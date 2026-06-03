@@ -133,10 +133,23 @@ const int g_pause_page_sizes[8] = { 256, 0, 0, 0, 0, 0, 0, 0 };
 #define NEEDLE_QUAD_OFF     0x39C      /* needle quad offset */
 #define GEAR_QUAD_OFF       0x0BC      /* gear indicator offset */
 #define SPEEDFONT_BASE_OFF  0x174      /* speed font first digit offset */
+#define HUD_VIEW_BLOCK      0xC00      /* per-view HUD primitive block stride
+                                        * [PORT: N-way split]. Quads occupy
+                                        * +0x04..~0x8A4; 0xC00 leaves generous
+                                        * margin so a view's quads can't spill into
+                                        * the next view's block. Flag words are now
+                                        * held separately in s_hud_flag_words[]. */
 
 /* Per-view HUD primitive storage (0x1148 bytes each) */
 static uint8_t *s_hud_prim_storage;      /* 0x4B0C00 */
 static uint32_t *s_hud_flags[MAX_HUD_VIEWS]; /* per-view visibility bitmask ptrs */
+/* [PORT: N-way] Dedicated flag-word storage. The flag word originally lived at
+ * the start of each view's quad block inside s_hud_prim_storage, but per-view
+ * quad builds spill past their block and clobber the NEXT view's flag word
+ * (observed as float screen-coords 0x431C4000=156.0f in the mask -> views 1..N
+ * rendered no HUD). Keeping the words in their own array decouples them from the
+ * quad storage so every view always reads a valid visibility mask. */
+static uint32_t s_hud_flag_words[MAX_HUD_VIEWS];
 
 /* Active view pointers (set per iteration in render loop) */
 static uint32_t *s_cur_flags;            /* 0x4B0BFC */
@@ -1212,9 +1225,9 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
      * Allocate room for every pane so views >=2 don't deref an uninitialised
      * flag pointer (the legacy code only set s_hud_flags[0]/[1]). */
     s_hud_prim_storage = (uint8_t *)td5_game_heap_alloc(
-        (size_t)MAX_HUD_VIEWS * 0x894 + TD5_HUD_VIEW_STRIDE);
+        (size_t)MAX_HUD_VIEWS * HUD_VIEW_BLOCK);
     for (int v = 0; v < MAX_HUD_VIEWS; v++)
-        s_hud_flags[v] = (uint32_t *)(s_hud_prim_storage + (size_t)v * 0x894);
+        s_hud_flags[v] = &s_hud_flag_words[v];   /* dedicated array — never clobbered by quad spill */
 
     /* Set visibility bitmask based on race mode */
     if (race_mode == 0) {
@@ -1225,13 +1238,9 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
          *  → flags=0x80000000; else flags=0.] The previous port keyed this on
          * g_replay_mode==0, which (combined with the caller hardcoding race_mode=1)
          * left the banner permanently dead and showed "DEMO MODE" during replay. */
-        if (!g_td5.benchmark_active) {
-            *s_hud_flags[0] = TD5_HUD_REPLAY_BANNER;
-            *s_hud_flags[1] = TD5_HUD_REPLAY_BANNER;
-        } else {
-            *s_hud_flags[0] = 0;
-            *s_hud_flags[1] = 0;
-        }
+        /* [PORT: N-way] write the flag word for every pane, not just 0/1. */
+        for (int hv = 0; hv < MAX_HUD_VIEWS; hv++)
+            *s_hud_flags[hv] = (!g_td5.benchmark_active) ? TD5_HUD_REPLAY_BANNER : 0;
     } else {
         /* Active race mode -- build bitmask */
         uint32_t flags = TD5_HUD_SPEEDOMETER
@@ -1280,8 +1289,9 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
             flags |= TD5_HUD_CIRCUIT_LAPS;
         }
 
-        *s_hud_flags[0] = flags;
-        *s_hud_flags[1] = flags;
+        /* [PORT: N-way] every pane shows the same HUD element set. */
+        for (int hv = 0; hv < MAX_HUD_VIEWS; hv++)
+            *s_hud_flags[hv] = flags;
     }
 
     /* Load FADEWHT sprite for screen-fade overlays */
@@ -1505,7 +1515,7 @@ void td5_hud_init_layout(int viewport_mode)
         float speedo_x = vp_r - sx * 96.0f - sx * 16.0f;
         float speedo_y = vp_b - sy * 96.0f - sy * 8.0f;
 
-        uint8_t *view_base = s_hud_prim_storage; /* simplified: single allocation */
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + SPEEDO_QUAD_OFF,
             0, speedo->texture_page,
@@ -1685,7 +1695,7 @@ int td5_hud_build_metric_digits(void)
         float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
         /* Update the 4th digit quad UV */
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + 0x734,
             0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
@@ -1732,7 +1742,7 @@ int td5_hud_build_metric_digits(void)
         float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
         float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + 0x454,
             0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
@@ -1751,7 +1761,7 @@ int td5_hud_build_metric_digits(void)
         float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
         float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + 0x50C,
             0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
@@ -1769,7 +1779,7 @@ int td5_hud_build_metric_digits(void)
         float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
         float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + 0x5C4,
             0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
@@ -2150,6 +2160,7 @@ void td5_hud_render_overlays(float dt)
     s_cur_view = 0;
 
     for (int v = 0; v < s_view_count; v++) {
+        s_cur_view = v;
         s_cur_flags = s_hud_flags[v];
         s_cur_scale = (float *)&s_view_layout[v];
         int actor_slot = g_actor_slot_map[v];
@@ -2165,7 +2176,7 @@ void td5_hud_render_overlays(float dt)
                       v, (unsigned int)flags);
         }
 
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
 
         /* --- Bit 0: Race position label --- */
         if (flags & TD5_HUD_POSITION_LABEL) {
