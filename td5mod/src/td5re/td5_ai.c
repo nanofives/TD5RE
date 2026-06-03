@@ -2507,14 +2507,14 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
     (void)self_field80; /* read below per-peer */
 
     /* ----------------------------------------------------------------
-     * Pass 1: TRAFFIC slots [6 .. racer_count-1].
-     * Gated on racer_count > 6 (i.e., traffic mode active).
+     * Pass 1: TRAFFIC slots [g_traffic_slot_base .. racer_count-1].
+     * Gated on racer_count > g_traffic_slot_base (i.e., traffic mode active).
      * [CONFIRMED @ 0x004337E8/0x00433807/0x00433815: dual cmp,jl/jle].
-     * ---------------------------------------------------------------- */
+     * [PORT: N-way] "6" is the racer/traffic boundary; legacy => 6. */
     best_slot = self_slot;
     best_dist = 0x2ee00;
-    if (racer_count > 6) {
-        for (i = 6; i < racer_count; i++) {
+    if (racer_count > g_traffic_slot_base) {
+        for (i = g_traffic_slot_base; i < racer_count; i++) {
             int32_t *peer_rs = route_state(i);
             char *peer_actor = actor_ptr(i);
             int32_t peer_field82 = (int32_t)ACTOR_I16(peer_actor, ACTOR_SPAN_NORMALIZED);
@@ -2644,11 +2644,13 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
     }
 
     /* ----------------------------------------------------------------
-     * Pass 2: RACER slots [0 .. min(racer_count, 6)-1], skipping self.
-     * [CONFIRMED @ 0x00433A5E-0x00433CD0].
-     * ---------------------------------------------------------------- */
+     * Pass 2: RACER slots [0 .. min(racer_count, g_traffic_slot_base)-1],
+     * skipping self. [CONFIRMED @ 0x00433A5E-0x00433CD0].
+     * [PORT: N-way] racer region is [0, g_traffic_slot_base); legacy => 6.
+     * Inactive racer slots are filtered by the span/route checks below, the
+     * same way the original handles a <6-car race scanning all 6 slots. */
     {
-        int cap = (racer_count >= 6) ? 6 : racer_count;
+        int cap = (racer_count >= g_traffic_slot_base) ? g_traffic_slot_base : racer_count;
         best_slot = self_slot;
         best_dist = 0x2ee00;
         offset_at_clamp = route_state_ptr[RS_TRACK_OFFSET_BIAS];
@@ -4435,9 +4437,11 @@ void td5_ai_recycle_traffic_actor(void) {
 
     /* [0x004353b0-c1] EAX = g_racerCount; bail if <= 6. The original reads
      * `dword ptr [0x004aaf00]` which is g_racerCount (also exposed in port
-     * as g_active_actor_count for the runtime active-slot count). */
+     * as g_active_actor_count for the runtime active-slot count).
+     * [PORT: N-way] "6" is really the racer/traffic boundary — only recycle
+     * once traffic actors exist beyond the racer slots. */
     racer_count = g_active_actor_count;
-    if (racer_count <= 6) return;
+    if (racer_count <= g_traffic_slot_base) return;
 
     if (!g_actor_base || !g_route_state_base) return;
     if (!g_traffic_queue_ptr || !g_traffic_queue_base) return;
@@ -4487,10 +4491,14 @@ void td5_ai_recycle_traffic_actor(void) {
      * The original's EBX walks the actor table at slot[6]+0x82 (raw byte
      * address 0x004ac6ba); the inner read is signed 16-bit (MOVSX). */
     loop_max = racer_count;
-    if (loop_max > 12) loop_max = 12;
+    if (loop_max > g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS)
+        loop_max = g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS;
     {
         int psn_loop;
-        for (i = 6; i < loop_max; i++) {
+        /* [PORT: N-way] scan the TRAFFIC region [g_traffic_slot_base, loop_max),
+         * not the legacy 6..12, so big fields recycle their own traffic slots
+         * (16..21) instead of mistakenly teleporting racer slots 6..15. */
+        for (i = g_traffic_slot_base; i < loop_max; i++) {
             int16_t ts;
             int32_t dist;
             /* [PORT: N-way] Recycle reference = the TRAILING local player, so a
@@ -5216,9 +5224,13 @@ void td5_ai_init_traffic_actors(void) {
 
         /* 0x00435c85-78: reload g_racerCount each iteration (in case it
          * changed; mirror original even if our port doesn't mutate it
-         * mid-loop). */
+         * mid-loop). [PORT: N-way] re-cap to the traffic region end
+         * (g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS) so big fields fill all
+         * traffic slots, not just one — must match the top cap at 0x435975.
+         * Legacy (base 6) => 12, byte-identical. */
         racer_count = g_active_actor_count;
-        racer_cap = (racer_count > 12) ? 12 : racer_count;
+        racer_cap = (racer_count > g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS)
+                    ? (g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS) : racer_count;
     }
 
     g_traffic_queue_ptr = qp;
