@@ -2572,7 +2572,7 @@ int td5_asset_load_environs_pages(int level_number, int page_base, int max_pages
 
 /* Car ZIP archive paths indexed by car_index — MUST match td5_frontend.c order
  * (original binary pointer table at 0x00466edc, UI order at 0x00463e24). */
-static const char *s_car_zip_paths[37] = {
+static const char *s_car_zip_paths[76] = {
     "cars/vip.zip",  /* 0  - VIPER            */
     "cars/97c.zip",  /* 1  - '97 CAMARO       */
     "cars/frd.zip",  /* 2  - SALEEN MUSTANG   */
@@ -2610,6 +2610,15 @@ static const char *s_car_zip_paths[37] = {
     "cars/sp5.zip",  /* 34 - POLICE MUSTANG   */
     "cars/sp6.zip",  /* 35 - POLICE CHARGER   */
     "cars/sp7.zip",  /* 36 - POLICE CAMARO    */
+    /* --- Test Drive 6 cars (ported; indices 37-75, convert_td6_cars order) --- */
+    "cars/390.zip", "cars/400.zip", "cars/atl.zip", "cars/att.zip", "cars/aud.zip",
+    "cars/bmw.zip", "cars/cer.zip", "cars/chd.zip", "cars/chr.zip", "cars/cp1.zip",
+    "cars/cp2.zip", "cars/cp3.zip", "cars/cp4.zip", "cars/db7.zip", "cars/eli.zip",
+    "cars/esp.zip", "cars/flx.zip", "cars/g40.zip", "cars/grf.zip", "cars/gts.zip",
+    "cars/lgt.zip", "cars/lit.zip", "cars/lot.zip", "cars/mam.zip", "cars/mcj.zip",
+    "cars/mcl.zip", "cars/mgt.zip", "cars/pan.zip", "cars/pro.zip", "cars/pwr.zip",
+    "cars/s12.zip", "cars/shl.zip", "cars/sub.zip", "cars/sup.zip", "cars/toy.zip",
+    "cars/tur.zip", "cars/tus.zip", "cars/xjr.zip", "cars/xk1.zip",
 };
 
 /* ========================================================================
@@ -2804,7 +2813,8 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
         /* TD6-car test hook: force the player into a ported TD6 archive. */
         snprintf(zip_path, sizeof(zip_path), "cars/%s.zip", s_player_car_override);
         TD5_LOG_I(LOG_TAG, "vehicle slot=0: TD6 player override -> %s", zip_path);
-    } else if (car_index >= 0 && car_index < 37) {
+    } else if (car_index >= 0 &&
+               car_index < (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0]))) {
         snprintf(zip_path, sizeof(zip_path), "%s", s_car_zip_paths[car_index]);
     } else {
         snprintf(zip_path, sizeof(zip_path), "cars/car%02d.zip", car_index);
@@ -2979,7 +2989,9 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
 
 const char *td5_asset_get_car_zip_path(int car_index)
 {
-    if (car_index < 0 || car_index >= 37) return NULL;
+    if (car_index < 0 ||
+        car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
+        return NULL;
     return s_car_zip_paths[car_index];
 }
 

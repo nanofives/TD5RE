@@ -225,6 +225,7 @@ typedef struct TD5_GlobalState {
         int  default_car;
         int  default_track;
         int  default_game_type;
+        int  td6_paint_color;    /* last-selected TD6 paint color (0xRRGGBB); persisted */
         int  skip_intro;
         int  debug_overlay;
         int  debug_collisions;   /* 1 = draw wireframe of track wall/span geometry */

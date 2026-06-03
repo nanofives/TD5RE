@@ -1652,6 +1652,14 @@ int td5_game_init_race_session(void) {
             int paint_for_slot = g_td5.ai_car_variants[i];
             td5_asset_load_vehicle(car_for_slot, i, paint_for_slot);
 
+            /* Tint the player's ported TD6 car with the selected paint color: its
+             * body skin is grayscale, so the chosen hue multiplies it. TD6 cars
+             * are roster indices >= 37; TD5 cars and AI stay untinted (white).
+             * The photo booth renders the car UNtinted (grayscale) so the menu can
+             * tint the captured preview live. */
+            if (i == 0 && car_for_slot >= 37 && !td5_render_photobooth_active())
+                td5_render_set_vehicle_tint(0, (uint32_t)g_td5.ini.td6_paint_color);
+
             /* Load per-vehicle sound bank (Drive.wav, Rev.wav/Reverb.wav, Horn.wav).
              * Slot 0 is the local player and uses Reverb.wav (is_reverb=1).
              * When a TD6 player-car override is active, source the bank from the
@@ -3637,7 +3645,9 @@ int td5_game_run_race_frame(void) {
      * Moved out of td5_render_actors_for_view so the split-screen P2 pass
      * does not wipe P1's already-rendered half.
      * [RE: RunRaceFrame 0x42B580 — single BeginScene/EndScene pair, one clear] */
-    td5_plat_render_clear(0xFF4080C0u);
+    /* Photo booth clears to chroma BLUE88 (0,0,88) so the menu can color-key the
+     * car out of the captured preview; normal race uses the sky-blue clear. */
+    td5_plat_render_clear(td5_render_photobooth_active() ? 0xFF000058u : 0xFF4080C0u);
 
     /* For each viewport: camera setup, sky, track, actors, vfx, hud */
     for (int vp = 0; vp < g_td5.viewport_count; vp++) {
@@ -3722,9 +3732,11 @@ int td5_game_run_race_frame(void) {
         }
 
         /* VFX: tire tracks, particles */
-        td5_vfx_render_tire_tracks();
-        td5_vfx_render_tire_marks();
-        td5_vfx_draw_particles(vp);
+        if (!td5_render_photobooth_active()) {
+            td5_vfx_render_tire_tracks();
+            td5_vfx_render_tire_marks();
+            td5_vfx_draw_particles(vp);
+        }
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();
 
@@ -3741,7 +3753,8 @@ int td5_game_run_race_frame(void) {
         td5_render_set_fog(0);  /* fog off for HUD */
 
         /* HUD overlay for this viewport */
-        td5_hud_draw_status_text(vp, vp);
+        if (!td5_render_photobooth_active())
+            td5_hud_draw_status_text(vp, vp);
         /* NOTE: minimap is drawn from td5_hud_render_overlays (below).
          * A duplicated call here used to be a no-op (set_clip_rect was a stub),
          * but once 65a4fea wired hardware scissor, it left the minimap rect
@@ -3761,7 +3774,8 @@ int td5_game_run_race_frame(void) {
     }
 
     /* Full-screen HUD overlay (speedometer, lap counter, etc.) */
-    td5_hud_render_overlays(g_td5.normalized_frame_dt);
+    if (!td5_render_photobooth_active())
+        td5_hud_render_overlays(g_td5.normalized_frame_dt);
 
     /* Pause overlay: panel + PAUSETXT atlas glyphs are all pre-built quads */
     if (s_pause_menu_active) {

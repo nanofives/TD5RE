@@ -34,6 +34,7 @@
 #include "td5_save.h"
 #include "td5_trace.h"
 #include "td5_asset.h"
+#include "td5_render.h"
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -239,6 +240,9 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("GameOptions", "Dynamics",         g_td5.ini.dynamics);
     td5_ini_write_int("GameOptions", "Collisions",       g_td5.ini.collisions);
     td5_ini_write_int("GameOptions", "AutoGearbox",      g_td5.ini.auto_gearbox);
+
+    /* TD6 paint color (last selected in the car-select color panel). */
+    td5_ini_write_int("CarSelection", "TD6PaintColor",   g_td5.ini.td6_paint_color);
 
     td5_plat_log(TD5_LOG_INFO, "main",
                  "td5re.ini options persisted (in-game change write-back): "
@@ -564,6 +568,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         td5_asset_set_player_car_override(pca[0] ? pca : NULL);
     }
 
+    /* Last-selected TD6 paint color (0xRRGGBB), set by the car-select color
+     * panel and persisted across launches. Default = red. */
+    g_td5.ini.td6_paint_color =
+        td5_ini_int("CarSelection", "TD6PaintColor", 0xFF0000) & 0x00FFFFFF;
+
+    /* Photo-booth: [Game] PhotoBoothCar=<code> boots the race with that car as
+     * the player and renders ONLY the (grayscale) car over a chroma background,
+     * for offline preview (carpic) generation. */
+    {
+        char pbc[16] = {0};
+        td5_ini_str("Game", "PhotoBoothCar", "", pbc, sizeof(pbc));
+        for (char *q = pbc; *q; ++q)
+            if (*q == ' ' || *q == '\t' || *q == ';' || *q == '#') { *q = '\0'; break; }
+        if (pbc[0]) {
+            td5_asset_set_player_car_override(pbc);
+            td5_render_set_photobooth(1);
+            g_td5.ini.auto_race = 1;   /* boot straight into the booth scene */
+        }
+    }
+
     /* Trace */
     g_td5.ini.race_trace_enabled    = td5_ini_int("Trace", "RaceTrace", 0);
     g_td5.ini.race_trace_slot       = td5_ini_int("Trace", "RaceTraceSlot", -1);
@@ -668,6 +692,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             code[n] = '\0';
             td5_asset_set_player_car_override(n > 0 ? code : NULL);
             dbglog("CLI: PlayerCarArchive = '%s'", code);
+        }
+    }
+
+    /* --PhotoBoothCar=<code>: same as the INI key, for the offline generator. */
+    if (lpCmdLine && *lpCmdLine) {
+        const char *m = strstr(lpCmdLine, "--PhotoBoothCar=");
+        if (!m) m = strstr(lpCmdLine, "--photoboothcar=");
+        if (m) {
+            m += 16;   /* strlen("--PhotoBoothCar=") */
+            char code[16];
+            int n = 0;
+            while (m[n] && m[n] != ' ' && m[n] != '\t' && n < (int)sizeof(code) - 1) {
+                code[n] = m[n];
+                n++;
+            }
+            code[n] = '\0';
+            if (n > 0) {
+                td5_asset_set_player_car_override(code);
+                td5_render_set_photobooth(1);
+                g_td5.ini.auto_race = 1;
+                dbglog("CLI: PhotoBoothCar = '%s'", code);
+            }
         }
     }
 
