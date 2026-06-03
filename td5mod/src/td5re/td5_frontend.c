@@ -255,6 +255,38 @@ static int  s_selected_track;           /* DAT_004a2c90            */
 static int  s_attract_track;            /* random track for attract demo; never overwrites s_selected_track */
 static int  s_track_direction;          /* DAT_004a2c98: 0=fwd, 1=bwd */
 static int  s_track_max;               /* max track index for current mode */
+/* Quick Race player setup (infra to later replace the Two-Player menu).
+ * Only the Quick Race screen writes these; all other launch flows leave the
+ * defaults (1 human + 5 AI = legacy single-race grid). See g_td5.num_* . */
+static int  s_num_human_players = 1;    /* 1..TD5_MAX_RACER_SLOTS            */
+static int  s_num_ai_opponents  = 5;    /* 0..(TD5_MAX_RACER_SLOTS-1)        */
+/* Drag Strip = schedule index 19 (s_track_schedule_to_name_index[19]==0 ->
+ * "DRAG STRIP"). Excluded from the Quick Race track cycler. */
+#define FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX 19
+
+/* Quick Race screen button indices (improved layout). */
+#define QR_BTN_CAR        0
+#define QR_BTN_TRACK      1
+#define QR_BTN_DIRECTION  2
+#define QR_BTN_PLAYERS    3
+#define QR_BTN_OPPONENTS  4
+#define QR_BTN_OK         5
+#define QR_BTN_BACK       6
+
+/* Quick Race layout: caption buttons in a left column, the selected value in a
+ * right column, all rows uniformly spaced.
+ * NB frontend_create_button treats w==200 as an "unset" sentinel (substitutes
+ * 224), so QR_BTN_W must NOT be 200. */
+#define QR_COL_X        64    /* button left edge                         */
+#define QR_BTN_W       208    /* button width (right edge = 272)          */
+#define QR_ROW_Y0       96    /* first row y                              */
+#define QR_ROW_DY       56    /* uniform vertical gap between rows         */
+#define QR_ROW_Y(n)     (QR_ROW_Y0 + (n) * QR_ROW_DY)
+#define FE_QR_VALUE_X  280    /* value column left edge (clear of button @272)  */
+#define FE_QR_VALUE_SCALE 0.9f /* value glyph scale — matches the button-caption size */
+#define FE_QR_SCREEN_W   640  /* canvas width                                    */
+#define FE_QR_RIGHT_MARGIN 12 /* keep value text this far from the right edge     */
+#define FE_QR_VALUE_LINE_H 22 /* canvas px per value line (centers + wrap spacing) */
 static int  s_score_category_index;    /* DAT_00497a68: current track in score table */
 
 #define FE_MAX_DISPLAY_MODES 64
@@ -613,6 +645,7 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
                                       TD5_ColorKeyMode colorkey);
 static int frontend_load_surface_keyed(const char *name, const char *archive, TD5_ColorKeyMode colorkey);
 static int frontend_track_level_exists(int track_index);
+static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
 static uint8_t s_font_glyph_advance[96];
 static const uint8_t k_font_glyph_advance_default[96] = {
     8,  9, 10, 14, 14, 24, 21,  9,  8,  9, 10, 14,
@@ -1804,6 +1837,7 @@ static void frontend_init_race_schedule(void) {
     int slot_ext_id[TD5_MAX_RACER_SLOTS]  = {0};
     int slot_variant[TD5_MAX_RACER_SLOTS] = {0};
     int start_slot = 1;
+    int eff_humans = 1;   /* human-driven slots actually rendered/controlled (<=2) */
 
     /* A normal race entry (new race / Race Again / AutoRace) always RECORDS
      * fresh input. Clear any replay/playback/demo state left over from a prior
@@ -1830,11 +1864,48 @@ static void frontend_init_race_schedule(void) {
      * [CONFIRMED @ 0x42AE1E: gRaceViewportLayoutMode = (char)DAT_00497a5c + 1]
      * g_td5.viewport_count is derived later by td5_game_init_viewport_layout().
      * g_td5.network_active=0 ensures local split-screen path is taken. */
-    g_td5.split_screen_mode = (s_two_player_mode != 0) ? (s_split_screen_mode + 1) : 0;
+
+    /* Quick Race player setup (PORT ENHANCEMENT — infra to later replace the
+     * Two-Player menu). Only the Quick Race screen drives these counts; every
+     * other launch flow keeps the legacy single-player / two_player behavior.
+     * effective humans = min(num_human_players, 2) because the engine has only
+     * single + 2 split-screen layouts (orig InitializeRaceViewportLayout
+     * 0x42C2B0; gSplitScreenMode+1, masked &1). Requested humans beyond 2 run
+     * as AI for now (td5_game InitRace) so no car sits dead; N-way split is a
+     * deferred follow-up. Defaults (1 human + 5 AI) reproduce the legacy grid. */
+    if (s_current_screen == TD5_SCREEN_QUICK_RACE) {
+        int qr_humans = s_num_human_players;
+        int qr_opp    = s_num_ai_opponents;
+        if (qr_humans < 1) qr_humans = 1;
+        if (qr_humans > TD5_MAX_RACER_SLOTS) qr_humans = TD5_MAX_RACER_SLOTS;
+        if (qr_opp < 0) qr_opp = 0;
+        if (qr_opp > TD5_MAX_RACER_SLOTS - qr_humans) qr_opp = TD5_MAX_RACER_SLOTS - qr_humans;
+        g_td5.num_human_players = qr_humans;
+        g_td5.num_ai_opponents  = qr_opp;
+    } else {
+        g_td5.num_human_players = (s_two_player_mode != 0) ? 2 : 1;
+        g_td5.num_ai_opponents  = TD5_MAX_RACER_SLOTS - g_td5.num_human_players;
+    }
+    eff_humans = (g_td5.num_human_players < 2) ? g_td5.num_human_players : 2;
+
+    if (s_current_screen == TD5_SCREEN_QUICK_RACE) {
+        /* 2 humans -> split (orientation from the 2P-options shadow, default
+         * horizontal); 1 human -> single viewport. */
+        g_td5.split_screen_mode = (eff_humans >= 2) ? (s_split_screen_mode + 1) : 0;
+        if (g_td5.num_human_players > 2) {
+            TD5_LOG_W(LOG_TAG,
+                      "QuickRace: %d humans requested but engine renders only 2 split views; "
+                      "slots 2..%d run as AI until N-way split lands",
+                      g_td5.num_human_players, g_td5.num_human_players - 1);
+        }
+    } else {
+        g_td5.split_screen_mode = (s_two_player_mode != 0) ? (s_split_screen_mode + 1) : 0;
+    }
     g_td5.network_active    = 0;
     TD5_LOG_I(LOG_TAG,
-              "InitRaceSchedule: split_screen_mode=%d two_player_mode=%d network_active=0",
-              g_td5.split_screen_mode, s_two_player_mode);
+              "InitRaceSchedule: split=%d humans=%d opponents=%d eff_humans=%d two_player_mode=%d",
+              g_td5.split_screen_mode, g_td5.num_human_players, g_td5.num_ai_opponents,
+              eff_humans, s_two_player_mode);
 
     /* Slot 0 = player, always active */
     slot_active[0]  = 1;
@@ -1853,6 +1924,19 @@ static void frontend_init_race_schedule(void) {
         slot_variant[1] = 0;
         start_slot = 2;
         TD5_LOG_I(LOG_TAG, "InitRaceSchedule: P2 slot1 ext_id=%d", s_p2_car);
+    }
+
+    /* Quick Race extra humans: slots 1..eff_humans-1 are human-driven. Until a
+     * per-player car-select UI exists (the next infra step), the extra humans
+     * default to the player's selected car. AI then fills from start_slot; the
+     * remaining slots beyond (humans+opponents) are disabled in td5_game InitRace. */
+    if (s_current_screen == TD5_SCREEN_QUICK_RACE) {
+        for (i = 1; i < eff_humans && i < TD5_MAX_RACER_SLOTS; i++) {
+            slot_active[i]  = 1;
+            slot_ext_id[i]  = s_selected_car;
+            slot_variant[i] = 0;
+            if (i + 1 > start_slot) start_slot = i + 1;
+        }
     }
 
     /* RNG state for AI ext_id picks.
@@ -2088,6 +2172,19 @@ void td5_frontend_auto_race_setup(void) {
 
     /* Now trigger the race schedule (sets race_requested, assigns AI cars) */
     frontend_init_race_schedule();
+
+    /* AutoRace opponent-count override (test harness / Quick Race-field probe):
+     * the schedule's non-QuickRace path defaults to 1 human + 5 AI; honor an
+     * explicit [Game] DefaultOpponents=N here so AutoRace can exercise the
+     * reduced-field spawn path. -1 = leave the full grid. */
+    if (g_td5.ini.default_opponents >= 0) {
+        int opp = g_td5.ini.default_opponents;
+        if (opp > TD5_MAX_RACER_SLOTS - 1) opp = TD5_MAX_RACER_SLOTS - 1;
+        g_td5.num_human_players = 1;
+        g_td5.num_ai_opponents  = opp;
+        TD5_LOG_I(LOG_TAG, "AutoRace: DefaultOpponents override -> %d racers total (1 human + %d AI)",
+                  1 + opp, opp);
+    }
 
     /* Enumerate display modes — original quickrace hook calls
      * InitializeFrontendDisplayModeState() right after the schedule init. */
@@ -3895,6 +3992,54 @@ static void frontend_draw_value_text(float sx, float sy, int x, int y,
     fe_draw_text((float)x * sx, (float)y * sy, text, color, sx, sy);
 }
 
+/* Draw a Quick Race value in the right-hand column at FE_QR_VALUE_SCALE (matched
+ * to the button-caption size). If it would run past the right margin, wrap to a
+ * second line below; the 1- or 2-line block is vertically centered on the
+ * button row at row_btn_idx. */
+static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
+                                   const char *text, uint32_t color) {
+    if (row_btn_idx < 0 || row_btn_idx >= s_button_count) return;
+    if (!text || !text[0] || s_font_page < 0) return;
+    const float gs   = FE_QR_VALUE_SCALE;
+    const float vx   = (float)FE_QR_VALUE_X * sx;
+    const float avail = (float)(FE_QR_SCREEN_W - FE_QR_VALUE_X - FE_QR_RIGHT_MARGIN) * sx;
+    const int   by   = s_buttons[row_btn_idx].y;
+
+    /* Fits on one line — center it on the 32px button. */
+    if (fe_measure_text(text, sx * gs) <= avail) {
+        float ty = ((float)by + (32.0f - FE_QR_VALUE_LINE_H) * 0.5f) * sy;
+        fe_draw_text(vx, ty, text, color, sx * gs, sy * gs);
+        return;
+    }
+
+    /* Wrap: split at the last space whose prefix fits; else hard char-break. */
+    char l1[96], l2[96];
+    int len = (int)strlen(text);
+    int split = -1;
+    for (int i = 1; i < len && i < (int)sizeof(l1); i++) {
+        if (text[i] != ' ') continue;
+        memcpy(l1, text, (size_t)i); l1[i] = '\0';
+        if (fe_measure_text(l1, sx * gs) <= avail) split = i;
+        else break;
+    }
+    if (split > 0) {
+        memcpy(l1, text, (size_t)split); l1[split] = '\0';
+        snprintf(l2, sizeof(l2), "%s", text + split + 1);
+    } else {
+        int cut = 1;
+        for (int i = 1; i <= len && i < (int)sizeof(l1); i++) {
+            memcpy(l1, text, (size_t)i); l1[i] = '\0';
+            if (fe_measure_text(l1, sx * gs) > avail) break;
+            cut = i;
+        }
+        memcpy(l1, text, (size_t)cut); l1[cut] = '\0';
+        snprintf(l2, sizeof(l2), "%s", text + cut);
+    }
+    float top = (float)by + (32.0f - 2.0f * FE_QR_VALUE_LINE_H) * 0.5f;
+    fe_draw_text(vx,  top * sy,                                  l1, color, sx * gs, sy * gs);
+    fe_draw_text(vx, (top + FE_QR_VALUE_LINE_H) * sy,           l2, color, sx * gs, sy * gs);
+}
+
 /* Value text centering: original draws to 224px panel at screen x=394 (canvasW/2+0x4A),
  * then centers text within via MeasureOrCenter. Panel center = 394+112 = 506.
  * [CONFIRMED @ 0x41FF5B: ADD ESI,0x11C; panel width 0xE0 @ CreateTrackedFrontendSurface] */
@@ -4145,9 +4290,11 @@ static float frontend_get_title_render_y(float sy) {
 static void frontend_render_quick_race_overlay(float sx, float sy) {
     char car_name[80];
     char track_name[80];
+    char count[8];
     int car_locked;
     int track_locked;
     if (!s_anim_complete) return;
+    if (s_button_count <= QR_BTN_OPPONENTS) return;
     snprintf(car_name, sizeof(car_name), "%s", frontend_get_car_display_name(s_selected_car));
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
     car_locked = (!s_cheat_unlock_all && !s_network_active &&
@@ -4156,16 +4303,22 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     track_locked = (!s_cheat_unlock_all && !s_network_active &&
                     s_selected_track >= 0 && s_selected_track < 26 &&
                     s_track_lock_table[s_selected_track] != 0);
-    /* Car/track names sit ABOVE their CHANGE CAR / CHANGE TRACK buttons. The audit's
-     * panel-local "name Y = 135/255" is only correct if the buttons also move down to match
-     * the original (orig = name-above-button); with the port's current button rests at ~135/255
-     * a name at 135/255 OVERLAPS the button. Keeping the names at 106/226 (above the port's
-     * buttons) until the Quick Race button rests are runtime-read and corrected together. */
-    frontend_draw_value_text(sx, sy, 140, 106, car_name, 0xFFFFFFFF);
-    frontend_draw_value_text(sx, sy, 140, 226, track_name, 0xFFFFFFFF);
-    /* SNK_LockedTxt renders WHITE in the original (consistent with CarSelect/TrackSelect). */
-    if (car_locked)   frontend_draw_value_text(sx, sy, 398, 126, "LOCKED", 0xFFFFFFFF);
-    if (track_locked) frontend_draw_value_text(sx, sy, 398, 246, "LOCKED", 0xFFFFFFFF);
+
+    /* Each selected value renders in the right-hand value column at the same
+     * glyph size as the button caption, vertically centered on its row, and
+     * wraps to a second line if it would run off the right edge. Car/Track show
+     * the name; Direction shows Forwards/Backwards (only when the row is
+     * visible); Players/Opponents show the count. */
+    frontend_draw_qr_value(sx, sy, QR_BTN_CAR,   car_locked   ? "LOCKED" : car_name,   0xFFFFFFFF);
+    frontend_draw_qr_value(sx, sy, QR_BTN_TRACK, track_locked ? "LOCKED" : track_name, 0xFFFFFFFF);
+    if (!s_buttons[QR_BTN_DIRECTION].hidden) {
+        frontend_draw_qr_value(sx, sy, QR_BTN_DIRECTION,
+                               s_track_direction ? "Backwards" : "Forwards", 0xFFFFFFFF);
+    }
+    snprintf(count, sizeof(count), "%d", s_num_human_players);
+    frontend_draw_qr_value(sx, sy, QR_BTN_PLAYERS, count, 0xFFFFFFFF);
+    snprintf(count, sizeof(count), "%d", s_num_ai_opponents);
+    frontend_draw_qr_value(sx, sy, QR_BTN_OPPONENTS, count, 0xFFFFFFFF);
 }
 
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
@@ -6365,8 +6518,10 @@ void td5_frontend_render_ui_rects(void) {
     if (s_anim_complete) {
         switch (s_current_screen) {
         case TD5_SCREEN_QUICK_RACE:
-            fe_draw_option_arrows(0, sx, sy);
-            fe_draw_option_arrows(1, sx, sy);
+            /* Selectors: Car(0), Track(1), Direction(2, hidden on forward-only
+             * tracks), Players(3), Opponents(4). fe_draw_option_arrows self-skips
+             * hidden buttons so the Direction ◄► vanish with the row. */
+            for (int i = 0; i <= 4; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_GAME_OPTIONS:
             for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
@@ -7495,43 +7650,91 @@ static void Screen_RaceTypeCategory(void) {
 }
 
 /* ========================================================================
- * [7] ScreenQuickRaceMenu (0x4213D0)
+ * [7] ScreenQuickRaceMenu (0x4213D0)  [PORT ENHANCEMENT — diverges from orig]
  * States: 7 (0x00 - 0x06)
- * Buttons: Change Car, Change Track, OK, Back
+ *
+ * Original buttons: Change Car, Change Track, OK, Back (no direction toggle,
+ * drag strip reachable). The port's improved Quick Race screen adds:
+ *   - a Forwards/Backwards direction toggle (reuses TrackSelection's reverse
+ *     gating: hidden on forward-only/circuit tracks),
+ *   - Drag Strip removed from the track cycler (schedule index 19),
+ *   - Players (1..6 human) + Opponents (0..5 AI) selectors, sum <= 6 racers.
+ * This is the infrastructure that will later replace the separate Two Player
+ * menu + Two Player configuration screen. >2-way split rendering is deferred
+ * (engine has only single + 2 split layouts), so the launch path caps the
+ * EFFECTIVE human-driven slots at 2; see frontend_init_race_schedule.
  * ======================================================================== */
+
+/* Cycle s_selected_track by delta, skipping the Drag Strip (schedule index 19)
+ * and any track whose level data is absent. One full revolution then give up. */
+static void frontend_quickrace_cycle_track(int delta) {
+    int track_max = s_network_active ? 0x13 : s_total_unlocked_tracks; /* exclusive bound */
+    if (track_max <= 0) return;
+    int start = s_selected_track;
+    int attempts = track_max + 1;
+    while (attempts-- > 0) {
+        s_selected_track += delta;
+        if (s_selected_track < 0) s_selected_track = track_max - 1;
+        if (s_selected_track >= track_max) s_selected_track = 0;
+        if (s_selected_track == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX) continue;
+        if (frontend_track_level_exists(s_selected_track)) return;
+    }
+    s_selected_track = start; /* nothing else available — restore (never lands on drag strip) */
+}
+
+/* Clamp the human/AI counts so 1 <= humans <= 6 and 0 <= opponents <= 6-humans.
+ * The counts render as value text to the right of the Players/Opponents buttons
+ * (frontend_render_quick_race_overlay), so no button labels are touched here. */
+static void frontend_quickrace_clamp_counts(void) {
+    if (s_num_human_players < 1) s_num_human_players = 1;
+    if (s_num_human_players > TD5_MAX_RACER_SLOTS) s_num_human_players = TD5_MAX_RACER_SLOTS;
+    int opp_max = TD5_MAX_RACER_SLOTS - s_num_human_players;
+    if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
+    if (s_num_ai_opponents > opp_max) s_num_ai_opponents = opp_max;
+}
 
 static void Screen_QuickRaceMenu(void) {
     switch (s_inner_state) {
-    case 0: /* Init: validate indices, create info panel, create 4 buttons */
+    case 0: /* Init: validate indices, create the 7-row improved layout */
         frontend_init_return_screen(TD5_SCREEN_QUICK_RACE);
         TD5_LOG_D(LOG_TAG, "QuickRaceMenu: init");
         s_anim_complete = 0;
         /* Load background: same as main menu */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
 
-        /* Validate car/track indices against max counts */
+        /* Validate car/track indices; never start on the Drag Strip (excluded). */
         if (s_selected_car < 0) s_selected_car = 0;
         if (s_selected_track < 0) s_selected_track = 0;
         if (s_selected_track >= 26) s_selected_track = 0;
+        if (s_selected_track == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX) s_selected_track = 0;
 
-        /* Create 0x208 x 200px info panel */
-        /* Draw car name and track name */
-        /* Show "Locked" if car/track is locked and not in network mode */
-
-        /* From Ghidra: halfW=320, halfH=240
-         * ChangeCar:   (halfW-200, halfH-0x67) = (120, 137), size 0x100x0x20 (256x32)
-         * ChangeTrack: (120, halfH+0x11)       = (120, 257), size 256x32
-         * OK:          (120, halfH+0x89)        = (120, 377), size 0x60x0x20 (96x32)
-         * Back:        (halfW-0x58, halfH+0x89) = (232, 377), size 0x70x0x20 (112x32) */
+        /* Improved layout (PORT ENHANCEMENT): five caption selectors with the
+         * selected value drawn to the RIGHT of each button (value column), plus
+         * OK/Back on the bottom row. All six rows are uniformly spaced
+         * (QR_ROW_Y0 + n*QR_ROW_DY). The Direction row hides on
+         * forward-only/circuit tracks. Values are drawn by
+         * frontend_render_quick_race_overlay at FE_QR_VALUE_X. */
         { int bi;
-          bi = frontend_create_button(SNK_ChangeCarButTxt,   120, 137, 256, 32);
+          bi = frontend_create_button("Car",                 QR_COL_X, QR_ROW_Y(0), QR_BTN_W, 32); /* QR_BTN_CAR */
           if (bi >= 0) s_buttons[bi].is_selector = 1;
-          bi = frontend_create_button(SNK_ChangeTrackButTxt, 120, 257, 256, 32);
+          bi = frontend_create_button("Track",               QR_COL_X, QR_ROW_Y(1), QR_BTN_W, 32); /* QR_BTN_TRACK */
+          if (bi >= 0) s_buttons[bi].is_selector = 1;
+          bi = frontend_create_button("Direction",           QR_COL_X, QR_ROW_Y(2), QR_BTN_W, 32); /* QR_BTN_DIRECTION */
+          if (bi >= 0) s_buttons[bi].is_selector = 1;
+          bi = frontend_create_button("Players",             QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_PLAYERS */
+          if (bi >= 0) s_buttons[bi].is_selector = 1;
+          bi = frontend_create_button("Opponents",           QR_COL_X, QR_ROW_Y(4), QR_BTN_W, 32); /* QR_BTN_OPPONENTS */
           if (bi >= 0) s_buttons[bi].is_selector = 1; }
-        frontend_create_button(SNK_OkButTxt,           120, 377,  96, 32);
-        frontend_create_button(SNK_BackButTxt,         232, 377, 112, 32);
+        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(5),  96, 32); /* QR_BTN_OK */
+        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(5), 112, 32); /* QR_BTN_BACK */
 
-        /* Init left/right arrows on buttons 0 and 1 */
+        /* Reset direction to Forwards on entry (matches TrackSelection); hide the
+         * toggle on forward-only/circuit tracks (caption stays "Direction" —
+         * manage_label=0). Clamp the player/opponent counts. */
+        s_track_direction = 0;
+        frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
+        frontend_quickrace_clamp_counts();
+
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -7550,11 +7753,12 @@ static void Screen_QuickRaceMenu(void) {
         }
         break;
 
-    case 4: /* Interactive: arrow input cycles car/track, OK/Back dispatch */
+    case 4: /* Interactive: cycle car/track/direction/players/opponents, OK/Back */
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            if (selected_button == 0 && delta != 0) {
+
+            if (selected_button == QR_BTN_CAR && delta != 0) {
                 /* Cycle car */
                 s_selected_car += delta;
                 {
@@ -7565,20 +7769,44 @@ static void Screen_QuickRaceMenu(void) {
                 }
                 frontend_play_sfx(2); /* ping2.wav cycle */
             }
-            if (selected_button == 1 && delta != 0) {
-                /* Cycle track */
-                s_selected_track += delta;
-                {
-                    int track_max = s_network_active ? 0x13 : s_total_unlocked_tracks;
-                    if (s_selected_track < 0) s_selected_track = track_max - 1;
-                    if (s_selected_track >= track_max) s_selected_track = 0;
-                }
+
+            if (selected_button == QR_BTN_TRACK && delta != 0) {
+                /* Cycle track, skipping Drag Strip (index 19) + absent levels. */
+                frontend_quickrace_cycle_track(delta);
+                /* Re-evaluate the Direction toggle for the newly selected track. */
+                frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
                 TD5_LOG_I(LOG_TAG, "QuickRace track cycle: s_selected_track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
                           frontend_get_track_name(s_selected_track));
                 frontend_play_sfx(2); /* ping2.wav cycle */
             }
-            if (s_button_index == 2) { /* OK */
+
+            /* Direction toggle: 0=Forwards, 1=Backwards. Inert (and hidden) on
+             * forward-only/circuit tracks. Responds to either arrow or button
+             * press (mirrors TrackSelection 0x00427630 button-1 behavior). The
+             * value renders to the right of the button (caption stays "Direction"). */
+            if (selected_button == QR_BTN_DIRECTION && !s_buttons[QR_BTN_DIRECTION].hidden &&
+                (delta != 0 || s_button_index == QR_BTN_DIRECTION)) {
+                s_track_direction = !s_track_direction;
+                frontend_play_sfx(2);
+            }
+
+            /* Players (human) count: 1..6. Increasing past the 6-racer cap auto-
+             * reduces Opponents (handled in frontend_quickrace_clamp_counts). */
+            if (selected_button == QR_BTN_PLAYERS && delta != 0) {
+                s_num_human_players += delta;
+                frontend_quickrace_clamp_counts();
+                frontend_play_sfx(2);
+            }
+
+            /* Opponents (AI) count: 0..(6 - humans). */
+            if (selected_button == QR_BTN_OPPONENTS && delta != 0) {
+                s_num_ai_opponents += delta;
+                frontend_quickrace_clamp_counts();
+                frontend_play_sfx(2);
+            }
+
+            if (s_button_index == QR_BTN_OK) {
                 /* Block if car or track is locked */
                 int car_locked = (!s_cheat_unlock_all && !s_network_active &&
                                   s_selected_car >= 0 && s_selected_car < 37 &&
@@ -7589,11 +7817,18 @@ static void Screen_QuickRaceMenu(void) {
                 if (car_locked || track_locked) {
                     frontend_play_sfx(10); /* rejection */
                 } else {
+                    /* Commit the selected direction; counts are read by
+                     * frontend_init_race_schedule (gated to Quick Race). */
+                    g_td5.reverse_direction = s_track_direction;
+                    TD5_LOG_I(LOG_TAG,
+                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d",
+                              s_selected_track, s_track_direction ? "Backwards" : "Forwards",
+                              s_num_human_players, s_num_ai_opponents);
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 5;
                 }
             }
-            if (s_button_index == 3) { /* Back */
+            if (s_button_index == QR_BTN_BACK) {
                 s_return_screen = TD5_SCREEN_MAIN_MENU;
                 s_inner_state = 5;
             }
@@ -9976,19 +10211,25 @@ static void Screen_CarSelection(void) {
  * track has no reverse we also force s_track_direction=0 and reset the label so
  * a stale "Backwards" choice can't carry onto a forward-only track. Random
  * (s_selected_track < 0, 2P "?") keeps the toggle shown. */
-static void frontend_update_direction_button_visibility(void) {
-    if (s_button_count <= 1) return;
+/* Gate the Direction selector to reverse-capable tracks. manage_label=1 (Track
+ * Selection) makes the button LABEL itself the value ("Forwards"/"Backwards"),
+ * so it gets reset to "Forwards" when hidden. manage_label=0 (Quick Race) keeps
+ * a static caption and draws the value separately, so the label is left alone. */
+static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label) {
+    if (dir_btn_idx < 0 || dir_btn_idx >= s_button_count) return;
     int has_reverse = (s_selected_track < 0)
                       ? 1
                       : td5_asset_track_has_reverse(s_selected_track);
-    s_buttons[1].hidden   = !has_reverse;
-    s_buttons[1].disabled = !has_reverse;
+    s_buttons[dir_btn_idx].hidden   = !has_reverse;
+    s_buttons[dir_btn_idx].disabled = !has_reverse;
     if (!has_reverse) {
         s_track_direction = 0;
-        strncpy(s_buttons[1].label, "Forwards", sizeof(s_buttons[1].label) - 1);
-        s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
+        if (manage_label) {
+            strncpy(s_buttons[dir_btn_idx].label, "Forwards", sizeof(s_buttons[dir_btn_idx].label) - 1);
+            s_buttons[dir_btn_idx].label[sizeof(s_buttons[dir_btn_idx].label) - 1] = '\0';
+        }
         /* Don't leave the highlight focus parked on the now-hidden button. */
-        if (s_selected_button == 1) s_selected_button = 0;
+        if (s_selected_button == dir_btn_idx) s_selected_button = 0;
     }
 }
 
@@ -10035,7 +10276,7 @@ static void Screen_TrackSelection(void) {
         frontend_load_selected_track_preview();
         /* Hide the Direction toggle for forward-only/circuit tracks from the
          * very first frame (cases 1-3 render before case 5 reloads). */
-        frontend_update_direction_button_visibility();
+        frontend_update_direction_button_visibility(1, 1);
         frontend_begin_timed_animation();
         s_inner_state = 1;
         break;
@@ -10088,7 +10329,7 @@ static void Screen_TrackSelection(void) {
                 s_track_switch_tick = 0;
                 /* Re-evaluate the Direction toggle for the newly selected track
                  * (hide on forward-only/circuit tracks, restore on reverse-capable). */
-                frontend_update_direction_button_visibility();
+                frontend_update_direction_button_visibility(1, 1);
                 s_inner_state = 5;
             }
 
