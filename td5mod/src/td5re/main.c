@@ -297,6 +297,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Player1Joystick",      &g_td5.ini.player1_joystick },
         { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
+        { "OtherPlayersAI",       &g_td5.ini.others_ai },
         { "SoloAISlot",           &g_td5.ini.solo_ai_slot },
         { "SoloRace",             &g_td5.ini.solo_race },
         { "MaxSpan",              &g_td5.ini.max_span },
@@ -541,6 +542,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * matching the original attract-mode autopilot (InitializeRaceSession
      * 0x0042ACCF writes slot[0].state = 1 - g_attractModeDemoActive). */
     g_td5.ini.player_is_ai      = td5_ini_int("GameOptions", "PlayerIsAI", 0);
+    /* OtherPlayersAI: AI-drive every local human slot except slot 0 (drive P1). */
+    g_td5.ini.others_ai         = td5_ini_int("GameOptions", "OtherPlayersAI", 0);
     g_td5.ini.solo_ai_slot      = td5_ini_int("GameOptions", "SoloAISlot", 0);
     g_td5.ini.solo_race         = td5_ini_int("GameOptions", "SoloRace", 0);
     g_td5.ini.max_span          = td5_ini_int("GameOptions", "MaxSpan", 0);

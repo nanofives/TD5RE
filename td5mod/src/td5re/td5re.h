@@ -334,6 +334,13 @@ typedef struct TD5_GlobalState {
          * When set, slot 0 is driven by td5_ai_update_race_actors and the
          * human input-to-actor path is skipped, exactly like demo mode. */
         int  player_is_ai;
+        /* OtherPlayersAI (port-only N-way test, 2026-06-03): when set, every
+         * LOCAL human slot EXCEPT slot 0 is put on AI autopilot, so player 1
+         * (slot 0) is driven by real input while the other split-screen panes
+         * drive themselves. Distinct from player_is_ai (which AI-drives slot 0
+         * too); the slot-0 AI-dispatch paths key off player_is_ai only, so
+         * slot 0 stays human under this knob. */
+        int  others_ai;
         /* SoloAISlot (port-only debug, 2026-05-22): which slot drives in
          * solo mode. Default 0. Affects td5_ai_update_track_offset_bias
          * peer-emulation gate and slot-state init. Used to A/B test the

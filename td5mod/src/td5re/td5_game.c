@@ -1550,6 +1550,20 @@ int td5_game_init_race_session(void) {
         TD5_LOG_I(LOG_TAG,
                   "InitRace: player_is_ai=1 -> %d human slot(s) switched to AI autopilot",
                   humans);
+    } else if (g_td5.ini.others_ai) {
+        /* [PORT: N-way] AI-drive every local human slot EXCEPT slot 0, so the
+         * user drives player 1 while the other split-screen panes self-drive.
+         * Slot 0 keeps state==1 (human) and the slot-0 AI-dispatch paths key
+         * off player_is_ai (not others_ai), so its input path stays live. */
+        int humans = g_td5.num_human_players;
+        if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+        for (int i = 1; i < humans; i++) {
+            if (s_slot_state[i].state == 1) s_slot_state[i].state = 0;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace: others_ai=1 -> human slots 1..%d on AI autopilot "
+                  "(slot 0 = human)",
+                  humans - 1);
     }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {

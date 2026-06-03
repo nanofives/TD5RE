@@ -1685,11 +1685,20 @@ void td5_ai_init_race_actor_runtime(void) {
     }
     if (g_td5.split_screen_mode > 0 && racer_count > 1 && !g_td5.ini.player_is_ai) {
         /* [PORT ENHANCEMENT] mark slots 1..num_human_players-1 as human (N-way).
-         * Skipped when player_is_ai so every local slot stays AI autopilot. */
+         * Skipped when player_is_ai so every local slot stays AI autopilot.
+         * Under others_ai, slots 1..N-1 are AI (0) instead so only slot 0 is
+         * human — the AI's g_slot_state MUST agree with td5_game.c's
+         * s_slot_state or the AI skips those slots (player state) AND no input
+         * drives them, leaving them parked. */
         int humans = g_td5.num_human_players;
+        int human_state = g_td5.ini.others_ai ? 0 : 1;
         if (humans > TD5_MAX_VIEWPORTS) humans = TD5_MAX_VIEWPORTS;
         for (int k = 1; k < humans && k < g_traffic_slot_base; k++)
-            g_slot_state[k] = 1;
+            g_slot_state[k] = human_state;
+        if (g_td5.ini.others_ai)
+            TD5_LOG_I(LOG_TAG,
+                      "others_ai=1 -> AI g_slot_state[1..%d]=0 (slot 0 = human)",
+                      (humans < g_traffic_slot_base ? humans : g_traffic_slot_base) - 1);
     }
     /* Wanted mode (cop chase): slots 2-5 are inactive (no AI, no physics dispatch).
      * Mirrors gRaceSlotStateTable init at 0x42ABF8 for non-zero game types. */
