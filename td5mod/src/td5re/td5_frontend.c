@@ -25,6 +25,7 @@
 #include "../../ddraw_wrapper/src/wrapper.h"
 #include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes.h"       /* g_ps_msdf bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes.h"  /* g_ps_roundrect bytecode */
+#include "../../ddraw_wrapper/src/shaders/ps_arrow_bytes.h"       /* g_ps_arrow bytecode */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -610,6 +611,7 @@ static ID3D11PixelShader *s_ps_msdf = NULL;
  * any resolution); s_rr_cb feeds it per-button geometry/colour via constant
  * buffer register b1. Must match cbuffer RoundRectParams in ps_roundrect.hlsl. */
 static ID3D11PixelShader *s_ps_roundrect = NULL;
+static ID3D11PixelShader *s_ps_arrow = NULL;   /* selector ◄► triangle SDF */
 static ID3D11Buffer      *s_rr_cb = NULL;
 typedef struct {
     float size_px[2];   /* button w,h in screen px */
@@ -2714,6 +2716,8 @@ static void fe_draw_text_centered(float center_x, float y, const char *text,
 static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
 static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
                                   int state, float sx, float sy);
+static int fe_draw_arrow_proc(float x, float y, float w, float h,
+                              int dir_right, uint32_t color);
 static void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 static float fe_measure_small_text(const char *text);
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
@@ -3726,7 +3730,7 @@ int td5_frontend_init_resources(void) {
         if (s_ps_roundrect && !s_rr_cb) {
             D3D11_BUFFER_DESC bd;
             ZeroMemory(&bd, sizeof(bd));
-            bd.ByteWidth = sizeof(FE_RoundRectParams);   /* 48, 16-aligned */
+            bd.ByteWidth = sizeof(FE_RoundRectParams);   /* 96, 16-aligned */
             bd.Usage = D3D11_USAGE_DEFAULT;
             bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_rr_cb);
@@ -3735,6 +3739,14 @@ int td5_frontend_init_resources(void) {
                 TD5_LOG_W(LOG_TAG, "roundrect cbuffer create failed hr=0x%08lX", (unsigned long)hr);
             } else {
                 TD5_LOG_I(LOG_TAG, "Procedural roundrect button shader ready (VectorUI)");
+            }
+        }
+        if (!s_ps_arrow) {
+            HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+                g_ps_arrow, sizeof(g_ps_arrow), NULL, &s_ps_arrow);
+            if (FAILED(hr)) {
+                s_ps_arrow = NULL;
+                TD5_LOG_W(LOG_TAG, "arrow shader create failed hr=0x%08lX", (unsigned long)hr);
             }
         }
     }
@@ -4479,9 +4491,20 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
     /* Skip hidden buttons (e.g. the Direction toggle on forward-only/circuit
      * tracks) — the selector arrows must vanish with the button frame+label,
      * not leave an empty ◄ ► row floating where the button used to be. */
-    if (!s_buttons[btn_idx].active || s_buttons[btn_idx].hidden ||
-        s_arrowbuttonz_tex_page < 0) return;
+    if (!s_buttons[btn_idx].active || s_buttons[btn_idx].hidden) return;
     frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
+
+    /* VectorUI: procedural triangle-SDF arrows (crisp + AA at any resolution). */
+    if (g_td5.ini.vector_ui && s_ps_arrow) {
+        float aw2 = 13.0f * sx, ah2 = 13.0f * sy;
+        float ay  = by + (bh - ah2) * 0.5f;
+        uint32_t acol = 0xFF7995FFu;  /* bright selector blue */
+        fe_draw_arrow_proc(bx + 4.0f * sx,          ay, aw2, ah2, 0 /*left */, acol);
+        fe_draw_arrow_proc(bx + bw - 4.0f*sx - aw2, ay, aw2, ah2, 1 /*right*/, acol);
+        return;
+    }
+
+    if (s_arrowbuttonz_tex_page < 0) return;
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
     fe_draw_quad(bx + 4.0f * sx,          by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
                  s_arrowbuttonz_tex_page, 0.0f, 0.50f, 1.0f, 0.75f);
@@ -6120,6 +6143,28 @@ static int fe_draw_roundrect(float x, float y, float w, float h,
     ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_rr_cb);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     td5_plat_render_set_ps_override((void *)s_ps_roundrect, SAMP_LINEAR_CLAMP);
+    fe_draw_quad(x, y, w, h, 0xFFFFFFFF, s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+    td5_plat_render_clear_ps_override();
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    return 1;
+}
+
+/* Procedural selector arrow (◄ ►) via the triangle-SDF shader, crisp + AA at
+ * any resolution. dir_right selects the direction; color is 0xAARRGGBB. Reuses
+ * the b1 constant buffer. Returns 0 if unavailable (caller falls back). */
+static int fe_draw_arrow_proc(float x, float y, float w, float h,
+                              int dir_right, uint32_t color) {
+    if (!s_ps_arrow || !s_rr_cb || !g_backend.context) return 0;
+    FE_RoundRectParams rp;
+    memset(&rp, 0, sizeof(rp));
+    rp.size_px[0] = w;  rp.size_px[1] = h;
+    rp.border[0] = dir_right ? 1.0f : 0.0f;
+    FE_ARGB_TO_RGB(rp.mid, color);  rp.mid[3] = 1.0f;
+    ID3D11DeviceContext_UpdateSubresource(g_backend.context,
+        (ID3D11Resource *)s_rr_cb, 0, NULL, &rp, 0, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_rr_cb);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_set_ps_override((void *)s_ps_arrow, SAMP_LINEAR_CLAMP);
     fe_draw_quad(x, y, w, h, 0xFFFFFFFF, s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
     td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);

@@ -42,4 +42,8 @@ echo   ps_msdf OK
 if errorlevel 1 (echo FAILED: ps_roundrect && exit /b 1)
 echo   ps_roundrect OK
 
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_arrow_bytes.h /Vn g_ps_arrow ps_arrow.hlsl
+if errorlevel 1 (echo FAILED: ps_arrow && exit /b 1)
+echo   ps_arrow OK
+
 echo All shaders compiled successfully.
