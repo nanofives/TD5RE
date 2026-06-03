@@ -4386,6 +4386,37 @@ extern void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
  * but was removed pending byte-diff validation against the existing helper.
  */
 
+/* [PORT: N-way split] Span extremes across the LOCAL human players (slots
+ * 0..num_human_players-1, clamped to the racer range). span = span_normalized
+ * (+0x82). For a single player both return slot 0's span, so legacy traffic
+ * recycling stays byte-identical to the original. Used so traffic is recycled
+ * only once the TRAILING player has passed it and respawns ahead of the LEAD
+ * player. */
+static int ai_player_span_lead(void)
+{
+    int humans = g_td5.num_human_players;
+    if (humans < 1) humans = 1;
+    if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
+    int ext = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+    for (int s = 1; s < humans; s++) {
+        int sp = (int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED);
+        if (sp > ext) ext = sp;
+    }
+    return ext;
+}
+static int ai_player_span_trailing(void)
+{
+    int humans = g_td5.num_human_players;
+    if (humans < 1) humans = 1;
+    if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
+    int ext = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+    for (int s = 1; s < humans; s++) {
+        int sp = (int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED);
+        if (sp < ext) ext = sp;
+    }
+    return ext;
+}
+
 void td5_ai_recycle_traffic_actor(void) {
     int       racer_count;
     int       best_slot = 0;
@@ -4426,7 +4457,11 @@ void td5_ai_recycle_traffic_actor(void) {
      * used ACTOR_SPAN_RAW (+0x80) which is the wrong field for tracks
      * with junction remaps. */
     p0 = actor_ptr(0);
-    player_span_norm = ACTOR_I16(p0, ACTOR_SPAN_NORMALIZED); /* +0x82 */
+    (void)p0;
+    /* [PORT: N-way] Pre-scan/respawn reference = the LEAD local player, so a
+     * recycled traffic car respawns ahead of the front-runner. (1 player =>
+     * slot 0 span, byte-identical to the original.) */
+    player_span_norm = (int16_t)ai_player_span_lead();
 
     qp = g_traffic_queue_ptr;
     q_span = (int16_t)(qp[0] | (qp[1] << 8));
@@ -4458,9 +4493,11 @@ void td5_ai_recycle_traffic_actor(void) {
         for (i = 6; i < loop_max; i++) {
             int16_t ts;
             int32_t dist;
-            /* Reload player.span_norm every iteration — matches original
-             * MOV BP, word ptr [0x004ab18a] at 0x00435438 inside the loop. */
-            psn_loop = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+            /* [PORT: N-way] Recycle reference = the TRAILING local player, so a
+             * traffic car is only retired once EVERY player has passed it by
+             * >40 spans (1 player => slot 0 span, byte-identical to original).
+             * Orig reloaded slot 0's span_norm here each iteration (0x00435438). */
+            psn_loop = ai_player_span_trailing();
             ts = ACTOR_I16(actor_ptr(i), ACTOR_SPAN_NORMALIZED);
             dist = psn_loop - (int)ts;
             if (dist > best_dist) {

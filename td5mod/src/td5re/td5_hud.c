@@ -2246,11 +2246,17 @@ void td5_hud_render_overlays(float dt)
         /* --- Bit 0: Race position label --- */
         if (flags & TD5_HUD_POSITION_LABEL) {
             uint8_t pos = actor_race_position(actor_slot);
-            td5_hud_queue_text(0,
-                (int)(vl->vp_int_left + 8.0f),
-                (int)(vl->vp_int_top + 8.0f),
-                0,
-                "%s", s_hud_string_table[pos]);
+            int px = (int)(vl->vp_int_left + 8.0f);
+            int py = (int)(vl->vp_int_top + 8.0f);
+            if (pos < 6) {
+                td5_hud_queue_text(0, px, py, 0, "%s", s_hud_string_table[pos]);
+            } else {
+                /* [PORT: N-way] The SNK position table only has 1ST..6TH; for a
+                 * >6-racer field generate the ordinal (positions 7..16 are all
+                 * "TH"). Without this, 7th+ read the next table entries
+                 * ("WRONG WAY", "PIT STOP", ...). */
+                td5_hud_queue_text(0, px, py, 0, "%dTH", (int)pos + 1);
+            }
         }
 
         /* --- Bit 7: Total timer "%s %d" / cop-chase POINTS --- */

@@ -1288,19 +1288,19 @@ int td5_game_init_race_session(void) {
         g_td5.circuit_lap_count = 4;
     }
     if (g_td5.split_screen_mode > 0) {
-        /* The original disables traffic + special encounters in split-screen.
-         * [PORT: N-way] Keep that faithful for legacy (<=6-racer) splits, but
-         * ALLOW traffic in a >6-racer field — it spawns at slot 16+ and behaves
-         * exactly as the original (position-relative). The special-encounter cop
-         * stays off either way (it's hardwired to the legacy slot-9 layout). */
+        /* [PORT: N-way] The original disables traffic + special encounters in
+         * ALL split-screen. The port KEEPS traffic in every split-screen race so
+         * it's visible to every player (spawns at g_traffic_slot_base..+6). The
+         * special-encounter COP rides traffic slot 9: that's a real traffic slot
+         * in a <=6 field (kept), but a RACER slot in a >6 field (so disabled). */
         int field = g_td5.num_human_players + g_td5.num_ai_opponents;
-        g_td5.special_encounter_enabled = 0;
-        if (field <= TD5_LEGACY_RACE_SLOTS) {
-            g_td5.traffic_enabled = 0;
-            TD5_LOG_I(LOG_TAG, "InitRace: split-screen (<=6) — disabling traffic/encounters");
+        if (field > TD5_LEGACY_RACE_SLOTS) {
+            g_td5.special_encounter_enabled = 0;
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: >6-racer split — traffic kept, special-encounter off (slot-9 layout)");
         } else {
             TD5_LOG_I(LOG_TAG,
-                      "InitRace: >6-racer split-screen — keeping traffic (encounters off)");
+                      "InitRace: <=6 split — traffic + special-encounter kept (PORT deviation)");
         }
     }
 
