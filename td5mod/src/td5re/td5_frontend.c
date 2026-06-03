@@ -2171,6 +2171,19 @@ void td5_frontend_auto_race_setup(void) {
     /* Now trigger the race schedule (sets race_requested, assigns AI cars) */
     frontend_init_race_schedule();
 
+    /* AutoRace opponent-count override (test harness / Quick Race-field probe):
+     * the schedule's non-QuickRace path defaults to 1 human + 5 AI; honor an
+     * explicit [Game] DefaultOpponents=N here so AutoRace can exercise the
+     * reduced-field spawn path. -1 = leave the full grid. */
+    if (g_td5.ini.default_opponents >= 0) {
+        int opp = g_td5.ini.default_opponents;
+        if (opp > TD5_MAX_RACER_SLOTS - 1) opp = TD5_MAX_RACER_SLOTS - 1;
+        g_td5.num_human_players = 1;
+        g_td5.num_ai_opponents  = opp;
+        TD5_LOG_I(LOG_TAG, "AutoRace: DefaultOpponents override -> %d racers total (1 human + %d AI)",
+                  1 + opp, opp);
+    }
+
     /* Enumerate display modes — original quickrace hook calls
      * InitializeFrontendDisplayModeState() right after the schedule init. */
     frontend_init_display_mode_state();
