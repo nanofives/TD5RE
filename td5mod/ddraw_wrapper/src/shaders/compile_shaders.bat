@@ -38,4 +38,8 @@ echo   ps_composite OK
 if errorlevel 1 (echo FAILED: ps_msdf && exit /b 1)
 echo   ps_msdf OK
 
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_roundrect_bytes.h /Vn g_ps_roundrect ps_roundrect.hlsl
+if errorlevel 1 (echo FAILED: ps_roundrect && exit /b 1)
+echo   ps_roundrect OK
+
 echo All shaders compiled successfully.

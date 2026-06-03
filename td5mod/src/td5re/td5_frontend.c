@@ -23,7 +23,8 @@
 #include "td5_snk_strings.h"   /* byte-exact SNK_ labels baked from Language.dll */
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
 #include "../../ddraw_wrapper/src/wrapper.h"
-#include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes.h"  /* g_ps_msdf bytecode */
+#include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes.h"       /* g_ps_msdf bytecode */
+#include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes.h"  /* g_ps_roundrect bytecode */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -603,6 +604,22 @@ static int s_font_page = -1;
 static int s_msdf_font_page = -1;
 static ID3D11PixelShader *s_ps_msdf = NULL;
 #define SHARED_PAGE_FONT_MSDF 970   /* free page (frontend uses 888-955) */
+
+/* Procedural neon rounded-rect (frontend buttons/frames) — VectorUI only.
+ * ps_roundrect evaluates an analytic rounded-rect SDF per pixel (crisp glow at
+ * any resolution); s_rr_cb feeds it per-button geometry/colour via constant
+ * buffer register b1. Must match cbuffer RoundRectParams in ps_roundrect.hlsl. */
+static ID3D11PixelShader *s_ps_roundrect = NULL;
+static ID3D11Buffer      *s_rr_cb = NULL;
+typedef struct {
+    float size_px[2];   /* button w,h in screen px */
+    float border[2];    /* border thickness px: x = left/right, y = top/bottom */
+    float radii[4];     /* outer corner radii px: TL, TR, BL, BR */
+    float mid[4];       /* border gradient: lightest (middle of band) */
+    float inner[4];     /* border gradient: inner-edge colour */
+    float outer[4];     /* border gradient: outer-edge colour (darkest) */
+    float fill[4];      /* interior rgb, a = interior alpha (0 = transparent) */
+} FE_RoundRectParams;   /* 96 bytes, matches cbuffer RoundRectParams */
 /* When set, fe_draw_text preserves the input case instead of forcing upper-case.
  * BodyText.tga DOES contain lowercase glyphs (rows 6-9, ascii 0x61+), so mixed-case
  * strings (e.g. high-score player names "Frank"/"Jeffrey") render correctly. Scoped:
@@ -3694,6 +3711,34 @@ int td5_frontend_init_resources(void) {
         }
     }
 
+    /* ---- Procedural rounded-rect button shader + constant buffer (VectorUI) ----
+     * On failure both stay NULL and the button loop falls back to the bitmap
+     * 9-slice / button cache. */
+    if (g_td5.ini.vector_ui && g_backend.device) {
+        if (!s_ps_roundrect) {
+            HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+                g_ps_roundrect, sizeof(g_ps_roundrect), NULL, &s_ps_roundrect);
+            if (FAILED(hr)) {
+                s_ps_roundrect = NULL;
+                TD5_LOG_W(LOG_TAG, "roundrect shader create failed hr=0x%08lX", (unsigned long)hr);
+            }
+        }
+        if (s_ps_roundrect && !s_rr_cb) {
+            D3D11_BUFFER_DESC bd;
+            ZeroMemory(&bd, sizeof(bd));
+            bd.ByteWidth = sizeof(FE_RoundRectParams);   /* 48, 16-aligned */
+            bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_rr_cb);
+            if (FAILED(hr)) {
+                s_rr_cb = NULL;
+                TD5_LOG_W(LOG_TAG, "roundrect cbuffer create failed hr=0x%08lX", (unsigned long)hr);
+            } else {
+                TD5_LOG_I(LOG_TAG, "Procedural roundrect button shader ready (VectorUI)");
+            }
+        }
+    }
+
     /* ---- Font atlas (BodyText.tga) ----
      * The ACTUAL game font is BodyText.tga (240x552, 8bpp palette TGA with
      * red color key). 10 chars/row, 24px cells. DAT_0049626c in original.
@@ -6038,6 +6083,49 @@ static void fe_draw_small_text(float x, float y, const char *text, uint32_t colo
 #define BB_RX      28       /* right column x start */
 #define BB_TILE    4        /* edge tile size (4x4) */
 
+/* Procedural rounded-rect button/frame (VectorUI), crisp at any resolution.
+ * Diagonally-symmetric corners (matches the original ButtonBits): top-left &
+ * bottom-right use r_large (smooth), top-right & bottom-left use r_small
+ * (abrupt). border_px = rim band width. rim_argb/fill_argb are 0xAARRGGBB;
+ * fill_alpha 0 = transparent interior (border only). Returns 0 if the
+ * procedural path is unavailable (caller falls back to the bitmap button). */
+#define FE_ARGB_TO_RGB(dst, argb) do {                       \
+        (dst)[0] = (((argb) >> 16) & 0xFF) / 255.0f;         \
+        (dst)[1] = (((argb) >>  8) & 0xFF) / 255.0f;         \
+        (dst)[2] = ( (argb)        & 0xFF) / 255.0f;         \
+    } while (0)
+
+static int fe_draw_roundrect(float x, float y, float w, float h,
+                             float r_large, float r_small,
+                             float border_side, float border_topbot,
+                             uint32_t mid_argb, uint32_t inner_argb, uint32_t outer_argb,
+                             uint32_t fill_argb, float fill_alpha) {
+    if (!s_ps_roundrect || !s_rr_cb || !g_backend.context) return 0;
+    FE_RoundRectParams rp;
+    float rmax = 0.5f * (w < h ? w : h);
+    if (r_large > rmax) r_large = rmax;
+    if (r_small > rmax) r_small = rmax;
+    rp.size_px[0] = w;  rp.size_px[1] = h;
+    rp.border[0] = border_side;  rp.border[1] = border_topbot;
+    rp.radii[0] = r_large;  /* TL smooth  */
+    rp.radii[1] = r_small;  /* TR abrupt  */
+    rp.radii[2] = r_small;  /* BL abrupt  */
+    rp.radii[3] = r_large;  /* BR smooth  */
+    FE_ARGB_TO_RGB(rp.mid,   mid_argb);   rp.mid[3]   = 1.0f;
+    FE_ARGB_TO_RGB(rp.inner, inner_argb); rp.inner[3] = 1.0f;
+    FE_ARGB_TO_RGB(rp.outer, outer_argb); rp.outer[3] = 1.0f;
+    FE_ARGB_TO_RGB(rp.fill,  fill_argb);  rp.fill[3]  = fill_alpha;
+    ID3D11DeviceContext_UpdateSubresource(g_backend.context,
+        (ID3D11Resource *)s_rr_cb, 0, NULL, &rp, 0, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_rr_cb);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_set_ps_override((void *)s_ps_roundrect, SAMP_LINEAR_CLAMP);
+    fe_draw_quad(x, y, w, h, 0xFFFFFFFF, s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
+    td5_plat_render_clear_ps_override();
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    return 1;
+}
+
 static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
                                   int state, float sx, float sy) {
     int tex = s_buttonbits_tex_page;
@@ -6554,15 +6642,41 @@ void td5_frontend_render_ui_rects(void) {
          * draw arrows + value text on top of the frame and would need a
          * different cache layout; disabled buttons render with state 2
          * (gray) which isn't baked. */
+        /* Procedural neon button frame (VectorUI): crisp glow at any resolution.
+         * Draws the dark rounded interior + glowing coloured rim, then the label
+         * via the SDF text path. Selectors get only the frame (their value text
+         * + arrows are drawn separately below). */
+        int use_proc = (g_td5.ini.vector_ui && s_ps_roundrect && s_rr_cb);
+
         int cache_page = -1;
-        if (!s_buttons[i].disabled && !s_buttons[i].is_selector
+        if (!use_proc && !s_buttons[i].disabled && !s_buttons[i].is_selector
             && s_buttons[i].label[0] && s_font_page >= 0) {
             cache_page = td5_fe_btncache_ensure_page(i, s_buttons[i].label,
                                                     s_buttons[i].w, s_buttons[i].h,
                                                     s_font_glyph_advance);
         }
 
-        if (cache_page >= 0) {
+        if (use_proc) {
+            /* Border 3-stop gradient (outer-edge -> bright middle -> inner-edge),
+             * colours per state. Selected = gold, unselected = blue, locked =
+             * gray. Interior dark purple 0x392152 ONLY on the selected button;
+             * unselected/locked have a transparent interior (border only).
+             * Corners diagonally symmetric (TL/BR smooth, TR/BL abrupt). */
+            uint32_t mid_c, inner_c, outer_c;
+            if (bb_state == 0)      { mid_c = 0xFFD9CA00u; inner_c = 0xFFA08C00u; outer_c = 0xFF3C2F00u; }
+            else if (bb_state == 2) { mid_c = 0xFFAAAAAAu; inner_c = 0xFF777777u; outer_c = 0xFF222222u; }
+            else                    { mid_c = 0xFF7995FFu; inner_c = 0xFF496BDCu; outer_c = 0xFF001675u; }
+            float fillA = (bb_state == 0) ? 1.0f : 0.0f;
+            fe_draw_roundrect(bx, by, bw, bh,
+                              20.0f * sy /*large TL/BR*/, 5.0f * sy /*small TR/BL*/,
+                              6.0f * sy  /*side border*/, 2.0f * sy /*top/bottom border*/,
+                              mid_c, inner_c, outer_c, 0xFF392152u, fillA);
+            if (s_buttons[i].label[0] && !s_buttons[i].is_selector && s_font_page >= 0) {
+                float tw = fe_measure_text(s_buttons[i].label, sx);
+                uint32_t tc = s_buttons[i].disabled ? 0xFF888888u : 0xFFFFFFFFu;
+                fe_draw_text(bx + (bw - tw) * 0.5f, by, s_buttons[i].label, tc, sx, sy);
+            }
+        } else if (cache_page >= 0) {
             /* Cache is 224x64 with halves stacked at row 32. Inset v at
              * the half boundary by half a texel so LINEAR filtering does
              * not blend row 31 (other half) with row 32. u stays at the
