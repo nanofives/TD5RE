@@ -1678,8 +1678,9 @@ void td5_ai_init_race_actor_runtime(void) {
         TD5_LOG_I(LOG_TAG,
                   "player_is_ai=1 -> AI slot_state[0]=0 (autopilot active)");
     }
-    if (g_td5.split_screen_mode > 0 && racer_count > 1) {
-        /* [PORT ENHANCEMENT] mark slots 1..num_human_players-1 as human (N-way). */
+    if (g_td5.split_screen_mode > 0 && racer_count > 1 && !g_td5.ini.player_is_ai) {
+        /* [PORT ENHANCEMENT] mark slots 1..num_human_players-1 as human (N-way).
+         * Skipped when player_is_ai so every local slot stays AI autopilot. */
         int humans = g_td5.num_human_players;
         if (humans > TD5_MAX_VIEWPORTS) humans = TD5_MAX_VIEWPORTS;
         for (int k = 1; k < humans && k < g_traffic_slot_base; k++)

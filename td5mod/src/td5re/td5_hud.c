@@ -1416,8 +1416,11 @@ void td5_hud_init_layout(int viewport_mode)
         s_view_layout[0].vp_top    = 0.0f;
         s_view_layout[0].vp_bottom = g_render_height_f;
 
-    } else if (views == 2 && viewport_mode == 1) {
-        /* Left/right split (legacy viewport_mode 1) */
+    } else if (views == 2 && viewport_mode == 2) {
+        /* Vertical split — left | right. Matches the game's viewport layout
+         * for split_screen_mode 2 (td5_game_init_viewport_layout). The HUD used
+         * to key left/right off mode 1, which is the game's TOP/BOTTOM mode —
+         * that orientation mismatch put the HUD in the wrong half. */
         s_scale_x *= 0.5f;
         s_scale_y *= 0.5f;
         s_view_layout[0].scale_x  = s_scale_x;
@@ -1434,7 +1437,8 @@ void td5_hud_init_layout(int viewport_mode)
         s_view_layout[1].vp_bottom = g_render_height_f;
 
     } else if (views == 2) {
-        /* Top/bottom split (legacy viewport_mode 2 / default) */
+        /* Horizontal split — top / bottom. Matches the game's viewport layout
+         * for split_screen_mode 1 (the default 2-player orientation). */
         s_scale_x *= 0.5f;
         s_scale_y *= 0.5f;
         s_view_layout[0].scale_x  = s_scale_x;

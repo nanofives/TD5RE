@@ -1526,11 +1526,19 @@ int td5_game_init_race_session(void) {
      * Dropping slot 0 to state=0 (AI) routes it through
      * td5_physics_update_ai at td5_physics.c:463 and makes td5_game skip
      * td5_input_update_player_control(0) at td5_game.c:1538/1559. */
-    if (g_td5.ini.player_is_ai && s_slot_state[0].state == 1) {
-        s_slot_state[0].state = 0;
+    /* [PORT: N-way] player_is_ai puts EVERY local human slot on AI autopilot
+     * (not just slot 0), so all split-screen cars drive themselves — handy for
+     * testing the panes without N controllers. */
+    if (g_td5.ini.player_is_ai) {
+        int humans = g_td5.num_human_players;
+        if (humans < 1) humans = 1;
+        if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+        for (int i = 0; i < humans; i++) {
+            if (s_slot_state[i].state == 1) s_slot_state[i].state = 0;
+        }
         TD5_LOG_I(LOG_TAG,
-                  "InitRace: player_is_ai=1 -> slot 0 switched to AI "
-                  "(mirrors 0x0042ACCF attract-mode write)");
+                  "InitRace: player_is_ai=1 -> %d human slot(s) switched to AI autopilot",
+                  humans);
     }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
