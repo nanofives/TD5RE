@@ -26,6 +26,7 @@
 #include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes.h"       /* g_ps_msdf bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes.h"  /* g_ps_roundrect bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_arrow_bytes.h"       /* g_ps_arrow bytecode */
+#include "../../ddraw_wrapper/src/shaders/ps_cursor_bytes.h"      /* g_ps_cursor bytecode */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -612,6 +613,9 @@ static ID3D11PixelShader *s_ps_msdf = NULL;
  * buffer register b1. Must match cbuffer RoundRectParams in ps_roundrect.hlsl. */
 static ID3D11PixelShader *s_ps_roundrect = NULL;
 static ID3D11PixelShader *s_ps_arrow = NULL;   /* selector ◄► triangle SDF */
+static ID3D11PixelShader *s_ps_cursor = NULL;  /* mouse pointer (SDF: white outline + purple fill) */
+static int s_cursor_msdf_page = -1;
+#define SHARED_PAGE_CURSOR_MSDF 981  /* free page (titles use 972..980) */
 static ID3D11Buffer      *s_rr_cb = NULL;
 typedef struct {
     float size_px[2];   /* button w,h in screen px */
@@ -1719,8 +1723,26 @@ static void frontend_blit(int dst, int src, int dx, int dy) {
     cmd->color = 0xFFFFFFFF;
 }
 
+/* VectorUI cursor: SDF pointer (white outline + purple fill) drawn immediately,
+ * called AFTER the sprite flush so it stays on top. */
+static void fe_draw_cursor_proc(float sx, float sy) {
+    if (!s_cursor_visible || !s_ps_cursor || s_cursor_msdf_page < 0) return;
+    float cw = (s_cursor_w > 0 ? (float)s_cursor_w : 22.0f) * sx;
+    float ch = (s_cursor_h > 0 ? (float)s_cursor_h : 30.0f) * sy;
+    float x  = (float)s_mouse_x * sx;
+    float y  = (float)s_mouse_y * sy;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    td5_plat_render_set_ps_override((void *)s_ps_cursor, SAMP_LINEAR_CLAMP);
+    fe_draw_quad(x, y, cw, ch, 0xFFFFFFFF, s_cursor_msdf_page, 0.0f, 0.0f, 1.0f, 1.0f);
+    td5_plat_render_clear_ps_override();
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
 static void frontend_render_cursor(void) {
     if (!s_cursor_visible) return;
+    /* VectorUI: the cursor is drawn after the sprite flush by fe_draw_cursor_proc
+     * (so it stays on top); skip the queued bitmap path here. */
+    if (g_td5.ini.vector_ui && s_ps_cursor && s_cursor_msdf_page >= 0) return;
     if (s_cursor_tex_page >= 0 && s_cursor_w > 0 && s_cursor_h > 0) {
         /* Draw textured cursor from snkmouse.tga */
         if (s_draw_queue_count < FE_MAX_DRAW_CMDS) {
@@ -3592,6 +3614,15 @@ int td5_frontend_display_loop(void) {
     frontend_render_cursor();
     td5_frontend_flush_sprite_blits();
 
+    /* VectorUI mouse cursor: drawn last (on top of everything) via the SDF
+     * pointer shader. Bitmap cursor (when VectorUI off) was queued above. */
+    if (g_td5.ini.vector_ui && s_ps_cursor && s_cursor_msdf_page >= 0) {
+        int sw = 0, sh = 0;
+        td5_plat_get_window_size(&sw, &sh);
+        if (sw > 0 && sh > 0)
+            fe_draw_cursor_proc((float)sw / 640.0f, (float)sh / 480.0f);
+    }
+
     /* 5. Presentation (flip / software blit) */
     td5_plat_present(1);
 
@@ -3747,6 +3778,26 @@ int td5_frontend_init_resources(void) {
             if (FAILED(hr)) {
                 s_ps_arrow = NULL;
                 TD5_LOG_W(LOG_TAG, "arrow shader create failed hr=0x%08lX", (unsigned long)hr);
+            }
+        }
+        if (!s_ps_cursor) {
+            HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+                g_ps_cursor, sizeof(g_ps_cursor), NULL, &s_ps_cursor);
+            if (FAILED(hr)) {
+                s_ps_cursor = NULL;
+                TD5_LOG_W(LOG_TAG, "cursor shader create failed hr=0x%08lX", (unsigned long)hr);
+            }
+        }
+        if (s_ps_cursor && s_cursor_msdf_page < 0) {
+            void *pixels = NULL;
+            int mw = 0, mh = 0;
+            if (td5_asset_load_png_to_buffer("re/assets/frontend/snkmouse_msdf.png",
+                                              TD5_COLORKEY_NONE, &pixels, &mw, &mh)) {
+                if (td5_plat_render_upload_texture(SHARED_PAGE_CURSOR_MSDF, pixels, mw, mh, 2))
+                    s_cursor_msdf_page = SHARED_PAGE_CURSOR_MSDF;
+                free(pixels);
+            } else {
+                TD5_LOG_W(LOG_TAG, "snkmouse_msdf.png not found -- cursor falls back to bitmap");
             }
         }
     }
