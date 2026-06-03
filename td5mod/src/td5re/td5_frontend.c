@@ -654,6 +654,9 @@ static int s_arrowbuttonz_tex_page = -1; /* page 894: ArrowButtonz.tga 12x36 spr
 static int s_title_tex_page[TD5_SCREEN_COUNT];
 static int s_title_tex_w[TD5_SCREEN_COUNT];
 static int s_title_tex_h[TD5_SCREEN_COUNT];
+/* Parallel SDF title pages (VectorUI): same word-strip art as a distance field
+ * so the big yellow headers stay crisp at any resolution. 0 = not loaded. */
+static int s_title_msdf_page[TD5_SCREEN_COUNT];
 
 /* Forward declarations for functions used before their definitions */
 static int frontend_load_tga(const char *name, const char *archive);
@@ -700,6 +703,7 @@ static const uint8_t k_font_glyph_advance_default[96] = {
 #define SHARED_PAGE_BG_GALLERY 888 /* 5 pages 888-892: background slideshow pic1-5.tga */
 #define SHARED_PAGE_MIN       888  /* lowest shared page -- don't clear below this */
 #define FE_TITLE_PAGE_BASE    931
+#define FE_TITLE_MSDF_PAGE_BASE 972  /* parallel SDF title pages 972..980 */
 
 static void frontend_note_activity(void) {
     s_attract_idle_counter = 0;
@@ -915,6 +919,32 @@ static int frontend_ensure_title_texture(TD5_ScreenIndex screen) {
         return 0;
     }
     s_title_tex_page[screen] = page;
+
+    /* Parallel SDF title (VectorUI): load re/assets/frontend/<base>_msdf.png to a
+     * parallel page so the header can render crisp at any resolution. The strips
+     * are flat menu-font yellow, so the SDF shader's diffuse colour carries the
+     * tint (see the title draw). Failure leaves s_title_msdf_page[screen]=0 and
+     * the draw falls back to the bitmap strip. */
+    if (g_td5.ini.vector_ui && s_ps_msdf &&
+        screen >= 0 && screen < TD5_SCREEN_COUNT && s_title_msdf_page[screen] == 0) {
+        char base[128], sdf_path[256];
+        size_t n = 0;
+        while (entry[n] && entry[n] != '.' && n < sizeof(base) - 1) { base[n] = entry[n]; n++; }
+        base[n] = 0;
+        snprintf(sdf_path, sizeof(sdf_path), "re/assets/frontend/%s_msdf.png", base);
+        void *pixels = NULL;
+        int mw = 0, mh = 0;
+        if (td5_asset_load_png_to_buffer(sdf_path, TD5_COLORKEY_NONE, &pixels, &mw, &mh)) {
+            int mpage = FE_TITLE_MSDF_PAGE_BASE + (page - FE_TITLE_PAGE_BASE);
+            if (td5_plat_render_upload_texture(mpage, pixels, mw, mh, 2)) {
+                s_title_msdf_page[screen] = mpage;
+                TD5_LOG_I(LOG_TAG, "Title SDF loaded: %s page=%d %dx%d", sdf_path, mpage, mw, mh);
+            }
+            free(pixels);
+        } else {
+            TD5_LOG_W(LOG_TAG, "Title SDF not found: %s (falls back to bitmap)", sdf_path);
+        }
+    }
     return 1;
 }
 
@@ -4042,6 +4072,7 @@ void td5_frontend_release_resources(void) {
     s_white_tex_page = -1;
     s_background_surface = 0;
     memset(s_title_tex_page, 0, sizeof(s_title_tex_page));
+    memset(s_title_msdf_page, 0, sizeof(s_title_msdf_page));
     memset(s_title_tex_w, 0, sizeof(s_title_tex_w));
     memset(s_title_tex_h, 0, sizeof(s_title_tex_h));
 }
@@ -6743,8 +6774,20 @@ void td5_frontend_render_ui_rects(void) {
                 title_x = 48.0f * sx;
             }
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_quad(title_x, title_y, draw_w, draw_h,
-                         0xFFFFFFFF, page, 0.0f, 0.0f, 1.0f, 1.0f);
+            int tmsdf = (g_td5.ini.vector_ui && s_ps_msdf &&
+                         s_title_msdf_page[s_current_screen] > 0);
+            if (tmsdf) {
+                /* SDF strip carries no colour, so tint with the menu-header
+                 * yellow (227,215,8 = mainfont glyph colour). */
+                td5_plat_render_set_ps_override((void *)s_ps_msdf, SAMP_LINEAR_CLAMP);
+                fe_draw_quad(title_x, title_y, draw_w, draw_h,
+                             0xFFE3D708u, s_title_msdf_page[s_current_screen],
+                             0.0f, 0.0f, 1.0f, 1.0f);
+                td5_plat_render_clear_ps_override();
+            } else {
+                fe_draw_quad(title_x, title_y, draw_w, draw_h,
+                             0xFFFFFFFF, page, 0.0f, 0.0f, 1.0f, 1.0f);
+            }
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         }
     }
