@@ -2839,7 +2839,7 @@ int td5_asset_load_traffic_model(int model_index, int slot)
     /* --- Load skin texture + patch primitive page IDs -------------------- */
     /* Traffic slots live in [6..11]; subtract 6 so we get a 0..5 index into
      * the dedicated traffic texture page block. */
-    int traffic_idx = (slot >= 6) ? (slot - 6) : slot;
+    int traffic_idx = (slot >= g_traffic_slot_base) ? (slot - g_traffic_slot_base) : slot;
     int skin_page   = TD5_TRAFFIC_TEXTURE_PAGE_BASE + traffic_idx;
 
     char png_path[256];

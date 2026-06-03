@@ -71,52 +71,53 @@ float  g_cameraSecondary[9] = { 1,0,0, 0,1,0, 0,0,1 };
 float  g_cameraSecondaryUnscaled[9] = { 1,0,0, 0,1,0, 0,0,1 };
 float  g_cameraTertiary[9]  = { 1,0,0, 0,1,0, 0,0,1 };
 
-/* --- Per-view camera state arrays --- */
-int    g_camElevationAngleFP[2]     = {0};
-short  g_camCachedAngles[2][4]      = {{0}};
-short  g_camOffsetVec[2][4]         = {{0}};
-float  g_camSmoothedHeight[2]       = {0};
-int    g_camHeightSampleOfs[2]      = {0};
-int    g_camTrackSpanOfs[2]         = {0};
-int    g_camBehaviorType[2]         = {0};
-float  g_camOrbitRadiusScale[2]     = {0};
-int    g_camOrbitOffset[2][3]       = {{0}};
-int    g_camFlyInCounter[2]         = {0};
-int    g_camRotationSlot[2]         = {0};
-float  g_camCurrentRadius[2]        = {0};
-int    g_camSplineParam[2]          = {0};
-float  g_camTargetHeight[2]         = {0};
-int    g_camOrbitAngleFP[2]         = {0};
-int    g_camAnchorSpan[2]           = {0};
-int    g_camPresetChangeFlag[2]     = {0};
-int    g_camWorldPos[2][3]          = {{0}};
-short  g_camOrientShort[2][4]       = {{0}};
-int    g_camHeadingDelta20[2]       = {0};
-int    g_camSplineNodeCount[2]      = {0};
-int    g_camYawOffset[2]            = {0};
-int    g_camReserved78[2]           = {0};
-int    g_camSplineAdvRate[2]        = {0};
-int    g_camAnchorX[2]              = {0};
-int    g_camHeightParam[2]          = {0};
-int    g_camAnchorZ[2]              = {0};
-int    g_camStoredPitch[2]          = {0};
+/* --- Per-view camera state arrays ---
+ * [PORT ENHANCEMENT] grown from [2] to [TD5_MAX_VIEWPORTS] for N-way split. */
+int    g_camElevationAngleFP[TD5_MAX_VIEWPORTS]     = {0};
+short  g_camCachedAngles[TD5_MAX_VIEWPORTS][4]      = {{0}};
+short  g_camOffsetVec[TD5_MAX_VIEWPORTS][4]         = {{0}};
+float  g_camSmoothedHeight[TD5_MAX_VIEWPORTS]       = {0};
+int    g_camHeightSampleOfs[TD5_MAX_VIEWPORTS]      = {0};
+int    g_camTrackSpanOfs[TD5_MAX_VIEWPORTS]         = {0};
+int    g_camBehaviorType[TD5_MAX_VIEWPORTS]         = {0};
+float  g_camOrbitRadiusScale[TD5_MAX_VIEWPORTS]     = {0};
+int    g_camOrbitOffset[TD5_MAX_VIEWPORTS][3]       = {{0}};
+int    g_camFlyInCounter[TD5_MAX_VIEWPORTS]         = {0};
+int    g_camRotationSlot[TD5_MAX_VIEWPORTS]         = {0};
+float  g_camCurrentRadius[TD5_MAX_VIEWPORTS]        = {0};
+int    g_camSplineParam[TD5_MAX_VIEWPORTS]          = {0};
+float  g_camTargetHeight[TD5_MAX_VIEWPORTS]         = {0};
+int    g_camOrbitAngleFP[TD5_MAX_VIEWPORTS]         = {0};
+int    g_camAnchorSpan[TD5_MAX_VIEWPORTS]           = {0};
+int    g_camPresetChangeFlag[TD5_MAX_VIEWPORTS]     = {0};
+int    g_camWorldPos[TD5_MAX_VIEWPORTS][3]          = {{0}};
+short  g_camOrientShort[TD5_MAX_VIEWPORTS][4]       = {{0}};
+int    g_camHeadingDelta20[TD5_MAX_VIEWPORTS]       = {0};
+int    g_camSplineNodeCount[TD5_MAX_VIEWPORTS]      = {0};
+int    g_camYawOffset[TD5_MAX_VIEWPORTS]            = {0};
+int    g_camReserved78[TD5_MAX_VIEWPORTS]           = {0};
+int    g_camSplineAdvRate[TD5_MAX_VIEWPORTS]        = {0};
+int    g_camAnchorX[TD5_MAX_VIEWPORTS]              = {0};
+int    g_camHeightParam[TD5_MAX_VIEWPORTS]          = {0};
+int    g_camAnchorZ[TD5_MAX_VIEWPORTS]              = {0};
+int    g_camStoredPitch[TD5_MAX_VIEWPORTS]          = {0};
 
-/* --- Scalar camera globals --- */
-int    g_raceCameraPresetId[2]      = {0};
-int    g_raceCameraPresetMode[2]    = {0};
-int    g_cameraProfileIndex[2]      = {0};
-int    g_cameraLastProjScale[2]     = {0};
-int    g_cameraProjDist[2]          = {0};
-int    g_cameraProjScaleComp[2]     = {0};
-int    g_cameraPrevPresetId[2]      = {0};
+/* --- Scalar camera globals (per-view) --- */
+int    g_raceCameraPresetId[TD5_MAX_VIEWPORTS]      = {0};
+int    g_raceCameraPresetMode[TD5_MAX_VIEWPORTS]    = {0};
+int    g_cameraProfileIndex[TD5_MAX_VIEWPORTS]      = {0};
+int    g_cameraLastProjScale[TD5_MAX_VIEWPORTS]     = {0};
+int    g_cameraProjDist[TD5_MAX_VIEWPORTS]          = {0};
+int    g_cameraProjScaleComp[TD5_MAX_VIEWPORTS]     = {0};
+int    g_cameraPrevPresetId[TD5_MAX_VIEWPORTS]      = {0};
 
-unsigned char g_camPackedSave[2]    = {0};
+unsigned char g_camPackedSave[TD5_MAX_VIEWPORTS]    = {0};
 
 /* --- Trackside --- */
 int    g_tracksideCameraProfileCount = 0;
 short *g_tracksideCameraProfiles     = NULL;
-int    g_tracksideTimer[2]           = {0};
-unsigned int g_tracksideYawOffset[2] = {0};
+int    g_tracksideTimer[TD5_MAX_VIEWPORTS]           = {0};
+unsigned int g_tracksideYawOffset[TD5_MAX_VIEWPORTS] = {0};
 
 /* --- Track geometry tables --- */
 int    g_spanTable      = 0;
@@ -125,17 +126,17 @@ int    g_vertexTable    = 0;
 /* --- Race state (camera-owned) --- */
 int    g_cameraTransitionActive = 0xA000;
 int    g_camTransitionGate      = 0;
-static int s_flyin_preset_reloaded[2] = {0, 0};
-extern int    g_actorSlotForView[2];     /* td5_game.c */
+static int s_flyin_preset_reloaded[TD5_MAX_VIEWPORTS] = {0};
+extern int    g_actorSlotForView[TD5_MAX_VIEWPORTS];     /* td5_game.c */
 extern int    g_actorBaseAddr;           /* td5_game.c */
 extern uint8_t *g_actor_table_base;      /* td5_game.c */
 extern int    g_game_type;               /* td5_game.c — g_selectedGameType equivalent */
 int    g_trackType              = 0;
-unsigned char g_actorAliveTable[12] = {0};
-int    g_lookLeftRight[2]       = {0};
+unsigned char g_actorAliveTable[TD5_MAX_TOTAL_ACTORS] = {0};
+int    g_lookLeftRight[TD5_MAX_VIEWPORTS]       = {0};
 
 /* --- Camera spline workspace --- */
-int    g_camSplineState[2][15]  = {{0}};
+int    g_camSplineState[TD5_MAX_VIEWPORTS][15]  = {{0}};
 
 /* --- Constants in .data --- */
 int    g_flyInThreshold  = 40;
@@ -1357,7 +1358,7 @@ static TD5_Actor *camera_actor_for_view(int v);  /* forward decl — defined bel
 void td5_camera_finalize_all(void)
 {
     if (td5_game_get_total_actor_count() <= 0) return;
-    int view_count = g_td5.split_screen_mode ? 2 : 1;
+    int view_count = (g_td5.viewport_count > 0) ? g_td5.viewport_count : 1;
     for (int v = 0; v < view_count; v++) {
         TD5_Actor *actor = camera_actor_for_view(v);
         if (!actor) continue;
@@ -2635,7 +2636,7 @@ static TD5_Actor *camera_actor_for_view(int v)
 void td5_camera_cache_angles(void)
 {
     if (td5_game_get_total_actor_count() <= 0) return;
-    int view_count = g_td5.split_screen_mode ? 2 : 1;
+    int view_count = (g_td5.viewport_count > 0) ? g_td5.viewport_count : 1;
     for (int v = 0; v < view_count; v++) {
         TD5_Actor *actor = camera_actor_for_view(v);
         if (!actor) continue;
@@ -2655,7 +2656,7 @@ void td5_camera_update_chase_all(void)
         update_debug_track_camera();
         return;
     }
-    int view_count = g_td5.split_screen_mode ? 2 : 1;
+    int view_count = (g_td5.viewport_count > 0) ? g_td5.viewport_count : 1;
     for (int v = 0; v < view_count; v++) {
         TD5_Actor *actor = camera_actor_for_view(v);
         if (!actor) continue;

@@ -156,14 +156,13 @@ typedef struct TD5_GlobalState {
     int  dynamics_mode;  /* 0=arcade, 1=simulation */
 
     /* Quick Race player setup (infra to later replace the Two-Player menu).
-     * num_human_players + num_ai_opponents <= TD5_MAX_RACER_SLOTS (6).
-     * NOTE: live split-screen rendering/input supports only 2 viewports
-     * (gSplitScreenMode+1, masked &1 @ orig 0x42C2B0). Until N-way split
-     * lands, the launch path caps EFFECTIVE human-driven slots at 2; the
-     * remaining requested-human slots run as AI so no car sits dead.
-     * Defaults (1 human + 5 AI = 6) reproduce the legacy single-race grid. */
-    int  num_human_players;   /* 1..6 */
-    int  num_ai_opponents;    /* 0..5 */
+     * num_human_players + num_ai_opponents <= TD5_MAX_RACER_SLOTS (16).
+     * [PORT ENHANCEMENT 2026-06] N-way split-screen: up to TD5_MAX_HUMAN_PLAYERS
+     * (9) local humans, each with its own viewport (see td5_game viewport ladder).
+     * The original was hard-capped at 2 viewports / 6 racers; this path deviates
+     * freely. Defaults (1 human + 5 AI = 6) reproduce the legacy single-race grid. */
+    int  num_human_players;   /* 1..TD5_MAX_HUMAN_PLAYERS (9) */
+    int  num_ai_opponents;    /* 0..TD5_MAX_RACER_SLOTS-1 (15) */
 
     /* Viewport */
     int  render_width;
@@ -189,8 +188,8 @@ typedef struct TD5_GlobalState {
     int     track_type;         /* TD5_TrackType */
     int     track_index;
     int     car_index;
-    int     ai_car_indices[6];  /* per-slot car index for AI racers (slot 1-5) */
-    int     ai_car_variants[6]; /* per-slot color variant (0..3) */
+    int     ai_car_indices[TD5_MAX_RACER_SLOTS];  /* per-slot car index for AI racers (slot 1..N-1) */
+    int     ai_car_variants[TD5_MAX_RACER_SLOTS]; /* per-slot color variant (0..3) */
 
     /* Frontend */
     int  frontend_screen_index;
@@ -241,6 +240,7 @@ typedef struct TD5_GlobalState {
         int  default_game_type;
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
         int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
+        int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */
         int  skip_intro;
         int  debug_overlay;
         int  debug_collisions;   /* 1 = draw wireframe of track wall/span geometry */

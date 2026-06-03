@@ -1965,27 +1965,32 @@ static void frontend_init_race_schedule(void) {
         int qr_humans = s_num_human_players;
         int qr_opp    = s_num_ai_opponents;
         if (qr_humans < 1) qr_humans = 1;
-        if (qr_humans > TD5_MAX_RACER_SLOTS) qr_humans = TD5_MAX_RACER_SLOTS;
+        if (qr_humans > TD5_MAX_HUMAN_PLAYERS) qr_humans = TD5_MAX_HUMAN_PLAYERS;
         if (qr_opp < 0) qr_opp = 0;
         if (qr_opp > TD5_MAX_RACER_SLOTS - qr_humans) qr_opp = TD5_MAX_RACER_SLOTS - qr_humans;
         g_td5.num_human_players = qr_humans;
         g_td5.num_ai_opponents  = qr_opp;
     } else {
         g_td5.num_human_players = (s_two_player_mode != 0) ? 2 : 1;
-        g_td5.num_ai_opponents  = TD5_MAX_RACER_SLOTS - g_td5.num_human_players;
+        /* Legacy default = faithful 6-car grid (1 human + 5 AI). The >6-racer
+         * field is opt-in via Quick Race config / the SplitScreenPlayers knob. */
+        g_td5.num_ai_opponents  = TD5_LEGACY_RACE_SLOTS - g_td5.num_human_players;
     }
-    eff_humans = (g_td5.num_human_players < 2) ? g_td5.num_human_players : 2;
+    /* [PORT ENHANCEMENT] N-way split-screen: each local human gets its own
+     * viewport (up to TD5_MAX_VIEWPORTS). The legacy eff_humans=2 cap is gone —
+     * the Quick Race Players button now drives the live split count. */
+    eff_humans = g_td5.num_human_players;
+    if (eff_humans < 1) eff_humans = 1;
+    if (eff_humans > TD5_MAX_VIEWPORTS) eff_humans = TD5_MAX_VIEWPORTS;
 
     if (s_current_screen == TD5_SCREEN_QUICK_RACE) {
-        /* 2 humans -> split (orientation from the 2P-options shadow, default
-         * horizontal); 1 human -> single viewport. */
-        g_td5.split_screen_mode = (eff_humans >= 2) ? (s_split_screen_mode + 1) : 0;
-        if (g_td5.num_human_players > 2) {
-            TD5_LOG_W(LOG_TAG,
-                      "QuickRace: %d humans requested but engine renders only 2 split views; "
-                      "slots 2..%d run as AI until N-way split lands",
-                      g_td5.num_human_players, g_td5.num_human_players - 1);
-        }
+        /* >=2 humans -> split. For exactly 2 the 2P-options shadow picks
+         * top/bottom vs left/right; for 3+ the viewport ladder in
+         * td5_game_init_viewport_layout decides the grid (3=strips, 4=2x2, ...). */
+        if (eff_humans >= 2)
+            g_td5.split_screen_mode = (eff_humans == 2) ? (s_split_screen_mode + 1) : 1;
+        else
+            g_td5.split_screen_mode = 0;
     } else {
         g_td5.split_screen_mode = (s_two_player_mode != 0) ? (s_split_screen_mode + 1) : 0;
     }
@@ -2265,13 +2270,26 @@ void td5_frontend_auto_race_setup(void) {
      * the schedule's non-QuickRace path defaults to 1 human + 5 AI; honor an
      * explicit [Game] DefaultOpponents=N here so AutoRace can exercise the
      * reduced-field spawn path. -1 = leave the full grid. */
-    if (g_td5.ini.default_opponents >= 0) {
-        int opp = g_td5.ini.default_opponents;
-        if (opp > TD5_MAX_RACER_SLOTS - 1) opp = TD5_MAX_RACER_SLOTS - 1;
-        g_td5.num_human_players = 1;
+    /* AutoRace player/opponent override (test harness for N-way split, since
+     * AutoRace skips the Quick Race menu). DefaultPlayers sets the local human
+     * count (>=2 enables split); DefaultOpponents sets the AI count. Either at
+     * its sentinel leaves the schedule's value. */
+    if (g_td5.ini.default_players >= 1 || g_td5.ini.default_opponents >= 0) {
+        int humans = (g_td5.ini.default_players >= 1) ? g_td5.ini.default_players
+                                                      : g_td5.num_human_players;
+        if (humans < 1) humans = 1;
+        if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
+        int opp = (g_td5.ini.default_opponents >= 0) ? g_td5.ini.default_opponents
+                                                     : g_td5.num_ai_opponents;
+        if (opp < 0) opp = 0;
+        if (opp > TD5_MAX_RACER_SLOTS - humans) opp = TD5_MAX_RACER_SLOTS - humans;
+        g_td5.num_human_players = humans;
         g_td5.num_ai_opponents  = opp;
-        TD5_LOG_I(LOG_TAG, "AutoRace: DefaultOpponents override -> %d racers total (1 human + %d AI)",
-                  1 + opp, opp);
+        if (humans >= 2 && g_td5.split_screen_mode == 0)
+            g_td5.split_screen_mode = 1;   /* enable N-way split for the harness */
+        TD5_LOG_I(LOG_TAG,
+                  "AutoRace: player override -> %d humans + %d AI (split=%d)",
+                  humans, opp, g_td5.split_screen_mode);
     }
 
     /* Enumerate display modes — original quickrace hook calls
@@ -8023,7 +8041,8 @@ static void frontend_quickrace_cycle_track(int delta) {
  * (frontend_render_quick_race_overlay), so no button labels are touched here. */
 static void frontend_quickrace_clamp_counts(void) {
     if (s_num_human_players < 1) s_num_human_players = 1;
-    if (s_num_human_players > TD5_MAX_RACER_SLOTS) s_num_human_players = TD5_MAX_RACER_SLOTS;
+    /* [PORT ENHANCEMENT] up to TD5_MAX_HUMAN_PLAYERS (9) local split-screen humans. */
+    if (s_num_human_players > TD5_MAX_HUMAN_PLAYERS) s_num_human_players = TD5_MAX_HUMAN_PLAYERS;
     int opp_max = TD5_MAX_RACER_SLOTS - s_num_human_players;
     if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
     if (s_num_ai_opponents > opp_max) s_num_ai_opponents = opp_max;

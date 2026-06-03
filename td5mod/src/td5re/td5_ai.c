@@ -184,14 +184,24 @@ int32_t g_rb_ahead_range;        /* 0x473DA8 */
  * throttle comes ONLY from this seed (the rubber-band recompute @0x00432D60
  * covers slots 0-5 only). The prior port table zeroed index 9, so the cop
  * steered toward the player but never accelerated. [FIX 2026-06-01 cops-traffic] */
-int32_t g_default_throttle[14] = {
+int32_t g_default_throttle[TD5_MAX_TOTAL_ACTORS] = {
+    /* 0-5: faithful original racer seeds [CONFIRMED @ 0x473D64] */
     0x0100, 0x0100, 0x0140, 0x0118, 0x0122, 0x0140,
-    0, 0, 0, 0x2bc, 0, 0, 0, 0
+    /* 6-8: traffic in the legacy layout (0); racer seeds for big fields */
+    0x0140, 0x0140, 0x0140,
+    /* 9: special-encounter cop seed (0x2bc) in the legacy 6+6 layout — MUST
+     * stay for the faithful cop chase; harmless as a big-field racer seed
+     * (rubber-band recompute @0x432D60 overwrites AI throttle each tick) */
+    0x2bc,
+    /* 10-15: racer seeds for >6-racer split-screen fields */
+    0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140,
+    /* 16-21: traffic slots (no AI race throttle) */
+    0, 0, 0, 0, 0, 0
 };
 
 /* Live throttle table (0x473D2C) -- copied from default each tick,
  * then rubber-band-modified per slot */
-int32_t g_live_throttle[14];
+int32_t g_live_throttle[TD5_MAX_TOTAL_ACTORS];
 
 /* Per-actor throttle bias output consumed by route threshold */
 /* Pool11 pilot: exposed for td5_pilot_trace_00432D60.c. */
@@ -622,7 +632,7 @@ void td5_ai_correct_spawn_heading(int slot) {
     int32_t rb, route_heading;
     char *actor;
 
-    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS || !g_route_state_base)
+    if (slot < 0 || slot >= g_traffic_slot_base || !g_route_state_base)
         return;
 
     rs = route_state(slot);
@@ -1018,7 +1028,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
          * route data IS loaded, the gated block below handles the writeback
          * via the same lines, so behaviour is preserved. */
         {
-            int slot_is_racer = (slot < TD5_MAX_RACER_SLOTS);
+            int slot_is_racer = (slot < g_traffic_slot_base);
             int slot_is_encounter_9 =
                 (slot == 9 && g_encounter_tracked_handle != -1);
             int racer_or_encounter = slot_is_racer || slot_is_encounter_9;
@@ -1135,7 +1145,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
      * table indexing, and V2V eligibility -- causing the regression in
      * memory todo_traffic_through_ground_no_motion_no_collision_2026-05-16.md
      * (traffic vehicles spawning underground, idle, no collision). */
-    if (slot < TD5_MAX_RACER_SLOTS) {
+    if (slot < g_traffic_slot_base) {
         int span_raw_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_norm_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
 
@@ -1255,7 +1265,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         {
             const uint8_t *self_table =
                 (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-            int slot_is_racer = (slot < TD5_MAX_RACER_SLOTS);
+            int slot_is_racer = (slot < g_traffic_slot_base);
             int slot_is_encounter_9 =
                 (slot == 9 && g_encounter_tracked_handle != -1);
             int racer_or_encounter = slot_is_racer || slot_is_encounter_9;
@@ -1325,7 +1335,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
 void td5_ai_tick(void) {
     td5_ai_compute_rubber_band();
     if ((g_ai_frame_counter % 60u) == 0u) {
-        int racer_count = TD5_MAX_RACER_SLOTS;
+        int racer_count = g_traffic_slot_base;
         if (g_active_actor_count < racer_count)
             racer_count = g_active_actor_count;
         for (int i = 0; i < racer_count; i++) {
@@ -1384,7 +1394,7 @@ void td5_ai_compute_rubber_band(void) {
     td5_pilot_emit_00432D60_enter();
 
     /* [0x00432D6B-7A] MOVSD.REP ECX=14: unconditional default→live copy */
-    memcpy(g_live_throttle, g_default_throttle, 14 * sizeof(int32_t));
+    memcpy(g_live_throttle, g_default_throttle, sizeof(g_live_throttle));
 
     /* [0x00432D60-7C] TEST g_networkRaceActive; JZ → rubber-band loop.
      * Fall-through here = network ACTIVE → write 0x100 bias for AI slots. */
@@ -1392,7 +1402,7 @@ void td5_ai_compute_rubber_band(void) {
         /* [0x00432D7E-DC2] network-active branch.
          * Original re-reads g_racerCount each iter (CMP ESI,0x6 with ESI cached);
          * effective cap = min(g_racerCount, 6). */
-        racer_count = TD5_MAX_RACER_SLOTS;
+        racer_count = g_traffic_slot_base;
         if (g_active_actor_count < racer_count)
             racer_count = g_active_actor_count;
         for (i = 0; i < racer_count; i++) {
@@ -1426,7 +1436,7 @@ void td5_ai_compute_rubber_band(void) {
     /* [0x00432DD5-E4B] g_racerCount re-read at loop top each iteration in
      * original. We cache here — the function is single-threaded with no
      * callees, so g_racerCount cannot change within this call. Equivalent. */
-    racer_count = TD5_MAX_RACER_SLOTS;
+    racer_count = g_traffic_slot_base;
     if (g_active_actor_count < racer_count)
         racer_count = g_active_actor_count;
 
@@ -1533,10 +1543,17 @@ void td5_ai_init_race_actor_runtime(void) {
     /* --- Active actor count --- */
     if (is_time_trial) {
         g_active_actor_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
+    } else if (g_traffic_slot_base > TD5_LEGACY_RACE_SLOTS) {
+        /* [PORT ENHANCEMENT] big split-screen field: racers only (humans+AI);
+         * traffic was forced off in InitRace, so no traffic actors exist. */
+        int total = g_td5.num_human_players + g_td5.num_ai_opponents;
+        if (total < 1) total = 1;
+        if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
+        g_active_actor_count = total;
     } else if (has_traffic) {
-        g_active_actor_count = 12;
+        g_active_actor_count = TD5_LEGACY_RACE_SLOTS + TD5_MAX_TRAFFIC_SLOTS;  /* 12 */
     } else {
-        g_active_actor_count = 6;
+        g_active_actor_count = TD5_LEGACY_RACE_SLOTS;  /* 6 */
     }
     g_td5.total_actor_count = g_active_actor_count;
     racer_count = is_time_trial
@@ -1567,7 +1584,7 @@ void td5_ai_init_race_actor_runtime(void) {
          * g_actor_route_steer_bias[] memset to 0 and only the rubber-band (0-5)
          * populated it, starving slot 9. [FIX 2026-06-01 cops-traffic] */
         g_actor_route_steer_bias[i] = g_default_throttle[i];
-        if (g_default_throttle[i] != 0 && i >= TD5_MAX_RACER_SLOTS) {
+        if (g_default_throttle[i] != 0 && i >= g_traffic_slot_base) {
             TD5_LOG_I(LOG_TAG,
                       "init_actor_runtime: encounter-cop slot=%d seeded "
                       "route_steer_bias=live_throttle=%d (0x%X)",
@@ -1662,12 +1679,16 @@ void td5_ai_init_race_actor_runtime(void) {
                   "player_is_ai=1 -> AI slot_state[0]=0 (autopilot active)");
     }
     if (g_td5.split_screen_mode > 0 && racer_count > 1) {
-        g_slot_state[1] = 1;
+        /* [PORT ENHANCEMENT] mark slots 1..num_human_players-1 as human (N-way). */
+        int humans = g_td5.num_human_players;
+        if (humans > TD5_MAX_VIEWPORTS) humans = TD5_MAX_VIEWPORTS;
+        for (int k = 1; k < humans && k < g_traffic_slot_base; k++)
+            g_slot_state[k] = 1;
     }
     /* Wanted mode (cop chase): slots 2-5 are inactive (no AI, no physics dispatch).
      * Mirrors gRaceSlotStateTable init at 0x42ABF8 for non-zero game types. */
     if (g_td5.wanted_mode_enabled) {
-        for (int k = 2; k < TD5_MAX_RACER_SLOTS; k++)
+        for (int k = 2; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "wanted_mode: g_slot_state[2..5] = 3 (inactive)");
     }
@@ -1678,7 +1699,7 @@ void td5_ai_init_race_actor_runtime(void) {
      * those slots have no spawned actor, so the drive command lands on
      * uninitialized memory. */
     if (g_td5.drag_race_enabled) {
-        for (int k = 2; k < TD5_MAX_RACER_SLOTS; k++)
+        for (int k = 2; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "drag_race: g_slot_state[2..5] = 3 (inactive)");
     }
@@ -1686,7 +1707,7 @@ void td5_ai_init_race_actor_runtime(void) {
     /* Solo mode synth (Time Trial mapped to gt=0 — see ConfigureGameTypeFlags
      * case 7): slots 1..5 inactive. Mirrors td5_game.c:1215-1222. */
     if (g_td5.solo_mode_synth && g_td5.split_screen_mode == 0) {
-        for (int k = 1; k < TD5_MAX_RACER_SLOTS; k++)
+        for (int k = 1; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "solo_mode_synth: g_slot_state[1..5] = 3 (inactive)");
     }
@@ -1704,7 +1725,7 @@ void td5_ai_init_race_actor_runtime(void) {
         int total = g_td5.num_human_players + g_td5.num_ai_opponents;
         if (total < 1) total = 1;
         if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
-        for (int k = total; k < TD5_MAX_RACER_SLOTS; k++)
+        for (int k = total; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "single-race: g_slot_state[%d..5] = 3 (humans=%d opponents=%d)",
                   total, g_td5.num_human_players, g_td5.num_ai_opponents);
@@ -1923,7 +1944,7 @@ void td5_ai_init_race_actor_runtime(void) {
     g_encounter_enabled = g_td5.special_encounter_enabled;
 
     /* Initialize traffic actors from queue if traffic is enabled */
-    if (g_active_actor_count > TD5_MAX_RACER_SLOTS) {
+    if (g_active_actor_count > g_traffic_slot_base) {
         td5_ai_init_traffic_actors();
     }
 
@@ -4769,7 +4790,7 @@ void td5_ai_init_traffic_actors(void) {
 
     /* 0x00435940-50: gate on g_racerCount > 6 */
     racer_count = g_active_actor_count;
-    if (racer_count <= 6)
+    if (racer_count <= g_traffic_slot_base)
         return;
 
     qp = g_traffic_queue_ptr ? g_traffic_queue_ptr : g_traffic_queue_base;
@@ -4793,12 +4814,15 @@ void td5_ai_init_traffic_actors(void) {
                   td5_track_get_span_count());
     }
 
-    /* 0x00435975-7e: cap iteration at min(racer_count, 0xc) */
-    racer_cap = (racer_count > 12) ? 12 : racer_count;
+    /* 0x00435975-7e: cap iteration at min(racer_count, traffic_base+6 traffic).
+     * [PORT] traffic base is g_traffic_slot_base (6 legacy / 16 big fields). */
+    racer_cap = (racer_count > g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS)
+                ? (g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS) : racer_count;
 
-    /* Initial loop state (0x4359 5b/68/63/70) */
-    local_18 = TD5_MAX_RACER_SLOTS;   /* 6 */
-    local_c  = 0x28;                  /* 6*4 + 0x10 */
+    /* Initial loop state (0x4359 5b/68/63/70) — traffic actors start right
+     * after the racer slots (g_traffic_slot_base: 6 legacy, 16 big fields). */
+    local_18 = g_traffic_slot_base;             /* 6 legacy */
+    local_c  = g_traffic_slot_base * 4 + 0x10;  /* 0x28 legacy */
 
     while (local_18 < racer_cap) {
         char *a = actor_ptr(local_18);
@@ -6310,7 +6334,7 @@ void td5_ai_update_race_actors(void) {
 
     /* --- Step 2: Update racers (slots 0 through min(count, 6)) --- */
     {
-        int racer_count = TD5_MAX_RACER_SLOTS;
+        int racer_count = g_traffic_slot_base;
         if (g_active_actor_count < racer_count)
             racer_count = g_active_actor_count;
 
@@ -6320,12 +6344,12 @@ void td5_ai_update_race_actors(void) {
     }
 
     /* --- Step 3: Update traffic (slots 6-11) if active --- */
-    if (g_active_actor_count > TD5_MAX_RACER_SLOTS) {
+    if (g_active_actor_count > g_traffic_slot_base) {
         int traffic_max = g_active_actor_count;
         if (traffic_max > TD5_MAX_TOTAL_ACTORS)
             traffic_max = TD5_MAX_TOTAL_ACTORS;
 
-        for (i = TD5_MAX_RACER_SLOTS; i < traffic_max; i++) {
+        for (i = g_traffic_slot_base; i < traffic_max; i++) {
             ai_update_single_traffic(i);
         }
 
@@ -6467,7 +6491,7 @@ void td5_ai_update_actor(int slot) {
     if (slot < 0 || slot >= g_active_actor_count)
         return;
 
-    if (slot < TD5_MAX_RACER_SLOTS) {
+    if (slot < g_traffic_slot_base) {
         ai_update_single_racer(slot);
     } else {
         ai_update_single_traffic(slot);

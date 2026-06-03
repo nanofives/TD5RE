@@ -145,7 +145,7 @@ static int32_t s_rear_view[TD5_MAX_RACER_SLOTS];
  * 0 = keyboard, 1+ = joystick index + 1.
  * ======================================================================== */
 
-static int s_input_source[2] = { 0, 0 };
+static int s_input_source[TD5_MAX_HUMAN_PLAYERS] = { 0 };
 
 /** Number of active human players (1 or 2). */
 static int s_active_players = 1;
@@ -270,17 +270,17 @@ void td5_input_tick(void)
  * Setters for state driven by other modules
  * ======================================================================== */
 
-void td5_input_set_active_players(int n)       { s_active_players = clamp_i(n, 1, 2); }
+void td5_input_set_active_players(int n)       { s_active_players = clamp_i(n, 1, TD5_MAX_HUMAN_PLAYERS); }
 void td5_input_set_input_source(int p, int s)
 {
-    if (p < 0 || p >= 2) return;
+    if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return;
     s_input_source[p] = s;
     /* Activate the device so the poll path actually reads it: source 0 releases
      * this slot's joystick (keyboard), source >=1 creates joystick (1-based
      * device index). Without this the chosen source was a dead flag. */
     td5_plat_input_set_device(p, s);
 }
-int  td5_input_get_input_source(int p)          { return (p >= 0 && p < 2) ? s_input_source[p] : 0; }
+int  td5_input_get_input_source(int p)          { return (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) ? s_input_source[p] : 0; }
 void td5_input_set_joystick_bindings(int player, const int32_t *bindings, int count)
 {
     if (player < 0 || player >= 2) return;
@@ -1947,7 +1947,7 @@ const char *td5_input_get_device_name(int index)
 
 int td5_input_get_device_type(int player)
 {
-    if (player < 0 || player >= 2) return 0;
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
     int source = s_input_source[player];
     if (source == 0) return 0;  /* keyboard */
     /* source is 1-based device index for joysticks */

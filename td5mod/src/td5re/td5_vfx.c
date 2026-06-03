@@ -225,9 +225,9 @@ static int32_t s_smoke_vel_y = 0x600;
  * ======================================================================== */
 
 /* --- Race particle system --- */
-static uint8_t  s_particle_banks[2][TD5_VFX_PARTICLE_BANK_SIZE]; /* 2 views */
-static uint8_t  s_sprite_render_flags[2][TD5_VFX_SPRITE_BATCH_COUNT];
-static VfxSpriteQuad s_sprite_batches[2 * TD5_VFX_SPRITE_BATCH_COUNT];
+static uint8_t  s_particle_banks[TD5_MAX_VIEWPORTS][TD5_VFX_PARTICLE_BANK_SIZE]; /* per-view (PORT: N-way) */
+static uint8_t  s_sprite_render_flags[TD5_MAX_VIEWPORTS][TD5_VFX_SPRITE_BATCH_COUNT];
+static VfxSpriteQuad s_sprite_batches[TD5_MAX_VIEWPORTS * TD5_VFX_SPRITE_BATCH_COUNT];
 static int      s_current_view_index;
 static unsigned int s_vfx_debug_frame;
 
@@ -246,12 +246,12 @@ static float    s_smoke_page;
 static float    s_smoke_variant_uv[8][5]; /* u0, v0, width, height, page */
 
 /* --- Weather overlay --- */
-static VfxWeatherParticle *s_weather_buf[2];   /* per-view particle buffers */
+static VfxWeatherParticle *s_weather_buf[TD5_MAX_VIEWPORTS];   /* per-view particle buffers */
 static int      s_weather_type;                /* 0=rain, 1=snow(cut), 2=clear */
-static int      s_weather_target_density[2];   /* target particle count per view */
-static int      s_weather_active_count[2];     /* current active count per view */
-static float    s_weather_prev_cam[2][3];      /* previous camera position per view */
-static float    s_weather_prev_budget[2];      /* previous sim_budget per view */
+static int      s_weather_target_density[TD5_MAX_VIEWPORTS];   /* target particle count per view */
+static int      s_weather_active_count[TD5_MAX_VIEWPORTS];     /* current active count per view */
+static float    s_weather_prev_cam[TD5_MAX_VIEWPORTS][3];      /* previous camera position per view */
+static float    s_weather_prev_budget[TD5_MAX_VIEWPORTS];      /* previous sim_budget per view */
 static float    s_weather_sprite_page;         /* texture page for weather sprite */
 
 /* Weather sprite UV (rain/snow) */
@@ -682,7 +682,7 @@ void td5_vfx_project_particles(int view_index) {
     float cam_x, cam_y, cam_z;
     td5_camera_get_position(&cam_x, &cam_y, &cam_z);
 
-    uint8_t *bank = s_particle_banks[view_index & 1];
+    uint8_t *bank = s_particle_banks[(view_index >= 0 && view_index < TD5_MAX_VIEWPORTS) ? view_index : 0];
 
     for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
         uint8_t *slot = bank + i * TD5_VFX_PARTICLE_SLOT_STRIDE;

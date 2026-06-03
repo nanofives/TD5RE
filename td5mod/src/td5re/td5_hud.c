@@ -128,7 +128,7 @@ const int g_pause_page_sizes[8] = { 256, 0, 0, 0, 0, 0, 0, 0 };
  * Module-local state
  * ======================================================================== */
 
-#define MAX_HUD_VIEWS       2
+#define MAX_HUD_VIEWS       TD5_MAX_VIEWPORTS   /* PORT: N-way split (was 2) */
 #define SPEEDO_QUAD_OFF     0x04       /* offset into view storage for speedo */
 #define NEEDLE_QUAD_OFF     0x39C      /* needle quad offset */
 #define GEAR_QUAD_OFF       0x0BC      /* gear indicator offset */
@@ -1204,13 +1204,17 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
     s_hud_string_table = g_position_strings + string_table_offset * 13;
     s_is_first_player = (string_table_offset == 0) ? 1 : 0;
 
-    s_wrong_way_counter[0] = 0;
-    s_wrong_way_counter[1] = 0;
+    for (int v = 0; v < MAX_HUD_VIEWS; v++)
+        s_wrong_way_counter[v] = 0;
 
-    /* Allocate per-view HUD primitive storage */
-    s_hud_prim_storage = (uint8_t *)td5_game_heap_alloc(TD5_HUD_VIEW_STRIDE);
-    s_hud_flags[0] = (uint32_t *)s_hud_prim_storage;
-    s_hud_flags[1] = (uint32_t *)(s_hud_prim_storage + 0x894); /* offset 0x229*4 */
+    /* Allocate per-view HUD primitive storage [PORT ENHANCEMENT: N-way split].
+     * Each view's flag word + quad block lives at +v*0x894 (orig +0x229*4).
+     * Allocate room for every pane so views >=2 don't deref an uninitialised
+     * flag pointer (the legacy code only set s_hud_flags[0]/[1]). */
+    s_hud_prim_storage = (uint8_t *)td5_game_heap_alloc(
+        (size_t)MAX_HUD_VIEWS * 0x894 + TD5_HUD_VIEW_STRIDE);
+    for (int v = 0; v < MAX_HUD_VIEWS; v++)
+        s_hud_flags[v] = (uint32_t *)(s_hud_prim_storage + (size_t)v * 0x894);
 
     /* Set visibility bitmask based on race mode */
     if (race_mode == 0) {
@@ -1382,9 +1386,19 @@ void td5_hud_init_layout(int viewport_mode)
      * before submitting to hardware.  Our source port submits vertices
      * directly to D3D11 without that centering step, so all HUD positions
      * must be in pixel-space (vp_left = 0, vp_right = width). */
-    if (viewport_mode == 0) {
-        /* Single full-screen view */
-        s_view_count = 1;
+    /* [PORT ENHANCEMENT] N-way HUD layout. Views 1-2 reproduce the legacy
+     * full / half-screen layouts byte-for-byte (viewport_mode 0/1/2). Views
+     * 3-9 mirror the 3D viewport ladder in td5_game_init_viewport_layout
+     * (3 = horizontal strips; 4=2x2, 5-6=3x2, 7-9=3x3) with a uniform per-pane
+     * scale so HUD elements keep their aspect inside each pane. Driven by
+     * g_td5.viewport_count (the live pane count), not just viewport_mode. */
+    int views = g_td5.viewport_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+    s_view_count = views;
+
+    if (views == 1) {
+        /* Single full-screen view (legacy viewport_mode 0) */
         s_view_layout[0].scale_x  = s_scale_x;
         s_view_layout[0].scale_y  = s_scale_y;
         s_view_layout[0].vp_left   = 0.0f;
@@ -1392,19 +1406,16 @@ void td5_hud_init_layout(int viewport_mode)
         s_view_layout[0].vp_top    = 0.0f;
         s_view_layout[0].vp_bottom = g_render_height_f;
 
-    } else if (viewport_mode == 1) {
-        /* Left/right split: each half-screen view */
+    } else if (views == 2 && viewport_mode == 1) {
+        /* Left/right split (legacy viewport_mode 1) */
         s_scale_x *= 0.5f;
         s_scale_y *= 0.5f;
-        s_view_count = 2;
-        /* View 0: left half */
         s_view_layout[0].scale_x  = s_scale_x;
         s_view_layout[0].scale_y  = s_scale_y;
         s_view_layout[0].vp_left   = 0.0f;
         s_view_layout[0].vp_right  = g_render_width_f * 0.5f;
         s_view_layout[0].vp_top    = 0.0f;
         s_view_layout[0].vp_bottom = g_render_height_f;
-        /* View 1: right half */
         s_view_layout[1].scale_x  = s_scale_x;
         s_view_layout[1].scale_y  = s_scale_y;
         s_view_layout[1].vp_left   = g_render_width_f * 0.5f;
@@ -1412,25 +1423,45 @@ void td5_hud_init_layout(int viewport_mode)
         s_view_layout[1].vp_top    = 0.0f;
         s_view_layout[1].vp_bottom = g_render_height_f;
 
-    } else {
-        /* Top/bottom split: each half-screen view */
+    } else if (views == 2) {
+        /* Top/bottom split (legacy viewport_mode 2 / default) */
         s_scale_x *= 0.5f;
         s_scale_y *= 0.5f;
-        s_view_count = 2;
-        /* View 0: top half */
         s_view_layout[0].scale_x  = s_scale_x;
         s_view_layout[0].scale_y  = s_scale_y;
         s_view_layout[0].vp_left   = 0.0f;
         s_view_layout[0].vp_right  = g_render_width_f;
         s_view_layout[0].vp_top    = 0.0f;
         s_view_layout[0].vp_bottom = g_render_height_f * 0.5f;
-        /* View 1: bottom half */
         s_view_layout[1].scale_x  = s_scale_x;
         s_view_layout[1].scale_y  = s_scale_y;
         s_view_layout[1].vp_left   = 0.0f;
         s_view_layout[1].vp_right  = g_render_width_f;
         s_view_layout[1].vp_top    = g_render_height_f * 0.5f;
         s_view_layout[1].vp_bottom = g_render_height_f;
+
+    } else {
+        /* N-way grid (>=3): mirror the game's viewport ladder. */
+        int cols, rows;
+        if (views == 3) { cols = 1; rows = 3; }            /* 3 horizontal strips */
+        else { cols = (views <= 4) ? 2 : 3; rows = (views + cols - 1) / cols; }
+        float pane_w = g_render_width_f  / (float)cols;
+        float pane_h = g_render_height_f / (float)rows;
+        float fx = pane_w / g_render_width_f;
+        float fy = pane_h / g_render_height_f;
+        float sfrac = (fx < fy) ? fx : fy;   /* uniform fit, aspect-correct */
+        s_scale_x *= sfrac;
+        s_scale_y *= sfrac;
+        for (int v = 0; v < views; v++) {
+            int col = v % cols;
+            int row = v / cols;
+            s_view_layout[v].scale_x  = s_scale_x;
+            s_view_layout[v].scale_y  = s_scale_y;
+            s_view_layout[v].vp_left   = (float)col       * pane_w;
+            s_view_layout[v].vp_right  = (float)(col + 1) * pane_w;
+            s_view_layout[v].vp_top    = (float)row       * pane_h;
+            s_view_layout[v].vp_bottom = (float)(row + 1) * pane_h;
+        }
     }
 
     /* Compute derived viewport values for each view.
@@ -3600,7 +3631,7 @@ void td5_hud_render_minimap(int actor_slot)
      * at slots TD5_MAX_RACER_SLOTS..total-1; mesh==NULL is the "slot
      * inactive" indicator (matches the render path at td5_render.c:2185). */
     int total_actors = td5_game_get_total_actor_count();
-    for (int t = TD5_MAX_RACER_SLOTS; t < total_actors && t < TD5_MAX_TOTAL_ACTORS; t++) {
+    for (int t = g_traffic_slot_base; t < total_actors && t < TD5_MAX_TOTAL_ACTORS; t++) {
         if (!td5_render_get_vehicle_mesh(t))
             continue;
         int16_t traffic_span = actor_span_index(t);
