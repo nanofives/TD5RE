@@ -956,10 +956,10 @@ Both are now enforced through the PID the launch harness wrote to `${WORKTREE_DI
   rm -f .td5re_test_pid
   ```
 
-- **Screenshot only your own window.** Pass the PID — never `-Proc`/`-TitleLike` — so capture foregrounds and grabs THIS session's race. `capture_window.ps1` now **refuses** an ambiguous name/title match (more than one td5re window) and tells you to pass `-ProcessId`, so a name-based capture can no longer silently grab a sibling's window:
+- **Screenshot only your own window.** Pass the PID — never `-Proc`/`-TitleLike` — so capture foregrounds and grabs THIS session's race. `capture_window.ps1` now **refuses** an ambiguous name/title match (more than one td5re window) and tells you to pass `-ProcessId`, so a name-based capture can no longer silently grab a sibling's window. `capture_window.ps1` lives ONLY in the main tree (`tools/` is gitignored → it is NOT checked out into worktrees), so call it by its absolute main-tree path — it's host-level (screenshots by PID), so running main's copy from a worktree is correct:
   ```bash
   cd "${WORKTREE_DIR}"
-  pwsh tools/capture_window.ps1 -ProcessId "$(cat .td5re_test_pid)" -Out "shot_${SESSION_TAG}.png"
+  pwsh "C:/Users/maria/Desktop/Proyectos/TD5RE/tools/capture_window.ps1" -ProcessId "$(cat .td5re_test_pid)" -Out "shot_${SESSION_TAG}.png"
   ```
 
 - **Visual-verify variant (launch → screenshot → kill).** The auto-close harness above closes the window after its `Start-Sleep`, so to grab a frame you launch **detached** (no auto-close), record the pid, capture by pid, then kill that pid:
@@ -970,7 +970,7 @@ Both are now enforced through the PID the launch harness wrote to `${WORKTREE_DI
     Set-Content -Path '.td5re_test_pid' -Value \$proc.Id
     Write-Host \"PID=\$(\$proc.Id)\""
   sleep 12   # let it reach the frame you want
-  pwsh tools/capture_window.ps1 -ProcessId "$(cat .td5re_test_pid)" -Out "shot_${SESSION_TAG}.png"
+  pwsh "C:/Users/maria/Desktop/Proyectos/TD5RE/tools/capture_window.ps1" -ProcessId "$(cat .td5re_test_pid)" -Out "shot_${SESSION_TAG}.png"
   powershell.exe -Command "Stop-Process -Id $(cat .td5re_test_pid) -ErrorAction SilentlyContinue"
   rm -f .td5re_test_pid
   ```
