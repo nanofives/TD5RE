@@ -917,20 +917,65 @@ WIN_TITLE="TD5RE [${SESSION_TAG}] ${FIX_DESC}"
 
 cd "${WORKTREE_DIR}" && TD5RE_WINDOW_TITLE="${WIN_TITLE}" powershell.exe -Command "
 \$env:TD5RE_WINDOW_TITLE = '${WIN_TITLE}'
-Start-Process -FilePath '.\td5re.exe' -PassThru | ForEach-Object {
-    \$proc = \$_
-    Start-Sleep -Seconds 10
-    \$proc.CloseMainWindow() | Out-Null
-    Start-Sleep -Seconds 2
-    if (!\$proc.HasExited) { \$proc.Kill() }
-    Write-Host 'Done - process closed'
-}
+\$proc = Start-Process -FilePath '.\td5re.exe' -PassThru
+# Record OUR pid in a worktree-scoped file (never a shared /tmp name that a
+# parallel session would clobber). Everything that kills or screenshots a
+# td5re must target THIS pid — never the process name. See 'PID ownership' below.
+Set-Content -Path '.td5re_test_pid' -Value \$proc.Id
+Write-Host \"Launched td5re.exe PID=\$(\$proc.Id) (pid file: .td5re_test_pid)\"
+Start-Sleep -Seconds 10
+\$proc.CloseMainWindow() | Out-Null
+Start-Sleep -Seconds 2
+if (!\$proc.HasExited) { \$proc.Kill() }   # scoped to OUR \$proc only — NEVER Stop-Process -Name td5re
+Remove-Item '.td5re_test_pid' -ErrorAction SilentlyContinue
+Write-Host 'Done - process closed'
 " 2>&1
 ```
 
 If `${WIN_TITLE}` contains single quotes, escape them for the PowerShell string (double them up: `'` → `''`). Keep the title under ~180 chars — Windows truncates beyond that anyway.
 
 Tune the inner `Start-Sleep` to your scenario — ~10s for grid/countdown/spawn/early-drive checks; **60+s** for slope/ramp/jump features further into the track (the first ~10s is always grid + countdown).
+
+### PID ownership — never touch another session's td5re
+
+Multiple `/fix` sessions run `td5re.exe` simultaneously. Two operations corrupt sibling sessions when they target the process by **name** or by **"whatever window is up"** instead of the exact PID this session launched:
+
+1. **Killing.** A name-based `Stop-Process -Name td5re` / `taskkill /IM td5re*` kills **every** session's exe — including races other sessions are mid-capture on. This has broken manual drive-tests twice (`feedback_fix_parallel_session_hazards_2026-06-02.md`). **Never blanket-kill by name.**
+2. **Screenshots.** `capture_window.ps1 -Proc td5re` would grab the *first* td5re Windows enumerates — likely a sibling's window — and foreground/screenshot the wrong race.
+
+Both are now enforced through the PID the launch harness wrote to `${WORKTREE_DIR}/.td5re_test_pid`:
+
+- **Kill only your own PID.** The harness above already scopes `CloseMainWindow()`/`Kill()` to the `$proc` it started and deletes the pid file on exit. To reap an orphan left by a *previous turn of THIS session*, read the pid and kill only that — with a defence-in-depth check that the process's exe path is under your worktree (a sibling's td5re has a different `.Path`):
+  ```bash
+  cd "${WORKTREE_DIR}"
+  PID=$(cat .td5re_test_pid 2>/dev/null)
+  [ -n "$PID" ] && powershell.exe -Command "
+    \$p = Get-Process -Id $PID -ErrorAction SilentlyContinue
+    if (\$p -and \$p.Path -like '*${SESSION_TAG}*') { \$p.Kill(); Write-Host 'killed own pid $PID' }
+    else { Write-Host 'pid $PID is not ours (path mismatch) — leaving it alone' }"
+  rm -f .td5re_test_pid
+  ```
+
+- **Screenshot only your own window.** Pass the PID — never `-Proc`/`-TitleLike` — so capture foregrounds and grabs THIS session's race. `capture_window.ps1` now **refuses** an ambiguous name/title match (more than one td5re window) and tells you to pass `-ProcessId`, so a name-based capture can no longer silently grab a sibling's window:
+  ```bash
+  cd "${WORKTREE_DIR}"
+  pwsh tools/capture_window.ps1 -ProcessId "$(cat .td5re_test_pid)" -Out "shot_${SESSION_TAG}.png"
+  ```
+
+- **Visual-verify variant (launch → screenshot → kill).** The auto-close harness above closes the window after its `Start-Sleep`, so to grab a frame you launch **detached** (no auto-close), record the pid, capture by pid, then kill that pid:
+  ```bash
+  cd "${WORKTREE_DIR}"
+  TD5RE_WINDOW_TITLE="${WIN_TITLE}" powershell.exe -Command "
+    \$proc = Start-Process -FilePath '.\td5re.exe' -PassThru
+    Set-Content -Path '.td5re_test_pid' -Value \$proc.Id
+    Write-Host \"PID=\$(\$proc.Id)\""
+  sleep 12   # let it reach the frame you want
+  pwsh tools/capture_window.ps1 -ProcessId "$(cat .td5re_test_pid)" -Out "shot_${SESSION_TAG}.png"
+  powershell.exe -Command "Stop-Process -Id $(cat .td5re_test_pid) -ErrorAction SilentlyContinue"
+  rm -f .td5re_test_pid
+  ```
+
+(For a *user-driven* manual play session that must survive the whole time, copy `td5re.exe`→`manual_drive.exe` and launch that — a name not starting with `td5re` is invisible to any stray name-based kill, per `feedback_fix_parallel_session_hazards_2026-06-02.md`.)
 
 ### Runtime asset + toolchain setup (first build inside a fresh worktree)
 
@@ -1168,13 +1213,13 @@ for entry in "0:moscow" "5:newcastle" "${RANDOM_IDX}:${RANDOM_NAME}"; do
     cd "${WORKTREE_DIR}"
     rm -f log/race_trace.csv
     TD5RE_WINDOW_TITLE="TD5RE [${SESSION_TAG}] ${TRACK_NAME}_track${TRACK_N}" powershell.exe -Command "
-    Start-Process -FilePath '.\td5re.exe' -PassThru | ForEach-Object {
-        \$proc = \$_
-        Start-Sleep -Seconds 20   # 20s covers countdown + ~14s of race
-        \$proc.CloseMainWindow() | Out-Null
-        Start-Sleep -Seconds 2
-        if (!\$proc.HasExited) { \$proc.Kill() }
-    }"
+    \$proc = Start-Process -FilePath '.\td5re.exe' -PassThru
+    Set-Content -Path '.td5re_test_pid' -Value \$proc.Id   # OUR pid; kill scoped to it, NEVER by name
+    Start-Sleep -Seconds 20   # 20s covers countdown + ~14s of race
+    \$proc.CloseMainWindow() | Out-Null
+    Start-Sleep -Seconds 2
+    if (!\$proc.HasExited) { \$proc.Kill() }
+    Remove-Item '.td5re_test_pid' -ErrorAction SilentlyContinue"
     cp log/race_trace.csv "${BUNDLE_DIR}/fix_track${TRACK_N}_${TRACK_NAME}.csv"
 
     # --- Original side: run TD5_d3d.exe under Frida from main ---

@@ -122,6 +122,17 @@ def main():
     original_ini = patch_ini(scenario_cfg)
 
     try:
+        # Snapshot existing td5re.exe pids so we identify (and later kill) only
+        # the instance TTD launches — never a parallel session's.
+        pre_pids = set()
+        try:
+            import frida as _frida
+            pre_pids = {p.pid for p in _frida.get_local_device().enumerate_processes()
+                        if p.name.lower() == "td5re.exe"}
+        except Exception:
+            pass
+        td5re_pid = None
+
         # Launch TTD; it spawns td5re.exe and records
         print("[ttd] spawning td5re.exe under TTD")
         ttd_proc = subprocess.Popen(
@@ -140,10 +151,12 @@ def main():
             import frida
             import ctypes, ctypes.wintypes as wt
             device = frida.get_local_device()
-            pids = [p.pid for p in device.enumerate_processes()
-                    if p.name.lower() == "td5re.exe"]
-            if pids:
-                new_pid = pids[-1]  # most recent
+            cur = [p.pid for p in device.enumerate_processes()
+                   if p.name.lower() == "td5re.exe"]
+            new = [pid for pid in cur if pid not in pre_pids]
+            if new:
+                new_pid = sorted(new)[-1]  # our TTD-launched instance
+                td5re_pid = new_pid
                 u32 = ctypes.windll.user32
                 WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
                 found = {"h": None}
@@ -174,10 +187,16 @@ def main():
         print(f"[rec] recording for {remaining:.0f}s more...")
         time.sleep(remaining)
 
-        # Stop the game; TTD finalizes the trace
-        print("[rec] killing td5re.exe")
-        subprocess.run(["taskkill", "/F", "/IM", "td5re.exe"],
-                       capture_output=True, text=True)
+        # Stop OUR game so TTD finalizes the trace. Kill only the pid we
+        # launched — never taskkill /IM (that would stop other sessions' games
+        # and corrupt their captures).
+        if td5re_pid:
+            print(f"[rec] killing td5re.exe pid={td5re_pid}")
+            subprocess.run(["taskkill", "/F", "/PID", str(td5re_pid)],
+                           capture_output=True, text=True)
+        else:
+            print("[rec] WARN: our td5re pid unknown; terminating the TTD launcher instead")
+            ttd_proc.terminate()
 
         # Wait for TTD to finalize and exit
         try:

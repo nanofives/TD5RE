@@ -1,10 +1,15 @@
+# PARALLEL-SAFE NOTE: all td5re windows share the "TD5RE_Window" class, so the
+# FindWindow path below grabs an ARBITRARY td5re when several sessions run at
+# once. Pass -ProcessId <pid> (the pid your launch harness recorded, e.g.
+# `cat .td5re_test_pid`) to capture YOUR OWN window deterministically.
 param(
     [string]$Prefix = "shot",
     [string]$OutDir = ".",
     [int]$IntervalSec = 10,
     [int]$Count = 8,
     [string]$WindowClass = "TD5RE_Window",
-    [string]$WindowTitle = ""
+    [string]$WindowTitle = "",
+    [int]$ProcessId = 0          # exact PID to capture — PREFERRED under parallel /fix; 0 = fall back to FindWindow
 )
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -35,12 +40,24 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $cls   = if ([string]::IsNullOrEmpty($WindowClass)) { $null } else { $WindowClass }
 $title = if ([string]::IsNullOrEmpty($WindowTitle)) { $null } else { $WindowTitle }
 
+if ($ProcessId -le 0) {
+    Write-Host "WARNING: no -ProcessId given; FindWindow(class='$cls') grabs an arbitrary td5re. Pass -ProcessId for parallel-safe capture."
+}
+
 for ($i = 0; $i -lt $Count; $i++) {
     Start-Sleep -Seconds $IntervalSec
 
-    $hwnd = [W32]::FindWindow($cls, $title)
+    # Resolve the target hwnd. -ProcessId pins it to OUR process; otherwise fall
+    # back to the (parallel-UNSAFE) FindWindow-by-class lookup.
+    if ($ProcessId -gt 0) {
+        $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        $hwnd = if ($p) { $p.MainWindowHandle } else { [IntPtr]::Zero }
+    } else {
+        $hwnd = [W32]::FindWindow($cls, $title)
+    }
+
     if ($hwnd -eq [IntPtr]::Zero) {
-        Write-Host "[$i] window not found (cls=$cls title=$title), capturing primary"
+        Write-Host "[$i] window not found (pid=$ProcessId cls=$cls title=$title), capturing primary"
         $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     } else {
         [W32]::ShowWindow($hwnd, 9) | Out-Null   # SW_RESTORE
