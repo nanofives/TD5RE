@@ -5764,26 +5764,16 @@ extern void td5_physics_reset_actor_state(TD5_Actor *actor);
 void td5_ai_update_special_encounter(void) {
     int32_t handle;
     char *cop;        /* actor[9] */
-    char *player;     /* actor[0] */
-    int32_t cop_span_norm;     /* DAT_004ad152 — actor[9] +0x82 */
-    int16_t player_span_norm;  /* DAT_004ab18a — actor[0] +0x82 */
-    int32_t player_speed;      /* DAT_004ab41c — actor[0] +0x314 */
-    int32_t player_fwd;        /* DAT_004afbc0 — RS[0].forward_track_component */
-    int32_t player_selector;   /* DAT_004afb6c — RS[0].route_table_selector */
+    int32_t cop_span_norm;     /* actor[9] +0x82 (cop is always traffic slot 9) */
 
     /* Port-only master gate (see header comment). */
     if (!g_encounter_enabled) return;
 
     /* Bind frequently-used addresses once. */
     if (!g_actor_base) return;
-    cop    = actor_ptr(9);
-    player = actor_ptr(0);
+    cop = actor_ptr(9);
 
-    cop_span_norm     = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_NORMALIZED);
-    player_span_norm  =                    ACTOR_I16(player, ACTOR_SPAN_NORMALIZED);
-    player_speed      =                    ACTOR_I32(player, ACTOR_LONGITUDINAL_SPEED);
-    player_fwd        = g_actor_forward_track_component[0];
-    player_selector   = route_state(0)[RS_ROUTE_TABLE_SELECTOR];
+    cop_span_norm = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_NORMALIZED);
 
     handle = g_encounter_tracked_handle;
 
@@ -5835,102 +5825,106 @@ void td5_ai_update_special_encounter(void) {
         if (handle == -1) return;
         /* fall through to active_monitor */
     } else if (handle == -1) {
-        /* ---- Spawn attempt (0x00434e2c–0x00434f11) ------------------ */
-        int32_t span_delta_2span;
-        int32_t player_diff_abs;
+        /* ---- Spawn attempt (0x00434e2c–0x00434f11) ------------------
+         * PORT DEVIATION (multiplayer): the original latches the encounter
+         * onto slot 0 (the only human). Here we scan EVERY human slot
+         * [0 .. num_human_players) and latch the FIRST one that passes the
+         * full gate, so the cop chases whichever player drives past it
+         * first — and only that car (the active monitor + per-slot
+         * g_encounter_active gating below confine the effect to that slot).
+         * With a single player this loops once over slot 0, reproducing the
+         * original byte-for-byte. The cop is always traffic slot 9 (special-
+         * encounter is only enabled for fields of <=6 racers, where slot 9
+         * is free). */
+        int n_players;
+        int spawn_slot = -1;
+        int16_t spawn_span_norm = 0;
+        int32_t spawn_speed = 0, spawn_fwd = 0, spawn_selector = 0;
 
-        /* [DIAG fix-1780404735] BUG-1 cop-spawn diagnosis. The spawn gate is
-         * byte-faithful (no divergence found) but the spawn requires a precise
-         * runtime condition only reachable by MANUAL driving (PlayerIsAI forces
-         * route_table_selector=1, which fails the selector gate). This logs which
-         * of the 5 gate conditions blocks the spawn + the live inputs, so a
-         * manual drive (Traffic ON + Cops ON, e.g. Moscow/Tokyo) pinpoints the
-         * failing condition. Rate-limited, plus an always-on "near-miss" log when
-         * the cop (slot 9) is within 1..3 spans of the player (the window in
-         * which span_delta crosses the required ==2). Zero behavioral effect. */
-        {
-            int32_t sd = (int32_t)(int16_t)player_span_norm - cop_span_norm;
-            int near_miss = (sd >= 1 && sd <= 3);
-            if (near_miss || (g_ai_frame_counter % 90u) == 0u) {
-                const char *blocker =
-                    (g_encounter_cooldown != 0)                            ? "cooldown!=0" :
-                    (sd != 2)                                              ? "span_delta!=2" :
-                    (player_speed <= 0x15638)                              ? "speed<=0x15638" :
-                    (player_fwd <= 0)                                      ? "fwd<=0" :
-                    (player_selector != g_encounter_route_table_selector)  ? "selector!=0" :
-                                                                             "PASSES(will spawn)";
-                TD5_LOG_I(LOG_TAG,
-                          "cop_spawn_gate: BLOCK=%s | cooldown=%d span_delta=%d "
-                          "(player_norm=%d cop9_norm=%d) speed=%d(>0x15638?%d) "
-                          "fwd=%d(>0?%d) selector=%d(==%d?%d)%s",
-                          blocker, g_encounter_cooldown, sd,
-                          (int)(int16_t)player_span_norm, cop_span_norm,
-                          player_speed, player_speed > 0x15638,
-                          player_fwd, player_fwd > 0,
-                          player_selector, g_encounter_route_table_selector,
-                          player_selector == g_encounter_route_table_selector,
-                          near_miss ? " [NEAR-MISS: cop within 1-3 spans]" : "");
+        /* Cooldown is a single shared timer — check once. */
+        if (g_encounter_cooldown != 0) {
+            if ((g_ai_frame_counter % 90u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "cop_spawn_gate: BLOCK=cooldown!=0 (%d)",
+                          g_encounter_cooldown);
             }
+            return;
         }
 
-        if (g_encounter_cooldown != 0) return;
+        n_players = g_td5.num_human_players;
+        if (n_players < 1) n_players = 1;
+        if (n_players > g_traffic_slot_base) n_players = g_traffic_slot_base;
 
-        /* (int16)actor[0].span_norm - (int16)actor[9].span_norm == 2 */
-        span_delta_2span = (int32_t)(int16_t)player_span_norm - cop_span_norm;
-        if (span_delta_2span != 2) return;
+        for (int ps = 0; ps < n_players; ps++) {
+            char   *pl       = actor_ptr(ps);
+            int16_t ps_span  = ACTOR_I16(pl, ACTOR_SPAN_NORMALIZED);
+            int32_t ps_speed = ACTOR_I32(pl, ACTOR_LONGITUDINAL_SPEED);
+            int32_t ps_fwd   = g_actor_forward_track_component[ps];
+            int32_t ps_sel   = route_state(ps)[RS_ROUTE_TABLE_SELECTOR];
+            /* (int16)player.span_norm - (int16)cop.span_norm == 2 */
+            int32_t sd       = (int32_t)ps_span - cop_span_norm;
 
-        /* actor[0].long_speed > 0x15638 (JLE → fail at 0x15638) */
-        if (player_speed <= 0x15638) return;
+            /* [DIAG] near-miss log — cop (slot 9) within 1..3 spans of this
+             * player (the window in which span_delta crosses the required ==2),
+             * plus a periodic slot-0 heartbeat. Zero behavioral effect. */
+            if ((sd >= 1 && sd <= 3) || (ps == 0 && (g_ai_frame_counter % 90u) == 0u)) {
+                const char *blocker =
+                    (sd != 2)                                     ? "span_delta!=2" :
+                    (ps_speed <= 0x15638)                         ? "speed<=0x15638" :
+                    (ps_fwd <= 0)                                 ? "fwd<=0" :
+                    (ps_sel != g_encounter_route_table_selector)  ? "selector!=0" :
+                                                                    "PASSES(will spawn)";
+                TD5_LOG_I(LOG_TAG,
+                          "cop_spawn_gate[p%d]: BLOCK=%s span_delta=%d "
+                          "(player_norm=%d cop9_norm=%d) speed=%d(>0x15638?%d) "
+                          "fwd=%d(>0?%d) selector=%d(==%d?%d)",
+                          ps, blocker, sd, (int)ps_span, cop_span_norm,
+                          ps_speed, ps_speed > 0x15638, ps_fwd, ps_fwd > 0,
+                          ps_sel, g_encounter_route_table_selector,
+                          ps_sel == g_encounter_route_table_selector);
+            }
 
-        /* RS[0].forward_track_component > 0 (JLE → fail at 0) */
-        if (player_fwd <= 0) return;
+            /* actor[ps].span_norm - actor[9].span_norm == 2 */
+            if (sd != 2) continue;
+            /* actor[ps].long_speed > 0x15638 (JLE → fail at 0x15638) */
+            if (ps_speed <= 0x15638) continue;
+            /* RS[ps].forward_track_component > 0 (JLE → fail at 0) */
+            if (ps_fwd <= 0) continue;
+            /* RS[ps].route_table_selector == DAT_004b0568 (JNZ → fail) */
+            if (ps_sel != g_encounter_route_table_selector) continue;
 
-        /* RS[0].route_table_selector == DAT_004b0568 (JNZ → fail) */
-        if (player_selector != g_encounter_route_table_selector) return;
+            /* The original's final abs(player_span - player_span) > 0x10 check
+             * is vacuously true (always 0); dropped — no behavioral effect. */
 
-        /* The original then performs:
-         *   uVar1 = (int16)player_span_norm - (int16)player_span_norm
-         *   abs(uVar1) > 0x10 ⇒ return
-         * which is always 0, so the check passes unconditionally. Kept
-         * verbatim so the byte-faithful trace matches. */
-        {
-            int32_t tmp = (int32_t)(int16_t)player_span_norm
-                        - (int32_t)(int16_t)player_span_norm;
-            player_diff_abs = (tmp < 0) ? -tmp : tmp;
-            if (player_diff_abs > 0x10) return;
+            /* First qualifying player wins the chase. */
+            spawn_slot      = ps;
+            spawn_span_norm = ps_span;
+            spawn_speed     = ps_speed;
+            spawn_fwd       = ps_fwd;
+            spawn_selector  = ps_sel;
+            break;
         }
+
+        if (spawn_slot < 0) return;
 
         /* ===== SPAWN =====
-         * Original (0x00434e97–0x00434f11):
-         *   [0x4b05d8] = 0                       (handle = 0)
-         *   call ComputeTrackSpanProgress
-         *   [0x4b05c0] = ret_lo                  (track_progress)
-         *   call ComputeSignedTrackOffset
-         *   [0x4b0580] = ret_lo                  (signed_track_offset)
-         *   [0x4b055c] = route_state[0][0]       (cache RS[0].route_table_ptr)
-         *   ResetVehicleActorState(&actor[9])
-         *   if (ENC_WANTED_MODE == 0) StartTrackedVehicleAudio(9);
-         * Note: the prologue refresh above already cached the cop's
-         * route table when handle was != -1; on the spawn path the
-         * handle was -1, so the cached pointer is stale. The original
-         * writes route_state[0][RS_ROUTE_TABLE_PTR] (slot 0 = player).
-         */
+         * Original (0x00434e97–0x00434f11) latches handle=0 (slot 0 = player)
+         * and caches route_state[0][RS_ROUTE_TABLE_PTR]. We use spawn_slot so
+         * the chase tracks the winning player; the active monitor below is
+         * already handle-generic, so it follows the right car automatically. */
         {
             int32_t cop_span_raw = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_RAW);
             int32_t *cop_xyz     = (int32_t *)(cop + ACTOR_WORLD_POS_X);
             const uint8_t *rb0;
             uint8_t lane_byte;
 
-            g_encounter_tracked_handle = 0;
+            g_encounter_tracked_handle = spawn_slot;
 
             s_enc_track_progress = (int32_t)td5_track_compute_span_progress(
                 cop_span_raw, cop_xyz);
 
-            /* IMPORTANT: the original reads the lane byte from the
-             * *previous* gSpecialEncounterRouteTable, then immediately
-             * overwrites it with route_state[0][RS_ROUTE_TABLE_PTR].
-             * (0x434eb8 reads MOV EDX,[0x4b055c] BEFORE 0x434eea writes.)
-             * Match exactly. */
+            /* IMPORTANT: the original reads the lane byte from the *previous*
+             * gSpecialEncounterRouteTable, then immediately overwrites it.
+             * (0x434eb8 reads MOV EDX,[0x4b055c] BEFORE 0x434eea writes.) */
             rb0 = s_enc_route_table_ptr;
             lane_byte = (rb0 && cop_span_norm >= 0)
                 ? rb0[(size_t)cop_span_norm * 3u]
@@ -5939,22 +5933,20 @@ void td5_ai_update_special_encounter(void) {
             s_enc_signed_track_offset = (int32_t)td5_track_compute_signed_offset(
                 cop_span_raw, s_enc_track_progress, (int)lane_byte);
 
-            /* Cache RS[0].route_table_ptr (slot 0 = player) into the
-             * gSpecialEncounterRouteTable global. Subsequent ticks compare
-             * the tracked actor's RS_ROUTE_TABLE_PTR against this cache.
-             * Since the tracked actor IS slot 0 after spawn, the prologue
-             * "ptr changed" check will be false on the very next tick. */
+            /* Cache the tracked player's route_table_ptr. Since the tracked
+             * actor IS spawn_slot after this, the prologue "ptr changed" check
+             * will be false on the very next tick. */
             s_enc_route_table_ptr = (const uint8_t *)(intptr_t)
-                                    route_state(0)[RS_ROUTE_TABLE_PTR];
+                                    route_state(spawn_slot)[RS_ROUTE_TABLE_PTR];
 
             td5_physics_reset_actor_state((TD5_Actor *)cop);
         }
 
         TD5_LOG_I(LOG_TAG,
-                  "Encounter spawn: handle=0 player_span_norm=%d cop_span_norm=%d "
+                  "Encounter spawn: handle=%d player_span_norm=%d cop_span_norm=%d "
                   "speed=%d fwd=%d sel=%d",
-                  (int)player_span_norm, cop_span_norm, player_speed,
-                  player_fwd, player_selector);
+                  spawn_slot, (int)spawn_span_norm, cop_span_norm, spawn_speed,
+                  spawn_fwd, spawn_selector);
 
         if (ENC_WANTED_MODE != 0) return;
         td5_enc_start_tracked_audio(9);
@@ -6089,8 +6081,12 @@ void td5_ai_update_encounter_control(int slot) {
     int32_t *rs_self      = route_state(slot);
     int      tracked      = g_encounter_tracked_handle;
     /* DAT_004ad152 in orig = player's SPAN_NORMALIZED snapshot; UpdateSpecialTrafficEncounter
-     * keeps it equal to the current player's field_0x82 each tick. Port reads it live. */
-    int32_t  player_span_ref = (int32_t)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+     * keeps it equal to the current player's field_0x82 each tick. Port reads it live.
+     * PORT DEVIATION (multiplayer): read the span of the TRACKED (chased) player, not a
+     * hardcoded slot 0, so the brake gate matches single-player when the chased car is
+     * not slot 0. For a single player tracked==0, so this is byte-identical. */
+    int      span_ref_slot = (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS) ? tracked : 0;
+    int32_t  player_span_ref = (int32_t)(int16_t)ACTOR_I16(actor_ptr(span_ref_slot), ACTOR_SPAN_NORMALIZED);
     /* gSpecialEncounterRouteTable in orig = cached route-table pointer of the tracked actor.
      * Port reads the live equivalent from the tracked actor's rs[RS_ROUTE_TABLE_PTR]. */
     const uint8_t *tracked_route_tbl = (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS)
