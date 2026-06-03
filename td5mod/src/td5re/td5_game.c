@@ -5385,6 +5385,7 @@ void td5_game_init_viewport_layout(void) {
      * original was hard-capped at 2 viewports (RunRaceFrame 0x42B580) — this
      * deliberately deviates. */
     int views = g_td5.num_human_players;
+    int cols, rows;
     if (views < 1) views = 1;
     if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
     if (g_td5.split_screen_mode == 0) views = 1;
@@ -5394,22 +5395,32 @@ void td5_game_init_viewport_layout(void) {
     if (views <= 1) {
         s_viewports[0].x = 0; s_viewports[0].y = 0;
         s_viewports[0].w = w; s_viewports[0].h = h;
-    } else if (views == 2) {
-        if (g_td5.split_screen_mode == 2) {     /* vertical: left | right */
-            s_viewports[0].x = 0;   s_viewports[0].y = 0; s_viewports[0].w = w / 2; s_viewports[0].h = h;
-            s_viewports[1].x = w/2; s_viewports[1].y = 0; s_viewports[1].w = w / 2; s_viewports[1].h = h;
-        } else {                                /* horizontal: top / bottom */
-            s_viewports[0].x = 0; s_viewports[0].y = 0;     s_viewports[0].w = w; s_viewports[0].h = h / 2;
-            s_viewports[1].x = 0; s_viewports[1].y = h / 2; s_viewports[1].w = w; s_viewports[1].h = h / 2;
-        }
-    } else {
-        int cols, rows;
-        if (views == 3) {                       /* 3 horizontal strips (user pick) */
-            cols = 1; rows = 3;
+        TD5_LOG_I(LOG_TAG, "Viewport layout: single %dx%d", w, h);
+        return;
+    }
+
+    /* [PORT ENHANCEMENT 2026-06] Honour the Multiplayer Options layout pick when a
+     * valid grid was committed (g_td5.split_grid_cols/rows, resolved in
+     * frontend_init_race_schedule from the player count + chosen layout). The N
+     * players fill the first N cells of the cols x rows grid (row-major); any
+     * extra "missing" cells stay empty here (their content is a deferred
+     * follow-up). When no grid was committed (AutoRace harness / legacy launch
+     * paths leave cols/rows 0), fall back to the automatic ladder. */
+    cols = g_td5.split_grid_cols;
+    rows = g_td5.split_grid_rows;
+    if (cols < 1 || rows < 1 || cols * rows < views) {
+        if (views == 2) {
+            if (g_td5.split_screen_mode == 2) { cols = 2; rows = 1; }  /* left | right */
+            else                              { cols = 1; rows = 2; }  /* top / bottom */
+        } else if (views == 3) {
+            cols = 1; rows = 3;                 /* 3 horizontal strips */
         } else {
             cols = (views <= 4) ? 2 : 3;        /* 4=2x2, 5-6=3x2, 7-9=3x3 */
             rows = (views + cols - 1) / cols;
         }
+    }
+
+    {
         int cw = w / cols;
         int ch = h / rows;
         for (int vp = 0; vp < views; vp++) {
@@ -5422,9 +5433,9 @@ void td5_game_init_viewport_layout(void) {
         }
     }
 
-    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d count=%d %dx%d",
+    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d count=%d grid=%dx%d %dx%d",
               g_td5.split_screen_mode, g_td5.num_human_players,
-              g_td5.viewport_count, w, h);
+              g_td5.viewport_count, cols, rows, w, h);
 }
 
 /* ========================================================================

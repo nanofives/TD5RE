@@ -211,18 +211,23 @@ float td5_save_get_view_distance(void);
 void  td5_save_set_view_distance(float v);
 
 /* Controller / keyboard binding buffers — mutable pointers for binding-screen capture.
- * td5_save_get_controller_bindings_mutable: 18 dwords (72 bytes), flat [player*9+slot].
+ * td5_save_get_controller_bindings_mutable: TD5_MAX_HUMAN_PLAYERS*9 dwords, flat
+ *   [player*9+slot] ([PORT ENHANCEMENT 2026-06] grown from 18 to 81 for 9 players;
+ *   first 18 still round-trip through the legacy Config.td5 blob).
  * td5_save_get_p1/p2_custom_bindings_mutable: 98 dwords (392 bytes), first 16 bytes
  *   used as uint8_t[16] keyboard scancode capture buffer for the respective player.
- * After writing, call td5_save_write_config() to persist to Config.td5.
+ * After writing, call td5_save_write_config() to persist.
  * [CONFIRMED @ 0x463FC4 / 0x4978C0 / 0x497330] */
 uint32_t *td5_save_get_controller_bindings_mutable(void);
 uint32_t *td5_save_get_p1_custom_bindings_mutable(void);
 uint32_t *td5_save_get_p2_custom_bindings_mutable(void);
 
-/* Persisted per-player input device index (Config.td5 +0x20/+0x21):
+/* Persisted per-player input device index (Config.td5 +0x20/+0x21 for p1/p2):
  * 0 = keyboard, >=1 = 1-based joystick index. */
 uint32_t td5_save_get_p1_device_index(void);
 uint32_t td5_save_get_p2_device_index(void);
+/* [PORT ENHANCEMENT 2026-06] generic per-player accessors (player 0..8). */
+uint32_t td5_save_get_player_device_index(int player);
+void     td5_save_set_player_device_index(int player, uint32_t idx);
 
 #endif /* TD5_SAVE_H */

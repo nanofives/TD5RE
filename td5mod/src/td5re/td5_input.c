@@ -156,8 +156,9 @@ static int s_nos_enabled = 0;
 /** Cop/encounter mode active. */
 static int s_cop_mode = 0;
 
-/** Nitro pending flag per-player (set by game logic, read here). */
-static int s_nitro_pending[2] = { 0, 0 };
+/** Nitro pending flag per-player (set by game logic, read here).
+ *  [PORT ENHANCEMENT 2026-06] grown from 2 to TD5_MAX_HUMAN_PLAYERS. */
+static int s_nitro_pending[TD5_MAX_HUMAN_PLAYERS] = { 0 };
 
 /* ========================================================================
  * Internal State -- Playback/Replay
@@ -283,40 +284,49 @@ void td5_input_set_input_source(int p, int s)
 int  td5_input_get_input_source(int p)          { return (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) ? s_input_source[p] : 0; }
 void td5_input_set_joystick_bindings(int player, const int32_t *bindings, int count)
 {
-    if (player < 0 || player >= 2) return;
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
     td5_plat_input_set_joystick_bindings(player, bindings, count);
 }
 
 /* Resolve and apply each player's input device + bindings at race start.
  * Source precedence: INI override (Player1Joystick/Player2Joystick, >0 = a
- * 1-based enumerated joystick index) wins; otherwise the device index persisted
- * in Config.td5 (p1/p2_device_index). 0 = keyboard. For a joystick player the
- * saved 9-slot binding row is pushed to the live poll. Called from
- * InitializeRaceSession (Step 15) BEFORE FF init so slot 0's device exists. */
+ * 1-based enumerated joystick index) wins for players 1/2; otherwise the
+ * per-player device index persisted via the save module (Config.td5 p1/p2,
+ * td5re_input.ini [Devices] PlayerN for 3-9). 0 = keyboard. For a joystick
+ * player the saved 9-slot binding row is pushed to the live poll. Called from
+ * InitializeRaceSession (Step 15) BEFORE FF init so each device exists.
+ * [PORT ENHANCEMENT 2026-06] generalized from 2 to s_active_players (up to 9). */
 void td5_input_apply_device_selection(void)
 {
     /* Device count (idempotent re-enumeration) so a stale/placeholder persisted
      * index can't try to open a device that doesn't exist. */
     int dev_count = td5_plat_input_enumerate_devices();
-    int src[2];
-    src[0] = (g_td5.ini.player1_joystick > 0) ? g_td5.ini.player1_joystick
-                                              : (int)td5_save_get_p1_device_index();
-    src[1] = (g_td5.ini.player2_joystick > 0) ? g_td5.ini.player2_joystick
-                                              : (int)td5_save_get_p2_device_index();
-    /* Clamp out-of-range indices to keyboard (the shipped default Config.td5
-     * carries a non-zero placeholder at +0x20/+0x21). */
-    for (int p = 0; p < 2; p++)
-        if (src[p] < 0 || src[p] >= dev_count) src[p] = 0;
+    int players = s_active_players;
+    if (players < 1) players = 1;
+    if (players > TD5_MAX_HUMAN_PLAYERS) players = TD5_MAX_HUMAN_PLAYERS;
+
     const uint32_t *bind = td5_save_get_controller_bindings_mutable();
-    for (int p = 0; p < 2; p++) {
-        td5_input_set_input_source(p, src[p]);   /* creates/releases the device */
-        if (src[p] > 0 && bind) {
+    for (int p = 0; p < players; p++) {
+        int src;
+        if (p == 0 && g_td5.ini.player1_joystick > 0)
+            src = g_td5.ini.player1_joystick;
+        else if (p == 1 && g_td5.ini.player2_joystick > 0)
+            src = g_td5.ini.player2_joystick;
+        else
+            src = (int)td5_save_get_player_device_index(p);
+
+        /* Clamp out-of-range indices to keyboard (the shipped default Config.td5
+         * carries a non-zero placeholder at +0x20/+0x21). */
+        if (src < 0 || src >= dev_count) src = 0;
+
+        td5_input_set_input_source(p, src);   /* creates/releases the device */
+        if (src > 0 && bind) {
             int32_t row[9];
             for (int i = 0; i < 9; i++) row[i] = (int32_t)bind[p * 9 + i];
             td5_input_set_joystick_bindings(p, row, 9);
         }
         TD5_LOG_I(LOG_TAG, "Device selection: player=%d source=%d (%s)",
-                  p, src[p], (src[p] == 0) ? "keyboard" : "joystick");
+                  p, src, (src == 0) ? "keyboard" : "joystick");
     }
 }
 void td5_input_set_playback_active(int v)       { s_playback_active = v; }
@@ -324,7 +334,7 @@ int  td5_input_is_playback_active(void)         { return s_playback_active; }
 void td5_input_set_replay_mode(int v)           { s_replay_mode_flag = v; }
 void td5_input_set_nos_enabled(int v)           { s_nos_enabled = v; }
 void td5_input_set_cop_mode(int v)              { s_cop_mode = v; }
-void td5_input_set_nitro_pending(int p, int v)  { if (p >= 0 && p < 2) s_nitro_pending[p] = v; }
+void td5_input_set_nitro_pending(int p, int v)  { if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) s_nitro_pending[p] = v; }
 
 /* ========================================================================
  * PollRaceSessionInput  (0x42C470)
@@ -1632,30 +1642,46 @@ int td5_input_ff_init(void)
 {
     memset(&s_ff, 0, sizeof(s_ff));
 
-    /* Attempt to init FF on device 0 (primary joystick).
-     * CreateRaceForceFeedbackEffects (0x4285B0) creates 4 effect slots:
+    /* CreateRaceForceFeedbackEffects (0x4285B0) creates 4 effect slots PER
+     * device:
      *   Slot 0: Constant force -- steering resistance
      *   Slot 1: Constant force -- frontal collision impact
      *   Slot 2: Constant force -- side collision impact
-     *   Slot 3: Spring/condition -- terrain vibration + centering
+     *   Slot 3: Periodic       -- terrain vibration / rumble
      *
-     * In the source port, the platform layer handles the actual
-     * DirectInput effect creation.  We just request initialization. */
-    int ok = td5_plat_ff_init(0);
-    if (ok) {
-        TD5_LOG_I(LOG_TAG, "Force feedback initialized on device 0");
-    } else {
-        TD5_LOG_W(LOG_TAG, "Force feedback not available");
+     * [PORT ENHANCEMENT 2026-06] N-way vibration: each human player whose input
+     * source is a joystick gets its own FF effect set on its own device. The
+     * per-player FF controller assignment (= the player's 1-based device index)
+     * is configured here — the original wired ConfigureForceFeedbackControllers
+     * @0x428880 but the port never called it, so FF had been inert. */
+    int players = s_active_players;
+    if (players < 1) players = 1;
+    if (players > TD5_MAX_HUMAN_PLAYERS) players = TD5_MAX_HUMAN_PLAYERS;
+
+    int assignments[TD5_MAX_RACER_SLOTS];
+    memset(assignments, 0, sizeof(assignments));
+    for (int p = 0; p < players; p++)
+        assignments[p] = s_input_source[p];   /* 1-based device idx, 0 = keyboard */
+    td5_input_ff_configure(assignments, players);
+
+    int any = 0;
+    for (int p = 0; p < players; p++) {
+        if (s_input_source[p] <= 0) continue;  /* keyboard player: no FF device */
+        if (td5_plat_ff_init(p)) {
+            TD5_LOG_I(LOG_TAG, "Force feedback initialized: player=%d device=%d",
+                      p, s_input_source[p]);
+            any = 1;
+        } else {
+            TD5_LOG_W(LOG_TAG, "Force feedback not available: player=%d device=%d",
+                      p, s_input_source[p]);
+        }
     }
-    return ok;
+    return any;
 }
 
 void td5_input_ff_shutdown(void)
 {
-    for (int slot = 0; slot < 4; slot++) {
-        td5_plat_ff_stop(slot);
-    }
-    td5_plat_ff_shutdown();
+    td5_plat_ff_shutdown();   /* stops + releases effects on every device */
     memset(&s_ff, 0, sizeof(s_ff));
 }
 
@@ -1673,25 +1699,24 @@ void td5_input_ff_shutdown(void)
 void td5_input_ff_update(void)
 {
     /* Dispatch per-player FF update for all active local players.
-     * [CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback dispatched
-     * inside PollRaceSessionInput for slot 0 (single-player) or the
-     * local participant slot (network). */
-    td5_input_ff_update_player(0);
-    if (s_active_players > 1) {
-        td5_input_ff_update_player(1);
-    }
-    TD5_LOG_D(LOG_TAG, "FF dispatcher: players=%d", s_active_players);
+     * [CONFIRMED @ 0x0042C470]: UpdateControllerForceFeedback dispatched inside
+     * PollRaceSessionInput for slot 0 (single-player) or the local participant
+     * slot (network). [PORT ENHANCEMENT 2026-06] iterate all active humans. */
+    int players = s_active_players;
+    if (players < 1) players = 1;
+    if (players > TD5_MAX_HUMAN_PLAYERS) players = TD5_MAX_HUMAN_PLAYERS;
+    for (int p = 0; p < players; p++)
+        td5_input_ff_update_player(p);
+    TD5_LOG_D(LOG_TAG, "FF dispatcher: players=%d", players);
 }
 
 void td5_input_ff_stop(void)
 {
-    for (int slot = 0; slot < 4; slot++) {
-        TD5_LOG_I(LOG_TAG, "FF stop: slot=%d", slot);
-        td5_plat_ff_stop(slot);
-    }
-    for (int i = 0; i < 2; i++) {
-        s_ff.steer_effect_started[i] = 0;
-        s_ff.terrain_effect_started[i] = 0;
+    for (int dev = 0; dev < TD5_MAX_HUMAN_PLAYERS; dev++) {
+        for (int slot = 0; slot < 4; slot++)
+            td5_plat_ff_stop(dev, slot);
+        s_ff.steer_effect_started[dev] = 0;
+        s_ff.terrain_effect_started[dev] = 0;
     }
 }
 
@@ -1750,9 +1775,11 @@ void td5_input_ff_update_player(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
     if (s_ff.controller_assignment[slot] == 0) return;
-
-    int js_idx = s_ff.controller_assignment[slot] - 1;
-    if (js_idx < 0 || js_idx > 1) return;
+    /* The player's FF device lives at device slot == player slot (created by
+     * td5_plat_input_set_device(player, ...)). Only human players (0..8) own a
+     * device slot. [PORT ENHANCEMENT 2026-06] no longer capped at js_idx<=1. */
+    if (slot >= TD5_MAX_HUMAN_PLAYERS) return;
+    int dev = slot;
 
     /* ---- Steering resistance (slot 0) ---- */
 
@@ -1778,13 +1805,13 @@ void td5_input_ff_update_player(int slot)
 
     int steer_mag = lateral_force; /* __ftol in original: integer value, no conversion needed */
 
-    if (!s_ff.steer_effect_started[js_idx]) {
+    if (!s_ff.steer_effect_started[dev]) {
         /* First-time play: start the effect */
-        td5_plat_ff_constant(0, steer_mag);
-        s_ff.steer_effect_started[js_idx] = 1;
+        td5_plat_ff_constant(dev, 0, steer_mag);
+        s_ff.steer_effect_started[dev] = 1;
     } else {
         /* Update running effect parameters */
-        td5_plat_ff_constant(0, steer_mag);
+        td5_plat_ff_constant(dev, 0, steer_mag);
     }
 
     /* ---- Terrain vibration (slot 3) ---- */
@@ -1806,17 +1833,17 @@ void td5_input_ff_update_player(int slot)
     int terrain_coeff = g_terrain_ff_coefficients[surface_type];
     int terrain_mag = (30 - lateral_force / 10000) * terrain_coeff;
 
-    if (!s_ff.terrain_effect_started[js_idx]) {
+    if (!s_ff.terrain_effect_started[dev]) {
         /* First play of terrain effect */
-        td5_plat_ff_constant(3, terrain_mag);
-        s_ff.terrain_effect_started[js_idx] = 1;
+        td5_plat_ff_constant(dev, 3, terrain_mag);
+        s_ff.terrain_effect_started[dev] = 1;
         s_ff.collision_active[slot] = 0;
     } else {
         if (s_ff.collision_active[slot] != 0) {
             /* During collision recovery, dampen terrain vibration */
             terrain_mag = TD5_INPUT_FF_COLLISION_DAMPEN;
         }
-        td5_plat_ff_constant(3, terrain_mag);
+        td5_plat_ff_constant(dev, 3, terrain_mag);
     }
 }
 
@@ -1842,17 +1869,17 @@ void td5_input_ff_update_player(int slot)
 void td5_input_ff_play_effect(int slot, int effect_slot, int magnitude,
                               int repeat_count)
 {
-    (void)effect_slot;
     (void)repeat_count;
 
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
     if (s_ff.controller_assignment[slot] == 0) return;
+    if (slot >= TD5_MAX_HUMAN_PLAYERS) return;   /* device slots are per human player */
 
     if (effect_slot < 0) effect_slot = 0;
     if (effect_slot > 3) effect_slot = 3;
     TD5_LOG_I(LOG_TAG, "FF start: player=%d slot=%d magnitude=%d repeat=%d",
               slot, effect_slot, magnitude, repeat_count);
-    td5_plat_ff_constant(effect_slot, magnitude);
+    td5_plat_ff_constant(slot, effect_slot, magnitude);
 }
 
 /* ========================================================================

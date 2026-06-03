@@ -83,18 +83,20 @@ static uint32_t s_mouse_buttons;
 static LPDIRECTINPUT8A       s_dinput        = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_keyboard   = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_mouse      = NULL;
-/* Per-player (slot) joystick devices. slot 0 = player 1, slot 1 = player 2.
- * The original supports up to 2 joystick devices simultaneously (M2DX
- * JoystickC cap = 2); each race player can be bound to the keyboard or one of
- * the joysticks. */
-#define TD5_PLAT_MAX_JS_SLOTS 2
-static LPDIRECTINPUTDEVICE8A s_di_joystick[TD5_PLAT_MAX_JS_SLOTS] = { NULL, NULL };
+/* Per-player (slot) joystick devices. slot N = player N+1.
+ * [PORT ENHANCEMENT 2026-06] Raised from 2 to 9 for N-way split-screen. The
+ * ORIGINAL data model already enumerated 7 joystick slots with the source index
+ * masked &7 (8 sources incl. keyboard) [CONFIRMED @ ScreenLocalizationInit
+ * 0x004269D0 loop i<7; ScreenControlOptions 0x41DF20 &7]; the port had narrowed
+ * this to 2. Each race player binds to the keyboard or one of the joysticks. */
+#define TD5_PLAT_MAX_JS_SLOTS 9
+static LPDIRECTINPUTDEVICE8A s_di_joystick[TD5_PLAT_MAX_JS_SLOTS] = { NULL };
 /* 9-slot binding table per player, mirroring the original DAT_00463FC4 row:
  *   [0]=active flag, [1]/[2]=axis assignment (4=X-like, 5=Y-like, swappable),
  *   [3..8]=6 button actions (value 2..10 selects physical button = value-2).
  * s_joystick_bound[slot]==0 → unconfigured → GetJS-default button mapping. */
 static int32_t s_joystick_bindings[TD5_PLAT_MAX_JS_SLOTS][9];
-static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0, 0 };
+static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
 /* GetJS axis center (0xFA=250) and max tracked buttons (10); kept local so the
  * platform layer doesn't depend on td5_input.h (mirrors TD5_INPUT_JS_AXIS_CENTER
  * / TD5_INPUT_MAX_JS_BUTTONS). */
@@ -179,7 +181,10 @@ typedef struct TD5_StreamAudioState {
 } TD5_StreamAudioState;
 
 static TD5_StreamAudioState s_audio_stream;
-static TD5_FFState          s_ff;
+/* Per-device force-feedback state. [PORT ENHANCEMENT 2026-06] grown from a
+ * single device to one entry per joystick slot so each player's wheel/pad can
+ * vibrate independently. Devices without FF leave their entry zeroed (no-op). */
+static TD5_FFState          s_ff[TD5_PLAT_MAX_JS_SLOTS];
 
 /* Rendering: texture pages */
 #define MAX_TEXTURE_PAGES 1024
@@ -1537,7 +1542,7 @@ void td5_plat_input_set_device(int slot, int device_index)
         IDirectInputDevice8_SetDataFormat(s_di_joystick[slot], &c_dfDIJoystick2);
 
         /* Exclusive foreground: required for force feedback (td5_plat_ff_init
-         * reuses slot 0's device); input reads still work in this mode. */
+         * binds this slot's own device); input reads still work in this mode. */
         if (s_hwnd)
             IDirectInputDevice8_SetCooperativeLevel(s_di_joystick[slot], s_hwnd,
                 DISCL_EXCLUSIVE | DISCL_FOREGROUND);
@@ -1589,6 +1594,34 @@ void td5_plat_input_set_joystick_bindings(int slot, const int32_t *bindings, int
               s_joystick_bindings[slot][8]);
 }
 
+/* Raw physical joystick button bitmask for a device slot (bit i = button i down).
+ * Used by the control-config per-button capture. [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_joystick_buttons(int device_slot)
+{
+    DIJOYSTATE2 js;
+    HRESULT hr;
+    uint32_t mask = 0;
+    int i;
+
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS ||
+        !s_di_joystick[device_slot])
+        return 0;
+
+    memset(&js, 0, sizeof(js));
+    hr = IDirectInputDevice8_Poll(s_di_joystick[device_slot]);
+    if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
+        IDirectInputDevice8_Acquire(s_di_joystick[device_slot]);
+        IDirectInputDevice8_Poll(s_di_joystick[device_slot]);
+    }
+    if (FAILED(IDirectInputDevice8_GetDeviceState(s_di_joystick[device_slot],
+                                                  sizeof(js), &js)))
+        return 0;
+
+    for (i = 0; i < 32; i++)
+        if (js.rgbButtons[i] & 0x80) mask |= (1u << i);
+    return mask;
+}
+
 /* ========================================================================
  * Force Feedback
  * ======================================================================== */
@@ -1604,19 +1637,19 @@ static BOOL CALLBACK EnumConstantForceEffectsCallback(const DIEFFECTINFOA *info,
     return DIENUM_CONTINUE;
 }
 
-static void td5_ff_release_effects(void)
+static void td5_ff_release_effects(int dev)
 {
     int i;
     for (i = 0; i < 4; i++) {
-        if (s_ff.effects[i]) {
-            IDirectInputEffect_Stop(s_ff.effects[i]);
-            IDirectInputEffect_Release(s_ff.effects[i]);
-            s_ff.effects[i] = NULL;
+        if (s_ff[dev].effects[i]) {
+            IDirectInputEffect_Stop(s_ff[dev].effects[i]);
+            IDirectInputEffect_Release(s_ff[dev].effects[i]);
+            s_ff[dev].effects[i] = NULL;
         }
     }
 }
 
-static int td5_ff_create_constant_effect(int slot, DWORD axis, LONG direction)
+static int td5_ff_create_constant_effect(int dev, int slot, DWORD axis, LONG direction)
 {
     DICONSTANTFORCE cf;
     DIEFFECT eff;
@@ -1636,14 +1669,14 @@ static int td5_ff_create_constant_effect(int slot, DWORD axis, LONG direction)
     eff.cbTypeSpecificParams = sizeof(cf);
     eff.lpvTypeSpecificParams = &cf;
 
-    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff.device,
-        &s_ff.effectGuid, &eff, &s_ff.effects[slot], NULL));
-    TD5_LOG_I(LOG_TAG, "FF effect create constant: slot=%d axis=%lu direction=%ld result=%s",
-              slot, (unsigned long)axis, (long)direction, ok ? "ok" : "failed");
+    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff[dev].device,
+        &s_ff[dev].effectGuid, &eff, &s_ff[dev].effects[slot], NULL));
+    TD5_LOG_I(LOG_TAG, "FF effect create constant: dev=%d slot=%d axis=%lu direction=%ld result=%s",
+              dev, slot, (unsigned long)axis, (long)direction, ok ? "ok" : "failed");
     return ok;
 }
 
-static int td5_ff_create_periodic_effect(int slot)
+static int td5_ff_create_periodic_effect(int dev, int slot)
 {
     DIPERIODIC periodic;
     DWORD axis = DIJOFS_X;
@@ -1670,74 +1703,89 @@ static int td5_ff_create_periodic_effect(int slot)
     eff.cbTypeSpecificParams = sizeof(periodic);
     eff.lpvTypeSpecificParams = &periodic;
 
-    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff.device,
-        &GUID_Sine, &eff, &s_ff.effects[slot], NULL));
-    TD5_LOG_I(LOG_TAG, "FF effect create periodic: slot=%d axis=%lu result=%s",
-              slot, (unsigned long)axis, ok ? "ok" : "failed");
+    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff[dev].device,
+        &GUID_Sine, &eff, &s_ff[dev].effects[slot], NULL));
+    TD5_LOG_I(LOG_TAG, "FF effect create periodic: dev=%d slot=%d axis=%lu result=%s",
+              dev, slot, (unsigned long)axis, ok ? "ok" : "failed");
     return ok;
 }
 
-int td5_plat_ff_init(int device_index)
+int td5_plat_ff_init(int device_slot)
 {
     DIDEVCAPS caps;
 
-    (void)device_index;
-
-    /* Force feedback runs on player 1's joystick (slot 0) — the wheel. */
-    if (!s_di_joystick[0]) {
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
         return 0;
     }
 
-    ZeroMemory(&s_ff, sizeof(s_ff));
-    s_ff.device = (IDirectInputDevice8 *)s_di_joystick[0];
-    s_ff.axes[0] = DIJOFS_X;
-    s_ff.axes[1] = DIJOFS_Y;
-    s_ff.directions[0] = 0;
-    s_ff.directions[1] = 0;
+    /* Force feedback runs on this player's joystick (the wheel/pad). */
+    if (!s_di_joystick[device_slot]) {
+        return 0;
+    }
+
+    /* Re-init: drop any prior effects for this device first. */
+    if (s_ff[device_slot].device) {
+        td5_ff_release_effects(device_slot);
+    }
+    ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
+    s_ff[device_slot].device = (IDirectInputDevice8 *)s_di_joystick[device_slot];
+    s_ff[device_slot].axes[0] = DIJOFS_X;
+    s_ff[device_slot].axes[1] = DIJOFS_Y;
+    s_ff[device_slot].directions[0] = 0;
+    s_ff[device_slot].directions[1] = 0;
 
     ZeroMemory(&caps, sizeof(caps));
     caps.dwSize = sizeof(caps);
-    if (FAILED(IDirectInputDevice8_GetCapabilities(s_ff.device, &caps)) ||
+    if (FAILED(IDirectInputDevice8_GetCapabilities(s_ff[device_slot].device, &caps)) ||
         !(caps.dwFlags & DIDC_FORCEFEEDBACK)) {
-        ZeroMemory(&s_ff, sizeof(s_ff));
+        ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
         return 0;
     }
 
-    s_ff.is_wheel = ((GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_DRIVING) ||
+    s_ff[device_slot].is_wheel = ((GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_DRIVING) ||
                      (GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_1STPERSON));
 
-    IDirectInputDevice8_Acquire(s_ff.device);
+    IDirectInputDevice8_Acquire(s_ff[device_slot].device);
 
-    if (FAILED(IDirectInputDevice8_EnumEffects(s_ff.device,
-            EnumConstantForceEffectsCallback, &s_ff.effectGuid, DIEFT_ALL)) ||
-        !IsEqualGUID(&s_ff.effectGuid, &GUID_ConstantForce)) {
-        ZeroMemory(&s_ff, sizeof(s_ff));
+    if (FAILED(IDirectInputDevice8_EnumEffects(s_ff[device_slot].device,
+            EnumConstantForceEffectsCallback, &s_ff[device_slot].effectGuid, DIEFT_ALL)) ||
+        !IsEqualGUID(&s_ff[device_slot].effectGuid, &GUID_ConstantForce)) {
+        ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
         return 0;
     }
 
-    if (!td5_ff_create_constant_effect(0, s_ff.axes[0], 0) ||
-        !td5_ff_create_constant_effect(1, s_ff.axes[1], 9000) ||
-        !td5_ff_create_constant_effect(2, s_ff.axes[0], 0) ||
-        !td5_ff_create_periodic_effect(3)) {
-        td5_ff_release_effects();
-        ZeroMemory(&s_ff, sizeof(s_ff));
+    if (!td5_ff_create_constant_effect(device_slot, 0, s_ff[device_slot].axes[0], 0) ||
+        !td5_ff_create_constant_effect(device_slot, 1, s_ff[device_slot].axes[1], 9000) ||
+        !td5_ff_create_constant_effect(device_slot, 2, s_ff[device_slot].axes[0], 0) ||
+        !td5_ff_create_periodic_effect(device_slot, 3)) {
+        td5_ff_release_effects(device_slot);
+        ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
         return 0;
     }
 
+    TD5_LOG_I(LOG_TAG, "FF init ok: dev=%d is_wheel=%d", device_slot, s_ff[device_slot].is_wheel);
     return 1;
 }
 
 void td5_plat_ff_shutdown(void)
 {
-    td5_ff_release_effects();
-    ZeroMemory(&s_ff, sizeof(s_ff));
+    int dev;
+    for (dev = 0; dev < TD5_PLAT_MAX_JS_SLOTS; dev++) {
+        if (s_ff[dev].device) {
+            td5_ff_release_effects(dev);
+        }
+        ZeroMemory(&s_ff[dev], sizeof(s_ff[dev]));
+    }
 }
 
-void td5_plat_ff_constant(int slot, int magnitude)
+void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
 {
     HRESULT hr;
 
-    if (slot < 0 || slot >= 4 || !s_ff.effects[slot]) {
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
+        return;
+    }
+    if (slot < 0 || slot >= 4 || !s_ff[device_slot].effects[slot]) {
         return;
     }
 
@@ -1760,18 +1808,18 @@ void td5_plat_ff_constant(int slot, int magnitude)
 
         eff.dwSize = sizeof(eff);
         eff.cAxes = 1;
-        eff.rgdwAxes = &s_ff.axes[0];
+        eff.rgdwAxes = &s_ff[device_slot].axes[0];
         eff.rglDirection = &direction;
         eff.cbTypeSpecificParams = sizeof(periodic);
         eff.lpvTypeSpecificParams = &periodic;
 
-        hr = IDirectInputEffect_SetParameters(s_ff.effects[slot], &eff,
+        hr = IDirectInputEffect_SetParameters(s_ff[device_slot].effects[slot], &eff,
             DIEP_AXES | DIEP_DIRECTION | DIEP_TYPESPECIFICPARAMS);
     } else {
         DICONSTANTFORCE cf;
         DIEFFECT eff;
         LONG direction = (magnitude >= 0) ? 0 : 18000;
-        DWORD axis = (slot == 1) ? s_ff.axes[1] : s_ff.axes[0];
+        DWORD axis = (slot == 1) ? s_ff[device_slot].axes[1] : s_ff[device_slot].axes[0];
 
         if (magnitude < 0) {
             magnitude = -magnitude;
@@ -1791,21 +1839,24 @@ void td5_plat_ff_constant(int slot, int magnitude)
         eff.cbTypeSpecificParams = sizeof(cf);
         eff.lpvTypeSpecificParams = &cf;
 
-        hr = IDirectInputEffect_SetParameters(s_ff.effects[slot], &eff,
+        hr = IDirectInputEffect_SetParameters(s_ff[device_slot].effects[slot], &eff,
             DIEP_AXES | DIEP_DIRECTION | DIEP_TYPESPECIFICPARAMS);
     }
 
     if (SUCCEEDED(hr)) {
-        IDirectInputEffect_Start(s_ff.effects[slot], 1, 0);
+        IDirectInputEffect_Start(s_ff[device_slot].effects[slot], 1, 0);
     }
 }
 
-void td5_plat_ff_stop(int slot)
+void td5_plat_ff_stop(int device_slot, int slot)
 {
-    if (slot < 0 || slot >= 4 || !s_ff.effects[slot]) {
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
         return;
     }
-    IDirectInputEffect_Stop(s_ff.effects[slot]);
+    if (slot < 0 || slot >= 4 || !s_ff[device_slot].effects[slot]) {
+        return;
+    }
+    IDirectInputEffect_Stop(s_ff[device_slot].effects[slot]);
 }
 
 /* ========================================================================

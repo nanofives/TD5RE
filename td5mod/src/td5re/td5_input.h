@@ -168,12 +168,15 @@ typedef struct TD5_PlayerControl {
  * Force Feedback State
  * ======================================================================== */
 
-/** Per-player FF assignment and state. */
+/** Per-player FF assignment and state.
+ *  [PORT ENHANCEMENT 2026-06] the per-JS "effect started" latches grew from
+ *  [2] to [TD5_MAX_HUMAN_PLAYERS] so every split-screen player's device tracks
+ *  its own steering/terrain effect start state. */
 typedef struct TD5_FFGameState {
     int32_t  controller_assignment[TD5_MAX_RACER_SLOTS]; /**< 1-based JS idx, 0=none */
     int32_t  collision_active[TD5_MAX_RACER_SLOTS];      /**< dampens terrain FF */
-    int      steer_effect_started[2];   /**< per-JS: slot 0 started? */
-    int      terrain_effect_started[2]; /**< per-JS: slot 3 started? */
+    int      steer_effect_started[TD5_MAX_HUMAN_PLAYERS];   /**< per-JS: slot 0 started? */
+    int      terrain_effect_started[TD5_MAX_HUMAN_PLAYERS]; /**< per-JS: slot 3 started? */
 } TD5_FFGameState;
 
 /* ========================================================================

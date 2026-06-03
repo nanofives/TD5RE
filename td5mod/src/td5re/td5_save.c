@@ -222,8 +222,15 @@ static int s_overlay_present;
 static TD5_GameOptions s_game_options;                        /* 0x466000 */
 static uint32_t s_p1_device_index;                            /* 0x497A58 */
 static uint32_t s_p2_device_index;                            /* 0x465FF4 */
+/* [PORT ENHANCEMENT 2026-06] per-player device index for up to 9 split-screen
+ * players. [0]/[1] mirror s_p1/p2 (legacy Config.td5 + back-compat); [2..8] are
+ * persisted only in td5re_input.ini. 0 = keyboard, >=1 = 1-based joystick. */
+static uint32_t s_player_device_index[TD5_MAX_HUMAN_PLAYERS];
 static int32_t  s_ff_config[4];                               /* 0x464054, 0x46405C, 0x464058, 0x464060 */
-static uint32_t s_controller_bindings[18];                    /* 0x463FC4 */
+/* [PORT ENHANCEMENT 2026-06] runtime joystick binding table grown from 2 to 9
+ * players (9 dwords each). The legacy Config.td5 blob still carries only the
+ * first 18 dwords (2 players); players 3-9 persist via td5re_input.ini. */
+static uint32_t s_controller_bindings[TD5_MAX_HUMAN_PLAYERS * 9];    /* 0x463FC4 (first 18) */
 static uint32_t s_p1_device_desc[8];                          /* 0x465660 (write) / 0x4656A0 (read) */
 static uint32_t s_p2_device_desc[8];                          /* 0x465680 (write) / 0x4656C0 (read) */
 static uint32_t s_p1_device_desc_backup[8];                   /* 0x4656A0 (read target) */
@@ -255,10 +262,24 @@ uint32_t *td5_save_get_controller_bindings_mutable(void) { return s_controller_b
 uint32_t *td5_save_get_p1_custom_bindings_mutable(void)  { return s_p1_custom_bindings; }
 uint32_t *td5_save_get_p2_custom_bindings_mutable(void)  { return s_p2_custom_bindings; }
 
-/* Persisted per-player input device index (Config.td5 +0x20/+0x21):
+/* Persisted per-player input device index (Config.td5 +0x20/+0x21 for p1/p2):
  * 0 = keyboard, >=1 = 1-based joystick index. */
-uint32_t td5_save_get_p1_device_index(void)  { return s_p1_device_index; }
-uint32_t td5_save_get_p2_device_index(void)  { return s_p2_device_index; }
+uint32_t td5_save_get_p1_device_index(void)  { return s_player_device_index[0]; }
+uint32_t td5_save_get_p2_device_index(void)  { return s_player_device_index[1]; }
+
+/* [PORT ENHANCEMENT 2026-06] generic per-player device index accessors (0..8). */
+uint32_t td5_save_get_player_device_index(int player)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    return s_player_device_index[player];
+}
+void td5_save_set_player_device_index(int player, uint32_t idx)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
+    s_player_device_index[player] = idx;
+    if (player == 0) s_p1_device_index = idx;   /* keep legacy blob fields in sync */
+    if (player == 1) s_p2_device_index = idx;
+}
 
 static uint32_t s_split_screen_mode;                          /* 0x497A5C */
 static uint32_t s_catchup_assist;                             /* 0x465FF8 */
@@ -749,9 +770,9 @@ static void config_serialize_to_buffer(void)
     /* Game options: 7 dwords at offset 0x04. */
     memcpy(buf->game_options, &s_game_options, sizeof(buf->game_options));
 
-    /* Controller device indices. */
-    buf->p1_device_index = (uint8_t)s_p1_device_index;
-    buf->p2_device_index = (uint8_t)s_p2_device_index;
+    /* Controller device indices (legacy blob only stores p1/p2). */
+    buf->p1_device_index = (uint8_t)s_player_device_index[0];
+    buf->p2_device_index = (uint8_t)s_player_device_index[1];
 
     /* Force feedback config (4 dwords in non-sequential order matching original). */
     buf->ff_config_a = s_ff_config[0];  /* 0x464054 */
@@ -841,9 +862,13 @@ static void config_deserialize_from_buffer(void)
     /* Game options. */
     memcpy(&s_game_options, buf->game_options, sizeof(s_game_options));
 
-    /* Controller device indices. */
+    /* Controller device indices (legacy blob supplies p1/p2; mirror into the
+     * generic per-player array, players 3-9 default to keyboard until the
+     * td5re_input.ini overlay or the menu sets them). */
     s_p1_device_index = buf->p1_device_index;
     s_p2_device_index = buf->p2_device_index;
+    s_player_device_index[0] = s_p1_device_index;
+    s_player_device_index[1] = s_p2_device_index;
 
     /* Force feedback config. */
     s_ff_config[0] = buf->ff_config_a;
@@ -1688,8 +1713,10 @@ static int cfgini_write_input(void)
 
     cfgini_add(&w, "[Devices]\r\n");
     cfgini_add(&w, "; 0 = keyboard, >=1 = 1-based enumerated joystick index\r\n");
-    cfgini_add(&w, "Player1 = %u\r\n", (unsigned)s_p1_device_index);
-    cfgini_add(&w, "Player2 = %u\r\n\r\n", (unsigned)s_p2_device_index);
+    cfgini_add(&w, "; Player1..Player9 (N-way split-screen). Player1/2 also live in Config.td5.\r\n");
+    for (int pl = 0; pl < TD5_MAX_HUMAN_PLAYERS; pl++)
+        cfgini_add(&w, "Player%d = %u\r\n", pl + 1, (unsigned)s_player_device_index[pl]);
+    cfgini_add(&w, "\r\n");
 
     cfgini_add(&w, "[ForceFeedback]\r\n");
     cfgini_add(&w, "; Raw force-feedback config dwords (Config.td5 +0x22..0x2D)\r\n");
@@ -1697,9 +1724,9 @@ static int cfgini_write_input(void)
                s_ff_config[0], s_ff_config[1], s_ff_config[2], s_ff_config[3]);
 
     cfgini_add(&w, "[ControllerButtons]\r\n");
-    cfgini_add(&w, "; 18 raw joystick binding dwords [player*9 + slot]:\r\n");
+    cfgini_add(&w, "; raw joystick binding dwords [player*9 + slot], players 1..9:\r\n");
     cfgini_add(&w, ";   slot0 = active flag, slot1/2 = axis assignment, slot3..8 = button actions.\r\n");
-    for (int pl = 0; pl < 2; pl++)
+    for (int pl = 0; pl < TD5_MAX_HUMAN_PLAYERS; pl++)
         for (int sl = 0; sl < 9; sl++)
             cfgini_add(&w, "P%d_%d = %u\r\n", pl + 1, sl,
                        (unsigned)s_controller_bindings[pl * 9 + sl]);
@@ -1723,15 +1750,21 @@ static int cfgini_read_input(void)
     uint8_t *p2kb = (uint8_t *)s_p2_custom_bindings;
     char key[8];
 
-    s_p1_device_index = (uint32_t)td5_plat_ini_get_int(f, "Devices", "Player1", (int)s_p1_device_index);
-    s_p2_device_index = (uint32_t)td5_plat_ini_get_int(f, "Devices", "Player2", (int)s_p2_device_index);
+    for (int pl = 0; pl < TD5_MAX_HUMAN_PLAYERS; pl++) {
+        char dkey[12];
+        snprintf(dkey, sizeof dkey, "Player%d", pl + 1);
+        s_player_device_index[pl] = (uint32_t)td5_plat_ini_get_int(
+            f, "Devices", dkey, (int)s_player_device_index[pl]);
+    }
+    s_p1_device_index = s_player_device_index[0];   /* keep legacy fields in sync */
+    s_p2_device_index = s_player_device_index[1];
 
     s_ff_config[0] = cfgini_get_i32(f, "ForceFeedback", "A", s_ff_config[0]);
     s_ff_config[1] = cfgini_get_i32(f, "ForceFeedback", "B", s_ff_config[1]);
     s_ff_config[2] = cfgini_get_i32(f, "ForceFeedback", "C", s_ff_config[2]);
     s_ff_config[3] = cfgini_get_i32(f, "ForceFeedback", "D", s_ff_config[3]);
 
-    for (int pl = 0; pl < 2; pl++)
+    for (int pl = 0; pl < TD5_MAX_HUMAN_PLAYERS; pl++)
         for (int sl = 0; sl < 9; sl++) {
             snprintf(key, sizeof key, "P%d_%d", pl + 1, sl);
             s_controller_bindings[pl * 9 + sl] =

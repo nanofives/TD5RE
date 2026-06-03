@@ -217,10 +217,22 @@ static int  s_cup_unlock_tier;          /* DAT_004962a8           */
 
 /* Two-player mode flag (DAT_004962a0) */
 static int  s_two_player_mode;
-/* Split-screen display mode: 0=off, 1=on [CONFIRMED @ 0x420C70 g_twoPlayerSplitMode] */
-static int  s_split_screen_mode;           /* g_twoPlayerSplitMode   */
-/* Catch-up intensity level 0..9 (0=off) [CONFIRMED @ 0x4210B3 DAT_00465ff8] */
-static int  s_catchup_level;
+/* [PORT ENHANCEMENT 2026-06] Multiplayer Options split-layout picker state
+ * (replaces the original Two Player Options split-on/off toggle + CATCHUP level,
+ * both removed). The layout is chosen per local-human-count; see mp_split_layouts.
+ *   s_mp_layout_sel        — index into mp_split_layouts(num_human_players)
+ *   s_mp_missing_content[k] — stub content id for the k-th empty grid cell
+ *                             (the cell-content feature itself is deferred). */
+static int  s_mp_layout_sel = 0;
+static int  s_mp_missing_content[2] = { 0, 0 };
+/* Dynamic button-index bookkeeping for the rebuilt Multiplayer Options rows
+ * (the row set changes with the player count, so buttons are rebuilt live). */
+static int  s_mp_btn_players   = -1;
+static int  s_mp_btn_layout    = -1;
+static int  s_mp_btn_missing[2] = { -1, -1 };
+static int  s_mp_btn_ok        = -1;
+static int  s_mp_missing_count = 0;
+static int  s_mp_layout_optcount = 1;
 
 /* ScreenLocalizationInit bootstrap control [CONFIRMED @ 0x4269D0 g_attractModeControlEnabled]:
  * 0 = first entry (run full init), 1 = re-entry (skip init, go to menu),
@@ -469,23 +481,33 @@ static int  s_nocontroller_surface = 0;     /* NoControllerText.tga (376x20 warn
 static int  s_car_preview_prev_surface;
 static int  s_car_preview_next_surface;
 
+/* ---- Screen [14] ControlOptions revamp state (PORT ENHANCEMENT 2026-06) ---- */
+/* Which player (0-based) the Control Options screen is currently configuring,
+ * and the live selectable range (recomputed on entry from the connected device
+ * count — "hot-swappable"). */
+static int      s_ctrl_opts_player      = 0;
+static int      s_ctrl_opts_max_players = 1;
+
 /* ---- Screen [18] ControllerBinding persistent state ---- */
 /* [CONFIRMED @ 0x40FE00 / DAT_004974b8]: which player is being configured */
 static int      s_ctrl_player        = 0;
-/* [CONFIRMED @ 0x40FE00 / DAT_00490b94]: device source index */
+/* [CONFIRMED @ 0x40FE00 / DAT_00490b94]: device source index (0=kbd/1=pad/2=stick) */
 static int      s_ctrl_input_source  = 0;
-/* [CONFIRMED @ 0x40FE00 / DAT_00490ba4]: joystick button slot count */
-static int      s_ctrl_num_buttons   = 0;
-/* [CONFIRMED @ 0x40FE00 / DAT_00490b90/8c/88]: joystick bitmask shift register */
+/* Joystick raw-button snapshot at capture-begin (rising-edge detection). */
 static uint32_t s_ctrl_js_prev       = 0;
-static uint32_t s_ctrl_js_curr       = 0;
-static uint32_t s_ctrl_js_held       = 0;
-/* [CONFIRMED @ 0x40FE00 / DAT_00490b84]: keyboard capture slot counter */
-static int      s_ctrl_kb_slot       = 0;
+/* [PORT ENHANCEMENT 2026-06] per-button remap: which action row the Configure
+ * screen has selected, and whether it is currently capturing that action. */
+static int      s_ctrl_sel_action    = 0;
+static int      s_ctrl_capturing     = 0;
 /* [CONFIRMED @ 0x40FE00 / DAT_00464054]: 16-byte scancode capture buffer */
 static uint8_t  s_ctrl_kb_scancodes[16];
-/* [CONFIRMED @ 0x40FE00 / DAT_00463FC8]: per-player joystick binding rows */
-static uint32_t s_ctrl_binding_table[2][9];
+/* [PORT ENHANCEMENT 2026-06] keyboard state snapshot at capture-begin, so a key
+ * already held when remap starts (e.g. the Enter that confirmed the row) is
+ * ignored — only a fresh rising-edge press is accepted. */
+static uint8_t  s_ctrl_capture_kb_snapshot[256];
+/* [CONFIRMED @ 0x40FE00 / DAT_00463FC8]: per-player joystick binding rows.
+ * [PORT ENHANCEMENT 2026-06] grown from [2] to [TD5_MAX_HUMAN_PLAYERS] players. */
+static uint32_t s_ctrl_binding_table[TD5_MAX_HUMAN_PLAYERS][9];
 
 /* Action label strings for keyboard capture prompt (SNK_ControlText slots 0-9)
  * [CONFIRMED @ 0x40FE00 case 0x19]: index = s_ctrl_kb_slot (0..9), iterated
@@ -509,30 +531,11 @@ static const char * const k_ctrl_action_labels[10] = {
     "REAR VIEW",    /* slot 9 — DIK_X     0x2D */
 };
 
-/* Descriptive labels for joystick binding values 2-10.
- *
- * [CONFIRMED @ 0x40FE00 (ScreenControllerBindingPage)]: the binding "value"
- * cycles 2..10 (wraps back to 2 when incremented past 10). It is NOT an index
- * into a LANGUAGE.DLL string table — the original joystick screen renders each
- * row from SNK_ButtonTxt ("BUTTON", LANGUAGE.DLL @ 0x100076BC) plus a 1-based
- * digit, and the stored value is an internal STATE CODE consumed by the
- * axis/button mask logic: value 2 -> axis-direction mask bit 1, value 3 ->
- * axis-direction mask bit 2, values 4..10 -> button codes. (The earlier
- * "SNK_ControlText[value*16]" / placeholder note was wrong; verified there is
- * no per-value label asset.) The port draws a value column as a UI aid, so
- * these strings are grounded in the confirmed state-code semantics, using the
- * real "BUTTON" wording for the button codes. */
-static const char * const k_js_value_labels[9] = {
-    "AXIS +",    /* value 2  — axis direction, mask bit 1 */
-    "AXIS -",    /* value 3  — axis direction, mask bit 2 */
-    "BUTTON 1",  /* value 4 */
-    "BUTTON 2",  /* value 5 */
-    "BUTTON 3",  /* value 6 */
-    "BUTTON 4",  /* value 7 */
-    "BUTTON 5",  /* value 8 */
-    "BUTTON 6",  /* value 9 */
-    "BUTTON 7",  /* value 10 */
-};
+/* [PORT ENHANCEMENT 2026-06] The old k_js_value_labels[] table (binding values
+ * 2..10 → "AXIS +/-" / "BUTTON 1..7") was retired with the sequential joystick
+ * binding screen. The per-button remap now stores value = physical_button + 2
+ * (the platform poll reads phys = value-2) and displays "BTN n" directly, which
+ * matches what the user actually pressed. */
 
 /* ========================================================================
  * Frontend Rendering Infrastructure
@@ -1965,6 +1968,60 @@ static int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids,
     return 0;
 }
 
+/* ========================================================================
+ * Multiplayer Options — split-screen layout tables (PORT ENHANCEMENT 2026-06)
+ *
+ * For N local human players, the selectable split layouts. The N players fill
+ * the first N cells of a cols x rows grid (row-major); any remaining cells are
+ * "missing" and get a (deferred) content selector. Per the design:
+ *   1: single   2: L|R or U/D   3: L|R / U/D / 2x2(+1 empty)   4: 2x2
+ *   5: 3x2 or 2x3 (+1 empty)    6: 3x2 or 2x3    7: 3x3 (+2 empty)
+ *   8: 3x3 (+1 empty)           9: 3x3
+ * ======================================================================== */
+typedef struct { const char *label; int cols; int rows; } MpSplitLayout;
+
+static const MpSplitLayout *mp_split_layouts(int n, int *count)
+{
+    static const MpSplitLayout L1[]   = { {"SINGLE", 1, 1} };
+    static const MpSplitLayout L2[]   = { {"LEFT / RIGHT", 2, 1}, {"UP / DOWN", 1, 2} };
+    static const MpSplitLayout L3[]   = { {"LEFT / RIGHT", 3, 1}, {"UP / DOWN", 1, 3}, {"2X2 GRID", 2, 2} };
+    static const MpSplitLayout L4[]   = { {"2X2 GRID", 2, 2} };
+    static const MpSplitLayout L56[]  = { {"3X2 GRID", 3, 2}, {"2X3 GRID", 2, 3} };
+    static const MpSplitLayout L789[] = { {"3X3 GRID", 3, 3} };
+    switch (n) {
+        case 1:  if (count) *count = 1; return L1;
+        case 2:  if (count) *count = 2; return L2;
+        case 3:  if (count) *count = 3; return L3;
+        case 4:  if (count) *count = 1; return L4;
+        case 5:
+        case 6:  if (count) *count = 2; return L56;
+        default: if (count) *count = 1; return L789;  /* 7,8,9 (callers clamp n<=9) */
+    }
+}
+
+/* Resolve the active layout for (n, sel) → cols/rows + missing-cell count. */
+static void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing)
+{
+    int cnt = 1;
+    const MpSplitLayout *opts = mp_split_layouts(n, &cnt);
+    int c, r, m;
+    if (sel < 0 || sel >= cnt) sel = 0;
+    c = opts[sel].cols;
+    r = opts[sel].rows;
+    m = c * r - n;
+    if (m < 0) m = 0;
+    if (m > 2) m = 2;
+    if (cols)    *cols = c;
+    if (rows)    *rows = r;
+    if (missing) *missing = m;
+}
+
+/* What to display in an empty split-screen cell. STUB options for now — the
+ * actual rendering of map/standings into the empty pane is a deferred follow-up
+ * (the user explicitly asked to wire only the selector at this stage). */
+static const char *const k_mp_missing_content[] = { "EMPTY", "MAP", "STANDINGS" };
+#define MP_MISSING_CONTENT_COUNT ((int)(sizeof(k_mp_missing_content) / sizeof(k_mp_missing_content[0])))
+
 static void frontend_init_race_schedule(void) {
     int i;
     int slot_active[TD5_MAX_RACER_SLOTS]  = {0};
@@ -1989,24 +2046,13 @@ static void frontend_init_race_schedule(void) {
                         ? s_attract_track
                         : s_selected_track;
 
-    /* Propagate split-screen selection into global state.
-     * s_split_screen_mode (0/1) is set by Screen_TwoPlayerOptions:
-     *   0 = horizontal split, 1 = vertical split (mirrors gSplitScreenMode @ 0x497A5C).
-     * Apply +1 to convert to td5_game_init_viewport_layout case values:
-     *   case 1 = horizontal, case 2 = vertical  (case 0 = single player).
-     * This matches the original: gRaceViewportLayoutMode = gSplitScreenMode + 1
-     * [CONFIRMED @ 0x42AE1E: gRaceViewportLayoutMode = (char)DAT_00497a5c + 1]
-     * g_td5.viewport_count is derived later by td5_game_init_viewport_layout().
-     * g_td5.network_active=0 ensures local split-screen path is taken. */
-
-    /* Quick Race player setup (PORT ENHANCEMENT — infra to later replace the
-     * Two-Player menu). Only the Quick Race screen drives these counts; every
-     * other launch flow keeps the legacy single-player / two_player behavior.
-     * effective humans = min(num_human_players, 2) because the engine has only
-     * single + 2 split-screen layouts (orig InitializeRaceViewportLayout
-     * 0x42C2B0; gSplitScreenMode+1, masked &1). Requested humans beyond 2 run
-     * as AI for now (td5_game InitRace) so no car sits dead; N-way split is a
-     * deferred follow-up. Defaults (1 human + 5 AI) reproduce the legacy grid. */
+    /* --- Local human count + split-screen layout (PORT ENHANCEMENT 2026-06) ---
+     * s_num_human_players is the single source of truth, set by EITHER the Quick
+     * Race "Players" selector OR the rebuilt Multiplayer Options "PLAYERS" button
+     * (both edit the same static). The chosen layout (s_mp_layout_sel) resolves
+     * to a cols x rows grid consumed by td5_game_init_viewport_layout. The
+     * untouched default (1 human + 5 AI) stays byte-faithful to the legacy grid.
+     * g_td5.network_active=0 ensures the local split-screen path is taken. */
     if (s_current_screen == TD5_SCREEN_QUICK_RACE) {
         int qr_humans = s_num_human_players;
         int qr_opp    = s_num_ai_opponents;
@@ -2016,35 +2062,52 @@ static void frontend_init_race_schedule(void) {
         if (qr_opp > TD5_MAX_RACER_SLOTS - qr_humans) qr_opp = TD5_MAX_RACER_SLOTS - qr_humans;
         g_td5.num_human_players = qr_humans;
         g_td5.num_ai_opponents  = qr_opp;
+    } else if (s_two_player_mode != 0) {
+        /* Two-player / multiplayer launch path (main-menu TWO PLAYER button +
+         * split toggle). Honor the Multiplayer Options player count (>=2). */
+        int humans = (s_num_human_players > 1) ? s_num_human_players : 2;
+        int ai;
+        if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
+        ai = TD5_LEGACY_RACE_SLOTS - humans;
+        if (ai < 0) ai = 0;
+        g_td5.num_human_players = humans;
+        g_td5.num_ai_opponents  = ai;
     } else {
-        g_td5.num_human_players = (s_two_player_mode != 0) ? 2 : 1;
-        /* Legacy default = faithful 6-car grid (1 human + 5 AI). The >6-racer
-         * field is opt-in via Quick Race config / the SplitScreenPlayers knob. */
-        g_td5.num_ai_opponents  = TD5_LEGACY_RACE_SLOTS - g_td5.num_human_players;
+        /* Single-player (career/cup/single quick race): faithful 6-car grid. */
+        g_td5.num_human_players = 1;
+        g_td5.num_ai_opponents  = TD5_LEGACY_RACE_SLOTS - 1;
     }
-    /* [PORT ENHANCEMENT] N-way split-screen: each local human gets its own
-     * viewport (up to TD5_MAX_VIEWPORTS). The legacy eff_humans=2 cap is gone —
-     * the Quick Race Players button now drives the live split count. */
+
     eff_humans = g_td5.num_human_players;
     if (eff_humans < 1) eff_humans = 1;
     if (eff_humans > TD5_MAX_VIEWPORTS) eff_humans = TD5_MAX_VIEWPORTS;
 
-    if (s_current_screen == TD5_SCREEN_QUICK_RACE) {
-        /* >=2 humans -> split. For exactly 2 the 2P-options shadow picks
-         * top/bottom vs left/right; for 3+ the viewport ladder in
-         * td5_game_init_viewport_layout decides the grid (3=strips, 4=2x2, ...). */
-        if (eff_humans >= 2)
-            g_td5.split_screen_mode = (eff_humans == 2) ? (s_split_screen_mode + 1) : 1;
-        else
-            g_td5.split_screen_mode = 0;
+    /* Resolve the chosen split layout. For >=2 humans split is on and the layout
+     * grid (cols x rows) overrides the automatic ladder in
+     * td5_game_init_viewport_layout. split_screen_mode keeps its legacy meaning
+     * for HUD / minimap / sound consumers: 0=single, 2=two-player left|right,
+     * 1=any other split "on". */
+    if (eff_humans >= 2) {
+        int cols = 0, rows = 0, missing = 0;
+        mp_resolve_layout(eff_humans, s_mp_layout_sel, &cols, &rows, &missing);
+        g_td5.split_grid_cols = cols;
+        g_td5.split_grid_rows = rows;
+        g_td5.split_screen_mode = (eff_humans == 2 && cols == 2) ? 2 : 1;
+        g_td5.split_missing_content[0] = (missing > 0) ? s_mp_missing_content[0] : 0;
+        g_td5.split_missing_content[1] = (missing > 1) ? s_mp_missing_content[1] : 0;
     } else {
-        g_td5.split_screen_mode = (s_two_player_mode != 0) ? (s_split_screen_mode + 1) : 0;
+        g_td5.split_grid_cols = 0;
+        g_td5.split_grid_rows = 0;
+        g_td5.split_screen_mode = 0;
+        g_td5.split_missing_content[0] = 0;
+        g_td5.split_missing_content[1] = 0;
     }
     g_td5.network_active    = 0;
     TD5_LOG_I(LOG_TAG,
-              "InitRaceSchedule: split=%d humans=%d opponents=%d eff_humans=%d two_player_mode=%d",
-              g_td5.split_screen_mode, g_td5.num_human_players, g_td5.num_ai_opponents,
-              eff_humans, s_two_player_mode);
+              "InitRaceSchedule: split=%d grid=%dx%d humans=%d opp=%d eff=%d 2p=%d layout_sel=%d",
+              g_td5.split_screen_mode, g_td5.split_grid_cols, g_td5.split_grid_rows,
+              g_td5.num_human_players, g_td5.num_ai_opponents, eff_humans,
+              s_two_player_mode, s_mp_layout_sel);
 
     /* Slot 0 = player, always active */
     slot_active[0]  = 1;
@@ -4901,44 +4964,37 @@ static void frontend_render_music_test_overlay(float sx, float sy) {
 }
 
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
-    /* [FIXED 2026-06-01, layout corrected] Orig (0x420c70 cases 4/5/6) composites a 224x120
-     * value panel at screen (394,97)=(cx+0x4a, cy-0x8f): the SplitScreen.tga icon at panel-top
-     * (src_y=mode*32, 64x32) with the split-mode NAME text over it at panel-local y=0, and the
-     * catchup NUMBER at panel-local y=0x50 (80). The prior port drew the value text via
-     * frontend_draw_value_centered at button[i].y+6, which collided with the icon at y=97.
-     * Also: catchup displays level+1 (1..10), not raw 0..9. [CONFIRMED @0x420f40/0x420f90/
-     * 0x420fbf: SNK_Split_Modes[mode], "%d" of g_twoPlayerCatchupAssist+1, centered in the
-     * panel.] Value column X = 394 (cx+0x4a). */
-    const char *split_modes[] = { "LEFT/RIGHT", "UP/DOWN" };
-    char catchup_buf[8];
-    float panel_cx = (394.0f + 112.0f) * sx;   /* panel x=394, centered text at +0xe0/2=112 */
+    /* [PORT ENHANCEMENT 2026-06] Multiplayer Options value column. Draws the
+     * current value for each dynamic row (PLAYERS, SPLIT LAYOUT, DISPLAY k) at
+     * the standard value-column X, aligned to each row's button Y. */
+    char buf[16];
 
-    if (!s_buttons[0].active) return;
+    if (s_mp_btn_players < 0 || !s_buttons[s_mp_btn_players].active) return;
     if (!s_anim_complete) return;
 
-    /* SplitScreen.tga icon at panel-top (394,97), 64x32, row = mode. */
-    if (s_split_screen_surface > 0) {
-        int slot = s_split_screen_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-            int sh = s_surfaces[slot].height;
-            if (sh > 0) {
-                int   mode = s_split_screen_mode;  /* [CONFIRMED @ 0x420C70 g_twoPlayerSplitMode] */
-                float v_row = 32.0f / (float)sh;
-                float v0    = (float)mode * v_row;
-                float v1    = v0 + v_row;
-                td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-                fe_draw_quad(394.0f * sx, 97.0f * sy, 64.0f * sx, 32.0f * sy,
-                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
-                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            }
-        }
+    /* PLAYERS = N */
+    snprintf(buf, sizeof buf, "%d", s_num_human_players);
+    frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_players].y + 6, buf, 0xFFFFFFFF);
+
+    /* SPLIT LAYOUT = current layout label */
+    if (s_mp_btn_layout >= 0 && s_buttons[s_mp_btn_layout].active) {
+        int cnt = 1;
+        const MpSplitLayout *opts = mp_split_layouts(s_num_human_players, &cnt);
+        int sel = s_mp_layout_sel;
+        if (sel < 0 || sel >= cnt) sel = 0;
+        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_layout].y + 6,
+                                     opts[sel].label, 0xFFFFFFFF);
     }
 
-    /* Split-mode NAME text at panel-local y=0 (screen y=97), centered; catchup NUMBER
-     * (level+1) at panel-local y=0x50 (screen y=177), centered. */
-    snprintf(catchup_buf, sizeof(catchup_buf), "%d", s_catchup_level + 1);
-    fe_draw_text_centered(panel_cx, 97.0f * sy,  split_modes[s_split_screen_mode & 1], 0xFFFFFFFF, sx, sy);
-    fe_draw_text_centered(panel_cx, 177.0f * sy, catchup_buf, 0xFFFFFFFF, sx, sy);
+    /* DISPLAY k = stub content label for each empty cell (rendering deferred). */
+    for (int k = 0; k < s_mp_missing_count && k < 2; k++) {
+        int v;
+        if (s_mp_btn_missing[k] < 0 || !s_buttons[s_mp_btn_missing[k]].active) continue;
+        v = s_mp_missing_content[k];
+        if (v < 0 || v >= MP_MISSING_CONTENT_COUNT) v = 0;
+        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_missing[k]].y + 6,
+                                     k_mp_missing_content[v], 0xFFFFFFFF);
+    }
 }
 
 /* ScreenLanguageSelect overlay: full-screen LanguageScreen.tga bg + 4 flag IMAGE tiles
@@ -5444,62 +5500,48 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
 }
 
 static void frontend_render_control_options_overlay(float sx, float sy) {
-    if (!s_anim_complete || s_control_options_surface <= 0) return;
-    int slot = s_control_options_surface - 1;
-    if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
+    /* [PORT ENHANCEMENT 2026-06] Single-player-selector layout:
+     *   row 0 (y=97)  PLAYER value (the selected 1-based player)
+     *   row 1 (y=177) CONTROLLER SELECTION: device-type icon + device name. */
+    char buf[40];
+    int player, type, cls, source;
 
-    /* Controllers.tga: 64x32 device-type icon, color-keyed (black transparent).
-     * [CONFIRMED @0x0041df20 case 6]: P1 icon dest (uVar3+0x4a, uVar5-0x8f)=(394,145);
-     * P2 icon (394, uVar5-0x17)=(394,217). src (0, class*32). The icon sits at the LEFT
-     * of a 224-wide name panel anchored at the same (x,y); the device name is drawn
-     * centered within that panel (base x 0x4a), i.e. to the RIGHT of the icon. */
-    int sh = s_surfaces[slot].height;
-    if (sh <= 0) return;
+    if (!s_anim_complete) return;
 
-    float icon_w = 64.0f * sx;
-    float icon_h = 32.0f * sy;
-    float v_row  = 32.0f / (float)sh;
-    int p1_type = td5_input_get_device_type(0);
-    int p2_type = td5_input_get_device_type(1);
-    float p1_v0 = (float)p1_type * v_row, p1_v1 = p1_v0 + v_row;
-    float p2_v0 = (float)p2_type * v_row, p2_v1 = p2_v0 + v_row;
-    /* [FIXED 2026-06-02] device icons align with the PLAYER 1 / PLAYER 2 button ROWS:
-     * P1 row y=97, P2 row y=217 (orig panel y = halfH-0x8f = 97 for P1). The prior p1_y=145
-     * was set when the buttons themselves were mis-positioned (they're now runtime-correct). */
-    float p1_y = 97.0f, p2_y = 217.0f;
+    player = s_ctrl_opts_player;
+    if (player < 0) player = 0;
+    if (player >= TD5_MAX_HUMAN_PLAYERS) player = TD5_MAX_HUMAN_PLAYERS - 1;
 
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(394.0f * sx, p1_y * sy, icon_w, icon_h,
-                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, p1_v0, 1.0f, p1_v1);
-    fe_draw_quad(394.0f * sx, p2_y * sy, icon_w, icon_h,
-                 0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, p2_v0, 1.0f, p2_v1);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    /* PLAYER value (row 0). */
+    snprintf(buf, sizeof buf, "%d", player + 1);
+    frontend_draw_value_centered(sx, sy, 97 + 6, buf, 0xFFFFFFFF);
 
-    /* [FIXED 2026-06-01] Device-NAME text TO THE RIGHT of the icon, vertically aligned
-     * with it. [CONFIRMED @0x0041df20]: SNK_Ctrl_Modes[class] — keyboard => "%s", others
-     * => "%s %d" (name + 1-based device index). class: 0=KEYBOARD/1=JOYSTICK/2=JOYPAD/
-     * 3=WHEEL/4=<NONE>. The original draws the name centered in the 224-wide (0xe0) panel
-     * starting at panel base x=0x4a; with the 64px icon at the panel's left edge the name
-     * reads to the right of the icon. Port: left-align the name just right of the icon
-     * (icon ends at 394+64=458) at the icon's vertical center. td5_input_get_device_type
-     * returns 0=kbd/1=joypad/2=joystick; remap to SNK_Ctrl_Modes order. */
+    /* CONTROLLER SELECTION (row 1, y=177): device-type icon + name.
+     * td5_input_get_device_type: 0=keyboard, 1=joypad, 2=joystick/wheel — used
+     * directly as the Controllers.tga 64x32 row; cls remaps to the name order. */
+    type   = td5_input_get_device_type(player);
+    source = td5_input_get_input_source(player);
+    cls = (type == 0) ? 0 : (type == 2) ? 1 : (type == 1) ? 2 : 4;
+
+    if (s_control_options_surface > 0) {
+        int slot = s_control_options_surface - 1;
+        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use &&
+            s_surfaces[slot].height > 0) {
+            float v_row = 32.0f / (float)s_surfaces[slot].height;
+            float v0 = (float)type * v_row, v1 = v0 + v_row;
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(394.0f * sx, 177.0f * sy, 64.0f * sx, 32.0f * sy,
+                         0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        }
+    }
     {
         static const char *ctrl_modes[5] = { "KEYBOARD", "JOYSTICK", "JOYPAD", "WHEEL", "<NONE>" };
-        int p_types[2] = { p1_type, p2_type };
-        float icon_y[2] = { p1_y, p2_y };
-        int pi;
-        for (pi = 0; pi < 2; pi++) {
-            int t = p_types[pi];
-            int cls = (t == 0) ? 0 : (t == 2) ? 1 : (t == 1) ? 2 : 4;
-            char buf[40];
-            if (cls == 0)
-                snprintf(buf, sizeof(buf), "%s", ctrl_modes[cls]);
-            else
-                snprintf(buf, sizeof(buf), "%s %d", ctrl_modes[cls],
-                         td5_input_get_input_source(pi) + 1);
-            /* Right of the 64px icon (x=394..458), vertically centered on the 32px icon. */
-            fe_draw_text(466.0f * sx, (icon_y[pi] + 8.0f) * sy, buf, 0xFFFFFFFF, sx, sy);
-        }
+        if (cls == 0)
+            snprintf(buf, sizeof buf, "%s", ctrl_modes[0]);
+        else
+            snprintf(buf, sizeof buf, "%s %d", ctrl_modes[cls], source + 1);
+        fe_draw_text(466.0f * sx, (177.0f + 8.0f) * sy, buf, 0xFFFFFFFF, sx, sy);
     }
 }
 
@@ -5508,115 +5550,81 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
  * Original: FUN_0040FE00 draws the detected device icon from individual TGAs.
  * The Control Options screen (14) uses Controllers.TGA sprite sheet instead;
  * the binding screen (18) uses per-type icon TGAs. */
+/* Short human-readable name for a DirectInput scancode (common driving keys;
+ * falls back to hex). [PORT ENHANCEMENT 2026-06] */
+static const char *ctrl_scancode_name(unsigned sc)
+{
+    static char hexbuf[8];
+    switch (sc) {
+        case 0x00: return "-";
+        case 0x01: return "ESC";    case 0x0E: return "BKSP";  case 0x0F: return "TAB";
+        case 0x1C: return "ENTER";  case 0x1D: return "LCTRL"; case 0x38: return "ALT";
+        case 0x2A: return "LSHIFT"; case 0x36: return "RSHIFT";case 0x39: return "SPACE";
+        case 0xC8: return "UP";     case 0xD0: return "DOWN";
+        case 0xCB: return "LEFT";   case 0xCD: return "RIGHT";
+        case 0x02: return "1"; case 0x03: return "2"; case 0x04: return "3";
+        case 0x05: return "4"; case 0x06: return "5"; case 0x07: return "6";
+        case 0x08: return "7"; case 0x09: return "8"; case 0x0A: return "9";
+        case 0x0B: return "0";
+        case 0x10: return "Q"; case 0x11: return "W"; case 0x12: return "E";
+        case 0x13: return "R"; case 0x14: return "T"; case 0x15: return "Y";
+        case 0x16: return "U"; case 0x17: return "I"; case 0x18: return "O";
+        case 0x19: return "P";
+        case 0x1E: return "A"; case 0x1F: return "S"; case 0x20: return "D";
+        case 0x21: return "F"; case 0x22: return "G"; case 0x23: return "H";
+        case 0x24: return "J"; case 0x25: return "K"; case 0x26: return "L";
+        case 0x2C: return "Z"; case 0x2D: return "X"; case 0x2E: return "C";
+        case 0x2F: return "V"; case 0x30: return "B"; case 0x31: return "N";
+        case 0x32: return "M";
+        default: break;
+    }
+    snprintf(hexbuf, sizeof hexbuf, "0x%02X", sc & 0xFF);
+    return hexbuf;
+}
+
+/* [PORT ENHANCEMENT 2026-06] Per-button remap overlay. The action rows are real
+ * buttons (drawn by the button renderer); this draws the current binding in a
+ * value column beside each row, the capture prompt on the row being remapped,
+ * and a header + hint line. */
 static void frontend_render_controller_binding_overlay(float sx, float sy) {
+    int rows, kbd, j;
     if (!s_anim_complete) return;
+    if (s_inner_state != 10) return;   /* only the interactive list state shows values */
 
-    /* Controller type icon (per-type TGA centered at y=120). [FIXED 2026-06-01] Do NOT draw
-     * it during the keyboard-capture states (20/25/26/27): those show the "PRESS THE KEY TO
-     * USE FOR <action>" prompt at y=85-145, and the y=120 icon collided with the action label
-     * (read as a black/keyboard box behind "LEFT"). The device icon belongs to the idle /
-     * joystick-binding view, not the per-key capture prompt. */
-    int kb_capture = (s_ctrl_input_source == 0 &&
-                      (s_inner_state == 20 || s_inner_state == 25 ||
-                       s_inner_state == 26 || s_inner_state == 27));
-    int controller_type = td5_input_get_device_type(0);
-    int icon_surface = s_keyboard_icon_surface;
-    if (controller_type == 1) icon_surface = s_joypad_icon_surface;
-    if (controller_type == 2) icon_surface = s_joystick_icon_surface;
+    kbd  = (s_ctrl_input_source == 0);
+    rows = kbd ? 10 : 6;
 
-    if (!kb_capture && icon_surface > 0) {
-        int slot = icon_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-            float icon_w = (float)s_surfaces[slot].width  * sx;
-            float icon_h = (float)s_surfaces[slot].height * sy;
-            float icon_x = (320.0f - (float)s_surfaces[slot].width * 0.5f) * sx;
-            float icon_y = 120.0f * sy;
-            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_quad(icon_x, icon_y, icon_w, icon_h,
-                         0xFFFFFFFF, s_surfaces[slot].tex_page,
-                         0.0f, 0.0f, 1.0f, 1.0f);
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        }
+    {
+        char hdr[48];
+        snprintf(hdr, sizeof hdr, "CONTROLLER SETUP - PLAYER %d", s_ctrl_player + 1);
+        fe_draw_text(120.0f * sx, 56.0f * sy, hdr, 0xFFCCCCCC, sx * 0.8f, sy * 0.8f);
     }
 
-    /* ---------------------------------------------------------------
-     * Joystick binding list — active during state 10 (interactive).
-     *
-     * [CONFIRMED @ 0x40FE00 case 10]:
-     *   Action label at x=0xa0 (160) on 448×216 surface.
-     *   Row y = uStack_14 + 0x20 + i * 0x18, where
-     *   uStack_14 = iVar13 + num_buttons * (-12) + 0x9a.
-     * [CONFIRMED 2026-06-01 @0x0040fe00 state 10] The 448x216 binding-list panel blits
-     * at dest (cx-0xb0, cy-5-0xc*count) = (144, cy-5-0xc*count); at 640x480 with 8 buttons
-     * that's (144,139). Action label x = panel_x + 0xa0 (160). Replaces the (96,130) estimate.
-     * --------------------------------------------------------------- */
-    if (s_ctrl_input_source != 0 && s_inner_state == 10) {
-        int   num = s_ctrl_num_buttons;
-        float panel_x  = 144.0f * sx;                /* cx - 0xb0 = 320-176 */
-        float origin_x = panel_x;
-        float col_act_x = panel_x + 160.0f * sx;     /* action column at panel_x + 0xa0 */
-        /* Panel top dest Y = cy - 5 - 0xc*count; rows within start at +0x20, step 0x18. */
-        float panel_y  = (240.0f - 5.0f - 12.0f * (float)num) * sy;
-        float y_first  = panel_y + 32.0f * sy;
-        float ts = 0.75f;
-
-        fe_draw_text(origin_x,          y_first - 20.0f * sy, "BUTTON", 0xFF888888, sx*ts, sy*ts);
-        fe_draw_text(col_act_x,         y_first - 20.0f * sy, "ACTION", 0xFF888888, sx*ts, sy*ts);
-
-        for (int i = 0; i < num; i++) {
-            float row_y = y_first + (float)(i * 24) * sy;
-            if (row_y > 450.0f * sy) break;
-
-            char btn_name[8];
-            snprintf(btn_name, sizeof(btn_name), "BTN%d", i + 1);
-            fe_draw_text(origin_x, row_y, btn_name, 0xFFBBBBBB, sx*ts, sy*ts);
-
-            uint32_t bval = s_ctrl_binding_table[s_ctrl_player][i];
-            const char *aname = "---";
-            if (bval >= 2 && bval <= 10)
-                aname = k_js_value_labels[bval - 2];
-            fe_draw_text(col_act_x, row_y, aname, 0xFFFFFFFF, sx*ts, sy*ts);
+    for (j = 0; j < rows && j < s_button_count; j++) {
+        const char *val;
+        char vb[12];
+        uint32_t col;
+        if (!s_buttons[j].active) continue;
+        col = (s_ctrl_capturing && j == s_ctrl_sel_action) ? 0xFF33FF33u : 0xFFFFFFFFu;
+        if (s_ctrl_capturing && j == s_ctrl_sel_action) {
+            val = kbd ? "PRESS A KEY..." : "PRESS A BUTTON...";
+        } else if (kbd) {
+            val = ctrl_scancode_name(s_ctrl_kb_scancodes[j]);
+        } else {
+            uint32_t bv = s_ctrl_binding_table[s_ctrl_player][3 + j];
+            if (bv >= 2 && bv <= 10) { snprintf(vb, sizeof vb, "BTN %u", bv - 1u); val = vb; }
+            else val = "-";
         }
-        TD5_LOG_D(LOG_TAG, "CtrlBind overlay: joystick path, player=%d num=%d",
-                  s_ctrl_player, num);
+        /* value column just right of the 0x100-wide row button (x 120..376). */
+        fe_draw_text(392.0f * sx, (float)(s_buttons[j].y + 4) * sy, val, col,
+                     sx * 0.8f, sy * 0.8f);
     }
 
-    /* ---------------------------------------------------------------
-     * Keyboard capture prompt — shown during states 20/25/26/27.
-     *
-     * [CONFIRMED @ 0x40FE00 case 0x19] action label at y=0x18 (24) on a 448×64 header
-     * surface blitted at dest (cx-0xc8, cy-0x9f) = (120, 81). So the action label sits at
-     * canvas y = 81 + 24 = 105; the prompt line above it. Prompt text = SNK_PressKeyTxt =
-     * "PRESS THE KEY TO USE FOR". [origin RE-confirmed 2026-06-01, replaces y=130 estimate.] */
-    if (s_ctrl_input_source == 0 &&
-        (s_inner_state == 20 || s_inner_state == 25 ||
-         s_inner_state == 26 || s_inner_state == 27)) {
-        float cx = 320.0f * sx;
-        float hdr_y = 81.0f * sy;            /* 448x64 header surface dest top */
-
-        static const char k_prompt[] = "PRESS THE KEY TO USE FOR";  /* SNK_PressKeyTxt */
-        float pw = fe_measure_text(k_prompt, sx);
-        fe_draw_text(cx - pw * 0.5f, hdr_y + 4.0f * sy, k_prompt, 0xFFCCCCCC, sx, sy);
-
-        int slot_idx = s_ctrl_kb_slot;
-        if (slot_idx >= 10) slot_idx = 9;
-        const char *aname = k_ctrl_action_labels[slot_idx];
-        /* [FIXED 2026-06-01] action label at the header's y=0x18 (24) in NORMAL font size.
-         * The prior 1.3x scale stretched the BodyText glyph cells (exposing their black
-         * inter-glyph background = the "black box" look) AND its taller line collided with
-         * the counter below. Original draws this at the standard font size. */
-        float aw = fe_measure_text(aname, sx);
-        fe_draw_text(cx - aw * 0.5f, hdr_y + 24.0f * sy, aname, 0xFFFFFFFF, sx, sy);
-
-        /* Progress counter is a PORT-ONLY UX addition (original has no "%d / 10" line);
-         * anchored further below so it never collides with the action label. */
-        char prog[16];
-        snprintf(prog, sizeof(prog), "%d / 10", s_ctrl_kb_slot);
-        float pgw = fe_measure_text(prog, sx * 0.8f);
-        fe_draw_text(cx - pgw * 0.5f, hdr_y + 60.0f * sy, prog, 0xFF999999, sx * 0.8f, sy * 0.8f);
-
-        TD5_LOG_D(LOG_TAG, "CtrlBind overlay: keyboard path, slot=%d action=%s",
-                  s_ctrl_kb_slot, aname);
+    {
+        const char *hint = s_ctrl_capturing
+            ? "PRESS A KEY / BUTTON   (ESC = CANCEL)"
+            : "SELECT AN ACTION, CONFIRM TO REMAP IT";
+        fe_draw_text(120.0f * sx, 362.0f * sy, hint, 0xFF999999, sx * 0.65f, sy * 0.65f);
     }
 }
 
@@ -7115,7 +7123,13 @@ void td5_frontend_render_ui_rects(void) {
             for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
-            for (int i = 0; i <= 1; i++) fe_draw_option_arrows(i, sx, sy);
+            /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,
+             * SPLIT LAYOUT only when >1 layout exists, plus each DISPLAY row. */
+            if (s_mp_btn_players >= 0) fe_draw_option_arrows(s_mp_btn_players, sx, sy);
+            if (s_mp_btn_layout >= 0 && s_mp_layout_optcount > 1)
+                fe_draw_option_arrows(s_mp_btn_layout, sx, sy);
+            for (int i = 0; i < s_mp_missing_count && i < 2; i++)
+                if (s_mp_btn_missing[i] >= 0) fe_draw_option_arrows(s_mp_btn_missing[i], sx, sy);
             break;
         case TD5_SCREEN_CAR_SELECTION:
             /* orig CarSelectionScreenStateMachine @0x0040DFC0 case 4 calls
@@ -7137,9 +7151,9 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_option_arrows(0, sx, sy);
             break;
         case TD5_SCREEN_CONTROL_OPTIONS:
-            /* orig 0x41DF20: arrows on Player1(0) and Player2(2) device selectors */
+            /* [PORT ENHANCEMENT 2026-06] arrows on PLAYER(0) + CONTROLLER SELECTION(1). */
             fe_draw_option_arrows(0, sx, sy);
-            fe_draw_option_arrows(2, sx, sy);
+            fe_draw_option_arrows(1, sx, sy);
             break;
         case TD5_SCREEN_MUSIC_TEST:
             /* orig 0x418460: InitializeFrontendDisplayModeArrows(0,1) — the TRACK
@@ -7360,8 +7374,9 @@ int td5_frontend_init(void) {
     s_race_within_series = 0;
     s_cup_unlock_tier = 0;
     s_two_player_mode = 0;
-    s_split_screen_mode = 0;
-    s_catchup_level     = 0;
+    s_mp_layout_sel = 0;
+    s_mp_missing_content[0] = 0;
+    s_mp_missing_content[1] = 0;
     s_attract_mode_ctrl = 0;
     s_selected_car = g_td5.ini.loaded ? g_td5.ini.default_car : 0;
     s_selected_paint = 0;
@@ -9252,8 +9267,76 @@ static void Screen_GameOptions(void) {
 }
 
 /* ========================================================================
- * [14] ScreenControlOptions (0x41DF20) -- Standard options pattern
+ * [14] ScreenControlOptions (0x41DF20) -- revamped (PORT ENHANCEMENT 2026-06)
+ *
+ * The original had two fixed PLAYER rows (P1/P2), each a device-source ◄►
+ * selector + a CONFIGURE button. Rebuilt into:
+ *   row 0  PLAYER               — 1..K selector (K = connected joysticks,
+ *                                 hot-swapped on entry; never < declared humans)
+ *   row 1  CONTROLLER SELECTION — device for the selected player (Keyboard / Joy N);
+ *                                 Keyboard is always present + the only shareable
+ *                                 device; joysticks are exclusive across players
+ *   row 2  CONFIGURE            — opens the per-button remap screen for that player
+ *   row 3  OK
  * ======================================================================== */
+
+/* Recompute the player range from the live device count ("hot-swap") and re-seed
+ * each player's source from the persisted device index, dropping any index that
+ * now points at an unplugged device. */
+static void ctrl_opts_refresh_devices(void)
+{
+    int dev_count = td5_input_enumerate_devices();
+    int joys, n, p;
+    if (dev_count < 1) dev_count = 1;
+    joys = dev_count - 1;            /* device 0 = keyboard */
+    if (joys < 0) joys = 0;
+    /* Range = connected joysticks, but never fewer than the declared human count
+     * (so every active player can still be configured), clamped to [1,9].
+     * [INTERPRETATION] the spec says "depending on the amount of joysticks"; the
+     * max(.., num_human_players) keeps keyboard-only multiplayer configurable. */
+    n = joys;
+    if (n < s_num_human_players) n = s_num_human_players;
+    if (n < 1) n = 1;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    s_ctrl_opts_max_players = n;
+    if (s_ctrl_opts_player >= n) s_ctrl_opts_player = n - 1;
+    if (s_ctrl_opts_player < 0)  s_ctrl_opts_player = 0;
+
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
+        int idx = (int)td5_save_get_player_device_index(p);
+        if (idx < 0 || idx >= dev_count) idx = 0;   /* unplugged → keyboard */
+        td5_input_set_input_source(p, idx);
+    }
+    TD5_LOG_I(LOG_TAG, "ControlOptions: devices=%d joys=%d range=1..%d player=%d",
+              dev_count, joys, s_ctrl_opts_max_players, s_ctrl_opts_player + 1);
+}
+
+/* Cycle the selected player's input device by delta. Keyboard (0) is always
+ * available + shareable; joysticks (>=1) are exclusive (skip any already taken
+ * by another player). */
+static void ctrl_opts_cycle_device(int delta)
+{
+    int dev_count = td5_input_enumerate_devices();
+    int src, guard = 0;
+    if (dev_count < 1) dev_count = 1;
+    src = td5_input_get_input_source(s_ctrl_opts_player);
+    do {
+        int taken = 0, p;
+        src += delta;
+        if (src < 0) src = dev_count - 1;
+        if (src >= dev_count) src = 0;
+        if (src == 0) break;                       /* keyboard: always OK / shareable */
+        for (p = 0; p < s_ctrl_opts_max_players; p++) {
+            if (p == s_ctrl_opts_player) continue;
+            if (td5_input_get_input_source(p) == src) { taken = 1; break; }
+        }
+        if (!taken) break;
+    } while (++guard < dev_count * 2);
+    td5_input_set_input_source(s_ctrl_opts_player, src);
+    td5_save_set_player_device_index(s_ctrl_opts_player, (uint32_t)src);
+    TD5_LOG_I(LOG_TAG, "ControlOptions: player %d device -> %d",
+              s_ctrl_opts_player + 1, src);
+}
 
 static void Screen_ControlOptions(void) {
     switch (s_inner_state) {
@@ -9261,17 +9344,18 @@ static void Screen_ControlOptions(void) {
         frontend_init_return_screen(TD5_SCREEN_CONTROL_OPTIONS);
         TD5_LOG_D(LOG_TAG, "ControlOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* [FIXED 2026-06-01] Controllers.tga icon must be BLACK-color-keyed (the original
-         * sets DDCKEY_SRCBLT @0x412030); loading without it left an opaque black box. */
+        /* Controllers.tga icon must be BLACK-color-keyed (orig DDCKEY_SRCBLT @0x412030). */
         s_control_options_surface = frontend_load_tga_ck("Controllers.TGA", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
-        /* Original layout: Player 1 label, Configure P1, Player 2 label, Configure P2, OK */
-        /* [FIXED 2026-06-01, runtime @0x499c78] P1 group y=97/137, P2 group y=217/257 (80px gap),
-         * OK (200,377). 256-wide rows, OK 96. */
-        frontend_create_preview_button(SNK_Player1ButTxt,  120,  97, 0x100, 0x20);
-        frontend_create_button(SNK_ConfigureButTxt,        120, 137, 0x100, 0x20);
-        frontend_create_preview_button(SNK_Player2ButTxt,  120, 217, 0x100, 0x20);
-        frontend_create_button(SNK_ConfigureButTxt,        120, 257, 0x100, 0x20);
-        frontend_create_button(SNK_OkButTxt,               200, 377, 0x60,  0x20);
+        /* Hot-swap: re-enumerate devices + refresh range/sources on every entry. */
+        ctrl_opts_refresh_devices();
+        /* Non-selector rows (labels bake); ◄► arrows drawn by the per-screen
+         * dispatch, values by the overlay. PLAYER(0) + CONTROLLER SELECTION(1)
+         * cycle on ◄►; CONFIGURE(2) + OK(3) are plain buttons. */
+        frontend_reset_buttons();
+        frontend_create_button(SNK_PlayerSelectButTxt,     120,  97, 0x100, 0x20);  /* 0 */
+        frontend_create_button(SNK_ControllerSelectButTxt, 120, 177, 0x100, 0x20);  /* 1 */
+        frontend_create_button(SNK_ConfigureButTxt,        120, 257, 0x100, 0x20);  /* 2 */
+        frontend_create_button(SNK_OkButTxt,               200, 377, 0x60,  0x20);  /* 3 */
         s_anim_complete = 0;
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -9294,48 +9378,30 @@ static void Screen_ControlOptions(void) {
         break;
     case 6:
         if (s_input_ready) {
-            /* btn 0 = "Player 1" device selector, btn 1 = Configure P1
-             * btn 2 = "Player 2" device selector, btn 3 = Configure P2
-             * btn 4 = OK */
-            /* [FIXED 2026-06-01, L3] Orig (0x41DF20) makes the Player rows ◄►
-             * device-source SELECTORS that cycle g_player1/2InputSource. Wire that:
-             * keyboard ◄► over row 0 / row 2 cycles the player's input device.
-             * (active_button fallback because keyboard arrows leave s_button_index=-1.)
-             * NOTE: the full original screen STRUCTURE — rows 0/2 ARE the cyclers and
-             * the device NAME panel is now drawn (frontend_render_control_options_overlay)
-             * and the cycle does the original's skip-other-player walk. The original's
-             * skip-EMPTY-descriptor step (slots whose g_playerNDeviceDesc==0) is bounded
-             * here by the enumerated device count instead (the port packs present devices
-             * contiguously, so 0..count-1 are all valid). [CONFIRMED @0x0041df20:
-             * src=(src+dir)&7; skip empty; skip == other player's source.] */
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             int delta = frontend_option_delta();
-            int dev_count = td5_input_enumerate_devices();
-            if (dev_count < 1) dev_count = 1;
-            if ((active_button == 0 || active_button == 2) && delta != 0) {
-                int player = (active_button == 2) ? 1 : 0;
-                int other  = player ^ 1;
-                int other_src = td5_input_get_input_source(other);
-                int src = td5_input_get_input_source(player);
-                int guard = 0;
-                /* Advance to the next device, skipping the slot assigned to the other
-                 * player (original's outer do/while). Guard bounds the walk. */
-                do {
-                    src += delta;
-                    if (src < 0) src = dev_count - 1;
-                    if (src >= dev_count) src = 0;
-                } while (src == other_src && dev_count > 1 && ++guard < dev_count);
-                td5_input_set_input_source(player, src);
+            if (active_button == 0 && delta != 0) {
+                /* PLAYER selector (wrap within the live range). */
+                int n = s_ctrl_opts_player + delta;
+                int range = (s_ctrl_opts_max_players > 0) ? s_ctrl_opts_max_players : 1;
+                while (n < 0) n += range;
+                n %= range;
+                s_ctrl_opts_player = n;
                 frontend_play_sfx(2);
-                s_inner_state = 4; /* redraw */
-            }
-            if (s_button_index == 1 || s_button_index == 3) {
-                /* Set which player to configure [CONFIRMED @ 0x40FE00 / DAT_004974b8] */
-                s_ctrl_player = (s_button_index == 3) ? 1 : 0;
+                s_inner_state = 4;
+            } else if (active_button == 1 && delta != 0) {
+                /* CONTROLLER SELECTION device cycle. */
+                ctrl_opts_cycle_device(delta);
+                frontend_play_sfx(2);
+                s_inner_state = 4;
+            } else if (s_button_index == 2) {
+                /* CONFIGURE → per-button remap for the selected player. */
+                s_ctrl_player = s_ctrl_opts_player;
                 s_return_screen = TD5_SCREEN_CONTROLLER_BINDING;
                 s_inner_state = 7;
-            }
-            if (s_button_index == 4) {
+            } else if (s_button_index == 3) {
+                /* OK → persist device assignments + return to hub. */
+                td5_save_write_config(NULL);
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
             }
@@ -9576,28 +9642,71 @@ static void Screen_DisplayOptions(void) {
 }
 
 /* ========================================================================
- * [17] ScreenTwoPlayerOptions (0x420C70)
- * 2 rows: Split Screen, Catch-Up + OK
+ * [17] Multiplayer Options  (was ScreenTwoPlayerOptions, orig 0x420C70)
+ *
+ * [PORT ENHANCEMENT 2026-06] Rebuilt from the original 2-row screen (Split
+ * Screen on/off + CATCHUP) into a dynamic split-screen layout picker:
+ *   row 0  PLAYERS        — 1..9 (◄►), shared with Quick Race (s_num_human_players)
+ *   row 1  SPLIT LAYOUT   — per-count layout (◄► when >1 option, else fixed label)
+ *   row 2+ DISPLAY k      — content for each empty grid cell (deferred; stub list)
+ *   last   OK
+ * CATCHUP was removed (it set the 2P human steering rubber-band swing, which is
+ * already inert in the port). The row set changes with the player count, so the
+ * button table is rebuilt via mp_build_buttons() whenever PLAYERS/LAYOUT change.
  * ======================================================================== */
+
+/* (Re)build the Multiplayer Options row buttons for the current player count. */
+static void mp_build_buttons(void)
+{
+    int n = s_num_human_players;
+    int cols = 0, rows = 0, missing = 0;
+    int y;
+    if (n < 1) n = 1;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    s_num_human_players = n;
+
+    mp_split_layouts(n, &s_mp_layout_optcount);
+    if (s_mp_layout_sel < 0 || s_mp_layout_sel >= s_mp_layout_optcount)
+        s_mp_layout_sel = 0;
+    mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+    s_mp_missing_count = missing;
+
+    frontend_reset_buttons();
+    s_mp_btn_players = s_mp_btn_layout = s_mp_btn_ok = -1;
+    s_mp_btn_missing[0] = s_mp_btn_missing[1] = -1;
+
+    /* Rows are NON-selector buttons: the button renderer bakes their label (the
+     * ◄► arrows are drawn by the per-screen dispatch, the value by the overlay).
+     * This matches the Game/Sound/Display Options pattern; a real selector button
+     * suppresses its label, which would leave the row blank. */
+    y = 77;
+    s_mp_btn_players = frontend_create_button(SNK_MpPlayersButTxt, 120, y, 0x100, 0x20);
+    y += 50;
+    s_mp_btn_layout = frontend_create_button(SNK_MpLayoutButTxt, 120, y, 0x100, 0x20);
+    y += 50;
+    for (int k = 0; k < missing && k < 2; k++) {
+        char lbl[24];
+        snprintf(lbl, sizeof lbl, "%s %d", SNK_MpDisplayButTxt, k + 1);
+        s_mp_btn_missing[k] = frontend_create_button(lbl, 120, y, 0x100, 0x20);
+        y += 50;
+    }
+
+    s_mp_btn_ok = frontend_create_button(SNK_OkButTxt, 200, 377, 0x60, 0x20);
+
+    TD5_LOG_I(LOG_TAG,
+              "MultiplayerOptions buttons: n=%d optcount=%d missing=%d grid=%dx%d",
+              n, s_mp_layout_optcount, missing, cols, rows);
+}
 
 static void Screen_TwoPlayerOptions(void) {
     switch (s_inner_state) {
     case 0:
-        /* [CONFIRMED @ 0x420C70 case 0]: init state */
         frontend_init_return_screen(TD5_SCREEN_TWO_PLAYER_OPTIONS);
-        TD5_LOG_D(LOG_TAG, "TwoPlayerOptions: init split_mode=%d", s_split_screen_mode);
-        /* [RESOLVED 2026-06-01] SplitScreen.tga is drawn OPAQUE — no colorkey. Its
-         * near-white (255,239,255) background is intentional (palette index 5, the
-         * dominant color). The original loader sets a black SRCBLT key but the icon is
-         * blitted via the OPAQUE path (Copy16BitSurfaceRect @0x4251a0 flag 0x10, no key
-         * test), so the key is inert. Port's plain load (no colorkey) is correct. */
+        TD5_LOG_D(LOG_TAG, "MultiplayerOptions: init players=%d layout_sel=%d",
+                  s_num_human_players, s_mp_layout_sel);
+        /* SplitScreen.tga (split-layout preview icon) — drawn OPAQUE, no colorkey. */
         s_split_screen_surface = frontend_load_tga("SplitScreen.tga", "Front End/frontend.zip");
-        /* [CONFIRMED @ 0x420d22]: SNK_SplitScreenButTxt at x=-0x100, width=0x100 */
-        /* [FIXED 2026-06-01, runtime @0x499c78] SplitScreen y=97, Catchup y=177 (80px gap),
-         * OK (200,377). 256-wide rows, OK 96. */
-        frontend_create_button(SNK_SplitScreenButTxt, 120,  97, 0x100, 0x20);
-        frontend_create_button(SNK_CatchupTxt,        120, 177, 0x100, 0x20); /* orig label: CATCHUP (no hyphen) */
-        frontend_create_button(SNK_OkButTxt,          200, 377, 0x60,  0x20);
+        mp_build_buttons();
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -9605,42 +9714,57 @@ static void Screen_TwoPlayerOptions(void) {
         frontend_present_buffer();
         s_inner_state++;
         break;
-    case 3: /* Slide-in (~1200ms) [CONFIRMED @ 0x420D80 case 3] */
+    case 3: /* Slide-in (~1200ms) */
         if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
         }
         break;
     case 4: case 5:
-        /* [CONFIRMED @ 0x420E80 case 4/5]: redraw overlay, bump state */
         s_inner_state = 6;
         break;
     case 6:
-        /* [CONFIRMED @ 0x420F40 case 6]: input handling
-         * DAT_0049b690 = arrow delta; button 0 = split screen toggle,
-         * button 1 = catch-up level, button 2 = OK */
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            if (active_button == 0 && delta != 0) {
-                /* [CONFIRMED @ 0x42106B]: g_twoPlayerSplitMode = (delta + g_twoPlayerSplitMode) & 1 */
-                s_split_screen_mode = (delta + s_split_screen_mode) & 1;
-                /* Sync the split-screen ON flag into s_two_player_mode bit 2 */
-                if (s_split_screen_mode)
-                    s_two_player_mode |= 4;
-                else
-                    s_two_player_mode &= ~4;
+
+            if (active_button == s_mp_btn_players && delta != 0) {
+                int n = s_num_human_players + delta;
+                if (n < 1) n = 1;
+                if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+                if (n != s_num_human_players) {
+                    s_num_human_players = n;
+                    if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - n)
+                        s_num_ai_opponents = TD5_MAX_RACER_SLOTS - n;
+                    s_mp_layout_sel = 0;     /* layout list changed → reset selection */
+                    mp_build_buttons();      /* row set depends on N → rebuild */
+                    s_selected_button = (s_mp_btn_players >= 0) ? s_mp_btn_players : 0;
+                    frontend_play_sfx(2);
+                }
+                s_inner_state = 4;
+            } else if (active_button == s_mp_btn_layout && delta != 0 &&
+                       s_mp_layout_optcount > 1) {
+                int sel = s_mp_layout_sel + delta;
+                while (sel < 0) sel += s_mp_layout_optcount;
+                sel %= s_mp_layout_optcount;
+                if (sel != s_mp_layout_sel) {
+                    s_mp_layout_sel = sel;
+                    mp_build_buttons();      /* missing-cell count may change → rebuild */
+                    s_selected_button = (s_mp_btn_layout >= 0) ? s_mp_btn_layout : 0;
+                    frontend_play_sfx(2);
+                }
+                s_inner_state = 4;
+            } else if (delta != 0 &&
+                       (active_button == s_mp_btn_missing[0] ||
+                        active_button == s_mp_btn_missing[1])) {
+                int k = (active_button == s_mp_btn_missing[1]) ? 1 : 0;
+                int v = s_mp_missing_content[k] + delta;
+                while (v < 0) v += MP_MISSING_CONTENT_COUNT;
+                v %= MP_MISSING_CONTENT_COUNT;
+                s_mp_missing_content[k] = v;
                 frontend_play_sfx(2);
                 s_inner_state = 4;
-            } else if (active_button == 1 && delta != 0) {
-                /* [CONFIRMED @ 0x4210B3]: DAT_00465ff8 += delta; clamped 0..9 */
-                s_catchup_level += delta;
-                if (s_catchup_level < 0) s_catchup_level = 0;
-                if (s_catchup_level > 9) s_catchup_level = 9;
-                frontend_play_sfx(2);
-                s_inner_state = 4;
-            } else if (s_button_index == 2) {
-                /* [CONFIRMED @ 0x4210F7]: OK pressed: blit secondary, advance to slide-out */
+            } else if (s_button_index == s_mp_btn_ok) {
                 s_inner_state = 7;
             }
         }
@@ -9658,158 +9782,108 @@ static void Screen_TwoPlayerOptions(void) {
 }
 
 /* ========================================================================
- * [18] ScreenControllerBindingPage (0x40FE00) -- ~27 states
+ * [18] Controller Binding / Configure  (was ScreenControllerBindingPage, 0x40FE00)
  *
- * RE basis: ScreenControllerBindingPage decompiled [CONFIRMED @ 0x40FE00]
+ * [PORT ENHANCEMENT 2026-06] Rebuilt from the original's sequential capture
+ * (joystick: press each button in turn to cycle its slot; keyboard: forced
+ * "press the key for LEFT, now RIGHT, …" walk) into a navigable per-button
+ * remap: the whole action→binding mapping is shown as a list of buttons; the
+ * user selects ONE action and confirms to (re)bind just that one.
  *
- * State map (matches original Ghidra state IDs directly):
- *   0       Init — determine device, set up surfaces, route to joystick or
- *           keyboard path (0x13 = 19) or no-controller path (also 0x13).
- *   9       Joystick slide-in animation (0x1C frames)
- *   10      Joystick interactive — read joystick bitmask, detect rising edge,
- *           cycle each binding slot value 2→10→2; OK → state 11 (slide-out)
- *   11      Joystick slide-out animation (0x1C frames) → exit
- *   19      Keyboard/no-controller slide-in
- *   20      Keyboard init — clear gKbScanCodes, slot=0, → state 25
- *   25      Keyboard "Press [action]" display
- *   26      Keyboard scan loop — poll 256 scancodes for fresh press, write to
- *           gKbScanCodes[slot]; repeat until slot==10, then → state 11 path
- *   27      Keyboard slide-out animation (0x1C frames) → exit
+ * States: 0 init (device detect → build row buttons), 9 slide-in, 10 list +
+ * per-action capture, 11 slide-out → Control Options.
  *
- * Data layout [CONFIRMED @ 0x40FE00]:
- *   s_ctrl_player        — which player is being configured (0=P1, 1=P2)
- *                          mirrors DAT_004974b8
- *   s_ctrl_input_source  — device source index for that player
- *                          mirrors DAT_00490b94
- *   s_ctrl_num_buttons   — joystick button count for this device (0 for KB)
- *                          mirrors DAT_00490ba4
- *   s_ctrl_js_prev       — joystick bitmask from previous frame
- *                          mirrors DAT_00490b90
- *   s_ctrl_js_curr       — joystick bitmask current frame
- *                          mirrors DAT_00490b8c
- *   s_ctrl_js_held       — prev & curr (held bits) mirrors DAT_00490b88
- *   s_ctrl_kb_slot       — keyboard scan slot (0..9) mirrors DAT_00490b84
- *   s_ctrl_binding_table — per-player binding row [9] mirrors DAT_00463FC8[player*9]
- *                          values: 2=axis-up 3=axis-dn 4=btn-A 5=btn-B ... 10=btn-H
- *   s_ctrl_kb_scancodes  — 10-byte captured scancode buffer
- *                          mirrors DAT_00464054 (gKbScanCodes[16])
+ * Data (carried over from the original RE):
+ *   s_ctrl_player        — player being configured (set by Control Options)
+ *   s_ctrl_input_source  — device type 0=kbd / 1=joypad / 2=joystick [DAT_00490b94]
+ *   s_ctrl_sel_action    — the action row being (re)bound while capturing
+ *   s_ctrl_capturing     — 0 = browsing the list, 1 = capturing a key/button
+ *   s_ctrl_binding_table — per-player joystick binding rows [player*9]
+ *                          ([0]=active, [1]/[2]=axes, [3..8]=6 button actions,
+ *                          value = physical_button + 2) [DAT_00463FC8]
+ *   s_ctrl_kb_scancodes  — captured keyboard scancodes (DIK_*) [DAT_00464054]
  *
- * Action label strings (from SNK_ControlText @ 0x100075E0 + slot*0x10):
- *   0=LEFT  1=RIGHT  2=ACCELERATE  3=BRAKE  4=HANDBRAKE  5=HORN/SIREN
- *   6=GEAR UP  7=GEAR DOWN  8=CHANGE VIEW  9=REAR VIEW  (10=NONE sentinel)
+ * Action labels (k_ctrl_action_labels, from SNK_ControlText @ 0x100075E0):
+ *   0=LEFT 1=RIGHT 2=ACCELERATE 3=BRAKE 4=HANDBRAKE 5=HORN/SIREN
+ *   6=GEAR UP 7=GEAR DOWN 8=CHANGE VIEW 9=REAR VIEW. Keyboard players configure
+ *   all 10; joystick players configure the 6 button actions [4..9].
  * ======================================================================== */
+
+/* [PORT ENHANCEMENT 2026-06] Per-button remap row helpers. Keyboard players get
+ * the full 10-action list; joystick players get the 6 button-actions (the
+ * keyboard actions [4..9]: HANDBRAKE..REAR VIEW), which map to joystick binding
+ * slots [3..8]. Steering/throttle axes are not button-remappable. */
+static int ctrl_bind_row_count(void)
+{
+    return (s_ctrl_input_source == 0) ? 10 : 6;
+}
+
+static const char *ctrl_bind_row_label(int row)
+{
+    if (s_ctrl_input_source == 0)
+        return (row >= 0 && row < 10) ? k_ctrl_action_labels[row] : "?";
+    return (row >= 0 && row < 6) ? k_ctrl_action_labels[4 + row] : "?";
+}
 
 static void Screen_ControllerBinding(void) {
     switch (s_inner_state) {
 
     /* ------------------------------------------------------------------
-     * State 0: Init
-     * [CONFIRMED @ 0x40FE00] Determines device type, routes to joystick
-     * path (state 9) or keyboard path (state 19). If device==3 (none),
-     * jumps straight to state 19 (no-controller branch).
+     * State 0: Init — detect the configured player's device type, seed the
+     * binding state, build the per-action row buttons, → slide-in (state 9).
      * ------------------------------------------------------------------ */
     case 0:
         frontend_init_return_screen(TD5_SCREEN_CONTROLLER_BINDING);
-        TD5_LOG_D(LOG_TAG, "ControllerBinding: init");
+        TD5_LOG_I(LOG_TAG, "ControllerBinding: init player=%d", s_ctrl_player);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* [FIXED 2026-06-01] These icon TGAs have a BLACK background (verified corner=(0,0,0))
-         * and no alpha — key black transparent like Controllers.tga, else they show black boxes. */
         s_joypad_icon_surface   = frontend_load_tga_ck("JoypadIcon.tga",   "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         s_joystick_icon_surface = frontend_load_tga_ck("JoystickIcon.tga", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         s_keyboard_icon_surface = frontend_load_tga_ck("KeyboardIcon.tga", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         s_nocontroller_surface  = frontend_load_tga_ck("NoControllerText.tga", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
-
-        /* Which player are we configuring?
-         * s_ctrl_player is the direct port of DAT_004974b8.
-         * ScreenControlOptions writes 0 (P1) or 1 (P2) before calling
-         * td5_frontend_set_screen(TD5_SCREEN_CONTROLLER_BINDING).
-         * [CONFIRMED @ 0x0041e6c3]: button 1 → DAT_004974b8 = 0
-         * [CONFIRMED @ 0x0041e71d]: button 3 → DAT_004974b8 = 1 */
-        TD5_LOG_I(LOG_TAG, "ControllerBinding: player=%d", s_ctrl_player);
         {
-            int dev_type;
-            int source;
+            /* s_ctrl_player was set by Control Options (the player whose CONFIGURE
+             * was pressed). Pick the row model from its device type. */
+            int dev_type = td5_input_get_device_type(s_ctrl_player);
+            int rows, j, y;
+            if (dev_type < 0 || dev_type > 2) dev_type = 0;   /* no controller → keyboard list */
+            s_ctrl_input_source = dev_type;
 
-            /* Determine input source for this player.
-             * [CONFIRMED @ 0x40FE00] uses g_player1InputSource or g_player2InputSource
-             * depending on DAT_004974b8; port uses td5_input_get_device_type(). */
-            dev_type = td5_input_get_device_type(s_ctrl_player);
-            source   = dev_type;  /* 0=KB, 1=gamepad, 2=joystick/wheel */
-            s_ctrl_input_source = source;
-
-            /* Device type 3 = no controller attached.
-             * [CONFIRMED @ 0x40FE00] if device_desc[source] type byte == 3 →
-             * g_frontendAnimFrameCounter=0; g_frontendInnerState=0x13; return. */
-            if (dev_type >= 3) {
-                TD5_LOG_D(LOG_TAG, "ControllerBinding: no controller, going to kb path (state 19)");
-                s_anim_tick = 0;
-                s_inner_state = 19; /* same as 0x13 in original */
-                return;
-            }
-
-            /* Keyboard path: source==0
-             * [CONFIRMED @ 0x40FE00] if device_desc type byte == 3 → no-ctrl;
-             * otherwise joystick path uses DAT_00490ba4 = button count clamped.
-             * Keyboard (source==0) falls through to joystick path with
-             * DAT_00490ba4=0 when no buttons found. Actually the original
-             * routes to keyboard-capture at state 0x13 when it's keyboard type.
-             * [INFERRED] keyboard type = dev_type==0 → go to state 19 (0x13) */
             if (dev_type == 0) {
-                /* Keyboard: no joystick binding, go to keyboard capture */
-                s_ctrl_num_buttons = 0;
-                memset(s_ctrl_kb_scancodes, 0, sizeof(s_ctrl_kb_scancodes));
-                s_ctrl_kb_slot = 0;
-                /* Load initial binding table from save */
-                {
-                    TD5_GameOptions *opts = td5_save_get_game_options();
-                    (void)opts;
-                }
-                TD5_LOG_D(LOG_TAG, "ControllerBinding: keyboard device → state 19");
-                s_anim_tick = 0;
-                s_inner_state = 19;
-                return;
-            }
-
-            /* Joystick/gamepad: determine button count.
-             * [CONFIRMED @ 0x40FE00] DAT_00490ba4 set from device descriptor:
-             * if button_count < 4 → clamp to 2; if >= 9 → use 8; else use count.
-             * The binding table row for this player starts at DAT_00463FC8+player*9.
-             * controller_bindings[player*9] = 1 (active flag) [CONFIRMED @ 0x40FE00] */
-            {
-                int num_buttons;
-                /* [INFERRED] typical gamepad has 8 configurable buttons */
-                num_buttons = 8;
-                if (num_buttons < 4) num_buttons = 2;
-                if (num_buttons > 8) num_buttons = 8;
-                s_ctrl_num_buttons = num_buttons;
-
-                /* Set controller active flag [CONFIRMED @ 0x40FE00]:
-                 * (&DAT_00463fc4)[player*9] = 1  →  s_ctrl_binding_table row */
+                /* Seed the scancode buffer from this player's saved keyboard set
+                 * (players 0/1 have their own; 2+ share player-1's set). */
+                const uint8_t *src = (const uint8_t *)((s_ctrl_player == 0)
+                    ? td5_save_get_p1_custom_bindings_mutable()
+                    : td5_save_get_p2_custom_bindings_mutable());
+                memcpy(s_ctrl_kb_scancodes, src, 16);
+            } else {
+                /* Ensure the joystick binding row is active + axes sane. */
                 s_ctrl_binding_table[s_ctrl_player][0] = 1;
-
-                /* Validate axis assignments: slots [CONFIRMED @ 0x40FE00]
-                 * (&DAT_00463fc8)[player*9] = steer axis (must be 4 or 5)
-                 * (&DAT_00463fcc)[player*9] = throttle axis (must be 4 or 5)
-                 * If either outside 4-5 range, reset to defaults 4 and 5. */
-                if (s_ctrl_binding_table[s_ctrl_player][1] < 4 ||
-                    s_ctrl_binding_table[s_ctrl_player][1] > 5 ||
-                    s_ctrl_binding_table[s_ctrl_player][2] < 4 ||
-                    s_ctrl_binding_table[s_ctrl_player][2] > 5) {
+                if (s_ctrl_binding_table[s_ctrl_player][1] < 4 || s_ctrl_binding_table[s_ctrl_player][1] > 5 ||
+                    s_ctrl_binding_table[s_ctrl_player][2] < 4 || s_ctrl_binding_table[s_ctrl_player][2] > 5) {
                     s_ctrl_binding_table[s_ctrl_player][1] = 4;
                     s_ctrl_binding_table[s_ctrl_player][2] = 5;
                 }
             }
 
-            /* Create OK button [CONFIRMED @ 0x00410165]:
-             * CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x128, 0, 0x60, 0x20, 0) */
-            frontend_create_button(SNK_OkButTxt, -0x128, 0, 0x60, 0x20);
-
+            s_ctrl_sel_action = 0;
+            s_ctrl_capturing  = 0;
             s_ctrl_js_prev = 0;
-            s_ctrl_js_curr = 0;
-            s_ctrl_js_held = 0;
-            s_anim_tick = 0;
-            s_inner_state = 9;
+
+            /* Build the per-action row buttons (each selectable; current binding
+             * drawn in the overlay value column) + a trailing OK button. This is
+             * the "select which button to remap, full mapping visible" UI. */
+            rows = ctrl_bind_row_count();
+            frontend_reset_buttons();
+            y = 80;
+            for (j = 0; j < rows; j++) {
+                frontend_create_button(ctrl_bind_row_label(j), 120, y, 0x100, 24);
+                y += 28;
+            }
+            frontend_create_button(SNK_OkButTxt, 200, 377, 0x60, 0x20);
         }
+        s_anim_tick = 0;
+        s_anim_complete = 0;
+        s_inner_state = 9;
         break;
 
     /* ------------------------------------------------------------------
@@ -9848,88 +9922,95 @@ static void Screen_ControllerBinding(void) {
      * OK button (button_index==0) → animate to state 11 (slide-out).
      * ------------------------------------------------------------------ */
     case 10: {
-        /* Read joystick bitmask — port uses keyboard arrow keys as surrogate
-         * since we don't have a live DXInput::GetJS() API exposed yet.
-         * [INFERRED] We emulate the binding cycle with arrow key presses in KB
-         * fallback; real joystick would come from td5_input_get_control_bits(). */
-        uint32_t js_new = 0;
+        /* Unified per-button remap. Browse the action rows (generic button nav),
+         * confirm one to (re)bind just that action, OK to save + exit. The whole
+         * current mapping stays visible (overlay value column). */
+        int rows   = ctrl_bind_row_count();
+        int ok_btn = rows;   /* OK is the button created right after the rows */
 
-        /* Build joystick bitmask from control bits if joystick is attached.
-         * Port uses the race-session control bits which are updated by
-         * td5_input_poll_race_session(). For frontend use, we read keyboard
-         * state directly as fallback. [INFERRED] */
-        {
-            const uint8_t *kb = td5_plat_input_get_keyboard();
-            /* Map gamepad buttons to bit positions 18..25 (matching 0x40000 base) */
-            /* Button A = Enter (0x1C), B = Backspace (0x0E), etc. [INFERRED] */
-            if (kb[0x1C]) js_new |= (1u << 18);  /* btn 0 = Enter */
-            if (kb[0x0E]) js_new |= (1u << 19);  /* btn 1 = Backspace */
-            if (kb[0x39]) js_new |= (1u << 20);  /* btn 2 = Space */
-            if (kb[0xC8]) js_new |= (1u << 21);  /* btn 3 = Up */
-            if (kb[0xD0]) js_new |= (1u << 22);  /* btn 4 = Down */
-            if (kb[0xCB]) js_new |= (1u << 23);  /* btn 5 = Left */
-            if (kb[0xCD]) js_new |= (1u << 24);  /* btn 6 = Right */
-            if (kb[0x2A]) js_new |= (1u << 25);  /* btn 7 = LShift */
-        }
-
-        /* Shift register [CONFIRMED @ 0x40FE00]:
-         *   DAT_00490b90 = DAT_00490b88        (prev = old held)
-         *   DAT_00490b88 = ~DAT_00490b8c       (held = ~old curr)
-         *   DAT_00490b8c = GetJS(source-1)     (curr = new read)
-         *   DAT_00490b88 &= DAT_00490b8c       (held = ~old_curr & new_curr → rising edge)
-         * Rising-edge test below: (prev & bit) && (curr & bit) = pressed-last-held AND pressed-now */
-        s_ctrl_js_prev = s_ctrl_js_held;
-        s_ctrl_js_held = ~s_ctrl_js_curr;
-        s_ctrl_js_curr = js_new;
-        s_ctrl_js_held = s_ctrl_js_held & js_new;
-
-        /* Special 2-button mode: swap steer/throttle axis on Btn-0 or Btn-1
-         * [CONFIRMED @ 0x40FE00] if num_buttons==2: swap [1] and [2] */
-        if (s_ctrl_num_buttons == 2) {
-            if (((s_ctrl_js_prev & 0x40000u) && (s_ctrl_js_curr & 0x40000u)) ||
-                ((s_ctrl_js_prev & 0x80000u) && (s_ctrl_js_curr & 0x80000u))) {
-                uint32_t tmp = s_ctrl_binding_table[s_ctrl_player][2];
-                s_ctrl_binding_table[s_ctrl_player][2] = s_ctrl_binding_table[s_ctrl_player][1];
-                s_ctrl_binding_table[s_ctrl_player][1] = tmp;
-            }
-        } else {
-            /* General case: each bit rising edge cycles its slot 2→10→2
-             * [CONFIRMED @ 0x40FE00] */
-            for (int i = 0; i < s_ctrl_num_buttons; i++) {
-                uint32_t bit = 0x40000u << i;
-                if ((s_ctrl_js_prev & bit) && (s_ctrl_js_curr & bit)) {
-                    uint32_t val = s_ctrl_binding_table[s_ctrl_player][i] + 1;
-                    if (val > 10) val = 2;
-                    s_ctrl_binding_table[s_ctrl_player][i] = val;
-                    TD5_LOG_D(LOG_TAG, "CtrlBind: player=%d slot=%d → %u",
-                              s_ctrl_player, i, val);
+        if (!s_ctrl_capturing) {
+            if (s_input_ready) {
+                if (s_button_index == ok_btn) {
+                    /* Save every binding (joystick table + this player's keyboard
+                     * set) and return to Control Options. */
+                    memcpy(td5_save_get_controller_bindings_mutable(),
+                           s_ctrl_binding_table, sizeof(s_ctrl_binding_table));
+                    {
+                        int32_t r[9];
+                        for (int i = 0; i < 9; i++)
+                            r[i] = (int32_t)s_ctrl_binding_table[s_ctrl_player][i];
+                        td5_input_set_joystick_bindings(s_ctrl_player, r, 9);
+                    }
+                    {
+                        /* Keyboard set: players 0/1 own a set; 2+ share player-1's. */
+                        int kb_set = (s_ctrl_player == 0) ? 0 : 1;
+                        uint8_t *dst = (uint8_t *)((kb_set == 0)
+                            ? td5_save_get_p1_custom_bindings_mutable()
+                            : td5_save_get_p2_custom_bindings_mutable());
+                        memcpy(dst, s_ctrl_kb_scancodes, 16);
+                        td5_plat_input_set_keyboard_bindings(kb_set, s_ctrl_kb_scancodes, 10);
+                    }
+                    td5_save_write_config(NULL);
+                    TD5_LOG_I(LOG_TAG, "CtrlBind: saved bindings for player %d", s_ctrl_player);
+                    s_anim_tick = 0;
+                    s_inner_state = 11;
+                } else if (s_button_index >= 0 && s_button_index < rows) {
+                    /* Begin capturing the selected action. Snapshot current input
+                     * so a key/button still held from the confirm press is ignored
+                     * (only a fresh rising-edge press is accepted). */
+                    s_ctrl_sel_action = s_button_index;
+                    s_ctrl_capturing  = 1;
+                    memcpy(s_ctrl_capture_kb_snapshot, td5_plat_input_get_keyboard(), 256);
+                    if (s_ctrl_input_source != 0)
+                        s_ctrl_js_prev = td5_plat_input_joystick_buttons(s_ctrl_player);
+                    TD5_LOG_I(LOG_TAG, "CtrlBind: capturing action %d (%s) for player %d",
+                              s_ctrl_sel_action, ctrl_bind_row_label(s_ctrl_sel_action),
+                              s_ctrl_player);
                     frontend_play_sfx(2);
                 }
             }
-        }
-
-        /* OK button [CONFIRMED @ 0x40FE00]:
-         * if (g_frontendButtonPressedFlag && g_frontendButtonIndex==0) → state 11 */
-        if (s_input_ready && s_button_index == 0) {
-            /* Copy s_ctrl_binding_table into save module's s_controller_bindings
-             * (same 2×9 DWORD layout), then persist. Original writes to shared globals;
-             * port uses separate module statics that must be bridged at exit. */
-            memcpy(td5_save_get_controller_bindings_mutable(),
-                   s_ctrl_binding_table, sizeof(s_ctrl_binding_table));
-            /* Push the configured row to the live poll so the rebind takes
-             * effect immediately (otherwise it would only apply after the next
-             * td5_input_apply_device_selection at race start). */
-            {
-                int32_t row[9];
-                for (int i = 0; i < 9; i++)
-                    row[i] = (int32_t)s_ctrl_binding_table[s_ctrl_player][i];
-                td5_input_set_joystick_bindings(s_ctrl_player, row, 9);
+        } else {
+            /* --- Capture mode (ESC cancels) --- */
+            const uint8_t *kb = td5_plat_input_get_keyboard();
+            if (kb[0x01] && !s_ctrl_capture_kb_snapshot[0x01]) {
+                s_ctrl_capturing = 0;       /* ESC = cancel this remap, no change */
+                TD5_LOG_I(LOG_TAG, "CtrlBind: capture cancelled");
+                break;
             }
-            TD5_LOG_I(LOG_TAG, "CtrlBind: joystick OK — saved bindings for player %d",
-                      s_ctrl_player);
-            td5_save_write_config(NULL);  /* -> td5re_input.ini + td5re_progress.ini */
-            s_anim_tick = 0;
-            s_inner_state = 11;
+            if (s_ctrl_input_source == 0) {
+                /* Keyboard: first freshly-pressed key (rising edge vs snapshot). */
+                int sc, found = -1;
+                for (sc = 1; sc < 256 && found < 0; sc++)
+                    if (kb[sc] && !s_ctrl_capture_kb_snapshot[sc] && sc != 0x01)
+                        found = sc;
+                if (found >= 0) {
+                    if (s_ctrl_sel_action >= 0 && s_ctrl_sel_action < 10)
+                        s_ctrl_kb_scancodes[s_ctrl_sel_action] = (uint8_t)found;
+                    TD5_LOG_I(LOG_TAG, "CtrlBind: action %d -> scancode 0x%02X",
+                              s_ctrl_sel_action, (unsigned)found);
+                    frontend_play_sfx(3);
+                    s_ctrl_capturing = 0;
+                }
+            } else {
+                /* Joystick: first newly-pressed physical button (vs snapshot). */
+                uint32_t cur   = td5_plat_input_joystick_buttons(s_ctrl_player);
+                uint32_t fresh = cur & ~s_ctrl_js_prev;
+                if (fresh) {
+                    int b = 0;
+                    while (b < 31 && !(fresh & (1u << b))) b++;
+                    if (b > 8) b = 8;       /* binding value 2..10 holds phys 0..8 */
+                    /* row j (0..5) -> joystick binding slot [3+j], value = phys+2. */
+                    if (s_ctrl_sel_action >= 0 && s_ctrl_sel_action < 6)
+                        s_ctrl_binding_table[s_ctrl_player][3 + s_ctrl_sel_action] =
+                            (uint32_t)(b + 2);
+                    TD5_LOG_I(LOG_TAG, "CtrlBind: action %d -> joystick button %d",
+                              s_ctrl_sel_action, b);
+                    frontend_play_sfx(2);
+                    s_ctrl_capturing = 0;
+                }
+                /* Track releases so a held button becomes a clean rising edge. */
+                s_ctrl_js_prev &= cur;
+            }
         }
         break;
     }
@@ -9948,139 +10029,9 @@ static void Screen_ControllerBinding(void) {
         }
         break;
 
-    /* ------------------------------------------------------------------
-     * State 19 (0x13): Slide-in for keyboard / no-controller path
-     * [CONFIRMED @ 0x40FE00] Same anim counter mechanism as state 9.
-     * After 0x1C frames → state 20 (0x14).
-     * ------------------------------------------------------------------ */
-    case 19:
-        s_anim_tick++;
-        if (s_anim_tick >= 0x1C) {
-            s_anim_tick = 0;
-            s_anim_complete = 1;
-            s_inner_state = 20;
-        }
-        break;
-
-    /* ------------------------------------------------------------------
-     * State 20 (0x14): Keyboard capture init
-     * [CONFIRMED @ 0x40FE00] Draws "Press Key" header, clears the 4
-     * scan-code DWORDs (DAT_00464054/58/5c/60), resets slot counter to 0,
-     * deactivates cursor, goes to state 25 (0x19).
-     * ------------------------------------------------------------------ */
-    case 20:
-        memset(s_ctrl_kb_scancodes, 0, sizeof(s_ctrl_kb_scancodes));
-        s_ctrl_kb_slot = 0;
-        TD5_LOG_D(LOG_TAG, "CtrlBind: keyboard capture init, slot=0");
-        s_inner_state = 25;
-        break;
-
-    /* ------------------------------------------------------------------
-     * State 25 (0x19): Display current action label
-     * [CONFIRMED @ 0x40FE00] Draws label for slot DAT_00490b84 at y=0x18,
-     * then immediately advances to state 26 (0x1A).
-     * ------------------------------------------------------------------ */
-    case 25:
-        TD5_LOG_D(LOG_TAG, "CtrlBind: press key for slot %d (%s)",
-                  s_ctrl_kb_slot,
-                  (s_ctrl_kb_slot < 10) ? k_ctrl_action_labels[s_ctrl_kb_slot] : "?");
-        s_inner_state = 26;
-        break;
-
-    /* ------------------------------------------------------------------
-     * State 26 (0x1A): Keyboard scan — wait for a key press
-     *
-     * [CONFIRMED @ 0x40FE00] Scans scancodes 0..255 each frame:
-     *   - skip scancodes already in the 16-byte scan buffer
-     *   - call DXInput::CheckKey(scancode) — returns non-zero if pressed
-     *   - on first fresh press: write to gKbScanCodes[slot]; play SFX 3;
-     *     slot++ ; if slot==10 → go to OK state (advance to state 11 / 0x1B)
-     *     else → back to state 25 (0x19)
-     *
-     * Port: DXInput::CheckKey maps to td5_plat_input_key_pressed(scancode).
-     * The 16-byte buffer holds scancodes packed as bytes; port uses
-     * s_ctrl_kb_scancodes[slot].
-     * ------------------------------------------------------------------ */
-    case 26: {
-        /* Scan all 256 scancodes for a freshly-pressed key not already bound */
-        int found_sc = -1;
-        const uint8_t *kb = td5_plat_input_get_keyboard();
-
-        for (int sc = 1; sc < 256 && found_sc < 0; sc++) {
-            /* Skip if already captured [CONFIRMED @ 0x40FE00] */
-            int already = 0;
-            for (int j = 0; j < s_ctrl_kb_slot; j++) {
-                if (s_ctrl_kb_scancodes[j] == (uint8_t)sc) {
-                    already = 1;
-                    break;
-                }
-            }
-            if (already) continue;
-
-            /* Check if key is currently pressed
-             * [CONFIRMED @ 0x40FE00] DXInput::CheckKey(sc) != 0 */
-            if (kb[sc]) {
-                found_sc = sc;
-            }
-        }
-
-        if (found_sc < 0) {
-            /* No fresh key pressed yet — stay in this state */
-            break;
-        }
-
-        /* Record the scancode [CONFIRMED @ 0x40FE00]:
-         * *(char *)((int)&DAT_00464054 + DAT_00490b84) = (char)uVar13;  */
-        s_ctrl_kb_scancodes[s_ctrl_kb_slot] = (uint8_t)found_sc;
-        TD5_LOG_I(LOG_TAG, "CtrlBind: slot %d (%s) → scancode 0x%02X",
-                  s_ctrl_kb_slot,
-                  (s_ctrl_kb_slot < 10) ? k_ctrl_action_labels[s_ctrl_kb_slot] : "?",
-                  (unsigned)found_sc);
-        frontend_play_sfx(3);  /* [CONFIRMED @ 0x40FE00] DXSound::Play(3) */
-
-        s_ctrl_kb_slot++;
-
-        /* All 10 actions captured? [CONFIRMED @ 0x40FE00] if slot==10 → done */
-        if (s_ctrl_kb_slot >= 10) {
-            /* Copy scancodes into save module's p1/p2_custom_bindings first
-             * 16 bytes into the start of the 392-byte custom binding buffer.
-             * Original writes to shared globals; port bridges at capture completion. */
-            {
-                uint8_t *dst = (uint8_t *)(s_ctrl_player == 0
-                    ? td5_save_get_p1_custom_bindings_mutable()
-                    : td5_save_get_p2_custom_bindings_mutable());
-                memcpy(dst, s_ctrl_kb_scancodes, 16);
-                /* Apply immediately to the live input layer so the rebind takes
-                 * effect this session without waiting for a Config.td5 reload. */
-                td5_plat_input_set_keyboard_bindings(s_ctrl_player == 0 ? 0 : 1,
-                                                     s_ctrl_kb_scancodes, 10);
-            }
-            TD5_LOG_I(LOG_TAG, "CtrlBind: all 10 actions bound for player %d — saved",
-                      s_ctrl_player);
-            td5_save_write_config(NULL);  /* -> td5re_input.ini + td5re_progress.ini */
-            s_anim_tick = 0;
-            s_inner_state = 27;  /* → slide-out */
-        } else {
-            /* Next action */
-            s_inner_state = 25;
-        }
-        break;
-    }
-
-    /* ------------------------------------------------------------------
-     * State 27 (0x1B): Keyboard slide-out animation (0x1C frames)
-     * [CONFIRMED @ 0x40FE00] After animation, releases surfaces and
-     * calls SetFrontendScreen(0xe) = TD5_SCREEN_CONTROL_OPTIONS.
-     * ------------------------------------------------------------------ */
-    case 27:
-        s_anim_tick++;
-        if (s_anim_tick >= 0x1C) {
-            s_anim_tick = 0;
-            TD5_LOG_D(LOG_TAG, "CtrlBind: keyboard slide-out done → ControlOptions");
-            td5_frontend_set_screen(TD5_SCREEN_CONTROL_OPTIONS);
-        }
-        break;
-
+    /* [PORT ENHANCEMENT 2026-06] The original's sequential keyboard-capture
+     * states (19/20/25/26/27) and joystick-cycle state are gone — the unified
+     * per-button-remap list in state 10 handles both device types. */
     default:
         td5_frontend_set_screen(TD5_SCREEN_CONTROL_OPTIONS);
         break;
