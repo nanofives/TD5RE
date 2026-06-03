@@ -214,6 +214,43 @@ void td5_plat_input_set_joystick_bindings(int slot, const int32_t *bindings, int
  *  Used by the control-config per-button capture. [PORT ENHANCEMENT 2026-06] */
 uint32_t td5_plat_input_joystick_buttons(int device_slot);
 
+/* ------------------------------------------------------------------------
+ * Per-action joystick binding (PORT ENHANCEMENT 2026-06)
+ *
+ * Each of the 10 driving actions can be mapped to a physical button OR an
+ * axis/trigger direction. A binding is a uint32 "code":
+ *   0                              = unbound
+ *   TD5_JSBIND_BUTTON | btn        = physical button btn (0..63)
+ *   TD5_JSBIND_AXIS | (axis<<1)|d  = axis (0..7), direction d (0=+, 1=-)
+ * Action order matches k_ctrl_action_labels:
+ *   0 LEFT 1 RIGHT 2 ACCELERATE 3 BRAKE 4 HANDBRAKE 5 HORN/SIREN
+ *   6 GEAR UP 7 GEAR DOWN 8 CHANGE VIEW 9 REAR VIEW 10 PAUSE
+ * ------------------------------------------------------------------------ */
+#define TD5_JSBIND_NONE      0u
+#define TD5_JSBIND_BUTTON    0x100u
+#define TD5_JSBIND_AXIS      0x200u
+#define TD5_JSBIND_ACTIONS   11
+
+/** Apply the per-action binding codes for a player slot (count<=10). When set,
+ *  the in-race poll maps each action through these instead of the fixed default. */
+void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int count);
+
+/** Snapshot the device's rest state for capture (call when a remap begins). */
+void td5_plat_input_joystick_capture_begin(int device_slot);
+
+/** Poll for a freshly-pressed button OR an axis/trigger moved past threshold
+ *  (vs the capture-begin baseline). Returns 1 and writes the binding code to
+ *  *out_code on a fresh input, else 0. */
+int  td5_plat_input_joystick_capture_poll(int device_slot, uint32_t *out_code);
+
+/** Describe a binding code into buf (e.g. "BTN 3", "AXIS 2+", "-"). */
+void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap);
+
+/** Frontend navigation bitmask from a connected gamepad (any joystick):
+ *  bit0 LEFT, bit1 RIGHT, bit2 UP, bit3 DOWN, bit4 A/confirm, bit5 B/back.
+ *  Returns 0 if no joystick is present. [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_frontend_nav(void);
+
 /* ========================================================================
  * Force Feedback
  * ======================================================================== */

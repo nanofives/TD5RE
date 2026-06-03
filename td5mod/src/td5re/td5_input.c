@@ -288,6 +288,12 @@ void td5_input_set_joystick_bindings(int player, const int32_t *bindings, int co
     td5_plat_input_set_joystick_bindings(player, bindings, count);
 }
 
+void td5_input_set_action_bindings(int player, const uint32_t *codes, int count)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
+    td5_plat_input_set_action_bindings(player, codes, count);
+}
+
 /* Resolve and apply each player's input device + bindings at race start.
  * Source precedence: INI override (Player1Joystick/Player2Joystick, >0 = a
  * 1-based enumerated joystick index) wins for players 1/2; otherwise the
@@ -324,6 +330,18 @@ void td5_input_apply_device_selection(void)
             int32_t row[9];
             for (int i = 0; i < 9; i++) row[i] = (int32_t)bind[p * 9 + i];
             td5_input_set_joystick_bindings(p, row, 9);
+        }
+        /* Push the per-action bindings (button/axis/trigger) only when this
+         * player actually configured at least one — otherwise leave the device
+         * on the default mapping (all-zero would disable every input). */
+        if (src > 0) {
+            const uint32_t *ab = td5_save_get_action_bindings_mutable();
+            if (ab) {
+                const uint32_t *row = ab + (size_t)p * TD5_JSBIND_ACTIONS;
+                int any = 0, i;
+                for (i = 0; i < TD5_JSBIND_ACTIONS; i++) if (row[i]) { any = 1; break; }
+                if (any) td5_input_set_action_bindings(p, row, TD5_JSBIND_ACTIONS);
+            }
         }
         TD5_LOG_I(LOG_TAG, "Device selection: player=%d source=%d (%s)",
                   p, src, (src == 0) ? "keyboard" : "joystick");

@@ -221,6 +221,9 @@ void  td5_save_set_view_distance(float v);
 uint32_t *td5_save_get_controller_bindings_mutable(void);
 uint32_t *td5_save_get_p1_custom_bindings_mutable(void);
 uint32_t *td5_save_get_p2_custom_bindings_mutable(void);
+/* [PORT ENHANCEMENT 2026-06] per-action joystick bindings, flat
+ * [player*TD5_JSBIND_ACTIONS + action] (10 codes/player). */
+uint32_t *td5_save_get_action_bindings_mutable(void);
 
 /* Persisted per-player input device index (Config.td5 +0x20/+0x21 for p1/p2):
  * 0 = keyboard, >=1 = 1-based joystick index. */

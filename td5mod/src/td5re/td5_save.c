@@ -231,6 +231,11 @@ static int32_t  s_ff_config[4];                               /* 0x464054, 0x464
  * players (9 dwords each). The legacy Config.td5 blob still carries only the
  * first 18 dwords (2 players); players 3-9 persist via td5re_input.ini. */
 static uint32_t s_controller_bindings[TD5_MAX_HUMAN_PLAYERS * 9];    /* 0x463FC4 (first 18) */
+/* [PORT ENHANCEMENT 2026-06] per-action joystick bindings (10 codes/player):
+ * each action mapped to a button or axis/trigger (TD5_JSBIND_*). 0 = unbound →
+ * the in-race poll falls back to the default mapping. Persisted in td5re_input.ini
+ * [ControllerActions]; not part of the legacy Config.td5 blob. */
+static uint32_t s_js_action_bind[TD5_MAX_HUMAN_PLAYERS * TD5_JSBIND_ACTIONS];
 static uint32_t s_p1_device_desc[8];                          /* 0x465660 (write) / 0x4656A0 (read) */
 static uint32_t s_p2_device_desc[8];                          /* 0x465680 (write) / 0x4656C0 (read) */
 static uint32_t s_p1_device_desc_backup[8];                   /* 0x4656A0 (read target) */
@@ -259,6 +264,7 @@ static uint32_t s_p1_custom_bindings[0x62];                   /* 0x4978C0 */
 static uint32_t s_p2_custom_bindings[0x62];                   /* 0x497330 */
 
 uint32_t *td5_save_get_controller_bindings_mutable(void) { return s_controller_bindings; }
+uint32_t *td5_save_get_action_bindings_mutable(void)     { return s_js_action_bind; }
 uint32_t *td5_save_get_p1_custom_bindings_mutable(void)  { return s_p1_custom_bindings; }
 uint32_t *td5_save_get_p2_custom_bindings_mutable(void)  { return s_p2_custom_bindings; }
 
@@ -1732,6 +1738,17 @@ static int cfgini_write_input(void)
                        (unsigned)s_controller_bindings[pl * 9 + sl]);
     cfgini_add(&w, "\r\n");
 
+    cfgini_add(&w, "[ControllerActions]\r\n");
+    cfgini_add(&w, "; per-action joystick binding codes [player][action 0..9]:\r\n");
+    cfgini_add(&w, ";   0=unbound, 0x100|btn = button, 0x200|(axis<<1)|dir = axis/trigger.\r\n");
+    cfgini_add(&w, ";   actions: 0=LEFT 1=RIGHT 2=ACCEL 3=BRAKE 4=HANDBRAKE 5=HORN\r\n");
+    cfgini_add(&w, ";            6=GEARUP 7=GEARDOWN 8=VIEW 9=REARVIEW\r\n");
+    for (int pl = 0; pl < TD5_MAX_HUMAN_PLAYERS; pl++)
+        for (int a = 0; a < TD5_JSBIND_ACTIONS; a++)
+            cfgini_add(&w, "A%d_%d = %u\r\n", pl + 1, a,
+                       (unsigned)s_js_action_bind[pl * TD5_JSBIND_ACTIONS + a]);
+    cfgini_add(&w, "\r\n");
+
     cfgini_add(&w, "[KeyboardPlayer1]\r\n; DirectInput scancodes. 0 = unbound (keeps the built-in default).\r\n");
     for (int i = 0; i < 10; i++)
         cfgini_add(&w, "%s = %u\r\n", k_cfgini_kb_names[i], (unsigned)p1kb[i]);
@@ -1769,6 +1786,14 @@ static int cfgini_read_input(void)
             snprintf(key, sizeof key, "P%d_%d", pl + 1, sl);
             s_controller_bindings[pl * 9 + sl] =
                 cfgini_get_u32(f, "ControllerButtons", key, s_controller_bindings[pl * 9 + sl]);
+        }
+
+    for (int pl = 0; pl < TD5_MAX_HUMAN_PLAYERS; pl++)
+        for (int a = 0; a < TD5_JSBIND_ACTIONS; a++) {
+            snprintf(key, sizeof key, "A%d_%d", pl + 1, a);
+            s_js_action_bind[pl * TD5_JSBIND_ACTIONS + a] =
+                cfgini_get_u32(f, "ControllerActions", key,
+                               s_js_action_bind[pl * TD5_JSBIND_ACTIONS + a]);
         }
 
     for (int i = 0; i < 10; i++) {

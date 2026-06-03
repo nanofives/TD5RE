@@ -265,6 +265,9 @@ void td5_input_set_input_source(int player, int source);
 int  td5_input_get_input_source(int player);
 /** Push a player's 9-slot joystick binding table to the live poll. */
 void td5_input_set_joystick_bindings(int player, const int32_t *bindings, int count);
+/** [PORT ENHANCEMENT 2026-06] Push a player's per-action binding codes
+ *  (button/axis/trigger) to the live poll. count <= TD5_JSBIND_ACTIONS. */
+void td5_input_set_action_bindings(int player, const uint32_t *codes, int count);
 /** Resolve+apply both players' input devices (INI override or Config.td5) and
  *  push joystick bindings. Call at race start before force-feedback init. */
 void td5_input_apply_device_selection(void);

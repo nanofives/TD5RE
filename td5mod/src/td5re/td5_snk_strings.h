@@ -121,7 +121,7 @@
 #define SNK_TrackButTxt "TRACK"
 #define SNK_TracksUnlocked "TRACKS UNLOCKED"
 #define SNK_TrafficButTxt "TRAFFIC"
-#define SNK_TwoPlayerButTxt "TWO PLAYER"
+#define SNK_TwoPlayerButTxt "MULTIPLAYER"
 /* [PORT ENHANCEMENT 2026-06] the Two Player Options screen became the
  * Multiplayer Options screen (N-way split-screen layout picker). */
 #define SNK_TwoPlayerOptionsButTxt "MULTIPLAYER OPTIONS"
@@ -130,7 +130,7 @@
 #define SNK_MpLayoutButTxt         "SPLIT LAYOUT"
 #define SNK_MpDisplayButTxt        "DISPLAY"
 #define SNK_PlayerSelectButTxt     "PLAYER"
-#define SNK_ControllerSelectButTxt "CONTROLLER SELECTION"
+#define SNK_ControllerSelectButTxt "CONTROLLER"
 #define SNK_RemapButTxt            "REMAP"
 #define SNK_TxtBhostB "(HOST)"
 #define SNK_TxtPlayer "Player:"

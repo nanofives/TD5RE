@@ -199,6 +199,9 @@ static int  s_music_attract_track = 0;
 static int  s_input_ready;              /* DAT_004951e8            */
 static int  s_button_index;             /* currently pressed button */
 static int  s_arrow_input;              /* DAT_0049b690 arrow direction */
+/* [PORT ENHANCEMENT 2026-06] gamepad frontend-nav bits this frame (bit4 A,
+ * bit5 B); cached so frontend_check_escape() can read B without re-polling. */
+static uint32_t s_fe_gamepad_nav;
 static uint32_t s_screen_entry_timestamp;
 static uint32_t s_anim_start_ms = 0;
 static uint32_t s_anim_elapsed_ms = 0;
@@ -493,8 +496,6 @@ static int      s_ctrl_opts_max_players = 1;
 static int      s_ctrl_player        = 0;
 /* [CONFIRMED @ 0x40FE00 / DAT_00490b94]: device source index (0=kbd/1=pad/2=stick) */
 static int      s_ctrl_input_source  = 0;
-/* Joystick raw-button snapshot at capture-begin (rising-edge detection). */
-static uint32_t s_ctrl_js_prev       = 0;
 /* [PORT ENHANCEMENT 2026-06] per-button remap: which action row the Configure
  * screen has selected, and whether it is currently capturing that action. */
 static int      s_ctrl_sel_action    = 0;
@@ -505,9 +506,9 @@ static uint8_t  s_ctrl_kb_scancodes[16];
  * already held when remap starts (e.g. the Enter that confirmed the row) is
  * ignored — only a fresh rising-edge press is accepted. */
 static uint8_t  s_ctrl_capture_kb_snapshot[256];
-/* [CONFIRMED @ 0x40FE00 / DAT_00463FC8]: per-player joystick binding rows.
- * [PORT ENHANCEMENT 2026-06] grown from [2] to [TD5_MAX_HUMAN_PLAYERS] players. */
-static uint32_t s_ctrl_binding_table[TD5_MAX_HUMAN_PLAYERS][9];
+/* [PORT ENHANCEMENT 2026-06] per-action joystick binding being edited on the
+ * Configure screen: 10 codes (button/axis/trigger) for the selected player. */
+static uint32_t s_ctrl_action_bind[TD5_MAX_HUMAN_PLAYERS][TD5_JSBIND_ACTIONS];
 
 /* Action label strings for keyboard capture prompt (SNK_ControlText slots 0-9)
  * [CONFIRMED @ 0x40FE00 case 0x19]: index = s_ctrl_kb_slot (0..9), iterated
@@ -518,7 +519,7 @@ static uint32_t s_ctrl_binding_table[TD5_MAX_HUMAN_PLAYERS][9];
  *   is a sentinel, not iterated.
  * Faithful port of the original action list (was previously guessed/shifted —
  * had no "Steer"/"Gas"/"NOS"/"Camera", missed HANDBRAKE, and merged steer L/R). */
-static const char * const k_ctrl_action_labels[10] = {
+static const char * const k_ctrl_action_labels[TD5_JSBIND_ACTIONS] = {
     "LEFT",         /* slot 0 — DIK_LEFT  0xCB */
     "RIGHT",        /* slot 1 — DIK_RIGHT 0xCD */
     "ACCELERATE",   /* slot 2 — DIK_UP    0xC8 */
@@ -529,6 +530,7 @@ static const char * const k_ctrl_action_labels[10] = {
     "GEAR DOWN",    /* slot 7 — DIK_Z     0x2C */
     "CHANGE VIEW",  /* slot 8 — DIK_T     0x14 */
     "REAR VIEW",    /* slot 9 — DIK_X     0x2D */
+    "PAUSE",        /* slot 10 — DIK_P    0x19 [PORT ENHANCEMENT 2026-06] */
 };
 
 /* [PORT ENHANCEMENT 2026-06] The old k_js_value_labels[] table (binding values
@@ -2658,6 +2660,16 @@ static void frontend_poll_input(void) {
     down_now = td5_plat_input_key_pressed(0xD0);
     enter_now = td5_plat_input_key_pressed(0x1C);
 
+    /* [PORT ENHANCEMENT 2026-06] Gamepad navigation: any joystick's dpad/left
+     * stick moves the cursor, A (button 0) confirms, B (button 1) backs out.
+     * OR'd into the keyboard state so the existing edge-detection debounces it. */
+    s_fe_gamepad_nav = td5_plat_input_frontend_nav();
+    if (s_fe_gamepad_nav & 0x01) left_now  = 1;
+    if (s_fe_gamepad_nav & 0x02) right_now = 1;
+    if (s_fe_gamepad_nav & 0x04) up_now    = 1;
+    if (s_fe_gamepad_nav & 0x08) down_now  = 1;
+    if (s_fe_gamepad_nav & 0x10) enter_now = 1;   /* A = confirm/select */
+
     left_edge = (left_now && !s_prev_left_state);
     right_edge = (right_now && !s_prev_right_state);
     up_edge = (up_now && !s_prev_up_state);
@@ -2851,7 +2863,8 @@ static int frontend_check_escape(void) {
         s_prev_escape_state = 1;
         return 0;
     }
-    int esc_now = td5_plat_input_key_pressed(0x01);
+    /* Gamepad B (button 1) backs out, same as the ESC key. [PORT ENHANCEMENT] */
+    int esc_now = td5_plat_input_key_pressed(0x01) || ((s_fe_gamepad_nav & 0x20) != 0);
     int esc_edge = (esc_now && !s_prev_escape_state);
     s_prev_escape_state = esc_now;
     if (esc_edge) frontend_note_activity();
@@ -5504,7 +5517,7 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
      *   row 0 (y=97)  PLAYER value (the selected 1-based player)
      *   row 1 (y=177) CONTROLLER SELECTION: device-type icon + device name. */
     char buf[40];
-    int player, type, cls, source;
+    int player, type, source;
 
     if (!s_anim_complete) return;
 
@@ -5516,12 +5529,11 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
     snprintf(buf, sizeof buf, "%d", player + 1);
     frontend_draw_value_centered(sx, sy, 97 + 6, buf, 0xFFFFFFFF);
 
-    /* CONTROLLER SELECTION (row 1, y=177): device-type icon + name.
+    /* CONTROLLER (row 1, y=177): device-type icon + the FULL device name.
      * td5_input_get_device_type: 0=keyboard, 1=joypad, 2=joystick/wheel — used
-     * directly as the Controllers.tga 64x32 row; cls remaps to the name order. */
+     * directly as the Controllers.tga 64x32 icon row. */
     type   = td5_input_get_device_type(player);
     source = td5_input_get_input_source(player);
-    cls = (type == 0) ? 0 : (type == 2) ? 1 : (type == 1) ? 2 : 4;
 
     if (s_control_options_surface > 0) {
         int slot = s_control_options_surface - 1;
@@ -5536,12 +5548,36 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
         }
     }
     {
-        static const char *ctrl_modes[5] = { "KEYBOARD", "JOYSTICK", "JOYPAD", "WHEEL", "<NONE>" };
-        if (cls == 0)
-            snprintf(buf, sizeof buf, "%s", ctrl_modes[0]);
-        else
-            snprintf(buf, sizeof buf, "%s %d", ctrl_modes[cls], source + 1);
-        fe_draw_text(466.0f * sx, (177.0f + 8.0f) * sy, buf, 0xFFFFFFFF, sx, sy);
+        /* Full enumerated device name (e.g. "Logitech G29 Racing Wheel") to the
+         * right of the icon. If it's wider than the column, wrap to two lines at
+         * the space nearest the middle. */
+        const char *dname = td5_input_get_device_name(source);
+        float ts   = 0.85f;
+        float nx   = 466.0f * sx;
+        float maxw = 168.0f * sx;          /* column from x~466 to ~634 */
+        if (!dname || !dname[0]) dname = "<NONE>";
+        if (fe_measure_text(dname, sx * ts) <= maxw) {
+            fe_draw_text(nx, (177.0f + 8.0f) * sy, dname, 0xFFFFFFFF, sx * ts, sy * ts);
+        } else {
+            char l1[64], l2[64];
+            int n = (int)strlen(dname), mid = n / 2, best = -1, i, cut, skip, a, b;
+            for (i = 1; i < n - 1; i++) {
+                int di, db;
+                if (dname[i] != ' ') continue;
+                if (best < 0) { best = i; continue; }
+                di = i - mid;    if (di < 0) di = -di;
+                db = best - mid; if (db < 0) db = -db;
+                if (di < db) best = i;
+            }
+            cut  = (best >= 0) ? best : mid;
+            skip = (dname[cut] == ' ') ? 1 : 0;
+            a = cut;                if (a > 63) a = 63;
+            memcpy(l1, dname, (size_t)a); l1[a] = 0;
+            b = n - (cut + skip);   if (b > 63) b = 63;
+            memcpy(l2, dname + cut + skip, (size_t)b); l2[b] = 0;
+            fe_draw_text(nx, (177.0f +  1.0f) * sy, l1, 0xFFFFFFFF, sx * ts, sy * ts);
+            fe_draw_text(nx, (177.0f + 17.0f) * sy, l2, 0xFFFFFFFF, sx * ts, sy * ts);
+        }
     }
 }
 
@@ -5592,7 +5628,7 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
     if (s_inner_state != 10) return;   /* only the interactive list state shows values */
 
     kbd  = (s_ctrl_input_source == 0);
-    rows = kbd ? 10 : 6;
+    rows = TD5_JSBIND_ACTIONS;   /* 10 actions for both keyboard and joystick */
 
     {
         char hdr[48];
@@ -5602,18 +5638,18 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
 
     for (j = 0; j < rows && j < s_button_count; j++) {
         const char *val;
-        char vb[12];
+        char vb[16];
         uint32_t col;
         if (!s_buttons[j].active) continue;
         col = (s_ctrl_capturing && j == s_ctrl_sel_action) ? 0xFF33FF33u : 0xFFFFFFFFu;
         if (s_ctrl_capturing && j == s_ctrl_sel_action) {
-            val = kbd ? "PRESS A KEY..." : "PRESS A BUTTON...";
+            val = kbd ? "PRESS A KEY..." : "PRESS BUTTON/AXIS...";
         } else if (kbd) {
             val = ctrl_scancode_name(s_ctrl_kb_scancodes[j]);
         } else {
-            uint32_t bv = s_ctrl_binding_table[s_ctrl_player][3 + j];
-            if (bv >= 2 && bv <= 10) { snprintf(vb, sizeof vb, "BTN %u", bv - 1u); val = vb; }
-            else val = "-";
+            td5_plat_input_describe_binding(s_ctrl_action_bind[s_ctrl_player][j],
+                                            vb, (int)sizeof vb);
+            val = vb;
         }
         /* value column just right of the 0x100-wide row button (x 120..376). */
         fe_draw_text(392.0f * sx, (float)(s_buttons[j].y + 4) * sy, val, col,
@@ -9809,20 +9845,18 @@ static void Screen_TwoPlayerOptions(void) {
  *   all 10; joystick players configure the 6 button actions [4..9].
  * ======================================================================== */
 
-/* [PORT ENHANCEMENT 2026-06] Per-button remap row helpers. Keyboard players get
- * the full 10-action list; joystick players get the 6 button-actions (the
- * keyboard actions [4..9]: HANDBRAKE..REAR VIEW), which map to joystick binding
- * slots [3..8]. Steering/throttle axes are not button-remappable. */
+/* [PORT ENHANCEMENT 2026-06] Per-button remap row helpers. Both keyboard and
+ * joystick players configure all 10 actions (LEFT/RIGHT/ACCELERATE/BRAKE +
+ * HANDBRAKE..REAR VIEW). For joysticks each action maps to a button or an
+ * axis/trigger direction (steer/accel/brake become analog when bound to axes). */
 static int ctrl_bind_row_count(void)
 {
-    return (s_ctrl_input_source == 0) ? 10 : 6;
+    return TD5_JSBIND_ACTIONS;   /* 10 */
 }
 
 static const char *ctrl_bind_row_label(int row)
 {
-    if (s_ctrl_input_source == 0)
-        return (row >= 0 && row < 10) ? k_ctrl_action_labels[row] : "?";
-    return (row >= 0 && row < 6) ? k_ctrl_action_labels[4 + row] : "?";
+    return (row >= 0 && row < 10) ? k_ctrl_action_labels[row] : "?";
 }
 
 static void Screen_ControllerBinding(void) {
@@ -9856,28 +9890,26 @@ static void Screen_ControllerBinding(void) {
                     : td5_save_get_p2_custom_bindings_mutable());
                 memcpy(s_ctrl_kb_scancodes, src, 16);
             } else {
-                /* Ensure the joystick binding row is active + axes sane. */
-                s_ctrl_binding_table[s_ctrl_player][0] = 1;
-                if (s_ctrl_binding_table[s_ctrl_player][1] < 4 || s_ctrl_binding_table[s_ctrl_player][1] > 5 ||
-                    s_ctrl_binding_table[s_ctrl_player][2] < 4 || s_ctrl_binding_table[s_ctrl_player][2] > 5) {
-                    s_ctrl_binding_table[s_ctrl_player][1] = 4;
-                    s_ctrl_binding_table[s_ctrl_player][2] = 5;
-                }
+                /* Seed the per-action joystick bindings from the saved set. */
+                const uint32_t *ab = td5_save_get_action_bindings_mutable();
+                if (ab)
+                    memcpy(s_ctrl_action_bind[s_ctrl_player],
+                           ab + (size_t)s_ctrl_player * TD5_JSBIND_ACTIONS,
+                           TD5_JSBIND_ACTIONS * sizeof(uint32_t));
             }
 
             s_ctrl_sel_action = 0;
             s_ctrl_capturing  = 0;
-            s_ctrl_js_prev = 0;
 
             /* Build the per-action row buttons (each selectable; current binding
              * drawn in the overlay value column) + a trailing OK button. This is
              * the "select which button to remap, full mapping visible" UI. */
             rows = ctrl_bind_row_count();
             frontend_reset_buttons();
-            y = 80;
+            y = 70;                       /* 11 rows fit in 70..354, OK at 377 */
             for (j = 0; j < rows; j++) {
-                frontend_create_button(ctrl_bind_row_label(j), 120, y, 0x100, 24);
-                y += 28;
+                frontend_create_button(ctrl_bind_row_label(j), 120, y, 0x100, 22);
+                y += 26;
             }
             frontend_create_button(SNK_OkButTxt, 200, 377, 0x60, 0x20);
         }
@@ -9902,24 +9934,10 @@ static void Screen_ControllerBinding(void) {
         break;
 
     /* ------------------------------------------------------------------
-     * State 10: Joystick interactive — detect button presses, cycle bindings
-     *
-     * [CONFIRMED @ 0x40FE00] Each frame:
-     *   js_prev = js_held (prev & curr)
-     *   js_held = ~js_curr            (then & curr in next line)
-     *   js_curr = DXInput::GetJS(input_source - 1)
-     *   js_held = js_held & js_curr   (effectively: rising edge = prev_frame & curr)
-     *
-     * For each binding slot i in [0..num_buttons):
-     *   bit_mask = 0x40000 << i
-     *   if (js_prev & bit_mask) && (js_curr & bit_mask):
-     *     binding_table[player][i] += 1
-     *     if binding_table[player][i] > 10: binding_table[player][i] = 2
-     *
-     * Special case when num_buttons==2: swap steer/throttle axes if
-     * both (prev&0x40000) and (curr&0x40000), or (prev&0x80000) and (curr&0x80000).
-     *
-     * OK button (button_index==0) → animate to state 11 (slide-out).
+     * State 10: interactive list + per-action capture (PORT ENHANCEMENT).
+     * Browse the action rows (generic button nav / mouse), confirm one to
+     * (re)bind ONLY that action — keyboard captures a scancode, joystick captures
+     * a button OR an axis/trigger direction. OK saves + slides out (state 11).
      * ------------------------------------------------------------------ */
     case 10: {
         /* Unified per-button remap. Browse the action rows (generic button nav),
@@ -9931,15 +9949,16 @@ static void Screen_ControllerBinding(void) {
         if (!s_ctrl_capturing) {
             if (s_input_ready) {
                 if (s_button_index == ok_btn) {
-                    /* Save every binding (joystick table + this player's keyboard
-                     * set) and return to Control Options. */
-                    memcpy(td5_save_get_controller_bindings_mutable(),
-                           s_ctrl_binding_table, sizeof(s_ctrl_binding_table));
+                    /* Save this player's bindings (joystick per-action codes +
+                     * keyboard set) and return to Control Options. */
                     {
-                        int32_t r[9];
-                        for (int i = 0; i < 9; i++)
-                            r[i] = (int32_t)s_ctrl_binding_table[s_ctrl_player][i];
-                        td5_input_set_joystick_bindings(s_ctrl_player, r, 9);
+                        uint32_t *ab = td5_save_get_action_bindings_mutable();
+                        if (ab)
+                            memcpy(ab + (size_t)s_ctrl_player * TD5_JSBIND_ACTIONS,
+                                   s_ctrl_action_bind[s_ctrl_player],
+                                   TD5_JSBIND_ACTIONS * sizeof(uint32_t));
+                        td5_input_set_action_bindings(s_ctrl_player,
+                            s_ctrl_action_bind[s_ctrl_player], TD5_JSBIND_ACTIONS);
                     }
                     {
                         /* Keyboard set: players 0/1 own a set; 2+ share player-1's. */
@@ -9948,7 +9967,8 @@ static void Screen_ControllerBinding(void) {
                             ? td5_save_get_p1_custom_bindings_mutable()
                             : td5_save_get_p2_custom_bindings_mutable());
                         memcpy(dst, s_ctrl_kb_scancodes, 16);
-                        td5_plat_input_set_keyboard_bindings(kb_set, s_ctrl_kb_scancodes, 10);
+                        td5_plat_input_set_keyboard_bindings(kb_set, s_ctrl_kb_scancodes,
+                                                             TD5_JSBIND_ACTIONS);
                     }
                     td5_save_write_config(NULL);
                     TD5_LOG_I(LOG_TAG, "CtrlBind: saved bindings for player %d", s_ctrl_player);
@@ -9956,13 +9976,13 @@ static void Screen_ControllerBinding(void) {
                     s_inner_state = 11;
                 } else if (s_button_index >= 0 && s_button_index < rows) {
                     /* Begin capturing the selected action. Snapshot current input
-                     * so a key/button still held from the confirm press is ignored
-                     * (only a fresh rising-edge press is accepted). */
+                     * so a key/button/axis still held from the confirm press is
+                     * ignored (only a fresh change is accepted). */
                     s_ctrl_sel_action = s_button_index;
                     s_ctrl_capturing  = 1;
                     memcpy(s_ctrl_capture_kb_snapshot, td5_plat_input_get_keyboard(), 256);
                     if (s_ctrl_input_source != 0)
-                        s_ctrl_js_prev = td5_plat_input_joystick_buttons(s_ctrl_player);
+                        td5_plat_input_joystick_capture_begin(s_ctrl_player);
                     TD5_LOG_I(LOG_TAG, "CtrlBind: capturing action %d (%s) for player %d",
                               s_ctrl_sel_action, ctrl_bind_row_label(s_ctrl_sel_action),
                               s_ctrl_player);
@@ -9984,7 +10004,7 @@ static void Screen_ControllerBinding(void) {
                     if (kb[sc] && !s_ctrl_capture_kb_snapshot[sc] && sc != 0x01)
                         found = sc;
                 if (found >= 0) {
-                    if (s_ctrl_sel_action >= 0 && s_ctrl_sel_action < 10)
+                    if (s_ctrl_sel_action >= 0 && s_ctrl_sel_action < TD5_JSBIND_ACTIONS)
                         s_ctrl_kb_scancodes[s_ctrl_sel_action] = (uint8_t)found;
                     TD5_LOG_I(LOG_TAG, "CtrlBind: action %d -> scancode 0x%02X",
                               s_ctrl_sel_action, (unsigned)found);
@@ -9992,24 +10012,17 @@ static void Screen_ControllerBinding(void) {
                     s_ctrl_capturing = 0;
                 }
             } else {
-                /* Joystick: first newly-pressed physical button (vs snapshot). */
-                uint32_t cur   = td5_plat_input_joystick_buttons(s_ctrl_player);
-                uint32_t fresh = cur & ~s_ctrl_js_prev;
-                if (fresh) {
-                    int b = 0;
-                    while (b < 31 && !(fresh & (1u << b))) b++;
-                    if (b > 8) b = 8;       /* binding value 2..10 holds phys 0..8 */
-                    /* row j (0..5) -> joystick binding slot [3+j], value = phys+2. */
-                    if (s_ctrl_sel_action >= 0 && s_ctrl_sel_action < 6)
-                        s_ctrl_binding_table[s_ctrl_player][3 + s_ctrl_sel_action] =
-                            (uint32_t)(b + 2);
-                    TD5_LOG_I(LOG_TAG, "CtrlBind: action %d -> joystick button %d",
-                              s_ctrl_sel_action, b);
+                /* Joystick: first fresh button press OR axis/trigger movement past
+                 * threshold (platform handles both; works for sticks + triggers). */
+                uint32_t code = 0;
+                if (td5_plat_input_joystick_capture_poll(s_ctrl_player, &code)) {
+                    if (s_ctrl_sel_action >= 0 && s_ctrl_sel_action < TD5_JSBIND_ACTIONS)
+                        s_ctrl_action_bind[s_ctrl_player][s_ctrl_sel_action] = code;
+                    TD5_LOG_I(LOG_TAG, "CtrlBind: action %d -> joystick code 0x%X",
+                              s_ctrl_sel_action, (unsigned)code);
                     frontend_play_sfx(2);
                     s_ctrl_capturing = 0;
                 }
-                /* Track releases so a held button becomes a clean rising edge. */
-                s_ctrl_js_prev &= cur;
             }
         }
         break;

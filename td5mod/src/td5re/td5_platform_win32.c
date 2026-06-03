@@ -70,12 +70,14 @@ static uint8_t  s_keyboard[256];
  * keyboard defaults were not RE'd, so this is the non-regression choice).
  * The config screen pushes rebound codes here via td5_plat_input_set_keyboard_bindings
  * so a rebind actually takes effect in-race instead of being a write-only dead end. */
-enum { TD5_KB_BIND_COUNT = 10 };
+/* [PORT ENHANCEMENT 2026-06] slot 10 = PAUSE (default DIK_P 0x19) so the pause
+ * action is rebindable alongside the rest. */
+enum { TD5_KB_BIND_COUNT = 11 };
 static uint8_t s_kb_bindings[2][TD5_KB_BIND_COUNT] = {
-    /* P1: LEFT  RIGHT ACCEL BRAKE HBRK  HORN  GUP   GDN   VIEW  REAR */
-    {     0xCB, 0xCD, 0xC8, 0xD0, 0x10, 0x9D, 0x1E, 0x2C, 0x14, 0x2D },
-    /* P2:   A     D     W     S    CAPS  TAB    E     Q     R     F  */
-    {     0x1E, 0x20, 0x11, 0x1F, 0x3A, 0x0F, 0x12, 0x10, 0x13, 0x21 },
+    /* P1: LEFT  RIGHT ACCEL BRAKE HBRK  HORN  GUP   GDN   VIEW  REAR  PAUSE */
+    {     0xCB, 0xCD, 0xC8, 0xD0, 0x10, 0x9D, 0x1E, 0x2C, 0x14, 0x2D, 0x19 },
+    /* P2:   A     D     W     S    CAPS  TAB    E     Q     R     F   PAUSE */
+    {     0x1E, 0x20, 0x11, 0x1F, 0x3A, 0x0F, 0x12, 0x10, 0x13, 0x21, 0x19 },
 };
 
 static int      s_mouse_dx, s_mouse_dy;
@@ -97,6 +99,21 @@ static LPDIRECTINPUTDEVICE8A s_di_joystick[TD5_PLAT_MAX_JS_SLOTS] = { NULL };
  * s_joystick_bound[slot]==0 → unconfigured → GetJS-default button mapping. */
 static int32_t s_joystick_bindings[TD5_PLAT_MAX_JS_SLOTS][9];
 static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
+/* [PORT ENHANCEMENT 2026-06] per-action binding codes (button | axis+dir) for
+ * each player; when *_set, the in-race poll maps actions through these instead
+ * of the fixed X=steer/Y=throttle/buttons default. See TD5_JSBIND_* in the .h. */
+static uint32_t s_js_action_bind[TD5_PLAT_MAX_JS_SLOTS][TD5_JSBIND_ACTIONS];
+static int      s_js_action_set[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
+/* Capture baseline (one remap active at a time). */
+static long     s_js_cap_axis_base[8];
+static uint32_t s_js_cap_btn_base;
+static int      s_js_cap_slot = -1;
+/* [PORT ENHANCEMENT 2026-06] dedicated non-exclusive joystick for FRONTEND
+ * navigation (A=select, B=back, dpad/stick=move). Lazily created from the first
+ * enumerated joystick when no per-player device exists; once a per-player device
+ * is created, navigation reads that instead and this one is released. */
+static LPDIRECTINPUTDEVICE8A s_di_fe_joystick = NULL;
+static int      s_fe_js_suppress = 0;
 /* GetJS axis center (0xFA=250) and max tracked buttons (10); kept local so the
  * platform layer doesn't depend on td5_input.h (mirrors TD5_INPUT_JS_AXIS_CENTER
  * / TD5_INPUT_MAX_JS_BUTTONS). */
@@ -1149,6 +1166,11 @@ int td5_plat_input_init(void)
 
 void td5_plat_input_shutdown(void)
 {
+    if (s_di_fe_joystick) {
+        IDirectInputDevice8_Unacquire(s_di_fe_joystick);
+        IDirectInputDevice8_Release(s_di_fe_joystick);
+        s_di_fe_joystick = NULL;
+    }
     for (int js = 0; js < TD5_PLAT_MAX_JS_SLOTS; js++) {
         if (s_di_joystick[js]) {
             IDirectInputDevice8_Unacquire(s_di_joystick[js]);
@@ -1187,6 +1209,40 @@ void td5_plat_input_set_keyboard_bindings(int player, const uint8_t *scancodes, 
     TD5_LOG_I(LOG_TAG, "input: applied %d kb bindings P%d (view=0x%02X rear=0x%02X handbrake=0x%02X)",
               count, player + 1, s_kb_bindings[player][8], s_kb_bindings[player][9],
               s_kb_bindings[player][4]);
+}
+
+/* DIJOYSTATE2 axis value by index 0..7 (lX,lY,lZ,lRx,lRy,lRz,slider0,slider1). */
+static long js_axis_val(const DIJOYSTATE2 *js, int axis)
+{
+    switch (axis) {
+        case 0: return js->lX;  case 1: return js->lY;  case 2: return js->lZ;
+        case 3: return js->lRx; case 4: return js->lRy; case 5: return js->lRz;
+        case 6: return js->rglSlider[0]; case 7: return js->rglSlider[1];
+        default: return TD5_PLAT_JS_AXIS_CENTER;
+    }
+}
+
+/* Magnitude [0..256] of an action's binding given the current device state.
+ * Buttons are 0/256; axes are measured from centre (0xFA) in the bound
+ * direction (works for sticks and centre-rest combined triggers). */
+static int js_action_mag(const DIJOYSTATE2 *js, uint32_t code)
+{
+    if (code == TD5_JSBIND_NONE) return 0;
+    if (code & TD5_JSBIND_AXIS) {
+        int axis = (int)((code >> 1) & 0x7);
+        int dir  = (int)(code & 1);
+        long v   = js_axis_val(js, axis) - TD5_PLAT_JS_AXIS_CENTER;  /* -250..250 */
+        int  m   = (dir == 0) ? (int)v : (int)(-v);
+        if (m < 0) m = 0;
+        if (m > TD5_PLAT_JS_AXIS_CENTER) m = TD5_PLAT_JS_AXIS_CENTER;
+        return (m * 256) / TD5_PLAT_JS_AXIS_CENTER;
+    }
+    if (code & TD5_JSBIND_BUTTON) {
+        int btn = (int)(code & 0xFF);
+        if (btn >= 0 && btn < 128 && (js->rgbButtons[btn] & 0x80)) return 256;
+        return 0;
+    }
+    return 0;
 }
 
 void td5_plat_input_poll(int slot, TD5_InputState *out)
@@ -1328,6 +1384,7 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             if (K_DOWN(kb[7])) bits |= TD5_INPUT_GEAR_DOWN;
             if (K_DOWN(kb[8])) bits |= TD5_INPUT_CAMERA_CHANGE;
             if (K_DOWN(kb[9])) bits |= TD5_INPUT_REAR_VIEW;
+            if (K_DOWN(kb[10])) bits |= TD5_INPUT_PAUSE;   /* [PORT 2026-06] rebindable pause */
         }
 
         #undef K_DOWN
@@ -1362,42 +1419,55 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
         }
         hr = IDirectInputDevice8_GetDeviceState(s_di_joystick[slot], sizeof(js), &js);
         if (SUCCEEDED(hr)) {
-            const int32_t *bind = s_joystick_bindings[slot];
-            int configured = s_joystick_bound[slot];
+            static const uint32_t k_action_bits[6] = {
+                TD5_INPUT_HANDBRAKE, TD5_INPUT_HORN, TD5_INPUT_GEAR_UP,
+                TD5_INPUT_GEAR_DOWN, TD5_INPUT_CAMERA_CHANGE, TD5_INPUT_REAR_VIEW
+            };
             uint32_t jbits = 0;
+            long ax_x, ax_y;
 
-            /* Axes: X = steering, Y = throttle/brake (fixed assignment, matching
-             * M2DX Configure[p][0..3] = {1,2,0x200,0x400}). Honour the [1]/[2]
-             * axis-swap if the binding requests it (orig 2-button swap path). */
-            long ax_x = js.lX, ax_y = js.lY;
-            if (configured && bind[1] == 5 && bind[2] == 4) {
-                long t = ax_x; ax_x = ax_y; ax_y = t;
-            }
-            if (ax_x < 0)     ax_x = 0;
-            if (ax_x > 0x1FF) ax_x = 0x1FF;
-            if (ax_y < 0)     ax_y = 0;
-            if (ax_y > 0x1FF) ax_y = 0x1FF;
-            jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
-            jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
-
-            /* Buttons -> action bits. Default (GetJS non-custom) maps physical
-             * btn 2..7 to handbrake/horn/gear-up/gear-down/camera/rear; a
-             * configured binding slot [3+k] selects physical button (value-2). */
-            {
-                static const uint32_t k_action_bits[6] = {
-                    TD5_INPUT_HANDBRAKE, TD5_INPUT_HORN, TD5_INPUT_GEAR_UP,
-                    TD5_INPUT_GEAR_DOWN, TD5_INPUT_CAMERA_CHANGE, TD5_INPUT_REAR_VIEW
-                };
-                static const int k_default_btn[6] = { 2, 3, 4, 5, 6, 7 };
-                for (int k = 0; k < 6; k++) {
-                    int phys = k_default_btn[k];
-                    if (configured) {
-                        int v = bind[3 + k];
-                        if (v >= 2 && v <= 10) phys = v - 2;
+            if (s_js_action_set[slot]) {
+                /* [PORT ENHANCEMENT 2026-06] per-action bindings: each of the 10
+                 * actions maps to a button or an axis/trigger direction. LEFT/RIGHT
+                 * synthesize the analog steer axis, ACCELERATE/BRAKE the throttle
+                 * axis (so a trigger drives them analog), the rest are digital. */
+                const uint32_t *ab = s_js_action_bind[slot];
+                int left  = js_action_mag(&js, ab[0]);
+                int right = js_action_mag(&js, ab[1]);
+                int accel = js_action_mag(&js, ab[2]);
+                int brake = js_action_mag(&js, ab[3]);
+                int steer = left - right;     /* -256..256 (LEFT input → steer left) */
+                int thr   = accel - brake;    /* accelerate pushes Y below centre */
+                ax_x = TD5_PLAT_JS_AXIS_CENTER + (steer * TD5_PLAT_JS_AXIS_CENTER) / 256;
+                ax_y = TD5_PLAT_JS_AXIS_CENTER - (thr   * TD5_PLAT_JS_AXIS_CENTER) / 256;
+                if (ax_x < 0) ax_x = 0; if (ax_x > 0x1FF) ax_x = 0x1FF;
+                if (ax_y < 0) ax_y = 0; if (ax_y > 0x1FF) ax_y = 0x1FF;
+                jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
+                jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
+                for (int k = 0; k < 6; k++)
+                    if (js_action_mag(&js, ab[4 + k]) >= 128) jbits |= k_action_bits[k];
+                if (js_action_mag(&js, ab[10]) >= 128) jbits |= TD5_INPUT_PAUSE;  /* PAUSE */
+            } else {
+                /* Default mapping (unconfigured): X = steering, Y = throttle/brake;
+                 * physical buttons 2..7 → handbrake/horn/gear/camera/rear. The
+                 * legacy [1]/[2] axis-swap is honoured for 2-axis wheels. */
+                const int32_t *bind = s_joystick_bindings[slot];
+                int configured = s_joystick_bound[slot];
+                ax_x = js.lX; ax_y = js.lY;
+                if (configured && bind[1] == 5 && bind[2] == 4) { long t = ax_x; ax_x = ax_y; ax_y = t; }
+                if (ax_x < 0) ax_x = 0; if (ax_x > 0x1FF) ax_x = 0x1FF;
+                if (ax_y < 0) ax_y = 0; if (ax_y > 0x1FF) ax_y = 0x1FF;
+                jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
+                jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
+                {
+                    static const int k_default_btn[6] = { 2, 3, 4, 5, 6, 7 };
+                    for (int k = 0; k < 6; k++) {
+                        int phys = k_default_btn[k];
+                        if (configured) { int v = bind[3 + k]; if (v >= 2 && v <= 10) phys = v - 2; }
+                        if (phys >= 0 && phys < TD5_PLAT_JS_MAX_BUTTONS &&
+                            (js.rgbButtons[phys] & 0x80))
+                            jbits |= k_action_bits[k];
                     }
-                    if (phys >= 0 && phys < TD5_PLAT_JS_MAX_BUTTONS &&
-                        (js.rgbButtons[phys] & 0x80))
-                        jbits |= k_action_bits[k];
                 }
             }
 
@@ -1406,7 +1476,6 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             if (s_keyboard[0x01] & 0x80) jbits |= TD5_INPUT_ESCAPE;  /* DIK_ESC */
 
             out->buttons  = jbits;
-            /* Keep the decoded analog accessors in sync (FF / camera consumers). */
             out->analog_x = (int16_t)((int)ax_x - TD5_PLAT_JS_AXIS_CENTER);
             out->analog_y = (int16_t)((int)ax_y - TD5_PLAT_JS_AXIS_CENTER);
         }
@@ -1527,6 +1596,16 @@ void td5_plat_input_set_device(int slot, int device_index)
         s_di_joystick[slot] = NULL;
     }
 
+    /* Release the shared frontend-nav handle so the per-player device can take
+     * the physical joystick cleanly (frontend nav then reads the per-player
+     * handle via fe_nav_device). */
+    if (s_di_fe_joystick) {
+        IDirectInputDevice8_Unacquire(s_di_fe_joystick);
+        IDirectInputDevice8_Release(s_di_fe_joystick);
+        s_di_fe_joystick = NULL;
+    }
+    s_fe_js_suppress = 1;
+
     {
         HRESULT hr = IDirectInput8_CreateDevice(s_dinput,
                                                 &s_device_guids[device_index],
@@ -1620,6 +1699,159 @@ uint32_t td5_plat_input_joystick_buttons(int device_slot)
     for (i = 0; i < 32; i++)
         if (js.rgbButtons[i] & 0x80) mask |= (1u << i);
     return mask;
+}
+
+/* ---- Per-action joystick bindings (PORT ENHANCEMENT 2026-06) ---- */
+
+void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int count)
+{
+    int i;
+    if (slot < 0 || slot >= TD5_PLAT_MAX_JS_SLOTS || !codes) return;
+    if (count > TD5_JSBIND_ACTIONS) count = TD5_JSBIND_ACTIONS;
+    for (i = 0; i < count; i++) s_js_action_bind[slot][i] = codes[i];
+    for (; i < TD5_JSBIND_ACTIONS; i++) s_js_action_bind[slot][i] = TD5_JSBIND_NONE;
+    s_js_action_set[slot] = 1;
+    TD5_LOG_I(LOG_TAG, "Action bindings set: slot=%d", slot);
+}
+
+static int td5_plat_js_read(int device_slot, DIJOYSTATE2 *js)
+{
+    HRESULT hr;
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS ||
+        !s_di_joystick[device_slot])
+        return 0;
+    memset(js, 0, sizeof(*js));
+    hr = IDirectInputDevice8_Poll(s_di_joystick[device_slot]);
+    if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
+        IDirectInputDevice8_Acquire(s_di_joystick[device_slot]);
+        IDirectInputDevice8_Poll(s_di_joystick[device_slot]);
+    }
+    return SUCCEEDED(IDirectInputDevice8_GetDeviceState(s_di_joystick[device_slot],
+                                                        sizeof(*js), js));
+}
+
+void td5_plat_input_joystick_capture_begin(int device_slot)
+{
+    DIJOYSTATE2 js;
+    int i;
+    s_js_cap_slot = device_slot;
+    s_js_cap_btn_base = 0;
+    for (i = 0; i < 8; i++) s_js_cap_axis_base[i] = TD5_PLAT_JS_AXIS_CENTER;
+    if (!td5_plat_js_read(device_slot, &js)) return;
+    for (i = 0; i < 8; i++)  s_js_cap_axis_base[i] = js_axis_val(&js, i);
+    for (i = 0; i < 32; i++) if (js.rgbButtons[i] & 0x80) s_js_cap_btn_base |= (1u << i);
+}
+
+int td5_plat_input_joystick_capture_poll(int device_slot, uint32_t *out_code)
+{
+    DIJOYSTATE2 js;
+    int i;
+    const long AXIS_THRESH = 100;   /* of the 0..0x1F4 range (~20%) */
+    if (!out_code) return 0;
+    if (!td5_plat_js_read(device_slot, &js)) return 0;
+
+    /* Fresh button press (down now, up at capture-begin). */
+    for (i = 0; i < 32; i++) {
+        uint32_t bit = (1u << i);
+        if ((js.rgbButtons[i] & 0x80) && !(s_js_cap_btn_base & bit)) {
+            *out_code = TD5_JSBIND_BUTTON | (uint32_t)i;
+            return 1;
+        }
+    }
+    /* Axis / trigger moved past threshold from its rest baseline. */
+    for (i = 0; i < 8; i++) {
+        long d = js_axis_val(&js, i) - s_js_cap_axis_base[i];
+        if (d > AXIS_THRESH || d < -AXIS_THRESH) {
+            int dir = (d > 0) ? 0 : 1;
+            *out_code = TD5_JSBIND_AXIS | ((uint32_t)i << 1) | (uint32_t)dir;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap)
+{
+    if (!buf || cap <= 0) return;
+    if (code == TD5_JSBIND_NONE) {
+        snprintf(buf, (size_t)cap, "-");
+    } else if (code & TD5_JSBIND_AXIS) {
+        int axis = (int)((code >> 1) & 0x7);
+        int dir  = (int)(code & 1);
+        snprintf(buf, (size_t)cap, "AXIS %d%c", axis, dir ? '-' : '+');
+    } else if (code & TD5_JSBIND_BUTTON) {
+        snprintf(buf, (size_t)cap, "BTN %d", (int)(code & 0xFF) + 1);
+    } else {
+        snprintf(buf, (size_t)cap, "?");
+    }
+}
+
+/* Pick the device used for frontend navigation: the first per-player joystick if
+ * one exists, else a lazily-created non-exclusive handle to the first enumerated
+ * joystick. [PORT ENHANCEMENT 2026-06] */
+static LPDIRECTINPUTDEVICE8A fe_nav_device(void)
+{
+    int i;
+    for (i = 0; i < TD5_PLAT_MAX_JS_SLOTS; i++)
+        if (s_di_joystick[i]) { s_fe_js_suppress = 1; return s_di_joystick[i]; }
+    if (s_fe_js_suppress) return NULL;
+    if (!s_di_fe_joystick && s_dinput && s_device_count > 1) {
+        if (SUCCEEDED(IDirectInput8_CreateDevice(s_dinput, &s_device_guids[1],
+                                                 &s_di_fe_joystick, NULL))) {
+            DIPROPRANGE range;
+            IDirectInputDevice8_SetDataFormat(s_di_fe_joystick, &c_dfDIJoystick2);
+            if (s_hwnd)
+                IDirectInputDevice8_SetCooperativeLevel(s_di_fe_joystick, s_hwnd,
+                    DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+            range.diph.dwSize = sizeof(DIPROPRANGE);
+            range.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+            range.diph.dwHow = DIPH_DEVICE;
+            range.diph.dwObj = 0;
+            range.lMin = 0; range.lMax = 0x1F4;
+            IDirectInputDevice8_SetProperty(s_di_fe_joystick, DIPROP_RANGE, &range.diph);
+            IDirectInputDevice8_Acquire(s_di_fe_joystick);
+        } else {
+            s_di_fe_joystick = NULL;
+        }
+    }
+    return s_di_fe_joystick;
+}
+
+/* Frontend navigation bitmask from a connected gamepad:
+ *   bit0 LEFT  bit1 RIGHT  bit2 UP  bit3 DOWN  bit4 A/confirm  bit5 B/back. */
+uint32_t td5_plat_input_frontend_nav(void)
+{
+    LPDIRECTINPUTDEVICE8A dev = fe_nav_device();
+    DIJOYSTATE2 js;
+    HRESULT hr;
+    uint32_t bits = 0;
+    long cx, cy;
+    const long T = 130;
+
+    if (!dev) return 0;
+    memset(&js, 0, sizeof(js));
+    hr = IDirectInputDevice8_Poll(dev);
+    if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
+        IDirectInputDevice8_Acquire(dev);
+        IDirectInputDevice8_Poll(dev);
+    }
+    if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) return 0;
+
+    cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
+    cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
+    if (cx < -T) bits |= 1; if (cx > T) bits |= 2;
+    if (cy < -T) bits |= 4; if (cy > T) bits |= 8;   /* stick up = lY low = UP */
+
+    if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+        DWORD deg = js.rgdwPOV[0] / 100;
+        if (deg > 270 || deg <  90) bits |= 4;   /* up    (315..45)  */
+        if (deg >  90 && deg < 270) bits |= 8;   /* down  (135..225) */
+        if (deg > 180 && deg < 360) bits |= 1;   /* left  (225..315) */
+        if (deg >   0 && deg < 180) bits |= 2;   /* right (45..135)  */
+    }
+    if (js.rgbButtons[0] & 0x80) bits |= 0x10;   /* A = confirm/select */
+    if (js.rgbButtons[1] & 0x80) bits |= 0x20;   /* B = back/cancel    */
+    return bits;
 }
 
 /* ========================================================================
