@@ -282,9 +282,11 @@ static int  s_num_ai_opponents  = 5;    /* 0..(TD5_MAX_RACER_SLOTS-1)        */
 #define QR_ROW_Y0       96    /* first row y                              */
 #define QR_ROW_DY       56    /* uniform vertical gap between rows         */
 #define QR_ROW_Y(n)     (QR_ROW_Y0 + (n) * QR_ROW_DY)
-#define FE_QR_VALUE_X  280    /* value column left edge (clear of button @272) */
-#define FE_QR_VALUE_DY  10    /* value baseline offset to vertically center on the row */
-#define FE_QR_VALUE_SCALE 0.64f /* value glyph scale — fits the longest track name in the column */
+#define FE_QR_VALUE_X  280    /* value column left edge (clear of button @272)  */
+#define FE_QR_VALUE_SCALE 0.9f /* value glyph scale — matches the button-caption size */
+#define FE_QR_SCREEN_W   640  /* canvas width                                    */
+#define FE_QR_RIGHT_MARGIN 12 /* keep value text this far from the right edge     */
+#define FE_QR_VALUE_LINE_H 22 /* canvas px per value line (centers + wrap spacing) */
 static int  s_score_category_index;    /* DAT_00497a68: current track in score table */
 
 #define FE_MAX_DISPLAY_MODES 64
@@ -3990,13 +3992,52 @@ static void frontend_draw_value_text(float sx, float sy, int x, int y,
     fe_draw_text((float)x * sx, (float)y * sy, text, color, sx, sy);
 }
 
-/* Left-aligned value text at a custom glyph scale (fraction of the full value
- * font). Used by the Quick Race value column so long track names fit to the
- * right of the button without clipping the screen edge. */
-static void frontend_draw_value_text_scaled(float sx, float sy, int x, int y,
-                                            const char *text, uint32_t color, float scale) {
+/* Draw a Quick Race value in the right-hand column at FE_QR_VALUE_SCALE (matched
+ * to the button-caption size). If it would run past the right margin, wrap to a
+ * second line below; the 1- or 2-line block is vertically centered on the
+ * button row at row_btn_idx. */
+static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
+                                   const char *text, uint32_t color) {
+    if (row_btn_idx < 0 || row_btn_idx >= s_button_count) return;
     if (!text || !text[0] || s_font_page < 0) return;
-    fe_draw_text((float)x * sx, (float)y * sy, text, color, sx * scale, sy * scale);
+    const float gs   = FE_QR_VALUE_SCALE;
+    const float vx   = (float)FE_QR_VALUE_X * sx;
+    const float avail = (float)(FE_QR_SCREEN_W - FE_QR_VALUE_X - FE_QR_RIGHT_MARGIN) * sx;
+    const int   by   = s_buttons[row_btn_idx].y;
+
+    /* Fits on one line — center it on the 32px button. */
+    if (fe_measure_text(text, sx * gs) <= avail) {
+        float ty = ((float)by + (32.0f - FE_QR_VALUE_LINE_H) * 0.5f) * sy;
+        fe_draw_text(vx, ty, text, color, sx * gs, sy * gs);
+        return;
+    }
+
+    /* Wrap: split at the last space whose prefix fits; else hard char-break. */
+    char l1[96], l2[96];
+    int len = (int)strlen(text);
+    int split = -1;
+    for (int i = 1; i < len && i < (int)sizeof(l1); i++) {
+        if (text[i] != ' ') continue;
+        memcpy(l1, text, (size_t)i); l1[i] = '\0';
+        if (fe_measure_text(l1, sx * gs) <= avail) split = i;
+        else break;
+    }
+    if (split > 0) {
+        memcpy(l1, text, (size_t)split); l1[split] = '\0';
+        snprintf(l2, sizeof(l2), "%s", text + split + 1);
+    } else {
+        int cut = 1;
+        for (int i = 1; i <= len && i < (int)sizeof(l1); i++) {
+            memcpy(l1, text, (size_t)i); l1[i] = '\0';
+            if (fe_measure_text(l1, sx * gs) > avail) break;
+            cut = i;
+        }
+        memcpy(l1, text, (size_t)cut); l1[cut] = '\0';
+        snprintf(l2, sizeof(l2), "%s", text + cut);
+    }
+    float top = (float)by + (32.0f - 2.0f * FE_QR_VALUE_LINE_H) * 0.5f;
+    fe_draw_text(vx,  top * sy,                                  l1, color, sx * gs, sy * gs);
+    fe_draw_text(vx, (top + FE_QR_VALUE_LINE_H) * sy,           l2, color, sx * gs, sy * gs);
 }
 
 /* Value text centering: original draws to 224px panel at screen x=394 (canvasW/2+0x4A),
@@ -4263,25 +4304,21 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
                     s_selected_track >= 0 && s_selected_track < 26 &&
                     s_track_lock_table[s_selected_track] != 0);
 
-    /* Each selected value renders in the right-hand value column, vertically
-     * centered on its button row, at a reduced glyph scale so even the longest
-     * track name fits. Car/Track show the name; Direction shows
-     * Forwards/Backwards (only when the row is visible); Players/Opponents show
-     * the count. */
-    frontend_draw_value_text_scaled(sx, sy, FE_QR_VALUE_X, s_buttons[QR_BTN_CAR].y   + FE_QR_VALUE_DY,
-                             car_locked ? "LOCKED" : car_name, 0xFFFFFFFF, FE_QR_VALUE_SCALE);
-    frontend_draw_value_text_scaled(sx, sy, FE_QR_VALUE_X, s_buttons[QR_BTN_TRACK].y + FE_QR_VALUE_DY,
-                             track_locked ? "LOCKED" : track_name, 0xFFFFFFFF, FE_QR_VALUE_SCALE);
+    /* Each selected value renders in the right-hand value column at the same
+     * glyph size as the button caption, vertically centered on its row, and
+     * wraps to a second line if it would run off the right edge. Car/Track show
+     * the name; Direction shows Forwards/Backwards (only when the row is
+     * visible); Players/Opponents show the count. */
+    frontend_draw_qr_value(sx, sy, QR_BTN_CAR,   car_locked   ? "LOCKED" : car_name,   0xFFFFFFFF);
+    frontend_draw_qr_value(sx, sy, QR_BTN_TRACK, track_locked ? "LOCKED" : track_name, 0xFFFFFFFF);
     if (!s_buttons[QR_BTN_DIRECTION].hidden) {
-        frontend_draw_value_text_scaled(sx, sy, FE_QR_VALUE_X, s_buttons[QR_BTN_DIRECTION].y + FE_QR_VALUE_DY,
-                                 s_track_direction ? "Backwards" : "Forwards", 0xFFFFFFFF, FE_QR_VALUE_SCALE);
+        frontend_draw_qr_value(sx, sy, QR_BTN_DIRECTION,
+                               s_track_direction ? "Backwards" : "Forwards", 0xFFFFFFFF);
     }
     snprintf(count, sizeof(count), "%d", s_num_human_players);
-    frontend_draw_value_text_scaled(sx, sy, FE_QR_VALUE_X, s_buttons[QR_BTN_PLAYERS].y + FE_QR_VALUE_DY,
-                             count, 0xFFFFFFFF, FE_QR_VALUE_SCALE);
+    frontend_draw_qr_value(sx, sy, QR_BTN_PLAYERS, count, 0xFFFFFFFF);
     snprintf(count, sizeof(count), "%d", s_num_ai_opponents);
-    frontend_draw_value_text_scaled(sx, sy, FE_QR_VALUE_X, s_buttons[QR_BTN_OPPONENTS].y + FE_QR_VALUE_DY,
-                             count, 0xFFFFFFFF, FE_QR_VALUE_SCALE);
+    frontend_draw_qr_value(sx, sy, QR_BTN_OPPONENTS, count, 0xFFFFFFFF);
 }
 
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
@@ -7678,9 +7715,9 @@ static void Screen_QuickRaceMenu(void) {
          * forward-only/circuit tracks. Values are drawn by
          * frontend_render_quick_race_overlay at FE_QR_VALUE_X. */
         { int bi;
-          bi = frontend_create_button(SNK_ChangeCarButTxt,   QR_COL_X, QR_ROW_Y(0), QR_BTN_W, 32); /* QR_BTN_CAR */
+          bi = frontend_create_button("Car",                 QR_COL_X, QR_ROW_Y(0), QR_BTN_W, 32); /* QR_BTN_CAR */
           if (bi >= 0) s_buttons[bi].is_selector = 1;
-          bi = frontend_create_button(SNK_ChangeTrackButTxt, QR_COL_X, QR_ROW_Y(1), QR_BTN_W, 32); /* QR_BTN_TRACK */
+          bi = frontend_create_button("Track",               QR_COL_X, QR_ROW_Y(1), QR_BTN_W, 32); /* QR_BTN_TRACK */
           if (bi >= 0) s_buttons[bi].is_selector = 1;
           bi = frontend_create_button("Direction",           QR_COL_X, QR_ROW_Y(2), QR_BTN_W, 32); /* QR_BTN_DIRECTION */
           if (bi >= 0) s_buttons[bi].is_selector = 1;
