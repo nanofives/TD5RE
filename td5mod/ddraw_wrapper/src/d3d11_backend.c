@@ -1076,6 +1076,68 @@ int Backend_Reset(int width, int height, int bpp, int windowed)
 }
 
 /* ========================================================================
+ * Backend_SetExclusiveFullscreen  [S01 Display options 2026-06-04]
+ *
+ * Toggles DXGI exclusive fullscreen on the existing swap chain. The platform
+ * layer (td5_plat_set_window_mode) is responsible for the HWND style; this
+ * function only flips the swap-chain fullscreen state and re-sizes the buffers
+ * to the current target dims after the transition (DXGI requires a
+ * ResizeBuffers after fullscreen<->windowed switches). Idempotent.
+ * ======================================================================== */
+int Backend_SetExclusiveFullscreen(int enable)
+{
+    BOOL cur = FALSE;
+    HRESULT hr;
+    int rt_w, rt_h;
+
+    if (!g_backend.swap_chain) return 0;
+
+    IDXGISwapChain_GetFullscreenState(g_backend.swap_chain, &cur, NULL);
+    if ((enable != 0) == (cur != FALSE)) {
+        return 1; /* already in requested state */
+    }
+
+    hr = IDXGISwapChain_SetFullscreenState(g_backend.swap_chain,
+                                           enable ? TRUE : FALSE, NULL);
+    if (FAILED(hr)) {
+        WRAPPER_LOG("Backend_SetExclusiveFullscreen(%d): FAILED hr=0x%08lX",
+                    enable, hr);
+        return 0;
+    }
+
+    /* Resize buffers to the current target after the mode transition. */
+    rt_w = g_backend.target_width  > 0 ? g_backend.target_width  : g_backend.width;
+    rt_h = g_backend.target_height > 0 ? g_backend.target_height : g_backend.height;
+
+    ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 0, NULL, NULL);
+    Backend_ReleaseRenderTargets();
+    hr = IDXGISwapChain_ResizeBuffers(g_backend.swap_chain, 1,
+        (UINT)rt_w, (UINT)rt_h, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+    if (FAILED(hr)) {
+        WRAPPER_LOG("Backend_SetExclusiveFullscreen: ResizeBuffers FAILED hr=0x%08lX", hr);
+    }
+    if (!Backend_CreateRenderTargets(rt_w, rt_h)) {
+        WRAPPER_LOG("Backend_SetExclusiveFullscreen: CreateRenderTargets FAILED");
+        return 0;
+    }
+    ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
+        &g_backend.swap_rtv, g_backend.depth_dsv);
+    {
+        D3D11_VIEWPORT vp;
+        vp.TopLeftX = 0; vp.TopLeftY = 0;
+        vp.Width    = (FLOAT)rt_w;
+        vp.Height   = (FLOAT)rt_h;
+        vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+        ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
+    }
+    Backend_UpdateViewportCB((float)rt_w, (float)rt_h);
+    g_backend.window_mode = enable ? 0 : g_backend.window_mode;
+
+    WRAPPER_LOG("Backend_SetExclusiveFullscreen(%d): OK rt=%dx%d", enable, rt_w, rt_h);
+    return 1;
+}
+
+/* ========================================================================
  * Constant buffer updates
  * ======================================================================== */
 
@@ -1541,7 +1603,9 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
      * rotates buffer 0 after Present, so capture must happen here). */
     Backend_CaptureIfRequested();
 
-    hr = IDXGISwapChain_Present(g_backend.swap_chain, 1, 0);
+    /* [S01 2026-06-04] sync interval driven by the Display-options VSync toggle
+     * (g_backend.vsync; 1=wait-for-vblank, 0=uncapped/tear). Defaults to 1. */
+    hr = IDXGISwapChain_Present(g_backend.swap_chain, g_backend.vsync ? 1 : 0, 0);
     if (FAILED(hr) && s_log_count < 10) {
         WRAPPER_LOG("CompositeAndPresent: Present FAILED hr=0x%08lX", hr);
     }

@@ -126,6 +126,12 @@ int Backend_Init(void)
 {
     WRAPPER_LOG("Backend_Init: Initializing D3D11 backend");
 
+    /* [S01 2026-06-04] Default present sync interval to 1 (vblank-locked, the
+     * original DDraw behavior). The game overrides this from the [Display]
+     * VSync INI key once it boots; default here so the very first presents
+     * before that override are still vsynced. */
+    g_backend.vsync = 1;
+
     /* Patch HandleRenderWindowResize EARLY — before M2DX creates any D3D
      * devices. If we wait until Backend_CreateDevice, M2DX's WM_SIZE
      * handling may destroy g_pDirect3DDevice during ShowWindow(SW_HIDE). */
@@ -285,6 +291,9 @@ void Backend_Shutdown(void)
         g_backend.device = NULL;
     }
     if (g_backend.swap_chain) {
+        /* [S01 2026-06-04] DXGI deadlocks if a swap chain is released while in
+         * exclusive fullscreen — drop out first (no-op if already windowed). */
+        IDXGISwapChain_SetFullscreenState(g_backend.swap_chain, FALSE, NULL);
         IDXGISwapChain_Release(g_backend.swap_chain);
         g_backend.swap_chain = NULL;
     }

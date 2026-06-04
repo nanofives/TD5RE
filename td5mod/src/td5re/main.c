@@ -227,6 +227,16 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Display", "SpeedUnits",    g_td5.ini.speed_units);
     td5_ini_write_int("Display", "CameraDamping", g_td5.ini.camera_damping);
     td5_ini_write_int("Display", "DisplayMode",   td5_save_get_display_mode());
+    /* [S01 2026-06-04] window mode / vsync / fps overlay + the chosen resolution
+     * so a relaunch reopens at the same size and mode. Refresh Width/Height from
+     * the live window first so a drag-resize (no Resolution row any more) sticks. */
+    { int cw = 0, ch = 0; td5_plat_get_chosen_resolution(&cw, &ch);
+      if (cw > 0 && ch > 0) { g_td5.ini.disp_width = cw; g_td5.ini.disp_height = ch; } }
+    td5_ini_write_int("Display", "WindowMode",    g_td5.ini.window_mode);
+    td5_ini_write_int("Display", "VSync",         g_td5.ini.vsync);
+    td5_ini_write_int("Display", "ShowFps",       g_td5.ini.show_fps);
+    td5_ini_write_int("Display", "Width",         g_td5.ini.disp_width);
+    td5_ini_write_int("Display", "Height",        g_td5.ini.disp_height);
 
     /* Audio */
     td5_ini_write_int("Audio", "SFXVolume",   g_td5.ini.sfx_volume);
@@ -287,6 +297,9 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SpeedUnits",           &g_td5.ini.speed_units },
         { "CameraDamping",        &g_td5.ini.camera_damping },
         { "DisplayMode",          &g_td5.ini.display_mode },
+        { "WindowMode",           &g_td5.ini.window_mode },
+        { "VSync",                &g_td5.ini.vsync },
+        { "ShowFps",              &g_td5.ini.show_fps },
         /* Audio */
         { "SFXVolume",            &g_td5.ini.sfx_volume },
         { "MusicVolume",          &g_td5.ini.music_volume },
@@ -510,6 +523,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.speed_units    = td5_ini_int("Display", "SpeedUnits", 0);
     g_td5.ini.camera_damping = td5_ini_int("Display", "CameraDamping", 5);
     g_td5.ini.display_mode   = td5_ini_int("Display", "DisplayMode", 0);
+    /* [S01 2026-06-04] 3-way window mode (0=fullscreen,1=windowed,2=borderless;
+     * defaults from the legacy Windowed key), VSync, and the FPS/MS overlay
+     * toggle. disp_width/height mirror the chosen resolution for persistence. */
+    g_td5.ini.window_mode    = td5_ini_int("Display", "WindowMode", windowed ? 1 : 0);
+    g_td5.ini.vsync          = td5_ini_int("Display", "VSync", 1);
+    g_td5.ini.show_fps       = td5_ini_int("Display", "ShowFps", 1);
 
     /* Audio */
     g_td5.ini.sfx_volume    = td5_ini_int("Audio", "SFXVolume", 80);
@@ -819,6 +838,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         if (height <= 0) height = 480;
     }
     bpp = DEFAULT_BPP;
+    /* [S01] Record the finalized windowed/fullscreen resolution so a persist
+     * before any in-menu change still writes real [Display] Width/Height. */
+    g_td5.ini.disp_width  = width;
+    g_td5.ini.disp_height = height;
 
     /* Set Windows timer resolution to 1ms so Sleep() and GetTickCount()
      * are accurate. Without this, Sleep(16) may sleep ~30ms (15.6ms default). */
@@ -847,6 +870,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * display window in windowed mode).
      * --------------------------------------------------------------- */
     dbglog("Step 1: Backend_Init OK");
+    /* [S01] Always create the device windowed, then apply the persisted
+     * WindowMode (windowed/borderless/exclusive-fullscreen) once the platform
+     * layer is up — this avoids the untested exclusive-fullscreen-at-create
+     * path and keeps a single code path for mode transitions. */
+    windowed = 1;
     dbglog("Step 2: Backend_CreateDevice(%d x %d, bpp=%d, windowed=%d)...", width, height, bpp, windowed);
     /* Pre-set target dimensions so Backend_CreateDevice skips its own INI read */
     g_backend.target_width  = width;
@@ -961,6 +989,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Update global state with actual render dimensions and INI settings */
     g_td5.render_width  = width;
     g_td5.render_height = height;
+
+    /* [S01 2026-06-04] Apply the persisted VSync + WindowMode now that the swap
+     * chain and platform layer exist. set_window_mode may change the render size
+     * (borderless -> desktop res), so re-read the resulting client size into the
+     * render-dim globals before the game modules initialize. */
+    td5_plat_set_vsync(g_td5.ini.vsync);
+    td5_plat_set_window_mode(g_td5.ini.window_mode);
+    {
+        int aw = width, ah = height;
+        td5_plat_get_window_size(&aw, &ah);
+        if (aw > 0 && ah > 0) {
+            width  = aw;
+            height = ah;
+            g_td5.render_width  = aw;
+            g_td5.render_height = ah;
+        }
+    }
+
     g_td5.intro_movie_pending = g_td5.ini.skip_intro ? 0 : 1;
     dbglog("Step 4: Platform init OK (render=%dx%d, skip_intro=%d)", width, height, g_td5.ini.skip_intro);
     dbglog("Step 5: td5re_init (15 modules)...");

@@ -692,8 +692,9 @@ static HRESULT __stdcall Surface4_Flip(WrapperSurface *self, WrapperSurface *tar
         return DD_OK;
     }
 
-    /* Fallback: simple present via swap chain */
-    IDXGISwapChain_Present(g_backend.swap_chain, 1, 0);
+    /* Fallback: simple present via swap chain.
+     * [S01 2026-06-04] sync interval from the VSync toggle (g_backend.vsync). */
+    IDXGISwapChain_Present(g_backend.swap_chain, g_backend.vsync ? 1 : 0, 0);
     return DD_OK;
 }
 

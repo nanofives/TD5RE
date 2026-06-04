@@ -281,6 +281,15 @@ typedef struct {
     int                 mode_count;
     int                 mode_capacity;
 
+    /* [S01 Display options 2026-06-04] Runtime present/window-mode knobs.
+     *   vsync       : Present sync interval (1 = wait for vblank, 0 = tear/uncapped).
+     *                 Defaults to 1 (the original DDraw DDFLIP_VSYNC behavior).
+     *   window_mode : 0 = exclusive fullscreen, 1 = windowed, 2 = borderless.
+     *                 Owned by the platform layer; mirrored here so the wrapper's
+     *                 swap-chain code can branch on it. */
+    int                 vsync;
+    int                 window_mode;
+
     /* Vertex coordinate scaling: game emits XYZRHW vertices in M2DX's internal
      * resolution (e.g. 640x480) but our RT is at native res. These scale factors
      * are applied to every pre-transformed vertex X/Y in DrawPrimitive. */
@@ -785,6 +794,10 @@ void Backend_Shutdown(void);
 int  Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed);
 int  Backend_Reset(int width, int height, int bpp, int windowed);
 void Backend_EnumerateModes(void);
+/* [S01 2026-06-04] Toggle DXGI exclusive fullscreen on the swap chain.
+ * enable!=0 -> SetFullscreenState(TRUE) (exclusive), 0 -> SetFullscreenState(FALSE).
+ * Idempotent and safe to call when no swap chain exists. Returns 1 on success. */
+int  Backend_SetExclusiveFullscreen(int enable);
 
 /* Object creation */
 WrapperDirectDraw* WrapperDirectDraw_Create(void);

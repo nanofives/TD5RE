@@ -2981,8 +2981,15 @@ void td5_render_configure_projection(int width, int height)
     s_center_x = (float)width  * 0.5f;
     s_center_y = (float)height * 0.5f;
 
-    /* Focal length: FOV locked to 4:3 horizontal */
-    s_focal_length = (float)width * 0.5625f;
+    /* Focal length. [S01 2026-06-04] Lock the VERTICAL FOV (focal proportional to
+     * HEIGHT) instead of the horizontal one. The original ran fixed 4:3, where
+     * height*0.75 == width*0.5625 (= 720 at 1280x960) so this is byte-identical at
+     * 4:3. On a widescreen / resized window it keeps the same vertical framing
+     * (the car and its ground shadow stay in view) and instead widens the
+     * horizontal FOV — "Hor+", the expected behavior when the window gets wider.
+     * The old width*0.5625 locked the horizontal FOV, so widening the window
+     * shrank the vertical FOV and pushed the car's shadow off the bottom. */
+    s_focal_length = (float)height * 0.75f;
     s_inv_focal    = 1.0f / s_focal_length;
 
     /* Near/far clip.

@@ -220,6 +220,17 @@ typedef struct TD5_GlobalState {
          * Formerly persisted in Config.td5 (+0xBD); now a [Display] DisplayMode
          * key in td5re.ini. The applied resolution still comes from Width/Height. */
         int  display_mode;
+        /* [S01 Display options 2026-06-04] new display knobs:
+         *   window_mode : 0=fullscreen exclusive, 1=windowed, 2=borderless ([Display] WindowMode)
+         *   vsync       : 1=wait for vblank, 0=uncapped/tearing ([Display] VSync)
+         *   show_fps    : 1=show the FPS/MS overlay, 0=hide it ([Display] ShowFps)
+         *   disp_width / disp_height : the chosen windowed/fullscreen resolution,
+         *     persisted to [Display] Width/Height so it survives a relaunch. */
+        int  window_mode;
+        int  vsync;
+        int  show_fps;
+        int  disp_width;
+        int  disp_height;
         /* Audio */
         int  sfx_volume;
         int  music_volume;

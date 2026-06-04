@@ -1484,9 +1484,19 @@ void td5_hud_init_layout(int viewport_mode)
     s_numbers_atlas = td5_asset_find_atlas_entry(NULL, "numbers");
     hud_log_atlas_status("numbers", s_numbers_atlas);
 
-    /* Compute base scale factors */
+    /* Compute base scale factors. [S01 2026-06-04] Use a UNIFORM scale (the
+     * smaller of the two axes) for HUD element SIZING so round elements — speedo
+     * dial, tach, minimap grid, gauges — stay circular on non-4:3 / widescreen
+     * windows instead of stretching. Element POSITIONS still use the full per-view
+     * vp_* bounds below, so the HUD stays pinned to the correct screen corners. At
+     * 4:3 sx==sy, so this is a no-op (byte-identical to the original layout). */
     s_scale_x = g_render_width_f * (1.0f / 640.0f);
     s_scale_y = g_render_height_f * (1.0f / 480.0f);
+    {
+        float uniform_scale = (s_scale_x < s_scale_y) ? s_scale_x : s_scale_y;
+        s_scale_x = uniform_scale;
+        s_scale_y = uniform_scale;
+    }
 
     /* Set up per-view layout in pixel-space coordinates.
      *
@@ -2630,11 +2640,18 @@ void td5_hud_render_overlays(float dt)
             if (speed_raw < 0) speed_raw = 0;
             speed_raw >>= 8;
 
+            /* [S01 2026-06-04] Units from the live Display-options setting
+             * (g_td5.ini.speed_units; 0=MPH, 1=KPH). g_kph_mode was initialized
+             * to 0 and NEVER synced to the saved preference, so the speedo always
+             * showed MPH regardless of the menu choice — read the INI value and
+             * keep g_kph_mode mirrored for any other reader. The MPH round-to-
+             * nearest bias is +626 (orig +0x272 @0x438ed4), not 625. */
             int speed_display;
+            g_kph_mode = g_td5.ini.speed_units;
             if (g_kph_mode == 0) {
-                speed_display = (speed_raw * 256 + 625) / 1252; /* MPH */
+                speed_display = (speed_raw * 256 + 626) / 1252; /* MPH [CONFIRMED @0x438ed4] */
             } else {
-                speed_display = (speed_raw * 256 + 389) / 778;  /* KPH */
+                speed_display = (speed_raw * 256 + 389) / 778;  /* KPH [CONFIRMED @0x438ebc] */
             }
 
             /* Build and submit speed digit quads using SPEEDOFONT atlas
@@ -2863,12 +2880,15 @@ void td5_hud_render_overlays(float dt)
     td5_render_set_clip_rect(0.0f, (float)g_render_width, 0.0f, (float)g_render_height);
     td5_render_set_projection_center(g_render_width_f * 0.5f, g_render_height_f * 0.5f);
 
-    /* Always-on FPS counter (top-left), independent of the debug overlay so the
-     * readout shows in every state. peak = worst frame time over the last ~1s,
+    /* FPS/MS counter, fixed top-left (8,8) corner — consistent with the
+     * frontend overlay. [S01 2026-06-04] gated by the Display-options Show FPS
+     * toggle (g_td5.ini.show_fps). peak = worst frame time over the last ~1s,
      * which spikes on a stall (e.g. a car-change decode) even when the smoothed
-     * FPS barely moves. Real wall-clock values from td5_game_update_frame_timing. */
-    td5_hud_queue_text(0, 8, 8, 0, "FPS %.0f  %dMS",
-                       (double)g_td5_display_fps, g_td5_peak_frame_ms);
+     * FPS barely moves. Values from the main-loop td5_game_update_fps_overlay(). */
+    if (g_td5.ini.show_fps) {
+        td5_hud_queue_text(0, 8, 8, 0, "FPS %.0f  %dMS",
+                           (double)g_td5_display_fps, g_td5_peak_frame_ms);
+    }
 
     /* Flush queued text glyphs */
     td5_hud_flush_text();
