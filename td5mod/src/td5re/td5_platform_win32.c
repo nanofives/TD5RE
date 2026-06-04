@@ -114,6 +114,9 @@ static int      s_js_cap_slot = -1;
  * is created, navigation reads that instead and this one is released. */
 static LPDIRECTINPUTDEVICE8A s_di_fe_joystick = NULL;
 static int      s_fe_js_suppress = 0;
+/* [PORT ENHANCEMENT 2026-06] non-exclusive handles for the multiplayer lobby's
+ * "press to join" scan across every enumerated joystick. */
+static LPDIRECTINPUTDEVICE8A s_di_scan[16];
 /* GetJS axis center (0xFA=250) and max tracked buttons (10); kept local so the
  * platform layer doesn't depend on td5_input.h (mirrors TD5_INPUT_JS_AXIS_CENTER
  * / TD5_INPUT_MAX_JS_BUTTONS). */
@@ -1166,6 +1169,7 @@ int td5_plat_input_init(void)
 
 void td5_plat_input_shutdown(void)
 {
+    td5_plat_input_scan_join_release();
     if (s_di_fe_joystick) {
         IDirectInputDevice8_Unacquire(s_di_fe_joystick);
         IDirectInputDevice8_Release(s_di_fe_joystick);
@@ -1596,14 +1600,14 @@ void td5_plat_input_set_device(int slot, int device_index)
         s_di_joystick[slot] = NULL;
     }
 
-    /* Release the shared frontend-nav handle so the per-player device can take
-     * the physical joystick cleanly (frontend nav then reads the per-player
-     * handle via fe_nav_device). */
+    /* Release the shared frontend-nav + lobby-scan handles so the per-player
+     * device can take the physical joystick cleanly. */
     if (s_di_fe_joystick) {
         IDirectInputDevice8_Unacquire(s_di_fe_joystick);
         IDirectInputDevice8_Release(s_di_fe_joystick);
         s_di_fe_joystick = NULL;
     }
+    td5_plat_input_scan_join_release();
     s_fe_js_suppress = 1;
 
     {
@@ -1815,6 +1819,53 @@ static LPDIRECTINPUTDEVICE8A fe_nav_device(void)
         }
     }
     return s_di_fe_joystick;
+}
+
+/* Multiplayer lobby "press to join" scan: bit i set if device i's join control
+ * is held this frame — device 0 = keyboard (Enter), devices 1.. = joystick
+ * button 0 (A). Lazily creates a non-exclusive handle per joystick.
+ * [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_scan_join(void)
+{
+    uint32_t mask = 0;
+    int i;
+    if (s_keyboard[0x1C] & 0x80) mask |= 1u;     /* keyboard Enter = device 0 */
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        DIJOYSTATE2 js;
+        if (!s_di_scan[i]) {
+            if (!s_dinput) continue;
+            if (SUCCEEDED(IDirectInput8_CreateDevice(s_dinput, &s_device_guids[i],
+                                                     &s_di_scan[i], NULL))) {
+                IDirectInputDevice8_SetDataFormat(s_di_scan[i], &c_dfDIJoystick2);
+                if (s_hwnd)
+                    IDirectInputDevice8_SetCooperativeLevel(s_di_scan[i], s_hwnd,
+                        DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+                IDirectInputDevice8_Acquire(s_di_scan[i]);
+            } else { s_di_scan[i] = NULL; continue; }
+        }
+        memset(&js, 0, sizeof(js));
+        if (FAILED(IDirectInputDevice8_Poll(s_di_scan[i]))) {
+            IDirectInputDevice8_Acquire(s_di_scan[i]);
+            IDirectInputDevice8_Poll(s_di_scan[i]);
+        }
+        if (SUCCEEDED(IDirectInputDevice8_GetDeviceState(s_di_scan[i], sizeof(js), &js)))
+            if (js.rgbButtons[0] & 0x80) mask |= (1u << i);
+    }
+    return mask;
+}
+
+/* Release the lobby scan handles (call when leaving the lobby so per-player
+ * exclusive devices can take the hardware cleanly). */
+void td5_plat_input_scan_join_release(void)
+{
+    int i;
+    for (i = 0; i < 16; i++) {
+        if (s_di_scan[i]) {
+            IDirectInputDevice8_Unacquire(s_di_scan[i]);
+            IDirectInputDevice8_Release(s_di_scan[i]);
+            s_di_scan[i] = NULL;
+        }
+    }
 }
 
 /* Frontend navigation bitmask from a connected gamepad:

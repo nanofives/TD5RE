@@ -84,6 +84,7 @@ static void Screen_CupFailed(void);                  /* [26] 0x4237F0 */
 static void Screen_CupWon(void);                     /* [27] 0x423A80 */
 static void Screen_StartupInit(void);                /* [28] 0x415370 */
 static void Screen_SessionLocked(void);              /* [29] 0x41D630 */
+static void Screen_MultiplayerLobby(void);           /* [30] PORT ENHANCEMENT 2026-06 */
 
 /* ========================================================================
  * Screen function pointer type and dispatch table
@@ -126,6 +127,7 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [27] */ Screen_CupWon,
     /* [28] */ Screen_StartupInit,
     /* [29] */ Screen_SessionLocked,
+    /* [30] */ Screen_MultiplayerLobby,   /* PORT ENHANCEMENT 2026-06 */
 };
 
 /* ========================================================================
@@ -236,6 +238,16 @@ static int  s_mp_btn_missing[2] = { -1, -1 };
 static int  s_mp_btn_ok        = -1;
 static int  s_mp_missing_count = 0;
 static int  s_mp_layout_optcount = 1;
+
+/* [PORT ENHANCEMENT 2026-06] MULTIPLAYER press-to-join lobby + sequential car
+ * select. join order = player number; each joined player records its device. */
+static int      s_mp_flow         = 0;     /* 1 = multiplayer setup flow active */
+static int      s_mp_joined_count = 0;     /* players who have joined the lobby */
+static int      s_mp_join_device[TD5_MAX_HUMAN_PLAYERS]; /* device idx per joined player */
+static uint32_t s_mp_join_prev    = 0;     /* lobby join-scan mask last frame (edge) */
+static int      s_mp_car_player    = 0;    /* which player is picking (sequential car select) */
+static int      s_mp_player_car[TD5_MAX_HUMAN_PLAYERS];   /* per-player chosen car */
+static int      s_mp_player_paint[TD5_MAX_HUMAN_PLAYERS]; /* per-player chosen paint */
 
 /* ScreenLocalizationInit bootstrap control [CONFIRMED @ 0x4269D0 g_attractModeControlEnabled]:
  * 0 = first entry (run full init), 1 = re-entry (skip init, go to menu),
@@ -2055,29 +2067,32 @@ static void frontend_init_race_schedule(void) {
      * to a cols x rows grid consumed by td5_game_init_viewport_layout. The
      * untouched default (1 human + 5 AI) stays byte-faithful to the legacy grid.
      * g_td5.network_active=0 ensures the local split-screen path is taken. */
-    if (s_current_screen == TD5_SCREEN_QUICK_RACE) {
-        int qr_humans = s_num_human_players;
-        int qr_opp    = s_num_ai_opponents;
-        if (qr_humans < 1) qr_humans = 1;
-        if (qr_humans > TD5_MAX_HUMAN_PLAYERS) qr_humans = TD5_MAX_HUMAN_PLAYERS;
-        if (qr_opp < 0) qr_opp = 0;
-        if (qr_opp > TD5_MAX_RACER_SLOTS - qr_humans) qr_opp = TD5_MAX_RACER_SLOTS - qr_humans;
-        g_td5.num_human_players = qr_humans;
-        g_td5.num_ai_opponents  = qr_opp;
-    } else if (s_two_player_mode != 0) {
-        /* Two-player / multiplayer launch path (main-menu TWO PLAYER button +
-         * split toggle). Honor the Multiplayer Options player count (>=2). */
-        int humans = (s_num_human_players > 1) ? s_num_human_players : 2;
-        int ai;
+    {
+        int humans, ai;
+        /* Human count: Quick Race + the multiplayer lobby flow drive s_num_human_players;
+         * everything else is single-player (1). */
+        if (s_current_screen == TD5_SCREEN_QUICK_RACE)
+            humans = s_num_human_players;
+        else if (s_two_player_mode != 0)
+            humans = (s_num_human_players > 1) ? s_num_human_players : 2;
+        else
+            humans = 1;
+        if (humans < 1) humans = 1;
         if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
-        ai = TD5_LEGACY_RACE_SLOTS - humans;
+
+        /* AI count: the screens that expose an opponents selector (Quick Race +
+         * the track selector race-option row) drive s_num_ai_opponents; other
+         * flows use the legacy fill (cup game-types override it anyway). */
+        if (s_current_screen == TD5_SCREEN_QUICK_RACE ||
+            s_current_screen == TD5_SCREEN_TRACK_SELECTION)
+            ai = s_num_ai_opponents;
+        else
+            ai = TD5_LEGACY_RACE_SLOTS - humans;
         if (ai < 0) ai = 0;
+        if (ai > TD5_MAX_RACER_SLOTS - humans) ai = TD5_MAX_RACER_SLOTS - humans;
+
         g_td5.num_human_players = humans;
         g_td5.num_ai_opponents  = ai;
-    } else {
-        /* Single-player (career/cup/single quick race): faithful 6-car grid. */
-        g_td5.num_human_players = 1;
-        g_td5.num_ai_opponents  = TD5_LEGACY_RACE_SLOTS - 1;
     }
 
     eff_humans = g_td5.num_human_players;
@@ -2116,13 +2131,27 @@ static void frontend_init_race_schedule(void) {
     slot_ext_id[0]  = s_selected_car;
     slot_variant[0] = s_selected_paint;
 
+    /* [PORT ENHANCEMENT 2026-06] Multiplayer lobby flow: each human slot uses the
+     * car that player chose in the sequential car select. */
+    if (s_mp_flow) {
+        slot_ext_id[0]  = s_mp_player_car[0];
+        slot_variant[0] = s_mp_player_paint[0];
+        for (i = 1; i < eff_humans && i < TD5_MAX_RACER_SLOTS; i++) {
+            slot_active[i]  = 1;
+            slot_ext_id[i]  = s_mp_player_car[i];
+            slot_variant[i] = s_mp_player_paint[i];
+            if (i + 1 > start_slot) start_slot = i + 1;
+        }
+    }
+
     /* Two-player setup [CONFIRMED @ 0x0040daf0]:
      * Original gate: g_twoPlayerModeEnabled != 0 || g_selectedGameType == 7.
      * In the original, game_type 7 is DRAG RACE (user picks a 2nd car via the
      * 2-pass CarSelect loop). The port's convention uses game_type 9 for drag
      * race, so the constant is swapped here. Time Trials is solo and must NOT
-     * fall into this branch. */
-    if (s_two_player_mode || s_selected_game_type == 9) {
+     * fall into this branch. (Skipped for the N-way multiplayer lobby flow,
+     * which already populated the human slots above.) */
+    if ((s_two_player_mode || s_selected_game_type == 9) && !s_mp_flow) {
         slot_active[1]  = 1;
         slot_ext_id[1]  = s_p2_car;
         slot_variant[1] = 0;
@@ -5257,6 +5286,13 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     float sw = sx * 640.0f;
     float sh = sy * 480.0f;
 
+    /* [PORT ENHANCEMENT 2026-06] Multiplayer flow: show whose turn it is to pick. */
+    if (s_mp_flow && s_anim_complete) {
+        char who[32];
+        snprintf(who, sizeof who, "PLAYER %d - SELECT CAR", s_mp_car_player + 1);
+        fe_draw_text_centered(320.0f * sx, 30.0f * sy, who, 0xFFFFD000, sx, sy);
+    }
+
     /* Layer 1: Solid dark blue fill — drawn FIRST so overlays render on top.
      * Original DDraw renderer preserves pixels between frames; our clear-per-frame
      * D3D11 renderer needs an explicit fill to produce the same visual.
@@ -5437,6 +5473,24 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
     float txt_y_off = (s_track_switch_tick < 16) ? (s_track_switch_tick - 16) * 16.0f * sy : 0.0f;
 
     if (!s_anim_complete) return;
+
+    /* [PORT ENHANCEMENT 2026-06] race-option row values (AI/laps/traffic/police),
+     * drawn in the gap between the 224-wide option buttons (end x=344) and the
+     * track preview (x=412). */
+    {
+        const char *on_off[2] = { "OFF", "ON" };
+        char vb[8];
+        float vx = 350.0f * sx;
+        if (s_buttons[2].active) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
+            fe_draw_text(vx, (float)(s_buttons[2].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
+        if (s_buttons[3].active) { snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
+            fe_draw_text(vx, (float)(s_buttons[3].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
+        if (s_buttons[4].active)
+            fe_draw_text(vx, (float)(s_buttons[4].y + 6) * sy, on_off[s_game_option_traffic & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
+        if (s_buttons[5].active)
+            fe_draw_text(vx, (float)(s_buttons[5].y + 6) * sy, on_off[s_game_option_cops & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
+    }
+
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
     /* Original: text surface 296x184 at (344,81), city at surf y=0, country at surf y=0x20=32
      * RE: 0x00427CD0-0x00427D56 — split at 0x2C; blit top 64 rows to screen (344,81) */
@@ -5662,6 +5716,30 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
             : "SELECT AN ACTION, CONFIRM TO REMAP IT";
         fe_draw_text(120.0f * sx, 362.0f * sy, hint, 0xFF999999, sx * 0.65f, sy * 0.65f);
     }
+}
+
+/* [PORT ENHANCEMENT 2026-06] MULTIPLAYER lobby overlay: header + the list of
+ * joined players (in join order) with their device + READY, drawn each frame. */
+static void frontend_render_mp_lobby_overlay(float sx, float sy) {
+    int p;
+    if (!s_anim_complete) return;
+
+    fe_draw_text_centered(320.0f * sx,  40.0f * sy, SNK_MultiplayerTitleTxt, 0xFFFFD000, sx, sy);
+    fe_draw_text_centered(320.0f * sx,  78.0f * sy, SNK_PressJoinTxt, 0xFFCCCCCC, sx*0.8f, sy*0.8f);
+
+    for (p = 0; p < s_mp_joined_count && p < TD5_MAX_HUMAN_PLAYERS; p++) {
+        char line[80];
+        const char *dev = td5_input_get_device_name(s_mp_join_device[p]);
+        if (!dev || !dev[0]) dev = "?";
+        snprintf(line, sizeof line, "PLAYER %d:  %s  -  %s", p + 1, dev, SNK_ReadyTxt);
+        fe_draw_text(120.0f * sx, (float)(110 + p * 24) * sy, line, 0xFF33FF33u, sx*0.8f, sy*0.8f);
+    }
+    if (s_mp_joined_count == 0)
+        fe_draw_text_centered(320.0f * sx, 150.0f * sy, "( no players yet )", 0xFF888888, sx*0.8f, sy*0.8f);
+
+    fe_draw_text_centered(320.0f * sx, 340.0f * sy,
+                          "ENTER / A = JOIN     SPACE = START     ESC / B = BACK",
+                          0xFF999999, sx*0.62f, sy*0.62f);
 }
 
 static void frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type) {
@@ -6925,6 +7003,9 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
         frontend_render_two_player_options_overlay(sx, sy);
         break;
+    case TD5_SCREEN_MP_LOBBY:
+        frontend_render_mp_lobby_overlay(sx, sy);
+        break;
     case TD5_SCREEN_CAR_SELECTION:
         frontend_render_car_selection_preview(sx, sy);
         break;
@@ -7180,11 +7261,13 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_option_arrows(1, sx, sy);
             break;
         case TD5_SCREEN_TRACK_SELECTION:
-            /* The track overlay draws arrows BEFORE the button fill, so the
-             * highlighted selector's arrows get painted over. Re-draw button 0
-             * (Track) here, post-fill, so the highlighted Track keeps its arrows
-             * (Forwards/button 1 is non-highlighted, so its overlay arrows show). */
+            /* Track(0) selector + the race-option rows (AI/laps/traffic/police =
+             * buttons 2..5). [PORT ENHANCEMENT 2026-06] */
             fe_draw_option_arrows(0, sx, sy);
+            fe_draw_option_arrows(2, sx, sy);
+            fe_draw_option_arrows(3, sx, sy);
+            fe_draw_option_arrows(4, sx, sy);
+            fe_draw_option_arrows(5, sx, sy);
             break;
         case TD5_SCREEN_CONTROL_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] arrows on PLAYER(0) + CONTROLLER SELECTION(1). */
@@ -7410,6 +7493,9 @@ int td5_frontend_init(void) {
     s_race_within_series = 0;
     s_cup_unlock_tier = 0;
     s_two_player_mode = 0;
+    s_mp_flow = 0;
+    s_mp_joined_count = 0;
+    s_mp_car_player = 0;
     s_mp_layout_sel = 0;
     s_mp_missing_content[0] = 0;
     s_mp_missing_content[1] = 0;
@@ -7783,6 +7869,111 @@ static void Screen_LegalCopyright(void) {
 }
 
 /* ========================================================================
+ * [30] Multiplayer Lobby  (PORT ENHANCEMENT 2026-06)
+ *
+ * Press-to-join: each input that presses A (joystick) / Enter (keyboard) joins
+ * in order (join order = player number) and shows as READY. START (the button,
+ * SPACE, or a joined player's confirm) proceeds to the per-player car select.
+ * ======================================================================== */
+static void Screen_MultiplayerLobby(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_init_return_screen(TD5_SCREEN_MP_LOBBY);
+        TD5_LOG_I(LOG_TAG, "MP Lobby: init");
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        td5_input_enumerate_devices();              /* fresh device list for the join scan */
+        s_mp_joined_count = 0;
+        memset(s_mp_join_device, 0, sizeof(s_mp_join_device));
+        s_mp_join_prev = td5_plat_input_scan_join();/* ignore inputs already held on entry */
+        frontend_reset_buttons();
+        frontend_create_button(SNK_StartRaceTxt, 220, 300, 200, 32);  /* 0 START */
+        frontend_create_button(SNK_BackButTxt,   260, 360, 120, 32);  /* 1 BACK */
+        s_selected_button = 0;
+        s_anim_complete = 0;
+        frontend_begin_timed_animation();
+        s_inner_state = 1;
+        break;
+    case 1: case 2:
+        frontend_present_buffer();
+        s_inner_state++;
+        break;
+    case 3:
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 6;
+        }
+        break;
+    case 6: {
+        uint32_t scan  = td5_plat_input_scan_join();
+        uint32_t newly = scan & ~s_mp_join_prev;
+        int kbd_joined = 0, joined_now = 0, j, d, do_start = 0, do_back = 0;
+        s_mp_join_prev = scan;
+
+        for (j = 0; j < s_mp_joined_count; j++)
+            if (s_mp_join_device[j] == 0) kbd_joined = 1;
+
+        /* Joystick joins (devices 1..) in join order. */
+        for (d = 1; d < 16; d++) {
+            int already = 0;
+            if (!(newly & (1u << d))) continue;
+            for (j = 0; j < s_mp_joined_count; j++)
+                if (s_mp_join_device[j] == d) already = 1;
+            if (!already && s_mp_joined_count < TD5_MAX_HUMAN_PLAYERS) {
+                s_mp_join_device[s_mp_joined_count++] = d;
+                joined_now = 1;
+                frontend_play_sfx(3);
+                TD5_LOG_I(LOG_TAG, "MP Lobby: player %d join device %d", s_mp_joined_count, d);
+            }
+        }
+        /* Keyboard join via Enter (device 0). The FIRST Enter joins; once joined,
+         * Enter falls through to confirm the START button. */
+        if ((newly & 1u) && !kbd_joined && s_mp_joined_count < TD5_MAX_HUMAN_PLAYERS) {
+            s_mp_join_device[s_mp_joined_count++] = 0;
+            joined_now = 1;
+            frontend_play_sfx(3);
+            TD5_LOG_I(LOG_TAG, "MP Lobby: player %d join keyboard", s_mp_joined_count);
+        }
+
+        if (!joined_now) {
+            if (s_input_ready && s_button_index == 0) do_start = 1;  /* START button */
+            if (s_input_ready && s_button_index == 1) do_back  = 1;  /* BACK button  */
+            if (td5_plat_input_key_pressed(0x39))      do_start = 1;  /* SPACE        */
+        }
+        if (frontend_check_escape()) do_back = 1;                     /* ESC / gamepad B */
+
+        if (do_start && s_mp_joined_count >= 1) {
+            int p;
+            s_num_human_players = s_mp_joined_count;
+            s_two_player_mode   = 1;       /* engage split-screen multiplayer */
+            s_mp_flow           = 1;
+            for (p = 0; p < s_mp_joined_count; p++) {
+                td5_input_set_input_source(p, s_mp_join_device[p]);
+                td5_save_set_player_device_index(p, (uint32_t)s_mp_join_device[p]);
+                s_mp_player_car[p]   = s_selected_car;
+                s_mp_player_paint[p] = 0;
+            }
+            s_mp_car_player = 0;
+            td5_plat_input_scan_join_release();
+            TD5_LOG_I(LOG_TAG, "MP Lobby: START with %d players -> car select", s_mp_joined_count);
+            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+            return;
+        }
+        if (do_back) {
+            s_mp_flow = 0;
+            td5_plat_input_scan_join_release();
+            td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+            return;
+        }
+        break;
+    }
+    default:
+        td5_plat_input_scan_join_release();
+        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+        break;
+    }
+}
+
+/* ========================================================================
  * [5] ScreenMainMenuAnd1PRaceFlow (0x415490)
  * States: 24 (0x00 - 0x17)
  *
@@ -7918,10 +8109,12 @@ static void Screen_MainMenu(void) {
                     s_return_screen = TD5_SCREEN_CAR_SELECTION;
                     s_inner_state = 8;
                 } else {
+                    /* [PORT ENHANCEMENT 2026-06] MULTIPLAYER → press-to-join lobby
+                     * (which assigns players/devices then runs per-player car select).
+                     * s_two_player_mode is engaged by the lobby's START, not here. */
                     s_flow_context = 3;
-                    s_two_player_mode = 1;
                     s_selected_game_type = 0;
-                    s_return_screen = TD5_SCREEN_CAR_SELECTION;
+                    s_return_screen = TD5_SCREEN_MP_LOBBY;
                     s_inner_state = 8;
                 }
                 break;
@@ -10293,6 +10486,11 @@ static void Screen_CarSelection(void) {
             /* Create P2 label */
         }
 
+        /* [PORT ENHANCEMENT 2026-06] Multiplayer flow: start each player at their
+         * own prior pick (so Back/forward keeps each player's car). */
+        if (s_mp_flow && s_mp_car_player >= 0 && s_mp_car_player < TD5_MAX_HUMAN_PLAYERS)
+            s_selected_car = s_mp_player_car[s_mp_car_player];
+
         /* Clamp initial car to valid range */
         if (s_selected_car < s_car_roster_min) s_selected_car = s_car_roster_min;
         if (s_selected_car > s_car_roster_max) s_selected_car = s_car_roster_max;
@@ -10618,6 +10816,38 @@ static void Screen_CarSelection(void) {
         int actual_car = (s_selected_game_type == 5) ?
                          s_masters_roster[s_selected_car] : s_selected_car;
 
+        /* [PORT ENHANCEMENT 2026-06] Multiplayer lobby flow: sequential per-player
+         * car select. Each player picks in turn (join order); after the last,
+         * proceed to the track selector. OK advances; Back steps to the previous
+         * player (or back to the lobby from player 0). */
+        if (s_mp_flow) {
+            if (s_return_screen == TD5_SCREEN_TRACK_SELECTION) {   /* OK */
+                if (s_mp_car_player >= 0 && s_mp_car_player < TD5_MAX_HUMAN_PLAYERS) {
+                    s_mp_player_car[s_mp_car_player]   = actual_car;
+                    s_mp_player_paint[s_mp_car_player] = s_selected_paint;
+                }
+                TD5_LOG_I(LOG_TAG, "CarSelect MP: player %d car=%d", s_mp_car_player + 1, actual_car);
+                s_mp_car_player++;
+                if (s_mp_car_player < s_num_human_players) {
+                    td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);   /* next player */
+                    return;
+                }
+                s_selected_car   = s_mp_player_car[0];   /* slot 0 = player 1's car */
+                s_selected_paint = s_mp_player_paint[0];
+                td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
+                return;
+            } else {   /* Back */
+                if (s_mp_car_player > 0) {
+                    s_mp_car_player--;
+                    td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+                    return;
+                }
+                s_mp_flow = 0;
+                td5_frontend_set_screen(TD5_SCREEN_MP_LOBBY);
+                return;
+            }
+        }
+
         /* Two-player flow dispatch [CONFIRMED @ 0x0040DFC0 case 0x1A].
          * Original gates the 2P advance on g_returnToScreenIndex == -1 (OK
          * was pressed); Back has its own arm at lines 880-887 of the archived
@@ -10820,12 +11050,21 @@ static void Screen_TrackSelection(void) {
 
         /* Create buttons. Ghidra settles these at x=120 for Track/Forwards/OK
          * and x=232 for Back, with OK/Back sharing the bottom row. */
-        frontend_create_button(SNK_TrackButTxt,     120,  97, 224, 32); /* with L/R arrows */
-        frontend_create_button(SNK_ForwardsButTxt,  120, 145, 224, 32); /* direction toggle */
-        frontend_create_button(SNK_OkButTxt,        120, 377,  96, 32);
+        frontend_create_button(SNK_TrackButTxt,     120,  97, 224, 32); /* 0: with L/R arrows */
+        frontend_create_button(SNK_ForwardsButTxt,  120, 137, 224, 32); /* 1: direction toggle */
+        /* [PORT ENHANCEMENT 2026-06] race-option rows: AI opponents, laps, traffic,
+         * police. They drive s_num_ai_opponents + s_game_option_* which apply to
+         * single/multiplayer races via ConfigureGameTypeFlags (cup game-types
+         * override them, so they're inert there). Present on every track-select
+         * entry (regular single race, quick race, multiplayer). */
+        frontend_create_button(SNK_OpponentsButTxt, 120, 177, 224, 32); /* 2: AI count */
+        frontend_create_button(SNK_LapsButTxt,      120, 217, 224, 32); /* 3: laps */
+        frontend_create_button(SNK_TrafficButTxt,   120, 257, 224, 32); /* 4: traffic */
+        frontend_create_button(SNK_CopsButTxt,      120, 297, 224, 32); /* 5: police */
+        frontend_create_button(SNK_OkButTxt,        120, 377,  96, 32); /* 6: OK */
         /* Quick Race mode: no Back button */
         if (s_flow_context != 2) {
-            frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);
+            frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);  /* 7: Back */
         }
 
         /* Create 0x128 x 0xB8 info surface */
@@ -10908,7 +11147,26 @@ static void Screen_TrackSelection(void) {
                 s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
             }
 
-            if (s_button_index == 2) { /* OK */
+            /* [PORT ENHANCEMENT 2026-06] race-option rows (AI/laps/traffic/police). */
+            if (delta != 0 && selected_button >= 2 && selected_button <= 5) {
+                if (selected_button == 2) {            /* AI opponents */
+                    s_num_ai_opponents += delta;
+                    if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
+                    if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
+                        s_num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
+                } else if (selected_button == 3) {     /* laps (shown as value+1) */
+                    s_game_option_laps += delta;
+                    if (s_game_option_laps < 0) s_game_option_laps = 0;
+                    if (s_game_option_laps > 9) s_game_option_laps = 9;
+                } else if (selected_button == 4) {     /* traffic on/off */
+                    s_game_option_traffic = (s_game_option_traffic + delta) & 1;
+                } else if (selected_button == 5) {     /* police on/off */
+                    s_game_option_cops = (s_game_option_cops + delta) & 1;
+                }
+                frontend_play_sfx(2);
+            }
+
+            if (s_button_index == 6) { /* OK */
                 /* Lock enforcement */
                 int locked = (s_selected_track >= 0 && s_selected_track < 26 &&
                              s_track_lock_table[s_selected_track] != 0 &&
@@ -10922,7 +11180,7 @@ static void Screen_TrackSelection(void) {
                 }
             }
 
-            if (s_button_index == 3) { /* Back */
+            if (s_button_index == 7) { /* Back */
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 6;
             }

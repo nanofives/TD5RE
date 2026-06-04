@@ -365,7 +365,9 @@ typedef enum TD5_ScreenIndex {
     TD5_SCREEN_CUP_WON             = 27,
     TD5_SCREEN_STARTUP_INIT        = 28,
     TD5_SCREEN_SESSION_LOCKED      = 29,
-    TD5_SCREEN_COUNT               = 30
+    /* [PORT ENHANCEMENT 2026-06] local-multiplayer press-to-join lobby. */
+    TD5_SCREEN_MP_LOBBY            = 30,
+    TD5_SCREEN_COUNT               = 31
 } TD5_ScreenIndex;
 
 /* ========================================================================
