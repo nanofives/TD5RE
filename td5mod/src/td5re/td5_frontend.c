@@ -366,6 +366,17 @@ static int  s_cheat_unlock_all;         /* DAT_00496298 */
 
 /* Network state */
 static int  s_network_active;           /* g_networkSessionActive / DAT_004962bc */
+/* --- S10 net-play: explicit connection modes (LAN / Direct-IP) --- */
+static int  s_net_mode_sel;             /* mode-select cursor: 0=LAN, 1=DIRECT */
+static int  s_net_direct_submode;       /* DIRECT sub-flow: 0=choose, 1=host, 2=join */
+static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direct join) */
+static int  s_net_join_pending_ui;      /* awaiting JOIN_ACK before entering lobby */
+static uint32_t s_net_join_wait_start;  /* tick when the join wait began (timeout) */
+static int  s_net_session_sel;          /* SESSION_PICKER cursor: 0=host, 1..N=join */
+static int  s_launching_net_race;       /* set by the lobby before init_race_schedule */
+/* [Network] config (seeded from td5re.ini in frontend_init; see td5_save). */
+static int  s_net_cfg_game_port   = 37050;   /* [Network] GamePort */
+static int  s_net_cfg_enable_upnp = 1;       /* [Network] EnableUPnP (Direct host) */
 static int  s_kicked_flag;              /* DAT_00497328 */
 static int  s_lobby_action;             /* DAT_0049722c */
 static int  s_dialog_mode;              /* DAT_00496350 */
@@ -2430,7 +2441,16 @@ static void frontend_init_race_schedule(void) {
         /* Human count: only the multiplayer lobby flow (s_mp_flow, sets
          * s_two_player_mode) runs >1 local human. Quick Race is single-player
          * (driven by the active controller); everything else is single-player. */
-        if (s_mp_flow && s_two_player_mode != 0)
+        if (s_launching_net_race) {
+            /* S10: each synced network player occupies an input-reading racer
+             * slot (slots 0..N-1 read s_control_bits, which the lockstep fills
+             * with the host-merged input each frame); the remaining slots are AI
+             * fill. NOTE: this currently produces N split-screen viewports
+             * because it reuses the local split-screen slot model; a single
+             * local-follow viewport for net play is a documented follow-up. */
+            int np = td5_net_get_player_count();
+            humans = (np > 0) ? np : 1;
+        } else if (s_mp_flow && s_two_player_mode != 0)
             humans = (s_num_human_players > 1) ? s_num_human_players : 2;
         else
             humans = 1;
@@ -2483,7 +2503,8 @@ static void frontend_init_race_schedule(void) {
         g_td5.split_missing_content[0] = 0;
         g_td5.split_missing_content[1] = 0;
     }
-    g_td5.network_active    = 0;
+    g_td5.network_active    = s_launching_net_race;   /* S10: net race engages lockstep */
+    s_launching_net_race    = 0;                      /* one-shot intent */
     TD5_LOG_I(LOG_TAG,
               "InitRaceSchedule: split=%d grid=%dx%d humans=%d opp=%d eff=%d 2p=%d layout_sel=%d",
               g_td5.split_screen_mode, g_td5.split_grid_cols, g_td5.split_grid_rows,
@@ -9253,63 +9274,96 @@ static void Screen_QuickRaceMenu(void) {
  * States: ~10
  * ======================================================================== */
 
+/* S10: the local player name presented to the lobby/roster. */
+static const char *frontend_net_player_name(void) {
+    return "Player";
+}
+
+/* S10: split "ip" or "ip:port" into an IP string + port (default game port). */
+static void frontend_net_parse_ip_port(const char *in, char *ip_out, int ip_len, int *port_out) {
+    const char *colon = strchr(in, ':');
+    *port_out = s_net_cfg_game_port;
+    if (colon) {
+        int n = (int)(colon - in);
+        if (n >= ip_len) n = ip_len - 1;
+        memcpy(ip_out, in, (size_t)n);
+        ip_out[n] = '\0';
+        int p = atoi(colon + 1);
+        if (p > 0 && p <= 65535) *port_out = p;
+    } else {
+        snprintf(ip_out, (size_t)ip_len, "%s", in);
+    }
+}
+
+/* ========================================================================
+ * [8] Screen_ConnectionBrowser -- S10 ONLINE connection hub
+ *
+ * Repurposed from the original DirectPlay provider browser into an explicit
+ * two-mode selector + Direct-IP host/join sub-flow:
+ *   States 0-9   : LAN / DIRECT IP / BACK mode select.
+ *   States 20-21 : DIRECT -> HOST / JOIN / BACK chooser.
+ *   States 22-23 : DIRECT JOIN -> IP[:port] text entry.
+ *   State  24    : DIRECT HOST -> show local IP + UPnP status, then lobby.
+ *   State  26    : DIRECT JOIN -> wait for the host's JOIN_ACK, then lobby.
+ * LAN host/join continue through SESSION_PICKER (9) / CREATE_SESSION (10).
+ * ======================================================================== */
 static void Screen_ConnectionBrowser(void) {
     switch (s_inner_state) {
-    case 0: /* Init: enumerate DirectPlay providers, build list */
+    case 0: /* Init: net up + mode-select buttons (LAN / DIRECT / BACK) */
         frontend_init_return_screen(TD5_SCREEN_CONNECTION_BROWSER);
-        TD5_LOG_D(LOG_TAG, "ConnectionBrowser: init");
-        frontend_net_enumerate();
+        TD5_LOG_D(LOG_TAG, "ConnectionBrowser: mode select");
+        /* Seed [Network] config from the ini (game port + UPnP toggle + mode). */
+        s_net_cfg_game_port   = (g_td5.ini.net_game_port > 0 && g_td5.ini.net_game_port <= 65535)
+                                ? g_td5.ini.net_game_port : 37050;
+        s_net_cfg_enable_upnp = g_td5.ini.net_enable_upnp;
+        s_net_mode_sel        = g_td5.ini.net_mode ? 1 : 0;
+        frontend_net_enumerate();                 /* idempotent td5_net_init */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* Create buttons: connection list, OK, Back */
-        /* [FIXED 2026-06-02, runtime @0x499c78] list (120,193) 496x128; OK (120,377) 96x32; BACK (232,377) 112x32. */
-        frontend_create_button(SNK_ChooseConnectionButTxt, 120, 193, 496, 128);
-        frontend_create_button(SNK_OkButTxt,   120, 377,  96, 0x20);
-        frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
+        frontend_create_button("LAN GAME (AUTO-DISCOVER)", 120, 193, 496, 0x30);
+        frontend_create_button("DIRECT IP",                120, 257, 496, 0x30);
+        frontend_create_button(SNK_BackButTxt,             232, 377, 112, 0x20);
+        s_net_direct_submode = 0;
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
 
-    case 1: /* Build list UI */
+    case 1:
         s_inner_state = 2;
         break;
 
-    case 2: /* Slide-in (~500ms) */
+    case 2: /* Slide-in */
         if (frontend_update_timed_animation(0x10, 267) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 3;
         }
         break;
 
-    case 3: /* Tick + render */
+    case 3:
         frontend_present_buffer();
         s_inner_state = 4;
         break;
 
-    case 4: /* Flash highlight */
+    case 4:
         frontend_present_buffer();
         s_inner_state = 5;
         break;
 
-    case 5: /* Selection interaction */
+    case 5: /* Mode-select interaction */
         if (s_input_ready) {
-            if (s_button_index == 0 && s_arrow_input != 0) {
-                frontend_play_sfx(2);
-            } else if (s_button_index == 1) { /* OK */
+            if (s_button_index == 0) {            /* LAN GAME */
+                td5_net_set_mode(TD5_NET_MODE_LAN);
                 s_return_screen = TD5_SCREEN_SESSION_PICKER;
                 s_inner_state = 8;
-            } else if (s_button_index == 2) { /* Back */
+            } else if (s_button_index == 1) {     /* DIRECT IP */
+                td5_net_set_mode(TD5_NET_MODE_DIRECT);
+                s_inner_state = 20;
+            } else if (s_button_index == 2) {     /* BACK */
                 s_return_screen = TD5_SCREEN_MAIN_MENU;
                 s_inner_state = 8;
             }
         }
         break;
 
-    /* [ARCH-DIVERGENCE: DXPTYPE] Cases 6/7 were the highlight-browse and
-     * scroll sub-states of the orig DirectPlay session-browser list. The
-     * port's connection browser is a static 2-button list (OK/Back) with no
-     * enumerable peers, so neither sub-state is reachable; they exist as
-     * no-op fall-throughs to state 5 so any stale orig-derived state value
-     * still returns to interaction safely. */
     case 6:
     case 7:
         s_inner_state = 5;
@@ -9320,9 +9374,102 @@ static void Screen_ConnectionBrowser(void) {
         s_inner_state = 9;
         break;
 
-    case 9: /* Slide-out (~500ms) */
+    case 9: /* Slide-out -> next screen */
         if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+        }
+        break;
+
+    /* ---- DIRECT IP sub-flow ---- */
+    case 20: /* HOST / JOIN / BACK chooser */
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_create_button("HOST GAME", 120, 193, 496, 0x30);
+        frontend_create_button("JOIN GAME", 120, 257, 496, 0x30);
+        frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
+        s_inner_state = 21;
+        break;
+
+    case 21:
+        frontend_present_buffer();
+        if (s_input_ready) {
+            if (s_button_index == 0) {            /* HOST */
+                if (td5_net_create_session_ex("TD5RE Game", frontend_net_player_name(),
+                                              6, s_net_cfg_game_port, s_net_cfg_enable_upnp)) {
+                    s_network_active = 1;
+                    s_inner_state = 24;           /* show host status */
+                } else {
+                    TD5_LOG_W(LOG_TAG, "Direct host create failed");
+                    td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
+                }
+            } else if (s_button_index == 1) {     /* JOIN */
+                snprintf(s_net_direct_ip, sizeof(s_net_direct_ip), "127.0.0.1");
+                s_inner_state = 22;
+            } else if (s_button_index == 2) {     /* BACK -> mode select */
+                td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
+            }
+        }
+        break;
+
+    case 22: /* JOIN: IP[:port] text entry */
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_create_button("ENTER HOST IP[:PORT]", 120, 193, 448, 0x40);
+        frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
+        frontend_begin_text_input(s_net_direct_ip, (int)sizeof(s_net_direct_ip));
+        s_inner_state = 23;
+        break;
+
+    case 23:
+        frontend_render_text_input();
+        if (s_input_ready && s_button_index == 1) {    /* BACK */
+            s_inner_state = 20;
+            break;
+        }
+        if (frontend_text_input_confirmed()) {
+            char ip[64];
+            int port = s_net_cfg_game_port;
+            frontend_net_parse_ip_port(s_net_direct_ip, ip, sizeof(ip), &port);
+            if (td5_net_join_direct(ip, port, frontend_net_player_name())) {
+                s_network_active = 1;
+                s_net_join_pending_ui = 1;
+                s_net_join_wait_start = td5_plat_time_ms();
+                s_inner_state = 26;
+            } else {
+                TD5_LOG_W(LOG_TAG, "Direct join '%s' failed", s_net_direct_ip);
+                s_inner_state = 20;
+            }
+        }
+        break;
+
+    case 24: /* HOST: show local IP + UPnP status, then enter lobby */
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_create_button(td5_net_get_status_text(), 120, 193, 496, 0x40);
+        frontend_create_button("CONTINUE", 232, 377, 160, 0x20);
+        s_inner_state = 25;
+        break;
+
+    case 25:
+        frontend_present_buffer();
+        if (s_input_ready) {
+            s_network_active = 1;
+            s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
+            s_inner_state = 8;
+        }
+        break;
+
+    case 26: /* JOIN: wait for the host's JOIN_ACK (slot assigned) */
+        frontend_present_buffer();
+        if (td5_net_local_slot() >= 0) {
+            s_net_join_pending_ui = 0;
+            s_network_active = 1;
+            s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
+            s_inner_state = 8;
+        } else if (td5_net_is_connection_lost() ||
+                   (td5_plat_time_ms() - s_net_join_wait_start) > 8000) {
+            TD5_LOG_W(LOG_TAG, "Direct join: no response from host (timeout)");
+            s_net_join_pending_ui = 0;
+            s_network_active = 0;
+            frontend_net_destroy();
+            s_inner_state = 20;                   /* back to host/join chooser */
         }
         break;
     }
@@ -9333,22 +9480,37 @@ static void Screen_ConnectionBrowser(void) {
  * States: ~8
  * ======================================================================== */
 
+/* S10: set the SESSION_PICKER selector (button 0) label from s_net_session_sel.
+ * 0 = host a new LAN game; 1..count = join the i-th discovered session. */
+static void frontend_net_label_session_selector(void) {
+    int count = td5_net_get_enum_session_count();
+    char buf[64];
+    if (s_net_session_sel < 0) s_net_session_sel = count;        /* wrap */
+    if (s_net_session_sel > count) s_net_session_sel = 0;
+    if (s_net_session_sel == 0) {
+        snprintf(buf, sizeof(buf), "HOST NEW LAN GAME");
+    } else {
+        snprintf(buf, sizeof(buf), "JOIN: %s",
+                 td5_net_get_enum_session_name(s_net_session_sel - 1));
+    }
+    strncpy(s_buttons[0].label, buf, sizeof(s_buttons[0].label) - 1);
+    s_buttons[0].label[sizeof(s_buttons[0].label) - 1] = '\0';
+}
+
 static void Screen_SessionPicker(void) {
     switch (s_inner_state) {
-    case 0: /* Init: ConnectionPick, start 3s session enum timer */
+    case 0: /* Init: refresh LAN discovery + build the session selector */
         frontend_init_return_screen(TD5_SCREEN_SESSION_PICKER);
-        TD5_LOG_D(LOG_TAG, "SessionPicker: init");
+        TD5_LOG_D(LOG_TAG, "SessionPicker: init (LAN discovery)");
+        td5_net_set_mode(TD5_NET_MODE_LAN);
+        td5_net_enumerate_sessions();             /* broadcast QUERY, collect ANNOUNCEs */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* [FIXED 2026-06-01] Orig RunFrontendSessionPicker (0x419CF0) has only the
-         * session-list selector + OK (join) + Back — NO "Create" button (creating a
-         * session is the separate ConnectionBrowser->CreateSession path). The spurious
-         * Create button shifted OK/Back indices and ESC. Removed; OK is now slot 1, Back
-         * slot 2. (DXPTYPE session enumeration/join is stubbed ARCH-DIV, but the button
-         * set + dispatch are now faithful.) */
         /* [FIXED 2026-06-02, runtime @0x499c78] list (120,193) 496x128; OK (120,377) 96; BACK (232,377) 112. */
-        frontend_create_button(SNK_ChooseSessionButTxt, 120, 193, 496, 128);  /* slot 0: session-list selector */
+        frontend_create_button(SNK_ChooseSessionButTxt, 120, 193, 496, 128);  /* slot 0: session selector */
         frontend_create_button(SNK_OkButTxt,     120, 377,  96, 0x20);   /* slot 1 */
         frontend_create_button(SNK_BackButTxt,   232, 377, 112, 0x20);   /* slot 2 */
+        s_net_session_sel = (td5_net_get_enum_session_count() > 0) ? 1 : 0;
+        frontend_net_label_session_selector();
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -9366,22 +9528,29 @@ static void Screen_SessionPicker(void) {
 
     case 3: /* Interaction */
         if (s_input_ready) {
-            /* [FIXED 2026-06-01] active_button fallback (keyboard ◄► leaves
-             * s_button_index == -1). Slot 0 = session-list selector (cycle through
-             * enumerated sessions), slot 1 = OK (join selected), slot 2 = Back. */
+            /* Slot 0 = session selector (host or join target), slot 1 = OK, slot 2 = Back. */
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             int delta = frontend_option_delta();
             if (active_button == 0 && delta != 0) {
-                /* Cycle the session-list selection. (DXPTYPE enumeration is stubbed,
-                 * so the list is currently empty; the selector input is wired faithfully
-                 * for when sessions exist.) */
+                s_net_session_sel += (delta > 0) ? 1 : -1;
+                frontend_net_label_session_selector();
                 frontend_play_sfx(2);
-            } else if (s_button_index == 1) { /* OK -> join the selected session */
-                /* Orig joins the highlighted enumerated session and proceeds to the
-                 * lobby. With the peer layer stubbed there is no session to join, so
-                 * route to the lobby (the faithful post-join destination). */
-                s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
-                s_inner_state = 5;
+            } else if (s_button_index == 1) { /* OK */
+                if (s_net_session_sel == 0) {
+                    /* Host a new LAN game -> name entry / create. */
+                    s_return_screen = TD5_SCREEN_CREATE_SESSION;
+                    s_inner_state = 5;
+                } else {
+                    /* Join the selected discovered session. */
+                    if (td5_net_join_session(s_net_session_sel - 1, frontend_net_player_name())) {
+                        s_network_active = 1;
+                        s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
+                        s_inner_state = 5;
+                    } else {
+                        TD5_LOG_W(LOG_TAG, "LAN join %d failed", s_net_session_sel - 1);
+                        frontend_play_sfx(10);
+                    }
+                }
             } else if (s_button_index == 2) { /* Back */
                 s_return_screen = TD5_SCREEN_CONNECTION_BROWSER;
                 s_inner_state = 5;
@@ -9435,13 +9604,21 @@ static void Screen_CreateSession(void) {
 
     case 2: /* Name input */
         frontend_render_text_input();
-        if (s_input_ready && s_button_index == 1) {
+        if (s_input_ready && s_button_index == 1) {   /* BACK */
             s_return_screen = TD5_SCREEN_SESSION_PICKER;
             s_inner_state = 3;
             break;
         }
         if (frontend_text_input_confirmed()) {
-            s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
+            /* S10: actually host a LAN session under the entered name. */
+            td5_net_set_mode(TD5_NET_MODE_LAN);
+            if (td5_net_create_session(s_create_session_name, frontend_net_player_name(), 6)) {
+                s_network_active = 1;
+                s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
+            } else {
+                TD5_LOG_W(LOG_TAG, "LAN host create failed");
+                s_return_screen = TD5_SCREEN_SESSION_PICKER;
+            }
             s_inner_state = 3;
         }
         break;
@@ -9546,11 +9723,25 @@ static void Screen_NetworkLobby(void) {
         /* Render background and chat input */
         frontend_present_buffer();
 
-        /* Check lobby action state */
-        if (s_lobby_action == 3) {
-            /* Race start received (clients) */
+        /* S10: keep the participant table mirrored to the live roster so the
+         * host's ready check + the status panel reflect who has actually
+         * joined (slots populated by the JOIN handshake / DXPROSTER). */
+        {
+            int slot;
+            for (slot = 0; slot < 6; slot++)
+                s_participant_flags[slot] = td5_net_is_slot_active(slot) ? 1 : 0;
+        }
+
+        /* S10: a client auto-launches into the race once the host's DXPSTART
+         * rendezvous has activated lockstep sync (td5_net_is_active). The host
+         * launches via state 5 -> 0x10 -> 0x11. */
+        if ((s_lobby_action == 3) ||
+            (!frontend_net_is_host() && td5_net_is_active())) {
+            TD5_LOG_I(LOG_TAG, "NetworkLobby: client race start (sync active)");
+            s_launching_net_race = 1;
             s_race_active_flag = 1;
             frontend_init_race_schedule();
+            frontend_init_display_mode_state();
             return;
         }
 
@@ -9626,17 +9817,16 @@ static void Screen_NetworkLobby(void) {
             }
         }
 
-        if (ready_count == active_count && active_count >= 2) {
-            /* All ready, 2+ players -> start pre-race sequence */
-            s_inner_state = 0x0C;
-        } else if (active_count < 2) {
-            /* Not enough players */
-            s_dialog_mode = 1;
-            frontend_play_sfx(5);
-            s_inner_state = 6;
+        (void)ready_count;
+        if (active_count >= 2) {
+            /* S10: enough players have joined -> begin the DXPSTART rendezvous.
+             * The per-slot config/settings exchange (states 0xC-0xF) is bypassed
+             * for the lockstep path -- only input bitmasks + dt are synced at
+             * race time, so no pre-race car/settings replication is required. */
+            s_inner_state = 0x10;
         } else {
-            /* Not all ready yet */
-            s_dialog_mode = 0;
+            /* Not enough players to start a network race. */
+            s_dialog_mode = 1;
             frontend_play_sfx(5);
             s_inner_state = 6;
         }
@@ -9818,14 +10008,19 @@ static void Screen_NetworkLobby(void) {
 
     case 0x11: /* WAIT FOR START CONFIRMATION */
     {
-        /* Tight receive loop until DXPSTART (type 4) received */
+        /* The DXPSTART rendezvous (handle_start / ack_reply / start_confirm in
+         * td5_net.c, driven by the worker thread) activates lockstep sync on all
+         * machines. Drain the ring and launch once sync is active. */
         uint8_t recv_buf[256];
-        int msg_type = frontend_net_receive(recv_buf, sizeof(recv_buf));
-        if (msg_type == 4) {
-            /* DXPSTART received -> launch race */
+        (void)frontend_net_receive(recv_buf, sizeof(recv_buf));
+        if (td5_net_is_active()) {
+            TD5_LOG_I(LOG_TAG, "NetworkLobby: host race start (sync active)");
+            s_launching_net_race = 1;
+            s_race_active_flag = 1;
             frontend_init_race_schedule();
+            frontend_init_display_mode_state();
+            return;
         }
-        /* Keep waiting if no message yet */
     }
         break;
     }

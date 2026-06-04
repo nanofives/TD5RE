@@ -243,6 +243,9 @@ extern int32_t g_td5_steering_bias_max_swing;
  * ======================================================================== */
 
 uint32_t td5_input_get_control_bits(int slot);
+/* Overwrite a slot's control word. Used by the network lockstep path to push
+ * host-merged authoritative input back into the per-slot store. */
+void     td5_input_set_control_bits(int slot, uint32_t bits);
 int16_t  td5_input_get_analog_x(int slot);
 int16_t  td5_input_get_analog_y(int slot);
 int32_t  td5_input_get_steering_cmd(int slot);

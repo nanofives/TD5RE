@@ -16,6 +16,7 @@
 
 #include "td5_net.h"
 #include "td5_platform.h"
+#include "td5_upnp.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -128,6 +129,22 @@ static int          s_is_client;            /* g_isDirectPlayClient (1=in sessio
 static int          s_active;               /* g_isDirectPlaySyncActive */
 static int          s_connection_lost;      /* bConnectionLost */
 
+/* --- S10: connection-mode / port / UPnP state --- */
+static int          s_conn_mode = TD5_NET_MODE_LAN;
+static int          s_game_port = WS2_GAME_PORT;        /* bound host game port */
+static int          s_enable_upnp;                      /* host requested UPnP  */
+static int          s_upnp_status = TD5_NET_UPNP_IDLE;
+static uint16_t     s_upnp_mapped_port;                 /* port we asked UPnP to open */
+static char         s_status_text[192];                 /* UI host/connect status line */
+static char         s_local_ip[64];                     /* our LAN IP (display)  */
+static uint32_t     s_last_beacon_ms;                   /* periodic LAN ANNOUNCE clock */
+
+/* --- S10: client join handshake (game-socket JOIN_REQ -> JOIN_ACK) --- */
+static char         s_local_player_name[64];
+static int          s_join_pending;                     /* awaiting JOIN_ACK    */
+static int          s_join_attempts;                    /* JOIN_REQ retries so far */
+static uint32_t     s_join_last_ms;                     /* last JOIN_REQ send clock */
+
 /* --- Session --- */
 static SessionInfo  s_session;
 static int          s_local_slot;           /* our slot index (0-5) */
@@ -189,16 +206,18 @@ typedef int (*TransportRecvFn)(uint32_t *sender_id, void *buf, int buf_size);
 typedef int (*TransportInitFn)(void);
 typedef int (*TransportHostFn)(const char *name, int max_players);
 typedef int (*TransportJoinFn)(int session_index);
+typedef int (*TransportJoinDirectFn)(const char *host_ip, int game_port);
 typedef int (*TransportEnumFn)(void);
 typedef void (*TransportShutdownFn)(void);
 
-static TransportSendFn      s_transport_send;
-static TransportRecvFn      s_transport_recv;
-static TransportInitFn      s_transport_init;
-static TransportHostFn      s_transport_host;
-static TransportJoinFn      s_transport_join;
-static TransportEnumFn      s_transport_enum;
-static TransportShutdownFn  s_transport_shutdown;
+static TransportSendFn       s_transport_send;
+static TransportRecvFn       s_transport_recv;
+static TransportInitFn       s_transport_init;
+static TransportHostFn       s_transport_host;
+static TransportJoinFn       s_transport_join;
+static TransportJoinDirectFn s_transport_join_direct;
+static TransportEnumFn       s_transport_enum;
+static TransportShutdownFn   s_transport_shutdown;
 
 /* --- Discovery protocol message (sent on WS2_DISCOVERY_PORT) --- */
 #pragma pack(push, 1)
@@ -241,6 +260,7 @@ static int              ws2_transport_send(uint32_t target_id, const void *data,
 static int              ws2_transport_recv(uint32_t *sender_id, void *buf, int buf_size);
 static int              ws2_transport_host(const char *name, int max_players);
 static int              ws2_transport_join(int session_index);
+static int              ws2_transport_join_direct(const char *host_ip, int game_port);
 static int              ws2_transport_enum(void);
 static void             ws2_transport_shutdown(void);
 static int              ws2_bind_socket(u_short port);
@@ -249,6 +269,13 @@ static const SOCKADDR_IN *ws2_get_target_addr(uint32_t target_id);
 static int              ws2_discovery_init(void);
 static void             ws2_discovery_shutdown(void);
 static void             ws2_handle_join_request(const SOCKADDR_IN *from_addr);
+static void             ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
+                                        SOCKET reply_socket);
+static void             ws2_handle_game_control(const DiscoveryMsg *dm,
+                                                const SOCKADDR_IN *from_addr);
+static int              ws2_send_join_request(const char *player_name);
+static void             net_build_status_text(void);
+static void             net_begin_client_join(const char *player_name);
 
 /* Per-type handlers (13 DXPTYPE handlers) */
 static void handle_frame(uint32_t sender, const void *data, int size);
@@ -1015,31 +1042,59 @@ static int ws2_transport_host(const char *name, int max_players)
     (void)name;
     (void)max_players;
 
-    if (!ws2_bind_socket(WS2_GAME_PORT)) {
-        TD5_LOG_E(NET_LOG, "Host: failed to bind game port %u", (unsigned)WS2_GAME_PORT);
+    if (!ws2_bind_socket((u_short)s_game_port)) {
+        TD5_LOG_E(NET_LOG, "Host: failed to bind game port %u", (unsigned)s_game_port);
         return 0;
     }
 
     memset(&s_ws2_host_addr, 0, sizeof(s_ws2_host_addr));
     s_ws2_host_addr.sin_family = AF_INET;
     s_ws2_host_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    s_ws2_host_addr.sin_port = htons(WS2_GAME_PORT);
+    s_ws2_host_addr.sin_port = htons((u_short)s_game_port);
 
     s_ws2_peer_addrs[0] = s_ws2_host_addr;
     s_ws2_peer_valid[0] = 1;
 
+    /* LAN discovery beacon socket (session LISTING only -- the actual join now
+       rides the game socket). Bound in both modes; harmless in Direct. */
     ws2_discovery_init();
 
-    TD5_LOG_I(NET_LOG, "Host: bound on port %u, discovery active", (unsigned)WS2_GAME_PORT);
+    /* Our LAN IP, for display + the UPnP InternalClient value. */
+    if (!td5_upnp_get_local_ip(s_local_ip, sizeof(s_local_ip)))
+        s_local_ip[0] = '\0';
+
+    /* S10: optional UPnP IGD port-mapping so a Direct-IP host is reachable
+       across NAT without manual port forwarding. Best-effort; never fatal. */
+    if (s_enable_upnp) {
+        s_upnp_status = TD5_NET_UPNP_MAPPING;
+        if (td5_upnp_map_port((uint16_t)s_game_port, 1 /*UDP*/, "TD5RE",
+                              0 /*permanent lease*/) &&
+            td5_upnp_verify_port((uint16_t)s_game_port, 1)) {
+            s_upnp_status = TD5_NET_UPNP_MAPPED;
+            s_upnp_mapped_port = (uint16_t)s_game_port;
+            TD5_LOG_I(NET_LOG, "UPnP: UDP %u opened + verified on router",
+                      (unsigned)s_game_port);
+        } else {
+            s_upnp_status = TD5_NET_UPNP_FAILED;
+            TD5_LOG_W(NET_LOG, "UPnP: could not open UDP %u (manual forward needed)",
+                      (unsigned)s_game_port);
+        }
+    } else {
+        s_upnp_status = TD5_NET_UPNP_UNAVAILABLE;
+    }
+
+    TD5_LOG_I(NET_LOG, "Host: bound game port %u (mode=%s ip=%s)",
+              (unsigned)s_game_port,
+              s_conn_mode == TD5_NET_MODE_DIRECT ? "direct" : "lan",
+              s_local_ip[0] ? s_local_ip : "?");
     return 1;
 }
 
+/* LAN join by enumerated session index: point at the discovered host's game
+ * address and bind an ephemeral local game socket. The JOIN_REQ itself is sent
+ * (and retried) by td5_net_join_session via ws2_send_join_request(). */
 static int ws2_transport_join(int session_index)
 {
-    DiscoveryMsg join_req;
-    SOCKADDR_IN disc_addr;
-    uint32_t hello[2];
-
     if (session_index < 0 || session_index >= s_enum_session_count) {
         TD5_LOG_E(NET_LOG, "Join: invalid session index %d", session_index);
         return 0;
@@ -1054,31 +1109,48 @@ static int ws2_transport_join(int session_index)
     s_ws2_peer_addrs[0] = s_ws2_host_addr;
     s_ws2_peer_valid[0] = 1;
 
-    /* Send join request to host's discovery port */
-    memset(&join_req, 0, sizeof(join_req));
-    join_req.magic = WS2_DISCOVERY_MAGIC;
-    join_req.disc_type = WS2_DISC_JOIN_REQ;
+    TD5_LOG_I(NET_LOG, "Join(LAN): host %s:%u",
+              inet_ntoa(s_ws2_host_addr.sin_addr),
+              (unsigned)ntohs(s_ws2_host_addr.sin_port));
+    return 1;
+}
 
-    disc_addr = s_ws2_host_addr;
-    disc_addr.sin_port = htons(WS2_DISCOVERY_PORT);
+/* Direct join by explicit IP[:port]: resolve, point at the host's game address,
+ * and bind an ephemeral local game socket. JOIN_REQ sent by td5_net_join_direct. */
+static int ws2_transport_join_direct(const char *host_ip, int game_port)
+{
+    SOCKADDR_IN addr;
 
-    if (s_ws2_disc_socket == INVALID_SOCKET)
-        ws2_discovery_init();
+    if (!host_ip || !host_ip[0])
+        return 0;
 
-    if (s_ws2_disc_socket != INVALID_SOCKET) {
-        sendto(s_ws2_disc_socket, (const char *)&join_req, sizeof(join_req), 0,
-               (const struct sockaddr *)&disc_addr, (int)sizeof(disc_addr));
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((u_short)game_port);
+    addr.sin_addr.s_addr = inet_addr(host_ip);
+    if (addr.sin_addr.s_addr == INADDR_NONE) {
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(host_ip, NULL, &hints, &res) != 0 || !res) {
+            TD5_LOG_E(NET_LOG, "Join(direct): cannot resolve '%s'", host_ip);
+            return 0;
+        }
+        addr.sin_addr = ((SOCKADDR_IN *)res->ai_addr)->sin_addr;
+        freeaddrinfo(res);
     }
 
-    /* Send a hello on the game socket so host learns our address */
-    hello[0] = TD5_DXPDATA;
-    hello[1] = 0;
-    sendto(s_ws2_socket, (const char *)hello, 8, 0,
-           (const struct sockaddr *)&s_ws2_host_addr,
-           (int)sizeof(s_ws2_host_addr));
+    if (!ws2_bind_socket(0)) {
+        TD5_LOG_E(NET_LOG, "Join(direct): failed to bind game socket");
+        return 0;
+    }
 
-    TD5_LOG_I(NET_LOG, "Join: connected to host at port %u",
-              (unsigned)ntohs(s_ws2_host_addr.sin_port));
+    s_ws2_host_addr = addr;
+    s_ws2_peer_addrs[0] = s_ws2_host_addr;
+    s_ws2_peer_valid[0] = 1;
+
+    TD5_LOG_I(NET_LOG, "Join(direct): host %s:%u", host_ip, (unsigned)game_port);
     return 1;
 }
 
@@ -1218,31 +1290,45 @@ static uint32_t ws2_resolve_sender_id(const SOCKADDR_IN *addr)
 static int ws2_transport_recv(uint32_t *sender_id, void *buf, int buf_size)
 {
     SOCKADDR_IN from_addr;
-    int from_len = (int)sizeof(from_addr);
+    int from_len;
     int ret;
 
     if (s_ws2_socket == INVALID_SOCKET || !buf || buf_size <= 0 || !s_ws2_socket_bound) {
         return 0;
     }
 
-    ret = recvfrom(s_ws2_socket, (char *)buf, buf_size, 0,
-                   (struct sockaddr *)&from_addr, &from_len);
-    if (ret == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) {
+    for (;;) {
+        from_len = (int)sizeof(from_addr);
+        ret = recvfrom(s_ws2_socket, (char *)buf, buf_size, 0,
+                       (struct sockaddr *)&from_addr, &from_len);
+        if (ret == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+                return 0;
+            }
+            TD5_LOG_W(NET_LOG, "recvfrom failed: %d", err);
+            if (err == WSAECONNRESET) {
+                s_connection_lost = 1;
+            }
             return 0;
         }
-        TD5_LOG_W(NET_LOG, "recvfrom failed: %d", err);
-        if (err == WSAECONNRESET) {
-            s_connection_lost = 1;
-        }
-        return 0;
-    }
 
-    if (sender_id) {
-        *sender_id = ws2_resolve_sender_id(&from_addr);
+        /* S10: the JOIN handshake rides the GAME socket (so it crosses routers
+           via the UPnP-opened port), tagged with WS2_DISCOVERY_MAGIC so it is
+           distinguishable from a DXPTYPE (0-12) message BEFORE dispatch. The
+           lockstep wire protocol is untouched. Consume it here and keep
+           draining the next datagram. */
+        if (ret >= (int)sizeof(DiscoveryMsg) &&
+            *(const uint32_t *)buf == WS2_DISCOVERY_MAGIC) {
+            ws2_handle_game_control((const DiscoveryMsg *)buf, &from_addr);
+            continue;
+        }
+
+        if (sender_id) {
+            *sender_id = ws2_resolve_sender_id(&from_addr);
+        }
+        return ret;
     }
-    return ret;
 }
 
 static const SOCKADDR_IN *ws2_get_target_addr(uint32_t target_id)
@@ -1390,19 +1476,34 @@ static void ws2_discovery_shutdown(void)
     }
 }
 
-static void ws2_handle_join_request(const SOCKADDR_IN *from_addr)
+/**
+ * Host-side: accept (or re-ACK) a join from `from_addr`, sending the JOIN_ACK
+ * back over `reply_socket`. Works for both the legacy discovery-socket path and
+ * the S10 game-socket path; idempotent so a retried JOIN_REQ is harmless.
+ */
+static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
+                            SOCKET reply_socket)
 {
     int slot = -1;
     int i;
     DiscoveryMsg ack;
 
-    if (!s_is_host || s_session.sealed)
+    if (!s_is_host || s_session.sealed || !from_addr)
         return;
 
+    /* Already-known peer (a retried JOIN_REQ)? Re-use its slot, just re-ACK. */
     for (i = 1; i < TD5_NET_MAX_PLAYERS; i++) {
-        if (!s_roster[i].active) {
+        if (s_ws2_peer_valid[i] && s_roster[i].active &&
+            s_ws2_peer_addrs[i].sin_addr.s_addr == from_addr->sin_addr.s_addr &&
+            s_ws2_peer_addrs[i].sin_port == from_addr->sin_port) {
             slot = i;
             break;
+        }
+    }
+
+    if (slot < 0) {
+        for (i = 1; i < TD5_NET_MAX_PLAYERS; i++) {
+            if (!s_roster[i].active) { slot = i; break; }
         }
     }
 
@@ -1411,10 +1512,18 @@ static void ws2_handle_join_request(const SOCKADDR_IN *from_addr)
         return;
     }
 
-    s_roster[slot].id = (uint32_t)(slot + 1);
-    s_roster[slot].active = 1;
-    snprintf(s_roster[slot].name, sizeof(s_roster[slot].name), "Player %d", slot + 1);
-    s_player_count++;
+    if (!s_roster[slot].active) {
+        s_roster[slot].id = (uint32_t)(slot + 1);
+        s_roster[slot].active = 1;
+        if (name && name[0])
+            snprintf(s_roster[slot].name, sizeof(s_roster[slot].name), "%s", name);
+        else
+            snprintf(s_roster[slot].name, sizeof(s_roster[slot].name), "Player %d", slot + 1);
+        s_player_count++;
+        InterlockedIncrement(&s_sync_generation);
+        TD5_LOG_I(NET_LOG, "Join accepted: slot=%d id=%u name=\"%s\"",
+                  slot, s_roster[slot].id, s_roster[slot].name);
+    }
 
     s_ws2_peer_addrs[slot] = *from_addr;
     s_ws2_peer_valid[slot] = 1;
@@ -1424,16 +1533,92 @@ static void ws2_handle_join_request(const SOCKADDR_IN *from_addr)
     ack.disc_type = WS2_DISC_JOIN_ACK;
     ack.assigned_slot = (uint32_t)slot;
     ack.assigned_id   = s_roster[slot].id;
-    ack.game_port     = ntohs(s_ws2_host_addr.sin_port);
+    ack.game_port     = (uint16_t)s_game_port;
     strncpy(ack.session_name, s_session.name, sizeof(ack.session_name) - 1);
 
-    sendto(s_ws2_disc_socket, (const char *)&ack, sizeof(ack), 0,
-           (const struct sockaddr *)from_addr, (int)sizeof(*from_addr));
+    if (reply_socket != INVALID_SOCKET) {
+        sendto(reply_socket, (const char *)&ack, sizeof(ack), 0,
+               (const struct sockaddr *)from_addr, (int)sizeof(*from_addr));
+    }
 
     broadcast_roster();
-    InterlockedIncrement(&s_sync_generation);
+}
 
-    TD5_LOG_I(NET_LOG, "Join accepted: slot=%d id=%u", slot, s_roster[slot].id);
+/** Legacy discovery-socket join entry; delegates to the shared accept path. */
+static void ws2_handle_join_request(const SOCKADDR_IN *from_addr)
+{
+    ws2_accept_join(from_addr, NULL, s_ws2_disc_socket);
+}
+
+/**
+ * Dispatch a magic-tagged control datagram received on the GAME socket
+ * (the S10 unified JOIN handshake — see ws2_transport_recv).
+ */
+static void ws2_handle_game_control(const DiscoveryMsg *dm, const SOCKADDR_IN *from_addr)
+{
+    if (!dm || !from_addr)
+        return;
+
+    switch (dm->disc_type) {
+    case WS2_DISC_JOIN_REQ:
+        /* Host: a client wants in over the game socket (LAN or Direct). The
+           joiner's player name is carried in session_name. ACK on the game
+           socket so the reply uses the same UPnP-opened port. */
+        if (s_is_host) {
+            char name[64];
+            strncpy(name, dm->session_name, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+            ws2_accept_join(from_addr, name, s_ws2_socket);
+        }
+        break;
+
+    case WS2_DISC_JOIN_ACK:
+        /* Client: the host assigned our slot/id and we now know its game
+           address. The authoritative roster follows via DXPROSTER. */
+        if (!s_is_host) {
+            int slot = (int)dm->assigned_slot;
+            if (slot >= 0 && slot < TD5_NET_MAX_PLAYERS) {
+                s_local_slot = slot;
+                s_roster[slot].id = dm->assigned_id ? dm->assigned_id
+                                                    : (uint32_t)(slot + 1);
+                s_roster[slot].active = 1;
+                if (!s_roster[0].active) {   /* bootstrap host as slot 0 / id 1 */
+                    s_roster[0].id = 1;
+                    s_roster[0].active = 1;
+                }
+                s_ws2_host_addr = *from_addr;
+                s_ws2_peer_addrs[0] = *from_addr;
+                s_ws2_peer_valid[0] = 1;
+                TD5_LOG_I(NET_LOG, "JOIN_ACK: slot %d id %u (host %s:%u)",
+                          slot, s_roster[slot].id, inet_ntoa(from_addr->sin_addr),
+                          (unsigned)ntohs(from_addr->sin_port));
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/** Client-side: send a magic JOIN_REQ (with our player name) to the host's
+ *  game address over the game socket. */
+static int ws2_send_join_request(const char *player_name)
+{
+    DiscoveryMsg req;
+
+    if (s_ws2_socket == INVALID_SOCKET || !s_ws2_socket_bound)
+        return 0;
+
+    memset(&req, 0, sizeof(req));
+    req.magic = WS2_DISCOVERY_MAGIC;
+    req.disc_type = WS2_DISC_JOIN_REQ;
+    if (player_name && player_name[0])
+        strncpy(req.session_name, player_name, sizeof(req.session_name) - 1);
+
+    return sendto(s_ws2_socket, (const char *)&req, sizeof(req), 0,
+                  (const struct sockaddr *)&s_ws2_host_addr,
+                  (int)sizeof(s_ws2_host_addr)) != SOCKET_ERROR;
 }
 
 /* ========================================================================
@@ -1683,6 +1868,20 @@ int td5_net_init(void)
     s_expected_ack_count = 0;
     s_received_frame_dt = 0.0f;
 
+    /* S10: connection-mode / port / UPnP / join state */
+    s_conn_mode = TD5_NET_MODE_LAN;
+    s_game_port = WS2_GAME_PORT;
+    s_enable_upnp = 0;
+    s_upnp_status = TD5_NET_UPNP_IDLE;
+    s_upnp_mapped_port = 0;
+    s_status_text[0] = '\0';
+    s_local_ip[0] = '\0';
+    s_last_beacon_ms = 0;
+    s_local_player_name[0] = '\0';
+    s_join_pending = 0;
+    s_join_attempts = 0;
+    s_join_last_ms = 0;
+
     memset(s_player_sync_table, 0, sizeof(s_player_sync_table));
     memset(s_player_sync_received, 0, sizeof(s_player_sync_received));
     memset(&s_outbound_frame, 0, sizeof(s_outbound_frame));
@@ -1694,13 +1893,14 @@ int td5_net_init(void)
     s_receive_event_is_ws2 = 0;
 
     /* Install Winsock2 UDP transport backend */
-    s_transport_send     = ws2_transport_send;
-    s_transport_recv     = ws2_transport_recv;
-    s_transport_init     = ws2_transport_init;
-    s_transport_host     = ws2_transport_host;
-    s_transport_join     = ws2_transport_join;
-    s_transport_enum     = ws2_transport_enum;
-    s_transport_shutdown = ws2_transport_shutdown;
+    s_transport_send        = ws2_transport_send;
+    s_transport_recv        = ws2_transport_recv;
+    s_transport_init        = ws2_transport_init;
+    s_transport_host        = ws2_transport_host;
+    s_transport_join        = ws2_transport_join;
+    s_transport_join_direct = ws2_transport_join_direct;
+    s_transport_enum        = ws2_transport_enum;
+    s_transport_shutdown    = ws2_transport_shutdown;
 
     /* Reset ring buffer */
     ring_reset();
@@ -1738,6 +1938,13 @@ void td5_net_shutdown(void)
     /* Stop worker thread and close events */
     stop_worker();
 
+    /* S10: release any UPnP port-mapping we opened for the host game port. */
+    if (s_upnp_mapped_port) {
+        td5_upnp_unmap_port(s_upnp_mapped_port, 1 /*UDP*/);
+        s_upnp_mapped_port = 0;
+        s_upnp_status = TD5_NET_UPNP_IDLE;
+    }
+
     /* Notify transport */
     if (s_transport_shutdown)
         s_transport_shutdown();
@@ -1761,10 +1968,15 @@ void td5_net_shutdown(void)
  */
 void td5_net_tick(void)
 {
+    uint32_t now;
+
     if (!s_initialized)
         return;
 
-    /* Poll the discovery socket for queries (host) and join requests */
+    now = td5_plat_time_ms();
+
+    /* Poll the discovery socket for QUERY (-> ANNOUNCE) and the legacy
+       discovery-socket join path. The primary join now rides the game socket. */
     if (s_ws2_disc_socket != INVALID_SOCKET) {
         DiscoveryMsg disc_msg;
         SOCKADDR_IN from_addr;
@@ -1782,7 +1994,7 @@ void td5_net_tick(void)
 
             switch (disc_msg.disc_type) {
             case WS2_DISC_QUERY:
-                if (s_is_host) {
+                if (s_is_host && !s_session.sealed) {
                     DiscoveryMsg announce;
                     memset(&announce, 0, sizeof(announce));
                     announce.magic = WS2_DISCOVERY_MAGIC;
@@ -1793,7 +2005,7 @@ void td5_net_tick(void)
                     announce.max_players  = s_session.max_players;
                     announce.game_type    = s_session.game_type;
                     announce.sealed       = (uint32_t)s_session.sealed;
-                    announce.game_port    = WS2_GAME_PORT;
+                    announce.game_port    = (uint16_t)s_game_port;
                     sendto(s_ws2_disc_socket, (const char *)&announce,
                            sizeof(announce), 0,
                            (const struct sockaddr *)&from_addr,
@@ -1824,9 +2036,47 @@ void td5_net_tick(void)
         }
     }
 
-    /* Check for connection loss */
-    if (s_connection_lost) {
-        TD5_LOG_W(NET_LOG, "Connection lost detected in tick");
+    /* S10: periodic LAN ANNOUNCE beacon so passive listeners can find an open
+       host without first sending a QUERY. */
+    if (s_is_host && s_conn_mode == TD5_NET_MODE_LAN && !s_session.sealed &&
+        s_ws2_disc_socket != INVALID_SOCKET && (now - s_last_beacon_ms) >= 1000) {
+        DiscoveryMsg announce;
+        SOCKADDR_IN bcast;
+        memset(&announce, 0, sizeof(announce));
+        announce.magic = WS2_DISCOVERY_MAGIC;
+        announce.disc_type = WS2_DISC_ANNOUNCE;
+        strncpy(announce.session_name, s_session.name, sizeof(announce.session_name) - 1);
+        announce.player_count = (uint32_t)s_player_count;
+        announce.max_players  = s_session.max_players;
+        announce.game_type    = s_session.game_type;
+        announce.sealed       = (uint32_t)s_session.sealed;
+        announce.game_port    = (uint16_t)s_game_port;
+        memset(&bcast, 0, sizeof(bcast));
+        bcast.sin_family = AF_INET;
+        bcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+        bcast.sin_port = htons(WS2_DISCOVERY_PORT);
+        sendto(s_ws2_disc_socket, (const char *)&announce, sizeof(announce), 0,
+               (const struct sockaddr *)&bcast, (int)sizeof(bcast));
+        s_last_beacon_ms = now;
+    }
+
+    /* S10: client JOIN_REQ retry until the host assigns a slot (JOIN_ACK). */
+    if (s_join_pending) {
+        if (s_local_slot >= 0) {
+            s_join_pending = 0;
+            net_build_status_text();
+            TD5_LOG_I(NET_LOG, "Join complete: local slot %d", s_local_slot);
+        } else if ((now - s_join_last_ms) >= 500) {
+            if (s_join_attempts >= 12) {       /* ~6 s of retries */
+                s_join_pending = 0;
+                s_connection_lost = 1;
+                TD5_LOG_W(NET_LOG, "Join timed out (no JOIN_ACK from host)");
+            } else {
+                ws2_send_join_request(s_local_player_name);
+                s_join_attempts++;
+                s_join_last_ms = now;
+            }
+        }
     }
 }
 
@@ -1845,7 +2095,77 @@ void td5_net_tick(void)
  *   4. Create local player in slot 0
  *   5. Refresh roster and broadcast
  */
-int td5_net_create_session(const char *name, const char *player_name, int max_players)
+/**
+ * Build the human-readable host/connect status line for the lobby UI
+ * (local IP + port, plus UPnP outcome when hosting Direct).
+ */
+static void net_build_status_text(void)
+{
+    const char *ip = s_local_ip[0] ? s_local_ip : "?";
+
+    if (s_is_host) {
+        if (s_conn_mode == TD5_NET_MODE_DIRECT) {
+            switch (s_upnp_status) {
+            case TD5_NET_UPNP_MAPPED:
+                snprintf(s_status_text, sizeof(s_status_text),
+                         "Host %s:%d  -  UPnP: port opened on router",
+                         ip, s_game_port);
+                break;
+            case TD5_NET_UPNP_FAILED:
+                snprintf(s_status_text, sizeof(s_status_text),
+                         "Host %s:%d  -  UPnP unavailable, forward UDP %d",
+                         ip, s_game_port, s_game_port);
+                break;
+            default:
+                snprintf(s_status_text, sizeof(s_status_text),
+                         "Host %s:%d", ip, s_game_port);
+                break;
+            }
+        } else {
+            snprintf(s_status_text, sizeof(s_status_text),
+                     "Hosting LAN game on %s:%d", ip, s_game_port);
+        }
+    } else if (s_is_client) {
+        snprintf(s_status_text, sizeof(s_status_text),
+                 "Connecting to %s:%u ...",
+                 inet_ntoa(s_ws2_host_addr.sin_addr),
+                 (unsigned)ntohs(s_ws2_host_addr.sin_port));
+    } else {
+        s_status_text[0] = '\0';
+    }
+}
+
+/** Shared client-join finalize: set flags, store name, kick off the
+ *  game-socket JOIN handshake (retried by td5_net_tick). */
+static void net_begin_client_join(const char *player_name)
+{
+    s_is_host = 0;
+    s_is_client = 1;
+    s_connection_lost = 0;
+    s_local_slot = -1;            /* assigned by host via JOIN_ACK / DXPROSTER */
+    memset(s_roster, 0, sizeof(s_roster));
+
+    if (player_name)
+        snprintf(s_local_player_name, sizeof(s_local_player_name), "%s", player_name);
+    else
+        s_local_player_name[0] = '\0';
+
+    ResetEvent(s_evt_frame_ack);
+
+    s_join_pending = 1;
+    ws2_send_join_request(s_local_player_name);
+    s_join_attempts = 1;
+    s_join_last_ms = td5_plat_time_ms();
+
+    net_build_status_text();
+}
+
+/**
+ * Host with an explicit game port and optional UPnP IGD port-mapping.
+ * Mirrors DXPlay::NewSession() with the S10 transport extensions.
+ */
+int td5_net_create_session_ex(const char *name, const char *player_name,
+                              int max_players, int game_port, int enable_upnp)
 {
     if (!s_initialized) {
         TD5_LOG_E(NET_LOG, "Cannot create session: not initialized");
@@ -1854,6 +2174,11 @@ int td5_net_create_session(const char *name, const char *player_name, int max_pl
 
     if (max_players < 1) max_players = 1;
     if (max_players > TD5_NET_MAX_PLAYERS) max_players = TD5_NET_MAX_PLAYERS;
+
+    /* S10: the transport host path reads s_game_port / s_enable_upnp. */
+    s_game_port = (game_port > 0 && game_port <= 65535) ? game_port : WS2_GAME_PORT;
+    s_enable_upnp = enable_upnp ? 1 : 0;
+    s_upnp_status = TD5_NET_UPNP_IDLE;
 
     /* Fill session info */
     memset(&s_session, 0, sizeof(s_session));
@@ -1866,7 +2191,7 @@ int td5_net_create_session(const char *name, const char *player_name, int max_pl
     s_session.seed = td5_plat_time_ms();
     s_session.sealed = 0;
 
-    /* Ask transport to host */
+    /* Ask transport to host (binds the game port + runs UPnP if requested) */
     if (s_transport_host) {
         if (!s_transport_host(name, max_players)) {
             TD5_LOG_E(NET_LOG, "Transport failed to host session");
@@ -1887,6 +2212,7 @@ int td5_net_create_session(const char *name, const char *player_name, int max_pl
     if (player_name) {
         strncpy(s_roster[0].name, player_name, sizeof(s_roster[0].name) - 1);
         s_roster[0].name[sizeof(s_roster[0].name) - 1] = '\0';
+        snprintf(s_local_player_name, sizeof(s_local_player_name), "%s", player_name);
     }
     s_player_count = 1;
 
@@ -1896,9 +2222,19 @@ int td5_net_create_session(const char *name, const char *player_name, int max_pl
     /* Broadcast initial roster */
     broadcast_roster();
 
-    TD5_LOG_I(NET_LOG, "Session created: \"%s\" (max=%d, seed=%u)",
-              s_session.name, max_players, s_session.seed);
+    net_build_status_text();
+
+    TD5_LOG_I(NET_LOG, "Session created: \"%s\" (max=%d port=%d upnp=%d seed=%u) %s",
+              s_session.name, max_players, s_game_port, s_enable_upnp,
+              s_session.seed, s_status_text);
     return 1;
+}
+
+int td5_net_create_session(const char *name, const char *player_name, int max_players)
+{
+    /* LAN host convenience wrapper: default game port, no UPnP. */
+    return td5_net_create_session_ex(name, player_name, max_players,
+                                     WS2_GAME_PORT, 0);
 }
 
 /**
@@ -1924,7 +2260,9 @@ int td5_net_join_session(int session_index, const char *player_name)
         return 0;
     }
 
-    /* Ask transport to join */
+    s_conn_mode = TD5_NET_MODE_LAN;
+
+    /* Point the transport at the discovered host + bind a local game socket. */
     if (s_transport_join) {
         if (!s_transport_join(session_index)) {
             TD5_LOG_E(NET_LOG, "Transport failed to join session %d", session_index);
@@ -1932,29 +2270,91 @@ int td5_net_join_session(int session_index, const char *player_name)
         }
     }
 
-    /* Set client flags */
-    s_is_host = 0;
-    s_is_client = 1;
-    s_connection_lost = 0;
+    net_begin_client_join(player_name);
 
-    /* Local player -- slot will be assigned by host via roster message */
-    s_local_slot = -1; /* will be resolved when roster arrives */
-    memset(s_roster, 0, sizeof(s_roster));
-
-    /* Store our player name for later slot assignment */
-    /* The host will assign our slot and send a DXPROSTER update */
-    if (player_name) {
-        /* Temporarily store in slot 0; will be relocated on roster update */
-        strncpy(s_roster[0].name, player_name, sizeof(s_roster[0].name) - 1);
-        s_roster[0].name[sizeof(s_roster[0].name) - 1] = '\0';
-    }
-
-    /* Refresh roster */
-    refresh_roster();
-
-    TD5_LOG_I(NET_LOG, "Joined session index %d as \"%s\"",
+    TD5_LOG_I(NET_LOG, "Join(LAN) session %d as \"%s\"",
               session_index, player_name ? player_name : "(unnamed)");
     return 1;
+}
+
+/**
+ * Join an explicit host by IP[:port] -- no enumeration (Direct mode).
+ * The JOIN handshake rides the game socket so it works across routers when the
+ * host's port is reachable (e.g. opened via UPnP).
+ */
+int td5_net_join_direct(const char *host_ip, int game_port, const char *player_name)
+{
+    if (!s_initialized) {
+        TD5_LOG_E(NET_LOG, "Cannot join: not initialized");
+        return 0;
+    }
+    if (!host_ip || !host_ip[0]) {
+        TD5_LOG_E(NET_LOG, "Join(direct): empty host IP");
+        return 0;
+    }
+    if (game_port <= 0 || game_port > 65535)
+        game_port = WS2_GAME_PORT;
+
+    s_conn_mode = TD5_NET_MODE_DIRECT;
+    s_game_port = game_port;
+
+    if (s_transport_join_direct) {
+        if (!s_transport_join_direct(host_ip, game_port)) {
+            TD5_LOG_E(NET_LOG, "Transport failed to join %s:%d", host_ip, game_port);
+            return 0;
+        }
+    }
+
+    net_begin_client_join(player_name);
+
+    TD5_LOG_I(NET_LOG, "Join(direct) %s:%d as \"%s\"",
+              host_ip, game_port, player_name ? player_name : "(unnamed)");
+    return 1;
+}
+
+/* ========================================================================
+ * Public API: S10 connection-mode + status
+ * ======================================================================== */
+
+int td5_net_set_mode(int mode)
+{
+    if (mode != TD5_NET_MODE_LAN && mode != TD5_NET_MODE_DIRECT)
+        return 0;
+    s_conn_mode = mode;
+    TD5_LOG_I(NET_LOG, "Connection mode set to %s",
+              mode == TD5_NET_MODE_DIRECT ? "DIRECT" : "LAN");
+    return 1;
+}
+
+int td5_net_get_mode(void)
+{
+    return s_conn_mode;
+}
+
+int td5_net_get_upnp_status(void)
+{
+    return s_upnp_status;
+}
+
+const char *td5_net_get_status_text(void)
+{
+    return s_status_text;
+}
+
+int td5_net_get_local_ip(char *buf, int len)
+{
+    if (!buf || len <= 0)
+        return 0;
+    if (s_local_ip[0]) {
+        snprintf(buf, (size_t)len, "%s", s_local_ip);
+        return 1;
+    }
+    if (td5_upnp_get_local_ip(buf, len)) {
+        snprintf(s_local_ip, sizeof(s_local_ip), "%s", buf);
+        return 1;
+    }
+    buf[0] = '\0';
+    return 0;
 }
 
 /**

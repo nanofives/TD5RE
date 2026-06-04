@@ -407,6 +407,10 @@ typedef struct TD5_GlobalState {
          * pre-loop body byte-faithfully against the original. Gated so the
          * change can be A/B-tested per session. */
         int  experimental_bias_clamp;
+        /* S10 net-play: [Network] connection config. */
+        int  net_mode;          /* 0=LAN auto-discovery (default), 1=Direct IP */
+        int  net_game_port;     /* host UDP game port (default 37050) */
+        int  net_enable_upnp;   /* Direct host: open the port via UPnP (default 1) */
     } ini;
 
 } TD5_GlobalState;

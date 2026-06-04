@@ -3106,11 +3106,81 @@ static void td5_photobooth_tick(void) {
     }
 }
 
+/* ========================================================================
+ * Network lockstep input sync (S10)
+ *
+ * Mirrors the original PollRaceSessionInput network branch (0x0042C470):
+ * once per rendered frame, sample the local player's input, exchange it through
+ * the deterministic lockstep barrier (host merges all slots + broadcasts; client
+ * submits its slot + receives the merged frame), then write the host-merged
+ * authoritative input for all racer slots back into the input store so every
+ * substep this frame uses identical bits. The client also adopts the host's
+ * authoritative frame dt and corrects this frame's sim-time accumulator to it,
+ * so all machines advance the simulation by the same number of ticks. Only input
+ * bitmasks + dt cross the wire, so the simulation stays bit-identical.
+ *
+ * Returns 1 if the barrier failed (timeout/disconnect): the local slot's ESCAPE
+ * bit is set so the race falls through to its normal quit/fade path.
+ * ======================================================================== */
+static int td5_game_net_sync_frame(void) {
+    uint32_t bits[TD5_NET_MAX_PLAYERS];
+    int local = td5_net_local_slot();
+    int i, ok;
+    float local_dt = g_td5.normalized_frame_dt;
+    float dt = local_dt;   /* host: authoritative; client: receives host's dt */
+
+    if (local < 0 || local >= TD5_NET_MAX_PLAYERS)
+        local = 0;
+
+    /* Sample local controller(s); the port writes the primary local player into
+     * slot 0. Place that input at our assigned network slot for the exchange. */
+    td5_input_poll_race_session();
+
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        bits[i] = 0;
+    bits[local] = td5_input_get_control_bits(0);
+
+    ok = td5_net_is_host() ? td5_net_handle_host_frame(bits, &dt)
+                           : td5_net_handle_client_frame(bits, &dt);
+
+    if (!ok) {
+        bits[local] |= (uint32_t)TD5_INPUT_ESCAPE;
+        td5_input_set_control_bits(local, bits[local]);
+        TD5_LOG_W(LOG_TAG, "net lockstep failed (timeout/disconnect) -> ESC slot %d", local);
+        return 1;
+    }
+
+    /* Client adopts the host's dt; correct this frame's accumulator, which
+     * update_frame_timing() already advanced by the LOCAL dt. uint32 wrap is
+     * safe because the accumulator was just incremented by old_delta. */
+    if (!td5_net_is_host() && dt != local_dt) {
+        uint32_t old_delta = td5_game_normalized_dt_to_accum(local_dt);
+        uint32_t new_delta = td5_game_normalized_dt_to_accum(dt);
+        g_td5.sim_time_accumulator += new_delta - old_delta;
+        g_td5.normalized_frame_dt = dt;
+    }
+
+    /* Push host-merged authoritative input into every racer slot. */
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        td5_input_set_control_bits(i, bits[i]);
+
+    return 0;
+}
+
 int td5_game_run_race_frame(void) {
     int i;
     td5_photobooth_tick();   /* sets the booth camera before this frame renders */
     /* ---- Update frame timing ---- */
     td5_game_update_frame_timing();
+
+    /* ---- Network lockstep input sync (S10) ----
+     * With a network session active, sample + exchange input ONCE per frame
+     * here and hold the host-merged authoritative bits constant across every
+     * substep below (mirrors the original's once-per-frame network poll).
+     * Non-network play keeps polling once per substep, inside the loop. */
+    int net_lockstep = (g_td5.network_active && td5_net_is_active());
+    if (net_lockstep)
+        td5_game_net_sync_frame();
 
     td5_profile_begin_frame();   /* race-frame profiler timeline (zones via trace_stage + render/present below) */
     td5_game_trace_stage("frame_begin", 0);
@@ -3227,8 +3297,12 @@ int td5_game_run_race_frame(void) {
 
     while (g_td5.sim_time_accumulator > 0xFFFF &&
            ticks_this_frame < max_ticks_per_frame) {
-        /* --- Input polling --- */
-        td5_input_poll_race_session();
+        /* --- Input polling ---
+         * Network play already sampled + exchanged input once per frame above
+         * (net_lockstep); re-polling here would clobber the merged authoritative
+         * bits, so only the local-only path polls per substep. */
+        if (!net_lockstep)
+            td5_input_poll_race_session();
 
         /* --- Camera angle caching (per viewport) --- */
         /* Original (0x0042b84e) gates camera inside the pause-flag check.
