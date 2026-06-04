@@ -67,6 +67,14 @@ void td5_game_update_frame_timing(void);
 float td5_game_get_fps(void);
 float td5_game_get_frame_dt(void);
 
+/* Always-on FPS overlay: smoothed FPS + worst frame time (ms) over the last ~1s.
+ * Drawn by the frontend and the in-race HUD so the counter shows everywhere.
+ * td5_game_update_fps_overlay() must be called once per frame from the main loop
+ * (all states), since td5_game_update_frame_timing() only runs in the race. */
+extern float g_td5_display_fps;
+extern int   g_td5_peak_frame_ms;
+void td5_game_update_fps_overlay(void);
+
 /* --- Viewport --- */
 void td5_game_init_viewport_layout(void);
 

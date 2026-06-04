@@ -252,6 +252,15 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint);
 /** Get the ZIP archive path for a car by index (0-36). Returns NULL if out of range. */
 const char *td5_asset_get_car_zip_path(int car_index);
 
+/* --- TD6-car player override (test hook) ---------------------------------
+ * Forces the player (slot 0) to load a ported Test Drive 6 car archive
+ * (cars/<code>.zip -> re/assets/cars/<code>/) regardless of the menu/DefaultCar
+ * selection. Set from td5re.ini [Game] PlayerCarArchive or --PlayerCarArchive=
+ * Pass "" / NULL to clear. AI slots are unaffected. */
+void        td5_asset_set_player_car_override(const char *code);
+int         td5_asset_player_override_active(void);
+const char *td5_asset_get_player_override_zip(void);
+
 /**
  * Load a traffic vehicle model (model%d.prr + skin%d.png) from traffic.zip into
  * the given actor slot (expected range 6..11). Mirrors Phase 4 of

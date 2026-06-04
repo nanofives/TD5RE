@@ -247,6 +247,7 @@ typedef struct TD5_GlobalState {
         int  default_car;
         int  default_track;
         int  default_game_type;
+        int  td6_paint_color;    /* last-selected TD6 paint color (0xRRGGBB); persisted */
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
         int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
         int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */
@@ -433,5 +434,8 @@ void td5re_shutdown(void);
 
 /** Run one frame of the main game loop. Returns 0 to continue, 1 to quit. */
 int  td5re_frame(void);
+
+/** Update the always-on FPS counter (call once per frame from the main loop). */
+void td5_game_update_fps_overlay(void);
 
 #endif /* TD5RE_H */

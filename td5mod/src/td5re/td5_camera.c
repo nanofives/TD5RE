@@ -743,7 +743,9 @@ after_flyin:
 
     /* Camera orbit position = sin/cos of visual angle * radius.
      * All values are in 24.8 fixed-point scale (matching actor positions).
-     * SetCameraWorldPosition divides by 256 to produce float world coords. */
+     * SetCameraWorldPosition divides by 256 to produce float world coords.
+     * NOTE: photo-booth framing/angle is handled by the camera-rotation
+     * mechanism (branch fix-1780448829), not hacked here. */
     g_camOrbitOffset[v][0] = (int)(SinFloat12bit(orbit_visual_angle) * current_radius + 0.5f);
     g_camOrbitOffset[v][1] = g_camStoredPitch[v];
     g_camOrbitOffset[v][2] = (int)(-(CosFloat12bit((unsigned int)orbit_visual_angle) * current_radius) + 0.5f);

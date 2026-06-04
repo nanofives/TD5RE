@@ -362,6 +362,40 @@ static int s_debug_scene_draw_calls;
 static int s_debug_span_meshes_submitted;
 static TD5_MeshHeader *s_vehicle_meshes[TD5_ACTOR_MAX_TOTAL_SLOTS];
 
+/* Per-slot paint TINT (0xRRGGBB). 0 = unset = white = identity (TD5 cars and AI
+ * are unaffected, byte-for-byte). A non-white tint is applied by
+ * td5_render_compute_vertex_lighting to color a GRAYSCALE body (ported TD6 cars):
+ * the chosen color multiplies the per-vertex luminance. Reset on every mesh load;
+ * the game sets the player's selected color after loading a TD6 car. */
+static uint32_t s_vehicle_tint[TD5_ACTOR_MAX_TOTAL_SLOTS];
+
+void td5_render_set_vehicle_tint(int slot, uint32_t rgb)
+{
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
+    s_vehicle_tint[slot] = rgb & 0x00FFFFFFu;
+}
+
+/* Per-slot "this is a ported TD6 car" flag. TD6 cars have a grayscale body and
+ * no meaningful env-map reflection mesh (envmodel.dat is unused), so the
+ * TD5-faithful chrome/projection reflection overlay must NOT run on them: in a
+ * planar-scroll light zone (e.g. the Australia bridge/tunnel) it paints the
+ * scrolling environs "lights" texture onto the grayscale body — the user's
+ * "lights shader over new cars". Reset on every mesh swap. */
+static int s_vehicle_is_td6[TD5_ACTOR_MAX_TOTAL_SLOTS];
+
+void td5_render_set_vehicle_is_td6(int slot, int is_td6)
+{
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
+    s_vehicle_is_td6[slot] = is_td6 ? 1 : 0;
+}
+
+/* Photo-booth mode: render ONLY the player car (skip sky + track spans here, and
+ * VFX/HUD/clear in the game frame) over a chroma background, for offline preview
+ * (carpic) generation. Reuses the normal chase camera (frozen car at spawn). */
+static int s_photobooth_active = 0;
+void td5_render_set_photobooth(int on) { s_photobooth_active = on ? 1 : 0; }
+int  td5_render_photobooth_active(void) { return s_photobooth_active; }
+
 /* ========================================================================
  * Vehicle Projection Effect / Chrome Reflection (0x43DEC0 / 0x40CBD0)
  *
@@ -372,7 +406,13 @@ static TD5_MeshHeader *s_vehicle_meshes[TD5_ACTOR_MAX_TOTAL_SLOTS];
  * Effect state per-slot: heading cos/sin, sub-mode, texture page.
  * ======================================================================== */
 
-#define ENVMAP_TEXTURE_PAGE_BASE 900  /* D3D page IDs for environs textures */
+/* D3D page IDs for environs textures. MUST NOT overlap the frontend surface
+ * pool (FE_SURFACE_PAGE_BASE=900, 31 pages → 900-930): they did, so loading a
+ * level's environs/projection textures for a race clobbered the menu background
+ * surface, and only the (now-removed) per-frame frontend surface recovery hid
+ * it. Moved to 990-993, clear of the frontend pool and within MAX_TEXTURE_PAGES
+ * (1024). */
+#define ENVMAP_TEXTURE_PAGE_BASE 990
 #define ENVMAP_MAX_PAGES         4
 
 typedef struct {
@@ -826,6 +866,23 @@ static void update_render_camera_from_game(void)
         inspect_cam_load_env();
     if (s_inspect_enabled)
         apply_inspection_camera();
+#endif
+}
+
+/* Programmatic inspection-camera control — drives the same fixed-angle camera
+ * the photo booth uses to frame a car (dev only; no-op in release). Locks out
+ * the env loader so the booth's angles aren't overridden. */
+void td5_render_set_inspect_cam(int on, float az_deg, float el_deg, float dist, int slot)
+{
+#ifndef TD5RE_RELEASE
+    s_inspect_loaded  = 1;
+    s_inspect_enabled = on ? 1 : 0;
+    s_inspect_az_deg  = az_deg;
+    s_inspect_el_deg  = el_deg;
+    s_inspect_dist    = dist;
+    s_inspect_slot    = (slot < 0 || slot > 5) ? 0 : slot;
+#else
+    (void)on; (void)az_deg; (void)el_deg; (void)dist; (void)slot;
 #endif
 }
 
@@ -1612,7 +1669,7 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
     }
 }
 
-void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh)
+void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 {
     if (!mesh) return;
 
@@ -1620,6 +1677,14 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh)
     TD5_MeshVertex *verts   = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
     TD5_VertexNormal *norms = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
     if (!verts || !norms || count <= 0) return;
+
+    /* Paint tint (TD6 cars). 0/white => the original luminance-index path below
+     * (TD5 cars are byte-identical). A real color packs the lit luminance into a
+     * full ARGB diffuse so the color-LUT step (alpha==0 path) is bypassed and the
+     * grayscale body is multiplied by the chosen hue. */
+    uint32_t tint = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS) ? s_vehicle_tint[slot] : 0;
+    int use_tint = (tint != 0 && tint != 0x00FFFFFFu);
+    int tr = (tint >> 16) & 0xFF, tg = (tint >> 8) & 0xFF, tb = tint & 0xFF;
 
     /*
      * Per-vertex 3-directional diffuse lighting (0x43DDF0):
@@ -1651,7 +1716,14 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh)
         int lum = (int)intensity;
         lum = clampi(lum, TD5_LIGHTING_MIN, TD5_LIGHTING_MAX);
 
-        verts[i].lighting = (uint32_t)lum;
+        if (use_tint) {
+            /* Full ARGB = lit-luminance * tint; alpha 0xFF bypasses the color LUT. */
+            int lr = (lum * tr) / 255, lg = (lum * tg) / 255, lb = (lum * tb) / 255;
+            verts[i].lighting = 0xFF000000u | ((uint32_t)lr << 16) |
+                                ((uint32_t)lg << 8) | (uint32_t)lb;
+        } else {
+            verts[i].lighting = (uint32_t)lum;   /* luminance index -> color LUT */
+        }
     }
 }
 
@@ -1943,7 +2015,7 @@ void td5_render_span_display_list(void *display_list_block)
             td5_render_pop_transform();
         } else {
             td5_render_transform_mesh_vertices(mesh);
-            td5_render_compute_vertex_lighting(mesh);
+            td5_render_compute_vertex_lighting(mesh, -1);   /* track mesh: no tint */
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
         }
@@ -2071,6 +2143,8 @@ void td5_render_set_vehicle_mesh(int slot, TD5_MeshHeader *mesh)
         return;
 
     s_vehicle_meshes[slot] = mesh;
+    s_vehicle_tint[slot] = 0;   /* default white; game re-sets it for TD6 player car */
+    s_vehicle_is_td6[slot] = 0; /* asset loader re-sets it for a transcoded TD6 mesh */
 }
 
 TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot)
@@ -2216,7 +2290,7 @@ void td5_render_actors_for_view(int view_index)
             s_sky_preset_logged = 1;
         }
     }
-    td5_render_draw_sky();
+    if (!s_photobooth_active) td5_render_draw_sky();   /* photo booth: chroma bg only */
     td5_render_flush_immediate_batch();
     s_in_sky_draw = 0;
 
@@ -2372,7 +2446,7 @@ void td5_render_actors_for_view(int view_index)
             if (submitted_count < TD5_RENDER_SUBMITTED_CAP)
                 s_submitted[submitted_count++] = display_list;
 
-            td5_render_span_display_list(display_list);
+            if (!s_photobooth_active) td5_render_span_display_list(display_list);
             rendered_spans++;
         }
 
@@ -2404,7 +2478,7 @@ void td5_render_actors_for_view(int view_index)
                 if (dup) continue;
                 if (submitted_count < TD5_RENDER_SUBMITTED_CAP)
                     s_submitted[submitted_count++] = display_list;
-                td5_render_span_display_list(display_list);
+                if (!s_photobooth_active) td5_render_span_display_list(display_list);
                 rendered_spans++;
             }
         }
@@ -2461,6 +2535,7 @@ void td5_render_actors_for_view(int view_index)
         {
             int shadow_drawn = 0;
             for (int slot = 0; slot < total_actors; slot++) {
+                if (s_photobooth_active) continue;  /* booth: no shadows in the preview */
                 TD5_Actor *sa = td5_game_get_actor(slot);
                 if (!sa || !td5_render_get_vehicle_mesh(slot))
                     continue;
@@ -2498,6 +2573,7 @@ void td5_render_actors_for_view(int view_index)
         }
 
         for (int slot = 0; slot < total_actors; slot++) {
+            if (s_photobooth_active && slot != 0) continue;  /* booth: player car only */
             TD5_Actor *actor = td5_game_get_actor(slot);
             TD5_MeshHeader *mesh = td5_render_get_vehicle_mesh(slot);
             TD5_Mat3x3 view_rot;
@@ -2692,7 +2768,7 @@ void td5_render_actors_for_view(int view_index)
              * BEFORE compute_vertex_lighting since that's the consumer of
              * s_light_dirs[]/s_ambient_intensity. */
             td5_render_apply_track_lighting(slot, actor);
-            td5_render_compute_vertex_lighting(mesh);
+            td5_render_compute_vertex_lighting(mesh, slot);
 
             /* Vehicle shadow is now drawn in the shadow PRE-PASS above (before
              * ANY car body in this view), not inline here. [FIX 2026-06-02
@@ -2714,9 +2790,14 @@ void td5_render_actors_for_view(int view_index)
              * path in RenderRaceActorsForView and are intentionally left without
              * reflection. [RE basis: agent confirmed mesh is global, gate is
              * slot==0 in original — this is a deliberate visual enhancement.] */
-            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS) {
+            /* Skip ported TD6 cars: their grayscale body + unused env-map mesh
+             * make the reflection overlay paint the scrolling environs "lights"
+             * texture onto the body in planar-scroll zones (Australia bridge/
+             * tunnel) — wrong on new cars. TD5 cars are unaffected. */
+            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS &&
+                !s_photobooth_active && !s_vehicle_is_td6[slot]) {
                 td5_render_update_projection_effect(slot, actor);
-                render_vehicle_reflection_overlay(mesh, slot);
+                render_vehicle_reflection_overlay(mesh, slot);   /* booth: no reflections */
             }
 
             /* Render wheel ring + brake-light billboards — RACER SLOTS ONLY.
@@ -4642,7 +4723,14 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * with tire tracks and z-write does not affect occlusion here — known divergence. */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
 #define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
-#define SHADOW_PULL_VIEWZ       (2.0f)   /* small toward-camera pull: clears road z-fight, far below the car gap */
+/* Toward-camera depth-compare pull (view-z). NOTE: currently MOOT — the shadow
+ * preset (TD5_PRESET_SHADOW) disables the depth test (z_enable=0) because the
+ * port's separate shadow projection could never tie the coplanar road
+ * deterministically, so any LEQUAL bias left a per-frame ground shimmer; the
+ * 2026-06-01 pre-pass makes the no-depth-test path safe (the opaque body, drawn
+ * after, overwrites any over-car shadow). This bias only matters if the depth
+ * test is ever re-enabled. */
+#define SHADOW_PULL_VIEWZ       (2.0f)
 #define SHADOW_DEPTH_Z_BIAS     (SHADOW_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
 
 static int   s_shadow_lookup_done = 0;

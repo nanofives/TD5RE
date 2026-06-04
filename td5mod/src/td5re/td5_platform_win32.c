@@ -618,6 +618,7 @@ void td5_plat_present(int vsync)
         ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
             &g_backend.swap_rtv, NULL);
         Backend_DrawFullscreenQuad(g_backend.backbuffer->d3d11_srv);
+        Backend_CaptureIfRequested();  /* photo-booth: grab the composited race frame */
         IDXGISwapChain_Present(g_backend.swap_chain, vsync ? 1 : 0, 0);
 
         if (g_backend.backbuffer->d3d11_rtv) {
@@ -3401,22 +3402,32 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
 
     case TD5_PRESET_SHADOW:
-        /* Shadow quads — z_test LEQUAL, z_write OFF, plus the shadow-decal
-         * rasterizer state (DepthBias + SlopeScaledDepthBias toward camera).
-         * The polygon offset wins against co-planar ground polys (no flicker
-         * regardless of car speed) while staying small enough at separated
-         * geometry that opaque opponents / walls still occlude correctly.
-         * [r7 diagnostic with z_func=ALWAYS confirmed shadow rendered fine
-         *  on the road but drew over the car — proved depth-test was the
-         *  flicker cause and a constant bias couldn't satisfy both
-         *  "win-vs-ground" and "lose-vs-car" constraints simultaneously.] */
+        /* Shadow quads. DEPTH TEST DISABLED [FIX: ground shimmer].
+         *
+         * The shadow is a FLAT quad through the 4 wheel-contact probes (scaled
+         * 1.25x outward) projected through a SEPARATE transform from the road, so
+         * coplanar shadow/road depths never tie deterministically — the LEQUAL
+         * test loses on jittery sub-LSB / bumpy-road pixels and the shadow drops
+         * out per-frame ("shimmers against the ground"). No constant or slope
+         * depth bias cured it (r7 diagnostic: only z_func=ALWAYS rendered the
+         * shadow cleanly on the road).
+         *
+         * The historical blocker to disabling the test was "shadow drew over the
+         * car." That is GONE since the 2026-06-01 shadow PRE-PASS: every car body
+         * is drawn AFTER all shadows with z_write=1, so the opaque body
+         * unconditionally overwrites any shadow pixel it covers. So we drop the
+         * depth test entirely (z_enable=0) — the shadow renders cleanly on the
+         * ground (no tie, no shimmer) and the body-overwrite handles over-car.
+         * (Trade-off: a wall/scenery prop BETWEEN the camera and the ground
+         * shadow no longer occludes it; rare in the chase view and far less
+         * objectionable than the constant shimmer.) z_write stays OFF. */
         s->blend_enable = 1;
         s->src_blend    = D3D6BLEND_SRCALPHA;
         s->dest_blend   = D3D6BLEND_INVSRCALPHA;
-        s->z_enable     = 1;
+        s->z_enable     = 0;  /* no depth test — pre-pass + body-overwrite handles occlusion */
         s->z_write      = 0;
-        s->z_func       = 0;  /* LEQUAL */
-        s->polygon_offset    = 1;  /* shadow-decal rasterizer */
+        s->z_func       = 0;
+        s->polygon_offset    = 0;  /* depth bias moot with the test off */
         s->mag_filter   = 0;
         s->min_filter   = 0;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
@@ -3684,20 +3695,22 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
                 }
             }
 
-            for (size_t i = 0; i < pixel_count; i++) {
-                uint8_t b = src32[i * 4 + 0];
-                uint8_t g = src32[i * 4 + 1];
-                uint8_t r = src32[i * 4 + 2];
-                uint8_t a = src32[i * 4 + 3];
-
-                if (apply_font_colorkey) {
-                    a = (((unsigned int)r + (unsigned int)g + (unsigned int)b) < 16u) ? 0 : 255;
+            if (!apply_font_colorkey) {
+                /* The decoder already produced BGRA, so this is an identity copy
+                 * for every non-font page — a memcpy instead of a per-pixel loop
+                 * (the loop was costing ~1.8M iterations per 1632x1120 carpic). */
+                memcpy(dst32, src32, total);
+            } else {
+                for (size_t i = 0; i < pixel_count; i++) {
+                    uint8_t b = src32[i * 4 + 0];
+                    uint8_t g = src32[i * 4 + 1];
+                    uint8_t r = src32[i * 4 + 2];
+                    unsigned a = (((unsigned)r + g + b) < 16u) ? 0u : 255u;
+                    dst32[i * 4 + 0] = b;
+                    dst32[i * 4 + 1] = g;
+                    dst32[i * 4 + 2] = r;
+                    dst32[i * 4 + 3] = (uint8_t)a;
                 }
-
-                dst32[i * 4 + 0] = b;
-                dst32[i * 4 + 1] = g;
-                dst32[i * 4 + 2] = r;
-                dst32[i * 4 + 3] = a;
             }
         } else {
             memcpy(surf->sys_buffer, pixels, total);
