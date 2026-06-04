@@ -34,4 +34,24 @@ echo   ps_luminance_alpha OK
 if errorlevel 1 (echo FAILED: ps_composite && exit /b 1)
 echo   ps_composite OK
 
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_msdf_bytes.h /Vn g_ps_msdf ps_msdf.hlsl
+if errorlevel 1 (echo FAILED: ps_msdf && exit /b 1)
+echo   ps_msdf OK
+
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_roundrect_bytes.h /Vn g_ps_roundrect ps_roundrect.hlsl
+if errorlevel 1 (echo FAILED: ps_roundrect && exit /b 1)
+echo   ps_roundrect OK
+
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_arrow_bytes.h /Vn g_ps_arrow ps_arrow.hlsl
+if errorlevel 1 (echo FAILED: ps_arrow && exit /b 1)
+echo   ps_arrow OK
+
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_cursor_bytes.h /Vn g_ps_cursor ps_cursor.hlsl
+if errorlevel 1 (echo FAILED: ps_cursor && exit /b 1)
+echo   ps_cursor OK
+
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_gauge_bytes.h /Vn g_ps_gauge ps_gauge.hlsl
+if errorlevel 1 (echo FAILED: ps_gauge && exit /b 1)
+echo   ps_gauge OK
+
 echo All shaders compiled successfully.

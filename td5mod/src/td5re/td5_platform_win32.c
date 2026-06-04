@@ -70,12 +70,14 @@ static uint8_t  s_keyboard[256];
  * keyboard defaults were not RE'd, so this is the non-regression choice).
  * The config screen pushes rebound codes here via td5_plat_input_set_keyboard_bindings
  * so a rebind actually takes effect in-race instead of being a write-only dead end. */
-enum { TD5_KB_BIND_COUNT = 10 };
+/* [PORT ENHANCEMENT 2026-06] slot 10 = PAUSE (default DIK_P 0x19) so the pause
+ * action is rebindable alongside the rest. */
+enum { TD5_KB_BIND_COUNT = 11 };
 static uint8_t s_kb_bindings[2][TD5_KB_BIND_COUNT] = {
-    /* P1: LEFT  RIGHT ACCEL BRAKE HBRK  HORN  GUP   GDN   VIEW  REAR */
-    {     0xCB, 0xCD, 0xC8, 0xD0, 0x10, 0x9D, 0x1E, 0x2C, 0x14, 0x2D },
-    /* P2:   A     D     W     S    CAPS  TAB    E     Q     R     F  */
-    {     0x1E, 0x20, 0x11, 0x1F, 0x3A, 0x0F, 0x12, 0x10, 0x13, 0x21 },
+    /* P1: LEFT  RIGHT ACCEL BRAKE HBRK  HORN  GUP   GDN   VIEW  REAR  PAUSE */
+    {     0xCB, 0xCD, 0xC8, 0xD0, 0x10, 0x9D, 0x1E, 0x2C, 0x14, 0x2D, 0x19 },
+    /* P2:   A     D     W     S    CAPS  TAB    E     Q     R     F   PAUSE */
+    {     0x1E, 0x20, 0x11, 0x1F, 0x3A, 0x0F, 0x12, 0x10, 0x13, 0x21, 0x19 },
 };
 
 static int      s_mouse_dx, s_mouse_dy;
@@ -83,18 +85,38 @@ static uint32_t s_mouse_buttons;
 static LPDIRECTINPUT8A       s_dinput        = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_keyboard   = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_mouse      = NULL;
-/* Per-player (slot) joystick devices. slot 0 = player 1, slot 1 = player 2.
- * The original supports up to 2 joystick devices simultaneously (M2DX
- * JoystickC cap = 2); each race player can be bound to the keyboard or one of
- * the joysticks. */
-#define TD5_PLAT_MAX_JS_SLOTS 2
-static LPDIRECTINPUTDEVICE8A s_di_joystick[TD5_PLAT_MAX_JS_SLOTS] = { NULL, NULL };
+/* Per-player (slot) joystick devices. slot N = player N+1.
+ * [PORT ENHANCEMENT 2026-06] Raised from 2 to 9 for N-way split-screen. The
+ * ORIGINAL data model already enumerated 7 joystick slots with the source index
+ * masked &7 (8 sources incl. keyboard) [CONFIRMED @ ScreenLocalizationInit
+ * 0x004269D0 loop i<7; ScreenControlOptions 0x41DF20 &7]; the port had narrowed
+ * this to 2. Each race player binds to the keyboard or one of the joysticks. */
+#define TD5_PLAT_MAX_JS_SLOTS 9
+static LPDIRECTINPUTDEVICE8A s_di_joystick[TD5_PLAT_MAX_JS_SLOTS] = { NULL };
 /* 9-slot binding table per player, mirroring the original DAT_00463FC4 row:
  *   [0]=active flag, [1]/[2]=axis assignment (4=X-like, 5=Y-like, swappable),
  *   [3..8]=6 button actions (value 2..10 selects physical button = value-2).
  * s_joystick_bound[slot]==0 → unconfigured → GetJS-default button mapping. */
 static int32_t s_joystick_bindings[TD5_PLAT_MAX_JS_SLOTS][9];
-static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0, 0 };
+static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
+/* [PORT ENHANCEMENT 2026-06] per-action binding codes (button | axis+dir) for
+ * each player; when *_set, the in-race poll maps actions through these instead
+ * of the fixed X=steer/Y=throttle/buttons default. See TD5_JSBIND_* in the .h. */
+static uint32_t s_js_action_bind[TD5_PLAT_MAX_JS_SLOTS][TD5_JSBIND_ACTIONS];
+static int      s_js_action_set[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
+/* Capture baseline (one remap active at a time). */
+static long     s_js_cap_axis_base[8];
+static uint32_t s_js_cap_btn_base;
+static int      s_js_cap_slot = -1;
+/* [PORT ENHANCEMENT 2026-06] dedicated non-exclusive joystick for FRONTEND
+ * navigation (A=select, B=back, dpad/stick=move). Lazily created from the first
+ * enumerated joystick when no per-player device exists; once a per-player device
+ * is created, navigation reads that instead and this one is released. */
+static LPDIRECTINPUTDEVICE8A s_di_fe_joystick = NULL;
+static int      s_fe_js_suppress = 0;
+/* [PORT ENHANCEMENT 2026-06] non-exclusive handles for the multiplayer lobby's
+ * "press to join" scan across every enumerated joystick. */
+static LPDIRECTINPUTDEVICE8A s_di_scan[16];
 /* GetJS axis center (0xFA=250) and max tracked buttons (10); kept local so the
  * platform layer doesn't depend on td5_input.h (mirrors TD5_INPUT_JS_AXIS_CENTER
  * / TD5_INPUT_MAX_JS_BUTTONS). */
@@ -179,7 +201,10 @@ typedef struct TD5_StreamAudioState {
 } TD5_StreamAudioState;
 
 static TD5_StreamAudioState s_audio_stream;
-static TD5_FFState          s_ff;
+/* Per-device force-feedback state. [PORT ENHANCEMENT 2026-06] grown from a
+ * single device to one entry per joystick slot so each player's wheel/pad can
+ * vibrate independently. Devices without FF leave their entry zeroed (no-op). */
+static TD5_FFState          s_ff[TD5_PLAT_MAX_JS_SLOTS];
 
 /* Rendering: texture pages */
 #define MAX_TEXTURE_PAGES 1024
@@ -959,6 +984,86 @@ int td5_plat_file_delete(const char *path)
     return DeleteFileA(path) ? 0 : -1;
 }
 
+int td5_plat_file_rename(const char *from, const char *to)
+{
+    if (!from || !to) return -1;
+    /* MOVEFILE_REPLACE_EXISTING so a stale .migrated backup doesn't block it. */
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+}
+
+/* ========================================================================
+ * Human-readable INI config (Config.td5/CupData.td5 retirement)
+ * ======================================================================== */
+
+void td5_plat_ini_resolve_path(const char *filename, char *out, size_t out_n)
+{
+    if (!out || out_n == 0) return;
+    out[0] = '\0';
+    if (!filename) return;
+
+    DWORD n = GetModuleFileNameA(NULL, out, (DWORD)out_n);
+    if (n > 0 && n < out_n) {
+        char *sl = out + n;
+        while (sl > out && *sl != '\\' && *sl != '/') sl--;
+        if (sl > out) {
+            sl[1] = '\0';
+        } else {
+            out[0] = '\0';
+        }
+        /* Append filename if it still fits. */
+        if (strlen(out) + strlen(filename) + 1 <= out_n) {
+            strcat(out, filename);
+            return;
+        }
+    }
+    /* Fallback: bare filename (cwd-relative). */
+    strncpy(out, filename, out_n - 1);
+    out[out_n - 1] = '\0';
+}
+
+int td5_plat_ini_get_int(const char *file, const char *section,
+                         const char *key, int fallback)
+{
+    if (!file || !section || !key) return fallback;
+    return (int)GetPrivateProfileIntA(section, key, fallback, file);
+}
+
+int td5_plat_ini_get_str(const char *file, const char *section,
+                         const char *key, const char *fallback,
+                         char *out, size_t out_n)
+{
+    if (!out || out_n == 0) return 0;
+    if (!file || !section || !key) { out[0] = '\0'; return 0; }
+    DWORD n = GetPrivateProfileStringA(section, key,
+                                       fallback ? fallback : "",
+                                       out, (DWORD)out_n, file);
+    return (int)n;
+}
+
+void td5_plat_ini_set_int(const char *file, const char *section,
+                          const char *key, int value)
+{
+    char buf[16];
+    if (!file || !section || !key) return;
+    snprintf(buf, sizeof(buf), "%d", value);
+    WritePrivateProfileStringA(section, key, buf, file);
+}
+
+void td5_plat_ini_set_str(const char *file, const char *section,
+                          const char *key, const char *value)
+{
+    if (!file || !section || !key) return;
+    WritePrivateProfileStringA(section, key, value ? value : "", file);
+}
+
+void td5_plat_ini_flush(const char *file)
+{
+    /* Passing NULL section/key/value flushes the cached profile so the next
+     * Get* call re-reads the on-disk file we just rewrote via raw I/O. */
+    if (!file) return;
+    WritePrivateProfileStringA(NULL, NULL, NULL, file);
+}
+
 /* ========================================================================
  * Memory
  * ======================================================================== */
@@ -1065,6 +1170,12 @@ int td5_plat_input_init(void)
 
 void td5_plat_input_shutdown(void)
 {
+    td5_plat_input_scan_join_release();
+    if (s_di_fe_joystick) {
+        IDirectInputDevice8_Unacquire(s_di_fe_joystick);
+        IDirectInputDevice8_Release(s_di_fe_joystick);
+        s_di_fe_joystick = NULL;
+    }
     for (int js = 0; js < TD5_PLAT_MAX_JS_SLOTS; js++) {
         if (s_di_joystick[js]) {
             IDirectInputDevice8_Unacquire(s_di_joystick[js]);
@@ -1103,6 +1214,40 @@ void td5_plat_input_set_keyboard_bindings(int player, const uint8_t *scancodes, 
     TD5_LOG_I(LOG_TAG, "input: applied %d kb bindings P%d (view=0x%02X rear=0x%02X handbrake=0x%02X)",
               count, player + 1, s_kb_bindings[player][8], s_kb_bindings[player][9],
               s_kb_bindings[player][4]);
+}
+
+/* DIJOYSTATE2 axis value by index 0..7 (lX,lY,lZ,lRx,lRy,lRz,slider0,slider1). */
+static long js_axis_val(const DIJOYSTATE2 *js, int axis)
+{
+    switch (axis) {
+        case 0: return js->lX;  case 1: return js->lY;  case 2: return js->lZ;
+        case 3: return js->lRx; case 4: return js->lRy; case 5: return js->lRz;
+        case 6: return js->rglSlider[0]; case 7: return js->rglSlider[1];
+        default: return TD5_PLAT_JS_AXIS_CENTER;
+    }
+}
+
+/* Magnitude [0..256] of an action's binding given the current device state.
+ * Buttons are 0/256; axes are measured from centre (0xFA) in the bound
+ * direction (works for sticks and centre-rest combined triggers). */
+static int js_action_mag(const DIJOYSTATE2 *js, uint32_t code)
+{
+    if (code == TD5_JSBIND_NONE) return 0;
+    if (code & TD5_JSBIND_AXIS) {
+        int axis = (int)((code >> 1) & 0x7);
+        int dir  = (int)(code & 1);
+        long v   = js_axis_val(js, axis) - TD5_PLAT_JS_AXIS_CENTER;  /* -250..250 */
+        int  m   = (dir == 0) ? (int)v : (int)(-v);
+        if (m < 0) m = 0;
+        if (m > TD5_PLAT_JS_AXIS_CENTER) m = TD5_PLAT_JS_AXIS_CENTER;
+        return (m * 256) / TD5_PLAT_JS_AXIS_CENTER;
+    }
+    if (code & TD5_JSBIND_BUTTON) {
+        int btn = (int)(code & 0xFF);
+        if (btn >= 0 && btn < 128 && (js->rgbButtons[btn] & 0x80)) return 256;
+        return 0;
+    }
+    return 0;
 }
 
 void td5_plat_input_poll(int slot, TD5_InputState *out)
@@ -1244,6 +1389,7 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             if (K_DOWN(kb[7])) bits |= TD5_INPUT_GEAR_DOWN;
             if (K_DOWN(kb[8])) bits |= TD5_INPUT_CAMERA_CHANGE;
             if (K_DOWN(kb[9])) bits |= TD5_INPUT_REAR_VIEW;
+            if (K_DOWN(kb[10])) bits |= TD5_INPUT_PAUSE;   /* [PORT 2026-06] rebindable pause */
         }
 
         #undef K_DOWN
@@ -1278,42 +1424,55 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
         }
         hr = IDirectInputDevice8_GetDeviceState(s_di_joystick[slot], sizeof(js), &js);
         if (SUCCEEDED(hr)) {
-            const int32_t *bind = s_joystick_bindings[slot];
-            int configured = s_joystick_bound[slot];
+            static const uint32_t k_action_bits[6] = {
+                TD5_INPUT_HANDBRAKE, TD5_INPUT_HORN, TD5_INPUT_GEAR_UP,
+                TD5_INPUT_GEAR_DOWN, TD5_INPUT_CAMERA_CHANGE, TD5_INPUT_REAR_VIEW
+            };
             uint32_t jbits = 0;
+            long ax_x, ax_y;
 
-            /* Axes: X = steering, Y = throttle/brake (fixed assignment, matching
-             * M2DX Configure[p][0..3] = {1,2,0x200,0x400}). Honour the [1]/[2]
-             * axis-swap if the binding requests it (orig 2-button swap path). */
-            long ax_x = js.lX, ax_y = js.lY;
-            if (configured && bind[1] == 5 && bind[2] == 4) {
-                long t = ax_x; ax_x = ax_y; ax_y = t;
-            }
-            if (ax_x < 0)     ax_x = 0;
-            if (ax_x > 0x1FF) ax_x = 0x1FF;
-            if (ax_y < 0)     ax_y = 0;
-            if (ax_y > 0x1FF) ax_y = 0x1FF;
-            jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
-            jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
-
-            /* Buttons -> action bits. Default (GetJS non-custom) maps physical
-             * btn 2..7 to handbrake/horn/gear-up/gear-down/camera/rear; a
-             * configured binding slot [3+k] selects physical button (value-2). */
-            {
-                static const uint32_t k_action_bits[6] = {
-                    TD5_INPUT_HANDBRAKE, TD5_INPUT_HORN, TD5_INPUT_GEAR_UP,
-                    TD5_INPUT_GEAR_DOWN, TD5_INPUT_CAMERA_CHANGE, TD5_INPUT_REAR_VIEW
-                };
-                static const int k_default_btn[6] = { 2, 3, 4, 5, 6, 7 };
-                for (int k = 0; k < 6; k++) {
-                    int phys = k_default_btn[k];
-                    if (configured) {
-                        int v = bind[3 + k];
-                        if (v >= 2 && v <= 10) phys = v - 2;
+            if (s_js_action_set[slot]) {
+                /* [PORT ENHANCEMENT 2026-06] per-action bindings: each of the 10
+                 * actions maps to a button or an axis/trigger direction. LEFT/RIGHT
+                 * synthesize the analog steer axis, ACCELERATE/BRAKE the throttle
+                 * axis (so a trigger drives them analog), the rest are digital. */
+                const uint32_t *ab = s_js_action_bind[slot];
+                int left  = js_action_mag(&js, ab[0]);
+                int right = js_action_mag(&js, ab[1]);
+                int accel = js_action_mag(&js, ab[2]);
+                int brake = js_action_mag(&js, ab[3]);
+                int steer = left - right;     /* -256..256 (LEFT input → steer left) */
+                int thr   = accel - brake;    /* accelerate pushes Y below centre */
+                ax_x = TD5_PLAT_JS_AXIS_CENTER + (steer * TD5_PLAT_JS_AXIS_CENTER) / 256;
+                ax_y = TD5_PLAT_JS_AXIS_CENTER - (thr   * TD5_PLAT_JS_AXIS_CENTER) / 256;
+                if (ax_x < 0) ax_x = 0; if (ax_x > 0x1FF) ax_x = 0x1FF;
+                if (ax_y < 0) ax_y = 0; if (ax_y > 0x1FF) ax_y = 0x1FF;
+                jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
+                jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
+                for (int k = 0; k < 6; k++)
+                    if (js_action_mag(&js, ab[4 + k]) >= 128) jbits |= k_action_bits[k];
+                if (js_action_mag(&js, ab[10]) >= 128) jbits |= TD5_INPUT_PAUSE;  /* PAUSE */
+            } else {
+                /* Default mapping (unconfigured): X = steering, Y = throttle/brake;
+                 * physical buttons 2..7 → handbrake/horn/gear/camera/rear. The
+                 * legacy [1]/[2] axis-swap is honoured for 2-axis wheels. */
+                const int32_t *bind = s_joystick_bindings[slot];
+                int configured = s_joystick_bound[slot];
+                ax_x = js.lX; ax_y = js.lY;
+                if (configured && bind[1] == 5 && bind[2] == 4) { long t = ax_x; ax_x = ax_y; ax_y = t; }
+                if (ax_x < 0) ax_x = 0; if (ax_x > 0x1FF) ax_x = 0x1FF;
+                if (ax_y < 0) ax_y = 0; if (ax_y > 0x1FF) ax_y = 0x1FF;
+                jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
+                jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
+                {
+                    static const int k_default_btn[6] = { 2, 3, 4, 5, 6, 7 };
+                    for (int k = 0; k < 6; k++) {
+                        int phys = k_default_btn[k];
+                        if (configured) { int v = bind[3 + k]; if (v >= 2 && v <= 10) phys = v - 2; }
+                        if (phys >= 0 && phys < TD5_PLAT_JS_MAX_BUTTONS &&
+                            (js.rgbButtons[phys] & 0x80))
+                            jbits |= k_action_bits[k];
                     }
-                    if (phys >= 0 && phys < TD5_PLAT_JS_MAX_BUTTONS &&
-                        (js.rgbButtons[phys] & 0x80))
-                        jbits |= k_action_bits[k];
                 }
             }
 
@@ -1322,7 +1481,6 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             if (s_keyboard[0x01] & 0x80) jbits |= TD5_INPUT_ESCAPE;  /* DIK_ESC */
 
             out->buttons  = jbits;
-            /* Keep the decoded analog accessors in sync (FF / camera consumers). */
             out->analog_x = (int16_t)((int)ax_x - TD5_PLAT_JS_AXIS_CENTER);
             out->analog_y = (int16_t)((int)ax_y - TD5_PLAT_JS_AXIS_CENTER);
         }
@@ -1443,6 +1601,16 @@ void td5_plat_input_set_device(int slot, int device_index)
         s_di_joystick[slot] = NULL;
     }
 
+    /* Release the shared frontend-nav + lobby-scan handles so the per-player
+     * device can take the physical joystick cleanly. */
+    if (s_di_fe_joystick) {
+        IDirectInputDevice8_Unacquire(s_di_fe_joystick);
+        IDirectInputDevice8_Release(s_di_fe_joystick);
+        s_di_fe_joystick = NULL;
+    }
+    td5_plat_input_scan_join_release();
+    s_fe_js_suppress = 1;
+
     {
         HRESULT hr = IDirectInput8_CreateDevice(s_dinput,
                                                 &s_device_guids[device_index],
@@ -1458,7 +1626,7 @@ void td5_plat_input_set_device(int slot, int device_index)
         IDirectInputDevice8_SetDataFormat(s_di_joystick[slot], &c_dfDIJoystick2);
 
         /* Exclusive foreground: required for force feedback (td5_plat_ff_init
-         * reuses slot 0's device); input reads still work in this mode. */
+         * binds this slot's own device); input reads still work in this mode. */
         if (s_hwnd)
             IDirectInputDevice8_SetCooperativeLevel(s_di_joystick[slot], s_hwnd,
                 DISCL_EXCLUSIVE | DISCL_FOREGROUND);
@@ -1510,6 +1678,388 @@ void td5_plat_input_set_joystick_bindings(int slot, const int32_t *bindings, int
               s_joystick_bindings[slot][8]);
 }
 
+/* Raw physical joystick button bitmask for a device slot (bit i = button i down).
+ * Used by the control-config per-button capture. [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_joystick_buttons(int device_slot)
+{
+    DIJOYSTATE2 js;
+    HRESULT hr;
+    uint32_t mask = 0;
+    int i;
+
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS ||
+        !s_di_joystick[device_slot])
+        return 0;
+
+    memset(&js, 0, sizeof(js));
+    hr = IDirectInputDevice8_Poll(s_di_joystick[device_slot]);
+    if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
+        IDirectInputDevice8_Acquire(s_di_joystick[device_slot]);
+        IDirectInputDevice8_Poll(s_di_joystick[device_slot]);
+    }
+    if (FAILED(IDirectInputDevice8_GetDeviceState(s_di_joystick[device_slot],
+                                                  sizeof(js), &js)))
+        return 0;
+
+    for (i = 0; i < 32; i++)
+        if (js.rgbButtons[i] & 0x80) mask |= (1u << i);
+    return mask;
+}
+
+static int td5_plat_js_read(int device_slot, DIJOYSTATE2 *js);   /* fwd */
+
+/* State for td5_plat_input_joystick_neutral (below). A trigger rests at an
+ * arbitrary OFF-CENTRE value AND a held trigger is "stable" (motionless) just
+ * like a released one — so neither an absolute centre test NOR a stability test
+ * alone can tell "held" from "released". The fix: LEARN each axis's rest position
+ * while the UI is idle (td5_plat_input_joystick_learn_rest), then require every
+ * axis to be back within a band of that learned rest (a held trigger reads far
+ * from rest) AND motionless for a few frames (absorbs spring-back overshoot). */
+static long s_neutral_rest_axes[8];          /* learned idle position per axis     */
+static int  s_neutral_rest_valid   = 0;
+static long s_neutral_prev_axes[8];          /* last frame, for the motion test    */
+static int  s_neutral_have_prev    = 0;
+static int  s_neutral_stable_count = 0;
+
+/* Reset the settle/motion tracker — call when (re)entering a wait-for-release so a
+ * stale stable-count from an earlier capture can't arm the next one instantly.
+ * (The learned REST reference is intentionally preserved across resets.) */
+void td5_plat_input_joystick_neutral_reset(void)
+{
+    s_neutral_have_prev    = 0;
+    s_neutral_stable_count = 0;
+}
+
+/* Learn the current axis positions as the device's REST reference. Call every
+ * frame while the binding UI is IDLE (not capturing) so the wait-for-release can
+ * later distinguish a held trigger (far from rest) from a released one (back at
+ * rest). Skips learning while a button is held (user mid-interaction).
+ * [PORT ENHANCEMENT 2026-06] */
+void td5_plat_input_joystick_learn_rest(int device_slot)
+{
+    DIJOYSTATE2 js;
+    int i;
+    if (!td5_plat_js_read(device_slot, &js)) { s_neutral_rest_valid = 0; return; }
+    for (i = 0; i < 32; i++) if (js.rgbButtons[i] & 0x80) return;
+    for (i = 0; i < 8; i++) s_neutral_rest_axes[i] = js_axis_val(&js, i);
+    s_neutral_rest_valid = 1;
+}
+
+/* 1 once the joystick has fully RETURNED TO REST: no buttons / dpad, sticks near
+ * centre, every axis (incl. off-centre-resting triggers/sliders) back within a
+ * band of its learned rest, and motionless for a few frames. Gates per-action
+ * capture so it waits for the previous input — including a trigger's release
+ * travel — to finish before listening again.
+ * [PORT ENHANCEMENT 2026-06] "wait until everything is released" */
+int td5_plat_input_joystick_neutral(int device_slot)
+{
+    DIJOYSTATE2 js;
+    int i, moved;
+    long axes[8];
+    long sticks[4];
+    const long REST_BAND     = 55;   /* max |axis - learned rest| to count as released */
+    const long STABLE_DELTA  = 12;   /* per-frame axis jitter tolerance (of 0..0x1F4)  */
+    const int  STABLE_FRAMES = 3;    /* consecutive motionless frames = settled        */
+
+    if (!td5_plat_js_read(device_slot, &js)) {           /* no device → neutral */
+        td5_plat_input_joystick_neutral_reset();
+        return 1;
+    }
+    /* Any button or dpad held resets the settle timer. */
+    for (i = 0; i < 32; i++)
+        if (js.rgbButtons[i] & 0x80) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
+    if (js.rgdwPOV[0] != 0xFFFFFFFFu) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
+
+    /* Sticks (lX/lY/lRx/lRy) must be near centre. */
+    sticks[0] = js.lX; sticks[1] = js.lY; sticks[2] = js.lRx; sticks[3] = js.lRy;
+    for (i = 0; i < 4; i++) {
+        long d = sticks[i] - TD5_PLAT_JS_AXIS_CENTER;
+        if (d > 90 || d < -90) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
+    }
+
+    for (i = 0; i < 8; i++) axes[i] = js_axis_val(&js, i);
+
+    /* Every axis must be back within a band of its LEARNED rest — this is what
+     * catches a HELD trigger (it sits far from where it rests when released). */
+    if (s_neutral_rest_valid) {
+        for (i = 0; i < 8; i++) {
+            long d = axes[i] - s_neutral_rest_axes[i];
+            if (d > REST_BAND || d < -REST_BAND) {
+                for (i = 0; i < 8; i++) s_neutral_prev_axes[i] = axes[i];
+                s_neutral_have_prev = 1;
+                s_neutral_stable_count = 0;
+                return 0;
+            }
+        }
+    }
+
+    /* …and motionless for STABLE_FRAMES frames (absorbs spring-back overshoot so
+     * we don't arm while an axis is still travelling through the rest band). */
+    moved = 0;
+    if (s_neutral_have_prev) {
+        for (i = 0; i < 8; i++) {
+            long d = axes[i] - s_neutral_prev_axes[i];
+            if (d > STABLE_DELTA || d < -STABLE_DELTA) { moved = 1; break; }
+        }
+    } else {
+        moved = 1;   /* first sample — need another frame to measure motion */
+    }
+    for (i = 0; i < 8; i++) s_neutral_prev_axes[i] = axes[i];
+    s_neutral_have_prev = 1;
+    if (moved) { s_neutral_stable_count = 0; return 0; }
+    if (++s_neutral_stable_count < STABLE_FRAMES) return 0;
+    return 1;
+}
+
+/* Re-enumerate input devices; returns 1 if the device count changed (hot-plug),
+ * releasing the scan handles so they recreate against the fresh GUID list.
+ * [PORT ENHANCEMENT 2026-06] */
+int td5_plat_input_rescan_devices(void)
+{
+    int prev = s_device_count;
+    td5_plat_input_enumerate_devices();
+    if (s_device_count != prev) {
+        td5_plat_input_scan_join_release();
+        s_fe_js_suppress = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- Per-action joystick bindings (PORT ENHANCEMENT 2026-06) ---- */
+
+void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int count)
+{
+    int i;
+    if (slot < 0 || slot >= TD5_PLAT_MAX_JS_SLOTS || !codes) return;
+    if (count > TD5_JSBIND_ACTIONS) count = TD5_JSBIND_ACTIONS;
+    for (i = 0; i < count; i++) s_js_action_bind[slot][i] = codes[i];
+    for (; i < TD5_JSBIND_ACTIONS; i++) s_js_action_bind[slot][i] = TD5_JSBIND_NONE;
+    s_js_action_set[slot] = 1;
+    TD5_LOG_I(LOG_TAG, "Action bindings set: slot=%d", slot);
+}
+
+static int td5_plat_js_read(int device_slot, DIJOYSTATE2 *js)
+{
+    HRESULT hr;
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS ||
+        !s_di_joystick[device_slot])
+        return 0;
+    memset(js, 0, sizeof(*js));
+    hr = IDirectInputDevice8_Poll(s_di_joystick[device_slot]);
+    if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
+        IDirectInputDevice8_Acquire(s_di_joystick[device_slot]);
+        IDirectInputDevice8_Poll(s_di_joystick[device_slot]);
+    }
+    return SUCCEEDED(IDirectInputDevice8_GetDeviceState(s_di_joystick[device_slot],
+                                                        sizeof(*js), js));
+}
+
+void td5_plat_input_joystick_capture_begin(int device_slot)
+{
+    DIJOYSTATE2 js;
+    int i;
+    s_js_cap_slot = device_slot;
+    s_js_cap_btn_base = 0;
+    for (i = 0; i < 8; i++) s_js_cap_axis_base[i] = TD5_PLAT_JS_AXIS_CENTER;
+    if (!td5_plat_js_read(device_slot, &js)) return;
+    for (i = 0; i < 8; i++)  s_js_cap_axis_base[i] = js_axis_val(&js, i);
+    for (i = 0; i < 32; i++) if (js.rgbButtons[i] & 0x80) s_js_cap_btn_base |= (1u << i);
+}
+
+int td5_plat_input_joystick_capture_poll(int device_slot, uint32_t *out_code)
+{
+    DIJOYSTATE2 js;
+    int i;
+    const long AXIS_THRESH = 100;   /* of the 0..0x1F4 range (~20%) */
+    if (!out_code) return 0;
+    if (!td5_plat_js_read(device_slot, &js)) return 0;
+
+    /* Fresh button press (down now, up at capture-begin). */
+    for (i = 0; i < 32; i++) {
+        uint32_t bit = (1u << i);
+        if ((js.rgbButtons[i] & 0x80) && !(s_js_cap_btn_base & bit)) {
+            *out_code = TD5_JSBIND_BUTTON | (uint32_t)i;
+            return 1;
+        }
+    }
+    /* Axis / trigger moved past threshold from its rest baseline. */
+    for (i = 0; i < 8; i++) {
+        long d = js_axis_val(&js, i) - s_js_cap_axis_base[i];
+        if (d > AXIS_THRESH || d < -AXIS_THRESH) {
+            int dir = (d > 0) ? 0 : 1;
+            *out_code = TD5_JSBIND_AXIS | ((uint32_t)i << 1) | (uint32_t)dir;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap)
+{
+    if (!buf || cap <= 0) return;
+    if (code == TD5_JSBIND_NONE) {
+        snprintf(buf, (size_t)cap, "-");
+    } else if (code & TD5_JSBIND_AXIS) {
+        int axis = (int)((code >> 1) & 0x7);
+        int dir  = (int)(code & 1);
+        snprintf(buf, (size_t)cap, "AXIS %d%c", axis, dir ? '-' : '+');
+    } else if (code & TD5_JSBIND_BUTTON) {
+        snprintf(buf, (size_t)cap, "BTN %d", (int)(code & 0xFF) + 1);
+    } else {
+        snprintf(buf, (size_t)cap, "?");
+    }
+}
+
+/* Enumerated index of the joystick that last produced a confirm/nav (the active
+ * controller). -1 = none yet. [PORT ENHANCEMENT 2026-06] */
+static int s_plat_active_js = -1;
+int td5_plat_input_active_joystick(void) { return s_plat_active_js; }
+
+/* Ensure a non-exclusive scan handle for enumerated joystick i (1..). */
+static LPDIRECTINPUTDEVICE8A scan_dev(int i)
+{
+    if (i < 1 || i >= 16 || !s_dinput) return NULL;
+    if (!s_di_scan[i]) {
+        if (SUCCEEDED(IDirectInput8_CreateDevice(s_dinput, &s_device_guids[i],
+                                                 &s_di_scan[i], NULL))) {
+            DIPROPRANGE range;
+            IDirectInputDevice8_SetDataFormat(s_di_scan[i], &c_dfDIJoystick2);
+            if (s_hwnd)
+                IDirectInputDevice8_SetCooperativeLevel(s_di_scan[i], s_hwnd,
+                    DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+            range.diph.dwSize = sizeof(DIPROPRANGE);
+            range.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+            range.diph.dwHow = DIPH_DEVICE;
+            range.diph.dwObj = 0;
+            range.lMin = 0; range.lMax = 0x1F4;
+            IDirectInputDevice8_SetProperty(s_di_scan[i], DIPROP_RANGE, &range.diph);
+            IDirectInputDevice8_Acquire(s_di_scan[i]);
+        } else {
+            s_di_scan[i] = NULL;
+        }
+    }
+    return s_di_scan[i];
+}
+
+/* Multiplayer lobby "press to join" scan: bit i set if device i's join control
+ * is held this frame — device 0 = keyboard (Enter), devices 1.. = joystick
+ * button 0 (A). Lazily creates a non-exclusive handle per joystick.
+ * [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_scan_join(void)
+{
+    uint32_t mask = 0;
+    int i;
+    if (s_keyboard[0x1C] & 0x80) mask |= 1u;     /* keyboard Enter = device 0 */
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        DIJOYSTATE2 js;
+        if (!s_di_scan[i]) {
+            if (!s_dinput) continue;
+            if (SUCCEEDED(IDirectInput8_CreateDevice(s_dinput, &s_device_guids[i],
+                                                     &s_di_scan[i], NULL))) {
+                IDirectInputDevice8_SetDataFormat(s_di_scan[i], &c_dfDIJoystick2);
+                if (s_hwnd)
+                    IDirectInputDevice8_SetCooperativeLevel(s_di_scan[i], s_hwnd,
+                        DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+                IDirectInputDevice8_Acquire(s_di_scan[i]);
+            } else { s_di_scan[i] = NULL; continue; }
+        }
+        memset(&js, 0, sizeof(js));
+        if (FAILED(IDirectInputDevice8_Poll(s_di_scan[i]))) {
+            IDirectInputDevice8_Acquire(s_di_scan[i]);
+            IDirectInputDevice8_Poll(s_di_scan[i]);
+        }
+        if (SUCCEEDED(IDirectInputDevice8_GetDeviceState(s_di_scan[i], sizeof(js), &js)))
+            if (js.rgbButtons[0] & 0x80) mask |= (1u << i);
+    }
+    return mask;
+}
+
+/* Release the lobby scan handles (call when leaving the lobby so per-player
+ * exclusive devices can take the hardware cleanly). */
+void td5_plat_input_scan_join_release(void)
+{
+    int i;
+    for (i = 0; i < 16; i++) {
+        if (s_di_scan[i]) {
+            IDirectInputDevice8_Unacquire(s_di_scan[i]);
+            IDirectInputDevice8_Release(s_di_scan[i]);
+            s_di_scan[i] = NULL;
+        }
+    }
+}
+
+/* Frontend navigation bitmask aggregated across EVERY connected joystick, so any
+ * configured pad drives the menus from startup:
+ *   bit0 LEFT  bit1 RIGHT  bit2 UP  bit3 DOWN  bit4 A/confirm  bit5 B/back.
+ * Also records which joystick produced A as the active controller. */
+uint32_t td5_plat_input_frontend_nav(void)
+{
+    uint32_t bits = 0;
+    int i;
+    const long T = 130;
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        DIJOYSTATE2 js;
+        uint32_t db = 0;
+        long cx, cy;
+        LPDIRECTINPUTDEVICE8A dev = scan_dev(i);
+        if (!dev) continue;
+        memset(&js, 0, sizeof(js));
+        if (FAILED(IDirectInputDevice8_Poll(dev))) {
+            IDirectInputDevice8_Acquire(dev);
+            IDirectInputDevice8_Poll(dev);
+        }
+        if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) continue;
+
+        cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
+        cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
+        if (cx < -T) db |= 1; if (cx > T) db |= 2;
+        if (cy < -T) db |= 4; if (cy > T) db |= 8;   /* stick up = lY low = UP */
+        if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+            DWORD deg = js.rgdwPOV[0] / 100;
+            if (deg > 270 || deg <  90) db |= 4;
+            if (deg >  90 && deg < 270) db |= 8;
+            if (deg > 180 && deg < 360) db |= 1;
+            if (deg >   0 && deg < 180) db |= 2;
+        }
+        if (js.rgbButtons[0] & 0x80) db |= 0x10;     /* A = confirm/select */
+        if (js.rgbButtons[1] & 0x80) db |= 0x20;     /* B = back/cancel    */
+        if (db) {
+            bits |= db;
+            if (db & 0x10) s_plat_active_js = i;      /* A press marks this pad active */
+        }
+    }
+    return bits;
+}
+
+/* In-race navigation bitmask from a player's EXCLUSIVE joystick device
+ * (s_di_joystick[slot]) — same encoding as td5_plat_input_frontend_nav
+ * (bit0 LEFT bit1 RIGHT bit2 UP bit3 DOWN bit4 A/confirm bit5 B/back). The
+ * frontend scan handles are released while a race owns the device, so the pause
+ * menu reads the player's own device through this instead. [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_joystick_nav(int device_slot)
+{
+    DIJOYSTATE2 js;
+    uint32_t db = 0;
+    long cx, cy;
+    const long T = 130;
+    if (!td5_plat_js_read(device_slot, &js)) return 0;
+    cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
+    cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
+    if (cx < -T) db |= 1; if (cx > T) db |= 2;
+    if (cy < -T) db |= 4; if (cy > T) db |= 8;       /* stick up = lY low = UP */
+    if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+        DWORD deg = js.rgdwPOV[0] / 100;
+        if (deg > 270 || deg <  90) db |= 4;
+        if (deg >  90 && deg < 270) db |= 8;
+        if (deg > 180 && deg < 360) db |= 1;
+        if (deg >   0 && deg < 180) db |= 2;
+    }
+    if (js.rgbButtons[0] & 0x80) db |= 0x10;         /* A = confirm/select */
+    if (js.rgbButtons[1] & 0x80) db |= 0x20;         /* B = back/cancel    */
+    return db;
+}
+
 /* ========================================================================
  * Force Feedback
  * ======================================================================== */
@@ -1525,19 +2075,19 @@ static BOOL CALLBACK EnumConstantForceEffectsCallback(const DIEFFECTINFOA *info,
     return DIENUM_CONTINUE;
 }
 
-static void td5_ff_release_effects(void)
+static void td5_ff_release_effects(int dev)
 {
     int i;
     for (i = 0; i < 4; i++) {
-        if (s_ff.effects[i]) {
-            IDirectInputEffect_Stop(s_ff.effects[i]);
-            IDirectInputEffect_Release(s_ff.effects[i]);
-            s_ff.effects[i] = NULL;
+        if (s_ff[dev].effects[i]) {
+            IDirectInputEffect_Stop(s_ff[dev].effects[i]);
+            IDirectInputEffect_Release(s_ff[dev].effects[i]);
+            s_ff[dev].effects[i] = NULL;
         }
     }
 }
 
-static int td5_ff_create_constant_effect(int slot, DWORD axis, LONG direction)
+static int td5_ff_create_constant_effect(int dev, int slot, DWORD axis, LONG direction)
 {
     DICONSTANTFORCE cf;
     DIEFFECT eff;
@@ -1557,14 +2107,14 @@ static int td5_ff_create_constant_effect(int slot, DWORD axis, LONG direction)
     eff.cbTypeSpecificParams = sizeof(cf);
     eff.lpvTypeSpecificParams = &cf;
 
-    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff.device,
-        &s_ff.effectGuid, &eff, &s_ff.effects[slot], NULL));
-    TD5_LOG_I(LOG_TAG, "FF effect create constant: slot=%d axis=%lu direction=%ld result=%s",
-              slot, (unsigned long)axis, (long)direction, ok ? "ok" : "failed");
+    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff[dev].device,
+        &s_ff[dev].effectGuid, &eff, &s_ff[dev].effects[slot], NULL));
+    TD5_LOG_I(LOG_TAG, "FF effect create constant: dev=%d slot=%d axis=%lu direction=%ld result=%s",
+              dev, slot, (unsigned long)axis, (long)direction, ok ? "ok" : "failed");
     return ok;
 }
 
-static int td5_ff_create_periodic_effect(int slot)
+static int td5_ff_create_periodic_effect(int dev, int slot)
 {
     DIPERIODIC periodic;
     DWORD axis = DIJOFS_X;
@@ -1591,74 +2141,89 @@ static int td5_ff_create_periodic_effect(int slot)
     eff.cbTypeSpecificParams = sizeof(periodic);
     eff.lpvTypeSpecificParams = &periodic;
 
-    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff.device,
-        &GUID_Sine, &eff, &s_ff.effects[slot], NULL));
-    TD5_LOG_I(LOG_TAG, "FF effect create periodic: slot=%d axis=%lu result=%s",
-              slot, (unsigned long)axis, ok ? "ok" : "failed");
+    ok = SUCCEEDED(IDirectInputDevice8_CreateEffect(s_ff[dev].device,
+        &GUID_Sine, &eff, &s_ff[dev].effects[slot], NULL));
+    TD5_LOG_I(LOG_TAG, "FF effect create periodic: dev=%d slot=%d axis=%lu result=%s",
+              dev, slot, (unsigned long)axis, ok ? "ok" : "failed");
     return ok;
 }
 
-int td5_plat_ff_init(int device_index)
+int td5_plat_ff_init(int device_slot)
 {
     DIDEVCAPS caps;
 
-    (void)device_index;
-
-    /* Force feedback runs on player 1's joystick (slot 0) — the wheel. */
-    if (!s_di_joystick[0]) {
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
         return 0;
     }
 
-    ZeroMemory(&s_ff, sizeof(s_ff));
-    s_ff.device = (IDirectInputDevice8 *)s_di_joystick[0];
-    s_ff.axes[0] = DIJOFS_X;
-    s_ff.axes[1] = DIJOFS_Y;
-    s_ff.directions[0] = 0;
-    s_ff.directions[1] = 0;
+    /* Force feedback runs on this player's joystick (the wheel/pad). */
+    if (!s_di_joystick[device_slot]) {
+        return 0;
+    }
+
+    /* Re-init: drop any prior effects for this device first. */
+    if (s_ff[device_slot].device) {
+        td5_ff_release_effects(device_slot);
+    }
+    ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
+    s_ff[device_slot].device = (IDirectInputDevice8 *)s_di_joystick[device_slot];
+    s_ff[device_slot].axes[0] = DIJOFS_X;
+    s_ff[device_slot].axes[1] = DIJOFS_Y;
+    s_ff[device_slot].directions[0] = 0;
+    s_ff[device_slot].directions[1] = 0;
 
     ZeroMemory(&caps, sizeof(caps));
     caps.dwSize = sizeof(caps);
-    if (FAILED(IDirectInputDevice8_GetCapabilities(s_ff.device, &caps)) ||
+    if (FAILED(IDirectInputDevice8_GetCapabilities(s_ff[device_slot].device, &caps)) ||
         !(caps.dwFlags & DIDC_FORCEFEEDBACK)) {
-        ZeroMemory(&s_ff, sizeof(s_ff));
+        ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
         return 0;
     }
 
-    s_ff.is_wheel = ((GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_DRIVING) ||
+    s_ff[device_slot].is_wheel = ((GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_DRIVING) ||
                      (GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_1STPERSON));
 
-    IDirectInputDevice8_Acquire(s_ff.device);
+    IDirectInputDevice8_Acquire(s_ff[device_slot].device);
 
-    if (FAILED(IDirectInputDevice8_EnumEffects(s_ff.device,
-            EnumConstantForceEffectsCallback, &s_ff.effectGuid, DIEFT_ALL)) ||
-        !IsEqualGUID(&s_ff.effectGuid, &GUID_ConstantForce)) {
-        ZeroMemory(&s_ff, sizeof(s_ff));
+    if (FAILED(IDirectInputDevice8_EnumEffects(s_ff[device_slot].device,
+            EnumConstantForceEffectsCallback, &s_ff[device_slot].effectGuid, DIEFT_ALL)) ||
+        !IsEqualGUID(&s_ff[device_slot].effectGuid, &GUID_ConstantForce)) {
+        ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
         return 0;
     }
 
-    if (!td5_ff_create_constant_effect(0, s_ff.axes[0], 0) ||
-        !td5_ff_create_constant_effect(1, s_ff.axes[1], 9000) ||
-        !td5_ff_create_constant_effect(2, s_ff.axes[0], 0) ||
-        !td5_ff_create_periodic_effect(3)) {
-        td5_ff_release_effects();
-        ZeroMemory(&s_ff, sizeof(s_ff));
+    if (!td5_ff_create_constant_effect(device_slot, 0, s_ff[device_slot].axes[0], 0) ||
+        !td5_ff_create_constant_effect(device_slot, 1, s_ff[device_slot].axes[1], 9000) ||
+        !td5_ff_create_constant_effect(device_slot, 2, s_ff[device_slot].axes[0], 0) ||
+        !td5_ff_create_periodic_effect(device_slot, 3)) {
+        td5_ff_release_effects(device_slot);
+        ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
         return 0;
     }
 
+    TD5_LOG_I(LOG_TAG, "FF init ok: dev=%d is_wheel=%d", device_slot, s_ff[device_slot].is_wheel);
     return 1;
 }
 
 void td5_plat_ff_shutdown(void)
 {
-    td5_ff_release_effects();
-    ZeroMemory(&s_ff, sizeof(s_ff));
+    int dev;
+    for (dev = 0; dev < TD5_PLAT_MAX_JS_SLOTS; dev++) {
+        if (s_ff[dev].device) {
+            td5_ff_release_effects(dev);
+        }
+        ZeroMemory(&s_ff[dev], sizeof(s_ff[dev]));
+    }
 }
 
-void td5_plat_ff_constant(int slot, int magnitude)
+void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
 {
     HRESULT hr;
 
-    if (slot < 0 || slot >= 4 || !s_ff.effects[slot]) {
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
+        return;
+    }
+    if (slot < 0 || slot >= 4 || !s_ff[device_slot].effects[slot]) {
         return;
     }
 
@@ -1681,18 +2246,18 @@ void td5_plat_ff_constant(int slot, int magnitude)
 
         eff.dwSize = sizeof(eff);
         eff.cAxes = 1;
-        eff.rgdwAxes = &s_ff.axes[0];
+        eff.rgdwAxes = &s_ff[device_slot].axes[0];
         eff.rglDirection = &direction;
         eff.cbTypeSpecificParams = sizeof(periodic);
         eff.lpvTypeSpecificParams = &periodic;
 
-        hr = IDirectInputEffect_SetParameters(s_ff.effects[slot], &eff,
+        hr = IDirectInputEffect_SetParameters(s_ff[device_slot].effects[slot], &eff,
             DIEP_AXES | DIEP_DIRECTION | DIEP_TYPESPECIFICPARAMS);
     } else {
         DICONSTANTFORCE cf;
         DIEFFECT eff;
         LONG direction = (magnitude >= 0) ? 0 : 18000;
-        DWORD axis = (slot == 1) ? s_ff.axes[1] : s_ff.axes[0];
+        DWORD axis = (slot == 1) ? s_ff[device_slot].axes[1] : s_ff[device_slot].axes[0];
 
         if (magnitude < 0) {
             magnitude = -magnitude;
@@ -1712,21 +2277,24 @@ void td5_plat_ff_constant(int slot, int magnitude)
         eff.cbTypeSpecificParams = sizeof(cf);
         eff.lpvTypeSpecificParams = &cf;
 
-        hr = IDirectInputEffect_SetParameters(s_ff.effects[slot], &eff,
+        hr = IDirectInputEffect_SetParameters(s_ff[device_slot].effects[slot], &eff,
             DIEP_AXES | DIEP_DIRECTION | DIEP_TYPESPECIFICPARAMS);
     }
 
     if (SUCCEEDED(hr)) {
-        IDirectInputEffect_Start(s_ff.effects[slot], 1, 0);
+        IDirectInputEffect_Start(s_ff[device_slot].effects[slot], 1, 0);
     }
 }
 
-void td5_plat_ff_stop(int slot)
+void td5_plat_ff_stop(int device_slot, int slot)
 {
-    if (slot < 0 || slot >= 4 || !s_ff.effects[slot]) {
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
         return;
     }
-    IDirectInputEffect_Stop(s_ff.effects[slot]);
+    if (slot < 0 || slot >= 4 || !s_ff[device_slot].effects[slot]) {
+        return;
+    }
+    IDirectInputEffect_Stop(s_ff[device_slot].effects[slot]);
 }
 
 /* ========================================================================
@@ -2581,6 +3149,24 @@ void td5_plat_render_end_scene(void)
     g_backend.scene_rendered = 1;
 }
 
+/* Optional frontend pixel-shader override (VectorUI / MSDF text). When set, the
+ * indexed draw path binds this PS + sampler instead of the texblend-derived
+ * pair it normally forces. The frontend sets it around a text batch and clears
+ * it after. Typed void* so td5_platform.h stays free of D3D11 types. */
+static void *s_render_ps_override = NULL;
+static int   s_render_ps_override_samp = SAMP_LINEAR_CLAMP;
+
+void td5_plat_render_set_ps_override(void *ps, int sampler_idx)
+{
+    s_render_ps_override = ps;
+    s_render_ps_override_samp = sampler_idx;
+}
+
+void td5_plat_render_clear_ps_override(void)
+{
+    s_render_ps_override = NULL;
+}
+
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count)
 {
@@ -2627,12 +3213,19 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                               DXGI_FORMAT_R16_UINT, 0);
         ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
             D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        /* Force correct PS and sampler before every draw */
-        ID3D11DeviceContext_PSSetShader(ctx,
-            g_backend.ps_shaders[g_backend.state.texblend_mode == 5 ? 1 : 0], NULL, 0);
-        {
-            int si = (g_backend.state.mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
-            ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
+        /* Force correct PS and sampler before every draw (honor MSDF override) */
+        if (s_render_ps_override) {
+            ID3D11DeviceContext_PSSetShader(ctx,
+                (ID3D11PixelShader *)s_render_ps_override, NULL, 0);
+            ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1,
+                &g_backend.sampler_states[s_render_ps_override_samp]);
+        } else {
+            ID3D11DeviceContext_PSSetShader(ctx,
+                g_backend.ps_shaders[g_backend.state.texblend_mode == 5 ? 1 : 0], NULL, 0);
+            {
+                int si = (g_backend.state.mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
+                ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
+            }
         }
         ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, 0, 0);
     } else {

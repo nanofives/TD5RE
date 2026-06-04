@@ -156,20 +156,28 @@ typedef struct TD5_GlobalState {
     int  dynamics_mode;  /* 0=arcade, 1=simulation */
 
     /* Quick Race player setup (infra to later replace the Two-Player menu).
-     * num_human_players + num_ai_opponents <= TD5_MAX_RACER_SLOTS (6).
-     * NOTE: live split-screen rendering/input supports only 2 viewports
-     * (gSplitScreenMode+1, masked &1 @ orig 0x42C2B0). Until N-way split
-     * lands, the launch path caps EFFECTIVE human-driven slots at 2; the
-     * remaining requested-human slots run as AI so no car sits dead.
-     * Defaults (1 human + 5 AI = 6) reproduce the legacy single-race grid. */
-    int  num_human_players;   /* 1..6 */
-    int  num_ai_opponents;    /* 0..5 */
+     * num_human_players + num_ai_opponents <= TD5_MAX_RACER_SLOTS (16).
+     * [PORT ENHANCEMENT 2026-06] N-way split-screen: up to TD5_MAX_HUMAN_PLAYERS
+     * (9) local humans, each with its own viewport (see td5_game viewport ladder).
+     * The original was hard-capped at 2 viewports / 6 racers; this path deviates
+     * freely. Defaults (1 human + 5 AI = 6) reproduce the legacy single-race grid. */
+    int  num_human_players;   /* 1..TD5_MAX_HUMAN_PLAYERS (9) */
+    int  num_ai_opponents;    /* 0..TD5_MAX_RACER_SLOTS-1 (15) */
 
     /* Viewport */
     int  render_width;
     int  render_height;
     int  split_screen_mode;     /* 0=single, 1=horiz, 2=vert */
     int  viewport_count;
+    /* [PORT ENHANCEMENT 2026-06] Multiplayer Options split-layout picker.
+     * The chosen grid for N-way split: split_grid_cols x split_grid_rows. The N
+     * human players fill the first N cells (row-major); cells N..cols*rows-1 are
+     * "missing" and carry a (deferred) content selector. When cols/rows are 0
+     * the viewport layout falls back to the automatic ladder (harness path).
+     * split_missing_content[k] = stub content id for the k-th empty cell. */
+    int  split_grid_cols;
+    int  split_grid_rows;
+    int  split_missing_content[2];
 
     /* Timing */
     float sim_tick_budget;
@@ -189,8 +197,8 @@ typedef struct TD5_GlobalState {
     int     track_type;         /* TD5_TrackType */
     int     track_index;
     int     car_index;
-    int     ai_car_indices[6];  /* per-slot car index for AI racers (slot 1-5) */
-    int     ai_car_variants[6]; /* per-slot color variant (0..3) */
+    int     ai_car_indices[TD5_MAX_RACER_SLOTS];  /* per-slot car index for AI racers (slot 1..N-1) */
+    int     ai_car_variants[TD5_MAX_RACER_SLOTS]; /* per-slot color variant (0..3) */
 
     /* Frontend */
     int  frontend_screen_index;
@@ -208,6 +216,10 @@ typedef struct TD5_GlobalState {
         int  fog_enabled;
         int  speed_units;
         int  camera_damping;
+        /* Enumerated display-mode ordinal (DisplayOptions resolution row).
+         * Formerly persisted in Config.td5 (+0xBD); now a [Display] DisplayMode
+         * key in td5re.ini. The applied resolution still comes from Width/Height. */
+        int  display_mode;
         /* Audio */
         int  sfx_volume;
         int  music_volume;
@@ -237,6 +249,8 @@ typedef struct TD5_GlobalState {
         int  default_game_type;
         int  td6_paint_color;    /* last-selected TD6 paint color (0xRRGGBB); persisted */
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
+        int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
+        int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */
         int  skip_intro;
         int  debug_overlay;
         int  debug_collisions;   /* 1 = draw wireframe of track wall/span geometry */
@@ -330,6 +344,13 @@ typedef struct TD5_GlobalState {
          * When set, slot 0 is driven by td5_ai_update_race_actors and the
          * human input-to-actor path is skipped, exactly like demo mode. */
         int  player_is_ai;
+        /* OtherPlayersAI (port-only N-way test, 2026-06-03): when set, every
+         * LOCAL human slot EXCEPT slot 0 is put on AI autopilot, so player 1
+         * (slot 0) is driven by real input while the other split-screen panes
+         * drive themselves. Distinct from player_is_ai (which AI-drives slot 0
+         * too); the slot-0 AI-dispatch paths key off player_is_ai only, so
+         * slot 0 stays human under this knob. */
+        int  others_ai;
         /* SoloAISlot (port-only debug, 2026-05-22): which slot drives in
          * solo mode. Default 0. Affects td5_ai_update_track_offset_bias
          * peer-emulation gate and slot-state init. Used to A/B test the
@@ -355,6 +376,11 @@ typedef struct TD5_GlobalState {
          * log/frontend_draw_port.csv (screen, page, x, y, w, h, color, uvs).
          * Disabled by default — enable with FrontendDraw=1 in [Logging]. */
         int  log_frontend_draw;
+        /* VectorUI: when 1, render frontend BodyText via the resolution-
+         * independent MSDF path (crisp at any resolution) instead of the
+         * bitmap glyph atlas. Falls back to bitmap if the MSDF atlas/shader
+         * fail to load. [Frontend] VectorUI, default 1. */
+        int  vector_ui;
         /* Logging — gates for the platform multi-file logger and the D3D
          * ddraw_wrapper log. Defaults preserve current behavior. Flip to
          * compare A/B perf without touching the build. */

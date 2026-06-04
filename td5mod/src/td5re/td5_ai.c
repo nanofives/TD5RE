@@ -184,14 +184,24 @@ int32_t g_rb_ahead_range;        /* 0x473DA8 */
  * throttle comes ONLY from this seed (the rubber-band recompute @0x00432D60
  * covers slots 0-5 only). The prior port table zeroed index 9, so the cop
  * steered toward the player but never accelerated. [FIX 2026-06-01 cops-traffic] */
-int32_t g_default_throttle[14] = {
+int32_t g_default_throttle[TD5_MAX_TOTAL_ACTORS] = {
+    /* 0-5: faithful original racer seeds [CONFIRMED @ 0x473D64] */
     0x0100, 0x0100, 0x0140, 0x0118, 0x0122, 0x0140,
-    0, 0, 0, 0x2bc, 0, 0, 0, 0
+    /* 6-8: traffic in the legacy layout (0); racer seeds for big fields */
+    0x0140, 0x0140, 0x0140,
+    /* 9: special-encounter cop seed (0x2bc) in the legacy 6+6 layout — MUST
+     * stay for the faithful cop chase; harmless as a big-field racer seed
+     * (rubber-band recompute @0x432D60 overwrites AI throttle each tick) */
+    0x2bc,
+    /* 10-15: racer seeds for >6-racer split-screen fields */
+    0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140,
+    /* 16-21: traffic slots (no AI race throttle) */
+    0, 0, 0, 0, 0, 0
 };
 
 /* Live throttle table (0x473D2C) -- copied from default each tick,
  * then rubber-band-modified per slot */
-int32_t g_live_throttle[14];
+int32_t g_live_throttle[TD5_MAX_TOTAL_ACTORS];
 
 /* Per-actor throttle bias output consumed by route threshold */
 /* Pool11 pilot: exposed for td5_pilot_trace_00432D60.c. */
@@ -622,7 +632,7 @@ void td5_ai_correct_spawn_heading(int slot) {
     int32_t rb, route_heading;
     char *actor;
 
-    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS || !g_route_state_base)
+    if (slot < 0 || slot >= g_traffic_slot_base || !g_route_state_base)
         return;
 
     rs = route_state(slot);
@@ -1018,7 +1028,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
          * route data IS loaded, the gated block below handles the writeback
          * via the same lines, so behaviour is preserved. */
         {
-            int slot_is_racer = (slot < TD5_MAX_RACER_SLOTS);
+            int slot_is_racer = (slot < g_traffic_slot_base);
             int slot_is_encounter_9 =
                 (slot == 9 && g_encounter_tracked_handle != -1);
             int racer_or_encounter = slot_is_racer || slot_is_encounter_9;
@@ -1135,7 +1145,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
      * table indexing, and V2V eligibility -- causing the regression in
      * memory todo_traffic_through_ground_no_motion_no_collision_2026-05-16.md
      * (traffic vehicles spawning underground, idle, no collision). */
-    if (slot < TD5_MAX_RACER_SLOTS) {
+    if (slot < g_traffic_slot_base) {
         int span_raw_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int span_norm_i = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
 
@@ -1255,7 +1265,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         {
             const uint8_t *self_table =
                 (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-            int slot_is_racer = (slot < TD5_MAX_RACER_SLOTS);
+            int slot_is_racer = (slot < g_traffic_slot_base);
             int slot_is_encounter_9 =
                 (slot == 9 && g_encounter_tracked_handle != -1);
             int racer_or_encounter = slot_is_racer || slot_is_encounter_9;
@@ -1325,7 +1335,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
 void td5_ai_tick(void) {
     td5_ai_compute_rubber_band();
     if ((g_ai_frame_counter % 60u) == 0u) {
-        int racer_count = TD5_MAX_RACER_SLOTS;
+        int racer_count = g_traffic_slot_base;
         if (g_active_actor_count < racer_count)
             racer_count = g_active_actor_count;
         for (int i = 0; i < racer_count; i++) {
@@ -1384,7 +1394,7 @@ void td5_ai_compute_rubber_band(void) {
     td5_pilot_emit_00432D60_enter();
 
     /* [0x00432D6B-7A] MOVSD.REP ECX=14: unconditional default→live copy */
-    memcpy(g_live_throttle, g_default_throttle, 14 * sizeof(int32_t));
+    memcpy(g_live_throttle, g_default_throttle, sizeof(g_live_throttle));
 
     /* [0x00432D60-7C] TEST g_networkRaceActive; JZ → rubber-band loop.
      * Fall-through here = network ACTIVE → write 0x100 bias for AI slots. */
@@ -1392,7 +1402,7 @@ void td5_ai_compute_rubber_band(void) {
         /* [0x00432D7E-DC2] network-active branch.
          * Original re-reads g_racerCount each iter (CMP ESI,0x6 with ESI cached);
          * effective cap = min(g_racerCount, 6). */
-        racer_count = TD5_MAX_RACER_SLOTS;
+        racer_count = g_traffic_slot_base;
         if (g_active_actor_count < racer_count)
             racer_count = g_active_actor_count;
         for (i = 0; i < racer_count; i++) {
@@ -1426,7 +1436,7 @@ void td5_ai_compute_rubber_band(void) {
     /* [0x00432DD5-E4B] g_racerCount re-read at loop top each iteration in
      * original. We cache here — the function is single-threaded with no
      * callees, so g_racerCount cannot change within this call. Equivalent. */
-    racer_count = TD5_MAX_RACER_SLOTS;
+    racer_count = g_traffic_slot_base;
     if (g_active_actor_count < racer_count)
         racer_count = g_active_actor_count;
 
@@ -1533,10 +1543,22 @@ void td5_ai_init_race_actor_runtime(void) {
     /* --- Active actor count --- */
     if (is_time_trial) {
         g_active_actor_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
+    } else if (g_traffic_slot_base > TD5_LEGACY_RACE_SLOTS) {
+        /* [PORT ENHANCEMENT] big split-screen field. Traffic (if enabled) spawns
+         * at g_traffic_slot_base..+TD5_MAX_TRAFFIC_SLOTS, so the active-actor
+         * count must reach those slots; otherwise it's just the racers. */
+        if (has_traffic) {
+            g_active_actor_count = g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS;
+        } else {
+            int total = g_td5.num_human_players + g_td5.num_ai_opponents;
+            if (total < 1) total = 1;
+            if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
+            g_active_actor_count = total;
+        }
     } else if (has_traffic) {
-        g_active_actor_count = 12;
+        g_active_actor_count = TD5_LEGACY_RACE_SLOTS + TD5_MAX_TRAFFIC_SLOTS;  /* 12 */
     } else {
-        g_active_actor_count = 6;
+        g_active_actor_count = TD5_LEGACY_RACE_SLOTS;  /* 6 */
     }
     g_td5.total_actor_count = g_active_actor_count;
     racer_count = is_time_trial
@@ -1567,7 +1589,7 @@ void td5_ai_init_race_actor_runtime(void) {
          * g_actor_route_steer_bias[] memset to 0 and only the rubber-band (0-5)
          * populated it, starving slot 9. [FIX 2026-06-01 cops-traffic] */
         g_actor_route_steer_bias[i] = g_default_throttle[i];
-        if (g_default_throttle[i] != 0 && i >= TD5_MAX_RACER_SLOTS) {
+        if (g_default_throttle[i] != 0 && i >= g_traffic_slot_base) {
             TD5_LOG_I(LOG_TAG,
                       "init_actor_runtime: encounter-cop slot=%d seeded "
                       "route_steer_bias=live_throttle=%d (0x%X)",
@@ -1661,13 +1683,27 @@ void td5_ai_init_race_actor_runtime(void) {
         TD5_LOG_I(LOG_TAG,
                   "player_is_ai=1 -> AI slot_state[0]=0 (autopilot active)");
     }
-    if (g_td5.split_screen_mode > 0 && racer_count > 1) {
-        g_slot_state[1] = 1;
+    if (g_td5.split_screen_mode > 0 && racer_count > 1 && !g_td5.ini.player_is_ai) {
+        /* [PORT ENHANCEMENT] mark slots 1..num_human_players-1 as human (N-way).
+         * Skipped when player_is_ai so every local slot stays AI autopilot.
+         * Under others_ai, slots 1..N-1 are AI (0) instead so only slot 0 is
+         * human — the AI's g_slot_state MUST agree with td5_game.c's
+         * s_slot_state or the AI skips those slots (player state) AND no input
+         * drives them, leaving them parked. */
+        int humans = g_td5.num_human_players;
+        int human_state = g_td5.ini.others_ai ? 0 : 1;
+        if (humans > TD5_MAX_VIEWPORTS) humans = TD5_MAX_VIEWPORTS;
+        for (int k = 1; k < humans && k < g_traffic_slot_base; k++)
+            g_slot_state[k] = human_state;
+        if (g_td5.ini.others_ai)
+            TD5_LOG_I(LOG_TAG,
+                      "others_ai=1 -> AI g_slot_state[1..%d]=0 (slot 0 = human)",
+                      (humans < g_traffic_slot_base ? humans : g_traffic_slot_base) - 1);
     }
     /* Wanted mode (cop chase): slots 2-5 are inactive (no AI, no physics dispatch).
      * Mirrors gRaceSlotStateTable init at 0x42ABF8 for non-zero game types. */
     if (g_td5.wanted_mode_enabled) {
-        for (int k = 2; k < TD5_MAX_RACER_SLOTS; k++)
+        for (int k = 2; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "wanted_mode: g_slot_state[2..5] = 3 (inactive)");
     }
@@ -1678,7 +1714,7 @@ void td5_ai_init_race_actor_runtime(void) {
      * those slots have no spawned actor, so the drive command lands on
      * uninitialized memory. */
     if (g_td5.drag_race_enabled) {
-        for (int k = 2; k < TD5_MAX_RACER_SLOTS; k++)
+        for (int k = 2; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "drag_race: g_slot_state[2..5] = 3 (inactive)");
     }
@@ -1686,7 +1722,7 @@ void td5_ai_init_race_actor_runtime(void) {
     /* Solo mode synth (Time Trial mapped to gt=0 — see ConfigureGameTypeFlags
      * case 7): slots 1..5 inactive. Mirrors td5_game.c:1215-1222. */
     if (g_td5.solo_mode_synth && g_td5.split_screen_mode == 0) {
-        for (int k = 1; k < TD5_MAX_RACER_SLOTS; k++)
+        for (int k = 1; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "solo_mode_synth: g_slot_state[1..5] = 3 (inactive)");
     }
@@ -1704,7 +1740,7 @@ void td5_ai_init_race_actor_runtime(void) {
         int total = g_td5.num_human_players + g_td5.num_ai_opponents;
         if (total < 1) total = 1;
         if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
-        for (int k = total; k < TD5_MAX_RACER_SLOTS; k++)
+        for (int k = total; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
         TD5_LOG_I(LOG_TAG, "single-race: g_slot_state[%d..5] = 3 (humans=%d opponents=%d)",
                   total, g_td5.num_human_players, g_td5.num_ai_opponents);
@@ -1923,7 +1959,7 @@ void td5_ai_init_race_actor_runtime(void) {
     g_encounter_enabled = g_td5.special_encounter_enabled;
 
     /* Initialize traffic actors from queue if traffic is enabled */
-    if (g_active_actor_count > TD5_MAX_RACER_SLOTS) {
+    if (g_active_actor_count > g_traffic_slot_base) {
         td5_ai_init_traffic_actors();
     }
 
@@ -2480,14 +2516,14 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
     (void)self_field80; /* read below per-peer */
 
     /* ----------------------------------------------------------------
-     * Pass 1: TRAFFIC slots [6 .. racer_count-1].
-     * Gated on racer_count > 6 (i.e., traffic mode active).
+     * Pass 1: TRAFFIC slots [g_traffic_slot_base .. racer_count-1].
+     * Gated on racer_count > g_traffic_slot_base (i.e., traffic mode active).
      * [CONFIRMED @ 0x004337E8/0x00433807/0x00433815: dual cmp,jl/jle].
-     * ---------------------------------------------------------------- */
+     * [PORT: N-way] "6" is the racer/traffic boundary; legacy => 6. */
     best_slot = self_slot;
     best_dist = 0x2ee00;
-    if (racer_count > 6) {
-        for (i = 6; i < racer_count; i++) {
+    if (racer_count > g_traffic_slot_base) {
+        for (i = g_traffic_slot_base; i < racer_count; i++) {
             int32_t *peer_rs = route_state(i);
             char *peer_actor = actor_ptr(i);
             int32_t peer_field82 = (int32_t)ACTOR_I16(peer_actor, ACTOR_SPAN_NORMALIZED);
@@ -2617,11 +2653,13 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
     }
 
     /* ----------------------------------------------------------------
-     * Pass 2: RACER slots [0 .. min(racer_count, 6)-1], skipping self.
-     * [CONFIRMED @ 0x00433A5E-0x00433CD0].
-     * ---------------------------------------------------------------- */
+     * Pass 2: RACER slots [0 .. min(racer_count, g_traffic_slot_base)-1],
+     * skipping self. [CONFIRMED @ 0x00433A5E-0x00433CD0].
+     * [PORT: N-way] racer region is [0, g_traffic_slot_base); legacy => 6.
+     * Inactive racer slots are filtered by the span/route checks below, the
+     * same way the original handles a <6-car race scanning all 6 slots. */
     {
-        int cap = (racer_count >= 6) ? 6 : racer_count;
+        int cap = (racer_count >= g_traffic_slot_base) ? g_traffic_slot_base : racer_count;
         best_slot = self_slot;
         best_dist = 0x2ee00;
         offset_at_clamp = route_state_ptr[RS_TRACK_OFFSET_BIAS];
@@ -4359,6 +4397,37 @@ extern void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
  * but was removed pending byte-diff validation against the existing helper.
  */
 
+/* [PORT: N-way split] Span extremes across the LOCAL human players (slots
+ * 0..num_human_players-1, clamped to the racer range). span = span_normalized
+ * (+0x82). For a single player both return slot 0's span, so legacy traffic
+ * recycling stays byte-identical to the original. Used so traffic is recycled
+ * only once the TRAILING player has passed it and respawns ahead of the LEAD
+ * player. */
+static int ai_player_span_lead(void)
+{
+    int humans = g_td5.num_human_players;
+    if (humans < 1) humans = 1;
+    if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
+    int ext = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+    for (int s = 1; s < humans; s++) {
+        int sp = (int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED);
+        if (sp > ext) ext = sp;
+    }
+    return ext;
+}
+static int ai_player_span_trailing(void)
+{
+    int humans = g_td5.num_human_players;
+    if (humans < 1) humans = 1;
+    if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
+    int ext = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+    for (int s = 1; s < humans; s++) {
+        int sp = (int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED);
+        if (sp < ext) ext = sp;
+    }
+    return ext;
+}
+
 void td5_ai_recycle_traffic_actor(void) {
     int       racer_count;
     int       best_slot = 0;
@@ -4377,9 +4446,11 @@ void td5_ai_recycle_traffic_actor(void) {
 
     /* [0x004353b0-c1] EAX = g_racerCount; bail if <= 6. The original reads
      * `dword ptr [0x004aaf00]` which is g_racerCount (also exposed in port
-     * as g_active_actor_count for the runtime active-slot count). */
+     * as g_active_actor_count for the runtime active-slot count).
+     * [PORT: N-way] "6" is really the racer/traffic boundary — only recycle
+     * once traffic actors exist beyond the racer slots. */
     racer_count = g_active_actor_count;
-    if (racer_count <= 6) return;
+    if (racer_count <= g_traffic_slot_base) return;
 
     if (!g_actor_base || !g_route_state_base) return;
     if (!g_traffic_queue_ptr || !g_traffic_queue_base) return;
@@ -4399,7 +4470,11 @@ void td5_ai_recycle_traffic_actor(void) {
      * used ACTOR_SPAN_RAW (+0x80) which is the wrong field for tracks
      * with junction remaps. */
     p0 = actor_ptr(0);
-    player_span_norm = ACTOR_I16(p0, ACTOR_SPAN_NORMALIZED); /* +0x82 */
+    (void)p0;
+    /* [PORT: N-way] Pre-scan/respawn reference = the LEAD local player, so a
+     * recycled traffic car respawns ahead of the front-runner. (1 player =>
+     * slot 0 span, byte-identical to the original.) */
+    player_span_norm = (int16_t)ai_player_span_lead();
 
     qp = g_traffic_queue_ptr;
     q_span = (int16_t)(qp[0] | (qp[1] << 8));
@@ -4425,15 +4500,21 @@ void td5_ai_recycle_traffic_actor(void) {
      * The original's EBX walks the actor table at slot[6]+0x82 (raw byte
      * address 0x004ac6ba); the inner read is signed 16-bit (MOVSX). */
     loop_max = racer_count;
-    if (loop_max > 12) loop_max = 12;
+    if (loop_max > g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS)
+        loop_max = g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS;
     {
         int psn_loop;
-        for (i = 6; i < loop_max; i++) {
+        /* [PORT: N-way] scan the TRAFFIC region [g_traffic_slot_base, loop_max),
+         * not the legacy 6..12, so big fields recycle their own traffic slots
+         * (16..21) instead of mistakenly teleporting racer slots 6..15. */
+        for (i = g_traffic_slot_base; i < loop_max; i++) {
             int16_t ts;
             int32_t dist;
-            /* Reload player.span_norm every iteration — matches original
-             * MOV BP, word ptr [0x004ab18a] at 0x00435438 inside the loop. */
-            psn_loop = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+            /* [PORT: N-way] Recycle reference = the TRAILING local player, so a
+             * traffic car is only retired once EVERY player has passed it by
+             * >40 spans (1 player => slot 0 span, byte-identical to original).
+             * Orig reloaded slot 0's span_norm here each iteration (0x00435438). */
+            psn_loop = ai_player_span_trailing();
             ts = ACTOR_I16(actor_ptr(i), ACTOR_SPAN_NORMALIZED);
             dist = psn_loop - (int)ts;
             if (dist > best_dist) {
@@ -4769,7 +4850,7 @@ void td5_ai_init_traffic_actors(void) {
 
     /* 0x00435940-50: gate on g_racerCount > 6 */
     racer_count = g_active_actor_count;
-    if (racer_count <= 6)
+    if (racer_count <= g_traffic_slot_base)
         return;
 
     qp = g_traffic_queue_ptr ? g_traffic_queue_ptr : g_traffic_queue_base;
@@ -4793,12 +4874,15 @@ void td5_ai_init_traffic_actors(void) {
                   td5_track_get_span_count());
     }
 
-    /* 0x00435975-7e: cap iteration at min(racer_count, 0xc) */
-    racer_cap = (racer_count > 12) ? 12 : racer_count;
+    /* 0x00435975-7e: cap iteration at min(racer_count, traffic_base+6 traffic).
+     * [PORT] traffic base is g_traffic_slot_base (6 legacy / 16 big fields). */
+    racer_cap = (racer_count > g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS)
+                ? (g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS) : racer_count;
 
-    /* Initial loop state (0x4359 5b/68/63/70) */
-    local_18 = TD5_MAX_RACER_SLOTS;   /* 6 */
-    local_c  = 0x28;                  /* 6*4 + 0x10 */
+    /* Initial loop state (0x4359 5b/68/63/70) — traffic actors start right
+     * after the racer slots (g_traffic_slot_base: 6 legacy, 16 big fields). */
+    local_18 = g_traffic_slot_base;             /* 6 legacy */
+    local_c  = g_traffic_slot_base * 4 + 0x10;  /* 0x28 legacy */
 
     while (local_18 < racer_cap) {
         char *a = actor_ptr(local_18);
@@ -5149,9 +5233,13 @@ void td5_ai_init_traffic_actors(void) {
 
         /* 0x00435c85-78: reload g_racerCount each iteration (in case it
          * changed; mirror original even if our port doesn't mutate it
-         * mid-loop). */
+         * mid-loop). [PORT: N-way] re-cap to the traffic region end
+         * (g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS) so big fields fill all
+         * traffic slots, not just one — must match the top cap at 0x435975.
+         * Legacy (base 6) => 12, byte-identical. */
         racer_count = g_active_actor_count;
-        racer_cap = (racer_count > 12) ? 12 : racer_count;
+        racer_cap = (racer_count > g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS)
+                    ? (g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS) : racer_count;
     }
 
     g_traffic_queue_ptr = qp;
@@ -5697,26 +5785,16 @@ extern void td5_physics_reset_actor_state(TD5_Actor *actor);
 void td5_ai_update_special_encounter(void) {
     int32_t handle;
     char *cop;        /* actor[9] */
-    char *player;     /* actor[0] */
-    int32_t cop_span_norm;     /* DAT_004ad152 — actor[9] +0x82 */
-    int16_t player_span_norm;  /* DAT_004ab18a — actor[0] +0x82 */
-    int32_t player_speed;      /* DAT_004ab41c — actor[0] +0x314 */
-    int32_t player_fwd;        /* DAT_004afbc0 — RS[0].forward_track_component */
-    int32_t player_selector;   /* DAT_004afb6c — RS[0].route_table_selector */
+    int32_t cop_span_norm;     /* actor[9] +0x82 (cop is always traffic slot 9) */
 
     /* Port-only master gate (see header comment). */
     if (!g_encounter_enabled) return;
 
     /* Bind frequently-used addresses once. */
     if (!g_actor_base) return;
-    cop    = actor_ptr(9);
-    player = actor_ptr(0);
+    cop = actor_ptr(9);
 
-    cop_span_norm     = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_NORMALIZED);
-    player_span_norm  =                    ACTOR_I16(player, ACTOR_SPAN_NORMALIZED);
-    player_speed      =                    ACTOR_I32(player, ACTOR_LONGITUDINAL_SPEED);
-    player_fwd        = g_actor_forward_track_component[0];
-    player_selector   = route_state(0)[RS_ROUTE_TABLE_SELECTOR];
+    cop_span_norm = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_NORMALIZED);
 
     handle = g_encounter_tracked_handle;
 
@@ -5768,102 +5846,106 @@ void td5_ai_update_special_encounter(void) {
         if (handle == -1) return;
         /* fall through to active_monitor */
     } else if (handle == -1) {
-        /* ---- Spawn attempt (0x00434e2c–0x00434f11) ------------------ */
-        int32_t span_delta_2span;
-        int32_t player_diff_abs;
+        /* ---- Spawn attempt (0x00434e2c–0x00434f11) ------------------
+         * PORT DEVIATION (multiplayer): the original latches the encounter
+         * onto slot 0 (the only human). Here we scan EVERY human slot
+         * [0 .. num_human_players) and latch the FIRST one that passes the
+         * full gate, so the cop chases whichever player drives past it
+         * first — and only that car (the active monitor + per-slot
+         * g_encounter_active gating below confine the effect to that slot).
+         * With a single player this loops once over slot 0, reproducing the
+         * original byte-for-byte. The cop is always traffic slot 9 (special-
+         * encounter is only enabled for fields of <=6 racers, where slot 9
+         * is free). */
+        int n_players;
+        int spawn_slot = -1;
+        int16_t spawn_span_norm = 0;
+        int32_t spawn_speed = 0, spawn_fwd = 0, spawn_selector = 0;
 
-        /* [DIAG fix-1780404735] BUG-1 cop-spawn diagnosis. The spawn gate is
-         * byte-faithful (no divergence found) but the spawn requires a precise
-         * runtime condition only reachable by MANUAL driving (PlayerIsAI forces
-         * route_table_selector=1, which fails the selector gate). This logs which
-         * of the 5 gate conditions blocks the spawn + the live inputs, so a
-         * manual drive (Traffic ON + Cops ON, e.g. Moscow/Tokyo) pinpoints the
-         * failing condition. Rate-limited, plus an always-on "near-miss" log when
-         * the cop (slot 9) is within 1..3 spans of the player (the window in
-         * which span_delta crosses the required ==2). Zero behavioral effect. */
-        {
-            int32_t sd = (int32_t)(int16_t)player_span_norm - cop_span_norm;
-            int near_miss = (sd >= 1 && sd <= 3);
-            if (near_miss || (g_ai_frame_counter % 90u) == 0u) {
-                const char *blocker =
-                    (g_encounter_cooldown != 0)                            ? "cooldown!=0" :
-                    (sd != 2)                                              ? "span_delta!=2" :
-                    (player_speed <= 0x15638)                              ? "speed<=0x15638" :
-                    (player_fwd <= 0)                                      ? "fwd<=0" :
-                    (player_selector != g_encounter_route_table_selector)  ? "selector!=0" :
-                                                                             "PASSES(will spawn)";
-                TD5_LOG_I(LOG_TAG,
-                          "cop_spawn_gate: BLOCK=%s | cooldown=%d span_delta=%d "
-                          "(player_norm=%d cop9_norm=%d) speed=%d(>0x15638?%d) "
-                          "fwd=%d(>0?%d) selector=%d(==%d?%d)%s",
-                          blocker, g_encounter_cooldown, sd,
-                          (int)(int16_t)player_span_norm, cop_span_norm,
-                          player_speed, player_speed > 0x15638,
-                          player_fwd, player_fwd > 0,
-                          player_selector, g_encounter_route_table_selector,
-                          player_selector == g_encounter_route_table_selector,
-                          near_miss ? " [NEAR-MISS: cop within 1-3 spans]" : "");
+        /* Cooldown is a single shared timer — check once. */
+        if (g_encounter_cooldown != 0) {
+            if ((g_ai_frame_counter % 90u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "cop_spawn_gate: BLOCK=cooldown!=0 (%d)",
+                          g_encounter_cooldown);
             }
+            return;
         }
 
-        if (g_encounter_cooldown != 0) return;
+        n_players = g_td5.num_human_players;
+        if (n_players < 1) n_players = 1;
+        if (n_players > g_traffic_slot_base) n_players = g_traffic_slot_base;
 
-        /* (int16)actor[0].span_norm - (int16)actor[9].span_norm == 2 */
-        span_delta_2span = (int32_t)(int16_t)player_span_norm - cop_span_norm;
-        if (span_delta_2span != 2) return;
+        for (int ps = 0; ps < n_players; ps++) {
+            char   *pl       = actor_ptr(ps);
+            int16_t ps_span  = ACTOR_I16(pl, ACTOR_SPAN_NORMALIZED);
+            int32_t ps_speed = ACTOR_I32(pl, ACTOR_LONGITUDINAL_SPEED);
+            int32_t ps_fwd   = g_actor_forward_track_component[ps];
+            int32_t ps_sel   = route_state(ps)[RS_ROUTE_TABLE_SELECTOR];
+            /* (int16)player.span_norm - (int16)cop.span_norm == 2 */
+            int32_t sd       = (int32_t)ps_span - cop_span_norm;
 
-        /* actor[0].long_speed > 0x15638 (JLE → fail at 0x15638) */
-        if (player_speed <= 0x15638) return;
+            /* [DIAG] near-miss log — cop (slot 9) within 1..3 spans of this
+             * player (the window in which span_delta crosses the required ==2),
+             * plus a periodic slot-0 heartbeat. Zero behavioral effect. */
+            if ((sd >= 1 && sd <= 3) || (ps == 0 && (g_ai_frame_counter % 90u) == 0u)) {
+                const char *blocker =
+                    (sd != 2)                                     ? "span_delta!=2" :
+                    (ps_speed <= 0x15638)                         ? "speed<=0x15638" :
+                    (ps_fwd <= 0)                                 ? "fwd<=0" :
+                    (ps_sel != g_encounter_route_table_selector)  ? "selector!=0" :
+                                                                    "PASSES(will spawn)";
+                TD5_LOG_I(LOG_TAG,
+                          "cop_spawn_gate[p%d]: BLOCK=%s span_delta=%d "
+                          "(player_norm=%d cop9_norm=%d) speed=%d(>0x15638?%d) "
+                          "fwd=%d(>0?%d) selector=%d(==%d?%d)",
+                          ps, blocker, sd, (int)ps_span, cop_span_norm,
+                          ps_speed, ps_speed > 0x15638, ps_fwd, ps_fwd > 0,
+                          ps_sel, g_encounter_route_table_selector,
+                          ps_sel == g_encounter_route_table_selector);
+            }
 
-        /* RS[0].forward_track_component > 0 (JLE → fail at 0) */
-        if (player_fwd <= 0) return;
+            /* actor[ps].span_norm - actor[9].span_norm == 2 */
+            if (sd != 2) continue;
+            /* actor[ps].long_speed > 0x15638 (JLE → fail at 0x15638) */
+            if (ps_speed <= 0x15638) continue;
+            /* RS[ps].forward_track_component > 0 (JLE → fail at 0) */
+            if (ps_fwd <= 0) continue;
+            /* RS[ps].route_table_selector == DAT_004b0568 (JNZ → fail) */
+            if (ps_sel != g_encounter_route_table_selector) continue;
 
-        /* RS[0].route_table_selector == DAT_004b0568 (JNZ → fail) */
-        if (player_selector != g_encounter_route_table_selector) return;
+            /* The original's final abs(player_span - player_span) > 0x10 check
+             * is vacuously true (always 0); dropped — no behavioral effect. */
 
-        /* The original then performs:
-         *   uVar1 = (int16)player_span_norm - (int16)player_span_norm
-         *   abs(uVar1) > 0x10 ⇒ return
-         * which is always 0, so the check passes unconditionally. Kept
-         * verbatim so the byte-faithful trace matches. */
-        {
-            int32_t tmp = (int32_t)(int16_t)player_span_norm
-                        - (int32_t)(int16_t)player_span_norm;
-            player_diff_abs = (tmp < 0) ? -tmp : tmp;
-            if (player_diff_abs > 0x10) return;
+            /* First qualifying player wins the chase. */
+            spawn_slot      = ps;
+            spawn_span_norm = ps_span;
+            spawn_speed     = ps_speed;
+            spawn_fwd       = ps_fwd;
+            spawn_selector  = ps_sel;
+            break;
         }
+
+        if (spawn_slot < 0) return;
 
         /* ===== SPAWN =====
-         * Original (0x00434e97–0x00434f11):
-         *   [0x4b05d8] = 0                       (handle = 0)
-         *   call ComputeTrackSpanProgress
-         *   [0x4b05c0] = ret_lo                  (track_progress)
-         *   call ComputeSignedTrackOffset
-         *   [0x4b0580] = ret_lo                  (signed_track_offset)
-         *   [0x4b055c] = route_state[0][0]       (cache RS[0].route_table_ptr)
-         *   ResetVehicleActorState(&actor[9])
-         *   if (ENC_WANTED_MODE == 0) StartTrackedVehicleAudio(9);
-         * Note: the prologue refresh above already cached the cop's
-         * route table when handle was != -1; on the spawn path the
-         * handle was -1, so the cached pointer is stale. The original
-         * writes route_state[0][RS_ROUTE_TABLE_PTR] (slot 0 = player).
-         */
+         * Original (0x00434e97–0x00434f11) latches handle=0 (slot 0 = player)
+         * and caches route_state[0][RS_ROUTE_TABLE_PTR]. We use spawn_slot so
+         * the chase tracks the winning player; the active monitor below is
+         * already handle-generic, so it follows the right car automatically. */
         {
             int32_t cop_span_raw = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_RAW);
             int32_t *cop_xyz     = (int32_t *)(cop + ACTOR_WORLD_POS_X);
             const uint8_t *rb0;
             uint8_t lane_byte;
 
-            g_encounter_tracked_handle = 0;
+            g_encounter_tracked_handle = spawn_slot;
 
             s_enc_track_progress = (int32_t)td5_track_compute_span_progress(
                 cop_span_raw, cop_xyz);
 
-            /* IMPORTANT: the original reads the lane byte from the
-             * *previous* gSpecialEncounterRouteTable, then immediately
-             * overwrites it with route_state[0][RS_ROUTE_TABLE_PTR].
-             * (0x434eb8 reads MOV EDX,[0x4b055c] BEFORE 0x434eea writes.)
-             * Match exactly. */
+            /* IMPORTANT: the original reads the lane byte from the *previous*
+             * gSpecialEncounterRouteTable, then immediately overwrites it.
+             * (0x434eb8 reads MOV EDX,[0x4b055c] BEFORE 0x434eea writes.) */
             rb0 = s_enc_route_table_ptr;
             lane_byte = (rb0 && cop_span_norm >= 0)
                 ? rb0[(size_t)cop_span_norm * 3u]
@@ -5872,22 +5954,20 @@ void td5_ai_update_special_encounter(void) {
             s_enc_signed_track_offset = (int32_t)td5_track_compute_signed_offset(
                 cop_span_raw, s_enc_track_progress, (int)lane_byte);
 
-            /* Cache RS[0].route_table_ptr (slot 0 = player) into the
-             * gSpecialEncounterRouteTable global. Subsequent ticks compare
-             * the tracked actor's RS_ROUTE_TABLE_PTR against this cache.
-             * Since the tracked actor IS slot 0 after spawn, the prologue
-             * "ptr changed" check will be false on the very next tick. */
+            /* Cache the tracked player's route_table_ptr. Since the tracked
+             * actor IS spawn_slot after this, the prologue "ptr changed" check
+             * will be false on the very next tick. */
             s_enc_route_table_ptr = (const uint8_t *)(intptr_t)
-                                    route_state(0)[RS_ROUTE_TABLE_PTR];
+                                    route_state(spawn_slot)[RS_ROUTE_TABLE_PTR];
 
             td5_physics_reset_actor_state((TD5_Actor *)cop);
         }
 
         TD5_LOG_I(LOG_TAG,
-                  "Encounter spawn: handle=0 player_span_norm=%d cop_span_norm=%d "
+                  "Encounter spawn: handle=%d player_span_norm=%d cop_span_norm=%d "
                   "speed=%d fwd=%d sel=%d",
-                  (int)player_span_norm, cop_span_norm, player_speed,
-                  player_fwd, player_selector);
+                  spawn_slot, (int)spawn_span_norm, cop_span_norm, spawn_speed,
+                  spawn_fwd, spawn_selector);
 
         if (ENC_WANTED_MODE != 0) return;
         td5_enc_start_tracked_audio(9);
@@ -6022,8 +6102,12 @@ void td5_ai_update_encounter_control(int slot) {
     int32_t *rs_self      = route_state(slot);
     int      tracked      = g_encounter_tracked_handle;
     /* DAT_004ad152 in orig = player's SPAN_NORMALIZED snapshot; UpdateSpecialTrafficEncounter
-     * keeps it equal to the current player's field_0x82 each tick. Port reads it live. */
-    int32_t  player_span_ref = (int32_t)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+     * keeps it equal to the current player's field_0x82 each tick. Port reads it live.
+     * PORT DEVIATION (multiplayer): read the span of the TRACKED (chased) player, not a
+     * hardcoded slot 0, so the brake gate matches single-player when the chased car is
+     * not slot 0. For a single player tracked==0, so this is byte-identical. */
+    int      span_ref_slot = (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS) ? tracked : 0;
+    int32_t  player_span_ref = (int32_t)(int16_t)ACTOR_I16(actor_ptr(span_ref_slot), ACTOR_SPAN_NORMALIZED);
     /* gSpecialEncounterRouteTable in orig = cached route-table pointer of the tracked actor.
      * Port reads the live equivalent from the tracked actor's rs[RS_ROUTE_TABLE_PTR]. */
     const uint8_t *tracked_route_tbl = (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS)
@@ -6310,7 +6394,7 @@ void td5_ai_update_race_actors(void) {
 
     /* --- Step 2: Update racers (slots 0 through min(count, 6)) --- */
     {
-        int racer_count = TD5_MAX_RACER_SLOTS;
+        int racer_count = g_traffic_slot_base;
         if (g_active_actor_count < racer_count)
             racer_count = g_active_actor_count;
 
@@ -6320,12 +6404,12 @@ void td5_ai_update_race_actors(void) {
     }
 
     /* --- Step 3: Update traffic (slots 6-11) if active --- */
-    if (g_active_actor_count > TD5_MAX_RACER_SLOTS) {
+    if (g_active_actor_count > g_traffic_slot_base) {
         int traffic_max = g_active_actor_count;
         if (traffic_max > TD5_MAX_TOTAL_ACTORS)
             traffic_max = TD5_MAX_TOTAL_ACTORS;
 
-        for (i = TD5_MAX_RACER_SLOTS; i < traffic_max; i++) {
+        for (i = g_traffic_slot_base; i < traffic_max; i++) {
             ai_update_single_traffic(i);
         }
 
@@ -6467,7 +6551,7 @@ void td5_ai_update_actor(int slot) {
     if (slot < 0 || slot >= g_active_actor_count)
         return;
 
-    if (slot < TD5_MAX_RACER_SLOTS) {
+    if (slot < g_traffic_slot_base) {
         ai_update_single_racer(slot);
     } else {
         ai_update_single_traffic(slot);

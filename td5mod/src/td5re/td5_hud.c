@@ -31,6 +31,7 @@
 #include "td5_physics.h"
 #include "td5_ai.h"
 #include "td5re.h"
+#include "td5_vectorui.h"   /* resolution-independent VectorUI primitives (SDF gauge, text) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -128,15 +129,28 @@ const int g_pause_page_sizes[8] = { 256, 0, 0, 0, 0, 0, 0, 0 };
  * Module-local state
  * ======================================================================== */
 
-#define MAX_HUD_VIEWS       2
+#define MAX_HUD_VIEWS       TD5_MAX_VIEWPORTS   /* PORT: N-way split (was 2) */
 #define SPEEDO_QUAD_OFF     0x04       /* offset into view storage for speedo */
 #define NEEDLE_QUAD_OFF     0x39C      /* needle quad offset */
 #define GEAR_QUAD_OFF       0x0BC      /* gear indicator offset */
 #define SPEEDFONT_BASE_OFF  0x174      /* speed font first digit offset */
+#define HUD_VIEW_BLOCK      0xC00      /* per-view HUD primitive block stride
+                                        * [PORT: N-way split]. Quads occupy
+                                        * +0x04..~0x8A4; 0xC00 leaves generous
+                                        * margin so a view's quads can't spill into
+                                        * the next view's block. Flag words are now
+                                        * held separately in s_hud_flag_words[]. */
 
 /* Per-view HUD primitive storage (0x1148 bytes each) */
 static uint8_t *s_hud_prim_storage;      /* 0x4B0C00 */
 static uint32_t *s_hud_flags[MAX_HUD_VIEWS]; /* per-view visibility bitmask ptrs */
+/* [PORT: N-way] Dedicated flag-word storage. The flag word originally lived at
+ * the start of each view's quad block inside s_hud_prim_storage, but per-view
+ * quad builds spill past their block and clobber the NEXT view's flag word
+ * (observed as float screen-coords 0x431C4000=156.0f in the mask -> views 1..N
+ * rendered no HUD). Keeping the words in their own array decouples them from the
+ * quad storage so every view always reads a valid visibility mask. */
+static uint32_t s_hud_flag_words[MAX_HUD_VIEWS];
 
 /* Active view pointers (set per iteration in render loop) */
 static uint32_t *s_cur_flags;            /* 0x4B0BFC */
@@ -242,6 +256,12 @@ static float s_pause_selbox_x1;                /* right edge of selbox, relative
 static float s_pause_selbox_base_y;            /* y-center of row 0 (= -52.0f) */
 static float s_pause_bar_x0 = 10.0f;
 static float s_pause_bar_x1;  /* = s_pause_half_width - 4.0f, set during init */
+
+/* VectorUI: pause-menu text lines recorded at init (instead of baking PAUSETXT
+ * glyph quads) and rendered crisply via the pause-font SDF at draw time. */
+typedef struct { float y; int alignment; char s[48]; } PauseTextLine;
+static PauseTextLine s_pause_vui_lines[16];
+static int s_pause_vui_line_count;
 
 /* Pause overlay dimmer state.
  * Must NOT be 898 (TD5_SHARED_FONT_PAGE) — that would clobber BodyText.tga
@@ -1011,6 +1031,44 @@ void td5_hud_draw_pause_overlay(void)
     for (i = 0; i < s_pause_quad_count && i < TD5_HUD_PAUSE_MAX_QUADS; i++) {
         hud_submit_quad(s_pause_quad_buf + i * 0xB8);
     }
+
+    /* VectorUI: render the menu text crisply via the pause-font SDF (the glyph
+     * quads were NOT baked above). Mirrors the original PAUSETXT layout exactly
+     * (alignment, glyph_w = width*2/3, +2 spacing, char-code -> 16x16 cell UV). */
+    if (g_td5.ini.vector_ui && td5_vui_pausefont_page() >= 0 && s_pause_vui_line_count > 0) {
+        int page = td5_vui_pausefont_page();
+        float cx = g_render_width_f  * 0.5f;
+        float cy = g_render_height_f * 0.5f;
+        const float INV = 1.0f / 256.0f;          /* pause SDF page is 256x256 */
+        for (int li = 0; li < s_pause_vui_line_count; li++) {
+            PauseTextLine *L = &s_pause_vui_lines[li];
+            int len = (int)strlen(L->s);
+            float start_x;
+            if (L->alignment == 2) {
+                float total_w = 0.0f;
+                for (int c = 0; c < len; c++) {
+                    uint8_t ch = (uint8_t)L->s[c];
+                    total_w += (float)(((g_pause_glyph_widths[ch] * 2) / 3) + 2);
+                }
+                start_x = -(total_w * 0.5f);
+            } else {
+                start_x = 4.0f - s_pause_half_width;
+            }
+            float curx = start_x;
+            for (int c = 0; c < len; c++) {
+                uint8_t ch = (uint8_t)L->s[c];
+                int glyph_w = (g_pause_glyph_widths[ch] * 2) / 3;
+                float gu = (float)(ch & 0x0F) * 16.0f;
+                float gv = (float)(ch >> 4)   * 16.0f;
+                float u0 = (gu + 0.5f) * INV,                 v0 = (gv + 0.5f)  * INV;
+                float u1 = (gu + 0.5f + (float)(glyph_w - 1)) * INV, v1 = (gv + 16.5f) * INV;
+                td5_vui_msdf_quad(cx + curx + 0.5f, cy + L->y + 0.5f,
+                                  (float)(glyph_w - 1), 15.5f,
+                                  0xFFFFFFFFu, page, u0, v0, u1, v1);
+                curx += (float)(glyph_w + 2);
+            }
+        }
+    }
 }
 
 /* Called each frame while paused to update SELBOX position and slider thumb positions.
@@ -1068,6 +1126,17 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
     }
 }
 
+/* ---- VectorUI HUD text (MSDF) ------------------------------------------
+ * When [Frontend] VectorUI is on, td5_hud_queue_text records the formatted
+ * ASCII string + position instead of building bitmap glyph quads, and
+ * td5_hud_flush_text renders them crisply via the shared MSDF text renderer
+ * (td5_vui_text). Recorded (not drawn immediately) so they layer on top of the
+ * gauge/scene exactly like the bitmap flush did. Falls back to the bitmap glyph
+ * atlas when VectorUI is off or the MSDF font is unavailable. */
+typedef struct { float x, y; int centered; char s[64]; } HudVuiText;
+static HudVuiText s_hud_vui_text[96];
+static int        s_hud_vui_text_count;
+
 /* ========================================================================
  * QueueRaceHudFormattedText (0x428320)
  *
@@ -1085,6 +1154,21 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
     va_end(ap);
 
     int len = (int)strlen(buf);
+
+    /* VectorUI: record the raw ASCII string for crisp SDF rendering at flush
+     * (the original glyph table + char remap are applied there, against the
+     * HUD-font SDF atlas -- same typeface, sharp at any resolution). */
+    if (g_td5.ini.vector_ui && td5_vui_hudfont_page() >= 0) {
+        int n = (int)(sizeof(s_hud_vui_text) / sizeof(s_hud_vui_text[0]));
+        if (s_hud_vui_text_count < n) {
+            HudVuiText *e = &s_hud_vui_text[s_hud_vui_text_count++];
+            e->x = (float)x;  e->y = (float)y;  e->centered = centered;
+            strncpy(e->s, buf, sizeof(e->s) - 1);
+            e->s[sizeof(e->s) - 1] = '\0';
+        }
+        return;
+    }
+
     if (s_queued_glyph_count + len > TD5_HUD_MAX_TEXT_GLYPHS) {
         return; /* overflow guard */
     }
@@ -1155,6 +1239,35 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
 
 void td5_hud_flush_text(void)
 {
+    /* VectorUI: render the recorded strings via the HUD-font SDF atlas, reusing
+     * the ORIGINAL glyph table (typeface, per-glyph widths, char remap, centered
+     * math, +1 spacing) -- identical layout to the bitmap path, just crisp. */
+    if (g_td5.ini.vector_ui && td5_vui_hudfont_page() >= 0 && s_hud_vui_text_count > 0) {
+        int page = td5_vui_hudfont_page();
+        TD5_GlyphRecord *glyphs = s_glyph_table;   /* font 0 */
+        const float INV = 1.0f / 256.0f;           /* SDF page is 256x256, texel UVs */
+        for (int i = 0; i < s_hud_vui_text_count; i++) {
+            HudVuiText *e = &s_hud_vui_text[i];
+            int len = (int)strlen(e->s);
+            float total_w = 0.0f;
+            for (int k = 0; k < len; k++) {
+                uint8_t gi = s_char_remap[(uint8_t)e->s[k] & 0x7F];
+                total_w += glyphs[gi].width;
+            }
+            float cx = e->x;
+            if (e->centered) cx -= ((float)(len - 1) + total_w) * 0.5f;
+            for (int k = 0; k < len; k++) {
+                uint8_t gi = s_char_remap[(uint8_t)e->s[k] & 0x7F];
+                TD5_GlyphRecord *g = &glyphs[gi];
+                float u0 = g->atlas_u * INV,                v0 = g->atlas_v * INV;
+                float u1 = (g->atlas_u + g->width)  * INV,  v1 = (g->atlas_v + g->height) * INV;
+                td5_vui_msdf_quad(cx, e->y, g->width, g->height, 0xFFFFFFFFu, page, u0, v0, u1, v1);
+                cx += g->width + 1.0f;
+            }
+        }
+        s_hud_vui_text_count = 0;
+    }
+
     uint8_t *ptr = s_text_quad_buf;
     int count = s_queued_glyph_count;
 
@@ -1204,13 +1317,17 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
     s_hud_string_table = g_position_strings + string_table_offset * 13;
     s_is_first_player = (string_table_offset == 0) ? 1 : 0;
 
-    s_wrong_way_counter[0] = 0;
-    s_wrong_way_counter[1] = 0;
+    for (int v = 0; v < MAX_HUD_VIEWS; v++)
+        s_wrong_way_counter[v] = 0;
 
-    /* Allocate per-view HUD primitive storage */
-    s_hud_prim_storage = (uint8_t *)td5_game_heap_alloc(TD5_HUD_VIEW_STRIDE);
-    s_hud_flags[0] = (uint32_t *)s_hud_prim_storage;
-    s_hud_flags[1] = (uint32_t *)(s_hud_prim_storage + 0x894); /* offset 0x229*4 */
+    /* Allocate per-view HUD primitive storage [PORT ENHANCEMENT: N-way split].
+     * Each view's flag word + quad block lives at +v*0x894 (orig +0x229*4).
+     * Allocate room for every pane so views >=2 don't deref an uninitialised
+     * flag pointer (the legacy code only set s_hud_flags[0]/[1]). */
+    s_hud_prim_storage = (uint8_t *)td5_game_heap_alloc(
+        (size_t)MAX_HUD_VIEWS * HUD_VIEW_BLOCK);
+    for (int v = 0; v < MAX_HUD_VIEWS; v++)
+        s_hud_flags[v] = &s_hud_flag_words[v];   /* dedicated array — never clobbered by quad spill */
 
     /* Set visibility bitmask based on race mode */
     if (race_mode == 0) {
@@ -1221,13 +1338,9 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
          *  → flags=0x80000000; else flags=0.] The previous port keyed this on
          * g_replay_mode==0, which (combined with the caller hardcoding race_mode=1)
          * left the banner permanently dead and showed "DEMO MODE" during replay. */
-        if (!g_td5.benchmark_active) {
-            *s_hud_flags[0] = TD5_HUD_REPLAY_BANNER;
-            *s_hud_flags[1] = TD5_HUD_REPLAY_BANNER;
-        } else {
-            *s_hud_flags[0] = 0;
-            *s_hud_flags[1] = 0;
-        }
+        /* [PORT: N-way] write the flag word for every pane, not just 0/1. */
+        for (int hv = 0; hv < MAX_HUD_VIEWS; hv++)
+            *s_hud_flags[hv] = (!g_td5.benchmark_active) ? TD5_HUD_REPLAY_BANNER : 0;
     } else {
         /* Active race mode -- build bitmask */
         uint32_t flags = TD5_HUD_SPEEDOMETER
@@ -1276,8 +1389,9 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
             flags |= TD5_HUD_CIRCUIT_LAPS;
         }
 
-        *s_hud_flags[0] = flags;
-        *s_hud_flags[1] = flags;
+        /* [PORT: N-way] every pane shows the same HUD element set. */
+        for (int hv = 0; hv < MAX_HUD_VIEWS; hv++)
+            *s_hud_flags[hv] = flags;
     }
 
     /* Load FADEWHT sprite for screen-fade overlays */
@@ -1382,9 +1496,19 @@ void td5_hud_init_layout(int viewport_mode)
      * before submitting to hardware.  Our source port submits vertices
      * directly to D3D11 without that centering step, so all HUD positions
      * must be in pixel-space (vp_left = 0, vp_right = width). */
-    if (viewport_mode == 0) {
-        /* Single full-screen view */
-        s_view_count = 1;
+    /* [PORT ENHANCEMENT] N-way HUD layout. Views 1-2 reproduce the legacy
+     * full / half-screen layouts byte-for-byte (viewport_mode 0/1/2). Views
+     * 3-9 mirror the 3D viewport ladder in td5_game_init_viewport_layout
+     * (3 = horizontal strips; 4=2x2, 5-6=3x2, 7-9=3x3) with a uniform per-pane
+     * scale so HUD elements keep their aspect inside each pane. Driven by
+     * g_td5.viewport_count (the live pane count), not just viewport_mode. */
+    int views = g_td5.viewport_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+    s_view_count = views;
+
+    if (views == 1) {
+        /* Single full-screen view (legacy viewport_mode 0) */
         s_view_layout[0].scale_x  = s_scale_x;
         s_view_layout[0].scale_y  = s_scale_y;
         s_view_layout[0].vp_left   = 0.0f;
@@ -1392,19 +1516,19 @@ void td5_hud_init_layout(int viewport_mode)
         s_view_layout[0].vp_top    = 0.0f;
         s_view_layout[0].vp_bottom = g_render_height_f;
 
-    } else if (viewport_mode == 1) {
-        /* Left/right split: each half-screen view */
+    } else if (views == 2 && viewport_mode == 2) {
+        /* Vertical split — left | right. Matches the game's viewport layout
+         * for split_screen_mode 2 (td5_game_init_viewport_layout). The HUD used
+         * to key left/right off mode 1, which is the game's TOP/BOTTOM mode —
+         * that orientation mismatch put the HUD in the wrong half. */
         s_scale_x *= 0.5f;
         s_scale_y *= 0.5f;
-        s_view_count = 2;
-        /* View 0: left half */
         s_view_layout[0].scale_x  = s_scale_x;
         s_view_layout[0].scale_y  = s_scale_y;
         s_view_layout[0].vp_left   = 0.0f;
         s_view_layout[0].vp_right  = g_render_width_f * 0.5f;
         s_view_layout[0].vp_top    = 0.0f;
         s_view_layout[0].vp_bottom = g_render_height_f;
-        /* View 1: right half */
         s_view_layout[1].scale_x  = s_scale_x;
         s_view_layout[1].scale_y  = s_scale_y;
         s_view_layout[1].vp_left   = g_render_width_f * 0.5f;
@@ -1412,25 +1536,46 @@ void td5_hud_init_layout(int viewport_mode)
         s_view_layout[1].vp_top    = 0.0f;
         s_view_layout[1].vp_bottom = g_render_height_f;
 
-    } else {
-        /* Top/bottom split: each half-screen view */
+    } else if (views == 2) {
+        /* Horizontal split — top / bottom. Matches the game's viewport layout
+         * for split_screen_mode 1 (the default 2-player orientation). */
         s_scale_x *= 0.5f;
         s_scale_y *= 0.5f;
-        s_view_count = 2;
-        /* View 0: top half */
         s_view_layout[0].scale_x  = s_scale_x;
         s_view_layout[0].scale_y  = s_scale_y;
         s_view_layout[0].vp_left   = 0.0f;
         s_view_layout[0].vp_right  = g_render_width_f;
         s_view_layout[0].vp_top    = 0.0f;
         s_view_layout[0].vp_bottom = g_render_height_f * 0.5f;
-        /* View 1: bottom half */
         s_view_layout[1].scale_x  = s_scale_x;
         s_view_layout[1].scale_y  = s_scale_y;
         s_view_layout[1].vp_left   = 0.0f;
         s_view_layout[1].vp_right  = g_render_width_f;
         s_view_layout[1].vp_top    = g_render_height_f * 0.5f;
         s_view_layout[1].vp_bottom = g_render_height_f;
+
+    } else {
+        /* N-way grid (>=3): mirror the game's viewport ladder. */
+        int cols, rows;
+        if (views == 3) { cols = 1; rows = 3; }            /* 3 horizontal strips */
+        else { cols = (views <= 4) ? 2 : 3; rows = (views + cols - 1) / cols; }
+        float pane_w = g_render_width_f  / (float)cols;
+        float pane_h = g_render_height_f / (float)rows;
+        float fx = pane_w / g_render_width_f;
+        float fy = pane_h / g_render_height_f;
+        float sfrac = (fx < fy) ? fx : fy;   /* uniform fit, aspect-correct */
+        s_scale_x *= sfrac;
+        s_scale_y *= sfrac;
+        for (int v = 0; v < views; v++) {
+            int col = v % cols;
+            int row = v / cols;
+            s_view_layout[v].scale_x  = s_scale_x;
+            s_view_layout[v].scale_y  = s_scale_y;
+            s_view_layout[v].vp_left   = (float)col       * pane_w;
+            s_view_layout[v].vp_right  = (float)(col + 1) * pane_w;
+            s_view_layout[v].vp_top    = (float)row       * pane_h;
+            s_view_layout[v].vp_bottom = (float)(row + 1) * pane_h;
+        }
     }
 
     /* Compute derived viewport values for each view.
@@ -1474,7 +1619,7 @@ void td5_hud_init_layout(int viewport_mode)
         float speedo_x = vp_r - sx * 96.0f - sx * 16.0f;
         float speedo_y = vp_b - sy * 96.0f - sy * 8.0f;
 
-        uint8_t *view_base = s_hud_prim_storage; /* simplified: single allocation */
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + SPEEDO_QUAD_OFF,
             0, speedo->texture_page,
@@ -1654,7 +1799,7 @@ int td5_hud_build_metric_digits(void)
         float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
         /* Update the 4th digit quad UV */
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + 0x734,
             0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
@@ -1701,7 +1846,7 @@ int td5_hud_build_metric_digits(void)
         float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
         float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + 0x454,
             0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
@@ -1720,7 +1865,7 @@ int td5_hud_build_metric_digits(void)
         float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
         float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + 0x50C,
             0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
@@ -1738,7 +1883,7 @@ int td5_hud_build_metric_digits(void)
         float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
         float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + 0x5C4,
             0, s_numbers_atlas->texture_page,  /* mode 0: write screen positions every call (port has no layout-init step that mode=2 would rely on) */
@@ -2113,12 +2258,143 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
  * mode and for the per-view layout table representation.
  * ======================================================================== */
 
+/* [PORT: N-way] Recompute the (global) minimap layout for one split-screen
+ * pane so the minimap can be drawn inside each viewport instead of once at a
+ * fixed full-screen position. Mirrors td5_hud_init_minimap_layout but uses the
+ * per-view scale + pane bounds. For a single full-screen view this reproduces
+ * the init values exactly. */
+static void hud_set_minimap_for_view(int v)
+{
+    TD5_HudViewLayout *vl = &s_view_layout[v];
+    float sx = vl->scale_x, sy = vl->scale_y;
+    s_minimap_width   = sx * 100.0f;
+    s_minimap_height  = sy * 100.0f;
+    s_minimap_dot_size = sx * 7.0f;
+    s_minimap_x = vl->vp_int_left + sx * 8.0f;
+    s_minimap_y = vl->vp_int_bottom - s_minimap_height - sy * 8.0f;
+    s_minimap_world_scale_x = sx * (1.0f / 1024.0f);
+    s_minimap_world_scale_y = sy * (1.0f / 1024.0f);
+    s_minimap_tile_width  = s_minimap_width;
+    s_minimap_tile_height = s_minimap_height;
+}
+
+/* [PORT: N-way] Draw thin divider lines between split-screen panes matching the
+ * viewport ladder grid. Replaces the legacy single-quad divider (which only
+ * handled the 2-view case and used degenerate coords). */
+static void hud_draw_split_dividers(void)
+{
+    if (g_td5.viewport_count <= 1) return;
+    int views = g_td5.viewport_count;
+    int cols, rows;
+    if (views == 2) {
+        if (g_split_screen_mode == 2) { cols = 2; rows = 1; }  /* left|right */
+        else                          { cols = 1; rows = 2; }  /* top/bottom */
+    } else if (views == 3) {
+        cols = 1; rows = 3;                                    /* 3 strips */
+    } else {
+        cols = (views <= 4) ? 2 : 3;
+        rows = (views + cols - 1) / cols;
+    }
+
+    TD5_AtlasEntry *colours = td5_asset_find_atlas_entry(NULL, "COLOURS");
+    if (!colours) return;
+    float cu = (float)colours->atlas_x + 0.5f;
+    float cv = (float)colours->atlas_y + 0.5f;
+    int   ctex = colours->texture_page;
+    float W = g_render_width_f, H = g_render_height_f;
+    const float t = 1.0f;   /* half-thickness (~2px) */
+    TD5_SpriteQuad q;
+
+    for (int c = 1; c < cols; c++) {
+        float x = (float)c * (W / (float)cols);
+        hud_build_quad(&q, 0, ctex, x - t, 0.0f, x + t, H,
+                       cu, cv, cu, cv, 0xFF000000, HUD_DEPTH2);
+        hud_submit_quad(&q);
+    }
+    for (int r = 1; r < rows; r++) {
+        float y = (float)r * (H / (float)rows);
+        hud_build_quad(&q, 0, ctex, 0.0f, y - t, W, y + t,
+                       cu, cv, cu, cv, 0xFF000000, HUD_DEPTH2);
+        hud_submit_quad(&q);
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * Vectorized speedometer / tachometer arc (VectorUI)
+ *
+ * Replaces the baked SPEEDO texture (tpage4 / GDI fallback) with a crisp
+ * analytic SDF reproduction that stays sharp at any resolution. Faithful to
+ * the original art (extracted from tpage4.dat): an ARC of tick marks (NOT a
+ * filled dial, no full ring -- the centre is transparent), with a static red
+ * "bar" baked at the top end. Only the needle (drawn separately) animates.
+ *
+ * Geometry from the real texture (dial centred, 96px, radius ~47):
+ *   - tick arc sweeps 90deg (the "0" at 6 o'clock, just left of the speed
+ *     digits) clockwise up the left + over the top to ~282deg;
+ *   - 8 major ticks (longer) with fine minor ticks between -- "8 subdivisions";
+ *   - a solid RED bar from ~282deg to 322.9deg (the redline, above the gear).
+ * Angles are screen degrees (angle*360/4096; screen Y-down, CW). The full
+ * 90..322.9 span is exactly the needle's RPM range (0x400 .. 0x400+0xA5A), so
+ * the needle sweeps the whole arc and points into the red bar at redline.
+ *
+ * cx/cy is the centre in render px; drawn as a true circle (radius from sy)
+ * so it stays circular at any aspect ratio. ------------------------------*/
+static void hud_vector_speedo_tach(float cx, float cy, float sy)
+{
+    const float A0 = (float)0x400 * 360.0f / 4096.0f;           /* 90.0  (idle)   */
+    const float A1 = (float)(0x400 + 0xA5A) * 360.0f / 4096.0f; /* 322.9 (redline)*/
+    const float RL_FRAC = 0.80f;                  /* red zone = top 20% of the arc */
+    float rl = A0 + RL_FRAC * (A1 - A0);          /* red zone start angle (~276)   */
+
+    TD5_VuiGauge g;
+    memset(&g, 0, sizeof(g));
+    g.cx = cx;  g.cy = cy;
+    g.radius       = 50.0f * sy;      /* outer semi-transparent disc (no border)         */
+    g.inner_radius = 15.0f * sy;      /* concentric inner circle -> 3D recessed look     */
+    g.tick_out     = 46.0f * sy;      /* tooth outer radius (near the rim)               */
+    g.sweep_start_deg = A0;           /* "0" tooth at 6 o'clock (left of the digits)     */
+    g.sweep_end_deg   = A1;           /* subdivisions span the FULL arc incl. the red    */
+    g.tick_count   = 33;              /* 9 majors (every 4th) => 8 subdivisions + minors */
+    g.major_every  = 4;
+    g.major_len_px = 9.0f * sy;       /* long major teeth                                */
+    g.minor_len_px = 5.0f * sy;       /* short minor teeth                               */
+    g.pivot_px     = 3.0f * sy;       /* small needle-pivot hub                          */
+    /* Red zone: teeth here render RED and a red arc runs along the rim. The
+     * last subdivision falls inside it (top 20% of the sweep). */
+    g.redline_start_deg = rl;
+    g.redline_end_deg   = A1;
+    g.rim_red_px   = 4.0f * sy;
+    g.face_color   = 0x80181820u;     /* semi-transparent dark disc (no border line)     */
+    g.inner_color  = 0xC00A0A10u;     /* darker inner disc -> recessed 3D centre         */
+    g.tick_color   = 0xFFECECECu;     /* white teeth                                     */
+    g.redline_color= 0xFFE0202Au;     /* red teeth + red rim                             */
+    g.pivot_color  = 0xFF8A8A8Au;     /* grey hub                                        */
+    td5_vui_gauge(&g);
+}
+
+/* Draw one speed digit (0-9) from the Technology-font SDF (a 7-segment LCD
+ * digital typeface baked into the HUD-font SDF page at a 5x2 grid of 30x48
+ * cells, top-left). SPEEDOFONT is empty in the asset; this gives a real digital
+ * speedometer font, crisp at any resolution and tinted via `color`. */
+static void hud_vector_speed_digit(int d, float x, float y, float w, float h, uint32_t color)
+{
+    int page = td5_vui_hudfont_page();
+    if (page < 0 || d < 0 || d > 9) return;
+    int col = d % 5, row = d / 5;
+    float gx = (float)(col * 30), gy = (float)(row * 48);
+    const float INV = 1.0f / 256.0f;
+    td5_vui_msdf_quad(x, y, w, h, color, page,
+                      (gx + 0.5f) * INV, (gy + 0.5f) * INV,
+                      (gx + 29.5f) * INV, (gy + 47.5f) * INV);
+}
+
 void td5_hud_render_overlays(float dt)
 {
     /* dt is normalized 30 Hz frame time from td5_game.c. */
     s_cur_view = 0;
 
     for (int v = 0; v < s_view_count; v++) {
+        s_cur_view = v;
         s_cur_flags = s_hud_flags[v];
         s_cur_scale = (float *)&s_view_layout[v];
         int actor_slot = g_actor_slot_map[v];
@@ -2134,16 +2410,22 @@ void td5_hud_render_overlays(float dt)
                       v, (unsigned int)flags);
         }
 
-        uint8_t *view_base = s_hud_prim_storage;
+        uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
 
         /* --- Bit 0: Race position label --- */
         if (flags & TD5_HUD_POSITION_LABEL) {
             uint8_t pos = actor_race_position(actor_slot);
-            td5_hud_queue_text(0,
-                (int)(vl->vp_int_left + 8.0f),
-                (int)(vl->vp_int_top + 8.0f),
-                0,
-                "%s", s_hud_string_table[pos]);
+            int px = (int)(vl->vp_int_left + 8.0f);
+            int py = (int)(vl->vp_int_top + 8.0f);
+            if (pos < 6) {
+                td5_hud_queue_text(0, px, py, 0, "%s", s_hud_string_table[pos]);
+            } else {
+                /* [PORT: N-way] The SNK position table only has 1ST..6TH; for a
+                 * >6-racer field generate the ordinal (positions 7..16 are all
+                 * "TH"). Without this, 7th+ read the next table entries
+                 * ("WRONG WAY", "PIT STOP", ...). */
+                td5_hud_queue_text(0, px, py, 0, "%dTH", (int)pos + 1);
+            }
         }
 
         /* --- Bit 7: Total timer "%s %d" / cop-chase POINTS --- */
@@ -2255,15 +2537,27 @@ void td5_hud_render_overlays(float dt)
             float cx = vl->vp_int_right - sx * 64.0f;
             float cy = vl->vp_int_bottom - sy * 56.0f;
 
+            /* When the vectorized dial is active it is drawn as a true CIRCLE
+             * (radius from sy), so the needle uses a uniform sy scale on both
+             * axes to stay inside the circular face. Without it (baked-dial
+             * fallback) the needle keeps the original elliptical sx/sy scale to
+             * match the stretched 96x96 texture. */
+            int   use_vec = td5_vui_gauge_available();
+            /* Vector dial: circular needle (uniform sy scale) so it stays inside
+             * the circular SDF dial. Baked-dial fallback keeps the faithful
+             * elliptical sx/sy needle. */
+            float nsx = use_vec ? sy : sx;
+            float nsy = sy;
+
             /* V0: near end (9 units into dial), V2: far tip (45 units out) */
-            float near_x = cx - cos_a * sx * 9.0f;
-            float near_y = cy - sin_a * sy * 9.0f;
+            float near_x = cx - cos_a * nsx * 9.0f;
+            float near_y = cy - sin_a * nsy * 9.0f;
 
-            float base_offset_x = sin_a * sx * 2.0f;
-            float base_offset_y = cos_a * sy * 2.0f;
+            float base_offset_x = sin_a * nsx * 2.0f;
+            float base_offset_y = cos_a * nsy * 2.0f;
 
-            float tip_x = cx + cos_a * sx * 45.0f;
-            float tip_y = cy + sin_a * sy * 45.0f;
+            float tip_x = cx + cos_a * nsx * 45.0f;
+            float tip_y = cy + sin_a * nsy * 45.0f;
 
             TD5_LOG_I(LOG_TAG, "speedo: rpm=%d max=%d angle=0x%03X cos=%.3f sin=%.3f cx=%.1f cy=%.1f tip=(%.1f,%.1f) near=(%.1f,%.1f)",
                 engine_speed, max_rpm, needle_angle, cos_a, sin_a, cx, cy, tip_x, tip_y, near_x, near_y);
@@ -2348,11 +2642,14 @@ void td5_hud_render_overlays(float dt)
              * Original renders right-to-left: ones at anchor, each additional
              * digit subtracts (glyph_w + 2.0) moving LEFT (0x438E90).
              * Inter-digit gap is 2.0 [CONFIRMED @ 0x45d6d8]. */
-            float sf_gw = sx * 15.0f;
+            /* Bigger digits, kept at the same spot (left anchor + original
+             * bottom edge, growing upward). */
+            float sf_gw = sx * 19.0f;
+            float dh    = sy * 32.0f;
             float sf_step = sf_gw + 2.0f;
             float sf_x0 = vl->vp_int_right - sx * 60.0f;
-            float sf_y0 = vl->vp_int_bottom - sy * 23.0f - sy * 8.0f;
-            float sf_y1 = sf_y0 + sy * 24.0f;
+            float sf_y1 = vl->vp_int_bottom - sy * 7.0f;   /* original bottom edge */
+            float sf_y0 = sf_y1 - dh;
             float digit_u_base = (float)s_speedofont_atlas->atlas_x;
             float digit_v_base = (float)s_speedofont_atlas->atlas_y;
             int   sf_pg = s_speedofont_atlas->texture_page;
@@ -2370,54 +2667,66 @@ void td5_hud_render_overlays(float dt)
             /* Ones anchor: rightmost position = sf_x0 + (num_digits-1) * step */
             float ones_x = sf_x0 + (float)(num_digits - 1) * sf_step;
 
-            /* Submit speedo dial */
-            hud_submit_quad(view_base + SPEEDO_QUAD_OFF);
+            /* Submit speedo dial: crisp SDF dial + RPM tach arc when VectorUI
+             * is available, otherwise the baked 96x96 GDI dial texture. Drawn
+             * BEFORE the needle (immediate-mode call order = z-order) so the
+             * needle/digits paint on top of the dial face. */
+            if (use_vec) {
+                hud_vector_speedo_tach(cx, cy, sy);
+            } else {
+                hud_submit_quad(view_base + SPEEDO_QUAD_OFF);
+            }
             /* Submit needle */
             hud_submit_quad(view_base + 0x39C);
 
-            /* Ones digit (always shown) */
+            /* Speed digits: VectorUI draws crisp GREEN digits from the NUMBERS
+             * SDF (SPEEDOFONT is empty in the asset); otherwise the baked
+             * SPEEDOFONT quads. Right-to-left: ones at anchor, then tens/hundreds. */
+            const uint32_t SPEED_GREEN = 0xFF3CDC3Cu;
             float dx = ones_x;
-            float u_ones = digit_u_base + (float)ones * 16.0f + 0.5f;
-            hud_build_quad(
-                view_base + SPEEDFONT_BASE_OFF,
-                0, sf_pg,
-                dx, sf_y0, dx + sf_gw, sf_y1,
-                u_ones, digit_v_base + 0.5f,
-                u_ones + 15.5f, digit_v_base + 23.5f,
-                0xFFFFFFFF, HUD_DEPTH
-            );
-            hud_submit_quad(view_base + SPEEDFONT_BASE_OFF);
+            if (use_vec) {
+                hud_vector_speed_digit(ones, dx, sf_y0, sf_gw, dh, SPEED_GREEN);
+            } else {
+                float u_ones = digit_u_base + (float)ones * 16.0f + 0.5f;
+                hud_build_quad(view_base + SPEEDFONT_BASE_OFF, 0, sf_pg,
+                    dx, sf_y0, dx + sf_gw, sf_y1,
+                    u_ones, digit_v_base + 0.5f, u_ones + 15.5f, digit_v_base + 23.5f,
+                    0xFFFFFFFF, HUD_DEPTH);
+                hud_submit_quad(view_base + SPEEDFONT_BASE_OFF);
+            }
 
             /* Tens digit if speed >= 10 (one step LEFT of ones) */
             if (speed_display >= 10) {
-                float u_tens = digit_u_base + (float)tens_val * 16.0f + 0.5f;
                 dx = ones_x - sf_step;
-                hud_build_quad(
-                    view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE,
-                    0, sf_pg,
-                    dx, sf_y0, dx + sf_gw, sf_y1,
-                    u_tens, digit_v_base + 0.5f,
-                    u_tens + 15.5f, digit_v_base + 23.5f,
-                    0xFFFFFFFF, HUD_DEPTH
-                );
-                hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE);
+                if (use_vec) {
+                    hud_vector_speed_digit(tens_val, dx, sf_y0, sf_gw, dh, SPEED_GREEN);
+                } else {
+                    float u_tens = digit_u_base + (float)tens_val * 16.0f + 0.5f;
+                    hud_build_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE, 0, sf_pg,
+                        dx, sf_y0, dx + sf_gw, sf_y1,
+                        u_tens, digit_v_base + 0.5f, u_tens + 15.5f, digit_v_base + 23.5f,
+                        0xFFFFFFFF, HUD_DEPTH);
+                    hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + TD5_HUD_GLYPH_QUAD_SIZE);
+                }
 
                 /* Hundreds digit if speed >= 100 (two steps LEFT of ones) */
                 if (speed_display >= 100) {
-                    float u_hund = digit_u_base + (float)hundreds_val * 16.0f + 0.5f;
                     dx = ones_x - 2.0f * sf_step;
-                    hud_build_quad(
-                        view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE,
-                        0, sf_pg,
-                        dx, sf_y0, dx + sf_gw, sf_y1,
-                        u_hund, digit_v_base + 0.5f,
-                        u_hund + 15.5f, digit_v_base + 23.5f,
-                        0xFFFFFFFF, HUD_DEPTH
-                    );
-                    hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE);
+                    if (use_vec) {
+                        hud_vector_speed_digit(hundreds_val, dx, sf_y0, sf_gw, dh, SPEED_GREEN);
+                    } else {
+                        float u_hund = digit_u_base + (float)hundreds_val * 16.0f + 0.5f;
+                        hud_build_quad(view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE, 0, sf_pg,
+                            dx, sf_y0, dx + sf_gw, sf_y1,
+                            u_hund, digit_v_base + 0.5f, u_hund + 15.5f, digit_v_base + 23.5f,
+                            0xFFFFFFFF, HUD_DEPTH);
+                        hud_submit_quad(view_base + SPEEDFONT_BASE_OFF + 2 * TD5_HUD_GLYPH_QUAD_SIZE);
+                    }
                 }
             }
 
+            /* Gear indicator: VectorUI draws a gold gear character from the FONT
+             * SDF (GEARNUMBERS is empty in the asset); otherwise the baked quad. */
             /* Submit gear indicator */
             hud_submit_quad(view_base + GEAR_QUAD_OFF);
         }
@@ -2533,11 +2842,19 @@ void td5_hud_render_overlays(float dt)
         s_cur_view++;
     }
 
-    /* --- Minimap (single-player only, non-circuit tracks) --- */
-    if (g_split_screen_mode == 0 && (*s_hud_flags[0] & TD5_HUD_UTURN_WARNING) &&
-        g_track_type_mode == 0) {
-        int actor_slot = g_actor_slot_map[0];
-        td5_hud_render_minimap(actor_slot);
+    /* --- Minimap (per-view) [PORT: N-way + circuit enhancement] ---
+     * Drawn inside each pane via the per-view minimap layout. For a single view
+     * this is identical to the legacy full-screen minimap.
+     * Faithful: P2P only (g_track_type_mode == 0). Port enhancement: also draw
+     * on circuit tracks when [Game] CircuitMinimap is on (default) — the
+     * renderer re-checks the knob and picks the circuit ring-walk path.
+     * [REBASE MERGE: master's circuit-minimap knob + branch's per-view loop.] */
+    if (g_track_type_mode == 0 || g_td5.ini.circuit_minimap) {
+        for (int v = 0; v < s_view_count; v++) {
+            if (!(*s_hud_flags[v] & TD5_HUD_UTURN_WARNING)) continue;
+            hud_set_minimap_for_view(v);
+            td5_hud_render_minimap(g_actor_slot_map[v]);
+        }
     }
 
     /* Restore full-screen viewport and projection center.
@@ -2724,10 +3041,8 @@ void td5_hud_render_overlays(float dt)
         td5_render_radial_pulse(dt);
     }
 
-    /* Split-screen divider bars */
-    if (g_split_screen_mode != 0) {
-        hud_submit_quad(&s_divider_quad_h + (g_split_screen_mode - 1));
-    }
+    /* Split-screen divider bars [PORT: N-way grid] */
+    hud_draw_split_dividers();
 }
 
 /* ========================================================================
@@ -2842,10 +3157,134 @@ static int minimap_emit_connector(uint8_t *span_base, uint8_t *vert_base, int sp
     return 1;
 }
 
+/* Emit one minimap PRIMARY road quad spanning [near_idx .. far_idx].
+ * The near edge uses the span record's +0x04 front-vertex (col0 delta) and the
+ * far edge uses +0x06 (col1 delta) — identical geometry to the inline primary
+ * quad built in the P2P road-walk loop below. Factored out so the circuit
+ * ring-walk can reuse the exact same per-span quad build. Returns 1 if a quad
+ * was submitted, 0 if skipped (bad index / degenerate / fully offscreen).
+ * [mirrors the inline build @ td5_hud.c P2P loop; orig 0x0043a220 primary quad]. */
+static int minimap_emit_road_quad(uint8_t *span_base, uint8_t *vert_base,
+                                  int near_idx, int far_idx,
+                                  float offset_x, float offset_z,
+                                  float cos_h, float sin_h,
+                                  float mm_cx, float mm_cy)
+{
+    if (!span_base || !vert_base) return 0;
+    if (near_idx < 0 || far_idx < 0 ||
+        near_idx >= g_strip_span_count || far_idx >= g_strip_span_count) return 0;
+
+    uint8_t *sn = span_base + near_idx * 24;
+    uint8_t *sf = span_base + far_idx  * 24;
+
+    int32_t ox_n = *(int32_t *)(sn + 0x0C);
+    int32_t oz_n = *(int32_t *)(sn + 0x14);
+    int32_t ox_f = *(int32_t *)(sf + 0x0C);
+    int32_t oz_f = *(int32_t *)(sf + 0x14);
+
+    /* NEAR span: base vertex from +0x04, column-0 delta for the right edge. */
+    uint16_t vi_n_l  = *(uint16_t *)(sn + 0x04);
+    uint8_t  type_n  = sn[0];
+    uint8_t  nib_n   = sn[3] & 0x0F;
+    int32_t  col0    = s_minimap_vtx_delta_col0[type_n & 0x07];
+    int32_t  vi_n_r  = (int32_t)vi_n_l + (int32_t)nib_n + col0;
+
+    /* FAR span: base vertex from +0x06, column-1 delta for the right edge. */
+    uint16_t vi_f_l  = *(uint16_t *)(sf + 0x06);
+    uint8_t  type_f  = sf[0];
+    uint8_t  nib_f   = sf[3] & 0x0F;
+    int32_t  col1    = s_minimap_vtx_delta_col1[type_f & 0x07];
+    int32_t  vi_f_r  = (int32_t)vi_f_l + (int32_t)nib_f + col1;
+
+    if (vi_n_r < 0 || vi_f_r < 0) return 0;
+
+    int16_t *vn_l = (int16_t *)(vert_base + (uint32_t)vi_n_l * 6);
+    int16_t *vn_r = (int16_t *)(vert_base + (uint32_t)vi_n_r * 6);
+    int16_t *vf_l = (int16_t *)(vert_base + (uint32_t)vi_f_l * 6);
+    int16_t *vf_r = (int16_t *)(vert_base + (uint32_t)vi_f_r * 6);
+
+    float wx_fl = (float)((int)vn_l[0] + ox_n) + offset_x;
+    float wz_fl = (float)((int)vn_l[2] + oz_n) + offset_z;
+    float wx_fr = (float)((int)vn_r[0] + ox_n) + offset_x;
+    float wz_fr = (float)((int)vn_r[2] + oz_n) + offset_z;
+    float wx_bl = (float)((int)vf_l[0] + ox_f) + offset_x;
+    float wz_bl = (float)((int)vf_l[2] + oz_f) + offset_z;
+    float wx_br = (float)((int)vf_r[0] + ox_f) + offset_x;
+    float wz_br = (float)((int)vf_r[2] + oz_f) + offset_z;
+
+    float fl_x = mm_cx + (wx_fl * cos_h + wz_fl * sin_h) * s_minimap_world_scale_x;
+    float fl_y = mm_cy + (wz_fl * cos_h - wx_fl * sin_h) * s_minimap_world_scale_y;
+    float fr_x = mm_cx + (wx_fr * cos_h + wz_fr * sin_h) * s_minimap_world_scale_x;
+    float fr_y = mm_cy + (wz_fr * cos_h - wx_fr * sin_h) * s_minimap_world_scale_y;
+    float bl_x = mm_cx + (wx_bl * cos_h + wz_bl * sin_h) * s_minimap_world_scale_x;
+    float bl_y = mm_cy + (wz_bl * cos_h - wx_bl * sin_h) * s_minimap_world_scale_y;
+    float br_x = mm_cx + (wx_br * cos_h + wz_br * sin_h) * s_minimap_world_scale_x;
+    float br_y = mm_cy + (wz_br * cos_h - wx_br * sin_h) * s_minimap_world_scale_y;
+
+    float mm_l = s_minimap_x, mm_t = s_minimap_y;
+    float mm_r = s_minimap_x + s_minimap_width, mm_b = s_minimap_y + s_minimap_height;
+    float min_x = fl_x, max_x = fl_x, min_y = fl_y, max_y = fl_y;
+    if (fr_x < min_x) min_x = fr_x; if (fr_x > max_x) max_x = fr_x;
+    if (bl_x < min_x) min_x = bl_x; if (bl_x > max_x) max_x = bl_x;
+    if (br_x < min_x) min_x = br_x; if (br_x > max_x) max_x = br_x;
+    if (fr_y < min_y) min_y = fr_y; if (fr_y > max_y) max_y = fr_y;
+    if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
+    if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
+    if (max_x < mm_l || min_x > mm_r || max_y < mm_t || min_y > mm_b) return 0;
+
+    /* TL=front-left, BL=back-left, BR=back-right, TR=front-right */
+    TD5_SpriteQuad q;
+    hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+        fl_x, fl_y, bl_x, bl_y, br_x, br_y, fr_x, fr_y,
+        0.0f, 0.0f, 0.0f, 0.0f, 0xFF9A9A9A, HUD_DEPTH);
+    hud_submit_quad(&q);
+    return 1;
+}
+
+/* Vectorized minimap "grid" (VectorUI). The original tiles a small rose "+"
+ * SCANBACK sprite 4x4; this replaces it with a clean radar-style grid: a darker
+ * semi-transparent GREEN background panel + continuous lighter-green grid lines
+ * (graph-paper). Solid axis-aligned quads -> crisp + resolution-independent.
+ * Screen-space (the grid does not rotate; the route rotates within it). Drawn
+ * before the route + dots so they read on top. */
+static void hud_vector_minimap_grid(float mm_cx, float mm_cy)
+{
+    float x0 = s_minimap_x, y0 = s_minimap_y;
+    float w  = s_minimap_width, h = s_minimap_height;
+
+    /* darker semi-transparent green background panel */
+    td5_vui_quad(x0, y0, w, h, 0x620E2614u, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+
+    /* continuous lighter-green grid lines at the original 4-cell spacing
+     * (lines run through the former crosshair positions, edge to edge) */
+    uint32_t gcol = 0x7034A052u;                 /* lighter green, semi-transparent */
+    float lw = w * 0.012f;  if (lw < 1.0f) lw = 1.0f;   /* ~1px, scales with res */
+    const float f[4] = { -0.375f, -0.125f, 0.125f, 0.375f };
+    for (int i = 0; i < 4; i++) {
+        float vx = mm_cx + f[i] * s_minimap_tile_width;   /* vertical line   */
+        td5_vui_quad(vx - lw * 0.5f, y0, lw, h, gcol, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+        float hy = mm_cy + f[i] * s_minimap_tile_height;  /* horizontal line */
+        td5_vui_quad(x0, hy - lw * 0.5f, w, lw, gcol, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+}
+
 void td5_hud_render_minimap(int actor_slot)
 {
-    /* Only for point-to-point tracks */
-    if (g_track_is_circuit != 0) return;
+    /* Faithful: the original disabled the whole minimap on circuit tracks via an
+     * early-return on gTrackIsCircuit @ 0x0043A231 (the dead circuit-aware code
+     * inside RenderTrackMinimapOverlay shows the wrap behaviour the devs intended
+     * but never shipped). Port enhancement: re-enable it behind the [Game]
+     * CircuitMinimap knob (default on). Knob off → restore the faithful "no
+     * minimap on circuits" behaviour. The road-walk below branches on `circuit`;
+     * everything else (background tiles, racer/traffic dots) is shared and the
+     * dot loops already handle the circuit modulo-wrap span window. */
+    int circuit = (g_track_is_circuit != 0);
+    if (circuit && !g_td5.ini.circuit_minimap) return;
+
+    /* Guard against the span-wrap modulo dividing by zero before the track
+     * strip is loaded (g_strip_span_count == 0) -- crashed on early race frames
+     * (0xC0000094 integer divide-by-zero in the ring-walk). No spans => no map. */
+    if (g_strip_span_count <= 0) return;
 
     /* Set minimap clip rect */
     td5_render_set_clip_rect(
@@ -2875,14 +3314,18 @@ void td5_hud_render_minimap(int actor_slot)
     float offset_x = -(float)actor_world_x(actor_slot) * kFP;
     float offset_z = -(float)actor_world_z(actor_slot) * kFP;
 
-    /* Submit 16 background tiles (binary: offset 0x4500..0x507F, stride 0xB8).
-     * Use the low-alpha-ref translucent path (TRANSLUCENT_POINT preset,
-     * alpha_ref=1) so the per-tile vertex alpha can drop below 0x80 and
-     * produce a more see-through grid. */
-    for (int i = 0; i < 16; i++) {
-        int buf_off = 0x4500 + i * TD5_HUD_GLYPH_QUAD_SIZE;
-        td5_render_submit_translucent_low_ref(
-            (uint16_t *)(s_minimap_quad_buf + buf_off));
+    /* Background "grid" of 16 SCANBACK crosshairs. VectorUI: draw them as crisp
+     * procedural bars (resolution-independent); otherwise submit the 16 baked
+     * texture tiles (binary: offset 0x4500..0x507F, stride 0xB8) via the
+     * low-alpha-ref translucent path (TRANSLUCENT_POINT, alpha_ref=1). */
+    if (g_td5.ini.vector_ui) {
+        hud_vector_minimap_grid(mm_cx, mm_cy);
+    } else {
+        for (int i = 0; i < 16; i++) {
+            int buf_off = 0x4500 + i * TD5_HUD_GLYPH_QUAD_SIZE;
+            td5_render_submit_translucent_low_ref(
+                (uint16_t *)(s_minimap_quad_buf + buf_off));
+        }
     }
 
     /* Walk track spans and render road segments using the pre-built segment table.
@@ -2899,8 +3342,16 @@ void td5_hud_render_minimap(int actor_slot)
      * behind when the car moves many spans per frame, leaving player_span
      * pointing at a stale region.  If the span origin is too far from the
      * actor, do a brute-force nearest-span search so the minimap stays
-     * centred on the car. */
-    {
+     * centred on the car.
+     *
+     * P2P only: the test compares the actor position to the span ORIGIN
+     * (+0x0C/+0x14), which on some circuit tracks (e.g. Maui) sits far from the
+     * road centerline, so it misfires every frame — the search returns the same
+     * span (a no-op that spams the log + rescans the whole strip, and could even
+     * mis-recenter to a coincidentally-close origin). The circuit ring-walk
+     * below centres via `player_span % ring`, which tolerates a slightly-stale
+     * tracker, so skip this P2P-tuned heuristic on circuits. */
+    if (!circuit) {
         int32_t px = actor_world_x(actor_slot) >> 8; /* 24.8 FP → world units */
         int32_t pz = actor_world_z(actor_slot) >> 8;
         uint8_t *sb = (uint8_t *)g_strip_span_base;
@@ -2998,7 +3449,10 @@ void td5_hud_render_minimap(int actor_slot)
         if (cur_seg < 0) cur_seg = 0;
     }
 
-    for (int i = 0; span_base && vert_base && i < 0x30; i++) {
+    /* `!circuit`: the P2P segment-walk is skipped entirely on circuit tracks —
+     * the circuit ring-walk below replaces it. The branch-remap / start_span /
+     * cur_seg setup above is computed but unused when circuit (harmless). */
+    for (int i = 0; !circuit && span_base && vert_base && i < 0x30; i++) {
         /* Pre-iter segment advance [CONFIRMED @ 0x43A426]:
          * while (seg_end[cur_seg] < local_a4) cur_seg++ */
         while (cur_seg + 1 < s_minimap_seg_branch_start &&
@@ -3302,6 +3756,80 @@ void td5_hud_render_minimap(int actor_slot)
         }
     }
 
+    /* --- Circuit road walk (port enhancement; orig early-returned) ---
+     * Re-enables the minimap road geometry for circuit tracks. The MAIN LOOP is
+     * drawn by a player-centred ring walk modelled on the main track render's
+     * circuit entry walk (td5_render.c circuit branch; td5_track_get_ring_length)
+     * — "the same logic as the tracks, in the minimap's format". Same 48-quad /
+     * ±144-span window and the same per-span quad geometry as the P2P path
+     * (minimap_emit_road_quad), but the span index wraps modulo the ring so the
+     * road stays continuous across the start/finish seam — fixing the limitation
+     * the original avoided by simply not drawing the minimap on circuits (whose
+     * dead code reset the index to 0 at the seam instead of true-wrapping).
+     * BRANCH / FORK roads are then drawn from the appended branch-mirror rows of
+     * the segment table (built by the init for every track; branch spans live in
+     * [ring, total_spans)), so forks show up the same as on P2P tracks. */
+    if (circuit) {
+        int ring = g_td5.track_span_ring_length;
+        if (ring <= 0) ring = g_strip_span_count;
+        int circuit_rendered = 0;
+        int circuit_branches  = 0;
+        if (ring > 0 && span_base && vert_base) {
+            int center = (int)player_span % ring;
+            if (center < 0) center += ring;
+            /* start_span = ((player_span/24) - 6) * 24 — 144 spans behind the
+             * player, same formula as the P2P path [orig @ 0x43A372-0x43A3B7]. */
+            int start = (center / 24 - 6) * 24;
+            for (int i = 0; i < 0x30; i++) {            /* 48 quads (orig while < 0x30) */
+                int near_raw = start + i * 6;           /* advance ~6 spans / quad */
+                if (near_raw - start >= ring) break;    /* covered a full lap; stop */
+                int far_raw  = near_raw + 5;
+                /* True modulo wrap into [0, ring). The ring closes (span ring-1
+                 * ≈ span 0) so a quad bridging the seam is geometrically valid. */
+                int near_idx = ((near_raw % ring) + ring) % ring;
+                int far_idx  = ((far_raw  % ring) + ring) % ring;
+                if (minimap_emit_road_quad(span_base, vert_base, near_idx, far_idx,
+                                           offset_x, offset_z, cos_h, sin_h,
+                                           mm_cx, mm_cy))
+                    circuit_rendered++;
+            }
+
+            /* Branch / fork roads. The init appends one segment row per branch
+             * link [s_minimap_seg_branch_start .. s_minimap_seg_primary_end):
+             * seg_start = branch's first span, seg_end = branch's last span (both
+             * in the [ring, total_spans) branch region). Walk each range and draw
+             * it at its OWN world position (each branch span carries its origin +
+             * vertices). The window AABB cull inside minimap_emit_road_quad keeps
+             * only the branch quads near the player, matching the windowed view.
+             * No overlap with the ring walk above (which stays in [0, ring)). */
+            for (int bi = s_minimap_seg_branch_start;
+                 bi < s_minimap_seg_primary_end; bi++) {
+                int bstart = (int)s_minimap_seg_start[bi];
+                int bend   = (int)s_minimap_seg_end[bi];
+                if (bend <= bstart) continue;
+                for (int bs = bstart; bs <= bend; bs += 6) {
+                    int bf = bs + 5;
+                    if (bf > bend) bf = bend;
+                    if (minimap_emit_road_quad(span_base, vert_base, bs, bf,
+                                               offset_x, offset_z, cos_h, sin_h,
+                                               mm_cx, mm_cy)) {
+                        circuit_rendered++;
+                        circuit_branches++;
+                    }
+                }
+            }
+        }
+        {
+            static int s_mm_circuit_log = 0;
+            if ((s_mm_circuit_log++ % 60) == 0) {
+                TD5_LOG_I(LOG_TAG, "minimap circuit: span=%d ring=%d rendered=%d (branch=%d) branch_rows=%d span_count=%d",
+                          (int)player_span, ring, circuit_rendered, circuit_branches,
+                          (int)s_minimap_seg_primary_end - (int)s_minimap_seg_branch_start,
+                          g_strip_span_count);
+            }
+        }
+    }
+
     /* Render racer dot markers.
      *
      * Skip slots in state==3 (decoration) so drag-race decoration slots
@@ -3377,12 +3905,17 @@ void td5_hud_render_minimap(int actor_slot)
              * Pixel data: player(64,200)=red, AI(72,200)=blue, other(80,200)=teal. */
             int dot_tex = s_minimap_scandots_tex_page ? s_minimap_scandots_tex_page : HUD_WHITE_TEX_PAGE;
             float dot_u0;
-            if (r == g_actor_slot_map[0]) {
+            if (r == actor_slot) {
+                /* [PORT: N-way] THIS pane's own car is red — actor_slot is the
+                 * view's player (was hardcoded to g_actor_slot_map[0], so panes
+                 * 1..N drew their own car blue). */
                 dot_u0 = s_minimap_dot_atlas_u;          /* col 0: player (red) */
-            } else if (r < 6) {
-                dot_u0 = s_minimap_dot_atlas_u + 8.5f;  /* col 1: AI (blue) [@ 0x45D724] */
             } else {
-                dot_u0 = s_minimap_dot_atlas_u + 16.5f; /* col 2: other (teal) [@ 0x45D720] */
+                /* [PORT: N-way] every OTHER racer is blue. This loop only draws
+                 * racers (r < g_racer_count), so the legacy `r < 6 ? blue : teal`
+                 * split wrongly painted racer slots 6..15 teal in a big field.
+                 * Teal (col 2) is reserved for the traffic-dot loop below. */
+                dot_u0 = s_minimap_dot_atlas_u + 8.5f;  /* col 1: other racer (blue) [@ 0x45D724] */
             }
             hud_build_quad(
                 &map_quad,
@@ -3409,7 +3942,7 @@ void td5_hud_render_minimap(int actor_slot)
      * at slots TD5_MAX_RACER_SLOTS..total-1; mesh==NULL is the "slot
      * inactive" indicator (matches the render path at td5_render.c:2185). */
     int total_actors = td5_game_get_total_actor_count();
-    for (int t = TD5_MAX_RACER_SLOTS; t < total_actors && t < TD5_MAX_TOTAL_ACTORS; t++) {
+    for (int t = g_traffic_slot_base; t < total_actors && t < TD5_MAX_TOTAL_ACTORS; t++) {
         if (!td5_render_get_vehicle_mesh(t))
             continue;
         int16_t traffic_span = actor_span_index(t);
@@ -3822,12 +4355,30 @@ void td5_hud_init_pause_menu(int page_index)
     float text_y = -52.0f;
     int string_offset = 0;
 
+    /* VectorUI: record lines for crisp SDF rendering at draw time instead of
+     * baking the bitmap PAUSETXT glyph quads. */
+    int pause_vec = (g_td5.ini.vector_ui && td5_vui_pausefont_page() >= 0);
+    s_pause_vui_line_count = 0;
+
     while (pausetxt && s_pause_menu_strings && string_offset < 0x30) {
         const char *str = s_pause_menu_strings[string_offset / 4];
         if (str == NULL) break;
 
         int alignment = *(int *)((uint8_t *)s_pause_menu_strings + string_offset + 4);
         int len = (int)strlen(str);
+
+        if (pause_vec) {
+            if (s_pause_vui_line_count < 16) {
+                PauseTextLine *L = &s_pause_vui_lines[s_pause_vui_line_count++];
+                L->y = text_y;  L->alignment = alignment;
+                strncpy(L->s, str, sizeof(L->s) - 1);
+                L->s[sizeof(L->s) - 1] = '\0';
+            }
+            text_y += 16.0f;
+            string_offset += 8;
+            if (string_offset > 0x2F) break;
+            continue;
+        }
 
         float start_x;
         if (alignment == 2) {

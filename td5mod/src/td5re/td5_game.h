@@ -112,7 +112,7 @@ extern int      g_game_type;
 extern int      g_split_screen_mode;
 extern int      g_racer_count;
 extern uint32_t g_tick_counter;
-extern int      g_actor_slot_map[2];
+extern int      g_actor_slot_map[TD5_MAX_VIEWPORTS];
 extern void    *g_actor_pool;
 
 /* --- Split-screen --- */

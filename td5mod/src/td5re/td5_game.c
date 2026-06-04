@@ -49,15 +49,16 @@ int td5_trace_current_sim_tick(void) {
  * Game State Globals (migrated from td5re_stubs.c — owned by this module)
  * ======================================================================== */
 
-int     g_actorSlotForView[2]   = {0};
+int     g_actorSlotForView[TD5_MAX_VIEWPORTS] = {0};
 int     g_actorBaseAddr         = 0;
 void   *g_actor_pool            = NULL;
 void   *g_actor_base            = NULL;
 uint8_t *g_actor_table_base     = NULL;
-int     g_actor_slot_map[2]     = {0};
+int     g_actor_slot_map[TD5_MAX_VIEWPORTS] = {0};
 int     g_racer_count           = 0;
 int     g_game_type             = 0;
 int     g_split_screen_mode     = 0;
+int     g_traffic_slot_base     = TD5_LEGACY_RACE_SLOTS;  /* racer/traffic boundary; see td5_types.h */
 int     g_replay_mode           = 0;
 /* Attract-demo flag (orig g_replayModeFlag @ 0x4AAF64). Distinct from
  * g_replay_mode (orig g_inputPlaybackActive @ 0x466E9C). See td5_game.h. */
@@ -78,7 +79,7 @@ void   *g_route_data            = NULL;
 
 extern int   g_cameraTransitionActive;  /* td5_camera.c */
 extern float g_subTickFraction;        /* td5_camera.c -- [0..1) sub-tick interp */
-extern int   g_camWorldPos[2][3];       /* td5_camera.c -- per-viewport camera pos (24.8 fixed) */
+extern int   g_camWorldPos[TD5_MAX_VIEWPORTS][3];   /* td5_camera.c -- per-viewport camera pos (24.8 fixed) */
 extern float g_cameraPos[3];            /* td5_camera.c -- float camera pos for render */
 extern float g_render_width_f;          /* td5_render.c */
 extern float g_render_height_f;         /* td5_render.c */
@@ -477,7 +478,7 @@ typedef struct ViewportRect {
     int x, y, w, h;
 } ViewportRect;
 
-static ViewportRect s_viewports[2];
+static ViewportRect s_viewports[TD5_MAX_VIEWPORTS];
 
 /* Replay / benchmark timing */
 static uint32_t s_race_end_timer_start;
@@ -531,6 +532,7 @@ static void tick_wanted_target_tracker(void) {
 }
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
+static int      s_prev_pause_act;      /* edge detector for the rebindable PAUSE action */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
 
@@ -1289,9 +1291,20 @@ int td5_game_init_race_session(void) {
         g_td5.circuit_lap_count = 4;
     }
     if (g_td5.split_screen_mode > 0) {
-        TD5_LOG_I(LOG_TAG, "InitRace: 2-player split-screen — disabling traffic/encounters");
-        g_td5.traffic_enabled = 0;
-        g_td5.special_encounter_enabled = 0;
+        /* [PORT: N-way] The original disables traffic + special encounters in
+         * ALL split-screen. The port KEEPS traffic in every split-screen race so
+         * it's visible to every player (spawns at g_traffic_slot_base..+6). The
+         * special-encounter COP rides traffic slot 9: that's a real traffic slot
+         * in a <=6 field (kept), but a RACER slot in a >6 field (so disabled). */
+        int field = g_td5.num_human_players + g_td5.num_ai_opponents;
+        if (field > TD5_LEGACY_RACE_SLOTS) {
+            g_td5.special_encounter_enabled = 0;
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: >6-racer split — traffic kept, special-encounter off (slot-9 layout)");
+        } else {
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: <=6 split — traffic + special-encounter kept (PORT deviation)");
+        }
     }
 
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
@@ -1406,9 +1419,13 @@ int td5_game_init_race_session(void) {
         s_slot_state[i].companion_2 = 0;
         s_slot_state[i].reserved    = 0;
     }
-    /* If split-screen, slot 1 is also a player */
+    /* If split-screen, slots 1..num_human_players-1 are also human players
+     * [PORT ENHANCEMENT: N-way split, was just slot 1]. */
     if (g_td5.split_screen_mode > 0) {
-        s_slot_state[1].state = 1;
+        int humans = g_td5.num_human_players;
+        if (humans > TD5_MAX_VIEWPORTS) humans = TD5_MAX_VIEWPORTS;
+        for (int i = 1; i < humans && i < TD5_MAX_RACER_SLOTS; i++)
+            s_slot_state[i].state = 1;
     }
     /* Time trial single-player: disable slot 1 (no ghost car yet) */
     if (g_td5.time_trial_enabled && g_td5.split_screen_mode == 0) {
@@ -1523,11 +1540,33 @@ int td5_game_init_race_session(void) {
      * Dropping slot 0 to state=0 (AI) routes it through
      * td5_physics_update_ai at td5_physics.c:463 and makes td5_game skip
      * td5_input_update_player_control(0) at td5_game.c:1538/1559. */
-    if (g_td5.ini.player_is_ai && s_slot_state[0].state == 1) {
-        s_slot_state[0].state = 0;
+    /* [PORT: N-way] player_is_ai puts EVERY local human slot on AI autopilot
+     * (not just slot 0), so all split-screen cars drive themselves — handy for
+     * testing the panes without N controllers. */
+    if (g_td5.ini.player_is_ai) {
+        int humans = g_td5.num_human_players;
+        if (humans < 1) humans = 1;
+        if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+        for (int i = 0; i < humans; i++) {
+            if (s_slot_state[i].state == 1) s_slot_state[i].state = 0;
+        }
         TD5_LOG_I(LOG_TAG,
-                  "InitRace: player_is_ai=1 -> slot 0 switched to AI "
-                  "(mirrors 0x0042ACCF attract-mode write)");
+                  "InitRace: player_is_ai=1 -> %d human slot(s) switched to AI autopilot",
+                  humans);
+    } else if (g_td5.ini.others_ai) {
+        /* [PORT: N-way] AI-drive every local human slot EXCEPT slot 0, so the
+         * user drives player 1 while the other split-screen panes self-drive.
+         * Slot 0 keeps state==1 (human) and the slot-0 AI-dispatch paths key
+         * off player_is_ai (not others_ai), so its input path stays live. */
+        int humans = g_td5.num_human_players;
+        if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+        for (int i = 1; i < humans; i++) {
+            if (s_slot_state[i].state == 1) s_slot_state[i].state = 0;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace: others_ai=1 -> human slots 1..%d on AI autopilot "
+                  "(slot 0 = human)",
+                  humans - 1);
     }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -1565,6 +1604,25 @@ int td5_game_init_race_session(void) {
     if (g_td5.ini.solo_race && g_td5.split_screen_mode == 0) {
         g_racer_count = 1;
         TD5_LOG_I(LOG_TAG, "SoloRace: g_racer_count=1 (opponents disabled)");
+    }
+
+    /* [PORT ENHANCEMENT] Racer/traffic slot boundary. Legacy <=6-racer races
+     * keep the faithful slot-6 traffic base (so the slot-9 cop encounter and
+     * traffic stay byte-faithful); a >6-racer split-screen field pushes traffic
+     * to slot TD5_TRAFFIC_SLOT_BASE and runs with traffic/cops OFF (the cop
+     * subsystem is hardwired to the 6+6 layout — out of scope for big fields). */
+    g_traffic_slot_base = (g_racer_count > TD5_LEGACY_RACE_SLOTS)
+                          ? TD5_TRAFFIC_SLOT_BASE : TD5_LEGACY_RACE_SLOTS;
+    if (g_racer_count > TD5_LEGACY_RACE_SLOTS && g_td5.special_encounter_enabled) {
+        /* [PORT: N-way] The slot-9 special-encounter COP is hardwired to the
+         * legacy 6+6 layout; in a >6-racer field slot 9 is a normal racer, so
+         * disable just the special encounter. REGULAR traffic is kept and stays
+         * faithful — it spawns at g_traffic_slot_base (16) and behaves exactly
+         * as the original (position-relative). */
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace: >6-racer field (%d) -> special-encounter cop disabled "
+                  "(slot-9 layout); regular traffic kept faithful", g_racer_count);
+        g_td5.special_encounter_enabled = 0;
     }
 
     /* ---- Step 4: Load track runtime data ---- */
@@ -1691,7 +1749,10 @@ int td5_game_init_race_session(void) {
              * so the menu can preview the paint live. */
 
             /* Load per-vehicle sound bank (Drive.wav, Rev.wav/Reverb.wav, Horn.wav).
-             * Slot 0 is the local player and uses Reverb.wav (is_reverb=1).
+             * [PORT: N-way] Every LOCAL human player's car uses the reverb engine
+             * audio (is_reverb=1) so it gets the proper drive/rumble sound rather
+             * than the AI fixed-idle whine (gated on !s_reverb_flag in
+             * td5_sound). AI opponents (i >= num_human_players) stay non-reverb.
              * When a TD6 player-car override is active, source the bank from the
              * TD6 archive (donor wavs in re/assets/cars/<code>/) instead of the
              * menu car's TD5 zip. */
@@ -1699,7 +1760,8 @@ int td5_game_init_race_session(void) {
                                       ? td5_asset_get_player_override_zip()
                                       : td5_asset_get_car_zip_path(car_for_slot);
             if (car_zip) {
-                td5_sound_load_vehicle_bank(car_zip, i, (i == 0) ? 1 : 0);
+                int is_human = (i < g_td5.num_human_players);
+                td5_sound_load_vehicle_bank(car_zip, i, is_human ? 1 : 0);
             }
 
             TD5_LOG_I(LOG_TAG, "InitRace step 5/19: vehicle asset loaded slot=%d car_index=%d",
@@ -1831,28 +1893,49 @@ int td5_game_init_race_session(void) {
     /* ---- Step 11: Allocate actors and init vehicle/AI runtime ---- */
     {
         static uint8_t s_actor_memory[TD5_ACTOR_STRIDE * TD5_MAX_TOTAL_ACTORS];
-        int spawn_count = g_td5.time_trial_enabled
-                          ? (g_td5.split_screen_mode > 0 ? 2 : 1)
-                          : (g_td5.traffic_enabled ? TD5_MAX_TOTAL_ACTORS : TD5_MAX_RACER_SLOTS);
-        int racer_count = (spawn_count > TD5_MAX_RACER_SLOTS)
-                          ? TD5_MAX_RACER_SLOTS : spawn_count;
-        /* Single race / Quick Race: only spawn the configured number of racers
-         * (humans + opponents) [PORT ENHANCEMENT]. Slots beyond the total are
-         * never positioned and never load a vehicle mesh, so the dropped
-         * opponents don't appear in the world or take a grid slot. The AI side
-         * (td5_ai g_slot_state) and standings tables (s_slot_state) mark those
-         * slots disabled separately. Guarded on num_human_players>=1 so an
-         * un-configured launch keeps the full grid. Traffic (slots 6+) is
-         * unaffected — it spawns via td5_ai_init_traffic_actors. */
-        if (!g_td5.time_trial_enabled && !g_td5.drag_race_enabled &&
-            !g_td5.wanted_mode_enabled && g_td5.num_human_players >= 1) {
-            int total = g_td5.num_human_players + g_td5.num_ai_opponents;
-            if (total < 1) total = 1;
-            if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
-            if (total < racer_count) racer_count = total;
-            TD5_LOG_I(LOG_TAG, "InitRace: spawning %d racers (humans=%d opponents=%d)",
-                      racer_count, g_td5.num_human_players, g_td5.num_ai_opponents);
+        /* Racer/traffic slot budget [PORT ENHANCEMENT — original capped at 6
+         * racers + 6 traffic = 12 actors]. Legacy modes keep that faithful
+         * layout (traffic at the fixed slot-6 base, cop encounter at slot 9);
+         * a >6-racer split-screen field uses up to TD5_MAX_RACER_SLOTS racers
+         * with traffic/cops disabled (g_traffic_slot_base set in step 3).
+         *   racer_count = cars positioned on the grid (slots 0..racer_count-1)
+         *   spawn_count = total actor slots incl. traffic / faithful decoration */
+        int racer_count;
+        if (g_td5.time_trial_enabled) {
+            racer_count = (g_td5.split_screen_mode > 0 ? 2 : 1);
+        } else if (g_racer_count > TD5_LEGACY_RACE_SLOTS) {
+            racer_count = g_racer_count;            /* big multiplayer field */
+            if (racer_count > TD5_MAX_RACER_SLOTS) racer_count = TD5_MAX_RACER_SLOTS;
+        } else {
+            racer_count = TD5_LEGACY_RACE_SLOTS;    /* faithful up-to-6 grid */
+            /* Quick Race dropped-opponents: position only the configured
+             * humans+opponents; remaining legacy slots stay decoration. The
+             * AI side (g_slot_state) and standings (s_slot_state) disable them. */
+            if (!g_td5.drag_race_enabled && !g_td5.wanted_mode_enabled &&
+                g_td5.num_human_players >= 1) {
+                int total = g_td5.num_human_players + g_td5.num_ai_opponents;
+                if (total < 1) total = 1;
+                if (total > TD5_LEGACY_RACE_SLOTS) total = TD5_LEGACY_RACE_SLOTS;
+                racer_count = total;
+            }
         }
+        int spawn_count;
+        if (g_td5.time_trial_enabled) {
+            spawn_count = racer_count;                  /* time trial: no traffic */
+        } else if (g_td5.traffic_enabled) {
+            /* Traffic spawns at g_traffic_slot_base..+6 (6 legacy / 16 big field).
+             * In a big field the racer slots between racer_count and the base are
+             * inert decoration (disabled like dropped opponents). */
+            spawn_count = g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS;
+        } else if (g_racer_count > TD5_LEGACY_RACE_SLOTS) {
+            spawn_count = racer_count;                  /* big field, no traffic */
+        } else {
+            spawn_count = TD5_LEGACY_RACE_SLOTS;        /* legacy 6-slot grid */
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace: %d racers / %d actors (traffic_base=%d humans=%d opp=%d)",
+                  racer_count, spawn_count, g_traffic_slot_base,
+                  g_td5.num_human_players, g_td5.num_ai_opponents);
 
         memset(s_actor_memory, 0, sizeof(s_actor_memory));
         g_actorBaseAddr = (int)(uintptr_t)s_actor_memory;
@@ -1880,13 +1963,17 @@ int td5_game_init_race_session(void) {
         /* Grid patterns from InitializeRaceSession (0x42B07B-0x42B225):
          *   Circuit (0x42B110): paired rows 6 spans apart
          *   Non-circuit (0x42B174): staggered 3 spans apart */
+        /* Slots 0-5 are the faithful original grid; 6-15 continue the stagger
+         * (PORT ENHANCEMENT for >6-car split-screen fields). int8_t range OK (>=-48). */
         static const int8_t s_circuit_span_offsets[TD5_MAX_RACER_SLOTS] = {
-            -6, -6, -12, -12, -18, -18
+            -6, -6, -12, -12, -18, -18,
+            -24, -24, -30, -30, -36, -36, -42, -42, -48, -48
         };
         /* Original (0x42B174): slot 2 placed first (closest to line),
-         * slot 0 (player) placed third. Per-slot offsets: */
+         * slot 0 (player) placed third. Per-slot offsets (6-15 extend 3 apart): */
         static const int8_t s_staggered_span_offsets[TD5_MAX_RACER_SLOTS] = {
-            -9, -6, -3, -12, -15, -18
+            -9, -6, -3, -12, -15, -18,
+            -21, -24, -27, -30, -33, -36, -39, -42, -45, -48
         };
         /* Wanted-mode spawn (InitializeRaceSession @ 0x42B1C6..0x42B21E):
          *   slot 0: startSpan - 3,   lane 2
@@ -1911,7 +1998,8 @@ int td5_game_init_race_session(void) {
          *   i-1, 0) — span=1 absolute, lanes=0..4 (decoration).
          * The circuit 2x3 grid tables below are NOT used for drag race. */
         static const uint8_t s_racer_lanes[TD5_MAX_RACER_SLOTS] = {
-            1, 2, 1, 2, 1, 2
+            1, 2, 1, 2, 1, 2,
+            1, 2, 1, 2, 1, 2, 1, 2, 1, 2
         };
 
         /* Per-track start span: indexed by LEVEL NUMBER (1-based, from
@@ -2284,6 +2372,29 @@ int td5_game_init_race_session(void) {
     td5_vfx_init_tracked_actor_marker_billboards();
     TD5_LOG_I(LOG_TAG, "InitRace step 14/19: VFX systems initialized");
 
+    /* ---- Step 14a: Initialize weather overlay particles ----
+     * Orig InitializeWeatherOverlayParticles @ 0x00446240, called from
+     * InitializeRaceSession @ 0x0042b2ec — after the particle/tire/marker init
+     * and immediately before the 2nd traffic fill @ 0x42b2f4 (this position).
+     * The weather type is the int32 at LEVELINF.DAT +0x28: 0=rain, 1=snow,
+     * 2(or >=2)=none [CONFIRMED @ 0x00446245 MOV EAX,[EAX+0x28] + branch logic
+     * @ 0x00446240]. The raw on-disk encoding matches TD5_WeatherType exactly,
+     * so it passes straight through. Snow is a cut feature (init seeds positions
+     * but the render path is gated off — faithful). NULL config (e.g. TD6 ported
+     * tracks with no LEVELINF) -> clear, no weather. */
+    {
+        TD5_WeatherType weather = TD5_WEATHER_CLEAR;
+        if (g_track_environment_config) {
+            int32_t wt;
+            memcpy(&wt, g_track_environment_config + 0x28, sizeof(int32_t));
+            weather = (TD5_WeatherType)wt;
+        }
+        g_td5.weather = weather;
+        td5_vfx_init_weather(weather);
+        TD5_LOG_I(LOG_TAG, "InitRace step 14a: weather init type=%d (0=rain,1=snow,2=none)",
+                  (int)weather);
+    }
+
     /* ---- Step 14b: SECOND traffic fill ----
      * The orig calls InitializeTrafficActorsFromQueue @ 0x00435940 TWICE
      * during race setup [CONFIRMED @ 0x0042aa10 InitializeRaceSession +
@@ -2303,7 +2414,19 @@ int td5_game_init_race_session(void) {
     td5_ai_init_traffic_actors();
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
-    td5_input_set_active_players(g_td5.split_screen_mode > 0 ? 2 : 1);
+    /* [PORT ENHANCEMENT] N-way split: one input slot per local human. Players
+     * 2..N-1 default to joystick index = player (the per-player device picker
+     * is a deferred frontend step). Players 0-1 keep their configured devices. */
+    {
+        int humans = (g_td5.split_screen_mode > 0) ? g_td5.num_human_players : 1;
+        if (humans < 1) humans = 1;
+        if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
+        td5_input_set_active_players(humans);
+        for (int p = 2; p < humans; p++) {
+            if (td5_input_get_input_source(p) == 0)
+                td5_input_set_input_source(p, p);  /* default: joystick #p */
+        }
+    }
     /* Resolve each player's input device (keyboard / joystick 1 / joystick 2)
      * from the INI override or Config.td5 and create the DirectInput devices +
      * push joystick bindings, BEFORE FF init (which binds slot 0's device). */
@@ -2323,10 +2446,15 @@ int td5_game_init_race_session(void) {
     /* ---- Step 17: Initialize 3D render state + viewport layout ---- */
     td5_render_reset_texture_cache();
     td5_game_init_viewport_layout();
-    g_actorSlotForView[0] = 0;
-    g_actorSlotForView[1] = (g_td5.split_screen_mode > 0 && g_td5.total_actor_count > 1) ? 1 : 0;
-    g_actor_slot_map[0] = g_actorSlotForView[0];
-    g_actor_slot_map[1] = g_actorSlotForView[1];
+    /* [PORT ENHANCEMENT] Each viewport follows its own local player slot
+     * (viewport vp -> racer slot vp). Humans occupy slots 0..viewport_count-1
+     * so every pane tracks a distinct human. Legacy 1/2-view behaviour kept
+     * (vp0->slot0; vp1->slot1 when a 2nd actor exists). */
+    for (int vp = 0; vp < TD5_MAX_VIEWPORTS; vp++) {
+        int slot = (vp < g_td5.viewport_count && vp < g_td5.total_actor_count) ? vp : 0;
+        g_actorSlotForView[vp] = slot;
+        g_actor_slot_map[vp]   = slot;
+    }
     TD5_LOG_I(LOG_TAG, "InitRace step 17/19: render state and viewport layout initialized views=%d",
               g_td5.viewport_count);
     CK("ck17_after_viewport");
@@ -2554,6 +2682,7 @@ int td5_game_init_race_session(void) {
      * driven — slated for cleanup. */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
+    s_prev_pause_act = 1;          /* suppress false PAUSE-action edge on first frame */
     g_td5.sim_tick_budget = 0.0f;
     g_td5.sim_time_accumulator = 0;
     g_td5.simulation_tick_counter = 0;
@@ -2840,7 +2969,7 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
 
     /* View rows */
     if (td5_trace_active(TD5_TRACE_MOD_VIEW, stage_bit)) {
-        for (int vp = 0; vp < g_td5.viewport_count && vp < 2; vp++) {
+        for (int vp = 0; vp < g_td5.viewport_count && vp < TD5_MAX_VIEWPORTS; vp++) {
             TD5_TraceViewRow r;
             r.view_index   = vp;
             r.actor_slot   = g_actorSlotForView[vp];
@@ -3125,6 +3254,24 @@ int td5_game_run_race_frame(void) {
         int pause_menu_was_active = s_pause_menu_active;
         s_prev_esc_state = esc_now;
 
+        /* [PORT ENHANCEMENT 2026-06] The rebindable PAUSE action (keyboard key or
+         * joystick button mapped in the control-config screen) opens/toggles the
+         * pause menu, in addition to ESC. The original only had ESC; the PAUSE
+         * action bit was being SET by the input layer but never consumed here, so
+         * a mapped pause key did nothing. Read it from any human player's control
+         * word. It only opens/continues — it never triggers the ESC exit-to-results
+         * or the cinematic abort (those stay ESC-only). */
+        int pause_act_now = 0;
+        {
+            int hp = g_td5.num_human_players;
+            if (hp < 1) hp = 1;
+            if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+            for (int pi = 0; pi < hp; pi++)
+                if (td5_input_get_control_bits(pi) & TD5_INPUT_PAUSE) { pause_act_now = 1; break; }
+        }
+        int pause_act_edge = (pause_act_now && !s_prev_pause_act);
+        s_prev_pause_act = pause_act_now;
+
         /* Replay/demo abort: ESC during a cinematic (View Replay / attract demo)
          * race does NOT open the pause menu — it ends the race immediately and
          * returns to where it was launched (results for replay, menu for demo).
@@ -3144,7 +3291,7 @@ int td5_game_run_race_frame(void) {
                       s_demo_mode ? "menu" : "results");
             td5_game_begin_fade_out(0);
         }
-        if (esc_edge && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
+        if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
             s_pause_menu_cursor = 3;  /* default to CONTINUE (row 3), matching the
                                        * original: g_audioOptionsCursorRow @0x00474640
@@ -3167,11 +3314,23 @@ int td5_game_run_race_frame(void) {
                 static int s_prev_down = 0, s_prev_up = 0;
                 static int s_prev_left = 0, s_prev_right = 0;
                 static int s_prev_enter = 0;
-                int key_down  = td5_plat_input_key_pressed(0xD0);
-                int key_up    = td5_plat_input_key_pressed(0xC8);
-                int key_left  = td5_plat_input_key_pressed(0xCB);
-                int key_right = td5_plat_input_key_pressed(0xCD);
-                int key_enter = td5_plat_input_key_pressed(0x1C);
+                /* [PORT ENHANCEMENT 2026-06] Aggregate joystick nav from every human
+                 * player's in-race device (dpad/left stick = move, A = confirm) so the
+                 * pause menu is navigable with the pad, not just the keyboard. The
+                 * frontend scan handles are released while the race owns the device,
+                 * so this reads each player's exclusive device directly. */
+                uint32_t jnav = 0;
+                {
+                    int hp = g_td5.num_human_players;
+                    if (hp < 1) hp = 1;
+                    if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+                    for (int pi = 0; pi < hp; pi++) jnav |= td5_plat_input_joystick_nav(pi);
+                }
+                int key_down  = td5_plat_input_key_pressed(0xD0) || (jnav & 0x08);
+                int key_up    = td5_plat_input_key_pressed(0xC8) || (jnav & 0x04);
+                int key_left  = td5_plat_input_key_pressed(0xCB) || (jnav & 0x01);
+                int key_right = td5_plat_input_key_pressed(0xCD) || (jnav & 0x02);
+                int key_enter = td5_plat_input_key_pressed(0x1C) || (jnav & 0x10); /* A = confirm */
 
                 /* Navigation: 5 selectable items (CD Music / SFX / Audio3 / Continue / Exit).
                  * [CONFIRMED @ 0x0043BF70] RunAudioOptionsOverlay: 5 rows total. */
@@ -3254,13 +3413,22 @@ int td5_game_run_race_frame(void) {
                     }
                 }
 
+                /* Joystick B = back = continue (close the menu), mirroring the
+                 * frontend B=back convention. [PORT ENHANCEMENT 2026-06] */
+                {
+                    static int s_prev_jb = 0;
+                    int jb = (jnav & 0x20) ? 1 : 0;
+                    if (jb && !s_prev_jb) s_pause_menu_active = 0;
+                    s_prev_jb = jb;
+                }
+
                 s_prev_down = key_down; s_prev_up = key_up;
                 s_prev_left = key_left; s_prev_right = key_right;
                 s_prev_enter = key_enter;
             }
 
-            /* ESC again = continue */
-            if (esc_edge && pause_menu_was_active) {
+            /* ESC again = continue; the PAUSE action also toggles the menu shut. */
+            if ((esc_edge || pause_act_edge) && pause_menu_was_active) {
                 s_pause_menu_active = 0;
             }
 
@@ -3640,6 +3808,24 @@ int td5_game_run_race_frame(void) {
         /* --- VFX tick (tire tracks, particle lifetimes) --- */
         td5_vfx_tick();
 
+        /* --- Weather density zoning (per active view) ---
+         * Orig UpdateAmbientParticleDensityForSegment @ 0x004464B0, called in
+         * RunRaceFrame's sim phase right after the general particle update
+         * (UpdateRaceParticleEffects), once per view, unrolled @ 0x0042ba3c /
+         * 0x0042ba5e. Walks the LEVELINF density-pair table keyed on the actor's
+         * current span (+0x80) and ramps the active raindrop count +/-1 per
+         * sub-tick toward the per-span target, so rain fades in/out as the
+         * player drives through rain zones. Inside the per-sub-tick loop to
+         * match the original's cadence. */
+        {
+            int wview = g_td5.viewport_count > 0 ? g_td5.viewport_count : 1;
+            if (wview > 2) wview = 2;
+            for (int wv = 0; wv < wview; wv++) {
+                TD5_Actor *wa = td5_game_get_actor(g_actorSlotForView[wv]);
+                if (wa) td5_vfx_update_ambient_density(wa, wv);
+            }
+        }
+
         /* --- Per-actor tire-track emitter dispatch moved to render path ---
          * Original: UpdateTireTrackEmitterDispatch @ 0x43FAE0 has a SINGLE
          * caller — RenderRaceActorForView @ 0x0040C120 (LAB_0040c7ba). Sim
@@ -3883,6 +4069,17 @@ int td5_game_run_race_frame(void) {
         if (!td5_render_photobooth_active()) {
             td5_vfx_render_tire_tracks();
             td5_vfx_render_tire_marks();
+            /* Weather rain streaks — orig RenderAmbientParticleStreaks @ 0x00446560,
+             * called per view in RunRaceFrame's draw phase AFTER the actors + tire
+             * tracks and BEFORE the general particle draw (order @ 0x0042be9a:
+             * RenderRaceActorsForView -> RenderTireTrackPool -> RenderAmbient-
+             * ParticleStreaks -> DrawRaceParticleEffects). Only rain renders (snow
+             * gated off, faithful). sim_budget = port's normalized per-frame sim
+             * budget (frame_dt*30), the analog of orig (int)g_simTickBudget. */
+            {
+                TD5_Actor *wa = td5_game_get_actor(g_actorSlotForView[vp]);
+                if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
+            }
             td5_vfx_draw_particles(vp);
         }
         td5_render_flush_translucent();
@@ -3954,7 +4151,7 @@ int td5_game_run_race_frame(void) {
     /* Feed camera position into the sound system as listener position.
      * g_camWorldPos is in 24.8 fixed-point, which is the same coordinate
      * space td5_sound expects (matching actor world_pos). */
-    for (int vp = 0; vp < (g_td5.split_screen_mode ? 2 : 1); vp++) {
+    for (int vp = 0; vp < g_td5.viewport_count && vp < TD5_MAX_VIEWPORTS; vp++) {
         td5_sound_set_listener_pos(vp,
             g_camWorldPos[vp][0],
             g_camWorldPos[vp][1],
@@ -5379,52 +5576,65 @@ void td5_game_init_viewport_layout(void) {
     int w = g_td5.render_width;
     int h = g_td5.render_height;
 
-    switch (g_td5.split_screen_mode) {
-    case 0: /* Single player -- fullscreen */
-        g_td5.viewport_count = 1;
-        s_viewports[0].x = 0;
-        s_viewports[0].y = 0;
-        s_viewports[0].w = w;
-        s_viewports[0].h = h;
-        break;
+    /* [PORT ENHANCEMENT] N-way split. Viewport count = number of local human
+     * players (each human gets its own pane). split_screen_mode==0 -> single
+     * fullscreen view. For 2 views the legacy orientation flag is honoured
+     * (mode 1 = top/bottom, mode 2 = left/right). 3 views = 3 horizontal strips
+     * (user pick); 4+ = a near-square grid (4=2x2, 5-6=3x2, 7-9=3x3). The
+     * original was hard-capped at 2 viewports (RunRaceFrame 0x42B580) — this
+     * deliberately deviates. */
+    int views = g_td5.num_human_players;
+    int cols, rows;
+    if (views < 1) views = 1;
+    if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
+    if (g_td5.split_screen_mode == 0) views = 1;
 
-    case 1: /* Horizontal split -- top/bottom */
-        g_td5.viewport_count = 2;
-        s_viewports[0].x = 0;
-        s_viewports[0].y = 0;
-        s_viewports[0].w = w;
-        s_viewports[0].h = h / 2;
+    g_td5.viewport_count = views;
 
-        s_viewports[1].x = 0;
-        s_viewports[1].y = h / 2;
-        s_viewports[1].w = w;
-        s_viewports[1].h = h / 2;
-        break;
-
-    case 2: /* Vertical split -- left/right */
-        g_td5.viewport_count = 2;
-        s_viewports[0].x = 0;
-        s_viewports[0].y = 0;
-        s_viewports[0].w = w / 2;
-        s_viewports[0].h = h;
-
-        s_viewports[1].x = w / 2;
-        s_viewports[1].y = 0;
-        s_viewports[1].w = w / 2;
-        s_viewports[1].h = h;
-        break;
-
-    default:
-        g_td5.viewport_count = 1;
-        s_viewports[0].x = 0;
-        s_viewports[0].y = 0;
-        s_viewports[0].w = w;
-        s_viewports[0].h = h;
-        break;
+    if (views <= 1) {
+        s_viewports[0].x = 0; s_viewports[0].y = 0;
+        s_viewports[0].w = w; s_viewports[0].h = h;
+        TD5_LOG_I(LOG_TAG, "Viewport layout: single %dx%d", w, h);
+        return;
     }
 
-    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d, count=%d, %dx%d",
-              g_td5.split_screen_mode, g_td5.viewport_count, w, h);
+    /* [PORT ENHANCEMENT 2026-06] Honour the Multiplayer Options layout pick when a
+     * valid grid was committed (g_td5.split_grid_cols/rows, resolved in
+     * frontend_init_race_schedule from the player count + chosen layout). The N
+     * players fill the first N cells of the cols x rows grid (row-major); any
+     * extra "missing" cells stay empty here (their content is a deferred
+     * follow-up). When no grid was committed (AutoRace harness / legacy launch
+     * paths leave cols/rows 0), fall back to the automatic ladder. */
+    cols = g_td5.split_grid_cols;
+    rows = g_td5.split_grid_rows;
+    if (cols < 1 || rows < 1 || cols * rows < views) {
+        if (views == 2) {
+            if (g_td5.split_screen_mode == 2) { cols = 2; rows = 1; }  /* left | right */
+            else                              { cols = 1; rows = 2; }  /* top / bottom */
+        } else if (views == 3) {
+            cols = 1; rows = 3;                 /* 3 horizontal strips */
+        } else {
+            cols = (views <= 4) ? 2 : 3;        /* 4=2x2, 5-6=3x2, 7-9=3x3 */
+            rows = (views + cols - 1) / cols;
+        }
+    }
+
+    {
+        int cw = w / cols;
+        int ch = h / rows;
+        for (int vp = 0; vp < views; vp++) {
+            int col = vp % cols;
+            int row = vp / cols;
+            s_viewports[vp].x = col * cw;
+            s_viewports[vp].y = row * ch;
+            s_viewports[vp].w = cw;
+            s_viewports[vp].h = ch;
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d count=%d grid=%dx%d %dx%d",
+              g_td5.split_screen_mode, g_td5.num_human_players,
+              g_td5.viewport_count, cols, rows, w, h);
 }
 
 /* ========================================================================
@@ -5538,7 +5748,11 @@ void td5_game_store_rounded_vec3(const float *in, int32_t *out) {
  * ======================================================================== */
 
 int td5_game_get_player_slot(int viewport) {
-    if (viewport < 0 || viewport > 1) return 0;
+    /* [PORT: N-way] was capped at viewports 0/1, so views 2..N used slot 0's
+     * span as their actor-cull-window centre + camera-target — their own car
+     * was culled (invisible) whenever it drifted >±64 spans from slot 0 (e.g.
+     * after a recovery). Honour every viewport now. */
+    if (viewport < 0 || viewport >= TD5_MAX_VIEWPORTS) return 0;
     return g_actorSlotForView[viewport];
 }
 int td5_game_is_split_screen(void) {

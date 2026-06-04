@@ -226,6 +226,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Display", "Fogging",       g_td5.ini.fog_enabled);
     td5_ini_write_int("Display", "SpeedUnits",    g_td5.ini.speed_units);
     td5_ini_write_int("Display", "CameraDamping", g_td5.ini.camera_damping);
+    td5_ini_write_int("Display", "DisplayMode",   td5_save_get_display_mode());
 
     /* Audio */
     td5_ini_write_int("Audio", "SFXVolume",   g_td5.ini.sfx_volume);
@@ -285,6 +286,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Fogging",              &g_td5.ini.fog_enabled },
         { "SpeedUnits",           &g_td5.ini.speed_units },
         { "CameraDamping",        &g_td5.ini.camera_damping },
+        { "DisplayMode",          &g_td5.ini.display_mode },
         /* Audio */
         { "SFXVolume",            &g_td5.ini.sfx_volume },
         { "MusicVolume",          &g_td5.ini.music_volume },
@@ -301,6 +303,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Player1Joystick",      &g_td5.ini.player1_joystick },
         { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
+        { "OtherPlayersAI",       &g_td5.ini.others_ai },
         { "SoloAISlot",           &g_td5.ini.solo_ai_slot },
         { "SoloRace",             &g_td5.ini.solo_race },
         { "MaxSpan",              &g_td5.ini.max_span },
@@ -310,6 +313,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "DefaultTrack",         &g_td5.ini.default_track },
         { "DefaultGameType",      &g_td5.ini.default_game_type },
         { "DefaultOpponents",     &g_td5.ini.default_opponents },
+        { "CircuitMinimap",       &g_td5.ini.circuit_minimap },
+        { "DefaultPlayers",       &g_td5.ini.default_players },
         { "SkipIntro",            &g_td5.ini.skip_intro },
         { "DebugOverlay",         &g_td5.ini.debug_overlay },
         { "DebugCollisions",      &g_td5.ini.debug_collisions },
@@ -504,6 +509,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.fog_enabled    = td5_ini_int("Display", "Fogging", 1);
     g_td5.ini.speed_units    = td5_ini_int("Display", "SpeedUnits", 0);
     g_td5.ini.camera_damping = td5_ini_int("Display", "CameraDamping", 5);
+    g_td5.ini.display_mode   = td5_ini_int("Display", "DisplayMode", 0);
 
     /* Audio */
     g_td5.ini.sfx_volume    = td5_ini_int("Audio", "SFXVolume", 80);
@@ -527,6 +533,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.default_track     = td5_ini_int("Game", "DefaultTrack", 0);
     g_td5.ini.default_game_type = td5_ini_int("Game", "DefaultGameType", 0);
     g_td5.ini.default_opponents = td5_ini_int("Game", "DefaultOpponents", -1); /* -1 = full grid */
+    g_td5.ini.circuit_minimap   = td5_ini_int("Game", "CircuitMinimap", 1);    /* 1 = minimap on circuit tracks too */
+    g_td5.ini.default_players   = td5_ini_int("Game", "DefaultPlayers", -1);   /* -1 = schedule default; >=2 = N-way split */
     g_td5.ini.skip_intro        = td5_ini_int("Game", "SkipIntro", 1);
     g_td5.ini.debug_overlay     = td5_ini_int("Game", "DebugOverlay", 0);
     g_td5.ini.debug_collisions  = td5_ini_int("Debug", "Collisions", 0);
@@ -540,6 +548,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * matching the original attract-mode autopilot (InitializeRaceSession
      * 0x0042ACCF writes slot[0].state = 1 - g_attractModeDemoActive). */
     g_td5.ini.player_is_ai      = td5_ini_int("GameOptions", "PlayerIsAI", 0);
+    /* OtherPlayersAI: AI-drive every local human slot except slot 0 (drive P1). */
+    g_td5.ini.others_ai         = td5_ini_int("GameOptions", "OtherPlayersAI", 0);
     g_td5.ini.solo_ai_slot      = td5_ini_int("GameOptions", "SoloAISlot", 0);
     g_td5.ini.solo_race         = td5_ini_int("GameOptions", "SoloRace", 0);
     g_td5.ini.max_span          = td5_ini_int("GameOptions", "MaxSpan", 0);
@@ -656,6 +666,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Logging — defaults preserve historic behavior (master on, INFO+, all
      * categories on, wrapper on). Flip to A/B-test perf without rebuilding. */
     g_td5.ini.log_frontend_draw = td5_ini_int("Logging", "FrontendDraw", 0);
+    /* Resolution-independent vector frontend (MSDF text). Default on. */
+    g_td5.ini.vector_ui     = td5_ini_int("Frontend", "VectorUI", 1);
     g_td5.ini.log_enabled   = td5_ini_int("Logging", "Enabled",  1);
     g_td5.ini.log_min_level = td5_ini_int("Logging", "MinLevel", 1);
     g_td5.ini.log_frontend  = td5_ini_int("Logging", "Frontend", 1);
@@ -735,6 +747,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.auto_race              = 0;   /* always boot the normal menu flow */
     g_td5.ini.start_screen           = -1;  /* no jump-to-screen test harness   */
     g_td5.ini.default_opponents      = -1;  /* full grid (no AutoRace override)  */
+    g_td5.ini.default_players        = -1;  /* schedule default (no N-way override) */
     g_td5.ini.player_is_ai           = 0;   /* the human drives                 */
     g_td5.ini.debug_overlay          = 0;   /* no HUD debug text overlay        */
     g_td5.ini.debug_collisions       = 0;   /* no collision wireframe overlay   */

@@ -225,9 +225,9 @@ static int32_t s_smoke_vel_y = 0x600;
  * ======================================================================== */
 
 /* --- Race particle system --- */
-static uint8_t  s_particle_banks[2][TD5_VFX_PARTICLE_BANK_SIZE]; /* 2 views */
-static uint8_t  s_sprite_render_flags[2][TD5_VFX_SPRITE_BATCH_COUNT];
-static VfxSpriteQuad s_sprite_batches[2 * TD5_VFX_SPRITE_BATCH_COUNT];
+static uint8_t  s_particle_banks[TD5_MAX_VIEWPORTS][TD5_VFX_PARTICLE_BANK_SIZE]; /* per-view (PORT: N-way) */
+static uint8_t  s_sprite_render_flags[TD5_MAX_VIEWPORTS][TD5_VFX_SPRITE_BATCH_COUNT];
+static VfxSpriteQuad s_sprite_batches[TD5_MAX_VIEWPORTS * TD5_VFX_SPRITE_BATCH_COUNT];
 static int      s_current_view_index;
 static unsigned int s_vfx_debug_frame;
 
@@ -246,12 +246,12 @@ static float    s_smoke_page;
 static float    s_smoke_variant_uv[8][5]; /* u0, v0, width, height, page */
 
 /* --- Weather overlay --- */
-static VfxWeatherParticle *s_weather_buf[2];   /* per-view particle buffers */
+static VfxWeatherParticle *s_weather_buf[TD5_MAX_VIEWPORTS];   /* per-view particle buffers */
 static int      s_weather_type;                /* 0=rain, 1=snow(cut), 2=clear */
-static int      s_weather_target_density[2];   /* target particle count per view */
-static int      s_weather_active_count[2];     /* current active count per view */
-static float    s_weather_prev_cam[2][3];      /* previous camera position per view */
-static float    s_weather_prev_budget[2];      /* previous sim_budget per view */
+static int      s_weather_target_density[TD5_MAX_VIEWPORTS];   /* target particle count per view */
+static int      s_weather_active_count[TD5_MAX_VIEWPORTS];     /* current active count per view */
+static float    s_weather_prev_cam[TD5_MAX_VIEWPORTS][3];      /* previous camera position per view */
+static float    s_weather_prev_budget[TD5_MAX_VIEWPORTS];      /* previous sim_budget per view */
 static float    s_weather_sprite_page;         /* texture page for weather sprite */
 
 /* Weather sprite UV (rain/snow) */
@@ -333,7 +333,6 @@ static const float WEATHER_DEPTH_OFFSET = 2147.0f; /* DAT_0045d7a8 */
 static const float WEATHER_Y_OFFSET = 1000.0f;     /* DAT_0045d7a4 */
 static const float TRACK_Y_OFFSET   = -20.0f;      /* DAT_0045d6ac */
 static const float TAILLIGHT_Z_BIAS = -24.0f;      /* DAT_0045d5d4 */
-static const float VIEW_SCALE       = 4096.0f;     /* DAT_0045d604 */
 
 /* ========================================================================
  * Helper: extract UV coords from a TD5_AtlasEntry (static.hed sprite)
@@ -683,7 +682,7 @@ void td5_vfx_project_particles(int view_index) {
     float cam_x, cam_y, cam_z;
     td5_camera_get_position(&cam_x, &cam_y, &cam_z);
 
-    uint8_t *bank = s_particle_banks[view_index & 1];
+    uint8_t *bank = s_particle_banks[(view_index >= 0 && view_index < TD5_MAX_VIEWPORTS) ? view_index : 0];
 
     for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
         uint8_t *slot = bank + i * TD5_VFX_PARTICLE_SLOT_STRIDE;
@@ -1104,16 +1103,22 @@ void td5_vfx_update_ambient_density(TD5_Actor *actor, int view_index) {
     int16_t current_segment;
     memcpy(&current_segment, (uint8_t *)actor + 0x80, sizeof(int16_t));
 
-    /* Walk density pair array from track environment config.
-     * Original: pairs at gTrackEnvironmentConfig + 0x36, count at +0x2c.
-     * Each pair is 4 bytes: [int16 segment_id, int16 density]. */
+    /* Walk density pair array from track environment config (LEVELINF.DAT).
+     * Original UpdateAmbientParticleDensityForSegment @ 0x004464B0:
+     *   count @ config+0x2C (int32, loop bound)            [CONFIRMED @ 0x004464C8]
+     *   pair[0].seg @ config+0x34, pair[0].density @ +0x36 [CONFIRMED @ 0x004464D1
+     *     LEA EDX,[EDI+0x36]; MOVSX seg=[EDX-2]; density=[EDX]; ADD EDX,4 stride]
+     * Each pair is 4 bytes: [int16 segment_id, int16 density], both sign-extended.
+     * (Was config+0x36 here — off by 2; that read density-as-seg and produced
+     *  garbage zoning. e.g. Moscow/level001 pairs at +0x34 = {100,32},{400,0},
+     *  {900,0},{1000,128},{1500,128},{1600,0}.) */
     if (g_track_environment_config) {
         int32_t pair_count;
         memcpy(&pair_count, g_track_environment_config + 0x2C, sizeof(int32_t));
         if (pair_count > TD5_VFX_MAX_DENSITY_PAIRS)
             pair_count = TD5_VFX_MAX_DENSITY_PAIRS;
 
-        uint8_t *pair_base = g_track_environment_config + 0x36;
+        uint8_t *pair_base = g_track_environment_config + 0x34;
         for (int p = 0; p < pair_count; p++) {
             int16_t seg_id, density;
             memcpy(&seg_id, pair_base + p * 4, sizeof(int16_t));
@@ -1123,6 +1128,14 @@ void td5_vfx_update_ambient_density(TD5_Actor *actor, int view_index) {
                 int target = (int)density;
                 if (target > TD5_VFX_MAX_WEATHER_PARTICLES)
                     target = TD5_VFX_MAX_WEATHER_PARTICLES;
+                /* Decision-point log: fires only on a zone-boundary crossing that
+                 * changes the target (~6x per race max), not per-frame. */
+                if (target != s_weather_target_density[vi]) {
+                    TD5_LOG_I(LOG_TAG,
+                              "weather zone: view=%d span=%d target_density=%d active=%d",
+                              vi, (int)current_segment, target,
+                              s_weather_active_count[vi]);
+                }
                 s_weather_target_density[vi] = target;
             }
         }
@@ -1172,6 +1185,29 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
     if (active_count <= 0) return;
     if (!s_weather_buf[vi]) return;
 
+    /* Rain streaks are a fixed SCREEN overlay, NOT world geometry. The original
+     * builds pre-transformed (XYZRHW) screen-space quads [CONFIRMED @
+     * BuildSpriteQuadTemplate 0x00432bd0; the matrix is NOT applied] and submits
+     * them through the generic translucent path. The port's equivalent
+     * pre-transformed submit is td5_render_submit_translucent_hud (alpha blend);
+     * routing these through td5_render_queue_translucent_batch (TD5_PrimitiveCmd
+     * records) mis-parsed the 0xB8 sprite quad and projected it through the world
+     * matrix. RAINDROP @ static.hed slot 5 (3x8) is a real ALPHA-channel streak
+     * (reddish-white, alpha 128..215), so alpha-blend (NOT additive). */
+
+    /* Normalize the RAINDROP texel UVs to [0,1] for the D3D11 sampler, and fetch
+     * the viewport center: the projection below yields ORIGIN-relative coords,
+     * but the pre-transformed sprite path expects pixel coords (top-left origin),
+     * so the center is added per-vertex. */
+    int wtw = 256, wth = 256;
+    td5_plat_render_get_texture_dims((int)s_weather_sprite_page, &wtw, &wth);
+    float weather_nu0 = s_weather_u0 / (float)wtw;
+    float weather_nv0 = s_weather_v0 / (float)wth;
+    float weather_nu1 = s_weather_u1 / (float)wtw;
+    float weather_nv1 = s_weather_v1 / (float)wth;
+    float screen_cx = td5_render_get_center_x();
+    float screen_cy = td5_render_get_center_y();
+
     /* Sub-tick camera position interpolation.
      * cam = (1/256) * (actor->linear_velocity * g_subTickFraction + actor->world_pos)
      * Original reads actor+0x1CC/0x1D0/0x1D4 (velocity) and actor+0x1FC/0x200/0x204 (position) */
@@ -1191,53 +1227,14 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
     float cam_y = FP_TO_FLOAT * ((float)vel_y * sub_tick + (float)pos_y);
     float cam_z = FP_TO_FLOAT * ((float)vel_z * sub_tick + (float)pos_z);
 
-    /* Rain splash spawn: random check proportional to density */
-    int splash_roll = rand() & 0x7F;
-    if (splash_roll <= active_count && active_count > 0) {
-        /* SpawnAmbientParticleStreak -- spawns RAINSPL splash in general pool.
-         * Allocates from general particle bank and builds a splash sprite quad
-         * using the RAINSPL UV coordinates extracted at init time. */
-        int32_t actor_speed;
-        memcpy(&actor_speed, ap + 0x318, 4); /* lateral_speed as seed */
-
-        /* Find a free particle slot in the view's bank */
-        uint8_t *bank = s_particle_banks[vi];
-        for (int s = 0; s < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; s++) {
-            uint8_t *pslot = bank + s * TD5_VFX_PARTICLE_SLOT_STRIDE;
-            if (pslot[PSLOT_FLAGS] == 0) {
-                /* Found free slot -- initialize as rain splash particle */
-                memset(pslot, 0, TD5_VFX_PARTICLE_SLOT_STRIDE);
-                pslot[PSLOT_FLAGS] = 0xE0; /* active | projected | blend */
-                pslot[PSLOT_TYPE]  = 1;    /* type 1 = rain splash */
-                PSLOT_WR16(pslot, PSLOT_LIFETIME, 20);
-
-                /* Seed position near camera at ground level */
-                int32_t splash_wx = pos_x + (rand() % 8000 - 4000) * 256;
-                int32_t splash_wy = pos_y;
-                int32_t splash_wz = pos_z + (rand() % 8000 - 4000) * 256;
-                PSLOT_WR32(pslot, PSLOT_POS_X, splash_wx);
-                PSLOT_WR32(pslot, PSLOT_POS_Y, splash_wy);
-                PSLOT_WR32(pslot, PSLOT_POS_Z, splash_wz);
-
-                /* Find free sprite batch slot */
-                for (int b = 0; b < TD5_VFX_SPRITE_BATCH_COUNT; b++) {
-                    if (s_sprite_render_flags[vi][b] == 0) {
-                        s_sprite_render_flags[vi][b] = 0x80;
-                        pslot[PSLOT_BATCH] = (uint8_t)b;
-
-                        VfxSpriteQuad *sq = &s_sprite_batches[vi * TD5_VFX_SPRITE_BATCH_COUNT + b];
-                        vfx_build_sprite_quad(sq, 0.0f, 0.0f, 128.0f,
-                                               4.0f, 4.0f,
-                                               s_rainspl_u0, s_rainspl_v0,
-                                               s_rainspl_u1, s_rainspl_v1,
-                                               s_rainspl_page, 0xFFFFFFFF);
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-    }
+    /* RAINSPL ground-splash spawn intentionally DROPPED (user request 2026-06-03).
+     * The original spawns world-space RAINSPL "circular droplet" splashes at
+     * ground level (z=0) into the general particle pool [orig SpawnAmbientParticle-
+     * Streak @ 0x0042a6b0]. They render as world-locked sprites on the road. The
+     * user prefers the screen-space rain LINES (streaks) alone, so the splash
+     * spawn is removed — a deliberate, documented deviation from the original.
+     * (Re-enable by restoring the SpawnAmbientParticleStreak port here, seeding
+     * a type-1 splash slot in s_particle_banks[vi] at pos +/- rand world coords.) */
 
     /* Pause gate: if paused, freeze particle positions */
     if (g_td5.paused) {
@@ -1256,9 +1253,12 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
     float cam_delta_y = cam_y - s_weather_prev_cam[cam_idx][1];
     float cam_delta_z = cam_z - s_weather_prev_cam[cam_idx][2];
 
-    float motion_x = wind_x - cam_delta_x;
-    float motion_y = wind_y - cam_delta_y;
-    float motion_z = wind_z - cam_delta_z;
+    /* Contiguous vec3 (not 3 separate locals) so td5_render_transform_vec3,
+     * which reads in[0..2], is well-defined. */
+    float motion[3];
+    motion[0] = wind_x - cam_delta_x;
+    motion[1] = wind_y - cam_delta_y;
+    motion[2] = wind_z - cam_delta_z;
 
     if (!g_td5.paused) {
         s_weather_prev_cam[cam_idx][0] = cam_x;
@@ -1266,17 +1266,36 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
         s_weather_prev_cam[cam_idx][2] = cam_z;
     }
 
-    /* Transform motion vector to view space via render rotation matrix */
+    /* Transform the world-space (wind + camera-motion) vector into VIEW space
+     * using the CAMERA rotation, so the streaks (a) follow the car's heading —
+     * turning/looking around tilts the rain — and (b) fall in the correct screen
+     * direction. The original calls LoadRenderRotationMatrix(camera) before this
+     * transform [orig RenderAmbientParticleStreaks]; the port was MISSING that
+     * load, so transform_vec3 ran against a stale/identity matrix -> rain ignored
+     * car rotation and streaked upward. Mirrors td5_vfx_draw_particles' setup. */
+    TD5_Mat3x3 weather_cam_rot;
+    td5_camera_get_basis(&weather_cam_rot.m[0], &weather_cam_rot.m[3],
+                         &weather_cam_rot.m[6]);
+    td5_render_push_transform();
+    td5_render_load_rotation(&weather_cam_rot);
     float view_motion[3];
-    td5_render_transform_vec3(&motion_x, view_motion);
+    td5_render_transform_vec3(motion, view_motion);
+    td5_render_pop_transform();
 
-    /* Scale view-space motion by VIEW_SCALE (4096.0) / world_scale
-     * Original: DAT_00467368 is a world scale factor = g_worldToRenderScale
-     * which is 1/256 = 0.00390625. We use it as the denominator. */
-    float world_scale = (g_worldToRenderScale > 0.0f) ? g_worldToRenderScale : 1.0f;
-    float advect_x = view_motion[0] * VIEW_SCALE / world_scale;
-    float advect_y = view_motion[1] * VIEW_SCALE / world_scale;
-    float advect_z = view_motion[2] * VIEW_SCALE / world_scale;
+    /* Per-frame advance. Original [CONFIRMED @ 0x004466fe-0x0044674f]:
+     *   advect = view_motion * 4096.0 (DAT_0045d604) / (float)g_projectionDepthBias
+     * where g_projectionDepthBias @ 0x00467368 is INTEGER 1 (FILD), NOT a scale.
+     * The prior port mis-identified 0x00467368 as g_worldToRenderScale (1/256)
+     * and DIVIDED by it, so advect = view_motion * 4096 * 256 (~1e6) -> every
+     * particle left the +/-(4000,3000,1947) bounds in a single frame and was
+     * recycled before it ever drew. That is why no streaks rendered (the only
+     * visible weather was the world-space RAINSPL splashes). The 4096 numerator
+     * and the runtime projection bias cancel to ~unity for an in-bounds fall of
+     * ~|wind*sim_budget| units/frame, so use net x1 (view_motion). Wind is
+     * (0,-250,0)*sim_budget minus camera delta, already rotated to view space. */
+    float advect_x = view_motion[0];
+    float advect_y = view_motion[1];
+    float advect_z = view_motion[2];
 
     /* Per-particle update and render loop */
     VfxWeatherParticle *buf = s_weather_buf[vi];
@@ -1342,6 +1361,12 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
             bot_x = prev_sx; bot_y = prev_sy; bot_depth = prev_depth;
         }
 
+        /* Re-center origin-relative projected coords into viewport pixel space
+         * so the streak lands on screen (the pre-transformed sprite path uses a
+         * top-left origin). */
+        top_x += screen_cx; top_y += screen_cy;
+        bot_x += screen_cx; bot_y += screen_cy;
+
         /* Build a 1-pixel-wide quad connecting the two projected points.
          * Original sets vertex positions with +/- HALF_PIXEL X offset. */
         VfxSpriteQuad *quad = &p->quad;
@@ -1354,31 +1379,33 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
         /* v0 = top-left */
         quad->v0_x = top_x - HALF_PIXEL;  quad->v0_y = top_y;
         quad->v0_z = avg_depth;            quad->v0_rhw = rhw;
-        quad->v0_color = 0xFFFFFFFF;       quad->v0_u = s_weather_u0;
-        quad->v0_v = s_weather_v0;
+        quad->v0_color = 0xFFFFFFFF;       quad->v0_u = weather_nu0;
+        quad->v0_v = weather_nv0;
 
         /* v1 = top-right */
         quad->v1_x = top_x + HALF_PIXEL;  quad->v1_y = top_y;
         quad->v1_z = avg_depth;            quad->v1_rhw = rhw;
-        quad->v1_color = 0xFFFFFFFF;       quad->v1_u = s_weather_u1;
-        quad->v1_v = s_weather_v0;
+        quad->v1_color = 0xFFFFFFFF;       quad->v1_u = weather_nu1;
+        quad->v1_v = weather_nv0;
 
         /* v2 = bottom-right */
         quad->v2_x = bot_x + HALF_PIXEL;  quad->v2_y = bot_y;
         quad->v2_z = avg_depth;            quad->v2_rhw = rhw;
-        quad->v2_color = 0xFFFFFFFF;       quad->v2_u = s_weather_u1;
-        quad->v2_v = s_weather_v1;
+        quad->v2_color = 0xFFFFFFFF;       quad->v2_u = weather_nu1;
+        quad->v2_v = weather_nv1;
 
         /* v3 = bottom-left */
         quad->v3_x = bot_x - HALF_PIXEL;  quad->v3_y = bot_y;
         quad->v3_z = avg_depth;            quad->v3_rhw = rhw;
-        quad->v3_color = 0xFFFFFFFF;       quad->v3_u = s_weather_u0;
-        quad->v3_v = s_weather_v1;
+        quad->v3_color = 0xFFFFFFFF;       quad->v3_u = weather_nu0;
+        quad->v3_v = weather_nv1;
 
         quad->texture_page = s_weather_sprite_page;
 
-        /* Submit to translucent pipeline */
-        td5_render_queue_translucent_batch(quad);
+        /* Pre-transformed screen-space submit (alpha-blend HUD preset: LINEAR +
+         * alpha_ref=1, z-test off) — keeps the rain fixed on the viewport on top
+         * of the 3D scene instead of locking it to world geometry. */
+        td5_render_submit_translucent_hud((uint16_t *)quad);
     }
 }
 
