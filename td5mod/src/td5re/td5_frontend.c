@@ -208,6 +208,9 @@ static uint32_t s_fe_gamepad_nav;
  * device last gave input (0 = keyboard, >=1 = enumerated joystick). It becomes
  * the driver (player 0's device) for single-player races. */
 static int s_active_menu_device = 0;
+/* [PORT ENHANCEMENT 2026-06] hot-swap: re-enumerate joysticks periodically so a
+ * controller plugged in at the main menu is picked up without leaving the screen. */
+static unsigned s_fe_rescan_tick = 0;
 static uint32_t s_screen_entry_timestamp;
 static uint32_t s_anim_start_ms = 0;
 static uint32_t s_anim_elapsed_ms = 0;
@@ -519,6 +522,10 @@ static int      s_ctrl_capturing     = 0;
 /* [PORT ENHANCEMENT 2026-06] "REMAP ALL" sequential mode: capture every action
  * one by one (the original's sequential flow, re-added as an option). */
 static int      s_ctrl_remap_all     = 0;
+/* Capture is two-phase: 0 = waiting for the device to return to NEUTRAL (so a
+ * held input from the previous bind / the confirm press isn't re-captured), then
+ * 1 = armed and listening for one fresh input. */
+static int      s_ctrl_capture_armed = 0;
 /* [CONFIRMED @ 0x40FE00 / DAT_00464054]: 16-byte scancode capture buffer */
 static uint8_t  s_ctrl_kb_scancodes[16];
 /* [PORT ENHANCEMENT 2026-06] keyboard state snapshot at capture-begin, so a key
@@ -2705,6 +2712,14 @@ static void frontend_poll_input(void) {
     /* Active-controller tracking: keyboard input keeps device 0 active. */
     if (left_now || right_now || up_now || down_now || enter_now)
         s_active_menu_device = 0;
+
+    /* [PORT ENHANCEMENT 2026-06] Hot-swap detection: re-enumerate DirectInput
+     * joysticks every ~90 frames (~1.5s @ 60fps) so a controller connected while
+     * sitting on a menu is detected without having to leave/re-enter the screen.
+     * Cheap (an IDirectInput8::EnumDevices pass that early-outs when the count is
+     * unchanged); only the scan handles are rebuilt when the device set changes. */
+    if ((++s_fe_rescan_tick % 90u) == 0u)
+        td5_plat_input_rescan_devices();
 
     /* [PORT ENHANCEMENT 2026-06] Gamepad navigation: ANY connected joystick's
      * dpad/left stick moves the cursor, A (button 0) confirms, B (button 1) backs
@@ -5744,9 +5759,11 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
     if (s_inner_state != 10) return;   /* only the interactive list state */
 
     snprintf(hdr, sizeof hdr, "CONTROLLER SETUP - PLAYER %d", s_ctrl_player + 1);
-    fe_draw_text_centered(320.0f * sx, 46.0f * sy, hdr, 0xFFCCCCCC, sx * 0.75f, sy * 0.75f);
+    fe_draw_text_centered(320.0f * sx, 34.0f * sy, hdr, 0xFFCCCCCC, sx * 0.75f, sy * 0.75f);
     hint = s_ctrl_capturing
-        ? "PRESS A KEY / BUTTON / AXIS   (ESC = CANCEL)"
+        ? (s_ctrl_capture_armed
+            ? "PRESS A KEY / BUTTON / AXIS   (ESC = CANCEL)"
+            : "RELEASE TO CONTINUE...   (ESC = CANCEL)")
         : "SELECT AN ACTION TO REMAP   -   REMAP ALL = ONE BY ONE";
     fe_draw_text_centered(320.0f * sx, 350.0f * sy, hint, 0xFF999999, sx * 0.58f, sy * 0.58f);
     /* The per-action labels/values are drawn post-button in
@@ -5772,10 +5789,13 @@ static void frontend_render_controller_binding_labels(float sx, float sy) {
         if (!s_buttons[j].active) continue;
         bcx = ((float)s_buttons[j].x + (float)s_buttons[j].w * 0.5f) * sx;
         vx  = ((float)s_buttons[j].x + (float)s_buttons[j].w + 6.0f) * sx;
-        by  = (float)(s_buttons[j].y + 5) * sy;
-        lab = (j < 10) ? k_ctrl_action_labels[j] : "?";   /* PAUSE shown as "?" */
+        by  = ((float)s_buttons[j].y + ((float)s_buttons[j].h - (float)FONT_CELL * ts) * 0.5f) * sy;
+        lab = (j < 10) ? k_ctrl_action_labels[j] : "PAUSE MENU";   /* action 10 = pause */
         col = 0xFFFFFFFFu;
-        if (s_ctrl_capturing && j == s_ctrl_sel_action) { val = "PRESS"; col = 0xFF33FF33u; }
+        if (s_ctrl_capturing && j == s_ctrl_sel_action) {
+            val = s_ctrl_capture_armed ? "PRESS" : "...";
+            col = 0xFF33FF33u;
+        }
         else if (kbd) val = ctrl_scancode_name(s_ctrl_kb_scancodes[j]);
         else { td5_plat_input_describe_binding(s_ctrl_action_bind[s_ctrl_player][j],
                                                vb, (int)sizeof vb); val = vb; }
@@ -5793,7 +5813,7 @@ static void frontend_render_controller_binding_labels(float sx, float sy) {
             float bcx, by;
             if (idx >= s_button_count || !s_buttons[idx].active) continue;
             bcx = ((float)s_buttons[idx].x + (float)s_buttons[idx].w * 0.5f) * sx;
-            by  = (float)(s_buttons[idx].y + 7) * sy;
+            by  = ((float)s_buttons[idx].y + ((float)s_buttons[idx].h - (float)FONT_CELL * ts2) * 0.5f) * sy;
             fe_draw_text_centered(bcx, by, labs[idx - 11], 0xFFFFFFFFu, sx*ts2, sy*ts2);
         }
     }
@@ -10143,16 +10163,19 @@ static const char *ctrl_bind_row_label(int row)
     return (row >= 0 && row < 10) ? k_ctrl_action_labels[row] : "?";
 }
 
-/* Begin capturing input for the currently-selected action (snapshot the rest
- * state so a key/button/axis held from the confirm press is ignored). Shared by
- * the single-action remap and the REMAP ALL sequential pass. [PORT 2026-06] */
+/* Begin capturing input for the currently-selected action. Capture is two-phase:
+ * first we WAIT for the device to return to neutral (armed=0) so the confirm
+ * press — or a previous bind's still-held key/stick — isn't re-captured; once
+ * neutral we snapshot the rest state and arm (armed=1) to listen for ONE input.
+ * Shared by the single-action remap and the REMAP ALL sequential pass.
+ * [PORT 2026-06] "listen once, wait for release before the next" */
 static void ctrl_begin_capture(void)
 {
-    s_ctrl_capturing = 1;
-    memcpy(s_ctrl_capture_kb_snapshot, td5_plat_input_get_keyboard(), 256);
+    s_ctrl_capturing     = 1;
+    s_ctrl_capture_armed = 0;   /* wait for neutral; baseline snapshot happens then */
     if (s_ctrl_input_source != 0)
-        td5_plat_input_joystick_capture_begin(s_ctrl_player);
-    TD5_LOG_I(LOG_TAG, "CtrlBind: capturing action %d (%s) player %d%s",
+        td5_plat_input_joystick_neutral_reset();   /* fresh settle timer per action */
+    TD5_LOG_I(LOG_TAG, "CtrlBind: capturing action %d (%s) player %d%s (waiting for neutral)",
               s_ctrl_sel_action, ctrl_bind_row_label(s_ctrl_sel_action),
               s_ctrl_player, s_ctrl_remap_all ? " [remap-all]" : "");
 }
@@ -10203,6 +10226,10 @@ static void Screen_ControllerBinding(void) {
                     ? td5_save_get_p1_custom_bindings_mutable()
                     : td5_save_get_p2_custom_bindings_mutable());
                 memcpy(s_ctrl_kb_scancodes, src, 16);
+                /* PAUSE (index 10) isn't in the legacy 10-key buffer; default it
+                 * to P (0x19) for display unless an in-session rebind set it. */
+                if (s_ctrl_kb_scancodes[10] == 0 || s_ctrl_kb_scancodes[10] > 0xED)
+                    s_ctrl_kb_scancodes[10] = 0x19;
             } else {
                 /* Seed the per-action joystick bindings from the saved set. */
                 const uint32_t *ab = td5_save_get_action_bindings_mutable();
@@ -10215,29 +10242,31 @@ static void Screen_ControllerBinding(void) {
             s_ctrl_sel_action = 0;
             s_ctrl_capturing  = 0;
             s_ctrl_remap_all  = 0;
+            s_ctrl_capture_armed = 0;
 
             /* Build the action buttons in TWO narrow columns (is_selector → the
              * renderer skips their label; the overlay draws a small label+value
-             * inside each). 10 driving actions (cols of 5), the PAUSE "?" button,
-             * then REMAP ALL (sequential one-by-one) + OK (baked labels).
-             * [PORT ENHANCEMENT 2026-06] */
+             * inside each). Layout (PORT ENHANCEMENT 2026-06):
+             *   TOP    REMAP ALL (sequential one-by-one)
+             *   GRID   10 driving actions (two columns of 5)
+             *   BOTTOM "?" (= PAUSE mapping) | OK
+             * Buttons are created actions-first so the handler's fixed indices
+             * stay valid: 0..9 actions, 10 = "?"/PAUSE, 11 = REMAP ALL, 12 = OK. */
             {
-                int colx[2] = { 64, 300 };   /* two aligned columns, equal width */
+                int colx[2] = { 130, 360 };  /* two aligned columns, shifted right off the
+                                              * dark left edge of the background */
                 int b;
                 frontend_reset_buttons();
                 for (j = 0; j < 10; j++) {                 /* 0..9 driving actions */
                     int c = j / 5, r = j % 5;
-                    b = frontend_create_button("", colx[c], 84 + r * 32, 150, 26);
+                    b = frontend_create_button("", colx[c], 132 + r * 32, 135, 26);
                     if (b >= 0) s_buttons[b].is_selector = 1;
                 }
-                /* Bottom command row — all three on the SAME line (aligned):
-                 * "?" (PAUSE) | REMAP ALL | OK. is_selector so their labels are
-                 * drawn by the labels pass at a slightly smaller custom font. */
-                b = frontend_create_button("", 64, 272, 80, 28);             /* 10 = "?" */
+                b = frontend_create_button("", 130, 312, 150, 26);           /* 10 = PAUSE MENU (bottom-left) */
                 if (b >= 0) s_buttons[b].is_selector = 1;
-                b = frontend_create_button("REMAP ALL", 215, 272, 150, 28);  /* 11 */
+                b = frontend_create_button("REMAP ALL", 235, 90, 170, 28);   /* 11 = REMAP ALL (top, centered) */
                 if (b >= 0) s_buttons[b].is_selector = 1;
-                b = frontend_create_button(SNK_OkButTxt, 390, 272,  80, 28); /* 12 */
+                b = frontend_create_button(SNK_OkButTxt, 415, 312, 80, 26);  /* 12 = OK (bottom-right) */
                 if (b >= 0) s_buttons[b].is_selector = 1;
             }
         }
@@ -10276,6 +10305,10 @@ static void Screen_ControllerBinding(void) {
         int ok_btn       = rows + 1;                 /* 12 */
 
         if (!s_ctrl_capturing) {
+            /* While idle, continuously learn this joystick's REST positions so the
+             * wait-for-release gate can tell a held trigger from a released one. */
+            if (s_ctrl_input_source != 0)
+                td5_plat_input_joystick_learn_rest(s_ctrl_player);
             if (s_input_ready) {
                 if (s_button_index == ok_btn) {
                     /* Save this player's bindings (joystick per-action codes +
@@ -10321,12 +10354,38 @@ static void Screen_ControllerBinding(void) {
         } else {
             /* --- Capture mode (ESC cancels; in REMAP ALL it cancels the run) --- */
             const uint8_t *kb = td5_plat_input_get_keyboard();
-            if (kb[0x01] && !s_ctrl_capture_kb_snapshot[0x01]) {
+            if (kb[0x01]) {
+                /* ESC always cancels (checked before the neutral gate so a held
+                 * ESC can't wedge the wait). */
                 s_ctrl_capturing = 0;
                 s_ctrl_remap_all = 0;
+                s_ctrl_capture_armed = 0;
                 TD5_LOG_I(LOG_TAG, "CtrlBind: capture cancelled");
                 break;
             }
+
+            /* Phase 1: wait for the device to go neutral, THEN snapshot + arm.
+             * This makes the remap "listen once" — a held stick/key from the
+             * confirm press (or the previous bind) must be released before the
+             * next input is captured. [PORT 2026-06] */
+            if (!s_ctrl_capture_armed) {
+                int neutral;
+                if (s_ctrl_input_source == 0) {
+                    int sc; neutral = 1;
+                    for (sc = 1; sc < 256; sc++) if (kb[sc]) { neutral = 0; break; }
+                } else {
+                    neutral = td5_plat_input_joystick_neutral(s_ctrl_player);
+                }
+                if (neutral) {
+                    s_ctrl_capture_armed = 1;
+                    memcpy(s_ctrl_capture_kb_snapshot, kb, 256);
+                    if (s_ctrl_input_source != 0)
+                        td5_plat_input_joystick_capture_begin(s_ctrl_player);
+                    TD5_LOG_D(LOG_TAG, "CtrlBind: armed for action %d", s_ctrl_sel_action);
+                }
+                break;   /* still releasing / just armed — don't capture this frame */
+            }
+
             if (s_ctrl_input_source == 0) {
                 /* Keyboard: first freshly-pressed key (rising edge vs snapshot). */
                 int sc, found = -1;

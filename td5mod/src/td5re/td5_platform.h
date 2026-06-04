@@ -246,10 +246,28 @@ int  td5_plat_input_joystick_capture_poll(int device_slot, uint32_t *out_code);
 /** Describe a binding code into buf (e.g. "BTN 3", "AXIS 2+", "-"). */
 void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap);
 
+/** 1 once the joystick has settled at rest (no buttons/dpad, sticks centred, all
+ *  axes incl. triggers motionless for several frames) — gates per-action capture
+ *  so it waits for the previous input's release travel to finish before listening. */
+int  td5_plat_input_joystick_neutral(int device_slot);
+/** Reset the neutral-detector's stability timer (call when entering a wait). */
+void td5_plat_input_joystick_neutral_reset(void);
+/** Learn the device's current axis positions as its REST reference. Call every
+ *  frame while the binding UI is idle so a wait can tell held vs released. */
+void td5_plat_input_joystick_learn_rest(int device_slot);
+
+/** Re-enumerate devices; returns 1 if the count changed (hot-plug). */
+int  td5_plat_input_rescan_devices(void);
+
 /** Frontend navigation bitmask from a connected gamepad (any joystick):
  *  bit0 LEFT, bit1 RIGHT, bit2 UP, bit3 DOWN, bit4 A/confirm, bit5 B/back.
  *  Returns 0 if no joystick is present. [PORT ENHANCEMENT 2026-06] */
 uint32_t td5_plat_input_frontend_nav(void);
+
+/** In-race navigation bitmask from a player's EXCLUSIVE joystick device (same
+ *  encoding as td5_plat_input_frontend_nav) — for the pause menu, which can't use
+ *  the released frontend scan handles while a race owns the device. */
+uint32_t td5_plat_input_joystick_nav(int device_slot);
 
 /** Enumerated index of the joystick that last produced a confirm/nav (the
  *  "active controller" that drives the menus). -1 if none yet. */

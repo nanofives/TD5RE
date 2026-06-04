@@ -331,16 +331,38 @@ void td5_input_apply_device_selection(void)
             for (int i = 0; i < 9; i++) row[i] = (int32_t)bind[p * 9 + i];
             td5_input_set_joystick_bindings(p, row, 9);
         }
-        /* Push the per-action bindings (button/axis/trigger) only when this
-         * player actually configured at least one — otherwise leave the device
-         * on the default mapping (all-zero would disable every input). */
+        /* Push the per-action bindings (button/axis/trigger). These FOLLOW THE
+         * DEVICE, not the player slot: a controller configured under ANY
+         * Control-Options player applies whenever that physical device drives a
+         * race slot. (Otherwise configuring "PLAYER 2"'s joystick and then
+         * driving slot 0 with it would fall back to the default mapping — the
+         * bug being fixed.) Find the configured owner of this slot's device:
+         * prefer a player whose persisted device == src AND has bindings, else
+         * any player on that device, else this slot's own row.
+         * [PORT ENHANCEMENT 2026-06] */
         if (src > 0) {
             const uint32_t *ab = td5_save_get_action_bindings_mutable();
             if (ab) {
-                const uint32_t *row = ab + (size_t)p * TD5_JSBIND_ACTIONS;
-                int any = 0, i;
-                for (i = 0; i < TD5_JSBIND_ACTIONS; i++) if (row[i]) { any = 1; break; }
-                if (any) td5_input_set_action_bindings(p, row, TD5_JSBIND_ACTIONS);
+                int owner = -1, q, i;
+                for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) {
+                    if ((int)td5_save_get_player_device_index(q) != src) continue;
+                    const uint32_t *row = ab + (size_t)q * TD5_JSBIND_ACTIONS;
+                    int any = 0;
+                    for (i = 0; i < TD5_JSBIND_ACTIONS; i++) if (row[i]) { any = 1; break; }
+                    if (any) { owner = q; break; }   /* configured owner wins */
+                    if (owner < 0) owner = q;        /* else first claimant of the device */
+                }
+                if (owner < 0) owner = p;            /* fallback: this slot's own row */
+                {
+                    const uint32_t *row = ab + (size_t)owner * TD5_JSBIND_ACTIONS;
+                    int any = 0;
+                    for (i = 0; i < TD5_JSBIND_ACTIONS; i++) if (row[i]) { any = 1; break; }
+                    if (any) {
+                        td5_input_set_action_bindings(p, row, TD5_JSBIND_ACTIONS);
+                        TD5_LOG_I(LOG_TAG, "Device selection: slot=%d device=%d uses bindings from player %d",
+                                  p, src, owner + 1);
+                    }
+                }
             }
         }
         TD5_LOG_I(LOG_TAG, "Device selection: player=%d source=%d (%s)",
@@ -801,23 +823,59 @@ void td5_input_update_player_control(int slot)
         /* Analog Y-axis */
         int raw_y = (int)((bits >> 9) & 0x1FF) - TD5_INPUT_JS_AXIS_CENTER;
 
-        if (raw_y > -TD5_INPUT_ANALOG_Y_DEADZONE &&
-            raw_y < TD5_INPUT_ANALOG_Y_DEADZONE)
+        /* [PORT ENHANCEMENT 2026-06] PROPORTIONAL analog throttle/brake. The axis
+         * (a trigger or stick Y) past the deadzone scales 0..0x100 instead of
+         * snapping to full. Previously ANY deflection latched full throttle/brake
+         * ("accelerate all the way"); now a trigger/stick gives partial drive.
+         * Span = [deadzone .. axis_center] mapped to [0 .. 0x100]. */
         {
-            /* Deadzone -- no throttle or brake */
-            s_throttle[slot] = 0;
-            s_brake[slot] = 0;
-            s_reverse_req[slot] = 0;
-        } else if (raw_y >= TD5_INPUT_ANALOG_Y_DEADZONE) {
-            /* Positive Y = brake */
-            s_throttle[slot] = (int16_t)0xFF00; /* full brake */
-            s_brake[slot] = 1;
-            s_reverse_req[slot] = 0;
-        } else {
-            /* Negative Y = accelerate */
-            s_throttle[slot] = 0xFF;  /* full digital throttle (0-255 range, >>8 in RPM formula) */
-            s_brake[slot] = 0;
-            s_reverse_req[slot] = 0;
+            int span = TD5_INPUT_JS_AXIS_CENTER - TD5_INPUT_ANALOG_Y_DEADZONE; /* 250-10 */
+            if (span < 1) span = 1;
+            TD5_Actor *a_actor = td5_game_get_actor(slot);
+            if (raw_y > -TD5_INPUT_ANALOG_Y_DEADZONE &&
+                raw_y < TD5_INPUT_ANALOG_Y_DEADZONE)
+            {
+                /* Deadzone -- no throttle or brake. Reset to forward, mirroring the
+                 * digital no-input branch (so releasing the brake exits reverse). */
+                s_throttle[slot] = 0;
+                s_brake[slot] = 0;
+                s_reverse_req[slot] = 0;
+                if (a_actor) ((uint8_t *)a_actor)[0x36F] = 1;
+            } else if (raw_y >= TD5_INPUT_ANALOG_Y_DEADZONE) {
+                /* Positive Y = brake/reverse, proportional to how far past the
+                 * deadzone. The reverse latch mirrors the digital BRAKE path
+                 * [CONFIRMED @ 0x4032A0-0x403300]: with an auto gearbox, once the
+                 * car is nearly stopped (and field_0x376==0) holding the brake
+                 * flips throttle_state (+0x36F) to 0 = reverse, so a negative
+                 * throttle drives backward instead of just braking. Without this
+                 * the joystick could brake but never reverse. */
+                int mag = raw_y - TD5_INPUT_ANALOG_Y_DEADZONE;     /* 0..span */
+                int t   = (mag * 0x100) / span;                    /* 0..0x100 */
+                uint8_t throttle_st = 1, auto_gearbox = 0, sflags = 0;
+                if (t > 0x100) t = 0x100;
+                if (a_actor) {
+                    uint8_t *ab2 = (uint8_t *)a_actor;
+                    throttle_st  = ab2[0x36F];
+                    auto_gearbox = ab2[0x378];
+                    sflags       = ab2[0x376];
+                }
+                if (auto_gearbox != 0 && throttle_st == 1 && speed < 10 && sflags == 0)
+                    throttle_st = 0;                 /* -> reverse */
+                s_brake[slot]    = throttle_st;      /* 1=brake, 0=reverse (no brake light) */
+                s_throttle[slot] = (int16_t)(-t);    /* proportional negative = brake/reverse force */
+                s_reverse_req[slot] = 0;
+                if (a_actor) ((uint8_t *)a_actor)[0x36F] = throttle_st;
+            } else {
+                /* Negative Y = accelerate, proportional. Reset throttle_state to
+                 * forward (mirror the digital no-brake branch). */
+                int mag = (-raw_y) - TD5_INPUT_ANALOG_Y_DEADZONE;  /* 0..span */
+                int t   = (mag * 0x100) / span;                    /* 0..0x100 */
+                if (t > 0x100) t = 0x100;
+                s_throttle[slot] = (int16_t)t;     /* 0..0x100 forward (0x100 = full) */
+                s_brake[slot] = 0;
+                s_reverse_req[slot] = 0;
+                if (a_actor) ((uint8_t *)a_actor)[0x36F] = 1;
+            }
         }
     } else {
         /* Digital throttle/brake */

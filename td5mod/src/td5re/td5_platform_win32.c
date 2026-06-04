@@ -1705,6 +1705,126 @@ uint32_t td5_plat_input_joystick_buttons(int device_slot)
     return mask;
 }
 
+static int td5_plat_js_read(int device_slot, DIJOYSTATE2 *js);   /* fwd */
+
+/* State for td5_plat_input_joystick_neutral (below). A trigger rests at an
+ * arbitrary OFF-CENTRE value AND a held trigger is "stable" (motionless) just
+ * like a released one — so neither an absolute centre test NOR a stability test
+ * alone can tell "held" from "released". The fix: LEARN each axis's rest position
+ * while the UI is idle (td5_plat_input_joystick_learn_rest), then require every
+ * axis to be back within a band of that learned rest (a held trigger reads far
+ * from rest) AND motionless for a few frames (absorbs spring-back overshoot). */
+static long s_neutral_rest_axes[8];          /* learned idle position per axis     */
+static int  s_neutral_rest_valid   = 0;
+static long s_neutral_prev_axes[8];          /* last frame, for the motion test    */
+static int  s_neutral_have_prev    = 0;
+static int  s_neutral_stable_count = 0;
+
+/* Reset the settle/motion tracker — call when (re)entering a wait-for-release so a
+ * stale stable-count from an earlier capture can't arm the next one instantly.
+ * (The learned REST reference is intentionally preserved across resets.) */
+void td5_plat_input_joystick_neutral_reset(void)
+{
+    s_neutral_have_prev    = 0;
+    s_neutral_stable_count = 0;
+}
+
+/* Learn the current axis positions as the device's REST reference. Call every
+ * frame while the binding UI is IDLE (not capturing) so the wait-for-release can
+ * later distinguish a held trigger (far from rest) from a released one (back at
+ * rest). Skips learning while a button is held (user mid-interaction).
+ * [PORT ENHANCEMENT 2026-06] */
+void td5_plat_input_joystick_learn_rest(int device_slot)
+{
+    DIJOYSTATE2 js;
+    int i;
+    if (!td5_plat_js_read(device_slot, &js)) { s_neutral_rest_valid = 0; return; }
+    for (i = 0; i < 32; i++) if (js.rgbButtons[i] & 0x80) return;
+    for (i = 0; i < 8; i++) s_neutral_rest_axes[i] = js_axis_val(&js, i);
+    s_neutral_rest_valid = 1;
+}
+
+/* 1 once the joystick has fully RETURNED TO REST: no buttons / dpad, sticks near
+ * centre, every axis (incl. off-centre-resting triggers/sliders) back within a
+ * band of its learned rest, and motionless for a few frames. Gates per-action
+ * capture so it waits for the previous input — including a trigger's release
+ * travel — to finish before listening again.
+ * [PORT ENHANCEMENT 2026-06] "wait until everything is released" */
+int td5_plat_input_joystick_neutral(int device_slot)
+{
+    DIJOYSTATE2 js;
+    int i, moved;
+    long axes[8];
+    long sticks[4];
+    const long REST_BAND     = 55;   /* max |axis - learned rest| to count as released */
+    const long STABLE_DELTA  = 12;   /* per-frame axis jitter tolerance (of 0..0x1F4)  */
+    const int  STABLE_FRAMES = 3;    /* consecutive motionless frames = settled        */
+
+    if (!td5_plat_js_read(device_slot, &js)) {           /* no device → neutral */
+        td5_plat_input_joystick_neutral_reset();
+        return 1;
+    }
+    /* Any button or dpad held resets the settle timer. */
+    for (i = 0; i < 32; i++)
+        if (js.rgbButtons[i] & 0x80) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
+    if (js.rgdwPOV[0] != 0xFFFFFFFFu) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
+
+    /* Sticks (lX/lY/lRx/lRy) must be near centre. */
+    sticks[0] = js.lX; sticks[1] = js.lY; sticks[2] = js.lRx; sticks[3] = js.lRy;
+    for (i = 0; i < 4; i++) {
+        long d = sticks[i] - TD5_PLAT_JS_AXIS_CENTER;
+        if (d > 90 || d < -90) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
+    }
+
+    for (i = 0; i < 8; i++) axes[i] = js_axis_val(&js, i);
+
+    /* Every axis must be back within a band of its LEARNED rest — this is what
+     * catches a HELD trigger (it sits far from where it rests when released). */
+    if (s_neutral_rest_valid) {
+        for (i = 0; i < 8; i++) {
+            long d = axes[i] - s_neutral_rest_axes[i];
+            if (d > REST_BAND || d < -REST_BAND) {
+                for (i = 0; i < 8; i++) s_neutral_prev_axes[i] = axes[i];
+                s_neutral_have_prev = 1;
+                s_neutral_stable_count = 0;
+                return 0;
+            }
+        }
+    }
+
+    /* …and motionless for STABLE_FRAMES frames (absorbs spring-back overshoot so
+     * we don't arm while an axis is still travelling through the rest band). */
+    moved = 0;
+    if (s_neutral_have_prev) {
+        for (i = 0; i < 8; i++) {
+            long d = axes[i] - s_neutral_prev_axes[i];
+            if (d > STABLE_DELTA || d < -STABLE_DELTA) { moved = 1; break; }
+        }
+    } else {
+        moved = 1;   /* first sample — need another frame to measure motion */
+    }
+    for (i = 0; i < 8; i++) s_neutral_prev_axes[i] = axes[i];
+    s_neutral_have_prev = 1;
+    if (moved) { s_neutral_stable_count = 0; return 0; }
+    if (++s_neutral_stable_count < STABLE_FRAMES) return 0;
+    return 1;
+}
+
+/* Re-enumerate input devices; returns 1 if the device count changed (hot-plug),
+ * releasing the scan handles so they recreate against the fresh GUID list.
+ * [PORT ENHANCEMENT 2026-06] */
+int td5_plat_input_rescan_devices(void)
+{
+    int prev = s_device_count;
+    td5_plat_input_enumerate_devices();
+    if (s_device_count != prev) {
+        td5_plat_input_scan_join_release();
+        s_fe_js_suppress = 0;
+        return 1;
+    }
+    return 0;
+}
+
 /* ---- Per-action joystick bindings (PORT ENHANCEMENT 2026-06) ---- */
 
 void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int count)
@@ -1909,6 +2029,34 @@ uint32_t td5_plat_input_frontend_nav(void)
         }
     }
     return bits;
+}
+
+/* In-race navigation bitmask from a player's EXCLUSIVE joystick device
+ * (s_di_joystick[slot]) — same encoding as td5_plat_input_frontend_nav
+ * (bit0 LEFT bit1 RIGHT bit2 UP bit3 DOWN bit4 A/confirm bit5 B/back). The
+ * frontend scan handles are released while a race owns the device, so the pause
+ * menu reads the player's own device through this instead. [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_joystick_nav(int device_slot)
+{
+    DIJOYSTATE2 js;
+    uint32_t db = 0;
+    long cx, cy;
+    const long T = 130;
+    if (!td5_plat_js_read(device_slot, &js)) return 0;
+    cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
+    cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
+    if (cx < -T) db |= 1; if (cx > T) db |= 2;
+    if (cy < -T) db |= 4; if (cy > T) db |= 8;       /* stick up = lY low = UP */
+    if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+        DWORD deg = js.rgdwPOV[0] / 100;
+        if (deg > 270 || deg <  90) db |= 4;
+        if (deg >  90 && deg < 270) db |= 8;
+        if (deg > 180 && deg < 360) db |= 1;
+        if (deg >   0 && deg < 180) db |= 2;
+    }
+    if (js.rgbButtons[0] & 0x80) db |= 0x10;         /* A = confirm/select */
+    if (js.rgbButtons[1] & 0x80) db |= 0x20;         /* B = back/cancel    */
+    return db;
 }
 
 /* ========================================================================

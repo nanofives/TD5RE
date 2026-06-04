@@ -530,6 +530,7 @@ static void tick_wanted_target_tracker(void) {
 }
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
+static int      s_prev_pause_act;      /* edge detector for the rebindable PAUSE action */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
 
@@ -2662,6 +2663,7 @@ int td5_game_init_race_session(void) {
      * driven — slated for cleanup. */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
+    s_prev_pause_act = 1;          /* suppress false PAUSE-action edge on first frame */
     g_td5.sim_tick_budget = 0.0f;
     g_td5.sim_time_accumulator = 0;
     g_td5.simulation_tick_counter = 0;
@@ -3132,6 +3134,24 @@ int td5_game_run_race_frame(void) {
         int pause_menu_was_active = s_pause_menu_active;
         s_prev_esc_state = esc_now;
 
+        /* [PORT ENHANCEMENT 2026-06] The rebindable PAUSE action (keyboard key or
+         * joystick button mapped in the control-config screen) opens/toggles the
+         * pause menu, in addition to ESC. The original only had ESC; the PAUSE
+         * action bit was being SET by the input layer but never consumed here, so
+         * a mapped pause key did nothing. Read it from any human player's control
+         * word. It only opens/continues — it never triggers the ESC exit-to-results
+         * or the cinematic abort (those stay ESC-only). */
+        int pause_act_now = 0;
+        {
+            int hp = g_td5.num_human_players;
+            if (hp < 1) hp = 1;
+            if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+            for (int pi = 0; pi < hp; pi++)
+                if (td5_input_get_control_bits(pi) & TD5_INPUT_PAUSE) { pause_act_now = 1; break; }
+        }
+        int pause_act_edge = (pause_act_now && !s_prev_pause_act);
+        s_prev_pause_act = pause_act_now;
+
         /* Replay/demo abort: ESC during a cinematic (View Replay / attract demo)
          * race does NOT open the pause menu — it ends the race immediately and
          * returns to where it was launched (results for replay, menu for demo).
@@ -3151,7 +3171,7 @@ int td5_game_run_race_frame(void) {
                       s_demo_mode ? "menu" : "results");
             td5_game_begin_fade_out(0);
         }
-        if (esc_edge && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
+        if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
             s_pause_menu_cursor = 3;  /* default to CONTINUE (row 3), matching the
                                        * original: g_audioOptionsCursorRow @0x00474640
@@ -3174,11 +3194,23 @@ int td5_game_run_race_frame(void) {
                 static int s_prev_down = 0, s_prev_up = 0;
                 static int s_prev_left = 0, s_prev_right = 0;
                 static int s_prev_enter = 0;
-                int key_down  = td5_plat_input_key_pressed(0xD0);
-                int key_up    = td5_plat_input_key_pressed(0xC8);
-                int key_left  = td5_plat_input_key_pressed(0xCB);
-                int key_right = td5_plat_input_key_pressed(0xCD);
-                int key_enter = td5_plat_input_key_pressed(0x1C);
+                /* [PORT ENHANCEMENT 2026-06] Aggregate joystick nav from every human
+                 * player's in-race device (dpad/left stick = move, A = confirm) so the
+                 * pause menu is navigable with the pad, not just the keyboard. The
+                 * frontend scan handles are released while the race owns the device,
+                 * so this reads each player's exclusive device directly. */
+                uint32_t jnav = 0;
+                {
+                    int hp = g_td5.num_human_players;
+                    if (hp < 1) hp = 1;
+                    if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+                    for (int pi = 0; pi < hp; pi++) jnav |= td5_plat_input_joystick_nav(pi);
+                }
+                int key_down  = td5_plat_input_key_pressed(0xD0) || (jnav & 0x08);
+                int key_up    = td5_plat_input_key_pressed(0xC8) || (jnav & 0x04);
+                int key_left  = td5_plat_input_key_pressed(0xCB) || (jnav & 0x01);
+                int key_right = td5_plat_input_key_pressed(0xCD) || (jnav & 0x02);
+                int key_enter = td5_plat_input_key_pressed(0x1C) || (jnav & 0x10); /* A = confirm */
 
                 /* Navigation: 5 selectable items (CD Music / SFX / Audio3 / Continue / Exit).
                  * [CONFIRMED @ 0x0043BF70] RunAudioOptionsOverlay: 5 rows total. */
@@ -3261,13 +3293,22 @@ int td5_game_run_race_frame(void) {
                     }
                 }
 
+                /* Joystick B = back = continue (close the menu), mirroring the
+                 * frontend B=back convention. [PORT ENHANCEMENT 2026-06] */
+                {
+                    static int s_prev_jb = 0;
+                    int jb = (jnav & 0x20) ? 1 : 0;
+                    if (jb && !s_prev_jb) s_pause_menu_active = 0;
+                    s_prev_jb = jb;
+                }
+
                 s_prev_down = key_down; s_prev_up = key_up;
                 s_prev_left = key_left; s_prev_right = key_right;
                 s_prev_enter = key_enter;
             }
 
-            /* ESC again = continue */
-            if (esc_edge && pause_menu_was_active) {
+            /* ESC again = continue; the PAUSE action also toggles the menu shut. */
+            if ((esc_edge || pause_act_edge) && pause_menu_was_active) {
                 s_pause_menu_active = 0;
             }
 
