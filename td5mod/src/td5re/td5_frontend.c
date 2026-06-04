@@ -5146,17 +5146,39 @@ static void frontend_render_race_type_description(float sx, float sy) {
     if (!s_anim_complete) return;
     if (btn < 0 || btn > 6) btn = 0;
 
-    /* [PORT ENHANCEMENT 2026-06] Active-controller indicator, drawn above the
-     * game-mode description panel: shows which controller is driving the menus
-     * (and, for single-player, will be the driver). */
+    /* [PORT ENHANCEMENT 2026-06] Active-controller indicator above the game-mode
+     * description panel: a "CONTROLLER" title with the device name below it,
+     * wrapped to up to two lines. Shows which controller drives the menus (and,
+     * for single-player, will be the driver). */
     {
         const char *dn = (s_active_menu_device == 0)
             ? "KEYBOARD" : td5_input_get_device_name(s_active_menu_device);
-        char ind[64];
+        float cx   = panel_x + panel_w * 0.5f;
+        float ts   = 0.7f;
         if (!dn || !dn[0]) dn = "KEYBOARD";
-        snprintf(ind, sizeof ind, "CONTROLLER: %s", dn);
-        fe_draw_text_centered(panel_x + panel_w * 0.5f, (145.0f - 22.0f) * sy,
-                              ind, 0xFFFFD000, sx * 0.8f, sy * 0.8f);
+        fe_draw_text_centered(cx, 90.0f * sy, "CONTROLLER", 0xFFFFD000, sx*0.8f, sy*0.8f);
+        if (fe_measure_text(dn, sx*ts) <= panel_w) {
+            fe_draw_text_centered(cx, 112.0f * sy, dn, 0xFFFFFFFF, sx*ts, sy*ts);
+        } else {
+            char l1[48], l2[48];
+            int n = (int)strlen(dn), mid = n/2, best = -1, i, cut, skip, a, b;
+            for (i = 1; i < n - 1; i++) {
+                int di, db;
+                if (dn[i] != ' ') continue;
+                if (best < 0) { best = i; continue; }
+                di = i - mid;    if (di < 0) di = -di;
+                db = best - mid; if (db < 0) db = -db;
+                if (di < db) best = i;
+            }
+            cut = (best >= 0) ? best : mid;
+            skip = (dn[cut] == ' ') ? 1 : 0;
+            a = cut;              if (a > 47) a = 47;
+            memcpy(l1, dn, (size_t)a); l1[a] = 0;
+            b = n - (cut + skip); if (b > 47) b = 47;
+            memcpy(l2, dn + cut + skip, (size_t)b); l2[b] = 0;
+            fe_draw_text_centered(cx, 108.0f * sy, l1, 0xFFFFFFFF, sx*ts, sy*ts);
+            fe_draw_text_centered(cx, 124.0f * sy, l2, 0xFFFFFFFF, sx*ts, sy*ts);
+        }
     }
 
     idx = (s_inner_state >= 6 && s_inner_state <= 12) ? k_cup_to_idx[btn] : k_top_to_idx[btn];
