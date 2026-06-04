@@ -340,6 +340,12 @@ static int             s_display_mode_index;
 static int             s_display_fog_enabled = 1;
 static int             s_display_speed_units;
 static int             s_display_camera_damping = 5;
+/* [S01 Display options 2026-06-04] new rows: window mode (0=fullscreen,
+ * 1=windowed, 2=borderless), vsync (0/1), show-fps (0/1). Mirrored from
+ * g_td5.ini on screen entry, applied live on change, persisted on OK. */
+static int             s_display_window_mode = 1;
+static int             s_display_vsync       = 1;
+static int             s_display_show_fps    = 1;
 static int             s_game_option_laps = 0;
 static int             s_game_option_checkpoint_timers = 1;
 static int             s_game_option_traffic = 1;
@@ -2948,27 +2954,24 @@ static int frontend_find_display_mode_index(int width, int height, int bpp) {
     return -1;
 }
 
+static void frontend_set_button_label(int idx, const char *text) {
+    if (idx < 0 || idx >= s_button_count) return;
+    strncpy(s_buttons[idx].label, text, sizeof(s_buttons[idx].label) - 1);
+    s_buttons[idx].label[sizeof(s_buttons[idx].label) - 1] = '\0';
+}
+
+/* [S01 Display options 2026-06-04] 6 option rows + OK (Resolution row removed —
+ * the window is freely resizable). Row order:
+ *   0 Display Mode  1 VSync  2 Fogging
+ *   3 Speed Readout 4 Show FPS  5 Camera Damping  6 OK */
 static void frontend_refresh_display_option_labels(void) {
-    if (s_button_count > 0) {
-        strncpy(s_buttons[0].label, "Resolution", sizeof(s_buttons[0].label) - 1);
-        s_buttons[0].label[sizeof(s_buttons[0].label) - 1] = '\0';
-    }
-    if (s_button_count > 1) {
-        strncpy(s_buttons[1].label, "Fogging", sizeof(s_buttons[1].label) - 1);
-        s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
-    }
-    if (s_button_count > 2) {
-        strncpy(s_buttons[2].label, "Speed Readout", sizeof(s_buttons[2].label) - 1);
-        s_buttons[2].label[sizeof(s_buttons[2].label) - 1] = '\0';
-    }
-    if (s_button_count > 3) {
-        strncpy(s_buttons[3].label, "Camera Damping", sizeof(s_buttons[3].label) - 1);
-        s_buttons[3].label[sizeof(s_buttons[3].label) - 1] = '\0';
-    }
-    if (s_button_count > 4) {
-        strncpy(s_buttons[4].label, "OK", sizeof(s_buttons[4].label) - 1);
-        s_buttons[4].label[sizeof(s_buttons[4].label) - 1] = '\0';
-    }
+    frontend_set_button_label(0, "Display Mode");
+    frontend_set_button_label(1, "VSync");
+    frontend_set_button_label(2, "Fogging");
+    frontend_set_button_label(3, "Speed Readout");
+    frontend_set_button_label(4, "Show FPS");
+    frontend_set_button_label(5, "Camera Damping");
+    frontend_set_button_label(6, "OK");
 }
 
 static int frontend_option_delta(void) {
@@ -5420,20 +5423,22 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
     char damping[16];
-    const char *mode_name = "UNAVAILABLE";
-    const char *on_off[] = { "OFF", "ON" };
+    const char *on_off[]     = { "OFF", "ON" };
     const char *speed_read[] = { "MPH", "KPH" };
+    const char *win_mode[]   = { "FULLSCREEN", "WINDOWED", "BORDERLESS" };
+    int wm = s_display_window_mode;
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    if (s_display_mode_count > 0 &&
-        s_display_mode_index >= 0 &&
-        s_display_mode_index < s_display_mode_count)
-        mode_name = s_display_mode_names[s_display_mode_index];
+    if (wm < 0 || wm > 2) wm = 1;
     snprintf(damping, sizeof(damping), "%d", s_display_camera_damping);
-    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, mode_name, 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, damping, 0xFFFFFFFF);
+    /* Rows: 0 Display Mode, 1 VSync, 2 Fogging,
+     *       3 Speed Readout, 4 Show FPS, 5 Camera Damping. */
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, win_mode[wm], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_display_vsync & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, on_off[s_display_show_fps & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, damping, 0xFFFFFFFF);
 }
 
 static void frontend_render_sound_options_overlay(float sx, float sy) {
@@ -8274,15 +8279,16 @@ done:
     /* Clear draw queue for next frame */
     s_draw_queue_count = 0;
 
-    /* Always-on FPS counter (top-left), drawn last so it overlays everything.
-     * peak = worst frame time over the last ~1s, which spikes on a car-change
-     * decode stall even though the smoothed FPS barely moves. */
-    {
+    /* FPS/MS counter at the fixed top-left (8,8) corner — same anchor as the
+     * in-race HUD so the readout sits in one consistent spot across menu + race.
+     * Drawn last so it overlays everything. [S01 2026-06-04] gated by the
+     * Display-options Show FPS toggle (g_td5.ini.show_fps). */
+    if (g_td5.ini.show_fps) {
         char fps_buf[48];
         snprintf(fps_buf, sizeof(fps_buf), "FPS %.0f  %dMS",
                  (double)g_td5_display_fps, g_td5_peak_frame_ms);
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        fe_draw_text(6.0f * sx, 4.0f * sy, fps_buf, 0xFFFFFF00u, sx, sy);
+        fe_draw_text(8.0f * sx, 8.0f * sy, fps_buf, 0xFFFFFF00u, sx, sy);
     }
 
     /* End scene + present */
@@ -8346,6 +8352,10 @@ int td5_frontend_init(void) {
     if (g_td5.ini.loaded) {
         s_display_fog_enabled       = g_td5.ini.fog_enabled;
         td5_render_set_fog(g_td5.ini.fog_enabled);
+        /* [S01 2026-06-04] mirror the new Display-options rows. */
+        s_display_window_mode       = g_td5.ini.window_mode;
+        s_display_vsync             = g_td5.ini.vsync;
+        s_display_show_fps          = g_td5.ini.show_fps;
         s_display_speed_units       = g_td5.ini.speed_units;
         td5_save_set_speed_units(g_td5.ini.speed_units);
         s_display_camera_damping    = g_td5.ini.camera_damping;
@@ -10612,23 +10622,24 @@ static void Screen_DisplayOptions(void) {
         TD5_LOG_D(LOG_TAG, "DisplayOptions: init (display_mode_index=%d, count=%d)",
                   s_display_mode_index, s_display_mode_count);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* [CONFIRMED @ 0x00420400 ScreenDisplayOptions case 0] Original does
-         * NOT re-enumerate the display-mode list here — that's done once at
-         * boot by ScreenLocalizationInit. Re-deriving the index from the
-         * current window dimensions every entry would clobber the user's
-         * last selection (which is restored from config.td5 at boot). */
-        /* [FIXED 2026-06-01, runtime @0x499c78] rows y=97,137 / 217,257 (gap), OK (200,377). 288-wide. */
-        frontend_create_button(SNK_ResolutionButTxt,    120,  97, 0x120, 0x20);
-        /* PARITY NOTE (audit 2026-05-30): orig 0x00420484 makes Fogging a DISABLED
-         * preview button when DXD3D::CanFog() != 1 (M2DX ordinal 0x6f), else a live
-         * cycler with arrows. The port's D3D11 backend always supports fog (same as the
-         * SFX 3-mode reasoning in Screen_SoundOptions), so CanFog()==1 holds and the
-         * faithful result is an always-live Fogging row — which is what this is. No
-         * gating needed unless a future backend can lack fog. */
-        frontend_create_button(SNK_FoggingButTxt,       120, 137, 0x120, 0x20);
-        frontend_create_button(SNK_SpeedReadoutButTxt,  120, 217, 0x120, 0x20);
-        frontend_create_button(SNK_CameraDampingButTxt, 120, 257, 0x120, 0x20);
-        frontend_create_button(SNK_OkButTxt,            200, 377, 0x60,  0x20);
+        /* [S01 Display options 2026-06-04] 6 option rows + OK. The discrete
+         * Resolution row was removed — the window is now freely resizable
+         * (drag the border / maximize, or pick Borderless/Fullscreen via Display
+         * Mode), so a fixed resolution list is redundant. Labels are overridden
+         * by frontend_refresh_display_option_labels (the SNK arg is a placeholder).
+         * Rows top-to-bottom:
+         *   0 Display Mode  1 VSync  2 Fogging
+         *   3 Speed Readout 4 Show FPS  5 Camera Damping  6 OK
+         * PARITY NOTE (audit 2026-05-30): orig 0x00420484 makes Fogging a DISABLED
+         * preview button when DXD3D::CanFog()!=1; the D3D11 backend always supports
+         * fog so the faithful result is an always-live Fogging row. */
+        frontend_create_button(SNK_ResolutionButTxt,    120,  97, 0x120, 0x20); /* Display Mode */
+        frontend_create_button(SNK_FoggingButTxt,       120, 137, 0x120, 0x20); /* VSync */
+        frontend_create_button(SNK_FoggingButTxt,       120, 177, 0x120, 0x20); /* Fogging */
+        frontend_create_button(SNK_SpeedReadoutButTxt,  120, 217, 0x120, 0x20); /* Speed Readout */
+        frontend_create_button(SNK_SpeedReadoutButTxt,  120, 257, 0x120, 0x20); /* Show FPS */
+        frontend_create_button(SNK_CameraDampingButTxt, 120, 297, 0x120, 0x20); /* Camera Damping */
+        frontend_create_button(SNK_OkButTxt,            200, 377, 0x60,  0x20); /* OK */
         frontend_refresh_display_option_labels();
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -10656,40 +10667,53 @@ static void Screen_DisplayOptions(void) {
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             int changed = 0;
 
-            if (active_button == 0 && delta != 0 && s_display_mode_count > 0) {
-                s_display_mode_index += delta;
-                if (s_display_mode_index < 0) s_display_mode_index = s_display_mode_count - 1;
-                if (s_display_mode_index >= s_display_mode_count) s_display_mode_index = 0;
-                td5_plat_apply_display_mode(
-                    s_display_modes[s_display_mode_index].width,
-                    s_display_modes[s_display_mode_index].height,
-                    s_display_modes[s_display_mode_index].bpp);
-                /* Persist the cursor's new position so it survives a save/load
-                 * round trip (matches gSelectedDisplayModeOrdinal write at
-                 * 0x00420400 case 6). */
-                td5_save_set_display_mode(s_display_mode_index);
+            if (active_button == 0 && delta != 0) {
+                /* Row 0 — Display Mode: Fullscreen(0) -> Windowed(1) -> Borderless(2) */
+                s_display_window_mode += delta;
+                if (s_display_window_mode < 0) s_display_window_mode = 2;
+                if (s_display_window_mode > 2) s_display_window_mode = 0;
+                g_td5.ini.window_mode = s_display_window_mode;
+                td5_plat_set_window_mode(s_display_window_mode);
                 changed = 1;
             } else if (active_button == 1 && delta != 0) {
+                /* Row 1 — VSync on/off (applied live) */
+                s_display_vsync = !s_display_vsync;
+                g_td5.ini.vsync = s_display_vsync;
+                td5_plat_set_vsync(s_display_vsync);
+                changed = 1;
+            } else if (active_button == 2 && delta != 0) {
+                /* Row 2 — Fogging on/off */
                 s_display_fog_enabled = !s_display_fog_enabled;
                 g_td5.ini.fog_enabled = s_display_fog_enabled;
                 changed = 1;
-            } else if (active_button == 2 && delta != 0) {
-                s_display_speed_units = !s_display_speed_units;
-                changed = 1;
             } else if (active_button == 3 && delta != 0) {
+                /* Row 3 — Speed Readout MPH/KPH (applied live to the HUD) */
+                s_display_speed_units = !s_display_speed_units;
+                g_td5.ini.speed_units = s_display_speed_units;
+                td5_save_set_speed_units(s_display_speed_units);
+                changed = 1;
+            } else if (active_button == 4 && delta != 0) {
+                /* Row 4 — Show FPS overlay on/off */
+                s_display_show_fps = !s_display_show_fps;
+                g_td5.ini.show_fps = s_display_show_fps;
+                changed = 1;
+            } else if (active_button == 5 && delta != 0) {
+                /* Row 5 — Camera Damping 0..9 (clamp, no wrap) */
                 s_display_camera_damping += delta;
                 if (s_display_camera_damping < 0) s_display_camera_damping = 0;
                 if (s_display_camera_damping > 9) s_display_camera_damping = 9;
                 changed = 1;
-            } else if (s_button_index == 4) {
-                /* Persist display options (fog / speed units / camera damping)
-                 * to td5re.ini so they survive a relaunch (see PART B note in
-                 * Screen_GameOptions). Resolution is NOT written here — it
-                 * applies live and persists its display-mode ordinal to
-                 * Config.td5 separately. [PART B 2026-06-02] */
+            } else if (s_button_index == 6) {
+                /* OK — persist every display option to td5re.ini. Resolution +
+                 * window-mode/vsync already applied live; this writes them (plus
+                 * fog / units / damping / W,H) so they survive a relaunch. */
+                g_td5.ini.window_mode    = s_display_window_mode;
+                g_td5.ini.vsync          = s_display_vsync;
+                g_td5.ini.show_fps       = s_display_show_fps;
                 g_td5.ini.fog_enabled    = s_display_fog_enabled;
                 g_td5.ini.speed_units    = s_display_speed_units;
                 g_td5.ini.camera_damping = s_display_camera_damping;
+                td5_save_set_speed_units(s_display_speed_units);
                 td5_ini_persist_options();
                 s_inner_state = 7;
                 break;

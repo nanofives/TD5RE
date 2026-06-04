@@ -4003,6 +4003,21 @@ int td5_game_run_race_frame(void) {
      * car out of the captured preview; normal race uses the sky-blue clear. */
     td5_plat_render_clear(td5_render_photobooth_active() ? 0xFF000058u : 0xFF4080C0u);
 
+    /* [S01 2026-06-04] Live window resize: if the render dimensions changed
+     * (drag-resize / maximize, applied in the platform layer's WM_SIZE handler),
+     * recompute the per-viewport rectangles so the camera projection, scissor
+     * and HUD layout follow the new client size. Cheap per-frame compare; the
+     * relayout only runs on an actual change. */
+    {
+        static int s_last_vp_w = 0, s_last_vp_h = 0;
+        if (g_td5.render_width != s_last_vp_w || g_td5.render_height != s_last_vp_h) {
+            td5_game_init_viewport_layout();              /* 3D viewport rects + projection input */
+            td5_hud_init_layout(g_td5.split_screen_mode); /* HUD/minimap layout (reads viewport_count) */
+            s_last_vp_w = g_td5.render_width;
+            s_last_vp_h = g_td5.render_height;
+        }
+    }
+
     /* For each viewport: camera setup, sky, track, actors, vfx, hud */
     for (int vp = 0; vp < g_td5.viewport_count; vp++) {
         /* Set viewport rectangle + scissor.

@@ -48,6 +48,17 @@ static int      s_window_w      = 640;
 static int      s_window_h      = 480;
 static int      s_window_bpp    = 16;
 static int      s_fullscreen    = 0;
+/* [S01 Display options 2026-06-04] 3-way window mode + the user's chosen
+ * windowed/fullscreen resolution. Borderless overrides the render size to the
+ * desktop; windowed and exclusive-fullscreen render at the chosen resolution. */
+static int      s_window_mode   = 1;   /* 0=fullscreen exclusive, 1=windowed, 2=borderless */
+static int      s_chosen_w      = 0;   /* last resolution picked in Display options */
+static int      s_chosen_h      = 0;
+/* Re-entrancy guard so the WM_SIZE-driven live resize ignores our own
+ * programmatic SetWindowPos inside td5_plat_set_window_mode (which already
+ * resizes the swap chain explicitly). */
+static int      s_suppress_wm_size = 0;
+static int      plat_resize_native(int width, int height, int bpp, int do_swap_reset);
 
 /* Timing */
 static LARGE_INTEGER s_qpc_freq;
@@ -272,6 +283,11 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
     s_window_h   = g_backend.height;
     s_window_bpp = g_backend.bpp;
     s_fullscreen = !g_backend.windowed;
+    /* Seed the chosen resolution + window mode from the boot state; main.c
+     * applies the persisted [Display] WindowMode right after this returns. */
+    s_chosen_w    = s_window_w;
+    s_chosen_h    = s_window_h;
+    s_window_mode = s_fullscreen ? 0 : 1;
 
     /* Subclass the wrapper's window to handle WM_CLOSE and hide system cursor */
     if (s_hwnd) {
@@ -351,6 +367,22 @@ static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (LOWORD(lParam) == HTCLIENT) {
             SetCursor(NULL);
             return TRUE;
+        }
+        break;
+    case WM_SIZE:
+        /* [S01 2026-06-04] Live window resize (drag the sizing border / maximize)
+         * in windowed mode: match the swap chain, backbuffer and render dims to
+         * the new client area. Skip when minimized, during our own programmatic
+         * resizes (s_suppress_wm_size), and in borderless / exclusive-fullscreen
+         * (those own their size). */
+        if (wParam != SIZE_MINIMIZED && !s_suppress_wm_size && s_window_mode == 1) {
+            int cw = (int)LOWORD(lParam);
+            int ch = (int)HIWORD(lParam);
+            if (cw > 0 && ch > 0 && (cw != s_window_w || ch != s_window_h)) {
+                s_chosen_w = cw;   /* keep the resolution selector + manual size in sync */
+                s_chosen_h = ch;
+                plat_resize_native(cw, ch, s_window_bpp, 1);
+            }
         }
         break;
     /* Latch mouse clicks so a quick click released within one 33ms frame is not missed */
@@ -742,6 +774,32 @@ int td5_plat_enum_display_modes(TD5_DisplayMode *modes, int max_count)
         return 0;
     }
 
+    /* [S01 2026-06-04] Prefer the wrapper's DXGI output enumeration
+     * (IDXGIOutput::GetDisplayModeList, run once at Backend_Init into
+     * g_backend.modes) so the resolution selector lists true DXGI display
+     * modes. DXGI lists every refresh-rate variant, so dedup by WxH and filter
+     * to >=640x480. All enumerated DXGI formats are 32-bit BGRA/RGBA. Fall back
+     * to the GDI EnumDisplaySettings list below if DXGI produced nothing. */
+    if (g_backend.modes && g_backend.mode_count > 0) {
+        int i;
+        for (i = 0; i < g_backend.mode_count && count < max_count; i++) {
+            int w = (int)g_backend.modes[i].Width;
+            int h = (int)g_backend.modes[i].Height;
+            if (w < 640 || h < 480) continue;
+            if (display_mode_exists(modes, count, w, h, 32)) continue;
+            modes[count].width      = w;
+            modes[count].height     = h;
+            modes[count].bpp        = 32;
+            modes[count].fullscreen = 1;
+            count++;
+        }
+        if (count > 0) {
+            TD5_LOG_I(LOG_TAG, "enum_display_modes: %d modes from DXGI", count);
+            return count;
+        }
+        /* else fall through to the GDI fallback */
+    }
+
     ZeroMemory(&dm, sizeof(dm));
     dm.dmSize = sizeof(dm);
 
@@ -766,145 +824,222 @@ int td5_plat_enum_display_modes(TD5_DisplayMode *modes, int max_count)
     return count;
 }
 
-int td5_plat_apply_display_mode(int width, int height, int bpp)
+/* [S01 Display options 2026-06-04] Resize the swap-chain RT, the offscreen 3D
+ * backbuffer, the wrapper frontend-scale and the source-port render-dim globals
+ * to a new native client size. Does NOT touch the HWND style/position or the
+ * exclusive-fullscreen state (callers own those). do_swap_reset==0 skips the
+ * Backend_Reset/ResizeBuffers — used right after Backend_SetExclusiveFullscreen,
+ * which already resized the swap-chain buffers itself. */
+static int plat_resize_native(int width, int height, int bpp, int do_swap_reset)
 {
-    if (width <= 0 || height <= 0) return 0;
+    g_backend.target_width  = width;
+    g_backend.target_height = height;
 
-    /* In windowed mode: leave the desktop alone but resize the actual game
-     * window, the DXGI swap chain, and the wrapper backbuffer so the game's
-     * viewport math, the swap chain and the visible client area stay
-     * consistent with the user's selection. */
-    if (!s_fullscreen) {
-        if (width == s_window_w && height == s_window_h && bpp == s_window_bpp) {
-            return 1;
-        }
-
-        TD5_LOG_I(LOG_TAG,
-                  "apply_display_mode: windowed %dx%d bpp=%d (was %dx%d bpp=%d) hwnd=%p",
-                  width, height, bpp, s_window_w, s_window_h, s_window_bpp,
-                  (void*)s_hwnd);
-
-        /* 1. Resize the visible Win32 window so client area = width x height.
-         *    Use the live style/ex_style so any future window-style additions
-         *    keep producing the right outer size. */
-        if (s_hwnd) {
-            RECT wr;
-            DWORD style    = (DWORD)GetWindowLongA(s_hwnd, GWL_STYLE);
-            DWORD ex_style = (DWORD)GetWindowLongA(s_hwnd, GWL_EXSTYLE);
-            wr.left = 0; wr.top = 0;
-            wr.right = width; wr.bottom = height;
-            AdjustWindowRectEx(&wr, style, FALSE, ex_style);
-            SetWindowPos(s_hwnd, NULL, 0, 0,
-                         wr.right - wr.left, wr.bottom - wr.top,
-                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-            TD5_LOG_I(LOG_TAG, "  SetWindowPos: client=%dx%d outer=%dx%d",
-                      width, height, wr.right - wr.left, wr.bottom - wr.top);
-        }
-
-        /* 2. Tell the wrapper its new client size. Backend_Reset reads
-         *    target_width/height for the swap-chain ResizeBuffers call in
-         *    windowed mode. */
-        g_backend.target_width  = width;
-        g_backend.target_height = height;
-
-        /* 3. ResizeBuffers + recreate swap_rtv / depth_dsv / viewport at the
-         *    new size. Backend_Reset uses target_width/height (just set) for
-         *    the actual RT dimensions when windowed; the width/height args
-         *    are only stored on g_backend. */
-        if (g_backend.swap_chain) {
-            int reset_w = g_backend.width  > 0 ? g_backend.width  : width;
-            int reset_h = g_backend.height > 0 ? g_backend.height : height;
-            if (!Backend_Reset(reset_w, reset_h, bpp, 1)) {
-                TD5_LOG_E(LOG_TAG, "  Backend_Reset FAILED");
-                return 0;
-            }
-            TD5_LOG_I(LOG_TAG, "  Backend_Reset OK: swap chain -> %dx%d", width, height);
-        }
-
-        /* 4. Recreate the wrapper's offscreen 3D backbuffer at the new size
-         *    so td5_plat_render_clear / set_viewport / set_clip_rect (which
-         *    query backbuffer->width/height) and the standalone
-         *    backbuffer-SRV->swap-chain present blit all match the swap chain.
-         *    Mirrors main.c's startup creation. */
-        if (g_backend.standalone) {
-            WrapperSurface *new_bb = WrapperSurface_Create(
-                (DWORD)width, (DWORD)height, (DWORD)bpp,
-                DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE);
-            if (new_bb) {
-                WrapperSurface *old_bb = g_backend.backbuffer;
-                g_backend.backbuffer = new_bb;
-                if (old_bb && old_bb->vtbl && old_bb->vtbl->Release) {
-                    old_bb->vtbl->Release(old_bb);
-                }
-                TD5_LOG_I(LOG_TAG, "  backbuffer recreated at %dx%d", width, height);
-            } else {
-                TD5_LOG_W(LOG_TAG,
-                          "  backbuffer recreate FAILED at %dx%d - keeping old",
-                          width, height);
-            }
-        }
-
-        /* 5. Refresh wrapper frontend-scaling state. Frontend renders at the
-         *    640x480 design resolution and scales to native; only the native
-         *    side changes here. */
-        g_backend.fe_scale.native_w = width;
-        g_backend.fe_scale.native_h = height;
-        if (g_backend.fe_scale.virtual_w > 0 &&
-            g_backend.fe_scale.virtual_h > 0 &&
-            width  > g_backend.fe_scale.virtual_w &&
-            height > g_backend.fe_scale.virtual_h) {
-            g_backend.fe_scale.scale_x =
-                (float)width  / (float)g_backend.fe_scale.virtual_w;
-            g_backend.fe_scale.scale_y =
-                (float)height / (float)g_backend.fe_scale.virtual_h;
-            g_backend.fe_scale.enabled = 1;
-        } else {
-            g_backend.fe_scale.scale_x = 1.0f;
-            g_backend.fe_scale.scale_y = 1.0f;
-            g_backend.fe_scale.enabled = 0;
-        }
-
-        s_window_w   = width;
-        s_window_h   = height;
-        s_window_bpp = bpp;
-
-        /* 6. Sync the source-port render-dim globals so race-side viewport
-         *    setup, HUD layout, VFX projection and the debug overlay text
-         *    follow the new client size. These are set once at startup in
-         *    td5_render.c / td5re_init and otherwise never touched. The
-         *    g_td5.render_width/height mirror is updated via the helper
-         *    in td5re.c so we don't have to pull td5re.h in here. */
-        {
-            extern float g_render_width_f, g_render_height_f;
-            extern int   g_render_width,   g_render_height;
-            extern void  td5re_set_render_dims(int w, int h);
-            g_render_width      = width;
-            g_render_height     = height;
-            g_render_width_f    = (float)width;
-            g_render_height_f   = (float)height;
-            td5re_set_render_dims(width, height);
-        }
-        return 1;
-    }
-
-    {
-        DEVMODEW dm;
-        ZeroMemory(&dm, sizeof(dm));
-        dm.dmSize = sizeof(dm);
-        dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL;
-        dm.dmPelsWidth = (DWORD)width;
-        dm.dmPelsHeight = (DWORD)height;
-        dm.dmBitsPerPel = (DWORD)bpp;
-
-        if (ChangeDisplaySettingsW(&dm, CDS_FULLSCREEN) != DISP_CHANGE_SUCCESSFUL) {
+    if (do_swap_reset && g_backend.swap_chain) {
+        int reset_w = g_backend.width  > 0 ? g_backend.width  : width;
+        int reset_h = g_backend.height > 0 ? g_backend.height : height;
+        if (!Backend_Reset(reset_w, reset_h, bpp, 1)) {
+            TD5_LOG_E(LOG_TAG, "plat_resize_native: Backend_Reset FAILED");
             return 0;
         }
     }
 
-    s_window_w = width;
-    s_window_h = height;
+    /* Recreate the offscreen 3D backbuffer so render_clear / set_viewport /
+     * set_clip_rect (which read backbuffer->width/height) and the present blit
+     * match the swap chain. */
+    if (g_backend.standalone) {
+        WrapperSurface *new_bb = WrapperSurface_Create(
+            (DWORD)width, (DWORD)height, (DWORD)bpp,
+            DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE);
+        if (new_bb) {
+            WrapperSurface *old_bb = g_backend.backbuffer;
+            g_backend.backbuffer = new_bb;
+            if (old_bb && old_bb->vtbl && old_bb->vtbl->Release) {
+                old_bb->vtbl->Release(old_bb);
+            }
+        } else {
+            TD5_LOG_W(LOG_TAG, "plat_resize_native: backbuffer recreate FAILED at %dx%d",
+                      width, height);
+        }
+    }
+
+    /* Frontend-scale: the 2D UI is laid out at a 640x480 virtual resolution and
+     * scaled to native; only the native side changes here. */
+    g_backend.fe_scale.native_w = width;
+    g_backend.fe_scale.native_h = height;
+    if (g_backend.fe_scale.virtual_w > 0 && g_backend.fe_scale.virtual_h > 0 &&
+        width  > g_backend.fe_scale.virtual_w &&
+        height > g_backend.fe_scale.virtual_h) {
+        g_backend.fe_scale.scale_x = (float)width  / (float)g_backend.fe_scale.virtual_w;
+        g_backend.fe_scale.scale_y = (float)height / (float)g_backend.fe_scale.virtual_h;
+        g_backend.fe_scale.enabled = 1;
+    } else {
+        g_backend.fe_scale.scale_x = 1.0f;
+        g_backend.fe_scale.scale_y = 1.0f;
+        g_backend.fe_scale.enabled = 0;
+    }
+
+    s_window_w   = width;
+    s_window_h   = height;
     s_window_bpp = bpp;
+
+    /* Sync the source-port render-dim globals (race viewport, HUD layout, VFX
+     * projection, debug overlay). */
+    {
+        extern float g_render_width_f, g_render_height_f;
+        extern int   g_render_width,   g_render_height;
+        extern void  td5re_set_render_dims(int w, int h);
+        g_render_width    = width;
+        g_render_height   = height;
+        g_render_width_f  = (float)width;
+        g_render_height_f = (float)height;
+        td5re_set_render_dims(width, height);
+    }
     return 1;
+}
+
+/* Apply a resolution picked in Display options. Records it as the chosen
+ * windowed/fullscreen resolution and re-applies the current window mode so the
+ * change takes effect consistently (borderless ignores it and stays desktop). */
+int td5_plat_apply_display_mode(int width, int height, int bpp)
+{
+    if (width <= 0 || height <= 0) return 0;
+    s_chosen_w = width;
+    s_chosen_h = height;
+    TD5_LOG_I(LOG_TAG, "apply_display_mode: chosen=%dx%d bpp=%d mode=%d",
+              width, height, bpp, s_window_mode);
+    return td5_plat_set_window_mode(s_window_mode);
+}
+
+/* 0 = exclusive fullscreen, 1 = windowed, 2 = borderless. */
+int td5_plat_get_window_mode(void)
+{
+    return s_window_mode;
+}
+
+int td5_plat_set_window_mode(int mode)
+{
+    HMONITOR mon;
+    MONITORINFO mi;
+    int desk_w, desk_h, bpp;
+    DWORD style;
+
+    if (mode < 0 || mode > 2) mode = 1;
+    bpp = s_window_bpp > 0 ? s_window_bpp : 32;
+
+    if (!s_hwnd) {
+        s_window_mode = mode;
+        s_fullscreen  = (mode == 0);
+        g_backend.window_mode = mode;
+        return 0;
+    }
+
+    mi.cbSize = sizeof(mi);
+    mon = MonitorFromWindow(s_hwnd, MONITOR_DEFAULTTOPRIMARY);
+    if (!mon || !GetMonitorInfoA(mon, &mi)) {
+        mi.rcMonitor.left = 0; mi.rcMonitor.top = 0;
+        mi.rcMonitor.right  = GetSystemMetrics(SM_CXSCREEN);
+        mi.rcMonitor.bottom = GetSystemMetrics(SM_CYSCREEN);
+        mi.rcWork = mi.rcMonitor; /* no taskbar info -> full monitor */
+    }
+    desk_w = mi.rcMonitor.right  - mi.rcMonitor.left;
+    desk_h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    if (s_chosen_w <= 0 || s_chosen_h <= 0) {
+        s_chosen_w = s_window_w;
+        s_chosen_h = s_window_h;
+    }
+
+    TD5_LOG_I(LOG_TAG, "set_window_mode: %d (was %d) chosen=%dx%d desktop=%dx%d",
+              mode, s_window_mode, s_chosen_w, s_chosen_h, desk_w, desk_h);
+
+    /* Suppress the WM_SIZE-driven live resize for the duration of this function:
+     * the SetWindowPos / SetFullscreenState calls below fire WM_SIZE, but we
+     * resize the swap chain explicitly via plat_resize_native. */
+    s_suppress_wm_size = 1;
+
+    /* Leaving exclusive fullscreen: drop the swap chain out of it first so the
+     * subsequent restyle / ResizeBuffers operate on a windowed swap chain. */
+    if (s_window_mode == 0 && mode != 0) {
+        Backend_SetExclusiveFullscreen(0);
+    }
+
+    if (mode == 1) {
+        /* Windowed: a fully resizable (WS_OVERLAPPEDWINDOW) bordered window at
+         * the chosen resolution, centered in the monitor work area. The client
+         * is clamped so the *framed* window fits the work area (taskbar-aware) —
+         * without this a >=desktop pick pushes the title bar / lower menu rows
+         * off screen and you can't change it again. The user can still drag the
+         * sizing border or maximize afterwards (handled by WM_SIZE). */
+        int w = s_chosen_w, h = s_chosen_h;
+        int work_w = mi.rcWork.right  - mi.rcWork.left;
+        int work_h = mi.rcWork.bottom - mi.rcWork.top;
+        RECT wr;
+        int outer_w, outer_h, frame_w, frame_h, x, y;
+        s_fullscreen = 0;
+        style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+        SetWindowLongA(s_hwnd, GWL_STYLE, (LONG)style);
+        wr.left = 0; wr.top = 0; wr.right = w; wr.bottom = h;
+        AdjustWindowRectEx(&wr, style, FALSE, 0);
+        frame_w = (wr.right - wr.left) - w;   /* chrome overhead (borders+caption) */
+        frame_h = (wr.bottom - wr.top) - h;
+        if (w + frame_w > work_w) w = work_w - frame_w;
+        if (h + frame_h > work_h) h = work_h - frame_h;
+        if (w < 320) w = 320;
+        if (h < 240) h = 240;
+        outer_w = w + frame_w;
+        outer_h = h + frame_h;
+        x = mi.rcWork.left + (work_w - outer_w) / 2;
+        y = mi.rcWork.top  + (work_h - outer_h) / 2;
+        if (x < mi.rcWork.left) x = mi.rcWork.left;
+        if (y < mi.rcWork.top)  y = mi.rcWork.top;
+        SetWindowPos(s_hwnd, HWND_NOTOPMOST, x, y, outer_w, outer_h,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        plat_resize_native(w, h, bpp, 1);
+    } else if (mode == 2) {
+        /* Borderless: WS_POPUP covering the whole monitor at desktop res. */
+        s_fullscreen = 0;
+        style = WS_POPUP | WS_VISIBLE;
+        SetWindowLongA(s_hwnd, GWL_STYLE, (LONG)style);
+        SetWindowPos(s_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                     desk_w, desk_h, SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        plat_resize_native(desk_w, desk_h, bpp, 1);
+    } else {
+        /* Exclusive fullscreen at the chosen resolution. SetExclusiveFullscreen
+         * resizes the swap-chain buffers itself, so plat_resize_native skips the
+         * Backend_Reset (do_swap_reset=0) and only refreshes backbuffer/dims. */
+        int w = s_chosen_w, h = s_chosen_h;
+        s_fullscreen = 1;
+        style = WS_POPUP | WS_VISIBLE;
+        SetWindowLongA(s_hwnd, GWL_STYLE, (LONG)style);
+        g_backend.target_width  = w;
+        g_backend.target_height = h;
+        if (g_backend.swap_chain) {
+            Backend_SetExclusiveFullscreen(1);
+        }
+        plat_resize_native(w, h, bpp, 0);
+    }
+
+    s_suppress_wm_size = 0;
+    s_window_mode = mode;
+    g_backend.window_mode = mode;
+    return 1;
+}
+
+/* [S01 2026-06-04] Toggle the present sync interval (Display options VSync). */
+void td5_plat_set_vsync(int on)
+{
+    g_backend.vsync = on ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "set_vsync: %d", g_backend.vsync);
+}
+
+/* [S01 2026-06-04] The user's current windowed/fullscreen resolution — tracks
+ * drag-resizes (WM_SIZE updates s_chosen_*) but NOT the borderless desktop
+ * override. Persisted as [Display] Width/Height so the window reopens at the
+ * same size next launch (there is no Resolution row any more). */
+void td5_plat_get_chosen_resolution(int *w, int *h)
+{
+    if (w) *w = (s_chosen_w > 0) ? s_chosen_w : s_window_w;
+    if (h) *h = (s_chosen_h > 0) ? s_chosen_h : s_window_h;
 }
 
 /* ========================================================================

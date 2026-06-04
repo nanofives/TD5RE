@@ -400,6 +400,19 @@ int td5_plat_enum_display_modes(TD5_DisplayMode *modes, int max_count);
 /** Apply a fullscreen display mode immediately. */
 int td5_plat_apply_display_mode(int width, int height, int bpp);
 
+/** [S01 2026-06-04] 3-way window mode: 0=fullscreen exclusive, 1=windowed,
+ *  2=borderless. Owns the HWND style + swap-chain fullscreen state. */
+int  td5_plat_set_window_mode(int mode);
+int  td5_plat_get_window_mode(void);
+
+/** [S01 2026-06-04] Toggle the present sync interval (VSync). on!=0 = wait for
+ *  vblank (no tearing), 0 = uncapped/tearing. */
+void td5_plat_set_vsync(int on);
+
+/** [S01 2026-06-04] Current windowed/fullscreen resolution (tracks drag-resizes,
+ *  excludes the borderless desktop override). Persisted as [Display] Width/Height. */
+void td5_plat_get_chosen_resolution(int *w, int *h);
+
 /* ========================================================================
  * Rendering Backend
  *
