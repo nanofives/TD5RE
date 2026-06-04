@@ -812,6 +812,13 @@ void Backend_EnforceWindowSize(void);
 void Backend_UpdateMousePosition(void);
 HWND Backend_GetDisplayWindow(void);
 
+/* Photo-booth frame capture (offline car-preview generation). RequestCapture
+ * grabs the next presented frame; GetCapture returns its BGRA pixels (w*h*4),
+ * owned by the backend, valid until the next capture. Returns 0 if not ready. */
+void Backend_RequestCapture(void);
+int  Backend_GetCapture(unsigned char **px, int *w, int *h);
+void Backend_CaptureIfRequested(void);  /* call before every Present */
+
 /* Render state management */
 void Backend_ApplyStateCache(void);  /* Bind D3D11 state objects from cache */
 void Backend_SelectPixelShader(void); /* Choose PS based on texblend + alpha + tex format */

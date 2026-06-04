@@ -90,11 +90,22 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot);
  * TD6 car body. TD5 cars/AI keep tint 0 and render unchanged. */
 void td5_render_set_vehicle_tint(int slot, uint32_t rgb);
 
+/* Mark a slot as holding a ported TD6 car (transcoded mesh). Suppresses the
+ * chrome/projection reflection overlay for that slot (TD6 cars have a grayscale
+ * body + unused env-map mesh, so the overlay misrenders as a "lights shader" in
+ * planar-scroll light zones). Reset by td5_render_set_vehicle_mesh. */
+void td5_render_set_vehicle_is_td6(int slot, int is_td6);
+
 /* Photo-booth render mode: draw only the player car over a chroma background
  * (sky + track spans suppressed here; VFX/HUD/clear suppressed in the game frame)
  * for offline car-preview (carpic) generation. */
 void td5_render_set_photobooth(int on);
 int  td5_render_photobooth_active(void);
+
+/* Drive the fixed-angle inspection camera from code (the photo booth uses it to
+ * frame the car at a chosen azimuth/elevation/distance). az/el in degrees,
+ * world-relative; slot = actor to frame. Dev-only (no-op in release). */
+void td5_render_set_inspect_cam(int on, float az_deg, float el_deg, float dist, int slot);
 
 /* Per-actor track-zone driven lighting basis update.
  * Walks the per-track light-zone array for `actor->track_span_raw`, picks the

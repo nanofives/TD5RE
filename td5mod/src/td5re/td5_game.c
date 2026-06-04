@@ -32,6 +32,7 @@
 #include "td5_vfx.h"
 #include "td5_trace.h"
 #include "td5_trace_whole_state.h"
+#include "td5_profile.h"
 #include "td5_trace_replay.h"
 #include "td5_benchmark.h"
 
@@ -42,6 +43,7 @@ int td5_trace_current_sim_tick(void) {
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 /* ========================================================================
  * Game State Globals (migrated from td5re_stubs.c — owned by this module)
@@ -1655,7 +1657,11 @@ int td5_game_init_race_session(void) {
      * (CONFIRMED: orig opponent loop @ 0x0040DD5B uses the difficulty roster,
      * not the police set). */
     if (g_td5.wanted_mode_enabled) {
-        if (g_td5.car_index < 33 || g_td5.car_index > 36) {
+        /* Valid cop cars = TD5 police 33..36 OR the ported TD6 cops cp1..cp4
+         * (roster 46..49). Anything else falls back to the Police Cerbera (33). */
+        int is_cop = (g_td5.car_index >= 33 && g_td5.car_index <= 36) ||
+                     (g_td5.car_index >= 46 && g_td5.car_index <= 49);
+        if (!is_cop) {
             TD5_LOG_I(LOG_TAG,
                       "Cop Chase: forcing player car %d -> 33 (Police Cerbera, cop.zip)",
                       g_td5.car_index);
@@ -1676,13 +1682,13 @@ int td5_game_init_race_session(void) {
             int paint_for_slot = g_td5.ai_car_variants[i];
             td5_asset_load_vehicle(car_for_slot, i, paint_for_slot);
 
-            /* Tint the player's ported TD6 car with the selected paint color: its
-             * body skin is grayscale, so the chosen hue multiplies it. TD6 cars
-             * are roster indices >= 37; TD5 cars and AI stay untinted (white).
-             * The photo booth renders the car UNtinted (grayscale) so the menu can
-             * tint the captured preview live. */
-            if (i == 0 && car_for_slot >= 37 && !td5_render_photobooth_active())
-                td5_render_set_vehicle_tint(0, (uint32_t)g_td5.ini.td6_paint_color);
+            /* The player's TD6 paint colour is baked into the BODY texels of the
+             * skin at load time (td5_asset_load_vehicle_skin_painted, masked by
+             * carmask.png) so glass/lights/chrome/tyres keep their own colours and
+             * the wheels (separate hub page) stay untinted. No per-vertex tint is
+             * applied here — that would re-tint the whole mesh, fixed parts and
+             * wheels included. The photo booth loads the skin UNbaked (grey body)
+             * so the menu can preview the paint live. */
 
             /* Load per-vehicle sound bank (Drive.wav, Rev.wav/Reverb.wav, Horn.wav).
              * Slot 0 is the local player and uses Reverb.wav (is_reverb=1).
@@ -2850,6 +2856,11 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
  * uses the string + bit pair so the gate is computed once per stage. */
 static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
 {
+    /* Profiler hook: attribute the time since the previous stage to this stage
+     * name (zone "post_physics" = the physics phase, etc.). ~zero cost when the
+     * profiler is disabled. */
+    td5_profile_mark(stage);
+
     unsigned int stage_bit = 0;
     if      (!strcmp(stage, "frame_begin"))   stage_bit = TD5_TRACE_STG_FRAME_BEGIN;
     else if (!strcmp(stage, "pre_physics"))   stage_bit = TD5_TRACE_STG_PRE_PHYSICS;
@@ -2872,11 +2883,107 @@ static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
  * Returns 0 = racing continues, 1 = race over (fade complete).
  * ======================================================================== */
 
+/* ---- Photo-booth carpic capture (offline preview generation, dev only) ----
+ * When --PhotoBoothCar is active, frame the car at two angles (a 3/4 view and a
+ * pure side), grab each composited frame via the backend readback, write them as
+ * raw PNGs into the car's asset dir, then quit so the generator does the next
+ * car. re/tools/td6_photobooth.py crops by chroma + stacks the two into
+ * carpic0..3.png. Angles/distance are env-tunable (TD5RE_PB_*) for dialing-in. */
+extern void Backend_RequestCapture(void);
+extern int  Backend_GetCapture(unsigned char **px, int *w, int *h);
+extern int  stbi_write_png(const char *f, int w, int h, int comp, const void *data, int stride);
+
+static float pb_env_f(const char *name, float def) {
+    const char *v = getenv(name);
+    return (v && v[0]) ? (float)atof(v) : def;
+}
+static void pb_write_frame(const char *code, char tag) {
+    unsigned char *px; int w, h;
+    if (!Backend_GetCapture(&px, &w, &h)) return;
+    unsigned char *rgb = (unsigned char *)malloc((size_t)w * h * 3);
+    if (!rgb) return;
+    for (int i = 0; i < w * h; i++) {       /* BGRA -> RGB */
+        rgb[i*3+0] = px[i*4+2];
+        rgb[i*3+1] = px[i*4+1];
+        rgb[i*3+2] = px[i*4+0];
+    }
+    char path[256];
+    snprintf(path, sizeof(path), "re/assets/cars/%s/_pb_%c.png", code, tag);
+    stbi_write_png(path, w, h, 3, rgb, w * 3);
+    free(rgb);
+    TD5_LOG_I(LOG_TAG, "photobooth: wrote %s (%dx%d)", path, w, h);
+}
+static void td5_photobooth_tick(void) {
+    if (!td5_render_photobooth_active()) return;
+    static char code[16] = {0};
+    if (!code[0]) {
+        const char *zip = td5_asset_get_player_override_zip();   /* "cars/<code>.zip" */
+        if (!zip) return;
+        const char *p = strrchr(zip, '/'); p = p ? p + 1 : zip;
+        int n = 0; while (p[n] && p[n] != '.' && n < 15) { code[n] = p[n]; n++; }
+        code[n] = '\0';
+    }
+    float dist = pb_env_f("TD5RE_PB_DIST", 1900.0f);
+
+    /* Derive the car's world heading from its orientation matrix so the booth
+     * angles are RELATIVE to where the nose actually points — the car spawns
+     * with a few degrees of yaw, so a fixed absolute azimuth leaves the "side"
+     * shot slightly off-perpendicular (you can see a sliver of the back). The
+     * car's local forward (+Z) maps to world (m[2], m[8]); the azimuth that
+     * places the camera directly in front of the nose is atan2(m[2], m[8])
+     * (matches apply_inspection_camera's offset = (sin az, *, cos az)). */
+    float front_az = 0.0f;
+    {
+        TD5_Actor *pa = td5_game_get_actor(0);
+        if (pa) {
+            const float *m = pa->rotation_matrix.m;
+            front_az = atan2f(m[2], m[8]) * (180.0f / 3.14159265358979f);
+        }
+    }
+    /* Offsets are measured from front_az (0 = dead-on nose):
+     *   A = front-3/4 hero  (+45 -> front + one flank), EL 5 = ~mid-car height
+     *       so the roof is nearly edge-on (user-approved framing).
+     *   B = pure side       (+90 -> camera square to the door, level). */
+    float azA = front_az + pb_env_f("TD5RE_PB_AOFS", 45.0f), elA = pb_env_f("TD5RE_PB_EL_A", 5.0f);
+    float azB = front_az + pb_env_f("TD5RE_PB_BOFS", 90.0f), elB = pb_env_f("TD5RE_PB_EL_B", 0.0f);
+
+    static int logged = 0;
+    if (!logged) { logged = 1;
+        TD5_LOG_I(LOG_TAG, "photobooth: front_az=%.1f -> azA=%.1f azB=%.1f", front_az, azA, azB);
+    }
+
+    static int st = 0, fc = 0;
+    fc++;
+    switch (st) {
+    case 0:  /* hold angle A until the scene settles, then request a grab */
+        td5_render_set_inspect_cam(1, azA, elA, dist, 0);
+        if (fc > 50) { Backend_RequestCapture(); st = 1; }
+        break;
+    case 1:  /* angle A captured last present -> save it, switch to angle B */
+        pb_write_frame(code, 'a');
+        td5_render_set_inspect_cam(1, azB, elB, dist, 0);
+        fc = 0; st = 2;
+        break;
+    case 2:  /* hold angle B, then grab */
+        if (fc > 20) { Backend_RequestCapture(); st = 3; }
+        break;
+    case 3:  /* save B and quit */
+        pb_write_frame(code, 'b');
+        TD5_LOG_I(LOG_TAG, "photobooth: done for '%s', quitting", code);
+        g_td5.quit_requested = 1;
+        st = 4;
+        break;
+    default: break;
+    }
+}
+
 int td5_game_run_race_frame(void) {
     int i;
+    td5_photobooth_tick();   /* sets the booth camera before this frame renders */
     /* ---- Update frame timing ---- */
     td5_game_update_frame_timing();
 
+    td5_profile_begin_frame();   /* race-frame profiler timeline (zones via trace_stage + render/present below) */
     td5_game_trace_stage("frame_begin", 0);
 
     /* ---- Race completion check (before sim loop) ----
@@ -3882,9 +3989,12 @@ int td5_game_run_race_frame(void) {
 
     /* End scene and present */
     td5_render_end_scene();
+    td5_profile_mark("render");      /* all draw submission since post_progress */
     td5_plat_present(1);
+    td5_profile_mark("present");     /* present + GPU drain + vsync wait */
 
     td5_game_trace_stage("frame_end", ticks_this_frame);
+    td5_profile_end_frame();
 
     return 0;  /* race continues */
 }
@@ -5147,6 +5257,35 @@ static uint32_t td5_game_normalized_dt_to_accum(float dt_normalized)
 static float td5_game_normalized_dt_to_seconds(float dt_normalized)
 {
     return dt_normalized * (1.0f / 30.0f);
+}
+
+/* Always-on FPS overlay readouts. Updated by td5_game_update_fps_overlay(),
+ * which is called from the main loop EVERY frame (all states) — unlike
+ * td5_game_update_frame_timing(), which only runs in the race frame. */
+float g_td5_display_fps = 0.0f;
+int   g_td5_peak_frame_ms = 0;
+
+void td5_game_update_fps_overlay(void) {
+    static uint32_t s_prev = 0, s_peak = 0, s_win_max = 0, s_win_start = 0;
+    static float    s_disp = 0.0f;
+    uint32_t now = td5_plat_time_ms();
+    if (s_prev == 0) { s_prev = now; s_win_start = now; return; }
+    uint32_t delta = now - s_prev;
+    s_prev = now;
+    if (delta < 1)    delta = 1;
+    if (delta > 1000) delta = 1000;
+
+    float fps = 1000.0f / (float)delta;
+    if (s_disp <= 0.0f) s_disp = fps;
+    s_disp += (fps - s_disp) * 0.1f;                 /* EMA for a stable readout */
+    if (delta > s_win_max) s_win_max = delta;        /* worst frame this window  */
+    if (now - s_win_start >= 1000) {
+        s_peak = s_win_max;
+        TD5_LOG_W("plat", "FPS: %.0f  peak_frame=%ums", (double)s_disp, s_peak);
+        s_win_max = 0; s_win_start = now;
+    }
+    g_td5_display_fps   = s_disp;
+    g_td5_peak_frame_ms = (int)s_peak;
 }
 
 void td5_game_update_frame_timing(void) {

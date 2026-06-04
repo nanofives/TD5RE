@@ -375,6 +375,20 @@ void td5_render_set_vehicle_tint(int slot, uint32_t rgb)
     s_vehicle_tint[slot] = rgb & 0x00FFFFFFu;
 }
 
+/* Per-slot "this is a ported TD6 car" flag. TD6 cars have a grayscale body and
+ * no meaningful env-map reflection mesh (envmodel.dat is unused), so the
+ * TD5-faithful chrome/projection reflection overlay must NOT run on them: in a
+ * planar-scroll light zone (e.g. the Australia bridge/tunnel) it paints the
+ * scrolling environs "lights" texture onto the grayscale body — the user's
+ * "lights shader over new cars". Reset on every mesh swap. */
+static int s_vehicle_is_td6[TD5_ACTOR_MAX_TOTAL_SLOTS];
+
+void td5_render_set_vehicle_is_td6(int slot, int is_td6)
+{
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
+    s_vehicle_is_td6[slot] = is_td6 ? 1 : 0;
+}
+
 /* Photo-booth mode: render ONLY the player car (skip sky + track spans here, and
  * VFX/HUD/clear in the game frame) over a chroma background, for offline preview
  * (carpic) generation. Reuses the normal chase camera (frozen car at spawn). */
@@ -392,7 +406,13 @@ int  td5_render_photobooth_active(void) { return s_photobooth_active; }
  * Effect state per-slot: heading cos/sin, sub-mode, texture page.
  * ======================================================================== */
 
-#define ENVMAP_TEXTURE_PAGE_BASE 900  /* D3D page IDs for environs textures */
+/* D3D page IDs for environs textures. MUST NOT overlap the frontend surface
+ * pool (FE_SURFACE_PAGE_BASE=900, 31 pages → 900-930): they did, so loading a
+ * level's environs/projection textures for a race clobbered the menu background
+ * surface, and only the (now-removed) per-frame frontend surface recovery hid
+ * it. Moved to 990-993, clear of the frontend pool and within MAX_TEXTURE_PAGES
+ * (1024). */
+#define ENVMAP_TEXTURE_PAGE_BASE 990
 #define ENVMAP_MAX_PAGES         4
 
 typedef struct {
@@ -846,6 +866,23 @@ static void update_render_camera_from_game(void)
         inspect_cam_load_env();
     if (s_inspect_enabled)
         apply_inspection_camera();
+#endif
+}
+
+/* Programmatic inspection-camera control — drives the same fixed-angle camera
+ * the photo booth uses to frame a car (dev only; no-op in release). Locks out
+ * the env loader so the booth's angles aren't overridden. */
+void td5_render_set_inspect_cam(int on, float az_deg, float el_deg, float dist, int slot)
+{
+#ifndef TD5RE_RELEASE
+    s_inspect_loaded  = 1;
+    s_inspect_enabled = on ? 1 : 0;
+    s_inspect_az_deg  = az_deg;
+    s_inspect_el_deg  = el_deg;
+    s_inspect_dist    = dist;
+    s_inspect_slot    = (slot < 0 || slot > 5) ? 0 : slot;
+#else
+    (void)on; (void)az_deg; (void)el_deg; (void)dist; (void)slot;
 #endif
 }
 
@@ -2107,6 +2144,7 @@ void td5_render_set_vehicle_mesh(int slot, TD5_MeshHeader *mesh)
 
     s_vehicle_meshes[slot] = mesh;
     s_vehicle_tint[slot] = 0;   /* default white; game re-sets it for TD6 player car */
+    s_vehicle_is_td6[slot] = 0; /* asset loader re-sets it for a transcoded TD6 mesh */
 }
 
 TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot)
@@ -2752,7 +2790,12 @@ void td5_render_actors_for_view(int view_index)
              * path in RenderRaceActorsForView and are intentionally left without
              * reflection. [RE basis: agent confirmed mesh is global, gate is
              * slot==0 in original — this is a deliberate visual enhancement.] */
-            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS && !s_photobooth_active) {
+            /* Skip ported TD6 cars: their grayscale body + unused env-map mesh
+             * make the reflection overlay paint the scrolling environs "lights"
+             * texture onto the body in planar-scroll zones (Australia bridge/
+             * tunnel) — wrong on new cars. TD5 cars are unaffected. */
+            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS &&
+                !s_photobooth_active && !s_vehicle_is_td6[slot]) {
                 td5_render_update_projection_effect(slot, actor);
                 render_vehicle_reflection_overlay(mesh, slot);   /* booth: no reflections */
             }
@@ -4680,7 +4723,14 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * with tire tracks and z-write does not affect occlusion here — known divergence. */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
 #define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
-#define SHADOW_PULL_VIEWZ       (2.0f)   /* small toward-camera pull: clears road z-fight, far below the car gap */
+/* Toward-camera depth-compare pull (view-z). NOTE: currently MOOT — the shadow
+ * preset (TD5_PRESET_SHADOW) disables the depth test (z_enable=0) because the
+ * port's separate shadow projection could never tie the coplanar road
+ * deterministically, so any LEQUAL bias left a per-frame ground shimmer; the
+ * 2026-06-01 pre-pass makes the no-depth-test path safe (the opaque body, drawn
+ * after, overwrites any over-car shadow). This bias only matters if the depth
+ * test is ever re-enabled. */
+#define SHADOW_PULL_VIEWZ       (2.0f)
 #define SHADOW_DEPTH_Z_BIAS     (SHADOW_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
 
 static int   s_shadow_lookup_done = 0;

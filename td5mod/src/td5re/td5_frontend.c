@@ -12,6 +12,7 @@
 #include "td5_asset.h"
 #include "td5_frontend_button_cache.h"
 #include "td5_game.h"
+#include "td5_profile.h"
 #include "td5_input.h"
 #include "td5_physics.h"
 #include "td5_net.h"
@@ -583,6 +584,16 @@ static int s_carsel_curve_surface = 0;
 static int s_carsel_topbar_surface = 0;
 static int s_graphbars_surface = 0;
 static int s_car_preview_surface = 0;
+/* Body-only paint overlay (carpicpaint) for TD6 cars — grayscale body, rest
+ * transparent; drawn MODULATEd by the paint colour over the gray carpic.
+ * Lazily (re)loaded per car in the render path. s_paint_active: the picked
+ * colour persists on the preview (panel-open shows it live too); it's set on
+ * CONFIRM (closing the panel) and cleared on car change / screen entry, so an
+ * un-painted car shows neutral gray and a painted one keeps its colour through
+ * the confirm slide and after. */
+static int s_paint_overlay_surface = 0;
+static int s_paint_overlay_car = -1;
+static int s_paint_active = 0;
 static char s_car_spec[17][48]; /* config.nfo fields (0-16) for stats sub-screen */
 static int  s_car_spec_car = -1; /* which car index is currently cached */
 static int s_track_preview_surface = 0;
@@ -932,6 +943,17 @@ static int frontend_load_car_preview_surface(int car_index, int paint_index) {
      * car silhouette floats over the CarSel background.
      * [CONFIRMED]: all carpic*.png in re/assets/cars have corners (0,0,90,255). */
     return frontend_load_surface_keyed(entry, s_car_zip_paths[car_index], TD5_COLORKEY_BLUE88);
+}
+
+/* TD6 body-only paint overlay (carpicpaint0.png): grayscale body, everything
+ * else already transparent (alpha), so load with NO colour key — the PNG alpha
+ * is the mask. Paint-independent, so a single frame. Returns <=0 if absent (e.g.
+ * a TD5 car, or a TD6 car whose preview predates carpicpaint generation). */
+static int frontend_load_car_paint_overlay_surface(int car_index) {
+    if (car_index < 0 || car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
+        return 0;
+    return frontend_load_surface_keyed("CarPicPaint0.tga", s_car_zip_paths[car_index],
+                                       TD5_COLORKEY_NONE);
 }
 
 /* Draw a surface OPAQUE: all pixels (including black) rendered as-is, no color key.
@@ -1333,12 +1355,25 @@ static int frontend_td5_car_cap_inclusive(void) {
     return cap;
 }
 
-/* Is car index i reachable by normal (non-cup/non-cop) car cycling?
- *   [0 .. td5_cap]  unlocked, non-police TD5 cars
- *   [37 .. 75]      ported TD6 cars (always available)
+/* TD6 cop cars cp1..cp4 (Jaguar/Charger/Mustang/Cerbera police) sit at roster
+ * indices 37 + TD6_NEW_CODES{9..12} = 46..49. Like the TD5 police (33-36) they
+ * are NOT player-selectable and cannot be painted — they belong to Cop Chase. */
+#define TD6_COP_FIRST 46
+#define TD6_COP_LAST  49
+static int frontend_car_is_cop(int i) {
+    return (i >= 33 && i <= 36) || (i >= TD6_COP_FIRST && i <= TD6_COP_LAST);
+}
+
+/* Is car index i reachable by normal car cycling for the current game type?
+ *   Cop Chase (type 8): ONLY the cop cars (TD5 33-36 + TD6 cp1-4 = 46-49).
+ *   Otherwise:          [0..td5_cap] unlocked non-police TD5 + [37..75] TD6,
+ *                       with the cop cars excluded.
  * The gap (td5_cap+1 .. 36) — locked TD5 cars + police — is skipped. */
 static int frontend_car_selectable(int i) {
     if (i < 0 || i >= TD5_CAR_COUNT) return 0;
+    if (s_selected_game_type == 8)                  /* Cop Chase: cops only */
+        return frontend_car_is_cop(i);
+    if (frontend_car_is_cop(i)) return 0;           /* cops excluded everywhere else */
     if (i >= TD5_BASE_CAR_COUNT) return 1;          /* TD6 */
     return i <= frontend_td5_car_cap_inclusive();   /* unlocked TD5 (police excluded by cap) */
 }
@@ -1364,6 +1399,12 @@ static int frontend_car_cycle_step(int cur, int delta, int lo, int hi) {
  * color selector vs. the TD5 paint-arrows behaviour. */
 static int frontend_car_is_td6(int car_index) {
     return car_index >= TD5_BASE_CAR_COUNT && car_index < TD5_CAR_COUNT;
+}
+
+/* TD6 car that may be repainted: every ported car EXCEPT the cp1-4 cop cars
+ * (police liveries are fixed). Gates the colour selector + the preview tint. */
+static int frontend_car_paintable(int car_index) {
+    return frontend_car_is_td6(car_index) && !frontend_car_is_cop(car_index);
 }
 
 /* --- TD6 paint COLOR selector ---------------------------------------------
@@ -1406,15 +1447,13 @@ static int s_color_panel_visible = 0;
 static int s_color_cur_col = 0;
 static int s_color_cur_row = 0;
 
-/* RGB (0xRRGGBB) -> frontend BGRA modulate (0xAABBGGRR), full alpha. */
+/* RGB (0xRRGGBB) -> frontend vertex-diffuse modulate (0xAARRGGBB), full alpha.
+ * The fe_draw_quad vertex diffuse is packed/consumed as 0xAARRGGBB (same field
+ * + shader as the in-race tint at td5_render.c:1702), so NO R/B swap — an
+ * earlier swap here turned red paint into a blue preview and disagreed with the
+ * (correct) in-race tint that reads (rgb>>16)&FF as red. */
 static uint32_t frontend_rgb_to_bgra(uint32_t c) {
-    return 0xFF000000u | ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
-}
-/* BGRA modulate for the current TD6 paint color, or white if the selected car
- * is not a TD6 car (so TD5 previews are unaffected). */
-static uint32_t frontend_td6_tint_bgra(void) {
-    if (!frontend_car_is_td6(frontend_current_car_index())) return 0xFFFFFFFFu;
-    return frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color);
+    return 0xFF000000u | (c & 0x00FFFFFFu);
 }
 /* HSV (0..1 each) -> 0xRRGGBB. */
 static uint32_t td6_hsv_to_rgb(float h, float s, float v) {
@@ -1561,6 +1600,14 @@ static void frontend_load_selected_car_preview(void) {
         s_car_preview_surface = 0;
     }
     s_car_preview_surface = frontend_load_car_preview_surface(car_index, s_selected_paint);
+    /* Invalidate the paint-overlay cache so it RELOADS with the preview. On
+     * car-select ENTRY (incl. returning from a race) the car index is unchanged,
+     * so the lazy per-car load wouldn't refresh it — and a race may have reused
+     * its texture page (it would otherwise paint the WHOLE body from stale
+     * content). Only the cache index is reset here; the release + fresh reload
+     * happens in frontend_draw_car_paint_overlay so we never release a handle
+     * that could collide with the just-reloaded preview surface. */
+    s_paint_overlay_car = -1;
 }
 
 static void frontend_load_selected_track_preview(void) {
@@ -1646,6 +1693,22 @@ static int frontend_color_panel_mouse(void) {
         return 1;
     }
     return 0;
+}
+
+/* Draw the TD6 body-only paint overlay for actual_car at preview x (canvas px),
+ * MODULATEd by the selected paint colour. Lazily (re)loads the overlay surface
+ * per car. No-op for TD5 cars or if there's no overlay surface. */
+static void frontend_draw_car_paint_overlay(int actual_car, float x, float sx, float sy) {
+    if (!frontend_car_paintable(actual_car)) return;
+    if (s_paint_overlay_car != actual_car) {
+        if (s_paint_overlay_surface > 0) frontend_release_surface(s_paint_overlay_surface);
+        s_paint_overlay_surface = frontend_load_car_paint_overlay_surface(actual_car);
+        s_paint_overlay_car = actual_car;
+    }
+    if (s_paint_overlay_surface > 0)
+        fe_draw_surface_rect(s_paint_overlay_surface, x * sx, 124.0f * sy,
+                             408.0f * sx, 280.0f * sy,
+                             frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color));
 }
 
 static int s_cursor_visible;
@@ -3784,31 +3847,51 @@ TD5_ScreenIndex td5_frontend_get_screen(void) {
 
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
+    td5_profile_begin_frame();
     /* 0. Poll platform input so s_keyboard[] is fresh for this frame */
     {
         TD5_InputState dummy;
         td5_plat_input_poll(0, &dummy);
     }
 
-    /* 1. Surface recovery (DDERR_SURFACELOST) */
-    frontend_recover_surfaces();
+    /* 1. Surface recovery (DDERR_SURFACELOST) — ONLY on an actual window/device
+     * resolution change, NOT every frame. [PERF FIX] Running it unconditionally
+     * re-decoded + re-uploaded EVERY tracked surface each frame; on SELECT CAR
+     * that meant re-decoding the ~26ms carpic + overlay per frame (~35ms/frame =
+     * the FPS collapse from 180 to ~30). In D3D11 textures survive a resize, so
+     * recovery is essentially never needed; gate it on a size change to preserve
+     * the original intent (re-upload after a device reset) at zero steady cost. */
+    {
+        static int s_rec_w = -1, s_rec_h = -1;
+        int rw = 0, rh = 0;
+        td5_plat_get_window_size(&rw, &rh);
+        if (rw != s_rec_w || rh != s_rec_h) {
+            frontend_recover_surfaces();
+            s_rec_w = rw; s_rec_h = rh;
+        }
+    }
 
     /* 2. Input polling (keyboard, mouse, joystick) */
     frontend_poll_input();
+    td5_profile_mark("fe_input");   /* steps 0-2: input + surface recovery */
 
     /* 3. Screen dispatch -- call the active screen's state machine */
     if (s_current_screen >= 0 && s_current_screen < TD5_SCREEN_COUNT) {
         ScreenFn fn = s_screen_table[s_current_screen];
         if (fn) fn();
     }
+    td5_profile_mark("fe_fsm");
 
     /* 4. Render flush (cursor queued after all other UI) */
     td5_frontend_render_ui_rects();
     frontend_render_cursor();
     td5_frontend_flush_sprite_blits();
+    td5_profile_mark("fe_render");
 
     /* 5. Presentation (flip / software blit) */
     td5_plat_present(1);
+    td5_profile_mark("fe_present");
+    td5_profile_end_frame();
 
     /* 7. Escape key handling -- only when intro animation is complete (original
      *    behavior: ESC is ignored during slide-in animations) */
@@ -5195,11 +5278,37 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFF404040);
         frontend_render_car_stats_overlay(sx, sy);
     } else {
-        if (s_inner_state == 11 && s_car_preview_prev_surface > 0) {
-            /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20 */
+        /* Show the paint colour live whenever the panel is open OR a colour has
+         * been confirmed (s_paint_active). The body-only overlay follows the car
+         * in every state — static AND the slide — so the confirm animation shows
+         * the painted car (never a gray flash). The slide-OUT (state 11) only
+         * paints when active (a paint confirm slides the SAME car); on a car
+         * CHANGE s_paint_active is cleared, so the old car slides out neutral. */
+        int show_paint = (s_color_panel_visible || s_paint_active);
+        if (s_inner_state == 11) {
+            /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20.
+             * On the very first frame(s) of state 11 the case-11 update that loads
+             * prev_surface may not have run yet (prev==0); in that case keep the OLD
+             * car at centre (s_car_preview_surface is still the old carpic — it is
+             * only swapped to the new car when the slide-out completes). State 11 is
+             * handled ENTIRELY here so it can never fall through to the static branch
+             * below, whose helper would reload the overlay to the NEW car mid-slide. */
             float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 433.0f);
-            float x = 232.0f + 408.0f * t;  /* 232 → 640 (off-screen right) */
-            fe_draw_surface_rect(s_car_preview_prev_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+            float x = (s_car_preview_prev_surface > 0) ? (232.0f + 408.0f * t) : 232.0f;
+            int slide_surf = (s_car_preview_prev_surface > 0) ? s_car_preview_prev_surface : s_car_preview_surface;
+            if (slide_surf > 0)
+            fe_draw_surface_rect(slide_surf, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+            /* Keep the OLD car painted while it slides out. Its overlay surface
+             * is still cached for the old car (s_paint_overlay_car) — it isn't
+             * reloaded until the slide-IN draws the new car — so draw it DIRECTLY
+             * (not via the lazy helper, which would swap in the new car's mask).
+             * Gated on the cached car being paintable so a stale TD6 overlay
+             * never lands on a TD5 car sliding out. */
+            if (show_paint && s_paint_overlay_surface > 0 &&
+                frontend_car_paintable(s_paint_overlay_car))
+                fe_draw_surface_rect(s_paint_overlay_surface, x * sx, 124.0f * sy,
+                                     408.0f * sx, 280.0f * sy,
+                                     frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color));
         } else if (s_inner_state == 14 && s_car_preview_surface > 0) {
             /* New car slides in from right (state 14, ~833ms @30fps):
              * formula @ 0x0040DF4A: x = canvasW + counter*(-0x40) + 0x4A8
@@ -5207,23 +5316,41 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
              * Time-based equivalent: 25 frames / 30fps = ~833ms, using 800ms for match. */
             float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 800.0f);
             float x = 1832.0f - 1600.0f * t;  /* 1832 → 232 [CONFIRMED @ 0x0040DF4A] */
-            TD5_LOG_I(LOG_TAG, "car_sel: slide-in x=%.0f t=%.2f", x, t);
-            fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, frontend_td6_tint_bgra());
+            fe_draw_surface_rect(s_car_preview_surface, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+            if (show_paint) frontend_draw_car_paint_overlay(actual_car, x, sx, sy);
         } else if (s_inner_state >= 6 && s_inner_state != 12 && s_inner_state != 13 && s_car_preview_surface > 0) {
-            /* Static car display: skip during init+slide-in (states 0-5) and
-             * pass-through transition ticks (12/13) to avoid premature display.
-             * TD6 cars are tinted live by the selected paint color (grayscale
-             * carpic * color); TD5 cars use white (no change). */
-            fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, frontend_td6_tint_bgra());
+            /* Static car display. ALWAYS white: the carpic already carries the
+             * grayscale body + the fixed parts (glass/lights/chrome) in their own
+             * colours. The body-only paint overlay (below) tints just the body. */
+            fe_draw_surface_rect(s_car_preview_surface, 232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
+            if (show_paint) {
+                if (s_inner_state == 10) {
+                    /* State 10 is the SINGLE transient frame between a car CHANGE
+                     * and the slide-out: s_car_preview_surface is still the OLD
+                     * carpic and actual_car is already the NEW car. Draw the OLD
+                     * car's CACHED overlay DIRECTLY here — calling the helper would
+                     * reload the overlay for the new car, so its colour/mask would
+                     * leak onto this first frame and the whole slide-OUT ("first
+                     * animation"). The new car's overlay is loaded on the slide-IN
+                     * (state 14, the "second animation"). */
+                    if (s_paint_overlay_surface > 0 && frontend_car_paintable(s_paint_overlay_car))
+                        fe_draw_surface_rect(s_paint_overlay_surface, 232.0f * sx, 124.0f * sy,
+                                             408.0f * sx, 280.0f * sy,
+                                             frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color));
+                } else {
+                    frontend_draw_car_paint_overlay(actual_car, 232.0f, sx, sy);
+                }
+            }
         }
     }
 
-    /* TD6 cars have no carpic preview yet, so fill the preview area with the
-     * selected paint color — live feedback when picking a color from the panel.
-     * Drawn unconditionally for TD6 (over any empty carpic surface) so the
-     * feedback is robust; replaced by the tinted carpic once previews exist.
-     * Skipped on the dimmed stats sub-screen (state 15). */
-    if (frontend_car_is_td6(actual_car) && s_inner_state >= 6 && s_inner_state != 15) {
+    /* FALLBACK only: a TD6 car whose carpic preview hasn't been generated yet
+     * has no surface, so fill the preview area with the flat selected paint
+     * color as live feedback. Once a carpic exists it is drawn above (gray base
+     * + body-only paint overlay), so this flat box must NOT cover it — gated on
+     * s_car_preview_surface <= 0. Skipped on the dimmed stats sub-screen (15). */
+    if (frontend_car_paintable(actual_car) && s_car_preview_surface <= 0 &&
+        s_inner_state >= 6 && s_inner_state != 15) {
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy,
                      frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color),
@@ -7042,6 +7169,17 @@ done:
     /* Clear draw queue for next frame */
     s_draw_queue_count = 0;
 
+    /* Always-on FPS counter (top-left), drawn last so it overlays everything.
+     * peak = worst frame time over the last ~1s, which spikes on a car-change
+     * decode stall even though the smoothed FPS barely moves. */
+    {
+        char fps_buf[48];
+        snprintf(fps_buf, sizeof(fps_buf), "FPS %.0f  %dMS",
+                 (double)g_td5_display_fps, g_td5_peak_frame_ms);
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_text(6.0f * sx, 4.0f * sy, fps_buf, 0xFFFFFF00u, sx, sy);
+    }
+
     /* End scene + present */
     td5_plat_render_end_scene();
 }
@@ -7075,6 +7213,9 @@ int td5_frontend_init(void) {
     s_selected_paint = 0;
     s_selected_config = 0;
     s_color_panel_visible = 0;   /* TD6 color panel starts closed */
+    /* s_paint_active persists across car-select entries (e.g. returning from a
+     * race) so a chosen colour stays applied; it starts 0 (neutral) only at
+     * launch and is set when the player first confirms a paint colour. */
     s_selected_transmission = 0;
     s_selected_track = g_td5.ini.loaded ? g_td5.ini.default_track : 0;
     s_track_direction = 0;
@@ -10004,9 +10145,10 @@ static void Screen_CarSelection(void) {
         case 5: /* Masters: use random roster */
             s_car_roster_max = 14; /* index into s_masters_roster[] */
             break;
-        case 8: /* Cop Chase: 33-36 */
+        case 8: /* Cop Chase: TD5 police 33-36 + TD6 cops cp1-4 (46-49).
+                 * frontend_car_cycle_step skips the non-cop gap (37-45). */
             s_car_roster_min = 33;
-            s_car_roster_max = 36;
+            s_car_roster_max = TD6_COP_LAST;   /* 49 */
             break;
         default:
             /* [CONFIRMED @ 0x0040E8F8 CarSelectionScreenStateMachine case 7]
@@ -10135,7 +10277,10 @@ static void Screen_CarSelection(void) {
             }
         }
         /* Render car preview overlay */
-        if (s_input_ready) {
+        /* Car-select also enters on a bare mouse CLICK while the colour panel is
+         * open, so swatch/map clicks reach the panel — a click doesn't set
+         * s_input_ready (only keyboard/button input does). */
+        if (s_input_ready || (s_color_panel_visible && s_mouse_clicked)) {
             int delta = frontend_option_delta();
             int active_button = s_button_index;
             /* [FIXED 2026-06-01] include button 2 (Stats) — orig slot2 is also a ◄►
@@ -10156,23 +10301,32 @@ static void Screen_CarSelection(void) {
              * picker: PAINT just closes; any other button closes AND acts. There's
              * no OK/close inside the panel — re-press PAINT (or click it) to hide. */
             if (s_color_panel_visible) {
-                int moved = 0;
+                int moved = 0, confirm = 0;
                 if (s_arrow_input & 1) { s_color_cur_col = (s_color_cur_col + TD6_CP_COLS - 1) % TD6_CP_COLS; moved = 1; }
                 if (s_arrow_input & 2) { s_color_cur_col = (s_color_cur_col + 1) % TD6_CP_COLS; moved = 1; }
-                if (s_arrow_input & 4) { if (s_color_cur_row > 0) s_color_cur_row--; moved = 1; }
-                if (s_arrow_input & 8) { if (s_color_cur_row < TD6_CP_GRID_ROWS - 1) s_color_cur_row++; moved = 1; }
+                if (s_arrow_input & 4) {         /* UP: move up, or exit the picker from the top row */
+                    if (s_color_cur_row > 0) { s_color_cur_row--; moved = 1; }
+                    else confirm = 1;
+                }
+                if (s_arrow_input & 8) { if (s_color_cur_row < TD6_CP_GRID_ROWS - 1) { s_color_cur_row++; moved = 1; } }
                 if (frontend_color_panel_mouse()) moved = 1;
                 if (moved) {
+                    /* Live preview only: no animation while navigating — the
+                     * body-only overlay shows the colour instantly (modulate). */
                     g_td5.ini.td6_paint_color = (int)td6_cursor_color(s_color_cur_col, s_color_cur_row);
-                    s_inner_state = 10;          /* re-render preview with new color */
                     frontend_play_sfx(2);
                 }
-                if (s_button_index == 1) {       /* PAINT pressed -> close */
+                if (s_button_index == 1) confirm = 1;   /* PAINT re-pressed -> confirm */
+                if (confirm) {                   /* commit the colour: it stays on the
+                                                  * preview (no animation on hide — the
+                                                  * colour already changed live). */
+                    s_paint_active = 1;
                     frontend_set_color_panel(0);
                     td5_ini_persist_options();
                     frontend_play_sfx(3);
                     active_button = -1;
-                } else if (s_button_index >= 0) { /* other button -> close + act */
+                } else if (s_button_index >= 0) { /* other button -> keep colour, close + act */
+                    s_paint_active = 1;
                     frontend_set_color_panel(0);
                     td5_ini_persist_options();
                     active_button = s_button_index;
@@ -10205,12 +10359,15 @@ static void Screen_CarSelection(void) {
                      * new car is a TD5 car (see the post-switch check). */
                     s_selected_paint = 0;
                     s_selected_config = 0;
+                    /* s_paint_active is NOT cleared on car change: the chosen
+                     * paint colour carries over to the next car (and survives a
+                     * race) — it's a single remembered colour for all TD6 cars. */
                     s_inner_state = 10; /* trigger new car image load */
                 }
                 break;
 
             case 1: /* Paint (TD5: ◄► cycle paint 0-3) / Color (TD6: open panel) */
-                if (frontend_car_is_td6(frontend_current_car_index())) {
+                if (frontend_car_paintable(frontend_current_car_index())) {
                     /* Pressing PAINT opens the modal color panel. (Closing is
                      * handled by the modal block above when it's already open, so
                      * this branch only runs while the panel is closed.) */
@@ -10291,7 +10448,7 @@ static void Screen_CarSelection(void) {
 
             /* Auto-hide the color panel + restore PAINT arrows when the selection
              * is no longer a TD6 car (e.g. cycled back to a TD5 car while open). */
-            if (s_color_panel_visible && !frontend_car_is_td6(frontend_current_car_index()))
+            if (s_color_panel_visible && !frontend_car_paintable(frontend_current_car_index()))
                 frontend_set_color_panel(0);
         }
 

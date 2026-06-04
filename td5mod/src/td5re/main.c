@@ -32,6 +32,7 @@
 #include "td5re.h"
 #include "td5_platform.h"
 #include "td5_save.h"
+#include "td5_profile.h"
 #include "td5_trace.h"
 #include "td5_asset.h"
 #include "td5_render.h"
@@ -661,6 +662,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.log_race      = td5_ini_int("Logging", "Race",     1);
     g_td5.ini.log_engine    = td5_ini_int("Logging", "Engine",   1);
     g_td5.ini.log_wrapper   = td5_ini_int("Logging", "Wrapper",  1);
+    /* [Logging] Profile=1 enables the per-phase frame profiler (off by default;
+     * logs "PROFILE (ms avg/max) ..." per second to engine.log for frontend and
+     * race). ~zero cost when off. */
+    td5_profile_set_enabled(td5_ini_int("Logging", "Profile", 0));
 
     /* Replay persistence (port-only divergence — default 0 = faithful).
      * See td5re.h ini.replay_persist_to_disk and td5_input.c. */
@@ -1029,6 +1034,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
          * td5re_frame() drives the FSM (INTRO -> MENU -> RACE -> BENCHMARK)
          * and calls td5_plat_present() internally at the end of each frame. */
         {
+            /* Update the always-on FPS counter EVERY frame (all states) before
+             * td5re_frame() renders it — td5_game_update_frame_timing() only runs
+             * in the race, so the frontend would otherwise read a stale 0. */
+            td5_game_update_fps_overlay();
             uint32_t t0 = td5_plat_time_ms();
             td5re_frame();
             uint32_t t1 = td5_plat_time_ms();

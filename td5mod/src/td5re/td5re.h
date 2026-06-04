@@ -409,4 +409,7 @@ void td5re_shutdown(void);
 /** Run one frame of the main game loop. Returns 0 to continue, 1 to quit. */
 int  td5re_frame(void);
 
+/** Update the always-on FPS counter (call once per frame from the main loop). */
+void td5_game_update_fps_overlay(void);
+
 #endif /* TD5RE_H */

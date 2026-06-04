@@ -1473,6 +1473,123 @@ static int td5_asset_build_track_texture_png_path(int track_index,
     return 0;
 }
 
+/* Fast narrow PNG decoder for the car-preview-style assets: 8-bit, color type 6
+ * (RGBA), non-interlaced — the format our tools (PIL) emit for carpic/carpicpaint.
+ * Inflates IDAT through the engine's zlib-backed td5_inflate, which is ~2x faster
+ * than stb_image's built-in inflate on a big (1632x1120) car preview, getting a
+ * carpic decode comfortably under the 16.6ms vsync frame budget so a car change
+ * no longer drops a frame. Returns 1 + a malloc'd RGBA buffer (caller frees with
+ * stbi_image_free == free), or 0 to fall back to stb_image for any other PNG
+ * variant (palette / 16-bit / grayscale / interlaced). */
+static int td5_png_decode_fast(const uint8_t *data, size_t size,
+                               unsigned char **out, int *w_out, int *h_out)
+{
+    static const uint8_t PNG_SIG[8] = {137,80,78,71,13,10,26,10};
+    if (!data || size < 57 || memcmp(data, PNG_SIG, 8) != 0) return 0;
+
+    int width = 0, height = 0, bit_depth = 0, color_type = 0, interlace = -1, got_ihdr = 0;
+    uint8_t *idat = NULL; size_t idat_len = 0, idat_cap = 0;
+    size_t pos = 8;
+
+    while (pos + 12 <= size) {
+        uint32_t clen = ((uint32_t)data[pos]<<24)|((uint32_t)data[pos+1]<<16)|
+                        ((uint32_t)data[pos+2]<<8)|(uint32_t)data[pos+3];
+        const uint8_t *ctype = data + pos + 4;
+        const uint8_t *cdata = data + pos + 8;
+        if (pos + 12 + (size_t)clen > size) break;              /* malformed/truncated */
+        if (memcmp(ctype, "IHDR", 4) == 0 && clen >= 13) {
+            width  = (int)(((uint32_t)cdata[0]<<24)|((uint32_t)cdata[1]<<16)|((uint32_t)cdata[2]<<8)|cdata[3]);
+            height = (int)(((uint32_t)cdata[4]<<24)|((uint32_t)cdata[5]<<16)|((uint32_t)cdata[6]<<8)|cdata[7]);
+            bit_depth  = cdata[8];
+            color_type = cdata[9];
+            interlace  = cdata[12];
+            got_ihdr = 1;
+        } else if (memcmp(ctype, "IDAT", 4) == 0) {
+            if (idat_len + clen > idat_cap) {
+                size_t nc = (idat_len + clen) * 2 + 4096;
+                uint8_t *ni = (uint8_t *)realloc(idat, nc);
+                if (!ni) { free(idat); return 0; }
+                idat = ni; idat_cap = nc;
+            }
+            memcpy(idat + idat_len, cdata, clen);
+            idat_len += clen;
+        } else if (memcmp(ctype, "IEND", 4) == 0) {
+            break;
+        }
+        pos += 12 + (size_t)clen;                                /* len + type + data + crc */
+    }
+
+    if (!got_ihdr || bit_depth != 8 || color_type != 6 || interlace != 0 ||
+        width <= 0 || height <= 0 || idat_len < 3 ||
+        (uint64_t)width * (uint64_t)height > 64ull*1024ull*1024ull) {
+        free(idat); return 0;                                    /* not our format -> stb */
+    }
+
+    size_t stride  = (size_t)width * 4 + 1;                      /* filter byte + RGBA row */
+    size_t raw_len = stride * (size_t)height;
+    unsigned char *raw = (unsigned char *)malloc(raw_len);
+    if (!raw) { free(idat); return 0; }
+
+    /* IDAT is a zlib stream; td5_inflate wants RAW deflate, so skip the 2-byte
+     * zlib header (the deflate end-marker stops before the adler trailer). */
+    size_t got = td5_inflate_mem_to_mem(raw, raw_len, idat + 2, idat_len - 2);
+    free(idat);
+    if (got != raw_len) { free(raw); return 0; }
+
+    unsigned char *img = (unsigned char *)malloc((size_t)width * (size_t)height * 4);
+    if (!img) { free(raw); return 0; }
+
+    /* Unfilter with the per-line filter type hoisted OUT of the inner loop so
+     * the common cases reduce to a memcpy / vectorizable add (the per-byte
+     * switch dominated the carpic decode). bpp=4. */
+    const size_t bpp = 4;
+    size_t rowbytes = (size_t)width * 4;
+    for (int y = 0; y < height; y++) {
+        unsigned char filt = raw[(size_t)y * stride];
+        const unsigned char *src = raw + (size_t)y * stride + 1;
+        unsigned char *dst  = img + (size_t)y * rowbytes;
+        const unsigned char *prev = (y > 0) ? (img + (size_t)(y - 1) * rowbytes) : NULL;
+        size_t x;
+        switch (filt) {
+            case 0:                                              /* None */
+                memcpy(dst, src, rowbytes);
+                break;
+            case 1:                                              /* Sub */
+                for (x = 0; x < bpp; x++) dst[x] = src[x];
+                for (; x < rowbytes; x++) dst[x] = (unsigned char)(src[x] + dst[x - bpp]);
+                break;
+            case 2:                                              /* Up */
+                if (prev) for (x = 0; x < rowbytes; x++) dst[x] = (unsigned char)(src[x] + prev[x]);
+                else memcpy(dst, src, rowbytes);
+                break;
+            case 3:                                              /* Average */
+                for (x = 0; x < bpp; x++)
+                    dst[x] = (unsigned char)(src[x] + ((prev ? prev[x] : 0) >> 1));
+                for (; x < rowbytes; x++)
+                    dst[x] = (unsigned char)(src[x] + ((dst[x - bpp] + (prev ? prev[x] : 0)) >> 1));
+                break;
+            case 4:                                              /* Paeth */
+                if (!prev) {
+                    for (x = 0; x < bpp; x++) dst[x] = src[x];
+                    for (; x < rowbytes; x++) dst[x] = (unsigned char)(src[x] + dst[x - bpp]);
+                } else {
+                    for (x = 0; x < bpp; x++) dst[x] = (unsigned char)(src[x] + prev[x]);
+                    for (; x < rowbytes; x++) {
+                        int a = dst[x - bpp], b = prev[x], c = prev[x - bpp];
+                        int pa = abs(b - c), pb = abs(a - c), pc = abs(a + b - 2 * c);
+                        int pred = (pa <= pb && pa <= pc) ? a : (pb <= pc) ? b : c;
+                        dst[x] = (unsigned char)(src[x] + pred);
+                    }
+                }
+                break;
+            default: free(img); free(raw); return 0;             /* bad filter -> stb */
+        }
+    }
+    free(raw);
+    *out = img; *w_out = width; *h_out = height;
+    return 1;
+}
+
 int td5_asset_decode_png_rgba32(const char *path,
                                        void **pixels_out,
                                        int *width_out,
@@ -1514,16 +1631,23 @@ int td5_asset_decode_png_rgba32(const char *path,
         return 0;
     }
 
-    pixels = stbi_load_from_memory(file_data, (int)file_size,
-                                   &width, &height, &channels, 4);
-    free(file_data);
+    /* Fast path: zlib-backed decode for the common 8-bit RGBA PNGs (carpics,
+     * skins). Falls through to stb_image for any unsupported variant. */
+    if (td5_png_decode_fast(file_data, (size_t)file_size,
+                            &pixels, &width, &height)) {
+        free(file_data);
+    } else {
+        pixels = stbi_load_from_memory(file_data, (int)file_size,
+                                       &width, &height, &channels, 4);
+        free(file_data);
+    }
     if (!pixels || width <= 0 || height <= 0) {
         if (pixels) stbi_image_free(pixels);
         return 0;
     }
 
-    /* stb_image outputs RGBA; D3D11 format=2 upload expects BGRA byte order.
-     * Swap R↔B here so all callers get GPU-ready pixel data. */
+    /* stb_image / the fast path output RGBA; D3D11 format=2 upload expects BGRA
+     * byte order. Swap R↔B here so all callers get GPU-ready pixel data. */
     {
         int count = width * height;
         int i;
@@ -2798,6 +2922,46 @@ const char *td5_asset_get_player_override_zip(void)
     return buf;
 }
 
+/* TD6 player paint: load the (body-grayscale + fixed-colour) carskin and the
+ * carmask, multiply ONLY the masked body texels by the paint colour, and upload.
+ * Glass/lights/chrome/tyres (mask=0) keep their original colour. Returns 0 on
+ * any failure so the caller falls back to a plain skin load. The mesh is then
+ * drawn with NO per-vertex tint, so the body colour comes solely from here. */
+static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
+                                               const char *mask_path, uint32_t paint)
+{
+    void *spix = NULL, *mpix = NULL;
+    int sw = 0, sh = 0, mw = 0, mh = 0;
+    if (!td5_asset_load_png_to_buffer(skin_path, TD5_COLORKEY_NONE, &spix, &sw, &sh))
+        return 0;
+    if (!td5_asset_load_png_to_buffer(mask_path, TD5_COLORKEY_NONE, &mpix, &mw, &mh)) {
+        stbi_image_free(spix);
+        return 0;
+    }
+    if (mw != sw || mh != sh) {
+        stbi_image_free(spix); stbi_image_free(mpix);
+        return 0;
+    }
+    unsigned char *s = (unsigned char *)spix;
+    unsigned char *m = (unsigned char *)mpix;
+    int tr = (paint >> 16) & 0xFF, tg = (paint >> 8) & 0xFF, tb = paint & 0xFF;
+    /* td5_asset_decode_png_rgba32 returns BGRA buffers (byte0=B, byte1=G,
+     * byte2=R) to match the engine's B8G8R8A8 textures, so write tb->byte0 and
+     * tr->byte2 (NOT the other way) or blue paint comes out red/orange. */
+    for (int i = 0; i < sw * sh; i++) {
+        if (m[i * 4] > 127) {              /* body texel (grayscale) -> lum * tint */
+            int g = s[i * 4];              /* body is R==G==B, so any byte is the luminance */
+            s[i * 4 + 0] = (unsigned char)((g * tb) / 255);   /* B */
+            s[i * 4 + 1] = (unsigned char)((g * tg) / 255);   /* G */
+            s[i * 4 + 2] = (unsigned char)((g * tr) / 255);   /* R */
+        }
+        s[i * 4 + 3] = 255;                /* keep opaque (mask alpha unused on GPU) */
+    }
+    int ok = td5_plat_render_upload_texture(page, spix, sw, sh, 2);
+    stbi_image_free(spix); stbi_image_free(mpix);
+    return ok;
+}
+
 int td5_asset_load_vehicle(int car_index, int slot, int paint)
 {
     char zip_path[256];
@@ -2839,6 +3003,7 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
     /* TD6 cars ship a render_type 0x104 indexed mesh — transcode it to the
      * TD5 expanded-vertex format the renderer consumes. A non-TD6 mesh
      * (render_type 0x103) returns NULL here and is used as-is. */
+    int is_td6_mesh = 0;
     {
         int td6_size = 0;
         void *td6_mesh = td5_asset_transcode_td6_mesh(mesh_data, mesh_size, &td6_size);
@@ -2846,6 +3011,7 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
             free(mesh_data);
             mesh_data = td6_mesh;
             mesh_size = td6_size;
+            is_td6_mesh = 1;
             TD5_LOG_I(LOG_TAG,
                       "vehicle slot=%d car=%d: transcoded TD6 mesh (%d expanded verts)",
                       slot, car_index, ((TD5_MeshHeader *)mesh_data)->total_vertex_count);
@@ -2864,6 +3030,10 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
 
     /* Register mesh with render system */
     td5_render_set_vehicle_mesh(slot, mesh);
+    /* Flag TD6 cars so the renderer skips the chrome/projection reflection
+     * overlay (misrenders as a "lights shader" on their grayscale body). Must
+     * follow set_vehicle_mesh, which resets the flag. */
+    td5_render_set_vehicle_is_td6(slot, is_td6_mesh);
 
     TD5_LOG_I(LOG_TAG,
               "vehicle slot=%d car=%d: himodel.dat loaded (%d bytes, %d verts, %d cmds)",
@@ -2889,8 +3059,24 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
         {
             char png_skin[256];
             int skin_ok = 0;
-            if (td5_asset_resolve_png_path(skin_tga, zip_path, png_skin, sizeof(png_skin)))
-                skin_ok = td5_asset_load_png_texture(skin_page, png_skin, TD5_COLORKEY_NONE);
+            if (td5_asset_resolve_png_path(skin_tga, zip_path, png_skin, sizeof(png_skin))) {
+                /* TD6 player car: bake the selected paint colour into the body
+                 * texels only (carmask.png), leaving glass/lights/chrome/tyres
+                 * untouched. The booth (photo-booth) is skipped so its carpic
+                 * keeps the grey body. Non-TD6 cars have no carmask -> plain load. */
+                char png_mask[256];
+                uint32_t paint_rgb = (uint32_t)g_td5.ini.td6_paint_color & 0x00FFFFFFu;
+                if (slot == 0 && !td5_render_photobooth_active() &&
+                    paint_rgb != 0x00FFFFFFu &&
+                    td5_asset_resolve_png_path("carmask.png", zip_path, png_mask, sizeof(png_mask))) {
+                    skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin,
+                                                                 png_mask, paint_rgb);
+                    if (skin_ok)
+                        TD5_LOG_I(LOG_TAG, "vehicle slot=0: TD6 body painted %06X (mask)", paint_rgb);
+                }
+                if (!skin_ok)
+                    skin_ok = td5_asset_load_png_texture(skin_page, png_skin, TD5_COLORKEY_NONE);
+            }
             if (!skin_ok)
                 TD5_LOG_W(LOG_TAG, "vehicle slot=%d: %s PNG not found in %s", slot, skin_tga, zip_path);
         }

@@ -2546,34 +2546,23 @@ void td5_hud_render_overlays(float dt)
     td5_render_set_clip_rect(0.0f, (float)g_render_width, 0.0f, (float)g_render_height);
     td5_render_set_projection_center(g_render_width_f * 0.5f, g_render_height_f * 0.5f);
 
+    /* Always-on FPS counter (top-left), independent of the debug overlay so the
+     * readout shows in every state. peak = worst frame time over the last ~1s,
+     * which spikes on a stall (e.g. a car-change decode) even when the smoothed
+     * FPS barely moves. Real wall-clock values from td5_game_update_frame_timing. */
+    td5_hud_queue_text(0, 8, 8, 0, "FPS %.0f  %dMS",
+                       (double)g_td5_display_fps, g_td5_peak_frame_ms);
+
     /* Flush queued text glyphs */
     td5_hud_flush_text();
 
-    /* Debug overlay (gated by td5re.ini DebugOverlay setting) */
+    /* Debug overlay (gated by td5re.ini DebugOverlay setting) — FPS now lives in
+     * the always-on counter above, so this block only carries POS/YAW/etc. */
     if (g_td5.ini.debug_overlay) {
-        /* FPS sampled once per real second. dt is normalized 30 Hz units
-         * (seconds * 30), so divide by 30 to recover seconds before
-         * accumulating to a 1.0-second window. */
-        static float s_dbg_fps = 0.0f;
-        static float s_dbg_fps_accum = 0.0f;
-        static int   s_dbg_fps_frames = 0;
-        s_dbg_fps_accum += dt * (1.0f / 30.0f);
-        s_dbg_fps_frames++;
-        if (s_dbg_fps_accum >= 1.0f) {
-            s_dbg_fps = (float)s_dbg_fps_frames / s_dbg_fps_accum;
-            TD5_LOG_I(LOG_TAG, "debug_overlay fps_window: frames=%d accum_s=%.3f fps=%.1f",
-                      s_dbg_fps_frames, s_dbg_fps_accum, s_dbg_fps);
-            s_dbg_fps_accum = 0.0f;
-            s_dbg_fps_frames = 0;
-        }
-
         int dbg_slot = g_actor_slot_map[0];
         uint8_t *dbg_a = (uint8_t *)actor_ptr(dbg_slot);
         int dbg_y = 52;
         const int dbg_dy = 14;
-
-        td5_hud_queue_text(0, 8, dbg_y, 0, "FPS: %.0f", s_dbg_fps);
-        dbg_y += dbg_dy;
 
         /* World position (24.8 fixed-point -> float) */
         int32_t wx = *(int32_t *)(dbg_a + 0x1FC);
