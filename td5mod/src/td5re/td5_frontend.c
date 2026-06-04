@@ -5759,17 +5759,19 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
  * arrows) so it renders on top of the selected button's opaque fill. */
 static void frontend_render_controller_binding_labels(float sx, float sy) {
     int kbd = (s_ctrl_input_source == 0);
-    int rows = TD5_JSBIND_ACTIONS;   /* 11 incl PAUSE */
     int j;
     if (!s_anim_complete || s_inner_state != 10) return;
-    for (j = 0; j < rows && j < s_button_count; j++) {
+
+    /* The 11 action buttons (0..9 driving + 10 = PAUSE "?"): centered action label
+     * IN the button, mapped binding value to its RIGHT. */
+    for (j = 0; j < TD5_JSBIND_ACTIONS && j < s_button_count; j++) {
         const char *lab, *val;
         char vb[16];
         float bcx, vx, by, ts = 0.58f;
         uint32_t col;
         if (!s_buttons[j].active) continue;
-        bcx = ((float)s_buttons[j].x + (float)s_buttons[j].w * 0.5f) * sx;        /* button centre */
-        vx  = ((float)s_buttons[j].x + (float)s_buttons[j].w + 6.0f) * sx;        /* right of button */
+        bcx = ((float)s_buttons[j].x + (float)s_buttons[j].w * 0.5f) * sx;
+        vx  = ((float)s_buttons[j].x + (float)s_buttons[j].w + 6.0f) * sx;
         by  = (float)(s_buttons[j].y + 5) * sy;
         lab = (j < 10) ? k_ctrl_action_labels[j] : "?";   /* PAUSE shown as "?" */
         col = 0xFFFFFFFFu;
@@ -5777,9 +5779,23 @@ static void frontend_render_controller_binding_labels(float sx, float sy) {
         else if (kbd) val = ctrl_scancode_name(s_ctrl_kb_scancodes[j]);
         else { td5_plat_input_describe_binding(s_ctrl_action_bind[s_ctrl_player][j],
                                                vb, (int)sizeof vb); val = vb; }
-        /* Action label centered IN the button; mapped value to its RIGHT. [PORT 2026-06] */
         fe_draw_text_centered(bcx, by, lab, 0xFFFFFFFFu, sx*ts, sy*ts);
         fe_draw_text(vx, by, val, col, sx*ts, sy*ts);
+    }
+
+    /* Command buttons REMAP ALL (11) + OK (12): centered label only, drawn at a
+     * slightly smaller font so the long "REMAP ALL" fits its button. */
+    {
+        int idx;
+        const char *labs[2] = { "REMAP ALL", "OK" };
+        float ts2 = 0.78f;
+        for (idx = 11; idx <= 12; idx++) {
+            float bcx, by;
+            if (idx >= s_button_count || !s_buttons[idx].active) continue;
+            bcx = ((float)s_buttons[idx].x + (float)s_buttons[idx].w * 0.5f) * sx;
+            by  = (float)(s_buttons[idx].y + 7) * sy;
+            fe_draw_text_centered(bcx, by, labs[idx - 11], 0xFFFFFFFFu, sx*ts2, sy*ts2);
+        }
     }
 }
 
@@ -10206,18 +10222,23 @@ static void Screen_ControllerBinding(void) {
              * then REMAP ALL (sequential one-by-one) + OK (baked labels).
              * [PORT ENHANCEMENT 2026-06] */
             {
-                int colx[2] = { 64, 326 };
+                int colx[2] = { 64, 300 };   /* two aligned columns, equal width */
                 int b;
                 frontend_reset_buttons();
                 for (j = 0; j < 10; j++) {                 /* 0..9 driving actions */
                     int c = j / 5, r = j % 5;
-                    b = frontend_create_button("", colx[c], 80 + r * 30, 150, 24);
+                    b = frontend_create_button("", colx[c], 84 + r * 32, 150, 26);
                     if (b >= 0) s_buttons[b].is_selector = 1;
                 }
-                b = frontend_create_button("", 64, 248, 120, 26);   /* 10 = PAUSE "?" */
+                /* Bottom command row — all three on the SAME line (aligned):
+                 * "?" (PAUSE) | REMAP ALL | OK. is_selector so their labels are
+                 * drawn by the labels pass at a slightly smaller custom font. */
+                b = frontend_create_button("", 64, 272, 80, 28);             /* 10 = "?" */
                 if (b >= 0) s_buttons[b].is_selector = 1;
-                frontend_create_button("REMAP ALL", 200, 300, 150, 28);  /* 11 */
-                frontend_create_button(SNK_OkButTxt,  370, 300,  90, 28); /* 12 */
+                b = frontend_create_button("REMAP ALL", 215, 272, 150, 28);  /* 11 */
+                if (b >= 0) s_buttons[b].is_selector = 1;
+                b = frontend_create_button(SNK_OkButTxt, 390, 272,  80, 28); /* 12 */
+                if (b >= 0) s_buttons[b].is_selector = 1;
             }
         }
         s_anim_tick = 0;
