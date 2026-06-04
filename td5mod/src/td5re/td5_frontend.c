@@ -5765,21 +5765,21 @@ static void frontend_render_controller_binding_labels(float sx, float sy) {
     for (j = 0; j < rows && j < s_button_count; j++) {
         const char *lab, *val;
         char vb[16];
-        float bx, by, bw, vw, ts = 0.58f;
-        uint32_t vcol;
+        float bcx, vx, by, ts = 0.58f;
+        uint32_t col;
         if (!s_buttons[j].active) continue;
-        bx = (float)s_buttons[j].x * sx;
-        by = (float)(s_buttons[j].y + 5) * sy;
-        bw = (float)s_buttons[j].w * sx;
+        bcx = ((float)s_buttons[j].x + (float)s_buttons[j].w * 0.5f) * sx;        /* button centre */
+        vx  = ((float)s_buttons[j].x + (float)s_buttons[j].w + 6.0f) * sx;        /* right of button */
+        by  = (float)(s_buttons[j].y + 5) * sy;
         lab = (j < 10) ? k_ctrl_action_labels[j] : "?";   /* PAUSE shown as "?" */
-        vcol = 0xFFFFFFFFu;
-        if (s_ctrl_capturing && j == s_ctrl_sel_action) { val = "PRESS"; vcol = 0xFF33FF33u; }
+        col = 0xFFFFFFFFu;
+        if (s_ctrl_capturing && j == s_ctrl_sel_action) { val = "PRESS"; col = 0xFF33FF33u; }
         else if (kbd) val = ctrl_scancode_name(s_ctrl_kb_scancodes[j]);
         else { td5_plat_input_describe_binding(s_ctrl_action_bind[s_ctrl_player][j],
                                                vb, (int)sizeof vb); val = vb; }
-        fe_draw_text(bx + 5.0f * sx, by, lab, 0xFFEEEEEEu, sx*ts, sy*ts);
-        vw = fe_measure_text(val, sx*ts);
-        fe_draw_text(bx + bw - vw - 5.0f * sx, by, val, vcol, sx*ts, sy*ts);
+        /* Action label centered IN the button; mapped value to its RIGHT. [PORT 2026-06] */
+        fe_draw_text_centered(bcx, by, lab, 0xFFFFFFFFu, sx*ts, sy*ts);
+        fe_draw_text(vx, by, val, col, sx*ts, sy*ts);
     }
 }
 
