@@ -288,10 +288,24 @@ void td5_save_set_player_device_index(int player, uint32_t idx)
 }
 
 static uint32_t s_split_screen_mode;                          /* 0x497A5C */
-static uint32_t s_catchup_assist;                             /* 0x465FF8 */
+/* CATCHUP / rubber-band assist level (orig g_twoPlayerCatchupAssist @ 0x465FF8,
+ * range 0..9). 0 = off; >0 = catchup ON. Default 1 so the AI rubber-band is on
+ * (softened) on a fresh install — matches the original's always-present catchup
+ * and the user-reported "catchup too aggressive" baseline. The S05 Multiplayer
+ * Options toggle drives this via td5_save_set_catchup_assist(); td5_ai.c reads it
+ * to gate/soften the rubber-band, and td5_input.c maps it to the steering-bias
+ * swing. [S06 2026-06-04 catchup restore] */
+static uint32_t s_catchup_assist = 1;                         /* 0x465FF8 */
 static uint8_t  s_camera_byte_a;                              /* 0x482F48 */
 static uint8_t  s_camera_byte_b;                              /* 0x482F49 */
 static uint32_t s_music_track;                                /* 0x466840 */
+
+/* CATCHUP / rubber-band assist accessors. Persisted via the config buffer
+ * (catchup_assist byte). The frontend (S05 Multiplayer Options toggle) sets it;
+ * td5_ai.c / td5_input.c read it. Clamped to the original 0..9 range; 0 = off.
+ * [S06 2026-06-04 catchup restore] */
+int  td5_save_get_catchup_assist(void)   { return (int)s_catchup_assist; }
+void td5_save_set_catchup_assist(int v)  { if (v < 0) v = 0; if (v > 9) v = 9; s_catchup_assist = (uint32_t)v; }
 /* Default NPC high-score table — raw PE .data bytes from 0x004643B8.
  * Loaded on fresh install (no Config.td5). Overwritten by td5_save_load_config
  * on success. 26 groups x 164 bytes = 4264 bytes. */
@@ -1729,6 +1743,15 @@ static int cfgini_write_input(void)
     cfgini_add(&w, "A = %d\r\nB = %d\r\nC = %d\r\nD = %d\r\n\r\n",
                s_ff_config[0], s_ff_config[1], s_ff_config[2], s_ff_config[3]);
 
+    /* [S05 2026-06-04] CATCHUP / rubber-band assist level (orig 0x465FF8). The
+     * Multiplayer Options toggle persists it here; the retired Config.td5 binary
+     * path (config_serialize_to_buffer) is no longer written, so this organized
+     * INI key is the only persistence across runs. 0 = off, 1..9 = on (default
+     * 1). The td5re.ini [GameOptions] CatchupAssist key (-1 = use this value) is a
+     * separate power-user override resolved by td5_ai_get_catchup_level(). */
+    cfgini_add(&w, "[Assist]\r\n");
+    cfgini_add(&w, "Catchup = %u\r\n\r\n", (unsigned)td5_save_get_catchup_assist());
+
     cfgini_add(&w, "[ControllerButtons]\r\n");
     cfgini_add(&w, "; raw joystick binding dwords [player*9 + slot], players 1..9:\r\n");
     cfgini_add(&w, ";   slot0 = active flag, slot1/2 = axis assignment, slot3..8 = button actions.\r\n");
@@ -1780,6 +1803,10 @@ static int cfgini_read_input(void)
     s_ff_config[1] = cfgini_get_i32(f, "ForceFeedback", "B", s_ff_config[1]);
     s_ff_config[2] = cfgini_get_i32(f, "ForceFeedback", "C", s_ff_config[2]);
     s_ff_config[3] = cfgini_get_i32(f, "ForceFeedback", "D", s_ff_config[3]);
+
+    /* [S05 2026-06-04] CATCHUP / rubber-band assist (set clamps to 0..9). */
+    td5_save_set_catchup_assist(
+        td5_plat_ini_get_int(f, "Assist", "Catchup", td5_save_get_catchup_assist()));
 
     for (int pl = 0; pl < TD5_MAX_HUMAN_PLAYERS; pl++)
         for (int sl = 0; sl < 9; sl++) {

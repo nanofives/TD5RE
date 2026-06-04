@@ -357,6 +357,18 @@ void td5_plat_audio_set_master_volume(int volume);
  *  audio while the in-race pause menu is up. Does not affect CD/music. */
 void td5_plat_audio_set_muted(int muted);
 
+/** Stop and release every active SFX voice (not the primary/keepalive buffers).
+ *  Used at race teardown so voice counts return to baseline between races and no
+ *  looping voice survives into the menus or the next race. */
+void td5_plat_audio_stop_all(void);
+
+/** Number of currently-allocated SFX voices (DirectSound duplicate buffers).
+ *  Used by the sound layer to confirm there is no monotonic voice leak. */
+int td5_plat_audio_active_channels(void);
+
+/** Log the voice allocation/release/steal/fail counters under `tag`. */
+void td5_plat_audio_log_stats(const char *tag);
+
 /** Start streaming a WAV file through a double-buffered DirectSound buffer. */
 int td5_plat_audio_stream_play(const char *wav_path, int loop);
 

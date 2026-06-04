@@ -63,6 +63,11 @@ int  td5_ai_advance_track_script(int *route_state);
 /* --- Rubber-band system --- */
 void td5_ai_compute_rubber_band(void);
 
+/* Effective CATCHUP / rubber-band assist level (0 = off, 1..9 = on/softened).
+ * Resolves the td5re.ini override (>=0 wins) else the persisted S05 toggle
+ * value (default 1). [S06 2026-06-04 catchup restore] */
+int  td5_ai_get_catchup_level(void);
+
 /* --- Initialization --- */
 void td5_ai_bind_actor_table(void *actor_base);
 void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,

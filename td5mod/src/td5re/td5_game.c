@@ -1782,9 +1782,29 @@ int td5_game_init_race_session(void) {
      * @ 0x004435ad (`iVar15 < 0x19`) which gates a zero-sized traffic
      * allocation.
      *
-     * Gate mirrors the original 0x0042AA10 forced-off conditions:
-     * network / split-screen already cleared g_td5.traffic_enabled above;
-     * time-trial and drag-race don't spawn traffic actors.
+     * Gate: traffic is the user-facing Traffic toggle (g_td5.traffic_enabled,
+     * committed from the Quick Race / Multiplayer track-select row); network
+     * races already force it off above; time-trial and drag-race don't spawn
+     * traffic actors.
+     *
+     * [FIX 2026-06-04 S05] Two prior bugs are corrected here so the Traffic
+     * toggle actually gates spawning in every mode the row is exposed:
+     *   (1) The mesh slot was TD5_MAX_RACER_SLOTS+ti. That constant was 6 when
+     *       this loop was written (commit 9a4c1c2) but the N-way work bumped it
+     *       to 16, so meshes loaded into slots 16..21 — rejected by
+     *       td5_asset_load_traffic_model's "slot >= 12" guard — leaving traffic
+     *       INVISIBLE even in single-player. Traffic actors live at
+     *       g_traffic_slot_base..+5 (6..11 for the legacy/<=6 field), so load
+     *       the mesh into the SAME slot the actor (and renderer) use.
+     *   (2) The gate required split_screen_mode == 0, so split-screen never
+     *       loaded traffic meshes (yet td5_ai still spawned the actors — they
+     *       were meshless/invisible). The port KEEPS traffic in <=6 splits (see
+     *       the N-way deviation in step 3), so load it there too. Big (>6-racer)
+     *       fields keep traffic at slot base 16; the 12-slot vehicle-mesh array
+     *       (TD5_ACTOR_MAX_TOTAL_SLOTS) can't hold those, so they're excluded by
+     *       gating on g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS (true for
+     *       single + every <=6 split, false for big fields).
+     *
      * Reverse-direction flag (TRAFFIC.BUS entry flags bit 0) is applied in
      * td5_ai_init_traffic_actors / td5_ai_recycle_traffic_actor via +0x80000
      * heading offset [CONFIRMED @ 0x00435786, 0x00435C00]. */
@@ -1792,10 +1812,10 @@ int td5_game_init_race_session(void) {
         && !g_td5.time_trial_enabled
         && !g_td5.drag_race_enabled
         && !g_td5.network_active
-        && g_td5.split_screen_mode == 0) {
+        && g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS) {
         int traffic_loaded = 0;
         for (int ti = 0; ti < 6; ti++) {
-            int traffic_slot  = TD5_MAX_RACER_SLOTS + ti;  /* slots 6..11 */
+            int traffic_slot  = g_traffic_slot_base + ti;  /* slots 6..11 (legacy base) */
             int traffic_model = td5_asset_resolve_traffic_model_index(
                 g_td5.track_index, /*reverse=*/0, ti);
             if (traffic_model < 0) {
@@ -1824,10 +1844,10 @@ int td5_game_init_race_session(void) {
                   traffic_loaded, g_td5.track_index);
     } else {
         TD5_LOG_I(LOG_TAG,
-                  "InitRace step 5b/19: traffic disabled (traffic_enabled=%d time_trial=%d drag=%d net=%d split=%d)",
+                  "InitRace step 5b/19: traffic disabled (traffic_enabled=%d time_trial=%d drag=%d net=%d split=%d traffic_base=%d)",
                   g_td5.traffic_enabled, g_td5.time_trial_enabled,
                   g_td5.drag_race_enabled, g_td5.network_active,
-                  g_td5.split_screen_mode);
+                  g_td5.split_screen_mode, g_traffic_slot_base);
     }
 
     /* ---- Step 6: Bind track strip runtime pointers ---- */

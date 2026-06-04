@@ -167,6 +167,10 @@ void td5_physics_set_slot_series_position(int slot, int position);
  * Must be called before td5_physics_init_vehicle_runtime(). */
 void td5_physics_load_carparam(int slot, const uint8_t *data_268);
 
+/* Per-slot carparam top speed (tuning +0x74), or -1 if none loaded. Used to
+ * derive a per-car traffic cruise throttle. [S06 2026-06-04] */
+int  td5_physics_get_carparam_top_speed(int slot);
+
 /* Mirror orig LoadRaceVehicleAssets @ 0x00443280 traffic loop: copy slot 0's
  * loaded cardef into the given traffic slot's s_loaded_cardef row, and mark
  * s_carparam_loaded[slot]=1 so bind_default_vehicle_tuning uses it instead of

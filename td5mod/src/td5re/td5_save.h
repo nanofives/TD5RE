@@ -210,6 +210,12 @@ void td5_save_set_music_volume(int v);
 float td5_save_get_view_distance(void);
 void  td5_save_set_view_distance(float v);
 
+/* CATCHUP / rubber-band assist level (0..9; 0 = off). Persisted across launches.
+ * Set by the S05 Multiplayer Options toggle; read by the AI rubber-band and the
+ * 2-player steering-bias swing. [S06 2026-06-04 catchup restore] */
+int  td5_save_get_catchup_assist(void);
+void td5_save_set_catchup_assist(int v);
+
 /* Controller / keyboard binding buffers — mutable pointers for binding-screen capture.
  * td5_save_get_controller_bindings_mutable: TD5_MAX_HUMAN_PLAYERS*9 dwords, flat
  *   [player*9+slot] ([PORT ENHANCEMENT 2026-06] grown from 18 to 81 for 9 players;

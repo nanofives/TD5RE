@@ -173,10 +173,36 @@ static int slot_is_playing(int slot) {
 static int s_engine_state[12];
 
 /**
+ * Maximum number of traffic vehicles that get a dedicated engine-loop voice.
+ *
+ * The original sound bank reserves exactly 7 traffic engine slots (37..43, see
+ * re/analysis/wave4_deep_audits/da_m3_dxsound_polyphony.md §A.2). The mixer
+ * plays slot 37+(t-6) and modifies slot 38+(t-6), so keeping BOTH within the
+ * 37..43 dedicated range — and out of the duplicate-buffer range that starts at
+ * slot 44 — bounds the count at 6. This also bounds the per-pass state index
+ * (pass + (t-6)*2, max 11) inside s_traffic_engine_state[].
+ *
+ * [S11 fix] The N-way build allows up to TD5_MAX_TOTAL_ACTORS (22) actors, and
+ * the mixer treats every actor >= 6 as "traffic". The old uncapped loop wrote
+ * s_traffic_engine_state[12] at indices up to 31 (a 20-int out-of-bounds write
+ * that corrupted the adjacent horn/tracked/reverb state arrays) and played
+ * traffic engines into the duplicate-buffer slots (44+), orphaning real voices.
+ * Both effects scaled with player count — the dominant ">6 players" trigger for
+ * the stuck-sound overload. The mixer loop is now capped at this many traffic
+ * voices; extra actors simply get no dedicated engine loop (logged, not silent).
+ */
+#define TD5_SOUND_TRAFFIC_AUDIO_MAX 6
+
+/**
  * Per-traffic-vehicle engine state for each viewport pass.
+ * Index: pass + (t-6)*2, bounded by TD5_SOUND_TRAFFIC_AUDIO_MAX * 2.
  * Original: DAT_004c37a0.
  */
-static int s_traffic_engine_state[12];
+static int s_traffic_engine_state[TD5_SOUND_TRAFFIC_AUDIO_MAX * 2];
+
+/* One-shot guard so the "traffic audio capped" notice logs once per race, not
+ * every frame. Reset in td5_sound_init_race_resources. */
+static int s_traffic_audio_cap_logged;
 
 /**
  * Per-vehicle horn/siren tracked audio state.
@@ -350,6 +376,7 @@ int td5_sound_init_race_resources(void)
     s_race_end_flag         = 0;
     s_active_listener_pos   = NULL;
     s_active_listener_vel   = NULL;
+    s_traffic_audio_cap_logged = 0;
 
     memset(s_slot_to_buffer, 0xFF, sizeof(s_slot_to_buffer));
     memset(s_slot_to_channel, 0xFF, sizeof(s_slot_to_channel));
@@ -376,6 +403,8 @@ int td5_sound_init_race_resources(void)
  *   tracked it internally). */
 void td5_sound_release_race_channels(void)
 {
+    td5_plat_audio_log_stats("race-end:before");
+
     /* Stop duplicate slots 44-87 */
     for (int i = TD5_SOUND_DUP_OFFSET; i < TD5_SOUND_TOTAL_SLOTS; i++) {
         slot_stop(i);
@@ -391,6 +420,17 @@ void td5_sound_release_race_channels(void)
                 s_slot_to_buffer[i + TD5_SOUND_DUP_OFFSET] = -1;
         }
     }
+
+    /* [S11] Backstop: force every remaining SFX voice to release so the voice
+     * count returns to baseline (0) between races. The per-slot stops above only
+     * release voices the slot->channel table still tracks; any voice that was
+     * orphaned (e.g. a loop whose slot mapping was overwritten or a stolen
+     * voice's stale handle) would otherwise linger and keep looping into the
+     * menus or next race. stop_all also covers them. The silent keepalive buffer
+     * is separate and stays running. */
+    td5_plat_audio_stop_all();
+    memset(s_slot_to_channel, 0xFF, sizeof(s_slot_to_channel));
+    td5_plat_audio_log_stats("race-end:after");
 }
 
 /* ========================================================================
@@ -505,10 +545,17 @@ int td5_sound_load_ambient(void)
                   s_ambient_wav_names[i], slot);
     }
 
-    /* Load traffic engine loops for actors 6+ */
+    /* Load traffic engine loops for actors 6+.
+     * [S11] Bound to the dedicated traffic slots (37..). Without this, a small
+     * g_traffic_slot_base with many actors drives slot = 37+i past 43 into the
+     * 44+ duplicate-buffer range, which sound_load_wav_from_zip then rejects one
+     * by one (noise) — and which the mixer is now capped not to use anyway. */
     int total_actors = td5_game_get_total_actor_count();
     if (total_actors > g_traffic_slot_base) {
-        for (int i = 0; i < total_actors - g_traffic_slot_base; i++) {
+        int traffic_count = total_actors - g_traffic_slot_base;
+        if (traffic_count > TD5_SOUND_TRAFFIC_AUDIO_MAX)
+            traffic_count = TD5_SOUND_TRAFFIC_AUDIO_MAX;
+        for (int i = 0; i < traffic_count; i++) {
             int variant = td5_game_get_traffic_variant(i);
             if (variant < 0 || variant > 2) variant = 0;
             int slot = TD5_SOUND_TRAFFIC_SLOT_BASE + i;
@@ -753,8 +800,9 @@ void td5_sound_update_audio_mix(void)
             }
         }
         TD5_LOG_D(LOG_TAG,
-                  "Audio mix: engine_channels=%d listener0=(%d,%d,%d)",
+                  "Audio mix: engine_channels=%d voices=%d listener0=(%d,%d,%d)",
                   active_engine_channels,
+                  td5_plat_audio_active_channels(),
                   (int)s_listener_pos[0][0],
                   (int)s_listener_pos[0][1],
                   (int)s_listener_pos[0][2]);
@@ -799,11 +847,17 @@ void td5_sound_update_audio_mix(void)
             s_tracked_veh_fade_level = 0;
         }
     } else {
-        /* Active but both fade level and target are zero: stop siren */
+        /* Active but both fade level and target are zero: stop siren.
+         * [S11] Stop the slots the play path actually started — 0x14/0x15 (P1)
+         * and their P2 duplicates 0x40/0x41. The old code stopped 0x15/0x16 and
+         * 0x41/0x42, so the Siren3 loop on 0x14 (and its dup 0x40) was NEVER
+         * stopped and kept droning for the rest of the session after the siren
+         * toggled off — a textbook "stuck on one sound" case during cop chases.
+         * 0x16/0x42 were never played, so stopping them was a no-op. */
+        slot_stop(0x14);
         slot_stop(0x15);
-        slot_stop(0x16);
+        slot_stop(0x40);
         slot_stop(0x41);
-        slot_stop(0x42);
         s_tracked_veh_active_p2 = 0;
         s_tracked_veh_active    = 0;
     }
@@ -849,6 +903,29 @@ void td5_sound_update_audio_mix(void)
             if (!actor) continue;
 
             int state_idx = pass + veh * 2;
+
+            /* [S11] Release engine/horn voices for a retired/empty racer slot.
+             * A dead slot carries the 0xFFFFFFFF identity tag at actor+0x371
+             * (UpdateRaceActors 0x436a70 / InitializeRaceVehicleRuntime 0x42f140,
+             * the same tag the tracked-audio block below trusts). Without this,
+             * the engine state machine reads the dead actor's stale RPM every
+             * frame and keeps (or starts) a phantom Drive/Rev loop that holds a
+             * voice for the rest of the race — exactly the kind of leaked loop
+             * that, multiplied across N-way retire/recycle, fills the voice pool.
+             * Stop this slot's voices for the current pass and skip it. */
+            {
+                const uint8_t *idt = (const uint8_t *)actor + 0x371;
+                if (idt[0] == 0xFF && idt[1] == 0xFF &&
+                    idt[2] == 0xFF && idt[3] == 0xFF) {
+                    slot_stop(slot_offset + veh * 3 + 0);
+                    slot_stop(slot_offset + veh * 3 + 1);
+                    slot_stop(slot_offset + veh * 3 + 2);
+                    s_engine_state[state_idx]        = ENGINE_STATE_STOPPED;
+                    s_horn_state[state_idx]          = 0;
+                    s_tracked_audio_state[state_idx] = ENGINE_STATE_STOPPED;
+                    continue;
+                }
+            }
 
             /* ----------------------------------------------------------
              * Viewer vehicle horn/siren tracked audio (per-vehicle)
@@ -1199,8 +1276,25 @@ void td5_sound_update_audio_mix(void)
          * ============================================================ */
         int total_actors = td5_game_get_total_actor_count();
         if (total_actors > 6) {
+            /* [S11] Cap at the dedicated traffic engine slots (37..43). Beyond
+             * this the play/modify slots would spill into the duplicate-buffer
+             * range (44+) and the per-pass state index would overflow
+             * s_traffic_engine_state[]. With N-way >6 players the actors >= 6 are
+             * extra racers treated as traffic, so this cap is what previously
+             * overflowed; bound it and note any dropped engines once per race. */
+            int traffic_limit = total_actors;
+            if (traffic_limit > 6 + TD5_SOUND_TRAFFIC_AUDIO_MAX)
+                traffic_limit = 6 + TD5_SOUND_TRAFFIC_AUDIO_MAX;
+            if (total_actors > traffic_limit && !s_traffic_audio_cap_logged) {
+                TD5_LOG_W(LOG_TAG,
+                          "traffic engine audio capped at %d voices (%d actors > 6); "
+                          "%d extra actors get no dedicated engine loop",
+                          TD5_SOUND_TRAFFIC_AUDIO_MAX, total_actors,
+                          total_actors - traffic_limit);
+                s_traffic_audio_cap_logged = 1;
+            }
             int traffic_slot = slot_offset + 0x26; /* DXSound slot for first traffic */
-            for (int t = 6; t < total_actors; t++) {
+            for (int t = 6; t < traffic_limit; t++) {
                 TD5_Actor *traffic = td5_game_get_actor(t);
                 if (!traffic) { traffic_slot++; continue; }
 

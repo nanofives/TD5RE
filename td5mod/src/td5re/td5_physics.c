@@ -237,7 +237,16 @@ static int32_t g_actor_aabb[TD5_MAX_TOTAL_ACTORS][5];
  * Chain links stored in g_actor_aabb[][4]. */
 #define COLLISION_GRID_SIZE     256
 #define COLLISION_CHAIN_END     0xFF
-#define COLLISION_MAX_WALK      17
+/* Per-bucket chain-walk cap (Phase 2 of td5_physics_resolve_vehicle_contacts).
+ * Must be >= the maximum number of actors that can land in one span bucket,
+ * which is the full active-actor count. The original binary capped the field
+ * at 12 (6 racers + 6 traffic), so a fixed 17 always cleared the real chain.
+ * The N-way expansion raised TD5_MAX_TOTAL_ACTORS to 22, so a tight pack of
+ * >17 cars in a single ~12-span window silently dropped the trailing chain
+ * nodes -> some pairs were never tested -> cars passed through each other.
+ * Scaling the cap with the actor cap guarantees no real chain is truncated.
+ * [S08 car-vs-car coverage 2026-06-04] */
+#define COLLISION_MAX_WALK      TD5_MAX_TOTAL_ACTORS
 static uint8_t s_collision_grid[COLLISION_GRID_SIZE];
 
 /* OBB_CornerData defined near top of file with forward declarations */
@@ -3789,6 +3798,26 @@ static void td5_physics_apply_traffic_crash_spin(TD5_Actor *t, int32_t impact_ma
               t->slot_index, impact_mag, lift, ang[0], ang[1], ang[2]);
 }
 
+/* True when `slot` is a HUMAN-driven racer (race_slot_state == 1). AI racers,
+ * traffic, and out-of-range slots return 0. Used by the S08 rear-impact
+ * softening so only the player's response is tuned, never AI/traffic.
+ * g_race_slot_state is sized [TD5_MAX_RACER_SLOTS]; a human is always a racer
+ * slot (< g_traffic_slot_base <= TD5_MAX_RACER_SLOTS), so the bound is safe. */
+static inline int v2v_slot_is_human(int slot)
+{
+    return slot >= 0 && slot < g_traffic_slot_base &&
+           slot < TD5_MAX_RACER_SLOTS && g_race_slot_state[slot] == 1;
+}
+
+/* Scale x to `pct`% (round-to-zero), used to soften a rear-ended player's
+ * angular response. pct==100 is identity (byte-faithful pass-through). */
+static inline int32_t v2v_scale_pct(int32_t x, int32_t pct)
+{
+    if (pct >= 100) return x;
+    if (pct <= 0)   return 0;
+    return (int32_t)(((int64_t)x * pct) / 100);
+}
+
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
                                      int32_t heading_target, int32_t impactForce)
@@ -3896,6 +3925,21 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         if (front_depth < 0) front_depth = -front_depth;
         is_side_branch = (abs_side_extent < front_depth);
     }
+
+    /* [S08 rear-impact softening 2026-06-04] When a HUMAN player (always the
+     * target A inside this function) is struck on its REAR face, the angular
+     * response below — and the heavy-impact scatter/lift in step 10 — is scaled
+     * down so getting rear-ended destabilises but stays recoverable instead of
+     * spinning the car out. `cz_A < 1` is A's rear half (same predicate as the
+     * side-vs-front/rear split above); a rear face contact is never the side
+     * branch, so require the front/rear branch too. Only the victim's spin is
+     * softened: the attacker B, front/side contacts on A, and every AI/traffic
+     * response stay byte-faithful. rear_retain==100 disables the softening. */
+    int rear_hit_on_player = (!is_side_branch) && (cz_A < 1) &&
+                             v2v_slot_is_human(A->slot_index);
+    int32_t rear_retain = rear_hit_on_player ? g_td5.ini.rear_impact_response : 100;
+    if (rear_retain < 0)   rear_retain = 0;
+    if (rear_retain > 100) rear_retain = 100;
 
     /* --- 4. Branch-specific impulse math --- */
     int32_t impulse      = 0;
@@ -4010,6 +4054,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             local_44 -= impulse * mass_B;
             omega_A_delta = -(int32_t)(((int64_t)impulse * mass_A * cx_A) / V2V_INERTIA_PER_ANG);
             omega_B_delta =  (int32_t)(((int64_t)impulse * mass_B * cx_B) / V2V_INERTIA_PER_ANG);
+            /* [S08] Tame the yaw spin imparted to a rear-ended player; the
+             * linear impulse (local_50/local_44) is left faithful so the hit
+             * still shoves the car forward like a real bump. */
+            omega_A_delta = v2v_scale_pct(omega_A_delta, rear_retain);
         }
     }
 
@@ -4088,12 +4136,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
               cx_A, cz_A, cx_B, cz_B, impulse, impact_mag, impactForce);
 
     /* [orig ApplyVehicleCollisionImpulse 0x004079c0, pre-LAB_00408289]: car/
-     * traffic collision SFX. A racer-involved impact (at least one slot < 6)
+     * traffic collision SFX. A racer-involved impact (at least one racer slot)
      * above 0x3201 plays a positional one-shot: LHit1-5 (light) below 0xc801,
      * HHit1-4 (hard) at/above it. Volume 0x1000; pitch per tier (0xd02 / 0x2198).
      * Reached only on an APPROACHING impact (the separating early-out above
-     * returns before this), so it fires once per real hit, not while resting. */
-    if ((A->slot_index < 6 || B->slot_index < 6) && impact_mag >= 0x3201) {
+     * returns before this), so it fires once per real hit, not while resting.
+     * [N-way 2026-06-04] racer boundary g_traffic_slot_base, not hardcoded 6. */
+    if ((A->slot_index < g_traffic_slot_base || B->slot_index < g_traffic_slot_base) &&
+        impact_mag >= 0x3201) {
         int hit_slot, hit_pitch, hit_variants;
         if (impact_mag < 0xc801) {
             hit_slot = 0x1F; hit_pitch = 0xd02;  hit_variants = 5; /* LHit1-5 */
@@ -4115,12 +4165,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             td5_ai_wanted_cop_hit(A->slot_index, impact_mag);
     }
 
-    /* Traffic recovery escalation (> 50000 and slot>=6). */
-    if (A->slot_index >= 6 && impact_mag > 50000 &&
+    /* Traffic recovery escalation (> 50000 and traffic slot). [N-way 2026-06-04]
+     * traffic boundary g_traffic_slot_base, not hardcoded 6 — a human racer in
+     * an expanded slot must not pick up the traffic-only lockout escalation. */
+    if (A->slot_index >= g_traffic_slot_base && impact_mag > 50000 &&
         A->damage_lockout > 0 && A->damage_lockout < 7) {
         A->damage_lockout++;
     }
-    if (B->slot_index >= 6 && impact_mag > 50000 &&
+    if (B->slot_index >= g_traffic_slot_base && impact_mag > 50000 &&
         B->damage_lockout > 0 && B->damage_lockout < 7) {
         B->damage_lockout++;
     }
@@ -4163,18 +4215,31 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
         int32_t kick_ry = scatter / 2;            /* roll & yaw delta magnitude */
         int32_t kick_p  = scatter;                /* pitch delta magnitude      */
-        if (A->slot_index < 6) {
-            A->angular_velocity_roll  -= kick_ry;
-            A->angular_velocity_yaw   -= kick_ry;
-            A->angular_velocity_pitch -= kick_p;
+        /* [N-way coverage 2026-06-04] The racer/traffic split was hardcoded
+         * `< 6`, the ORIGINAL racer count. With the N-way expansion a human
+         * racer can sit in slots 6..15, so `< 6` wrongly routed it into the
+         * traffic scripted crash-spin (vehicle_mode=1 takeover). Use the live
+         * racer/traffic boundary g_traffic_slot_base — byte-identical to `< 6`
+         * in a legacy 6-racer race, correct for the expanded field. */
+        if (A->slot_index < g_traffic_slot_base) {
+            /* [S08] Soften the rear-ended player's launch/spin (rear_retain is
+             * 100 for everyone else, so this is a no-op for AI/front/side). */
+            int32_t a_kick_ry = v2v_scale_pct(kick_ry, rear_retain);
+            int32_t a_kick_p  = v2v_scale_pct(kick_p,  rear_retain);
             int32_t lift_a = impact_mag / 6;
             if (lift_a > 200000) lift_a = 200000; /* port-only clamp (orig: none) */
+            lift_a = v2v_scale_pct(lift_a, rear_retain);
+            A->angular_velocity_roll  -= a_kick_ry;
+            A->angular_velocity_yaw   -= a_kick_ry;
+            A->angular_velocity_pitch -= a_kick_p;
             A->linear_velocity_y  = lift_a;
         } else {
-            /* Traffic (slot >= 6): scripted crash-spin recovery, orig 0x00408289+. */
+            /* Traffic: scripted crash-spin recovery, orig 0x00408289+. */
             td5_physics_apply_traffic_crash_spin(A, impact_mag);
         }
-        if (B->slot_index < 6) {
+        if (B->slot_index < g_traffic_slot_base) {
+            /* B is the penetrator (never the rear-contacted victim here), so it
+             * always takes the byte-faithful kick — the attacker is unchanged. */
             B->angular_velocity_roll  -= kick_ry;
             B->angular_velocity_yaw   -= kick_ry;
             B->angular_velocity_pitch -= kick_p;
@@ -4182,11 +4247,11 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             if (lift_b > 200000) lift_b = 200000; /* port-only clamp (orig: none) */
             B->linear_velocity_y  = lift_b;
         } else {
-            /* Traffic (slot >= 6): scripted crash-spin recovery, orig 0x00408289+. */
+            /* Traffic: scripted crash-spin recovery, orig 0x00408289+. */
             td5_physics_apply_traffic_crash_spin(B, impact_mag);
         }
-        TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d",
-                  A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p);
+        TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d",
+                  A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain);
     }
 
     /* pool14_v2v pilot trace: capture post-state at function exit.
@@ -10243,6 +10308,18 @@ void td5_physics_init_vehicle_runtime(void)
     }
 }
 
+/* Per-difficulty-tier scale (numerator over 256) applied to the per-car carparam
+ * values sourced into the AI template for racer slots (S06 2026-06-04,
+ * [GameOptions] AIAccelFromCar). Tier 0 = Easy is deliberately softened so the
+ * "not so fast" opponents are noticeably more forgiving; tier 2 = Hard lets a
+ * quick car edge ahead. Difficulty SCALES; the per-vehicle magnitude comes from
+ * the car's own carparam.dat.
+ *   top    : 0.85 / 0.94 / 1.02  (the player tops out at ~carparam, no diff scale)
+ *   torque : 0.60 / 0.75 / 0.875 (eased on Easy; near the template tier scale on Hard)
+ */
+static const int k_ai_tier_top_pct[3]    = { 0xD9, 0xF0, 0x105 };
+static const int k_ai_tier_torque_pct[3] = { 0x99, 0xC0, 0xE0  };
+
 static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
 {
     uint8_t *tuning;
@@ -10339,13 +10416,38 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
             memcpy(tuning, ai_tmpl, 0x80);
             if (s_carparam_loaded[slot]) {
                 memcpy(cardef, s_loaded_cardef[slot], 0x8C);
+                /* S06 2026-06-04: source per-car ACCELERATION (drive-torque
+                 * +0x68) and TOP SPEED (+0x74) from THIS car's carparam, scaled
+                 * by a per-difficulty-tier factor, so different AI cars top out
+                 * and accelerate per their own parameters rather than a single
+                 * difficulty-only template constant. The bicycle-critical fields
+                 * (Wf/Wr/I/half_wb +0x20..0x2B and grip +0x2C) stay on the AI
+                 * template — sourcing those from carparam flips the bicycle
+                 * determinant sign and spins the car (the documented hazard
+                 * above). Gated by [GameOptions] AIAccelFromCar; off = faithful. */
+                if (g_td5.ini.ai_accel_from_car) {
+                    const int16_t *cp = (const int16_t *)s_loaded_tuning[slot];
+                    int tier = g_td5.difficulty_tier;
+                    if (tier < 0) tier = 0; else if (tier > 2) tier = 2;
+                    int ai_top = ((int)cp[0x74 / 2] * k_ai_tier_top_pct[tier]) >> 8;
+                    int ai_dt  = ((int)cp[0x68 / 2] * k_ai_tier_torque_pct[tier]) >> 8;
+                    if (ai_top < 1) ai_top = 1;
+                    if (ai_dt  < 1) ai_dt  = 1;
+                    write_i16(tuning, 0x74, (int16_t)ai_top);  /* top speed */
+                    write_i16(tuning, 0x68, (int16_t)ai_dt);   /* drive-torque (accel) */
+                }
             }
             actor->tuning_data_ptr = tuning;
             actor->car_definition_ptr = cardef;
-            TD5_LOG_I(LOG_TAG, "bind_tuning slot=%d: using AI template (Wf=%d Wr=%d I=%d)",
+            TD5_LOG_I(LOG_TAG,
+                      "bind_tuning slot=%d: AI template (Wf=%d Wr=%d I=%d) "
+                      "accel_from_car=%d dt=%d top=%d",
                       slot, *(int16_t *)(tuning + 0x28),
                       *(int16_t *)(tuning + 0x2A),
-                      *(int32_t *)(tuning + 0x20));
+                      *(int32_t *)(tuning + 0x20),
+                      g_td5.ini.ai_accel_from_car,
+                      (int)*(int16_t *)(tuning + 0x68),
+                      (int)*(int16_t *)(tuning + 0x74));
             return;
         }
     }
@@ -10684,6 +10786,16 @@ void td5_physics_seed_traffic_cardef_from_player(int traffic_slot)
               (int)*(int16_t *)(s_loaded_cardef[traffic_slot] + 0x0C),
               (int)*(int16_t *)(s_loaded_cardef[traffic_slot] + 0x08),
               (int)*(int16_t *)(s_loaded_cardef[traffic_slot] + 0x80));
+}
+
+/* Per-slot carparam top-speed (tuning +0x74), or -1 if no carparam.dat was
+ * loaded for the slot. Lets td5_ai.c derive a per-car traffic cruise throttle
+ * from the vehicle's own top speed. [S06 2026-06-04 accel/top-from-car] */
+int td5_physics_get_carparam_top_speed(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return -1;
+    if (!s_carparam_loaded[slot]) return -1;
+    return (int)*(const int16_t *)(s_loaded_tuning[slot] + 0x74);
 }
 
 void td5_physics_load_carparam(int slot, const uint8_t *data_268)

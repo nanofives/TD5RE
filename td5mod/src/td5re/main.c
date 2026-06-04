@@ -300,6 +300,9 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Dynamics",             &g_td5.ini.dynamics },
         { "Collisions",           &g_td5.ini.collisions },
         { "AutoGearbox",          &g_td5.ini.auto_gearbox },
+        { "RearImpactResponse",   &g_td5.ini.rear_impact_response },
+        { "CatchupAssist",        &g_td5.ini.catchup_assist },
+        { "AIAccelFromCar",       &g_td5.ini.ai_accel_from_car },
         { "Player1Joystick",      &g_td5.ini.player1_joystick },
         { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
@@ -525,6 +528,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
     g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
+    /* Rear-impact softening (S08): % of the rear-end angular response to keep
+     * for a human player. 100 = faithful, default 45 = recoverable nudge. */
+    g_td5.ini.rear_impact_response = td5_ini_int("GameOptions", "RearImpactResponse", 45);
+    if (g_td5.ini.rear_impact_response < 0)   g_td5.ini.rear_impact_response = 0;
+    if (g_td5.ini.rear_impact_response > 100) g_td5.ini.rear_impact_response = 100;
+    /* CATCHUP / rubber-band assist override (S06). -1 = use the persisted value
+     * (S05 toggle); 0 = off; 1..9 = on. See ai_catchup_level() in td5_ai.c. */
+    g_td5.ini.catchup_assist = td5_ini_int("GameOptions", "CatchupAssist", -1);
+    if (g_td5.ini.catchup_assist < -1) g_td5.ini.catchup_assist = -1;
+    if (g_td5.ini.catchup_assist > 9)  g_td5.ini.catchup_assist = 9;
+    /* AI/traffic accel + top speed sourced from each car's carparam (S06). */
+    g_td5.ini.ai_accel_from_car = td5_ini_int("GameOptions", "AIAccelFromCar", 1);
     g_td5.ini.player1_joystick   = td5_ini_int("GameOptions", "Player1Joystick", 0);
     g_td5.ini.player2_joystick   = td5_ini_int("GameOptions", "Player2Joystick", 0);
 

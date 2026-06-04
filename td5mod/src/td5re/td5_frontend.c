@@ -241,6 +241,7 @@ static int  s_mp_missing_content[2] = { 0, 0 };
 /* Dynamic button-index bookkeeping for the rebuilt Multiplayer Options rows
  * (the row set changes with the player count, so buttons are rebuilt live). */
 static int  s_mp_btn_players   = -1;
+static int  s_mp_btn_catchup   = -1;   /* [S05 2026-06-04] CATCHUP toggle row */
 static int  s_mp_btn_layout    = -1;
 static int  s_mp_btn_missing[2] = { -1, -1 };
 static int  s_mp_btn_ok        = -1;
@@ -311,8 +312,9 @@ static int  s_num_ai_opponents  = 5;    /* 0..(TD5_MAX_RACER_SLOTS-1)        */
 #define QR_BTN_DIRECTION  2
 #define QR_BTN_PLAYERS    3
 #define QR_BTN_OPPONENTS  4
-#define QR_BTN_OK         5
-#define QR_BTN_BACK       6
+#define QR_BTN_LAPS       5   /* [S02 (c)] circuit laps, re-homed from Game Options */
+#define QR_BTN_OK         6
+#define QR_BTN_BACK       7
 
 /* Quick Race layout: caption buttons in a left column, the selected value in a
  * right column, all rows uniformly spaced.
@@ -921,12 +923,17 @@ static const char *s_track_display_names[26] = {
     "BERN, SWITZERLAND",
     "SAN FRANCISCO, CA, USA",
     "KESWICK, ENGLAND",
-    "TRACK 21",
-    "TRACK 22",
-    "TRACK 23",
-    "TRACK 24",
-    "TRACK 25",
-    "TRACK 26"
+    /* Indices 20-25 are the six CUPS, not race tracks. The High Scores browser
+     * (s_score_category_index 0x14..0x19) and the cup track slots read their
+     * label here via frontend_get_track_name; show the cup names rather than the
+     * old "TRACK 21".."TRACK 26" placeholders. Names match the original
+     * Language.dll SNK_TrackNames[20..25]. [S02 (d) 2026-06-04] */
+    "CHAMPIONSHIP CUP",   /* 20 */
+    "ERA CUP",            /* 21 */
+    "CHALLENGE CUP",      /* 22 */
+    "PITBULL CUP",        /* 23 */
+    "MASTERS CUP",        /* 24 */
+    "ULTIMATE CUP"        /* 25 */
 };
 /* Original binary order: DAT_00466894 (slot→SNK_TrackNames index) cross-referenced
  * with Language.dll SNK_TrackNames → city name → s_track_display_names index.
@@ -1554,6 +1561,22 @@ static int frontend_car_paintable(int car_index) {
     return frontend_car_is_td6(car_index) && !frontend_car_is_cop(car_index);
 }
 
+/* Whether a car offers ANY paint choice at all (used to grey-out the PAINT
+ * button when it would do nothing):
+ *   - TD6 cars: the modal colour picker, available on every ported car except
+ *     the cp1-4 cop cars (== frontend_car_paintable).
+ *   - TD5 cars: the 4-scheme ◄► paint arrows, available on every original car
+ *     EXCEPT the special / hot-rod / police cars at indices 0x1C..0x24 (28..36:
+ *     HOT DOG, MAUL, PITBULL, BEAST, WAGON + 4 police). Those ship a single
+ *     paint in the original data — their carpic0..3 / carskin0..3 are byte-
+ *     identical — so cycling paint changes nothing. This is the same range the
+ *     paint-cycle handler (case 1) already refuses to cycle. */
+static int frontend_car_has_paint(int car_index) {
+    if (frontend_car_is_td6(car_index))
+        return frontend_car_paintable(car_index);
+    return !(car_index >= 0x1C && car_index <= 0x24);
+}
+
 /* --- TD6 paint COLOR selector ---------------------------------------------
  * TD6 cars ship a single grayscale skin, so the player picks a body COLOR
  * instead of cycling 4 paint schemes. The PAINT button toggles a compact
@@ -1973,6 +1996,59 @@ static int frontend_cycle_selected_button_vertical(int direction) {
     return frontend_cycle_selected_button_by_row(direction, 0);
 }
 
+/* [PORT ENHANCEMENT 2026-06] True 2D spatial navigation by button geometry.
+ * Given a unit direction (dx,dy in {-1,0,1}: left/right or up/down), pick the
+ * active button whose CENTER lies in that direction and best matches the on-
+ * screen layout: up/down stay in the current column, left/right stay on the
+ * current row. The flat index-order nav (frontend_cycle_selected_button_by_row)
+ * breaks on multi-column grids — e.g. the Controller-Binding screen lays the 10
+ * driving actions out as two columns of five, so a DOWN press on the bottom of
+ * the left column would spill to the TOP of the right column. This routes arrow
+ * input by real (x,y) position instead. Returns the target button, or -1 when
+ * no button lies in the requested direction (no wrap). */
+static int frontend_spatial_pick(int dx, int dy) {
+    int current = frontend_resolve_selected_button();
+    int cx, cy, i, best = -1, best_cost = 0;
+
+    if (current < 0) return -1;
+    cx = s_buttons[current].x + s_buttons[current].w / 2;
+    cy = s_buttons[current].y + s_buttons[current].h / 2;
+
+    for (i = 0; i < FE_MAX_BUTTONS; i++) {
+        int bx, by, pdx, pdy, primary, offaxis, cost;
+        if (i == current) continue;
+        if (!s_buttons[i].active || s_buttons[i].disabled) continue;
+        bx = s_buttons[i].x + s_buttons[i].w / 2;
+        by = s_buttons[i].y + s_buttons[i].h / 2;
+        pdx = bx - cx;   /* + = to the right */
+        pdy = by - cy;   /* + = downward     */
+        if (dy != 0) {                      /* vertical move */
+            primary = pdy * dy;             /* distance along travel axis  */
+            offaxis = pdx < 0 ? -pdx : pdx; /* horizontal drift (column)   */
+        } else {                            /* horizontal move */
+            primary = pdx * dx;
+            offaxis = pdy < 0 ? -pdy : pdy; /* vertical drift (row)        */
+        }
+        if (primary <= 0) continue;         /* not in the requested direction */
+        /* Penalize perpendicular drift heavily so movement stays in the same
+         * column (up/down) or row (left/right); nearest along the travel axis
+         * breaks ties. Columns here are ~230px apart vs ~32px rows, so an 8x
+         * weight makes a column jump strictly costlier than any in-column step. */
+        cost = offaxis * 8 + primary;
+        if (best < 0 || cost < best_cost) { best_cost = cost; best = i; }
+    }
+    return best;
+}
+
+/* Move the selection in a 2D direction using frontend_spatial_pick; returns 1
+ * if the selection actually changed. */
+static int frontend_move_selected_button_spatial(int dx, int dy) {
+    int target = frontend_spatial_pick(dx, dy);
+    if (target < 0 || target == s_selected_button) return 0;
+    s_selected_button = target;
+    return 1;
+}
+
 /**
  * Create a frontend button using the original's coordinate conventions:
  *
@@ -2063,7 +2139,44 @@ static void frontend_set_cursor_visible(int visible) {
 
 static void frontend_render_cursor(void); /* forward decl — impl after draw queue types */
 
-static void frontend_play_sfx(int id) { td5_sound_play_frontend_sfx(id); }
+/* === Universal transition fades (PORT ENHANCEMENT — S03 2026-06-04) ============
+ * Every navigable menu screen should fade OUT (Whoosh = SFX 5) when it is left
+ * and fade IN (Crash1 chime = SFX 4) when it settles — INCLUDING screens added
+ * to s_screen_table later with no per-screen audio wiring (e.g. the multiplayer
+ * lobby [30] / future track screens, which today emit no slide SFX at all).
+ *
+ * Rather than hand-wire all 31 screens, the single transition choke point
+ * (td5_frontend_set_screen) provides the fades as a DEFAULT and de-dups against
+ * any screen that already plays its own, so nothing doubles and new screens
+ * inherit the fades for free:
+ *
+ *   - s_fade_whoosh_emitted / s_fade_chime_emitted record whether a 5 / 4 was
+ *     played during the CURRENT screen's lifetime (reset in set_screen). A
+ *     screen that plays its own slide-out whoosh / slide-in chime sets these,
+ *     which suppresses the matching default.
+ *   - td5_frontend_set_screen() plays the default slide-OUT for the screen being
+ *     LEFT if it never whooshed, and ARMS the default slide-IN chime for the
+ *     screen being ENTERED.
+ *   - td5_frontend_display_loop() fires the armed chime once the new screen
+ *     settles (s_anim_complete) — or after a deadline backstop — unless the
+ *     screen already chimed itself this frame (its fn() runs before the check).
+ *
+ * Boot/init, attract and the deliberately-silent end dialogs (CupWon/Failed/
+ * SessionLocked) are excluded via frontend_screen_wants_fade(). The dedup is
+ * exact for the original 30 screens (each already plays at least one whoosh in
+ * its lifetime and chimes co-located with / before s_anim_complete) so this is
+ * purely additive: existing per-screen audio is unchanged, gaps are filled. */
+static int s_fade_whoosh_emitted;   /* a Play(5) happened during this screen's lifetime */
+static int s_fade_chime_emitted;    /* a Play(4) happened during this screen's lifetime */
+static int s_fade_in_pending;       /* default slide-in chime still owed to the new screen */
+
+#define TD5_FE_FADE_IN_DEADLINE_MS 1500u /* backstop chime if a screen never sets s_anim_complete */
+
+static void frontend_play_sfx(int id) {
+    if (id == 5) s_fade_whoosh_emitted = 1;
+    if (id == 4) s_fade_chime_emitted = 1;
+    td5_sound_play_frontend_sfx(id);
+}
 
 static void frontend_cd_play(int track) {
     td5_plat_cd_play(track + 2);
@@ -2484,6 +2597,23 @@ static void frontend_init_race_schedule(void) {
         g_td5.split_missing_content[1] = 0;
     }
     g_td5.network_active    = 0;
+
+    /* [FIX 2026-06-04 S05] Re-commit the Traffic / Police toggles at launch.
+     * The Quick Race + Multiplayer track-select screen edits s_game_option_traffic
+     * / s_game_option_cops AFTER ConfigureGameTypeFlags already ran (it's invoked
+     * at game-type selection on the Main Menu), and the MULTIPLAYER lobby flow
+     * never calls ConfigureGameTypeFlags at all — so the toggles were stale (or
+     * ignored entirely) at race start. For the modes that expose the rows
+     * (s_selected_game_type == 0 = Single Race / Quick Race / Multiplayer; cup
+     * game-types 1..6 and the special modes 7/8/9 force their own values, so they
+     * are left untouched) push the latest toggle state into the runtime gates
+     * read by InitRace / td5_ai. Mirrors ConfigureGameTypeFlags @ 0x00410CA0
+     * case 0. */
+    if (s_selected_game_type == 0) {
+        g_td5.traffic_enabled           = s_game_option_traffic;
+        g_td5.special_encounter_enabled = s_game_option_cops;
+    }
+
     TD5_LOG_I(LOG_TAG,
               "InitRaceSchedule: split=%d grid=%dx%d humans=%d opp=%d eff=%d 2p=%d layout_sel=%d",
               g_td5.split_screen_mode, g_td5.split_grid_cols, g_td5.split_grid_rows,
@@ -3129,21 +3259,28 @@ static void frontend_poll_input(void) {
     /* Keyboard navigation: UP/DOWN move between rows, LEFT/RIGHT move within
      * a horizontal button row. Suppressed while the TD6 color panel is open —
      * there the 4 arrows navigate the color grid (modal), handled in the tick;
-     * the s_arrow_input bits are still set above for that. */
+     * the s_arrow_input bits are still set above for that.
+     *
+     * [PORT ENHANCEMENT 2026-06] The Controller-Binding (Configure) screen lays
+     * its action buttons out as a two-column grid, which the flat index-order
+     * row nav mis-handles (DOWN at a column's bottom spills to the next column's
+     * top). For that screen route all four arrows through true 2D spatial nav so
+     * UP/DOWN stay in the current column and LEFT/RIGHT change column. */
+    int spatial_nav = (s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
     if (left_edge && !s_color_panel_visible) {
-        if (frontend_cycle_selected_button_horizontal(-1)) {
-            frontend_play_sfx(2); s_selection_from_mouse = 0;
-        }
+        int moved = spatial_nav ? frontend_move_selected_button_spatial(-1, 0)
+                                : frontend_cycle_selected_button_horizontal(-1);
+        if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
     }
     if (right_edge && !s_color_panel_visible) {
-        if (frontend_cycle_selected_button_horizontal(1)) {
-            frontend_play_sfx(2); s_selection_from_mouse = 0;
-        }
+        int moved = spatial_nav ? frontend_move_selected_button_spatial(1, 0)
+                                : frontend_cycle_selected_button_horizontal(1);
+        if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
     }
     if (up_edge && !s_color_panel_visible) {
-        if (frontend_cycle_selected_button_vertical(-1)) {
-            frontend_play_sfx(2); s_selection_from_mouse = 0;
-        }
+        int moved = spatial_nav ? frontend_move_selected_button_spatial(0, -1)
+                                : frontend_cycle_selected_button_vertical(-1);
+        if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
         /* No sound on a no-target edge move. Faithful to the original shared nav
          * handler UpdateFrontendDisplayModeSelection @0x00426580, which is SILENT
          * when no neighbour button exists. The port previously played Uh-Oh (10)
@@ -3151,9 +3288,9 @@ static void frontend_poll_input(void) {
          * list. (Horizontal L/R moves already had no failed-move sound.) */
     }
     if (down_edge && !s_color_panel_visible) {
-        if (frontend_cycle_selected_button_vertical(1)) {
-            frontend_play_sfx(2); s_selection_from_mouse = 0;
-        }
+        int moved = spatial_nav ? frontend_move_selected_button_spatial(0, 1)
+                                : frontend_cycle_selected_button_vertical(1);
+        if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
     }
     if (enter_edge) {
         if (s_selected_button >= 0 && s_selected_button < FE_MAX_BUTTONS &&
@@ -3960,6 +4097,30 @@ static int BarFade_Tick(void) {
     return 0;
 }
 
+/* Returns 1 if the screen should get the universal transition fades (slide-out
+ * whoosh on leave, slide-in chime on enter). DEFAULT is 1 so any screen added
+ * to s_screen_table — including future ones — inherits the fades with no extra
+ * wiring. Excluded: boot/init/attract/debug screens (not user navigation) and
+ * the deliberately-silent end dialogs (CupWon/Failed/SessionLocked), which the
+ * earlier frontend-audio audit confirmed should stay silent. See the universal
+ * transition-fades block near frontend_play_sfx. */
+static int frontend_screen_wants_fade(TD5_ScreenIndex s) {
+    switch (s) {
+    case TD5_SCREEN_LOCALIZATION_INIT:   /* [0]  boot/localization init */
+    case TD5_SCREEN_POSITIONER_DEBUG:    /* [1]  dev glyph-positioner tool */
+    case TD5_SCREEN_ATTRACT_MODE:        /* [2]  attract demo (routes into a race) */
+    case TD5_SCREEN_LANGUAGE_SELECT:     /* [3]  first-run boot screen */
+    case TD5_SCREEN_LEGAL_COPYRIGHT:     /* [4]  copyright splash */
+    case TD5_SCREEN_STARTUP_INIT:        /* [28] boot init redirect */
+    case TD5_SCREEN_CUP_FAILED:          /* [26] silent end dialog */
+    case TD5_SCREEN_CUP_WON:             /* [27] silent end dialog */
+    case TD5_SCREEN_SESSION_LOCKED:      /* [29] silent end dialog */
+        return 0;
+    default:
+        return 1;                        /* every navigable menu screen, incl. new/future */
+    }
+}
+
 /* ========================================================================
  * SetFrontendScreen (0x414610)
  *
@@ -4031,8 +4192,21 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     g_td5.frontend_inner_state = 0;
     g_td5.frontend_frame_counter = 0;
 
-    /* Original SetFrontendScreen (0x00414610) is silent — per-screen state-0
-     * code emits its own Play(N). Playing here doubled the main-menu Whoosh. */
+    /* Universal transition fades (S03). The original SetFrontendScreen
+     * (0x00414610) is silent and per-screen state-0 code emits its own Play(N),
+     * so an UNCONDITIONAL play here would double the wired screens' Whoosh (the
+     * reason a prior attempt was reverted). Instead we play the default slide-OUT
+     * only when the screen being LEFT never whooshed during its lifetime — every
+     * wired screen does, so this fires solely for unwired/new screens — and ARM
+     * the default slide-IN chime for the screen being ENTERED (fired at settle by
+     * the display loop, suppressed if the new screen chimes itself). */
+    if (frontend_screen_wants_fade(previous) && !s_fade_whoosh_emitted) {
+        td5_sound_play_frontend_sfx(5);   /* default slide-out for the leaving screen */
+    }
+    s_fade_whoosh_emitted = 0;
+    s_fade_chime_emitted  = 0;
+    s_fade_in_pending     = frontend_screen_wants_fade(index) ? 1 : 0;
+
     TD5_LOG_I(LOG_TAG, "Screen transition: %d -> %d", (int)previous, (int)index);
     s_logged_screen = (TD5_ScreenIndex)-1;
     s_logged_inner_state = -1;
@@ -4177,6 +4351,22 @@ int td5_frontend_display_loop(void) {
         if (fn) fn();
     }
     td5_profile_mark("fe_fsm");
+
+    /* 3b. Universal slide-IN chime (S03). fn() above has already run this frame,
+     * so s_fade_chime_emitted reflects any chime the new screen played itself —
+     * if it did, drop the armed default (no double). Otherwise fire the default
+     * once the screen settles (s_anim_complete) or after a deadline backstop for
+     * screens that never set it. New screens added to s_screen_table inherit the
+     * enter chime here with no per-screen wiring. */
+    if (s_fade_in_pending) {
+        if (s_fade_chime_emitted) {
+            s_fade_in_pending = 0;        /* the new screen chimed itself */
+        } else if (s_anim_complete ||
+                   (td5_plat_time_ms() - s_screen_entry_timestamp) >= TD5_FE_FADE_IN_DEADLINE_MS) {
+            td5_sound_play_frontend_sfx(4);
+            s_fade_in_pending = 0;
+        }
+    }
 
     /* 4. Render flush (cursor queued after all other UI) */
     td5_frontend_render_ui_rects();
@@ -5137,7 +5327,7 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     int car_locked;
     int track_locked;
     if (!s_anim_complete) return;
-    if (s_button_count <= QR_BTN_OPPONENTS) return;
+    if (s_button_count <= QR_BTN_LAPS) return;
     snprintf(car_name, sizeof(car_name), "%s", frontend_get_car_display_name(s_selected_car));
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
     car_locked = (!s_cheat_unlock_all && !s_network_active &&
@@ -5151,7 +5341,7 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
      * glyph size as the button caption, vertically centered on its row, and
      * wraps to a second line if it would run off the right edge. Car/Track show
      * the name; Direction shows Forwards/Backwards (only when the row is
-     * visible); Players/Opponents show the count. */
+     * visible); Players/Opponents show the count; Laps shows value+1. */
     frontend_draw_qr_value(sx, sy, QR_BTN_CAR,   car_locked   ? "LOCKED" : car_name,   0xFFFFFFFF);
     frontend_draw_qr_value(sx, sy, QR_BTN_TRACK, track_locked ? "LOCKED" : track_name, 0xFFFFFFFF);
     if (!s_buttons[QR_BTN_DIRECTION].hidden) {
@@ -5165,6 +5355,10 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     }
     snprintf(count, sizeof(count), "%d", s_num_ai_opponents);
     frontend_draw_qr_value(sx, sy, QR_BTN_OPPONENTS, count, 0xFFFFFFFF);
+    /* [S02 (c) 2026-06-04] Circuit laps value (displayed as laps+1, matching the
+     * Game Options + Track Selection convention). */
+    snprintf(count, sizeof(count), "%d", s_game_option_laps + 1);
+    frontend_draw_qr_value(sx, sy, QR_BTN_LAPS, count, 0xFFFFFFFF);
 }
 
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
@@ -5211,21 +5405,17 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
      * inverted. Physics: 0=ARCADE (gravity 1900 + car-stat boosts),
      * 1=SIMULATION (gravity 1500 + stock stats). */
     const char *dynamics[] = { "ARCADE", "SIMULATION" };
-    char laps[16];
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    /* [CONFIRMED @ 0x0041FD78] orig renders gCircuitLapsConfigShadow + 1 with "%d"
-     * (shadow 0..3 -> "1".."4"); there is NO *2 multiply. Must match the live lap
-     * count (g_td5.circuit_lap_count = laps+1) so the displayed number equals the
-     * laps actually raced. */
-    snprintf(laps, sizeof(laps), "%d", s_game_option_laps + 1);
-    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, laps, 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_game_option_traffic & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
+    /* [S02 (c) 2026-06-04] Circuit Laps row removed from this screen; the six
+     * remaining option values shifted up one button index. Laps is now shown and
+     * edited in the Quick Race menu and the Track Selection screen. */
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_game_option_traffic & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -5413,16 +5603,32 @@ static void frontend_render_music_test_overlay(float sx, float sy) {
 
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
     /* [PORT ENHANCEMENT 2026-06] Multiplayer Options value column. Draws the
-     * current value for each dynamic row (PLAYERS, SPLIT LAYOUT, DISPLAY k) at
-     * the standard value-column X, aligned to each row's button Y. */
+     * current value for each dynamic row (PLAYERS, CATCHUP, SPLIT LAYOUT,
+     * DISPLAY k) at the standard value-column X, aligned to each row's button Y. */
     char buf[16];
 
-    if (s_mp_btn_players < 0 || !s_buttons[s_mp_btn_players].active) return;
     if (!s_anim_complete) return;
+
+    /* [S05 2026-06-04] MULTIPLAYER header at the top, drawn in the shared menu
+     * font (fe_draw_text_centered — the same path used by every other screen
+     * title and the lobby's MULTIPLAYER label) so it matches the rest of the
+     * menus' format. */
+    fe_draw_text_centered(320.0f * sx, 40.0f * sy, SNK_MultiplayerTitleTxt,
+                          0xFFFFD000, sx, sy);
+
+    if (s_mp_btn_players < 0 || !s_buttons[s_mp_btn_players].active) return;
 
     /* PLAYERS = N */
     snprintf(buf, sizeof buf, "%d", s_num_human_players);
     frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_players].y + 6, buf, 0xFFFFFFFF);
+
+    /* [S05 2026-06-04] CATCHUP = ON / OFF (persisted AI rubber-band assist,
+     * read live via td5_save_get_catchup_assist; consumed by S06). */
+    if (s_mp_btn_catchup >= 0 && s_buttons[s_mp_btn_catchup].active) {
+        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_catchup].y + 6,
+                                     td5_save_get_catchup_assist() > 0 ? "ON" : "OFF",
+                                     0xFFFFFFFF);
+    }
 
     /* SPLIT LAYOUT = current layout label */
     if (s_mp_btn_layout >= 0 && s_buttons[s_mp_btn_layout].active) {
@@ -5716,6 +5922,15 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
     }
 }
 
+/* Car-select ENTRY sidebar slide-in duration (bar/curve/topbar sweeping in +
+ * the blue fill growing from the right). Halved from the original 2500ms so the
+ * screen fades in 2x faster (S04 user request). Referenced by BOTH the state-2
+ * advance gate (Screen_CarSelection) and the slide-in render below, which derive
+ * the same t from s_anim_start_ms — keep them on this one constant so they stay
+ * in sync. (frontend_update_timed_animation already applies a global 2x factor,
+ * so the slide actually settles in ~half this value of wall-clock.) */
+#define FE_CARSEL_SLIDE_IN_MS 1250
+
 /* [ARCH-DIVERGENCE: DDraw QueueFrontendOverlayRect -> D3D11 fe_draw_surface_rect; L5 sweep 2026-05-21]
  *   Port reimplements DrawCarSelectionPreviewOverlay (0x0040DDC0) using D3D11
  *   batched quads instead of DDraw blit-queue. Same animation phases (state 0
@@ -5725,6 +5940,14 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
  *   replaced by tex-page + alpha blending. */
 static void frontend_render_car_selection_preview(float sx, float sy) {
     int actual_car = frontend_current_car_index();
+    /* Keep the PAINT button (slot 1) greyed/disabled whenever the current car
+     * has no paint choice (TD5 special/police cars; TD6 cop cars). Idempotent
+     * UI sync — runs every frame for this screen, so it tracks car changes with
+     * no lag, and a disabled button is skipped by nav/hover/click + rendered
+     * grey (see the button draw's bb_state==2 path). Paintable cars keep the
+     * working ◄► arrows (TD5) / modal colour picker (TD6). */
+    if (s_button_count > 1 && s_buttons[1].active)
+        s_buttons[1].disabled = !frontend_car_has_paint(actual_car);
     float sw = sx * 640.0f;
     float sh = sy * 480.0f;
 
@@ -5745,7 +5968,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     {
         uint32_t fill_color = 0xFF00005C; /* BGRA: B=0x5C(92), G=0, R=0, A=0xFF */
         if (s_inner_state == 2) {
-            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 2500.0f);
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / (float)FE_CARSEL_SLIDE_IN_MS);
             float bar_x = 636.0f - (636.0f - 36.0f) * t;
             float fill_x = bar_x + 24.0f;
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -5764,7 +5987,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * CarSelCurve + CarSelTopBar: color-keyed black (alpha=0) → fe_draw_surface_rect
      * so transparent pixels show whatever is behind (fill or background during anim). */
     if (s_inner_state == 2) {
-        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 2500.0f);
+        float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / (float)FE_CARSEL_SLIDE_IN_MS);
         float bar_x    = 636.0f - (636.0f - 36.0f) * t;
         float topbar_x = -532.0f + 532.0f * t;
         if (s_carsel_bar_surface > 0)
@@ -5808,9 +6031,12 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         /* Show the paint colour live whenever the panel is open OR a colour has
          * been confirmed (s_paint_active). The body-only overlay follows the car
          * in every state — static AND the slide — so the confirm animation shows
-         * the painted car (never a gray flash). The slide-OUT (state 11) only
-         * paints when active (a paint confirm slides the SAME car); on a car
-         * CHANGE s_paint_active is cleared, so the old car slides out neutral. */
+         * the painted car (never a gray flash). s_paint_active is NOT cleared on a
+         * car change (the chosen colour is remembered for all TD6 cars), so during
+         * the slide-OUT (state 11) the OUTGOING car's painted body is drawn — but
+         * ONLY while it has a carpic to ride along with (see the prev-surface gate
+         * below), so a carpic-less TD6 car's body is hidden at the start of the
+         * fade-out instead of left lingering at centre. */
         int show_paint = (s_color_panel_visible || s_paint_active);
         if (s_inner_state == 11) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20.
@@ -5825,13 +6051,22 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             int slide_surf = (s_car_preview_prev_surface > 0) ? s_car_preview_prev_surface : s_car_preview_surface;
             if (slide_surf > 0)
             fe_draw_surface_rect(slide_surf, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
-            /* Keep the OLD car painted while it slides out. Its overlay surface
-             * is still cached for the old car (s_paint_overlay_car) — it isn't
-             * reloaded until the slide-IN draws the new car — so draw it DIRECTLY
-             * (not via the lazy helper, which would swap in the new car's mask).
-             * Gated on the cached car being paintable so a stale TD6 overlay
-             * never lands on a TD5 car sliding out. */
-            if (show_paint && s_paint_overlay_surface > 0 &&
+            /* Keep the OLD car painted while it slides out — but only when it
+             * actually slides. Its overlay surface is still cached for the old
+             * car (s_paint_overlay_car) — it isn't reloaded until the slide-IN
+             * draws the new car — so draw it DIRECTLY (not via the lazy helper,
+             * which would swap in the new car's mask). Gated on:
+             *   - the cached car being paintable, so a stale TD6 overlay never
+             *     lands on a TD5 car sliding out; and
+             *   - s_car_preview_prev_surface > 0, so the body rides along with a
+             *     sliding carpic. A carpic-less (or failed-to-load) TD6 car has
+             *     no surface to slide (x stays pinned at 232 / slide_surf<=0), so
+             *     WITHOUT this gate its tinted body would sit centred for the whole
+             *     fade-out — the "previous TD6 body still visible / bleeding
+             *     through" bug. With the gate it's simply hidden when switching
+             *     to a (paintless) TD5 car. */
+            if (show_paint && s_car_preview_prev_surface > 0 &&
+                s_paint_overlay_surface > 0 &&
                 frontend_car_paintable(s_paint_overlay_car))
                 fe_draw_surface_rect(s_paint_overlay_surface, x * sx, 124.0f * sy,
                                      408.0f * sx, 280.0f * sy,
@@ -6813,6 +7048,38 @@ static void frontend_render_extras_gallery_overlay(float sx, float sy) {
     }
 }
 
+/* ============================================================================
+ * SHARED MENU TEXT PATH  [S02 (a) — canonical API, confirmed 2026-06-04]
+ *
+ * fe_draw_text / fe_draw_text_centered are THE single text-draw helpers for the
+ * frontend. Every menu screen renders its captions, values, titles and hints
+ * through them — including the newer port screens (MULTIPLAYER lobby, controller
+ * binding, track / quick-race option rows). Adding a new screen needs NO baked
+ * word art: it just calls fe_draw_text.
+ *
+ * One font drives all of it: BodyText (re/assets/frontend/BodyText.*). With
+ * VectorUI on (the default, [Frontend] VectorUI=1) the glyphs come from the
+ * resolution-independent MSDF atlas (BodyText_msdf.png) via s_ps_msdf; with it
+ * off they come from the BodyText.tga bitmap atlas. The baked button cache
+ * (td5_frontend_button_cache.c) composites from the SAME BodyText atlas and the
+ * SAME s_font_glyph_advance metrics, so cached button captions and live text
+ * share one set of letterforms. fe_measure_text* mirrors that advance table so
+ * centering matches the rendered width.
+ *
+ * fe_draw_small_text (smalltext atlas) is the ONLY deliberate second font — the
+ * dense High-Scores / Race-Results tables need true lowercase + descenders. It
+ * has its own MSDF variant and measure helper, on the same single-path model.
+ *
+ * Practical rules:
+ *   - Draw menu text with fe_draw_text(_centered); never bake a per-screen text
+ *     TGA. (Screen TITLE logos like QuickRaceText.tga are the legacy exception;
+ *     new screens render their title with fe_draw_text too — see the MULTIPLAYER
+ *     lobby's SNK_MultiplayerTitleTxt.)
+ *   - A selector button must NOT set is_selector if its caption should render
+ *     through this path: the VectorUI button path only auto-draws captions for
+ *     NON-selector buttons. Selectors that keep a caption draw it via this path
+ *     (Quick Race rows) or via a per-screen overlay (controller binding).
+ * ========================================================================== */
 static float fe_measure_text_width(const char *text, float sx) {
     float w = 0.0f;
     if (!text) return 0.0f;
@@ -7751,12 +8018,15 @@ void td5_frontend_render_ui_rects(void) {
         switch (s_current_screen) {
         case TD5_SCREEN_QUICK_RACE:
             /* Selectors: Car(0), Track(1), Direction(2, hidden on forward-only
-             * tracks), Players(3), Opponents(4). fe_draw_option_arrows self-skips
-             * hidden buttons so the Direction ◄► vanish with the row. */
-            for (int i = 0; i <= 4; i++) fe_draw_option_arrows(i, sx, sy);
+             * tracks), Players(3, hidden), Opponents(4), Laps(5).
+             * fe_draw_option_arrows self-skips hidden buttons so the Direction
+             * and Players ◄► vanish with their rows. */
+            for (int i = 0; i <= QR_BTN_LAPS; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_GAME_OPTIONS:
-            for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
+            /* [S02 (c)] Six option rows remain (0..5) after Circuit Laps was
+             * removed; OK is index 6 and gets no arrows. */
+            for (int i = 0; i <= 5; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_CONTROLLER_BINDING:
             /* Draw the action labels+values on top of the (opaque-when-selected)
@@ -7771,8 +8041,10 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,
-             * SPLIT LAYOUT only when >1 layout exists, plus each DISPLAY row. */
+             * CATCHUP always (on/off), SPLIT LAYOUT only when >1 layout exists,
+             * plus each DISPLAY row. */
             if (s_mp_btn_players >= 0) fe_draw_option_arrows(s_mp_btn_players, sx, sy);
+            if (s_mp_btn_catchup >= 0) fe_draw_option_arrows(s_mp_btn_catchup, sx, sy);
             if (s_mp_btn_layout >= 0 && s_mp_layout_optcount > 1)
                 fe_draw_option_arrows(s_mp_btn_layout, sx, sy);
             for (int i = 0; i < s_mp_missing_count && i < 2; i++)
@@ -9098,30 +9370,36 @@ static void Screen_QuickRaceMenu(void) {
         if (s_selected_track >= 26) s_selected_track = 0;
         if (s_selected_track == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX) s_selected_track = 0;
 
-        /* Improved layout (PORT ENHANCEMENT): five caption selectors with the
-         * selected value drawn to the RIGHT of each button (value column), plus
-         * OK/Back on the bottom row. All six rows are uniformly spaced
-         * (QR_ROW_Y0 + n*QR_ROW_DY). The Direction row hides on
-         * forward-only/circuit tracks. Values are drawn by
-         * frontend_render_quick_race_overlay at FE_QR_VALUE_X. */
+        /* Improved layout (PORT ENHANCEMENT): caption selectors with the selected
+         * value drawn to the RIGHT of each button (value column), plus OK/Back on
+         * the bottom row. Rows are uniformly spaced (QR_ROW_Y0 + n*QR_ROW_DY). The
+         * Direction row hides on forward-only/circuit tracks. Values are drawn by
+         * frontend_render_quick_race_overlay at FE_QR_VALUE_X.
+         *
+         * [S02 (b) 2026-06-04] These caption rows are NOT marked is_selector: the
+         * VectorUI procedural-button path (the default) draws a caption only for
+         * non-selector buttons, so flagging them as selectors left the captions
+         * blank. They render their captions through the shared fe_draw_text path
+         * (same as the Track Selection option rows); the ◄► arrows are still drawn
+         * by the explicit fe_draw_option_arrows loop in td5_frontend_render_ui_rects. */
         { int bi;
-          bi = frontend_create_button("Car",                 QR_COL_X, QR_ROW_Y(0), QR_BTN_W, 32); /* QR_BTN_CAR */
-          if (bi >= 0) s_buttons[bi].is_selector = 1;
-          bi = frontend_create_button("Track",               QR_COL_X, QR_ROW_Y(1), QR_BTN_W, 32); /* QR_BTN_TRACK */
-          if (bi >= 0) s_buttons[bi].is_selector = 1;
-          bi = frontend_create_button("Direction",           QR_COL_X, QR_ROW_Y(2), QR_BTN_W, 32); /* QR_BTN_DIRECTION */
-          if (bi >= 0) s_buttons[bi].is_selector = 1;
+          frontend_create_button("Car",                 QR_COL_X, QR_ROW_Y(0), QR_BTN_W, 32); /* QR_BTN_CAR */
+          frontend_create_button("Track",               QR_COL_X, QR_ROW_Y(1), QR_BTN_W, 32); /* QR_BTN_TRACK */
+          frontend_create_button("Direction",           QR_COL_X, QR_ROW_Y(2), QR_BTN_W, 32); /* QR_BTN_DIRECTION */
           /* [PORT ENHANCEMENT 2026-06] Quick Race is single-player (driven by the
            * active controller); the Players row is hidden — local multiplayer is
            * the main-menu MULTIPLAYER lobby. The row is still CREATED (to keep the
-           * QR_BTN_* indices stable) but hidden, and Opponents/OK/Back move up to
-           * close the gap. */
+           * QR_BTN_* indices stable) but hidden, and Opponents/Laps/OK/Back close
+           * the gap. */
           bi = frontend_create_button("Players",             QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_PLAYERS */
           if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
-          bi = frontend_create_button("Opponents",           QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_OPPONENTS */
-          if (bi >= 0) s_buttons[bi].is_selector = 1; }
-        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(4),  96, 32); /* QR_BTN_OK */
-        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(4), 112, 32); /* QR_BTN_BACK */
+          frontend_create_button("Opponents",           QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_OPPONENTS */
+          /* [S02 (c) 2026-06-04] Circuit laps, re-homed here from Game Options.
+           * Mirrors the Track Selection laps row; edits s_game_option_laps. */
+          frontend_create_button("Laps",                QR_COL_X, QR_ROW_Y(4), QR_BTN_W, 32); /* QR_BTN_LAPS */
+        }
+        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(5),  96, 32); /* QR_BTN_OK */
+        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(5), 112, 32); /* QR_BTN_BACK */
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
@@ -9198,6 +9476,17 @@ static void Screen_QuickRaceMenu(void) {
                 frontend_play_sfx(2);
             }
 
+            /* [S02 (c) 2026-06-04] Circuit laps (re-homed from Game Options).
+             * Stored 0..9, displayed value+1 (so 1..10 laps); race setup reads
+             * g_td5.circuit_lap_count = s_game_option_laps + 1. Matches the Track
+             * Selection laps row's range. */
+            if (selected_button == QR_BTN_LAPS && delta != 0) {
+                s_game_option_laps += delta;
+                if (s_game_option_laps < 0) s_game_option_laps = 0;
+                if (s_game_option_laps > 9) s_game_option_laps = 9;
+                frontend_play_sfx(2);
+            }
+
             if (s_button_index == QR_BTN_OK) {
                 /* Block if car or track is locked */
                 int car_locked = (!s_cheat_unlock_all && !s_network_active &&
@@ -9212,10 +9501,14 @@ static void Screen_QuickRaceMenu(void) {
                     /* Commit the selected direction; counts are read by
                      * frontend_init_race_schedule (gated to Quick Race). */
                     g_td5.reverse_direction = s_track_direction;
+                    /* [S02 (c) 2026-06-04] Persist the lap choice (re-homed from
+                     * Game Options' OK, which no longer owns this setting). */
+                    g_td5.ini.laps = s_game_option_laps;
+                    td5_ini_persist_options();
                     TD5_LOG_I(LOG_TAG,
-                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d",
+                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d",
                               s_selected_track, s_track_direction ? "Backwards" : "Forwards",
-                              s_num_human_players, s_num_ai_opponents);
+                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1);
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 5;
                 }
@@ -9933,19 +10226,22 @@ static void Screen_GameOptions(void) {
         frontend_init_return_screen(TD5_SCREEN_GAME_OPTIONS);
         TD5_LOG_D(LOG_TAG, "GameOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* 7 option rows with left/right arrows:
-         * Circuit Laps, Checkpoint Timers, Traffic, Cops,
-         * Difficulty, Dynamics, 3D Collisions */
+        /* 6 option rows with left/right arrows:
+         * Checkpoint Timers, Traffic, Cops, Difficulty, Dynamics, 3D Collisions.
+         * [S02 (c) 2026-06-04] CIRCUIT LAPS was removed from this screen — the lap
+         * count is now set in the Quick Race menu + the Track Selection screen
+         * (both edit s_game_option_laps). The value still feeds race setup via
+         * g_td5.circuit_lap_count = s_game_option_laps + 1; this screen no longer
+         * owns it. Remaining rows shifted up one slot to close the gap. */
         /* [FIXED 2026-06-01, runtime button-table @0x499c78] explicit rests: rows at x=120,
          * y=97 step 40; OK bottom-center (216,377). (Port auto-layout gave 110/93 + OK stacked
          * in-column — 10px left / 4px high / OK mis-placed.) Slide-in still animates X to rest. */
-        frontend_create_button(SNK_CircuitLapsTxt,         120,  97, 0x128, 0x20);
-        frontend_create_button(SNK_CheckpointTimersButTxt, 120, 137, 0x128, 0x20);
-        frontend_create_button(SNK_TrafficButTxt,          120, 177, 0x128, 0x20);
-        frontend_create_button(SNK_CopsButTxt,             120, 217, 0x128, 0x20); /* orig label: POLICE */
-        frontend_create_button(SNK_DifficultyButTxt,       120, 257, 0x128, 0x20);
-        frontend_create_button(SNK_DynamicsButTxt,         120, 297, 0x128, 0x20);
-        frontend_create_button(SNK_3dCollisionsButTxt,     120, 337, 0x128, 0x20);
+        frontend_create_button(SNK_CheckpointTimersButTxt, 120,  97, 0x128, 0x20);
+        frontend_create_button(SNK_TrafficButTxt,          120, 137, 0x128, 0x20);
+        frontend_create_button(SNK_CopsButTxt,             120, 177, 0x128, 0x20); /* orig label: POLICE */
+        frontend_create_button(SNK_DifficultyButTxt,       120, 217, 0x128, 0x20);
+        frontend_create_button(SNK_DynamicsButTxt,         120, 257, 0x128, 0x20);
+        frontend_create_button(SNK_3dCollisionsButTxt,     120, 297, 0x128, 0x20);
         frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -9974,48 +10270,42 @@ static void Screen_GameOptions(void) {
             int delta = frontend_option_delta();
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             /* Each row cycles its respective global on arrow input.
-             * OK button triggers exit. */
+             * OK button triggers exit. [S02 (c) 2026-06-04] Circuit Laps (old
+             * idx 0) was removed; the remaining six rows shifted up one index. */
             if (delta != 0) {
                 if (active_button == 0) {
-                    s_game_option_laps += delta;
-                    /* [CONFIRMED @ 0x0041F990 case6/idx0] orig CLAMPS laps to [0,3] and
-                     * does NOT wrap. (The Difficulty row at idx4 DOES wrap 0<->2 — the
-                     * clamp-vs-wrap distinction is deliberate.) Port previously wrapped. */
-                    if (s_game_option_laps < 0) s_game_option_laps = 0;
-                    if (s_game_option_laps > 3) s_game_option_laps = 3;
-                    TD5_LOG_D(LOG_TAG, "GameOptions: laps idx=%d (displayed %d)",
-                              s_game_option_laps, s_game_option_laps + 1);
-                    s_inner_state = 4;
-                } else if (active_button == 1) {
                     s_game_option_checkpoint_timers ^= 1;
                     s_inner_state = 4;
-                } else if (active_button == 2) {
+                } else if (active_button == 1) {
                     s_game_option_traffic ^= 1;
                     s_inner_state = 4;
-                } else if (active_button == 3) {
+                } else if (active_button == 2) {
                     s_game_option_cops ^= 1;
                     s_inner_state = 4;
-                } else if (active_button == 4) {
+                } else if (active_button == 3) {
                     s_game_option_difficulty += delta;
                     if (s_game_option_difficulty < 0) s_game_option_difficulty = 2;
                     if (s_game_option_difficulty > 2) s_game_option_difficulty = 0;
                     s_inner_state = 4;
-                } else if (active_button == 5) {
+                } else if (active_button == 4) {
                     s_game_option_dynamics ^= 1;
                     s_inner_state = 4;
-                } else if (active_button == 6) {
+                } else if (active_button == 5) {
                     s_game_option_collisions ^= 1;
                     s_inner_state = 4;
                 }
             }
-            if (s_button_index == 7) { /* OK */
+            if (s_button_index == 6) { /* OK */
                 /* Sync the committed game options into g_td5.ini (the global the
                  * boot-override at frontend init reads) and write them back to
                  * td5re.ini so the selection survives a relaunch. The original
                  * persisted these to Config.td5 only, but the port's td5re.ini
                  * boot-override masks Config.td5, so the ini is the live config
-                 * layer that must be kept in sync. [PART B 2026-06-02] */
-                g_td5.ini.laps              = s_game_option_laps;
+                 * layer that must be kept in sync. [PART B 2026-06-02]
+                 * NB: laps is intentionally NOT written here anymore — this
+                 * screen no longer owns it (re-homed to Quick Race + Track
+                 * Selection, which persist g_td5.ini.laps themselves).
+                 * [S02 (c) 2026-06-04] */
                 g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
                 g_td5.ini.traffic           = s_game_option_traffic;
                 g_td5.ini.cops              = s_game_option_cops;
@@ -10453,7 +10743,7 @@ static void mp_build_buttons(void)
     s_mp_missing_count = missing;
 
     frontend_reset_buttons();
-    s_mp_btn_players = s_mp_btn_layout = s_mp_btn_ok = -1;
+    s_mp_btn_players = s_mp_btn_catchup = s_mp_btn_layout = s_mp_btn_ok = -1;
     s_mp_btn_missing[0] = s_mp_btn_missing[1] = -1;
 
     /* Rows are NON-selector buttons: the button renderer bakes their label (the
@@ -10462,6 +10752,12 @@ static void mp_build_buttons(void)
      * suppresses its label, which would leave the row blank. */
     y = 77;
     s_mp_btn_players = frontend_create_button(SNK_MpPlayersButTxt, 120, y, 0x100, 0x20);
+    y += 50;
+    /* [S05 2026-06-04] CATCHUP toggle row, between PLAYERS and SPLIT LAYOUT. The
+     * value is the persisted AI rubber-band assist (td5_save get/set_catchup_assist,
+     * default 1 = on); S06's td5_ai_get_catchup_level() consumes it (ON = softened
+     * rubber-band, OFF = no player-distance boost/cut). */
+    s_mp_btn_catchup = frontend_create_button(SNK_CatchupTxt, 120, y, 0x100, 0x20);
     y += 50;
     s_mp_btn_layout = frontend_create_button(SNK_MpLayoutButTxt, 120, y, 0x100, 0x20);
     y += 50;
@@ -10522,6 +10818,14 @@ static void Screen_TwoPlayerOptions(void) {
                     s_selected_button = (s_mp_btn_players >= 0) ? s_mp_btn_players : 0;
                     frontend_play_sfx(2);
                 }
+                s_inner_state = 4;
+            } else if (active_button == s_mp_btn_catchup && delta != 0) {
+                /* [S05 2026-06-04] CATCHUP on/off toggle. Either arrow flips it;
+                 * persisted via td5_save (organized td5re_input.ini [Assist]) and
+                 * consumed by S06's td5_ai_get_catchup_level(). 0 = off, 1 = on. */
+                int cur = td5_save_get_catchup_assist();
+                td5_save_set_catchup_assist(cur > 0 ? 0 : 1);
+                frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (active_button == s_mp_btn_layout && delta != 0 &&
                        s_mp_layout_optcount > 1) {
@@ -11156,7 +11460,7 @@ static void Screen_CarSelection(void) {
         if ((s_two_player_mode & 4) != 0 || s_network_active ||
             s_drag_carselect_pass != 0) {
             s_inner_state = 3;
-        } else if (frontend_update_timed_animation(75, 2500) >= 1.0f) {
+        } else if (frontend_update_timed_animation(75, FE_CARSEL_SLIDE_IN_MS) >= 1.0f) {
             s_inner_state = 3;
         }
         break;
@@ -11893,6 +12197,10 @@ static void Screen_TrackSelection(void) {
                     frontend_play_sfx(10);
                 } else {
                     g_td5.reverse_direction = s_track_direction;
+                    /* [S02 (c) 2026-06-04] Persist the lap choice (re-homed from
+                     * Game Options, which no longer owns this setting). */
+                    g_td5.ini.laps = s_game_option_laps;
+                    td5_ini_persist_options();
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 6;
                 }

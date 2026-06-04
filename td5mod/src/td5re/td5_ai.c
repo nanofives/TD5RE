@@ -26,6 +26,8 @@
 #include "td5_sound.h"
 #include "td5_trace.h"
 #include "td5_game.h"   /* td5_game_get_wanted_target_slot, td5_game_is_wanted_mode */
+#include "td5_save.h"   /* td5_save_get_catchup_assist — CATCHUP level (S06) */
+#include "td5_input.h"  /* g_td5_steering_bias_max_swing — CATCHUP steering swing (S06) */
 #include "td5re.h"
 #include <string.h>
 #include <math.h>
@@ -1387,9 +1389,35 @@ void td5_pilot_00432D60_collect(PilotSnapshot_00432D60 *snap) {
     }
 }
 
+/* ========================================================================
+ * CATCHUP / rubber-band assist controls (S06 2026-06-04)
+ *
+ * Restores the CATCHUP setting removed in the 2026-06-04 input revamp and
+ * exposes it as a tunable gate over the AI rubber-band:
+ *   - Effective level resolved from the td5re.ini override (>=0 wins) else the
+ *     persisted value (S05 Multiplayer Options toggle, default 1 = on).
+ *   - level 0  -> catchup OFF: rubber-band modifier forced to 0, so each AI runs
+ *                 on its plain difficulty-tier throttle (no player-distance
+ *                 boost/cut). bias = 0x100 (neutral), same as the network branch.
+ *   - level >0 -> catchup ON, but the modifier is softened by
+ *                 K_CATCHUP_STRENGTH_PCT/256 so it assists without yo-yoing the
+ *                 player (the user-reported "too aggressive" symptom).
+ * ======================================================================== */
+
+/* Softening applied to the rubber-band modifier when catchup is ON. 256 = full
+ * original strength; 176 (~0.69) tames the over-correction / yo-yo. */
+#define K_CATCHUP_STRENGTH_PCT 176
+
+int td5_ai_get_catchup_level(void) {
+    int ini = g_td5.ini.catchup_assist;     /* -1 = use persisted; 0..9 override */
+    if (ini >= 0) return ini;
+    return td5_save_get_catchup_assist();    /* persisted; default 1 */
+}
+
 void td5_ai_compute_rubber_band(void) {
     int i, racer_count;
     int32_t player0_span, ai_span, delta, modifier;
+    int catchup = td5_ai_get_catchup_level();   /* 0 = off; >0 = on (softened) */
 
     td5_pilot_emit_00432D60_enter();
 
@@ -1481,6 +1509,17 @@ void td5_ai_compute_rubber_band(void) {
             if (delta > g_rb_ahead_range)
                 delta = g_rb_ahead_range;
             modifier = (g_rb_ahead_scale * delta) / g_rb_ahead_range;
+        }
+
+        /* CATCHUP gate/soften (S06 2026-06-04). OFF -> modifier 0 so the AI runs
+         * on its plain difficulty-tier throttle (bias = 0x100, neutral). ON ->
+         * scale the swing down so catchup assists without yo-yoing the player.
+         * `/256` truncates toward zero, keeping the behind(neg)/ahead(pos)
+         * branches symmetric. */
+        if (catchup <= 0) {
+            modifier = 0;
+        } else {
+            modifier = (modifier * K_CATCHUP_STRENGTH_PCT) / 256;
         }
 
         /* [0x00432E32-39] MOV ECX,0x100; SUB ECX,EAX; MOV [EDI],ECX */
@@ -1951,6 +1990,18 @@ void td5_ai_init_race_actor_runtime(void) {
         TD5_LOG_I(LOG_TAG,
                   "Cop Chase: g_wanted_damage_state[0..5]=0x1000 "
                   "(mirrors gWantedDamageStateTable init @ 0x0043D2FC)");
+    }
+
+    /* Restore the original CATCHUP -> 2-player steering-bias-swing propagation
+     * (orig `DAT_0048301c = DAT_00465ff8` at the MainMenu->1PRace transition,
+     * 0x004155EA). The revamp dropped the frontend CATCHUP row that fed this;
+     * re-derive it from the resolved catchup level so the assist is restored and
+     * the S05 toggle drives it. 0 = off (swing 0, the BSS default). The swing
+     * only bites once a 2-player split feeds td5_input_set_player_steering_bias_input;
+     * inert otherwise, but kept faithful. [S06 2026-06-04 catchup restore] */
+    {
+        int catchup = td5_ai_get_catchup_level();
+        g_td5_steering_bias_max_swing = (catchup > 0) ? catchup : 0;
     }
 
     /* Initialize encounter globals */
@@ -5456,8 +5507,26 @@ void td5_ai_update_traffic_route_plan(int slot) {
         }
     }
 
-    /* --- Stage 4: Normal driving -- constant speed 0x3C (60) --- */
-    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0x3C;
+    /* --- Stage 4: Normal driving -- cruise throttle (orig constant 0x3C=60) ---
+     * S06 2026-06-04: derive the cruise throttle from the traffic vehicle's OWN
+     * carparam top speed so different traffic cars move at car-appropriate speeds
+     * instead of one difficulty-independent constant. The traffic dynamics are a
+     * simplified force balance (no torque curve / +0x74 cap), so we scale the
+     * emergent cruise command by the car's top-speed ratio vs a baseline, clamped
+     * to a sane band. Gated by [GameOptions] AIAccelFromCar; falls back to the
+     * faithful 0x3C when off or the carparam is unavailable. */
+    int cruise = 0x3C;
+    if (g_td5.ini.ai_accel_from_car) {
+        int top = td5_physics_get_carparam_top_speed(slot);
+        if (top > 0) {
+            const int baseline_top = 950;   /* ~mid of the carparam top-speed range */
+            int scaled = (0x3C * top) / baseline_top;
+            if (scaled < 0x2A) scaled = 0x2A;   /* ~0.70x floor */
+            if (scaled > 0x4E) scaled = 0x4E;   /* ~1.30x ceiling */
+            cruise = scaled;
+        }
+    }
+    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
     ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
 
     /* --- Stage 5: Compute target span and deviation

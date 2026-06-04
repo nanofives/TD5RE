@@ -174,6 +174,37 @@ static LPDIRECTSOUNDBUFFER     s_ds_keepalive = NULL;
 static LPDIRECTSOUNDBUFFER     s_ds_buffers[MAX_AUDIO_BUFFERS];
 static LPDIRECTSOUNDBUFFER     s_ds_channels[MAX_AUDIO_CHANNELS];
 static int                     s_ds_channel_buf[MAX_AUDIO_CHANNELS]; /* buffer index per channel */
+
+/* Channel-handle generation/recycle bookkeeping (S11 sound-overload fix).
+ *
+ * A channel handle returned by td5_plat_audio_play is no longer the bare index
+ * `i`. It is `(generation << AUDIO_CHANNEL_INDEX_BITS) | i`, where the generation
+ * is bumped every time index `i` is (re)allocated. The TD5 sound module keeps a
+ * slot->channel table (s_slot_to_channel) that is freely overwritten and can go
+ * stale when a channel is recycled or stolen for a different sound. Without a
+ * generation tag, a stale handle would resolve to whatever sound now occupies
+ * that index — so a Stop()/Modify() meant for one slot would hit another's
+ * voice (cross-talk), and in the worst case the whole mix could lock onto a
+ * single stuck source. The generation lets td5_plat_audio_{stop,modify,is_playing}
+ * detect a stale handle (gen mismatch) and treat it as a no-op. */
+#define AUDIO_CHANNEL_INDEX_BITS 8
+#define AUDIO_CHANNEL_INDEX_MASK 0xFF
+#define AUDIO_CHANNEL_GEN_MAX    0x7FFFFF /* keep encoded handle within int >= 0 */
+static uint32_t                s_ds_channel_gen[MAX_AUDIO_CHANNELS];    /* gen per index */
+static uint32_t                s_ds_channel_serial[MAX_AUDIO_CHANNELS]; /* alloc order (steal pick) */
+static int                     s_ds_channel_loop[MAX_AUDIO_CHANNELS];   /* 1 = looping (steal last) */
+static uint32_t                s_audio_alloc_serial = 0;                /* monotonic alloc counter */
+
+/* Voice instrumentation (S11): confirm no monotonic leak and that counts return
+ * to baseline between races. Active = currently-allocated DirectSound voices
+ * (DuplicateSoundBuffer instances), excluding the primary/keepalive buffers. */
+static uint32_t                s_audio_alloc_count  = 0; /* total successful Play allocations */
+static uint32_t                s_audio_free_count   = 0; /* total channel releases */
+static uint32_t                s_audio_steal_count  = 0; /* Play allocations that stole a busy voice */
+static uint32_t                s_audio_fail_count   = 0; /* Play attempts that could not allocate */
+static int                     s_audio_active_count = 0; /* live voices right now */
+static int                     s_audio_peak_active  = 0; /* high-water mark */
+
 static DWORD                   s_ds_buffer_rates[MAX_AUDIO_BUFFERS];
 static int                     s_audio_buf_count = 0;
 static int                     s_master_volume   = 40;
@@ -285,7 +316,13 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
     memset(s_tex_heights, 0, sizeof(s_tex_heights));
     memset(s_ds_buffers, 0, sizeof(s_ds_buffers));
     memset(s_ds_channels, 0, sizeof(s_ds_channels));
+    memset(s_ds_channel_gen, 0, sizeof(s_ds_channel_gen));
+    memset(s_ds_channel_serial, 0, sizeof(s_ds_channel_serial));
+    memset(s_ds_channel_loop, 0, sizeof(s_ds_channel_loop));
     memset(s_ds_buffer_rates, 0, sizeof(s_ds_buffer_rates));
+    s_audio_alloc_serial = 0;
+    s_audio_alloc_count = s_audio_free_count = s_audio_steal_count = s_audio_fail_count = 0;
+    s_audio_active_count = s_audio_peak_active = 0;
 }
 
 /* ========================================================================
@@ -2744,24 +2781,106 @@ void td5_plat_audio_free(int buffer_index)
     }
 }
 
+/* Stop + release the voice at channel index `i` and update the live count.
+ * The generation is NOT bumped here — it is bumped on the next allocation of
+ * this index, which is what invalidates any stale handle still pointing at it. */
+static void audio_release_channel(int i)
+{
+    if (i < 0 || i >= MAX_AUDIO_CHANNELS) return;
+    if (s_ds_channels[i]) {
+        IDirectSoundBuffer_Stop(s_ds_channels[i]);
+        IDirectSoundBuffer_Release(s_ds_channels[i]);
+        s_ds_channels[i] = NULL;
+        s_ds_channel_loop[i] = 0;
+        if (s_audio_active_count > 0) s_audio_active_count--;
+        s_audio_free_count++;
+    }
+}
+
+/* Resolve a (generation,index) handle back to a live channel index, or -1 if
+ * the handle is stale (the index was recycled/stolen for a different sound) or
+ * the channel is no longer live. This is the guard that stops a stale
+ * s_slot_to_channel entry from cross-talking onto another slot's voice. */
+static int audio_resolve_channel(TD5_AudioChannel h)
+{
+    int idx;
+    uint32_t gen;
+    if (h < 0) return -1;
+    idx = (int)((uint32_t)h & AUDIO_CHANNEL_INDEX_MASK);
+    gen = (uint32_t)h >> AUDIO_CHANNEL_INDEX_BITS;
+    if (idx < 0 || idx >= MAX_AUDIO_CHANNELS) return -1;
+    if (!s_ds_channels[idx]) return -1;
+    if (s_ds_channel_gen[idx] != gen) return -1;
+    return idx;
+}
+
+/* Pick a channel index for a new voice.
+ *
+ *   1. an empty slot, else
+ *   2. a finished (non-looping one-shot that stopped) slot — reclaimed lazily,
+ *      else
+ *   3. STEAL the least-important busy voice: the oldest non-looping voice if any
+ *      is still playing, otherwise the oldest looping voice.
+ *
+ * Pass 3 is the critical S11 fix. The original M2DX DXSound::Play never fails on
+ * a full bank — it walks the duplicate chain and steals the tail voice (see
+ * re/analysis/wave4_deep_audits/da_m3_dxsound_polyphony.md §B). The old port
+ * returned -1 once all 64 channels were busy; because looping engine/siren/
+ * traffic voices never report "stopped", pass 2 then found nothing and every
+ * later Play failed — the mix stuck on whatever loops already held the pool
+ * (the "plays one sound for the rest of the session" symptom, made more likely
+ * by >6 players spawning more loops). Stealing guarantees forward progress:
+ * Play always returns a usable voice, and a stolen looping voice that is still
+ * wanted simply re-Plays next frame (its old handle resolves stale, so
+ * slot_is_playing() reports idle and the mixer restarts it).
+ *
+ * Victim choice (rare — only under genuine >64 concurrency): steal the OLDEST
+ * one-shot first (it is the closest to finishing, so cutting it is least
+ * audible), and only if every busy voice is looping, steal the NEWEST loop. The
+ * long-lived loops carry the stable bed — the local player's own engine and the
+ * ambient/rain/siren layers are started first (lowest serial), so stealing the
+ * newest loop preserves them and sacrifices the most recently spawned overflow
+ * voice instead. */
 static int find_free_channel(void)
 {
     int i;
-    /* First pass: find an empty slot */
+    int steal = -1;
+    uint32_t steal_serial = 0;
+
+    /* Pass 1: an empty slot. */
     for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
         if (!s_ds_channels[i]) return i;
     }
-    /* Second pass: find a stopped channel */
+    /* Pass 2: a busy-but-finished slot (one-shot that already stopped). */
     for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
         DWORD status = 0;
-        if (s_ds_channels[i]) {
-            IDirectSoundBuffer_GetStatus(s_ds_channels[i], &status);
-            if (!(status & DSBSTATUS_PLAYING)) {
-                IDirectSoundBuffer_Release(s_ds_channels[i]);
-                s_ds_channels[i] = NULL;
-                return i;
+        IDirectSoundBuffer_GetStatus(s_ds_channels[i], &status);
+        if (!(status & DSBSTATUS_PLAYING)) {
+            audio_release_channel(i);
+            return i;
+        }
+    }
+    /* Pass 3a: steal the oldest still-playing one-shot (lowest serial, loop==0). */
+    for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+        if (s_ds_channel_loop[i]) continue;
+        if (steal < 0 || s_ds_channel_serial[i] < steal_serial) {
+            steal = i;
+            steal_serial = s_ds_channel_serial[i];
+        }
+    }
+    /* Pass 3b: no one-shot to steal — steal the newest loop (highest serial). */
+    if (steal < 0) {
+        for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+            if (steal < 0 || s_ds_channel_serial[i] > steal_serial) {
+                steal = i;
+                steal_serial = s_ds_channel_serial[i];
             }
         }
+    }
+    if (steal >= 0) {
+        s_audio_steal_count++;
+        audio_release_channel(steal);
+        return steal;
     }
     return -1;
 }
@@ -2836,17 +2955,27 @@ TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop,
     if (!s_dsound) return TD5_AUDIO_INVALID_CHANNEL;
     if (buffer_index < 0 || buffer_index >= s_audio_buf_count) return TD5_AUDIO_INVALID_CHANNEL;
     src_buf = s_ds_buffers[buffer_index];
-    if (!src_buf) return TD5_AUDIO_INVALID_CHANNEL;
+    if (!src_buf) { s_audio_fail_count++; return TD5_AUDIO_INVALID_CHANNEL; }
 
     ch = find_free_channel();
-    if (ch < 0) return TD5_AUDIO_INVALID_CHANNEL;
+    if (ch < 0) { s_audio_fail_count++; return TD5_AUDIO_INVALID_CHANNEL; }
 
     /* Duplicate the buffer so multiple instances can play simultaneously */
     hr = IDirectSound8_DuplicateSoundBuffer(s_dsound, src_buf, &dup_buf);
-    if (FAILED(hr) || !dup_buf) return TD5_AUDIO_INVALID_CHANNEL;
+    if (FAILED(hr) || !dup_buf) { s_audio_fail_count++; return TD5_AUDIO_INVALID_CHANNEL; }
 
+    /* Claim the index: bump its generation so any stale handle that still names
+     * this index resolves invalid, and record alloc order + loop flag for the
+     * voice-steal policy. */
+    s_ds_channel_gen[ch]++;
+    if (s_ds_channel_gen[ch] > AUDIO_CHANNEL_GEN_MAX) s_ds_channel_gen[ch] = 1;
     s_ds_channels[ch] = dup_buf;
     s_ds_channel_buf[ch] = buffer_index;
+    s_ds_channel_serial[ch] = ++s_audio_alloc_serial;
+    s_ds_channel_loop[ch] = loop ? 1 : 0;
+    s_audio_alloc_count++;
+    s_audio_active_count++;
+    if (s_audio_active_count > s_audio_peak_active) s_audio_peak_active = s_audio_active_count;
 
     /* Apply parameters */
     {
@@ -2860,30 +2989,27 @@ TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop,
     IDirectSoundBuffer_SetCurrentPosition(dup_buf, 0);
     IDirectSoundBuffer_Play(dup_buf, 0, 0, loop ? DSBPLAY_LOOPING : 0);
 
-    TD5_LOG_I(LOG_TAG, "Audio channel play: channel=%d buffer=%d loop=%d",
-              ch, buffer_index, loop);
+    TD5_LOG_I(LOG_TAG, "Audio channel play: channel=%d gen=%u buffer=%d loop=%d active=%d",
+              ch, (unsigned)s_ds_channel_gen[ch], buffer_index, loop, s_audio_active_count);
 
-    return (TD5_AudioChannel)ch;
+    return (TD5_AudioChannel)(((int)s_ds_channel_gen[ch] << AUDIO_CHANNEL_INDEX_BITS) | ch);
 }
 
 void td5_plat_audio_stop(TD5_AudioChannel ch)
 {
-    if (ch < 0 || ch >= MAX_AUDIO_CHANNELS) return;
-    if (s_ds_channels[ch]) {
-        TD5_LOG_I(LOG_TAG, "Audio channel stop: channel=%d buffer=%d",
-                  ch, s_ds_channel_buf[ch]);
-        IDirectSoundBuffer_Stop(s_ds_channels[ch]);
-        IDirectSoundBuffer_Release(s_ds_channels[ch]);
-        s_ds_channels[ch] = NULL;
-    }
+    int idx = audio_resolve_channel(ch);
+    if (idx < 0) return;
+    TD5_LOG_I(LOG_TAG, "Audio channel stop: channel=%d buffer=%d active=%d",
+              idx, s_ds_channel_buf[idx], s_audio_active_count - 1);
+    audio_release_channel(idx);
 }
 
 void td5_plat_audio_modify(TD5_AudioChannel ch, int volume, int pan, int frequency)
 {
     LPDIRECTSOUNDBUFFER buf;
-    if (ch < 0 || ch >= MAX_AUDIO_CHANNELS) return;
-    buf = s_ds_channels[ch];
-    if (!buf) return;
+    int idx = audio_resolve_channel(ch);
+    if (idx < 0) return;
+    buf = s_ds_channels[idx];
 
     {
         int effective_vol = s_audio_muted ? 0 : (volume * s_master_volume) / 100;
@@ -2891,16 +3017,43 @@ void td5_plat_audio_modify(TD5_AudioChannel ch, int volume, int pan, int frequen
     }
     IDirectSoundBuffer_SetPan(buf, pan_to_ds(pan));
     if (frequency > 0)
-        IDirectSoundBuffer_SetFrequency(buf, td5_audio_translate_frequency(s_ds_channel_buf[ch], frequency));
+        IDirectSoundBuffer_SetFrequency(buf, td5_audio_translate_frequency(s_ds_channel_buf[idx], frequency));
 }
 
 int td5_plat_audio_is_playing(TD5_AudioChannel ch)
 {
     DWORD status = 0;
-    if (ch < 0 || ch >= MAX_AUDIO_CHANNELS) return 0;
-    if (!s_ds_channels[ch]) return 0;
-    IDirectSoundBuffer_GetStatus(s_ds_channels[ch], &status);
+    int idx = audio_resolve_channel(ch);
+    if (idx < 0) return 0;
+    IDirectSoundBuffer_GetStatus(s_ds_channels[idx], &status);
     return (status & DSBSTATUS_PLAYING) ? 1 : 0;
+}
+
+/* Release every active SFX voice (NOT the primary or silent-keepalive buffers).
+ * Called at race teardown so voice counts return to baseline between races and
+ * no looping engine/siren/traffic voice can survive into the next race or the
+ * menus. The keepalive stays running so menu one-shots remain instant. */
+void td5_plat_audio_stop_all(void)
+{
+    int i;
+    for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+        audio_release_channel(i);
+    }
+}
+
+int td5_plat_audio_active_channels(void)
+{
+    return s_audio_active_count;
+}
+
+void td5_plat_audio_log_stats(const char *tag)
+{
+    TD5_LOG_I(LOG_TAG,
+              "voice stats [%s]: active=%d peak=%d alloc=%u free=%u steal=%u fail=%u",
+              tag ? tag : "",
+              s_audio_active_count, s_audio_peak_active,
+              (unsigned)s_audio_alloc_count, (unsigned)s_audio_free_count,
+              (unsigned)s_audio_steal_count, (unsigned)s_audio_fail_count);
 }
 
 void td5_plat_audio_set_master_volume(int volume)

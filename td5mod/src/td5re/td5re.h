@@ -238,6 +238,29 @@ typedef struct TD5_GlobalState {
          * block on. The orig defaults to auto; in port the menu toggle is
          * not wired, so this INI key is the only way to switch to manual. */
         int  auto_gearbox;
+        /* RearImpactResponse (port-only playability knob, S08 2026-06-04):
+         * percentage of the original car-vs-car ANGULAR response (yaw spin +
+         * heavy-impact scatter/lift) to retain when a HUMAN player is struck on
+         * its REAR face. 100 = byte-faithful (no softening), lower = gentler.
+         * Front/side contacts, the attacker's response, and all AI/traffic
+         * collisions stay fully faithful. Default 45 tames getting rear-ended
+         * from an uncontrollable spin-out into a recoverable nudge; the linear
+         * shove is left faithful so the hit still reads as a real bump.
+         * Clamped to [0,100] at parse. */
+        int  rear_impact_response;
+        /* CatchupAssist (S06 2026-06-04): td5re.ini override for the persisted
+         * CATCHUP / rubber-band assist level. -1 (default) = use the persisted
+         * value (S05 toggle, default 1 = on/softened). 0 = catchup off; 1..9 =
+         * on. When >= 0 this wins over the persisted value (a test/power-user
+         * override). Resolved by ai_catchup_level() in td5_ai.c. */
+        int  catchup_assist;
+        /* AIAccelFromCar (S06 2026-06-04, default 1): when 1, AI racers' and
+         * traffic vehicles' acceleration (drive-torque +0x68) and top speed
+         * (+0x74) are sourced from each car's OWN carparam.dat, scaled by a
+         * per-difficulty-tier factor, instead of the difficulty-only template
+         * constants. Bicycle-critical fields (Wf/Wr/I/grip) stay on the AI
+         * template for stability. 0 = faithful template-only behaviour. */
+        int  ai_accel_from_car;
         /* Per-player joystick selection (0 = keyboard, >=1 = 1-based enumerated
          * joystick index). Overrides the device index persisted in Config.td5.
          * The original supports up to 2 simultaneous joystick devices. */
