@@ -530,6 +530,7 @@ static void tick_wanted_target_tracker(void) {
 }
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
+static int      s_prev_pause_act;      /* edge detector for the rebindable PAUSE action */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
 
@@ -2662,6 +2663,7 @@ int td5_game_init_race_session(void) {
      * driven — slated for cleanup. */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
+    s_prev_pause_act = 1;          /* suppress false PAUSE-action edge on first frame */
     g_td5.sim_tick_budget = 0.0f;
     g_td5.sim_time_accumulator = 0;
     g_td5.simulation_tick_counter = 0;
@@ -3132,6 +3134,24 @@ int td5_game_run_race_frame(void) {
         int pause_menu_was_active = s_pause_menu_active;
         s_prev_esc_state = esc_now;
 
+        /* [PORT ENHANCEMENT 2026-06] The rebindable PAUSE action (keyboard key or
+         * joystick button mapped in the control-config screen) opens/toggles the
+         * pause menu, in addition to ESC. The original only had ESC; the PAUSE
+         * action bit was being SET by the input layer but never consumed here, so
+         * a mapped pause key did nothing. Read it from any human player's control
+         * word. It only opens/continues — it never triggers the ESC exit-to-results
+         * or the cinematic abort (those stay ESC-only). */
+        int pause_act_now = 0;
+        {
+            int hp = g_td5.num_human_players;
+            if (hp < 1) hp = 1;
+            if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+            for (int pi = 0; pi < hp; pi++)
+                if (td5_input_get_control_bits(pi) & TD5_INPUT_PAUSE) { pause_act_now = 1; break; }
+        }
+        int pause_act_edge = (pause_act_now && !s_prev_pause_act);
+        s_prev_pause_act = pause_act_now;
+
         /* Replay/demo abort: ESC during a cinematic (View Replay / attract demo)
          * race does NOT open the pause menu — it ends the race immediately and
          * returns to where it was launched (results for replay, menu for demo).
@@ -3151,7 +3171,7 @@ int td5_game_run_race_frame(void) {
                       s_demo_mode ? "menu" : "results");
             td5_game_begin_fade_out(0);
         }
-        if (esc_edge && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
+        if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
             s_pause_menu_cursor = 3;  /* default to CONTINUE (row 3), matching the
                                        * original: g_audioOptionsCursorRow @0x00474640
@@ -3174,11 +3194,23 @@ int td5_game_run_race_frame(void) {
                 static int s_prev_down = 0, s_prev_up = 0;
                 static int s_prev_left = 0, s_prev_right = 0;
                 static int s_prev_enter = 0;
-                int key_down  = td5_plat_input_key_pressed(0xD0);
-                int key_up    = td5_plat_input_key_pressed(0xC8);
-                int key_left  = td5_plat_input_key_pressed(0xCB);
-                int key_right = td5_plat_input_key_pressed(0xCD);
-                int key_enter = td5_plat_input_key_pressed(0x1C);
+                /* [PORT ENHANCEMENT 2026-06] Aggregate joystick nav from every human
+                 * player's in-race device (dpad/left stick = move, A = confirm) so the
+                 * pause menu is navigable with the pad, not just the keyboard. The
+                 * frontend scan handles are released while the race owns the device,
+                 * so this reads each player's exclusive device directly. */
+                uint32_t jnav = 0;
+                {
+                    int hp = g_td5.num_human_players;
+                    if (hp < 1) hp = 1;
+                    if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+                    for (int pi = 0; pi < hp; pi++) jnav |= td5_plat_input_joystick_nav(pi);
+                }
+                int key_down  = td5_plat_input_key_pressed(0xD0) || (jnav & 0x08);
+                int key_up    = td5_plat_input_key_pressed(0xC8) || (jnav & 0x04);
+                int key_left  = td5_plat_input_key_pressed(0xCB) || (jnav & 0x01);
+                int key_right = td5_plat_input_key_pressed(0xCD) || (jnav & 0x02);
+                int key_enter = td5_plat_input_key_pressed(0x1C) || (jnav & 0x10); /* A = confirm */
 
                 /* Navigation: 5 selectable items (CD Music / SFX / Audio3 / Continue / Exit).
                  * [CONFIRMED @ 0x0043BF70] RunAudioOptionsOverlay: 5 rows total. */
@@ -3261,13 +3293,22 @@ int td5_game_run_race_frame(void) {
                     }
                 }
 
+                /* Joystick B = back = continue (close the menu), mirroring the
+                 * frontend B=back convention. [PORT ENHANCEMENT 2026-06] */
+                {
+                    static int s_prev_jb = 0;
+                    int jb = (jnav & 0x20) ? 1 : 0;
+                    if (jb && !s_prev_jb) s_pause_menu_active = 0;
+                    s_prev_jb = jb;
+                }
+
                 s_prev_down = key_down; s_prev_up = key_up;
                 s_prev_left = key_left; s_prev_right = key_right;
                 s_prev_enter = key_enter;
             }
 
-            /* ESC again = continue */
-            if (esc_edge && pause_menu_was_active) {
+            /* ESC again = continue; the PAUSE action also toggles the menu shut. */
+            if ((esc_edge || pause_act_edge) && pause_menu_was_active) {
                 s_pause_menu_active = 0;
             }
 
@@ -5385,6 +5426,7 @@ void td5_game_init_viewport_layout(void) {
      * original was hard-capped at 2 viewports (RunRaceFrame 0x42B580) — this
      * deliberately deviates. */
     int views = g_td5.num_human_players;
+    int cols, rows;
     if (views < 1) views = 1;
     if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
     if (g_td5.split_screen_mode == 0) views = 1;
@@ -5394,22 +5436,32 @@ void td5_game_init_viewport_layout(void) {
     if (views <= 1) {
         s_viewports[0].x = 0; s_viewports[0].y = 0;
         s_viewports[0].w = w; s_viewports[0].h = h;
-    } else if (views == 2) {
-        if (g_td5.split_screen_mode == 2) {     /* vertical: left | right */
-            s_viewports[0].x = 0;   s_viewports[0].y = 0; s_viewports[0].w = w / 2; s_viewports[0].h = h;
-            s_viewports[1].x = w/2; s_viewports[1].y = 0; s_viewports[1].w = w / 2; s_viewports[1].h = h;
-        } else {                                /* horizontal: top / bottom */
-            s_viewports[0].x = 0; s_viewports[0].y = 0;     s_viewports[0].w = w; s_viewports[0].h = h / 2;
-            s_viewports[1].x = 0; s_viewports[1].y = h / 2; s_viewports[1].w = w; s_viewports[1].h = h / 2;
-        }
-    } else {
-        int cols, rows;
-        if (views == 3) {                       /* 3 horizontal strips (user pick) */
-            cols = 1; rows = 3;
+        TD5_LOG_I(LOG_TAG, "Viewport layout: single %dx%d", w, h);
+        return;
+    }
+
+    /* [PORT ENHANCEMENT 2026-06] Honour the Multiplayer Options layout pick when a
+     * valid grid was committed (g_td5.split_grid_cols/rows, resolved in
+     * frontend_init_race_schedule from the player count + chosen layout). The N
+     * players fill the first N cells of the cols x rows grid (row-major); any
+     * extra "missing" cells stay empty here (their content is a deferred
+     * follow-up). When no grid was committed (AutoRace harness / legacy launch
+     * paths leave cols/rows 0), fall back to the automatic ladder. */
+    cols = g_td5.split_grid_cols;
+    rows = g_td5.split_grid_rows;
+    if (cols < 1 || rows < 1 || cols * rows < views) {
+        if (views == 2) {
+            if (g_td5.split_screen_mode == 2) { cols = 2; rows = 1; }  /* left | right */
+            else                              { cols = 1; rows = 2; }  /* top / bottom */
+        } else if (views == 3) {
+            cols = 1; rows = 3;                 /* 3 horizontal strips */
         } else {
             cols = (views <= 4) ? 2 : 3;        /* 4=2x2, 5-6=3x2, 7-9=3x3 */
             rows = (views + cols - 1) / cols;
         }
+    }
+
+    {
         int cw = w / cols;
         int ch = h / rows;
         for (int vp = 0; vp < views; vp++) {
@@ -5422,9 +5474,9 @@ void td5_game_init_viewport_layout(void) {
         }
     }
 
-    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d count=%d %dx%d",
+    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d count=%d grid=%dx%d %dx%d",
               g_td5.split_screen_mode, g_td5.num_human_players,
-              g_td5.viewport_count, w, h);
+              g_td5.viewport_count, cols, rows, w, h);
 }
 
 /* ========================================================================

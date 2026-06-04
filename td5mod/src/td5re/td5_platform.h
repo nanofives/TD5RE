@@ -209,6 +209,76 @@ void td5_plat_input_set_device(int slot, int device_index);
  *  [3..8]=6 button actions (value 2..10 → physical button = value-2). */
 void td5_plat_input_set_joystick_bindings(int slot, const int32_t *bindings, int count);
 
+/** Raw physical joystick button bitmask for a device slot (bit i = physical
+ *  button i currently pressed). Returns 0 if no device is bound to that slot.
+ *  Used by the control-config per-button capture. [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_joystick_buttons(int device_slot);
+
+/* ------------------------------------------------------------------------
+ * Per-action joystick binding (PORT ENHANCEMENT 2026-06)
+ *
+ * Each of the 10 driving actions can be mapped to a physical button OR an
+ * axis/trigger direction. A binding is a uint32 "code":
+ *   0                              = unbound
+ *   TD5_JSBIND_BUTTON | btn        = physical button btn (0..63)
+ *   TD5_JSBIND_AXIS | (axis<<1)|d  = axis (0..7), direction d (0=+, 1=-)
+ * Action order matches k_ctrl_action_labels:
+ *   0 LEFT 1 RIGHT 2 ACCELERATE 3 BRAKE 4 HANDBRAKE 5 HORN/SIREN
+ *   6 GEAR UP 7 GEAR DOWN 8 CHANGE VIEW 9 REAR VIEW 10 PAUSE
+ * ------------------------------------------------------------------------ */
+#define TD5_JSBIND_NONE      0u
+#define TD5_JSBIND_BUTTON    0x100u
+#define TD5_JSBIND_AXIS      0x200u
+#define TD5_JSBIND_ACTIONS   11
+
+/** Apply the per-action binding codes for a player slot (count<=10). When set,
+ *  the in-race poll maps each action through these instead of the fixed default. */
+void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int count);
+
+/** Snapshot the device's rest state for capture (call when a remap begins). */
+void td5_plat_input_joystick_capture_begin(int device_slot);
+
+/** Poll for a freshly-pressed button OR an axis/trigger moved past threshold
+ *  (vs the capture-begin baseline). Returns 1 and writes the binding code to
+ *  *out_code on a fresh input, else 0. */
+int  td5_plat_input_joystick_capture_poll(int device_slot, uint32_t *out_code);
+
+/** Describe a binding code into buf (e.g. "BTN 3", "AXIS 2+", "-"). */
+void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap);
+
+/** 1 once the joystick has settled at rest (no buttons/dpad, sticks centred, all
+ *  axes incl. triggers motionless for several frames) — gates per-action capture
+ *  so it waits for the previous input's release travel to finish before listening. */
+int  td5_plat_input_joystick_neutral(int device_slot);
+/** Reset the neutral-detector's stability timer (call when entering a wait). */
+void td5_plat_input_joystick_neutral_reset(void);
+/** Learn the device's current axis positions as its REST reference. Call every
+ *  frame while the binding UI is idle so a wait can tell held vs released. */
+void td5_plat_input_joystick_learn_rest(int device_slot);
+
+/** Re-enumerate devices; returns 1 if the count changed (hot-plug). */
+int  td5_plat_input_rescan_devices(void);
+
+/** Frontend navigation bitmask from a connected gamepad (any joystick):
+ *  bit0 LEFT, bit1 RIGHT, bit2 UP, bit3 DOWN, bit4 A/confirm, bit5 B/back.
+ *  Returns 0 if no joystick is present. [PORT ENHANCEMENT 2026-06] */
+uint32_t td5_plat_input_frontend_nav(void);
+
+/** In-race navigation bitmask from a player's EXCLUSIVE joystick device (same
+ *  encoding as td5_plat_input_frontend_nav) — for the pause menu, which can't use
+ *  the released frontend scan handles while a race owns the device. */
+uint32_t td5_plat_input_joystick_nav(int device_slot);
+
+/** Enumerated index of the joystick that last produced a confirm/nav (the
+ *  "active controller" that drives the menus). -1 if none yet. */
+int      td5_plat_input_active_joystick(void);
+
+/** Multiplayer-lobby join scan: bit i set if device i's join control is held
+ *  (device 0 = keyboard Enter; device i>=1 = joystick i button 0). */
+uint32_t td5_plat_input_scan_join(void);
+/** Release the lobby join-scan handles (call on leaving the lobby). */
+void     td5_plat_input_scan_join_release(void);
+
 /* ========================================================================
  * Force Feedback
  * ======================================================================== */
@@ -231,17 +301,21 @@ typedef struct TD5_FFState {
 #endif
 } TD5_FFState;
 
-/** Initialize force feedback for a device. Returns 0 on failure. */
-int  td5_plat_ff_init(int device_index);
+/** Initialize force feedback for one player's joystick device. device_slot is
+ *  the per-player joystick slot (0..TD5_PLAT_MAX_JS_SLOTS-1, == player index).
+ *  Returns 0 on failure (no device, or device has no FF). Idempotent per slot.
+ *  [PORT ENHANCEMENT 2026-06] N-way: each human player's device gets its own
+ *  effect set so vibration is delivered per-player, not just on slot 0. */
+int  td5_plat_ff_init(int device_slot);
 
-/** Stop all effects and shutdown. */
+/** Stop all effects on all devices and shutdown. */
 void td5_plat_ff_shutdown(void);
 
-/** Play an effect. magnitude: -10000..+10000 for constant slots. */
-void td5_plat_ff_constant(int slot, int magnitude);
+/** Play an effect on one device. effect_slot 0..3, magnitude -10000..+10000. */
+void td5_plat_ff_constant(int device_slot, int effect_slot, int magnitude);
 
-/** Stop one active effect slot. */
-void td5_plat_ff_stop(int slot);
+/** Stop one active effect slot on one device. */
+void td5_plat_ff_stop(int device_slot, int effect_slot);
 
 /* ========================================================================
  * Audio

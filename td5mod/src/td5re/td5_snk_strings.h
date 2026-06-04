@@ -121,8 +121,25 @@
 #define SNK_TrackButTxt "TRACK"
 #define SNK_TracksUnlocked "TRACKS UNLOCKED"
 #define SNK_TrafficButTxt "TRAFFIC"
-#define SNK_TwoPlayerButTxt "TWO PLAYER"
-#define SNK_TwoPlayerOptionsButTxt "TWO PLAYER OPTIONS"
+#define SNK_TwoPlayerButTxt "MULTIPLAYER"
+/* [PORT ENHANCEMENT 2026-06] the Two Player Options screen became the
+ * Multiplayer Options screen (N-way split-screen layout picker). */
+#define SNK_TwoPlayerOptionsButTxt "MULTIPLAYER OPTIONS"
+/* New labels for the rebuilt Multiplayer Options + revamped Control Options. */
+#define SNK_MpPlayersButTxt        "PLAYERS"
+#define SNK_MpLayoutButTxt         "SPLIT LAYOUT"
+#define SNK_MpDisplayButTxt        "DISPLAY"
+#define SNK_PlayerSelectButTxt     "PLAYER"
+#define SNK_ControllerSelectButTxt "CONTROLLER"
+#define SNK_RemapButTxt            "REMAP"
+/* Race-option row labels (track selectors + quick race) + multiplayer lobby. */
+#define SNK_OpponentsButTxt        "OPPONENTS"
+#define SNK_LapsButTxt             "LAPS"
+#define SNK_MultiplayerTitleTxt    "MULTIPLAYER"
+#define SNK_PressJoinTxt           "PRESS A / ENTER TO JOIN"
+#define SNK_StartRaceTxt           "START"
+#define SNK_ReadyTxt               "READY"
+#define SNK_DeviceButTxt           "DEVICE"
 #define SNK_TxtBhostB "(HOST)"
 #define SNK_TxtPlayer "Player:"
 #define SNK_TxtSession "Session:"

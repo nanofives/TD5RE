@@ -168,12 +168,15 @@ typedef struct TD5_PlayerControl {
  * Force Feedback State
  * ======================================================================== */
 
-/** Per-player FF assignment and state. */
+/** Per-player FF assignment and state.
+ *  [PORT ENHANCEMENT 2026-06] the per-JS "effect started" latches grew from
+ *  [2] to [TD5_MAX_HUMAN_PLAYERS] so every split-screen player's device tracks
+ *  its own steering/terrain effect start state. */
 typedef struct TD5_FFGameState {
     int32_t  controller_assignment[TD5_MAX_RACER_SLOTS]; /**< 1-based JS idx, 0=none */
     int32_t  collision_active[TD5_MAX_RACER_SLOTS];      /**< dampens terrain FF */
-    int      steer_effect_started[2];   /**< per-JS: slot 0 started? */
-    int      terrain_effect_started[2]; /**< per-JS: slot 3 started? */
+    int      steer_effect_started[TD5_MAX_HUMAN_PLAYERS];   /**< per-JS: slot 0 started? */
+    int      terrain_effect_started[TD5_MAX_HUMAN_PLAYERS]; /**< per-JS: slot 3 started? */
 } TD5_FFGameState;
 
 /* ========================================================================
@@ -262,6 +265,9 @@ void td5_input_set_input_source(int player, int source);
 int  td5_input_get_input_source(int player);
 /** Push a player's 9-slot joystick binding table to the live poll. */
 void td5_input_set_joystick_bindings(int player, const int32_t *bindings, int count);
+/** [PORT ENHANCEMENT 2026-06] Push a player's per-action binding codes
+ *  (button/axis/trigger) to the live poll. count <= TD5_JSBIND_ACTIONS. */
+void td5_input_set_action_bindings(int player, const uint32_t *codes, int count);
 /** Resolve+apply both players' input devices (INI override or Config.td5) and
  *  push joystick bindings. Call at race start before force-feedback init. */
 void td5_input_apply_device_selection(void);

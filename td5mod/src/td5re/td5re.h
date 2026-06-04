@@ -169,6 +169,15 @@ typedef struct TD5_GlobalState {
     int  render_height;
     int  split_screen_mode;     /* 0=single, 1=horiz, 2=vert */
     int  viewport_count;
+    /* [PORT ENHANCEMENT 2026-06] Multiplayer Options split-layout picker.
+     * The chosen grid for N-way split: split_grid_cols x split_grid_rows. The N
+     * human players fill the first N cells (row-major); cells N..cols*rows-1 are
+     * "missing" and carry a (deferred) content selector. When cols/rows are 0
+     * the viewport layout falls back to the automatic ladder (harness path).
+     * split_missing_content[k] = stub content id for the k-th empty cell. */
+    int  split_grid_cols;
+    int  split_grid_rows;
+    int  split_missing_content[2];
 
     /* Timing */
     float sim_tick_budget;
