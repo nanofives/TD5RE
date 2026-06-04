@@ -251,6 +251,10 @@ void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap);
  *  Returns 0 if no joystick is present. [PORT ENHANCEMENT 2026-06] */
 uint32_t td5_plat_input_frontend_nav(void);
 
+/** Enumerated index of the joystick that last produced a confirm/nav (the
+ *  "active controller" that drives the menus). -1 if none yet. */
+int      td5_plat_input_active_joystick(void);
+
 /** Multiplayer-lobby join scan: bit i set if device i's join control is held
  *  (device 0 = keyboard Enter; device i>=1 = joystick i button 0). */
 uint32_t td5_plat_input_scan_join(void);

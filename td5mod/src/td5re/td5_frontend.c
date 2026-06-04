@@ -204,6 +204,10 @@ static int  s_arrow_input;              /* DAT_0049b690 arrow direction */
 /* [PORT ENHANCEMENT 2026-06] gamepad frontend-nav bits this frame (bit4 A,
  * bit5 B); cached so frontend_check_escape() can read B without re-polling. */
 static uint32_t s_fe_gamepad_nav;
+/* [PORT ENHANCEMENT 2026-06] the "active controller" driving the menus: whichever
+ * device last gave input (0 = keyboard, >=1 = enumerated joystick). It becomes
+ * the driver (player 0's device) for single-player races. */
+static int s_active_menu_device = 0;
 static uint32_t s_screen_entry_timestamp;
 static uint32_t s_anim_start_ms = 0;
 static uint32_t s_anim_elapsed_ms = 0;
@@ -2069,16 +2073,22 @@ static void frontend_init_race_schedule(void) {
      * g_td5.network_active=0 ensures the local split-screen path is taken. */
     {
         int humans, ai;
-        /* Human count: Quick Race + the multiplayer lobby flow drive s_num_human_players;
-         * everything else is single-player (1). */
-        if (s_current_screen == TD5_SCREEN_QUICK_RACE)
-            humans = s_num_human_players;
-        else if (s_two_player_mode != 0)
+        /* Human count: only the multiplayer lobby flow (s_mp_flow, sets
+         * s_two_player_mode) runs >1 local human. Quick Race is single-player
+         * (driven by the active controller); everything else is single-player. */
+        if (s_mp_flow && s_two_player_mode != 0)
             humans = (s_num_human_players > 1) ? s_num_human_players : 2;
         else
             humans = 1;
         if (humans < 1) humans = 1;
         if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
+
+        /* [PORT ENHANCEMENT 2026-06] Single-player: the active menu controller
+         * (whoever navigated here) becomes the driver = player 0's device. */
+        if (!s_mp_flow) {
+            td5_input_set_input_source(0, s_active_menu_device);
+            td5_save_set_player_device_index(0, (uint32_t)s_active_menu_device);
+        }
 
         /* AI count: the screens that expose an opponents selector (Quick Race +
          * the track selector race-option row) drive s_num_ai_opponents; other
@@ -2689,15 +2699,24 @@ static void frontend_poll_input(void) {
     down_now = td5_plat_input_key_pressed(0xD0);
     enter_now = td5_plat_input_key_pressed(0x1C);
 
-    /* [PORT ENHANCEMENT 2026-06] Gamepad navigation: any joystick's dpad/left
-     * stick moves the cursor, A (button 0) confirms, B (button 1) backs out.
-     * OR'd into the keyboard state so the existing edge-detection debounces it. */
+    /* Active-controller tracking: keyboard input keeps device 0 active. */
+    if (left_now || right_now || up_now || down_now || enter_now)
+        s_active_menu_device = 0;
+
+    /* [PORT ENHANCEMENT 2026-06] Gamepad navigation: ANY connected joystick's
+     * dpad/left stick moves the cursor, A (button 0) confirms, B (button 1) backs
+     * out. OR'd into the keyboard state so the existing edge-detection debounces
+     * it; the joystick that pressed A becomes the active controller. */
     s_fe_gamepad_nav = td5_plat_input_frontend_nav();
     if (s_fe_gamepad_nav & 0x01) left_now  = 1;
     if (s_fe_gamepad_nav & 0x02) right_now = 1;
     if (s_fe_gamepad_nav & 0x04) up_now    = 1;
     if (s_fe_gamepad_nav & 0x08) down_now  = 1;
     if (s_fe_gamepad_nav & 0x10) enter_now = 1;   /* A = confirm/select */
+    if (s_fe_gamepad_nav) {
+        int aj = td5_plat_input_active_joystick();
+        if (aj >= 1) s_active_menu_device = aj;
+    }
 
     left_edge = (left_now && !s_prev_left_state);
     right_edge = (right_now && !s_prev_right_state);
@@ -4755,8 +4774,11 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
         frontend_draw_qr_value(sx, sy, QR_BTN_DIRECTION,
                                s_track_direction ? "Backwards" : "Forwards", 0xFFFFFFFF);
     }
-    snprintf(count, sizeof(count), "%d", s_num_human_players);
-    frontend_draw_qr_value(sx, sy, QR_BTN_PLAYERS, count, 0xFFFFFFFF);
+    /* Players row is hidden (Quick Race is single-player); only Opponents shown. */
+    if (!s_buttons[QR_BTN_PLAYERS].hidden) {
+        snprintf(count, sizeof(count), "%d", s_num_human_players);
+        frontend_draw_qr_value(sx, sy, QR_BTN_PLAYERS, count, 0xFFFFFFFF);
+    }
     snprintf(count, sizeof(count), "%d", s_num_ai_opponents);
     frontend_draw_qr_value(sx, sy, QR_BTN_OPPONENTS, count, 0xFFFFFFFF);
 }
@@ -5123,6 +5145,20 @@ static void frontend_render_race_type_description(float sx, float sy) {
 
     if (!s_anim_complete) return;
     if (btn < 0 || btn > 6) btn = 0;
+
+    /* [PORT ENHANCEMENT 2026-06] Active-controller indicator, drawn above the
+     * game-mode description panel: shows which controller is driving the menus
+     * (and, for single-player, will be the driver). */
+    {
+        const char *dn = (s_active_menu_device == 0)
+            ? "KEYBOARD" : td5_input_get_device_name(s_active_menu_device);
+        char ind[64];
+        if (!dn || !dn[0]) dn = "KEYBOARD";
+        snprintf(ind, sizeof ind, "CONTROLLER: %s", dn);
+        fe_draw_text_centered(panel_x + panel_w * 0.5f, (145.0f - 22.0f) * sy,
+                              ind, 0xFFFFD000, sx * 0.8f, sy * 0.8f);
+    }
+
     idx = (s_inner_state >= 6 && s_inner_state <= 12) ? k_cup_to_idx[btn] : k_top_to_idx[btn];
     if (idx < 0) return;  /* "Back" has no description */
 
@@ -8561,12 +8597,17 @@ static void Screen_QuickRaceMenu(void) {
           if (bi >= 0) s_buttons[bi].is_selector = 1;
           bi = frontend_create_button("Direction",           QR_COL_X, QR_ROW_Y(2), QR_BTN_W, 32); /* QR_BTN_DIRECTION */
           if (bi >= 0) s_buttons[bi].is_selector = 1;
+          /* [PORT ENHANCEMENT 2026-06] Quick Race is single-player (driven by the
+           * active controller); the Players row is hidden — local multiplayer is
+           * the main-menu MULTIPLAYER lobby. The row is still CREATED (to keep the
+           * QR_BTN_* indices stable) but hidden, and Opponents/OK/Back move up to
+           * close the gap. */
           bi = frontend_create_button("Players",             QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_PLAYERS */
-          if (bi >= 0) s_buttons[bi].is_selector = 1;
-          bi = frontend_create_button("Opponents",           QR_COL_X, QR_ROW_Y(4), QR_BTN_W, 32); /* QR_BTN_OPPONENTS */
+          if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
+          bi = frontend_create_button("Opponents",           QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_OPPONENTS */
           if (bi >= 0) s_buttons[bi].is_selector = 1; }
-        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(5),  96, 32); /* QR_BTN_OK */
-        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(5), 112, 32); /* QR_BTN_BACK */
+        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(4),  96, 32); /* QR_BTN_OK */
+        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(4), 112, 32); /* QR_BTN_BACK */
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —

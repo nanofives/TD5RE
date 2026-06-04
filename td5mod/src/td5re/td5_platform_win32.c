@@ -1790,35 +1790,35 @@ void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap)
     }
 }
 
-/* Pick the device used for frontend navigation: the first per-player joystick if
- * one exists, else a lazily-created non-exclusive handle to the first enumerated
- * joystick. [PORT ENHANCEMENT 2026-06] */
-static LPDIRECTINPUTDEVICE8A fe_nav_device(void)
+/* Enumerated index of the joystick that last produced a confirm/nav (the active
+ * controller). -1 = none yet. [PORT ENHANCEMENT 2026-06] */
+static int s_plat_active_js = -1;
+int td5_plat_input_active_joystick(void) { return s_plat_active_js; }
+
+/* Ensure a non-exclusive scan handle for enumerated joystick i (1..). */
+static LPDIRECTINPUTDEVICE8A scan_dev(int i)
 {
-    int i;
-    for (i = 0; i < TD5_PLAT_MAX_JS_SLOTS; i++)
-        if (s_di_joystick[i]) { s_fe_js_suppress = 1; return s_di_joystick[i]; }
-    if (s_fe_js_suppress) return NULL;
-    if (!s_di_fe_joystick && s_dinput && s_device_count > 1) {
-        if (SUCCEEDED(IDirectInput8_CreateDevice(s_dinput, &s_device_guids[1],
-                                                 &s_di_fe_joystick, NULL))) {
+    if (i < 1 || i >= 16 || !s_dinput) return NULL;
+    if (!s_di_scan[i]) {
+        if (SUCCEEDED(IDirectInput8_CreateDevice(s_dinput, &s_device_guids[i],
+                                                 &s_di_scan[i], NULL))) {
             DIPROPRANGE range;
-            IDirectInputDevice8_SetDataFormat(s_di_fe_joystick, &c_dfDIJoystick2);
+            IDirectInputDevice8_SetDataFormat(s_di_scan[i], &c_dfDIJoystick2);
             if (s_hwnd)
-                IDirectInputDevice8_SetCooperativeLevel(s_di_fe_joystick, s_hwnd,
+                IDirectInputDevice8_SetCooperativeLevel(s_di_scan[i], s_hwnd,
                     DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
             range.diph.dwSize = sizeof(DIPROPRANGE);
             range.diph.dwHeaderSize = sizeof(DIPROPHEADER);
             range.diph.dwHow = DIPH_DEVICE;
             range.diph.dwObj = 0;
             range.lMin = 0; range.lMax = 0x1F4;
-            IDirectInputDevice8_SetProperty(s_di_fe_joystick, DIPROP_RANGE, &range.diph);
-            IDirectInputDevice8_Acquire(s_di_fe_joystick);
+            IDirectInputDevice8_SetProperty(s_di_scan[i], DIPROP_RANGE, &range.diph);
+            IDirectInputDevice8_Acquire(s_di_scan[i]);
         } else {
-            s_di_fe_joystick = NULL;
+            s_di_scan[i] = NULL;
         }
     }
-    return s_di_fe_joystick;
+    return s_di_scan[i];
 }
 
 /* Multiplayer lobby "press to join" scan: bit i set if device i's join control
@@ -1868,40 +1868,46 @@ void td5_plat_input_scan_join_release(void)
     }
 }
 
-/* Frontend navigation bitmask from a connected gamepad:
- *   bit0 LEFT  bit1 RIGHT  bit2 UP  bit3 DOWN  bit4 A/confirm  bit5 B/back. */
+/* Frontend navigation bitmask aggregated across EVERY connected joystick, so any
+ * configured pad drives the menus from startup:
+ *   bit0 LEFT  bit1 RIGHT  bit2 UP  bit3 DOWN  bit4 A/confirm  bit5 B/back.
+ * Also records which joystick produced A as the active controller. */
 uint32_t td5_plat_input_frontend_nav(void)
 {
-    LPDIRECTINPUTDEVICE8A dev = fe_nav_device();
-    DIJOYSTATE2 js;
-    HRESULT hr;
     uint32_t bits = 0;
-    long cx, cy;
+    int i;
     const long T = 130;
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        DIJOYSTATE2 js;
+        uint32_t db = 0;
+        long cx, cy;
+        LPDIRECTINPUTDEVICE8A dev = scan_dev(i);
+        if (!dev) continue;
+        memset(&js, 0, sizeof(js));
+        if (FAILED(IDirectInputDevice8_Poll(dev))) {
+            IDirectInputDevice8_Acquire(dev);
+            IDirectInputDevice8_Poll(dev);
+        }
+        if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) continue;
 
-    if (!dev) return 0;
-    memset(&js, 0, sizeof(js));
-    hr = IDirectInputDevice8_Poll(dev);
-    if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
-        IDirectInputDevice8_Acquire(dev);
-        IDirectInputDevice8_Poll(dev);
+        cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
+        cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
+        if (cx < -T) db |= 1; if (cx > T) db |= 2;
+        if (cy < -T) db |= 4; if (cy > T) db |= 8;   /* stick up = lY low = UP */
+        if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+            DWORD deg = js.rgdwPOV[0] / 100;
+            if (deg > 270 || deg <  90) db |= 4;
+            if (deg >  90 && deg < 270) db |= 8;
+            if (deg > 180 && deg < 360) db |= 1;
+            if (deg >   0 && deg < 180) db |= 2;
+        }
+        if (js.rgbButtons[0] & 0x80) db |= 0x10;     /* A = confirm/select */
+        if (js.rgbButtons[1] & 0x80) db |= 0x20;     /* B = back/cancel    */
+        if (db) {
+            bits |= db;
+            if (db & 0x10) s_plat_active_js = i;      /* A press marks this pad active */
+        }
     }
-    if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) return 0;
-
-    cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
-    cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
-    if (cx < -T) bits |= 1; if (cx > T) bits |= 2;
-    if (cy < -T) bits |= 4; if (cy > T) bits |= 8;   /* stick up = lY low = UP */
-
-    if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
-        DWORD deg = js.rgdwPOV[0] / 100;
-        if (deg > 270 || deg <  90) bits |= 4;   /* up    (315..45)  */
-        if (deg >  90 && deg < 270) bits |= 8;   /* down  (135..225) */
-        if (deg > 180 && deg < 360) bits |= 1;   /* left  (225..315) */
-        if (deg >   0 && deg < 180) bits |= 2;   /* right (45..135)  */
-    }
-    if (js.rgbButtons[0] & 0x80) bits |= 0x10;   /* A = confirm/select */
-    if (js.rgbButtons[1] & 0x80) bits |= 0x20;   /* B = back/cancel    */
     return bits;
 }
 
