@@ -516,6 +516,9 @@ static int      s_ctrl_input_source  = 0;
  * screen has selected, and whether it is currently capturing that action. */
 static int      s_ctrl_sel_action    = 0;
 static int      s_ctrl_capturing     = 0;
+/* [PORT ENHANCEMENT 2026-06] "REMAP ALL" sequential mode: capture every action
+ * one by one (the original's sequential flow, re-added as an option). */
+static int      s_ctrl_remap_all     = 0;
 /* [CONFIRMED @ 0x40FE00 / DAT_00464054]: 16-byte scancode capture buffer */
 static uint8_t  s_ctrl_kb_scancodes[16];
 /* [PORT ENHANCEMENT 2026-06] keyboard state snapshot at capture-begin, so a key
@@ -5735,44 +5738,48 @@ static const char *ctrl_scancode_name(unsigned sc)
  * value column beside each row, the capture prompt on the row being remapped,
  * and a header + hint line. */
 static void frontend_render_controller_binding_overlay(float sx, float sy) {
-    int rows, kbd, j;
+    char hdr[48];
+    const char *hint;
     if (!s_anim_complete) return;
-    if (s_inner_state != 10) return;   /* only the interactive list state shows values */
+    if (s_inner_state != 10) return;   /* only the interactive list state */
 
-    kbd  = (s_ctrl_input_source == 0);
-    rows = TD5_JSBIND_ACTIONS;   /* 10 actions for both keyboard and joystick */
+    snprintf(hdr, sizeof hdr, "CONTROLLER SETUP - PLAYER %d", s_ctrl_player + 1);
+    fe_draw_text_centered(320.0f * sx, 46.0f * sy, hdr, 0xFFCCCCCC, sx * 0.75f, sy * 0.75f);
+    hint = s_ctrl_capturing
+        ? "PRESS A KEY / BUTTON / AXIS   (ESC = CANCEL)"
+        : "SELECT AN ACTION TO REMAP   -   REMAP ALL = ONE BY ONE";
+    fe_draw_text_centered(320.0f * sx, 350.0f * sy, hint, 0xFF999999, sx * 0.58f, sy * 0.58f);
+    /* The per-action labels/values are drawn post-button in
+     * frontend_render_controller_binding_labels (so they sit on top of the
+     * selected button's opaque fill). */
+}
 
-    {
-        char hdr[48];
-        snprintf(hdr, sizeof hdr, "CONTROLLER SETUP - PLAYER %d", s_ctrl_player + 1);
-        fe_draw_text(120.0f * sx, 56.0f * sy, hdr, 0xFFCCCCCC, sx * 0.8f, sy * 0.8f);
-    }
-
+/* [PORT ENHANCEMENT 2026-06] Per-action labels + binding values drawn INSIDE the
+ * narrow two-column buttons. Called AFTER the button pass (like the option
+ * arrows) so it renders on top of the selected button's opaque fill. */
+static void frontend_render_controller_binding_labels(float sx, float sy) {
+    int kbd = (s_ctrl_input_source == 0);
+    int rows = TD5_JSBIND_ACTIONS;   /* 11 incl PAUSE */
+    int j;
+    if (!s_anim_complete || s_inner_state != 10) return;
     for (j = 0; j < rows && j < s_button_count; j++) {
-        const char *val;
+        const char *lab, *val;
         char vb[16];
-        uint32_t col;
+        float bx, by, bw, vw, ts = 0.58f;
+        uint32_t vcol;
         if (!s_buttons[j].active) continue;
-        col = (s_ctrl_capturing && j == s_ctrl_sel_action) ? 0xFF33FF33u : 0xFFFFFFFFu;
-        if (s_ctrl_capturing && j == s_ctrl_sel_action) {
-            val = kbd ? "PRESS A KEY..." : "PRESS BUTTON/AXIS...";
-        } else if (kbd) {
-            val = ctrl_scancode_name(s_ctrl_kb_scancodes[j]);
-        } else {
-            td5_plat_input_describe_binding(s_ctrl_action_bind[s_ctrl_player][j],
-                                            vb, (int)sizeof vb);
-            val = vb;
-        }
-        /* value column just right of the 0x100-wide row button (x 120..376). */
-        fe_draw_text(392.0f * sx, (float)(s_buttons[j].y + 4) * sy, val, col,
-                     sx * 0.8f, sy * 0.8f);
-    }
-
-    {
-        const char *hint = s_ctrl_capturing
-            ? "PRESS A KEY / BUTTON   (ESC = CANCEL)"
-            : "SELECT AN ACTION, CONFIRM TO REMAP IT";
-        fe_draw_text(120.0f * sx, 362.0f * sy, hint, 0xFF999999, sx * 0.65f, sy * 0.65f);
+        bx = (float)s_buttons[j].x * sx;
+        by = (float)(s_buttons[j].y + 5) * sy;
+        bw = (float)s_buttons[j].w * sx;
+        lab = (j < 10) ? k_ctrl_action_labels[j] : "?";   /* PAUSE shown as "?" */
+        vcol = 0xFFFFFFFFu;
+        if (s_ctrl_capturing && j == s_ctrl_sel_action) { val = "PRESS"; vcol = 0xFF33FF33u; }
+        else if (kbd) val = ctrl_scancode_name(s_ctrl_kb_scancodes[j]);
+        else { td5_plat_input_describe_binding(s_ctrl_action_bind[s_ctrl_player][j],
+                                               vb, (int)sizeof vb); val = vb; }
+        fe_draw_text(bx + 5.0f * sx, by, lab, 0xFFEEEEEEu, sx*ts, sy*ts);
+        vw = fe_measure_text(val, sx*ts);
+        fe_draw_text(bx + bw - vw - 5.0f * sx, by, val, vcol, sx*ts, sy*ts);
     }
 }
 
@@ -7290,6 +7297,11 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_GAME_OPTIONS:
             for (int i = 0; i <= 6; i++) fe_draw_option_arrows(i, sx, sy);
+            break;
+        case TD5_SCREEN_CONTROLLER_BINDING:
+            /* Draw the action labels+values on top of the (opaque-when-selected)
+             * two-column buttons. [PORT ENHANCEMENT 2026-06] */
+            frontend_render_controller_binding_labels(sx, sy);
             break;
         case TD5_SCREEN_DISPLAY_OPTIONS:
             for (int i = 0; i <= 3; i++) fe_draw_option_arrows(i, sx, sy);
@@ -10115,6 +10127,36 @@ static const char *ctrl_bind_row_label(int row)
     return (row >= 0 && row < 10) ? k_ctrl_action_labels[row] : "?";
 }
 
+/* Begin capturing input for the currently-selected action (snapshot the rest
+ * state so a key/button/axis held from the confirm press is ignored). Shared by
+ * the single-action remap and the REMAP ALL sequential pass. [PORT 2026-06] */
+static void ctrl_begin_capture(void)
+{
+    s_ctrl_capturing = 1;
+    memcpy(s_ctrl_capture_kb_snapshot, td5_plat_input_get_keyboard(), 256);
+    if (s_ctrl_input_source != 0)
+        td5_plat_input_joystick_capture_begin(s_ctrl_player);
+    TD5_LOG_I(LOG_TAG, "CtrlBind: capturing action %d (%s) player %d%s",
+              s_ctrl_sel_action, ctrl_bind_row_label(s_ctrl_sel_action),
+              s_ctrl_player, s_ctrl_remap_all ? " [remap-all]" : "");
+}
+
+/* After a capture completes, advance the REMAP ALL sequence (or finish it). */
+static void ctrl_capture_advance(void)
+{
+    s_ctrl_capturing = 0;
+    if (s_ctrl_remap_all) {
+        s_ctrl_sel_action++;
+        if (s_ctrl_sel_action < TD5_JSBIND_ACTIONS) {
+            s_selected_button = s_ctrl_sel_action;   /* keep the cursor on it */
+            ctrl_begin_capture();
+        } else {
+            s_ctrl_remap_all = 0;
+            s_ctrl_sel_action = 0;
+        }
+    }
+}
+
 static void Screen_ControllerBinding(void) {
     switch (s_inner_state) {
 
@@ -10134,7 +10176,7 @@ static void Screen_ControllerBinding(void) {
             /* s_ctrl_player was set by Control Options (the player whose CONFIGURE
              * was pressed). Pick the row model from its device type. */
             int dev_type = td5_input_get_device_type(s_ctrl_player);
-            int rows, j, y;
+            int j;
             if (dev_type < 0 || dev_type > 2) dev_type = 0;   /* no controller → keyboard list */
             s_ctrl_input_source = dev_type;
 
@@ -10156,18 +10198,27 @@ static void Screen_ControllerBinding(void) {
 
             s_ctrl_sel_action = 0;
             s_ctrl_capturing  = 0;
+            s_ctrl_remap_all  = 0;
 
-            /* Build the per-action row buttons (each selectable; current binding
-             * drawn in the overlay value column) + a trailing OK button. This is
-             * the "select which button to remap, full mapping visible" UI. */
-            rows = ctrl_bind_row_count();
-            frontend_reset_buttons();
-            y = 70;                       /* 11 rows fit in 70..354, OK at 377 */
-            for (j = 0; j < rows; j++) {
-                frontend_create_button(ctrl_bind_row_label(j), 120, y, 0x100, 22);
-                y += 26;
+            /* Build the action buttons in TWO narrow columns (is_selector → the
+             * renderer skips their label; the overlay draws a small label+value
+             * inside each). 10 driving actions (cols of 5), the PAUSE "?" button,
+             * then REMAP ALL (sequential one-by-one) + OK (baked labels).
+             * [PORT ENHANCEMENT 2026-06] */
+            {
+                int colx[2] = { 64, 326 };
+                int b;
+                frontend_reset_buttons();
+                for (j = 0; j < 10; j++) {                 /* 0..9 driving actions */
+                    int c = j / 5, r = j % 5;
+                    b = frontend_create_button("", colx[c], 80 + r * 30, 150, 24);
+                    if (b >= 0) s_buttons[b].is_selector = 1;
+                }
+                b = frontend_create_button("", 64, 248, 120, 26);   /* 10 = PAUSE "?" */
+                if (b >= 0) s_buttons[b].is_selector = 1;
+                frontend_create_button("REMAP ALL", 200, 300, 150, 28);  /* 11 */
+                frontend_create_button(SNK_OkButTxt,  370, 300,  90, 28); /* 12 */
             }
-            frontend_create_button(SNK_OkButTxt, 200, 377, 0x60, 0x20);
         }
         s_anim_tick = 0;
         s_anim_complete = 0;
@@ -10196,11 +10247,12 @@ static void Screen_ControllerBinding(void) {
      * a button OR an axis/trigger direction. OK saves + slides out (state 11).
      * ------------------------------------------------------------------ */
     case 10: {
-        /* Unified per-button remap. Browse the action rows (generic button nav),
-         * confirm one to (re)bind just that action, OK to save + exit. The whole
-         * current mapping stays visible (overlay value column). */
-        int rows   = ctrl_bind_row_count();
-        int ok_btn = rows;   /* OK is the button created right after the rows */
+        /* Two-column per-action remap. Browse the action buttons (0..10 incl the
+         * PAUSE "?" at 10), confirm one to (re)bind just it; REMAP ALL (11) runs
+         * the sequential one-by-one pass; OK (12) saves + exits. [PORT 2026-06] */
+        int rows         = ctrl_bind_row_count();   /* 11 actions (0..10) */
+        int remapall_btn = rows;                     /* 11 */
+        int ok_btn       = rows + 1;                 /* 12 */
 
         if (!s_ctrl_capturing) {
             if (s_input_ready) {
@@ -10230,26 +10282,27 @@ static void Screen_ControllerBinding(void) {
                     TD5_LOG_I(LOG_TAG, "CtrlBind: saved bindings for player %d", s_ctrl_player);
                     s_anim_tick = 0;
                     s_inner_state = 11;
+                } else if (s_button_index == remapall_btn) {
+                    /* REMAP ALL: configure every action one by one, from action 0. */
+                    s_ctrl_remap_all  = 1;
+                    s_ctrl_sel_action = 0;
+                    s_selected_button = 0;
+                    ctrl_begin_capture();
+                    frontend_play_sfx(2);
                 } else if (s_button_index >= 0 && s_button_index < rows) {
-                    /* Begin capturing the selected action. Snapshot current input
-                     * so a key/button/axis still held from the confirm press is
-                     * ignored (only a fresh change is accepted). */
+                    /* Begin capturing just the selected action. */
+                    s_ctrl_remap_all  = 0;
                     s_ctrl_sel_action = s_button_index;
-                    s_ctrl_capturing  = 1;
-                    memcpy(s_ctrl_capture_kb_snapshot, td5_plat_input_get_keyboard(), 256);
-                    if (s_ctrl_input_source != 0)
-                        td5_plat_input_joystick_capture_begin(s_ctrl_player);
-                    TD5_LOG_I(LOG_TAG, "CtrlBind: capturing action %d (%s) for player %d",
-                              s_ctrl_sel_action, ctrl_bind_row_label(s_ctrl_sel_action),
-                              s_ctrl_player);
+                    ctrl_begin_capture();
                     frontend_play_sfx(2);
                 }
             }
         } else {
-            /* --- Capture mode (ESC cancels) --- */
+            /* --- Capture mode (ESC cancels; in REMAP ALL it cancels the run) --- */
             const uint8_t *kb = td5_plat_input_get_keyboard();
             if (kb[0x01] && !s_ctrl_capture_kb_snapshot[0x01]) {
-                s_ctrl_capturing = 0;       /* ESC = cancel this remap, no change */
+                s_ctrl_capturing = 0;
+                s_ctrl_remap_all = 0;
                 TD5_LOG_I(LOG_TAG, "CtrlBind: capture cancelled");
                 break;
             }
@@ -10265,11 +10318,10 @@ static void Screen_ControllerBinding(void) {
                     TD5_LOG_I(LOG_TAG, "CtrlBind: action %d -> scancode 0x%02X",
                               s_ctrl_sel_action, (unsigned)found);
                     frontend_play_sfx(3);
-                    s_ctrl_capturing = 0;
+                    ctrl_capture_advance();
                 }
             } else {
-                /* Joystick: first fresh button press OR axis/trigger movement past
-                 * threshold (platform handles both; works for sticks + triggers). */
+                /* Joystick: first fresh button press OR axis/trigger movement. */
                 uint32_t code = 0;
                 if (td5_plat_input_joystick_capture_poll(s_ctrl_player, &code)) {
                     if (s_ctrl_sel_action >= 0 && s_ctrl_sel_action < TD5_JSBIND_ACTIONS)
@@ -10277,7 +10329,7 @@ static void Screen_ControllerBinding(void) {
                     TD5_LOG_I(LOG_TAG, "CtrlBind: action %d -> joystick code 0x%X",
                               s_ctrl_sel_action, (unsigned)code);
                     frontend_play_sfx(2);
-                    s_ctrl_capturing = 0;
+                    ctrl_capture_advance();
                 }
             }
         }
