@@ -350,6 +350,11 @@ void td5_plat_audio_modify(TD5_AudioChannel ch, int volume, int pan, int frequen
 /** Check if a channel is still playing. */
 int td5_plat_audio_is_playing(TD5_AudioChannel ch);
 
+/** Check if a channel handle still names a live voice this slot owns, ignoring
+ *  the transient PLAYING bit (a parked/idle loop still counts). Used to avoid
+ *  re-triggering a loop the mixer is still modulating. */
+int td5_plat_audio_channel_valid(TD5_AudioChannel ch);
+
 /** Set master volume (0-100). */
 void td5_plat_audio_set_master_volume(int volume);
 

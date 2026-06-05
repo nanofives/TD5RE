@@ -140,6 +140,10 @@ static int slot_buf(int slot) {
 static void slot_play(int slot, int loop, int volume, int pan, int frequency) {
     int buf_id = slot_buf(slot);
     if (buf_id < 0) return;
+    /* [S11] Looping voices are deduped per source buffer inside
+     * td5_plat_audio_play (one voice per loop buffer, reused on re-issue), which
+     * is what prevents the per-frame loop re-trigger from stranding voices and
+     * pegging the pool. So slot_play just records the (possibly reused) channel. */
     int ch = td5_plat_audio_play(buf_id, loop, volume, pan, frequency);
     if (slot >= 0 && slot < TD5_SOUND_TOTAL_SLOTS)
         s_slot_to_channel[slot] = ch;
@@ -159,6 +163,16 @@ static int slot_is_playing(int slot) {
     int ch = s_slot_to_channel[slot];
     if (ch < 0) return 0;
     return td5_plat_audio_is_playing(ch);
+}
+/* Whether this slot still owns a live voice (a parked/idle loop counts), as
+ * opposed to slot_is_playing() which reflects the backend's transient PLAYING
+ * bit. Used by the engine looping-state update so a momentarily-parked engine
+ * loop is not treated as gone and re-triggered every frame. */
+static int slot_has_voice(int slot) {
+    if (slot < 0 || slot >= TD5_SOUND_TOTAL_SLOTS) return 0;
+    int ch = s_slot_to_channel[slot];
+    if (ch < 0) return 0;
+    return td5_plat_audio_channel_valid(ch);
 }
 
 /* ========================================================================
@@ -703,10 +717,20 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
         return;
     }
 
-    /* Keep the looping engine state latched to the existing channel rather
-     * than requesting a fresh play every frame. */
-    if (!slot_is_playing(base_slot) &&
-        !slot_is_playing(base_slot + 1)) {
+    /* Keep the looping engine state latched to the existing channel rather than
+     * requesting a fresh play every frame.
+     *
+     * [S11] Gate on slot_has_voice(), NOT slot_is_playing(). The engine Drive
+     * loop plays at volume 0 under the audible Rev loop, and a volume-0 buffer is
+     * parked by WASAPI so its DirectSound status reads not-PLAYING — even though
+     * the voice is alive and being modulated. Using slot_is_playing() here saw
+     * the parked loop as gone and reset the state to STOPPED every frame, which
+     * made the mixer re-issue Drive+Rev every frame (the broken/muffled engine
+     * and the churn that fed the overload). slot_has_voice() only resets when the
+     * slot has genuinely lost its voice (handle released/stale), so a parked but
+     * owned loop is left alone. */
+    if (!slot_has_voice(base_slot) &&
+        !slot_has_voice(base_slot + 1)) {
         s_engine_state[actor_index * 2] = ENGINE_STATE_STOPPED;
         s_engine_state[actor_index * 2 + 1] = ENGINE_STATE_STOPPED;
     }
@@ -806,6 +830,11 @@ void td5_sound_update_audio_mix(void)
                   (int)s_listener_pos[0][0],
                   (int)s_listener_pos[0][1],
                   (int)s_listener_pos[0][2]);
+        /* [S11 diagnostic] Once-a-second voice-pool snapshot at INFO level
+         * (self-flushing). A climbing active/peak or rising steal/fail count
+         * means voice-pool pressure; a flat count while a sound is stuck points
+         * elsewhere (a pinned loop, not exhaustion). Survives a force-close. */
+        td5_plat_audio_log_stats("race");
     }
 
     /* ----------------------------------------------------------------

@@ -218,7 +218,7 @@ Using the research summary from Step 1, make the code changes **in the worktree 
 3. Fix any compile errors (up to 2 attempts).
 4. Run the **single-track runtime probe** (see [Testing the build](#testing-the-build-ini--log-loop)) — fast sanity check on Moscow before the multi-track sweep.
 5. **Run the multi-track CSV bundle sweep** (see [Multi-track CSV bundle sweep](#multi-track-csv-bundle-sweep-mandatory)) — this is **mandatory** for any fix touching race / AI / physics / camera / track / HUD code. Skip only when the fix is pure frontend/asset/build-tooling.
-6. Report the result to the user: what was found, what was changed, build status, the worktree path so they can inspect or manually launch, AND the bundle path at `tools/frida_csv/${SESSION_TAG}/`.
+6. Report the result to the user: what was found, what was changed, build status, the worktree path so they can inspect or manually launch, AND the bundle path at `tools/frida_csv/${SESSION_TAG}/`. **If the fix can only be confirmed by the user driving/playing** (handling feel, brakes, analog throttle, AI/catchup feel, multiplayer with real controllers, subjective audio/visual quality), do NOT present it as confirmed — explicitly say a manual test is needed and follow the ask-first flow in [When the fix needs the user to test](#when-the-fix-needs-the-user-to-test-ask-first): finish all self-verification, prep `manual_drive.exe`, then ask and wait until they're ready.
 
 #### MANDATORY: Verbose Uncertainty Disclosure
 
@@ -820,9 +820,24 @@ git worktree prune --verbose
 
 ## Testing the build (INI + log loop)
 
-After a successful build, **you can run the game yourself** to validate the fix — do not ask the user to launch it. The flow is: configure `td5re.ini` **inside the worktree**, run the auto-trace harness from the worktree, then read the worktree's log.
+There are two kinds of validation, and they're handled differently:
+
+- **Self-verifiable checks** (the build loads, doesn't crash, a screenshot shows the right HUD/menu/layout/color, a CSV trace sweep matches the original, the log shows the expected branch/value): **you run these yourself** — do NOT ask the user to launch the game for them. The flow is: configure `td5re.ini` **inside the worktree**, run the auto-trace harness from the worktree, then read the worktree's log.
+
+- **Checks that need the user's hands on the controls** (anything only a human driving/playing can judge — handling feel, "do the brakes bite", proportional analog throttle, reverse behavior, AI difficulty / catchup feel, multiplayer with real controllers / press-to-join, subjective audio or visual quality while actually driving): **ASK THE USER FIRST and wait until they say they're ready.** Do all the self-verification you can up front, then surface a short, explicit test brief and pause — see [When the fix needs the user to test](#when-the-fix-needs-the-user-to-test-ask-first) below. Never silently assume the user will get to it later, and never burn through to "shipped" on a fix whose only real proof requires them at the keyboard.
 
 Because every `/fix` session runs in its own worktree, your INI tweaks and log output are guaranteed not to collide with other sessions.
+
+### When the fix needs the user to test (ask first)
+
+If confirming the fix genuinely requires the user to drive/play/use-their-controllers, do this **instead of** silently moving on:
+
+1. Finish every check you *can* do yourself first (build sanity, screenshots, CSV sweep, logs) so the user's manual run is the *last* gate, not the first.
+2. Prepare the manual-drive build so it's ready the moment they are: copy `td5re.exe` → `manual_drive.exe` in the worktree (a name not starting with `td5re` is invisible to any stray name-based kill — see line ~1008 and `feedback_fix_parallel_session_hazards_2026-06-02.md`), with the baseline INI flags written (`PlayerIsAI = 0`, `AutoRace`/`SkipIntro` as appropriate, audio per the SFX rule).
+3. **Then ask** — a short message that states (a) that a manual test is needed, (b) the one-line test brief (what to do, what "correct" looks like), (c) the exact command/path to launch, and (d) "tell me when you're ready / once you've tried it." Use `AskUserQuestion` if a simple ready/not-ready or scenario choice helps; otherwise just ask in prose. **Wait for the user.** Do not proceed to commit-as-confirmed, merge, or "shipped" claims on the strength of an untested manual gate.
+4. When the user reports back, read the relevant worktree log (see [Read logs when iterating](#read-logs-when-iterating)) before any further change.
+
+The point is timing: the user wants to be **at the keyboard when the test is needed**, not surprised by a "please go test this" after the fact. Ask early enough that they can line up the run.
 
 ### Configure the run via INI
 
@@ -838,12 +853,15 @@ Because every `/fix` session runs in its own worktree, your INI tweaks and log o
 | `[Game]` | `DefaultTrack` | `0` (Moscow) | Default unless `$ARGUMENTS` names another track — see below |
 | `[GameOptions]` | `PlayerIsAI` | `0` | **Default off** — user drives manually. Only flip to `1` if the fix is specifically about attract-mode / AI-slot-0 / `/diff-race` behavior |
 | `[Logging]` | `Enabled` | `1` | **Mandatory for `/fix`** — master `td5re.ini` default is `0` (perf baseline). Without this flip the post-run log reads in **Logging Rules** below see only `[session start]`. Leave `Wrapper = 0` unless you're actually debugging the D3D shim |
+| `[Audio]` | `SFXVolume` | `0` | **Default for every `/fix` run** — silence sound effects so several test windows running side-by-side don't bleed overlapping engine/menu audio across sessions. **EXCEPTION:** when the fix focus is `audio` / the sound subsystem, set a real level instead (master default is `10`, or pass `--SFXVolume=N`) so you can actually hear the behavior under test. Music is untouched (`MusicVolume` keeps its INI value) |
 
 **Track selection rule:** Parse `$ARGUMENTS` for a track name. If it mentions one of the quickrace mapping entries (Moscow, Edinburgh, Sydney, Blue Ridge, Jarash, Newcastle, Maui, Courmayeur, Honolulu, Tokyo, Keswick, San Francisco, Bern, Kyoto, Washington, Munich, Cheddar, Montego, Bez, Drag Strip), look up its index in `re/tools/quickrace/td5_quickrace.ini` and set `DefaultTrack` accordingly. Otherwise use `0` (Moscow). Moscow is the default because it's the reference track used by `/diff-race` and every regression baseline.
 
 **PlayerIsAI exception:** Do NOT auto-flip to `1`. The only cases where you should ever set `PlayerIsAI = 1` in `/fix` are when the user explicitly asks to test AI behavior on slot 0 (attract-mode parity, AI rubber-banding, script VM). Never for general physics / camera / HUD / render fixes.
 
-The worktree INI is seeded from the committed master copy, which usually has these keys at the wrong defaults — so the full set of edits is needed on every fresh worktree. Do NOT launch the exe until all six keys are written to disk.
+**SFX-volume rule:** Every `/fix` launch runs with `[Audio] SFXVolume = 0` by default (set it in the worktree INI alongside the other baseline keys). Multiple `/fix` windows running at once otherwise blast overlapping engine/menu audio, which is both confusing and a real annoyance for the user driving one of them. The ONLY exception is a fix whose focus is the **sound subsystem** (the `audio` bucket — e.g. the stuck-sound overload, frontend fade SFX, per-car engine audio): there, set `SFXVolume` to a real level (or pass `--SFXVolume=N` on the launch) so the audio under test is audible. `MusicVolume` is never forced — it keeps whatever the INI says.
+
+The worktree INI is seeded from the committed master copy, which usually has these keys at the wrong defaults — so the full set of edits is needed on every fresh worktree. Do NOT launch the exe until all seven keys are written to disk.
 
 Useful keys for fix-validation runs:
 
@@ -907,13 +925,26 @@ For a render-only fix, set `Modules = frame` and `Stages = frame_end` — most r
 
 **Always drive the race via `AutoRace = 1` + `SkipIntro = 1`. Never use `SendKeys F5` — it's unreliable, and the AutoRace path is the supported harness.** Set those two flags in `${WORKTREE_DIR}/td5re.ini` before launching.
 
-Launch from the worktree so it picks up the worktree's `td5re.exe`, INI, and log dir — NOT the main tree. **Set `TD5RE_WINDOW_TITLE` before launching** so the running window identifies which `/fix` candidate is on screen (critical when several worktrees are running side-by-side). Compose the title from the session tag and a compact version of `$ARGUMENTS`:
+Launch from the worktree so it picks up the worktree's `td5re.exe`, INI, and log dir — NOT the main tree. **Setting `TD5RE_WINDOW_TITLE` before launching is MANDATORY on every launch path** (the auto-close harness below, the visual-verify variant, and each window of the multi-track sweep). This regressed recently — windows came up with the default caption — so treat it as non-negotiable: a launch without a composed title is a bug.
+
+**The title must LEAD with a precise test instruction — not a raw echo of `$ARGUMENTS`.** The user reads it off the title bar to know what *this specific window* is for. Author a short imperative `TEST_FOCUS` (≤ ~90 chars) describing the concrete thing to look at and what "correct" looks like, derived from the fix + the Step-1 RE findings. Examples:
+
+| `$ARGUMENTS` | Good `TEST_FOCUS` |
+|---|---|
+| "fix brake gate on reverse" | `reverse out of spawn — brakes should bite, no free-roll` |
+| "gray out paint for paintless TD5 cars" | `SELECT CAR — paintless TD5 cars show greyed paint arrows` |
+| "multiplayer traffic/police toggle not working" | `MP race, Traffic=off — zero traffic cars should spawn` |
+| "fps/ms overlay position" | `check FPS/MS overlay sits top-left in BOTH menu and race` |
 
 ```bash
-# Build a short, descriptive title — e.g. "TD5RE [fix-1712956800-42831] brake gate on reverse"
-# Trim $ARGUMENTS to ~80 chars and strip newlines so the title bar stays readable.
-FIX_DESC="$(printf '%s' "$ARGUMENTS" | tr '\n' ' ' | cut -c1-80)"
-WIN_TITLE="TD5RE [${SESSION_TAG}] ${FIX_DESC}"
+# TEST_FOCUS = a precise, human-authored "what to verify" string. Do NOT just
+# truncate $ARGUMENTS — this is the one-line test brief the user reads off the
+# title bar. Keep it imperative, concrete, and short (front-loaded so it survives
+# Windows title truncation).
+TEST_FOCUS="<one concise imperative: what to look at / what correct looks like>"
+
+# Title bar leads with the test focus, then the session tag for disambiguation.
+WIN_TITLE="TD5RE TEST: ${TEST_FOCUS}  [${SESSION_TAG}]"
 
 cd "${WORKTREE_DIR}" && TD5RE_WINDOW_TITLE="${WIN_TITLE}" powershell.exe -Command "
 \$env:TD5RE_WINDOW_TITLE = '${WIN_TITLE}'
@@ -926,17 +957,26 @@ Write-Host \"Launched td5re.exe PID=\$(\$proc.Id) (pid file: .td5re_test_pid)\"
 Start-Sleep -Seconds 10
 \$proc.CloseMainWindow() | Out-Null
 Start-Sleep -Seconds 2
-if (!\$proc.HasExited) { \$proc.Kill() }   # scoped to OUR \$proc only — NEVER Stop-Process -Name td5re
+# Termination is PID-scoped to the \$proc WE launched. Defence-in-depth: only kill
+# when its exe path is under THIS session's worktree, so even a recycled PID can
+# never let us terminate a sibling /fix session's td5re. NEVER Stop-Process -Name
+# / taskkill /IM — those hit every session's exe at once.
+if (!\$proc.HasExited) {
+    if (\$proc.Path -like '*${SESSION_TAG}*') { \$proc.Kill() }
+    else { Write-Host \"REFUSING to kill PID=\$(\$proc.Id): path '\$(\$proc.Path)' is not under ${SESSION_TAG} — not ours\" }
+}
 Remove-Item '.td5re_test_pid' -ErrorAction SilentlyContinue
 Write-Host 'Done - process closed'
 " 2>&1
 ```
 
-If `${WIN_TITLE}` contains single quotes, escape them for the PowerShell string (double them up: `'` → `''`). Keep the title under ~180 chars — Windows truncates beyond that anyway.
+If `${TEST_FOCUS}` / `${WIN_TITLE}` contains single quotes, escape them for the PowerShell string (double them up: `'` → `''`). Keep the title under ~180 chars — Windows truncates beyond that anyway, so the test focus must come first.
 
 Tune the inner `Start-Sleep` to your scenario — ~10s for grid/countdown/spawn/early-drive checks; **60+s** for slope/ramp/jump features further into the track (the first ~10s is always grid + countdown).
 
 ### PID ownership — never touch another session's td5re
+
+> **HARD KILL RULE.** Terminate ONLY the PID this session launched — the `$proc` object from `Start-Process -PassThru`, or the PID stored in `${WORKTREE_DIR}/.td5re_test_pid`, and only after confirming its exe `.Path` is under this session's worktree (`*${SESSION_TAG}*`). **Never** `taskkill /IM td5re*`, `taskkill /F /IM`, `Stop-Process -Name td5re`, or "kill all td5re windows" — those reap every parallel `/fix` session's race mid-capture. There is no scenario in `/fix` where a name-based or unscoped kill is correct.
 
 Multiple `/fix` sessions run `td5re.exe` simultaneously. Two operations corrupt sibling sessions when they target the process by **name** or by **"whatever window is up"** instead of the exact PID this session launched:
 
@@ -965,17 +1005,22 @@ Both are now enforced through the PID the launch harness wrote to `${WORKTREE_DI
 - **Visual-verify variant (launch → screenshot → kill).** The auto-close harness above closes the window after its `Start-Sleep`, so to grab a frame you launch **detached** (no auto-close), record the pid, capture by pid, then kill that pid:
   ```bash
   cd "${WORKTREE_DIR}"
+  # Re-declare the test-focus title (separate shell block — same string you authored
+  # for the launch step) so this window's caption also says what to verify.
+  TEST_FOCUS="<same concise what-to-verify string as the launch step>"
+  WIN_TITLE="TD5RE TEST: ${TEST_FOCUS}  [${SESSION_TAG}]"
   TD5RE_WINDOW_TITLE="${WIN_TITLE}" powershell.exe -Command "
     \$proc = Start-Process -FilePath '.\td5re.exe' -PassThru
     Set-Content -Path '.td5re_test_pid' -Value \$proc.Id
     Write-Host \"PID=\$(\$proc.Id)\""
   sleep 12   # let it reach the frame you want
   pwsh "C:/Users/maria/Desktop/Proyectos/TD5RE/tools/capture_window.ps1" -ProcessId "$(cat .td5re_test_pid)" -Out "shot_${SESSION_TAG}.png"
-  powershell.exe -Command "Stop-Process -Id $(cat .td5re_test_pid) -ErrorAction SilentlyContinue"
+  # PID-scoped stop + worktree-path guard so a recycled PID can never hit a sibling.
+  powershell.exe -Command "\$p = Get-Process -Id $(cat .td5re_test_pid) -ErrorAction SilentlyContinue; if (\$p -and \$p.Path -like '*${SESSION_TAG}*') { \$p.Kill() }"
   rm -f .td5re_test_pid
   ```
 
-(For a *user-driven* manual play session that must survive the whole time, copy `td5re.exe`→`manual_drive.exe` and launch that — a name not starting with `td5re` is invisible to any stray name-based kill, per `feedback_fix_parallel_session_hazards_2026-06-02.md`.)
+(For a *user-driven* manual play session that must survive the whole time, copy `td5re.exe`→`manual_drive.exe` and launch that — a name not starting with `td5re` is invisible to any stray name-based kill, per `feedback_fix_parallel_session_hazards_2026-06-02.md`. **Reminder:** if the fix can only be confirmed by the user driving/playing, don't just hand them the exe after the fact — **ask first and wait until they're ready**, per [When the fix needs the user to test](#when-the-fix-needs-the-user-to-test-ask-first).)
 
 ### Runtime asset + toolchain setup (first build inside a fresh worktree)
 
@@ -1201,6 +1246,11 @@ Loop over the trio. For each iteration, `TRACK_N` is the track index and `TRACK_
 BUNDLE_DIR="C:/Users/maria/Desktop/Proyectos/TD5RE/tools/frida_csv/${SESSION_TAG}"
 mkdir -p "${BUNDLE_DIR}"
 
+# Reuse the SAME concise TEST_FOCUS you authored for the single-track launch so
+# every sweep window's title bar still says what to verify. Re-declare it here —
+# this is a separate shell block, so the variable from the launch step is gone.
+TEST_FOCUS="<same concise what-to-verify string as the launch step>"
+
 for entry in "0:moscow" "5:newcastle" "${RANDOM_IDX}:${RANDOM_NAME}"; do
     TRACK_N="${entry%%:*}"
     TRACK_NAME="${entry##*:}"
@@ -1212,13 +1262,17 @@ for entry in "0:moscow" "5:newcastle" "${RANDOM_IDX}:${RANDOM_NAME}"; do
     # RaceTraceSlot=-1, RaceTraceMaxFrames=300 from the baseline config.
     cd "${WORKTREE_DIR}"
     rm -f log/race_trace.csv
-    TD5RE_WINDOW_TITLE="TD5RE [${SESSION_TAG}] ${TRACK_NAME}_track${TRACK_N}" powershell.exe -Command "
+    TD5RE_WINDOW_TITLE="TD5RE TEST: ${TEST_FOCUS} — ${TRACK_NAME} [${SESSION_TAG}]" powershell.exe -Command "
     \$proc = Start-Process -FilePath '.\td5re.exe' -PassThru
     Set-Content -Path '.td5re_test_pid' -Value \$proc.Id   # OUR pid; kill scoped to it, NEVER by name
     Start-Sleep -Seconds 20   # 20s covers countdown + ~14s of race
     \$proc.CloseMainWindow() | Out-Null
     Start-Sleep -Seconds 2
-    if (!\$proc.HasExited) { \$proc.Kill() }
+    # PID-scoped kill + worktree-path guard: only ever terminate THIS session's exe.
+    if (!\$proc.HasExited) {
+        if (\$proc.Path -like '*${SESSION_TAG}*') { \$proc.Kill() }
+        else { Write-Host \"REFUSING cross-session kill of PID=\$(\$proc.Id)\" }
+    }
     Remove-Item '.td5re_test_pid' -ErrorAction SilentlyContinue"
     cp log/race_trace.csv "${BUNDLE_DIR}/fix_track${TRACK_N}_${TRACK_NAME}.csv"
 
@@ -1343,6 +1397,7 @@ Read the log **tail** (last 100-200 lines) to see what happened at runtime. Use 
 - The Ghidra research agent does ALL MCP work. Main context never sees raw decompilation output.
 - Code edits, builds, and test runs happen inside the Step-0 worktree at `${WORKTREE_DIR}` — never in the main tree. The worktree is the unit of isolation between parallel `/fix` sessions.
 - Do NOT merge to master or push until the user explicitly approves (Step 4). Worktrees are meant to coexist and be picked between.
+- Run every self-verifiable check yourself (build, screenshots, CSV sweep, logs). But when confirming the fix genuinely requires the user's hands on the controls (driving/playing feel, real controllers, subjective audio/visual), **ask first and wait until they're ready** — prep `manual_drive.exe`, give a one-line test brief, and don't claim the fix confirmed/shipped on an untested manual gate. See [When the fix needs the user to test](#when-the-fix-needs-the-user-to-test-ask-first).
 - If the research agent can't find the relevant function, ask the user for hints (function name, address, or module) before retrying.
 - If build fails after edits, try fixing compile errors directly (up to 2 attempts), then escalate to user.
 - If the user returns to a session later and `${WORKTREE_DIR}` / `${SESSION_TAG}` are no longer in scope, re-derive them with `git worktree list` and pick the branch matching this session's fix.

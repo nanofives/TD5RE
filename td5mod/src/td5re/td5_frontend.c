@@ -5618,12 +5618,14 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
 
     if (!s_anim_complete) return;
 
-    /* [S05 2026-06-04] MULTIPLAYER header at the top, drawn in the shared menu
-     * font (fe_draw_text_centered — the same path used by every other screen
-     * title and the lobby's MULTIPLAYER label) so it matches the rest of the
-     * menus' format. */
-    fe_draw_text_centered(320.0f * sx, 40.0f * sy, SNK_MultiplayerTitleTxt,
-                          0xFFFFD000, sx, sy);
+    /* [S05 2026-06-04] MULTIPLAYER sub-header, drawn in the shared menu font
+     * (fe_draw_text_centered — the same path used by every other screen title
+     * and the lobby's MULTIPLAYER label) so it matches the rest of the menus'
+     * format. Sits BELOW the shared "OPTIONS" title strip (OptionsText.tga,
+     * native y~17) and ABOVE the first row button (PLAYERS @ y=77) so the two
+     * don't overlap — it reads as "OPTIONS / MULTIPLAYER". */
+    fe_draw_text_centered(320.0f * sx, 60.0f * sy, SNK_MultiplayerTitleTxt,
+                          0xFFFFD000, sx * 0.8f, sy * 0.8f);
 
     if (s_mp_btn_players < 0 || !s_buttons[s_mp_btn_players].active) return;
 
@@ -6038,15 +6040,20 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         frontend_render_car_stats_overlay(sx, sy);
     } else {
         /* Show the paint colour live whenever the panel is open OR a colour has
-         * been confirmed (s_paint_active). The body-only overlay follows the car
-         * in every state — static AND the slide — so the confirm animation shows
-         * the painted car (never a gray flash). s_paint_active is NOT cleared on a
-         * car change (the chosen colour is remembered for all TD6 cars), so during
-         * the slide-OUT (state 11) the OUTGOING car's painted body is drawn — but
-         * ONLY while it has a carpic to ride along with (see the prev-surface gate
-         * below), so a carpic-less TD6 car's body is hidden at the start of the
-         * fade-out instead of left lingering at centre. */
-        int show_paint = (s_color_panel_visible || s_paint_active);
+         * been confirmed (s_paint_active) — but ONLY for a car that is actually
+         * paintable (the CURRENTLY selected one). s_paint_active is deliberately
+         * NOT cleared on a car change (the chosen colour is remembered for all TD6
+         * cars), so WITHOUT the paintable(actual_car) gate the slide-OUT (state 11)
+         * and its lead-in frame (state 10) would paint the OUTGOING TD6 body even
+         * while the INCOMING selection is a TD5 car — the reported "fade-out loads
+         * the latest painted TD6 body when selecting a TD5 car" bug. (TD6 cars DO
+         * ship a carpic, so prev_surface>0 and the body would otherwise slide out
+         * fully painted.) Gating on the current car means the instant the selection
+         * becomes a non-paintable TD5 car the overlay stops drawing: the old car
+         * slides out as its plain (grey) carpic and no TD6 paint bleeds into the
+         * TD5 transition. TD6->TD6 switches still slide out painted. */
+        int show_paint = (s_color_panel_visible || s_paint_active) &&
+                         frontend_car_paintable(actual_car);
         if (s_inner_state == 11) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20.
              * On the very first frame(s) of state 11 the case-11 update that loads
@@ -6060,20 +6067,15 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             int slide_surf = (s_car_preview_prev_surface > 0) ? s_car_preview_prev_surface : s_car_preview_surface;
             if (slide_surf > 0)
             fe_draw_surface_rect(slide_surf, x * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy, 0xFFFFFFFF);
-            /* Keep the OLD car painted while it slides out — but only when it
-             * actually slides. Its overlay surface is still cached for the old
-             * car (s_paint_overlay_car) — it isn't reloaded until the slide-IN
-             * draws the new car — so draw it DIRECTLY (not via the lazy helper,
-             * which would swap in the new car's mask). Gated on:
-             *   - the cached car being paintable, so a stale TD6 overlay never
-             *     lands on a TD5 car sliding out; and
-             *   - s_car_preview_prev_surface > 0, so the body rides along with a
-             *     sliding carpic. A carpic-less (or failed-to-load) TD6 car has
-             *     no surface to slide (x stays pinned at 232 / slide_surf<=0), so
-             *     WITHOUT this gate its tinted body would sit centred for the whole
-             *     fade-out — the "previous TD6 body still visible / bleeding
-             *     through" bug. With the gate it's simply hidden when switching
-             *     to a (paintless) TD5 car. */
+            /* Keep the OLD car painted while it slides out — reached only for a
+             * TD6->TD6 switch (show_paint above already requires the CURRENT car
+             * be paintable, so a TD6->TD5 switch never paints the outgoing body).
+             * The overlay surface is still cached for the old car (s_paint_overlay
+             * _car) — it isn't reloaded until the slide-IN draws the new car — so
+             * draw it DIRECTLY (not via the lazy helper, which would swap in the
+             * new car's mask). Extra gates: cached car paintable (defence in depth
+             * against a stale mask) + prev_surface>0 so the body rides a sliding
+             * carpic rather than sitting pinned at centre. */
             if (show_paint && s_car_preview_prev_surface > 0 &&
                 s_paint_overlay_surface > 0 &&
                 frontend_car_paintable(s_paint_overlay_car))

@@ -2982,34 +2982,46 @@ static int find_free_channel(void)
     int steal = -1;
     uint32_t steal_serial = 0;
 
+    /* Reap finished one-shots up front so they don't linger as "active" voices
+     * and slowly creep the live count toward the cap over a long race (each
+     * collision/hit allocates a one-shot voice that stays allocated until
+     * reclaimed). Loops are intentionally NOT reaped here — they are meant to
+     * keep playing; a momentarily-idle loop is recovered by the per-buffer dedup
+     * in td5_plat_audio_play, not torn down. */
+    for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+        if (s_ds_channels[i] && !s_ds_channel_loop[i]) {
+            DWORD status = 0;
+            IDirectSoundBuffer_GetStatus(s_ds_channels[i], &status);
+            if (!(status & DSBSTATUS_PLAYING)) {
+                audio_release_channel(i);
+            }
+        }
+    }
+
     /* Pass 1: an empty slot. */
     for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
         if (!s_ds_channels[i]) return i;
     }
-    /* Pass 2: a busy-but-finished slot (one-shot that already stopped). */
-    for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
-        DWORD status = 0;
-        IDirectSoundBuffer_GetStatus(s_ds_channels[i], &status);
-        if (!(status & DSBSTATUS_PLAYING)) {
-            audio_release_channel(i);
-            return i;
-        }
-    }
-    /* Pass 3a: steal the oldest still-playing one-shot (lowest serial, loop==0). */
+    /* Pass 2: steal the oldest still-playing ONE-SHOT (lowest serial, loop==0).
+     *
+     * [S11] Looping voices are NEVER reclaimed or stolen here. The mixer keeps
+     * the slot->channel handle of every engine/skid/siren/traffic loop and
+     * modulates it every frame via slot_modify(); if find_free_channel recycled
+     * that channel for another sound, the slot's handle would resolve stale and
+     * slot_modify() would silently no-op — leaving the loop frozen at its last
+     * volume/pitch for the rest of the race (the "engine/skid sound locks into a
+     * constant loop when I drift or get rear-ended" bug: a drift/collision spawns
+     * one-shot hits that used to steal the engine/skid voice's channel). A
+     * momentarily-idle loop (a volume-0 buffer WASAPI parked, a lost buffer) is
+     * NOT torn down — the per-buffer dedup in td5_plat_audio_play restarts it in
+     * place on the next re-issue, keeping its channel and handle stable. The
+     * per-buffer dedup caps loops at ~one per distinct sound (well under 64), so
+     * pinning them never starves one-shots. */
     for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
         if (s_ds_channel_loop[i]) continue;
         if (steal < 0 || s_ds_channel_serial[i] < steal_serial) {
             steal = i;
             steal_serial = s_ds_channel_serial[i];
-        }
-    }
-    /* Pass 3b: no one-shot to steal — steal the newest loop (highest serial). */
-    if (steal < 0) {
-        for (i = 0; i < MAX_AUDIO_CHANNELS; i++) {
-            if (steal < 0 || s_ds_channel_serial[i] > steal_serial) {
-                steal = i;
-                steal_serial = s_ds_channel_serial[i];
-            }
         }
     }
     if (steal >= 0) {
@@ -3092,6 +3104,50 @@ TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop,
     src_buf = s_ds_buffers[buffer_index];
     if (!src_buf) { s_audio_fail_count++; return TD5_AUDIO_INVALID_CHANNEL; }
 
+    /* [S11] One looping voice per source buffer.
+     *
+     * The original M2DX kept a fixed buffer per sound and re-Played THAT buffer;
+     * it never allocated a voice per Play(). The port instead DuplicateSoundBuffer's
+     * a fresh voice every Play and only tracks the latest in the caller's
+     * slot->channel table — so when the per-frame mixer re-issues a loop start
+     * (which it does whenever GetStatus transiently reports the looping buffer
+     * idle: a volume-0 buffer WASAPI parked, a lost buffer, a stolen voice), each
+     * re-issue stranded the previous voice. With >6 racers those orphans piled up
+     * ~2/frame until all 64 voices were copies of one engine loop, droning over
+     * everything — the "overload / stuck on one sound" the user hit. Slot-level
+     * stop-before-replay couldn't catch it (the slot's stored handle had already
+     * gone stale). Deduping at the source buffer is reliable: a looping buffer
+     * gets exactly ONE voice. A re-issue finds that voice and reuses it —
+     * reapplying volume/pan/freq and restarting it only if it actually stopped
+     * (which also recovers a lost buffer) — so nothing accumulates and an already-
+     * playing loop is not even interrupted (no per-frame restart click). */
+    if (loop) {
+        for (ch = 0; ch < MAX_AUDIO_CHANNELS; ch++) {
+            LPDIRECTSOUNDBUFFER ex = s_ds_channels[ch];
+            DWORD status;
+            if (!ex || !s_ds_channel_loop[ch] || s_ds_channel_buf[ch] != buffer_index)
+                continue;
+            status = 0;
+            IDirectSoundBuffer_GetStatus(ex, &status);
+            if (status & DSBSTATUS_BUFFERLOST) {
+                IDirectSoundBuffer_Restore(ex);
+                status = 0;
+                IDirectSoundBuffer_GetStatus(ex, &status);
+            }
+            {
+                int effective_vol = s_audio_muted ? 0 : (volume * s_master_volume) / 100;
+                IDirectSoundBuffer_SetVolume(ex, vol_to_ds(effective_vol));
+            }
+            IDirectSoundBuffer_SetPan(ex, pan_to_ds(pan));
+            if (frequency > 0)
+                IDirectSoundBuffer_SetFrequency(ex, td5_audio_translate_frequency(buffer_index, frequency));
+            if (!(status & DSBSTATUS_PLAYING))
+                IDirectSoundBuffer_Play(ex, 0, 0, DSBPLAY_LOOPING);
+            s_ds_channel_serial[ch] = ++s_audio_alloc_serial; /* refresh recency vs steal */
+            return (TD5_AudioChannel)(((int)s_ds_channel_gen[ch] << AUDIO_CHANNEL_INDEX_BITS) | ch);
+        }
+    }
+
     ch = find_free_channel();
     if (ch < 0) { s_audio_fail_count++; return TD5_AUDIO_INVALID_CHANNEL; }
 
@@ -3162,6 +3218,16 @@ int td5_plat_audio_is_playing(TD5_AudioChannel ch)
     if (idx < 0) return 0;
     IDirectSoundBuffer_GetStatus(s_ds_channels[idx], &status);
     return (status & DSBSTATUS_PLAYING) ? 1 : 0;
+}
+
+/* Does this handle still name a live voice this slot owns? Unlike is_playing,
+ * this ignores DirectSound's transient PLAYING bit — a looping voice that was
+ * momentarily parked (volume 0) or lost still counts as owned. Used so the mixer
+ * doesn't tear down/re-trigger a loop it is still modulating just because the
+ * backend briefly reported it idle. Returns 0 for a stale/released handle. */
+int td5_plat_audio_channel_valid(TD5_AudioChannel ch)
+{
+    return audio_resolve_channel(ch) >= 0 ? 1 : 0;
 }
 
 /* Release every active SFX voice (NOT the primary or silent-keepalive buffers).
