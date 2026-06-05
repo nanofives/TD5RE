@@ -1844,10 +1844,17 @@ static void frontend_load_selected_car_preview(void) {
      * car-select ENTRY (incl. returning from a race) the car index is unchanged,
      * so the lazy per-car load wouldn't refresh it — and a race may have reused
      * its texture page (it would otherwise paint the WHOLE body from stale
-     * content). Only the cache index is reset here; the release + fresh reload
-     * happens in frontend_draw_car_paint_overlay so we never release a handle
-     * that could collide with the just-reloaded preview surface. */
+     * content). DROP the handle too (set to 0) — do NOT frontend_release_surface()
+     * it: the old overlay slot was already freed by td5_frontend_set_screen's
+     * recyclable sweep, and the preview we just loaded may now occupy that very
+     * slot. Releasing the stale handle would free the fresh preview; uploading
+     * CarPicPaint0 onto it then showed only the painted chassis. Zeroing the
+     * handle leaks nothing (slot already free) and guarantees the lazy reload in
+     * frontend_draw_car_paint_overlay takes the clean "no prior surface" path. */
+    s_paint_overlay_surface = 0;
     s_paint_overlay_car = -1;
+    TD5_LOG_I(LOG_TAG, "car preview (re)loaded: car=%d surf=%d; paint overlay cache invalidated",
+              car_index, s_car_preview_surface);
 }
 
 static void frontend_load_selected_track_preview(void) {
@@ -4455,6 +4462,21 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_car_preview_surface = 0;
     s_car_preview_prev_surface = 0;
     s_car_preview_next_surface = 0;
+    /* Reset the TD6 body-paint overlay cache in LOCKSTEP with the preview
+     * surface. The recyclable-surface sweep below frees every non-shared slot
+     * (in_use=0), INCLUDING whatever slot the paint overlay was on — but the
+     * handle/cache-key here used to survive the screen change. That stale
+     * s_paint_overlay_surface handle then aliased a freshly-loaded preview slot
+     * on the next car-select entry: the lazy reload in
+     * frontend_draw_car_paint_overlay would frontend_release_surface() the alias
+     * (freeing the new preview) and upload CarPicPaint0 (chassis-only) onto the
+     * preview's page — so only the painted chassis of the last TD6 car showed,
+     * and reselect then bled paint onto the whole body. Dropping both the handle
+     * and the cached car index here keeps the overlay cache consistent with the
+     * preview, so no alias can form. (TD6-only: TD5 cars never load an overlay.)
+     * NO RE BASIS — the TD6 colour-overlay preview is a port-only feature. */
+    s_paint_overlay_surface = 0;
+    s_paint_overlay_car = -1;
     s_track_preview_surface = 0;
     s_gallery_pic_surface = 0;
     s_gallery_pic_index = 0;
