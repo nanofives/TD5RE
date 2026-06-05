@@ -5165,17 +5165,30 @@ void td5_ai_init_traffic_actors(void) {
             remapped_int = td5_track_apply_target_span_remap((int)queue_span, 0);
 
             if (remapped_int == (int)queue_span) {
-                /* No remap occurred — treat as miss per original (sentinel). */
-                remapped_span = (int16_t)-1;
-                /* [DIAG fix-1780404735 upstream-remap] capture WHY this branch
-                 * entry missed the junction remap so we can compare vs the
-                 * original: the resulting span=-1 placement strands the car at
-                 * the world origin (stuck-traffic root cause). */
+                /* Junction-remap MISS. This fires on the 2nd (down-track) traffic
+                 * fill when a queue record asks for a BRANCH lane
+                 * (sub_lane >= lane_count) off a span that has no matching
+                 * junction-remap entry on this track. The original sets a -1
+                 * sentinel and then indexes strip[-1] (garbage); the port's
+                 * range-guarded placement zeroed that to the world ORIGIN,
+                 * stranding a visible, immovable traffic car off-track
+                 * (user-reported "traffic standing still" / dead car at spawn).
+                 *
+                 * [SOURCE-PORT FIX S20 2026-06-05] Instead of stranding it, fall
+                 * back to a NORMAL main-road placement at the queued span on the
+                 * canonical (LEFT) route, so the car spawns on-track and cruises
+                 * like the rest. Selector + route ptr are set to canonical so the
+                 * Stage-2 heading check stays aligned (a branch-route car on the
+                 * main road would otherwise trip the recovery brake). Strictly
+                 * better than the origin-strand; only changes the miss case. */
+                remapped_span = (int16_t)queue_span;
+                rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+                if (g_route_tables[0])
+                    rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[0];
                 TD5_LOG_I(LOG_TAG,
                           "init_remap_MISS: slot=%d queue_span=%d sub_lane=%d "
-                          "lane_count=%d (sub_lane>=lane_count -> REMAP path) span_count=%d",
-                          local_18, (int)queue_span, (int)queue_byte3,
-                          lane_count, td5_track_get_span_count());
+                          "lane_count=%d -> main-road fallback (was origin-strand)",
+                          local_18, (int)queue_span, (int)queue_byte3, lane_count);
             } else {
                 remapped_span = (int16_t)remapped_int;
             }
