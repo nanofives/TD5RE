@@ -1227,6 +1227,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             uint32_t t1 = td5_plat_time_ms();
             uint32_t dt = t1 - t0;
 
+            /* [S12] The frontend drains+consumes the WM_KEYDOWN nav latch every
+             * menu frame. While NOT in the menu (intro/race/benchmark) nothing
+             * consumes it, so arrow-steering during a race would leave sticky
+             * bits that fire a spurious cursor move / confirm on the next return
+             * to the frontend. Discard it here whenever state != MENU so the
+             * latch only ever holds presses from the current menu frame. */
+            if (g_td5.game_state != 1 /* MENU */)
+                td5_plat_input_nav_latch();
+
             /* 1-second window: track min/avg/max of full td5re_frame() ms.
              * Logs once per real second so we can name the hot phase without
              * flooding. Tag "main" routes to log/engine.log. */

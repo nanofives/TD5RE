@@ -376,6 +376,16 @@ static volatile unsigned char s_char_queue[TD5_CHAR_QUEUE_SIZE];
 static volatile int s_char_q_head;   /* producer (window proc) */
 static volatile int s_char_q_tail;   /* consumer (frontend)    */
 
+/* WM_KEYDOWN navigation-key latch. Same robustness model as the WM_CHAR queue
+ * above: Windows posts a WM_KEYDOWN for every genuine key press, so an arrow /
+ * Enter tap that lands between two slow frames is never dropped the way the
+ * once-per-frame DirectInput immediate read can drop it. Auto-repeat is filtered
+ * (lParam bit 30) so a held key still moves the cursor only once. The old
+ * GetAsyncKeyState '&1' approach was rejected for a poll-contention bug (other
+ * GetAsyncKeyState callers consumed the "pressed since last call" bit first —
+ * see td5_frontend.c); WM_KEYDOWN has no such contention. */
+static volatile unsigned s_navkey_latch = 0;
+
 static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -427,6 +437,21 @@ static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONDOWN: s_mouse_click_latch |= 1; break;
     case WM_RBUTTONDOWN: s_mouse_click_latch |= 2; break;
     case WM_MBUTTONDOWN: s_mouse_click_latch |= 4; break;
+    /* Latch genuine nav-key presses (auto-repeat filtered via lParam bit 30) so
+     * menu navigation is never dropped at high MS. Falls through to the default
+     * proc below so WM_CHAR is still produced for text-entry screens. */
+    case WM_KEYDOWN:
+        if (!(lParam & (1L << 30))) {
+            switch (wParam) {
+            case VK_LEFT:   s_navkey_latch |= TD5_NAVKEY_LEFT;  break;
+            case VK_RIGHT:  s_navkey_latch |= TD5_NAVKEY_RIGHT; break;
+            case VK_UP:     s_navkey_latch |= TD5_NAVKEY_UP;    break;
+            case VK_DOWN:   s_navkey_latch |= TD5_NAVKEY_DOWN;  break;
+            case VK_RETURN: s_navkey_latch |= TD5_NAVKEY_ENTER; break;
+            default: break;
+            }
+        }
+        break;
     }
     if (s_original_wndproc)
         return CallWindowProcA(s_original_wndproc, hwnd, msg, wParam, lParam);
@@ -1724,6 +1749,16 @@ int td5_plat_input_get_char(void)
 void td5_plat_input_flush_chars(void)
 {
     s_char_q_tail = s_char_q_head;
+}
+
+/* Drain the WM_KEYDOWN nav-key latch (read-and-clear). Frame-rate independent,
+ * so a cursor/Enter tap captured by the window proc between two slow frames is
+ * never dropped. Returns OR'd TD5_NAVKEY_* bits. */
+unsigned td5_plat_input_nav_latch(void)
+{
+    unsigned v = s_navkey_latch;
+    s_navkey_latch = 0;
+    return v;
 }
 
 /* Joystick enumeration callback */
