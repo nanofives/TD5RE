@@ -4670,7 +4670,16 @@ static int32_t v2v_depenetrate_pair(TD5_Actor *a, TD5_Actor *b)
         if (m > depth) depth = m;
     }
     if (depth <= 0) return 0;         /* exactly touching, nothing to clear */
-    if (depth > ANTITUNNEL_MAX_DEPTH) depth = ANTITUNNEL_MAX_DEPTH;
+
+    /* Playability slop: the collision OBB is slightly larger than the visible
+     * car mesh, so depenetrating to ZERO OBB overlap parks the cars with a
+     * visible gap (~the combined box-vs-mesh margin). Allow anti_tunnel_slop
+     * units of OBB overlap to remain so the cars settle at ~mesh contact, and
+     * push only the excess. The faithful impulse/bounce path is untouched --
+     * only the resting separation changes. */
+    int32_t push_depth = depth - g_td5.ini.anti_tunnel_slop;
+    if (push_depth <= 0) return 0;    /* within the allowed slop -> leave it */
+    if (push_depth > ANTITUNNEL_MAX_DEPTH) push_depth = ANTITUNNEL_MAX_DEPTH;
 
     /* World line of centres (display units), pointing A away from B. */
     int32_t dx = (a->world_pos.x - b->world_pos.x) >> 8;
@@ -4688,11 +4697,11 @@ static int32_t v2v_depenetrate_pair(TD5_Actor *a, TD5_Actor *b)
         nz = (dz << 12) / len;
     }
 
-    /* Split the separation 50/50: each car moves half of (depth + 2) display
-     * units along the unit normal, converted to 24.8 world position units
-     * ((unit/4096) * half * 256 == (unit * half) >> 4). The +2 guard clears
-     * the contact by a couple of units so the next test reports separated. */
-    int32_t half = (depth + 2) >> 1;
+    /* Split the separation 50/50: each car moves half of (push_depth + 2)
+     * display units along the unit normal, converted to 24.8 world position
+     * units ((unit/4096) * half * 256 == (unit * half) >> 4). The +2 guard
+     * clears the slop boundary by a couple of units so the next test settles. */
+    int32_t half = (push_depth + 2) >> 1;
     int32_t mv_x = (nx * half) >> 4;
     int32_t mv_z = (nz * half) >> 4;
 

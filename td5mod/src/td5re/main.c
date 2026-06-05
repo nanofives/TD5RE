@@ -323,6 +323,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "AutoGearbox",          &g_td5.ini.auto_gearbox },
         { "RearImpactResponse",   &g_td5.ini.rear_impact_response },
         { "AntiTunnel",           &g_td5.ini.anti_tunnel },
+        { "AntiTunnelSlop",       &g_td5.ini.anti_tunnel_slop },
         { "CatchupAssist",        &g_td5.ini.catchup_assist },
         { "AIAccelFromCar",       &g_td5.ini.ai_accel_from_car },
         { "Player1Joystick",      &g_td5.ini.player1_joystick },
@@ -651,6 +652,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.anti_tunnel = td5_ini_int("GameOptions", "AntiTunnel", 1);
     if (g_td5.ini.anti_tunnel < 0) g_td5.ini.anti_tunnel = 0;
     if (g_td5.ini.anti_tunnel > 1) g_td5.ini.anti_tunnel = 1;
+    /* Collision-box overlap allowance so cars rest at visible-mesh contact
+     * rather than the inflated collision box (~3 display units ~= 1 cm). */
+    g_td5.ini.anti_tunnel_slop = td5_ini_int("GameOptions", "AntiTunnelSlop", 40);
+    if (g_td5.ini.anti_tunnel_slop < 0)   g_td5.ini.anti_tunnel_slop = 0;
+    if (g_td5.ini.anti_tunnel_slop > 256) g_td5.ini.anti_tunnel_slop = 256;
     /* CATCHUP / rubber-band assist override (S06). -1 = use the persisted value
      * (S05 toggle); 0 = off; 1..9 = on. See ai_catchup_level() in td5_ai.c. */
     g_td5.ini.catchup_assist = td5_ini_int("GameOptions", "CatchupAssist", -1);
