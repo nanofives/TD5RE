@@ -2420,17 +2420,44 @@ void td5_render_actors_for_view(int view_index)
         int n_entries   = eff_spans;
 
         /* TD6 track migration: the windowed `entry = span>>2` walk assumes TD5's
-         * ~4-spans-per-entry MODELS.DAT layout. TD6 levels have a different entry
-         * density (e.g. 113 chunk-entries for 517 spans), so the span>>2 window
-         * drifts off the player and leaves near track sections unrendered
-         * (collision present, geometry missing). For an OverrideTrackZip'd track,
-         * render EVERY display-list entry each frame and let the per-mesh frustum
-         * cull (td5_render_test_mesh_frustum) + the dedup set handle visibility.
-         * Gated on the override knob, so faithful tracks keep the exact window. */
-        int ring_entries_all = (ring > 0) ? ((ring + 3) >> 2) : 0;
-        if (g_active_td6_level > 0 && ring_entries_all > 0) {
-            start_entry = 0;
-            n_entries   = ring_entries_all;
+         * ~4-spans-per-entry MODELS.DAT layout. TD6 levels have a DIFFERENT and
+         * VARIABLE entry density (e.g. ~113 chunk-entries for ~517 spans), so the
+         * span>>2 window indexes the wrong entries and drifts off the player.
+         *
+         * [S22 fix #3: TD6 high frame-ms] Previously we worked around the drift
+         * by rendering EVERY display-list entry each frame (~113-129 entries,
+         * ~214 meshes) and leaning entirely on the per-mesh frustum cull. That is
+         * correct but expensive: with no spatial windowing, TD6 tracks paid a
+         * much higher per-frame render cost than TD5 tracks (every entry's meshes
+         * sphere-tested every frame). Instead, map the SAME spatial span window
+         * the TD5 walk uses ([eff_player - cull_window, eff_player + cull_window]
+         * = ±2*eff_spans spans around the player) onto the TD6 display-list
+         * PROPORTIONALLY using the real entry count, so the window tracks the
+         * player without assuming a fixed spans-per-entry. The per-mesh frustum
+         * cull (td5_render_test_mesh_frustum) + dedup set still gate fine
+         * visibility; this just bounds how many entries are walked + sphere-tested
+         * per frame, dropping TD6 dispatch toward what TD5 tracks pay. Gated on
+         * the override knob, so faithful tracks keep the exact span>>2 window. */
+        int td6_entries = (g_active_td6_level > 0)
+                          ? td5_track_get_models_display_list_count() : 0;
+        if (g_active_td6_level > 0 && td6_entries > 0 && ring > 0) {
+            int span_lo = eff_player - cull_window;   /* = eff_player - 2*eff_spans */
+            int span_hi = eff_player + cull_window;   /* = eff_player + 2*eff_spans */
+            /* Proportional span->entry map; floor low / ceil high so the window
+             * never under-covers a partially-visible boundary entry. 64-bit
+             * intermediates so long tracks can't overflow the multiply. C integer
+             * division truncates toward zero for the (rare) negative span_lo near
+             * the track start; the per-iteration clamp/wrap below absorbs the
+             * <=1-entry difference vs a true floor. */
+            long long re = (long long)td6_entries;
+            int lo = (int)((span_lo * re) / ring);
+            int hi = (int)(((span_hi * re) + (ring - 1)) / ring);   /* ceil */
+            if (hi <= lo) hi = lo + 1;
+            start_entry = lo;
+            n_entries   = hi - lo;
+            /* Never walk more than the whole table (worst case == old render-all,
+             * never worse) — guards a pathological cull_window vs short track. */
+            if (n_entries > td6_entries) n_entries = td6_entries;
         }
         /* Change-gated (not per-frame) so the render dispatch isn't spammed. */
         {
@@ -2445,7 +2472,13 @@ void td5_render_actors_for_view(int view_index)
             }
         }
 
-        int ring_entries = (ring > 0) ? ((ring + 3) >> 2) : 0;
+        /* [S22 fix #3] TD6 wrap (circuit) / clamp (P2P) must use the REAL TD6
+         * display-list length, not the TD5 span>>2 estimate (which over-counts
+         * for TD6's variable entry density and would wrap/clamp at the wrong
+         * boundary). Faithful tracks keep (ring+3)>>2. */
+        int ring_entries = (g_active_td6_level > 0 && td6_entries > 0)
+                           ? td6_entries
+                           : ((ring > 0) ? ((ring + 3) >> 2) : 0);
         int is_circuit   = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 1 : 0;
 
         /* [FIX 2026-05-25 munich-gantry-double-submit] Per-frame display-list

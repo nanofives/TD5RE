@@ -3827,7 +3827,21 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->min_filter   = 2;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
         s->alpha_test_enable = 1;
-        s->alpha_ref         = 1;
+        /* [S22 fix #1: tree/sprite black-border fringe] This is the type-2
+         * alpha-blended billboard preset (trees, fences, foliage, signs). The
+         * world indexed draw path (td5_plat_render_draw_tris) samples these
+         * 1-bit-alpha (A1R5G5B5) cutout pages with BILINEAR (mag_filter=2), so
+         * the edge taps between an opaque tree texel and a transparent BLACK
+         * border texel produce intermediate alphas in (0,255) with darkened
+         * RGB — the visible "black line" around tree borders. alpha_ref was 1
+         * (discard only alpha<1/255), which let every fringe tap survive.
+         * Raise to 0x80, exactly as TD5_PRESET_TRANSLUCENT_LINEAR already does
+         * ("Discarding < 128 prunes the dark/black fringes around transparent
+         * pixels"): the sub-50%-alpha fringe taps are alpha-tested away while
+         * genuine type-2 semi-transparent surfaces sit at exactly 0x80 and the
+         * strict `< alphaRef` test (ps_common.hlsli) keeps them. Solid opaque
+         * geometry is alpha=255 throughout and is unaffected. */
+        s->alpha_ref         = 0x80;
         break;
 
     case TD5_PRESET_OPAQUE_LINEAR:
