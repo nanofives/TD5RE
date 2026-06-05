@@ -24,6 +24,7 @@
 #include "td5_snk_strings.h"   /* byte-exact SNK_ labels baked from Language.dll */
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
 #include "td5_vectorui.h"      /* public VectorUI surface (HUD reuses these primitives) */
+#include "td5_font.h"          /* [S13] runtime TTF glyph cache (native menu text) */
 #include "../../ddraw_wrapper/src/wrapper.h"
 #include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes.h"       /* g_ps_msdf bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes.h"  /* g_ps_roundrect bytecode */
@@ -863,14 +864,14 @@ static uint8_t s_font_glyph_advance[96];
  * No RE basis for the swap itself: it is a data/asset change, not a behavioural
  * port (the original ran at a fixed 4:3 resolution with this one font). */
 static const uint8_t k_font_glyph_advance_default[96] = {
-    8,  8, 10, 14, 14, 24, 21,  9,  8,  9, 10, 14,
-    7, 12,  7, 13, 16, 11, 14, 15, 15, 14, 15, 14,
-   15, 15,  8,  8, 12, 13, 11, 14, 18, 19, 16, 18,
-   17, 13, 13, 18, 16,  8, 15, 17, 13, 22, 17, 19,
-   16, 19, 16, 15, 15, 17, 18, 24, 18, 17, 14,  9,
-   13,  9, 12, 15,  9, 14, 15, 15, 15, 15, 11, 15,
-   15,  8,  9, 15,  8, 21, 15, 15, 15, 15, 11, 13,
-   11, 15, 16, 20, 16, 15, 13,  9,  6, 10, 16,  8,
+    8,  9,  9, 13, 13, 24, 20,  8,  7,  8,  9, 13,
+    9, 13,  9, 12, 18, 12, 16, 16, 17, 16, 17, 15,
+   17, 17,  9,  9, 11, 12, 10, 15, 17, 20, 18, 20,
+   19, 15, 15, 20, 18, 10, 16, 18, 15, 24, 19, 21,
+   17, 21, 18, 17, 17, 18, 20, 24, 19, 18, 16,  8,
+   12,  8, 11, 14,  8, 16, 17, 17, 17, 17, 13, 17,
+   16,  9, 10, 17,  9, 23, 16, 17, 17, 17, 13, 15,
+   13, 16, 17, 22, 16, 17, 15,  8,  5,  9, 15,  8,
 };
 
 /* [S13 4:3-LOCKED GLYPH SCALE 2026-06-05] Horizontal glyph scale that keeps the
@@ -890,7 +891,16 @@ static inline float fe_glyph_sx(float sx, float sy) { return sx < sy ? sx : sy; 
  * DAT_0049626c. */
 #define FONT_COLS 10
 #define FONT_CELL 24
-#define FONT_GLYPH_PADDING 2
+#define FONT_GLYPH_PADDING 1   /* [S13] inter-glyph gap (px) added after each glyph's
+                                * rightmost ink; 1 = tight tracking for MontBlanc Black
+                                * (was 2). Glyphs render with 0 left bearing, so the
+                                * on-screen gap is exactly this value. */
+#define FONT_GLYPH_TRACKING (0)  /* [S13] extra letter-tracking (px, 24-unit) applied to
+                                * the CURSOR STEP only (glyph_w stays full, so nothing is
+                                * cropped). Negative = tighter, positive = looser. 0 = the
+                                * font's natural advances (user walked the spacing back from
+                                * an earlier tight -2). Applied in fe_draw_text + the measure
+                                * helpers so centering stays consistent. */
 #define FONT_TEX_W (FONT_COLS * FONT_CELL)  /* 240 */
 #define FONT_TEX_H 552  /* actual BodyText.tga height: 23 rows of 24px */
 
@@ -2522,13 +2532,22 @@ static float fe_measure_text(const char *text, float sx, float sy) {
 
     if (!text) return 0.0f;
 
+    if (td5_font_ready()) {            /* native TTF: real advances + tracking (matches fe_draw_text) */
+        const float cap_px = 15.0f * sy;
+        const float hscale = (sx < sy) ? (sx / sy) : 1.0f;
+        const float trkn   = (float)FONT_GLYPH_TRACKING * sy * hscale;
+        for (int i = 0; text[i]; i++)
+            width += td5_font_advance(toupper((unsigned char)text[i]), cap_px) * hscale + trkn;
+        return width;
+    }
+
     for (int i = 0; text[i]; i++) {
         int c = toupper((unsigned char)text[i]);
         if (c < 32 || c > 127) {
-            width += 14.0f * gsx;
+            width += (14.0f + FONT_GLYPH_TRACKING) * gsx;
             continue;
         }
-        width += (float)s_font_glyph_advance[c - 0x20] * gsx;
+        width += ((float)s_font_glyph_advance[c - 0x20] + FONT_GLYPH_TRACKING) * gsx;
     }
 
     return width;
@@ -7531,10 +7550,18 @@ static float fe_measure_text_width(const char *text, float sx, float sy) {
     float w = 0.0f;
     float gsx = fe_glyph_sx(sx, sy);   /* 4:3-locked glyph width (see fe_glyph_sx) */
     if (!text) return 0.0f;
+    if (td5_font_ready()) {            /* native TTF: real advances + tracking (matches fe_draw_text) */
+        const float cap_px = 15.0f * sy;
+        const float hscale = (sx < sy) ? (sx / sy) : 1.0f;
+        const float trkn   = (float)FONT_GLYPH_TRACKING * sy * hscale;
+        for (int i = 0; text[i]; i++)
+            w += td5_font_advance(toupper((unsigned char)text[i]), cap_px) * hscale + trkn;
+        return w;
+    }
     for (int i = 0; text[i]; i++) {
         int c = toupper((unsigned char)text[i]);
-        if (c < 32 || c > 127) { w += 14.0f * gsx; continue; }
-        w += (float)s_font_glyph_advance[c - 0x20] * gsx;
+        if (c < 32 || c > 127) { w += (14.0f + FONT_GLYPH_TRACKING) * gsx; continue; }
+        w += ((float)s_font_glyph_advance[c - 0x20] + FONT_GLYPH_TRACKING) * gsx;
     }
     return w;
 }
@@ -7552,7 +7579,39 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
     /* Font atlas: BodyText.tga (or GDI fallback), 10 chars/row, 24x24 cells.
      * Layout: col = (ascii - 0x20) % 10, row = (ascii - 0x20) / 10.
      * Source rect: (col*24, row*24, 24, 24). From Ghidra FUN_00424560. */
-    if (s_font_page < 0 || !text) return;
+    if (!text) return;
+
+    /* [S13] Native TTF path: rasterise the menu font straight from its outlines
+     * at the on-screen pixel size (crisp at any resolution, real metrics). Caps
+     * are placed at the same 24px-cell rows (8..23) the bitmap path used, so the
+     * button-centred layout carries over; the 4:3 lock condenses horizontally
+     * only when the window is narrower than 4:3 (glyphs stay square otherwise).
+     * Falls through to the MSDF/bitmap atlas below when no TTF is available. */
+    if (td5_font_ready()) {
+        const float cap_px   = 15.0f * sy;             /* caps 15px tall (design rows 8..23) */
+        const float baseline = y + 23.0f * sy;         /* design baseline = cell row 23 */
+        const float hscale   = (sx < sy) ? (sx / sy) : 1.0f;
+        const float trkn     = (float)FONT_GLYPH_TRACKING * sy * hscale;
+        for (int i = 0; text[i]; i++) {                /* pass 1: rasterise into the atlas */
+            int c = s_fe_preserve_case ? (unsigned char)text[i] : toupper((unsigned char)text[i]);
+            td5_glyph g; td5_font_get(c, cap_px, &g);
+        }
+        td5_font_flush_uploads();                      /* one GPU upload for any new glyphs */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        float ncx = x;
+        for (int i = 0; text[i]; i++) {                /* pass 2: draw (cache hits) */
+            int c = s_fe_preserve_case ? (unsigned char)text[i] : toupper((unsigned char)text[i]);
+            td5_glyph g; td5_font_get(c, cap_px, &g);
+            if (g.valid && g.w > 0.0f)
+                fe_draw_quad(ncx + g.xoff * hscale, baseline + g.yoff,
+                             g.w * hscale, g.h, color, g.page, g.u0, g.v0, g.u1, g.v1);
+            ncx += g.advance * hscale + trkn;
+        }
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        return;
+    }
+    if (s_font_page < 0) return;
+
     /* Resolution-independent MSDF path: same grid/UV/metrics, swapped page +
      * shader. Falls back to the bitmap atlas when VectorUI is off or the MSDF
      * assets failed to load. */
@@ -7562,6 +7621,7 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
     float texel_w = 1.0f / (float)FONT_TEX_W;
     float cell_h = (float)FONT_CELL * sy;
     float gsx = fe_glyph_sx(sx, sy);   /* 4:3-locked horizontal glyph scale; cell_h keeps sy */
+    float trk = (float)FONT_GLYPH_TRACKING * gsx;  /* extra cursor tracking (negative = tighter) */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     if (msdf) td5_plat_render_set_ps_override((void *)s_ps_msdf, SAMP_LINEAR_CLAMP);
     for (int i = 0; text[i]; i++) {
@@ -7570,11 +7630,11 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
         float glyph_advance_px;
         float glyph_advance;
         float glyph_w;
-        if (c < 32 || c > 127) { cx += 14.0f * gsx; continue; }
+        if (c < 32 || c > 127) { cx += 14.0f * gsx + trk; continue; }
         glyph_index = c - 0x20;
         glyph_advance_px = (float)s_font_glyph_advance[glyph_index];
         glyph_advance = glyph_advance_px * gsx;
-        if (c == ' ') { cx += glyph_advance; continue; }
+        if (c == ' ') { cx += glyph_advance + trk; continue; }
         int col = glyph_index % FONT_COLS;
         int row = glyph_index / FONT_COLS;
         float u0 = (float)(col * FONT_CELL) / (float)FONT_TEX_W;
@@ -7583,7 +7643,7 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
         float v1 = (float)((row + 1) * FONT_CELL) / (float)FONT_TEX_H;
         glyph_w = glyph_advance_px * gsx;
         fe_draw_quad(cx, y, glyph_w, cell_h, color, page, u0, v0, u1, v1);
-        cx += glyph_advance;
+        cx += glyph_advance + trk;
     }
     if (msdf) td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
