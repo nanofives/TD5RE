@@ -259,6 +259,25 @@ typedef struct TD5_GlobalState {
          * shove is left faithful so the hit still reads as a real bump.
          * Clamped to [0,100] at parse. */
         int  rear_impact_response;
+        /* AntiTunnel (port-only anti-interpenetration knob, S17 2026-06-05):
+         * 1 (default) = run the position-only car-vs-car depenetration
+         * relaxation pass after the faithful impulse resolution, so a
+         * high-speed pair cannot visibly pass THROUGH each other for a frame.
+         * 0 = byte-faithful (original 0x004079C0 single fixed-step push only,
+         * which can leave a deep/fast overlap interpenetrated for >=1 frame).
+         * The pass moves ONLY world position — velocities and yaw spin are
+         * never touched, so the S08 RearImpactResponse / impact tuning is
+         * unaffected. Clamped to {0,1} at parse. */
+        int  anti_tunnel;
+        /* AntiTunnelSlop (port-only, S17 2026-06-05): how many display units of
+         * collision-OBB overlap the depenetration pass is allowed to LEAVE
+         * before pushing cars apart. The original collision box is slightly
+         * larger than the visible car mesh, so depenetrating to zero OBB
+         * overlap parks cars with a visible gap (~combined box-vs-mesh margin).
+         * Allowing this much OBB overlap lets cars rest at ~visible-mesh
+         * contact. ~3 display units ~= 1 cm. Only the resting position changes;
+         * the faithful impulse/bounce timing is untouched. Clamped [0,256]. */
+        int  anti_tunnel_slop;
         /* CatchupAssist (S06 2026-06-04): td5re.ini override for the persisted
          * CATCHUP / rubber-band assist level. -1 (default) = use the persisted
          * value (S05 toggle, default 1 = on/softened). 0 = catchup off; 1..9 =

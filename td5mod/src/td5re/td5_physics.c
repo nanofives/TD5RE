@@ -249,6 +249,20 @@ static int32_t g_actor_aabb[TD5_MAX_TOTAL_ACTORS][5];
 #define COLLISION_MAX_WALK      TD5_MAX_TOTAL_ACTORS
 static uint8_t s_collision_grid[COLLISION_GRID_SIZE];
 
+/* --- Anti-tunnel car-vs-car depenetration (S17 2026-06-05) ---
+ * Number of outer relaxation rounds the position-only separation pass runs
+ * per frame. Each round pushes every still-overlapping pair fully apart along
+ * the line of centres; extra rounds let multi-car packs (A shoved into C while
+ * separating from B) settle. This is Gauss-Seidel relaxation of separation
+ * constraints, so a dense N-car pile-up needs several sweeps to converge --
+ * 24 fully clears even a 12-racer heap in one frame. The loop breaks as soon
+ * as no pair moves, so the common 1-2 contact case still costs only 1-2 rounds. */
+#define ANTITUNNEL_RELAX_ROUNDS  24
+/* Clamp on the per-call separation magnitude (display units). Bounds the move
+ * for a pathological deep overlap so the reposition can't teleport a car;
+ * normal car overlaps are well under this, so they separate in one round. */
+#define ANTITUNNEL_MAX_DEPTH     256
+
 /* OBB_CornerData defined near top of file with forward declarations */
 static uint8_t s_default_tuning[TD5_MAX_TOTAL_ACTORS][0x80];
 static uint8_t s_default_cardef[TD5_MAX_TOTAL_ACTORS][0x90];
@@ -4599,6 +4613,104 @@ void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b)
 }
 
 /* ========================================================================
+ * Anti-tunnel car-vs-car depenetration (S17 2026-06-05) -- PORT-ONLY
+ *
+ * The original v2v resolution (ApplyVehicleCollisionImpulse @ 0x004079C0)
+ * applies a single FIXED half-cos/sin positional push -- NOT proportional to
+ * how deeply the cars overlap -- and runs once per frame with no relaxation
+ * loop. A high-speed / deep collision therefore stays visibly interpenetrated
+ * for one or more frames before the impulse plus repeated small fixed pushes
+ * finally separate the cars. That is the user-visible "at the moment of
+ * crashing I can briefly go THROUGH cars".
+ *
+ * This pass restores hard non-overlap by pushing any genuinely OBB-overlapping
+ * pair fully apart along their line of centres. It is purely POSITIONAL: it
+ * writes world_pos only and never touches linear or angular velocity, so the
+ * S08 rear/side/front impact response tuning (RearImpactResponse etc.) is
+ * provably unaffected -- the cars bounce and spin exactly as before, they just
+ * no longer clip through one another first.
+ *
+ * Overlap is detected with the SAME obb_corner_test the collision system uses,
+ * so two cars racing side-by-side without actually touching are never pushed
+ * apart (no ghost repulsion) and we separate exactly the pairs the game already
+ * treats as in contact. The push direction is the world line of centres, which
+ * for convex bodies monotonically reduces penetration (so it cannot oscillate)
+ * and whose sign is trivially "away from each other".
+ *
+ * Returns the pre-push penetration depth in display units (> 0 means it moved
+ * the pair apart), or 0 if the cars were not actually overlapping.
+ * ======================================================================== */
+static int32_t v2v_depenetrate_pair(TD5_Actor *a, TD5_Actor *b)
+{
+    OBB_CornerData corners[8];
+    memset(corners, 0, sizeof(corners));
+
+    /* Detect overlap at the cars' CURRENT positions (the faithful impulse and
+     * earlier relaxation rounds may already have moved them). Raw 24.8 fp in;
+     * the callee shifts internally. The pilot-trace emits inside obb_corner_test
+     * self-gate to a no-op unless V2V contact tracing is explicitly enabled, so
+     * these extra detection calls are free in normal and release builds. */
+    int bm = obb_corner_test(a, b,
+                             a->world_pos.x, a->world_pos.z,
+                             b->world_pos.x, b->world_pos.z,
+                             a->euler_accum.yaw, b->euler_accum.yaw,
+                             corners);
+    if (bm == 0) return 0;            /* not actually overlapping */
+
+    /* Deepest minimal-axis penetration across all set corners (display units).
+     * pen_x/pen_z are the signed depth to the nearest face on each local axis;
+     * min(|pen_x|,|pen_z|) is that corner's minimum-translation distance, and
+     * the max over corners is how far the pair must move to fully clear. */
+    int32_t depth = 0;
+    for (int c = 0; c < 8; c++) {
+        if (!(bm & (1 << c))) continue;
+        int32_t px = corners[c].pen_x; if (px < 0) px = -px;
+        int32_t pz = corners[c].pen_z; if (pz < 0) pz = -pz;
+        int32_t m  = (px < pz) ? px : pz;
+        if (m > depth) depth = m;
+    }
+    if (depth <= 0) return 0;         /* exactly touching, nothing to clear */
+
+    /* Playability slop: the collision OBB is slightly larger than the visible
+     * car mesh, so depenetrating to ZERO OBB overlap parks the cars with a
+     * visible gap (~the combined box-vs-mesh margin). Allow anti_tunnel_slop
+     * units of OBB overlap to remain so the cars settle at ~mesh contact, and
+     * push only the excess. The faithful impulse/bounce path is untouched --
+     * only the resting separation changes. */
+    int32_t push_depth = depth - g_td5.ini.anti_tunnel_slop;
+    if (push_depth <= 0) return 0;    /* within the allowed slop -> leave it */
+    if (push_depth > ANTITUNNEL_MAX_DEPTH) push_depth = ANTITUNNEL_MAX_DEPTH;
+
+    /* World line of centres (display units), pointing A away from B. */
+    int32_t dx = (a->world_pos.x - b->world_pos.x) >> 8;
+    int32_t dz = (a->world_pos.z - b->world_pos.z) >> 8;
+    int32_t nx, nz;                   /* 12-bit unit direction */
+    int32_t len = td5_isqrt(dx * dx + dz * dz);
+    if (len < 1) {
+        /* Centres coincide -- eject along A's lateral axis as a fallback so we
+         * still make progress instead of dividing by zero. */
+        int32_t ha = a->euler_accum.yaw >> 8;
+        nx =  cos_fixed12(ha);
+        nz = -sin_fixed12(ha);
+    } else {
+        nx = (dx << 12) / len;
+        nz = (dz << 12) / len;
+    }
+
+    /* Split the separation 50/50: each car moves half of (push_depth + 2)
+     * display units along the unit normal, converted to 24.8 world position
+     * units ((unit/4096) * half * 256 == (unit * half) >> 4). The +2 guard
+     * clears the slop boundary by a couple of units so the next test settles. */
+    int32_t half = (push_depth + 2) >> 1;
+    int32_t mv_x = (nx * half) >> 4;
+    int32_t mv_z = (nz * half) >> 4;
+
+    a->world_pos.x += mv_x;  a->world_pos.z += mv_z;
+    b->world_pos.x -= mv_x;  b->world_pos.z -= mv_z;
+    return depth;
+}
+
+/* ========================================================================
  * ResolveVehicleContacts (0x409150) -- Spatial grid broadphase + OBB
  *
  * Phase 1: Build AABB grid, insert actors into spatial buckets
@@ -4801,6 +4913,95 @@ void td5_physics_resolve_vehicle_contacts(void)
 #ifdef TD5_PILOT_TRACE_00409150
     td5_pilot_trace_00409150_leave(pilot_pair_idx);
 #endif
+
+    /* --- Phase 2.5: anti-tunnel position-only depenetration (S17) ---
+     * Port-only robustness pass (gated by [GameOptions] AntiTunnel, default
+     * on). The faithful resolution above can leave a fast/deep pair visibly
+     * interpenetrated for a frame; this clears any residual OBB overlap by
+     * pushing the cars apart, moving ONLY world position so the S08 impact
+     * tuning is untouched. It walks every pair O(n^2) (n <= 22) over the LIVE
+     * post-resolution positions, so unlike the span-bucket broadphase above it
+     * has no bucket-aliasing blind spot for a fast closing pair. */
+    if (g_td5.ini.anti_tunnel) {
+        static uint32_t s_sep_frames = 0;   /* throttle for the summary log */
+        int     moved_any_actor   = 0;
+        int     separated_cleanly = 0;
+        int32_t max_pre_depth     = 0;       /* deepest overlap seen this frame */
+        uint8_t moved[TD5_MAX_TOTAL_ACTORS];
+        memset(moved, 0, sizeof(moved));
+
+        for (int round = 0; round < ANTITUNNEL_RELAX_ROUNDS; round++) {
+            int moved_this_round = 0;
+
+            for (int i = 0; i < total; i++) {
+                TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
+                if (!a->car_definition_ptr) continue;
+
+                /* Script-controlled vehicles (crash takeovers, AI script VM)
+                 * own their own position -- leave them alone, the same set the
+                 * faithful dispatch routes to the sphere (non-OBB) handler. */
+                int a_scripted = (a->vehicle_mode != 0) ||
+                                 (a->wheel_contact_bitmask >= 0x0F);
+                if (a_scripted) continue;
+
+                int32_t rad_a = (int32_t)CDEF_S(a, 0x80);
+                int32_t ax = a->world_pos.x >> 8;
+                int32_t az = a->world_pos.z >> 8;
+
+                for (int j = i + 1; j < total; j++) {
+                    TD5_Actor *b = (TD5_Actor *)(g_actor_table_base + (size_t)j * TD5_ACTOR_STRIDE);
+                    if (!b->car_definition_ptr) continue;
+
+                    int b_scripted = (b->vehicle_mode != 0) ||
+                                     (b->wheel_contact_bitmask >= 0x0F);
+                    if (b_scripted) continue;
+
+                    /* Cheap live AABB reject before the OBB test. */
+                    int32_t rad_b = (int32_t)CDEF_S(b, 0x80);
+                    int32_t bx = b->world_pos.x >> 8;
+                    int32_t bz = b->world_pos.z >> 8;
+                    int32_t r  = rad_a + rad_b;
+                    int32_t ddx = ax - bx; if (ddx < 0) ddx = -ddx;
+                    int32_t ddz = az - bz; if (ddz < 0) ddz = -ddz;
+                    if (ddx > r || ddz > r) continue;
+
+                    int32_t pen = v2v_depenetrate_pair(a, b);
+                    if (pen > 0) {
+                        moved[i] = moved[j] = 1;
+                        moved_this_round = 1;
+                        moved_any_actor  = 1;
+                        if (round == 0 && pen > max_pre_depth) max_pre_depth = pen;
+                        /* a moved -- refresh its cached centre for the rest of
+                         * this row so later j see the updated position. */
+                        ax = a->world_pos.x >> 8;
+                        az = a->world_pos.z >> 8;
+                    }
+                }
+            }
+
+            if (!moved_this_round) { separated_cleanly = 1; break; }
+        }
+
+        /* Resync render pose (render_pos + matrices) for any car we moved, the
+         * same way apply_collision_response does after its push. Only XZ
+         * position changed (angles untouched), but the shared helper is the
+         * established idiom and keeps wheel/camera/HUD consumers consistent. */
+        if (moved_any_actor) {
+            for (int i = 0; i < total; i++) {
+                if (!moved[i]) continue;
+                TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
+                if (a->car_definition_ptr) update_vehicle_pose_from_physics(a);
+            }
+            s_sep_frames++;
+            if (!separated_cleanly) {
+                TD5_LOG_W(LOG_TAG, "v2v_antitunnel: pair(s) still overlapping after %d relax rounds (max_pre_depth=%d units, deep pile-up); continuing next frame",
+                          ANTITUNNEL_RELAX_ROUNDS, max_pre_depth);
+            } else if ((s_sep_frames % 30u) == 1u) {
+                TD5_LOG_I(LOG_TAG, "v2v_antitunnel: cleared car overlap (max_pre_depth=%d units) in <=%d rounds; frames_with_sep=%u",
+                          max_pre_depth, ANTITUNNEL_RELAX_ROUNDS, s_sep_frames);
+            }
+        }
+    }
 
     /* --- Phase 3: Grid reset is handled at start of next call --- */
 }
