@@ -3721,6 +3721,11 @@ int td5_game_run_race_frame(void) {
                     TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
                               g_td5.track_index % 10 + 1);
                 }
+                /* Pause menu just closed: re-anchor the chase-camera smoothing
+                 * so the first resumed frame doesn't glide across the gap (esp.
+                 * pausing right at the start, when the countdown spring is mid-
+                 * settle). Render-only; cannot affect the sim. */
+                td5_camera_snap_smoothing();
             }
 
             /* If the pause menu just closed (Continue / ESC) and a volume slider

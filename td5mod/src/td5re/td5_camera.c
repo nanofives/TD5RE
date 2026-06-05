@@ -145,6 +145,38 @@ float  g_const32         = 32.0f;
 float  g_dampWeight      = 0.125f;
 float  g_nearZeroThreshold = 0.001f;
 
+/* ========================================================================
+ * Per-render-frame chase-camera smoothing snapshots [PORT — render-only]
+ *
+ * The chase spring (radius/height/pitch lerp at g_dampWeight, the 32.0 radius
+ * term, the pitch >>3) is byte-faithful and runs ONCE per fixed 30 Hz sim
+ * sub-tick inside UpdateChaseCamera — countdown AND race. The ORIGINAL ran
+ * render==sim at 30 Hz, so it consumed the spring output directly. The port
+ * renders faster than 30 Hz, so consuming the spring output un-interpolated
+ * staircases it once per tick: visible as high-MS / low-FPS jitter, and — far
+ * worse — as countdown bob, because simulation_tick_counter is FROZEN at 0 for
+ * the whole countdown so the old tick-counter-keyed interpolation never
+ * re-anchored.
+ *
+ * Fix: snapshot the spring OUTPUT (orbit offset, smoothed height) + the car's
+ * vertical pose once per sub-tick (in UpdateChaseCamera, the producer), then
+ * interpolate prev->cur by g_subTickFraction in finalize_chase_pos (the
+ * consumer). This mirrors the original's own UpdateTracksideOrbitCamera, which
+ * scales its height smoothing by the sub-tick fraction (@0x00401950). Keying on
+ * the per-sub-tick producer (not simulation_tick_counter) is what makes the
+ * countdown smooth. Render-only: the camera never feeds the sim, so this cannot
+ * change physics / AI / replay determinism. Toggle with TD5RE_SMOOTH_CAM=0. */
+static int   s_camSmoothInit[TD5_MAX_VIEWPORTS]   = {0};
+static int   s_camOffPrev[TD5_MAX_VIEWPORTS][3]   = {{0}};
+static int   s_camOffCur [TD5_MAX_VIEWPORTS][3]   = {{0}};
+static float s_camHPrev  [TD5_MAX_VIEWPORTS]      = {0};
+static float s_camHCur   [TD5_MAX_VIEWPORTS]      = {0};
+static int   s_camYPrev  [TD5_MAX_VIEWPORTS]      = {0};
+static int   s_camYCur   [TD5_MAX_VIEWPORTS]      = {0};
+
+/* Re-anchor one view's smoothing (prev := cur on next producer call). */
+static void td5_camera_snap_smoothing_view(int view);
+
 /* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
 TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
     { 0, 600,  2100, 510, 0, 0 },  /* preset  0: far chase */
@@ -560,6 +592,11 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
     g_raceCameraPresetMode[view] = (int)mode_val;
     g_camFlyInCounter[view]     = g_flyInThreshold;
 
+    /* The spring just (re)seeded to target above; re-anchor the per-render
+     * smoothing for this view so the next finalize doesn't glide from the
+     * stale pre-reload snapshot (avoids a 1-frame snap on preset change). */
+    td5_camera_snap_smoothing_view(view);
+
     if (save_state != 0) {
         g_camPackedSave[0] = (unsigned char)((g_raceCameraPresetId[0] & 0x7F) |
                                               (g_raceCameraPresetMode[0] << 7));
@@ -697,6 +734,135 @@ static void terrain_probe_trace_emit(int view, int actor_addr,
         g_camStoredPitch[view],
         g_camOrbitOffset[view][1]);
     fflush(s_terrain_probe_trace_fp);
+}
+
+/* Force the next snapshot to re-seed (prev := cur) for one view. */
+static void td5_camera_snap_smoothing_view(int view)
+{
+    if (view >= 0 && view < TD5_MAX_VIEWPORTS)
+        s_camSmoothInit[view] = 0;
+}
+
+/* Public: re-anchor smoothing for every view (race start / resume-from-pause). */
+void td5_camera_snap_smoothing(void)
+{
+    for (int v = 0; v < TD5_MAX_VIEWPORTS; v++)
+        s_camSmoothInit[v] = 0;
+}
+
+/* Producer — capture this sub-tick's spring output + car vertical pose.
+ * Called once per UpdateChaseCamera (= once per sim sub-tick, countdown AND
+ * race). finalize_chase_pos interpolates prev->cur by g_subTickFraction. */
+static void td5_camera_snapshot_spring(uintptr_t actor, int v)
+{
+    int pos_y = *(int *)(actor + 0x200);
+
+    if (!s_camSmoothInit[v]) {
+        s_camSmoothInit[v] = 1;
+        for (int k = 0; k < 3; k++)
+            s_camOffPrev[v][k] = s_camOffCur[v][k] = g_camOrbitOffset[v][k];
+        s_camHPrev[v] = s_camHCur[v] = g_camSmoothedHeight[v];
+        s_camYPrev[v] = s_camYCur[v] = pos_y;
+        return;
+    }
+
+    for (int k = 0; k < 3; k++) {
+        s_camOffPrev[v][k] = s_camOffCur[v][k];
+        s_camOffCur[v][k]  = g_camOrbitOffset[v][k];
+    }
+    s_camHPrev[v] = s_camHCur[v];  s_camHCur[v] = g_camSmoothedHeight[v];
+    s_camYPrev[v] = s_camYCur[v];  s_camYCur[v] = pos_y;
+
+    /* Teleport / respawn / preset-snap guard: a large per-tick jump in the
+     * car Y or the orbit offset is a discontinuity, not motion to glide
+     * across — collapse prev onto cur so finalize shows it instantly. */
+    {
+        int dyj = s_camYCur[v] - s_camYPrev[v];
+        if (dyj > 0x40000 || dyj < -0x40000)
+            s_camYPrev[v] = s_camYCur[v];
+        int dxo = s_camOffCur[v][0] - s_camOffPrev[v][0];
+        int dzo = s_camOffCur[v][2] - s_camOffPrev[v][2];
+        if (dxo > 0x40000 || dxo < -0x40000 || dzo > 0x40000 || dzo < -0x40000) {
+            for (int k = 0; k < 3; k++) s_camOffPrev[v][k] = s_camOffCur[v][k];
+            s_camHPrev[v] = s_camHCur[v];
+        }
+    }
+}
+
+/* ========================================================================
+ * Invisible-car (vehicle_mode != 0) ground floor [PORT ENHANCEMENT — NOT in
+ * original; the original clamps camera Y in NO mode]
+ *
+ * In the scripted/recovery "invisible car" mode the chase camera can dip below
+ * terrain on slopes. A blanket ground clamp was tried before and reverted (see
+ * the comment in finalize_chase_pos) because: (1) the chassis-span lane probe
+ * is unreliable several spans behind the car (branch / ring-wrap → garbage
+ * altitude → camera reset), and (2) on flat road the per-heading probe variance
+ * made the camera bob with the car's facing.
+ *
+ * This floor avoids both: it walks a DEDICATED probe from the car's span to the
+ * camera XZ (so it lands on the span that actually contains the camera, not the
+ * chassis span extrapolated), VALIDATES the result (reject far-span / ring-wrap
+ * walks and implausible heights — on failure it returns 0 = "no floor", never a
+ * reset), and the caller applies it ONE-SIDED to the eye Y only (raise, never
+ * lower; never touches the look-at target). With a small offset the eye on flat
+ * road already sits far above the floor, so it never triggers there — no bob.
+ *
+ * Returns 1 and writes *out_floor_y (24.8 FP eye-Y floor) when a trustworthy
+ * ground height was found; 0 otherwise.
+ * ======================================================================== */
+
+/* Small lift above terrain, 24.8 FP world units (~24 world units). */
+#define TD5_CAM_GROUND_OFFSET   0x1800
+/* Max spans the camera XZ may be from the chassis span before we distrust the
+ * walk (camera sits ~4 spans behind; allow slack). */
+#define TD5_CAM_GROUND_MAX_SPAN_GAP  10
+/* Reject a probed ground height further than this from the car's Y (24.8 FP);
+ * a real slope over the ~4-span camera gap stays well inside this band, while a
+ * branch/ring-wrap walk to a far altitude blows past it. ~3072 world units. */
+#define TD5_CAM_GROUND_SANE_DY  0xC0000
+
+static int td5_camera_probe_ground_floor(uintptr_t actor, int cam_x, int cam_z,
+                                         int *out_floor_y)
+{
+    TD5_TrackProbeState probe;
+    int car_span = (int)(*(short *)(actor + 0x80));
+    int car_y    = *(int *)(actor + 0x200);
+
+    memset(&probe, 0, sizeof(probe));
+    probe.span_index     = (int16_t)car_span;
+    probe.sub_lane_index = *(signed char *)(actor + 0x8C);
+
+    /* Single-step walker toward the camera XZ; bounded so a runaway walk can't
+     * spin. ~4 spans of gap needs only a few steps; stop early on convergence. */
+    for (int i = 0; i < TD5_CAM_GROUND_MAX_SPAN_GAP + 2; i++) {
+        int prev = probe.span_index;
+        td5_track_update_probe_position(&probe, cam_x, cam_z);
+        if (probe.span_index == prev) break;
+    }
+
+    /* Validate: the landed span must be near the chassis span (else the walk
+     * crossed a branch / ring boundary into unrelated geometry). */
+    {
+        int gap = (int)probe.span_index - car_span;
+        if (gap < 0) gap = -gap;
+        if (gap > TD5_CAM_GROUND_MAX_SPAN_GAP)
+            return 0;
+    }
+
+    int ground_y = (int)td5_track_compute_contact_height_bestlane(
+                       probe.span_index, cam_x, cam_z, NULL);
+
+    /* Validate the height: reject implausible (far-altitude) reads. */
+    {
+        int dy = ground_y - car_y;
+        if (dy < 0) dy = -dy;
+        if (dy > TD5_CAM_GROUND_SANE_DY)
+            return 0;
+    }
+
+    *out_floor_y = ground_y + TD5_CAM_GROUND_OFFSET;
+    return 1;
 }
 
 void UpdateChaseCamera(int actor, int do_track_heading, int view)
@@ -1044,6 +1210,13 @@ after_flyin:
     g_camSmoothedHeight[v] = g_camSmoothedHeight[v] +
         (g_camTargetHeight[v] - g_camSmoothedHeight[v]) * g_dampWeight;
 
+    /* Snapshot this sub-tick's spring output (orbit offset + smoothed height)
+     * and car vertical pose so the per-render-frame finalize can interpolate
+     * prev->cur and not staircase the spring at render rates above 30 Hz, nor
+     * bob during the (tick-counter-frozen) countdown. Producer runs here, once
+     * per sub-tick; consumer is td5_camera_finalize_chase_pos. */
+    td5_camera_snapshot_spring((uintptr_t)actor, v);
+
     /* Final chase position is written by td5_camera_finalize_chase_pos(),
      * which also runs per-render-frame so the camera stays pinned to the
      * interpolated car mesh even when the fixed-tick sim loop runs 0 times
@@ -1228,7 +1401,6 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     int v = view;  /* [PORT: N-way] per-view camera state (was view & 1) */
     uintptr_t actor = (uintptr_t)actor_p;
 
-    int smoothed_h = (int)(g_camSmoothedHeight[v] + 0.5f);
     int target[3];
 
     int pos_x = *(int *)(actor + 0x1FC);
@@ -1241,61 +1413,52 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     int vel_y_interp = (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
     int vel_z_interp = (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
 
-    /* [PORT ENHANCEMENT — high-FPS vertical smoothing]
-     * The base camera/target Y normally follows world_pos.y (+0x200) plus a
-     * velocity extrapolation (vel_y_interp). world_pos.y only changes per
-     * 30 Hz sim tick, and the chassis-settle SNAP (0x00406300) updates it
-     * WITHOUT a matching vertical velocity (see td5_physics.c:798-810), so
-     * vel_y_interp cannot smooth it. At render rates >> 30 Hz the camera Y
-     * then staircases once per tick, which reads as the whole background
-     * (trees / horizon) bobbing up and down — most visible while the car
-     * settles onto its suspension during the countdown.
-     *
-     * Fix: sub-tick INTERPOLATE the base Y between the previous and current
-     * sim-tick world_pos.y instead of extrapolating by velocity. At 30 Hz
-     * (subtick 0/1) this is identical to the faithful value; above 30 Hz it
-     * smooths the staircase at the cost of <=1 tick (33 ms) of purely-
-     * vertical camera latency. Render-only: the camera never feeds the sim,
-     * so this cannot change physics / AI / replay determinism. Toggle off
-     * with TD5RE_SMOOTH_CAM=0 to A/B against the faithful behavior. */
-    static int      s_camY_init[TD5_MAX_VIEWPORTS]     = {0};
-    static uint32_t s_camY_lastTick[TD5_MAX_VIEWPORTS] = {0};
-    static int      s_camY_prev[TD5_MAX_VIEWPORTS]     = {0};
-    static int      s_camY_cur[TD5_MAX_VIEWPORTS]      = {0};
-    static int      s_smoothCam        = -1;
+    /* [PORT ENHANCEMENT — sub-tick smoothing of the chase-spring output]
+     * Rationale, producer, and the prev/cur snapshot arrays are documented at
+     * td5_camera_snapshot_spring() above. The chase spring (radius/height/pitch
+     * lerp) is byte-faithful and runs once per fixed 30 Hz sim sub-tick. Here
+     * we interpolate its prev->cur snapshot by g_subTickFraction so the camera
+     * glides smoothly at ANY render rate, instead of:
+     *   - staircasing the spring once per tick (the high-MS / low-FPS jitter), and
+     *   - bobbing during the countdown, where simulation_tick_counter is FROZEN
+     *     at 0 so the old tick-counter-keyed interpolation never re-anchored and
+     *     base_y oscillated with the per-frame g_subTickFraction beat.
+     * base_y likewise interpolates the car Y: the chassis-settle SNAP
+     * (0x00406300) moves world_pos.y WITHOUT a matching vertical velocity (see
+     * td5_physics.c:798-810), so vel_y_interp alone cannot smooth it.
+     * <=1 tick (33 ms) latency. Render-only — never feeds sim/AI/replay.
+     * Toggle off with TD5RE_SMOOTH_CAM=0 to A/B against the faithful path. */
+    static int s_smoothCam = -1;
     if (s_smoothCam < 0) {
         const char *e = getenv("TD5RE_SMOOTH_CAM");
         s_smoothCam = (e && e[0] == '0') ? 0 : 1;   /* default ON */
     }
-    if (!s_camY_init[v]) {
-        s_camY_init[v]     = 1;
-        s_camY_prev[v]     = pos_y;
-        s_camY_cur[v]      = pos_y;
-        s_camY_lastTick[v] = (uint32_t)g_td5.simulation_tick_counter;
-    } else if ((uint32_t)g_td5.simulation_tick_counter != s_camY_lastTick[v]) {
-        s_camY_lastTick[v] = (uint32_t)g_td5.simulation_tick_counter;
-        s_camY_prev[v]     = s_camY_cur[v];
-        s_camY_cur[v]      = pos_y;
-    }
-    /* Teleport / respawn / large correction → snap, do not glide across it. */
-    {
-        int dyj = pos_y - s_camY_prev[v];
-        if (dyj > 0x40000 || dyj < -0x40000) {
-            s_camY_prev[v] = pos_y;
-            s_camY_cur[v]  = pos_y;
-        }
-    }
-    int base_y;
-    if (s_smoothCam)
-        base_y = (int)((float)s_camY_prev[v]
-                       + (float)(pos_y - s_camY_prev[v]) * g_subTickFraction + 0.5f);
-    else
+
+    int off0, off1, off2, smoothed_h, base_y;
+    if (s_smoothCam && s_camSmoothInit[v]) {
+        float f = g_subTickFraction;
+        off0 = (int)((float)s_camOffPrev[v][0]
+                     + (float)(s_camOffCur[v][0] - s_camOffPrev[v][0]) * f + 0.5f);
+        off1 = (int)((float)s_camOffPrev[v][1]
+                     + (float)(s_camOffCur[v][1] - s_camOffPrev[v][1]) * f + 0.5f);
+        off2 = (int)((float)s_camOffPrev[v][2]
+                     + (float)(s_camOffCur[v][2] - s_camOffPrev[v][2]) * f + 0.5f);
+        smoothed_h = (int)(s_camHPrev[v] + (s_camHCur[v] - s_camHPrev[v]) * f + 0.5f);
+        base_y = (int)((float)s_camYPrev[v]
+                       + (float)(s_camYCur[v] - s_camYPrev[v]) * f + 0.5f);
+    } else {
+        /* Faithful path: consume the current spring output directly. */
+        off0 = g_camOrbitOffset[v][0];
+        off1 = g_camOrbitOffset[v][1];
+        off2 = g_camOrbitOffset[v][2];
+        smoothed_h = (int)(g_camSmoothedHeight[v] + 0.5f);
         base_y = pos_y + vel_y_interp;
+    }
 
     /* Desired (unclipped) camera position from existing chase logic. */
-    int cam_x_desired = pos_x + g_camOrbitOffset[v][0] + vel_x_interp;
-    int cam_y_desired = base_y + g_camOrbitOffset[v][1];
-    int cam_z_desired = pos_z + g_camOrbitOffset[v][2] + vel_z_interp;
+    int cam_x_desired = pos_x + off0 + vel_x_interp;
+    int cam_y_desired = base_y + off1;
+    int cam_z_desired = pos_z + off2 + vel_z_interp;
 
     /* Wall-clip raycast (port enhancement, see comment block above).
      * Ray origin = car center (with vel extrapolation); end = desired
@@ -1330,20 +1493,36 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     if (clip < 0.0f) clip = 0.0f;
 
     g_camWorldPos[v][0] = pos_x + vel_x_interp +
-                          (int)((float)g_camOrbitOffset[v][0] * clip + 0.5f);
+                          (int)((float)off0 * clip + 0.5f);
     g_camWorldPos[v][1] = cam_y_desired;
     g_camWorldPos[v][2] = pos_z + vel_z_interp +
-                          (int)((float)g_camOrbitOffset[v][2] * clip + 0.5f);
+                          (int)((float)off2 * clip + 0.5f);
 
-    /* [REVERTED 2026-05-27 PM-10] A ground-clamp here (probe the terrain at the
-     * camera XZ, raise cam Y above it) traded the slope clip for worse bugs:
-     * the chassis-span lane probe is unreliable at the camera's orbiting XZ
-     * (several spans behind), returning garbage/zero → camera reset/stop-follow,
-     * and on flat road the per-heading probe variance made the camera bob up
-     * and down with the car's facing. The real cause of the slope clip is the
-     * terrain-tilt OVER-SWING (port's look-at amplifies cam_angles tilt by the
-     * orbit radius — see UpdateChaseCamera ~L860); fix that at the source, not
-     * with a flaky downstream floor. */
+    /* [REVERTED 2026-05-27 PM-10] A BLANKET ground-clamp here (probe terrain at
+     * the camera XZ, raise cam Y above it, for ALL modes) traded the slope clip
+     * for worse bugs: the chassis-span lane probe is unreliable at the camera's
+     * orbiting XZ (several spans behind), returning garbage/zero → camera
+     * reset/stop-follow, and on flat road the per-heading probe variance made
+     * the camera bob with the car's facing. For NORMAL chase (vehicle_mode == 0)
+     * that diagnosis stands — no clamp; the slope-tilt over-swing is fixed at
+     * the source (UpdateChaseCamera ~L860). The targeted floor below applies
+     * ONLY to the invisible-car mode and dodges both failure modes (walked +
+     * validated probe; one-sided eye-only raise with a small offset, so it
+     * never triggers on flat road). See td5_camera_probe_ground_floor above. */
+
+    /* [PORT ENHANCEMENT — invisible-car (vehicle_mode != 0) ground floor] */
+    if (*(char *)(actor + 0x379) != 0) {
+        int floor_y;
+        if (td5_camera_probe_ground_floor(actor, g_camWorldPos[v][0],
+                                          g_camWorldPos[v][2], &floor_y) &&
+            g_camWorldPos[v][1] < floor_y) {
+            static uint32_t s_floor_log_ctr;
+            if ((s_floor_log_ctr++ % 120u) == 0u)
+                TD5_LOG_D(LOG_TAG, "invis-cam ground floor v%d: eye Y %d -> %d",
+                          v, g_camWorldPos[v][1], floor_y);
+            g_camWorldPos[v][1] = floor_y;
+        }
+    }
 
     target[0] = pos_x + vel_x_interp;
     target[1] = base_y + smoothed_h;   /* smoothed base (see high-FPS note above) */
