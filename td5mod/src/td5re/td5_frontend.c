@@ -2525,11 +2525,13 @@ static int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids,
  * S21 opponent pool, bucketed by top speed (PORT ENHANCEMENT 2026-06-05)
  *
  * Replaces the hardcoded 3x6 s_difficulty_tier_cars roster (used by the
- * default / single-race path) with a dynamic pool: EVERY non-police TD5 car
- * (ext_id 0..32) is eligible. Cars are sorted by their carparam top-speed
- * field (file offset 0x100 == tuning +0x74; see td5_physics_load_carparam and
- * project_td6_car_perf_normalization) and split into three contiguous speed
- * bands. The difficulty tier selects the band:
+ * default / single-race path) with a dynamic pool: EVERY drivable car —
+ * all TD5 cars (ext_id 0..32) AND all ported TD6 cars (ext_id 37..75) — is
+ * eligible. Cars are sorted by their carparam top-speed field (file offset
+ * 0x100 == tuning +0x74; see td5_physics_load_carparam and
+ * project_td6_car_perf_normalization, which remaps TD6 perf onto TD5's range
+ * so they bucket sensibly alongside TD5 cars) and split into three contiguous
+ * speed bands. The difficulty tier selects the band:
  *     Easy   (tier 0) -> slowest third
  *     Normal (tier 1) -> middle third
  *     Hard   (tier 2) -> fastest third
@@ -2538,20 +2540,23 @@ static int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids,
  * only when more opponents are requested than the band has cars, in which case
  * the round-robin wrap spreads them evenly rather than repeating one car.
  *
- * Police cars (33..36) and ported TD6 cars (37..75) are excluded so a TD5 race
- * fields TD5 opponents only, matching the original roster's car set. If no
- * carparam.dat can be read (assets missing) the caller falls back to the
- * original s_difficulty_tier_cars roster.
+ * Only the police cars (ext_id 33..36) are excluded — they are cop-chase
+ * vehicles, not race cars. Any car whose carparam.dat cannot be read is also
+ * skipped automatically. If NO carparam.dat is readable the caller falls back
+ * to the original s_difficulty_tier_cars roster.
  * ======================================================================== */
 
-/* Eligible race-car ext_id count: 0..32 (police 33..36 + TD6 37+ excluded). */
-#define S21_OPP_POOL_MAX_CARS 33
+/* Police cars (cop-chase only) sit at ext_id 33..36 and are skipped. The pool
+ * spans all other s_car_zip_paths entries (TD5 0..32 + TD6 37..75), so the
+ * arrays are sized to the full car table. */
+#define S21_POLICE_FIRST 33
+#define S21_POLICE_LAST  36
 
 /* Lazily-built, sorted-by-top-speed list of eligible cars. Built once and
  * cached — carparam top speeds are static data that never change at runtime. */
-static int s_speed_pool_ids[S21_OPP_POOL_MAX_CARS];    /* ext_ids, top speed ascending */
-static int s_speed_pool_speeds[S21_OPP_POOL_MAX_CARS]; /* parallel top-speed values */
-static int s_speed_pool_count = -1;                    /* -1 = not built yet */
+static int s_speed_pool_ids[TD5_CAR_COUNT];    /* ext_ids, top speed ascending */
+static int s_speed_pool_speeds[TD5_CAR_COUNT]; /* parallel top-speed values */
+static int s_speed_pool_count = -1;            /* -1 = not built yet */
 
 /* Read a car's carparam top-speed (int16 at file offset 0x100), or -1 if the
  * carparam.dat is missing / too short. */
@@ -2573,14 +2578,17 @@ static int frontend_read_car_top_speed(int ext_id) {
 static void frontend_build_speed_pool(void) {
     int n = 0;
     if (s_speed_pool_count >= 0) return;   /* already built */
-    for (int id = 0; id < S21_OPP_POOL_MAX_CARS; id++) {
-        int top = frontend_read_car_top_speed(id);
+    for (int id = 0; id < TD5_CAR_COUNT; id++) {
+        int top;
+        if (id >= S21_POLICE_FIRST && id <= S21_POLICE_LAST)
+            continue;                      /* skip cop-chase cars */
+        top = frontend_read_car_top_speed(id);
         if (top <= 0) continue;            /* skip cars with no/garbage carparam */
         s_speed_pool_ids[n]    = id;
         s_speed_pool_speeds[n] = top;
         n++;
     }
-    /* Insertion sort by top speed ascending (n <= 33, trivial). */
+    /* Insertion sort by top speed ascending (n <= TD5_CAR_COUNT, trivial). */
     for (int i = 1; i < n; i++) {
         int ki = s_speed_pool_ids[i], ks = s_speed_pool_speeds[i], j = i - 1;
         while (j >= 0 && s_speed_pool_speeds[j] > ks) {
@@ -2978,7 +2986,7 @@ static void frontend_init_race_schedule(void) {
         frontend_build_speed_pool();
         if (s_speed_pool_count > 0) {
             int lo, hi, band, seq;
-            int band_ids[S21_OPP_POOL_MAX_CARS];
+            int band_ids[TD5_CAR_COUNT];
             frontend_speed_band_for_tier(tier, &lo, &hi);
             band = hi - lo;
             for (int k = 0; k < band; k++)
@@ -3031,7 +3039,11 @@ static void frontend_init_race_schedule(void) {
      * is NOT applied here — it maps to the original binary's table ordering which
      * doesn't match the source port's reordered table. */
     for (i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
-        if (slot_active[i] && slot_ext_id[i] >= 0 && slot_ext_id[i] < 37) {
+        /* Accept any valid s_car_zip_paths index (TD5 0..32 + TD6 37..75). The
+         * S21 speed pool can assign TD6 cars (ext_id >= 37) as opponents; the
+         * old `< 37` bound clamped those to VIPER. The cup/masters/quick-race
+         * paths only ever produce TD5 ext_ids, so widening is a no-op for them. */
+        if (slot_active[i] && slot_ext_id[i] >= 0 && slot_ext_id[i] < TD5_CAR_COUNT) {
             g_td5.ai_car_indices[i]  = slot_ext_id[i];
             g_td5.ai_car_variants[i] = slot_variant[i];
         } else {
