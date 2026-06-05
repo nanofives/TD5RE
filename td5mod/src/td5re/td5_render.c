@@ -2815,24 +2815,26 @@ void td5_render_actors_for_view(int view_index)
 
             td5_render_prepared_mesh(mesh);
 
-            /* Chrome/envmap reflection overlay (0x40C120 second pass).
-             * Original (RenderRaceActorForView @ 0x0040c120) gates on
-             * `actor_00 == 0` — only the player car (slot 0) gets the reflection
-             * pass. Port deviation: extend to all racer slots (0..5) per user
-             * request; AI cars now share the player's chrome mesh
-             * (g_playerReflectionMeshResource @ 0x004c3d40 is a single global,
-             * not per-slot). Traffic actors render through a different inlined
-             * path in RenderRaceActorsForView and are intentionally left without
-             * reflection. [RE basis: agent confirmed mesh is global, gate is
-             * slot==0 in original — this is a deliberate visual enhancement.] */
-            /* Skip ported TD6 cars: their grayscale body + unused env-map mesh
-             * make the reflection overlay paint the scrolling environs "lights"
-             * texture onto the body in planar-scroll zones (Australia bridge/
-             * tunnel) — wrong on new cars. TD5 cars are unaffected. */
-            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS &&
-                !s_photobooth_active && !s_vehicle_is_td6[slot]) {
+            /* [S23 2026-06-05] UNIFIED vehicle reflection — TD5 cars now match
+             * TD6 cars. The chrome/env-map "mode 2" overlay was a PORT-ONLY
+             * enhancement: the original RenderRaceActorForView @0x0040c120 ran it
+             * for the PLAYER car only (gate `actor_00 == 0`), and the traffic path
+             * RenderRaceActorsForView @0x0040bd20 never ran it [CONFIRMED agent
+             * 2026-06-05]. The port had extended it to all racer slots, then had
+             * to EXCLUDE ported TD6 cars via !s_vehicle_is_td6 because the overlay
+             * painted the scrolling environs "lights" texture onto their grayscale
+             * bodies (the user's "lights shader over new cars"). The user asked
+             * for ONE unified look matching the TD6 cars — which never run the
+             * overlay — so it is now disabled for ALL cars and the divergent
+             * !s_vehicle_is_td6 gate is removed. The overlay + projection-effect
+             * update are kept behind this flag for easy revert; flip to 1 to
+             * restore the all-racer chrome (the TD6 grayscale caveat returns). */
+            static const int s_vehicle_reflection_overlay_enabled = 0;
+            if (s_vehicle_reflection_overlay_enabled &&
+                s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS &&
+                !s_photobooth_active) {
                 td5_render_update_projection_effect(slot, actor);
-                render_vehicle_reflection_overlay(mesh, slot);   /* booth: no reflections */
+                render_vehicle_reflection_overlay(mesh, slot);
             }
 
             /* Render wheel ring + brake-light billboards — RACER SLOTS ONLY.
@@ -5036,6 +5038,64 @@ static void brake_light_lookup_atlas(void)
               s_braked_u1, s_braked_v1, e->width, e->height);
 }
 
+/* [S23 2026-06-05] Dynamic rear-light depth.
+ * The taillight anchor is the fixed cardef hardpoint (car_def+0x60/+0x68); its
+ * model-space Z is authored per car. Ported TD6 car meshes can be LONGER than
+ * their authored hardpoint Z, so the fixed Z buries the brake light inside the
+ * body. We derive the real rear extent from the loaded car mesh (most-negative
+ * model-space pos_z = rear; CONFIRMED: every TD5/TD6 cardef taillight Z is
+ * negative — rear is -Z) and push the light back to it.
+ *
+ * Faithfulness guard: we only ever push the light OUTWARD (more rearward),
+ * never forward, so a TD5 car whose hardpoint already sits at/behind its rear
+ * is left untouched. The search is gated to vertices near the light HEIGHT so a
+ * tall rear wing or low diffuser can't drag the light off the bumper. Result is
+ * cached per slot, recomputed on mesh swap.
+ *
+ * RE basis: RenderVehicleTaillightQuads @0x004011C0 reads ONLY the fixed cardef
+ * hardpoint and never touches mesh bounds [CONFIRMED, agent 2026-06-05] — this
+ * mesh-derived Z is a deliberate port deviation for the (non-original) longer
+ * TD6 car meshes. */
+#define BRAKE_REAR_Y_BAND      (200.0f) /* model units around light height to search */
+#define BRAKE_REAR_FLUSH_INSET  (40.0f) /* pull center forward so the ±40 quad sits flush at the bumper */
+
+static TD5_MeshHeader *s_brake_rear_mesh[TD5_ACTOR_MAX_TOTAL_SLOTS];
+static float           s_brake_rear_z[TD5_ACTOR_MAX_TOTAL_SLOTS];
+
+/* Rearmost (min) model-space pos_z over mesh vertices within BRAKE_REAR_Y_BAND
+ * of light_y. Returns 0.0f when unavailable (caller treats >= 0 as "no
+ * override", since a real rear is negative). Cached per slot, keyed by mesh. */
+static float brake_light_rear_z(int slot, TD5_MeshHeader *mesh, float light_y)
+{
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return 0.0f;
+    if (!mesh) return 0.0f;
+    if (s_brake_rear_mesh[slot] == mesh) return s_brake_rear_z[slot];
+
+    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    int n = mesh->total_vertex_count;
+    float band_min = 0.0f, global_min = 0.0f;
+    int band_found = 0, global_found = 0;
+    if (verts && n > 0) {
+        for (int i = 0; i < n; i++) {
+            float z = verts[i].pos_z;
+            if (!global_found || z < global_min) { global_min = z; global_found = 1; }
+            float dy = verts[i].pos_y - light_y;
+            if (dy < 0.0f) dy = -dy;
+            if (dy <= BRAKE_REAR_Y_BAND) {
+                if (!band_found || z < band_min) { band_min = z; band_found = 1; }
+            }
+        }
+    }
+    float rear = band_found ? band_min : (global_found ? global_min : 0.0f);
+    s_brake_rear_mesh[slot] = mesh;
+    s_brake_rear_z[slot] = rear;
+
+    TD5_LOG_I(RENDER_LOG_TAG,
+              "brake rear-Z: slot=%d mesh_rear_z=%.1f band_hit=%d global=%d light_y=%.1f verts=%d",
+              slot, (double)rear, band_found, global_found, (double)light_y, n);
+    return rear;
+}
+
 /**
  * Draw brake light sprites at the two taillight hardpoints.
  * Called from the actor render loop where the render transform
@@ -5090,6 +5150,10 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     memcpy(&car_def, ap + 0x1B8, sizeof(void *));
     if (!car_def) return;
 
+    /* Loaded car mesh for the dynamic rear-light depth (S23). May be NULL
+     * mid-swap — then we fall back to the fixed hardpoint Z. */
+    TD5_MeshHeader *veh_mesh = td5_render_get_vehicle_mesh(slot);
+
     const float *m = s_render_transform.m;
     const float half_size = 40.0f; /* model-space half-extent (original ±80 / 2) */
 
@@ -5101,6 +5165,18 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
         float px = (float)hp[0];
         float py = (float)hp[1];
         float pz = (float)hp[2];
+
+        /* [S23] Push the light back to the actual mesh rear so it isn't buried
+         * inside a long (TD6) car body. Keep the authored lateral (px) and
+         * height (py); only override the depth, and only OUTWARD (more rearward)
+         * so a TD5 car whose hardpoint already sits at its rear is unaffected. */
+        if (veh_mesh) {
+            float rear_z = brake_light_rear_z(slot, veh_mesh, py);
+            if (rear_z < 0.0f) {                       /* valid: rear is -Z */
+                float candidate = rear_z + BRAKE_REAR_FLUSH_INSET;
+                if (candidate < pz) pz = candidate;     /* more negative = more rearward */
+            }
+        }
 
         /* Transform hardpoint center through the render matrix to view space */
         float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];

@@ -303,8 +303,13 @@ static float    s_taillight_u0, s_taillight_v0;
 static float    s_taillight_u1, s_taillight_v1;
 static float    s_taillight_page;
 
-/* Taillight billboard offset vectors (from 0x463030-0x463048)
- * Original: int16[4] per entry (4th = 0 padding). We store only xyz. */
+/* Taillight billboard CORNER offsets (from 0x463030-0x463048): the 4 ±80
+ * camera-facing quad corners, NOT light positions [CONFIRMED agent 2026-06-05].
+ * Original: int16[4] per entry (4th = 0 padding). We store only xyz.
+ * NOTE: this table is historical/unused — the active taillight path is
+ * render_vehicle_brake_lights() in td5_render.c, which builds the quad from a
+ * screen-space half-size and (as of S23) a mesh-derived rear anchor. Kept for
+ * reference; do not chase it for taillight placement. */
 static const int16_t s_taillight_offsets[4][3] = {
     {  80, -80, 0 },   /* 0x463030: top-left     */
     { -80, -80, 0 },   /* 0x463038: bottom-left  */
