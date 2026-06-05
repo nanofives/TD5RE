@@ -845,16 +845,39 @@ static void frontend_update_direction_button_visibility(int dir_btn_idx, int man
 static int  frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static uint8_t s_font_glyph_advance[96];
+/* [S13 FONT SWAP 2026-06-05] Per-glyph horizontal advances (px in the 24px cell).
+ * The original table came from the binary @0x4660C8 (the old BodyText face). The
+ * main-menu font was swapped to Bahnschrift SemiBold (clean DIN/automotive face);
+ * these advances are the rightmost-inked-column + 1 + FONT_GLYPH_PADDING measured
+ * off the regenerated re/assets/frontend/BodyText.png (see re/tools/
+ * build_bodytext_bitmap.py). NOTE: at runtime this is only the FALLBACK — the
+ * real advances are re-measured live from the loaded BodyText.png pixels by
+ * frontend_init_font_metrics_from_pixels (so the bitmap page, the MSDF page, and
+ * the baked button cache all share one consistent set of letterforms+metrics).
+ * No RE basis for the swap itself: it is a data/asset change, not a behavioural
+ * port (the original ran at a fixed 4:3 resolution with this one font). */
 static const uint8_t k_font_glyph_advance_default[96] = {
-    8,  9, 10, 14, 14, 24, 21,  9,  8,  9, 10, 14,
-   10, 10,  8, 13, 17, 10, 17, 16, 17, 16, 16, 17,
-   17, 17,  8, 10, 12, 13, 11, 13, 18, 19, 15, 14,
-   17, 13, 12, 19, 17,  8, 12, 18, 13, 23, 17, 20,
-   16, 20, 17, 14, 14, 17, 18, 24, 19, 18, 17,  9,
-   13,  9, 12, 15,  9, 16, 16, 12, 15, 15, 11, 15,
-   15,  8,  8, 15,  8, 21, 15, 16, 15, 16, 12, 12,
-   11, 15, 16, 22, 17, 16, 14,  9,  6, 10, 16, 14,
+    8,  9, 12, 18, 16, 19, 19,  8, 12, 10, 13, 15,
+    8, 14,  8, 15, 15, 10, 15, 15, 16, 15, 15, 14,
+   16, 15,  8,  8, 13, 13, 13, 13, 23, 18, 17, 17,
+   17, 17, 16, 17, 18,  9, 14, 18, 17, 20, 18, 17,
+   17, 19, 18, 17, 16, 17, 17, 23, 17, 17, 16, 11,
+   15,  9, 14, 14, 10, 15, 15, 15, 15, 15, 11, 15,
+   15,  9,  9, 16, 10, 22, 15, 15, 15, 15, 14, 15,
+   10, 15, 15, 21, 15, 15, 14, 12,  9, 11, 15,  8,
 };
+
+/* [S13 4:3-LOCKED GLYPH SCALE 2026-06-05] Horizontal glyph scale that keeps the
+ * font's 4:3-authored letterform shape under a freely-resizable window. The 2D
+ * frontend is laid out at a 640x480 virtual canvas; button RECTS scale by the
+ * caller's (sx,sy)=(w/640,h/480) and may freely grow/stretch with the window,
+ * but TEXT must never stretch. Returns min(sx,sy):
+ *   - window at/above 4:3 (sx>=sy): use sy -> uniform scale, glyph keeps its 4:3
+ *     proportion (no horizontal stretch) while buttons grow wider with sx;
+ *   - window narrower than 4:3 (sx<sy): use sx -> glyph shrinks horizontally with
+ *     the buttons, while the vertical size (cell_h, kept at sy) holds.
+ * Vertical glyph scale always stays sy. No RE basis (original was fixed 4:3). */
+static inline float fe_glyph_sx(float sx, float sy) { return sx < sy ? sx : sy; }
 
 /* Original font: BodyText.tga, 10 chars per row, 24x24 cells (from Ghidra FUN_00424560)
  * Atlas is 240x552 (8bpp with palette, red color key for transparency).
@@ -2478,20 +2501,28 @@ static void frontend_init_font_metrics_from_pixels(const uint8_t *pixels, int w,
             s_font_glyph_advance[glyph] = (uint8_t)advance;
         }
     }
+    /* [S13] One-shot confirmation that the swapped font (Bahnschrift) measured
+     * sane proportional advances off the loaded BodyText.png (runs once at load,
+     * not per frame). */
+    TD5_LOG_I(LOG_TAG, "Font metrics measured: adv A=%u M=%u W=%u i=%u a=%u (BodyText.png swap)",
+              s_font_glyph_advance['A' - 0x20], s_font_glyph_advance['M' - 0x20],
+              s_font_glyph_advance['W' - 0x20], s_font_glyph_advance['i' - 0x20],
+              s_font_glyph_advance['a' - 0x20]);
 }
 
-static float fe_measure_text(const char *text, float sx) {
+static float fe_measure_text(const char *text, float sx, float sy) {
     float width = 0.0f;
+    float gsx = fe_glyph_sx(sx, sy);   /* 4:3-locked glyph width (see fe_glyph_sx) */
 
     if (!text) return 0.0f;
 
     for (int i = 0; text[i]; i++) {
         int c = toupper((unsigned char)text[i]);
         if (c < 32 || c > 127) {
-            width += 14.0f * sx;
+            width += 14.0f * gsx;
             continue;
         }
-        width += (float)s_font_glyph_advance[c - 0x20] * sx;
+        width += (float)s_font_glyph_advance[c - 0x20] * gsx;
     }
 
     return width;
@@ -5416,7 +5447,7 @@ static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
     const int   by   = s_buttons[row_btn_idx].y;
 
     /* Fits on one line — center it on the 32px button. */
-    if (fe_measure_text(text, sx * gs) <= avail) {
+    if (fe_measure_text(text, sx * gs, sy * gs) <= avail) {
         float ty = ((float)by + (32.0f - FE_QR_VALUE_LINE_H) * 0.5f) * sy;
         fe_draw_text(vx, ty, text, color, sx * gs, sy * gs);
         return;
@@ -5429,7 +5460,7 @@ static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
     for (int i = 1; i < len && i < (int)sizeof(l1); i++) {
         if (text[i] != ' ') continue;
         memcpy(l1, text, (size_t)i); l1[i] = '\0';
-        if (fe_measure_text(l1, sx * gs) <= avail) split = i;
+        if (fe_measure_text(l1, sx * gs, sy * gs) <= avail) split = i;
         else break;
     }
     if (split > 0) {
@@ -5439,7 +5470,7 @@ static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
         int cut = 1;
         for (int i = 1; i <= len && i < (int)sizeof(l1); i++) {
             memcpy(l1, text, (size_t)i); l1[i] = '\0';
-            if (fe_measure_text(l1, sx * gs) > avail) break;
+            if (fe_measure_text(l1, sx * gs, sy * gs) > avail) break;
             cut = i;
         }
         memcpy(l1, text, (size_t)cut); l1[cut] = '\0';
@@ -6103,7 +6134,7 @@ static void frontend_render_race_type_description(float sx, float sy) {
         float ts   = 0.7f;
         if (!dn || !dn[0]) dn = "KEYBOARD";
         fe_draw_text_centered(cx, 90.0f * sy, "CONTROLLER", 0xFFFFD000, sx*0.8f, sy*0.8f);
-        if (fe_measure_text(dn, sx*ts) <= panel_w) {
+        if (fe_measure_text(dn, sx*ts, sy*ts) <= panel_w) {
             fe_draw_text_centered(cx, 112.0f * sy, dn, 0xFFFFFFFF, sx*ts, sy*ts);
         } else {
             char l1[48], l2[48];
@@ -6131,7 +6162,7 @@ static void frontend_render_race_type_description(float sx, float sy) {
     if (idx < 0) return;  /* "Back" has no description */
 
     /* Line 0: race-type NAME, big font, centered at Y=0. */
-    fe_draw_text(panel_x + (panel_w - fe_measure_text(k_race_desc[idx][0], sx)) * 0.5f,
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(k_race_desc[idx][0], sx, sy)) * 0.5f,
                  panel_y + 2.0f * sy, k_race_desc[idx][0], 0xFFFFFFFF, sx, sy);
     /* Lines 1..: the description body, drawn in the SMALL font (smalltext) — the original
      * RaceTypeCategoryMenuStateMachine@0x4168b0 word-wraps the description and draws it with
@@ -6755,7 +6786,7 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
         float nx   = 466.0f * sx;
         float maxw = 168.0f * sx;          /* column from x~466 to ~634 */
         if (!dname || !dname[0]) dname = "<NONE>";
-        if (fe_measure_text(dname, sx * ts) <= maxw) {
+        if (fe_measure_text(dname, sx * ts, sy * ts) <= maxw) {
             fe_draw_text(nx, (177.0f + 8.0f) * sy, dname, 0xFFFFFFFF, sx * ts, sy * ts);
         } else {
             char l1[64], l2[64];
@@ -7490,20 +7521,24 @@ static void frontend_render_extras_gallery_overlay(float sx, float sy) {
  *     NON-selector buttons. Selectors that keep a caption draw it via this path
  *     (Quick Race rows) or via a per-screen overlay (controller binding).
  * ========================================================================== */
-static float fe_measure_text_width(const char *text, float sx) {
+static float fe_measure_text_width(const char *text, float sx, float sy) {
     float w = 0.0f;
+    float gsx = fe_glyph_sx(sx, sy);   /* 4:3-locked glyph width (see fe_glyph_sx) */
     if (!text) return 0.0f;
     for (int i = 0; text[i]; i++) {
         int c = toupper((unsigned char)text[i]);
-        if (c < 32 || c > 127) { w += 14.0f * sx; continue; }
-        w += (float)s_font_glyph_advance[c - 0x20] * sx;
+        if (c < 32 || c > 127) { w += 14.0f * gsx; continue; }
+        w += (float)s_font_glyph_advance[c - 0x20] * gsx;
     }
     return w;
 }
 
 static void fe_draw_text_centered(float center_x, float y, const char *text,
                                   uint32_t color, float sx, float sy) {
-    float w = fe_measure_text_width(text, sx);
+    /* Center on the GLYPH width (fe_glyph_sx), which is exactly what fe_draw_text
+     * advances by — so the string stays centered on center_x at every aspect
+     * while the surrounding button rect may still scale by the full sx. */
+    float w = fe_measure_text_width(text, sx, sy);
     fe_draw_text(center_x - w * 0.5f, y, text, color, sx, sy);
 }
 
@@ -7520,6 +7555,7 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
     float cx = x;
     float texel_w = 1.0f / (float)FONT_TEX_W;
     float cell_h = (float)FONT_CELL * sy;
+    float gsx = fe_glyph_sx(sx, sy);   /* 4:3-locked horizontal glyph scale; cell_h keeps sy */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     if (msdf) td5_plat_render_set_ps_override((void *)s_ps_msdf, SAMP_LINEAR_CLAMP);
     for (int i = 0; text[i]; i++) {
@@ -7528,10 +7564,10 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
         float glyph_advance_px;
         float glyph_advance;
         float glyph_w;
-        if (c < 32 || c > 127) { cx += 14.0f * sx; continue; }
+        if (c < 32 || c > 127) { cx += 14.0f * gsx; continue; }
         glyph_index = c - 0x20;
         glyph_advance_px = (float)s_font_glyph_advance[glyph_index];
-        glyph_advance = glyph_advance_px * sx;
+        glyph_advance = glyph_advance_px * gsx;
         if (c == ' ') { cx += glyph_advance; continue; }
         int col = glyph_index % FONT_COLS;
         int row = glyph_index / FONT_COLS;
@@ -7539,7 +7575,7 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
         float u1 = u0 + glyph_advance_px * texel_w;
         float v0 = (float)(row * FONT_CELL) / (float)FONT_TEX_H;
         float v1 = (float)((row + 1) * FONT_CELL) / (float)FONT_TEX_H;
-        glyph_w = glyph_advance_px * sx;
+        glyph_w = glyph_advance_px * gsx;
         fe_draw_quad(cx, y, glyph_w, cell_h, color, page, u0, v0, u1, v1);
         cx += glyph_advance;
     }
@@ -7857,7 +7893,11 @@ void td5_vui_text_centered(float cx, float y, const char *s, uint32_t color, flo
     fe_draw_text_centered(cx, y, s, color, sx, sy);
 }
 float td5_vui_text_width(const char *s, float sx) {
-    return fe_measure_text_width(s, sx);
+    /* Public VectorUI helper only carries a single (uniform) scale — pass it as
+     * both axes so the 4:3 glyph lock is a no-op here (HUD/VectorUI callers).
+     * The frontend menu's own 4:3-locked centering goes through
+     * fe_draw_text_centered, not this path. */
+    return fe_measure_text_width(s, sx, sx);
 }
 
 void td5_vui_quad(float x, float y, float w, float h, uint32_t color, int tex_page,
@@ -8458,7 +8498,7 @@ void td5_frontend_render_ui_rects(void) {
              * helper so it matches. */
             fe_draw_button_frame(bx, by, bw, bh, bb_state, sx, sy);
             if (s_buttons[i].label[0] && !s_buttons[i].is_selector && s_font_page >= 0) {
-                float tw = fe_measure_text(s_buttons[i].label, sx);
+                float tw = fe_measure_text(s_buttons[i].label, sx, sy);
                 uint32_t tc = s_buttons[i].disabled ? 0xFF888888u : 0xFFFFFFFFu;
                 fe_draw_text(bx + (bw - tw) * 0.5f, by, s_buttons[i].label, tc, sx, sy);
             }
@@ -8483,7 +8523,7 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_button_frame(bx, by, bw, bh, bb_state, sx, sy);
 
             if (s_buttons[i].label[0] && s_font_page >= 0) {
-                float text_w = fe_measure_text(s_buttons[i].label, sx);
+                float text_w = fe_measure_text(s_buttons[i].label, sx, sy);
                 float tx = bx + (bw - text_w) * 0.5f;
                 float ty = by;
                 uint32_t text_color = 0xFFFFFFFF;
@@ -8493,7 +8533,7 @@ void td5_frontend_render_ui_rects(void) {
         } else {
             fe_draw_quad(bx, by, bw, bh, bg_color, -1, 0, 0, 1, 1);
             if (s_buttons[i].label[0] && s_font_page >= 0) {
-                float text_w = fe_measure_text(s_buttons[i].label, sx);
+                float text_w = fe_measure_text(s_buttons[i].label, sx, sy);
                 float tx = bx + (bw - text_w) * 0.5f;
                 float ty = by;
                 uint32_t text_color = 0xFFFFFFFF;
@@ -8628,7 +8668,7 @@ void td5_frontend_render_ui_rects(void) {
          * the 32px bar (de-stretched orig caps native [103..118] in button [97..129]). The
          * prior +6 pushed the 24px cell's caps into the lower half → text bottom-aligned,
          * below the (correctly centered) ◄► arrows. Drop the +6 to match the original. */
-        float tnw = fe_measure_text(track_name, sx);
+        float tnw = fe_measure_text(track_name, sx, sy);
         float tx = nav_bx + (nav_bw - tnw) * 0.5f;
         float ty = nav_by;
         fe_draw_text(tx, ty, track_name, 0xFFFFFFFF, sx, sy);
@@ -8648,7 +8688,7 @@ void td5_frontend_render_ui_rects(void) {
         const char *car_name = frontend_get_car_display_name(car);
         float nav_bx, nav_by, nav_bw, nav_bh;
         frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
-        float cnw = fe_measure_text(car_name, sx);
+        float cnw = fe_measure_text(car_name, sx, sy);
         fe_draw_text(nav_bx + (nav_bw - cnw) * 0.5f, nav_by, car_name, 0xFFFFFFFF, sx, sy);
         fe_draw_option_arrows(0, sx, sy);
     }
