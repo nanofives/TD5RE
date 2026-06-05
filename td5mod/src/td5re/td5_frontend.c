@@ -11388,7 +11388,13 @@ static void Screen_GameOptions(void) {
             /* Each row cycles its respective global on arrow input.
              * OK button triggers exit. [S02 (c) 2026-06-04] Circuit Laps (old
              * idx 0) was removed; the remaining six rows shifted up one index. */
-            if (delta != 0) {
+            if (delta != 0 && active_button >= 0 && active_button <= 5) {
+                /* Nav beep on any selector-row change, matching the original's
+                 * central arrow handler (DXSound::Play(2) @ 0x0042687c) and the
+                 * other Options screens (Control/Sound). Rows 0..5 are all
+                 * arrow-capable selectors; OK (row 6) is handled separately below
+                 * and is not arrow-capable, so it stays silent on L/R. */
+                frontend_play_sfx(2);
                 if (active_button == 0) {
                     s_game_option_checkpoint_timers ^= 1;
                     s_inner_state = 4;
@@ -11823,6 +11829,11 @@ static void Screen_DisplayOptions(void) {
             }
 
             if (changed) {
+                /* Nav beep on any selector-row change (rows 0..5), matching the
+                 * original's central arrow handler (DXSound::Play(2) @ 0x0042687c)
+                 * and the other Options screens. OK (row 6) breaks out above and
+                 * is not arrow-capable, so it stays silent on L/R. */
+                frontend_play_sfx(2);
                 s_inner_state = 4;
             }
         }
