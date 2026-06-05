@@ -2950,7 +2950,8 @@ void td5_hud_render_overlays(float dt)
      * screen. Drawn here (after the full-screen viewport is restored) so x is in
      * render-target px; right-anchor x = width - measured text width - 8.
      * [S01 2026-06-04] gated by the Display-options Show FPS toggle. peak = worst
-     * frame time over the last ~1s. Values from td5_game_update_fps_overlay(). */
+     * frame time over the last ~250ms. Both values refresh at 4 Hz (every 250ms);
+     * values from td5_game_update_fps_overlay(). */
     if (g_td5.ini.show_fps) {
         char fps_buf[48];
         snprintf(fps_buf, sizeof(fps_buf), "FPS %.0f  %dMS",

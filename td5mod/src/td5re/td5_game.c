@@ -5870,10 +5870,19 @@ float g_td5_display_fps = 0.0f;
 int   g_td5_peak_frame_ms = 0;
 
 void td5_game_update_fps_overlay(void) {
-    static uint32_t s_prev = 0, s_peak = 0, s_win_max = 0, s_win_start = 0;
-    static float    s_disp = 0.0f;
+    /* Sampling (EMA fps + worst-frame) runs EVERY frame for accuracy, but the
+     * on-screen values are PUBLISHED at 4 Hz (every 250 ms). [S12 follow-up
+     * 2026-06-05] Previously g_td5_display_fps was written every frame (digits
+     * flickered) and g_td5_peak_frame_ms refreshed at 1 Hz — now both refresh at
+     * a uniform, readable 4 Hz. The 1 s diagnostic log keeps its own cadence. */
+    static uint32_t s_prev = 0;          /* prev frame timestamp                  */
+    static uint32_t s_pub_start = 0;     /* start of the current 250 ms publish window */
+    static uint32_t s_pub_max = 0;       /* worst frame-ms within the publish window   */
+    static uint32_t s_log_start = 0;     /* start of the 1 s diagnostic-log window      */
+    static uint32_t s_log_max = 0;       /* worst frame-ms within the log window         */
+    static float    s_disp = 0.0f;       /* EMA-smoothed fps                       */
     uint32_t now = td5_plat_time_ms();
-    if (s_prev == 0) { s_prev = now; s_win_start = now; return; }
+    if (s_prev == 0) { s_prev = now; s_pub_start = now; s_log_start = now; return; }
     uint32_t delta = now - s_prev;
     s_prev = now;
     if (delta < 1)    delta = 1;
@@ -5882,14 +5891,23 @@ void td5_game_update_fps_overlay(void) {
     float fps = 1000.0f / (float)delta;
     if (s_disp <= 0.0f) s_disp = fps;
     s_disp += (fps - s_disp) * 0.1f;                 /* EMA for a stable readout */
-    if (delta > s_win_max) s_win_max = delta;        /* worst frame this window  */
-    if (now - s_win_start >= 1000) {
-        s_peak = s_win_max;
-        TD5_LOG_W("plat", "FPS: %.0f  peak_frame=%ums", (double)s_disp, s_peak);
-        s_win_max = 0; s_win_start = now;
+    if (delta > s_pub_max) s_pub_max = delta;        /* worst frame this 250ms window */
+    if (delta > s_log_max) s_log_max = delta;        /* worst frame this 1s window    */
+
+    /* Publish the on-screen FPS/MS 4x per second (every 250 ms). */
+    if (now - s_pub_start >= 250) {
+        g_td5_display_fps   = s_disp;
+        g_td5_peak_frame_ms = (int)s_pub_max;        /* worst frame over the last ~250ms */
+        s_pub_max = 0;
+        s_pub_start = now;
     }
-    g_td5_display_fps   = s_disp;
-    g_td5_peak_frame_ms = (int)s_peak;
+
+    /* 1 s diagnostic log to engine.log — independent of the 4 Hz display cadence. */
+    if (now - s_log_start >= 1000) {
+        TD5_LOG_W("plat", "FPS: %.0f  peak_frame=%ums", (double)s_disp, s_log_max);
+        s_log_max = 0;
+        s_log_start = now;
+    }
 }
 
 void td5_game_update_frame_timing(void) {
