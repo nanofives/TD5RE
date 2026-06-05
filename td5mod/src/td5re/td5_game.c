@@ -2118,6 +2118,37 @@ int td5_game_init_race_session(void) {
             int td6_ss = td5_asset_td6_start_span_for_level(level_num);
             if (td6_ss > 0)
                 start_span = td6_ss;
+
+            /* [TD6 REVERSE START] In reverse the loaded geometry is STRIPB.DAT,
+             * which is reverse-numbered (STRIPB span i ~= forward span
+             * span_count - i; confirmed against both native TD5 and TD6 stripb).
+             * The registry start span is a FORWARD-strip span, so:
+             *  - POINT-TO-POINT: using it directly already lands the grid at
+             *    STRIPB[fwd_start] ~= the forward FINISH = the reverse start (the
+             *    same proven mapping native TD5 P2P reverse relies on), and the
+             *    P2P finish (s_td6_finish_span = fwd_finish) lands at the forward
+             *    START = the reverse finish. Leave it unchanged.
+             *  - CIRCUIT: map the forward start span into STRIPB numbering
+             *    (span_count - fwd_start) so the lap/start line and the grid sit
+             *    on the start BANNER. Without this the reverse circuit still laps
+             *    correctly but its start/finish line sits a different physical
+             *    span away from the visible banner.
+             *  Use the MAIN-ROAD ring length (g_td5.track_span_ring_length =
+             *  STRIP hdr[1]), NOT td5_track_get_span_count() which includes
+             *  appended branch spans — the reverse-numbering relation
+             *  (STRIPB span i ~= forward span ring-i) is defined over the main
+             *  ring only, so mixing in branch spans skews the mapped span. */
+            int rev_ring = g_td5.track_span_ring_length;
+            if (td6_ss > 0 && g_td5.reverse_direction && g_track_is_circuit &&
+                rev_ring > 1) {
+                int rev_ss = rev_ring - td6_ss;
+                if (rev_ss < 1) rev_ss = 1;
+                if (rev_ss >= rev_ring) rev_ss = rev_ring - 1;
+                TD5_LOG_I(LOG_TAG,
+                          "TD6 reverse circuit start span: fwd=%d -> rev=%d (ring=%d total=%d)",
+                          td6_ss, rev_ss, rev_ring, track_span_count);
+                start_span = rev_ss;
+            }
         }
 
         /* TD6 track migration / out-of-range robustness: the per-level
@@ -2187,9 +2218,20 @@ int td5_game_init_race_session(void) {
          * tracks that reuse a TD6 output-level number get none. Registered as
          * drive-throughs in advance_pending_finish_state (split + player HUD
          * ack), with no fail-timer and without gating the finish. */
-        s_td6_cp_count = (g_active_td6_level > 0)
+        /* Synthesized checkpoints are FORWARD-strip spans (extracted from the
+         * forward checkpoint-banner meshes). In reverse the player's normalized
+         * span counts up the reverse-numbered STRIPB, so the forward thresholds
+         * would fire at the wrong physical points and in the wrong order. They
+         * are non-gating (split times + HUD flash only — they never end the
+         * race), so simply suppress them in reverse rather than mirroring the
+         * spans. P2P reverse still finishes on s_td6_finish_span; circuits stay
+         * lap-based. */
+        s_td6_cp_count = (g_active_td6_level > 0 && !g_td5.reverse_direction)
             ? td5_asset_td6_checkpoint_spans(g_active_td6_level, s_td6_cp_spans)
             : 0;
+        if (g_active_td6_level > 0 && g_td5.reverse_direction)
+            TD5_LOG_I(LOG_TAG,
+                      "TD6 reverse: synthesized checkpoints suppressed (forward-keyed spans)");
         memset(s_td6_cp_index, 0, sizeof(s_td6_cp_index));
         if (s_td6_cp_count > 0) {
             TD5_LOG_I(LOG_TAG,

@@ -12891,6 +12891,14 @@ static void frontend_update_direction_button_visibility(int dir_btn_idx, int man
     int has_reverse = (s_selected_track < 0)
                       ? 1
                       : td5_asset_track_has_reverse(s_selected_track);
+    /* Diagnostic: per-track Direction-toggle decision. has_reverse is driven by
+     * reverse-asset presence (STRIPB.DAT + LEFTB/RIGHTB.TRK) — TD6 tracks and TD5
+     * P2P show the toggle; TD5 circuit tracks (no STRIPB) hide it. */
+    TD5_LOG_I(LOG_TAG,
+              "Direction toggle: track=%d level=%d has_reverse=%d -> %s",
+              s_selected_track,
+              (s_selected_track >= 0) ? td5_asset_level_number(s_selected_track) : -1,
+              has_reverse, has_reverse ? "SHOWN" : "hidden");
     s_buttons[dir_btn_idx].hidden   = !has_reverse;
     s_buttons[dir_btn_idx].disabled = !has_reverse;
     if (!has_reverse) {
