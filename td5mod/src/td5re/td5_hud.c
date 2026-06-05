@@ -4439,7 +4439,12 @@ void td5_hud_init_pause_menu(int page_index)
     int pause_vec = (g_td5.ini.vector_ui && td5_vui_pausefont_page() >= 0);
     s_pause_vui_line_count = 0;
 
-    while (pausetxt && s_pause_menu_strings && string_offset < 0x30) {
+    /* [REWORK 2026-06-05 / S15] The offset cap was 0x30 (6 string entries × 8B),
+     * sized for the original PAUSED+5-row table. The reworked menu has 7 entries
+     * (PAUSED + 6 rows), so EXIT GAME (entry 7, offset 0x30) was dropped. Raised
+     * to 0x80 (16 entries, matching the s_pause_vui_lines[16] guard); the NULL
+     * terminator (`if (str == NULL) break;`) is the real stop. */
+    while (pausetxt && s_pause_menu_strings && string_offset < 0x80) {
         const char *str = s_pause_menu_strings[string_offset / 4];
         if (str == NULL) break;
 
@@ -4455,7 +4460,7 @@ void td5_hud_init_pause_menu(int page_index)
             }
             text_y += 16.0f;
             string_offset += 8;
-            if (string_offset > 0x2F) break;
+            if (string_offset > 0x7F) break;  /* [S15] was 0x2F (6 entries); see while-cap note above */
             continue;
         }
 
@@ -4491,7 +4496,7 @@ void td5_hud_init_pause_menu(int page_index)
 
         text_y += 16.0f;
         string_offset += 8;
-        if (string_offset > 0x2F) break;
+        if (string_offset > 0x7F) break;  /* [S15] was 0x2F (6 entries); see while-cap note above */
     }
 #undef PAUSE_ADD
 #undef PAUSE_BUF
