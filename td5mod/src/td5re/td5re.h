@@ -294,15 +294,16 @@ typedef struct TD5_GlobalState {
         /* --- S20 Smart Traffic (source-port enhancement, all default ON) ---
          * The original background traffic is scripted/reactive (flat 0x3c cruise,
          * deterministic junction route, no active wall avoidance). These knobs
-         * layer four tunable behaviours on top, applied ONLY to traffic slots
+         * layer three tunable behaviours on top, applied ONLY to traffic slots
          * (>= g_traffic_slot_base); racing AI (slots 0-5) is untouched. Each can
-         * be disabled independently; traffic_smart=0 disables all four (fully
-         * faithful traffic). Section [Traffic] in td5re.ini. */
+         * be disabled independently; traffic_smart=0 disables all three (fully
+         * faithful traffic). All three operate only on the traffic car's lateral
+         * target / sub-lane — they never touch route_state or yaw, so they don't
+         * trip the heading-recovery brake or perturb racers. (A 4th behaviour,
+         * random branches via route reassignment, was dropped: it froze traffic
+         * by desyncing yaw from the route — see td5_ai.c S20 block.) Section
+         * [Traffic] in td5re.ini. */
         int  traffic_smart;            /* master gate (default 1) */
-        int  traffic_random_branch;    /* vary route table per traffic car (default 0 = OFF;
-                                        * opt-in — touches route_state the racer peer-scan
-                                        * reads, so it changes racer race-lines. The other
-                                        * three behaviours are racer-neutral, default ON.) */
         int  traffic_wall_avoid;       /* bias edge-lane target toward lane centre (default 1) */
         int  traffic_avoid_slow_lane;  /* prefer asphalt lane over off-road shoulder (default 1) */
         int  traffic_lookahead;        /* lane-change/ease around a car close ahead (default 1) */

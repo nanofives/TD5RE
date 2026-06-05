@@ -5402,33 +5402,37 @@ void td5_ai_init_traffic_actors(void) {
  * (a linear remap-table walk, NO RNG — confirmed _rand @ 0x00448157 is never
  * called from the route path), and no active lateral wall avoidance (traffic
  * slots >= 6 are even skipped by the lateral wall-contact synthesis, see
- * td5_track.c:1035). This block layers four OPTIONAL, individually-gateable
+ * td5_track.c:1035). This block layers three OPTIONAL, individually-gateable
  * behaviours on top, applied ONLY to traffic slots (>= g_traffic_slot_base);
  * racing AI (slots 0..5, a different code path entirely) is untouched. With
  * [Traffic] TrafficSmart=0 the traffic is byte-faithful again.
  *
- *   1. RandomBranch  — give each traffic car a route table (LEFT/RIGHT) chosen
- *                      from a DEDICATED per-actor PRNG, so cars take varied
- *                      branches at forks instead of all following one route.
- *   2. WallAvoid     — bias an edge-lane car's lateral target toward the lane
+ *   1. WallAvoid     — bias an edge-lane car's lateral target toward the lane
  *                      interior so it stops scraping the rail.
- *   3. AvoidSlowLane — prefer the asphalt lane over an off-road shoulder lane
+ *   2. AvoidSlowLane — prefer the asphalt lane over an off-road shoulder lane
  *                      (the only per-lane attribute the track exposes is the
  *                      lane bitmask + surface_attribute; there is NO native
  *                      lane-speed field, so this is a clearly-marked heuristic).
- *   4. Lookahead     — when a car is close ahead in our lane, change to a clear
+ *   3. Lookahead     — when a car is close ahead in our lane, change to a clear
  *                      adjacent lane (and ease the hard brake) instead of just
  *                      ramming/braking. Falls back to the faithful TTC brake.
  *
- * IMPORTANT: the shared CRT rand()/td5_msvc_rand() sequence drives AI *racer*
- * car selection (paired-capture verified), so perturbing it here would change
- * racer determinism. These helpers therefore use a SEPARATE per-actor LCG with
- * its own state and never touch the shared _holdrand.
- * ======================================================================== */
+ * All three operate purely on the traffic car's lateral target / chosen sub-lane
+ * — they do NOT touch route_state, the route table, or the actor's yaw, so they
+ * neither trip the heading-recovery brake nor perturb racer routing.
+ *
+ * REMOVED (was behaviour "RandomBranch"): assigning each traffic car a random
+ * route table to vary branches at forks. TD5 traffic STRICTLY follows one
+ * prescribed route, enforced by the Stage-2 heading-misalignment recovery brake
+ * (UpdateTrafficRoutePlan @ 0x00435E80): re-pointing a live car at a different
+ * route table desynced its yaw from the new route's heading bytes, tripping the
+ * recovery brake -> the car froze in place until recycled (visible as "traffic
+ * standing still"). It also fed the faithful racer peer-scan
+ * td5_ai_find_offset_peer (which reads traffic route_state) and shifted racer
+ * race-lines. A faithful, stable random-branch lever does not exist on top of
+ * the route-following + recovery design, so the behaviour was dropped. */
 
 /* Per-actor smart-traffic state (indexed by actor slot). */
-static uint32_t s_traffic_smart_rng[TD5_MAX_TOTAL_ACTORS];     /* dedicated LCG */
-static uint8_t  s_traffic_route_assigned[TD5_MAX_TOTAL_ACTORS];/* sticky branch flag */
 static int8_t   s_traffic_lane_bias[TD5_MAX_TOTAL_ACTORS];     /* situational lane offset (-1/0/+1), 1-tick latency */
 
 /* Per-race diagnostic counters — observe which behaviours actually trigger
@@ -5446,64 +5450,9 @@ static struct {
 /* Reset all smart-traffic per-actor state. Called once per race from
  * td5_ai_init_race_actor_runtime(). */
 static void td5_traffic_smart_reset(void) {
-    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
-        s_traffic_smart_rng[i] = 0;
-        s_traffic_route_assigned[i] = 0;
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++)
         s_traffic_lane_bias[i] = 0;
-    }
     memset(&s_smart_stat, 0, sizeof(s_smart_stat));
-}
-
-/* Well-mixed 32-bit integer hash (Murmur3-style finalizer) so per-slot seeds
- * decorrelate — a plain LCG step on adjacent (slot,span) seeds gave a skewed
- * LEFT/RIGHT split across the 6 traffic slots. */
-static uint32_t traffic_smart_hash(uint32_t x) {
-    x ^= x >> 16; x *= 0x7FEB352Du;
-    x ^= x >> 15; x *= 0x846CA68Bu;
-    x ^= x >> 16;
-    return x;
-}
-
-/* Advance the per-slot dedicated LCG (MSVC constants, but private state — does
- * NOT touch the shared rand()). Lazily self-seeds from the slot index. */
-static uint32_t traffic_smart_rng_next(int slot) {
-    uint32_t s = s_traffic_smart_rng[slot];
-    if (s == 0)
-        s = traffic_smart_hash((uint32_t)(slot + 1) * 0x9E3779B1u) | 1u;
-    s = s * 214013u + 2531011u;
-    s_traffic_smart_rng[slot] = s;
-    return (s >> 16) & 0x7FFFu;
-}
-
-/* (1) RandomBranch: assign this traffic actor a route table once (sticky for
- * the race), setting selector + table pointer CONSISTENTLY so heading and
- * branch decisions agree. No-op when disabled, slot is not traffic, the actor
- * is already assigned, or the chosen route table is absent (single-route
- * track). span_seed mixes spawn position into the seed for track variety. */
-static void traffic_smart_assign_route(int slot, int32_t *rs, int span_seed) {
-    int r;
-    if (!g_td5.ini.traffic_smart || !g_td5.ini.traffic_random_branch)
-        return;
-    if (slot < g_traffic_slot_base || slot >= TD5_MAX_TOTAL_ACTORS)
-        return;
-    if (s_traffic_route_assigned[slot])
-        return;
-    s_traffic_route_assigned[slot] = 1;
-    if (s_traffic_smart_rng[slot] == 0)
-        s_traffic_smart_rng[slot] =
-            traffic_smart_hash(((uint32_t)(slot + 1) * 0x9E3779B1u)
-                             ^ ((uint32_t)(span_seed + 1) * 0x85EBCA77u)) | 1u;
-    /* take a high, well-mixed bit for a ~50/50 LEFT/RIGHT split */
-    r = (int)((traffic_smart_rng_next(slot) >> 9) & 1u);   /* 0 = LEFT, 1 = RIGHT */
-    if (g_route_tables[r] == NULL) {
-        r ^= 1;                                      /* track has only one route */
-        if (g_route_tables[r] == NULL)
-            return;
-    }
-    rs[RS_ROUTE_TABLE_SELECTOR] = r;
-    rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[r];
-    TD5_LOG_I(LOG_TAG, "traffic_smart_branch: slot=%d route=%s selector=%d",
-              slot, r ? "RIGHT" : "LEFT", r);
 }
 
 /* Scan active actors for one occupying `target_lane` near `self_span` (a car
@@ -5700,12 +5649,6 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
     /* --- Stage 1: Recycle --- */
     td5_ai_recycle_traffic_actor();
-
-    /* [S20 smart-traffic] RandomBranch — assign this traffic car a route table
-     * (sticky, once per race) so it follows LEFT or RIGHT at forks. Done before
-     * Stage 2 so the heading read below uses the assigned table consistently.
-     * No-op when disabled / single-route track / racing AI. */
-    traffic_smart_assign_route(slot, rs, (int)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED));
 
     /* [S20 smart-traffic] periodic diagnostic dump (one slot, every ~300 frames)
      * so the before/after trace can confirm which behaviours actually fired. */
