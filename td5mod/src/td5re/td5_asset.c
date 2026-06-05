@@ -2959,6 +2959,73 @@ static const char *s_car_zip_paths[76] = {
     "cars/tur.zip", "cars/tus.zip", "cars/xjr.zip", "cars/xk1.zip",
 };
 
+/* [S23] Authored TD6 per-car rear (brake/tail) light positions, extracted from
+ * Test Drive 6 param/<code>param.scr :CAR_LIGHTS0/1: by
+ * re/tools/extract_td6_carlights.py. Model space, rear = -Z; light0 = +X (right),
+ * light1 = -X (left). TD6.exe parses these .scr fields at runtime (CONFIRMED: the
+ * exe contains the "CAR_LIGHTS"/"param.scr" parser strings). These REPLACE the
+ * values the binary carparam.dat carries at +0x60/+0x68 for TD6 cars, which are a
+ * DIFFERENT field and were burying the lights inside the body (.scr differs from
+ * the binary +0x60 in 28/39 cars). Donor-param cars (aud/pro/xjr — no .scr) are
+ * omitted and fall back to the cardef hardpoint. */
+static const struct td6_car_lights {
+    const char *code; int16_t l0[3]; int16_t l1[3];
+} k_td6_car_lights[] = {
+    { "390", {  180,  40, -750}, { -180,  40, -750} },
+    { "400", {  208,  42, -743}, { -208,  42, -743} },
+    { "atl", {  198,  40, -738}, { -198,  40, -738} },
+    { "att", {  237,  24, -725}, { -237,  24, -725} },
+    { "bmw", {  268,   7, -664}, { -268,   7, -664} },
+    { "cer", {  210,  40, -710}, { -210,  40, -710} },
+    { "chd", {  195,  61, -689}, { -195,  61, -689} },
+    { "chr", {  180,  50, -790}, { -180,  50, -790} },
+    { "cp1", {  196,  64, -750}, { -196,  64, -750} },
+    { "cp2", {  200,   0, -760}, { -200,   0, -760} },
+    { "cp3", {  180,  10, -670}, { -180,  10, -670} },
+    { "cp4", {  210,   0, -690}, { -210,   0, -690} },
+    { "db7", {  184,  32, -717}, { -184,  32, -717} },
+    { "eli", {  120,  79, -685}, { -120,  79, -685} },
+    { "esp", {  178,  26, -600}, { -178,  26, -600} },
+    { "flx", {  236,  12, -664}, { -236,  12, -664} },
+    { "g40", {  200,  50, -670}, { -200,  50, -670} },
+    { "grf", {  194,  14, -740}, { -194,  14, -740} },
+    { "gts", {  162,  46, -690}, { -162,  46, -690} },
+    { "lgt", {  188,  40, -702}, { -188,  40, -702} },
+    { "lit", {  264,  14, -690}, { -264,  14, -690} },
+    { "lot", {  190,  55, -670}, { -190,  55, -670} },
+    { "mam", {  203,  26, -677}, { -203,  26, -677} },
+    { "mcj", {  210,  45, -790}, { -220,  45, -790} },
+    { "mcl", {  179,  27, -620}, { -179,  27, -620} },
+    { "mgt", {  180,  50, -700}, { -180,  50, -700} },
+    { "pan", {  210,   0, -690}, { -210,   0, -690} },
+    { "pwr", {  158,  15, -700}, { -158,  15, -700} },
+    { "s12", {  231,  83, -700}, { -231,  83, -700} },
+    { "shl", {  160,  70, -640}, { -160,  70, -640} },
+    { "sub", {  227,  40, -720}, { -227,  40, -720} },
+    { "sup", {  194,  51, -741}, { -194,  51, -741} },
+    { "toy", {  202, -70, -700}, { -202, -70, -700} },
+    { "tur", {  150,  65, -660}, { -150,  65, -660} },
+    { "tus", {  210,   0, -690}, { -210,   0, -690} },
+    { "xk1", {  128,  35, -735}, { -128,  35, -735} },
+};
+
+/* Resolve a "cars/<code>.zip" path to its authored TD6 light entry, or NULL. */
+static const struct td6_car_lights *td6_lookup_car_lights(const char *zip_path)
+{
+    if (!zip_path) return NULL;
+    const char *p = strstr(zip_path, "cars/");
+    if (!p) return NULL;
+    p += 5;
+    char code[8];
+    int i = 0;
+    while (p[i] && p[i] != '.' && i < (int)sizeof(code) - 1) { code[i] = p[i]; i++; }
+    code[i] = '\0';
+    for (size_t k = 0; k < sizeof(k_td6_car_lights) / sizeof(k_td6_car_lights[0]); k++)
+        if (strcmp(code, k_td6_car_lights[k].code) == 0)
+            return &k_td6_car_lights[k];
+    return NULL;
+}
+
 /* ========================================================================
  * Test Drive 6 car support
  *
@@ -3248,6 +3315,23 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
      * overlay (misrenders as a "lights shader" on their grayscale body). Must
      * follow set_vehicle_mesh, which resets the flag. */
     td5_render_set_vehicle_is_td6(slot, is_td6_mesh);
+
+    /* [S23] Install the authored TD6 rear/brake-light positions for this slot.
+     * The binary carparam.dat the converter copied has the WRONG values at
+     * +0x60/+0x68 for TD6 cars (that is not TD6's CAR_LIGHTS field), which buried
+     * the lights inside the body. Use the authored :CAR_LIGHTS0/1: from the code
+     * table; TD5 cars and donor-param TD6 cars (no .scr) fall back to the cardef
+     * hardpoint (set_vehicle_mesh already cleared the override). */
+    if (is_td6_mesh) {
+        const struct td6_car_lights *cl = td6_lookup_car_lights(zip_path);
+        if (cl) {
+            td5_render_set_vehicle_taillights(slot, cl->l0, cl->l1);
+            TD5_LOG_I(LOG_TAG,
+                      "vehicle slot=%d: TD6 CAR_LIGHTS %s -> (%d,%d,%d)/(%d,%d,%d)",
+                      slot, cl->code, cl->l0[0], cl->l0[1], cl->l0[2],
+                      cl->l1[0], cl->l1[1], cl->l1[2]);
+        }
+    }
 
     TD5_LOG_I(LOG_TAG,
               "vehicle slot=%d car=%d: himodel.dat loaded (%d bytes, %d verts, %d cmds)",

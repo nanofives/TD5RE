@@ -389,6 +389,29 @@ void td5_render_set_vehicle_is_td6(int slot, int is_td6)
     s_vehicle_is_td6[slot] = is_td6 ? 1 : 0;
 }
 
+/* [S23] Per-slot authored rear/brake-light positions (model space, int16[3] ×2).
+ * Ported TD6 cars carry WRONG taillight values in the binary carparam.dat at
+ * +0x60/+0x68 — that is NOT TD6's brake-light field. TD6.exe instead reads the
+ * authored :CAR_LIGHTS0/1: positions from each car's param.scr (CONFIRMED:
+ * TD6.exe contains the "CAR_LIGHTS"/"param.scr" parser strings; .scr values
+ * differ from the binary +0x60 in 28/39 cars). The asset loader installs those
+ * authored positions here when it loads a TD6 car; render_vehicle_brake_lights
+ * uses them in preference to the cardef hardpoint. valid=0 → fall back to cardef
+ * (TD5 cars + donor-param TD6 cars aud/pro/xjr that have no .scr). */
+static int16_t s_vehicle_taillight[TD5_ACTOR_MAX_TOTAL_SLOTS][2][3];
+static int     s_vehicle_taillight_valid[TD5_ACTOR_MAX_TOTAL_SLOTS];
+
+void td5_render_set_vehicle_taillights(int slot, const int16_t *l0, const int16_t *l1)
+{
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
+    if (!l0 || !l1) { s_vehicle_taillight_valid[slot] = 0; return; }
+    for (int i = 0; i < 3; i++) {
+        s_vehicle_taillight[slot][0][i] = l0[i];
+        s_vehicle_taillight[slot][1][i] = l1[i];
+    }
+    s_vehicle_taillight_valid[slot] = 1;
+}
+
 /* Photo-booth mode: render ONLY the player car (skip sky + track spans here, and
  * VFX/HUD/clear in the game frame) over a chroma background, for offline preview
  * (carpic) generation. Reuses the normal chase camera (frozen car at spawn). */
@@ -2166,6 +2189,7 @@ void td5_render_set_vehicle_mesh(int slot, TD5_MeshHeader *mesh)
     s_vehicle_meshes[slot] = mesh;
     s_vehicle_tint[slot] = 0;   /* default white; game re-sets it for TD6 player car */
     s_vehicle_is_td6[slot] = 0; /* asset loader re-sets it for a transcoded TD6 mesh */
+    s_vehicle_taillight_valid[slot] = 0; /* [S23] loader re-sets TD6 authored CAR_LIGHTS */
 }
 
 TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot)
@@ -2815,24 +2839,26 @@ void td5_render_actors_for_view(int view_index)
 
             td5_render_prepared_mesh(mesh);
 
-            /* Chrome/envmap reflection overlay (0x40C120 second pass).
-             * Original (RenderRaceActorForView @ 0x0040c120) gates on
-             * `actor_00 == 0` — only the player car (slot 0) gets the reflection
-             * pass. Port deviation: extend to all racer slots (0..5) per user
-             * request; AI cars now share the player's chrome mesh
-             * (g_playerReflectionMeshResource @ 0x004c3d40 is a single global,
-             * not per-slot). Traffic actors render through a different inlined
-             * path in RenderRaceActorsForView and are intentionally left without
-             * reflection. [RE basis: agent confirmed mesh is global, gate is
-             * slot==0 in original — this is a deliberate visual enhancement.] */
-            /* Skip ported TD6 cars: their grayscale body + unused env-map mesh
-             * make the reflection overlay paint the scrolling environs "lights"
-             * texture onto the body in planar-scroll zones (Australia bridge/
-             * tunnel) — wrong on new cars. TD5 cars are unaffected. */
-            if (s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS &&
-                !s_photobooth_active && !s_vehicle_is_td6[slot]) {
+            /* [S23 2026-06-05] UNIFIED vehicle reflection — TD5 cars now match
+             * TD6 cars. The chrome/env-map "mode 2" overlay was a PORT-ONLY
+             * enhancement: the original RenderRaceActorForView @0x0040c120 ran it
+             * for the PLAYER car only (gate `actor_00 == 0`), and the traffic path
+             * RenderRaceActorsForView @0x0040bd20 never ran it [CONFIRMED agent
+             * 2026-06-05]. The port had extended it to all racer slots, then had
+             * to EXCLUDE ported TD6 cars via !s_vehicle_is_td6 because the overlay
+             * painted the scrolling environs "lights" texture onto their grayscale
+             * bodies (the user's "lights shader over new cars"). The user asked
+             * for ONE unified look matching the TD6 cars — which never run the
+             * overlay — so it is now disabled for ALL cars and the divergent
+             * !s_vehicle_is_td6 gate is removed. The overlay + projection-effect
+             * update are kept behind this flag for easy revert; flip to 1 to
+             * restore the all-racer chrome (the TD6 grayscale caveat returns). */
+            static const int s_vehicle_reflection_overlay_enabled = 0;
+            if (s_vehicle_reflection_overlay_enabled &&
+                s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS &&
+                !s_photobooth_active) {
                 td5_render_update_projection_effect(slot, actor);
-                render_vehicle_reflection_overlay(mesh, slot);   /* booth: no reflections */
+                render_vehicle_reflection_overlay(mesh, slot);
             }
 
             /* Render wheel ring + brake-light billboards — RACER SLOTS ONLY.
@@ -5094,9 +5120,20 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     const float half_size = 40.0f; /* model-space half-extent (original ±80 / 2) */
 
     for (int light = 0; light < 2; light++) {
-        /* Read hardpoint int16[3] at car_def+0x60 / +0x68 */
+        /* Taillight hardpoint, int16[3] model space. [S23] For ported TD6 cars
+         * the binary carparam.dat carries WRONG values at +0x60/+0x68 (it is not
+         * TD6's CAR_LIGHTS field), so the asset loader installs the authored TD6
+         * :CAR_LIGHTS0/1: positions per slot via td5_render_set_vehicle_taillights.
+         * Use those when present; otherwise read the cardef hardpoint (TD5 cars +
+         * donor-param TD6 cars aud/pro/xjr with no .scr). */
         int16_t hp[3];
-        memcpy(hp, (uint8_t *)car_def + 0x60 + light * 8, 6);
+        if (s_vehicle_taillight_valid[slot]) {
+            hp[0] = s_vehicle_taillight[slot][light][0];
+            hp[1] = s_vehicle_taillight[slot][light][1];
+            hp[2] = s_vehicle_taillight[slot][light][2];
+        } else {
+            memcpy(hp, (uint8_t *)car_def + 0x60 + light * 8, 6);
+        }
 
         float px = (float)hp[0];
         float py = (float)hp[1];
