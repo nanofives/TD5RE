@@ -4014,7 +4014,7 @@ static void frontend_render_text_input(void) {
     if (s_text_input_state == 1 &&
         (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
         float name_w = fe_measure_small_text(s_text_input_ctx.buffer);
-        float caret_x = field_x + name_w * sx + 1.0f * sx;
+        float caret_x = field_x + name_w * fe_glyph_sx(sx, sy) + 1.0f * sx;
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         fe_draw_quad(caret_x, field_y, 2.0f * sx, 12.0f * sy, 0xFF00FF00, -1, 0, 0, 0, 0);
     }
@@ -6215,7 +6215,7 @@ static void frontend_render_race_type_description(float sx, float sy) {
         float ly = 32.0f + (float)(line - 1) * 12.0f;
         if (ly >= 176.0f) break;
         const char *s = k_race_desc[idx][line];
-        fe_draw_small_text(panel_x + (panel_w - fe_measure_small_text(s) * sx) * 0.5f,
+        fe_draw_small_text(panel_x + (panel_w - fe_measure_small_text(s) * fe_glyph_sx(sx, sy)) * 0.5f,
                            panel_y + ly * sy, s, 0xFFFFFFFF, sx, sy);
     }
 }
@@ -6303,7 +6303,7 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
      * rows are drawn in the SMALL font in the original (CarSelectionScreenStateMachine
      * @0x40dfc0, 10+ DrawFrontendSmallFontStringToSurface calls @0x40ee82..0x40f11b), not
      * the scaled button font — measure with the small font. */
-    float vx = hx + fe_measure_small_text("COMPRESSION:") * sx + 16.0f * sx;
+    float vx = hx + fe_measure_small_text("COMPRESSION:") * fe_glyph_sx(sx, sy) + 16.0f * sx;
     char val[64];
     int i;
 
@@ -7036,11 +7036,17 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
      * [left,right]: NAME[16,112] SCORE[128,212] CAR[228,336] AVERAGE[352,428] TOP[444,520]. */
     #define HS_SF_X(LX)      ((115.0f + (float)(LX)) * sx)
     #define HS_SF_Y(LY)      ((177.0f + (float)(LY)) * sy)
-    #define HS_SF_CTR(L,R,S) ((115.0f + (float)(L) + ((float)((R)-(L)) - fe_measure_small_text(S)) * 0.5f) * sx)
+    /* Centre text S in panel-local column [L,R]: anchor the COLUMN centre at *sx
+     * (UI layout space), then subtract HALF the rendered text width at the GLYPH
+     * scale fe_glyph_sx(sx,sy) (= the 4:3-locked min(sx,sy)). Multiplying the text
+     * width by gsx (not sx) keeps the now-square, non-stretched glyphs centred in
+     * the column at every aspect ratio. */
+    #define HS_SF_CTR(L,R,S) ((115.0f + (float)(L) + (float)((R)-(L)) * 0.5f) * sx \
+                              - fe_measure_small_text(S) * 0.5f * fe_glyph_sx(sx, sy))
 
     if (!grp) {
         const char *msg = "NO SCORES YET";
-        fe_draw_small_text((320.0f * sx) - (fe_measure_small_text(msg) * 0.5f) * sx,
+        fe_draw_small_text((320.0f * sx) - (fe_measure_small_text(msg) * 0.5f) * fe_glyph_sx(sx, sy),
                            HS_SF_Y(60), msg, 0xFFCCCCCC, sx, sy);
         return;
     }
@@ -7711,8 +7717,14 @@ static void fe_draw_small_text(float x, float y, const char *text, uint32_t colo
         }
         const float cap_px   = SMALLFONT_TTF_CAP * sy;          /* rasterise at on-screen vertical px */
         const float baseline = y + SMALLFONT_TTF_BASELINE * sy; /* design baseline below the cell top */
-        const float hscale   = (sy != 0.0f) ? (sx / sy) : 1.0f; /* horizontal scale = sx (bitmap stretch model) */
-        const float trkn     = SMALLFONT_TTF_TRACK * sx;
+        /* 4:3 lock — IDENTICAL to fe_draw_text/buttons: never stretch horizontally
+         * past square. When the window is WIDER than 4:3 (sx >= sy) hscale=1, so
+         * glyphs advance at the vertical (sy) scale (square, not stretched to sx);
+         * when NARROWER it condenses. The effective design->screen horizontal scale
+         * is sy*hscale = min(sx,sy) = fe_glyph_sx(sx,sy) — exactly the width every
+         * fe_measure_small_text caller now multiplies by, so positions are preserved. */
+        const float hscale   = (sx < sy) ? (sx / sy) : 1.0f;
+        const float trkn     = SMALLFONT_TTF_TRACK * sy * hscale;
         for (int i = 0; text[i]; i++) {                         /* pass 1: rasterise into the shared atlas */
             td5_glyph g; td5_font_get((unsigned char)text[i], cap_px, &g);
         }

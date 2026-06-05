@@ -32,6 +32,7 @@
 #include "td5_ai.h"
 #include "td5re.h"
 #include "td5_vectorui.h"   /* resolution-independent VectorUI primitives (SDF gauge, text) */
+#include "td5_font.h"       /* shared native menu TTF glyph cache (pause-menu text) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -1051,6 +1052,56 @@ void td5_hud_draw_pause_overlay(void)
      * Submit pre-built pause menu panel, selection, sliders, and text. */
     for (i = 0; i < s_pause_quad_count && i < TD5_HUD_PAUSE_MAX_QUADS; i++) {
         hud_submit_quad(s_pause_quad_buf + i * 0xB8);
+    }
+
+    /* [SMALL-FONT TTF SWAP 2026-06-05] Native TTF path: render the pause-menu
+     * text in the SAME face as the frontend menu / buttons / small font (menu.ttf),
+     * instead of the pause-font SDF / PAUSETXT bitmap, so the in-race pause menu
+     * matches the rest of the UI. The pause panel is drawn at a FIXED pixel size
+     * centred on screen (cx/cy, no sx/sy), so glyphs are naturally square — no
+     * aspect stretch and no 4:3 lock needed here (unlike the frontend). Advances
+     * come straight from the TTF so the row self-sizes; centred rows (alignment 2)
+     * use those same advances. Tunable: PAUSE_TTF_CAP (cap px in the 16px row) /
+     * PAUSE_TTF_BASELINE (px from the row top down to the baseline). Falls through
+     * to the SDF/bitmap path below when no TTF is loaded. */
+    if (s_pause_vui_line_count > 0 && td5_font_ready()) {
+        const float PAUSE_TTF_CAP      = 11.0f;
+        const float PAUSE_TTF_BASELINE = 13.0f;
+        const float PAUSE_TTF_TRACK    = 0.0f;
+        float cx = g_render_width_f  * 0.5f;
+        float cy = g_render_height_f * 0.5f;
+        static int s_logged_pause_ttf = 0;
+        if (!s_logged_pause_ttf) {
+            s_logged_pause_ttf = 1;
+            TD5_LOG_I(LOG_TAG, "pause menu: native TTF active (cap=%.1f baseline=%.1f)",
+                      (double)PAUSE_TTF_CAP, (double)PAUSE_TTF_BASELINE);
+        }
+        /* pass 1: rasterise every glyph into the shared atlas, then ONE GPU upload */
+        for (int li = 0; li < s_pause_vui_line_count; li++) {
+            const char *s = s_pause_vui_lines[li].s;
+            for (int c = 0; s[c]; c++) { td5_glyph g; td5_font_get((unsigned char)s[c], PAUSE_TTF_CAP, &g); }
+        }
+        td5_font_flush_uploads();
+        /* pass 2: lay out + draw (cache hits) */
+        for (int li = 0; li < s_pause_vui_line_count; li++) {
+            PauseTextLine *L = &s_pause_vui_lines[li];
+            const char *s = L->s;
+            float total_w = 0.0f;
+            for (int c = 0; s[c]; c++)
+                total_w += td5_font_advance((unsigned char)s[c], PAUSE_TTF_CAP) + PAUSE_TTF_TRACK;
+            float start_x  = (L->alignment == 2) ? -(total_w * 0.5f)
+                                                 : (4.0f - s_pause_half_width);
+            float baseline = cy + L->y + PAUSE_TTF_BASELINE;
+            float curx     = cx + start_x;
+            for (int c = 0; s[c]; c++) {
+                td5_glyph g; td5_font_get((unsigned char)s[c], PAUSE_TTF_CAP, &g);
+                if (g.valid && g.w > 0.0f)
+                    td5_vui_quad(curx + g.xoff, baseline + g.yoff, g.w, g.h,
+                                 0xFFFFFFFFu, g.page, g.u0, g.v0, g.u1, g.v1);
+                curx += g.advance + PAUSE_TTF_TRACK;
+            }
+        }
+        return;
     }
 
     /* VectorUI: render the menu text crisply via the pause-font SDF (the glyph
