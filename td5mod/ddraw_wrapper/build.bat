@@ -4,7 +4,11 @@ setlocal
 REM Change to script directory so relative paths work
 cd /d "%~dp0"
 
-set GCC=..\..\deps\mingw\mingw32\bin\gcc.exe
+REM [2026-06-04] Toolchain is at td5mod\deps\mingw. From this script's dir
+REM (td5mod\ddraw_wrapper) that is ONE level up, not two — the old ..\..\deps
+REM pointed at a nonexistent TD5RE\deps and broke every wrapper rebuild.
+set GCC=..\deps\mingw\mingw32\bin\gcc.exe
+set AR=..\deps\mingw\mingw32\bin\ar.exe
 set SRCDIR=src
 set OUTDIR=build
 set DEF=ddraw.def
@@ -55,6 +59,25 @@ if errorlevel 1 goto :fail
 
 echo Compiling png_loader.c...
 "%GCC%" -c -O2 -Wall -Wno-unused-function -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\png_loader.c -o %OUTDIR%\png_loader.o
+if errorlevel 1 goto :fail
+
+REM --- Static archive for the source-port link ---
+REM [2026-06-04] build_standalone.bat links the wrapper as a PREBUILT static lib
+REM (-L build -lddraw_wrapper); it does NOT compile the wrapper itself. So this
+REM .a MUST be (re)produced here whenever the wrapper objects change, or td5re's
+REM link fails with "undefined reference" (e.g. S01's Backend_SetExclusiveFullscreen).
+echo Creating libddraw_wrapper.a...
+if exist %OUTDIR%\libddraw_wrapper.a del %OUTDIR%\libddraw_wrapper.a
+"%AR%" rcs %OUTDIR%\libddraw_wrapper.a ^
+    %OUTDIR%\ddraw_main.o ^
+    %OUTDIR%\ddraw4.o ^
+    %OUTDIR%\surface4.o ^
+    %OUTDIR%\d3d3.o ^
+    %OUTDIR%\device3.o ^
+    %OUTDIR%\viewport3.o ^
+    %OUTDIR%\texture2.o ^
+    %OUTDIR%\d3d11_backend.o ^
+    %OUTDIR%\png_loader.o
 if errorlevel 1 goto :fail
 
 echo Linking %OUT%...
