@@ -1454,9 +1454,12 @@ static const struct { int slot; int level; int start_span; int finish_span; floa
      * s_staggered_span_offsets), so cars sit a few spans BEHIND the banner and
      * drive through it at the lights — matching the original game. Previously
      * all were span 20, which left a 40-56 span empty run-up before the banner
-     * (the "starts too far from the banner" report). Rome ships no 'start'
-     * banner mesh and London already starts ~8 spans behind its banner (~28),
-     * so both keep span 20.
+     * (the "starts too far from the banner" report). Rome ships no dedicated
+     * 'start' banner, but its first checkpoint gantry (Check01a/b @ span 51) sits
+     * right at the start and reads as the start banner, so Rome starts there
+     * (span 51) — the old span 20 left a ~31-49 span empty run-up to it (the S29
+     * "Rome starts too far from the start banner" report). London already starts
+     * ~8 spans behind its Kstart banner (~28), so it keeps span 20.
      *
      * finish_span = the track's FINISH-BANNER span (in-track 'finish'/Kfin mesh).
      * Originally all were span_cnt-8 — i.e. 8 spans from the strip END (the cliff
@@ -1468,7 +1471,7 @@ static const struct { int slot; int level; int start_span; int finish_span; floa
      * stays a walled 6-8 lanes to the end, so it keeps span_cnt-8 (2348). */
     { 32,  8,  76, 2762, 0.08f },  /* PARIS      (TD6 level000, P2P, start~76  finish 1finish~2762) */
     { 33,  9,  59, 2523, 0.08f },  /* NEW YORK   (TD6 level001, P2P, start~59  finish Finish~2523)  */
-    { 34, 10,  20, 2348, 0.08f },  /* ROME       (TD6 level002, P2P, no banners, walled to end)      */
+    { 34, 10,  51, 2348, 0.08f },  /* ROME       (TD6 level002, P2P, start=Check01 gantry~51, walled to end) */
     { 35, 11,  70, 2014, 0.08f },  /* HONG KONG  (TD6 level003, P2P, start~70  finish 1finish~2014)  */
     { 36, 12,  20, 2083, 0.08f },  /* LONDON     (TD6 level004, P2P, start~28  finish Kfin~2083)     */
 };
