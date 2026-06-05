@@ -320,12 +320,16 @@ static int  s_num_ai_opponents  = 5;    /* 0..(TD5_MAX_RACER_SLOTS-1)        */
  * right column, all rows uniformly spaced.
  * NB frontend_create_button treats w==200 as an "unset" sentinel (substitutes
  * 224), so QR_BTN_W must NOT be 200. */
-#define QR_COL_X        64    /* button left edge                         */
-#define QR_BTN_W       208    /* button width (right edge = 272)          */
+/* [S02 follow-up 2026-06-04] Whole QR row group shifted right +56 (64->120) so the
+ * caption buttons clear the MainMenu background's black left bar (~0..110px); this
+ * matches the other option screens' x=120 left edge. FE_QR_VALUE_X shifts by the
+ * same +56 to keep the button->value gap (button right edge = 120+208 = 328). */
+#define QR_COL_X       120    /* button left edge (clears the black left bar)     */
+#define QR_BTN_W       208    /* button width (right edge = 328)          */
 #define QR_ROW_Y0       96    /* first row y                              */
 #define QR_ROW_DY       56    /* uniform vertical gap between rows         */
 #define QR_ROW_Y(n)     (QR_ROW_Y0 + (n) * QR_ROW_DY)
-#define FE_QR_VALUE_X  280    /* value column left edge (clear of button @272)  */
+#define FE_QR_VALUE_X  336    /* value column left edge (clear of button @328)  */
 #define FE_QR_VALUE_SCALE 0.9f /* value glyph scale — matches the button-caption size */
 #define FE_QR_SCREEN_W   640  /* canvas width                                    */
 #define FE_QR_RIGHT_MARGIN 12 /* keep value text this far from the right edge     */
