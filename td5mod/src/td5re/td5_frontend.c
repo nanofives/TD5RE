@@ -1170,14 +1170,63 @@ static int frontend_load_car_preview_surface(int car_index, int paint_index) {
 }
 
 /* TD6 body-only paint overlay (carpicpaint0.png): grayscale body, everything
- * else already transparent (alpha), so load with NO colour key — the PNG alpha
- * is the mask. Paint-independent, so a single frame. Returns <=0 if absent (e.g.
- * a TD5 car, or a TD6 car whose preview predates carpicpaint generation). */
+ * else transparent (alpha) — the PNG alpha is the mask. Drawn MODULATEd by the
+ * paint colour OVER the gray base carpic to tint just the body.
+ *
+ * 🟥 The source mask is anti-aliased: ~6% of its texels carry PARTIAL alpha at
+ * the body silhouette, and it ships at HALF the base carpic's resolution
+ * (816x560 vs 1632x1120). Drawn over the gray base, those semi-transparent edge
+ * texels let the unpainted gray body bleed through — barely visible static, but
+ * obvious during the car-change SLIDE: the two mismatched-resolution layers are
+ * linear-filtered at sub-pixel positions, so the gray base "ghosts" behind the
+ * coloured paint. Fix: BINARISE the mask alpha at load (any body texel -> fully
+ * opaque) so the coloured body completely covers the gray base; only an ignorable
+ * sub-pixel rim against the background can remain. Decoded/uploaded directly
+ * (not via frontend_load_surface_keyed) so the threshold runs before upload.
+ * NO RE BASIS — the TD6 colour-overlay preview is a port-only feature.
+ *
+ * Returns <=0 if absent (a TD5 car, or a TD6 car whose preview predates
+ * carpicpaint generation). */
 static int frontend_load_car_paint_overlay_surface(int car_index) {
     if (car_index < 0 || car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
         return 0;
-    return frontend_load_surface_keyed("CarPicPaint0.tga", s_car_zip_paths[car_index],
-                                       TD5_COLORKEY_NONE);
+    const char *archive = s_car_zip_paths[car_index];
+
+    int existing = frontend_find_surface_by_source("CarPicPaint0.tga", archive);
+    if (existing > 0) return existing;  /* already loaded + binarised */
+
+    char png_path[256];
+    if (!td5_asset_resolve_png_path("CarPicPaint0.tga", archive, png_path, sizeof(png_path)))
+        return 0;
+    void *pixels = NULL; int w = 0, h = 0;
+    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &w, &h))
+        return 0;
+
+    /* Binarise the BGRA32 mask alpha: any non-zero body texel -> fully opaque. */
+    unsigned char *p = (unsigned char *)pixels;
+    for (int i = 0; i < w * h; i++)
+        if (p[i * 4 + 3] != 0) p[i * 4 + 3] = 255;
+
+    int slot = -1;
+    for (int i = 0; i < FE_MAX_SURFACES; i++) if (!s_surfaces[i].in_use) { slot = i; break; }
+    if (slot < 0) { free(pixels); return 0; }
+
+    int page = FE_SURFACE_PAGE_BASE + slot;
+    if (!td5_plat_render_upload_texture(page, pixels, w, h, 2)) { free(pixels); return 0; }
+    s_surfaces[slot].in_use = 1;
+    s_surfaces[slot].tex_page = page;
+    s_surfaces[slot].width = w;
+    s_surfaces[slot].height = h;
+    strncpy(s_surfaces[slot].source_name, "CarPicPaint0.tga", sizeof(s_surfaces[slot].source_name) - 1);
+    s_surfaces[slot].source_name[sizeof(s_surfaces[slot].source_name) - 1] = '\0';
+    strncpy(s_surfaces[slot].source_archive, archive, sizeof(s_surfaces[slot].source_archive) - 1);
+    s_surfaces[slot].source_archive[sizeof(s_surfaces[slot].source_archive) - 1] = '\0';
+    strncpy(s_surfaces[slot].png_path, png_path, sizeof(s_surfaces[slot].png_path) - 1);
+    s_surfaces[slot].png_path[sizeof(s_surfaces[slot].png_path) - 1] = '\0';
+    free(pixels);
+    TD5_LOG_I(LOG_TAG, "paint overlay loaded (alpha binarised): car=%d slot=%d page=%d %dx%d",
+              car_index, slot, page, w, h);
+    return slot + 1;
 }
 
 /* Draw a surface OPAQUE: all pixels (including black) rendered as-is, no color key.
@@ -1844,10 +1893,17 @@ static void frontend_load_selected_car_preview(void) {
      * car-select ENTRY (incl. returning from a race) the car index is unchanged,
      * so the lazy per-car load wouldn't refresh it — and a race may have reused
      * its texture page (it would otherwise paint the WHOLE body from stale
-     * content). Only the cache index is reset here; the release + fresh reload
-     * happens in frontend_draw_car_paint_overlay so we never release a handle
-     * that could collide with the just-reloaded preview surface. */
+     * content). DROP the handle too (set to 0) — do NOT frontend_release_surface()
+     * it: the old overlay slot was already freed by td5_frontend_set_screen's
+     * recyclable sweep, and the preview we just loaded may now occupy that very
+     * slot. Releasing the stale handle would free the fresh preview; uploading
+     * CarPicPaint0 onto it then showed only the painted chassis. Zeroing the
+     * handle leaks nothing (slot already free) and guarantees the lazy reload in
+     * frontend_draw_car_paint_overlay takes the clean "no prior surface" path. */
+    s_paint_overlay_surface = 0;
     s_paint_overlay_car = -1;
+    TD5_LOG_I(LOG_TAG, "car preview (re)loaded: car=%d surf=%d; paint overlay cache invalidated",
+              car_index, s_car_preview_surface);
 }
 
 static void frontend_load_selected_track_preview(void) {
@@ -3983,6 +4039,15 @@ static void frontend_recover_surfaces(void) {
         if (s_surfaces[i].png_path[0]) {
             if (td5_asset_load_png_to_buffer(s_surfaces[i].png_path, TD5_COLORKEY_NONE,
                                               &pixels, &w, &h)) {
+                /* The TD6 paint overlay is uploaded with its mask alpha binarised
+                 * (see frontend_load_car_paint_overlay_surface) so the coloured
+                 * body fully covers the gray base; re-apply that here or a resize
+                 * would re-introduce the gray-bleed edge until the next reload. */
+                if (strcmp(s_surfaces[i].source_name, "CarPicPaint0.tga") == 0) {
+                    unsigned char *pp = (unsigned char *)pixels;
+                    for (int k = 0; k < w * h; k++)
+                        if (pp[k * 4 + 3] != 0) pp[k * 4 + 3] = 255;
+                }
                 s_surfaces[i].width = w;
                 s_surfaces[i].height = h;
                 td5_plat_render_upload_texture(s_surfaces[i].tex_page, pixels, w, h, 2);
@@ -4455,6 +4520,21 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_car_preview_surface = 0;
     s_car_preview_prev_surface = 0;
     s_car_preview_next_surface = 0;
+    /* Reset the TD6 body-paint overlay cache in LOCKSTEP with the preview
+     * surface. The recyclable-surface sweep below frees every non-shared slot
+     * (in_use=0), INCLUDING whatever slot the paint overlay was on — but the
+     * handle/cache-key here used to survive the screen change. That stale
+     * s_paint_overlay_surface handle then aliased a freshly-loaded preview slot
+     * on the next car-select entry: the lazy reload in
+     * frontend_draw_car_paint_overlay would frontend_release_surface() the alias
+     * (freeing the new preview) and upload CarPicPaint0 (chassis-only) onto the
+     * preview's page — so only the painted chassis of the last TD6 car showed,
+     * and reselect then bled paint onto the whole body. Dropping both the handle
+     * and the cached car index here keeps the overlay cache consistent with the
+     * preview, so no alias can form. (TD6-only: TD5 cars never load an overlay.)
+     * NO RE BASIS — the TD6 colour-overlay preview is a port-only feature. */
+    s_paint_overlay_surface = 0;
+    s_paint_overlay_car = -1;
     s_track_preview_surface = 0;
     s_gallery_pic_surface = 0;
     s_gallery_pic_index = 0;
@@ -6338,10 +6418,19 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
              * The overlay surface is still cached for the old car (s_paint_overlay
              * _car) — it isn't reloaded until the slide-IN draws the new car — so
              * draw it DIRECTLY (not via the lazy helper, which would swap in the
-             * new car's mask). Extra gates: cached car paintable (defence in depth
-             * against a stale mask) + prev_surface>0 so the body rides a sliding
-             * carpic rather than sitting pinned at centre. */
-            if (show_paint && s_car_preview_prev_surface > 0 &&
+             * new car's mask).
+             *
+             * 🟥 Paint the overlay over the SAME surface/position as the base
+             * (slide_surf / x), NOT gated on prev_surface>0. On the first frame(s)
+             * of state 11 the case-11 update hasn't set prev yet (prev==0), so the
+             * base is drawn UNPAINTED at centre (slide_surf = s_car_preview_surface,
+             * still the old carpic); gating the overlay on prev>0 dropped the paint
+             * for those frames — a one-frame flash of the GRAY unpainted chassis at
+             * the start of every car change ("it's still loading the no-paint
+             * chassis"). slide_surf and s_paint_overlay_car are both the OLD car in
+             * either case, so drawing the overlay at the same x keeps it painted
+             * throughout. NO RE BASIS — port-only TD6 paint preview. */
+            if (show_paint && slide_surf > 0 &&
                 s_paint_overlay_surface > 0 &&
                 frontend_car_paintable(s_paint_overlay_car))
                 fe_draw_surface_rect(s_paint_overlay_surface, x * sx, 124.0f * sy,
@@ -12629,6 +12718,17 @@ static void Screen_CarSelection(void) {
             s_car_preview_surface = s_car_preview_next_surface;
             s_car_preview_prev_surface = 0;
             s_car_preview_next_surface = 0;
+            /* If the newly-displayed car is NOT paintable (a TD5 car), invalidate
+             * the TD6 paint-overlay cache. A TD5 car never loads an overlay, so
+             * s_paint_overlay_car would otherwise keep pointing at a PREVIOUSLY
+             * viewed TD6 car — and when this TD5 car later slides OUT to a TD6 car,
+             * the state-11 paint draw (whose show_paint gate keys on the INCOMING
+             * TD6 car) would stamp that stale TD6 chassis paint onto the outgoing
+             * TD5 body. Resetting the cache here means the slide-out paint draws
+             * only when the overlay genuinely belongs to a paintable outgoing car.
+             * NO RE BASIS — the TD6 colour-overlay preview is a port-only feature. */
+            if (!frontend_car_paintable(actual_car))
+                s_paint_overlay_car = -1;
             s_inner_state = 12;
         }
     }
