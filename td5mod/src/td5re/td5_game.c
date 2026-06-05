@@ -519,7 +519,8 @@ static int      s_replay_abort_pending; /* 1 = ESC pressed during replay → exi
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
 static int      s_pause_menu_active;
-static int      s_pause_menu_cursor;   /* 0=VIEW, 1=MUSIC, 2=SOUND, 3=CONTINUE, 4=EXIT */
+static int      s_pause_menu_cursor;   /* [REWORK 2026-06-05/S15] 0=VIEW 1=SOUND
+                                        * 2=CONTINUE 3=RESTART RACE 4=QUIT TO MENU 5=EXIT GAME */
 
 /* Wanted-mode tracker marker intensity (DecayTrackedActorMarkerIntensity @ 0x43D7E0).
  * Original global g_wantedTargetTrackerActive. Decays 0x200/sub-tick, clamped to
@@ -551,6 +552,7 @@ static int      s_pause_input_done;    /* reset per-frame, set after first tick 
 static int      s_prev_esc_state;      /* edge detector for ESC key */
 static int      s_prev_pause_act;      /* edge detector for the rebindable PAUSE action */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
+static int      s_pause_restart_pending; /* [REWORK 2026-06-05/S15] 1 = pause-menu RESTART RACE fade in progress, return 3 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
 
 /* ========================================================================
@@ -930,6 +932,18 @@ int td5_game_tick(void) {
      * ------------------------------------------------------------------ */
     case TD5_GAMESTATE_RACE: {
         int result = td5_game_run_race_frame();
+        if (result == 3) {
+            /* [REWORK 2026-06-05/S15] Pause-menu RESTART RACE: the fade-out in
+             * run_race_frame already released race resources; re-init the SAME
+             * race session (reads track/car/opponents/laps/direction straight
+             * from g_td5, all unchanged) and stay in RACE. Mirrors the
+             * menu->race entry path's init call without rebuilding the AI
+             * schedule, so opponents/track/laps are identical. */
+            TD5_LOG_I(LOG_TAG, "Pause RESTART RACE: re-initializing race session (same params)");
+            td5_game_init_race_session();
+            g_td5.game_state = TD5_GAMESTATE_RACE;
+            return 0;
+        }
         if (result != 0) {
             /* Race is over. Determine next state.
              * result=1: normal race completion (fade finished) -> results screen
@@ -2802,6 +2816,7 @@ int td5_game_init_race_session(void) {
     g_td5.race_end_fade_state = 0;
     s_race_end_radial_pulse_enabled = 0;  /* orig writes [0x4aaefc] @ 0x0042aaff */
     s_pause_exit_pending = 0;
+    s_pause_restart_pending = 0;   /* [REWORK 2026-06-05/S15] clear stale RESTART latch */
     g_td5.paused = 1;              /* start paused for countdown */
     /* DAT_00483030 (xz_freeze) has 1 read / 0 writes in the original binary.
      * The port previously set a software flag here to gate XZ integration,
@@ -3396,6 +3411,14 @@ int td5_game_run_race_frame(void) {
                 /* Fade complete: release all race resources and exit */
                 td5_game_release_race_resources();
 
+                if (s_pause_restart_pending) {
+                    /* [REWORK 2026-06-05/S15] Pause-menu RESTART RACE: resources
+                     * released above; signal the FSM to re-init the SAME race
+                     * (same track/car/opponents/laps/direction from g_td5). */
+                    TD5_LOG_I(LOG_TAG, "Fade complete (RESTART RACE) -> re-init same race");
+                    s_pause_restart_pending = 0;
+                    return 3;  /* 3 = restart same race (-> re-init, stay in RACE) */
+                }
                 if (s_pause_exit_pending) {
                     TD5_LOG_I(LOG_TAG, "Fade complete (ESC exit) -> main menu");
                     s_pause_exit_pending = 0;
@@ -3502,17 +3525,20 @@ int td5_game_run_race_frame(void) {
         }
         if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
-            s_pause_menu_cursor = 3;  /* default to CONTINUE (row 3), matching the
-                                       * original: g_audioOptionsCursorRow @0x00474640
-                                       * is statically initialised to 3 and is never
-                                       * reset on pause-open, so the menu always opens
-                                       * on CONTINUE. [CONFIRMED memory_read
-                                       * @0x00474640 = 0x00000003; rows
-                                       * 0=VIEW 1=MUSIC 2=SOUND 3=CONTINUE 4=EXIT]
+            s_pause_menu_cursor = 2;  /* [REWORK 2026-06-05/S15] default to
+                                       * CONTINUE. After removing the MUSIC row
+                                       * CONTINUE moved from row 3 to row 2.
+                                       * Rows: 0=VIEW 1=SOUND 2=CONTINUE
+                                       * 3=RESTART RACE 4=QUIT TO MENU 5=EXIT GAME.
                                        * ENTER then dismisses in one keypress. */
             td5_sound_set_sfx_muted(1);  /* silence engine/skid SFX on pause
                                           * (mirrors DXSound::MuteAll @0x0042C470). */
-            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 3, SFX muted)");
+            /* [REWORK 2026-06-05/S15] Silence the in-race music (CD audio) while
+             * paused — user does not want pause music. Restored (replayed) on
+             * resume to gameplay; left stopped on RESTART/QUIT/EXIT (RESTART's
+             * init re-plays it, the others tear the race down). */
+            td5_sound_cd_stop();
+            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 2, SFX muted, music stopped)");
         }
         if (s_pause_menu_active) {
             /* Process pause menu input ONCE per frame (not per tick) to avoid
@@ -3541,10 +3567,11 @@ int td5_game_run_race_frame(void) {
                 int key_right = td5_plat_input_key_pressed(0xCD) || (jnav & 0x02);
                 int key_enter = td5_plat_input_key_pressed(0x1C) || (jnav & 0x10); /* A = confirm */
 
-                /* Navigation: 5 selectable items (CD Music / SFX / Audio3 / Continue / Exit).
-                 * [CONFIRMED @ 0x0043BF70] RunAudioOptionsOverlay: 5 rows total. */
-                if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 5;
-                if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 4) % 5;
+                /* Navigation: [REWORK 2026-06-05/S15] 6 selectable rows
+                 * (VIEW / SOUND / CONTINUE / RESTART RACE / QUIT TO MENU / EXIT GAME).
+                 * Original had 5 rows (RunAudioOptionsOverlay @ 0x0043BF70). */
+                if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 6;
+                if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 5) % 6;
 
                 /* Left/right adjusts sliders for rows 0-2.
                  * [CONFIRMED @ 0x0043C211] CONTINUOUS while held — (&DAT_004B135C)[cursor] ± 0.02f, clamp [0,1].
@@ -3557,25 +3584,21 @@ int td5_game_run_race_frame(void) {
                     static int s_pause_input_seq = 0;
                     if ((s_pause_input_seq++ & 0x07) == 0) {  /* throttle 1-in-8 */
                         TD5_LOG_I(LOG_TAG,
-                                  "PAUSE input: cursor=%d L=%d R=%d (slider gate cursor<3: %s)",
+                                  "PAUSE input: cursor=%d L=%d R=%d (slider gate cursor<2: %s)",
                                   s_pause_menu_cursor, key_left, key_right,
-                                  s_pause_menu_cursor < 3 ? "PASS" : "BLOCKED");
+                                  s_pause_menu_cursor < 2 ? "PASS" : "BLOCKED");
                     }
                 }
-                if (s_pause_menu_cursor < 3) {
+                /* [REWORK 2026-06-05/S15] Two slider rows now: 0=VIEW, 1=SOUND.
+                 * The MUSIC slider was removed (music is silenced while paused). */
+                if (s_pause_menu_cursor < 2) {
                     int delta = key_right ? +1 : (key_left ? -1 : 0);
                     if (delta) {
                         if (s_pause_menu_cursor == 0) {
                             float v = td5_save_get_view_distance() + (float)delta * 0.02f;
                             td5_save_set_view_distance(v);
                             TD5_LOG_I(LOG_TAG, "Pause slider VIEW: %.2f", td5_save_get_view_distance());
-                        } else if (s_pause_menu_cursor == 1) {
-                            int v = td5_save_get_music_volume() + delta * 2;
-                            td5_save_set_music_volume(v);
-                            td5_sound_set_music_volume(td5_save_get_music_volume());
-                            s_pause_options_dirty = 1;  /* persist to td5re.ini on close [PART B] */
-                            TD5_LOG_I(LOG_TAG, "Pause slider MUSIC: %d", td5_save_get_music_volume());
-                        } else {
+                        } else {  /* cursor 1 = SOUND (SFX master volume) */
                             int v = td5_save_get_sfx_volume() + delta * 2;
                             td5_save_set_sfx_volume(v);
                             td5_sound_set_sfx_volume(td5_save_get_sfx_volume());
@@ -3585,11 +3608,25 @@ int td5_game_run_race_frame(void) {
                     }
                 }
 
-                /* Confirm (Enter) */
+                /* Confirm (Enter). [REWORK 2026-06-05/S15] Rows:
+                 *   2=CONTINUE 3=RESTART RACE 4=QUIT TO MENU 5=EXIT GAME. */
                 if (key_enter && !s_prev_enter) {
-                    if (s_pause_menu_cursor == 3) {
+                    if (s_pause_menu_cursor == 2) {
+                        /* CONTINUE — close the menu, resume the race. */
                         s_pause_menu_active = 0;
+                    } else if (s_pause_menu_cursor == 3) {
+                        /* RESTART RACE — re-run the SAME race (track/car/opponents/
+                         * laps/direction unchanged). Fade out, then the fade-complete
+                         * handler returns 3 and the FSM re-inits the race session.
+                         * The dirty-volume flush below (close-path) persists any
+                         * SOUND slider change; the race re-init re-plays the music. */
+                        s_pause_menu_active = 0;
+                        s_pause_restart_pending = 1;
+                        TD5_LOG_I(LOG_TAG, "Pause menu: RESTART RACE selected, starting fade-out");
+                        td5_game_begin_fade_out(0);
                     } else if (s_pause_menu_cursor == 4) {
+                        /* QUIT TO MENU — leave the race, return to the frontend
+                         * (was "EXIT"; behaviour unchanged, only relabelled). */
                         s_pause_menu_active = 0;
                         s_pause_exit_pending = 1;
                         /* PART A (user 2026-06-02): capture the player's CURRENT
@@ -3614,11 +3651,26 @@ int td5_game_run_race_frame(void) {
                             td5_ini_persist_options();
                             s_pause_options_dirty = 0;
                         }
-                        TD5_LOG_I(LOG_TAG, "Pause menu: Exit selected, starting fade-out (pos=%d)",
+                        TD5_LOG_I(LOG_TAG, "Pause menu: Quit-to-menu selected, starting fade-out (pos=%d)",
                                   s_finish_position_display);
                         /* Trigger fade-out; resources released when fade completes.
                          * Original (0x43C317): calls BeginRaceFadeOutTransition(0). */
                         td5_game_begin_fade_out(0);
+                    } else if (s_pause_menu_cursor == 5) {
+                        /* EXIT GAME — clean application shutdown (distinct from
+                         * QUIT TO MENU). Sets the same quit latch the frontend
+                         * Quit button uses (g_td5.quit_requested); the main loop
+                         * tears the app down on its next iteration. Persist any
+                         * pending volume change first so it survives the exit. */
+                        s_pause_menu_active = 0;
+                        if (s_pause_options_dirty) {
+                            g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
+                            g_td5.ini.music_volume = td5_save_get_music_volume();
+                            td5_ini_persist_options();
+                            s_pause_options_dirty = 0;
+                        }
+                        TD5_LOG_I(LOG_TAG, "Pause menu: EXIT GAME selected -> requesting clean shutdown");
+                        g_td5.quit_requested = 1;
                     }
                 }
 
@@ -3652,14 +3704,23 @@ int td5_game_run_race_frame(void) {
             /* SFX audio gating while paused (mirrors the original's MuteAll on
              * entry + per-row preview + UnMuteAll on exit):
              *   - menu open  → engine/skid SFX stay muted EXCEPT on the SOUND row
-             *     (cursor 2), where un-muting lets the volume slider preview
-             *     audibly. [CONFIRMED @ 0x0043BF70: ModifyOveride(1, cursor==2?100:0,...)]
-             *   - menu just closed (Continue/ESC/Exit this frame) → restore all
-             *     SFX. [CONFIRMED @ 0x0043BF70: DXSound::UnMuteAll on rows 3/4] */
+             *     ([REWORK 2026-06-05/S15] now cursor 1, was cursor 2 before the
+             *     MUSIC row was removed), where un-muting lets the volume slider
+             *     preview audibly. [CONFIRMED @ 0x0043BF70: ModifyOveride(1,...)]
+             *   - menu just closed this frame → restore all SFX, and if we are
+             *     resuming gameplay (CONTINUE / ESC / pad-B — NOT restart, quit-to-
+             *     menu, or exit-game) replay the in-race music that pause-enter
+             *     stopped. RESTART's race re-init re-plays it; the two exit paths
+             *     leave it stopped so it doesn't bleed past the race. */
             if (s_pause_menu_active) {
-                td5_sound_set_sfx_muted(s_pause_menu_cursor == 2 ? 0 : 1);
+                td5_sound_set_sfx_muted(s_pause_menu_cursor == 1 ? 0 : 1);
             } else if (pause_menu_was_active) {
                 td5_sound_set_sfx_muted(0);
+                if (!s_pause_exit_pending && !s_pause_restart_pending && !g_td5.quit_requested) {
+                    td5_sound_cd_play(g_td5.track_index % 10 + 1);  /* same call as InitRace step 16 */
+                    TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
+                              g_td5.track_index % 10 + 1);
+                }
             }
 
             /* If the pause menu just closed (Continue / ESC) and a volume slider

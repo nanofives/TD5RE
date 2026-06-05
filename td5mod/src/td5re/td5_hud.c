@@ -110,14 +110,24 @@ const int8_t g_pause_glyph_widths[256] = {
 };
 
 /* English pause-menu overlay string table (0x4744B8).
- * 6 entries: PAUSED(center), VIEW/MUSIC/SOUND(left), CONTINUE/EXIT(center). */
+ * [PORT REWORK 2026-06-05 / S15] The original had 6 entries
+ * (PAUSED, VIEW/MUSIC/SOUND, CONTINUE/EXIT). Per user feedback the MUSIC
+ * slider row is removed (music is silenced while paused, see td5_game.c
+ * pause-enter), and two action rows are added: RESTART RACE (re-run the same
+ * race) and EXIT GAME (clean app shutdown). The old "EXIT" (return to menu)
+ * is relabelled "QUIT TO MENU" to disambiguate it from EXIT GAME.
+ * New layout — title + 6 selectable rows (cursor indices in parentheses):
+ *   PAUSED(title) / VIEW(0) SOUND(1) [sliders] /
+ *   CONTINUE(2) RESTART RACE(3) QUIT TO MENU(4) EXIT GAME(5).
+ * This is source-port-only UI (no original pause-restart/exit-game equiv). */
 static const char *s_eng_pause_strings[] = {
     "PAUSED",         (const char *)(intptr_t)2,
     "VIEW",           (const char *)(intptr_t)0,
-    "MUSIC",          (const char *)(intptr_t)0,
     "SOUND",          (const char *)(intptr_t)0,
     "CONTINUE",       (const char *)(intptr_t)2,
-    "EXIT",           (const char *)(intptr_t)2,
+    "RESTART RACE",   (const char *)(intptr_t)2,
+    "QUIT TO MENU",   (const char *)(intptr_t)2,
+    "EXIT GAME",      (const char *)(intptr_t)2,
     NULL
 };
 const char **g_pause_page_strings[8] = {
@@ -1091,15 +1101,17 @@ void td5_hud_draw_pause_overlay(void)
 }
 
 /* Called each frame while paused to update SELBOX position and slider thumb positions.
- * cursor: 0-4 (rows: VIEW / MUSIC / SOUND / Continue / Exit)
- * [CONFIRMED @ 0x0043BF70] slider 0=DAT_004B135C → 0x00466EA8 view distance,
- * slider 1=DAT_004B1360 → DXSound::CDSetVolume (music),
- * slider 2=DAT_004B1364 → DXSound::SetVolume (SFX master). */
+ * cursor: 0-5 (rows: VIEW / SOUND / CONTINUE / RESTART RACE / QUIT TO MENU / EXIT GAME)
+ * [PORT REWORK 2026-06-05 / S15] The MUSIC slider was removed, so only two
+ * sliders remain: row 0 = VIEW (view distance), row 1 = SOUND (SFX master).
+ * music_frac is retained in the signature (caller still computes it) but is no
+ * longer used. */
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac)
 {
+    (void)music_frac;
     float cx = g_render_width_f  * 0.5f;
     float cy = g_render_height_f * 0.5f;
-    float fracs[3] = { view_dist_frac, music_frac, sfx_frac };
+    float fracs[2] = { view_dist_frac, sfx_frac };  /* row 0 = VIEW, row 1 = SOUND */
 
     {
         static float s_last_view_frac = -1.0f;
@@ -1125,8 +1137,9 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
     }
 
     /* Update slider fill bar using atlas texture.
-     * Fill scale = 128.0f (0x0045D600), UV scale = frac*255.0 (0x0045D684). */
-    for (int row = 0; row < 3; row++) {
+     * Fill scale = 128.0f (0x0045D600), UV scale = frac*255.0 (0x0045D684).
+     * [PORT REWORK 2026-06-05 / S15] Two sliders (VIEW, SOUND). */
+    for (int row = 0; row < 2; row++) {
         if (!s_pause_slider_ptrs[row]) continue;
         float frac = fracs[row];
         if (frac < 0.0f) frac = 0.0f;
@@ -4342,20 +4355,27 @@ void td5_hud_init_pause_menu(int page_index)
     TD5_AtlasEntry *blackbar_e = td5_asset_find_atlas_entry(NULL, "BLACKBAR");
     TD5_AtlasEntry *slider_e   = td5_asset_find_atlas_entry(NULL, "SLIDER");
 
-    /* BLACKBOX: dark semi-transparent panel. y is fixed ±56.
-     * From binary 0x43B7C0: single-texel sample.  Texture alpha (A=128 after
-     * ARGB channel remap) provides semi-transparency naturally. */
+    /* BLACKBOX: dark semi-transparent panel. Original y was fixed ±56 (5 rows
+     * below the PAUSED title). [PORT REWORK 2026-06-05 / S15] The reworked menu
+     * has 6 rows (the bottom EXIT GAME row + its selbox reach ~+63), so the
+     * panel bottom is grown to +68 to frame the extra row. Top stays -56 (the
+     * title at -52 keeps a 4px margin). From binary 0x43B7C0: single-texel
+     * sample. Texture alpha (A=128 after ARGB channel remap) provides
+     * semi-transparency naturally. */
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
         PAUSE_ADD(-s_pause_half_width, -56.0f,
-                   s_pause_half_width,  56.0f,
+                   s_pause_half_width,  68.0f,
                    bu, bv, bu, bv,
                    blackbox_e->texture_page, 0xFFFFFFFF);
     }
 
     /* SELBOX: grayscale highlight bar (256x16 atlas texture).
-     * From binary: x0=1-half_w, x1=half_w-1; cursor=3 default (CONTINUE). */
+     * From binary: x0=1-half_w, x1=half_w-1. [PORT REWORK 2026-06-05 / S15]
+     * Default cursor is now CONTINUE = row 2 (was row 3, before MUSIC removal).
+     * This initial position is overwritten every frame by
+     * td5_hud_update_pause_overlay(cursor,...). */
     s_pause_selbox_atlas = selbox_e;
     s_pause_sel_box = NULL;
     s_pause_selbox_base_y = -33.0f;  /* 0x0045D75C: selbox starts at row 1 (VIEW), not row 0 (PAUSED) */
@@ -4370,7 +4390,7 @@ void td5_hud_init_pause_menu(int page_index)
         float sv0 = (float)selbox_e->atlas_y + 0.5f;
         float su1 = su0 + 255.0f;
         float sv1 = sv0 + 15.0f;
-        float init_y = s_pause_selbox_base_y + 3.0f * 16.0f;
+        float init_y = s_pause_selbox_base_y + 2.0f * 16.0f;  /* default = CONTINUE (row 2) */
         PAUSE_ADD(sel_x0, init_y, sel_x1, init_y + 16.0f,
                   su0, sv0, su1, sv1,
                   selbox_e->texture_page, 0xFFFFFFFF);
@@ -4382,7 +4402,11 @@ void td5_hud_init_pause_menu(int page_index)
     s_pause_bar_x0 = s_pause_half_width - 130.0f;  /* 0x0045D73C */
     s_pause_bar_x1 = s_pause_half_width - 1.0f;
 
-    for (int row = 0; row < 3; row++) {
+    /* [PORT REWORK 2026-06-05 / S15] Two sliders now: VIEW (row 0) + SOUND
+     * (row 1). The MUSIC slider (old row 1) was removed. Clear the stale 3rd
+     * pointer so a previous init's quad can't draw a phantom slider. */
+    s_pause_slider_ptrs[2] = NULL;
+    for (int row = 0; row < 2; row++) {
         float row_y = (float)row * 16.0f;
         /* Dark background trough — single-texel BLACKBAR */
         float bbu = (float)blackbar_e->atlas_x + 0.5f;
@@ -4415,7 +4439,12 @@ void td5_hud_init_pause_menu(int page_index)
     int pause_vec = (g_td5.ini.vector_ui && td5_vui_pausefont_page() >= 0);
     s_pause_vui_line_count = 0;
 
-    while (pausetxt && s_pause_menu_strings && string_offset < 0x30) {
+    /* [REWORK 2026-06-05 / S15] The offset cap was 0x30 (6 string entries × 8B),
+     * sized for the original PAUSED+5-row table. The reworked menu has 7 entries
+     * (PAUSED + 6 rows), so EXIT GAME (entry 7, offset 0x30) was dropped. Raised
+     * to 0x80 (16 entries, matching the s_pause_vui_lines[16] guard); the NULL
+     * terminator (`if (str == NULL) break;`) is the real stop. */
+    while (pausetxt && s_pause_menu_strings && string_offset < 0x80) {
         const char *str = s_pause_menu_strings[string_offset / 4];
         if (str == NULL) break;
 
@@ -4431,7 +4460,7 @@ void td5_hud_init_pause_menu(int page_index)
             }
             text_y += 16.0f;
             string_offset += 8;
-            if (string_offset > 0x2F) break;
+            if (string_offset > 0x7F) break;  /* [S15] was 0x2F (6 entries); see while-cap note above */
             continue;
         }
 
@@ -4467,7 +4496,7 @@ void td5_hud_init_pause_menu(int page_index)
 
         text_y += 16.0f;
         string_offset += 8;
-        if (string_offset > 0x2F) break;
+        if (string_offset > 0x7F) break;  /* [S15] was 0x2F (6 entries); see while-cap note above */
     }
 #undef PAUSE_ADD
 #undef PAUSE_BUF
