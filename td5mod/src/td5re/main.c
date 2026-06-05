@@ -498,19 +498,28 @@ static int td5_net_selftest(void)
     td5_net_set_mode(TD5_NET_MODE_DIRECT);
 
     if (is_host) {
+        const char *pw  = getenv("TD5RE_NET_SELFTEST_PW");
+        const char *mx  = getenv("TD5RE_NET_SELFTEST_MAX");
         if (!td5_net_create_session_ex("SelfTest", "Host", 6,
                                        g_td5.ini.net_game_port, g_td5.ini.net_enable_upnp))
             TD5_LOG_E("net", "selftest host: create failed");
-        else
-            TD5_LOG_I("net", "selftest host: \"%s\" upnp_status=%d",
-                      td5_net_get_status_text(), td5_net_get_upnp_status());
+        else {
+            int mxn = (mx && mx[0]) ? atoi(mx) : 6;
+            td5_net_set_session_limits(mxn, (pw && pw[0]) ? pw : "");
+            TD5_LOG_I("net", "selftest host: \"%s\" upnp=%d max=%d password=%s",
+                      td5_net_get_status_text(), td5_net_get_upnp_status(),
+                      td5_net_get_max_players(), (pw && pw[0]) ? "set" : "none");
+        }
     } else {
         const char *ip = getenv("TD5RE_NET_SELFTEST_IP");
+        const char *pw = getenv("TD5RE_NET_SELFTEST_PW");
         if (!ip || !ip[0]) ip = "127.0.0.1";
+        if (pw) td5_net_set_join_password(pw);
         if (!td5_net_join_direct(ip, g_td5.ini.net_game_port, "Client"))
             TD5_LOG_E("net", "selftest join: join_direct failed");
         else
-            TD5_LOG_I("net", "selftest join: \"%s\"", td5_net_get_status_text());
+            TD5_LOG_I("net", "selftest join: \"%s\" (pw=%s)",
+                      td5_net_get_status_text(), (pw && pw[0]) ? "set" : "none");
     }
 
     start = td5_plat_time_ms();
@@ -526,6 +535,11 @@ static int td5_net_selftest(void)
                       td5_net_local_slot());
             break;
         }
+        if (!is_host && td5_net_get_join_nak_reason() != 0) {
+            TD5_LOG_W("net", "selftest join: REJECTED nak_reason=%d (1=full,2=password)",
+                      td5_net_get_join_nak_reason());
+            break;
+        }
         if (!is_host && td5_net_is_connection_lost()) {
             TD5_LOG_W("net", "selftest join: connection lost / timed out");
             break;
@@ -533,9 +547,10 @@ static int td5_net_selftest(void)
         td5_plat_sleep(50);
     }
 
-    TD5_LOG_I("net", "selftest %s DONE: players=%d slot=%d upnp=%d",
+    TD5_LOG_I("net", "selftest %s DONE: players=%d slot=%d upnp=%d nak=%d",
               is_host ? "host" : "join", td5_net_get_player_count(),
-              td5_net_local_slot(), td5_net_get_upnp_status());
+              td5_net_local_slot(), td5_net_get_upnp_status(),
+              td5_net_get_join_nak_reason());
     td5_net_shutdown();
     return 1;
 }

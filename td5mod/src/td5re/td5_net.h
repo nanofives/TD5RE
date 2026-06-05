@@ -53,6 +53,17 @@ int  td5_net_get_upnp_status(void);         /* TD5_NET_UPNP_* */
 const char *td5_net_get_status_text(void);  /* human-readable host / connect status */
 int  td5_net_get_local_ip(char *buf, int len);
 
+/* --- S10b: lobby session limits + per-slot info --- */
+/* Host: set max players (2..6) + an optional join password ("" = open). */
+void td5_net_set_session_limits(int max_players, const char *password);
+int  td5_net_get_max_players(void);
+/* Client: set the password to send with the JOIN request (before joining). */
+void td5_net_set_join_password(const char *password);
+/* Last join rejection reason: 0=none, 1=session full, 2=wrong/again password. */
+int  td5_net_get_join_nak_reason(void);
+const char *td5_net_get_slot_name(int slot);    /* "" if empty */
+int  td5_net_get_slot_latency_ms(int slot);     /* -1 = unknown (e.g. self/host) */
+
 /* --- Per-frame sync --- */
 int  td5_net_handle_host_frame(uint32_t *control_bits, float *frame_dt);
 int  td5_net_handle_client_frame(uint32_t *control_bits, float *frame_dt);

@@ -68,11 +68,19 @@
 /** Magic number for discovery protocol messages */
 #define WS2_DISCOVERY_MAGIC 0x54443552  /* "TD5R" */
 
-/** Discovery message types */
-#define WS2_DISC_QUERY      1
-#define WS2_DISC_ANNOUNCE   2
-#define WS2_DISC_JOIN_REQ   3
-#define WS2_DISC_JOIN_ACK   4
+/** Discovery message types (game-socket control channel, magic-tagged) */
+#define WS2_DISC_QUERY       1
+#define WS2_DISC_ANNOUNCE    2
+#define WS2_DISC_JOIN_REQ    3
+#define WS2_DISC_JOIN_ACK    4
+#define WS2_DISC_JOIN_NAK    5   /* host rejected the join (full / bad password) */
+#define WS2_DISC_PING        6   /* host -> client RTT probe (token = send time) */
+#define WS2_DISC_PONG        7   /* client -> host echo                          */
+#define WS2_DISC_ROSTER_INFO 8   /* host -> all: per-slot names + latency        */
+
+/** JOIN_NAK reason codes (also surfaced via td5_net_get_join_nak_reason). */
+#define WS2_NAK_FULL         1
+#define WS2_NAK_PASSWORD     2
 
 /* Worker thread event indices for WaitForMultipleObjects */
 #define EVT_RECEIVE         0
@@ -144,6 +152,15 @@ static char         s_local_player_name[64];
 static int          s_join_pending;                     /* awaiting JOIN_ACK    */
 static int          s_join_attempts;                    /* JOIN_REQ retries so far */
 static uint32_t     s_join_last_ms;                     /* last JOIN_REQ send clock */
+
+/* --- S10b: lobby session config + per-slot info (names + latency) --- */
+static char         s_host_password[32];                /* host: required join pw ("" = open) */
+static char         s_join_password[32];                /* client: pw to send on join         */
+static int          s_join_nak_reason;                  /* last JOIN_NAK reason (WS2_NAK_*)    */
+static int          s_slot_latency[TD5_NET_MAX_PLAYERS];/* per-slot RTT ms (-1 unknown)        */
+static char         s_slot_name[TD5_NET_MAX_PLAYERS][32];/* client-side roster names           */
+static uint32_t     s_ping_last_ms;                     /* host: last PING broadcast clock     */
+static uint32_t     s_roster_info_last_ms;              /* host: last ROSTER_INFO broadcast    */
 
 /* --- Session --- */
 static SessionInfo  s_session;
@@ -224,7 +241,7 @@ static TransportShutdownFn   s_transport_shutdown;
 typedef struct DiscoveryMsg {
     uint32_t    magic;
     uint32_t    disc_type;
-    char        session_name[64];
+    char        session_name[64];   /* ANNOUNCE: session name; JOIN_REQ: player name */
     uint32_t    player_count;
     uint32_t    max_players;
     uint32_t    game_type;
@@ -232,7 +249,28 @@ typedef struct DiscoveryMsg {
     uint16_t    game_port;
     uint32_t    assigned_slot;
     uint32_t    assigned_id;
+    uint32_t    has_password;        /* ANNOUNCE: 1 if the session needs a password */
+    uint32_t    nak_reason;          /* JOIN_NAK: WS2_NAK_* */
+    char        password[32];        /* JOIN_REQ: password the joiner supplies      */
 } DiscoveryMsg;
+
+/* PING/PONG RTT probe (small; magic-tagged on the game socket). */
+typedef struct PingMsg {
+    uint32_t    magic;
+    uint32_t    disc_type;
+    uint32_t    token;               /* host send timestamp (ms) echoed back */
+} PingMsg;
+
+/* Per-slot names + latency, broadcast by the host so every client can render the
+ * lobby roster. Magic-tagged on the game socket. */
+typedef struct RosterInfoMsg {
+    uint32_t    magic;
+    uint32_t    disc_type;
+    uint32_t    active[TD5_NET_MAX_PLAYERS];
+    uint32_t    latency_ms[TD5_NET_MAX_PLAYERS];
+    char        names[TD5_NET_MAX_PLAYERS][32];
+    uint32_t    host_slot;
+} RosterInfoMsg;
 #pragma pack(pop)
 
 /* --- Winsock2 UDP backend state --- */
@@ -270,10 +308,13 @@ static int              ws2_discovery_init(void);
 static void             ws2_discovery_shutdown(void);
 static void             ws2_handle_join_request(const SOCKADDR_IN *from_addr);
 static void             ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
-                                        SOCKET reply_socket);
-static void             ws2_handle_game_control(const DiscoveryMsg *dm,
+                                        const char *password, SOCKET reply_socket);
+static void             ws2_handle_game_control(const void *buf, int size,
                                                 const SOCKADDR_IN *from_addr);
 static int              ws2_send_join_request(const char *player_name);
+static void             ws2_send_join_nak(const SOCKADDR_IN *from_addr, int reason);
+static void             ws2_broadcast_roster_info(void);
+static void             ws2_send_pings(void);
 static void             net_build_status_text(void);
 static void             net_begin_client_join(const char *player_name);
 
@@ -1318,9 +1359,8 @@ static int ws2_transport_recv(uint32_t *sender_id, void *buf, int buf_size)
            distinguishable from a DXPTYPE (0-12) message BEFORE dispatch. The
            lockstep wire protocol is untouched. Consume it here and keep
            draining the next datagram. */
-        if (ret >= (int)sizeof(DiscoveryMsg) &&
-            *(const uint32_t *)buf == WS2_DISCOVERY_MAGIC) {
-            ws2_handle_game_control((const DiscoveryMsg *)buf, &from_addr);
+        if (ret >= 8 && *(const uint32_t *)buf == WS2_DISCOVERY_MAGIC) {
+            ws2_handle_game_control(buf, ret, &from_addr);
             continue;
         }
 
@@ -1476,20 +1516,37 @@ static void ws2_discovery_shutdown(void)
     }
 }
 
+/** Host: tell a joiner we rejected them (session full / wrong password). */
+static void ws2_send_join_nak(const SOCKADDR_IN *from_addr, int reason)
+{
+    DiscoveryMsg nak;
+    if (!from_addr || s_ws2_socket == INVALID_SOCKET) return;
+    memset(&nak, 0, sizeof(nak));
+    nak.magic = WS2_DISCOVERY_MAGIC;
+    nak.disc_type = WS2_DISC_JOIN_NAK;
+    nak.nak_reason = (uint32_t)reason;
+    sendto(s_ws2_socket, (const char *)&nak, sizeof(nak), 0,
+           (const struct sockaddr *)from_addr, (int)sizeof(*from_addr));
+}
+
 /**
- * Host-side: accept (or re-ACK) a join from `from_addr`, sending the JOIN_ACK
- * back over `reply_socket`. Works for both the legacy discovery-socket path and
- * the S10 game-socket path; idempotent so a retried JOIN_REQ is harmless.
+ * Host-side: accept (or re-ACK) a join from `from_addr`, sending JOIN_ACK back
+ * over `reply_socket`. Enforces the join password + the max-players limit
+ * (JOIN_NAK on rejection). Idempotent so a retried JOIN_REQ is harmless.
  */
 static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
-                            SOCKET reply_socket)
+                            const char *password, SOCKET reply_socket)
 {
-    int slot = -1;
+    int slot = -1, active_count = 0;
     int i;
     DiscoveryMsg ack;
 
-    if (!s_is_host || s_session.sealed || !from_addr)
+    if (!s_is_host || !from_addr)
         return;
+    if (s_session.sealed) {
+        ws2_send_join_nak(from_addr, WS2_NAK_FULL);
+        return;
+    }
 
     /* Already-known peer (a retried JOIN_REQ)? Re-use its slot, just re-ACK. */
     for (i = 1; i < TD5_NET_MAX_PLAYERS; i++) {
@@ -1502,13 +1559,28 @@ static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
     }
 
     if (slot < 0) {
+        /* New joiner: password gate, then capacity gate. */
+        if (s_host_password[0] &&
+            (!password || strncmp(password, s_host_password, sizeof(s_host_password)) != 0)) {
+            TD5_LOG_W(NET_LOG, "Join rejected: wrong password");
+            ws2_send_join_nak(from_addr, WS2_NAK_PASSWORD);
+            return;
+        }
+        for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+            if (s_roster[i].active) active_count++;
+        if (active_count >= (int)s_session.max_players) {
+            TD5_LOG_W(NET_LOG, "Join rejected: session full (%d/%u)",
+                      active_count, s_session.max_players);
+            ws2_send_join_nak(from_addr, WS2_NAK_FULL);
+            return;
+        }
         for (i = 1; i < TD5_NET_MAX_PLAYERS; i++) {
             if (!s_roster[i].active) { slot = i; break; }
         }
     }
 
     if (slot < 0) {
-        TD5_LOG_W(NET_LOG, "Join request rejected: no free slots");
+        ws2_send_join_nak(from_addr, WS2_NAK_FULL);
         return;
     }
 
@@ -1519,6 +1591,7 @@ static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
             snprintf(s_roster[slot].name, sizeof(s_roster[slot].name), "%s", name);
         else
             snprintf(s_roster[slot].name, sizeof(s_roster[slot].name), "Player %d", slot + 1);
+        s_slot_latency[slot] = 0;
         s_player_count++;
         InterlockedIncrement(&s_sync_generation);
         TD5_LOG_I(NET_LOG, "Join accepted: slot=%d id=%u name=\"%s\"",
@@ -1542,50 +1615,90 @@ static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
     }
 
     broadcast_roster();
+    ws2_broadcast_roster_info();
 }
 
 /** Legacy discovery-socket join entry; delegates to the shared accept path. */
 static void ws2_handle_join_request(const SOCKADDR_IN *from_addr)
 {
-    ws2_accept_join(from_addr, NULL, s_ws2_disc_socket);
+    ws2_accept_join(from_addr, NULL, NULL, s_ws2_disc_socket);
+}
+
+/** Host: broadcast per-slot names + latency so clients can render the roster. */
+static void ws2_broadcast_roster_info(void)
+{
+    RosterInfoMsg info;
+    int i;
+    if (!s_is_host || s_ws2_socket == INVALID_SOCKET) return;
+    memset(&info, 0, sizeof(info));
+    info.magic = WS2_DISCOVERY_MAGIC;
+    info.disc_type = WS2_DISC_ROSTER_INFO;
+    info.host_slot = (uint32_t)s_local_slot;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
+        info.active[i] = s_roster[i].active ? 1u : 0u;
+        info.latency_ms[i] = (s_slot_latency[i] >= 0) ? (uint32_t)s_slot_latency[i] : 0u;
+        snprintf(info.names[i], sizeof(info.names[i]), "%s", s_roster[i].name);
+    }
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
+        if (i == s_local_slot || !s_roster[i].active || !s_ws2_peer_valid[i]) continue;
+        sendto(s_ws2_socket, (const char *)&info, sizeof(info), 0,
+               (const struct sockaddr *)&s_ws2_peer_addrs[i],
+               (int)sizeof(s_ws2_peer_addrs[i]));
+    }
+}
+
+/** Host: send an RTT PING (token = now) to each active client. */
+static void ws2_send_pings(void)
+{
+    PingMsg ping;
+    int i;
+    if (!s_is_host || s_ws2_socket == INVALID_SOCKET) return;
+    memset(&ping, 0, sizeof(ping));
+    ping.magic = WS2_DISCOVERY_MAGIC;
+    ping.disc_type = WS2_DISC_PING;
+    ping.token = td5_plat_time_ms();
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
+        if (i == s_local_slot || !s_roster[i].active || !s_ws2_peer_valid[i]) continue;
+        sendto(s_ws2_socket, (const char *)&ping, sizeof(ping), 0,
+               (const struct sockaddr *)&s_ws2_peer_addrs[i],
+               (int)sizeof(s_ws2_peer_addrs[i]));
+    }
 }
 
 /**
- * Dispatch a magic-tagged control datagram received on the GAME socket
- * (the S10 unified JOIN handshake — see ws2_transport_recv).
+ * Dispatch a magic-tagged control datagram received on the GAME socket: the
+ * JOIN handshake (REQ/ACK/NAK) plus the lobby PING/PONG + ROSTER_INFO channel.
  */
-static void ws2_handle_game_control(const DiscoveryMsg *dm, const SOCKADDR_IN *from_addr)
+static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN *from_addr)
 {
-    if (!dm || !from_addr)
+    uint32_t type;
+    if (!buf || !from_addr || size < 8)
         return;
+    type = ((const uint32_t *)buf)[1];   /* disc_type follows the magic */
 
-    switch (dm->disc_type) {
+    switch (type) {
     case WS2_DISC_JOIN_REQ:
-        /* Host: a client wants in over the game socket (LAN or Direct). The
-           joiner's player name is carried in session_name. ACK on the game
-           socket so the reply uses the same UPnP-opened port. */
-        if (s_is_host) {
-            char name[64];
-            strncpy(name, dm->session_name, sizeof(name) - 1);
-            name[sizeof(name) - 1] = '\0';
-            ws2_accept_join(from_addr, name, s_ws2_socket);
+        /* Host: a client wants in (player name + password in the payload). */
+        if (s_is_host && size >= (int)sizeof(DiscoveryMsg)) {
+            const DiscoveryMsg *dm = (const DiscoveryMsg *)buf;
+            char name[64], pw[32];
+            strncpy(name, dm->session_name, sizeof(name) - 1); name[sizeof(name) - 1] = '\0';
+            strncpy(pw, dm->password, sizeof(pw) - 1);         pw[sizeof(pw) - 1] = '\0';
+            ws2_accept_join(from_addr, name, pw, s_ws2_socket);
         }
         break;
 
     case WS2_DISC_JOIN_ACK:
-        /* Client: the host assigned our slot/id and we now know its game
-           address. The authoritative roster follows via DXPROSTER. */
-        if (!s_is_host) {
+        /* Client: the host assigned our slot/id and we now know its game addr. */
+        if (!s_is_host && size >= (int)sizeof(DiscoveryMsg)) {
+            const DiscoveryMsg *dm = (const DiscoveryMsg *)buf;
             int slot = (int)dm->assigned_slot;
             if (slot >= 0 && slot < TD5_NET_MAX_PLAYERS) {
+                s_join_nak_reason = 0;
                 s_local_slot = slot;
-                s_roster[slot].id = dm->assigned_id ? dm->assigned_id
-                                                    : (uint32_t)(slot + 1);
+                s_roster[slot].id = dm->assigned_id ? dm->assigned_id : (uint32_t)(slot + 1);
                 s_roster[slot].active = 1;
-                if (!s_roster[0].active) {   /* bootstrap host as slot 0 / id 1 */
-                    s_roster[0].id = 1;
-                    s_roster[0].active = 1;
-                }
+                if (!s_roster[0].active) { s_roster[0].id = 1; s_roster[0].active = 1; }
                 s_ws2_host_addr = *from_addr;
                 s_ws2_peer_addrs[0] = *from_addr;
                 s_ws2_peer_valid[0] = 1;
@@ -1596,13 +1709,58 @@ static void ws2_handle_game_control(const DiscoveryMsg *dm, const SOCKADDR_IN *f
         }
         break;
 
+    case WS2_DISC_JOIN_NAK:
+        /* Client: rejected (wrong password / full). The UI re-prompts/back-offs. */
+        if (!s_is_host && size >= (int)sizeof(DiscoveryMsg)) {
+            const DiscoveryMsg *dm = (const DiscoveryMsg *)buf;
+            s_join_nak_reason = (int)dm->nak_reason;
+            s_join_pending = 0;
+            TD5_LOG_W(NET_LOG, "JOIN_NAK: reason=%d", s_join_nak_reason);
+        }
+        break;
+
+    case WS2_DISC_PING:
+        /* Client: echo the host's RTT probe back as PONG (same token). */
+        if (size >= (int)sizeof(PingMsg)) {
+            PingMsg pong = *(const PingMsg *)buf;
+            pong.disc_type = WS2_DISC_PONG;
+            sendto(s_ws2_socket, (const char *)&pong, sizeof(pong), 0,
+                   (const struct sockaddr *)from_addr, (int)sizeof(*from_addr));
+        }
+        break;
+
+    case WS2_DISC_PONG:
+        /* Host: RTT = now - token for the slot this address belongs to. */
+        if (s_is_host && size >= (int)sizeof(PingMsg)) {
+            const PingMsg *pm = (const PingMsg *)buf;
+            int slot = find_slot_by_id(ws2_resolve_sender_id(from_addr));
+            if (slot >= 0 && slot < TD5_NET_MAX_PLAYERS) {
+                uint32_t rtt = td5_plat_time_ms() - pm->token;
+                s_slot_latency[slot] = (rtt > 5000) ? 5000 : (int)rtt;
+            }
+        }
+        break;
+
+    case WS2_DISC_ROSTER_INFO:
+        /* Client: adopt the host's per-slot names + latency for the lobby UI. */
+        if (!s_is_host && size >= (int)sizeof(RosterInfoMsg)) {
+            const RosterInfoMsg *ri = (const RosterInfoMsg *)buf;
+            int i;
+            for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
+                s_roster[i].active = ri->active[i] ? 1 : 0;
+                s_slot_latency[i] = (int)ri->latency_ms[i];
+                snprintf(s_slot_name[i], sizeof(s_slot_name[i]), "%s", ri->names[i]);
+                snprintf(s_roster[i].name, sizeof(s_roster[i].name), "%s", ri->names[i]);
+            }
+        }
+        break;
+
     default:
         break;
     }
 }
 
-/** Client-side: send a magic JOIN_REQ (with our player name) to the host's
- *  game address over the game socket. */
+/** Client-side: send a magic JOIN_REQ (player name + password) to the host. */
 static int ws2_send_join_request(const char *player_name)
 {
     DiscoveryMsg req;
@@ -1615,6 +1773,7 @@ static int ws2_send_join_request(const char *player_name)
     req.disc_type = WS2_DISC_JOIN_REQ;
     if (player_name && player_name[0])
         strncpy(req.session_name, player_name, sizeof(req.session_name) - 1);
+    strncpy(req.password, s_join_password, sizeof(req.password) - 1);
 
     return sendto(s_ws2_socket, (const char *)&req, sizeof(req), 0,
                   (const struct sockaddr *)&s_ws2_host_addr,
@@ -1882,6 +2041,20 @@ int td5_net_init(void)
     s_join_attempts = 0;
     s_join_last_ms = 0;
 
+    /* S10b: lobby session config + per-slot info */
+    s_host_password[0] = '\0';
+    s_join_password[0] = '\0';
+    s_join_nak_reason = 0;
+    s_ping_last_ms = 0;
+    s_roster_info_last_ms = 0;
+    {
+        int li;
+        for (li = 0; li < TD5_NET_MAX_PLAYERS; li++) {
+            s_slot_latency[li] = -1;
+            s_slot_name[li][0] = '\0';
+        }
+    }
+
     memset(s_player_sync_table, 0, sizeof(s_player_sync_table));
     memset(s_player_sync_received, 0, sizeof(s_player_sync_received));
     memset(&s_outbound_frame, 0, sizeof(s_outbound_frame));
@@ -2078,6 +2251,19 @@ void td5_net_tick(void)
             }
         }
     }
+
+    /* S10b: host lobby keepalive — RTT pings + per-slot names/latency broadcast
+       (lobby phase only; lockstep frame sync owns the wire once the race starts). */
+    if (s_is_host && !s_active) {
+        if ((now - s_ping_last_ms) >= 1000) {
+            ws2_send_pings();
+            s_ping_last_ms = now;
+        }
+        if ((now - s_roster_info_last_ms) >= 1000) {
+            ws2_broadcast_roster_info();
+            s_roster_info_last_ms = now;
+        }
+    }
 }
 
 /* ========================================================================
@@ -2152,6 +2338,7 @@ static void net_begin_client_join(const char *player_name)
 
     ResetEvent(s_evt_frame_ack);
 
+    s_join_nak_reason = 0;   /* clear any prior rejection before this attempt */
     s_join_pending = 1;
     ws2_send_join_request(s_local_player_name);
     s_join_attempts = 1;
@@ -2355,6 +2542,59 @@ int td5_net_get_local_ip(char *buf, int len)
     }
     buf[0] = '\0';
     return 0;
+}
+
+/* --- S10b: lobby session limits + per-slot info --- */
+
+void td5_net_set_session_limits(int max_players, const char *password)
+{
+    if (max_players < 2) max_players = 2;
+    if (max_players > TD5_NET_MAX_PLAYERS) max_players = TD5_NET_MAX_PLAYERS;
+    s_session.max_players = (uint32_t)max_players;
+    if (password) {
+        strncpy(s_host_password, password, sizeof(s_host_password) - 1);
+        s_host_password[sizeof(s_host_password) - 1] = '\0';
+    } else {
+        s_host_password[0] = '\0';
+    }
+    TD5_LOG_I(NET_LOG, "Session limits: max=%d password=%s",
+              max_players, s_host_password[0] ? "set" : "none");
+    if (s_is_host)
+        ws2_broadcast_roster_info();
+}
+
+int td5_net_get_max_players(void)
+{
+    return (int)s_session.max_players;
+}
+
+void td5_net_set_join_password(const char *password)
+{
+    if (password) {
+        strncpy(s_join_password, password, sizeof(s_join_password) - 1);
+        s_join_password[sizeof(s_join_password) - 1] = '\0';
+    } else {
+        s_join_password[0] = '\0';
+    }
+}
+
+int td5_net_get_join_nak_reason(void)
+{
+    return s_join_nak_reason;
+}
+
+const char *td5_net_get_slot_name(int slot)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS) return "";
+    if (!s_roster[slot].active) return "";
+    if (s_roster[slot].name[0]) return s_roster[slot].name;
+    return s_slot_name[slot];
+}
+
+int td5_net_get_slot_latency_ms(int slot)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS) return -1;
+    return s_slot_latency[slot];
 }
 
 /**
