@@ -3234,6 +3234,12 @@ static void frontend_poll_input(void) {
     int had_activity = 0;
     uint32_t now = td5_plat_time_ms();
 
+    /* [S12] Drain the WM_KEYDOWN nav latch every frame. Read here (before the
+     * inactive early-return) so a press that arrived while the window was
+     * unfocused is discarded rather than firing on refocus. Applied to the edge
+     * flags further down, only while no text field is open. */
+    unsigned nav_latch = td5_plat_input_nav_latch();
+
     s_input_ready = 0;
     s_button_index = -1;
     s_arrow_input = 0;
@@ -3292,6 +3298,21 @@ static void frontend_poll_input(void) {
     down_edge = (down_now && !s_prev_down_state);
     enter_edge = (enter_now && !s_prev_enter_state);
     if (left_now || right_now || up_now || down_now || enter_now) had_activity = 1;
+
+    /* [S12] Fold in nav-key taps the window proc captured between frames so a
+     * quick press at low FPS isn't dropped by the once-per-frame DI immediate
+     * read. Press-only (auto-repeat filtered in the proc) so a held key still
+     * moves once and never auto-repeats. Suppressed while a text field is open
+     * so a latched Enter can't leak into name entry (text uses the WM_CHAR
+     * queue, not these edges). */
+    if (s_text_input_state == 0 && nav_latch) {
+        if (nav_latch & TD5_NAVKEY_LEFT)  left_edge  = 1;
+        if (nav_latch & TD5_NAVKEY_RIGHT) right_edge = 1;
+        if (nav_latch & TD5_NAVKEY_UP)    up_edge    = 1;
+        if (nav_latch & TD5_NAVKEY_DOWN)  down_edge  = 1;
+        if (nav_latch & TD5_NAVKEY_ENTER) enter_edge = 1;
+        had_activity = 1;
+    }
 
     if (left_edge) s_arrow_input |= 1;  /* LEFT — rising edge only (original: DAT_004951f8) */
     if (right_edge) s_arrow_input |= 2; /* RIGHT — rising edge only */
@@ -8472,16 +8493,28 @@ done:
     /* Clear draw queue for next frame */
     s_draw_queue_count = 0;
 
-    /* FPS/MS counter at the fixed top-left (8,8) corner — same anchor as the
-     * in-race HUD so the readout sits in one consistent spot across menu + race.
-     * Drawn last so it overlays everything. [S01 2026-06-04] gated by the
-     * Display-options Show FPS toggle (g_td5.ini.show_fps). */
-    if (g_td5.ini.show_fps) {
+    /* FPS/MS counter at the top-RIGHT corner. [S12 2026-06-05] Moved from the
+     * old top-left (8,8) so it sits out of the way of the title/menu content and
+     * matches the in-race HUD's top-right readout. Anchored to the right edge:
+     * x = screen_w - measured text width - an 8px (scaled) gutter mirroring the
+     * old left inset. fe_measure_text_width returns scaled (screen) px, same
+     * space as screen_w. Drawn last so it overlays everything. [S01 2026-06-04]
+     * gated by the Display-options Show FPS toggle (g_td5.ini.show_fps). */
+    if (g_td5.ini.show_fps && screen_w > 0) {
         char fps_buf[48];
         snprintf(fps_buf, sizeof(fps_buf), "FPS %.0f  %dMS",
                  (double)g_td5_display_fps, g_td5_peak_frame_ms);
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        fe_draw_text(8.0f * sx, 8.0f * sy, fps_buf, 0xFFFFFF00u, sx, sy);
+        float fps_w = fe_measure_text_width(fps_buf, sx);
+        float fps_x = (float)screen_w - fps_w - 8.0f * sx;
+        if (fps_x < 0.0f) fps_x = 0.0f;
+        { static int s_fps_logged_w = -1;   /* one-shot per width; re-logs on resize */
+          if (screen_w != s_fps_logged_w) {
+              s_fps_logged_w = screen_w;
+              TD5_LOG_I(LOG_TAG, "menu FPS overlay top-right: screen_w=%d text_w=%.1f x=%.1f",
+                        screen_w, (double)fps_w, (double)fps_x);
+          } }
+        fe_draw_text(fps_x, 8.0f * sy, fps_buf, 0xFFFFFF00u, sx, sy);
     }
 
     /* End scene + present */
