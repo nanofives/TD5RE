@@ -563,6 +563,7 @@ static void reset_results_table(void);
 static void sort_results_by_time_asc(void);
 static void sort_results_by_score_desc(void);
 static void update_race_order(void);
+static int  active_racer_count(void);   /* # of participating racers (state != 3) */
 static void advance_pending_finish_state(int slot, uint32_t sim_delta);
 static void tick_pending_finish_timer(int slot);
 static void sync_actor_race_metrics(int slot);
@@ -3340,6 +3341,12 @@ int td5_game_run_race_frame(void) {
             {
                 TD5_Actor *pl = td5_game_get_actor(0);
                 s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+                TD5_LOG_I(LOG_TAG,
+                          "Finish capture: player race_position=%d -> display=%d "
+                          "(active_racers=%d, g_racer_count=%d, traffic_base=%d)",
+                          pl ? (int)pl->race_position : -1,
+                          s_finish_position_display, active_racer_count(),
+                          g_racer_count, g_traffic_slot_base);
             }
 
             /* Select fade direction based on viewport layout */
@@ -5447,6 +5454,42 @@ static void reset_results_table(void) {
     s_results[0].slot_flags = 1;  /* mark entry 0 as active */
 }
 
+/* Number of actual race participants = the contiguous prefix of racer slots
+ * that are NOT disabled (state != 3).
+ *
+ * [FIX 2026-06-05 finish-position-15-16] The original ranks only its fixed
+ * racer field — UpdateRaceOrder @0x0042F5B0 writes the position byte (+0x831b)
+ * for the first 6 entries only [CONFIRMED @0x0042F6C0 CMP EAX,0x6] and gates
+ * the sort on the participation flag +0x82c0==0 [CONFIRMED @0x0042F5D9]. The
+ * port grew to 16 racer slots (N-way split) but kept the sort/rank loops at
+ * TD5_MAX_RACER_SLOTS, so inactive decoration slots (a 2-car Quick Race leaves
+ * slots 2..5 spawned-but-disabled, and 6..15 never spawn) got display_position
+ * 0..15 too. Worse, build_results_table synthesizes a finish time ONLY for
+ * active slots (td5_game.c:5380), so the disabled slots keep primary_metric==0
+ * and sort_results_by_time_asc floats them to the FRONT of the SHARED
+ * s_race_order; update_race_order's post-finish `continue` skips then freeze
+ * that order into display_position, pushing the player to index 14 -> "15".
+ *
+ * The port's analogue of the original participation gate is s_slot_state.state
+ * != 3 (every mode parks its dropped/decoration slots there: Quick Race
+ * dropped opponents 1500-1502, cop-chase 1547-1552, drag 1521-1525, time-trial
+ * 1448-1451). Those disabled slots are always the TAIL, so the active racers
+ * occupy s_race_order[0 .. count). Bounding all sorts + position writes to this
+ * count ranks only real participants (rank 0..N-1) and never lets an inactive
+ * slot receive a standings position. */
+static int active_racer_count(void) {
+    int base = g_traffic_slot_base;            /* racer/traffic boundary */
+    if (base < 1) base = 1;
+    if (base > TD5_MAX_RACER_SLOTS) base = TD5_MAX_RACER_SLOTS;
+    int n = 0;
+    for (int i = 0; i < base; i++) {
+        if (s_slot_state[i].state != 3) n++;   /* 3 == disabled/decoration */
+    }
+    if (n < 1) n = 1;                           /* slot 0 always participates */
+    if (n > TD5_MAX_RACER_SLOTS) n = TD5_MAX_RACER_SLOTS;
+    return n;
+}
+
 /* ========================================================================
  * Sort results by primary metric ascending (fastest wins)
  * Bubble sort on s_race_order, matching SortRaceResultsByPrimaryMetricAsc
@@ -5454,10 +5497,14 @@ static void reset_results_table(void) {
  * ======================================================================== */
 
 static void sort_results_by_time_asc(void) {
+    /* Rank only the active racers (s_race_order[0..n) — see active_racer_count).
+     * Disabled slots have primary_metric==0 and would otherwise float to the
+     * front of the shared order table. */
+    int n = active_racer_count();
     int swapped;
     do {
         swapped = 0;
-        for (int i = 0; i < TD5_MAX_RACER_SLOTS - 1; i++) {
+        for (int i = 0; i < n - 1; i++) {
             int a = s_race_order[i];
             int b = s_race_order[i + 1];
             /* Compare: primary_metric * 100 / 30 ascending (lower = better) */
@@ -5471,8 +5518,8 @@ static void sort_results_by_time_asc(void) {
         }
     } while (swapped);
 
-    /* Write final positions */
-    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+    /* Write final positions (active racers only) */
+    for (int i = 0; i < n; i++) {
         s_results[s_race_order[i]].final_position = (int16_t)i;
     }
 }
@@ -5484,10 +5531,12 @@ static void sort_results_by_time_asc(void) {
  * ======================================================================== */
 
 static void sort_results_by_score_desc(void) {
+    /* Rank only the active racers (see active_racer_count). */
+    int n = active_racer_count();
     int swapped;
     do {
         swapped = 0;
-        for (int i = 0; i < TD5_MAX_RACER_SLOTS - 1; i++) {
+        for (int i = 0; i < n - 1; i++) {
             int a = s_race_order[i];
             int b = s_race_order[i + 1];
             if (s_results[a].secondary_metric < s_results[b].secondary_metric) {
@@ -5498,8 +5547,8 @@ static void sort_results_by_score_desc(void) {
         }
     } while (swapped);
 
-    /* Write final positions */
-    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+    /* Write final positions (active racers only) */
+    for (int i = 0; i < n; i++) {
         s_results[s_race_order[i]].final_position = (int16_t)i;
     }
 }
@@ -5513,11 +5562,17 @@ static void sort_results_by_score_desc(void) {
 
 static void update_race_order(void) {
     /* UpdateRaceOrder @ 0x0042F5B0 — original sorts g_raceOrderTable[6]
-     * by actor+0x86 (track_span_high_water) DESCENDING, not by +0x82. */
+     * by actor+0x86 (track_span_high_water) DESCENDING, not by +0x82.
+     * Rank ONLY active racers: the original's rank loop bound was the fixed
+     * 6-racer field [CONFIRMED @0x0042F6C0]; the port's faithful analogue is
+     * active_racer_count() (disabled slots are state==3 in the tail). Bounding
+     * here keeps inactive decoration slots out of the standings — the cause of
+     * the "15/16" finish display in a 2-car race. */
+    int n = active_racer_count();
     int swapped;
     do {
         swapped = 0;
-        for (int i = 0; i < TD5_MAX_RACER_SLOTS - 1; i++) {
+        for (int i = 0; i < n - 1; i++) {
             int a = s_race_order[i];
             int b = s_race_order[i + 1];
 
@@ -5543,8 +5598,8 @@ static void update_race_order(void) {
         }
     } while (swapped);
 
-    /* Write display positions */
-    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+    /* Write display positions (active racers only — rank 0..n-1) */
+    for (int i = 0; i < n; i++) {
         s_metrics[s_race_order[i]].display_position = (int16_t)i;
     }
 
@@ -5564,7 +5619,7 @@ static void update_race_order(void) {
         }
     }
 
-    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+    for (int i = 0; i < n; i++) {
         TD5_Actor *actor = td5_game_get_actor(i);
         if (!actor) {
             continue;

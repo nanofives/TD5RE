@@ -439,6 +439,11 @@ static int  s_results_view_data_request;
 
 /* Race snapshot for re-race */
 static int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
+/* [FIX 2026-06-05 race-again-opponent-count] Snapshot the opponent count too,
+ * so "Race Again" (and S15's pause-menu RESTART RACE, which reads this same
+ * snapshot) reruns with the SAME field size instead of falling back to the
+ * legacy 5-opponent default. Defaults to -1 = "no snapshot captured yet". */
+static int  s_snap_num_ai_opponents = -1;
 
 /* Post-race name entry state (Screen [25]) */
 static int32_t s_post_race_score;       /* DAT_004951d0: player's score for qualification */
@@ -2624,9 +2629,16 @@ static void frontend_init_race_schedule(void) {
 
         /* AI count: the screens that expose an opponents selector (Quick Race +
          * the track selector race-option row) drive s_num_ai_opponents; other
-         * flows use the legacy fill (cup game-types override it anyway). */
+         * flows use the legacy fill (cup game-types override it anyway).
+         * [FIX 2026-06-05 race-again-opponent-count] "Race Again" re-enters this
+         * from the RACE_RESULTS screen, which previously fell through to the
+         * legacy 5-opponent fill regardless of the original field size. For a
+         * Single/Quick Race (game_type 0) honour the snapshotted opponent count
+         * (restored into s_num_ai_opponents above); cups (game_type != 0) keep
+         * the legacy fill and override the count downstream. */
         if (s_current_screen == TD5_SCREEN_QUICK_RACE ||
-            s_current_screen == TD5_SCREEN_TRACK_SELECTION)
+            s_current_screen == TD5_SCREEN_TRACK_SELECTION ||
+            (s_current_screen == TD5_SCREEN_RACE_RESULTS && s_selected_game_type == 0))
             ai = s_num_ai_opponents;
         else
             ai = TD5_LEGACY_RACE_SLOTS - humans;
@@ -13125,7 +13137,11 @@ static void Screen_RaceResults(void) {
             s_snap_paint = s_selected_paint;
             s_snap_trans = s_selected_transmission;
             s_snap_config = s_selected_config;
+            s_snap_num_ai_opponents = s_num_ai_opponents;  /* [FIX 2026-06-05] */
             s_results_rerace_flag = 1;
+            TD5_LOG_I(LOG_TAG,
+                      "RaceResults: snapshot saved car=%d opponents=%d (for Race Again)",
+                      s_snap_car, s_snap_num_ai_opponents);
         }
 
         /* [CONFIRMED @ 0x00422480 case 0 tail] Build the click-catcher + OK
@@ -13224,15 +13240,29 @@ static void Screen_RaceResults(void) {
              * only as the panel re-enters from the opposite side. */
         s_results_panel_slide_x = 0;  /* clean rest position while in interactive */
         if (s_input_ready) {
-            if (s_arrow_input != 0) {
-                s_results_panel_slide_dir = (s_arrow_input > 0) ? +1 : -1;
+            /* [FIX 2026-06-05 results-nav] Only LEFT/RIGHT browse racer slots
+             * (the horizontal panel slide). s_arrow_input is a BITMASK
+             * (1=LEFT,2=RIGHT,4=UP,8=DOWN), so the old `!= 0` test fired on
+             * UP/DOWN too, and `> 0` is true for any non-zero mask — so every
+             * arrow (incl. LEFT) slid the panel RIGHT. UP/DOWN are already
+             * consumed by the shared row-nav handler (frontend_update_input
+             * moves the selection between the selector bar and OK vertically),
+             * so here we react to the horizontal bits only and honour their
+             * direction: RIGHT -> state 7 (exit right), LEFT -> state 9. */
+            if (s_arrow_input & 2) {          /* RIGHT */
+                s_results_panel_slide_dir = +1;
                 s_anim_tick = 0;
-                /* Right arrow → state 7 (panel exits right), Left → state 9
-                 * (panel exits left). */
-                s_inner_state = (s_arrow_input > 0) ? 7 : 9;
+                s_inner_state = 7;
                 TD5_LOG_D(LOG_TAG,
-                          "RaceResults state 6: arrow=%d -> slide-out state %d",
-                          s_arrow_input, s_inner_state);
+                          "RaceResults state 6: RIGHT -> slide-out state 7");
+                break;
+            }
+            if (s_arrow_input & 1) {          /* LEFT */
+                s_results_panel_slide_dir = -1;
+                s_anim_tick = 0;
+                s_inner_state = 9;
+                TD5_LOG_D(LOG_TAG,
+                          "RaceResults state 6: LEFT -> slide-out state 9");
                 break;
             }
             /* [CONFIRMED @ 0x004229DA] Original wraps the button-press exit
@@ -13475,6 +13505,17 @@ static void Screen_RaceResults(void) {
                     s_selected_paint = s_snap_paint;
                     s_selected_transmission = s_snap_trans;
                     s_selected_config = s_snap_config;
+                    /* [FIX 2026-06-05 race-again-opponent-count] Restore the
+                     * opponent count so the rerun keeps the same field size.
+                     * frontend_init_race_schedule reads s_num_ai_opponents for
+                     * the RACE_RESULTS re-race path (game_type 0); cups override
+                     * the count downstream so this is a no-op for them. */
+                    if (s_snap_num_ai_opponents >= 0)
+                        s_num_ai_opponents = s_snap_num_ai_opponents;
+                    TD5_LOG_I(LOG_TAG,
+                              "RaceResults: Race Again -> restored car=%d opponents=%d "
+                              "(game_type=%d)",
+                              s_selected_car, s_num_ai_opponents, s_selected_game_type);
                 }
                 if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
                     s_race_within_series++;
