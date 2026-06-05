@@ -803,6 +803,23 @@ static int s_smallfont_msdf_page = -1;
 #define SMALLFONT_COLS   21
 #define SMALLFONT_TEX_W  252.0f   /* 21 * 12 */
 #define SMALLFONT_TEX_H  132.0f   /* 11 * 12 */
+
+/* [SMALL-FONT TTF SWAP 2026-06-05] When the native menu TTF (menu.ttf — the SAME
+ * face fe_draw_text/buttons render with) is loaded, the small font is rasterised
+ * straight from its outlines at a smaller cap size instead of the smalltext.tga
+ * bitmap / smalltext_msdf SDF, so EVERY frontend string shares one typeface and
+ * stays crisp at any resolution. Sizes are in 12px-cell DESIGN px (the unscaled
+ * 320x240 canvas) so the fe_measure_small_text contract is preserved exactly:
+ * measure returns design px, callers multiply by sx, and the draw advances the pen
+ * by design_advance*sx (vertical at sy) — the same stretch model the bitmap path
+ * used (cell_w=SMALLFONT_CELL*sx, cell_h=*sy). Tunable visual constants (no RE
+ * basis; this is a port-only asset swap, like the S13 main-font swap):
+ *   CAP      = cap height in design px (smalltext caps were ~9px in a 12px cell).
+ *   BASELINE = design px from the cell top (the `y` arg) down to the baseline.
+ *   TRACK    = extra inter-glyph tracking (design px; 0 = font's natural advances). */
+#define SMALLFONT_TTF_CAP       9.0f
+#define SMALLFONT_TTF_BASELINE  10.0f
+#define SMALLFONT_TTF_TRACK     0.0f
 /* indexed by (char-0x20), char 0x20..0x7F */
 static const uint8_t k_smallfont_advance[96] = {
     5, 5, 7, 8, 8, 13, 11, 5, 4, 5, 6, 8, 6, 6, 4, 8,
@@ -7649,10 +7666,19 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
-/* Sum of small-font advances (unscaled font px) — for centering. Preserves case. */
+/* Sum of small-font advances (unscaled/design font px) — for centering. Preserves
+ * case. When the native TTF is loaded this measures the SAME design-px advances
+ * fe_draw_small_text advances by (cap = SMALLFONT_TTF_CAP design px), so every
+ * column-centring / truncation site keeps working unchanged. */
 static float fe_measure_small_text(const char *text) {
     float w = 0.0f;
     if (!text) return 0.0f;
+    if (td5_font_ready()) {            /* native TTF: real advances at the small cap size */
+        const float cap = SMALLFONT_TTF_CAP;
+        for (int i = 0; text[i]; i++)
+            w += td5_font_advance((unsigned char)text[i], cap) + SMALLFONT_TTF_TRACK;
+        return w;
+    }
     for (int i = 0; text[i]; i++) {
         int c = (unsigned char)text[i];
         if (c < 0x20 || c > 0x7f) { w += 8.0f; continue; }
@@ -7667,7 +7693,44 @@ static float fe_measure_small_text(const char *text) {
  * black color key (the texture is loaded with TD5_COLORKEY_BLACK). Case is preserved
  * (true lowercase glyphs). x/y are screen px; sx/sy are the canvas scale. */
 static void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy) {
-    if (s_smallfont_page < 0 || !text) return;
+    if (!text) return;
+
+    /* [SMALL-FONT TTF SWAP] Native TTF path: rasterise the menu font (the SAME
+     * face fe_draw_text/buttons use) at a small on-screen cap size, instead of
+     * the smalltext.tga bitmap / smalltext_msdf SDF. Horizontal advance = design
+     * advance * sx, vertical = sy (the same stretch the bitmap path applied via
+     * cell_w*sx / cell_h*sy), so fe_measure_small_text stays consistent and every
+     * column-centred caller keeps its layout. Case is preserved (the TTF has true
+     * lowercase). Falls through to the MSDF/bitmap path below when no TTF loaded. */
+    if (td5_font_ready()) {
+        static int s_logged_ttf = 0;
+        if (!s_logged_ttf) {
+            s_logged_ttf = 1;
+            TD5_LOG_I(LOG_TAG, "small font: native TTF active (cap=%.1f baseline=%.1f track=%.1f design-px)",
+                      (double)SMALLFONT_TTF_CAP, (double)SMALLFONT_TTF_BASELINE, (double)SMALLFONT_TTF_TRACK);
+        }
+        const float cap_px   = SMALLFONT_TTF_CAP * sy;          /* rasterise at on-screen vertical px */
+        const float baseline = y + SMALLFONT_TTF_BASELINE * sy; /* design baseline below the cell top */
+        const float hscale   = (sy != 0.0f) ? (sx / sy) : 1.0f; /* horizontal scale = sx (bitmap stretch model) */
+        const float trkn     = SMALLFONT_TTF_TRACK * sx;
+        for (int i = 0; text[i]; i++) {                         /* pass 1: rasterise into the shared atlas */
+            td5_glyph g; td5_font_get((unsigned char)text[i], cap_px, &g);
+        }
+        td5_font_flush_uploads();                               /* one GPU upload for any new glyphs */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        float tcx = x;
+        for (int i = 0; text[i]; i++) {                         /* pass 2: draw (cache hits) */
+            td5_glyph g; td5_font_get((unsigned char)text[i], cap_px, &g);
+            if (g.valid && g.w > 0.0f)
+                fe_draw_quad(tcx + g.xoff * hscale, baseline + g.yoff,
+                             g.w * hscale, g.h, color, g.page, g.u0, g.v0, g.u1, g.v1);
+            tcx += g.advance * hscale + trkn;
+        }
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        return;
+    }
+
+    if (s_smallfont_page < 0) return;
     /* Resolution-independent SDF path: same 21x11 grid/UV/metrics, swapped page
      * + shader. Falls back to the bitmap atlas when VectorUI is off or the SDF
      * atlas failed to load. */
