@@ -31,6 +31,7 @@
 /* TD5RE headers */
 #include "td5re.h"
 #include "td5_platform.h"
+#include "td5_net.h"
 #include "td5_save.h"
 #include "td5_profile.h"
 #include "td5_trace.h"
@@ -218,6 +219,13 @@ static void td5_ini_write_int(const char *section, const char *key, int value)
     WritePrivateProfileStringA(section, key, buf, s_ini_path);
 }
 
+/* Public string write-back (S10: persist the player nickname). */
+void td5_ini_write_str(const char *section, const char *key, const char *value)
+{
+    if (!s_ini_path[0]) return;
+    WritePrivateProfileStringA(section, key, value ? value : "", s_ini_path);
+}
+
 void td5_ini_persist_options(void)
 {
     if (!s_ini_path[0]) return;
@@ -348,6 +356,10 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "WholeState",           &g_td5.ini.whole_state_enabled },
         { "WholeStateMaxTicks",   &g_td5.ini.whole_state_max_ticks },
         { "ExperimentalBiasClamp", &g_td5.ini.experimental_bias_clamp },
+        /* Network (S10) */
+        { "NetMode",              &g_td5.ini.net_mode },
+        { "GamePort",             &g_td5.ini.net_game_port },
+        { "EnableUPnP",           &g_td5.ini.net_enable_upnp },
         /* StateReplayMode is also CLI-overridable but takes the integer
          * code (0=off, 1=dump, 2=inject, 3=both) rather than the string. */
         { "StateReplayMode",        &g_td5.ini.state_replay_mode },
@@ -481,6 +493,85 @@ show_help:
     return n_applied;
 }
 
+#ifndef TD5RE_RELEASE
+/* S10 loopback net self-test (dev builds only). Set env TD5RE_NET_SELFTEST=host
+ * (or =join, with optional TD5RE_NET_SELFTEST_IP) to exercise the Direct-IP
+ * game-port JOIN handshake + UPnP fallback end-to-end WITHOUT driving the menu.
+ * Returns 1 if the self-test ran (WinMain should then exit), 0 to boot normally. */
+static int td5_net_selftest(void)
+{
+    const char *mode = getenv("TD5RE_NET_SELFTEST");
+    uint32_t start;
+    int is_host;
+
+    if (!mode || !mode[0]) return 0;
+    is_host = (mode[0] == 'h' || mode[0] == 'H');
+
+    if (!td5_net_init()) {
+        TD5_LOG_E("net", "selftest: td5_net_init failed");
+        return 1;
+    }
+    td5_net_set_mode(TD5_NET_MODE_DIRECT);
+
+    if (is_host) {
+        const char *pw  = getenv("TD5RE_NET_SELFTEST_PW");
+        const char *mx  = getenv("TD5RE_NET_SELFTEST_MAX");
+        if (!td5_net_create_session_ex("SelfTest", "Host", 6,
+                                       g_td5.ini.net_game_port, g_td5.ini.net_enable_upnp))
+            TD5_LOG_E("net", "selftest host: create failed");
+        else {
+            int mxn = (mx && mx[0]) ? atoi(mx) : 6;
+            td5_net_set_session_limits(mxn, (pw && pw[0]) ? pw : "");
+            TD5_LOG_I("net", "selftest host: \"%s\" upnp=%d max=%d password=%s",
+                      td5_net_get_status_text(), td5_net_get_upnp_status(),
+                      td5_net_get_max_players(), (pw && pw[0]) ? "set" : "none");
+        }
+    } else {
+        const char *ip = getenv("TD5RE_NET_SELFTEST_IP");
+        const char *pw = getenv("TD5RE_NET_SELFTEST_PW");
+        if (!ip || !ip[0]) ip = "127.0.0.1";
+        if (pw) td5_net_set_join_password(pw);
+        if (!td5_net_join_direct(ip, g_td5.ini.net_game_port, "Client"))
+            TD5_LOG_E("net", "selftest join: join_direct failed");
+        else
+            TD5_LOG_I("net", "selftest join: \"%s\" (pw=%s)",
+                      td5_net_get_status_text(), (pw && pw[0]) ? "set" : "none");
+    }
+
+    start = td5_plat_time_ms();
+    while ((td5_plat_time_ms() - start) < 12000) {
+        td5_net_tick();
+        if (is_host && td5_net_get_player_count() >= 2) {
+            TD5_LOG_I("net", "selftest host: client joined (players=%d) -- HANDSHAKE OK",
+                      td5_net_get_player_count());
+            break;
+        }
+        if (!is_host && td5_net_local_slot() >= 0) {
+            TD5_LOG_I("net", "selftest join: assigned slot %d -- HANDSHAKE OK",
+                      td5_net_local_slot());
+            break;
+        }
+        if (!is_host && td5_net_get_join_nak_reason() != 0) {
+            TD5_LOG_W("net", "selftest join: REJECTED nak_reason=%d (1=full,2=password)",
+                      td5_net_get_join_nak_reason());
+            break;
+        }
+        if (!is_host && td5_net_is_connection_lost()) {
+            TD5_LOG_W("net", "selftest join: connection lost / timed out");
+            break;
+        }
+        td5_plat_sleep(50);
+    }
+
+    TD5_LOG_I("net", "selftest %s DONE: players=%d slot=%d upnp=%d nak=%d",
+              is_host ? "host" : "join", td5_net_get_player_count(),
+              td5_net_local_slot(), td5_net_get_upnp_status(),
+              td5_net_get_join_nak_reason());
+    td5_net_shutdown();
+    return 1;
+}
+#endif /* !TD5RE_RELEASE */
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
 {
@@ -591,6 +682,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * Edinburgh from 11 → 1418 wall_hits when ON; v1 emulation is the
      * shipping path. Enable with --PhantomPeer=1 for A/B testing. */
     g_td5.ini.phantom_peer      = td5_ini_int("GameOptions", "PhantomPeer", 0);
+
+    /* S10 net-play: [Network] connection config. */
+    g_td5.ini.net_mode              = td5_ini_int("Network", "Mode", 0);
+    g_td5.ini.net_game_port         = td5_ini_int("Network", "GamePort", 37050);
+    g_td5.ini.net_enable_upnp       = td5_ini_int("Network", "EnableUPnP", 1);
+    td5_ini_str("Network", "Nickname", "", g_td5.ini.net_nickname,
+                sizeof(g_td5.ini.net_nickname));
+
+#ifndef TD5RE_RELEASE
+    /* S10 dev hook: run the loopback net self-test (env TD5RE_NET_SELFTEST) and
+     * exit if requested. Placed AFTER the [Network] reads so it honors GamePort
+     * + EnableUPnP. */
+    if (td5_net_selftest())
+        return 0;
+#endif
 
     /* Auto-race: skip frontend entirely, launch race with INI settings */
     g_td5.ini.auto_race             = td5_ini_int("Game", "AutoRace", 0);

@@ -1351,6 +1351,12 @@ uint32_t td5_input_get_control_bits(int slot)
     return s_control_bits[slot];
 }
 
+void td5_input_set_control_bits(int slot, uint32_t bits)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    s_control_bits[slot] = bits;
+}
+
 int16_t td5_input_get_analog_x(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;

@@ -20,6 +20,17 @@
 
 #include "td5_types.h"
 
+/* --- Connection modes (S10 net-play rework) --- */
+#define TD5_NET_MODE_LAN        0   /* auto-discovery via LAN broadcast beacon */
+#define TD5_NET_MODE_DIRECT     1   /* explicit host/join by IP:port           */
+
+/* --- UPnP IGD port-mapping status (host, Direct mode) --- */
+#define TD5_NET_UPNP_IDLE        0  /* not attempted                           */
+#define TD5_NET_UPNP_MAPPING     1  /* discovery / SOAP in progress            */
+#define TD5_NET_UPNP_MAPPED      2  /* router opened the port (verified)       */
+#define TD5_NET_UPNP_FAILED      3  /* attempted, router refused / unreachable */
+#define TD5_NET_UPNP_UNAVAILABLE 4  /* disabled by config                      */
+
 int  td5_net_init(void);
 void td5_net_shutdown(void);
 void td5_net_tick(void);
@@ -29,6 +40,29 @@ int  td5_net_create_session(const char *name, const char *player_name, int max_p
 int  td5_net_join_session(int session_index, const char *player_name);
 void td5_net_seal_session(int sealed);
 void td5_net_unsync(void);
+
+/* --- S10: explicit connection modes --- */
+int  td5_net_set_mode(int mode);            /* TD5_NET_MODE_LAN / _DIRECT */
+int  td5_net_get_mode(void);
+/* Host with an explicit game port + optional UPnP IGD port-mapping. */
+int  td5_net_create_session_ex(const char *name, const char *player_name,
+                               int max_players, int game_port, int enable_upnp);
+/* Join an explicit host by IP (and port); no enumeration (Direct mode). */
+int  td5_net_join_direct(const char *host_ip, int game_port, const char *player_name);
+int  td5_net_get_upnp_status(void);         /* TD5_NET_UPNP_* */
+const char *td5_net_get_status_text(void);  /* human-readable host / connect status */
+int  td5_net_get_local_ip(char *buf, int len);
+
+/* --- S10b: lobby session limits + per-slot info --- */
+/* Host: set max players (2..6) + an optional join password ("" = open). */
+void td5_net_set_session_limits(int max_players, const char *password);
+int  td5_net_get_max_players(void);
+/* Client: set the password to send with the JOIN request (before joining). */
+void td5_net_set_join_password(const char *password);
+/* Last join rejection reason: 0=none, 1=session full, 2=wrong/again password. */
+int  td5_net_get_join_nak_reason(void);
+const char *td5_net_get_slot_name(int slot);    /* "" if empty */
+int  td5_net_get_slot_latency_ms(int slot);     /* -1 = unknown (e.g. self/host) */
 
 /* --- Per-frame sync --- */
 int  td5_net_handle_host_frame(uint32_t *control_bits, float *frame_dt);
