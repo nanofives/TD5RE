@@ -34,7 +34,18 @@ void  td5_font_get(int codepoint, float cap_px, td5_glyph *out);
 float td5_font_advance(int codepoint, float cap_px);
 
 /* Upload any newly-rasterised glyphs to the GPU page. Call once after a batch
- * of td5_font_get() and before drawing the quads. No-op when nothing changed. */
+ * of td5_font_get() / td5_hudfont_get() and before drawing the quads (the two
+ * faces share one GPU atlas page). No-op when nothing changed. */
 void  td5_font_flush_uploads(void);
+
+/* ---- Secondary HUD face (Rajdhani, re/assets/frontend/hud.ttf) -----------
+ * A distinct typeface for the in-race HUD overlay text, sharing the same glyph
+ * cache + GPU atlas page as the menu face (so td5_font_flush_uploads() uploads
+ * both). Same semantics as the menu equivalents above; returns/rasterises
+ * nothing until td5_hudfont_ready() succeeds (it requires the menu face to have
+ * initialised the shared atlas first). */
+int   td5_hudfont_ready(void);
+void  td5_hudfont_get(int codepoint, float cap_px, td5_glyph *out);
+float td5_hudfont_advance(int codepoint, float cap_px);
 
 #endif /* TD5_FONT_H */

@@ -1300,6 +1300,19 @@ typedef struct { float x, y; int centered; char s[64]; } HudVuiText;
 static HudVuiText s_hud_vui_text[96];
 static int        s_hud_vui_text_count;
 
+/* [HUD TTF SWAP 2026-06-05] The in-race HUD overlay text renders in the menu's
+ * SECONDARY native face (Rajdhani, td5_hudfont_*) when loaded, instead of the
+ * HUD-font SDF / tpage5 bitmap. Like the pause menu, the HUD text path is
+ * FIXED-pixel (the original 8x12-cell layout, unscaled in g_render_width_f
+ * space), so glyphs are naturally square — no 4:3 lock. Advances come from the
+ * TTF so layout self-sizes; both the flush (centring) and hud_text_width (FPS
+ * right-anchor) use the SAME advances so positions stay consistent. Sizes are in
+ * HUD design px (the ~12px-tall cell). Tunable:
+ *   CAP      = cap height px (orig caps were ~11 in the 12px cell)
+ *   BASELINE = px from the queued cell-top y down to the baseline. */
+#define HUD_TTF_CAP       11.0f
+#define HUD_TTF_BASELINE  11.0f
+
 /* ========================================================================
  * QueueRaceHudFormattedText (0x428320)
  *
@@ -1318,10 +1331,11 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
 
     int len = (int)strlen(buf);
 
-    /* VectorUI: record the raw ASCII string for crisp SDF rendering at flush
-     * (the original glyph table + char remap are applied there, against the
-     * HUD-font SDF atlas -- same typeface, sharp at any resolution). */
-    if (g_td5.ini.vector_ui && td5_vui_hudfont_page() >= 0) {
+    /* VectorUI: record the raw ASCII string for crisp rendering at flush — via
+     * the native HUD TTF (Rajdhani) when loaded, else the HUD-font SDF. The
+     * original glyph table / char remap is applied in the SDF path; the TTF path
+     * renders the ASCII codepoints directly. */
+    if (g_td5.ini.vector_ui && (td5_hudfont_ready() || td5_vui_hudfont_page() >= 0)) {
         int n = (int)(sizeof(s_hud_vui_text) / sizeof(s_hud_vui_text[0]));
         if (s_hud_vui_text_count < n) {
             HudVuiText *e = &s_hud_vui_text[s_hud_vui_text_count++];
@@ -1402,6 +1416,45 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
 
 void td5_hud_flush_text(void)
 {
+    /* Native HUD TTF (Rajdhani): render the recorded strings in the menu's
+     * secondary face. Fixed-pixel layout (glyphs are square, no aspect lock);
+     * advances + centring come from the TTF, matching hud_text_width. Each glyph
+     * quad is pixel-snapped so the small fixed-size text stays crisp under linear
+     * sampling. Takes priority over the SDF/bitmap when the TTF is loaded. */
+    if (g_td5.ini.vector_ui && s_hud_vui_text_count > 0 && td5_hudfont_ready()) {
+        static int s_logged_hud_ttf = 0;
+        if (!s_logged_hud_ttf) {
+            s_logged_hud_ttf = 1;
+            TD5_LOG_I(LOG_TAG, "HUD text: native TTF active (cap=%.1f baseline=%.1f)",
+                      (double)HUD_TTF_CAP, (double)HUD_TTF_BASELINE);
+        }
+        /* pass 1: rasterise every glyph into the shared atlas, then ONE upload */
+        for (int i = 0; i < s_hud_vui_text_count; i++) {
+            const char *s = s_hud_vui_text[i].s;
+            for (int k = 0; s[k]; k++) { td5_glyph g; td5_hudfont_get((unsigned char)s[k], HUD_TTF_CAP, &g); }
+        }
+        td5_font_flush_uploads();
+        /* pass 2: lay out + draw (cache hits) */
+        for (int i = 0; i < s_hud_vui_text_count; i++) {
+            HudVuiText *e = &s_hud_vui_text[i];
+            const char *s = e->s;
+            float total_w = 0.0f;
+            for (int k = 0; s[k]; k++) total_w += td5_hudfont_advance((unsigned char)s[k], HUD_TTF_CAP);
+            float cx = e->x;
+            if (e->centered) cx -= total_w * 0.5f;
+            float baseline = e->y + HUD_TTF_BASELINE;
+            for (int k = 0; s[k]; k++) {
+                td5_glyph g; td5_hudfont_get((unsigned char)s[k], HUD_TTF_CAP, &g);
+                if (g.valid && g.w > 0.0f) {
+                    float gx = (float)(int)(cx + g.xoff + 0.5f);
+                    float gy = (float)(int)(baseline + g.yoff + 0.5f);
+                    td5_vui_quad(gx, gy, g.w, g.h, 0xFFFFFFFFu, g.page, g.u0, g.v0, g.u1, g.v1);
+                }
+                cx += g.advance;
+            }
+        }
+        s_hud_vui_text_count = 0;
+    } else
     /* VectorUI: render the recorded strings via the HUD-font SDF atlas, reusing
      * the ORIGINAL glyph table (typeface, per-glyph widths, char remap, centered
      * math, +1 spacing) -- identical layout to the bitmap path, just crisp. */
@@ -1450,7 +1503,16 @@ void td5_hud_flush_text(void)
  * anchors the FPS/MS counter exactly. Returns 0 before the glyph table loads. */
 static float hud_text_width(const char *s)
 {
-    if (!s || !s_glyph_table) return 0.0f;
+    if (!s) return 0.0f;
+    /* Match whichever path td5_hud_flush_text uses: the native HUD TTF advances
+     * when loaded (so the FPS/MS counter right-anchors against the real rendered
+     * width), else the original glyph-table widths + 1px inter-glyph spacing. */
+    if (td5_hudfont_ready()) {
+        float w = 0.0f;
+        for (int k = 0; s[k]; k++) w += td5_hudfont_advance((unsigned char)s[k], HUD_TTF_CAP);
+        return w;
+    }
+    if (!s_glyph_table) return 0.0f;
     TD5_GlyphRecord *glyphs = s_glyph_table;   /* font 0 */
     int len = (int)strlen(s);
     float w = 0.0f;
@@ -3166,39 +3228,6 @@ void td5_hud_render_overlays(float dt)
                            yaw_deg, pitch_deg, roll_deg);
         dbg_y += dbg_dy;
 
-        /* [ATTITUDE DIAG 2026-05-27] Ground-truth for "car not following the
-         * slope". display_angles.roll FIELD (+0x208) = front-rear-derived =
-         * the car's VISUAL PITCH; .pitch FIELD (+0x20C) = left-right = visual
-         * ROLL. Shown SIGNED in degrees (the YAW/PITCH/ROLL line above wraps
-         * negatives to ~348). The dz breakdown answers WHY: dzWheel = the pure
-         * wheel-plane front-rear slope (what the road demands); suspFR = the
-         * suspension squat/dive that gets ADDED in the solver; dzFull =
-         * dzWheel+suspFR = the numerator that becomes the displayed pitch.
-         * If on a downhill dzWheel is big but dzFull≈0 (suspFR cancels it),
-         * the squat is eating the slope. If pitch matches the road but the car
-         * still looks flat, it's render/camera, not the solver. */
-        {
-            int16_t disp_fr = *(int16_t *)(dbg_a + 0x208);   /* front-rear → visual pitch */
-            int16_t disp_lr = *(int16_t *)(dbg_a + 0x20C);   /* left-right → visual roll  */
-            int sfr = (((int)disp_fr + 2048) & 0xFFF) - 2048;
-            int slr = (((int)disp_lr + 2048) & 0xFFF) - 2048;
-            int fl = *(int32_t *)(dbg_a + 0xF0 + 0*12 + 4);
-            int fr = *(int32_t *)(dbg_a + 0xF0 + 1*12 + 4);
-            int rl = *(int32_t *)(dbg_a + 0xF0 + 2*12 + 4);
-            int rr = *(int32_t *)(dbg_a + 0xF0 + 3*12 + 4);
-            int s0 = *(int32_t *)(dbg_a + 0x2DC + 0);
-            int s1 = *(int32_t *)(dbg_a + 0x2DC + 4);
-            int s2 = *(int32_t *)(dbg_a + 0x2DC + 8);
-            int s3 = *(int32_t *)(dbg_a + 0x2DC + 12);
-            int dz_wheel = (fl + fr) - (rl + rr);
-            int susp_fr  = (s0 + s1) - (s2 + s3);
-            td5_hud_queue_text(0, 8, dbg_y, 0,
-                "ATT: pitch=%+ddeg roll=%+ddeg | dzWheel=%d suspFR=%d dzFull=%d",
-                sfr * 360 / 4096, slr * 360 / 4096,
-                dz_wheel, susp_fr, dz_wheel + susp_fr);
-            dbg_y += dbg_dy;
-        }
-
         /* [WHEELGAP DIAG 2026-05-27] Per-wheel RENDERED world-Y minus GROUND
          * contact-Y, in world units (÷256). Wheels render rigidly at
          * render_pos + body_matrix*wheel_display_angles[w] (td5_render.c ~5054),
@@ -3224,7 +3253,7 @@ void td5_hud_render_overlays(float dt)
                 gap[w] = (int)(render_y - ground_y);
             }
             td5_hud_queue_text(0, 8, dbg_y, 0,
-                "WHEELGAP(float+): FL=%d FR=%d RL=%d RR=%d",
+                "WHEELGAP: FL=%d FR=%d RL=%d RR=%d",
                 gap[0], gap[1], gap[2], gap[3]);
             dbg_y += dbg_dy;
         }
@@ -3246,10 +3275,8 @@ void td5_hud_render_overlays(float dt)
         int32_t steer = *(int32_t *)(dbg_a + 0x30C);
         uint8_t brake = dbg_a[0x36D];
         uint8_t hbrake = dbg_a[0x36E];
-        int16_t slip_metric = *(int16_t *)(dbg_a + 0x33C);
-        td5_hud_queue_text(0, 8, dbg_y, 0, "STEER: %d  BRAKE: %s  HBRAKE: %s  SLIP: %d",
-                           steer, brake ? "ON" : "OFF", hbrake ? "ON" : "OFF",
-                           (int)slip_metric);
+        td5_hud_queue_text(0, 8, dbg_y, 0, "STEER: %d  BRAKE: %s  HBRAKE: %s",
+                           steer, brake ? "ON" : "OFF", hbrake ? "ON" : "OFF");
         dbg_y += dbg_dy;
 
         /* Suspension: roll (center) and pitch (wheel[0]) positions */
@@ -3264,9 +3291,6 @@ void td5_hud_render_overlays(float dt)
         uint8_t veh_mode     = dbg_a[0x379];  /* vehicle_mode: 0=normal, 1=recovery */
         uint8_t wheel_contact = dbg_a[0x37C]; /* wheel airborne mask THIS tick (NEW) */
         uint8_t dmg_lockout   = dbg_a[0x37D]; /* wheel airborne mask PREV tick (OLD snapshot) */
-        uint8_t surface_flags = dbg_a[0x376]; /* surface contact (bit0=rear, bit1=front) */
-        int32_t slip_f = *(int32_t *)(dbg_a + 0x31C); /* front axle slip excess */
-        int32_t slip_r = *(int32_t *)(dbg_a + 0x320); /* rear axle slip excess */
 
         const char *wall_str = "NONE";
         if (wall_flag == 1) wall_str = "WALL";
@@ -3278,19 +3302,23 @@ void td5_hud_render_overlays(float dt)
                            (int)dmg_lockout);
         dbg_y += dbg_dy;
 
-        td5_hud_queue_text(0, 8, dbg_y, 0, "WHEELS: %c%c%c%c  SURF: %s%s  SLIP: F%d R%d",
+        td5_hud_queue_text(0, 8, dbg_y, 0, "WHEELS: %c%c%c%c",
                            (wheel_contact & 1) ? 'L' : '-',
                            (wheel_contact & 2) ? 'R' : '-',
                            (wheel_contact & 4) ? 'l' : '-',
-                           (wheel_contact & 8) ? 'r' : '-',
-                           (surface_flags & 2) ? "FRT " : "",
-                           (surface_flags & 1) ? "REAR" : "",
-                           slip_f >> 8, slip_r >> 8);
+                           (wheel_contact & 8) ? 'r' : '-');
         dbg_y += dbg_dy;
 
-        /* Track span index */
+        /* Track span index + current sub-lane / lane count.
+         * sub_lane = actor+0x8C (ACTOR_SUB_LANE_INDEX, signed); lane count is the
+         * current span's geometry nibble via td5_track_get_span_lane_count. */
         int16_t span = *(int16_t *)(dbg_a + 0x82);
         td5_hud_queue_text(0, 8, dbg_y, 0, "SPAN: %d", (int)span);
+        dbg_y += dbg_dy;
+
+        int cur_sub_lane  = (int)*(int8_t *)(dbg_a + 0x8C);
+        int cur_lane_cnt  = td5_track_get_span_lane_count((int)span);
+        td5_hud_queue_text(0, 8, dbg_y, 0, "LANE: sub=%d  lanes=%d", cur_sub_lane, cur_lane_cnt);
 
         td5_hud_flush_text();
     }
