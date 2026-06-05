@@ -1496,33 +1496,12 @@ void td5_hud_flush_text(void)
     s_queued_glyph_count = 0;
 }
 
-/* [S12] Measure a HUD string's pixel width with the font-0 glyph metrics — the
- * same sum-of-glyph-widths + 1px inter-glyph spacing td5_hud_queue_text /
- * td5_hud_flush_text use to lay glyphs out. Result is in render-target px (the
- * HUD text path is unscaled, same space as g_render_width_f), so it right-
- * anchors the FPS/MS counter exactly. Returns 0 before the glyph table loads. */
-static float hud_text_width(const char *s)
-{
-    if (!s) return 0.0f;
-    /* Match whichever path td5_hud_flush_text uses: the native HUD TTF advances
-     * when loaded (so the FPS/MS counter right-anchors against the real rendered
-     * width), else the original glyph-table widths + 1px inter-glyph spacing. */
-    if (td5_hudfont_ready()) {
-        float w = 0.0f;
-        for (int k = 0; s[k]; k++) w += td5_hudfont_advance((unsigned char)s[k], HUD_TTF_CAP);
-        return w;
-    }
-    if (!s_glyph_table) return 0.0f;
-    TD5_GlyphRecord *glyphs = s_glyph_table;   /* font 0 */
-    int len = (int)strlen(s);
-    float w = 0.0f;
-    for (int k = 0; k < len; k++) {
-        uint8_t gi = s_char_remap[(uint8_t)s[k] & 0x7F];
-        w += glyphs[gi].width;
-    }
-    if (len > 1) w += (float)(len - 1);
-    return w;
-}
+/* [removed 2026-06-05] hud_text_width() was added in S12 solely to right-anchor
+ * the FPS/MS counter to the screen's right edge. The counter now draws top-LEFT
+ * at a fixed x=8 (below the POSITION label), so the width measurement is no
+ * longer needed and the helper was removed to avoid an unused-function warning.
+ * (Master's TTF-aware revision of it, 48d480c, only served that same right-anchor
+ * caller, which this change replaces — so nothing else depends on it.) */
 
 /* ========================================================================
  * InitializeRaceOverlayResources (0x4377B0)
@@ -3172,13 +3151,16 @@ void td5_hud_render_overlays(float dt)
     td5_render_set_clip_rect(0.0f, (float)g_render_width, 0.0f, (float)g_render_height);
     td5_render_set_projection_center(g_render_width_f * 0.5f, g_render_height_f * 0.5f);
 
-    /* FPS/MS counter, top-RIGHT corner of the whole screen. [S12 2026-06-05]
-     * Moved from the old top-left (8,8), which overlapped the per-viewport race
-     * POSITION label (drawn at each viewport's top-LEFT, vp_int_left+8). The
-     * position label always sits at a viewport's LEFT edge, so anchoring the
-     * counter to the screen's RIGHT edge keeps it clear in single AND split-
-     * screen. Drawn here (after the full-screen viewport is restored) so x is in
-     * render-target px; right-anchor x = width - measured text width - 8.
+    /* FPS/MS counter, top-LEFT — stacked directly BELOW the per-viewport race
+     * POSITION label and ABOVE the debug overlay. [user request 2026-06-05]
+     * Moved back from the S12 top-RIGHT anchor: the user wants it grouped in the
+     * top-left corner under the race position. Left-aligned at x=8 so it lines up
+     * with both the POSITION label (drawn at vp_int_left+8, top row y=8) and the
+     * debug overlay column (x=8). The position label is one ~16px font-0 line at
+     * y=8 (spans ~8..24), and the debug overlay starts at y=52, so y=24 sits one
+     * line below position with a clear gap above debug. Drawn here (after the
+     * full-screen viewport is restored) so the coords are render-target px.
+     * In split-screen this sits below the TOP-LEFT pane's position label.
      * [S01 2026-06-04] gated by the Display-options Show FPS toggle. peak = worst
      * frame time over the last ~250ms. Both values refresh at 4 Hz (every 250ms);
      * values from td5_game_update_fps_overlay(). */
@@ -3186,16 +3168,14 @@ void td5_hud_render_overlays(float dt)
         char fps_buf[48];
         snprintf(fps_buf, sizeof(fps_buf), "FPS %.0f  %dMS",
                  (double)g_td5_display_fps, g_td5_peak_frame_ms);
-        int fps_x = (int)(g_render_width_f - hud_text_width(fps_buf) - 8.0f);
-        if (fps_x < 8) fps_x = 8;
-        { static int s_fps_logged_w = -1;   /* one-shot per width; re-logs on resize */
-          int rw = (int)g_render_width_f;
-          if (rw != s_fps_logged_w) {
-              s_fps_logged_w = rw;
-              TD5_LOG_I(LOG_TAG, "race FPS overlay top-right: render_w=%d text_w=%.1f x=%d",
-                        rw, (double)hud_text_width(fps_buf), fps_x);
+        int fps_x = 8;
+        int fps_y = 24;   /* below POSITION (y=8, ~16px tall), above debug (y=52) */
+        { static int s_fps_logged = 0;   /* one-shot */
+          if (!s_fps_logged) {
+              s_fps_logged = 1;
+              TD5_LOG_I(LOG_TAG, "race FPS overlay top-left: x=%d y=%d", fps_x, fps_y);
           } }
-        td5_hud_queue_text(0, fps_x, 8, 0, "%s", fps_buf);
+        td5_hud_queue_text(0, fps_x, fps_y, 0, "%s", fps_buf);
     }
 
     /* Flush queued text glyphs */
