@@ -3037,19 +3037,36 @@ void td5_vfx_spawn_random_smoke_puff(TD5_Actor *actor, int view_index)
     if (rem >= 0x1F4) return;          /* 500 */
 
     /* Probe-midpoint computation [CONFIRMED @ 0x004013AC-0x004013F2].
-     * Each avg uses (left + right) signed >>1 with round-toward-zero. */
-    int32_t pRL_y, pRL_x, pRL_z;
-    int32_t pRR_y, pRR_x, pRR_z;
-    memcpy(&pRL_y, ap + 0xA8, 4);
-    memcpy(&pRL_x, ap + 0xAC, 4);
+     * Each avg uses (left + right) signed >>1 with round-toward-zero.
+     *
+     * [S26 FIX 2026-06-05 — opponent smoke floats at start] The rear contact-
+     * probe corners are stored as [X, Y(vertical), Z] at +0xA8/+0xAC/+0xB0
+     * (rear-left) and +0xB4/+0xB8/+0xBC (rear-right). Confirmed at runtime: the
+     * +0xA8 value tracks the chassis-center X (+0x1FC), +0xAC tracks center Y
+     * (+0x200), +0xB0 tracks center Z (+0x204); the sibling
+     * SpawnRearWheelSmokeEffects (td5_vfx_spawn_rear_wheel_smoke) and the orig
+     * read the SAME [X,Y,Z] layout. This function previously mis-labelled +0xA8
+     * as Y and +0xAC as X, so it averaged the X-probes into the VERTICAL output
+     * (point[1]) and added the +0x7800 lift there — placing the smoke at a
+     * vertical height equal to the car's world-X coordinate (hundreds of
+     * thousands of units up). Because the engine-rev gate above fires mainly
+     * during the low-RPM/high-throttle start-line launch, the stray high smoke
+     * was most visible "at the beginning" of the race. Orig builds:
+     *   out.X = avg(+0xA8,+0xB4)            [CONFIRMED @ 0x004013AC]
+     *   out.Y = avg(+0xAC,+0xB8) + 0x7800   [CONFIRMED @ 0x004013c5 ADD EAX,0x7800]
+     *   out.Z = avg(+0xB0,+0xBC)            [CONFIRMED @ 0x004013F2] */
+    int32_t pRL_x, pRL_y, pRL_z;
+    int32_t pRR_x, pRR_y, pRR_z;
+    memcpy(&pRL_x, ap + 0xA8, 4);
+    memcpy(&pRL_y, ap + 0xAC, 4);
     memcpy(&pRL_z, ap + 0xB0, 4);
-    memcpy(&pRR_y, ap + 0xB4, 4);
-    memcpy(&pRR_x, ap + 0xB8, 4);
+    memcpy(&pRR_x, ap + 0xB4, 4);
+    memcpy(&pRR_y, ap + 0xB8, 4);
     memcpy(&pRR_z, ap + 0xBC, 4);
 
     /* Faithful round-toward-zero divide by 2 (orig: ADD/CDQ/SUB/SAR pattern) */
-    int32_t sum_y = pRL_y + pRR_y;  int32_t avg_y = (sum_y - (sum_y >> 31)) >> 1;
     int32_t sum_x = pRL_x + pRR_x;  int32_t avg_x = (sum_x - (sum_x >> 31)) >> 1;
+    int32_t sum_y = pRL_y + pRR_y;  int32_t avg_y = (sum_y - (sum_y >> 31)) >> 1;
     int32_t sum_z = pRL_z + pRR_z;  int32_t avg_z = (sum_z - (sum_z >> 31)) >> 1;
 
     /* Layout of param struct: { X, Y+0x7800, Z } [CONFIRMED @ 0x004013F6-0x00401407] */

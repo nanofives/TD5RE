@@ -4241,6 +4241,33 @@ int td5_game_run_race_frame(void) {
          * while the reference had the full post-tick state. */
         td5_game_trace_stage("pre_physics", ticks_this_frame);
         td5_ai_tick();
+
+        /* [S26 2026-06-05] Race-end auto-brake for the HUMAN player(s). Once the
+         * finish line triggers the end transition (race_end_fade_state > 0), the
+         * human loses control and the car brakes itself to a stop. The normal
+         * per-slot input update (td5_input_update_player_control, gated on
+         * s_slot_state.state==1) STOPS for a slot the moment it finishes, so the
+         * brake must be forced here instead — AFTER td5_ai_tick (so a finished
+         * slot that gets AI-coasted is overridden) and BEFORE td5_physics_tick
+         * (so the brake is integrated THIS tick). Human slots only: an AI-driven
+         * slot 0 (attract mode) and AI co-op slots keep driving. */
+        if (g_td5.race_end_fade_state > 0) {
+            int hp = g_td5.num_human_players;
+            if (hp < 1) hp = 1;
+            if (hp > TD5_MAX_RACER_SLOTS) hp = TD5_MAX_RACER_SLOTS;
+            for (int fb = 0; fb < hp; fb++) {
+                if (fb == 0 && g_td5.ini.player_is_ai) continue;  /* attract slot keeps driving */
+                if (fb > 0 && g_td5.ini.others_ai)     continue;  /* AI-driven co-op slots */
+                TD5_Actor *fa = td5_game_get_actor(fb);
+                if (!fa) continue;
+                uint8_t *fp = (uint8_t *)fa;
+                *(int32_t *)(fp + 0x30C) = 0;   /* steering_command centred */
+                *(int16_t *)(fp + 0x33E) = 0;   /* throttle off */
+                fp[0x36D] = 1;                  /* brake_flag on (byte boolean) */
+                fp[0x36E] = 0;                  /* handbrake off */
+            }
+        }
+
         td5_physics_tick();
         td5_game_trace_stage("post_physics", ticks_this_frame);
         td5_game_trace_stage("post_ai", ticks_this_frame);
