@@ -847,24 +847,28 @@ static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static uint8_t s_font_glyph_advance[96];
 /* [S13 FONT SWAP 2026-06-05] Per-glyph horizontal advances (px in the 24px cell).
  * The original table came from the binary @0x4660C8 (the old BodyText face). The
- * main-menu font was swapped to Bahnschrift SemiBold (clean DIN/automotive face);
- * these advances are the rightmost-inked-column + 1 + FONT_GLYPH_PADDING measured
+ * main-menu font was swapped to the "Scream" bold rounded display face
+ * (td5mod/dist/fonts/scream_mod.ttf), horizontally condensed to fit the 24px cell
+ * with its baseline placed so caps land at cell rows ~8..23 — vertically centered
+ * in the 32px button, matching the original art's placement. These advances are
+ * the rightmost-inked-column + 1 + FONT_GLYPH_PADDING measured
  * off the regenerated re/assets/frontend/BodyText.png (see re/tools/
- * build_bodytext_bitmap.py). NOTE: at runtime this is only the FALLBACK — the
+ * build_bodytext_bitmap.py; rare symbols the face lacks are sourced from the
+ * original atlas). NOTE: at runtime this is only the FALLBACK — the
  * real advances are re-measured live from the loaded BodyText.png pixels by
  * frontend_init_font_metrics_from_pixels (so the bitmap page, the MSDF page, and
  * the baked button cache all share one consistent set of letterforms+metrics).
  * No RE basis for the swap itself: it is a data/asset change, not a behavioural
  * port (the original ran at a fixed 4:3 resolution with this one font). */
 static const uint8_t k_font_glyph_advance_default[96] = {
-    8,  9, 12, 18, 16, 19, 19,  8, 12, 10, 13, 15,
-    8, 14,  8, 15, 15, 10, 15, 15, 16, 15, 15, 14,
-   16, 15,  8,  8, 13, 13, 13, 13, 23, 18, 17, 17,
-   17, 17, 16, 17, 18,  9, 14, 18, 17, 20, 18, 17,
-   17, 19, 18, 17, 16, 17, 17, 23, 17, 17, 16, 11,
-   15,  9, 14, 14, 10, 15, 15, 15, 15, 15, 11, 15,
-   15,  9,  9, 16, 10, 22, 15, 15, 15, 15, 14, 15,
-   10, 15, 15, 21, 15, 15, 14, 12,  9, 11, 15,  8,
+    8, 14, 16, 14, 17, 24, 24, 12, 13, 13, 10, 17,
+   14, 13, 13, 13, 19, 16, 20, 19, 20, 19, 20, 20,
+   19, 20, 13, 15, 17, 18, 17, 22, 18, 22, 19, 19,
+   20, 16, 16, 22, 20, 12, 17, 21, 16, 24, 22, 23,
+   18, 23, 19, 18, 17, 20, 22, 24, 23, 22, 21, 13,
+   13, 13, 12, 15,  9, 19, 19, 16, 19, 18, 15, 19,
+   18, 12, 12, 19, 12, 24, 18, 19, 19, 19, 15, 16,
+   14, 18, 20, 24, 22, 21, 18,  9,  6, 10, 16,  8,
 };
 
 /* [S13 4:3-LOCKED GLYPH SCALE 2026-06-05] Horizontal glyph scale that keeps the
