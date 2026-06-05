@@ -344,6 +344,9 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SkipIntro",            &g_td5.ini.skip_intro },
         { "DebugOverlay",         &g_td5.ini.debug_overlay },
         { "DebugCollisions",      &g_td5.ini.debug_collisions },
+        { "SimulateJoyLoss",      &g_td5.ini.sim_joy_loss_player },
+        { "SimulateJoyLossDelayMs", &g_td5.ini.sim_joy_loss_delay_ms },
+        { "SimulateJoyLossHoldMs",  &g_td5.ini.sim_joy_loss_hold_ms },
         { "AutoRace",             &g_td5.ini.auto_race },
         { "StartScreen",          &g_td5.ini.start_screen },
         { "StartSpanOffset",      &g_td5.ini.start_span_offset },
@@ -668,6 +671,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.debug_overlay     = td5_ini_int("Game", "DebugOverlay", 0);
     g_td5.ini.debug_collisions  = td5_ini_int("Debug", "Collisions", 0);
 
+    /* [S27] DEV headless test hook for the controller-disconnect modal. */
+    g_td5.ini.sim_joy_loss_player   = td5_ini_int("Debug", "SimulateJoyLoss", -1);
+    g_td5.ini.sim_joy_loss_delay_ms = td5_ini_int("Debug", "SimulateJoyLossDelayMs", 4000);
+    g_td5.ini.sim_joy_loss_hold_ms  = td5_ini_int("Debug", "SimulateJoyLossHoldMs", 4000);
+
     /* Benchmark mode: enables main-menu button 2 → TD5_GAMESTATE_BENCHMARK path.
      * Matches the original's dead-code button-2 branch (app+0x170 is never written
      * in TD5_d3d.exe). Default 0 = button 2 is 2-player. */
@@ -895,6 +903,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.player_is_ai           = 0;   /* the human drives                 */
     g_td5.ini.debug_overlay          = 0;   /* no HUD debug text overlay        */
     g_td5.ini.debug_collisions       = 0;   /* no collision wireframe overlay   */
+    g_td5.ini.sim_joy_loss_player    = -1;  /* no simulated controller-loss hook */
     g_td5.ini.race_trace_enabled     = 0;   /* no per-tick CSV race trace       */
     g_td5.ini.whole_state_enabled    = 0;   /* no whole-state snapshot dump     */
     g_td5.ini.state_replay_mode      = 0;   /* snapshot-replay harness off      */

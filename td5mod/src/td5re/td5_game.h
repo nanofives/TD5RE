@@ -119,6 +119,16 @@ extern void    *g_actor_pool;
 int td5_game_get_player_slot(int viewport);
 int td5_game_is_split_screen(void);
 
+/* --- [S27] Controller-disconnect pause + reconnect modal ---
+ * device_disconnect_active(): 1 while the race is frozen for a missing pad.
+ * player_disconnected(p): 1 if player p's controller is currently gone (drives
+ * the per-viewport HUD modal). Source-port feature (no original equivalent). */
+int td5_game_device_disconnect_active(void);
+int td5_game_player_disconnected(int player);
+#ifndef TD5RE_RELEASE
+void td5_game_debug_toggle_sim_device_loss(int player);  /* F9 dev test hook */
+#endif
+
 /* --- Post-race results accessors (for Screen [24]/[25]) ---
  * [CONFIRMED @ 0x0040AAD0/0x0040AB80] sort populates s_results
  * [CONFIRMED @ 0x00413BC0] ScreenPostRaceNameEntry reads these fields */

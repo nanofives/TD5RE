@@ -554,6 +554,18 @@ post_poll:
         }
         s_prev_f12 = f12_now;
     }
+
+    /* [S27] F9 (DIK_F9 = 0x43) — simulate a controller disconnect for player 0,
+     * to exercise the disconnect pause + per-viewport reconnect modal without a
+     * physical unplug. Rising edge toggles it (press once to "drop" the pad,
+     * again to "reconnect"). Dev-only affordance — compiled out of release. */
+    {
+        static int s_prev_f9 = 0;
+        int f9_now = td5_plat_input_key_pressed(0x43);
+        if (f9_now && !s_prev_f9)
+            td5_game_debug_toggle_sim_device_loss(0);
+        s_prev_f9 = f9_now;
+    }
 #endif
 
     /* Escape handling: trigger race exit fade */

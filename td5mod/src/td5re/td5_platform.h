@@ -234,6 +234,12 @@ void td5_plat_input_set_joystick_bindings(int slot, const int32_t *bindings, int
  *  Used by the control-config per-button capture. [PORT ENHANCEMENT 2026-06] */
 uint32_t td5_plat_input_joystick_buttons(int device_slot);
 
+/** [S27 2026-06-05] 1 if the joystick bound to this player slot has been
+ *  persistently lost (physically disconnected); 0 for a keyboard slot or a
+ *  live device. Drives the in-race controller-disconnect pause + reconnect
+ *  modal. Source-port feature (no original DirectInput hot-plug handling). */
+int td5_plat_input_joystick_is_lost(int device_slot);
+
 /* ------------------------------------------------------------------------
  * Per-action joystick binding (PORT ENHANCEMENT 2026-06)
  *

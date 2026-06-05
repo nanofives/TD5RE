@@ -180,6 +180,9 @@ int  td5_hud_build_metric_digits(void);
 void td5_hud_draw_status_text(int player_slot, int view_index);
 void td5_hud_render_minimap(int view_index);
 void td5_hud_draw_pause_overlay(void);
+/* [S27] Per-viewport "controller disconnected — reconnect" modal. No-op unless a
+ * required player's controller is currently missing. */
+void td5_hud_draw_disconnect_overlays(void);
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac);
 void td5_hud_draw_race_fade(float progress, int direction);
 
