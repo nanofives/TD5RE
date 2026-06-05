@@ -3243,6 +3243,27 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
     return ok;
 }
 
+/* Pick a body colour for a TD6 AI opponent. TD6 carskin0..3 are all the same
+ * grey/white base (the real game tints the masked body at runtime), so without
+ * a tint every TD6 AI car renders white/grey. Deterministic from
+ * (car_index, slot, variant): the slot term spreads the palette so adjacent
+ * opponents get distinct colours, and the per-race-random variant rotates the
+ * field race-to-race. Returns 0xRRGGBB (never pure white, so it always paints). */
+static uint32_t td5_asset_pick_ai_td6_color(int car_index, int slot, int variant)
+{
+    static const uint32_t k_ai_td6_palette[] = {
+        0xD02020, /* red      */ 0x2048D0, /* blue     */ 0x1F9F30, /* green    */
+        0xE0C020, /* yellow   */ 0xE07020, /* orange   */ 0x8C28C0, /* purple   */
+        0x20B8B8, /* cyan     */ 0xE040A0, /* pink     */ 0xD8D8D8, /* silver   */
+        0x687888, /* slate    */ 0x303848, /* gunmetal */ 0x86D020, /* lime     */
+        0x208878, /* teal     */ 0x903020, /* maroon   */ 0x203088, /* navy     */
+        0xC0A038, /* gold     */
+    };
+    int n = (int)(sizeof(k_ai_td6_palette) / sizeof(k_ai_td6_palette[0]));
+    unsigned h = (unsigned)(car_index * 3 + slot * 5 + variant * 7);
+    return k_ai_td6_palette[h % (unsigned)n];
+}
+
 int td5_asset_load_vehicle(int car_index, int slot, int paint)
 {
     char zip_path[256];
@@ -3358,19 +3379,28 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
             char png_skin[256];
             int skin_ok = 0;
             if (td5_asset_resolve_png_path(skin_tga, zip_path, png_skin, sizeof(png_skin))) {
-                /* TD6 player car: bake the selected paint colour into the body
-                 * texels only (carmask.png), leaving glass/lights/chrome/tyres
-                 * untouched. The booth (photo-booth) is skipped so its carpic
-                 * keeps the grey body. Non-TD6 cars have no carmask -> plain load. */
+                /* TD6 cars: bake a paint colour into the body texels only
+                 * (carmask.png), leaving glass/lights/chrome/tyres untouched.
+                 *   slot 0 (player)  -> the chosen INI colour (white = leave grey)
+                 *   slot >=1 (AI)     -> a per-car colour so the TD6 opponent
+                 *                        field isn't all white/grey (the carskin
+                 *                        variants are identical grey base art).
+                 * The booth (photo-booth) is skipped so its carpic keeps the grey
+                 * body. Non-TD6 cars have no carmask -> plain load with their own
+                 * pre-painted carskinN. */
                 char png_mask[256];
-                uint32_t paint_rgb = (uint32_t)g_td5.ini.td6_paint_color & 0x00FFFFFFu;
-                if (slot == 0 && !td5_render_photobooth_active() &&
-                    paint_rgb != 0x00FFFFFFu &&
+                if (!td5_render_photobooth_active() &&
                     td5_asset_resolve_png_path("carmask.png", zip_path, png_mask, sizeof(png_mask))) {
-                    skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin,
-                                                                 png_mask, paint_rgb);
-                    if (skin_ok)
-                        TD5_LOG_I(LOG_TAG, "vehicle slot=0: TD6 body painted %06X (mask)", paint_rgb);
+                    uint32_t paint_rgb = (slot == 0)
+                        ? ((uint32_t)g_td5.ini.td6_paint_color & 0x00FFFFFFu)
+                        : td5_asset_pick_ai_td6_color(car_index, slot, paint);
+                    if (paint_rgb != 0x00FFFFFFu) {
+                        skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin,
+                                                                     png_mask, paint_rgb);
+                        if (skin_ok)
+                            TD5_LOG_I(LOG_TAG, "vehicle slot=%d: TD6 body painted %06X (mask)",
+                                      slot, paint_rgb);
+                    }
                 }
                 if (!skin_ok)
                     skin_ok = td5_asset_load_png_texture(skin_page, png_skin, TD5_COLORKEY_NONE);

@@ -640,28 +640,71 @@ void td5_ai_correct_spawn_heading(int slot) {
     rs = route_state(slot);
     if (!rs) return;
 
-    route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-    if (!route_bytes) return;
-
     actor = actor_ptr(slot);
     span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
     if (span < 0) return;
 
-    rb = (int32_t)route_bytes[(size_t)(unsigned)span * 3u + 1u];
-    if (rb < 4) return; /* junction-zone sentinel: skip */
+    route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    rb = route_bytes ? (int32_t)route_bytes[(size_t)(unsigned)span * 3u + 1u] : 0;
 
-    /* Same formula as ai_route_heading_for_actor [CONFIRMED @ td5_ai.c:305]:
-     * route_heading = (rb * 0x102C) >> 8 */
-    route_heading = ((rb * 0x102C) >> 8) & 0xFFF;
+    if (route_bytes && rb >= 4) {
+        /* Primary path: derive the spawn heading from the route byte.
+         * Same formula as ai_route_heading_for_actor [CONFIRMED @ td5_ai.c:305]:
+         * route_heading = (rb * 0x102C) >> 8.  (rb < 4 is a junction-zone
+         * sentinel that can't encode a heading; route_bytes==NULL is a track
+         * that shipped without LEFT/RIGHT.TRK — both fall through below.) */
+        route_heading = ((rb * 0x102C) >> 8) & 0xFFF;
 
-    TD5_LOG_I(LOG_TAG,
-              "correct_spawn_heading: slot=%d span=%d rb=%d geom_yaw=%d route_yaw=%d",
-              slot, (int)span, (int)rb,
-              ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8,
-              route_heading);
+        TD5_LOG_I(LOG_TAG,
+                  "correct_spawn_heading: slot=%d span=%d rb=%d geom_yaw=%d route_yaw=%d",
+                  slot, (int)span, (int)rb,
+                  ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8,
+                  route_heading);
 
-    /* Write route heading to the 20-bit yaw accumulator (<<8 = 12→20 bit) */
-    ACTOR_I32(actor, ACTOR_YAW_ACCUM) = route_heading << 8;
+        /* Write route heading to the 20-bit yaw accumulator (<<8 = 12→20 bit) */
+        ACTOR_I32(actor, ACTOR_YAW_ACCUM) = route_heading << 8;
+        return;
+    }
+
+    /* [S21 DEFENSIVE FALLBACK 2026-06-05] No usable route byte (route-less
+     * track, or a junction-sentinel span where rb < 4).  Previously this
+     * returned early and left the geometry yaw from td5_track_compute_heading,
+     * which on TD6 tracks lands ~90° off the real travel direction (TD6's
+     * in-span vertex layout differs from TD5's) — the AI then accelerates
+     * sideways into a wall and stalls "in the middle of the road".  Instead,
+     * derive the heading from the track CENTERLINE TANGENT: sample the
+     * centerline world XZ at the spawn span and 4 spans ahead and take atan2 of
+     * the delta.  The tangent is layout-independent, so the car faces down-track
+     * regardless of vertex layout or missing route data.
+     *
+     * Yaw convention: ACTOR_YAW_ACCUM stores (angle + 0x800) << 8 — the same
+     * +0x800 baseline the route_heading path and the geometry spawn pose use
+     * (td5_game.c spawn writes (geom_angle + 0x800) << 8; deviation baseline is
+     * ~0x800, see td5_ai.c:4010).  This function is only called from the
+     * TD6-gated site (td5_game.c, g_active_td6_level > 0), so faithful TD5
+     * tracks never reach here and keep byte-identical behaviour; for tracks
+     * that have a valid route byte (all currently-migrated TD6 levels at their
+     * spawn spans, e.g. Rome rb=188) the primary path above is taken. */
+    {
+        int span_count = td5_track_get_span_count();
+        int s0 = (int)span;
+        int s1, x0 = 0, z0 = 0, x1 = 0, z1 = 0;
+        if (span_count <= 1) return;
+        s1 = (s0 + 4) % span_count;     /* 4 spans ahead, matching AI lookahead */
+        if (td5_track_sample_target_point(s0, 128, &x0, &z0, 0) &&
+            td5_track_sample_target_point(s1, 128, &x1, &z1, 0)) {
+            int32_t dx = (int32_t)(x1 - x0) >> 8;   /* 24.8 FP -> integer */
+            int32_t dz = (int32_t)(z1 - z0) >> 8;
+            int32_t tangent = ai_angle_from_vector(dx, dz) & 0xFFF;
+            int32_t yaw12   = (tangent + 0x800) & 0xFFF;
+            TD5_LOG_I(LOG_TAG,
+                      "correct_spawn_heading: slot=%d span=%d TANGENT fallback "
+                      "(rb=%d no usable route byte) geom_yaw=%d tangent_yaw=%d dx=%d dz=%d",
+                      slot, (int)span, (int)rb,
+                      ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8, yaw12, dx, dz);
+            ACTOR_I32(actor, ACTOR_YAW_ACCUM) = yaw12 << 8;
+        }
+    }
 }
 
 
