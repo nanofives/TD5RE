@@ -2854,11 +2854,30 @@ void td5_hud_render_overlays(float dt)
             int32_t *rs_hud = td5_ai_get_route_state(actor_slot);
             uint32_t heading_delta = rs_hud ? td5_compute_heading_delta(rs_hud) : 0;
 
-            if (heading_delta > 0x3FF && heading_delta < 0xC00 &&
-                s_wrong_way_counter[v] > 2) {
-                /* Flash at ~8Hz (visible when tick counter mod 32 > 8) */
-                uint32_t flash = g_tick_counter & 0x1F;
-                if (flash > 8) {
+            /* [FIX 2026-06-05b wrong-way detection — THE real bug]
+             * td5_compute_heading_delta returns the NEGATED 12-bit route-vs-yaw
+             * angle (its last op is `return 0u - t`), so the raw uint32 is either
+             * 0 (car aligned with the route) or 0xFFFFFxxx (off-axis). The old
+             * port test compared that RAW value against (0x3FF,0xC00) and so could
+             * essentially never match (0xFFFFFxxx > 0xC00) — that is exactly why
+             * "no wrong-way sign ever appears". Mask to 12 bits to recover the
+             * real angular separation; the band is symmetric about 0x800 so it
+             * correctly flags the car facing >90deg off-route. Confirmed live:
+             * reversing gave heading_delta=0xFFFFF770 -> hd12=0x770 (in band) with
+             * s_wrong_way_counter climbing 1..14. Kept the faithful two-signal
+             * design: facing the wrong way AND sustained backward span progression
+             * (the span counter, ++ when the span index drops below last frame's,
+             * reset when it climbs). */
+            uint32_t hd12 = heading_delta & 0xFFFu;
+            int wrong_way = (hd12 > 0x3FF && hd12 < 0xC00) &&
+                            (s_wrong_way_counter[v] > 2);
+
+            if (wrong_way) {
+                /* Slow, readable blink: ON for 48 of every 64 ticks (~75% duty),
+                 * i.e. half the rate of the old (tick & 0x1F) > 8 cadence which
+                 * read as a fast flicker (user feedback 2026-06-05). Mostly-on so
+                 * the warning stays legible while still pulsing for attention. */
+                if ((g_tick_counter & 0x3Fu) < 0x30u) {
                     /* Pre-baked U-turn icon (UTURN sprite, centered). */
                     hud_submit_quad(view_base + 0x67C);
                     /* [FIX 2026-06-05 wrong-way warning — source-port HUD, no
@@ -2880,8 +2899,8 @@ void td5_hud_render_overlays(float dt)
                 }
                 if ((g_tick_counter % 30u) == 0u) {
                     TD5_LOG_I(LOG_TAG,
-                        "wrong-way warning view %d active: heading_delta=0x%X counter=%d",
-                        v, (unsigned int)heading_delta, s_wrong_way_counter[v]);
+                        "wrong-way warning view %d active: hd12=0x%X counter=%d",
+                        v, (unsigned int)hd12, s_wrong_way_counter[v]);
                 }
             }
 
