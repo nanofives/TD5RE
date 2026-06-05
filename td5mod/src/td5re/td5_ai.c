@@ -5447,6 +5447,7 @@ void td5_ai_init_traffic_actors(void) {
 
 /* Per-actor smart-traffic state (indexed by actor slot). */
 static int8_t   s_traffic_lane_bias[TD5_MAX_TOTAL_ACTORS];     /* situational lane offset (-1/0/+1), 1-tick latency */
+static int      s_traffic_stuck_frames[TD5_MAX_TOTAL_ACTORS];  /* AntiFreeze: consecutive recovery-frozen ticks */
 
 /* Per-race diagnostic counters — observe which behaviours actually trigger
  * (the rate-limited per-event logs can miss firings). Dumped periodically. */
@@ -5463,9 +5464,54 @@ static struct {
 /* Reset all smart-traffic per-actor state. Called once per race from
  * td5_ai_init_race_actor_runtime(). */
 static void td5_traffic_smart_reset(void) {
-    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++)
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
         s_traffic_lane_bias[i] = 0;
+        s_traffic_stuck_frames[i] = 0;
+    }
     memset(&s_smart_stat, 0, sizeof(s_smart_stat));
+}
+
+/* AntiFreeze (source-port enhancement): the faithful traffic recovery-brake only
+ * clears via RecycleTrafficActorFromQueue, which requires the player to advance
+ * (~41 spans) — so a heading-misaligned traffic car freezes PERMANENTLY when the
+ * player is parked/slow. This un-sticks a car that has been recovery-frozen for
+ * `traffic_antifreeze_frames` consecutive ticks: clear the recovery flag and
+ * re-align its heading to the road geometry (so Stage-2 below does not just
+ * re-arm it), reset its velocity, and re-seed track progress. Independent of the
+ * "smart" gate; default ON. Skips the active special-encounter cop (slot 9). */
+static void traffic_smart_antifreeze(int slot, char *actor, int32_t *rs) {
+    if (!g_td5.ini.traffic_antifreeze)
+        return;
+    if (slot < g_traffic_slot_base || slot >= TD5_MAX_TOTAL_ACTORS)
+        return;
+    if (slot == 9 && g_encounter_tracked_handle != -1) {
+        s_traffic_stuck_frames[slot] = 0;
+        return;
+    }
+    if (g_traffic_recovery_stage[slot] == 0) {
+        s_traffic_stuck_frames[slot] = 0;   /* not frozen — reset the counter */
+        return;
+    }
+    if (++s_traffic_stuck_frames[slot] < g_td5.ini.traffic_antifreeze_frames)
+        return;                              /* not stuck long enough yet */
+
+    /* Stuck too long — un-stick in place. */
+    s_traffic_stuck_frames[slot] = 0;
+    g_traffic_recovery_stage[slot] = 0;
+    /* Re-align heading to the road at the current span (same helper the faithful
+     * recycle uses), then flip 180 deg for reverse-polarity (oncoming) traffic,
+     * matching the spawn/recycle convention. This keeps Stage-2's heading delta
+     * small so it does not immediately re-arm the recovery brake. */
+    td5_track_compute_heading((TD5_Actor *)actor);
+    if ((rs[RS_ROUTE_DIRECTION_POLARITY] & 1) != 0)
+        ACTOR_I32(actor, ACTOR_YAW_ACCUM) += 0x80000;
+    td5_physics_reset_actor_state((TD5_Actor *)actor);
+    td5_ai_seed_actor_track_progress_offset(slot);
+    td5_track_normalize_actor_wrap((TD5_Actor *)actor);
+    if ((g_ai_frame_counter % 30u) == 0u)
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_antifreeze: slot=%d unstuck at span=%d (cleared recovery + realigned)",
+                  slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW));
 }
 
 /* Scan active actors for one occupying `target_lane` near `self_span` (a car
@@ -5662,6 +5708,10 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
     /* --- Stage 1: Recycle --- */
     td5_ai_recycle_traffic_actor();
+
+    /* [S20 AntiFreeze] un-stick a traffic car that the faithful recovery brake
+     * has frozen and the player-relative recycle can't reach (parked player). */
+    traffic_smart_antifreeze(slot, actor, rs);
 
     /* [S20 smart-traffic] periodic diagnostic dump (one slot, every ~300 frames)
      * so the before/after trace can confirm which behaviours actually fired. */
@@ -6036,11 +6086,14 @@ void td5_ai_update_traffic_route_plan(int slot) {
             span_diff_dir = (int32_t)self_span - (int32_t)peer_span;
         }
 
-        /* [S20 smart-traffic] Lookahead: when the nearest peer is close ahead in
+        /* [S20 smart-traffic] Lookahead: when the nearest peer is close AHEAD in
          * our lane and a clear adjacent lane exists, set up a lane change (next
-         * tick) and ease the hard brake instead of ramming/stopping. Outside the
-         * close window we leave the faithful TTC behaviour untouched. */
-        if (span_diff_dir > -6 && span_diff_dir < 8 && self_speed > 0) {
+         * tick) and ease the hard brake instead of ramming/stopping.
+         * span_diff_dir > 0 means the peer is in FRONT of us in our travel
+         * direction — we only dodge what we can see. A peer BEHIND us
+         * (span_diff_dir <= 0) is left to the faithful path: a driver can't see
+         * behind, so traffic must not swerve for a car overtaking from the rear. */
+        if (span_diff_dir > 0 && span_diff_dir < 8 && self_speed > 0) {
             smart_ease = traffic_smart_react_to_peer(
                 slot, (int)self_span,
                 (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX),

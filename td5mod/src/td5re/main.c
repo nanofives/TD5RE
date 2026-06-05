@@ -332,6 +332,9 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "TrafficAvoidSlowLane", &g_td5.ini.traffic_avoid_slow_lane },
         { "TrafficLookahead",     &g_td5.ini.traffic_lookahead },
         { "TrafficWallAvoidBias", &g_td5.ini.traffic_wall_avoid_bias },
+        { "TrafficAntiFreeze",        &g_td5.ini.traffic_antifreeze },
+        { "TrafficAntiFreezeFrames",  &g_td5.ini.traffic_antifreeze_frames },
+        { "TrafficPlayerCollide",     &g_td5.ini.traffic_player_collide },
         { "Player1Joystick",      &g_td5.ini.player1_joystick },
         { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
@@ -681,6 +684,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.traffic_wall_avoid_bias = td5_ini_int("Traffic", "WallAvoidBias", 96);
     if (g_td5.ini.traffic_wall_avoid_bias < 0)   g_td5.ini.traffic_wall_avoid_bias = 0;
     if (g_td5.ini.traffic_wall_avoid_bias > 256) g_td5.ini.traffic_wall_avoid_bias = 256;
+    g_td5.ini.traffic_antifreeze        = td5_ini_int("Traffic", "AntiFreeze", 1);
+    g_td5.ini.traffic_antifreeze_frames = td5_ini_int("Traffic", "AntiFreezeFrames", 120);
+    if (g_td5.ini.traffic_antifreeze_frames < 15) g_td5.ini.traffic_antifreeze_frames = 15;
+    g_td5.ini.traffic_player_collide    = td5_ini_int("Traffic", "PlayerCollide", 1);
     g_td5.ini.player1_joystick   = td5_ini_int("GameOptions", "Player1Joystick", 0);
     g_td5.ini.player2_joystick   = td5_ini_int("GameOptions", "Player2Joystick", 0);
 
