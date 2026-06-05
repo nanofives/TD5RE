@@ -49,6 +49,11 @@ void td5_camera_update_chase_all(void);
 void td5_camera_finalize_chase_pos(TD5_Actor *actor, int view);
 void td5_camera_finalize_all(void);
 
+/* Re-anchor (snap) the per-render-frame chase-camera smoothing so the next
+   finalize does NOT glide across a discontinuity. Call on race start / preset
+   change / resume-from-pause. Render-only; never feeds the sim. */
+void td5_camera_snap_smoothing(void);
+
 /* ========================================================================
  * Camera preset table (7 presets x 16 bytes at 0x463098)
  *
