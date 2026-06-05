@@ -388,6 +388,12 @@ static int  s_network_active;           /* g_networkSessionActive / DAT_004962bc
 /* --- S10 net-play: explicit connection modes (LAN / Direct-IP) --- */
 static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direct join) */
 static int  s_nickname_from_mpopts;     /* nickname screen entered from Multiplayer Options */
+/* Main-menu EXIT confirm dialog: button-pool indices of the YES / NO! buttons,
+ * recorded when the dialog is built (state 5) so the handler (state 6) dispatches
+ * by index instead of by label text — the SNK labels are "YES"/"NO!", which never
+ * matched the old strcmp(..,"Yes")/strcmp(..,"No") so EXIT did nothing. */
+static int  s_exit_confirm_yes_idx = -1;
+static int  s_exit_confirm_no_idx  = -1;
 /* --- S10b: lobby options modal (host) + join-password prompt --- */
 static int  s_lobby_modal;              /* 0=closed, 1=OPTIONS modal open */
 static int  s_lobby_modal_armed;        /* 1 once the opening Enter is released */
@@ -3215,6 +3221,20 @@ static int frontend_is_window_active(void) {
     return (foreground == hwnd) ? 1 : 0;
 }
 
+static void frontend_post_quit(void);   /* defined later; used by the credits-skip path */
+
+/* True if ANY keyboard key is currently down (DirectInput state buffer) or any
+ * mapped gamepad nav/confirm bit is set this frame. Basis for "press any key to
+ * exit the post-EXIT credits scroll". */
+static int frontend_any_input_down(void) {
+    const uint8_t *kb = td5_plat_input_get_keyboard();
+    if (kb) {
+        for (int i = 0; i < 256; i++)
+            if (kb[i] & 0x80) return 1;
+    }
+    return s_fe_gamepad_nav ? 1 : 0;
+}
+
 static void frontend_poll_input(void) {
     POINT pt;
     HWND hwnd;
@@ -3397,9 +3417,27 @@ static void frontend_poll_input(void) {
             frontend_play_sfx(3);
             TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=keyboard",
                       s_button_index, s_buttons[s_button_index].label);
-        } else {
+        } else if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY) {
             frontend_play_sfx(10);
         }
+        /* else: the post-EXIT credits scroll has no buttons, so a confirm press
+         * has nothing to action — the any-key skip block below quits instead of
+         * playing the rejection blip. */
+    }
+
+    /* Credits/extras scroll: press ANY key (or click / gamepad button) to skip
+     * the credits and quit the game. Edge-detected against a key held over from
+     * the menu so the YES press that opened the credits can't instantly exit.
+     * [user request 2026-06-05: any key leaves the post-EXIT credits, no lock sfx] */
+    {
+        static int s_credits_anykey_prev = 0;
+        int any_now = frontend_any_input_down();
+        if (s_current_screen == TD5_SCREEN_EXTRAS_GALLERY &&
+            ((any_now && !s_credits_anykey_prev) || s_mouse_clicked)) {
+            TD5_LOG_I(LOG_TAG, "ExtrasGallery: input detected, quitting game");
+            frontend_post_quit();
+        }
+        s_credits_anykey_prev = any_now;
     }
     s_prev_left_state = left_now;
     s_prev_right_state = right_now;
@@ -3524,6 +3562,8 @@ static void fe_draw_text_centered(float center_x, float y, const char *text,
 static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
 static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
                                   int state, float sx, float sy);
+static void fe_draw_button_frame(float bx, float by, float bw, float bh,
+                                 int bb_state, float sx, float sy);
 static int fe_draw_arrow_proc(float x, float y, float w, float h,
                               int dir_right, uint32_t color);
 static void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
@@ -3667,11 +3707,14 @@ static void frontend_render_text_input(void) {
     const float BTN_X = 120.0f, BTN_W = 448.0f, BTN_H = 64.0f, BTN_Y = 193.0f;
     float bx = BTN_X * sx, by = BTN_Y * sy, bw = BTN_W * sx, bh = BTN_H * sy;
 
-    /* Gold focused 9-slice button frame (transparent interior — color-keyed black in the
-     * original, like every other frontend button). */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_button_9slice(bx, by, bw, bh, 0 /*focused*/, sx, sy);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    /* Field frame in the MODERN frontend-button style: this routes through the
+     * SAME fe_draw_button_frame() the main button loop uses, so when VectorUI is
+     * on the field gets the neon gold roundrect (matching the OK button beside
+     * it) instead of the flat ButtonBits 9-slice that looked out of place. State
+     * 0 = gold/selected because the field is the active input widget. Falls back
+     * to the 9-slice frame automatically when VectorUI is off (helper internals).
+     * Prompt + typed name + caret are drawn on top below, unchanged. */
+    fe_draw_button_frame(bx, by, bw, bh, 0 /*gold/active*/, sx, sy);
 
     /* Prompt centered near the top of the button (screen-overridable). */
     fe_draw_text_centered(bx + bw * 0.5f, by + 8.0f * sy,
@@ -7478,6 +7521,37 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
                  1.0f,                     (yb + 30.0f) / BB_TEX_H);
 }
 
+/* Draw a modern frontend button FRAME (no label/no fill of the caller's content)
+ * at the given rect. This is the single source of truth for how every modern
+ * frontend button is framed: the VectorUI neon roundrect when VectorUI is enabled
+ * and its shader resources loaded, else the ButtonBits 9-slice gold/blue/gray
+ * frame. bb_state: 0 = gold/selected, 1 = blue/unselected, 2 = gray/disabled.
+ * Used by the main button render loop AND by the text-input widget so the
+ * nickname / session-name field matches every other button on screen. The
+ * roundrect/9-slice paths manage their own blend presets internally. */
+static void fe_draw_button_frame(float bx, float by, float bw, float bh,
+                                 int bb_state, float sx, float sy) {
+    int use_proc = (g_td5.ini.vector_ui && s_ps_roundrect && s_rr_cb);
+    if (use_proc) {
+        /* Border 3-stop gradient + interior fill, colours per state (matches the
+         * button render loop exactly). Selected interior = dark purple 0x392152;
+         * unselected/locked have a transparent interior (border only). */
+        uint32_t mid_c, inner_c, outer_c;
+        if (bb_state == 0)      { mid_c = 0xFFD9CA00u; inner_c = 0xFFA08C00u; outer_c = 0xFF3C2F00u; }
+        else if (bb_state == 2) { mid_c = 0xFFAAAAAAu; inner_c = 0xFF777777u; outer_c = 0xFF222222u; }
+        else                    { mid_c = 0xFF7995FFu; inner_c = 0xFF496BDCu; outer_c = 0xFF001675u; }
+        float fillA = (bb_state == 0) ? 1.0f : 0.0f;
+        fe_draw_roundrect(bx, by, bw, bh,
+                          20.0f * sy /*large TL/BR*/, 5.0f * sy /*small TR/BL*/,
+                          6.0f * sy  /*side border*/, 2.0f * sy /*top/bottom border*/,
+                          mid_c, inner_c, outer_c, 0xFF392152u, fillA);
+    } else if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    }
+}
+
 static void fe_draw_quad(float x, float y, float w, float h,
                          uint32_t color, int tex_page,
                          float u0, float v0, float u1, float v1) {
@@ -8142,20 +8216,10 @@ void td5_frontend_render_ui_rects(void) {
         }
 
         if (use_proc) {
-            /* Border 3-stop gradient (outer-edge -> bright middle -> inner-edge),
-             * colours per state. Selected = gold, unselected = blue, locked =
-             * gray. Interior dark purple 0x392152 ONLY on the selected button;
-             * unselected/locked have a transparent interior (border only).
-             * Corners diagonally symmetric (TL/BR smooth, TR/BL abrupt). */
-            uint32_t mid_c, inner_c, outer_c;
-            if (bb_state == 0)      { mid_c = 0xFFD9CA00u; inner_c = 0xFFA08C00u; outer_c = 0xFF3C2F00u; }
-            else if (bb_state == 2) { mid_c = 0xFFAAAAAAu; inner_c = 0xFF777777u; outer_c = 0xFF222222u; }
-            else                    { mid_c = 0xFF7995FFu; inner_c = 0xFF496BDCu; outer_c = 0xFF001675u; }
-            float fillA = (bb_state == 0) ? 1.0f : 0.0f;
-            fe_draw_roundrect(bx, by, bw, bh,
-                              20.0f * sy /*large TL/BR*/, 5.0f * sy /*small TR/BL*/,
-                              6.0f * sy  /*side border*/, 2.0f * sy /*top/bottom border*/,
-                              mid_c, inner_c, outer_c, 0xFF392152u, fillA);
+            /* Neon roundrect frame (gold/blue/gray per state) via the shared
+             * fe_draw_button_frame() helper — the text-input field uses the same
+             * helper so it matches. */
+            fe_draw_button_frame(bx, by, bw, bh, bb_state, sx, sy);
             if (s_buttons[i].label[0] && !s_buttons[i].is_selector && s_font_page >= 0) {
                 float tw = fe_measure_text(s_buttons[i].label, sx);
                 uint32_t tc = s_buttons[i].disabled ? 0xFF888888u : 0xFFFFFFFFu;
@@ -8177,10 +8241,9 @@ void td5_frontend_render_ui_rects(void) {
         } else if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
             /* No opaque fill — original blits button surface to screen with
              * DDBLT_KEYSRC (black = transparent). We draw only the 9-slice
-             * frame with alpha blending; background shows through naturally. */
-            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+             * frame with alpha blending; background shows through naturally.
+             * Routed through the shared helper (9-slice path) for parity. */
+            fe_draw_button_frame(bx, by, bw, bh, bb_state, sx, sy);
 
             if (s_buttons[i].label[0] && s_font_page >= 0) {
                 float text_w = fe_measure_text(s_buttons[i].label, sx);
@@ -9203,32 +9266,51 @@ static void Screen_MainMenu(void) {
         }
         break;
 
-    case 5: { /* Exit confirm dialog: create Yes/No buttons */
+    case 5: { /* Exit confirm dialog: create YES / NO! buttons */
         int exit_x = s_buttons[6].x;
         int exit_y = s_buttons[6].y;
+        int exit_w = s_buttons[6].w;
         int exit_h = s_buttons[6].h;
-        int yes_idx = frontend_create_button(SNK_YesButTxt, exit_x, exit_y + exit_h + 8, 96, 32);
-        int no_idx  = frontend_create_button(SNK_NoxButTxt,  exit_x + 100, exit_y + exit_h + 8, 96, 32);
+        /* Split the EXIT button's footprint into two equal buttons with a clear
+         * gap so YES and NO! read as two distinct, easy-to-hit targets (the old
+         * layout left only a 4px gap between two 96px buttons). The pair is
+         * centered under EXIT by construction. */
+        const int yn_gap = 24;
+        int yn_w = (exit_w - yn_gap) / 2;
+        if (yn_w < 80) yn_w = 80;                 /* floor for unusually narrow EXIT */
+        int yn_y = exit_y + exit_h + 10;
+        int yes_idx = frontend_create_button(SNK_YesButTxt, exit_x,                  yn_y, yn_w, 32);
+        int no_idx  = frontend_create_button(SNK_NoxButTxt,  exit_x + yn_w + yn_gap, yn_y, yn_w, 32);
+        s_exit_confirm_yes_idx = yes_idx;
+        s_exit_confirm_no_idx  = no_idx;
         if (yes_idx >= 0) s_selected_button = yes_idx;
         TD5_LOG_I(LOG_TAG, "MainMenu: exit confirm dialog created yes=%d no=%d", yes_idx, no_idx);
-        (void)no_idx;
         s_inner_state = 6;
         break;
     }
 
-    case 6: /* Exit confirm: wait for Yes/No */
+    case 6: /* Exit confirm: wait for YES / NO! */
         if (s_input_ready && s_button_index >= 0) {
-            /* Check by label since button indices depend on pool state */
-            if (s_button_index < FE_MAX_BUTTONS &&
-                strcmp(s_buttons[s_button_index].label, "Yes") == 0) {
-                TD5_LOG_I(LOG_TAG, "MainMenu: exit Yes selected, quitting");
+            /* Dispatch by the indices recorded in state 5, NOT by label text.
+             * The SNK labels are "YES" / "NO!" (td5_snk_strings.h), so the old
+             * strcmp(label,"Yes")/strcmp(label,"No") never matched and EXIT did
+             * nothing. Index compare also tolerates the button-pool slot the
+             * dialog happens to land in. (yes/no idx are -1 if creation failed,
+             * and s_button_index is >= 0 here, so a failed button can't match.) */
+            if (s_button_index == s_exit_confirm_yes_idx) {
+                TD5_LOG_I(LOG_TAG, "MainMenu: exit YES selected, quitting");
                 s_inner_state = 7;
-            } else if (s_button_index < FE_MAX_BUTTONS &&
-                       strcmp(s_buttons[s_button_index].label, "No") == 0) {
-                /* Drop Yes/No buttons (appended after the 7 main menu buttons) */
+            } else if (s_button_index == s_exit_confirm_no_idx) {
+                /* Drop the YES / NO! buttons (release by index so the render loop,
+                 * which gates on .active, actually stops drawing them) and return
+                 * to the menu. */
+                frontend_release_button(s_exit_confirm_yes_idx);
+                frontend_release_button(s_exit_confirm_no_idx);
+                s_exit_confirm_yes_idx = -1;
+                s_exit_confirm_no_idx  = -1;
                 if (s_button_count > 7) s_button_count = 7;
                 s_selected_button = 6; /* re-focus on Exit */
-                TD5_LOG_I(LOG_TAG, "MainMenu: exit No selected, returning to menu");
+                TD5_LOG_I(LOG_TAG, "MainMenu: exit NO selected, returning to menu");
                 s_inner_state = 4;
             }
         }
