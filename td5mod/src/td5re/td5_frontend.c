@@ -378,6 +378,7 @@ static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direc
 static int  s_nickname_from_mpopts;     /* nickname screen entered from Multiplayer Options */
 /* --- S10b: lobby options modal (host) + join-password prompt --- */
 static int  s_lobby_modal;              /* 0=closed, 1=OPTIONS modal open */
+static int  s_lobby_modal_armed;        /* 1 once the opening Enter is released */
 static int  s_lobby_max_players = 6;    /* modal: max players (2..6) */
 static char s_lobby_password[32];       /* modal: host join password (also reused for join prompt) */
 static int  s_net_join_pending_ui;      /* awaiting JOIN_ACK before entering lobby */
@@ -7525,31 +7526,36 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
     status = td5_net_get_status_text();
     if (status[0])
         fe_draw_small_text(56.0f * sx, 298.0f * sy, status, 0xFFA8C0E0, sx, sy);
+}
 
+/* S10b: the OPTIONS modal is drawn in a POST-button pass (the action buttons are
+ * rendered after the per-screen overlay, so drawing the modal in the overlay let
+ * the buttons paint over it). Called from td5_frontend_render_ui_rects after the
+ * button loop so it covers everything. */
+static void frontend_render_lobby_modal(float sx, float sy) {
+    char buf[72], mask[33];
+    int n, k;
     if (!s_lobby_modal) return;
 
-    /* Modal: heavy backdrop so the lobby is clearly hidden behind the panel. */
+    /* Heavy backdrop so the whole lobby (incl. buttons) is hidden behind it. */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xDC000000, -1, 0, 0, 0, 0);
-    fe_draw_quad(170.0f * sx, 150.0f * sy, 300.0f * sx, 180.0f * sy, 0xF0102845, -1, 0, 0, 0, 0);
+    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xE6000000, -1, 0, 0, 0, 0);
+    fe_draw_quad(150.0f * sx, 140.0f * sy, 340.0f * sx, 200.0f * sy, 0xF8102845, -1, 0, 0, 0, 0);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
-    fe_draw_text_centered(320.0f * sx, 162.0f * sy, "GAME OPTIONS", 0xFFFFD040, sx, sy);
-    {
-        char buf[72], mask[33];
-        int n = (int)strlen(s_lobby_password), k;
-        snprintf(buf, sizeof(buf), "MAX PLAYERS:  < %d >", s_lobby_max_players);
-        fe_draw_text_centered(320.0f * sx, 200.0f * sy, buf, 0xFFFFFFFF, sx, sy);
-        if (n > 32) n = 32;
-        for (k = 0; k < n; k++) mask[k] = '*';
-        mask[n] = '\0';
-        snprintf(buf, sizeof(buf), "PASSWORD: %s_", mask);
-        fe_draw_text_centered(320.0f * sx, 228.0f * sy, buf, 0xFFFFFFFF, sx, sy);
-        fe_draw_small_text(184.0f * sx, 282.0f * sy,
-                           "<- -> set MAX   -   type PASSWORD", 0xFFB0B0B0, sx, sy);
-        fe_draw_small_text(184.0f * sx, 300.0f * sy,
-                           "ENTER = done    ESC = cancel", 0xFFB0B0B0, sx, sy);
-    }
+    fe_draw_text_centered(320.0f * sx, 154.0f * sy, "GAME OPTIONS", 0xFFFFD040, sx, sy);
+    snprintf(buf, sizeof(buf), "MAX PLAYERS:  < %d >", s_lobby_max_players);
+    fe_draw_text_centered(320.0f * sx, 196.0f * sy, buf, 0xFFFFFFFF, sx, sy);
+    n = (int)strlen(s_lobby_password);
+    if (n > 32) n = 32;
+    for (k = 0; k < n; k++) mask[k] = '*';
+    mask[n] = '\0';
+    snprintf(buf, sizeof(buf), "PASSWORD: %s_", mask);
+    fe_draw_text_centered(320.0f * sx, 226.0f * sy, buf, 0xFFFFFFFF, sx, sy);
+    fe_draw_small_text(180.0f * sx, 286.0f * sy,
+                       "<- -> set MAX   -   type PASSWORD", 0xFFB0B0B0, sx, sy);
+    fe_draw_small_text(180.0f * sx, 306.0f * sy,
+                       "ENTER = done    ESC = cancel", 0xFFB0B0B0, sx, sy);
 }
 
 void td5_frontend_render_ui_rects(void) {
@@ -7943,6 +7949,12 @@ void td5_frontend_render_ui_rects(void) {
             break;
         }
     }
+
+    /* S10b: the lobby OPTIONS modal renders here, AFTER the buttons + arrows, so
+     * it covers the whole lobby (the per-screen overlay above runs BEFORE the
+     * buttons, which would otherwise paint over the modal). */
+    if (s_current_screen == TD5_SCREEN_NETWORK_LOBBY)
+        frontend_render_lobby_modal(sx, sy);
 
     /* Nav bar text drawn after buttons so it renders on top of the button frame.
      * (button 0 is the nav bar: button loop draws the 9-slice frame, then we
@@ -9961,6 +9973,7 @@ static void Screen_NetworkLobby(void) {
                 s_lobby_password[0] = '\0';
                 frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
                 frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
+                s_lobby_modal_armed = 1;   /* dev auto-open: no Enter to wait on */
                 s_lobby_modal = 1;
             }
         }
@@ -9970,6 +9983,15 @@ static void Screen_NetworkLobby(void) {
          * while open. Password edits via the WM_CHAR text path; Left/Right adjust
          * max players; Enter applies + closes; Esc cancels. */
         if (s_lobby_modal) {
+            /* Wait for the OPTIONS-Enter (which opened this modal) to be released
+             * before accepting input — otherwise its WM_CHAR key-repeat '\r'
+             * instantly confirms and closes the modal ("can't change options"). */
+            if (!s_lobby_modal_armed) {
+                td5_plat_input_flush_chars();
+                if (!td5_plat_input_key_pressed(0x1C))   /* Enter scancode */
+                    s_lobby_modal_armed = 1;
+                break;
+            }
             frontend_handle_text_input_key();
             if (frontend_text_input_confirmed()) {
                 td5_net_set_session_limits(s_lobby_max_players, s_lobby_password);
@@ -10056,6 +10078,7 @@ static void Screen_NetworkLobby(void) {
                     s_lobby_password[0] = '\0';
                     frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
                     frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
+                    s_lobby_modal_armed = 0;   /* arm after the Enter is released */
                     s_lobby_modal = 1;
                     frontend_play_sfx(3);
                 }
