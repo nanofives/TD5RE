@@ -318,6 +318,18 @@ typedef struct TD5_GlobalState {
         int  skip_intro;
         int  debug_overlay;
         int  debug_collisions;   /* 1 = draw wireframe of track wall/span geometry */
+        /* [S27 2026-06-05] DEV-ONLY headless test hook for the controller-
+         * disconnect pause + reconnect modal. Lets an automated run exercise the
+         * full pause->modal->resume cycle with no physical unplug.
+         *   sim_joy_loss_player   : -1 = off; >=0 = which player slot to simulate
+         *                           losing a controller for.
+         *   sim_joy_loss_delay_ms : ms after race start before the simulated loss.
+         *   sim_joy_loss_hold_ms  : ms to hold the loss before auto-reconnecting.
+         * Wall-clock timed (the sim clock freezes while paused). Zeroed/off in the
+         * release build (see main.c TD5RE_RELEASE block). */
+        int  sim_joy_loss_player;
+        int  sim_joy_loss_delay_ms;
+        int  sim_joy_loss_hold_ms;
         /* Trace */
         int  race_trace_enabled;
         int  race_trace_slot;

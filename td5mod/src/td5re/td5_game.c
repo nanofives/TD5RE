@@ -522,6 +522,19 @@ static int      s_pause_menu_active;
 static int      s_pause_menu_cursor;   /* [REWORK 2026-06-05/S15] 0=VIEW 1=SOUND
                                         * 2=CONTINUE 3=RESTART RACE 4=QUIT TO MENU 5=EXIT GAME */
 
+/* [S27 2026-06-05] Controller-disconnect pause + per-viewport reconnect modal.
+ * SOURCE-PORT FEATURE — the 1999 binary had no hot-plug handling, so this is
+ * documented new code, not an RE reconstruction. While ANY required (joystick)
+ * player's controller is missing the race is frozen and that player's split-
+ * screen pane shows a "reconnect" modal. */
+static uint32_t s_player_disconnected_mask;   /* bit p = player p's controller is gone */
+static int      s_disconnect_pause_active;    /* sim frozen because a pad is missing */
+static int      s_disconnect_prev_paused;     /* g_td5.paused to restore on reconnect */
+#ifndef TD5RE_RELEASE
+static uint32_t s_sim_loss_mask;              /* DEV: simulate loss for these players */
+static uint32_t s_sim_loss_race_start_ms;     /* DEV: race-start wall clock for timed sim */
+#endif
+
 /* Wanted-mode tracker marker intensity (DecayTrackedActorMarkerIntensity @ 0x43D7E0).
  * Original global g_wantedTargetTrackerActive. Decays 0x200/sub-tick, clamped to
  * [0, 0x1000]. Gate: audio-options overlay (= pause menu) pauses decay.
@@ -2867,6 +2880,13 @@ int td5_game_init_race_session(void) {
      * g_xz_freeze / td5_physics_set_xz_freeze kept around but no longer
      * driven — slated for cleanup. */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
+    /* [S27] Clear controller-disconnect state for the new race. */
+    s_disconnect_pause_active  = 0;
+    s_player_disconnected_mask = 0;
+#ifndef TD5RE_RELEASE
+    s_sim_loss_mask          = 0;
+    s_sim_loss_race_start_ms = 0;
+#endif
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
     s_prev_pause_act = 1;          /* suppress false PAUSE-action edge on first frame */
     g_td5.sim_tick_budget = 0.0f;
@@ -3353,6 +3373,101 @@ static int td5_game_net_sync_frame(void) {
     return 0;
 }
 
+/* ========================================================================
+ * [S27 2026-06-05] Controller-disconnect pause + per-viewport reconnect modal
+ *
+ * SOURCE-PORT FEATURE. The original TD5 binary delegated all device handling to
+ * M2DX/DXInput and never queried device presence, so there is no original
+ * behaviour to reverse-engineer here — this is documented new code.
+ *
+ * Detection lives in the platform layer (td5_plat_input_joystick_is_lost): a
+ * physically removed pad makes GetDeviceState fail persistently and that latches
+ * a per-slot "lost" flag. Here, once per render frame, we map each active human
+ * player to its device and, if a JOYSTICK player's device is gone, freeze the
+ * race (g_td5.paused = 1) and remember the player so the HUD can modal that
+ * player's pane. Keyboard players have no device to lose, so they are never
+ * flagged (no modal). The race stays paused while ANY required player is missing
+ * and resumes when the last one returns.
+ * ======================================================================== */
+int td5_game_device_disconnect_active(void) { return s_disconnect_pause_active; }
+int td5_game_player_disconnected(int player)
+{
+    if (player < 0 || player >= 32) return 0;
+    return (int)((s_player_disconnected_mask >> player) & 1u);
+}
+
+#ifndef TD5RE_RELEASE
+/* DEV test hook (F9): toggle a simulated controller loss for one player so the
+ * pause/modal/resume path can be exercised without a physical unplug. */
+void td5_game_debug_toggle_sim_device_loss(int player)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
+    s_sim_loss_mask ^= (1u << player);
+    TD5_LOG_W(LOG_TAG, "DEBUG F9: simulate device loss player %d -> %s",
+              player, ((s_sim_loss_mask >> player) & 1u) ? "LOST" : "back");
+}
+#endif
+
+/* Re-evaluate controller-disconnect state for the active human players and drive
+ * the instant pause / resume. Called once per render frame at the top of
+ * td5_game_run_race_frame (before the fixed-step sim loop). */
+static void td5_game_update_device_disconnect(void)
+{
+    uint32_t mask = 0;
+    int hp = g_td5.num_human_players;
+    if (hp < 1) hp = 1;
+    if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+
+#ifndef TD5RE_RELEASE
+    /* Timed simulation knob ([Debug] SimulateJoyLoss). Drives s_sim_loss_mask
+     * from WALL-CLOCK time (the sim clock freezes while paused, so a sim-tick
+     * timer would never reach the auto-reconnect): lose the pad delay_ms after
+     * race start, give it back hold_ms later. Lets a headless run capture the
+     * whole pause->modal->resume cycle. */
+    if (g_td5.ini.sim_joy_loss_player >= 0 &&
+        g_td5.ini.sim_joy_loss_player < TD5_MAX_HUMAN_PLAYERS) {
+        int sp = g_td5.ini.sim_joy_loss_player;
+        if (s_sim_loss_race_start_ms == 0) s_sim_loss_race_start_ms = td5_plat_time_ms();
+        uint32_t elapsed = td5_plat_time_ms() - s_sim_loss_race_start_ms;
+        uint32_t on  = (uint32_t)g_td5.ini.sim_joy_loss_delay_ms;
+        uint32_t off = on + (uint32_t)g_td5.ini.sim_joy_loss_hold_ms;
+        if (elapsed >= on && elapsed < off) s_sim_loss_mask |=  (1u << sp);
+        else                                s_sim_loss_mask &= ~(1u << sp);
+    }
+#endif
+
+    for (int p = 0; p < hp; p++) {
+        int lost = 0;
+        /* Real disconnect: only a joystick player (input source > 0) can lose a
+         * device. Keyboard players (source 0) are deliberately never flagged. */
+        if (td5_input_get_input_source(p) > 0 && td5_plat_input_joystick_is_lost(p))
+            lost = 1;
+#ifndef TD5RE_RELEASE
+        if (s_sim_loss_mask & (1u << p)) lost = 1;   /* DEV simulated loss */
+#endif
+        if (lost) mask |= (1u << p);
+    }
+    s_player_disconnected_mask = mask;
+
+    int any = (mask != 0);
+    if (any && !s_disconnect_pause_active) {
+        s_disconnect_prev_paused  = g_td5.paused;   /* usually 0 mid-race, 1 in countdown */
+        s_disconnect_pause_active = 1;
+        g_td5.paused = 1;
+        td5_sound_set_sfx_muted(1);                 /* silence engine/skid like a pause */
+        TD5_LOG_W(LOG_TAG, "Controller disconnect: race paused (player mask=0x%X)", mask);
+    } else if (any && s_disconnect_pause_active) {
+        g_td5.paused = 1;                           /* re-assert so the sim stays frozen */
+    } else if (!any && s_disconnect_pause_active) {
+        s_disconnect_pause_active = 0;
+        if (!s_pause_menu_active) {                 /* don't fight an open pause menu */
+            g_td5.paused = s_disconnect_prev_paused;
+            td5_sound_set_sfx_muted(0);
+        }
+        TD5_LOG_I(LOG_TAG, "Controller reconnect: race resumed");
+    }
+}
+
 int td5_game_run_race_frame(void) {
     int i;
     td5_photobooth_tick();   /* sets the booth camera before this frame renders */
@@ -3370,6 +3485,11 @@ int td5_game_run_race_frame(void) {
 
     td5_profile_begin_frame();   /* race-frame profiler timeline (zones via trace_stage + render/present below) */
     td5_game_trace_stage("frame_begin", 0);
+
+    /* [S27] Controller-disconnect check (once per frame, before the sim loop).
+     * Pauses instantly the frame a required player's pad drops; resumes when it
+     * returns. Sets g_td5.paused so the fixed-step loop freezes below. */
+    td5_game_update_device_disconnect();
 
     /* ---- Race completion check (before sim loop) ----
      *
@@ -3780,6 +3900,19 @@ int td5_game_run_race_frame(void) {
                 s_pause_options_dirty = 0;
             }
 
+            g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
+            ticks_this_frame++;
+            td5_game_trace_stage("pause_menu", ticks_this_frame);
+            continue;
+        }
+
+        /* [S27] Controller-disconnect freeze: a required player's pad is gone.
+         * Drain a tick exactly like the pause menu (skip physics + AI entirely)
+         * so the whole field stops dead until the pad returns — distinct from the
+         * start-countdown freeze below, which still ticks AI/engine-RPM. The
+         * per-viewport reconnect modal is drawn in the HUD render path. The input
+         * poll at the top of the loop keeps running so reconnect is detected. */
+        if (s_disconnect_pause_active) {
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
             td5_game_trace_stage("pause_menu", ticks_this_frame);
@@ -4458,6 +4591,11 @@ int td5_game_run_race_frame(void) {
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
     }
+
+    /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
+     * over each disconnected player's split-screen viewport. Self-gated (no-op
+     * unless a controller is currently missing). Drawn on top of the HUD. */
+    td5_hud_draw_disconnect_overlays();
 
     /* Race end fade: directional wipe overlay (black bars closing in).
      * [CONFIRMED @ 0x0042b791/0x0042b797 RunRaceFrame] The directional fade and

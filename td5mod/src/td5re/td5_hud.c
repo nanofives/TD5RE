@@ -1092,6 +1092,81 @@ void td5_hud_draw_pause_overlay(void)
     }
 }
 
+/* ========================================================================
+ * [S27 2026-06-05] Controller-disconnect modal (per split-screen viewport)
+ *
+ * Draws a semi-transparent dimmer + a centered "reconnect" message over the
+ * viewport of each player whose controller has dropped, scoped to that player's
+ * pane. s_view_layout[v] holds the pixel-space rect; viewport v == player v ==
+ * device slot v (per td5_game_init_viewport_layout), so g_actor_slot_map[v]
+ * gives the player whose disconnect state we check. No-op unless a controller is
+ * currently missing. SOURCE-PORT FEATURE — no original equivalent.
+ *
+ * Uses the immediate-mode VectorUI primitives: td5_vui_quad self-blends via the
+ * HUD translucent preset (so a low-alpha fill is genuinely see-through), and
+ * td5_vui_text_centered is crisp MSDF text. Both fall back to the bitmap path
+ * when VectorUI is disabled, so this needs no quad pre-bake.
+ * ======================================================================== */
+void td5_hud_draw_disconnect_overlays(void)
+{
+    if (!td5_game_device_disconnect_active()) return;   /* fast out: nothing lost */
+
+    int views = s_view_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    for (int v = 0; v < views; v++) {
+        int player = g_actor_slot_map[v];               /* viewport v -> player slot */
+        if (!td5_game_player_disconnected(player)) continue;
+
+        const TD5_HudViewLayout *vl = &s_view_layout[v];
+        float L = vl->vp_int_left,  T = vl->vp_int_top;
+        float R = vl->vp_int_right, B = vl->vp_int_bottom;
+        float w = R - L, h = B - T;
+        if (w < 2.0f || h < 2.0f) continue;
+
+        /* Semi-transparent dark dimmer over the whole pane (~72% black). */
+        td5_vui_quad(L, T, w, h, 0xB8000000u, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+
+        /* Throttled confirmation that the modal draw path runs with a sane pane
+         * rect (once/sec/view, not per-frame spam). Lets a headless run verify
+         * the overlay without a screenshot of the D3D swapchain. */
+        {
+            static uint32_t s_dc_log_ctr;
+            if ((s_dc_log_ctr++ % 60u) == 0u)
+                TD5_LOG_I("hud", "disconnect modal: view=%d player=%d rect=(%.0f,%.0f %.0fx%.0f)",
+                          v, player, L, T, w, h);
+        }
+
+        /* Message scaled to the pane so it fits in split-screen: start from a
+         * width-proportional scale, then shrink until the longest line fits
+         * ~88% of the pane width. */
+        const char *l1 = "CONTROLLER DISCONNECTED";
+        const char *l2 = "RECONNECT TO CONTINUE";
+        float ts = w / 640.0f;
+        if (ts > 1.5f) ts = 1.5f;
+        if (ts < 0.35f) ts = 0.35f;
+        float maxw = w * 0.88f;
+        for (int guard = 0; guard < 10; guard++) {
+            if (td5_vui_text_width(l1, ts) <= maxw) break;
+            ts *= 0.88f;
+        }
+
+        float cx = (L + R) * 0.5f;
+        float cy = (T + B) * 0.5f;
+        float line_h = 26.0f * ts;
+
+        if (views > 1) {                                /* which player, when split */
+            char who[24];
+            snprintf(who, sizeof who, "PLAYER %d", player + 1);
+            float ts2 = ts * 0.8f;
+            td5_vui_text_centered(cx, cy - line_h * 1.6f, who, 0xFF66FF66u, ts2, ts2);
+        }
+        td5_vui_text_centered(cx, cy - line_h * 0.5f, l1, 0xFFFFFFFFu, ts, ts);
+        td5_vui_text_centered(cx, cy + line_h * 0.6f, l2, 0xFFFFC050u, ts * 0.85f, ts * 0.85f);
+    }
+}
+
 /* Called each frame while paused to update SELBOX position and slider thumb positions.
  * cursor: 0-5 (rows: VIEW / SOUND / CONTINUE / RESTART RACE / QUIT TO MENU / EXIT GAME)
  * [PORT REWORK 2026-06-05 / S15] The MUSIC slider was removed, so only two

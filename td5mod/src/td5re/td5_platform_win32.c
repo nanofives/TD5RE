@@ -115,6 +115,25 @@ static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
  * of the fixed X=steer/Y=throttle/buttons default. See TD5_JSBIND_* in the .h. */
 static uint32_t s_js_action_bind[TD5_PLAT_MAX_JS_SLOTS][TD5_JSBIND_ACTIONS];
 static int      s_js_action_set[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
+
+/* [S27 2026-06-05] Per-device persistent-loss detection (controller hot-unplug).
+ * SOURCE-PORT FEATURE — the 1999 binary had no hot-plug handling: M2DX/DXInput
+ * owned the devices and the game never queried device presence, so there is no
+ * original behaviour to RE here. The original poll path only re-Acquired on a
+ * transient DIERR_INPUTLOST/NOTACQUIRED and never reported a persistent loss.
+ *
+ * We track a consecutive GetDeviceState-failure streak per device slot and
+ * latch s_js_lost once it persists past a threshold (so a one-frame INPUTLOST
+ * from an alt-tab focus change does NOT count as a disconnect). While a slot is
+ * lost we throttle the re-Acquire retry to avoid hammering the DirectInput API
+ * every frame for an unplugged pad. A later successful read clears the latch
+ * (device reconnected). */
+#define TD5_JS_LOST_FAIL_THRESHOLD   6   /* consecutive failed polls => "lost"   */
+#define TD5_JS_REACQ_HOLDOFF_FRAMES 12   /* frames between re-Acquire tries while lost */
+static int s_js_fail_streak[TD5_PLAT_MAX_JS_SLOTS]  = { 0 };
+static int s_js_lost[TD5_PLAT_MAX_JS_SLOTS]         = { 0 };
+static int s_js_reacq_holdoff[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
+
 /* Capture baseline (one remap active at a time). */
 static long     s_js_cap_axis_base[8];
 static uint32_t s_js_cap_btn_base;
@@ -1651,14 +1670,46 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
     if (slot >= 0 && slot < TD5_PLAT_MAX_JS_SLOTS && s_di_joystick[slot]) {
         DIJOYSTATE2 js;
         HRESULT hr;
+        int got = 0;
         memset(&js, 0, sizeof(js));
-        hr = IDirectInputDevice8_Poll(s_di_joystick[slot]);
-        if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
-            IDirectInputDevice8_Acquire(s_di_joystick[slot]);
-            IDirectInputDevice8_Poll(s_di_joystick[slot]);
+
+        /* [S27] Re-Acquire throttle: once a slot is flagged lost, only retry the
+         * Poll/Acquire every TD5_JS_REACQ_HOLDOFF_FRAMES frames so an unplugged
+         * pad doesn't hammer DirectInput each frame. A live (non-lost) slot polls
+         * every frame exactly as before. */
+        int try_poll = 1;
+        if (s_js_lost[slot]) {
+            if (s_js_reacq_holdoff[slot] > 0) { s_js_reacq_holdoff[slot]--; try_poll = 0; }
+            else s_js_reacq_holdoff[slot] = TD5_JS_REACQ_HOLDOFF_FRAMES;
         }
-        hr = IDirectInputDevice8_GetDeviceState(s_di_joystick[slot], sizeof(js), &js);
-        if (SUCCEEDED(hr)) {
+        if (try_poll) {
+            hr = IDirectInputDevice8_Poll(s_di_joystick[slot]);
+            if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
+                IDirectInputDevice8_Acquire(s_di_joystick[slot]);
+                IDirectInputDevice8_Poll(s_di_joystick[slot]);
+            }
+            hr = IDirectInputDevice8_GetDeviceState(s_di_joystick[slot], sizeof(js), &js);
+            got = SUCCEEDED(hr);
+        }
+
+        /* [S27] Disconnect bookkeeping. A persistent run of failures latches the
+         * slot as lost; the next good read clears it (device reconnected). */
+        if (got) {
+            if (s_js_lost[slot])
+                TD5_LOG_I(LOG_TAG, "joystick slot=%d reacquired (controller back)", slot);
+            s_js_lost[slot] = 0;
+            s_js_fail_streak[slot] = 0;
+        } else if (try_poll) {
+            if (s_js_fail_streak[slot] < 1000000) s_js_fail_streak[slot]++;
+            if (!s_js_lost[slot] && s_js_fail_streak[slot] >= TD5_JS_LOST_FAIL_THRESHOLD) {
+                s_js_lost[slot] = 1;
+                s_js_reacq_holdoff[slot] = TD5_JS_REACQ_HOLDOFF_FRAMES;
+                TD5_LOG_W(LOG_TAG, "joystick slot=%d lost (controller disconnected after %d failed polls)",
+                          slot, s_js_fail_streak[slot]);
+            }
+        }
+
+        if (got) {
             static const uint32_t k_action_bits[6] = {
                 TD5_INPUT_HANDBRAKE, TD5_INPUT_HORN, TD5_INPUT_GEAR_UP,
                 TD5_INPUT_GEAR_DOWN, TD5_INPUT_CAMERA_CHANGE, TD5_INPUT_REAR_VIEW
@@ -1921,6 +1972,18 @@ void td5_plat_input_set_device(int slot, int device_index)
 
     TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s (joystick created)",
               slot, device_index, s_device_names[device_index]);
+}
+
+/* [S27 2026-06-05] Report whether the joystick bound to this player slot has
+ * been persistently lost (physically disconnected). Returns 0 for a slot with
+ * no joystick (keyboard player) so callers never modal a keyboard player. The
+ * lost latch is maintained by the in-race poll above; a slot whose device went
+ * away keeps its s_di_joystick handle (so we can re-Acquire on reconnect). */
+int td5_plat_input_joystick_is_lost(int device_slot)
+{
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return 0;
+    if (!s_di_joystick[device_slot]) return 0;   /* keyboard / no device assigned */
+    return s_js_lost[device_slot];
 }
 
 /* Push the per-player 9-slot joystick binding table into the platform poll.
