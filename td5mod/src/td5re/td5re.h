@@ -291,6 +291,43 @@ typedef struct TD5_GlobalState {
          * constants. Bicycle-critical fields (Wf/Wr/I/grip) stay on the AI
          * template for stability. 0 = faithful template-only behaviour. */
         int  ai_accel_from_car;
+        /* --- S20 Smart Traffic (source-port enhancement, all default ON) ---
+         * The original background traffic is scripted/reactive (flat 0x3c cruise,
+         * deterministic junction route, no active wall avoidance). These knobs
+         * layer three tunable behaviours on top, applied ONLY to traffic slots
+         * (>= g_traffic_slot_base); racing AI (slots 0-5) is untouched. Each can
+         * be disabled independently; traffic_smart=0 disables all three (fully
+         * faithful traffic). All three operate only on the traffic car's lateral
+         * target / sub-lane — they never touch route_state or yaw, so they don't
+         * trip the heading-recovery brake or perturb racers. (A 4th behaviour,
+         * random branches via route reassignment, was dropped: it froze traffic
+         * by desyncing yaw from the route — see td5_ai.c S20 block.) Section
+         * [Traffic] in td5re.ini. */
+        int  traffic_smart;            /* master gate (default 1) */
+        int  traffic_wall_avoid;       /* bias edge-lane target toward lane centre (default 1) */
+        int  traffic_avoid_slow_lane;  /* prefer asphalt lane over off-road shoulder (default 1) */
+        int  traffic_lookahead;        /* lane-change/ease around a car close ahead (default 1) */
+        int  traffic_wall_avoid_bias;  /* edge-lane inward blend, 0..256 (default 96 ~= 0.375) */
+        /* AntiFreeze (source-port enhancement, default ON, independent of the
+         * three "smart" behaviours above): the faithful traffic recovery-brake
+         * only clears when the player drives forward enough to recycle the car,
+         * so a heading-misaligned traffic car FREEZES forever when the player is
+         * parked/slow (RE-confirmed: RecycleTrafficActorFromQueue @ 0x4353b0
+         * gate is player-relative; Stage-2 recovery only cleared by recycle).
+         * AntiFreeze un-sticks a car that has been recovery-frozen for
+         * `traffic_antifreeze_frames` ticks by clearing the recovery flag and
+         * re-aligning its heading to the road, so traffic stays alive even when
+         * watched from a standstill. Clearly non-faithful; [Traffic] AntiFreeze. */
+        int  traffic_antifreeze;        /* 1 = un-stick recovery-frozen traffic (default 1) */
+        int  traffic_antifreeze_frames; /* frozen-tick threshold before un-stick (default 120) */
+        /* PlayerCollide (source-port enhancement, default ON): the faithful V2V
+         * broadphase buckets actors by track-span (>>2) and only tests pairs
+         * within +/-1 bucket (~4 spans). On curves/junctions a traffic car can be
+         * physically on top of the player but several spans apart, so the pair is
+         * never tested and the player drives THROUGH it. This adds an explicit
+         * per-frame player-vs-each-traffic collision test by world proximity that
+         * bypasses the span bucket, so you always bump traffic you overlap. */
+        int  traffic_player_collide;    /* 1 = explicit player<->traffic collision (default 1) */
         /* Per-player joystick selection (0 = keyboard, >=1 = 1-based enumerated
          * joystick index). Overrides the device index persisted in Config.td5.
          * The original supports up to 2 simultaneous joystick devices. */

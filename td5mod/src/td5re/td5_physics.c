@@ -4886,14 +4886,15 @@ void td5_physics_resolve_vehicle_contacts(void)
                         s_v2v_slot0_obb_enter++;
                         TD5_LOG_I(LOG_TAG,
                                   "v2v_aabb_hit: i=%d j=%d slot_i=%d slot_j=%d "
-                                  "pos_i=(%d,%d) pos_j=(%d,%d) aabb_i=[%d,%d,%d,%d] aabb_j=[%d,%d,%d,%d]",
+                                  "pos_i=(%d,%d) pos_j=(%d,%d) span_i=%d span_j=%d "
+                                  "dispatch=%s a[vm=%d wm=%d scr=%d] b[vm=%d wm=%d scr=%d]",
                                   i, j, a->slot_index, b->slot_index,
                                   a->world_pos.x >> 8, a->world_pos.z >> 8,
                                   b->world_pos.x >> 8, b->world_pos.z >> 8,
-                                  g_actor_aabb[i][0], g_actor_aabb[i][1],
-                                  g_actor_aabb[i][2], g_actor_aabb[i][3],
-                                  g_actor_aabb[j][0], g_actor_aabb[j][1],
-                                  g_actor_aabb[j][2], g_actor_aabb[j][3]);
+                                  a->track_span_normalized, b->track_span_normalized,
+                                  (a_scripted || b_scripted) ? "SIMPLE" : "FULL",
+                                  a->vehicle_mode, a->wheel_contact_bitmask, a_scripted,
+                                  b->vehicle_mode, b->wheel_contact_bitmask, b_scripted);
                     }
                 }
 
@@ -5005,6 +5006,46 @@ void td5_physics_resolve_vehicle_contacts(void)
             } else if ((s_sep_frames % 30u) == 1u) {
                 TD5_LOG_I(LOG_TAG, "v2v_antitunnel: cleared car overlap (max_pre_depth=%d units) in <=%d rounds; frames_with_sep=%u",
                           max_pre_depth, ANTITUNNEL_RELAX_ROUNDS, s_sep_frames);
+            }
+        }
+    }
+
+    /* [S20 PlayerCollide] Explicit player-vs-traffic collision by world proximity.
+     * The span-bucket broadphase above only pairs actors within +/-1 bucket
+     * (~4 track-spans). On curves/junctions a traffic car can be physically on
+     * top of the player yet several spans apart in track-progress, so the pair
+     * is never tested and the player drives THROUGH it (user-reported "traffic
+     * doesn't collide"). Supplement here: test slot 0 against every traffic
+     * actor whose bucket the broadphase did NOT cover, gated on a real world
+     * overlap. resolve_collision_pair runs the same OBB test + impulse as the
+     * faithful path, so the response is identical — just no longer skipped. */
+    if (g_td5.ini.traffic_player_collide && total > g_traffic_slot_base) {
+        TD5_Actor *player = (TD5_Actor *)g_actor_table_base;   /* slot 0 */
+        if (player->car_definition_ptr) {
+            int32_t prad = (int32_t)CDEF_S(player, 0x80);
+            int tmax = (total < TD5_MAX_TOTAL_ACTORS) ? total : TD5_MAX_TOTAL_ACTORS;
+            for (int t = g_traffic_slot_base; t < tmax; ++t) {
+                TD5_Actor *tr =
+                    (TD5_Actor *)(g_actor_table_base + (size_t)t * TD5_ACTOR_STRIDE);
+                int32_t dxp, dzp, rr;
+                int64_t d2;
+                if (!tr->car_definition_ptr) continue;
+                dxp = (player->world_pos.x >> 8) - (tr->world_pos.x >> 8);
+                dzp = (player->world_pos.z >> 8) - (tr->world_pos.z >> 8);
+                rr  = prad + (int32_t)CDEF_S(tr, 0x80);
+                d2  = (int64_t)dxp * dxp + (int64_t)dzp * dzp;
+                if (d2 > (int64_t)rr * rr) continue;   /* not physically overlapping */
+                /* Physically overlapping the player. The bucket broadphase
+                 * misses player<->traffic pairs (verified 0 hits), so force the
+                 * sphere collision response here regardless of track-span bucket
+                 * or OBB orientation. Sphere only impulses when CLOSING, so this
+                 * is a no-op once separated (won't fight the broadphase). */
+                TD5_LOG_I(LOG_TAG,
+                          "player_traffic_collide: traffic_slot=%d dist=%d rr=%d span_p=%d span_t=%d "
+                          "(world-overlap -> sphere collision)",
+                          t, (int)td5_isqrt((int32_t)(d2 > 0x7FFFFFFF ? 0x7FFFFFFF : d2)), rr,
+                          player->track_span_normalized, tr->track_span_normalized);
+                collision_detect_simple(player, tr);
             }
         }
     }
