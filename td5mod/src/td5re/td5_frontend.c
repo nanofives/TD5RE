@@ -13590,6 +13590,16 @@ static void Screen_PostRaceHighScore(void) {
                  * Simple wrap [0..0x19]. */
                 if (s_score_category_index > 0x19) s_score_category_index = 0;
                 if (s_score_category_index < 0)    s_score_category_index = 0x19;
+                /* Menu-move nav sound on track change. The original plays sound id 2
+                 * (DXSound::Play(2)) centrally for arrow-capable L/R changes in the
+                 * shared frontend input handler [CONFIRMED @ 0x0042687c, handler
+                 * UpdateFrontendDisplayModeSelection @ 0x00426580]. The port's central
+                 * keyboard handler only fires sfx(2) when a horizontal cycle moves the
+                 * selected button, which the High Scores nav bar never does, so play it
+                 * explicitly here like the other option-cycle screens (e.g. line 10103). */
+                frontend_play_sfx(2); /* ping2.wav cycle */
+                TD5_LOG_I(LOG_TAG, "PostRaceHighScore: track nav delta=%d -> category=%d (sfx 2)",
+                          delta, s_score_category_index);
             }
             if (s_button_index == 1) { /* OK */
                 s_inner_state = 7;
