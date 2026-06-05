@@ -535,7 +535,8 @@ static int   s_bg_gal_blend;
 static float s_bg_gal_x, s_bg_gal_y;
 
 static int  s_control_options_surface;
-static int  s_sound_icon_surface = 0;       /* Controllers.tga: SFX-mode icon strip (64x224, 7x 64x32 rows; SFX mode N -> row N+4) */
+/* [PORT REWORK 2026-06-05 / S15] s_sound_icon_surface (Controllers.tga SFX-mode
+ * icon strip) removed along with the SFX Mode row on the sound-options screen. */
 static int  s_sound_volumebox_surface = 0;  /* VolumeBox.tga   (volume bar background) */
 static int  s_sound_volumefill_surface = 0; /* VolumeFill.tga  (volume bar fill)       */
 static int  s_split_screen_surface = 0;     /* SplitScreen.tga (Two Player layout preview)    */
@@ -5516,51 +5517,16 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
 static void frontend_render_sound_options_overlay(float sx, float sy) {
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    /* SFX Mode is indicated by the Stereo/Mono icon; no extra text needed.
-     * Volume levels are indicated by bar fill only; no numbers. */
-
-    /* Image positions from FUN_0041EA90 (640x480 absolute):
-     * Stereo/Mono icon: x=394, y=97, w=64, h=32
-     * VolumeBox SFX:  x=394, y=185, w=224, h=12
-     * VolumeFill SFX: x=395, y=186, w=0-222, h=10
-     * VolumeBox Mus:  x=394, y=225, w=224, h=12
-     * VolumeFill Mus: x=395, y=226, w=0-222, h=10 */
+    /* [PORT REWORK 2026-06-05 / S15] The SFX-mode row (Stereo/Mono/3D icon +
+     * MONAURAL/STEREO/3D SOUND name) was removed. Only the two volume bars are
+     * drawn now. Volume levels are indicated by bar fill only; no numbers. */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
 
-    /* SFX-mode icon: Controllers.tga row (sfx_mode+4) of 7. [CONFIRMED @ 0x0041EA90:
-     * src_y = (g_sfxPlaybackMode + 4) * 0x20, full 64px width.] Modes 0/1/2 map to
-     * rows 4/5/6 -> three distinct icons. The prior 2-state Stereo/Mono swap keyed on
-     * (mode & 1), so mode 0 and mode 2 drew the SAME icon (mode 2 indistinguishable). */
+    /* Volume bars: SFX = button[0], Music = button[1] (re-indexed after the
+     * SFX Mode row was removed). Each bar sits to the right of its button at
+     * x=394, vertically centred in the button height (32px). Bar=12px, fill=10px. */
     {
-        int icon_surface = s_sound_icon_surface;
-        int mode = s_sound_option_sfx_mode;
-        if (mode < 0) mode = 0;
-        if (mode > 2) mode = 2;
-        if (icon_surface > 0) {
-            int slot = icon_surface - 1;
-            if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-                float v0 = (float)(mode + 4) / 7.0f;
-                float v1 = (float)(mode + 5) / 7.0f;
-                fe_draw_quad(394.0f * sx, 97.0f * sy, 64.0f * sx, 32.0f * sy,
-                             0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
-            }
-        }
-        /* [FIXED 2026-06-01] SFX-mode NAME text. Orig (0x41EA90) draws SNK_SFX_Modes[mode]
-         * beside the icon. Placed TO THE RIGHT of the 64px icon (ends at 394+64=458) at the
-         * icon's vertical center (y=97+8) — NOT below it, where it collided with the SFX
-         * VOLUME bar at y~133. */
-        {
-            static const char *sfx_mode_names[] = { "MONAURAL", "STEREO", "3D SOUND" };
-            fe_draw_text(466.0f * sx, (97.0f + 8.0f) * sy, sfx_mode_names[mode],
-                         0xFFFFFFFF, sx, sy);
-        }
-    }
-
-    /* Volume bars: SFX = button[1], Music = button[2]
-     * Each bar sits to the right of its button at x=394, vertically
-     * centred in the button height (32px). Bar=12px tall, fill=10px. */
-    {
-        int bar_btns[2]  = { 1, 2 }; /* SFX Volume, Music Volume */
+        int bar_btns[2]  = { 0, 1 }; /* SFX Volume, Music Volume */
         int vols[2]      = { s_sound_option_sfx_volume, s_sound_option_music_volume };
 
         for (int vi = 0; vi < 2; vi++) {
@@ -11095,7 +11061,9 @@ static void Screen_ControlOptions(void) {
 
 /* ========================================================================
  * [15] ScreenSoundOptions (0x41EA90) -- Standard options pattern
- * 4 rows: SFX Mode, SFX Volume, Music Volume, Music Test + OK
+ * [PORT REWORK 2026-06-05 / S15] The SFX Mode row was removed per user
+ * feedback. 3 rows remain: SFX Volume, Music Volume, Music Test + OK.
+ * Buttons re-indexed 0..3 (was 0..4) and reflowed up one slot to fill the gap.
  * ======================================================================== */
 
 static void Screen_SoundOptions(void) {
@@ -11110,15 +11078,16 @@ static void Screen_SoundOptions(void) {
          * a distinct icon for the 3rd (surround) mode. */
         /* [FIXED 2026-06-01] black-color-keyed like the Control Options icon (was opaque
          * black box). Controllers.tga background is black; key it transparent. */
-        s_sound_icon_surface       = frontend_load_tga_ck("Controllers.TGA", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         s_sound_volumebox_surface  = frontend_load_tga("VolumeBox.tga", "Front End/frontend.zip");
         s_sound_volumefill_surface = frontend_load_tga("VolumeFill.tga","Front End/frontend.zip");
-        /* [FIXED 2026-06-01, runtime @0x499c78] rows y=97 / 177,217 / 297 (256-wide), OK (200,377). */
-        frontend_create_button(SNK_SfxModeButTxt,     120,  97, 0x100, 0x20);
-        frontend_create_button(SNK_SfxVolumeButTxt,   120, 177, 0x100, 0x20);
-        frontend_create_button(SNK_MusicVolumeButTxt, 120, 217, 0x100, 0x20);
-        frontend_create_button(SNK_MusicTestButTxt,   120, 297, 0x100, 0x20);
-        frontend_create_button(SNK_OkButTxt,          200, 377, 0x60,  0x20);
+        /* [PORT REWORK 2026-06-05 / S15] SFX Mode row (was 120,97 + the
+         * Controllers.tga icon load) removed. Remaining rows reflowed up one
+         * slot, keeping their original 40/80/80 spacing:
+         *   SFX Volume 97, Music Volume 137, Music Test 217, OK 297. */
+        frontend_create_button(SNK_SfxVolumeButTxt,   120,  97, 0x100, 0x20);  /* btn 0 */
+        frontend_create_button(SNK_MusicVolumeButTxt, 120, 137, 0x100, 0x20);  /* btn 1 */
+        frontend_create_button(SNK_MusicTestButTxt,   120, 217, 0x100, 0x20);  /* btn 2 */
+        frontend_create_button(SNK_OkButTxt,          200, 297, 0x60,  0x20);  /* btn 3 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -11140,25 +11109,17 @@ static void Screen_SoundOptions(void) {
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            if (delta != 0 && active_button >= 0 && active_button <= 2) {
+            /* [PORT REWORK 2026-06-05 / S15] SFX Mode row removed; sliders are
+             * now button 0 (SFX volume) and button 1 (Music volume). */
+            if (delta != 0 && active_button >= 0 && active_button <= 1) {
                 if (active_button == 0) {
-                    /* [CONFIRMED @ 0x0041F2EB ScreenSoundOptions case-6 SFX mode cycle; REG-2 fix 2026-05-22]
-                     * Orig: 3-mode cycle (0,1,2) gated by DXSound::CanDo3D() — falls back to 2-mode
-                     * (0,1) if hardware has no 3D positional audio. Port: D3D11+DSound backend
-                     * always supports 3D positional audio so the 3-mode branch is unconditional.
-                     * Prior port had `^= 1` (binary toggle); replaced with full 3-mode cycle. */
-                    s_sound_option_sfx_mode += delta;
-                    if (s_sound_option_sfx_mode < 0) s_sound_option_sfx_mode = 2;
-                    else if (s_sound_option_sfx_mode > 2) s_sound_option_sfx_mode = 0;
-                } else if (active_button == 1) {
-                    /* REG-2 fix 2026-05-22: orig step is delta * 10 (matches 10%-per-tick UX);
-                     * port had delta * 5. */
+                    /* SFX volume. REG-2 fix 2026-05-22: orig step is delta * 10. */
                     s_sound_option_sfx_volume += delta * 10;
                     if (s_sound_option_sfx_volume < 0) s_sound_option_sfx_volume = 0;
                     if (s_sound_option_sfx_volume > 100) s_sound_option_sfx_volume = 100;
                     td5_save_set_sfx_volume(s_sound_option_sfx_volume);
                     td5_sound_set_sfx_volume(s_sound_option_sfx_volume);
-                } else if (active_button == 2) {
+                } else { /* active_button == 1: Music volume */
                     /* REG-2 fix 2026-05-22: orig step delta * 10. */
                     s_sound_option_music_volume += delta * 10;
                     if (s_sound_option_music_volume < 0) s_sound_option_music_volume = 0;
@@ -11168,14 +11129,16 @@ static void Screen_SoundOptions(void) {
                 }
                 frontend_play_sfx(2);
                 s_inner_state = 4;
-            } else if (s_button_index == 3) { /* Music Test */
+            } else if (s_button_index == 2) { /* Music Test */
                 s_return_screen = TD5_SCREEN_MUSIC_TEST;
                 s_inner_state = 7;
-            } else if (s_button_index == 4) { /* OK */
+            } else if (s_button_index == 3) { /* OK */
                 /* Persist sound options to td5re.ini so they survive a relaunch
                  * (see PART B note in Screen_GameOptions). Volume changes already
                  * applied live via td5_save_set_*; sync the committed values into
-                 * g_td5.ini and write them back. [PART B 2026-06-02] */
+                 * g_td5.ini and write them back. [PART B 2026-06-02]
+                 * sfx_mode is no longer user-editable here (row removed) but is
+                 * still written so its loaded value is preserved across the save. */
                 g_td5.ini.sfx_mode     = s_sound_option_sfx_mode;
                 g_td5.ini.sfx_volume   = s_sound_option_sfx_volume;
                 g_td5.ini.music_volume = s_sound_option_music_volume;
