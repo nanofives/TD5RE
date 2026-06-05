@@ -1258,6 +1258,34 @@ static int32_t s_boundary_rev_sentinel = 9999;
 
 void td5_track_bind_boundary_sentinels(int level_number)
 {
+    /* [TD6 SEAM-TELEPORT ROOT FIX — track-scoped, OverrideTrackZip-gated]
+     * s_level_boundary_sentinels is keyed by NATIVE TD5 level number and holds
+     * geometry-specific span indices for that level's point-to-point end-of-
+     * level boundary walls (fwd/rev). When a TD6 track is substituted via
+     * OverrideTrackZip it loads as e.g. "level 7" and inherits native level
+     * 7's forward sentinel (span 40) — but the TD6 geometry is completely
+     * different, so span 40 is a meaningless mid-track index. On the circuit
+     * seam wrap (chassis span -> 0, which is <= sentinel+1) the forward-contact
+     * resolver fwd_rev_handler activates and measures a wheel probe against
+     * span 40's far edge, computing a ~-51000 penetration -> ApplyTrackSurface
+     * ForceToActor shoves the chassis ~53000 units off the track = the
+     * "seam teleport" (confirmed: forward_contact boundary=40 pen=-51574 ->
+     * wall_response delta=34668). A TD6 circuit has NO forward end-of-level
+     * boundary, so disable both sentinels for any override track. This is pure
+     * boundary CONFIG: it does NOT touch the recovery logic (state0f / scripted
+     * recovery) or the wall-resolver code, lateral wall containment
+     * (td5_track_resolve_wall_contacts) still runs, and faithful (non-override)
+     * levels are byte-identical. */
+    if (g_active_td6_level > 0) {
+        s_boundary_fwd_sentinel = -1;
+        s_boundary_rev_sentinel = 9999;
+        TD5_LOG_I(LOG_TAG,
+                  "boundary sentinels: override track (level=%d) -> DISABLED "
+                  "(substituted TD6 geometry has no native end-of-level boundary)",
+                  level_number);
+        return;
+    }
+
     if (level_number < 1 || level_number > 40) {
         s_boundary_fwd_sentinel = -1;
         s_boundary_rev_sentinel = 9999;

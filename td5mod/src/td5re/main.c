@@ -339,6 +339,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "DefaultOpponents",     &g_td5.ini.default_opponents },
         { "CircuitMinimap",       &g_td5.ini.circuit_minimap },
         { "DefaultPlayers",       &g_td5.ini.default_players },
+        { "OverrideTrackZip",     &g_td5.ini.override_track_zip },
+        { "OverrideStartSpan",    &g_td5.ini.override_start_span },
         { "SkipIntro",            &g_td5.ini.skip_intro },
         { "DebugOverlay",         &g_td5.ini.debug_overlay },
         { "DebugCollisions",      &g_td5.ini.debug_collisions },
@@ -660,6 +662,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.default_opponents = td5_ini_int("Game", "DefaultOpponents", -1); /* -1 = full grid */
     g_td5.ini.circuit_minimap   = td5_ini_int("Game", "CircuitMinimap", 1);    /* 1 = minimap on circuit tracks too */
     g_td5.ini.default_players   = td5_ini_int("Game", "DefaultPlayers", -1);   /* -1 = schedule default; >=2 = N-way split */
+    g_td5.ini.override_track_zip = td5_ini_int("Game", "OverrideTrackZip", 0);  /* 0 = faithful; >0 = TD6 level NNN */
+    g_td5.ini.override_start_span = td5_ini_int("Game", "OverrideStartSpan", 0); /* TD6 grid start span; 0 = auto */
     g_td5.ini.skip_intro        = td5_ini_int("Game", "SkipIntro", 1);
     g_td5.ini.debug_overlay     = td5_ini_int("Game", "DebugOverlay", 0);
     g_td5.ini.debug_collisions  = td5_ini_int("Debug", "Collisions", 0);

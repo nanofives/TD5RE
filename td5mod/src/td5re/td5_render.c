@@ -1727,6 +1727,22 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     }
 }
 
+/* TD6 track migration: a fixed daylight basis for OverrideTrackZip'd tracks.
+ * Such tracks have no faithful per-span lighting zones (s_environs_level is out
+ * of range), so apply_track_lighting falls back to a flat 0x40 ambient and the
+ * de-indexed geometry renders uniformly dark. This sets 3 directional lights
+ * (top + two obliques) + a bright ambient so compute_vertex_lighting produces
+ * lit, textured geometry. The converter orients face normals to the upper
+ * hemisphere, so the top light keeps ground/roofs bright. Gated by the caller
+ * on g_td5.ini.override_track_zip, so faithful tracks never call this. */
+void td5_render_set_override_daylight(void)
+{
+    s_light_dirs[0] =   0.0f; s_light_dirs[1] = 120.0f; s_light_dirs[2] =   0.0f; /* top   */
+    s_light_dirs[3] =  70.0f; s_light_dirs[4] =  45.0f; s_light_dirs[5] =  45.0f; /* fr-rt */
+    s_light_dirs[6] = -55.0f; s_light_dirs[7] =  45.0f; s_light_dirs[8] = -55.0f; /* bk-lf */
+    s_ambient_intensity = 104.0f;   /* 0x68 base so even unlit faces stay visible */
+}
+
 /* --- Frustum Culling --- */
 
 /* Diagnostic counters for view-distance investigation. */
@@ -2015,6 +2031,11 @@ void td5_render_span_display_list(void *display_list_block)
             td5_render_pop_transform();
         } else {
             td5_render_transform_mesh_vertices(mesh);
+            /* TD6 override tracks have no faithful lighting zones -> set a fixed
+             * daylight basis so de-indexed geometry isn't flat-dark. Faithful
+             * tracks (override 0) keep the per-span zone lighting untouched. */
+            if (g_active_td6_level > 0)
+                td5_render_set_override_daylight();
             td5_render_compute_vertex_lighting(mesh, -1);   /* track mesh: no tint */
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
@@ -2373,6 +2394,20 @@ void td5_render_actors_for_view(int view_index)
          * depth [CONFIRMED count = effectiveSpans @ 0x42BBE9 `MOV EBP,[0x4aae44]`,
          * loop 0x42BC11-0x42BC3C]. */
         int n_entries   = eff_spans;
+
+        /* TD6 track migration: the windowed `entry = span>>2` walk assumes TD5's
+         * ~4-spans-per-entry MODELS.DAT layout. TD6 levels have a different entry
+         * density (e.g. 113 chunk-entries for 517 spans), so the span>>2 window
+         * drifts off the player and leaves near track sections unrendered
+         * (collision present, geometry missing). For an OverrideTrackZip'd track,
+         * render EVERY display-list entry each frame and let the per-mesh frustum
+         * cull (td5_render_test_mesh_frustum) + the dedup set handle visibility.
+         * Gated on the override knob, so faithful tracks keep the exact window. */
+        int ring_entries_all = (ring > 0) ? ((ring + 3) >> 2) : 0;
+        if (g_active_td6_level > 0 && ring_entries_all > 0) {
+            start_entry = 0;
+            n_entries   = ring_entries_all;
+        }
         /* Change-gated (not per-frame) so the render dispatch isn't spammed. */
         {
             static int s_log_start = 0x7fffffff, s_log_n = -1;
@@ -4243,6 +4278,16 @@ static void tl_apply_case0(const TD5_LightZone *zone)
  */
 void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
 {
+    /* [TD6 CAR LIGHTING — track-scoped] Migrated TD6 tracks have no real light
+     * zones; without this they borrow the TD5 level-number's zone table, whose
+     * tunnel/dark zones darken the car as if it were in a tunnel (seen on the
+     * London opening). Apply the same flat daylight basis the track geometry
+     * uses so the car stays correctly lit everywhere. Faithful TD5 tracks fall
+     * through to the byte-faithful per-zone path below. */
+    if (g_active_td6_level > 0) {
+        td5_render_set_override_daylight();
+        return;
+    }
     if (!actor || slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) {
         tl_apply_fallback();
         s_ambient_intensity = (float)s_tl_ambient;
@@ -5878,6 +5923,13 @@ static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 
 #define SKY_TEXTURE_PAGE 1020
 
+/* TD6 sky-dome pitch (radians) that lowers the panorama horizon to eye level.
+ * Applied only when g_active_td6_level > 0. Overridable at runtime via
+ * TD5RE_SKY_PITCH for bring-up; 0.0 = no change. */
+#ifndef TD6_SKY_PITCH_DEFAULT
+#define TD6_SKY_PITCH_DEFAULT 0.12f
+#endif
+
 static int             s_sky_loaded;
 static int             s_sky_page;
 static TD5_MeshHeader *s_sky_mesh = NULL;   /* sky.prr dome mesh */
@@ -5965,6 +6017,30 @@ void td5_render_draw_sky(void)
         /* Camera basis IS the rotation — sky has identity model rotation */
         for (int i = 0; i < 9; i++)
             sky_rot.m[i] = s_camera_basis[i];
+
+        /* TD6 sky horizon adjustment. The TD6 FORWSKY panoramas place their
+         * horizon higher than the TD5 sky dome was tuned for, so the sky reads
+         * "too high". Pitch the dome about the view right-axis (compose a pitch
+         * P with the camera basis: rows 1,2 = up/forward mixed) to slide the
+         * horizon down. Gated on TD6 so faithful tracks are byte-unchanged.
+         * Angle from TD5RE_SKY_PITCH (radians) during bring-up; falls back to
+         * the baked default below. */
+        if (g_active_td6_level > 0) {
+            const char *sp = getenv("TD5RE_SKY_PITCH");
+            float ang = sp ? (float)atof(sp)
+                           : td5_asset_td6_sky_pitch_for_level(g_active_td6_level);
+            if (ang != 0.0f) {
+                float c = cosf(ang), s = sinf(ang);
+                float u0 = sky_rot.m[3], u1 = sky_rot.m[4], u2 = sky_rot.m[5];
+                float f0 = sky_rot.m[6], f1 = sky_rot.m[7], f2 = sky_rot.m[8];
+                sky_rot.m[3] = c * u0 - s * f0;
+                sky_rot.m[4] = c * u1 - s * f1;
+                sky_rot.m[5] = c * u2 - s * f2;
+                sky_rot.m[6] = s * u0 + c * f0;
+                sky_rot.m[7] = s * u1 + c * f1;
+                sky_rot.m[8] = s * u2 + c * f2;
+            }
+        }
 
         td5_render_load_rotation(&sky_rot);
 

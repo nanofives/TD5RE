@@ -186,6 +186,10 @@ void td5_hud_draw_race_fade(float progress, int direction);
 /* --- State control --- */
 void td5_hud_set_indicator_state(int view_index, int value);
 
+/* Flash a brief centered "CHECKPOINT n/N" acknowledgement on the player view,
+ * called by the TD6 synthesized-checkpoint registration in td5_game.c. */
+void td5_hud_set_td6_checkpoint_flash(int reached, int total);
+
 /* Finishing-position center-screen digit (race-end victory overlay).
  * position is 1-based (1 = 1st). See td5_hud.c. */
 void td5_hud_draw_finish_position(int position);

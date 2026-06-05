@@ -324,6 +324,24 @@ int  td5_asset_level_number(int track_index);
  *  Used to hide the frontend Direction toggle and to force forward in the
  *  INI/AutoRace path. */
 int  td5_asset_track_has_reverse(int track_index);
+/** Converted TD5 level number for a migrated TD6 menu slot (schedule index),
+ *  or 0 if track_index is not a TD6 track. Source of truth = k_td6_menu_slots. */
+int  td5_asset_td6_level_for_slot(int track_index);
+/** Per-track grid / start-finish span for a migrated TD6 track, keyed by its
+ *  converted level number, or 0 if not a TD6 track. */
+int  td5_asset_td6_start_span_for_level(int level_num);
+/** Finish span for a migrated point-to-point TD6 track (race ends on reaching
+ *  it), keyed by converted level number. 0 for circuits / non-TD6 levels. */
+int  td5_asset_td6_finish_span_for_level(int level_num);
+/** Synthesized checkpoint spans for a migrated TD6 track, keyed by converted
+ *  level number. Writes up to 5 ascending strip spans into out_spans[] and
+ *  returns the count (0 = none). NON-FAITHFUL: TD6.exe ships no checkpoint
+ *  trigger data, so these are derived from the in-track ring/banner mesh
+ *  positions (see td5_asset.c). Faithful TD5 levels return 0. */
+int  td5_asset_td6_checkpoint_spans(int level_num, int out_spans[5]);
+/** Per-track sky-dome pitch (radians) for a migrated TD6 track, keyed by
+ *  converted level number. >0 lowers the panorama horizon to eye level. */
+float td5_asset_td6_sky_pitch_for_level(int level_num);
 /** Load PNG and return BGRA32 pixels (R↔B swapped for D3D11 B8G8R8A8_UNORM).
  *  Despite the legacy name, output is BGRA, not RGBA. */
 int  td5_asset_decode_png_rgba32(const char *path,

@@ -285,6 +285,17 @@ typedef struct TD5_GlobalState {
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
         int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
         int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */
+        /* TD6 track migration (Phase 1): when > 0, td5_asset_level_number()
+         * returns this level number directly (bypassing the schedule->pool->zip
+         * chain), so the loader resolves re/assets/levels/level<NNN>/ loose files
+         * for a converted TD6 track. 0 = disabled = faithful. See
+         * re/analysis/td6_track_migration_plan.md and convert_td6_tracks.py. */
+        int  override_track_zip;
+        /* TD6 track migration: grid start span for an override track (the per-TD5
+         * level start-span table is meaningless for a TD6 level). When > 0 it is
+         * used as the start/finish grid span. Pick the start/finish straight
+         * (widest, straightest section). 0 = auto-clamp to the opening straight. */
+        int  override_start_span;
         int  skip_intro;
         int  debug_overlay;
         int  debug_collisions;   /* 1 = draw wireframe of track wall/span geometry */
@@ -452,6 +463,12 @@ typedef struct TD5_GlobalState {
 
 /** The single global state instance. */
 extern TD5_GlobalState g_td5;
+
+/* >0 when the loaded level is a substituted TD6 track (via OverrideTrackZip OR a
+ * TD6 menu registry slot). Gates the TD6 engine fixes (seam/lap/grass/AI/render).
+ * Set by td5_asset_level_number(); 0 = faithful TD5 track. Standalone global (NOT
+ * a g_td5 field) so adding it doesn't change the g_td5 struct layout. */
+extern int g_active_td6_level;
 
 /* Persist the in-game-configurable option keys (Display/Audio/GameOptions)
  * from g_td5.ini.* back to td5re.ini (the file s_ini_path resolved at boot).

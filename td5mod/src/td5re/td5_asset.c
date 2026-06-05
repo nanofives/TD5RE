@@ -1420,8 +1420,186 @@ static const char *s_traffic_rev[1] = { "TRAFFICB.BUS" };
 /** Wrapper texture-page limit. Must match td5_platform_win32.c. */
 #define TD5_TRACK_TEXTURE_PAGE_LIMIT 1024
 
+/* >0 when the active level is a substituted TD6 track (override knob OR a TD6
+ * menu registry slot). Gates the TD6 engine fixes. Set in td5_asset_level_number. */
+int g_active_td6_level = 0;
+
+/* TD6 menu registry: schedule slot -> converted TD5 level number. One row per
+ * migrated TD6 track. Single source of truth for both level resolution and the
+ * "is this a TD6 track" gating. Extend as more TD6 tracks are migrated; keep in
+ * sync with the frontend tables (s_track_schedule_to_tga_index / display names)
+ * and re/tools/track_preview_render.py TD6_TRACKS. */
+static const struct { int slot; int level; int start_span; int finish_span; float sky_pitch; } k_td6_menu_slots[] = {
+    /* frontend schedule slot, converted TD5 level number
+     * (re/assets/levels/levelNNN), per-track grid/start span, and (P2P only)
+     * the finish span. TD6 tracks each have their own start span; the TD5
+     * per-level start-span tables in td5_game.c are meaningless for them.
+     * CIRCUITS: finish_span = 0 (lap-based, finish == start after N laps).
+     * POINT-TO-POINT: finish_span > 0 (race ends when the player reaches it;
+     * there is no TD6 checkpoint data, so this is the only finish trigger). */
+    /* sky_pitch (radians): per-track sky-DOME pitch that drops the panorama
+     * horizon toward eye level. Pitching a SPHERICAL dome curves the horizon at
+     * the screen edges while steering (a tilted great-circle projects to a
+     * conic), worse the larger the angle — so this is capped low. A full
+     * distortion-free horizon fix needs regenerating the FORWSKY panoramas
+     * (sky-dominant) instead of tilting the dome. 0 = no pitch. */
+    { 26,  7, 312,    0, 0.08f },  /* PELTON RACEWAY  (TD6 level010, circuit)  */
+    { 27, 18,  70,    0, 0.08f },  /* IRELAND         (TD6 level011, circuit)  */
+    { 28, 19,  32,    0, 0.08f },  /* LAKE TAHOE      (TD6 level015, circuit)  */
+    { 29, 20, 371,    0, 0.08f },  /* CAPE HATTERAS   (TD6 level016, circuit)  */
+    { 30, 21, 346,    0, 0.08f },  /* SWITZERLAND     (TD6 level017, circuit)  */
+    { 31, 22,  10,    0, 0.08f },  /* EGYPT           (TD6 level018, circuit)  */
+    /* P2P start_span = the track's START-BANNER span (from the in-track 'start'
+     * banner mesh). The grid spreads BACKWARD from start_span (offsets -3..-18,
+     * s_staggered_span_offsets), so cars sit a few spans BEHIND the banner and
+     * drive through it at the lights — matching the original game. Previously
+     * all were span 20, which left a 40-56 span empty run-up before the banner
+     * (the "starts too far from the banner" report). Rome ships no 'start'
+     * banner mesh and London already starts ~8 spans behind its banner (~28),
+     * so both keep span 20.
+     *
+     * finish_span = the track's FINISH-BANNER span (in-track 'finish'/Kfin mesh).
+     * Originally all were span_cnt-8 — i.e. 8 spans from the strip END (the cliff
+     * into the void) — too close to the edge for the instant-end race to stop the
+     * player before they run off the world ("out of bounds at the track end").
+     * Ending at the finish banner (~50-90 spans earlier, well inside the track,
+     * after the last checkpoint) ends the race at the visual finish line and
+     * keeps the player on the road. Rome ships no finish gantry and its road
+     * stays a walled 6-8 lanes to the end, so it keeps span_cnt-8 (2348). */
+    { 32,  8,  76, 2762, 0.08f },  /* PARIS      (TD6 level000, P2P, start~76  finish 1finish~2762) */
+    { 33,  9,  59, 2523, 0.08f },  /* NEW YORK   (TD6 level001, P2P, start~59  finish Finish~2523)  */
+    { 34, 10,  20, 2348, 0.08f },  /* ROME       (TD6 level002, P2P, no banners, walled to end)      */
+    { 35, 11,  70, 2014, 0.08f },  /* HONG KONG  (TD6 level003, P2P, start~70  finish 1finish~2014)  */
+    { 36, 12,  20, 2083, 0.08f },  /* LONDON     (TD6 level004, P2P, start~28  finish Kfin~2083)     */
+};
+
+/* Converted level number for a TD6 menu slot, or 0 if track_index is not a
+ * migrated TD6 track. */
+int td5_asset_td6_level_for_slot(int track_index)
+{
+    size_t i;
+    for (i = 0; i < sizeof(k_td6_menu_slots) / sizeof(k_td6_menu_slots[0]); i++)
+        if (k_td6_menu_slots[i].slot == track_index)
+            return k_td6_menu_slots[i].level;
+    return 0;
+}
+
+/* Per-track grid / start-finish span for a migrated TD6 track by its converted
+ * level number, or 0 if level_num is not a TD6 track. */
+int td5_asset_td6_start_span_for_level(int level_num)
+{
+    size_t i;
+    for (i = 0; i < sizeof(k_td6_menu_slots) / sizeof(k_td6_menu_slots[0]); i++)
+        if (k_td6_menu_slots[i].level == level_num)
+            return k_td6_menu_slots[i].start_span;
+    return 0;
+}
+
+/* Per-track sky-dome pitch (radians) for a migrated TD6 track by converted
+ * level number. >0 lowers the panorama horizon to eye level. Returns a sane
+ * default for unknown levels (shouldn't happen for TD6). */
+float td5_asset_td6_sky_pitch_for_level(int level_num)
+{
+    size_t i;
+    for (i = 0; i < sizeof(k_td6_menu_slots) / sizeof(k_td6_menu_slots[0]); i++)
+        if (k_td6_menu_slots[i].level == level_num)
+            return k_td6_menu_slots[i].sky_pitch;
+    return 0.12f;
+}
+
+/* Finish span for a migrated point-to-point TD6 track (race ends when the
+ * player reaches it). 0 for circuits (lap-based) and non-TD6 levels. */
+int td5_asset_td6_finish_span_for_level(int level_num)
+{
+    size_t i;
+    for (i = 0; i < sizeof(k_td6_menu_slots) / sizeof(k_td6_menu_slots[0]); i++)
+        if (k_td6_menu_slots[i].level == level_num)
+            return k_td6_menu_slots[i].finish_span;
+    return 0;
+}
+
+/* Synthesized checkpoint spans for a migrated TD6 track (converted level
+ * number). Writes up to 5 ascending strip-span thresholds into out_spans[] and
+ * returns the count (0 = no checkpoints on this track).
+ *
+ * NON-FAITHFUL by necessity: TD6.exe ships NO live checkpoint-trigger data
+ * (RE'd 2026-06-04 — CHECKPT.NUM is loaded but never read; the banner-texture
+ * tables and RINGO have zero code refs; the only per-track span table drives
+ * fog/lighting). So the in-track checkpoint RING / numbered-BANNER meshes are
+ * pure decoration. To make those visible banners FUNCTIONAL in the port we
+ * SYNTHESIZE checkpoints from the numbered checkpoint-BANNER meshes' world
+ * positions, mapped to the nearest strip span (re/tools/extract_td6_checkpoints.py).
+ *
+ * All 5 migrated point-to-point city tracks ship numbered checkpoint banners,
+ * each city using its own art/naming convention (visually confirmed against the
+ * extracted TGAs, 2026-06-04):
+ *   Paris  : 1one/1two/1three/1four  (blue swirl banners)        -> 4 checkpoints
+ *   NewYork: 1.tga..4.tga            (green/yellow oval banners)  -> 4
+ *   Rome   : Check01a..Check05a      (green/orange checkered)     -> 5
+ *   HongKong:1one/1two/1three/1four  (red/gold banners)           -> 4
+ *   London : Kstage1..Kstage4        (cyan numbered banners)      -> 4
+ * (My first pass mis-keyed on texture-NAME guesses — NY's "ringo" is a RINGO'S
+ * storefront, Paris's "Post" are wall posters, London's "flag" are national
+ * flags — all décor, not checkpoints. The banners above are the real signage.)
+ * The 6 circuit tracks are lap-based and get no synthesized checkpoints.
+ * Faithful TD5 tracks return 0 and are entirely unaffected. */
+int td5_asset_td6_checkpoint_spans(int level_num, int out_spans[5])
+{
+    static const int s_paris[]  = { 641, 1113, 1685, 2211 };       /* 1one..1four      */
+    static const int s_ny[]     = { 600, 1008, 1619, 1998 };       /* 1.tga..4.tga     */
+    static const int s_rome[]   = { 51, 505, 1056, 1500, 1838 };   /* Check01..Check05 */
+    static const int s_hk[]     = { 540, 832, 1196, 1567 };        /* 1one..1four      */
+    static const int s_london[] = { 515, 906, 1289, 1692 };        /* Kstage1..Kstage4 */
+    const int *src = 0;
+    int n = 0, i;
+    switch (level_num) {
+    case  8: src = s_paris;  n = 4; break;   /* PARIS     (TD6 level000, P2P) */
+    case  9: src = s_ny;     n = 4; break;   /* NEW YORK  (TD6 level001, P2P) */
+    case 10: src = s_rome;   n = 5; break;   /* ROME      (TD6 level002, P2P) */
+    case 11: src = s_hk;     n = 4; break;   /* HONG KONG (TD6 level003, P2P) */
+    case 12: src = s_london; n = 4; break;   /* LONDON    (TD6 level004, P2P) */
+    default: return 0;
+    }
+    for (i = 0; i < n; i++)
+        out_spans[i] = src[i];
+    return n;
+}
+
 int td5_asset_level_number(int track_index)
 {
+    /* TD6 track migration (Phase 1, NON-faithful dev knob): when
+     * [Game] OverrideTrackZip / --OverrideTrackZip is > 0, force every level
+     * lookup to that number so the loose-file loader resolves
+     * re/assets/levels/level<NNN>/ for a converted TD6 track (see
+     * convert_td6_tracks.py). Wins over the schedule/drag remap on purpose —
+     * Phase 1 drives a single selected track via AutoRace. 0 = faithful.
+     * One-shot log so the per-load call burst doesn't spam. */
+    if (g_td5.ini.override_track_zip > 0) {
+        static int s_logged_override = -1;
+        if (s_logged_override != g_td5.ini.override_track_zip) {
+            s_logged_override = g_td5.ini.override_track_zip;
+            TD5_LOG_W(LOG_TAG, "OverrideTrackZip active: level_number forced to %d "
+                      "(TD6 track migration; non-faithful)", g_td5.ini.override_track_zip);
+        }
+        g_active_td6_level = g_td5.ini.override_track_zip;
+        return g_td5.ini.override_track_zip;
+    }
+
+    /* [TD6 MENU REGISTRY] Schedule slots beyond the 19 native tracks map to
+     * converted TD6 levels (loose re/assets/levels/levelNNN/). This is how a
+     * menu-selected TD6 track resolves its level WITHOUT the OverrideTrackZip
+     * ini knob. Setting active_td6_level here makes the override-gated engine
+     * fixes (seam/lap/grass/AI/render) fire for these tracks too. Extend the
+     * table as more TD6 tracks are migrated (one row per added menu slot). */
+    {
+        int td6 = td5_asset_td6_level_for_slot(track_index);
+        if (td6 > 0) {
+            g_active_td6_level = td6;
+            return td6;
+        }
+    }
+    g_active_td6_level = 0;   /* faithful TD5 track */
+
     /* Drag race hardcodes level030.zip [CONFIRMED @ InitializeRaceSession
      * 0x0042ad63-0x0042ad73]: when s_selected_track < 0 the original writes
      * MOV [0x004aaf3c], 0x1e (=30) directly, bypassing the schedule remap.
@@ -1974,6 +2152,12 @@ static void td5_asset_build_level_loose_path(int track_index,
 int td5_asset_track_has_reverse(int track_index)
 {
     char rev_path[256];
+    /* Migrated TD6 tracks ship a STRIPB.DAT, but reverse direction is not yet
+     * validated across the TD6 roster. Report no reverse so the frontend hides
+     * the Forwards/Backwards toggle (and the loader won't honour a reverse
+     * request). Remove this gate once TD6 reverse is confirmed on all tracks. */
+    if (td5_asset_td6_level_for_slot(track_index) > 0)
+        return 0;
     td5_asset_build_level_loose_path(track_index, "STRIPB.DAT",
                                      rev_path, sizeof(rev_path));
     return td5_plat_file_exists(rev_path) ? 1 : 0;
@@ -2489,6 +2673,33 @@ int td5_asset_load_race_texture_pages(void)
     if (!rgba) { free(tex_data); return 0; }
 
     for (uint32_t pg = 0; pg < page_count; pg++) {
+        /* [TD6 NATIVE-RES TEXTURES] Migrated TD6 tracks ship the textures at
+         * their native resolution (128x128 / 256x256, full alpha) as loose PNGs
+         * (textures/tex_NNN.png), built from the TD6 textures.dir entries. Upload
+         * those directly instead of the 64x64 8-bit palettized DAT page, which
+         * was the main cause of blurry/unreadable city textures. The per-page
+         * TYPE byte (blend preset) still comes from the DAT. Falls back to the
+         * DAT page below when the PNG is absent. Page index == DAT page == mesh
+         * tex_page, so it lines up. TD6 is forward-only so no reverse remap. */
+        if (g_active_td6_level > 0) {
+            char png_path[256];
+            void *png_px = NULL;
+            int pw = 0, ph = 0;
+            snprintf(png_path, sizeof(png_path),
+                     "re/assets/levels/level%03d/textures/tex_%03d.png",
+                     level_number, (int)pg);
+            if (td5_plat_file_exists(png_path) &&
+                td5_asset_decode_png_rgba32(png_path, &png_px, &pw, &ph) && png_px) {
+                uint32_t poff = offsets[pg];
+                int ptype = (poff + 4 <= (uint32_t)tex_size) ? tex_data[poff + 3] : 0;
+                td5_plat_render_upload_texture((int)pg, png_px, pw, ph, 2);
+                td5_asset_set_page_transparency((int)pg, ptype);
+                free(png_px);
+                loaded_count++;
+                continue;
+            }
+        }
+
         int src_i = td5_asset_texture_page_remap_source((int)pg);
         if (src_i < 0 || (uint32_t)src_i >= page_count) src_i = (int)pg;
         uint32_t src = (uint32_t)src_i;

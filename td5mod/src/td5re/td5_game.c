@@ -378,6 +378,23 @@ static CheckpointRecord s_active_checkpoint;
 /* LEVELINF.DAT checkpoint span storage (+0x08..+0x24) */
 static int32_t s_levelinf_checkpoint_spans[7]; /* +0x0C..+0x24 from LEVELINF.DAT */
 static int32_t s_levelinf_checkpoint_config;   /* +0x08 from LEVELINF.DAT */
+/* Finish span for a migrated point-to-point TD6 track (0 = circuit / non-TD6).
+ * Resolved once at race init from the TD6 registry; consumed by the P2P finish
+ * path in advance_pending_finish_state (TD6 P2P tracks have no checkpoint data,
+ * so reaching this span is the only finish trigger). */
+static int s_td6_finish_span = 0;
+
+/* [TD6 SYNTHESIZED CHECKPOINTS] Drive-through markers derived from the in-track
+ * ring/banner mesh positions (TD6.exe ships NO checkpoint-trigger data — RE'd
+ * 2026-06-04: CHECKPT.NUM is loaded but never read, the banner-texture tables
+ * and RINGO have zero code refs; the only per-track span table drives fog). So
+ * the visible ring/banner meshes are decoration; these spans make them
+ * FUNCTIONAL. s_td6_cp_count is 0 for the 8 migrated tracks without banner art
+ * and for ALL faithful TD5 tracks (gated on g_active_td6_level at race init, so
+ * a TD5 level reusing a TD6 output-level number is never affected). */
+static int     s_td6_cp_count = 0;
+static int     s_td6_cp_spans[5];
+static uint8_t s_td6_cp_index[TD5_MAX_RACER_SLOTS];
 
 /* LEVELINF.DAT additional fields */
 static int32_t s_levelinf_track_subvariant;  /* +0x54: 36 for race, -1 for cup */
@@ -2075,6 +2092,46 @@ int td5_game_init_race_session(void) {
         if (start_span <= 0)
             start_span = (track_span_count > 0) ? track_span_count : 1;
 
+        /* [TD6 PER-TRACK START SPAN] Each migrated TD6 menu track has its own
+         * grid / start-finish span (k_td6_menu_slots); the TD5 per-level tables
+         * above don't apply. Use the registry value directly so every TD6 track
+         * grids on its real start/finish straight and the circuit lap test
+         * anchors there too. Faithful TD5 tracks return 0 and keep the table
+         * value byte-identically. (The single-track --OverrideStartSpan ini knob
+         * still serves the AutoRace dev path via the clamp fallback below.) */
+        {
+            int td6_ss = td5_asset_td6_start_span_for_level(level_num);
+            if (td6_ss > 0)
+                start_span = td6_ss;
+        }
+
+        /* TD6 track migration / out-of-range robustness: the per-level
+         * start-span tables are indexed by level number and only meaningful for
+         * the 39 shipped TD5 tracks. An OverrideTrackZip'd TD6 track (or any
+         * out-of-range level) can yield a start_span PAST the end of the actual
+         * strip -> every racer clamps to the wrap point and spawns cramped on
+         * top of each other (observed on the TD6 level007 proof). Clamp into the
+         * strip mid-ring when that happens. This NEVER fires for faithful tracks
+         * (their table value is always < span_count), so faithful spawn stays
+         * byte-identical. */
+        if (track_span_count > 0 && start_span >= track_span_count) {
+            int safe;
+            if (g_td5.ini.override_start_span > 0 &&
+                g_td5.ini.override_start_span < track_span_count) {
+                /* Explicit grid span for this TD6 track — point it at the real
+                 * start/finish straight (widest, straightest section). */
+                safe = g_td5.ini.override_start_span;
+            } else {
+                /* Fallback: opening straight. Mid-ring lands on a corner/runoff
+                 * and the racers spawn on grass. */
+                safe = (track_span_count > 48) ? 24
+                       : (track_span_count > 1 ? track_span_count / 2 : 1);
+            }
+            TD5_LOG_W(LOG_TAG, "start_span %d >= span_count %d (out-of-range level) "
+                      "-> grid span %d", start_span, track_span_count, safe);
+            start_span = safe;
+        }
+
         /* StartSpanOffset (td5re.ini [Game] or --StartSpanOffset=N): mirrors
          * the Frida hook on InitializeActorTrackPose (0x00434350) which does
          *   esp.add(8).writeS16((span + offset) & 0xFFFF)
@@ -2103,6 +2160,28 @@ int td5_game_init_race_session(void) {
          * (verbatim port of CheckRaceCompletionState @ 0x00409E80). This
          * holds the unshifted base — matches original 0x0042b076. */
         g_td5.track_start_span_index = start_span;
+
+        /* [TD6 P2P FINISH] Resolve this track's finish span once (0 for circuits
+         * and faithful TD5 tracks). Consumed by advance_pending_finish_state's
+         * P2P branch — the only finish trigger for checkpoint-less TD6 P2P
+         * tracks. */
+        s_td6_finish_span = td5_asset_td6_finish_span_for_level(level_num);
+
+        /* [TD6 SYNTHESIZED CHECKPOINTS] Resolve this track's checkpoint spans
+         * once. Gated on g_active_td6_level (NOT level_num) so faithful TD5
+         * tracks that reuse a TD6 output-level number get none. Registered as
+         * drive-throughs in advance_pending_finish_state (split + player HUD
+         * ack), with no fail-timer and without gating the finish. */
+        s_td6_cp_count = (g_active_td6_level > 0)
+            ? td5_asset_td6_checkpoint_spans(g_active_td6_level, s_td6_cp_spans)
+            : 0;
+        memset(s_td6_cp_index, 0, sizeof(s_td6_cp_index));
+        if (s_td6_cp_count > 0) {
+            TD5_LOG_I(LOG_TAG,
+                      "TD6 checkpoints: level=%d count=%d first=%d last=%d",
+                      g_active_td6_level, s_td6_cp_count, s_td6_cp_spans[0],
+                      s_td6_cp_spans[s_td6_cp_count - 1]);
+        }
 
         /* Drag race does NOT derive from start_span — it uses hardcoded
          * absolute span values (slot 0 = 115, slots 1..5 = 1) inside the
@@ -2192,6 +2271,21 @@ int td5_game_init_race_session(void) {
             if (!sp)
                 continue;
 
+            /* [TD6 GRID CENTERING — track-scoped] On the wide TD6 city strips the
+             * paved road is the CENTRE of the strip (sidewalks are the outer
+             * lanes), but the grid lanes (1,2) sit near the left rail, so the
+             * player spawns on the sidewalk. Re-anchor the grid to the strip
+             * mid-lane (== the AI route centre, byte 128) while keeping the
+             * relative lane spread. The formula is a no-op on narrow strips
+             * (lane_count <= 4 -> centre == 1), so normal-width TD6 circuits and
+             * all faithful TD5 tracks are unaffected; only genuinely wide strips
+             * shift. */
+            if (g_active_td6_level > 0) {
+                int lc = td5_track_span_lane_count_at(span_index);
+                if (lc > 4)
+                    sub_lane = (lc - 1) / 2 + (active_lanes[effective_slot] - 1);
+            }
+
             /* InitActorTrackSegmentPlacement @ 0x00445F10 seeds:
              *   param_1[0] = spawn_span (+0x80)
              *   param_1[2] = spawn_span (+0x84 — accumulated span counter)
@@ -2274,6 +2368,20 @@ int td5_game_init_race_session(void) {
              * at the start of each physics tick. Starting at 0 is correct.
              * [CONFIRMED @ 0x405D70 / 0x434350 decompilation] */
             td5_track_compute_heading((TD5_Actor *)actor);
+
+            /* [TD6 SPAWN HEADING FIX — track-scoped] TD6's in-span vertex layout
+             * differs from TD5's, so the geometry yaw above lands ~90° off the
+             * real travel direction: the human car faces sideways at the start
+             * (e.g. London by the sidewalk) and AI cars trip the recovery gate
+             * (spawn-yaw vs route-heading too large) and stall instead of
+             * driving. Re-seed euler_accum.yaw from the synthesized LEFT.TRK
+             * route heading (== travel direction) HERE — before
+             * reset_actor_state below builds the rotation matrix — so the matrix
+             * (hence render + initial motion) reflects the corrected heading.
+             * Faithful TD5 tracks keep the geometry yaw byte-identically (the
+             * "DO NOT post-process" note below still governs them). */
+            if (g_active_td6_level > 0)
+                td5_ai_correct_spawn_heading(slot);
 
             /* DO NOT post-process the geometry-derived yaw.
              *
@@ -4729,6 +4837,29 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     /* Already finished */
     if (s_slot_state[slot].companion_1 != 0) return;
 
+    /* [TD6 SYNTHESIZED CHECKPOINTS] Register a drive-through when this actor
+     * reaches the next synthesized checkpoint span (derived from the in-track
+     * ring/banner meshes — TD6.exe has no checkpoint-trigger data). Records a
+     * split and, for the player, a brief HUD acknowledgement. Deliberately
+     * runs BEFORE the circuit/P2P branches and does NOT end the race: P2P
+     * finish stays s_td6_finish_span, circuit stays lap-based, and there is no
+     * beat-the-clock fail-timer. s_td6_cp_count is 0 on every faithful TD5
+     * track, so this is a no-op there. */
+    if (s_td6_cp_count > 0 &&
+        s_td6_cp_index[slot] < s_td6_cp_count &&
+        (int)actor_span >= s_td6_cp_spans[s_td6_cp_index[slot]]) {
+        int idx = s_td6_cp_index[slot];
+        if (idx < 9)
+            m->lap_split_times[idx] = (int16_t)m->cumulative_timer;
+        s_td6_cp_index[slot] = (uint8_t)(idx + 1);
+        TD5_LOG_I(LOG_TAG,
+                  "TD6 checkpoint: slot=%d cp=%d/%d span=%d timer=%d",
+                  slot, idx + 1, s_td6_cp_count, (int)actor_span,
+                  m->cumulative_timer);
+        if (slot == 0)
+            td5_hud_set_td6_checkpoint_flash(idx + 1, s_td6_cp_count);
+    }
+
     /* Race timer increment is driven per sub-tick in td5_game_run_race_frame
      * (see the per-slot block after sync_actor_race_metrics). Originally the
      * write at UpdateVehicleActor +0x34c runs once per sub-tick gated on the
@@ -4797,9 +4928,37 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
          * bitmask reset BOTH happen before the finish gate — that is, the
          * lap counter is already advanced when we check for finish.
          * --------------------------------------------------------------- */
-        if ((int32_t)actor_span >= (track_start - 1) &&
-            (int32_t)actor_span <= (track_start + 1) &&
-            m->checkpoint_bitmask == 0x0F) {
+        /* [TD6 LAP/FINISH FIX — track-scoped, OverrideTrackZip-gated]
+         * The native gate requires the 4-sector checkpoint bitmask (==0x0F) to
+         * latch before a start-line crossing counts a lap. But checkpoints are
+         * a point-to-point feature (not meaningful on a circuit), AND the sector
+         * boundary formula assumes track_start < ring/2 — on a substituted TD6
+         * ring the start/finish straight (g_trackStartSpanIndex = OverrideStart
+         * Span, e.g. 312 of 450) sits past the midpoint, so the sector bits
+         * never latch and no lap/finish ever fires. For override tracks, count a
+         * lap the simple circuit way: arm at the ring point opposite the start/
+         * finish, then complete when the car returns to the start/finish span.
+         * checkpoint_bitmask is reused as a 1-bit armed latch (the sector
+         * dispatch is skipped for override below). The lap ticks exactly at the
+         * visual start/finish straight where the grid spawns; faithful tracks
+         * keep the byte-faithful sector-gated path unchanged. */
+        int lap_crossed;
+        if (g_active_td6_level > 0) {
+            int32_t opp = (track_start + total_spans / 2) % total_spans;
+            int32_t d_start = (int32_t)actor_span - track_start;
+            if (d_start < 0) d_start = -d_start;
+            if (d_start > total_spans - d_start) d_start = total_spans - d_start;
+            int32_t d_opp = (int32_t)actor_span - opp;
+            if (d_opp < 0) d_opp = -d_opp;
+            if (d_opp > total_spans - d_opp) d_opp = total_spans - d_opp;
+            if (d_opp <= 10) m->checkpoint_bitmask = 1;   /* arm at far side */
+            lap_crossed = (m->checkpoint_bitmask == 1 && d_start <= 10);
+        } else {
+            lap_crossed = ((int32_t)actor_span >= (track_start - 1) &&
+                           (int32_t)actor_span <= (track_start + 1) &&
+                           m->checkpoint_bitmask == 0x0F);
+        }
+        if (lap_crossed) {
             /* lap++; bitmask = 0. DO NOT write split here — the delta loop
              * above has already captured it into lap_split_times[lap]. */
             m->checkpoint_index++;
@@ -4908,7 +5067,9 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
          * travel — a spun-out car moving backward cannot skip sectors to
          * reach 0xF and illegitimately trip the start-line lap increment.
          * --------------------------------------------------------------- */
-        {
+        if (g_td5.ini.override_track_zip == 0) {  /* native sector anti-cut gate;
+            * override (TD6) tracks use the simple armed start-line crossing above
+            * and must NOT run this (checkpoint_bitmask is reused as armed latch). */
             int32_t remaining = total_spans - track_start * 2;
             int32_t boundary  = track_start * 2 + 1;
             int32_t step      = remaining / 5;   /* matches orig; signed div */
@@ -4939,6 +5100,27 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             }
         }
     } else {
+        /* [TD6 P2P FINISH — track-scoped] Migrated TD6 point-to-point tracks
+         * ship no checkpoint data (synth LEVELINF +0x08 == 0), so the native
+         * checkpoint-finish below never fires and the race could not end. End
+         * the race for these tracks when the player reaches the registered
+         * finish span (near the end of the strip). Faithful TD5 P2P tracks have
+         * s_td6_finish_span == 0 and fall through to the byte-faithful
+         * checkpoint path unchanged. */
+        if (s_td6_finish_span > 0) {
+            if (s_slot_state[slot].companion_1 == 0 &&
+                (int)actor_span >= s_td6_finish_span) {
+                m->post_finish_metric_base = m->cumulative_timer;
+                s_slot_state[slot].companion_1 = 1;
+                s_slot_state[slot].companion_2 = 1;
+                s_slot_state[slot].state = 2;
+                TD5_LOG_I(LOG_TAG,
+                          "Actor finish: slot=%d mode=td6-p2p span=%d finish=%d timer=%d",
+                          slot, (int)actor_span, s_td6_finish_span, m->cumulative_timer);
+            }
+            return;   /* TD6 P2P: this is the only finish path (no checkpoints) */
+        }
+
         /* Point-to-point / time trial: checkpoint crossing (0x409E80 P2P branch)
          * Original comparison: (int)(uint)(uint16_t)threshold <= (int)(int16_t)span
          *

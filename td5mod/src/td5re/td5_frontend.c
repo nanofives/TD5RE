@@ -378,7 +378,7 @@ static int             s_sound_option_music_volume = 80;
 
 /* Lock tables (simplified inline representation) */
 static uint8_t s_car_lock_table[TD5_CAR_COUNT];    /* DAT_00463e4c (0-36); 37-75 = TD6, always unlocked */
-static uint8_t s_track_lock_table[26];  /* DAT_004668B0 */
+static uint8_t s_track_lock_table[37];  /* DAT_004668B0 (orig 26); 26-30 = migrated TD6 P2P slots */
 static int  s_total_unlocked_cars;      /* DAT_00463e0c */
 static int  s_total_unlocked_tracks;    /* DAT_00466840 */
 static int  s_cheat_unlock_all;         /* DAT_00496298 */
@@ -684,6 +684,13 @@ typedef struct {
 } TD5_TrackMarker;
 static TD5_TrackMarker s_track_markers[20];
 static int s_track_markers_loaded = 0; /* 0=untried, 1=loaded, -1=unavailable */
+/* Migrated TD6 tracks use preview TGA numbers >= TD6_PREVIEW_TGA_BASE (trak0090+),
+ * outside the 20-entry pool array. Their start/finish markers live in a separate
+ * file keyed by (tga - base). Loaded lazily, same projection as their preview PNG. */
+#define TD6_PREVIEW_TGA_BASE 90
+#define TD6_MARKER_MAX       16
+static TD5_TrackMarker s_track_markers_td6[TD6_MARKER_MAX];
+static int s_track_markers_td6_loaded = 0;
 static int s_font_page = -1;
 /* ---- Vector (MSDF) BodyText font — resolution-independent frontend text ----
  * BodyText_msdf.png is generated offline by re/tools/build_msdf_font.py: the
@@ -934,7 +941,7 @@ static const char *s_car_zip_paths[TD5_CAR_COUNT] = {
     "cars/tur.zip", "cars/tus.zip", "cars/xjr.zip", "cars/xk1.zip",
 };
 
-static const char *s_track_display_names[26] = {
+static const char *s_track_display_names[37] = {
     "DRAG STRIP",
     "MONTEGO BAY, JAMAICA",
     "HOUSE OF BEZ, ENGLAND",
@@ -955,17 +962,28 @@ static const char *s_track_display_names[26] = {
     "BERN, SWITZERLAND",
     "SAN FRANCISCO, CA, USA",
     "KESWICK, ENGLAND",
-    /* Indices 20-25 are the six CUPS, not race tracks. The High Scores browser
-     * (s_score_category_index 0x14..0x19) and the cup track slots read their
-     * label here via frontend_get_track_name; show the cup names rather than the
-     * old "TRACK 21".."TRACK 26" placeholders. Names match the original
-     * Language.dll SNK_TrackNames[20..25]. [S02 (d) 2026-06-04] */
+    /* 20-25: the six championship CUPS (High Scores cat 0x14-0x19, resolved by
+     * direct frontend_get_track_name index) -- kept from master's S02 work. */
     "CHAMPIONSHIP CUP",   /* 20 */
     "ERA CUP",            /* 21 */
     "CHALLENGE CUP",      /* 22 */
     "PITBULL CUP",        /* 23 */
     "MASTERS CUP",        /* 24 */
-    "ULTIMATE CUP"        /* 25 */
+    "ULTIMATE CUP",       /* 25 */
+    /* 26-36: migrated TD6 tracks, RELOCATED after the cups (circuits 26-31,
+     * P2P 32-36) so their schedule slots do not collide with the cup categories
+     * at 20-25. k_td6_menu_slots uses the matching 26-36 slots. */
+    "PELTON RACEWAY",      /* 26: TD6 (circuit) */
+    "IRELAND",             /* 27: TD6 (circuit) */
+    "LAKE TAHOE, USA",     /* 28: TD6 (circuit) */
+    "CAPE HATTERAS, USA",  /* 29: TD6 (circuit) */
+    "SWITZERLAND",         /* 30: TD6 (circuit) */
+    "EGYPT",               /* 31: TD6 (circuit) */
+    "PARIS, FRANCE",       /* 32: TD6 (P2P) */
+    "NEW YORK, USA",       /* 33: TD6 (P2P) */
+    "ROME, ITALY",         /* 34: TD6 (P2P) */
+    "HONG KONG, CHINA",    /* 35: TD6 (P2P) */
+    "LONDON, ENGLAND"      /* 36: TD6 (P2P) */
 };
 /* Original binary order: DAT_00466894 (slot→SNK_TrackNames index) cross-referenced
  * with Language.dll SNK_TrackNames → city name → s_track_display_names index.
@@ -975,16 +993,22 @@ static const char *s_track_display_names[26] = {
  *                    Washington, Munich.
  * Championship-only slots 16-19: Cheddar Cheese, Montego Bay, House of Bez,
  *                                Drag Strip. */
-static const uint8_t s_track_schedule_to_name_index[20] = {
+static const uint8_t s_track_schedule_to_name_index[37] = {
      8, 10, 12,  9,  6,  3,  4,  5, 13, 11,
-    19, 18, 17, 16, 15, 14,  7,  1,  2,  0
+    19, 18, 17, 16, 15, 14,  7,  1,  2,  0,
+    20, 21, 22, 23, 24, 25,   /* slots 20-25: cups (identity) */
+    26, 27, 28, 29, 30, 31,   /* slots 26-31: TD6 circuits */
+    32, 33, 34, 35, 36        /* slots 32-36: TD6 P2P cities */
 };
 /* Original binary gScheduleToPoolIndex (DAT_00466894): maps schedule slot →
  * Language.dll pool index, which equals the trak TGA file number.
  * Derived from listing at 0x466894 in TD5_d3d.exe. */
-static const uint8_t s_track_schedule_to_tga_index[20] = {
+static const uint8_t s_track_schedule_to_tga_index[37] = {
     11,  9,  7, 10, 13, 16, 15, 14,  6,  8,
-     0,  1,  2,  3,  4,  5, 12, 18, 17, 19
+     0,  1,  2,  3,  4,  5, 12, 18, 17, 19,
+    20, 21, 22, 23, 24, 25,   /* slots 20-25: cups -> trak0020..0025 (master direct) */
+    90, 91, 92, 93, 94, 95,   /* slots 26-31: TD6 circuits -> trak0090..0095 */
+    96, 97, 98, 99,100        /* slots 32-36: TD6 P2P cities -> trak0096..0100 */
 };
 
 static char s_car_display_names[TD5_CAR_COUNT][64];
@@ -3699,11 +3723,15 @@ static void frontend_update_cheat_codes(void) {
             memset(s_car_lock_table, 0, sizeof(s_car_lock_table));
             memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
             s_total_unlocked_cars = 37;
-            s_total_unlocked_tracks = 26;
+            s_total_unlocked_tracks = 37;   /* incl. migrated TD6 slots 26-36 */
         } else {
             int t;
             td5_save_get_car_lock_table(s_car_lock_table, TD5_BASE_CAR_COUNT);
             td5_save_get_track_lock_table(s_track_lock_table, 26);
+            /* TD6 migrated tracks (schedule slots 26-36) are always available
+             * regardless of save progress — force-unlock so the loop below
+             * raises s_total_unlocked_tracks to include them in the cycler. */
+            { int td6s; for (td6s = 26; td6s <= 36; td6s++) s_track_lock_table[td6s] = 0; }
             if (td5_save_get_all_cars_unlocked()) {
                 s_total_unlocked_cars = 37;
             } else {
@@ -3711,7 +3739,7 @@ static void frontend_update_cheat_codes(void) {
                 if (s_total_unlocked_cars < 21) s_total_unlocked_cars = 21;
             }
             s_total_unlocked_tracks = 20;
-            for (t = 20; t < 26; t++) {
+            for (t = 20; t < 37; t++) {
                 if (s_track_lock_table[t] == 0)
                     s_total_unlocked_tracks = t + 1;
             }
@@ -4906,6 +4934,7 @@ int td5_frontend_init_resources(void) {
     /* Populate lock tables from save system (Config.td5 loaded by td5_save_init). */
     td5_save_get_car_lock_table(s_car_lock_table, TD5_BASE_CAR_COUNT);
     td5_save_get_track_lock_table(s_track_lock_table, 26);
+    { int td6s; for (td6s = 26; td6s <= 36; td6s++) s_track_lock_table[td6s] = 0; } /* TD6 tracks always available */
 
     /* Compute total unlocked car count (visible + selectable in roster).
      * s_total_unlocked_cars = max visible car index (exclusive).
@@ -4924,7 +4953,7 @@ int td5_frontend_init_resources(void) {
     {
         int t;
         s_total_unlocked_tracks = 20; /* race tracks 0-19 always navigable */
-        for (t = 20; t < 26; t++) {
+        for (t = 20; t < 37; t++) {
             if (s_track_lock_table[t] == 0) /* 0 = unlocked in frontend table */
                 s_total_unlocked_tracks = t + 1; /* extend range to include this cup track */
         }
@@ -5380,7 +5409,7 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
                   s_selected_car >= 0 && s_selected_car < 37 &&
                   s_car_lock_table[s_selected_car] != 0);
     track_locked = (!s_cheat_unlock_all && !s_network_active &&
-                    s_selected_track >= 0 && s_selected_track < 26 &&
+                    s_selected_track >= 0 && s_selected_track < 37 &&
                     s_track_lock_table[s_selected_track] != 0);
 
     /* Each selected value renders in the right-hand value column at the same
@@ -6232,6 +6261,39 @@ static void frontend_load_track_markers(void) {
     fclose(f);
 }
 
+/* Same as above for migrated TD6 tracks (trak_markers_td6.dat). Entry i maps to
+ * preview TGA number (TD6_PREVIEW_TGA_BASE + i). Optional: absent file just means
+ * no TD6 start dots, identical to the TD5-only behaviour. */
+static void frontend_load_track_markers_td6(void) {
+    FILE *f;
+    char magic[4];
+    uint32_t count;
+    if (s_track_markers_td6_loaded != 0) return;
+    s_track_markers_td6_loaded = -1;
+    f = fopen("re/assets/tracks/trak_markers_td6.dat", "rb");
+    if (!f) return;
+    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "TMK1", 4) == 0 &&
+        fread(&count, sizeof(count), 1, f) == 1) {
+        int n = (count > TD6_MARKER_MAX) ? TD6_MARKER_MAX : (int)count;
+        int i, ok = 1;
+        for (i = 0; i < n; i++) {
+            float v[4];
+            uint8_t b[4];
+            if (fread(v, sizeof(float), 4, f) != 4 || fread(b, 1, 4, f) != 4) { ok = 0; break; }
+            s_track_markers_td6[i].start_u = v[0];
+            s_track_markers_td6[i].start_v = v[1];
+            s_track_markers_td6[i].end_u   = v[2];
+            s_track_markers_td6[i].end_v   = v[3];
+            s_track_markers_td6[i].circuit = b[0];
+        }
+        if (ok) {
+            s_track_markers_td6_loaded = 1;
+            TD5_LOG_I(LOG_TAG, "loaded %d TD6 track start/finish markers", n);
+        }
+    }
+    fclose(f);
+}
+
 /* Draw one preview marker dot centered at (cx,cy) screen px. kind 0 = START
  * (green), kind 1 = FINISH (black/white 2x2 checker). A black outline keeps it
  * legible over the red track line. */
@@ -6316,11 +6378,23 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
          * end). Markers line up because they were generated with the same
          * projection as the PNG. */
         frontend_load_track_markers();
-        if (s_track_markers_loaded == 1 && s_selected_track >= 0 &&
-            s_selected_track < (int)sizeof(s_track_schedule_to_tga_index)) {
-            int pool = s_track_schedule_to_tga_index[s_selected_track];
+        {
+            /* pool == trak TGA file number. TD5 tracks: 0..19 (s_track_markers).
+             * Migrated TD6 tracks: >= TD6_PREVIEW_TGA_BASE (s_track_markers_td6). */
+            int pool = (s_selected_track >= 0 &&
+                        s_selected_track < (int)(sizeof(s_track_schedule_to_tga_index) /
+                                                 sizeof(s_track_schedule_to_tga_index[0])))
+                       ? s_track_schedule_to_tga_index[s_selected_track] : -1;
+            const TD5_TrackMarker *m = NULL;
             if (pool >= 0 && pool < 20) {
-                const TD5_TrackMarker *m = &s_track_markers[pool];
+                if (s_track_markers_loaded == 1) m = &s_track_markers[pool];
+            } else if (pool >= TD6_PREVIEW_TGA_BASE &&
+                       pool < TD6_PREVIEW_TGA_BASE + TD6_MARKER_MAX) {
+                frontend_load_track_markers_td6();
+                if (s_track_markers_td6_loaded == 1)
+                    m = &s_track_markers_td6[pool - TD6_PREVIEW_TGA_BASE];
+            }
+            if (m) {
                 float bx = 412.0f * sx + img_x_off, by = 135.0f * sy;
                 float pw = 152.0f * sx, ph = 224.0f * sy;
                 /* Forward shows the geometry start; Backwards swaps the roles so
@@ -6350,7 +6424,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
     fe_draw_option_arrows(0, sx, sy);
     if (!s_cheat_unlock_all &&
         s_selected_track >= 0 &&
-        s_selected_track < 26 &&
+        s_selected_track < 31 &&
         s_track_lock_table[s_selected_track] != 0 &&
         !s_network_active) {
         /* [FIXED 2026-06-01] SNK_LockedTxt renders white (orig), not red. */
@@ -9644,7 +9718,7 @@ static void Screen_QuickRaceMenu(void) {
                                   s_selected_car >= 0 && s_selected_car < 37 &&
                                   s_car_lock_table[s_selected_car] != 0);
                 int track_locked = (!s_cheat_unlock_all && !s_network_active &&
-                                    s_selected_track >= 0 && s_selected_track < 26 &&
+                                    s_selected_track >= 0 && s_selected_track < 37 &&
                                     s_track_lock_table[s_selected_track] != 0);
                 if (car_locked || track_locked) {
                     frontend_play_sfx(10); /* rejection */
@@ -12742,7 +12816,7 @@ static void Screen_TrackSelection(void) {
 
             if (s_button_index == 6) { /* OK */
                 /* Lock enforcement */
-                int locked = (s_selected_track >= 0 && s_selected_track < 26 &&
+                int locked = (s_selected_track >= 0 && s_selected_track < 37 &&
                              s_track_lock_table[s_selected_track] != 0 &&
                              !s_network_active && !s_cheat_unlock_all);
                 if (locked) {
@@ -13954,6 +14028,7 @@ static void Screen_CupWon(void) {
             /* Refresh frontend lock tables from save system */
             td5_save_get_car_lock_table(s_car_lock_table, TD5_BASE_CAR_COUNT);
             td5_save_get_track_lock_table(s_track_lock_table, 26);
+            { int td6s; for (td6s = 26; td6s <= 36; td6s++) s_track_lock_table[td6s] = 0; } /* TD6 tracks always available */
             if (td5_save_get_all_cars_unlocked()) {
                 s_total_unlocked_cars = 37;
             } else {
@@ -13963,7 +14038,7 @@ static void Screen_CupWon(void) {
             {
                 int t;
                 s_total_unlocked_tracks = 20;
-                for (t = 20; t < 26; t++) {
+                for (t = 20; t < 37; t++) {
                     if (s_track_lock_table[t] == 0)
                         s_total_unlocked_tracks = t + 1;
                 }

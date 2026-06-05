@@ -197,6 +197,20 @@ void  td5_hud_radial_pulse_set(float value) { s_radial_pulse_progress = value; }
  * 0x0042cc6f -- both wired in the port at td5_game.c. */
 void td5_hud_reset_radial_pulse(void) { s_radial_pulse_progress = 0.0f; }
 
+/* [TD6 SYNTHESIZED CHECKPOINTS] Tick-gated "CHECKPOINT n/N" acknowledgement.
+ * Drawn on the player view while g_tick_counter < s_td6_cp_flash_until. Set by
+ * td5_game.c when the player drives through a synthesized TD6 checkpoint. */
+static uint32_t s_td6_cp_flash_until   = 0;
+static int      s_td6_cp_flash_reached = 0;
+static int      s_td6_cp_flash_total   = 0;
+
+void td5_hud_set_td6_checkpoint_flash(int reached, int total)
+{
+    s_td6_cp_flash_reached = reached;
+    s_td6_cp_flash_total   = total;
+    s_td6_cp_flash_until   = g_tick_counter + 75u;  /* ~2.5 s @ 30 Hz */
+}
+
 /* Screen-center flash counter for HUD */
 static int   s_wrong_way_counter[MAX_HUD_VIEWS]; /* 0x4B0A64 */
 static int   s_prev_span_pos[MAX_HUD_VIEWS];     /* 0x4B1120 */
@@ -228,12 +242,17 @@ static float s_minimap_dot_atlas_u;        /* scandots atlas_x + 0.5 */
 static float s_minimap_dot_atlas_v;        /* scandots atlas_y + 0.5 */
 static float s_minimap_dot_atlas_vstride;  /* row stride in pixels (7.0f) */
 
-/* Minimap route segment tables */
+/* Minimap route segment tables. Original is [64] (TD5 tracks stay under it), but
+ * migrated TD6 tracks have many more junctions (London: 56 primary + ~28 branch
+ * rows = ~85), which overflowed [64] and corrupted the adjacent branch_start/
+ * primary_end statics (garbage 146M) -> incoherent/invisible minimap. Enlarged +
+ * bounds-checked below. */
+#define MINIMAP_SEG_MAX 256
 static int   s_minimap_seg_primary_end;  /* 0x4B0A58 */
 static int   s_minimap_seg_branch_start; /* 0x4B0A5C */
-static int16_t s_minimap_seg_start[64];  /* 0x4B0A70 */
-static int16_t s_minimap_seg_end[64];    /* 0x4B0A72 */
-static int16_t s_minimap_seg_branch[64]; /* 0x4B0A74 */
+static int16_t s_minimap_seg_start[MINIMAP_SEG_MAX];  /* 0x4B0A70 */
+static int16_t s_minimap_seg_end[MINIMAP_SEG_MAX];    /* 0x4B0A72 */
+static int16_t s_minimap_seg_branch[MINIMAP_SEG_MAX]; /* 0x4B0A74 */
 
 /* --- Text rendering state --- */
 static TD5_GlyphRecord *s_glyph_table;  /* 0x4A2CB8: heap, 64 entries + tex ptr */
@@ -2422,6 +2441,17 @@ void td5_hud_render_overlays(float dt)
 
         uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
 
+        /* [TD6 SYNTHESIZED CHECKPOINTS] Centered "CHECKPOINT n/N" ack on the
+         * player view for ~2.5 s after a drive-through (set by td5_game.c). */
+        if (actor_slot == 0 && g_tick_counter < s_td6_cp_flash_until) {
+            td5_hud_queue_text(0,
+                (int)((vl->vp_int_left + vl->vp_int_right) * 0.5f),
+                (int)(vl->vp_int_top + 56.0f),
+                1,
+                "CHECKPOINT %d/%d",
+                s_td6_cp_flash_reached, s_td6_cp_flash_total);
+        }
+
         /* --- Bit 0: Race position label --- */
         if (flags & TD5_HUD_POSITION_LABEL) {
             uint8_t pos = actor_race_position(actor_slot);
@@ -3570,7 +3600,7 @@ void td5_hud_render_minimap(int actor_slot)
             if (skip_aabb == 0 && seg_rendered == 0) {
                 static int s_aabb_log_ctr = 0;
                 if ((s_aabb_log_ctr++ % 60) == 0) {
-                    TD5_LOG_W(LOG_TAG, "minimap AABB cull i=%d near=%d: fl=(%.0f,%.0f) fr=(%.0f,%.0f) bl=(%.0f,%.0f) br=(%.0f,%.0f) rect=(%.0f,%.0f)-(%.0f,%.0f) off=(%.0f,%.0f) ox_n=%d oz_n=%d",
+                    TD5_LOG_W("track", "minimap AABB cull i=%d near=%d: fl=(%.0f,%.0f) fr=(%.0f,%.0f) bl=(%.0f,%.0f) br=(%.0f,%.0f) rect=(%.0f,%.0f)-(%.0f,%.0f) off=(%.0f,%.0f) ox_n=%d oz_n=%d",
                               i, near_idx,
                               fl_x, fl_y, fr_x, fr_y, bl_x, bl_y, br_x, br_y,
                               s_minimap_x, s_minimap_y, mm_r, mm_b,
@@ -3762,7 +3792,7 @@ void td5_hud_render_minimap(int actor_slot)
     {
         static int s_mm_log_counter = 0;
         if ((s_mm_log_counter++ % 60) == 0) {
-            TD5_LOG_I(LOG_TAG, "minimap: span=%d remap=%d start=%d last_a4=%d cur_seg=%d(start=%d end=%d link=%d) primary=%d branch=%d skip_bounds=%d skip_vtx=%d skip_aabb=%d primaries=%d branches=%d total=%d",
+            TD5_LOG_I("track", "minimap: span=%d remap=%d start=%d last_a4=%d cur_seg=%d(start=%d end=%d link=%d) primary=%d branch=%d skip_bounds=%d skip_vtx=%d skip_aabb=%d primaries=%d branches=%d total=%d",
                       (int)player_span, remapped_span, start_span, local_a4,
                       cur_seg,
                       (cur_seg < s_minimap_seg_branch_start ? (int)s_minimap_seg_start[cur_seg] : -1),
@@ -4153,6 +4183,10 @@ void td5_hud_init_minimap_layout(void)
         uint8_t *span_base = (uint8_t *)g_strip_span_base;
 
         for (int s = 0; s < g_strip_total_segments; s++) {
+            /* Leave room for the final-segment write + the appended branch rows
+             * (defensive; only triggers on tracks with > ~MINIMAP_SEG_MAX/2
+             * junctions, far beyond any current TD6 track). */
+            if (seg_count >= MINIMAP_SEG_MAX / 2 - 1) break;
             /* Test the CURRENT span's type. Original tests span N at counter N:
              * g_trackStripRecords[N*0x18] [CONFIRMED @ 0x43b6c1]. The prior
              * (s+1)*24 indexing made every segment END land one span short
@@ -4204,6 +4238,7 @@ void td5_hud_init_minimap_layout(void)
      * The primary row K's seg_end is NOT overwritten. */
     int branch_write = s_minimap_seg_primary_end;
     for (int i = 0; i < s_minimap_seg_primary_end; i++) {
+        if (branch_write >= MINIMAP_SEG_MAX) break;   /* never overflow the table */
         if (s_minimap_seg_branch[i] != (int16_t)-1) {
             int16_t br    = s_minimap_seg_branch[i];
             int16_t plen  = s_minimap_seg_end[i] - s_minimap_seg_start[i];
