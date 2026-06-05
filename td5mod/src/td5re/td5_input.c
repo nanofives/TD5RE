@@ -1188,6 +1188,11 @@ void td5_input_update_player_control(int slot)
                 }
             }
 
+            /* (Race-end auto-brake for the finished human player is applied in
+             * td5_game.c RunRaceFrame, between td5_ai_tick and td5_physics_tick —
+             * NOT here. The per-slot input update stops the moment a slot
+             * finishes, so an input-layer lockout would never run post-finish. */
+
             /* 0x30C: steering_command (int32).
              *
              * Skip for slot 0 under PlayerIsAI=1. The AI cascade in

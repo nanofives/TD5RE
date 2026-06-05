@@ -7307,21 +7307,47 @@ void td5_render_radial_pulse(float dt)
      * letting the WARM finish-line scene bleed ~28% through the white star and
      * leaving a faint residual warm tint. [RE: RenderHudRadialPulseOverlay
      * @0x00439E60 — orig petals are OPAQUE (alpha 0xFF), so the original never
-     * bleeds the scene.] Ramp the alpha faster (1.6) so the star reaches full
-     * opacity (255) by phase ~160 (mid-hold): the prominent second half is then
-     * fully OPAQUE neutral white, the first half still fades in, and the result
-     * is closer to the original opaque petals. Tunable: 0.31875 = orig-faint,
-     * 0.55 = old (translucent fade-in), 1.6 = opaque-by-mid-hold (neutral). */
-    int alpha = (int)(phase * 1.6f);
-    if (alpha < 0)        alpha = 0;
-    else if (alpha > 255) alpha = 255;
+     * bleeds the scene.]
+     *
+     * [S26 2026-06-05 FINAL — user wants a SUBTLE star: "appear just like now at
+     * the beginning, then as it's rotating it gets just a little bit more opaque
+     * (like 20%) and just that".] So this is a deliberate, documented deviation
+     * from the original's opaque petals: the star stays TRANSLUCENT the whole
+     * time. It fades in faint (same early look as the prior ramp) and rises
+     * GENTLY to a low ~20% peak (alpha ~51 = 0.20*255) by the end of the ~2.5s
+     * victory hold, then holds there — never approaching the full-white-out the
+     * user rejected, and with NO fade-out at the end (also rejected).
+     *   alpha = phase * 0.16  (reaches ~51 at phase ~315 = end of hold)
+     *   capped at 51 so it never exceeds ~20% opacity.
+     * Tunable: STAR_ALPHA_SLOPE sets how quickly it intensifies; STAR_ALPHA_MAX
+     * sets the peak opacity (51 = 20%, 64 = 25%, 255 = fully opaque). */
+    const float STAR_ALPHA_SLOPE = 0.16f;   /* opacity gained per phase unit */
+    const int   STAR_ALPHA_MAX   = 51;      /* peak alpha (~20% of 255) */
+    int alpha = (int)(phase * STAR_ALPHA_SLOPE);
+    if (alpha < 0)                 alpha = 0;
+    else if (alpha > STAR_ALPHA_MAX) alpha = STAR_ALPHA_MAX;
 
-    /* Per-frame radius. viewport_width * phase * (1/640).
-     * [CONFIRMED @ 0x439e60 RenderHudRadialPulseOverlay: _DAT_0045d64c =
-     *  0.0015625f = 1/640]. The port previously used 0.00625f (1/160) — 4x
-     *  too large, which ballooned the star across the screen ~4x too fast
-     *  (user 2026-05-30 "animation too fast"). Restored to the faithful 1/640. */
-    float radius = (float)s_viewport_width * phase * 0.0015625f;
+    /* Per-frame radius. viewport_width * phase * coeff.
+     * Orig coeff [CONFIRMED @ 0x439e60 RenderHudRadialPulseOverlay: _DAT_0045d64c
+     *  = 0.0015625f = 1/640]. A prior port bug used 0.00625f (1/160) — 4x too
+     *  large, ballooning the star ~4x too fast (user 2026-05-30 "animation too
+     *  fast") — which was restored to the faithful 1/640.
+     *
+     * [S26 2026-06-05 — "make the star bigger ... covers more of the screen"]
+     *  Measured end radius/viewport_width = 0.752 at 1/640; enlarge the linear
+     *  coefficient to 0.0024f (= 1/417, ~1.54x the faithful value) so the star
+     *  grows clearly larger while the growth stays LINEAR in phase (smooth, no
+     *  jump). Deliberate, documented deviation from the faithful 1/640 per user
+     *  request. Tunable: 0.0015625 = faithful, 0.0024 = enlarged (current).
+     *
+     * [S26 2026-06-05 FINAL — "the star stops growing at some point, otherwise it
+     *  looks fine"] A radius CAP was briefly added to stop a full white-out, but
+     *  the white-out came from the opacity (since dialed down to a translucent
+     *  ~20% peak above), not the size. At ~20% opacity a large star just lets the
+     *  scene show through, so the cap is unnecessary AND the user saw the growth
+     *  visibly stop when it clamped. Cap removed: the radius now grows linearly
+     *  with phase for the whole animation, never stalling. */
+    float radius = (float)s_viewport_width * phase * 0.0024f;
 
     /* 10 ring vertices: even k = inner (radius*0.5), odd k = outer (radius).
      * Inner angle steps by -0x33332 (~72°) per pair; outer angle is inner - 0x19999. */
