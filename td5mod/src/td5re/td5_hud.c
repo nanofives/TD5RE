@@ -1065,8 +1065,13 @@ void td5_hud_draw_pause_overlay(void)
      * PAUSE_TTF_BASELINE (px from the row top down to the baseline). Falls through
      * to the SDF/bitmap path below when no TTF is loaded. */
     if (s_pause_vui_line_count > 0 && td5_font_ready()) {
-        const float PAUSE_TTF_CAP      = 11.0f;
-        const float PAUSE_TTF_BASELINE = 13.0f;
+        /* Vertical: the SELBOX highlight for cursor row c spans [base_y+c*16,
+         * +16] while that row's text line sits at L->y = base_y-3+c*16, so the
+         * selbox CENTRE is at L->y + 11. Put the cap centre there:
+         *   cap_centre = baseline - CAP/2 = L->y + BASELINE - CAP/2 == L->y + 11
+         *   => BASELINE = 11 + CAP/2  (= 17 for CAP 12). */
+        const float PAUSE_TTF_CAP      = 12.0f;
+        const float PAUSE_TTF_BASELINE = 17.0f;   /* 11 + CAP/2; centres caps on the selbox */
         const float PAUSE_TTF_TRACK    = 0.0f;
         float cx = g_render_width_f  * 0.5f;
         float cy = g_render_height_f * 0.5f;
@@ -1095,9 +1100,17 @@ void td5_hud_draw_pause_overlay(void)
             float curx     = cx + start_x;
             for (int c = 0; s[c]; c++) {
                 td5_glyph g; td5_font_get((unsigned char)s[c], PAUSE_TTF_CAP, &g);
-                if (g.valid && g.w > 0.0f)
-                    td5_vui_quad(curx + g.xoff, baseline + g.yoff, g.w, g.h,
+                if (g.valid && g.w > 0.0f) {
+                    /* Snap the glyph quad to the pixel grid. The pause panel is
+                     * fixed-pixel-size, so glyphs are rasterised small (~12px); at
+                     * that size, fractional positions + linear sampling read soft.
+                     * Integer-aligning the top-left (w/h are already integer raster
+                     * dims) makes texels map 1:1 to pixels => crisp edges. */
+                    float gx = (float)(int)(curx + g.xoff + 0.5f);
+                    float gy = (float)(int)(baseline + g.yoff + 0.5f);
+                    td5_vui_quad(gx, gy, g.w, g.h,
                                  0xFFFFFFFFu, g.page, g.u0, g.v0, g.u1, g.v1);
+                }
                 curx += g.advance + PAUSE_TTF_TRACK;
             }
         }
