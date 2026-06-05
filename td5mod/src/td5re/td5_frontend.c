@@ -842,6 +842,8 @@ static int frontend_load_tga_colorkey(const char *name, const char *archive,
 static int frontend_load_surface_keyed(const char *name, const char *archive, TD5_ColorKeyMode colorkey);
 static int frontend_track_level_exists(int track_index);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
+static int  frontend_track_is_circuit(int track_slot);
+static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static uint8_t s_font_glyph_advance[96];
 static const uint8_t k_font_glyph_advance_default[96] = {
     8,  9, 10, 14, 14, 24, 21,  9,  8,  9, 10, 14,
@@ -5651,9 +5653,12 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     snprintf(count, sizeof(count), "%d", s_num_ai_opponents);
     frontend_draw_qr_value(sx, sy, QR_BTN_OPPONENTS, count, 0xFFFFFFFF);
     /* [S02 (c) 2026-06-04] Circuit laps value (displayed as laps+1, matching the
-     * Game Options + Track Selection convention). */
-    snprintf(count, sizeof(count), "%d", s_game_option_laps + 1);
-    frontend_draw_qr_value(sx, sy, QR_BTN_LAPS, count, 0xFFFFFFFF);
+     * Game Options + Track Selection convention). Hidden on point-to-point tracks
+     * (frontend_update_laps_button_visibility) — no laps there. */
+    if (!s_buttons[QR_BTN_LAPS].hidden) {
+        snprintf(count, sizeof(count), "%d", s_game_option_laps + 1);
+        frontend_draw_qr_value(sx, sy, QR_BTN_LAPS, count, 0xFFFFFFFF);
+    }
 }
 
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
@@ -6522,7 +6527,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         float vx = 350.0f * sx;
         if (s_buttons[2].active) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
             fe_draw_text(vx, (float)(s_buttons[2].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
-        if (s_buttons[3].active) { snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
+        if (s_buttons[3].active && !s_buttons[3].hidden) { snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
             fe_draw_text(vx, (float)(s_buttons[3].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
         if (s_buttons[4].active)
             fe_draw_text(vx, (float)(s_buttons[4].y + 6) * sy, on_off[s_game_option_traffic & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
@@ -9867,6 +9872,8 @@ static void Screen_QuickRaceMenu(void) {
          * manage_label=0). Clamp the player/opponent counts. */
         s_track_direction = 0;
         frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
+        /* Hide the Laps row on point-to-point tracks (no laps); show on circuits. */
+        frontend_update_laps_button_visibility(QR_BTN_LAPS);
         frontend_quickrace_clamp_counts();
 
         s_anim_tick = 0;
@@ -9904,8 +9911,9 @@ static void Screen_QuickRaceMenu(void) {
             if (selected_button == QR_BTN_TRACK && delta != 0) {
                 /* Cycle track, skipping Drag Strip (index 19) + absent levels. */
                 frontend_quickrace_cycle_track(delta);
-                /* Re-evaluate the Direction toggle for the newly selected track. */
+                /* Re-evaluate the Direction toggle + Laps row for the new track. */
                 frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
+                frontend_update_laps_button_visibility(QR_BTN_LAPS);
                 TD5_LOG_I(LOG_TAG, "QuickRace track cycle: s_selected_track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
                           frontend_get_track_name(s_selected_track));
@@ -9941,7 +9949,8 @@ static void Screen_QuickRaceMenu(void) {
              * Stored 0..9, displayed value+1 (so 1..10 laps); race setup reads
              * g_td5.circuit_lap_count = s_game_option_laps + 1. Matches the Track
              * Selection laps row's range. */
-            if (selected_button == QR_BTN_LAPS && delta != 0) {
+            if (selected_button == QR_BTN_LAPS && !s_buttons[QR_BTN_LAPS].hidden &&
+                delta != 0) {
                 s_game_option_laps += delta;
                 if (s_game_option_laps < 0) s_game_option_laps = 0;
                 if (s_game_option_laps > 9) s_game_option_laps = 9;
@@ -12886,11 +12895,54 @@ static void Screen_CarSelection(void) {
  * Selection) makes the button LABEL itself the value ("Forwards"/"Backwards"),
  * so it gets reset to "Forwards" when hidden. manage_label=0 (Quick Race) keeps
  * a static caption and draws the value separately, so the label is left alone. */
+/* Is the menu-selected track a CIRCUIT (laps meaningful) or point-to-point (no
+ * laps)? Determined WITHOUT loading the race — LEVELINF.DAT isn't read until race
+ * init — so:
+ *   - TD6 tracks: the registry is authoritative (finish_span>0 = P2P, ==0 =
+ *     circuit), matching the same source the in-race lap counter now uses.
+ *   - Native TD5 tracks: circuit tracks ship NO reverse strip (forward-only) and
+ *     P2P tracks DO, so reverse-data presence is an exact proxy (consistent with
+ *     the Direction-toggle model and the per-track shipped data).
+ * Random / 2P "?" (slot<0) defaults to circuit so the Laps row stays available. */
+static int frontend_track_is_circuit(int track_slot) {
+    if (track_slot < 0) return 1;
+    int td6_level = td5_asset_td6_level_for_slot(track_slot);
+    if (td6_level > 0)
+        return td5_asset_td6_finish_span_for_level(td6_level) > 0 ? 0 : 1;
+    return td5_asset_track_has_reverse(track_slot) ? 0 : 1;
+}
+
+/* Hide/show the "Laps" selector for the currently selected track. Point-to-point
+ * tracks have no laps, so the row is hidden+disabled — the vertical nav, the
+ * selector arrows (fe_draw_option_arrows) and the value draw all skip a hidden
+ * button, exactly like the Direction toggle. Circuit tracks keep the row. Called
+ * on screen entry and whenever the selected track changes. The persisted lap
+ * value (s_game_option_laps) is untouched and is simply ignored by P2P races
+ * (which finish at the finish line, not after N laps). */
+static void frontend_update_laps_button_visibility(int laps_btn_idx) {
+    if (laps_btn_idx < 0 || laps_btn_idx >= s_button_count) return;
+    int is_circuit = frontend_track_is_circuit(s_selected_track);
+    s_buttons[laps_btn_idx].hidden   = !is_circuit;
+    s_buttons[laps_btn_idx].disabled = !is_circuit;
+    TD5_LOG_I(LOG_TAG, "Laps row: track=%d circuit=%d -> %s",
+              s_selected_track, is_circuit, is_circuit ? "SHOWN" : "hidden");
+    /* Don't leave the highlight parked on a now-hidden row. */
+    if (!is_circuit && s_selected_button == laps_btn_idx) s_selected_button = 0;
+}
+
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label) {
     if (dir_btn_idx < 0 || dir_btn_idx >= s_button_count) return;
     int has_reverse = (s_selected_track < 0)
                       ? 1
                       : td5_asset_track_has_reverse(s_selected_track);
+    /* Diagnostic: per-track Direction-toggle decision. has_reverse is driven by
+     * reverse-asset presence (STRIPB.DAT + LEFTB/RIGHTB.TRK) — TD6 tracks and TD5
+     * P2P show the toggle; TD5 circuit tracks (no STRIPB) hide it. */
+    TD5_LOG_I(LOG_TAG,
+              "Direction toggle: track=%d level=%d has_reverse=%d -> %s",
+              s_selected_track,
+              (s_selected_track >= 0) ? td5_asset_level_number(s_selected_track) : -1,
+              has_reverse, has_reverse ? "SHOWN" : "hidden");
     s_buttons[dir_btn_idx].hidden   = !has_reverse;
     s_buttons[dir_btn_idx].disabled = !has_reverse;
     if (!has_reverse) {
@@ -12957,6 +13009,8 @@ static void Screen_TrackSelection(void) {
         /* Hide the Direction toggle for forward-only/circuit tracks from the
          * very first frame (cases 1-3 render before case 5 reloads). */
         frontend_update_direction_button_visibility(1, 1);
+        /* Hide the Laps row (button 3) on point-to-point tracks (no laps). */
+        frontend_update_laps_button_visibility(3);
         frontend_begin_timed_animation();
         s_inner_state = 1;
         break;
@@ -13007,9 +13061,10 @@ static void Screen_TrackSelection(void) {
                  * (old preview still loaded, new s_selected_track already set).
                  * Case 5 loads new preview next frame; case 9 runs the 16-frame slide-in. */
                 s_track_switch_tick = 0;
-                /* Re-evaluate the Direction toggle for the newly selected track
+                /* Re-evaluate the Direction toggle + Laps row for the new track
                  * (hide on forward-only/circuit tracks, restore on reverse-capable). */
                 frontend_update_direction_button_visibility(1, 1);
+                frontend_update_laps_button_visibility(3);
                 s_inner_state = 5;
             }
 
@@ -13035,7 +13090,7 @@ static void Screen_TrackSelection(void) {
                     if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
                     if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
                         s_num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
-                } else if (selected_button == 3) {     /* laps (shown as value+1) */
+                } else if (selected_button == 3 && !s_buttons[3].hidden) {  /* laps (value+1) */
                     s_game_option_laps += delta;
                     if (s_game_option_laps < 0) s_game_option_laps = 0;
                     if (s_game_option_laps > 9) s_game_option_laps = 9;

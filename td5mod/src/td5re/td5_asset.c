@@ -2155,15 +2155,30 @@ static void td5_asset_build_level_loose_path(int track_index,
 int td5_asset_track_has_reverse(int track_index)
 {
     char rev_path[256];
-    /* Migrated TD6 tracks ship a STRIPB.DAT, but reverse direction is not yet
-     * validated across the TD6 roster. Report no reverse so the frontend hides
-     * the Forwards/Backwards toggle (and the loader won't honour a reverse
-     * request). Remove this gate once TD6 reverse is confirmed on all tracks. */
-    if (td5_asset_td6_level_for_slot(track_index) > 0)
-        return 0;
-    td5_asset_build_level_loose_path(track_index, "STRIPB.DAT",
-                                     rev_path, sizeof(rev_path));
-    return td5_plat_file_exists(rev_path) ? 1 : 0;
+    /* Reverse direction is available when the track ships a COMPLETE reverse
+     * data set: STRIPB.DAT (reverse geometry) PLUS LEFTB.TRK/RIGHTB.TRK (the
+     * reverse AI corridor — required for the spawn yaw and AI steering line in
+     * reverse). This per-track DATA check replaces the old "every TD6 track is
+     * forward-only" blanket gate: migrated TD6 tracks that ship STRIPB.DAT and
+     * (re)generated reverse routes are now reverse-capable, while TD5 circuit
+     * tracks (no STRIPB.DAT) and any TD6 track lacking reverse routes stay
+     * forward-only. This mirrors the original's per-track "reverse offered" data
+     * byte (gNpcRacerCheatFlags @0x4a2c9c, indexed by schedule slot) but is
+     * driven by reverse-asset presence — which the port has, unlike the original's
+     * unlock-progression model.
+     *
+     * Loose-path EXACT check (no level_num+1 probing — unlike
+     * load_first_available_level_entry's try_extracted_level_file_* helpers) so a
+     * forward-only track can't false-match a neighbour level's reverse files
+     * (e.g. Newcastle level029 -> level030 Drag Strip). */
+    static const char *const need[3] = { "STRIPB.DAT", "LEFTB.TRK", "RIGHTB.TRK" };
+    for (int i = 0; i < 3; i++) {
+        td5_asset_build_level_loose_path(track_index, need[i],
+                                         rev_path, sizeof(rev_path));
+        if (!td5_plat_file_exists(rev_path))
+            return 0;
+    }
+    return 1;
 }
 
 static void *load_first_available_level_entry(int track_index,
@@ -2349,6 +2364,34 @@ int td5_asset_load_level(int track_index)
             g_td5.track_type = TD5_TRACK_CIRCUIT;
             free(levelinf_data);
             levelinf_data = NULL;
+        }
+
+        /* [TD6 AUTHORITATIVE TRACK TYPE] For migrated TD6 tracks, derive circuit
+         * vs point-to-point from the port's single source of truth
+         * (k_td6_menu_slots: finish_span>0 = point-to-point, finish_span==0 =
+         * circuit) rather than trusting the synthesized LEVELINF.DAT DWORD[0].
+         * This guarantees P2P TD6 city tracks NEVER show the lap counter (the HUD
+         * gates TD5_HUD_CIRCUIT_LAPS on g_track_is_circuit, set from track_type)
+         * and circuit TD6 tracks always do, independent of whether the gitignored
+         * level assets were regenerated with the right circuit flag. Faithful TD5
+         * tracks (g_active_td6_level==0, set in td5_asset_level_number above) are
+         * untouched and keep their LEVELINF value byte-faithfully. */
+        if (g_active_td6_level > 0) {
+            int td6_finish = td5_asset_td6_finish_span_for_level(g_active_td6_level);
+            int prev = g_td5.track_type;
+            g_td5.track_type = (td6_finish > 0) ? TD5_TRACK_POINT_TO_POINT
+                                                : TD5_TRACK_CIRCUIT;
+            if (g_td5.track_type != prev) {
+                TD5_LOG_W(LOG_TAG,
+                          "TD6 track_type override: level=%d finish_span=%d -> %s (LEVELINF said %s)",
+                          g_active_td6_level, td6_finish,
+                          g_td5.track_type == TD5_TRACK_CIRCUIT ? "CIRCUIT" : "P2P",
+                          prev == TD5_TRACK_CIRCUIT ? "CIRCUIT" : "P2P");
+            } else {
+                TD5_LOG_I(LOG_TAG, "TD6 track_type confirmed: level=%d -> %s",
+                          g_active_td6_level,
+                          g_td5.track_type == TD5_TRACK_CIRCUIT ? "CIRCUIT" : "P2P");
+            }
         }
     }
     {
