@@ -367,7 +367,11 @@ typedef enum TD5_ScreenIndex {
     TD5_SCREEN_SESSION_LOCKED      = 29,
     /* [PORT ENHANCEMENT 2026-06] local-multiplayer press-to-join lobby. */
     TD5_SCREEN_MP_LOBBY            = 30,
-    TD5_SCREEN_COUNT               = 31
+    /* [S10 net-play UX 2026-06-04] online connection screens. */
+    TD5_SCREEN_LAN_MENU           = 31,  /* LAN GAME: host / discover */
+    TD5_SCREEN_DIRECT_CONNECT     = 32,  /* DIRECT IP: host / join (IP entry) */
+    TD5_SCREEN_NET_NICKNAME       = 33,  /* nickname entry (first net-play visit) */
+    TD5_SCREEN_COUNT               = 34
 } TD5_ScreenIndex;
 
 /* ========================================================================

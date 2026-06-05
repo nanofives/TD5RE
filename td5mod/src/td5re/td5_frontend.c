@@ -86,6 +86,9 @@ static void Screen_CupWon(void);                     /* [27] 0x423A80 */
 static void Screen_StartupInit(void);                /* [28] 0x415370 */
 static void Screen_SessionLocked(void);              /* [29] 0x41D630 */
 static void Screen_MultiplayerLobby(void);           /* [30] PORT ENHANCEMENT 2026-06 */
+static void Screen_LanMenu(void);                    /* [31] S10 net-play UX */
+static void Screen_DirectConnect(void);              /* [32] S10 net-play UX */
+static void Screen_NetNickname(void);                /* [33] S10 net-play UX */
 
 /* ========================================================================
  * Screen function pointer type and dispatch table
@@ -129,6 +132,9 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [28] */ Screen_StartupInit,
     /* [29] */ Screen_SessionLocked,
     /* [30] */ Screen_MultiplayerLobby,   /* PORT ENHANCEMENT 2026-06 */
+    /* [31] */ Screen_LanMenu,            /* S10 net-play UX */
+    /* [32] */ Screen_DirectConnect,      /* S10 net-play UX */
+    /* [33] */ Screen_NetNickname,        /* S10 net-play UX */
 };
 
 /* ========================================================================
@@ -243,6 +249,7 @@ static int  s_mp_missing_content[2] = { 0, 0 };
 static int  s_mp_btn_players   = -1;
 static int  s_mp_btn_layout    = -1;
 static int  s_mp_btn_missing[2] = { -1, -1 };
+static int  s_mp_btn_nickname  = -1;    /* S10: edit net-play nickname (below split rows) */
 static int  s_mp_btn_ok        = -1;
 static int  s_mp_missing_count = 0;
 static int  s_mp_layout_optcount = 1;
@@ -367,9 +374,8 @@ static int  s_cheat_unlock_all;         /* DAT_00496298 */
 /* Network state */
 static int  s_network_active;           /* g_networkSessionActive / DAT_004962bc */
 /* --- S10 net-play: explicit connection modes (LAN / Direct-IP) --- */
-static int  s_net_mode_sel;             /* mode-select cursor: 0=LAN, 1=DIRECT */
-static int  s_net_direct_submode;       /* DIRECT sub-flow: 0=choose, 1=host, 2=join */
 static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direct join) */
+static int  s_nickname_from_mpopts;     /* nickname screen entered from Multiplayer Options */
 static int  s_net_join_pending_ui;      /* awaiting JOIN_ACK before entering lobby */
 static uint32_t s_net_join_wait_start;  /* tick when the join wait began (timeout) */
 static int  s_net_session_sel;          /* SESSION_PICKER cursor: 0=host, 1..N=join */
@@ -3323,8 +3329,21 @@ static void frontend_render_cup_failed_overlay(float sx, float sy);
 static void frontend_render_cup_won_overlay(float sx, float sy);
 static void frontend_render_session_locked_overlay(float sx, float sy);
 
+/* S10: optional prompt shown in the text-input widget (empty -> "ENTER PLAYER
+ * NAME"). Set AFTER frontend_begin_text_input (which resets it to default). */
+static char s_text_input_prompt[40] = "";
+static void frontend_set_text_input_prompt(const char *p) {
+    if (p && p[0]) {
+        strncpy(s_text_input_prompt, p, sizeof(s_text_input_prompt) - 1);
+        s_text_input_prompt[sizeof(s_text_input_prompt) - 1] = '\0';
+    } else {
+        s_text_input_prompt[0] = '\0';
+    }
+}
+
 static void frontend_begin_text_input(char *buffer, int capacity) {
     memset(&s_text_input_ctx, 0, sizeof(s_text_input_ctx));
+    s_text_input_prompt[0] = '\0';   /* default prompt unless the screen sets one */
     if (!buffer || capacity <= 1) { s_text_input_state = 0; return; }
     buffer[capacity - 1] = '\0';
     s_text_input_ctx.buffer = buffer;
@@ -3460,9 +3479,10 @@ static void frontend_render_text_input(void) {
     fe_draw_button_9slice(bx, by, bw, bh, 0 /*focused*/, sx, sy);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
-    /* Prompt "ENTER PLAYER NAME" centered near the top of the button. */
+    /* Prompt centered near the top of the button (screen-overridable). */
     fe_draw_text_centered(bx + bw * 0.5f, by + 8.0f * sy,
-                          "ENTER PLAYER NAME", 0xFFFFFFFF, sx, sy);
+                          s_text_input_prompt[0] ? s_text_input_prompt : "ENTER PLAYER NAME",
+                          0xFFFFFFFF, sx, sy);
 
     /* Typed name in the SMALL font, left-aligned at button-local x=0x14=20 [CONFIRMED
      * @0x41A530: DrawFrontendClippedStringToSurface(name,0x14,iVar3+0xc,surf) draws into the
@@ -5463,6 +5483,13 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
         if (v < 0 || v >= MP_MISSING_CONTENT_COUNT) v = 0;
         frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_missing[k]].y + 6,
                                      k_mp_missing_content[v], 0xFFFFFFFF);
+    }
+
+    /* S10: NICKNAME row shows the current net-play nickname as its value. */
+    if (s_mp_btn_nickname >= 0 && s_buttons[s_mp_btn_nickname].active) {
+        const char *nick = g_td5.ini.net_nickname[0] ? g_td5.ini.net_nickname : "Player";
+        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_nickname].y + 6,
+                                     nick, 0xFFFFFFFF);
     }
 }
 
@@ -7584,6 +7611,17 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_EXTRAS_GALLERY:
         frontend_render_extras_gallery_overlay(sx, sy);
         break;
+    /* S10: text-input widgets must be drawn from the render path so they
+     * composite into the presented frame (the handler-drawn copy is cleared). */
+    case TD5_SCREEN_NET_NICKNAME:
+        frontend_render_text_input();
+        break;
+    case TD5_SCREEN_CREATE_SESSION:
+        if (s_text_input_state != 0) frontend_render_text_input();
+        break;
+    case TD5_SCREEN_DIRECT_CONNECT:
+        if (s_text_input_state != 0) frontend_render_text_input();
+        break;
     case TD5_SCREEN_RACE_RESULTS:
         frontend_render_race_results_overlay(sx, sy);
         break;
@@ -9274,9 +9312,9 @@ static void Screen_QuickRaceMenu(void) {
  * States: ~10
  * ======================================================================== */
 
-/* S10: the local player name presented to the lobby/roster. */
+/* S10: the local player name presented to the lobby/roster (persisted nickname). */
 static const char *frontend_net_player_name(void) {
-    return "Player";
+    return (g_td5.ini.net_nickname[0]) ? g_td5.ini.net_nickname : "Player";
 }
 
 /* S10: split "ip" or "ip:port" into an IP string + port (default game port). */
@@ -9296,33 +9334,33 @@ static void frontend_net_parse_ip_port(const char *in, char *ip_out, int ip_len,
 }
 
 /* ========================================================================
- * [8] Screen_ConnectionBrowser -- S10 ONLINE connection hub
+ * [8] Screen_ConnectionBrowser -- S10 ONLINE connection MODE SELECT
  *
- * Repurposed from the original DirectPlay provider browser into an explicit
- * two-mode selector + Direct-IP host/join sub-flow:
- *   States 0-9   : LAN / DIRECT IP / BACK mode select.
- *   States 20-21 : DIRECT -> HOST / JOIN / BACK chooser.
- *   States 22-23 : DIRECT JOIN -> IP[:port] text entry.
- *   State  24    : DIRECT HOST -> show local IP + UPnP status, then lobby.
- *   State  26    : DIRECT JOIN -> wait for the host's JOIN_ACK, then lobby.
- * LAN host/join continue through SESSION_PICKER (9) / CREATE_SESSION (10).
+ * Two explicit modes: LAN GAME (-> Screen_LanMenu: host / discover) and
+ * DIRECT IP (-> Screen_DirectConnect: host / join by IP). On the first net-play
+ * visit with no saved nickname, routes to the nickname-entry screen first.
  * ======================================================================== */
 static void Screen_ConnectionBrowser(void) {
     switch (s_inner_state) {
     case 0: /* Init: net up + mode-select buttons (LAN / DIRECT / BACK) */
         frontend_init_return_screen(TD5_SCREEN_CONNECTION_BROWSER);
         TD5_LOG_D(LOG_TAG, "ConnectionBrowser: mode select");
-        /* Seed [Network] config from the ini (game port + UPnP toggle + mode). */
+        /* Seed [Network] config from the ini (game port + UPnP toggle). */
         s_net_cfg_game_port   = (g_td5.ini.net_game_port > 0 && g_td5.ini.net_game_port <= 65535)
                                 ? g_td5.ini.net_game_port : 37050;
         s_net_cfg_enable_upnp = g_td5.ini.net_enable_upnp;
-        s_net_mode_sel        = g_td5.ini.net_mode ? 1 : 0;
+
+        /* First net-play visit with no saved nickname -> prompt for one. */
+        if (!g_td5.ini.net_nickname[0]) {
+            td5_frontend_set_screen(TD5_SCREEN_NET_NICKNAME);
+            return;
+        }
+
         frontend_net_enumerate();                 /* idempotent td5_net_init */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("LAN GAME (AUTO-DISCOVER)", 120, 193, 496, 0x30);
-        frontend_create_button("DIRECT IP",                120, 257, 496, 0x30);
-        frontend_create_button(SNK_BackButTxt,             232, 377, 112, 0x20);
-        s_net_direct_submode = 0;
+        frontend_create_button("LAN GAME",  120, 193, 496, 0x30);
+        frontend_create_button("DIRECT IP", 120, 257, 496, 0x30);
+        frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -9352,11 +9390,12 @@ static void Screen_ConnectionBrowser(void) {
         if (s_input_ready) {
             if (s_button_index == 0) {            /* LAN GAME */
                 td5_net_set_mode(TD5_NET_MODE_LAN);
-                s_return_screen = TD5_SCREEN_SESSION_PICKER;
+                s_return_screen = TD5_SCREEN_LAN_MENU;
                 s_inner_state = 8;
             } else if (s_button_index == 1) {     /* DIRECT IP */
                 td5_net_set_mode(TD5_NET_MODE_DIRECT);
-                s_inner_state = 20;
+                s_return_screen = TD5_SCREEN_DIRECT_CONNECT;
+                s_inner_state = 8;
             } else if (s_button_index == 2) {     /* BACK */
                 s_return_screen = TD5_SCREEN_MAIN_MENU;
                 s_inner_state = 8;
@@ -9379,51 +9418,123 @@ static void Screen_ConnectionBrowser(void) {
             td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
+    }
+}
 
-    /* ---- DIRECT IP sub-flow ---- */
-    case 20: /* HOST / JOIN / BACK chooser */
+/* ========================================================================
+ * [33] Screen_NetNickname -- enter the player nickname (first net-play visit;
+ * also reachable from Multiplayer Options). Persisted to td5re.ini [Network].
+ * ======================================================================== */
+static void Screen_NetNickname(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_init_return_screen(TD5_SCREEN_NET_NICKNAME);
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        /* The text-input widget IS the field (gold frame at 120,193); only the
+         * OK button is a real button (index 0). */
+        frontend_create_button(SNK_OkButTxt, 232, 377, 160, 0x20);
+        if (!g_td5.ini.net_nickname[0])
+            snprintf(g_td5.ini.net_nickname, sizeof(g_td5.ini.net_nickname), "Player");
+        frontend_begin_text_input(g_td5.ini.net_nickname, (int)sizeof(g_td5.ini.net_nickname));
+        frontend_set_text_input_prompt("ENTER YOUR NICKNAME");
+        s_inner_state = 1;
+        break;
+
+    case 1:
+        frontend_handle_text_input_key();   /* process keystrokes into the buffer */
+        if (frontend_text_input_confirmed() || (s_input_ready && s_button_index == 0)) {
+            int from_mpopts = s_nickname_from_mpopts;
+            s_nickname_from_mpopts = 0;
+            if (!g_td5.ini.net_nickname[0])
+                snprintf(g_td5.ini.net_nickname, sizeof(g_td5.ini.net_nickname), "Player");
+            td5_ini_write_str("Network", "Nickname", g_td5.ini.net_nickname);
+            TD5_LOG_I(LOG_TAG, "Nickname set: \"%s\"", g_td5.ini.net_nickname);
+            td5_frontend_set_screen(from_mpopts ? TD5_SCREEN_TWO_PLAYER_OPTIONS
+                                                : TD5_SCREEN_CONNECTION_BROWSER);
+        }
+        break;
+    }
+}
+
+/* ========================================================================
+ * [31] Screen_LanMenu -- LAN GAME: host a new game or discover existing ones.
+ * ======================================================================== */
+static void Screen_LanMenu(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_init_return_screen(TD5_SCREEN_LAN_MENU);
+        td5_net_set_mode(TD5_NET_MODE_LAN);
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_create_button("HOST NEW LAN GAME",  120, 193, 496, 0x30);
+        frontend_create_button("DISCOVER LAN GAMES", 120, 257, 496, 0x30);
+        frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
+        s_inner_state = 1;
+        break;
+
+    case 1:
+        frontend_present_buffer();
+        if (s_input_ready) {
+            if (s_button_index == 0)              /* HOST -> name entry + create */
+                td5_frontend_set_screen(TD5_SCREEN_CREATE_SESSION);
+            else if (s_button_index == 1)         /* DISCOVER -> session list */
+                td5_frontend_set_screen(TD5_SCREEN_SESSION_PICKER);
+            else if (s_button_index == 2)         /* BACK */
+                td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
+        }
+        break;
+    }
+}
+
+/* ========================================================================
+ * [32] Screen_DirectConnect -- DIRECT IP: host a game (port + UPnP) or join one
+ * by IP[:port]. Sub-layouts are swapped in place via frontend_reset_buttons()
+ * so button indices never collide (the bug from the old inner-state version).
+ * ======================================================================== */
+static void Screen_DirectConnect(void) {
+    switch (s_inner_state) {
+    case 0: /* HOST / JOIN / BACK chooser */
+        frontend_init_return_screen(TD5_SCREEN_DIRECT_CONNECT);
+        td5_net_set_mode(TD5_NET_MODE_DIRECT);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_create_button("HOST GAME", 120, 193, 496, 0x30);
         frontend_create_button("JOIN GAME", 120, 257, 496, 0x30);
         frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
-        s_inner_state = 21;
+        s_inner_state = 1;
         break;
 
-    case 21:
+    case 1: /* chooser interaction */
         frontend_present_buffer();
         if (s_input_ready) {
             if (s_button_index == 0) {            /* HOST */
                 if (td5_net_create_session_ex("TD5RE Game", frontend_net_player_name(),
                                               6, s_net_cfg_game_port, s_net_cfg_enable_upnp)) {
                     s_network_active = 1;
-                    s_inner_state = 24;           /* show host status */
+                    s_inner_state = 4;            /* show host status */
                 } else {
                     TD5_LOG_W(LOG_TAG, "Direct host create failed");
                     td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
                 }
             } else if (s_button_index == 1) {     /* JOIN */
                 snprintf(s_net_direct_ip, sizeof(s_net_direct_ip), "127.0.0.1");
-                s_inner_state = 22;
-            } else if (s_button_index == 2) {     /* BACK -> mode select */
+                s_inner_state = 2;
+            } else if (s_button_index == 2) {     /* BACK */
                 td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
             }
         }
         break;
 
-    case 22: /* JOIN: IP[:port] text entry */
+    case 2: /* JOIN: build IP-entry layout (fresh buttons) */
+        frontend_reset_buttons();
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("ENTER HOST IP[:PORT]", 120, 193, 448, 0x40);
+        /* The text-input widget IS the field; only BACK is a real button (index 0). */
         frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
         frontend_begin_text_input(s_net_direct_ip, (int)sizeof(s_net_direct_ip));
-        s_inner_state = 23;
+        frontend_set_text_input_prompt("ENTER HOST IP[:PORT]");
+        s_inner_state = 3;
         break;
 
-    case 23:
-        frontend_render_text_input();
-        if (s_input_ready && s_button_index == 1) {    /* BACK */
-            s_inner_state = 20;
-            break;
-        }
+    case 3: /* JOIN: IP entry interaction */
+        frontend_handle_text_input_key();   /* process keystrokes into the buffer */
         if (frontend_text_input_confirmed()) {
             char ip[64];
             int port = s_net_cfg_game_port;
@@ -9432,44 +9543,47 @@ static void Screen_ConnectionBrowser(void) {
                 s_network_active = 1;
                 s_net_join_pending_ui = 1;
                 s_net_join_wait_start = td5_plat_time_ms();
-                s_inner_state = 26;
+                s_inner_state = 5;                /* wait for JOIN_ACK */
             } else {
                 TD5_LOG_W(LOG_TAG, "Direct join '%s' failed", s_net_direct_ip);
-                s_inner_state = 20;
+                td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
             }
+            break;
+        }
+        if (s_input_ready && s_button_index == 0) {   /* BACK -> chooser */
+            td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
         }
         break;
 
-    case 24: /* HOST: show local IP + UPnP status, then enter lobby */
+    case 4: /* HOST: show local IP + UPnP status (fresh buttons) */
+        frontend_reset_buttons();
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button(td5_net_get_status_text(), 120, 193, 496, 0x40);
+        frontend_create_button(td5_net_get_status_text(), 80, 193, 480, 0x40);
         frontend_create_button("CONTINUE", 232, 377, 160, 0x20);
-        s_inner_state = 25;
+        s_inner_state = 6;
         break;
 
-    case 25:
+    case 6: /* HOST status interaction -> lobby */
         frontend_present_buffer();
         if (s_input_ready) {
             s_network_active = 1;
-            s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
-            s_inner_state = 8;
+            td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
         }
         break;
 
-    case 26: /* JOIN: wait for the host's JOIN_ACK (slot assigned) */
+    case 5: /* JOIN: wait for the host's JOIN_ACK (slot assigned) */
         frontend_present_buffer();
         if (td5_net_local_slot() >= 0) {
             s_net_join_pending_ui = 0;
             s_network_active = 1;
-            s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
-            s_inner_state = 8;
+            td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
         } else if (td5_net_is_connection_lost() ||
                    (td5_plat_time_ms() - s_net_join_wait_start) > 8000) {
             TD5_LOG_W(LOG_TAG, "Direct join: no response from host (timeout)");
             s_net_join_pending_ui = 0;
             s_network_active = 0;
             frontend_net_destroy();
-            s_inner_state = 20;                   /* back to host/join chooser */
+            td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
         }
         break;
     }
@@ -9480,18 +9594,21 @@ static void Screen_ConnectionBrowser(void) {
  * States: ~8
  * ======================================================================== */
 
-/* S10: set the SESSION_PICKER selector (button 0) label from s_net_session_sel.
- * 0 = host a new LAN game; 1..count = join the i-th discovered session. */
+/* S10: set the SESSION_PICKER selector (button 0) label from s_net_session_sel
+ * (discover-only: 0..count-1 are the discovered LAN sessions; hosting is the
+ * separate LAN-menu "HOST" option). */
 static void frontend_net_label_session_selector(void) {
     int count = td5_net_get_enum_session_count();
     char buf[64];
-    if (s_net_session_sel < 0) s_net_session_sel = count;        /* wrap */
-    if (s_net_session_sel > count) s_net_session_sel = 0;
-    if (s_net_session_sel == 0) {
-        snprintf(buf, sizeof(buf), "HOST NEW LAN GAME");
+    if (count <= 0) {
+        s_net_session_sel = 0;
+        snprintf(buf, sizeof(buf), "(NO LAN GAMES FOUND)");
     } else {
-        snprintf(buf, sizeof(buf), "JOIN: %s",
-                 td5_net_get_enum_session_name(s_net_session_sel - 1));
+        if (s_net_session_sel < 0) s_net_session_sel = count - 1;   /* wrap */
+        if (s_net_session_sel >= count) s_net_session_sel = 0;
+        snprintf(buf, sizeof(buf), "%s  (%d/%d)",
+                 td5_net_get_enum_session_name(s_net_session_sel),
+                 s_net_session_sel + 1, count);
     }
     strncpy(s_buttons[0].label, buf, sizeof(s_buttons[0].label) - 1);
     s_buttons[0].label[sizeof(s_buttons[0].label) - 1] = '\0';
@@ -9509,7 +9626,7 @@ static void Screen_SessionPicker(void) {
         frontend_create_button(SNK_ChooseSessionButTxt, 120, 193, 496, 128);  /* slot 0: session selector */
         frontend_create_button(SNK_OkButTxt,     120, 377,  96, 0x20);   /* slot 1 */
         frontend_create_button(SNK_BackButTxt,   232, 377, 112, 0x20);   /* slot 2 */
-        s_net_session_sel = (td5_net_get_enum_session_count() > 0) ? 1 : 0;
+        s_net_session_sel = 0;
         frontend_net_label_session_selector();
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -9535,24 +9652,19 @@ static void Screen_SessionPicker(void) {
                 s_net_session_sel += (delta > 0) ? 1 : -1;
                 frontend_net_label_session_selector();
                 frontend_play_sfx(2);
-            } else if (s_button_index == 1) { /* OK */
-                if (s_net_session_sel == 0) {
-                    /* Host a new LAN game -> name entry / create. */
-                    s_return_screen = TD5_SCREEN_CREATE_SESSION;
+            } else if (s_button_index == 1) { /* OK -> join the selected session */
+                if (td5_net_get_enum_session_count() <= 0) {
+                    frontend_play_sfx(10);        /* nothing to join */
+                } else if (td5_net_join_session(s_net_session_sel, frontend_net_player_name())) {
+                    s_network_active = 1;
+                    s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
                     s_inner_state = 5;
                 } else {
-                    /* Join the selected discovered session. */
-                    if (td5_net_join_session(s_net_session_sel - 1, frontend_net_player_name())) {
-                        s_network_active = 1;
-                        s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
-                        s_inner_state = 5;
-                    } else {
-                        TD5_LOG_W(LOG_TAG, "LAN join %d failed", s_net_session_sel - 1);
-                        frontend_play_sfx(10);
-                    }
+                    TD5_LOG_W(LOG_TAG, "LAN join %d failed", s_net_session_sel);
+                    frontend_play_sfx(10);
                 }
-            } else if (s_button_index == 2) { /* Back */
-                s_return_screen = TD5_SCREEN_CONNECTION_BROWSER;
+            } else if (s_button_index == 2) { /* Back -> LAN menu */
+                s_return_screen = TD5_SCREEN_LAN_MENU;
                 s_inner_state = 5;
             }
         }
@@ -9585,12 +9697,13 @@ static void Screen_CreateSession(void) {
         frontend_init_return_screen(TD5_SCREEN_CREATE_SESSION);
         TD5_LOG_D(LOG_TAG, "CreateSession: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* [FIXED 2026-06-02, runtime @0x499c78] name-input (120,193) 448x64; BACK (278,289) 112x32. */
-        frontend_create_button(SNK_EnterNewSessionNameButTxt, 120, 193, 448, 0x40);
-        frontend_create_button(SNK_BackButTxt,       278, 289, 112, 0x20);
+        /* The text-input widget IS the name field (gold frame at 120,193);
+         * only BACK is a real button (index 0). */
+        frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
         memset(s_create_session_name, 0, sizeof(s_create_session_name));
         strcpy(s_create_session_name, "New Session");
         frontend_begin_text_input(s_create_session_name, (int)sizeof(s_create_session_name));
+        frontend_set_text_input_prompt("ENTER SESSION NAME");
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -9603,12 +9716,7 @@ static void Screen_CreateSession(void) {
         break;
 
     case 2: /* Name input */
-        frontend_render_text_input();
-        if (s_input_ready && s_button_index == 1) {   /* BACK */
-            s_return_screen = TD5_SCREEN_SESSION_PICKER;
-            s_inner_state = 3;
-            break;
-        }
+        frontend_handle_text_input_key();   /* process keystrokes into the buffer */
         if (frontend_text_input_confirmed()) {
             /* S10: actually host a LAN session under the entered name. */
             td5_net_set_mode(TD5_NET_MODE_LAN);
@@ -9617,8 +9725,13 @@ static void Screen_CreateSession(void) {
                 s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
             } else {
                 TD5_LOG_W(LOG_TAG, "LAN host create failed");
-                s_return_screen = TD5_SCREEN_SESSION_PICKER;
+                s_return_screen = TD5_SCREEN_LAN_MENU;
             }
+            s_inner_state = 3;
+            break;
+        }
+        if (s_input_ready && s_button_index == 0) {   /* BACK -> LAN menu */
+            s_return_screen = TD5_SCREEN_LAN_MENU;
             s_inner_state = 3;
         }
         break;
@@ -10650,6 +10763,7 @@ static void mp_build_buttons(void)
     frontend_reset_buttons();
     s_mp_btn_players = s_mp_btn_layout = s_mp_btn_ok = -1;
     s_mp_btn_missing[0] = s_mp_btn_missing[1] = -1;
+    s_mp_btn_nickname = -1;
 
     /* Rows are NON-selector buttons: the button renderer bakes their label (the
      * ◄► arrows are drawn by the per-screen dispatch, the value by the overlay).
@@ -10666,6 +10780,12 @@ static void mp_build_buttons(void)
         s_mp_btn_missing[k] = frontend_create_button(lbl, 120, y, 0x100, 0x20);
         y += 50;
     }
+
+    /* S10: NICKNAME row sits dynamically BELOW the split-layout + missing-cell
+     * rows (whose count varies with player count / layout). Pressing it opens
+     * the nickname-entry screen; the current nickname is shown as its value. */
+    s_mp_btn_nickname = frontend_create_button("NICKNAME", 120, y, 0x100, 0x20);
+    y += 50;
 
     s_mp_btn_ok = frontend_create_button(SNK_OkButTxt, 200, 377, 0x60, 0x20);
 
@@ -10740,6 +10860,11 @@ static void Screen_TwoPlayerOptions(void) {
                 s_mp_missing_content[k] = v;
                 frontend_play_sfx(2);
                 s_inner_state = 4;
+            } else if (s_button_index == s_mp_btn_nickname) {
+                /* Open the nickname-entry screen; return here on confirm. */
+                s_nickname_from_mpopts = 1;
+                td5_frontend_set_screen(TD5_SCREEN_NET_NICKNAME);
+                return;
             } else if (s_button_index == s_mp_btn_ok) {
                 s_inner_state = 7;
             }

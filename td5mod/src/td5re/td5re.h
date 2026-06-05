@@ -411,6 +411,7 @@ typedef struct TD5_GlobalState {
         int  net_mode;          /* 0=LAN auto-discovery (default), 1=Direct IP */
         int  net_game_port;     /* host UDP game port (default 37050) */
         int  net_enable_upnp;   /* Direct host: open the port via UPnP (default 1) */
+        char net_nickname[32];  /* player nickname shown in the lobby roster */
     } ini;
 
 } TD5_GlobalState;
@@ -425,6 +426,10 @@ extern TD5_GlobalState g_td5;
  * td5_frontend.c re-applies g_td5.ini.* over Config.td5 every launch, so
  * without this write-back in-game changes were masked). [PART B, 2026-06-02] */
 void td5_ini_persist_options(void);
+
+/* S10 net-play: write a free-form string key back to td5re.ini (used to
+ * persist the player nickname). */
+void td5_ini_write_str(const char *section, const char *key, const char *value);
 
 /* ========================================================================
  * Master Entry Points

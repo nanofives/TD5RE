@@ -219,6 +219,13 @@ static void td5_ini_write_int(const char *section, const char *key, int value)
     WritePrivateProfileStringA(section, key, buf, s_ini_path);
 }
 
+/* Public string write-back (S10: persist the player nickname). */
+void td5_ini_write_str(const char *section, const char *key, const char *value)
+{
+    if (!s_ini_path[0]) return;
+    WritePrivateProfileStringA(section, key, value ? value : "", s_ini_path);
+}
+
 void td5_ini_persist_options(void)
 {
     if (!s_ini_path[0]) return;
@@ -631,6 +638,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.net_mode              = td5_ini_int("Network", "Mode", 0);
     g_td5.ini.net_game_port         = td5_ini_int("Network", "GamePort", 37050);
     g_td5.ini.net_enable_upnp       = td5_ini_int("Network", "EnableUPnP", 1);
+    td5_ini_str("Network", "Nickname", "", g_td5.ini.net_nickname,
+                sizeof(g_td5.ini.net_nickname));
 
 #ifndef TD5RE_RELEASE
     /* S10 dev hook: run the loopback net self-test (env TD5RE_NET_SELFTEST) and
