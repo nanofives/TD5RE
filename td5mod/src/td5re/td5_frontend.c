@@ -1920,7 +1920,36 @@ static int frontend_track_level_exists(int track_index) {
     return td5_plat_file_exists(path);
 }
 
-/* Advance track by delta (+1 or -1), skipping indices whose level zips are absent.
+/* Schedule slots 20-25 are the six championship CUPS (CHAMPIONSHIP / ERA /
+ * CHALLENGE / PITBULL / MASTERS / ULTIMATE), NOT single tracks — they belong to
+ * the Championship game type, not the single-race / quick-race track selector.
+ * They leaked into the selectors because s_total_unlocked_tracks is forced to 37
+ * (TD6 slots 26-36 are always unlocked, extending the cycle bound past the cup
+ * range) and td5_asset_level_number(20..25) falls back to level001.zip (so the
+ * level-exists check doesn't skip them) — so they showed up as "LOCKED" entries.
+ * Treat them as non-selectable so the cyclers hop over them, leaving 0-19 (TD5)
+ * and 26-36 (TD6) selectable. The cups remain reachable via the Championship
+ * menu and the High Scores browser (which index slots 20-25 directly, not via
+ * these cyclers). [user request 2026-06-05] */
+static int frontend_track_is_cup_slot(int track_index) {
+    return (track_index >= 20 && track_index <= 25);
+}
+
+/* Slots the single-race / quick-race track selectors must NOT land on:
+ *   - DRAG STRIP (slot 19) — its own race type, not a normal circuit/sprint track
+ *   - the six championship CUPS (20-25, frontend_track_is_cup_slot)
+ * Both remain reachable elsewhere: the drag strip via its dedicated race type,
+ * and the cups via the Championship menu + the High Scores browser (which index
+ * slots 20-25 directly, not through these cyclers). Quick Race already excluded
+ * the drag strip; this unifies it with Track Selection. [user request 2026-06-05] */
+static int frontend_track_excluded_from_selector(int track_index) {
+    return track_index == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX ||
+           frontend_track_is_cup_slot(track_index);
+}
+
+/* Advance track by delta (+1 or -1), skipping indices whose level zips are absent
+ * and any slot excluded from the selector (drag strip + cups; see
+ * frontend_track_excluded_from_selector).
  * Stops after one full revolution to avoid an infinite loop when no tracks exist. */
 static void frontend_cycle_track(int delta, int track_min, int track_max) {
     int start = s_selected_track;
@@ -1929,6 +1958,7 @@ static void frontend_cycle_track(int delta, int track_min, int track_max) {
         s_selected_track += delta;
         if (s_selected_track < track_min) s_selected_track = track_max - 1;
         if (s_selected_track >= track_max) s_selected_track = track_min;
+        if (frontend_track_excluded_from_selector(s_selected_track)) continue;
         if (frontend_track_level_exists(s_selected_track)) return;
     }
     /* No available track found -- restore original selection */
@@ -10074,10 +10104,10 @@ static void frontend_quickrace_cycle_track(int delta) {
         s_selected_track += delta;
         if (s_selected_track < 0) s_selected_track = track_max - 1;
         if (s_selected_track >= track_max) s_selected_track = 0;
-        if (s_selected_track == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX) continue;
+        if (frontend_track_excluded_from_selector(s_selected_track)) continue; /* skip drag strip + cups */
         if (frontend_track_level_exists(s_selected_track)) return;
     }
-    s_selected_track = start; /* nothing else available — restore (never lands on drag strip) */
+    s_selected_track = start; /* nothing else available — restore (never lands on drag strip / cup) */
 }
 
 /* Clamp the human/AI counts so 1 <= humans <= 6 and 0 <= opponents <= 6-humans.
@@ -10101,11 +10131,12 @@ static void Screen_QuickRaceMenu(void) {
         /* Load background: same as main menu */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
 
-        /* Validate car/track indices; never start on the Drag Strip (excluded). */
+        /* Validate car/track indices; never start on the Drag Strip or a cup
+         * (excluded from the selector, see frontend_track_excluded_from_selector). */
         if (s_selected_car < 0) s_selected_car = 0;
         if (s_selected_track < 0) s_selected_track = 0;
         if (s_selected_track >= 26) s_selected_track = 0;
-        if (s_selected_track == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX) s_selected_track = 0;
+        if (frontend_track_excluded_from_selector(s_selected_track)) s_selected_track = 0;
 
         /* Improved layout (PORT ENHANCEMENT): caption selectors with the selected
          * value drawn to the RIGHT of each button (value column), plus OK/Back on
@@ -13273,6 +13304,9 @@ static void Screen_TrackSelection(void) {
         }
         if (s_selected_track >= s_track_max) s_selected_track = (s_two_player_mode ? -1 : 0);
         if (!s_two_player_mode && s_selected_track < 0) s_selected_track = 0;
+        /* Never open parked on a selector-excluded slot — drag strip (19) or a
+         * championship cup (20-25), see frontend_track_excluded_from_selector. */
+        if (frontend_track_excluded_from_selector(s_selected_track)) s_selected_track = 0;
 
         /* Create buttons. Ghidra settles these at x=120 for Track/Forwards/OK
          * and x=232 for Back, with OK/Back sharing the bottom row. */
@@ -13339,8 +13373,13 @@ static void Screen_TrackSelection(void) {
                     s_selected_track += delta;
                     if (s_selected_track < -1) s_selected_track = s_track_max - 1;
                     if (s_selected_track >= s_track_max) s_selected_track = -1;
-                    /* Skip unavailable for positive indices */
-                    if (s_selected_track >= 0 && !frontend_track_level_exists(s_selected_track))
+                    /* Skip unavailable levels AND selector-excluded slots (drag
+                     * strip + cups): cups resolve to level001.zip so the level-
+                     * exists check alone won't drop them — route through the
+                     * exclusion-aware cycler. */
+                    if (s_selected_track >= 0 &&
+                        (frontend_track_excluded_from_selector(s_selected_track) ||
+                         !frontend_track_level_exists(s_selected_track)))
                         frontend_cycle_track(delta, 0, s_track_max);
                 } else {
                     frontend_cycle_track(delta, 0, s_track_max);
