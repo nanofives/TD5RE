@@ -3221,6 +3221,20 @@ static int frontend_is_window_active(void) {
     return (foreground == hwnd) ? 1 : 0;
 }
 
+static void frontend_post_quit(void);   /* defined later; used by the credits-skip path */
+
+/* True if ANY keyboard key is currently down (DirectInput state buffer) or any
+ * mapped gamepad nav/confirm bit is set this frame. Basis for "press any key to
+ * exit the post-EXIT credits scroll". */
+static int frontend_any_input_down(void) {
+    const uint8_t *kb = td5_plat_input_get_keyboard();
+    if (kb) {
+        for (int i = 0; i < 256; i++)
+            if (kb[i] & 0x80) return 1;
+    }
+    return s_fe_gamepad_nav ? 1 : 0;
+}
+
 static void frontend_poll_input(void) {
     POINT pt;
     HWND hwnd;
@@ -3382,9 +3396,27 @@ static void frontend_poll_input(void) {
             frontend_play_sfx(3);
             TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=keyboard",
                       s_button_index, s_buttons[s_button_index].label);
-        } else {
+        } else if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY) {
             frontend_play_sfx(10);
         }
+        /* else: the post-EXIT credits scroll has no buttons, so a confirm press
+         * has nothing to action — the any-key skip block below quits instead of
+         * playing the rejection blip. */
+    }
+
+    /* Credits/extras scroll: press ANY key (or click / gamepad button) to skip
+     * the credits and quit the game. Edge-detected against a key held over from
+     * the menu so the YES press that opened the credits can't instantly exit.
+     * [user request 2026-06-05: any key leaves the post-EXIT credits, no lock sfx] */
+    {
+        static int s_credits_anykey_prev = 0;
+        int any_now = frontend_any_input_down();
+        if (s_current_screen == TD5_SCREEN_EXTRAS_GALLERY &&
+            ((any_now && !s_credits_anykey_prev) || s_mouse_clicked)) {
+            TD5_LOG_I(LOG_TAG, "ExtrasGallery: input detected, quitting game");
+            frontend_post_quit();
+        }
+        s_credits_anykey_prev = any_now;
     }
     s_prev_left_state = left_now;
     s_prev_right_state = right_now;
