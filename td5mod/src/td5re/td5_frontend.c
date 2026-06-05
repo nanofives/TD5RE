@@ -8911,7 +8911,7 @@ done:
         snprintf(fps_buf, sizeof(fps_buf), "FPS %.0f  %dMS",
                  (double)g_td5_display_fps, g_td5_peak_frame_ms);
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        float fps_w = fe_measure_text_width(fps_buf, sx);
+        float fps_w = fe_measure_text_width(fps_buf, sx, sy);
         float fps_x = (float)screen_w - fps_w - 8.0f * sx;
         if (fps_x < 0.0f) fps_x = 0.0f;
         { static int s_fps_logged_w = -1;   /* one-shot per width; re-logs on resize */
