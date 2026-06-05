@@ -207,19 +207,11 @@ void  td5_hud_radial_pulse_set(float value) { s_radial_pulse_progress = value; }
  * 0x0042cc6f -- both wired in the port at td5_game.c. */
 void td5_hud_reset_radial_pulse(void) { s_radial_pulse_progress = 0.0f; }
 
-/* [TD6 SYNTHESIZED CHECKPOINTS] Tick-gated "CHECKPOINT n/N" acknowledgement.
- * Drawn on the player view while g_tick_counter < s_td6_cp_flash_until. Set by
- * td5_game.c when the player drives through a synthesized TD6 checkpoint. */
-static uint32_t s_td6_cp_flash_until   = 0;
-static int      s_td6_cp_flash_reached = 0;
-static int      s_td6_cp_flash_total   = 0;
-
-void td5_hud_set_td6_checkpoint_flash(int reached, int total)
-{
-    s_td6_cp_flash_reached = reached;
-    s_td6_cp_flash_total   = total;
-    s_td6_cp_flash_until   = g_tick_counter + 75u;  /* ~2.5 s @ 30 Hz */
-}
+/* [REMOVED 2026-06-05] The TD6 synthesized-checkpoint "CHECKPOINT n/N" flash
+ * acknowledgement (s_td6_cp_flash_until/reached/total + td5_hud_set_td6_checkpoint_flash)
+ * was removed along with its draw block in td5_hud_render_overlays — the user did
+ * not want the on-screen checkpoint indicator. The split-time registration in
+ * td5_game.c stays; it simply no longer pokes the HUD. */
 
 /* Screen-center flash counter for HUD */
 static int   s_wrong_way_counter[MAX_HUD_VIEWS]; /* 0x4B0A64 */
@@ -2473,16 +2465,12 @@ void td5_hud_render_overlays(float dt)
 
         uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
 
-        /* [TD6 SYNTHESIZED CHECKPOINTS] Centered "CHECKPOINT n/N" ack on the
-         * player view for ~2.5 s after a drive-through (set by td5_game.c). */
-        if (actor_slot == 0 && g_tick_counter < s_td6_cp_flash_until) {
-            td5_hud_queue_text(0,
-                (int)((vl->vp_int_left + vl->vp_int_right) * 0.5f),
-                (int)(vl->vp_int_top + 56.0f),
-                1,
-                "CHECKPOINT %d/%d",
-                s_td6_cp_flash_reached, s_td6_cp_flash_total);
-        }
+        /* [REMOVED 2026-06-05] The TD6 synthesized "CHECKPOINT n/N" drive-through
+         * banner (centered, ~2.5 s) was drawn here. User did not want a checkpoint
+         * indicator at the top of the screen when passing a checkpoint, so the
+         * draw block and its flash-timer state (s_td6_cp_flash_*) + setter were
+         * removed. The underlying split-time checkpoint registration in td5_game.c
+         * is unaffected — only the on-screen acknowledgement is gone. */
 
         /* --- Bit 0: Race position label --- */
         if (flags & TD5_HUD_POSITION_LABEL) {
@@ -2871,7 +2859,29 @@ void td5_hud_render_overlays(float dt)
                 /* Flash at ~8Hz (visible when tick counter mod 32 > 8) */
                 uint32_t flash = g_tick_counter & 0x1F;
                 if (flash > 8) {
+                    /* Pre-baked U-turn icon (UTURN sprite, centered). */
                     hud_submit_quad(view_base + 0x67C);
+                    /* [FIX 2026-06-05 wrong-way warning — source-port HUD, no
+                     * original equivalent] The UTURN icon alone did not read as a
+                     * clear "you are going the wrong way" sign (user feedback: "no
+                     * sign when going in the wrong direction"), so also draw a
+                     * prominent flashing "WRONG WAY" caption through the same
+                     * VectorUI HUD text path as the rest of the overlay. Drawn
+                     * per-viewport: positioned from THIS view's layout and gated by
+                     * this view's s_wrong_way_counter[v], so each split-screen pane
+                     * shows its own warning. s_hud_string_table[6] is the SNK
+                     * "WRONG WAY" label (see s_default_position_strings[6]). */
+                    td5_hud_queue_text(0,
+                        (int)vl->center_x,
+                        (int)(vl->vp_int_top +
+                              (vl->vp_int_bottom - vl->vp_int_top) * 0.28f),
+                        1,
+                        "%s", s_hud_string_table[6]);
+                }
+                if ((g_tick_counter % 30u) == 0u) {
+                    TD5_LOG_I(LOG_TAG,
+                        "wrong-way warning view %d active: heading_delta=0x%X counter=%d",
+                        v, (unsigned int)heading_delta, s_wrong_way_counter[v]);
                 }
             }
 
@@ -3180,6 +3190,25 @@ static int minimap_normalize_span(int raw_span)
     return norm;
 }
 
+/* [FIX 2026-06-05 Rome end-of-race stray minimap line — source-port HUD, no
+ * original equivalent] True when a built minimap road quad's on-screen extent
+ * dwarfs the whole minimap (here: > 2.5x its width/height). A legitimate per-span
+ * road quad spans only a few px at minimap scale; a quad this large means its
+ * NEAR and FAR spans are geometrically DISCONTINUOUS in world space. That happens
+ * on the TD6 P2P tracks (e.g. Rome) whose strip continues PAST the finish line
+ * into a disconnected out-of-bounds tail: a quad bridging the last on-route span
+ * and the first tail span stretches a long stray line clear across the minimap
+ * right when the player reaches the finish ("at the end of the race"). The quad's
+ * AABB still overlaps the minimap rect (one corner is on-route), so the existing
+ * fully-offscreen cull does NOT drop it — this extent test does. Rejecting these
+ * is purely additive to the faithful path: real road quads never approach this
+ * size, so faithful TD5 minimaps are unchanged. */
+static int minimap_quad_is_stray(float min_x, float max_x, float min_y, float max_y)
+{
+    return (max_x - min_x) > 2.5f * s_minimap_width ||
+           (max_y - min_y) > 2.5f * s_minimap_height;
+}
+
 /* Emit one minimap "checkpoint-connector" road quad spanning [span_a .. span_a+2].
  * BOTH edges use the span record's +0x06 back-vertex (orig Quad3 @ 0x43a9b1/0x43aa45,
  * Quad4 @ 0x43ac51/0x43ad40 — unlike the primary quad which uses +0x04 for the near
@@ -3246,6 +3275,7 @@ static int minimap_emit_connector(uint8_t *span_base, uint8_t *vert_base, int sp
     if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
     if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
     if (max_x < mm_l || min_x > mm_r || max_y < mm_t || min_y > mm_b) return 0;
+    if (minimap_quad_is_stray(min_x, max_x, min_y, max_y)) return 0; /* [S25] discontinuous spans */
 
     TD5_SpriteQuad q;
     hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
@@ -3329,6 +3359,7 @@ static int minimap_emit_road_quad(uint8_t *span_base, uint8_t *vert_base,
     if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
     if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
     if (max_x < mm_l || min_x > mm_r || max_y < mm_t || min_y > mm_b) return 0;
+    if (minimap_quad_is_stray(min_x, max_x, min_y, max_y)) return 0; /* [S25] discontinuous spans */
 
     /* TL=front-left, BL=back-left, BR=back-right, TR=front-right */
     TD5_SpriteQuad q;
@@ -3643,6 +3674,13 @@ void td5_hud_render_minimap(int actor_slot)
         if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
         int primary_culled = (max_x < s_minimap_x || min_x > mm_r ||
                               max_y < s_minimap_y || min_y > mm_b);
+        /* [FIX 2026-06-05 Rome end-of-race stray minimap line] Also drop a quad
+         * whose extent dwarfs the minimap — its NEAR/FAR spans are discontinuous
+         * (the strip continues past the P2P finish into a disconnected tail). See
+         * minimap_quad_is_stray(). This is the quad that drew the stray line at
+         * the Rome finish; its AABB overlaps the rect so the cull above misses it. */
+        if (!primary_culled && minimap_quad_is_stray(min_x, max_x, min_y, max_y))
+            primary_culled = 1;
         if (primary_culled) {
             /* Log first culled quad per frame for diagnostics */
             if (skip_aabb == 0 && seg_rendered == 0) {
@@ -3772,7 +3810,8 @@ void td5_hud_render_minimap(int actor_slot)
                     if (bbr_y < b_min_y) b_min_y = bbr_y; if (bbr_y > b_max_y) b_max_y = bbr_y;
 
                     if (!(b_max_x < s_minimap_x || b_min_x > mm_r ||
-                          b_max_y < s_minimap_y || b_min_y > mm_b)) {
+                          b_max_y < s_minimap_y || b_min_y > mm_b) &&
+                        !minimap_quad_is_stray(b_min_x, b_max_x, b_min_y, b_max_y)) {
                         hud_build_quad_warped(
                             &map_quad, HUD_WHITE_TEX_PAGE,
                             bfl_x, bfl_y,

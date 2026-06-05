@@ -4929,8 +4929,10 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
                   "TD6 checkpoint: slot=%d cp=%d/%d span=%d timer=%d",
                   slot, idx + 1, s_td6_cp_count, (int)actor_span,
                   m->cumulative_timer);
-        if (slot == 0)
-            td5_hud_set_td6_checkpoint_flash(idx + 1, s_td6_cp_count);
+        /* [REMOVED 2026-06-05] previously poked the HUD's on-screen
+         * "CHECKPOINT n/N" flash here (td5_hud_set_td6_checkpoint_flash) for
+         * slot 0 — the user did not want that indicator. Split-time recording
+         * above is retained. */
     }
 
     /* Race timer increment is driven per sub-tick in td5_game_run_race_frame
