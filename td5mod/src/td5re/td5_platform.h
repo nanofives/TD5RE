@@ -191,6 +191,12 @@ const uint8_t *td5_plat_input_get_keyboard(void);
 /** Check if a specific key is pressed (scancode). */
 int td5_plat_input_key_pressed(int scancode);
 
+/** Pop the next queued typed character (WM_CHAR); 0 if none. Frame-rate
+ *  independent so text input is never dropped by slow frames / poll contention. */
+int  td5_plat_input_get_char(void);
+/** Discard pending typed characters (call when opening a text field). */
+void td5_plat_input_flush_chars(void);
+
 /** Enumerate available input devices. Returns count. */
 int td5_plat_input_enumerate_devices(void);
 

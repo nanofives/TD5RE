@@ -3365,6 +3365,9 @@ static void frontend_begin_text_input(char *buffer, int capacity) {
     (void)GetAsyncKeyState(VK_SPACE);
     (void)GetAsyncKeyState(VK_BACK);
     for (int vk = 0x30; vk <= 0x5A; vk++) (void)GetAsyncKeyState(vk);
+    /* Discard any typed characters queued before this field opened (e.g. the
+     * Enter that navigated here) so they don't auto-fill or auto-confirm. */
+    td5_plat_input_flush_chars();
     TD5_LOG_I(LOG_TAG, "Text input started: capacity=%d initial=\"%s\"", capacity, buffer);
 }
 
@@ -3376,67 +3379,51 @@ static void frontend_commit_text_input(void) {
 }
 
 static void frontend_handle_text_input_key(void) {
-    int len;
+    int len, ch;
     if (s_text_input_state != 1 || !s_text_input_ctx.buffer) return;
     if (!frontend_is_window_active()) return;
     len = (int)strlen(s_text_input_ctx.buffer);
     if (s_text_input_ctx.caret > len) s_text_input_ctx.caret = len;
 
-    /* Enter = confirm */
-    if (GetAsyncKeyState(VK_RETURN) & 1) { frontend_note_activity(); frontend_commit_text_input(); return; }
+    /* Drain the WM_CHAR queue. Windows already applied shift/caps/key-repeat and
+     * queued every typed character, so every keystroke is processed regardless of
+     * frame rate / input-poll contention (the old GetAsyncKeyState '&1' path
+     * dropped keys whenever another poll consumed the "pressed since last call"
+     * bit first — the source of the "hard to input" lag). */
+    while ((ch = td5_plat_input_get_char()) != 0) {
+        len = (int)strlen(s_text_input_ctx.buffer);
 
-    /* Backspace */
-    if ((GetAsyncKeyState(VK_BACK) & 1) && s_text_input_ctx.caret > 0) {
-        memmove(&s_text_input_ctx.buffer[s_text_input_ctx.caret - 1],
+        if (ch == '\r' || ch == '\n') {            /* Enter = confirm */
+            frontend_note_activity();
+            frontend_commit_text_input();
+            return;
+        }
+        if (ch == '\b') {                          /* Backspace */
+            if (s_text_input_ctx.caret > 0) {
+                memmove(&s_text_input_ctx.buffer[s_text_input_ctx.caret - 1],
+                        &s_text_input_ctx.buffer[s_text_input_ctx.caret],
+                        (size_t)(len - s_text_input_ctx.caret + 1));
+                s_text_input_ctx.caret--;
+                s_text_input_ctx.blink_tick = td5_plat_time_ms();
+                frontend_note_activity();
+                frontend_play_sfx(3);  /* keystroke tick [CONFIRMED @ 0x41A63D] */
+            }
+            continue;
+        }
+        if (ch == 0x1B || ch == '\t') continue;    /* Esc/Tab handled elsewhere */
+        if (ch < 32 || ch > 126) continue;         /* printable ASCII only */
+        if (len >= s_text_input_ctx.capacity - 1) continue;
+
+        memmove(&s_text_input_ctx.buffer[s_text_input_ctx.caret + 1],
                 &s_text_input_ctx.buffer[s_text_input_ctx.caret],
                 (size_t)(len - s_text_input_ctx.caret + 1));
-        s_text_input_ctx.caret--;
+        s_text_input_ctx.buffer[s_text_input_ctx.caret] = (char)ch;
+        s_text_input_ctx.caret++;
         s_text_input_ctx.blink_tick = td5_plat_time_ms();
         frontend_note_activity();
-        frontend_play_sfx(3); /* keystroke tick — the original name-entry input
-                               * plays Ping1 on each edit [CONFIRMED @ 0x41A63D];
-                               * the port's text widget was silent while typing. */
-    }
-
-    /* Printable characters */
-    {
-        int shift_down = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 1 : 0;
-        int vk;
-        for (vk = 0x30; vk <= 0x5A; vk++) {
-            unsigned ch;
-            if (!(GetAsyncKeyState(vk) & 1)) continue;
-            len = (int)strlen(s_text_input_ctx.buffer);
-            if (len >= s_text_input_ctx.capacity - 1) continue;
-            ch = MapVirtualKeyA((UINT)vk, MAPVK_VK_TO_CHAR) & 0x7FFFu;
-            if (ch < 32 || ch > 126) continue;
-            if (!shift_down && ch >= 'A' && ch <= 'Z') ch = ch - 'A' + 'a';
-            memmove(&s_text_input_ctx.buffer[s_text_input_ctx.caret + 1],
-                    &s_text_input_ctx.buffer[s_text_input_ctx.caret],
-                    (size_t)(len - s_text_input_ctx.caret + 1));
-            s_text_input_ctx.buffer[s_text_input_ctx.caret] = (char)ch;
-            s_text_input_ctx.caret++;
-            s_text_input_ctx.blink_tick = td5_plat_time_ms();
-            frontend_note_activity();
-            frontend_play_sfx(3); /* keystroke tick [CONFIRMED @ 0x41A63D] */
-            TD5_LOG_I(LOG_TAG, "Text input char: '%c' -> \"%s\"",
-                      (char)ch, s_text_input_ctx.buffer);
-        }
-    }
-
-    /* Space */
-    if (GetAsyncKeyState(VK_SPACE) & 1) {
-        len = (int)strlen(s_text_input_ctx.buffer);
-        if (len < s_text_input_ctx.capacity - 1) {
-            memmove(&s_text_input_ctx.buffer[s_text_input_ctx.caret + 1],
-                    &s_text_input_ctx.buffer[s_text_input_ctx.caret],
-                    (size_t)(len - s_text_input_ctx.caret + 1));
-            s_text_input_ctx.buffer[s_text_input_ctx.caret] = ' ';
-            s_text_input_ctx.caret++;
-            s_text_input_ctx.blink_tick = td5_plat_time_ms();
-            frontend_note_activity();
-            frontend_play_sfx(3); /* keystroke tick [CONFIRMED @ 0x41A63D] */
-            TD5_LOG_I(LOG_TAG, "Text input char: ' ' -> \"%s\"", s_text_input_ctx.buffer);
-        }
+        frontend_play_sfx(3);          /* keystroke tick [CONFIRMED @ 0x41A63D] */
+        TD5_LOG_I(LOG_TAG, "Text input char: '%c' -> \"%s\"",
+                  (char)ch, s_text_input_ctx.buffer);
     }
 }
 

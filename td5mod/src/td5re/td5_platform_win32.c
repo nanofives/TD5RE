@@ -294,6 +294,16 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
 
 static uint32_t s_mouse_click_latch = 0; /* sticky per-button click flags */
 
+/* WM_CHAR ring buffer for robust text input. Windows queues every typed
+ * character (with correct shift/caps/repeat) and we drain it once per frame, so
+ * input is never dropped by frame-rate spikes or GetAsyncKeyState '&1' polling
+ * contention (the old text path missed keys whenever the menu's other
+ * GetAsyncKeyState calls consumed the "pressed since last call" bit first). */
+#define TD5_CHAR_QUEUE_SIZE 128
+static volatile unsigned char s_char_queue[TD5_CHAR_QUEUE_SIZE];
+static volatile int s_char_q_head;   /* producer (window proc) */
+static volatile int s_char_q_tail;   /* consumer (frontend)    */
+
 static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -303,6 +313,15 @@ static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+    case WM_CHAR: {
+        /* Queue the translated character (handles shift/caps + key repeat). */
+        int next = (s_char_q_head + 1) % TD5_CHAR_QUEUE_SIZE;
+        if (next != s_char_q_tail) {
+            s_char_queue[s_char_q_head] = (unsigned char)wParam;
+            s_char_q_head = next;
+        }
+        return 0;
+    }
     case WM_SYSKEYDOWN:
         /* Alt+F4 — explicit handler so it always closes even if original proc drops it */
         if (wParam == VK_F4) {
@@ -1496,6 +1515,24 @@ int td5_plat_input_key_pressed(int scancode)
 {
     if (scancode < 0 || scancode > 255) return 0;
     return (s_keyboard[scancode] & 0x80) ? 1 : 0;
+}
+
+/* Pop the next queued typed character (WM_CHAR). Returns 0 when the queue is
+ * empty. Drains independently of frame rate so no keystroke is ever dropped. */
+int td5_plat_input_get_char(void)
+{
+    int ch;
+    if (s_char_q_tail == s_char_q_head) return 0;
+    ch = (int)s_char_queue[s_char_q_tail];
+    s_char_q_tail = (s_char_q_tail + 1) % TD5_CHAR_QUEUE_SIZE;
+    return ch;
+}
+
+/* Discard any pending typed characters (called when a text field opens so
+ * keystrokes from the prior screen don't leak in). */
+void td5_plat_input_flush_chars(void)
+{
+    s_char_q_tail = s_char_q_head;
 }
 
 /* Joystick enumeration callback */
