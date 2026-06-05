@@ -326,6 +326,13 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "AntiTunnelSlop",       &g_td5.ini.anti_tunnel_slop },
         { "CatchupAssist",        &g_td5.ini.catchup_assist },
         { "AIAccelFromCar",       &g_td5.ini.ai_accel_from_car },
+        /* Traffic (S20 smart traffic) */
+        { "TrafficSmart",         &g_td5.ini.traffic_smart },
+        { "TrafficRandomBranch",  &g_td5.ini.traffic_random_branch },
+        { "TrafficWallAvoid",     &g_td5.ini.traffic_wall_avoid },
+        { "TrafficAvoidSlowLane", &g_td5.ini.traffic_avoid_slow_lane },
+        { "TrafficLookahead",     &g_td5.ini.traffic_lookahead },
+        { "TrafficWallAvoidBias", &g_td5.ini.traffic_wall_avoid_bias },
         { "Player1Joystick",      &g_td5.ini.player1_joystick },
         { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
@@ -667,6 +674,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (g_td5.ini.catchup_assist > 9)  g_td5.ini.catchup_assist = 9;
     /* AI/traffic accel + top speed sourced from each car's carparam (S06). */
     g_td5.ini.ai_accel_from_car = td5_ini_int("GameOptions", "AIAccelFromCar", 1);
+    /* S20 Smart Traffic (source-port enhancement; all default ON, traffic-only). */
+    g_td5.ini.traffic_smart           = td5_ini_int("Traffic", "TrafficSmart", 1);
+    /* RandomBranch defaults OFF (opt-in): unlike the other three behaviours it
+     * writes traffic route_state (selector + table ptr), which the faithful
+     * racer peer-scan td5_ai_find_offset_peer reads to decide cross-route swaps
+     * — so enabling it measurably changes racer race-lines (racers stay stable
+     * and finish, but trajectories diverge). Verified: with RandomBranch OFF the
+     * racer trace is byte-identical to faithful; ON, slots 0-5 diverge. Set
+     * [Traffic] RandomBranch=1 (or --TrafficRandomBranch=1) to enable varied
+     * traffic branches at the cost of byte-identical racing. */
+    g_td5.ini.traffic_random_branch   = td5_ini_int("Traffic", "RandomBranch", 0);
+    g_td5.ini.traffic_wall_avoid      = td5_ini_int("Traffic", "WallAvoid", 1);
+    g_td5.ini.traffic_avoid_slow_lane = td5_ini_int("Traffic", "AvoidSlowLane", 1);
+    g_td5.ini.traffic_lookahead       = td5_ini_int("Traffic", "Lookahead", 1);
+    g_td5.ini.traffic_wall_avoid_bias = td5_ini_int("Traffic", "WallAvoidBias", 96);
+    if (g_td5.ini.traffic_wall_avoid_bias < 0)   g_td5.ini.traffic_wall_avoid_bias = 0;
+    if (g_td5.ini.traffic_wall_avoid_bias > 256) g_td5.ini.traffic_wall_avoid_bias = 256;
     g_td5.ini.player1_joystick   = td5_ini_int("GameOptions", "Player1Joystick", 0);
     g_td5.ini.player2_joystick   = td5_ini_int("GameOptions", "Player2Joystick", 0);
 

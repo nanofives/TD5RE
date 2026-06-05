@@ -107,6 +107,17 @@ int  td5_track_load_runtime_data(int track_index, int reverse);
 int              td5_track_get_span_count(void);
 int              td5_track_get_ring_length(void);
 int              td5_track_get_span_lane_count(int span_index);
+/* Per-lane surface type for a span (reuses surface_type_for_span_lane).
+ * Returns the surface byte: 0x00-0x0F = main-road surface (low nibble of
+ * surface_attribute), 0x10-0x1F = alternate/off-road surface (high nibble |
+ * 0x10) when the span's lane bitmask (byte +0x02) marks the lane. Returns
+ * TD5_SURFACE_DRY_ASPHALT for an out-of-range span/lane. Used by the
+ * S20 smart-traffic lane chooser to avoid parking traffic on a slow lane. */
+int              td5_track_get_span_lane_surface(int span_index, int lane);
+/* 1 if `surface_type` (as returned above) is a "slow"/off-road surface the
+ * smart-traffic chooser should avoid: the alternate-surface bit (0x10) is set,
+ * or the base surface is DIRT(3)/GRAVEL(4). Asphalt (dry/wet) is not slow. */
+int              td5_track_surface_is_slow(int surface_type);
 int              td5_track_branch_to_junction(int span_idx);
 int              td5_track_get_fwd_sentinel(void);
 /* Junction-table lookup for orig UpdateRaceActors @ 0x00436A70 route_table

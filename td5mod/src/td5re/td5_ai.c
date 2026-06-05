@@ -1585,7 +1585,14 @@ void td5_ai_compute_rubber_band(void) {
  * the active actor count (6/12/2).
  * ======================================================================== */
 
+/* Forward decl — defined with the S20 smart-traffic helpers below. */
+static void td5_traffic_smart_reset(void);
+
 void td5_ai_init_race_actor_runtime(void) {
+    /* [S20 smart-traffic] reset per-actor smart-traffic state once per race
+     * (route assignments, PRNG seeds, lane biases). Cheap; harmless when the
+     * feature is disabled. */
+    td5_traffic_smart_reset();
     /* [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60 reads gRaceDifficultyTier
      * @ 0x00463210 throughout the Layer-2 decision tree.] The port previously
      * read a file-static `g_race_difficulty_tier` that was never written —
@@ -5386,6 +5393,287 @@ void td5_ai_init_traffic_actors(void) {
  *   - Stage 2 hdelta band check uses strict bounds (0x400, 0xC00) per the
  *     JLE/JGE pair at 0x435F2B/0x435F32, not >= and <=.
  */
+
+/* ========================================================================
+ * SOURCE-PORT ENHANCEMENT — Smart Traffic (S20, 2026-06-05)
+ *
+ * The original background traffic is deliberately simple: a flat 0x3c cruise
+ * command [CONFIRMED @ 0x00435E80], a fully deterministic junction route
+ * (a linear remap-table walk, NO RNG — confirmed _rand @ 0x00448157 is never
+ * called from the route path), and no active lateral wall avoidance (traffic
+ * slots >= 6 are even skipped by the lateral wall-contact synthesis, see
+ * td5_track.c:1035). This block layers four OPTIONAL, individually-gateable
+ * behaviours on top, applied ONLY to traffic slots (>= g_traffic_slot_base);
+ * racing AI (slots 0..5, a different code path entirely) is untouched. With
+ * [Traffic] TrafficSmart=0 the traffic is byte-faithful again.
+ *
+ *   1. RandomBranch  — give each traffic car a route table (LEFT/RIGHT) chosen
+ *                      from a DEDICATED per-actor PRNG, so cars take varied
+ *                      branches at forks instead of all following one route.
+ *   2. WallAvoid     — bias an edge-lane car's lateral target toward the lane
+ *                      interior so it stops scraping the rail.
+ *   3. AvoidSlowLane — prefer the asphalt lane over an off-road shoulder lane
+ *                      (the only per-lane attribute the track exposes is the
+ *                      lane bitmask + surface_attribute; there is NO native
+ *                      lane-speed field, so this is a clearly-marked heuristic).
+ *   4. Lookahead     — when a car is close ahead in our lane, change to a clear
+ *                      adjacent lane (and ease the hard brake) instead of just
+ *                      ramming/braking. Falls back to the faithful TTC brake.
+ *
+ * IMPORTANT: the shared CRT rand()/td5_msvc_rand() sequence drives AI *racer*
+ * car selection (paired-capture verified), so perturbing it here would change
+ * racer determinism. These helpers therefore use a SEPARATE per-actor LCG with
+ * its own state and never touch the shared _holdrand.
+ * ======================================================================== */
+
+/* Per-actor smart-traffic state (indexed by actor slot). */
+static uint32_t s_traffic_smart_rng[TD5_MAX_TOTAL_ACTORS];     /* dedicated LCG */
+static uint8_t  s_traffic_route_assigned[TD5_MAX_TOTAL_ACTORS];/* sticky branch flag */
+static int8_t   s_traffic_lane_bias[TD5_MAX_TOTAL_ACTORS];     /* situational lane offset (-1/0/+1), 1-tick latency */
+
+/* Per-race diagnostic counters — observe which behaviours actually trigger
+ * (the rate-limited per-event logs can miss firings). Dumped periodically. */
+static struct {
+    int react_calls;          /* react_to_peer entered with a real peer       */
+    int ease_diff_lane;       /* eased: nearest peer in a different lane       */
+    int ease_lane_change;     /* eased: same-lane, changed to a clear lane     */
+    int blocked_single_lane;  /* couldn't act: span had <=1 lane (brake stays) */
+    int no_clear_lane;        /* same-lane peer but no clear adjacent (brake)   */
+    int slow_lane_change;     /* choose_lane stepped off a slow/off-road lane  */
+    int wall_nudges;          /* edge-lane targets nudged toward lane centre   */
+} s_smart_stat;
+
+/* Reset all smart-traffic per-actor state. Called once per race from
+ * td5_ai_init_race_actor_runtime(). */
+static void td5_traffic_smart_reset(void) {
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+        s_traffic_smart_rng[i] = 0;
+        s_traffic_route_assigned[i] = 0;
+        s_traffic_lane_bias[i] = 0;
+    }
+    memset(&s_smart_stat, 0, sizeof(s_smart_stat));
+}
+
+/* Well-mixed 32-bit integer hash (Murmur3-style finalizer) so per-slot seeds
+ * decorrelate — a plain LCG step on adjacent (slot,span) seeds gave a skewed
+ * LEFT/RIGHT split across the 6 traffic slots. */
+static uint32_t traffic_smart_hash(uint32_t x) {
+    x ^= x >> 16; x *= 0x7FEB352Du;
+    x ^= x >> 15; x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
+
+/* Advance the per-slot dedicated LCG (MSVC constants, but private state — does
+ * NOT touch the shared rand()). Lazily self-seeds from the slot index. */
+static uint32_t traffic_smart_rng_next(int slot) {
+    uint32_t s = s_traffic_smart_rng[slot];
+    if (s == 0)
+        s = traffic_smart_hash((uint32_t)(slot + 1) * 0x9E3779B1u) | 1u;
+    s = s * 214013u + 2531011u;
+    s_traffic_smart_rng[slot] = s;
+    return (s >> 16) & 0x7FFFu;
+}
+
+/* (1) RandomBranch: assign this traffic actor a route table once (sticky for
+ * the race), setting selector + table pointer CONSISTENTLY so heading and
+ * branch decisions agree. No-op when disabled, slot is not traffic, the actor
+ * is already assigned, or the chosen route table is absent (single-route
+ * track). span_seed mixes spawn position into the seed for track variety. */
+static void traffic_smart_assign_route(int slot, int32_t *rs, int span_seed) {
+    int r;
+    if (!g_td5.ini.traffic_smart || !g_td5.ini.traffic_random_branch)
+        return;
+    if (slot < g_traffic_slot_base || slot >= TD5_MAX_TOTAL_ACTORS)
+        return;
+    if (s_traffic_route_assigned[slot])
+        return;
+    s_traffic_route_assigned[slot] = 1;
+    if (s_traffic_smart_rng[slot] == 0)
+        s_traffic_smart_rng[slot] =
+            traffic_smart_hash(((uint32_t)(slot + 1) * 0x9E3779B1u)
+                             ^ ((uint32_t)(span_seed + 1) * 0x85EBCA77u)) | 1u;
+    /* take a high, well-mixed bit for a ~50/50 LEFT/RIGHT split */
+    r = (int)((traffic_smart_rng_next(slot) >> 9) & 1u);   /* 0 = LEFT, 1 = RIGHT */
+    if (g_route_tables[r] == NULL) {
+        r ^= 1;                                      /* track has only one route */
+        if (g_route_tables[r] == NULL)
+            return;
+    }
+    rs[RS_ROUTE_TABLE_SELECTOR] = r;
+    rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[r];
+    TD5_LOG_I(LOG_TAG, "traffic_smart_branch: slot=%d route=%s selector=%d",
+              slot, r ? "RIGHT" : "LEFT", r);
+}
+
+/* Scan active actors for one occupying `target_lane` near `self_span` (a car
+ * beside or just ahead). Returns 1 if the lane is clear. */
+static int traffic_lane_is_clear(int self_slot, int self_span,
+                                 int target_lane, int polarity) {
+    int n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (int i = 0; i < n; i++) {
+        char *a;
+        int lane, span, diff;
+        if (i == self_slot) continue;
+        a = actor_ptr(i);
+        if (!a) continue;
+        lane = (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX);
+        if (lane != target_lane) continue;
+        span = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+        diff = (polarity == 0) ? (span - self_span) : (self_span - span);
+        if (diff >= -2 && diff <= 6) return 0;   /* occupied */
+    }
+    return 1;
+}
+
+/* (4) Lookahead: when a peer sits in our lane just ahead, pick a clear adjacent
+ * lane to move into (preferring the interior side and never a slow lane), set
+ * the 1-tick-latency lane bias consumed by traffic_smart_choose_lane next tick,
+ * and return 1 to tell the caller to EASE the hard brake. Returns 0 (and clears
+ * the bias) when disabled, single-lane, no same-lane peer, or no clear lane —
+ * in which case the faithful TTC brake stands. */
+static int traffic_smart_react_to_peer(int slot, int self_span, int self_sub_lane,
+                                        int lane_count, int peer_slot, int polarity) {
+    char *peer;
+    int peer_lane, dir_first, dirs[2], k;
+    if (!g_td5.ini.traffic_smart || !g_td5.ini.traffic_lookahead ||
+        peer_slot < 0 || peer_slot >= TD5_MAX_TOTAL_ACTORS || peer_slot == slot) {
+        s_traffic_lane_bias[slot] = 0;
+        return 0;
+    }
+    peer = actor_ptr(peer_slot);
+    if (!peer) { s_traffic_lane_bias[slot] = 0; return 0; }
+    s_smart_stat.react_calls++;
+    if (lane_count <= 1) {
+        /* Single-lane span: nowhere to go around — the faithful brake is the
+         * correct response. */
+        s_smart_stat.blocked_single_lane++;
+        s_traffic_lane_bias[slot] = 0;
+        return 0;
+    }
+    peer_lane = (int)ACTOR_U8(peer, ACTOR_SUB_LANE_INDEX);
+    if (peer_lane != self_sub_lane) {
+        s_smart_stat.ease_diff_lane++;
+        /* The nearest peer is in a DIFFERENT lane on a multi-lane span — not an
+         * actual collision course. The faithful TTC brakes purely on span
+         * distance (lane-agnostic) and would needlessly stop us behind a car in
+         * the next lane. Ease (keep rolling, no lane change) so parallel-lane
+         * traffic flows past instead of stacking up. */
+        s_traffic_lane_bias[slot] = 0;
+        if ((g_ai_frame_counter % 30u) == 0u)
+            TD5_LOG_I(LOG_TAG,
+                      "traffic_smart_avoid: slot=%d peer=%d in lane %d (self %d) "
+                      "-> ease (different lane, no brake)",
+                      slot, peer_slot, peer_lane, self_sub_lane);
+        return 1;
+    }
+
+    dir_first = (self_sub_lane < lane_count / 2) ? +1 : -1;  /* prefer interior */
+    dirs[0] = dir_first;
+    dirs[1] = -dir_first;
+    for (k = 0; k < 2; k++) {
+        int cand = self_sub_lane + dirs[k];
+        if (cand < 0 || cand >= lane_count) continue;
+        if (g_td5.ini.traffic_avoid_slow_lane &&
+            td5_track_surface_is_slow(td5_track_get_span_lane_surface(self_span, cand)))
+            continue;
+        if (traffic_lane_is_clear(slot, self_span, cand, polarity)) {
+            s_traffic_lane_bias[slot] = (int8_t)dirs[k];
+            s_smart_stat.ease_lane_change++;
+            if ((g_ai_frame_counter % 30u) == 0u)
+                TD5_LOG_I(LOG_TAG,
+                          "traffic_smart_avoid: slot=%d peer=%d lane %d->%d (ease brake)",
+                          slot, peer_slot, self_sub_lane, cand);
+            return 1;
+        }
+    }
+    s_smart_stat.no_clear_lane++;
+    s_traffic_lane_bias[slot] = 0;
+    return 0;
+}
+
+/* (2)+(3) Choose the target sub-lane: apply the situational lane bias (set last
+ * tick by react_to_peer) then avoid-slow-lane. Returns base_sub_lane unchanged
+ * when disabled or single-lane. Result is clamped to [0, lane_count-1]. */
+static int traffic_smart_choose_lane(int slot, int target_span,
+                                     int lane_count, int base_sub_lane) {
+    int lane;
+    if (!g_td5.ini.traffic_smart || lane_count <= 1)
+        return base_sub_lane;
+    lane = base_sub_lane;
+    if (lane < 0) lane = 0;
+    if (lane >= lane_count) lane = lane_count - 1;
+
+    /* situational lane change (1-tick latency) */
+    if (g_td5.ini.traffic_lookahead && s_traffic_lane_bias[slot] != 0) {
+        int cand = lane + s_traffic_lane_bias[slot];
+        if (cand >= 0 && cand < lane_count) lane = cand;
+    }
+
+    /* avoid a slow / off-road lane: step to the nearest faster lane */
+    if (g_td5.ini.traffic_avoid_slow_lane &&
+        td5_track_surface_is_slow(td5_track_get_span_lane_surface(target_span, lane))) {
+        int toward_centre = (lane < lane_count / 2) ? +1 : -1;
+        int picked = lane, d;
+        for (d = 1; d < lane_count; d++) {
+            int c1 = lane + toward_centre * d;
+            int c2 = lane - toward_centre * d;
+            if (c1 >= 0 && c1 < lane_count &&
+                !td5_track_surface_is_slow(td5_track_get_span_lane_surface(target_span, c1))) {
+                picked = c1; break;
+            }
+            if (c2 >= 0 && c2 < lane_count &&
+                !td5_track_surface_is_slow(td5_track_get_span_lane_surface(target_span, c2))) {
+                picked = c2; break;
+            }
+        }
+        if (picked != lane) s_smart_stat.slow_lane_change++;
+        lane = picked;
+    }
+
+    if (lane != base_sub_lane && (g_ai_frame_counter % 60u) == 0u)
+        TD5_LOG_I(LOG_TAG, "traffic_smart_lane: slot=%d base=%d -> %d (lanes=%d span=%d)",
+                  slot, base_sub_lane, lane, lane_count, target_span);
+    return lane;
+}
+
+/* (2) WallAvoid: blend an edge-lane car's lateral target (24.8 FP) toward the
+ * interior neighbour lane so it stops scraping the rail. Interior lanes are
+ * left exactly centred (preserves lane separation). No-op when disabled or
+ * single-lane. */
+static void traffic_smart_wall_nudge(int target_span, int target_sub_lane,
+                                     int lane_count, int32_t *tx,
+                                     int32_t *ty, int32_t *tz) {
+    int bias, inward, ix = 0, iy = 0, iz = 0;
+    if (!g_td5.ini.traffic_smart || !g_td5.ini.traffic_wall_avoid || lane_count <= 1)
+        return;
+    bias = g_td5.ini.traffic_wall_avoid_bias;
+    if (bias <= 0) return;
+    if (target_sub_lane <= 0)
+        inward = 1;
+    else if (target_sub_lane >= lane_count - 1)
+        inward = lane_count - 2;
+    else
+        return;   /* interior lane already away from both rails */
+    if (!td5_track_get_span_lane_world(target_span, inward, &ix, &iy, &iz))
+        return;
+    {
+        int32_t dx_move = (int32_t)(((int64_t)(ix - *tx) * bias) >> 8);
+        int32_t dz_move = (int32_t)(((int64_t)(iz - *tz) * bias) >> 8);
+        *tx += dx_move;
+        *ty += (int32_t)(((int64_t)(iy - *ty) * bias) >> 8);
+        *tz += dz_move;
+        s_smart_stat.wall_nudges++;
+        /* Rate-limited so the before/after trace can count edge-lane nudges. */
+        if ((g_ai_frame_counter % 60u) == 0u)
+            TD5_LOG_I(LOG_TAG,
+                      "traffic_smart_wallnudge: span=%d edge_lane=%d->interior=%d "
+                      "moved(dx=%d dz=%d) [24.8 FP]",
+                      target_span, target_sub_lane, inward, dx_move, dz_move);
+    }
+}
+
 void td5_ai_update_traffic_route_plan(int slot) {
     int32_t *rs = route_state(slot);
     char *actor  = actor_ptr(slot);
@@ -5412,6 +5700,25 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
     /* --- Stage 1: Recycle --- */
     td5_ai_recycle_traffic_actor();
+
+    /* [S20 smart-traffic] RandomBranch — assign this traffic car a route table
+     * (sticky, once per race) so it follows LEFT or RIGHT at forks. Done before
+     * Stage 2 so the heading read below uses the assigned table consistently.
+     * No-op when disabled / single-route track / racing AI. */
+    traffic_smart_assign_route(slot, rs, (int)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED));
+
+    /* [S20 smart-traffic] periodic diagnostic dump (one slot, every ~300 frames)
+     * so the before/after trace can confirm which behaviours actually fired. */
+    if (g_td5.ini.traffic_smart && slot == g_traffic_slot_base &&
+        (g_ai_frame_counter % 300u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_smart_stat: react=%d ease_difflane=%d ease_lanechg=%d "
+                  "single_lane=%d no_clear=%d slow_lane=%d wallnudge=%d",
+                  s_smart_stat.react_calls, s_smart_stat.ease_diff_lane,
+                  s_smart_stat.ease_lane_change, s_smart_stat.blocked_single_lane,
+                  s_smart_stat.no_clear_lane, s_smart_stat.slow_lane_change,
+                  s_smart_stat.wall_nudges);
+    }
 
     /* --- Stage 2: Heading misalignment check ---
      * [CONFIRMED @ 0x00435EA6-0x00435FA8]
@@ -5679,10 +5986,24 @@ void td5_ai_update_traffic_route_plan(int slot) {
                 }
             }
 
+            /* [S20 smart-traffic] AvoidSlowLane + situational lane change:
+             * adjust the faithful target sub-lane toward a faster / clearer
+             * lane. No-op when disabled / single-lane. */
+            target_sub_lane = traffic_smart_choose_lane(
+                slot, target_span,
+                td5_track_get_span_lane_count(target_span), target_sub_lane);
+
             int target_x = 0, target_y = 0, target_z = 0;
 
             if (td5_track_get_span_lane_world(target_span, target_sub_lane,
                                               &target_x, &target_y, &target_z)) {
+                /* [S20 smart-traffic] WallAvoid: nudge an edge-lane target
+                 * toward the lane interior so the car stops scraping the rail.
+                 * Interior lanes are untouched. No-op when disabled. */
+                traffic_smart_wall_nudge(
+                    target_span, target_sub_lane,
+                    td5_track_get_span_lane_count(target_span),
+                    &target_x, &target_y, &target_z);
                 /* [CONFIRMED @ 0x00436344-0x004363EF] Original re-reads
                  *   EAX = rs[RS_SLOT_INDEX] (= ref_slot)
                  *   ESI = ref_actor.world_pos_x   (offset 0x1FC, DAT_004ab304)
@@ -5731,6 +6052,11 @@ void td5_ai_update_traffic_route_plan(int slot) {
     /* --- Stage 7: Peer avoidance / yield --- */
     peer = td5_ai_find_nearest_route_peer(rs);
 
+    /* [S20 smart-traffic] default: no lane change this tick (cleared unless a
+     * close same-lane peer triggers react_to_peer below). */
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+        s_traffic_lane_bias[slot] = 0;
+
     if (peer != slot) {
         /* Peer found — faithful TTC formula [CONFIRMED @ 0x4364E0–0x43656E] */
         char *peer_actor = actor_ptr(peer);
@@ -5741,6 +6067,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
         int32_t iVar14;        /* combined progress delta: (spans * 0x100) */
         int32_t iVar7, iVar13; /* intermediate TTC and final TTC */
         int32_t speed_shifted; /* self_speed >> 10 with arithmetic rounding */
+        int     smart_ease = 0; /* 1 = a clear lane exists; ease instead of hard brake */
 
         self_speed  = g_actor_forward_track_component[slot];
         peer_speed  = g_actor_forward_track_component[peer];
@@ -5753,11 +6080,30 @@ void td5_ai_update_traffic_route_plan(int slot) {
             span_diff_dir = (int32_t)self_span - (int32_t)peer_span;
         }
 
+        /* [S20 smart-traffic] Lookahead: when the nearest peer is close ahead in
+         * our lane and a clear adjacent lane exists, set up a lane change (next
+         * tick) and ease the hard brake instead of ramming/stopping. Outside the
+         * close window we leave the faithful TTC behaviour untouched. */
+        if (span_diff_dir > -6 && span_diff_dir < 8 && self_speed > 0) {
+            smart_ease = traffic_smart_react_to_peer(
+                slot, (int)self_span,
+                (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX),
+                td5_track_get_span_lane_count((int)self_span),
+                peer, polarity);
+        }
+
         /* Proximity gate [CONFIRMED @ 0x43646A]: if peer within 4 spans and moving, brake now */
         if (span_diff_dir > -4 && self_speed > 0) {
-            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
-            TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d proximity gate span_diff=%d", slot, span_diff_dir);
+            if (smart_ease) {
+                /* Clear lane found — keep rolling (gentle throttle) while the
+                 * lane bias above steers around the obstacle next tick. */
+                ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0x28; /* eased cruise */
+            } else {
+                ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
+                TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d proximity gate span_diff=%d", slot, span_diff_dir);
+            }
             goto ttc_done;
         }
 
@@ -5782,9 +6128,16 @@ void td5_ai_update_traffic_route_plan(int slot) {
         /* Brake condition [CONFIRMED @ 0x436561–0x43656E]:
          * ttc - 8 <= speed_shifted  &&  ttc >= 0  &&  self_speed > 0 */
         if (iVar13 - 8 <= speed_shifted && iVar13 > -1 && self_speed > 0) {
-            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
-            TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d ttc=%d spd_shifted=%d", slot, iVar13, speed_shifted);
+            if (smart_ease) {
+                /* [S20 smart-traffic] ease instead of hard brake — a clear lane
+                 * exists, so slow gently and steer around next tick. */
+                ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0x28;
+            } else {
+                ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
+                TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d ttc=%d spd_shifted=%d", slot, iVar13, speed_shifted);
+            }
         }
     }
 ttc_done:;

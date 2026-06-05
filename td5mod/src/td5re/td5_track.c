@@ -1936,6 +1936,46 @@ static int surface_type_for_span_lane(const TD5_StripSpan *sp, int lane)
     return attr & 0x0F;
 }
 
+/* ------------------------------------------------------------------------
+ * Public per-lane surface accessors (S20 smart-traffic).
+ *
+ * These expose the existing static surface_type_for_span_lane() decode so
+ * td5_ai.c's smart-traffic lane chooser can prefer the faster (asphalt) lane
+ * over a slow off-road shoulder. There is NO native per-lane speed attribute
+ * in the original (DAT_00650cd4 has zero xrefs); the only per-lane data the
+ * track exposes is the lane bitmask (byte +0x02) + surface_attribute, decoded
+ * here. Classification is a clearly-marked source-port heuristic.
+ * ---------------------------------------------------------------------- */
+int td5_track_get_span_lane_surface(int span_index, int lane)
+{
+    const TD5_StripSpan *sp;
+    int lane_count;
+
+    if (!s_span_array || span_index < 0 || span_index >= s_span_count)
+        return TD5_SURFACE_DRY_ASPHALT;
+
+    sp = &s_span_array[span_index];
+    lane_count = span_lane_count(sp);
+    if (lane_count < 1) lane_count = 1;
+    if (lane < 0) lane = 0;
+    if (lane >= lane_count) lane = lane_count - 1;
+
+    /* surface_type_for_span_lane masks lane to bit (1u<<lane); lanes >= 8 wrap
+     * the bitmask, so clamp the bit index defensively to the byte width. */
+    return surface_type_for_span_lane(sp, lane & 7);
+}
+
+int td5_track_surface_is_slow(int surface_type)
+{
+    /* Alternate/off-road surface (bitmask bit set -> high-nibble surface). */
+    if ((surface_type & 0x10) != 0)
+        return 1;
+    /* Base dirt/gravel are slow; dry/wet asphalt are road-speed. */
+    if ((surface_type & 0x0F) >= TD5_SURFACE_DIRT)
+        return 1;
+    return 0;
+}
+
 static void *build_span_strip_display_list(int span_index)
 {
     const TD5_StripSpan *sp;

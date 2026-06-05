@@ -291,6 +291,22 @@ typedef struct TD5_GlobalState {
          * constants. Bicycle-critical fields (Wf/Wr/I/grip) stay on the AI
          * template for stability. 0 = faithful template-only behaviour. */
         int  ai_accel_from_car;
+        /* --- S20 Smart Traffic (source-port enhancement, all default ON) ---
+         * The original background traffic is scripted/reactive (flat 0x3c cruise,
+         * deterministic junction route, no active wall avoidance). These knobs
+         * layer four tunable behaviours on top, applied ONLY to traffic slots
+         * (>= g_traffic_slot_base); racing AI (slots 0-5) is untouched. Each can
+         * be disabled independently; traffic_smart=0 disables all four (fully
+         * faithful traffic). Section [Traffic] in td5re.ini. */
+        int  traffic_smart;            /* master gate (default 1) */
+        int  traffic_random_branch;    /* vary route table per traffic car (default 0 = OFF;
+                                        * opt-in — touches route_state the racer peer-scan
+                                        * reads, so it changes racer race-lines. The other
+                                        * three behaviours are racer-neutral, default ON.) */
+        int  traffic_wall_avoid;       /* bias edge-lane target toward lane centre (default 1) */
+        int  traffic_avoid_slow_lane;  /* prefer asphalt lane over off-road shoulder (default 1) */
+        int  traffic_lookahead;        /* lane-change/ease around a car close ahead (default 1) */
+        int  traffic_wall_avoid_bias;  /* edge-lane inward blend, 0..256 (default 96 ~= 0.375) */
         /* Per-player joystick selection (0 = keyboard, >=1 = 1-based enumerated
          * joystick index). Overrides the device index persisted in Config.td5.
          * The original supports up to 2 simultaneous joystick devices. */
