@@ -195,6 +195,12 @@ static int32_t g_slot_race_result[TD5_MAX_RACER_SLOTS];
 static int32_t g_slot_race_bonus [TD5_MAX_RACER_SLOTS];
 static int32_t g_slot_race_points[TD5_MAX_RACER_SLOTS];
 static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded bitmask (1=grounded) */
+
+/* [S18] Per-slot consecutive-ticks-over-attitude-limit counter, used ONLY on
+ * migrated TD6 tracks to debounce the MODE-0 recovery latch (see
+ * td5_physics_clamp_attitude). Faithful TD5 tracks never touch this. */
+#define S18_TD6_RECOVERY_DEBOUNCE_TICKS 8   /* ~0.27s at 30Hz before recovery latches on TD6 */
+static uint8_t s_td6_recovery_debounce[TD5_MAX_TOTAL_ACTORS];
 static void integrate_traffic_pose(TD5_Actor *actor);  /* forward decl */
 static inline void td5_transform_short_vec3_by_render_matrix_rounded(
     const int16_t param_1[3], int32_t param_2[3], const float matrix[12]);  /* fwd decl (def @ 7240) */
@@ -8679,8 +8685,57 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
      * faithfully; the upstream suspension drift fix is out of scope. */
 
     /* Inside-limits early-out [0x00405C5C-78] */
-    if (iVar1 >= -0x355 && iVar1 <= 0x355 &&
-        iVar2 >= -0x3A4 && iVar2 <= 0x3A4) {
+    int within_limits = (iVar1 >= -0x355 && iVar1 <= 0x355 &&
+                         iVar2 >= -0x3A4 && iVar2 <= 0x3A4);
+
+    /* [S18 FIX — TD6-scoped recovery-latch debounce]
+     * Bug: on the migrated TD6 tracks the car "goes vertical and instantly
+     * triggers recovery" on down slopes. Root analysis (S18):
+     *   - The TD6 collision geometry is NOT anomalously steep: measured road
+     *     slopes peak ~21deg (Rome/London), with banking/curvature comparable
+     *     to stock Newcastle. A 21deg slope is pitch ~0xE3, far below the 0x3A4
+     *     (82deg) recovery threshold — so the limit is only reached by a
+     *     TRANSIENT overshoot, not by the terrain itself.
+     *   - The MODE-0 recovery latch above is byte-faithful, but the port carries
+     *     a known suspension equilibrium drift (see the note above: this branch
+     *     was historically DISABLED in the port for exactly this reason, then
+     *     re-enabled for faithfulness with the drift fix left "out of scope").
+     *     On a slope that drift transiently spikes pitch/roll past the limit for
+     *     a frame or two and the immediate latch yanks the car into recovery.
+     * Mitigation: on TD6 tracks ONLY (g_active_td6_level > 0), require the
+     * over-limit condition to PERSIST for a few consecutive ticks before
+     * latching recovery. A genuinely flipped car stays over-limit and still
+     * recovers a few ticks later (~0.27s, imperceptible); a transient drift
+     * spike clears before the debounce elapses, so the car keeps driving.
+     * Faithful TD5 tracks (g_active_td6_level == 0) are byte-IDENTICAL: the
+     * debounce block is skipped entirely and the immediate latch is preserved.
+     *
+     * NOTE: this addresses the SYMPTOM (the spurious instant yank). The deeper
+     * root is the port suspension drift; the over-limit log below records each
+     * suppressed spike so the exact spiral can be captured on a real drive and
+     * the drift fixed at source in a follow-up. */
+    if (g_active_td6_level > 0) {
+        int dbi = (int)actor->slot_index;
+        if (dbi < 0 || dbi >= TD5_MAX_TOTAL_ACTORS) dbi = 0;
+        if (!within_limits) {
+            if (s_td6_recovery_debounce[dbi] < 255)
+                s_td6_recovery_debounce[dbi]++;
+            TD5_LOG_I(LOG_TAG,
+                "S18 TD6 attitude over-limit slot=%d roll=%d pitch=%d ticks=%d "
+                "span_raw=%d wcb=0x%02x (latch when ticks>=%d)",
+                (int)actor->slot_index, (int)iVar1, (int)iVar2,
+                (int)s_td6_recovery_debounce[dbi],
+                (int)*(int16_t *)((uint8_t *)actor + 0x80),
+                (int)actor->wheel_contact_bitmask,
+                S18_TD6_RECOVERY_DEBOUNCE_TICKS);
+            if (s_td6_recovery_debounce[dbi] < S18_TD6_RECOVERY_DEBOUNCE_TICKS)
+                within_limits = 1;   /* not yet persistent — suppress recovery */
+        } else {
+            s_td6_recovery_debounce[dbi] = 0;  /* settled — reset */
+        }
+    }
+
+    if (within_limits) {
         td5_pilot_emit_00405B40_leave(actor, branch_taken);  /* branch_taken==0 here */
         return;
     }
@@ -8747,6 +8802,22 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
     /* Set recovery state flags [0x00405D4E-5D].
      *   MOV byte ptr [EBX+0x379], 0x1   -> vehicle_mode = 1
      *   MOV word ptr [EBX+0x338], 0x0   -> frame_counter = 0 (int16 write) */
+    /* [S18] Event log at the recovery latch: records the attitude (roll/pitch)
+     * that tripped it and the span/collision context. Fires only when recovery
+     * actually engages (a rare, session-level event, NOT a per-tick path), so
+     * the cost is negligible. This is the capture the user needs when driving a
+     * down slope: it pins down whether pitch/roll genuinely reach the 0x3A4
+     * (~82deg) / 0x355 limit and on which span, so the residual port suspension
+     * drift behind the TD6 down-slope blow-up can be fixed at source. */
+    if (actor->vehicle_mode != 1) {
+        TD5_LOG_I(LOG_TAG,
+            "S18 RECOVERY LATCH: slot=%d roll=%d pitch=%d (lim roll=0x355 pitch=0x3A4) "
+            "span_raw=%d span_norm=%d collflag=%d td6=%d",
+            (int)actor->slot_index, (int)iVar1, (int)iVar2,
+            (int)*(int16_t *)((uint8_t *)actor + 0x80),
+            (int)*(int16_t *)((uint8_t *)actor + 0x82),
+            (int)g_collisions_enabled, (int)g_active_td6_level);
+    }
     actor->vehicle_mode = 1;
     actor->frame_counter = 0;
 
