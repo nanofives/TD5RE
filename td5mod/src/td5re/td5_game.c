@@ -4960,16 +4960,29 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
      * finish stays s_td6_finish_span, circuit stays lap-based, and there is no
      * beat-the-clock fail-timer. s_td6_cp_count is 0 on every faithful TD5
      * track, so this is a no-op there. */
+    /* [S18] For P2P TD6 tracks (s_td6_finish_span > 0) the checkpoint spans
+     * ascend monotonically toward the finish, so gate them on the RAW
+     * accumulated span (+0x84) for the same reason as the finish gate below:
+     * a reverse at the start wraps the normalized span (+0x82) to ~ring_length-1
+     * and would otherwise FALSELY register every checkpoint at once (observed:
+     * "cp=1/5 span=2353" the moment the car reversed past span 0). The raw
+     * accumulator equals the normalized span for forward driving (so forward
+     * behaviour is unchanged) and stays negative on reverse. Circuit TD6 tracks
+     * (s_td6_finish_span == 0) keep the normalized span — laps wrap there and
+     * the normalized value is the correct lap-relative position. */
+    int td6_cp_basis = (int)actor_span;
+    if (s_td6_finish_span > 0 && actor)
+        td6_cp_basis = (int)*(int16_t *)((uint8_t *)actor + 0x84);
     if (s_td6_cp_count > 0 &&
         s_td6_cp_index[slot] < s_td6_cp_count &&
-        (int)actor_span >= s_td6_cp_spans[s_td6_cp_index[slot]]) {
+        td6_cp_basis >= s_td6_cp_spans[s_td6_cp_index[slot]]) {
         int idx = s_td6_cp_index[slot];
         if (idx < 9)
             m->lap_split_times[idx] = (int16_t)m->cumulative_timer;
         s_td6_cp_index[slot] = (uint8_t)(idx + 1);
         TD5_LOG_I(LOG_TAG,
                   "TD6 checkpoint: slot=%d cp=%d/%d span=%d timer=%d",
-                  slot, idx + 1, s_td6_cp_count, (int)actor_span,
+                  slot, idx + 1, s_td6_cp_count, td6_cp_basis,
                   m->cumulative_timer);
         /* [REMOVED 2026-06-05] previously poked the HUD's on-screen
          * "CHECKPOINT n/N" flash here (td5_hud_set_td6_checkpoint_flash) for
@@ -5225,15 +5238,38 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
          * s_td6_finish_span == 0 and fall through to the byte-faithful
          * checkpoint path unchanged. */
         if (s_td6_finish_span > 0) {
+            /* [S18 FIX — reverse-at-start retirement] Gate the finish on the RAW
+             * accumulated span (+0x84, span_accumulated), NOT the wrapped
+             * normalized span (+0x82 = actor_span).
+             *
+             * On a TD6 P2P track the grid sits near span 0 (Rome/London
+             * start_span=20, slot-0 spawns ~span 11). A small reverse off the
+             * line decrements the raw accumulator below 0; NormalizeActorTrackWrap
+             * State (@0x00443FB0) then wraps a negative raw to ring_length-1
+             * (Rome: -1 -> 2353), and that high value spuriously satisfied
+             * `actor_span >= finish_span` (2348) and ENDED the race after ~2 s of
+             * reverse (the user-reported "reversing at the start kicks me off the
+             * race entirely"; confirmed in log: "span=2353 finish=2348 timer=107").
+             *
+             * The raw accumulator is monotonic forward progress: it only reaches
+             * finish_span by actually driving there and goes NEGATIVE on reverse,
+             * so it never trips on a backward wrap. For a legitimate forward
+             * finish raw == normalized (both < ring_length on a no-branch synth
+             * P2P ring), so this is byte-identical for the normal finish and only
+             * differs on the backward-wrap case. */
+            int32_t raw_acc = actor
+                ? (int32_t)*(int16_t *)((uint8_t *)actor + 0x84)
+                : (int32_t)actor_span;
             if (s_slot_state[slot].companion_1 == 0 &&
-                (int)actor_span >= s_td6_finish_span) {
+                raw_acc >= s_td6_finish_span) {
                 m->post_finish_metric_base = m->cumulative_timer;
                 s_slot_state[slot].companion_1 = 1;
                 s_slot_state[slot].companion_2 = 1;
                 s_slot_state[slot].state = 2;
                 TD5_LOG_I(LOG_TAG,
-                          "Actor finish: slot=%d mode=td6-p2p span=%d finish=%d timer=%d",
-                          slot, (int)actor_span, s_td6_finish_span, m->cumulative_timer);
+                          "Actor finish: slot=%d mode=td6-p2p raw=%d norm=%d finish=%d timer=%d",
+                          slot, (int)raw_acc, (int)actor_span, s_td6_finish_span,
+                          m->cumulative_timer);
             }
             return;   /* TD6 P2P: this is the only finish path (no checkpoints) */
         }

@@ -195,6 +195,12 @@ static int32_t g_slot_race_result[TD5_MAX_RACER_SLOTS];
 static int32_t g_slot_race_bonus [TD5_MAX_RACER_SLOTS];
 static int32_t g_slot_race_points[TD5_MAX_RACER_SLOTS];
 static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded bitmask (1=grounded) */
+
+/* [S18] Per-slot consecutive-ticks-over-attitude-limit counter, used ONLY on
+ * migrated TD6 tracks to debounce the MODE-0 recovery latch (see
+ * td5_physics_clamp_attitude). Faithful TD5 tracks never touch this. */
+#define S18_TD6_RECOVERY_DEBOUNCE_TICKS 8   /* ~0.27s at 30Hz before recovery latches on TD6 */
+static uint8_t s_td6_recovery_debounce[TD5_MAX_TOTAL_ACTORS];
 static void integrate_traffic_pose(TD5_Actor *actor);  /* forward decl */
 static inline void td5_transform_short_vec3_by_render_matrix_rounded(
     const int16_t param_1[3], int32_t param_2[3], const float matrix[12]);  /* fwd decl (def @ 7240) */
@@ -8296,6 +8302,56 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * the car falls under gravity instead, matching the original. */
         int wheel_capped = td5_track_last_contact_was_capped();
 
+        /* [S18 FIX — TD6 branch-fork wheel-probe teleport / chassis-launch]
+         * On the migrated TD6 synth tracks each branch begins with a type-9
+         * SENTINEL_START span whose link_prev points at a DISTANT span (e.g.
+         * Rome branch span 2357 -> link_prev=85). The per-wheel contact probe is
+         * walked independently (td5_track_update_probe_position above), so a
+         * wheel that sits slightly behind the chassis crosses the sentinel's
+         * BACKWARD boundary and the walker follows that wrap-link, TELEPORTING
+         * the wheel's probe to the far span (captured: "S18 WHEEL i=2
+         * probe_span=85 gy=-47872" while the real ground is -368896). That far
+         * span's plane, extrapolated to the wheel's true XZ, reads ~1250 units
+         * too high; the chassis Y-snap then averages that one bogus-high wheel
+         * and ROCKETS the car ~600 units/tick into the air until recovery yanks
+         * it (the user's "down-slope" blow-up — the terrain here is dead flat).
+         *
+         * Reject it: re-probe the ground from the CHASSIS span (which carries a
+         * stable running position and did NOT teleport) at this wheel's XZ. If
+         * the wheel-span ground is a wild outlier vs that reference (|diff| >
+         * 256 world units — far beyond any real suspension travel / camber /
+         * slope, but well under the ~1250-unit teleport error), the wheel probe
+         * jumped to unrelated geometry, so use the chassis-span ground+normal
+         * instead and clear the spurious cap. Faithful TD5 tracks
+         * (g_active_td6_level == 0) are byte-IDENTICAL — this block is skipped.
+         * Only the wheel's GROUND read is corrected; its own XZ/sub_lane (hence
+         * genuine camber) is preserved. */
+        if (g_active_td6_level > 0) {
+            int chassis_span = (int)actor->track_span_raw;
+            int max_sp_ref = td5_track_get_span_count();
+            if (chassis_span >= 0 && chassis_span < max_sp_ref &&
+                chassis_span != probe_span) {
+                int16_t ref_normal[3] = {0, 4096, 0};
+                int32_t ground_ref = td5_track_compute_contact_height_bounded(
+                    chassis_span, (int)actor->wheel_probes[i].sub_lane_index,
+                    actor->wheel_contact_pos[i].x, actor->wheel_contact_pos[i].z,
+                    ref_normal);
+                int ref_capped = td5_track_last_contact_was_capped();
+                int32_t diff = ground_y - ground_ref;
+                if (!ref_capped && (diff > 0x10000 || diff < -0x10000)) {
+                    TD5_LOG_I(LOG_TAG,
+                        "S18 wheel-teleport reject: i=%d probe_span=%d chassis_span=%d "
+                        "gy=%d -> ref_gy=%d (diff=%d)",
+                        i, probe_span, chassis_span, ground_y, ground_ref, diff);
+                    ground_y = ground_ref;
+                    span_normal[0] = ref_normal[0];
+                    span_normal[1] = ref_normal[1];
+                    span_normal[2] = ref_normal[2];
+                    wheel_capped = 0;
+                }
+            }
+        }
+
         /* Write surface normal to wheel_contact_velocities[i][0..2] (actor+0x250+i*8).
          * Original: FUN_00445A70 computes cross-product of span edge vectors >> 12,
          * then FUN_0042CD40 normalizes to magnitude 4096. For flat ground: (0, 4096, 0).
@@ -8545,6 +8601,31 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 body_pos[i]->y = td5_track_compute_contact_height_with_normal(
                     probe_span, probe_lane,
                     body_pos[i]->x, body_pos[i]->z, NULL);
+
+                /* [S18 FIX — TD6 branch-fork probe teleport, shadow corners]
+                 * Same root as the wheel-contact guard above, applied to the
+                 * SHADOW body corners (probe_FL/FR/RL/RR). A body-corner probe
+                 * can follow a branch sentinel's link_prev to a distant span and
+                 * read a wild-high ground; that stretches the shadow decal right
+                 * at the fork (user report: "the shadow distorts where the car
+                 * used to jump"). Re-probe the ground from the CHASSIS span at
+                 * the corner's XZ and, if the corner-span ground is a large
+                 * outlier (> 256 world units) and the reference did not cap, use
+                 * the chassis-span ground instead. TD6-only; faithful TD5 tracks
+                 * are byte-identical. */
+                if (g_active_td6_level > 0) {
+                    int chassis_span = (int)actor->track_span_raw;
+                    if (chassis_span >= 0 && chassis_span < max_sp &&
+                        chassis_span != probe_span) {
+                        int32_t ground_ref = td5_track_compute_contact_height_with_normal(
+                            chassis_span, probe_lane,
+                            body_pos[i]->x, body_pos[i]->z, NULL);
+                        int ref_capped = td5_track_last_contact_was_capped();
+                        int32_t diff = body_pos[i]->y - ground_ref;
+                        if (!ref_capped && (diff > 0x10000 || diff < -0x10000))
+                            body_pos[i]->y = ground_ref;
+                    }
+                }
             }
         }
     }
@@ -8679,8 +8760,57 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
      * faithfully; the upstream suspension drift fix is out of scope. */
 
     /* Inside-limits early-out [0x00405C5C-78] */
-    if (iVar1 >= -0x355 && iVar1 <= 0x355 &&
-        iVar2 >= -0x3A4 && iVar2 <= 0x3A4) {
+    int within_limits = (iVar1 >= -0x355 && iVar1 <= 0x355 &&
+                         iVar2 >= -0x3A4 && iVar2 <= 0x3A4);
+
+    /* [S18 FIX — TD6-scoped recovery-latch debounce]
+     * Bug: on the migrated TD6 tracks the car "goes vertical and instantly
+     * triggers recovery" on down slopes. Root analysis (S18):
+     *   - The TD6 collision geometry is NOT anomalously steep: measured road
+     *     slopes peak ~21deg (Rome/London), with banking/curvature comparable
+     *     to stock Newcastle. A 21deg slope is pitch ~0xE3, far below the 0x3A4
+     *     (82deg) recovery threshold — so the limit is only reached by a
+     *     TRANSIENT overshoot, not by the terrain itself.
+     *   - The MODE-0 recovery latch above is byte-faithful, but the port carries
+     *     a known suspension equilibrium drift (see the note above: this branch
+     *     was historically DISABLED in the port for exactly this reason, then
+     *     re-enabled for faithfulness with the drift fix left "out of scope").
+     *     On a slope that drift transiently spikes pitch/roll past the limit for
+     *     a frame or two and the immediate latch yanks the car into recovery.
+     * Mitigation: on TD6 tracks ONLY (g_active_td6_level > 0), require the
+     * over-limit condition to PERSIST for a few consecutive ticks before
+     * latching recovery. A genuinely flipped car stays over-limit and still
+     * recovers a few ticks later (~0.27s, imperceptible); a transient drift
+     * spike clears before the debounce elapses, so the car keeps driving.
+     * Faithful TD5 tracks (g_active_td6_level == 0) are byte-IDENTICAL: the
+     * debounce block is skipped entirely and the immediate latch is preserved.
+     *
+     * NOTE: this addresses the SYMPTOM (the spurious instant yank). The deeper
+     * root is the port suspension drift; the over-limit log below records each
+     * suppressed spike so the exact spiral can be captured on a real drive and
+     * the drift fixed at source in a follow-up. */
+    if (g_active_td6_level > 0) {
+        int dbi = (int)actor->slot_index;
+        if (dbi < 0 || dbi >= TD5_MAX_TOTAL_ACTORS) dbi = 0;
+        if (!within_limits) {
+            if (s_td6_recovery_debounce[dbi] < 255)
+                s_td6_recovery_debounce[dbi]++;
+            TD5_LOG_I(LOG_TAG,
+                "S18 TD6 attitude over-limit slot=%d roll=%d pitch=%d ticks=%d "
+                "span_raw=%d wcb=0x%02x (latch when ticks>=%d)",
+                (int)actor->slot_index, (int)iVar1, (int)iVar2,
+                (int)s_td6_recovery_debounce[dbi],
+                (int)*(int16_t *)((uint8_t *)actor + 0x80),
+                (int)actor->wheel_contact_bitmask,
+                S18_TD6_RECOVERY_DEBOUNCE_TICKS);
+            if (s_td6_recovery_debounce[dbi] < S18_TD6_RECOVERY_DEBOUNCE_TICKS)
+                within_limits = 1;   /* not yet persistent — suppress recovery */
+        } else {
+            s_td6_recovery_debounce[dbi] = 0;  /* settled — reset */
+        }
+    }
+
+    if (within_limits) {
         td5_pilot_emit_00405B40_leave(actor, branch_taken);  /* branch_taken==0 here */
         return;
     }
@@ -8747,6 +8877,22 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
     /* Set recovery state flags [0x00405D4E-5D].
      *   MOV byte ptr [EBX+0x379], 0x1   -> vehicle_mode = 1
      *   MOV word ptr [EBX+0x338], 0x0   -> frame_counter = 0 (int16 write) */
+    /* [S18] Event log at the recovery latch: records the attitude (roll/pitch)
+     * that tripped it and the span/collision context. Fires only when recovery
+     * actually engages (a rare, session-level event, NOT a per-tick path), so
+     * the cost is negligible. This is the capture the user needs when driving a
+     * down slope: it pins down whether pitch/roll genuinely reach the 0x3A4
+     * (~82deg) / 0x355 limit and on which span, so the residual port suspension
+     * drift behind the TD6 down-slope blow-up can be fixed at source. */
+    if (actor->vehicle_mode != 1) {
+        TD5_LOG_I(LOG_TAG,
+            "S18 RECOVERY LATCH: slot=%d roll=%d pitch=%d (lim roll=0x355 pitch=0x3A4) "
+            "span_raw=%d span_norm=%d collflag=%d td6=%d",
+            (int)actor->slot_index, (int)iVar1, (int)iVar2,
+            (int)*(int16_t *)((uint8_t *)actor + 0x80),
+            (int)*(int16_t *)((uint8_t *)actor + 0x82),
+            (int)g_collisions_enabled, (int)g_active_td6_level);
+    }
     actor->vehicle_mode = 1;
     actor->frame_counter = 0;
 
