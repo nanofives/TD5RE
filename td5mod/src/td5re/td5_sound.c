@@ -334,7 +334,13 @@ int td5_sound_init(void)
         TD5_LOG_W(LOG_TAG, "audio init failed -- running silent");
         return 1; /* graceful degradation, same as original */
     }
-    TD5_LOG_I(LOG_TAG, "audio subsystem initialized");
+    /* Apply the configured SFX volume now. Previously the platform master volume
+     * kept its hard-coded default (40) until the frontend Options screen pushed
+     * the saved value — so any race entered before visiting Options (AutoRace,
+     * or just driving straight in) mixed every SFX at 40% through the wrong part
+     * of the volume curve, which made the whole mix sound weak/flat. */
+    td5_plat_audio_set_master_volume(g_td5.ini.sfx_volume);
+    TD5_LOG_I(LOG_TAG, "audio subsystem initialized (sfx master=%d)", g_td5.ini.sfx_volume);
     return 1;
 }
 
@@ -932,29 +938,6 @@ void td5_sound_update_audio_mix(void)
             if (!actor) continue;
 
             int state_idx = pass + veh * 2;
-
-            /* [S11] Release engine/horn voices for a retired/empty racer slot.
-             * A dead slot carries the 0xFFFFFFFF identity tag at actor+0x371
-             * (UpdateRaceActors 0x436a70 / InitializeRaceVehicleRuntime 0x42f140,
-             * the same tag the tracked-audio block below trusts). Without this,
-             * the engine state machine reads the dead actor's stale RPM every
-             * frame and keeps (or starts) a phantom Drive/Rev loop that holds a
-             * voice for the rest of the race — exactly the kind of leaked loop
-             * that, multiplied across N-way retire/recycle, fills the voice pool.
-             * Stop this slot's voices for the current pass and skip it. */
-            {
-                const uint8_t *idt = (const uint8_t *)actor + 0x371;
-                if (idt[0] == 0xFF && idt[1] == 0xFF &&
-                    idt[2] == 0xFF && idt[3] == 0xFF) {
-                    slot_stop(slot_offset + veh * 3 + 0);
-                    slot_stop(slot_offset + veh * 3 + 1);
-                    slot_stop(slot_offset + veh * 3 + 2);
-                    s_engine_state[state_idx]        = ENGINE_STATE_STOPPED;
-                    s_horn_state[state_idx]          = 0;
-                    s_tracked_audio_state[state_idx] = ENGINE_STATE_STOPPED;
-                    continue;
-                }
-            }
 
             /* ----------------------------------------------------------
              * Viewer vehicle horn/siren tracked audio (per-vehicle)

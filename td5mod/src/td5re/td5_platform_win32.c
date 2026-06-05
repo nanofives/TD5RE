@@ -206,6 +206,25 @@ static uint32_t                s_ds_channel_serial[MAX_AUDIO_CHANNELS]; /* alloc
 static int                     s_ds_channel_loop[MAX_AUDIO_CHANNELS];   /* 1 = looping (steal last) */
 static uint32_t                s_audio_alloc_serial = 0;                /* monotonic alloc counter */
 
+/* Per-voice volume table, reproduced byte-faithfully from M2DX
+ * DXSound::Environment (0x1000cda0):
+ *     table[v] = -(int)( (500/log10(2)) * log10(128/(v+1)) ),  v in 0..127
+ * It maps the mixer's 0..127 volume to DirectSound centibels (hundredths of dB):
+ * 0 dB at v=127, sloping down a log curve to a -35 dB FLOOR at v=0 — NOT silence.
+ * DXSound::Modify sets each voice to table[vol] (no per-sound master scaling), and
+ * the master SFX volume is a SEPARATE attenuation (DXSound::SetVolume applies
+ * table[master>>9] to the primary buffer). The port previously used a different
+ * 20*log10(vol/100) curve AND folded the master in per-sound (vol*master/100),
+ * which (a) muted v=0 entirely so the original's faint engine/ambient layers
+ * vanished (the player's own Drive loop runs at v=0 under the audible Reverb — a
+ * real second engine layer in the original, dead silent in the port) and (b)
+ * shifted the whole balance. We now match the table per-voice and apply the
+ * master as an equivalent dB offset (adding dB == scaling the summed mix, which
+ * is what the original's primary-buffer attenuation does). */
+static int                     s_vol_table[128];
+static int                     s_master_offset_cb = 0;   /* master attenuation, centibels (<=0) */
+static void audio_build_vol_table(void);                 /* defined below, used in audio init */
+
 /* Voice instrumentation (S11): confirm no monotonic leak and that counts return
  * to baseline between races. Active = currently-allocated DirectSound voices
  * (DuplicateSoundBuffer instances), excluding the primary/keepalive buffers. */
@@ -2642,6 +2661,8 @@ int td5_plat_audio_init(void)
     DSBUFFERDESC desc;
     WAVEFORMATEX wfx;
 
+    audio_build_vol_table();          /* faithful per-voice volume curve */
+
     hr = DirectSoundCreate8(NULL, &s_dsound, NULL);
     if (FAILED(hr) || !s_dsound) {
         s_dsound = NULL;
@@ -3032,23 +3053,30 @@ static int find_free_channel(void)
     return -1;
 }
 
-/** Convert 0-100 linear volume to DirectSound's logarithmic dB scale.
- *  DS range: DSBVOLUME_MIN (-10000) to DSBVOLUME_MAX (0). */
-static LONG vol_to_ds(int volume)
+/** Fill s_vol_table with the original M2DX per-voice attenuation curve. Safe to
+ *  call before/after DirectSound init; uses only libm. */
+static void audio_build_vol_table(void)
 {
-    if (volume <= 0)   return DSBVOLUME_MIN;
-    if (volume >= 100) return DSBVOLUME_MAX;
-    /* Perceptual amplitude-dB attenuation: 20*log10(v/100), in DirectSound's
-     * hundredths-of-a-dB. The old -50*(100-v) was linear-IN-dB and far too steep
-     * (v=50 -> -25 dB), which buried every mid-volume sound: a wall scrape at
-     * ~v48 mapped to -26 dB and was masked under the engine, so it was inaudible
-     * even at full SFX volume. Log maps v=50 -> -6 dB, v=25 -> -12 dB, v=10 ->
-     * -20 dB, keeping quieter one-shots (scrape, distant hits) audible while the
-     * loud sounds (engine/collisions near v100) stay at full level. */
-    LONG ds = (LONG)(2000.0 * log10((double)volume / 100.0));
-    if (ds < DSBVOLUME_MIN) ds = DSBVOLUME_MIN;
-    if (ds > DSBVOLUME_MAX) ds = DSBVOLUME_MAX;
-    return ds;
+    int i;
+    double k = 500.0 / log10(2.0);  /* == 1660.964..., the original's scale */
+    for (i = 0; i < 128; i++) {
+        /* (int) truncates toward zero, matching the original's __ftol(). */
+        s_vol_table[i] = -(int)(k * log10(128.0 / (double)(i + 1)));
+    }
+}
+
+/** Final DirectSound volume (centibels) for a mixer voice volume (0..127):
+ *  faithful per-voice table value plus the separate master attenuation. */
+static LONG audio_effective_cb(int vol)
+{
+    int cb;
+    if (s_audio_muted) return DSBVOLUME_MIN;
+    if (vol < 0)   vol = 0;
+    if (vol > 127) vol = 127;
+    cb = s_vol_table[vol] + s_master_offset_cb;
+    if (cb < DSBVOLUME_MIN) cb = DSBVOLUME_MIN;
+    if (cb > DSBVOLUME_MAX) cb = DSBVOLUME_MAX;
+    return (LONG)cb;
 }
 
 /** Pass through a native DirectSound-scale pan (-10000..+10000).
@@ -3134,10 +3162,7 @@ TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop,
                 status = 0;
                 IDirectSoundBuffer_GetStatus(ex, &status);
             }
-            {
-                int effective_vol = s_audio_muted ? 0 : (volume * s_master_volume) / 100;
-                IDirectSoundBuffer_SetVolume(ex, vol_to_ds(effective_vol));
-            }
+            IDirectSoundBuffer_SetVolume(ex, audio_effective_cb(volume));
             IDirectSoundBuffer_SetPan(ex, pan_to_ds(pan));
             if (frequency > 0)
                 IDirectSoundBuffer_SetFrequency(ex, td5_audio_translate_frequency(buffer_index, frequency));
@@ -3169,10 +3194,7 @@ TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop,
     if (s_audio_active_count > s_audio_peak_active) s_audio_peak_active = s_audio_active_count;
 
     /* Apply parameters */
-    {
-        int effective_vol = s_audio_muted ? 0 : (volume * s_master_volume) / 100;
-        IDirectSoundBuffer_SetVolume(dup_buf, vol_to_ds(effective_vol));
-    }
+    IDirectSoundBuffer_SetVolume(dup_buf, audio_effective_cb(volume));
     IDirectSoundBuffer_SetPan(dup_buf, pan_to_ds(pan));
     if (frequency > 0)
         IDirectSoundBuffer_SetFrequency(dup_buf, td5_audio_translate_frequency(buffer_index, frequency));
@@ -3202,10 +3224,7 @@ void td5_plat_audio_modify(TD5_AudioChannel ch, int volume, int pan, int frequen
     if (idx < 0) return;
     buf = s_ds_channels[idx];
 
-    {
-        int effective_vol = s_audio_muted ? 0 : (volume * s_master_volume) / 100;
-        IDirectSoundBuffer_SetVolume(buf, vol_to_ds(effective_vol));
-    }
+    IDirectSoundBuffer_SetVolume(buf, audio_effective_cb(volume));
     IDirectSoundBuffer_SetPan(buf, pan_to_ds(pan));
     if (frequency > 0)
         IDirectSoundBuffer_SetFrequency(buf, td5_audio_translate_frequency(s_ds_channel_buf[idx], frequency));
@@ -3259,9 +3278,19 @@ void td5_plat_audio_log_stats(const char *tag)
 
 void td5_plat_audio_set_master_volume(int volume)
 {
+    int idx;
     if (volume < 0)   volume = 0;
     if (volume > 100) volume = 100;
     s_master_volume = volume;
+    /* Master attenuation = table[master>>9], exactly as DXSound::SetVolume indexes
+     * it (the 0..100 slider maps to the original's 0..0xFFFF range, then >>9 gives
+     * the 0..127 table index). Applied as a dB offset on every voice, which is
+     * equivalent to the original scaling the summed primary buffer. */
+    idx = (volume * 0xFFFF / 100) >> 9;
+    if (idx < 0)   idx = 0;
+    if (idx > 127) idx = 127;
+    if (s_vol_table[127] == 0 && s_vol_table[0] == 0) audio_build_vol_table();
+    s_master_offset_cb = s_vol_table[idx];
 }
 
 void td5_plat_audio_set_muted(int muted)
