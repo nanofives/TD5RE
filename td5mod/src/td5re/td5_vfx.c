@@ -308,8 +308,9 @@ static float    s_taillight_page;
  * Original: int16[4] per entry (4th = 0 padding). We store only xyz.
  * NOTE: this table is historical/unused — the active taillight path is
  * render_vehicle_brake_lights() in td5_render.c, which builds the quad from a
- * screen-space half-size and (as of S23) a mesh-derived rear anchor. Kept for
- * reference; do not chase it for taillight placement. */
+ * screen-space half-size centred on the cardef taillight hardpoint (or, for
+ * ported TD6 cars as of S23, the authored TD6 :CAR_LIGHTS: position installed by
+ * the asset loader). Kept for reference; do not chase it for taillight placement. */
 static const int16_t s_taillight_offsets[4][3] = {
     {  80, -80, 0 },   /* 0x463030: top-left     */
     { -80, -80, 0 },   /* 0x463038: bottom-left  */

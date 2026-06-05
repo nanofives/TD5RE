@@ -96,6 +96,14 @@ void td5_render_set_vehicle_tint(int slot, uint32_t rgb);
  * planar-scroll light zones). Reset by td5_render_set_vehicle_mesh. */
 void td5_render_set_vehicle_is_td6(int slot, int is_td6);
 
+/* [S23] Install authored rear/brake-light positions for a slot (model-space
+ * int16[3] ×2: light0 = +X right, light1 = -X left). Used for ported TD6 cars
+ * whose binary carparam.dat has wrong taillight values at +0x60/+0x68 — the
+ * loader passes the car's :CAR_LIGHTS0/1: from its TD6 param.scr. Pass l0/l1 =
+ * NULL (or omit the call) to clear and fall back to the cardef hardpoint. Reset
+ * by td5_render_set_vehicle_mesh. */
+void td5_render_set_vehicle_taillights(int slot, const int16_t *l0, const int16_t *l1);
+
 /* Photo-booth render mode: draw only the player car over a chroma background
  * (sky + track spans suppressed here; VFX/HUD/clear suppressed in the game frame)
  * for offline car-preview (carpic) generation. */

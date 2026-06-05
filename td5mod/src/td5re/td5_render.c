@@ -389,6 +389,29 @@ void td5_render_set_vehicle_is_td6(int slot, int is_td6)
     s_vehicle_is_td6[slot] = is_td6 ? 1 : 0;
 }
 
+/* [S23] Per-slot authored rear/brake-light positions (model space, int16[3] ×2).
+ * Ported TD6 cars carry WRONG taillight values in the binary carparam.dat at
+ * +0x60/+0x68 — that is NOT TD6's brake-light field. TD6.exe instead reads the
+ * authored :CAR_LIGHTS0/1: positions from each car's param.scr (CONFIRMED:
+ * TD6.exe contains the "CAR_LIGHTS"/"param.scr" parser strings; .scr values
+ * differ from the binary +0x60 in 28/39 cars). The asset loader installs those
+ * authored positions here when it loads a TD6 car; render_vehicle_brake_lights
+ * uses them in preference to the cardef hardpoint. valid=0 → fall back to cardef
+ * (TD5 cars + donor-param TD6 cars aud/pro/xjr that have no .scr). */
+static int16_t s_vehicle_taillight[TD5_ACTOR_MAX_TOTAL_SLOTS][2][3];
+static int     s_vehicle_taillight_valid[TD5_ACTOR_MAX_TOTAL_SLOTS];
+
+void td5_render_set_vehicle_taillights(int slot, const int16_t *l0, const int16_t *l1)
+{
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
+    if (!l0 || !l1) { s_vehicle_taillight_valid[slot] = 0; return; }
+    for (int i = 0; i < 3; i++) {
+        s_vehicle_taillight[slot][0][i] = l0[i];
+        s_vehicle_taillight[slot][1][i] = l1[i];
+    }
+    s_vehicle_taillight_valid[slot] = 1;
+}
+
 /* Photo-booth mode: render ONLY the player car (skip sky + track spans here, and
  * VFX/HUD/clear in the game frame) over a chroma background, for offline preview
  * (carpic) generation. Reuses the normal chase camera (frozen car at spawn). */
@@ -2166,6 +2189,7 @@ void td5_render_set_vehicle_mesh(int slot, TD5_MeshHeader *mesh)
     s_vehicle_meshes[slot] = mesh;
     s_vehicle_tint[slot] = 0;   /* default white; game re-sets it for TD6 player car */
     s_vehicle_is_td6[slot] = 0; /* asset loader re-sets it for a transcoded TD6 mesh */
+    s_vehicle_taillight_valid[slot] = 0; /* [S23] loader re-sets TD6 authored CAR_LIGHTS */
 }
 
 TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot)
@@ -5038,64 +5062,6 @@ static void brake_light_lookup_atlas(void)
               s_braked_u1, s_braked_v1, e->width, e->height);
 }
 
-/* [S23 2026-06-05] Dynamic rear-light depth.
- * The taillight anchor is the fixed cardef hardpoint (car_def+0x60/+0x68); its
- * model-space Z is authored per car. Ported TD6 car meshes can be LONGER than
- * their authored hardpoint Z, so the fixed Z buries the brake light inside the
- * body. We derive the real rear extent from the loaded car mesh (most-negative
- * model-space pos_z = rear; CONFIRMED: every TD5/TD6 cardef taillight Z is
- * negative — rear is -Z) and push the light back to it.
- *
- * Faithfulness guard: we only ever push the light OUTWARD (more rearward),
- * never forward, so a TD5 car whose hardpoint already sits at/behind its rear
- * is left untouched. The search is gated to vertices near the light HEIGHT so a
- * tall rear wing or low diffuser can't drag the light off the bumper. Result is
- * cached per slot, recomputed on mesh swap.
- *
- * RE basis: RenderVehicleTaillightQuads @0x004011C0 reads ONLY the fixed cardef
- * hardpoint and never touches mesh bounds [CONFIRMED, agent 2026-06-05] — this
- * mesh-derived Z is a deliberate port deviation for the (non-original) longer
- * TD6 car meshes. */
-#define BRAKE_REAR_Y_BAND      (200.0f) /* model units around light height to search */
-#define BRAKE_REAR_FLUSH_INSET  (40.0f) /* pull center forward so the ±40 quad sits flush at the bumper */
-
-static TD5_MeshHeader *s_brake_rear_mesh[TD5_ACTOR_MAX_TOTAL_SLOTS];
-static float           s_brake_rear_z[TD5_ACTOR_MAX_TOTAL_SLOTS];
-
-/* Rearmost (min) model-space pos_z over mesh vertices within BRAKE_REAR_Y_BAND
- * of light_y. Returns 0.0f when unavailable (caller treats >= 0 as "no
- * override", since a real rear is negative). Cached per slot, keyed by mesh. */
-static float brake_light_rear_z(int slot, TD5_MeshHeader *mesh, float light_y)
-{
-    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return 0.0f;
-    if (!mesh) return 0.0f;
-    if (s_brake_rear_mesh[slot] == mesh) return s_brake_rear_z[slot];
-
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-    int n = mesh->total_vertex_count;
-    float band_min = 0.0f, global_min = 0.0f;
-    int band_found = 0, global_found = 0;
-    if (verts && n > 0) {
-        for (int i = 0; i < n; i++) {
-            float z = verts[i].pos_z;
-            if (!global_found || z < global_min) { global_min = z; global_found = 1; }
-            float dy = verts[i].pos_y - light_y;
-            if (dy < 0.0f) dy = -dy;
-            if (dy <= BRAKE_REAR_Y_BAND) {
-                if (!band_found || z < band_min) { band_min = z; band_found = 1; }
-            }
-        }
-    }
-    float rear = band_found ? band_min : (global_found ? global_min : 0.0f);
-    s_brake_rear_mesh[slot] = mesh;
-    s_brake_rear_z[slot] = rear;
-
-    TD5_LOG_I(RENDER_LOG_TAG,
-              "brake rear-Z: slot=%d mesh_rear_z=%.1f band_hit=%d global=%d light_y=%.1f verts=%d",
-              slot, (double)rear, band_found, global_found, (double)light_y, n);
-    return rear;
-}
-
 /**
  * Draw brake light sprites at the two taillight hardpoints.
  * Called from the actor render loop where the render transform
@@ -5150,33 +5116,28 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     memcpy(&car_def, ap + 0x1B8, sizeof(void *));
     if (!car_def) return;
 
-    /* Loaded car mesh for the dynamic rear-light depth (S23). May be NULL
-     * mid-swap — then we fall back to the fixed hardpoint Z. */
-    TD5_MeshHeader *veh_mesh = td5_render_get_vehicle_mesh(slot);
-
     const float *m = s_render_transform.m;
     const float half_size = 40.0f; /* model-space half-extent (original ±80 / 2) */
 
     for (int light = 0; light < 2; light++) {
-        /* Read hardpoint int16[3] at car_def+0x60 / +0x68 */
+        /* Taillight hardpoint, int16[3] model space. [S23] For ported TD6 cars
+         * the binary carparam.dat carries WRONG values at +0x60/+0x68 (it is not
+         * TD6's CAR_LIGHTS field), so the asset loader installs the authored TD6
+         * :CAR_LIGHTS0/1: positions per slot via td5_render_set_vehicle_taillights.
+         * Use those when present; otherwise read the cardef hardpoint (TD5 cars +
+         * donor-param TD6 cars aud/pro/xjr with no .scr). */
         int16_t hp[3];
-        memcpy(hp, (uint8_t *)car_def + 0x60 + light * 8, 6);
+        if (s_vehicle_taillight_valid[slot]) {
+            hp[0] = s_vehicle_taillight[slot][light][0];
+            hp[1] = s_vehicle_taillight[slot][light][1];
+            hp[2] = s_vehicle_taillight[slot][light][2];
+        } else {
+            memcpy(hp, (uint8_t *)car_def + 0x60 + light * 8, 6);
+        }
 
         float px = (float)hp[0];
         float py = (float)hp[1];
         float pz = (float)hp[2];
-
-        /* [S23] Push the light back to the actual mesh rear so it isn't buried
-         * inside a long (TD6) car body. Keep the authored lateral (px) and
-         * height (py); only override the depth, and only OUTWARD (more rearward)
-         * so a TD5 car whose hardpoint already sits at its rear is unaffected. */
-        if (veh_mesh) {
-            float rear_z = brake_light_rear_z(slot, veh_mesh, py);
-            if (rear_z < 0.0f) {                       /* valid: rear is -Z */
-                float candidate = rear_z + BRAKE_REAR_FLUSH_INSET;
-                if (candidate < pz) pz = candidate;     /* more negative = more rearward */
-            }
-        }
 
         /* Transform hardpoint center through the render matrix to view space */
         float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
