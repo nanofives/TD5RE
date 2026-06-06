@@ -285,6 +285,10 @@ void td5_plat_input_joystick_learn_rest(int device_slot);
 /** Re-enumerate devices; returns 1 if the count changed (hot-plug). */
 int  td5_plat_input_rescan_devices(void);
 
+/** Returns 1 (and clears) if a USB device hot-plug (WM_DEVICECHANGE) occurred
+ *  since the last call; lets callers gate the costly rescan on actual changes. */
+int  td5_plat_input_devices_changed(void);
+
 /** Frontend navigation bitmask from a connected gamepad (any joystick):
  *  bit0 LEFT, bit1 RIGHT, bit2 UP, bit3 DOWN, bit4 A/confirm, bit5 B/back.
  *  Returns 0 if no joystick is present. [PORT ENHANCEMENT 2026-06] */

@@ -405,6 +405,12 @@ static volatile int s_char_q_tail;   /* consumer (frontend)    */
  * see td5_frontend.c); WM_KEYDOWN has no such contention. */
 static volatile unsigned s_navkey_latch = 0;
 
+/* [PERF FIX 2026-06-05] Set by WM_DEVICECHANGE; consumed by
+ * td5_plat_input_devices_changed(). Lets the frontend run the ~120ms blocking
+ * EnumDevices rescan ONLY when the OS signals a USB device change, instead of
+ * polling it every ~90 frames (the dominant frontend frame-time spike). */
+static volatile int s_devices_dirty = 0;
+
 static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -429,6 +435,13 @@ static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             PostQuitMessage(0);
             return 0;
         }
+        break;
+    case WM_DEVICECHANGE:
+        /* USB controller arrival/removal. DBT_DEVNODES_CHANGED is broadcast to
+         * every top-level window without RegisterDeviceNotification, so a flag is
+         * all we need: the frontend rescans on the next poll instead of running
+         * EnumDevices (a ~120ms blocking HID enumeration) on a frame timer. */
+        s_devices_dirty = 1;
         break;
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT) {
@@ -2140,6 +2153,15 @@ int td5_plat_input_joystick_neutral(int device_slot)
 /* Re-enumerate input devices; returns 1 if the device count changed (hot-plug),
  * releasing the scan handles so they recreate against the fresh GUID list.
  * [PORT ENHANCEMENT 2026-06] */
+/* One-shot: returns 1 (and clears the latch) if a WM_DEVICECHANGE has arrived
+ * since the last call. The frontend gates its EnumDevices rescan on this so the
+ * blocking enumeration runs only on an actual device hot-plug, not every frame. */
+int td5_plat_input_devices_changed(void)
+{
+    if (s_devices_dirty) { s_devices_dirty = 0; return 1; }
+    return 0;
+}
+
 int td5_plat_input_rescan_devices(void)
 {
     int prev = s_device_count;

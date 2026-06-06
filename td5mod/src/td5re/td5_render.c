@@ -2273,6 +2273,18 @@ void td5_render_actors_for_view(int view_index)
         }
     }
     float view_dist_frac = td5_save_get_view_distance();
+    /* [PERF FIX 2026-06-05] Dense TD6 city tracks — London (level012) and Egypt
+     * (level022) — pack ~12 meshes per span, so the port's 1.0 view distance walks
+     * ~780 candidate span-meshes/frame through the core, spiking the world-render
+     * zone (r_world) to ~35ms avg / 120ms peak (~40fps) — the TD6 render lag.
+     * Cap THEIR effective view distance to the ORIGINAL game's faithful 0.65
+     * default (@0x0042AA27); profiled A/B cuts sustained r_world ~4.5x (54->12ms)
+     * for a minor distant pop-in, while every other track keeps the port's full
+     * 1.0. far_cull is fixed/slider-independent (2026-05-31 popin fix), so only the
+     * MODELS.DAT entry-walk depth shrinks — distant buildings still resolve. A
+     * user VIEW slider / [Display] ViewDistance set lower than the cap still wins. */
+    if ((g_active_td6_level == 12 || g_active_td6_level == 22) && view_dist_frac > 0.65f)
+        view_dist_frac = 0.65f;
     float frac_scaled = view_dist_frac * 0.85f + 0.15f;
     int fwd_window  = (int)(frac_scaled * (float)VIEW_DIST_FWD_SPANS);
     int back_window = (int)(frac_scaled * (float)VIEW_DIST_BACK_SPANS);

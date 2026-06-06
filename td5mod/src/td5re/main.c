@@ -640,6 +640,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.vsync          = td5_ini_int("Display", "VSync", 1);
     g_td5.ini.show_fps       = td5_ini_int("Display", "ShowFps", 1);
 
+    /* [PERF/FAITHFULNESS 2026-06-05] Initial track draw distance, 0..100%
+     * (maps to the runtime VIEW slider frac 0..1; eff_spans = (frac*0.85+0.15)*64).
+     * The original game defaulted to 0.65 (@0x0042AA27); the source port shipped
+     * 1.0, rendering ~45% further forward — the dominant render cost on dense TD6
+     * tracks (London/Egypt). Exposed here so the existing pause-menu VIEW slider's
+     * value persists and is tunable; default 100 preserves current port behaviour,
+     * lower trims the dense-track world-geometry submission. */
+    {
+        int vd = td5_ini_int("Display", "ViewDistance", 100);
+        if (vd < 0) vd = 0;
+        if (vd > 100) vd = 100;
+        td5_save_set_view_distance((float)vd / 100.0f);
+    }
+
     /* Audio */
     g_td5.ini.sfx_volume    = td5_ini_int("Audio", "SFXVolume", 80);
     g_td5.ini.music_volume  = td5_ini_int("Audio", "MusicVolume", 80);

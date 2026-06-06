@@ -216,9 +216,6 @@ static uint32_t s_fe_gamepad_nav;
  * device last gave input (0 = keyboard, >=1 = enumerated joystick). It becomes
  * the driver (player 0's device) for single-player races. */
 static int s_active_menu_device = 0;
-/* [PORT ENHANCEMENT 2026-06] hot-swap: re-enumerate joysticks periodically so a
- * controller plugged in at the main menu is picked up without leaving the screen. */
-static unsigned s_fe_rescan_tick = 0;
 static uint32_t s_screen_entry_timestamp;
 static uint32_t s_anim_start_ms = 0;
 static uint32_t s_anim_elapsed_ms = 0;
@@ -3546,12 +3543,16 @@ static void frontend_poll_input(void) {
     if (left_now || right_now || up_now || down_now || enter_now)
         s_active_menu_device = 0;
 
-    /* [PORT ENHANCEMENT 2026-06] Hot-swap detection: re-enumerate DirectInput
-     * joysticks every ~90 frames (~1.5s @ 60fps) so a controller connected while
-     * sitting on a menu is detected without having to leave/re-enter the screen.
-     * Cheap (an IDirectInput8::EnumDevices pass that early-outs when the count is
-     * unchanged); only the scan handles are rebuilt when the device set changes. */
-    if ((++s_fe_rescan_tick % 90u) == 0u)
+    /* [PORT ENHANCEMENT 2026-06; PERF FIX 2026-06-05] Hot-swap detection:
+     * re-enumerate DirectInput joysticks when a controller is connected while
+     * sitting on a menu. This is now EVENT-DRIVEN off WM_DEVICECHANGE instead of
+     * a frame timer: IDirectInput8::EnumDevices is a ~120ms BLOCKING HID
+     * enumeration (it does NOT early-out cheaply — the count compare only gates
+     * the handle rebuild, not the enumeration), and the old "every ~90 frames"
+     * throttle assumed 60fps but fired ~2x/sec at high refresh, hitching the menu
+     * ~120ms each time (the dominant frontend frame spike per the profiler).
+     * Gating on the OS device-change signal makes the steady-state cost zero. */
+    if (td5_plat_input_devices_changed())
         td5_plat_input_rescan_devices();
 
     /* [PORT ENHANCEMENT 2026-06] Gamepad navigation: ANY connected joystick's
