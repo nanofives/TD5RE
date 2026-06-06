@@ -5239,6 +5239,44 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     return 1;
 }
 
+/* Returns the left-rail and right-rail world points (track integer coords, NOT
+ * 24.8 FP) that td5_track_sample_target_point uses for its route_byte
+ * interpolation and lateral-bias axis. A smart-AI caller that measures a
+ * lateral target against THIS frame and then converts it to a lateral_bias is
+ * guaranteed to share the same orientation/sign as the bias consumer above —
+ * unlike td5_track_get_span_edges, which keys off right_vertex_index and can
+ * be oriented differently. Returns 0 if the span/vertices are unusable. */
+int td5_track_get_span_route_frame(int span_index, int *lx, int *lz,
+                                   int *rx, int *rz)
+{
+    const TD5_StripSpan *sp;
+    TD5_StripVertex *v_left, *v_right;
+    int lane_count, type_offset;
+
+    if (lx) *lx = 0; if (lz) *lz = 0;
+    if (rx) *rx = 0; if (rz) *rz = 0;
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count)
+        return 0;
+
+    sp = &s_span_array[span_index];
+    lane_count = span_lane_count(sp);
+    type_offset = 0;
+    if (sp->span_type >= 0 && sp->span_type < 12)
+        type_offset = k_target_vertex_offsets[sp->span_type][0];
+
+    v_left  = vertex_at((int)sp->left_vertex_index);
+    v_right = vertex_at((int)sp->left_vertex_index + type_offset + lane_count);
+    if (!v_left || !v_right)
+        return 0;
+
+    if (lx) *lx = (int32_t)v_left->x  + sp->origin_x;
+    if (lz) *lz = (int32_t)v_left->z  + sp->origin_z;
+    if (rx) *rx = (int32_t)v_right->x + sp->origin_x;
+    if (rz) *rz = (int32_t)v_right->z + sp->origin_z;
+    return 1;
+}
+
 /* ========================================================================
  * Target-span junction remap
  * Port of the walker inside UpdateActorTrackBehavior @

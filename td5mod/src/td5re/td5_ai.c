@@ -354,6 +354,22 @@ static void td5_ai_update_actor_track_bounds(int slot);
 static int  td5_ai_classify_track_offset_clamp_v2(int slot, int track_offset_bias);
 static int  td5_ai_remap_for_classify(int span_normalized);
 
+/* ---- Smart opponent AI overhaul (non-faithful; gated by [GameOptions]SmartAI).
+ * Defined in the "SMART OPPONENT AI" section below; forward-declared here
+ * because td5_ai_compute_rubber_band / td5_ai_init_race_actor_runtime sit
+ * earlier in the file than the section. ------------------------------------ */
+static int   td5_ai_smart_active(void);          /* race-level master gate */
+static void  td5_ai_smart_race_init(void);       /* per-race skill + seeds */
+static float td5_ai_smart_skill(int slot);       /* continuous 0..1 competence */
+static void  td5_ai_smart_lane_bias(int slot);   /* writes RS_TRACK_OFFSET_BIAS */
+static void  td5_ai_smart_speed(int slot);       /* post-modulates throttle/brake */
+static void  td5_ai_smart_branch(int slot);      /* strategic junction selector */
+static int   td5_ai_smart_traffic_lane(int slot, int target_span,
+                                        int lane_count, int base_sub_lane,
+                                        int polarity);
+static int   td5_ai_smart_leash_modifier(int slot, int32_t delta,
+                                          int32_t *out_modifier);
+
 static int32_t ai_cos_fixed12(int32_t angle) {
     /* Use standard math — the quadratic approximation was catastrophically
      * wrong at quadrant boundaries (sin(0) returned -4096 instead of 0). */
@@ -1521,6 +1537,7 @@ void td5_ai_compute_rubber_band(void) {
         ai_span = (int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_ACCUM);
         /* [0x00432DF8] SUB ECX,EAX — signed 32-bit delta */
         delta = ai_span - player0_span;
+        int32_t delta0 = delta;   /* SmartAI leash needs the unclamped delta */
 
         /* [0x00432DFA] JNS — sign of delta selects branch */
         if (delta < 0) {
@@ -1565,6 +1582,16 @@ void td5_ai_compute_rubber_band(void) {
             modifier = (modifier * K_CATCHUP_STRENGTH_PCT) / 256;
         }
 
+        /* SmartAI: replace the faithful (asymmetric, uncapped-behind) rubber
+         * band with a gentle SYMMETRIC leash — behind→small boost, ahead→small
+         * trim, capped to a narrow band so the catch-up never feels rigged.
+         * Independent of CatchupAssist; off when SmartAILeash=0 (pure skill). */
+        if (td5_ai_smart_active()) {
+            int32_t smod;
+            if (td5_ai_smart_leash_modifier(i, delta0, &smod))
+                modifier = smod;
+        }
+
         /* [0x00432E32-39] MOV ECX,0x100; SUB ECX,EAX; MOV [EDI],ECX */
         g_actor_route_steer_bias[i] = 0x100 - modifier;
     }
@@ -1593,6 +1620,10 @@ void td5_ai_init_race_actor_runtime(void) {
      * (route assignments, PRNG seeds, lane biases). Cheap; harmless when the
      * feature is disabled. */
     td5_traffic_smart_reset();
+    /* [SmartAI overhaul] derive per-car skill + per-car branch tie-breaks once
+     * per race (cheap; only consumed when SmartAI is on). Must run after
+     * g_td5.difficulty_tier is set for this race. */
+    if (g_td5.ini.smart_ai) td5_ai_smart_race_init();
     /* [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60 reads gRaceDifficultyTier
      * @ 0x00463210 throughout the Layer-2 decision tree.] The port previously
      * read a file-static `g_race_difficulty_tier` that was never written —
@@ -3731,6 +3762,532 @@ int td5_ai_advance_track_script(int *rs) {
 extern void td5_pilot_emit_00434FE0_enter(int slot, const int32_t *rs, const void *actor, int32_t game_type);
 extern void td5_pilot_emit_00434FE0_leave(int slot, const int32_t *rs, const void *actor);
 
+/* ========================================================================
+ * SMART OPPONENT AI OVERHAUL  (non-faithful; [GameOptions] SmartAI, default 1)
+ *
+ * A from-scratch decision brain for the racing opponents AND background
+ * traffic. It does NOT replace the tuned execution layer (waypoint sampling →
+ * LEFT/RIGHT deviation → UpdateActorSteeringBias cascade → bicycle physics) —
+ * it only computes smarter DECISIONS and feeds them through the SAME levers
+ * the faithful code uses:
+ *
+ *   - lane choice         -> RS_TRACK_OFFSET_BIAS (perpendicular target shift)
+ *   - branch choice       -> folded into the lane target near a fork
+ *   - speed / following   -> post-modulates ENCOUNTER_STEER / BRAKE_FLAG
+ *   - catch-up leash       -> gentle symmetric override in ComputeAIRubberBand
+ *   - difficulty          -> a continuous per-car `skill` scales competence
+ *
+ * Everything here is gated by td5_ai_smart_active(); with SmartAI=0 the AI is
+ * byte-faithful to the original. Cop-chase (wanted) and drag modes keep their
+ * faithful behaviour. Geometry is read through the existing public track
+ * helpers + the raw strip records (g_strip_span_base), so td5_track.c is
+ * untouched.
+ *
+ * Units: lateral position is expressed as `u` in [0,1] across the road
+ * (0 = left rail, 1 = right rail). A RS_TRACK_OFFSET_BIAS value is a
+ * perpendicular shift in raw track-distance units along the left->right rail
+ * axis — exactly what td5_track_sample_target_point consumes — so a target u
+ * is reached with bias = (u - u_routeline) * road_width_track.
+ * ======================================================================== */
+
+#define SMART_MAX_LANES            32
+#define SMART_LANE_FALLBACK_WIDTH  256.0  /* track units if rail geometry missing */
+
+static float   g_smart_skill[TD5_MAX_TOTAL_ACTORS];       /* 0..1 competence */
+static int8_t  g_smart_branch_pref[TD5_MAX_TOTAL_ACTORS]; /* -1/+1 per-car tie-break */
+static double  g_smart_branch_pull[TD5_MAX_TOTAL_ACTORS]; /* cached fork pull -1..+1 */
+static double  g_smart_lane_u[TD5_MAX_TOTAL_ACTORS];      /* smoothed target lateral u (road fraction); -1 = uninit */
+static int     g_smart_inited = 0;
+
+static inline int smart_iabs(int x) { return x < 0 ? -x : x; }
+
+/* Deterministic integer hash (no runtime RNG — reproducible across replays). */
+static inline uint32_t smart_hash_u32(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352dU;
+    x ^= x >> 15; x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+/* Race-level master gate: on, and not in a faithful-only mode. */
+static int td5_ai_smart_active(void) {
+    return g_td5.ini.smart_ai
+        && !g_td5.drag_race_enabled
+        && !g_td5.wanted_mode_enabled;
+}
+
+static float td5_ai_smart_skill(int slot) {
+    if (!g_smart_inited || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS)
+        return 0.6f;
+    return g_smart_skill[slot];
+}
+
+/* Per-race: derive a continuous skill from the difficulty tier plus a small,
+ * deterministic per-car spread so the field isn't uniform (some opponents are
+ * genuinely faster/cleaner than others). */
+static void td5_ai_smart_race_init(void) {
+    int tier = g_td5.difficulty_tier;
+    float base = (tier <= 0) ? 0.42f : (tier == 1 ? 0.63f : 0.86f);
+    for (int s = 0; s < TD5_MAX_TOTAL_ACTORS; s++) {
+        uint32_t h = smart_hash_u32((uint32_t)s * 2654435761u
+                                    + (uint32_t)(tier + 1) * 40503u);
+        float spread = ((float)(h & 0xFFFF) / 65535.0f - 0.5f) * 0.24f; /* +-0.12 */
+        float sk = base + spread;
+        if (sk < 0.12f) sk = 0.12f;
+        if (sk > 0.97f) sk = 0.97f;
+        g_smart_skill[s] = sk;
+        g_smart_branch_pref[s] = (int8_t)(((h >> 17) & 1u) ? 1 : -1);
+        g_smart_branch_pull[s] = 0.0;
+        g_smart_lane_u[s] = -1.0;   /* snap to the car's actual u on first sight */
+    }
+    g_smart_inited = 1;
+    TD5_LOG_I(LOG_TAG, "smart_ai_init: tier=%d base_skill=%.2f aggression=%d leash=%d",
+              tier, (double)base, g_td5.ini.smart_ai_aggression,
+              g_td5.ini.smart_ai_leash);
+}
+
+/* Left-rail origin + unit edge vector + road width (all in track units) for a
+ * span, from the existing rail-edge helper. Returns 0 if geometry unusable. */
+static int smart_span_frame(int span, double *lx, double *lz,
+                            double *ex, double *ez, double *width) {
+    int rlx = 0, rlz = 0, rrx = 0, rrz = 0;
+    int sc = td5_track_get_span_count();
+    if (span < 0 || sc <= 0 || span >= sc) return 0;
+    /* Use the SAME rail frame the bias consumer (sample_target_point) uses, so
+     * a positive bias always shifts toward higher u (sign-consistent). */
+    if (!td5_track_get_span_route_frame(span, &rlx, &rlz, &rrx, &rrz))
+        return 0;
+    double dx = (double)(rrx - rlx), dz = (double)(rrz - rlz);
+    double w = sqrt(dx * dx + dz * dz);
+    if (w < 1.0) return 0;
+    *lx = (double)rlx; *lz = (double)rlz;
+    *ex = dx / w; *ez = dz / w; *width = w;
+    return 1;
+}
+
+/* Lateral fraction u in [0,1] of an actor across the road at `span`. */
+static double smart_actor_u(char *actor, int span) {
+    double lx, lz, ex, ez, w;
+    if (!smart_span_frame(span, &lx, &lz, &ex, &ez, &w)) return 0.5;
+    double ax = (double)(ACTOR_I32(actor, ACTOR_WORLD_POS_X) >> 8);
+    double az = (double)(ACTOR_I32(actor, ACTOR_WORLD_POS_Z) >> 8);
+    double u = ((ax - lx) * ex + (az - lz) * ez) / w;
+    if (u < 0.0) u = 0.0;
+    if (u > 1.0) u = 1.0;
+    return u;
+}
+
+/* Forward span gap (wrap-aware): >0 means `to` is ahead of `from`. */
+static int smart_span_gap(int from_span, int to_span, int span_count) {
+    int g = to_span - from_span;
+    if (span_count > 0) {
+        while (g >  span_count / 2) g -= span_count;
+        while (g < -span_count / 2) g += span_count;
+    }
+    return g;
+}
+
+typedef struct { double u; int gap; int32_t speed; int slot; } SmartBlocker;
+
+/* Collect actors within [-1 .. lookahead] spans of self (incl. the human in
+ * slot 0). Lateral position is the peer's own-span u. */
+static int smart_gather_blockers(int self_slot, int self_span, int span_count,
+                                 int lookahead, SmartBlocker *out, int max_out) {
+    int n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    int cnt = 0;
+    for (int i = 0; i < n && cnt < max_out; i++) {
+        if (i == self_slot) continue;
+        if (i < g_traffic_slot_base && g_slot_state[i] == 2) continue; /* finished */
+        char *a = actor_ptr(i);
+        if (!a) continue;
+        int peer_span = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+        int gap = smart_span_gap(self_span, peer_span, span_count);
+        if (gap < -1 || gap > lookahead) continue;
+        out[cnt].u     = smart_actor_u(a, peer_span);
+        out[cnt].gap   = gap;
+        out[cnt].speed = ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED);
+        out[cnt].slot  = i;
+        cnt++;
+    }
+    return cnt;
+}
+
+/* Strategic branch: scan ahead on the raw strip records for a junction span
+ * (type 8 fwd / 11 bwd). At a fork the "branch" route is taken from the HIGH
+ * sub-lanes and "main" from the LOW sub-lanes (see td5_track.c junction logic),
+ * so we express the preference as a lateral pull (-1 = hug low/main lanes,
+ * +1 = hug high/branch lanes) that the lane brain folds into its scoring.
+ * Preference = least congested option, tie-broken by a stable per-car bias. */
+static void td5_ai_smart_branch(int slot) {
+    g_smart_branch_pull[slot] = 0.0;
+    const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+    int span_count = td5_track_get_span_count();
+    if (!strips || span_count <= 0) return;
+    char *actor = actor_ptr(slot);
+    int span = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    if (span < 0 || span >= span_count) return;
+
+    float skill = td5_ai_smart_skill(slot);
+    int look = 5 + (int)(skill * 8.0f); /* 5..13 spans — react early enough to lane-change before the fork */
+
+    for (int d = 1; d <= look; d++) {
+        int s = span + d;
+        if (s >= span_count) s -= span_count;
+        if (s < 0) continue;
+        uint8_t stype = strips[(size_t)s * 0x18];
+        if (stype != 8 && stype != 11) continue;
+
+        int main_span = (stype == 8) ? (s + 1) : (s - 1);
+        if (main_span >= span_count) main_span -= span_count;
+        if (main_span < 0) main_span += span_count;
+        int branch_span = (stype == 8)
+            ? (int)*(const int16_t *)(const void *)(strips + (size_t)s * 0x18 + 8)
+            : (int)*(const int16_t *)(const void *)(strips + (size_t)s * 0x18 + 10);
+
+        int cong_main = 0, cong_branch = 0;
+        int n = g_active_actor_count;
+        if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+        for (int i = 0; i < n; i++) {
+            if (i == slot) continue;
+            int psp = (int)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
+            if (smart_iabs(psp - main_span) <= 2) cong_main++;
+            if (branch_span >= 0 && branch_span < span_count &&
+                smart_iabs(psp - branch_span) <= 2) cong_branch++;
+        }
+
+        /* Prefer the MAIN through-route by default. In this engine the side
+         * branches are short detours that are often tighter / wall-lined (e.g.
+         * the Moscow-reverse branch span 2790 scrapes its boundary), and the
+         * main road is the proven racing line — so only divert onto a branch
+         * when the main option is NOTABLY more congested (a real reason to
+         * overtake around traffic), not merely because the branch is emptier. */
+        double pref;
+        if (branch_span < 0 || branch_span >= span_count)
+            pref = -1.0;                              /* invalid branch → stay main */
+        else if (cong_main - cong_branch >= 2)
+            pref = +1.0;                              /* main genuinely jammed → use branch */
+        else
+            pref = -1.0;                              /* default: hold the main through-route */
+        (void)g_smart_branch_pref;
+
+        double strength = 1.0 - (double)(d - 1) / (double)look; /* stronger near fork */
+        g_smart_branch_pull[slot] = pref * strength;
+        if ((g_ai_frame_counter % 60u) == 0u) {
+            TD5_LOG_I(LOG_TAG, "smart_branch: slot=%d fork=%d d=%d type=%d "
+                      "main=%d(c%d) branch=%d(c%d) pull=%.2f",
+                      slot, s, d, stype, main_span, cong_main,
+                      branch_span, cong_branch, g_smart_branch_pull[slot]);
+        }
+        return;
+    }
+}
+
+/* Lane brain: score candidate lanes (surface, occupancy, wall, racing-line,
+ * change-cost, fork pull), pick the best, and steer RS_TRACK_OFFSET_BIAS toward
+ * it with a skill-scaled rate limit and an occasional low-skill lapse. */
+static void td5_ai_smart_lane_bias(int slot) {
+    int32_t *rs = route_state(slot);
+    char *actor = actor_ptr(slot);
+    int span_count = td5_track_get_span_count();
+    int span      = (int)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+    int span_raw  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+
+    /* A branch-road span is an APPENDED detour (span_raw beyond the main ring,
+     * e.g. Moscow-reverse span 2790). These are tight, authored, often
+     * wall-lined roads where imposing lane-center targeting drives the car into
+     * the boundary — so on them we follow the authored route line instead. */
+    int ring_len = td5_track_get_ring_length();
+    int on_branch = (ring_len > 0 && span_raw >= ring_len);
+
+    td5_ai_smart_branch(slot);
+
+    if (span_count <= 0 || span < 0) {
+        int32_t b = rs[RS_TRACK_OFFSET_BIAS];
+        if (b > 8) b -= 8; else if (b < -8) b += 8; else b = 0;
+        rs[RS_TRACK_OFFSET_BIAS] = b;
+        return;
+    }
+
+    float skill = td5_ai_smart_skill(slot);
+    int lookahead = 4 + (int)(skill * 8.0f);
+
+    double clx, clz, cex, cez, cwidth;
+    if (!smart_span_frame(span, &clx, &clz, &cex, &cez, &cwidth))
+        cwidth = SMART_LANE_FALLBACK_WIDTH;
+
+    int look_span = span + 2;
+    if (look_span >= span_count) look_span -= span_count;
+    int L = td5_track_get_span_lane_count(look_span);
+    if (L < 1) L = 1;
+    if (L > SMART_MAX_LANES) L = SMART_MAX_LANES;
+
+    double u_base = 0.5;
+    {
+        const uint8_t *rt = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        if (rt) {
+            int rb = (int)rt[(size_t)(unsigned)look_span * 3u];
+            u_base = (double)rb / 256.0;
+            if (u_base < 0.0) u_base = 0.0;
+            if (u_base > 1.0) u_base = 1.0;
+        }
+    }
+
+    int proj_span = (span_raw >= 0 && span_raw < span_count) ? span_raw : span;
+    double u_self = smart_actor_u(actor, proj_span);
+
+    SmartBlocker bl[TD5_MAX_TOTAL_ACTORS];
+    int nb = smart_gather_blockers(slot, span_raw, span_count, lookahead,
+                                   bl, TD5_MAX_TOTAL_ACTORS);
+
+    int aggression = g_td5.ini.smart_ai_aggression;
+    double lane_w = 1.0 / (double)L;
+
+    double best_u = u_base, best_score = 1e18;
+    for (int c = 0; c <= L; c++) {
+        double u_c = (c == L) ? u_base : (c + 0.5) * lane_w;
+        int lane = (int)(u_c * L);
+        if (lane < 0) lane = 0;
+        if (lane >= L) lane = L - 1;
+
+        double score = 0.0;
+        if (td5_track_surface_is_slow(td5_track_get_span_lane_surface(look_span, lane)))
+            score += 6.0;
+        for (int k = 0; k < nb; k++) {
+            double du = bl[k].u - u_c; if (du < 0) du = -du;
+            if (du < lane_w * 0.9) {
+                double prox = (double)(lookahead - bl[k].gap + 1) / (double)(lookahead + 1);
+                if (prox < 0.0) prox = 0.0;
+                score += ((aggression >= 1) ? 3.0 : 4.5) * prox;
+                if (bl[k].slot == 0) score += 0.5 * prox; /* avoid the human a bit harder */
+            }
+        }
+        /* Prefer central lanes (quadratic): the outermost lanes are both
+         * wall-adjacent AND, at a junction, branch-triggering (high sub-lane).
+         * Keeping cars central by default stops avoidance from shoving them
+         * onto a wall or a wrong branch where they can wedge (Newcastle span
+         * 636). Cars still move out for a real block — avoidance outweighs this
+         * — but they prefer to slow (car-following) over diving to the rail. */
+        if (L > 1) {
+            double center = (L - 1) * 0.5;
+            double edist  = (double)lane - center; if (edist < 0) edist = -edist;
+            double enorm  = edist / center;            /* 0 centre .. 1 outermost */
+            score += enorm * enorm * 2.2;
+        }
+        { double dl = u_c - u_base; if (dl < 0) dl = -dl; score += dl * 1.2; }
+        { double dc = u_c - u_self; if (dc < 0) dc = -dc; score += dc * (1.6 - skill * 0.8); }
+        if (g_smart_branch_pull[slot] != 0.0) {
+            double side = (u_c - 0.5) * 2.0;
+            /* Weighted high so the fork preference dominates ordinary avoidance
+             * near a junction — this is what reliably keeps cars in the
+             * main-route lanes instead of drifting onto a wall-lined branch. */
+            score -= g_smart_branch_pull[slot] * side * 4.0;
+        }
+        if (c == L) score -= 0.15;            /* gentle tie-break toward racing line */
+
+        if (score < best_score) { best_score = score; best_u = u_c; }
+    }
+
+    /* Width-invariant lateral control. Rate-limit the TARGET lateral fraction
+     * (u) and keep it inside the drivable band, THEN convert to a bias with the
+     * current span width. Doing this in u-space (not absolute bias units) is
+     * what stops a large offset built up on a wide road from aiming the car off
+     * a NARROW branch — the Moscow-reverse wall-clip, where a 6-lane→2-lane
+     * transition left a stale ~1500-unit bias pointing into the boundary. */
+    double margin = 0.5 / (double)L;          /* half a lane from each rail */
+    if (margin < 0.08) margin = 0.08;
+    if (margin > 0.30) margin = 0.30;
+
+    double cu = g_smart_lane_u[slot];
+    if (cu < 0.0 || cu > 1.0) cu = u_self;     /* first sight / post-reset snap */
+    double max_du = 0.03 + skill * 0.05;       /* 3%..8% of road width per tick */
+
+    if (on_branch) {
+        /* Tight authored branch road: do NOT impose lane choice — track the
+         * original route line and immediately drop any lateral offset carried
+         * in from the wide main road, so we never aim off the narrow branch.
+         * This makes branch behaviour no worse than the faithful original. */
+        best_u = u_base;
+        if (cu > best_u + 0.12 || cu < best_u - 0.12)
+            cu = u_self;                       /* shed stale wide-road offset */
+        max_du = 0.12;                         /* converge onto the line fast */
+    } else {
+        if (best_u < margin)       best_u = margin;
+        if (best_u > 1.0 - margin) best_u = 1.0 - margin;
+        uint32_t lh = smart_hash_u32((uint32_t)slot * 2246822519u
+                                     + (uint32_t)(g_ai_frame_counter / 8u));
+        if ((double)(lh & 0xFFFF) / 65535.0 < (1.0 - skill) * 0.25)
+            max_du *= 0.25;                    /* sluggish low-skill tick */
+    }
+
+    if (best_u > cu + max_du)      cu += max_du;
+    else if (best_u < cu - max_du) cu -= max_du;
+    else                           cu = best_u;
+    if (!on_branch) {
+        if (cu < margin)       cu = margin;
+        if (cu > 1.0 - margin) cu = 1.0 - margin;
+    }
+    g_smart_lane_u[slot] = cu;
+
+    /* Target the steering at lateral fraction `cu`; bias is the perpendicular
+     * shift from the route line to that fraction in the current span's units. */
+    int32_t cur = (int32_t)((cu - u_base) * cwidth);
+    rs[RS_TRACK_OFFSET_BIAS] = cur;
+
+    if ((g_ai_frame_counter % 60u) == 0u) {
+        TD5_LOG_I(LOG_TAG, "smart_lane: slot=%d skill=%.2f span=%d L=%d "
+                  "u_self=%.2f u_base=%.2f u_tgt=%.2f u_cur=%.2f bias=%d nb=%d pull=%.2f",
+                  slot, (double)skill, span, L, u_self, u_base, best_u, cu,
+                  (int)cur, nb, g_smart_branch_pull[slot]);
+    }
+}
+
+/* Speed brain (car-following): after route_threshold sets throttle, if a car
+ * we can't yet clear sits ahead in our corridor and we're closing, ease the
+ * throttle (or brake when very close). Never raises throttle. */
+static void td5_ai_smart_speed(int slot) {
+    char *actor = actor_ptr(slot);
+    int span_count = td5_track_get_span_count();
+    if (span_count <= 0) return;
+    int span_raw = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+
+    float skill = td5_ai_smart_skill(slot);
+    int aggression = g_td5.ini.smart_ai_aggression;
+    int lookahead = 3 + (int)(skill * 5.0f);
+
+    int L = td5_track_get_span_lane_count(span_raw);
+    if (L < 1) L = 1;
+    double lane_w = 1.0 / (double)L;
+    double u_self = smart_actor_u(actor, span_raw);
+
+    SmartBlocker bl[TD5_MAX_TOTAL_ACTORS];
+    int nb = smart_gather_blockers(slot, span_raw, span_count, lookahead,
+                                   bl, TD5_MAX_TOTAL_ACTORS);
+    int nearest_gap = 99; int32_t peer_speed = 0; int have = 0;
+    for (int k = 0; k < nb; k++) {
+        if (bl[k].gap < 0) continue;
+        double du = bl[k].u - u_self; if (du < 0) du = -du;
+        if (du < lane_w * 0.8 && bl[k].gap < nearest_gap) {
+            nearest_gap = bl[k].gap; peer_speed = bl[k].speed; have = 1;
+        }
+    }
+    if (!have) return;
+
+    int32_t self_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+    int desired = 3 - aggression;            /* clean=3 realistic=2 aggressive=1 */
+    if (desired < 1) desired = 1;
+    int16_t thr = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+
+    if (nearest_gap <= desired && self_speed > peer_speed) {
+        if (nearest_gap <= 1 && (self_speed - peer_speed) > 0x4000) {
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG)     = 1;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 1;
+        } else if (thr > 0) {
+            double f = (double)nearest_gap / (double)(desired + 1);
+            if (f < 0.25) f = 0.25;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)((double)thr * f);
+        }
+        if ((g_ai_frame_counter % 60u) == 0u) {
+            TD5_LOG_I(LOG_TAG, "smart_follow: slot=%d gap=%d desired=%d "
+                      "self_v=%d peer_v=%d thr0=%d", slot, nearest_gap, desired,
+                      (int)self_speed, (int)peer_speed, (int)thr);
+        }
+    }
+}
+
+/* Gentle symmetric catch-up leash. Returns 1 and writes *out_modifier to be
+ * used in place of the faithful rubber-band modifier; 0x100-modifier becomes
+ * the throttle bias, so behind→boost / ahead→trim, capped to a small band. */
+static int td5_ai_smart_leash_modifier(int slot, int32_t delta, int32_t *out_modifier) {
+    (void)slot;
+    int s = g_td5.ini.smart_ai_leash;
+    if (s <= 0) { *out_modifier = 0; return 1; }   /* leash off → pure skill */
+    int32_t range = 0x40;
+    int32_t d = delta;
+    if (d >  range) d =  range;
+    if (d < -range) d = -range;
+    int32_t maxmod = (0x30 * s) / 9;               /* up to ~0x30 (~19%) */
+    *out_modifier = (d * maxmod) / range;          /* symmetric, signed */
+    return 1;
+}
+
+/* Traffic lane brain: score lanes by surface, occupancy ahead, wall, and
+ * change-cost; return the best, clamped to a ±1 lane step so the change is
+ * gradual (a multi-lane jump would slam the steering cascade). */
+static int td5_ai_smart_traffic_lane(int slot, int target_span, int lane_count,
+                                     int base_sub_lane, int polarity) {
+    (void)polarity;
+    if (lane_count <= 1) return base_sub_lane;
+    if (lane_count > SMART_MAX_LANES) lane_count = SMART_MAX_LANES;
+
+    char *actor = actor_ptr(slot);
+    int self_span  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    int span_count = td5_track_get_span_count();
+    float skill = td5_ai_smart_skill(slot);
+    int lookahead = 3 + (int)(skill * 4.0f);
+
+    int base = base_sub_lane;
+    if (base < 0) base = 0;
+    if (base >= lane_count) base = lane_count - 1;
+
+    int occ[SMART_MAX_LANES];
+    for (int l = 0; l < lane_count; l++) occ[l] = 0;
+    int n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (int i = 0; i < n; i++) {
+        if (i == slot) continue;
+        char *a = actor_ptr(i);
+        int psp = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+        int gap = smart_span_gap(self_span, psp, span_count);
+        if (gap < -1 || gap > lookahead) continue;
+        int pl = (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX);
+        if (pl >= 0 && pl < lane_count)
+            occ[pl] += (lookahead - (gap < 0 ? 0 : gap) + 1);
+    }
+
+    double best_score = 1e18; int best = base;
+    for (int l = 0; l < lane_count; l++) {
+        double score = 0.0;
+        if (td5_track_surface_is_slow(td5_track_get_span_lane_surface(target_span, l)))
+            score += 6.0;
+        score += (double)occ[l] * 1.5;
+        if (l == 0 || l == lane_count - 1) score += 0.6;
+        score += (double)smart_iabs(l - base) * (1.4 - skill * 0.7);
+        if (score < best_score) { best_score = score; best = l; }
+    }
+    if (best > base + 1) best = base + 1;
+    else if (best < base - 1) best = base - 1;
+
+    if (best != base && (g_ai_frame_counter % 90u) == 0u)
+        TD5_LOG_I(LOG_TAG, "smart_traffic_lane: slot=%d base=%d -> %d "
+                  "(lanes=%d tspan=%d)", slot, base, best, lane_count, target_span);
+    return best;
+}
+
+/* Traffic car-following: scale the cruise throttle down when a car sits close
+ * ahead in the same lane. Returns a 0..256 fixed-point scale. */
+static int td5_ai_smart_traffic_cruise_scale(int slot) {
+    char *actor = actor_ptr(slot);
+    int span_count = td5_track_get_span_count();
+    int self_span = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    int self_lane = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+    int n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    int nearest = 99;
+    for (int i = 0; i < n; i++) {
+        if (i == slot) continue;
+        char *a = actor_ptr(i);
+        if ((int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) != self_lane) continue;
+        int gap = smart_span_gap(self_span, (int)ACTOR_I16(a, ACTOR_SPAN_RAW), span_count);
+        if (gap >= 0 && gap < nearest) nearest = gap;
+    }
+    if (nearest <= 1) return 96;    /* ~0.375x */
+    if (nearest == 2) return 176;   /* ~0.69x  */
+    if (nearest <= 4) return 224;   /* ~0.875x */
+    return 256;                     /* clear   */
+}
+
 void td5_ai_update_track_behavior(int slot) {
     int32_t *rs = route_state(slot);
     char *actor  = actor_ptr(slot);
@@ -3894,9 +4451,14 @@ void td5_ai_update_track_behavior(int slot) {
 
     /* --- Normal AI path following --- */
 
-    /* 1. Lateral offset targeting (peer avoidance) */
-
-    td5_ai_update_track_offset_bias(slot);
+    /* 1. Lateral offset targeting.
+     *    SmartAI: replace the faithful nearest-peer nudge with the lane brain
+     *    (surface/occupancy/wall/racing-line/branch scoring). Off → faithful. */
+    if (td5_ai_smart_active()) {
+        td5_ai_smart_lane_bias(slot);
+    } else {
+        td5_ai_update_track_offset_bias(slot);
+    }
 
     /* 2. Look-ahead waypoint sampling + deviation computation
      *    [CONFIRMED @ 0x43523D-0x435372]
@@ -4156,6 +4718,13 @@ void td5_ai_update_track_behavior(int slot) {
 
     /* 3. Throttle/brake decision */
     threshold_result = td5_ai_update_route_threshold(slot);
+
+    /* 3b. SmartAI: car-following speed control. Runs AFTER route_threshold has
+     *     written the throttle, and only eases / brakes (never raises it), so
+     *     the corner-speed governor stays the upper bound. */
+    if (td5_ai_smart_active()) {
+        td5_ai_smart_speed(slot);
+    }
 
     /* 5. Steering: band-based steering-command controller.
      *
@@ -5882,6 +6451,14 @@ void td5_ai_update_traffic_route_plan(int slot) {
             cruise = scaled;
         }
     }
+    /* [SmartAI] car-following: ease the cruise throttle when a car sits close
+     * ahead in the same lane so traffic queues instead of nose-to-tail tunnelling.
+     * Scope choice = opponents + traffic, so traffic shares the smart brain. */
+    if (td5_ai_smart_active()) {
+        int cscale = td5_ai_smart_traffic_cruise_scale(slot);
+        cruise = (cruise * cscale) >> 8;
+        if (cruise < 0) cruise = 0;
+    }
     ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
     ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
 
@@ -5995,9 +6572,19 @@ void td5_ai_update_traffic_route_plan(int slot) {
             /* [S20 smart-traffic] AvoidSlowLane + situational lane change:
              * adjust the faithful target sub-lane toward a faster / clearer
              * lane. No-op when disabled / single-lane. */
-            target_sub_lane = traffic_smart_choose_lane(
-                slot, target_span,
-                td5_track_get_span_lane_count(target_span), target_sub_lane);
+            if (td5_ai_smart_active()) {
+                /* [SmartAI] unified lane brain for traffic: score lanes by
+                 * surface/occupancy/wall/change-cost (±1 step). Replaces the S20
+                 * react-to-nearest-peer chooser. */
+                target_sub_lane = td5_ai_smart_traffic_lane(
+                    slot, target_span,
+                    td5_track_get_span_lane_count(target_span),
+                    target_sub_lane, polarity);
+            } else {
+                target_sub_lane = traffic_smart_choose_lane(
+                    slot, target_span,
+                    td5_track_get_span_lane_count(target_span), target_sub_lane);
+            }
 
             int target_x = 0, target_y = 0, target_z = 0;
 

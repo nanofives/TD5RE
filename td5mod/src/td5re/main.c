@@ -326,6 +326,10 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "AntiTunnelSlop",       &g_td5.ini.anti_tunnel_slop },
         { "CatchupAssist",        &g_td5.ini.catchup_assist },
         { "AIAccelFromCar",       &g_td5.ini.ai_accel_from_car },
+        /* Smart opponent AI overhaul (non-faithful) */
+        { "SmartAI",              &g_td5.ini.smart_ai },
+        { "SmartAIAggression",    &g_td5.ini.smart_ai_aggression },
+        { "SmartAILeash",         &g_td5.ini.smart_ai_leash },
         /* Traffic (S20 smart traffic) */
         { "TrafficSmart",         &g_td5.ini.traffic_smart },
         { "TrafficWallAvoid",     &g_td5.ini.traffic_wall_avoid },
@@ -683,6 +687,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.anti_tunnel_slop = td5_ini_int("GameOptions", "AntiTunnelSlop", 40);
     if (g_td5.ini.anti_tunnel_slop < 0)   g_td5.ini.anti_tunnel_slop = 0;
     if (g_td5.ini.anti_tunnel_slop > 256) g_td5.ini.anti_tunnel_slop = 256;
+    /* PhysicsLOD (S30): distant-car physics rate-limiting for big fields (>8). */
+    g_td5.ini.physics_lod = td5_ini_int("GameOptions", "PhysicsLOD", 1);
+    if (g_td5.ini.physics_lod < 0) g_td5.ini.physics_lod = 0;
+    if (g_td5.ini.physics_lod > 1) g_td5.ini.physics_lod = 1;
     /* CATCHUP / rubber-band assist override (S06). -1 = use the persisted value
      * (S05 toggle); 0 = off; 1..9 = on. See ai_catchup_level() in td5_ai.c. */
     g_td5.ini.catchup_assist = td5_ini_int("GameOptions", "CatchupAssist", -1);
@@ -690,6 +698,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (g_td5.ini.catchup_assist > 9)  g_td5.ini.catchup_assist = 9;
     /* AI/traffic accel + top speed sourced from each car's carparam (S06). */
     g_td5.ini.ai_accel_from_car = td5_ini_int("GameOptions", "AIAccelFromCar", 1);
+    /* Smart opponent AI overhaul (non-faithful; default ON). */
+    g_td5.ini.smart_ai = td5_ini_int("GameOptions", "SmartAI", 1);
+    if (g_td5.ini.smart_ai < 0) g_td5.ini.smart_ai = 0;
+    if (g_td5.ini.smart_ai > 1) g_td5.ini.smart_ai = 1;
+    g_td5.ini.smart_ai_aggression = td5_ini_int("GameOptions", "SmartAIAggression", 1);
+    if (g_td5.ini.smart_ai_aggression < 0) g_td5.ini.smart_ai_aggression = 0;
+    if (g_td5.ini.smart_ai_aggression > 2) g_td5.ini.smart_ai_aggression = 2;
+    g_td5.ini.smart_ai_leash = td5_ini_int("GameOptions", "SmartAILeash", 3);
+    if (g_td5.ini.smart_ai_leash < 0) g_td5.ini.smart_ai_leash = 0;
+    if (g_td5.ini.smart_ai_leash > 9) g_td5.ini.smart_ai_leash = 9;
     /* S20 Smart Traffic (source-port enhancement; all default ON, traffic-only). */
     g_td5.ini.traffic_smart           = td5_ini_int("Traffic", "TrafficSmart", 1);
     g_td5.ini.traffic_wall_avoid      = td5_ini_int("Traffic", "WallAvoid", 1);

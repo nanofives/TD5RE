@@ -278,6 +278,15 @@ typedef struct TD5_GlobalState {
          * contact. ~3 display units ~= 1 cm. Only the resting position changes;
          * the faithful impulse/bounce timing is untouched. Clamped [0,256]. */
         int  anti_tunnel_slop;
+        /* PhysicsLOD (S30 2026-06-06, default 1): distant-car physics level-of-
+         * detail for LARGE fields (>8 racers). When on, racers far from the
+         * camera car AND off-screen run the expensive per-car track-contact work
+         * (span-walk, ground-snap, suspension, wall/edge resolvers) every 2nd tick
+         * instead of every tick — on the skipped tick they "coast" on their last
+         * velocity. Keeps AI steering + motion every tick so cars stay on-route;
+         * only the invisible-at-distance detail is rate-limited. Faithful 6-car
+         * races are untouched (gate requires >8 racers). 0 = off (full physics). */
+        int  physics_lod;
         /* CatchupAssist (S06 2026-06-04): td5re.ini override for the persisted
          * CATCHUP / rubber-band assist level. -1 (default) = use the persisted
          * value (S05 toggle, default 1 = on/softened). 0 = catchup off; 1..9 =
@@ -291,6 +300,32 @@ typedef struct TD5_GlobalState {
          * constants. Bicycle-critical fields (Wf/Wr/I/grip) stay on the AI
          * template for stability. 0 = faithful template-only behaviour. */
         int  ai_accel_from_car;
+        /* --- Smart Opponent AI (source-port overhaul, NON-FAITHFUL) ---------
+         * A from-scratch decision brain for the racing opponents (and, when
+         * scope includes it, background traffic). Replaces the original's
+         * centreline-follow + slot-parity-branch + nearest-peer-nudge with:
+         *   - lane selection scored by surface / occupancy / wall proximity,
+         *   - strategic branch choice at junctions,
+         *   - car-following speed control (ease/brake for a blocked lane),
+         *   - a continuous per-car skill that scales competence with difficulty,
+         *   - a gentle, symmetric rubber-band "leash".
+         * The tuned steering cascade + physics interface are left untouched —
+         * only the DECISIONS (lateral target, branch, throttle) change. When
+         * smart_ai = 0 the AI is byte-faithful to the original. [GameOptions].
+         *
+         *   smart_ai            : master gate (default 1 = on).
+         *   smart_ai_aggression : racecraft when lanes run out —
+         *                         0 = clean/defensive (always yield, no contact),
+         *                         1 = racing-realistic (hold line, defend, light
+         *                             contact) [default],
+         *                         2 = aggressive (block + lean on rivals).
+         *   smart_ai_leash      : gentle symmetric catch-up leash strength,
+         *                         0 = none .. 9 = strong (default 3). Independent
+         *                         of the faithful CatchupAssist; only active when
+         *                         smart_ai = 1. */
+        int  smart_ai;
+        int  smart_ai_aggression;
+        int  smart_ai_leash;
         /* --- S20 Smart Traffic (source-port enhancement, all default ON) ---
          * The original background traffic is scripted/reactive (flat 0x3c cruise,
          * deterministic junction route, no active wall avoidance). These knobs
