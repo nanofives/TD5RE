@@ -4043,102 +4043,113 @@ static void td5_ai_smart_lane_bias(int slot) {
     int aggression = g_td5.ini.smart_ai_aggression;
     double lane_w = 1.0 / (double)L;
 
-    double best_u = u_base, best_score = 1e18;
-    for (int c = 0; c <= L; c++) {
-        double u_c = (c == L) ? u_base : (c + 0.5) * lane_w;
-        int lane = (int)(u_c * L);
-        if (lane < 0) lane = 0;
-        if (lane >= L) lane = L - 1;
+    /* ====================================================================
+     * DYNAMIC racing-line correction (no discrete lanes). The target starts
+     * ON the authored racing line — so a clear road runs at faithful pace with
+     * no lane-to-lane darting — and we add smooth, continuous nudges ONLY for
+     * the four things that actually matter: SLOW surface, a BRANCH ahead, a
+     * WALL, and other CARS. Positions are road fractions u in [0,1].
+     * ==================================================================== */
+    const double WALL_MARGIN = 0.11;        /* never aim within 11% of a rail */
+    double target_u = u_base;
 
-        double score = 0.0;
-        if (td5_track_surface_is_slow(td5_track_get_span_lane_surface(look_span, lane)))
-            score += 6.0;
-        for (int k = 0; k < nb; k++) {
-            double du = bl[k].u - u_c; if (du < 0) du = -du;
-            if (du < lane_w * 0.9) {
-                double prox = (double)(lookahead - bl[k].gap + 1) / (double)(lookahead + 1);
-                if (prox < 0.0) prox = 0.0;
-                score += ((aggression >= 1) ? 3.0 : 4.5) * prox;
-                if (bl[k].slot == 0) score += 0.5 * prox; /* avoid the human a bit harder */
+    if (!on_branch) {
+        double pull = g_smart_branch_pull[slot];
+        if (pull != 0.0) {
+            /* BRANCH dominates near a fork: firmly blend the target toward the
+             * chosen side (main = low u for pull<0, branch = high u for pull>0),
+             * ramping with fork proximity, so the car arrives correctly placed
+             * and enters cleanly instead of clipping the branch wall. Surface /
+             * overtake nudges are skipped here — getting onto the right road
+             * matters more than lane choice for these few spans. */
+            double anchor = (pull < 0.0) ? 0.28 : 0.72;
+            double w = (pull < 0.0) ? -pull : pull;   /* 0..1 */
+            if (w > 1.0) w = 1.0;
+            target_u = u_base * (1.0 - w) + anchor * w;
+        } else {
+            /* (1) FAST vs SLOW surface: if the line sits on a slow lane, slide
+             * to the nearest fast one. */
+            int line_lane = (int)(target_u * L);
+            if (line_lane < 0) line_lane = 0;
+            if (line_lane >= L) line_lane = L - 1;
+            if (L > 1 &&
+                td5_track_surface_is_slow(td5_track_get_span_lane_surface(look_span, line_lane))) {
+                for (int d = 1; d < L; d++) {
+                    int r2 = line_lane + d, l2 = line_lane - d;
+                    if (r2 < L &&
+                        !td5_track_surface_is_slow(td5_track_get_span_lane_surface(look_span, r2))) {
+                        target_u = (r2 + 0.5) * lane_w; break;
+                    }
+                    if (l2 >= 0 &&
+                        !td5_track_surface_is_slow(td5_track_get_span_lane_surface(look_span, l2))) {
+                        target_u = (l2 + 0.5) * lane_w; break;
+                    }
+                }
+            }
+
+            /* (2) OVERTAKE: only ease aside for a genuinely SLOWER car sustained
+             * ahead in our path — equal/faster cars get NO lateral (the speed
+             * brain handles following, so packed cars don't weave). The side is
+             * STICKY: we continue the way we're already leaning, so this is one
+             * smooth move out and back, never a left-right wobble. */
+            int32_t self_v = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+            int near_gap = 999; int slower = 0;
+            for (int k = 0; k < nb; k++) {
+                if (bl[k].gap < 0) continue;
+                double du = bl[k].u - target_u; if (du < 0) du = -du;
+                if (du < lane_w * 1.0 && bl[k].gap < near_gap &&
+                    bl[k].speed < self_v - 0x2000) {
+                    near_gap = bl[k].gap; slower = 1;
+                }
+            }
+            if (slower) {
+                double lean = g_smart_lane_u[slot] - u_base;   /* current offset */
+                double dir = (lean > 0.01) ? +1.0
+                           : (lean < -0.01) ? -1.0
+                           : (target_u < 0.5 ? +1.0 : -1.0);
+                if (dir > 0.0 && target_u > 1.0 - (WALL_MARGIN + lane_w)) dir = -1.0;
+                if (dir < 0.0 && target_u < (WALL_MARGIN + lane_w))       dir = +1.0;
+                target_u += dir * 0.7 * lane_w;                /* ease out ~0.7 lane to pass */
             }
         }
-        /* Prefer central lanes (quadratic): the outermost lanes are both
-         * wall-adjacent AND, at a junction, branch-triggering (high sub-lane).
-         * Keeping cars central by default stops avoidance from shoving them
-         * onto a wall or a wrong branch where they can wedge (Newcastle span
-         * 636). Cars still move out for a real block — avoidance outweighs this
-         * — but they prefer to slow (car-following) over diving to the rail. */
-        if (L > 1) {
-            double center = (L - 1) * 0.5;
-            double edist  = (double)lane - center; if (edist < 0) edist = -edist;
-            double enorm  = edist / center;            /* 0 centre .. 1 outermost */
-            score += enorm * enorm * 2.2;
-        }
-        { double dl = u_c - u_base; if (dl < 0) dl = -dl; score += dl * 1.2; }
-        { double dc = u_c - u_self; if (dc < 0) dc = -dc; score += dc * (1.6 - skill * 0.8); }
-        if (g_smart_branch_pull[slot] != 0.0) {
-            double side = (u_c - 0.5) * 2.0;
-            /* Weighted high so the fork preference dominates ordinary avoidance
-             * near a junction — this is what reliably keeps cars in the
-             * main-route lanes instead of drifting onto a wall-lined branch. */
-            score -= g_smart_branch_pull[slot] * side * 4.0;
-        }
-        if (c == L) score -= 0.15;            /* gentle tie-break toward racing line */
-
-        if (score < best_score) { best_score = score; best_u = u_c; }
     }
+    (void)aggression;
 
-    /* Width-invariant lateral control. Rate-limit the TARGET lateral fraction
-     * (u) and keep it inside the drivable band, THEN convert to a bias with the
-     * current span width. Doing this in u-space (not absolute bias units) is
-     * what stops a large offset built up on a wide road from aiming the car off
-     * a NARROW branch — the Moscow-reverse wall-clip, where a 6-lane→2-lane
-     * transition left a stale ~1500-unit bias pointing into the boundary. */
-    double margin = 0.5 / (double)L;          /* half a lane from each rail */
-    if (margin < 0.08) margin = 0.08;
-    if (margin > 0.30) margin = 0.30;
+    /* (4) WALL: never aim within WALL_MARGIN of a rail — the single guard that
+     * keeps the car off the boundary whether the authored line hugs a rail, a
+     * surface nudge went wide, or we're threading a tight branch. */
+    if (target_u < WALL_MARGIN)       target_u = WALL_MARGIN;
+    if (target_u > 1.0 - WALL_MARGIN) target_u = 1.0 - WALL_MARGIN;
 
+    double best_u = target_u;
+
+    /* --- Smooth the physical move (rate-limit in u-space) so the car holds a
+     * clean line and any correction is one gentle slide, not a jerk. Because
+     * target_u is a CONTINUOUS function of the situation (not a discrete lane
+     * pick), it doesn't flip tick-to-tick, so no hysteresis/commitment is
+     * needed — the rate limit alone keeps it smooth. -------------------------*/
     double cu = g_smart_lane_u[slot];
     if (cu < 0.0 || cu > 1.0) cu = u_self;     /* first sight / post-reset snap */
-    double max_du = 0.03 + skill * 0.05;       /* 3%..8% of road width per tick */
-
+    double max_du = 0.022 + skill * 0.028;     /* ~2.2%..5% of road width per tick */
     if (on_branch) {
-        /* Tight authored branch road: do NOT impose lane choice — track the
-         * original route line and immediately drop any lateral offset carried
-         * in from the wide main road, so we never aim off the narrow branch.
-         * This makes branch behaviour no worse than the faithful original. */
-        best_u = u_base;
         if (cu > best_u + 0.12 || cu < best_u - 0.12)
-            cu = u_self;                       /* shed stale wide-road offset */
-        max_du = 0.12;                         /* converge onto the line fast */
-    } else {
-        if (best_u < margin)       best_u = margin;
-        if (best_u > 1.0 - margin) best_u = 1.0 - margin;
-        uint32_t lh = smart_hash_u32((uint32_t)slot * 2246822519u
-                                     + (uint32_t)(g_ai_frame_counter / 8u));
-        if ((double)(lh & 0xFFFF) / 65535.0 < (1.0 - skill) * 0.25)
-            max_du *= 0.25;                    /* sluggish low-skill tick */
+            cu = u_self;                       /* shed a stale wide-road offset */
+        max_du = 0.12;                         /* converge onto the branch line fast */
     }
-
     if (best_u > cu + max_du)      cu += max_du;
     else if (best_u < cu - max_du) cu -= max_du;
     else                           cu = best_u;
-    if (!on_branch) {
-        if (cu < margin)       cu = margin;
-        if (cu > 1.0 - margin) cu = 1.0 - margin;
-    }
     g_smart_lane_u[slot] = cu;
 
-    /* Target the steering at lateral fraction `cu`; bias is the perpendicular
-     * shift from the route line to that fraction in the current span's units. */
+    /* Bias = perpendicular shift from the route line to fraction `cu`. */
     int32_t cur = (int32_t)((cu - u_base) * cwidth);
     rs[RS_TRACK_OFFSET_BIAS] = cur;
 
     if ((g_ai_frame_counter % 60u) == 0u) {
         TD5_LOG_I(LOG_TAG, "smart_lane: slot=%d skill=%.2f span=%d L=%d "
-                  "u_self=%.2f u_base=%.2f u_tgt=%.2f u_cur=%.2f bias=%d nb=%d pull=%.2f",
+                  "u_self=%.2f u_base=%.2f u_tgt=%.2f u_cur=%.2f bias=%d nb=%d pull=%.2f%s",
                   slot, (double)skill, span, L, u_self, u_base, best_u, cu,
-                  (int)cur, nb, g_smart_branch_pull[slot]);
+                  (int)cur, nb, g_smart_branch_pull[slot], on_branch ? " [on_branch]" : "");
     }
 }
 
@@ -4171,6 +4182,26 @@ static void td5_ai_smart_speed(int slot) {
             nearest_gap = bl[k].gap; peer_speed = bl[k].speed; have = 1;
         }
     }
+
+    /* Branch-road ADAPT: a car that wandered onto a branch must keep driving it
+     * out, not sit there. If the road ahead is clear, override any brake/coast
+     * the route-threshold left and commit a forward throttle. (Car-following
+     * below still slows it if a peer is genuinely close in the same lane.) */
+    {
+        int rl = td5_track_get_ring_length();
+        if (rl > 0 && span_raw >= rl && (!have || nearest_gap > 2)) {
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+            ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 0;
+            int16_t thr_b = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+            if (thr_b <= 0x40) {               /* coasting/braking → drive */
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xA0;
+                if ((g_ai_frame_counter % 60u) == 0u)
+                    TD5_LOG_I(LOG_TAG, "smart_branch_drive: slot=%d span=%d thr %d->0xA0 (adapt)",
+                              slot, span_raw, (int)thr_b);
+            }
+        }
+    }
+
     if (!have) return;
 
     int32_t self_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
@@ -4185,7 +4216,7 @@ static void td5_ai_smart_speed(int slot) {
             ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 1;
         } else if (thr > 0) {
             double f = (double)nearest_gap / (double)(desired + 1);
-            if (f < 0.25) f = 0.25;
+            if (f < 0.55) f = 0.55;   /* ease, don't crawl — keeps pace in a pack */
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)((double)thr * f);
         }
         if ((g_ai_frame_counter % 60u) == 0u) {
@@ -4356,7 +4387,26 @@ void td5_ai_update_track_behavior(int slot) {
      * per-tick steering ramp produced wall-leaning behaviour for ~150
      * ticks regardless of contact state.
      * [CONFIRMED via Ghidra disassembly + decompilation @ 0x00434FE0]. */
+    /* SmartAI: detect a branch-road span (appended detour, span_raw beyond the
+     * main ring). On a branch we make the car ADAPT and drive it rather than
+     * run the faithful heading-misalignment recovery, which otherwise brakes a
+     * car that wandered onto a branch into a standstill — the "refuses to drive
+     * the branch it entered by mistake" report (Hong Kong). */
+    int smart_on_branch = 0;
+    if (td5_ai_smart_active()) {
+        int sr_b = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int rl_b = td5_track_get_ring_length();
+        smart_on_branch = (rl_b > 0 && sr_b >= rl_b);
+    }
+
     if (g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE) {
+        /* SmartAI on a branch: cancel any active recovery/brake script and skip
+         * the misalignment trigger below, so the normal path drives the branch
+         * route forward instead of freezing. */
+        if (smart_on_branch && rs[RS_SCRIPT_BASE_PTR] != 0) {
+            rs[RS_SCRIPT_BASE_PTR] = 0;
+            rs[RS_SCRIPT_IP] = 0;
+        }
         /* --- Script check: if a script is active, run it --- */
         if (rs[RS_SCRIPT_BASE_PTR] != 0) {
             int result = td5_ai_advance_track_script(rs);
@@ -4410,7 +4460,8 @@ void td5_ai_update_track_behavior(int slot) {
              * recovery-script set on the first sub-tick. orig with route data
              * loaded computes a meaningful route_heading and does NOT enter
              * recovery. */
-            if (rs[RS_ROUTE_TABLE_PTR] != 0 && hdelta > 0x320 && hdelta < 0xCE0) {
+            if (rs[RS_ROUTE_TABLE_PTR] != 0 && hdelta > 0x320 && hdelta < 0xCE0
+                && !smart_on_branch) {
                 TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X gt=%d",
                           slot, hdelta, heading & 0xFFF, route_heading & 0xFFF,
                           (int)g_td5.game_type);
