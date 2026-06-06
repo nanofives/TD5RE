@@ -3506,6 +3506,70 @@ static int frontend_any_input_down(void) {
     return s_fe_gamepad_nav ? 1 : 0;
 }
 
+/* Apply ONE menu navigation event — a single cursor move or confirm. Shared by
+ * the gamepad immediate-edge path and the keyboard WM_KEYDOWN FIFO drain so both
+ * behave identically: exactly one move per press, matching the original's
+ * one-move-per-rising-edge handler UpdateFrontendDisplayModeSelection @0x00426580.
+ * Routing keyboard nav through the queue (one call per queued press, in order)
+ * is what makes a burst of taps during an MS spike apply press-for-press instead
+ * of being collapsed/dropped. The s_arrow_input bit is set regardless of the
+ * color-panel modal (the modal reads those bits in the tick); only the button
+ * move itself is suppressed while the panel is open. */
+static void frontend_apply_nav_event(unsigned code) {
+    int spatial_nav = (s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
+    switch (code) {
+    case TD5_NAVKEY_LEFT:
+        s_arrow_input |= 1;
+        if (!s_color_panel_visible) {
+            int moved = spatial_nav ? frontend_move_selected_button_spatial(-1, 0)
+                                    : frontend_cycle_selected_button_horizontal(-1);
+            if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
+        }
+        break;
+    case TD5_NAVKEY_RIGHT:
+        s_arrow_input |= 2;
+        if (!s_color_panel_visible) {
+            int moved = spatial_nav ? frontend_move_selected_button_spatial(1, 0)
+                                    : frontend_cycle_selected_button_horizontal(1);
+            if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
+        }
+        break;
+    case TD5_NAVKEY_UP:
+        s_arrow_input |= 4;
+        if (!s_color_panel_visible) {
+            int moved = spatial_nav ? frontend_move_selected_button_spatial(0, -1)
+                                    : frontend_cycle_selected_button_vertical(-1);
+            if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
+            /* No sound on a no-target edge move — faithful to the original shared
+             * nav handler @0x00426580, which is SILENT when no neighbour exists. */
+        }
+        break;
+    case TD5_NAVKEY_DOWN:
+        s_arrow_input |= 8;
+        if (!s_color_panel_visible) {
+            int moved = spatial_nav ? frontend_move_selected_button_spatial(0, 1)
+                                    : frontend_cycle_selected_button_vertical(1);
+            if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
+        }
+        break;
+    case TD5_NAVKEY_ENTER:
+        if (s_selected_button >= 0 && s_selected_button < FE_MAX_BUTTONS &&
+            s_buttons[s_selected_button].active && !s_buttons[s_selected_button].disabled) {
+            s_button_index = s_selected_button;
+            s_input_ready = 1;
+            frontend_play_sfx(3);
+            TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=keyboard",
+                      s_button_index, s_buttons[s_button_index].label);
+        } else if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY) {
+            frontend_play_sfx(10);
+        }
+        /* else: the post-EXIT credits scroll has no buttons, so a confirm press
+         * has nothing to action — the any-key skip block in the poll quits. */
+        break;
+    default: break;
+    }
+}
+
 static void frontend_poll_input(void) {
     POINT pt;
     HWND hwnd;
@@ -3525,11 +3589,11 @@ static void frontend_poll_input(void) {
     int had_activity = 0;
     uint32_t now = td5_plat_time_ms();
 
-    /* [S12] Drain the WM_KEYDOWN nav latch every frame. Read here (before the
-     * inactive early-return) so a press that arrived while the window was
-     * unfocused is discarded rather than firing on refocus. Applied to the edge
-     * flags further down, only while no text field is open. */
-    unsigned nav_latch = td5_plat_input_nav_latch();
+    /* [2026-06-05] Menu nav is now drained from the WM_KEYDOWN FIFO further down
+     * (one move per queued press, in order — see frontend_apply_nav_event), which
+     * is what stops a burst of taps during an MS spike from being collapsed/
+     * dropped. The queue is flushed in the inactive branch below so presses
+     * captured while the window was unfocused are discarded, not fired on refocus. */
 
     s_input_ready = 0;
     s_button_index = -1;
@@ -3537,6 +3601,9 @@ static void frontend_poll_input(void) {
 
     hwnd = (HWND)(DWORD_PTR)Backend_GetDisplayWindow();
     if (!frontend_is_window_active()) {
+        /* Discard any nav presses captured while unfocused so they don't fire on
+         * refocus (the old code achieved this by draining the latch every frame). */
+        td5_plat_input_flush_nav();
         s_prev_left_state = 1;
         s_prev_right_state = 1;
         s_prev_up_state = 1;
@@ -3549,16 +3616,24 @@ static void frontend_poll_input(void) {
         return;
     }
 
-    /* Keyboard arrows */
-    left_now = td5_plat_input_key_pressed(0xCB);
-    right_now = td5_plat_input_key_pressed(0xCD);
-    up_now = td5_plat_input_key_pressed(0xC8);
-    down_now = td5_plat_input_key_pressed(0xD0);
-    enter_now = td5_plat_input_key_pressed(0x1C);
+    /* Keyboard arrows/Enter — read for activity & active-device tracking ONLY.
+     * The actual menu MOVES now come exclusively from the WM_KEYDOWN FIFO drained
+     * below (frontend_apply_nav_event), so a burst of taps during an MS spike is
+     * applied press-for-press, in order. Feeding these immediate reads into the
+     * move edges as well would double-count each keyboard press. */
+    int kb_left  = td5_plat_input_key_pressed(0xCB);
+    int kb_right = td5_plat_input_key_pressed(0xCD);
+    int kb_up    = td5_plat_input_key_pressed(0xC8);
+    int kb_down  = td5_plat_input_key_pressed(0xD0);
+    int kb_enter = td5_plat_input_key_pressed(0x1C);
 
     /* Active-controller tracking: keyboard input keeps device 0 active. */
-    if (left_now || right_now || up_now || down_now || enter_now)
+    if (kb_left || kb_right || kb_up || kb_down || kb_enter)
         s_active_menu_device = 0;
+
+    /* The move-edge path below is GAMEPAD-ONLY now (keyboard flows via the FIFO);
+     * the gamepad block just after this OR's its dpad/stick state into these. */
+    left_now = right_now = up_now = down_now = enter_now = 0;
 
     /* [PORT ENHANCEMENT 2026-06; PERF FIX 2026-06-05] Hot-swap detection:
      * re-enumerate DirectInput joysticks when a controller is connected while
@@ -3587,32 +3662,18 @@ static void frontend_poll_input(void) {
         if (aj >= 1) s_active_menu_device = aj;
     }
 
+    /* Gamepad-only rising edges (keyboard nav comes from the FIFO, drained below). */
     left_edge = (left_now && !s_prev_left_state);
     right_edge = (right_now && !s_prev_right_state);
     up_edge = (up_now && !s_prev_up_state);
     down_edge = (down_now && !s_prev_down_state);
     enter_edge = (enter_now && !s_prev_enter_state);
-    if (left_now || right_now || up_now || down_now || enter_now) had_activity = 1;
+    if (kb_left || kb_right || kb_up || kb_down || kb_enter ||
+        left_now || right_now || up_now || down_now || enter_now) had_activity = 1;
 
-    /* [S12] Fold in nav-key taps the window proc captured between frames so a
-     * quick press at low FPS isn't dropped by the once-per-frame DI immediate
-     * read. Press-only (auto-repeat filtered in the proc) so a held key still
-     * moves once and never auto-repeats. Suppressed while a text field is open
-     * so a latched Enter can't leak into name entry (text uses the WM_CHAR
-     * queue, not these edges). */
-    if (s_text_input_state == 0 && nav_latch) {
-        if (nav_latch & TD5_NAVKEY_LEFT)  left_edge  = 1;
-        if (nav_latch & TD5_NAVKEY_RIGHT) right_edge = 1;
-        if (nav_latch & TD5_NAVKEY_UP)    up_edge    = 1;
-        if (nav_latch & TD5_NAVKEY_DOWN)  down_edge  = 1;
-        if (nav_latch & TD5_NAVKEY_ENTER) enter_edge = 1;
-        had_activity = 1;
-    }
-
-    if (left_edge) s_arrow_input |= 1;  /* LEFT — rising edge only (original: DAT_004951f8) */
-    if (right_edge) s_arrow_input |= 2; /* RIGHT — rising edge only */
-    if (up_edge) s_arrow_input |= 4;   /* UP */
-    if (down_edge) s_arrow_input |= 8; /* DOWN */
+    /* s_arrow_input bits are set per-event inside frontend_apply_nav_event (for
+     * both the gamepad edges and the queued keyboard presses), so the color-panel
+     * modal and the value-cycle consumers still see them. */
 
     /* Mouse position */
     GetCursorPos(&pt);
@@ -3648,56 +3709,34 @@ static void frontend_poll_input(void) {
     if (mouse_btn || s_mouse_clicked) had_activity = 1;
     s_prev_mouse_btn = mouse_btn;
 
-    /* Keyboard navigation: UP/DOWN move between rows, LEFT/RIGHT move within
-     * a horizontal button row. Suppressed while the TD6 color panel is open —
-     * there the 4 arrows navigate the color grid (modal), handled in the tick;
-     * the s_arrow_input bits are still set above for that.
+    /* Menu navigation. UP/DOWN move between rows, LEFT/RIGHT within a horizontal
+     * button row (the Controller-Binding grid uses 2D spatial nav). Both the
+     * gamepad rising edges (this frame) and every keyboard press queued by the
+     * window proc are funnelled through frontend_apply_nav_event so each press =
+     * one move, in order.
      *
-     * [PORT ENHANCEMENT 2026-06] The Controller-Binding (Configure) screen lays
-     * its action buttons out as a two-column grid, which the flat index-order
-     * row nav mis-handles (DOWN at a column's bottom spills to the next column's
-     * top). For that screen route all four arrows through true 2D spatial nav so
-     * UP/DOWN stay in the current column and LEFT/RIGHT change column. */
-    int spatial_nav = (s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
-    if (left_edge && !s_color_panel_visible) {
-        int moved = spatial_nav ? frontend_move_selected_button_spatial(-1, 0)
-                                : frontend_cycle_selected_button_horizontal(-1);
-        if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
-    }
-    if (right_edge && !s_color_panel_visible) {
-        int moved = spatial_nav ? frontend_move_selected_button_spatial(1, 0)
-                                : frontend_cycle_selected_button_horizontal(1);
-        if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
-    }
-    if (up_edge && !s_color_panel_visible) {
-        int moved = spatial_nav ? frontend_move_selected_button_spatial(0, -1)
-                                : frontend_cycle_selected_button_vertical(-1);
-        if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
-        /* No sound on a no-target edge move. Faithful to the original shared nav
-         * handler UpdateFrontendDisplayModeSelection @0x00426580, which is SILENT
-         * when no neighbour button exists. The port previously played Uh-Oh (10)
-         * here, producing an error blip every time you hit the top/bottom of a
-         * list. (Horizontal L/R moves already had no failed-move sound.) */
-    }
-    if (down_edge && !s_color_panel_visible) {
-        int moved = spatial_nav ? frontend_move_selected_button_spatial(0, 1)
-                                : frontend_cycle_selected_button_vertical(1);
-        if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
-    }
-    if (enter_edge) {
-        if (s_selected_button >= 0 && s_selected_button < FE_MAX_BUTTONS &&
-            s_buttons[s_selected_button].active && !s_buttons[s_selected_button].disabled) {
-            s_button_index = s_selected_button;
-            s_input_ready = 1;
-            frontend_play_sfx(3);
-            TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=keyboard",
-                      s_button_index, s_buttons[s_button_index].label);
-        } else if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY) {
-            frontend_play_sfx(10);
+     * Gamepad edges first (sampled "now"): */
+    if (left_edge)  frontend_apply_nav_event(TD5_NAVKEY_LEFT);
+    if (right_edge) frontend_apply_nav_event(TD5_NAVKEY_RIGHT);
+    if (up_edge)    frontend_apply_nav_event(TD5_NAVKEY_UP);
+    if (down_edge)  frontend_apply_nav_event(TD5_NAVKEY_DOWN);
+    if (enter_edge) frontend_apply_nav_event(TD5_NAVKEY_ENTER);
+
+    /* Then drain the keyboard WM_KEYDOWN FIFO: one queued press = one move, in
+     * order, so a burst of taps during a frame-time spike is applied press-for-
+     * press instead of collapsed/dropped (the reported bug). Down,Down,Enter
+     * mashed inside one slow frame thus selects the row two below — the right one.
+     * Suppressed (queue flushed) while a text field is open so a buffered Enter
+     * can't leak into name entry; text uses the WM_CHAR queue, not this path. */
+    if (s_text_input_state == 0) {
+        unsigned nav_code;
+        int nav_guard = 0;
+        while ((nav_code = td5_plat_input_nav_pop()) != 0 && nav_guard++ < 128) {
+            frontend_apply_nav_event(nav_code);
+            had_activity = 1;
         }
-        /* else: the post-EXIT credits scroll has no buttons, so a confirm press
-         * has nothing to action — the any-key skip block below quits instead of
-         * playing the rejection blip. */
+    } else {
+        td5_plat_input_flush_nav();
     }
 
     /* Credits/extras scroll: press ANY key (or click / gamepad button) to skip
@@ -3820,14 +3859,19 @@ static void frontend_poll_input(void) {
 static int frontend_check_escape(void) {
     if (!frontend_is_window_active()) {
         s_prev_escape_state = 1;
+        td5_plat_input_esc_taken();   /* drop any ESC captured while unfocused */
         return 0;
     }
     /* Gamepad B (button 1) backs out, same as the ESC key. [PORT ENHANCEMENT] */
     int esc_now = td5_plat_input_key_pressed(0x01) || ((s_fe_gamepad_nav & 0x20) != 0);
     int esc_edge = (esc_now && !s_prev_escape_state);
     s_prev_escape_state = esc_now;
-    if (esc_edge) frontend_note_activity();
-    return esc_edge;
+    /* Fold in a WM_KEYDOWN ESC the once-per-frame immediate read missed at low FPS
+     * (read-and-clear). At most one back-out per frame so a buffered burst of ESCs
+     * can't pop several screens at once. */
+    int esc_queued = td5_plat_input_esc_taken();
+    if (esc_edge || esc_queued) frontend_note_activity();
+    return (esc_edge || esc_queued) ? 1 : 0;
 }
 
 /* Forward declaration for text rendering (defined later in file) */

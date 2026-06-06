@@ -197,19 +197,31 @@ int  td5_plat_input_get_char(void);
 /** Discard pending typed characters (call when opening a text field). */
 void td5_plat_input_flush_chars(void);
 
-/** WM_KEYDOWN navigation-key latch bits (see td5_plat_input_nav_latch). */
+/** WM_KEYDOWN navigation-key event codes (one per genuine key press). Each is a
+ *  single bit so the same value can also be OR'd as a mask where convenient. */
 #define TD5_NAVKEY_LEFT  0x01u
 #define TD5_NAVKEY_RIGHT 0x02u
 #define TD5_NAVKEY_UP    0x04u
 #define TD5_NAVKEY_DOWN  0x08u
 #define TD5_NAVKEY_ENTER 0x10u
 
-/** Drain the WM_KEYDOWN navigation-key latch: returns OR'd TD5_NAVKEY_* bits for
- *  the cursor/Enter keys pressed since the last call, and clears them. The
- *  frame-rate-independent analogue of td5_plat_input_get_char() for menu nav —
- *  lets a quick tap that the once-per-frame DirectInput immediate read missed at
- *  low FPS still register. Auto-repeat is filtered in the window proc. */
-unsigned td5_plat_input_nav_latch(void);
+/** Pop the next queued menu-navigation event (WM_KEYDOWN FIFO). Returns a single
+ *  TD5_NAVKEY_* code, or 0 when the queue is empty. Unlike a one-bit latch the
+ *  queue preserves EVERY press and its order, so a burst of taps during a
+ *  frame-time spike is drained press-for-press instead of being collapsed or
+ *  dropped — the frame-rate-independent analogue of td5_plat_input_get_char() for
+ *  menu nav. Auto-repeat is filtered in the window proc. */
+unsigned td5_plat_input_nav_pop(void);
+
+/** Discard all pending menu-nav events and the ESC latch. Call on leaving the
+ *  menu, or while a text field is open, so stale presses don't fire next frame. */
+void td5_plat_input_flush_nav(void);
+
+/** One-shot: returns 1 (and clears) if an ESC press was captured (WM_KEYDOWN)
+ *  since the last call. Lets a quick ESC tap the once-per-frame immediate read
+ *  missed still back out — applied at most once per frame so a buffered burst
+ *  can't pop several screens at once. */
+int  td5_plat_input_esc_taken(void);
 
 /** Enumerate available input devices. Returns count. */
 int td5_plat_input_enumerate_devices(void);
