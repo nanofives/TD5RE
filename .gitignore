@@ -115,3 +115,6 @@ verify/*.log
 
 # Ghidra project clones inside research-archive (DB state, not research)
 re/tools/research-archive/tmp_ghidra_proj/
+
+# Root-folder cleanup archive (regenerable scratch parked for review before deletion)
+_archive/
