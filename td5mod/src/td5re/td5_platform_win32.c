@@ -395,15 +395,24 @@ static volatile unsigned char s_char_queue[TD5_CHAR_QUEUE_SIZE];
 static volatile int s_char_q_head;   /* producer (window proc) */
 static volatile int s_char_q_tail;   /* consumer (frontend)    */
 
-/* WM_KEYDOWN navigation-key latch. Same robustness model as the WM_CHAR queue
- * above: Windows posts a WM_KEYDOWN for every genuine key press, so an arrow /
- * Enter tap that lands between two slow frames is never dropped the way the
- * once-per-frame DirectInput immediate read can drop it. Auto-repeat is filtered
- * (lParam bit 30) so a held key still moves the cursor only once. The old
- * GetAsyncKeyState '&1' approach was rejected for a poll-contention bug (other
- * GetAsyncKeyState callers consumed the "pressed since last call" bit first —
- * see td5_frontend.c); WM_KEYDOWN has no such contention. */
-static volatile unsigned s_navkey_latch = 0;
+/* WM_KEYDOWN navigation FIFO. Same robustness model as the WM_CHAR queue above,
+ * but for menu cursor/Enter keys: Windows posts a WM_KEYDOWN for every genuine
+ * press, so we queue each one (auto-repeat filtered via lParam bit 30) and the
+ * frontend drains them in order. A burst of taps during a frame-time spike is
+ * preserved press-for-press instead of being collapsed into a single bit (the
+ * previous OR-latch did exactly that — three quick DOWNs became one move), and
+ * unlike the once-per-frame DirectInput immediate read, a press that lands AND
+ * releases inside one slow frame is still captured. The old GetAsyncKeyState '&1'
+ * approach was rejected for a poll-contention bug (other GetAsyncKeyState callers
+ * consumed the "pressed since last call" bit first — see td5_frontend.c);
+ * WM_KEYDOWN has no such contention. */
+#define TD5_NAV_QUEUE_SIZE 64
+static volatile unsigned char s_nav_queue[TD5_NAV_QUEUE_SIZE];
+static volatile int s_nav_q_head;   /* producer (window proc) */
+static volatile int s_nav_q_tail;   /* consumer (frontend)    */
+/* ESC stays a one-shot latch rather than a FIFO entry: a back-out is applied at
+ * most once per frame so a buffered burst can't pop several screens at once. */
+static volatile int s_esc_latch = 0;
 
 /* [PERF FIX 2026-06-05] Set by WM_DEVICECHANGE; consumed by
  * td5_plat_input_devices_changed(). Lets the frontend run the ~120ms blocking
@@ -469,18 +478,29 @@ static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONDOWN: s_mouse_click_latch |= 1; break;
     case WM_RBUTTONDOWN: s_mouse_click_latch |= 2; break;
     case WM_MBUTTONDOWN: s_mouse_click_latch |= 4; break;
-    /* Latch genuine nav-key presses (auto-repeat filtered via lParam bit 30) so
-     * menu navigation is never dropped at high MS. Falls through to the default
-     * proc below so WM_CHAR is still produced for text-entry screens. */
+    /* Queue genuine nav-key presses (auto-repeat filtered via lParam bit 30) so
+     * menu navigation is never dropped OR collapsed at high MS: each press is one
+     * FIFO entry, drained in order by the frontend. ESC uses a separate one-shot
+     * latch. Falls through to the default proc below so WM_CHAR is still produced
+     * for text-entry screens. */
     case WM_KEYDOWN:
         if (!(lParam & (1L << 30))) {
+            unsigned code = 0;
             switch (wParam) {
-            case VK_LEFT:   s_navkey_latch |= TD5_NAVKEY_LEFT;  break;
-            case VK_RIGHT:  s_navkey_latch |= TD5_NAVKEY_RIGHT; break;
-            case VK_UP:     s_navkey_latch |= TD5_NAVKEY_UP;    break;
-            case VK_DOWN:   s_navkey_latch |= TD5_NAVKEY_DOWN;  break;
-            case VK_RETURN: s_navkey_latch |= TD5_NAVKEY_ENTER; break;
+            case VK_LEFT:   code = TD5_NAVKEY_LEFT;  break;
+            case VK_RIGHT:  code = TD5_NAVKEY_RIGHT; break;
+            case VK_UP:     code = TD5_NAVKEY_UP;    break;
+            case VK_DOWN:   code = TD5_NAVKEY_DOWN;  break;
+            case VK_RETURN: code = TD5_NAVKEY_ENTER; break;
+            case VK_ESCAPE: s_esc_latch = 1;         break;
             default: break;
+            }
+            if (code) {
+                int next = (s_nav_q_head + 1) % TD5_NAV_QUEUE_SIZE;
+                if (next != s_nav_q_tail) {   /* drop only if 64-deep queue is full */
+                    s_nav_queue[s_nav_q_head] = (unsigned char)code;
+                    s_nav_q_head = next;
+                }
             }
         }
         break;
@@ -1815,14 +1835,34 @@ void td5_plat_input_flush_chars(void)
     s_char_q_tail = s_char_q_head;
 }
 
-/* Drain the WM_KEYDOWN nav-key latch (read-and-clear). Frame-rate independent,
- * so a cursor/Enter tap captured by the window proc between two slow frames is
- * never dropped. Returns OR'd TD5_NAVKEY_* bits. */
-unsigned td5_plat_input_nav_latch(void)
+/* Pop the next queued nav event (WM_KEYDOWN FIFO). Returns a single TD5_NAVKEY_*
+ * code, or 0 when empty. Frame-rate independent: every cursor/Enter tap captured
+ * by the window proc between two slow frames is preserved in order, so a burst of
+ * presses during an MS spike is drained press-for-press instead of collapsed. */
+unsigned td5_plat_input_nav_pop(void)
 {
-    unsigned v = s_navkey_latch;
-    s_navkey_latch = 0;
-    return v;
+    unsigned code;
+    if (s_nav_q_tail == s_nav_q_head) return 0;
+    code = (unsigned)s_nav_queue[s_nav_q_tail];
+    s_nav_q_tail = (s_nav_q_tail + 1) % TD5_NAV_QUEUE_SIZE;
+    return code;
+}
+
+/* Discard all pending nav events and the ESC latch (called when leaving the menu
+ * or while a text field is open so stale presses don't fire on the next frame). */
+void td5_plat_input_flush_nav(void)
+{
+    s_nav_q_tail = s_nav_q_head;
+    s_esc_latch = 0;
+}
+
+/* One-shot ESC read-and-clear: 1 if a WM_KEYDOWN VK_ESCAPE arrived since the last
+ * call. Lets a quick ESC the immediate read missed still back out, at most once
+ * per frame. */
+int td5_plat_input_esc_taken(void)
+{
+    if (s_esc_latch) { s_esc_latch = 0; return 1; }
+    return 0;
 }
 
 /* Joystick enumeration callback */
