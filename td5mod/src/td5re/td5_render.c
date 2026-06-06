@@ -2260,15 +2260,50 @@ void td5_render_actors_for_view(int view_index)
         TD5_Actor *player = td5_game_get_actor(td5_game_get_player_slot(view_index));
         if (player) {
             player_span = (int)player->track_span_raw;
-            /* If on a branch road, use the junction's main-road span as
-             * the culling center so nearby main road geometry stays visible.
-             * Also track the branch span to render branch geometry. */
             int ring = td5_track_get_ring_length();
+            /* Branch-road cull center. The original render walk windows the
+             * track display list on the actor's WRAPPED/normalized span
+             * (actor +0x82, always in [0, ring_length)) — the strip walker
+             * keeps that field advancing along the main-ring progress axis
+             * even while the car is physically on a branch road
+             * [CONFIRMED orig RunRaceFrame @ 0x0042bbb2 `MOVSX EAX,word ptr
+             * [EAX+0x82]`; reverse mirror @ 0x0042bbc2]. The raw span (+0x80)
+             * goes >= ring_length on a branch, so it must NOT be used as the
+             * window center directly.
+             *
+             * The port previously remapped the raw branch span to a "junction"
+             * main-road span via td5_track_branch_to_junction(). On the
+             * migrated TD6 tracks (e.g. London level012) that jump table chains
+             * branch->branch and returns a value that is ITSELF >= ring_length
+             * (raw 2137 -> 4285 with ring 2136). The out-of-range center then
+             * blew out the TD6 proportional span->entry map: start_entry=1049
+             * against only 534 display-list entries -> every main-road entry
+             * clamped out (P2P) -> all city geometry vanished on branch entry.
+             * Use the normalized span like the original; keep the raw branch
+             * span only to drive the port-only branch-road STRIP fallback. */
             if (player_span >= ring) {
                 player_branch_span = player_span;
-                int junction = td5_track_branch_to_junction(player_span);
-                if (junction >= 0)
-                    player_span = junction;
+                player_span = (int)player->track_span_normalized;
+            }
+            /* Hard guarantee: the cull-window center must be a valid in-ring
+             * span so both the TD5 (span>>2) and TD6 (proportional) entry
+             * windows can never index past the display list. The normalizer's
+             * negative-exact-multiple edge can store exactly ring_length, so
+             * clamp as a last resort regardless of how player_span was set. */
+            if (ring > 0) {
+                if (player_span < 0)           player_span = 0;
+                else if (player_span >= ring)  player_span = ring - 1;
+            }
+            {
+                static int s_branch_logged = -2;
+                int on_branch = (player_branch_span >= 0) ? 1 : 0;
+                if (view_index == 0 && on_branch != s_branch_logged) {
+                    TD5_LOG_I(LOG_TAG,
+                        "branch cull-center: on_branch=%d branch_span=%d center(norm)=%d ring=%d td6lvl=%d",
+                        on_branch, player_branch_span, player_span, ring,
+                        g_active_td6_level);
+                    s_branch_logged = on_branch;
+                }
             }
         }
     }
