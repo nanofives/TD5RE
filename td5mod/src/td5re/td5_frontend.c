@@ -800,6 +800,23 @@ static int s_smallfont_msdf_page = -1;
 #define SMALLFONT_COLS   21
 #define SMALLFONT_TEX_W  252.0f   /* 21 * 12 */
 #define SMALLFONT_TEX_H  132.0f   /* 11 * 12 */
+
+/* [SMALL-FONT TTF SWAP 2026-06-05] When the native menu TTF (menu.ttf — the SAME
+ * face fe_draw_text/buttons render with) is loaded, the small font is rasterised
+ * straight from its outlines at a smaller cap size instead of the smalltext.tga
+ * bitmap / smalltext_msdf SDF, so EVERY frontend string shares one typeface and
+ * stays crisp at any resolution. Sizes are in 12px-cell DESIGN px (the unscaled
+ * 320x240 canvas) so the fe_measure_small_text contract is preserved exactly:
+ * measure returns design px, callers multiply by sx, and the draw advances the pen
+ * by design_advance*sx (vertical at sy) — the same stretch model the bitmap path
+ * used (cell_w=SMALLFONT_CELL*sx, cell_h=*sy). Tunable visual constants (no RE
+ * basis; this is a port-only asset swap, like the S13 main-font swap):
+ *   CAP      = cap height in design px (smalltext caps were ~9px in a 12px cell).
+ *   BASELINE = design px from the cell top (the `y` arg) down to the baseline.
+ *   TRACK    = extra inter-glyph tracking (design px; 0 = font's natural advances). */
+#define SMALLFONT_TTF_CAP       9.0f
+#define SMALLFONT_TTF_BASELINE  10.0f
+#define SMALLFONT_TTF_TRACK     0.0f
 /* indexed by (char-0x20), char 0x20..0x7F */
 static const uint8_t k_smallfont_advance[96] = {
     5, 5, 7, 8, 8, 13, 11, 5, 4, 5, 6, 8, 6, 6, 4, 8,
@@ -3998,7 +4015,7 @@ static void frontend_render_text_input(void) {
     if (s_text_input_state == 1 &&
         (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
         float name_w = fe_measure_small_text(s_text_input_ctx.buffer);
-        float caret_x = field_x + name_w * sx + 1.0f * sx;
+        float caret_x = field_x + name_w * fe_glyph_sx(sx, sy) + 1.0f * sx;
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         fe_draw_quad(caret_x, field_y, 2.0f * sx, 12.0f * sy, 0xFF00FF00, -1, 0, 0, 0, 0);
     }
@@ -6199,7 +6216,7 @@ static void frontend_render_race_type_description(float sx, float sy) {
         float ly = 32.0f + (float)(line - 1) * 12.0f;
         if (ly >= 176.0f) break;
         const char *s = k_race_desc[idx][line];
-        fe_draw_small_text(panel_x + (panel_w - fe_measure_small_text(s) * sx) * 0.5f,
+        fe_draw_small_text(panel_x + (panel_w - fe_measure_small_text(s) * fe_glyph_sx(sx, sy)) * 0.5f,
                            panel_y + ly * sy, s, 0xFFFFFFFF, sx, sy);
     }
 }
@@ -6287,7 +6304,7 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
      * rows are drawn in the SMALL font in the original (CarSelectionScreenStateMachine
      * @0x40dfc0, 10+ DrawFrontendSmallFontStringToSurface calls @0x40ee82..0x40f11b), not
      * the scaled button font — measure with the small font. */
-    float vx = hx + fe_measure_small_text("COMPRESSION:") * sx + 16.0f * sx;
+    float vx = hx + fe_measure_small_text("COMPRESSION:") * fe_glyph_sx(sx, sy) + 16.0f * sx;
     char val[64];
     int i;
 
@@ -7020,11 +7037,17 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
      * [left,right]: NAME[16,112] SCORE[128,212] CAR[228,336] AVERAGE[352,428] TOP[444,520]. */
     #define HS_SF_X(LX)      ((115.0f + (float)(LX)) * sx)
     #define HS_SF_Y(LY)      ((177.0f + (float)(LY)) * sy)
-    #define HS_SF_CTR(L,R,S) ((115.0f + (float)(L) + ((float)((R)-(L)) - fe_measure_small_text(S)) * 0.5f) * sx)
+    /* Centre text S in panel-local column [L,R]: anchor the COLUMN centre at *sx
+     * (UI layout space), then subtract HALF the rendered text width at the GLYPH
+     * scale fe_glyph_sx(sx,sy) (= the 4:3-locked min(sx,sy)). Multiplying the text
+     * width by gsx (not sx) keeps the now-square, non-stretched glyphs centred in
+     * the column at every aspect ratio. */
+    #define HS_SF_CTR(L,R,S) ((115.0f + (float)(L) + (float)((R)-(L)) * 0.5f) * sx \
+                              - fe_measure_small_text(S) * 0.5f * fe_glyph_sx(sx, sy))
 
     if (!grp) {
         const char *msg = "NO SCORES YET";
-        fe_draw_small_text((320.0f * sx) - (fe_measure_small_text(msg) * 0.5f) * sx,
+        fe_draw_small_text((320.0f * sx) - (fe_measure_small_text(msg) * 0.5f) * fe_glyph_sx(sx, sy),
                            HS_SF_Y(60), msg, 0xFFCCCCCC, sx, sy);
         return;
     }
@@ -7650,10 +7673,19 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
-/* Sum of small-font advances (unscaled font px) — for centering. Preserves case. */
+/* Sum of small-font advances (unscaled/design font px) — for centering. Preserves
+ * case. When the native TTF is loaded this measures the SAME design-px advances
+ * fe_draw_small_text advances by (cap = SMALLFONT_TTF_CAP design px), so every
+ * column-centring / truncation site keeps working unchanged. */
 static float fe_measure_small_text(const char *text) {
     float w = 0.0f;
     if (!text) return 0.0f;
+    if (td5_font_ready()) {            /* native TTF: real advances at the small cap size */
+        const float cap = SMALLFONT_TTF_CAP;
+        for (int i = 0; text[i]; i++)
+            w += td5_font_advance((unsigned char)text[i], cap) + SMALLFONT_TTF_TRACK;
+        return w;
+    }
     for (int i = 0; text[i]; i++) {
         int c = (unsigned char)text[i];
         if (c < 0x20 || c > 0x7f) { w += 8.0f; continue; }
@@ -7668,7 +7700,50 @@ static float fe_measure_small_text(const char *text) {
  * black color key (the texture is loaded with TD5_COLORKEY_BLACK). Case is preserved
  * (true lowercase glyphs). x/y are screen px; sx/sy are the canvas scale. */
 static void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy) {
-    if (s_smallfont_page < 0 || !text) return;
+    if (!text) return;
+
+    /* [SMALL-FONT TTF SWAP] Native TTF path: rasterise the menu font (the SAME
+     * face fe_draw_text/buttons use) at a small on-screen cap size, instead of
+     * the smalltext.tga bitmap / smalltext_msdf SDF. Horizontal advance = design
+     * advance * sx, vertical = sy (the same stretch the bitmap path applied via
+     * cell_w*sx / cell_h*sy), so fe_measure_small_text stays consistent and every
+     * column-centred caller keeps its layout. Case is preserved (the TTF has true
+     * lowercase). Falls through to the MSDF/bitmap path below when no TTF loaded. */
+    if (td5_font_ready()) {
+        static int s_logged_ttf = 0;
+        if (!s_logged_ttf) {
+            s_logged_ttf = 1;
+            TD5_LOG_I(LOG_TAG, "small font: native TTF active (cap=%.1f baseline=%.1f track=%.1f design-px)",
+                      (double)SMALLFONT_TTF_CAP, (double)SMALLFONT_TTF_BASELINE, (double)SMALLFONT_TTF_TRACK);
+        }
+        const float cap_px   = SMALLFONT_TTF_CAP * sy;          /* rasterise at on-screen vertical px */
+        const float baseline = y + SMALLFONT_TTF_BASELINE * sy; /* design baseline below the cell top */
+        /* 4:3 lock — IDENTICAL to fe_draw_text/buttons: never stretch horizontally
+         * past square. When the window is WIDER than 4:3 (sx >= sy) hscale=1, so
+         * glyphs advance at the vertical (sy) scale (square, not stretched to sx);
+         * when NARROWER it condenses. The effective design->screen horizontal scale
+         * is sy*hscale = min(sx,sy) = fe_glyph_sx(sx,sy) — exactly the width every
+         * fe_measure_small_text caller now multiplies by, so positions are preserved. */
+        const float hscale   = (sx < sy) ? (sx / sy) : 1.0f;
+        const float trkn     = SMALLFONT_TTF_TRACK * sy * hscale;
+        for (int i = 0; text[i]; i++) {                         /* pass 1: rasterise into the shared atlas */
+            td5_glyph g; td5_font_get((unsigned char)text[i], cap_px, &g);
+        }
+        td5_font_flush_uploads();                               /* one GPU upload for any new glyphs */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        float tcx = x;
+        for (int i = 0; text[i]; i++) {                         /* pass 2: draw (cache hits) */
+            td5_glyph g; td5_font_get((unsigned char)text[i], cap_px, &g);
+            if (g.valid && g.w > 0.0f)
+                fe_draw_quad(tcx + g.xoff * hscale, baseline + g.yoff,
+                             g.w * hscale, g.h, color, g.page, g.u0, g.v0, g.u1, g.v1);
+            tcx += g.advance * hscale + trkn;
+        }
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        return;
+    }
+
+    if (s_smallfont_page < 0) return;
     /* Resolution-independent SDF path: same 21x11 grid/UV/metrics, swapped page
      * + shader. Falls back to the bitmap atlas when VectorUI is off or the SDF
      * atlas failed to load. */

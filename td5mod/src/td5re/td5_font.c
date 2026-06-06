@@ -36,6 +36,7 @@
 #define CACHE_N    8192       /* power of two; open-addressing glyph cache */
 
 #define MENU_TTF      "re/assets/frontend/menu.ttf"
+#define HUD_TTF       "re/assets/frontend/hud.ttf"   /* in-race HUD overlay font (Rajdhani) */
 #define FALLBACK_TTF  "C:\\Windows\\Fonts\\arialbd.ttf"
 
 typedef struct { int key; int used; td5_glyph g; } GlyphEntry;
@@ -46,6 +47,15 @@ static int            s_have_fb = 0;
 static unsigned char *s_primary_buf = NULL, *s_fallback_buf = NULL;
 static float          s_cap_primary = 1.0f, s_cap_fallback = 1.0f;
 static uint8_t        s_use_fb[128];        /* 1 = route codepoint to fallback */
+
+/* Secondary HUD face (Rajdhani). Shares the atlas + glyph cache with the menu
+ * face — collisions are avoided by tagging the cache key with the face id (see
+ * font_rasterize). No trial-watermark routing (Rajdhani is a complete font); any
+ * truly-missing glyph routes to the same arialbd fallback. */
+static int            s_hud_tried = 0, s_hud_ok = 0;
+static stbtt_fontinfo s_hud_primary;
+static unsigned char *s_hud_buf = NULL;
+static float          s_hud_cap = 1.0f;
 
 static uint32_t      *s_atlas = NULL;       /* ATLAS_W*ATLAS_H BGRA32 (A8R8G8B8) */
 static int            s_cur_x = 0, s_cur_y = 0, s_shelf_h = 0;
@@ -186,24 +196,25 @@ static GlyphEntry *cache_slot(int key)
     return &s_cache[0];   /* full (shouldn't happen: atlas overflows first) */
 }
 
-void td5_font_get(int cp, float cap_px, td5_glyph *out)
+/* Rasterise `cp` at `cap_px` using face `fi` (cap-units `capu`), caching under a
+ * face-tagged key (face 0 = menu, 1 = HUD) so the two faces share the atlas +
+ * cache without colliding. Face 0 keeps the exact pre-refactor key layout. */
+static void font_rasterize(stbtt_fontinfo *fi, float capu, int face,
+                           int cp, float cap_px, td5_glyph *out)
 {
     out->valid = 0;
-    if (!td5_font_ready()) return;
     if (cp < 0 || cp > 0x2FFFF) return;
 
     int size_q = (int)(cap_px + 0.5f);
     if (size_q < 1) size_q = 1;
     if (size_q > 0xFFF) size_q = 0xFFF;
-    int key = ((cp & 0x1FF) << 12) | size_q;
+    int key = ((face & 1) << 21) | ((cp & 0x1FF) << 12) | size_q;
     if (key == 0) key = 1;
 
     GlyphEntry *e = cache_slot(key);
     if (e->used && e->key == key) { *out = e->g; return; }
 
-    stbtt_fontinfo *fi; float cap;
-    pick_font(cp, &fi, &cap);
-    float scale = cap_px / cap;
+    float scale = cap_px / capu;
 
     int adv = 0, lsb = 0;
     stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
@@ -250,11 +261,74 @@ void td5_font_get(int cp, float cap_px, td5_glyph *out)
     *out = g;
 }
 
+void td5_font_get(int cp, float cap_px, td5_glyph *out)
+{
+    out->valid = 0;
+    if (!td5_font_ready()) return;
+    stbtt_fontinfo *fi; float cap;
+    pick_font(cp, &fi, &cap);
+    font_rasterize(fi, cap, 0, cp, cap_px, out);
+}
+
 float td5_font_advance(int cp, float cap_px)
 {
     if (!td5_font_ready()) return 0.0f;
     stbtt_fontinfo *fi; float cap;
     pick_font(cp, &fi, &cap);
+    int adv = 0, lsb = 0;
+    stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
+    return (float)adv * (cap_px / cap);
+}
+
+/* ---- secondary HUD face (Rajdhani) -------------------------------------- */
+
+int td5_hudfont_ready(void)
+{
+    if (s_hud_tried) return s_hud_ok;
+    s_hud_tried = 1;
+    /* The HUD face shares the menu face's atlas + cache, so the base font (and
+     * thus the atlas) must be initialised first. */
+    if (!td5_font_ready() || !s_atlas) { s_hud_ok = 0; return 0; }
+
+    long len = 0;
+    s_hud_buf = read_file(HUD_TTF, &len);
+    if (!s_hud_buf ||
+        !stbtt_InitFont(&s_hud_primary, s_hud_buf,
+                        stbtt_GetFontOffsetForIndex(s_hud_buf, 0))) {
+        TD5_LOG_W(LOG_TAG, "HUD TTF not loaded (%s) -- HUD text falls back to SDF/bitmap", HUD_TTF);
+        s_hud_ok = 0;
+        return 0;
+    }
+    s_hud_cap = cap_units(&s_hud_primary);
+    TD5_LOG_I(LOG_TAG, "HUD TTF loaded: %s (cap_units=%.0f)", HUD_TTF, s_hud_cap);
+    s_hud_ok = 1;
+    return 1;
+}
+
+/* Pick the HUD face for `cp`, routing a glyph the HUD font lacks to the fallback. */
+static void pick_hud_font(int cp, stbtt_fontinfo **fi, float *cap)
+{
+    if (cp >= 0 && s_have_fb && stbtt_FindGlyphIndex(&s_hud_primary, cp) == 0) {
+        *fi = &s_fallback;    *cap = s_cap_fallback;
+    } else {
+        *fi = &s_hud_primary; *cap = s_hud_cap;
+    }
+}
+
+void td5_hudfont_get(int cp, float cap_px, td5_glyph *out)
+{
+    out->valid = 0;
+    if (!td5_hudfont_ready()) return;
+    stbtt_fontinfo *fi; float cap;
+    pick_hud_font(cp, &fi, &cap);
+    font_rasterize(fi, cap, 1, cp, cap_px, out);
+}
+
+float td5_hudfont_advance(int cp, float cap_px)
+{
+    if (!td5_hudfont_ready()) return 0.0f;
+    stbtt_fontinfo *fi; float cap;
+    pick_hud_font(cp, &fi, &cap);
     int adv = 0, lsb = 0;
     stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
     return (float)adv * (cap_px / cap);
