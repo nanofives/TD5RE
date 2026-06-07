@@ -640,6 +640,7 @@ typedef struct {
     char source_name[128];
     char source_archive[128];
     char png_path[256];         /* resolved PNG path for recovery (empty = ZIP fallback) */
+    uint32_t load_seq;          /* [PERF] monotonic use-order for the background LRU cache */
 } FE_Surface;
 
 typedef struct {
@@ -656,6 +657,7 @@ static char s_post_race_name[32];
 static char s_cheat_key_history[32];
 
 static FE_Surface s_surfaces[FE_MAX_SURFACES];
+static uint32_t s_fe_load_seq = 0;   /* [PERF] background-cache LRU clock */
 static int s_white_tex_page = -1;
 static int s_background_surface = 0;
 static int s_carsel_bg_surface = 0;     /* unused — background inherited from RaceMenu.tga via s_background_surface */
@@ -1334,9 +1336,10 @@ static int frontend_load_tga_ck(const char *name, const char *archive, TD5_Color
     existing_handle = frontend_find_surface_by_source(bare_name, real_archive);
     if (existing_handle > 0) {
         int slot = existing_handle - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES &&
-            frontend_surface_is_background_like(s_surfaces[slot].width, s_surfaces[slot].height)) {
-            s_background_surface = existing_handle;
+        if (slot >= 0 && slot < FE_MAX_SURFACES) {
+            s_surfaces[slot].load_seq = ++s_fe_load_seq;   /* [PERF] cache hit -> mark fresh */
+            if (frontend_surface_is_background_like(s_surfaces[slot].width, s_surfaces[slot].height))
+                s_background_surface = existing_handle;
         }
         return existing_handle;
     }
@@ -1361,12 +1364,29 @@ static int frontend_load_tga_ck(const char *name, const char *archive, TD5_Color
     for (int i = 0; i < FE_MAX_SURFACES; i++) {
         if (!s_surfaces[i].in_use) { slot = i; break; }
     }
+    if (slot < 0) {
+        /* [PERF] No free slot: evict the OLDEST cached background (lowest
+         * load_seq), never the current bg or a shared page. The set_screen sweep
+         * now KEEPS backgrounds across transitions (so revisiting a screen reuses
+         * its decoded surface instead of re-decoding ~4ms each); this bounds that
+         * cache to the slot pool and guarantees a load never fails for a slot. */
+        uint32_t best = 0xFFFFFFFFu;
+        int cur_bg = s_background_surface - 1;
+        for (int i = 0; i < FE_MAX_SURFACES; i++) {
+            if (!s_surfaces[i].in_use || i == cur_bg) continue;
+            if (s_surfaces[i].tex_page < FE_SURFACE_PAGE_BASE) continue;  /* shared */
+            if (!frontend_surface_is_background_like(s_surfaces[i].width, s_surfaces[i].height)) continue;
+            if (s_surfaces[i].load_seq < best) { best = s_surfaces[i].load_seq; slot = i; }
+        }
+        if (slot >= 0) s_surfaces[slot].in_use = 0;   /* evict LRU background */
+    }
     if (slot < 0) { free(pixels); return 0; }
 
     int page = FE_SURFACE_PAGE_BASE + slot;
     if (td5_plat_render_upload_texture(page, pixels, w, h, 2)) {
         int is_background = frontend_surface_is_background_like(w, h);
         s_surfaces[slot].in_use = 1;
+        s_surfaces[slot].load_seq = ++s_fe_load_seq;   /* [PERF] background-cache LRU */
         s_surfaces[slot].tex_page = page;
         s_surfaces[slot].width = w;
         s_surfaces[slot].height = h;
@@ -2698,17 +2718,17 @@ static int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids,
  * only when more opponents are requested than the band has cars, in which case
  * the round-robin wrap spreads them evenly rather than repeating one car.
  *
- * Only the police cars (ext_id 33..36) are excluded — they are cop-chase
- * vehicles, not race cars. Any car whose carparam.dat cannot be read is also
- * skipped automatically. If NO carparam.dat is readable the caller falls back
- * to the original s_difficulty_tier_cars roster.
+ * The police / cop-chase cars are excluded — TD5 police (ext_id 33..36) AND
+ * the ported TD6 cop cars cp1..cp4 (ext_id 46..49) — via frontend_car_is_cop();
+ * they are cop-chase vehicles, not race cars, so they must never spawn as AI
+ * opponents. Any car whose carparam.dat cannot be read is also skipped
+ * automatically. If NO carparam.dat is readable the caller falls back to the
+ * original s_difficulty_tier_cars roster (which lists no cop ids).
  * ======================================================================== */
 
-/* Police cars (cop-chase only) sit at ext_id 33..36 and are skipped. The pool
- * spans all other s_car_zip_paths entries (TD5 0..32 + TD6 37..75), so the
- * arrays are sized to the full car table. */
-#define S21_POLICE_FIRST 33
-#define S21_POLICE_LAST  36
+/* The pool spans every non-cop s_car_zip_paths entry (TD5 0..32 + TD6 37..75,
+ * minus the cop ranges 33..36 and 46..49), so the arrays are sized to the full
+ * car table. Cop exclusion is handled by frontend_car_is_cop() in the builder. */
 
 /* Lazily-built, sorted-by-top-speed list of eligible cars. Built once and
  * cached — carparam top speeds are static data that never change at runtime. */
@@ -2738,8 +2758,8 @@ static void frontend_build_speed_pool(void) {
     if (s_speed_pool_count >= 0) return;   /* already built */
     for (int id = 0; id < TD5_CAR_COUNT; id++) {
         int top;
-        if (id >= S21_POLICE_FIRST && id <= S21_POLICE_LAST)
-            continue;                      /* skip cop-chase cars */
+        if (frontend_car_is_cop(id))
+            continue;                      /* skip cop-chase cars (TD5 33-36 + TD6 46-49) */
         top = frontend_read_car_top_speed(id);
         if (top <= 0) continue;            /* skip cars with no/garbage carparam */
         s_speed_pool_ids[n]    = id;
@@ -4700,6 +4720,14 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
         if (s_surfaces[i].in_use &&
             s_surfaces[i].tex_page >= SHARED_PAGE_MIN &&
             s_surfaces[i].tex_page < FE_SURFACE_PAGE_BASE) continue;
+        /* [PERF 2026-06-06] Keep cached BACKGROUNDS across transitions so revisiting
+         * a screen reuses the decoded surface (frontend_find_surface_by_source hit)
+         * instead of re-decoding its ~4ms PNG — that re-decode is the screen-change
+         * MS spike. The loader's LRU eviction (lowest load_seq) reclaims these slots
+         * under pressure, so a heavy screen (car-select) can never be starved. */
+        if (s_surfaces[i].in_use &&
+            frontend_surface_is_background_like(s_surfaces[i].width, s_surfaces[i].height))
+            continue;
         s_surfaces[i].in_use = 0;
     }
 
@@ -9495,7 +9523,11 @@ static void Screen_MultiplayerLobby(void) {
         frontend_init_return_screen(TD5_SCREEN_MP_LOBBY);
         TD5_LOG_I(LOG_TAG, "MP Lobby: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        td5_input_enumerate_devices();              /* fresh device list for the join scan */
+        /* [PERF 2026-06-06] Dropped a td5_input_enumerate_devices() here — it was a
+         * ~120ms blocking IDirectInput8::EnumDevices on the lobby's entry frame.
+         * The device list is already kept current by init + the WM_DEVICECHANGE
+         * rescan, td5_plat_input_scan_join builds its scan handles lazily, and the
+         * per-frame join scan below picks up any hot-plug within a frame or two. */
         s_mp_joined_count = 0;
         memset(s_mp_join_device, 0, sizeof(s_mp_join_device));
         s_mp_join_prev = td5_plat_input_scan_join();/* ignore inputs already held on entry */
@@ -10406,11 +10438,18 @@ static void Screen_ConnectionBrowser(void) {
             return;
         }
 
-        frontend_net_enumerate();                 /* idempotent td5_net_init */
+        /* [PERF 2026-06-06] Do NOT run LAN session discovery here. This is the
+         * net-play MODE-SELECT screen (LAN / DIRECT / BACK) — it never displays the
+         * session list, so the old frontend_net_enumerate() blocked the entry frame
+         * ~500ms (synchronous LAN broadcast+poll) for a result that was discarded.
+         * The actual session browser (Screen_SessionPicker) runs discovery itself.
+         * Just make sure the net stack is up (cheap, idempotent). */
+        td5_net_init();
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("LAN GAME",  120, 193, 496, 0x30);
-        frontend_create_button("DIRECT IP", 120, 257, 496, 0x30);
-        frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
+        /* [2026-06-07] Regular main-menu button height (0x20) + BACK left-aligned. */
+        frontend_create_button("LAN GAME",  120, 193, 496, 0x20);
+        frontend_create_button("DIRECT IP", 120, 257, 496, 0x20);
+        frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -10492,6 +10531,16 @@ static void Screen_NetNickname(void) {
 
     case 1:
         frontend_handle_text_input_key();   /* process keystrokes into the buffer */
+        if (frontend_check_escape()) {       /* ESC == cancel (don't persist) */
+            int from_mpopts = s_nickname_from_mpopts;
+            s_nickname_from_mpopts = 0;
+            /* Back to MP options if that's where we came from, else the main
+             * menu — NOT the connection browser, which would just bounce
+             * straight back here on a first-run (empty) nickname. */
+            td5_frontend_set_screen(from_mpopts ? TD5_SCREEN_TWO_PLAYER_OPTIONS
+                                                : TD5_SCREEN_MAIN_MENU);
+            break;
+        }
         if (frontend_text_input_confirmed() || (s_input_ready && s_button_index == 0)) {
             int from_mpopts = s_nickname_from_mpopts;
             s_nickname_from_mpopts = 0;
@@ -10515,14 +10564,19 @@ static void Screen_LanMenu(void) {
         frontend_init_return_screen(TD5_SCREEN_LAN_MENU);
         td5_net_set_mode(TD5_NET_MODE_LAN);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("HOST NEW LAN GAME",  120, 193, 496, 0x30);
-        frontend_create_button("DISCOVER LAN GAMES", 120, 257, 496, 0x30);
-        frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
+        /* [2026-06-07] Regular main-menu button height (0x20) + BACK left-aligned. */
+        frontend_create_button("HOST NEW LAN GAME",  120, 193, 496, 0x20);
+        frontend_create_button("DISCOVER LAN GAMES", 120, 257, 496, 0x20);
+        frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);
         s_inner_state = 1;
         break;
 
     case 1:
         frontend_present_buffer();
+        if (frontend_check_escape()) {            /* ESC == BACK */
+            td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
+            break;
+        }
         if (s_input_ready) {
             if (s_button_index == 0)              /* HOST -> name entry + create */
                 td5_frontend_set_screen(TD5_SCREEN_CREATE_SESSION);
@@ -10541,14 +10595,32 @@ static void Screen_LanMenu(void) {
  * so button indices never collide (the bug from the old inner-state version).
  * ======================================================================== */
 static void Screen_DirectConnect(void) {
+    /* ESC == BACK [2026-06-07]. The chooser (state 1) backs out to the
+     * connection browser; every JOIN/HOST sub-layout backs out to the chooser
+     * (re-enter DIRECT_CONNECT at state 0). State 0 is skipped — it is still
+     * building the layout this frame. */
+    if (s_inner_state != 0 && frontend_check_escape()) {
+        if (s_inner_state == 1) {
+            td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
+        } else {
+            /* Backing out of a JOIN/HOST sub-layout: drop any half-open session
+             * so a cancelled host/join can't leak, then return to the chooser. */
+            if (s_network_active) frontend_net_destroy();
+            s_net_join_pending_ui = 0;
+            td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
+        }
+        return;
+    }
     switch (s_inner_state) {
     case 0: /* HOST / JOIN / BACK chooser */
         frontend_init_return_screen(TD5_SCREEN_DIRECT_CONNECT);
         td5_net_set_mode(TD5_NET_MODE_DIRECT);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("HOST GAME", 120, 193, 496, 0x30);
-        frontend_create_button("JOIN GAME", 120, 257, 496, 0x30);
-        frontend_create_button(SNK_BackButTxt, 232, 377, 112, 0x20);
+        /* [2026-06-07] Regular main-menu button height (0x20) and BACK left-
+         * aligned with the action buttons above (x=120) for a consistent look. */
+        frontend_create_button("HOST GAME", 120, 193, 496, 0x20);
+        frontend_create_button("JOIN GAME", 120, 257, 496, 0x20);
+        frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);
         s_inner_state = 1;
         break;
 
@@ -10697,12 +10769,19 @@ static void frontend_net_label_session_selector(void) {
 }
 
 static void Screen_SessionPicker(void) {
+    /* [PERF 2026-06-06] LAN discovery is now non-blocking + incremental, so poll it
+     * every frame after init: the session list fills in live as hosts answer,
+     * instead of the old 500ms select-poll freeze on the entry frame. */
+    if (s_inner_state >= 1) {
+        td5_net_enumerate_sessions();
+        frontend_net_label_session_selector();
+    }
     switch (s_inner_state) {
-    case 0: /* Init: refresh LAN discovery + build the session selector */
+    case 0: /* Init: kick off LAN discovery + build the session selector */
         frontend_init_return_screen(TD5_SCREEN_SESSION_PICKER);
         TD5_LOG_D(LOG_TAG, "SessionPicker: init (LAN discovery)");
         td5_net_set_mode(TD5_NET_MODE_LAN);
-        td5_net_enumerate_sessions();             /* broadcast QUERY, collect ANNOUNCEs */
+        td5_net_enumerate_sessions();             /* start a discovery window (non-blocking) */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* [FIXED 2026-06-02, runtime @0x499c78] list (120,193) 496x128; OK (120,377) 96; BACK (232,377) 112. */
         frontend_create_button(SNK_ChooseSessionButTxt, 120, 193, 496, 128);  /* slot 0: session selector */
@@ -10726,6 +10805,11 @@ static void Screen_SessionPicker(void) {
         break;
 
     case 3: /* Interaction */
+        if (frontend_check_escape()) {        /* ESC == BACK (-> LAN menu) */
+            s_return_screen = TD5_SCREEN_LAN_MENU;
+            s_inner_state = 5;
+            break;
+        }
         if (s_input_ready) {
             /* Slot 0 = session selector (host or join target), slot 1 = OK, slot 2 = Back. */
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
@@ -10799,6 +10883,11 @@ static void Screen_CreateSession(void) {
 
     case 2: /* Name input */
         frontend_handle_text_input_key();   /* process keystrokes into the buffer */
+        if (frontend_check_escape()) {       /* ESC == BACK (-> LAN menu) */
+            s_return_screen = TD5_SCREEN_LAN_MENU;
+            s_inner_state = 3;
+            break;
+        }
         if (frontend_text_input_confirmed()) {
             /* S10: actually host a LAN session under the entered name. */
             td5_net_set_mode(TD5_NET_MODE_LAN);
@@ -10899,12 +10988,15 @@ static void Screen_NetworkLobby(void) {
          * input strip + a "MESSAGE WINDOW" panel that overlapped the roster and
          * the action buttons. Replaced with a left roster (drawn by the overlay,
          * no navigable panel buttons) + a right column of action buttons. Fixed
-         * indices: 0=START 1=CHANGE CAR 2=EXIT 3=OPTIONS(host). */
-        frontend_create_button(SNK_StartButTxt,     400, 110, 190, 0x28); /* 0 */
-        frontend_create_button(SNK_ChangeCarButTxt, 400, 158, 190, 0x28); /* 1 */
-        frontend_create_button(SNK_ExitButTxt,      400, 206, 190, 0x28); /* 2 */
+         * indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=EXIT 4=OPTIONS(host).
+         * [2026-06-07] Added SELECT TRACK -> the track picker (returns to the
+         * lobby via flow_context==4); rows below it shift down one slot (0x28). */
+        frontend_create_button(SNK_StartButTxt,     400, 110, 190, 0x28); /* 0 START */
+        frontend_create_button(SNK_ChangeCarButTxt, 400, 158, 190, 0x28); /* 1 CHANGE CAR */
+        frontend_create_button("SELECT TRACK",      400, 206, 190, 0x28); /* 2 SELECT TRACK */
+        frontend_create_button(SNK_ExitButTxt,      400, 254, 190, 0x28); /* 3 EXIT */
         if (frontend_net_is_host())
-            frontend_create_button("OPTIONS",       400, 254, 190, 0x28); /* 3 (host) */
+            frontend_create_button("OPTIONS",       400, 302, 190, 0x28); /* 4 (host) */
 
         memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
         s_lobby_modal = 0;
@@ -10987,6 +11079,17 @@ static void Screen_NetworkLobby(void) {
             break;
         }
 
+        /* ESC backs out of the lobby = the EXIT action (tear the session down so
+         * no dangling host/session leaks). Mirrors button index 3. */
+        if (frontend_check_escape()) {
+            TD5_LOG_I(LOG_TAG, "NetworkLobby: ESC -> exit (destroy session)");
+            frontend_net_destroy();
+            s_network_active = 0;
+            s_lobby_modal = 0;
+            td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
+            return;
+        }
+
         /* S10: keep the participant table mirrored to the live roster so the
          * host's ready check + the status panel reflect who has actually
          * joined (slots populated by the JOIN handshake / DXPROSTER). */
@@ -11009,7 +11112,8 @@ static void Screen_NetworkLobby(void) {
             return;
         }
 
-        /* Process button input (indices: 0=START 1=CHANGE CAR 2=EXIT 3=OPTIONS). */
+        /* Process button input
+         * (indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=EXIT 4=OPTIONS). */
         if (s_input_ready && s_button_index >= 0) {
             switch (s_button_index) {
             case 0: /* START */
@@ -11036,7 +11140,14 @@ static void Screen_NetworkLobby(void) {
                 td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
                 return;
 
-            case 2: /* EXIT -> tear down the session and leave the lobby */
+            case 2: /* SELECT TRACK -> the track picker. flow_context==4 makes the
+                     * track screen's exit dispatch return here (not launch a race),
+                     * so the host can set the track and come back to the lobby. */
+                s_flow_context = 4;
+                td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
+                return;
+
+            case 3: /* EXIT -> tear down the session and leave the lobby */
                 TD5_LOG_I(LOG_TAG, "NetworkLobby: exit -> destroy session");
                 frontend_net_destroy();
                 s_network_active = 0;
@@ -11044,7 +11155,7 @@ static void Screen_NetworkLobby(void) {
                 td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
                 return;
 
-            case 3: /* OPTIONS (host) -> open the max-players/password modal */
+            case 4: /* OPTIONS (host) -> open the max-players/password modal */
                 if (frontend_net_is_host()) {
                     s_lobby_max_players = td5_net_get_max_players();
                     if (s_lobby_max_players < 2 || s_lobby_max_players > 6)
@@ -13100,8 +13211,12 @@ static void Screen_CarSelection(void) {
                     td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
                     return;
                 }
+                /* Backing out of player 1's car select abandons the whole
+                 * multiplayer setup -> return to the MAIN MENU (not the join
+                 * lobby). [2026-06-07 user request] */
                 s_mp_flow = 0;
-                td5_frontend_set_screen(TD5_SCREEN_MP_LOBBY);
+                s_two_player_mode = 0;
+                td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
                 return;
             }
         }
@@ -13370,6 +13485,13 @@ static void Screen_TrackSelection(void) {
         if (s_flow_context != 2) {
             frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);  /* 7: Back */
         }
+
+        /* Network track-pick (entered from the lobby's SELECT TRACK, flow
+         * context 4): the global ESC/back handler navigates to s_return_screen,
+         * which defaults to CAR_SELECTION (the parent). Point it at the lobby so
+         * ESC matches the OK/Back exit dispatch in state 8. [2026-06-07] */
+        if (s_flow_context == 4)
+            s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
 
         /* Create 0x128 x 0xB8 info surface */
         frontend_load_tga("Front_End/TrackSelect.tga", "Front_End/FrontEnd.zip");

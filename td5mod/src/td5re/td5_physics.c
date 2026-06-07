@@ -1363,7 +1363,8 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     } else if (actor->slot_index < 6) {
         /* Racer path: full gravity + per-wheel ground snap.
          * Run even during countdown (paused) so ground-snap keeps the car
-         * at the correct height above the road surface. */
+         * at the correct height above the road surface.
+         */
         td5_physics_integrate_pose(actor);
     }
 

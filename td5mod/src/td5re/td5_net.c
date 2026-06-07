@@ -1195,26 +1195,15 @@ static int ws2_transport_join_direct(const char *host_ip, int game_port)
     return 1;
 }
 
-static int ws2_transport_enum(void)
+/* Broadcast the discovery QUERY (LAN broadcast + loopback for same-machine). */
+static void ws2_send_disc_query(void)
 {
     SOCKADDR_IN bcast_addr, lo_addr;
     DiscoveryMsg query;
-    DWORD start_tick;
-    int count = 0;
-
-    memset(s_enum_sessions, 0, sizeof(s_enum_sessions));
-    memset(s_ws2_enum_host_addrs, 0, sizeof(s_ws2_enum_host_addrs));
-
-    if (s_ws2_disc_socket == INVALID_SOCKET) {
-        if (!ws2_discovery_init())
-            return 0;
-    }
-
     memset(&query, 0, sizeof(query));
     query.magic = WS2_DISCOVERY_MAGIC;
     query.disc_type = WS2_DISC_QUERY;
 
-    /* Broadcast on LAN */
     memset(&bcast_addr, 0, sizeof(bcast_addr));
     bcast_addr.sin_family = AF_INET;
     bcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
@@ -1222,59 +1211,104 @@ static int ws2_transport_enum(void)
     sendto(s_ws2_disc_socket, (const char *)&query, sizeof(query), 0,
            (const struct sockaddr *)&bcast_addr, (int)sizeof(bcast_addr));
 
-    /* Also try loopback for same-machine testing */
     memset(&lo_addr, 0, sizeof(lo_addr));
     lo_addr.sin_family = AF_INET;
     lo_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     lo_addr.sin_port = htons(WS2_DISCOVERY_PORT);
     sendto(s_ws2_disc_socket, (const char *)&query, sizeof(query), 0,
            (const struct sockaddr *)&lo_addr, (int)sizeof(lo_addr));
+}
 
-    /* Poll for responses up to 500ms */
-    start_tick = GetTickCount();
-    while ((GetTickCount() - start_tick) < 500 && count < MAX_ENUM_SESSIONS) {
+/* [PERF 2026-06-06] NON-BLOCKING incremental LAN discovery.
+ *
+ * The old version blocked the calling frame up to 500ms (a select-poll loop) — a
+ * visible freeze on the SessionPicker entry frame, and the full 500ms when no host
+ * answered (the common single-player case). Now the frontend calls this every frame
+ * while the LAN browser is open and it never blocks: it (re)opens a ~2s discovery
+ * window on first use / after a >1.5s idle gap, re-broadcasts the QUERY every 250ms
+ * within that window so late-starting hosts are still found, and drains whatever has
+ * arrived since the last call with a zero-timeout select. The session list fills in
+ * live. Sessions are deduped by host address+port (the periodic rebroadcast makes a
+ * host answer many times per window). Returns the current discovered count. */
+static DWORD s_ws2_enum_win_start = 0;   /* GetTickCount of the active window, 0 = none */
+static DWORD s_ws2_enum_last_bcast = 0;
+static DWORD s_ws2_enum_last_call  = 0;
+
+static int ws2_transport_enum(void)
+{
+    DWORD now;
+    int i;
+
+    if (s_ws2_disc_socket == INVALID_SOCKET) {
+        if (!ws2_discovery_init())
+            return 0;
+    }
+    now = GetTickCount();
+
+    if (s_ws2_enum_win_start == 0 || (now - s_ws2_enum_last_call) > 1500) {
+        /* Fresh open / refresh: reset the list and start a new discovery window. */
+        s_enum_session_count = 0;
+        memset(s_enum_sessions, 0, sizeof(s_enum_sessions));
+        memset(s_ws2_enum_host_addrs, 0, sizeof(s_ws2_enum_host_addrs));
+        s_ws2_enum_win_start = now;
+        ws2_send_disc_query();
+        s_ws2_enum_last_bcast = now;
+    } else if ((now - s_ws2_enum_last_bcast) >= 250 &&
+               (now - s_ws2_enum_win_start) < 2000) {
+        ws2_send_disc_query();
+        s_ws2_enum_last_bcast = now;
+    }
+    s_ws2_enum_last_call = now;
+
+    /* Drain all responses currently waiting — NON-BLOCKING (zero-timeout select). */
+    for (;;) {
         DiscoveryMsg resp;
         SOCKADDR_IN from_addr;
         int from_len = (int)sizeof(from_addr);
-        int ret;
+        int ret, dup, slot;
         fd_set readfds;
         struct timeval tv;
 
         FD_ZERO(&readfds);
         FD_SET(s_ws2_disc_socket, &readfds);
         tv.tv_sec = 0;
-        tv.tv_usec = 50000;
-
+        tv.tv_usec = 0;
         if (select(0, &readfds, NULL, NULL, &tv) <= 0)
-            continue;
+            break;
 
         ret = recvfrom(s_ws2_disc_socket, (char *)&resp, sizeof(resp), 0,
                        (struct sockaddr *)&from_addr, &from_len);
-        if (ret < (int)sizeof(DiscoveryMsg))
-            continue;
-        if (resp.magic != WS2_DISCOVERY_MAGIC)
-            continue;
-        if (resp.disc_type != WS2_DISC_ANNOUNCE)
-            continue;
-        if (resp.sealed)
-            continue;
+        if (ret < (int)sizeof(DiscoveryMsg)) continue;
+        if (resp.magic != WS2_DISCOVERY_MAGIC) continue;
+        if (resp.disc_type != WS2_DISC_ANNOUNCE) continue;
+        if (resp.sealed) continue;
 
-        strncpy(s_enum_sessions[count].name, resp.session_name,
-                sizeof(s_enum_sessions[count].name) - 1);
-        s_enum_sessions[count].player_count = resp.player_count;
-        s_enum_sessions[count].max_players  = resp.max_players;
-        s_enum_sessions[count].game_type    = resp.game_type;
+        /* Dedup by host address+game port (a host answers each rebroadcast). */
+        dup = 0; slot = s_enum_session_count;
+        for (i = 0; i < s_enum_session_count; i++) {
+            if (s_ws2_enum_host_addrs[i].sin_addr.s_addr == from_addr.sin_addr.s_addr &&
+                s_ws2_enum_host_addrs[i].sin_port == htons(resp.game_port)) {
+                slot = i; dup = 1; break;
+            }
+        }
+        if (!dup && slot >= MAX_ENUM_SESSIONS) continue;   /* list full */
 
-        s_ws2_enum_host_addrs[count] = from_addr;
-        s_ws2_enum_host_addrs[count].sin_port = htons(resp.game_port);
+        strncpy(s_enum_sessions[slot].name, resp.session_name,
+                sizeof(s_enum_sessions[slot].name) - 1);
+        s_enum_sessions[slot].name[sizeof(s_enum_sessions[slot].name) - 1] = '\0';
+        s_enum_sessions[slot].player_count = resp.player_count;
+        s_enum_sessions[slot].max_players  = resp.max_players;
+        s_enum_sessions[slot].game_type    = resp.game_type;
+        s_ws2_enum_host_addrs[slot] = from_addr;
+        s_ws2_enum_host_addrs[slot].sin_port = htons(resp.game_port);
 
-        TD5_LOG_I(NET_LOG, "Enum: found session \"%s\" (%u/%u)",
-                  resp.session_name, resp.player_count, resp.max_players);
-        count++;
+        if (!dup) {
+            TD5_LOG_I(NET_LOG, "Enum: found session \"%s\" (%u/%u)",
+                      resp.session_name, resp.player_count, resp.max_players);
+            s_enum_session_count++;
+        }
     }
-
-    TD5_LOG_I(NET_LOG, "Enum: discovered %d session(s)", count);
-    return count;
+    return s_enum_session_count;
 }
 
 static uint32_t ws2_resolve_sender_id(const SOCKADDR_IN *addr)
@@ -2876,12 +2910,17 @@ int td5_net_pick_connection(int index)
  */
 int td5_net_enumerate_sessions(void)
 {
-    s_enum_session_count = 0;
-
+    /* [PERF 2026-06-06] Do NOT zero s_enum_session_count here: the WS2 transport is
+     * now non-blocking + INCREMENTAL and owns the accumulator across frames (it
+     * resets on a fresh discovery window / >1.5s idle). Zeroing every call would
+     * wipe the partial results between frames. The transport returns the current
+     * count; callers poll this each frame while the LAN browser is open. */
     if (s_transport_enum) {
         s_enum_session_count = s_transport_enum();
         if (s_enum_session_count > MAX_ENUM_SESSIONS)
             s_enum_session_count = MAX_ENUM_SESSIONS;
+    } else {
+        s_enum_session_count = 0;
     }
 
     TD5_LOG_D(NET_LOG, "Enumerated %d session(s)", s_enum_session_count);
