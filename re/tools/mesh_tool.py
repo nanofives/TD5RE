@@ -119,14 +119,54 @@ def _parse_mesh(data, base):
     return mesh
 
 
+TD6_VSTRIDE = 32     # pos(12) + normal(12) + uv(8)
+TD6_CSTRIDE = 24
+
+
+def _decode_himodel_td6(data):
+    """Expand a TD6 0x104 INDEXED himodel into the TD5 expanded model, mirroring
+    td5_asset_transcode_td6_mesh (td5_asset.c): merge every command's indexed
+    triangles into one command of independent tris; mark render_type 0x103 so
+    build_dat emits a himodel the runtime loads directly (no transcode)."""
+    cmd_count = struct.unpack_from("<i", data, 0x04)[0]
+    vsrc_count = struct.unpack_from("<i", data, 0x08)[0]
+    radius = struct.unpack_from("<f", data, 0x0C)[0]
+    cx, cy, cz = struct.unpack_from("<fff", data, 0x10)
+    ox, oy, oz = struct.unpack_from("<fff", data, 0x1C)
+    cmds_off = struct.unpack_from("<i", data, 0x2C)[0]
+    verts_off = struct.unpack_from("<i", data, 0x30)[0]
+    verts, norms = [], []
+    for c in range(cmd_count):
+        cb = cmds_off + c * TD6_CSTRIDE
+        idx_count = struct.unpack_from("<i", data, cb + 0x0C)[0]
+        idx_off = struct.unpack_from("<i", data, cb + 0x14)[0]
+        for k in range(idx_count):
+            vi = struct.unpack_from("<H", data, idx_off + k * 2)[0]
+            if vi >= vsrc_count:
+                raise ValueError("TD6 index out of range")
+            sv = verts_off + vi * TD6_VSTRIDE
+            px, py, pz = struct.unpack_from("<fff", data, sv + 0x00)
+            nx, ny, nz = struct.unpack_from("<fff", data, sv + 0x0C)
+            tu, tv = struct.unpack_from("<ff", data, sv + 0x18)
+            verts.append({"pos": [px, py, pz], "view": [0.0, 0.0, 0.0],
+                          "light": 0xFF, "tex": [tu, tv], "proj": [0.0, 0.0]})
+            norms.append({"n": [nx, ny, nz], "vis": 1})
+    total = len(verts)
+    return {"render_type": 0x103, "texture_page_id": 0, "reserved_28": 0,
+            "bounding": [radius, cx, cy, cz], "origin": [ox, oy, oz],
+            "commands": [{"dispatch_type": 0, "texture_page_id": 7,
+                          "reserved_04": 0, "tri": total // 3, "quad": 0, "vptr": 0}],
+            "vertices": verts, "normals": norms}
+
+
 def decode(data, kind="models"):
     if kind == "himodel":
         # HIMODEL.DAT is a single PRR mesh at offset 0 (no container).
-        # render_type 0x103 = TD5 expanded; 0x104 = TD6 indexed (transcoded at
-        # load -> different vertex layout, not handled by this tool yet).
+        # render_type 0x103 = TD5 expanded (used as-is); 0x104 = TD6 indexed,
+        # expanded here to match what the runtime transcodes it to at load.
         rt = struct.unpack_from("<h", data, 0)[0]
         if rt == 0x104:
-            return {"kind": "himodel", "mesh": None, "td6_indexed": True}
+            return {"kind": "himodel", "mesh": _decode_himodel_td6(data)}
         return {"kind": "himodel", "mesh": _parse_mesh(data, 0)}
 
     size = len(data)

@@ -54,12 +54,22 @@ All formats round-trip **byte-exact** (self-test 463/463).
   it loads the byte-exact `.bin`; the import step regenerates that `.bin` from the
   edited `.glb`.
 
+## TD6 cars (0x104 indexed himodel)
+
+The 39 TD6 cars ship a `render_type 0x104` *indexed* himodel (transcoded at load by
+`td5_asset_transcode_td6_mesh`). `mesh_tool.py` now decodes it — it expands the indexed
+mesh exactly like the runtime transcode and presents it as a normal `0x103` mesh, so
+TD6 cars **export to glTF and round-trip** (verified: `selfcheck-glb-all re/_retired_dats`
+= 107/107). Editing flow is the same as TD5 cars.
+
+Caveat: re-import writes a `0x103` expanded himodel. The runtime loads that directly
+(no transcode), but it no longer carries the `0x104` marker, so an *edited* TD6 car
+falls back to the cardef brake-light hardpoint instead of the authored `:CAR_LIGHTS:`
+positions (minor; the reflection overlay is globally off, so no chrome misrender).
+Unedited TD6 cars keep their byte-exact `0x104` `himodel.bin` (passthrough).
+
 ## Known gaps (non-blocking)
 
-- **TD6 cars in Blender:** the 39 TD6 cars ship a `render_type 0x104` *indexed*
-  himodel (transcoded at load by `td5_asset_transcode_td6_mesh`). It is retired
-  byte-exact (passthrough `himodel.bin`) but `mesh_tool.py` does not yet decode the
-  indexed layout, so those cars aren't Blender-editable yet (`selfcheck` reports SKIP).
 - **5 peripheral `.dat` kept in `re/assets`:** `tpage{4,5,12}.dat` (static atlases
   with no PNG sibling — the special "corrupted GRXB" dumps; retire by generating PNGs)
   and `trak_markers.dat` / `trak_markers_td6.dat` (port-generated frontend track-preview

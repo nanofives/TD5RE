@@ -102,7 +102,7 @@ all: wrapper td5re
 # the project root (where re/assets + re/_retired_dats live).
 verify-assets:
 	cd "$(PROJECT_ROOT)" && python re/tools/verify_assets.py
-	cd "$(PROJECT_ROOT)" && python re/tools/mesh_tool.py selfcheck-glb-all
+	cd "$(PROJECT_ROOT)" && python re/tools/mesh_tool.py selfcheck-glb-all re/_retired_dats
 
 dirs:
 	@mkdir -p "$(TD5RE_BUILD)" "$(WRAPPER_BUILD)"
