@@ -222,6 +222,10 @@ int  td5_track_probe_height(int world_x, int world_z, int current_span,
 void td5_track_get_span_edges(int span_index,
                                int *left_x, int *left_z,
                                int *right_x, int *right_z);
+/* Rail frame matching td5_track_sample_target_point's bias axis (track coords).
+ * Used by the smart-AI lane brain so its lateral target shares the bias sign. */
+int  td5_track_get_span_route_frame(int span_index, int *lx, int *lz,
+                                    int *rx, int *rz);
 int  td5_track_get_span_center_world(int span_index,
                                       int *out_x, int *out_y, int *out_z);
 int  td5_track_get_span_lane_world(int span_index, int sub_lane,
