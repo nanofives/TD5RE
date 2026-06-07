@@ -1788,10 +1788,14 @@ void td5_hud_init_layout(int viewport_mode)
         s_view_layout[1].vp_bottom = g_render_height_f;
 
     } else {
-        /* N-way grid (>=3): mirror the game's viewport ladder. */
+        /* N-way grid (>=3): mirror the game's 3D viewport grid EXACTLY (same
+         * shared resolver) so the HUD panes line up with the rendered
+         * viewports. [FIX 2026-06-07] The HUD used to hardcode views==3 -> 1x3
+         * (horizontal strips) while the 3D layout honoured the committed pick
+         * (3 players default to 3x1 LEFT/RIGHT) -> HUD/viewport orientation
+         * mismatch (UI laid out UP/DOWN over a LEFT/RIGHT viewport). */
         int cols, rows;
-        if (views == 3) { cols = 1; rows = 3; }            /* 3 horizontal strips */
-        else { cols = (views <= 4) ? 2 : 3; rows = (views + cols - 1) / cols; }
+        td5_game_resolve_split_grid(views, &cols, &rows);
         float pane_w = g_render_width_f  / (float)cols;
         float pane_h = g_render_height_f / (float)rows;
         float fx = pane_w / g_render_width_f;
@@ -2519,15 +2523,10 @@ static void hud_draw_split_dividers(void)
     if (g_td5.viewport_count <= 1) return;
     int views = g_td5.viewport_count;
     int cols, rows;
-    if (views == 2) {
-        if (g_split_screen_mode == 2) { cols = 2; rows = 1; }  /* left|right */
-        else                          { cols = 1; rows = 2; }  /* top/bottom */
-    } else if (views == 3) {
-        cols = 1; rows = 3;                                    /* 3 strips */
-    } else {
-        cols = (views <= 4) ? 2 : 3;
-        rows = (views + cols - 1) / cols;
-    }
+    /* Same shared resolver as the viewport + HUD layouts so the divider lines
+     * land on the actual pane seams (vertical lines for a LEFT/RIGHT grid,
+     * horizontal for UP/DOWN) instead of a hardcoded orientation. */
+    td5_game_resolve_split_grid(views, &cols, &rows);
 
     TD5_AtlasEntry *colours = td5_asset_find_atlas_entry(NULL, "COLOURS");
     if (!colours) return;

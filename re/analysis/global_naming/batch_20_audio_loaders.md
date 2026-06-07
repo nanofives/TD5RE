@@ -126,6 +126,13 @@ Three structural insights drove the relevance gate:
    - **In-race modal** (T3.13's `RunAudioOptionsOverlay`): `g_cdAudioVolumeFraction` (float), `g_sfxVolumeFraction` (float), `g_engineSpeakerVolumeFraction` (float). NOT persisted directly — recomputed from the percentage form at race start.
    The port should mirror the percentage-form globals as the canonical source-of-truth and derive the float-form on-demand. **Confirmed by save-routine xrefs at `0x0040fccc..0x0040fd2e` writing only the percent forms to Config.td5.**
 
+   > **CORRECTION 2026-06-01 (P4 audio /fix — Ghidra-confirmed):** The three in-race float globals are **write-only shadows**, NOT differential attenuators, and `g_engineSpeakerVolumeFraction` is a misnomer.
+   > - `reference_to(0x47463c)` = exactly ONE xref, a WRITE from `0x43c384`. **Zero readers.** Same for `g_sfxVolumeFraction 0x474638` (single WRITE @0x43c37e → `DXSound::CDSetVolume`). Only `g_cdAudioVolumeFraction 0x466ea8` has a live reader (`RunRaceFrame 0x42b580`, view-distance).
+   > - `UpdateVehicleAudioMix 0x440b00` computes the engine loop volume as `clamp(speed,0,0xFFF)>>5` → distance-atten → `DXSound::Modify`, with **NO multiply by 0x47463c / 0x474638 / any 0.2f**. The engine volume is independent of all three fractions.
+   > - The modal's only audio effect is `DXSound::SetVolume(staging[2]*const)` (M2DX **master SFX** volume — scales engine AND skid/collision/horn uniformly) and `DXSound::CDSetVolume(staging[1]*const)`. The "engine speaker" label is unconfirmed (runtime-filled string IDs); mechanically `0x47463c` ← `DXSound::GetVolume()` = master SFX, not engine-only.
+   > - The 0.2f default at `0x47463c` is a dead `.data` image value — overwritten by `GetVolume()` the instant the modal opens, never read otherwise.
+   > **Implication:** there is NO missing "engine-only 0.2f attenuation" in the port. The port's `speed_scaled>>5` engine math is byte-faithful, engine and SFX share one master, and adding an engine-only `* 0.2f` would be a NEW divergence. Item 5 closed as FAITHFUL (no code change).
+
 8. **`LoadVehicleSoundBank` issues 9 DXSound::LoadBuffer calls per car for 6 cars = 54 buffer loads in single-player race init, plus 19 ambient + up-to-6 traffic = 79 LoadBuffer total.** Each LoadBuffer is a synchronous staging-allocate→read→submit→free sequence; total race-init audio cost is ~80 ZIP entry reads. The `param_2 == 0` early-init clear (zeros 12+12+12+6 ints) happens ONLY on the first slot — subsequent slots only initialize their own slice. **This is the fragile behaviour T3.13 noted**: a partial reload (network late-join) leaves listener velocity, weather flags, and siren state stale.
 
 ## Out-of-scope finds

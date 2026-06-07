@@ -1983,6 +1983,10 @@ static int frontend_track_level_exists(int track_index) {
     if (td5_plat_file_exists(path)) return 1;
     /* Also check for extracted loose-file directory (re/assets/levels/levelNNN/STRIP.DAT) */
     snprintf(path, sizeof(path), "re/assets/levels/level%03d/STRIP.DAT", level_num);
+    if (td5_plat_file_exists(path)) return 1;
+    /* Pack-on-load: STRIP.DAT may be retired in favour of the strip.json
+     * editable source — treat the track as present if either exists. */
+    snprintf(path, sizeof(path), "re/assets/levels/level%03d/strip.json", level_num);
     return td5_plat_file_exists(path);
 }
 
@@ -2661,6 +2665,59 @@ static float fe_measure_text(const char *text, float sx, float sy) {
     }
 
     return width;
+}
+
+/* [PORT ENHANCEMENT 2026-06] Greedy word-wrap a string into up to max_lines lines,
+ * each fitting within maxw pixels at the given text scale. Returns the number of
+ * lines produced (>=1). Breaks on spaces; a single word wider than maxw is placed
+ * on its own line (it may still exceed maxw, but real device names word-wrap
+ * cleanly). Used so a long controller name (e.g. "Controller (8BitDo Ultimate 2C
+ * Wireless Controller) #1") is shown in full instead of being clipped to two
+ * fixed lines. Each line buffer is 64 bytes; pass lines as char[N][64]. */
+static int fe_wrap_text_lines(const char *s, float maxw, float sx, float sy,
+                              char lines[][64], int max_lines) {
+    char cur[64];
+    int nlines = 0;
+    int i = 0, len;
+    if (!s) s = "";
+    len = (int)strlen(s);
+    if (max_lines < 1) max_lines = 1;
+    cur[0] = '\0';
+    while (i < len && nlines < max_lines) {
+        int ws, we, wl;
+        char cand[80];
+        while (i < len && s[i] == ' ') i++;     /* skip run of spaces */
+        if (i >= len) break;
+        ws = i;
+        while (i < len && s[i] != ' ') i++;      /* [ws,we) is one word */
+        we = i;
+        wl = we - ws;
+        if (cur[0] == '\0') {
+            int n = wl > 63 ? 63 : wl;
+            memcpy(cand, s + ws, (size_t)n); cand[n] = '\0';
+        } else {
+            snprintf(cand, sizeof cand, "%s %.*s", cur, wl, s + ws);
+        }
+        if (cur[0] == '\0' || fe_measure_text(cand, sx, sy) <= maxw) {
+            /* Fits (or the line is empty so the word must go here regardless). */
+            strncpy(cur, cand, sizeof cur); cur[sizeof cur - 1] = '\0';
+        } else {
+            /* Doesn't fit: flush the current line, start a new one with this word. */
+            strncpy(lines[nlines], cur, 64); lines[nlines][63] = '\0';
+            nlines++;
+            if (nlines >= max_lines) { cur[0] = '\0'; break; }
+            {
+                int n = wl > 63 ? 63 : wl;
+                memcpy(cur, s + ws, (size_t)n); cur[n] = '\0';
+            }
+        }
+    }
+    if (cur[0] != '\0' && nlines < max_lines) {
+        strncpy(lines[nlines], cur, 64); lines[nlines][63] = '\0';
+        nlines++;
+    }
+    if (nlines == 0) { lines[0][0] = '\0'; nlines = 1; }
+    return nlines;
 }
 
 static int frontend_advance_tick(void) {
@@ -6320,27 +6377,16 @@ static void frontend_render_race_type_description(float sx, float sy) {
         float ts   = 0.7f;
         if (!dn || !dn[0]) dn = "KEYBOARD";
         fe_draw_text_centered(cx, 90.0f * sy, "CONTROLLER", 0xFFFFD000, sx*0.8f, sy*0.8f);
-        if (fe_measure_text(dn, sx*ts, sy*ts) <= panel_w) {
-            fe_draw_text_centered(cx, 112.0f * sy, dn, 0xFFFFFFFF, sx*ts, sy*ts);
-        } else {
-            char l1[48], l2[48];
-            int n = (int)strlen(dn), mid = n/2, best = -1, i, cut, skip, a, b;
-            for (i = 1; i < n - 1; i++) {
-                int di, db;
-                if (dn[i] != ' ') continue;
-                if (best < 0) { best = i; continue; }
-                di = i - mid;    if (di < 0) di = -di;
-                db = best - mid; if (db < 0) db = -db;
-                if (di < db) best = i;
-            }
-            cut = (best >= 0) ? best : mid;
-            skip = (dn[cut] == ' ') ? 1 : 0;
-            a = cut;              if (a > 47) a = 47;
-            memcpy(l1, dn, (size_t)a); l1[a] = 0;
-            b = n - (cut + skip); if (b > 47) b = 47;
-            memcpy(l2, dn + cut + skip, (size_t)b); l2[b] = 0;
-            fe_draw_text_centered(cx, 108.0f * sy, l1, 0xFFFFFFFF, sx*ts, sy*ts);
-            fe_draw_text_centered(cx, 124.0f * sy, l2, 0xFFFFFFFF, sx*ts, sy*ts);
+        {
+            /* Word-wrap the controller name over up to 3 lines (capped so it
+             * stays above the race-type description panel at y~145). */
+            char lines[3][64];
+            int nl = fe_wrap_text_lines(dn, panel_w, sx*ts, sy*ts, lines, 3);
+            float step = 14.0f, base = 113.0f - (float)(nl - 1) * step * 0.5f;
+            int li;
+            for (li = 0; li < nl; li++)
+                fe_draw_text_centered(cx, (base + (float)li * step) * sy, lines[li],
+                                      0xFFFFFFFF, sx*ts, sy*ts);
         }
     }
 
@@ -6964,36 +7010,23 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
         }
     }
     {
-        /* Full enumerated device name (e.g. "Logitech G29 Racing Wheel") to the
-         * right of the icon. If it's wider than the column, wrap to two lines at
-         * the space nearest the middle. */
+        /* Full enumerated device name (e.g. "Controller (8BitDo Ultimate 2C
+         * Wireless Controller) #1") to the right of the icon. Word-wrapped over
+         * as many lines as needed so the whole name is shown without clipping;
+         * the block is vertically centred on the 32px icon row. */
         const char *dname = td5_input_get_device_name(source);
         float ts   = 0.85f;
         float nx   = 466.0f * sx;
         float maxw = 168.0f * sx;          /* column from x~466 to ~634 */
+        char lines[6][64];
+        int nl, li;
+        float step = 14.0f, first_y;
         if (!dname || !dname[0]) dname = "<NONE>";
-        if (fe_measure_text(dname, sx * ts, sy * ts) <= maxw) {
-            fe_draw_text(nx, (177.0f + 8.0f) * sy, dname, 0xFFFFFFFF, sx * ts, sy * ts);
-        } else {
-            char l1[64], l2[64];
-            int n = (int)strlen(dname), mid = n / 2, best = -1, i, cut, skip, a, b;
-            for (i = 1; i < n - 1; i++) {
-                int di, db;
-                if (dname[i] != ' ') continue;
-                if (best < 0) { best = i; continue; }
-                di = i - mid;    if (di < 0) di = -di;
-                db = best - mid; if (db < 0) db = -db;
-                if (di < db) best = i;
-            }
-            cut  = (best >= 0) ? best : mid;
-            skip = (dname[cut] == ' ') ? 1 : 0;
-            a = cut;                if (a > 63) a = 63;
-            memcpy(l1, dname, (size_t)a); l1[a] = 0;
-            b = n - (cut + skip);   if (b > 63) b = 63;
-            memcpy(l2, dname + cut + skip, (size_t)b); l2[b] = 0;
-            fe_draw_text(nx, (177.0f +  1.0f) * sy, l1, 0xFFFFFFFF, sx * ts, sy * ts);
-            fe_draw_text(nx, (177.0f + 17.0f) * sy, l2, 0xFFFFFFFF, sx * ts, sy * ts);
-        }
+        nl = fe_wrap_text_lines(dname, maxw, sx * ts, sy * ts, lines, 6);
+        first_y = 185.0f - (float)(nl - 1) * step * 0.5f;   /* centre on icon (y 177..209) */
+        for (li = 0; li < nl; li++)
+            fe_draw_text(nx, (first_y + (float)li * step) * sy, lines[li],
+                         0xFFFFFFFF, sx * ts, sy * ts);
     }
 }
 
@@ -7048,13 +7081,14 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
      * sub-header sits lower — at the old REMAP ALL height (y=90). */
     snprintf(hdr, sizeof hdr, "CONTROLLER SETUP - PLAYER %d", s_ctrl_player + 1);
     fe_draw_text_centered(320.0f * sx, 90.0f * sy, hdr, 0xFFCCCCCC, sx * 0.75f, sy * 0.75f);
-    hint = s_ctrl_capturing
-        ? (s_ctrl_capture_armed
+    /* While actively (re)binding, show the press/release prompt at the bottom.
+     * The idle "SELECT AN ACTION TO REMAP..." hint line was removed per request. */
+    if (s_ctrl_capturing) {
+        hint = s_ctrl_capture_armed
             ? "PRESS A KEY / BUTTON / AXIS   (ESC = CANCEL)"
-            : "RELEASE TO CONTINUE...   (ESC = CANCEL)")
-        : "SELECT AN ACTION TO REMAP   -   REMAP ALL = ONE BY ONE";
-    /* Hint drops below the OK button (now bottom-left at y=352). */
-    fe_draw_text_centered(320.0f * sx, 400.0f * sy, hint, 0xFF999999, sx * 0.58f, sy * 0.58f);
+            : "RELEASE TO CONTINUE...   (ESC = CANCEL)";
+        fe_draw_text_centered(320.0f * sx, 400.0f * sy, hint, 0xFF999999, sx * 0.58f, sy * 0.58f);
+    }
     /* The per-action labels/values are drawn post-button in
      * frontend_render_controller_binding_labels (so they sit on top of the
      * selected button's opaque fill). */
@@ -11828,11 +11862,15 @@ static void ctrl_opts_refresh_devices(void)
     if (dev_count < 1) dev_count = 1;
     joys = dev_count - 1;            /* device 0 = keyboard */
     if (joys < 0) joys = 0;
-    /* Range = connected joysticks, but never fewer than the declared human count
-     * (so every active player can still be configured), clamped to [1,9].
-     * [INTERPRETATION] the spec says "depending on the amount of joysticks"; the
-     * max(.., num_human_players) keeps keyboard-only multiplayer configurable. */
-    n = joys;
+    /* The PLAYER selector lets you configure ANY of the up-to-9 split-screen
+     * players, independent of how many joysticks are plugged in. The keyboard is
+     * shareable and the per-player device is picked on the CONTROLLER SELECTION
+     * row, so capping the player count at the joystick count was wrong — with N
+     * pads you could only reach PLAYER N, blocking setups like "keyboard + pads"
+     * or more players than pads. (The race's human count is still chosen on the
+     * Quick Race / Multiplayer Options screens; this only governs which player
+     * you are configuring here.) */
+    n = TD5_MAX_HUMAN_PLAYERS;
     if (n < s_num_human_players) n = s_num_human_players;
     if (n < 1) n = 1;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
@@ -12487,9 +12525,9 @@ static void Screen_ControllerBinding(void) {
             /* Build the action buttons in TWO narrow columns (is_selector → the
              * renderer skips their label; the overlay draws a small label+value
              * inside each). Layout (PORT ENHANCEMENT 2026-06):
-             *   TOP    REMAP ALL (sequential one-by-one)
-             *   GRID   10 driving actions (two columns of 5)
-             *   BOTTOM "?" (= PAUSE mapping) | OK
+             *   TOP     REMAP ALL — centred, just under the CONTROLLER SETUP header
+             *   GRID    10 driving actions (two columns of 5), pushed below it
+             *   BOTTOM  "?" (= PAUSE mapping) / OK stacked at lower-left
              * Buttons are created actions-first so the handler's fixed indices
              * stay valid: 0..9 actions, 10 = "?"/PAUSE, 11 = REMAP ALL, 12 = OK. */
             {
@@ -12499,19 +12537,19 @@ static void Screen_ControllerBinding(void) {
                 frontend_reset_buttons();
                 for (j = 0; j < 10; j++) {                 /* 0..9 driving actions */
                     int c = j / 5, r = j % 5;
-                    b = frontend_create_button("", colx[c], 132 + r * 32, 135, 26);
+                    b = frontend_create_button("", colx[c], 156 + r * 32, 135, 26);
                     if (b >= 0) s_buttons[b].is_selector = 1;
                 }
-                /* Command column: left-aligned with the left action column (x=130),
-                 * the same width (135) as the action buttons, vertically stacked
-                 * REMAP ALL / PAUSE MENU / OK with OK at the bottom. Creation order
-                 * is fixed (10=PAUSE, 11=REMAP ALL, 12=OK) so the handler's indices
-                 * stay valid; only the on-screen positions changed. */
-                b = frontend_create_button("", 130, 322, 135, 26);           /* 10 = PAUSE MENU (above OK) */
+                /* Command buttons. Creation order is fixed (10=PAUSE, 11=REMAP ALL,
+                 * 12=OK) so the handler's indices stay valid; only the on-screen
+                 * positions changed. REMAP ALL now sits at the TOP (centred, just
+                 * below the header), ahead of the action grid; PAUSE MENU + OK
+                 * stack at the bottom-left below the grid, OK last. */
+                b = frontend_create_button("", 130, 322, 135, 26);            /* 10 = PAUSE MENU */
                 if (b >= 0) s_buttons[b].is_selector = 1;
-                b = frontend_create_button("REMAP ALL", 130, 292, 135, 26);  /* 11 = REMAP ALL (top of stack) */
+                b = frontend_create_button("REMAP ALL", 240, 110, 160, 28);  /* 11 = REMAP ALL (top, centred) */
                 if (b >= 0) s_buttons[b].is_selector = 1;
-                b = frontend_create_button(SNK_OkButTxt, 130, 352, 135, 26); /* 12 = OK (bottom of stack) */
+                b = frontend_create_button(SNK_OkButTxt, 130, 354, 135, 26); /* 12 = OK (bottom) */
                 if (b >= 0) s_buttons[b].is_selector = 1;
             }
         }

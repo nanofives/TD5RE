@@ -6325,16 +6325,44 @@ int td5_game_get_victory_position(void) {
  *   Mode 2 (vert split):  2 viewports, left/right halves
  * ======================================================================== */
 
+/* Resolve the split-screen pane grid for `views` panes. Honours the committed
+ * Multiplayer Options layout pick (g_td5.split_grid_cols/rows, resolved in
+ * frontend_init_race_schedule from the player count + chosen layout); falls
+ * back to the automatic ladder when no grid was committed (AutoRace harness /
+ * legacy launch paths leave cols/rows 0). This is the SINGLE source of truth
+ * for the grid — the 3D viewport rects (td5_game_init_viewport_layout), the HUD
+ * per-pane layout (td5_hud_init_layout), and the divider lines
+ * (hud_draw_split_dividers) all call it so they can never disagree on
+ * orientation (the 3-player LEFT/RIGHT-vs-UP/DOWN mismatch fixed 2026-06-07). */
+void td5_game_resolve_split_grid(int views, int *cols, int *rows) {
+    int c = g_td5.split_grid_cols;
+    int r = g_td5.split_grid_rows;
+    if (views < 1) views = 1;
+    if (c < 1 || r < 1 || c * r < views) {
+        if (views == 2) {
+            if (g_td5.split_screen_mode == 2) { c = 2; r = 1; }  /* left | right */
+            else                              { c = 1; r = 2; }  /* top / bottom */
+        } else if (views == 3) {
+            c = 1; r = 3;                       /* 3 horizontal strips (legacy) */
+        } else {
+            c = (views <= 4) ? 2 : 3;           /* 4=2x2, 5-6=3x2, 7-9=3x3 */
+            r = (views + c - 1) / c;
+        }
+    }
+    if (cols) *cols = c;
+    if (rows) *rows = r;
+}
+
 void td5_game_init_viewport_layout(void) {
     int w = g_td5.render_width;
     int h = g_td5.render_height;
 
     /* [PORT ENHANCEMENT] N-way split. Viewport count = number of local human
      * players (each human gets its own pane). split_screen_mode==0 -> single
-     * fullscreen view. For 2 views the legacy orientation flag is honoured
-     * (mode 1 = top/bottom, mode 2 = left/right). 3 views = 3 horizontal strips
-     * (user pick); 4+ = a near-square grid (4=2x2, 5-6=3x2, 7-9=3x3). The
-     * original was hard-capped at 2 viewports (RunRaceFrame 0x42B580) — this
+     * fullscreen view. The pane grid (cols x rows) comes from the committed
+     * Multiplayer Options layout pick via td5_game_resolve_split_grid (e.g. 3
+     * players default to LEFT/RIGHT = 3x1), falling back to an automatic ladder.
+     * The original was hard-capped at 2 viewports (RunRaceFrame 0x42B580) — this
      * deliberately deviates. */
     int views = g_td5.num_human_players;
     int cols, rows;
@@ -6351,26 +6379,10 @@ void td5_game_init_viewport_layout(void) {
         return;
     }
 
-    /* [PORT ENHANCEMENT 2026-06] Honour the Multiplayer Options layout pick when a
-     * valid grid was committed (g_td5.split_grid_cols/rows, resolved in
-     * frontend_init_race_schedule from the player count + chosen layout). The N
-     * players fill the first N cells of the cols x rows grid (row-major); any
-     * extra "missing" cells stay empty here (their content is a deferred
-     * follow-up). When no grid was committed (AutoRace harness / legacy launch
-     * paths leave cols/rows 0), fall back to the automatic ladder. */
-    cols = g_td5.split_grid_cols;
-    rows = g_td5.split_grid_rows;
-    if (cols < 1 || rows < 1 || cols * rows < views) {
-        if (views == 2) {
-            if (g_td5.split_screen_mode == 2) { cols = 2; rows = 1; }  /* left | right */
-            else                              { cols = 1; rows = 2; }  /* top / bottom */
-        } else if (views == 3) {
-            cols = 1; rows = 3;                 /* 3 horizontal strips */
-        } else {
-            cols = (views <= 4) ? 2 : 3;        /* 4=2x2, 5-6=3x2, 7-9=3x3 */
-            rows = (views + cols - 1) / cols;
-        }
-    }
+    /* The N players fill the first N cells of the cols x rows grid (row-major);
+     * any extra "missing" cells stay empty here (their content is a deferred
+     * follow-up). Grid resolved by the shared helper so the HUD agrees. */
+    td5_game_resolve_split_grid(views, &cols, &rows);
 
     {
         int cw = w / cols;

@@ -78,6 +78,12 @@ void td5_game_update_fps_overlay(void);
 /* --- Viewport --- */
 void td5_game_init_viewport_layout(void);
 
+/* Resolve the split-screen pane grid (cols x rows) for `views` local panes.
+ * Honours the committed Multiplayer Options layout pick (g_td5.split_grid_*)
+ * when valid, else falls back to the automatic ladder. Single source of truth
+ * so the 3D viewport rects, HUD per-pane layout, and divider lines all agree. */
+void td5_game_resolve_split_grid(int views, int *cols, int *rows);
+
 /* --- Intro / Legal --- */
 void td5_game_play_intro_movie(void);
 void td5_game_show_legal_screens(void);

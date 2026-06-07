@@ -97,8 +97,10 @@ LEVELINF_SIZE = 0x64   # 100 bytes
 
 FIELDS: List[FieldDef] = [
     _u32("track_type", 0x00,
-         "0 = circuit, 1 = point-to-point. Read at VA 0x42ae6b — sets "
-         "DAT_00466e94=1 (circuit-mode CP tracking) when == 1."),
+         "1 = circuit (show lap counter), 0 = point-to-point (no laps). "
+         "Read at VA 0x42ae6b: CMP [eax],edi(=1); JNZ; MOV [0x466e94],1 — i.e. "
+         "sets gTrackIsCircuit=1 ONLY when DWORD[0]==1. (Verified by Ghidra "
+         "2026-06-05; the prior '0=circuit,1=P2P' note had the polarity backwards.)"),
 
     _u32("smoke_enable", 0x04,
          "1 = enable tire smoke sprites, 0 = disabled. Read at VA 0x401410 "
@@ -123,9 +125,12 @@ FIELDS: List[FieldDef] = [
          "VA 0x4464c8 by UpdateAmbientParticleDensityForSegment — "
          "bounds the scan over density_pairs below."),
 
-    _u32("is_circuit", 0x30,
-         "1 = circuit (lapped), 0 = P2P. Read at VA 0x42ae7b. When 0, "
-         "clears DAT_004aad8c (disables certain race features for P2P)."),
+    _u32("traffic_enable", 0x30,
+         "1 = ambient traffic allowed, 0 = no traffic. Read at VA 0x42ae7b: "
+         "CMP [eax+0x30],ebx(=0); JNZ; MOV [0x004aad8c],0 — clears the traffic "
+         "actor enable when this field is 0. (NOT the circuit flag; that is "
+         "track_type at 0x00. The prior 'is_circuit' name/desc here was wrong — "
+         "verified by Ghidra 2026-06-05.)"),
 
     _i16_arr("density_pairs", 0x34, 12,
              "Interleaved (segment_id, density) pairs — 6 pairs × (int16, int16). "

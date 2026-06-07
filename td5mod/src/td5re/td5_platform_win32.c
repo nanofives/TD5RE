@@ -155,6 +155,7 @@ static LPDIRECTINPUTDEVICE8A s_di_scan[16];
 static char s_device_names[16][256];
 static int  s_device_types[16];  /* 0=keyboard, 1=gamepad, 2=wheel/joystick */
 static GUID s_device_guids[16];  /* DirectInput instance GUID per enumerated device (index 0 = keyboard, unused) */
+static GUID s_device_product_guids[16]; /* DirectInput PRODUCT GUID (same model -> same product GUID) */
 static int  s_device_count = 0;
 
 /* Multi-file logging — messages routed by module tag to separate log files.
@@ -1865,11 +1866,50 @@ int td5_plat_input_esc_taken(void)
     return 0;
 }
 
+/* Device-detection override (blocklist).
+ *
+ * Any controller whose DirectInput instance name CONTAINS one of these strings
+ * (case-insensitive) is dropped during enumeration: it is never added to
+ * s_device_names[]/s_device_guids[], so it cannot be detected, listed in the
+ * controller-config / multiplayer-join UI, nor assigned to a player slot.
+ *
+ * The user's "Keychron Link" keyboards enumerate under DI8DEVCLASS_GAMECTRL as
+ * game controllers but are not real pads/wheels; this filter keeps them out of
+ * the controller pool entirely. Edit the list to block other devices. */
+static const char *const s_blocked_device_substrings[] = {
+    "keychron link",
+};
+
+static int td5_plat_input_device_name_is_blocked(const char *name)
+{
+    char low[256];
+    size_t i;
+    if (!name) return 0;
+    /* Lower-case a bounded copy, then substring-match each blocked entry. */
+    for (i = 0; i + 1 < sizeof(low) && name[i]; i++) {
+        char c = name[i];
+        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    low[i] = '\0';
+    for (i = 0; i < sizeof(s_blocked_device_substrings) /
+                    sizeof(s_blocked_device_substrings[0]); i++) {
+        if (strstr(low, s_blocked_device_substrings[i]))
+            return 1;
+    }
+    return 0;
+}
+
 /* Joystick enumeration callback */
 static BOOL CALLBACK EnumJoysticksCallback(
     const DIDEVICEINSTANCEA *inst, void *ctx)
 {
     (void)ctx;
+    /* Override: blocked devices are skipped outright — never detected or usable. */
+    if (td5_plat_input_device_name_is_blocked(inst->tszInstanceName)) {
+        TD5_LOG_I(LOG_TAG, "Skipping blocked input device: \"%s\"",
+                  inst->tszInstanceName);
+        return DIENUM_CONTINUE;
+    }
     if (s_device_count < 16) {
         strncpy(s_device_names[s_device_count],
                 inst->tszInstanceName,
@@ -1879,6 +1919,7 @@ static BOOL CALLBACK EnumJoysticksCallback(
          * this exact device later — without it, switching to any joystick is
          * impossible (s_di_joystick was never created). */
         s_device_guids[s_device_count] = inst->guidInstance;
+        s_device_product_guids[s_device_count] = inst->guidProduct;
         /* Classify device type: wheel/driving=2, gamepad=1 */
         {
             BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
@@ -1893,6 +1934,62 @@ static BOOL CALLBACK EnumJoysticksCallback(
         s_device_count++;
     }
     return DIENUM_CONTINUE;
+}
+
+/* Disambiguate identically-named devices.
+ *
+ * Two physically-identical controllers (e.g. a pair of the same gamepad/wheel)
+ * report the SAME tszInstanceName from DirectInput; only their instance GUID
+ * (s_device_guids[]) differs — which is what actually binds a device to a slot,
+ * so the two are already independently selectable. The display name, however,
+ * is identical, leaving the user unable to tell them apart in the controller
+ * config / multiplayer-join UI.
+ *
+ * This pass scans the freshly-enumerated names and, for any name shared by two
+ * or more devices, appends " #1", " #2", ... in enumeration order. A device
+ * with a unique name is left untouched (no lone "#1"). Numbering follows
+ * DirectInput's enumeration order, which is stable for a fixed set of attached
+ * devices, so a given physical pad keeps its number across rescans. Operates on
+ * the raw re-read names each enumeration, so it is idempotent (never stacks
+ * "#1 #1"). Index 0 (the keyboard) is skipped. */
+static void td5_plat_input_disambiguate_device_names(void)
+{
+    int numbered[16] = {0};   /* device already given a suffix this pass */
+    int i, j;
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        char key[256];    /* untrimmed comparison key (matches raw names) */
+        char disp[256];   /* trimmed base used to build the displayed name */
+        size_t n;
+        int total = 0, ord = 0;
+        if (numbered[i]) continue;
+        /* How many not-yet-numbered devices share this exact name? */
+        for (j = i; j < s_device_count && j < 16; j++) {
+            if (!numbered[j] && strcmp(s_device_names[j], s_device_names[i]) == 0)
+                total++;
+        }
+        if (total < 2) continue;   /* unique name -> leave it plain */
+        /* Capture the shared name. `key` stays untrimmed so the strcmp below
+         * still matches the raw enumerated names (incl. the first occurrence);
+         * `disp` is trimmed of trailing whitespace so a name with a trailing
+         * space (e.g. "Keychron Link ") renders "...Link #1", not "...Link  #1".
+         * The "%.*s #%d" precision bounds `disp` so the " #NN" suffix can never
+         * overflow the 256-byte buffer. */
+        strncpy(key, s_device_names[i], sizeof(key) - 1);
+        key[sizeof(key) - 1] = '\0';
+        strncpy(disp, key, sizeof(disp));
+        n = strlen(disp);
+        while (n > 0 && (disp[n - 1] == ' ' || disp[n - 1] == '\t'))
+            disp[--n] = '\0';
+        for (j = i; j < s_device_count && j < 16; j++) {
+            if (!numbered[j] && strcmp(s_device_names[j], key) == 0) {
+                ord++;
+                snprintf(s_device_names[j], sizeof(s_device_names[j]),
+                         "%.*s #%d", (int)(sizeof(s_device_names[j]) - 8),
+                         disp, ord);
+                numbered[j] = 1;
+            }
+        }
+    }
 }
 
 int td5_plat_input_enumerate_devices(void)
@@ -1910,9 +2007,32 @@ int td5_plat_input_enumerate_devices(void)
             NULL,
             DIEDFL_ATTACHEDONLY);
     }
+    /* Append " #1"/" #2"/... to any controllers that share an identical name
+     * so two of the same model can be told apart in the config UI. */
+    td5_plat_input_disambiguate_device_names();
     TD5_LOG_I(LOG_TAG, "Input devices enumerated: count=%d primary=%s",
               s_device_count,
               (s_device_count > 0) ? s_device_names[0] : "<none>");
+    for (int di = 1; di < s_device_count && di < 16; di++) {
+        /* Log the full DirectInput instance + product GUID per joystick. Two
+         * physically-distinct controllers normally get distinct INSTANCE GUIDs;
+         * some pads (notably 8BitDo) report a fixed/identical instance GUID for
+         * every unit, which the binding layer (CreateDevice-by-GUID) cannot tell
+         * apart — so two such pads collapse onto one bindable device. The log
+         * makes that collision visible. */
+        const GUID *ig = &s_device_guids[di];
+        const GUID *pg = &s_device_product_guids[di];
+        TD5_LOG_I(LOG_TAG,
+                  "  device[%d] type=%d name=\"%s\"",
+                  di, s_device_types[di], s_device_names[di]);
+        TD5_LOG_I(LOG_TAG,
+                  "    inst=%08lX-%04X-%04X-%02X%02X%02X%02X%02X%02X%02X%02X "
+                  "prod=%08lX",
+                  (unsigned long)ig->Data1, ig->Data2, ig->Data3,
+                  ig->Data4[0], ig->Data4[1], ig->Data4[2], ig->Data4[3],
+                  ig->Data4[4], ig->Data4[5], ig->Data4[6], ig->Data4[7],
+                  (unsigned long)pg->Data1);
+    }
     return s_device_count;
 }
 

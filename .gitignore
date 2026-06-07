@@ -122,3 +122,6 @@ _archive/
 # Retired binary .DAT assets moved here by the pack-on-load retirement
 # (local backup; originals also live in original/ ZIPs — not for version control)
 re/_retired_dats/
+
+# Test Drive 6 source install (326 MB; copyrighted upstream game data, not VC)
+Test Drive 6/
