@@ -136,6 +136,17 @@ void *td5_asset_open_and_read(const char *entry_name,
                               const char *zip_path,
                               int *out_size);
 
+/**
+ * Resolve an editable-source file (exact filename, e.g. "strip.json") for the
+ * asset addressed by `zip_path` (level zip -> re/assets/levels/levelNNN/,
+ * car/static/etc. zip -> re/assets/<sub>/). Fills out_path and returns 1 if the
+ * source exists on disk, else 0. Reuses the same directory logic as the
+ * loose/extracted loader steps. Consumed by the pack-on-load layer
+ * (td5_assetsrc.c).
+ */
+int td5_asset_resolve_source_path(const char *source_name, const char *zip_path,
+                                  char *out_path, size_t out_size);
+
 /* ========================================================================
  * Static HED Texture Directory (from static.zip)
  *

@@ -45,12 +45,15 @@ PROJECT_ROOT  := ..
 
 TD5RE_SRCS := \
     td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c td5_render.c \
-    td5_frontend.c td5_hud.c td5_sound.c td5_input.c td5_asset.c \
+    td5_frontend.c td5_hud.c td5_sound.c td5_input.c td5_asset.c td5_assetsrc.c \
     td5_inflate.c td5_save.c td5_net.c td5_camera.c td5_vfx.c td5_fmv.c \
     td5_benchmark.c \
     td5_trace.c td5_trace_whole_state.c td5_platform_win32.c main.c
 
 TD5RE_OBJS := $(addprefix $(TD5RE_BUILD)/,$(TD5RE_SRCS:.c=.o))
+# Vendored single-file libs that live in a subdir (compiled by explicit rules).
+TD5RE_VENDOR_OBJS := $(TD5RE_BUILD)/cJSON.o
+TD5RE_OBJS += $(TD5RE_VENDOR_OBJS)
 # libtd5re.a contains every td5re object except main.o (linked separately)
 TD5RE_LIB_OBJS := $(filter-out $(TD5RE_BUILD)/main.o,$(TD5RE_OBJS))
 
@@ -99,6 +102,10 @@ dirs:
 
 # --- td5re object files ---
 $(TD5RE_BUILD)/%.o: $(TD5RE_SRC)/%.c | dirs
+	"$(GCC)" $(TD5RE_CFLAGS) $< -o $@
+
+# --- vendored cJSON (lives in deps/cjson/) ---
+$(TD5RE_BUILD)/cJSON.o: $(TD5RE_SRC)/deps/cjson/cJSON.c | dirs
 	"$(GCC)" $(TD5RE_CFLAGS) $< -o $@
 
 # --- wrapper object files ---

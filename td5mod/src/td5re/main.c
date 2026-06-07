@@ -36,6 +36,7 @@
 #include "td5_profile.h"
 #include "td5_trace.h"
 #include "td5_asset.h"
+#include "td5_assetsrc.h"
 #include "td5_render.h"
 
 /* Wrapper backend types and functions */
@@ -609,6 +610,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hInstance;
     (void)hPrevInstance;
     (void)nCmdShow;
+
+    /* Editable-source byte-exact self-test: pack every registered source and
+     * compare against the original .DAT, then exit without booting the game.
+     * Writes assetsrc_selftest.log in the cwd (run from the project root).
+     * Needs no engine init -- the encoders read files via stdio. */
+    if (lpCmdLine && strstr(lpCmdLine, "--selftest-assetsrc")) {
+        return td5_assetsrc_selftest("assetsrc_selftest.log");
+    }
 
     /* Match the original TD5_d3d.exe FPU control word: round-toward-minus-infinity
      * (x87 RC=01) AND 64-bit extended precision (x87 PC=11). Empirical capture

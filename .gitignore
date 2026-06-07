@@ -118,3 +118,7 @@ re/tools/research-archive/tmp_ghidra_proj/
 
 # Root-folder cleanup archive (regenerable scratch parked for review before deletion)
 _archive/
+
+# Retired binary .DAT assets moved here by the pack-on-load retirement
+# (local backup; originals also live in original/ ZIPs — not for version control)
+re/_retired_dats/

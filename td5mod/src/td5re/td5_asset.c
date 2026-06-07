@@ -26,6 +26,7 @@
  */
 
 #include "td5_asset.h"
+#include "td5_assetsrc.h" /* pack-on-load editable sources (step 0) */
 #include "td5_track.h"
 #include "td5_platform.h"
 #include "td5re.h"
@@ -269,6 +270,30 @@ static int try_extracted_asset_file_read(const char *name, const char *zip_path,
     if (build_extracted_asset_path(candidate, sizeof(candidate), name, zip_path))
         return try_loose_file_read(candidate, buf, max_size);
     return -1;
+}
+
+/* Resolve an editable-source file (exact filename, e.g. "strip.json") for the
+ * asset addressed by `zip_path`, reusing the same directory logic as the
+ * loose/extracted loader steps: level zips -> re/assets/levels/levelNNN/ (with
+ * the same level_num+1 probe), car/static/etc. zips -> re/assets/<sub>/. Fills
+ * out_path and returns 1 if the source exists on disk, else 0. Consumed by the
+ * pack-on-load layer (td5_assetsrc.c). */
+int td5_asset_resolve_source_path(const char *source_name, const char *zip_path,
+                                  char *out_path, size_t out_size)
+{
+    if (!source_name || !zip_path || !out_path || out_size == 0)
+        return 0;
+
+    /* build_extracted_*_path already check td5_plat_file_exists on the result. */
+    for (int offset = 0; offset <= 1; offset++) {
+        if (build_extracted_level_path(out_path, out_size, source_name,
+                                       zip_path, offset))
+            return 1;
+    }
+    if (build_extracted_asset_path(out_path, out_size, source_name, zip_path))
+        return 1;
+
+    return 0;
 }
 
 /* ========================================================================
@@ -1246,6 +1271,10 @@ int td5_asset_read_entry(TD5_Archive *arc, const char *name,
 int td5_asset_get_entry_size_from_path(const char *entry_name,
                                        const char *zip_path)
 {
+    /* Step 0: editable-source pack-on-load (report the PACKED size). */
+    int src_sz = td5_assetsrc_packed_size(entry_name, zip_path);
+    if (src_sz >= 0) return src_sz;
+
     /* Loose file override */
     int loose_sz = try_loose_file_size(entry_name);
     if (loose_sz >= 0) return loose_sz;
@@ -1298,6 +1327,18 @@ void *td5_asset_open_and_read(const char *entry_name,
     }
 
     if (out_size) *out_size = 0;
+
+    /* Step 0: editable-source pack-on-load (retires binary .DAT). If an
+     * editable source exists for this entry, encode it to the .DAT layout in
+     * memory and return it; otherwise fall through to the legacy paths. */
+    {
+        int   packed_sz = 0;
+        void *packed    = td5_assetsrc_pack(entry_name, zip_path, &packed_sz);
+        if (packed) {
+            if (out_size) *out_size = packed_sz;
+            return packed;
+        }
+    }
 
     /* Loose file override */
     int loose_sz = try_loose_file_size(entry_name);
@@ -2172,8 +2213,17 @@ int td5_asset_track_has_reverse(int track_index)
      * forward-only track can't false-match a neighbour level's reverse files
      * (e.g. Newcastle level029 -> level030 Drag Strip). */
     static const char *const need[3] = { "STRIPB.DAT", "LEFTB.TRK", "RIGHTB.TRK" };
+    /* Pack-on-load: the binary .DATs may be retired in favour of editable
+     * sources (stripb.json / leftb.trk.csv / rightb.trk.csv). Accept either,
+     * so the forward/reverse toggle stays correct after retirement. */
+    static const char *const need_src[3] = { "stripb.json", "leftb.trk.csv",
+                                             "rightb.trk.csv" };
     for (int i = 0; i < 3; i++) {
         td5_asset_build_level_loose_path(track_index, need[i],
+                                         rev_path, sizeof(rev_path));
+        if (td5_plat_file_exists(rev_path))
+            continue;
+        td5_asset_build_level_loose_path(track_index, need_src[i],
                                          rev_path, sizeof(rev_path));
         if (!td5_plat_file_exists(rev_path))
             return 0;
