@@ -915,6 +915,22 @@ int td5_game_tick(void) {
              * the first tick of the target screen. Idempotent: each loader
              * has an internal guard. */
             td5_frontend_init_resources();
+#ifndef TD5RE_RELEASE
+            /* Post-race preview harness: when TD5RE_INJECT_POSTRACE is set and
+             * the jump targets a post-race screen (23..27), fabricate a finished
+             * race so the screen renders real data instead of all-zero columns.
+             * Must run BEFORE the screen's case-0 (next display-loop tick) reads
+             * the result statics. See td5_game_inject_demo_results. */
+            if (g_td5.ini.start_screen >= TD5_SCREEN_HIGH_SCORE &&
+                g_td5.ini.start_screen <= TD5_SCREEN_CUP_WON) {
+                const char *inj = getenv("TD5RE_INJECT_POSTRACE");
+                if (inj && inj[0] && inj[0] != '0') {
+                    td5_game_inject_demo_results();
+                    TD5_LOG_I(LOG_TAG, "StartScreen=%d: injected demo post-race "
+                              "results (TD5RE_INJECT_POSTRACE)", g_td5.ini.start_screen);
+                }
+            }
+#endif
             td5_frontend_set_screen((TD5_ScreenIndex)g_td5.ini.start_screen);
             g_td5.ini.start_screen = -1;  /* one-shot */
         }
@@ -1293,6 +1309,68 @@ void td5_game_sort_results(void)
         break;
     }
 }
+
+#ifndef TD5RE_RELEASE
+/* ----------------------------------------------------------------------------
+ * Dev/test harness: fabricate a plausible *finished* race result so the
+ * post-race frontend screens (RACE_RESULTS [24], NAME_ENTRY [25],
+ * HIGH_SCORE [23], CUP_FAILED/WON) can be VIEWED via a StartScreen jump
+ * without driving a full race. These screens normally read s_results /
+ * s_metrics / s_slot_state, which are all zero on a fresh boot — so the
+ * table/columns render blank or as "00:00.00 / 0KPH" and the screen "looks
+ * weird" (user-reported 2026-06-07). This populates those statics for the 6
+ * racing slots with realistic data (slot 0 = the player, a strong ~#1 time).
+ *
+ * Invoked only from the StartScreen path when TD5RE_INJECT_POSTRACE is set;
+ * compiled out of the release build (mirrors the TD5RE_FORCE_REPLAY harness).
+ * Calibration:
+ *   - time in 30 Hz ticks: 1800 = 1:00.00 (frontend_format_score_time).
+ *   - speed raw -> frontend_convert_speed: 547 ~= 180 KPH, 395 ~= 130 KPH.
+ * -------------------------------------------------------------------------- */
+void td5_game_inject_demo_results(void)
+{
+    const int     demo_racers = 6;        /* player + 5 opponents */
+    const int32_t base_finish = 1800;     /* slot 0: 1:00.00 */
+    const int32_t place_step  = 195;      /* +6.5s per finishing place */
+    const int32_t top_raw     = 547;      /* ~180 KPH / ~112 MPH */
+    const int32_t avg_raw     = 395;      /* ~130 KPH /  ~81 MPH */
+
+    for (int i = 0; i < demo_racers && i < TD5_MAX_RACER_SLOTS; i++) {
+        int32_t finish = base_finish + place_step * i;
+
+        memset(&s_metrics[i], 0, sizeof(s_metrics[i]));
+        s_metrics[i].post_finish_metric_base = finish;          /* != 0 => slot_is_finished */
+        s_metrics[i].cumulative_timer        = finish;
+        s_metrics[i].accumulated_score       = 5000 - 400 * i;  /* points (higher = better) */
+        s_metrics[i].top_speed               = top_raw - 9 * i;
+        s_metrics[i].average_speed_raw       = avg_raw - 7 * i;
+        s_metrics[i].display_position        = (int16_t)i;
+        for (int lap = 0; lap < 3; lap++)
+            s_metrics[i].lap_split_times[lap] = (int16_t)(finish / 3);   /* ~3 even laps */
+
+        memset(&s_results[i], 0, sizeof(s_results[i]));
+        s_results[i].slot_flags       = 1;
+        s_results[i].slot_index       = (uint8_t)i;
+        s_results[i].final_position   = (int16_t)i;
+        s_results[i].primary_metric   = finish;
+        s_results[i].secondary_metric = s_metrics[i].accumulated_score;
+        s_results[i].top_speed        = (int16_t)(top_raw - 9 * i);
+
+        s_slot_state[i].state       = 2;   /* completed */
+        s_slot_state[i].companion_1 = 1;   /* finished */
+        s_slot_state[i].companion_2 = 1;   /* completed-ok (NOT 2 = DNF; keeps Screen_RaceResults
+                                            * off the cup-fail early-route) */
+        s_slot_state[i].reserved    = 0;
+
+        s_race_order[i] = (uint8_t)i;
+    }
+
+    TD5_LOG_I(LOG_TAG,
+              "inject_demo_results: fabricated finished race for %d slots "
+              "(slot0 finish=%d ticks ~1:00, top~180kph) for post-race frontend preview",
+              demo_racers, (int)base_finish);
+}
+#endif /* TD5RE_RELEASE */
 
 /* ========================================================================
  * InitializeRaceSession (0x42AA10)
