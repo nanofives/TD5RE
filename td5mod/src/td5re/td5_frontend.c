@@ -14846,6 +14846,31 @@ static void Screen_PostRaceNameEntry(void) {
         } else {
             TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: case 4 skip (score=0, no qualification)");
         }
+
+        /* [FIX 2026-06-07] Create the table-phase buttons. The original
+         * ScreenPostRaceNameEntry @0x00413BC0 case 4 creates the SAME two
+         * buttons as ScreenPostRaceHighScoreTable @0x00413580 immediately after
+         * inserting the score, then forces g_frontendButtonIndex =
+         * g_frontendEscKeyButtonIndex = 1 [CONFIRMED @ 0x00413BC0]:
+         *   CreateFrontendDisplayModeButton(NULL,         -0x208,0, 0x208,0x20, 0)  // nav bar, NO label
+         *   CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x130,0, 0x60, 0x20, 0)  // OK
+         * The port previously created NO button in this table-display phase, so
+         * the post-name-entry High Scores table rendered with no visible button
+         * to leave the screen (user-reported 2026-06-07). Positions mirror the
+         * resolved sentinels used by Screen_PostRaceHighScore: (115,97) 520x32
+         * and (115,377) 96x32. The nav bar is a label-less empty 9-slice frame
+         * (RebuildFrontendButtonSurface @0x00426120 draws NO text for a NULL
+         * caption [CONFIRMED]) and this table is STATIC — unlike the Records
+         * screen [23] it does NOT browse categories with L/R [CONFIRMED @
+         * 0x00413BC0], so no nav-bar text/arrows are drawn (see the
+         * HIGH_SCORE-gated nav-text block in the render path). Buttons survive
+         * cases 5-12 (no set_screen until case 12); the list is empty here
+         * (set_screen reset it on entry; text input creates no button), so the
+         * nav bar lands at index 0 and OK at index 1. */
+        frontend_create_button(NULL, 115, 97, 520, 32);          /* nav bar (empty frame) */
+        frontend_create_button(SNK_OkButTxt, 115, 377, 96, 32);  /* OK button */
+        s_selected_button = 1;   /* pre-select OK (orig forces g_frontendButtonIndex=1) */
+        TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: created nav-bar + OK buttons for table phase (OK preselected)");
         s_inner_state = 5;
         break;
 
