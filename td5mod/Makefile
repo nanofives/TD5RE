@@ -93,9 +93,16 @@ LINK_FLAGS := -m32 -mwindows -static \
 # Targets
 # ---------------------------------------------------------------------------
 
-.PHONY: all td5re wrapper clean rebuild dirs
+.PHONY: all td5re wrapper clean rebuild dirs verify-assets
 
 all: wrapper td5re
+
+# Pack-on-load regression guard: re-pack every editable source and byte-compare
+# against the retired originals, then check the glTF mesh round-trip. Run from
+# the project root (where re/assets + re/_retired_dats live).
+verify-assets:
+	cd "$(PROJECT_ROOT)" && python re/tools/verify_assets.py
+	cd "$(PROJECT_ROOT)" && python re/tools/mesh_tool.py selfcheck-glb-all
 
 dirs:
 	@mkdir -p "$(TD5RE_BUILD)" "$(WRAPPER_BUILD)"
