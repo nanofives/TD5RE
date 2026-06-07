@@ -51,6 +51,13 @@ static void frontend_init_font_metrics_default(void);
 static void fe_draw_quad(float x, float y, float w, float h,
                          uint32_t color, int tex_page,
                          float u0, float v0, float u1, float v1);
+/* Like fe_draw_quad but draws a parallelogram: the two top vertices are shifted
+ * by dx_top and the two bottom vertices by dx_bot (used for faux-italic title
+ * text). */
+static void fe_draw_quad_sheared(float x, float y, float w, float h,
+                                 float dx_top, float dx_bot,
+                                 uint32_t color, int tex_page,
+                                 float u0, float v0, float u1, float v1);
 
 /* ========================================================================
  * Forward declarations -- screen functions (30 entries)
@@ -1139,6 +1146,45 @@ static const char *frontend_get_title_tga_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_CREATE_SESSION:
     case TD5_SCREEN_NETWORK_LOBBY:
     case TD5_SCREEN_SESSION_LOCKED: return "NetPlayText.TGA";
+    default: return NULL;
+    }
+}
+
+/* Human-readable header text drawn at the top of each screen in the Lunatica
+ * title face (td5_titlefont). Mirrors frontend_get_title_tga_for_screen's screen
+ * coverage one-for-one; NULL means the screen has no header (same screens that
+ * have no title TGA). Rendered uppercase via the title-draw helper. */
+static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
+    switch (screen) {
+    case TD5_SCREEN_MAIN_MENU:          return "MAIN MENU";
+    /* Race-type menu doubles as the cup chooser: its inner states 6..10 are the
+     * championship "cup sub-menu" (Championship/Era/Challenge/...), where the
+     * header reads SELECT CUP; the top-level race-type list reads RACE TYPE. */
+    case TD5_SCREEN_RACE_TYPE_MENU:
+        return (s_inner_state >= 6 && s_inner_state <= 10) ? "SELECT CUP" : "RACE TYPE";
+    case TD5_SCREEN_QUICK_RACE:         return "QUICK RACE";
+    case TD5_SCREEN_OPTIONS_HUB:
+    case TD5_SCREEN_GAME_OPTIONS:
+    case TD5_SCREEN_CONTROL_OPTIONS:
+    case TD5_SCREEN_SOUND_OPTIONS:
+    case TD5_SCREEN_DISPLAY_OPTIONS:
+    case TD5_SCREEN_TWO_PLAYER_OPTIONS:
+    case TD5_SCREEN_CONTROLLER_BINDING: return "OPTIONS";
+    case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
+    case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
+    case TD5_SCREEN_HIGH_SCORE:
+    case TD5_SCREEN_NAME_ENTRY:         return "HIGH SCORES";
+    case TD5_SCREEN_RACE_RESULTS:       return "RESULTS";
+    case TD5_SCREEN_MP_LOBBY:           return "MULTIPLAYER";
+    /* All net-play frontends share one header: NET PLAY. */
+    case TD5_SCREEN_CONNECTION_BROWSER:
+    case TD5_SCREEN_SESSION_PICKER:
+    case TD5_SCREEN_CREATE_SESSION:
+    case TD5_SCREEN_NETWORK_LOBBY:
+    case TD5_SCREEN_SESSION_LOCKED:
+    case TD5_SCREEN_LAN_MENU:
+    case TD5_SCREEN_DIRECT_CONNECT:
+    case TD5_SCREEN_NET_NICKNAME:       return "NET PLAY";
     default: return NULL;
     }
 }
@@ -6104,14 +6150,9 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
 
     if (!s_anim_complete) return;
 
-    /* [S05 2026-06-04] MULTIPLAYER sub-header, drawn in the shared menu font
-     * (fe_draw_text_centered — the same path used by every other screen title
-     * and the lobby's MULTIPLAYER label) so it matches the rest of the menus'
-     * format. Sits BELOW the shared "OPTIONS" title strip (OptionsText.tga,
-     * native y~17) and ABOVE the first row button (PLAYERS @ y=77) so the two
-     * don't overlap — it reads as "OPTIONS / MULTIPLAYER". */
-    fe_draw_text_centered(320.0f * sx, 60.0f * sy, SNK_MultiplayerTitleTxt,
-                          0xFFFFD000, sx * 0.8f, sy * 0.8f);
+    /* [title font 2026-06] The MULTIPLAYER sub-header was removed — this screen
+     * already shows the shared "OPTIONS" header at the top, so the extra
+     * orange "MULTIPLAYER" line below it was redundant. */
 
     if (s_mp_btn_players < 0 || !s_buttons[s_mp_btn_players].active) return;
 
@@ -6975,14 +7016,17 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
     if (!s_anim_complete) return;
     if (s_inner_state != 10) return;   /* only the interactive list state */
 
+    /* The "OPTIONS" Lunatica header now occupies the very top (y~17), so this
+     * sub-header sits lower — at the old REMAP ALL height (y=90). */
     snprintf(hdr, sizeof hdr, "CONTROLLER SETUP - PLAYER %d", s_ctrl_player + 1);
-    fe_draw_text_centered(320.0f * sx, 34.0f * sy, hdr, 0xFFCCCCCC, sx * 0.75f, sy * 0.75f);
+    fe_draw_text_centered(320.0f * sx, 90.0f * sy, hdr, 0xFFCCCCCC, sx * 0.75f, sy * 0.75f);
     hint = s_ctrl_capturing
         ? (s_ctrl_capture_armed
             ? "PRESS A KEY / BUTTON / AXIS   (ESC = CANCEL)"
             : "RELEASE TO CONTINUE...   (ESC = CANCEL)")
         : "SELECT AN ACTION TO REMAP   -   REMAP ALL = ONE BY ONE";
-    fe_draw_text_centered(320.0f * sx, 350.0f * sy, hint, 0xFF999999, sx * 0.58f, sy * 0.58f);
+    /* Hint drops below the OK button (now bottom-left at y=352). */
+    fe_draw_text_centered(320.0f * sx, 400.0f * sy, hint, 0xFF999999, sx * 0.58f, sy * 0.58f);
     /* The per-action labels/values are drawn post-button in
      * frontend_render_controller_binding_labels (so they sit on top of the
      * selected button's opaque fill). */
@@ -7042,7 +7086,9 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
     int p;
     if (!s_anim_complete) return;
 
-    fe_draw_text_centered(320.0f * sx,  40.0f * sy, SNK_MultiplayerTitleTxt, 0xFFFFD000, sx, sy);
+    /* [title font 2026-06] The orange "MULTIPLAYER" title was removed — the
+     * screen now shows the standard top header "MULTIPLAYER" (Lunatica title
+     * face) via frontend_get_title_text_for_screen, matching every other menu. */
     fe_draw_text_centered(320.0f * sx,  78.0f * sy, SNK_PressJoinTxt, 0xFFCCCCCC, sx*0.8f, sy*0.8f);
 
     for (p = 0; p < s_mp_joined_count && p < TD5_MAX_HUMAN_PLAYERS; p++) {
@@ -7673,6 +7719,54 @@ static void fe_draw_text_centered(float center_x, float y, const char *text,
     fe_draw_text(center_x - w * 0.5f, y, text, color, sx, sy);
 }
 
+/* ---- frontend screen-header text (Lunatica title face) -------------------
+ * Renders the big header at the top of each frontend screen as text in the
+ * td5_titlefont face, replacing the legacy baked title-strip art. Uses the same
+ * native-TTF mechanism as fe_draw_text (shared glyph atlas, translucent preset)
+ * but a larger cap height, the display typeface, a faux-italic slant for a more
+ * cursive look, and tighter letter tracking. Titles are LEFT-ALIGNED at a fixed
+ * x so the first letter starts in the same place on every screen. The 4:3 lock
+ * (hscale) matches fe_draw_text so titles condense the same way on windows
+ * narrower than 4:3. */
+#define FE_TITLE_CAP_PX  24.0f   /* design cap height (px at 480-tall reference) */
+#define FE_TITLE_LEFT_X  126.0f  /* design x where the first letter starts (every screen);
+                                  * = main-menu button left edge (FE_CENTER_X - 0xC2 = 320-194) */
+#define FE_TITLE_SLANT   0.20f   /* faux-italic shear (x shift per y unit above baseline) */
+#define FE_TITLE_TRACK  (-1.5f)  /* extra letter tracking (design px; negative = tighter) */
+
+/* Draw `text` as a screen header left-aligned with its first letter at `left_x`.
+ * `top_y` is where the cap tops land (the slide-in animated Y from the caller). */
+static void frontend_draw_screen_title(const char *text, float left_x, float top_y,
+                                       uint32_t color, float sx, float sy) {
+    if (!text || !td5_titlefont_ready()) return;
+    const float cap_px   = FE_TITLE_CAP_PX * sy;
+    const float baseline = top_y + cap_px;            /* cap tops land near top_y */
+    const float hscale   = (sx < sy) ? (sx / sy) : 1.0f;
+    const float trkn     = FE_TITLE_TRACK * sy * hscale;
+    float pen = left_x;
+    for (int i = 0; text[i]; i++) {                   /* pass 1: rasterise into atlas */
+        td5_glyph g; td5_titlefont_get(toupper((unsigned char)text[i]), cap_px, &g);
+    }
+    td5_font_flush_uploads();                         /* one GPU upload for new glyphs */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    for (int i = 0; text[i]; i++) {                   /* pass 2: draw (cache hits) */
+        int c = toupper((unsigned char)text[i]);
+        td5_glyph g; td5_titlefont_get(c, cap_px, &g);
+        if (g.valid && g.w > 0.0f) {
+            float gx = pen + g.xoff * hscale;
+            float gy = baseline + g.yoff;             /* glyph quad top edge */
+            /* Faux-italic: shear x by the height above the baseline so the cap
+             * tops lean right while the baseline stays put. */
+            float dx_top = FE_TITLE_SLANT * (baseline - gy);
+            float dx_bot = FE_TITLE_SLANT * (baseline - (gy + g.h));
+            fe_draw_quad_sheared(gx, gy, g.w * hscale, g.h, dx_top, dx_bot,
+                                 color, g.page, g.u0, g.v0, g.u1, g.v1);
+        }
+        pen += g.advance * hscale + trkn;
+    }
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
 static void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy) {
     /* Font atlas: BodyText.tga (or GDI fallback), 10 chars/row, 24x24 cells.
      * Layout: col = (ascii - 0x20) % 10, row = (ascii - 0x20) / 10.
@@ -8067,6 +8161,39 @@ static void fe_draw_quad(float x, float y, float w, float h,
     verts[2].tex_u = u1;      verts[2].tex_v = v1;
     verts[3].screen_x = x;     verts[3].screen_y = y + h;
     verts[3].tex_u = u0;      verts[3].tex_v = v1;
+    for (int v = 0; v < 4; v++) {
+        verts[v].depth_z = 0.0f;
+        verts[v].rhw = 1.0f;
+        verts[v].diffuse = color;
+    }
+    td5_plat_render_bind_texture(tex_page >= 0 ? tex_page : s_white_tex_page);
+    ID3D11DeviceContext_PSSetShader(g_backend.context,
+        g_backend.ps_shaders[g_backend.state.texblend_mode == 5 ? 1 : 0], NULL, 0);
+    {
+        int si = (g_backend.state.mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
+        ID3D11DeviceContext_PSSetSamplers(g_backend.context, 0, 1, &g_backend.sampler_states[si]);
+    }
+    td5_plat_render_draw_tris(verts, 4, indices, 6);
+}
+
+/* Same as fe_draw_quad but draws a parallelogram: the top edge is shifted by
+ * dx_top and the bottom edge by dx_bot. Used for the faux-italic title text —
+ * the glyph texture is sheared across the parallelogram by the sampler. */
+static void fe_draw_quad_sheared(float x, float y, float w, float h,
+                                 float dx_top, float dx_bot,
+                                 uint32_t color, int tex_page,
+                                 float u0, float v0, float u1, float v1) {
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = {0, 1, 2, 0, 2, 3};
+    memset(verts, 0, sizeof(verts));
+    verts[0].screen_x = x + dx_top;       verts[0].screen_y = y;
+    verts[0].tex_u = u0;                  verts[0].tex_v = v0;
+    verts[1].screen_x = x + w + dx_top;   verts[1].screen_y = y;
+    verts[1].tex_u = u1;                  verts[1].tex_v = v0;
+    verts[2].screen_x = x + w + dx_bot;   verts[2].screen_y = y + h;
+    verts[2].tex_u = u1;                  verts[2].tex_v = v1;
+    verts[3].screen_x = x + dx_bot;       verts[3].screen_y = y + h;
+    verts[3].tex_u = u0;                  verts[3].tex_v = v1;
     for (int v = 0; v < 4; v++) {
         verts[v].depth_z = 0.0f;
         verts[v].rhw = 1.0f;
@@ -8922,7 +9049,18 @@ void td5_frontend_render_ui_rects(void) {
         title_visible = (s_inner_state >= 3 && s_inner_state <= 0x0B) ? 1 : 0;
     }
 
-    if (title_visible && frontend_ensure_title_texture(s_current_screen)) {
+    if (title_visible) {
+        const char *title_text = frontend_get_title_text_for_screen(s_current_screen);
+        if (title_text && td5_titlefont_ready()) {
+            /* [title font] render the screen header as text in the Lunatica
+             * title face, replacing the legacy baked title-strip art. LEFT-ALIGNED
+             * at a fixed x on every screen so the first letter always starts in
+             * the same place. The slide-in Y reuses the legacy strip animation so
+             * the header still slides in from above (rest 21 -> 17). */
+            float t_y = frontend_get_title_render_y(sy) - 4.0f * sy;
+            frontend_draw_screen_title(title_text, FE_TITLE_LEFT_X * sx, t_y,
+                                       0xFFE3D708u, sx, sy);
+        } else if (frontend_ensure_title_texture(s_current_screen)) {
         int page = s_title_tex_page[s_current_screen];
         int title_w = s_title_tex_w[s_current_screen];
         int title_h = s_title_tex_h[s_current_screen];
@@ -8974,7 +9112,8 @@ void td5_frontend_render_ui_rects(void) {
             }
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         }
-    }
+        }   /* end fallback strip blit (title font unavailable) */
+    }       /* end if (title_visible) */
 
     /* Draw queued colored rects (with alpha blending for fade overlays) */
     for (int i = 0; i < s_draw_queue_count; i++) {
@@ -12232,11 +12371,16 @@ static void Screen_ControllerBinding(void) {
                     b = frontend_create_button("", colx[c], 132 + r * 32, 135, 26);
                     if (b >= 0) s_buttons[b].is_selector = 1;
                 }
-                b = frontend_create_button("", 130, 312, 150, 26);           /* 10 = PAUSE MENU (bottom-left) */
+                /* Command column: left-aligned with the left action column (x=130),
+                 * the same width (135) as the action buttons, vertically stacked
+                 * REMAP ALL / PAUSE MENU / OK with OK at the bottom. Creation order
+                 * is fixed (10=PAUSE, 11=REMAP ALL, 12=OK) so the handler's indices
+                 * stay valid; only the on-screen positions changed. */
+                b = frontend_create_button("", 130, 322, 135, 26);           /* 10 = PAUSE MENU (above OK) */
                 if (b >= 0) s_buttons[b].is_selector = 1;
-                b = frontend_create_button("REMAP ALL", 235, 90, 170, 28);   /* 11 = REMAP ALL (top, centered) */
+                b = frontend_create_button("REMAP ALL", 130, 292, 135, 26);  /* 11 = REMAP ALL (top of stack) */
                 if (b >= 0) s_buttons[b].is_selector = 1;
-                b = frontend_create_button(SNK_OkButTxt, 415, 312, 80, 26);  /* 12 = OK (bottom-right) */
+                b = frontend_create_button(SNK_OkButTxt, 130, 352, 135, 26); /* 12 = OK (bottom of stack) */
                 if (b >= 0) s_buttons[b].is_selector = 1;
             }
         }

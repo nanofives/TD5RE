@@ -37,6 +37,7 @@
 
 #define MENU_TTF      "re/assets/frontend/menu.ttf"
 #define HUD_TTF       "re/assets/frontend/hud.ttf"   /* in-race HUD overlay font (Rajdhani) */
+#define TITLE_TTF     "re/assets/frontend/title.ttf" /* frontend screen-header font (Lunatica) */
 #define FALLBACK_TTF  "C:\\Windows\\Fonts\\arialbd.ttf"
 
 typedef struct { int key; int used; td5_glyph g; } GlyphEntry;
@@ -56,6 +57,14 @@ static int            s_hud_tried = 0, s_hud_ok = 0;
 static stbtt_fontinfo s_hud_primary;
 static unsigned char *s_hud_buf = NULL;
 static float          s_hud_cap = 1.0f;
+
+/* Tertiary title face (Lunatica). Same shared-atlas scheme as the HUD face;
+ * cache key tagged with face id 2 (see font_rasterize). Any glyph the display
+ * font lacks routes to the same arialbd fallback. */
+static int            s_title_tried = 0, s_title_ok = 0;
+static stbtt_fontinfo s_title_primary;
+static unsigned char *s_title_buf = NULL;
+static float          s_title_cap = 1.0f;
 
 static uint32_t      *s_atlas = NULL;       /* ATLAS_W*ATLAS_H BGRA32 (A8R8G8B8) */
 static int            s_cur_x = 0, s_cur_y = 0, s_shelf_h = 0;
@@ -197,8 +206,9 @@ static GlyphEntry *cache_slot(int key)
 }
 
 /* Rasterise `cp` at `cap_px` using face `fi` (cap-units `capu`), caching under a
- * face-tagged key (face 0 = menu, 1 = HUD) so the two faces share the atlas +
- * cache without colliding. Face 0 keeps the exact pre-refactor key layout. */
+ * face-tagged key (face 0 = menu, 1 = HUD, 2 = title) so the faces share the
+ * atlas + cache without colliding. Face 0/1 keep the exact pre-refactor key
+ * layout (face & 3 == face & 1 for those); face 2 sets the extra tag bit. */
 static void font_rasterize(stbtt_fontinfo *fi, float capu, int face,
                            int cp, float cap_px, td5_glyph *out)
 {
@@ -208,7 +218,7 @@ static void font_rasterize(stbtt_fontinfo *fi, float capu, int face,
     int size_q = (int)(cap_px + 0.5f);
     if (size_q < 1) size_q = 1;
     if (size_q > 0xFFF) size_q = 0xFFF;
-    int key = ((face & 1) << 21) | ((cp & 0x1FF) << 12) | size_q;
+    int key = ((face & 3) << 21) | ((cp & 0x1FF) << 12) | size_q;
     if (key == 0) key = 1;
 
     GlyphEntry *e = cache_slot(key);
@@ -329,6 +339,60 @@ float td5_hudfont_advance(int cp, float cap_px)
     if (!td5_hudfont_ready()) return 0.0f;
     stbtt_fontinfo *fi; float cap;
     pick_hud_font(cp, &fi, &cap);
+    int adv = 0, lsb = 0;
+    stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
+    return (float)adv * (cap_px / cap);
+}
+
+/* ---- tertiary title face (Lunatica) ------------------------------------- */
+
+int td5_titlefont_ready(void)
+{
+    if (s_title_tried) return s_title_ok;
+    s_title_tried = 1;
+    /* Shares the menu face's atlas + cache, so the base font must init first. */
+    if (!td5_font_ready() || !s_atlas) { s_title_ok = 0; return 0; }
+
+    long len = 0;
+    s_title_buf = read_file(TITLE_TTF, &len);
+    if (!s_title_buf ||
+        !stbtt_InitFont(&s_title_primary, s_title_buf,
+                        stbtt_GetFontOffsetForIndex(s_title_buf, 0))) {
+        TD5_LOG_W(LOG_TAG, "title TTF not loaded (%s) -- screen titles fall back to the strip art", TITLE_TTF);
+        s_title_ok = 0;
+        return 0;
+    }
+    s_title_cap = cap_units(&s_title_primary);
+    TD5_LOG_I(LOG_TAG, "title TTF loaded: %s (cap_units=%.0f)", TITLE_TTF, s_title_cap);
+    s_title_ok = 1;
+    return 1;
+}
+
+/* Pick the title face for `cp`, routing a glyph the display font lacks to the
+ * arialbd fallback (Lunatica is a demo font and omits many glyphs). */
+static void pick_title_font(int cp, stbtt_fontinfo **fi, float *cap)
+{
+    if (cp >= 0 && s_have_fb && stbtt_FindGlyphIndex(&s_title_primary, cp) == 0) {
+        *fi = &s_fallback;      *cap = s_cap_fallback;
+    } else {
+        *fi = &s_title_primary; *cap = s_title_cap;
+    }
+}
+
+void td5_titlefont_get(int cp, float cap_px, td5_glyph *out)
+{
+    out->valid = 0;
+    if (!td5_titlefont_ready()) return;
+    stbtt_fontinfo *fi; float cap;
+    pick_title_font(cp, &fi, &cap);
+    font_rasterize(fi, cap, 2, cp, cap_px, out);
+}
+
+float td5_titlefont_advance(int cp, float cap_px)
+{
+    if (!td5_titlefont_ready()) return 0.0f;
+    stbtt_fontinfo *fi; float cap;
+    pick_title_font(cp, &fi, &cap);
     int adv = 0, lsb = 0;
     stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
     return (float)adv * (cap_px / cap);
