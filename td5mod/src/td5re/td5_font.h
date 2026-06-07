@@ -48,4 +48,14 @@ int   td5_hudfont_ready(void);
 void  td5_hudfont_get(int codepoint, float cap_px, td5_glyph *out);
 float td5_hudfont_advance(int codepoint, float cap_px);
 
+/* ---- Tertiary title face (Lunatica, re/assets/frontend/title.ttf) ---------
+ * The display typeface for the big header at the top of every frontend screen.
+ * Shares the same glyph cache + GPU atlas page as the menu/HUD faces (so
+ * td5_font_flush_uploads() uploads all three). Same semantics as the menu
+ * equivalents above; returns/rasterises nothing until td5_titlefont_ready()
+ * succeeds (it requires the menu face to have initialised the shared atlas). */
+int   td5_titlefont_ready(void);
+void  td5_titlefont_get(int codepoint, float cap_px, td5_glyph *out);
+float td5_titlefont_advance(int codepoint, float cap_px);
+
 #endif /* TD5_FONT_H */
