@@ -150,6 +150,14 @@ void    td5_game_add_wanted_kill(int slot);              /* cop-chase bust -> wa
  * [CONFIRMED @ 0x00422480 case 0] */
 void td5_game_sort_results(void);
 
+#ifndef TD5RE_RELEASE
+/* Dev/test harness: fabricate a finished-race result (s_results / s_metrics /
+ * s_slot_state for the 6 racing slots) so the post-race frontend screens can be
+ * previewed via a StartScreen jump. Gated by TD5RE_INJECT_POSTRACE in the
+ * StartScreen path; compiled out of the release build. */
+void td5_game_inject_demo_results(void);
+#endif
+
 /* --- Split-Screen Steering Balance (0x4036B0) --- */
 void td5_game_update_split_screen_balance(void);
 

@@ -9046,6 +9046,26 @@ void td5_frontend_render_ui_rects(void) {
         fe_draw_option_arrows(0, sx, sy);
     }
 
+    /* [PORT ENHANCEMENT 2026-06-07] Post-name-entry High Scores table (NAME_ENTRY
+     * [25]) nav bar: draw the just-raced track's (or cup's) name centered on
+     * button 0 so the bar isn't an empty box (user-requested). STATIC — unlike the
+     * Records screen [23] above, NO ◄► arrows and no L/R browsing: this screen
+     * shows only the single group the player just scored in (s_score_category_index,
+     * set to the inserted group in Screen_PostRaceNameEntry case 4). The original
+     * left this bar empty (NULL caption, RebuildFrontendButtonSurface @0x00426120
+     * draws no text); this is a readability enhancement beyond original parity. */
+    if (s_current_screen == TD5_SCREEN_NAME_ENTRY && s_anim_complete && s_inner_state >= 6) {
+        char track_name[80];
+        frontend_get_track_display_name(s_score_category_index, 0, track_name, sizeof(track_name));
+        float nav_bx, nav_by, nav_bw, nav_bh;
+        frontend_get_button_render_rect(0, sx, sy, &nav_bx, &nav_by, &nav_bw, &nav_bh);
+        float tnw = fe_measure_text(track_name, sx, sy);
+        float tx = nav_bx + (nav_bw - tnw) * 0.5f;
+        float ty = nav_by;
+        fe_draw_text(tx, ty, track_name, 0xFFFFFFFF, sx, sy);
+        /* deliberately NO fe_draw_option_arrows — static, non-browsable. */
+    }
+
     /* Race Results selector nav bar (button 0): the FOCUS racer's car name centered on
      * the bar plus ◄► arrows to browse racers — same widget as the High Scores nav bar.
      * The bar tracks the same slot as the stat values (s_score_category_index, raw actor
@@ -14704,13 +14724,21 @@ static void Screen_PostRaceNameEntry(void) {
             TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: group=%d type=%d score=%d qualifies=%d",
                       group_idx, group_type, (int)s_post_race_score, qualifies);
 
-            /* DEV harness: TD5RE_DEMO_NAMEENTRY=1 forces the name-prompt phase so the
-             * name-input widget can be frame-dumped without finishing a qualifying race.
-             * Inert unless the env var is set. */
+            /* DEV harness: force the name-prompt phase so the name-input widget
+             * and the resulting high-score table can be viewed without finishing a
+             * qualifying race. Two triggers:
+             *   TD5RE_DEMO_NAMEENTRY=1  — frame-dump the name widget (score=1 stub).
+             *   TD5RE_INJECT_POSTRACE=1 — the post-race preview harness; the result
+             *     data was fabricated by td5_game_inject_demo_results, so
+             *     s_post_race_score is already a realistic value (~1:00) here and the
+             *     full name-entry -> table flow renders real-looking columns.
+             * Inert unless one of the env vars is set. */
             {
                 static int s_demo_ne_init = 0, s_demo_ne = 0;
                 if (!s_demo_ne_init) { s_demo_ne_init = 1;
-                    const char *e = getenv("TD5RE_DEMO_NAMEENTRY"); s_demo_ne = (e && e[0] && e[0] != '0'); }
+                    const char *e = getenv("TD5RE_DEMO_NAMEENTRY");
+                    const char *p = getenv("TD5RE_INJECT_POSTRACE");
+                    s_demo_ne = ((e && e[0] && e[0] != '0') || (p && p[0] && p[0] != '0')); }
                 if (s_demo_ne) { qualifies = 1; if (s_post_race_score == 0) s_post_race_score = 1; }
             }
 
@@ -14757,6 +14785,17 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 4: /* Insert score into table */
+        /* [FIX 2026-06-07] Close the name-entry text field now that the input
+         * phase (cases 1-3) is over. frontend_commit_text_input left
+         * s_text_input_state = 2, and it otherwise stays non-zero until the next
+         * set_screen — which suppresses the keyboard WM_KEYDOWN nav FIFO drain
+         * (frontend_poll_input: `if (s_text_input_state == 0)`). With the field
+         * still "open", the OK button's keyboard Enter in the table phase (case
+         * 10) was flushed instead of processed, so Enter never set s_input_ready
+         * and the user could not leave the screen (gamepad Enter worked because it
+         * uses the un-gated edge path). Clearing it here re-enables keyboard nav
+         * for cases 5-12. Harmless on the no-qualify path (already 0). */
+        s_text_input_state = 0;
         /* [CONFIRMED @ 0x00413CB0 case 4] ScreenPostRaceNameEntry:
          * 1. Scan entries[0..4].score to find insert position (uVar8).
          *    - Types 0/1: find first entry where player_score <= entry.score (insert before)
