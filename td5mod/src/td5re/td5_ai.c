@@ -3797,6 +3797,8 @@ static float   g_smart_skill[TD5_MAX_TOTAL_ACTORS];       /* 0..1 competence */
 static int8_t  g_smart_branch_pref[TD5_MAX_TOTAL_ACTORS]; /* -1/+1 per-car tie-break */
 static double  g_smart_branch_pull[TD5_MAX_TOTAL_ACTORS]; /* cached fork pull -1..+1 */
 static double  g_smart_lane_u[TD5_MAX_TOTAL_ACTORS];      /* smoothed target lateral u (road fraction); -1 = uninit */
+static int8_t  g_smart_overtake[TD5_MAX_TOTAL_ACTORS];      /* 0=none, -1/+1 = committed to a pass on that side */
+static int16_t g_smart_overtake_timer[TD5_MAX_TOTAL_ACTORS];/* ticks blocked (patience) / ticks committed to a pass */
 static int     g_smart_inited = 0;
 
 static inline int smart_iabs(int x) { return x < 0 ? -x : x; }
@@ -3839,6 +3841,8 @@ static void td5_ai_smart_race_init(void) {
         g_smart_branch_pref[s] = (int8_t)(((h >> 17) & 1u) ? 1 : -1);
         g_smart_branch_pull[s] = 0.0;
         g_smart_lane_u[s] = -1.0;   /* snap to the car's actual u on first sight */
+        g_smart_overtake[s] = 0;
+        g_smart_overtake_timer[s] = 0;
     }
     g_smart_inited = 1;
     TD5_LOG_I(LOG_TAG, "smart_ai_init: tier=%d base_skill=%.2f aggression=%d leash=%d",
@@ -3911,6 +3915,26 @@ static int smart_gather_blockers(int self_slot, int self_span, int span_count,
         cnt++;
     }
     return cnt;
+}
+
+/* Is the lateral band around `u` free of other cars from just behind us out to
+ * `lookahead` spans ahead? Used to decide whether a pass lane is open. */
+static int smart_lane_clear_ahead(int self_slot, double u, double half_w,
+                                  int self_span, int span_count, int lookahead) {
+    int n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (int i = 0; i < n; i++) {
+        if (i == self_slot) continue;
+        char *a = actor_ptr(i);
+        if (!a) continue;
+        int psp = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+        int gap = smart_span_gap(self_span, psp, span_count);
+        if (gap < -1 || gap > lookahead) continue;
+        double pu = smart_actor_u(a, psp);
+        double du = pu - u; if (du < 0) du = -du;
+        if (du < half_w) return 0;          /* a car occupies this lateral band */
+    }
+    return 1;
 }
 
 /* Strategic branch: scan ahead on the raw strip records for a junction span
@@ -4087,29 +4111,91 @@ static void td5_ai_smart_lane_bias(int slot) {
                 }
             }
 
-            /* (2) OVERTAKE: only ease aside for a genuinely SLOWER car sustained
-             * ahead in our path — equal/faster cars get NO lateral (the speed
-             * brain handles following, so packed cars don't weave). The side is
-             * STICKY: we continue the way we're already leaning, so this is one
-             * smooth move out and back, never a left-right wobble. */
-            int32_t self_v = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-            int near_gap = 999; int slower = 0;
+            /* (2) OVERTAKE state machine — breaks up formation driving. A car
+             * that sits behind another in its lane commits, once an adjacent
+             * lane is clear, to pulling out and DRIVING PAST (the speed brain
+             * does NOT slow it while a pass is committed). The side is latched
+             * so it's one smooth move out, alongside, and back — never a wobble.
+             * If we just followed (slowed to match), equal-pace cars would lock
+             * into a nose-to-tail line forever. */
+            double line_u = target_u;                 /* our intended line this span */
+            int near_gap = 999; int blocked = 0;
             for (int k = 0; k < nb; k++) {
                 if (bl[k].gap < 0) continue;
-                double du = bl[k].u - target_u; if (du < 0) du = -du;
-                if (du < lane_w * 1.0 && bl[k].gap < near_gap &&
-                    bl[k].speed < self_v - 0x2000) {
-                    near_gap = bl[k].gap; slower = 1;
+                double du = bl[k].u - line_u; if (du < 0) du = -du;
+                if (du < lane_w * 0.9 && bl[k].gap < near_gap) {
+                    near_gap = bl[k].gap; blocked = 1;
                 }
             }
-            if (slower) {
-                double lean = g_smart_lane_u[slot] - u_base;   /* current offset */
-                double dir = (lean > 0.01) ? +1.0
-                           : (lean < -0.01) ? -1.0
-                           : (target_u < 0.5 ? +1.0 : -1.0);
-                if (dir > 0.0 && target_u > 1.0 - (WALL_MARGIN + lane_w)) dir = -1.0;
-                if (dir < 0.0 && target_u < (WALL_MARGIN + lane_w))       dir = +1.0;
-                target_u += dir * 0.7 * lane_w;                /* ease out ~0.7 lane to pass */
+            /* Corner guard: only pass on reasonably STRAIGHT track. Pulling wide
+             * and holding throttle through a tight bend is exactly what flung
+             * cars into the Newcastle rails, so a sharp upcoming heading change
+             * blocks (and aborts) an overtake — you wait for the straight. */
+            int sharp_corner = 0;
+            {
+                int hs = (span + 7) % span_count;
+                int hd = (td5_track_get_primary_route_heading(hs)
+                          - td5_track_get_primary_route_heading(span)) & 0xFFF;
+                if (hd > 0x800) hd -= 0x1000;
+                if (hd < 0) hd = -hd;
+                sharp_corner = (hd > 0x140);      /* ~28° over ~7 spans */
+            }
+            int follow_dist = 5 + (int)(skill * 3.0f);          /* 5..8 spans = "right behind" */
+            double pass_off = 0.62 * lane_w;                     /* gentle ~0.6-lane step out */
+            int ot = (int)g_smart_overtake[slot];
+
+            if (ot != 0) {
+                /* committed to a pass: hold the offset, throttle stays up (speed
+                 * brain checks g_smart_overtake). End when clear of the car, the
+                 * pass lane closes, a corner arrives, or we time out — then a
+                 * short cooldown before the next attempt (anti-thrash). */
+                double pass_u = line_u + ot * pass_off;
+                int pass_clear = smart_lane_clear_ahead(slot, pass_u, lane_w * 0.7,
+                                                        span_raw, span_count, 2);
+                int still_passing = blocked && near_gap <= follow_dist + 3;
+                g_smart_overtake_timer[slot]++;
+                int wall_side = (ot > 0 && pass_u > 1.0 - WALL_MARGIN) ||
+                                (ot < 0 && pass_u < WALL_MARGIN);
+                if (!still_passing || !pass_clear || wall_side || sharp_corner ||
+                    g_smart_overtake_timer[slot] > 120) {
+                    g_smart_overtake[slot] = 0;
+                    g_smart_overtake_timer[slot] = -25;   /* cooldown */
+                } else {
+                    target_u = pass_u;
+                }
+            } else if (blocked && near_gap <= follow_dist && !sharp_corner &&
+                       g_smart_overtake_timer[slot] >= 0) {
+                /* stuck behind a car on a straight — build patience, then pass */
+                g_smart_overtake_timer[slot]++;
+                int patience = 6 + (int)((1.0f - skill) * 18.0f);   /* 6..24 ticks */
+                if (g_smart_overtake_timer[slot] >= patience) {
+                    int dir = 0;
+                    double right_u = line_u + pass_off, left_u = line_u - pass_off;
+                    int right_ok = (right_u <= 1.0 - WALL_MARGIN) &&
+                        smart_lane_clear_ahead(slot, right_u, lane_w * 0.7,
+                                               span_raw, span_count, follow_dist + 5);
+                    int left_ok = (left_u >= WALL_MARGIN) &&
+                        smart_lane_clear_ahead(slot, left_u, lane_w * 0.7,
+                                               span_raw, span_count, follow_dist + 5);
+                    if (right_ok && left_ok)
+                        dir = (line_u <= 0.5) ? +1 : -1;   /* both open → toward centre */
+                    else if (right_ok) dir = +1;
+                    else if (left_ok)  dir = -1;
+                    if (dir != 0) {
+                        g_smart_overtake[slot] = (int8_t)dir;
+                        g_smart_overtake_timer[slot] = 0;
+                        target_u = line_u + dir * pass_off;
+                        if ((g_ai_frame_counter % 30u) == 0u)
+                            TD5_LOG_I(LOG_TAG, "smart_overtake: slot=%d commit dir=%d gap=%d",
+                                      slot, dir, near_gap);
+                    } else {
+                        g_smart_overtake_timer[slot] = (int16_t)patience;  /* hold, no room yet */
+                    }
+                }
+            } else {
+                /* not attempting: relax the timer toward 0 (also expires cooldown) */
+                if (g_smart_overtake_timer[slot] > 0) g_smart_overtake_timer[slot]--;
+                else if (g_smart_overtake_timer[slot] < 0) g_smart_overtake_timer[slot]++;
             }
         }
     }
@@ -4166,6 +4252,32 @@ static void td5_ai_smart_speed(int slot) {
     int aggression = g_td5.ini.smart_ai_aggression;
     int lookahead = 3 + (int)(skill * 5.0f);
 
+    /* Skill -> PACE. Give higher-skill cars genuinely more speed and lower-skill
+     * a touch less (~±8%), so the field has real pace differences. Without this
+     * the cars equalize and drive in a fixed formation with nothing to overtake;
+     * with it, faster cars catch slower ones and the overtake logic resolves the
+     * pass. The gentle leash still keeps the pack from spreading too far. */
+    {
+        int16_t thr = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+        if (thr > 0) {
+            double f = 0.96 + (double)skill * 0.08;     /* ~±4%: variation, not field-spread */
+            /* Do NOT add corner-entry speed: on a sharp bend cap the boost so a
+             * fast car can't overcook into the wall (Newcastle span ~137). The
+             * low-skill REDUCTION still applies (slower = safer into a corner). */
+            if (f > 1.0) {
+                int hs = (span_raw + 7) % span_count;
+                int hd = (td5_track_get_primary_route_heading(hs)
+                          - td5_track_get_primary_route_heading(span_raw)) & 0xFFF;
+                if (hd > 0x800) hd -= 0x1000;
+                if (hd < 0) hd = -hd;
+                if (hd > 0x140) f = 1.0;            /* ~28° bend ahead → no boost */
+            }
+            int v = (int)((double)thr * f);
+            if (v > 0x7FFF) v = 0x7FFF;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)v;
+        }
+    }
+
     int L = td5_track_get_span_lane_count(span_raw);
     if (L < 1) L = 1;
     double lane_w = 1.0 / (double)L;
@@ -4202,21 +4314,25 @@ static void td5_ai_smart_speed(int slot) {
         }
     }
 
+    /* While a pass is committed, do NOT slow for the car being overtaken —
+     * keep the throttle up and drive past it. (Lane brain owns the side move.) */
+    if (g_smart_overtake[slot] != 0) return;
+
     if (!have) return;
 
     int32_t self_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-    int desired = 3 - aggression;            /* clean=3 realistic=2 aggressive=1 */
+    int desired = 2 - aggression;            /* clean=2 realistic=1 aggressive=1 (follow close) */
     if (desired < 1) desired = 1;
     int16_t thr = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
 
     if (nearest_gap <= desired && self_speed > peer_speed) {
-        if (nearest_gap <= 1 && (self_speed - peer_speed) > 0x4000) {
+        if (nearest_gap <= 1 && (self_speed - peer_speed) > 0x6000) {
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG)     = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
             ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 1;
         } else if (thr > 0) {
             double f = (double)nearest_gap / (double)(desired + 1);
-            if (f < 0.55) f = 0.55;   /* ease, don't crawl — keeps pace in a pack */
+            if (f < 0.66) f = 0.66;   /* follow close, keep pace; light contact OK */
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)((double)thr * f);
         }
         if ((g_ai_frame_counter % 60u) == 0u) {
