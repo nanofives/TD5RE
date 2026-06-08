@@ -38,6 +38,7 @@
 #include "td5_render.h"
 #include "td5_camera.h"
 #include "td5_platform.h"
+#include "td5_profile.h"
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_asset.h"
@@ -142,11 +143,7 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * Original: DAT_004bf6b8 (active), 0x4C36C8 (backup)
  * ======================================================================== */
 
-static TD5_Mat3x4 s_render_transform;
-
-/** Transform stack: 8-deep push/pop for hierarchical models */
-static TD5_Mat3x4 s_transform_stack[TRANSFORM_STACK_MAX];
-static int         s_transform_stack_depth;
+/* s_render_transform / s_transform_stack[_depth] moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Projection Parameters
@@ -160,15 +157,7 @@ static int         s_transform_stack_depth;
  *   _DAT_004ab0a8 = frustum_v_sin
  * ======================================================================== */
 
-static float s_focal_length;
-static float s_inv_focal;
-static float s_frustum_h_cos, s_frustum_h_sin;
-static float s_frustum_v_cos, s_frustum_v_sin;
-static float s_near_clip;
-static float s_far_clip;       /* depth normalization far distance (65536) */
-static float s_far_cull;       /* frustum rejection far distance  (195000) */
-static float s_center_x, s_center_y;
-static int   s_viewport_width, s_viewport_height;
+/* projection params (focal/frustum/clip/center/viewport) moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Camera Basis (set externally by td5_camera module)
@@ -177,8 +166,7 @@ static int   s_viewport_width, s_viewport_height;
  *           DAT_004aafc4..cc = camera world position
  * ======================================================================== */
 
-static float s_camera_basis[9];      /* 3x3 row-major: right, up, forward */
-static float s_camera_pos[3];        /* world-space camera position */
+/* s_camera_basis / s_camera_pos moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Lighting State
@@ -187,8 +175,7 @@ static float s_camera_pos[3];        /* world-space camera position */
  * Original: DAT_004ab0d0..f0 = light directions, DAT_004bf6a8 = ambient
  * ======================================================================== */
 
-static float s_light_dirs[9];        /* 3 light direction vectors (3 floats each) */
-static float s_ambient_intensity;    /* base ambient [0..255] range */
+/* s_light_dirs / s_ambient_intensity moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Fog State
@@ -216,10 +203,7 @@ typedef struct TextureCacheSlot {
     uint8_t  _pad;
 } TextureCacheSlot;
 
-static TextureCacheSlot s_texture_cache[TEXTURE_CACHE_SLOTS];
-static int              s_texture_cache_active_count;
-static int              s_current_texture_page;   /* DAT_0048da00 */
-static int              s_previous_texture_page;  /* DAT_0048da04 */
+/* texture-bind cache (slots/active_count/current/previous page) moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Translucent Primitive Pipeline
@@ -241,10 +225,7 @@ typedef struct TranslucentBatchEntry {
 #define TRANSLUCENT_POOL_SIZE 512
 #define TRANSLUCENT_MAX_ACTIVE (TRANSLUCENT_POOL_SIZE - 2) /* 510 usable */
 
-static TranslucentBatchEntry s_translucent_pool[TRANSLUCENT_POOL_SIZE];
-static int                   s_translucent_head;       /* head of sorted list */
-static int                   s_translucent_free;       /* head of free list */
-static int                   s_translucent_count;      /* active count */
+/* translucent batch pool (pool/head/free/count) moved to RenderScratch (Phase B Stage 1). */
 
 /* Luminance-to-ARGB color LUT (1024 entries).
  * Original: DAT_004aee68, init as i * 0x10101 - 0x1000000 */
@@ -267,9 +248,7 @@ typedef struct DepthBucketEntry {
 #define DEPTH_BUCKET_COUNT TD5_DEPTH_SORT_BUCKETS  /* 4096 */
 #define DEPTH_ENTRY_POOL   4096
 
-static int              s_depth_buckets[DEPTH_BUCKET_COUNT]; /* head index per bucket */
-static DepthBucketEntry s_depth_entries[DEPTH_ENTRY_POOL];
-static int              s_depth_entry_count;                 /* next free entry */
+/* depth-sort buckets/entries/count moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Immediate Draw Buffers
@@ -278,10 +257,7 @@ static int              s_depth_entry_count;                 /* next free entry 
  * Original: DAT_004afb14 (vertex buf), DAT_004af314 (index buf)
  * ======================================================================== */
 
-static TD5_D3DVertex s_imm_verts[IMMEDIATE_MAX_VERTS];
-static uint16_t      s_imm_indices[IMMEDIATE_MAX_INDICES];
-static int           s_imm_vert_count;   /* DAT_004afb4c */
-static int           s_imm_index_count;  /* DAT_004afb50 */
+/* immediate vert/index buffers + counts moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Deferred Additive Pass
@@ -313,15 +289,135 @@ typedef struct DeferredAdditiveBatch {
     int index_count;
 } DeferredAdditiveBatch;
 
-static TD5_D3DVertex        s_deferred_add_verts[DEFERRED_ADD_MAX_VERTS];
-static uint16_t             s_deferred_add_indices[DEFERRED_ADD_MAX_INDICES];
-static int                  s_deferred_add_vert_count;
-static int                  s_deferred_add_index_count;
-static DeferredAdditiveBatch s_deferred_add_batches[DEFERRED_ADD_MAX_BATCHES];
-static int                  s_deferred_add_batch_count;
-/* Only defer while the world/opaque pass is active. HUD/FMV/frontend
- * draws don't need deferral. */
-static int                  s_deferred_add_active;
+/* ========================================================================
+ * [Phase B / Stage 1 — render re-entrancy, 2026-06-08]
+ *
+ * All per-pane MUTABLE render scratch (transform stack, projection, camera,
+ * lighting, texture-bind cache, translucent/depth/immediate/deferred-additive
+ * buffers, and the nested-draw guards) is bundled into RenderScratch and
+ * reached through a THREAD-LOCAL pointer g_rs that defaults to a single static
+ * instance g_rs_default. The existing `s_*` access sites are redirected by the
+ * #define shims below, so the serial/main-thread path (g_rs == &g_rs_default)
+ * is byte-identical to the previous single-instance code. Stage 2 points each
+ * worker thread's g_rs at its own instance so panes record concurrently
+ * without clobbering each other's scratch.
+ *
+ * Deliberately LEFT SHARED (read-only after init, or benign): the trig/color
+ * LUTs, per-frame anim counters (sky rotation, billboard phase), the per-slot
+ * vehicle prep arrays (built once per frame before the pane loop), the lazy
+ * atlas-lookup caches (idempotent), the diagnostic debug counters, and the
+ * dev-only F12 debug-line overlay buffer.
+ * ======================================================================== */
+
+/* Relocated from its original site (~0x42E130 lighting block) so it can live
+ * inside RenderScratch, which is defined above the first use of the shims. */
+typedef struct {
+    int   enabled;       /* 0 = slot disabled, 1 = active */
+    float vec_world[3];  /* world-frame contribution dir scaled by intensity */
+} TL_Contribution;
+
+typedef struct RenderScratch {
+    /* transform stack (mesh dispatch) */
+    TD5_Mat3x4 render_transform;
+    TD5_Mat3x4 transform_stack[TRANSFORM_STACK_MAX];
+    int        transform_stack_depth;
+    /* projection params (per pane via td5_render_configure_projection) */
+    float focal_length, inv_focal;
+    float frustum_h_cos, frustum_h_sin;
+    float frustum_v_cos, frustum_v_sin;
+    float near_clip, far_clip, far_cull;
+    float center_x, center_y;
+    int   viewport_width, viewport_height;
+    /* camera basis/pos (per pane) */
+    float camera_basis[9];
+    float camera_pos[3];
+    /* lighting (written during actor pass) */
+    float light_dirs[9];
+    float ambient_intensity;
+    TL_Contribution tl_contrib[3];
+    int   tl_ambient;
+    /* texture-bind cache */
+    TextureCacheSlot texture_cache[TEXTURE_CACHE_SLOTS];
+    int texture_cache_active_count;
+    int current_texture_page;
+    int previous_texture_page;
+    /* translucent batch pipeline */
+    TranslucentBatchEntry translucent_pool[TRANSLUCENT_POOL_SIZE];
+    int translucent_head, translucent_free, translucent_count;
+    /* depth-sorted projected bucket pipeline */
+    int depth_buckets[DEPTH_BUCKET_COUNT];
+    DepthBucketEntry depth_entries[DEPTH_ENTRY_POOL];
+    int depth_entry_count;
+    /* immediate draw accumulation */
+    TD5_D3DVertex imm_verts[IMMEDIATE_MAX_VERTS];
+    uint16_t imm_indices[IMMEDIATE_MAX_INDICES];
+    int imm_vert_count, imm_index_count;
+    /* deferred additive pass */
+    TD5_D3DVertex deferred_add_verts[DEFERRED_ADD_MAX_VERTS];
+    uint16_t deferred_add_indices[DEFERRED_ADD_MAX_INDICES];
+    int deferred_add_vert_count, deferred_add_index_count;
+    DeferredAdditiveBatch deferred_add_batches[DEFERRED_ADD_MAX_BATCHES];
+    int deferred_add_batch_count;
+    int deferred_add_active;
+    /* misc per-pane state */
+    int scene_has_renderer_geometry;
+    int in_sky_draw;
+    int in_reflection_overlay;
+} RenderScratch;
+
+static RenderScratch        g_rs_default;
+static __thread RenderScratch *g_rs = &g_rs_default;
+
+/* Field shims — redirect the historical static names to the thread-local
+ * instance. Defined here (after all member typedefs, before the first function
+ * that uses them) so every access site compiles unchanged. */
+#define s_render_transform          (g_rs->render_transform)
+#define s_transform_stack           (g_rs->transform_stack)
+#define s_transform_stack_depth     (g_rs->transform_stack_depth)
+#define s_focal_length              (g_rs->focal_length)
+#define s_inv_focal                 (g_rs->inv_focal)
+#define s_frustum_h_cos             (g_rs->frustum_h_cos)
+#define s_frustum_h_sin             (g_rs->frustum_h_sin)
+#define s_frustum_v_cos             (g_rs->frustum_v_cos)
+#define s_frustum_v_sin             (g_rs->frustum_v_sin)
+#define s_near_clip                 (g_rs->near_clip)
+#define s_far_clip                  (g_rs->far_clip)
+#define s_far_cull                  (g_rs->far_cull)
+#define s_center_x                  (g_rs->center_x)
+#define s_center_y                  (g_rs->center_y)
+#define s_viewport_width            (g_rs->viewport_width)
+#define s_viewport_height           (g_rs->viewport_height)
+#define s_camera_basis              (g_rs->camera_basis)
+#define s_camera_pos                (g_rs->camera_pos)
+#define s_light_dirs                (g_rs->light_dirs)
+#define s_ambient_intensity         (g_rs->ambient_intensity)
+#define s_tl_contrib                (g_rs->tl_contrib)
+#define s_tl_ambient                (g_rs->tl_ambient)
+#define s_texture_cache             (g_rs->texture_cache)
+#define s_texture_cache_active_count (g_rs->texture_cache_active_count)
+#define s_current_texture_page      (g_rs->current_texture_page)
+#define s_previous_texture_page     (g_rs->previous_texture_page)
+#define s_translucent_pool          (g_rs->translucent_pool)
+#define s_translucent_head          (g_rs->translucent_head)
+#define s_translucent_free          (g_rs->translucent_free)
+#define s_translucent_count         (g_rs->translucent_count)
+#define s_depth_buckets             (g_rs->depth_buckets)
+#define s_depth_entries             (g_rs->depth_entries)
+#define s_depth_entry_count         (g_rs->depth_entry_count)
+#define s_imm_verts                 (g_rs->imm_verts)
+#define s_imm_indices               (g_rs->imm_indices)
+#define s_imm_vert_count            (g_rs->imm_vert_count)
+#define s_imm_index_count           (g_rs->imm_index_count)
+#define s_deferred_add_verts        (g_rs->deferred_add_verts)
+#define s_deferred_add_indices      (g_rs->deferred_add_indices)
+#define s_deferred_add_vert_count   (g_rs->deferred_add_vert_count)
+#define s_deferred_add_index_count  (g_rs->deferred_add_index_count)
+#define s_deferred_add_batches      (g_rs->deferred_add_batches)
+#define s_deferred_add_batch_count  (g_rs->deferred_add_batch_count)
+#define s_deferred_add_active       (g_rs->deferred_add_active)
+#define s_scene_has_renderer_geometry (g_rs->scene_has_renderer_geometry)
+#define s_in_sky_draw               (g_rs->in_sky_draw)
+#define s_in_reflection_overlay     (g_rs->in_reflection_overlay)
 
 /* ========================================================================
  * Sky Rotation (12-bit fixed angle, +0x400 per tick)
@@ -343,7 +439,7 @@ static int32_t s_billboard_anim_phase;
 
 static int s_globals_initialized;   /* DAT_0048dba8 */
 static int s_state_active;          /* DAT_0048dba0 */
-static int s_scene_has_renderer_geometry;
+/* s_scene_has_renderer_geometry moved to RenderScratch (Phase B Stage 1). */
 static int s_debug_fallback_log_count;
 static int s_debug_clip_log_count;
 static int s_debug_clip_near_rejects;
@@ -1496,6 +1592,25 @@ void td5_render_end_scene(void)
         s_debug_clip_log_count++;
     }
 
+    /* [2026-06-08 split-screen diagnostic] Per-frame draw-submission counters,
+     * emitted at WARN once/~second when the profiler is on (so a split-screen
+     * pane sweep captures them in engine.log). Lets us tell a draw-call /
+     * triangle COUNT explosion (CPU-submission bound) apart from a per-draw cost
+     * jump (GPU / Map-DISCARD stall): if these scale ~linearly with the pane
+     * count while the render-ms cliffs, the bottleneck is GPU/driver side, not
+     * the submission count. Whole-frame totals (all panes), reset at begin-scene. */
+    if (td5_profile_enabled() && (g_tick_counter % 60u) == 0u) {
+        TD5_LOG_W(LOG_TAG,
+                  "RENDERSTAT views=%d draws=%d tris=%d binds=%d texmiss=%d texevict=%d spanmesh=%d",
+                  g_td5.viewport_count,
+                  s_debug_scene_draw_calls,
+                  s_debug_flush_submitted_tris,
+                  s_debug_texture_bind_calls,
+                  s_debug_texture_cache_misses,
+                  s_debug_texture_cache_evictions,
+                  s_debug_span_meshes_submitted);
+    }
+
     td5_plat_render_end_scene();
     g_tick_counter++;
 
@@ -2212,7 +2327,7 @@ TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot)
  * 994ab68 placed it below the writer, which fails to compile. The reader
  * (td5_render_apply_page_blend_preset) appears even later and remains
  * correctly in scope. */
-static int s_in_sky_draw = 0;
+/* s_in_sky_draw moved to RenderScratch (Phase B Stage 1). */
 
 void td5_render_actors_for_view(int view_index)
 {
@@ -2308,6 +2423,16 @@ void td5_render_actors_for_view(int view_index)
         }
     }
     float view_dist_frac = td5_save_get_view_distance();
+    /* [2026-06-08 split-screen perf] AI spectator panes (the extra split-screen
+     * tiles beyond the local human players, view_index >= num_human_players)
+     * render at reduced draw distance. v_track — the windowed track display-list
+     * walk below — is the #1 per-pane render cost in N-way split (per-pass probe
+     * at 9 panes), and these panes are secondary 640x336 tiles, so halving their
+     * span window/actor cull trims the cost with little visible loss. The
+     * player's pane(s) (view_index < num_human_players) keep full distance, so
+     * single/2-player split is byte-unchanged. Composes with the TD6 cap below. */
+    if (g_td5.split_screen_mode > 0 && view_index >= g_td5.num_human_players)
+        view_dist_frac *= 0.5f;
     /* [PERF FIX 2026-06-05] Dense TD6 city tracks — London (level012) and Egypt
      * (level022) — pack ~12 meshes per span, so the port's 1.0 view distance walks
      * ~780 candidate span-meshes/frame through the core, spiking the world-render
@@ -2623,6 +2748,13 @@ void td5_render_actors_for_view(int view_index)
         }
         #undef TD5_RENDER_SUBMITTED_CAP
     }
+
+    /* [2026-06-08 split-screen perf probe] Split the per-view world cost: above
+     * is the sky dome + track display-list walk; the actor loop follows. Profiled
+     * per pane (fires viewport_count times/frame) so a 9-pane sweep shows whether
+     * the render budget is track geometry (→ split view-window reduction) or the
+     * actors. Zero cost when [Logging] Profile is off. */
+    td5_profile_mark("v_track");
 
     {
         int total_actors = td5_game_get_total_actor_count();
@@ -3491,7 +3623,7 @@ void td5_render_advance_texture_ages(void)
  * the per-bind preset switch overrides ADDITIVE with TRANSLUCENT_ANISO and
  * the reflection paints opaquely over the car body (bug: "cars render only
  * the reflection texture"). */
-static int s_in_reflection_overlay = 0;
+/* s_in_reflection_overlay moved to RenderScratch (Phase B Stage 1). */
 
 /* Dispatch render preset per tpage transparency type.
  * BindRaceTexturePage @ 0x0040B660 switch:
@@ -3880,14 +4012,8 @@ static int tl_normalize_4096(const int16_t in[3], int16_t out[3])
     return (int)mag2;
 }
 
-/* Per-frame 3-slot contribution accumulator (one set per actor pass). */
-typedef struct {
-    int   enabled;       /* 0 = slot disabled, 1 = active */
-    float vec_world[3];  /* world-frame contribution dir scaled by intensity */
-} TL_Contribution;
-
-static TL_Contribution s_tl_contrib[3];
-static int             s_tl_ambient;  /* scalar ambient byte (post-ComputeAverageDepth) */
+/* TL_Contribution typedef relocated above into the RenderScratch region;
+ * s_tl_contrib[3] / s_tl_ambient moved to RenderScratch (Phase B Stage 1). */
 
 /* SetTrackLightDirectionContribution @ 0x0042E130:
  *   intensity = avg(R,G,B); contribution_world = dir * intensity * (1/1024).
