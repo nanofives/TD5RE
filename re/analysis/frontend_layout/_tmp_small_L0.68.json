@@ -1,0 +1,10 @@
+{
+  "atlas": "_tmp_small_L0.68.png",
+  "cols": 21,
+  "rows": 11,
+  "src_cell": 12,
+  "out_cell": 64,
+  "distance_range_atlas_px": 6.0,
+  "distance_range_src_units": 1.125,
+  "note": "Same logical grid as source bitmap font; reuse existing UV math."
+}

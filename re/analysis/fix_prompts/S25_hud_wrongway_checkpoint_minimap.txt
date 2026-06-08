@@ -1,0 +1,29 @@
+S25 — HUD: wrong-way warning · remove checkpoint indicator · fix Rome minimap stray line
+=========================================================================================
+
+Covers feedback: no sign when going in the wrong direction · remove the checkpoint indicator at the top of the screen when passing a checkpoint · at the end of a race on Rome the minimap shows a weird line
+Modules: td5_hud.c (wrong-way detection + HUD draw, checkpoint banner, minimap), td5_track.c (track heading)
+Memory: project_hud_vectorui_2026-06-03 (minimap idiv g_strip_span_count crashes when span_count==0); reference_td6_checkpoints_unwired_2026-06-04
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Three HUD items (all in td5_hud.c):
+
+1. WRONG-WAY WARNING (missing). Detection already exists — s_wrong_way_counter / heading-delta vs track direction td5_hud.c ~2818-2838 (td5_compute_heading_delta; track heading td5_track.c ~4277) — but NOTHING is drawn. Add an on-screen "WRONG WAY" warning (text/icon, VectorUI HUD style) that shows when the wrong-way counter trips and clears when the player faces the right way. Keep it per-viewport for split-screen.
+
+2. REMOVE CHECKPOINT INDICATOR. The "CHECKPOINT %d/%d" banner at td5_hud.c ~2446-2453 (drawn while g_tick_counter < s_td6_cp_flash_until, at vp_int_top+56) should be removed entirely — the user does not want it. Delete that draw block (and any now-unused flash-timer state if it's only used here).
+
+3. ROME MINIMAP STRAY LINE. At race end on Rome the minimap draws a spurious segment. Minimap span loop td5_hud.c ~3513-3525; segment table ~4194-4251 (final primary segment end g_strip_span_count-2). A finished actor, a wrapped span, or a branch span beyond span_count likely draws a stray edge. Clamp the span/segment indices so no out-of-range or wrapped segment renders at the finish (and keep the existing span_count==0 guard intact).
+
+NOTE: all source-port HUD (no original equivalent) — document and proceed. #1 is additive using existing detection. Pure HUD — the multi-track CSV sweep can be skipped, but capture a Rome end-of-race frame to verify #3 and a reversed-heading frame for #1.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to watch. Finish ALL self-verification first: build + a headless AutoRace (drive/finish on Rome to capture the minimap at race end; force a wrong-way heading to verify the warning shows/clears; confirm the checkpoint banner is gone). Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- A clear "WRONG WAY" warning appears when driving against the track direction and clears when corrected.
+- No checkpoint indicator at the top of the screen when passing a checkpoint.
+- Rome end-of-race minimap shows no stray line; no minimap crash (span_count==0 guard intact).

@@ -273,6 +273,12 @@ int td5_plat_input_joystick_is_lost(int device_slot);
  *  the in-race poll maps each action through these instead of the fixed default. */
 void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int count);
 
+/** The built-in DEFAULT per-action binding table (TD5_JSBIND_ACTIONS entries),
+ *  the standard Xbox-controller-via-DirectInput map applied to any joystick with
+ *  no explicit config. Read-only; lets the Control-Options UI seed/show the
+ *  active defaults so per-action remaps keep the rest of the map. */
+const uint32_t *td5_plat_input_default_action_bindings(void);
+
 /** Snapshot the device's rest state for capture (call when a remap begins). */
 void td5_plat_input_joystick_capture_begin(int device_slot);
 
@@ -310,6 +316,15 @@ uint32_t td5_plat_input_frontend_nav(void);
  *  encoding as td5_plat_input_frontend_nav) — for the pause menu, which can't use
  *  the released frontend scan handles while a race owns the device. */
 uint32_t td5_plat_input_joystick_nav(int device_slot);
+
+/** Navigation bitmask for ONE enumerated device, polled through the shared
+ *  non-exclusive lobby/frontend scan handle (the same enum index used by
+ *  td5_plat_input_scan_join: 1..count = joysticks). Same bit encoding as
+ *  td5_plat_input_frontend_nav. Lets several controllers be read independently
+ *  during simultaneous-multiplayer car select, BEFORE per-player exclusive
+ *  devices are bound. Device 0 (keyboard) returns 0 — read the keyboard
+ *  directly. [PORT ENHANCEMENT 2026-06-07] */
+uint32_t td5_plat_input_device_nav(int enum_index);
 
 /** Enumerated index of the joystick that last produced a confirm/nav (the
  *  "active controller" that drives the menus). -1 if none yet. */

@@ -1,0 +1,26 @@
+S26 — Race VFX: opponent smoke floating at start · finish star opacity + size
+==============================================================================
+
+Covers feedback: opponents' car smoke is in the air at the beginning (~2 m above the actual car) · the star on race finish doesn't get all the way opaque (finishes ~70%); make the star bigger by the end of the animation so it covers more of the screen
+Modules: td5_vfx.c (exhaust/smoke emitter), td5_render.c (finish star overlay)
+Memory: project_hud_vectorui_2026-06-03
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Two race VFX issues:
+
+1. OPPONENT SMOKE FLOATS AT START. Exhaust/crash smoke for opponents spawns ~2 m above the car at race start. The emitter uses the actor chassis position actor+0x1FC/+0x200/+0x204 td5_vfx.c ~2814-2821 with no Y correction; at race start the actor pose is likely stale/zeroed before the first physics tick, so the emit position is wrong (high). Fix by deferring emission until the actor pose is valid (post first physics tick) and/or anchoring the emitter to the exhaust/wheel hardpoint Y rather than a raw/stale center — so smoke starts at the car, not above it.
+
+2. FINISH STAR OPACITY + SIZE. The finish "star" overlay alpha ramp is td5_render.c ~7245 (alpha = phase*1.6, capped 255) and radius ~7254 (= viewport_w * phase * 0.0015625), with phase capped ~7222 (~3000). It visually peaks ~70% opaque. Determine why it doesn't reach full opacity — most likely the finish sequence ends (or phase stops advancing) before alpha reaches 255 — and make the star reach FULLY opaque by the end. Also increase the final scale so the star covers MORE of the screen at the end of the animation (raise the radius ramp / cap), keeping the growth smooth.
+
+NOTE: subjective visual — DO NOT ask me to drive (see below). Mostly source-port VFX; capture finish frames to verify. The multi-track CSV sweep can be skipped (no physics), but a headless AutoRace to the finish is needed to see the star.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to watch. Finish ALL self-verification first: build + a headless AutoRace to the finish (capture frames across the star animation to confirm it reaches full opacity and grows larger) + a race-start capture to confirm opponent smoke spawns at the car, not above it. Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Opponent smoke originates at the car (not ~2 m above) from the very start of the race.
+- The finish star reaches full opacity and grows noticeably larger by the end, covering more of the screen.

@@ -1,0 +1,78 @@
+================================================================================
+SESSION P4 — AUDIO
+Paste everything below the line into a fresh Claude Code session at the repo root.
+Mostly verify-faithful. One ear-test-gated item.
+NOTE: may add a preset/volume path in td5_platform_win32.c — coordinate with P5 if
+both land an edit there.
+================================================================================
+
+TD5RE Workstream-D audio. Root: C:\Users\maria\Desktop\Proyectos\TD5RE. Source:
+td5mod\src\td5re\td5_sound.c. A 2-pass sound overhaul merged 2026-05-31; an audit
+found ALL prior documented audio regressions already fixed. Sound is observed via
+engine.log ([Sound] Engine=1) + ear-test (ask the user to listen). Ghidra read_only
+if needed.
+
+DO NOT touch (already faithful — docs permanent_l4_residual.md /
+orig_vs_port_intentional_divergences.md are STALE):
+- SFX 3-mode + *10 volume: td5_frontend.c:7774-7796 (REG-2 fix 2026-05-22; the orig
+  CanDo3D gate is intentionally dropped because D3D11+DSound always supports 3D).
+  THIS IS A FRONTEND FILE — tell the frontend session it's already correct, no fix
+  here.
+- Wheel-sound anchor +0xf0: td5_vfx.c:1523 (REG-5 fix 2026-05-22; it's the
+  tire-track anchor, not td5_sound.c). The lagging +0x298 read was removed.
+- LoadVehicleSoundBank "CLASSIFIER-LAG": a doc/tooling tagging artifact (0x441A80
+  missing leading zeros), not a behavioral gap — function is faithful.
+- CD audio: td5_platform_win32.c:2256-2294 is a real MCI backend (open/play/stop/
+  setaudio volume), silent only without a physical CD — faithful to a CD-less original.
+- Merged-pass internals: screech slot 0x13 @ native 22050Hz (td5_sound.c:888-950);
+  opponent engine modify base+(state-1) (:1100-1103); V2V LHit 0x1F / HHit 0x1B gated
+  impact_mag>=0x3201 (td5_physics.c:4019-4027); wall Scrape 0x16 / HHit 0x1b
+  (td5_physics.c:562-572); ground-bottom 0x17; vol_to_ds = 2000*log10(v/100)
+  (td5_platform_win32.c:1985-1999). VERIFY these are not reverted while you're in
+  there; fix only if broken.
+
+------------------------------------------------------------
+THE ONE GAP (Item 5) — engine-speaker volume — EAR-TEST GATED
+------------------------------------------------------------
+g_engineSpeakerVolumeFraction @0x47463c (default 0.2f) is the 3rd float of an
+in-race audio-options modal RunAudioOptionsOverlay @0x0043c384 that the port never
+implemented (the trio is g_cdAudioVolumeFraction / g_sfxVolumeFraction /
+g_engineSpeakerVolumeFraction, staged in g_audioOptionsSliderStaging[3] @0x4b135c).
+These are NOT persisted — recomputed from the percentage form at race start (see
+re/analysis/global_naming/batch_20_audio_loaders.md:126). So engine loops are not
+separately attenuated from other SFX. Config.td5 stores only sfx_volume (0xBB) and
+music_volume (0xBC), which the port faithfully mirrors.
+
+DIAGNOSE FIRST (do not change blind):
+  Build, run a race with [Sound] Engine=1 (engine.log; the mixer logs
+  engine_channels=N every 60 frames). Drive (manual — ASK THE USER TO LISTEN) at low
+  and high RPM with at least one opponent; slide to get skid, ram to get collisions.
+  Question: does the engine drone MASK skid/collision/horn, or already sit ~20% under
+  them?
+
+DECISION:
+  - If engine is already well-balanced under other SFX -> the existing
+    engine_vol = speed_scaled >> 5 math (td5_sound.c ~996/1205) already approximates
+    the 0.2f default -> CLOSE as FAITHFUL, optionally update the doc status, done.
+  - If engine masks other SFX -> add `static float s_engine_volume_fraction = 0.2f;`
+    (orig default 0.2f @0x47463c) and multiply it into ONLY the engine-loop volume at
+    the viewer slot_modify(modify_slot+1, engine_vol, ...) (~td5_sound.c:1042) and the
+    spatial slot_modify(eng_slot, vol_atten, ...) (~:1102). Clamp [0,0x7F]. Do NOT
+    scale skid (0x13), horn, collision, or siren.
+
+VERIFY: engine + skid + collision + horn all individually audible and balanced;
+engine.log still shows engine channels active; ASK THE USER TO LISTEN and approve
+before merge. Keep the change scoped to the engine loop only.
+
+GHIDRA-CONFIRM (optional): the engine-vs-ambient semantic of 0x47463c is doc-labeled
+"speculative" — confirm via Ghidra if you implement the modal; not needed for the
+default-value approach above.
+
+------------------------------------------------------------
+Build per CLAUDE.md. Use /fix. End commits with:
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+KEY FILES: td5_sound.c (screech 888, opponent engine 1100, engine vol 996/1205),
+td5_platform_win32.c (vol_to_ds 1985, CD/MCI 2256), td5_physics.c (V2V 4019, wall
+562), td5_vfx.c (wheel anchor 1523), td5_save.c (volume fields 74).
+================================================================================

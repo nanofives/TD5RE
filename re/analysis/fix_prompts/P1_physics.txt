@@ -1,0 +1,109 @@
+================================================================================
+SESSION P1 — PHYSICS / VEHICLE DYNAMICS FIDELITY
+Paste everything below the line into a fresh Claude Code session at the repo root.
+HIGH risk. Each fix is A/B-test gated. Fix 3 should get its own session.
+================================================================================
+
+TD5RE Workstream-A physics fidelity. Root: C:\Users\maria\Desktop\Proyectos\TD5RE.
+Source: td5mod\src\td5re\. Docs: re\analysis\. Use the /fix skill per change
+(separate /fix + commit each). Ghidra HARD RULE: bash scripts/ghidra_pool.sh
+acquire -> open read_only=true -> cleanup; if pool busy, fall back to docs.
+
+DO NOT touch (already faithful despite stale docs):
+- D3+D4 V2V attitude switch — the per-tick path at td5_physics.c:6752-6797 already
+  implements it.
+- heading_normal.y — td5_track_compute_runtime_heading_normal @ td5_track.c:4468 is
+  the live byte-faithful 0x00445B90 port, wired into all 3 pose paths.
+- D11 scripted-motion seed — td5_physics.c:1198 writes euler_accum (fixed 2026-05-29).
+- ApplySteeringTorqueToWheels — td5_physics.c:9452, verbatim port of 0x42EEA0.
+- max_gear scan — td5_physics.c:10072, faithful (the :10070 "hardcoded" text is a
+  comment describing the OLD behavior).
+
+------------------------------------------------------------
+FIX 1 (HIGH risk, DO FIRST, A-B trace required)
+Restore the original 12-bit angle LUT for trig.
+------------------------------------------------------------
+td5_physics.c:311-339 — cos_fixed12 / sin_fixed12 / atan2_fixed12 currently call
+host cos/sin/atan2 then cast *4096. The original physics path uses a 12-bit angle
+LUT + AngleFromVector12 @0x0040a720, never libm. These three integer helpers are the
+remaining host-trig consumers; they feed wall response, steering, heading, and
+collision normals, so the per-angle quantization drift accumulates everywhere.
+
+CHANGE: route cos_fixed12/sin_fixed12 to the SAME table the faithful
+CosFloat12bit/SinFloat12bit already use (grep them to find it). Port atan2_fixed12
+to AngleFromVector12 @0x0040a720's quadrant logic (decompile if needed) instead of
+libm atan2.
+REF: re/analysis/audits/race-path-arithmetic-fidelity-audit-2026-04-09.md (HIGH).
+VERIFY: build, then A-B trace a steering/heading corpus using the
+deterministic-validation-suite harness
+(re/analysis/audits/deterministic-validation-suite-2026-04-09.md). Confirm REDUCED
+divergence in wall response + AI heading. If divergence increases, REVERT.
+
+------------------------------------------------------------
+FIX 2 (HIGH risk, A-B test required)
+Re-evaluate the obsolete non-original velocity safety clamp.
+------------------------------------------------------------
+td5_physics.c:2441-2459 — a "14b velocity magnitude safety clamp" hard-caps player
+velocity to 1x speed_limit, justified "until track walls are implemented." Lateral
+rail containment is now ported (0x00406CC0, the Tokyo wall work), so the clamp is
+obsolete and can mask upstream force divergence / clip corner-exit speed.
+
+CHANGE: raise the cap to 2x speed_limit, OR remove the block and rely on wall
+containment. Do NOT leave a 1x hard cap. (The per-axis checks at :1776/:1933 are the
+faithful orig checks — leave those.)
+VERIFY: MANUAL drive on Tokyo + Moscow (walls present) — the car must stay contained
+AND reach higher corner-exit speed than before. ASK THE USER TO DRIVE before
+launching (AutoThrottle won't exercise corner-exit at the limit). If the car leaves
+the road on any tested track, keep a 2x cap rather than full removal.
+
+------------------------------------------------------------
+FIX 3 (HIGH risk, ITS OWN SESSION, A-B trace required)
+Reconstruct the per-wheel suspension integrator.
+------------------------------------------------------------
+td5_physics.c:4726 td5_physics_integrate_suspension is a stable substitute, not the
+original 0x00403A20 math; the suspension->attitude torque coupling is disabled.
+Symptom is live: the [SUSPCONST 2026-05-27] log at td5_physics.c:4752 shows "port
+suspension saturates while orig stays ~500; fx is only 2x, so the extra factor is in
+the spring response (constants or arm)." This causes the session_05 flat-ground F-R
+lean.
+
+STEPS:
+  (a) Use the SUSPCONST probe + a Frida hook on orig 0x00403A20 onLeave capturing
+      per-wheel wheel_suspension_pos[i] / wheel_spring_dv[i] (see
+      re/analysis/followup_sessions/session_05_suspension_fr_asymmetry.md).
+  (b) Diff to localize whether the divergence is in k_spring / lever-arm (arm0) or
+      the load term.
+  (c) Port the original XZ force projection.
+  (d) Re-enable the torque coupling.
+SUCCESS: car sits level on a flat-ground Edinburgh straight, roll ~= 0 stationary,
+no saturation, correct pitch/roll over curbs/crests/landings.
+ASK THE USER TO DRIVE. HIGH cascade risk — do NOT batch with Fixes 1/2; gate behind
+an A-B trace at 0x00403A20 onLeave (per-wheel sp[i]). This is a multi-hour
+reconstruction.
+
+------------------------------------------------------------
+OUT OF SCOPE HERE (RUNTIME-REQUIRED — separate effort, do NOT attempt statically)
+------------------------------------------------------------
+Crash-spin / damage RNG. GetDamageRulesStub was never decompiled, so the
+deterministic scatter at td5_physics.c:4070 and the traffic crash-spin local LCG at
+td5_physics.c:3680 cannot be made faithful statically. Plan:
+  - Frida hook orig 0x00408289..0x0040844A (the "if (90000 < impact && cameraMode==0)"
+    heavy-impact branch in ApplyVehicleCollisionImpulse @0x4079C0): capture the value
+    written to angular_velocity_roll/pitch/yaw and the modulo angle operand.
+  - Find + hook GetDamageRulesStub: capture its return AND whether it consumes the
+    global rand() stream (watch the seed before/after).
+  - Hook CollectVehicleCollisionContacts @0x408570 onLeave: dump the real 4-short
+    contact record [cx_A,cz_A,cx_B,cz_B] (resolves the synthesized [cx_B,cz_B]); and
+    capture the TOI impactForce fraction (local_84-0x10 at 0x408D26) to replace the
+    hardcoded 0x70.
+  DECISION: if GetDamageRulesStub consumes global rand(), the port MUST consume from
+  the same shared stream at the same call-order point, or AI/spawn RNG parity breaks.
+
+------------------------------------------------------------
+ORDER: 1 -> 2 -> 3, each its own /fix + commit. Build per CLAUDE.md (ABSOLUTE
+gcc/ar paths). End commits with:
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+KEY FILES: td5mod/src/td5re/td5_physics.c (trig 311-339, clamp 2441-2459,
+suspension 4726, SUSPCONST 4752).
+================================================================================

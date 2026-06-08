@@ -1,0 +1,74 @@
+================================================================================
+SESSION P6 — STRUCTS / GLOBALS / FORMATS  (DOCUMENTATION ONLY)
+Paste everything below the line into a fresh Claude Code session at the repo root.
+NO port code change. This is RE-doc + Ghidra-naming hygiene. Use /re.
+Fully isolated — safe to run in parallel with everything else.
+================================================================================
+
+TD5RE Workstream-F: RE-doc reconciliation ONLY. Touch NO port .c/.h behavior. Root:
+C:\Users\maria\Desktop\Proyectos\TD5RE. A completeness audit confirmed all 18 flagged
+struct/global/format items are FAITHFUL, DEAD-VESTIGIAL, or DOC-ONLY — zero port code
+changes warranted. The recurring root cause is stale analysis docs (the port was
+reworked past several flagged items). Ghidra read_only if re-verifying (pool acquire/
+cleanup; pyghidra-mcp for cross-binary xref if available).
+
+DO NOT IMPLEMENT the "unknown" fields. actor_aux_ptr_1B4, the drag-lane buffer,
+g_tgaLoadFailureLatch, and g_modelsDatPostEntryTableEnd all have NO reader in the
+original — adding them would be invention, not fidelity.
+
+------------------------------------------------------------
+TASKS (documentation / naming only)
+------------------------------------------------------------
+1. re/analysis/actor_struct_gap_audit_2026-05-20.md
+   - Mark wheel_contact_normals (+0x230) RESOLVED: writer = ConvertFloatVec3ToShortAngles
+     inside IntegrateVehiclePoseAndContacts @0x00405E80; the port already writes all 3
+     components at td5_physics.c:6961-6967, consumed by suspension-response.
+   - Mark actor_aux_ptr_1B4 (+0x1B4) and _pad_362 (+0x362, 9B) DEAD-VESTIGIAL: a
+     binary-wide [reg+0x1b4] scan yields only [ESP+0x1b4] stack hits (no actor-relative
+     reader/writer); +0x362 has none either. Update re/include/td5_actor_struct.h field
+     comments to "confirmed unwritten/unread, kept as zeroed pad" (COMMENT ONLY — keep
+     the fields).
+
+2. re/analysis/formats/data-structure-gaps-filled.md
+   - Supersede the STRIP.DAT +0x08 "unknown_08 / not accessed" note: +0x08 is the
+     forward junction link (link_next, confirmed @0x004440F0; the port uses it,
+     td5_types.h:388).
+   - Confirm MODELS.DAT dword-1 stays "unread" (ParseModelsDat @0x431190 only relocates
+     dword-0). Leave LEVELINF +0x54 (PS-only sky_animation_index) and DAT_004c3d8c
+     (write-only) as VESTIGIAL.
+   - static.hed +0x20 is already decoded as width_a (read by LoadStaticTrackTextureHeader);
+     not unresolved.
+
+3. Ghidra naming
+   - 0x495234: collapse the g_extrasGalleryEnabledFlag vs g_cpuHasMmx duplicate to a
+     single primary symbol — recommend g_extrasGalleryEnabledFlag (all 5 reads are
+     extras-gallery fns: 0x40d590/d640/d84c/da3a/da65; role over CPUID-origin). Keep the
+     other as an EOL comment.
+   - 0x4aee14: confirm primary symbol is the lighting-zone name
+     (g_trackLightingZoneTablePtr — 1 write LoadTrackRuntimeData 0x42fd19, 2 reads
+     lighting fns 0x40cdaa/0x430150), NOT the disproven g_trackCircuitFlagOrLapCount guess.
+   - 0x4aee54: drop the _PROVISIONAL suffix (confirmed write-only end-of-entry-table
+     pointer; 1 write 0x43119e, 0 reads).
+   - g_tgaLoadFailureLatch @0x4962a4: note 15 writes / 0 reads = DEAD (sticky error bit
+     never consumed; port propagates errors via return codes).
+
+4. re/analysis/followup_sessions/wave1_f_overview.md + the function-mapping confidence
+   audit
+   - Note the 6 game-type init handlers @0x410f60-0x4110a0 are NOW named
+     (ConfigureCupChampionshipSchedule etc., Wave 2F) and fully mirrored in
+     td5_frontend.c:2980-3011 (the end-of-series unlock-bit/clamp logic).
+   - Downgrade the 126 "weak signatures" and the 14 FMV/TGQ provisional names from
+     "fidelity risk" to "RE-doc cosmetic" (the port compiles with its own correct C
+     types; FMV is stubbed in td5_fmv.c — zero runtime impact).
+
+5. (Optional, lowest priority) g_dragRaceLaneStripPtr @0x4ad288 writer, for the record
+   only: set a HW write breakpoint on 0x004ad288 (4 bytes), launch any race, capture the
+   storing instruction address + value (predict 0x4ad2a0, aliasing the two drag-lane
+   blocks). DOCUMENT ONLY — the port deliberately loads the real STRIP.DAT for the drag
+   strip (level030, 301 spans), so the buffer is unused and there is nothing to change.
+
+------------------------------------------------------------
+DELIVERABLE: updated analysis docs + reconciled Ghidra primary symbols. No build, no
+/fix, no port edit. If a future investigator is tempted to "implement" any of the dead
+fields, the answer is documented here: don't.
+================================================================================

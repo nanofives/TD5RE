@@ -1,0 +1,24 @@
+S09 — Controller setup: 4-arrow visual navigation
+=================================================
+
+Covers feedback: controller setup nav should follow visual position with all 4 arrows
+Modules: td5_frontend.c (Control Options / Configure / REMAP nav handler).
+Memory: project_joystick_multiplayer_input_2026-06-04 (Control Options + Configure revamp, REMAP ALL, capture-wait-for-release).
+
+PROMPT
+------
+Fix controller-setup-screen navigation so it follows the VISUAL 2D position with all four arrow keys.
+
+Current bug: the bindings are laid out in multiple columns, but navigation is effectively linear — e.g. on "Handbrake", pressing the DOWN arrow jumps to the NEXT COLUMN instead of moving down within the current column. The user does not want this.
+
+Desired: a proper 2D grid navigation that matches the on-screen layout:
+- Up / Down move within the current visual column (to the row above/below).
+- Left / Right move between columns (to the adjacent column, ideally keeping a similar vertical position).
+- No wrap-to-next-column on a vertical press.
+
+Map the binding entries to their actual (column, row) screen positions and route arrow input by that geometry rather than a flat index. Don't disturb the capture flow (REMAP, capture-wait-for-release, PAUSE rebind) — only the cursor movement between fields.
+
+ACCEPTANCE
+----------
+- From any binding, Up/Down stays in the same column; Left/Right changes column.
+- Movement matches what the eye expects from the visual layout; no surprise column jumps.

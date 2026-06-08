@@ -1,0 +1,31 @@
+S17 — Car-vs-car collision pass-through (one-frame tunnelling at impact)
+========================================================================
+
+Covers feedback: collision with other cars is still finnicky — at the moment of crashing I can briefly go THROUGH cars
+Modules: td5_physics.c (v2v broadphase / contact resolution)
+Memory: project_car_vs_car_collision_s08_2026-06-04 (stale COLLISION_MAX_WALK, N-way coverage); project_nway_splitscreen_multiplayer_2026-06-03 (g_traffic_slot_base, up to 16 racer slots / 22 actors)
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Cars can briefly pass THROUGH each other at the moment of impact (one-frame tunnelling) before the collision resolves. Make contact resolution robust so a high-speed pair cannot interpenetrate/tunnel for a frame.
+
+Investigation pointers (verify before trusting; line numbers may have drifted):
+- td5_physics_resolve_vehicle_contacts ~td5_physics.c:4610 is the v2v entry.
+- Broadphase uses a span-bucket grid: bucket = track_span_normalized >> 2, walking +/-1 adjacent buckets (~4683-4690). A pair that crosses more than one bucket in a single frame (fast closing speed) can be missed.
+- The time-of-impact path does a 7-iteration bisection (~4432-4528) and writes back raw positions; if the written position is ahead of the true contact point before the next tick re-tests, the chassis visibly slips through.
+- COLLISION_MAX_WALK was previously stale (sized for the old 12-actor cap) and bumped to TD5_MAX_TOTAL_ACTORS in S08 — confirm it is still correct for the N-way actor set.
+
+Likely fix direction (confirm against RE): ensure resolution applies POSITION depenetration (push the cars apart to non-overlap), not just a velocity impulse; and that per-frame displacement can't skip the contact (clamp the step to the contact point, widen the bucket walk for fast pairs, or add a swept test). Keep front/side/rear response tuning from S08 intact (RearImpactResponse etc.) — this is a coverage/anti-tunnel fix, not a re-tune. Original RE: UpdatePlayerVehiclePhysics @0x00404760 and the v2v contact routines.
+
+NOTE: RE basis exists — research the original contact loop. This is physics: the multi-track CSV bundle sweep is MANDATORY.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive (confirming "feel" of impacts is mine to judge). Finish ALL self-verification first: build, the mandatory multi-track CSV sweep, and if possible a headless AutoRace scenario that forces two cars together so you can check overlap in the trace. Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Two cars closing at speed collide and separate without visibly overlapping/passing through, across racer + traffic slots incl. >6 racers.
+- No regression to the S08 rear/side/front impact tuning.
+- Multi-track CSV sweep clean.

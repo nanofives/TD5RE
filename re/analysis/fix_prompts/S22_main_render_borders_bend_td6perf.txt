@@ -1,0 +1,29 @@
+S22 — Main render: black sprite borders (trees) · buildings bend/stretch up close · TD6 high MS
+===============================================================================================
+
+Covers feedback: borders of some PNG have black lines (most notable on trees) · fix main render, buildings appear bent and stretch out when getting closer · unusually high MS on TD6 tracks
+Modules: td5_render.c (projection / near-clip / culling), td5mod/ddraw_wrapper/src/d3d11_backend.c (sampler state)
+Memory: reference_perf_profiler_and_two_bugs_2026-06-03 ([Logging]Profile=1 per-phase profiler); project_td6_track_migration_2026-06-02 (TD6 renders ALL entries, ~214 meshes)
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Three core-rendering issues:
+
+1. BLACK BORDERS ON SPRITES (trees). Bilinear + CLAMP sampling blends transparent/black border texels at sprite UV edges, producing fringing. Sampler selection is in ddraw_wrapper/src/d3d11_backend.c ~1277-1290 (Backend_ApplyStateCache picks SAMP_LINEAR_CLAMP / WRAP); billboards dispatch ~1181. Fix the edge fringing — options: add 1px texel-border padding to the sprite/tree atlases (TGA/PNG preprocess), use POINT sampling for color-keyed sprites, or premultiplied-alpha. Pick the cleanest that doesn't blur the rest.
+
+2. BUILDINGS BEND / STRETCH UP CLOSE. The software projection + near-plane clip is td5_render.c ~1016-1032 (screen = -view*focal/vz; rhw = inv_z) with a Sutherland-Hodgman near clip ~962-1015. Hypothesis: vertices inserted at the near clip don't get their rhw/vz recomputed, so UV/position interpolation goes affine and warps as you approach. Verify the clipped-vertex out_vz / rhw is recomputed from the post-clip position; fix the near-clip interpolation so close geometry stays straight.
+
+3. TD6 HIGH MS. On TD6 tracks the renderer skips the span>>2 windowing and draws ALL display-list entries (td5_render.c ~2407-2410 when g_active_td6_level>0) — ~113-129 entries + denser meshes (~214) per frame with no spatial culling. Add a camera-distance / windowed cull for TD6 (replace render-all) so per-frame mesh dispatch drops to roughly what TD5 tracks pay. Measure with [Logging]Profile=1 before/after.
+
+NOTE: #2 and #3 are port-projection/culling logic (research the original render loop where relevant); #1 is wrapper/asset. Perf-sensitive — use the profiler. Render/track: run the multi-track CSV sweep (incl. a TD6 track for #3 if the harness supports it).
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to watch. Finish ALL self-verification first: build + [Logging]Profile=1 captures (record render-phase ms on a TD6 track before/after for #3) + headless frames you can screenshot/inspect for #1 (tree edges) and #2 (a building approach) + the multi-track CSV sweep. Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Tree/sprite edges no longer show black fringing.
+- Buildings stay straight as the camera approaches (no bend/stretch).
+- TD6 render-phase ms drops substantially (profiler before/after); no visible pop-in regression on TD5 tracks.

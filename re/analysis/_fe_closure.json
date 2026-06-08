@@ -1,0 +1,7686 @@
+{
+"0x0040a880": {
+"name": "ResetRaceResultsTable",
+"roots": [
+"SCR24",
+"SCR6"
+],
+"callees": []
+},
+"0x0040aad0": {
+"name": "SortRaceResultsByPrimaryMetricAsc",
+"roots": [
+"SCR24"
+],
+"callees": []
+},
+"0x0040ab80": {
+"name": "SortRaceResultsBySecondaryMetricDesc",
+"roots": [
+"SCR24"
+],
+"callees": []
+},
+"0x0040b100": {
+"name": "BuildEnumeratedDisplayModeList",
+"roots": [
+"FSM",
+"SCR0",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR5",
+"SCR7"
+],
+"callees": []
+},
+"0x0040cdc0": {
+"name": "CrossFade16BitSurfaces",
+"roots": [
+"SCR8"
+],
+"callees": []
+},
+"0x0040d120": {
+"name": "AdvanceCrossFadeTransition",
+"roots": [
+"SCR8"
+],
+"callees": [
+"0x00424c50",
+"0x0040cdc0"
+]
+},
+"0x0040d190": {
+"name": "CrossFade16BitSurfaces",
+"roots": [
+"FLUSH",
+"LOOP",
+"SEED"
+],
+"callees": []
+},
+"0x0040d590": {
+"name": "LoadExtrasGalleryImageSurfaces",
+"roots": [
+"INIT",
+"SCR19"
+],
+"callees": [
+"0x00412030"
+]
+},
+"0x0040d640": {
+"name": "ReleaseExtrasGalleryImageSurfaces",
+"roots": [
+"SCR19"
+],
+"callees": [
+"0x00411e30"
+]
+},
+"0x0040d6a0": {
+"name": "LoadExtrasBandGalleryImages",
+"roots": [
+"SCR19",
+"SEED"
+],
+"callees": [
+"0x004122f0"
+]
+},
+"0x0040d750": {
+"name": "AdvanceExtrasGallerySlideshow",
+"roots": [
+"FLUSH",
+"LOOP",
+"SEED"
+],
+"callees": [
+"0x00448157"
+]
+},
+"0x0040d830": {
+"name": "UpdateExtrasGalleryDisplay",
+"roots": [
+"FLUSH",
+"LOOP",
+"SEED"
+],
+"callees": [
+"0x004251a0",
+"0x0040d750",
+"0x0040d190"
+]
+},
+"0x0040dac0": {
+"name": "InitializeRaceSeriesSchedule",
+"roots": [
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR5",
+"SCR7"
+],
+"callees": [
+"0x00448157"
+]
+},
+"0x0040ddc0": {
+"name": "DrawCarSelectionPreviewOverlay",
+"roots": [
+"SCR20"
+],
+"callees": [
+"0x00425660"
+]
+},
+"0x0040df80": {
+"name": "MarkMastersRaceSlotCompleted",
+"roots": [
+"SCR24"
+],
+"callees": []
+},
+"0x0040dfc0": {
+"name": "CarSelectionScreenStateMachine",
+"roots": [
+"SCR20"
+],
+"callees": [
+"0x00424b30",
+"0x00426120",
+"0x0041b390",
+"0x00424cf0",
+"0x00424660",
+"0x0041b610",
+"0x00425de0",
+"0x0040ddc0",
+"0x00414a90",
+"0x00412b90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424d40",
+"0x00423db0",
+"0x00424c10",
+"0x004260e0",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00424890",
+"0x004183b0",
+"0x00424bc0",
+"0x00414610",
+"0x00423ed0",
+"0x00418430",
+"0x004129b0",
+"0x00424ca0",
+"0x00424b80",
+"0x004259d0",
+"0x00424a50",
+"0x004258b0",
+"0x00418410",
+"0x004242b0",
+"0x00448443",
+"0x00424c50",
+"0x004258c0",
+"0x00412030",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x0040f8d0": {
+"name": "WritePackedConfigTd5",
+"roots": [
+"FSM",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR5",
+"SCR7"
+],
+"callees": [
+"0x00448495",
+"0x00448512",
+"0x0044867c"
+]
+},
+"0x0040fb60": {
+"name": "LoadPackedConfigTd5",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044868f",
+"0x00448495",
+"0x0044867c"
+]
+},
+"0x0040fe00": {
+"name": "ScreenControllerBindingPage",
+"roots": [
+"SCR18"
+],
+"callees": [
+"0x00424b30",
+"0x00412e30",
+"0x00424560",
+"0x00411f00",
+"0x00414610",
+"0x00424a50",
+"0x004259d0",
+"0x004100ce",
+"0x00425660",
+"0x004258e0",
+"0x004258c0",
+"0x00411e30",
+"0x00412030",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x004100ce": {
+"name": "DrawControlBindingTextWithOkButton",
+"roots": [
+"SCR18"
+],
+"callees": []
+},
+"0x00410ca0": {
+"name": "ConfigureGameTypeFlags",
+"roots": [
+"SCR24",
+"SCR6"
+],
+"callees": [
+"0x0040a880",
+"0x00448157"
+]
+},
+"0x00411120": {
+"name": "SerializeRaceStatusSnapshot",
+"roots": [
+"INIT"
+],
+"callees": []
+},
+"0x004112c0": {
+"name": "RestoreRaceStatusSnapshot",
+"roots": [
+"SCR24",
+"SCR6"
+],
+"callees": []
+},
+"0x004114f0": {
+"name": "WriteCupData",
+"roots": [
+"SCR24"
+],
+"callees": [
+"0x004487b0",
+"0x00448495",
+"0x00448512",
+"0x0044867c"
+]
+},
+"0x00411590": {
+"name": "LoadContinueCupData",
+"roots": [
+"SCR6"
+],
+"callees": [
+"0x0044868f",
+"0x004487b0",
+"0x004112c0",
+"0x00448495",
+"0x0044867c"
+]
+},
+"0x00411630": {
+"name": "ValidateCupDataChecksum",
+"roots": [
+"SCR6"
+],
+"callees": [
+"0x0044868f",
+"0x004487b0",
+"0x00448495",
+"0x0044867c"
+]
+},
+"0x00411710": {
+"name": "BuildFrontendDitherOffsetTable",
+"roots": [
+"INIT"
+],
+"callees": []
+},
+"0x00411750": {
+"name": "InitFrontendFadeColor",
+"roots": [
+"SCR2",
+"SCR4"
+],
+"callees": []
+},
+"0x00411780": {
+"name": "RenderFrontendFadeEffect",
+"roots": [
+"SCR2",
+"SCR4"
+],
+"callees": [
+"0x004251a0"
+]
+},
+"0x00411a50": {
+"name": "ResetFrontendFadeState",
+"roots": [
+"SCR4"
+],
+"callees": []
+},
+"0x00411a70": {
+"name": "RenderFrontendFadeOutEffect",
+"roots": [
+"SCR4"
+],
+"callees": [
+"0x004251a0"
+]
+},
+"0x00411de0": {
+"name": "ClearFrontendSurfaceRegistry",
+"roots": [
+"INIT"
+],
+"callees": []
+},
+"0x00411e00": {
+"name": "GetFrontendSurfaceRegistryId",
+"roots": [
+"LOOP",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR22",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00411e30": {
+"name": "ReleaseTrackedFrontendSurface",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00411e90": {
+"name": "ReleaseTrackedFrontendSurfaces",
+"roots": [
+"FSM",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR5",
+"SCR7"
+],
+"callees": []
+},
+"0x00411f00": {
+"name": "CreateTrackedFrontendSurface",
+"roots": [
+"INIT",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00412030": {
+"name": "LoadFrontendTgaSurfaceFromArchive",
+"roots": [
+"INIT",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8"
+],
+"callees": [
+"0x00411f00",
+"0x00440860",
+"0x004487df"
+]
+},
+"0x004122f0": {
+"name": "LoadTgaToFrontendSurfaceFromArchive",
+"roots": [
+"SCR19",
+"SEED"
+],
+"callees": [
+"0x00411f00",
+"0x00440860",
+"0x004487df"
+]
+},
+"0x004125b0": {
+"name": "LoadTgaToFrontendSurface16bpp",
+"roots": [
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8"
+],
+"callees": [
+"0x00440860",
+"0x004487df"
+]
+},
+"0x004127b0": {
+"name": "LoadTgaToFrontendSurface16bppVariant",
+"roots": [
+"SCR4",
+"SCR8"
+],
+"callees": [
+"0x00440860",
+"0x004487df"
+]
+},
+"0x004129b0": {
+"name": "RenderTgaToFrontendSurface",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x00412b00": {
+"name": "SetSurfaceColorKeyFromRGB",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x00412b90": {
+"name": "RenderTgaWithColorKeyToSurface",
+"roots": [
+"SCR20"
+],
+"callees": []
+},
+"0x00412d50": {
+"name": "MeasureOrDrawFrontendFontString",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8"
+],
+"callees": []
+},
+"0x00412e30": {
+"name": "CreateMenuStringLabelSurface",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8"
+],
+"callees": [
+"0x00412d50",
+"0x00448443",
+"0x00411f00",
+"0x00412030",
+"0x00424050"
+]
+},
+"0x00413010": {
+"name": "DrawPostRaceHighScoreEntry",
+"roots": [
+"SCR23",
+"SCR25"
+],
+"callees": [
+"0x00448443",
+"0x00424890",
+"0x00424660",
+"0x00424740",
+"0x00424050"
+]
+},
+"0x00413580": {
+"name": "ScreenPostRaceHighScoreTable",
+"roots": [
+"SCR23"
+],
+"callees": [
+"0x00424b30",
+"0x00426120",
+"0x00413010",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424c50",
+"0x004258c0",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00413bc0": {
+"name": "ScreenPostRaceNameEntry",
+"roots": [
+"SCR25"
+],
+"callees": [
+"0x00424b30",
+"0x00426120",
+"0x00413010",
+"0x00425de0",
+"0x00425660",
+"0x004258e0",
+"0x004259b0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x004183b0",
+"0x00411f00",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x0041a530",
+"0x00424c50",
+"0x004258c0",
+"0x00426390",
+"0x00424050",
+"0x004125b0"
+]
+},
+"0x00414610": {
+"name": "SetFrontendScreen",
+"roots": [
+"FSM",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x00414640": {
+"name": "LoadFrontendSoundEffects",
+"roots": [
+"INIT"
+],
+"callees": [
+"0x00440860",
+"0x004487df"
+]
+},
+"0x00414740": {
+"name": "InitializeFrontendResourcesAndState",
+"roots": [
+"INIT"
+],
+"callees": [
+"0x00411710",
+"0x00411120",
+"0x004254d0",
+"0x00424e40",
+"0x00411f00",
+"0x00418430",
+"0x00414640",
+"0x0044814a",
+"0x00425500",
+"0x0040d590",
+"0x00418450",
+"0x00411de0",
+"0x004258c0",
+"0x00412030",
+"0x00448157"
+]
+},
+"0x00414a90": {
+"name": "InitializeFrontendDisplayModeState",
+"roots": [
+"FSM",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR5",
+"SCR7"
+],
+"callees": [
+"0x0040b100",
+"0x0040f8d0",
+"0x00411e90",
+"0x00448157"
+]
+},
+"0x00414b50": {
+"name": "RunFrontendDisplayLoop",
+"roots": [
+"LOOP"
+],
+"callees": [
+"0x00426580",
+"0x00424b80",
+"0x00425360",
+"0x00425660",
+"0x00418450",
+"0x00425540",
+"0x00425a30",
+"0x00425170",
+"0x00448157"
+]
+},
+"0x00414f40": {
+"name": "RenderPositionerGlyphStrip",
+"roots": [
+"SCR1"
+],
+"callees": [
+"0x00425660"
+]
+},
+"0x00415030": {
+"name": "ScreenPositionerDebugTool",
+"roots": [
+"SCR1"
+],
+"callees": [
+"0x00425660",
+"0x00424af0",
+"0x00424d90",
+"0x00414f40",
+"0x00423db0",
+"0x00412030"
+]
+},
+"0x00415370": {
+"name": "ScreenStartupInit",
+"roots": [
+"SCR28"
+],
+"callees": [
+"0x00425660",
+"0x004258c0",
+"0x00411e30",
+"0x00411f00",
+"0x00425de0",
+"0x00424050",
+"0x00426390"
+]
+},
+"0x00415490": {
+"name": "ScreenMainMenuAnd1PRaceFlow",
+"roots": [
+"SCR5"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x004183b0",
+"0x00411f00",
+"0x00414610",
+"0x004264e0",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424a50",
+"0x00418410",
+"0x00424c50",
+"0x004258c0",
+"0x00426540",
+"0x00426390",
+"0x00424050",
+"0x004125b0"
+]
+},
+"0x004168b0": {
+"name": "RaceTypeCategoryMenuStateMachine",
+"roots": [
+"SCR6"
+],
+"callees": [
+"0x00424b30",
+"0x00411590",
+"0x00424560",
+"0x00410ca0",
+"0x00424660",
+"0x00425de0",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x00412b00",
+"0x00424c10",
+"0x004260e0",
+"0x00412e30",
+"0x00411630",
+"0x00424af0",
+"0x00424890",
+"0x00411f00",
+"0x004183b0",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424a50",
+"0x00424c50",
+"0x00417b74",
+"0x004258c0",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00417b74": {
+"name": "AdvanceFrontendInlineStringTableState",
+"roots": [
+"SCR6"
+],
+"callees": [
+"0x004183b0"
+]
+},
+"0x00417d50": {
+"name": "ScreenExtrasGallery",
+"roots": [
+"SCR22"
+],
+"callees": [
+"0x00424a50",
+"0x00425660",
+"0x00423f90",
+"0x00424560",
+"0x004258c0"
+]
+},
+"0x004183b0": {
+"name": "SetFrontendInlineStringTable",
+"roots": [
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR5",
+"SCR6",
+"SCR7"
+],
+"callees": []
+},
+"0x00418410": {
+"name": "SetFrontendInlineStringEntry",
+"roots": [
+"SCR14",
+"SCR20",
+"SCR21",
+"SCR5"
+],
+"callees": []
+},
+"0x00418430": {
+"name": "ResetFrontendInlineStringTable",
+"roots": [
+"INIT",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR25",
+"SCR5",
+"SCR6",
+"SCR7"
+],
+"callees": []
+},
+"0x00418450": {
+"name": "NoOpHookStub",
+"roots": [
+"INIT",
+"LOOP",
+"SCR10",
+"SCR11",
+"SCR25",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x00418460": {
+"name": "ScreenMusicTestExtras",
+"roots": [
+"SCR19"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00425de0",
+"0x00414a90",
+"0x0040d590",
+"0x0040d640",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x0040d6a0",
+"0x00418430",
+"0x004129b0",
+"0x00424a50",
+"0x004259d0",
+"0x00448443",
+"0x00424c50",
+"0x004258c0",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00418c60": {
+"name": "QueueFrontendNetworkMessage",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR20",
+"SCR21"
+],
+"callees": []
+},
+"0x00418d50": {
+"name": "RunFrontendConnectionBrowser",
+"roots": [
+"SCR8"
+],
+"callees": [
+"0x00424b30",
+"0x00425de0",
+"0x00425660",
+"0x00418450",
+"0x004259b0",
+"0x004258e0",
+"0x00412b00",
+"0x00424740",
+"0x00411e30",
+"0x0040d120",
+"0x00448a38",
+"0x00424c10",
+"0x00412e30",
+"0x00414610",
+"0x004129b0",
+"0x00424b80",
+"0x004259d0",
+"0x00424c50",
+"0x00448904",
+"0x004258c0",
+"0x004127b0",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00419b30": {
+"name": "RenderFrontendSessionBrowser",
+"roots": [
+"SCR9"
+],
+"callees": [
+"0x00418450",
+"0x00448443",
+"0x00424740",
+"0x00424050"
+]
+},
+"0x00419cf0": {
+"name": "RunFrontendSessionPicker",
+"roots": [
+"SCR9"
+],
+"callees": [
+"0x00414610",
+"0x00425de0",
+"0x004129b0",
+"0x00424b80",
+"0x004259d0",
+"0x00425660",
+"0x004258e0",
+"0x00412b00",
+"0x004258c0",
+"0x00411e30",
+"0x00426390",
+"0x00419b30"
+]
+},
+"0x0041a530": {
+"name": "RenderFrontendCreateSessionNameInput",
+"roots": [
+"SCR10",
+"SCR25"
+],
+"callees": [
+"0x00418450",
+"0x00424740",
+"0x00424050"
+]
+},
+"0x0041a670": {
+"name": "RenderFrontendLobbyChatInput",
+"roots": [
+"SCR11"
+],
+"callees": [
+"0x00418450",
+"0x00424740",
+"0x00424050"
+]
+},
+"0x0041a7b0": {
+"name": "RunFrontendCreateSessionFlow",
+"roots": [
+"SCR10"
+],
+"callees": [
+"0x00412e30",
+"0x00414610",
+"0x00425de0",
+"0x004129b0",
+"0x004259d0",
+"0x00425660",
+"0x004258e0",
+"0x0041a530",
+"0x00412b00",
+"0x00418c60",
+"0x004258c0",
+"0x00411e30",
+"0x00426390"
+]
+},
+"0x0041b390": {
+"name": "CreateFrontendNetworkSession",
+"roots": [
+"SCR20",
+"SCR21"
+],
+"callees": [
+"0x00418c60",
+"0x00414610"
+]
+},
+"0x0041b420": {
+"name": "RenderFrontendLobbyStatusPanel",
+"roots": [
+"SCR11"
+],
+"callees": [
+"0x00424660",
+"0x00424740",
+"0x00424050"
+]
+},
+"0x0041b610": {
+"name": "ProcessFrontendNetworkMessages",
+"roots": [
+"SCR11",
+"SCR20"
+],
+"callees": [
+"0x00418c60"
+]
+},
+"0x0041bd00": {
+"name": "RenderFrontendLobbyChatPanel",
+"roots": [
+"SCR11"
+],
+"callees": [
+"0x00424740",
+"0x00424050",
+"0x004248e0"
+]
+},
+"0x0041c030": {
+"name": "NormalizeFrontendChatTokens",
+"roots": [
+"SCR11"
+],
+"callees": [
+"0x00418c60",
+"0x00448b80"
+]
+},
+"0x0041c330": {
+"name": "RunFrontendNetworkLobby",
+"roots": [
+"SCR11"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x0041b610",
+"0x00425de0",
+"0x00414a90",
+"0x0041b420",
+"0x00425660",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00418c60",
+"0x00411e30",
+"0x0041a670",
+"0x00412e30",
+"0x0041bd00",
+"0x00411f00",
+"0x00414610",
+"0x004264e0",
+"0x004129b0",
+"0x00424b80",
+"0x004259d0",
+"0x00424a50",
+"0x0041c030",
+"0x00424c50",
+"0x004258c0",
+"0x00426540",
+"0x00426390",
+"0x00424050",
+"0x004125b0"
+]
+},
+"0x0041d630": {
+"name": "ScreenSessionLockedDialog",
+"roots": [
+"SCR29"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00424af0",
+"0x00411f00",
+"0x00414610",
+"0x00425de0",
+"0x00424b80",
+"0x00424a50",
+"0x004259d0",
+"0x00425660",
+"0x004258e0",
+"0x004258c0",
+"0x00411e30",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x0041d840": {
+"name": "FormatDisplayModeOptionStrings",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x00448443"
+]
+},
+"0x0041d890": {
+"name": "ScreenOptionsHub",
+"roots": [
+"SCR12"
+],
+"callees": [
+"0x00412e30",
+"0x00424b30",
+"0x00424af0",
+"0x004183b0",
+"0x00414610",
+"0x00425de0",
+"0x00418430",
+"0x004129b0",
+"0x00414a90",
+"0x004259d0",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00424c50",
+"0x004258c0",
+"0x00411e30",
+"0x00424c10",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x0041df20": {
+"name": "ScreenControlOptions",
+"roots": [
+"SCR14"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424a50",
+"0x00418410",
+"0x00448443",
+"0x00424c50",
+"0x004258c0",
+"0x00412030",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x0041ea90": {
+"name": "ScreenSoundOptions",
+"roots": [
+"SCR15"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424a50",
+"0x00424c50",
+"0x004258c0",
+"0x00412030",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x0041f990": {
+"name": "ScreenGameOptions",
+"roots": [
+"SCR13"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424a50",
+"0x00448443",
+"0x00424c50",
+"0x004258c0",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00420400": {
+"name": "ScreenDisplayOptions",
+"roots": [
+"SCR16"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x004260e0",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424a50",
+"0x00448443",
+"0x00424c50",
+"0x004258c0",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00420c70": {
+"name": "ScreenTwoPlayerOptions",
+"roots": [
+"SCR17"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424a50",
+"0x00448443",
+"0x00424c50",
+"0x004258c0",
+"0x00412030",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x004213d0": {
+"name": "ScreenQuickRaceMenu",
+"roots": [
+"SCR7"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00424c10",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00448443",
+"0x00424c50",
+"0x004258c0",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00421da0": {
+"name": "AwardCupCompletionUnlocks",
+"roots": [
+"SCR24"
+],
+"callees": []
+},
+"0x00421e90": {
+"name": "DrawRaceDataSummaryPanel",
+"roots": [
+"SCR24"
+],
+"callees": [
+"0x00424560",
+"0x00426120",
+"0x00448443",
+"0x00426260",
+"0x00424050"
+]
+},
+"0x00422480": {
+"name": "RunRaceResultsScreen",
+"roots": [
+"SCR24"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x0040df80",
+"0x00410ca0",
+"0x00425de0",
+"0x00421e90",
+"0x00421da0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x004114f0",
+"0x0040ab80",
+"0x00412b00",
+"0x00411e30",
+"0x004260e0",
+"0x00412e30",
+"0x00424af0",
+"0x004112c0",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x004129b0",
+"0x004259d0",
+"0x0040aad0",
+"0x004258c0",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x004237f0": {
+"name": "ScreenCupFailedDialog",
+"roots": [
+"SCR26"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00424af0",
+"0x00411f00",
+"0x00414610",
+"0x00425de0",
+"0x00424a50",
+"0x004259d0",
+"0x00425660",
+"0x004258e0",
+"0x004258c0",
+"0x00411e30",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00423a80": {
+"name": "ScreenCupWonDialog",
+"roots": [
+"SCR27"
+],
+"callees": [
+"0x00424b30",
+"0x00424560",
+"0x00424af0",
+"0x00411f00",
+"0x00414610",
+"0x00425de0",
+"0x00424a50",
+"0x004259d0",
+"0x00425660",
+"0x004258e0",
+"0x00448443",
+"0x004258c0",
+"0x00411e30",
+"0x00448bb8",
+"0x00424050",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x00423db0": {
+"name": "ClearBackbufferWithColor",
+"roots": [
+"SCR1",
+"SCR20"
+],
+"callees": []
+},
+"0x00423ed0": {
+"name": "FillPrimaryFrontendRect",
+"roots": [
+"INIT",
+"SCR20"
+],
+"callees": []
+},
+"0x00423f90": {
+"name": "FillSurfaceRectWithColor",
+"roots": [
+"SCR22"
+],
+"callees": []
+},
+"0x00424050": {
+"name": "BltColorFillToSurface",
+"roots": [
+"FLUSH",
+"LOOP",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x00424110": {
+"name": "DrawFrontendFontStringPrimary",
+"roots": [
+"SCR20",
+"SCR3"
+],
+"callees": []
+},
+"0x004241e0": {
+"name": "DrawFrontendFontStringSecondary",
+"roots": [
+"SCR4"
+],
+"callees": []
+},
+"0x004242b0": {
+"name": "DrawFrontendLocalizedStringPrimary",
+"roots": [
+"SCR20",
+"SCR3"
+],
+"callees": [
+"0x00424110"
+]
+},
+"0x00424390": {
+"name": "DrawFrontendLocalizedStringSecondary",
+"roots": [
+"SCR4"
+],
+"callees": [
+"0x004241e0"
+]
+},
+"0x00424470": {
+"name": "DrawFrontendFontStringToSurface",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR22",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00424560": {
+"name": "DrawFrontendLocalizedStringToSurface",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR22",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x00424470"
+]
+},
+"0x00424660": {
+"name": "DrawFrontendSmallFontStringToSurface",
+"roots": [
+"SCR11",
+"SCR20",
+"SCR23",
+"SCR25",
+"SCR6"
+],
+"callees": []
+},
+"0x00424740": {
+"name": "DrawFrontendClippedStringToSurface",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR23",
+"SCR25",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x00424890": {
+"name": "MeasureOrCenterFrontendString",
+"roots": [
+"SCR20",
+"SCR23",
+"SCR25",
+"SCR6"
+],
+"callees": []
+},
+"0x004248e0": {
+"name": "DrawFrontendWrappedStringLine",
+"roots": [
+"SCR11"
+],
+"callees": [
+"0x00424740"
+]
+},
+"0x00424a50": {
+"name": "MeasureOrCenterFrontendLocalizedString",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR22",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00424af0": {
+"name": "PresentPrimaryFrontendBufferViaCopy",
+"roots": [
+"SCR1",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7"
+],
+"callees": [
+"0x004251a0"
+]
+},
+"0x00424b30": {
+"name": "CopyPrimaryFrontendBufferToSecondary",
+"roots": [
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8"
+],
+"callees": []
+},
+"0x00424b80": {
+"name": "BlitFrontendCachedRect",
+"roots": [
+"LOOP",
+"SCR11",
+"SCR20",
+"SCR29",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x004251a0"
+]
+},
+"0x00424bc0": {
+"name": "CopyPrimaryFrontendRectToSecondary",
+"roots": [
+"SCR20"
+],
+"callees": []
+},
+"0x00424c10": {
+"name": "PresentSecondaryFrontendRectViaCopy",
+"roots": [
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR23",
+"SCR25",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8"
+],
+"callees": [
+"0x004251a0"
+]
+},
+"0x00424c50": {
+"name": "BlitSecondaryFrontendRectToPrimary",
+"roots": [
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR25",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8"
+],
+"callees": []
+},
+"0x00424ca0": {
+"name": "PresentPrimaryFrontendBuffer",
+"roots": [
+"SCR2",
+"SCR20",
+"SCR3"
+],
+"callees": []
+},
+"0x00424cf0": {
+"name": "PresentSecondaryFrontendRect",
+"roots": [
+"SCR20"
+],
+"callees": []
+},
+"0x00424d40": {
+"name": "PresentPrimaryFrontendRect",
+"roots": [
+"SCR20"
+],
+"callees": []
+},
+"0x00424d90": {
+"name": "FillPrimaryFrontendScanline",
+"roots": [
+"SCR1"
+],
+"callees": []
+},
+"0x00424e40": {
+"name": "InitializeFrontendPresentationState",
+"roots": [
+"INIT"
+],
+"callees": [
+"0x004251a0",
+"0x00448443",
+"0x00411f00",
+"0x00448c30",
+"0x00423ed0",
+"0x00448bf0"
+]
+},
+"0x00425170": {
+"name": "UpdateFrontendClientOrigin",
+"roots": [
+"LOOP"
+],
+"callees": []
+},
+"0x004251a0": {
+"name": "Copy16BitSurfaceRect",
+"roots": [
+"FLUSH",
+"INIT",
+"LOOP",
+"SCR1",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00425360": {
+"name": "PresentFrontendBufferSoftware",
+"roots": [
+"LOOP"
+],
+"callees": []
+},
+"0x004254d0": {
+"name": "ResetFrontendOverlayState",
+"roots": [
+"INIT"
+],
+"callees": []
+},
+"0x00425500": {
+"name": "ResetFrontendSelectionState",
+"roots": [
+"INIT"
+],
+"callees": []
+},
+"0x00425540": {
+"name": "FlushFrontendSpriteBlits",
+"roots": [
+"FLUSH",
+"LOOP"
+],
+"callees": [
+"0x004251a0",
+"0x004263e0",
+"0x0040d830"
+]
+},
+"0x00425660": {
+"name": "QueueFrontendOverlayRect",
+"roots": [
+"LOOP",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR22",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x00411e00"
+]
+},
+"0x00425730": {
+"name": "QueueFrontendSpriteBlit",
+"roots": [
+"LOOP"
+],
+"callees": []
+},
+"0x004258b0": {
+"name": "DeferFrontendBackgroundRestore",
+"roots": [
+"SCR20"
+],
+"callees": []
+},
+"0x004258c0": {
+"name": "ActivateFrontendCursorOverlay",
+"roots": [
+"INIT",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR22",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x004258e0": {
+"name": "DeactivateFrontendCursorOverlay",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x004258f0": {
+"name": "CreateFrontendMenuRectEntry",
+"roots": [
+"SCR3",
+"SEED"
+],
+"callees": [
+"0x00411e00"
+]
+},
+"0x004259b0": {
+"name": "AdvanceFrontendTickAndCheckReady",
+"roots": [
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8"
+],
+"callees": []
+},
+"0x004259d0": {
+"name": "MoveFrontendSpriteRect",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00425a30": {
+"name": "RenderFrontendUiRects",
+"roots": [
+"LOOP"
+],
+"callees": [
+"0x00425730"
+]
+},
+"0x00425b60": {
+"name": "DrawFrontendButtonBackground",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00425de0": {
+"name": "CreateFrontendDisplayModeButton",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x00425b60",
+"0x00424a50",
+"0x00424560",
+"0x00411e00",
+"0x00411e30",
+"0x00411f00"
+]
+},
+"0x004260e0": {
+"name": "CreateFrontendDisplayModePreviewButton",
+"roots": [
+"SCR16",
+"SCR20",
+"SCR24",
+"SCR6"
+],
+"callees": [
+"0x00425de0"
+]
+},
+"0x00426120": {
+"name": "RebuildFrontendButtonSurface",
+"roots": [
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25"
+],
+"callees": [
+"0x00425b60",
+"0x00424a50",
+"0x00424560"
+]
+},
+"0x00426260": {
+"name": "InitializeFrontendDisplayModeArrows",
+"roots": [
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR7",
+"SEED"
+],
+"callees": []
+},
+"0x00426390": {
+"name": "ReleaseFrontendDisplayModeButtons",
+"roots": [
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR28",
+"SCR29",
+"SCR3",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x00411e30"
+]
+},
+"0x004263e0": {
+"name": "RenderFrontendDisplayModeHighlight",
+"roots": [
+"FLUSH",
+"LOOP"
+],
+"callees": [
+"0x00424050"
+]
+},
+"0x004264e0": {
+"name": "BeginFrontendDisplayModePreviewLayout",
+"roots": [
+"SCR11",
+"SCR5"
+],
+"callees": []
+},
+"0x00426540": {
+"name": "RestoreFrontendDisplayModePreviewLayout",
+"roots": [
+"SCR11",
+"SCR5"
+],
+"callees": []
+},
+"0x00426580": {
+"name": "UpdateFrontendDisplayModeSelection",
+"roots": [
+"LOOP"
+],
+"callees": []
+},
+"0x004269d0": {
+"name": "ScreenLocalizationInit",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x004409b0",
+"0x0040fb60",
+"0x0040b100",
+"0x0041d840",
+"0x00414610",
+"0x00448cda",
+"0x00440790"
+]
+},
+"0x00427290": {
+"name": "ScreenLanguageSelect",
+"roots": [
+"SCR3"
+],
+"callees": [
+"0x00424b30",
+"0x00424af0",
+"0x00414610",
+"0x004258f0",
+"0x00424ca0",
+"0x004242b0",
+"0x004259b0",
+"0x004258e0",
+"0x004258c0",
+"0x00411e30",
+"0x00412030",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x004274a0": {
+"name": "ScreenLegalCopyright",
+"roots": [
+"SCR4"
+],
+"callees": [
+"0x00411a70",
+"0x00411750",
+"0x00424390",
+"0x00414610",
+"0x004127b0",
+"0x00411780",
+"0x00411a50"
+]
+},
+"0x004275a0": {
+"name": "RunAttractModeDemoScreen",
+"roots": [
+"SCR2"
+],
+"callees": [
+"0x00411750",
+"0x00424af0",
+"0x0040dac0",
+"0x004258c0",
+"0x00424ca0",
+"0x00411780",
+"0x00414a90",
+"0x00426390"
+]
+},
+"0x00427630": {
+"name": "TrackSelectionScreenStateMachine",
+"roots": [
+"SCR21"
+],
+"callees": [
+"0x00424b30",
+"0x00426120",
+"0x00424560",
+"0x0041b390",
+"0x00425de0",
+"0x00414a90",
+"0x00425660",
+"0x004259b0",
+"0x004258e0",
+"0x0040dac0",
+"0x00412b00",
+"0x00411e30",
+"0x00412e30",
+"0x00424af0",
+"0x00426260",
+"0x00411f00",
+"0x004183b0",
+"0x00414610",
+"0x00418430",
+"0x004129b0",
+"0x004259d0",
+"0x00424a50",
+"0x00418410",
+"0x00448443",
+"0x00424c50",
+"0x004258c0",
+"0x00424050",
+"0x00412030",
+"0x00426390",
+"0x004125b0"
+]
+},
+"0x0043fb70": {
+"name": "ReadTrackStaticDataChunk",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044868f"
+]
+},
+"0x0043fb90": {
+"name": "ReadCompressedTrackStreamChunk",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x00448512"
+]
+},
+"0x0043fbc0": {
+"name": "DecompressTrackDataStream",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044868f",
+"0x00448e91"
+]
+},
+"0x0043fc80": {
+"name": "ParseZipCentralDirectory",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0043fbc0",
+"0x0044868f",
+"0x00448d0e",
+"0x00448e91",
+"0x004481a3",
+"0x00449310",
+"0x00448495",
+"0x0044867c",
+"0x004487df"
+]
+},
+"0x004405b0": {
+"name": "DecompressZipEntry",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044868f",
+"0x00448e91",
+"0x004481a3",
+"0x00448512",
+"0x004487df",
+"0x00447fe2"
+]
+},
+"0x00440790": {
+"name": "ReadArchiveEntry",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0043fc80",
+"0x0044868f",
+"0x004405b0",
+"0x00448e91",
+"0x00448495",
+"0x0044867c"
+]
+},
+"0x00440860": {
+"name": "OpenArchiveFileForRead",
+"roots": [
+"INIT",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0043fc80",
+"0x0044868f",
+"0x004405b0",
+"0x00448d0e",
+"0x00448e91",
+"0x004481a3",
+"0x00448495",
+"0x0044867c",
+"0x004487df"
+]
+},
+"0x004409b0": {
+"name": "GetArchiveEntrySize",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0043fc80",
+"0x00448d0e",
+"0x00448e91",
+"0x00448495",
+"0x0044867c"
+]
+},
+"0x00447490": {
+"name": "InflateFlushOutputAndUpdateCrc32",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x00447502"
+]
+},
+"0x004474f6": {
+"name": "InflateRefillInputBuffer",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0043fb70"
+]
+},
+"0x00447502": {
+"name": "InflateWriteOutputChunk",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0043fb90"
+]
+},
+"0x0044751b": {
+"name": "InflateBuildDecodeTable",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": []
+},
+"0x00447715": {
+"name": "InflateDecodeHuffmanCodes",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x004474f6",
+"0x00447490"
+]
+},
+"0x00447aa6": {
+"name": "InflateProcessStoredBlock",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x004474f6",
+"0x00447490"
+]
+},
+"0x00447bbb": {
+"name": "InflateProcessFixedHuffmanBlock",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x00447715",
+"0x0044751b"
+]
+},
+"0x00447c42": {
+"name": "InflateProcessDynamicHuffmanBlock",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x004474f6",
+"0x00447715",
+"0x0044751b"
+]
+},
+"0x00447fe2": {
+"name": "InflateDecompress",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x00447bbb",
+"0x004474f6",
+"0x00447490",
+"0x00447aa6",
+"0x00447c42"
+]
+},
+"0x0044814a": {
+"name": "__set_new_handler",
+"roots": [
+"INIT"
+],
+"callees": [
+"0x00449a37"
+]
+},
+"0x00448157": {
+"name": "_rand",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR5",
+"SCR6",
+"SCR7",
+"SEED"
+],
+"callees": [
+"0x00449a37"
+]
+},
+"0x004481a3": {
+"name": "_malloc",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x004481b5"
+]
+},
+"0x004481b5": {
+"name": "__nh_malloc",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x004481e1",
+"0x00449b3e"
+]
+},
+"0x004481e1": {
+"name": "_heap_alloc",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044a874",
+"0x0044abc9",
+"0x0044a0c7",
+"0x004482a7",
+"0x00448248"
+]
+},
+"0x00448248": {
+"name": "__lock_fhandle",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x004482a7": {
+"name": "__unlock_fhandle",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x00448443": {
+"name": "sprintf_game",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x0044af28",
+"0x0044ae10"
+]
+},
+"0x00448495": {
+"name": "fclose_game",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044b840",
+"0x004484c6",
+"0x0044b7ee"
+]
+},
+"0x004484c6": {
+"name": "__fclose_lk",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044b972",
+"0x0044b9cb",
+"0x0044b892",
+"0x004487df"
+]
+},
+"0x00448512": {
+"name": "_fwrite",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044b840",
+"0x00448541",
+"0x0044b7ee"
+]
+},
+"0x00448541": {
+"name": "_fwrite_nolock",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044bcd0",
+"0x0044bad4",
+"0x0044b9cb",
+"0x0044ae10"
+]
+},
+"0x0044864b": {
+"name": "_fopen",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044b840",
+"0x0044c005",
+"0x0044c175"
+]
+},
+"0x0044867c": {
+"name": "fopen_game",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044864b"
+]
+},
+"0x0044868f": {
+"name": "fread_game",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044b840",
+"0x004486be",
+"0x0044b7ee"
+]
+},
+"0x004486be": {
+"name": "_fread_nolock",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044bcd0",
+"0x0044c319",
+"0x0044c23d"
+]
+},
+"0x004487b0": {
+"name": "__chkstk",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": []
+},
+"0x004487df": {
+"name": "_free",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044a82f",
+"0x0044abc9",
+"0x00449d9e",
+"0x00448849",
+"0x0044a7d8",
+"0x00449d73",
+"0x004488a1"
+]
+},
+"0x00448849": {
+"name": "__lock_fhandle2",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x004488a1": {
+"name": "__unlock_fhandle2",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x00448904": {
+"name": "_strlwr",
+"roots": [
+"SCR8"
+],
+"callees": [
+"0x0044c700",
+"0x0044abc9",
+"0x0044c610",
+"0x004481a3",
+"0x0044ac2a",
+"0x004487df"
+]
+},
+"0x00448a38": {
+"name": "_toupper",
+"roots": [
+"SCR8"
+],
+"callees": [
+"0x0044abc9",
+"0x00448aa7",
+"0x0044ac2a"
+]
+},
+"0x00448aa7": {
+"name": "_toupper_nolock",
+"roots": [
+"SCR8"
+],
+"callees": [
+"0x0044c700",
+"0x0044c94f"
+]
+},
+"0x00448b80": {
+"name": "_strncmp",
+"roots": [
+"SCR11"
+],
+"callees": []
+},
+"0x00448bb8": {
+"name": "_unlink",
+"roots": [
+"SCR27"
+],
+"callees": [
+"0x0044c9c4"
+]
+},
+"0x00448bf0": {
+"name": "__allmul",
+"roots": [
+"INIT",
+"SCR0"
+],
+"callees": []
+},
+"0x00448c30": {
+"name": "__alldiv",
+"roots": [
+"INIT"
+],
+"callees": []
+},
+"0x00448cda": {
+"name": "_sscanf",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044ca49",
+"0x0044d500"
+]
+},
+"0x00448d0e": {
+"name": "ftell_game",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044b840",
+"0x00448d30",
+"0x0044b7ee"
+]
+},
+"0x00448d30": {
+"name": "_ftell_nolock",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044d737",
+"0x0044ca37"
+]
+},
+"0x00448e91": {
+"name": "fseek_game",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x00448ebd",
+"0x0044b840",
+"0x0044b7ee"
+]
+},
+"0x00448ebd": {
+"name": "_fseek",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044d737",
+"0x0044b9cb",
+"0x00448d30",
+"0x0044ca37"
+]
+},
+"0x00449310": {
+"name": "stricmp_game",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044e61d",
+"0x0044abc9",
+"0x0044ac2a"
+]
+},
+"0x004494e8": {
+"name": "__amsg_exit",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044e726",
+"0x0044ee10",
+"0x0044ee49"
+]
+},
+"0x00449a24": {
+"name": "__initptd",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00449a37": {
+"name": "_getptd",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x00449a24",
+"0x004494e8",
+"0x0044f8be"
+]
+},
+"0x00449b3e": {
+"name": "__callnewh",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00449d73": {
+"name": "__sbh_find_block",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00449d9e": {
+"name": "__sbh_free_block",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044f580"
+]
+},
+"0x0044a0c7": {
+"name": "_heap_alloc_base",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044a3d0",
+"0x0044a481"
+]
+},
+"0x0044a3d0": {
+"name": "__sbh_alloc_new_region",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044a481": {
+"name": "__sbh_alloc_new_group",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044a57c": {
+"name": "__sbh_new_region",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044f520"
+]
+},
+"0x0044a6c0": {
+"name": "_heap_free_region",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044a716": {
+"name": "__sbh_decommit_pages",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044a6c0"
+]
+},
+"0x0044a7d8": {
+"name": "__sbh_find_block_old",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044a82f": {
+"name": "__sbh_page_decommit_check",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044a716"
+]
+},
+"0x0044a874": {
+"name": "__sbh_alloc_block",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044f520",
+"0x0044a57c",
+"0x0044aa7c"
+]
+},
+"0x0044aa7c": {
+"name": "_flsbuf",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044abc9": {
+"name": "_lock",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044abc9",
+"0x004481a3",
+"0x004494e8",
+"0x0044ac2a",
+"0x004487df"
+]
+},
+"0x0044ac2a": {
+"name": "_unlock",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044ae10": {
+"name": "_fputc",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044fd70",
+"0x0044bad4",
+"0x0044fdb4",
+"0x0044d737"
+]
+},
+"0x0044af28": {
+"name": "_output",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x0044b707",
+"0x0044b724",
+"0x0044b714",
+"0x0044b669",
+"0x0044f8b5",
+"0x0044fddd",
+"0x0044b6cf",
+"0x0044d500",
+"0x0044fea0",
+"0x0044b69e",
+"0x0044ff10"
+]
+},
+"0x0044b669": {
+"name": "_write_char",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x0044ae10"
+]
+},
+"0x0044b69e": {
+"name": "_write_multi_char",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x0044b669"
+]
+},
+"0x0044b6cf": {
+"name": "_write_string",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x0044b669"
+]
+},
+"0x0044b707": {
+"name": "__va_arg_int",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x0044b714": {
+"name": "__va_arg_double",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x0044b724": {
+"name": "__va_arg_short",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x0044b7ee": {
+"name": "_lock_file",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044abc9"
+]
+},
+"0x0044b81d": {
+"name": "_lock_stream",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044abc9"
+]
+},
+"0x0044b840": {
+"name": "_unlock_file",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x0044b86f": {
+"name": "_unlock_stream",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x0044b892": {
+"name": "_close",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x004502c5",
+"0x00450266",
+"0x0044ca40",
+"0x0044b8ef",
+"0x0044ca37"
+]
+},
+"0x0044b8ef": {
+"name": "_close_nolock",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x00450224",
+"0x0044c9c4",
+"0x004501a5"
+]
+},
+"0x0044b972": {
+"name": "__freebuf",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x004487df"
+]
+},
+"0x0044b9cb": {
+"name": "_flush",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044bad4"
+]
+},
+"0x0044bad4": {
+"name": "_write",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x004502c5",
+"0x00450266",
+"0x0044ca40",
+"0x0044bb39",
+"0x0044ca37"
+]
+},
+"0x0044bb39": {
+"name": "_write_nolock",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044c9c4",
+"0x0044ca40",
+"0x0044d79c",
+"0x0044ca37"
+]
+},
+"0x0044bcd0": {
+"name": "_memmove",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": []
+},
+"0x0044c005": {
+"name": "_openfile",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0045037a"
+]
+},
+"0x0044c175": {
+"name": "_getstream",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044abc9",
+"0x0044b81d",
+"0x004481a3",
+"0x0044b86f",
+"0x0044ac2a"
+]
+},
+"0x0044c23d": {
+"name": "_filbuf",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044fd70",
+"0x0044c319"
+]
+},
+"0x0044c319": {
+"name": "_read",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x004502c5",
+"0x00450266",
+"0x0044ca40",
+"0x0044ca37",
+"0x0044c37e"
+]
+},
+"0x0044c37e": {
+"name": "_read_nolock",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044c9c4",
+"0x0044ca40",
+"0x0044d79c",
+"0x0044ca37"
+]
+},
+"0x0044c610": {
+"name": "_strcpy",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044c620": {
+"name": "_strcat",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044c700": {
+"name": "__crtLCMapStringA",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x004487b0",
+"0x0044c924"
+]
+},
+"0x0044c924": {
+"name": "_strnlen",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": []
+},
+"0x0044c94f": {
+"name": "__isctype",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0045085a"
+]
+},
+"0x0044c9c4": {
+"name": "_dosmaperr",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ca40",
+"0x0044ca37"
+]
+},
+"0x0044ca37": {
+"name": "_errno",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x00449a37"
+]
+},
+"0x0044ca40": {
+"name": "__doserrno",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x00449a37"
+]
+},
+"0x0044ca49": {
+"name": "_input",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044d4d6",
+"0x00450ac9",
+"0x0044f520",
+"0x0044f8b5",
+"0x0044d46e",
+"0x0044d4a5",
+"0x0044d4bf",
+"0x0044c94f",
+"0x004509a3",
+"0x00450b00",
+"0x00448bf0"
+]
+},
+"0x0044d46e": {
+"name": "_toupper_lk",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044c94f"
+]
+},
+"0x0044d4a5": {
+"name": "_fgetc",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044c23d"
+]
+},
+"0x0044d4bf": {
+"name": "_ungetc",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x00450b1f"
+]
+},
+"0x0044d4d6": {
+"name": "_fgetc_unlocked",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x00450ac9",
+"0x0044d4a5"
+]
+},
+"0x0044d500": {
+"name": "_strlen",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044d737": {
+"name": "_lseek",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x004502c5",
+"0x00450266",
+"0x0044ca40",
+"0x0044d79c",
+"0x0044ca37"
+]
+},
+"0x0044d79c": {
+"name": "_lseek_nolock",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x00450224",
+"0x0044c9c4",
+"0x0044ca37"
+]
+},
+"0x0044e61d": {
+"name": "_tolower_nolock",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044c700",
+"0x0044c94f"
+]
+},
+"0x0044e726": {
+"name": "__exit",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044e737"
+]
+},
+"0x0044e737": {
+"name": "_doexit",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044e7e5",
+"0x0044e7ee",
+"0x0044e7dc"
+]
+},
+"0x0044e7dc": {
+"name": "__lock_fh_init",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044abc9"
+]
+},
+"0x0044e7e5": {
+"name": "__unlock_fh_init",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x0044e7ee": {
+"name": "__initterm_real",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044ee10": {
+"name": "_cexit",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ee49"
+]
+},
+"0x0044ee49": {
+"name": "__initterm",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044c620",
+"0x004506e0",
+"0x00450bd2",
+"0x0044c610",
+"0x0044d500"
+]
+},
+"0x0044f520": {
+"name": "_memset",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044f580": {
+"name": "_memcpy",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044f8b5": {
+"name": "__amsg_exit_nomem",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x004494e8"
+]
+},
+"0x0044f8be": {
+"name": "_calloc",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044f9e0",
+"0x0044f520",
+"0x0044a874",
+"0x0044abc9",
+"0x0044a0c7",
+"0x0044f957",
+"0x00449b3e"
+]
+},
+"0x0044f957": {
+"name": "__unlock_fh_9",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x0044f9e0": {
+"name": "__unlock_fh_9b",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ac2a"
+]
+},
+"0x0044fd70": {
+"name": "__getbuf",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x004481a3"
+]
+},
+"0x0044fdb4": {
+"name": "_isatty",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0044fddd": {
+"name": "_wctomb",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x0044fe36",
+"0x0044abc9",
+"0x0044ac2a"
+]
+},
+"0x0044fe36": {
+"name": "_wctomb_nolock",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": [
+"0x0044ca37"
+]
+},
+"0x0044fea0": {
+"name": "__aulldiv",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x0044ff10": {
+"name": "__aullrem",
+"roots": [
+"INIT",
+"SCR0",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR27",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9"
+],
+"callees": []
+},
+"0x00450006": {
+"name": "_alloc_osfhnd",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044abc9",
+"0x00450266",
+"0x004481a3",
+"0x0044ac2a"
+]
+},
+"0x00450129": {
+"name": "_set_osfhnd",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044ca40",
+"0x0044ca37"
+]
+},
+"0x004501a5": {
+"name": "_free_osfhnd",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044ca40",
+"0x0044ca37"
+]
+},
+"0x00450224": {
+"name": "_get_osfhandle",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044ca40",
+"0x0044ca37"
+]
+},
+"0x00450266": {
+"name": "_lock_fh",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": [
+"0x0044abc9",
+"0x0044ac2a"
+]
+},
+"0x004502c5": {
+"name": "_unlock_fh",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0045037a": {
+"name": "_sopen",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x004502c5",
+"0x0044c9c4",
+"0x0044ca40",
+"0x0044d79c",
+"0x0044ca37",
+"0x0044c37e",
+"0x00450129",
+"0x00450006",
+"0x0044b892",
+"0x00451560"
+]
+},
+"0x004506e0": {
+"name": "_strncpy",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x0045085a": {
+"name": "__crtGetStringTypeA",
+"roots": [
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044f520",
+"0x004487b0"
+]
+},
+"0x004509a3": {
+"name": "_mbtowc",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044abc9",
+"0x00450a00",
+"0x0044ac2a"
+]
+},
+"0x00450a00": {
+"name": "_mbtowc_nolock",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044ca37"
+]
+},
+"0x00450ac9": {
+"name": "_isspace",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044c94f"
+]
+},
+"0x00450b00": {
+"name": "__allshl",
+"roots": [
+"SCR0"
+],
+"callees": []
+},
+"0x00450b1f": {
+"name": "_ungetc_nolock",
+"roots": [
+"SCR0"
+],
+"callees": [
+"0x0044fd70"
+]
+},
+"0x00450bd2": {
+"name": "__crtMessageBoxA",
+"roots": [
+"FLUSH",
+"FSM",
+"INIT",
+"LOOP",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SCR9",
+"SEED"
+],
+"callees": []
+},
+"0x00451560": {
+"name": "_chsize",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044f520",
+"0x00451921",
+"0x004487b0",
+"0x00450224",
+"0x0044ca40",
+"0x0044bb39",
+"0x0044d79c",
+"0x0044ca37"
+]
+},
+"0x00451921": {
+"name": "_setmode",
+"roots": [
+"FSM",
+"INIT",
+"SCR0",
+"SCR1",
+"SCR10",
+"SCR11",
+"SCR12",
+"SCR13",
+"SCR14",
+"SCR15",
+"SCR16",
+"SCR17",
+"SCR18",
+"SCR19",
+"SCR2",
+"SCR20",
+"SCR21",
+"SCR23",
+"SCR24",
+"SCR25",
+"SCR26",
+"SCR27",
+"SCR29",
+"SCR3",
+"SCR4",
+"SCR5",
+"SCR6",
+"SCR7",
+"SCR8",
+"SEED"
+],
+"callees": [
+"0x0044ca37"
+]
+}
+}

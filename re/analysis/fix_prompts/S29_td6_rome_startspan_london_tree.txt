@@ -1,0 +1,26 @@
+S29 — TD6 placement: Rome start span vs banner · tree in the middle of London's road
+=====================================================================================
+
+Covers feedback: starting span on Rome is too far away from the start banner · there's a tree in the middle of the road at the beginning of London
+Modules: td5_asset.c (k_td6_menu_slots start_span table), re/tools/convert_td6_tracks.py (MODELS.DAT / scenery conversion), re/tools (extract_td6_checkpoints.py, track_preview_render.py), re/assets/levels/* (data)
+Memory: project_td6_track_migration_2026-06-02; reference_track_preview_render_tool_2026-06-02 (STRIP.DAT branch+coord facts, render previews); reference_td6_track_names_2026-06-03 (Rome=level002, London=level004->level012)
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Two TD6 spatial-placement issues (both data-side):
+
+1. ROME START SPAN TOO FAR FROM BANNER. The TD6 per-track start span is in k_td6_menu_slots[] td5_asset.c ~1432-1474; Rome (TD6 level002, slot ~34) is set to start_span=20, which a comment (~1456) admits is a placeholder fallback (Rome ships no "start" banner mesh), leaving a long empty run-up before the start banner. Find the real start/finish-straight span near Rome's start banner — use re/tools/extract_td6_checkpoints.py and/or re/tools/track_preview_render.py (it renders STRIP.DAT centerlines and start/finish markers; see the track-preview memory) to locate the banner span — and set Rome's start_span so the player spawns at the banner. Keep the value within the ring; verify spawn lands on the straight.
+
+2. TREE IN THE MIDDLE OF LONDON'S ROAD. London is TD6 level004 -> re/assets/levels/level012/MODELS.DAT. Scenery/trees come from the conversion convert_td6_tracks.py (convert_models ~507-599; tree/billboard page detection ~628; mesh de-index/split ~210-505). A tree sits on the road at the London start. Determine whether it's bad TD6 source data or a conversion mis-split (e.g. a billboard placed at the wrong world position), then remove or relocate the offending tree. Use track_preview_render.py / a headless render to locate it spatially. This regenerates a gitignored asset (MODELS.DAT) — note it; do NOT git-add regenerated assets.
+
+NOTE: both are DATA fixes (per-track config value + conversion/asset). The /fix Ghidra step does not apply (no original-binary behavior) — document "data fix, no RE basis" and proceed; do NOT hard-stop. Pure asset/track data — the multi-track CSV sweep can be skipped, but verify spatially with renders.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive. Finish ALL self-verification first: build + a headless AutoRace/spawn on Rome to confirm the spawn is at the banner (read spawn span / camera vs banner from the trace or a frame capture) + a headless frame/preview of London's start to confirm the road is clear of the tree. Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Rome spawns the player right at/near the start banner (no long empty run-up).
+- London's starting road is clear — no tree in the middle of the road.

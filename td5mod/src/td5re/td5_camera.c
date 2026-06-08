@@ -177,6 +177,75 @@ static int   s_camYCur   [TD5_MAX_VIEWPORTS]      = {0};
 /* Re-anchor one view's smoothing (prev := cur on next producer call). */
 static void td5_camera_snap_smoothing_view(int view);
 
+/* ========================================================================
+ * [CAMERA REWRITE 2026-06-07] Unified FPS-independent camera pose pipeline.
+ *
+ * Every camera mode's dynamics (chase spring, fly-in orbit, bumper angle
+ * follow, trackside orbit/static/spline, replay profile selection) now run
+ * ONCE per fixed 30 Hz sim tick in td5_camera_solve_tick_all(). Each mode's
+ * existing updater is reused as-is: we run it with g_subTickFraction forced to
+ * 0 (so its velocity-extrapolation terms vanish — extrapolation is re-applied
+ * per render frame) and CAPTURE the eye / look-at / euler-angles it feeds to
+ * SetCameraWorldPosition / OrientCameraTowardTarget / BuildCameraBasisFromAngles
+ * into a per-view tick pose. The orbit/height/angle integrators that the port
+ * had smeared across render frames via g_subTickFraction now advance a full
+ * step per tick (see cam_integ_step()).
+ *
+ * td5_camera_apply_view() then, once per render frame per viewport, interpolates
+ * prev->cur by g_subTickFraction and RE-PINS the car-locked components to the
+ * exact body-mesh extrapolation (world_pos + linear_velocity*subtick for X/Z,
+ * sub-tick interpolated world_pos.y, matching td5_render.c:2838-2840 + the
+ * inspect-cam recipe at td5_render.c:805-877). Result: identical motion at any
+ * FPS, and the followed car is pixel-locked in frame (no wobble).
+ *
+ * Legacy per-frame path (td5_camera_finalize_all + td5_camera_update_transition_state)
+ * is preserved and selected when TD5RE_CAM_NEW=0 for A/B testing.
+ * ======================================================================== */
+
+typedef struct {
+    int   eye[3];           /* captured world-space eye (24.8 FP) at the tick   */
+    int   target[3];        /* captured look-at target (build_mode 0)           */
+    short angles[3];        /* captured euler basis angles (build_mode 1=bumper)*/
+    int   anchor[3];        /* followed car world_pos at this tick (re-pin base)*/
+    int   yaw_offset;       /* OrientCameraTowardTarget yaw offset              */
+    int   fov_factor;       /* g_depthFovFactor snapshot (trackside FOV)        */
+    unsigned char build_mode;     /* 0 = orient-toward-target, 1 = euler basis  */
+    unsigned char eye_car_locked; /* 1 = eye re-pins to body extrapolation      */
+    unsigned char tgt_car_locked; /* 1 = look-at re-pins to body extrapolation  */
+    unsigned char anchor_valid;   /* 0 = no followed car (debug / no actor)     */
+    unsigned char valid;          /* a pose has been solved for this view       */
+} TD5_CamPose;
+
+static TD5_CamPose s_cam_pose_prev[TD5_MAX_VIEWPORTS];
+static TD5_CamPose s_cam_pose_cur [TD5_MAX_VIEWPORTS];
+static int         s_cam_pose_init[TD5_MAX_VIEWPORTS] = {0};
+static int         s_cam_capture_view = -1;   /* >=0 => sinks also record into s_cam_pose_cur[view] */
+/* g_depthFovFactor is defined above (camera projection FOV). */
+
+/* TD5RE_CAM_NEW (default 1): 0 falls back to the legacy per-frame camera path. */
+static int td5_camera_use_new_pipeline(void)
+{
+    static int s_mode = -1;
+    if (s_mode < 0) {
+        const char *e = getenv("TD5RE_CAM_NEW");
+        s_mode = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s_mode;
+}
+
+/* Integrator step for the orbit/height/angle accumulators that the port had
+ * scaled by g_subTickFraction (per-frame smear). New pipeline: advance a full
+ * step per tick (1.0). Legacy path: keep the per-frame sub-tick smear. */
+static float cam_integ_step(void)
+{
+    return td5_camera_use_new_pipeline() ? 1.0f : g_subTickFraction;
+}
+
+void td5_camera_solve_tick_all(void);
+void td5_camera_apply_view(int view);
+void td5_camera_snap_poses(void);
+static void update_debug_race_camera(int view);   /* defined later */
+
 /* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
 TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
     { 0, 600,  2100, 510, 0, 0 },  /* preset  0: far chase */
@@ -257,6 +326,10 @@ void td5_camera_bind_track_geometry(const void *span_base,
 
 void SetCameraWorldPosition(int *pos)
 {
+    if (s_cam_capture_view >= 0) {
+        TD5_CamPose *P = &s_cam_pose_cur[s_cam_capture_view];
+        P->eye[0] = pos[0]; P->eye[1] = pos[1]; P->eye[2] = pos[2];
+    }
     g_cameraPos[0] = (float)pos[0] * g_worldToRenderScale;
     g_cameraPos[1] = (float)pos[1] * g_worldToRenderScale;
     g_cameraPos[2] = (float)pos[2] * g_worldToRenderScale;
@@ -278,6 +351,11 @@ void SetCameraWorldPosition(int *pos)
 
 void BuildCameraBasisFromAngles(short *angles)
 {
+    if (s_cam_capture_view >= 0) {
+        TD5_CamPose *P = &s_cam_pose_cur[s_cam_capture_view];
+        P->angles[0] = angles[0]; P->angles[1] = angles[1]; P->angles[2] = angles[2];
+        P->build_mode = 1;
+    }
     /*
      * Directly follows the Ghidra decompilation of FUN_0042d0b0.
      *
@@ -458,6 +536,11 @@ void FinalizeCameraProjectionMatrices(void)
 
 void OrientCameraTowardTarget(int *target_pos, unsigned int yaw_offset)
 {
+    if (s_cam_capture_view >= 0) {
+        TD5_CamPose *P = &s_cam_pose_cur[s_cam_capture_view];
+        P->target[0] = target_pos[0]; P->target[1] = target_pos[1]; P->target[2] = target_pos[2];
+        P->yaw_offset = (int)yaw_offset; P->build_mode = 0;
+    }
     float dir_x, dir_y, dir_z;
     float dist_sq, inv_dist, horiz_len;
     float flip[9];
@@ -739,15 +822,19 @@ static void terrain_probe_trace_emit(int view, int actor_addr,
 /* Force the next snapshot to re-seed (prev := cur) for one view. */
 static void td5_camera_snap_smoothing_view(int view)
 {
-    if (view >= 0 && view < TD5_MAX_VIEWPORTS)
+    if (view >= 0 && view < TD5_MAX_VIEWPORTS) {
         s_camSmoothInit[view] = 0;
+        s_cam_pose_init[view] = 0;   /* [CAMERA REWRITE] re-seed prev=cur on next solve */
+    }
 }
 
 /* Public: re-anchor smoothing for every view (race start / resume-from-pause). */
 void td5_camera_snap_smoothing(void)
 {
-    for (int v = 0; v < TD5_MAX_VIEWPORTS; v++)
+    for (int v = 0; v < TD5_MAX_VIEWPORTS; v++) {
         s_camSmoothInit[v] = 0;
+        s_cam_pose_init[v] = 0;      /* [CAMERA REWRITE] re-seed prev=cur on next solve */
+    }
 }
 
 /* Producer — capture this sub-tick's spring output + car vertical pose.
@@ -1435,7 +1522,10 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     }
 
     int off0, off1, off2, smoothed_h, base_y;
-    if (s_smoothCam && s_camSmoothInit[v]) {
+    /* During the new pipeline's per-tick capture (s_cam_capture_view==v,
+     * g_subTickFraction forced to 0) take the raw spring output — the prev->cur
+     * interpolation now happens in td5_camera_apply_view, not here. */
+    if (s_smoothCam && s_camSmoothInit[v] && s_cam_capture_view < 0) {
         float f = g_subTickFraction;
         off0 = (int)((float)s_camOffPrev[v][0]
                      + (float)(s_camOffCur[v][0] - s_camOffPrev[v][0]) * f + 0.5f);
@@ -1539,12 +1629,213 @@ static TD5_Actor *camera_actor_for_view(int v);  /* forward decl — defined bel
 
 void td5_camera_finalize_all(void)
 {
+    if (td5_camera_use_new_pipeline()) return;  /* new path finalizes per-viewport in td5_camera_apply_view */
     if (td5_game_get_total_actor_count() <= 0) return;
     int view_count = (g_td5.viewport_count > 0) ? g_td5.viewport_count : 1;
     for (int v = 0; v < view_count; v++) {
         TD5_Actor *actor = camera_actor_for_view(v);
         if (!actor) continue;
         td5_camera_finalize_chase_pos(actor, v);
+    }
+}
+
+/* ========================================================================
+ * [CAMERA REWRITE 2026-06-07] Unified per-tick solve + per-frame present.
+ * ======================================================================== */
+
+static int cam_lerp_i(int a, int b, float f)
+{
+    float d = (float)(b - a) * f;
+    return a + (int)(d + (d >= 0.0f ? 0.5f : -0.5f));
+}
+
+/* Shortest-path interpolation of a 12-bit (0x1000) angle. */
+static short cam_lerp_angle(short a, short b, float f)
+{
+    int d = ((int)b - (int)a) & 0xFFF;
+    if (d > 0x800) d -= 0x1000;
+    float fd = (float)d * f;
+    int r = (int)a + (int)(fd + (fd >= 0.0f ? 0.5f : -0.5f));
+    return (short)(r & 0xFFF);
+}
+
+/* Re-seed prev := cur on the next solve for every view (race start, preset
+ * change, resume-from-pause) so apply_view does not glide across a teleport. */
+void td5_camera_snap_poses(void)
+{
+    for (int v = 0; v < TD5_MAX_VIEWPORTS; v++)
+        s_cam_pose_init[v] = 0;
+}
+
+/* Solve one view's desired tick pose by running its existing mode updater with
+ * g_subTickFraction == 0 and capturing the eye/target/angles it emits. */
+static void cam_solve_view(int v)
+{
+    TD5_Actor *actor = camera_actor_for_view(v);
+    if (!actor) return;
+
+    if (s_cam_pose_init[v])
+        s_cam_pose_prev[v] = s_cam_pose_cur[v];     /* roll prev <- last tick */
+
+    TD5_CamPose *C = &s_cam_pose_cur[v];
+    int eye_lock = 1, tgt_lock = 1;
+
+    /* Fly-in spring-reset one-shot (mirrors td5_camera_update_transition_state). */
+    if (!s_flyin_preset_reloaded[v] && !g_td5.paused) {
+        s_flyin_preset_reloaded[v] = 1;
+        g_raceCameraPresetId[v]   = 0;
+        g_raceCameraPresetMode[v] = 0;
+        TD5_CameraPreset *p = &g_cameraPresets[0];
+        g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw  * g_const256;
+        g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
+        g_camElevationAngleFP[v] = (int)p->elevation_angle << 8;
+    }
+
+    float save = g_subTickFraction;
+    g_subTickFraction = 0.0f;     /* kill vel-extrapolation; integrators use cam_integ_step() */
+    s_cam_capture_view = v;
+
+    if (g_cameraTransitionActive > 0 && !s_flyin_preset_reloaded[v]) {
+        /* Race-start fly-in — now advances once per TICK (was per frame/viewport). */
+        UpdateChaseCamera((int)actor, 1, v);
+        UpdateRaceCameraTransitionState((int)actor, v);
+        td5_camera_finalize_chase_pos(actor, v);
+        eye_lock = 1; tgt_lock = 1;
+    } else if (g_replay_mode && td5_camera_replay_trackside_ready()) {
+        SelectTracksideCameraProfile((int)actor, v);
+        UpdateTracksideCamera((int)actor, v);
+        eye_lock = 0; tgt_lock = 1;     /* trackside eye is world-fixed; look-at tracks car */
+    } else if (g_raceCameraPresetMode[v] != 0 && !g_td5.paused) {
+        UpdateVehicleRelativeCamera((int)actor, v);   /* bumper / in-car (euler basis) */
+        eye_lock = 1; tgt_lock = 1;
+    } else {
+        UpdateChaseCamera((int)actor, 1, v);
+        td5_camera_finalize_chase_pos(actor, v);
+        eye_lock = 1; tgt_lock = 1;
+    }
+
+    s_cam_capture_view = -1;
+    g_subTickFraction = save;
+
+    C->anchor[0] = actor->world_pos.x;
+    C->anchor[1] = actor->world_pos.y;
+    C->anchor[2] = actor->world_pos.z;
+    C->anchor_valid   = 1;
+    C->eye_car_locked = (unsigned char)eye_lock;
+    C->tgt_car_locked = (unsigned char)tgt_lock;
+    C->fov_factor     = g_depthFovFactor;
+    C->valid          = 1;
+
+    if (!s_cam_pose_init[v]) {
+        s_cam_pose_prev[v] = s_cam_pose_cur[v];   /* seed prev=cur on first solve (no glide) */
+        s_cam_pose_init[v] = 1;
+    }
+
+    /* [CAMERA REWRITE] FPS-independence harness: TD5RE_CAM_LOG=1 dumps the solved
+     * pose once per sim tick. Keyed on simulation_tick_counter (NOT frame), the
+     * stream must be byte-identical at 30/60/180 fps to prove tick-locked dynamics. */
+    {
+        static int s_cam_log = -1;
+        if (s_cam_log < 0) { const char *e = getenv("TD5RE_CAM_LOG"); s_cam_log = (e && e[0] == '1') ? 1 : 0; }
+        if (s_cam_log) {
+            TD5_LOG_I(LOG_TAG,
+                "campose tick=%d v=%d eye=(%d,%d,%d) tgt=(%d,%d,%d) ang=(%d,%d,%d) mode=%d eyelock=%d fov=%d transA=0x%X",
+                (int)g_td5.simulation_tick_counter, v,
+                C->eye[0], C->eye[1], C->eye[2],
+                C->target[0], C->target[1], C->target[2],
+                (int)C->angles[0], (int)C->angles[1], (int)C->angles[2],
+                (int)C->build_mode, (int)C->eye_car_locked, C->fov_factor,
+                g_cameraTransitionActive);
+        }
+    }
+}
+
+/* Per-sim-tick: solve every active view's camera pose (FPS-independent). */
+void td5_camera_solve_tick_all(void)
+{
+    if (!td5_camera_use_new_pipeline()) { td5_camera_update_chase_all(); return; }
+    if (td5_game_get_total_actor_count() <= 0) {
+        /* No race actors yet: debug fly-around (already tick-keyed). Capture it. */
+        int v = 0;
+        if (s_cam_pose_init[v]) s_cam_pose_prev[v] = s_cam_pose_cur[v];
+        TD5_CamPose *C = &s_cam_pose_cur[v];
+        float save = g_subTickFraction;
+        g_subTickFraction = 0.0f;
+        s_cam_capture_view = v;
+        update_debug_race_camera(v);
+        s_cam_capture_view = -1;
+        g_subTickFraction = save;
+        C->anchor_valid = 0; C->eye_car_locked = 0; C->tgt_car_locked = 0;
+        C->fov_factor = g_depthFovFactor; C->valid = 1;
+        if (!s_cam_pose_init[v]) { s_cam_pose_prev[v] = s_cam_pose_cur[v]; s_cam_pose_init[v] = 1; }
+        return;
+    }
+
+    int view_count = (g_td5.viewport_count > 0) ? g_td5.viewport_count : 1;
+    if (view_count > TD5_MAX_VIEWPORTS) view_count = TD5_MAX_VIEWPORTS;
+    for (int v = 0; v < view_count; v++)
+        cam_solve_view(v);
+}
+
+/* Per-render-frame, per-viewport: interpolate the solved pose and re-pin the
+ * car-locked components to the body-mesh extrapolation, then build the basis. */
+void td5_camera_apply_view(int view)
+{
+    if (!td5_camera_use_new_pipeline()) { td5_camera_update_transition_state(view, view); return; }
+    int v = view;
+    if (v < 0 || v >= TD5_MAX_VIEWPORTS) return;
+    TD5_CamPose *C = &s_cam_pose_cur[v];
+    if (!C->valid) return;
+    TD5_CamPose *P = s_cam_pose_init[v] ? &s_cam_pose_prev[v] : C;
+
+    float f = g_subTickFraction;
+    if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
+
+    /* Body-matching anchor: X/Z velocity-extrapolate, Y sub-tick interpolate
+     * (matches td5_render.c body mesh 2838-2840 + inspect-cam 805-877). */
+    int ax = C->anchor[0], ay = C->anchor[1], az = C->anchor[2];
+    if (C->anchor_valid) {
+        TD5_Actor *a = camera_actor_for_view(v);
+        if (a) {
+            ax = a->world_pos.x + (int)((float)a->linear_velocity_x * f);
+            az = a->world_pos.z + (int)((float)a->linear_velocity_z * f);
+            int dy = C->anchor[1] - P->anchor[1];
+            if (dy > 0x40000 || dy < -0x40000) ay = C->anchor[1];
+            else ay = P->anchor[1] + (int)((float)dy * f + (dy >= 0 ? 0.5f : -0.5f));
+        }
+    }
+
+    int eye[3], target[3];
+    if (C->eye_car_locked && C->anchor_valid) {
+        eye[0] = ax + cam_lerp_i(P->eye[0]-P->anchor[0], C->eye[0]-C->anchor[0], f);
+        eye[1] = ay + cam_lerp_i(P->eye[1]-P->anchor[1], C->eye[1]-C->anchor[1], f);
+        eye[2] = az + cam_lerp_i(P->eye[2]-P->anchor[2], C->eye[2]-C->anchor[2], f);
+    } else {
+        eye[0] = cam_lerp_i(P->eye[0], C->eye[0], f);
+        eye[1] = cam_lerp_i(P->eye[1], C->eye[1], f);
+        eye[2] = cam_lerp_i(P->eye[2], C->eye[2], f);
+    }
+    if (C->tgt_car_locked && C->anchor_valid) {
+        target[0] = ax + cam_lerp_i(P->target[0]-P->anchor[0], C->target[0]-C->anchor[0], f);
+        target[1] = ay + cam_lerp_i(P->target[1]-P->anchor[1], C->target[1]-C->anchor[1], f);
+        target[2] = az + cam_lerp_i(P->target[2]-P->anchor[2], C->target[2]-C->anchor[2], f);
+    } else {
+        target[0] = cam_lerp_i(P->target[0], C->target[0], f);
+        target[1] = cam_lerp_i(P->target[1], C->target[1], f);
+        target[2] = cam_lerp_i(P->target[2], C->target[2], f);
+    }
+
+    g_depthFovFactor = cam_lerp_i(P->fov_factor, C->fov_factor, f);
+    s_cam_capture_view = -1;          /* build live, not capture */
+    SetCameraWorldPosition(eye);
+    if (C->build_mode == 1) {
+        short ang[3];
+        ang[0] = cam_lerp_angle(P->angles[0], C->angles[0], f);
+        ang[1] = cam_lerp_angle(P->angles[1], C->angles[1], f);
+        ang[2] = cam_lerp_angle(P->angles[2], C->angles[2], f);
+        BuildCameraBasisFromAngles(ang);
+    } else {
+        OrientCameraTowardTarget(target, (unsigned int)C->yaw_offset);
     }
 }
 
@@ -1598,7 +1889,7 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
         }
 
         /* Smooth by subTickFraction */
-        orbit_angle_fp = (int)((float)((delta * effective) >> 8) * g_subTickFraction + 0.5f) +
+        orbit_angle_fp = (int)((float)((delta * effective) >> 8) * cam_integ_step() + 0.5f) +
                          g_camOrbitAngleFP[v];
     } else {
         orbit_angle_fp = g_camOrbitAngleFP[v];
@@ -1632,7 +1923,7 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
     /* Smooth height */
     {
         float h_delta = (g_camTargetHeight[v] - g_camSmoothedHeight[v]) * g_dampWeight;
-        int smoothed_h = (int)(h_delta * g_subTickFraction + g_camSmoothedHeight[v] + 0.5f);
+        int smoothed_h = (int)(h_delta * cam_integ_step() + g_camSmoothedHeight[v] + 0.5f);
 
         /* Orbit position from Ghidra 0x00401950:
          *   X =  sin(orbit_vis) * radius
@@ -1739,7 +2030,7 @@ void UpdateVehicleRelativeCamera(int actor, int view)
     {
         int wrapped = (int)((((unsigned int)(unsigned short)target_pitch -
                      (unsigned int)(unsigned short)cached[0]) - 0x800) & 0xFFF) - 0x800;
-        delta = (short)(int)((float)wrapped * g_subTickFraction + 0.5f);
+        delta = (short)(int)((float)wrapped * cam_integ_step() + 0.5f);
     }
     cam_angles[0] = cached[0] + delta;
 
@@ -1747,7 +2038,7 @@ void UpdateVehicleRelativeCamera(int actor, int view)
     {
         int wrapped = (int)((((unsigned int)(unsigned short)target_yaw -
                      (unsigned int)(unsigned short)cached[1]) - 0x800) & 0xFFF) - 0x800;
-        delta = (short)(int)((float)wrapped * g_subTickFraction + 0.5f);
+        delta = (short)(int)((float)wrapped * cam_integ_step() + 0.5f);
     }
     cam_angles[1] = cached[1] + delta;
 
@@ -1755,7 +2046,7 @@ void UpdateVehicleRelativeCamera(int actor, int view)
     {
         int wrapped = (int)((((unsigned int)(unsigned short)target_roll -
                      (unsigned int)(unsigned short)cached[2]) - 0x800) & 0xFFF) - 0x800;
-        delta = (short)(int)((float)wrapped * g_subTickFraction + 0.5f);
+        delta = (short)(int)((float)wrapped * cam_integ_step() + 0.5f);
     }
     cam_angles[2] = delta + cached[2];
 
@@ -2515,21 +2806,21 @@ void UpdateTracksideCamera(int actor, int view)
         {
             int w = (int)((((unsigned int)(unsigned short)target_pitch -
                    (unsigned int)(unsigned short)cached[0]) - 0x800) & 0xFFF) - 0x800;
-            delta_p = (short)(int)((float)w * g_subTickFraction + 0.5f);
+            delta_p = (short)(int)((float)w * cam_integ_step() + 0.5f);
         }
         cam_angles[0] = cached[0] + delta_p;
 
         {
             int w = (int)((((unsigned int)(unsigned short)target_yaw -
                    (unsigned int)(unsigned short)cached[1]) - 0x800) & 0xFFF) - 0x800;
-            delta_y = (short)(int)((float)w * g_subTickFraction + 0.5f);
+            delta_y = (short)(int)((float)w * cam_integ_step() + 0.5f);
         }
         cam_angles[1] = cached[1] + delta_y;
 
         {
             int w = (int)((((unsigned int)(unsigned short)target_roll -
                    (unsigned int)(unsigned short)cached[2]) - 0x800) & 0xFFF) - 0x800;
-            delta_r = (short)(int)((float)w * g_subTickFraction + 0.5f);
+            delta_r = (short)(int)((float)w * cam_integ_step() + 0.5f);
         }
         cam_angles[2] = cached[2] + delta_r;
 

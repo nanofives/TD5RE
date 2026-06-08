@@ -1,0 +1,29 @@
+S19 — Camera: countdown shake, pause-at-start erratic, invisible-cam ground clip, high-MS jitter
+================================================================================================
+
+Covers feedback: camera sometimes shakes during the race countdown (fine once racing) · pausing right as the race starts makes the camera behave erratically · the "invisible car" camera is too close to the ground and clips through the ground on slopes · when MS is high the camera gets shaky
+Modules: td5_camera.c (damping/smoothing, invisible-cam mode, paused guard), td5_game.c (countdown state)
+Memory: (camera profiles td5_camera_profiles.h)
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Fix four camera issues; #1 and #4 likely share a root (fixed per-frame damping not scaled by delta-time):
+
+1. COUNTDOWN SHAKE + PAUSE-AT-START ERRATIC. UpdateChaseCamera is gated on !g_td5.paused (~td5_camera.c:2678-2680); the countdown holds g_td5.paused while it runs (tick_race_countdown td5_game.c ~4487-4566) and flips it at timer==0, so the camera's spring state is stale on unfreeze and jumps. Car velocity ≈ 0 during the countdown also feeds garbage into the position interpolation (~1477-1484). Seed/settle the camera spring at race start and keep it smoothly updated during the countdown so the first racing frame doesn't snap; make pausing at the start moment not corrupt the spring state.
+
+2. HIGH-MS JITTER. The radius/height smoothing uses a FIXED per-frame lerp (g_dampWeight=0.125f ~145; ~1038-1045) with no dt scaling, so at low FPS / high MS the smoothing oscillates. Make the damping frame-rate independent (scale the lerp by frame delta, or run it on the fixed sim tick) so it behaves the same at 30 and 60 fps.
+
+3. INVISIBLE-CAR CAMERA GROUND CLIP. The special/invisible-car mode (gate on actor+0x379 ~724-735) uses the same height smoothing (~1043-1045) with NO ground clamp (a naive clamp was tried before and caused worse bugs — see comment ~1338-1343), so on slopes it dips below terrain. Add a careful ground-height floor for THIS mode only (clamp camera Y to a terrain-probe minimum + small offset) without reintroducing the old slope artifacts.
+
+NOTE: RE basis exists (camera funcs) — research them, and respect the existing comment about why a blanket ground clamp was removed. Subjective feel — DO NOT ask me to drive (see below). Physics-adjacent: run the multi-track CSV sweep.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive or watch — camera feel is mine to judge. Finish ALL self-verification first: build + the multi-track CSV sweep + a headless AutoRace where you can read camera Y / spring values from the trace (countdown frames, a downslope, and a simulated low-FPS/high-MS run if the harness supports a frame-time knob). Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- No camera shake during countdown; first racing frame is smooth; pausing at the start doesn't corrupt the view.
+- Camera smoothing is stable at high MS (no jitter at low FPS).
+- Invisible-car camera stays above the ground on slopes; no return of the old slope-clip artifacts.

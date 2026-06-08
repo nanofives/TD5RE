@@ -1,0 +1,26 @@
+S03 — Frontend fade SFX on every screen
+=======================================
+
+Covers feedback: add fading sounds in all frontend screens including new and future ones
+Modules: td5_frontend.c (screen enter/leave transitions), td5_sound.c.
+Memory: project_frontend_sound_system_2026-06-02 (device-idle gotcha + silent keepalive).
+
+PROMPT
+------
+Make frontend transition fade SFX universal across all menu screens, including the newer multiplayer/track screens and any future ones.
+
+Model (from the frontend sound RE): each screen transition plays Play(5) = Whoosh slide-OUT and Play(4) = Crash1 slide-IN chime, one each. The "device-idle swallows short one-shots" issue is already solved via the looping silent keepalive secondary buffer + DSBCAPS_GLOBALFOCUS, so this is purely about coverage/wiring.
+
+1. FIRST verify SFXVolume in td5re.ini is not persisted low (the pause/options SOUND slider can save a low value -> next-launch silence). Check SFXVolume before chasing any "missing sound".
+
+2. Audit ALL entries in the 30-entry screen table for missing slide-IN / slide-OUT fades and add them consistently.
+
+3. Make it SYSTEMATIC: hook the fade SFX into the generic screen enter/leave transition path so newly added screens inherit the fades BY DEFAULT, instead of requiring per-screen wiring.
+
+Keep the already-correct silent cases silent (CupWon/Failed/Locked value-toggles per the earlier audit) — don't add spurious chimes.
+
+ACCEPTANCE
+----------
+- Every navigable screen plays slide-out on leave and slide-in on enter.
+- A brand-new screen added to the table gets fades with no extra wiring.
+- No regression of the previously-fixed per-screen audio.

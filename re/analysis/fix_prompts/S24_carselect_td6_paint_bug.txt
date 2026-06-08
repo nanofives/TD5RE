@@ -1,0 +1,30 @@
+S24 — Car-select TD6 paint/chassis bug on screen re-entry
+=========================================================
+
+Covers feedback: when leaving the car selection and coming back, if a TD6 car was previously selected, on return only the PAINTED CHASSIS of the last car is visible; selecting another car partially fixes it, but then the paint COLOR applies to the WHOLE car instead of only the paintable chassis
+Modules: td5_frontend.c (car preview load + paint overlay), td5_asset.c (vehicle skin/paint load)
+Memory: project_s02_frontend_text_labels_2026-06-04; project_td6_car_port_2026-06-02
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Fix the car-select preview corruption that happens when you leave the car-selection screen and return with a TD6 car previously selected: on return only the painted chassis of the last car shows; reselecting another car partially recovers but then the paint color is applied to the WHOLE car instead of just the paintable chassis submesh.
+
+Investigation pointers (verify before trusting; line numbers may have drifted):
+- frontend_load_selected_car_preview td5_frontend.c ~12075 is called on car-select entry; it sets s_paint_overlay_car=-1 ~1836 (invalidate) and releases the main preview surface ~1825.
+- The paint overlay is drawn lazily in frontend_draw_car_paint_overlay ~1927-1938 (tint via g_td5.ini.td6_paint_color).
+- Suspected: the paint-overlay surface handle is invalidated (set -1) but NOT actually released/reloaded on re-entry, so stale TD6 paint/mask state persists; and the paintable-chassis MASK (which limits paint to the chassis submesh) is lost so reselect paints the whole car.
+- Vehicle skin/paint load is td5_asset.c ~3141-3286.
+
+Find how the paintable-chassis submesh is distinguished from the rest (the paint MASK), and ensure that on every car-select (re-)entry BOTH the preview mesh/surface AND the paint mask are fully released and reloaded for the selected car — especially TD6 cars — so the full car renders and paint is confined to the chassis. Compare the TD6 vs TD5 paint path; if TD6 lacks a proper chassis mask, derive/apply one consistently.
+
+NOTE: focused source-port bug (the preview is port-side; no original equivalent) — document "no RE basis" and proceed. Pure frontend/asset — the multi-track CSV sweep can be skipped, but screenshot the preview to verify.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to watch. Finish ALL self-verification first: build + a headless frontend run that lands on the car-select screen (--AutoRace=0 --SkipIntro=1 --StartScreen=<car-select> with [Logging]Frontend=1 in THIS worktree's td5re.ini), reproduce the leave/return on a TD6 car, and screenshot the preview before/after the fix. Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Leaving and returning to car-select with a TD6 car shows the FULL car (not just the chassis).
+- Paint color is confined to the paintable chassis submesh, not the whole car, on both TD5 and TD6 cars, across repeated screen entries.

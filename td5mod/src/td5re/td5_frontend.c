@@ -25,6 +25,7 @@
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
 #include "td5_vectorui.h"      /* public VectorUI surface (HUD reuses these primitives) */
 #include "td5_font.h"          /* [S13] runtime TTF glyph cache (native menu text) */
+#include "deps/cjson/cJSON.h"  /* track-marker JSON (retired trak_markers*.dat) */
 #include "../../ddraw_wrapper/src/wrapper.h"
 #include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes.h"       /* g_ps_msdf bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes.h"  /* g_ps_roundrect bytecode */
@@ -152,6 +153,17 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
 static TD5_ScreenIndex s_current_screen;
 static int  s_inner_state;              /* g_frontendInnerState   */
 static int  s_anim_tick;                /* g_frontendAnimFrameCounter (0x49522C) */
+
+/* [FPS-DECOUPLE 2026-06-07] Number of fixed 60 Hz animation ticks elapsed since
+ * the previous frontend frame (computed in frontend_update_anim_pacing at the
+ * top of td5_frontend_display_loop). Every per-frame frontend animation step —
+ * s_anim_tick, s_fade_progress, the background-slideshow blend, the track-
+ * preview slide — is multiplied by this so it advances at a constant real-time
+ * speed regardless of the (now-uncapped) render FPS. Usually 0 or 1; >1 only
+ * when FPS drops below 60. Rendering, input and present still run every frame. */
+static uint32_t s_fe_anim_prev_ms  = 0;
+static float    s_fe_anim_accum_ms = 0.0f;
+static int      s_fe_logic_ticks   = 1;
 static int  s_return_screen;            /* g_returnToScreenIndex  */
 static int  s_start_race_request;       /* 0x495248               */
 static int  s_start_race_confirm;       /* 0x49524C               */
@@ -269,6 +281,63 @@ static uint32_t s_mp_join_prev    = 0;     /* lobby join-scan mask last frame (e
 static int      s_mp_car_player    = 0;    /* which player is picking (sequential car select) */
 static int      s_mp_player_car[TD5_MAX_HUMAN_PLAYERS];   /* per-player chosen car */
 static int      s_mp_player_paint[TD5_MAX_HUMAN_PLAYERS]; /* per-player chosen paint */
+
+/* [PORT ENHANCEMENT 2026-06-07] SIMULTANEOUS grid car-select: every joined
+ * player picks their car at the same time, each driven by their OWN controller,
+ * in panes laid out by the chosen split-screen grid (mp_resolve_layout — the
+ * same layout the race viewports use). Each pane is "forked" with a coloured
+ * PLAYER N header so everyone can find their own screen. */
+static int      s_mp_player_color[TD5_MAX_HUMAN_PLAYERS];     /* per-player TD6 body colour (0xRRGGBB); -1 = grey */
+static int      s_mp_player_color_idx[TD5_MAX_HUMAN_PLAYERS]; /* palette cursor for TD6 colour cycling */
+static int      s_mp_player_ready[TD5_MAX_HUMAN_PLAYERS];     /* 1 once that player has locked their pick */
+static uint32_t s_mp_pane_nav_prev[TD5_MAX_HUMAN_PLAYERS];    /* prev-frame nav bits per player (edge detect) */
+static int      s_mp_simul         = 0;    /* 1 = simultaneous grid car-select is active */
+static uint32_t s_mp_simul_ready_ms = 0;   /* time all players became READY (0 = not yet); drives the auto-advance beat */
+static uint32_t s_mp_simul_anim_ms = 0;    /* lobby->car-select slide-in animation start time */
+static int      s_mp_pane_preview[TD5_MAX_HUMAN_PLAYERS];  /* cached carpic surface handle per pane */
+static int      s_mp_pane_overlay[TD5_MAX_HUMAN_PLAYERS];  /* cached TD6 body-paint overlay handle per pane (0 = none) */
+static int      s_mp_pane_btn[TD5_MAX_HUMAN_PLAYERS];      /* focused button per pane (MP_BTN_*) */
+static int      s_mp_player_trans[TD5_MAX_HUMAN_PLAYERS];  /* 0 = Automatic, 1 = Manual */
+static int      s_mp_pane_substate[TD5_MAX_HUMAN_PLAYERS]; /* 0 = car select, 1 = stats spec sheet */
+static int      s_mp_pane_spec_car[TD5_MAX_HUMAN_PLAYERS]; /* which car's spec is cached per pane (-1 = none) */
+static char     s_mp_pane_spec[TD5_MAX_HUMAN_PLAYERS][17][48]; /* per-pane config.nfo fields */
+/* Per-pane car-select button set (compact, navigated by that player's own pad). */
+enum { MP_BTN_CAR = 0, MP_BTN_PAINT, MP_BTN_STATS, MP_BTN_TRANS, MP_BTN_OK, MP_BTN_COUNT };
+#define MP_SIMUL_ANIM_MS 480u   /* lobby -> car-select pane slide-in duration */
+/* Default identity colour per player (0xAARRGGBB); overridden by the setup window. */
+static const uint32_t k_mp_player_colors[TD5_MAX_HUMAN_PLAYERS] = {
+    0xFFFF4040, /* P1 red    */ 0xFF4080FF, /* P2 blue   */ 0xFF40D040, /* P3 green  */
+    0xFFFFD030, /* P4 yellow */ 0xFFFF8020, /* P5 orange */ 0xFFE060E0, /* P6 magenta*/
+    0xFF40D0D0, /* P7 cyan   */ 0xFFF0F0F0, /* P8 white  */ 0xFFA0E040, /* P9 lime   */
+};
+
+/* [PORT 2026-06-07] PLAYER-SETUP window (phase 0, before car select): each player
+ * types a NAME and picks a background/identity COLOUR (the same TD6 colour picker
+ * the car-select uses). Keyboard players type directly (high-score style); pad
+ * players get an on-screen QWERTY. Then phase 1 = the car-select grid. */
+static int  s_mp_phase = 0;                                   /* 0 = setup, 1 = car select */
+static char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][16];      /* chosen display name */
+static int  s_mp_player_accent[TD5_MAX_HUMAN_PLAYERS];        /* chosen identity colour (0xRRGGBB) */
+static int  s_mp_setup_sub[TD5_MAX_HUMAN_PLAYERS];            /* 0 idle, 1 name entry, 2 colour picker */
+static int  s_mp_setup_btn[TD5_MAX_HUMAN_PLAYERS];            /* idle focus: 0 NAME, 1 COLOUR, 2 OK */
+static int  s_mp_kbd_col[TD5_MAX_HUMAN_PLAYERS];              /* QWERTY cursor (pad name entry) */
+static int  s_mp_kbd_row[TD5_MAX_HUMAN_PLAYERS];
+static int  s_mp_col_col[TD5_MAX_HUMAN_PLAYERS];              /* colour-grid cursor */
+static int  s_mp_col_row[TD5_MAX_HUMAN_PLAYERS];
+enum { MP_SET_NAME = 0, MP_SET_COLOUR, MP_SET_OK, MP_SET_COUNT };
+/* On-screen QWERTY (pad name entry): 4 letter rows + a special row (SPACE/DEL/DONE). */
+static const char *const k_mp_kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM" };
+#define MP_KBD_LETTER_ROWS 4
+#define MP_KBD_ROWS        (MP_KBD_LETTER_ROWS + 1)   /* + special row */
+#define MP_KBD_SPECIAL     MP_KBD_LETTER_ROWS
+static void frontend_mp_setup_init(void);
+static void frontend_mp_setup_update(void);
+static void frontend_mp_setup_render(float sx, float sy);
+
+/* Simultaneous-grid car-select entry points (defined just before Screen_CarSelection). */
+static void frontend_mp_simul_carsel_init(void);
+static void frontend_mp_simul_carsel_update(void);
+static void frontend_mp_simul_carsel_render(float sx, float sy);
 
 /* ScreenLocalizationInit bootstrap control [CONFIRMED @ 0x4269D0 g_attractModeControlEnabled]:
  * 0 = first entry (run full init), 1 = re-entry (skip init, go to menu),
@@ -690,7 +759,7 @@ static int s_track_preview_surface = 0;
 static int s_track_switch_tick = 16; /* 0-15 = animating in, 16 = settled */
 
 /* Track-preview start/finish dot markers, generated by
- * re/tools/track_preview_render.py into re/assets/tracks/trak_markers.dat
+ * re/tools/track_preview_render.py into re/assets/tracks/trak_markers.json
  * (same projection as each trak%04d.png, so the dots line up). Indexed by pool
  * (== trak TGA number == s_track_schedule_to_tga_index[selected]). u,v are
  * normalized 0..1 in the 152x224 preview, top-left origin. circuit: LEVELINF
@@ -2721,7 +2790,7 @@ static int fe_wrap_text_lines(const char *s, float maxw, float sx, float sy,
 }
 
 static int frontend_advance_tick(void) {
-    s_anim_tick += 2;
+    s_anim_tick += 2 * s_fe_logic_ticks;
     return 1;
 }
 
@@ -2741,7 +2810,7 @@ static void frontend_init_fade(int color) {
 
 static int frontend_render_fade(void) {
     if (!s_fade_active) return 1;
-    s_fade_progress += 16;
+    s_fade_progress += 16 * s_fe_logic_ticks;
     if (s_fade_progress >= 256) {
         s_fade_active = 0;
         return 1;
@@ -3101,12 +3170,19 @@ static void frontend_init_race_schedule(void) {
     if (s_mp_flow) {
         slot_ext_id[0]  = s_mp_player_car[0];
         slot_variant[0] = s_mp_player_paint[0];
+        /* Each human slot is painted with that player's chosen TD6 colour (no-op
+         * for TD5 cars, which have no carmask). -1 = leave the default. */
+        td5_asset_set_human_td6_color(0, s_mp_player_color[0]);
         for (i = 1; i < eff_humans && i < TD5_MAX_RACER_SLOTS; i++) {
             slot_active[i]  = 1;
             slot_ext_id[i]  = s_mp_player_car[i];
             slot_variant[i] = s_mp_player_paint[i];
+            td5_asset_set_human_td6_color(i, s_mp_player_color[i]);
             if (i + 1 > start_slot) start_slot = i + 1;
         }
+        /* AI / unused slots get the hashed AI palette (clear any stale override). */
+        for (; i < TD5_MAX_RACER_SLOTS; i++)
+            td5_asset_set_human_td6_color(i, -1);
     }
 
     /* Two-player setup [CONFIRMED @ 0x0040daf0]:
@@ -4033,9 +4109,14 @@ static void fe_draw_text_centered(float center_x, float y, const char *text,
                                   uint32_t color, float sx, float sy);
 static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
 static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
-                                  int state, float sx, float sy);
+                                  int state, uint32_t interior, float sx, float sy);
 static void fe_draw_button_frame(float bx, float by, float bw, float bh,
                                  int bb_state, float sx, float sy);
+/* As fe_draw_button_frame but the SELECTED-state interior fill is `interior`
+ * (0xAARRGGBB) instead of the default dark purple — lets a caller (the simul
+ * car-select grid) tint the focused button with the player's accent colour. */
+static void fe_draw_button_frame_fill(float bx, float by, float bw, float bh,
+                                      int bb_state, uint32_t interior, float sx, float sy);
 static int fe_draw_arrow_proc(float x, float y, float w, float h,
                               int dir_right, uint32_t color);
 static void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
@@ -4713,7 +4794,7 @@ static void BarFade_Start(int table_index, int direction) {
 
 static int BarFade_Tick(void) {
     if (!s_fade_active) return 1;
-    s_fade_progress += s_fade_direction * 8;
+    s_fade_progress += s_fade_direction * 8 * s_fe_logic_ticks;
     if (s_fade_progress >= 256 || s_fade_progress < 0) {
         s_fade_active = 0;
         return 1; /* done */
@@ -4970,9 +5051,31 @@ TD5_ScreenIndex td5_frontend_get_screen(void) {
  *   surface-lost handshake.
  * ======================================================================== */
 
+/* [FPS-DECOUPLE 2026-06-07] Advance the frontend animation clock on a fixed
+ * 60 Hz cadence. Accumulates real elapsed milliseconds and converts them into a
+ * whole number of 60 Hz ticks for this frame; the leftover carries forward. The
+ * render loop still runs every frame — this only paces the animation counters so
+ * menus / slideshow / fades play at the same real-time speed at 60, 144 or 180
+ * Hz (the original ran these once per refresh-frame, i.e. ~60 Hz on era CRTs). */
+static void frontend_update_anim_pacing(void) {
+    uint32_t now = td5_plat_time_ms();
+    if (s_fe_anim_prev_ms == 0) s_fe_anim_prev_ms = now;  /* first frame: no jump */
+    uint32_t dt = now - s_fe_anim_prev_ms;
+    s_fe_anim_prev_ms = now;
+    if (dt > 250u) dt = 250u;                 /* clamp long stalls (asset loads, alt-tab) */
+    s_fe_anim_accum_ms += (float)dt;
+    const float tick_ms = 1000.0f / 60.0f;    /* 60 Hz animation reference */
+    int ticks = (int)(s_fe_anim_accum_ms / tick_ms);
+    if (ticks < 0) ticks = 0;
+    if (ticks > 8) ticks = 8;                 /* spiral-of-death cap */
+    s_fe_anim_accum_ms -= (float)ticks * tick_ms;
+    s_fe_logic_ticks = ticks;
+}
+
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     td5_profile_begin_frame();
+    frontend_update_anim_pacing();   /* [FPS-DECOUPLE] pace animations at 60 Hz */
     /* 0. Poll platform input so s_keyboard[] is fresh for this frame */
     {
         TD5_InputState dummy;
@@ -4996,8 +5099,16 @@ int td5_frontend_display_loop(void) {
         }
     }
 
-    /* 2. Input polling (keyboard, mouse, joystick) */
-    frontend_poll_input();
+    /* 2. Input polling (keyboard, mouse, joystick).
+     * The simultaneous-MP car-select grid reads every pad directly and creates no
+     * s_buttons[]; running the shared poll here would treat each player's confirm
+     * press as "Enter on a screen with no focused button" and play the locked /
+     * rejection sfx (10). Skip it — the grid owns its own input + ESC handling. */
+    {
+        int simul_grid = (s_current_screen == TD5_SCREEN_CAR_SELECTION) &&
+                         (s_mp_simul || (s_mp_flow && s_num_human_players >= 2));
+        if (!simul_grid) frontend_poll_input();
+    }
     td5_profile_mark("fe_input");   /* steps 0-2: input + surface recovery */
 
     /* 3. Screen dispatch -- call the active screen's state machine */
@@ -5045,7 +5156,9 @@ int td5_frontend_display_loop(void) {
 
     /* 7. Escape key handling -- only when intro animation is complete (original
      *    behavior: ESC is ignored during slide-in animations) */
-    if (s_anim_complete && frontend_check_escape()) {
+    if (s_anim_complete &&
+        !(s_mp_simul && s_current_screen == TD5_SCREEN_CAR_SELECTION) &&
+        frontend_check_escape()) {
         if (s_current_screen == TD5_SCREEN_MAIN_MENU) {
             if (s_inner_state == 4) {
                 s_inner_state = 5;
@@ -5616,7 +5729,7 @@ static void frontend_render_bg_gallery(float sx, float sy) {
 
     /* Update blend weight: decrement 1 per frame (original g_attractModeIdleCounter--).
      * Starts at 256 on load/advance, triggers next image at -24 (~280 frames ≈ 4.7s @60fps) */
-    s_bg_gal_blend--;
+    s_bg_gal_blend -= s_fe_logic_ticks;
     if (s_bg_gal_blend <= -24) {
         frontend_advance_bg_gallery();
         i = s_bg_gal_current;
@@ -6558,6 +6671,13 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
  *   0x4A8 offscreen offset). DDraw color-key + per-frame surface tracking
  *   replaced by tex-page + alpha blending. */
 static void frontend_render_car_selection_preview(float sx, float sy) {
+    /* Simultaneous multiplayer: render the per-player grid (setup window in phase
+     * 0, car-select grid in phase 1) instead of the single preview + buttons. */
+    if (s_mp_simul) {
+        if (s_mp_phase == 0) frontend_mp_setup_render(sx, sy);
+        else                 frontend_mp_simul_carsel_render(sx, sy);
+        return;
+    }
     int actual_car = frontend_current_car_index();
     /* Keep the PAINT button (slot 1) greyed/disabled whenever the current car
      * has no paint choice (TD5 special/police cars; TD6 cop cars). Idempotent
@@ -6767,73 +6887,105 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     }
 }
 
+/* Read a whole file into a malloc'd, NUL-terminated buffer (for cJSON_Parse).
+ * Returns NULL on any error; caller frees. */
+static char *frontend_slurp_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    long sz;
+    char *buf;
+    size_t rd;
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return NULL; }
+    buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = '\0';
+    return buf;
+}
+
+/* Fetch a numeric field as double, 0.0 if absent/non-numeric. */
+static double frontend_json_num(const cJSON *obj, const char *key) {
+    const cJSON *n = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return cJSON_IsNumber(n) ? cJSON_GetNumberValue(n) : 0.0;
+}
+
+/* Parse a trak_markers JSON file into dst[], placing each entry at
+ * (<index_key> - index_base). Returns the number of markers placed (>=0), or
+ * -1 if the file is absent / unparseable (caller treats that as "unavailable").
+ * The editable replacement for the retired TMK1 trak_markers*.dat. */
+static int frontend_parse_track_markers_json(const char *path,
+                                             const char *index_key,
+                                             int index_base,
+                                             TD5_TrackMarker *dst,
+                                             int dst_cap) {
+    char *buf = frontend_slurp_file(path);
+    cJSON *root;
+    const cJSON *arr, *el;
+    int placed = 0;
+    if (!buf) return -1;
+    root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) return -1;
+    arr = cJSON_GetObjectItemCaseSensitive(root, "markers");
+    if (cJSON_IsArray(arr)) {
+        cJSON_ArrayForEach(el, arr) {
+            const cJSON *idxn, *ci;
+            double dv;
+            int slot;
+            if (!cJSON_IsObject(el)) continue;
+            idxn = cJSON_GetObjectItemCaseSensitive(el, index_key);
+            if (!cJSON_IsNumber(idxn)) continue;
+            dv = cJSON_GetNumberValue(idxn);
+            slot = (int)(dv < 0 ? dv - 0.5 : dv + 0.5) - index_base;
+            if (slot < 0 || slot >= dst_cap) continue;
+            ci = cJSON_GetObjectItemCaseSensitive(el, "circuit");
+            dst[slot].start_u = (float)frontend_json_num(el, "start_u");
+            dst[slot].start_v = (float)frontend_json_num(el, "start_v");
+            dst[slot].end_u   = (float)frontend_json_num(el, "end_u");
+            dst[slot].end_v   = (float)frontend_json_num(el, "end_v");
+            dst[slot].circuit = (uint8_t)(cJSON_IsTrue(ci) ||
+                (cJSON_IsNumber(ci) && cJSON_GetNumberValue(ci) != 0.0));
+            placed++;
+        }
+    }
+    cJSON_Delete(root);
+    return placed;
+}
+
 /* Load the start/finish dot table once. File is optional: if absent (e.g. the
  * tool hasn't been run), dots are silently skipped and the previews render as
  * before. */
 static void frontend_load_track_markers(void) {
-    FILE *f;
-    char magic[4];
-    uint32_t count;
+    int n;
     if (s_track_markers_loaded != 0) return;
     s_track_markers_loaded = -1;
-    f = fopen("re/assets/tracks/trak_markers.dat", "rb");
-    if (!f) {
-        TD5_LOG_W(LOG_TAG, "trak_markers.dat not found; track start/finish dots disabled");
+    n = frontend_parse_track_markers_json("re/assets/tracks/trak_markers.json",
+                                          "pool", 0, s_track_markers, 20);
+    if (n < 0) {
+        TD5_LOG_W(LOG_TAG, "trak_markers.json not found; track start/finish dots disabled");
         return;
     }
-    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "TMK1", 4) == 0 &&
-        fread(&count, sizeof(count), 1, f) == 1) {
-        int n = (count > 20) ? 20 : (int)count;
-        int i, ok = 1;
-        for (i = 0; i < n; i++) {
-            float v[4];
-            uint8_t b[4];
-            if (fread(v, sizeof(float), 4, f) != 4 || fread(b, 1, 4, f) != 4) { ok = 0; break; }
-            s_track_markers[i].start_u = v[0];
-            s_track_markers[i].start_v = v[1];
-            s_track_markers[i].end_u   = v[2];
-            s_track_markers[i].end_v   = v[3];
-            s_track_markers[i].circuit = b[0];
-        }
-        if (ok) {
-            s_track_markers_loaded = 1;
-            TD5_LOG_I(LOG_TAG, "loaded %d track start/finish markers", n);
-        }
-    }
-    fclose(f);
+    s_track_markers_loaded = 1;
+    TD5_LOG_I(LOG_TAG, "loaded %d track start/finish markers", n);
 }
 
-/* Same as above for migrated TD6 tracks (trak_markers_td6.dat). Entry i maps to
- * preview TGA number (TD6_PREVIEW_TGA_BASE + i). Optional: absent file just means
- * no TD6 start dots, identical to the TD5-only behaviour. */
+/* Same as above for migrated TD6 tracks (trak_markers_td6.json). Each entry's
+ * "tga" field maps to preview TGA number (TD6_PREVIEW_TGA_BASE + slot). Optional:
+ * absent file just means no TD6 start dots, identical to the TD5-only behaviour. */
 static void frontend_load_track_markers_td6(void) {
-    FILE *f;
-    char magic[4];
-    uint32_t count;
+    int n;
     if (s_track_markers_td6_loaded != 0) return;
     s_track_markers_td6_loaded = -1;
-    f = fopen("re/assets/tracks/trak_markers_td6.dat", "rb");
-    if (!f) return;
-    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "TMK1", 4) == 0 &&
-        fread(&count, sizeof(count), 1, f) == 1) {
-        int n = (count > TD6_MARKER_MAX) ? TD6_MARKER_MAX : (int)count;
-        int i, ok = 1;
-        for (i = 0; i < n; i++) {
-            float v[4];
-            uint8_t b[4];
-            if (fread(v, sizeof(float), 4, f) != 4 || fread(b, 1, 4, f) != 4) { ok = 0; break; }
-            s_track_markers_td6[i].start_u = v[0];
-            s_track_markers_td6[i].start_v = v[1];
-            s_track_markers_td6[i].end_u   = v[2];
-            s_track_markers_td6[i].end_v   = v[3];
-            s_track_markers_td6[i].circuit = b[0];
-        }
-        if (ok) {
-            s_track_markers_td6_loaded = 1;
-            TD5_LOG_I(LOG_TAG, "loaded %d TD6 track start/finish markers", n);
-        }
-    }
-    fclose(f);
+    n = frontend_parse_track_markers_json("re/assets/tracks/trak_markers_td6.json",
+                                          "tga", TD6_PREVIEW_TGA_BASE,
+                                          s_track_markers_td6, TD6_MARKER_MAX);
+    if (n < 0) return;
+    s_track_markers_td6_loaded = 1;
+    TD5_LOG_I(LOG_TAG, "loaded %d TD6 track start/finish markers", n);
 }
 
 /* Draw one preview marker dot centered at (cx,cy) screen px. kind 0 = START
@@ -8083,7 +8235,7 @@ static int fe_draw_arrow_proc(float x, float y, float w, float h,
 }
 
 static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
-                                  int state, float sx, float sy) {
+                                  int state, uint32_t interior, float sx, float sy) {
     int tex = s_buttonbits_tex_page;
     float yb = (float)(state * 32);
 
@@ -8104,7 +8256,7 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
      * pixels of each corner texture. The original used color-key blit so the
      * outside pixels were always transparent against the page background. */
     if (state == 0) {
-        uint32_t fill = 0xFF392152u;
+        uint32_t fill = interior;
         fe_draw_quad(bx + lw, by, bw - lw - rw, bh, fill, -1, 0,0,0,0);
         fe_draw_quad(bx, by + tl_h, lw, bh - tl_h - bl_h, fill, -1, 0,0,0,0);
         fe_draw_quad(bx + bw - rw, by + tr_h, rw, bh - tr_h - br_h, fill, -1, 0,0,0,0);
@@ -8174,13 +8326,13 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
  * Used by the main button render loop AND by the text-input widget so the
  * nickname / session-name field matches every other button on screen. The
  * roundrect/9-slice paths manage their own blend presets internally. */
-static void fe_draw_button_frame(float bx, float by, float bw, float bh,
-                                 int bb_state, float sx, float sy) {
+static void fe_draw_button_frame_fill(float bx, float by, float bw, float bh,
+                                      int bb_state, uint32_t interior, float sx, float sy) {
     int use_proc = (g_td5.ini.vector_ui && s_ps_roundrect && s_rr_cb);
     if (use_proc) {
         /* Border 3-stop gradient + interior fill, colours per state (matches the
-         * button render loop exactly). Selected interior = dark purple 0x392152;
-         * unselected/locked have a transparent interior (border only). */
+         * button render loop exactly). Selected interior = `interior` (default
+         * dark purple 0x392152); unselected/locked have a transparent interior. */
         uint32_t mid_c, inner_c, outer_c;
         if (bb_state == 0)      { mid_c = 0xFFD9CA00u; inner_c = 0xFFA08C00u; outer_c = 0xFF3C2F00u; }
         else if (bb_state == 2) { mid_c = 0xFFAAAAAAu; inner_c = 0xFF777777u; outer_c = 0xFF222222u; }
@@ -8189,12 +8341,17 @@ static void fe_draw_button_frame(float bx, float by, float bw, float bh,
         fe_draw_roundrect(bx, by, bw, bh,
                           20.0f * sy /*large TL/BR*/, 5.0f * sy /*small TR/BL*/,
                           6.0f * sy  /*side border*/, 2.0f * sy /*top/bottom border*/,
-                          mid_c, inner_c, outer_c, 0xFF392152u, fillA);
+                          mid_c, inner_c, outer_c, interior, fillA);
     } else if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        fe_draw_button_9slice(bx, by, bw, bh, bb_state, sx, sy);
+        fe_draw_button_9slice(bx, by, bw, bh, bb_state, interior, sx, sy);
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
     }
+}
+
+static void fe_draw_button_frame(float bx, float by, float bw, float bh,
+                                 int bb_state, float sx, float sy) {
+    fe_draw_button_frame_fill(bx, by, bw, bh, bb_state, 0xFF392152u, sx, sy);
 }
 
 static void fe_draw_quad(float x, float y, float w, float h,
@@ -9130,6 +9287,8 @@ void td5_frontend_render_ui_rects(void) {
     if (s_current_screen == TD5_SCREEN_RACE_RESULTS) {
         title_visible = (s_inner_state >= 3 && s_inner_state <= 0x0B) ? 1 : 0;
     }
+    /* The simultaneous grid car-select draws its own per-pane headers. */
+    if (s_mp_simul) title_visible = 0;
 
     if (title_visible) {
         const char *title_text = frontend_get_title_text_for_screen(s_current_screen);
@@ -9321,6 +9480,7 @@ int td5_frontend_init(void) {
     s_cup_unlock_tier = 0;
     s_two_player_mode = 0;
     s_mp_flow = 0;
+    s_mp_simul = 0;
     s_mp_joined_count = 0;
     s_mp_car_player = 0;
     s_mp_layout_sel = 0;
@@ -9629,7 +9789,7 @@ static void Screen_LanguageSelect(void) {
         break;
 
     case 2:
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         frontend_present_buffer();
         if (s_anim_tick >= 16) {
             s_inner_state = 3;
@@ -9646,7 +9806,7 @@ static void Screen_LanguageSelect(void) {
 
     case 4:
     case 5:
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 8) {
             s_inner_state = 6;
         }
@@ -9785,20 +9945,39 @@ static void Screen_MultiplayerLobby(void) {
             s_num_human_players = s_mp_joined_count;
             s_two_player_mode   = 1;       /* engage split-screen multiplayer */
             s_mp_flow           = 1;
+            /* 2+ players pick simultaneously in a grid (each on their own pad);
+             * a lone player just gets the normal single-player car select. */
+            s_mp_simul          = (s_mp_joined_count >= 2);
+            s_mp_phase          = 0;       /* start at the name + colour setup window */
             for (p = 0; p < s_mp_joined_count; p++) {
-                td5_input_set_input_source(p, s_mp_join_device[p]);
-                td5_save_set_player_device_index(p, (uint32_t)s_mp_join_device[p]);
-                s_mp_player_car[p]   = s_selected_car;
-                s_mp_player_paint[p] = 0;
+                s_mp_player_car[p]    = s_selected_car;
+                s_mp_player_paint[p]  = 0;
+                s_mp_player_color[p]  = -1;
+                s_mp_player_ready[p]  = 0;
+                s_mp_pane_nav_prev[p] = 0;
+                s_mp_player_name[p][0] = '\0';
+                s_mp_player_accent[p] = (int)(k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
+                /* Simultaneous select reads each pad through the still-alive,
+                 * NON-exclusive scan handles, so per-player EXCLUSIVE devices
+                 * (which would release those handles) are NOT bound until the
+                 * picks are locked. Sequential / single binds now, as before. */
+                if (!s_mp_simul) {
+                    td5_input_set_input_source(p, s_mp_join_device[p]);
+                    td5_save_set_player_device_index(p, (uint32_t)s_mp_join_device[p]);
+                }
             }
             s_mp_car_player = 0;
-            td5_plat_input_scan_join_release();
-            TD5_LOG_I(LOG_TAG, "MP Lobby: START with %d players -> car select", s_mp_joined_count);
+            s_mp_simul_ready_ms = 0;
+            if (!s_mp_simul)
+                td5_plat_input_scan_join_release();
+            TD5_LOG_I(LOG_TAG, "MP Lobby: START %d players -> %s car select",
+                      s_mp_joined_count, s_mp_simul ? "simultaneous grid" : "sequential");
             td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
             return;
         }
         if (do_back) {
             s_mp_flow = 0;
+            s_mp_simul = 0;
             td5_plat_input_scan_join_release();
             td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
             return;
@@ -11491,7 +11670,7 @@ static void Screen_NetworkLobby(void) {
         break;
 
     case 11:
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x0C) { /* 12 frames */
             s_lobby_action = 0;
             s_inner_state = 2; /* return to enabled input */
@@ -11590,7 +11769,7 @@ static void Screen_NetworkLobby(void) {
         break;
 
     case 0x10: /* LAUNCH COUNTDOWN (8 ticks, then send DXPSTART) */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 8) {
             s_race_active_flag = 1;
             /* Send DXPSTART (message type 4) */
@@ -12515,6 +12694,22 @@ static void Screen_ControllerBinding(void) {
                     memcpy(s_ctrl_action_bind[s_ctrl_player],
                            ab + (size_t)s_ctrl_player * TD5_JSBIND_ACTIONS,
                            TD5_JSBIND_ACTIONS * sizeof(uint32_t));
+                /* If this player has no per-action config yet (all zero), seed the
+                 * edit copy with the built-in Xbox-style defaults so the screen
+                 * SHOWS them (matching the in-race fallback) and a per-action remap
+                 * keeps the rest of the map instead of unbinding it. Display/edit
+                 * only — nothing persists unless the user presses OK. */
+                {
+                    int any = 0;
+                    for (int a = 0; a < TD5_JSBIND_ACTIONS; a++)
+                        if (s_ctrl_action_bind[s_ctrl_player][a]) { any = 1; break; }
+                    if (!any) {
+                        const uint32_t *def = td5_plat_input_default_action_bindings();
+                        if (def)
+                            memcpy(s_ctrl_action_bind[s_ctrl_player], def,
+                                   TD5_JSBIND_ACTIONS * sizeof(uint32_t));
+                    }
+                }
             }
 
             s_ctrl_sel_action = 0;
@@ -12565,7 +12760,7 @@ static void Screen_ControllerBinding(void) {
      * Port: uses s_anim_tick.
      * ------------------------------------------------------------------ */
     case 9:
-        s_anim_tick++;
+        s_anim_tick += s_fe_logic_ticks;
         if (s_anim_tick >= 0x1C) {
             s_anim_tick = 0;
             s_anim_complete = 1;
@@ -12705,7 +12900,7 @@ static void Screen_ControllerBinding(void) {
      * calls SetFrontendScreen(0xe) = TD5_SCREEN_CONTROL_OPTIONS.
      * ------------------------------------------------------------------ */
     case 11:
-        s_anim_tick++;
+        s_anim_tick += s_fe_logic_ticks;
         if (s_anim_tick >= 0x1C) {
             s_anim_tick = 0;
             TD5_LOG_D(LOG_TAG, "CtrlBind: joystick slide-out done → ControlOptions");
@@ -12869,7 +13064,934 @@ static void Screen_MusicTestExtras(void) {
  * Handles 1P, 2P sequential, and network car selection.
  * ======================================================================== */
 
+/* ========================================================================
+ * Simultaneous multiplayer car select (grid)  [PORT ENHANCEMENT 2026-06-07]
+ *
+ * Every joined player picks their car at the same time, each driven by their
+ * OWN controller, in panes laid out by the chosen split-screen grid (the same
+ * mp_resolve_layout the race viewports use) so each player can identify their
+ * own forked screen by its coloured PLAYER N banner/border. Each pane carries a
+ * compact copy of the single-player car-select buttons (CAR / PAINT / STATS /
+ * AUTO-MANUAL / OK), navigated by that player's own pad:
+ *   up / down  move the button cursor   left / right  change the focused value
+ *   A          activate (STATS opens the spec sheet; OK locks the pick in)
+ *   B / ESC    back to the MULTIPLAYER LOBBY
+ * When ALL players have pressed OK the screen auto-advances to track selection
+ * after a short beat. Per-player input is read through the still-alive lobby
+ * scan handles (td5_plat_input_device_nav); the per-player EXCLUSIVE devices are
+ * bound only at the commit, since binding them releases the shared scan handles.
+ * Inner states: 0x20 = lobby->grid slide-in animation, 0x21 = interactive. */
+
+static float mp_simul_clamp01(float t) { return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t); }
+
+/* This player's navigation bits (same encoding as the platform nav helpers:
+ * 1 LEFT 2 RIGHT 4 UP 8 DOWN 0x10 A/confirm 0x20 B/back). Joystick players poll
+ * their own device through the shared scan handle; the keyboard player (device 0)
+ * reads arrows + Enter/Esc directly. */
+static uint32_t mp_simul_player_nav(int player) {
+    int dev = s_mp_join_device[player];
+    uint32_t b = 0;
+    if (dev > 0) return td5_plat_input_device_nav(dev);
+    if (td5_plat_input_key_pressed(0xCB)) b |= 1;     /* Left          */
+    if (td5_plat_input_key_pressed(0xCD)) b |= 2;     /* Right         */
+    if (td5_plat_input_key_pressed(0xC8)) b |= 4;     /* Up            */
+    if (td5_plat_input_key_pressed(0xD0)) b |= 8;     /* Down          */
+    if (td5_plat_input_key_pressed(0x1C) || td5_plat_input_key_pressed(0x39)) b |= 0x10; /* Enter/Space */
+    if (td5_plat_input_key_pressed(0x0E)) b |= 0x20;  /* Backspace = back (ESC handled globally) */
+    return b;
+}
+
+/* Release a pane's cached surface handle, but only if no OTHER pane currently
+ * aliases it — the surface cache dedups identical car+paint loads, so two panes
+ * picking the same car share one handle. Sets the slot to 0. */
+static void mp_simul_drop_handle(int *cache, int player, int n) {
+    int old = cache[player];
+    if (old > 0) {
+        int q, shared = 0;
+        for (q = 0; q < n; q++)
+            if (q != player && cache[q] == old) { shared = 1; break; }
+        if (!shared) frontend_release_surface(old);
+    }
+    cache[player] = 0;
+}
+
+/* (Re)load a pane's carpic preview + (TD6) body-paint overlay for its current
+ * car/paint. Loads the new handle BEFORE dropping the old one so the loader
+ * can't reuse the old slot mid-swap. */
+static void mp_simul_refresh_pane(int player) {
+    int n = s_num_human_players;
+    int car = s_mp_player_car[player];
+    int td6 = frontend_car_is_td6(car);
+    int paint = td6 ? 0 : s_mp_player_paint[player];
+    int prev_h = frontend_load_car_preview_surface(car, paint);
+    int over_h = (td6 && frontend_car_paintable(car))
+                 ? frontend_load_car_paint_overlay_surface(car) : 0;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    if (s_mp_pane_preview[player] != prev_h) {
+        mp_simul_drop_handle(s_mp_pane_preview, player, n);
+        s_mp_pane_preview[player] = prev_h;
+    }
+    if (s_mp_pane_overlay[player] != over_h) {
+        mp_simul_drop_handle(s_mp_pane_overlay, player, n);
+        s_mp_pane_overlay[player] = over_h;
+    }
+}
+
+/* Free every pane's cached surfaces (on commit / cancel). */
+static void mp_simul_free_all_panes(int n) {
+    int p;
+    for (p = 0; p < n; p++) {
+        mp_simul_drop_handle(s_mp_pane_preview, p, n);
+        mp_simul_drop_handle(s_mp_pane_overlay, p, n);
+    }
+}
+
+/* Parse a car's config.nfo into this pane's spec cache (only on car change). */
+static void mp_simul_load_pane_spec(int p, int car) {
+    int sz = 0, field; size_t i; char *data;
+    if (s_mp_pane_spec_car[p] == car) return;
+    s_mp_pane_spec_car[p] = car;
+    for (field = 0; field < 17; field++) s_mp_pane_spec[p][field][0] = '\0';
+    if (car < 0 || car >= TD5_CAR_COUNT) return;
+    data = (char *)td5_asset_open_and_read("config.nfo", s_car_zip_paths[car], &sz);
+    if (!data || sz <= 0) return;
+    field = 0; i = 0;
+    while (field < 17 && i < (size_t)sz) {
+        size_t j = 0;
+        while (i < (size_t)sz && data[i] != '\n' && data[i] != '\r') {
+            if (j + 1 < sizeof(s_mp_pane_spec[p][0])) s_mp_pane_spec[p][field][j++] = data[i];
+            i++;
+        }
+        s_mp_pane_spec[p][field][j] = '\0';
+        while (i < (size_t)sz && (data[i] == '\n' || data[i] == '\r')) i++;
+        field++;
+    }
+    free(data);
+}
+
+/* Cycle a pane's paint/colour by `step` (+1/-1). TD6 cars walk the body-colour
+ * palette; TD5 cars cycle their 4 paint schemes (no-op for paintless cars). */
+static void mp_simul_cycle_paint(int p, int step) {
+    int car = s_mp_player_car[p];
+    if (frontend_car_paintable(car)) {
+        int idx = s_mp_player_color_idx[p] + step;
+        if (idx < 0) idx = TD6_PALETTE_N - 1;
+        if (idx >= TD6_PALETTE_N) idx = 0;
+        s_mp_player_color_idx[p] = idx;
+        s_mp_player_color[p]     = (int)s_td6_palette[idx];
+        frontend_play_sfx(2);
+    } else if (!frontend_car_is_td6(car) && frontend_car_has_paint(car)) {
+        int pa = s_mp_player_paint[p] + step;
+        if (pa < 0) pa = 3;
+        if (pa > 3) pa = 0;
+        s_mp_player_paint[p] = pa;
+        mp_simul_refresh_pane(p);
+        frontend_play_sfx(2);
+    }
+}
+
+static void frontend_mp_simul_carsel_init(void) {
+    int p, n = s_num_human_players;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    frontend_init_return_screen(TD5_SCREEN_CAR_SELECTION);
+    frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+    frontend_reset_buttons();
+    frontend_set_color_panel(0);
+    frontend_set_cursor_visible(0);
+
+    /* Drop any per-player EXCLUSIVE devices so the shared non-exclusive scan
+     * handles can poll each pad again. On first entry these aren't bound (the
+     * lobby skipped that for simul); on re-entry from track select they are. */
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+        td5_input_set_input_source(p, 0);
+
+    /* Full single-race roster (TD6 cars reachable; cycle_step skips locked gaps). */
+    s_car_roster_min = 0;
+    s_car_roster_max = TD5_CAR_COUNT - 1;
+
+    for (p = 0; p < n; p++) {
+        int car = s_mp_player_car[p];
+        if (car < s_car_roster_min) car = s_car_roster_min;
+        if (car > s_car_roster_max) car = s_car_roster_max;
+        if (!frontend_car_selectable(car))
+            car = frontend_car_cycle_step(car, 1, s_car_roster_min, s_car_roster_max);
+        s_mp_player_car[p]       = car;
+        s_mp_player_ready[p]     = 0;
+        s_mp_player_color_idx[p] = p % TD6_PALETTE_N;          /* distinct default colour */
+        s_mp_player_color[p]     = (int)s_td6_palette[s_mp_player_color_idx[p]];
+        s_mp_player_trans[p]     = 0;                          /* Automatic by default */
+        s_mp_pane_btn[p]         = MP_BTN_CAR;
+        s_mp_pane_substate[p]    = 0;
+        s_mp_pane_spec_car[p]    = -1;
+        s_mp_pane_preview[p]     = 0;
+        s_mp_pane_overlay[p]     = 0;
+        /* Seed the edge tracker with whatever's held now (the START press is
+         * probably still down) so it isn't read as an instant action. */
+        s_mp_pane_nav_prev[p]    = mp_simul_player_nav(p);
+        mp_simul_refresh_pane(p);
+    }
+    s_mp_simul_ready_ms = 0;
+    s_mp_simul_anim_ms  = td5_plat_time_ms();   /* start the lobby->grid slide-in */
+    s_anim_complete = 1;
+    s_inner_state = 0x20;                        /* animation phase */
+    /* poll_input is skipped in grid mode, so freeze the shared gamepad-nav cache
+     * (a stale held B could make frontend_check_escape fire a spurious back). */
+    s_fe_gamepad_nav = 0;
+    /* Grid mode reads keys/pads directly (level + own edge detect) and never
+     * drains the menu nav FIFO, so clear it on entry/exit to keep stray queued
+     * presses from leaking into this screen or the next one. */
+    td5_plat_input_flush_nav();
+    frontend_check_escape();                     /* swallow any pending ESC latch */
+    frontend_play_sfx(4);
+    TD5_LOG_I(LOG_TAG, "CarSelect: simultaneous grid for %d players", n);
+}
+
+/* Leave the grid back to the MULTIPLAYER LOBBY (B / ESC). Keeps the scan handles
+ * alive (the lobby polls them) and re-arms a fresh join. */
+static void mp_simul_back_to_lobby(int n) {
+    mp_simul_free_all_panes(n);
+    td5_plat_input_flush_nav();
+    s_mp_simul = 0;
+    TD5_LOG_I(LOG_TAG, "CarSelect grid: back -> multiplayer lobby");
+    td5_frontend_set_screen(TD5_SCREEN_MP_LOBBY);
+}
+
+static void frontend_mp_simul_carsel_update(void) {
+    int p, n = s_num_human_players;
+    int all_ready = 1, want_back = 0;
+    uint32_t now = td5_plat_time_ms();
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    /* Slide-in animation phase: no input; keep edge trackers fresh so a held
+     * START button isn't treated as a press once interaction begins. */
+    if (s_inner_state == 0x20) {
+        for (p = 0; p < n; p++) s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        frontend_check_escape();                 /* keep the ESC latch clear during the anim */
+        if (now - s_mp_simul_anim_ms >= MP_SIMUL_ANIM_MS) s_inner_state = 0x21;
+        return;
+    }
+
+    for (p = 0; p < n; p++) {
+        uint32_t bits = mp_simul_player_nav(p);
+        uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
+        int car;
+        s_mp_pane_nav_prev[p] = bits;
+
+        if (edge & 0x20) want_back = 1;          /* any pad's B -> back to lobby */
+
+        /* Stats spec sheet: A/B closes it. */
+        if (s_mp_pane_substate[p] == 1) {
+            if (edge & 0x10) { s_mp_pane_substate[p] = 0; frontend_play_sfx(5); }
+            continue;
+        }
+        /* Already locked in: A toggles back to editing. */
+        if (s_mp_player_ready[p]) {
+            if (edge & 0x10) { s_mp_player_ready[p] = 0; s_mp_simul_ready_ms = 0; frontend_play_sfx(5); }
+            continue;
+        }
+
+        car = s_mp_player_car[p];
+        if (edge & 4) { s_mp_pane_btn[p] = (s_mp_pane_btn[p] + MP_BTN_COUNT - 1) % MP_BTN_COUNT; frontend_play_sfx(2); }
+        if (edge & 8) { s_mp_pane_btn[p] = (s_mp_pane_btn[p] + 1) % MP_BTN_COUNT;                 frontend_play_sfx(2); }
+        {
+            int left = (edge & 1) != 0, right = (edge & 2) != 0, act = (edge & 0x10) != 0;
+            switch (s_mp_pane_btn[p]) {
+            case MP_BTN_CAR:
+                if (left || right) {
+                    car = frontend_car_cycle_step(car, right ? +1 : -1, s_car_roster_min, s_car_roster_max);
+                    s_mp_player_car[p]   = car;
+                    s_mp_player_paint[p] = 0;   /* reset paint on car change (matches single-player) */
+                    mp_simul_refresh_pane(p);
+                    frontend_play_sfx(5);
+                }
+                break;
+            case MP_BTN_PAINT:
+                if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1);
+                break;
+            case MP_BTN_STATS:
+                if (act) { mp_simul_load_pane_spec(p, car); s_mp_pane_substate[p] = 1; frontend_play_sfx(3); }
+                break;
+            case MP_BTN_TRANS:
+                if (act || left || right) { s_mp_player_trans[p] = !s_mp_player_trans[p]; frontend_play_sfx(3); }
+                break;
+            case MP_BTN_OK:
+                if (act) { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }
+                break;
+            }
+        }
+    }
+
+    if (frontend_check_escape()) want_back = 1;  /* keyboard ESC / aggregated gamepad B */
+    if (want_back) { mp_simul_back_to_lobby(n); return; }
+
+    for (p = 0; p < n; p++)
+        if (!s_mp_player_ready[p]) { all_ready = 0; break; }
+
+    if (all_ready) {
+        if (s_mp_simul_ready_ms == 0) s_mp_simul_ready_ms = now;
+        if (now - s_mp_simul_ready_ms >= 500u) {
+            int q;
+            for (q = 0; q < n; q++) {
+                /* Bind each player's own device for the race (exclusive). */
+                td5_input_set_input_source(q, s_mp_join_device[q]);
+                td5_save_set_player_device_index(q, (uint32_t)s_mp_join_device[q]);
+            }
+            mp_simul_free_all_panes(n);
+            td5_plat_input_scan_join_release();
+            td5_plat_input_flush_nav();
+            s_selected_car          = s_mp_player_car[0];
+            s_selected_paint        = s_mp_player_paint[0];
+            s_selected_transmission = s_mp_player_trans[0];
+            /* Keep s_mp_simul set so backing here from track select re-enters the
+             * car grid (phase 1) with picks intact; the Screen_CarSelection
+             * intercept clears it when the MP flow ends. */
+            TD5_LOG_I(LOG_TAG, "CarSelect grid: all %d ready -> track select", n);
+            td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
+            return;
+        }
+    } else {
+        s_mp_simul_ready_ms = 0;
+    }
+}
+
+/* Centred small-font helper (px in, native cap size scaled by lsx/lsy). */
+static void mp_simul_small_centered(float cx_px, float y_px, const char *t,
+                                    uint32_t c, float lsx, float lsy) {
+    float w = fe_measure_small_text(t) * fe_glyph_sx(lsx, lsy);
+    fe_draw_small_text(cx_px - w * 0.5f, y_px, t, c, lsx, lsy);
+}
+
+/* ◄ ► selector arrows in the ORIGINAL game's style (ArrowButtonz.tga sprite, or
+ * the VectorUI procedural arrows) at the left/right edges of a button. Native. */
+static void mp_simul_draw_arrows(float bx, float by, float bw, float bh, float sx, float sy) {
+    float aw = 12.0f, ah = 9.0f;
+    float ay = by + (bh - ah) * 0.5f;
+    if (g_td5.ini.vector_ui && s_ps_arrow) {
+        float a2 = 12.0f, ay2 = by + (bh - a2) * 0.5f;
+        fe_draw_arrow_proc((bx + 3.0f) * sx,           ay2 * sy, a2 * sx, a2 * sy, 0, 0xFF7995FFu);
+        fe_draw_arrow_proc((bx + bw - 3.0f - a2) * sx, ay2 * sy, a2 * sx, a2 * sy, 1, 0xFF7995FFu);
+        return;
+    }
+    if (s_arrowbuttonz_tex_page < 0) return;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    fe_draw_quad((bx + 3.0f) * sx,           ay * sy, aw * sx, ah * sy, 0xFFFFFFFF,
+                 s_arrowbuttonz_tex_page, 0.0f, 0.50f, 1.0f, 0.75f);
+    fe_draw_quad((bx + bw - 3.0f - aw) * sx, ay * sy, aw * sx, ah * sy, 0xFFFFFFFF,
+                 s_arrowbuttonz_tex_page, 0.0f, 0.75f, 1.0f, 1.00f);
+}
+
+/* One compact pane button — the REGULAR TD5 button frame (the same 9-slice / neon
+ * design the rest of the menus use), with a TRANSPARENT interior when unselected.
+ * The FOCUSED button uses the SELECTED frame (the golden ring) but with the
+ * player's accent colour as the INTERIOR fill in place of the default purple.
+ * Selector buttons draw the original ◄/► arrow sprites at the edges; `val`/
+ * `swatch_rgb` (right, kept clear of the right arrow) are optional. */
+static void mp_simul_draw_btn(float x, float y, float w, float h, const char *label,
+                              int focused, uint32_t pcol, int arrows,
+                              const char *val, int swatch_rgb, float sx, float sy) {
+    uint32_t rgb = pcol & 0x00FFFFFFu;
+    uint32_t tc  = 0xFFFFFFFFu;
+    float ty = (y + (h - SMALLFONT_TTF_CAP) * 0.5f) * sy;   /* vertically centred */
+    float redge = arrows ? (x + w - 18.0f) : (x + w - 6.0f);
+    /* Transparent background: unselected frame has no interior fill; the focused
+     * one fills with the player's accent colour. */
+    fe_draw_button_frame_fill(x * sx, y * sy, w * sx, h * sy,
+                              focused ? 0 : 1, rgb | 0xFF000000u, sx, sy);
+    if (focused) {
+        int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+        int lum = (r * 30 + g * 59 + b * 11) / 100;     /* readable label over the accent */
+        tc = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
+    }
+    if (arrows) mp_simul_draw_arrows(x, y, w, h, sx, sy);
+    if (arrows) {
+        fe_draw_small_text((x + 17.0f) * sx, ty, label, tc, sx, sy);
+    } else {
+        float lw = fe_measure_small_text(label) * fe_glyph_sx(sx, sy);
+        fe_draw_small_text((x + w * 0.5f) * sx - lw * 0.5f, ty, label, tc, sx, sy);
+    }
+    if (swatch_rgb >= 0) {
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_quad((redge - 15.0f) * sx, (y + h * 0.5f - 5.0f) * sy, 15.0f * sx, 10.0f * sy,
+                     frontend_rgb_to_bgra((uint32_t)swatch_rgb), -1, 0, 0, 1, 1);
+    } else if (val) {
+        float vw = fe_measure_small_text(val) * fe_glyph_sx(sx, sy);
+        fe_draw_small_text(redge * sx - vw, ty, val, tc, sx, sy);
+    }
+}
+
+/* Per-pane STATS spec sheet, drawn as an OVERLAY on top of the normal pane (car
+ * stays at the top, the button menu stays semi-visible underneath) — the same
+ * "processing" the original uses (dimmed content, spec rows over it). Text is
+ * scaled to fit the pane. */
+static void mp_simul_render_stats(int p, float px, float py, float pw, float ph, float sx, float sy) {
+    static const struct { const char *hdr; int fi; int exp; const char *sfx; } k_rows[] = {
+        { "LAYOUT:",       2, 1, NULL   }, { "GEARS:",        3, 0, NULL   },
+        { "PRICE:",        4, 0, NULL   }, { "TIRES:",        5, 3, NULL   },
+        { "TOP SPEED:",    7, 0, " MPH" }, { "0-60 MPH:",     8, 0, " sec" },
+        { "60-0 MPH:",     9, 0, " ft"  }, { "1/4 MILE:",    10, 0, " sec" },
+        { "ENGINE:",      11, 2, NULL   }, { "COMPRESSION:", 12, 0, NULL   },
+        { "DISPLACEMENT:",13, 0, NULL   }, { "LATERAL ACC:", 14, 0, NULL   },
+        { "TORQUE:",      15, 0, NULL   }, { "HP:",          16, 0, NULL   },
+    };
+    int n_layout = (int)(sizeof(k_stat_layout_types) / sizeof(k_stat_layout_types[0]));
+    int n_engine = (int)(sizeof(k_stat_engine_types) / sizeof(k_stat_engine_types[0]));
+    float ax = px + 6.0f, ay = py + 28.0f, aw = pw - 12.0f, ah = ph - 34.0f;
+    float rh, lsx, lsy, vx;
+    int i;
+    char val[64];
+
+    /* Translucent dark scrim — dims the car + menu underneath so they stay
+     * SEMI-VISIBLE behind the spec text (no opaque takeover). */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(ax * sx, ay * sy, aw * sx, ah * sy, 0xC2000810u, -1, 0, 0, 1, 1);
+
+    rh  = ah / 15.0f;                         /* 14 rows + a back-hint line */
+    lsy = sy * mp_simul_clamp01(rh / 11.0f);  /* shrink the small font to fit a row */
+    if (lsy < sy * 0.42f) lsy = sy * 0.42f;
+    lsx = sx * (lsy / sy);
+    vx  = ax + aw * 0.46f;
+    for (i = 0; i < 14; i++) {
+        float ry = (ay + 2.0f + (float)i * rh) * sy;
+        const char *raw = s_mp_pane_spec[p][k_rows[i].fi];
+        int idx;
+        fe_draw_small_text(ax * sx + 2.0f * sx, ry, k_rows[i].hdr, 0xFFC8C8C8u, lsx, lsy);
+        switch (k_rows[i].exp) {
+        case 1:
+            idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
+            fe_draw_small_text(vx * sx, ry, (idx >= 0 && idx < n_layout) ? k_stat_layout_types[idx] : raw,
+                               0xFFFFFFFFu, lsx, lsy);
+            break;
+        case 2:
+            idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
+            fe_draw_small_text(vx * sx, ry, (idx >= 0 && idx < n_engine) ? k_stat_engine_types[idx] : raw,
+                               0xFFFFFFFFu, lsx, lsy);
+            break;
+        case 3: {
+            char f[24], r[24];
+            frontend_fmt_spec(f, sizeof f, raw);
+            frontend_fmt_spec(r, sizeof r, (k_rows[i].fi + 1 < 17) ? s_mp_pane_spec[p][k_rows[i].fi + 1] : "");
+            snprintf(val, sizeof val, "%s/%s", f, r);
+            fe_draw_small_text(vx * sx, ry, val, 0xFFFFFFFFu, lsx, lsy);
+            break;
+        }
+        default:
+            frontend_fmt_spec(val, sizeof val, raw);
+            if (k_rows[i].sfx && val[0] && val[0] != '-') {
+                size_t vl = strlen(val), sl = strlen(k_rows[i].sfx);
+                if (vl + sl + 1 < sizeof val) memcpy(val + vl, k_rows[i].sfx, sl + 1);
+            }
+            fe_draw_small_text(vx * sx, ry, val, 0xFFFFFFFFu, lsx, lsy);
+            break;
+        }
+    }
+    mp_simul_small_centered((px + pw * 0.5f) * sx, (ay + ah - rh) * sy, "A / B = BACK",
+                            0xFFFFE060u, lsx, lsy);
+}
+
+static void frontend_mp_simul_carsel_render(float sx, float sy) {
+    int p, n = s_num_human_players;
+    int cols = 1, rows = 1, missing = 0;
+    uint32_t now = td5_plat_time_ms();
+    float anim_t = 1.0f;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+    (void)missing;
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+
+    if (s_inner_state == 0x20)
+        anim_t = mp_simul_clamp01((float)(now - s_mp_simul_anim_ms) / (float)MP_SIMUL_ANIM_MS);
+
+    float pane_w = 640.0f / (float)cols;
+    float pane_h = 480.0f / (float)rows;
+
+    /* Dim the MainMenu background (ramps up with the slide-in). */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy,
+                 ((uint32_t)(0xB0 * anim_t) << 24) | 0x101018u, -1, 0, 0, 1, 1);
+
+    for (p = 0; p < n; p++) {
+        int col = p % cols, row = p / cols;
+        float px = (float)col * pane_w, py = (float)row * pane_h;
+        float cx, pyr, pt, pe, rise;
+        uint32_t rgb  = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;  /* chosen identity colour */
+        uint32_t pcol = rgb | 0xFF000000u;
+        int car   = s_mp_player_car[p];
+        int td6   = frontend_car_is_td6(car);
+        int ready = s_mp_player_ready[p];
+        int stats = (s_mp_pane_substate[p] == 1);
+        char buf[64];
+
+        /* Staggered rise-in: each pane eases up into place from below. */
+        pt = mp_simul_clamp01(anim_t * (1.0f + 0.12f * (float)n) - 0.10f * (float)p);
+        pe = 1.0f - (1.0f - pt) * (1.0f - pt);
+        rise = (1.0f - pe) * (pane_h * 0.45f);
+        pyr = py + rise;
+        cx  = px + pane_w * 0.5f;
+
+        /* Pane backdrop + coloured border (brighter/thicker when READY). */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, (pane_h - 6) * sy,
+                     ready ? 0xC0102818u : 0xB0141420u, -1, 0, 0, 1, 1);
+        {
+            float bt = ready ? 4.0f : 2.0f;
+            uint32_t bc = rgb | (ready ? 0xFF000000u : 0xD0000000u);
+            fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+            fe_draw_quad((px + 3) * sx, (pyr + pane_h - 3 - bt) * sy, (pane_w - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+            fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, bt * sx, (pane_h - 6) * sy, bc, -1, 0, 0, 1, 1);
+            fe_draw_quad((px + pane_w - 3 - bt) * sx, (pyr + 3) * sy, bt * sx, (pane_h - 6) * sy, bc, -1, 0, 0, 1, 1);
+        }
+
+        /* Header banner: the player's chosen NAME (falls back to PLAYER N). */
+        if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
+        else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
+                     rgb | 0xD0000000u, -1, 0, 0, 1, 1);
+        mp_simul_small_centered(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy);
+
+        /* Car NAME above the image (request). */
+        snprintf(buf, sizeof buf, "%s", frontend_get_car_display_name(car));
+        mp_simul_small_centered(cx * sx, (pyr + 21) * sy, buf, 0xFFFFFFFFu, sx, sy);
+
+        /* Car image (below the name). */
+        {
+            float avail_w = pane_w - 20.0f;
+            float avail_h = pane_h * 0.38f;
+            float ar = 408.0f / 280.0f;
+            float dw = avail_w, dh = dw / ar, dx, dy;
+            if (dh > avail_h) { dh = avail_h; dw = dh * ar; }
+            dx = cx - dw * 0.5f;
+            dy = pyr + 32.0f;
+            if (s_mp_pane_preview[p] > 0)
+                fe_draw_surface_rect(s_mp_pane_preview[p], dx * sx, dy * sy, dw * sx, dh * sy, 0xFFFFFFFF);
+            if (td6 && frontend_car_paintable(car) && s_mp_pane_overlay[p] > 0)
+                fe_draw_surface_rect(s_mp_pane_overlay[p], dx * sx, dy * sy, dw * sx, dh * sy,
+                                     frontend_rgb_to_bgra((uint32_t)s_mp_player_color[p]));
+        }
+
+        if (ready) {
+            mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.66f) * sy, "READY", 0xFF40FF40u, sx, sy);
+            mp_simul_small_centered(cx * sx, (pyr + pane_h - 16.0f) * sy, "A = CHANGE   B = LOBBY",
+                                    0xFFB0B0B0u, sx, sy);
+            continue;
+        }
+
+        /* Button stack (CAR / PAINT / STATS / AUTO-MANUAL / OK). */
+        {
+            float bx = px + 8.0f, bw = pane_w - 16.0f;
+            float bsy = pyr + 32.0f + pane_h * 0.38f + 4.0f;
+            float room = (pyr + pane_h - 18.0f) - bsy;
+            float bh = room / (float)MP_BTN_COUNT - 2.0f;
+            int focus = s_mp_pane_btn[p];
+            float yy = bsy;
+            char vbuf[24];
+            if (bh < 10.0f) bh = 10.0f;
+            if (bh > 22.0f) bh = 22.0f;
+
+            mp_simul_draw_btn(bx, yy, bw, bh, "CAR", focus == MP_BTN_CAR, pcol, 1, NULL, -1, sx, sy);
+            yy += bh + 2.0f;
+            if (td6 && frontend_car_paintable(car))
+                mp_simul_draw_btn(bx, yy, bw, bh, "PAINT", focus == MP_BTN_PAINT, pcol, 1, NULL,
+                                  s_mp_player_color[p], sx, sy);
+            else if (!td6 && frontend_car_has_paint(car)) {
+                snprintf(vbuf, sizeof vbuf, "%d/4", s_mp_player_paint[p] + 1);
+                mp_simul_draw_btn(bx, yy, bw, bh, "PAINT", focus == MP_BTN_PAINT, pcol, 1, vbuf, -1, sx, sy);
+            } else
+                mp_simul_draw_btn(bx, yy, bw, bh, "PAINT", focus == MP_BTN_PAINT, pcol, 0, "-", -1, sx, sy);
+            yy += bh + 2.0f;
+            mp_simul_draw_btn(bx, yy, bw, bh, "STATS", focus == MP_BTN_STATS, pcol, 0, NULL, -1, sx, sy);
+            yy += bh + 2.0f;
+            mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTOMATIC",
+                              focus == MP_BTN_TRANS, pcol, 0, NULL, -1, sx, sy);
+            yy += bh + 2.0f;
+            mp_simul_draw_btn(bx, yy, bw, bh, "OK", focus == MP_BTN_OK, pcol, 0, NULL, -1, sx, sy);
+        }
+
+        /* STATS spec sheet overlays the car + menu (both kept semi-visible). */
+        if (stats) mp_simul_render_stats(p, px, pyr, pane_w, pane_h, sx, sy);
+    }
+
+    /* All-ready beat banner. */
+    if (s_mp_simul_ready_ms != 0) {
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_quad(0.0f, 227.0f * sy, 640.0f * sx, 26.0f * sy, 0xC0103018u, -1, 0, 0, 1, 1);
+        fe_draw_text_centered(320.0f * sx, 232.0f * sy, "ALL READY - STARTING...", 0xFFFFFF80u, sx, sy);
+    }
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* ========================================================================
+ * Player-setup window (phase 0): per-pane NAME + background COLOUR entry.
+ * Same grid layout as the car-select window. Keyboard players type directly;
+ * pad players use an on-screen QWERTY. Colour uses the TD6 colour picker grid.
+ * ======================================================================== */
+
+static void mp_setup_name_append(int p, char c) {
+    int l = (int)strlen(s_mp_player_name[p]);
+    if (l < (int)sizeof(s_mp_player_name[p]) - 1) {
+        s_mp_player_name[p][l] = c;
+        s_mp_player_name[p][l + 1] = '\0';
+    }
+}
+static void mp_setup_name_backspace(int p) {
+    int l = (int)strlen(s_mp_player_name[p]);
+    if (l > 0) s_mp_player_name[p][l - 1] = '\0';
+}
+
+static void frontend_mp_setup_init(void) {
+    int p, n = s_num_human_players;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    frontend_init_return_screen(TD5_SCREEN_CAR_SELECTION);
+    frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+    frontend_reset_buttons();
+    frontend_set_color_panel(0);
+    frontend_set_cursor_visible(0);
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+        td5_input_set_input_source(p, 0);   /* drop exclusives so scan handles poll */
+
+    for (p = 0; p < n; p++) {
+        if (s_mp_player_accent[p] == 0)
+            s_mp_player_accent[p] = (int)(k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
+        s_mp_player_ready[p]  = 0;
+        s_mp_setup_sub[p]     = 0;
+        s_mp_setup_btn[p]     = MP_SET_NAME;
+        s_mp_kbd_col[p]       = 0;
+        s_mp_kbd_row[p]       = 0;
+        s_mp_col_col[p]       = 0;
+        s_mp_col_row[p]       = 0;
+        s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+    }
+    s_mp_simul_ready_ms = 0;
+    s_mp_simul_anim_ms  = td5_plat_time_ms();
+    s_anim_complete = 1;
+    s_inner_state = 0x20;
+    s_fe_gamepad_nav = 0;
+    td5_plat_input_flush_nav();
+    td5_plat_input_flush_chars();
+    frontend_check_escape();
+    frontend_play_sfx(4);
+    TD5_LOG_I(LOG_TAG, "MP setup window for %d players", n);
+}
+
+static void frontend_mp_setup_update(void) {
+    int p, n = s_num_human_players;
+    int all_ready = 1, want_back = 0;
+    uint32_t now = td5_plat_time_ms();
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    if (s_inner_state == 0x20) {   /* slide-in animation */
+        for (p = 0; p < n; p++) s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        frontend_check_escape();
+        if (now - s_mp_simul_anim_ms >= MP_SIMUL_ANIM_MS) s_inner_state = 0x21;
+        return;
+    }
+
+    for (p = 0; p < n; p++) {
+        uint32_t bits = mp_simul_player_nav(p);
+        uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
+        int isk = (s_mp_join_device[p] == 0);
+        s_mp_pane_nav_prev[p] = bits;
+
+        if (s_mp_setup_sub[p] == 1) {            /* NAME entry */
+            if (isk) {
+                int ch;
+                while ((ch = td5_plat_input_get_char()) != 0) {
+                    if (ch == '\r' || ch == '\n') { s_mp_setup_sub[p] = 0; frontend_play_sfx(3); break; }
+                    else if (ch == '\b') mp_setup_name_backspace(p);
+                    else if (ch >= 0x20 && ch < 0x7f) mp_setup_name_append(p, (char)ch);
+                }
+            } else {
+                int row = s_mp_kbd_row[p], col = s_mp_kbd_col[p];
+                int rowlen = (row < MP_KBD_LETTER_ROWS) ? (int)strlen(k_mp_kbd_rows[row]) : 3;
+                if (edge & 1) { if (col > 0) col--; frontend_play_sfx(2); }
+                if (edge & 2) { if (col < rowlen - 1) col++; frontend_play_sfx(2); }
+                if (edge & 4) { if (row > 0) row--; frontend_play_sfx(2); }
+                if (edge & 8) { if (row < MP_KBD_ROWS - 1) row++; frontend_play_sfx(2); }
+                rowlen = (row < MP_KBD_LETTER_ROWS) ? (int)strlen(k_mp_kbd_rows[row]) : 3;
+                if (col > rowlen - 1) col = rowlen - 1;
+                s_mp_kbd_row[p] = row; s_mp_kbd_col[p] = col;
+                if (edge & 0x10) {
+                    if (row < MP_KBD_LETTER_ROWS) { mp_setup_name_append(p, k_mp_kbd_rows[row][col]); frontend_play_sfx(2); }
+                    else if (col == 0) { mp_setup_name_append(p, ' '); frontend_play_sfx(2); }
+                    else if (col == 1) { mp_setup_name_backspace(p); frontend_play_sfx(2); }
+                    else { s_mp_setup_sub[p] = 0; frontend_play_sfx(3); }   /* DONE */
+                }
+                if (edge & 0x20) { s_mp_setup_sub[p] = 0; frontend_play_sfx(5); }
+            }
+            all_ready = 0;
+            continue;
+        }
+
+        if (s_mp_setup_sub[p] == 2) {            /* COLOUR picker */
+            int moved = 0;
+            if (edge & 1) { if (s_mp_col_col[p] > 0) s_mp_col_col[p]--; moved = 1; }
+            if (edge & 2) { if (s_mp_col_col[p] < TD6_CP_COLS - 1) s_mp_col_col[p]++; moved = 1; }
+            if (edge & 4) { if (s_mp_col_row[p] > 0) s_mp_col_row[p]--; moved = 1; }
+            if (edge & 8) { if (s_mp_col_row[p] < TD6_CP_GRID_ROWS - 1) s_mp_col_row[p]++; moved = 1; }
+            if (moved) {
+                s_mp_player_accent[p] = (int)td6_cursor_color(s_mp_col_col[p], s_mp_col_row[p]);
+                frontend_play_sfx(2);
+            }
+            if (edge & 0x10) { s_mp_setup_sub[p] = 0; frontend_play_sfx(3); }
+            if (edge & 0x20) { s_mp_setup_sub[p] = 0; frontend_play_sfx(5); }
+            all_ready = 0;
+            continue;
+        }
+
+        if (s_mp_player_ready[p]) {
+            if (edge & 0x10) { s_mp_player_ready[p] = 0; s_mp_simul_ready_ms = 0; frontend_play_sfx(5); }
+            if (edge & 0x20) want_back = 1;
+            continue;
+        }
+
+        /* idle: navigate NAME / COLOUR / OK */
+        if (edge & 4) { s_mp_setup_btn[p] = (s_mp_setup_btn[p] + MP_SET_COUNT - 1) % MP_SET_COUNT; frontend_play_sfx(2); }
+        if (edge & 8) { s_mp_setup_btn[p] = (s_mp_setup_btn[p] + 1) % MP_SET_COUNT; frontend_play_sfx(2); }
+        if (edge & 0x10) {
+            if (s_mp_setup_btn[p] == MP_SET_NAME)   { s_mp_setup_sub[p] = 1; if (isk) td5_plat_input_flush_chars(); frontend_play_sfx(3); }
+            else if (s_mp_setup_btn[p] == MP_SET_COLOUR) { s_mp_setup_sub[p] = 2; frontend_play_sfx(3); }
+            else { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }
+        }
+        if (edge & 0x20) want_back = 1;
+    }
+
+    if (frontend_check_escape()) {
+        /* A keyboard player mid name-entry: ESC just leaves the field. Otherwise
+         * ESC backs the whole setup out to the lobby. */
+        int handled = 0;
+        for (p = 0; p < n; p++)
+            if (s_mp_join_device[p] == 0 && s_mp_setup_sub[p] == 1) { s_mp_setup_sub[p] = 0; handled = 1; }
+        if (!handled) want_back = 1;
+    }
+    if (want_back) { mp_simul_back_to_lobby(n); return; }
+
+    for (p = 0; p < n; p++)
+        if (!s_mp_player_ready[p]) { all_ready = 0; break; }
+
+    if (all_ready) {
+        if (s_mp_simul_ready_ms == 0) s_mp_simul_ready_ms = now;
+        if (now - s_mp_simul_ready_ms >= 500u) {
+            /* Advance to the car-select grid (phase 1). */
+            s_mp_phase = 1;
+            s_mp_simul_ready_ms = 0;
+            s_inner_state = 0;        /* intercept will run carsel_init next frame */
+            TD5_LOG_I(LOG_TAG, "MP setup: all %d ready -> car select", n);
+            return;
+        }
+    } else {
+        s_mp_simul_ready_ms = 0;
+    }
+}
+
+/* On-screen QWERTY for pad name entry. */
+static void mp_setup_render_kbd(int p, float ax, float ay, float aw, float ah,
+                                uint32_t accent, float sx, float sy) {
+    int row, col;
+    float rh = ah / (float)MP_KBD_ROWS;
+    for (row = 0; row < MP_KBD_LETTER_ROWS; row++) {
+        const char *r = k_mp_kbd_rows[row];
+        int len = (int)strlen(r);
+        float kw = aw / 10.0f;
+        float rowx = ax + (aw - kw * (float)len) * 0.5f;
+        float ry = ay + (float)row * rh;
+        for (col = 0; col < len; col++) {
+            float kx = rowx + (float)col * kw;
+            int foc = (s_mp_kbd_row[p] == row && s_mp_kbd_col[p] == col);
+            char ch[2]; ch[0] = r[col]; ch[1] = '\0';
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(kx * sx, ry * sy, (kw - 1.0f) * sx, (rh - 1.0f) * sy,
+                         foc ? (accent | 0xFF000000u) : 0xB0203040u, -1, 0, 0, 1, 1);
+            mp_simul_small_centered((kx + kw * 0.5f) * sx, (ry + (rh - SMALLFONT_TTF_CAP) * 0.5f) * sy,
+                                    ch, foc ? 0xFF101010u : 0xFFFFFFFFu, sx, sy);
+        }
+    }
+    {
+        static const char *const sp[3] = { "SPACE", "DEL", "DONE" };
+        float kw = aw / 3.0f, ry = ay + (float)MP_KBD_SPECIAL * rh;
+        for (col = 0; col < 3; col++) {
+            float kx = ax + (float)col * kw;
+            int foc = (s_mp_kbd_row[p] == MP_KBD_SPECIAL && s_mp_kbd_col[p] == col);
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(kx * sx, ry * sy, (kw - 1.0f) * sx, (rh - 1.0f) * sy,
+                         foc ? (accent | 0xFF000000u) : 0xB0203040u, -1, 0, 0, 1, 1);
+            mp_simul_small_centered((kx + kw * 0.5f) * sx, (ry + (rh - SMALLFONT_TTF_CAP) * 0.5f) * sy,
+                                    sp[col], foc ? 0xFF101010u : 0xFFFFFFFFu, sx, sy);
+        }
+    }
+}
+
+/* TD6 colour-picker grid for the background-colour choice. */
+static void mp_setup_render_colorgrid(int p, float ax, float ay, float aw, float ah,
+                                      float sx, float sy) {
+    int r, c;
+    float cw = aw / (float)TD6_CP_COLS, ch = ah / (float)TD6_CP_GRID_ROWS;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    for (r = 0; r < TD6_CP_GRID_ROWS; r++) {
+        for (c = 0; c < TD6_CP_COLS; c++) {
+            uint32_t col = td6_cursor_color(c, r);
+            float kx = ax + (float)c * cw, ky = ay + (float)r * ch;
+            fe_draw_quad(kx * sx, ky * sy, cw * sx, ch * sy, frontend_rgb_to_bgra(col), -1, 0, 0, 1, 1);
+        }
+    }
+    {
+        float kx = ax + (float)s_mp_col_col[p] * cw, ky = ay + (float)s_mp_col_row[p] * ch;
+        uint32_t hl = 0xFFFFFFFFu;
+        fe_draw_quad(kx * sx, ky * sy, cw * sx, 2.0f * sy, hl, -1, 0, 0, 1, 1);
+        fe_draw_quad(kx * sx, (ky + ch - 2.0f) * sy, cw * sx, 2.0f * sy, hl, -1, 0, 0, 1, 1);
+        fe_draw_quad(kx * sx, ky * sy, 2.0f * sx, ch * sy, hl, -1, 0, 0, 1, 1);
+        fe_draw_quad((kx + cw - 2.0f) * sx, ky * sy, 2.0f * sx, ch * sy, hl, -1, 0, 0, 1, 1);
+    }
+}
+
+static void frontend_mp_setup_render(float sx, float sy) {
+    int p, n = s_num_human_players;
+    int cols = 1, rows = 1, missing = 0;
+    uint32_t now = td5_plat_time_ms();
+    int caret = ((now / 400u) & 1u) != 0;
+    float anim_t = 1.0f;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+    (void)missing;
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    if (s_inner_state == 0x20)
+        anim_t = mp_simul_clamp01((float)(now - s_mp_simul_anim_ms) / (float)MP_SIMUL_ANIM_MS);
+
+    float pane_w = 640.0f / (float)cols;
+    float pane_h = 480.0f / (float)rows;
+
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy,
+                 ((uint32_t)(0xB0 * anim_t) << 24) | 0x101018u, -1, 0, 0, 1, 1);
+
+    for (p = 0; p < n; p++) {
+        int col = p % cols, row = p / cols;
+        float px = (float)col * pane_w, py = (float)row * pane_h;
+        float cx, pyr, pt, pe, rise, ax, ay, aw, ah;
+        uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
+        uint32_t pcol = rgb | 0xFF000000u;
+        int ready = s_mp_player_ready[p];
+        int sub = s_mp_setup_sub[p];
+        int isk = (s_mp_join_device[p] == 0);
+        char buf[64];
+
+        pt = mp_simul_clamp01(anim_t * (1.0f + 0.12f * (float)n) - 0.10f * (float)p);
+        pe = 1.0f - (1.0f - pt) * (1.0f - pt);
+        rise = (1.0f - pe) * (pane_h * 0.45f);
+        pyr = py + rise;
+        cx  = px + pane_w * 0.5f;
+
+        /* Backdrop + accent border. */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, (pane_h - 6) * sy,
+                     ready ? 0xC0102818u : 0xB0141420u, -1, 0, 0, 1, 1);
+        {
+            float bt = ready ? 4.0f : 2.0f;
+            uint32_t bc = rgb | (ready ? 0xFF000000u : 0xD0000000u);
+            fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+            fe_draw_quad((px + 3) * sx, (pyr + pane_h - 3 - bt) * sy, (pane_w - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+            fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, bt * sx, (pane_h - 6) * sy, bc, -1, 0, 0, 1, 1);
+            fe_draw_quad((px + pane_w - 3 - bt) * sx, (pyr + 3) * sy, bt * sx, (pane_h - 6) * sy, bc, -1, 0, 0, 1, 1);
+        }
+
+        /* Header banner: chosen name or PLAYER N. */
+        if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
+        else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
+                     rgb | 0xD0000000u, -1, 0, 0, 1, 1);
+        mp_simul_small_centered(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy);
+
+        ax = px + 6.0f; ay = pyr + 22.0f; aw = pane_w - 12.0f; ah = pane_h - 28.0f;
+
+        if (ready) {
+            mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.42f) * sy, "READY", 0xFF40FF40u, sx, sy);
+            snprintf(buf, sizeof buf, "%s", s_mp_player_name[p][0] ? s_mp_player_name[p] : "(no name)");
+            mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.42f + 14.0f) * sy, buf, 0xFFFFFFFFu, sx, sy);
+            mp_simul_small_centered(cx * sx, (pyr + pane_h - 16.0f) * sy, "A = CHANGE   B = LOBBY",
+                                    0xFFB0B0B0u, sx, sy);
+            continue;
+        }
+
+        if (sub == 1) {                 /* NAME entry */
+            /* name field box */
+            float fy = ay;
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(ax * sx, fy * sy, aw * sx, 16.0f * sy, 0xC0000814u, -1, 0, 0, 1, 1);
+            snprintf(buf, sizeof buf, "%s%s", s_mp_player_name[p], caret ? "_" : " ");
+            fe_draw_small_text((ax + 4.0f) * sx, (fy + (16.0f - SMALLFONT_TTF_CAP) * 0.5f) * sy,
+                               buf, 0xFFFFFFFFu, sx, sy);
+            if (isk)
+                mp_simul_small_centered(cx * sx, (ay + ah - 12.0f) * sy,
+                                        "TYPE NAME - ENTER=DONE  ESC=BACK", 0xFFFFE060u, sx, sy);
+            else
+                mp_setup_render_kbd(p, ax, fy + 19.0f, aw, ah - 22.0f, pcol, sx, sy);
+            continue;
+        }
+
+        if (sub == 2) {                 /* COLOUR picker */
+            mp_setup_render_colorgrid(p, ax, ay, aw, ah - 12.0f, sx, sy);
+            mp_simul_small_centered(cx * sx, (ay + ah - 9.0f) * sy, "A=OK  B=BACK", 0xFFFFE060u, sx, sy);
+            continue;
+        }
+
+        /* idle: NAME / COLOUR / OK buttons */
+        {
+            float bx = px + 8.0f, bw = pane_w - 16.0f;
+            float bsy = ay + 4.0f;
+            float room = (pyr + pane_h - 12.0f) - bsy;
+            float bh = room / (float)MP_SET_COUNT - 3.0f;
+            int focus = s_mp_setup_btn[p];
+            float yy = bsy;
+            if (bh < 12.0f) bh = 12.0f;
+            if (bh > 26.0f) bh = 26.0f;
+            mp_simul_draw_btn(bx, yy, bw, bh, "NAME", focus == MP_SET_NAME, pcol, 0,
+                              s_mp_player_name[p][0] ? s_mp_player_name[p] : "-", -1, sx, sy);
+            yy += bh + 3.0f;
+            mp_simul_draw_btn(bx, yy, bw, bh, "COLOUR", focus == MP_SET_COLOUR, pcol, 0,
+                              NULL, s_mp_player_accent[p], sx, sy);
+            yy += bh + 3.0f;
+            mp_simul_draw_btn(bx, yy, bw, bh, "OK", focus == MP_SET_OK, pcol, 0, NULL, -1, sx, sy);
+        }
+    }
+
+    if (s_mp_simul_ready_ms != 0) {
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        fe_draw_quad(0.0f, 227.0f * sy, 640.0f * sx, 26.0f * sy, 0xC0103018u, -1, 0, 0, 1, 1);
+        fe_draw_text_centered(320.0f * sx, 232.0f * sy, "ALL READY - CHOOSE CARS...", 0xFFFFFF80u, sx, sy);
+    }
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
 static void Screen_CarSelection(void) {
+    /* Multiplayer simultaneous flow (2+ humans) takes over this screen with its
+     * own per-pane panes + per-device input: phase 0 = name/colour setup window,
+     * phase 1 = the car-select grid. Single-player / classic-2P / network fall
+     * through to the original state machine below. */
+    if (s_mp_flow && s_num_human_players >= 2) {
+        if (!s_mp_simul) { s_mp_simul = 1; s_mp_phase = 0; s_inner_state = 0; }
+        /* 0x20 = slide-in animation, 0x21 = interactive; anything else (fresh
+         * inner-state 0 on entry / phase change) (re)initialises the phase. */
+        if (s_mp_phase == 0) {
+            if (s_inner_state == 0x20 || s_inner_state == 0x21) frontend_mp_setup_update();
+            else                                                frontend_mp_setup_init();
+        } else {
+            if (s_inner_state == 0x20 || s_inner_state == 0x21) frontend_mp_simul_carsel_update();
+            else                                                frontend_mp_simul_carsel_init();
+        }
+        return;
+    }
+    s_mp_simul = 0;
     switch (s_inner_state) {
     case 0: /* Init: determine car roster, load UI assets */
         frontend_init_return_screen(TD5_SCREEN_CAR_SELECTION);
@@ -13259,7 +14381,7 @@ static void Screen_CarSelection(void) {
         break;
 
     case 8: /* Blit cached rect, wait 2 frames then return to 7 */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 2) {
             s_inner_state = 7;
         }
@@ -13870,7 +14992,7 @@ static void Screen_TrackSelection(void) {
     case 9: /* Track-switch slide-in: 16 frames [CONFIRMED @ 0x427e96 original state 8].
              * Single tick counter drives both preview (slides from right) and text (slides from above).
              * Original: tick * -0x10 + 0x22e for preview x; (tick-0x10)*0x10 + base for text y. */
-        s_track_switch_tick++;
+        s_track_switch_tick += s_fe_logic_ticks;
         if (s_track_switch_tick >= 16) {
             s_track_switch_tick = 16; /* settled: render offsets become 0 */
             TD5_LOG_I(LOG_TAG, "TrackSel: track change slide-in complete");
@@ -13919,7 +15041,7 @@ static void Screen_ExtrasGallery(void) {
         break;
 
     case 1: /* Brief delay to prevent input bleed from menu (~39 ticks) */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x27) {
             s_credits_start_ms = td5_plat_time_ms();
             s_inner_state = 2;
@@ -14191,7 +15313,7 @@ static void Screen_RaceResults(void) {
             s_inner_state = 0x0C;
             break;
         }
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x12) {
             /* P8 — DXSound::Play(4) on slide-in completion.
              * [CONFIRMED @ 0x00422480 case 3] Original fires Play(4) inside
@@ -14272,7 +15394,7 @@ static void Screen_RaceResults(void) {
              *   DrawRaceDataSummaryPanel(DAT_00497a68);  // re-fill with new slot
              *   counter = 0; state++;                    // -> state 8
              * Port uses s_anim_tick stepping +2 from 0..0x11. */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         s_results_panel_slide_x = s_anim_tick * 0x20;  /* +0..+0x220 */
         if (s_anim_tick >= 0x11) {
             /* Cycle slot index now (mid-slide) — new data visible on slide-in.
@@ -14305,7 +15427,7 @@ static void Screen_RaceResults(void) {
              * At counter=0 panel is off-screen left (-0x1f6 + iVar4 ~ -382);
              * at counter=0x11 it reaches rest x. Port: offset progresses
              * from -0x220 → 0. */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         s_results_panel_slide_x = -((0x11 - s_anim_tick) * 0x20);  /* -0x220..0 */
         if (s_anim_tick >= 0x11) {
             s_results_panel_slide_x = 0;
@@ -14318,7 +15440,7 @@ static void Screen_RaceResults(void) {
              *   panel_x = iVar4 + counter * -0x20 + 0x2a
              * Step -0x20 per frame; same DrawRaceDataSummaryPanel re-fill
              * trigger at counter==0x11. */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         s_results_panel_slide_x = -(s_anim_tick * 0x20);  /* 0..-0x220 */
         if (s_anim_tick >= 0x11) {
             s_score_category_index += s_results_panel_slide_dir;
@@ -14347,7 +15469,7 @@ static void Screen_RaceResults(void) {
               *   panel_x = iVar4 + counter * -0x20 + 0x24a
               * At counter=0 panel is off-screen right (+0x220 from rest);
               * at counter=0x11 reaches rest. */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         s_results_panel_slide_x = (0x11 - s_anim_tick) * 0x20;  /* +0x220..0 */
         if (s_anim_tick >= 0x11) {
             s_results_panel_slide_x = 0;
@@ -14363,7 +15485,7 @@ static void Screen_RaceResults(void) {
                 * state 0xC, so its X slide is approximated by the existing
                 * Y-slide-out path that fires when the FSM exits the
                 * table-browse window. */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         s_results_panel_slide_x = s_anim_tick * 0x30;  /* +0..+0x330 */
         if (s_anim_tick >= 0x11) {
             s_results_panel_slide_x = 0;
@@ -14466,7 +15588,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x0E: /* Menu slide-in: 5 buttons animate in, 32 frames */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x10) {
             s_inner_state = 0x0F;
         }
@@ -14481,7 +15603,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x10: /* Menu slide-out: 32 frames, then dispatch */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x10) {
             switch (s_results_button) {
             case 0: /* Race Again / Next Cup Race */
@@ -14645,7 +15767,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x12: /* Save confirmation slide-in: 32 frames */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x10) {
             s_inner_state = 0x13;
         }
@@ -14658,7 +15780,7 @@ static void Screen_RaceResults(void) {
         break;
 
     case 0x14: /* Save confirmation slide-out: 32 frames -> back to menu */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x10) {
             s_inner_state = 0x0D; /* return to post-results menu */
         }
@@ -14797,7 +15919,7 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 1: /* Slide-in: 32 frames */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x10) {
             s_anim_tick = 0;
             s_inner_state = 2;
@@ -14815,7 +15937,7 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 3: /* Slide-out of input: 32 frames */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x10) {
             s_anim_tick = 0;
             s_inner_state = 4;
@@ -14957,7 +16079,7 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 7: /* Score table slide-in: 39 frames */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 0x12) {
             s_inner_state = 8;
         }
@@ -14979,7 +16101,7 @@ static void Screen_PostRaceNameEntry(void) {
         break;
 
     case 12: /* Slide-out: 16 frames */
-        s_anim_tick += 2;
+        s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 16) {
             /* Persist high-score table to Config.td5.
              * [CONFIRMED @ 0x413BC0 case 4]: original writes into g_npcRacerGroupTable
@@ -15035,7 +16157,7 @@ static void Screen_CupFailed(void) {
         break;
 
     case 4: /* Slide-in: 32 frames [CONFIRMED @ 0x4237F0 case 4: anim==0x20 exit] */
-        s_anim_tick++;
+        s_anim_tick += s_fe_logic_ticks;
         /* Dialog slides from right (24px/frame), button from left */
         if (s_anim_tick >= 0x20) {
             s_inner_state = 5;
@@ -15133,7 +16255,7 @@ static void Screen_CupWon(void) {
         break;
 
     case 4: /* Slide-in: 32 frames [CONFIRMED @ 0x00423D35: anim==0x20 exit, +1/frame] */
-        s_anim_tick++;
+        s_anim_tick += s_fe_logic_ticks;
         if (s_anim_tick >= 0x20) {
             s_inner_state = 5;
         }
@@ -15213,7 +16335,7 @@ static void Screen_SessionLocked(void) {
         break;
 
     case 4: /* Slide-in: 32 frames [CONFIRMED @ 0x41D630 case 4: anim==0x20 exit] */
-        s_anim_tick++;
+        s_anim_tick += s_fe_logic_ticks;
         if (s_anim_tick >= 0x20) {
             s_inner_state = 5;
         }

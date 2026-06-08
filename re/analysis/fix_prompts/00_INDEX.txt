@@ -1,0 +1,80 @@
+================================================================================
+TD5RE UNCERTAINTY-RESOLUTION WORK PLAN  —  INDEX
+Generated 2026-06-01 from a whole-project uncertainty audit (6 parallel investigators).
+================================================================================
+
+WHAT THIS IS
+  One .txt per terminal session. Open the file, paste its full contents into a
+  fresh Claude Code session in C:\Users\maria\Desktop\Proyectos\TD5RE, run.
+
+HEADLINE FINDING
+  The uncertainty registers are largely STALE. The port was reworked through
+  2026-05-31 past most flagged items. Of ~62 non-frontend items triaged, the
+  CONFIRMED-NEEDED code backlog is tiny:
+    - 3 substantive physics fixes (all A/B-test gated)         -> P1
+    - 2 zero-behavior cleanups (race-order dead code; comment) -> P2, P5
+    - the rest are runtime-gated (trace -> decide) or doc-only.
+
+VERDICT SUMMARY (non-frontend)
+  Category                 Items  Faithful  Code-change  Runtime  Doc-only
+  A Physics/dynamics         10      6          3           1        -
+  B Race/AI/track-walker     13      7          1           5        -
+  C Camera                    7      6          0           1        -
+  D Audio                     6      5          0           1        -
+  E Rendering/FPU             8      6          1           2        -
+  F Structs/globals/formats  18     11          0           0        7
+
+FILES
+  P1_physics.txt              3 real fixes (trig LUT, velocity clamp, suspension)
+                              + 1 runtime (damage RNG). HIGH risk; A/B gated.
+  P2_race_ai_track.txt        1 zero-behavior cleanup now + a runtime cluster
+                              (edge-pen sign, DA-T2 Fix5, GameOptions map, AI
+                              stall/recovery, RNG parity).
+  P3_camera.txt               Mostly verify-faithful; 1 optional runtime-gated
+                              chase-tilt A/B. No blind edits.
+  P4_audio.txt                Mostly verify-faithful; 1 ear-test-gated engine
+                              volume item.
+  P5_rendering_fpu.txt        1 zero-risk stale-comment rewrite + 1 runtime-gated
+                              smoke occlusion. Determinism residual is out-of-scope
+                              (multi-session).
+  P6_structs_globals_docs.txt DOCUMENTATION ONLY (/re). No port code change. Do
+                              NOT implement the "unknown" fields - they are dead in
+                              the original.
+  frontend_handoff.txt        FYI/context for the dedicated frontend session (not a
+                              run-session). Includes cross-session items that live
+                              in td5_frontend.c.
+
+RUN ORDER / PARALLELIZATION
+  - P3, P4, P6 are fully isolated -> run any time, in parallel.
+  - P1 and P2 BOTH eventually touch td5_physics.c (P2's traffic_edge_pen is at
+    td5_physics.c:5792). P2's only STATIC edit is the td5_track.c/td5_game.c
+    cleanup; its physics edits wait on runtime traces. Run on separate branches
+    and merge P1 first to be safe.
+  - P4 and P5 both add a preset in td5_platform_win32.c -> coordinate the preset
+    enum if both land an edit.
+  - Frontend is a separate session; hand it frontend_handoff.txt.
+
+CROSS-SESSION FLAGS
+  - SFX 3-mode + *10 volume (td5_frontend.c:7774) is ALREADY FAITHFUL (audio
+    session confirmed) -> frontend session, no action.
+  - AI car-select RNG burn (td5_frontend.c:1661) governs RACE-AI determinism, not
+    UI -> P2 and the frontend session must coordinate before changing it.
+
+CONVENTIONS (all sessions)
+  - Ghidra HARD RULE: bash scripts/ghidra_pool.sh acquire -> open read_only=true
+    -> bash scripts/ghidra_pool.sh cleanup. If a pool slot is corrupt/empty, open
+    the master TD5 project read_only=true. If busy, fall back to docs.
+  - Build per CLAUDE.md: td5mod/src/td5re/build_standalone.bat with ABSOLUTE
+    mingw32 gcc/ar paths (relative fails through the MSYS junction).
+  - End commit messages with:
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+STALE-DOC CORRECTIONS WORTH MAKING (quick wins, prevents re-chasing fixed items)
+  - permanent_l4_residual.md and orig_vs_port_intentional_divergences.md still list
+    REGR#2 (audio SFX mode/vol) and REGR#6 (wheel anchor) as live -> both fixed
+    2026-05-22.
+  - Memory note "0x0040b070 sets ZENABLE on / ZFUNC LESSEQUAL" is FALSIFIED -> it
+    only toggles texture filter/blend renderstates (0x17, 0xE).
+  - td5_render.c smoke "KNOWN ISSUE" comment (~6620) is doubly stale (claims NDC z
+    + wrong preset) -> fixed by P5 Fix A.
+================================================================================

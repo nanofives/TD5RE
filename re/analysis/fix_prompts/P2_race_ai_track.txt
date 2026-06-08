@@ -1,0 +1,122 @@
+================================================================================
+SESSION P2 — RACE PROGRESSION / AI / TRACK-WALKER
+Paste everything below the line into a fresh Claude Code session at the repo root.
+One zero-behavior cleanup now; the rest is runtime-trace-first.
+NOTE: this eventually touches td5_physics.c (traffic_edge_pen @5792) — coordinate
+with session P1; run on a separate branch, merge P1 first.
+================================================================================
+
+TD5RE Workstream-B race progression / AI / track-walker. Root:
+C:\Users\maria\Desktop\Proyectos\TD5RE. Source: td5mod\src\td5re\. Use /fix for the
+cleanup, /diff-race to validate, Frida probes for the runtime items. Ghidra HARD
+RULE: pool acquire -> read_only=true -> cleanup.
+
+ALREADY FAITHFUL — do NOT re-investigate (docs predate fixes through 2026-05-31;
+verified against current source, not the stale doc line numbers):
+- Frame-timing: td5_game.c:4924 sets frame_dt_normalized = (delta_ms/1000)*30; HUD
+  uniformly fed normalized dt. Ledger #1/#7 resolved.
+- Single finish model: advance_pending_finish_state (td5_game.c:4068), faithful port
+  of CheckRaceCompletionState @0x00409E80. The dual td5_track_update_circuit_lap was
+  REMOVED. Ledger #2 resolved.
+- AwardWantedDamageScore: fully implemented td5_ai.c:496-575 (gates, arrest counter,
+  clamp).
+- AccumulateVehicleSpeedBonus: reads real actor fields td5_game.c:4381-4427.
+- RS_DIRECTION_POLARITY: dual-write removed; td5_ai.c:4466 writes only 0x3F.
+- AI route-heading: td5_ai.c:1064, CONFIRMED @0x434FFB (the "/* simplified */" is gone).
+- Checkpoint / q1-angle: now the faithful CheckRaceCompletionState port.
+
+------------------------------------------------------------
+CODE CHANGE (zero-behavior cleanup — the ONLY static edit in this workstream)
+Quarantine the dead placeholder race-order pass + refresh 2 stale comments.
+------------------------------------------------------------
+The REAL, authoritative race-order owner is update_race_order() in td5_game.c
+(~line 4679): reads real actors via td5_game_get_actor(), bubble-sorts by
+track_span_high_water (+0x86) descending, writes display_position + race_position.
+This is faithful to UpdateRaceOrder @0x0042F5B0. KEEP IT.
+
+td5_track.c (~line 5468) has a SECOND function td5_track_update_race_order() that is
+a dead placeholder: it sets actor_base pointers to 0 and forces hw_a=hw_b=0, so its
+swap test `if (hw_a < hw_b)` is always false -> it NEVER swaps and NEVER writes back.
+It is still CALLED every tick from td5_track_tick() (~line 6724), which runs at
+td5_game.c:3156 and :3299.
+
+CHANGES:
+1. In td5_track_tick() (~6721): remove the td5_track_update_race_order() call (~6724).
+   KEEP the td5_track_recycle_traffic_actor() call (real). Fix the function's
+   doc-comment (~6713-6720) so it no longer claims to correspond to UpdateRaceActors
+   (0x436A70) — it only does traffic recycling now.
+2. Quarantine the placeholder body (~5468-5526): wrap in #if 0 ... #endif with a
+   comment pointing to update_race_order() in td5_game.c, OR delete it (grep
+   td5_track_update_race_order first; remove the prototype from td5_track.h if present).
+3. Reword the stale FIXME comments at td5_ai.c:4241-4242 and 4295-4301 (they still
+   say the port writes BOTH 0x3F and 0x25 with a "FIXME: resolve discrepancy" — the
+   dual-write was removed; live write at ~4466 sets only rs[RS_ROUTE_DIRECTION_POLARITY]
+   = 0x3F). Comment-only; change no code.
+
+VERIFY: /diff-race on Edinburgh + one overtake scenario, capturing standings
+(race_pos, metric_display_pos, span_high). They MUST be byte-identical before vs
+after (the removed call was a no-op). Any divergence means something depended on the
+placeholder — STOP and report. Confirm td5_track_tick() still recycles traffic.
+SCOPE GUARD: do NOT touch update_race_order() in td5_game.c, and do NOT alter timing,
+checkpoint, finish-state, or DA-T2 walker logic.
+
+------------------------------------------------------------
+RUNTIME-REQUIRED (trace first, then decide — instrumentation mostly already wired)
+------------------------------------------------------------
+1. traffic_edge_pen sign (DO FIRST). td5_physics.c:5792 uses atan2_fixed12
+   tangent/parallel projection vs the orig outward-normal/perpendicular
+   (ProcessActorSegmentTransition/Forward/RouteAdvance @0x407390 / 0x4076c0 / 0x407840);
+   plus an extra +sub index at td5_physics.c:6156 the orig lacks.
+   - Set td5re.ini trace_traffic_edge_pen=1 (port CSV via tools/frida_csv/
+     traffic_edge_pen_port.csv) + run tools/_probes/traffic_edge_pen_probe.js on orig
+     0x004073D8 (inner-edge pen) and 0x00407920 (outer-edge pen). Best first target:
+     ProcessActorRouteAdvance @0x00407840 (single pen, no split).
+   - Capture: (slot, span_idx, sub_lane, type, A.x, A.z, B.x, B.z, rel.x, rel.z,
+     li_idx, ri_idx, pen) on Edinburgh (racers) + San Francisco (traffic).
+   - RULE: if sign(pen) matches on all contact ticks AND (li_idx,ri_idx) match ->
+     FAITHFUL/ARCH-DIV. If sign differs on any tick -> replace the tangent dot with
+     outward-normal perpendicular distance. If li/ri diverge (the +sub at :6156) ->
+     that is a SEPARATE real bug, fix independently.
+
+2. DA-T2 Fix 5 (default-case bits 5/7/10/11). Cases 1/2/4/8 already have 3-outcome
+   reject/advance logic (fixed 2026-05-27); only the default case at td5_track.c:3274
+   remains (orig RET no-op vs port cascade-resolve).
+   - Hook orig UpdateActorTrackPosition @0x004440F0 onEnter; histogram the `bits`
+     (boundary-cross mask) over an Edinburgh-at-speed MANUAL 6-racer run.
+   - RULE: if bits in {5,7,10,11} NEVER occur -> port default-case is unreachable ->
+     FAITHFUL, no change. If they occur -> make them a RET no-op (per orig switch
+     table 0x00445420 -> 0x00445411), then re-measure the slot-0 ~210u bias via
+     pool13 dynamic diff. NEVER apply blind (HIGH cascade risk).
+
+3. ScreenGameOptions storage map @0x0041f990. Port uses s_game_option_* statics + INI
+   vs orig RDATA 0x466004/8/C (UnlockA/B, SpecialEncounterConfig).
+   - Frida-write each orig global =1 ONE AT A TIME, start Edinburgh, observe HUD/AI
+     (checkpoint timer visible? traffic spawned? cops siren?). Mirror with the port by
+     setting g_td5.{checkpoint_timers,traffic,special_encounter}_enabled independently.
+   - RULE: 1:1 effect map -> FAITHFUL storage-layout divergence. Any orig write that
+     triggers a DIFFERENT effect -> that field is mis-mapped, re-map it.
+
+4. AI residuals (briefs in re/analysis/followup_sessions/, runtime-first):
+   - post-440 AI stall ~800 ticks (session_01): STEER_TRACE the saturating -98304
+     steering contributor; find which sub-module writes it.
+   - wall-recovery exit RS[0x3D]/RS[0x45] clear (session_07): Frida 0x00434FE0
+     onEnter/onLeave, compare recovery-clear conditions. Depends on the stall item.
+   - slot-0 lat_offset_bias ~11u residue (session_08): re-run pool13 paired-diff
+     AFTER item 5 (RNG) lands; only standalone-audit if still 11u.
+
+5. AI car-selection RNG parity. frontend_init_race_schedule (td5_frontend.c:1661) is
+   trace-aligned (srand 0x1A2B3C4D, zero preamble, 3-rand/iter with dedup re-run,
+   @0x0040dac0). The LIVE path uses timeGetTime() so parity only holds under the trace
+   seed (use RaceTrace + --seed-crt). THIS CODE LIVES IN td5_frontend.c — coordinate
+   with the frontend session before changing the rand-call pattern; it governs
+   race-AI determinism, not UI.
+
+------------------------------------------------------------
+Build per CLAUDE.md. End commits with:
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+KEY FILES: td5_game.c (timing 4924, finish 4068, order 4679, speed-bonus 4381),
+td5_track.c (DA-T2 2842/3274, placeholder 5468/6724), td5_physics.c (edge_pen 5792,
+sub-lane 6156), td5_ai.c (wanted 496, heading 1064, polarity 4466),
+td5_frontend.c (RNG schedule 1661).
+================================================================================

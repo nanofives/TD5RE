@@ -1,0 +1,29 @@
+S12 — FPS/MS overlay position (menu + race) + frontend responsiveness at high MS
+================================================================================
+
+Covers feedback: move FPS/MS to top-right on main menu · FPS/MS overlay overlaps car position in race · frontend more responsive when MS is high
+Modules: td5_frontend.c (menu overlay draw), td5_hud.c (race overlay + position text), main.c (main-loop tick)
+Memory: reference_perf_profiler_and_two_bugs_2026-06-03 (g_td5_display_fps/peak, td5_game_update_fps_overlay from the MAIN loop; frontend_recover_surfaces ran every frame inflating MS)
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Reposition the FPS/MS overlay and improve frontend input responsiveness. Three sub-tasks:
+
+1. MAIN MENU — move the FPS/MS counter to the TOP-RIGHT corner. It is currently drawn at the top-left (~8*sx, 8*sy) in td5_frontend.c (around line 8506, in the frontend UI-rect/display-loop draw, fe_draw_text). Anchor it to the right edge: x = screen_w - measured_text_width - margin.
+
+2. IN-RACE — the FPS/MS overlay overlaps the on-screen race POSITION text (both sit at viewport top-left, 8,8). FPS draw is td5_hud.c ~2919 (td5_hud_queue_text(0,8,8,...)); position text is td5_hud.c ~2461/2467 (vp_int_left+8, vp_int_top+8). Move the FPS/MS overlay to a corner that doesn't collide with the position readout (e.g. top-right of the active viewport), and verify it stays clear in split-screen too.
+
+3. RESPONSIVENESS — the frontend feels laggy when frame time (MS) is high. Frontend input is polled once per frame, coupled to FPS: frontend_poll_input td5_frontend.c ~4419, FSM tick ~4425, called from main.c ~1224. First confirm with [Logging]Profile=1 whether a per-frame cost (e.g. surface recovery, see the perf-profiler memory) is inflating MS in menus; reduce it. Then make input handling not feel sluggish at low FPS (e.g. consume input edges reliably / decouple polling from render where cheap). Keep it minimal and faithful — don't regress menu behavior.
+
+NOTE: this is source-port-only chrome/timing work — the original TD5_d3d.exe has no equivalent overlay, so the Ghidra research step will find nothing relevant; document that and proceed with a source-port change (don't hard-stop on "no RE basis").
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive or watch. If this fix can only be CONFIRMED by me playing (feel/visuals/audio/controller/multiplayer), finish ALL self-verification you can first (build + any headless/AutoRace probe + the mandatory multi-track CSV sweep where applicable), then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE, and for frontend checks use --AutoRace=0 --SkipIntro=1 --StartScreen=N with [Logging]Frontend=1 in THIS worktree's td5re.ini (CLI --LogFrontend is read too late). Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- FPS/MS sits cleanly in the top-right on the main menu.
+- In race (incl. split-screen) FPS/MS no longer overlaps the position text.
+- Menu input feels responsive even when MS is elevated; no menu behavior regressions.

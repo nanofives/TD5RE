@@ -1,0 +1,31 @@
+S01 — Display & Graphics Options + FPS/speed readout
+=====================================================
+
+Covers feedback: fps/ms location · resolution rework · speed KPH/MPH · vsync · show/hide fps/ms
+Modules: td5_frontend.c (Graphics/Display Options screen), main.c + ddraw_wrapper/ (swapchain, window mode, vsync), td5_hud.c / td5_game.c (overlay + speedometer), td5_save.c (persistence).
+
+PROMPT
+------
+Rework the Graphics/Display Options screen and the on-screen FPS/MS overlay.
+
+1. RESOLUTION SELECTOR: add an option that enumerates the supported display modes (DXGI mode enumeration) and applies the chosen resolution to the swapchain/backbuffer.
+
+2. DISPLAY MODE (3-way): replace the current fullscreen handling with a toggle cycling Fullscreen (exclusive) / Windowed / Borderless-windowed. Wire each through the D3D11 swapchain + window-style (WS_OVERLAPPEDWINDOW vs borderless) code in main.c + ddraw_wrapper.
+
+3. VSYNC: add an on/off toggle wired to the swapchain Present sync interval (1 vs 0).
+
+4. SHOW FPS/MS: add a toggle that gates the existing FPS+frametime overlay. Use the already-built counters g_td5_display_fps / g_td5_display_peak driven by td5_game_update_fps_overlay() from the MAIN loop (NOT update_frame_timing, which is race-only — that is the stale-0 trap; see perf-profiler memory reference_perf_profiler_and_two_bugs_2026-06-03).
+
+5. OVERLAY POSITION: reposition the FPS/MS overlay to a fixed clean corner so its location is consistent across menu + race.
+
+6. SPEED READOUT: confirm KPH is correct, verify the MPH conversion factor is right, and add a KPH/MPH units toggle in display options. Apply the chosen units to the speedometer HUD (VectorUI ps_gauge path, td5_hud.c — see project_hud_vectorui_2026-06-03).
+
+Persist every new setting through td5_save (td5re.ini), apply them on launch, and keep the dev (td5re.exe) and release (td5re_release.exe) builds in sync (release knob-zeroing in main.c + td5re_release.ini — see project_dual_release_dev_build_2026-06-01).
+
+ACCEPTANCE
+----------
+- Resolution change takes effect (and persists across launch).
+- Each of Fullscreen/Windowed/Borderless visibly works and persists.
+- VSync toggle changes tearing/frame pacing.
+- FPS/MS overlay can be shown/hidden, sits in a fixed corner, and reads non-zero in BOTH menu and race.
+- Speedometer shows correct KPH and correct MPH when toggled.

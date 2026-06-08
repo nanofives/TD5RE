@@ -1,0 +1,28 @@
+S11 — Sound-system overload (stuck single sound)   CRITICAL
+===========================================================
+
+Covers feedback: sound system overloads and plays one sound for the rest of the session, more frequent with >6 players
+Modules: td5_sound.c (DXSound wrapper, vehicle audio, ambient).
+Memory: project_frontend_sound_system_2026-06-02 (device-idle + silent keepalive), project_td6_car_port_2026-06-02 (per-car engine sounds, reverb.wav = player loop), project_nway_splitscreen_multiplayer_2026-06-03 (>6 players).
+PRIORITY: HIGH — high-risk bug.
+
+PROMPT
+------
+Critical sound bug: occasionally the sound system overloads and gets STUCK playing a single sound for the rest of the session (persists whether in-race or back in menus). It happens MORE FREQUENTLY with more than 6 players.
+
+Root-cause and fix in td5_sound.c. Likely suspects:
+- Voice / secondary-buffer EXHAUSTION when many vehicles each allocate engine loops (N-way >6 players, plus per-car TD6 engine sounds) — DirectSound runs out of buffers/voices and new Play() calls silently fail or alias onto one stuck buffer.
+- A LEAKED / never-released looping buffer (engine loop not stopped/freed on retire/recycle), interacting with the looping silent keepalive buffer.
+- A shared/static buffer handle being reused so every sound maps to one source.
+
+Work:
+1. Reproduce with >6 players (use the N-way harness knobs DefaultPlayers/DefaultOpponents).
+2. Instrument buffer/voice allocation + release counts to confirm the leak/exhaustion.
+3. Add voice-allocation GUARDING + proper buffer RECYCLING (release engine loops on slot retire/recycle; cap concurrent voices with sensible stealing) so the system can NEVER lock to a single sound.
+4. Keep the silent keepalive + per-car engine sound behavior working.
+
+ACCEPTANCE
+----------
+- Repeated >6-player races no longer get stuck on one sound.
+- Buffer/voice counts return to baseline between races (no monotonic leak).
+- Frontend + race audio still correct after the fix.

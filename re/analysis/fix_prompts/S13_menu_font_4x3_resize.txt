@@ -1,0 +1,27 @@
+S13 — Main-menu font swap + 4:3-locked resize scaling (no font stretch)
+=======================================================================
+
+Covers feedback: change main menu font · on resize keep the font SHAPE (optimized for 4:3); buttons may grow but the font must not stretch; if width drops below 4:3 the font shrinks horizontally with the buttons (vertical stays)
+Modules: td5_frontend.c (atlas load + glyph advances + fe_scale), td5_platform_win32.c (plat_resize_native), re/tools/build_msdf_font.py (+ BodyText atlas assets)
+Memory: project_s02_frontend_text_labels_2026-06-04 (single shared BodyText atlas + button-cache bake from same advances); project_hud_vectorui_2026-06-03
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Change the main-menu font and make the font keep its shape on window resize (optimized for 4:3). Two parts:
+
+1. FONT SWAP: the menu font atlas is loaded in td5_frontend.c ~4569 (BodyText_msdf.png when VectorUI=1, else BodyText.tga page 898). Glyph advances live in s_font_glyph_advance[96] ~833-843 (from k_font_glyph_advance_default; original widths @0x4660C8). To change the font, regenerate the MSDF atlas from a new TTF via re/tools/build_msdf_font.py (current layout: 10 cols x 23 rows of 24x24 cells) and update the advance table to match the new glyph widths. The button-cache bakes from the SAME atlas+advances, so a clean swap keeps menu text and baked buttons consistent. Pick a clean, readable face; let me know what you chose.
+
+2. 4:3-LOCKED SCALING: on resize the font currently stretches because sx and sy are computed independently — td5_frontend.c ~3615-3616 (sx=screen_w/640, sy=screen_h/480) and plat_resize_native td5_platform_win32.c ~871-918 set fe_scale.scale_x/scale_y independently. Desired behavior: when the window is at/above 4:3 aspect, the FONT must keep a 4:3 glyph shape (use a single uniform font scale, e.g. tied to height / min, NOT stretched horizontally) while BUTTON rects may grow with the window. When the window is NARROWER than 4:3, let the font shrink horizontally with the buttons (follow scale_x) but keep vertical size (scale_y). Separate the "button rect scale" from the "glyph scale" so text aspect is preserved.
+
+NOTE: original was a fixed 4:3 resolution, so there is no original resize behavior to RE — the font-change is a data/asset regen + advance table, and the resize logic is source-port. Document "no RE basis" and proceed; don't hard-stop.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive or watch. If this fix can only be CONFIRMED by me playing (feel/visuals/audio/controller/multiplayer), finish ALL self-verification you can first (build + any headless/AutoRace probe + the mandatory multi-track CSV sweep where applicable), then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE, and for frontend checks use --AutoRace=0 --SkipIntro=1 --StartScreen=N with [Logging]Frontend=1 in THIS worktree's td5re.ini (CLI --LogFrontend is read too late). Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Main menu renders in the new font (menu text + baked buttons consistent).
+- Growing the window past 4:3 keeps glyph proportions (no horizontal stretch); buttons may scale up.
+- Narrowing below 4:3 shrinks the font horizontally with the buttons; vertical size holds.

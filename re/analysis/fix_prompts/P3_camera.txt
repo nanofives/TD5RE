@@ -1,0 +1,76 @@
+================================================================================
+SESSION P3 — CAMERA
+Paste everything below the line into a fresh Claude Code session at the repo root.
+Mostly verify-faithful. One optional, runtime-gated item. No blind edits.
+Fully isolated (td5_camera.c) — safe to run in parallel with everything else.
+================================================================================
+
+TD5RE Workstream-C camera. Root: C:\Users\maria\Desktop\Proyectos\TD5RE. Source:
+td5mod\src\td5re\td5_camera.c. A prior audit found 6 of 7 flagged camera items
+already FAITHFUL — the docs flagging them (re/analysis/permanent_l4_residual.md,
+oversight_triage_2026-05-24.md) are STALE (fixes landed 2026-05-22..28). Verify,
+then act only on the one open item. Ghidra read_only (pool acquire/cleanup; if the
+slot is corrupt/empty, open the master TD5 project read_only=true).
+
+------------------------------------------------------------
+STEP 1 — Re-confirm the 6 FAITHFUL items (read-only, NO edits)
+------------------------------------------------------------
+1. Spline templates: decompile 0x00402AD0; reconstruct the stack array local_5e
+   (local_60=0xffff aliases local_5e[-1]; loop reads psVar2[-1]=span, *psVar2=ofs,
+   base local_5e+type*8). Expected: t0 (-1,0)(0,0)(40,0)(41,0); t1 (40,4)(41,4);
+   t2 (40,-4)(41,-4); t3/t4 (10,4)(11,4). Confirm td5_camera.c:190-197 matches.
+2. Static-cam Y offset: confirm reference_to 0x00482eb8 (g_cameraProfileVertOffset)
+   has only READS, no WRITER -> port's g_camHeightSampleOfs[2]={0} (line 74) is correct.
+3. case 1/2 + in-car helper: confirm td5_camera.c:2267 and :1536 both call
+   ConvertFloatVec3ToIntVec3 (short-clamped, td5_render.c:6162), not
+   TransformVector3ByBasis.
+4. Distance: confirm (int)dist_f * 4 (~lines 2129, 2215) matches orig __ftol-then-*4
+   (truncate; distance >= 0 so faithful).
+5. BuildWorldToViewMatrix 0x0042E750 "NO-PORT-SITE": confirm function_callers = only
+   ComputeActorWorldBoundingVolume 0x004096B0 (physics/render bounding-volume, NOT a
+   camera-view builder) -> the flag is a classifier artifact, no camera action.
+6. In-car/bumper/glide: confirm the handedness 180-about-fwd flip
+   (td5_camera.c:1571-1576), the mode dispatch g_raceCameraPresetMode != 0
+   (:2742-2757), and the force_reload glide are intact.
+If any of these is NOT as described, STOP and report before editing.
+
+------------------------------------------------------------
+STEP 2 — Item 3 (chase terrain tilt) — the only open item, RUNTIME-GATED
+------------------------------------------------------------
+Decompile 0x00401590 (UpdateChaseCamera). The orig computes
+  pitch = AngleFromVector12(-((norm_a-(norm_b+norm_c)/2)>>8), 0x200)
+  roll  = AngleFromVector12(-((norm_b-norm_c)>>8), 0x400)
+fed to BuildRotationMatrixFromAngles, with NO clamp, NO IIR, NO probe-miss fallback.
+The port (td5_camera.c:887-988) reproduces these formulas EXACTLY but adds 3
+port-only stabilizers: WANDER_FP=500000 probe-miss fallback (:887-894),
+TILT_CLAMP=512 (:938), and IIR 3/4+1/4 smoothing (:949-959). These were added
+(drive-tested 2026-05-26/28) because the port's probe-walker occasionally spikes
+where the orig's inline walker did not. The coordinate-mismatch the doc cites IS
+resolved (TD5_TrackProbeState layout fix 2026-05-28).
+
+DO NOT remove them blind. Run the A/B trace first:
+  - Set td5re.ini [Trace] TerrainCamProbe=1 -> emits tools/frida_csv/
+    terrain_probe_port.csv (norm_a_y, norm_b_y, norm_c_y, pitch_input, roll_input).
+    Orig side: tools/_probes/terrain_probe_capture.js (hook 0x004017CA where
+    pitch_input is formed, plus the two AngleFromVector12 calls).
+  - Capture the same track + same span/sub_lane over a sloped section on BOTH
+    Newcastle (small slopes ~80-130) and Honolulu (high-altitude, where spikes
+    appeared). Log norm_a/b/c_y, pitch_input, roll_input, cam_angles[0]/[2] per tick.
+  - RULE: if orig pitch_input/roll_input stay within +-512 and never spike AND the
+    port's raw (pre-clamp/pre-IIR) values match orig within +-2 -> relax stabilizers
+    (remove TILT_CLAMP first, then the IIR; keep WANDER_FP last — it guards a genuine
+    port-walker artifact). If orig ALSO produces large excursions / the IIR is
+    suppressing real motion -> KEEP the stabilizers, mark Item 3 permanently
+    FAITHFUL-with-documented-divergence. If port normals diverge from orig normals ->
+    the residual is in td5_track_update_probe_position, NOT the camera; reclassify to
+    a track-walker item.
+
+ASK THE USER TO DRIVE a sloped track manually (AutoThrottle won't reproduce the
+slope-tilt transient). This is optional faithfulness polish, not a bug.
+
+------------------------------------------------------------
+STEP 3 — Build + verify only if STEP 2 produced an edit. Build per CLAUDE.md
+(mingw32 gcc/ar, absolute paths). Drive-verify the chase cam over hills (no lurch at
+race-start, tilt follows slope). Use /fix. End commits with:
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+================================================================================

@@ -1,0 +1,1045 @@
+{
+ "audits": {
+  "21": {
+   "screen_index": 21,
+   "orig_fn": "0x00427630 TrackSelectionScreenStateMachine",
+   "screen_name": "Track Selection (Screen_TrackSelection)",
+   "port_handler": "Screen_TrackSelection @ td5_frontend.c:9649 + frontend_render_track_selection_preview @4719 + shared title path @6198 + frontend_get_title_render_y @4037",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title (TrackSelectText surface)",
+     "original": "x = halfW-200 = 120; resting y = (iVar5 - YOffset) - 0x40 where iVar5 = halfH-0x9f = 81 => (81-0)-64 = 17 (native). Slide-in (case 3): y = (tick*4 - 0xdc) - YOffset + iVar5 = -139 at tick0 .. 17 at tick0x27.",
+     "port": "title_x = 120 (correct). title_y from frontend_get_title_render_y: base_y=21, hidden_y=-135. The -4 correction (resting 21->17) is applied ONLY for TD5_SCREEN_HIGH_SCORE (line 6218), NOT for TD5_SCREEN_TRACK_SELECTION. So the Track Selection title rests at native 21 and slides from -135.",
+     "severity": "divergent",
+     "faithful_fix": "Title rests 4px too low. The original resting Y is 17 (and slide start -139) for THIS screen, identical to High Scores. Either (a) add TD5_SCREEN_TRACK_SELECTION to the same -4*sy special case at td5_frontend.c:6218, or better (b) fix the global constants in frontend_get_title_render_y @4049-4050 to base_y=17.0f / hidden_y=-139.0f and delete the per-screen High-Score -4 override (since 0x4213D0 QuickRace, 0x427630 Track, 0x413580 HighScore ALL compute resting=17 / slide-start=-139 natively \u2014 the 21/-135 values were taken from the widescreen-PATCHED exe whose ~1.275x vertical stretch the High-Score comment already flags)."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title (TrackSelectText surface)",
+     "original": "native-size TGA: width@0x4962c4 (runtime), height@0x4962c8 = 0x14 = 20, YOffset@0x4962cc = 0; drawn at native size, NO scaling.",
+     "port": "draw_w = title_tex_w * sx, draw_h = title_tex_h * sy (native TGA size scaled only by the global frontend scale). No per-screen size override.",
+     "severity": "faithful",
+     "faithful_fix": "No change. Port draws the native title TGA at native size; matches the original's native-size (no-scale) title blit."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (Track / SNK_TrackButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_TrackButTxt, -0xe0, 0, 0xe0, 0x20, 0) -> auto-layout sentinel x=-0xe0; w=0xe0=224, h=0x20=32. Runtime resting Y from MoveFrontendSpriteRect(0,...,uVar4-0x8f)=97; X from iVar7+... settles to halfW-200=120.",
+     "port": "frontend_create_button(SNK_TrackButTxt, 120, 97, 224, 32)",
+     "severity": "faithful",
+     "faithful_fix": "No change. x/y (120,97) match the runtime-resolved auto-layout; w/h (224x32) match the create immediates."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 1 (Forwards/Backwards toggle / SNK_ForwardsButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_ForwardsButTxt, -0xe0, 0, 0xe0, 0x20, 0) -> auto-layout; w=224, h=32. Resting Y MoveFrontendSpriteRect(1,...,uVar4-0x5f)=145.",
+     "port": "frontend_create_button(SNK_ForwardsButTxt, 120, 145, 224, 32)",
+     "severity": "faithful",
+     "faithful_fix": "No change. (120,145) matches runtime resolution; 224x32 matches create immediates. Hide/disable on forward-only tracks also mirrors orig (MoveFrontendSpriteRect(1,-0xe0,...))."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 2 (OK / SNK_OkButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0xe0, 0, 0x60, 0x20, 0) -> auto-layout; w=0x60=96, h=32. Resting X iVar8 = halfW-200 = 120 (hint!=2 branch); bottom-row Y = halfH+0x89 = 377 (same row convention as 0x4213D0).",
+     "port": "frontend_create_button(SNK_OkButTxt, 120, 377, 96, 32)",
+     "severity": "faithful",
+     "faithful_fix": "No change. (120,377) 96x32 matches the runtime-resolved auto-layout."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 3 (Back / SNK_BackButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_BackButTxt, -0xe0, 0, 0x70, 0x20, 0) -> auto-layout; w=0x70=112, h=32. Resting X MoveFrontendSpriteRect(3,uVar6-0x58,...)=232; Y bottom row halfH+0x89=377. Only created when g_mainMenuButtonHint != 2 (Quick-Race context omits Back).",
+     "port": "frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32) inside `if (s_flow_context != 2)`",
+     "severity": "faithful",
+     "faithful_fix": "No change. (232,377) 112x32 matches; the s_flow_context!=2 guard mirrors the orig g_mainMenuButtonHint!=2 gate."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "track-name preview text (city/country)",
+     "original": "Separate tracked surface 0x128x0xb8 (296x184); city/country drawn into it split at ','. In case 5 BltColorFillToSurface + MeasureOrCenterFrontendLocalizedString(...,0,0x128) centered across 296px, then blitted to screen at (halfW+0x18, halfH-0x2f)... text top region blit puts the 296px band at screen x=344 (halfW+0x18=344) so center x = 344+148 = 492; city at surf y=0, country at surf y=0x20=32.",
+     "port": "frontend_render_track_selection_preview: fe_draw_text_centered(492, 81, city) and (492, 113, country); single-line track_name at (492,81). txt_y_off slide = (tick-16)*16.",
+     "severity": "faithful",
+     "faithful_fix": "No change. Center x=492 and line Y 81/113 (32px apart) match the orig surface composite (city y=0 at screen 81, country y=32 at screen 113)."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "track preview image (Tracks/%s.tga) + LOCKED text",
+     "original": "Preview surface DAT_004a2c94 (0x98x0xe0 = 152x224) blitted at (halfW+0x5c, halfH-0x69)=(412,135) in settled state (case 4); slide-in case 8 animates x = iVar7 + tick*-0x10 + 0x22e. LOCKED (SNK_LockedTxt) MeasureOrCenter'd in 0x98 width when track locked.",
+     "port": "fe_draw_surface_rect at (412 + img_x_off, 135), 152x224; LOCKED via frontend_draw_value_text(412,375). img_x_off = (16-tick)*16 slide.",
+     "severity": "faithful",
+     "faithful_fix": "No change. Image origin (412,135) and size 152x224 match; slide direction (from right) matches. LOCKED placement is a minor cosmetic (orig centers it in the 0x98 preview width ~ x458; port puts it at x412) \u2014 acceptable, leave as-is unless consolidation wants exact centering."
+    }
+   ]
+  },
+  "22": {
+   "screen_index": 22,
+   "orig_fn": "0x00417d50 ScreenExtrasGallery (Credits scroll-reel)",
+   "screen_name": "Extras Gallery / Credits (Screen_ExtrasGallery)",
+   "port_handler": "Screen_ExtrasGallery @ td5_frontend.c:9856 + frontend_render_extras_gallery_overlay @5394",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title",
+     "original": "NO title: 0x00417d50 never calls CreateMenuStringLabelSurface and never queues an overlay rect with g_currentScreenIndex. It is a full-screen credits screen.",
+     "port": "No title drawn \u2014 TD5_SCREEN_EXTRAS_GALLERY is absent from frontend_get_title_page_for_screen, so frontend_ensure_title_texture returns 0 and the title block @6198 is skipped.",
+     "severity": "faithful",
+     "faithful_fix": "No change. Correctly omits any title strip, matching the original."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "buttons (none)",
+     "original": "NO CreateFrontendDisplayModeButton calls. Navigation is ESC-to-quit only (g_frontendInputEdgeBits & 0x40000 -> CleanUpAndPostQuit).",
+     "port": "No frontend_create_button calls in Screen_ExtrasGallery. ESC handled by global handler -> frontend_post_quit.",
+     "severity": "faithful",
+     "faithful_fix": "No change. No buttons, matching the original."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "credits content (developer names / legal text)",
+     "original": "VERTICAL SCROLL REEL composited into g_secondaryWorkSurface: counter inits 0x27f, +1/frame, wraps -0x280 (640-frame cycle). Content blitted in two halves via QueueFrontendOverlayRect at fixed x=0xcc (204), y=0x60 (96), tile 0x140 wide (320) with the 0x140-tall window split; a new 32px (0x20) content row drawn every (counter & 0x1f)==0; either a mugshot TGA (marker 0x23 '#') blit or a MeasureOrCenter'd credits line (SNK_CreditsText) per row; quits after DAT_00496354 reaches 0xb ('*' section terminators).",
+     "port": "frontend_render_extras_gallery_overlay: opaque black full-screen fill, then ONE aspect-fit-centered mugshot TGA per page; Screen_ExtrasGallery auto-advances one image every 4000ms (paged slideshow, 27 images, then quit).",
+     "severity": "minor",
+     "faithful_fix": "ACCEPTED ARCH-DIV (no scroll-surface pool in the port; documented at td5_frontend.c:9884-9889). Not a position bug. If exactness is later wanted: the orig content band is anchored at native x=0xcc (204), y=0x60 (96), tile 0x140x0x140 (320x320), 32px rows scrolling at +1px/frame (~32 frames/row); reproducing requires a vertical scroll surface, not a centered full-screen image. Leave as-is for this audit."
+    }
+   ]
+  },
+  "23": {
+   "screen_index": 23,
+   "orig_fn": "0x00413580 ScreenPostRaceHighScoreTable",
+   "screen_name": "Post-Race High Scores (Screen_PostRaceHighScore)",
+   "port_handler": "Screen_PostRaceHighScore @ td5_frontend.c:9924 + frontend_render_high_score_overlay @4977 + nav-bar text @6165 + title path @6198/6218",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title (HighScoresText surface)",
+     "original": "x = halfW-200 = 120; resting y = (iVar5 - YOffset) - 0x40 = (81-0)-64 = 17 (native). Slide-in case 3: y = (tick*4 - 0xdc) - YOffset + 81 = -139 .. 17.",
+     "port": "title_x=120; title_y = frontend_get_title_render_y - 4*sy (the High-Score special case @6218 brings resting 21 -> 17). hidden_y still -135 (slide starts -135 not -139).",
+     "severity": "faithful",
+     "faithful_fix": "Resting Y is correct (17). The slide-in START is technically -135 vs orig -139 (4px), but the resting/de-stretched endpoint matches and this was the screen the recent fix targeted. If the global fix (base_y=17/hidden_y=-139, drop the special case) is applied for screen 21, screen 23 should switch to the same global path and drop its -4 override \u2014 net identical resting 17, and the slide start becomes the faithful -139."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title (HighScoresText surface)",
+     "original": "native-size TGA, height 0x14=20, YOffset 0, NO scaling (the 379x24 was a widescreen-patched artifact; native is the TGA's own 308x20).",
+     "port": "draw_w/draw_h = native TGA size * sx/sy; no inflated 379x24 override (the prior stretch-baked size was removed, per comment @6207).",
+     "severity": "faithful",
+     "faithful_fix": "No change. Native-size, no scaling \u2014 matches."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (nav-bar track selector, label NULL)",
+     "original": "CreateFrontendDisplayModeButton(0x0, -0x208, 0, 0x208, 0x20, 0) -> auto-layout sentinel x=-0x208; w=0x208=520, h=0x20=32. Runtime-resolved origin (per port comment from button table @0x499c78) = (115,97).",
+     "port": "frontend_create_button(NULL, 115, 97, 520, 32)",
+     "severity": "faithful",
+     "faithful_fix": "No change. w/h (520x32) match the create immediates; (115,97) is the runtime-resolved auto-layout (recently fixed)."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 1 (OK / SNK_OkButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x130, 0, 0x60, 0x20, 0) -> auto-layout x=-0x130; w=0x60=96, h=0x20=32. Runtime-resolved (115,377).",
+     "port": "frontend_create_button(SNK_OkButTxt, 115, 377, 96, 32)",
+     "severity": "faithful",
+     "faithful_fix": "No change. 96x32 matches create immediates; (115,377) is the runtime-resolved auto-layout."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "score table panel (g_lobbyErrorDialogSurface)",
+     "original": "CreateTrackedFrontendSurface(0x208,0x90)=520x144 filled black; in states 4-8 blitted via QueueFrontendOverlayRect(halfW-0xcd, halfH-0x3f, ...,0x208,0x90, trailing-0 = colour-keyed on black) => native (115,177). DrawPostRaceHighScoreEntry draws all text in the SMALL font at panel-local coords; only text shows over the MainMenu backdrop (no visible box).",
+     "port": "frontend_render_high_score_overlay: panel origin (115,177), 520x144; HS_SF_X/HS_SF_Y macros add panel-local coords to (115,177); fe_draw_small_text; no opaque box (removed). Headers/rows at panel-local y (0/7/14 headers; rows 48..112 step 16) and the documented column centers.",
+     "severity": "faithful",
+     "faithful_fix": "No change. Panel origin (115,177) and size 520x144 match QueueFrontendOverlayRect(halfW-0xcd, halfH-0x3f, ...). Text-only (color-keyed) composite matches; small-font and column layout were fixed in the recent pass."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "nav-bar track name text (RebuildFrontendButtonSurface label)",
+     "original": "RebuildFrontendButtonSurface(0,0,SNK_TrackNames[pool]) draws the track label MeasureOrCenter'd across the 520px button width at button-local y=0 (DrawFrontendLocalizedStringToSurface(text,x,0,surface)).",
+     "port": "Nav-bar text @6165-6182: button-centered horizontally (tx = nav_bx + (nav_bw - tnw)*0.5), vertical ty = nav_by (button-local y=0, the +6 was dropped per comment @6170).",
+     "severity": "faithful",
+     "faithful_fix": "No change. Horizontal button-centering and button-local y=0 match the original RebuildFrontendButtonSurface label draw."
+    }
+   ],
+   "notes": "Screen 23 is faithful after the 2026-06-01 fix, as the prompt anticipated. The only residual is a 4px slide-in START difference (hidden_y -135 vs faithful -139) shared with all screens; the resting position is correct."
+  },
+  "9": {
+   "screen_index": 9,
+   "orig_fn": "0x419CF0 RunFrontendSessionPicker",
+   "screen_name": "Session Picker / Session Browser (TD5_SCREEN_SESSION_PICKER)",
+   "port_handler": "Screen_SessionPicker (td5_frontend.c:7424); title drawn by shared path at td5_frontend.c:6198 via frontend_get_title_render_y (4037) + frontend_get_title_tga_for_screen (NetPlayText.TGA)",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title (NetPlayText.TGA)",
+     "original": "QueueFrontendOverlayRect(uVar4-200, (iVar3 - g_menuHeaderLabelYOffset) - 0x40, ...) where iVar3 = halfH-0x9f = 81; YOffset=0 => native (x=120, resting y=17)",
+     "port": "title_x = 120*sx (faithful); title_y = frontend_get_title_render_y => resting base_y = 21 (generic, NO netplay special-case). High Scores already special-cased to 17 via -4, but screens 9/10/11 are not.",
+     "severity": "divergent",
+     "faithful_fix": "Title resting Y for SESSION_PICKER must be 17, not 21. The native shared resting title Y for screens that use C2=0x40 (QuickRace 0x4213D0 states 4/5, SessionPicker, CreateSession, NetworkLobby) is (halfH-0x9f-YOffset)-0x40 = 81-64 = 17. Either set base_y=17 in frontend_get_title_render_y (4049) for all C2=0x40 screens, or add SESSION_PICKER/CREATE_SESSION/NETWORK_LOBBY to the HIGH_SCORE -4 special-case at td5_frontend.c:6218 (title_y -= 4*sy). Slide-in endpoints likewise off by 4 (hidden_y -135 should give a tick*4-139 ramp landing at 17)."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title (NetPlayText.TGA)",
+     "original": "native-size TGA, width@0x4962c4 / height@0x4962c8 (=0x14=20) / YOffset@0x4962cc(=0); both BSS at runtime (read as 0 statically) \u2014 drawn at native size, NO scaling",
+     "port": "draw_w = title_w*sx, draw_h = title_h*sy using the loaded TGA's own w/h (native size). Faithful in mechanism.",
+     "severity": "faithful",
+     "faithful_fix": "No change to size mechanism; port uses the loaded TGA native dimensions which matches the orig's runtime title-surface size. (Only the Y position diverges.)"
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (session-list selector, SNK_ChooseSessionButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_ChooseSessionButTxt, -0x1f0, 0, 0x1f0, 0x80, 0) => AUTO-LAYOUT (neg x sentinel -496), w=0x1f0=496, h=0x80=128 (runtime-resolved position)",
+     "port": "frontend_create_button(SNK_ChooseSessionButTxt, 120, 160, 256, 32) => POSITIVE x=120 (literal fixed position, NOT auto-layout), w=256, h=32",
+     "severity": "divergent",
+     "faithful_fix": "Change td5_frontend.c:7436 to frontend_create_button(SNK_ChooseSessionButTxt, -0x1f0, 0, 0x1f0, 0x80) so it is auto-layout (runtime-resolved) with the original width 496 and height 128. The port's fixed (120,160) 256x32 is a 240px-narrower, 96px-shorter box at the wrong placement."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 1 (OK, SNK_OkButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x60, 0, 0x60, 0x20, 0) => auto-layout, w=0x60=96, h=0x20=32",
+     "port": "frontend_create_button(SNK_OkButTxt, -100, 0, 100, 0x20) => auto-layout, w=100, h=32",
+     "severity": "minor",
+     "faithful_fix": "Change width 100 -> 0x60 (96) and the x-sentinel -100 -> -0x60 at td5_frontend.c:7437 to match the original (auto-layout, w=96)."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 2 (Back, SNK_BackButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_BackButTxt, -0x70, 0, 0x70, 0x20, 0) => auto-layout, w=0x70=112, h=0x20=32",
+     "port": "frontend_create_button(SNK_BackButTxt, -100, 0, 100, 0x20) => auto-layout, w=100, h=32",
+     "severity": "divergent",
+     "faithful_fix": "Change width 100 -> 0x70 (112) and x-sentinel -100 -> -0x70 at td5_frontend.c:7438 (auto-layout, w=112). Back is 12px wider than the port renders. ESC index=2 already faithful."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "session list content (RenderFrontendSessionBrowser)",
+     "original": "Session-list rows + scroll indicators + selection bar drawn by RenderFrontendSessionBrowser() and per-state QueueFrontendOverlayRect of g_browserScrollIndicatorSprite/g_browserSelectionBarSprite at g_connBrowserListOriginX origins (DXPTYPE-fed enumerated session data)",
+     "port": "No session-list rows are drawn; DXPTYPE enumeration is stubbed (s_button_index==0 selector just plays sfx). ARCH-DIVERGENCE.",
+     "severity": "faithful",
+     "faithful_fix": "Accept as ARCH-DIVERGENCE (DXPTYPE session enumeration unreachable). No layout fix required for the stubbed list; only the selector button geometry above needs correcting so that when/if a list exists it sits under a correctly-sized 496x128 panel."
+    }
+   ]
+  },
+  "10": {
+   "screen_index": 10,
+   "orig_fn": "0x41A7B0 RunFrontendCreateSessionFlow",
+   "screen_name": "Create Session (enter session name) (TD5_SCREEN_CREATE_SESSION)",
+   "port_handler": "Screen_CreateSession (td5_frontend.c:7500); title via shared path td5_frontend.c:6198 (NetPlayText.TGA)",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title (NetPlayText.TGA)",
+     "original": "QueueFrontendOverlayRect(uVar7-200, (iVar6 - g_menuHeaderLabelYOffset) - 0x40, ...) where iVar6 = halfH-0x9f = 81 => native (x=120, resting y=17). (Title surface from CreateMenuStringLabelSurface(5).)",
+     "port": "title_x=120*sx (faithful); title_y resting = 21 (generic base_y), no netplay special-case.",
+     "severity": "divergent",
+     "faithful_fix": "Same as screen 9: title resting Y must be 17, not 21. Add TD5_SCREEN_CREATE_SESSION to the -4 special-case at td5_frontend.c:6218, or fix base_y=17 in frontend_get_title_render_y (4049)."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title (NetPlayText.TGA)",
+     "original": "native-size title surface (CreateMenuStringLabelSurface(5)), drawn with g_menuHeaderLabelSurfaceWidth/Height, no scaling",
+     "port": "native TGA w/h scaled by sx/sy (native-size mechanism). Faithful.",
+     "severity": "faithful",
+     "faithful_fix": "No size change needed."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (Enter New Session Name, SNK_EnterNewSessionNameButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_EnterNewSessionNameButTxt, -0x1c0, 0, 0x1c0, 0x40, 0) => auto-layout, w=0x1c0=448, h=0x40=64",
+     "port": "frontend_create_button(SNK_EnterNewSessionNameButTxt, -300, 0, 300, 0x20) => auto-layout, w=300, h=32",
+     "severity": "divergent",
+     "faithful_fix": "Change td5_frontend.c:7506 to (-0x1c0, 0, 0x1c0, 0x40): width 300 -> 0x1c0 (448) and height 0x20 -> 0x40 (64). Port's name button is 148px too narrow and HALF the height (the original is a tall 64px name-entry box)."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 1 (Back, SNK_BackButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_BackButTxt, -0x70, 0, 0x70, 0x20, 0) => auto-layout, w=0x70=112, h=32",
+     "port": "frontend_create_button(SNK_BackButTxt, -100, 0, 100, 0x20) => auto-layout, w=100, h=32",
+     "severity": "divergent",
+     "faithful_fix": "Change td5_frontend.c:7507 width 100 -> 0x70 (112) and x-sentinel -100 -> -0x70. ESC index=1 already faithful."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "session-name text input (RenderFrontendCreateSessionNameInput)",
+     "original": "Name input rendered each tick via RenderFrontendCreateSessionNameInput() (0x41A530); edit target = DAT_00497068, max len 0x10; drawn inside the name button surface",
+     "port": "frontend_render_text_input() over s_create_session_name (default 'New Session'), confirmed -> NETWORK_LOBBY. Mechanism present and reasonable; the visible box geometry is governed by button 0 above.",
+     "severity": "minor",
+     "faithful_fix": "Once button 0 is resized to 448x64, the text-input render will sit inside the faithful box. No separate panel-surface needed (orig draws into the button surface). Verify max length = 0x10 (16) matches orig _g_postRaceNameEditMaxLength=0x10."
+    }
+   ]
+  },
+  "11": {
+   "screen_index": 11,
+   "orig_fn": "0x41C330 RunFrontendNetworkLobby",
+   "screen_name": "Network Lobby (multiplayer chat/roster/start) (TD5_SCREEN_NETWORK_LOBBY)",
+   "port_handler": "Screen_NetworkLobby (td5_frontend.c:7571); title via shared path td5_frontend.c:6198 (NetPlayText.TGA)",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title (NetPlayText.TGA)",
+     "original": "Resting (states 2..0x12): QueueFrontendOverlayRect(uVar12-200, (iVar9 - g_menuHeaderLabelYOffset) - 0x40, ...) where iVar9 = halfH-0x9f = 81 => native (x=120, resting y=17). Slide-in (state 1): x=halfW-200=120, y=(tick*4 - 0x90 - YOffset)+iVar9 = tick*4-63 over 0x14 ticks, lands at 17.",
+     "port": "title_x=120*sx (faithful); resting title_y = 21 (generic base_y), no netplay special-case.",
+     "severity": "divergent",
+     "faithful_fix": "Title resting Y must be 17, not 21. Add TD5_SCREEN_NETWORK_LOBBY to the -4 special-case at td5_frontend.c:6218 or set base_y=17 in frontend_get_title_render_y (4049). (Confirms the generic base_y=21 is the widescreen-patched-capture artifact; native is 17 for every C2=0x40 screen incl QuickRace 0x4213D0.)"
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (chat/text-input decoration strip, label NULL)",
+     "original": "CreateFrontendDisplayModeButton(NULL, -0x1d0, 0, 0x1d0, 0x18, 0) => auto-layout, w=0x1d0=464, h=0x18=24",
+     "port": "frontend_create_button(\"\", -0x1D0, 0, 0x1D0, 0x18) => auto-layout, w=0x1D0=464, h=0x18=24",
+     "severity": "faithful",
+     "faithful_fix": "No change; matches the original create params."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 1 (message window, SNK_MessageWindowButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_MessageWindowButTxt, -0x200, 0, 0x200, 0x80, 0) => auto-layout, w=0x200=512, h=0x80=128",
+     "port": "frontend_create_button(SNK_MessageWindowButTxt, -0x200, 0, 0x200, 0x80) => identical",
+     "severity": "faithful",
+     "faithful_fix": "No change."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 2 (status/roster panel, SNK_StatusButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_StatusButTxt, -0xe0, 0, 0xe0, 0x86, 0) => auto-layout, w=0xe0=224, h=0x86=134",
+     "port": "frontend_create_button(SNK_StatusButTxt, -0xE0, 0, 0xE0, 0x86) => identical",
+     "severity": "faithful",
+     "faithful_fix": "No change."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 3 (Change Car, SNK_ChangeCarButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_ChangeCarButTxt, -200, 0, 200, 0x20, 0) => auto-layout, w=200, h=32",
+     "port": "frontend_create_button(SNK_ChangeCarButTxt, -200, 0, 200, 0x20) => identical (note: port frontend_create_button treats w==200 as 'unusable' and falls back to |x|=200, net same)",
+     "severity": "faithful",
+     "faithful_fix": "No change (resolved width 200 either way)."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 4 (Start, SNK_StartButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_StartButTxt, -200, 0, 0x78, 0x20, 0) => auto-layout (x sentinel -200=-0xC8), w=0x78=120, h=32",
+     "port": "frontend_create_button(SNK_StartButTxt, -0x78, 0, 0x78, 0x20) => auto-layout (x sentinel -0x78), w=0x78=120, h=32",
+     "severity": "minor",
+     "faithful_fix": "Width 0x78=120 matches; only the auto-layout x-sentinel magnitude differs (-200 orig vs -0x78 port). Since negative x is just the auto-layout flag (real X is runtime-resolved into the button table), this does not change the resolved position. For exactness set x-sentinel to -200 at td5_frontend.c:7600, but functionally faithful."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 5 (Exit, SNK_ExitButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_ExitButTxt, -200, 0, 0x78, 0x20, 0) => auto-layout (x sentinel -200), w=0x78=120, h=32",
+     "port": "frontend_create_button(SNK_ExitButTxt, -0x78, 0, 0x78, 0x20) => auto-layout (x sentinel -0x78), w=0x78=120, h=32",
+     "severity": "minor",
+     "faithful_fix": "Same as Start: width 120 faithful; for exactness set x-sentinel -200 at td5_frontend.c:7601. Functionally faithful (auto-layout)."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "session header panel (g_lobbySessionHeaderSurface)",
+     "original": "CreateTrackedFrontendSurface(0x1e0,0x20) => 480x32 panel blitted via QueueFrontendOverlayRect at screen (uVar12-0xb0, uVar8-0x97) = (halfW-0xb0, halfH-0x97) = native (208, 89) in states 1/2/3 (holds the session name/header text)",
+     "port": "No equivalent session-header panel is created or blitted in Screen_NetworkLobby; this surface and its 480x32 @(208,89) blit are absent.",
+     "severity": "divergent",
+     "faithful_fix": "If the lobby is to render faithfully, add a 0x1e0x0x20 (480x32) tracked panel blitted at native (halfW-0xb0, halfH-0x97) = (208, 89) [scaled by sx/sy] holding the session header text. NOTE: this is DXPTYPE-fed content (session name from enumeration) \u2014 if kept as ARCH-DIVERGENCE stub, at minimum reserve/blit the empty 480x32 header band at (208,89) so the layout matches. Confirm against RenderFrontendLobbyStatusPanel/ChatPanel for the inner text Y stacking before implementing."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "error/confirm dialog panel (g_lobbyErrorDialogSurface)",
+     "original": "CreateTrackedFrontendSurface(0x1e2,0x40) => 482x64 panel; BltColorFillToSurface(0,...); two centered text lines via MeasureOrCenterFrontendLocalizedString(SNK_NetErrString1/2 or 3/4, 0, 0x1e2) + DrawFrontendLocalizedStringToSurface; blitted at (halfW-0xba, halfH-0x5f) = native (198, 145) in states 7/8/9 (Yes/No or OK buttons at uVar12-0x42/g_frontendCanvasW-0xf0, uVar8-0xf)",
+     "port": "Port dialog path uses s_dialog_mode states with Yes/No/OK buttons (frontend_create_button(SNK_YesButTxt/SNK_NoxButTxt/SNK_OkButTxt, -80,0,80,0x20)) but does NOT build the 482x64 centered-text error panel at (198,145); buttons are auto-layout w=80 vs original positive-x placement (Yes @ halfW-0x42, No @ canvasW-0xf0, OK @ halfW-2, all y=halfH-0xf, w=0x60).",
+     "severity": "divergent",
+     "faithful_fix": "For the lobby error/confirm dialog: (1) build a 0x1e2x0x40 (482x64) panel filled black with two centered SNK_NetErrString lines, blit at native (198,145); (2) place dialog buttons at the original POSITIVE coords with w=0x60: Yes @ (halfW-0x42, halfH-0xf, 0x60,0x20), No @ (canvasW-0xf0, halfH-0xf, 0x60,0x20), OK @ (halfW-2, halfH-0xf, 0x60,0x20) \u2014 not auto-layout w=80. (DXPTYPE-gated; lower priority than the title-Y and create/name screens, but the geometry is divergent.)"
+    }
+   ]
+  },
+  "27": {
+   "screen_index": 27,
+   "orig_fn": "0x423a80 ScreenCupWonDialog",
+   "screen_name": "Cup Won dialog (Screen_CupWon / frontend_render_cup_won_overlay)",
+   "port_handler": "Screen_CupWon (td5_frontend.c:10921) + frontend_render_cup_won_overlay (td5_frontend.c:5775)",
+   "notes": "Dialog, NOT a content screen: no CreateMenuStringLabelSurface title strip. Original builds an offscreen panel CreateTrackedFrontendSurface(0x198,0xc4)=408x196, BltColorFillToSurface(0,...) black, draws lines into it, then blits color-keyed-on-black via QueueFrontendOverlayRect at settled pos (halfW-0xa8, halfH-0x8f)=(152,97). Port draws text live at the same panel screen rect, which is the equivalent net result. All Y immediates verified by disassembly. One semantic nuance: original gates the two unlock lines on g_cupSchedule_currentCup/_currentRound counters (DAT_00494bb0/b4) via sprintf '%d %s'; port gates on s_cup_won_car_count/s_cup_won_track_count \u2014 positions identical, behavior equivalent. Overall the port screen is FAITHFUL on positions/sizes.",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip",
+     "original": "NONE \u2014 dialog has no CreateMenuStringLabelSurface / QueueFrontendOverlayRect title call",
+     "port": "no title drawn",
+     "severity": "faithful",
+     "faithful_fix": "Leave as-is; this dialog correctly has no title strip."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "panel surface (text container)",
+     "original": "CreateTrackedFrontendSurface(0x198,0xc4)=408x196 filled black (BltColorFillToSurface 0), blitted COLOR-KEYED-on-black via QueueFrontendOverlayRect(halfW-0xa8, halfH-0x8f, 0,0, 0x198,0xc4, 0, surf) at settled state5 => screen (152,97), size 408x196",
+     "port": "frontend_render_cup_won_overlay: dlg_x=(320-168)*sx, dlg_y=(240-143)*sy, dlg_w=408*sx, dlg_h=196*sy; text drawn live centered on dlg_cx (panel center on screen). No box.",
+     "severity": "faithful",
+     "faithful_fix": "Keep (152,97) origin, 408x196 panel, transparent (color-keyed black) \u2014 matches orig."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "line 'CONGRATULATIONS!' (SNK_CongratsTxt)",
+     "original": "Y=0x0 (0) in panel; PUSH 0 @0x423b24 then DrawFrontendLocalizedStringToSurface",
+     "port": "dlg_y + 0.0f*sy (line 5796)",
+     "severity": "faithful",
+     "faithful_fix": "Keep Y=0."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "line 'YOU HAVE WON THE' (SNK_YouHaveWonTxt)",
+     "original": "Y=0x38 (56); PUSH 0x38 @0x423b52",
+     "port": "dlg_y + 56.0f*sy (line 5797)",
+     "severity": "faithful",
+     "faithful_fix": "Keep Y=56."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "line cup-type name (SNK_RaceTypeText[game_type])",
+     "original": "Y=0x54 (84); PUSH 0x54 @0x423b89",
+     "port": "dlg_y + 84.0f*sy gated 1<=game_type<=6 (line 5800)",
+     "severity": "faithful",
+     "faithful_fix": "Keep Y=84."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "line '%d CARS UNLOCKED' (car unlock)",
+     "original": "Y=0x8c (140), gated on [0x494bb0]!=0; PUSH 0x8c @0x423bdd",
+     "port": "dlg_y + 140.0f*sy gated on s_cup_won_car_count!=0 (line 5806)",
+     "severity": "faithful",
+     "faithful_fix": "Keep Y=140; gate is behaviorally equivalent (car-unlock count)."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "line '%d TRACKS UNLOCKED' (track unlock)",
+     "original": "Y=0xa8 (168), gated on [0x494bb4]!=0; PUSH 0xa8 @0x423c2d",
+     "port": "dlg_y + 168.0f*sy gated on s_cup_won_track_count!=0 (line 5811)",
+     "severity": "faithful",
+     "faithful_fix": "Keep Y=168; gate behaviorally equivalent (track-unlock count)."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "OK button (SNK_OkButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x120, 0, 0x60, 0x20, 0) @0x423c61 \u2014 auto-layout (x=-0x120 sentinel), w=0x60=96, h=0x20=32. Runtime-resolved into button registry @0x499c78.",
+     "port": "frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20) (line 10983) -> auto-layout slot0 placed at (320-0xD2, 240-0x93)=(110,93), w=96, h=32",
+     "severity": "faithful",
+     "faithful_fix": "Keep (-0x120,0,0x60,0x20). x is auto-layout (runtime-resolved); port's center-relative slot-0 placement is the standard convention. w=96/h=32 match orig."
+    }
+   ]
+  },
+  "28": {
+   "screen_index": 28,
+   "orig_fn": "0x415370 ScreenStartupInit",
+   "screen_name": "Startup-init redirect (Screen_StartupInit)",
+   "port_handler": "Screen_StartupInit (td5_frontend.c:11013); NO overlay render fn registered in td5_frontend_render_ui_rects switch",
+   "notes": "Pass-through redirect screen, not a real content screen. Original case0 builds CreateTrackedFrontendSurface(0x198,0x70)=408x112 black panel + OK button, then in states1-3 blits the EMPTY (no text) panel at (halfW-0xa8, halfH-0x8f)=(152,97), state4 releases it and redirects g_currentScreenFnPtr to the first screen-table entry (timeGetTime stamp). Port mirrors the FSM but skips the empty-panel blit (no overlay render case) and redirects to TD5_SCREEN_LOCALIZATION_INIT. The empty panel is invisible (black color-keyed) so skipping it is faithful in net pixels. The ONE real divergence is the OK-button create params.",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip",
+     "original": "NONE",
+     "port": "none",
+     "severity": "faithful",
+     "faithful_fix": "Leave as-is; no title."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "OK button (SNK_OkButTxt) create params",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x120, 0, 0x60, 0x20, 0) @0x415370 case0 \u2014 x sentinel -0x120, w=0x60=96, h=0x20=32",
+     "port": "frontend_create_button(SNK_OkButTxt, -100, 0, 100, 0x20) (line 11019) \u2014 x sentinel -100, w=100",
+     "severity": "divergent",
+     "faithful_fix": "Change td5_frontend.c:11019 to frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20). Port's button-create logic uses w directly (w=100, since 100!=200) => OK button renders 100px wide instead of the faithful 96px (0x60); also the x-sentinel should be -0x120 not -100. Both x values are negative so placement is unaffected, but the width is a real 4px miss and the immediates should match the orig."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "panel surface (empty)",
+     "original": "CreateTrackedFrontendSurface(0x198,0x70)=408x112 black, NO text drawn into it, blitted color-keyed at (halfW-0xa8,halfH-0x8f)=(152,97) in states1-3",
+     "port": "no overlay render case for TD5_SCREEN_STARTUP_INIT (panel skipped)",
+     "severity": "faithful",
+     "faithful_fix": "Leave skipped \u2014 the panel is filled black and blitted color-keyed-on-black (fully transparent, no text), so it draws nothing visible; omitting it is net-faithful. No fix needed."
+    }
+   ]
+  },
+  "29": {
+   "screen_index": 29,
+   "orig_fn": "0x41d630 ScreenSessionLockedDialog",
+   "screen_name": "Session Locked dialog (Screen_SessionLocked / frontend_render_session_locked_overlay)",
+   "port_handler": "Screen_SessionLocked (td5_frontend.c:11048) + frontend_render_session_locked_overlay (td5_frontend.c:5824)",
+   "notes": "Dialog, no title strip. Original builds CreateTrackedFrontendSurface(0x198,0x70)=408x112 black panel, draws SNK_SorryTxt + SNK_SeshLockedTxt into it, blits color-keyed at settled (halfW-0xa8,halfH-0x8f)=(152,97). Y immediates verified by disassembly (PUSH 0 @0x41d6c7, PUSH 0x38 @0x41d6ee). OK button (-0x120,0,0x60,0x20) confirmed @0x41d71b. Port is FAITHFUL on all positions/sizes.",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip",
+     "original": "NONE",
+     "port": "none",
+     "severity": "faithful",
+     "faithful_fix": "Leave as-is; no title."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "panel surface (text container)",
+     "original": "CreateTrackedFrontendSurface(0x198,0x70)=408x112 black, color-keyed-on-black blit via QueueFrontendOverlayRect(halfW-0xa8,halfH-0x8f,0,0,0x198,0x70,0,surf) => screen (152,97), 408x112",
+     "port": "frontend_render_session_locked_overlay: dlg_x=(320-168)*sx, dlg_y=(240-143)*sy, dlg_w=408*sx; text live-centered on dlg_cx. No box.",
+     "severity": "faithful",
+     "faithful_fix": "Keep (152,97) origin, 408x112 panel, transparent \u2014 matches orig."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "line 'SORRY' (SNK_SorryTxt)",
+     "original": "Y=0x0 (0); PUSH 0 @0x41d6c7",
+     "port": "dlg_y + 0.0f*sy (line 5837)",
+     "severity": "faithful",
+     "faithful_fix": "Keep Y=0."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "line 'SESSION LOCKED' (SNK_SeshLockedTxt)",
+     "original": "Y=0x38 (56); PUSH 0x38 @0x41d6ee",
+     "port": "dlg_y + 56.0f*sy (line 5839)",
+     "severity": "faithful",
+     "faithful_fix": "Keep Y=56."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "OK button (SNK_OkButTxt)",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x120, 0, 0x60, 0x20, 0) @0x41d71b \u2014 auto-layout x=-0x120, w=0x60=96, h=0x20=32, runtime-resolved",
+     "port": "frontend_create_button(SNK_OkButTxt, -0x120, 0, 0x60, 0x20) (line 11062) -> auto-layout slot0 (110,93), w=96, h=32",
+     "severity": "faithful",
+     "faithful_fix": "Keep (-0x120,0,0x60,0x20) \u2014 matches orig; w/h correct, x is the runtime-resolved auto-layout sentinel."
+    }
+   ]
+  },
+  "18": {
+   "screen_index": 18,
+   "orig_fn": "0x40fe00 ScreenControllerBindingPage",
+   "screen_name": "Controller Binding (Screen_ControllerBinding)",
+   "port_handler": "Screen_ControllerBinding (td5_frontend.c:8541) + frontend_render_controller_binding_overlay (4834) + shared title block (6198-6226)",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip (CreateMenuStringLabelSurface(6))",
+     "original": "X = uVar10-200 = 120 (case 10 'iVar11 = uVar10-200'); Y = (iVar13 - g_menuHeaderLabelYOffset) + -0x40 = (81-0)-64 = 17 (halfH-0x9f-0x40). Native (120,17).",
+     "port": "Shared render block uses title_x = 120.0*sx (faithful X) but title_y = frontend_get_title_render_y(sy) whose resting base_y = 21 (line 4049). No screen-18 override exists (only HIGH_SCORE overrides). So port rests at y=21.",
+     "severity": "divergent",
+     "faithful_fix": "Title resting Y should be 17, not 21, for this screen. In the shared title block (td5_frontend.c ~6218) add a screen-specific override like the HIGH_SCORE one: for TD5_SCREEN_CONTROLLER_BINDING set title_y = base resting - 4*sy (21->17). Or, more correctly, change the shared resting base_y in frontend_get_title_render_y from 21 to 17 since native is (halfH-0x9f)-0x40 = 17 for the standard screens. X=120 is faithful."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title surface",
+     "original": "Native TGA size: width@0x4962c4 (runtime, BSS), height@0x4962c8 = 0x14 (20), YOffset@0x4962cc = 0. Blitted at native size, NO scaling (mode 0).",
+     "port": "Uses s_title_tex_w/h (the loaded TGA native size) drawn at title_w*sx x title_h*sy. Native size, no extra scale.",
+     "severity": "faithful",
+     "faithful_fix": "No change. Port draws the title TGA at its native pixel size scaled only by the global sx/sy canvas scale, matching the original native-size blit."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (OK)",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x128, 0, 0x60, 0x20, 0). Negative x = AUTO-LAYOUT sentinel (runtime-resolved into button table @0x499c78); w=0x60 (96), h=0x20 (32).",
+     "port": "frontend_create_button(SNK_OkButTxt, -0x128, 0, 0x60, 0x20) at td5_frontend.c:8644 \u2014 same sentinel x, w, h.",
+     "severity": "faithful",
+     "faithful_fix": "No change. Create params (x-sentinel -0x128, w=0x60, h=0x20) match exactly; final position is runtime auto-layout in both."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "joystick binding list panel (state 10)",
+     "original": "Panel = g_lobbyErrorDialogSurface (CreateTrackedFrontendSurface(0x1c0,0xd8) = 448x216) blitted at QueueFrontendOverlayRect(uVar10-0xb0, local_14,...) = (320-176, 235-12*count) = (144, 235-12*count); 8 btns -> (144,139). State header g_controllerBindingPage_state (0x1c0,0x40=448x64) blitted at (iVar11, iVar13) = (174, 81). Per-row press-indicator QueueFrontendOverlayRect(iVar11=120, local_20=local_14+0x20+i*0x18,...). Rows step 0x18 from panel-local 0x20.",
+     "port": "panel_x = 144*sx (cx-0xb0), panel_y = (240-5-12*num)*sy = (235-12*num)*sy, y_first = panel_y+32*sy, rows step 24px (0x18). col_act_x = panel_x+160 (0xa0). This is the keyboard-surrogate path; port draws BTN%d/ACTION columns rather than the real per-axis indicator boxes.",
+     "severity": "faithful",
+     "faithful_fix": "Panel origin (144, 235-12*num) and row step 0x18 match native exactly; action column at panel+0xa0 matches. No positional change needed. (The BTN/ACTION text is a port-only approximation of the runtime joystick path; acceptable as the real DXInput::GetJS path isn't wired.)"
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "keyboard capture prompt (states 20/25/26/27 = orig 0x14/0x19/0x1a)",
+     "original": "Action label drawn via MeasureOrCenterFrontendLocalizedString(SNK_ControlText+idx*0x10, 0, 0x1c0) into g_controllerBindingPage_state (448x64) at the surface's row, then blitted at (uVar10-200, iVar13) = (120, 81). Prompt SNK_PressKeyTxt also centered in the 0x1c0 surface. Action label sits ~y=81+24=105.",
+     "port": "hdr_y = 81*sy; prompt at hdr_y+4, action label at hdr_y+24 (=105), progress counter (port-only) at hdr_y+60. Centered.",
+     "severity": "faithful",
+     "faithful_fix": "Header surface dest (120,81) and action-label y=+24 match native. No change. (The '%d / 10' progress line is correctly flagged port-only.)"
+    }
+   ]
+  },
+  "19": {
+   "screen_index": 19,
+   "orig_fn": "0x418460 ScreenMusicTestExtras",
+   "screen_name": "Music Test / Extras CD jukebox (Screen_MusicTestExtras)",
+   "port_handler": "Screen_MusicTestExtras (td5_frontend.c:8925) + frontend_render_music_test_overlay (4270) + shared title block (6198-6226)",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip (CreateMenuStringLabelSurface(6))",
+     "original": "Steady cases 4/5/6/7: QueueFrontendOverlayRect(uVar4-200, (iVar3 - g_menuHeaderLabelYOffset) + -0x40, ...) = (320-200, (81-0)-64) = (120, 17). Native (120,17).",
+     "port": "Shared block: title_x = 120 (faithful X), title_y = frontend_get_title_render_y resting base_y = 21. No screen-19 override.",
+     "severity": "divergent",
+     "faithful_fix": "Title resting Y should be 17, not 21. Same fix as screen 18: either a per-screen override for TD5_SCREEN_MUSIC_TEST (title_y -= 4*sy) or correct the shared resting base_y 21->17. X=120 faithful."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title surface",
+     "original": "Native TGA size (height 0x14=20, YOffset 0), no scaling.",
+     "port": "Native s_title_tex_w/h * sx/sy.",
+     "severity": "faithful",
+     "faithful_fix": "No change."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (TRACK selector)",
+     "original": "CreateFrontendDisplayModeButton(SNK_SelectTrackButTxt, -0x120, 0, 0xA0, 0x20, 0). NEGATIVE x = auto-layout sentinel (runtime-resolved + slide-settled via MoveFrontendSpriteRect to a counter-0x27 rest). w=0xA0(160), h=0x20(32). The slide path in case 3/8 moves sprite 0 around (uVar4-0x68 etc.) so the true rest is runtime-resolved, NOT a static immediate.",
+     "port": "frontend_create_button(SNK_SelectTrackButTxt, 120, 97, 0xA0, 0x20) at :8949 \u2014 POSITIVE hardcoded (120,97), bypassing auto-layout.",
+     "severity": "needs-orig-RE",
+     "faithful_fix": "w=0xA0/h=0x20 are faithful. The (120,97) rest position is a hardcoded approximation of the original's runtime auto-layout settle; it cannot be confirmed from static immediates (auto-layout resolves in button table @0x499c78). Keep as-is unless a runtime capture of the settled origin_x@+0/origin_y@+4 contradicts it. If faithfulness is required, replace the hardcoded x,y with the same negative-sentinel auto-layout the port uses elsewhere and let the layout engine resolve it (pass x=-0x120)."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 1 (OK)",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x120, 0, 0x60, 0x20, 0). Auto-layout sentinel; w=0x60(96), h=0x20(32). Sprite 1 slides via MoveFrontendSpriteRect(1, uVar4-0x68, ...) -> runtime rest.",
+     "port": "frontend_create_button(SNK_OkButTxt, 216, 377, 0x60, 0x20) at :8950 \u2014 hardcoded (216,377).",
+     "severity": "needs-orig-RE",
+     "faithful_fix": "w=0x60/h=0x20 faithful. (216,377) is a hardcoded approximation of the runtime auto-layout/slide settle and cannot be verified from static immediates. Same recommendation: prefer the negative-sentinel auto-layout path (x=-0x120) so the layout engine resolves the rest, matching the original."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "track-name panel (\"%d. %s\")",
+     "original": "Offscreen surface g_lobbyErrorDialogSurface = CreateTrackedFrontendSurface(0x170,0x28)=368x40; text centered via MeasureOrCenterFrontendLocalizedString(...,0,0x170). Blitted (cases 4/5/6) at QueueFrontendOverlayRect(uVar4-0x32, uVar2-0x8f, 0,0, 0x170, 0x28,...) = (320-50, 240-143) = (270, 97).",
+     "port": "Live text (no offscreen surface). fe_draw_text_centered at (cx-0x32*sx)+184*sx (= screen center 270+184=454, i.e. center of 368-wide box anchored at 270), y = (cy-0x8f*sy)+8*sy. Panel origin (270,97).",
+     "severity": "faithful",
+     "faithful_fix": "Panel screen origin (270,97) and 368-wide centering match native (uVar4-0x32, uVar2-0x8f, w=0x170). No change. (ARCH-DIV: live-render vs offscreen surface, acceptable.)"
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "now-playing panel (NOW PLAYING / band / title)",
+     "original": "Offscreen surface g_musicTestSelectedTrackId = CreateTrackedFrontendSurface(0x170,0x78)=368x120; 3 lines at surface-local y=0 (NowPlayingTxt), 0x28 (band), 0x50 (title), centered in 0x170. Blitted (cases 4/5/6) at QueueFrontendOverlayRect(uVar4-0xc, uVar2-0x3f, 0,0, 0x170, 0x78,...) = (320-12, 240-63) = (308, 177).",
+     "port": "Live text: ncx = (cx-0xc*sx)+184*sx (center of 368 box at x=308); y0 = cy-0x3f*sy (177), y1=+0x28, y2=+0x50. Header 'NOW PLAYING:'.",
+     "severity": "faithful",
+     "faithful_fix": "Panel origin (308,177), 368-wide centering, and line offsets 0/0x28/0x50 match native exactly. No change."
+    }
+   ]
+  },
+  "20": {
+   "screen_index": 20,
+   "orig_fn": "0x40dfc0 CarSelectionScreenStateMachine",
+   "screen_name": "Car Selection (Screen_CarSelection)",
+   "port_handler": "Screen_CarSelection (td5_frontend.c:9067) + frontend_render_car_selection_preview (4603) + frontend_render_car_stats_overlay (4514) + shared title block (6198-6226)",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip (CreateMenuStringLabelSurface(0xb/0xc/0xd))",
+     "original": "Case 6 (steady): QueueFrontendOverlayRect(uVar10-0x110, ((int)sy - g_menuHeaderLabelYOffset) + -0x40, ...). uVar10-0x110 = 320-272 = 48 (confirmed in disasm: ESI = halfW-0x11a = 38, +0xa = 48). Y = (81-0)-0x40 = 17. Native title = (48, 17). Note: this screen's title X is 48, NOT the usual 120, because sx base = halfW-0x11a and title uses -0x110.",
+     "port": "Shared block: title_x = 120.0*sx (WRONG for this screen) and title_y resting 21 (also off by 4). No screen-20 override exists.",
+     "severity": "divergent",
+     "faithful_fix": "Car Selection title is at native (48, 17), not (120, 21). Add a screen-specific override in the shared title block (td5_frontend.c ~6218) for TD5_SCREEN_CAR_SELECTION: set title_x = 48.0f*sx AND title_y = 17.0f*sy (i.e. resting (halfW-0x110, (halfH-0x9f)-0x40)). This is a 72px horizontal miss plus the 4px vertical miss."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title surface",
+     "original": "Native TGA size (height 0x14=20, YOffset 0), no scaling. SelectCarText.tga.",
+     "port": "Native s_title_tex_w/h * sx/sy (FE_TITLE_PAGE_BASE+4).",
+     "severity": "faithful",
+     "faithful_fix": "No change to size."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "buttons 0-2 (Car / Paint / Config tabs)",
+     "original": "CreateFrontendDisplayModeButton(SNK_CarButTxt/PaintButTxt/ConfigButTxt, -0xa8, 0, 0xa8, 0x20, 0). NEGATIVE x = auto-layout sentinel; w=0xa8(168), h=0x20(32). Settled via MoveFrontendSpriteRect in case 5 (sx + counter*-0x20 + 0x308 etc.) -> runtime rest.",
+     "port": "frontend_create_button(...,46,169/209/249,168,32) \u2014 hardcoded POSITIVE (46,169),(46,209),(46,249) 168x32.",
+     "severity": "needs-orig-RE",
+     "faithful_fix": "w=168/h=32 faithful. The (46, 169/209/249) rest positions are hardcoded approximations of the original's runtime auto-layout (negative sentinel -0xa8); cannot be confirmed from static immediates. Prefer passing the negative sentinel (-0xa8) so the layout engine resolves the rest, matching the original, OR verify (46,169...) via a runtime read of button table @0x499c78 origin_x/origin_y."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 3 (Auto/Manual transmission)",
+     "original": "CreateFrontendDisplayModeButton(SNK_AutoButTxt) OR CreateFrontendDisplayModePreviewButton(SNK_ManualButTxt), -0xa8, 0, 0xa8, 0x20, 0. Auto-layout; w=0xa8, h=0x20. Label is SNK_AutoButTxt/SNK_ManualButTxt (Language.dll).",
+     "port": "frontend_create_button(s_selected_transmission ? \"Manual\" : \"Automatic\", 46, 289, 168, 32) \u2014 hardcoded (46,289) 168x32 and HARDCODED English literals \"Manual\"/\"Automatic\" instead of SNK_AutoButTxt/SNK_ManualButTxt.",
+     "severity": "minor",
+     "faithful_fix": "Position w/h faithful; (46,289) is the auto-layout approximation (same caveat as buttons 0-2). Separately, replace the literal \"Automatic\"/\"Manual\" with SNK_AutoButTxt/SNK_ManualButTxt (the orig uses the Auto button label, swapped to Manual via the preview-button variant) for label faithfulness."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 4 (OK) and button 5 (Back)",
+     "original": "OK: CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x40, 0, 0x40, 0x20, 0) -> w=0x40(64). Back (only when !postRaceRestart && !mainMenuFlow): CreateFrontendDisplayModeButton(SNK_BackButTxt, -0x60, 0, 0x60, 0x20, 0) -> w=0x60(96). Both auto-layout (confirmed disasm @0x40e491 PUSH 0x20/0x40/-0x40 and @0x40e4b9 PUSH 0x20/0x60/-0x60).",
+     "port": "OK: frontend_create_button(SNK_OkButTxt, 46, 329, 64, 32). Back (if !network): frontend_create_button(SNK_BackButTxt, 118, 329, 96, 32). Hardcoded positions; w/h match (64x32, 96x32).",
+     "severity": "needs-orig-RE",
+     "faithful_fix": "w/h faithful (0x40x0x20, 0x60x0x20). (46,329)/(118,329) are hardcoded approximations of the negative-sentinel auto-layout (-0x40, -0x60); cannot be confirmed statically. Prefer negative-sentinel auto-layout or verify via runtime button-table read. NOTE the gate differs: orig gates Back on (postRaceRestart==0 && mainMenuFlowPhase==0); port gates on !s_network_active \u2014 confirm these gates are equivalent in the port's flow model."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "car name + Beast/Beauty/Locked overlay (state 0xC)",
+     "original": "Car name: sprintf \"%s %s\" centered MeasureOrCenterFrontendLocalizedString(local_80,(int)sx,canvasW) drawn at y = uVar11-0x97 = 240-151 = 89; x = centered from sx(=38) across canvasW. Beast/Beauty/Locked: DrawFrontendLocalizedStringPrimary(...,uVar10-0xea, uVar11-0x77) = (320-234, 240-119) = (86, 121).",
+     "port": "Not in the audited car_stats overlay; handled in Screen_CarSelection state machine / preview. Not directly visible in the read blocks.",
+     "severity": "needs-orig-RE",
+     "faithful_fix": "Verify the port draws the car-name line centered at y=89 (uVar11-0x97) over the preview column starting x=sx(38), and the Beast/Beauty/Locked tag at (86,121) = (uVar10-0xea, uVar11-0x77). Not covered by frontend_render_car_stats_overlay; check the preview/name draw path."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "car stats spec sheet (state 0xF, frontend_render_car_stats_overlay)",
+     "original": "DrawFrontendSmallFontStringToSurface header column at uVar1 = canvasW-0x198 = 640-408 = 232. Row Y groups: Group A from iVar8 = canvasH-0x164 = 316? No: iVar8 = g_frontendCanvasH-0x164 = 480-356 = 124; step 0xc. Group B from canvasH-0x11c = 316? = 480-284 = 196; step 0xc. ENGINE at canvasH-0xe0 = 256. Group C from canvasH-0xc8 = 280; step 0xc. Group D from canvasH-0x98 = 328; step 0xc. Value column at iVar12(max label width)+0x10+uVar1.",
+     "port": "frontend_render_car_stats_overlay: hx = 232; k_rows[] Y values 124/136/148/160 (A), 196/208/220/232 (B), 256 (ENGINE), 280/292/304 (C), 328/340 (D). vx = hx + measure(\"COMPRESSION:\") + 16.",
+     "severity": "faithful",
+     "faithful_fix": "Header column x=232 (canvasW-0x198), the four row groups (124/196/256/280/328 bases, step 0xc=12) and value column (label_width+16 gap) all match the native immediates. No change."
+    }
+   ]
+  },
+  "6": {
+   "screen_index": 6,
+   "orig_fn": "0x4168b0 RaceTypeCategoryMenuStateMachine",
+   "screen_name": "Race Type Category Menu (Single/Cup/Continue/TimeTrials/Drag/Cop/Back + Cup sub-menu)",
+   "port_handler": "Screen_RaceTypeCategory (td5_frontend.c:6985) + frontend_render_race_type_description (td5_frontend.c:4398); title rendered by shared path at td5_frontend.c:6198 via frontend_get_title_render_y (4037)",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip (RaceMenuText, CreateMenuStringLabelSurface(1))",
+     "original": "resting native (120, 17): x = halfW-200 = 120; y = (iVar8 - g_menuHeaderLabelYOffset) - 0x40 = (240-0x9f) - 0 - 0x40 = 81-64 = 17",
+     "port": "x=120 (faithful), y=21 (frontend_get_title_render_y base_y=21; NO per-screen override \u2014 only HIGH_SCORE gets the -4 correction at line 6218)",
+     "severity": "divergent",
+     "faithful_fix": "Title resting Y for this screen is 17, not 21. In the shared title block (td5_frontend.c:6198-6225) add a per-screen resting-Y override for TD5_SCREEN_RACE_TYPE_MENU identical to the existing HIGH_SCORE case: title_y = frontend_get_title_render_y(sy) - 4.0f*sy (21 -> 17). Native formula: (halfH-0x9f) - YOffset - 0x40 = 17."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title strip",
+     "original": "native TGA size width@0x4962c4, height@0x4962c8 = 0x14 = 20; YOffset@0x4962cc = 0; drawn at native size, NO scaling",
+     "port": "draws s_title_tex_w/h * sx/sy (RaceMenuText.TGA native) at full size, no extra scale",
+     "severity": "faithful",
+     "faithful_fix": "No change. Port uses native TGA size scaled only by global sx/sy, matching the original's native-size blit."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "buttons 0-5 (Single Race, Cup Race, Continue Cup, Time Trials, Drag Race, Cop Chase)",
+     "original": "all created with CreateFrontendDisplayModeButton(label, -0xE0, 0, 0xE0, 0x20, 0) = auto-layout x sentinel -0xE0, w=0xE0(224), h=0x20(32)",
+     "port": "frontend_create_button(label, -0xE0, 0, 0xE0, 0x20) for each (lines 7006-7015)",
+     "severity": "faithful",
+     "faithful_fix": "No change. Auto-layout (runtime-resolved into button table @0x499c78); create params match byte-for-byte."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 6 (Back) \u2014 top-level menu",
+     "original": "CreateFrontendDisplayModeButton(SNK_BackButTxt, -0xE0, 0, 0x70, 0x20, 0): auto-layout x, w = 0x70 (112), h=0x20",
+     "port": "frontend_create_button(SNK_BackButTxt, -0xE0, 0, 0xE0, 0x20) (line 7016): w = 0xE0 (224)",
+     "severity": "divergent",
+     "faithful_fix": "Change the Back button width from 0xE0 to 0x70 at td5_frontend.c:7016: frontend_create_button(SNK_BackButTxt, -0xE0, 0, 0x70, 0x20). The Back button is half-width (112px) in the original, not full-width (224px)."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "Cup sub-menu Back button",
+     "original": "state 6 / state 0xb create Back with LITERAL position: CreateFrontendDisplayModeButton(SNK_BackButTxt, halfW-0x90, halfH+0x89, 0x70, 0x20, 0) = (320-0x90, 240+0x89, 112, 32) = (176, 377, 112, 32) \u2014 NOT auto-layout",
+     "port": "Cup sub-menu (case 6) creates Back as frontend_create_button(SNK_BackButTxt, -0xE0, 0, 0xE0, 0x20) (line 7131): auto-layout sentinel, w=0xE0",
+     "severity": "divergent",
+     "faithful_fix": "At td5_frontend.c:7131 create the cup-submenu Back as a LITERAL-positioned half-width button: frontend_create_button(SNK_BackButTxt, 176, 377, 112, 32) (halfW-0x90=176, halfH+0x89=377, w=0x70=112, h=0x20=32). The original places this Back at a fixed bottom-row position, not in the auto-layout stack."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "race-type description panel",
+     "original": "CreateTrackedFrontendSurface(0x110, 0xb4) = 272x180 panel; blitted via QueueFrontendOverlayRect(halfW+0x26, halfH-0x5f, 0,0, 0x110, 0xb4, 0, surf) = screen (358, 145). Inside panel: line0 = race NAME via MeasureOrCenterFrontendLocalizedString(text,0,0x110)+DrawFrontendLocalizedStringToSurface at panel-y=0 (big font); body lines via DrawFrontendSmallFontStringToSurface centered (MeasureOrCenterFrontendString(...,0,0x110)) starting panel-y=0x20 step 0xc, stop at panel-y>=0xb0 (176)",
+     "port": "frontend_render_race_type_description: panel_x=358, panel_y=145, panel_w=272; line0 big-font centered at panel_y+2; lines 1.. small-font centered from y=32 step 12, break at >=176 (td5_frontend.c:4438-4462)",
+     "severity": "faithful",
+     "faithful_fix": "No change to mechanism/position (panel 272x180 @ (358,145), name at top, small-font body from y=32 step 12). Minor: original draws line0 NAME at panel-local y=0; port uses y=+2. Optionally drop the +2 (use panel_y + 0.0f) to be exact, but this is <=2px (minor)."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "description NAME line vertical",
+     "original": "name line drawn at panel-local Y=0 (top of the 272x180 panel)",
+     "port": "panel_y + 2.0f*sy (line 4450)",
+     "severity": "minor",
+     "faithful_fix": "Set name line Y to panel_y + 0.0f*sy to match the original's panel-local Y=0 exactly (2px nudge)."
+    }
+   ]
+  },
+  "7": {
+   "screen_index": 7,
+   "orig_fn": "0x4213d0 ScreenQuickRaceMenu",
+   "screen_name": "Quick Race Menu (Change Car / Change Track / OK / Back + info panel)",
+   "port_handler": "Screen_QuickRaceMenu (td5_frontend.c:7219) + frontend_render_quick_race_overlay (td5_frontend.c:4070); title via shared path 6198/4037",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip (QuickRaceText, CreateMenuStringLabelSurface(3))",
+     "original": "resting native (120, 17): x = halfW-200 = 120; y = (iVar4 - g_menuHeaderLabelYOffset) - 0x40 = (240-0x9f) - 0 - 0x40 = 17 (states 4 and 5)",
+     "port": "x=120 (faithful), y=21 (frontend_get_title_render_y base_y=21, no per-screen override)",
+     "severity": "divergent",
+     "faithful_fix": "Add a per-screen resting-Y override for TD5_SCREEN_QUICK_RACE in the shared title block (td5_frontend.c:6198-6225), same as HIGH_SCORE: title_y -= 4.0f*sy (21 -> 17). Native: (halfH-0x9f)-YOffset-0x40 = 17."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title strip",
+     "original": "native size (h=0x14=20), no scaling",
+     "port": "native TGA scaled by sx/sy only",
+     "severity": "faithful",
+     "faithful_fix": "No change."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (Change Car)",
+     "original": "CreateFrontendDisplayModeButton(SNK_ChangeCarButTxt, halfW-200, halfH-0x67, 0x100, 0x20, 0) = (120, 137, 256, 32)",
+     "port": "frontend_create_button(SNK_ChangeCarButTxt, 120, 137, 256, 32) (line 7243), is_selector=1",
+     "severity": "faithful",
+     "faithful_fix": "No change. Literal position matches exactly."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 1 (Change Track)",
+     "original": "(halfW-200, halfH+0x11, 0x100, 0x20) = (120, 257, 256, 32)",
+     "port": "frontend_create_button(..., 120, 257, 256, 32) (line 7245), is_selector=1",
+     "severity": "faithful",
+     "faithful_fix": "No change. Matches exactly."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 2 (OK)",
+     "original": "(halfW-200, halfH+0x89, 0x60, 0x20) = (120, 377, 96, 32)",
+     "port": "frontend_create_button(SNK_OkButTxt, 120, 377, 96, 32) (line 7247)",
+     "severity": "faithful",
+     "faithful_fix": "No change. Matches exactly."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 3 (Back)",
+     "original": "(halfW-0x58, halfH+0x89, 0x70, 0x20) = (232, 377, 112, 32)",
+     "port": "frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32) (line 7248)",
+     "severity": "faithful",
+     "faithful_fix": "No change. Matches exactly."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "car/track info panel",
+     "original": "CreateTrackedFrontendSurface(0x208, 200) = 520x200 panel; blitted resting via QueueFrontendOverlayRect(halfW-200, halfH-0x8f, 0,0, 0x208, 200, 0, surf) = screen (120, 95) (states 4/5). Car name + track name drawn INTO the panel (sprintf + DrawFrontendLocalizedStringToSurface @0x424560) at panel-local coords; LOCKED line conditionally appended. Per-block clears: car block BltColorFill panel-y[0..0x40); track block BltColorFill at panel-y=0x78 height 0x40.",
+     "port": "frontend_render_quick_race_overlay draws absolute screen text via frontend_draw_value_text: car at (140,106), track at (140,226), LOCKED car (398,126), LOCKED track (398,246) \u2014 flat absolute coords, left-aligned, NOT a centered panel surface (td5_frontend.c:4084-4089)",
+     "severity": "divergent",
+     "faithful_fix": "The panel is 520x200 at screen (120,95). Text is centered within the panel and stacked. From the steady-state redraw immediates (0x4215b0-0x4215c2 region): car name drawn at panel-local (x=0x118=280, y=0x28=40) -> screen (~400 centered, Y=135); track name at panel-local (x=0x118=280, y=0xa0=160) -> screen Y=255. Move car-name to screen Y~135 and track-name to screen Y~255, and CENTER both horizontally over the panel (panel center x = 120+260 = 380), rather than left-aligned at x=140. Recommended: car Y=135, track Y=255, centered at x=380. (Current 106/226 @ x=140 are too high and left-shifted.)"
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "car name Y",
+     "original": "panel-local y=0x28(40) -> screen Y = 95+40 = 135",
+     "port": "screen Y=106 (td5_frontend.c:4084)",
+     "severity": "divergent",
+     "faithful_fix": "Set car-name Y to 135 (panel base 95 + panel-local 40)."
+    },
+    {
+     "dimension": "value-text-Y",
+     "element": "track name Y",
+     "original": "panel-local y=0xa0(160) [steady-state redraw] -> screen Y = 95+160 = 255",
+     "port": "screen Y=226 (td5_frontend.c:4085)",
+     "severity": "divergent",
+     "faithful_fix": "Set track-name Y to 255 (panel base 95 + panel-local 160)."
+    }
+   ]
+  },
+  "8": {
+   "screen_index": 8,
+   "orig_fn": "0x418d50 RunFrontendConnectionBrowser",
+   "screen_name": "Connection Browser (DirectPlay session list \u2014 Choose Connection / OK / Back) [ARCH-DIVERGENCE: DXPTYPE]",
+   "port_handler": "Screen_ConnectionBrowser (td5_frontend.c:7345); title via shared path 6198/4037",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip (NetPlayText, CreateMenuStringLabelSurface(5))",
+     "original": "resting native (120, 17): x = halfW-200 = 120; y = (iVar5 - g_menuHeaderLabelYOffset) - 0x40 = (240-0x9f) - 0 - 0x40 = 17 (states 3,4,5,6,8,9,10)",
+     "port": "x=120 (faithful), y=21 (no per-screen override)",
+     "severity": "divergent",
+     "faithful_fix": "Add a per-screen resting-Y override for TD5_SCREEN_CONNECTION_BROWSER in the shared title block, same as HIGH_SCORE: title_y -= 4.0f*sy (21 -> 17)."
+    },
+    {
+     "dimension": "title-size",
+     "element": "title strip",
+     "original": "native size (h=0x14=20), no scaling",
+     "port": "native TGA scaled by sx/sy only",
+     "severity": "faithful",
+     "faithful_fix": "No change."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 0 (Choose Connection list box)",
+     "original": "CreateFrontendDisplayModeButton(SNK_ChooseConnectionButTxt, -0x1f0, halfH-0x2f, 0x1f0, 0x80, 0): auto-layout x sentinel -0x1f0, y = 240-0x2f = 193, w = 0x1f0 (496), h = 0x80 (128) \u2014 a large list panel",
+     "port": "frontend_create_button(SNK_ChooseConnectionButTxt, 120, 160, 256, 32) (line 7353): literal (120,160), 256x32",
+     "severity": "divergent",
+     "faithful_fix": "Use the original geometry: auto-layout x sentinel -0x1f0, y=193 (halfH-0x2f), w=0x1f0=496, h=0x80=128. The list box is a 496x128 panel (it holds up to 4 connection rows at 16px each), not a 256x32 button. NOTE: this screen is ARCH-DIVERGENCE (DXPTYPE/DirectPlay) \u2014 the port renders a stub 2-button list, so this is lower priority, but if the panel is shown its size/y should match (496x128 @ y=193)."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 1 (OK)",
+     "original": "CreateFrontendDisplayModeButton(SNK_OkButTxt, -0x1f0, halfH+0x89, 0x60, 0x20, 0): auto-layout x, y = 240+0x89 = 377, w=0x60(96), h=0x20(32)",
+     "port": "frontend_create_button(SNK_OkButTxt, -100, 0, 100, 0x20) (line 7354): sentinel -100, y=0, w=100",
+     "severity": "divergent",
+     "faithful_fix": "Use original: frontend_create_button(SNK_OkButTxt, -0x1f0, 377, 0x60, 0x20) \u2014 auto-layout x sentinel -0x1f0, y=halfH+0x89=377, w=0x60=96. (ARCH-DIVERGENCE screen; align if the OK button is rendered.)"
+    },
+    {
+     "dimension": "button-pos",
+     "element": "button 2 (Back)",
+     "original": "CreateFrontendDisplayModeButton(SNK_BackButTxt, -0x1f0, halfH+0x89, 0x70, 0x20, 0): auto-layout x, y=377, w=0x70(112), h=0x20",
+     "port": "frontend_create_button(SNK_BackButTxt, -100, 0, 100, 0x20) (line 7355): sentinel -100, y=0, w=100",
+     "severity": "divergent",
+     "faithful_fix": "Use original: frontend_create_button(SNK_BackButTxt, -0x1f0, 377, 0x70, 0x20) \u2014 auto-layout x sentinel -0x1f0, y=377, w=0x70=112. (ARCH-DIVERGENCE screen; align if rendered.)"
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "connection list rows + scroll indicators",
+     "original": "List rows drawn INTO button-0 surface via DrawFrontendClippedStringToSurface(text, 0x20, y, surf, 0x1b0) starting panel-y=0x2c step 0x10, up to 4 rows. Scroll-up/down chevrons + selection bar drawn via QueueFrontendOverlayRect relative to button-0 origin (origin_x+0xf2 etc.). Selection bar: (origin_x+0x10, (cursor-scroll)*0x10 + 0x2f + origin_y, 0x1b,0xc,9). All driven by DirectPlay enumeration (dpu_exref).",
+     "port": "No enumerated peers (DXPTYPE arch-divergence); port draws nothing into the list and has no scroll bar/selection mechanics (Screen_ConnectionBrowser is a 3-state stub, cases 6/7 fall through)",
+     "severity": "faithful",
+     "faithful_fix": "No change required \u2014 intentional ARCH-DIVERGENCE (no DirectPlay backend). Do NOT port the dpu_exref-driven row/scroll rendering. Only the title-Y (17) and, if the list panel is ever shown, its 496x128 @ y=193 geometry should match. Mechanism divergence is by design."
+    }
+   ]
+  },
+  "0": {
+   "screen_index": 0,
+   "orig_fn": "0x4269d0 ScreenLocalizationInit",
+   "screen_name": "Localization/Bootstrap Init (Screen_LocalizationInit)",
+   "port_handler": "Screen_LocalizationInit (td5_frontend.c ~6414)",
+   "notes": "This is NOT a visible menu screen. ScreenLocalizationInit @0x4269d0 is a single-pass bootstrap: it loads config.eng per car ZIP, sscanf's 17 tokens into DAT_0049b90c (stride 0x330), calls LoadPackedConfigTd5, seeds controller bindings (g_player1InputSource=0/g_player2InputSource=7) and display modes, then SetFrontendScreen(MAIN_MENU); or for boot mode==2 routes to RACE_RESULTS with g_replayFileAvailable=1. The decomp contains ZERO drawing calls \u2014 no CreateMenuStringLabelSurface, no QueueFrontendOverlayRect, no CreateFrontendDisplayModeButton, no CreateTrackedFrontendSurface. There is nothing positional to diverge. The port mirrors the FSM (three-state gate, resume-cup -> RACE_RESULTS, first-entry init -> MAIN_MENU) faithfully.",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip",
+     "original": "no title drawn (init screen has no CreateMenuStringLabelSurface / QueueFrontendOverlayRect)",
+     "port": "no title drawn",
+     "severity": "faithful",
+     "faithful_fix": "none \u2014 leave as-is; this screen draws no title."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "buttons",
+     "original": "no buttons (no CreateFrontendDisplayModeButton calls in 0x4269d0)",
+     "port": "no buttons",
+     "severity": "faithful",
+     "faithful_fix": "none \u2014 leave as-is; this screen creates no buttons."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "value/extra text",
+     "original": "no value panel / no text draw \u2014 pure data-load + screen-route logic",
+     "port": "no value panel; routes to MAIN_MENU or RACE_RESULTS",
+     "severity": "faithful",
+     "faithful_fix": "none \u2014 leave as-is; no visible elements exist on this bootstrap screen."
+    }
+   ]
+  },
+  "1": {
+   "screen_index": 1,
+   "orig_fn": "0x415030 ScreenPositionerDebugTool",
+   "screen_name": "Positioner Debug Tool (Screen_PositionerDebugTool) \u2014 unreachable dev screen",
+   "port_handler": "Screen_PositionerDebugTool (td5_frontend.c ~6483)",
+   "notes": "Internal dev tool, never reachable from normal navigation. Original @0x415030 draws: (1) Positioner.tga background via LoadFrontendTgaSurfaceFromArchive (port loads it); (2) two full-width scanline fills FillPrimaryFrontendScanline(0x114,0xff) and FillPrimaryFrontendScanline(0x10c,0xff) at native y=276 and y=268 (the port does NOT draw these); (3) the selected-glyph rect via QueueFrontendOverlayRect(glyphX, 0x15c, 0x24, 0, 0x24, 0x24, 0, g_menuFontSurface) = a 36x36 glyph at native screen y=0x15c(348), x = RenderPositionerGlyphStrip(0) return (the port does NOT render the glyph strip). Crucially the original creates NO CreateFrontendDisplayModeButton \u2014 all interaction is via keyboard edge bits (g_frontendInputEdgeBits & 0x40000 saves to positioner.txt; &1/&2/&0x200/&0x400 move the glyph cursor). The PORT INVENTS two on-screen buttons. Because the screen is unreachable dev-only and the port already documents this as a deliberate non-faithful affordance, severity is divergent-but-low-impact; not worth pixel work unless the project wants byte-exactness on dev screens.",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip",
+     "original": "no CreateMenuStringLabelSurface title; only Positioner.tga bg + two FillPrimaryFrontendScanline(y=0x114=276, y=0x10c=268, color 0xff)",
+     "port": "no title; loads Positioner.tga only (no scanline fills)",
+     "severity": "minor",
+     "faithful_fix": "Port omits the two horizontal guide scanlines at native y=268 and y=276 (FillPrimaryFrontendScanline 0x10c/0x114). For full fidelity draw two full-width white (0xff) horizontal lines at y=268 and y=276 over the Positioner.tga bg. Dev-only; cosmetic."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "buttons (\"Save\"@120,400,96x32 and Back@232,400,112x32)",
+     "original": "ZERO on-screen buttons; save triggered by keyboard edge bit g_frontendInputEdgeBits & 0x40000, glyph cursor moved by &1/&2/&0x200/&0x400",
+     "port": "frontend_create_button(\"Save\",120,400,96,32) + frontend_create_button(SNK_BackButTxt,232,400,112,32)",
+     "severity": "divergent",
+     "faithful_fix": "Original creates no buttons. To be byte-faithful, remove both frontend_create_button calls (lines ~6493-6494) and drive state purely via the keyboard edge bits as the original does. Port already flags these as a deliberate dev affordance, so removal is optional \u2014 but a faithful port would have NO buttons here."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "selected glyph rect (per-frame overlay)",
+     "original": "QueueFrontendOverlayRect(glyphX, 0x15c, 0x24, 0, 0x24, 0x24, 0, g_menuFontSurface): a 36x36 (0x24x0x24) glyph blit at screen y=0x15c(348), x = RenderPositionerGlyphStrip(0) return; plus the full RenderPositionerGlyphStrip glyph grid editor",
+     "port": "does not render the glyph strip or the selected-glyph overlay at all (case 3/4 just adjust s_anim_tick and play SFX)",
+     "severity": "divergent",
+     "faithful_fix": "Port omits the entire positioner glyph-grid renderer. Faithful behavior: in case 4 draw the selected glyph via an overlay rect at native y=348, size 36x36, source x from RenderPositionerGlyphStrip(0), using the menu font surface; case 5 should write positioner.txt with the two glyph-rect tables (g_positionerGlyphRectsPrimary/Secondary, 0x25 rows x 7 cols). Dev-only tool; low priority unless byte-exact dev parity is wanted."
+    }
+   ]
+  },
+  "2": {
+   "screen_index": 2,
+   "orig_fn": "0x4275a0 RunAttractModeDemoScreen",
+   "screen_name": "Attract Mode Demo (Screen_AttractModeDemo)",
+   "port_handler": "Screen_AttractModeDemo (td5_frontend.c ~6558)",
+   "notes": "This is NOT a visible layout screen. RunAttractModeDemoScreen @0x4275a0 is a 6-state FSM that fades the current frontend out and launches the demo race: case0 g_attractModeDemoActive=1 + PresentPrimaryFrontendBuffer + ActivateFrontendCursorOverlay; case1 ReleaseFrontendDisplayModeButtons; case2/3 PresentPrimaryFrontendBufferViaCopy; case4 InitFrontendFadeColor(0); case5 RenderFrontendFadeEffect then on completion InitializeRaceSeriesSchedule + InitializeFrontendDisplayModeState. The decomp contains ZERO title/button/value-panel draw calls \u2014 only present/release/fade. Nothing positional to diverge. The port mirrors all six cases case-for-case (s_attract_demo_active, frontend_present_buffer, frontend_reset_buttons, frontend_init_fade(0), frontend_render_fade -> frontend_init_race_schedule + frontend_init_display_mode_state).",
+   "findings": [
+    {
+     "dimension": "title-pos",
+     "element": "title strip",
+     "original": "no title drawn (no CreateMenuStringLabelSurface / QueueFrontendOverlayRect in 0x4275a0)",
+     "port": "no title drawn",
+     "severity": "faithful",
+     "faithful_fix": "none \u2014 leave as-is; attract-mode FSM draws no title."
+    },
+    {
+     "dimension": "button-pos",
+     "element": "buttons",
+     "original": "no buttons; in fact case1 RELEASES the inherited main-menu buttons (ReleaseFrontendDisplayModeButtons)",
+     "port": "no buttons; case1 frontend_reset_buttons()",
+     "severity": "faithful",
+     "faithful_fix": "none \u2014 leave as-is; matches the original (releases buttons, creates none)."
+    },
+    {
+     "dimension": "value-text-mechanism",
+     "element": "value/extra text",
+     "original": "no value panel / no text draw \u2014 present + fade-to-black + launch demo race",
+     "port": "no value panel; fade then frontend_init_race_schedule + frontend_init_display_mode_state",
+     "severity": "faithful",
+     "faithful_fix": "none \u2014 leave as-is; no visible positional elements exist on this screen."
+    }
+   ]
+  }
+ },
+ "verifies": [
+  {
+   "screen_index": 0,
+   "element": "title strip",
+   "dimension": "title-pos",
+   "confirmed": false,
+   "corrected_fix": "",
+   "reason": "Re-decompiled ScreenLocalizationInit @0x4269d0. It is a pure data-load + FSM-routing function (config.eng sscanf into DAT_0049b90c stride 0x330, LoadPackedConfigTd5, controller seeding g_player1InputSource=0/g_player2InputSource=7, display-mode enumeration, then SetFrontendScreen(MAIN_MENU) or for boot mode 2 -> RACE_RESULTS). ZERO drawing calls: no CreateMenuStringLabelSurface, no QueueFrontendOverlayRect. There is no title to diverge. Port (Screen_LocalizationInit, td5_frontend.c:6414) mirrors the FSM faithfully. Prior finding 'faithful' is correct; confirmed=false because there is no real discrepancy to fix."
+  },
+  {
+   "screen_index": 0,
+   "element": "buttons",
+   "dimension": "button-pos",
+   "confirmed": false,
+   "corrected_fix": "",
+   "reason": "No CreateFrontendDisplayModeButton calls exist in 0x4269d0. Port creates no buttons. No discrepancy; prior 'faithful' verdict correct."
+  },
+  {
+   "screen_index": 0,
+   "element": "value/extra text",
+   "dimension": "value-text-mechanism",
+   "confirmed": false,
+   "corrected_fix": "",
+   "reason": "No CreateTrackedFrontendSurface / DrawFrontendLocalizedStringToSurface in 0x4269d0 \u2014 no value panel or text. Port draws none. No discrepancy; prior 'faithful' verdict correct."
+  },
+  {
+   "screen_index": 1,
+   "element": "title strip / guide scanlines",
+   "dimension": "title-pos",
+   "confirmed": true,
+   "corrected_fix": "Port omits two full-width horizontal guide scanlines. In case 0, after loading Positioner.tga, call the equivalent of FillPrimaryFrontendScanline(0x114=276, color 0xff) and FillPrimaryFrontendScanline(0x10c=268, color 0xff) \u2014 two white horizontal lines at native y=268 and y=276 over the Positioner.tga bg. There is NO CreateMenuStringLabelSurface title. Dev-only/cosmetic.",
+   "reason": "Verified in decomp of 0x415030 case 0: ClearBackbufferWithColor(0); FillPrimaryFrontendScanline(0x114,0xff); FillPrimaryFrontendScanline(0x10c,0xff). 0x114=276, 0x10c=268, color=0xff. Port Screen_PositionerDebugTool case 0 (td5_frontend.c:6485) loads the TGA but does not draw the two scanlines. Real omission; faithful_fix value (y=268, y=276, color 0xff) is correct. Low impact \u2014 unreachable dev screen."
+  },
+  {
+   "screen_index": 1,
+   "element": "buttons (port-invented \"Save\"@120,400,96x32 + Back@232,400,112x32)",
+   "dimension": "button-pos",
+   "confirmed": true,
+   "corrected_fix": "Original creates ZERO on-screen buttons. Interaction is purely keyboard edge bits: g_frontendInputEdgeBits & 0x40000 advances inner state (triggers positioner.txt save at case 5); &1/&2/&0x200/&0x400 move the glyph cursor. To be byte-faithful, remove both frontend_create_button calls (td5_frontend.c:6493-6494) and drive state via keyboard edge bits. Removal is optional \u2014 the port already documents these as a deliberate dev affordance.",
+   "reason": "Verified: decomp of 0x415030 contains NO CreateFrontendDisplayModeButton calls anywhere. State advance is `if ((uVar1 & 0x40000) != 0) g_frontendInnerState++`. The port (lines 6493-6494) invents \"Save\" at (120,400,96,32) and SNK_BackButTxt at (232,400,112,32). Real divergence; faithful_fix correct. Unreachable dev screen, port self-documents as intentional, so low-impact."
+  },
+  {
+   "screen_index": 1,
+   "element": "selected-glyph overlay rect + glyph-strip editor",
+   "dimension": "value-text-mechanism",
+   "confirmed": true,
+   "corrected_fix": "Original case 4 draws the selected glyph via QueueFrontendOverlayRect(x, 0x15c, 0x24, 0, 0x24, 0x24, 0, g_menuFontSurface) \u2014 a 36x36 (0x24x0x24) glyph at native screen y=0x15c(348), x = RenderPositionerGlyphStrip(0) return value, source = g_menuFontSurface. Case 3 calls RenderPositionerGlyphStrip(0) (the glyph-grid editor) and moves g_positionerSelectedGlyphIndex by +/-1 / +/-8. Case 5 writes positioner.txt with the two 0x25-row x 7-col glyph-rect tables (g_positionerGlyphRectsPrimary/Secondary). Port omits the entire glyph renderer/overlay. Faithful: render the glyph overlay at native y=348, size 36x36, from the menu font surface. Dev-only; low priority.",
+   "reason": "Verified in decomp 0x415030: case 4 issues QueueFrontendOverlayRect(iVar2, 0x15c, 0x24, 0, 0x24, 0x24, 0, g_menuFontSurface) where iVar2=RenderPositionerGlyphStrip(0); case 3 calls RenderPositionerGlyphStrip(0); case 5 fopen positioner.txt and writes both glyph-rect tables (iStack_184=0x25 rows, inner loop 7 cols). Port case 3/4 (lines 6506-6530) only adjust s_anim_tick and play SFX \u2014 no glyph render, no overlay. Real omission; faithful_fix values (y=0x15c=348, size 0x24x0x24=36x36, g_menuFontSurface) are correct."
+  },
+  {
+   "screen_index": 2,
+   "element": "title strip",
+   "dimension": "title-pos",
+   "confirmed": false,
+   "corrected_fix": "",
+   "reason": "Re-decompiled RunAttractModeDemoScreen @0x4275a0: a 6-state FSM (case0 g_attractModeDemoActive=1 + PresentPrimaryFrontendBuffer + ActivateFrontendCursorOverlay; case1 ReleaseFrontendDisplayModeButtons; case2/3 PresentPrimaryFrontendBufferViaCopy; case4 InitFrontendFadeColor(0); case5 RenderFrontendFadeEffect -> InitializeRaceSeriesSchedule + InitializeFrontendDisplayModeState). ZERO title/draw calls. Port Screen_AttractModeDemo (td5_frontend.c:6558) mirrors all 6 cases. No discrepancy; prior 'faithful' verdict correct."
+  },
+  {
+   "screen_index": 2,
+   "element": "buttons",
+   "dimension": "button-pos",
+   "confirmed": false,
+   "corrected_fix": "",
+   "reason": "0x4275a0 creates no buttons; case1 RELEASES inherited buttons via ReleaseFrontendDisplayModeButtons. Port case1 calls frontend_reset_buttons() and creates no buttons. No discrepancy; prior 'faithful' verdict correct."
+  },
+  {
+   "screen_index": 2,
+   "element": "value/extra text",
+   "dimension": "value-text-mechanism",
+   "confirmed": false,
+   "corrected_fix": "",
+   "reason": "No value panel or text draw in 0x4275a0 \u2014 only present/release/fade/launch. Port matches (fade then frontend_init_race_schedule + frontend_init_display_mode_state). No discrepancy; prior 'faithful' verdict correct."
+  }
+ ]
+}

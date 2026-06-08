@@ -1,0 +1,29 @@
+S16 — Race results: vertical nav · correct finish position · persist opponent count
+====================================================================================
+
+Covers feedback: arrow up/down in race results scrolls left/right · finish position data is wrong (2-car race shows 15 for the winner, 16 for the opponent) · "race again" doesn't save the original race configuration (opponent count)
+Modules: td5_frontend.c (results screen nav + race-again snapshot/restore), td5_game.c (race-order / finish position)
+Memory: project_nway_splitscreen_multiplayer_2026-06-03 (16 racer slots, "%dTH" position)
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Fix three race-results / restart issues:
+
+1. NAV DIRECTION. On the results screen, UP/DOWN currently triggers a LEFT/RIGHT slide. The state-6 input handler td5_frontend.c ~13225-13237 maps s_arrow_input>0 ? state 7 : state 9 (horizontal slide). Map vertical up/down to the row navigation instead (use the up/down keys for moving the selection vertically); keep left/right for whatever genuinely is horizontal.
+
+2. FINISH POSITION = 15/16 instead of 1/2. The displayed number is s_finish_position_display = pl->race_position + 1 (td5_game.c ~3599). race_position is written ~5567-5574 from s_metrics[i].display_position, and display_position is assigned for ALL 16 slots ~5548 — so inactive slots keep ranks 2..15 and an inactive/wrong slot's value leaks in (giving 14/15 -> shows 15/16). Fix the ranking so positions are computed ONLY over the active/participating racers (rank 0..N-1 among real actors), guarding inactive slots. Original RE targets: UpdateRaceOrder @0x0042F5B0 and UpdateRaceActors @0x00436A70 — have the research agent confirm how the original ranks active racers before you change the loop.
+
+3. "RACE AGAIN" loses the opponent count. The snapshot at td5_frontend.c ~13124-13128 saves car/paint/transmission/config but NOT s_num_ai_opponents; restore is ~13474-13478. Add s_snap_num_ai_opponents (save it in the snapshot, restore it on race-again) so the rerun keeps the same number of opponents. (S15's pause-menu RESTART RACE reads this same snapshot — keep the field name/behavior compatible.)
+
+NOTE: #2 has RE basis (race-order funcs) — RE it. #1 and #3 are source-port frontend/state. Run the multi-track CSV sweep since #2 touches race-order code.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive or watch. Finish ALL self-verification you can first (build + a headless AutoRace run to a finish so you can read the position value from logs + the mandatory multi-track CSV sweep), then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE; use AutoRace to drive a full race headless and log the finish position. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Up/Down moves the results selection vertically (no spurious left/right slide).
+- A 2-car race shows finish position 1 (winner) and 2 (opponent), not 15/16; verify with 3+ racers too.
+- "Race again" (and pause-menu Restart) reuse the same opponent count as the original race.

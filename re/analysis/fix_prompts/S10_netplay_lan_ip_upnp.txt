@@ -1,0 +1,31 @@
+S10 — Net-play rework: LAN + direct IP + UPnP   (LARGE)
+=======================================================
+
+Covers feedback: two game modes (LAN + direct IP), UPnP to avoid port forwarding
+Modules: td5_net.c (DirectPlay lockstep, DXPTYPE protocol), multiplayer frontend screens.
+NOTE: this is a large feature — propose architecture FIRST, then implement. Consider a /re research pass before coding.
+
+PROMPT
+------
+Rework the net-play multiplayer into two explicit connection modes.
+
+MODE 1 — LAN: automatic discovery of hosted games on the local network (broadcast/multicast beacon -> list of joinable sessions in the UI).
+
+MODE 2 — DIRECT (IP): host or join by entering an IP address (and port). No discovery; explicit address.
+
+Additionally investigate UPnP (IGD port mapping) so a direct/IP host can automatically open its port on the router and avoid manual port forwarding. Pick/justify an approach (e.g. a small UPnP IGD SOAP client, or a vendored miniupnpc-style helper) compatible with the MinGW i686 toolchain and the existing build.
+
+Constraints:
+- Keep the existing lockstep sync model (DXPTYPE). Refactor the DirectPlay transport path as needed but preserve determinism.
+- Coordinate the mode-select UI with the multiplayer frontend screens (and the shared menu font from S02).
+
+DELIVERABLE ORDER:
+1. Architecture proposal first: mode-select UI flow, LAN discovery protocol (packet format, ports), direct-connect flow (host/join), UPnP approach + library choice, and how each maps onto the current td5_net.c lockstep.
+2. Then implement after the plan is reviewed.
+
+ACCEPTANCE
+----------
+- A LAN host is auto-discovered and joinable from another machine on the same network.
+- Direct IP host/join works across networks.
+- With UPnP enabled, an IP host opens its port automatically (verify a mapped port on the router); graceful fallback + message if UPnP unavailable.
+- Lockstep gameplay sync unchanged.

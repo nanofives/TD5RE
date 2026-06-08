@@ -1,0 +1,30 @@
+S15 — Pause-menu rework (remove music, add Exit-Game + Restart-Race) + remove SFX mode
+=======================================================================================
+
+Covers feedback: modify pause menu — remove music, add a button to exit the game, another to restart the race with current parameters · remove the SFX mode on sound settings
+Modules: td5_frontend.c (sound options + pause rows), td5_game.c (pause activation + race restart), td5_hud.c (pause row strings), td5_sound.c (stop music)
+Memory: project_sound_voice_overload_fix_2026-06-04; project_frontend_sound_system_2026-06-02
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Rework the pause menu and trim the sound-settings screen. Two parts:
+
+1. PAUSE MENU. Activation is td5_game.c ~3497; the row list is built ~3522; row strings live in g_pause_page_strings[] td5_hud.c ~4312 with sizes in g_pause_page_sizes[] (current rows: VIEW / MUSIC / SOUND / CONTINUE / EXIT).
+   a) REMOVE MUSIC: stop the music while paused (and drop the "MUSIC" pause row, since the user wants the pause music gone). Find where audio/music continues during pause and silence the music track via td5_sound.c on pause-enter; restore on resume if appropriate.
+   b) ADD "EXIT GAME" row: quits the application (clean shutdown) — distinct from CONTINUE.
+   c) ADD "RESTART RACE" row: restarts the current race with the SAME parameters (track, car, opponent count, laps, direction). Reuse the existing race-init/race-again path. NOTE: the opponent-count persistence for "race again" is being fixed in session S16 — coordinate so RESTART here reads the same snapshot (this session adds the button + restart wiring; S16 ensures the opponent count is saved/restored).
+
+2. SOUND SETTINGS — remove the "SFX mode" row. It is created in td5_frontend.c ~11117 (SNK_SfxModeButTxt) and cycled in the case-6 handler ~11143-11152. Delete the row and its handler branch, then re-index the remaining sound-option rows + OK/BACK so navigation stays correct.
+
+NOTE: source-port-only menu/audio work (no original pause-restart/exit equivalent to RE) — document and proceed. Be careful re-indexing the sound screen rows (off-by-one breaks nav).
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive or watch. If this fix can only be CONFIRMED by me playing (the pause flow / audio), finish ALL self-verification you can first (build + any headless/AutoRace probe), then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE, and for frontend checks use --AutoRace=0 --SkipIntro=1 --StartScreen=N with [Logging]Frontend=1 in THIS worktree's td5re.ini. Never run the main-tree exe; never poll or kill by window name. (Pause menu needs an active race — AutoRace can put you in a race to reach pause.)
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Pausing does not play/keep music; CONTINUE resumes normally.
+- Pause menu has working EXIT GAME (quits) and RESTART RACE (same params) entries.
+- Sound settings no longer shows the SFX mode row; remaining rows navigate correctly.

@@ -3275,6 +3275,26 @@ static void *td5_asset_transcode_td6_mesh(const void *src_data, int src_size,
  * the frontend's 37-car roster is untouched (no menu regression). */
 static char s_player_car_override[16] = {0};
 
+/* Per-race-slot TD6 body-colour override (0xRRGGBB), -1 = no override.
+ * Set by the frontend's simultaneous-multiplayer car select so EACH human's
+ * ported-TD6 car is painted that player's chosen colour, instead of the single
+ * global INI colour (slot 0) / the hashed AI palette (slots >=1). Consulted in
+ * td5_asset_load_vehicle when baking the carmask paint. -1 leaves the default
+ * behaviour intact for single-player / AI. [PORT ENHANCEMENT 2026-06-07] */
+static int32_t s_human_td6_color[TD5_MAX_RACER_SLOTS];
+static int     s_human_td6_color_init;
+
+void td5_asset_set_human_td6_color(int slot, int rgb)
+{
+    int i;
+    if (!s_human_td6_color_init) {
+        for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) s_human_td6_color[i] = -1;
+        s_human_td6_color_init = 1;
+    }
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    s_human_td6_color[slot] = rgb;
+}
+
 void td5_asset_set_player_car_override(const char *code)
 {
     if (code && code[0])
@@ -3484,9 +3504,16 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                 char png_mask[256];
                 if (!td5_render_photobooth_active() &&
                     td5_asset_resolve_png_path("carmask.png", zip_path, png_mask, sizeof(png_mask))) {
-                    uint32_t paint_rgb = (slot == 0)
-                        ? ((uint32_t)g_td5.ini.td6_paint_color & 0x00FFFFFFu)
-                        : td5_asset_pick_ai_td6_color(car_index, slot, paint);
+                    uint32_t paint_rgb;
+                    if (s_human_td6_color_init && slot >= 0 &&
+                        slot < TD5_MAX_RACER_SLOTS && s_human_td6_color[slot] >= 0) {
+                        /* Per-player chosen colour (simultaneous-MP car select). */
+                        paint_rgb = (uint32_t)s_human_td6_color[slot] & 0x00FFFFFFu;
+                    } else if (slot == 0) {
+                        paint_rgb = (uint32_t)g_td5.ini.td6_paint_color & 0x00FFFFFFu;
+                    } else {
+                        paint_rgb = td5_asset_pick_ai_td6_color(car_index, slot, paint);
+                    }
                     if (paint_rgb != 0x00FFFFFFu) {
                         skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin,
                                                                      png_mask, paint_rgb);

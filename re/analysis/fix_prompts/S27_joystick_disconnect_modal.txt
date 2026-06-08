@@ -1,0 +1,31 @@
+S27 — Joystick disconnect -> instant pause + per-viewport reconnect modal
+=========================================================================
+
+Covers feedback: if a joystick gets disconnected the race should be paused instantly, and a semi-transparent modal should cover the disconnected player's screen with text telling them to reconnect the device
+Modules: td5_platform_win32.c (DirectInput device polling), td5_input.c (input layer), td5_game.c (pause flag), td5_hud.c (per-viewport overlay)
+Memory: project_joystick_multiplayer_input_2026-06-04 (per-device bindings, apply_device_selection maps device->owner); project_nway_splitscreen_multiplayer_2026-06-03
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Add joystick/controller disconnect handling. Today there is NO disconnect detection: the DirectInput GetDeviceState path td5_platform_win32.c ~1631-1635 only re-Acquires on DIERR_INPUTLOST / DIERR_NOTACQUIRED and never reports a persistent loss.
+
+Implement:
+1. DETECT a persistent device loss per device (acquire keeps failing / device enumeration no longer lists it). Map the lost device to its owning player via the existing per-device ownership (apply_device_selection / device->owner from the joystick-input revamp).
+2. On loss DURING A RACE: pause instantly — set g_td5.paused=1 (pause is set elsewhere ~td5_game.c:2804) — so the sim freezes the moment the controller drops.
+3. Draw a SEMI-TRANSPARENT modal over the DISCONNECTED player's split-screen viewport (reuse the HUD overlay infra around td5_hud_draw_pause_overlay ~td5_hud.c:1044, but scoped to that player's viewport rect) with text like "Controller disconnected — reconnect to continue".
+4. RESUME when the device is re-acquired (clear the modal, unpause if no other player is still disconnected). Handle multiple players: stay paused while ANY required player's device is missing.
+
+Keep keyboard players unaffected; if the disconnected slot was keyboard, no modal. Make the detection cheap (don't thrash Acquire every frame).
+
+NOTE: source-port feature — DirectInput handling is port/wrapper-side, no original equivalent to RE; document and proceed. Pure input/HUD — the multi-track CSV sweep can be skipped, but you MUST verify the pause+modal behavior some automated way (e.g. simulate a device-loss code path / force the failure branch) since I can't unplug a pad for you.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game expecting me to unplug a controller. Since you can't physically disconnect a device, add a TEST HOOK (e.g. a debug key or an ini knob, dev-build only) that simulates "device lost" for a chosen player so you can exercise pause + modal + resume headlessly; finish ALL self-verification with it, then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE; reach a race via AutoRace, then trigger the simulated disconnect. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Simulated device loss mid-race pauses instantly.
+- A semi-transparent "reconnect" modal covers the disconnected player's viewport (correct viewport in split-screen).
+- Re-acquiring the device clears the modal and resumes (stays paused while any required player is still missing); keyboard players unaffected.

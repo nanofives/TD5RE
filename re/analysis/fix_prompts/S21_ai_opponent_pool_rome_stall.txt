@@ -1,0 +1,27 @@
+S21 — AI opponent pool (all cars, bucketed by top speed) + Rome 1-opponent stall
+=================================================================================
+
+Covers feedback: make all cars available in the pool of AI opponents (difficulty changes the pool according to top speed) · cars not moving in the middle of the road on Rome when racing against 1 player
+Modules: td5_frontend.c (opponent selection), td5_ai.c / td5_game.c (route init / spawn for TD6)
+Memory: project_td6_car_perf_normalization_2026-06-04 (carparam top-speed = tuning off 0x74 / file off 0x100); project_td6_track_migration_2026-06-02
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Two AI-opponent issues:
+
+1. OPPONENT POOL BY TOP SPEED. Today AI opponents are picked from a hardcoded roster: s_difficulty_tier_cars[3][6] td5_frontend.c ~2496, chosen randomly per tier ~2856-2885 (no speed filter), stored in g_td5.ai_car_indices. Replace this so ALL cars are eligible, bucketed by TOP SPEED: read each car's carparam top-speed field (tuning offset 0x74 / file offset 0x100 — see the TD6 car-perf-normalization memory), sort/bucket cars into speed bands, and pick opponents from the band matching difficulty (Easy = slower band ... Hard = faster band). Keep the count = chosen opponent count; avoid duplicate-car spam if the band is large.
+
+2. ROME 1-OPPONENT STALL. On Rome (TD6) with a single opponent the cars sit still in the middle of the road. Pointers: TD6 spawn-heading fix td5_game.c ~2383 (runs only when g_active_td6_level>0); racer_count seeding td5_ai.c ~1603-1605; route-state init ~1607-1680; AI dispatch / recovery gate ~3684/3806. Hypothesis from the sweep: with a low opponent count on a TD6 track the route table pointer (rs[RS_ROUTE_TABLE_PTR]) is left NULL (TD6 has no LEFT/RIGHT.TRK), so ai_route_heading returns 0 and the AI never gets a heading → it stalls. Investigate why the route/heading isn't initialized for the active AI slot on TD6 at low counts and fix it so the opponent drives.
+
+NOTE: #1 is a source-port feature (document, proceed). #2 is a real bug on TD6 routing — RE the route loader / heading path. Test on Rome specifically + a stock TD5 track for regression. AI/track: the multi-track CSV sweep is MANDATORY (include Rome if the harness supports it).
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to watch. Finish ALL self-verification first: build + the mandatory multi-track CSV sweep + a headless AutoRace on Rome with exactly 1 opponent (confirm the opponent actually moves in the trace) and a check that the opponent pool now spans all cars bucketed by speed. Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- AI opponents are drawn from ALL cars, bucketed by top speed; Easy fields slower cars, Hard fields faster ones.
+- Racing 1 opponent on Rome: the opponent actually drives (no stalled cars in the road).
+- No regression on stock TD5 tracks; multi-track sweep clean.

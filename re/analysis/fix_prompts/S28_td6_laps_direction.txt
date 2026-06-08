@@ -1,0 +1,27 @@
+S28 — TD6 track flags: remove laps on point-to-point · implement direction for circuit + TD6 tracks
+====================================================================================================
+
+Covers feedback: remove laps on point-to-point tracks of TD6 · implement direction (forward/reverse) for circuit tracks and TD6 tracks
+Modules: re/tools/convert_td6_tracks.py (data: LEVELINF / reverse strips), td5_asset.c (circuit flag + has_reverse gate + reverse load), td5_game.c (circuit flag use), td5_hud.c (lap display), td5_frontend.c (direction button visibility)
+Memory: project_td6_track_migration_2026-06-02; reference_track_preview_render_tool_2026-06-02 (LEVELINF DWORD[0] = circuit vs P2P; quickrace.ini comments are INVERTED); reference_td6_track_names_2026-06-03
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Two TD6 track-flag issues:
+
+1. REMOVE LAPS ON P2P TD6 TRACKS. Lap display is gated on g_track_is_circuit && game_type!=3 (td5_hud.c ~1407); the circuit flag comes from LEVELINF[0] (td5_game.c ~1649, loaded td5_asset.c ~2333). Point-to-point TD6 tracks are showing laps, which means they're being flagged as circuits. Check the conversion: convert_td6_tracks.py (around the --circuit flag / synth_levelinf, ~1075) — ensure P2P TD6 tracks are written with LEVELINF[0]=0 (P2P) so laps disappear, and circuit TD6 tracks keep =1. Remember the quickrace.ini circuit/P2P comments are INVERTED (see memory) — verify against LEVELINF DWORD[0], not the ini comment. This regenerates gitignored level assets — note that in your report.
+
+2. DIRECTION (FORWARD/REVERSE) FOR CIRCUIT + TD6. Today reverse is blanket-disabled for all TD6 tracks: td5_asset_track_has_reverse td5_asset.c ~2152-2164 returns 0 when td5_asset_td6_level_for_slot>0 (comment says it's a temporary gate); the direction button hides when has_reverse==0 (td5_frontend.c ~12656-12672); reverse actually loads STRIPB.DAT + reverse routes ~2241/2269-2291 and swaps via g_td5.reverse_direction. Implement real direction support: enable forward/reverse for circuit tracks, and for TD6 tracks where a reverse strip/route can be produced. TRIAGE FEASIBILITY FIRST — if TD6 tracks lack STRIPB.DAT, decide whether to synthesize reverse strips/routes in convert_td6_tracks.py or to enable reverse only where data exists; report which tracks get reverse. Replace the blanket TD6 gate with a per-track has_reverse driven by actual data.
+
+NOTE: #1 is mostly DATA (conversion regen + flag); #2 is code + possibly data (reverse strips). This may be large — consider landing #1 first, then #2. The Ghidra step has limited applicability (these are TD6/data + port flags) — document and proceed; don't hard-stop. If you touch the conversion tool it regenerates gitignored assets in re/assets — do NOT git-add those.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive. Finish ALL self-verification first: build + a headless launch into the track-options/quick-race flow (--AutoRace=0 --SkipIntro=1 --StartScreen=<track-options> with [Logging]Frontend=1 in THIS worktree's td5re.ini) to confirm P2P TD6 tracks show NO laps and that a Direction toggle appears for circuit/TD6 tracks; and a headless AutoRace in reverse on a track that supports it to confirm spawn/route. Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Point-to-point TD6 tracks show NO lap counter; circuit tracks still show laps.
+- A Direction (forward/reverse) toggle is available for circuit tracks and for TD6 tracks that support it; report the per-track support list.
+- Selecting reverse spawns + routes the race in the reverse direction without breaking start/finish.

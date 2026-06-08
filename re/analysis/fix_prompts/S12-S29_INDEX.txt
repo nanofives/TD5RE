@@ -1,0 +1,112 @@
+BATCH 2 (S12–S29) — INDEX  ·  generated 2026-06-05
+==================================================
+37 feedback items grouped into 18 fix sessions. Each S##_*.txt holds a paste-ready
+prompt whose body STARTS WITH /fix — pasting it into a fresh Claude Code instance
+spins up its own isolated git worktree (the /fix workflow, Step 0), so sessions
+don't clobber each other's td5re.exe / td5re.ini / log/.
+
+HOW TO USE
+----------
+1. Open one S##_*.txt, copy from "/fix" to the end of the PROMPT body.
+2. Paste into a new Claude Code instance. It creates the worktree and works there.
+3. Every prompt already tells the session: do NOT start the game for a manual test
+   (you'll be away) — it self-verifies (build + headless/AutoRace + CSV sweep),
+   preps manual_drive.exe, and stops. It launches the game ONLY via the /fix
+   worktree rules and kills ONLY its own PID-/tag-guarded process (never a
+   name-based kill that would hit sibling sessions).
+
+SESSION LIST
+------------
+S12  FPS/MS overlay -> menu top-right + race no-overlap; frontend responsive at high MS
+S13  Main-menu font swap + 4:3-locked resize (font keeps shape, no stretch)
+S14  "Enter nickname" modern button + EXIT broken / YES-NO spacing
+S15  Pause menu rework (remove music, add Exit-Game + Restart-Race) + remove SFX mode
+S16  Race results: vertical nav + correct finish position (15/16 bug) + persist opponent count
+S17  Car-vs-car collision pass-through (one-frame tunnelling)
+S18  Downslope physics blow-up + reverse-at-start kicks player off (TD6)
+S19  Camera: countdown shake, pause-at-start, invisible-cam ground clip, high-MS jitter
+S20  Traffic AI rework (branches, wall avoidance, lane choice, awareness)
+S21  AI opponent pool by top speed + Rome 1-opponent stall
+S22  Main render: black sprite borders (trees) + buildings bend/stretch + TD6 high MS
+S23  Unify car reflection (TD5 like TD6) + dynamic brake-light position on long cars
+S24  Car-select TD6 paint/chassis bug on screen re-entry
+S25  HUD: wrong-way warning + remove checkpoint indicator + Rome minimap stray line
+S26  Race VFX: opponent smoke floating at start + finish star opacity/size
+S27  Joystick disconnect -> instant pause + per-viewport reconnect modal
+S28  TD6 track flags: remove laps on P2P + implement direction (circuit + TD6)
+S29  TD6 placement: Rome start span vs banner + tree in middle of London road
+
+FEEDBACK -> SESSION MAP (all 37 items)
+--------------------------------------
+move FPS/MS top-right on menu .................... S12
+frontend more responsive at high MS ............. S12
+FPS/MS overlaps car position in race ............ S12
+change main menu font ........................... S13
+resize keep font shape (4:3) .................... S13
+enter nickname not modern button ................ S14
+exit button doesn't work / yes-no too close ..... S14
+pause menu: remove music, exit+restart buttons .. S15
+remove SFX mode on sound settings ............... S15
+arrow up/down in results scrolls left/right ..... S16
+finish position data wrong (15/16) .............. S16
+race again doesn't save opponent count .......... S16
+collision finnicky, go through cars ............. S17
+physics crazy on down slopes (vertical+recovery)  S18
+driving backwards on TD6 start kicks off race ... S18
+camera shake on countdown / pause-at-start ...... S19
+invisible-car camera clips ground on slopes ..... S19
+high MS camera shaky ............................ S19
+rework traffic AI smarter ....................... S20
+all cars in AI pool, difficulty by top speed .... S21
+cars not moving on Rome vs 1 player ............. S21
+black lines on PNG borders (trees) .............. S22
+buildings bend/stretch up close ................. S22
+unusually high MS on TD6 tracks ................. S22
+TD5 cars same reflection as TD6 ................. S23
+TD6 long cars: brake lights inside .............. S23
+car-select TD6 paint/chassis bug on return ...... S24
+no sign when going wrong direction .............. S25
+remove checkpoint indicator at top .............. S25
+weird minimap line at end of Rome ............... S25
+opponent smoke in the air at start .............. S26
+finish star not fully opaque / make bigger ...... S26
+joystick disconnect -> pause + modal ............ S27
+remove laps on P2P TD6 tracks ................... S28
+implement direction for circuit + TD6 tracks .... S28
+Rome start span too far from banner ............. S29
+tree in middle of road at start of London ....... S29
+
+PARALLEL-SAFETY / MERGE GUIDANCE
+--------------------------------
+Sessions run as independent worktrees, but /fix merges ONE branch at a time on your
+approval and then propagates master into the other live worktrees (surfacing any
+conflict — nothing is auto-resolved). So overlapping files are fine, just merge those
+sequentially. Shared-file clusters (mostly DIFFERENT regions of each file):
+  td5_frontend.c : S12 S13 S14 S15 S16 S21 S24 S28   (biggest cluster — merge these in series)
+  td5_hud.c      : S12 S15 S25 S28
+  td5_game.c     : S15 S16 S18 S21 S28 S29
+  td5_physics.c  : S17 S18            (different functions; merge S17 then S18)
+  td5_ai.c       : S20 S21            (different regions)
+  td5_render.c   : S22 S23 S26        (different regions)
+  td5_vfx.c      : S23 S26
+  td5_asset.c    : S21 S24 S28 S29
+  td5_platform_win32.c : S13 S27
+  convert_td6_tracks.py: S28 S29      (data/regen — both touch the converter)
+
+Lowest-conflict / easiest to run truly in parallel: S19 (camera, sole owner),
+S17 then S18 (physics), S20 (traffic), S27 (input). Heavy-frontend (S12–S16, S21,
+S24, S28) and game.c sessions: merge one at a time.
+
+CROSS-SESSION DEPENDENCIES (note, not blockers)
+-----------------------------------------------
+- S15 (pause "Restart Race") and S16 (persist opponent count for "race again") share
+  the race-config snapshot. Land S16 first, or keep the snapshot field name compatible.
+
+RE-BASIS NOTE
+-------------
+Several sessions are source-port-only or data fixes with NO original-binary behavior to
+reverse-engineer (S12, S13, S14, S15, S24, S25, S27 source-port; S28, S29 data). Each
+such prompt tells the session to document "no RE basis" and proceed instead of hitting
+the /fix Step-1 HARD STOP. RE-backed sessions (S16 position, S17 collision, S18 physics,
+S19 camera, S21 Rome route, S22 projection, S23 hardpoints) target specific original
+addresses cited in their prompts.

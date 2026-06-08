@@ -1,0 +1,94 @@
+================================================================================
+SESSION P5 — RENDERING / FPU / DETERMINISM
+Paste everything below the line into a fresh Claude Code session at the repo root.
+One zero-risk comment rewrite + one runtime-gated occlusion item.
+NOTE: may add a preset in td5_platform_win32.c — coordinate with P4 if both edit there.
+================================================================================
+
+TD5RE Workstream-E rendering/FPU. Root: C:\Users\maria\Desktop\Proyectos\TD5RE.
+Source: td5mod\src\td5re\td5_render.c (+ ddraw_wrapper). KEY FACT (don't re-derive):
+the entire software renderer is LINEAR-depth, not NDC.
+  - Opaque: clip_and_submit_polygon writes depth_z = (out_vz - 64)*(1/195000)
+    (td5_render.c:824), NEAR_DEPTH_OFFSET=64, DEPTH_NORMALIZE_INV=1/195000.
+  - Smoke: project_vertex writes sz = vz*(1/195000) WITHOUT the -64 (td5_render.c:498).
+  - Depth buffer is DXGI_FORMAT_D32_FLOAT (d3d11_backend.c:679).
+Build via build_standalone.bat with ABSOLUTE gcc/ar paths (relative fails through the
+MSYS junction):
+  GCC = C:\Users\maria\Desktop\Proyectos\TD5RE\td5mod\deps\mingw\mingw32\bin\gcc.exe
+  AR  = ...\ar.exe
+main.c:414 sets _controlfp(_RC_DOWN|_PC_64, ...) — do NOT remove. Ghidra read_only
+(pool; if slot corrupt, open master read_only=true).
+
+DO NOT touch (Ghidra-confirmed faithful this audit):
+- focal width*0.5625f (orig 0x0045d78c = 0.5625 exact).
+- shadow corner-scale 1.25f (orig g_wheelSuspensionRenderScale 0x00463b64 = 1.25).
+- shadow Y-offset 0.0f (orig g_shadowVerticalOffset 0x0048dc48 = 0.0). The wrapper
+  DepthBias=-500 is ~1e-7 on D32-near (negligible, leave it).
+- dumped trig LUT (byte-exact from the exe to kill +-1 ULP x87 drift, intentional).
+- FPU control-word init (main.c:414) and -fwrapv (shipped, build_standalone.bat:34).
+- texture-header OOB: LoadStaticTrackTextureHeader @0x00442560 [ecx-4] read has NO
+  port analog (structurally avoided, td5_asset.c:2218-2275). Leave it.
+- IDIV/CDQ/CWD/ROL/ROR axes: low/no risk (C / and % already = x86 IDIV truncation;
+  -fwrapv doesn't affect division; physics/AI use shifts+masks, not rotate intrinsics).
+
+------------------------------------------------------------
+FIX A (zero-risk, DO FIRST) — rewrite the doubly-stale smoke comment
+------------------------------------------------------------
+The KNOWN-ISSUE comment at td5_render.c:6620-6633 (above
+td5_render_submit_translucent_world) is STALE in two ways: it claims opaque uses
+"perspective NDC z" vs smoke "linear vz/far_clip" (false — the pipeline is uniformly
+linear) and that it falls through to TRANSLUCENT_LINEAR_HUD (false — it uses
+TD5_PRESET_ADDITIVE_OVERLAY). Rewrite it to state the truth: smoke depth is in the
+SAME linear space as opaque geometry (differs only by the constant 64
+NEAR_DEPTH_OFFSET); occlusion is OFF only because TD5_PRESET_ADDITIVE_OVERLAY
+(td5_types.h:297) has z-test disabled.
+
+------------------------------------------------------------
+FIX B (RUNTIME-GATED — do the runtime check FIRST) — smoke world occlusion
+------------------------------------------------------------
+Question: does the ORIGINAL draw vehicle smoke depth-tested? NOTE:
+SetRaceRenderStatePreset @0x0040b070 only sets renderstate 0x17 + 0xE — it does NOT
+set Z-state. (Correct the memory note that claims 0x0040b070 sets "ZENABLE on / ZFUNC
+LESSEQUAL" — that is FALSIFIED.) So Z-state is inherited and must be read live:
+  - Frida on original/TD5_d3d.exe, break at the translucent flush
+    (QueueTranslucentPrimitiveBatch @0x00431460), read D3DRENDERSTATE_ZENABLE(7),
+    ZWRITEENABLE(14), ZFUNC(23) while a smoke puff is on screen (Moscow/Sydney rear-
+    wheel smoke).
+DECISION:
+  - If ZENABLE==0 -> smoke is faithfully additive-on-top. Fix A alone is the
+    deliverable. STOP.
+  - If ZENABLE==1 -> add a depth-tested additive preset in td5_platform_win32.c
+    (mirror TD5_PRESET_SHADOW's z_test=LEQUAL / z_write=0 but keep blend ONE/ONE),
+    switch td5_render_submit_translucent_world (td5_render.c:6657) to it, AND route
+    smoke depth through (vz-64)*DEPTH_NORMALIZE_INV so it ties with coplanar geometry
+    (project_vertex:498 currently omits the -64). Tire marks already do exactly this
+    via TD5_PRESET_SHADOW (td5_render.c:6669) — use them as the template and confirm
+    they don't regress.
+VERIFY: smoke is occluded by walls/cars in Moscow rear-wheel smoke; tire marks
+unaffected; no shadow flicker / no shadow-over-car.
+
+------------------------------------------------------------
+OUT OF SCOPE HERE (separate efforts)
+------------------------------------------------------------
+- Determinism residual: PC64 + -fwrapv closed only 8.6% at sim_tick=1; the rest is
+  dominated by countdown-init sequencing + matrix-builder float32-vs-80 rounding
+  (0x0042E1E0), a multi-session whole_state_diff effort, NOT a flag toggle. Concrete
+  next step: bump WholeStateMaxTicks/RaceTraceMaxSimTicks 8 -> ~130 across
+  Honolulu/Edinburgh/Moscow, capture --capture-original + --capture-port, --summary,
+  rank clusters by field-count x slot x tick, attack the matrix-builder cluster first.
+- Localized 24-bit PC clip path: ClipAndSubmitProjectedPolygon @0x004317F0 (FLDCW
+  0x0048DB90 enter / 0x0048DB94 exit) is un-wrapped in clip_and_submit_polygon
+  (td5_render.c:736) — sub-LSB clip-vertex drift. Measure (does it move the diff?)
+  before adding td5_fpu_enter_clip/exit_clip around :814-830.
+- HOST CLEANUP (user): confirm the appverif Full-Page-Heap hook on
+  original/TD5_d3d.exe is removed (pageheap_findings_2026-05-20.md reminder).
+
+------------------------------------------------------------
+Build per CLAUDE.md (absolute mingw paths; ddraw_wrapper rebuild also needs them).
+Use /fix. End commits with:
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+KEY FILES: td5_render.c (498, 824, 4391-4422, 4564-4597, 5740-5789, 6620-6695),
+td5_types.h (294-298), td5_platform_win32.c (presets), d3d11_backend.c (663-696),
+td5_asset.c (2218-2275), main.c (414), build_standalone.bat (34).
+================================================================================

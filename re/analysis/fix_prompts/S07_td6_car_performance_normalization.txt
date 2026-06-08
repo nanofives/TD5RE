@@ -1,0 +1,25 @@
+S07 — TD6 car performance normalization
+========================================
+
+Covers feedback: adjust handling / acceleration / max speed of TD6 cars to TD5's range
+Modules: re/tools/convert_td6_cars.py (asset prep) and/or runtime tuning; carparam path.
+Memory: project_td6_car_port_2026-06-02 (carparam.dat is byte-identical TD5<->TD6, drop-in).
+
+PROMPT
+------
+Normalize TD6 car performance to TD5's range. Right now every TD6 car feels much faster than the TD5 cars.
+
+Approach:
+1. Measure the TD5 fleet: identify the SLOWEST and FASTEST TD5 cars (by top speed and acceleration) to define the reference band.
+2. Sort the TD6 cars by performance (top speed / acceleration).
+3. Rescale each TD6 car's handling, acceleration, and max-speed limits so the TD6 set spans SIMILAR MARGINS to TD5 — i.e. the slowest TD6 car lands near the TD5 slowest, the fastest TD6 car near the TD5 fastest, and the rest distributed proportionally between.
+
+carparam.dat is byte-identical between TD5 and TD6 (drop-in), so adjust via the params/asset path (convert_td6_cars.py -> re/assets/cars/<code>/) and/or any runtime tuning hook. Keep relative ordering of the TD6 cars among themselves.
+
+Document the before/after numbers (per-car top speed + accel) in the session notes so the rescale is auditable.
+
+ACCEPTANCE
+----------
+- Slowest/fastest TD6 cars roughly match the slowest/fastest TD5 cars.
+- TD6 cars no longer feel categorically faster than TD5.
+- Relative ranking within TD6 preserved; before/after table recorded.

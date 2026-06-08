@@ -1,0 +1,19 @@
+S08 — Car-vs-car collision rework
+=================================
+
+Covers feedback: cars pass through each other · car-vs-car collisions too aggressive, hard recovery when hit from behind
+Modules: td5_physics.c (car-vs-car dynamics / broadphase).
+Memory: project_nway_splitscreen_multiplayer_2026-06-03 (g_traffic_slot_base, up to 16 racer slots / 22 actors).
+
+PROMPT
+------
+Rework car-vs-car collision. Two distinct problems:
+
+1. PASS-THROUGH: cars sometimes go straight through each other (missed inter-vehicle collision). Verify the car-vs-car collision/broadphase actually runs for ALL racer + traffic slots, including the expanded N-way set (>6 racers, up to g_traffic_slot_base/16 racer slots + traffic). Make sure no pair is skipped (e.g. loop bounds still hardcoded to 6/12 somewhere, or traffic-vs-racer pairs not tested).
+
+2. TOO AGGRESSIVE / HARD RECOVERY: collisions, especially being hit from behind, throw the player too hard and make recovery difficult. Soften the rear-impact response (impulse magnitude / spin imparted) so getting rear-ended doesn't cause an uncontrollable recovery, while keeping front/side contacts believable. Stay faithful where the original behavior is correct — this is a response-tuning + coverage fix.
+
+ACCEPTANCE
+----------
+- Two cars at speed collide instead of overlapping/passing through, across all slots incl. >6 players.
+- Being hit from behind nudges/destabilizes but is recoverable, not a spin-out.

@@ -1,0 +1,24 @@
+S04 — Car Selection screen polish
+=================================
+
+Covers feedback: fade-in 2x faster · lingering TD6 body on fade-out · gray out paint for paintless TD5 cars
+Modules: td5_frontend.c (SELECT CAR slide/transition), td5_render.c, TD6 car-port paint path.
+Memory: project_td6_car_port_2026-06-02 (grayscale base + modulate tint; carpic-less freeze).
+
+PROMPT
+------
+Car Selection screen polish.
+
+1. FADE-IN 2x FASTER: make the fade-IN animation that transitions INTO the car selection menu run 2x faster.
+
+2. LINGERING PREVIOUS CAR BODY: bug — when selecting a TD5 car, during the fade-OUT (the first animation) the body of the PREVIOUSLY selected TD6 car is still visible. Clear/hide the prior car mesh before or at the start of the fade-out so the old TD6 body doesn't bleed through.
+
+3. GRAY OUT PAINT SELECTORS: gray out / disable the paint-color selectors for TD5 cars that have NO paint variants. Only enable the picker for cars that actually support paint. TD6 cars use the grayscale-base + per-slot MODULATE tint path with the modal 4-arrow+mouse picker (td5_render_set_vehicle_tint, persisted to [CarSelection] TD6PaintColor) — keep that intact for cars that do have paint.
+
+Watch the known carpic-less freeze: a car with no carpic previously froze the slide transition's load-once guard — don't reintroduce that.
+
+ACCEPTANCE
+----------
+- Entering car-select fades in at double the old speed.
+- Switching from a TD6 car to a TD5 car shows no leftover TD6 body during the fade-out.
+- Paintless TD5 cars show a grayed/disabled paint selector; paintable cars keep the working picker.

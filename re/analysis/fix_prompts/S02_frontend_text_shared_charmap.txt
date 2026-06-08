@@ -1,0 +1,27 @@
+S02 — Frontend menu text, labels & shared character map
+========================================================
+
+Covers feedback: quick-race button text missing · remove circuit-laps from Game Options · high-scores 21-26 read as cups · shared character map idea
+Modules: td5_frontend.c (30-entry screen table), SNK strings (re/analysis/frontend_snk_strings.md).
+Note: the only open worktree is fix-1780453436 (TD6 track migration) — verify the quick-race text state on master before fixing.
+
+PROMPT
+------
+Frontend menu text/labels work.
+
+a) SHARED CHARACTER MAP: build (or confirm) ONE shared glyph atlas + a single draw-text helper so every menu screen — including the newer multiplayer/track screens and any future ones — renders text in one consistent format. Reuse the existing menu font rather than per-screen baked art. The user explicitly wants all menus to share the same letterforms. This becomes the infra that the other text items (and the multiplayer label in S05) consume.
+
+b) QUICK RACE BUTTON TEXT: the Quick Race screen is missing its button text. First check whether the open fix-1780453436 worktree or current master already fixed it; if not, render the missing label using the shared text helper.
+
+c) REMOVE CIRCUIT LAPS FROM GAME OPTIONS: remove the "circuit laps" setting from the Game Options screen (it is moving to the Quick Race menu + track selector). Make sure removing it does not break the options layout/row indexing or the value that fed downstream race setup — re-home or stub the value source.
+
+d) HIGH SCORES CUPS: on the High Scores screen, tracks 21-26 must be labeled/read as the CUPS (use the cup names), not raw track entries. Map indices 21-26 -> cup names.
+
+Reference the frontend screen-table model and frontend_snk_strings.md for string sources.
+
+ACCEPTANCE
+----------
+- A single text-draw path is used across menus; adding a new screen requires no new font art.
+- Quick Race button text is visible.
+- Game Options no longer shows circuit laps; layout is intact; race setup still gets a valid lap value.
+- High Scores entries 21-26 show cup names.

@@ -272,6 +272,11 @@ void        td5_asset_set_player_car_override(const char *code);
 int         td5_asset_player_override_active(void);
 const char *td5_asset_get_player_override_zip(void);
 
+/* Per-race-slot TD6 body-colour override (0xRRGGBB; -1 = use default behaviour).
+ * The simultaneous-multiplayer car select sets one per human slot so each
+ * player's ported-TD6 car is painted their chosen colour. [PORT 2026-06-07] */
+void        td5_asset_set_human_td6_color(int slot, int rgb);
+
 /**
  * Load a traffic vehicle model (model%d.prr + skin%d.png) from traffic.zip into
  * the given actor slot (expected range 6..11). Mirrors Phase 4 of

@@ -4191,7 +4191,7 @@ int td5_game_run_race_frame(void) {
             /* Chase camera runs AFTER physics — matches RunRaceFrame
              * (0x0042B580). Countdown still updates the camera so the
              * fly-in/idle-orbit animates while the grid counts down. */
-            td5_camera_update_chase_all();
+            td5_camera_solve_tick_all();
             /* Countdown decrement runs LATE in the sub-tick, matching
              * UpdateRaceCameraTransitionTimer at 0x42BA3A. On the sub-tick
              * where the timer reaches 0, this flips g_td5.paused 1→0; the
@@ -4398,7 +4398,7 @@ int td5_game_run_race_frame(void) {
          * matching UpdateChaseCamera near the tail of RunRaceFrame's
          * sim-tick loop (0x0042B580). See cache_angles call earlier
          * in this loop for the full rationale. */
-        td5_camera_update_chase_all();
+        td5_camera_solve_tick_all();
         td5_game_trace_stage("post_camera", ticks_this_frame);
 
         /* --- Per-actor wrap normalization ---
@@ -4450,6 +4450,22 @@ int td5_game_run_race_frame(void) {
             accumulate_speed_bonus(i);
             decay_ultimate_timer(i);
             sync_actor_race_metrics(i);
+        }
+
+        /* --- Per-non-paused-tick world animation advances ---
+         * [FPS-DECOUPLE 2026-06-07] Sky rotation, billboard strobe, tracked-
+         * marker phase and fog fade run once per non-paused sim tick — matching
+         * the original's "per non-paused tick" cadence (AdvanceGlobalSkyRotation
+         * @0x43D7C0). They were previously called from the per-viewport render
+         * loop, which advanced them per rendered frame *and* per viewport, so the
+         * sky spun ~2x too fast at 60 fps single-screen and worse at higher
+         * refresh / in split-screen. On the fixed 30 Hz tick they are frame-rate-
+         * and viewport-count-independent. */
+        if (!g_td5.paused) {
+            td5_render_advance_sky_rotation();
+            td5_render_advance_billboard_anims();
+            td5_vfx_advance_tracked_marker_phases();
+            td5_render_per_tick_fog_fade();
         }
 
         /* --- Consume one tick --- */
@@ -4519,8 +4535,9 @@ int td5_game_run_race_frame(void) {
         }
     }
 
-    /* ---- Per-tick fog fade ---- */
-    td5_render_per_tick_fog_fade();
+    /* ---- Per-tick fog fade now runs inside the fixed-step sim loop (see the
+     *      "Per-non-paused-tick world animation advances" block) so it advances
+     *      at 30 Hz instead of per rendered frame. ---- */
 
     /* ---- Split-screen steering balance ---- */
     td5_game_update_split_screen_balance();
@@ -4592,7 +4609,7 @@ int td5_game_run_race_frame(void) {
                 s_cam_debug_logged = 1;
             }
         }
-        td5_camera_update_transition_state(vp, vp);
+        td5_camera_apply_view(vp);
 
         /* Configure projection for this viewport */
         td5_render_configure_projection(s_viewports[vp].w, s_viewports[vp].h);
@@ -4600,12 +4617,10 @@ int td5_game_run_race_frame(void) {
         /* ---- Pass 0: SKY ---- */
         td5_render_set_race_pass(TD5_RACE_PASS_SKY);
         td5_render_set_fog(0);  /* fog off for sky */
-        td5_render_advance_sky_rotation();
-        td5_render_advance_billboard_anims();
-        /* Tier 1 port — advance tracked-actor marker strobe phases
-         * (orig AdvanceWorldBillboardAnimations @ 0x0043cdc0 stride
-         * 0x22c × 2 entries = first 2 sub-blocks of marker pool). */
-        td5_vfx_advance_tracked_marker_phases();
+        /* Sky rotation / billboard strobe / tracked-marker phase advance moved
+         * into the fixed-step sim loop (30 Hz, once per non-paused tick, once
+         * per frame regardless of viewport count) — see the
+         * "Per-non-paused-tick world animation advances" block above. */
 
         /* ---- Pass 1: OPAQUE (world + track + actors) ---- */
         td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);

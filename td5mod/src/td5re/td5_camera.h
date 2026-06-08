@@ -42,6 +42,18 @@ void td5_camera_tick(void);
 void td5_camera_cache_angles(void);
 void td5_camera_update_chase_all(void);
 
+/* [CAMERA REWRITE 2026-06-07] Unified FPS-independent pipeline.
+ *  - solve_tick_all: run once per fixed 30 Hz sim tick (replaces the in-loop
+ *    td5_camera_update_chase_all call) — solves every view's desired pose.
+ *  - apply_view: run once per viewport per render frame (replaces the in-render-
+ *    loop td5_camera_update_transition_state call) — interpolates + builds basis.
+ *  - snap_poses: re-seed prev=cur so the next frame doesn't glide across a
+ *    teleport (race start / preset change / resume-from-pause).
+ * Each transparently falls back to the legacy path when TD5RE_CAM_NEW=0. */
+void td5_camera_solve_tick_all(void);
+void td5_camera_apply_view(int view);
+void td5_camera_snap_poses(void);
+
 /* Per-render-frame camera position finalization. Writes g_camWorldPos[v]
    from current orbit state + vel*subTickFraction so the camera stays
    synchronized with the car-mesh render extrapolation every render frame

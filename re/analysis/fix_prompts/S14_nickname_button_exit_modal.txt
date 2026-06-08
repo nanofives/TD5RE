@@ -1,0 +1,27 @@
+S14 — "Enter nickname" modern button + EXIT broken / YES-NO spacing
+====================================================================
+
+Covers feedback: "enter your nickname" is not using the modern frontend button · EXIT button doesn't work · the YES/NO buttons after clicking EXIT are too close together
+Modules: td5_frontend.c
+Memory: project_s02_frontend_text_labels_2026-06-04 (is_selector gates the VectorUI proc-button path); project_joystick_multiplayer_input_2026-06-04
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Fix the nickname-entry styling and the EXIT confirm modal. Two parts:
+
+1. NICKNAME FIELD uses old plain styling, not the modern frontend button look. Screen_NetNickname td5_frontend.c ~9897 draws its text-input via frontend_render_text_input ~3607 (raw fe_draw_button_9slice + fe_draw_text), which bypasses the VectorUI/button-cache path that every modern button uses (the OK button at ~9894 already is modern). Restyle the input field + prompt so it matches the modern button visuals (same 9-slice/SDF look, same font metrics). Keep the text-capture behavior unchanged.
+
+2. EXIT IS BROKEN + YES/NO TOO CLOSE. The main-menu EXIT handler is td5_frontend.c ~9187-9190; the YES/NO confirm buttons are created in state 5 ~9195-9200 and handled in state 6 ~9208-9223. BUG: the handler compares the button label with strcmp against "Yes"/"No" (~9212/9216) but the actual SNK strings are "YES" and "NO!" (td5_snk_strings.h SNK_YesButTxt / SNK_NoxButTxt) — so neither branch ever matches and EXIT does nothing. Fix the match (compare against the real SNK labels, or better, dispatch by button index rather than a literal string). SPACING: YES is at (exit_x, y) width 96 and NO at (exit_x+100, y) — only a 4px gap. Widen the spacing and/or center the pair so they read as two distinct buttons and are easy to hit with pad/mouse.
+
+NOTE: source-port-only frontend. #2 is a concrete string-mismatch bug; verify the SNK label values before changing the comparison. The Ghidra step won't have a port-equivalent — document and proceed.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive or watch. If this fix can only be CONFIRMED by me playing (feel/visuals/audio/controller/multiplayer), finish ALL self-verification you can first (build + any headless/AutoRace probe), then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE, and for frontend checks use --AutoRace=0 --SkipIntro=1 --StartScreen=N with [Logging]Frontend=1 in THIS worktree's td5re.ini (CLI --LogFrontend is read too late). Never run the main-tree exe; never poll or kill by window name. (Nickname screen + the EXIT modal are both reachable from the main menu / net flow — use StartScreen to land near them.)
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Nickname field/prompt render in the modern button style; typing still works.
+- Clicking EXIT actually opens the confirm; YES quits, NO returns.
+- YES and NO are clearly separated, not touching.

@@ -1,0 +1,27 @@
+S23 — Unify car reflection (TD5 like TD6) + dynamic brake-light position on long cars
+=====================================================================================
+
+Covers feedback: make the TD5 cars have the same reflection logic as the TD6 cars · some TD6 cars are quite long so the brake lights end up inside the car — the brake-light position should be dynamic, at the outermost back of the car
+Modules: td5_render.c (reflection gate + brake-light hardpoints), td5_vfx.c (taillight offsets)
+Memory: project_hud_vectorui_2026-06-03; project_td6_car_port_2026-06-02
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Two car-appearance issues:
+
+1. REFLECTION PARITY. TD5 and TD6 cars currently take DIFFERENT reflection paths. The gate is td5_render.c ~2833: reflection (render_vehicle_reflection_overlay ~4553) runs only when s_proj_effect_mode==2 AND slot<MAX_RACER AND !s_vehicle_is_td6[slot] — so TD6 cars are excluded (the s_vehicle_is_td6 flag is set on mesh load ~384-390). The user wants the TD5 cars to use the SAME reflection logic as the TD6 cars, i.e. unify both onto one path that looks like the TD6 cars. Determine what the TD6 cars actually do for reflection (they currently skip the mode-2 overlay), decide the single unified look, and apply it to both — removing the divergent !s_vehicle_is_td6 gate. Confirm the intended target look with the trace/screenshots before committing (don't guess which path is "the TD6 look").
+
+2. BRAKE LIGHTS INSIDE LONG CARS. Brake-light placement uses fixed offsets: render hardpoints car_def+0x60/+0x68 td5_render.c ~5099, and a constant taillight offset table s_taillight_offsets[4][3] td5_vfx.c ~308 (±80 X/Y, Z=0). On long TD6 cars the fixed Z puts the lights inside the body. Make the rear-light position DYNAMIC — derive the rear Z from the car mesh bounding box (outermost rear extent) so the lights sit at the actual back of each car regardless of length.
+
+NOTE: subjective visual — DO NOT ask me to drive (see below). RE: car_def hardpoint offsets / mesh bounds. Light render is in-race: run the multi-track CSV sweep (it shouldn't affect physics, but confirm).
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to watch. Finish ALL self-verification first: build + headless frames/screenshots of a TD5 car and a LONG TD6 car (reflection look matches; brake lights sit at the rear) + the multi-track CSV sweep. Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- TD5 and TD6 cars share one reflection look (TD5 matches TD6).
+- Brake lights sit at the outermost rear on cars of any length (long TD6 cars included).
+- No physics regression; multi-track sweep clean.

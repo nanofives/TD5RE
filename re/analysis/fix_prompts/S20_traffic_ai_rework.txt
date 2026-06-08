@@ -1,0 +1,31 @@
+S20 — Traffic AI rework: situational awareness, random branches, wall avoidance, avoid slow lane
+================================================================================================
+
+Covers feedback: rework the traffic AI to be smarter — aware of surroundings, take random branches, avoid hitting walls, avoid driving on the slow road/lane
+Modules: td5_ai.c (traffic route/lane/speed), possibly td5_track.c (span boundary data for steering), td5_physics.c (traffic response)
+Memory: project_nway_splitscreen_multiplayer_2026-06-03 (g_traffic_slot_base); project_s06_catchup_ai_difficulty_accel_2026-06-04 (traffic cruise speed scaling)
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Make the background TRAFFIC smarter. Today traffic is largely scripted/reactive: cruise throttle td5_ai.c ~5518-5528 (from carparam top speed if AIAccelFromCar else constant 0x3C), route plan ~5577-5760 (reads ACTOR_SPAN_NORMALIZED at +0x82, junction/lane remap), spawn/route init ~4860-4950 (queue record span + sub_lane + route_selector 0=LEFT/1=RIGHT), td5_ai_update_traffic_route_plan ~6598. There is no active wall avoidance (wall hits are handled reactively in physics).
+
+Add (keep each behavior tunable / gated behind a flag so it can be disabled):
+- RANDOM BRANCHES: at junctions, let traffic pick a branch at random (use the LEFT/RIGHT route data already read in the route plan; vary by actor index since Math.random is unavailable in the harness but the game can use td5_msvc_rand).
+- WALL AVOIDANCE: bias the traffic's lateral target toward the lane centre / away from the span boundary using the boundary data in td5_track.c (the same rail/span-boundary info the collision overlay uses), so cars stop scraping walls.
+- AVOID THE SLOW LANE/ROAD: prefer the faster lane/road where the track exposes a speed/lane attribute; avoid parking traffic in a slow lane.
+- SITUATIONAL AWARENESS: basic look-ahead so traffic eases off / changes lane when another car is close ahead instead of ramming it.
+
+This is a behavior feature, not a faithful port (original traffic was simple) — be conservative, keep it readable and tunable, and make sure it doesn't destabilize racing AI or the N-way actor set (respect g_traffic_slot_base).
+
+NOTE: little direct RE to mirror here (the original traffic logic is simple) — document what the original does, then implement the improvement as a clearly-marked source-port enhancement; don't hard-stop on "no RE basis". Traffic/AI: the multi-track CSV sweep is MANDATORY.
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to watch traffic. Finish ALL self-verification first: build + the mandatory multi-track CSV sweep + a headless AutoRace where you can read traffic positions/lanes/branch choices and wall-contact counts from the trace (before/after). Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Traffic takes varied branches at junctions (not always the same one).
+- Traffic measurably scrapes walls less and tends toward lane centre / faster lane.
+- Traffic eases/avoids instead of ramming a car directly ahead; racing AI unaffected; multi-track sweep clean.

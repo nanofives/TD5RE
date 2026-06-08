@@ -1,0 +1,25 @@
+S06 — Catchup restore + AI difficulty & traffic acceleration logic
+==================================================================
+
+Covers feedback: difficulty too hard on easy + catchup too aggressive · AI/traffic accel & speed from car not static-by-difficulty · restore catchup logic
+Modules: td5_ai.c (rubber-banding / script VM), td5_physics.c (AI 2-axle + traffic dynamics).
+Memory: project_joystick_multiplayer_input_2026-06-04 (CATCHUP removed in the revamp).
+PAIRS WITH: S05 (which adds the catchup UI toggle and expects a setting here).
+
+PROMPT
+------
+AI difficulty, catchup, and traffic acceleration logic.
+
+1. RESTORE CATCHUP: restore the CATCHUP / rubber-banding logic that was removed in the 2026-06-04 revamp, exposed as a persisted setting so S05's multiplayer toggle can drive it. Keep it gated/off-by-default if that matches the UI default.
+
+2. TUNE DIFFICULTY: on Easy, the "not so fast" opponents are currently too hard — soften their pace/aggression. Also, catchup is too aggressive sometimes — reduce its strength/curve so it assists without yo-yo-ing the player.
+
+3. ACCEL/SPEED FROM THE CAR: change AI + traffic vehicle logic so acceleration and top-speed are derived from the car's OWN parameters (carparam.dat) instead of static values that depend only on the difficulty level. Difficulty should scale behavior, but the per-vehicle accel/max-speed should come from the car.
+
+Stay faithful to the original where it is faithful; this is a tuning + sourcing change, not a rewrite. Reference td5_ai.c rubber-banding and td5_physics.c AI/traffic dynamics.
+
+ACCEPTANCE
+----------
+- Catchup exists again and is controllable from the S05 toggle.
+- Easy is noticeably more forgiving; catchup no longer over-corrects.
+- Different cars used by AI/traffic accelerate and top out per their carparam, not a difficulty-only constant.

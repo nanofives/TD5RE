@@ -1,0 +1,27 @@
+S18 — Downslope physics blow-up + reverse-at-start kicks player off race (TD6)
+==============================================================================
+
+Covers feedback: physics go crazy on down slopes — the car goes vertical and instantly triggers recovery (may be related to the new tracks) · driving backwards on TD6 at the start of the race kicks me off the race entirely
+Modules: td5_physics.c (suspension/attitude/recovery), td5_track.c (span walker), td5_game.c (sector/OOB gate, grid init)
+Memory: project_td6_track_migration_2026-06-02 (synthesized routes, OverrideStartSpan); reference_td6_checkpoints_unwired_2026-06-04
+
+PROMPT (paste the block below, starting at /fix, into a fresh Claude Code instance)
+----------------------------------------------------------------------------------
+/fix Two TD6-slope-related physics bugs (likely a shared root in how synthesized TD6 routes feed terrain pitch / progress):
+
+1. DOWNSLOPE BLOW-UP. On down slopes the car snaps vertical and instantly enters recovery/respawn. Pointers: suspension response td5_physics_update_suspension_response ~td5_physics.c:5315 (orig UpdateVehicleSuspensionResponse @0x004057F0); attitude clamp td5_physics_clamp_attitude ~8390 (pitch limit ~0x3A4 ≈ ±82°); recovery entry ~8481-8486 (sets vehicle_mode=1). Investigate how the contact normal / pitch accumulates on a descent and why it spirals to the clamp limit — check whether TD6 synthesized route nodes give bad per-span pitch/normal data, and whether the clamp triggers recovery too eagerly. Original wheel-contact: RefreshVehicleWheelContactFrames @0x00403720.
+
+2. REVERSE-AT-START RETIREMENT (TD6). Reversing right at the start removes the player from the race. Pointers: track walker backward-boundary bit 0x04 td5_track.c ~2493-2494 and span decrement ~2525-2560; sector/progress gate td5_game.c ~5077-5157; grid/span init ~2316-2318 (accumulated span at +0x84). On TD6 the start span sits far into the ring, so moving backward wraps the normalized span negative and the OOB/retire path fires. Find the exact retire/removal trigger and make a small reverse at the start NOT retire the player (especially on TD6 synthesized routes) — clamp/relax the backward-wrap or the OOB condition at race start.
+
+NOTE: both have RE basis (suspension + track funcs) — research them. The user explicitly suspects the TD6 tracks, so test on a TD6 track (Rome/London/Pelton) AND a stock TD5 track to confirm no regression. Physics: the multi-track CSV sweep is MANDATORY (include a TD6 track if the harness allows).
+
+TESTING & LAUNCH RULES (I will be AWAY — do not wait on me, do not leave a game running):
+- Do NOT launch the game for a manual/interactive test that needs me to drive. Finish ALL self-verification first: build, the mandatory multi-track CSV sweep, and a headless AutoRace on a TD6 track (and check the trace for the vertical-flip/recovery event and for the reverse-at-start retirement). Then prep manual_drive.exe and STOP with clear instructions. Never block waiting for me.
+- Any game launch you DO need for AUTOMATED verification must follow the /fix worktree launch rules: run ONLY this worktree's exe, copy td5re.exe -> manual_drive.exe for any manual-style run, set a unique composed TD5RE_WINDOW_TITLE. Never run the main-tree exe; never poll or kill by window name.
+- Kill ONLY the process you launched in THIS worktree, by PID, path-guarded to *${SESSION_TAG}*. Never Stop-Process -Name td5re (it would kill other parallel sessions' games). Kill only when you are done testing this worktree.
+
+ACCEPTANCE
+----------
+- Driving down a slope (esp. on TD6 tracks) no longer flings the car vertical or instant-recovers.
+- Reversing at the start of a TD6 race does not retire/remove the player.
+- No regression on stock TD5 tracks; multi-track CSV sweep clean.

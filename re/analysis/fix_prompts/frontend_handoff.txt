@@ -1,0 +1,52 @@
+================================================================================
+FRONTEND HANDOFF — context for the dedicated frontend session (NOT a run-session)
+Paste below the line into the frontend session as background context.
+================================================================================
+
+CONTEXT HANDOFF — frontend uncertainties surfaced by a whole-project uncertainty
+audit (2026-06-01). The frontend is YOURS; this is FYI + a few cross-cutting items
+that touch td5_frontend.c. Primary register: re/analysis/frontend_assumption_register.md
+(80 entries: 49 RE-resolvable, 12 user-decision, 19 confirmed-OK, 2 contradictions).
+Key reads: frontend_diff_blindspot_postmortem.md and frontend_re_methodology_postmortem.md.
+
+TWO STRUCTURAL LESSONS (apply across all 30 screens):
+- CREATION != RENDERING: many elements are created by a button call but DRAWN by a
+  separate per-screen render dispatch (fe_draw_option_arrows switch ~td5_frontend.c:5784)
+  or the shared deferred flush. A diff keyed on the creation call is blind to whether
+  the element is actually wired to render. The Music Test missing arrows and the missing
+  album art are the SAME bug class. Re-audit every screen's elements against BOTH
+  (created) AND (rendered).
+- No "CONFIRMED @ addr" without pixels: that phrase only ever meant "the constant
+  exists in decomp," never "pixels match." Run a visual ground-truth diff (frame-dump
+  dev tool: env TD5RE_FRAMEDUMP=path), read Language.dll for labels (don't hardcode
+  English guesses), and don't diff against the already-wrong port as baseline.
+
+CONFIRMED OPEN BUGS:
+- S23 high-score highlight uses (i==0)?gold instead of s_score_insert_pos (tracked but
+  never read); orig bolds via SmallTextb, not gold color.
+- S9 spurious 4th "Create" button shifts OK/Back/ESC indices + a broken arrow-gate.
+- S15 SFX surround mode shows the Mono icon (port has only 2 mode TGAs).
+- S28 possibly-wrong startup redirect — VERIFY g_frontendScreenFnTable[0]==LocalizationInit
+  before trusting td5_frontend.c:10360.
+
+TRUST-RISK CONTENT (re-extract before relying on it): the SNK dumper truncated
+multi-line entries at the first NUL, so k_race_desc[12][13] (S6) and SNK_RaceTypeText
+were RECONSTRUCTED and "currently can't be trusted"; also SNK_Info_Values (S20,
+skipped), SNK_CarLongNames, and all _MT/_Ex hint strings. Re-run with a NUL-walking
+dumper. Plus ~80 hardcoded mixed-case English button labels vs SNK ALL-CAPS (systemic,
+register USER #1/#2).
+
+RESOLVED — do NOT re-open: C1 SNK_LangDLL[8] settled to 0x30 (port comment fixed);
+hint ticker correctly NOT drawn (table 0x00496374 write-only, zero reads in the retail
+D3D build); animation wall-clock pacing accepted as ARCH-DIV (hits correct end
+thresholds); S3 flag tile order faithful (M2DX flips bottom-origin TGAs).
+
+CROSS-SESSION ITEMS in td5_frontend.c flagged as YOURS:
+- SFX 3-mode + *10 volume (td5_frontend.c:7774-7796) is ALREADY FAITHFUL — the audio
+  session confirmed it; no action.
+- frontend_init_race_schedule RNG burn (td5_frontend.c:1661-1786) governs RACE-AI
+  determinism (not UI): the trace path is aligned (srand 0x1A2B3C4D, 3-rand/iter
+  @0x0040dac0), the live path uses timeGetTime() so parity only holds under the trace
+  seed. Coordinate with whoever owns AI determinism (session P2) before changing the
+  rand-call pattern.
+================================================================================

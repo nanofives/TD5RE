@@ -1,0 +1,23 @@
+S05 — Multiplayer options / lobby screen
+========================================
+
+Covers feedback: MULTIPLAYER top label · traffic/police toggle not working · readd catchup toggle + move split layout
+Modules: td5_frontend.c (multiplayer screen), spawn gating in td5_game.c / td5_ai.c.
+Memory: project_joystick_multiplayer_input_2026-06-04, project_nway_splitscreen_multiplayer_2026-06-03.
+DEPENDS ON: S02 (shared font for the label) and S06 (catchup logic to wire the toggle to).
+
+PROMPT
+------
+Multiplayer options/lobby screen changes.
+
+1. MULTIPLAYER LABEL: add a "MULTIPLAYER" label at the top of the multiplayer screen, rendered with the shared menu font/character map from S02 so it matches every other menu's format.
+
+2. FIX TRAFFIC & POLICE TOGGLES: there are Traffic and Police toggles on the multiplayer screen but they don't actually gate spawning in-race. Wire them to the spawn logic so OFF suppresses traffic / cops respectively. (Traffic is kept in ALL splits per the N-way memory — make the toggle the actual gate. Mind the dual slot-state tables: s_slot_state in td5_game.c for INPUT dispatch and g_slot_state in td5_ai.c init_race_actor_runtime for AI dispatch must stay consistent.)
+
+3. READD CATCHUP TOGGLE: re-add a CATCHUP toggle in the multiplayer options, positioned BELOW "Players" and ABOVE "Split layout" (move the Split-layout row DOWN to make room). CATCHUP was REMOVED in the 2026-06-04 input revamp, so the underlying logic is restored in S06 — here add the UI toggle + persistence (td5_save) and wire it to that restored catchup setting.
+
+ACCEPTANCE
+----------
+- "MULTIPLAYER" header shows at top in the shared font.
+- Turning Traffic off removes traffic cars in-race; turning Police off removes cops; on restores them.
+- Catchup toggle appears between Players and Split layout; Split layout moved down; setting persists and controls the S06 catchup behavior.

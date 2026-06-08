@@ -116,6 +116,32 @@ static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
 static uint32_t s_js_action_bind[TD5_PLAT_MAX_JS_SLOTS][TD5_JSBIND_ACTIONS];
 static int      s_js_action_set[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
 
+/* [PORT ENHANCEMENT 2026-06-07] Built-in DEFAULT per-action gamepad mapping.
+ * Applied to any joystick that has no explicit Control-Options per-action config
+ * (s_js_action_set==0) and no legacy Config.td5 9-slot remap, so a standard
+ * controller works out of the box without visiting the binding screen. Targets
+ * the Xbox-controller-via-DirectInput layout (an XInput pad surfaced through
+ * dinput8): left stick X = steer; the two triggers SHARE the Z axis (RT pulls Z
+ * below centre, LT pushes it above — a DirectInput limitation, so flooring both
+ * at once cancels); face/shoulder/stick buttons follow the canonical XInput
+ * order 0=A 1=B 2=X 3=Y 4=LB 5=RB 6=Back/View 7=Start/Menu 8=LS 9=RS. Entry
+ * order matches k_ctrl_action_labels / the k_action_bits decode below. If a
+ * given pad reports the triggers reversed or on a different axis, the
+ * Control-Options remap overrides this. */
+static const uint32_t k_default_js_action_bind[TD5_JSBIND_ACTIONS] = {
+    TD5_JSBIND_AXIS   | (0u << 1) | 1u,  /*  0 LEFT        left stick X (-)          */
+    TD5_JSBIND_AXIS   | (0u << 1) | 0u,  /*  1 RIGHT       left stick X (+)          */
+    TD5_JSBIND_AXIS   | (2u << 1) | 1u,  /*  2 ACCELERATE  R2 / RT  (Z below centre) */
+    TD5_JSBIND_AXIS   | (2u << 1) | 0u,  /*  3 BRAKE       L2 / LT  (Z above centre) */
+    TD5_JSBIND_BUTTON | 2u,              /*  4 HANDBRAKE   X                         */
+    TD5_JSBIND_BUTTON | 3u,              /*  5 HORN/SIREN  Y                         */
+    TD5_JSBIND_BUTTON | 5u,              /*  6 GEAR UP     R1 / RB                    */
+    TD5_JSBIND_BUTTON | 4u,              /*  7 GEAR DOWN   L1 / LB                    */
+    TD5_JSBIND_BUTTON | 6u,              /*  8 CHANGE VIEW Back / View (Select)       */
+    TD5_JSBIND_BUTTON | 9u,              /*  9 REAR VIEW   right stick click (R3)      */
+    TD5_JSBIND_BUTTON | 7u,              /* 10 PAUSE       Start / Menu               */
+};
+
 /* [S27 2026-06-05] Per-device persistent-loss detection (controller hot-unplug).
  * SOURCE-PORT FEATURE — the 1999 binary had no hot-plug handling: M2DX/DXInput
  * owned the devices and the game never queried device presence, so there is no
@@ -726,7 +752,9 @@ void td5_plat_present(int vsync)
     float fallback_rgba[4] = { 0.20f, 0.32f, 0.46f, 1.0f };
     int empty_scene_fallback = 0;
 
-    (void)vsync;
+    /* [S01] effective sync interval = caller's request AND the Display-options
+     * VSync toggle (g_backend.vsync). Loading screens pass vsync=0 to stay
+     * uncapped; race/frontend pass 1 and thus follow the option. */
 
     /* Dev frame-dump: when TD5RE_FRAMEDUMP=<path> is set, write the swap-chain
      * backbuffer to that PNG every 30 frames (overwrite). Captures buffer 0 at
@@ -780,7 +808,7 @@ void td5_plat_present(int vsync)
             &g_backend.swap_rtv, NULL);
         ID3D11DeviceContext_ClearRenderTargetView(g_backend.context,
             g_backend.swap_rtv, fallback_rgba);
-        IDXGISwapChain_Present(g_backend.swap_chain, vsync ? 1 : 0, 0);
+        IDXGISwapChain_Present(g_backend.swap_chain, (vsync && g_backend.vsync) ? 1 : 0, 0);
         empty_scene_fallback = 1;
     }
 
@@ -804,7 +832,7 @@ void td5_plat_present(int vsync)
             &g_backend.swap_rtv, NULL);
         Backend_DrawFullscreenQuad(g_backend.backbuffer->d3d11_srv);
         Backend_CaptureIfRequested();  /* photo-booth: grab the composited race frame */
-        IDXGISwapChain_Present(g_backend.swap_chain, vsync ? 1 : 0, 0);
+        IDXGISwapChain_Present(g_backend.swap_chain, (vsync && g_backend.vsync) ? 1 : 0, 0);
 
         if (g_backend.backbuffer->d3d11_rtv) {
             ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
@@ -818,7 +846,7 @@ void td5_plat_present(int vsync)
     if (s_primary && s_primary->vtbl) {
         s_primary->vtbl->Flip(s_primary, NULL, DDFLIP_WAIT);
     } else if (g_backend.swap_chain) {
-        IDXGISwapChain_Present(g_backend.swap_chain, vsync ? 1 : 0, 0);
+        IDXGISwapChain_Present(g_backend.swap_chain, (vsync && g_backend.vsync) ? 1 : 0, 0);
     }
 }
 
@@ -839,7 +867,7 @@ void td5_plat_present_texture_page(int page_index, int vsync)
 
     ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1, &g_backend.swap_rtv, NULL);
     Backend_DrawFullscreenQuad(srv);
-    IDXGISwapChain_Present(g_backend.swap_chain, vsync ? 1 : 0, 0);
+    IDXGISwapChain_Present(g_backend.swap_chain, (vsync && g_backend.vsync) ? 1 : 0, 0);
 
     if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
         ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
@@ -1751,12 +1779,28 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             uint32_t jbits = 0;
             long ax_x, ax_y;
 
+            /* Pick the per-action binding source. Explicit Control-Options
+             * config (s_js_action_set) always wins. Otherwise default to the
+             * built-in Xbox-style gamepad map (k_default_js_action_bind) — UNLESS
+             * a legacy Config.td5 9-slot mapping was explicitly remapped (axis
+             * swap or a real button value 2..10), which keeps the old raw-axis
+             * decode in the else-branch for imported wheels/pads. */
+            const uint32_t *ab;
             if (s_js_action_set[slot]) {
+                ab = s_js_action_bind[slot];
+            } else {
+                const int32_t *lb = s_joystick_bindings[slot];
+                int legacy_remap = (s_joystick_bound[slot] && lb[1] == 5 && lb[2] == 4);
+                for (int k = 0; !legacy_remap && k < 6; k++)
+                    if (lb[3 + k] >= 2 && lb[3 + k] <= 10) legacy_remap = 1;
+                ab = legacy_remap ? NULL : k_default_js_action_bind;
+            }
+
+            if (ab) {
                 /* [PORT ENHANCEMENT 2026-06] per-action bindings: each of the 10
                  * actions maps to a button or an axis/trigger direction. LEFT/RIGHT
                  * synthesize the analog steer axis, ACCELERATE/BRAKE the throttle
                  * axis (so a trigger drives them analog), the rest are digital. */
-                const uint32_t *ab = s_js_action_bind[slot];
                 int left  = js_action_mag(&js, ab[0]);
                 int right = js_action_mag(&js, ab[1]);
                 int accel = js_action_mag(&js, ab[2]);
@@ -1773,9 +1817,12 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
                     if (js_action_mag(&js, ab[4 + k]) >= 128) jbits |= k_action_bits[k];
                 if (js_action_mag(&js, ab[10]) >= 128) jbits |= TD5_INPUT_PAUSE;  /* PAUSE */
             } else {
-                /* Default mapping (unconfigured): X = steering, Y = throttle/brake;
-                 * physical buttons 2..7 → handbrake/horn/gear/camera/rear. The
-                 * legacy [1]/[2] axis-swap is honoured for 2-axis wheels. */
+                /* Legacy Config.td5 raw mapping (imported 2-axis wheels/pads that
+                 * explicitly remapped a button or axis): X = steering, Y =
+                 * throttle/brake; physical buttons 2..7 →
+                 * handbrake/horn/gear/camera/rear. The legacy [1]/[2] axis-swap is
+                 * honoured for 2-axis wheels. Fresh setups never reach here — they
+                 * use k_default_js_action_bind above. */
                 const int32_t *bind = s_joystick_bindings[slot];
                 int configured = s_joystick_bound[slot];
                 ax_x = js.lX; ax_y = js.lY;
@@ -2347,6 +2394,11 @@ void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int cou
     TD5_LOG_I(LOG_TAG, "Action bindings set: slot=%d", slot);
 }
 
+const uint32_t *td5_plat_input_default_action_bindings(void)
+{
+    return k_default_js_action_bind;
+}
+
 static int td5_plat_js_read(int device_slot, DIJOYSTATE2 *js)
 {
     HRESULT hr;
@@ -2552,6 +2604,43 @@ uint32_t td5_plat_input_joystick_nav(int device_slot)
     long cx, cy;
     const long T = 130;
     if (!td5_plat_js_read(device_slot, &js)) return 0;
+    cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
+    cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
+    if (cx < -T) db |= 1; if (cx > T) db |= 2;
+    if (cy < -T) db |= 4; if (cy > T) db |= 8;       /* stick up = lY low = UP */
+    if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+        DWORD deg = js.rgdwPOV[0] / 100;
+        if (deg > 270 || deg <  90) db |= 4;
+        if (deg >  90 && deg < 270) db |= 8;
+        if (deg > 180 && deg < 360) db |= 1;
+        if (deg >   0 && deg < 180) db |= 2;
+    }
+    if (js.rgbButtons[0] & 0x80) db |= 0x10;         /* A = confirm/select */
+    if (js.rgbButtons[1] & 0x80) db |= 0x20;         /* B = back/cancel    */
+    return db;
+}
+
+/* Navigation bitmask for ONE enumerated device via its shared non-exclusive scan
+ * handle (scan_dev). Used by the simultaneous-multiplayer car-select grid, where
+ * several pads are polled independently while the lobby scan handles are still
+ * alive (per-player EXCLUSIVE devices aren't bound until the picks are locked).
+ * Same bit encoding as td5_plat_input_frontend_nav. [PORT ENHANCEMENT 2026-06-07] */
+uint32_t td5_plat_input_device_nav(int enum_index)
+{
+    DIJOYSTATE2 js;
+    uint32_t db = 0;
+    long cx, cy;
+    const long T = 130;
+    LPDIRECTINPUTDEVICE8A dev;
+    if (enum_index <= 0 || enum_index >= s_device_count || enum_index >= 16) return 0;
+    dev = scan_dev(enum_index);
+    if (!dev) return 0;
+    memset(&js, 0, sizeof(js));
+    if (FAILED(IDirectInputDevice8_Poll(dev))) {
+        IDirectInputDevice8_Acquire(dev);
+        IDirectInputDevice8_Poll(dev);
+    }
+    if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) return 0;
     cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
     cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
     if (cx < -T) db |= 1; if (cx > T) db |= 2;
