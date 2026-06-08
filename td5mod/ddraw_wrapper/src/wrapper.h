@@ -167,6 +167,36 @@ typedef struct {
     int     dirty;
 } RenderStateCache;
 
+/* ========================================================================
+ * [Phase B / Stage 2 — multithreaded pane recording, 2026-06-08]
+ *
+ * WrapperRecCtx bundles ALL per-draw mutable wrapper state for ONE pane being
+ * recorded on a worker thread into its own DEFERRED context: the deferred
+ * context itself, a private dynamic VB/IB + ring offsets, private viewport/fog
+ * constant buffers (each Mapped per-draw, so they must not be shared across
+ * concurrently-recording panes), the render-state cache, and the bound SRV.
+ *
+ * A thread-local pointer g_wrapper_rec selects the active bundle: NULL on the
+ * main thread (the immediate-context path uses g_backend.* exactly as before —
+ * byte-identical serial fallback) and the pane's bundle on a worker thread.
+ * ======================================================================== */
+typedef struct WrapperRecCtx {
+    ID3D11DeviceContext      *dc;            /* deferred context */
+    ID3D11Buffer             *vb, *ib;       /* private dynamic buffers */
+    UINT                      vb_size, ib_size;
+    UINT                      vb_off, ib_off;/* ring offsets into vb/ib */
+    ID3D11Buffer             *cb_viewport;   /* private ViewportCB */
+    ID3D11Buffer             *cb_fog;        /* private FogCB */
+    RenderStateCache          state;         /* private state cache */
+    ID3D11ShaderResourceView *current_srv;   /* private bound texture */
+    int                       current_tex_has_alpha;
+    int                       alpha_blend_enabled;
+    int                       in_use;        /* allocated/active */
+} WrapperRecCtx;
+
+/* Thread-local active recording bundle. NULL => main thread / immediate path. */
+extern __thread WrapperRecCtx *g_wrapper_rec;
+
 /* Viewport constant buffer (updated when viewport changes) */
 typedef struct {
     float   viewportWidth;
@@ -837,5 +867,38 @@ void Backend_ApplyStateCache(void);  /* Bind D3D11 state objects from cache */
 void Backend_SelectPixelShader(void); /* Choose PS based on texblend + alpha + tex format */
 void Backend_UpdateFogCB(void);      /* Upload fog constant buffer */
 void Backend_UpdateViewportCB(float w, float h); /* Upload viewport constant buffer */
+
+/* [2026-06-08 streaming-ring] Append vertices (+ optional 16-bit indices) to the
+ * dynamic VB/IB ring with WRITE_NO_OVERWRITE (DISCARD only on wrap). On success
+ * returns 1 and writes the draw offsets: *out_base_vertex (BaseVertexLocation /
+ * StartVertexLocation) and *out_start_index (StartIndexLocation, only when
+ * indices!=NULL). Bind the buffers at byte offset 0 and pass these to the draw
+ * call. Returns 0 (skip the draw) if a single batch exceeds the buffer or Map
+ * fails. Shared by every draw path so the ring stays consistent. */
+int Backend_StreamUpload(const void *verts, UINT vert_count, UINT stride,
+                         const void *indices, UINT index_count,
+                         UINT *out_base_vertex, UINT *out_start_index);
+
+/* ========================================================================
+ * [Phase B / Stage 2] Multithreaded pane-record API (deferred contexts)
+ *
+ * Usage per frame when threaded panes are enabled:
+ *   Backend_RecPoolEnsure(n)            -- lazily create n deferred-context
+ *                                          bundles + per-pane buffers (once).
+ *   (on worker thread, per pane i:)
+ *     WrapperRecCtx *rc = Backend_RecBegin(i, vp_x, vp_y, vp_w, vp_h);
+ *     ... record draws (g_wrapper_rec == rc for this thread) ...
+ *     Backend_RecEnd(rc);               -- FinishCommandList into rc
+ *   (on main thread, in pane order:)
+ *     Backend_RecExecute(i);            -- ExecuteCommandList on the immediate ctx
+ *
+ * Returns NULL / no-op if deferred contexts are unavailable on this device, so
+ * the caller can fall back to the serial immediate path.
+ * ======================================================================== */
+int             Backend_RecPoolEnsure(int count);   /* 1 = ready, 0 = unavailable */
+WrapperRecCtx  *Backend_RecBegin(int index, int vp_x, int vp_y, int vp_w, int vp_h);
+void            Backend_RecEnd(WrapperRecCtx *rc);
+void            Backend_RecExecute(int index);
+void            Backend_RecPoolRelease(void);
 
 #endif /* TD5_D3D11_WRAPPER_H */
