@@ -3762,6 +3762,283 @@ static int smart_gather_blockers(int self_slot, int self_span, int span_count,
 }
 
 
+/* ========================================================================
+ * RAY-SENSING DECISION LAYER  ([GameOptions] SmartAIRays, default 1)
+ *
+ * A forward RAY FAN cast from each AI car's nose senses upcoming WALLS (span
+ * rails) and CARS, and a curvature scan of the route ahead drives a
+ * slow-in/fast-out racing line. The outputs feed the SAME levers the rest of
+ * SmartAI uses, so this stays an augmentation, not a rewrite:
+ *   - a target lateral fraction u in [0,1]  -> RS_TRACK_OFFSET_BIAS (lane brain)
+ *   - a corner speed cap (0..1 of throttle) -> ENCOUNTER_STEER / BRAKE (speed brain)
+ *
+ * All geometry is read through the existing public track helpers, in the SAME
+ * integer track-unit space smart_span_frame()/smart_actor_u() already use
+ * (actor world pos >> 8). Math is double precision + deterministic (no rng),
+ * matching the existing SmartAI discipline, so it is reusable by both racers
+ * and traffic and stays replay-stable. With SmartAIRays=0 none of this runs.
+ *
+ * Orientation is derived from geometry, never from a guessed angle sign: the
+ * forward direction is mid(span)->mid(span+1) and "+u" (toward the right rail)
+ * is the left->right rail axis, so left/right decisions are made by dotting a
+ * ray against that axis — no coordinate-handedness assumptions.
+ * ======================================================================== */
+
+#define SMART_RAY_COUNT     7        /* fan size: centre + 3 each side          */
+#define SMART_RAY_SPREAD    0.60     /* +-radians of the outermost rays (~34 deg)*/
+#define SMART_RAY_SPANS     8        /* spans of rail tested per ray            */
+#define SMART_RAY_FWD_LEAN  0.45     /* |lateral-dot| below this == "forward-ish" */
+#define SMART_CORNER_WIN    3        /* span window for the curvature measure    */
+#define SMART_CORNER_SHARP  0x2A0    /* heading delta over the window that == 1.0 */
+#define SMART_AVOID_GAIN    0.34     /* max road-fraction a wall/car push applies */
+#define SMART_RAY_MARGIN    0.06     /* hard backstop: never aim within 6% of rail*/
+
+typedef struct {
+    int    turn_dir;    /* dominant bend ahead: -1 = +u side, +1 = -u side, 0 straight */
+    double sharpness;   /* 0..1 curvature of that bend                           */
+    int    apex_d;      /* spans ahead to the bend apex                          */
+    double u_line;      /* racing-line lateral fraction (around u_base)          */
+    double speed_cap;   /* 0..1 throttle fraction for slow-in                    */
+} SmartCorner;
+
+typedef struct {
+    double avoid_u;      /* signed lateral push toward the clearer side (road frac) */
+    int    danger;       /* a wall/car sits close in the forward corridor        */
+    int    car_ahead;    /* slot of a car blocking ~dead ahead, else -1          */
+    double front_clear;  /* clearance straight ahead (track units, capped)       */
+    int    wall_imminent;/* a WALL is very close ahead -> force a brake          */
+    double span_len;     /* longitudinal length of the current span (track units)*/
+} SmartSense;
+
+static inline int smart_ang_signed(int a) { a &= 0xFFF; if (a > 0x800) a -= 0x1000; return a; }
+
+/* Mid-point (track units) of a span's left/right rail. */
+static int smart_span_mid(int span, int span_count, double *mx, double *mz) {
+    int lx, lz, rx, rz;
+    int s = span % span_count; if (s < 0) s += span_count;
+    if (!td5_track_get_span_route_frame(s, &lx, &lz, &rx, &rz)) return 0;
+    *mx = 0.5 * ((double)lx + (double)rx);
+    *mz = 0.5 * ((double)lz + (double)rz);
+    return 1;
+}
+
+/* Unit forward direction + span length from mid(span)->mid(span+1). */
+static int smart_forward_dir(int span, int span_count,
+                             double *fx, double *fz, double *len) {
+    double ax, az, bx, bz;
+    if (!smart_span_mid(span,     span_count, &ax, &az)) return 0;
+    if (!smart_span_mid(span + 1, span_count, &bx, &bz)) return 0;
+    double dx = bx - ax, dz = bz - az;
+    double d = sqrt(dx * dx + dz * dz);
+    if (d < 1.0) return 0;
+    *fx = dx / d; *fz = dz / d; *len = d;
+    return 1;
+}
+
+/* Ray O + t*Dir (Dir unit, t in [0,maxd]) vs segment A->B. Returns t, or -1. */
+static double smart_ray_seg(double ox, double oz, double dx, double dz, double maxd,
+                            double ax, double az, double bx, double bz) {
+    double ex = bx - ax, ez = bz - az;
+    double det = ex * dz - dx * ez;           /* [[Dx,-Ex],[Dz,-Ez]] determinant */
+    if (det > -1e-9 && det < 1e-9) return -1.0; /* parallel */
+    double wx = ax - ox, wz = az - oz;
+    double t = (-wx * ez + ex * wz) / det;    /* distance along the ray   */
+    double s = (dx * wz - dz * wx) / det;     /* parameter along segment  */
+    if (t < 0.0 || t > maxd) return -1.0;
+    if (s < 0.0 || s > 1.0)  return -1.0;
+    return t;
+}
+
+/* Ray vs circle (car obstacle). Returns nearest forward t, or -1. */
+static double smart_ray_circle(double ox, double oz, double dx, double dz, double maxd,
+                               double cx, double cz, double r) {
+    double fx = ox - cx, fz = oz - cz;
+    double b = fx * dx + fz * dz;             /* D is unit => a == 1       */
+    double c = fx * fx + fz * fz - r * r;
+    double disc = b * b - c;
+    if (disc < 0.0) return -1.0;
+    double sq = sqrt(disc);
+    double t = -b - sq;
+    if (t < 0.0) t = -b + sq;                 /* origin inside the circle  */
+    if (t < 0.0 || t > maxd) return -1.0;
+    return t;
+}
+
+/* Curvature scan + outside-in-outside racing line + slow-in speed cap. */
+static void smart_corner_eval(int slot, int span_raw, int span_count,
+                              double u_base, float skill, SmartCorner *out) {
+    out->turn_dir = 0; out->sharpness = 0.0; out->apex_d = 0;
+    out->u_line = u_base; out->speed_cap = 1.0;
+    (void)slot;
+    if (span_count <= 0) return;
+
+    int D = 4 + (int)(skill * 8.0f);          /* look 4..12 spans ahead */
+    int best_turn = 0, apex_d = 0;
+    for (int d = 0; d <= D; d++) {
+        int s0 = ((span_raw + d) % span_count + span_count) % span_count;
+        int s1 = ((span_raw + d + SMART_CORNER_WIN) % span_count + span_count) % span_count;
+        int turn = smart_ang_signed(td5_track_get_primary_route_heading(s1)
+                                    - td5_track_get_primary_route_heading(s0));
+        int at = turn < 0 ? -turn : turn;
+        int ab = best_turn < 0 ? -best_turn : best_turn;
+        if (at > ab) { best_turn = turn; apex_d = d; }
+    }
+    int mag = best_turn < 0 ? -best_turn : best_turn;
+    double sharp = (double)mag / (double)SMART_CORNER_SHARP;
+    if (sharp > 1.0) sharp = 1.0;
+    out->sharpness = sharp;
+    out->apex_d    = apex_d;
+
+    /* Slow-in cap: tighter bend -> lower cap; higher skill carries more speed
+     * (brakes later, loses less). Floor keeps cars from crawling. Computed even
+     * when the racing-line geometry is unusable, so braking is independent of it. */
+    double max_loss = 0.50 - (double)skill * 0.22;   /* ~0.47 (rookie) .. 0.29 (ace) */
+    double cap = 1.0 - max_loss * sharp;
+    if (cap < 0.45) cap = 0.45;
+    out->speed_cap = cap;
+
+    if (sharp <= 0.02) return;                /* effectively straight -> no line shift */
+
+    /* Find the INSIDE of the bend GEOMETRICALLY (no heading-sign convention
+     * guess): the forward direction rotates toward the inside as the car rounds
+     * the corner, so (F_apex - F_here) points into the turn. Dotting that against
+     * the +u (left->right) rail axis tells whether the inside is the +u or -u
+     * side. This is self-correcting regardless of coordinate handedness; the wall
+     * rays are a further backstop. */
+    double f0x, f0z, l0, f1x, f1z, l1, ex, ez, w, slx, slz;
+    int inside_sign = 0;
+    if (smart_forward_dir(span_raw, span_count, &f0x, &f0z, &l0) &&
+        smart_forward_dir(span_raw + apex_d, span_count, &f1x, &f1z, &l1) &&
+        smart_span_frame(((span_raw % span_count) + span_count) % span_count,
+                         &slx, &slz, &ex, &ez, &w)) {
+        double cx = f1x - f0x, cz = f1z - f0z;       /* centripetal-ish vector */
+        double dot = cx * ex + cz * ez;              /* >0 -> inside is +u side */
+        inside_sign = (dot > 0.0) ? 1 : -1;
+    }
+    out->turn_dir = inside_sign;                     /* +1 = inside on the +u side */
+    if (inside_sign == 0) return;
+
+    double appro = (D > 0) ? (1.0 - (double)apex_d / (double)D) : 0.0; /* 0 far..1 near apex */
+    if (appro < 0.0) appro = 0.0;
+    if (appro > 1.0) appro = 1.0;
+    double inside  = (double)inside_sign;        /* apex side  */
+    double outside = (double)(-inside_sign);     /* entry/exit side */
+    const double ENTRY = 0.30, APEX = 0.34;
+    double off = (outside * ENTRY * (1.0 - appro) + inside * APEX * appro) * sharp;
+    double u = u_base + off;
+    if (u < SMART_RAY_MARGIN)       u = SMART_RAY_MARGIN;
+    if (u > 1.0 - SMART_RAY_MARGIN) u = 1.0 - SMART_RAY_MARGIN;
+    out->u_line = u;
+}
+
+/* Cast the ray fan and reduce it to steering + speed signals for one actor. */
+static void smart_sense(int slot, int span_raw, int span_count,
+                        float skill, SmartSense *out) {
+    out->avoid_u = 0.0; out->danger = 0; out->car_ahead = -1;
+    out->front_clear = 1e9; out->wall_imminent = 0; out->span_len = 0.0;
+    if (span_count <= 0) return;
+
+    char *self = actor_ptr(slot);
+    if (!self) return;
+    double ox = (double)(ACTOR_I32(self, ACTOR_WORLD_POS_X) >> 8);
+    double oz = (double)(ACTOR_I32(self, ACTOR_WORLD_POS_Z) >> 8);
+
+    double fx, fz, span_len;
+    if (!smart_forward_dir(span_raw, span_count, &fx, &fz, &span_len)) return;
+    out->span_len = span_len;
+
+    /* +u (right-rail) lateral axis at the current span. */
+    double slx, slz, sex, sez, swidth;
+    if (!smart_span_frame(((span_raw % span_count) + span_count) % span_count,
+                          &slx, &slz, &sex, &sez, &swidth)) return;
+
+    /* Build the rail polylines once. */
+    double Lx[SMART_RAY_SPANS + 2], Lz[SMART_RAY_SPANS + 2];
+    double Rx[SMART_RAY_SPANS + 2], Rz[SMART_RAY_SPANS + 2];
+    int npts = 0;
+    for (int d = 0; d <= SMART_RAY_SPANS; d++) {
+        int s = ((span_raw + d) % span_count + span_count) % span_count;
+        int lx, lz, rx, rz;
+        if (!td5_track_get_span_route_frame(s, &lx, &lz, &rx, &rz)) break;
+        Lx[npts] = lx; Lz[npts] = lz; Rx[npts] = rx; Rz[npts] = rz; npts++;
+    }
+    if (npts < 2) return;
+
+    /* Gather nearby cars (world pos) within the ray span window. */
+    double Cx[TD5_MAX_TOTAL_ACTORS], Cz[TD5_MAX_TOTAL_ACTORS];
+    int    Cslot[TD5_MAX_TOTAL_ACTORS], ncar = 0;
+    int lanes = td5_track_get_span_lane_count(((span_raw % span_count) + span_count) % span_count);
+    if (lanes < 1) lanes = 1;
+    double car_r = 0.35 * swidth / (double)lanes;
+    if (car_r < 40.0)  car_r = 40.0;
+    if (car_r > 220.0) car_r = 220.0;
+    int n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (int i = 0; i < n && ncar < TD5_MAX_TOTAL_ACTORS; i++) {
+        if (i == slot) continue;
+        if (i < g_traffic_slot_base && g_slot_state[i] == 2) continue;  /* finished */
+        char *a = actor_ptr(i);
+        if (!a) continue;
+        int gap = smart_span_gap(span_raw, (int)ACTOR_I16(a, ACTOR_SPAN_RAW), span_count);
+        if (gap < -1 || gap > SMART_RAY_SPANS) continue;
+        Cx[ncar]    = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_X) >> 8);
+        Cz[ncar]    = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_Z) >> 8);
+        Cslot[ncar] = i;
+        ncar++;
+    }
+
+    double maxd = span_len * (double)SMART_RAY_SPANS;
+    if (maxd < 400.0) maxd = 400.0;
+
+    double open_hi = 0.0, open_lo = 0.0;   /* clearance weighted toward +u / -u */
+    double fwd_min = maxd; int fwd_is_car = 0, fwd_slot = -1;
+    double step = (SMART_RAY_COUNT > 1)
+                  ? (2.0 * SMART_RAY_SPREAD / (double)(SMART_RAY_COUNT - 1)) : 0.0;
+
+    for (int r = 0; r < SMART_RAY_COUNT; r++) {
+        double ang = -SMART_RAY_SPREAD + step * (double)r;
+        double ca = cos(ang), sa = sin(ang);
+        double dx = fx * ca - fz * sa;
+        double dz = fx * sa + fz * ca;
+
+        double best = maxd; int is_car = 0; int hit_slot = -1;
+        for (int i = 0; i + 1 < npts; i++) {
+            double t = smart_ray_seg(ox, oz, dx, dz, best, Lx[i], Lz[i], Lx[i+1], Lz[i+1]);
+            if (t >= 0.0 && t < best) { best = t; is_car = 0; hit_slot = -1; }
+            t = smart_ray_seg(ox, oz, dx, dz, best, Rx[i], Rz[i], Rx[i+1], Rz[i+1]);
+            if (t >= 0.0 && t < best) { best = t; is_car = 0; hit_slot = -1; }
+        }
+        for (int k = 0; k < ncar; k++) {
+            double t = smart_ray_circle(ox, oz, dx, dz, best, Cx[k], Cz[k], car_r);
+            if (t >= 0.0 && t < best) { best = t; is_car = 1; hit_slot = Cslot[k]; }
+        }
+
+        double lean = dx * sex + dz * sez;        /* >0 leans toward +u (right rail) */
+        if (lean > 0.0) open_hi += best * lean;
+        else            open_lo += best * (-lean);
+
+        if (lean < SMART_RAY_FWD_LEAN && lean > -SMART_RAY_FWD_LEAN && best < fwd_min) {
+            fwd_min = best; fwd_is_car = is_car; fwd_slot = hit_slot;
+        }
+    }
+
+    out->front_clear = fwd_min;
+    /* Steer away from danger toward the more open side. A clear road (large
+     * fwd_min) yields ~0 push, so the car holds its racing line. */
+    double danger_dist = span_len * 1.8;
+    if (danger_dist < 200.0) danger_dist = 200.0;
+    if (fwd_min < danger_dist) {
+        double strength = (danger_dist - fwd_min) / danger_dist;   /* 0..1 */
+        if (strength > 1.0) strength = 1.0;
+        double sign = (open_hi >= open_lo) ? 1.0 : -1.0;           /* +1 -> toward +u */
+        out->avoid_u = sign * SMART_AVOID_GAIN * strength;
+        out->danger  = 1;
+    }
+    if (fwd_is_car && fwd_min < span_len * 2.5) out->car_ahead = fwd_slot;
+    if (!fwd_is_car && fwd_min < span_len * 1.1) out->wall_imminent = 1;
+    (void)skill;
+}
+
 /* Strategic branch: scan ahead on the raw strip records for a junction span
  * (type 8 fwd / 11 bwd). At a fork the "branch" route is taken from the HIGH
  * sub-lanes and "main" from the LOW sub-lanes (see td5_track.c junction logic),
@@ -3902,7 +4179,33 @@ static void td5_ai_smart_lane_bias(int slot) {
     const double WALL_MARGIN = 0.11;        /* never aim within 11% of a rail */
     double target_u = u_base;
 
-    if (!on_branch) {
+    /* RAY BRAIN (SmartAIRays): corner racing line + ray wall/car avoidance,
+     * feeding the same target_u the rate-limit tail consumes. Replaces the
+     * discrete-lane scorer + hard wall clamp; with rays off the old path runs. */
+    SmartCorner co; SmartSense se;
+    int rays_on = g_td5.ini.smart_ai_rays;
+    if (rays_on) {
+        smart_corner_eval(slot, span_raw, span_count, u_base, skill, &co);
+        smart_sense(slot, span_raw, span_count, skill, &se);
+        double bpull = g_smart_branch_pull[slot];
+        if (on_branch) {
+            target_u = u_base + se.avoid_u;                /* hold authored branch line + avoid */
+        } else if (bpull != 0.0) {
+            double anchor = (bpull < 0.0) ? 0.28 : 0.72;   /* fork placement dominates near forks */
+            double w = (bpull < 0.0) ? -bpull : bpull; if (w > 1.0) w = 1.0;
+            target_u = u_base * (1.0 - w) + anchor * w + se.avoid_u;
+        } else {
+            target_u = co.u_line + se.avoid_u;             /* racing line + ray avoidance */
+        }
+        if ((g_ai_frame_counter % 60u) == 0u)
+            TD5_LOG_I(LOG_TAG, "smart_ray: slot=%d skill=%.2f span=%d u_base=%.2f "
+                      "u_line=%.2f avoid=%.2f tgt=%.2f turn=%d sharp=%.2f apex=%d "
+                      "cap=%.2f front=%.0f dgr=%d car=%d%s",
+                      slot, (double)skill, span, u_base, co.u_line, se.avoid_u,
+                      target_u, co.turn_dir, co.sharpness, co.apex_d, co.speed_cap,
+                      se.front_clear, se.danger, se.car_ahead,
+                      on_branch ? " [branch]" : "");
+    } else if (!on_branch) {
         double pull = g_smart_branch_pull[slot];
         if (pull != 0.0) {
             /* BRANCH dominates near a fork: firmly blend the target toward the
@@ -3991,8 +4294,9 @@ static void td5_ai_smart_lane_bias(int slot) {
     /* (4) WALL: never aim within WALL_MARGIN of a rail — the single guard that
      * keeps the car off the boundary whether the authored line hugs a rail, a
      * surface nudge went wide, or we're threading a tight branch. */
-    if (target_u < WALL_MARGIN)       target_u = WALL_MARGIN;
-    if (target_u > 1.0 - WALL_MARGIN) target_u = 1.0 - WALL_MARGIN;
+    double clamp_margin = rays_on ? SMART_RAY_MARGIN : WALL_MARGIN;
+    if (target_u < clamp_margin)       target_u = clamp_margin;
+    if (target_u > 1.0 - clamp_margin) target_u = 1.0 - clamp_margin;
 
     double best_u = target_u;
 
@@ -4062,6 +4366,40 @@ static void td5_ai_smart_speed(int slot) {
             int v = (int)((double)thr * f);
             if (v > 0x7FFF) v = 0x7FFF;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)v;
+        }
+    }
+
+    /* RAY BRAIN corner governor + wall safety. Only ever LOWERS the command
+     * (fast-out is automatic: no bend ahead -> cap 1.0 -> no change), so the
+     * faithful throttle ceiling is preserved. */
+    if (g_td5.ini.smart_ai_rays) {
+        SmartCorner co; SmartSense se;
+        smart_corner_eval(slot, span_raw, span_count, 0.5, skill, &co);
+        smart_sense(slot, span_raw, span_count, skill, &se);
+        int16_t thr0 = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+        int32_t self_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+
+        if (se.wall_imminent && self_speed > 0x4000) {
+            /* aimed at a wall while moving -> brake to stay off the boundary */
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            ACTOR_U8(actor, ACTOR_THROTTLE_STATE)   = 1;
+            if ((g_ai_frame_counter % 60u) == 0u)
+                TD5_LOG_I(LOG_TAG, "smart_ray_wall: slot=%d brake front=%.0f v=%d",
+                          slot, se.front_clear, (int)self_speed);
+        } else if (co.speed_cap < 0.999 && thr0 > 0 &&
+                   co.apex_d <= (4 + (int)(skill * 6.0f))) {
+            /* slow-in: ease toward the corner cap before the apex */
+            int v = (int)((double)thr0 * co.speed_cap);
+            if (v < 0) v = 0;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)v;
+            if (co.speed_cap < 0.55 && self_speed > 0xA000 && co.apex_d <= 2) {
+                ACTOR_U8(actor, ACTOR_BRAKE_FLAG)     = 1;
+                ACTOR_U8(actor, ACTOR_THROTTLE_STATE) = 1;
+            }
+            if ((g_ai_frame_counter % 60u) == 0u)
+                TD5_LOG_I(LOG_TAG, "smart_ray_corner: slot=%d cap=%.2f apex=%d sharp=%.2f thr %d->%d",
+                          slot, co.speed_cap, co.apex_d, co.sharpness, (int)thr0, v);
         }
     }
 
@@ -6406,6 +6744,32 @@ void td5_ai_update_traffic_route_plan(int slot) {
     }
     ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
     ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+
+    /* RAY BRAIN for traffic: slow into bends and brake if aimed at a wall, using
+     * the same forward ray sensor as the racers. Floors keep traffic rolling;
+     * lane selection still comes from the S20 / smart_traffic_lane chooser. */
+    if (td5_ai_smart_active() && g_td5.ini.smart_ai_rays) {
+        int tsc = td5_track_get_span_count();
+        if (tsc > 0) {
+            int   tspan = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+            float tsk   = td5_ai_smart_skill(slot);
+            SmartCorner tco; smart_corner_eval(slot, tspan, tsc, 0.5, tsk, &tco);
+            if (tco.speed_cap < 0.999) {
+                int cc = (int)((double)cruise * tco.speed_cap);
+                if (cc < 0x14) cc = 0x14;     /* keep traffic moving */
+                cruise = cc;
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
+            }
+            SmartSense tse; smart_sense(slot, tspan, tsc, tsk, &tse);
+            if (tse.wall_imminent) {
+                ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
+                ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+                if ((g_ai_frame_counter % 90u) == 0u)
+                    TD5_LOG_I(LOG_TAG, "smart_ray_traffic_wall: slot=%d span=%d front=%.0f",
+                              slot, tspan, tse.front_clear);
+            }
+        }
+    }
 
     /* --- Stage 5: Compute target span and deviation
      * [CONFIRMED @ 0x00435F0A-0x004364CA]
