@@ -31,6 +31,7 @@
 /* TD5RE headers */
 #include "td5re.h"
 #include "td5_platform.h"
+#include "td5_jobs.h"
 #include "td5_net.h"
 #include "td5_save.h"
 #include "td5_profile.h"
@@ -355,6 +356,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "DefaultOpponents",     &g_td5.ini.default_opponents },
         { "CircuitMinimap",       &g_td5.ini.circuit_minimap },
         { "DefaultPlayers",       &g_td5.ini.default_players },
+        { "SpectateScreens",      &g_td5.ini.spectate_screens },
         { "OverrideTrackZip",     &g_td5.ini.override_track_zip },
         { "OverrideStartSpan",    &g_td5.ini.override_start_span },
         { "SkipIntro",            &g_td5.ini.skip_intro },
@@ -635,6 +637,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Initialize multi-file logging (creates log/ dir, rotates old sessions) */
     td5_plat_log_init();
 
+    /* [F1 multithreading 2026-06-08] Bring up the fork/join worker pool early,
+     * before any asset loading (Phase A) or render submission (Phase B) can use
+     * it. Auto-sizes to (logical CPUs - 2). Torn down in Step 7 shutdown. */
+    td5_jobs_init(0);
+
     /* Load INI before anything else */
     td5_load_ini();
     width    = td5_ini_int("Display", "Width", 0);
@@ -739,6 +746,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.default_opponents = td5_ini_int("Game", "DefaultOpponents", -1); /* -1 = full grid */
     g_td5.ini.circuit_minimap   = td5_ini_int("Game", "CircuitMinimap", 1);    /* 1 = minimap on circuit tracks too */
     g_td5.ini.default_players   = td5_ini_int("Game", "DefaultPlayers", -1);   /* -1 = schedule default; >=2 = N-way split */
+    g_td5.ini.spectate_screens  = td5_ini_int("Game", "SpectateScreens", 0);   /* 0 = off; N = N AI cars in their own pane (dev profiling) */
     g_td5.ini.override_track_zip = td5_ini_int("Game", "OverrideTrackZip", 0);  /* 0 = faithful; >0 = TD6 level NNN */
     g_td5.ini.override_start_span = td5_ini_int("Game", "OverrideStartSpan", 0); /* TD6 grid start span; 0 = auto */
     g_td5.ini.skip_intro        = td5_ini_int("Game", "SkipIntro", 1);
@@ -974,6 +982,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.start_screen           = -1;  /* no jump-to-screen test harness   */
     g_td5.ini.default_opponents      = -1;  /* full grid (no AutoRace override)  */
     g_td5.ini.default_players        = -1;  /* schedule default (no N-way override) */
+    g_td5.ini.spectate_screens       = 0;   /* no AI spectator split-screens     */
     g_td5.ini.player_is_ai           = 0;   /* the human drives                 */
     g_td5.ini.debug_overlay          = 0;   /* no HUD debug text overlay        */
     g_td5.ini.debug_collisions       = 0;   /* no collision wireframe overlay   */
@@ -1305,6 +1314,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
              * td5re_frame() renders it — td5_game_update_frame_timing() only runs
              * in the race, so the frontend would otherwise read a stale 0. */
             td5_game_update_fps_overlay();
+            /* Mute all audio while the window isn't focused (alt-tabbed away),
+             * restore on refocus. Runs in every game state. */
+            td5_plat_audio_update_focus_mute();
             uint32_t t0 = td5_plat_time_ms();
             td5re_frame();
             uint32_t t1 = td5_plat_time_ms();
@@ -1354,6 +1366,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* ---------------------------------------------------------------
      * Step 7: Shutdown
      * --------------------------------------------------------------- */
+    /* Join the worker pool before any subsystem it may have touched (render,
+     * assets) is torn down, so no in-flight job references freed state. */
+    td5_jobs_shutdown();
     td5re_shutdown();
     Backend_Shutdown();
     timeEndPeriod(1);
