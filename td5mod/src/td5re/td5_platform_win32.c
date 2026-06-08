@@ -4651,6 +4651,30 @@ void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom)
     ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &rc);
 }
 
+/* [Phase B Stage 2b] Thin platform wrappers over the wrapper's deferred-context
+ * pane-record API, so td5_game.c can drive threaded pane recording without
+ * pulling D3D11 types in. The opaque void* carries the WrapperRecCtx handle. */
+int td5_plat_render_pane_pool_ensure(int count)
+{
+    return Backend_RecPoolEnsure(count);
+}
+void *td5_plat_render_pane_begin(int index, int x, int y, int w, int h)
+{
+    return (void *)Backend_RecBegin(index, x, y, w, h);
+}
+void td5_plat_render_pane_end(void *rc)
+{
+    Backend_RecEnd((WrapperRecCtx *)rc);
+}
+void td5_plat_render_pane_execute(int index)
+{
+    Backend_RecExecute(index);
+}
+void td5_plat_render_restore_main_rt(void)
+{
+    Backend_RestoreMainRenderTarget();
+}
+
 void td5_plat_render_clear(uint32_t color)
 {
     float rgba[4];

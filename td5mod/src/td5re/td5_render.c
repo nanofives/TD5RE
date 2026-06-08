@@ -419,6 +419,34 @@ static __thread RenderScratch *g_rs = &g_rs_default;
 #define s_in_sky_draw               (g_rs->in_sky_draw)
 #define s_in_reflection_overlay     (g_rs->in_reflection_overlay)
 
+/* [Phase B Stage 2b] Per-pane RenderScratch pool. Workers bind their pane's
+ * instance (this thread's g_rs); the serial/main path uses g_rs_default. The
+ * pool is allocated once, lazily, and never freed (bounded, reused each race). */
+static RenderScratch *s_rs_pool[TD5_MAX_VIEWPORTS];
+
+int td5_render_scratch_pool_ensure(int count)
+{
+    if (count > TD5_MAX_VIEWPORTS) count = TD5_MAX_VIEWPORTS;
+    for (int i = 0; i < count; i++) {
+        if (!s_rs_pool[i]) {
+            s_rs_pool[i] = (RenderScratch *)calloc(1, sizeof(RenderScratch));
+            if (!s_rs_pool[i]) return 0;
+        }
+    }
+    return 1;
+}
+
+void td5_render_scratch_bind(int index)
+{
+    g_rs = (index >= 0 && index < TD5_MAX_VIEWPORTS && s_rs_pool[index])
+           ? s_rs_pool[index] : &g_rs_default;
+}
+
+void td5_render_scratch_unbind(void)
+{
+    g_rs = &g_rs_default;
+}
+
 /* ========================================================================
  * Sky Rotation (12-bit fixed angle, +0x400 per tick)
  *

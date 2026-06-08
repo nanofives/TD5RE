@@ -419,6 +419,12 @@ void td5_plat_audio_set_master_volume(int volume);
  *  audio while the in-race pause menu is up. Does not affect CD/music. */
 void td5_plat_audio_set_muted(int muted);
 
+/** Mute/unmute ALL DirectSound output (per-voice SFX + the ambient stream)
+ *  based on whether the game window is the foreground window. Call once per
+ *  frame from the main loop. Independent of (ORs with) td5_plat_audio_set_muted
+ *  so the focus mute and the pause-menu mute never clobber each other. */
+void td5_plat_audio_update_focus_mute(void);
+
 /** Stop and release every active SFX voice (not the primary/keepalive buffers).
  *  Used at race teardown so voice counts return to baseline between races and no
  *  looping voice survives into the menus or the next race. */
@@ -548,6 +554,18 @@ void td5_plat_render_set_viewport(int x, int y, int width, int height);
  *  disables clipping. Used by the HUD/minimap render path to trim
  *  translucent 2D draws to a sub-rect. */
 void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom);
+
+/* [Phase B Stage 2b] Threaded pane recording (deferred contexts). pool_ensure
+ * lazily creates `count` deferred-context bundles (1=ready, 0=unavailable ->
+ * caller falls back to serial). pane_begin returns an opaque handle and routes
+ * THIS thread's draws into bundle `index`; pane_end finishes its command list;
+ * pane_execute replays bundle `index` onto the immediate context (call in pane
+ * order on the main thread); restore_main_rt re-binds the swap RTV afterward. */
+int   td5_plat_render_pane_pool_ensure(int count);
+void *td5_plat_render_pane_begin(int index, int x, int y, int w, int h);
+void  td5_plat_render_pane_end(void *rc);
+void  td5_plat_render_pane_execute(int index);
+void  td5_plat_render_restore_main_rt(void);
 
 /** Clear the back buffer. */
 void td5_plat_render_clear(uint32_t color);

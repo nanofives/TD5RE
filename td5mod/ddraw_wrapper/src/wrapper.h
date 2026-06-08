@@ -900,5 +900,6 @@ WrapperRecCtx  *Backend_RecBegin(int index, int vp_x, int vp_y, int vp_w, int vp
 void            Backend_RecEnd(WrapperRecCtx *rc);
 void            Backend_RecExecute(int index);
 void            Backend_RecPoolRelease(void);
+void            Backend_RestoreMainRenderTarget(void);
 
 #endif /* TD5_D3D11_WRAPPER_H */

@@ -924,6 +924,16 @@ void Backend_RecExecute(int index)
     s_rec_cmdlist[index] = NULL;
 }
 
+/* Re-bind the swap-chain RTV + depth DSV on the IMMEDIATE context. Needed after
+ * ExecuteCommandList(...,FALSE) returns the immediate context to default state,
+ * before the serial VFX/HUD pass draws on it. */
+void Backend_RestoreMainRenderTarget(void)
+{
+    if (!g_backend.context) return;
+    ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
+        &g_backend.swap_rtv, g_backend.depth_dsv);
+}
+
 void Backend_RecPoolRelease(void)
 {
     for (int i = 0; i < s_rec_pool_count; i++) {

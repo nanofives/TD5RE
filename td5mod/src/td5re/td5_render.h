@@ -180,6 +180,15 @@ void td5_render_flush_projected_buckets(void);
 void td5_render_begin_world_pass(void);
 void td5_render_flush_deferred_additive(void);
 
+/* [Phase B Stage 2b] Per-pane render-scratch pool for concurrent pane recording.
+ * pool_ensure lazily allocates `count` RenderScratch instances (1=ok, 0=OOM).
+ * bind(i) points THIS thread's scratch at instance i; unbind() restores the
+ * shared default. Workers bind their pane index before recording; the serial
+ * path never calls these (stays on the default instance). */
+int  td5_render_scratch_pool_ensure(int count);
+void td5_render_scratch_bind(int index);
+void td5_render_scratch_unbind(void);
+
 /* --- Texture cache --- */
 void td5_render_reset_texture_cache(void);
 void td5_render_advance_texture_ages(void);

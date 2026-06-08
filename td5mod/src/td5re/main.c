@@ -357,6 +357,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "CircuitMinimap",       &g_td5.ini.circuit_minimap },
         { "DefaultPlayers",       &g_td5.ini.default_players },
         { "SpectateScreens",      &g_td5.ini.spectate_screens },
+        { "ThreadedPanes",        &g_td5.ini.threaded_panes },
         { "OverrideTrackZip",     &g_td5.ini.override_track_zip },
         { "OverrideStartSpan",    &g_td5.ini.override_start_span },
         { "SkipIntro",            &g_td5.ini.skip_intro },
@@ -747,6 +748,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.circuit_minimap   = td5_ini_int("Game", "CircuitMinimap", 1);    /* 1 = minimap on circuit tracks too */
     g_td5.ini.default_players   = td5_ini_int("Game", "DefaultPlayers", -1);   /* -1 = schedule default; >=2 = N-way split */
     g_td5.ini.spectate_screens  = td5_ini_int("Game", "SpectateScreens", 0);   /* 0 = off; N = N AI cars in their own pane (dev profiling) */
+    g_td5.ini.threaded_panes    = td5_ini_int("Render", "ThreadedPanes", 0);   /* 1 = record split-screen panes (>2) on worker threads (deferred contexts) */
     g_td5.ini.override_track_zip = td5_ini_int("Game", "OverrideTrackZip", 0);  /* 0 = faithful; >0 = TD6 level NNN */
     g_td5.ini.override_start_span = td5_ini_int("Game", "OverrideStartSpan", 0); /* TD6 grid start span; 0 = auto */
     g_td5.ini.skip_intro        = td5_ini_int("Game", "SkipIntro", 1);
@@ -983,6 +985,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.default_opponents      = -1;  /* full grid (no AutoRace override)  */
     g_td5.ini.default_players        = -1;  /* schedule default (no N-way override) */
     g_td5.ini.spectate_screens       = 0;   /* no AI spectator split-screens     */
+    g_td5.ini.threaded_panes         = 0;   /* serial pane submission (release)   */
     g_td5.ini.player_is_ai           = 0;   /* the human drives                 */
     g_td5.ini.debug_overlay          = 0;   /* no HUD debug text overlay        */
     g_td5.ini.debug_collisions       = 0;   /* no collision wireframe overlay   */

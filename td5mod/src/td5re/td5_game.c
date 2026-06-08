@@ -17,6 +17,7 @@
 #include "td5_asset.h"
 #include "td5_physics.h"
 #include "td5_render.h"
+#include "td5_jobs.h"     /* Phase B Stage 2b: threaded pane recording */
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5_camera.h"
 #include "td5_frontend.h"
@@ -3546,6 +3547,43 @@ static void td5_game_update_device_disconnect(void)
     }
 }
 
+/* [Phase B Stage 2b] Worker-thread body: record ONE pane's WORLD pass (sky +
+ * track + actors + that pane's translucent/projected/additive flushes) into its
+ * own deferred context. Camera + projection were already baked into g_rs[vp] by
+ * the serial phase on the main thread (they touch the camera-global
+ * g_depthFovFactor, which is not per-pane). VFX + HUD run later, serially, on
+ * the main thread (they share the now-drained g_rs[vp] buckets). The worker
+ * touches only this pane's g_rs instance + its private deferred-context bundle,
+ * so panes record with no shared mutable render state. */
+static void mt_record_pane_world(int vp, void *unused)
+{
+    (void)unused;
+    void *rc = td5_plat_render_pane_begin(vp, s_viewports[vp].x, s_viewports[vp].y,
+                                          s_viewports[vp].w, s_viewports[vp].h);
+    if (!rc) return;                       /* pool unavailable — caller fell back already */
+    td5_render_scratch_bind(vp);           /* this thread's g_rs -> pool[vp] */
+
+    td5_plat_render_set_viewport(s_viewports[vp].x, s_viewports[vp].y,
+                                 s_viewports[vp].w, s_viewports[vp].h);
+    td5_plat_render_set_clip_rect(s_viewports[vp].x, s_viewports[vp].y,
+                                  s_viewports[vp].x + s_viewports[vp].w,
+                                  s_viewports[vp].y + s_viewports[vp].h);
+
+    td5_render_set_race_pass(TD5_RACE_PASS_SKY);
+    td5_render_set_fog(0);
+    td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
+    td5_render_set_fog(1);
+
+    td5_render_begin_world_pass();
+    td5_render_actors_for_view(vp);
+    td5_render_flush_translucent();
+    td5_render_flush_projected_buckets();
+    td5_render_flush_deferred_additive();
+
+    td5_render_scratch_unbind();
+    td5_plat_render_pane_end(rc);
+}
+
 int td5_game_run_race_frame(void) {
     int i;
     td5_photobooth_tick();   /* sets the booth camera before this frame renders */
@@ -4570,6 +4608,110 @@ int td5_game_run_race_frame(void) {
         }
     }
 
+    /* [Phase B Stage 2b] Decide whether to record panes on worker threads.
+     * Gated: dev-only [Render] ThreadedPanes, >2 panes, a live worker pool, the
+     * per-pane g_rs + deferred-context pools available, AND past a 2-frame warmup
+     * (so the first race frames populate the lazy set-once atlas/mesh caches on
+     * the main thread before any worker reads them). Otherwise: serial path. */
+    int mt_threaded = 0;
+    {
+        static int s_mt_warm = 0;
+        static int s_mt_diag = 0;
+        int n = g_td5.viewport_count;
+        if (g_td5.ini.threaded_panes && n > 2 && td5_jobs_worker_count() > 0) {
+            if (s_mt_warm >= 2) {
+                int rs_ok = td5_render_scratch_pool_ensure(n);
+                int dc_ok = td5_plat_render_pane_pool_ensure(n);
+                if (rs_ok && dc_ok) mt_threaded = 1;
+                if (!s_mt_diag) {
+                    TD5_LOG_I("render", "ThreadedPanes gate: tp=%d n=%d workers=%d warm=%d rs_pool=%d dc_pool=%d -> %s",
+                              g_td5.ini.threaded_panes, n, td5_jobs_worker_count(), s_mt_warm,
+                              rs_ok, dc_ok, mt_threaded ? "THREADED" : "SERIAL");
+                    s_mt_diag = 1;
+                }
+            } else {
+                s_mt_warm++;
+            }
+        } else {
+            s_mt_warm = 0;
+            if (!s_mt_diag && g_td5.viewport_count > 0) {
+                TD5_LOG_W("render", "ThreadedPanes gate(off): tp=%d n=%d workers=%d",
+                          g_td5.ini.threaded_panes, n, td5_jobs_worker_count());
+                s_mt_diag = 1;
+            }
+        }
+    }
+
+    if (mt_threaded) {
+        int n = g_td5.viewport_count;
+        static int s_mt_logged = 0;
+        if (!s_mt_logged) {
+            TD5_LOG_I("render", "ThreadedPanes ENGAGED: %d panes recorded on %d workers",
+                      n, td5_jobs_worker_count());
+            s_mt_logged = 1;
+        }
+
+        /* Phase 1 (serial, main): per-pane camera + projection, baked into each
+         * pane's g_rs instance. Serial because camera_apply_view writes the
+         * camera-global g_depthFovFactor (read while baking the frustum). */
+        for (int vp = 0; vp < n; vp++) {
+            td5_render_scratch_bind(vp);
+            td5_camera_apply_view(vp);
+            td5_render_configure_projection(s_viewports[vp].w, s_viewports[vp].h);
+        }
+        td5_render_scratch_unbind();
+
+        /* Phase 2 (parallel): record each pane's world draw into its deferred ctx. */
+        td5_jobs_parallel_for(n, mt_record_pane_world, NULL);
+
+        /* Phase 3 (serial, main): replay the command lists in pane order, then
+         * re-bind the swap RTV (ExecuteCommandList left the immediate ctx default). */
+        for (int vp = 0; vp < n; vp++)
+            td5_plat_render_pane_execute(vp);
+        td5_plat_render_restore_main_rt();
+
+        /* Phase 4 (serial, main): VFX + HUD per pane on the immediate context,
+         * with g_rs bound to the pane instance so VFX reads its camera/projection
+         * and refills/flushes its (now-drained) translucent buckets. */
+        for (int vp = 0; vp < n; vp++) {
+            td5_render_scratch_bind(vp);
+            td5_plat_render_set_viewport(s_viewports[vp].x, s_viewports[vp].y,
+                                         s_viewports[vp].w, s_viewports[vp].h);
+            td5_plat_render_set_clip_rect(s_viewports[vp].x, s_viewports[vp].y,
+                                          s_viewports[vp].x + s_viewports[vp].w,
+                                          s_viewports[vp].y + s_viewports[vp].h);
+            td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
+            td5_render_set_fog(1);
+
+            if (g_td5.ini.debug_collisions) {
+                TD5_Actor *wire_actor = td5_game_get_actor(g_actorSlotForView[vp]);
+                if (wire_actor) {
+                    int wire_span = *(int16_t *)((uint8_t *)wire_actor + 0x80);
+                    td5_render_debug_lines_reset();
+                    td5_track_debug_emit_collision_lines(wire_span, 40);
+                    td5_render_debug_lines_flush();
+                }
+            }
+
+            if (!td5_render_photobooth_active()) {
+                td5_vfx_render_tire_tracks();
+                td5_vfx_render_tire_marks();
+                {
+                    TD5_Actor *wa = td5_game_get_actor(g_actorSlotForView[vp]);
+                    if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
+                }
+                td5_vfx_draw_particles(vp);
+            }
+            td5_render_flush_translucent();
+            td5_render_flush_projected_buckets();
+
+            td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
+            td5_render_set_fog(0);
+            if (!td5_render_photobooth_active())
+                td5_hud_draw_status_text(vp, vp);
+        }
+        td5_render_scratch_unbind();
+    } else
     /* For each viewport: camera setup, sky, track, actors, vfx, hud */
     for (int vp = 0; vp < g_td5.viewport_count; vp++) {
         /* Set viewport rectangle + scissor.
@@ -4632,9 +4774,11 @@ int td5_game_run_race_frame(void) {
          * on top of all opaque geometry (including alpha-keyed trees)
          * after the world pass finishes. */
         td5_render_begin_world_pass();
+        td5_profile_mark("v_setup");   /* [perf probe] camera+projection+pass setup */
 
         /* Render race actors for this view */
-        td5_render_actors_for_view(vp);
+        td5_render_actors_for_view(vp);  /* emits v_track (sky+terrain) internally */
+        td5_profile_mark("v_actors");  /* [perf probe] per-view actor (car) draws */
 
         /* Debug: collision-wireframe overlay (F12 / [Debug] Collisions /
          * --DebugCollisions). Drawn after opaque terrain + actors so the depth
@@ -4667,6 +4811,7 @@ int td5_game_run_race_frame(void) {
             }
             td5_vfx_draw_particles(vp);
         }
+        td5_profile_mark("v_vfx");     /* [perf probe] per-view tire/streak/particle draws */
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();
 
@@ -4674,6 +4819,7 @@ int td5_game_run_race_frame(void) {
          * the deferred additive lights on top. Fog stays on — lights
          * follow the same fog the world does. */
         td5_render_flush_deferred_additive();
+        td5_profile_mark("v_flush");   /* [perf probe] translucent/projected/additive flushes */
 
         /* ---- Pass 3: ALPHA (overlay effects) ---- */
         td5_render_set_race_pass(TD5_RACE_PASS_ALPHA);
@@ -4685,6 +4831,7 @@ int td5_game_run_race_frame(void) {
         /* HUD overlay for this viewport */
         if (!td5_render_photobooth_active())
             td5_hud_draw_status_text(vp, vp);
+        td5_profile_mark("v_hud");     /* [perf probe] per-view HUD status text */
         /* NOTE: minimap is drawn from td5_hud_render_overlays (below).
          * A duplicated call here used to be a no-op (set_clip_rect was a stub),
          * but once 65a4fea wired hardware scissor, it left the minimap rect
@@ -4711,6 +4858,11 @@ int td5_game_run_race_frame(void) {
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
     }
+
+    /* [PORT 2026-06-08] Per-viewport player identity: coloured frame in each
+     * player's accent colour + a name plate under the car. Self-gated (only when
+     * the MP frontend set identities and the race is split). */
+    td5_hud_draw_player_id_overlays();
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op
@@ -4788,13 +4940,20 @@ int td5_game_run_race_frame(void) {
 
 static void set_countdown_indicator_state(int value)
 {
+    /* [PORT: N-way split 2026-06-08] Drive the countdown (3-2-1) indicator on
+     * EVERY active viewport, not just the legacy 2. With >2 split-screen panes
+     * the extra panes otherwise kept the stale per-actor digit the fly-in set
+     * once (UpdateCameraTransitionHudIndicator = race_position+2); for a car in
+     * 8th+ place that value (>=10) indexes past the 5x2 NUMBERS atlas and drew a
+     * blank/garbage "blue square" on the 9th pane. Setting all panes here makes
+     * the synchronized countdown overwrite it every level. */
     int view_count = g_td5.viewport_count;
 
     if (view_count < 1) {
         view_count = 1;
     }
-    if (view_count > 2) {
-        view_count = 2;
+    if (view_count > TD5_MAX_VIEWPORTS) {
+        view_count = TD5_MAX_VIEWPORTS;
     }
 
     for (int i = 0; i < view_count; i++) {
@@ -6379,7 +6538,11 @@ void td5_game_init_viewport_layout(void) {
      * players default to LEFT/RIGHT = 3x1), falling back to an automatic ladder.
      * The original was hard-capped at 2 viewports (RunRaceFrame 0x42B580) — this
      * deliberately deviates. */
-    int views = g_td5.num_human_players;
+    /* Pane count = local humans + AI spectator panes (dev/profiling). The N
+     * spectator panes follow AI-driven slots 1..N (set up in InitRace's
+     * actor_slot_map); only the humans read input. num_spectate_screens is 0 in
+     * every faithful flow, so this is identical to num_human_players there. */
+    int views = g_td5.num_human_players + g_td5.num_spectate_screens;
     int cols, rows;
     if (views < 1) views = 1;
     if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
@@ -6412,8 +6575,8 @@ void td5_game_init_viewport_layout(void) {
         }
     }
 
-    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d count=%d grid=%dx%d %dx%d",
-              g_td5.split_screen_mode, g_td5.num_human_players,
+    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d spectate=%d count=%d grid=%dx%d %dx%d",
+              g_td5.split_screen_mode, g_td5.num_human_players, g_td5.num_spectate_screens,
               g_td5.viewport_count, cols, rows, w, h);
 }
 

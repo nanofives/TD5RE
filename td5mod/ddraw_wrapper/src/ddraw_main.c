@@ -170,6 +170,9 @@ void Backend_Shutdown(void)
     WRAPPER_LOG("Backend_Shutdown");
     PngOverride_Shutdown();
 
+    /* [Phase B Stage 2b] Release the threaded-pane deferred-context pool. */
+    Backend_RecPoolRelease();
+
     /* Release compositing resources */
     if (g_backend.composite_srv) {
         ID3D11ShaderResourceView_Release(g_backend.composite_srv);
