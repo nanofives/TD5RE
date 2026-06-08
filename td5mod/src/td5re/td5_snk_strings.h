@@ -34,7 +34,7 @@
 #define SNK_ConfSec " SEC"
 #define SNK_ConfSpeed " SPEED"
 #define SNK_ConfUnknown "UNKNOWN"
-#define SNK_ConfigButTxt "STATS"
+#define SNK_ConfigButTxt "MORE STATS"
 #define SNK_ConfigurationTxt "CONFIGURATION FOR THAT BUTTON"
 #define SNK_ConfigureButTxt "CONFIGURE"
 #define SNK_CongratsTxt "CONGRATULATIONS!"

@@ -2174,7 +2174,12 @@ static int s_button_count;
  * BELOW the color panel, but compressed so OK/Back don't sit too low. Recomputed
  * from these tables every frame, so it survives button recreation (no drift). */
 static void frontend_apply_color_panel_layout(void) {
-    static const int closed_y[6] = { 169, 209, 249, 289, 329, 329 };
+    /* Closed layout: CAR/PAINT at the top, then a ~52px gap (y=241..293) holding
+     * the non-interactive at-a-glance stat-bar panel, then MORE STATS/AUTO/OK/
+     * BACK pushed down (gaps tightened 8->4px) so the bottom row still sits inside
+     * the y<408 blue-fill area. Open layout (TD6 colour picker) is unchanged — the
+     * stat panel is hidden while the picker fills that band. */
+    static const int closed_y[6] = { 169, 205, 297, 333, 369, 369 };
     static const int open_y[6]   = { 150, 190, 336, 372, 408, 408 };
     const int *y = s_color_panel_visible ? open_y : closed_y;
     for (int i = 0; i < 6 && i < FE_MAX_BUTTONS; i++)
@@ -2959,6 +2964,115 @@ static void frontend_build_speed_pool(void) {
     } else {
         TD5_LOG_W(LOG_TAG, "speed_pool: no carparam.dat readable — falling back to tier roster");
     }
+}
+
+/* ========================================================================
+ * Car "at a glance" stat bars (Speed / Accel / Grip).
+ *
+ * Three indicator bars normalised ACROSS THE WHOLE ROSTER: the slowest car maps
+ * to an empty bar and the fastest to a full one, everything else linearly
+ * between. Acceleration is the published 0-60 TIME (lower = better), so its
+ * fraction is inverted. The source numbers are the SAME published config.nfo
+ * fields the MORE STATS spec sheet shows (field 7 = top speed mph, field 8 =
+ * 0-60 sec, field 14 = lateral acc g -> "grip"), so the bars and the sheet
+ * always agree. Cached one-time scan, mirroring frontend_build_speed_pool
+ * above; cop-chase cars are excluded the same way. No numbers are ever drawn —
+ * bars only (user request). ======================================================== */
+static float s_cstat_spd_min, s_cstat_spd_max;
+static float s_cstat_acc_min, s_cstat_acc_max;   /* 0-60 time: min == quickest */
+static float s_cstat_hnd_min, s_cstat_hnd_max;
+static int   s_cstat_ranges_built = 0;
+
+/* Parse three raw config.nfo strings to numeric stats. Returns 1 only if all
+ * three are present and positive (so missing/garbage cars are skipped). */
+static int frontend_glance_from_fields(const char *f7, const char *f8, const char *f14,
+                                       float *spd, float *acc, float *hnd) {
+    float s = (float)atof(f7);
+    float a = (float)atof(f8);
+    float h = (float)atof(f14);
+    if (s <= 0.0f || a <= 0.0f || h <= 0.0f) return 0;
+    *spd = s; *acc = a; *hnd = h;
+    return 1;
+}
+
+/* Read a car's three glance stats straight from its config.nfo, WITHOUT
+ * touching the shared s_car_spec cache (this is used only by the range builder,
+ * which scans every car and would otherwise clobber the displayed car). The
+ * line-split mirrors frontend_load_car_spec_fields. Returns 1 on success. */
+static int frontend_read_car_glance_stats(int ext_id, float *spd, float *acc, float *hnd) {
+    const char *zip = td5_asset_get_car_zip_path(ext_id);
+    char fields[17][48];
+    char *data;
+    int sz = 0, field;
+    size_t i;
+    if (!zip) return 0;
+    data = (char *)td5_asset_open_and_read("config.nfo", zip, &sz);
+    if (!data || sz <= 0) { free(data); return 0; }
+    for (field = 0; field < 17; field++) fields[field][0] = '\0';
+    field = 0; i = 0;
+    while (field < 17 && i < (size_t)sz) {
+        size_t j = 0;
+        while (i < (size_t)sz && data[i] != '\n' && data[i] != '\r') {
+            if (j + 1 < sizeof(fields[0])) fields[field][j++] = data[i];
+            i++;
+        }
+        fields[field][j] = '\0';
+        while (i < (size_t)sz && (data[i] == '\n' || data[i] == '\r')) i++;
+        field++;
+    }
+    free(data);
+    return frontend_glance_from_fields(fields[7], fields[8], fields[14], spd, acc, hnd);
+}
+
+/* Build the roster-wide min/max for each stat (idempotent / cached). Excludes
+ * cop-chase cars like the speed pool, and any car whose config.nfo won't parse. */
+static void frontend_build_carstat_ranges(void) {
+    int id, n = 0;
+    if (s_cstat_ranges_built) return;
+    s_cstat_ranges_built = 1;
+    s_cstat_spd_min = s_cstat_acc_min = s_cstat_hnd_min =  1e30f;
+    s_cstat_spd_max = s_cstat_acc_max = s_cstat_hnd_max = -1e30f;
+    for (id = 0; id < TD5_CAR_COUNT; id++) {
+        float spd, acc, hnd;
+        if (frontend_car_is_cop(id)) continue;
+        if (!frontend_read_car_glance_stats(id, &spd, &acc, &hnd)) continue;
+        if (spd < s_cstat_spd_min) s_cstat_spd_min = spd;
+        if (spd > s_cstat_spd_max) s_cstat_spd_max = spd;
+        if (acc < s_cstat_acc_min) s_cstat_acc_min = acc;
+        if (acc > s_cstat_acc_max) s_cstat_acc_max = acc;
+        if (hnd < s_cstat_hnd_min) s_cstat_hnd_min = hnd;
+        if (hnd > s_cstat_hnd_max) s_cstat_hnd_max = hnd;
+        n++;
+    }
+    if (n == 0) {   /* nothing readable — neutral ranges so bars render half-full */
+        s_cstat_spd_min = s_cstat_acc_min = s_cstat_hnd_min = 0.0f;
+        s_cstat_spd_max = s_cstat_acc_max = s_cstat_hnd_max = 1.0f;
+        TD5_LOG_W(LOG_TAG, "carstat_ranges: no config.nfo readable — bars neutral");
+        return;
+    }
+    TD5_LOG_I(LOG_TAG,
+              "carstat_ranges: n=%d spd[%.0f..%.0f] 0-60[%.2f..%.2f] grip[%.2f..%.2f]",
+              n, s_cstat_spd_min, s_cstat_spd_max,
+              s_cstat_acc_min, s_cstat_acc_max, s_cstat_hnd_min, s_cstat_hnd_max);
+}
+
+static float frontend_glance_frac(float v, float lo, float hi) {
+    float f;
+    if (hi - lo < 1e-6f) return 0.5f;     /* degenerate (single-car) range */
+    f = (v - lo) / (hi - lo);
+    if (f < 0.0f) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    return f;
+}
+
+/* Map a car's raw stats to three [0,1] bar fractions. Accel is inverted (a
+ * lower 0-60 time -> a fuller bar). */
+static void frontend_normalize_glance(float spd, float acc, float hnd,
+                                      float *fs, float *fa, float *fg) {
+    frontend_build_carstat_ranges();
+    *fs = frontend_glance_frac(spd, s_cstat_spd_min, s_cstat_spd_max);
+    *fa = 1.0f - frontend_glance_frac(acc, s_cstat_acc_min, s_cstat_acc_max);  /* inverted */
+    *fg = frontend_glance_frac(hnd, s_cstat_hnd_min, s_cstat_hnd_max);
 }
 
 /* Resolve the [lo,hi) car-pool slice for a difficulty tier (0/1/2). Degenerate
@@ -6670,6 +6784,83 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
  *   constants (0x198 width, 0x118 height, 0x5A alpha, 0x40/0x20 step deltas,
  *   0x4A8 offscreen offset). DDraw color-key + per-frame surface tracking
  *   replaced by tex-page + alpha blending. */
+/* Non-interactive "at a glance" stat panel: a button-framed box with three
+ * relative bars (Speed / Accel / Grip), drawn between PAINT and MORE STATS on
+ * every car-select screen. Raw config.nfo fields are passed in (SP reads them
+ * from the shared s_car_spec cache, MP from its per-pane spec cache), so this
+ * draws no files. `accent` fills the bars (player colour in MP); `compact`
+ * shrinks the rows + scales the labels down so the full names still fit in the
+ * small split panes. */
+static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
+                                        const char *f7, const char *f8, const char *f14,
+                                        uint32_t accent, int compact, float sx, float sy) {
+    static const char *lbl[3] = { "SPEED", "ACCEL", "GRIP" };
+    float spd = 0, acc = 0, hnd = 0, fr[3] = { 0, 0, 0 };
+    float padx = compact ? 4.0f : 7.0f;
+    float pady = compact ? 2.0f : 6.0f;
+    /* In the MP panes, line the labels up with the CAR/PAINT button text (drawn at
+     * x+17) and stop the bars before the ◄► arrows on those buttons (their right
+     * arrow's left edge is x+w-15; the value redge is x+w-18). SP keeps padx. */
+    float content_l = compact ? 17.0f : padx;
+    float content_r = compact ? 18.0f : padx;
+    float top  = by + pady;
+    float rowh = (bh - 2.0f * pady) / 3.0f;
+    float barh = compact ? (rowh - 2.0f) : (rowh - 5.0f);
+    float lsx = sx, lsy = sy, capd, lblw, barx, barw;
+    int i;
+
+    if (barh < 2.0f) barh = 2.0f;
+    /* Shrink the label font to the row in compact (small split) panes so the
+     * full names still fit; SP keeps the full small-font size. */
+    if (compact) {
+        float s = rowh / 11.0f;
+        if (s > 1.0f) s = 1.0f;
+        if (s < 0.42f) s = 0.42f;
+        lsx = sx * s; lsy = sy * s;
+    }
+    capd = SMALLFONT_TTF_CAP * (lsy / sy);
+
+    if (frontend_glance_from_fields(f7, f8, f14, &spd, &acc, &hnd))
+        frontend_normalize_glance(spd, acc, hnd, &fr[0], &fr[1], &fr[2]);
+
+    /* Frame: the regular blue/unselected button look (non-interactive). */
+    fe_draw_button_frame(bx * sx, by * sy, bw * sx, bh * sy, 1, sx, sy);
+
+    /* Full-name label column ("SPEED"/"ACCEL"/"GRIP"); dropped only if the box is
+     * far too narrow to fit a label plus a usable bar. */
+    lblw = fe_measure_small_text("SPEED") * fe_glyph_sx(lsx, lsy) / sx;
+    if (bw < content_l + content_r + lblw + 8.0f) lblw = 0.0f;
+    barx = bx + content_l + (lblw > 0.0f ? lblw + 4.0f : 0.0f);
+    barw = (bx + bw - content_r) - barx;
+    if (barw < 4.0f) barw = 4.0f;
+
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    for (i = 0; i < 3; i++) {
+        float ry   = top + (float)i * rowh;
+        float bary = ry + (rowh - barh) * 0.5f;
+        float fillw = fr[i] * barw;
+        if (lblw > 0.0f) {
+            float ty = (ry + (rowh - capd) * 0.5f) * sy;
+            fe_draw_small_text((bx + content_l) * sx, ty, lbl[i], 0xFFC8C8C8u, lsx, lsy);
+        }
+        fe_draw_quad(barx * sx, bary * sy, barw * sx, barh * sy, 0xFF101828u, -1, 0, 0, 1, 1);
+        if (fillw > 0.0f)
+            fe_draw_quad(barx * sx, bary * sy, fillw * sx, barh * sy, accent, -1, 0, 0, 1, 1);
+    }
+}
+
+/* Fixed accent for the single-player / sequential car-select bars (the MP grid
+ * passes each player's identity colour instead). */
+#define FE_CARSTAT_ACCENT 0xFFE8C040u   /* amber — reads over the 0xFF00005C blue fill */
+
+/* Single-player stat panel rect (640x480 design space), sitting in the gap the
+ * re-laid-out button column (frontend_apply_color_panel_layout) leaves between
+ * the PAINT button (ends y=237) and the MORE STATS button (starts y=297). */
+#define FE_CARSTAT_PANEL_X 46.0f
+#define FE_CARSTAT_PANEL_Y 241.0f
+#define FE_CARSTAT_PANEL_W 168.0f
+#define FE_CARSTAT_PANEL_H 52.0f
+
 static void frontend_render_car_selection_preview(float sx, float sy) {
     /* Simultaneous multiplayer: render the per-player grid (setup window in phase
      * 0, car-select grid in phase 1) instead of the single preview + buttons. */
@@ -6752,6 +6943,22 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         /* Topbar drawn LAST (front of bar/curve) — z-order parity with original. */
         if (s_carsel_topbar_surface > 0)
             fe_draw_surface_rect(s_carsel_topbar_surface,  0.0f * sx,  45.0f * sy, 532.0f * sx,  36.0f * sy, 0xFFFFFFFF);
+    }
+
+    /* At-a-glance stat bars: a non-interactive panel in the gap between the PAINT
+     * and MORE STATS buttons. Drawn in BOTH the normal car preview AND the MORE
+     * STATS sub-screen (state 15) — the button column stays visible there, so the
+     * bars stay too. Hidden only while the TD6 colour picker is open (it fills
+     * that band). Slides in with the button column (mirrors button 2, directly
+     * below it). Drawn after the bar/curve/topbar layer so it sits on top, like
+     * the buttons. */
+    if (s_button_count > 0 && !s_color_panel_visible) {
+        float panel_x = frontend_get_button_anim_x(2, FE_CARSTAT_PANEL_X);
+        frontend_load_car_spec_fields(actual_car);
+        frontend_draw_car_stat_bars(panel_x, FE_CARSTAT_PANEL_Y,
+                                    FE_CARSTAT_PANEL_W, FE_CARSTAT_PANEL_H,
+                                    s_car_spec[7], s_car_spec[8], s_car_spec[14],
+                                    FE_CARSTAT_ACCENT, 0, sx, sy);
     }
 
     if (s_inner_state == 15) {
@@ -13582,17 +13789,27 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             continue;
         }
 
-        /* Button stack (CAR / PAINT / STATS / AUTO-MANUAL / OK). */
+        /* Button stack (CAR / PAINT / [stat bars] / MORE STATS / AUTO-MANUAL / OK).
+         * The at-a-glance stat panel sits between PAINT and MORE STATS; it's the
+         * flex element so the 5 buttons keep their [9,22]px size and the panel
+         * shrinks (down to thin label-less bars) when a small split runs out of
+         * room. */
         {
             float bx = px + 8.0f, bw = pane_w - 16.0f;
             float bsy = pyr + 32.0f + pane_h * 0.38f + 4.0f;
             float room = (pyr + pane_h - 18.0f) - bsy;
-            float bh = room / (float)MP_BTN_COUNT - 2.0f;
+            float bh = (room - 10.0f) / 6.2f;   /* 5 buttons + ~1.2-button stat panel + gaps */
             int focus = s_mp_pane_btn[p];
             float yy = bsy;
+            float panel_h;
             char vbuf[24];
             if (bh < 10.0f) bh = 10.0f;
-            if (bh > 22.0f) bh = 22.0f;
+            if (bh > 28.0f) bh = 28.0f;   /* taller buttons where the pane has room */
+            panel_h = bh * 1.2f;
+            if (5.0f * bh + panel_h + 10.0f > room) {   /* buttons hit their floor — shrink the panel */
+                panel_h = room - 5.0f * bh - 10.0f;
+                if (panel_h < 8.0f) panel_h = 8.0f;
+            }
 
             mp_simul_draw_btn(bx, yy, bw, bh, "CAR", focus == MP_BTN_CAR, pcol, 1, NULL, -1, sx, sy);
             yy += bh + 2.0f;
@@ -13605,7 +13822,12 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             } else
                 mp_simul_draw_btn(bx, yy, bw, bh, "PAINT", focus == MP_BTN_PAINT, pcol, 0, "-", -1, sx, sy);
             yy += bh + 2.0f;
-            mp_simul_draw_btn(bx, yy, bw, bh, "STATS", focus == MP_BTN_STATS, pcol, 0, NULL, -1, sx, sy);
+            mp_simul_load_pane_spec(p, car);   /* cached; bars need the spec even before MORE STATS is opened */
+            frontend_draw_car_stat_bars(bx, yy, bw, panel_h,
+                                        s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
+                                        s_mp_pane_spec[p][14], pcol, 1, sx, sy);
+            yy += panel_h + 2.0f;
+            mp_simul_draw_btn(bx, yy, bw, bh, "MORE STATS", focus == MP_BTN_STATS, pcol, 0, NULL, -1, sx, sy);
             yy += bh + 2.0f;
             mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTOMATIC",
                               focus == MP_BTN_TRANS, pcol, 0, NULL, -1, sx, sy);
@@ -14133,9 +14355,13 @@ static void Screen_CarSelection(void) {
     case 4: /* Button creation: 6 buttons along the left column.
              * Original layout places the button column on the left side and the
              * 408x280 car preview on the right side. */
-        /* 5 buttons per original (0x40DFC0 state 4): exact final positions from Ghidra
-         * Tab buttons: x=46, y=169/209/249/289, w=168, h=32
-         * OK: x=46, y=329, w=64  |  BACK: x=118, y=329, w=96 */
+        /* Button column. Original Ghidra layout was 169/209/249/289/329 (state 4
+         * @0x40DFC0); the port pushes STATS/AUTO/OK/BACK down to open a ~52px slot
+         * at y=241..293 for the at-a-glance stat-bar panel between PAINT and MORE
+         * STATS. These create-time Y values MUST match closed_y in
+         * frontend_apply_color_panel_layout (which re-applies them every frame and
+         * shifts for the TD6 colour picker) so the column is correct on frame 0,
+         * before any input arrives. */
         /* Drag race FORCES Manual transmission and renders the toggle
          * non-interactive [CONFIRMED @ 0x0040e119 cmp gameType!=7(orig drag) /
          * 0x0040e167 write g_carSelectManualTransmissionToggle = (gameType==7)].
@@ -14144,13 +14370,14 @@ static void Screen_CarSelection(void) {
         if (g_td5.drag_race_enabled)
             s_selected_transmission = 1;
         frontend_create_button(SNK_CarButTxt,   46, 169, 168, 32);
-        frontend_create_button(SNK_PaintButTxt, 46, 209, 168, 32);
-        frontend_create_button(SNK_ConfigButTxt, 46, 249, 168, 32);
+        frontend_create_button(SNK_PaintButTxt, 46, 205, 168, 32);
+        frontend_create_button(SNK_ConfigButTxt, 46, 297, 168, 32);
         frontend_create_button(s_selected_transmission ? "Manual" : "Automatic",
-                               46, 289, 168, 32);
-        frontend_create_button(SNK_OkButTxt,   46, 329,  64, 32);
+                               46, 333, 168, 32);
+        frontend_create_button(SNK_OkButTxt,   46, 369,  64, 32);
         if (!s_network_active)
-            frontend_create_button(SNK_BackButTxt, 118, 329, 96, 32);
+            frontend_create_button(SNK_BackButTxt, 118, 369, 96, 32);
+        frontend_apply_color_panel_layout();   /* fix positions immediately (picker may be open) */
 
         /* Time Trials: grey out Manual button */
         /* Load inline string table SNK_CarSelect_MT1 */
