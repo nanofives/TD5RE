@@ -166,6 +166,30 @@ int td5_jobs_worker_count(void)
     return g.inited ? g.worker_count : 0;
 }
 
+/* [Phase B render-transform] Self-test: confirm GCC __thread (TLS) is genuinely
+ * per-worker on the CreateThread pool (MinGW emutls can misbehave). Each job sets
+ * a __thread var to its index, busy-spins to force concurrent overlap, then checks
+ * the value survived. Returns the number of failures (0 = TLS is properly isolated;
+ * >0 = __thread is shared/broken across workers -> must use Win32 TLS instead). */
+static __thread volatile int s_tls_probe;
+static volatile LONG s_tls_fail;
+static void tls_probe_job(int i, void *ctx)
+{
+    volatile long sink = 0;
+    (void)ctx;
+    s_tls_probe = i;
+    for (long k = 0; k < 3000000; k++) sink += k;   /* ~ms spin: ensure overlap */
+    if (s_tls_probe != i) InterlockedIncrement(&s_tls_fail);
+}
+int td5_jobs_selftest_tls(void)
+{
+    s_tls_fail = 0;
+    td5_jobs_parallel_for(8, tls_probe_job, NULL);
+    TD5_LOG_W(LOG_TAG, "jobs TLS selftest: %ld failure(s) over 8 jobs / %d workers (0 = __thread isolated)",
+              (long)s_tls_fail, g.worker_count);
+    return (int)s_tls_fail;
+}
+
 void td5_jobs_parallel_for(int count, td5_job_fn fn, void *ctx)
 {
     if (count <= 0 || fn == NULL)

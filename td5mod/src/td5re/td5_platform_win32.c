@@ -27,6 +27,7 @@
 #include <math.h>
 
 #include "td5_platform.h"
+#include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
 
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -3988,6 +3989,12 @@ void td5_plat_render_clear_ps_override(void)
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count)
 {
+    /* [Phase B render-transform] If this thread is building a pane command list,
+     * record the draw (copy geometry) instead of issuing it; replayed live later. */
+    if (td5_rcmd_recording()) {
+        td5_rcmd_draw_tris(verts, vertex_count, indices, index_count);
+        return;
+    }
     /* [Phase B Stage 2] route to the thread-local pane bundle when recording. */
     WrapperRecCtx *rc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
@@ -4063,6 +4070,7 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
 
 void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_draw_lines(verts, vert_count); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
     ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
@@ -4130,6 +4138,7 @@ void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
 
 void td5_plat_render_set_preset(TD5_RenderPreset preset)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_set_preset((int)preset); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     RenderStateCache *s = rc ? &rc->state : &g_backend.state;
 
@@ -4445,6 +4454,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
 
 void td5_plat_render_bind_texture(int page_index)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_bind_texture(page_index); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
     ID3D11ShaderResourceView *srv = NULL;
@@ -4475,6 +4485,7 @@ void td5_plat_render_bind_texture(int page_index)
 void td5_plat_render_set_fog(int enable, uint32_t color,
                               float start, float end, float density)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_set_fog(enable, color, start, end, density); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     RenderStateCache *s = rc ? &rc->state : &g_backend.state;
 
@@ -4602,6 +4613,7 @@ void td5_plat_render_get_texture_dims(int page_index, int *w, int *h)
 
 void td5_plat_render_set_viewport(int x, int y, int width, int height)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_set_viewport(x, y, width, height); return; }
     WrapperRecCtx *wrc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = wrc ? wrc->dc : g_backend.context;
     D3D11_VIEWPORT vp;
@@ -4623,6 +4635,7 @@ void td5_plat_render_set_viewport(int x, int y, int width, int height)
 
 void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_set_clip(left, top, right, bottom); return; }
     WrapperRecCtx *wrc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = wrc ? wrc->dc : g_backend.context;
     D3D11_RECT rc;

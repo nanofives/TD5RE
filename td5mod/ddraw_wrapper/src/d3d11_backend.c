@@ -763,7 +763,12 @@ int Backend_StreamUpload(const void *verts, UINT vert_count, UINT stride,
     vbytes = vert_count * stride;
     if (vbytes > vb_size) return 0;   /* single batch too big */
 
-    /* Vertices: DISCARD on wrap / first append, else NO_OVERWRITE append. */
+    /* Vertices: DISCARD on wrap / first append, else NO_OVERWRITE append. Same
+     * streaming ring for the immediate AND deferred paths: NO_OVERWRITE versions
+     * the dynamic buffer ONCE (per DISCARD) and appends in place, so a command
+     * list holds a single buffer version. (Per-draw DISCARD on a deferred ctx
+     * versions the whole 4MB buffer EACH draw -> ~600 draws x 4MB -> OOM at
+     * FinishCommandList; that is why this must stay NO_OVERWRITE.) */
     {
         D3D11_MAP map_type;
         if (*vb_off + vbytes > vb_size) {
@@ -890,6 +895,14 @@ WrapperRecCtx *Backend_RecBegin(int index, int vp_x, int vp_y, int vp_w, int vp_
     g_wrapper_rec = rc;   /* route subsequent draw/state calls to this bundle */
 
     ID3D11DeviceContext_OMSetRenderTargets(dc, 1, &g_backend.swap_rtv, g_backend.depth_dsv);
+#ifdef TD5_REC_TESTCLEAR
+    /* DECISIVE TEST: record a full-RTV red clear into the deferred context. If the
+     * screen turns red after ExecuteCommandList, deferred replay reaches the
+     * backbuffer (issue is in the recorded draws/state); if it stays blue, the
+     * deferred replay itself isn't reaching the presented surface. */
+    { float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+      ID3D11DeviceContext_ClearRenderTargetView(dc, g_backend.swap_rtv, red); }
+#endif
     vp.TopLeftX = (float)vp_x; vp.TopLeftY = (float)vp_y;
     vp.Width = (float)vp_w; vp.Height = (float)vp_h; vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
     ID3D11DeviceContext_RSSetViewports(dc, 1, &vp);
@@ -903,12 +916,14 @@ WrapperRecCtx *Backend_RecBegin(int index, int vp_x, int vp_y, int vp_w, int vp_
 void Backend_RecEnd(WrapperRecCtx *rc)
 {
     int index;
+    HRESULT hr;
     if (!rc) { g_wrapper_rec = NULL; return; }
     index = (int)(rc - s_rec_pool);
     g_wrapper_rec = NULL;
     if (index < 0 || index >= s_rec_pool_count) return;
     if (s_rec_cmdlist[index]) { ID3D11CommandList_Release(s_rec_cmdlist[index]); s_rec_cmdlist[index] = NULL; }
-    ID3D11DeviceContext_FinishCommandList(rc->dc, FALSE, &s_rec_cmdlist[index]);
+    hr = ID3D11DeviceContext_FinishCommandList(rc->dc, FALSE, &s_rec_cmdlist[index]);
+    (void)hr;
 }
 
 /* Main-thread: replay bundle `index`'s command list onto the immediate context.

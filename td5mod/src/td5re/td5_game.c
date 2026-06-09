@@ -18,6 +18,16 @@
 #include "td5_physics.h"
 #include "td5_render.h"
 #include "td5_jobs.h"     /* Phase B Stage 2b: threaded pane recording */
+#include "td5_rcmd.h"     /* Phase B render-transform: per-pane CPU command lists */
+/* [Phase B render-transform — WIP] Define TD5_MT_PARALLEL_BUILD to build the
+ * per-pane command lists on the worker pool. CURRENTLY DISABLED: the parallel
+ * build corrupts geometry because td5_render_transform_mesh_vertices writes the
+ * transformed view coords IN-PLACE into the shared mesh blob, so concurrent
+ * panes (same meshes, different cameras) stomp each other. Re-enable only after
+ * the core transform is made per-pane (see the next-step plan). Until then the
+ * threaded path records+replays SERIALLY on the main thread (correct, no gain).
+ * Default-off anyway via [Render] ThreadedPanes=0. */
+/* #define TD5_MT_PARALLEL_BUILD 1 */
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5_camera.h"
 #include "td5_frontend.h"
@@ -3547,21 +3557,35 @@ static void td5_game_update_device_disconnect(void)
     }
 }
 
-/* [Phase B Stage 2b] Worker-thread body: record ONE pane's WORLD pass (sky +
- * track + actors + that pane's translucent/projected/additive flushes) into its
- * own deferred context. Camera + projection were already baked into g_rs[vp] by
- * the serial phase on the main thread (they touch the camera-global
- * g_depthFovFactor, which is not per-pane). VFX + HUD run later, serially, on
- * the main thread (they share the now-drained g_rs[vp] buckets). The worker
- * touches only this pane's g_rs instance + its private deferred-context bundle,
- * so panes record with no shared mutable render state. */
-static void mt_record_pane_world(int vp, void *unused)
+/* [Phase B render-transform] Per-pane CPU command lists. Each pane's expensive
+ * world build (track walk / mesh transform / cull) records into its own list
+ * (no shared GPU state — the texture-cache lookup is deferred to replay); the
+ * main thread replays the lists in order onto the immediate context. */
+static RCmdList *s_pane_cmd[TD5_MAX_VIEWPORTS];
+
+static int rcmd_pool_ensure(int count)
+{
+    int i;
+    if (count > TD5_MAX_VIEWPORTS) count = TD5_MAX_VIEWPORTS;
+    for (i = 0; i < count; i++) {
+        if (!s_pane_cmd[i]) {
+            s_pane_cmd[i] = td5_rcmd_create();
+            if (!s_pane_cmd[i]) return 0;
+        }
+    }
+    return 1;
+}
+
+/* Build ONE pane's world into its command list. Camera+projection were baked
+ * into g_rs[vp] by the serial Phase-1 pass (camera_apply touches the global
+ * g_depthFovFactor). Records draws + state into s_pane_cmd[vp]; issues NO GPU
+ * work and touches no shared GPU state, so this is safe to run on a worker. */
+static void mt_build_pane_rcmd(int vp, void *unused)
 {
     (void)unused;
-    void *rc = td5_plat_render_pane_begin(vp, s_viewports[vp].x, s_viewports[vp].y,
-                                          s_viewports[vp].w, s_viewports[vp].h);
-    if (!rc) return;                       /* pool unavailable — caller fell back already */
-    td5_render_scratch_bind(vp);           /* this thread's g_rs -> pool[vp] */
+    td5_render_scratch_bind(vp);              /* this thread's g_rs -> pool[vp] */
+    td5_rcmd_reset(s_pane_cmd[vp]);
+    td5_rcmd_begin(s_pane_cmd[vp]);
 
     td5_plat_render_set_viewport(s_viewports[vp].x, s_viewports[vp].y,
                                  s_viewports[vp].w, s_viewports[vp].h);
@@ -3580,8 +3604,8 @@ static void mt_record_pane_world(int vp, void *unused)
     td5_render_flush_projected_buckets();
     td5_render_flush_deferred_additive();
 
+    td5_rcmd_end();
     td5_render_scratch_unbind();
-    td5_plat_render_pane_end(rc);
 }
 
 int td5_game_run_race_frame(void) {
@@ -4621,12 +4645,12 @@ int td5_game_run_race_frame(void) {
         if (g_td5.ini.threaded_panes && n > 2 && td5_jobs_worker_count() > 0) {
             if (s_mt_warm >= 2) {
                 int rs_ok = td5_render_scratch_pool_ensure(n);
-                int dc_ok = td5_plat_render_pane_pool_ensure(n);
-                if (rs_ok && dc_ok) mt_threaded = 1;
+                int cl_ok = rcmd_pool_ensure(n);
+                if (rs_ok && cl_ok) mt_threaded = 1;
                 if (!s_mt_diag) {
-                    TD5_LOG_I("render", "ThreadedPanes gate: tp=%d n=%d workers=%d warm=%d rs_pool=%d dc_pool=%d -> %s",
+                    TD5_LOG_I("render", "ThreadedPanes gate: tp=%d n=%d workers=%d warm=%d rs_pool=%d cl_pool=%d -> %s",
                               g_td5.ini.threaded_panes, n, td5_jobs_worker_count(), s_mt_warm,
-                              rs_ok, dc_ok, mt_threaded ? "THREADED" : "SERIAL");
+                              rs_ok, cl_ok, mt_threaded ? "THREADED" : "SERIAL");
                     s_mt_diag = 1;
                 }
             } else {
@@ -4657,18 +4681,31 @@ int td5_game_run_race_frame(void) {
         for (int vp = 0; vp < n; vp++) {
             td5_render_scratch_bind(vp);
             td5_camera_apply_view(vp);
+            td5_render_bake_camera();   /* store view vp's camera into g_rs[vp] this frame */
             td5_render_configure_projection(s_viewports[vp].w, s_viewports[vp].h);
         }
         td5_render_scratch_unbind();
+        /* From here, render uses each pane's baked camera (don't re-read the shared
+         * camera-module "current", which now holds only the last pane's view). */
+        td5_render_set_camera_prebaked(1);
 
-        /* Phase 2 (parallel): record each pane's world draw into its deferred ctx. */
-        td5_jobs_parallel_for(n, mt_record_pane_world, NULL);
-
-        /* Phase 3 (serial, main): replay the command lists in pane order, then
-         * re-bind the swap RTV (ExecuteCommandList left the immediate ctx default). */
+        /* Phase 2 — BUILD each pane's world into its CPU command list.
+         * [validation step] SERIAL on the main thread for now: if record+replay
+         * renders identically to the plain serial path, the command list is
+         * correct, and only this loop swaps to td5_jobs_parallel_for to thread it. */
+#ifdef TD5_MT_PARALLEL_BUILD
+        td5_jobs_parallel_for(n, mt_build_pane_rcmd, NULL);
+#else
         for (int vp = 0; vp < n; vp++)
-            td5_plat_render_pane_execute(vp);
-        td5_plat_render_restore_main_rt();
+            mt_build_pane_rcmd(vp, NULL);
+#endif
+
+        /* Phase 3 — REPLAY each pane's command list in order on the immediate
+         * context (live GPU). g_rs back to the default instance for the live
+         * texture-cache/bind path; geometry is self-contained in each list. */
+        td5_render_scratch_unbind();
+        for (int vp = 0; vp < n; vp++)
+            td5_rcmd_replay(s_pane_cmd[vp]);
 
         /* Phase 4 (serial, main): VFX + HUD per pane on the immediate context,
          * with g_rs bound to the pane instance so VFX reads its camera/projection
@@ -4711,6 +4748,7 @@ int td5_game_run_race_frame(void) {
                 td5_hud_draw_status_text(vp, vp);
         }
         td5_render_scratch_unbind();
+        td5_render_set_camera_prebaked(0);   /* restore normal per-frame camera refresh */
     } else
     /* For each viewport: camera setup, sky, track, actors, vfx, hud */
     for (int vp = 0; vp < g_td5.viewport_count; vp++) {

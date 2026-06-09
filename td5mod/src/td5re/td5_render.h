@@ -188,6 +188,12 @@ void td5_render_flush_deferred_additive(void);
 int  td5_render_scratch_pool_ensure(int count);
 void td5_render_scratch_bind(int index);
 void td5_render_scratch_unbind(void);
+/* Bake the camera module's current basis/pos into the bound g_rs (per-pane camera
+ * for threaded panes). td5_render_set_camera_prebaked(1) makes render_actors use
+ * that baked camera instead of re-reading the shared current snapshot. */
+void td5_render_bake_camera(void);
+void td5_render_set_camera_prebaked(int on);
+void td5_render_log_pane_proj(int vp);   /* [diag] log per-pane projection inputs */
 
 /* --- Texture cache --- */
 void td5_render_reset_texture_cache(void);

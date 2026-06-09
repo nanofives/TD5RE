@@ -38,6 +38,7 @@
 #include "td5_render.h"
 #include "td5_camera.h"
 #include "td5_platform.h"
+#include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
 #include "td5_profile.h"
 #include "td5_track.h"
 #include "td5_game.h"
@@ -203,7 +204,15 @@ typedef struct TextureCacheSlot {
     uint8_t  _pad;
 } TextureCacheSlot;
 
-/* texture-bind cache (slots/active_count/current/previous page) moved to RenderScratch (Phase B Stage 1). */
+/* texture-bind cache: SHARED (manages the shared 1024-page GPU texture table).
+ * Intentionally NOT per-pane — see the note in RenderScratch. */
+static TextureCacheSlot s_texture_cache[TEXTURE_CACHE_SLOTS];
+static int              s_texture_cache_active_count;
+/* s_current_texture_page / s_previous_texture_page are PER-PANE (RenderScratch):
+ * the "currently bound page" is per-pane render state (each pane binds its own
+ * sequence), so the parallel build records the right page per pane. The LRU
+ * cache + active_count above stay SHARED (GPU residency manager, touched only on
+ * the serial replay/live path). */
 
 /* ========================================================================
  * Translucent Primitive Pipeline
@@ -331,16 +340,20 @@ typedef struct RenderScratch {
     /* camera basis/pos (per pane) */
     float camera_basis[9];
     float camera_pos[3];
+    float camera_secondary[9];   /* g_cameraSecondaryUnscaled snapshot (billboard basis) */
     /* lighting (written during actor pass) */
     float light_dirs[9];
     float ambient_intensity;
     TL_Contribution tl_contrib[3];
     int   tl_ambient;
-    /* texture-bind cache */
-    TextureCacheSlot texture_cache[TEXTURE_CACHE_SLOTS];
-    int texture_cache_active_count;
+    /* "currently/previously bound page" — per-pane render state (the LRU cache
+     * array itself stays shared; see note at its declaration). */
     int current_texture_page;
     int previous_texture_page;
+    /* NOTE: the texture-bind cache (TextureCacheSlot[600] + active_count) is NOT
+     * here — it manages the SHARED 1024-page GPU texture table, so it's a single
+     * shared instance (per-pane copies would diverge their page->slot mapping and
+     * bind/evict the wrong GPU pages). Kept as shared file statics. */
     /* translucent batch pipeline */
     TranslucentBatchEntry translucent_pool[TRANSLUCENT_POOL_SIZE];
     int translucent_head, translucent_free, translucent_count;
@@ -363,6 +376,7 @@ typedef struct RenderScratch {
     int scene_has_renderer_geometry;
     int in_sky_draw;
     int in_reflection_overlay;
+    uint8_t actor_light_zone[TD5_ACTOR_MAX_TOTAL_SLOTS];  /* per-pane light-zone cache */
 } RenderScratch;
 
 static RenderScratch        g_rs_default;
@@ -389,12 +403,13 @@ static __thread RenderScratch *g_rs = &g_rs_default;
 #define s_viewport_height           (g_rs->viewport_height)
 #define s_camera_basis              (g_rs->camera_basis)
 #define s_camera_pos                (g_rs->camera_pos)
+#define s_camera_secondary          (g_rs->camera_secondary)
 #define s_light_dirs                (g_rs->light_dirs)
 #define s_ambient_intensity         (g_rs->ambient_intensity)
 #define s_tl_contrib                (g_rs->tl_contrib)
 #define s_tl_ambient                (g_rs->tl_ambient)
-#define s_texture_cache             (g_rs->texture_cache)
-#define s_texture_cache_active_count (g_rs->texture_cache_active_count)
+/* s_texture_cache / _active_count are SHARED statics (declared at their original
+ * site), NOT g_rs fields. s_current/_previous_texture_page ARE per-pane g_rs. */
 #define s_current_texture_page      (g_rs->current_texture_page)
 #define s_previous_texture_page     (g_rs->previous_texture_page)
 #define s_translucent_pool          (g_rs->translucent_pool)
@@ -418,11 +433,37 @@ static __thread RenderScratch *g_rs = &g_rs_default;
 #define s_scene_has_renderer_geometry (g_rs->scene_has_renderer_geometry)
 #define s_in_sky_draw               (g_rs->in_sky_draw)
 #define s_in_reflection_overlay     (g_rs->in_reflection_overlay)
+#define s_actor_light_zone          (g_rs->actor_light_zone)
 
 /* [Phase B Stage 2b] Per-pane RenderScratch pool. Workers bind their pane's
  * instance (this thread's g_rs); the serial/main path uses g_rs_default. The
  * pool is allocated once, lazily, and never freed (bounded, reused each race). */
 static RenderScratch *s_rs_pool[TD5_MAX_VIEWPORTS];
+
+/* A calloc'd RenderScratch is all-zero, but several of its structures are
+ * linked lists / caches that MUST start -1-terminated (a zero free-list is a
+ * self-referential cycle -> infinite loop on first traversal). Mirror the
+ * one-time startup init that g_rs_default received. Runs on the main thread
+ * during pool creation (single-threaded), temporarily pointing g_rs at the
+ * instance so the field shims address it. */
+static void rs_init_instance(RenderScratch *rs)
+{
+    RenderScratch *save = g_rs;
+    g_rs = rs;
+
+    /* (texture cache is shared, not per-instance — initialized elsewhere) */
+
+    /* Translucent pipeline: builds the -1-terminated free list + empties the
+     * sorted list (head = -1). */
+    td5_render_init_translucent_pipeline();
+
+    /* Depth-sort buckets: -1 = empty bucket. */
+    for (int i = 0; i < DEPTH_BUCKET_COUNT; i++)
+        s_depth_buckets[i] = -1;
+    s_depth_entry_count = 0;
+
+    g_rs = save;
+}
 
 int td5_render_scratch_pool_ensure(int count)
 {
@@ -431,6 +472,7 @@ int td5_render_scratch_pool_ensure(int count)
         if (!s_rs_pool[i]) {
             s_rs_pool[i] = (RenderScratch *)calloc(1, sizeof(RenderScratch));
             if (!s_rs_pool[i]) return 0;
+            rs_init_instance(s_rs_pool[i]);
         }
     }
     return 1;
@@ -446,6 +488,15 @@ void td5_render_scratch_unbind(void)
 {
     g_rs = &g_rs_default;
 }
+
+/* [Phase B Stage 2b] When set, render_actors_for_view / configure_projection do
+ * NOT refresh the render camera from the camera module's single "current"
+ * snapshot (td5_camera_get_basis/position) — the per-pane camera was already
+ * baked into each g_rs[vp] by the serial Phase-1 pass. Without this, every pane
+ * would re-read the SAME current camera (the last pane applied) and show an
+ * identical view. Read-only on worker threads during the render phase. */
+static int s_camera_prebaked = 0;
+void td5_render_set_camera_prebaked(int on) { s_camera_prebaked = on ? 1 : 0; }
 
 /* ========================================================================
  * Sky Rotation (12-bit fixed angle, +0x400 per tick)
@@ -583,7 +634,10 @@ static int  s_environs_level;     /* level_number used to key the per-track tabl
  * ApplyTrackLightingForVehicleSegment @ 0x00430150 walks the per-track zone
  * array forward/backward each frame based on the actor's track_span_raw, so
  * we persist the last-known index per slot across frames. */
-static uint8_t s_actor_light_zone[TD5_ACTOR_MAX_TOTAL_SLOTS];
+/* s_actor_light_zone moved to RenderScratch (per-pane): update_actor_light_zone
+ * writes it every frame during the actor render, so under the threaded build all
+ * panes would write the same slot concurrently (flicker). Per-pane copies start
+ * at 0 (calloc), matching the level-load reset; hysteresis stays per-pane. */
 
 /* Per-track environs names + flags (from exe VA 0x0046bb1c). */
 #include "td5_environs_table.inc"
@@ -1014,6 +1068,32 @@ static void update_render_camera_from_game(void)
     if (s_inspect_enabled)
         apply_inspection_camera();
 #endif
+}
+
+/* [Phase B Stage 2b] Public: bake the camera module's CURRENT basis/position into
+ * the bound g_rs. The threaded path calls this in the serial camera pass (after
+ * td5_camera_apply_view(vp), with g_rs[vp] bound) so each pane's camera is stored
+ * per-pane EVERY frame; render_actors then skips its own refresh (s_camera_prebaked)
+ * and uses the baked camera, so panes don't all inherit the last applied view. */
+void td5_render_bake_camera(void)
+{
+    extern float g_cameraSecondaryUnscaled[9];   /* td5_camera.c (billboard basis) */
+    update_render_camera_from_game();
+    /* Snapshot the shared camera-secondary basis (used to orient billboards) into
+     * this pane's g_rs so the threaded build doesn't read another pane's value. */
+    memcpy(s_camera_secondary, g_cameraSecondaryUnscaled, 9 * sizeof(float));
+}
+
+/* [diag] log the bound g_rs's projection inputs (per-pane bake verification). */
+void td5_render_log_pane_proj(int vp)
+{
+    static int s_n = 0;
+    if (s_n < 12) {
+        TD5_LOG_W(LOG_TAG, "pane %d proj: center=(%.0f,%.0f) vpwh=(%d,%d) focal=%.0f cam=(%.0f,%.0f,%.0f)",
+                  vp, s_center_x, s_center_y, s_viewport_width, s_viewport_height, s_focal_length,
+                  s_camera_pos[0], s_camera_pos[1], s_camera_pos[2]);
+        s_n++;
+    }
 }
 
 /* Programmatic inspection-camera control — drives the same fixed-angle camera
@@ -2182,9 +2262,11 @@ void td5_render_span_display_list(void *display_list_block)
          * billboard quad off-screen. */
         int billboard_tag = (int)mesh->texture_page_id;
         if (billboard_tag == 1 || billboard_tag == 2) {
-            extern float g_cameraSecondaryUnscaled[9];
+            /* per-pane billboard basis (baked from g_cameraSecondaryUnscaled in
+             * td5_render_bake_camera) — reading the shared global here would make
+             * all threaded panes orient billboards with the last pane's camera. */
             td5_render_push_transform();
-            td5_render_load_rotation((const TD5_Mat3x3 *)g_cameraSecondaryUnscaled);
+            td5_render_load_rotation((const TD5_Mat3x3 *)s_camera_secondary);
             td5_render_transform_mesh_vertices(mesh);
             /* Skip runtime vertex-lighting recompute for billboard meshes.
              * RenderTrackSpanDisplayList @ 0x00431270 only calls
@@ -2510,8 +2592,11 @@ void td5_render_actors_for_view(int view_index)
 
     /* Refresh render-side camera snapshot from game-side globals every frame.
      * td5_render_configure_projection only runs when viewport dimensions change,
-     * so without this the render camera stays frozen at its initial position. */
-    update_render_camera_from_game();
+     * so without this the render camera stays frozen at its initial position.
+     * [Phase B Stage 2b] Skip when the per-pane camera was pre-baked into this
+     * g_rs by the serial camera pass (else all panes re-read the same current). */
+    if (!s_camera_prebaked)
+        update_render_camera_from_game();
 
     /* Draw sky panorama behind all geometry. Sky uses TD5_PRESET_SKY
      * (z_test=1, z_write=0) so the dome — drawn camera-centered with small
@@ -3692,6 +3777,17 @@ int td5_render_bind_texture_page(int page_id)
     /* Check if already the current texture */
     if (page_id == s_current_texture_page) return 1;
 
+    /* [Phase B render-transform] Recording (worker building a pane list): touch
+     * NO shared GPU state. Track the per-pane current page (so flush_immediate's
+     * bind records correctly) and record the bind intent; the cache lookup + GPU
+     * bind + blend preset are resolved on the serial replay. */
+    if (td5_rcmd_recording()) {
+        s_previous_texture_page = s_current_texture_page;
+        s_current_texture_page  = page_id;
+        td5_rcmd_bind_page(page_id);
+        return 1;
+    }
+
     s_debug_texture_bind_calls++;
 
     /* Search cache for this page */
@@ -3851,14 +3947,14 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot)
             verts[i].proj_v = (vz * cos_h + sin_h * vx + bias_v) * (1.0f / 1024.0f);
         }
     } else if (mode == 3) {
-        extern float g_cameraPos[3];   /* td5_camera.c */
         const float *mv  = s_render_transform.m;
         const float *cam = s_camera_basis;
         /* Anchor in view space: TransformVector3ByBasis(DAT_004aafe0, slot.anchor - camera_world).
-         * The port's s_camera_basis mirrors DAT_004aafe0 (camera world-to-view rotation). */
-        float dx = pe->anchor_x - g_cameraPos[0];
-        float dy = pe->anchor_y - g_cameraPos[1];
-        float dz = pe->anchor_z - g_cameraPos[2];
+         * The port's s_camera_basis mirrors DAT_004aafe0 (camera world-to-view rotation).
+         * Use the PER-PANE baked camera pos (s_camera_pos) not the shared g_cameraPos. */
+        float dx = pe->anchor_x - s_camera_pos[0];
+        float dy = pe->anchor_y - s_camera_pos[1];
+        float dz = pe->anchor_z - s_camera_pos[2];
         float anchor_vx = cam[0] * dx + cam[1] * dy + cam[2] * dz;
         float anchor_vy = cam[3] * dx + cam[4] * dy + cam[5] * dz;
         const float rot_scale   = 0.375f;                                 /* _DAT_0045d788 */

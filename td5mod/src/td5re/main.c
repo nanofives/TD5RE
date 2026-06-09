@@ -642,6 +642,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * before any asset loading (Phase A) or render submission (Phase B) can use
      * it. Auto-sizes to (logical CPUs - 2). Torn down in Step 7 shutdown. */
     td5_jobs_init(0);
+    td5_jobs_selftest_tls();   /* [diag] confirm __thread is per-worker before relying on it */
 
     /* Load INI before anything else */
     td5_load_ini();

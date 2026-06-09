@@ -48,6 +48,10 @@ int  td5_jobs_worker_count(void);
  * the calling thread. */
 void td5_jobs_parallel_for(int count, td5_job_fn fn, void *ctx);
 
+/* Diagnostic: returns 0 if GCC __thread is per-worker isolated on the pool,
+ * >0 (failure count) if __thread is shared/broken across workers. */
+int  td5_jobs_selftest_tls(void);
+
 #define TD5_JOBS_MAX_WORKERS 32
 
 #ifdef __cplusplus
