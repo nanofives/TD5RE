@@ -487,6 +487,13 @@ static int td5_src_encode_strip(const char *src_path, const char *zip_path,
     if (ok && td5_hex_decode(pre_span_s, out + pos) == pre_span_n) pos += pre_span_n;
     else if (ok) ok = 0;
 
+    /* total_spans (header[4]) — used to validate junction link targets below. */
+    long long span_total = 0;
+    {
+        const cJSON *h4 = cJSON_GetArrayItem(hdr, 4);
+        if (h4 && cJSON_IsNumber(h4)) span_total = td5_json_round(h4);
+    }
+
     if (ok) {                                   /* spans: 24 bytes each */
         const cJSON *s = NULL;
         cJSON_ArrayForEach(s, spans) {
@@ -497,6 +504,27 @@ static int td5_src_encode_strip(const char *src_path, const char *zip_path,
                 f[j++] = td5_json_round(e);
             }
             if (!ok) break;
+
+            /* --- TD6 backward-junction (span type 11) link fix ---------------
+             * Field layout: f[6]=link_next(+0x08), f[7]=link_prev(+0x0A),
+             * f[0]=span_type. Native TD5 stores a type-11 (main-road backward-
+             * return) junction's BRANCH target in link_prev, with link_next = -1.
+             * Migrated TD6 strips instead leave the target in link_next (pointing
+             * at a real appended branch span >= ring_length) and carry garbage in
+             * link_prev, so the TD5 engine + AI read a junk backward branch ->
+             * invisible geometry / teleports / AI confusion near junctions on
+             * every TD6 track (worst on London: 28 type-11 junctions). Mirror the
+             * real target into the field TD5 reads.
+             * Guard `link_next in [0,total)`: native type-11 spans have
+             * link_next = -1 (out of range) so they are NOT touched -> the strip
+             * round-trip stays byte-exact for faithful TD5 tracks. Types 8/9/10
+             * already place their target in the field TD5 reads, so only 11 here.
+             * See reference_td6_strip_backward_junction_linkfield_2026-06-08. */
+            if (f[0] == 11 && span_total > 0 && f[6] >= 0 && f[6] < span_total) {
+                f[7] = f[6];     /* link_prev = real branch target */
+                f[6] = -1;       /* link_next = -1 sentinel (TD5 convention) */
+            }
+
             td5_put_le(out, pos + 0,  1, f[0]);  td5_put_le(out, pos + 1,  1, f[1]);
             td5_put_le(out, pos + 2,  1, f[2]);  td5_put_le(out, pos + 3,  1, f[3]);
             td5_put_le(out, pos + 4,  2, f[4]);  td5_put_le(out, pos + 6,  2, f[5]);
