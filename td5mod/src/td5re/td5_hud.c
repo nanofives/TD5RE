@@ -42,6 +42,14 @@
 
 #define LOG_TAG "hud"
 
+/* Screen centre in render-target pixels — single source for the HUD's
+ * centred overlays (pause panel, TTF pause text, sliders). */
+static inline void hud_screen_center(float *cx, float *cy)
+{
+    *cx = g_render_width_f  * 0.5f;
+    *cy = g_render_height_f * 0.5f;
+}
+
 /* ========================================================================
  * HUD-owned globals (migrated from td5re_stubs.c)
  * ======================================================================== */
@@ -1107,8 +1115,8 @@ void td5_hud_draw_pause_overlay(void)
         const float PAUSE_TTF_CAP      = 12.0f;
         const float PAUSE_TTF_BASELINE = 17.0f;   /* 11 + CAP/2; centres caps on the selbox */
         const float PAUSE_TTF_TRACK    = 0.0f;
-        float cx = g_render_width_f  * 0.5f;
-        float cy = g_render_height_f * 0.5f;
+        float cx, cy;
+        hud_screen_center(&cx, &cy);
         static int s_logged_pause_ttf = 0;
         if (!s_logged_pause_ttf) {
             s_logged_pause_ttf = 1;
@@ -1156,8 +1164,8 @@ void td5_hud_draw_pause_overlay(void)
      * (alignment, glyph_w = width*2/3, +2 spacing, char-code -> 16x16 cell UV). */
     if (g_td5.ini.vector_ui && td5_vui_pausefont_page() >= 0 && s_pause_vui_line_count > 0) {
         int page = td5_vui_pausefont_page();
-        float cx = g_render_width_f  * 0.5f;
-        float cy = g_render_height_f * 0.5f;
+        float cx, cy;
+        hud_screen_center(&cx, &cy);
         const float INV = 1.0f / 256.0f;          /* pause SDF page is 256x256 */
         for (int li = 0; li < s_pause_vui_line_count; li++) {
             PauseTextLine *L = &s_pause_vui_lines[li];
@@ -1357,8 +1365,8 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
         td5_hud_init_pause_menu(s_pause_page_index);
     }
 
-    float cx = g_render_width_f  * 0.5f;
-    float cy = g_render_height_f * 0.5f;
+    float cx, cy;
+    hud_screen_center(&cx, &cy);
     float fracs[2] = { view_dist_frac, sfx_frac };  /* row 0 = VIEW, row 1 = SOUND */
 
     {
@@ -4697,8 +4705,8 @@ void td5_hud_init_pause_menu(int page_index)
     /* The original uses centered coords (origin = screen center).
      * Our pipeline uses pixel-space coords, so offset all positions by
      * the screen center so the panel appears in the middle of the screen. */
-    float cx = g_render_width_f  * 0.5f;
-    float cy = g_render_height_f * 0.5f;
+    float cx, cy;
+    hud_screen_center(&cx, &cy);
 
     /* Remember what we baked against so the per-frame update path can re-bake if
      * the render dimensions change (otherwise the panel drifts off the live-

@@ -8550,8 +8550,8 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
      * which off-by-ones at v == 0x800. */
     int32_t raw_roll  = (uint16_t)actor->display_angles.roll;
     int32_t raw_pitch = (uint16_t)actor->display_angles.pitch;
-    int32_t iVar1 = ((raw_roll  - 0x800) & 0xFFF) - 0x800;  /* signed roll  */
-    int32_t iVar2 = ((raw_pitch - 0x800) & 0xFFF) - 0x800;  /* signed pitch */
+    int32_t iVar1 = td5_angle12_signed(raw_roll);   /* signed roll  */
+    int32_t iVar2 = td5_angle12_signed(raw_pitch);  /* signed pitch */
 
     /* === Dispatch on collisions flag [0x00405B86-B88] === */
     if (g_collisions_enabled != 0) {

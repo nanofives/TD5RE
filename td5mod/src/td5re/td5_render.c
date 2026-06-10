@@ -5523,7 +5523,7 @@ static void render_tracked_actor_marker(const TD5_Actor *actor,
     int forward_dx = (int)(m[6] * 256.0f);   /* m[6..8] = forward (row 2) */
     int forward_dz = (int)(m[8] * 256.0f);
     int base_yaw   = AngleFromVector12(forward_dx, forward_dz);
-    int wrapped    = ((base_yaw - 0x800) & 0xFFF) - 0x800;
+    int wrapped    = td5_angle12_signed(base_yaw);
     int yaw_div16  = (wrapped + ((wrapped >> 31) & 0xF)) >> 4;
 
     for (int marker = 0; marker < TD5_VFX_TRACKED_MARKER_COUNT; marker++) {
