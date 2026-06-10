@@ -2770,6 +2770,9 @@ int td5_net_handle_host_frame(uint32_t *control_bits, float *frame_dt)
             return 0;
     }
 
+    if (s_connection_lost)
+        return 0;
+
     /* 2. Store local input and mark as received */
     s_player_sync_table[s_local_slot] = control_bits[s_local_slot];
     s_player_sync_received[s_local_slot] = 1;
@@ -2798,11 +2801,23 @@ int td5_net_handle_host_frame(uint32_t *control_bits, float *frame_dt)
         if (all_received) goto done_waiting;
     }
 
-    wait_result = WaitForSingleObject(s_evt_frame_ack, SYNC_TIMEOUT_MS);
+    /* Wait in short slices so a peer quit (DXPDISCONNECT -> s_connection_lost)
+     * aborts the barrier in <=250 ms instead of blocking the game thread for
+     * the full 20 s timeout (the window reads as frozen). */
+    {
+        DWORD waited = 0;
+        for (;;) {
+            wait_result = WaitForSingleObject(s_evt_frame_ack, 250);
+            if (wait_result == WAIT_OBJECT_0 || s_connection_lost) break;
+            waited += 250;
+            if (waited >= SYNC_TIMEOUT_MS) break;
+        }
+    }
     if (wait_result != WAIT_OBJECT_0) {
         s_waiting_for_frame_ack = 0;
-        TD5_LOG_W(NET_LOG, "Host HandlePadHost: timed out waiting for client inputs");
-        return 0; /* Caller sets ESC bit, disconnects */
+        TD5_LOG_W(NET_LOG, "Host HandlePadHost: %s waiting for client inputs",
+                  s_connection_lost ? "connection lost" : "timed out");
+        return 0; /* Caller quits the race */
     }
 
 done_waiting:
@@ -2878,7 +2893,7 @@ int td5_net_handle_client_frame(uint32_t *control_bits, float *frame_dt)
     uint32_t host_id = 0;
     int i;
 
-    if (!s_active)
+    if (!s_active || s_connection_lost)
         return 0;
 
     /* 1. Check for pending resync */
@@ -2919,12 +2934,22 @@ int td5_net_handle_client_frame(uint32_t *control_bits, float *frame_dt)
     if (s_transport_send)
         s_transport_send(host_id, &send_frame, FRAME_MSG_SIZE);
 
-    wait_result = WaitForSingleObject(s_evt_frame_ack, SYNC_TIMEOUT_MS);
+    /* Sliced wait: see the host-side comment -- bail fast on a dead link. */
+    {
+        DWORD waited = 0;
+        for (;;) {
+            wait_result = WaitForSingleObject(s_evt_frame_ack, 250);
+            if (wait_result == WAIT_OBJECT_0 || s_connection_lost) break;
+            waited += 250;
+            if (waited >= SYNC_TIMEOUT_MS) break;
+        }
+    }
     s_waiting_for_frame_ack = 0;
 
     if (wait_result != WAIT_OBJECT_0) {
-        TD5_LOG_W(NET_LOG, "Client HandlePadClient: timed out waiting for host broadcast");
-        return 0; /* Caller sets ESC bit, disconnects */
+        TD5_LOG_W(NET_LOG, "Client HandlePadClient: %s waiting for host broadcast",
+                  s_connection_lost ? "connection lost" : "timed out");
+        return 0; /* Caller quits the race */
     }
 
     /* Check if resync was triggered during the wait */
@@ -3102,9 +3127,28 @@ int td5_net_send(TD5_NetMsgType type, const void *data, int size)
         return 0;
 
     case TD5_DXPDATA:
+    case TD5_DXPDATA_TARGETED: {
+        /* Wire layout [4B type][4B payload_size][N payload] -- handle_data /
+         * handle_data_targeted read the size dword at +4 and the payload at
+         * +8. td5_net_send used to omit the size field, so receivers parsed
+         * the first 4 payload bytes as the length and surfaced the REMAINDER
+         * as the message: the lobby kick (payload[0]=0x12) arrived as zeros
+         * and was silently dropped. */
+        uint8_t wire[RING_ENTRY_SIZE];
+        uint32_t psz = (uint32_t)size;
+        if (size + 8 > (int)sizeof(wire)) {
+            TD5_LOG_E(NET_LOG, "Send message too large: type=%d size=%d", type, size);
+            return 0;
+        }
+        memcpy(wire, &type, 4);
+        memcpy(wire + 4, &psz, 4);
+        if (data && size > 0)
+            memcpy(wire + 8, data, (size_t)size);
+        s_transport_send(0, wire, size + 8);
+        break;
+    }
     case TD5_DXPCHAT:
-    case TD5_DXPDATA_TARGETED:
-        /* Broadcast to all */
+        /* Broadcast to all ([4B type][string] -- handle_chat reads at +4) */
         s_transport_send(0, buf, total_size);
         break;
 
@@ -3278,4 +3322,13 @@ const char *td5_net_get_enum_session_name(int index)
     if (index < 0 || index >= s_enum_session_count)
         return "";
     return s_enum_sessions[index].name;
+}
+
+int td5_net_get_enum_session_info(int index, int *player_count, int *max_players)
+{
+    if (index < 0 || index >= s_enum_session_count)
+        return 0;
+    if (player_count) *player_count = s_enum_sessions[index].player_count;
+    if (max_players)  *max_players  = s_enum_sessions[index].max_players;
+    return 1;
 }

@@ -2719,20 +2719,27 @@ void frontend_init_race_schedule(void) {
      * the shared seed so the rand()-driven AI fill below picks the SAME cars
      * on every machine. Lockstep has no state correction -- a different
      * carparam on any slot is a permanent desync. */
+    TD5_NetRaceConfig net_cfg;
+    int net_cfg_valid = 0;
     if (g_td5.network_active) {
-        TD5_NetRaceConfig ncfg;
-        if (td5_net_get_race_config(&ncfg)) {
+        if (td5_net_get_race_config(&net_cfg)) {
             int np = td5_net_get_player_count();
+            net_cfg_valid = 1;
             if (np > TD5_MAX_RACER_SLOTS) np = TD5_MAX_RACER_SLOTS;
             for (i = 0; i < np && i < 6; i++) {
                 slot_active[i]  = 1;
-                slot_ext_id[i]  = (ncfg.car_index[i] >= 0) ? ncfg.car_index[i] : 0;
-                slot_variant[i] = ncfg.paint_index[i];
+                slot_ext_id[i]  = (net_cfg.car_index[i] >= 0) ? net_cfg.car_index[i] : 0;
+                slot_variant[i] = net_cfg.paint_index[i];
             }
-            srand(ncfg.rng_seed);
+            /* The AI fill below must not overwrite the net players' slots
+             * (it used to start at slot 1 and stomp every client's car). */
+            if (np > start_slot) start_slot = np;
+            /* Opponent count is host-authoritative: it decides how many racer
+             * slots InitRace enables -- a mismatch is a different grid. */
+            g_td5.num_ai_opponents = net_cfg.num_opponents;
             TD5_LOG_I(LOG_TAG,
-                      "InitRaceSchedule: net config applied (np=%d seed=0x%08X)",
-                      np, ncfg.rng_seed);
+                      "InitRaceSchedule: net config applied (np=%d opp=%d seed=0x%08X)",
+                      np, net_cfg.num_opponents, net_cfg.rng_seed);
         } else {
             TD5_LOG_W(LOG_TAG,
                       "InitRaceSchedule: network race WITHOUT a host config");
@@ -2808,7 +2815,16 @@ void frontend_init_race_schedule(void) {
      *   - Port calls srand(0x1A2B3C4D) with ZERO preamble burns.
      *   - Both sides start AI-car selection from rand #1 → identical picks.
      * [CONFIRMED @ td5_quickrace_hook.js:180-186, td5_quickrace.py:261] */
-    if (g_td5.ini.race_trace_enabled) {
+    if (net_cfg_valid) {
+        /* [S31 NET] Every machine must run the AI car fill from the SAME
+         * rand() stream: seed with the host-broadcast seed, no preamble burn
+         * (every machine runs this exact path). The wall-clock srand below
+         * used to run AFTER the net seed was applied and silently wiped it --
+         * each machine then picked its own AI grid ("cars are different
+         * between client and server"). The fixed-trace seed masked this in
+         * the headless A/B runs by overriding both sides identically. */
+        srand(net_cfg.rng_seed);
+    } else if (g_td5.ini.race_trace_enabled) {
         /* Under race_trace_enabled the Frida quickrace hook calls
          * _srand(0x1A2B3C4D) IMMEDIATELY before InitializeRaceSeriesSchedule()
          * with zero preamble rand() calls between them (hook bypasses
@@ -2844,7 +2860,7 @@ void frontend_init_race_schedule(void) {
         (void)rand();
     }
 
-    if (s_selected_game_type == 2) {
+    if (s_selected_game_type == 2 && !g_td5.network_active) {
         /* === Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] ===
          * Original loop body consumes THREE rand() calls per iteration:
          *   rand #1 -> ext_id (& 7, optionally +8 if player car > 7)
@@ -2872,7 +2888,7 @@ void frontend_init_race_schedule(void) {
             TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d var=%d attempts=%d",
                       i, ext_id, slot_variant[i], attempts);
         }
-    } else if (s_selected_game_type == 5) {
+    } else if (s_selected_game_type == 5 && !g_td5.network_active) {
         /* === Path 2: Cup/Masters (gameType == 5) [CONFIRMED @ 0x0040dac0] ===
          * Scans s_masters_roster_flags[] for state==1 entries, claims them (sets to 2),
          * reads ext car id from s_masters_roster[]. */
@@ -3872,6 +3888,18 @@ static void frontend_render_text_input(void) {
 
 int frontend_text_input_confirmed(void) {
     return (s_text_input_ctx.confirm_state != 0) || (s_text_input_state == 2);
+}
+
+/* [S31] Drop any latched text-input confirm. confirm_state is set on commit
+ * and was only ever cleared by the next frontend_begin_text_input, so a
+ * screen that polls frontend_text_input_confirmed() OUTSIDE an active edit
+ * (the network lobby's chat-submit check runs every interactive frame) saw
+ * a confirm latched on a PRIOR screen -- e.g. the CREATE SESSION name edit --
+ * as TRUE forever, looping the lobby through its chat-submit states and
+ * eating ~2/3 of all button presses ("kick/start/nav don't work"). */
+void frontend_reset_text_input(void) {
+    s_text_input_state = 0;
+    s_text_input_ctx.confirm_state = 0;
 }
 
 /* --- Cheat Code Detection --- */
@@ -7891,8 +7919,7 @@ static void frontend_render_create_session_postpass(float sx, float sy) {
     frontend_get_button_render_rect(1, sx, sy, &bx, &by, &bw, &bh);
     snprintf(buf, sizeof(buf), "MAX PLAYERS: %d", s_lobby_max_players);
     tw = fe_measure_text(buf, sx, sy);
-    fe_draw_text(bx + (bw - tw) * 0.5f, by + (bh - 16.0f * sy) * 0.5f,
-                 buf, 0xFFFFFFFF, sx, sy);
+    fe_draw_text(bx + (bw - tw) * 0.5f, by, buf, 0xFFFFFFFF, sx, sy);
     fe_draw_option_arrows(1, sx, sy);
 }
 

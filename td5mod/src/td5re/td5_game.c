@@ -3388,7 +3388,20 @@ static int td5_game_net_sync_frame(void) {
     if (!ok) {
         bits[local] |= (uint32_t)TD5_INPUT_ESCAPE;
         td5_input_set_control_bits(local, bits[local]);
-        TD5_LOG_W(LOG_TAG, "net lockstep failed (timeout/disconnect) -> ESC slot %d", local);
+        TD5_LOG_W(LOG_TAG, "net lockstep failed (%s) -> quit to menu",
+                  td5_net_is_connection_lost() ? "connection lost" : "timeout");
+        /* [S31] Don't leave the player in a dead lockstep race (the old ESC
+         * bit only opened the pause menu over a frozen sim): run the pause
+         * QUIT TO MENU sequence directly -- fade out, release, back to the
+         * frontend, where the lobby/browser screens already handle the
+         * connection-lost cleanup. */
+        if (!s_pause_exit_pending) {
+            TD5_Actor *pl = td5_game_get_actor(0);
+            s_pause_menu_active = 0;
+            s_pause_exit_pending = 1;
+            s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+            td5_game_begin_fade_out(0);
+        }
         return 1;
     }
 

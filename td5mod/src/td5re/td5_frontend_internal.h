@@ -495,6 +495,7 @@ void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing);
 
 extern char s_create_session_name[64];
 extern int  s_cs_edit;
+void frontend_reset_text_input(void);
 
 /* @GENERATED-SYMBOLS@ */
 

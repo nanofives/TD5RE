@@ -627,50 +627,70 @@ void Screen_DirectConnect(void) {
     }
 }
 
-/* S10: set the SESSION_PICKER selector (button 0) label from s_net_session_sel
- * (discover-only: 0..count-1 are the discovered LAN sessions; hosting is the
- * separate LAN-menu "HOST" option). */
-static void frontend_net_label_session_selector(void) {
+/* [S31] SESSION_PICKER list: one row button per discovered LAN session
+ * (indices 0..5) + BACK (6). Rows refresh every frame as discovery replies
+ * arrive; ENTER on a row joins that session directly. */
+static int s_picker_prev_count = -1;
+static void frontend_net_update_session_list(void) {
     int count = td5_net_get_enum_session_count();
-    char buf[64];
-    if (count <= 0) {
-        s_net_session_sel = 0;
-        snprintf(buf, sizeof(buf), "(NO LAN GAMES FOUND)");
-    } else {
-        if (s_net_session_sel < 0) s_net_session_sel = count - 1;   /* wrap */
-        if (s_net_session_sel >= count) s_net_session_sel = 0;
-        snprintf(buf, sizeof(buf), "%s  (%d/%d)",
-                 td5_net_get_enum_session_name(s_net_session_sel),
-                 s_net_session_sel + 1, count);
+    int i;
+    for (i = 0; i < 6 && i < FE_MAX_BUTTONS; i++) {
+        if (!s_buttons[i].active) continue;
+        if (i < count) {
+            int cur = 0, max = 0;
+            td5_net_get_enum_session_info(i, &cur, &max);
+            snprintf(s_buttons[i].label, sizeof(s_buttons[i].label),
+                     "%s  %d/%d", td5_net_get_enum_session_name(i), cur, max);
+            s_buttons[i].hidden   = 0;
+            s_buttons[i].disabled = 0;
+        } else if (i == 0 && count <= 0) {
+            snprintf(s_buttons[i].label, sizeof(s_buttons[i].label),
+                     "(SEARCHING FOR LAN GAMES...)");
+            s_buttons[i].hidden   = 0;
+            s_buttons[i].disabled = 1;
+        } else {
+            s_buttons[i].label[0] = '\0';
+            s_buttons[i].hidden   = 1;
+            s_buttons[i].disabled = 1;
+        }
     }
-    strncpy(s_buttons[0].label, buf, sizeof(s_buttons[0].label) - 1);
-    s_buttons[0].label[sizeof(s_buttons[0].label) - 1] = '\0';
+    /* First session appearing: pull the selection up onto the list (it
+     * parked on BACK while every row was disabled). */
+    if (s_picker_prev_count <= 0 && count > 0 && s_selected_button == 6)
+        s_selected_button = 0;
+    s_picker_prev_count = count;
 }
 
 void Screen_SessionPicker(void) {
-    /* [PERF 2026-06-06] LAN discovery is now non-blocking + incremental, so poll it
-     * every frame after init: the session list fills in live as hosts answer,
-     * instead of the old 500ms select-poll freeze on the entry frame. */
+    /* [PERF 2026-06-06] LAN discovery is non-blocking + incremental: poll it
+     * every frame after init so the list fills in live as hosts answer. */
     if (s_inner_state >= 1) {
         td5_net_enumerate_sessions();
-        frontend_net_label_session_selector();
+        frontend_net_update_session_list();
     }
     switch (s_inner_state) {
-    case 0: /* Init: kick off LAN discovery + build the session selector */
+    case 0: /* Init: kick off LAN discovery + build the session list */
+    {
+        int i;
         frontend_init_return_screen(TD5_SCREEN_SESSION_PICKER);
         TD5_LOG_D(LOG_TAG, "SessionPicker: init (LAN discovery)");
         td5_net_set_mode(TD5_NET_MODE_LAN);
         td5_net_enumerate_sessions();             /* start a discovery window (non-blocking) */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* [FIXED 2026-06-02, runtime @0x499c78] list (120,193) 496x128; OK (120,377) 96; BACK (232,377) 112. */
-        frontend_create_button(SNK_ChooseSessionButTxt, 120, 193, 496, 128);  /* slot 0: session selector */
-        frontend_create_button(SNK_OkButTxt,     120, 377,  96, 0x20);   /* slot 1 */
-        frontend_create_button(SNK_BackButTxt,   232, 377, 112, 0x20);   /* slot 2 */
-        s_net_session_sel = 0;
-        frontend_net_label_session_selector();
+        for (i = 0; i < 6; i++) {                 /* 0..5: session rows */
+            int bi = frontend_create_button("", 120, 150 + i * 38, 420, 0x20);
+            if (bi >= 0 && bi < FE_MAX_BUTTONS) {
+                s_buttons[bi].hidden   = 1;
+                s_buttons[bi].disabled = 1;
+            }
+        }
+        frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);   /* 6 */
+        s_picker_prev_count = -1;
+        frontend_net_update_session_list();
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
+    }
 
     case 1: /* Build session list */
         s_inner_state = 2;
@@ -689,26 +709,18 @@ void Screen_SessionPicker(void) {
             s_inner_state = 5;
             break;
         }
-        if (s_input_ready) {
-            /* Slot 0 = session selector (host or join target), slot 1 = OK, slot 2 = Back. */
-            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            int delta = frontend_option_delta();
-            if (active_button == 0 && delta != 0) {
-                s_net_session_sel += (delta > 0) ? 1 : -1;
-                frontend_net_label_session_selector();
-                frontend_play_sfx(2);
-            } else if (s_button_index == 1) { /* OK -> join the selected session */
-                if (td5_net_get_enum_session_count() <= 0) {
-                    frontend_play_sfx(10);        /* nothing to join */
-                } else if (td5_net_join_session(s_net_session_sel, frontend_net_player_name())) {
+        if (s_input_ready && s_button_index >= 0) {
+            if (s_button_index <= 5) {        /* session row -> join it */
+                if (s_button_index < td5_net_get_enum_session_count() &&
+                    td5_net_join_session(s_button_index, frontend_net_player_name())) {
                     s_network_active = 1;
                     s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
                     s_inner_state = 5;
                 } else {
-                    TD5_LOG_W(LOG_TAG, "LAN join %d failed", s_net_session_sel);
+                    TD5_LOG_W(LOG_TAG, "LAN join %d failed", s_button_index);
                     frontend_play_sfx(10);
                 }
-            } else if (s_button_index == 2) { /* Back -> LAN menu */
+            } else if (s_button_index == 6) { /* Back -> LAN menu */
                 s_return_screen = TD5_SCREEN_LAN_MENU;
                 s_inner_state = 5;
             }
@@ -943,6 +955,12 @@ void Screen_NetworkLobby(void) {
         frontend_create_button(SNK_ChangeCarButTxt, 440, 150, 150, 0x20); /* 1 CHANGE CAR */
         frontend_create_button("SELECT TRACK",      440, 190, 150, 0x20); /* 2 SELECT TRACK */
         frontend_create_button(SNK_ExitButTxt,      440, 230, 150, 0x20); /* 3 EXIT */
+        /* [S31] Track choice is the host's call (the DXPSTART config overrides
+         * any client-side pick anyway) -- hide SELECT TRACK for joiners. */
+        if (!frontend_net_is_host()) {
+            s_buttons[2].hidden   = 1;
+            s_buttons[2].disabled = 1;
+        }
         /* [S31 redesign] indices 4..8: per-row KICK buttons (host only) —
          * positioned/unhidden each frame next to the joined remote players;
          * the exit-door icon is drawn over them in the post-button pass. */
@@ -980,7 +998,7 @@ void Screen_NetworkLobby(void) {
          * flag armed here suppressed the keyboard nav FIFO for the whole
          * lobby (frontend_poll_input flushes nav while a text field is open),
          * which made every lobby button unreachable by keyboard. */
-        s_text_input_state = 0;
+        frontend_reset_text_input();   /* also drops a stale confirm latch */
         s_inner_state = 3;
         break;
 
@@ -1180,12 +1198,15 @@ void Screen_NetworkLobby(void) {
                 td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
                 return;
 
-            case 2: /* SELECT TRACK -> the track picker. flow_context==4 makes the
-                     * track screen's exit dispatch return here (not launch a race),
-                     * so the host can set the track and come back to the lobby. */
-                s_flow_context = 4;
-                td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
-                return;
+            case 2: /* SELECT TRACK -> the track picker (host only; hidden for
+                     * joiners). flow_context==4 makes the track screen's exit
+                     * dispatch return here (not launch a race). */
+                if (frontend_net_is_host()) {
+                    s_flow_context = 4;
+                    td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
+                    return;
+                }
+                break;
 
             case 3: /* EXIT -> tear down the session and leave the lobby */
                 TD5_LOG_I(LOG_TAG, "NetworkLobby: exit -> destroy session");
@@ -1357,7 +1378,7 @@ void Screen_NetworkLobby(void) {
                 if (s_participant_flags[slot] && s_per_slot_status[slot] != 2) {
                     /* Kick non-ready: send LOBBY_KICK (opcode 0x12) */
                     uint8_t kick_msg[8] = {0x12, 0, 0, 0, 0, 0, 0, 0};
-                    kick_msg[4] = (uint8_t)slot;
+                    kick_msg[1] = (uint8_t)slot;
                     frontend_net_send(1, kick_msg, 8);
                     s_participant_flags[slot] = 0;
                 }
@@ -1454,6 +1475,7 @@ void Screen_NetworkLobby(void) {
                 cfg.track_index       = s_selected_track;
                 cfg.reverse_direction = s_track_direction;
                 cfg.lap_count         = 4;   /* net races force 4-lap drag mode */
+                cfg.num_opponents     = g_td5.num_ai_opponents;
                 for (slot = 0; slot < 6; slot++) {
                     cfg.car_index[slot]   = 0;
                     cfg.paint_index[slot] = 0;

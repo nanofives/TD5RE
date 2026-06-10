@@ -210,6 +210,16 @@ int td5_frontend_init_resources(void) {
     TD5_LOG_I(LOG_TAG, "InitializeFrontendResourcesAndState");
     frontend_init_font_metrics_default();
 
+    /* [S31] A net race aborted via the auto quit-to-menu (peer vanished ->
+     * dead lockstep) re-enters the frontend HERE, bypassing the lobby's
+     * connection-lost cleanup -- tear the dead session down so NET PLAY can
+     * start fresh instead of inheriting a zombie session. */
+    if (s_network_active && td5_net_is_connection_lost()) {
+        TD5_LOG_I(LOG_TAG, "frontend re-entry: dead net session, destroying");
+        frontend_net_destroy();
+        s_network_active = 0;
+    }
+
     /* Create 1x1 white fallback texture for untextured draws */
     if (s_white_tex_page < 0) {
         s_white_tex_page = SHARED_PAGE_WHITE;

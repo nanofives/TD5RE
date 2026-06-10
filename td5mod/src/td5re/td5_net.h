@@ -86,6 +86,7 @@ int  td5_net_local_slot(void);
 int  td5_net_is_connection_lost(void);
 int  td5_net_get_enum_session_count(void);
 const char *td5_net_get_enum_session_name(int index);
+int  td5_net_get_enum_session_info(int index, int *player_count, int *max_players);
 
 /* --- S31 network race config (2026-06-10) -------------------------------
  * Host-authoritative race parameters broadcast in the DXPSTART payload so
@@ -97,6 +98,7 @@ typedef struct TD5_NetRaceConfig {
     int32_t  track_index;
     int32_t  reverse_direction;
     int32_t  lap_count;           /* informational (net races force 4) */
+    int32_t  num_opponents;       /* AI opponent count (decides active slots) */
     int32_t  car_index[6];        /* per net slot (TD5_NET_MAX_PLAYERS) */
     int32_t  paint_index[6];
 } TD5_NetRaceConfig;
