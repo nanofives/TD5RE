@@ -2174,6 +2174,12 @@ void td5_net_shutdown(void)
 
     TD5_LOG_I(NET_LOG, "Shutting down network subsystem");
 
+    /* S31: tell the peers we're leaving BEFORE tearing the transport down,
+     * so a host quit doesn't leave clients sitting in a dead lobby (the
+     * DXPDISCONNECT handler sets s_connection_lost on the receivers). */
+    if ((s_is_host || s_is_client) && s_transport_send)
+        td5_net_send(TD5_DXPDISCONNECT, NULL, 0);
+
     /* Stop worker thread and close events */
     stop_worker();
 

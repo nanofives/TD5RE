@@ -62,6 +62,7 @@ static int  s_chat_dirty;              /* DAT_0049640c */
 static uint32_t s_last_poll_timestamp;  /* DAT_004968a8 */
 
 static char s_chat_input_buffer[64];    /* DAT_004972cc */
+static int  s_chat_esc_guard;           /* S31: swallow the ESC that cancelled chat */
 
 static char s_create_session_name[64];
 
@@ -906,8 +907,11 @@ void Screen_NetworkLobby(void) {
         break;
 
     case 2: /* TRANSITION COMPLETE / ENABLE INPUT */
-        /* Set up text input: buffer ptr, max 60 chars, enable */
-        s_text_input_state = 1;
+        /* S31: chat is OPT-IN (press T in the lobby). Keeping the text-input
+         * flag armed here suppressed the keyboard nav FIFO for the whole
+         * lobby (frontend_poll_input flushes nav while a text field is open),
+         * which made every lobby button unreachable by keyboard. */
+        s_text_input_state = 0;
         s_inner_state = 3;
         break;
 
@@ -948,6 +952,21 @@ void Screen_NetworkLobby(void) {
                     s_lobby_modal_armed = 1;
                 break;
             }
+            /* Keyboard arrows read directly (DIK edge-detected): the nav
+             * FIFO is suppressed while the password text field is open, so
+             * s_arrow_input never fires from the keyboard here (it still
+             * carries the gamepad d-pad). */
+            int nav_l, nav_r, nav_u, nav_d;
+            {
+                static int pl, pr, pu, pd;
+                int l = td5_plat_input_key_pressed(0xCB);   /* DIK_LEFT  */
+                int r = td5_plat_input_key_pressed(0xCD);   /* DIK_RIGHT */
+                int u = td5_plat_input_key_pressed(0xC8);   /* DIK_UP    */
+                int d = td5_plat_input_key_pressed(0xD0);   /* DIK_DOWN  */
+                nav_l = l && !pl;  nav_r = r && !pr;
+                nav_u = u && !pu;  nav_d = d && !pd;
+                pl = l;  pr = r;  pu = u;  pd = d;
+            }
             frontend_handle_text_input_key();
             if (frontend_text_input_confirmed()) {
                 td5_net_set_session_limits(s_lobby_max_players, s_lobby_password);
@@ -968,16 +987,16 @@ void Screen_NetworkLobby(void) {
                 s_lobby_modal = 0;
                 s_text_input_state = 1;             /* restore chat input */
                 frontend_play_sfx(3);
-            } else if (s_arrow_input & 1) {          /* LEFT (robust poll edge) */
+            } else if ((s_arrow_input & 1) || nav_l) {   /* LEFT */
                 if (s_lobby_max_players > 2) s_lobby_max_players--;
                 frontend_play_sfx(2);
-            } else if (s_arrow_input & 2) {          /* RIGHT */
+            } else if ((s_arrow_input & 2) || nav_r) {   /* RIGHT */
                 if (s_lobby_max_players < 6) s_lobby_max_players++;
                 frontend_play_sfx(2);
-            } else if (s_arrow_input & 4) {          /* UP: previous kick target */
+            } else if ((s_arrow_input & 4) || nav_u) {   /* UP: previous kick target */
                 s_lobby_kick_sel = lobby_cycle_kick(s_lobby_kick_sel, -1);
                 frontend_play_sfx(2);
-            } else if (s_arrow_input & 8) {          /* DOWN: next kick target */
+            } else if ((s_arrow_input & 8) || nav_d) {   /* DOWN: next kick target */
                 s_lobby_kick_sel = lobby_cycle_kick(s_lobby_kick_sel, +1);
                 frontend_play_sfx(2);
             } else if (td5_plat_input_key_pressed(0x01)) {   /* ESC = cancel */
@@ -988,9 +1007,29 @@ void Screen_NetworkLobby(void) {
             break;
         }
 
+        /* S31: chat typing mode (opened with T below). While typing, ESC
+         * cancels the chat instead of leaving the lobby and lobby nav is
+         * paused; Enter submits via the confirm path (-> state 4). */
+        if (s_text_input_state == 1) {
+            frontend_handle_text_input_key();
+            if (td5_plat_input_key_pressed(0x01)) {        /* ESC: cancel chat */
+                s_text_input_state = 0;
+                s_chat_esc_guard = 1;                      /* swallow this ESC */
+                memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
+                td5_plat_input_flush_chars();
+            } else if (frontend_text_input_confirmed()) {
+                s_inner_state = 4;
+            }
+            break;
+        }
+        if (s_chat_esc_guard) {
+            if (!td5_plat_input_key_pressed(0x01))
+                s_chat_esc_guard = 0;                      /* released: re-arm exit */
+        }
+
         /* ESC backs out of the lobby = the EXIT action (tear the session down so
          * no dangling host/session leaks). Mirrors button index 3. */
-        if (frontend_check_escape()) {
+        if (!s_chat_esc_guard && frontend_check_escape()) {
             TD5_LOG_I(LOG_TAG, "NetworkLobby: ESC -> exit (destroy session)");
             frontend_net_destroy();
             s_network_active = 0;
@@ -1033,6 +1072,18 @@ void Screen_NetworkLobby(void) {
             return;
         }
 
+        /* S31: the host quit (or the link died) -> leave the dead lobby.
+         * td5_net_shutdown now broadcasts DXPDISCONNECT, which sets
+         * s_connection_lost on every receiver. */
+        if (!frontend_net_is_host() && td5_net_is_connection_lost()) {
+            TD5_LOG_I(LOG_TAG, "NetworkLobby: connection lost -> leaving lobby");
+            s_race_active_flag = 0;
+            s_network_active = 0;
+            frontend_net_destroy();
+            td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
+            return;
+        }
+
 #ifndef TD5RE_RELEASE
         /* Dev hook: TD5RE_NET_AUTOSTART=1 -- the host fires START automatically
          * once a client has joined (headless 2-instance lockstep testing). */
@@ -1072,6 +1123,23 @@ void Screen_NetworkLobby(void) {
             frontend_init_race_schedule();
             frontend_init_display_mode_state();
             return;
+        }
+
+        /* S31: T opens the chat line (Enter sends, ESC cancels). */
+        {
+            static int s_chat_t_latch = 0;
+            if (td5_plat_input_key_pressed(0x14)) {        /* DIK_T */
+                if (!s_chat_t_latch) {
+                    s_chat_t_latch = 1;
+                    memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
+                    frontend_begin_text_input(s_chat_input_buffer,
+                                              (int)sizeof(s_chat_input_buffer));
+                    frontend_set_text_input_prompt("CHAT  (ENTER = SEND, ESC = CANCEL)");
+                    td5_plat_input_flush_chars();          /* drop the opening T */
+                }
+            } else {
+                s_chat_t_latch = 0;
+            }
         }
 
         /* Process button input
@@ -1162,7 +1230,7 @@ void Screen_NetworkLobby(void) {
             frontend_net_send(2, s_chat_input_buffer, (int)strlen(s_chat_input_buffer) + 1);
         }
         memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
-        s_inner_state = 2; /* re-enable text input */
+        s_inner_state = 2; /* back to the lobby (chat closes after send) */
         break;
 
     case 5: /* PLAYER READY CHECK (host only) */

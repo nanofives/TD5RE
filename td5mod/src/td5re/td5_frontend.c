@@ -7846,6 +7846,7 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
     status = td5_net_get_status_text();
     if (status[0])
         fe_draw_small_text(56.0f * sx, 298.0f * sy, status, 0xFFA8C0E0, sx, sy);
+    fe_draw_small_text(56.0f * sx, 312.0f * sy, "T = CHAT", 0xFF8098B0, sx, sy);
 }
 
 /* S10b: the OPTIONS modal is drawn in a POST-button pass (the action buttons are
