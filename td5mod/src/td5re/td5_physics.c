@@ -8251,15 +8251,45 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 int ref_capped = td5_track_last_contact_was_capped();
                 int32_t diff = ground_y - ground_ref;
                 if (!ref_capped && (diff > 0x10000 || diff < -0x10000)) {
-                    TD5_LOG_I(LOG_TAG,
-                        "S18 wheel-teleport reject: i=%d probe_span=%d chassis_span=%d "
-                        "gy=%d -> ref_gy=%d (diff=%d)",
-                        i, probe_span, chassis_span, ground_y, ground_ref, diff);
-                    ground_y = ground_ref;
-                    span_normal[0] = ref_normal[0];
-                    span_normal[1] = ref_normal[1];
-                    span_normal[2] = ref_normal[2];
-                    wheel_capped = 0;
+                    /* A gross mismatch means ONE of {wheel-span, chassis-span}
+                     * jumped to unrelated geometry. The original block always
+                     * trusted the chassis span — right when a WHEEL probe
+                     * teleported. But on dense TD6 junctions the CHASSIS itself
+                     * gets stuck on a distant branch span while the wheels stay
+                     * correctly on the main road; blindly trusting the chassis
+                     * then snaps the good wheels to a far ground = the car drops
+                     * through the floor. Decide by consistency with the body's
+                     * own Y: the real ground sits within ~suspension travel of
+                     * the chassis body, the bogus one is ~100k+ units away. */
+                    /* Decide which span is the liar by a STRUCTURAL test, not by
+                     * body height (the body Y is itself corrupt once the car has
+                     * been displaced, which creates a feedback loop that keeps it
+                     * stuck airborne). On migrated TD6 tracks the appended branch
+                     * spans (index >= ring_length) sit far from the main ring, so:
+                     *   chassis on a BRANCH span + wheel on a MAIN span  => the
+                     *   chassis is stuck on a displaced branch and its ground is
+                     *   garbage (~366000 off) -> KEEP the good wheel ground.
+                     * Otherwise a wheel probe teleported (the original case) -> use
+                     * the stable chassis-span ground. */
+                    int ring = g_td5.track_span_ring_length;
+                    int chassis_on_branch = (ring > 0 && chassis_span >= ring);
+                    int probe_on_branch   = (ring > 0 && probe_span   >= ring);
+                    if (chassis_on_branch && !probe_on_branch) {
+                        TD5_LOG_W(LOG_TAG,
+                            "S18 chassis-span reject: i=%d chassis_span=%d (stuck on branch) "
+                            "vs probe_span=%d — keep wheel ground gy=%d (bogus ref_gy=%d)",
+                            i, chassis_span, probe_span, ground_y, ground_ref);
+                    } else {
+                        TD5_LOG_I(LOG_TAG,
+                            "S18 wheel-teleport reject: i=%d probe_span=%d chassis_span=%d "
+                            "gy=%d -> ref_gy=%d (diff=%d)",
+                            i, probe_span, chassis_span, ground_y, ground_ref, diff);
+                        ground_y = ground_ref;
+                        span_normal[0] = ref_normal[0];
+                        span_normal[1] = ref_normal[1];
+                        span_normal[2] = ref_normal[2];
+                        wheel_capped = 0;
+                    }
                 }
             }
         }

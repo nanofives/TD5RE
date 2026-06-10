@@ -661,6 +661,17 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         }
     }
 
+    /* A real ~120-unit car can only ever be a few hundred units inside a wall
+     * before wall_response fires (field scrapes: |pen| < ~700). A penetration of
+     * THOUSANDS means the chassis span was momentarily mis-walked onto a
+     * geometrically-distant branch span (TD6 junctions: pen reaches
+     * -22534..-104052), so the rail reference belongs to a far-away span; the
+     * impulse then shoves the car thousands of units = the "junction teleport".
+     * Reject those. The engine already does the equivalent for wheels (S18
+     * wheel-teleport reject); this adds it to the wall-response path. Faithful
+     * tracks never hit this (their |pen| stays small). */
+    const int32_t WALL_PEN_TELEPORT_LIMIT = 2000;
+
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
@@ -690,7 +701,11 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
          * (walker-lag glitch) -> skip rather than fight it. */
         if (hit_l && hit_r) continue;
 
-        if (hit_l) {
+        if (hit_l && pen_l <= -WALL_PEN_TELEPORT_LIMIT) {
+            TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d LEFT span=%d type=%d pen=%d "
+                      "REJECTED (bogus -> would teleport)", actor->slot_index,
+                      span_idx, type, pen_l);
+        } else if (hit_l) {
             double rad = atan2((double)left.nnx, (double)(-left.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, pen_l, 1,
@@ -700,7 +715,11 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d type=%d sub=%d pen=%d angle=%d",
                           actor->slot_index, pi, span_idx, type, sub_lane, pen_l, wall_angle);
         }
-        if (hit_r) {
+        if (hit_r && pen_r <= -WALL_PEN_TELEPORT_LIMIT) {
+            TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d RIGHT span=%d type=%d pen=%d "
+                      "REJECTED (bogus -> would teleport)", actor->slot_index,
+                      span_idx, type, pen_r);
+        } else if (hit_r) {
             double rad = atan2((double)right.nnx, (double)(-right.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, pen_r, 2,
@@ -1776,6 +1795,39 @@ int td5_track_load_strip(const void *data, size_t size)
             s_jump_entry_count = 0;
             s_jump_entries = NULL;
         }
+    }
+
+    /* [TD6 JUNCTION FLATTEN] Migrated TD6 tracks pack many road forks whose
+     * branch corridors are appended far away (span index >= ring_length). The
+     * TD5 span-walk follows a junction span's branch link (link_next on type 8,
+     * link_prev on type 11) onto those displaced branches, stranding the chassis
+     * on a geometrically-distant span -> the whole junction glitch class
+     * (teleport / fall-through / launch / render-cull invisible geometry; see
+     * td5_track.c:614). TD6 forks are not the race route and are undrivable
+     * anyway, so SEVER the branch links: clear the link that points from a
+     * MAIN-RING junction span to a BRANCH span, leaving a clean single-loop
+     * corridor the engine handles like a native TD5 track. The branch road meshes
+     * still render (decorative side streets); the car can no longer be walked
+     * onto them. TD6-only (g_active_td6_level) + [GameOptions] TD6FlattenJunctions
+     * — faithful TD5 junctions (short rejoining detours) are never touched. */
+    if (g_active_td6_level > 0 && g_td5.ini.td6_flatten_junctions &&
+        s_span_array && s_span_count > 0 && g_td5.track_span_ring_length > 0) {
+        int ring = g_td5.track_span_ring_length;
+        int total = s_span_count;
+        int severed = 0;
+        if (ring > total) ring = total;
+        for (int i = 0; i < ring; i++) {            /* main-ring spans only */
+            TD5_StripSpan *s = &s_span_array[i];
+            if (s->span_type == 8) {
+                int t = (int)s->link_next;
+                if (t >= ring && t < total) { s->link_next = -1; severed++; }
+            } else if (s->span_type == 11) {
+                int t = (int)s->link_prev;          /* corrected by the assetsrc link_prev fix */
+                if (t >= ring && t < total) { s->link_prev = -1; severed++; }
+            }
+        }
+        TD5_LOG_I(LOG_TAG, "TD6 junction flatten: severed %d branch link(s) "
+                  "(ring=%d total=%d) -> single-loop corridor", severed, ring, total);
     }
 
     /* Bind runtime pointers (patch sentinels) */

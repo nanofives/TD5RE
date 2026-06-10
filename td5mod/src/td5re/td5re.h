@@ -390,6 +390,15 @@ typedef struct TD5_GlobalState {
          * for a converted TD6 track. 0 = disabled = faithful. See
          * re/analysis/td6_track_migration_plan.md and convert_td6_tracks.py. */
         int  override_track_zip;
+        /* TD6 junction flatten (default 1): migrated TD6 tracks pack many road
+         * forks whose branch corridors are appended far away (span >= ring); the
+         * TD5 span-walk follows a junction span's branch link onto them and
+         * strands the chassis on a distant span -> teleport / fall-through /
+         * launch / invisible geometry. When set, sever those branch links at
+         * strip-load so each TD6 track is a clean single-loop corridor the engine
+         * handles natively. TD6-only (g_active_td6_level); faithful TD5 junctions
+         * are never touched. 0 = keep the (currently-undrivable) TD6 forks. */
+        int  td6_flatten_junctions;
         /* TD6 track migration: grid start span for an override track (the per-TD5
          * level start-span table is meaningless for a TD6 level). When > 0 it is
          * used as the start/finish grid span. Pick the start/finish straight
