@@ -2730,7 +2730,7 @@ int td5_game_init_race_session(void) {
     td5_hud_init_overlay_resources(
         (s_replay_mode || g_td5.benchmark_active) ? 0 : 1, 0);
     DBG_WRITE("19b_before_layout");
-    td5_hud_init_layout(g_td5.split_screen_mode);
+    td5_hud_init_layout();
     DBG_WRITE("19c_before_minimap");
     td5_hud_init_minimap_layout();
     DBG_WRITE("19d_before_font");
@@ -4491,7 +4491,7 @@ int td5_game_run_race_frame(void) {
         static int s_last_vp_w = 0, s_last_vp_h = 0;
         if (g_td5.render_width != s_last_vp_w || g_td5.render_height != s_last_vp_h) {
             td5_game_init_viewport_layout();              /* 3D viewport rects + projection input */
-            td5_hud_init_layout(g_td5.split_screen_mode); /* HUD/minimap layout (reads viewport_count) */
+            td5_hud_init_layout();              /* HUD/minimap layout (reads viewport_count) */
             s_last_vp_w = g_td5.render_width;
             s_last_vp_h = g_td5.render_height;
         }
@@ -6316,6 +6316,25 @@ void td5_game_resolve_split_grid(int views, int *cols, int *rows) {
     if (rows) *rows = r;
 }
 
+/* Pane rect (pixels) for view v of a views-pane split across a w x h target.
+ * Row-major over the shared split grid; views<=1 = the full target. Single
+ * source for the 3D viewport rects, the HUD pane layout and the divider
+ * lines so they cannot disagree (integer pane sizes: the right/bottom
+ * remainder pixels are outside every pane, matching the 3D viewports). */
+void td5_game_get_pane_rect(int views, int v, int w, int h,
+                            int *x, int *y, int *pw, int *ph)
+{
+    if (views <= 1) { *x = 0; *y = 0; *pw = w; *ph = h; return; }
+    int cols, rows;
+    td5_game_resolve_split_grid(views, &cols, &rows);
+    int cw = w / cols;
+    int ch = h / rows;
+    *x  = (v % cols) * cw;
+    *y  = (v / cols) * ch;
+    *pw = cw;
+    *ph = ch;
+}
+
 void td5_game_init_viewport_layout(void) {
     int w = g_td5.render_width;
     int h = g_td5.render_height;
@@ -6351,17 +6370,10 @@ void td5_game_init_viewport_layout(void) {
      * follow-up). Grid resolved by the shared helper so the HUD agrees. */
     td5_game_resolve_split_grid(views, &cols, &rows);
 
-    {
-        int cw = w / cols;
-        int ch = h / rows;
-        for (int vp = 0; vp < views; vp++) {
-            int col = vp % cols;
-            int row = vp / cols;
-            s_viewports[vp].x = col * cw;
-            s_viewports[vp].y = row * ch;
-            s_viewports[vp].w = cw;
-            s_viewports[vp].h = ch;
-        }
+    for (int vp = 0; vp < views; vp++) {
+        td5_game_get_pane_rect(views, vp, w, h,
+                               &s_viewports[vp].x, &s_viewports[vp].y,
+                               &s_viewports[vp].w, &s_viewports[vp].h);
     }
 
     TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d spectate=%d count=%d grid=%dx%d %dx%d",

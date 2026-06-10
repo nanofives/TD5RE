@@ -159,7 +159,7 @@ void td5_hud_render(void);
 
 /* --- Initialization chain --- */
 void td5_hud_init_overlay_resources(int race_mode, int string_table_offset);
-void td5_hud_init_layout(int viewport_mode);
+void td5_hud_init_layout(void);
 void td5_hud_init_minimap_layout(void);
 void td5_hud_init_pause_menu(int page_index);
 void td5_hud_init_font_atlas(void);
