@@ -364,8 +364,6 @@ int  s_cheat_unlock_all;         /* DAT_00496298 */
 int  s_network_active;           /* g_networkSessionActive / DAT_004962bc */
 int  s_nickname_from_mpopts;     /* nickname screen entered from Multiplayer Options */
 /* --- S10b: lobby options modal (host) + join-password prompt --- */
-int  s_lobby_modal;              /* 0=closed, 1=OPTIONS modal open */
-int  s_lobby_kick_sel = -1;      /* S31 OPTIONS modal kick target: -1=off, else remote slot */
 int  s_lobby_max_players = 6;    /* modal: max players (2..6) */
 char s_lobby_password[32];       /* modal: host join password (also reused for join prompt) */
 int  s_net_session_sel;          /* SESSION_PICKER cursor: 0=host, 1..N=join */
@@ -7820,75 +7818,79 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
     char line[96];
     const char *status;
 
-    /* Roster panel backdrop (left column). */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(40.0f * sx, 96.0f * sy, 340.0f * sx, 220.0f * sy, 0xC0101C30, -1, 0, 0, 0, 0);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    /* [S31 redesign] Roster panel rendered as an UNSELECTABLE BUTTON — the
+     * same neon rounded-rect frame the menu buttons use (unselected palette,
+     * never highlighted) — left-aligned with the NET PLAY title
+     * (FE_LOBBY_X == FE_TITLE_LEFT_X). */
+    fe_draw_button_frame((float)FE_LOBBY_X * sx, (float)FE_LOBBY_PANEL_Y * sy,
+                         (float)FE_LOBBY_PANEL_W * sx, (float)FE_LOBBY_PANEL_H * sy,
+                         1 /* unselected */, sx, sy);
 
-    fe_draw_text(56.0f * sx, 106.0f * sy, "PLAYERS IN LOBBY", 0xFF00FF00, sx, sy);
+    fe_draw_text((FE_LOBBY_X + 18.0f) * sx, (FE_LOBBY_PANEL_Y + 14.0f) * sy,
+                 "PLAYERS IN LOBBY", 0xFF00FF00, sx, sy);
     for (slot = 0; slot < TD5_NET_MAX_PLAYERS; slot++) {
         const char *name;
+        const char *tag;
         int lat;
         if (!td5_net_is_slot_active(slot)) continue;
         name = td5_net_get_slot_name(slot);
         if (!name[0]) name = "Player";
+        tag = (slot == 0) ? " (HOST)" : "";
         lat = td5_net_get_slot_latency_ms(slot);
         if (slot == td5_net_local_slot())
-            snprintf(line, sizeof(line), "%d. %s (you)", slot + 1, name);
+            snprintf(line, sizeof(line), "%d. %s%s (YOU)", slot + 1, name, tag);
         else if (lat >= 0)
-            snprintf(line, sizeof(line), "%d. %s   %dms", slot + 1, name, lat);
+            snprintf(line, sizeof(line), "%d. %s%s   %dms", slot + 1, name, tag, lat);
         else
-            snprintf(line, sizeof(line), "%d. %s   --", slot + 1, name);
-        fe_draw_text(60.0f * sx, (136.0f + row * 22.0f) * sy, line, 0xFFFFFFFF, sx, sy);
+            snprintf(line, sizeof(line), "%d. %s%s   --", slot + 1, name, tag);
+        fe_draw_text((FE_LOBBY_X + 22.0f) * sx,
+                     (float)(FE_LOBBY_ROW0_Y + row * FE_LOBBY_ROW_H) * sy,
+                     line, 0xFFFFFFFF, sx, sy);
         row++;
     }
-    /* Host/connect status line at the bottom of the panel. */
+    /* Host/connect status + chat hint at the bottom of the panel. */
     status = td5_net_get_status_text();
     if (status[0])
-        fe_draw_small_text(56.0f * sx, 298.0f * sy, status, 0xFFA8C0E0, sx, sy);
-    fe_draw_small_text(56.0f * sx, 312.0f * sy, "T = CHAT", 0xFF8098B0, sx, sy);
+        fe_draw_small_text((FE_LOBBY_X + 18.0f) * sx, 282.0f * sy, status,
+                           0xFFA8C0E0, sx, sy);
+    fe_draw_small_text((FE_LOBBY_X + 18.0f) * sx, 296.0f * sy, "T = CHAT",
+                       0xFF8098B0, sx, sy);
 }
 
-/* S10b: the OPTIONS modal is drawn in a POST-button pass (the action buttons are
- * rendered after the per-screen overlay, so drawing the modal in the overlay let
- * the buttons paint over it). Called from td5_frontend_render_ui_rects after the
- * button loop so it covers everything. */
-static void frontend_render_lobby_modal(float sx, float sy) {
+
+/* [S31] HOST GAME setup values (session name / max players / password mask)
+ * drawn in the value column right of the caption buttons. */
+static void frontend_render_create_session_overlay(float sx, float sy) {
     char buf[72], mask[33];
     int n, k;
-    if (!s_lobby_modal) return;
-
-    /* Heavy backdrop so the whole lobby (incl. buttons) is hidden behind it. */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xE6000000, -1, 0, 0, 0, 0);
-    fe_draw_quad(150.0f * sx, 140.0f * sy, 340.0f * sx, 200.0f * sy, 0xF8102845, -1, 0, 0, 0, 0);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-
-    fe_draw_text_centered(320.0f * sx, 154.0f * sy, "GAME OPTIONS", 0xFFFFD040, sx, sy);
-    snprintf(buf, sizeof(buf), "MAX PLAYERS:  < %d >", s_lobby_max_players);
-    fe_draw_text_centered(320.0f * sx, 196.0f * sy, buf, 0xFFFFFFFF, sx, sy);
+    snprintf(buf, sizeof(buf), "%s", s_create_session_name);
+    fe_draw_text(368.0f * sx, 166.0f * sy, buf, 0xFFFFFFFF, sx, sy);
+    snprintf(buf, sizeof(buf), "< %d >", s_lobby_max_players);
+    fe_draw_text(368.0f * sx, 214.0f * sy, buf, 0xFFFFFFFF, sx, sy);
     n = (int)strlen(s_lobby_password);
     if (n > 32) n = 32;
     for (k = 0; k < n; k++) mask[k] = '*';
     mask[n] = '\0';
-    snprintf(buf, sizeof(buf), "PASSWORD: %s_", mask);
-    fe_draw_text_centered(320.0f * sx, 226.0f * sy, buf, 0xFFFFFFFF, sx, sy);
-    /* S31: kick row -- UP/DOWN cycles through the joined remote players. */
-    if (s_lobby_kick_sel >= 0) {
-        const char *kn = td5_net_get_slot_name(s_lobby_kick_sel);
-        if (!kn[0])
-            snprintf(buf, sizeof(buf), "KICK:  < PLAYER %d >", s_lobby_kick_sel + 1);
-        else
-            snprintf(buf, sizeof(buf), "KICK:  < %s >", kn);
-    } else {
-        snprintf(buf, sizeof(buf), "KICK:  < OFF >");
+    snprintf(buf, sizeof(buf), "%s", n ? mask : "(OPEN)");
+    fe_draw_text(368.0f * sx, 262.0f * sy, buf, 0xFFFFFFFF, sx, sy);
+}
+
+/* [S31 redesign] Exit-door icons over the lobby's per-row KICK buttons —
+ * drawn in the POST-button pass (the slot the old OPTIONS modal used) so
+ * they sit on top of the button frames, tracking the slide-in animation. */
+static void frontend_render_lobby_kick_icons(float sx, float sy) {
+    int k;
+    if (s_current_screen != TD5_SCREEN_NETWORK_LOBBY) return;
+    for (k = 4; k <= 8 && k < FE_MAX_BUTTONS; k++) {
+        float bx, by, bw, bh;
+        if (!s_buttons[k].active || s_buttons[k].hidden) continue;
+        frontend_get_button_render_rect(k, sx, sy, &bx, &by, &bw, &bh);
+        /* exit sign: right-pointing arrow leaving through the door bar */
+        td5_vui_arrow(bx + bw * 0.14f, by + bh * 0.28f,
+                      bw * 0.42f, bh * 0.44f, 1, 0xFFFFC8C8u);
+        fe_draw_quad(bx + bw * 0.64f, by + bh * 0.18f,
+                     bw * 0.12f, bh * 0.64f, 0xFFFFC8C8u, -1, 0, 0, 0, 0);
     }
-    fe_draw_text_centered(320.0f * sx, 256.0f * sy, buf,
-                          (s_lobby_kick_sel >= 0) ? 0xFFFF6060 : 0xFFFFFFFF, sx, sy);
-    fe_draw_small_text(150.0f * sx, 286.0f * sy,
-                       "L/R MAX   UP/DN KICK   type PASSWORD", 0xFFB0B0B0, sx, sy);
-    fe_draw_small_text(180.0f * sx, 306.0f * sy,
-                       "ENTER = apply    ESC = cancel", 0xFFB0B0B0, sx, sy);
 }
 
 void td5_frontend_render_ui_rects(void) {
@@ -8015,6 +8017,7 @@ void td5_frontend_render_ui_rects(void) {
         if (s_text_input_state != 0) frontend_render_text_input();
         break;
     case TD5_SCREEN_CREATE_SESSION:
+        frontend_render_create_session_overlay(sx, sy);
         if (s_inner_state == 2 && s_text_input_state != 0) frontend_render_text_input();
         break;
     case TD5_SCREEN_DIRECT_CONNECT:
@@ -8281,7 +8284,7 @@ void td5_frontend_render_ui_rects(void) {
      * it covers the whole lobby (the per-screen overlay above runs BEFORE the
      * buttons, which would otherwise paint over the modal). */
     if (s_current_screen == TD5_SCREEN_NETWORK_LOBBY)
-        frontend_render_lobby_modal(sx, sy);
+        frontend_render_lobby_kick_icons(sx, sy);
 
     /* Nav bar text drawn after buttons so it renders on top of the button frame.
      * (button 0 is the nav bar: button loop draws the 9-slice frame, then we

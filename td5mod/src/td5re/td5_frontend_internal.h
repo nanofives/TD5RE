@@ -161,8 +161,6 @@ extern int  s_kicked_flag;
 extern int  s_launching_net_race;
 extern int  s_lobby_action;
 extern int  s_lobby_max_players;
-extern int  s_lobby_modal;
-extern int  s_lobby_kick_sel;
 extern int  s_mp_phase;
 extern int  s_mp_player_accent[TD5_MAX_HUMAN_PLAYERS];
 extern int  s_net_cfg_game_port;
@@ -484,6 +482,19 @@ void frontend_init_font_metrics_default(void);
 void frontend_init_font_metrics_from_pixels(const uint8_t *pixels, int w, int h);
 void frontend_post_quit(void);
 void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing);
+/* ---- network lobby roster layout (design px) ----
+ * Single source for the overlay renderer (td5_frontend.c) and the per-row
+ * kick-button placement (td5_fe_net.c). FE_LOBBY_X matches FE_TITLE_LEFT_X
+ * so the panel left-aligns with the NET PLAY screen title. */
+#define FE_LOBBY_X        126
+#define FE_LOBBY_PANEL_Y   96
+#define FE_LOBBY_PANEL_W  340
+#define FE_LOBBY_PANEL_H  220
+#define FE_LOBBY_ROW0_Y   140
+#define FE_LOBBY_ROW_H     24
+
+extern char s_create_session_name[64];
+
 /* @GENERATED-SYMBOLS@ */
 
 #endif /* TD5_FRONTEND_INTERNAL_H */

@@ -39,7 +39,10 @@ static uint32_t s_mp_join_prev    = 0;     /* lobby join-scan mask last frame (e
 /* --- S10 net-play: explicit connection modes (LAN / Direct-IP) --- */
 static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direct join) */
 
-static int  s_lobby_modal_armed;        /* 1 once the opening Enter is released */
+static int  s_cs_edit;                  /* S31 host-setup: 1=name, 2=password editing */
+static int  s_cs_direct;                /* S31 host-setup: 1 = Direct-IP host, 0 = LAN */
+static int  s_cs_esc_guard;             /* swallow the ESC that cancelled an edit */
+static int  s_kick_button_slot[5];      /* lobby kick button k -> net slot */
 
 static int  s_net_join_pending_ui;      /* awaiting JOIN_ACK before entering lobby */
 
@@ -64,7 +67,7 @@ static uint32_t s_last_poll_timestamp;  /* DAT_004968a8 */
 static char s_chat_input_buffer[64];    /* DAT_004972cc */
 static int  s_chat_esc_guard;           /* S31: swallow the ESC that cancelled chat */
 
-static char s_create_session_name[64];
+char s_create_session_name[64];
 
 static void frontend_set_text_input_prompt(const char *p) {
     if (p && p[0]) {
@@ -90,21 +93,6 @@ static void frontend_net_send(int type, const void *data, int size) {
  * Returns the DXPTYPE message type (0-12) or -1 if no message available.
  * Copies payload into buf (up to max_size bytes).
  */
-/* S31: cycle the OPTIONS-modal kick target through {off} + the joined
- * remote slots. dir = +1 / -1. */
-static int lobby_cycle_kick(int cur, int dir) {
-    int cand[TD5_NET_MAX_PLAYERS + 1];
-    int n = 0, i, idx = 0;
-    cand[n++] = -1;
-    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
-        if (td5_net_is_slot_active(i) && i != td5_net_local_slot())
-            cand[n++] = i;
-    for (i = 0; i < n; i++)
-        if (cand[i] == cur) { idx = i; break; }
-    idx = (idx + dir + n) % n;
-    return cand[idx];
-}
-
 static int frontend_net_receive(void *buf, int max_size) {
     TD5_NetMsgType type;
     void *data = NULL;
@@ -478,8 +466,10 @@ void Screen_LanMenu(void) {
             break;
         }
         if (s_input_ready) {
-            if (s_button_index == 0)              /* HOST -> name entry + create */
+            if (s_button_index == 0) {            /* HOST -> setup screen */
+                s_cs_direct = 0;
                 td5_frontend_set_screen(TD5_SCREEN_CREATE_SESSION);
+            }
             else if (s_button_index == 1)         /* DISCOVER -> session list */
                 td5_frontend_set_screen(TD5_SCREEN_SESSION_PICKER);
             else if (s_button_index == 2)         /* BACK */
@@ -527,15 +517,9 @@ void Screen_DirectConnect(void) {
     case 1: /* chooser interaction */
         frontend_present_buffer();
         if (s_input_ready) {
-            if (s_button_index == 0) {            /* HOST */
-                if (td5_net_create_session_ex("TD5RE Game", frontend_net_player_name(),
-                                              6, s_net_cfg_game_port, s_net_cfg_enable_upnp)) {
-                    s_network_active = 1;
-                    s_inner_state = 4;            /* show host status */
-                } else {
-                    TD5_LOG_W(LOG_TAG, "Direct host create failed");
-                    td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
-                }
+            if (s_button_index == 0) {            /* HOST -> setup screen [S31] */
+                s_cs_direct = 1;
+                td5_frontend_set_screen(TD5_SCREEN_CREATE_SESSION);
             } else if (s_button_index == 1) {     /* JOIN */
                 snprintf(s_net_direct_ip, sizeof(s_net_direct_ip), "127.0.0.1");
                 s_inner_state = 2;
@@ -749,17 +733,21 @@ void Screen_SessionPicker(void) {
 
 void Screen_CreateSession(void) {
     switch (s_inner_state) {
-    case 0: /* Init: show "Enter New Session Name" text input */
+    case 0: /* Init: HOST GAME setup — name / max players / password [S31] */
         frontend_init_return_screen(TD5_SCREEN_CREATE_SESSION);
-        TD5_LOG_D(LOG_TAG, "CreateSession: init");
+        TD5_LOG_D(LOG_TAG, "CreateSession: init (direct=%d)", s_cs_direct);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* The text-input widget IS the name field (gold frame at 120,193);
-         * only BACK is a real button (index 0). */
-        frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
-        memset(s_create_session_name, 0, sizeof(s_create_session_name));
-        strcpy(s_create_session_name, "New Session");
-        frontend_begin_text_input(s_create_session_name, (int)sizeof(s_create_session_name));
-        frontend_set_text_input_prompt("ENTER SESSION NAME");
+        frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 */
+        frontend_create_button("MAX PLAYERS",  120, 208, 224, 0x20);  /* 1 */
+        frontend_create_button("PASSWORD",     120, 256, 224, 0x20);  /* 2 */
+        frontend_create_button("HOST",         120, 320, 160, 0x20);  /* 3 */
+        frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);  /* 4 */
+        if (s_create_session_name[0] == '\0')
+            strcpy(s_create_session_name, "New Session");
+        if (s_lobby_max_players < 2 || s_lobby_max_players > 6)
+            s_lobby_max_players = 6;
+        s_cs_edit = 0;
+        s_cs_esc_guard = 0;
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -771,29 +759,94 @@ void Screen_CreateSession(void) {
         }
         break;
 
-    case 2: /* Name input */
-        frontend_handle_text_input_key();   /* process keystrokes into the buffer */
-        if (frontend_check_escape()) {       /* ESC == BACK (-> LAN menu) */
-            s_return_screen = TD5_SCREEN_LAN_MENU;
-            s_inner_state = 3;
-            break;
-        }
-        if (frontend_text_input_confirmed()) {
-            /* S10: actually host a LAN session under the entered name. */
-            td5_net_set_mode(TD5_NET_MODE_LAN);
-            if (td5_net_create_session(s_create_session_name, frontend_net_player_name(), 6)) {
-                s_network_active = 1;
-                s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
-            } else {
-                TD5_LOG_W(LOG_TAG, "LAN host create failed");
-                s_return_screen = TD5_SCREEN_LAN_MENU;
+    case 2: /* Setup interaction [S31] */
+        if (s_cs_edit) {
+            /* Editing NAME or PASSWORD: Enter confirms, ESC cancels (and is
+             * swallowed so it cannot double as BACK). */
+            frontend_handle_text_input_key();
+            if (td5_plat_input_key_pressed(0x01)) {
+                s_cs_edit = 0;
+                s_text_input_state = 0;
+                s_cs_esc_guard = 1;
+                td5_plat_input_flush_chars();
+            } else if (frontend_text_input_confirmed()) {
+                s_cs_edit = 0;
+                s_text_input_state = 0;
             }
+            break;
+        }
+        if (s_cs_esc_guard) {
+            if (!td5_plat_input_key_pressed(0x01)) s_cs_esc_guard = 0;
+            break;
+        }
+        if (frontend_check_escape()) {       /* ESC == BACK */
+            s_return_screen = s_cs_direct ? TD5_SCREEN_DIRECT_CONNECT
+                                          : TD5_SCREEN_LAN_MENU;
             s_inner_state = 3;
             break;
         }
-        if (s_input_ready && s_button_index == 0) {   /* BACK -> LAN menu */
-            s_return_screen = TD5_SCREEN_LAN_MENU;
-            s_inner_state = 3;
+        /* MAX PLAYERS row: Left/Right adjust while it is the selected row. */
+        if (s_selected_button == 1) {
+            if (s_arrow_input & 1) {
+                if (s_lobby_max_players > 2) s_lobby_max_players--;
+                frontend_play_sfx(2);
+            } else if (s_arrow_input & 2) {
+                if (s_lobby_max_players < 6) s_lobby_max_players++;
+                frontend_play_sfx(2);
+            }
+        }
+        if (s_input_ready && s_button_index >= 0) {
+            switch (s_button_index) {
+            case 0: /* SESSION NAME */
+                frontend_begin_text_input(s_create_session_name,
+                                          (int)sizeof(s_create_session_name));
+                frontend_set_text_input_prompt("SESSION NAME");
+                s_cs_edit = 1;
+                break;
+            case 1: /* MAX PLAYERS: activate = cycle */
+                s_lobby_max_players = (s_lobby_max_players >= 6)
+                                          ? 2 : s_lobby_max_players + 1;
+                frontend_play_sfx(2);
+                break;
+            case 2: /* PASSWORD */
+                frontend_begin_text_input(s_lobby_password,
+                                          (int)sizeof(s_lobby_password));
+                frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
+                s_cs_edit = 2;
+                break;
+            case 3: { /* HOST */
+                int ok;
+                td5_net_set_mode(s_cs_direct ? TD5_NET_MODE_DIRECT
+                                             : TD5_NET_MODE_LAN);
+                if (s_cs_direct)
+                    ok = td5_net_create_session_ex(s_create_session_name,
+                                                   frontend_net_player_name(),
+                                                   s_lobby_max_players,
+                                                   s_net_cfg_game_port,
+                                                   s_net_cfg_enable_upnp);
+                else
+                    ok = td5_net_create_session(s_create_session_name,
+                                                frontend_net_player_name(),
+                                                s_lobby_max_players);
+                if (ok) {
+                    td5_net_set_session_limits(s_lobby_max_players,
+                                               s_lobby_password);
+                    s_network_active = 1;
+                    s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
+                } else {
+                    TD5_LOG_W(LOG_TAG, "host create failed (direct=%d)", s_cs_direct);
+                    s_return_screen = s_cs_direct ? TD5_SCREEN_DIRECT_CONNECT
+                                                  : TD5_SCREEN_LAN_MENU;
+                }
+                s_inner_state = 3;
+                break;
+            }
+            case 4: /* BACK */
+                s_return_screen = s_cs_direct ? TD5_SCREEN_DIRECT_CONNECT
+                                              : TD5_SCREEN_LAN_MENU;
+                s_inner_state = 3;
+                break;
+            }
         }
         break;
 
@@ -885,11 +938,22 @@ void Screen_NetworkLobby(void) {
         frontend_create_button(SNK_ChangeCarButTxt, 400, 158, 190, 0x28); /* 1 CHANGE CAR */
         frontend_create_button("SELECT TRACK",      400, 206, 190, 0x28); /* 2 SELECT TRACK */
         frontend_create_button(SNK_ExitButTxt,      400, 254, 190, 0x28); /* 3 EXIT */
-        if (frontend_net_is_host())
-            frontend_create_button("OPTIONS",       400, 302, 190, 0x28); /* 4 (host) */
+        /* [S31 redesign] indices 4..8: per-row KICK buttons (host only) —
+         * positioned/unhidden each frame next to the joined remote players;
+         * the exit-door icon is drawn over them in the post-button pass. */
+        if (frontend_net_is_host()) {
+            int k;
+            for (k = 0; k < 5; k++) {
+                int bi = frontend_create_button("", 0, 0, 26, 22);
+                if (bi >= 0 && bi < FE_MAX_BUTTONS) {
+                    s_buttons[bi].hidden   = 1;
+                    s_buttons[bi].disabled = 1;
+                }
+                s_kick_button_slot[k] = -1;
+            }
+        }
 
         memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
-        s_lobby_modal = 0;
 
         s_chat_dirty = (s_network_active) ? 1 : 0;
         s_lobby_action = 0;
@@ -919,94 +983,6 @@ void Screen_NetworkLobby(void) {
         /* Render background and chat input */
         frontend_present_buffer();
 
-#ifndef TD5RE_RELEASE
-        /* Dev hook: TD5RE_NET_LOBBY=2 auto-opens the OPTIONS modal once. */
-        {
-            static int s_dev_modal_once = 0;
-            const char *lv = getenv("TD5RE_NET_LOBBY");
-            if (lv && lv[0] == '2' && !s_dev_modal_once && !s_lobby_modal &&
-                frontend_net_is_host()) {
-                s_dev_modal_once = 1;
-                s_lobby_kick_sel = -1;
-                s_lobby_max_players = td5_net_get_max_players();
-                if (s_lobby_max_players < 2 || s_lobby_max_players > 6) s_lobby_max_players = 6;
-                s_lobby_password[0] = '\0';
-                frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
-                frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
-                s_lobby_modal_armed = 1;   /* dev auto-open: no Enter to wait on */
-                s_lobby_modal = 1;
-            }
-        }
-#endif
-
-        /* S10b: host OPTIONS modal (max players + password) — takes input focus
-         * while open. Password edits via the WM_CHAR text path; Left/Right adjust
-         * max players; Enter applies + closes; Esc cancels. */
-        if (s_lobby_modal) {
-            /* Wait for the OPTIONS-Enter (which opened this modal) to be released
-             * before accepting input — otherwise its WM_CHAR key-repeat '\r'
-             * instantly confirms and closes the modal ("can't change options"). */
-            if (!s_lobby_modal_armed) {
-                td5_plat_input_flush_chars();
-                if (!td5_plat_input_key_pressed(0x1C))   /* Enter scancode */
-                    s_lobby_modal_armed = 1;
-                break;
-            }
-            /* Keyboard arrows read directly (DIK edge-detected): the nav
-             * FIFO is suppressed while the password text field is open, so
-             * s_arrow_input never fires from the keyboard here (it still
-             * carries the gamepad d-pad). */
-            int nav_l, nav_r, nav_u, nav_d;
-            {
-                static int pl, pr, pu, pd;
-                int l = td5_plat_input_key_pressed(0xCB);   /* DIK_LEFT  */
-                int r = td5_plat_input_key_pressed(0xCD);   /* DIK_RIGHT */
-                int u = td5_plat_input_key_pressed(0xC8);   /* DIK_UP    */
-                int d = td5_plat_input_key_pressed(0xD0);   /* DIK_DOWN  */
-                nav_l = l && !pl;  nav_r = r && !pr;
-                nav_u = u && !pu;  nav_d = d && !pd;
-                pl = l;  pr = r;  pu = u;  pd = d;
-            }
-            frontend_handle_text_input_key();
-            if (frontend_text_input_confirmed()) {
-                td5_net_set_session_limits(s_lobby_max_players, s_lobby_password);
-                /* S31: apply the kick selection (if any). DXPDATA opcode 0x12,
-                 * payload[1] = target slot; only the target reacts. */
-                if (s_lobby_kick_sel >= 0 &&
-                    td5_net_is_slot_active(s_lobby_kick_sel) &&
-                    s_lobby_kick_sel != td5_net_local_slot()) {
-                    uint8_t kick_msg[8] = {0x12, 0, 0, 0, 0, 0, 0, 0};
-                    kick_msg[1] = (uint8_t)s_lobby_kick_sel;
-                    frontend_net_send(1, kick_msg, 8);
-                    TD5_LOG_I(LOG_TAG, "Lobby options: kick sent for slot %d",
-                              s_lobby_kick_sel);
-                }
-                s_lobby_kick_sel = -1;
-                TD5_LOG_I(LOG_TAG, "Lobby options: max=%d password=%s",
-                          s_lobby_max_players, s_lobby_password[0] ? "set" : "none");
-                s_lobby_modal = 0;
-                s_text_input_state = 1;             /* restore chat input */
-                frontend_play_sfx(3);
-            } else if ((s_arrow_input & 1) || nav_l) {   /* LEFT */
-                if (s_lobby_max_players > 2) s_lobby_max_players--;
-                frontend_play_sfx(2);
-            } else if ((s_arrow_input & 2) || nav_r) {   /* RIGHT */
-                if (s_lobby_max_players < 6) s_lobby_max_players++;
-                frontend_play_sfx(2);
-            } else if ((s_arrow_input & 4) || nav_u) {   /* UP: previous kick target */
-                s_lobby_kick_sel = lobby_cycle_kick(s_lobby_kick_sel, -1);
-                frontend_play_sfx(2);
-            } else if ((s_arrow_input & 8) || nav_d) {   /* DOWN: next kick target */
-                s_lobby_kick_sel = lobby_cycle_kick(s_lobby_kick_sel, +1);
-                frontend_play_sfx(2);
-            } else if (td5_plat_input_key_pressed(0x01)) {   /* ESC = cancel */
-                s_lobby_modal = 0;
-                s_lobby_kick_sel = -1;
-                s_text_input_state = 1;
-            }
-            break;
-        }
-
         /* S31: chat typing mode (opened with T below). While typing, ESC
          * cancels the chat instead of leaving the lobby and lobby nav is
          * paused; Enter submits via the confirm path (-> state 4). */
@@ -1033,7 +1009,6 @@ void Screen_NetworkLobby(void) {
             TD5_LOG_I(LOG_TAG, "NetworkLobby: ESC -> exit (destroy session)");
             frontend_net_destroy();
             s_network_active = 0;
-            s_lobby_modal = 0;
             td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
             return;
         }
@@ -1045,6 +1020,36 @@ void Screen_NetworkLobby(void) {
             int slot;
             for (slot = 0; slot < 6; slot++)
                 s_participant_flags[slot] = td5_net_is_slot_active(slot) ? 1 : 0;
+        }
+
+        /* [S31 redesign] place the per-row KICK buttons (host): kick button k
+         * sits at the right edge of the k-th remote player's roster row. */
+        if (frontend_net_is_host()) {
+            int prow = 0, k = 0;
+            int pslot;
+            for (pslot = 0; pslot < TD5_NET_MAX_PLAYERS; pslot++) {
+                if (!td5_net_is_slot_active(pslot)) continue;
+                if (pslot != td5_net_local_slot() && k < 5) {
+                    int bi = 4 + k;
+                    if (bi < FE_MAX_BUTTONS && s_buttons[bi].active) {
+                        s_buttons[bi].x = FE_LOBBY_X + FE_LOBBY_PANEL_W - 38;
+                        s_buttons[bi].y = FE_LOBBY_ROW0_Y + prow * FE_LOBBY_ROW_H - 3;
+                        s_buttons[bi].hidden   = 0;
+                        s_buttons[bi].disabled = 0;
+                        s_kick_button_slot[k]  = pslot;
+                        k++;
+                    }
+                }
+                prow++;
+            }
+            for (; k < 5; k++) {
+                int bi = 4 + k;
+                if (bi < FE_MAX_BUTTONS) {
+                    s_buttons[bi].hidden   = 1;
+                    s_buttons[bi].disabled = 1;
+                }
+                s_kick_button_slot[k] = -1;
+            }
         }
 
         /* S31: drain queued net messages. The only lobby-relevant opcode is
@@ -1181,26 +1186,24 @@ void Screen_NetworkLobby(void) {
                 TD5_LOG_I(LOG_TAG, "NetworkLobby: exit -> destroy session");
                 frontend_net_destroy();
                 s_network_active = 0;
-                s_lobby_modal = 0;
                 td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
                 return;
 
-            case 4: /* OPTIONS (host) -> open the max-players/password modal */
-                if (frontend_net_is_host()) {
-                    s_lobby_max_players = td5_net_get_max_players();
-                    if (s_lobby_max_players < 2 || s_lobby_max_players > 6)
-                        s_lobby_max_players = 6;
-                    s_lobby_password[0] = '\0';
-                    frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
-                    frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
-                    s_lobby_kick_sel = -1;
-                    s_lobby_modal_armed = 0;   /* arm after the Enter is released */
-                    s_lobby_modal = 1;
-                    frontend_play_sfx(3);
-                }
-                break;
-
             default:
+                /* [S31 redesign] indices 4..8 = per-row KICK buttons (host). */
+                if (frontend_net_is_host() &&
+                    s_button_index >= 4 && s_button_index <= 8) {
+                    int ks = s_kick_button_slot[s_button_index - 4];
+                    if (ks >= 0 && td5_net_is_slot_active(ks) &&
+                        ks != td5_net_local_slot()) {
+                        uint8_t kick_msg[8] = {0x12, 0, 0, 0, 0, 0, 0, 0};
+                        kick_msg[1] = (uint8_t)ks;
+                        frontend_net_send(1, kick_msg, 8);
+                        frontend_play_sfx(3);
+                        TD5_LOG_I(LOG_TAG, "NetworkLobby: kick sent for slot %d", ks);
+                    }
+                    break;
+                }
                 s_lobby_action = 0;
                 break;
             }
@@ -1209,6 +1212,7 @@ void Screen_NetworkLobby(void) {
         /* Process network messages */
         /* Check for disconnect */
         if (s_kicked_flag) {
+            s_kicked_flag = 0;
             frontend_net_destroy();
             td5_frontend_set_screen(TD5_SCREEN_SESSION_LOCKED);
             return;
