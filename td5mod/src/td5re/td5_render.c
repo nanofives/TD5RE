@@ -6306,7 +6306,6 @@ void td5_render_advance_billboard_anims(void)
  * Audit: re/analysis/pilot_trig_audit.md
  * ======================================================================== */
 
-#include "td5_pilot_trace_trig.h"
 
 #define TD5_TRIG_LUT_SIZE 0x1400  /* 5120, matches original */
 
@@ -6375,23 +6374,18 @@ static inline void td5_trig_ensure_lut(void) {
 /* [CONFIRMED @ 0x0040A6A0] Byte-faithful with orig CosFloat12bit.
  * L5 promotion 2026-05-18 (small-tier sweep). 4-instr listing match:
  * AND angle, 0xfff; FLD float [base + idx*4]. Port reads s_cosFloatTable
- * (built from FPU cos at td5_trig_build_lut) at the same index. Pilot trig
- * emit hook is an instrumentation side-effect with no semantic divergence. */
+ * (built from FPU cos at td5_trig_build_lut) at the same index. */
 float CosFloat12bit(unsigned int angle) {
     td5_trig_ensure_lut();
     unsigned int idx = angle & 0xFFFu;
     float v = s_cosFloatTable[idx];
-    union { float f; uint32_t u; } pun;
-    pun.f = v;
-    td5_pilot_trig_emit("cos", (int32_t)angle, pun.u, v);
     return v;
 }
 
 /* [CONFIRMED @ 0x0040A6C0] Byte-faithful with orig SinFloat12bit.
  * L5 promotion 2026-05-18 (small-tier sweep). 5-instr listing match:
  * ADD EAX, 0xfffffc00 (32-bit signed wrap = sin via cos(angle-pi/2));
- * AND 0xfff; FLD float [s_cosFloatTable + idx*4]. Pilot trig emit hook
- * is an instrumentation side-effect with no semantic divergence. */
+ * AND 0xfff; FLD float [s_cosFloatTable + idx*4]. */
 float SinFloat12bit(int angle) {
     td5_trig_ensure_lut();
     /* Match the original's `ADD EAX, 0xfffffc00` (32-bit signed wrap), then
@@ -6399,9 +6393,6 @@ float SinFloat12bit(int angle) {
     unsigned int shifted = ((unsigned int)angle) + 0xfffffc00u;
     unsigned int idx = shifted & 0xFFFu;
     float v = s_cosFloatTable[idx];
-    union { float f; uint32_t u; } pun;
-    pun.f = v;
-    td5_pilot_trig_emit("sin", (int32_t)angle, pun.u, v);
     return v;
 }
 
@@ -6497,9 +6488,6 @@ static const int16_t k_angle_from_vector12_lut[1026] = {
     0
 };
 
-#ifdef TD5_PILOT_TRACE_0040A720
-#include "td5_pilot_trace_0040A720.h"
-#endif
 
 int AngleFromVector12(int x, int z) {
     /* Literal port of 0x0040A720 AngleFromVector12 from TD5_d3d.exe.
@@ -6652,9 +6640,6 @@ int AngleFromVector12(int x, int z) {
         }
     }
 
-#ifdef TD5_PILOT_TRACE_0040A720
-    td5_pilot_trace_0040A720_call(param_1, param_2, ret);
-#endif
     return ret;
 }
 

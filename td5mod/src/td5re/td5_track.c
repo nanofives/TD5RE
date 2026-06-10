@@ -23,8 +23,6 @@
 #include "td5_render.h"
 #include "td5_camera.h"
 #include "td5_trace.h"
-#include "td5_pilot_trace_004440F0.h"
-#include "td5_pilot_trace_pool15_spline.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
 #include <string.h>
@@ -62,7 +60,7 @@ int     g_track_type_mode       = 0;
  * 0x431260  GetTrackSpanDisplayListEntry        -- DONE
  * 0x431190  ParseModelsDat                      -- DONE
  * 0x40AC00  PrepareMeshResource                 -- DONE
- * 0x436A70  UpdateRaceActors                    -- DONE (in td5_track_tick)
+ * 0x436A70  UpdateRaceActors                    -- DONE (td5_ai.c td5_ai_update_race_actors)
  * 0x42F5B0  UpdateRaceOrder                     -- DONE
  * 0x435930  InitializeTrafficActorsFromQueue    -- DONE
  * 0x4353B0  RecycleTrafficActorFromQueue        -- STUB ONLY (real port in td5_ai.c)
@@ -3495,13 +3493,7 @@ void td5_track_update_actor_position(TD5_Actor *actor)
      * pass restores faithful behavior; under the original spec the chassis
      * walker incurs at most a 1-tick lag after V2V push / spawn jumps,
      * which the next-tick call resolves. */
-    {
-        int32_t world_pos_xz[3] = { pos_x, 0, pos_z };
-        td5_pilot_emit_004440F0_enter(track_state, world_pos_xz,
-                                      (uintptr_t)__builtin_return_address(0));
-        update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
-        td5_pilot_emit_004440F0_leave(track_state, 0);
-    }
+    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;
@@ -3540,13 +3532,7 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
      * ground from a span ahead of where the original would. On slope onsets
      * this produces +1792 FP spurious chassis-Y launches. Frida-localized at
      * Moscow span 196 front wheels (2026-05-01). */
-    {
-        int32_t world_pos_xz[3] = { world_x, 0, world_z };
-        td5_pilot_emit_004440F0_enter(probe, world_pos_xz,
-                                      (uintptr_t)__builtin_return_address(0));
-        update_position_recursive((int16_t *)probe, world_x, world_z, 0, /*single_step=*/1);
-        td5_pilot_emit_004440F0_leave(probe, 0);
-    }
+    update_position_recursive((int16_t *)probe, world_x, world_z, 0, /*single_step=*/1);
 }
 
 /* Write per-probe contact_vertex_A/B from probe state. Mirrors the prefix
@@ -5105,7 +5091,6 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
     {
         int32_t ret_val = (progress < route_byte) ? -len : len;
 #ifndef TD5RE_RELEASE
-        td5_pilot_trace_pool15_emit_signed_offset(span_index, progress, route_byte, ret_val);
 #endif
         return ret_val;
     }
@@ -5233,8 +5218,6 @@ int td5_track_sample_target_point(int span_index, int route_byte,
     if (out_z) *out_z = result_z;
 
 #ifndef TD5RE_RELEASE
-    td5_pilot_trace_pool15_emit_target_point(span_index, route_byte, lateral_bias,
-                                              result_x, result_z);
 #endif
     return 1;
 }
@@ -5568,83 +5551,6 @@ void td5_track_apply_segment_lighting(TD5_Actor *actor, int view_index)
 #endif /* legacy track-lighting skeleton */
 
 /* ========================================================================
- * Race Order — REAL owner is update_race_order() in td5_game.c
- *
- * The authoritative race-order pass is update_race_order() in td5_game.c (the
- * faithful UpdateRaceOrder @0x0042F5B0 port: reads live actors via
- * td5_game_get_actor(), bubble-sorts by track_span_high_water (+0x86)
- * descending, writes display_position + race_position).
- *
- * The function below was a DEAD placeholder: it hardcoded its actor_base
- * pointers to 0 and forced hw_a=hw_b=0, so its swap test (hw_a < hw_b) was
- * always false — it NEVER swapped s_race_order and NEVER wrote back to actors.
- * It was called every tick from td5_track_tick() with zero observable effect.
- * Quarantined 2026-06-01 (the call was removed in td5_track_tick); kept under
- * #if 0 for code-archaeology only. Do NOT re-enable — use update_race_order().
- * ======================================================================== */
-#if 0  /* DEAD placeholder — superseded by update_race_order() in td5_game.c */
-void td5_track_update_race_order(void)
-{
-    int i, swapped;
-    uint8_t tmp;
-
-    /* Bubble sort the race order array by span_high_water (descending) */
-    do {
-        swapped = 0;
-        for (i = 0; i < TD5_MAX_RACER_SLOTS - 1; i++) {
-            int slot_a = s_race_order[i];
-            int slot_b = s_race_order[i + 1];
-
-            /* Get the actor pointers -- using stride 0x388 from base.
-             * In the source port, actors are managed externally; we access
-             * them via byte offset from a base pointer.
-             * For now, we use the global state's total_actor_count as a guard. */
-            int16_t hw_a, hw_b;
-            int32_t finish_a, finish_b;
-            uint8_t *actor_base_a, *actor_base_b;
-
-            /* Skip invalid slots */
-            if (slot_a >= g_td5.total_actor_count ||
-                slot_b >= g_td5.total_actor_count)
-                continue;
-
-            /* Access actors through byte-level pointer math.
-             * In a full integration, these would use the actor table pointer. */
-            actor_base_a = (uint8_t *)(uintptr_t)0; /* placeholder */
-            actor_base_b = (uint8_t *)(uintptr_t)0;
-
-            /* For the source port, use the offset approach:
-             * high_water at actor + 0x86 (int16)
-             * finish_time at actor + 0x328 (int32) */
-            (void)actor_base_a;
-            (void)actor_base_b;
-
-            /* Since we cannot directly access the actor table base from here,
-             * we store minimal state. In practice the race module would pass
-             * actor pointers. For now, implement the sorting logic structurally. */
-            hw_a = 0;
-            hw_b = 0;
-            finish_a = 0;
-            finish_b = 0;
-
-            /* Only swap unfinished actors whose span progress is lower */
-            if (finish_a == 0 && finish_b == 0) {
-                if (hw_a < hw_b) {
-                    tmp = s_race_order[i];
-                    s_race_order[i] = s_race_order[i + 1];
-                    s_race_order[i + 1] = tmp;
-                    swapped = 1;
-                }
-            }
-        }
-    } while (swapped);
-
-    /* Write back race positions to each actor's race_position field (+0x383).
-     * In full integration, this would iterate actors and set the byte. */
-}
-#endif /* DEAD td5_track_update_race_order placeholder */
-
-/* ========================================================================
  * Traffic Bus FIFO (0x435930 / 0x435310)
  *
  * TRAFFIC.BUS is a FIFO queue of 4-byte spawn records. The cursor
@@ -5702,64 +5608,6 @@ void td5_track_init_traffic_from_queue(void)
     }
 }
 
-/**
- * RecycleTrafficActorFromQueue: vestigial track-side stub.
- *
- * NOTE (precise-00435310 audit, 2026-05-14): the scope-file address
- * 0x00435310 does NOT correspond to a function entry in TD5_d3d.exe.
- * Ghidra reports 0x00435310 as an instruction inside
- * UpdateActorTrackBehavior (0x00434FE0-0x004353AC), not a function
- * start. The actual traffic-recycle entry lives at 0x004353B0
- * (RecycleTrafficActorFromQueue), and the byte-faithful port of that
- * function lives in td5_ai.c (td5_ai_recycle_traffic_actor). The
- * call-site dispatcher (UpdateRaceActors @ 0x00436A70) is in td5_ai.c
- * too, so the canonical home for this logic is td5_ai.c.
- *
- * This stub is retained only to keep external references (route-loader
- * scaffolding) building until those callers are migrated; it performs
- * no recycle work itself. Do not call from new code -- use
- * td5_ai_recycle_traffic_actor() in td5_ai.c.
- */
-void td5_track_recycle_traffic_actor(void)
-{
-    TD5_TrafficBusEntry *entry;
-    int cursor;
-
-    if (!s_traffic_bus || s_traffic_bus_count <= 0)
-        return;
-
-    if (!g_td5.traffic_enabled)
-        return;
-
-    /* Find the next valid entry from the FIFO cursor */
-    cursor = s_traffic_cursor;
-    while (cursor < s_traffic_bus_count) {
-        entry = &s_traffic_bus[cursor];
-        if (entry->span_index == -1) {
-            cursor = 0; /* wrap */
-            if (cursor == s_traffic_cursor)
-                return;
-            continue;
-        }
-        break;
-    }
-
-    if (cursor >= s_traffic_bus_count)
-        return;
-
-    entry = &s_traffic_bus[cursor];
-
-    /* The recycling logic:
-     * 1. Find the traffic actor farthest behind the player
-     * 2. Teleport it to entry->span_index
-     * 3. Set lane and direction from entry
-     * 4. Advance the FIFO cursor
-     */
-
-    s_traffic_cursor = cursor + 1;
-    if (s_traffic_cursor >= s_traffic_bus_count)
-        s_traffic_cursor = 0;
-}
 
 /* ========================================================================
  * Route Loading (LEFT.TRK / RIGHT.TRK)
@@ -6829,23 +6677,6 @@ void td5_track_shutdown(void)
     s_traffic_cursor = 0;
 }
 
-/**
- * Per-tick traffic recycling.
- * Called from the main game loop each simulation tick.
- *
- * Race ORDER is owned by update_race_order() in td5_game.c (the faithful
- * UpdateRaceOrder @0x0042F5B0 port). This function previously also called a
- * dead placeholder race-order pass (td5_track_update_race_order) that never
- * swapped or wrote back — that no-op call was removed 2026-06-01, leaving only
- * traffic recycling here. (This is NOT a port of UpdateRaceActors @0x436A70.)
- */
-void td5_track_tick(void)
-{
-    /* Recycle traffic actors that have fallen behind */
-    if (g_td5.traffic_enabled) {
-        td5_track_recycle_traffic_actor();
-    }
-}
 
 /* ========================================================================
  * Track Probe Functions (migrated from td5re_stubs.c)

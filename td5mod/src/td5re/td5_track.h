@@ -93,7 +93,6 @@ typedef struct TD5_ModelsDatEntry {
 /* --- Module lifecycle --- */
 int  td5_track_init(void);
 void td5_track_shutdown(void);
-void td5_track_tick(void);
 
 /* --- STRIP.DAT loading --- */
 int  td5_track_load_strip(const void *data, size_t size);
@@ -275,7 +274,6 @@ void td5_track_bind_boundary_sentinels(int level_number);
 
 /* --- Traffic --- */
 void td5_track_init_traffic_from_queue(void);
-void td5_track_recycle_traffic_actor(void);
 
 /* --- Route data (LEFT/RIGHT.TRK) --- */
 int  td5_track_load_routes(const void *left_data, size_t left_size,

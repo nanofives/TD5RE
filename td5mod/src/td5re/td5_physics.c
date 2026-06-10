@@ -44,27 +44,10 @@
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
-#include "td5_pilot_trace.h" /* precise-port pilot CSV emit for 0x00403720 */
-#include "td5_pilot_trace_00405B40.h" /* precise-port pilot CSV emit for 0x00405B40 */
-#include "td5_pilot_trace_00405D70.h" /* precise-port pilot CSV emit for 0x00405D70 */
-#include "td5_pilot_trace_00405E80.h" /* precise-port pilot CSV emit for 0x00405E80 */
-#include "td5_pilot_trace_004063A0.h" /* precise-port pilot CSV emit for 0x004063A0 */
-#include "td5_pilot_trace_00406650.h" /* precise-port pilot CSV emit for 0x00406650 */
-#include "td5_pilot_trace_00406980.h"  /* precise-port pilot trace */
-#ifdef TD5_PILOT_TRACE_00409150
-#include "td5_pilot_trace_00409150.h"
-#endif
-#include "td5_pilot_trace_0042EB10.h"  /* precise-port pilot trace */
-#include "td5_pilot_trace_0042EBF0.h" /* precise-port pilot CSV emit for 0x0042EBF0 */
-#ifdef TD5_PILOT_TRACE_TRAFFIC
-#include "td5_pilot_trace_traffic.h" /* precise-port pilot CSV emit for 0x004437C0 + 0x004438F0 */
-#endif
 /* V2V trace headers are included unconditionally: their obb_corner_test /
  * collision_detect_full call sites below are ungated, so the snapshot types
  * must always be declared. The emitters self-stub to no-ops under
  * TD5RE_RELEASE (release build does not link the v2v trace modules). */
-#include "td5_pilot_trace_v2v_contact.h" /* pool15 V2V pilot trace */
-#include "td5_pilot_trace_v2v.h"  /* pool14_v2v precise-port pilot */
 #include "td5re.h"
 
 /* Include the full actor struct for field-level access.
@@ -410,21 +393,6 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
                                int32_t probe_x_fp8, int32_t probe_z_fp8)
 {
-    /* Pilot trace: capture args + pre-state. Frida probe at
-     * tools/frida_pool7_00406980.js mirrors this schema. Output:
-     * log/port/pool7_00406980.csv. The `side` parameter is the port's
-     * encoding of the original's `flags` arg (side=-1 maps to flags=0;
-     * side=1/2 maps to flags=1/2). probe_x_fp8/probe_z_fp8 stand in for
-     * the original's `forceVec[0]/forceVec[2]`. */
-    {
-        uint32_t flags_for_trace = (side < 0) ? 0u : (uint32_t)(side);
-        td5_pilot_emit_00406980_enter(actor,
-                                       probe_x_fp8, 0, probe_z_fp8,
-                                       (uint32_t)wall_angle,
-                                       penetration,
-                                       flags_for_trace);
-    }
-
     /* Pre-impulse attitude snapshot (slot 0) — lets us see whether wall
      * response is the proximate trigger of a pitch/roll spike. */
     int32_t pre_av_roll  = actor->angular_velocity_roll;
@@ -683,7 +651,6 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
     }
 
     /* Pilot trace: capture post-state and emit row. */
-    td5_pilot_emit_00406980_leave(actor);
 }
 
 /* ========================================================================
@@ -1067,7 +1034,6 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     if (!actor) return;
 
     /* precise-port pilot 0x00406650: capture enter snapshot. */
-    td5_pilot_emit_00406650_enter(actor);
 
     /* 1. Increment frame counter — listing 0x00406664 INC WORD ptr [+0x338]. */
     actor->frame_counter++;
@@ -1453,7 +1419,6 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
     }
 
     /* precise-port pilot 0x00406650: capture leave snapshot. */
-    td5_pilot_emit_00406650_leave(actor);
 }
 
 /* ========================================================================
@@ -1495,15 +1460,12 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
  */
 
 /* Pilot trace hooks (pool0 / 0x00404030) */
-extern void td5_pilot_emit_00404030_enter(const TD5_Actor *actor, uintptr_t caller_ra);
-extern void td5_pilot_emit_00404030_leave(const TD5_Actor *actor);
 
 void td5_physics_update_player(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    td5_pilot_emit_00404030_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     int32_t i;
 
@@ -2703,7 +2665,6 @@ void td5_physics_update_player(TD5_Actor *actor)
      * `abs(lateral_speed)>>8` tail-write used the wrong values (post-update)
      * and collapsed slip to near-zero in normal driving. */
 
-    td5_pilot_emit_00404030_leave(actor);
 }
 
 /* ========================================================================
@@ -2739,15 +2700,12 @@ void td5_physics_update_player(TD5_Actor *actor)
  */
 
 /* Pilot trace emitters (pool12 / precise-port workflow) */
-extern void td5_pilot_emit_00404EC0_enter(const TD5_Actor *actor, uintptr_t caller_ra);
-extern void td5_pilot_emit_00404EC0_leave(const TD5_Actor *actor);
 
 void td5_physics_update_ai(TD5_Actor *actor)
 {
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    td5_pilot_emit_00404EC0_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     /* Calls-trace probe: capture per-slot AI dynamics entry state.
      * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
@@ -3205,7 +3163,6 @@ void td5_physics_update_ai(TD5_Actor *actor)
         actor->current_slip_metric = (int16_t)slip;
     }
 
-    td5_pilot_emit_00404EC0_leave(actor);
 }
 
 /* ========================================================================
@@ -3218,9 +3175,6 @@ void td5_physics_update_traffic(TD5_Actor *actor)
      * Transcribed from Ghidra decompilation; every SAR uses
      * truncate-toward-zero rounding: (x + ((x>>31)&mask)) >> shift. */
 
-#ifdef TD5_PILOT_TRACE_TRAFFIC
-    td5_pilot_emit_traffic_friction_enter(actor);
-#endif
 
     #define SAR12(x) (((x) + (((x) >> 31) & 0xFFF)) >> 12)
     #define SAR10(x) (((x) + (((x) >> 31) & 0x3FF)) >> 10)
@@ -3315,9 +3269,6 @@ void td5_physics_update_traffic(TD5_Actor *actor)
     #undef SAR10
     #undef SAR8_U8
 
-#ifdef TD5_PILOT_TRACE_TRAFFIC
-    td5_pilot_emit_traffic_friction_leave(actor);
-#endif
 }
 
 /* ========================================================================
@@ -3347,9 +3298,6 @@ static inline int32_t sar8_rz(int32_t x) {
 
 static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int32_t longitudinal)
 {
-#ifdef TD5_PILOT_TRACE_TRAFFIC
-    td5_pilot_emit_traffic_susp_enter(actor, lateral, longitudinal);
-#endif
 
     /* === Axis 0 (lateral-driven): pos @ +0x2DC, vel @ +0x2EC, clamp ±0x2000 ===
      * [CONFIRMED @ 0x004437C4-0x00443859] */
@@ -3412,9 +3360,6 @@ static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int
      * Roll/pitch display angles are computed from surface normal + suspension
      * correction in UpdateTrafficVehiclePose, not from euler accumulators. */
 
-#ifdef TD5_PILOT_TRACE_TRAFFIC
-    td5_pilot_emit_traffic_susp_leave(actor);
-#endif
 }
 
 /* ========================================================================
@@ -3487,34 +3432,8 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t dheading_raw_shift = (yaw_a_acc - yaw_b_acc) >> 8;
 
     /* Pool15 V2V pilot trace — capture inputs at entry. */
-    TD5_PilotV2VContactSnap _v2v_snap;
-    int _v2v_slot_a = a ? a->slot_index : -1;
-    int _v2v_slot_b = b ? b->slot_index : -1;
-    int _v2v_call_idx = td5_pilot_v2v_next_call_idx();
-    _v2v_snap.actor_a_addr = (uint32_t)(uintptr_t)a;
-    _v2v_snap.actor_b_addr = (uint32_t)(uintptr_t)b;
     /* Pilot snapshot stores raw 24.8 fp coords for direct comparison with the
      * Frida capture of the original callee. */
-    _v2v_snap.ax = pos_a_x_fp;
-    _v2v_snap.ay = a ? a->world_pos.y : 0;
-    _v2v_snap.az = pos_a_z_fp;
-    _v2v_snap.bx = pos_b_x_fp;
-    _v2v_snap.by = b ? b->world_pos.y : 0;
-    _v2v_snap.bz = pos_b_z_fp;
-    _v2v_snap.yaw_a_raw = yaw_a_acc;
-    _v2v_snap.yaw_b_raw = yaw_b_acc;
-    _v2v_snap.cardef_a_off04 = (int16_t)front_z_a;
-    _v2v_snap.cardef_a_off08 = (int16_t)half_w_a;
-    _v2v_snap.cardef_a_off14 = (int16_t)rear_z_a;
-    _v2v_snap.cardef_b_off04 = (int16_t)front_z_b;
-    _v2v_snap.cardef_b_off08 = (int16_t)half_w_b;
-    _v2v_snap.cardef_b_off14 = (int16_t)rear_z_b;
-    memset(_v2v_snap.corner_proj_x, 0, sizeof(_v2v_snap.corner_proj_x));
-    memset(_v2v_snap.corner_proj_z, 0, sizeof(_v2v_snap.corner_proj_z));
-    memset(_v2v_snap.corner_own_x,  0, sizeof(_v2v_snap.corner_own_x));
-    memset(_v2v_snap.corner_own_z,  0, sizeof(_v2v_snap.corner_own_z));
-    _v2v_snap.bitmask = 0;
-    td5_pilot_v2v_contact_emit_enter(&_v2v_snap, _v2v_slot_a, _v2v_slot_b, _v2v_call_idx);
 
     /* Precompute sin/cos for each heading. cos_fixed12/sin_fixed12 mask with
      * & 0xFFF internally, so passing the raw (yaw_acc >> 8) is safe and matches
@@ -3662,16 +3581,8 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
 
     /* Pool15 V2V pilot trace — capture outputs at exit. */
     {
-        TD5_PilotV2VContactSnap _v2v_out;
-        memset(&_v2v_out, 0, sizeof(_v2v_out));
-        _v2v_out.bitmask = (uint32_t)result;
         for (int _i = 0; _i < 8; _i++) {
-            _v2v_out.corner_proj_x[_i] = corners[_i].proj_x;
-            _v2v_out.corner_proj_z[_i] = corners[_i].proj_z;
-            _v2v_out.corner_own_x[_i]  = corners[_i].own_x;
-            _v2v_out.corner_own_z[_i]  = corners[_i].own_z;
         }
-        td5_pilot_v2v_contact_emit_leave(&_v2v_out);
     }
 
     return result;
@@ -3859,7 +3770,6 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     /* pool14_v2v pilot trace: capture pre-state. The Frida probe captures
      * args[0]=actorA (=slot_a=frame owner) and args[1]=actorB (=slot_b).
      * Port's A=target=caller's `a`=slot_a → maps to Frida's actorA. */
-    td5_pilot_v2v_enter(A, B, corner, angle, impactForce);
 
     /* --- 1. Prologue: save angular velocities for delta application --- */
     int32_t saved_omega_A = A->angular_velocity_yaw;
@@ -4100,7 +4010,6 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * Original returns 0 (XOR EAX,EAX at 0x00407CCD / 0x00407E86). */
         TD5_LOG_I(LOG_TAG, "v2v_reject: slot_A=%d slot_B=%d side=%d cxA=%d czA=%d cxB=%d czB=%d imp=%d push=(%d,%d)",
                   A->slot_index, B->slot_index, is_side_branch, cx_A, cz_A, cx_B, cz_B, impulse, push_x, push_z);
-        td5_pilot_v2v_leave(A, B, 0);
         return;
     }
 
@@ -4277,7 +4186,6 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
 
     /* pool14_v2v pilot trace: capture post-state at function exit.
      * Original returns int impact_mag at 0x004084A2 RET. */
-    td5_pilot_v2v_leave(A, B, impact_mag);
 }
 
 /* ========================================================================
@@ -4368,23 +4276,6 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
 
     /* Pool15 V2V pilot trace — reset corner-test call counter so the next
      * 1+7 obb_corner_test calls inside this function get event_idx 1..8. */
-    td5_pilot_v2v_reset_call_idx(idx_a, idx_b);
-    TD5_PilotV2VToiSnap _v2v_toi;
-    memset(&_v2v_toi, 0, sizeof(_v2v_toi));
-    _v2v_toi.actor_a_addr = (uint32_t)(uintptr_t)a;
-    _v2v_toi.actor_b_addr = (uint32_t)(uintptr_t)b;
-    _v2v_toi.ax = a->world_pos.x;
-    _v2v_toi.az = a->world_pos.z;
-    _v2v_toi.bx = b->world_pos.x;
-    _v2v_toi.bz = b->world_pos.z;
-    _v2v_toi.yaw_a_raw = a->euler_accum.yaw;
-    _v2v_toi.yaw_b_raw = b->euler_accum.yaw;
-    _v2v_toi.lin_vel_a_x = a->linear_velocity_x;
-    _v2v_toi.lin_vel_a_z = a->linear_velocity_z;
-    _v2v_toi.lin_vel_b_x = b->linear_velocity_x;
-    _v2v_toi.lin_vel_b_z = b->linear_velocity_z;
-    _v2v_toi.ang_vel_a_yaw = a->angular_velocity_yaw;
-    _v2v_toi.ang_vel_b_yaw = b->angular_velocity_yaw;
 
     /* AABB pre-test from broadphase grid.
      * [CONFIRMED @ 0x00408A92-0x00408AB7]: original uses JGE/JLE — i.e.
@@ -4563,15 +4454,6 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
     int32_t impactForce = local_84 - 0x10;
 
     /* Pool15 V2V pilot trace — emit toi-row at dispatch boundary. */
-    _v2v_toi.impactForce = impactForce;
-    _v2v_toi.dispatched_bitmask = (uint32_t)cached_bitmask;
-    _v2v_toi.final_yaw_a_disp = test_ha;
-    _v2v_toi.final_yaw_b_disp = test_hb;
-    _v2v_toi.final_ax = pos_a_x >> 8;
-    _v2v_toi.final_az = pos_a_z >> 8;
-    _v2v_toi.final_bx = pos_b_x >> 8;
-    _v2v_toi.final_bz = pos_b_z >> 8;
-    td5_pilot_v2v_toi_emit(&_v2v_toi, idx_a, idx_b);
 
     /* Dispatch uses the cached last-non-zero bitmask + corners, NOT a final
      * re-test. `test_ha` / `test_hb` carry the final-state yaws (in 12-bit
@@ -4752,10 +4634,6 @@ void td5_physics_resolve_vehicle_contacts(void)
         return;
     }
 
-#ifdef TD5_PILOT_TRACE_00409150
-    td5_pilot_trace_00409150_enter(total);
-    int pilot_pair_idx = 0;
-#endif
 
     s_v2v_tick++;
 
@@ -4808,19 +4686,6 @@ void td5_physics_resolve_vehicle_contacts(void)
         g_actor_aabb[i][4] = s_collision_grid[bucket];
         s_collision_grid[bucket] = (uint8_t)i;
 
-#ifdef TD5_PILOT_TRACE_00409150
-        td5_pilot_trace_00409150_phase1(i,
-                                        actor->world_pos.x >> 8,
-                                        actor->world_pos.z >> 8,
-                                        radius,
-                                        actor->track_span_normalized,
-                                        bucket,
-                                        g_actor_aabb[i][4],
-                                        g_actor_aabb[i][0],
-                                        g_actor_aabb[i][1],
-                                        g_actor_aabb[i][2],
-                                        g_actor_aabb[i][3]);
-#endif
     }
 
     /* --- Phase 2: Walk adjacent buckets for each actor --- */
@@ -4899,14 +4764,6 @@ void td5_physics_resolve_vehicle_contacts(void)
                     }
                 }
 
-#ifdef TD5_PILOT_TRACE_00409150
-                td5_pilot_trace_00409150_pair(i, j,
-                                              boff, walk_count - 1,
-                                              (a_scripted || b_scripted) ? 1 : 0,
-                                              a->vehicle_mode, a->wheel_contact_bitmask,
-                                              b->vehicle_mode, b->wheel_contact_bitmask,
-                                              pilot_pair_idx++);
-#endif
                 if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
                 } else {
@@ -4918,9 +4775,6 @@ void td5_physics_resolve_vehicle_contacts(void)
         }
     }
 
-#ifdef TD5_PILOT_TRACE_00409150
-    td5_pilot_trace_00409150_leave(pilot_pair_idx);
-#endif
 
     /* --- Phase 2.5: anti-tunnel position-only depenetration (S17) ---
      * Port-only robustness pass (gated by [GameOptions] AntiTunnel, default
@@ -5113,8 +4967,6 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
 
 /* pool5 / 0x00403A20 pilot trace hooks — header included separately to keep
  * the function signature unchanged. */
-extern void td5_pilot_emit_00403A20_enter(const TD5_Actor *actor, int32_t accel_x, int32_t accel_z, uintptr_t caller_ra);
-extern void td5_pilot_emit_00403A20_leave(const TD5_Actor *actor);
 
 /* Round-to-zero divide by 2 for signed int32. Mirrors the central-pass
  * `CDQ; SUB EAX,EDX; SAR EAX,1` idiom at 0x00403B78..B95.
@@ -5133,7 +4985,6 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
     int16_t *phys = get_phys(actor);
     if (!phys) return;
 
-    td5_pilot_emit_00403A20_enter(actor, accel_x, accel_z, (uintptr_t)__builtin_return_address(0));
 
     /* cardef constants -- see function header.
      * Names chosen to match the original's semantic use. */
@@ -5378,7 +5229,6 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
         }
     }
 
-    td5_pilot_emit_00403A20_leave(actor);
 }
 
 /* ========================================================================
@@ -5523,7 +5373,6 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
     return (x + (int32_t)((uint32_t)(x >> 31) & (uint32_t)mask)) >> shift;
 }
 
-#include "td5_pilot_trace_004057F0.h"
 
 /* [CONFIRMED @ 0x004057F0] L5 promotion sweep audit (2026-05-18).
  *
@@ -5563,9 +5412,6 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
  */
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
-    td5_pilot_emit_004057F0_enter(actor,
-                                  (uintptr_t)__builtin_return_address(0),
-                                  g_gravity_constant);
     /* Faithful port of UpdateVehicleSuspensionResponse @ 0x004057F0.
      *
      * HISTORY: this is a restore of commit e97669e's literal port, which
@@ -5627,7 +5473,6 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     if (lock == 0x0F) {
         /* All four wheels airborne — early-return matches original
          * 0x00405809; gravity stays subtracted (not added back). */
-        td5_pilot_emit_004057F0_leave(actor);
         return;
     }
 
@@ -5865,7 +5710,6 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
                   actor->linear_velocity_y);
     }
 
-    td5_pilot_emit_004057F0_leave(actor);
 }
 
 /* ========================================================================
@@ -6903,7 +6747,6 @@ static inline int32_t td5_physics_wrap_angle_delta(int32_t new_angle, int32_t ol
 void td5_physics_integrate_pose(TD5_Actor *actor)
 {
     /* Pilot precise-port trace — snapshot inputs at entry (slot 0 only). */
-    td5_pilot_emit_00405E80_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     /* Save previous Y for suspension delta */
     actor->prev_frame_y_position = actor->world_pos.y;
@@ -7654,7 +7497,6 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     }
 
     /* Pilot precise-port trace — snapshot outputs at exit (slot 0 only). */
-    td5_pilot_emit_00405E80_leave(actor);
 }
 
 /* ========================================================================
@@ -7667,7 +7509,6 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 static void update_vehicle_pose_from_physics(TD5_Actor *actor)
 {
     /* Pilot precise-port trace — snapshot inputs at entry. */
-    td5_pilot_emit_004063A0_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     /* Convert current angles to display.
      *
@@ -7920,7 +7761,6 @@ static void update_vehicle_pose_from_physics(TD5_Actor *actor)
     }
 
     /* Pilot precise-port trace — snapshot outputs at exit. */
-    td5_pilot_emit_004063A0_leave(actor);
 }
 
 /* ========================================================================
@@ -8037,7 +7877,6 @@ static inline void td5_transform_short_vec3_by_render_matrix_rounded(
 void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 {
     /* Pilot precise-port trace — snapshot inputs at entry. */
-    td5_pilot_emit_00403720_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     float *rot = actor->rotation_matrix.m;
     int resolved_surface = actor->surface_type_chassis;
@@ -8193,13 +8032,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             actor->wheel_contact_pos[i].y = world[1] << 8;
             actor->wheel_contact_pos[i].z = world[2] << 8;
 
-            td5_pilot_emit_0042EB10(
-                (uint32_t)td5_trace_current_sim_tick(),
-                actor->slot_index, PILOT_0042EB10_KIND_WCP, i,
-                0x00403873u,  /* faux caller_ra matching Frida CSV column */
-                body_off, &actor->wheel_contact_pos[i],
-                body_off[0], body_off[1], body_off[2],
-                matrix, world[0], world[1], world[2]);
         }
 
         /* Step C: stash int16-truncated body-rotated Y for chassis-snap.
@@ -8568,13 +8400,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             actor->wheel_world_positions_hires[i].y = hub[1];
             actor->wheel_world_positions_hires[i].z = hub[2];
 
-            td5_pilot_emit_0042EB10(
-                (uint32_t)td5_trace_current_sim_tick(),
-                actor->slot_index, PILOT_0042EB10_KIND_HIRES, i,
-                0x0040388Au,  /* faux caller_ra matching Frida CSV column */
-                body_off, &actor->wheel_world_positions_hires[i],
-                body_off[0], body_off[1], body_off[2],
-                matrix, hub[0], hub[1], hub[2]);
         }
 
     }
@@ -8687,7 +8512,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
      * torque). See the gate block in td5_physics_integrate_pose. */
 
     /* Pilot precise-port trace — emit row(s) at exit. */
-    td5_pilot_emit_00403720_leave(actor);
 }
 
 /* ========================================================================
@@ -8713,9 +8537,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
 
 void td5_physics_clamp_attitude(TD5_Actor *actor)
 {
-    /* Pilot precise-port trace — emit input snapshot at entry. */
-    td5_pilot_emit_00405B40_enter(actor, (uintptr_t)__builtin_return_address(0));
-
     /* === Read 12-bit display angles + center-shift unwrap [0x00405B40-B85] ===
      *
      * Original: EAX = (uint16) actor->display_angle_roll  [+0x208]
@@ -8733,9 +8554,7 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
     int32_t iVar2 = ((raw_pitch - 0x800) & 0xFFF) - 0x800;  /* signed pitch */
 
     /* === Dispatch on collisions flag [0x00405B86-B88] === */
-    int branch_taken = 0;  /* 0=skip, 1=mode1, 2=mode0-latch */
     if (g_collisions_enabled != 0) {
-        branch_taken = 1;
         /* MODE-1: soft nudge then hard clamp [0x00405B8E-C3D].
          *
          * Original layout is 8 straight-line independent `if`s with no
@@ -8781,10 +8600,8 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
             actor->euler_accum.pitch      = 0x3A400;
             /* original early-returns here as a compiler artifact (POP chain
              * split); functionally equivalent to falling through to RET. */
-            td5_pilot_emit_00405B40_leave(actor, branch_taken);
             return;
         }
-        td5_pilot_emit_00405B40_leave(actor, branch_taken);
         return;
     }
 
@@ -8853,10 +8670,8 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
     }
 
     if (within_limits) {
-        td5_pilot_emit_00405B40_leave(actor, branch_taken);  /* branch_taken==0 here */
         return;
     }
-    branch_taken = 2;
 
     /* Build delta-rotation angles: (eul - omega) >> 8 [0x00405C7E-CB].
      * Original SAR is signed arithmetic shift right; signed int32 >> 8 in C
@@ -8939,7 +8754,6 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
     actor->frame_counter = 0;
 
     /* Pilot precise-port trace — emit row at exit. */
-    td5_pilot_emit_00405B40_leave(actor, branch_taken);
 }
 
 /* Accessor for the pilot trace emitter to read the collisions flag without
@@ -8978,7 +8792,6 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
 
     /* Capture PRE-state for the pilot probe BEFORE any mutation. */
 #ifndef TD5RE_RELEASE
-    td5_pilot_trace_00405D70_enter(actor);
 #endif
 
     /* 0x405D78 / 0x405D7E — clear flag bytes */
@@ -9059,7 +8872,6 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
      * Fires once per reset (rare event — spawn/respawn/recycle); negligible
      * cost. Schema in tools/diff_func_trace.py reads addr=0x00405D70. */
 #ifndef TD5RE_RELEASE
-    td5_pilot_trace_00405D70_leave(actor);
 #endif
 }
 
@@ -9223,15 +9035,9 @@ static inline int32_t state0f_sar_rz(int32_t x, int n) {
     return (x + (((x) >> 31) & mask)) >> n;
 }
 
-#ifdef TD5_PILOT_TRACE_00403D90
-#include "td5_pilot_trace_00403D90.h"
-#endif
 
 void td5_physics_state0f_damping(TD5_Actor *actor)
 {
-#ifdef TD5_PILOT_TRACE_00403D90
-    td5_pilot_emit_00403D90_enter(actor, (uintptr_t)__builtin_return_address(0));
-#endif
 
     /* Keep engine alive [@ 0x403D9E CALL 0x0042ED50] */
     update_engine_speed_smoothed(actor);
@@ -9322,9 +9128,6 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
     actor->accumulated_tire_slip_x += (int16_t)(actor->lateral_speed >> 8);
     actor->accumulated_tire_slip_z += (int16_t)(actor->longitudinal_speed >> 8);
 
-#ifdef TD5_PILOT_TRACE_00403D90
-    td5_pilot_emit_00403D90_leave(actor);
-#endif
 }
 
 /* ========================================================================
@@ -9819,12 +9622,6 @@ void td5_physics_auto_gear_select_no_kick(TD5_Actor *actor)
     }
 }
 
-/* pool13 / 0x0042F030 pilot trace hooks — extern declarations to keep the
- * function signature unchanged. Implementation in td5_pilot_trace_0042F030.c. */
-extern void td5_pilot_emit_0042F030_enter(const TD5_Actor *actor, uintptr_t caller_ra);
-extern void td5_pilot_emit_0042F030_leave(const TD5_Actor *actor, int32_t return_value,
-                                          int32_t lut_index_used, int32_t lut_frac_used);
-
 /* Round-to-zero signed divide by 256 — byte-exact port of the 0x0042F030
  * idiom: CDQ ; AND EDX, 0xFF ; ADD EAX, EDX ; SAR EAX, 8.
  *
@@ -9868,11 +9665,9 @@ static inline int32_t sar9_rz_42F030(int32_t x) {
 int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 {
     /* Entry trace hook (pure-leaf function; no state to snapshot at exit). */
-    td5_pilot_emit_0042F030_enter(actor, (uintptr_t)__builtin_return_address(0));
 
     int16_t *phys = get_phys(actor);
     if (!phys) {
-        td5_pilot_emit_0042F030_leave(actor, 0, 0, 0);
         return 0;
     }
 
@@ -9881,7 +9676,6 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 
     /* Neutral (gear == 1) — original CMP BL,0x1 / JZ RET_ZERO at 0x0042F03B-45. */
     if (gear_u8 == 0x01) {
-        td5_pilot_emit_0042F030_leave(actor, 0, 0, 0);
         return 0;
     }
 
@@ -9925,11 +9719,9 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
      * The compare is signed (JLE), so rpm > redline-50 → return 0. */
     int32_t redline = (int32_t)PHYS_S(actor, 0x72);
     if (rpm > redline - 50) {
-        td5_pilot_emit_0042F030_leave(actor, 0, index, frac);
         return 0;
     }
 
-    td5_pilot_emit_0042F030_leave(actor, torque, index, frac);
     return torque;
 }
 
@@ -10277,7 +10069,6 @@ void td5_physics_compute_surface_gravity(TD5_Actor *actor)
 
     /* Pilot trace — pre-normalize snapshot (so the diff can localize Phase 1
      * vs Phase 2 divergence if it ever recurs). Compile-out for release builds. */
-    td5_pilot_emit_0042EBF0_inputs(actor, v1, v2);
 
     /* Phase 2 — Normalize both diagonals to length 4096.
      * [CONFIRMED @ 0x42ecbf + 0x42ecd0 (CALL 0x42ccd0)] */
@@ -10303,7 +10094,6 @@ void td5_physics_compute_surface_gravity(TD5_Actor *actor)
     actor->linear_velocity_z += (az + ((az >> 31) & 0xfff)) >> 12;
 
     /* Pilot trace — post-update snapshot. */
-    td5_pilot_emit_0042EBF0_outputs(actor, v1, v2, cross_x, cross_z);
 }
 
 /* ========================================================================
