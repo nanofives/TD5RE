@@ -26,14 +26,9 @@
 #include "td5_net.h"
 #include "td5_save.h"
 
-#ifdef TD5_PILOT_TRACE_00434350
-#include "td5_pilot_trace_00434350.h"
-#endif
 #include "td5_vfx.h"
 #include "td5_trace.h"
-#include "td5_trace_whole_state.h"
 #include "td5_profile.h"
-#include "td5_trace_replay.h"
 #include "td5_benchmark.h"
 
 int td5_trace_current_sim_tick(void) {
@@ -245,10 +240,9 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  *   See detailed audit comment at tick_race_countdown() — same-shape
  *   timer/level/indicator state machine; intentional port-side semantic
  *   choices for paused-flip timing and indicator gating on blank atlas
- *   cells. ONE TODO opened: orig's ResetRaceCameraSelectionState call at
- *   the timer-zero crossing is not yet wired in the port (no current
- *   functional impact because the camera preset is never re-saved during
- *   the countdown, but the missing call is documented for completeness).
+ *   cells. The orig's ResetRaceCameraSelectionState call at the timer-zero
+ *   crossing IS wired (Phase 2 follow-up 2026-05-18 — see delta A note at
+ *   tick_race_countdown).
  *
  * BeginRaceFadeOutTransition @ 0x0042cc20 [ARCH-DIVERGENCE]
  *   See detailed audit comment at td5_game_begin_fade_out(). Port
@@ -1486,17 +1480,13 @@ int td5_game_init_race_session(void) {
      * loading screen rand() and any subsequent race-runtime rand() consumers
      * (BuildRaceResultsTable @ 0x40A8C0 uses rand() & 0x1F, etc.). */
     {
-        /* StateReplay harness needs the same deterministic seed the orig
-         * snapshot was captured with (td5_quickrace.py default
-         * crt_seed=0x1A2B3C4D). Without this, port's CRT diverges each run
-         * and any rand()-fed init field (route_table_selector etc.)
-         * randomises into sub_tick=0. */
         /* Determinism: a recorded race captures its seed; replaying that race
          * RESTORES the captured seed so AI/traffic RNG reproduce the recorded
          * run. Mirrors InitializeRaceSession @0x42AA22-0x42AA4B (non-replay =
          * save g_savedRngSeed; replay = restore it). Without this the port
          * reseeded from GetTickCount() each race → replay = "not my race".
-         * Trace/snapshot modes keep their fixed seed and are never replays. */
+         * Trace mode keeps its fixed seed (crt_seed=0x1A2B3C4D, matching the
+         * td5_quickrace.py Frida default) and is never a replay. */
         uint32_t session_seed;
         if (s_replay_mode) {
             session_seed = s_saved_race_seed;
@@ -1504,7 +1494,7 @@ int td5_game_init_race_session(void) {
                       session_seed);
         } else {
             session_seed =
-                (g_td5.ini.race_trace_enabled || td5_trace_replay_active())
+                g_td5.ini.race_trace_enabled
                     ? (uint32_t)0x1A2B3C4D
                     : (uint32_t)GetTickCount();
             s_saved_race_seed = session_seed;   /* capture for a later View Replay */
@@ -2585,19 +2575,6 @@ int td5_game_init_race_session(void) {
                       slot, td5_ai_get_route_state(slot)[9],
                       td5_ai_get_route_state(slot)[0x19]);
 
-#ifdef TD5_PILOT_TRACE_00434350
-            {
-                static int s_pilot_00434350_call_idx = 0;
-                /* param_flip = 0 mirrors original — every observed call site
-                 * passes 0 (see audit pilot_00434350_audit.md). */
-                td5_pilot_emit_00434350_row(s_pilot_00434350_call_idx++,
-                                            slot,
-                                            (int)(int16_t)actor_span,
-                                            (int)(int8_t)sub_lane,
-                                            0,
-                                            actor);
-            }
-#endif
 
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",
@@ -2752,7 +2729,7 @@ int td5_game_init_race_session(void) {
     td5_hud_init_overlay_resources(
         (s_replay_mode || g_td5.benchmark_active) ? 0 : 1, 0);
     DBG_WRITE("19b_before_layout");
-    td5_hud_init_layout(g_td5.split_screen_mode);
+    td5_hud_init_layout();
     DBG_WRITE("19c_before_minimap");
     td5_hud_init_minimap_layout();
     DBG_WRITE("19d_before_font");
@@ -3066,54 +3043,6 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 return;
             }
         }
-    }
-
-    /* Whole-state snapshot -- INDEPENDENT of the per-module CSV trace.
-     * Fires before td5_trace_begin_frame so it works with [Trace] RaceTrace=0.
-     * Captures the full 6 x 0x388 actor array + a 128-byte globals blob each
-     * POST_PROGRESS tick. Counterpart: tools/frida_whole_state_snapshot.js
-     * hooks the same logical instant on the original binary.
-     *
-     * POST_PROGRESS only (skip COUNTDOWN): paused-physics countdown sub-ticks
-     * all carry sim_tick=0 so capturing them just wastes the MaxTicks budget
-     * before any actual race tick advances the counter. */
-    if ((stage_bit & TD5_TRACE_STG_POST_PROGRESS) &&
-        td5_trace_whole_state_is_open() && g_actor_table_base)
-    {
-        TD5_WholeStateGlobals ws;
-        memset(&ws, 0, sizeof(ws));
-        ws.game_state              = (int32_t)g_td5.game_state;
-        ws.game_paused             = (int32_t)g_td5.paused;
-        ws.race_end_fade_state     = (int32_t)g_td5.race_end_fade_state;
-        ws.sim_time_accumulator    = g_td5.sim_time_accumulator;
-        ws.sim_tick_budget         = g_td5.sim_tick_budget;
-        ws.simulation_tick_counter = (int32_t)g_td5.simulation_tick_counter;
-        ws.normalized_frame_dt     = g_td5.normalized_frame_dt;
-        ws.instant_fps             = g_td5.instant_fps;
-        ws.view_count              = (int32_t)g_td5.viewport_count;
-        ws.splitscreen_count       = (int32_t)g_td5.split_screen_mode;
-        for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
-            ws.race_slot_state_table[i] =
-                ((uint32_t)s_slot_state[i].state       <<  0) |
-                ((uint32_t)s_slot_state[i].companion_1 <<  8) |
-                ((uint32_t)s_slot_state[i].companion_2 << 16) |
-                ((uint32_t)s_slot_state[i].reserved    << 24);
-            ws.race_slot_player_flags[i] =
-                (s_slot_state[i].state == 1) ? 1 : 0;
-            ws.race_order_array[i] = s_race_order[i];
-        }
-        td5_trace_whole_state_emit(frame, sim_tick,
-                                   (const void *)g_actor_table_base, &ws);
-    }
-
-    /* Snapshot-replay harness: dump/inject per-sub-tick state at the SAME
-     * logical instant as the Frida hook on UpdateRaceCameraTransitionTimer
-     * (which fires for countdown sub-ticks too). Fire on BOTH post_progress
-     * (race ticks) and countdown (paused sub-ticks). */
-    if ((stage_bit & (TD5_TRACE_STG_POST_PROGRESS | TD5_TRACE_STG_COUNTDOWN)) &&
-        td5_trace_replay_active() && g_actor_table_base)
-    {
-        td5_trace_replay_step();
     }
 
     if (!td5_trace_begin_frame(frame))
@@ -4187,7 +4116,6 @@ int td5_game_run_race_frame(void) {
                 if (pa)
                     pa->prev_race_position = pa->race_position;
             }
-            td5_track_tick();
             /* Chase camera runs AFTER physics — matches RunRaceFrame
              * (0x0042B580). Countdown still updates the camera so the
              * fly-in/idle-orbit animates while the grid counts down. */
@@ -4356,8 +4284,6 @@ int td5_game_run_race_frame(void) {
             tick_wanted_target_tracker();
         }
 
-        /* --- Track update (tire marks, wrap normalization) --- */
-        td5_track_tick();
         td5_game_trace_stage("post_track", ticks_this_frame);
 
         /* --- VFX tick (tire tracks, particle lifetimes) --- */
@@ -4564,7 +4490,7 @@ int td5_game_run_race_frame(void) {
         static int s_last_vp_w = 0, s_last_vp_h = 0;
         if (g_td5.render_width != s_last_vp_w || g_td5.render_height != s_last_vp_h) {
             td5_game_init_viewport_layout();              /* 3D viewport rects + projection input */
-            td5_hud_init_layout(g_td5.split_screen_mode); /* HUD/minimap layout (reads viewport_count) */
+            td5_hud_init_layout();              /* HUD/minimap layout (reads viewport_count) */
             s_last_vp_w = g_td5.render_width;
             s_last_vp_h = g_td5.render_height;
         }
@@ -4849,12 +4775,10 @@ static void reset_race_countdown(void)
  *    6) if level == 0: g_gamePaused = 0; gRaceCameraTransitionGate = 0
  *
  *  Port deltas (this function):
- *    A) [TODO] Step (2)'s ResetRaceCameraSelectionState call is NOT wired
- *       in the port. Orig calls it once at the timer-zero crossing to
- *       reload camera presets for both views. Today the camera preset is
- *       never re-saved during the countdown window, so the reload is a
- *       no-op in practice -- but the call is structurally missing.
- *       See todo_countdown_reset_camera_preset_call_2026-05-18.md.
+ *    A) [RESOLVED 2026-05-18 Phase 2] Step (2)'s
+ *       ResetRaceCameraSelectionState call IS wired at the timer-zero
+ *       crossing below (clear when playback/replay, else restore) --
+ *       [CONFIRMED @ 0x0040A4B4].
  *    B) Step (6)'s paused-flip happens at timer==0 in the port instead of
  *       level==0 in orig. User-observed in-game behaviour (2026-05-17)
  *       confirmed the orig's car-hold extends across the level==0 window
@@ -6389,6 +6313,25 @@ void td5_game_resolve_split_grid(int views, int *cols, int *rows) {
     if (rows) *rows = r;
 }
 
+/* Pane rect (pixels) for view v of a views-pane split across a w x h target.
+ * Row-major over the shared split grid; views<=1 = the full target. Single
+ * source for the 3D viewport rects, the HUD pane layout and the divider
+ * lines so they cannot disagree (integer pane sizes: the right/bottom
+ * remainder pixels are outside every pane, matching the 3D viewports). */
+void td5_game_get_pane_rect(int views, int v, int w, int h,
+                            int *x, int *y, int *pw, int *ph)
+{
+    if (views <= 1) { *x = 0; *y = 0; *pw = w; *ph = h; return; }
+    int cols, rows;
+    td5_game_resolve_split_grid(views, &cols, &rows);
+    int cw = w / cols;
+    int ch = h / rows;
+    *x  = (v % cols) * cw;
+    *y  = (v / cols) * ch;
+    *pw = cw;
+    *ph = ch;
+}
+
 void td5_game_init_viewport_layout(void) {
     int w = g_td5.render_width;
     int h = g_td5.render_height;
@@ -6424,17 +6367,10 @@ void td5_game_init_viewport_layout(void) {
      * follow-up). Grid resolved by the shared helper so the HUD agrees. */
     td5_game_resolve_split_grid(views, &cols, &rows);
 
-    {
-        int cw = w / cols;
-        int ch = h / rows;
-        for (int vp = 0; vp < views; vp++) {
-            int col = vp % cols;
-            int row = vp / cols;
-            s_viewports[vp].x = col * cw;
-            s_viewports[vp].y = row * ch;
-            s_viewports[vp].w = cw;
-            s_viewports[vp].h = ch;
-        }
+    for (int vp = 0; vp < views; vp++) {
+        td5_game_get_pane_rect(views, vp, w, h,
+                               &s_viewports[vp].x, &s_viewports[vp].y,
+                               &s_viewports[vp].w, &s_viewports[vp].h);
     }
 
     TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d spectate=%d count=%d grid=%dx%d %dx%d",

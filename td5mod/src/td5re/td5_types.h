@@ -624,4 +624,23 @@ static inline int32_t td5_isqrt(int32_t x) {
 /** Compute CRC-32 over a buffer. Init=0xFFFFFFFF, final XOR=0xFFFFFFFF. */
 uint32_t td5_crc32(const uint8_t *data, size_t len);
 
+/* ========================================================================
+ * 12-bit angle helpers (full circle = 0x1000)
+ * ======================================================================== */
+
+/** Map a raw 12-bit angle/difference into the signed range [-0x800, +0x7FF]
+ *  (the classic TD5 centre-shift unwrap ((x - 0x800) & 0xFFF) - 0x800; note
+ *  x == 0x800 maps to -0x800, matching the original register dance). */
+static inline int32_t td5_angle12_signed(int32_t x)
+{
+    return ((x - 0x800) & 0xFFF) - 0x800;
+}
+
+/** Signed shortest-path delta between two 12-bit angles (a - b), with the
+ *  16-bit truncation every original call site performs first. */
+static inline int32_t td5_angle12_delta(int32_t a, int32_t b)
+{
+    return td5_angle12_signed((int32_t)(uint16_t)((uint16_t)a - (uint16_t)b));
+}
+
 #endif /* TD5_TYPES_H */

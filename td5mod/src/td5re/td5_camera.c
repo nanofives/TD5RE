@@ -2028,24 +2028,21 @@ void UpdateVehicleRelativeCamera(int actor, int view)
 
     /* Smooth pitch toward target via shortest-path wrapping */
     {
-        int wrapped = (int)((((unsigned int)(unsigned short)target_pitch -
-                     (unsigned int)(unsigned short)cached[0]) - 0x800) & 0xFFF) - 0x800;
+        int wrapped = td5_angle12_delta(target_pitch, cached[0]);
         delta = (short)(int)((float)wrapped * cam_integ_step() + 0.5f);
     }
     cam_angles[0] = cached[0] + delta;
 
     /* Smooth yaw */
     {
-        int wrapped = (int)((((unsigned int)(unsigned short)target_yaw -
-                     (unsigned int)(unsigned short)cached[1]) - 0x800) & 0xFFF) - 0x800;
+        int wrapped = td5_angle12_delta(target_yaw, cached[1]);
         delta = (short)(int)((float)wrapped * cam_integ_step() + 0.5f);
     }
     cam_angles[1] = cached[1] + delta;
 
     /* Smooth roll */
     {
-        int wrapped = (int)((((unsigned int)(unsigned short)target_roll -
-                     (unsigned int)(unsigned short)cached[2]) - 0x800) & 0xFFF) - 0x800;
+        int wrapped = td5_angle12_delta(target_roll, cached[2]);
         delta = (short)(int)((float)wrapped * cam_integ_step() + 0.5f);
     }
     cam_angles[2] = delta + cached[2];
@@ -2804,22 +2801,19 @@ void UpdateTracksideCamera(int actor, int view)
         short delta_p, delta_y, delta_r;
 
         {
-            int w = (int)((((unsigned int)(unsigned short)target_pitch -
-                   (unsigned int)(unsigned short)cached[0]) - 0x800) & 0xFFF) - 0x800;
+            int w = td5_angle12_delta(target_pitch, cached[0]);
             delta_p = (short)(int)((float)w * cam_integ_step() + 0.5f);
         }
         cam_angles[0] = cached[0] + delta_p;
 
         {
-            int w = (int)((((unsigned int)(unsigned short)target_yaw -
-                   (unsigned int)(unsigned short)cached[1]) - 0x800) & 0xFFF) - 0x800;
+            int w = td5_angle12_delta(target_yaw, cached[1]);
             delta_y = (short)(int)((float)w * cam_integ_step() + 0.5f);
         }
         cam_angles[1] = cached[1] + delta_y;
 
         {
-            int w = (int)((((unsigned int)(unsigned short)target_roll -
-                   (unsigned int)(unsigned short)cached[2]) - 0x800) & 0xFFF) - 0x800;
+            int w = td5_angle12_delta(target_roll, cached[2]);
             delta_r = (short)(int)((float)w * cam_integ_step() + 0.5f);
         }
         cam_angles[2] = cached[2] + delta_r;

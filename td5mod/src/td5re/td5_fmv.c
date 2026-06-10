@@ -920,11 +920,13 @@ void td5_fmv_show_legal_screens(void)
 #else /* !_WIN32 */
 
 /* ========================================================================
- * Non-Windows Stub
+ * Non-Windows Stub — INTENTIONAL
  *
- * On non-Windows platforms, video playback is not yet implemented.
- * Legal screens still work via the platform-agnostic TGA loader +
- * render backend, but need a different video backend (e.g., FFmpeg).
+ * TD5RE targets Windows (D3D11/DirectInput/DirectSound); these stubs only
+ * exist so the module compiles if someone ever attempts another platform.
+ * They are not a porting TODO. A real cross-platform build would need a
+ * video backend (e.g., FFmpeg) here plus equivalents for the entire
+ * td5_platform layer.
  * ======================================================================== */
 
 int td5_fmv_init(void) {

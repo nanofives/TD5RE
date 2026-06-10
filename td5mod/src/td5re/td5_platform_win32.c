@@ -32,6 +32,7 @@
 #include "../../ddraw_wrapper/src/wrapper.h"
 
 #define LOG_TAG "platform"
+#include "td5_color.h"
 
 /* ========================================================================
  * Module-level state
@@ -4634,10 +4635,8 @@ void td5_plat_render_clear(uint32_t color)
     if (!g_backend.context) return;
 
     /* Extract ARGB components to float RGBA */
-    rgba[0] = (float)((color >> 16) & 0xFF) / 255.0f; /* R */
-    rgba[1] = (float)((color >>  8) & 0xFF) / 255.0f; /* G */
-    rgba[2] = (float)((color >>  0) & 0xFF) / 255.0f; /* B */
-    rgba[3] = 1.0f;                                     /* A */
+    td5_argb_to_rgb_f(rgba, color);
+    rgba[3] = 1.0f;
 
     /* Clear backbuffer RTV */
     if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {

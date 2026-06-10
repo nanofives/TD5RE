@@ -42,6 +42,14 @@
 
 #define LOG_TAG "hud"
 
+/* Screen centre in render-target pixels — single source for the HUD's
+ * centred overlays (pause panel, TTF pause text, sliders). */
+static inline void hud_screen_center(float *cx, float *cy)
+{
+    *cx = g_render_width_f  * 0.5f;
+    *cy = g_render_height_f * 0.5f;
+}
+
 /* ========================================================================
  * HUD-owned globals (migrated from td5re_stubs.c)
  * ======================================================================== */
@@ -302,16 +310,9 @@ static float s_pause_selbox_x1;                /* right edge of selbox, relative
 static float s_pause_selbox_base_y;            /* y-center of row 0 (= -52.0f) */
 static float s_pause_bar_x0 = 10.0f;
 static float s_pause_bar_x1;  /* = s_pause_half_width - 4.0f, set during init */
-/* The pause panel/selbox/slider quads bake the screen centre (cx,cy) into their
- * absolute coords at init time, but the menu TEXT + the per-frame selbox/slider
- * updates recompute the centre live from g_render_width_f/height_f. If the render
- * dimensions change after the bake (drag-resize / maximize / a race that inits at
- * different dims), the baked panel drifts off the live-centred text — the pause
- * layout looks distorted and the dark backing panel sits displaced. Track the
- * baked dims + page so the draw/update path can re-bake when they change. */
+/* Page index of the current pause menu — td5_hud_update_pause_overlay rebuilds
+ * the quads from it (with the live screen centre) every frame. */
 static int   s_pause_page_index;
-static float s_pause_baked_w;
-static float s_pause_baked_h;
 
 /* VectorUI: pause-menu text lines recorded at init (instead of baking PAUSETXT
  * glyph quads) and rendered crisply via the pause-font SDF at draw time. */
@@ -1107,8 +1108,8 @@ void td5_hud_draw_pause_overlay(void)
         const float PAUSE_TTF_CAP      = 12.0f;
         const float PAUSE_TTF_BASELINE = 17.0f;   /* 11 + CAP/2; centres caps on the selbox */
         const float PAUSE_TTF_TRACK    = 0.0f;
-        float cx = g_render_width_f  * 0.5f;
-        float cy = g_render_height_f * 0.5f;
+        float cx, cy;
+        hud_screen_center(&cx, &cy);
         static int s_logged_pause_ttf = 0;
         if (!s_logged_pause_ttf) {
             s_logged_pause_ttf = 1;
@@ -1156,8 +1157,8 @@ void td5_hud_draw_pause_overlay(void)
      * (alignment, glyph_w = width*2/3, +2 spacing, char-code -> 16x16 cell UV). */
     if (g_td5.ini.vector_ui && td5_vui_pausefont_page() >= 0 && s_pause_vui_line_count > 0) {
         int page = td5_vui_pausefont_page();
-        float cx = g_render_width_f  * 0.5f;
-        float cy = g_render_height_f * 0.5f;
+        float cx, cy;
+        hud_screen_center(&cx, &cy);
         const float INV = 1.0f / 256.0f;          /* pause SDF page is 256x256 */
         for (int li = 0; li < s_pause_vui_line_count; li++) {
             PauseTextLine *L = &s_pause_vui_lines[li];
@@ -1344,21 +1345,15 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
 {
     (void)music_frac;
 
-    /* Re-bake the panel/selbox/slider quads if the render size has changed since
-     * they were built (the panel bakes the screen centre into absolute coords;
-     * the text below recomputes it live). Without this the panel drifts off the
-     * text after a resize/maximize, distorting the pause layout and displacing
-     * the dark backing panel. Runs before the selbox/slider positions are set so
-     * they land on the freshly-baked panel. Cheap: only fires on an actual change. */
-    if (g_render_width_f != s_pause_baked_w || g_render_height_f != s_pause_baked_h) {
-        TD5_LOG_I(LOG_TAG, "pause overlay: re-bake on dim change %.0fx%.0f -> %.0fx%.0f",
-                  (double)s_pause_baked_w, (double)s_pause_baked_h,
-                  (double)g_render_width_f, (double)g_render_height_f);
-        td5_hud_init_pause_menu(s_pause_page_index);
-    }
+    /* Rebuild the panel/selbox/slider quads from the LIVE screen centre every
+     * frame (compute-at-draw). There is no baked-centre state left to drift
+     * from the live-centred text when the render dimensions change — the old
+     * bake-once + re-bake-on-dim-mismatch dance is gone. Cheap: a handful of
+     * quads + atlas lookups, and only while the pause menu is up. */
+    td5_hud_init_pause_menu(s_pause_page_index);
 
-    float cx = g_render_width_f  * 0.5f;
-    float cy = g_render_height_f * 0.5f;
+    float cx, cy;
+    hud_screen_center(&cx, &cy);
     float fracs[2] = { view_dist_frac, sfx_frac };  /* row 0 = VIEW, row 1 = SOUND */
 
     {
@@ -1818,7 +1813,7 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
  *  L5 promotion sweep 2026-05-21.
  * ======================================================================== */
 
-void td5_hud_init_layout(int viewport_mode)
+void td5_hud_init_layout(void)
 {
     /* Load numbers atlas (used by metric display) */
     s_numbers_atlas = td5_asset_find_atlas_entry(NULL, "numbers");
@@ -1846,90 +1841,39 @@ void td5_hud_init_layout(int viewport_mode)
      * before submitting to hardware.  Our source port submits vertices
      * directly to D3D11 without that centering step, so all HUD positions
      * must be in pixel-space (vp_left = 0, vp_right = width). */
-    /* [PORT ENHANCEMENT] N-way HUD layout. Views 1-2 reproduce the legacy
-     * full / half-screen layouts byte-for-byte (viewport_mode 0/1/2). Views
-     * 3-9 mirror the 3D viewport ladder in td5_game_init_viewport_layout
-     * (3 = horizontal strips; 4=2x2, 5-6=3x2, 7-9=3x3) with a uniform per-pane
-     * scale so HUD elements keep their aspect inside each pane. Driven by
-     * g_td5.viewport_count (the live pane count), not just viewport_mode. */
+    /* [PORT ENHANCEMENT] N-way HUD layout, driven by g_td5.viewport_count
+     * (the live pane count) over the shared split grid. */
     int views = g_td5.viewport_count;
     if (views < 1) views = 1;
     if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
     s_view_count = views;
 
-    if (views == 1) {
-        /* Single full-screen view (legacy viewport_mode 0) */
-        s_view_layout[0].scale_x  = s_scale_x;
-        s_view_layout[0].scale_y  = s_scale_y;
-        s_view_layout[0].vp_left   = 0.0f;
-        s_view_layout[0].vp_right  = g_render_width_f;
-        s_view_layout[0].vp_top    = 0.0f;
-        s_view_layout[0].vp_bottom = g_render_height_f;
-
-    } else if (views == 2 && viewport_mode == 2) {
-        /* Vertical split — left | right. Matches the game's viewport layout
-         * for split_screen_mode 2 (td5_game_init_viewport_layout). The HUD used
-         * to key left/right off mode 1, which is the game's TOP/BOTTOM mode —
-         * that orientation mismatch put the HUD in the wrong half. */
-        s_scale_x *= 0.5f;
-        s_scale_y *= 0.5f;
-        s_view_layout[0].scale_x  = s_scale_x;
-        s_view_layout[0].scale_y  = s_scale_y;
-        s_view_layout[0].vp_left   = 0.0f;
-        s_view_layout[0].vp_right  = g_render_width_f * 0.5f;
-        s_view_layout[0].vp_top    = 0.0f;
-        s_view_layout[0].vp_bottom = g_render_height_f;
-        s_view_layout[1].scale_x  = s_scale_x;
-        s_view_layout[1].scale_y  = s_scale_y;
-        s_view_layout[1].vp_left   = g_render_width_f * 0.5f;
-        s_view_layout[1].vp_right  = g_render_width_f;
-        s_view_layout[1].vp_top    = 0.0f;
-        s_view_layout[1].vp_bottom = g_render_height_f;
-
-    } else if (views == 2) {
-        /* Horizontal split — top / bottom. Matches the game's viewport layout
-         * for split_screen_mode 1 (the default 2-player orientation). */
-        s_scale_x *= 0.5f;
-        s_scale_y *= 0.5f;
-        s_view_layout[0].scale_x  = s_scale_x;
-        s_view_layout[0].scale_y  = s_scale_y;
-        s_view_layout[0].vp_left   = 0.0f;
-        s_view_layout[0].vp_right  = g_render_width_f;
-        s_view_layout[0].vp_top    = 0.0f;
-        s_view_layout[0].vp_bottom = g_render_height_f * 0.5f;
-        s_view_layout[1].scale_x  = s_scale_x;
-        s_view_layout[1].scale_y  = s_scale_y;
-        s_view_layout[1].vp_left   = 0.0f;
-        s_view_layout[1].vp_right  = g_render_width_f;
-        s_view_layout[1].vp_top    = g_render_height_f * 0.5f;
-        s_view_layout[1].vp_bottom = g_render_height_f;
-
-    } else {
-        /* N-way grid (>=3): mirror the game's 3D viewport grid EXACTLY (same
-         * shared resolver) so the HUD panes line up with the rendered
-         * viewports. [FIX 2026-06-07] The HUD used to hardcode views==3 -> 1x3
-         * (horizontal strips) while the 3D layout honoured the committed pick
-         * (3 players default to 3x1 LEFT/RIGHT) -> HUD/viewport orientation
-         * mismatch (UI laid out UP/DOWN over a LEFT/RIGHT viewport). */
-        int cols, rows;
-        td5_game_resolve_split_grid(views, &cols, &rows);
-        float pane_w = g_render_width_f  / (float)cols;
-        float pane_h = g_render_height_f / (float)rows;
-        float fx = pane_w / g_render_width_f;
-        float fy = pane_h / g_render_height_f;
+    /* Pane rects come from td5_game_get_pane_rect — the SAME function that
+     * places the 3D viewports — so HUD panes align with the rendered panes by
+     * construction (including the integer pane-size truncation). A uniform
+     * per-pane scale (min of the pane's width/height fraction) keeps HUD
+     * element aspect inside each pane; the grid is uniform, so pane 0's
+     * fractions hold for every pane. (Single view: full target, sfrac=1.) */
+    {
+        int px, py, pw, ph;
+        td5_game_get_pane_rect(views, 0, g_td5.render_width, g_td5.render_height,
+                               &px, &py, &pw, &ph);
+        float fx = (float)pw / g_render_width_f;
+        float fy = (float)ph / g_render_height_f;
         float sfrac = (fx < fy) ? fx : fy;   /* uniform fit, aspect-correct */
         s_scale_x *= sfrac;
         s_scale_y *= sfrac;
-        for (int v = 0; v < views; v++) {
-            int col = v % cols;
-            int row = v / cols;
-            s_view_layout[v].scale_x  = s_scale_x;
-            s_view_layout[v].scale_y  = s_scale_y;
-            s_view_layout[v].vp_left   = (float)col       * pane_w;
-            s_view_layout[v].vp_right  = (float)(col + 1) * pane_w;
-            s_view_layout[v].vp_top    = (float)row       * pane_h;
-            s_view_layout[v].vp_bottom = (float)(row + 1) * pane_h;
-        }
+    }
+    for (int v = 0; v < views; v++) {
+        int px, py, pw, ph;
+        td5_game_get_pane_rect(views, v, g_td5.render_width, g_td5.render_height,
+                               &px, &py, &pw, &ph);
+        s_view_layout[v].scale_x  = s_scale_x;
+        s_view_layout[v].scale_y  = s_scale_y;
+        s_view_layout[v].vp_left   = (float)px;
+        s_view_layout[v].vp_right  = (float)(px + pw);
+        s_view_layout[v].vp_top    = (float)py;
+        s_view_layout[v].vp_bottom = (float)(py + ph);
     }
 
     /* Compute derived viewport values for each view.
@@ -2654,14 +2598,22 @@ static void hud_draw_split_dividers(void)
     const float t = 1.0f;   /* half-thickness (~2px) */
     TD5_SpriteQuad q;
 
+    /* Seam positions from the SAME pane rects the 3D viewports + HUD use
+     * (pane v=c sits in row 0 / column c; pane v=r*cols starts row r). */
     for (int c = 1; c < cols; c++) {
-        float x = (float)c * (W / (float)cols);
+        int px, py, pw, ph;
+        td5_game_get_pane_rect(views, c, g_td5.render_width, g_td5.render_height,
+                               &px, &py, &pw, &ph);
+        float x = (float)px;
         hud_build_quad(&q, 0, ctex, x - t, 0.0f, x + t, H,
                        cu, cv, cu, cv, 0xFF000000, HUD_DEPTH2);
         hud_submit_quad(&q);
     }
     for (int r = 1; r < rows; r++) {
-        float y = (float)r * (H / (float)rows);
+        int px, py, pw, ph;
+        td5_game_get_pane_rect(views, r * cols, g_td5.render_width, g_td5.render_height,
+                               &px, &py, &pw, &ph);
+        float y = (float)py;
         hud_build_quad(&q, 0, ctex, 0.0f, y - t, W, y + t,
                        cu, cv, cu, cv, 0xFF000000, HUD_DEPTH2);
         hud_submit_quad(&q);
@@ -4697,15 +4649,10 @@ void td5_hud_init_pause_menu(int page_index)
     /* The original uses centered coords (origin = screen center).
      * Our pipeline uses pixel-space coords, so offset all positions by
      * the screen center so the panel appears in the middle of the screen. */
-    float cx = g_render_width_f  * 0.5f;
-    float cy = g_render_height_f * 0.5f;
+    float cx, cy;
+    hud_screen_center(&cx, &cy);
 
-    /* Remember what we baked against so the per-frame update path can re-bake if
-     * the render dimensions change (otherwise the panel drifts off the live-
-     * centred text — see the s_pause_baked_* declaration). */
     s_pause_page_index = page_index;
-    s_pause_baked_w    = g_render_width_f;
-    s_pause_baked_h    = g_render_height_f;
 
 #define PAUSE_BUF(n) (s_pause_quad_buf + (n) * 0xB8)
 #define PAUSE_ADD(x0, y0, x1, y1, u0, v0, u1, v1, page, col) \

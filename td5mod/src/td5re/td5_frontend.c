@@ -46,6 +46,7 @@
  * ======================================================================== */
 
 #define LOG_TAG "frontend"
+#include "td5_color.h"
 
 /* Forward declarations for functions used before definition */
 static void frontend_init_font_metrics_from_pixels(const uint8_t *pixels, int w, int h);
@@ -3158,6 +3159,45 @@ static void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing
 static const char *const k_mp_missing_content[] = { "EMPTY", "MAP", "STANDINGS" };
 #define MP_MISSING_CONTENT_COUNT ((int)(sizeof(k_mp_missing_content) / sizeof(k_mp_missing_content[0])))
 
+/* Commit the AI-spectate pane count + split grid for a race launch: clamps
+ * the requested spectate count against the live AI field and the viewport
+ * cap, stores it, and (re)resolves the split grid for humans+spectate panes.
+ * Single source for the Quick Race menu path and the AutoRace SpectateScreens
+ * override so the clamp/grid logic cannot drift. */
+static void frontend_commit_pane_layout(int eff_humans, int requested_spectate)
+{
+    int spectate = requested_spectate;
+    if (spectate < 0) spectate = 0;
+    if (spectate > g_td5.num_ai_opponents) spectate = g_td5.num_ai_opponents;
+    if (spectate > TD5_MAX_VIEWPORTS - eff_humans) spectate = TD5_MAX_VIEWPORTS - eff_humans;
+    if (spectate < 0) spectate = 0;
+    g_td5.num_spectate_screens = spectate;
+
+    int eff_panes = eff_humans + spectate;
+    if (eff_panes < 1) eff_panes = 1;
+    if (eff_panes > TD5_MAX_VIEWPORTS) eff_panes = TD5_MAX_VIEWPORTS;
+
+    /* For >=2 panes split is on and the layout grid (cols x rows) overrides
+     * the automatic ladder in td5_game_init_viewport_layout. split_screen_mode
+     * keeps its legacy meaning for HUD / minimap / sound consumers: 0=single,
+     * 2=two-player left|right, 1=any other split "on". */
+    if (eff_panes >= 2) {
+        int cols = 0, rows = 0, missing = 0;
+        mp_resolve_layout(eff_panes, s_mp_layout_sel, &cols, &rows, &missing);
+        g_td5.split_grid_cols = cols;
+        g_td5.split_grid_rows = rows;
+        g_td5.split_screen_mode = (eff_panes == 2 && cols == 2) ? 2 : 1;
+        g_td5.split_missing_content[0] = (missing > 0) ? s_mp_missing_content[0] : 0;
+        g_td5.split_missing_content[1] = (missing > 1) ? s_mp_missing_content[1] : 0;
+    } else {
+        g_td5.split_grid_cols = 0;
+        g_td5.split_grid_rows = 0;
+        g_td5.split_screen_mode = 0;
+        g_td5.split_missing_content[0] = 0;
+        g_td5.split_missing_content[1] = 0;
+    }
+}
+
 static void frontend_init_race_schedule(void) {
     int i;
     int slot_active[TD5_MAX_RACER_SLOTS]  = {0};
@@ -3245,44 +3285,14 @@ static void frontend_init_race_schedule(void) {
 
     /* [PORT ENHANCEMENT 2026-06-08] AI spectator split-screens (dev/profiling).
      * Quick Race may render the first N AI cars (slots 1..N) each in its own
-     * viewport pane on top of the human pane(s). num_spectate_screens drives the
-     * pane count (eff_panes) used for the split layout below, while
-     * num_human_players is left untouched so ONLY the humans read input — the
-     * spectator panes follow AI-driven slots. Inert outside Quick Race; clamped
-     * to the live AI field and the viewport cap. The AutoRace harness applies its
-     * own SpectateScreens override after this (see InitializeAutoRaceState). */
-    int spectate = (s_current_screen == TD5_SCREEN_QUICK_RACE)
-                       ? s_num_spectate_screens : 0;
-    if (spectate < 0) spectate = 0;
-    if (spectate > g_td5.num_ai_opponents) spectate = g_td5.num_ai_opponents;
-    if (spectate > TD5_MAX_VIEWPORTS - eff_humans) spectate = TD5_MAX_VIEWPORTS - eff_humans;
-    if (spectate < 0) spectate = 0;
-    g_td5.num_spectate_screens = spectate;
-
-    int eff_panes = eff_humans + spectate;
-    if (eff_panes < 1) eff_panes = 1;
-    if (eff_panes > TD5_MAX_VIEWPORTS) eff_panes = TD5_MAX_VIEWPORTS;
-
-    /* Resolve the chosen split layout. For >=2 panes split is on and the layout
-     * grid (cols x rows) overrides the automatic ladder in
-     * td5_game_init_viewport_layout. split_screen_mode keeps its legacy meaning
-     * for HUD / minimap / sound consumers: 0=single, 2=two-player left|right,
-     * 1=any other split "on". */
-    if (eff_panes >= 2) {
-        int cols = 0, rows = 0, missing = 0;
-        mp_resolve_layout(eff_panes, s_mp_layout_sel, &cols, &rows, &missing);
-        g_td5.split_grid_cols = cols;
-        g_td5.split_grid_rows = rows;
-        g_td5.split_screen_mode = (eff_panes == 2 && cols == 2) ? 2 : 1;
-        g_td5.split_missing_content[0] = (missing > 0) ? s_mp_missing_content[0] : 0;
-        g_td5.split_missing_content[1] = (missing > 1) ? s_mp_missing_content[1] : 0;
-    } else {
-        g_td5.split_grid_cols = 0;
-        g_td5.split_grid_rows = 0;
-        g_td5.split_screen_mode = 0;
-        g_td5.split_missing_content[0] = 0;
-        g_td5.split_missing_content[1] = 0;
-    }
+     * viewport pane on top of the human pane(s); only the humans read input.
+     * Inert outside Quick Race. Clamping + split-grid resolution live in
+     * frontend_commit_pane_layout (shared with the AutoRace SpectateScreens
+     * override so the two paths cannot drift). */
+    frontend_commit_pane_layout(eff_humans,
+                                (s_current_screen == TD5_SCREEN_QUICK_RACE)
+                                    ? s_num_spectate_screens : 0);
+    int eff_panes = eff_humans + g_td5.num_spectate_screens;
     g_td5.network_active    = s_launching_net_race;   /* S10: net race engages lockstep */
     s_launching_net_race    = 0;                      /* one-shot intent */
 
@@ -3673,23 +3683,13 @@ void td5_frontend_auto_race_setup(void) {
      * grid from the resulting pane count so the viewport/HUD/divider layout all
      * agree (same resolver the menu path uses). */
     if (g_td5.ini.spectate_screens > 0) {
-        int spectate = g_td5.ini.spectate_screens;
-        if (spectate > g_td5.num_ai_opponents) spectate = g_td5.num_ai_opponents;
-        if (spectate > TD5_MAX_VIEWPORTS - g_td5.num_human_players)
-            spectate = TD5_MAX_VIEWPORTS - g_td5.num_human_players;
-        if (spectate < 0) spectate = 0;
-        g_td5.num_spectate_screens = spectate;
-        int panes = g_td5.num_human_players + spectate;
-        if (panes >= 2) {
-            int cols = 0, rows = 0, missing = 0;
-            mp_resolve_layout(panes, s_mp_layout_sel, &cols, &rows, &missing);
-            g_td5.split_grid_cols   = cols;
-            g_td5.split_grid_rows   = rows;
-            g_td5.split_screen_mode = (panes == 2 && cols == 2) ? 2 : 1;
-        }
+        frontend_commit_pane_layout(g_td5.num_human_players,
+                                    g_td5.ini.spectate_screens);
         TD5_LOG_I(LOG_TAG,
                   "AutoRace: spectate override -> %d AI panes (total panes=%d split=%d grid=%dx%d)",
-                  spectate, panes, g_td5.split_screen_mode,
+                  g_td5.num_spectate_screens,
+                  g_td5.num_human_players + g_td5.num_spectate_screens,
+                  g_td5.split_screen_mode,
                   g_td5.split_grid_cols, g_td5.split_grid_rows);
     }
 
@@ -8456,12 +8456,6 @@ static void fe_draw_small_text(float x, float y, const char *text, uint32_t colo
  * (abrupt). border_px = rim band width. rim_argb/fill_argb are 0xAARRGGBB;
  * fill_alpha 0 = transparent interior (border only). Returns 0 if the
  * procedural path is unavailable (caller falls back to the bitmap button). */
-#define FE_ARGB_TO_RGB(dst, argb) do {                       \
-        (dst)[0] = (((argb) >> 16) & 0xFF) / 255.0f;         \
-        (dst)[1] = (((argb) >>  8) & 0xFF) / 255.0f;         \
-        (dst)[2] = ( (argb)        & 0xFF) / 255.0f;         \
-    } while (0)
-
 static int fe_draw_roundrect(float x, float y, float w, float h,
                              float r_large, float r_small,
                              float border_side, float border_topbot,
@@ -8478,10 +8472,10 @@ static int fe_draw_roundrect(float x, float y, float w, float h,
     rp.radii[1] = r_small;  /* TR abrupt  */
     rp.radii[2] = r_small;  /* BL abrupt  */
     rp.radii[3] = r_large;  /* BR smooth  */
-    FE_ARGB_TO_RGB(rp.mid,   mid_argb);   rp.mid[3]   = 1.0f;
-    FE_ARGB_TO_RGB(rp.inner, inner_argb); rp.inner[3] = 1.0f;
-    FE_ARGB_TO_RGB(rp.outer, outer_argb); rp.outer[3] = 1.0f;
-    FE_ARGB_TO_RGB(rp.fill,  fill_argb);  rp.fill[3]  = fill_alpha;
+    td5_argb_to_rgb_f(rp.mid,   mid_argb);   rp.mid[3]   = 1.0f;
+    td5_argb_to_rgb_f(rp.inner, inner_argb); rp.inner[3] = 1.0f;
+    td5_argb_to_rgb_f(rp.outer, outer_argb); rp.outer[3] = 1.0f;
+    td5_argb_to_rgb_f(rp.fill,  fill_argb);  rp.fill[3]  = fill_alpha;
     ID3D11DeviceContext_UpdateSubresource(g_backend.context,
         (ID3D11Resource *)s_rr_cb, 0, NULL, &rp, 0, 0);
     ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_rr_cb);
@@ -8503,7 +8497,7 @@ static int fe_draw_arrow_proc(float x, float y, float w, float h,
     memset(&rp, 0, sizeof(rp));
     rp.size_px[0] = w;  rp.size_px[1] = h;
     rp.border[0] = dir_right ? 1.0f : 0.0f;
-    FE_ARGB_TO_RGB(rp.mid, color);  rp.mid[3] = 1.0f;
+    td5_argb_to_rgb_f(rp.mid, color);  rp.mid[3] = 1.0f;
     ID3D11DeviceContext_UpdateSubresource(g_backend.context,
         (ID3D11Resource *)s_rr_cb, 0, NULL, &rp, 0, 0);
     ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_rr_cb);
@@ -8796,13 +8790,6 @@ void td5_vui_gauge(const TD5_VuiGauge *g) {
     float x0  = g->cx - g->radius - m;
     float y0  = g->cy - g->radius - m;
 
-#define VUI_ARGB4(dst, argb) do {                                   \
-        (dst)[0] = (((argb) >> 16) & 0xFF) / 255.0f;                \
-        (dst)[1] = (((argb) >>  8) & 0xFF) / 255.0f;                \
-        (dst)[2] = ( (argb)        & 0xFF) / 255.0f;                \
-        (dst)[3] = (((argb) >> 24) & 0xFF) / 255.0f;                \
-    } while (0)
-
     FE_GaugeParams gp;
     memset(&gp, 0, sizeof(gp));
     gp.quad_px[0] = box;  gp.quad_px[1] = box;
@@ -8824,12 +8811,11 @@ void td5_vui_gauge(const TD5_VuiGauge *g) {
     }
     gp.pivot_px   = g->pivot_px;
     gp.rim_red_px = g->rim_red_px;
-    VUI_ARGB4(gp.face,  g->face_color);
-    VUI_ARGB4(gp.inner, g->inner_color);
-    VUI_ARGB4(gp.tick,  g->tick_color);
-    VUI_ARGB4(gp.red,   g->redline_color);
-    VUI_ARGB4(gp.pivot, g->pivot_color);
-#undef VUI_ARGB4
+    td5_argb_to_rgba_f(gp.face,  g->face_color);
+    td5_argb_to_rgba_f(gp.inner, g->inner_color);
+    td5_argb_to_rgba_f(gp.tick,  g->tick_color);
+    td5_argb_to_rgba_f(gp.red,   g->redline_color);
+    td5_argb_to_rgba_f(gp.pivot, g->pivot_color);
 
     ID3D11DeviceContext_UpdateSubresource(g_backend.context,
         (ID3D11Resource *)s_gauge_cb, 0, NULL, &gp, 0, 0);

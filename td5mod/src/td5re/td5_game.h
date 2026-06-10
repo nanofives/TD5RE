@@ -83,6 +83,8 @@ void td5_game_init_viewport_layout(void);
  * when valid, else falls back to the automatic ladder. Single source of truth
  * so the 3D viewport rects, HUD per-pane layout, and divider lines all agree. */
 void td5_game_resolve_split_grid(int views, int *cols, int *rows);
+void td5_game_get_pane_rect(int views, int v, int w, int h,
+                            int *x, int *y, int *pw, int *ph);
 
 /* --- Intro / Legal --- */
 void td5_game_play_intro_movie(void);

@@ -150,13 +150,6 @@ int32_t *td5_ai_get_route_state(int slot) {
     return route_state(slot);
 }
 
-/* Pilot trace accessor (pool9_00434FE0): used by td5_pilot_trace_00434FE0.c
- * to compute the is_canonical_route field. Returns the LEFT.TRK table ptr
- * (selector 0). */
-void *td5_ai_get_left_route_ptr(void) {
-    return (void *)g_route_tables[0];
-}
-
 static inline char *actor_ptr(int slot) {
     return g_actor_base + slot * ACTOR_STRIDE;
 }
@@ -171,12 +164,10 @@ static inline char *actor_ptr(int slot) {
  * ======================================================================== */
 
 /* Rubber-band parameters (4 globals at 0x473D9C-0x473DA8) */
-/* Pool11 pilot: exposed (non-static) so td5_pilot_trace_00432D60.c can
- * snapshot inputs without struct drift. */
-int32_t g_rb_behind_scale;       /* 0x473D9C */
-int32_t g_rb_ahead_scale;        /* 0x473DA0 */
-int32_t g_rb_behind_range;       /* 0x473DA4 */
-int32_t g_rb_ahead_range;        /* 0x473DA8 */
+static int32_t g_rb_behind_scale;       /* 0x473D9C */
+static int32_t g_rb_ahead_scale;        /* 0x473DA0 */
+static int32_t g_rb_behind_range;       /* 0x473DA4 */
+static int32_t g_rb_ahead_range;        /* 0x473DA8 */
 
 /* Default throttle table (0x473D64, 14 int32 entries).
  * [CONFIRMED @ memory_read 0x473D64]: raw bytes are
@@ -206,8 +197,7 @@ int32_t g_default_throttle[TD5_MAX_TOTAL_ACTORS] = {
 int32_t g_live_throttle[TD5_MAX_TOTAL_ACTORS];
 
 /* Per-actor throttle bias output consumed by route threshold */
-/* Pool11 pilot: exposed for td5_pilot_trace_00432D60.c. */
-int32_t g_actor_route_steer_bias[TD5_MAX_TOTAL_ACTORS];
+static int32_t g_actor_route_steer_bias[TD5_MAX_TOTAL_ACTORS];
 
 /* Per-actor forward track component */
 static int32_t g_actor_forward_track_component[TD5_MAX_TOTAL_ACTORS];
@@ -1436,17 +1426,7 @@ void td5_ai_tick(void) {
  * The pilot snapshot mirrors the function inputs read by Frida from the
  * original. Collector lives here so it can read the static slot-state
  * array + the public actor pointer. */
-#include "td5_pilot_trace_00432D60.h"
 
-void td5_pilot_00432D60_collect(PilotSnapshot_00432D60 *snap) {
-    snap->network_active = g_td5.network_active ? 1 : 0;
-    snap->racer_count    = g_active_actor_count;
-    snap->player0_span_accum = (int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_ACCUM);
-    for (int i = 0; i < 6; i++) {
-        snap->slot_state[i]    = (int)g_slot_state[i];
-        snap->ai_span_accum[i] = (int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_ACCUM);
-    }
-}
 
 /* ========================================================================
  * CATCHUP / rubber-band assist controls (S06 2026-06-04)
@@ -1478,7 +1458,6 @@ void td5_ai_compute_rubber_band(void) {
     int32_t player0_span, ai_span, delta, modifier;
     int catchup = td5_ai_get_catchup_level();   /* 0 = off; >0 = on (softened) */
 
-    td5_pilot_emit_00432D60_enter();
 
     /* [0x00432D6B-7A] MOVSD.REP ECX=14: unconditional default→live copy */
     memcpy(g_live_throttle, g_default_throttle, sizeof(g_live_throttle));
@@ -1502,7 +1481,6 @@ void td5_ai_compute_rubber_band(void) {
             }
             /* [0x00432DBC] ADD EDX,0x11C unconditional (handled by [i] indexing) */
         }
-        td5_pilot_emit_00432D60_leave();
         return;
     }
 
@@ -1595,7 +1573,6 @@ void td5_ai_compute_rubber_band(void) {
         /* [0x00432E32-39] MOV ECX,0x100; SUB ECX,EAX; MOV [EDI],ECX */
         g_actor_route_steer_bias[i] = 0x100 - modifier;
     }
-    td5_pilot_emit_00432D60_leave();
 }
 
 /* ========================================================================
@@ -1641,20 +1618,6 @@ void td5_ai_init_race_actor_runtime(void) {
     int is_cop_chase = g_td5.wanted_mode_enabled;
     int is_time_trial = g_td5.time_trial_enabled;
     int racer_count;
-
-    /* Pilot trace probe (precise-00432E60): capture inputs at entry. */
-    {
-        extern void td5_pilot_emit_00432E60_enter(int, int, int, int, int, int,
-                                                  int16_t, int16_t, int16_t, int16_t, int16_t);
-        const int16_t *t_steer = (const int16_t *)(g_ai_physics_template + 0x68);
-        const int16_t *t_grip  = (const int16_t *)(g_ai_physics_template + 0x2C);
-        const int16_t *t_brake = (const int16_t *)(g_ai_physics_template + 0x6E);
-        const int16_t *t_lspdb = (const int16_t *)(g_ai_physics_template + 0x70);
-        const int16_t *t_spd   = (const int16_t *)(g_ai_physics_template + 0x74);
-        td5_pilot_emit_00432E60_enter(tier, is_circuit, has_traffic, is_cop_chase,
-                                      (int)g_td5.difficulty, is_time_trial,
-                                      *t_steer, *t_grip, *t_brake, *t_lspdb, *t_spd);
-    }
 
     if (!g_route_state_base) {
         g_route_state_base = g_route_state_storage;
@@ -2108,21 +2071,6 @@ void td5_ai_init_race_actor_runtime(void) {
                   g_rb_ahead_scale,
                   g_rb_ahead_range);
     }
-
-    /* Pilot trace probe (precise-00432E60): capture outputs at exit. */
-    {
-        extern void td5_pilot_emit_00432E60_leave(int32_t, int32_t, int32_t, int32_t,
-                                                  int16_t, int16_t, int16_t, int16_t, int16_t, int);
-        const int16_t *t_steer = (const int16_t *)(g_ai_physics_template + 0x68);
-        const int16_t *t_grip  = (const int16_t *)(g_ai_physics_template + 0x2C);
-        const int16_t *t_brake = (const int16_t *)(g_ai_physics_template + 0x6E);
-        const int16_t *t_lspdb = (const int16_t *)(g_ai_physics_template + 0x70);
-        const int16_t *t_spd   = (const int16_t *)(g_ai_physics_template + 0x74);
-        td5_pilot_emit_00432E60_leave(g_rb_behind_scale, g_rb_behind_range,
-                                      g_rb_ahead_scale,  g_rb_ahead_range,
-                                      *t_steer, *t_grip, *t_brake, *t_lspdb, *t_spd,
-                                      g_active_actor_count);
-    }
 }
 
 /* ========================================================================
@@ -2165,22 +2113,12 @@ void td5_ai_init_race_actor_runtime(void) {
  * ======================================================================== */
 
 /* Pilot tracing — per-function entry/exit emitter for pool10 / 0x004340C0. */
-extern void td5_pilot_emit_004340C0_enter(int slot, const int32_t *rs,
-                                          const void *actor,
-                                          int32_t steer_weight,
-                                          const char *call_site);
-extern void td5_pilot_emit_004340C0_leave(int slot, const int32_t *rs,
-                                          const void *actor);
 
 /* Thread-local-style call-site hint. Set by each port caller immediately
  * before invoking td5_ai_update_steering_bias() so the trace probe can
  * attribute rows to "track_behavior", "traffic_plan", or "script_advance"
  * (mirroring the Frida probe's return-address classification). */
-static const char *s_pilot_004340C0_callsite = "unknown";
 
-void td5_ai_pilot_004340C0_set_callsite(const char *site) {
-    s_pilot_004340C0_callsite = site ? site : "unknown";
-}
 
 void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
     /* Literal translation of UpdateActorSteeringBias @ 0x4340C0.
@@ -2201,9 +2139,6 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
      */
     int   slot       = route_state[RS_SLOT_INDEX];
     char *actor      = actor_ptr(slot);
-    const char *site = s_pilot_004340C0_callsite;
-    s_pilot_004340C0_callsite = "unknown"; /* consumed; reset for next call */
-    td5_pilot_emit_004340C0_enter(slot, route_state, actor, steer_weight, site);
     int32_t iVar6    = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
     int32_t sign_mask = iVar6 >> 31;
     int32_t iVar4    = ACTOR_I32(actor, ACTOR_REAR_AXLE_SLIP) >> 8;
@@ -2318,7 +2253,6 @@ clamp_end:
               slot, left_dev, right_dev, steer_weight,
               ACTOR_I32(actor, ACTOR_STEERING_CMD));
 
-    td5_pilot_emit_004340C0_leave(slot, route_state, actor);
 }
 
 /* ========================================================================
@@ -3357,21 +3291,6 @@ void td5_ai_seed_actor_track_progress_offset(int slot)
  * Returns: 0 = script still running (blocking), 1 = script complete/reset
  * ======================================================================== */
 
-#ifdef TD5_PILOT_TRACE_004370A0
-#include "td5_pilot_trace_004370A0.h"
-/* Helper to compute "ip as index": when port stores IP as a dword-index, we
- * snapshot the index. When (legacy/orig-style) IP is a raw pointer, we
- * subtract base_ptr and divide by 4 to recover the index. The trace tool
- * uses this to align port and original IP values at the same canonical form. */
-static int32_t td5_pt_compute_ip_index(int32_t base_ptr, int32_t ip) {
-    /* Port semantics: ip is an index already (small unsigned int < 8). */
-    if ((uint32_t)ip < 0x100u) return ip;
-    if (base_ptr == 0) return -1;
-    intptr_t diff = (intptr_t)(uint32_t)ip - (intptr_t)(uint32_t)base_ptr;
-    if (diff < 0 || diff > 0x100 || (diff & 3) != 0) return -1;
-    return (int32_t)(diff >> 2);
-}
-#endif
 
 int td5_ai_advance_track_script(int *rs) {
     /* Verbatim port of AdvanceActorTrackScript @ 0x004370A0.
@@ -3393,44 +3312,6 @@ int td5_ai_advance_track_script(int *rs) {
     int slot = rs[RS_SLOT_INDEX];
     char *actor = actor_ptr(slot);
 
-#ifdef TD5_PILOT_TRACE_004370A0
-    /* === pilot trace: capture entry state BEFORE any field mutation === */
-    TD5_PilotTrace_004370A0_Entry _pt_e = {0};
-    _pt_e.rs_addr            = (uintptr_t)rs;
-    _pt_e.slot_index         = slot;
-    _pt_e.route_table_ptr    = rs[RS_ROUTE_TABLE_PTR];
-    _pt_e.script_base_ptr    = rs[RS_SCRIPT_BASE_PTR];
-    _pt_e.script_ip          = rs[RS_SCRIPT_IP];
-    _pt_e.script_ip_index    = td5_pt_compute_ip_index(_pt_e.script_base_ptr, _pt_e.script_ip);
-    _pt_e.script_flags       = rs[RS_SCRIPT_FLAGS];
-    _pt_e.script_countdown   = rs[RS_SCRIPT_COUNTDOWN];
-    _pt_e.script_offset_param = rs[RS_SCRIPT_OFFSET_PARAM];
-    _pt_e.script_speed_param  = rs[RS_SCRIPT_SPEED_PARAM];
-    _pt_e.script_field_3e    = rs[RS_SCRIPT_FIELD_3E];
-    _pt_e.script_field_43    = rs[RS_SCRIPT_FIELD_43];
-    _pt_e.actor_yaw_accum    = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
-    _pt_e.actor_steering_cmd = ACTOR_I32(actor, ACTOR_STEERING_CMD);
-    _pt_e.actor_long_speed   = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-    _pt_e.actor_span_norm    = (int32_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
-    _pt_e.actor_span_raw     = (int32_t)ACTOR_I16(actor, ACTOR_SPAN_RAW);
-    _pt_e.actor_sub_lane     = (int32_t)(int8_t)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
-    _pt_e.actor_encounter_steer = (int32_t)(int16_t)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
-    _pt_e.actor_brake_flag   = (int32_t)ACTOR_U8(actor, ACTOR_BRAKE_FLAG);
-    _pt_e.actor_angular_velocity_yaw = ACTOR_I32(actor, 0x1C4);
-    {
-        const uint8_t *_rb = (const uint8_t *)(intptr_t)_pt_e.route_table_ptr;
-        int16_t _sp = (int16_t)_pt_e.actor_span_norm;
-        if (_rb && _sp >= 0) {
-            uint8_t _rby = _rb[(size_t)(unsigned)_sp * 3u + 1u];
-            _pt_e.route_byte_at_entry = (int32_t)_rby;
-            _pt_e.route_heading_at_entry = ((int32_t)_rby * 0x102C) >> 8;
-        } else {
-            _pt_e.route_byte_at_entry = -1;
-            _pt_e.route_heading_at_entry = 0;
-        }
-    }
-    td5_pilot_trace_004370A0_enter(&_pt_e);
-#endif
 
     /* ==== 1. Countdown decrement + program rotation [orig prologue] ==== */
     rs[RS_SCRIPT_COUNTDOWN]--;
@@ -3511,43 +3392,11 @@ int td5_ai_advance_track_script(int *rs) {
         uint32_t dev = ((uint32_t)(-(int32_t)d1)) & 0xFFF;
         rs[RS_LEFT_DEVIATION]  = (int32_t)dev;
         rs[RS_RIGHT_DEVIATION] = (int32_t)(0xFFF - dev);
-        td5_ai_pilot_004340C0_set_callsite("script_advance");
         td5_ai_update_steering_bias(rs, 0x4000);
     }
 
     /* Re-fetch flags (flag 4/8 path may have toggled bits). */
     flags = rs[RS_SCRIPT_FLAGS];
-
-#ifdef TD5_PILOT_TRACE_004370A0
-    /* Macro to populate exit row + emit + return one value. Used at every
-     * return point inside this function. */
-#define PT_EMIT_AND_RETURN(retval, op, br) do {                                          \
-    TD5_PilotTrace_004370A0_Exit _pt_x = {0};                                            \
-    _pt_x.opcode_dispatched  = (op);                                                     \
-    _pt_x.branch_taken       = (br);                                                     \
-    _pt_x.script_base_ptr_out = rs[RS_SCRIPT_BASE_PTR];                                   \
-    _pt_x.script_ip_out       = rs[RS_SCRIPT_IP];                                        \
-    _pt_x.script_ip_index_out = td5_pt_compute_ip_index(                                 \
-                                   _pt_x.script_base_ptr_out, _pt_x.script_ip_out);      \
-    _pt_x.script_flags_out    = rs[RS_SCRIPT_FLAGS];                                     \
-    _pt_x.script_countdown_out = rs[RS_SCRIPT_COUNTDOWN];                                \
-    _pt_x.script_offset_param_out = rs[RS_SCRIPT_OFFSET_PARAM];                          \
-    _pt_x.script_speed_param_out  = rs[RS_SCRIPT_SPEED_PARAM];                           \
-    _pt_x.script_field_3e_out  = rs[RS_SCRIPT_FIELD_3E];                                 \
-    _pt_x.script_field_43_out  = rs[RS_SCRIPT_FIELD_43];                                 \
-    _pt_x.rs_left_deviation_out  = rs[RS_LEFT_DEVIATION];                                \
-    _pt_x.rs_right_deviation_out = rs[RS_RIGHT_DEVIATION];                               \
-    _pt_x.actor_steering_cmd_out  = ACTOR_I32(actor, ACTOR_STEERING_CMD);                \
-    _pt_x.actor_encounter_steer_out = (int32_t)(int16_t)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER); \
-    _pt_x.actor_brake_flag_out  = (int32_t)ACTOR_U8(actor, ACTOR_BRAKE_FLAG);            \
-    _pt_x.actor_angular_velocity_yaw_out = ACTOR_I32(actor, 0x1C4);                     \
-    _pt_x.return_value = (retval);                                                       \
-    td5_pilot_trace_004370A0_exit(&_pt_x);                                               \
-    return (retval);                                                                     \
-} while (0)
-#else
-#define PT_EMIT_AND_RETURN(retval, op, br) return (retval)
-#endif
 
     /* ==== 3. Flag 0x10 — stop-and-wait; orig returns 0 on BOTH branches.
      *
@@ -3577,7 +3426,7 @@ int td5_ai_advance_track_script(int *rs) {
             rs[RS_SCRIPT_FLAGS] = flags ^ 0x10;
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
-            PT_EMIT_AND_RETURN(0, -1, TD5_PT_004370A0_BR_FLAG10);
+            return 0;
         }
         if (lspd <= -0x100) {
             /* Reversing — forward throttle to overcome the reverse motion. */
@@ -3587,7 +3436,7 @@ int td5_ai_advance_track_script(int *rs) {
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
         }
         ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
-        PT_EMIT_AND_RETURN(0, -1, TD5_PT_004370A0_BR_FLAG10);
+        return 0;
     }
 
     /* ==== 4. Flag 0x02 — brake/accel until speed threshold.
@@ -3615,7 +3464,7 @@ int td5_ai_advance_track_script(int *rs) {
 
     /* ==== 5. Opcode switch ==== */
     const int32_t *base = (const int32_t *)(intptr_t)rs[RS_SCRIPT_BASE_PTR];
-    if (!base) PT_EMIT_AND_RETURN(1, -1, TD5_PT_004370A0_BR_SWITCH_DEFAULT);
+    if (!base) return 1;
     int ip = rs[RS_SCRIPT_IP];
     int32_t opcode = base[ip];
 
@@ -3634,7 +3483,7 @@ int td5_ai_advance_track_script(int *rs) {
         uint32_t b0 = (a0 - 0x800U) & 0xFFF;
         uint32_t hd_mir = ((uint32_t)(-(int32_t)b0)) & 0xFFF;
         if (hd_mir > 0x3F && hd_mir < 0xFC1) {
-            PT_EMIT_AND_RETURN(0, 0, TD5_PT_004370A0_BR_SWITCH_CASE_0_BLOCK);
+            return 0;
         }
         if ((int32_t)rs[RS_SCRIPT_OFFSET_PARAM] < 0) {
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
@@ -3645,53 +3494,53 @@ int td5_ai_advance_track_script(int *rs) {
         rs[RS_SCRIPT_FIELD_43] = 0;
         ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
         ACTOR_I32(actor, 0x1C4) = 0; /* angular_velocity_yaw */
-        PT_EMIT_AND_RETURN(1, 0, TD5_PT_004370A0_BR_SWITCH_CASE_0_TERM);
+        return 1;
     }
 
     case 1:
         rs[RS_SCRIPT_SPEED_PARAM] = base[ip + 1];
         rs[RS_SCRIPT_FLAGS] |= 0x01;
         rs[RS_SCRIPT_IP] = ip + 2;
-        PT_EMIT_AND_RETURN(0, 1, TD5_PT_004370A0_BR_SWITCH_CASE_1);
+        return 0;
 
     case 2:
         rs[RS_SCRIPT_FLAGS] |= 0x02;
         rs[RS_SCRIPT_OFFSET_PARAM] = base[ip + 1];
         rs[RS_SCRIPT_IP] = ip + 2;
-        PT_EMIT_AND_RETURN(0, 2, TD5_PT_004370A0_BR_SWITCH_CASE_2);
+        return 0;
 
     case 3:
         rs[RS_SCRIPT_FLAGS] |= base[ip + 1];
         rs[RS_SCRIPT_IP] = ip + 2;
-        PT_EMIT_AND_RETURN(0, 3, TD5_PT_004370A0_BR_SWITCH_CASE_3);
+        return 0;
 
     case 4:
         rs[RS_SCRIPT_FLAGS] &= ~base[ip + 1];
         rs[RS_SCRIPT_IP] = ip + 2;
-        PT_EMIT_AND_RETURN(0, 4, TD5_PT_004370A0_BR_SWITCH_CASE_4);
+        return 0;
 
     case 5:
         rs[RS_SCRIPT_FLAGS] |= 0x04;
         rs[RS_SCRIPT_IP] = ip + 1;
-        PT_EMIT_AND_RETURN(0, 5, TD5_PT_004370A0_BR_SWITCH_CASE_5);
+        return 0;
 
     case 6:
         rs[RS_SCRIPT_FLAGS] |= 0x08;
         rs[RS_SCRIPT_IP] = ip + 1;
-        PT_EMIT_AND_RETURN(0, 6, TD5_PT_004370A0_BR_SWITCH_CASE_6);
+        return 0;
 
     case 7:
         ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
         ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
         rs[RS_SCRIPT_IP] = ip + 1;
-        PT_EMIT_AND_RETURN(0, 7, TD5_PT_004370A0_BR_SWITCH_CASE_7);
+        return 0;
 
     case 8:
         /* Orig only sets flag 0x10; brake is applied by the flag-0x10
          * block next tick. */
         rs[RS_SCRIPT_FLAGS] |= 0x10;
         rs[RS_SCRIPT_IP] = ip + 1;
-        PT_EMIT_AND_RETURN(0, 8, TD5_PT_004370A0_BR_SWITCH_CASE_8);
+        return 0;
 
     case 9: {
         /* Auto-select program from MIRRORED hdelta + strip-half-lane.
@@ -3731,25 +3580,22 @@ int td5_ai_advance_track_script(int *rs) {
         }
         rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)sel;
         rs[RS_SCRIPT_IP] = 0;
-        PT_EMIT_AND_RETURN(0, 9, TD5_PT_004370A0_BR_SWITCH_CASE_9);
+        return 0;
     }
 
     case 10:
         rs[RS_SCRIPT_FLAGS] |= 0x40;
         rs[RS_SCRIPT_IP] = ip + 1;
-        PT_EMIT_AND_RETURN(0, 10, TD5_PT_004370A0_BR_SWITCH_CASE_10);
+        return 0;
 
     case 11:
         rs[RS_SCRIPT_FLAGS] |= 0x80;
         rs[RS_SCRIPT_IP] = ip + 1;
-        PT_EMIT_AND_RETURN(0, 11, TD5_PT_004370A0_BR_SWITCH_CASE_11);
+        return 0;
 
     default:
-        PT_EMIT_AND_RETURN(0, opcode, TD5_PT_004370A0_BR_SWITCH_DEFAULT);
+        return 0;
     }
-#ifdef TD5_PILOT_TRACE_004370A0
-#undef PT_EMIT_AND_RETURN
-#endif
 }
 
 /* ========================================================================
@@ -3759,8 +3605,6 @@ int td5_ai_advance_track_script(int *rs) {
  * ======================================================================== */
 
 /* Forward decl for the pool9_00434FE0 pilot trace (precise-port workflow). */
-extern void td5_pilot_emit_00434FE0_enter(int slot, const int32_t *rs, const void *actor, int32_t game_type);
-extern void td5_pilot_emit_00434FE0_leave(int slot, const int32_t *rs, const void *actor);
 
 /* ========================================================================
  * SMART OPPONENT AI OVERHAUL  (non-faithful; [GameOptions] SmartAI, default 1)
@@ -4382,7 +4226,6 @@ void td5_ai_update_track_behavior(int slot) {
     int32_t steer_weight;
 
     /* Pool9 pilot capture: entry snapshot before any state mutation. */
-    td5_pilot_emit_00434FE0_enter(slot, rs, actor, (int32_t)g_td5.game_type);
 
     /* Calls-trace probe: capture entry state per slot per tick.
      * Hooks YAML: re/trace-hooks/tick0_ai_chain.yaml
@@ -4486,7 +4329,6 @@ void td5_ai_update_track_behavior(int slot) {
                 }
                 rs[RS_TRACK_OFFSET_BIAS] =
                     td5_track_compute_signed_offset(span_raw, progress, route_byte);
-                td5_pilot_emit_00434FE0_leave(slot, rs, actor);
                 return;
             }
             /* result == 1: script complete, fall through to normal AI */
@@ -4546,7 +4388,6 @@ void td5_ai_update_track_behavior(int slot) {
                  * table at 0x49D1A4. Reverted to ip=0 to match port semantics. */
                 rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
                 rs[RS_SCRIPT_IP]       = 0;
-                td5_pilot_emit_00434FE0_leave(slot, rs, actor);
                 return;
             }
         }
@@ -4845,11 +4686,9 @@ void td5_ai_update_track_behavior(int slot) {
      * ~0 torque and therefore ~0 omega, so the countdown grid-hold period
      * naturally leaves actors still. */
     steer_weight = (threshold_result != 0) ? 0x10000 : 0x20000;
-    td5_ai_pilot_004340C0_set_callsite("track_behavior");
     td5_ai_update_steering_bias(rs, steer_weight);
     TD5_LOG_I(LOG_TAG, "track_behavior: slot=%d thr=%d weight=0x%X",
               slot, threshold_result, steer_weight);
-    td5_pilot_emit_00434FE0_leave(slot, rs, actor);
 }
 
 /* ========================================================================
@@ -6745,7 +6584,6 @@ void td5_ai_update_traffic_route_plan(int slot) {
     }
 
     /* --- Stage 6: Steering --- */
-    td5_ai_pilot_004340C0_set_callsite("traffic_plan");
     td5_ai_update_steering_bias(rs, 0x8000);
 
     /* --- Stage 7: Peer avoidance / yield --- */
@@ -7448,51 +7286,6 @@ teardown:
  *   After traffic loop: UpdateSpecialTrafficEncounter
  * ======================================================================== */
 
-/* ========================================================================
- * Pool13 pilot trace integration (0x00436A70 UpdateRaceActors).
- * Audit: re/analysis/pilot_00436A70_audit.md.
- *
- * The pilot snapshot mirrors the dispatcher's input set as read by Frida
- * from the original. Collector lives in this TU so it can access the
- * private slot_state + actor pointer state. */
-#include "td5_pilot_trace_00436A70.h"
-
-/* Accessors used by td5_pilot_trace_00436A70.c. */
-int32_t *td5_pilot_00436A70_route_state_ptr(void) {
-    return g_route_state_base;
-}
-char *td5_pilot_00436A70_actor_base_ptr(void) {
-    return g_actor_base;
-}
-
-void td5_pilot_00436A70_collect(PilotSnapshot_00436A70 *snap) {
-    int i;
-
-    snap->network_active = g_td5.network_active ? 1 : 0;
-    snap->racer_count    = g_active_actor_count;
-    snap->drag_mode      = g_td5.drag_race_enabled ? 1 : 0;
-    snap->wanted_mode    = g_td5.wanted_mode_enabled ? 1 : 0;
-    snap->encounter_handle  = g_encounter_tracked_handle;
-    snap->encounter_enabled = g_encounter_enabled;
-    /* Port doesn't track g_trackTotalSpanCount as a single int32; use the
-     * ring length the port consults for branch detection. */
-    snap->track_total_span_count = td5_track_get_ring_length();
-
-    for (i = 0; i < PILOT_00436A70_N_SLOTS; i++) {
-        char *actor = (g_actor_base && i < TD5_MAX_TOTAL_ACTORS)
-                       ? actor_ptr(i) : NULL;
-        snap->slot_state[i]    = (int)g_slot_state[i];
-        snap->span_raw[i]      = actor ? (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_RAW) : 0;
-        snap->span_norm[i]     = actor ? (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED) : 0;
-        snap->lin_vel_x[i]     = actor ? ACTOR_I32(actor, ACTOR_LIN_VEL_X) : 0;
-        snap->lin_vel_z[i]     = actor ? ACTOR_I32(actor, ACTOR_LIN_VEL_Z) : 0;
-        snap->world_pos_x[i]   = actor ? ACTOR_I32(actor, ACTOR_WORLD_POS_X) : 0;
-        snap->world_pos_z[i]   = actor ? ACTOR_I32(actor, ACTOR_WORLD_POS_Z) : 0;
-        snap->recovery_stage[i] = actor ? (int)(uint8_t)ACTOR_U8(actor, 0x37B) : 0;
-        snap->wanted_damage[i] = (int)g_wanted_damage_state[i];
-    }
-}
-
 /* [CONFIRMED @ 0x00436A70] L5 promotion sweep audit (2026-05-18).
  *
  * UpdateRaceActors — 1569 bytes / 450 instructions / 270 decompiled lines.
@@ -7541,7 +7334,6 @@ void td5_pilot_00436A70_collect(PilotSnapshot_00436A70 *snap) {
 void td5_ai_update_race_actors(void) {
     int i;
 
-    td5_pilot_emit_00436A70_enter();
 
     /* --- Step 1: Rubber-band already computed in td5_ai_tick --- */
     td5_ai_refresh_route_state();
@@ -7584,7 +7376,6 @@ void td5_ai_update_race_actors(void) {
         td5_ai_update_special_encounter();
     }
 
-    td5_pilot_emit_00436A70_leave();
 }
 
 /**

@@ -1,7 +1,35 @@
 # TD5RE Expected Behavior Map
 
 Reference: original TD5_d3d.exe behavior vs source port expected behavior.
-Use this to validate each subsystem during testing.
+Use this to validate each subsystem during testing. (Last full refresh: 2026-06-09.)
+
+## Recent changes (2026-06)
+
+Port-side work that changed behavior since the original version of this map:
+
+- **FPS decoupling + working VSync** — the `[Display] VSync` key actually gates
+  Present now; sky/fog/billboard/marker advances moved into the fixed 30Hz sim
+  tick, frontend animation counters pace at 60Hz regardless of render FPS.
+- **Camera rewrite (FPS-independent)** — every in-race camera mode solves on the
+  30Hz tick and interpolates per frame (`td5_camera_solve_tick_all` /
+  `td5_camera_apply_view`); kill-switch env `TD5RE_CAM_NEW=0` selects the legacy
+  per-frame path until the rewrite is fully soak-tested.
+- **N-way split-screen** — up to 9 local humans (Multiplayer Options grid picker),
+  plus dev-only AI spectator panes (`[Game] SpectateScreens`). Pane rects come
+  from one shared function (`td5_game_get_pane_rect`) for viewports/HUD/dividers.
+- **Simultaneous MP car select** — all joined players pick car/paint/transmission
+  at once in a split grid, each on their own controller.
+- **Car-select stat bars** — SPEED/ACCEL/GRIP relative bars + MORE STATS button
+  on both SP and MP car selection.
+- **Save system** — binary `Config.td5`/`CupData.td5` retired; settings live in
+  `td5re.ini` + `td5re_input/progress/cup.ini` (legacy files imported once, then
+  renamed `*.migrated`).
+- **Netplay** — Winsock2 UDP lockstep + UPnP port mapping; LAN lobby browse is
+  non-blocking; ESC works on every net screen.
+- **Cleanup 2026-06-09** — the RE parity-trace scaffolding (30 pilot-trace
+  modules, whole-state/state-replay harnesses) was deleted; `[Trace] RaceTrace`
+  CSVs remain as the supported diagnostic. The pause overlay rebuilds from the
+  live screen centre every frame (no baked layout state).
 
 ## Startup Sequence
 
@@ -9,7 +37,7 @@ Use this to validate each subsystem during testing.
 |------|----------|-----------------|---------|
 | 1. Window creation | 640x480 DirectDraw window | D3D11 window (windowed or fullscreen) | platform |
 | 2. Module init | 15 modules initialized in order | Same order: asset,save,input,sound,render,track,physics,ai,camera,vfx,hud,frontend,net,fmv,game | td5re |
-| 3. Config load | Config.td5 loaded, XOR decrypted, CRC validated | Same | save |
+| 3. Config load | Config.td5 loaded, XOR decrypted, CRC validated | INI files (td5re.ini + td5re_input/progress/cup.ini); legacy Config.td5/CupData.td5 imported once then renamed *.migrated | save |
 | 4. Frontend init | Load font atlas, cursor, button textures from frontend.zip | Same | frontend |
 | 5. Intro movie | Play intro.mp4/intro.avi if present | MFPlay MP4, skip on keypress | fmv |
 | 6. Legal screens | Display legal1.tga + legal2.tga with fade | Same, 500ms fade, 5s hold | fmv |
@@ -22,7 +50,7 @@ Use this to validate each subsystem during testing.
 | Localization [0] | Detect language from regional INI | Same, default English | frontend: "LocalizationInit" |
 | Main Menu [5] | 7 items, highlight cycling, background image | Same | frontend: screen=5 |
 | Quick Race [7] | Car/track selection launchers | **Port-enhanced**: Car/Track/Direction/Players/Opponents selectors, no Drag Strip (see QUICKRACE_PLAYER_SETUP.md) | frontend: screen=7 |
-| Car Selection [20] | 3D preview, spin animation, lock/unlock, stats | Same | frontend: screen=20 |
+| Car Selection [20] | 3D preview, spin animation, lock/unlock, stats | **Port-enhanced**: + SPEED/ACCEL/GRIP stat bars, MORE STATS spec sheet; MP flow uses a simultaneous split-grid picker | frontend: screen=20 |
 | Track Selection [21] | Preview images, lock status | Same | frontend: screen=21 |
 | Options Hub [12] | 5 sub-categories | Same | frontend: screen=12 |
 | Display Options [16] | Resolution list, fog, speed units | Enumerated modes, apply on race start | frontend: screen=16 |
@@ -48,9 +76,9 @@ Use this to validate each subsystem during testing.
 
 | System | Original (0x42B580) | Expected | Log Evidence |
 |--------|---------------------|----------|-------------|
-| Frame timing | Fixed timestep, max 4 ticks/frame | Same | td5_game: "dt=X ticks=N" |
+| Frame timing | Fixed timestep, max 4 ticks/frame | Same 30Hz sim; render/present decoupled (uncapped or VSync'd FPS) | td5_game: "dt=X ticks=N" |
 | Input polling | Keyboard + joystick per player | Same | input: "control_bits" |
-| Camera | Chase cam (7 presets), trackside for replay | Same, routes to real actor data | camera: "chase/trackside/bumper" |
+| Camera | Chase cam (7 presets), trackside for replay | Same modes; per-tick solve + per-frame interpolation (FPS-independent) | camera: "chase/trackside/bumper" |
 | Physics tick | Iterate all actors, update dynamics | Same | physics: "tick N actors" |
 | Collision V2V | AABB broadphase + 7-iter TOI | Same | physics: "collision pair" |
 | Collision V2W | Track edge wall impulse | Simplified edge check | physics: "wall impulse" |
@@ -76,10 +104,10 @@ Use this to validate each subsystem during testing.
 
 | Action | Original (0x43BF70) | Expected |
 |--------|---------------------|----------|
-| ESC pressed | Pause, show overlay | Same |
-| Up/Down | Navigate 5 items (View/Music/SFX/Continue/Exit) | 3 items (Resume/Options/Quit) |
+| ESC pressed | Pause, show overlay | Same (overlay quads rebuilt per frame from the live screen centre) |
+| Up/Down | Navigate 5 items (View/Music/SFX/Continue/Exit) | 6 rows: VIEW + SOUND sliders, CONTINUE, RESTART RACE, QUIT TO MENU, EXIT GAME (S15 rework) |
 | Continue | Resume race, restore DXInput | Resume, unpause |
-| Exit | Retire all actors, fade out | Fade out |
+| Exit | Retire all actors, fade out | Fade out (QUIT TO MENU) or quit app (EXIT GAME) |
 
 ## Expected Audio
 
@@ -167,12 +195,12 @@ the port rule, and the acceptance criteria.
   `td5_game.c` (`InitRace`), `td5_ai.c` (`td5_ai_init_race_actor_runtime`).
 - **Original**: Quick Race `0x4213D0` is Car / Track / OK / Back only and always
   runs a fixed 6-car field (slot 0 + 5 AI).
-- **Port rule**: the Quick Race screen adds **Players (1–6)** and **Opponents
-  (0–5)** selectors (sum ≤ 6); a Forwards/Backwards direction toggle; and drops
-  the Drag Strip from the track cycler. Dropped opponents are not spawned, not
-  AI-driven, and not rendered. Effective human-driven slots are capped at 2 (the
-  engine has only single + 2 split-screen layouts); >2 humans run as AI until
-  N-way split lands. Default `1+5=6` is byte-identical to the original grid.
+- **Port rule**: the Quick Race screen adds **Players** and **Opponents**
+  selectors (humans + AI ≤ 16 slots); a Forwards/Backwards direction toggle; and
+  drops the Drag Strip from the track cycler. Dropped opponents are not spawned,
+  not AI-driven, and not rendered. Up to 9 local humans each get their own
+  viewport pane (N-way split, Multiplayer Options grid picker). Default `1+5=6`
+  is byte-identical to the original grid.
 - **Debug knob**: `[Game] DefaultOpponents=N` / `--DefaultOpponents=N` (`-1` =
   full grid) forces the AI-opponent count for AutoRace without the menu — a dev
   tool for isolating one AI or building minimal repros. Release builds force `-1`.

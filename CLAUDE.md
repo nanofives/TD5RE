@@ -12,7 +12,10 @@ The original binary is a Win32 x86 DirectDraw/Direct3D 3 game. The source port r
 
 ```
 TD5RE/
-├── td5re.exe             # Built source port output
+├── td5re.exe             # DEV build output (debug affordances, trace harness)
+├── td5re_release.exe     # RELEASE build output (TD5RE_RELEASE, stripped)
+├── td5re.ini             # Runtime config (dev); td5re_release.ini for release
+├── log/                  # Runtime logs + CSV traces (gitignored)
 ├── original/             # Clean unmodified game files (backup, not used at runtime)
 │   ├── TD5_d3d.exe       # Original binary (RE target)
 │   ├── M2DX.dll          # Original M2DX middleware
@@ -22,62 +25,88 @@ TD5RE/
 │   ├── sound/            # Audio archives
 │   └── movie/            # FMV files
 ├── td5mod/
-│   ├── src/td5re/        # Source port modules (15 .c files)
-│   ├── ddraw_wrapper/    # DirectDraw → D3D11 translation layer
+│   ├── src/td5re/        # Source port modules (28 .c files, see table below)
+│   ├── ddraw_wrapper/    # DirectDraw → D3D11 translation layer (static lib)
 │   └── deps/mingw/       # Bundled MinGW-w64 i686 toolchain
 ├── re/                   # RE analysis, extracted assets, tools
 │   ├── assets/           # All game data — pre-extracted PNGs, DATs, WAVs, meshes (runtime asset directory)
 │   ├── tools/            # RE helper scripts (extractor, alpha tool, etc.)
 │   ├── analysis/         # RE analysis notes
 │   └── sessions/         # RE session logs
-├── tools/                # Cloned MCP helper repos
+├── scripts/              # ghidra_pool.sh (parallel-session Ghidra pool)
+├── ghidra_pool/          # Ghidra project clones for parallel sessions
+├── tools/                # Cloned MCP helper repos, capture_window.ps1, frida CSVs
 └── ghidra_12.0.3_PUBLIC/ # Ghidra installation
 ```
 
 ## Build commands
 
-### Source port (td5re.exe)
-```bash
-# From td5mod/src/td5re/
-GCC="../../deps/mingw/mingw32/bin/gcc.exe"
-AR="../../deps/mingw/mingw32/bin/ar.exe"
-WRAPPER_SRC="../../ddraw_wrapper/src"
-WRAPPER_BUILD="../../ddraw_wrapper/build"
-ZLIB_INC="../../deps/mingw/mingw32/i686-w64-mingw32/include"
-ZLIB_LIB="../../deps/mingw/mingw32/i686-w64-mingw32/lib"
-
-# Compile each module: td5_game.c td5_physics.c td5_track.c etc.
-"$GCC" -m32 -O2 -Wall -std=c11 -I. -I"$WRAPPER_SRC" -I"$ZLIB_INC" -DTD5_INFLATE_USE_ZLIB -c td5_game.c -o build/td5_game.o
-
-# Archive
-"$AR" rcs build/libtd5re.a build/td5re.o build/td5_*.o
-
-# Link
-"$GCC" -m32 -mwindows -static -o build/td5re.exe build/main.o build/td5re_stubs.o build/libtd5re.a "$WRAPPER_BUILD"/*.o -L"$ZLIB_LIB" -lz -lkernel32 -luser32 -lgdi32 -ld3d11 -ldxgi -ldinput8 -ldsound -lwinmm -lole32 -lshell32 -luuid
+```bat
+cd td5mod\src\td5re
+build_all.bat                 :: canonical — refresh ddraw_wrapper lib if stale, then DEV + RELEASE
+build_standalone.bat          :: DEV only     -> td5re.exe
+build_standalone.bat release  :: RELEASE only -> td5re_release.exe (-DTD5RE_RELEASE -DNDEBUG, stripped)
 ```
 
-## Source port modules
+Both exes deploy to the project root. Object dirs are `build\` (dev) and
+`build_release\` — separate so differing `-D` flags never share a stale .o cache.
+The D3D11 wrapper is a prebuilt static lib at `td5mod/ddraw_wrapper/build/libddraw_wrapper.a`;
+`build_all.bat` rebuilds it automatically when `ddraw_wrapper/src` is newer
+(standalone wrapper rebuild: `td5mod/ddraw_wrapper/build.bat`).
+
+DEV vs RELEASE: same module list; `TD5RE_RELEASE` compiles out dev affordances
+(trace knobs, debug overlays, net selftest) and strips symbols.
+
+## Runtime logs & dev harness
+
+- `[Logging] Enabled=1` in td5re.ini routes `TD5_LOG_*` to `log/`:
+  `frontend.log` (frontend/hud/save/input), `race.log` (game/physics/ai/track/camera/vfx),
+  `engine.log` (render/asset/platform/sound/net/fmv/main). The frontend log flushes
+  on clean shutdown — close the window, don't kill the process.
+- Every INI key has a `--Key=N` CLI override (CLI > INI), e.g.
+  `td5re.exe --AutoRace=1 --SkipIntro=1 --DefaultTrack=5`.
+- `[Game] AutoRace/SkipIntro/StartScreen` — boot straight into a race / frontend screen N.
+- `[Trace] RaceTrace=1` — per-sim-tick CSV trace to `log/race_trace_*.csv`
+  (modular via `Modules`/`Stages`; fixes the RNG seed for deterministic A/B runs).
+- `TD5RE_WINDOW_TITLE` env var — overrides the window caption (test harnesses).
+
+## Source port modules (28 .c)
 
 | File | Responsibility |
 |------|---------------|
-| `main.c` | Entry point, D3D11 bootstrap, main loop |
-| `td5_game.c` | Main loop, 4-state FSM (intro/menu/race/benchmark) |
-| `td5_physics.c` | 4-wheel player + 2-axle AI + simplified traffic dynamics |
-| `td5_track.c` | STRIP.DAT parser, span contacts, segment walking |
-| `td5_ai.c` | Routing (LEFT/RIGHT.TRK), rubber-banding, script VM |
-| `td5_camera.c` | 7 chase presets, trackside, spline, orbit modes |
-| `td5_render.c` | Software transform, frustum cull, mesh dispatch |
+| `main.c` | Entry point, INI/CLI config load, D3D11 bootstrap, main loop |
+| `td5re.c` | Module table, master init/shutdown |
+| `td5_game.c` | Race FSM (intro/menu/race/benchmark), fixed-30Hz tick loop, viewports, results |
+| `td5_physics.c` | 4-wheel player + 2-axle AI + simplified traffic dynamics, V2V/wall collisions |
+| `td5_track.c` | STRIP.DAT parser, span contacts, segment walking, traffic FIFO |
+| `td5_ai.c` | Routing (LEFT/RIGHT.TRK), rubber-banding, script VM, traffic recycle, SmartAI layer |
+| `td5_camera.c` | Per-tick solve + per-frame interpolate; 7 chase presets, trackside, spline, orbit |
+| `td5_render.c` | Software transform, frustum cull, mesh dispatch, trig LUT wrappers |
+| `td5_trig_lut_data.c` | Baked 12-bit trig LUT data |
 | `td5_vfx.c` | Particles, tire tracks, smoke, weather, billboards |
-| `td5_frontend.c` | 30-entry screen table, navigation FSM |
-| `td5_frontend_button_cache.c` | CPU-baked 224×64 main-menu button surfaces (Phase 6 parity) |
-| `td5_hud.c` | Speedometer, minimap, timers, text overlay |
-| `td5_asset.c` | ZIP archive, TGA decode, mesh prepare |
+| `td5_frontend.c` | 30-entry screen table, navigation FSM, all menu screens |
+| `td5_frontend_button_cache.c` | CPU-baked 224×64 main-menu button surfaces |
+| `td5_font.c` | Runtime TTF glyph cache (stb_truetype) for vector text |
+| `td5_hud.c` | Speedometer, minimap, timers, pause overlay, split-screen dividers/plates |
+| `td5_asset.c` | ZIP archive, TGA decode, texture pages, mesh prepare |
+| `td5_assetsrc.c` | Editable-source assets: re-encodes JSON/PNG sources to original DAT layout at load |
+| `td5_inflate.c` | Decompression utility (zlib-backed) |
 | `td5_save.c` | Organized INI config (td5re_input/progress/cup.ini); one-time import of legacy Config.td5/CupData.td5 |
-| `td5_sound.c` | DXSound wrapper, vehicle audio, ambient, CD |
-| `td5_input.c` | Polling, controller config, force feedback |
-| `td5_net.c` | DirectPlay lockstep, DXPTYPE protocol |
-| `td5_fmv.c` | FMV stub (replaces EA TGQ codec) |
-| `td5_inflate.c` | Decompression utility |
+| `td5_sound.c` | DirectSound wrapper, vehicle audio, ambient, CD audio (MCI) |
+| `td5_input.c` | Polling, controller config, force feedback, race replays |
+| `td5_net.c` | Winsock2 UDP lockstep netplay (DXPTYPE-derived protocol; replaces DirectPlay) |
+| `td5_upnp.c` | Minimal UPnP IGD port mapping for netplay hosting |
+| `td5_fmv.c` | FMV playback via Media Foundation (replaces EA TGQ codec) |
+| `td5_benchmark.c` | Benchmark mode capture + report (`EnableBenchmark` INI) |
+| `td5_trace.c` | Dev CSV race-trace harness (`[Trace]` knobs; inert when off) |
+| `td5_profile.c` | Per-phase frame profiler (`Profile` INI knob) |
+| `td5_msvc_rand.c` | MSVC CRT rand()/srand() override — netplay/replay determinism (DO NOT remove) |
+| `td5_platform_win32.c` | Win32/D3D11/DInput/DSound platform layer, window, logging sinks |
+
+Key headers: `td5_types.h` (structs, verified against 0x388 actor stride),
+`td5re.h` (global state `g_td5` + INI struct), `td5_platform.h` (platform API +
+`TD5_LOG_*`), `td5_camera_profiles.h` (chase-preset tables),
+`td5_orig_globals.h` (Ghidra name ↔ port name mapping, documentation only).
 
 ## Key constants (from RE)
 

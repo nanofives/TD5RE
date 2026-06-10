@@ -36,13 +36,11 @@ set ZLIB_INC=..\..\deps\mingw\mingw32\i686-w64-mingw32\include
 set PROJECT_ROOT=..\..\..
 
 REM ---------------------------------------------------------------------------
-REM Source split: COMMON modules are in every build; PILOT modules are the RE
-REM trace instrumentation, compiled into DEV only and excluded from RELEASE.
-REM The 3 td5_trace*.c front-end modules stay in COMMON but are inert at
-REM runtime -- the release build hard-disables every trace knob in main.c.
+REM Module list (shared by DEV and RELEASE). td5_trace.c (the CSV race-trace
+REM harness) is inert at runtime unless [Trace] knobs enable it; the release
+REM build additionally hard-disables every trace knob in main.c.
 REM ---------------------------------------------------------------------------
-set TD5RE_SRCS_COMMON=td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c td5_render.c td5_frontend.c td5_frontend_button_cache.c td5_font.c td5_hud.c td5_sound.c td5_input.c td5_asset.c td5_assetsrc.c deps\cjson\cJSON.c td5_inflate.c td5_save.c td5_net.c td5_upnp.c td5_camera.c td5_vfx.c td5_fmv.c td5_benchmark.c td5_trace.c td5_trace_whole_state.c td5_trace_replay.c td5_trig_lut_data.c td5_profile.c td5_platform_win32.c td5_msvc_rand.c main.c
-set TD5RE_SRCS_PILOT=td5_pilot_trace.c td5_pilot_trace_0040A720.c td5_pilot_trace_trig.c td5_pilot_trace_00403A20.c td5_pilot_trace_00403D90.c td5_pilot_trace_00404030.c td5_pilot_trace_00404EC0.c td5_pilot_trace_004057F0.c td5_pilot_trace_00405B40.c td5_pilot_trace_00405D70.c td5_pilot_trace_00405E80.c td5_pilot_trace_004063A0.c td5_pilot_trace_00406650.c td5_pilot_trace_00406980.c td5_pilot_trace_00409150.c td5_pilot_trace_0042EB10.c td5_pilot_trace_0042EBF0.c td5_pilot_trace_0042F030.c td5_pilot_trace_00432D60.c td5_pilot_trace_00432E60.c td5_pilot_trace_004340C0.c td5_pilot_trace_00434350.c td5_pilot_trace_00434FE0.c td5_pilot_trace_00436A70.c td5_pilot_trace_004370A0.c td5_pilot_trace_004440F0.c td5_pilot_trace_pool15_spline.c td5_pilot_trace_traffic.c td5_pilot_trace_v2v_contact.c td5_pilot_trace_v2v.c
+set TD5RE_SRCS_COMMON=td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c td5_render.c td5_frontend.c td5_frontend_button_cache.c td5_font.c td5_hud.c td5_sound.c td5_input.c td5_asset.c td5_assetsrc.c deps\cjson\cJSON.c td5_inflate.c td5_save.c td5_net.c td5_upnp.c td5_camera.c td5_vfx.c td5_fmv.c td5_benchmark.c td5_trace.c td5_trig_lut_data.c td5_profile.c td5_platform_win32.c td5_msvc_rand.c main.c
 
 REM Shared compiler flags for every variant.
 set CFLAGS_BASE=-c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC% -DTD5_INFLATE_USE_ZLIB
@@ -51,31 +49,26 @@ REM Per-variant configuration (goto-based, NOT parenthesized blocks, so comments
 REM containing parentheses cannot corrupt the batch parser).
 if /I "%VARIANT%"=="release" goto :cfg_release
 
-REM --- DEV: full RE instrumentation, byte-identical to the historic build ---
+REM --- DEV: full debug affordances ---
 set BUILDDIR=build
 set EXE=td5re.exe
 set MAPFILE=td5re.map
-set TD5RE_SRCS=!TD5RE_SRCS_COMMON! !TD5RE_SRCS_PILOT!
-set CFLAGS=!CFLAGS_BASE! -DTD5_PILOT_TRACE_0040A720 -DTD5_PILOT_TRACE_00403D90 -DTD5_PILOT_TRACE_00409150 -DTD5_PILOT_TRACE_00434350 -DTD5_PILOT_TRACE_004370A0 -DTD5_PILOT_TRACE_TRAFFIC
+set TD5RE_SRCS=!TD5RE_SRCS_COMMON!
+set CFLAGS=!CFLAGS_BASE!
 set EXTRA_LDFLAGS=
 goto :cfg_done
 
 :cfg_release
-REM --- RELEASE: strip the trace instrumentation. No pilot modules, no
-REM     -DTD5_PILOT_TRACE_* hot-path hooks, define TD5RE_RELEASE so the few
-REM     ungated trace call sites and dev affordances compile out, and let the
-REM     linker GC the now-dead functions, then strip the symbol table. ---
+REM --- RELEASE: define TD5RE_RELEASE so dev affordances (trace knobs, debug
+REM     overlays, net selftest) compile out / hard-disable, then strip the
+REM     symbol table. ---
 set BUILDDIR=build_release
 set EXE=td5re_release.exe
 set MAPFILE=td5re_release.map
-REM COMMON modules + the release stub TU. The stub supplies empty definitions
-REM for the always-on pilot-trace leaf emitters whose .c modules are excluded.
-set TD5RE_SRCS=!TD5RE_SRCS_COMMON! td5_release_stubs.c
+set TD5RE_SRCS=!TD5RE_SRCS_COMMON!
 REM Strip the symbol table (-s). We intentionally do NOT use
 REM -ffunction-sections/--gc-sections: per-function section padding bloated the
-REM binary by ~1 MB while reclaiming only the small dead F12/HUD/stub code, so
-REM the net was larger. The real strip comes from excluding the 30 pilot .c
-REM modules + dropping the -DTD5_PILOT_TRACE_* hot hooks + NDEBUG.
+REM binary by ~1 MB while reclaiming only small dead code, so the net was larger.
 set CFLAGS=!CFLAGS_BASE! -DTD5RE_RELEASE -DNDEBUG
 set EXTRA_LDFLAGS=-s
 
@@ -167,41 +160,10 @@ echo Deploying to project root...
 copy /Y !BUILDDIR!\!EXE! %PROJECT_ROOT%\!EXE! >nul
 if errorlevel 1 goto :fail
 
-REM ---------------------------------------------------------------------------
-REM Verify build: trace instrumentation strings must be PRESENT in the dev
-REM build and ABSENT in the release build. "log/port/pool" is the OUT_PATH
-REM literal compiled only into the pilot-trace modules.
-REM ---------------------------------------------------------------------------
-echo.
-echo === Verifying build artifact ===
-"%STRINGS%" %PROJECT_ROOT%\!EXE! | findstr /C:"log/port/pool" >nul 2>&1
-set HAS_INSTR=!errorlevel!
-if /I "%VARIANT%"=="release" goto :verify_release
-
-REM DEV: instrumentation should be present.
-if !HAS_INSTR!==0 (
-    echo OK: dev !EXE! contains expected instrumentation strings.
-) else (
-    echo WARNING: dev !EXE! does NOT contain expected instrumentation strings.
-    echo The build may be stale or the linker may have stripped the code.
-)
-goto :verify_done
-
-:verify_release
-REM RELEASE: instrumentation must be absent.
-if !HAS_INSTR!==0 (
-    echo ERROR: release !EXE! STILL contains pilot-trace instrumentation strings.
-    echo The strip is incomplete -- a trace module linked in. Investigate before shipping.
-    goto :fail
-)
-echo OK: release !EXE! is clean -- no pilot-trace instrumentation strings.
-
-:verify_done
 echo.
 for %%F in (%PROJECT_ROOT%\!EXE!) do echo === BUILD OK [!VARIANT!]: %%~fF (%%~zF bytes) ===
-REM Explicit success exit — the verify findstr above leaves errorlevel=1 when the
-REM release build is clean (string not found), which would otherwise leak through
-REM `call` to build_all and read as a failure. Force 0 here on the success path.
+REM Explicit success exit so stray errorlevels never leak through `call` to
+REM build_all and read as a failure.
 endlocal
 exit /b 0
 
