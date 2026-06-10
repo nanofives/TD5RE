@@ -488,12 +488,13 @@ void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing);
  * so the panel left-aligns with the NET PLAY screen title. */
 #define FE_LOBBY_X        126
 #define FE_LOBBY_PANEL_Y   96
-#define FE_LOBBY_PANEL_W  340
+#define FE_LOBBY_PANEL_W  260
 #define FE_LOBBY_PANEL_H  220
 #define FE_LOBBY_ROW0_Y   140
 #define FE_LOBBY_ROW_H     24
 
 extern char s_create_session_name[64];
+extern int  s_cs_edit;
 
 /* @GENERATED-SYMBOLS@ */
 

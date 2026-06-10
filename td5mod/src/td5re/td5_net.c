@@ -302,6 +302,12 @@ static SOCKADDR_IN  s_ws2_host_addr;
 static SOCKADDR_IN  s_ws2_peer_addrs[TD5_NET_MAX_PLAYERS];
 static int          s_ws2_peer_valid[TD5_NET_MAX_PLAYERS];
 static SOCKET       s_ws2_disc_socket = INVALID_SOCKET;
+/* [S31] Dedicated BROWSE socket (ephemeral port). Queries are sent and the
+ * ANNOUNCE replies received here, NOT on the shared 37051 discovery socket:
+ * with two instances on one machine both bound to 37051 (SO_REUSEADDR), the
+ * host's unicast reply to a 37051 source was delivered to the FIRST binder
+ * (the host itself) and the browser never saw any session. */
+static SOCKET       s_ws2_browse_socket = INVALID_SOCKET;
 static SOCKADDR_IN  s_ws2_enum_host_addrs[MAX_ENUM_SESSIONS];
 
 /* ========================================================================
@@ -1215,10 +1221,39 @@ static int ws2_transport_join_direct(const char *host_ip, int game_port)
 }
 
 /* Broadcast the discovery QUERY (LAN broadcast + loopback for same-machine). */
+static int ws2_browse_init(void)
+{
+    SOCKADDR_IN bind_addr;
+    BOOL opt_broadcast = TRUE;
+    u_long nonblocking = 1;
+
+    if (s_ws2_browse_socket != INVALID_SOCKET)
+        return 1;
+    s_ws2_browse_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s_ws2_browse_socket == INVALID_SOCKET)
+        return 0;
+    setsockopt(s_ws2_browse_socket, SOL_SOCKET, SO_BROADCAST,
+               (const char *)&opt_broadcast, sizeof(opt_broadcast));
+    ioctlsocket(s_ws2_browse_socket, FIONBIO, &nonblocking);
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port = 0;   /* ephemeral: replies come back uniquely to us */
+    if (bind(s_ws2_browse_socket, (const struct sockaddr *)&bind_addr,
+             (int)sizeof(bind_addr)) == SOCKET_ERROR) {
+        closesocket(s_ws2_browse_socket);
+        s_ws2_browse_socket = INVALID_SOCKET;
+        return 0;
+    }
+    return 1;
+}
+
 static void ws2_send_disc_query(void)
 {
     SOCKADDR_IN bcast_addr, lo_addr;
     DiscoveryMsg query;
+    if (!ws2_browse_init())
+        return;
     memset(&query, 0, sizeof(query));
     query.magic = WS2_DISCOVERY_MAGIC;
     query.disc_type = WS2_DISC_QUERY;
@@ -1227,14 +1262,14 @@ static void ws2_send_disc_query(void)
     bcast_addr.sin_family = AF_INET;
     bcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
     bcast_addr.sin_port = htons(WS2_DISCOVERY_PORT);
-    sendto(s_ws2_disc_socket, (const char *)&query, sizeof(query), 0,
+    sendto(s_ws2_browse_socket, (const char *)&query, sizeof(query), 0,
            (const struct sockaddr *)&bcast_addr, (int)sizeof(bcast_addr));
 
     memset(&lo_addr, 0, sizeof(lo_addr));
     lo_addr.sin_family = AF_INET;
     lo_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     lo_addr.sin_port = htons(WS2_DISCOVERY_PORT);
-    sendto(s_ws2_disc_socket, (const char *)&query, sizeof(query), 0,
+    sendto(s_ws2_browse_socket, (const char *)&query, sizeof(query), 0,
            (const struct sockaddr *)&lo_addr, (int)sizeof(lo_addr));
 }
 
@@ -1258,10 +1293,8 @@ static int ws2_transport_enum(void)
     DWORD now;
     int i;
 
-    if (s_ws2_disc_socket == INVALID_SOCKET) {
-        if (!ws2_discovery_init())
-            return 0;
-    }
+    if (!ws2_browse_init())
+        return 0;
     now = GetTickCount();
 
     if (s_ws2_enum_win_start == 0 || (now - s_ws2_enum_last_call) > 1500) {
@@ -1289,13 +1322,13 @@ static int ws2_transport_enum(void)
         struct timeval tv;
 
         FD_ZERO(&readfds);
-        FD_SET(s_ws2_disc_socket, &readfds);
+        FD_SET(s_ws2_browse_socket, &readfds);
         tv.tv_sec = 0;
         tv.tv_usec = 0;
         if (select(0, &readfds, NULL, NULL, &tv) <= 0)
             break;
 
-        ret = recvfrom(s_ws2_disc_socket, (char *)&resp, sizeof(resp), 0,
+        ret = recvfrom(s_ws2_browse_socket, (char *)&resp, sizeof(resp), 0,
                        (struct sockaddr *)&from_addr, &from_len);
         if (ret < (int)sizeof(DiscoveryMsg)) continue;
         if (resp.magic != WS2_DISCOVERY_MAGIC) continue;
@@ -1566,6 +1599,10 @@ static void ws2_discovery_shutdown(void)
     if (s_ws2_disc_socket != INVALID_SOCKET) {
         closesocket(s_ws2_disc_socket);
         s_ws2_disc_socket = INVALID_SOCKET;
+    }
+    if (s_ws2_browse_socket != INVALID_SOCKET) {
+        closesocket(s_ws2_browse_socket);
+        s_ws2_browse_socket = INVALID_SOCKET;
     }
 }
 

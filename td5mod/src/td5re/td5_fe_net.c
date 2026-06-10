@@ -39,7 +39,7 @@ static uint32_t s_mp_join_prev    = 0;     /* lobby join-scan mask last frame (e
 /* --- S10 net-play: explicit connection modes (LAN / Direct-IP) --- */
 static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direct join) */
 
-static int  s_cs_edit;                  /* S31 host-setup: 1=name, 2=password editing */
+int  s_cs_edit;                         /* S31 host-setup: 1=name, 2=password editing */
 static int  s_cs_direct;                /* S31 host-setup: 1 = Direct-IP host, 0 = LAN */
 static int  s_cs_esc_guard;             /* swallow the ESC that cancelled an edit */
 static int  s_kick_button_slot[5];      /* lobby kick button k -> net slot */
@@ -738,7 +738,12 @@ void Screen_CreateSession(void) {
         TD5_LOG_D(LOG_TAG, "CreateSession: init (direct=%d)", s_cs_direct);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 */
-        frontend_create_button("MAX PLAYERS",  120, 208, 224, 0x20);  /* 1 */
+        {   /* 1: MAX PLAYERS — selector-style (value + ◄ ► inside the button,
+             * drawn in the post-button pass like the other selector widgets) */
+            int bi = frontend_create_button("", 120, 208, 224, 0x20);
+            if (bi >= 0 && bi < FE_MAX_BUTTONS)
+                s_buttons[bi].is_selector = 1;
+        }
         frontend_create_button("PASSWORD",     120, 256, 224, 0x20);  /* 2 */
         frontend_create_button("HOST",         120, 320, 160, 0x20);  /* 3 */
         frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);  /* 4 */
@@ -934,10 +939,10 @@ void Screen_NetworkLobby(void) {
          * indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=EXIT 4=OPTIONS(host).
          * [2026-06-07] Added SELECT TRACK -> the track picker (returns to the
          * lobby via flow_context==4); rows below it shift down one slot (0x28). */
-        frontend_create_button(SNK_StartButTxt,     400, 110, 190, 0x28); /* 0 START */
-        frontend_create_button(SNK_ChangeCarButTxt, 400, 158, 190, 0x28); /* 1 CHANGE CAR */
-        frontend_create_button("SELECT TRACK",      400, 206, 190, 0x28); /* 2 SELECT TRACK */
-        frontend_create_button(SNK_ExitButTxt,      400, 254, 190, 0x28); /* 3 EXIT */
+        frontend_create_button(SNK_StartButTxt,     440, 110, 150, 0x20); /* 0 START */
+        frontend_create_button(SNK_ChangeCarButTxt, 440, 150, 150, 0x20); /* 1 CHANGE CAR */
+        frontend_create_button("SELECT TRACK",      440, 190, 150, 0x20); /* 2 SELECT TRACK */
+        frontend_create_button(SNK_ExitButTxt,      440, 230, 150, 0x20); /* 3 EXIT */
         /* [S31 redesign] indices 4..8: per-row KICK buttons (host only) —
          * positioned/unhidden each frame next to the joined remote players;
          * the exit-door icon is drawn over them in the post-button pass. */

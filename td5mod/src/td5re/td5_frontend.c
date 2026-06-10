@@ -7843,9 +7843,9 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
             snprintf(line, sizeof(line), "%d. %s%s   %dms", slot + 1, name, tag, lat);
         else
             snprintf(line, sizeof(line), "%d. %s%s   --", slot + 1, name, tag);
-        fe_draw_text((FE_LOBBY_X + 22.0f) * sx,
-                     (float)(FE_LOBBY_ROW0_Y + row * FE_LOBBY_ROW_H) * sy,
-                     line, 0xFFFFFFFF, sx, sy);
+        fe_draw_small_text((FE_LOBBY_X + 22.0f) * sx,
+                           (float)(FE_LOBBY_ROW0_Y + row * FE_LOBBY_ROW_H + 4) * sy,
+                           line, 0xFFFFFFFF, sx, sy);
         row++;
     }
     /* Host/connect status + chat hint at the bottom of the panel. */
@@ -7858,21 +7858,42 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
 }
 
 
-/* [S31] HOST GAME setup values (session name / max players / password mask)
- * drawn in the value column right of the caption buttons. */
+/* [S31] HOST GAME setup values, edited IN PLACE: while a field is being
+ * edited its value text becomes the live edit buffer with a caret — no
+ * separate text-input widget is drawn over the screen. */
 static void frontend_render_create_session_overlay(float sx, float sy) {
-    char buf[72], mask[33];
+    char buf[72], mask[34];
     int n, k;
-    snprintf(buf, sizeof(buf), "%s", s_create_session_name);
-    fe_draw_text(368.0f * sx, 166.0f * sy, buf, 0xFFFFFFFF, sx, sy);
-    snprintf(buf, sizeof(buf), "< %d >", s_lobby_max_players);
-    fe_draw_text(368.0f * sx, 214.0f * sy, buf, 0xFFFFFFFF, sx, sy);
+    uint32_t c_name = (s_cs_edit == 1) ? 0xFFFFE080u : 0xFFFFFFFFu;
+    uint32_t c_pass = (s_cs_edit == 2) ? 0xFFFFE080u : 0xFFFFFFFFu;
+    snprintf(buf, sizeof(buf), "%s%s", s_create_session_name,
+             (s_cs_edit == 1) ? "_" : "");
+    fe_draw_text(368.0f * sx, 166.0f * sy, buf, c_name, sx, sy);
     n = (int)strlen(s_lobby_password);
     if (n > 32) n = 32;
     for (k = 0; k < n; k++) mask[k] = '*';
     mask[n] = '\0';
-    snprintf(buf, sizeof(buf), "%s", n ? mask : "(OPEN)");
-    fe_draw_text(368.0f * sx, 262.0f * sy, buf, 0xFFFFFFFF, sx, sy);
+    if (s_cs_edit == 2)
+        snprintf(buf, sizeof(buf), "%s_", mask);
+    else
+        snprintf(buf, sizeof(buf), "%s", n ? mask : "(OPEN)");
+    fe_draw_text(368.0f * sx, 262.0f * sy, buf, c_pass, sx, sy);
+}
+
+/* [S31] MAX PLAYERS selector content — POST-button pass so the centred
+ * value + the ◄ ► arrows draw on top of the button frame (same pattern as
+ * the car-select nav bar). */
+static void frontend_render_create_session_postpass(float sx, float sy) {
+    char buf[40];
+    float bx, by, bw, bh, tw;
+    if (s_current_screen != TD5_SCREEN_CREATE_SESSION) return;
+    if (!s_buttons[1].active) return;
+    frontend_get_button_render_rect(1, sx, sy, &bx, &by, &bw, &bh);
+    snprintf(buf, sizeof(buf), "MAX PLAYERS: %d", s_lobby_max_players);
+    tw = fe_measure_text(buf, sx, sy);
+    fe_draw_text(bx + (bw - tw) * 0.5f, by + (bh - 16.0f * sy) * 0.5f,
+                 buf, 0xFFFFFFFF, sx, sy);
+    fe_draw_option_arrows(1, sx, sy);
 }
 
 /* [S31 redesign] Exit-door icons over the lobby's per-row KICK buttons —
@@ -8017,8 +8038,8 @@ void td5_frontend_render_ui_rects(void) {
         if (s_text_input_state != 0) frontend_render_text_input();
         break;
     case TD5_SCREEN_CREATE_SESSION:
+        /* [S31] values are edited in place — no separate input widget. */
         frontend_render_create_session_overlay(sx, sy);
-        if (s_inner_state == 2 && s_text_input_state != 0) frontend_render_text_input();
         break;
     case TD5_SCREEN_DIRECT_CONNECT:
         /* Only during the IP-entry (3) / password-entry (8) sub-states. */
@@ -8285,6 +8306,8 @@ void td5_frontend_render_ui_rects(void) {
      * buttons, which would otherwise paint over the modal). */
     if (s_current_screen == TD5_SCREEN_NETWORK_LOBBY)
         frontend_render_lobby_kick_icons(sx, sy);
+    if (s_current_screen == TD5_SCREEN_CREATE_SESSION)
+        frontend_render_create_session_postpass(sx, sy);
 
     /* Nav bar text drawn after buttons so it renders on top of the button frame.
      * (button 0 is the nav bar: button loop draws the 9-slice frame, then we
