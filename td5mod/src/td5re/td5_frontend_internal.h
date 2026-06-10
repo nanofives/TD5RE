@@ -12,7 +12,98 @@
 #define TD5_FRONTEND_INTERNAL_H
 
 #include <stdint.h>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include "td5_types.h"
+#include "td5_credits.h"                 /* K_CREDIT_MUGSHOT_COUNT */
+#include "../../ddraw_wrapper/src/wrapper.h"   /* ID3D11* handles, g_backend */
+
+typedef struct { int width; int height; } BgGalImg;
+typedef struct { const char *label; int cols; int rows; } MpSplitLayout;
+
+/* ---- shared texture-page allocations ---- */
+#define SHARED_PAGE_WHITE     899
+#define SHARED_PAGE_FONT_MSDF 970   /* free page (frontend uses 888-955) */
+#define SHARED_PAGE_SMALLFONT_MSDF 971  /* free page (BodyText MSDF is 970) */
+
+/* ---- VectorUI roundrect constant buffer (matches ps_roundrect.hlsl) ---- */
+typedef struct {
+    float size_px[2];   /* button w,h in screen px */
+    float border[2];    /* border thickness px: x = left/right, y = top/bottom */
+    float radii[4];     /* outer corner radii px: TL, TR, BL, BR */
+    float mid[4];       /* border gradient: lightest (middle of band) */
+    float inner[4];     /* border gradient: inner-edge colour */
+    float outer[4];     /* border gradient: outer-edge colour (darkest) */
+    float fill[4];      /* interior rgb, a = interior alpha (0 = transparent) */
+} FE_RoundRectParams;   /* 96 bytes, matches cbuffer RoundRectParams */
+
+/* ---- misc shared constants ---- */
+#define MP_MISSING_CONTENT_COUNT 3   /* keep in sync with k_mp_missing_content */
+extern const char *const k_mp_missing_content[MP_MISSING_CONTENT_COUNT];
+#define GALLERY_ZIP         "Front End/Extras/Mugshots.zip"
+#define FE_CREDITS_ROW_H    32.0f   /* 0x20 per text row */
+#define FE_CREDITS_PHOTO_H  224.0f  /* mugshot height (= 7 rows) */
+#define FE_CREDITS_SPEED    0.060f  /* px/ms = 60px/s = orig 1px/frame @60fps */
+extern float s_bg_gal_x, s_bg_gal_y;
+
+/* ---- shared texture-page allocations (see td5_frontend.c page map) ---- */
+#define SHARED_PAGE_MIN       888  /* lowest shared page -- don't clear below this */
+#define SHARED_PAGE_BG_GALLERY 888 /* 5 pages 888-892: background slideshow pic1-5.tga */
+#define SMALLFONT_PAGE   893
+#define SHARED_PAGE_ARROWBTNZ 894  /* ArrowButtonz.tga 12x36 sprite sheet */
+#define SHARED_PAGE_BTNLIGHTS 895
+#define SHARED_PAGE_CURSOR    896
+#define SHARED_PAGE_BUTTONBITS 897
+#define SHARED_PAGE_FONT      898
+#define SHARED_PAGE_CURSOR_MSDF 981  /* free page (titles use 972..980) */
+#define SHARED_PAGE_HUDFONT_SDF 982  /* free page (cursor MSDF is 981) */
+#define SHARED_PAGE_PAUSEFONT_SDF 983
+
+/* ---- BodyText.tga font atlas (10 cols x 24px cells, 240x552) ---- */
+#define FONT_COLS 10
+#define FONT_CELL 24
+#define FONT_TEX_W (FONT_COLS * FONT_CELL)  /* 240 */
+#define FONT_TEX_H 552  /* actual BodyText.tga height: 23 rows of 24px */
+
+/* ---- VectorUI gauge constant buffer (matches ps_gauge.hlsl) ---- */
+typedef struct {
+    float quad_px[2];   /* quad size px (uv -> local px) */
+    float center[2];    /* dial center in local px */
+    float radius;       /* outer disc radius px */
+    float inner_r;      /* inner 3D circle radius px (0 => none) */
+    float sweep_start;  /* first tick angle (radians, screen CW) */
+    float sweep_end;    /* last tick angle (radians) */
+    float tick_count;   /* ticks along the sweep (>=2) */
+    float major_every;  /* every Nth tick is major */
+    float major_len;    /* major tick length px */
+    float minor_len;    /* minor tick length px */
+    float tick_out;     /* tick outer radius px */
+    float red_start;    /* red zone start (radians); ticks >= this are red */
+    float red_end;      /* red zone end (radians); <= start => none */
+    float pivot_px;     /* pivot dot radius px (0 => none) */
+    float rim_red_px;   /* red rim arc thickness px */
+    float pad0, pad1, pad2;
+    float face[4];      /* outer disc rgba (semi-transparent) */
+    float inner[4];     /* inner 3D disc rgba */
+    float tick[4];      /* white tick rgba */
+    float red[4];       /* red teeth + red rim rgba */
+    float pivot[4];     /* pivot hub rgba (a<=0 => none) */
+} FE_GaugeParams;       /* 160 bytes, matches cbuffer GaugeParams */
+
+/* ---- frontend draw queue ---- */
+#define FE_MAX_DRAW_CMDS 128
+
+typedef enum { FE_CMD_RECT, FE_CMD_BLIT } FE_CmdType;
+
+typedef struct {
+    FE_CmdType type;
+    int x, y, w, h;
+    uint32_t color;
+    int tex_page;  /* for blit */
+    float u0, v0, u1, v1; /* UV for blit */
+} FE_DrawCmd;
 
 /* ---- car roster bounds (carmodel.nfo order) ---- */
 #define TD5_BASE_CAR_COUNT 37
@@ -223,6 +314,9 @@ void frontend_release_surface(int handle);
 void frontend_set_cursor_visible(int visible);
 void mp_simul_load_pane_spec(int p, int car);
 extern int  s_mouse_x, s_mouse_y;
+extern int  s_cursor_h;
+extern int  s_buttonbits_h;
+extern int  s_buttonlights_h;
 /* ---- frontend canvas (640x480 design space) ---- */
 #define FE_CANVAS_W 640
 #define FE_CANVAS_H 480
@@ -276,6 +370,119 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 #define FE_QR_RIGHT_MARGIN 12 /* keep value text this far from the right edge     */
 #define FE_QR_VALUE_LINE_H 22 /* canvas px per value line (centers + wrap spacing) */
 
+const MpSplitLayout *mp_split_layouts(int n, int *count);
+extern BgGalImg s_bg_gallery[5];
+extern FE_DrawCmd s_draw_queue[FE_MAX_DRAW_CMDS];
+extern ID3D11Buffer      *s_gauge_cb;
+extern ID3D11Buffer      *s_rr_cb;
+extern ID3D11PixelShader *s_ps_arrow;
+extern ID3D11PixelShader *s_ps_cursor;
+extern ID3D11PixelShader *s_ps_gauge;
+extern ID3D11PixelShader *s_ps_msdf;
+extern ID3D11PixelShader *s_ps_roundrect;
+extern char s_music_test_now_band[64];
+extern char s_music_test_now_title[64];
+extern char s_music_test_track_label[64];
+extern const char * const k_ctrl_action_labels[TD5_JSBIND_ACTIONS];
+extern int             s_display_camera_damping;
+extern int             s_display_fog_enabled;
+extern int             s_display_mode_count;
+extern int             s_display_mode_index;
+extern int             s_display_show_fps;
+extern int             s_display_speed_units;
+extern int             s_display_vsync;
+extern int             s_display_window_mode;
+extern int             s_game_option_checkpoint_timers;
+extern int             s_game_option_collisions;
+extern int             s_game_option_difficulty;
+extern int             s_game_option_dynamics;
+extern int             s_sound_option_music_volume;
+extern int             s_sound_option_sfx_mode;
+extern int             s_sound_option_sfx_volume;
+extern int      s_ctrl_capture_armed;
+extern int      s_ctrl_capturing;
+extern int      s_ctrl_input_source;
+extern int      s_ctrl_opts_player;
+extern int      s_ctrl_player;
+extern int      s_ctrl_sel_action;
+extern int      s_fade_active;
+extern int      s_fade_direction;
+extern int      s_fade_progress;
+extern int   s_bg_gal_blend;
+extern int   s_bg_gal_current;
+extern int   s_bg_gal_loaded;
+extern int  s_attract_demo_active;
+extern int  s_attract_mode_ctrl;
+extern int  s_attract_track;
+extern int  s_band_cover_surface[5];
+extern int  s_control_options_surface;
+extern int  s_credit_mugshot_surf[K_CREDIT_MUGSHOT_COUNT];
+extern int  s_cup_unlock_tier;
+extern int  s_joypad_icon_surface;
+extern int  s_joystick_icon_surface;
+extern int  s_keyboard_icon_surface;
+extern int  s_language_bg_surface;
+extern int  s_language_flag_surface;
+extern int  s_mp_btn_catchup;
+extern int  s_mp_btn_layout;
+extern int  s_mp_btn_missing[2];
+extern int  s_mp_btn_nickname;
+extern int  s_mp_btn_players;
+extern int  s_mp_layout_optcount;
+extern int  s_mp_layout_sel;
+extern int  s_mp_missing_content[2];
+extern int  s_mp_missing_count;
+extern int  s_music_attract_track;
+extern int  s_music_test_playing_set;
+extern int  s_nocontroller_surface;
+extern int  s_sound_volumebox_surface;
+extern int  s_sound_volumefill_surface;
+extern int s_arrowbuttonz_tex_page;
+extern int s_buttonbits_tex_page;
+extern int s_buttonbits_w;
+extern int s_buttonlights_tex_page;
+extern int s_buttonlights_w;
+extern int s_cursor_msdf_page;
+extern int s_cursor_tex_page;
+extern int s_cursor_w;
+extern int s_draw_queue_count;
+extern int s_font_page;
+extern int s_hudfont_sdf_page;
+extern int s_msdf_font_page;
+extern int s_pausefont_sdf_page;
+extern int s_smallfont_msdf_page;
+extern int s_smallfont_page;
+extern int s_white_tex_page;
+extern uint32_t s_anim_start_ms;
+extern uint32_t s_attract_idle_timestamp;
+extern uint32_t s_credits_start_ms;
+extern uint32_t s_ctrl_action_bind[TD5_MAX_HUMAN_PLAYERS][TD5_JSBIND_ACTIONS];
+extern uint8_t  s_ctrl_kb_scancodes[16];
+int frontend_load_tga_ck(const char *name, const char *archive, TD5_ColorKeyMode colorkey);
+int frontend_load_tga_colorkey(const char *name, const char *archive,
+                                       int dest_page, int *out_w, int *out_h,
+                                       TD5_ColorKeyMode colorkey);
+void Screen_AttractModeDemo(void);
+void Screen_ControlOptions(void);
+void Screen_ControllerBinding(void);
+void Screen_DisplayOptions(void);
+void Screen_ExtrasGallery(void);
+void Screen_GameOptions(void);
+void Screen_LanguageSelect(void);
+void Screen_LegalCopyright(void);
+void Screen_LocalizationInit(void);
+void Screen_MainMenu(void);
+void Screen_MusicTestExtras(void);
+void Screen_OptionsHub(void);
+void Screen_PositionerDebugTool(void);
+void Screen_RaceTypeCategory(void);
+void Screen_SoundOptions(void);
+void Screen_StartupInit(void);
+void Screen_TwoPlayerOptions(void);
+void frontend_init_font_metrics_default(void);
+void frontend_init_font_metrics_from_pixels(const uint8_t *pixels, int w, int h);
+void frontend_post_quit(void);
+void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing);
 /* @GENERATED-SYMBOLS@ */
 
 #endif /* TD5_FRONTEND_INTERNAL_H */
