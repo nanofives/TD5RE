@@ -240,10 +240,9 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  *   See detailed audit comment at tick_race_countdown() — same-shape
  *   timer/level/indicator state machine; intentional port-side semantic
  *   choices for paused-flip timing and indicator gating on blank atlas
- *   cells. ONE TODO opened: orig's ResetRaceCameraSelectionState call at
- *   the timer-zero crossing is not yet wired in the port (no current
- *   functional impact because the camera preset is never re-saved during
- *   the countdown, but the missing call is documented for completeness).
+ *   cells. The orig's ResetRaceCameraSelectionState call at the timer-zero
+ *   crossing IS wired (Phase 2 follow-up 2026-05-18 — see delta A note at
+ *   tick_race_countdown).
  *
  * BeginRaceFadeOutTransition @ 0x0042cc20 [ARCH-DIVERGENCE]
  *   See detailed audit comment at td5_game_begin_fade_out(). Port
@@ -4776,12 +4775,10 @@ static void reset_race_countdown(void)
  *    6) if level == 0: g_gamePaused = 0; gRaceCameraTransitionGate = 0
  *
  *  Port deltas (this function):
- *    A) [TODO] Step (2)'s ResetRaceCameraSelectionState call is NOT wired
- *       in the port. Orig calls it once at the timer-zero crossing to
- *       reload camera presets for both views. Today the camera preset is
- *       never re-saved during the countdown window, so the reload is a
- *       no-op in practice -- but the call is structurally missing.
- *       See todo_countdown_reset_camera_preset_call_2026-05-18.md.
+ *    A) [RESOLVED 2026-05-18 Phase 2] Step (2)'s
+ *       ResetRaceCameraSelectionState call IS wired at the timer-zero
+ *       crossing below (clear when playback/replay, else restore) --
+ *       [CONFIRMED @ 0x0040A4B4].
  *    B) Step (6)'s paused-flip happens at timer==0 in the port instead of
  *       level==0 in orig. User-observed in-game behaviour (2026-05-17)
  *       confirmed the orig's car-hold extends across the level==0 window
