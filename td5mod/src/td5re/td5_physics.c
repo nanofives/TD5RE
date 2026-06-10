@@ -677,6 +677,44 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 #define PHYS_I(a, off) (*(int32_t*)((uint8_t*)get_phys(a) + (off)))
 /* Read a short from the car definition at byte offset */
 #define CDEF_S(a, off) (*(int16_t*)((uint8_t*)get_cardef(a) + (off)))
+/* Named field offsets for the two per-car tuning tables the accessors above
+ * read. PHYS_* index the vehicle-physics table entry (get_phys, mostly int16
+ * fields); CDEF_* index the cardef entry (get_cardef). Values mirror the
+ * original binary's table layouts — the listing-anchored comments at the use
+ * sites are the provenance. */
+#define PHYS_INERTIA_YAW        0x20   /* int32 */
+#define PHYS_HALF_WHEELBASE     0x24   /* int32 */
+#define PHYS_FRONT_WEIGHT       0x28
+#define PHYS_REAR_WEIGHT        0x2A
+#define PHYS_TIRE_GRIP_COEFF    0x2C
+#define PHYS_GEAR_RATIO_BASE    0x2E   /* int16[gear], stride 2 */
+#define PHYS_GEAR_UPSHIFT_BASE  0x3E   /* int16[gear] RPM threshold, stride 2 */
+#define PHYS_GEAR_DOWNSHIFT_BASE 0x4E  /* int16[gear] RPM threshold, stride 2 */
+#define PHYS_SUSP_POS_DAMP      0x5E
+#define PHYS_SUSP_VEL_DAMP      0x60
+#define PHYS_SUSP_SPRING        0x62
+#define PHYS_SUSP_TRAVEL_LIM    0x64
+#define PHYS_SUSP_LOAD_SCALE    0x66
+#define PHYS_DRIVE_TORQUE_MULT  0x68
+#define PHYS_DAMP_COEFF_TURN    0x6A   /* picked when steering hard in gear >= 2 */
+#define PHYS_DAMP_COEFF_BASE    0x6C   /* picked when near-straight or gear < 2 */
+#define PHYS_BRAKE_FRONT        0x6E
+#define PHYS_BRAKE_REAR         0x70
+#define PHYS_REDLINE_RPM        0x72
+#define PHYS_TOP_SPEED          0x74
+#define PHYS_DRIVETRAIN_TYPE    0x76
+#define PHYS_SPEED_SCALE        0x78
+#define PHYS_HANDBRAKE_MOD      0x7A
+#define PHYS_SLIP_COUPLING      0x7C
+
+#define CDEF_FRONT_Z_EXTENT     0x04   /* positive */
+#define CDEF_HALF_WIDTH         0x08   /* positive */
+#define CDEF_REAR_Z_EXTENT      0x14   /* negative */
+#define CDEF_COLLISION_RADIUS   0x80
+#define CDEF_SUSP_REF_HEIGHT    0x82
+#define CDEF_HEIGHT_OFFSET      0x86
+#define CDEF_WHEEL_Y_BASE       0x42   /* per-wheel, stride 8 */
+
 #define ACTOR_I16(base, off) (*(int16_t *)((uint8_t *)(base) + (off)))
 #define ACTOR_I32(base, off) (*(int32_t *)((uint8_t *)(base) + (off)))
 
@@ -916,7 +954,7 @@ void td5_physics_run_paused_engine_step(void)
         if (g_game_type != 0 &&
             actor->slot_index < g_traffic_slot_base &&
             g_race_slot_state[actor->slot_index] != 1) {
-            int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+            int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
             actor->engine_speed_accum = (redline << 1) / 3;
         }
 
@@ -928,7 +966,7 @@ void td5_physics_run_paused_engine_step(void)
         if (actor->slot_index < g_traffic_slot_base && g_race_slot_state[actor->slot_index] == 1) {
             int16_t *phys = get_phys(actor);
             if (phys) {
-                int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+                int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
                 int32_t triple = redline * 3;
                 int32_t thresh = (triple + ((triple >> 31) & 3)) >> 2;
                 if (actor->engine_speed_accum > thresh) {
@@ -1264,7 +1302,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         if (g_game_type != 0 &&
             actor->slot_index < g_traffic_slot_base &&
             g_race_slot_state[actor->slot_index] != 1) {
-            int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+            int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
             actor->engine_speed_accum = (redline << 1) / 3;
         }
 
@@ -1283,7 +1321,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         if (actor->slot_index < g_traffic_slot_base && g_race_slot_state[actor->slot_index] == 1) {
             int16_t *phys = get_phys(actor);
             if (phys) {
-                int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+                int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
                 int32_t triple = redline * 3;
                 int32_t thresh = (triple + ((triple >> 31) & 3)) >> 2;  /* /4 round-rz */
                 if (actor->engine_speed_accum > thresh) {
@@ -1497,12 +1535,12 @@ void td5_physics_update_player(TD5_Actor *actor)
 
     /* --- 3. Per-wheel grip from surface tables, clamped [0x38..0x50] --- */
     int32_t grip[4];
-    int32_t front_weight = (int32_t)PHYS_S(actor, 0x28);
-    int32_t rear_weight  = (int32_t)PHYS_S(actor, 0x2A);
+    int32_t front_weight = (int32_t)PHYS_S(actor, PHYS_FRONT_WEIGHT);
+    int32_t rear_weight  = (int32_t)PHYS_S(actor, PHYS_REAR_WEIGHT);
     int32_t total_weight = front_weight + rear_weight;
     if (total_weight == 0) total_weight = 1;
 
-    int32_t half_wb = PHYS_I(actor, 0x24);
+    int32_t half_wb = PHYS_I(actor, PHYS_HALF_WHEELBASE);
     int32_t full_wb = half_wb * 2;
     if (full_wb == 0) full_wb = 1;
 
@@ -1554,7 +1592,7 @@ void td5_physics_update_player(TD5_Actor *actor)
      * Original has no clamp — shipped values ARE the tuning. AI vehicles
      * never engage handbrake_flag, so this branch is player-only. */
     if (actor->handbrake_flag) {
-        int32_t hb_mod = (int32_t)PHYS_S(actor, 0x7A);
+        int32_t hb_mod = (int32_t)PHYS_S(actor, PHYS_HANDBRAKE_MOD);
         /* [FIX 2026-06-02 power-donut] On a RWD car the faithful ~25% rear-grip
          * cut leaves too much LATERAL grip to oversteer UNDER power, so
          * throttle+handbrake just drove forward (handbrake "negated"). When the
@@ -1586,9 +1624,9 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
         int32_t damp_coeff;
         if (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2)
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_BASE);
         else
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_TURN);
 
         /* D2 — SAR-RZ-8 then SAR-RZ-12 [CONFIRMED @ 0x004040E5-0x00404104,
          * 0x0040410D-0x00404137].
@@ -1700,7 +1738,7 @@ void td5_physics_update_player(TD5_Actor *actor)
              * sVar2=1 (RWD): CRGT(body_vlong) → long; lat=body_vlat (front-axle form)
              * sVar2=2 (FWD): CRGT(body_vlat)  → lat;  long=body_vlong
              * sVar2=3 (AWD): CRGT((long+lat)/2) → BOTH */
-            int32_t dt_layout = (int32_t)PHYS_S(actor, 0x76);
+            int32_t dt_layout = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
             switch (dt_layout) {
             case 1: {
                 int32_t crgt = compute_reverse_gear_torque(actor, body_vlong);
@@ -1756,8 +1794,8 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;
     int32_t drive_torque = 0;
     int32_t wheel_drive[4] = {0, 0, 0, 0};
-    int32_t brake_front = (int32_t)PHYS_S(actor, 0x6E);
-    int32_t brake_rear  = (int32_t)PHYS_S(actor, 0x70);
+    int32_t brake_front = (int32_t)PHYS_S(actor, PHYS_BRAKE_FRONT);
+    int32_t brake_rear  = (int32_t)PHYS_S(actor, PHYS_BRAKE_REAR);
 
     if (actor->surface_contact_flags != 0) {
         /* --- ON-GROUND branch ---
@@ -1801,8 +1839,8 @@ void td5_physics_update_player(TD5_Actor *actor)
              * so wheel_drive stays zero and no force is added below. */
             drive_torque = td5_physics_compute_drive_torque(actor);
 
-            int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
-            int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
+            int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
+            int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
             if (abs_speed <= speed_limit) {
@@ -1881,7 +1919,7 @@ void td5_physics_update_player(TD5_Actor *actor)
                 {
                     int32_t steer_raw = (-steer_angle) & 0xFFF;
                     int32_t sin_sr = sin_fixed12(steer_raw);
-                    int32_t yaw_corr = (sin_sr * (int32_t)PHYS_S(actor, 0x28) * actor->angular_velocity_yaw) >> 12;
+                    int32_t yaw_corr = (sin_sr * (int32_t)PHYS_S(actor, PHYS_FRONT_WEIGHT) * actor->angular_velocity_yaw) >> 12;
                     yaw_corr /= ANGULAR_DIVISOR_W;
                     v_steer_axis -= yaw_corr;
                 }
@@ -1958,8 +1996,8 @@ void td5_physics_update_player(TD5_Actor *actor)
 
             /* Drive torque while airborne [CONFIRMED @ 0x404560-0x4045AE] */
             drive_torque = td5_physics_compute_drive_torque(actor);
-            int32_t dt_type = (int32_t)PHYS_S(actor, 0x76);
-            int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
+            int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
+            int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
             if (abs_speed <= speed_limit) {
                 switch (dt_type) {
@@ -2093,7 +2131,7 @@ void td5_physics_update_player(TD5_Actor *actor)
     {
         int32_t a_ = front_weight;                          /* iVar32 */
         int32_t b_ = rear_weight;                           /* iVar13 */
-        int32_t I_ = PHYS_I(actor, 0x20);                   /* iVar27 */
+        int32_t I_ = PHYS_I(actor, PHYS_INERTIA_YAW);                   /* iVar27 */
         int32_t L_ = a_ + b_;                               /* iVar33 */
         int32_t w_ = actor->angular_velocity_yaw;           /* iVar28 (initial) */
         int32_t F_f = front_long;                           /* local_8 */
@@ -2185,8 +2223,8 @@ void td5_physics_update_player(TD5_Actor *actor)
      * Pass B (classical): unconditional slip-circle clamp — same behavior
      *   as the prior single-pass implementation. Clamps both longitudinal
      *   and lateral when combined > grip_limit. */
-    int32_t tire_grip_coeff = (int32_t)PHYS_S(actor, 0x2C);
-    int32_t slip_coupling   = (int32_t)PHYS_S(actor, 0x7C);
+    int32_t tire_grip_coeff = (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF);
+    int32_t slip_coupling   = (int32_t)PHYS_S(actor, PHYS_SLIP_COUPLING);
     {
         /* ---- Longitudinal slip-circle -> REAR axle ----
          * [FIX 2026-05-28 tire-marks] Orig +0x31C store @0x404aed: scf&1 +
@@ -2374,7 +2412,7 @@ void td5_physics_update_player(TD5_Actor *actor)
      * gate. With the coupled solve and correct yaw formula, lateral forces
      * naturally go to zero at zero velocity. [CONFIRMED no gate in original] */
     {
-        int32_t inertia = PHYS_I(actor, 0x20);
+        int32_t inertia = PHYS_I(actor, PHYS_INERTIA_YAW);
         int32_t inertia_div = inertia / 0x28C;
         if (inertia_div == 0) inertia_div = 1;
 
@@ -2498,7 +2536,7 @@ void td5_physics_update_player(TD5_Actor *actor)
      * higher corner-exit speed than the 1x cap allowed. If a tested track lets
      * the car leave the road, KEEP the 2x cap (do not remove it). */
     {
-        int32_t speed_lim = (int32_t)PHYS_S(actor, 0x74) << 8;
+        int32_t speed_lim = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
         int32_t vel_cap = speed_lim * 2;  /* 2x backstop (was 1x); walls do real containment */
         int32_t vxh = actor->linear_velocity_x >> 8;
         int32_t vzh = actor->linear_velocity_z >> 8;
@@ -2637,8 +2675,8 @@ void td5_physics_update_player(TD5_Actor *actor)
                     actor->slot_index, rpm_norm, wheelspin, body_vlong_q8,
                     (int)actor->encounter_steering_cmd,
                     actor->surface_contact_flags,
-                    (int)(uint8_t)PHYS_S(actor, 0x76));
-                actor->surface_contact_flags = (uint8_t)PHYS_S(actor, 0x76);
+                    (int)(uint8_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE));
+                actor->surface_contact_flags = (uint8_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
             }
         }
     }
@@ -2734,12 +2772,12 @@ void td5_physics_update_ai(TD5_Actor *actor)
     /* --- 3. 2-axle load transfer with cross-weights [CONFIRMED @ 0x40506B-0x4050B4]
      * Original uses CROSSED weight numerators: front_load uses rear_weight,
      * rear_load uses front_weight. Divisor is half_wb, not full_wb. */
-    int32_t front_weight = (int32_t)PHYS_S(actor, 0x28);
-    int32_t rear_weight  = (int32_t)PHYS_S(actor, 0x2A);
+    int32_t front_weight = (int32_t)PHYS_S(actor, PHYS_FRONT_WEIGHT);
+    int32_t rear_weight  = (int32_t)PHYS_S(actor, PHYS_REAR_WEIGHT);
     int32_t total_weight = front_weight + rear_weight;
     if (total_weight == 0) total_weight = 1;
 
-    int32_t half_wb = PHYS_I(actor, 0x24);
+    int32_t half_wb = PHYS_I(actor, PHYS_HALF_WHEELBASE);
     if (half_wb == 0) half_wb = 1;
 
     int32_t susp_defl = actor->center_suspension_pos;
@@ -2765,9 +2803,9 @@ void td5_physics_update_ai(TD5_Actor *actor)
         int32_t surf_drag = (int32_t)s_surface_grip[surface & 0x1F];
         int32_t damp_coeff;
         if (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2)
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6C);
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_BASE);
         else
-            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, 0x6A);
+            damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_TURN);
 
         /* D1 — SAR-RZ-8 then SAR-RZ-12 [CONFIRMED @ 0x00404F33-0x00404F91].
          * Same SAR-RZ idiom as the player drag at 0x004040E5. */
@@ -2801,7 +2839,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
      *  before passing it into the matrix] */
     int32_t raw_lat = (cos_h * vx - sin_h * vz) >> 12;
     int32_t yaw_rate = actor->angular_velocity_yaw;
-    int32_t inertia = PHYS_I(actor, 0x20);
+    int32_t inertia = PHYS_I(actor, PHYS_INERTIA_YAW);
     int32_t inertia_div = inertia / 0x28C;
     if (inertia_div == 0) inertia_div = 1;
     int32_t yaw_corr = ((sin_d * front_weight) >> 12) * yaw_rate / 0x28C;
@@ -2827,9 +2865,9 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;
     int32_t drive_torque = 0;
     int32_t front_drive = 0, rear_drive = 0;
-    int32_t brake_front = (int32_t)PHYS_S(actor, 0x6E);
-    int32_t brake_rear  = (int32_t)PHYS_S(actor, 0x70);
-    int32_t speed_limit = (int32_t)PHYS_S(actor, 0x74) << 8;
+    int32_t brake_front = (int32_t)PHYS_S(actor, PHYS_BRAKE_FRONT);
+    int32_t brake_rear  = (int32_t)PHYS_S(actor, PHYS_BRAKE_REAR);
+    int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
     int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
     /* Drivetrain dispatch — verbatim port of UpdateAIVehicleDynamics @ 0x004051A0.
@@ -3060,7 +3098,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
     /* --- 8. Slip circle with sqrt [CONFIRMED @ 0x405518-0x405580] --- */
     {
-        int32_t tire_grip = (int32_t)PHYS_S(actor, 0x2C);
+        int32_t tire_grip = (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF);
         if (tire_grip == 0) tire_grip = sf; /* fallback */
 
         /* Front axle slip circle */
@@ -3393,12 +3431,12 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int result = 0;
 
     /* Car box extents (correct mapping — see header comment) */
-    int32_t half_w_a  = (int32_t)CDEF_S(a, 0x08);  /* half-width (positive) */
-    int32_t front_z_a = (int32_t)CDEF_S(a, 0x04);  /* front-Z extent (positive) */
-    int32_t rear_z_a  = (int32_t)CDEF_S(a, 0x14);  /* rear-Z extent (negative) */
-    int32_t half_w_b  = (int32_t)CDEF_S(b, 0x08);
-    int32_t front_z_b = (int32_t)CDEF_S(b, 0x04);
-    int32_t rear_z_b  = (int32_t)CDEF_S(b, 0x14);
+    int32_t half_w_a  = (int32_t)CDEF_S(a, CDEF_HALF_WIDTH);  /* half-width (positive) */
+    int32_t front_z_a = (int32_t)CDEF_S(a, CDEF_FRONT_Z_EXTENT);  /* front-Z extent (positive) */
+    int32_t rear_z_a  = (int32_t)CDEF_S(a, CDEF_REAR_Z_EXTENT);  /* rear-Z extent (negative) */
+    int32_t half_w_b  = (int32_t)CDEF_S(b, CDEF_HALF_WIDTH);
+    int32_t front_z_b = (int32_t)CDEF_S(b, CDEF_FRONT_Z_EXTENT);
+    int32_t rear_z_b  = (int32_t)CDEF_S(b, CDEF_REAR_Z_EXTENT);
 
     /* [LISTING ALIGNMENT 0x00408570]: the original's
      *   CollectVehicleCollisionContacts(int param_1, int param_2,
@@ -3826,9 +3864,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     /* [CONFIRMED @ 0x407ADB]: cardef+0x04 = front-Z extent (positive),
      *                         cardef+0x08 = half-width,
      *                         cardef+0x14 = rear-Z extent (stored negative). */
-    int32_t half_w_A   = (int32_t)CDEF_S(A, 0x08);
-    int32_t front_z_A  = (int32_t)CDEF_S(A, 0x04);
-    int32_t rear_z_A   = (int32_t)CDEF_S(A, 0x14);
+    int32_t half_w_A   = (int32_t)CDEF_S(A, CDEF_HALF_WIDTH);
+    int32_t front_z_A  = (int32_t)CDEF_S(A, CDEF_FRONT_Z_EXTENT);
+    int32_t rear_z_A   = (int32_t)CDEF_S(A, CDEF_REAR_Z_EXTENT);
 
     int32_t abs_cx_A   = cx_A < 0 ? -cx_A : cx_A;
     int32_t side_extent = half_w_A - abs_cx_A;
@@ -4200,8 +4238,8 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
-    int32_t radius_a = (int32_t)CDEF_S(a, 0x80);
-    int32_t radius_b = (int32_t)CDEF_S(b, 0x80);
+    int32_t radius_a = (int32_t)CDEF_S(a, CDEF_COLLISION_RADIUS);
+    int32_t radius_b = (int32_t)CDEF_S(b, CDEF_COLLISION_RADIUS);
     int32_t combined = ((radius_a + radius_b) * 3) >> 2;
 
     int32_t dx = (a->world_pos.x >> 8) - (b->world_pos.x >> 8);
@@ -4671,7 +4709,7 @@ void td5_physics_resolve_vehicle_contacts(void)
         }
 
         /* Compute AABB from position +/- bounding radius */
-        radius = (int32_t)CDEF_S(actor, 0x80);
+        radius = (int32_t)CDEF_S(actor, CDEF_COLLISION_RADIUS);
         g_actor_aabb[i][0] = (actor->world_pos.x >> 8) - radius;  /* xMin */
         g_actor_aabb[i][1] = (actor->world_pos.z >> 8) - radius;  /* zMin */
         g_actor_aabb[i][2] = (actor->world_pos.x >> 8) + radius;  /* xMax */
@@ -4806,7 +4844,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                                  (a->wheel_contact_bitmask >= 0x0F);
                 if (a_scripted) continue;
 
-                int32_t rad_a = (int32_t)CDEF_S(a, 0x80);
+                int32_t rad_a = (int32_t)CDEF_S(a, CDEF_COLLISION_RADIUS);
                 int32_t ax = a->world_pos.x >> 8;
                 int32_t az = a->world_pos.z >> 8;
 
@@ -4819,7 +4857,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                     if (b_scripted) continue;
 
                     /* Cheap live AABB reject before the OBB test. */
-                    int32_t rad_b = (int32_t)CDEF_S(b, 0x80);
+                    int32_t rad_b = (int32_t)CDEF_S(b, CDEF_COLLISION_RADIUS);
                     int32_t bx = b->world_pos.x >> 8;
                     int32_t bz = b->world_pos.z >> 8;
                     int32_t r  = rad_a + rad_b;
@@ -4877,7 +4915,7 @@ void td5_physics_resolve_vehicle_contacts(void)
     if (g_td5.ini.traffic_player_collide && total > g_traffic_slot_base) {
         TD5_Actor *player = (TD5_Actor *)g_actor_table_base;   /* slot 0 */
         if (player->car_definition_ptr) {
-            int32_t prad = (int32_t)CDEF_S(player, 0x80);
+            int32_t prad = (int32_t)CDEF_S(player, CDEF_COLLISION_RADIUS);
             int tmax = (total < TD5_MAX_TOTAL_ACTORS) ? total : TD5_MAX_TOTAL_ACTORS;
             for (int t = g_traffic_slot_base; t < tmax; ++t) {
                 TD5_Actor *tr =
@@ -4887,7 +4925,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                 if (!tr->car_definition_ptr) continue;
                 dxp = (player->world_pos.x >> 8) - (tr->world_pos.x >> 8);
                 dzp = (player->world_pos.z >> 8) - (tr->world_pos.z >> 8);
-                rr  = prad + (int32_t)CDEF_S(tr, 0x80);
+                rr  = prad + (int32_t)CDEF_S(tr, CDEF_COLLISION_RADIUS);
                 d2  = (int64_t)dxp * dxp + (int64_t)dzp * dzp;
                 if (d2 > (int64_t)rr * rr) continue;   /* not physically overlapping */
                 /* Physically overlapping the player. The bucket broadphase
@@ -4988,11 +5026,11 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
 
     /* cardef constants -- see function header.
      * Names chosen to match the original's semantic use. */
-    const int32_t k_pos_damp   = (int32_t)PHYS_S(actor, 0x5E);  /* position-proportional damping (restoring) */
-    const int32_t k_vel_damp   = (int32_t)PHYS_S(actor, 0x60);  /* velocity-proportional damping */
-    const int32_t k_spring     = (int32_t)PHYS_S(actor, 0x62);  /* spring coefficient (multiplies lever proj) */
-    const int32_t k_travel_lim = (int32_t)PHYS_S(actor, 0x64);  /* per-wheel +/- travel clamp */
-    const int32_t k_load_scale = (int32_t)PHYS_S(actor, 0x66);  /* multiplier on wheel_load_accum */
+    const int32_t k_pos_damp   = (int32_t)PHYS_S(actor, PHYS_SUSP_POS_DAMP);  /* position-proportional damping (restoring) */
+    const int32_t k_vel_damp   = (int32_t)PHYS_S(actor, PHYS_SUSP_VEL_DAMP);  /* velocity-proportional damping */
+    const int32_t k_spring     = (int32_t)PHYS_S(actor, PHYS_SUSP_SPRING);  /* spring coefficient (multiplies lever proj) */
+    const int32_t k_travel_lim = (int32_t)PHYS_S(actor, PHYS_SUSP_TRAVEL_LIM);  /* per-wheel +/- travel clamp */
+    const int32_t k_load_scale = (int32_t)PHYS_S(actor, PHYS_SUSP_LOAD_SCALE);  /* multiplier on wheel_load_accum */
 
     /* world_pos >> 8 with the original's round-to-zero bias (0x00403A7D-A85
      * and the symmetric one at 0x00403A9C-AA0). Plain SAR rounds toward -∞
@@ -5021,8 +5059,8 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
             "redline=%d | throttle(+0x33E)=%d rpm=%d gear=%d",
             (int)PHYS_S(actor, 16), (int)PHYS_S(actor, 18),
             (int)PHYS_S(actor, 20), (int)PHYS_S(actor, 22),
-            (int)PHYS_S(actor, 0x68), (int)PHYS_S(actor, 0x32),
-            (int)PHYS_S(actor, 0x72),
+            (int)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT), (int)PHYS_S(actor, 0x32),
+            (int)PHYS_S(actor, PHYS_REDLINE_RPM),
             (int)actor->encounter_steering_cmd,
             actor->engine_speed_accum, (int)actor->current_gear);
     }
@@ -6505,7 +6543,7 @@ static void integrate_traffic_pose(TD5_Actor *actor)
          * 2026-05-26). Use the magnitude so the lift direction matches
          * racers regardless of the sign that compute_envelope chose. */
         if (actor->car_definition_ptr) {
-            int32_t height_offset = (int32_t)CDEF_S(actor, 0x86) << 8;
+            int32_t height_offset = (int32_t)CDEF_S(actor, CDEF_HEIGHT_OFFSET) << 8;
             if (height_offset > 0) height_offset = -height_offset;
             ground_y -= height_offset;
         }
@@ -7169,7 +7207,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
         int contact_count = 0;
         uint8_t gnd_mask = actor->wheel_contact_bitmask;
 
-        int32_t href = (int32_t)CDEF_S(actor, 0x82);
+        int32_t href = (int32_t)CDEF_S(actor, CDEF_SUSP_REF_HEIGHT);
         int32_t href_x181 = href * 0xB5;
         int32_t susp_offset = (href_x181 + ((href_x181 >> 31) & 0xFF)) >> 8;
 
@@ -7973,7 +8011,7 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * reads the raw cardef wheel Y. X,Z stay static cardef (= the init
          * wheel_display_angles[0]/[2], unchanged). */
         int32_t wx = actor->wheel_display_angles[i][0];
-        int32_t wy = (int32_t)CDEF_S(actor, 0x42 + i * 8);
+        int32_t wy = (int32_t)CDEF_S(actor, CDEF_WHEEL_Y_BASE + i * 8);
         int32_t wz = actor->wheel_display_angles[i][2];
 
         /* Body-space Y of the wheel = cwy − (susp_pos>>8) − (href*0xB5>>8).
@@ -7995,7 +8033,7 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * [CONFIRMED @ 0x00403720 by research agent — ride-height refactor] */
         int32_t sp = actor->wheel_suspension_pos[i];
         int32_t sp_div = (sp + (int32_t)((uint32_t)(sp >> 31) & 0xFFu)) >> 8;
-        int32_t href = (int32_t)CDEF_S(actor, 0x82);
+        int32_t href = (int32_t)CDEF_S(actor, CDEF_SUSP_REF_HEIGHT);
         int32_t href_x181 = href * 0xB5;
         int32_t href_preload =
             (href_x181 + (int32_t)((uint32_t)(href_x181 >> 31) & 0xFFu)) >> 8;
@@ -9211,7 +9249,7 @@ void td5_physics_state0f_damping(TD5_Actor *actor)
 static void update_engine_speed_smoothed(TD5_Actor *actor)
 {
     /* MOVSX ECX, WORD [tuning+0x72]  [@ 0x42ED5B] */
-    int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+    int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
 
     int32_t target;
     /* TEST AL,AL / JNZ + TEST DX,DX / JL  [@ 0x42ED65, 0x42ED70] */
@@ -9383,7 +9421,7 @@ void td5_physics_update_engine_speed(TD5_Actor *actor)
 
     /* MOVSX EDX,WORD [param_2 + gear*2 + 0x2e]  [@ 0x42EE23] — gear ratio.
      * param_2 is the caller-cached tuning_data_ptr (== actor->tuning_data_ptr). */
-    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2e + gear * 2);
+    int32_t gear_ratio = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + gear * 2);
 
     /* MOV ECX,[ESI+0x310]  [@ 0x42EE28] */
     int32_t rpm = actor->engine_speed_accum;
@@ -9422,7 +9460,7 @@ void td5_physics_update_engine_speed(TD5_Actor *actor)
     }
 
     /* Clamp/store  [@ 0x42EE79-0x42EE90] — upper clamp at redline, no floor. */
-    int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+    int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
     if (rpm > redline) rpm = redline;
 
     actor->engine_speed_accum = rpm;
@@ -9513,7 +9551,7 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
     /* Listing 0x0042EF4E: MOV ESI, [ESP+0x14]  (param_2 == phys table). */
 
     /* Listing 0x0042EF52: MOVSX EBX, [ESI + EAX*2 + 0x3E]  upshift threshold. */
-    int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + (int32_t)gear_cached * 2);
+    int32_t up_thresh = (int32_t)PHYS_S(actor, PHYS_GEAR_UPSHIFT_BASE + (int32_t)gear_cached * 2);
 
     /* Listing 0x0042EF57-70:
      *   CMP EDI,EBX     ; JLE 0x42EFF1  (rpm <= up_thresh → downshift branch)
@@ -9537,7 +9575,7 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
          *
          * Listing 0x0042EF8F-A4: CDQ ; AND EDX,0xFF ; ADD EAX,EDX ; SAR EAX,8
          *   → first sar8_rz (truncated divide by 256). */
-        int32_t k = (int32_t)PHYS_S(actor, 0x68) * throttle * 0x1A;
+        int32_t k = (int32_t)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT) * throttle * 0x1A;
         k = sar8_rz_42EF10(k);
 
         /* Listing 0x0042EFA7-AD: AND EBX,0xFF ; IMUL EAX,[EBX*4 + 0x467394]
@@ -9570,7 +9608,7 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
 
     /* Listing 0x0042EFF1: MOVSX EDX,[ESI + EAX*2 + 0x4E]  dn_thresh
      *                        (still indexed by CACHED gear, not refreshed). */
-    int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + (int32_t)gear_cached * 2);
+    int32_t dn_thresh = (int32_t)PHYS_S(actor, PHYS_GEAR_DOWNSHIFT_BASE + (int32_t)gear_cached * 2);
 
     /* Listing 0x0042EFF6-FF:
      *   CMP EDI,EDX  ; JGE 0x42F005   (rpm >= dn_thresh → skip)
@@ -9605,7 +9643,7 @@ void td5_physics_auto_gear_select_no_kick(TD5_Actor *actor)
         actor->current_gear = TD5_GEAR_FIRST;
     }
 
-    int32_t up_thresh = (int32_t)PHYS_S(actor, 0x3E + gear_cached * 2);
+    int32_t up_thresh = (int32_t)PHYS_S(actor, PHYS_GEAR_UPSHIFT_BASE + gear_cached * 2);
 
     if (rpm > up_thresh
         && gear_cached < 8
@@ -9616,7 +9654,7 @@ void td5_physics_auto_gear_select_no_kick(TD5_Actor *actor)
         return;
     }
 
-    int32_t dn_thresh = (int32_t)PHYS_S(actor, 0x4E + gear_cached * 2);
+    int32_t dn_thresh = (int32_t)PHYS_S(actor, PHYS_GEAR_DOWNSHIFT_BASE + gear_cached * 2);
     if (rpm < dn_thresh && gear_cached > TD5_GEAR_FIRST) {
         actor->current_gear = (uint8_t)(actor->current_gear - 1);
     }
@@ -9685,7 +9723,7 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
      * NO bounds clamp (original reads LUT[index] and LUT[index+1] freely). */
     int32_t index = sar9_rz_42F030(rpm);
 
-    int32_t torque_mult = (int32_t)PHYS_S(actor, 0x68);
+    int32_t torque_mult = (int32_t)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT);
 
     /* t0 = sar8_rz(LUT[index] * mult) — listing 0x0042F060-72.
      * t1 = sar8_rz(LUT[index+1] * mult) — listing 0x0042F077-8F. */
@@ -9711,13 +9749,13 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 
     /* * gear_ratio[gear] — original at 0x0042F0D2-EF uses sar8_rz on the
      * EBX-byte-masked gear index. PHYS_S already does 16-bit signed load. */
-    int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + (int32_t)(uint8_t)gear_u8 * 2);
+    int32_t gear_ratio = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + (int32_t)(uint8_t)gear_u8 * 2);
     torque = sar8_rz_42F030(torque * gear_ratio);
 
     /* Redline cutoff: original computes the full pipeline then CMPs EBP (raw
      * engine_speed) against ECX (redline-50). JLE keep result; else XOR=0.
      * The compare is signed (JLE), so rpm > redline-50 → return 0. */
-    int32_t redline = (int32_t)PHYS_S(actor, 0x72);
+    int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
     if (rpm > redline - 50) {
         return 0;
     }
@@ -9800,7 +9838,7 @@ void td5_physics_apply_steering_torque(TD5_Actor *actor)
     };
 
     int32_t throttle    = (int32_t)actor->encounter_steering_cmd;  /* +0x33E s16 */
-    int32_t torque_mult = (int32_t)PHYS_S(actor, 0x68);            /* tuning +0x68 s16 */
+    int32_t torque_mult = (int32_t)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT);            /* tuning +0x68 s16 */
 
     int32_t k = throttle * torque_mult * 0x1A;
     k = (k + ((k >> 31) & 0xff)) >> 8;
@@ -9919,7 +9957,7 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
      *   EAX = target  (after target-build joins)  */
     int32_t engine  = actor->engine_speed_accum;
     int32_t gear    = (int32_t)actor->current_gear;          /* zero-extended byte */
-    int32_t redline = (int32_t)PHYS_S(actor, 0x72);          /* MOVSX from [+0x72] */
+    int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);          /* MOVSX from [+0x72] */
     int32_t step    = 200;                                    /* MOV EBP,0xC8 */
 
     /* --- Encode pseudo-speed (iVar5 / ESI) --- */
@@ -9930,7 +9968,7 @@ static int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in)
          * still runs through the cold branch below. */
         iVar5 = 0;
     } else {
-        int32_t gear_ratio = (int32_t)PHYS_S(actor, 0x2E + gear * 2);
+        int32_t gear_ratio = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + gear * 2);
 
         /* LEA ESI,[ECX-400] ; SHL ESI,12  →  ESI = (engine - 400) * 0x1000.
          * Then 0xB60B60B7 IMUL idiom = ESI / 45 with truncate-toward-zero
@@ -10187,31 +10225,31 @@ void td5_physics_init_vehicle_runtime(void)
             if (phys) {
                 if (g_difficulty_hard) {
                     /* 0x68: drive_torque_mult *= 0x28A/256 (2.54x) */
-                    int32_t tm = (int32_t)PHYS_S(actor, 0x68);
-                    write_i16((uint8_t *)phys, 0x68, (int16_t)((tm * 0x28A) >> 8));
+                    int32_t tm = (int32_t)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT);
+                    write_i16((uint8_t *)phys, PHYS_DRIVE_TORQUE_MULT, (int16_t)((tm * 0x28A) >> 8));
                     /* 0x2C: tire_grip_coeff *= 0x17C/256 (1.48x) */
-                    int32_t dc = (int32_t)PHYS_S(actor, 0x2C);
-                    write_i16((uint8_t *)phys, 0x2C, (int16_t)((dc * 0x17C) >> 8));
+                    int32_t dc = (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF);
+                    write_i16((uint8_t *)phys, PHYS_TIRE_GRIP_COEFF, (int16_t)((dc * 0x17C) >> 8));
                     /* 0x6E: brake_force *= 0x1C2/256 (1.76x) */
-                    int32_t bf = (int32_t)PHYS_S(actor, 0x6E);
-                    write_i16((uint8_t *)phys, 0x6E, (int16_t)((bf * 0x1C2) >> 8));
+                    int32_t bf = (int32_t)PHYS_S(actor, PHYS_BRAKE_FRONT);
+                    write_i16((uint8_t *)phys, PHYS_BRAKE_FRONT, (int16_t)((bf * 0x1C2) >> 8));
                     /* 0x70: engine_brake *= 400/256 (1.56x) */
-                    int32_t eb = (int32_t)PHYS_S(actor, 0x70);
-                    write_i16((uint8_t *)phys, 0x70, (int16_t)((eb * 400) >> 8));
+                    int32_t eb = (int32_t)PHYS_S(actor, PHYS_BRAKE_REAR);
+                    write_i16((uint8_t *)phys, PHYS_BRAKE_REAR, (int16_t)((eb * 400) >> 8));
                     /* 0x78: speed_scale <<= 2 */
-                    int32_t ss = (int32_t)PHYS_S(actor, 0x78);
-                    write_i16((uint8_t *)phys, 0x78, (int16_t)(ss << 2));
+                    int32_t ss = (int32_t)PHYS_S(actor, PHYS_SPEED_SCALE);
+                    write_i16((uint8_t *)phys, PHYS_SPEED_SCALE, (int16_t)(ss << 2));
                 } else if (!g_difficulty_easy) {
                     /* Normal difficulty */
                     /* 0x68: drive_torque_mult *= 0x168/256 (0.5625x) */
-                    int32_t tm = (int32_t)PHYS_S(actor, 0x68);
-                    write_i16((uint8_t *)phys, 0x68, (int16_t)((tm * 0x168) >> 8));
+                    int32_t tm = (int32_t)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT);
+                    write_i16((uint8_t *)phys, PHYS_DRIVE_TORQUE_MULT, (int16_t)((tm * 0x168) >> 8));
                     /* 0x2C: tire_grip_coeff *= 300/256 (1.17x) */
-                    int32_t dc = (int32_t)PHYS_S(actor, 0x2C);
-                    write_i16((uint8_t *)phys, 0x2C, (int16_t)((dc * 300) >> 8));
+                    int32_t dc = (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF);
+                    write_i16((uint8_t *)phys, PHYS_TIRE_GRIP_COEFF, (int16_t)((dc * 300) >> 8));
                     /* 0x78: speed_scale <<= 1 */
-                    int32_t ss = (int32_t)PHYS_S(actor, 0x78);
-                    write_i16((uint8_t *)phys, 0x78, (int16_t)(ss << 1));
+                    int32_t ss = (int32_t)PHYS_S(actor, PHYS_SPEED_SCALE);
+                    write_i16((uint8_t *)phys, PHYS_SPEED_SCALE, (int16_t)(ss << 1));
                 }
                 /* Easy: no scaling (raw carparam values used as-is) */
             }
@@ -10256,36 +10294,36 @@ void td5_physics_init_vehicle_runtime(void)
                             int32_t mul = entry * race_result;
                             prod = ((mul + ((mul >> 31) & 0x1FF)) >> 9) * weight / denom;
                         }
-                        write_i16((uint8_t *)phys, 0x32 + i * 2,
+                        write_i16((uint8_t *)phys, PHYS_GEAR_RATIO_BASE + (i + 2) * 2,
                                   (int16_t)(entry + prod));
                     }
                 }
 
                 /* (3a) top_speed_limit *= (race_bonus + 0x800) / 2048 */
                 {
-                    int32_t top = (int32_t)PHYS_S(actor, 0x74);
+                    int32_t top = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
                     int32_t n1  = (race_bonus + 0x800) * top;
-                    write_i16((uint8_t *)phys, 0x74,
+                    write_i16((uint8_t *)phys, PHYS_TOP_SPEED,
                               (int16_t)((n1 + ((n1 >> 31) & 0x7FF)) >> 11));
                 }
                 /* (3b) gear_ratio_table[gears-1] and [gears-2] top-gear rescale */
                 {
                     int32_t denom1 = race_bonus + 0x800;
                     if (denom1 != 0) {
-                        int32_t top = (int32_t)PHYS_S(actor, 0x2C + gears * 2);
+                        int32_t top = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + (gears - 1) * 2);
                         write_i16((uint8_t *)phys, 0x2C + gears * 2,
                                   (int16_t)((top << 11) / denom1));
                     }
                     int32_t denom2 = race_bonus + 0x1000;
                     if (denom2 != 0) {
-                        int32_t top2 = (int32_t)PHYS_S(actor, 0x2A + gears * 2);
+                        int32_t top2 = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + (gears - 2) * 2);
                         write_i16((uint8_t *)phys, 0x2A + gears * 2,
                                   (int16_t)((top2 << 12) / denom2));
                     }
                 }
                 /* (3c) damping_low_speed *= (0x200 - race_bonus) / 512 */
                 {
-                    int32_t dlo = (int32_t)PHYS_S(actor, 0x6A);
+                    int32_t dlo = (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_TURN);
                     int32_t n2  = (0x200 - race_bonus) * dlo;
                     write_i16((uint8_t *)phys, 0x6A,
                               (int16_t)((n2 + ((n2 >> 31) & 0x1FF)) >> 9));
@@ -10293,7 +10331,7 @@ void td5_physics_init_vehicle_runtime(void)
 
                 /* (4) drag_coefficient adjustment via race_points */
                 {
-                    int32_t drag = (int32_t)PHYS_S(actor, 0x2C);
+                    int32_t drag = (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF);
                     int32_t adj;
                     if (race_points < 0) {
                         /* Signed /0x300 with trunc-to-zero adjustment idiom */
@@ -10314,7 +10352,7 @@ void td5_physics_init_vehicle_runtime(void)
                                 pacing + ((pm + ((pm >> 31) & 0x1FF)) >> 9);
                         }
                     }
-                    write_i16((uint8_t *)phys, 0x2C, (int16_t)(drag + adj));
+                    write_i16((uint8_t *)phys, PHYS_TIRE_GRIP_COEFF, (int16_t)(drag + adj));
                 }
             }
         }
