@@ -2726,6 +2726,17 @@ int td5_game_init_race_session(void) {
         g_actorSlotForView[vp] = slot;
         g_actor_slot_map[vp]   = slot;
     }
+    /* [S31 net] One local viewport that follows THIS machine's car: the slot
+     * model keeps every net player as a racer slot, but each machine renders
+     * a single full-screen view pinned to its own net slot (the client's car
+     * is slot 1+, which the identity map above would never show). */
+    if (g_td5.network_active) {
+        int local = td5_net_local_slot();
+        if (local < 0 || local >= g_td5.total_actor_count) local = 0;
+        g_actorSlotForView[0] = local;
+        g_actor_slot_map[0]   = local;
+        TD5_LOG_I(LOG_TAG, "InitRace step 17: net view follows local slot %d", local);
+    }
     TD5_LOG_I(LOG_TAG, "InitRace step 17/19: render state and viewport layout initialized views=%d",
               g_td5.viewport_count);
     CK("ck17_after_viewport");

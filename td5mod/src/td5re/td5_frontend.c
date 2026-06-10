@@ -2677,10 +2677,13 @@ void frontend_init_race_schedule(void) {
      * Inert outside Quick Race. Clamping + split-grid resolution live in
      * frontend_commit_pane_layout (shared with the AutoRace SpectateScreens
      * override so the two paths cannot drift). */
-    frontend_commit_pane_layout(eff_humans,
+    /* [S31 net] A network race renders ONE full-screen view per machine
+     * (each pinned to that machine's own car in InitRace step 17) — the
+     * net players are racer SLOTS, not local split panes. */
+    frontend_commit_pane_layout(s_launching_net_race ? 1 : eff_humans,
                                 (s_current_screen == TD5_SCREEN_QUICK_RACE)
                                     ? s_num_spectate_screens : 0);
-    int eff_panes = eff_humans + g_td5.num_spectate_screens;
+    int eff_panes = (s_launching_net_race ? 1 : eff_humans) + g_td5.num_spectate_screens;
     g_td5.network_active    = s_launching_net_race;   /* S10: net race engages lockstep */
     s_launching_net_race    = 0;                      /* one-shot intent */
 
