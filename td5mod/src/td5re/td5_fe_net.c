@@ -89,6 +89,21 @@ static void frontend_net_send(int type, const void *data, int size) {
  * Returns the DXPTYPE message type (0-12) or -1 if no message available.
  * Copies payload into buf (up to max_size bytes).
  */
+/* S31: cycle the OPTIONS-modal kick target through {off} + the joined
+ * remote slots. dir = +1 / -1. */
+static int lobby_cycle_kick(int cur, int dir) {
+    int cand[TD5_NET_MAX_PLAYERS + 1];
+    int n = 0, i, idx = 0;
+    cand[n++] = -1;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        if (td5_net_is_slot_active(i) && i != td5_net_local_slot())
+            cand[n++] = i;
+    for (i = 0; i < n; i++)
+        if (cand[i] == cur) { idx = i; break; }
+    idx = (idx + dir + n) % n;
+    return cand[idx];
+}
+
 static int frontend_net_receive(void *buf, int max_size) {
     TD5_NetMsgType type;
     void *data = NULL;
@@ -836,6 +851,7 @@ void Screen_NetworkLobby(void) {
 
         /* Kick check: if kicked flag set, destroy session, go to SessionLocked */
         if (s_kicked_flag) {
+            s_kicked_flag = 0;   /* consume -- only frontend boot cleared it before */
             s_race_active_flag = 0;
             s_network_active = 0;
             frontend_net_destroy();
@@ -907,6 +923,7 @@ void Screen_NetworkLobby(void) {
             if (lv && lv[0] == '2' && !s_dev_modal_once && !s_lobby_modal &&
                 frontend_net_is_host()) {
                 s_dev_modal_once = 1;
+                s_lobby_kick_sel = -1;
                 s_lobby_max_players = td5_net_get_max_players();
                 if (s_lobby_max_players < 2 || s_lobby_max_players > 6) s_lobby_max_players = 6;
                 s_lobby_password[0] = '\0';
@@ -934,6 +951,18 @@ void Screen_NetworkLobby(void) {
             frontend_handle_text_input_key();
             if (frontend_text_input_confirmed()) {
                 td5_net_set_session_limits(s_lobby_max_players, s_lobby_password);
+                /* S31: apply the kick selection (if any). DXPDATA opcode 0x12,
+                 * payload[1] = target slot; only the target reacts. */
+                if (s_lobby_kick_sel >= 0 &&
+                    td5_net_is_slot_active(s_lobby_kick_sel) &&
+                    s_lobby_kick_sel != td5_net_local_slot()) {
+                    uint8_t kick_msg[8] = {0x12, 0, 0, 0, 0, 0, 0, 0};
+                    kick_msg[1] = (uint8_t)s_lobby_kick_sel;
+                    frontend_net_send(1, kick_msg, 8);
+                    TD5_LOG_I(LOG_TAG, "Lobby options: kick sent for slot %d",
+                              s_lobby_kick_sel);
+                }
+                s_lobby_kick_sel = -1;
                 TD5_LOG_I(LOG_TAG, "Lobby options: max=%d password=%s",
                           s_lobby_max_players, s_lobby_password[0] ? "set" : "none");
                 s_lobby_modal = 0;
@@ -945,8 +974,15 @@ void Screen_NetworkLobby(void) {
             } else if (s_arrow_input & 2) {          /* RIGHT */
                 if (s_lobby_max_players < 6) s_lobby_max_players++;
                 frontend_play_sfx(2);
+            } else if (s_arrow_input & 4) {          /* UP: previous kick target */
+                s_lobby_kick_sel = lobby_cycle_kick(s_lobby_kick_sel, -1);
+                frontend_play_sfx(2);
+            } else if (s_arrow_input & 8) {          /* DOWN: next kick target */
+                s_lobby_kick_sel = lobby_cycle_kick(s_lobby_kick_sel, +1);
+                frontend_play_sfx(2);
             } else if (td5_plat_input_key_pressed(0x01)) {   /* ESC = cancel */
                 s_lobby_modal = 0;
+                s_lobby_kick_sel = -1;
                 s_text_input_state = 1;
             }
             break;
@@ -970,6 +1006,31 @@ void Screen_NetworkLobby(void) {
             int slot;
             for (slot = 0; slot < 6; slot++)
                 s_participant_flags[slot] = td5_net_is_slot_active(slot) ? 1 : 0;
+        }
+
+        /* S31: drain queued net messages. The only lobby-relevant opcode is
+         * LOBBY_KICK (DXPDATA payload[0]=0x12, payload[1]=target slot). */
+        {
+            uint8_t nbuf[64];
+            int ntype;
+            memset(nbuf, 0, sizeof(nbuf));
+            while ((ntype = frontend_net_receive(nbuf, sizeof(nbuf))) >= 0) {
+                if (ntype == (int)TD5_DXPDATA && nbuf[0] == 0x12 &&
+                    !frontend_net_is_host() &&
+                    (int)nbuf[1] == td5_net_local_slot()) {
+                    TD5_LOG_I(LOG_TAG, "NetworkLobby: kicked by host");
+                    s_kicked_flag = 1;
+                }
+                memset(nbuf, 0, sizeof(nbuf));
+            }
+        }
+        if (s_kicked_flag) {
+            s_kicked_flag = 0;
+            s_race_active_flag = 0;
+            s_network_active = 0;
+            frontend_net_destroy();
+            td5_frontend_set_screen(TD5_SCREEN_SESSION_LOCKED);
+            return;
         }
 
 #ifndef TD5RE_RELEASE
@@ -1064,6 +1125,7 @@ void Screen_NetworkLobby(void) {
                     s_lobby_password[0] = '\0';
                     frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
                     frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
+                    s_lobby_kick_sel = -1;
                     s_lobby_modal_armed = 0;   /* arm after the Enter is released */
                     s_lobby_modal = 1;
                     frontend_play_sfx(3);

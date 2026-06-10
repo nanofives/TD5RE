@@ -365,6 +365,7 @@ int  s_network_active;           /* g_networkSessionActive / DAT_004962bc */
 int  s_nickname_from_mpopts;     /* nickname screen entered from Multiplayer Options */
 /* --- S10b: lobby options modal (host) + join-password prompt --- */
 int  s_lobby_modal;              /* 0=closed, 1=OPTIONS modal open */
+int  s_lobby_kick_sel = -1;      /* S31 OPTIONS modal kick target: -1=off, else remote slot */
 int  s_lobby_max_players = 6;    /* modal: max players (2..6) */
 char s_lobby_password[32];       /* modal: host join password (also reused for join prompt) */
 int  s_net_session_sel;          /* SESSION_PICKER cursor: 0=host, 1..N=join */
@@ -7871,10 +7872,22 @@ static void frontend_render_lobby_modal(float sx, float sy) {
     mask[n] = '\0';
     snprintf(buf, sizeof(buf), "PASSWORD: %s_", mask);
     fe_draw_text_centered(320.0f * sx, 226.0f * sy, buf, 0xFFFFFFFF, sx, sy);
-    fe_draw_small_text(180.0f * sx, 286.0f * sy,
-                       "<- -> set MAX   -   type PASSWORD", 0xFFB0B0B0, sx, sy);
+    /* S31: kick row -- UP/DOWN cycles through the joined remote players. */
+    if (s_lobby_kick_sel >= 0) {
+        const char *kn = td5_net_get_slot_name(s_lobby_kick_sel);
+        if (!kn[0])
+            snprintf(buf, sizeof(buf), "KICK:  < PLAYER %d >", s_lobby_kick_sel + 1);
+        else
+            snprintf(buf, sizeof(buf), "KICK:  < %s >", kn);
+    } else {
+        snprintf(buf, sizeof(buf), "KICK:  < OFF >");
+    }
+    fe_draw_text_centered(320.0f * sx, 256.0f * sy, buf,
+                          (s_lobby_kick_sel >= 0) ? 0xFFFF6060 : 0xFFFFFFFF, sx, sy);
+    fe_draw_small_text(150.0f * sx, 286.0f * sy,
+                       "L/R MAX   UP/DN KICK   type PASSWORD", 0xFFB0B0B0, sx, sy);
     fe_draw_small_text(180.0f * sx, 306.0f * sy,
-                       "ENTER = done    ESC = cancel", 0xFFB0B0B0, sx, sy);
+                       "ENTER = apply    ESC = cancel", 0xFFB0B0B0, sx, sy);
 }
 
 void td5_frontend_render_ui_rects(void) {

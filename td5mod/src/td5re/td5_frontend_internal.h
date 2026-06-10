@@ -162,6 +162,7 @@ extern int  s_launching_net_race;
 extern int  s_lobby_action;
 extern int  s_lobby_max_players;
 extern int  s_lobby_modal;
+extern int  s_lobby_kick_sel;
 extern int  s_mp_phase;
 extern int  s_mp_player_accent[TD5_MAX_HUMAN_PLAYERS];
 extern int  s_net_cfg_game_port;
