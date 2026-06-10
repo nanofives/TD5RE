@@ -567,17 +567,15 @@ static HRESULT __stdcall Dev3_DrawPrimitive(WrapperDevice *self,
     DWORD prim_type, DWORD fvf, void *verts, DWORD vert_count, DWORD flags)
 {
     ID3D11DeviceContext *ctx = g_backend.context;
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    UINT stride, data_size;
+    UINT stride;
     UINT offset = 0;
-    HRESULT hr;
+    UINT base_vertex = 0;
     (void)self; (void)fvf; (void)flags;
 
     if (!ctx || !verts || vert_count == 0)
         return DDERR_GENERIC;
 
     stride = TD5_VERTEX_STRIDE;
-    data_size = vert_count * stride;
 
     /* Scale pre-transformed vertex X/Y from game space to native RT space */
     if (g_backend.vertex_scale_x != 1.0f || g_backend.vertex_scale_y != 1.0f) {
@@ -591,12 +589,10 @@ static HRESULT __stdcall Dev3_DrawPrimitive(WrapperDevice *self,
         }
     }
 
-    /* Upload vertices to dynamic VB */
-    hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource*)g_backend.dynamic_vb,
-        0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    if (FAILED(hr)) return DDERR_GENERIC;
-    memcpy(mapped.pData, verts, data_size);
-    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource*)g_backend.dynamic_vb, 0);
+    /* [2026-06-08 streaming-ring] Append to the dynamic ring (DISCARD only on
+     * wrap, not per draw) and draw from base_vertex. */
+    if (!Backend_StreamUpload(verts, vert_count, stride, NULL, 0, &base_vertex, NULL))
+        return DDERR_GENERIC;
 
     s_frame_draws++;
 
@@ -624,7 +620,7 @@ static HRESULT __stdcall Dev3_DrawPrimitive(WrapperDevice *self,
         }
     }
 
-    ID3D11DeviceContext_Draw(ctx, vert_count, 0);
+    ID3D11DeviceContext_Draw(ctx, vert_count, base_vertex);
     return DD_OK;
 }
 
@@ -634,10 +630,9 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
     WORD *indices, DWORD index_count, DWORD flags)
 {
     ID3D11DeviceContext *ctx = g_backend.context;
-    D3D11_MAPPED_SUBRESOURCE mapped;
     UINT stride = TD5_VERTEX_STRIDE;
     UINT offset = 0;
-    HRESULT hr;
+    UINT base_vertex = 0, start_index = 0;
     (void)self; (void)fvf; (void)flags;
 
     if (!ctx || !verts || !indices || vert_count == 0 || index_count == 0)
@@ -655,23 +650,16 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
         }
     }
 
-    /* Upload vertices */
-    hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource*)g_backend.dynamic_vb,
-        0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    if (FAILED(hr)) return DDERR_GENERIC;
-    memcpy(mapped.pData, verts, vert_count * stride);
-    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource*)g_backend.dynamic_vb, 0);
+    /* [2026-06-08 streaming-ring] Append verts + indices to the dynamic ring
+     * (DISCARD only on wrap, not per draw); base_vertex/start_index address the
+     * appended slice. */
+    if (!Backend_StreamUpload(verts, vert_count, stride, indices, index_count,
+                              &base_vertex, &start_index))
+        return DDERR_GENERIC;
 
     s_frame_idx_draws++;
     if (prim_type < 8) s_frame_prim_types[prim_type]++;
     if (prim_type == D3DPT_TRIANGLEFAN) s_frame_fan_verts += vert_count;
-
-    /* Upload indices */
-    hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource*)g_backend.dynamic_ib,
-        0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    if (FAILED(hr)) return DDERR_GENERIC;
-    memcpy(mapped.pData, indices, index_count * sizeof(WORD));
-    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource*)g_backend.dynamic_ib, 0);
 
     /* Bind buffers */
     ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb, &stride, &offset);
@@ -703,7 +691,7 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
             g_backend.current_srv, !g_backend.current_tex_has_alpha);
     }
 
-    ID3D11DeviceContext_DrawIndexed(ctx, index_count, 0, 0);
+    ID3D11DeviceContext_DrawIndexed(ctx, index_count, start_index, (INT)base_vertex);
     return DD_OK;
 }
 

@@ -178,6 +178,14 @@ typedef struct TD5_GlobalState {
     int  split_grid_cols;
     int  split_grid_rows;
     int  split_missing_content[2];
+    /* [PORT ENHANCEMENT 2026-06-08] AI spectator split-screens (dev/profiling).
+     * Number of AI-driven cars (slots 1..N) each rendered in its own extra
+     * viewport pane, on top of the human pane(s). viewport_count becomes
+     * num_human_players + num_spectate_screens. Input still goes only to the
+     * humans; the spectator panes just follow AI cars. Set by the Quick Race
+     * "AI Screens" selector (interactive) or the [Game] SpectateScreens knob
+     * (AutoRace harness). 0 = off = legacy. Dev-only (release clamps to 0). */
+    int  num_spectate_screens;
 
     /* Timing */
     float sim_tick_budget;
@@ -376,6 +384,7 @@ typedef struct TD5_GlobalState {
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
         int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
         int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */
+        int  spectate_screens;    /* AutoRace AI-spectator split-screen count (dev profiling); 0 = off. See g_td5.num_spectate_screens */
         /* TD6 track migration (Phase 1): when > 0, td5_asset_level_number()
          * returns this level number directly (bypassing the schedule->pool->zip
          * chain), so the loader resolves re/assets/levels/level<NNN>/ loose files

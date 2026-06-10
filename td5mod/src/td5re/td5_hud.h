@@ -183,6 +183,11 @@ void td5_hud_draw_pause_overlay(void);
 /* [S27] Per-viewport "controller disconnected — reconnect" modal. No-op unless a
  * required player's controller is currently missing. */
 void td5_hud_draw_disconnect_overlays(void);
+/* [PORT 2026-06-08] Per-viewport player identity: coloured frame + name plate
+ * under the car. Set by the multiplayer frontend at race start. */
+void td5_hud_draw_player_id_overlays(void);
+void td5_hud_set_player_identity(int slot, const char *name, uint32_t rgb);
+void td5_hud_clear_player_identities(void);
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac);
 void td5_hud_draw_race_fade(float progress, int direction);
 

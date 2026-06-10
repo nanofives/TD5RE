@@ -38,6 +38,7 @@
 #include "td5_render.h"
 #include "td5_camera.h"
 #include "td5_platform.h"
+#include "td5_profile.h"
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_asset.h"
@@ -1496,6 +1497,25 @@ void td5_render_end_scene(void)
         s_debug_clip_log_count++;
     }
 
+    /* [2026-06-08 split-screen diagnostic] Per-frame draw-submission counters,
+     * emitted at WARN once/~second when the profiler is on (so a split-screen
+     * pane sweep captures them in engine.log). Lets us tell a draw-call /
+     * triangle COUNT explosion (CPU-submission bound) apart from a per-draw cost
+     * jump (GPU / Map-DISCARD stall): if these scale ~linearly with the pane
+     * count while the render-ms cliffs, the bottleneck is GPU/driver side, not
+     * the submission count. Whole-frame totals (all panes), reset at begin-scene. */
+    if (td5_profile_enabled() && (g_tick_counter % 60u) == 0u) {
+        TD5_LOG_W(LOG_TAG,
+                  "RENDERSTAT views=%d draws=%d tris=%d binds=%d texmiss=%d texevict=%d spanmesh=%d",
+                  g_td5.viewport_count,
+                  s_debug_scene_draw_calls,
+                  s_debug_flush_submitted_tris,
+                  s_debug_texture_bind_calls,
+                  s_debug_texture_cache_misses,
+                  s_debug_texture_cache_evictions,
+                  s_debug_span_meshes_submitted);
+    }
+
     td5_plat_render_end_scene();
     g_tick_counter++;
 
@@ -2308,6 +2328,16 @@ void td5_render_actors_for_view(int view_index)
         }
     }
     float view_dist_frac = td5_save_get_view_distance();
+    /* [2026-06-08 split-screen perf] AI spectator panes (the extra split-screen
+     * tiles beyond the local human players, view_index >= num_human_players)
+     * render at reduced draw distance. v_track — the windowed track display-list
+     * walk below — is the #1 per-pane render cost in N-way split (per-pass probe
+     * at 9 panes), and these panes are secondary 640x336 tiles, so halving their
+     * span window/actor cull trims the cost with little visible loss. The
+     * player's pane(s) (view_index < num_human_players) keep full distance, so
+     * single/2-player split is byte-unchanged. Composes with the TD6 cap below. */
+    if (g_td5.split_screen_mode > 0 && view_index >= g_td5.num_human_players)
+        view_dist_frac *= 0.5f;
     /* [PERF FIX 2026-06-05] Dense TD6 city tracks — London (level012) and Egypt
      * (level022) — pack ~12 meshes per span, so the port's 1.0 view distance walks
      * ~780 candidate span-meshes/frame through the core, spiking the world-render
@@ -2623,6 +2653,13 @@ void td5_render_actors_for_view(int view_index)
         }
         #undef TD5_RENDER_SUBMITTED_CAP
     }
+
+    /* [2026-06-08 split-screen perf probe] Split the per-view world cost: above
+     * is the sky dome + track display-list walk; the actor loop follows. Profiled
+     * per pane (fires viewport_count times/frame) so a 9-pane sweep shows whether
+     * the render budget is track geometry (→ split view-window reduction) or the
+     * actors. Zero cost when [Logging] Profile is off. */
+    td5_profile_mark("v_track");
 
     {
         int total_actors = td5_game_get_total_actor_count();

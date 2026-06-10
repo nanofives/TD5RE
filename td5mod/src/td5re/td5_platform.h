@@ -419,6 +419,12 @@ void td5_plat_audio_set_master_volume(int volume);
  *  audio while the in-race pause menu is up. Does not affect CD/music. */
 void td5_plat_audio_set_muted(int muted);
 
+/** Mute/unmute ALL DirectSound output (per-voice SFX + the ambient stream)
+ *  based on whether the game window is the foreground window. Call once per
+ *  frame from the main loop. Independent of (ORs with) td5_plat_audio_set_muted
+ *  so the focus mute and the pause-menu mute never clobber each other. */
+void td5_plat_audio_update_focus_mute(void);
+
 /** Stop and release every active SFX voice (not the primary/keepalive buffers).
  *  Used at race teardown so voice counts return to baseline between races and no
  *  looping voice survives into the menus or the next race. */

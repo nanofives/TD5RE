@@ -4632,9 +4632,11 @@ int td5_game_run_race_frame(void) {
          * on top of all opaque geometry (including alpha-keyed trees)
          * after the world pass finishes. */
         td5_render_begin_world_pass();
+        td5_profile_mark("v_setup");   /* [perf probe] camera+projection+pass setup */
 
         /* Render race actors for this view */
-        td5_render_actors_for_view(vp);
+        td5_render_actors_for_view(vp);  /* emits v_track (sky+terrain) internally */
+        td5_profile_mark("v_actors");  /* [perf probe] per-view actor (car) draws */
 
         /* Debug: collision-wireframe overlay (F12 / [Debug] Collisions /
          * --DebugCollisions). Drawn after opaque terrain + actors so the depth
@@ -4667,6 +4669,7 @@ int td5_game_run_race_frame(void) {
             }
             td5_vfx_draw_particles(vp);
         }
+        td5_profile_mark("v_vfx");     /* [perf probe] per-view tire/streak/particle draws */
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();
 
@@ -4674,6 +4677,7 @@ int td5_game_run_race_frame(void) {
          * the deferred additive lights on top. Fog stays on — lights
          * follow the same fog the world does. */
         td5_render_flush_deferred_additive();
+        td5_profile_mark("v_flush");   /* [perf probe] translucent/projected/additive flushes */
 
         /* ---- Pass 3: ALPHA (overlay effects) ---- */
         td5_render_set_race_pass(TD5_RACE_PASS_ALPHA);
@@ -4685,6 +4689,7 @@ int td5_game_run_race_frame(void) {
         /* HUD overlay for this viewport */
         if (!td5_render_photobooth_active())
             td5_hud_draw_status_text(vp, vp);
+        td5_profile_mark("v_hud");     /* [perf probe] per-view HUD status text */
         /* NOTE: minimap is drawn from td5_hud_render_overlays (below).
          * A duplicated call here used to be a no-op (set_clip_rect was a stub),
          * but once 65a4fea wired hardware scissor, it left the minimap rect
@@ -4707,15 +4712,24 @@ int td5_game_run_race_frame(void) {
     if (!td5_render_photobooth_active())
         td5_hud_render_overlays(g_td5.normalized_frame_dt);
 
-    /* Pause overlay: panel + PAUSETXT atlas glyphs are all pre-built quads */
-    if (s_pause_menu_active) {
-        td5_hud_draw_pause_overlay();
-    }
+    /* [PORT 2026-06-08] Per-viewport player identity: coloured frame in each
+     * player's accent colour + a name plate under the car. Self-gated (only when
+     * the MP frontend set identities and the race is split). */
+    td5_hud_draw_player_id_overlays();
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op
      * unless a controller is currently missing). Drawn on top of the HUD. */
     td5_hud_draw_disconnect_overlays();
+
+    /* Pause overlay drawn LAST among the in-race overlays so the menu (BLACKBOX
+     * panel + selbox + sliders + text) sits on top of everything else — the HUD,
+     * the per-viewport coloured player-identity borders/name plates, and the
+     * disconnect modal — instead of those bleeding over the menu. (The race-end
+     * fade below is the leaving-transition wipe and intentionally stays on top.) */
+    if (s_pause_menu_active) {
+        td5_hud_draw_pause_overlay();
+    }
 
     /* Race end fade: directional wipe overlay (black bars closing in).
      * [CONFIRMED @ 0x0042b791/0x0042b797 RunRaceFrame] The directional fade and
@@ -4788,13 +4802,20 @@ int td5_game_run_race_frame(void) {
 
 static void set_countdown_indicator_state(int value)
 {
+    /* [PORT: N-way split 2026-06-08] Drive the countdown (3-2-1) indicator on
+     * EVERY active viewport, not just the legacy 2. With >2 split-screen panes
+     * the extra panes otherwise kept the stale per-actor digit the fly-in set
+     * once (UpdateCameraTransitionHudIndicator = race_position+2); for a car in
+     * 8th+ place that value (>=10) indexes past the 5x2 NUMBERS atlas and drew a
+     * blank/garbage "blue square" on the 9th pane. Setting all panes here makes
+     * the synchronized countdown overwrite it every level. */
     int view_count = g_td5.viewport_count;
 
     if (view_count < 1) {
         view_count = 1;
     }
-    if (view_count > 2) {
-        view_count = 2;
+    if (view_count > TD5_MAX_VIEWPORTS) {
+        view_count = TD5_MAX_VIEWPORTS;
     }
 
     for (int i = 0; i < view_count; i++) {
@@ -6379,7 +6400,11 @@ void td5_game_init_viewport_layout(void) {
      * players default to LEFT/RIGHT = 3x1), falling back to an automatic ladder.
      * The original was hard-capped at 2 viewports (RunRaceFrame 0x42B580) — this
      * deliberately deviates. */
-    int views = g_td5.num_human_players;
+    /* Pane count = local humans + AI spectator panes (dev/profiling). The N
+     * spectator panes follow AI-driven slots 1..N (set up in InitRace's
+     * actor_slot_map); only the humans read input. num_spectate_screens is 0 in
+     * every faithful flow, so this is identical to num_human_players there. */
+    int views = g_td5.num_human_players + g_td5.num_spectate_screens;
     int cols, rows;
     if (views < 1) views = 1;
     if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
@@ -6412,8 +6437,8 @@ void td5_game_init_viewport_layout(void) {
         }
     }
 
-    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d count=%d grid=%dx%d %dx%d",
-              g_td5.split_screen_mode, g_td5.num_human_players,
+    TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d spectate=%d count=%d grid=%dx%d %dx%d",
+              g_td5.split_screen_mode, g_td5.num_human_players, g_td5.num_spectate_screens,
               g_td5.viewport_count, cols, rows, w, h);
 }
 

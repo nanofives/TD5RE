@@ -20,6 +20,7 @@
 #include "td5_render.h"
 #include "td5_save.h"
 #include "td5_sound.h"
+#include "td5_hud.h"           /* per-viewport player-identity overlay (race) */
 #include "td5re.h"
 #include "td5_snk_strings.h"   /* byte-exact SNK_ labels baked from Language.dll */
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
@@ -324,12 +325,19 @@ static int  s_mp_kbd_col[TD5_MAX_HUMAN_PLAYERS];              /* QWERTY cursor (
 static int  s_mp_kbd_row[TD5_MAX_HUMAN_PLAYERS];
 static int  s_mp_col_col[TD5_MAX_HUMAN_PLAYERS];              /* colour-grid cursor */
 static int  s_mp_col_row[TD5_MAX_HUMAN_PLAYERS];
+static uint32_t s_mp_rep_ms[TD5_MAX_HUMAN_PLAYERS];          /* colour-grid auto-repeat next-fire time */
 enum { MP_SET_NAME = 0, MP_SET_COLOUR, MP_SET_OK, MP_SET_COUNT };
 /* On-screen QWERTY (pad name entry): 4 letter rows + a special row (SPACE/DEL/DONE). */
 static const char *const k_mp_kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM" };
 #define MP_KBD_LETTER_ROWS 4
 #define MP_KBD_ROWS        (MP_KBD_LETTER_ROWS + 1)   /* + special row */
 #define MP_KBD_SPECIAL     MP_KBD_LETTER_ROWS
+#define MP_KBD_ROW_H       14.4f                       /* compact: ~20% over the cap height (9) */
+#define MP_KBD_BLOCK_H     (MP_KBD_ROWS * MP_KBD_ROW_H)
+/* Background-colour picker: a compact 16x16 pure HSV palette (no preselected
+ * swatch rows, no white bar). */
+#define MP_COL_COLS 16
+#define MP_COL_ROWS 16
 static void frontend_mp_setup_init(void);
 static void frontend_mp_setup_update(void);
 static void frontend_mp_setup_render(float sx, float sy);
@@ -383,6 +391,11 @@ static int  s_track_max;               /* max track index for current mode */
  * defaults (1 human + 5 AI = legacy single-race grid). See g_td5.num_* . */
 static int  s_num_human_players = 1;    /* 1..TD5_MAX_RACER_SLOTS            */
 static int  s_num_ai_opponents  = 5;    /* 0..(TD5_MAX_RACER_SLOTS-1)        */
+/* [PORT ENHANCEMENT 2026-06-08] Quick Race "AI Screens" selector (dev/profiling).
+ * How many AI cars (slots 1..N) get their own split-screen viewport pane on top
+ * of the player's pane — viewport_count = 1 + this. 0 = legacy single view.
+ * Inert outside Quick Race; clamped to the AI field + the viewport cap. */
+static int  s_num_spectate_screens = 0; /* 0..min(opponents, TD5_MAX_VIEWPORTS-1) */
 /* Drag Strip = schedule index 19 (s_track_schedule_to_name_index[19]==0 ->
  * "DRAG STRIP"). Excluded from the Quick Race track cycler. */
 #define FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX 19
@@ -394,8 +407,9 @@ static int  s_num_ai_opponents  = 5;    /* 0..(TD5_MAX_RACER_SLOTS-1)        */
 #define QR_BTN_PLAYERS    3
 #define QR_BTN_OPPONENTS  4
 #define QR_BTN_LAPS       5   /* [S02 (c)] circuit laps, re-homed from Game Options */
-#define QR_BTN_OK         6
-#define QR_BTN_BACK       7
+#define QR_BTN_SPLITSCREENS 6 /* [2026-06-08] AI spectator split-screens (dev-only) */
+#define QR_BTN_OK         7
+#define QR_BTN_BACK       8
 
 /* Quick Race layout: caption buttons in a left column, the selected value in a
  * right column, all rows uniformly spaced.
@@ -3229,17 +3243,37 @@ static void frontend_init_race_schedule(void) {
     if (eff_humans < 1) eff_humans = 1;
     if (eff_humans > TD5_MAX_VIEWPORTS) eff_humans = TD5_MAX_VIEWPORTS;
 
-    /* Resolve the chosen split layout. For >=2 humans split is on and the layout
+    /* [PORT ENHANCEMENT 2026-06-08] AI spectator split-screens (dev/profiling).
+     * Quick Race may render the first N AI cars (slots 1..N) each in its own
+     * viewport pane on top of the human pane(s). num_spectate_screens drives the
+     * pane count (eff_panes) used for the split layout below, while
+     * num_human_players is left untouched so ONLY the humans read input — the
+     * spectator panes follow AI-driven slots. Inert outside Quick Race; clamped
+     * to the live AI field and the viewport cap. The AutoRace harness applies its
+     * own SpectateScreens override after this (see InitializeAutoRaceState). */
+    int spectate = (s_current_screen == TD5_SCREEN_QUICK_RACE)
+                       ? s_num_spectate_screens : 0;
+    if (spectate < 0) spectate = 0;
+    if (spectate > g_td5.num_ai_opponents) spectate = g_td5.num_ai_opponents;
+    if (spectate > TD5_MAX_VIEWPORTS - eff_humans) spectate = TD5_MAX_VIEWPORTS - eff_humans;
+    if (spectate < 0) spectate = 0;
+    g_td5.num_spectate_screens = spectate;
+
+    int eff_panes = eff_humans + spectate;
+    if (eff_panes < 1) eff_panes = 1;
+    if (eff_panes > TD5_MAX_VIEWPORTS) eff_panes = TD5_MAX_VIEWPORTS;
+
+    /* Resolve the chosen split layout. For >=2 panes split is on and the layout
      * grid (cols x rows) overrides the automatic ladder in
      * td5_game_init_viewport_layout. split_screen_mode keeps its legacy meaning
      * for HUD / minimap / sound consumers: 0=single, 2=two-player left|right,
      * 1=any other split "on". */
-    if (eff_humans >= 2) {
+    if (eff_panes >= 2) {
         int cols = 0, rows = 0, missing = 0;
-        mp_resolve_layout(eff_humans, s_mp_layout_sel, &cols, &rows, &missing);
+        mp_resolve_layout(eff_panes, s_mp_layout_sel, &cols, &rows, &missing);
         g_td5.split_grid_cols = cols;
         g_td5.split_grid_rows = rows;
-        g_td5.split_screen_mode = (eff_humans == 2 && cols == 2) ? 2 : 1;
+        g_td5.split_screen_mode = (eff_panes == 2 && cols == 2) ? 2 : 1;
         g_td5.split_missing_content[0] = (missing > 0) ? s_mp_missing_content[0] : 0;
         g_td5.split_missing_content[1] = (missing > 1) ? s_mp_missing_content[1] : 0;
     } else {
@@ -3269,15 +3303,20 @@ static void frontend_init_race_schedule(void) {
     }
 
     TD5_LOG_I(LOG_TAG,
-              "InitRaceSchedule: split=%d grid=%dx%d humans=%d opp=%d eff=%d 2p=%d layout_sel=%d",
+              "InitRaceSchedule: split=%d grid=%dx%d humans=%d opp=%d eff=%d spectate=%d panes=%d 2p=%d layout_sel=%d",
               g_td5.split_screen_mode, g_td5.split_grid_cols, g_td5.split_grid_rows,
               g_td5.num_human_players, g_td5.num_ai_opponents, eff_humans,
+              g_td5.num_spectate_screens, eff_panes,
               s_two_player_mode, s_mp_layout_sel);
 
     /* Slot 0 = player, always active */
     slot_active[0]  = 1;
     slot_ext_id[0]  = s_selected_car;
     slot_variant[0] = s_selected_paint;
+
+    /* In-race per-viewport identity (coloured frame + name plate): cleared for
+     * every race, populated below only for the multiplayer flow. */
+    td5_hud_clear_player_identities();
 
     /* [PORT ENHANCEMENT 2026-06] Multiplayer lobby flow: each human slot uses the
      * car that player chose in the sequential car select. */
@@ -3287,11 +3326,13 @@ static void frontend_init_race_schedule(void) {
         /* Each human slot is painted with that player's chosen TD6 colour (no-op
          * for TD5 cars, which have no carmask). -1 = leave the default. */
         td5_asset_set_human_td6_color(0, s_mp_player_color[0]);
+        td5_hud_set_player_identity(0, s_mp_player_name[0], (uint32_t)s_mp_player_accent[0]);
         for (i = 1; i < eff_humans && i < TD5_MAX_RACER_SLOTS; i++) {
             slot_active[i]  = 1;
             slot_ext_id[i]  = s_mp_player_car[i];
             slot_variant[i] = s_mp_player_paint[i];
             td5_asset_set_human_td6_color(i, s_mp_player_color[i]);
+            td5_hud_set_player_identity(i, s_mp_player_name[i], (uint32_t)s_mp_player_accent[i]);
             if (i + 1 > start_slot) start_slot = i + 1;
         }
         /* AI / unused slots get the hashed AI palette (clear any stale override). */
@@ -3623,6 +3664,33 @@ void td5_frontend_auto_race_setup(void) {
         TD5_LOG_I(LOG_TAG,
                   "AutoRace: player override -> %d humans + %d AI (split=%d)",
                   humans, opp, g_td5.split_screen_mode);
+    }
+
+    /* [2026-06-08] AutoRace AI-spectator split-screen override (dev profiling).
+     * AutoRace skips the Quick Race "AI Screens" selector, so [Game]
+     * SpectateScreens=N forces N AI cars (slots 1..N) into their own panes for a
+     * deterministic split-screen render-load measurement. Recomputes the split
+     * grid from the resulting pane count so the viewport/HUD/divider layout all
+     * agree (same resolver the menu path uses). */
+    if (g_td5.ini.spectate_screens > 0) {
+        int spectate = g_td5.ini.spectate_screens;
+        if (spectate > g_td5.num_ai_opponents) spectate = g_td5.num_ai_opponents;
+        if (spectate > TD5_MAX_VIEWPORTS - g_td5.num_human_players)
+            spectate = TD5_MAX_VIEWPORTS - g_td5.num_human_players;
+        if (spectate < 0) spectate = 0;
+        g_td5.num_spectate_screens = spectate;
+        int panes = g_td5.num_human_players + spectate;
+        if (panes >= 2) {
+            int cols = 0, rows = 0, missing = 0;
+            mp_resolve_layout(panes, s_mp_layout_sel, &cols, &rows, &missing);
+            g_td5.split_grid_cols   = cols;
+            g_td5.split_grid_rows   = rows;
+            g_td5.split_screen_mode = (panes == 2 && cols == 2) ? 2 : 1;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "AutoRace: spectate override -> %d AI panes (total panes=%d split=%d grid=%dx%d)",
+                  spectate, panes, g_td5.split_screen_mode,
+                  g_td5.split_grid_cols, g_td5.split_grid_rows);
     }
 
     /* Enumerate display modes — original quickrace hook calls
@@ -6244,6 +6312,12 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     if (!s_buttons[QR_BTN_LAPS].hidden) {
         snprintf(count, sizeof(count), "%d", s_game_option_laps + 1);
         frontend_draw_qr_value(sx, sy, QR_BTN_LAPS, count, 0xFFFFFFFF);
+    }
+    /* [2026-06-08] AI Screens value (dev-only; row hidden in release). */
+    if (s_button_count > QR_BTN_SPLITSCREENS &&
+        !s_buttons[QR_BTN_SPLITSCREENS].hidden) {
+        snprintf(count, sizeof(count), "%d", s_num_spectate_screens);
+        frontend_draw_qr_value(sx, sy, QR_BTN_SPLITSCREENS, count, 0xFFFFFFFF);
     }
 }
 
@@ -10775,6 +10849,14 @@ static void frontend_quickrace_clamp_counts(void) {
     int opp_max = TD5_MAX_RACER_SLOTS - s_num_human_players;
     if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
     if (s_num_ai_opponents > opp_max) s_num_ai_opponents = opp_max;
+
+    /* [2026-06-08] AI spectator panes: at most one pane per AI car, and the
+     * total panes (humans + spectators) cannot exceed the viewport cap. */
+    int spectate_max = TD5_MAX_VIEWPORTS - s_num_human_players;
+    if (spectate_max > s_num_ai_opponents) spectate_max = s_num_ai_opponents;
+    if (spectate_max < 0) spectate_max = 0;
+    if (s_num_spectate_screens < 0) s_num_spectate_screens = 0;
+    if (s_num_spectate_screens > spectate_max) s_num_spectate_screens = spectate_max;
 }
 
 static void Screen_QuickRaceMenu(void) {
@@ -10820,9 +10902,19 @@ static void Screen_QuickRaceMenu(void) {
           /* [S02 (c) 2026-06-04] Circuit laps, re-homed here from Game Options.
            * Mirrors the Track Selection laps row; edits s_game_option_laps. */
           frontend_create_button("Laps",                QR_COL_X, QR_ROW_Y(4), QR_BTN_W, 32); /* QR_BTN_LAPS */
+          /* [2026-06-08] AI Screens (dev/profiling): render the first N AI cars
+           * each in their own split-screen pane. Dev-only — the row is created
+           * for index stability but hidden+disabled in release builds (the
+           * SpectateScreens knob is also clamped to 0 there). */
+          bi = frontend_create_button("AI Screens",        QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_SPLITSCREENS */
+#ifdef TD5RE_RELEASE
+          if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
+#else
+          (void)bi;
+#endif
         }
-        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(5),  96, 32); /* QR_BTN_OK */
-        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(5), 112, 32); /* QR_BTN_BACK */
+        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(6),  96, 32); /* QR_BTN_OK */
+        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(6), 112, 32); /* QR_BTN_BACK */
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
@@ -10911,6 +11003,16 @@ static void Screen_QuickRaceMenu(void) {
                 s_game_option_laps += delta;
                 if (s_game_option_laps < 0) s_game_option_laps = 0;
                 if (s_game_option_laps > 9) s_game_option_laps = 9;
+                frontend_play_sfx(2);
+            }
+
+            /* [2026-06-08] AI Screens (dev/profiling): 0..min(opponents,
+             * TD5_MAX_VIEWPORTS-1). Each step adds an AI car to its own pane.
+             * Hidden+disabled in release (see case-0 creation). */
+            if (selected_button == QR_BTN_SPLITSCREENS &&
+                !s_buttons[QR_BTN_SPLITSCREENS].hidden && delta != 0) {
+                s_num_spectate_screens += delta;
+                frontend_quickrace_clamp_counts();
                 frontend_play_sfx(2);
             }
 
@@ -13866,6 +13968,29 @@ static void mp_setup_name_backspace(int p) {
     if (l > 0) s_mp_player_name[p][l - 1] = '\0';
 }
 
+/* Colour at a cell of the compact 16x16 background-colour palette (0xRRGGBB).
+ * Hue runs across the columns; rows run light tint -> pure -> dark shade — with
+ * NO fully-white top row (min saturation 0.35) and no pure-black bottom. */
+static uint32_t mp_setup_grid_color(int col, int row) {
+    float hue = (float)col / (float)MP_COL_COLS;
+    float t   = (float)row / (float)(MP_COL_ROWS - 1);   /* 0..1 */
+    float sat, val;
+    if (t < 0.5f) { sat = 0.35f + 1.30f * t; if (sat > 1.0f) sat = 1.0f; val = 1.0f; }
+    else          { sat = 1.0f; val = 1.0f - 1.6f * (t - 0.5f); if (val < 0.20f) val = 0.20f; }
+    return td6_hsv_to_rgb(hue, sat, val);
+}
+
+/* Directional auto-repeat for the colour grid: fires once on the rising edge,
+ * then (after a hold delay) keeps firing at a steady moderate rate while the
+ * direction stays held. Works for joystick AND keyboard (both feed level bits).
+ * `held`/`edge` are the direction bits (0x0F). Returns 1 on a fire frame. */
+static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now) {
+    if (!(held & 0x0Fu)) { s_mp_rep_ms[p] = 0; return 0; }
+    if (edge & 0x0Fu)    { s_mp_rep_ms[p] = now + 320u; return 1; }   /* first press + arm delay */
+    if (s_mp_rep_ms[p] && now >= s_mp_rep_ms[p]) { s_mp_rep_ms[p] = now + 130u; return 1; } /* repeat */
+    return 0;
+}
+
 static void frontend_mp_setup_init(void) {
     int p, n = s_num_human_players;
     if (n < 2) n = 2;
@@ -13947,24 +14072,25 @@ static void frontend_mp_setup_update(void) {
                     else if (col == 1) { mp_setup_name_backspace(p); frontend_play_sfx(2); }
                     else { s_mp_setup_sub[p] = 0; frontend_play_sfx(3); }   /* DONE */
                 }
+                if (edge & 0x40) { s_mp_setup_sub[p] = 0; frontend_play_sfx(3); }  /* Start = finish */
                 if (edge & 0x20) { s_mp_setup_sub[p] = 0; frontend_play_sfx(5); }
             }
             all_ready = 0;
             continue;
         }
 
-        if (s_mp_setup_sub[p] == 2) {            /* COLOUR picker */
-            int moved = 0;
-            if (edge & 1) { if (s_mp_col_col[p] > 0) s_mp_col_col[p]--; moved = 1; }
-            if (edge & 2) { if (s_mp_col_col[p] < TD6_CP_COLS - 1) s_mp_col_col[p]++; moved = 1; }
-            if (edge & 4) { if (s_mp_col_row[p] > 0) s_mp_col_row[p]--; moved = 1; }
-            if (edge & 8) { if (s_mp_col_row[p] < TD6_CP_GRID_ROWS - 1) s_mp_col_row[p]++; moved = 1; }
-            if (moved) {
-                s_mp_player_accent[p] = (int)td6_cursor_color(s_mp_col_col[p], s_mp_col_row[p]);
+        if (s_mp_setup_sub[p] == 2) {            /* COLOUR picker (16x16 HSV grid) */
+            /* Auto-repeat: hold a direction to keep scrolling at a moderate rate. */
+            if (mp_repeat_fire(p, bits, edge, now)) {
+                if (bits & 1) { if (s_mp_col_col[p] > 0) s_mp_col_col[p]--; }
+                if (bits & 2) { if (s_mp_col_col[p] < MP_COL_COLS - 1) s_mp_col_col[p]++; }
+                if (bits & 4) { if (s_mp_col_row[p] > 0) s_mp_col_row[p]--; }
+                if (bits & 8) { if (s_mp_col_row[p] < MP_COL_ROWS - 1) s_mp_col_row[p]++; }
+                s_mp_player_accent[p] = (int)mp_setup_grid_color(s_mp_col_col[p], s_mp_col_row[p]);
                 frontend_play_sfx(2);
             }
-            if (edge & 0x10) { s_mp_setup_sub[p] = 0; frontend_play_sfx(3); }
-            if (edge & 0x20) { s_mp_setup_sub[p] = 0; frontend_play_sfx(5); }
+            if (edge & 0x10) { s_mp_setup_sub[p] = 0; s_mp_rep_ms[p] = 0; frontend_play_sfx(3); }
+            if (edge & 0x20) { s_mp_setup_sub[p] = 0; s_mp_rep_ms[p] = 0; frontend_play_sfx(5); }
             all_ready = 0;
             continue;
         }
@@ -14014,11 +14140,13 @@ static void frontend_mp_setup_update(void) {
     }
 }
 
-/* On-screen QWERTY for pad name entry. */
+/* On-screen QWERTY for pad name entry — compact: each row is just over the
+ * uppercase cap height (MP_KBD_ROW_H), width spans the pane content. */
 static void mp_setup_render_kbd(int p, float ax, float ay, float aw, float ah,
                                 uint32_t accent, float sx, float sy) {
     int row, col;
-    float rh = ah / (float)MP_KBD_ROWS;
+    float rh = MP_KBD_ROW_H;
+    (void)ah;
     for (row = 0; row < MP_KBD_LETTER_ROWS; row++) {
         const char *r = k_mp_kbd_rows[row];
         int len = (int)strlen(r);
@@ -14051,26 +14179,28 @@ static void mp_setup_render_kbd(int p, float ax, float ay, float aw, float ah,
     }
 }
 
-/* TD6 colour-picker grid for the background-colour choice. */
+/* Compact 16x16 HSV background-colour palette. Height matches the keyboard. */
 static void mp_setup_render_colorgrid(int p, float ax, float ay, float aw, float ah,
                                       float sx, float sy) {
     int r, c;
-    float cw = aw / (float)TD6_CP_COLS, ch = ah / (float)TD6_CP_GRID_ROWS;
+    float cw = aw / (float)MP_COL_COLS, ch = ah / (float)MP_COL_ROWS;
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    for (r = 0; r < TD6_CP_GRID_ROWS; r++) {
-        for (c = 0; c < TD6_CP_COLS; c++) {
-            uint32_t col = td6_cursor_color(c, r);
+    for (r = 0; r < MP_COL_ROWS; r++) {
+        for (c = 0; c < MP_COL_COLS; c++) {
+            uint32_t col = mp_setup_grid_color(c, r);
             float kx = ax + (float)c * cw, ky = ay + (float)r * ch;
-            fe_draw_quad(kx * sx, ky * sy, cw * sx, ch * sy, frontend_rgb_to_bgra(col), -1, 0, 0, 1, 1);
+            fe_draw_quad(kx * sx, ky * sy, cw * sx + 0.5f, ch * sy + 0.5f,
+                         frontend_rgb_to_bgra(col), -1, 0, 0, 1, 1);
         }
     }
     {
         float kx = ax + (float)s_mp_col_col[p] * cw, ky = ay + (float)s_mp_col_row[p] * ch;
         uint32_t hl = 0xFFFFFFFFu;
-        fe_draw_quad(kx * sx, ky * sy, cw * sx, 2.0f * sy, hl, -1, 0, 0, 1, 1);
-        fe_draw_quad(kx * sx, (ky + ch - 2.0f) * sy, cw * sx, 2.0f * sy, hl, -1, 0, 0, 1, 1);
-        fe_draw_quad(kx * sx, ky * sy, 2.0f * sx, ch * sy, hl, -1, 0, 0, 1, 1);
-        fe_draw_quad((kx + cw - 2.0f) * sx, ky * sy, 2.0f * sx, ch * sy, hl, -1, 0, 0, 1, 1);
+        float t = 1.5f;
+        fe_draw_quad((kx - t) * sx, (ky - t) * sy, (cw + 2 * t) * sx, t * sy, hl, -1, 0, 0, 1, 1);
+        fe_draw_quad((kx - t) * sx, (ky + ch) * sy, (cw + 2 * t) * sx, t * sy, hl, -1, 0, 0, 1, 1);
+        fe_draw_quad((kx - t) * sx, (ky - t) * sy, t * sx, (ch + 2 * t) * sy, hl, -1, 0, 0, 1, 1);
+        fe_draw_quad((kx + cw) * sx, (ky - t) * sy, t * sx, (ch + 2 * t) * sy, hl, -1, 0, 0, 1, 1);
     }
 }
 
@@ -14154,16 +14284,17 @@ static void frontend_mp_setup_render(float sx, float sy) {
             fe_draw_small_text((ax + 4.0f) * sx, (fy + (16.0f - SMALLFONT_TTF_CAP) * 0.5f) * sy,
                                buf, 0xFFFFFFFFu, sx, sy);
             if (isk)
-                mp_simul_small_centered(cx * sx, (ay + ah - 12.0f) * sy,
+                mp_simul_small_centered(cx * sx, (fy + 24.0f) * sy,
                                         "TYPE NAME - ENTER=DONE  ESC=BACK", 0xFFFFE060u, sx, sy);
             else
-                mp_setup_render_kbd(p, ax, fy + 19.0f, aw, ah - 22.0f, pcol, sx, sy);
+                mp_setup_render_kbd(p, ax, fy + 19.0f, aw, MP_KBD_BLOCK_H, pcol, sx, sy);
             continue;
         }
 
-        if (sub == 2) {                 /* COLOUR picker */
-            mp_setup_render_colorgrid(p, ax, ay, aw, ah - 12.0f, sx, sy);
-            mp_simul_small_centered(cx * sx, (ay + ah - 9.0f) * sy, "A=OK  B=BACK", 0xFFFFE060u, sx, sy);
+        if (sub == 2) {                 /* COLOUR picker (compact 16x16) */
+            mp_setup_render_colorgrid(p, ax, ay + 2.0f, aw, MP_KBD_BLOCK_H, sx, sy);
+            mp_simul_small_centered(cx * sx, (ay + 2.0f + MP_KBD_BLOCK_H + 3.0f) * sy,
+                                    "A=OK  B=BACK", 0xFFFFE060u, sx, sy);
             continue;
         }
 

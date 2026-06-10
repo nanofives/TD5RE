@@ -170,6 +170,30 @@ static float    *s_cur_scale;            /* 0x4B0FA4 */
 /* Per-view layouts */
 static TD5_HudViewLayout s_view_layout[MAX_HUD_VIEWS];
 
+/* [PORT 2026-06-08] Per-racer-slot player identity for the in-race overlays:
+ * a coloured frame around each viewport + a name indicator under the car, so
+ * everyone can see who is driving which pane. Set by the multiplayer frontend
+ * at race start; cleared for single-player races. */
+static char     s_hud_id_name[TD5_MAX_RACER_SLOTS][16];
+static uint32_t s_hud_id_accent[TD5_MAX_RACER_SLOTS];
+static int      s_hud_id_active;
+
+void td5_hud_clear_player_identities(void)
+{
+    memset(s_hud_id_name, 0, sizeof(s_hud_id_name));
+    s_hud_id_active = 0;
+}
+
+void td5_hud_set_player_identity(int slot, const char *name, uint32_t rgb)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    if (name) { strncpy(s_hud_id_name[slot], name, sizeof(s_hud_id_name[slot]) - 1);
+                s_hud_id_name[slot][sizeof(s_hud_id_name[slot]) - 1] = '\0'; }
+    else        s_hud_id_name[slot][0] = '\0';
+    s_hud_id_accent[slot] = (rgb & 0x00FFFFFFu) | 0xFF000000u;
+    s_hud_id_active = 1;
+}
+
 /* Global scale factors */
 static float s_scale_x;                  /* 0x4B1138 */
 static float s_scale_y;                  /* 0x4B113C */
@@ -278,6 +302,16 @@ static float s_pause_selbox_x1;                /* right edge of selbox, relative
 static float s_pause_selbox_base_y;            /* y-center of row 0 (= -52.0f) */
 static float s_pause_bar_x0 = 10.0f;
 static float s_pause_bar_x1;  /* = s_pause_half_width - 4.0f, set during init */
+/* The pause panel/selbox/slider quads bake the screen centre (cx,cy) into their
+ * absolute coords at init time, but the menu TEXT + the per-frame selbox/slider
+ * updates recompute the centre live from g_render_width_f/height_f. If the render
+ * dimensions change after the bake (drag-resize / maximize / a race that inits at
+ * different dims), the baked panel drifts off the live-centred text — the pause
+ * layout looks distorted and the dark backing panel sits displaced. Track the
+ * baked dims + page so the draw/update path can re-bake when they change. */
+static int   s_pause_page_index;
+static float s_pause_baked_w;
+static float s_pause_baked_h;
 
 /* VectorUI: pause-menu text lines recorded at init (instead of baking PAUSETXT
  * glyph quads) and rendered crisply via the pause-font SDF at draw time. */
@@ -1171,6 +1205,75 @@ void td5_hud_draw_pause_overlay(void)
  * td5_vui_text_centered is crisp MSDF text. Both fall back to the bitmap path
  * when VectorUI is disabled, so this needs no quad pre-bake.
  * ======================================================================== */
+/* ========================================================================
+ * Per-viewport player identity: a coloured frame in the player's accent colour
+ * around each split-screen pane + a name plate flush along the BOTTOM edge of
+ * the pane, so everyone can tell who is driving which viewport at a glance.
+ * SOURCE-PORT FEATURE. [PORT 2026-06-08]
+ * ======================================================================== */
+void td5_hud_draw_player_id_overlays(void)
+{
+    int views = s_view_count;
+    if (!s_hud_id_active) return;
+    if (views < 2) return;                  /* only meaningful when split */
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    for (int v = 0; v < views; v++) {
+        int slot = g_actor_slot_map[v];
+        const TD5_HudViewLayout *vl = &s_view_layout[v];
+        float L = vl->vp_int_left,  T = vl->vp_int_top;
+        float R = vl->vp_int_right, B = vl->vp_int_bottom;
+        float w = R - L, h = B - T;
+        uint32_t accent;
+        char nm[20];
+        float bt, ts, cx, ny, tw;
+        int r8, g8, b8, lum;
+        uint32_t tcol;
+        if (w < 2.0f || h < 2.0f) continue;
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+
+        accent = s_hud_id_accent[slot] ? s_hud_id_accent[slot] : 0xFFB0B0B0u;
+
+        /* Coloured frame around this pane. */
+        bt = 3.0f * (w / 640.0f);
+        if (bt < 2.0f) bt = 2.0f;
+        if (bt > 5.0f) bt = 5.0f;
+        td5_vui_quad(L, T, w, bt, accent, -1, 0, 0, 0, 0);
+        td5_vui_quad(L, B - bt, w, bt, accent, -1, 0, 0, 0, 0);
+        td5_vui_quad(L, T, bt, h, accent, -1, 0, 0, 0, 0);
+        td5_vui_quad(R - bt, T, bt, h, accent, -1, 0, 0, 0, 0);
+
+        /* Name plate flush along the BOTTOM edge of the pane, sized to fit the
+         * text. fe_draw_text anchors its `y` at the glyph CELL TOP, and the
+         * visible caps occupy cell rows 8..23 (15 design-px tall) in both the TTF
+         * and bitmap paths — so the cap band's vertical centre sits 15.5*ts below
+         * the passed y. We size the plate to that cap height plus a little
+         * padding and place the text so the caps sit centred inside the plate. */
+        if (s_hud_id_name[slot][0]) snprintf(nm, sizeof nm, "%s", s_hud_id_name[slot]);
+        else                        snprintf(nm, sizeof nm, "PLAYER %d", slot + 1);
+        ts = (w / 640.0f) * 0.95f;
+        if (ts > 1.2f) ts = 1.2f;
+        if (ts < 0.40f) ts = 0.40f;
+        cx = (L + R) * 0.5f;
+        tw = td5_vui_text_width(nm, ts);
+        {
+            float cap_h   = 15.0f * ts;             /* visible cap height (both font paths) */
+            float pad_y   = 5.0f  * ts;             /* breathing room above + below the caps */
+            float plate_h = cap_h + 2.0f * pad_y;
+            float plate_w = tw + 12.0f * ts;        /* 6*ts side padding each side */
+            float plate_b = B - bt;                 /* flush against the inside of the bottom frame */
+            float plate_t = plate_b - plate_h;
+            ny = (plate_t + plate_b) * 0.5f - 15.5f * ts;   /* cell top -> caps centred in plate */
+            td5_vui_quad(cx - plate_w * 0.5f, plate_t, plate_w, plate_h,
+                         accent, -1, 0, 0, 0, 0);
+            r8 = (accent >> 16) & 0xFF; g8 = (accent >> 8) & 0xFF; b8 = accent & 0xFF;
+            lum = (r8 * 30 + g8 * 59 + b8 * 11) / 100;
+            tcol = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
+            td5_vui_text_centered(cx, ny, nm, tcol, ts, ts);
+        }
+    }
+}
+
 void td5_hud_draw_disconnect_overlays(void)
 {
     if (!td5_game_device_disconnect_active()) return;   /* fast out: nothing lost */
@@ -1240,6 +1343,20 @@ void td5_hud_draw_disconnect_overlays(void)
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac)
 {
     (void)music_frac;
+
+    /* Re-bake the panel/selbox/slider quads if the render size has changed since
+     * they were built (the panel bakes the screen centre into absolute coords;
+     * the text below recomputes it live). Without this the panel drifts off the
+     * text after a resize/maximize, distorting the pause layout and displacing
+     * the dark backing panel. Runs before the selbox/slider positions are set so
+     * they land on the freshly-baked panel. Cheap: only fires on an actual change. */
+    if (g_render_width_f != s_pause_baked_w || g_render_height_f != s_pause_baked_h) {
+        TD5_LOG_I(LOG_TAG, "pause overlay: re-bake on dim change %.0fx%.0f -> %.0fx%.0f",
+                  (double)s_pause_baked_w, (double)s_pause_baked_h,
+                  (double)g_render_width_f, (double)g_render_height_f);
+        td5_hud_init_pause_menu(s_pause_page_index);
+    }
+
     float cx = g_render_width_f  * 0.5f;
     float cy = g_render_height_f * 0.5f;
     float fracs[2] = { view_dist_frac, sfx_frac };  /* row 0 = VIEW, row 1 = SOUND */
@@ -3092,7 +3209,13 @@ void td5_hud_render_overlays(float dt)
         }
 
         /* --- Indicator digit (countdown/finish) --- */
-        if (s_indicator_state[v] != 0 && s_numbers_atlas) {
+        /* [2026-06-08] Clamp to a renderable single-digit cell. The NUMBERS atlas
+         * is a 5x2 grid (cells 0-9); an indicator >9 (e.g. a spectator pane that
+         * briefly carried a last-place car's race_position+2 during the fly-in)
+         * would index row>=2, outside the glyph region, drawing a "blue square".
+         * Suppress those instead of sampling garbage (mirrors the existing
+         * countdown-timer indicator>=4 suppression in UpdateRaceCameraTransitionTimer). */
+        if (s_indicator_state[v] >= 1 && s_indicator_state[v] <= 9 && s_numbers_atlas) {
             int digit_val = s_indicator_state[v];
             int col = digit_val % 5;
             int row = digit_val / 5;
@@ -4576,6 +4699,13 @@ void td5_hud_init_pause_menu(int page_index)
      * the screen center so the panel appears in the middle of the screen. */
     float cx = g_render_width_f  * 0.5f;
     float cy = g_render_height_f * 0.5f;
+
+    /* Remember what we baked against so the per-frame update path can re-bake if
+     * the render dimensions change (otherwise the panel drifts off the live-
+     * centred text — see the s_pause_baked_* declaration). */
+    s_pause_page_index = page_index;
+    s_pause_baked_w    = g_render_width_f;
+    s_pause_baked_h    = g_render_height_f;
 
 #define PAUSE_BUF(n) (s_pause_quad_buf + (n) * 0xB8)
 #define PAUSE_ADD(x0, y0, x1, y1, u0, v0, u1, v1, page, col) \

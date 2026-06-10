@@ -838,4 +838,15 @@ void Backend_SelectPixelShader(void); /* Choose PS based on texblend + alpha + t
 void Backend_UpdateFogCB(void);      /* Upload fog constant buffer */
 void Backend_UpdateViewportCB(float w, float h); /* Upload viewport constant buffer */
 
+/* [2026-06-08 streaming-ring] Append vertices (+ optional 16-bit indices) to the
+ * dynamic VB/IB ring with WRITE_NO_OVERWRITE (DISCARD only on wrap). On success
+ * returns 1 and writes the draw offsets: *out_base_vertex (BaseVertexLocation /
+ * StartVertexLocation) and *out_start_index (StartIndexLocation, only when
+ * indices!=NULL). Bind the buffers at byte offset 0 and pass these to the draw
+ * call. Returns 0 (skip the draw) if a single batch exceeds the buffer or Map
+ * fails. Shared by every draw path so the ring stays consistent. */
+int Backend_StreamUpload(const void *verts, UINT vert_count, UINT stride,
+                         const void *indices, UINT index_count,
+                         UINT *out_base_vertex, UINT *out_start_index);
+
 #endif /* TD5_D3D11_WRAPPER_H */

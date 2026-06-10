@@ -92,9 +92,18 @@ void Backend_CaptureIfRequested(void)
 #include "shaders/ps_luminance_alpha_bytes.h"
 #include "shaders/ps_composite_bytes.h"
 
-/* Dynamic buffer sizes */
-#define DYNAMIC_VB_SIZE  (128 * 1024)   /* 128 KB — handles ~4000 vertices */
-#define DYNAMIC_IB_SIZE  (32 * 1024)    /* 32 KB — handles ~16000 indices */
+/* Dynamic buffer sizes.
+ *
+ * [2026-06-08 streaming-ring] These were 128 KB / 32 KB — one draw's worth —
+ * because every draw call Map(WRITE_DISCARD)'d the whole buffer and drew from
+ * offset 0. At high draw counts (split-screen re-renders the scene per pane →
+ * 2000-3500 draws/frame) that DISCARD-per-draw exhausted the driver's
+ * buffer-rename ring and serialized the CPU on the GPU (50-100 ms frame spikes;
+ * see re/analysis/split_screen_perf_diagnostic_2026-06-08.md). They are now
+ * sized to hold several FRAMES of geometry so Backend_StreamUpload can append
+ * with WRITE_NO_OVERWRITE and only DISCARD on wrap (a handful of times/frame). */
+#define DYNAMIC_VB_SIZE  (16 * 1024 * 1024)  /* 16 MB — ~520k verts (several split-screen frames) */
+#define DYNAMIC_IB_SIZE  (4  * 1024 * 1024)  /* 4 MB  — ~2.0M indices */
 
 /* ========================================================================
  * Display window
@@ -626,10 +635,22 @@ static int Backend_CreateStateObjects(void)
     return 1;
 }
 
+/* [2026-06-08 streaming-ring] Running byte offsets into the dynamic VB/IB.
+ * Backend_StreamUpload appends here with WRITE_NO_OVERWRITE and resets to 0 (with
+ * a WRITE_DISCARD) only when an append would overrun the buffer. Shared by every
+ * draw path (td5_plat_render_draw_tris/_lines, Dev3_DrawPrimitive/Indexed) so the
+ * ring stays consistent across them. */
+static UINT s_vb_ring_offset = 0;
+static UINT s_ib_ring_offset = 0;
+
 static int Backend_CreateDynamicBuffers(void)
 {
     HRESULT hr;
     D3D11_BUFFER_DESC bd;
+
+    /* Fresh buffers — restart the ring so the first append DISCARDs. */
+    s_vb_ring_offset = 0;
+    s_ib_ring_offset = 0;
 
     /* Dynamic vertex buffer */
     ZeroMemory(&bd, sizeof(bd));
@@ -698,6 +719,82 @@ static int Backend_CreateDynamicBuffers(void)
             return 0;
         }
     }
+    return 1;
+}
+
+/* ========================================================================
+ * Backend_StreamUpload — streaming ring append for the dynamic VB/IB.
+ *
+ * Appends `vert_count` vertices (and, when `indices`!=NULL, `index_count`
+ * 16-bit indices) to the persistent dynamic buffers using WRITE_NO_OVERWRITE,
+ * falling back to WRITE_DISCARD only when an append would overrun a buffer (or on
+ * the first append after (re)creation). Each Map→memcpy→Unmap is immediately
+ * followed by the caller's Draw/DrawIndexed, so monotonically advancing the
+ * offset between draws never overwrites geometry the GPU has not yet consumed in
+ * this ring cycle; a DISCARD on wrap renames the buffer, keeping in-flight draws
+ * valid. This replaces the old per-draw WRITE_DISCARD that serialized the CPU on
+ * the GPU at high draw counts (split-screen).
+ *
+ * On success returns 1 and writes:
+ *   *out_base_vertex  -> BaseVertexLocation (DrawIndexed) / StartVertexLocation (Draw)
+ *   *out_start_index  -> StartIndexLocation (only when indices!=NULL)
+ * The caller binds the VB/IB at byte offset 0 and applies these offsets in the
+ * draw call. Returns 0 (caller should skip the draw) if a single batch is larger
+ * than the whole buffer or a Map fails. ===================================== */
+int Backend_StreamUpload(const void *verts, UINT vert_count, UINT stride,
+                         const void *indices, UINT index_count,
+                         UINT *out_base_vertex, UINT *out_start_index)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    D3D11_MAPPED_SUBRESOURCE m;
+    HRESULT hr;
+    UINT vbytes;
+
+    if (!ctx || !verts || vert_count == 0 || stride == 0) return 0;
+    vbytes = vert_count * stride;
+    if (vbytes > g_backend.dynamic_vb_size) return 0;   /* single batch too big */
+
+    /* Vertices: DISCARD on wrap / first append, else NO_OVERWRITE append. */
+    {
+        D3D11_MAP map_type;
+        if (s_vb_ring_offset + vbytes > g_backend.dynamic_vb_size) {
+            s_vb_ring_offset = 0;
+            map_type = D3D11_MAP_WRITE_DISCARD;
+        } else if (s_vb_ring_offset == 0) {
+            map_type = D3D11_MAP_WRITE_DISCARD;
+        } else {
+            map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
+        }
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_backend.dynamic_vb,
+            0, map_type, 0, &m);
+        if (FAILED(hr)) return 0;
+        memcpy((BYTE *)m.pData + s_vb_ring_offset, verts, vbytes);
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_backend.dynamic_vb, 0);
+        if (out_base_vertex) *out_base_vertex = s_vb_ring_offset / stride;
+        s_vb_ring_offset += vbytes;
+    }
+
+    if (indices && index_count > 0) {
+        UINT ibytes = index_count * (UINT)sizeof(unsigned short);  /* R16_UINT */
+        D3D11_MAP map_type;
+        if (ibytes > g_backend.dynamic_ib_size) return 0;
+        if (s_ib_ring_offset + ibytes > g_backend.dynamic_ib_size) {
+            s_ib_ring_offset = 0;
+            map_type = D3D11_MAP_WRITE_DISCARD;
+        } else if (s_ib_ring_offset == 0) {
+            map_type = D3D11_MAP_WRITE_DISCARD;
+        } else {
+            map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
+        }
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_backend.dynamic_ib,
+            0, map_type, 0, &m);
+        if (FAILED(hr)) return 0;
+        memcpy((BYTE *)m.pData + s_ib_ring_offset, indices, ibytes);
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_backend.dynamic_ib, 0);
+        if (out_start_index) *out_start_index = s_ib_ring_offset / (UINT)sizeof(unsigned short);
+        s_ib_ring_offset += ibytes;
+    }
+
     return 1;
 }
 

@@ -289,6 +289,11 @@ static int                     s_master_volume   = 40;
  * per-frame audio mix simply re-applies volume 0 until unmuted. Music (CD) uses
  * a separate path and is unaffected. */
 static int                     s_audio_muted     = 0;
+/* When set, all audio is silenced because the game window is NOT the foreground
+ * window (alt-tabbed away). Independent of s_audio_muted (the pause-menu mute):
+ * they OR together in audio_effective_cb so neither clobbers the other. Driven
+ * once per frame by td5_plat_audio_update_focus_mute(). */
+static int                     s_audio_focus_muted = 0;
 
 #define TD5_STREAM_BUFFER_BYTES 0x81600u
 
@@ -2654,6 +2659,7 @@ uint32_t td5_plat_input_device_nav(int enum_index)
     }
     if (js.rgbButtons[0] & 0x80) db |= 0x10;         /* A = confirm/select */
     if (js.rgbButtons[1] & 0x80) db |= 0x20;         /* B = back/cancel    */
+    if (js.rgbButtons[7] & 0x80) db |= 0x40;         /* Start / Menu        */
     return db;
 }
 
@@ -3476,7 +3482,7 @@ static void audio_build_vol_table(void)
 static LONG audio_effective_cb(int vol)
 {
     int cb;
-    if (s_audio_muted) return DSBVOLUME_MIN;
+    if (s_audio_muted || s_audio_focus_muted) return DSBVOLUME_MIN;
     if (vol < 0)   vol = 0;
     if (vol > 127) vol = 127;
     cb = s_vol_table[vol] + s_master_offset_cb;
@@ -3704,6 +3710,27 @@ void td5_plat_audio_set_muted(int muted)
     s_audio_muted = muted ? 1 : 0;
 }
 
+/* Mute all DirectSound output while the game window is not the foreground
+ * window; restore on refocus. Edge-triggered so it only acts on a focus
+ * change. Per-voice SFX pick up s_audio_focus_muted via audio_effective_cb on
+ * their next per-frame volume re-apply (looping engine/tyre voices update every
+ * frame); the ambient stream plays at a fixed volume that bypasses
+ * audio_effective_cb, so its buffer volume is set explicitly here. CD audio
+ * (MCI cdaudio) is a separate device and is left alone. */
+void td5_plat_audio_update_focus_mute(void)
+{
+    int focused = (!s_hwnd) || (GetForegroundWindow() == s_hwnd);
+    int want    = focused ? 0 : 1;
+    if (want == s_audio_focus_muted)
+        return;                       /* no change -> nothing to do */
+    s_audio_focus_muted = want;
+    if (s_audio_stream.buffer)
+        IDirectSoundBuffer_SetVolume(s_audio_stream.buffer,
+                                     want ? DSBVOLUME_MIN : DSBVOLUME_MAX);
+    TD5_LOG_I(LOG_TAG, "audio focus-mute: window %s -> %s",
+              focused ? "focused" : "unfocused", want ? "MUTED" : "unmuted");
+}
+
 int td5_plat_audio_stream_play(const char *wav_path, int loop)
 {
     TD5_WavFileInfo info;
@@ -3756,6 +3783,8 @@ int td5_plat_audio_stream_play(const char *wav_path, int loop)
     td5_stream_fill_half(1);
 
     IDirectSoundBuffer_SetCurrentPosition(s_audio_stream.buffer, 0);
+    if (s_audio_focus_muted)   /* started while alt-tabbed away: stay silent */
+        IDirectSoundBuffer_SetVolume(s_audio_stream.buffer, DSBVOLUME_MIN);
     IDirectSoundBuffer_Play(s_audio_stream.buffer, 0, 0, DSBPLAY_LOOPING);
     TD5_LOG_I(LOG_TAG, "Audio stream open: path=%s loop=%d size=%u",
               wav_path, loop, (unsigned int)info.data_size);
@@ -3960,24 +3989,30 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count)
 {
     ID3D11DeviceContext *ctx = g_backend.context;
-    D3D11_MAPPED_SUBRESOURCE mapped;
     UINT stride = TD5_VERTEX_STRIDE; /* 32 bytes */
     UINT offset = 0;
-    HRESULT hr;
+    UINT base_vertex = 0, start_index = 0;
+    int  has_idx;
 
     if (!ctx || !verts || vertex_count <= 0) return;
 
+    has_idx = (indices && index_count > 0);
+
     s_frame_draw_calls++;
     s_frame_vertices += vertex_count;
-    if (indices && index_count > 0)
+    if (has_idx)
         s_frame_indices += index_count;
 
-    /* Upload vertices to dynamic VB */
-    hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_backend.dynamic_vb,
-        0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    if (FAILED(hr)) return;
-    memcpy(mapped.pData, verts, (size_t)vertex_count * stride);
-    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_backend.dynamic_vb, 0);
+    /* [2026-06-08 streaming-ring] Append verts (+ indices) to the dynamic ring
+     * with WRITE_NO_OVERWRITE (DISCARD only on wrap) instead of a per-draw
+     * WRITE_DISCARD — the latter serialized the CPU on the GPU once the per-frame
+     * draw count climbed (split-screen). base_vertex/start_index address the
+     * appended slice; the VB/IB stay bound at byte offset 0. */
+    if (!Backend_StreamUpload(verts, (UINT)vertex_count, stride,
+                              has_idx ? (const void *)indices : NULL,
+                              has_idx ? (UINT)index_count : 0,
+                              &base_vertex, &start_index))
+        return;
 
     /* Bind VB, input layout, shaders */
     ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb,
@@ -3990,14 +4025,8 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
     /* Apply render state cache -> D3D11 state objects */
     Backend_ApplyStateCache();
 
-    if (indices && index_count > 0) {
+    if (has_idx) {
         /* Indexed draw */
-        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_backend.dynamic_ib,
-            0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-        if (FAILED(hr)) return;
-        memcpy(mapped.pData, indices, (size_t)index_count * sizeof(uint16_t));
-        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_backend.dynamic_ib, 0);
-
         ID3D11DeviceContext_IASetIndexBuffer(ctx, g_backend.dynamic_ib,
                                               DXGI_FORMAT_R16_UINT, 0);
         ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
@@ -4016,32 +4045,30 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                 ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
             }
         }
-        ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, 0, 0);
+        ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, start_index, (INT)base_vertex);
     } else {
         /* Non-indexed draw */
         ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
             D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11DeviceContext_Draw(ctx, (UINT)vertex_count, 0);
+        ID3D11DeviceContext_Draw(ctx, (UINT)vertex_count, base_vertex);
     }
 }
 
 void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
 {
     ID3D11DeviceContext *ctx = g_backend.context;
-    D3D11_MAPPED_SUBRESOURCE mapped;
     UINT stride = TD5_VERTEX_STRIDE;
     UINT offset = 0;
-    HRESULT hr;
+    UINT base_vertex = 0;
 
     if (!ctx || !verts || vert_count < 2) return;
     if (!g_backend.white_srv) return;
-    if ((size_t)vert_count * stride > g_backend.dynamic_vb_size) return;
 
-    hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_backend.dynamic_vb,
-        0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    if (FAILED(hr)) return;
-    memcpy(mapped.pData, verts, (size_t)vert_count * stride);
-    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_backend.dynamic_vb, 0);
+    /* [2026-06-08 streaming-ring] Append to the dynamic ring (DISCARD only on
+     * wrap) instead of a per-call WRITE_DISCARD; draw from base_vertex. */
+    if (!Backend_StreamUpload(verts, (UINT)vert_count, stride, NULL, 0,
+                              &base_vertex, NULL))
+        return;
 
     ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb,
                                            &stride, &offset);
@@ -4075,7 +4102,7 @@ void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
     ID3D11DeviceContext_OMSetBlendState(ctx,
         g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
 
-    ID3D11DeviceContext_Draw(ctx, (UINT)vert_count, 0);
+    ID3D11DeviceContext_Draw(ctx, (UINT)vert_count, base_vertex);
 
     /* Invalidate cached state-object indices so the next ApplyStateCache
      * actually re-binds (current_* values must mismatch what we just set). */
