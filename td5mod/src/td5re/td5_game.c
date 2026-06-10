@@ -1504,10 +1504,17 @@ int td5_game_init_race_session(void) {
             TD5_LOG_I(LOG_TAG, "InitRace step 0/19: REPLAY restoring saved seed=0x%08X",
                       session_seed);
         } else {
-            session_seed =
-                g_td5.ini.race_trace_enabled
-                    ? (uint32_t)0x1A2B3C4D
-                    : (uint32_t)GetTickCount();
+            TD5_NetRaceConfig ncfg;
+            if (g_td5.network_active && td5_net_get_race_config(&ncfg)) {
+                /* [S31] lockstep: every machine seeds from the host-broadcast
+                 * value (takes precedence over the trace fixed seed). */
+                session_seed = ncfg.rng_seed;
+                TD5_LOG_I(LOG_TAG, "InitRace step 0/19: NET seed=0x%08X", session_seed);
+            } else if (g_td5.ini.race_trace_enabled) {
+                session_seed = (uint32_t)0x1A2B3C4D;
+            } else {
+                session_seed = (uint32_t)GetTickCount();
+            }
             s_saved_race_seed = session_seed;   /* capture for a later View Replay */
         }
         srand(session_seed);

@@ -2712,6 +2712,31 @@ void frontend_init_race_schedule(void) {
     slot_ext_id[0]  = s_selected_car;
     slot_variant[0] = s_selected_paint;
 
+    /* [S31 NET 2026-06-10] Network race: identical grids everywhere. Fill the
+     * net-player slots from the host-broadcast config and reseed the CRT with
+     * the shared seed so the rand()-driven AI fill below picks the SAME cars
+     * on every machine. Lockstep has no state correction -- a different
+     * carparam on any slot is a permanent desync. */
+    if (g_td5.network_active) {
+        TD5_NetRaceConfig ncfg;
+        if (td5_net_get_race_config(&ncfg)) {
+            int np = td5_net_get_player_count();
+            if (np > TD5_MAX_RACER_SLOTS) np = TD5_MAX_RACER_SLOTS;
+            for (i = 0; i < np && i < 6; i++) {
+                slot_active[i]  = 1;
+                slot_ext_id[i]  = (ncfg.car_index[i] >= 0) ? ncfg.car_index[i] : 0;
+                slot_variant[i] = ncfg.paint_index[i];
+            }
+            srand(ncfg.rng_seed);
+            TD5_LOG_I(LOG_TAG,
+                      "InitRaceSchedule: net config applied (np=%d seed=0x%08X)",
+                      np, ncfg.rng_seed);
+        } else {
+            TD5_LOG_W(LOG_TAG,
+                      "InitRaceSchedule: network race WITHOUT a host config");
+        }
+    }
+
     /* In-race per-viewport identity (coloured frame + name plate): cleared for
      * every race, populated below only for the multiplayer flow. */
     td5_hud_clear_player_identities();

@@ -815,13 +815,24 @@ void Screen_NetworkLobby(void) {
         /* Dev hook: TD5RE_NET_LOBBY=1 boots straight into a host lobby (e.g.
          * --StartScreen=11) so the lobby UI can be inspected without a 2nd PC. */
         if (!s_network_active && getenv("TD5RE_NET_LOBBY")) {
+            const char *nl = getenv("TD5RE_NET_LOBBY");
             td5_net_init();
             td5_net_set_mode(TD5_NET_MODE_DIRECT);
-            td5_net_create_session_ex("DevLobby", frontend_net_player_name(), 6,
-                                      g_td5.ini.net_game_port, 0);
+            if (nl[0] == 'j' || nl[0] == 'J') {
+                /* dev: join a loopback host (2-instance lockstep testing) */
+                td5_net_join_direct("127.0.0.1", g_td5.ini.net_game_port,
+                                    frontend_net_player_name());
+            } else {
+                td5_net_create_session_ex("DevLobby", frontend_net_player_name(), 6,
+                                          g_td5.ini.net_game_port, 0);
+            }
             s_network_active = 1;
         }
 #endif
+
+        /* S31: (re)announce this machine's car pick to the host -- runs on
+         * every lobby entry, including the return from CHANGE CAR. */
+        td5_net_set_local_car(s_selected_car, s_selected_paint);
 
         /* Kick check: if kicked flag set, destroy session, go to SessionLocked */
         if (s_kicked_flag) {
@@ -961,12 +972,40 @@ void Screen_NetworkLobby(void) {
                 s_participant_flags[slot] = td5_net_is_slot_active(slot) ? 1 : 0;
         }
 
+#ifndef TD5RE_RELEASE
+        /* Dev hook: TD5RE_NET_AUTOSTART=1 -- the host fires START automatically
+         * once a client has joined (headless 2-instance lockstep testing). */
+        {
+            static int s_dev_autostart_done = 0;
+            if (!s_dev_autostart_done && getenv("TD5RE_NET_AUTOSTART") &&
+                frontend_net_is_host() && td5_net_get_player_count() >= 2) {
+                s_dev_autostart_done = 1;
+                TD5_LOG_I(LOG_TAG, "NetworkLobby: dev autostart (players=%d)",
+                          td5_net_get_player_count());
+                s_lobby_action = 2;
+                s_inner_state = 5;
+                return;
+            }
+        }
+#endif
+
         /* S10: a client auto-launches into the race once the host's DXPSTART
          * rendezvous has activated lockstep sync (td5_net_is_active). The host
          * launches via state 5 -> 0x10 -> 0x11. */
         if ((s_lobby_action == 3) ||
             (!frontend_net_is_host() && td5_net_is_active())) {
             TD5_LOG_I(LOG_TAG, "NetworkLobby: client race start (sync active)");
+            /* S31: adopt the host's race config before building the schedule. */
+            {
+                TD5_NetRaceConfig ncfg;
+                if (td5_net_get_race_config(&ncfg)) {
+                    s_selected_track  = ncfg.track_index;
+                    s_track_direction = ncfg.reverse_direction;
+                    TD5_LOG_I(LOG_TAG,
+                              "NetworkLobby: adopted host config track=%d dir=%d seed=0x%08X",
+                              ncfg.track_index, ncfg.reverse_direction, ncfg.rng_seed);
+                }
+            }
             s_launching_net_race = 1;
             s_race_active_flag = 1;
             frontend_init_race_schedule();
@@ -1262,8 +1301,33 @@ void Screen_NetworkLobby(void) {
         s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 8) {
             s_race_active_flag = 1;
-            /* Send DXPSTART (message type 4) */
-            frontend_net_send(4, s_participant_flags, 0);
+            /* S31: build the authoritative race config and broadcast it in the
+             * DXPSTART payload -- seed, track, direction, per-slot cars. The
+             * clients adopt it before running their race schedule; the host's
+             * own schedule reads back the archived copy, so every machine
+             * builds the identical grid from the identical RNG stream. */
+            {
+                TD5_NetRaceConfig cfg;
+                int slot, c, p;
+                memset(&cfg, 0, sizeof(cfg));
+                cfg.rng_seed          = (uint32_t)td5_plat_time_ms() ^
+                                        ((uint32_t)rand() << 16);
+                cfg.track_index       = s_selected_track;
+                cfg.reverse_direction = s_track_direction;
+                cfg.lap_count         = 4;   /* net races force 4-lap drag mode */
+                for (slot = 0; slot < 6; slot++) {
+                    cfg.car_index[slot]   = 0;
+                    cfg.paint_index[slot] = 0;
+                    if (td5_net_get_slot_car(slot, &c, &p) && c >= 0) {
+                        cfg.car_index[slot]   = c;
+                        cfg.paint_index[slot] = p;
+                    }
+                }
+                frontend_net_send(4, &cfg, (int)sizeof(cfg));
+                TD5_LOG_I(LOG_TAG,
+                          "NetworkLobby: DXPSTART config seed=0x%08X track=%d dir=%d",
+                          cfg.rng_seed, cfg.track_index, cfg.reverse_direction);
+            }
             s_inner_state = 0x11;
         }
         break;

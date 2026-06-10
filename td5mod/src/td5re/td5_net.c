@@ -77,6 +77,7 @@
 #define WS2_DISC_PING        6   /* host -> client RTT probe (token = send time) */
 #define WS2_DISC_PONG        7   /* client -> host echo                          */
 #define WS2_DISC_ROSTER_INFO 8   /* host -> all: per-slot names + latency        */
+#define WS2_DISC_CAR_INFO    9   /* client -> host: my car/paint pick (S31)      */
 
 /** JOIN_NAK reason codes (also surfaced via td5_net_get_join_nak_reason). */
 #define WS2_NAK_FULL         1
@@ -255,6 +256,14 @@ typedef struct DiscoveryMsg {
 } DiscoveryMsg;
 
 /* PING/PONG RTT probe (small; magic-tagged on the game socket). */
+typedef struct CarInfoMsg {          /* S31: client announces its car pick */
+    uint32_t    magic;
+    uint32_t    disc_type;           /* WS2_DISC_CAR_INFO */
+    uint32_t    slot;
+    int32_t     car;
+    int32_t     paint;
+} CarInfoMsg;
+
 typedef struct PingMsg {
     uint32_t    magic;
     uint32_t    disc_type;
@@ -275,6 +284,16 @@ typedef struct RosterInfoMsg {
 
 /* --- Winsock2 UDP backend state --- */
 static SOCKET       s_ws2_socket = INVALID_SOCKET;
+
+/* --- S31: race-config replication state ---------------------------------
+ * s_race_config is armed on the host when it broadcasts DXPSTART (the same
+ * bytes the clients get) and on clients when DXPSTART arrives. Consumers
+ * (race schedule, InitRace seeding) gate on g_td5.network_active, so a
+ * stale config from an earlier session cannot leak into local races. */
+static TD5_NetRaceConfig s_race_config;
+static int     s_race_config_valid = 0;
+static int32_t s_slot_car[TD5_NET_MAX_PLAYERS]   = { -1, -1, -1, -1, -1, -1 };
+static int32_t s_slot_paint[TD5_NET_MAX_PLAYERS] = { 0 };
 static WSAEVENT     s_ws2_event = WSA_INVALID_EVENT;
 static int          s_ws2_started;
 static int          s_ws2_socket_bound;
@@ -660,32 +679,32 @@ static void handle_data_targeted(uint32_t sender, const void *data, int size)
 static void handle_start(uint32_t sender, const void *data, int size)
 {
     (void)sender;
-    (void)data;
-    (void)size;
 
     TD5_LOG_I(NET_LOG, "Received DXPSTART");
+
+    /* S31: the payload (after the type dword) carries the host's race config
+     * -- adopt it so this machine launches the same track/cars/seed. */
+    if (data && size >= 4 + (int)sizeof(TD5_NetRaceConfig)) {
+        memcpy(&s_race_config, (const uint8_t *)data + 4, sizeof(TD5_NetRaceConfig));
+        s_race_config_valid = 1;
+        TD5_LOG_I(NET_LOG, "DXPSTART config: seed=0x%08X track=%d dir=%d",
+                  s_race_config.rng_seed, s_race_config.track_index,
+                  s_race_config.reverse_direction);
+    } else {
+        TD5_LOG_W(NET_LOG, "DXPSTART without race config (size=%d)", size);
+    }
 
     /* Queue for game thread */
     ring_push(TD5_DXPSTART, NULL, 0);
 
-    /* Auto-reply with ACK_REPLY if we are a client */
-    if (!s_is_host) {
-        uint32_t reply_type = TD5_DXPACK_REPLY;
-        send_to_player(s_roster[s_local_slot].id, reply_type, &reply_type, 4);
-        /* Actually send to host, not to self */
-        if (s_transport_send) {
-            uint32_t buf[1] = { TD5_DXPACK_REPLY };
-            /* Find host ID */
-            int i;
-            for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
-                if (s_roster[i].active && i != s_local_slot) {
-                    /* In the original, send to g_hostDirectPlayPlayerId.
-                       We find the host slot (slot with lowest ID or marked host). */
-                    break;
-                }
-            }
-            s_transport_send(0, buf, 4); /* send to host (id 0 = host convention) */
-        }
+    /* Reply with a SINGLE ACK_REPLY to the host. (A previous version also
+     * called send_to_player(own id, ...), which the client-side address
+     * fallback ALSO routed to the host -- with >=2 clients the resulting
+     * double-ACK could zero the host's pending-ack counter before every
+     * client had actually acked.) */
+    if (!s_is_host && s_transport_send) {
+        uint32_t one[1] = { TD5_DXPACK_REPLY };
+        s_transport_send(0, one, 4); /* id 0 routes to the host on clients */
     }
 }
 
@@ -1763,6 +1782,19 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
         }
         break;
 
+    case WS2_DISC_CAR_INFO:
+        /* S31: a client announced its car/paint pick. Host-only. */
+        if (s_is_host && size >= (int)sizeof(CarInfoMsg)) {
+            const CarInfoMsg *cm = (const CarInfoMsg *)buf;
+            if (cm->slot < TD5_NET_MAX_PLAYERS) {
+                s_slot_car[cm->slot]   = cm->car;
+                s_slot_paint[cm->slot] = cm->paint;
+                TD5_LOG_I(NET_LOG, "CAR_INFO: slot %u car=%d paint=%d",
+                          cm->slot, cm->car, cm->paint);
+            }
+        }
+        break;
+
     case WS2_DISC_PONG:
         /* Host: RTT = now - token for the slot this address belongs to. */
         if (s_is_host && size >= (int)sizeof(PingMsg)) {
@@ -2755,15 +2787,20 @@ merge_and_broadcast:
     s_outbound_frame.frame_delta_time = *frame_dt;
     s_outbound_frame.sync_sequence = s_sync_sequence;
 
+    /* Reset per-frame receive flags BEFORE broadcasting [S31 deadlock fix]:
+     * a client sends its NEXT frame the instant the broadcast lands, and on
+     * a low-latency link that next frame can beat a post-broadcast wipe --
+     * its received flag would be erased and both sides stall to the 20 s
+     * timeout. Clearing first is race-free: no client can send frame N+1
+     * until it has seen broadcast N. */
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        s_player_sync_received[i] = 0;
+
     /* Broadcast to all players (DPID=0 = broadcast) */
     send_frame_to_all(&s_outbound_frame);
 
     /* Increment sequence counter */
     s_sync_sequence++;
-
-    /* Reset per-frame receive flags */
-    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
-        s_player_sync_received[i] = 0;
 
     /* 5. Copy merged controlBits back to caller */
     for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
@@ -2827,12 +2864,17 @@ int td5_net_handle_client_frame(uint32_t *control_bits, float *frame_dt)
         }
     }
 
-    if (s_transport_send)
-        s_transport_send(host_id, &send_frame, FRAME_MSG_SIZE);
-
-    /* 4. Wait for host's broadcast */
+    /* 4. Arm the wait BEFORE sending [S31 deadlock fix]: on a low-latency
+     * link the host's broadcast can land before a post-send ResetEvent, and
+     * resetting then throws the auto-reset signal away -> both sides stall
+     * to the 20 s timeout. The broadcast for THIS frame cannot precede our
+     * own send (the host needs our input to merge), so arming first is
+     * race-free. */
     s_waiting_for_frame_ack = 1;
     ResetEvent(s_evt_frame_ack);
+
+    if (s_transport_send)
+        s_transport_send(host_id, &send_frame, FRAME_MSG_SIZE);
 
     wait_result = WaitForSingleObject(s_evt_frame_ack, SYNC_TIMEOUT_MS);
     s_waiting_for_frame_ack = 0;
@@ -2946,6 +2988,50 @@ int td5_net_enumerate_sessions(void)
  *   - Type 9 (DISCONNECT): targeted to specific player
  *   - Type 10 (RESYNCREQ): targeted to each active client (sets up ack counters)
  */
+/* ========================================================================
+ * S31 -- race-config replication API
+ * ======================================================================== */
+
+/** Record this machine's car/paint pick; clients also announce it to the
+ *  host over the control channel. Called on every lobby entry (including
+ *  the return from CHANGE CAR). */
+void td5_net_set_local_car(int car_index, int paint_index)
+{
+    if (s_local_slot >= 0 && s_local_slot < TD5_NET_MAX_PLAYERS) {
+        s_slot_car[s_local_slot]   = car_index;
+        s_slot_paint[s_local_slot] = paint_index;
+    }
+    if (!s_is_host && s_ws2_socket != INVALID_SOCKET && s_local_slot >= 0) {
+        CarInfoMsg msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.magic     = WS2_DISCOVERY_MAGIC;
+        msg.disc_type = WS2_DISC_CAR_INFO;
+        msg.slot      = (uint32_t)s_local_slot;
+        msg.car       = car_index;
+        msg.paint     = paint_index;
+        sendto(s_ws2_socket, (const char *)&msg, (int)sizeof(msg), 0,
+               (const struct sockaddr *)&s_ws2_host_addr,
+               (int)sizeof(s_ws2_host_addr));
+    }
+}
+
+/** Host: the latest announced car/paint for a slot (-1 car = none yet). */
+int td5_net_get_slot_car(int slot, int *car_index, int *paint_index)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS) return 0;
+    if (car_index)   *car_index   = s_slot_car[slot];
+    if (paint_index) *paint_index = s_slot_paint[slot];
+    return 1;
+}
+
+/** The armed race config (host: as broadcast; client: as received). */
+int td5_net_get_race_config(TD5_NetRaceConfig *out)
+{
+    if (!s_race_config_valid) return 0;
+    if (out) *out = s_race_config;
+    return 1;
+}
+
 int td5_net_send(TD5_NetMsgType type, const void *data, int size)
 {
     uint8_t buf[RING_ENTRY_SIZE];
@@ -2984,12 +3070,17 @@ int td5_net_send(TD5_NetMsgType type, const void *data, int size)
         if (!s_is_host) return 0;
         s_pending_ack_count = 0;
         s_expected_ack_count = 0;
+        /* S31: archive the race config we are about to broadcast so the
+         * host's own launch path reads the exact bytes the clients get. */
+        if (data && size >= (int)sizeof(TD5_NetRaceConfig)) {
+            memcpy(&s_race_config, data, sizeof(TD5_NetRaceConfig));
+            s_race_config_valid = 1;
+        }
         for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
             if (i == s_local_slot) continue;
             if (s_roster[i].active) {
-                /* Check if this slot is participating (from data bitmask) */
-                uint32_t start_msg[1] = { TD5_DXPSTART };
-                s_transport_send(s_roster[i].id, start_msg, 4);
+                /* S31: the full payload (race config) rides with the START */
+                s_transport_send(s_roster[i].id, buf, total_size);
                 s_pending_ack_count++;
                 s_expected_ack_count++;
             }
