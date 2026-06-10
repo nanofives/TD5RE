@@ -4928,6 +4928,78 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
 #define SHADOW_PULL_VIEWZ       (2.0f)
 #define SHADOW_DEPTH_Z_BIAS     (SHADOW_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
 
+/* ============================================================================
+ * Terrain-conforming raycast vehicle shadow (2026-06-10 overhaul)
+ *
+ * Replaces the single flat 4-corner SHADOW-blob quad (render_vehicle_shadow_
+ * quad_legacy below) with a tessellated mesh that is RAYCAST DOWN onto the
+ * actual track surface at every grid node, so the shadow hugs slopes / crests /
+ * dips instead of clipping through or floating over them (the long-standing
+ * "tail visible depending on angle" class documented on the legacy path). It is
+ * also TEXTURE-FREE: softness and the rounded-car-blob shape come entirely from
+ * per-vertex alpha, so the SHADOW.png atlas sprite is no longer sampled (one
+ * more retired FX PNG).
+ *
+ * "Ray cast from above" == the proven physics ground query: seed a transient
+ * TD5_TrackProbeState at the actor's current span, single-step-walk it to each
+ * node's XZ (td5_track_update_probe_position), then read the barycentric ground
+ * height there (td5_track_compute_contact_height_with_normal). This is exactly
+ * the per-body-corner contact refresh pattern in td5_physics.c (~6668).
+ *
+ * Cost control: the grid is rebuilt at most ONCE per sim tick per actor. The
+ * walks are integer span math, but split-screen would otherwise re-pay them per
+ * pane per frame. Within a tick every viewport reuses the cached world-space
+ * grid and only re-applies the cheap per-frame sub-tick velocity shift, so the
+ * shadow stays view-consistent AND frame-rate-independent.
+ *
+ * A/B: env TD5RE_SHADOW_RAYCAST=0 falls back to the legacy textured quad.
+ * ==========================================================================*/
+
+#define SHADOW_GRID_COLS    7   /* nodes across the car's width (lateral)      */
+#define SHADOW_GRID_ROWS    9   /* nodes along the car's length (longitudinal) */
+#define SHADOW_GRID_NODES   (SHADOW_GRID_COLS * SHADOW_GRID_ROWS)
+#define SHADOW_GRID_CELLS   ((SHADOW_GRID_COLS - 1) * (SHADOW_GRID_ROWS - 1))
+
+/* 1x1 white texture page (shared id with the HUD pause dimmer) so the standard
+ * (texture * vertex) pixel path returns pure vertex colour — the shadow carries
+ * black RGB + soft alpha, no atlas page. */
+#define SHADOW_WHITE_TEX_PAGE   899
+
+/* Centre darkness of the drop shadow (alpha at the footprint centre). With the
+ * SHADOW preset's SRCALPHA/INVSRCALPHA blend + black RGB, the ground beneath the
+ * centre is multiplied by (1 - alpha). */
+#define SHADOW_CENTRE_ALPHA     (0.86f)
+
+/* Separable rounded-rectangle falloff (per car axis, NOT radial): on each of
+ * the lateral / longitudinal axes the alpha is full out to *_PLATEAU of the
+ * half-extent, then smoothsteps to zero by *_EDGE. The product of the two axis
+ * factors fills the car's oriented footprint (longer than wide) with rounded
+ * corners and a clearly defined feathered rim — reads as the car's shape rather
+ * than the inscribed oval the old radial falloff produced. */
+#define SHADOW_FALLOFF_PLATEAU  (0.62f)
+#define SHADOW_FALLOFF_EDGE     (1.00f)
+
+typedef struct {
+    float    base[SHADOW_GRID_NODES][3]; /* world-space node pos at sim-tick time  */
+    uint8_t  alpha[SHADOW_GRID_NODES];   /* baked soft footprint alpha (0..255)     */
+    uint32_t built_tick;                 /* simulation_tick_counter at build        */
+    int      valid;
+} ShadowGrid;
+
+static ShadowGrid s_shadow_grid[TD5_MAX_TOTAL_ACTORS];
+static int        s_shadow_white_uploaded = 0;
+
+/* A/B toggle (cached once): TD5RE_SHADOW_RAYCAST=0 -> legacy textured quad. */
+static int shadow_raycast_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_SHADOW_RAYCAST");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
 static float s_shadow_u0, s_shadow_v0, s_shadow_u1, s_shadow_v1;
@@ -4970,7 +5042,7 @@ static void shadow_lookup_static_hed(void)
  *   vertices directly through td5_plat_render_draw_tris, no scratch buffer.
  *   UV mapping fix at td5_render.c:3796 (commit d0abaad) verified
  *   [CONFIRMED @ 0x0040BB70 / @ 0x00432BD0] inline. */
-static void render_vehicle_shadow_quad(const TD5_Actor *actor)
+static void render_vehicle_shadow_quad_legacy(const TD5_Actor *actor)
 {
     if (!actor) return;
     if (!s_shadow_lookup_done) shadow_lookup_static_hed();
@@ -5134,6 +5206,241 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
     /* Restore opaque preset so the next per-actor draw starts from a known
      * z_test=1/z_write=1 state. */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* smoothstep(a,b,x) clamped to [0,1]. */
+static float shadow_smoothstep(float a, float b, float x)
+{
+    if (x <= a) return 0.0f;
+    if (x >= b) return 1.0f;
+    float t = (x - a) / (b - a);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+/* Build the terrain-conforming shadow grid for `actor` at the current sim tick:
+ * bilinear footprint XZ from the four outward-scaled wheel probes, a downward
+ * raycast at every node for the true ground Y, and the baked soft footprint
+ * alpha. Stored in world space at sub-tick fraction 0 (the per-frame sub-tick
+ * shift is applied at projection time). */
+static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
+{
+    const float inv256 = 1.0f / 256.0f;
+
+    /* Four footprint corners in render units (world/256), order FL,FR,RL,RR.
+     * The bilinear basis maps tF (front->back) and tR (left->right). */
+    const TD5_Vec3_Fixed *pr[4] = {
+        &actor->probe_FL, &actor->probe_FR, &actor->probe_RL, &actor->probe_RR
+    };
+    float corner[4][2]; /* XZ only — Y comes from the per-node raycast */
+    float cornerY[4];   /* the four wheel-contact Ys = the ground/wheel plane    */
+    float cx = 0.0f, cz = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        corner[i][0] = (float)pr[i]->x * inv256;
+        corner[i][1] = (float)pr[i]->z * inv256;
+        cornerY[i]   = (float)pr[i]->y * inv256;
+        cx += corner[i][0];
+        cz += corner[i][1];
+    }
+    cx *= 0.25f; cz *= 0.25f;
+    /* Scale the footprint outward from the centroid (body overhang past the
+     * wheels) — same footprint as the legacy SHADOW_CORNER_SCALE quad. */
+    for (int i = 0; i < 4; i++) {
+        corner[i][0] = cx + (corner[i][0] - cx) * SHADOW_CORNER_SCALE;
+        corner[i][1] = cz + (corner[i][1] - cz) * SHADOW_CORNER_SCALE;
+    }
+
+    /* Per-node ground Y is clamped to this band. CEILING = the highest wheel
+     * contact (maxWY): the shadow may never rise ABOVE the wheel plane, because
+     * the car body sits above that plane — so the shadow can no longer climb
+     * onto the rear/side of the car (the angle-dependent "shadow on the car").
+     * It also catches a scaled-out node whose single-step ground walk lands on a
+     * mis-extrapolated span and returns a bogus-high Y. FLOOR is generous (one
+     * footprint half-length below the lowest wheel) so real dips still show. */
+    float minWY = cornerY[0], maxWY = cornerY[0];
+    for (int i = 1; i < 4; i++) {
+        if (cornerY[i] < minWY) minWY = cornerY[i];
+        if (cornerY[i] > maxWY) maxWY = cornerY[i];
+    }
+    float fmx = 0.5f * (corner[0][0] + corner[1][0]); /* front-edge midpoint */
+    float fmz = 0.5f * (corner[0][1] + corner[1][1]);
+    float bmx = 0.5f * (corner[2][0] + corner[3][0]); /* back-edge midpoint  */
+    float bmz = 0.5f * (corner[2][1] + corner[3][1]);
+    float half_len = 0.5f * sqrtf((fmx - bmx) * (fmx - bmx) + (fmz - bmz) * (fmz - bmz));
+    float floorY = minWY - half_len;
+
+    int max_sp    = td5_track_get_span_count();
+    int seed_span = (int)actor->track_span_raw;
+    if (seed_span < 0) seed_span = 0;
+    if (max_sp > 0 && seed_span >= max_sp) seed_span = max_sp - 1;
+    int seed_lane = (int)actor->track_sub_lane_index;
+
+    for (int r = 0; r < SHADOW_GRID_ROWS; r++) {
+        float tF = (SHADOW_GRID_ROWS > 1) ? (float)r / (float)(SHADOW_GRID_ROWS - 1) : 0.0f;
+        for (int c = 0; c < SHADOW_GRID_COLS; c++) {
+            float tR = (SHADOW_GRID_COLS > 1) ? (float)c / (float)(SHADOW_GRID_COLS - 1) : 0.0f;
+            int   n  = r * SHADOW_GRID_COLS + c;
+
+            /* Bilinear XZ between the four corners (front edge FL->FR, back RL->RR). */
+            float fx = (1.0f - tR) * corner[0][0] + tR * corner[1][0]; /* front */
+            float fz = (1.0f - tR) * corner[0][1] + tR * corner[1][1];
+            float bx = (1.0f - tR) * corner[2][0] + tR * corner[3][0]; /* back  */
+            float bz = (1.0f - tR) * corner[2][1] + tR * corner[3][1];
+            float nx = (1.0f - tF) * fx + tF * bx;
+            float nz = (1.0f - tF) * fz + tF * bz;
+
+            /* Ray cast from above: resolve the containing span at this node
+             * (single-step walk seeded at the chassis span), then read the
+             * barycentric ground height. Same calls physics uses per body
+             * corner — captures cross-span slope/crest that a flat quad misses. */
+            int32_t nx_fp = (int32_t)lroundf(nx * 256.0f);
+            int32_t nz_fp = (int32_t)lroundf(nz * 256.0f);
+            int32_t gy    = 0;
+            if (max_sp > 0) {
+                TD5_TrackProbeState probe;
+                memset(&probe, 0, sizeof(probe));
+                probe.span_index     = (int16_t)seed_span;
+                probe.sub_lane_index = (int8_t)seed_lane;
+                td5_track_update_probe_position(&probe, nx_fp, nz_fp);
+                int ps = (int)probe.span_index;
+                int pl = (int)probe.sub_lane_index;
+                if (ps < 0) ps = 0;
+                if (ps >= max_sp) ps = max_sp - 1;
+                gy = td5_track_compute_contact_height_with_normal(ps, pl, nx_fp, nz_fp, NULL);
+            }
+
+            float ny = (float)gy * inv256;
+            if (ny > maxWY) ny = maxWY;   /* never above the wheel plane -> never on the car body */
+            if (ny < floorY) ny = floorY; /* generous floor so real dips still show */
+
+            g->base[n][0] = nx;
+            g->base[n][1] = ny;
+            g->base[n][2] = nz;
+
+            /* Soft footprint alpha: SEPARABLE rounded-rectangle falloff. Each
+             * car axis (lateral |u|, longitudinal |v|) stays full out to the
+             * plateau then feathers to the footprint edge; the product fills the
+             * oriented rectangle with rounded corners and a defined rim, so the
+             * shadow reads as the car's shape rather than an oval. */
+            float au   = fabsf((tR - 0.5f) * 2.0f);  /* 0 centre .. 1 lateral edge      */
+            float av   = fabsf((tF - 0.5f) * 2.0f);  /* 0 centre .. 1 longitudinal edge */
+            float fu   = 1.0f - shadow_smoothstep(SHADOW_FALLOFF_PLATEAU, SHADOW_FALLOFF_EDGE, au);
+            float fv   = 1.0f - shadow_smoothstep(SHADOW_FALLOFF_PLATEAU, SHADOW_FALLOFF_EDGE, av);
+            float fall = fu * fv;
+            int ai = (int)(fall * SHADOW_CENTRE_ALPHA * 255.0f + 0.5f);
+            if (ai < 0)   ai = 0;
+            if (ai > 255) ai = 255;
+            g->alpha[n] = (uint8_t)ai;
+        }
+    }
+
+    g->built_tick = (uint32_t)g_td5.simulation_tick_counter;
+    g->valid      = 1;
+}
+
+/* Texture-free, terrain-conforming vehicle shadow: project the cached raycast
+ * grid (rebuilt once per sim tick) with the per-frame sub-tick shift and draw it
+ * as a soft vertex-alpha mesh. */
+static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
+{
+    if (!actor) return;
+    int slot = (int)actor->slot_index;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+
+    /* Lazily upload the 1x1 white texture (an identical re-upload to the shared
+     * HUD-dimmer page is harmless). Texture-free shadow == white * vertex. */
+    if (!s_shadow_white_uploaded) {
+        static const uint32_t k_white = 0xFFFFFFFFu;
+        td5_plat_render_upload_texture(SHADOW_WHITE_TEX_PAGE, &k_white, 1, 1, 2);
+        s_shadow_white_uploaded = 1;
+    }
+
+    ShadowGrid *g    = &s_shadow_grid[slot];
+    uint32_t    tick = (uint32_t)g_td5.simulation_tick_counter;
+    if (!g->valid || g->built_tick != tick)
+        shadow_build_grid(actor, g);
+
+    /* Per-frame sub-tick shift so the shadow tracks the car smoothly between sim
+     * ticks (mirrors the legacy corner interpolation and the car mesh). */
+    extern float g_subTickFraction;
+    const float inv256 = 1.0f / 256.0f;
+    const float frac   = g_subTickFraction;
+    const float dx = (float)actor->linear_velocity_x * frac * inv256;
+    const float dy = (float)actor->linear_velocity_y * frac * inv256;
+    const float dz = (float)actor->linear_velocity_z * frac * inv256;
+
+    TD5_D3DVertex verts[SHADOW_GRID_NODES];
+    for (int n = 0; n < SHADOW_GRID_NODES; n++) {
+        float wx = g->base[n][0] + dx;
+        float wy = g->base[n][1] + dy + SHADOW_VERTICAL_OFFSET;
+        float wz = g->base[n][2] + dz;
+
+        float ddx = wx - s_camera_pos[0];
+        float ddy = wy - s_camera_pos[1];
+        float ddz = wz - s_camera_pos[2];
+
+        /* camera_basis is row-major { right, up, forward } */
+        float vx = ddx * s_camera_basis[0] + ddy * s_camera_basis[1] + ddz * s_camera_basis[2];
+        float vy = ddx * s_camera_basis[3] + ddy * s_camera_basis[4] + ddz * s_camera_basis[5];
+        float vz = ddx * s_camera_basis[6] + ddy * s_camera_basis[7] + ddz * s_camera_basis[8];
+
+        /* The whole ground patch sits under/just in front of the car; if any
+         * node falls behind the near plane the shadow is off-screen — skip it
+         * (matches the legacy quad's near-clip reject). */
+        if (vz <= s_near_clip) return;
+
+        float inv_z = 1.0f / vz;
+        verts[n].screen_x = -vx * s_focal_length * inv_z + s_center_x;
+        verts[n].screen_y = -vy * s_focal_length * inv_z + s_center_y;
+        verts[n].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - SHADOW_DEPTH_Z_BIAS;
+        verts[n].rhw      = inv_z;
+        verts[n].diffuse  = ((uint32_t)g->alpha[n] << 24); /* black RGB + soft alpha (BGRA) */
+        verts[n].specular = 0;
+        verts[n].tex_u    = 0.0f;
+        verts[n].tex_v    = 0.0f;
+    }
+
+    /* Triangulate the grid: two tris per cell, winding matched to the legacy
+     * quad (a,b,e then a,e,d == FL,FR,RR then FL,RR,RL). */
+    uint16_t idx[SHADOW_GRID_CELLS * 6];
+    int ii = 0;
+    for (int r = 0; r < SHADOW_GRID_ROWS - 1; r++) {
+        for (int c = 0; c < SHADOW_GRID_COLS - 1; c++) {
+            uint16_t a = (uint16_t)(r * SHADOW_GRID_COLS + c);
+            uint16_t b = (uint16_t)(a + 1);
+            uint16_t d = (uint16_t)(a + SHADOW_GRID_COLS);
+            uint16_t e = (uint16_t)(d + 1);
+            idx[ii++] = a; idx[ii++] = b; idx[ii++] = e;
+            idx[ii++] = a; idx[ii++] = e; idx[ii++] = d;
+        }
+    }
+
+    static int s_logged = 0;
+    if (!s_logged) {
+        s_logged = 1;
+        TD5_LOG_I(LOG_TAG,
+                  "shadow: conforming raycast mesh %dx%d (%d nodes, %d tris) "
+                  "texture-free, first tick=%u",
+                  SHADOW_GRID_COLS, SHADOW_GRID_ROWS, SHADOW_GRID_NODES,
+                  SHADOW_GRID_CELLS * 2, tick);
+    }
+
+    flush_immediate_internal();
+    /* TD5_PRESET_SHADOW: z_write=0, SRCALPHA/INVSRCALPHA, point filter. */
+    td5_plat_render_set_preset(TD5_PRESET_SHADOW);
+    td5_plat_render_bind_texture(SHADOW_WHITE_TEX_PAGE);
+    td5_plat_render_draw_tris(verts, SHADOW_GRID_NODES, idx, ii);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* Dispatcher (keeps the name the per-view shadow pre-pass calls): the new
+ * conforming raycast mesh by default, the legacy textured quad when the A/B
+ * env knob TD5RE_SHADOW_RAYCAST=0 is set. */
+static void render_vehicle_shadow_quad(const TD5_Actor *actor)
+{
+    if (shadow_raycast_enabled())
+        render_vehicle_shadow_conforming(actor);
+    else
+        render_vehicle_shadow_quad_legacy(actor);
 }
 
 /* --- Vehicle Brake Lights (0x4011C0) --- */
