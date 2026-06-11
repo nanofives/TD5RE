@@ -76,6 +76,7 @@ int  td5_net_enumerate_sessions(void);
 /* --- Messaging --- */
 int  td5_net_send(TD5_NetMsgType type, const void *data, int size);
 int  td5_net_receive(TD5_NetMsgType *type, void **data, int *size);
+void td5_net_race_done(void);
 
 /* --- State query --- */
 int  td5_net_is_host(void);

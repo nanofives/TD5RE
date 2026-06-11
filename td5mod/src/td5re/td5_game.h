@@ -133,6 +133,7 @@ int td5_game_is_split_screen(void);
  * the per-viewport HUD modal). Source-port feature (no original equivalent). */
 int td5_game_device_disconnect_active(void);
 int td5_game_player_disconnected(int player);
+int td5_game_net_remote_pause_slot(void);
 #ifndef TD5RE_RELEASE
 void td5_game_debug_toggle_sim_device_loss(int player);  /* F9 dev test hook */
 #endif

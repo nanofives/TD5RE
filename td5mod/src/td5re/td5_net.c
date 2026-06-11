@@ -1335,13 +1335,24 @@ static int ws2_transport_enum(void)
         if (resp.disc_type != WS2_DISC_ANNOUNCE) continue;
         if (resp.sealed) continue;
 
-        /* Dedup by host address+game port (a host answers each rebroadcast). */
+        /* Dedup by host address+game port (a host answers each rebroadcast).
+         * A SAME-MACHINE host answers the browse query twice -- once via the
+         * broadcast (reply sourced from the LAN adapter IP) and once via the
+         * explicit loopback send (reply from 127.0.0.1) -- so an announce
+         * whose source or stored twin is loopback with the same name+port is
+         * the same session, not a second one. */
         dup = 0; slot = s_enum_session_count;
         for (i = 0; i < s_enum_session_count; i++) {
-            if (s_ws2_enum_host_addrs[i].sin_addr.s_addr == from_addr.sin_addr.s_addr &&
-                s_ws2_enum_host_addrs[i].sin_port == htons(resp.game_port)) {
-                slot = i; dup = 1; break;
-            }
+            int same_addr =
+                (s_ws2_enum_host_addrs[i].sin_addr.s_addr == from_addr.sin_addr.s_addr &&
+                 s_ws2_enum_host_addrs[i].sin_port == htons(resp.game_port));
+            int loop_pair =
+                ((s_ws2_enum_host_addrs[i].sin_addr.s_addr == htonl(INADDR_LOOPBACK) ||
+                  from_addr.sin_addr.s_addr == htonl(INADDR_LOOPBACK)) &&
+                 s_ws2_enum_host_addrs[i].sin_port == htons(resp.game_port) &&
+                 strncmp(s_enum_sessions[i].name, resp.session_name,
+                         sizeof(s_enum_sessions[i].name) - 1) == 0);
+            if (same_addr || loop_pair) { slot = i; dup = 1; break; }
         }
         if (!dup && slot >= MAX_ENUM_SESSIONS) continue;   /* list full */
 
@@ -3294,6 +3305,23 @@ int td5_net_get_player_count(void)
 int td5_net_is_active(void)
 {
     return s_active;
+}
+
+/* [S31] Race over: drop the lockstep-active latch + per-frame sync state.
+ * Without this, td5_net_is_active() stayed TRUE after a race, and the lobby's
+ * client auto-launch ("DXPSTART rendezvous active") fired the instant anyone
+ * re-entered or joined the lobby -- the race re-started immediately. */
+void td5_net_race_done(void)
+{
+    int i;
+    if (!s_active)
+        return;
+    s_active = 0;
+    s_sync_sequence = 0;
+    s_waiting_for_frame_ack = 0;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        s_player_sync_received[i] = 0;
+    TD5_LOG_I(NET_LOG, "Race done: lockstep sync deactivated");
 }
 int td5_net_local_slot(void)
 {

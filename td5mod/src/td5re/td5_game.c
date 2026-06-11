@@ -3364,6 +3364,18 @@ static void td5_photobooth_tick(void) {
  * Returns 1 if the barrier failed (timeout/disconnect): the local slot's ESCAPE
  * bit is set so the race falls through to its normal quit/fade path.
  * ======================================================================== */
+static int s_net_pause_round;  /* [S31] merged NET_PAUSE present this round  */
+static int s_net_pause_slot;   /* first REMOTE slot pausing (-1 = none/local) */
+
+/* HUD query: a REMOTE player is holding the race paused and no local menu is
+ * covering the screen -> draw the "PAUSED BY <name>" overlay. */
+int td5_game_net_remote_pause_slot(void)
+{
+    if (!g_td5.network_active || !s_net_pause_round || s_pause_menu_active)
+        return -1;
+    return s_net_pause_slot;
+}
+
 static int td5_game_net_sync_frame(void) {
     uint32_t bits[TD5_NET_MAX_PLAYERS];
     int local = td5_net_local_slot();
@@ -3381,6 +3393,33 @@ static int td5_game_net_sync_frame(void) {
     for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
         bits[i] = 0;
     bits[local] = td5_input_get_control_bits(0);
+
+    /* [S31 PAUSE SYNC] Hold the NET_PAUSE bit while the local pause menu is
+     * open. The sim freeze keys on the MERGED bit (any slot) so every machine
+     * pauses and resumes on the same lockstep round -- a one-sided freeze
+     * would diverge the tick counts permanently. */
+    if (s_pause_menu_active)
+        bits[local] |= (uint32_t)TD5_INPUT_NET_PAUSE;
+
+    /* [S31] Drain in-race ring messages: RACE_LEFT (0x17) = a peer quit the
+     * race from their pause menu. Lockstep cannot continue without them, so
+     * end ours through the same quit-to-menu fade. */
+    {
+        TD5_NetMsgType mtype;
+        void *mdata;
+        int msize;
+        while (td5_net_receive(&mtype, &mdata, &msize)) {
+            if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
+                ((const uint8_t *)mdata)[0] == 0x17 && !s_pause_exit_pending) {
+                TD5_Actor *pl = td5_game_get_actor(0);
+                TD5_LOG_I(LOG_TAG, "net: peer left the race -> quit to menu");
+                s_pause_menu_active = 0;
+                s_pause_exit_pending = 1;
+                s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+                td5_game_begin_fade_out(0);
+            }
+        }
+    }
 
     ok = td5_net_is_host() ? td5_net_handle_host_frame(bits, &dt)
                            : td5_net_handle_client_frame(bits, &dt);
@@ -3418,6 +3457,19 @@ static int td5_game_net_sync_frame(void) {
     /* Push host-merged authoritative input into every racer slot. */
     for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
         td5_input_set_control_bits(i, bits[i]);
+
+    /* [S31 PAUSE SYNC] Derive this round's synced pause state from the merged
+     * bits -- identical on every machine, so every machine freezes/resumes on
+     * the same round. */
+    s_net_pause_round = 0;
+    s_net_pause_slot  = -1;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
+        if (bits[i] & (uint32_t)TD5_INPUT_NET_PAUSE) {
+            s_net_pause_round = 1;
+            if (i != local && s_net_pause_slot < 0)
+                s_net_pause_slot = i;
+        }
+    }
 
     return 0;
 }
@@ -3881,11 +3933,17 @@ int td5_game_run_race_frame(void) {
                          * laps/direction unchanged). Fade out, then the fade-complete
                          * handler returns 3 and the FSM re-inits the race session.
                          * The dirty-volume flush below (close-path) persists any
-                         * SOUND slider change; the race re-init re-plays the music. */
+                         * SOUND slider change; the race re-init re-plays the music.
+                         * [S31] Ignored in a net race: a one-sided re-init can't be
+                         * reconciled with the other machines' lockstep state. */
+                        if (g_td5.network_active && td5_net_is_active()) {
+                            TD5_LOG_I(LOG_TAG, "Pause menu: RESTART ignored (net race)");
+                        } else {
                         s_pause_menu_active = 0;
                         s_pause_restart_pending = 1;
                         TD5_LOG_I(LOG_TAG, "Pause menu: RESTART RACE selected, starting fade-out");
                         td5_game_begin_fade_out(0);
+                        }
                     } else if (s_pause_menu_cursor == 4) {
                         /* QUIT TO MENU — leave the race, return to the frontend
                          * (was "EXIT"; behaviour unchanged, only relabelled). */
@@ -3912,6 +3970,13 @@ int td5_game_run_race_frame(void) {
                             g_td5.ini.music_volume = td5_save_get_music_volume();
                             td5_ini_persist_options();
                             s_pause_options_dirty = 0;
+                        }
+                        /* [S31] Tell the peers we are leaving the race so they
+                         * end theirs too (lockstep cannot continue without us)
+                         * instead of stalling out their input barrier. */
+                        if (g_td5.network_active && td5_net_is_active()) {
+                            uint8_t left_msg[8] = {0x17, 0, 0, 0, 0, 0, 0, 0};
+                            td5_net_send(TD5_DXPDATA, left_msg, 8);
                         }
                         TD5_LOG_I(LOG_TAG, "Pause menu: Quit-to-menu selected, starting fade-out (pos=%d)",
                                   s_finish_position_display);
@@ -4000,6 +4065,19 @@ int td5_game_run_race_frame(void) {
                 s_pause_options_dirty = 0;
             }
 
+            /* [S31 PAUSE SYNC] Net race: the sim freeze keys on the MERGED
+             * pause bit so both machines stop on the same lockstep round.
+             * Until the locally-opened menu's bit round-trips (~1 frame) the
+             * sim keeps ticking under the menu -- identically everywhere. */
+            if (!net_lockstep || s_net_pause_round) {
+                g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
+                ticks_this_frame++;
+                td5_game_trace_stage("pause_menu", ticks_this_frame);
+                continue;
+            }
+        } else if (net_lockstep && s_net_pause_round) {
+            /* A REMOTE player paused: freeze the same rounds without a local
+             * menu; the HUD draws the PAUSED BY overlay. */
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
             td5_game_trace_stage("pause_menu", ticks_this_frame);
@@ -4871,6 +4949,7 @@ int td5_game_run_race_frame(void) {
      * over each disconnected player's split-screen viewport. Self-gated (no-op
      * unless a controller is currently missing). Drawn on top of the HUD. */
     td5_hud_draw_disconnect_overlays();
+    td5_hud_draw_net_pause_overlay();
 
     /* Pause overlay drawn LAST among the in-race overlays so the menu (BLACKBOX
      * panel + selbox + sliders + text) sits on top of everything else — the HUD,
@@ -5119,6 +5198,11 @@ static void tick_race_countdown(void)
 
 void td5_game_release_race_resources(void) {
     TD5_LOG_I(LOG_TAG, "Releasing race resources");
+
+    /* [S31] Net race over (finish, quit, or abort): drop the lockstep latch
+     * so the next lobby visit doesn't read a stale rendezvous and relaunch. */
+    if (g_td5.network_active)
+        td5_net_race_done();
 
     /* Stop and release all race sound channels */
     td5_sound_release_race_channels();
