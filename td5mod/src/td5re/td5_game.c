@@ -3403,6 +3403,21 @@ int td5_game_net_remote_pause_slot(void)
     return s_net_pause_slot;
 }
 
+/* [S31] The actor whose finishing position the LOCAL player cares about:
+ * slot 0 in local play, but the machine's own net slot in a network race
+ * (on a client, actor 0 is the HOST -- capturing it showed the host's
+ * position in the fade digit / "last position" after BACK TO LOBBY). */
+static TD5_Actor *td5_game_local_player_actor(void)
+{
+    int slot = 0;
+    if (g_td5.network_active) {
+        slot = td5_net_local_slot();
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+            slot = 0;
+    }
+    return td5_game_get_actor(slot);
+}
+
 static int td5_game_net_sync_frame(void) {
     uint32_t bits[TD5_NET_MAX_PLAYERS];
     int local = td5_net_local_slot();
@@ -3446,7 +3461,7 @@ static int td5_game_net_sync_frame(void) {
             } else if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
                 ((const uint8_t *)mdata)[0] == 0x17 &&
                 !s_pause_exit_pending && !s_pause_lobby_pending) {
-                TD5_Actor *pl = td5_game_get_actor(0);
+                TD5_Actor *pl = td5_game_local_player_actor();
                 TD5_LOG_I(LOG_TAG, "net: peer left the race -> back to lobby");
                 s_pause_menu_active = 0;
                 s_pause_lobby_pending = 1;   /* session stays alive */
@@ -3470,7 +3485,7 @@ static int td5_game_net_sync_frame(void) {
          * frontend, where the lobby/browser screens already handle the
          * connection-lost cleanup. */
         if (!s_pause_exit_pending) {
-            TD5_Actor *pl = td5_game_get_actor(0);
+            TD5_Actor *pl = td5_game_local_player_actor();
             s_pause_menu_active = 0;
             s_pause_exit_pending = 1;
             s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
@@ -3714,7 +3729,7 @@ int td5_game_run_race_frame(void) {
              * (update_race_order can re-sort mid-window), which blanked/changed
              * the number — [user 2026-05-30: "number sometimes is not present"]. */
             {
-                TD5_Actor *pl = td5_game_get_actor(0);
+                TD5_Actor *pl = td5_game_local_player_actor();
                 s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
                 TD5_LOG_I(LOG_TAG,
                           "Finish capture: player race_position=%d -> display=%d "
@@ -4022,7 +4037,7 @@ int td5_game_run_race_frame(void) {
                         s_pause_menu_active = 0;
                         s_pause_lobby_pending = 1;
                         {
-                            TD5_Actor *pl = td5_game_get_actor(0);
+                            TD5_Actor *pl = td5_game_local_player_actor();
                             s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
                         }
                         if (s_pause_options_dirty) {
@@ -4052,7 +4067,7 @@ int td5_game_run_race_frame(void) {
                          * digit was 0 and nothing drew — "there's no number, just
                          * the transition". Mirror the finish capture here. */
                         {
-                            TD5_Actor *pl = td5_game_get_actor(0);
+                            TD5_Actor *pl = td5_game_local_player_actor();
                             s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
                         }
                         /* Flush any pending pause-slider volume change before the
