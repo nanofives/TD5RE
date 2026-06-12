@@ -100,6 +100,7 @@ typedef struct TD5_NetRaceConfig {
     int32_t  reverse_direction;
     int32_t  lap_count;           /* informational (net races force 4) */
     int32_t  num_opponents;       /* AI opponent count (decides active slots) */
+    int32_t  difficulty;          /* difficulty tier (AI car pool row) */
     int32_t  car_index[6];        /* per net slot (TD5_NET_MAX_PLAYERS) */
     int32_t  paint_index[6];
 } TD5_NetRaceConfig;

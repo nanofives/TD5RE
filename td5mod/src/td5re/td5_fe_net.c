@@ -60,12 +60,14 @@ static int  s_participant_flags[6];     /* DAT_0049725c[6] */
 
 static int  s_race_active_flag;         /* DAT_00497324 */
 
-static int  s_chat_dirty;              /* DAT_0049640c */
 
 static uint32_t s_last_poll_timestamp;  /* DAT_004968a8 */
 
-static char s_chat_input_buffer[64];    /* DAT_004972cc */
-static int  s_chat_esc_guard;           /* S31: swallow the ESC that cancelled chat */
+/* [S31] Per-slot READY latch (clients toggle via the lobby READY button,
+ * broadcast as DXPDATA opcode 0x18 {op, slot, state}); reset on every lobby
+ * entry. The roster overlay draws the green READY tag from this. */
+uint8_t     s_slot_ready[6];
+static int  s_my_ready;
 
 char s_create_session_name[64];
 
@@ -952,10 +954,14 @@ void Screen_NetworkLobby(void) {
          * indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=EXIT 4=OPTIONS(host).
          * [2026-06-07] Added SELECT TRACK -> the track picker (returns to the
          * lobby via flow_context==4); rows below it shift down one slot (0x28). */
-        frontend_create_button(SNK_StartButTxt,     440, 110, 150, 0x20); /* 0 START */
-        frontend_create_button(SNK_ChangeCarButTxt, 440, 150, 150, 0x20); /* 1 CHANGE CAR */
-        frontend_create_button("SELECT TRACK",      440, 190, 150, 0x20); /* 2 SELECT TRACK */
-        frontend_create_button(SNK_ExitButTxt,      440, 230, 150, 0x20); /* 3 EXIT */
+        /* [S31] Button 0: the host STARTS the race; clients toggle READY.
+         * Width 180 so SELECT TRACK fits inside the frame. */
+        frontend_create_button(frontend_net_is_host() ? SNK_StartButTxt
+                                                      : "READY",
+                                                    430, 110, 180, 0x20); /* 0 */
+        frontend_create_button(SNK_ChangeCarButTxt, 430, 150, 180, 0x20); /* 1 CHANGE CAR */
+        frontend_create_button("SELECT TRACK",      430, 190, 180, 0x20); /* 2 SELECT TRACK */
+        frontend_create_button(SNK_ExitButTxt,      430, 230, 180, 0x20); /* 3 EXIT */
         /* [S31] Track choice is the host's call (the DXPSTART config overrides
          * any client-side pick anyway) -- hide SELECT TRACK for joiners. */
         if (!frontend_net_is_host()) {
@@ -977,9 +983,11 @@ void Screen_NetworkLobby(void) {
             }
         }
 
-        memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
+        /* [S31] READY state resets on every lobby entry (incl. the CHANGE
+         * CAR return) -- joiners press READY again. */
+        memset(s_slot_ready, 0, sizeof(s_slot_ready));
+        s_my_ready = 0;
 
-        s_chat_dirty = (s_network_active) ? 1 : 0;
         s_lobby_action = 0;
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -1004,32 +1012,11 @@ void Screen_NetworkLobby(void) {
         break;
 
     case 3: /* MAIN INTERACTIVE LOBBY */
-        /* Render background and chat input */
         frontend_present_buffer();
-
-        /* S31: chat typing mode (opened with T below). While typing, ESC
-         * cancels the chat instead of leaving the lobby and lobby nav is
-         * paused; Enter submits via the confirm path (-> state 4). */
-        if (s_text_input_state == 1) {
-            frontend_handle_text_input_key();
-            if (td5_plat_input_key_pressed(0x01)) {        /* ESC: cancel chat */
-                s_text_input_state = 0;
-                s_chat_esc_guard = 1;                      /* swallow this ESC */
-                memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
-                td5_plat_input_flush_chars();
-            } else if (frontend_text_input_confirmed()) {
-                s_inner_state = 4;
-            }
-            break;
-        }
-        if (s_chat_esc_guard) {
-            if (!td5_plat_input_key_pressed(0x01))
-                s_chat_esc_guard = 0;                      /* released: re-arm exit */
-        }
 
         /* ESC backs out of the lobby = the EXIT action (tear the session down so
          * no dangling host/session leaks). Mirrors button index 3. */
-        if (!s_chat_esc_guard && frontend_check_escape()) {
+        if (frontend_check_escape()) {
             TD5_LOG_I(LOG_TAG, "NetworkLobby: ESC -> exit (destroy session)");
             frontend_net_destroy();
             s_network_active = 0;
@@ -1042,8 +1029,11 @@ void Screen_NetworkLobby(void) {
          * joined (slots populated by the JOIN handshake / DXPROSTER). */
         {
             int slot;
-            for (slot = 0; slot < 6; slot++)
+            for (slot = 0; slot < 6; slot++) {
                 s_participant_flags[slot] = td5_net_is_slot_active(slot) ? 1 : 0;
+                if (!s_participant_flags[slot])
+                    s_slot_ready[slot] = 0;   /* left/kicked -> not ready */
+            }
         }
 
         /* [S31 redesign] place the per-row KICK buttons (host): kick button k
@@ -1088,6 +1078,10 @@ void Screen_NetworkLobby(void) {
                     (int)nbuf[1] == td5_net_local_slot()) {
                     TD5_LOG_I(LOG_TAG, "NetworkLobby: kicked by host");
                     s_kicked_flag = 1;
+                } else if (ntype == (int)TD5_DXPDATA && nbuf[0] == 0x18 &&
+                           nbuf[1] < 6) {
+                    /* [S31] READY toggle from a client. */
+                    s_slot_ready[nbuf[1]] = nbuf[2] ? 1 : 0;
                 }
                 memset(nbuf, 0, sizeof(nbuf));
             }
@@ -1143,9 +1137,17 @@ void Screen_NetworkLobby(void) {
                 if (td5_net_get_race_config(&ncfg)) {
                     s_selected_track  = ncfg.track_index;
                     s_track_direction = ncfg.reverse_direction;
+                    /* [S31] The race reads g_td5.reverse_direction, which only
+                     * the track screen's OK handler used to set -- a client
+                     * (or a host that never opened the track screen) raced the
+                     * wrong way. Difficulty picks the AI car-pool row, so it
+                     * must match everywhere too. */
+                    g_td5.reverse_direction = ncfg.reverse_direction;
+                    g_td5.difficulty_tier   = ncfg.difficulty;
                     TD5_LOG_I(LOG_TAG,
-                              "NetworkLobby: adopted host config track=%d dir=%d seed=0x%08X",
-                              ncfg.track_index, ncfg.reverse_direction, ncfg.rng_seed);
+                              "NetworkLobby: adopted host config track=%d dir=%d diff=%d seed=0x%08X",
+                              ncfg.track_index, ncfg.reverse_direction,
+                              ncfg.difficulty, ncfg.rng_seed);
                 }
             }
             s_launching_net_race = 1;
@@ -1153,23 +1155,6 @@ void Screen_NetworkLobby(void) {
             frontend_init_race_schedule();
             frontend_init_display_mode_state();
             return;
-        }
-
-        /* S31: T opens the chat line (Enter sends, ESC cancels). */
-        {
-            static int s_chat_t_latch = 0;
-            if (td5_plat_input_key_pressed(0x14)) {        /* DIK_T */
-                if (!s_chat_t_latch) {
-                    s_chat_t_latch = 1;
-                    memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
-                    frontend_begin_text_input(s_chat_input_buffer,
-                                              (int)sizeof(s_chat_input_buffer));
-                    frontend_set_text_input_prompt("CHAT  (ENTER = SEND, ESC = CANCEL)");
-                    td5_plat_input_flush_chars();          /* drop the opening T */
-                }
-            } else {
-                s_chat_t_latch = 0;
-            }
         }
 
         /* Process button input
@@ -1192,7 +1177,20 @@ void Screen_NetworkLobby(void) {
                     s_lobby_action = 2;
                     s_inner_state = 5; /* multi-player ready check -> DXPSTART */
                 }
-                /* Client: waits for the host's DXPSTART (handled in the sync poll). */
+                else {
+                    /* [S31] Client: toggle READY and tell the host (the race
+                     * itself starts on the host's DXPSTART). */
+                    s_my_ready = !s_my_ready;
+                    if (td5_net_local_slot() >= 0 && td5_net_local_slot() < 6)
+                        s_slot_ready[td5_net_local_slot()] = (uint8_t)s_my_ready;
+                    {
+                        uint8_t rd_msg[8] = {0x18, 0, 0, 0, 0, 0, 0, 0};
+                        rd_msg[1] = (uint8_t)td5_net_local_slot();
+                        rd_msg[2] = (uint8_t)s_my_ready;
+                        frontend_net_send(1, rd_msg, 8);
+                    }
+                    frontend_play_sfx(3);
+                }
                 break;
 
             case 1: /* CHANGE CAR */
@@ -1246,23 +1244,6 @@ void Screen_NetworkLobby(void) {
             return;
         }
 
-        /* Update lobby player list display */
-        /* Poll network input */
-
-        /* Check text input confirmed (Enter pressed) -> chat submit */
-        if (frontend_text_input_confirmed()) {
-            s_inner_state = 4;
-        }
-        break;
-
-    case 4: /* CHAT TEXT SUBMISSION */
-        /* Process chat input buffer: check admin commands, emoticons */
-        /* If valid, send as DXPCHAT (type 2) */
-        if (s_chat_input_buffer[0] != '\0') {
-            frontend_net_send(2, s_chat_input_buffer, (int)strlen(s_chat_input_buffer) + 1);
-        }
-        memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
-        s_inner_state = 2; /* back to the lobby (chat closes after send) */
         break;
 
     case 5: /* PLAYER READY CHECK (host only) */
@@ -1478,6 +1459,7 @@ void Screen_NetworkLobby(void) {
                 cfg.reverse_direction = s_track_direction;
                 cfg.lap_count         = 4;   /* net races force 4-lap drag mode */
                 cfg.num_opponents     = g_td5.num_ai_opponents;
+                cfg.difficulty        = g_td5.difficulty_tier;
                 for (slot = 0; slot < 6; slot++) {
                     cfg.car_index[slot]   = 0;
                     cfg.paint_index[slot] = 0;
@@ -1504,6 +1486,19 @@ void Screen_NetworkLobby(void) {
         (void)frontend_net_receive(recv_buf, sizeof(recv_buf));
         if (td5_net_is_active()) {
             TD5_LOG_I(LOG_TAG, "NetworkLobby: host race start (sync active)");
+            /* [S31] The host launches HERE (not through the state-3 client
+             * block), so commit the broadcast config on this path too --
+             * g_td5.reverse_direction is otherwise only written by the track
+             * screen's OK handler and could be stale. */
+            {
+                TD5_NetRaceConfig ncfg;
+                if (td5_net_get_race_config(&ncfg)) {
+                    s_selected_track        = ncfg.track_index;
+                    s_track_direction       = ncfg.reverse_direction;
+                    g_td5.reverse_direction = ncfg.reverse_direction;
+                    g_td5.difficulty_tier   = ncfg.difficulty;
+                }
+            }
             s_launching_net_race = 1;
             s_race_active_flag = 1;
             frontend_init_race_schedule();

@@ -2751,8 +2751,9 @@ void frontend_init_race_schedule(void) {
     td5_hud_clear_player_identities();
 
     /* [PORT ENHANCEMENT 2026-06] Multiplayer lobby flow: each human slot uses the
-     * car that player chose in the sequential car select. */
-    if (s_mp_flow) {
+     * car that player chose in the sequential car select. ([S31] skipped for
+     * net races: a stale local flag would overwrite the replicated grid.) */
+    if (s_mp_flow && !g_td5.network_active) {
         slot_ext_id[0]  = s_mp_player_car[0];
         slot_variant[0] = s_mp_player_paint[0];
         /* Each human slot is painted with that player's chosen TD6 colour (no-op
@@ -2779,7 +2780,8 @@ void frontend_init_race_schedule(void) {
      * race, so the constant is swapped here. Time Trials is solo and must NOT
      * fall into this branch. (Skipped for the N-way multiplayer lobby flow,
      * which already populated the human slots above.) */
-    if ((s_two_player_mode || s_selected_game_type == 9) && !s_mp_flow) {
+    if ((s_two_player_mode || s_selected_game_type == 9) && !s_mp_flow &&
+        !g_td5.network_active) {
         slot_active[1]  = 1;
         slot_ext_id[1]  = s_p2_car;
         slot_variant[1] = 0;
@@ -7895,15 +7897,18 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
         fe_draw_small_text((FE_LOBBY_X + 22.0f) * sx,
                            (float)(FE_LOBBY_ROW0_Y + row * FE_LOBBY_ROW_H + 4) * sy,
                            line, 0xFFFFFFFF, sx, sy);
+        /* [S31] Green READY tag (clients toggle it with the READY button). */
+        if (slot != 0 && s_slot_ready[slot])
+            fe_draw_small_text((FE_LOBBY_X + FE_LOBBY_PANEL_W - 88.0f) * sx,
+                               (float)(FE_LOBBY_ROW0_Y + row * FE_LOBBY_ROW_H + 4) * sy,
+                               "READY", 0xFF40FF40u, sx, sy);
         row++;
     }
-    /* Host/connect status + chat hint at the bottom of the panel. */
+    /* Host/connect status at the bottom of the panel. */
     status = td5_net_get_status_text();
     if (status[0])
-        fe_draw_small_text((FE_LOBBY_X + 18.0f) * sx, 282.0f * sy, status,
+        fe_draw_small_text((FE_LOBBY_X + 18.0f) * sx, 290.0f * sy, status,
                            0xFFA8C0E0, sx, sy);
-    fe_draw_small_text((FE_LOBBY_X + 18.0f) * sx, 296.0f * sy, "T = CHAT",
-                       0xFF8098B0, sx, sy);
 }
 
 

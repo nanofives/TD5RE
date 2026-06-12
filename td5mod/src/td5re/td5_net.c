@@ -2485,10 +2485,16 @@ static void net_build_status_text(void)
                      "Hosting LAN game on %s:%d", ip, s_game_port);
         }
     } else if (s_is_client) {
-        snprintf(s_status_text, sizeof(s_status_text),
-                 "Connecting to %s:%u ...",
-                 inet_ntoa(s_ws2_host_addr.sin_addr),
-                 (unsigned)ntohs(s_ws2_host_addr.sin_port));
+        if (s_local_slot >= 0)   /* JOIN_ACK received -> we are in */
+            snprintf(s_status_text, sizeof(s_status_text),
+                     "Connected to %s:%u",
+                     inet_ntoa(s_ws2_host_addr.sin_addr),
+                     (unsigned)ntohs(s_ws2_host_addr.sin_port));
+        else
+            snprintf(s_status_text, sizeof(s_status_text),
+                     "Connecting to %s:%u ...",
+                     inet_ntoa(s_ws2_host_addr.sin_addr),
+                     (unsigned)ntohs(s_ws2_host_addr.sin_port));
     } else {
         s_status_text[0] = '\0';
     }
@@ -2698,6 +2704,7 @@ int td5_net_get_upnp_status(void)
 
 const char *td5_net_get_status_text(void)
 {
+    net_build_status_text();   /* [S31] live: "Connecting" flips to "Connected" */
     return s_status_text;
 }
 

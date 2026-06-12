@@ -3419,6 +3419,13 @@ static int td5_game_net_sync_frame(void) {
         int msize;
         while (td5_net_receive(&mtype, &mdata, &msize)) {
             if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
+                ((const uint8_t *)mdata)[0] == 0x19 && !s_pause_restart_pending) {
+                /* [S31] Host restarted the race: same fade + re-init here. */
+                TD5_LOG_I(LOG_TAG, "net: host restarted the race -> re-init");
+                s_pause_menu_active = 0;
+                s_pause_restart_pending = 1;
+                td5_game_begin_fade_out(0);
+            } else if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
                 ((const uint8_t *)mdata)[0] == 0x17 &&
                 !s_pause_exit_pending && !s_pause_lobby_pending) {
                 TD5_Actor *pl = td5_game_get_actor(0);
@@ -3964,7 +3971,23 @@ int td5_game_run_race_frame(void) {
                          * [S31] Ignored in a net race: a one-sided re-init can't be
                          * reconciled with the other machines' lockstep state. */
                         if (g_td5.network_active && td5_net_is_active()) {
-                            TD5_LOG_I(LOG_TAG, "Pause menu: RESTART ignored (net race)");
+                            /* [S31] Net race: host-only and SYNCED. Broadcast
+                             * RACE_RESTART (0x19) so every machine runs the same
+                             * fade + re-init; the lockstep latch survives the
+                             * restart (release_race_resources keeps it while
+                             * restart_pending) and InitRace re-seeds from the
+                             * archived DXPSTART config, so all machines rebuild
+                             * the identical race and resume the same exchange. */
+                            if (td5_net_is_host()) {
+                                uint8_t rs_msg[8] = {0x19, 0, 0, 0, 0, 0, 0, 0};
+                                td5_net_send(TD5_DXPDATA, rs_msg, 8);
+                                s_pause_menu_active = 0;
+                                s_pause_restart_pending = 1;
+                                TD5_LOG_I(LOG_TAG, "Pause menu: net RESTART (host), fading out");
+                                td5_game_begin_fade_out(0);
+                            } else {
+                                TD5_LOG_I(LOG_TAG, "Pause menu: RESTART is host-only in net races");
+                            }
                         } else {
                         s_pause_menu_active = 0;
                         s_pause_restart_pending = 1;
@@ -5255,8 +5278,10 @@ void td5_game_release_race_resources(void) {
     TD5_LOG_I(LOG_TAG, "Releasing race resources");
 
     /* [S31] Net race over (finish, quit, or abort): drop the lockstep latch
-     * so the next lobby visit doesn't read a stale rendezvous and relaunch. */
-    if (g_td5.network_active)
+     * so the next lobby visit doesn't read a stale rendezvous and relaunch.
+     * A synced RESTART keeps it -- the machines resume the same lockstep
+     * stream in the re-initialized race. */
+    if (g_td5.network_active && !s_pause_restart_pending)
         td5_net_race_done();
 
     /* Stop and release all race sound channels */
