@@ -1873,7 +1873,15 @@ int td5_game_init_race_session(void) {
     /* ---- Step 5: Load vehicle assets and sound banks for all active slots ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state != 3) {
-            int car_for_slot = (i == 0) ? g_td5.car_index : g_td5.ai_car_indices[i];
+            /* [S31] Net race: slot 0 must come from the replicated schedule
+             * too. g_td5.car_index is the LOCAL player's pick, but on a
+             * client the local player is NOT slot 0 -- the host is. Using it
+             * here loaded the client's own model AND carparam.dat for the
+             * host's car ("client sees the same car twice"), and a carparam
+             * mismatch is a physics desync, not just a visual one. */
+            int car_for_slot = (i == 0 && !g_td5.network_active)
+                                   ? g_td5.car_index
+                                   : g_td5.ai_car_indices[i];
             /* Per-slot paint scheme: slot 0 = player's chosen colour, slots 1-5 =
              * AI variants. Committed in InitializeRaceSeriesSchedule. Without this
              * the loader always used carskin0 (the default colour). */

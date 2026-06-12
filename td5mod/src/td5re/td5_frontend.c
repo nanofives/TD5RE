@@ -3027,6 +3027,11 @@ void frontend_init_race_schedule(void) {
      * [CONFIRMED @ 0x0040DADC → built into "CARSKIN%d.TGA" @ 0x00442949]. */
     g_td5.ai_car_variants[0] = (slot_variant[0] >= 0 && slot_variant[0] <= 3)
                                ? slot_variant[0] : 0;
+    /* [S31] Slot 0's CAR index too: net races load every slot from
+     * ai_car_indices (g_td5.car_index is the LOCAL player's pick, which on a
+     * client is not slot 0). Non-net keeps loading slot 0 from car_index. */
+    g_td5.ai_car_indices[0] = (slot_ext_id[0] >= 0 && slot_ext_id[0] < TD5_CAR_COUNT)
+                              ? slot_ext_id[0] : 0;
 
     TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d level=%d screen=%d type=%d ai=[%d,%d,%d,%d,%d]",
               s_selected_car, g_td5.car_index, g_td5.track_index,
