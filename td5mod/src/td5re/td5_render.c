@@ -4918,13 +4918,13 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
  * with tire tracks and z-write does not affect occlusion here — known divergence. */
 #define SHADOW_VIEW_Y_OFFSET    (0.0f)
 #define SHADOW_VIEW_DEPTH_BIAS  (0.0f)
-/* Toward-camera depth-compare pull (view-z). NOTE: currently MOOT — the shadow
- * preset (TD5_PRESET_SHADOW) disables the depth test (z_enable=0) because the
- * port's separate shadow projection could never tie the coplanar road
- * deterministically, so any LEQUAL bias left a per-frame ground shimmer; the
- * 2026-06-01 pre-pass makes the no-depth-test path safe (the opaque body, drawn
- * after, overwrites any over-car shadow). This bias only matters if the depth
- * test is ever re-enabled. */
+/* Toward-camera depth-compare pull (view-z). LIVE again [2026-06-11]: the
+ * shadow preset depth test is re-enabled (LEQUAL, see TD5_PRESET_SHADOW in
+ * td5_platform_win32.c) so walls/kerbs/crests occlude ground shadows. The
+ * conforming raycast mesh ties the road depth (same barycentric ground solve,
+ * same depth formula), and this pull breaks the coplanar tie in the shadow's
+ * favour. The legacy flat quad (TD5RE_SHADOW_RAYCAST=0 debug A/B) may shimmer
+ * under the test — its depth diverges from the curved road across the quad. */
 #define SHADOW_PULL_VIEWZ       (2.0f)
 #define SHADOW_DEPTH_Z_BIAS     (SHADOW_PULL_VIEWZ * DEPTH_NORMALIZE_INV)
 

@@ -4386,32 +4386,40 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
 
     case TD5_PRESET_SHADOW:
-        /* Shadow quads. DEPTH TEST DISABLED [FIX: ground shimmer].
+        /* Shadow mesh + tire-mark ground decals. DEPTH TEST RE-ENABLED
+         * [FIX 2026-06-11: other cars' shadows painted over geometry].
          *
-         * The shadow is a FLAT quad through the 4 wheel-contact probes (scaled
-         * 1.25x outward) projected through a SEPARATE transform from the road, so
-         * coplanar shadow/road depths never tie deterministically — the LEQUAL
-         * test loses on jittery sub-LSB / bumpy-road pixels and the shadow drops
-         * out per-frame ("shimmers against the ground"). No constant or slope
-         * depth bias cured it (r7 diagnostic: only z_func=ALWAYS rendered the
-         * shadow cleanly on the road).
+         * History: the LEGACY shadow was a FLAT quad through the 4 wheel-contact
+         * probes projected through a SEPARATE transform from the road, so its
+         * depth diverged from the curved road surface across the quad — the
+         * LEQUAL test lost on bumpy-road pixels and the shadow shimmered; no
+         * bias cured it, so the test was disabled (z_enable=0) and over-car
+         * relied on the shadow PRE-PASS body-overwrite. The z-off trade-off
+         * ("a wall/prop between the camera and the shadow no longer occludes
+         * it") turned glaring with the 2026-06-10 conforming raycast mesh:
+         * other cars' shadows visibly paint over kerbs/walls/crests. It also
+         * silently regressed the tire-mark through-walls fix (td5_vfx.c
+         * submits marks via this preset EXPECTING a LEQUAL test).
          *
-         * The historical blocker to disabling the test was "shadow drew over the
-         * car." That is GONE since the 2026-06-01 shadow PRE-PASS: every car body
-         * is drawn AFTER all shadows with z_write=1, so the opaque body
-         * unconditionally overwrites any shadow pixel it covers. So we drop the
-         * depth test entirely (z_enable=0) — the shadow renders cleanly on the
-         * ground (no tie, no shimmer) and the body-overwrite handles over-car.
-         * (Trade-off: a wall/scenery prop BETWEEN the camera and the ground
-         * shadow no longer occludes it; rare in the chase view and far less
-         * objectionable than the constant shimmer.) z_write stays OFF. */
+         * The conforming mesh removes the shimmer blocker: its node heights
+         * come from the SAME barycentric ground solve the road renders from,
+         * and both write depth as (vz - NEAR_DEPTH_OFFSET)*DEPTH_NORMALIZE_INV
+         * (td5_render.c:1050 vs :5394), so shadow/road depths now tie to FP
+         * error and the existing SHADOW_DEPTH_Z_BIAS 2-view-z toward-camera
+         * pull wins LEQUAL robustly. Tire marks carry their own TIRE_DECAL_BIAS.
+         * The legacy quad (TD5RE_SHADOW_RAYCAST=0 debug A/B only) may shimmer
+         * again under the test — accepted for a debug fallback.
+         *
+         * z_write stays OFF (shared with tire marks; overlapping decals must
+         * not z-fight each other). The shadow PRE-PASS stays — bodies drawn
+         * after all shadows still unconditionally overwrite over-car pixels. */
         s->blend_enable = 1;
         s->src_blend    = D3D6BLEND_SRCALPHA;
         s->dest_blend   = D3D6BLEND_INVSRCALPHA;
-        s->z_enable     = 0;  /* no depth test — pre-pass + body-overwrite handles occlusion */
+        s->z_enable     = 1;  /* LEQUAL — walls/crests/kerbs occlude ground decals again */
         s->z_write      = 0;
-        s->z_func       = 0;
-        s->polygon_offset    = 0;  /* depth bias moot with the test off */
+        s->z_func       = 0;  /* LEQUAL */
+        s->polygon_offset    = 0;  /* vertex-level view-z pulls handle the tie instead */
         s->mag_filter   = 0;
         s->min_filter   = 0;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;
