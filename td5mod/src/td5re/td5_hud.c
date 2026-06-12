@@ -136,6 +136,7 @@ static const char *s_eng_pause_strings[] = {
     "SOUND",          (const char *)(intptr_t)0,
     "CONTINUE",       (const char *)(intptr_t)2,
     "RESTART RACE",   (const char *)(intptr_t)2,
+    "BACK TO LOBBY",  (const char *)(intptr_t)2,
     "QUIT TO MENU",   (const char *)(intptr_t)2,
     "EXIT GAME",      (const char *)(intptr_t)2,
     NULL
@@ -4718,8 +4719,10 @@ void td5_hud_init_pause_menu(int page_index)
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
+        /* [S31] 7 selectable rows now (BACK TO LOBBY added) -- the bottom
+         * row's selbox reaches ~+79, so the panel bottom grows to +84. */
         PAUSE_ADD(-s_pause_half_width, -56.0f,
-                   s_pause_half_width,  68.0f,
+                   s_pause_half_width,  84.0f,
                    bu, bv, bu, bv,
                    blackbox_e->texture_page, 0xFFFFFFFF);
     }

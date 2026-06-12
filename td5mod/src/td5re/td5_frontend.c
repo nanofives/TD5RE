@@ -4018,6 +4018,27 @@ void frontend_post_quit(void) {
     g_td5.quit_requested = 1;
 }
 
+/* [S31] Post-race BACK TO LOBBY: pick the lobby this race was launched from. */
+void td5_frontend_return_to_lobby(void) {
+    if (s_network_active) {
+        td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
+    } else if (s_mp_flow) {
+        td5_frontend_set_screen(TD5_SCREEN_MP_LOBBY);
+    } else {
+        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+    }
+}
+
+/* [S31] Leaving a net race for the MAIN MENU = leaving the session (peers
+ * were already told via RACE_LEFT and return to their lobby). */
+void td5_frontend_leave_net_session(void) {
+    if (s_network_active) {
+        TD5_LOG_I(LOG_TAG, "leaving net session (quit to menu)");
+        frontend_net_destroy();
+        s_network_active = 0;
+    }
+}
+
 
 
 

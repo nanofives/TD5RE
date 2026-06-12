@@ -900,7 +900,8 @@ void Screen_NetworkLobby(void) {
 #ifndef TD5RE_RELEASE
         /* Dev hook: TD5RE_NET_LOBBY=1 boots straight into a host lobby (e.g.
          * --StartScreen=11) so the lobby UI can be inspected without a 2nd PC. */
-        if (!s_network_active && getenv("TD5RE_NET_LOBBY")) {
+        if (!s_network_active && getenv("TD5RE_NET_LOBBY") &&
+            getenv("TD5RE_NET_LOBBY")[0]) {   /* empty string = unset */
             const char *nl = getenv("TD5RE_NET_LOBBY");
             td5_net_init();
             td5_net_set_mode(TD5_NET_MODE_DIRECT);
@@ -1117,7 +1118,8 @@ void Screen_NetworkLobby(void) {
          * once a client has joined (headless 2-instance lockstep testing). */
         {
             static int s_dev_autostart_done = 0;
-            if (!s_dev_autostart_done && getenv("TD5RE_NET_AUTOSTART") &&
+            const char *as = getenv("TD5RE_NET_AUTOSTART");
+            if (!s_dev_autostart_done && as && as[0] &&   /* empty = unset */
                 frontend_net_is_host() && td5_net_get_player_count() >= 2) {
                 s_dev_autostart_done = 1;
                 TD5_LOG_I(LOG_TAG, "NetworkLobby: dev autostart (players=%d)",
