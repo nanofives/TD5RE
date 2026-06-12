@@ -27,6 +27,7 @@
 #include <math.h>
 
 #include "td5_platform.h"
+#include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
 
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -4142,7 +4143,20 @@ void td5_plat_fx_soft_end(void)
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count)
 {
-    ID3D11DeviceContext *ctx = g_backend.context;
+    /* [Phase B render-transform] If this thread is building a pane command list,
+     * record the draw (copy geometry) instead of issuing it; replayed live later. */
+    if (td5_rcmd_recording()) {
+        td5_rcmd_draw_tris(verts, vertex_count, indices, index_count);
+        return;
+    }
+    /* [Phase B Stage 2] route to the thread-local pane bundle when recording. */
+    WrapperRecCtx *rc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
+    ID3D11Buffer *ib    = rc ? rc->ib : g_backend.dynamic_ib;
+    ID3D11Buffer *cbvp  = rc ? rc->cb_viewport : g_backend.cb_viewport;
+    ID3D11Buffer *cbfog = rc ? rc->cb_fog : g_backend.cb_fog;
+    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
     UINT stride = TD5_VERTEX_STRIDE; /* 32 bytes */
     UINT offset = 0;
     UINT base_vertex = 0, start_index = 0;
@@ -4169,19 +4183,19 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
         return;
 
     /* Bind VB, input layout, shaders */
-    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb,
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb,
                                            &stride, &offset);
     ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
     ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
-    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_viewport);
-    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_fog);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
 
     /* Apply render state cache -> D3D11 state objects */
     Backend_ApplyStateCache();
 
     if (has_idx) {
         /* Indexed draw */
-        ID3D11DeviceContext_IASetIndexBuffer(ctx, g_backend.dynamic_ib,
+        ID3D11DeviceContext_IASetIndexBuffer(ctx, ib,
                                               DXGI_FORMAT_R16_UINT, 0);
         ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
             D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4193,9 +4207,9 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                 &g_backend.sampler_states[s_render_ps_override_samp]);
         } else {
             ID3D11DeviceContext_PSSetShader(ctx,
-                g_backend.ps_shaders[g_backend.state.texblend_mode == 5 ? 1 : 0], NULL, 0);
+                g_backend.ps_shaders[st->texblend_mode == 5 ? 1 : 0], NULL, 0);
             {
-                int si = (g_backend.state.mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
+                int si = (st->mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
                 ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
             }
         }
@@ -4210,7 +4224,13 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
 
 void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
 {
-    ID3D11DeviceContext *ctx = g_backend.context;
+    if (td5_rcmd_recording()) { td5_rcmd_draw_lines(verts, vert_count); return; }
+    WrapperRecCtx *rc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
+    ID3D11Buffer *cbvp  = rc ? rc->cb_viewport : g_backend.cb_viewport;
+    ID3D11Buffer *cbfog = rc ? rc->cb_fog : g_backend.cb_fog;
+    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
     UINT stride = TD5_VERTEX_STRIDE;
     UINT offset = 0;
     UINT base_vertex = 0;
@@ -4224,28 +4244,28 @@ void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
                               &base_vertex, NULL))
         return;
 
-    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb,
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb,
                                            &stride, &offset);
     ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
     ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
         D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
 
     ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
-    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_viewport);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
 
     /* PS_MODULATE * white texel = vertex color. Disable fog and alpha test
      * via a fresh fog CB upload bounded to this draw. */
     ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shaders[PS_MODULATE], NULL, 0);
     ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
     ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
-    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_fog);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
     {
         FogCB fog = {0};
         fog.fogEnabled = 0;
         fog.alphaTestEnabled = 0;
         fog.alphaRef = 0.0f;
         ID3D11DeviceContext_UpdateSubresource(ctx,
-            (ID3D11Resource*)g_backend.cb_fog, 0, NULL, &fog, 0, 0);
+            (ID3D11Resource*)cbfog, 0, NULL, &fog, 0, 0);
     }
 
     ID3D11DeviceContext_RSSetState(ctx, g_backend.rs_state);
@@ -4260,19 +4280,21 @@ void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
 
     /* Invalidate cached state-object indices so the next ApplyStateCache
      * actually re-binds (current_* values must mismatch what we just set). */
-    g_backend.state.current_blend_idx = -1;
-    g_backend.state.current_ds_idx    = -1;
-    g_backend.state.current_samp_idx  = -1;
-    g_backend.state.current_ps_idx    = -1;
-    g_backend.state.dirty = 1;
+    st->current_blend_idx = -1;
+    st->current_ds_idx    = -1;
+    st->current_samp_idx  = -1;
+    st->current_ps_idx    = -1;
+    st->dirty = 1;
     /* Force texture rebind on next draw — current_srv was overwritten with white. */
-    g_backend.current_srv = NULL;
-    s_last_bound_texture_page = -1;
+    if (rc) rc->current_srv = NULL; else g_backend.current_srv = NULL;
+    if (!rc) s_last_bound_texture_page = -1;
 }
 
 void td5_plat_render_set_preset(TD5_RenderPreset preset)
 {
-    RenderStateCache *s = &g_backend.state;
+    if (td5_rcmd_recording()) { td5_rcmd_set_preset((int)preset); return; }
+    WrapperRecCtx *rc = g_wrapper_rec;
+    RenderStateCache *s = rc ? &rc->state : &g_backend.state;
 
     /* Default to no polygon offset; the SHADOW preset opts in explicitly. */
     s->polygon_offset = 0;
@@ -4587,12 +4609,16 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         break;
     }
 
-    g_backend.alpha_blend_enabled = s->blend_enable;
+    if (rc) rc->alpha_blend_enabled = s->blend_enable;
+    else    g_backend.alpha_blend_enabled = s->blend_enable;
     s->dirty = 1;
 }
 
 void td5_plat_render_bind_texture(int page_index)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_bind_texture(page_index); return; }
+    WrapperRecCtx *rc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
     ID3D11ShaderResourceView *srv = NULL;
 
     if (page_index >= 0 && page_index < MAX_TEXTURE_PAGES) {
@@ -4604,22 +4630,26 @@ void td5_plat_render_bind_texture(int page_index)
         }
     }
 
-    g_backend.current_srv = srv;
-    s_last_bound_texture_page = page_index;
-    if (g_backend.context && srv) {
-        ID3D11DeviceContext_PSSetShaderResources(g_backend.context, 0, 1, &srv);
-    } else if (g_backend.context) {
+    if (rc) rc->current_srv = srv;
+    else    g_backend.current_srv = srv;
+    if (!rc) s_last_bound_texture_page = page_index;  /* immediate-path hint only */
+    if (ctx && srv) {
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &srv);
+    } else if (ctx) {
         ID3D11ShaderResourceView *null_srv = NULL;
-        ID3D11DeviceContext_PSSetShaderResources(g_backend.context, 0, 1, &null_srv);
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &null_srv);
     }
 
-    g_backend.state.dirty = 1;
+    if (rc) rc->state.dirty = 1;
+    else    g_backend.state.dirty = 1;
 }
 
 void td5_plat_render_set_fog(int enable, uint32_t color,
                               float start, float end, float density)
 {
-    RenderStateCache *s = &g_backend.state;
+    if (td5_rcmd_recording()) { td5_rcmd_set_fog(enable, color, start, end, density); return; }
+    WrapperRecCtx *rc = g_wrapper_rec;
+    RenderStateCache *s = rc ? &rc->state : &g_backend.state;
 
     s->fog_enable  = enable ? 1 : 0;
     s->fog_color   = (DWORD)color;
@@ -4745,9 +4775,12 @@ void td5_plat_render_get_texture_dims(int page_index, int *w, int *h)
 
 void td5_plat_render_set_viewport(int x, int y, int width, int height)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_set_viewport(x, y, width, height); return; }
+    WrapperRecCtx *wrc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = wrc ? wrc->dc : g_backend.context;
     D3D11_VIEWPORT vp;
 
-    if (!g_backend.context) return;
+    if (!ctx) return;
 
     vp.TopLeftX = (FLOAT)x;
     vp.TopLeftY = (FLOAT)y;
@@ -4756,16 +4789,20 @@ void td5_plat_render_set_viewport(int x, int y, int width, int height)
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
 
-    ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
+    ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
     Backend_UpdateViewportCB((float)width, (float)height);
-    TD5_LOG_I(LOG_TAG, "Viewport set: x=%d y=%d w=%d h=%d", x, y, width, height);
+    /* INFO log only on the main thread (logger is not thread-safe). */
+    if (!wrc) TD5_LOG_I(LOG_TAG, "Viewport set: x=%d y=%d w=%d h=%d", x, y, width, height);
 }
 
 void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom)
 {
+    if (td5_rcmd_recording()) { td5_rcmd_set_clip(left, top, right, bottom); return; }
+    WrapperRecCtx *wrc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = wrc ? wrc->dc : g_backend.context;
     D3D11_RECT rc;
 
-    if (!g_backend.context) return;
+    if (!ctx) return;
 
     /* Clamp to render target dimensions so we never set an invalid rect. */
     int rt_w = (g_backend.backbuffer && g_backend.backbuffer->width)
@@ -4786,7 +4823,31 @@ void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom)
     rc.top    = top;
     rc.right  = right;
     rc.bottom = bottom;
-    ID3D11DeviceContext_RSSetScissorRects(g_backend.context, 1, &rc);
+    ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &rc);
+}
+
+/* [Phase B Stage 2b] Thin platform wrappers over the wrapper's deferred-context
+ * pane-record API, so td5_game.c can drive threaded pane recording without
+ * pulling D3D11 types in. The opaque void* carries the WrapperRecCtx handle. */
+int td5_plat_render_pane_pool_ensure(int count)
+{
+    return Backend_RecPoolEnsure(count);
+}
+void *td5_plat_render_pane_begin(int index, int x, int y, int w, int h)
+{
+    return (void *)Backend_RecBegin(index, x, y, w, h);
+}
+void td5_plat_render_pane_end(void *rc)
+{
+    Backend_RecEnd((WrapperRecCtx *)rc);
+}
+void td5_plat_render_pane_execute(int index)
+{
+    Backend_RecExecute(index);
+}
+void td5_plat_render_restore_main_rt(void)
+{
+    Backend_RestoreMainRenderTarget();
 }
 
 void td5_plat_render_clear(uint32_t color)

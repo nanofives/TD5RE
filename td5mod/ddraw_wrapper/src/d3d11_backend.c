@@ -745,57 +745,222 @@ int Backend_StreamUpload(const void *verts, UINT vert_count, UINT stride,
                          const void *indices, UINT index_count,
                          UINT *out_base_vertex, UINT *out_start_index)
 {
-    ID3D11DeviceContext *ctx = g_backend.context;
+    /* [Phase B Stage 2] Route to the thread-local pane recording bundle when
+     * set (worker recording a deferred context); else the immediate path. */
+    WrapperRecCtx *rc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    ID3D11Buffer *vb        = rc ? rc->vb : g_backend.dynamic_vb;
+    ID3D11Buffer *ib        = rc ? rc->ib : g_backend.dynamic_ib;
+    UINT vb_size            = rc ? rc->vb_size : g_backend.dynamic_vb_size;
+    UINT ib_size            = rc ? rc->ib_size : g_backend.dynamic_ib_size;
+    UINT *vb_off            = rc ? &rc->vb_off : &s_vb_ring_offset;
+    UINT *ib_off            = rc ? &rc->ib_off : &s_ib_ring_offset;
     D3D11_MAPPED_SUBRESOURCE m;
     HRESULT hr;
     UINT vbytes;
 
     if (!ctx || !verts || vert_count == 0 || stride == 0) return 0;
     vbytes = vert_count * stride;
-    if (vbytes > g_backend.dynamic_vb_size) return 0;   /* single batch too big */
+    if (vbytes > vb_size) return 0;   /* single batch too big */
 
-    /* Vertices: DISCARD on wrap / first append, else NO_OVERWRITE append. */
+    /* Vertices: DISCARD on wrap / first append, else NO_OVERWRITE append. Same
+     * streaming ring for the immediate AND deferred paths: NO_OVERWRITE versions
+     * the dynamic buffer ONCE (per DISCARD) and appends in place, so a command
+     * list holds a single buffer version. (Per-draw DISCARD on a deferred ctx
+     * versions the whole 4MB buffer EACH draw -> ~600 draws x 4MB -> OOM at
+     * FinishCommandList; that is why this must stay NO_OVERWRITE.) */
     {
         D3D11_MAP map_type;
-        if (s_vb_ring_offset + vbytes > g_backend.dynamic_vb_size) {
-            s_vb_ring_offset = 0;
+        if (*vb_off + vbytes > vb_size) {
+            *vb_off = 0;
             map_type = D3D11_MAP_WRITE_DISCARD;
-        } else if (s_vb_ring_offset == 0) {
+        } else if (*vb_off == 0) {
             map_type = D3D11_MAP_WRITE_DISCARD;
         } else {
             map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
         }
-        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_backend.dynamic_vb,
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)vb,
             0, map_type, 0, &m);
         if (FAILED(hr)) return 0;
-        memcpy((BYTE *)m.pData + s_vb_ring_offset, verts, vbytes);
-        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_backend.dynamic_vb, 0);
-        if (out_base_vertex) *out_base_vertex = s_vb_ring_offset / stride;
-        s_vb_ring_offset += vbytes;
+        memcpy((BYTE *)m.pData + *vb_off, verts, vbytes);
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)vb, 0);
+        if (out_base_vertex) *out_base_vertex = *vb_off / stride;
+        *vb_off += vbytes;
     }
 
     if (indices && index_count > 0) {
         UINT ibytes = index_count * (UINT)sizeof(unsigned short);  /* R16_UINT */
         D3D11_MAP map_type;
-        if (ibytes > g_backend.dynamic_ib_size) return 0;
-        if (s_ib_ring_offset + ibytes > g_backend.dynamic_ib_size) {
-            s_ib_ring_offset = 0;
+        if (ibytes > ib_size) return 0;
+        if (*ib_off + ibytes > ib_size) {
+            *ib_off = 0;
             map_type = D3D11_MAP_WRITE_DISCARD;
-        } else if (s_ib_ring_offset == 0) {
+        } else if (*ib_off == 0) {
             map_type = D3D11_MAP_WRITE_DISCARD;
         } else {
             map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
         }
-        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_backend.dynamic_ib,
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)ib,
             0, map_type, 0, &m);
         if (FAILED(hr)) return 0;
-        memcpy((BYTE *)m.pData + s_ib_ring_offset, indices, ibytes);
-        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_backend.dynamic_ib, 0);
-        if (out_start_index) *out_start_index = s_ib_ring_offset / (UINT)sizeof(unsigned short);
-        s_ib_ring_offset += ibytes;
+        memcpy((BYTE *)m.pData + *ib_off, indices, ibytes);
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)ib, 0);
+        if (out_start_index) *out_start_index = *ib_off / (UINT)sizeof(unsigned short);
+        *ib_off += ibytes;
     }
 
     return 1;
+}
+
+/* ========================================================================
+ * [Phase B / Stage 2] Deferred-context pane-recording pool.
+ *
+ * Each pane bundle owns a deferred context + private dynamic VB/IB + private
+ * viewport/fog CBs + private state cache, so N panes record concurrently with
+ * zero shared mutable wrapper state. The main thread executes the finished
+ * command lists in pane order onto the immediate context. Default-off: nothing
+ * here runs (and nothing is created) unless the threaded pane loop calls in.
+ * ======================================================================== */
+__thread WrapperRecCtx *g_wrapper_rec = NULL;
+
+#define REC_POOL_MAX 9                          /* == TD5_MAX_VIEWPORTS */
+#define REC_VB_SIZE  (4u * 1024u * 1024u)       /* per-pane vertex ring  */
+#define REC_IB_SIZE  (1u * 1024u * 1024u)       /* per-pane index ring   */
+
+static WrapperRecCtx    s_rec_pool[REC_POOL_MAX];
+static ID3D11CommandList *s_rec_cmdlist[REC_POOL_MAX];
+static int s_rec_pool_count   = 0;   /* bundles successfully created */
+static int s_rec_unavailable  = 0;   /* device can't do deferred contexts */
+
+int Backend_RecPoolEnsure(int count)
+{
+    if (s_rec_unavailable) return 0;
+    if (count > REC_POOL_MAX) count = REC_POOL_MAX;
+    for (int i = s_rec_pool_count; i < count; i++) {
+        WrapperRecCtx *rc = &s_rec_pool[i];
+        D3D11_BUFFER_DESC bd;
+        HRESULT hr;
+        memset(rc, 0, sizeof(*rc));
+
+        hr = ID3D11Device_CreateDeferredContext(g_backend.device, 0, &rc->dc);
+        if (FAILED(hr) || !rc->dc) { s_rec_unavailable = 1; WRAPPER_LOG("RecPool: CreateDeferredContext failed hr=0x%08lX", hr); return 0; }
+
+        ZeroMemory(&bd, sizeof(bd));
+        bd.Usage = D3D11_USAGE_DYNAMIC; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        bd.ByteWidth = REC_VB_SIZE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        if (FAILED(ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &rc->vb))) { s_rec_unavailable = 1; return 0; }
+        rc->vb_size = REC_VB_SIZE;
+        bd.ByteWidth = REC_IB_SIZE; bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        if (FAILED(ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &rc->ib))) { s_rec_unavailable = 1; return 0; }
+        rc->ib_size = REC_IB_SIZE;
+
+        bd.Usage = D3D11_USAGE_DEFAULT; bd.CPUAccessFlags = 0; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.ByteWidth = sizeof(ViewportCB);
+        if (FAILED(ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &rc->cb_viewport))) { s_rec_unavailable = 1; return 0; }
+        bd.ByteWidth = sizeof(FogCB);
+        if (FAILED(ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &rc->cb_fog))) { s_rec_unavailable = 1; return 0; }
+
+        s_rec_pool_count = i + 1;
+    }
+    return (s_rec_pool_count >= count) ? 1 : 0;
+}
+
+/* Worker-thread: set up bundle `index` for recording one pane and route this
+ * thread's Backend_* calls to it. Binds the SHARED swap RTV + depth DSV (panes
+ * write disjoint scissor regions), the pane viewport/scissor, and resets the
+ * private ring + state cache so the first ApplyStateCache binds everything. */
+WrapperRecCtx *Backend_RecBegin(int index, int vp_x, int vp_y, int vp_w, int vp_h)
+{
+    WrapperRecCtx *rc;
+    ID3D11DeviceContext *dc;
+    D3D11_VIEWPORT vp;
+    D3D11_RECT sc;
+
+    if (index < 0 || index >= s_rec_pool_count) return NULL;
+    rc = &s_rec_pool[index];
+    dc = rc->dc;
+
+    rc->vb_off = 0; rc->ib_off = 0;
+    memset(&rc->state, 0, sizeof(rc->state));
+    rc->state.current_blend_idx = -1;
+    rc->state.current_ds_idx    = -1;
+    rc->state.current_samp_idx  = -1;
+    rc->state.current_ps_idx    = -1;
+    rc->state.current_rs_idx    = -1;
+    rc->state.dirty = 1;
+    rc->current_srv = NULL;
+    rc->current_tex_has_alpha = 0;
+    rc->alpha_blend_enabled = 0;
+
+    g_wrapper_rec = rc;   /* route subsequent draw/state calls to this bundle */
+
+    ID3D11DeviceContext_OMSetRenderTargets(dc, 1, &g_backend.swap_rtv, g_backend.depth_dsv);
+#ifdef TD5_REC_TESTCLEAR
+    /* DECISIVE TEST: record a full-RTV red clear into the deferred context. If the
+     * screen turns red after ExecuteCommandList, deferred replay reaches the
+     * backbuffer (issue is in the recorded draws/state); if it stays blue, the
+     * deferred replay itself isn't reaching the presented surface. */
+    { float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+      ID3D11DeviceContext_ClearRenderTargetView(dc, g_backend.swap_rtv, red); }
+#endif
+    vp.TopLeftX = (float)vp_x; vp.TopLeftY = (float)vp_y;
+    vp.Width = (float)vp_w; vp.Height = (float)vp_h; vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+    ID3D11DeviceContext_RSSetViewports(dc, 1, &vp);
+    sc.left = vp_x; sc.top = vp_y; sc.right = vp_x + vp_w; sc.bottom = vp_y + vp_h;
+    ID3D11DeviceContext_RSSetScissorRects(dc, 1, &sc);
+    Backend_UpdateViewportCB((float)vp_w, (float)vp_h);  /* writes rc->cb_viewport on dc */
+    return rc;
+}
+
+/* Worker-thread: finish recording bundle `index` into a command list. */
+void Backend_RecEnd(WrapperRecCtx *rc)
+{
+    int index;
+    HRESULT hr;
+    if (!rc) { g_wrapper_rec = NULL; return; }
+    index = (int)(rc - s_rec_pool);
+    g_wrapper_rec = NULL;
+    if (index < 0 || index >= s_rec_pool_count) return;
+    if (s_rec_cmdlist[index]) { ID3D11CommandList_Release(s_rec_cmdlist[index]); s_rec_cmdlist[index] = NULL; }
+    hr = ID3D11DeviceContext_FinishCommandList(rc->dc, FALSE, &s_rec_cmdlist[index]);
+    (void)hr;
+}
+
+/* Main-thread: replay bundle `index`'s command list onto the immediate context.
+ * Call in pane order. RestoreContextState=FALSE: the immediate context is left
+ * in default state afterward, so the caller must re-bind the RTV before any
+ * subsequent immediate-context draws (HUD/VFX). */
+void Backend_RecExecute(int index)
+{
+    if (index < 0 || index >= s_rec_pool_count) return;
+    if (!s_rec_cmdlist[index]) return;
+    ID3D11DeviceContext_ExecuteCommandList(g_backend.context, s_rec_cmdlist[index], FALSE);
+    ID3D11CommandList_Release(s_rec_cmdlist[index]);
+    s_rec_cmdlist[index] = NULL;
+}
+
+/* Re-bind the swap-chain RTV + depth DSV on the IMMEDIATE context. Needed after
+ * ExecuteCommandList(...,FALSE) returns the immediate context to default state,
+ * before the serial VFX/HUD pass draws on it. */
+void Backend_RestoreMainRenderTarget(void)
+{
+    if (!g_backend.context) return;
+    ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
+        &g_backend.swap_rtv, g_backend.depth_dsv);
+}
+
+void Backend_RecPoolRelease(void)
+{
+    for (int i = 0; i < s_rec_pool_count; i++) {
+        WrapperRecCtx *rc = &s_rec_pool[i];
+        if (s_rec_cmdlist[i]) { ID3D11CommandList_Release(s_rec_cmdlist[i]); s_rec_cmdlist[i] = NULL; }
+        if (rc->cb_fog)      { ID3D11Buffer_Release(rc->cb_fog);      rc->cb_fog = NULL; }
+        if (rc->cb_viewport) { ID3D11Buffer_Release(rc->cb_viewport); rc->cb_viewport = NULL; }
+        if (rc->ib)          { ID3D11Buffer_Release(rc->ib);          rc->ib = NULL; }
+        if (rc->vb)          { ID3D11Buffer_Release(rc->vb);          rc->vb = NULL; }
+        if (rc->dc)          { ID3D11DeviceContext_Release(rc->dc);   rc->dc = NULL; }
+    }
+    s_rec_pool_count = 0;
 }
 
 /* ========================================================================
@@ -1280,32 +1445,39 @@ int Backend_SetExclusiveFullscreen(int enable)
 
 void Backend_UpdateViewportCB(float w, float h)
 {
+    WrapperRecCtx *rc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    ID3D11Buffer *cb = rc ? rc->cb_viewport : g_backend.cb_viewport;
     ViewportCB vp;
     vp.viewportWidth  = w;
     vp.viewportHeight = h;
     vp._pad[0] = vp._pad[1] = 0.0f;
-    ID3D11DeviceContext_UpdateSubresource(g_backend.context,
-        (ID3D11Resource*)g_backend.cb_viewport, 0, NULL, &vp, 0, 0);
+    ID3D11DeviceContext_UpdateSubresource(ctx,
+        (ID3D11Resource*)cb, 0, NULL, &vp, 0, 0);
 }
 
 void Backend_UpdateFogCB(void)
 {
+    WrapperRecCtx *rc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    ID3D11Buffer *cb = rc ? rc->cb_fog : g_backend.cb_fog;
+    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
     FogCB fog;
-    DWORD fc = g_backend.state.fog_color;
+    DWORD fc = st->fog_color;
     fog.fogColor[0] = ((fc >> 16) & 0xFF) / 255.0f;  /* R */
     fog.fogColor[1] = ((fc >>  8) & 0xFF) / 255.0f;  /* G */
     fog.fogColor[2] = ((fc >>  0) & 0xFF) / 255.0f;  /* B */
     fog.fogColor[3] = 1.0f;
-    fog.fogStart    = g_backend.state.fog_start;
-    fog.fogEnd      = g_backend.state.fog_end;
-    fog.fogDensity  = g_backend.state.fog_density;
-    fog.fogEnabled  = g_backend.state.fog_enable;
-    fog.alphaTestEnabled = g_backend.state.alpha_test_enable;
-    fog.alphaRef    = g_backend.state.alpha_ref / 255.0f;
+    fog.fogStart    = st->fog_start;
+    fog.fogEnd      = st->fog_end;
+    fog.fogDensity  = st->fog_density;
+    fog.fogEnabled  = st->fog_enable;
+    fog.alphaTestEnabled = st->alpha_test_enable;
+    fog.alphaRef    = st->alpha_ref / 255.0f;
     fog._pad1       = 0.0f;
     fog._pad2       = 0.0f;
-    ID3D11DeviceContext_UpdateSubresource(g_backend.context,
-        (ID3D11Resource*)g_backend.cb_fog, 0, NULL, &fog, 0, 0);
+    ID3D11DeviceContext_UpdateSubresource(ctx,
+        (ID3D11Resource*)cb, 0, NULL, &fog, 0, 0);
 }
 
 /* ========================================================================
@@ -1316,6 +1488,9 @@ static const char *s_ps_names[] = { "MODULATE", "MODULATE_ALPHA", "DECAL", "LUMI
 
 void Backend_SelectPixelShader(void)
 {
+    WrapperRecCtx *rc = g_wrapper_rec;
+    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
     int idx;
 
     /* R5G6B5 textures are converted to B8G8R8A8 with alpha=0xFF (fully opaque).
@@ -1327,31 +1502,32 @@ void Backend_SelectPixelShader(void)
      * transparent. The sky, road, and other opaque geometry rendered semi-transparent
      * over the cleared black background, causing missing track elements and
      * wrong car textures. */
-    switch (g_backend.state.texblend_mode) {
+    switch (st->texblend_mode) {
     case D3DTBLEND_DECAL:         idx = PS_DECAL; break;
     case D3DTBLEND_MODULATEALPHA: idx = PS_MODULATE_ALPHA; break;
     default:                      idx = PS_MODULATE; break;
     }
 
-    if (idx != g_backend.state.current_ps_idx) {
+    if (idx != st->current_ps_idx) {
         static int s_ps_log = 0;
-        if (s_ps_log < 30) {
+        if (!rc && s_ps_log < 30) {
             WRAPPER_LOG("SelectPS: %s (blend=%d tex_alpha=%d texblend=%d src=%u dst=%u)",
                 s_ps_names[idx], g_backend.alpha_blend_enabled,
-                g_backend.current_tex_has_alpha, g_backend.state.texblend_mode,
-                g_backend.state.src_blend, g_backend.state.dest_blend);
+                g_backend.current_tex_has_alpha, st->texblend_mode,
+                st->src_blend, st->dest_blend);
             s_ps_log++;
         }
-        g_backend.state.current_ps_idx = idx;
-        ID3D11DeviceContext_PSSetShader(g_backend.context,
+        st->current_ps_idx = idx;
+        ID3D11DeviceContext_PSSetShader(ctx,
             g_backend.ps_shaders[idx], NULL, 0);
     }
 }
 
 void Backend_ApplyStateCache(void)
 {
-    RenderStateCache *s = &g_backend.state;
-    ID3D11DeviceContext *ctx = g_backend.context;
+    WrapperRecCtx *rc = g_wrapper_rec;
+    RenderStateCache *s = rc ? &rc->state : &g_backend.state;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
 
     if (!s->dirty) return;
 

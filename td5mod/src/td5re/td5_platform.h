@@ -584,6 +584,18 @@ void td5_plat_render_set_viewport(int x, int y, int width, int height);
  *  translucent 2D draws to a sub-rect. */
 void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom);
 
+/* [Phase B Stage 2b] Threaded pane recording (deferred contexts). pool_ensure
+ * lazily creates `count` deferred-context bundles (1=ready, 0=unavailable ->
+ * caller falls back to serial). pane_begin returns an opaque handle and routes
+ * THIS thread's draws into bundle `index`; pane_end finishes its command list;
+ * pane_execute replays bundle `index` onto the immediate context (call in pane
+ * order on the main thread); restore_main_rt re-binds the swap RTV afterward. */
+int   td5_plat_render_pane_pool_ensure(int count);
+void *td5_plat_render_pane_begin(int index, int x, int y, int w, int h);
+void  td5_plat_render_pane_end(void *rc);
+void  td5_plat_render_pane_execute(int index);
+void  td5_plat_render_restore_main_rt(void);
+
 /** Clear the back buffer. */
 void td5_plat_render_clear(uint32_t color);
 

@@ -31,6 +31,7 @@
 /* TD5RE headers */
 #include "td5re.h"
 #include "td5_platform.h"
+#include "td5_jobs.h"
 #include "td5_net.h"
 #include "td5_save.h"
 #include "td5_profile.h"
@@ -356,6 +357,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "CircuitMinimap",       &g_td5.ini.circuit_minimap },
         { "DefaultPlayers",       &g_td5.ini.default_players },
         { "SpectateScreens",      &g_td5.ini.spectate_screens },
+        { "ThreadedPanes",        &g_td5.ini.threaded_panes },
         { "OverrideTrackZip",     &g_td5.ini.override_track_zip },
         { "TD6FlattenJunctions",  &g_td5.ini.td6_flatten_junctions },
         { "OverrideStartSpan",    &g_td5.ini.override_start_span },
@@ -629,6 +631,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Initialize multi-file logging (creates log/ dir, rotates old sessions) */
     td5_plat_log_init();
 
+    /* [F1 multithreading 2026-06-08] Bring up the fork/join worker pool early,
+     * before any asset loading (Phase A) or render submission (Phase B) can use
+     * it. Auto-sizes to (logical CPUs - 2). Torn down in Step 7 shutdown. */
+    td5_jobs_init(0);
+    td5_jobs_selftest_tls();   /* [diag] confirm __thread is per-worker before relying on it */
+
     /* Load INI before anything else */
     td5_load_ini();
     width    = td5_ini_int("Display", "Width", 0);
@@ -734,6 +742,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.circuit_minimap   = td5_ini_int("Game", "CircuitMinimap", 1);    /* 1 = minimap on circuit tracks too */
     g_td5.ini.default_players   = td5_ini_int("Game", "DefaultPlayers", -1);   /* -1 = schedule default; >=2 = N-way split */
     g_td5.ini.spectate_screens  = td5_ini_int("Game", "SpectateScreens", 0);   /* 0 = off; N = N AI cars in their own pane (dev profiling) */
+    g_td5.ini.threaded_panes    = td5_ini_int("Render", "ThreadedPanes", 0);   /* 1 = record split-screen panes (>2) on worker threads (deferred contexts) */
     g_td5.ini.override_track_zip = td5_ini_int("Game", "OverrideTrackZip", 0);  /* 0 = faithful; >0 = TD6 level NNN */
     g_td5.ini.td6_flatten_junctions = td5_ini_int("GameOptions", "TD6FlattenJunctions", 1); /* sever TD6 fork branches -> single loop */
     if (g_td5.ini.td6_flatten_junctions) g_td5.ini.td6_flatten_junctions = 1;
@@ -947,6 +956,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.default_opponents      = -1;  /* full grid (no AutoRace override)  */
     g_td5.ini.default_players        = -1;  /* schedule default (no N-way override) */
     g_td5.ini.spectate_screens       = 0;   /* no AI spectator split-screens     */
+    g_td5.ini.threaded_panes         = 0;   /* serial pane submission (release)   */
     g_td5.ini.player_is_ai           = 0;   /* the human drives                 */
     g_td5.ini.debug_overlay          = 0;   /* no HUD debug text overlay        */
     g_td5.ini.debug_collisions       = 0;   /* no collision wireframe overlay   */
@@ -1328,6 +1338,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* ---------------------------------------------------------------
      * Step 7: Shutdown
      * --------------------------------------------------------------- */
+    /* Join the worker pool before any subsystem it may have touched (render,
+     * assets) is torn down, so no in-flight job references freed state. */
+    td5_jobs_shutdown();
     td5re_shutdown();
     Backend_Shutdown();
     timeEndPeriod(1);

@@ -384,6 +384,7 @@ typedef struct TD5_GlobalState {
         int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
         int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */
         int  spectate_screens;    /* AutoRace AI-spectator split-screen count (dev profiling); 0 = off. See g_td5.num_spectate_screens */
+        int  threaded_panes;      /* [Render] ThreadedPanes: 1 = build split-screen panes (>2) on worker threads via per-pane CPU command lists. Dev-only (release clamps to 0). */
         /* TD6 track migration (Phase 1): when > 0, td5_asset_level_number()
          * returns this level number directly (bypassing the schedule->pool->zip
          * chain), so the loader resolves re/assets/levels/level<NNN>/ loose files

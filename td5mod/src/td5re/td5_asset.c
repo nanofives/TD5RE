@@ -52,6 +52,7 @@
  * ======================================================================== */
 
 #include "td5_inflate.h"
+#include "td5_jobs.h"    /* Phase A: parallel texture-page decode */
 
 #define TD5_TINFL_DECOMPRESS(out, out_len, in, in_len) \
     td5_inflate_mem_to_mem(out, out_len, in, in_len)
@@ -2710,6 +2711,152 @@ int td5_asset_load_track_textures(int track_index)
     return parsed;
 }
 
+/* ------------------------------------------------------------------------
+ * [Phase A multithreading 2026-06-08] Parallel race-texture-page decode.
+ *
+ * The expensive per-page work — palette->BGRA32 expansion + alpha-bleed for the
+ * DAT path, and the TD6 native-res PNG decode — is pure-CPU and per-page
+ * independent, so it runs across the td5_jobs worker pool. The GPU upload, the
+ * shared 1024-page table write (td5_plat_render_upload_texture), the per-page
+ * transparency registration, and ALL logging stay on the MAIN thread in a
+ * serial pass that consumes the decoded results in page order. The uploaded
+ * bytes and the registration order are therefore byte-identical to the old
+ * serial loop. Work is batched so peak decode-buffer memory stays bounded on
+ * the 32-bit heap (a TD6 256x256 RGBA page is 256 KB; 1024 of them would be
+ * 256 MB if decoded all at once).
+ * ------------------------------------------------------------------------ */
+#define TPAGE_DECODE_BATCH 64
+
+typedef struct {
+    int       page;          /* destination page index                       */
+    uint8_t  *pixels;        /* malloc'd BGRA, ownership passes to upload pass*/
+    int       w, h;
+    int       type;          /* page transparency type byte                  */
+    int       keyed_pixels;  /* type-1 keyed texel count (for logging)       */
+    int       from_png;      /* 1 = TD6 native-res PNG path (for logging)    */
+} tpage_result_t;
+
+typedef struct {
+    const uint8_t  *tex_data;
+    const uint32_t *offsets;
+    uint32_t        page_count;
+    int             tex_size;
+    int             level_number;
+    int             td6;
+    int             base;          /* batch base page index                  */
+    tpage_result_t *results;       /* indexed [0, batch_n)                    */
+} tpage_decode_ctx_t;
+
+/* Decode exactly one page into results[i]. Runs on a worker thread: touches
+ * only read-only shared inputs + its own result slot, and performs NO logging
+ * and NO D3D11/context calls. Mirrors the byte-for-byte decode of the original
+ * serial loop body (TD6 PNG path first, DAT palette path as fallback). */
+static void tpage_decode_one(int i, void *vctx)
+{
+    tpage_decode_ctx_t *c = (tpage_decode_ctx_t *)vctx;
+    int pg = c->base + i;
+    tpage_result_t *r = &c->results[i];
+    r->page = pg;
+    r->pixels = NULL;
+    r->w = r->h = 0;
+    r->type = 0;
+    r->keyed_pixels = 0;
+    r->from_png = 0;
+
+    /* TD6 native-res PNG path (forward-only, no reverse remap). */
+    if (c->td6 > 0) {
+        char png_path[256];
+        void *png_px = NULL;
+        int pw = 0, ph = 0;
+        snprintf(png_path, sizeof(png_path),
+                 "re/assets/levels/level%03d/textures/tex_%03d.png",
+                 c->level_number, pg);
+        if (td5_plat_file_exists(png_path) &&
+            td5_asset_decode_png_rgba32(png_path, &png_px, &pw, &ph) && png_px) {
+            uint32_t poff = c->offsets[pg];
+            int ptype = (poff + 4 <= (uint32_t)c->tex_size) ? c->tex_data[poff + 3] : 0;
+            r->pixels = (uint8_t *)png_px;
+            r->w = pw; r->h = ph;
+            r->type = ptype;
+            r->from_png = 1;
+            return;
+        }
+    }
+
+    /* DAT palette path. */
+    int src_i = td5_asset_texture_page_remap_source(pg);
+    if (src_i < 0 || (uint32_t)src_i >= c->page_count) src_i = pg;
+    uint32_t off = c->offsets[(uint32_t)src_i];
+    if (off + 8 > (uint32_t)c->tex_size) return;
+
+    const uint8_t *page_ptr = c->tex_data + off;
+    uint8_t  page_type = page_ptr[3];
+    int32_t  pal_count = *(const int32_t *)(page_ptr + 4);
+    if (pal_count < 0 || pal_count > 256) return;
+
+    const uint8_t *palette = page_ptr + 8;
+    const uint8_t *indices = palette + pal_count * 3;
+    if (indices + 4096 > c->tex_data + c->tex_size) return;
+
+    uint8_t *rgba = (uint8_t *)malloc(64 * 64 * 4);
+    if (!rgba) return;
+
+    int keyed_pixel_count = 0;
+    for (int px = 0; px < 4096; px++) {
+        int idx = indices[px];
+        int ci = idx * 3;
+        uint8_t alpha;
+        uint8_t b_val, g_val, r_val;
+
+        if (ci + 2 < pal_count * 3) {
+            b_val = palette[ci + 0];
+            g_val = palette[ci + 1];
+            r_val = palette[ci + 2];
+        } else {
+            b_val = g_val = r_val = 0;
+        }
+
+        switch (page_type) {
+        case 1: /* Alpha-keyed: index 0 = transparent (RGB zeroed) */
+            if (idx == 0) {
+                alpha = 0x00;
+                b_val = g_val = r_val = 0;
+                keyed_pixel_count++;
+            } else {
+                alpha = 0xFF;
+            }
+            break;
+        case 2: /* Semi-transparent */
+            alpha = 0x80;
+            break;
+        case 3: /* Additive: index 0 -> alpha 0 (sprite background) */
+            if (idx == 0) {
+                alpha = 0x00;
+                b_val = g_val = r_val = 0;
+            } else {
+                alpha = 0xFF;
+            }
+            break;
+        default: /* 0: opaque */
+            alpha = 0xFF;
+            break;
+        }
+
+        rgba[px * 4 + 0] = b_val;
+        rgba[px * 4 + 1] = g_val;
+        rgba[px * 4 + 2] = r_val;
+        rgba[px * 4 + 3] = alpha;
+    }
+
+    if (page_type == 1 || page_type == 3)
+        alpha_bleed_rgb(rgba, 64, 64);
+
+    r->pixels = rgba;
+    r->w = 64; r->h = 64;
+    r->type = (int)page_type;
+    r->keyed_pixels = keyed_pixel_count;
+}
+
 int td5_asset_load_race_texture_pages(void)
 {
     /*
@@ -2761,145 +2908,69 @@ int td5_asset_load_race_texture_pages(void)
 
     /* Apply CHECKPT.NUM-driven page swap when racing in reverse direction.
      * Mirrors RemapCheckpointOrderForTrackDirection @ 0x0042FD70 — see
-     * td5_asset_apply_reverse_texture_swap. Identity when forward. */
+     * td5_asset_apply_reverse_texture_swap. Identity when forward.
+     * Runs BEFORE the parallel decode so workers only read the remap table.
+     *
+     * [TD6 NATIVE-RES TEXTURES] Migrated TD6 tracks ship textures at native
+     * resolution as loose PNGs (textures/tex_NNN.png); the decoder uploads
+     * those directly instead of the 64x64 8-bit palettized DAT page, falling
+     * back to the DAT page when the PNG is absent. The per-page TYPE byte
+     * (blend preset) still comes from the DAT. TD6 is forward-only (no remap).
+     *
+     * [Phase A] Decode is parallelized across the worker pool in batches; the
+     * GPU upload + transparency registration + logging run serially on the main
+     * thread in page order so output is byte-identical to the old serial loop. */
     td5_asset_apply_reverse_texture_swap();
 
-    /* Temp BGRA buffer for one 64x64 page */
-    uint8_t *rgba = (uint8_t *)malloc(64 * 64 * 4);
-    if (!rgba) { free(tex_data); return 0; }
+    int td6 = (g_active_td6_level > 0);
+    tpage_result_t results[TPAGE_DECODE_BATCH];
+    uint32_t t_decode_start = td5_plat_time_ms();
 
-    for (uint32_t pg = 0; pg < page_count; pg++) {
-        /* [TD6 NATIVE-RES TEXTURES] Migrated TD6 tracks ship the textures at
-         * their native resolution (128x128 / 256x256, full alpha) as loose PNGs
-         * (textures/tex_NNN.png), built from the TD6 textures.dir entries. Upload
-         * those directly instead of the 64x64 8-bit palettized DAT page, which
-         * was the main cause of blurry/unreadable city textures. The per-page
-         * TYPE byte (blend preset) still comes from the DAT. Falls back to the
-         * DAT page below when the PNG is absent. Page index == DAT page == mesh
-         * tex_page, so it lines up. TD6 is forward-only so no reverse remap. */
-        if (g_active_td6_level > 0) {
-            char png_path[256];
-            void *png_px = NULL;
-            int pw = 0, ph = 0;
-            snprintf(png_path, sizeof(png_path),
-                     "re/assets/levels/level%03d/textures/tex_%03d.png",
-                     level_number, (int)pg);
-            if (td5_plat_file_exists(png_path) &&
-                td5_asset_decode_png_rgba32(png_path, &png_px, &pw, &ph) && png_px) {
-                uint32_t poff = offsets[pg];
-                int ptype = (poff + 4 <= (uint32_t)tex_size) ? tex_data[poff + 3] : 0;
-                td5_plat_render_upload_texture((int)pg, png_px, pw, ph, 2);
-                td5_asset_set_page_transparency((int)pg, ptype);
-                free(png_px);
-                loaded_count++;
+    for (uint32_t base = 0; base < page_count; base += TPAGE_DECODE_BATCH) {
+        uint32_t remain = page_count - base;
+        int n = (int)(remain < TPAGE_DECODE_BATCH ? remain : TPAGE_DECODE_BATCH);
+
+        tpage_decode_ctx_t ctx;
+        ctx.tex_data     = tex_data;
+        ctx.offsets      = offsets;
+        ctx.page_count   = page_count;
+        ctx.tex_size     = tex_size;
+        ctx.level_number = level_number;
+        ctx.td6          = td6;
+        ctx.base         = (int)base;
+        ctx.results      = results;
+
+        /* Parallel decode of this batch (main thread participates). */
+        td5_jobs_parallel_for(n, tpage_decode_one, &ctx);
+
+        /* Serial upload + registration, in page order, on the main thread. */
+        for (int i = 0; i < n; i++) {
+            tpage_result_t *r = &results[i];
+            if (!r->pixels)
                 continue;
+            td5_plat_render_upload_texture(r->page, r->pixels, r->w, r->h, 2);
+            td5_asset_set_page_transparency(r->page, r->type);
+            if (r->type == 1 && r->keyed_pixels > 0) {
+                TD5_LOG_I(LOG_TAG,
+                          "race tpage %d: type=1 keyed_pixels=%d/4096 (RGB zeroed)",
+                          r->page, r->keyed_pixels);
             }
-        }
-
-        int src_i = td5_asset_texture_page_remap_source((int)pg);
-        if (src_i < 0 || (uint32_t)src_i >= page_count) src_i = (int)pg;
-        uint32_t src = (uint32_t)src_i;
-        uint32_t off = offsets[src];
-        if (off + 8 > (uint32_t)tex_size) continue;
-
-        uint8_t *page_ptr = tex_data + off;
-        uint8_t  page_type = page_ptr[3];
-        int32_t  pal_count = *(int32_t *)(page_ptr + 4);
-        if (pal_count < 0 || pal_count > 256) continue;
-
-        uint8_t *palette = page_ptr + 8;
-        uint8_t *indices = palette + pal_count * 3;
-
-        if (indices + 4096 > tex_data + tex_size) continue;
-
-        int keyed_pixel_count = 0;
-
-        /* Decode 4096 palette-indexed pixels to BGRA32 */
-        for (int px = 0; px < 4096; px++) {
-            int idx = indices[px];
-            int ci = idx * 3;
-            uint8_t alpha;
-            uint8_t b_val, g_val, r_val;
-
-            if (ci + 2 < pal_count * 3) {
-                /* Palette is BGR: pal[0]=B, pal[1]=G, pal[2]=R */
-                b_val = palette[ci + 0];
-                g_val = palette[ci + 1];
-                r_val = palette[ci + 2];
-            } else {
-                b_val = g_val = r_val = 0;
+            if (r->type == 3) {
+                TD5_LOG_I(LOG_TAG,
+                          "race tpage %d: type=3 ADDITIVE (light/glow sprite)", r->page);
             }
-
-            switch (page_type) {
-            case 1: /* Alpha-keyed: index 0 = transparent */
-                if (idx == 0) {
-                    /* Match BuildTrackTextureCacheImpl @ 0x0040B1D0 case 1:
-                     * transparent pixels must have RGB=0 so bilinear taps
-                     * at the keyed edge don't bleed palette[0] into the
-                     * visible neighbour (causes dark/black fringes). */
-                    alpha = 0x00;
-                    b_val = g_val = r_val = 0;
-                    keyed_pixel_count++;
-                } else {
-                    alpha = 0xFF;
-                }
-                break;
-            case 2: /* Semi-transparent */
-                alpha = 0x80;
-                break;
-            case 3: /* Additive — BuildTrackTextureCacheImpl @ 0x0040B1D0
-                     * case 3: palette index 0 → alpha 0 (background of
-                     * the light sprite), all other palette entries →
-                     * alpha 0xFF with their raw RGB kept. alpha_test ref=1
-                     * in the ADDITIVE preset then discards just the
-                     * background so z_write stays safe. */
-                if (idx == 0) {
-                    alpha = 0x00;
-                    b_val = g_val = r_val = 0;
-                } else {
-                    alpha = 0xFF;
-                }
-                break;
-            default: /* 0: opaque */
-                alpha = 0xFF;
-                break;
-            }
-
-            /* BGRA byte order for D3D11 B8G8R8A8_UNORM */
-            rgba[px * 4 + 0] = b_val;
-            rgba[px * 4 + 1] = g_val;
-            rgba[px * 4 + 2] = r_val;
-            rgba[px * 4 + 3] = alpha;
+            free(r->pixels);
+            r->pixels = NULL;
+            loaded_count++;
         }
-
-        /* Alpha-keyed and additive pages zero RGB at transparent texels
-         * (matching BuildTrackTextureCacheImpl @ 0x0040B1D0). Under the
-         * wrapper's LINEAR sampler that bleeds black into opaque edges —
-         * dilate neighbour RGB into the zero-alpha texels to cancel it.
-         * Type 2 (uniform alpha 0x80) has no transparent pixels: skipped. */
-        if (page_type == 1 || page_type == 3) {
-            alpha_bleed_rgb(rgba, 64, 64);
-        }
-
-        td5_plat_render_upload_texture((int)pg, rgba, 64, 64, 2);
-        td5_asset_set_page_transparency((int)pg, (int)page_type);
-        if (page_type == 1 && keyed_pixel_count > 0) {
-            TD5_LOG_I(LOG_TAG,
-                      "race tpage %u: type=1 keyed_pixels=%d/4096 (RGB zeroed)",
-                      pg, keyed_pixel_count);
-        }
-        if (page_type == 3) {
-            TD5_LOG_I(LOG_TAG,
-                      "race tpage %u: type=3 ADDITIVE (light/glow sprite)", pg);
-        }
-        loaded_count++;
     }
 
-    free(rgba);
+    uint32_t t_decode_ms = td5_plat_time_ms() - t_decode_start;
     free(tex_data);
 
-    TD5_LOG_I(LOG_TAG, "race texture pages: level=%03d loaded=%d/%u fallback=%d",
-              level_number, loaded_count, page_count, s_fallback_texture_uploaded);
+    TD5_LOG_I(LOG_TAG, "race texture pages: level=%03d loaded=%d/%u fallback=%d workers=%d decode+upload=%ums",
+              level_number, loaded_count, page_count, s_fallback_texture_uploaded,
+              td5_jobs_worker_count(), t_decode_ms);
     return loaded_count > 0 || s_fallback_texture_uploaded;
 }
 /* ========================================================================

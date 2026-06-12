@@ -38,6 +38,7 @@
 #include "td5_render.h"
 #include "td5_camera.h"
 #include "td5_platform.h"
+#include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
 #include "td5_profile.h"
 #include "td5_track.h"
 #include "td5_game.h"
@@ -143,11 +144,7 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * Original: DAT_004bf6b8 (active), 0x4C36C8 (backup)
  * ======================================================================== */
 
-static TD5_Mat3x4 s_render_transform;
-
-/** Transform stack: 8-deep push/pop for hierarchical models */
-static TD5_Mat3x4 s_transform_stack[TRANSFORM_STACK_MAX];
-static int         s_transform_stack_depth;
+/* s_render_transform / s_transform_stack[_depth] moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Projection Parameters
@@ -161,15 +158,7 @@ static int         s_transform_stack_depth;
  *   _DAT_004ab0a8 = frustum_v_sin
  * ======================================================================== */
 
-static float s_focal_length;
-static float s_inv_focal;
-static float s_frustum_h_cos, s_frustum_h_sin;
-static float s_frustum_v_cos, s_frustum_v_sin;
-static float s_near_clip;
-static float s_far_clip;       /* depth normalization far distance (65536) */
-static float s_far_cull;       /* frustum rejection far distance  (195000) */
-static float s_center_x, s_center_y;
-static int   s_viewport_width, s_viewport_height;
+/* projection params (focal/frustum/clip/center/viewport) moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Camera Basis (set externally by td5_camera module)
@@ -178,8 +167,7 @@ static int   s_viewport_width, s_viewport_height;
  *           DAT_004aafc4..cc = camera world position
  * ======================================================================== */
 
-static float s_camera_basis[9];      /* 3x3 row-major: right, up, forward */
-static float s_camera_pos[3];        /* world-space camera position */
+/* s_camera_basis / s_camera_pos moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Lighting State
@@ -188,8 +176,7 @@ static float s_camera_pos[3];        /* world-space camera position */
  * Original: DAT_004ab0d0..f0 = light directions, DAT_004bf6a8 = ambient
  * ======================================================================== */
 
-static float s_light_dirs[9];        /* 3 light direction vectors (3 floats each) */
-static float s_ambient_intensity;    /* base ambient [0..255] range */
+/* s_light_dirs / s_ambient_intensity moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Fog State
@@ -217,10 +204,15 @@ typedef struct TextureCacheSlot {
     uint8_t  _pad;
 } TextureCacheSlot;
 
+/* texture-bind cache: SHARED (manages the shared 1024-page GPU texture table).
+ * Intentionally NOT per-pane — see the note in RenderScratch. */
 static TextureCacheSlot s_texture_cache[TEXTURE_CACHE_SLOTS];
 static int              s_texture_cache_active_count;
-static int              s_current_texture_page;   /* DAT_0048da00 */
-static int              s_previous_texture_page;  /* DAT_0048da04 */
+/* s_current_texture_page / s_previous_texture_page are PER-PANE (RenderScratch):
+ * the "currently bound page" is per-pane render state (each pane binds its own
+ * sequence), so the parallel build records the right page per pane. The LRU
+ * cache + active_count above stay SHARED (GPU residency manager, touched only on
+ * the serial replay/live path). */
 
 /* ========================================================================
  * Translucent Primitive Pipeline
@@ -242,10 +234,7 @@ typedef struct TranslucentBatchEntry {
 #define TRANSLUCENT_POOL_SIZE 512
 #define TRANSLUCENT_MAX_ACTIVE (TRANSLUCENT_POOL_SIZE - 2) /* 510 usable */
 
-static TranslucentBatchEntry s_translucent_pool[TRANSLUCENT_POOL_SIZE];
-static int                   s_translucent_head;       /* head of sorted list */
-static int                   s_translucent_free;       /* head of free list */
-static int                   s_translucent_count;      /* active count */
+/* translucent batch pool (pool/head/free/count) moved to RenderScratch (Phase B Stage 1). */
 
 /* Luminance-to-ARGB color LUT (1024 entries).
  * Original: DAT_004aee68, init as i * 0x10101 - 0x1000000 */
@@ -268,9 +257,7 @@ typedef struct DepthBucketEntry {
 #define DEPTH_BUCKET_COUNT TD5_DEPTH_SORT_BUCKETS  /* 4096 */
 #define DEPTH_ENTRY_POOL   4096
 
-static int              s_depth_buckets[DEPTH_BUCKET_COUNT]; /* head index per bucket */
-static DepthBucketEntry s_depth_entries[DEPTH_ENTRY_POOL];
-static int              s_depth_entry_count;                 /* next free entry */
+/* depth-sort buckets/entries/count moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Immediate Draw Buffers
@@ -279,10 +266,7 @@ static int              s_depth_entry_count;                 /* next free entry 
  * Original: DAT_004afb14 (vertex buf), DAT_004af314 (index buf)
  * ======================================================================== */
 
-static TD5_D3DVertex s_imm_verts[IMMEDIATE_MAX_VERTS];
-static uint16_t      s_imm_indices[IMMEDIATE_MAX_INDICES];
-static int           s_imm_vert_count;   /* DAT_004afb4c */
-static int           s_imm_index_count;  /* DAT_004afb50 */
+/* immediate vert/index buffers + counts moved to RenderScratch (Phase B Stage 1). */
 
 /* ========================================================================
  * Deferred Additive Pass
@@ -314,15 +298,256 @@ typedef struct DeferredAdditiveBatch {
     int index_count;
 } DeferredAdditiveBatch;
 
-static TD5_D3DVertex        s_deferred_add_verts[DEFERRED_ADD_MAX_VERTS];
-static uint16_t             s_deferred_add_indices[DEFERRED_ADD_MAX_INDICES];
-static int                  s_deferred_add_vert_count;
-static int                  s_deferred_add_index_count;
-static DeferredAdditiveBatch s_deferred_add_batches[DEFERRED_ADD_MAX_BATCHES];
-static int                  s_deferred_add_batch_count;
-/* Only defer while the world/opaque pass is active. HUD/FMV/frontend
- * draws don't need deferral. */
-static int                  s_deferred_add_active;
+/* ========================================================================
+ * [Phase B / Stage 1 — render re-entrancy, 2026-06-08]
+ *
+ * All per-pane MUTABLE render scratch (transform stack, projection, camera,
+ * lighting, texture-bind cache, translucent/depth/immediate/deferred-additive
+ * buffers, and the nested-draw guards) is bundled into RenderScratch and
+ * reached through a THREAD-LOCAL pointer g_rs that defaults to a single static
+ * instance g_rs_default. The existing `s_*` access sites are redirected by the
+ * #define shims below, so the serial/main-thread path (g_rs == &g_rs_default)
+ * is byte-identical to the previous single-instance code. Stage 2 points each
+ * worker thread's g_rs at its own instance so panes record concurrently
+ * without clobbering each other's scratch.
+ *
+ * Deliberately LEFT SHARED (read-only after init, or benign): the trig/color
+ * LUTs, per-frame anim counters (sky rotation, billboard phase), the per-slot
+ * vehicle prep arrays (built once per frame before the pane loop), the lazy
+ * atlas-lookup caches (idempotent), the diagnostic debug counters, and the
+ * dev-only F12 debug-line overlay buffer.
+ * ======================================================================== */
+
+/* Relocated from its original site (~0x42E130 lighting block) so it can live
+ * inside RenderScratch, which is defined above the first use of the shims. */
+typedef struct {
+    int   enabled;       /* 0 = slot disabled, 1 = active */
+    float vec_world[3];  /* world-frame contribution dir scaled by intensity */
+} TL_Contribution;
+
+typedef struct RenderScratch {
+    /* transform stack (mesh dispatch) */
+    TD5_Mat3x4 render_transform;
+    TD5_Mat3x4 transform_stack[TRANSFORM_STACK_MAX];
+    int        transform_stack_depth;
+    /* projection params (per pane via td5_render_configure_projection) */
+    float focal_length, inv_focal;
+    float frustum_h_cos, frustum_h_sin;
+    float frustum_v_cos, frustum_v_sin;
+    float near_clip, far_clip, far_cull;
+    float center_x, center_y;
+    int   viewport_width, viewport_height;
+    /* camera basis/pos (per pane) */
+    float camera_basis[9];
+    float camera_pos[3];
+    float camera_secondary[9];   /* g_cameraSecondaryUnscaled snapshot (billboard basis) */
+    /* lighting (written during actor pass) */
+    float light_dirs[9];
+    float ambient_intensity;
+    TL_Contribution tl_contrib[3];
+    int   tl_ambient;
+    /* "currently/previously bound page" — per-pane render state (the LRU cache
+     * array itself stays shared; see note at its declaration). */
+    int current_texture_page;
+    int previous_texture_page;
+    /* NOTE: the texture-bind cache (TextureCacheSlot[600] + active_count) is NOT
+     * here — it manages the SHARED 1024-page GPU texture table, so it's a single
+     * shared instance (per-pane copies would diverge their page->slot mapping and
+     * bind/evict the wrong GPU pages). Kept as shared file statics. */
+    /* translucent batch pipeline */
+    TranslucentBatchEntry translucent_pool[TRANSLUCENT_POOL_SIZE];
+    int translucent_head, translucent_free, translucent_count;
+    /* depth-sorted projected bucket pipeline */
+    int depth_buckets[DEPTH_BUCKET_COUNT];
+    DepthBucketEntry depth_entries[DEPTH_ENTRY_POOL];
+    int depth_entry_count;
+    /* immediate draw accumulation */
+    TD5_D3DVertex imm_verts[IMMEDIATE_MAX_VERTS];
+    uint16_t imm_indices[IMMEDIATE_MAX_INDICES];
+    int imm_vert_count, imm_index_count;
+    /* deferred additive pass */
+    TD5_D3DVertex deferred_add_verts[DEFERRED_ADD_MAX_VERTS];
+    uint16_t deferred_add_indices[DEFERRED_ADD_MAX_INDICES];
+    int deferred_add_vert_count, deferred_add_index_count;
+    DeferredAdditiveBatch deferred_add_batches[DEFERRED_ADD_MAX_BATCHES];
+    int deferred_add_batch_count;
+    int deferred_add_active;
+    /* misc per-pane state */
+    int scene_has_renderer_geometry;
+    int in_sky_draw;
+    int in_reflection_overlay;
+    uint8_t actor_light_zone[TD5_ACTOR_MAX_TOTAL_SLOTS];  /* per-pane light-zone cache */
+    /* [Phase B parallel-build] Per-pane mesh-vertex WORKSPACE. The mesh
+     * transform used to write view coords IN-PLACE into the SHARED mesh blob
+     * (lighting + proj-UV writers likewise) — fatal for concurrent pane
+     * builds: every pane transforms the SAME blobs with its own camera.
+     * td5_render_transform_mesh_vertices now copies the mesh's vertex array
+     * here and writes the runtime fields in the copy; dispatch rebases
+     * blob-derived vertex pointers via rs_vtx_rebase(). The blob is never
+     * written by the render path. The workspace holds ONE mesh at a time
+     * (transform -> dispatch is one uninterrupted sequence per mesh), so
+     * depth-bucket prims — consumed at flush, after the workspace has been
+     * reused — are copied into prim_copy at queue time (entry idx*4 slots). */
+    TD5_MeshVertex *vtx_work;        /* malloc'd, grown on demand            */
+    int             vtx_work_cap;
+    const uint8_t  *vtx_src_base;    /* blob range of the current mesh       */
+    const uint8_t  *vtx_src_end;
+    int             tex_page_override; /* -1 = none; reflection overlay page */
+    TD5_MeshVertex  prim_copy[DEPTH_ENTRY_POOL * 4];
+} RenderScratch;
+
+static RenderScratch        g_rs_default;
+static __thread RenderScratch *g_rs = &g_rs_default;
+
+/* Field shims — redirect the historical static names to the thread-local
+ * instance. Defined here (after all member typedefs, before the first function
+ * that uses them) so every access site compiles unchanged. */
+#define s_render_transform          (g_rs->render_transform)
+#define s_transform_stack           (g_rs->transform_stack)
+#define s_transform_stack_depth     (g_rs->transform_stack_depth)
+#define s_focal_length              (g_rs->focal_length)
+#define s_inv_focal                 (g_rs->inv_focal)
+#define s_frustum_h_cos             (g_rs->frustum_h_cos)
+#define s_frustum_h_sin             (g_rs->frustum_h_sin)
+#define s_frustum_v_cos             (g_rs->frustum_v_cos)
+#define s_frustum_v_sin             (g_rs->frustum_v_sin)
+#define s_near_clip                 (g_rs->near_clip)
+#define s_far_clip                  (g_rs->far_clip)
+#define s_far_cull                  (g_rs->far_cull)
+#define s_center_x                  (g_rs->center_x)
+#define s_center_y                  (g_rs->center_y)
+#define s_viewport_width            (g_rs->viewport_width)
+#define s_viewport_height           (g_rs->viewport_height)
+#define s_camera_basis              (g_rs->camera_basis)
+#define s_camera_pos                (g_rs->camera_pos)
+#define s_camera_secondary          (g_rs->camera_secondary)
+#define s_light_dirs                (g_rs->light_dirs)
+#define s_ambient_intensity         (g_rs->ambient_intensity)
+#define s_tl_contrib                (g_rs->tl_contrib)
+#define s_tl_ambient                (g_rs->tl_ambient)
+/* s_texture_cache / _active_count are SHARED statics (declared at their original
+ * site), NOT g_rs fields. s_current/_previous_texture_page ARE per-pane g_rs. */
+#define s_current_texture_page      (g_rs->current_texture_page)
+#define s_previous_texture_page     (g_rs->previous_texture_page)
+#define s_translucent_pool          (g_rs->translucent_pool)
+#define s_translucent_head          (g_rs->translucent_head)
+#define s_translucent_free          (g_rs->translucent_free)
+#define s_translucent_count         (g_rs->translucent_count)
+#define s_depth_buckets             (g_rs->depth_buckets)
+#define s_depth_entries             (g_rs->depth_entries)
+#define s_depth_entry_count         (g_rs->depth_entry_count)
+#define s_imm_verts                 (g_rs->imm_verts)
+#define s_imm_indices               (g_rs->imm_indices)
+#define s_imm_vert_count            (g_rs->imm_vert_count)
+#define s_imm_index_count           (g_rs->imm_index_count)
+#define s_deferred_add_verts        (g_rs->deferred_add_verts)
+#define s_deferred_add_indices      (g_rs->deferred_add_indices)
+#define s_deferred_add_vert_count   (g_rs->deferred_add_vert_count)
+#define s_deferred_add_index_count  (g_rs->deferred_add_index_count)
+#define s_deferred_add_batches      (g_rs->deferred_add_batches)
+#define s_deferred_add_batch_count  (g_rs->deferred_add_batch_count)
+#define s_deferred_add_active       (g_rs->deferred_add_active)
+#define s_scene_has_renderer_geometry (g_rs->scene_has_renderer_geometry)
+#define s_in_sky_draw               (g_rs->in_sky_draw)
+#define s_in_reflection_overlay     (g_rs->in_reflection_overlay)
+#define s_actor_light_zone          (g_rs->actor_light_zone)
+
+/* [Phase B Stage 2b] Per-pane RenderScratch pool. Workers bind their pane's
+ * instance (this thread's g_rs); the serial/main path uses g_rs_default. The
+ * pool is allocated once, lazily, and never freed (bounded, reused each race). */
+static RenderScratch *s_rs_pool[TD5_MAX_VIEWPORTS];
+
+/* A calloc'd RenderScratch is all-zero, but several of its structures are
+ * linked lists / caches that MUST start -1-terminated (a zero free-list is a
+ * self-referential cycle -> infinite loop on first traversal). Mirror the
+ * one-time startup init that g_rs_default received. Runs on the main thread
+ * during pool creation (single-threaded), temporarily pointing g_rs at the
+ * instance so the field shims address it. */
+static void rs_init_instance(RenderScratch *rs)
+{
+    RenderScratch *save = g_rs;
+    g_rs = rs;
+
+    /* (texture cache is shared, not per-instance — initialized elsewhere) */
+
+    /* Translucent pipeline: builds the -1-terminated free list + empties the
+     * sorted list (head = -1). */
+    td5_render_init_translucent_pipeline();
+
+    /* Depth-sort buckets: -1 = empty bucket. */
+    for (int i = 0; i < DEPTH_BUCKET_COUNT; i++)
+        s_depth_buckets[i] = -1;
+    s_depth_entry_count = 0;
+
+    /* Texture-page override: -1 = none (0 is a valid page, so calloc-zero
+     * would silently force every command onto page 0). */
+    g_rs->tex_page_override = -1;
+
+    g_rs = save;
+}
+
+int td5_render_scratch_pool_ensure(int count)
+{
+    if (count > TD5_MAX_VIEWPORTS) count = TD5_MAX_VIEWPORTS;
+    for (int i = 0; i < count; i++) {
+        if (!s_rs_pool[i]) {
+            s_rs_pool[i] = (RenderScratch *)calloc(1, sizeof(RenderScratch));
+            if (!s_rs_pool[i]) return 0;
+            rs_init_instance(s_rs_pool[i]);
+        }
+    }
+    return 1;
+}
+
+void td5_render_scratch_bind(int index)
+{
+    g_rs = (index >= 0 && index < TD5_MAX_VIEWPORTS && s_rs_pool[index])
+           ? s_rs_pool[index] : &g_rs_default;
+}
+
+void td5_render_scratch_unbind(void)
+{
+    g_rs = &g_rs_default;
+}
+
+/* --- [Phase B parallel-build] per-pane vertex workspace helpers --- */
+
+/* Grow this pane's workspace to hold `count` vertices. Returns 0 on alloc
+ * failure (caller falls back to legacy in-place blob writes — correct for the
+ * serial path, never expected to fail in practice). */
+static int rs_vtx_workspace_ensure(int count)
+{
+    if (g_rs->vtx_work && count <= g_rs->vtx_work_cap) return 1;
+    int cap = g_rs->vtx_work_cap > 0 ? g_rs->vtx_work_cap : 1024;
+    while (cap < count) cap *= 2;
+    TD5_MeshVertex *nw = (TD5_MeshVertex *)malloc((size_t)cap * sizeof(TD5_MeshVertex));
+    if (!nw) return 0;
+    free(g_rs->vtx_work);
+    g_rs->vtx_work     = nw;
+    g_rs->vtx_work_cap = cap;
+    return 1;
+}
+
+/* Translate a vertex pointer derived from the CURRENT mesh's blob range into
+ * this pane's workspace copy. Pointers outside the range (a mesh that never
+ * went through transform_mesh_vertices, or the alloc-failure fallback) pass
+ * through unchanged — identical to the legacy in-place behavior. */
+static inline TD5_MeshVertex *rs_vtx_rebase(void *p)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    if (b >= g_rs->vtx_src_base && b < g_rs->vtx_src_end)
+        return (TD5_MeshVertex *)((uint8_t *)g_rs->vtx_work + (b - g_rs->vtx_src_base));
+    return (TD5_MeshVertex *)p;
+}
+
+/* [Phase B Stage 2b] When set, render_actors_for_view / configure_projection do
+ * NOT refresh the render camera from the camera module's single "current"
+ * snapshot (td5_camera_get_basis/position) — the per-pane camera was already
+ * baked into each g_rs[vp] by the serial Phase-1 pass. Without this, every pane
+ * would re-read the SAME current camera (the last pane applied) and show an
+ * identical view. Read-only on worker threads during the render phase. */
+static int s_camera_prebaked = 0;
+void td5_render_set_camera_prebaked(int on) { s_camera_prebaked = on ? 1 : 0; }
 
 /* ========================================================================
  * Sky Rotation (12-bit fixed angle, +0x400 per tick)
@@ -344,7 +569,7 @@ static int32_t s_billboard_anim_phase;
 
 static int s_globals_initialized;   /* DAT_0048dba8 */
 static int s_state_active;          /* DAT_0048dba0 */
-static int s_scene_has_renderer_geometry;
+/* s_scene_has_renderer_geometry moved to RenderScratch (Phase B Stage 1). */
 static int s_debug_fallback_log_count;
 static int s_debug_clip_log_count;
 static int s_debug_clip_near_rejects;
@@ -460,7 +685,10 @@ static int  s_environs_level;     /* level_number used to key the per-track tabl
  * ApplyTrackLightingForVehicleSegment @ 0x00430150 walks the per-track zone
  * array forward/backward each frame based on the actor's track_span_raw, so
  * we persist the last-known index per slot across frames. */
-static uint8_t s_actor_light_zone[TD5_ACTOR_MAX_TOTAL_SLOTS];
+/* s_actor_light_zone moved to RenderScratch (per-pane): update_actor_light_zone
+ * writes it every frame during the actor render, so under the threaded build all
+ * panes would write the same slot concurrently (flicker). Per-pane copies start
+ * at 0 (calloc), matching the level-load reset; hysteresis stays per-pane. */
 
 /* Per-track environs names + flags (from exe VA 0x0046bb1c). */
 #include "td5_environs_table.inc"
@@ -891,6 +1119,32 @@ static void update_render_camera_from_game(void)
     if (s_inspect_enabled)
         apply_inspection_camera();
 #endif
+}
+
+/* [Phase B Stage 2b] Public: bake the camera module's CURRENT basis/position into
+ * the bound g_rs. The threaded path calls this in the serial camera pass (after
+ * td5_camera_apply_view(vp), with g_rs[vp] bound) so each pane's camera is stored
+ * per-pane EVERY frame; render_actors then skips its own refresh (s_camera_prebaked)
+ * and uses the baked camera, so panes don't all inherit the last applied view. */
+void td5_render_bake_camera(void)
+{
+    extern float g_cameraSecondaryUnscaled[9];   /* td5_camera.c (billboard basis) */
+    update_render_camera_from_game();
+    /* Snapshot the shared camera-secondary basis (used to orient billboards) into
+     * this pane's g_rs so the threaded build doesn't read another pane's value. */
+    memcpy(s_camera_secondary, g_cameraSecondaryUnscaled, 9 * sizeof(float));
+}
+
+/* [diag] log the bound g_rs's projection inputs (per-pane bake verification). */
+void td5_render_log_pane_proj(int vp)
+{
+    static int s_n = 0;
+    if (s_n < 12) {
+        TD5_LOG_W(LOG_TAG, "pane %d proj: center=(%.0f,%.0f) vpwh=(%d,%d) focal=%.0f cam=(%.0f,%.0f,%.0f)",
+                  vp, s_center_x, s_center_y, s_viewport_width, s_viewport_height, s_focal_length,
+                  s_camera_pos[0], s_camera_pos[1], s_camera_pos[2]);
+        s_n++;
+    }
 }
 
 /* Programmatic inspection-camera control — drives the same fixed-angle camera
@@ -1336,6 +1590,10 @@ int td5_render_init(void)
     /* Clear transform stack */
     s_transform_stack_depth = 0;
 
+    /* [parallel-build] g_rs_default doesn't go through rs_init_instance:
+     * arm the no-override sentinel here (0 would force texture page 0). */
+    g_rs->tex_page_override = -1;
+
     /* Initialize color LUT: i * 0x10101 - 0x1000000
      * Maps luminance byte [0..255] to packed ARGB with alpha=0xFF */
     for (int i = 0; i < 1024; i++) {
@@ -1690,8 +1948,23 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
 
     const float *m = s_render_transform.m;
     int count = mesh->total_vertex_count;
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-    if (!verts || count <= 0) return;
+    TD5_MeshVertex *src = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    if (!src || count <= 0) return;
+
+    /* [Phase B parallel-build] Copy the mesh's vertices into this pane's
+     * workspace and write the view coords THERE — the shared blob stays
+     * read-only so concurrent pane builds can transform the same mesh with
+     * different cameras. Downstream readers rebase via rs_vtx_rebase(). */
+    TD5_MeshVertex *verts;
+    if (rs_vtx_workspace_ensure(count)) {
+        verts = g_rs->vtx_work;
+        memcpy(verts, src, (size_t)count * sizeof(TD5_MeshVertex));
+        g_rs->vtx_src_base = (const uint8_t *)src;
+        g_rs->vtx_src_end  = (const uint8_t *)(src + count);
+    } else {
+        verts = src;   /* legacy in-place fallback (serial-only correct) */
+        g_rs->vtx_src_base = g_rs->vtx_src_end = NULL;
+    }
 
     /*
      * Software world->view transform (0x43DD60):
@@ -1717,7 +1990,9 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     if (!mesh) return;
 
     int count = mesh->total_vertex_count;
-    TD5_MeshVertex *verts   = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    /* [parallel-build] lighting writes target the pane workspace copy (the
+     * blob is read-only in the render path); normals stay blob (read-only). */
+    TD5_MeshVertex *verts   = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
     TD5_VertexNormal *norms = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
     if (!verts || !norms || count <= 0) return;
 
@@ -2059,9 +2334,11 @@ void td5_render_span_display_list(void *display_list_block)
          * billboard quad off-screen. */
         int billboard_tag = (int)mesh->texture_page_id;
         if (billboard_tag == 1 || billboard_tag == 2) {
-            extern float g_cameraSecondaryUnscaled[9];
+            /* per-pane billboard basis (baked from g_cameraSecondaryUnscaled in
+             * td5_render_bake_camera) — reading the shared global here would make
+             * all threaded panes orient billboards with the last pane's camera. */
             td5_render_push_transform();
-            td5_render_load_rotation((const TD5_Mat3x3 *)g_cameraSecondaryUnscaled);
+            td5_render_load_rotation((const TD5_Mat3x3 *)s_camera_secondary);
             td5_render_transform_mesh_vertices(mesh);
             /* Skip runtime vertex-lighting recompute for billboard meshes.
              * RenderTrackSpanDisplayList @ 0x00431270 only calls
@@ -2179,10 +2456,17 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
                 break; /* out of vertices */
             }
 
-            /* Dispatch through table with correct vertex pointer */
+            /* Dispatch through table with correct vertex pointer.
+             * [parallel-build] Rebase blob-derived pointers into this pane's
+             * vertex workspace (where transform/lighting wrote the runtime
+             * fields); out-of-range pointers pass through unchanged. The
+             * per-pane texture override serves the reflection overlay, which
+             * previously patched the SHARED blob command list in place. */
             TD5_PrimitiveCmd patched = *cmd;
-            patched.vertex_data_ptr = (uint32_t)(uintptr_t)cmd_verts;
-            s_dispatch_table[opcode](&patched, base_verts);
+            patched.vertex_data_ptr = (uint32_t)(uintptr_t)rs_vtx_rebase(cmd_verts);
+            if (g_rs->tex_page_override >= 0)
+                patched.texture_page_id = (int16_t)g_rs->tex_page_override;
+            s_dispatch_table[opcode](&patched, rs_vtx_rebase(base_verts));
 
             /* Advance running cursor by vertices consumed */
             if (cmd->vertex_data_ptr == 0) {
@@ -2232,7 +2516,7 @@ TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot)
  * 994ab68 placed it below the writer, which fails to compile. The reader
  * (td5_render_apply_page_blend_preset) appears even later and remains
  * correctly in scope. */
-static int s_in_sky_draw = 0;
+/* s_in_sky_draw moved to RenderScratch (Phase B Stage 1). */
 
 void td5_render_actors_for_view(int view_index)
 {
@@ -2387,8 +2671,11 @@ void td5_render_actors_for_view(int view_index)
 
     /* Refresh render-side camera snapshot from game-side globals every frame.
      * td5_render_configure_projection only runs when viewport dimensions change,
-     * so without this the render camera stays frozen at its initial position. */
-    update_render_camera_from_game();
+     * so without this the render camera stays frozen at its initial position.
+     * [Phase B Stage 2b] Skip when the per-pane camera was pre-baked into this
+     * g_rs by the serial camera pass (else all panes re-read the same current). */
+    if (!s_camera_prebaked)
+        update_render_camera_from_game();
 
     /* Draw sky panorama behind all geometry. Sky uses TD5_PRESET_SKY
      * (z_test=1, z_write=0) so the dome — drawn camera-centered with small
@@ -2577,8 +2864,15 @@ void td5_render_actors_for_view(int view_index)
          * case; typical frame uses ~25-30 entries each. Overflow falls back
          * to "submit anyway" so we never lose geometry — only the cap-spill
          * tail can re-duplicate, and that's strictly safer than the bug. */
+        /* [parallel-build FIX 2026-06-11 threaded-pane flicker] This dedup
+         * array was a function-local `static` — invisible to the Stage-1
+         * file-scope re-entrancy sweep — so concurrent pane builds shared it:
+         * each pane's dup-scan saw OTHER panes' pointers and skipped meshes
+         * at random (RENDERSTAT spanmesh ~300 -> ~110, panes flickering).
+         * It is per-frame-per-pane state by design -> plain stack local
+         * (16KB, fine for both the main thread and the job-pool workers). */
         #define TD5_RENDER_SUBMITTED_CAP 4096
-        static const void *s_submitted[TD5_RENDER_SUBMITTED_CAP];
+        const void *s_submitted[TD5_RENDER_SUBMITTED_CAP];
         int submitted_count = 0;
 
         for (int i = 0; i < n_entries; i++) {
@@ -3389,6 +3683,24 @@ void td5_render_queue_projected_entry(void *entry, int bucket, uint32_t flags, i
     if (s_depth_entry_count >= DEPTH_ENTRY_POOL) return;
 
     int idx = s_depth_entry_count++;
+
+    /* [parallel-build] Bucket entries are consumed at flush time — AFTER the
+     * pane's vertex workspace has been reused by later meshes — so copy the
+     * primitive's vertices into this entry's fixed arena slot now. (This also
+     * fixes the latent shared-blob hazard: a queued prim whose blob verts get
+     * re-transformed by a later draw before the flush.) Flags 0x3/0x4 (and
+     * the 0x8000000x variants) = 3/4 contiguous TD5_MeshVertex; the raw-N>4
+     * path has no live callers and passes through with original semantics. */
+    {
+        uint32_t f  = flags & 0x7FFFFFFFu;
+        int      nv = (f == 0x3u) ? 3 : (f == 0x4u) ? 4 : (int)(flags & 0x7Fu);
+        if (nv >= 3 && nv <= 4) {
+            TD5_MeshVertex *copy = &g_rs->prim_copy[(size_t)idx * 4];
+            memcpy(copy, entry, (size_t)nv * sizeof(TD5_MeshVertex));
+            entry = copy;
+        }
+    }
+
     s_depth_entries[idx].prim_data    = entry;
     s_depth_entries[idx].flags        = flags;
     s_depth_entries[idx].texture_page = texture_page;
@@ -3528,7 +3840,7 @@ void td5_render_advance_texture_ages(void)
  * the per-bind preset switch overrides ADDITIVE with TRANSLUCENT_ANISO and
  * the reflection paints opaquely over the car body (bug: "cars render only
  * the reflection texture"). */
-static int s_in_reflection_overlay = 0;
+/* s_in_reflection_overlay moved to RenderScratch (Phase B Stage 1). */
 
 /* Dispatch render preset per tpage transparency type.
  * BindRaceTexturePage @ 0x0040B660 switch:
@@ -3568,6 +3880,17 @@ int td5_render_bind_texture_page(int page_id)
 
     /* Check if already the current texture */
     if (page_id == s_current_texture_page) return 1;
+
+    /* [Phase B render-transform] Recording (worker building a pane list): touch
+     * NO shared GPU state. Track the per-pane current page (so flush_immediate's
+     * bind records correctly) and record the bind intent; the cache lookup + GPU
+     * bind + blend preset are resolved on the serial replay. */
+    if (td5_rcmd_recording()) {
+        s_previous_texture_page = s_current_texture_page;
+        s_current_texture_page  = page_id;
+        td5_rcmd_bind_page(page_id);
+        return 1;
+    }
 
     s_debug_texture_bind_calls++;
 
@@ -3695,7 +4018,9 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot)
     pe = &s_proj_effect[slot];
     mode = pe->sub_mode;
 
-    verts      = (TD5_MeshVertex  *)(uintptr_t)mesh->vertices_offset;
+    /* [parallel-build] proj_u/proj_v writes target the pane workspace copy
+     * (mode 3 also READS view_x/view_y, which only exist there). */
+    verts      = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
     normals    = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
     vert_count = mesh->total_vertex_count;
     if (!verts || vert_count <= 0) return;
@@ -3728,14 +4053,14 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot)
             verts[i].proj_v = (vz * cos_h + sin_h * vx + bias_v) * (1.0f / 1024.0f);
         }
     } else if (mode == 3) {
-        extern float g_cameraPos[3];   /* td5_camera.c */
         const float *mv  = s_render_transform.m;
         const float *cam = s_camera_basis;
         /* Anchor in view space: TransformVector3ByBasis(DAT_004aafe0, slot.anchor - camera_world).
-         * The port's s_camera_basis mirrors DAT_004aafe0 (camera world-to-view rotation). */
-        float dx = pe->anchor_x - g_cameraPos[0];
-        float dy = pe->anchor_y - g_cameraPos[1];
-        float dz = pe->anchor_z - g_cameraPos[2];
+         * The port's s_camera_basis mirrors DAT_004aafe0 (camera world-to-view rotation).
+         * Use the PER-PANE baked camera pos (s_camera_pos) not the shared g_cameraPos. */
+        float dx = pe->anchor_x - s_camera_pos[0];
+        float dy = pe->anchor_y - s_camera_pos[1];
+        float dz = pe->anchor_z - s_camera_pos[2];
         float anchor_vx = cam[0] * dx + cam[1] * dy + cam[2] * dz;
         float anchor_vy = cam[3] * dx + cam[4] * dy + cam[5] * dz;
         const float rot_scale   = 0.375f;                                 /* _DAT_0045d788 */
@@ -3917,14 +4242,8 @@ static int tl_normalize_4096(const int16_t in[3], int16_t out[3])
     return (int)mag2;
 }
 
-/* Per-frame 3-slot contribution accumulator (one set per actor pass). */
-typedef struct {
-    int   enabled;       /* 0 = slot disabled, 1 = active */
-    float vec_world[3];  /* world-frame contribution dir scaled by intensity */
-} TL_Contribution;
-
-static TL_Contribution s_tl_contrib[3];
-static int             s_tl_ambient;  /* scalar ambient byte (post-ComputeAverageDepth) */
+/* TL_Contribution typedef relocated above into the RenderScratch region;
+ * s_tl_contrib[3] / s_tl_ambient moved to RenderScratch (Phase B Stage 1). */
 
 /* SetTrackLightDirectionContribution @ 0x0042E130:
  *   intensity = avg(R,G,B); contribution_world = dir * intensity * (1/1024).
@@ -4707,7 +5026,10 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
     pe = &s_proj_effect[slot];
     if (pe->texture_page < 0) return;
 
-    verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    /* [parallel-build] Operate on the pane workspace copy (the body render
+     * just transformed this mesh, so the workspace holds it): the lighting/UV
+     * overrides below must not touch the SHARED blob. */
+    verts = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
     vert_count = mesh->total_vertex_count;
     if (!verts || vert_count <= 0) return;
 
@@ -4725,14 +5047,12 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
     cmd_count = mesh->command_count;
     if (!cmds || cmd_count <= 0) return;
 
-    /* Save original texture pages, override with environs */
-    int saved_pages[256];
-    if (cmd_count > 256) cmd_count = 256;
-
-    for (i = 0; i < cmd_count; i++) {
-        saved_pages[i] = cmds[i].texture_page_id;
-        cmds[i].texture_page_id = (int16_t)pe->texture_page;
-    }
+    /* Override every command's texture page with the environs page via the
+     * per-pane dispatch override. [parallel-build] This used to save/patch/
+     * restore texture_page_id in the SHARED blob command list — a concurrent
+     * pane dispatching the same car mesh mid-patch would bind the env page
+     * for the opaque body. */
+    g_rs->tex_page_override = pe->texture_page;
 
     /* Cap vertex count to stack budget */
 #define REFLECTION_MAX_VERTS 4096
@@ -4783,14 +5103,16 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
         s_refl_log_count++;
     }
 
-    /* Restore original UVs, lighting, and texture pages */
+    g_rs->tex_page_override = -1;
+
+    /* Restore original UVs + lighting. On the workspace path this is moot
+     * (the workspace is rewritten by the next mesh transform anyway) but it
+     * keeps the rs_vtx alloc-failure fallback — which writes the blob
+     * in place — from leaking the reflection overrides into later frames. */
     for (i = 0; i < save_count; i++) {
         verts[i].tex_u = saved_uv[i][0];
         verts[i].tex_v = saved_uv[i][1];
         verts[i].lighting = saved_lighting[i];
-    }
-    for (i = 0; i < cmd_count; i++) {
-        cmds[i].texture_page_id = (int16_t)saved_pages[i];
     }
 
     /* Restore opaque preset for subsequent geometry */
