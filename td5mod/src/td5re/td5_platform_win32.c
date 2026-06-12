@@ -31,6 +31,14 @@
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
 
+/* Procedural, texture-free particle/VFX pixel shaders (smoke/rain/decal/glow).
+ * Compiled bytecode embedded as g_ps_fx_* arrays; created lazily in
+ * td5_plat_fx_begin and exposed to the VFX/render code through the FX API. */
+#include "../../ddraw_wrapper/src/shaders/ps_fx_smoke_bytes.h"  /* g_ps_fx_smoke */
+#include "../../ddraw_wrapper/src/shaders/ps_fx_rain_bytes.h"   /* g_ps_fx_rain  */
+#include "../../ddraw_wrapper/src/shaders/ps_fx_decal_bytes.h"  /* g_ps_fx_decal */
+#include "../../ddraw_wrapper/src/shaders/ps_fx_glow_bytes.h"   /* g_ps_fx_glow  */
+
 #define LOG_TAG "platform"
 #include "td5_color.h"
 
@@ -3984,6 +3992,151 @@ void td5_plat_render_set_ps_override(void *ps, int sampler_idx)
 void td5_plat_render_clear_ps_override(void)
 {
     s_render_ps_override = NULL;
+}
+
+/* ========================================================================
+ * Procedural texture-free FX shaders (smoke / rain / decal / glow)
+ *
+ * These replace the SMOKE / RAINDROP / FADEWHT / BRAKED / POLICELT_* atlas
+ * sprites with analytic, resolution-independent pixel shaders. The draw model
+ * is identical to the frontend VectorUI gauge: upload a tiny b1 constant
+ * buffer (global time + one shader-specific param), bind the FX pixel shader
+ * via the existing PS-override path, then let the caller issue ordinary
+ * td5_plat_render_draw_tris batches (the per-particle data rides in the vertex
+ * COLOR0/COLOR1 channels). Lazily created on first use; if creation fails the
+ * begin() returns 0 and the caller keeps its textured fallback.
+ * ======================================================================== */
+
+/* Must match cbuffer FxParams (register b1) in every ps_fx_*.hlsl. */
+typedef struct FxParamsCB {
+    float time;   /* seconds, monotonic */
+    float p0;     /* shader-specific (glow: 0=src-alpha lamp, 1=additive) */
+    float p1;     /* shader-specific (glow: gaussian tightness) */
+    float p2;
+} FxParamsCB;
+
+static ID3D11PixelShader *s_fx_ps[4]   = { NULL, NULL, NULL, NULL };
+static int                s_fx_tried[4] = { 0, 0, 0, 0 };
+static ID3D11Buffer      *s_fx_cb       = NULL;
+
+static ID3D11PixelShader *fx_ensure_shader(TD5_FxShader which)
+{
+    int i = (int)which;
+    if (i < 0 || i > 3) return NULL;
+    if (s_fx_ps[i]) return s_fx_ps[i];
+    if (s_fx_tried[i]) return NULL;   /* already failed once — don't retry every frame */
+    s_fx_tried[i] = 1;
+
+    if (!g_backend.device) return NULL;
+
+    const BYTE *code = NULL;
+    SIZE_T      size = 0;
+    const char *name = "?";
+    switch (which) {
+    case TD5_FX_SMOKE: code = g_ps_fx_smoke; size = sizeof(g_ps_fx_smoke); name = "smoke"; break;
+    case TD5_FX_RAIN:  code = g_ps_fx_rain;  size = sizeof(g_ps_fx_rain);  name = "rain";  break;
+    case TD5_FX_DECAL: code = g_ps_fx_decal; size = sizeof(g_ps_fx_decal); name = "decal"; break;
+    case TD5_FX_GLOW:  code = g_ps_fx_glow;  size = sizeof(g_ps_fx_glow);  name = "glow";  break;
+    default: return NULL;
+    }
+
+    HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device, code, size, NULL, &s_fx_ps[i]);
+    if (FAILED(hr)) {
+        s_fx_ps[i] = NULL;
+        TD5_LOG_W(LOG_TAG, "fx shader '%s' create failed hr=0x%08lX", name, (unsigned long)hr);
+        return NULL;
+    }
+
+    if (!s_fx_cb) {
+        D3D11_BUFFER_DESC bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.ByteWidth = sizeof(FxParamsCB);   /* 16 bytes, 16-aligned */
+        bd.Usage     = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        HRESULT hcb = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_fx_cb);
+        if (FAILED(hcb)) {
+            s_fx_cb = NULL;
+            TD5_LOG_W(LOG_TAG, "fx cbuffer create failed hr=0x%08lX", (unsigned long)hcb);
+            ID3D11PixelShader_Release(s_fx_ps[i]);
+            s_fx_ps[i] = NULL;
+            return NULL;
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "procedural FX shader '%s' ready (texture-free)", name);
+    return s_fx_ps[i];
+}
+
+int td5_plat_fx_begin(TD5_FxShader which, float time_seconds, float p0)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    if (!ctx) return 0;
+
+    ID3D11PixelShader *ps = fx_ensure_shader(which);
+    if (!ps || !s_fx_cb) return 0;
+
+    FxParamsCB cb;
+    cb.time = time_seconds;
+    cb.p0   = p0;
+    cb.p1   = 0.0f;
+    cb.p2   = 0.0f;
+    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)s_fx_cb, 0, NULL, &cb, 0, 0);
+    /* b1 is never touched by td5_plat_render_draw_tris (it binds b0/fog only),
+     * so this binding survives every draw inside the begin/end bracket. */
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 1, 1, &s_fx_cb);
+
+    td5_plat_render_set_ps_override((void *)ps, SAMP_LINEAR_CLAMP);
+    return 1;
+}
+
+void td5_plat_fx_end(void)
+{
+    td5_plat_render_clear_ps_override();
+}
+
+/* --- Soft-particle depth binding (smoke) ------------------------------------
+ * Binds the scene depth as PS resource t1 and swaps the bound depth target to
+ * the READ-ONLY DSV so the smoke shader can SAMPLE scene depth for a depth-aware
+ * soft fade while the hardware z-test still runs. Returns 1 if the soft-particle
+ * resources exist (the caller passes that as the smoke shader's soft flag and
+ * MUST call td5_plat_fx_soft_end() after the draw to restore the writable depth
+ * target). Returns 0 (soft disabled) if the backend couldn't create them. */
+static ID3D11RenderTargetView *s_soft_saved_rtv = NULL;
+static ID3D11DepthStencilView *s_soft_saved_dsv = NULL;
+static int                     s_soft_active     = 0;
+
+int td5_plat_fx_soft_begin(void)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    if (!ctx || !g_backend.depth_srv || !g_backend.depth_dsv_readonly) return 0;
+
+    /* Save the currently bound RTV + DSV (AddRef'd) so we can restore them. */
+    s_soft_saved_rtv = NULL;
+    s_soft_saved_dsv = NULL;
+    ID3D11DeviceContext_OMGetRenderTargets(ctx, 1, &s_soft_saved_rtv, &s_soft_saved_dsv);
+
+    /* Same colour target, but the READ-ONLY depth view (so depth can also be an
+     * SRV), plus the depth SRV at t1 for the smoke shader. */
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &s_soft_saved_rtv, g_backend.depth_dsv_readonly);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &g_backend.depth_srv);
+    s_soft_active = 1;
+    return 1;
+}
+
+void td5_plat_fx_soft_end(void)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    if (!ctx || !s_soft_active) return;
+    s_soft_active = 0;
+
+    /* Unbind t1 (avoids a read/write hazard when the depth is next a writable
+     * target), then restore the original RTV + writable DSV. */
+    ID3D11ShaderResourceView *null_srv = NULL;
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &null_srv);
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &s_soft_saved_rtv, s_soft_saved_dsv);
+
+    if (s_soft_saved_rtv) { ID3D11RenderTargetView_Release(s_soft_saved_rtv); s_soft_saved_rtv = NULL; }
+    if (s_soft_saved_dsv) { ID3D11DepthStencilView_Release(s_soft_saved_dsv); s_soft_saved_dsv = NULL; }
 }
 
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,

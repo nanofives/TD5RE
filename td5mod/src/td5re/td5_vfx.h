@@ -66,6 +66,11 @@ int  td5_vfx_init(void);
 void td5_vfx_shutdown(void);
 void td5_vfx_tick(void);
 
+/* Global gate for the procedural (texture-free) VFX shaders. 1 = on (default),
+ * 0 = legacy textured path (TD5RE_FX_PROC=0). Shared by td5_vfx.c and the
+ * taillight/cop-marker glow paths in td5_render.c. */
+int  td5_vfx_proc_enabled(void);
+
 /* ========================================================================
  * Race particle system (callback-driven, 100 slots/view)
  * ======================================================================== */

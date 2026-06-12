@@ -5543,6 +5543,19 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     const float *m = s_render_transform.m;
     const float half_size = 40.0f; /* model-space half-extent (original ±80 / 2) */
 
+    /* [2026-06-08 procedural FX] Texture-free red brake lamp via ps_fx_glow
+     * (p0=0 -> SRC_ALPHA lamp). Bound once for both lights; the per-light draws
+     * below inherit the override. No BRAKED atlas sprite. */
+    int glow_fx = 0;
+    uint32_t lamp_col = 0xFFFFFFFFu;          /* legacy: white * red BRAKED texture */
+    float bu0 = s_braked_u0, bv0 = s_braked_v0, bu1 = s_braked_u1, bv1 = s_braked_v1;
+    if (td5_vfx_proc_enabled() && td5_plat_fx_begin(TD5_FX_GLOW, 0.0f, 0.0f)) {
+        glow_fx = 1;
+        uint32_t ai = (uint32_t)bright * 2u; if (ai > 255u) ai = 255u;  /* 0..0x80 -> 0..255 */
+        lamp_col = (ai << 24) | 0x00FF1808u;  /* bright red lamp, alpha = brightness ramp */
+        bu0 = 0.0f; bv0 = 0.0f; bu1 = 1.0f; bv1 = 1.0f;   /* canonical UVs for the shader */
+    }
+
     for (int light = 0; light < 2; light++) {
         /* Taillight hardpoint, int16[3] model space. [S23] For ported TD6 cars
          * the binary carparam.dat carries WRONG values at +0x60/+0x68 (it is not
@@ -5587,23 +5600,23 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
         /* TL */
         v[0].screen_x = cx - h;  v[0].screen_y = cy - h;
         v[0].depth_z  = depth;   v[0].rhw      = inv_z;
-        v[0].diffuse  = 0xFFFFFFFF; v[0].specular = 0;
-        v[0].tex_u    = s_braked_u0; v[0].tex_v = s_braked_v0;
+        v[0].diffuse  = lamp_col; v[0].specular = 0;
+        v[0].tex_u    = bu0; v[0].tex_v = bv0;
         /* BL */
         v[1].screen_x = cx - h;  v[1].screen_y = cy + h;
         v[1].depth_z  = depth;   v[1].rhw      = inv_z;
-        v[1].diffuse  = 0xFFFFFFFF; v[1].specular = 0;
-        v[1].tex_u    = s_braked_u0; v[1].tex_v = s_braked_v1;
+        v[1].diffuse  = lamp_col; v[1].specular = 0;
+        v[1].tex_u    = bu0; v[1].tex_v = bv1;
         /* TR */
         v[2].screen_x = cx + h;  v[2].screen_y = cy - h;
         v[2].depth_z  = depth;   v[2].rhw      = inv_z;
-        v[2].diffuse  = 0xFFFFFFFF; v[2].specular = 0;
-        v[2].tex_u    = s_braked_u1; v[2].tex_v = s_braked_v0;
+        v[2].diffuse  = lamp_col; v[2].specular = 0;
+        v[2].tex_u    = bu1; v[2].tex_v = bv0;
         /* BR */
         v[3].screen_x = cx + h;  v[3].screen_y = cy + h;
         v[3].depth_z  = depth;   v[3].rhw      = inv_z;
-        v[3].diffuse  = 0xFFFFFFFF; v[3].specular = 0;
-        v[3].tex_u    = s_braked_u1; v[3].tex_v = s_braked_v1;
+        v[3].diffuse  = lamp_col; v[3].specular = 0;
+        v[3].tex_u    = bu1; v[3].tex_v = bv1;
 
         uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
         flush_immediate_internal();
@@ -5620,6 +5633,8 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
         td5_plat_render_bind_texture(s_braked_page);
         td5_plat_render_draw_tris(v, 4, idx, 6);
     }
+
+    if (glow_fx) td5_plat_fx_end();
 
     /* Restore opaque so it doesn't leak into next mesh */
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -5703,8 +5718,13 @@ static void tracked_marker_emit_quad_world(const float corners_world_xy[4][2],
                                             float u0, float v0, float u1, float v1,
                                             uint32_t color, int tex_page)
 {
-    if (tex_page < 0) return;
+    /* [2026-06-08 procedural FX] When proc FX is on, draw the strobe as a
+     * texture-free additive radial glow (ps_fx_glow, p0=1). `color` then carries
+     * the layer tint (red/blue) with the pulse in alpha; UVs become canonical. */
+    int glow_fx = td5_vfx_proc_enabled();
+    if (!glow_fx && tex_page < 0) return;
     if (shared_world_z <= s_near_clip) return;
+    if (glow_fx) { u0 = 0.0f; v0 = 0.0f; u1 = 1.0f; v1 = 1.0f; }
 
     float inv_z = 1.0f / shared_world_z;
     float depth = shared_world_z * (1.0f / s_far_clip);
@@ -5764,8 +5784,10 @@ static void tracked_marker_emit_quad_world(const float corners_world_xy[4][2],
      * diffused" report). Additive keeps the zero-RGB background invisible, so
      * dropping the alpha test does not bring back any box. */
     td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_GLOW);
-    td5_plat_render_bind_texture(tex_page);
+    int gx = glow_fx && td5_plat_fx_begin(TD5_FX_GLOW, 0.0f, 1.0f); /* p0=1 -> additive glow */
+    if (!gx) td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(v, 4, idx, 6);
+    if (gx) td5_plat_fx_end();
 }
 
 /* Constant-needed forward declaration for AngleFromVector12 from
@@ -5924,26 +5946,37 @@ static void render_tracked_actor_marker(const TD5_Actor *actor,
          * SubmitImmediateTranslucentPrimitive). Each shares the same gray
          * pulse_color (all 4 corners get the same diffuse via the orig's
          * local_18/14/10/c broadcast at 0x0043cea5..0x0043ceba). */
+        /* [2026-06-08 procedural FX] Per-layer glow tint for the texture-free
+         * path (layer 0 = red strobe, 1 = blue strobe, 2 = base red/blue by
+         * marker). Pulse brightness `a` goes in the alpha; legacy path keeps the
+         * gray pulse_color (texture supplies the colour). */
+        const int   proc_marker = td5_vfx_proc_enabled();
+        const uint32_t tint_red  = 0x00FF2018u;
+        const uint32_t tint_blue = 0x002048FFu;
+        uint32_t col0 = proc_marker ? ((a << 24) | tint_red)  : pulse_color;
+        uint32_t col1 = proc_marker ? ((a << 24) | tint_blue) : pulse_color;
+        uint32_t col2 = proc_marker ? ((a << 24) | (marker == 0 ? tint_red : tint_blue))
+                                     : pulse_color;
         {
             int   page = td5_vfx_tracked_marker_get_page(marker, 0);
             float u0, v0, u1, v1;
             td5_vfx_tracked_marker_get_uv(marker, 0, &u0, &v0, &u1, &v1);
             tracked_marker_emit_quad_world(l0_corners, fVar7,
-                                            u0, v0, u1, v1, pulse_color, page);
+                                            u0, v0, u1, v1, col0, page);
         }
         {
             int   page = td5_vfx_tracked_marker_get_page(marker, 1);
             float u0, v0, u1, v1;
             td5_vfx_tracked_marker_get_uv(marker, 1, &u0, &v0, &u1, &v1);
             tracked_marker_emit_quad_world(l1_corners, fVar7,
-                                            u0, v0, u1, v1, pulse_color, page);
+                                            u0, v0, u1, v1, col1, page);
         }
         {
             int   page = td5_vfx_tracked_marker_get_page(marker, 2);
             float u0, v0, u1, v1;
             td5_vfx_tracked_marker_get_uv(marker, 2, &u0, &v0, &u1, &v1);
             tracked_marker_emit_quad_world(l2_corners, l2_z,
-                                            u0, v0, u1, v1, pulse_color, page);
+                                            u0, v0, u1, v1, col2, page);
         }
     }
 
@@ -7543,6 +7576,15 @@ void td5_render_submit_translucent_world(uint16_t *quad_data) {
  * (linear vz/far_clip) the opaque pass uses, so the LEQUAL compare is valid
  * (unlike the smoke NDC-vs-linear issue). z_write=0 so overlapping marks in
  * the trail don't z-fight each other. [FIX 2026-05-28 tire-marks-through-walls] */
+/* [2026-06-08 procedural FX] When the VFX layer is rendering tire marks through
+ * the procedural ps_fx_decal shader, it sets this so the immediate submit below
+ * uses the low-alpha-ref depth-tested preset (TRANSLUCENT_POINT_ZTEST, alpha_ref=1)
+ * instead of TRANSLUCENT_ANISO (alpha_ref=0x80) — otherwise the decal's feathered
+ * edges (alpha < 0.5) get alpha-tested away. Default 0 keeps the legacy textured
+ * path byte-identical. */
+static int s_tire_mark_fx_preset = 0;
+void td5_render_set_tire_mark_fx_preset(int on) { s_tire_mark_fx_preset = on ? 1 : 0; }
+
 void td5_render_submit_tire_mark(uint16_t *quad_data) {
     float *fdata;
     TD5_D3DVertex verts[4];
@@ -7581,7 +7623,8 @@ void td5_render_submit_tire_mark(uint16_t *quad_data) {
      * trail behind the car, so they only need to (a) win the coplanar road, handled by
      * the small vertex bias above, and (b) lose to the car, handled by the normal
      * LEQUAL test now that no rasterizer pull over-biases them. */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_ANISO);
+    td5_plat_render_set_preset(s_tire_mark_fx_preset ? TD5_PRESET_TRANSLUCENT_POINT_ZTEST
+                                                     : TD5_PRESET_TRANSLUCENT_ANISO);
     td5_plat_render_bind_texture(tex_page);
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }

@@ -54,4 +54,21 @@ echo   ps_cursor OK
 if errorlevel 1 (echo FAILED: ps_gauge && exit /b 1)
 echo   ps_gauge OK
 
+REM --- Procedural texture-free particle/VFX shaders (smoke, rain, decal, glow) ---
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_fx_smoke_bytes.h /Vn g_ps_fx_smoke ps_fx_smoke.hlsl
+if errorlevel 1 (echo FAILED: ps_fx_smoke && exit /b 1)
+echo   ps_fx_smoke OK
+
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_fx_rain_bytes.h /Vn g_ps_fx_rain ps_fx_rain.hlsl
+if errorlevel 1 (echo FAILED: ps_fx_rain && exit /b 1)
+echo   ps_fx_rain OK
+
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_fx_decal_bytes.h /Vn g_ps_fx_decal ps_fx_decal.hlsl
+if errorlevel 1 (echo FAILED: ps_fx_decal && exit /b 1)
+echo   ps_fx_decal OK
+
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_fx_glow_bytes.h /Vn g_ps_fx_glow ps_fx_glow.hlsl
+if errorlevel 1 (echo FAILED: ps_fx_glow && exit /b 1)
+echo   ps_fx_glow OK
+
 echo All shaders compiled successfully.

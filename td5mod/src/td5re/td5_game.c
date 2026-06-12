@@ -4116,6 +4116,14 @@ int td5_game_run_race_frame(void) {
                 if (pa)
                     pa->prev_race_position = pa->race_position;
             }
+            /* [2026-06-08 procedural FX] Advance VFX (particle position/size/
+             * lifetime + tire-track aging) during the COUNTDOWN too. The normal
+             * call lives only in the unpaused branch below, so smoke spawned by
+             * revving on the line otherwise sat frozen at its spawn pose/size —
+             * the "frozen disc behind the car at the start". This is the COSMETIC
+             * particle update only (no rand(), no actor-sim writes — rand() is
+             * confined to the spawners), so it cannot desync the lockstep sim. */
+            td5_vfx_tick();
             /* Chase camera runs AFTER physics — matches RunRaceFrame
              * (0x0042B580). Countdown still updates the camera so the
              * fly-in/idle-orbit animates while the grid counts down. */

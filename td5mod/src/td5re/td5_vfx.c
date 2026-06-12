@@ -126,6 +126,13 @@ typedef struct VfxParticleSlot {
 #define PSLOT_VIEW_X      0x2C  /* float: view-space X (after projection) */
 #define PSLOT_VIEW_Y      0x30  /* float: view-space Y */
 #define PSLOT_VIEW_Z      0x34  /* float: view-space Z */
+/* [2026-06-08 procedural FX] Spawn lifetime, stored per-puff so the procedural
+ * smoke shader can compute a correct age01 (= elapsed/life0). Different spawn
+ * paths use very different lifetimes (drift/rear-wheel 10..40 ticks vs
+ * rev/exhaust 0x200=512 ticks); the old fixed /512 normalisation mis-aged the
+ * short drift puffs to ~0.95 at birth → they rendered tiny + faint. Spare slot
+ * byte (free gap between VEL_Z and POS_X). */
+#define PSLOT_LIFE0       0x1A  /* int16: lifetime at spawn */
 
 /* Helper to read/write typed values from raw slot bytes */
 #define PSLOT_RD16(s,off)      (*(int16_t  *)((s)+(off)))
@@ -717,6 +724,79 @@ void td5_vfx_project_particles(int view_index) {
     }
 }
 
+/* ========================================================================
+ * Procedural texture-free VFX (smoke/rain/tire-marks/glows)
+ *
+ * The particle effects are rendered through analytic pixel shaders
+ * (td5_plat_fx_*) instead of sampling the SMOKE/RAINDROP/FADEWHT/BRAKED/
+ * POLICELT atlas sprites — no PNG is needed for particles. Per-particle data
+ * rides in the vertex COLOR0 (tint+alpha) / COLOR1 (age+seed) channels and the
+ * draw is one batched td5_plat_render_draw_tris per effect (the gauge pattern).
+ *
+ * TD5RE_FX_PROC=0 (env) restores the legacy textured path for A/B comparison.
+ * ======================================================================== */
+
+/* Smoke base tint (0xAARRGGBB): light neutral grey, master alpha modulated by
+ * the shader's age/density. Kept slightly cool so exhaust/burnout haze reads as
+ * smoke rather than dust. */
+#define TD5_FX_SMOKE_TINT   0xD8CDCDD6u  /* light cool grey; alpha = base opacity (shader modulates by density/age) */
+#define TD5_FX_SMOKE_LIFE0  512.0f   /* fallback spawn lifetime if PSLOT_LIFE0 is 0 */
+
+/* Visual lifetime CAP (ticks @30Hz): a puff is fully dissipated by this many
+ * ticks of elapsed life even if its actual slot lifetime is longer. The
+ * rev/exhaust puffs live 0x200=512 ticks (~17 s) and lingered on the ground far
+ * too long; capping the visual age makes them gone in ~5 s. Short drift puffs
+ * (10..40 ticks) are below the cap, so they age over their natural life. */
+#define TD5_FX_SMOKE_VISUAL_CAP  150.0f   /* ~5 s */
+
+/* Procedural-smoke puff size multiplier over the RE-faithful world half-extent.
+ * The original game's smoke renders noticeably larger than this RE port's
+ * (0x3000-init) size; the procedural path is a modern departure anyway, so we
+ * scale the billboard up for fuller, more readable burnout/exhaust clouds.
+ * Applied ONLY to the procedural quad (legacy textured path unchanged). */
+#define TD5_FX_SMOKE_SIZE_SCALE  2.5f
+
+/* Toward-camera depth bias for smoke verts, matching the fold that
+ * td5_render_submit_translucent_world applies (-NEAR_DEPTH_OFFSET *
+ * DEPTH_NORMALIZE_INV, i.e. 64/195000): the shared project_vertex omits the -64
+ * the opaque pass bakes in, so without this low puffs at wheel/ground height
+ * lose the LEQUAL tie to the coplanar road and get occluded by it. A touch more
+ * than 64 to reliably win the tie for airborne-but-low launch smoke. */
+#define TD5_FX_SMOKE_DEPTH_BIAS  (96.0f / 195000.0f)
+
+int td5_vfx_proc_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_FX_PROC");
+        cached = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        TD5_LOG_I(LOG_TAG, "procedural FX %s (TD5RE_FX_PROC)", cached ? "ENABLED" : "disabled");
+    }
+    return cached;
+}
+
+/* Free-running animation time in seconds for the procedural FX shaders.
+ *
+ * Uses the wall clock (QueryPerformanceCounter via td5_plat_time_us) rather
+ * than g_td5.simulation_tick_counter, because the sim tick is FROZEN during the
+ * race COUNTDOWN (it only increments when !g_td5.paused — see td5_game.c, and
+ * the countdown starts paused). Tying the smoke noise scroll to the sim tick
+ * left launch-burnout smoke completely static during the countdown (it read as
+ * a frozen disc behind the car). This is a per-client COSMETIC clock only — it
+ * never feeds the deterministic sim, so it's safe for netplay lockstep.
+ *
+ * Wrapped to a 3600 s window so the value stays small enough for crisp float32
+ * precision in the shader's noise/warp terms (a once-an-hour 1-frame seam in
+ * the noise pattern is imperceptible). */
+static float td5_vfx_anim_time(void) {
+    return (float)(td5_plat_time_us() % 3600000000ULL) * 1.0e-6f;
+}
+
+/* Procedural smoke draw batch (one quad per active smoke particle). Sized to
+ * the per-view slot pool; VFX renders serially on the main thread (threaded
+ * panes keep VFX on main), so file-scope scratch is safe. */
+static TD5_D3DVertex s_fx_smoke_verts[TD5_VFX_PARTICLE_SLOTS_PER_VIEW * 4];
+static uint16_t      s_fx_smoke_idx[TD5_VFX_PARTICLE_SLOTS_PER_VIEW * 6];
+
 /**
  * DrawRaceParticleEffects (0x429720)
  *
@@ -726,6 +806,13 @@ void td5_vfx_project_particles(int view_index) {
  * (same as the HUD and tire-track pipelines). Using td5_render_submit_
  * translucent — NOT td5_render_queue_translucent_batch, which expects
  * TD5_PrimitiveCmd records, not 0xB8 sprite quads.
+ *
+ * [2026-06-08 procedural FX] Smoke (type 0) now renders through the analytic
+ * ps_fx_smoke shader: each active puff becomes one unit-UV quad whose COLOR1
+ * carries (age01, seed); the whole batch is drawn in a single
+ * td5_plat_render_draw_tris under TD5_PRESET_TRANSLUCENT_POINT_ZTEST. No SMOKE
+ * atlas page is sampled. Rain splashes (type 1, a dropped feature) keep the
+ * legacy textured submit. TD5RE_FX_PROC=0 forces the legacy path for both.
  *
  * [ARCH-DIVERGENCE: D3D11 quad path replaces DDraw sprite batch; L5 sweep 2026-05-21]
  *   Orig used a pre-allocated DDraw sprite batch flushed via the immediate
@@ -740,7 +827,8 @@ void td5_vfx_draw_particles(int view_index) {
     s_current_view_index = view_index;
     int vi = view_index & 1;
     int drawn = 0;
-
+    const int proc = td5_vfx_proc_enabled();   /* procedural (texture-free) smoke */
+    int pv = 0;                                  /* accumulated proc-smoke vertices */
 
     /* Decrement sprite render flags (fade timers) */
     for (int i = 0; i < TD5_VFX_SPRITE_BATCH_COUNT; i++) {
@@ -814,6 +902,57 @@ void td5_vfx_draw_particles(int view_index) {
          * spawning car was already too small to see. */
         float half_w = world_half_w * focal * inv_z;
         float half_h = world_half_h * focal * inv_z;
+
+        /* [2026-06-08 procedural FX] Smoke (type 0) -> analytic ps_fx_smoke:
+         * emit a canonical unit-UV quad, carry (age01, seed) in COLOR1, and
+         * batch the whole pool into one draw after the loop. No SMOKE atlas. */
+        if (proc && slot[PSLOT_TYPE] == 0 &&
+            pv + 4 <= (int)(sizeof(s_fx_smoke_verts) / sizeof(s_fx_smoke_verts[0]))) {
+            /* age01 from THIS puff's own spawn lifetime (PSLOT_LIFE0), capped to
+             * a visual lifetime so the 512-tick rev/exhaust puffs dissipate in
+             * ~5 s instead of lingering ~17 s. Short drift puffs (life0 < cap)
+             * age over their natural life — and no longer get mis-aged to ~0.95
+             * at birth (which had shrunk them to nothing). */
+            int16_t  remain = PSLOT_RD16(slot, PSLOT_LIFETIME);
+            int16_t  life0  = PSLOT_RD16(slot, PSLOT_LIFE0);
+            if (life0 <= 0) life0 = (int16_t)TD5_FX_SMOKE_LIFE0;
+            float    vcap   = (float)life0;
+            if (vcap > TD5_FX_SMOKE_VISUAL_CAP) vcap = TD5_FX_SMOKE_VISUAL_CAP;
+            float    age01  = (float)(life0 - remain) / vcap;
+            if (age01 < 0.0f) age01 = 0.0f; else if (age01 > 1.0f) age01 = 1.0f;
+            uint32_t ageB  = (uint32_t)(age01 * 255.0f + 0.5f);
+            uint32_t seedB = (uint32_t)((i * 97 + 13) & 0xFF);
+            uint32_t spec  = (ageB << 16) | (seedB << 8); /* COLOR1: .r=age .g=seed */
+            uint32_t tint  = TD5_FX_SMOKE_TINT;
+            float    dz    = sz - TD5_FX_SMOKE_DEPTH_BIAS;   /* win LEQUAL vs coplanar ground */
+            /* Bigger than the RE-faithful size — the original's smoke is larger. */
+            float    hw    = half_w * TD5_FX_SMOKE_SIZE_SCALE;
+            float    hh    = half_h * TD5_FX_SMOKE_SIZE_SCALE;
+            int b = pv;
+            /* TL */
+            s_fx_smoke_verts[b+0].screen_x = sx - hw; s_fx_smoke_verts[b+0].screen_y = sy - hh;
+            s_fx_smoke_verts[b+0].depth_z  = dz;      s_fx_smoke_verts[b+0].rhw      = inv_z;
+            s_fx_smoke_verts[b+0].diffuse  = tint;    s_fx_smoke_verts[b+0].specular = spec;
+            s_fx_smoke_verts[b+0].tex_u    = 0.0f;    s_fx_smoke_verts[b+0].tex_v    = 0.0f;
+            /* TR */
+            s_fx_smoke_verts[b+1].screen_x = sx + hw; s_fx_smoke_verts[b+1].screen_y = sy - hh;
+            s_fx_smoke_verts[b+1].depth_z  = dz;      s_fx_smoke_verts[b+1].rhw      = inv_z;
+            s_fx_smoke_verts[b+1].diffuse  = tint;    s_fx_smoke_verts[b+1].specular = spec;
+            s_fx_smoke_verts[b+1].tex_u    = 1.0f;    s_fx_smoke_verts[b+1].tex_v    = 0.0f;
+            /* BR */
+            s_fx_smoke_verts[b+2].screen_x = sx + hw; s_fx_smoke_verts[b+2].screen_y = sy + hh;
+            s_fx_smoke_verts[b+2].depth_z  = dz;      s_fx_smoke_verts[b+2].rhw      = inv_z;
+            s_fx_smoke_verts[b+2].diffuse  = tint;    s_fx_smoke_verts[b+2].specular = spec;
+            s_fx_smoke_verts[b+2].tex_u    = 1.0f;    s_fx_smoke_verts[b+2].tex_v    = 1.0f;
+            /* BL */
+            s_fx_smoke_verts[b+3].screen_x = sx - hw; s_fx_smoke_verts[b+3].screen_y = sy + hh;
+            s_fx_smoke_verts[b+3].depth_z  = dz;      s_fx_smoke_verts[b+3].rhw      = inv_z;
+            s_fx_smoke_verts[b+3].diffuse  = tint;    s_fx_smoke_verts[b+3].specular = spec;
+            s_fx_smoke_verts[b+3].tex_u    = 0.0f;    s_fx_smoke_verts[b+3].tex_v    = 1.0f;
+            pv += 4;
+            drawn++;
+            continue;   /* skip the legacy textured submit for this puff */
+        }
 
         /* For smoke (type 0): refresh UVs every frame from variant table indexed
          * by (phase >> 2). Mirrors orig SmokeDrawCallback @ 0x004297D0 which sets
@@ -892,8 +1031,39 @@ void td5_vfx_draw_particles(int view_index) {
     /* Restore the prior render transform (matches the tire-track render). */
     td5_render_pop_transform();
 
+    /* [2026-06-08 procedural FX] Draw the whole smoke pool in ONE batched,
+     * texture-free pass (replaces the original per-puff immediate additive
+     * draws). Verts are pretransformed (screen-space), so the transform stack
+     * is irrelevant. Modern alpha-blended grey smoke (SRCALPHA, z-tested,
+     * z_write off) — a deliberate, modern departure from the original's
+     * additive white haze. */
+    if (proc && pv > 0) {
+        int quads = pv / 4;
+        for (int q = 0; q < quads; q++) {
+            int o = q * 6, bvx = q * 4;
+            s_fx_smoke_idx[o+0] = (uint16_t)(bvx + 0);
+            s_fx_smoke_idx[o+1] = (uint16_t)(bvx + 1);
+            s_fx_smoke_idx[o+2] = (uint16_t)(bvx + 2);
+            s_fx_smoke_idx[o+3] = (uint16_t)(bvx + 0);
+            s_fx_smoke_idx[o+4] = (uint16_t)(bvx + 2);
+            s_fx_smoke_idx[o+5] = (uint16_t)(bvx + 3);
+        }
+        /* Soft particles: bind scene depth so the shader fades smoke as it nears
+         * geometry (no hard flat-card seam where it meets the ground/walls). The
+         * returned flag becomes the shader's soft toggle; 0 = depth unavailable,
+         * draw normally. */
+        int soft = td5_plat_fx_soft_begin();
+        if (td5_plat_fx_begin(TD5_FX_SMOKE, td5_vfx_anim_time(), soft ? 1.0f : 0.0f)) {
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT_ZTEST);
+            td5_plat_render_draw_tris(s_fx_smoke_verts, pv, s_fx_smoke_idx, quads * 6);
+            td5_plat_fx_end();
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        }
+        if (soft) td5_plat_fx_soft_end();
+    }
+
     if ((s_vfx_debug_frame % 60u) == 0u) {
-        TD5_LOG_D(LOG_TAG, "particle draw view %d: drawn=%d", view_index, drawn);
+        TD5_LOG_D(LOG_TAG, "particle draw view %d: drawn=%d proc=%d pv=%d", view_index, drawn, proc, pv);
     }
 }
 
@@ -1211,6 +1381,12 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
     float weather_nv0 = s_weather_v0 / (float)wth;
     float weather_nu1 = s_weather_u1 / (float)wtw;
     float weather_nv1 = s_weather_v1 / (float)wth;
+    /* [2026-06-08 procedural FX] Procedural rain streak (ps_fx_rain): canonical
+     * unit UVs so the shader's across-width / along-length gradients are valid.
+     * The override is set once around the whole streak batch below; the existing
+     * per-quad submit_translucent_hud draws inherit it (no RAINDROP atlas). */
+    const int proc_rain = td5_vfx_proc_enabled();
+    if (proc_rain) { weather_nu0 = 0.0f; weather_nv0 = 0.0f; weather_nu1 = 1.0f; weather_nv1 = 1.0f; }
     float screen_cx = td5_render_get_center_x();
     float screen_cy = td5_render_get_center_y();
 
@@ -1302,6 +1478,10 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
     float advect_x = view_motion[0];
     float advect_y = view_motion[1];
     float advect_z = view_motion[2];
+
+    /* Bind the procedural rain shader once for the whole streak batch (the
+     * per-quad submit_translucent_hud draws below inherit the PS override). */
+    int rain_fx = proc_rain && td5_plat_fx_begin(TD5_FX_RAIN, td5_vfx_anim_time(), 0.0f);
 
     /* Per-particle update and render loop */
     VfxWeatherParticle *buf = s_weather_buf[vi];
@@ -1410,9 +1590,13 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
 
         /* Pre-transformed screen-space submit (alpha-blend HUD preset: LINEAR +
          * alpha_ref=1, z-test off) — keeps the rain fixed on the viewport on top
-         * of the 3D scene instead of locking it to world geometry. */
+         * of the 3D scene instead of locking it to world geometry. When the
+         * procedural rain shader is bound (rain_fx), this draws through it
+         * instead of sampling RAINDROP. */
         td5_render_submit_translucent_hud((uint16_t *)quad);
     }
+
+    if (rain_fx) td5_plat_fx_end();
 }
 
 /* ========================================================================
@@ -1825,6 +2009,7 @@ void td5_vfx_render_tire_tracks(void) {
      * through project_vertex), so the depth compare is valid and walls/props
      * occlude them. z_write=0 keeps overlapping trail quads from z-fighting. */
     extern void td5_render_submit_tire_mark(uint16_t *quad_data);
+    extern void td5_render_set_tire_mark_fx_preset(int on);
 
     static uint32_t s_tt_render_frame = 0;
     int tt_log = ((s_tt_render_frame++ % 60u) == 0u);
@@ -1832,6 +2017,13 @@ void td5_vfx_render_tire_tracks(void) {
     int tt_rej_frustum = 0;
 
     if (!s_tire_track_pool) return;
+
+    /* [2026-06-08 procedural FX] Bind ps_fx_decal for the whole tire-mark batch
+     * (feathered + grained skid, no FADEWHT texel). The submit path picks the
+     * low-alpha-ref depth-tested preset while this is active so the feathered
+     * edges survive. The per-mark UVs are forced canonical below. */
+    const int proc_decal = td5_vfx_proc_enabled();
+    int decal_fx = 0;
 
     /* BUGFIX 2026-05-28: drive the projection through the renderer's own
      * transform pipeline (td5_render_load_rotation +
@@ -1858,6 +2050,11 @@ void td5_vfx_render_tire_tracks(void) {
     /* Camera position (only for frustum diagnostic log). */
     float cam_x, cam_y, cam_z;
     td5_camera_get_position(&cam_x, &cam_y, &cam_z);
+
+    if (proc_decal && td5_plat_fx_begin(TD5_FX_DECAL, td5_vfx_anim_time(), 0.0f)) {
+        decal_fx = 1;
+        td5_render_set_tire_mark_fx_preset(1);
+    }
 
     for (int i = 0; i < TD5_VFX_TIRE_TRACK_POOL_SIZE; i++) {
         VfxTireTrackSlot *slot = &s_tire_track_pool[i];
@@ -2033,6 +2230,8 @@ void td5_vfx_render_tire_tracks(void) {
         float tm_v0 = s_tiremark_v0 * tt_inv_th;
         float tm_u1 = s_tiremark_u1 * tt_inv_tw;
         float tm_v1 = s_tiremark_v1 * tt_inv_th;
+        /* Procedural decal: canonical UVs (u across strip width, v along length). */
+        if (decal_fx) { tm_u0 = 0.0f; tm_v0 = 0.0f; tm_u1 = 1.0f; tm_v1 = 1.0f; }
 
         /* Build a VfxSpriteQuad on the stack for submission.
          * Vertex order: 0=trailing-left, 1=trailing-right, 2=leading-right, 3=leading-left
@@ -2088,9 +2287,14 @@ void td5_vfx_render_tire_tracks(void) {
     /* Restore the previous render transform so we don't pollute later draws. */
     td5_render_pop_transform();
 
+    if (decal_fx) {
+        td5_render_set_tire_mark_fx_preset(0);
+        td5_plat_fx_end();
+    }
+
     if (tt_log) {
-        TD5_LOG_I(LOG_TAG, "tire render: alive=%d submitted=%d rej(frus=%d)",
-                  tt_alive, tt_submitted, tt_rej_frustum);
+        TD5_LOG_I(LOG_TAG, "tire render: alive=%d submitted=%d rej(frus=%d) decal_fx=%d",
+                  tt_alive, tt_submitted, tt_rej_frustum, decal_fx);
     }
 }
 
@@ -2233,6 +2437,7 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
         /* Lifetime: (rand() % 4 + 1) * 10 = 10..40 ticks [CONFIRMED @ 0x0042a290] */
         int16_t life = (int16_t)((rand() % 4 + 1) * 10);
         PSLOT_WR16(slot, PSLOT_LIFETIME, life);
+        PSLOT_WR16(slot, PSLOT_LIFE0, life);   /* [proc FX] spawn lifetime for age01 */
 
         /* [CONFIRMED @ 0x0042A290 SpawnVehicleSmokePuffFromHardpoint; L5 sweep 2026-05-22]
          *   Byte-faithful: port mirrors the HARDPOINT variant (not the
@@ -2956,6 +3161,7 @@ static void td5_vfx_spawn_smoke_puff_at_point(TD5_Actor *actor,
 
     /* Lifetime constants [CONFIRMED @ 0x0042A270-0x0042A276] = 0x200 ticks */
     PSLOT_WR16(slot, PSLOT_LIFETIME, 0x200);
+    PSLOT_WR16(slot, PSLOT_LIFE0, 0x200);   /* [proc FX] spawn lifetime for age01 */
 
     /* Phase: random start [CONFIRMED @ 0x0042A278-0x0042A286] phase = rand() % 0x1F */
     slot[PSLOT_PHASE] = (uint8_t)(rand() % 0x1F);

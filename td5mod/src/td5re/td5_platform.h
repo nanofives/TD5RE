@@ -522,6 +522,35 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
 void td5_plat_render_set_ps_override(void *ps, int sampler_idx);
 void td5_plat_render_clear_ps_override(void);
 
+/** Procedural, texture-free particle/VFX pixel shaders. These replace the
+ *  SMOKE / RAINDROP / FADEWHT / BRAKED / POLICELT_* atlas sprites with analytic
+ *  shaders (animated noise smoke, gradient rain, feathered skid decals, radial
+ *  glows) so no PNG is needed for particles. */
+typedef enum TD5_FxShader {
+    TD5_FX_SMOKE = 0,  /* animated value-noise smoke/dust puff */
+    TD5_FX_RAIN  = 1,  /* gradient rain streak (screen-space) */
+    TD5_FX_DECAL = 2,  /* feathered + grained tire/skid road decal */
+    TD5_FX_GLOW  = 3   /* radial gaussian glow (taillight lamp / cop strobe) */
+} TD5_FxShader;
+
+/** Bind the procedural FX pixel shader `which` and upload its b1 params
+ *  (global animation time + one shader-specific param `p0`). Returns 1 if the
+ *  shader is ready — the caller then sets a render preset and issues ordinary
+ *  td5_plat_render_draw_tris batches whose vertex COLOR0/COLOR1 carry the
+ *  per-particle data. Returns 0 if the shader is unavailable (caller keeps its
+ *  textured fallback). Pair every successful begin with td5_plat_fx_end(). */
+int  td5_plat_fx_begin(TD5_FxShader which, float time_seconds, float p0);
+void td5_plat_fx_end(void);
+
+/** Soft-particle depth binding for smoke. Call td5_plat_fx_soft_begin() before
+ *  the smoke td5_plat_fx_begin/draw and td5_plat_fx_soft_end() after; it binds
+ *  the scene depth as a shader resource so the smoke shader can fade as it nears
+ *  geometry (no hard intersection seam). Returns 1 if available — pass that as
+ *  the smoke shader's soft flag (the `p0` of td5_plat_fx_begin). 0 = unavailable
+ *  (draw normally, no soft fade). */
+int  td5_plat_fx_soft_begin(void);
+void td5_plat_fx_soft_end(void);
+
 /** Draw pre-transformed lines (LINELIST, no texture, vertex color only).
  *  vert_count must be even — each consecutive pair forms one line segment.
  *  Used by the debug-collision overlay; depth test on, depth write off,

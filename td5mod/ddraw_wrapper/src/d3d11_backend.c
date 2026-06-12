@@ -839,10 +839,15 @@ static int Backend_CreateRenderTargets(int width, int height)
          * eliminating the distant z-fighting that read as buildings "rendered
          * in front of one another at a later stage". Depth-only (no stencil);
          * the DSV infers format from the texture, DS states use DepthFunc only. */
-        dtd.Format = DXGI_FORMAT_D32_FLOAT;
+        /* [2026-06-08 soft particles] R32_TYPELESS (not D32_FLOAT) so the SAME
+         * texture can back both a depth-stencil view (interpreted as D32_FLOAT)
+         * AND a shader-resource view (R32_FLOAT) — the smoke shader samples scene
+         * depth for the soft-particle fade. Depth precision/behaviour is identical;
+         * only the view interprets the format. */
+        dtd.Format = DXGI_FORMAT_R32_TYPELESS;
         dtd.SampleDesc.Count = 1;
         dtd.Usage = D3D11_USAGE_DEFAULT;
-        dtd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        dtd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
 
         hr = ID3D11Device_CreateTexture2D(g_backend.device, &dtd, NULL, &g_backend.depth_tex);
         if (FAILED(hr)) {
@@ -850,11 +855,44 @@ static int Backend_CreateRenderTargets(int width, int height)
             return 0;
         }
 
+        /* Writable depth-stencil view (explicit D32_FLOAT — a typeless texture
+         * cannot infer the DSV format from NULL). */
+        D3D11_DEPTH_STENCIL_VIEW_DESC dsvd;
+        ZeroMemory(&dsvd, sizeof(dsvd));
+        dsvd.Format = DXGI_FORMAT_D32_FLOAT;
+        dsvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        dsvd.Texture2D.MipSlice = 0;
         hr = ID3D11Device_CreateDepthStencilView(g_backend.device,
-            (ID3D11Resource*)g_backend.depth_tex, NULL, &g_backend.depth_dsv);
+            (ID3D11Resource*)g_backend.depth_tex, &dsvd, &g_backend.depth_dsv);
         if (FAILED(hr)) {
             WRAPPER_LOG("CreateRenderTargets: DSV FAILED hr=0x%08lX", hr);
             return 0;
+        }
+
+        /* [2026-06-08 soft particles] Optional read-only DSV + depth SRV. These
+         * are NON-FATAL: if either fails, soft particles are disabled but normal
+         * rendering proceeds. The read-only DSV lets the depth stay bound for
+         * z-testing while ALSO being sampled through the SRV (D3D11 forbids that
+         * with the writable DSV). */
+        dsvd.Flags = D3D11_DSV_READ_ONLY_DEPTH;
+        hr = ID3D11Device_CreateDepthStencilView(g_backend.device,
+            (ID3D11Resource*)g_backend.depth_tex, &dsvd, &g_backend.depth_dsv_readonly);
+        if (FAILED(hr)) {
+            g_backend.depth_dsv_readonly = NULL;
+            WRAPPER_LOG("CreateRenderTargets: read-only DSV FAILED hr=0x%08lX (soft particles off)", hr);
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvd;
+        ZeroMemory(&srvd, sizeof(srvd));
+        srvd.Format = DXGI_FORMAT_R32_FLOAT;
+        srvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvd.Texture2D.MostDetailedMip = 0;
+        srvd.Texture2D.MipLevels = 1;
+        hr = ID3D11Device_CreateShaderResourceView(g_backend.device,
+            (ID3D11Resource*)g_backend.depth_tex, &srvd, &g_backend.depth_srv);
+        if (FAILED(hr)) {
+            g_backend.depth_srv = NULL;
+            WRAPPER_LOG("CreateRenderTargets: depth SRV FAILED hr=0x%08lX (soft particles off)", hr);
         }
     }
 
@@ -864,6 +902,8 @@ static int Backend_CreateRenderTargets(int width, int height)
 
 static void Backend_ReleaseRenderTargets(void)
 {
+    if (g_backend.depth_srv)  { ID3D11ShaderResourceView_Release(g_backend.depth_srv); g_backend.depth_srv = NULL; }
+    if (g_backend.depth_dsv_readonly) { ID3D11DepthStencilView_Release(g_backend.depth_dsv_readonly); g_backend.depth_dsv_readonly = NULL; }
     if (g_backend.depth_dsv)  { ID3D11DepthStencilView_Release(g_backend.depth_dsv);  g_backend.depth_dsv = NULL; }
     if (g_backend.depth_tex)  { ID3D11Texture2D_Release(g_backend.depth_tex);           g_backend.depth_tex = NULL; }
     if (g_backend.swap_rtv)   { ID3D11RenderTargetView_Release(g_backend.swap_rtv);     g_backend.swap_rtv = NULL; }

@@ -200,8 +200,14 @@ typedef struct {
 
     /* Render targets */
     ID3D11RenderTargetView  *swap_rtv;      /* Swap chain back buffer RTV */
-    ID3D11Texture2D         *depth_tex;     /* Depth buffer texture */
-    ID3D11DepthStencilView  *depth_dsv;     /* Depth buffer DSV */
+    ID3D11Texture2D         *depth_tex;     /* Depth buffer texture (R32_TYPELESS) */
+    ID3D11DepthStencilView  *depth_dsv;     /* Depth buffer DSV (D32_FLOAT, writable) */
+    /* [2026-06-08 soft particles] Read-only DSV + SRV over the SAME depth_tex so
+     * the smoke shader can SAMPLE scene depth (SRV) while the depth is still bound
+     * for z-testing (read-only DSV) — enables depth-aware soft-particle fade. Both
+     * NULL if creation failed (soft particles then silently disabled). */
+    ID3D11DepthStencilView   *depth_dsv_readonly; /* D32_FLOAT, READ_ONLY_DEPTH */
+    ID3D11ShaderResourceView *depth_srv;          /* R32_FLOAT view of depth_tex */
 
     /* Window */
     HWND                hwnd;
