@@ -1420,12 +1420,22 @@ int td5_game_init_race_session(void) {
      * Split-screen 2-player:
      *   clears gSpecialEncounterEnabled + gTrafficActorsEnabled. */
     if (g_td5.network_active) {
-        TD5_LOG_I(LOG_TAG, "InitRace: network session — forcing drag race, 4 laps, no encounters");
-        g_td5.drag_race_enabled = 1;
+        /* [S31] The original forced 4-lap DRAG mode for net sessions
+         * (0x42ABD5) -- but drag mode also forces the MANUAL gearbox in the
+         * input layer (bit 28), which silently disabled the brake-at-
+         * standstill auto-REVERSE latch ("can't reverse in net races"). The
+         * port runs REAL races over lockstep; what must stay OFF is the
+         * rand()-consuming systems (traffic / encounters / wanted) -- they
+         * are the determinism envelope, not drag mode. Laps ride the host's
+         * DXPSTART config. */
+        TD5_NetRaceConfig ncfg_l;
+        TD5_LOG_I(LOG_TAG, "InitRace: network session — real race, encounters/traffic off");
+        g_td5.drag_race_enabled = 0;
         g_td5.special_encounter_enabled = 0;
         g_td5.wanted_mode_enabled = 0;
         g_td5.traffic_enabled = 0;
-        g_td5.circuit_lap_count = 4;
+        if (td5_net_get_race_config(&ncfg_l) && ncfg_l.lap_count > 0)
+            g_td5.circuit_lap_count = ncfg_l.lap_count;
     }
     if (g_td5.split_screen_mode > 0) {
         /* [PORT: N-way] The original disables traffic + special encounters in

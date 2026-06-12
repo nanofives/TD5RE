@@ -2748,8 +2748,13 @@ void frontend_init_race_schedule(void) {
                           i, net_cfg.car_index[i], net_cfg.paint_index[i],
                           (unsigned)net_cfg.td6_color[i]);
             /* Opponent count is host-authoritative: it decides how many racer
-             * slots InitRace enables -- a mismatch is a different grid. */
-            g_td5.num_ai_opponents = net_cfg.num_opponents;
+             * slots InitRace enables -- a mismatch is a different grid.
+             * InitRace computes the field as humans(1) + num_ai_opponents, so
+             * fold the EXTRA net players into the opponent count: the field
+             * is np humans + the host-chosen AI cars. */
+            g_td5.num_ai_opponents = net_cfg.num_opponents + (np - 1);
+            if (g_td5.num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
+                g_td5.num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
             TD5_LOG_I(LOG_TAG,
                       "InitRaceSchedule: net config applied (np=%d opp=%d seed=0x%08X)",
                       np, net_cfg.num_opponents, net_cfg.rng_seed);

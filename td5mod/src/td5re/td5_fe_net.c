@@ -1470,8 +1470,14 @@ void Screen_NetworkLobby(void) {
                                         ((uint32_t)rand() << 16);
                 cfg.track_index       = s_selected_track;
                 cfg.reverse_direction = s_track_direction;
-                cfg.lap_count         = 4;   /* net races force 4-lap drag mode */
-                cfg.num_opponents     = g_td5.num_ai_opponents;
+                /* Live frontend choices, NOT g_td5.* -- those are only
+                 * refreshed by the schedule (which runs AFTER this config is
+                 * broadcast) and were stale ("AI players are not loading"). */
+                cfg.lap_count         = s_game_option_laps + 1;
+                cfg.num_opponents     = s_num_ai_opponents;
+                if (cfg.num_opponents < 0)  cfg.num_opponents = 0;
+                if (cfg.num_opponents > TD5_MAX_RACER_SLOTS - 2)
+                    cfg.num_opponents = TD5_MAX_RACER_SLOTS - 2;
                 cfg.difficulty        = g_td5.difficulty_tier;
                 for (slot = 0; slot < 6; slot++) {
                     int col = td5_net_get_slot_td6_color(slot);
