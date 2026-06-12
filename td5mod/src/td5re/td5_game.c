@@ -19,15 +19,15 @@
 #include "td5_render.h"
 #include "td5_jobs.h"     /* Phase B Stage 2b: threaded pane recording */
 #include "td5_rcmd.h"     /* Phase B render-transform: per-pane CPU command lists */
-/* [Phase B render-transform — WIP] Define TD5_MT_PARALLEL_BUILD to build the
- * per-pane command lists on the worker pool. CURRENTLY DISABLED: the parallel
- * build corrupts geometry because td5_render_transform_mesh_vertices writes the
- * transformed view coords IN-PLACE into the shared mesh blob, so concurrent
- * panes (same meshes, different cameras) stomp each other. Re-enable only after
- * the core transform is made per-pane (see the next-step plan). Until then the
- * threaded path records+replays SERIALLY on the main thread (correct, no gain).
- * Default-off anyway via [Render] ThreadedPanes=0. */
-/* #define TD5_MT_PARALLEL_BUILD 1 */
+/* [Phase B render-transform] TD5_MT_PARALLEL_BUILD: build the per-pane CPU
+ * command lists on the worker pool. ENABLED 2026-06-11 — the blocker (the mesh
+ * transform / lighting / proj-UV writers stomping the SHARED mesh blob from
+ * concurrent panes) is fixed: the transform now copies each mesh into a
+ * per-pane g_rs vertex workspace, dispatch rebases pointers into it, and
+ * depth-bucket prims are copied at queue time (see the RenderScratch workspace
+ * note in td5_render.c). Replay stays serial-in-pane-order on the main thread.
+ * Whole path remains gated behind [Render] ThreadedPanes (default 0). */
+#define TD5_MT_PARALLEL_BUILD 1
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5_camera.h"
 #include "td5_frontend.h"

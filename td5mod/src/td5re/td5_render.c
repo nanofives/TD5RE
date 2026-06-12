@@ -377,6 +377,23 @@ typedef struct RenderScratch {
     int in_sky_draw;
     int in_reflection_overlay;
     uint8_t actor_light_zone[TD5_ACTOR_MAX_TOTAL_SLOTS];  /* per-pane light-zone cache */
+    /* [Phase B parallel-build] Per-pane mesh-vertex WORKSPACE. The mesh
+     * transform used to write view coords IN-PLACE into the SHARED mesh blob
+     * (lighting + proj-UV writers likewise) — fatal for concurrent pane
+     * builds: every pane transforms the SAME blobs with its own camera.
+     * td5_render_transform_mesh_vertices now copies the mesh's vertex array
+     * here and writes the runtime fields in the copy; dispatch rebases
+     * blob-derived vertex pointers via rs_vtx_rebase(). The blob is never
+     * written by the render path. The workspace holds ONE mesh at a time
+     * (transform -> dispatch is one uninterrupted sequence per mesh), so
+     * depth-bucket prims — consumed at flush, after the workspace has been
+     * reused — are copied into prim_copy at queue time (entry idx*4 slots). */
+    TD5_MeshVertex *vtx_work;        /* malloc'd, grown on demand            */
+    int             vtx_work_cap;
+    const uint8_t  *vtx_src_base;    /* blob range of the current mesh       */
+    const uint8_t  *vtx_src_end;
+    int             tex_page_override; /* -1 = none; reflection overlay page */
+    TD5_MeshVertex  prim_copy[DEPTH_ENTRY_POOL * 4];
 } RenderScratch;
 
 static RenderScratch        g_rs_default;
@@ -462,6 +479,10 @@ static void rs_init_instance(RenderScratch *rs)
         s_depth_buckets[i] = -1;
     s_depth_entry_count = 0;
 
+    /* Texture-page override: -1 = none (0 is a valid page, so calloc-zero
+     * would silently force every command onto page 0). */
+    g_rs->tex_page_override = -1;
+
     g_rs = save;
 }
 
@@ -487,6 +508,36 @@ void td5_render_scratch_bind(int index)
 void td5_render_scratch_unbind(void)
 {
     g_rs = &g_rs_default;
+}
+
+/* --- [Phase B parallel-build] per-pane vertex workspace helpers --- */
+
+/* Grow this pane's workspace to hold `count` vertices. Returns 0 on alloc
+ * failure (caller falls back to legacy in-place blob writes — correct for the
+ * serial path, never expected to fail in practice). */
+static int rs_vtx_workspace_ensure(int count)
+{
+    if (g_rs->vtx_work && count <= g_rs->vtx_work_cap) return 1;
+    int cap = g_rs->vtx_work_cap > 0 ? g_rs->vtx_work_cap : 1024;
+    while (cap < count) cap *= 2;
+    TD5_MeshVertex *nw = (TD5_MeshVertex *)malloc((size_t)cap * sizeof(TD5_MeshVertex));
+    if (!nw) return 0;
+    free(g_rs->vtx_work);
+    g_rs->vtx_work     = nw;
+    g_rs->vtx_work_cap = cap;
+    return 1;
+}
+
+/* Translate a vertex pointer derived from the CURRENT mesh's blob range into
+ * this pane's workspace copy. Pointers outside the range (a mesh that never
+ * went through transform_mesh_vertices, or the alloc-failure fallback) pass
+ * through unchanged — identical to the legacy in-place behavior. */
+static inline TD5_MeshVertex *rs_vtx_rebase(void *p)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    if (b >= g_rs->vtx_src_base && b < g_rs->vtx_src_end)
+        return (TD5_MeshVertex *)((uint8_t *)g_rs->vtx_work + (b - g_rs->vtx_src_base));
+    return (TD5_MeshVertex *)p;
 }
 
 /* [Phase B Stage 2b] When set, render_actors_for_view / configure_projection do
@@ -1539,6 +1590,10 @@ int td5_render_init(void)
     /* Clear transform stack */
     s_transform_stack_depth = 0;
 
+    /* [parallel-build] g_rs_default doesn't go through rs_init_instance:
+     * arm the no-override sentinel here (0 would force texture page 0). */
+    g_rs->tex_page_override = -1;
+
     /* Initialize color LUT: i * 0x10101 - 0x1000000
      * Maps luminance byte [0..255] to packed ARGB with alpha=0xFF */
     for (int i = 0; i < 1024; i++) {
@@ -1893,8 +1948,23 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
 
     const float *m = s_render_transform.m;
     int count = mesh->total_vertex_count;
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-    if (!verts || count <= 0) return;
+    TD5_MeshVertex *src = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    if (!src || count <= 0) return;
+
+    /* [Phase B parallel-build] Copy the mesh's vertices into this pane's
+     * workspace and write the view coords THERE — the shared blob stays
+     * read-only so concurrent pane builds can transform the same mesh with
+     * different cameras. Downstream readers rebase via rs_vtx_rebase(). */
+    TD5_MeshVertex *verts;
+    if (rs_vtx_workspace_ensure(count)) {
+        verts = g_rs->vtx_work;
+        memcpy(verts, src, (size_t)count * sizeof(TD5_MeshVertex));
+        g_rs->vtx_src_base = (const uint8_t *)src;
+        g_rs->vtx_src_end  = (const uint8_t *)(src + count);
+    } else {
+        verts = src;   /* legacy in-place fallback (serial-only correct) */
+        g_rs->vtx_src_base = g_rs->vtx_src_end = NULL;
+    }
 
     /*
      * Software world->view transform (0x43DD60):
@@ -1920,7 +1990,9 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     if (!mesh) return;
 
     int count = mesh->total_vertex_count;
-    TD5_MeshVertex *verts   = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    /* [parallel-build] lighting writes target the pane workspace copy (the
+     * blob is read-only in the render path); normals stay blob (read-only). */
+    TD5_MeshVertex *verts   = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
     TD5_VertexNormal *norms = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
     if (!verts || !norms || count <= 0) return;
 
@@ -2384,10 +2456,17 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
                 break; /* out of vertices */
             }
 
-            /* Dispatch through table with correct vertex pointer */
+            /* Dispatch through table with correct vertex pointer.
+             * [parallel-build] Rebase blob-derived pointers into this pane's
+             * vertex workspace (where transform/lighting wrote the runtime
+             * fields); out-of-range pointers pass through unchanged. The
+             * per-pane texture override serves the reflection overlay, which
+             * previously patched the SHARED blob command list in place. */
             TD5_PrimitiveCmd patched = *cmd;
-            patched.vertex_data_ptr = (uint32_t)(uintptr_t)cmd_verts;
-            s_dispatch_table[opcode](&patched, base_verts);
+            patched.vertex_data_ptr = (uint32_t)(uintptr_t)rs_vtx_rebase(cmd_verts);
+            if (g_rs->tex_page_override >= 0)
+                patched.texture_page_id = (int16_t)g_rs->tex_page_override;
+            s_dispatch_table[opcode](&patched, rs_vtx_rebase(base_verts));
 
             /* Advance running cursor by vertices consumed */
             if (cmd->vertex_data_ptr == 0) {
@@ -2785,8 +2864,15 @@ void td5_render_actors_for_view(int view_index)
          * case; typical frame uses ~25-30 entries each. Overflow falls back
          * to "submit anyway" so we never lose geometry — only the cap-spill
          * tail can re-duplicate, and that's strictly safer than the bug. */
+        /* [parallel-build FIX 2026-06-11 threaded-pane flicker] This dedup
+         * array was a function-local `static` — invisible to the Stage-1
+         * file-scope re-entrancy sweep — so concurrent pane builds shared it:
+         * each pane's dup-scan saw OTHER panes' pointers and skipped meshes
+         * at random (RENDERSTAT spanmesh ~300 -> ~110, panes flickering).
+         * It is per-frame-per-pane state by design -> plain stack local
+         * (16KB, fine for both the main thread and the job-pool workers). */
         #define TD5_RENDER_SUBMITTED_CAP 4096
-        static const void *s_submitted[TD5_RENDER_SUBMITTED_CAP];
+        const void *s_submitted[TD5_RENDER_SUBMITTED_CAP];
         int submitted_count = 0;
 
         for (int i = 0; i < n_entries; i++) {
@@ -3597,6 +3683,24 @@ void td5_render_queue_projected_entry(void *entry, int bucket, uint32_t flags, i
     if (s_depth_entry_count >= DEPTH_ENTRY_POOL) return;
 
     int idx = s_depth_entry_count++;
+
+    /* [parallel-build] Bucket entries are consumed at flush time — AFTER the
+     * pane's vertex workspace has been reused by later meshes — so copy the
+     * primitive's vertices into this entry's fixed arena slot now. (This also
+     * fixes the latent shared-blob hazard: a queued prim whose blob verts get
+     * re-transformed by a later draw before the flush.) Flags 0x3/0x4 (and
+     * the 0x8000000x variants) = 3/4 contiguous TD5_MeshVertex; the raw-N>4
+     * path has no live callers and passes through with original semantics. */
+    {
+        uint32_t f  = flags & 0x7FFFFFFFu;
+        int      nv = (f == 0x3u) ? 3 : (f == 0x4u) ? 4 : (int)(flags & 0x7Fu);
+        if (nv >= 3 && nv <= 4) {
+            TD5_MeshVertex *copy = &g_rs->prim_copy[(size_t)idx * 4];
+            memcpy(copy, entry, (size_t)nv * sizeof(TD5_MeshVertex));
+            entry = copy;
+        }
+    }
+
     s_depth_entries[idx].prim_data    = entry;
     s_depth_entries[idx].flags        = flags;
     s_depth_entries[idx].texture_page = texture_page;
@@ -3914,7 +4018,9 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot)
     pe = &s_proj_effect[slot];
     mode = pe->sub_mode;
 
-    verts      = (TD5_MeshVertex  *)(uintptr_t)mesh->vertices_offset;
+    /* [parallel-build] proj_u/proj_v writes target the pane workspace copy
+     * (mode 3 also READS view_x/view_y, which only exist there). */
+    verts      = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
     normals    = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
     vert_count = mesh->total_vertex_count;
     if (!verts || vert_count <= 0) return;
@@ -4920,7 +5026,10 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
     pe = &s_proj_effect[slot];
     if (pe->texture_page < 0) return;
 
-    verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    /* [parallel-build] Operate on the pane workspace copy (the body render
+     * just transformed this mesh, so the workspace holds it): the lighting/UV
+     * overrides below must not touch the SHARED blob. */
+    verts = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
     vert_count = mesh->total_vertex_count;
     if (!verts || vert_count <= 0) return;
 
@@ -4938,14 +5047,12 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
     cmd_count = mesh->command_count;
     if (!cmds || cmd_count <= 0) return;
 
-    /* Save original texture pages, override with environs */
-    int saved_pages[256];
-    if (cmd_count > 256) cmd_count = 256;
-
-    for (i = 0; i < cmd_count; i++) {
-        saved_pages[i] = cmds[i].texture_page_id;
-        cmds[i].texture_page_id = (int16_t)pe->texture_page;
-    }
+    /* Override every command's texture page with the environs page via the
+     * per-pane dispatch override. [parallel-build] This used to save/patch/
+     * restore texture_page_id in the SHARED blob command list — a concurrent
+     * pane dispatching the same car mesh mid-patch would bind the env page
+     * for the opaque body. */
+    g_rs->tex_page_override = pe->texture_page;
 
     /* Cap vertex count to stack budget */
 #define REFLECTION_MAX_VERTS 4096
@@ -4996,14 +5103,16 @@ static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
         s_refl_log_count++;
     }
 
-    /* Restore original UVs, lighting, and texture pages */
+    g_rs->tex_page_override = -1;
+
+    /* Restore original UVs + lighting. On the workspace path this is moot
+     * (the workspace is rewritten by the next mesh transform anyway) but it
+     * keeps the rs_vtx alloc-failure fallback — which writes the blob
+     * in place — from leaking the reflection overrides into later frames. */
     for (i = 0; i < save_count; i++) {
         verts[i].tex_u = saved_uv[i][0];
         verts[i].tex_v = saved_uv[i][1];
         verts[i].lighting = saved_lighting[i];
-    }
-    for (i = 0; i < cmd_count; i++) {
-        cmds[i].texture_page_id = (int16_t)saved_pages[i];
     }
 
     /* Restore opaque preset for subsequent geometry */
