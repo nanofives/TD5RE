@@ -147,6 +147,13 @@ typedef struct TD5_GlobalState {
     int  wanted_mode_enabled;
     int  drag_race_enabled;
     int  traffic_enabled;
+    /* [PORT ENHANCEMENT dynamic-traffic] User-facing traffic VOLUME committed
+     * from the track-select / game-options row: 0=Off 1=Low 2=Medium 3=High.
+     * traffic_enabled stays the boolean gate every faithful site already reads
+     * (== volume != 0). Consumed by the dynamic spawner's concurrency cap
+     * (Low=2 / Medium=4 / High=6 cars); with [Traffic] Dynamic=0 any
+     * non-zero volume behaves like the classic ON (all 6 queue slots). */
+    int  traffic_volume;
     int  special_encounter_enabled;
     int  circuit_lap_count;
     int  checkpoint_timers_enabled;
@@ -362,6 +369,25 @@ typedef struct TD5_GlobalState {
          * watched from a standstill. Clearly non-faithful; [Traffic] AntiFreeze. */
         int  traffic_antifreeze;        /* 1 = un-stick recovery-frozen traffic (default 1) */
         int  traffic_antifreeze_frames; /* frozen-tick threshold before un-stick (default 120) */
+        /* [PORT ENHANCEMENT dynamic-traffic 2026-06] GTA-style ambient traffic.
+         * Replaces the TRAFFIC.BUS fixed-spawn queue with distance-driven
+         * spawn/despawn: cars spawn periodically on a random non-slow lane a
+         * random span-distance ahead of a (random) local player, fade in over
+         * FadeTicks, and fade out + park once EVERY local player is farther
+         * than DespawnDistance spans away (multiplayer-aware, unlike the
+         * original slot-0-only recycle @ 0x004353B0). Dynamic=0 restores the
+         * byte-faithful queue spawn/recycle path untouched. All distances are
+         * in track SPANS (the original's own recycle metric, cf. 0x28 spans
+         * @ 0x004353EB); section [Traffic] in td5re.ini. */
+        int  traffic_dynamic;          /* master gate (default 1) */
+        int  traffic_dyn_spawn_min;    /* min spawn distance ahead, spans (default 25) */
+        int  traffic_dyn_spawn_max;    /* max spawn distance ahead, spans (default 50) */
+        int  traffic_dyn_despawn;      /* fade-out distance from EVERY player, spans (default 65) */
+        int  traffic_dyn_fade_ticks;   /* fade in/out duration, 30Hz ticks (default 12) */
+        int  traffic_dyn_period;       /* base ticks between spawn attempts (default 45) */
+        int  traffic_dyn_speed_pct;    /* cruise-speed scale %, dynamic mode only (default 150, 100=faithful 0x3C) */
+        int  traffic_dyn_start_offset; /* start-line clearance: no traffic spawns within N spans after the start line (default 200, 0=off) */
+        int  traffic_dyn_circuits;     /* 1 = dynamic traffic also on circuit / LEVELINF-no-traffic tracks incl. TD6 conversions (default 1; 0 = faithful no-traffic circuits) */
         /* PlayerCollide (source-port enhancement, default ON): the faithful V2V
          * broadphase buckets actors by track-span (>>2) and only tests pairs
          * within +/-1 bucket (~4 spans). On curves/junctions a traffic car can be

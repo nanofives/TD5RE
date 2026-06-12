@@ -162,6 +162,13 @@ void td5_render_debug_line_world(float x0, float y0, float z0,
 void td5_render_debug_lines_flush(void);
 void td5_render_debug_lines_reset(void);
 
+/* [dynamic-traffic] Whole-actor draw fade (0 = invisible, 255 = opaque /
+ * normal). Flushes the pending immediate batch on change so one actor's
+ * faded triangles can never batch with another's. Consumed by the flush
+ * fixup (vertex alpha scale + VEHICLE_FADE preset remap) and the direct-draw
+ * car accessories (shadow). Always reset to 255 after the bracketed draws. */
+void td5_render_set_actor_draw_alpha(int alpha);
+
 /* --- Translucent pipeline --- */
 void td5_render_init_translucent_pipeline(void);
 void td5_render_queue_translucent_batch(void *record);

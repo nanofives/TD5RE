@@ -1385,6 +1385,11 @@ static void td5_ai_refresh_route_state_slot(int slot) {
 
 void td5_ai_tick(void) {
     td5_ai_compute_rubber_band();
+    /* [dynamic-traffic] fades, despawn checks and spawn cadence — once per
+     * sim tick, before the per-actor loop (no-op when Dynamic=0). NOTE: this
+     * lives here, NOT in td5_ai_pre_tick — pre_tick has no callers in the
+     * port's game loop; td5_ai_tick is the live per-tick AI entry. */
+    td5_ai_traffic_dynamic_tick();
     if ((g_ai_frame_counter % 60u) == 0u) {
         int racer_count = g_traffic_slot_base;
         if (g_active_actor_count < racer_count)
@@ -5468,6 +5473,15 @@ void td5_ai_init_traffic_actors(void) {
     if (racer_count <= g_traffic_slot_base)
         return;
 
+    /* [PORT ENHANCEMENT dynamic-traffic] GTA-style spawner replaces the queue
+     * fill entirely (and works on tracks WITHOUT a TRAFFIC.BUS, e.g. TD6
+     * conversions — hence this gate sits before the queue NULL check).
+     * [Traffic] Dynamic=0 falls through to the byte-faithful queue path. */
+    if (g_td5.ini.traffic_dynamic && g_td5.traffic_enabled) {
+        td5_ai_traffic_dynamic_race_init();
+        return;
+    }
+
     qp = g_traffic_queue_ptr ? g_traffic_queue_ptr : g_traffic_queue_base;
     if (!qp) {
         TD5_LOG_W(LOG_TAG, "init_traffic_actors: g_traffic_queue_ptr is NULL");
@@ -6028,6 +6042,12 @@ static void traffic_smart_antifreeze(int slot, char *actor, int32_t *rs) {
                   slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW));
 }
 
+/* [dynamic-traffic] forward decls — defined in the dynamic-traffic module
+ * below; used here so the SmartAI lane-changer never moves a car into a lane
+ * of the opposite drive direction (lanes carry a direction when Dynamic=1). */
+static int trf_dyn_lane_direction(int lane_count, int lane);
+static int trf_dyn_lane_change_blocked(int slot, int lane_count, int cand_lane);
+
 /* Scan active actors for one occupying `target_lane` near `self_span` (a car
  * beside or just ahead). Returns 1 if the lane is clear. */
 static int traffic_lane_is_clear(int self_slot, int self_span,
@@ -6097,6 +6117,8 @@ static int traffic_smart_react_to_peer(int slot, int self_span, int self_sub_lan
     for (k = 0; k < 2; k++) {
         int cand = self_sub_lane + dirs[k];
         if (cand < 0 || cand >= lane_count) continue;
+        if (trf_dyn_lane_change_blocked(slot, lane_count, cand))
+            continue;   /* [dynamic-traffic] never swerve into an opposite-direction lane */
         if (g_td5.ini.traffic_avoid_slow_lane &&
             td5_track_surface_is_slow(td5_track_get_span_lane_surface(self_span, cand)))
             continue;
@@ -6130,10 +6152,13 @@ static int traffic_smart_choose_lane(int slot, int target_span,
     /* situational lane change (1-tick latency) */
     if (g_td5.ini.traffic_lookahead && s_traffic_lane_bias[slot] != 0) {
         int cand = lane + s_traffic_lane_bias[slot];
-        if (cand >= 0 && cand < lane_count) lane = cand;
+        if (cand >= 0 && cand < lane_count &&
+            !trf_dyn_lane_change_blocked(slot, lane_count, cand))
+            lane = cand;
     }
 
-    /* avoid a slow / off-road lane: step to the nearest faster lane */
+    /* avoid a slow / off-road lane: step to the nearest faster lane (that
+     * also matches the car's drive direction when Dynamic=1) */
     if (g_td5.ini.traffic_avoid_slow_lane &&
         td5_track_surface_is_slow(td5_track_get_span_lane_surface(target_span, lane))) {
         int toward_centre = (lane < lane_count / 2) ? +1 : -1;
@@ -6142,10 +6167,12 @@ static int traffic_smart_choose_lane(int slot, int target_span,
             int c1 = lane + toward_centre * d;
             int c2 = lane - toward_centre * d;
             if (c1 >= 0 && c1 < lane_count &&
+                !trf_dyn_lane_change_blocked(slot, lane_count, c1) &&
                 !td5_track_surface_is_slow(td5_track_get_span_lane_surface(target_span, c1))) {
                 picked = c1; break;
             }
             if (c2 >= 0 && c2 < lane_count &&
+                !trf_dyn_lane_change_blocked(slot, lane_count, c2) &&
                 !td5_track_surface_is_slow(td5_track_get_span_lane_surface(target_span, c2))) {
                 picked = c2; break;
             }
@@ -6196,6 +6223,616 @@ static void traffic_smart_wall_nudge(int target_span, int target_sub_lane,
     }
 }
 
+/* ========================================================================
+ * [PORT ENHANCEMENT 2026-06-11] Dynamic (GTA-style) ambient traffic
+ *
+ * Replaces the TRAFFIC.BUS fixed-spawn queue with a distance-driven
+ * spawn/despawn state machine, gated by [Traffic] Dynamic (default 1).
+ * Dynamic=0 leaves the byte-faithful queue init (InitializeTrafficActors-
+ * FromQueue @ 0x00435940) + recycle (RecycleTrafficActorFromQueue @
+ * 0x004353B0) paths completely untouched.
+ *
+ * Per traffic slot state machine:
+ *   INACTIVE  — parked at its last pose; skipped by AI route plan, traffic
+ *               physics, V2V broadphase, render (body/shadow/wheels/brakes),
+ *               minimap dot and engine audio.
+ *   FADE_IN   — just (re)placed on the road; render alpha ramps 0→255 over
+ *               [Traffic] FadeTicks. Fully simulated from tick 0.
+ *   ACTIVE    — normal traffic.
+ *   FADE_OUT  — every local player is > DespawnDistance spans away (or the
+ *               car is recovery-latched out of sight); alpha ramps 255→0,
+ *               then the slot parks (INACTIVE).
+ *
+ * Spawning: every SpawnPeriod-ish ticks (volume-scaled + jittered) one
+ * INACTIVE slot is placed at a random span [SpawnAheadMin..SpawnAheadMax]
+ * ahead of the LEAD local player, on a random CLEAR, NON-SLOW lane
+ * (td5_track_surface_is_slow — dirt/gravel/alternate-surface shoulders are
+ * never picked). Direction polarity (oncoming bit, +0x80000 heading like
+ * the queue's flags bit0 [CONFIRMED @ 0x00435786]) is rolled against the
+ * track's own TRAFFIC.BUS oncoming ratio so per-track direction character
+ * is preserved. Placement reuses the exact recycle placement chain
+ * (selector 0 / main ring only).
+ *
+ * Multiplayer: despawn requires EVERY local player to be out of range and
+ * spawn validates the window against ALL players — unlike the original
+ * recycle which only ever reads slot 0's span (word @ 0x004AB18A
+ * [CONFIRMED]). Netplay is unaffected (traffic is forced off there).
+ *
+ * Police: traffic slot 9 is the speeding-pursuit cop donor
+ * (UpdateSpecialTrafficEncounter @ 0x00434DA0). The spawner PREFERS slot 9
+ * when picking a slot to (re)spawn so the cop-capable car is usually on the
+ * road, and a slot-9 car is never despawned while the encounter handle is
+ * live (mirrors the recycle's slot-9 guard @ 0x0043545B).
+ *
+ * Determinism: a private LCG seeded from the track index — deliberately NOT
+ * the CRT rand(), whose sequence is consumed at render rate by the audio
+ * mix (td5_sound.c traffic pitch) and must stay untouched for the fixed-
+ * seed A/B trace harness.
+ * ======================================================================== */
+
+enum {
+    TRF_DYN_INACTIVE = 0,
+    TRF_DYN_FADE_IN  = 1,
+    TRF_DYN_ACTIVE   = 2,
+    TRF_DYN_FADE_OUT = 3
+};
+
+static uint8_t  s_trf_dyn_state[TD5_MAX_TOTAL_ACTORS];
+static int16_t  s_trf_dyn_alpha[TD5_MAX_TOTAL_ACTORS];   /* 0..255 draw alpha */
+static int      s_trf_dyn_cooldown;                       /* ticks to next spawn attempt */
+static uint32_t s_trf_dyn_rng;                            /* private LCG state */
+static int      s_trf_dyn_oncoming_pct;                   /* 0..100 from TRAFFIC.BUS mix (diagnostic) */
+static int      s_trf_dyn_seeded;                         /* race_init ran for this race */
+
+/* Per-track lane→direction map learned from the authored TRAFFIC.BUS records:
+ * each 4-byte record couples (span, lane, polarity), and the span's strip
+ * lane-count nibble keys which road layout the lane index refers to. Indexed
+ * [lane_count][lane]: -1 = no authored data, 0 = forward, 1 = oncoming
+ * (majority vote). s_trf_dyn_oncoming_left summarizes which HALF of the road
+ * carries oncoming traffic on this track (fallback for unseen combos and for
+ * tracks without a TRAFFIC.BUS, e.g. TD6 conversions). */
+#define TRF_DYN_MAX_LANES 15
+static int8_t   s_trf_dyn_lane_dir[TRF_DYN_MAX_LANES + 1][TRF_DYN_MAX_LANES];
+static int      s_trf_dyn_oncoming_left;                  /* 1 = oncoming on left half */
+
+/* Direction a freshly spawned car should drive in `lane` of a
+ * `lane_count`-lane span: authored data first, side-half heuristic second.
+ * Single-lane spans always drive forward. */
+static int trf_dyn_lane_direction(int lane_count, int lane)
+{
+    if (lane_count >= 1 && lane_count <= TRF_DYN_MAX_LANES &&
+        lane >= 0 && lane < lane_count &&
+        s_trf_dyn_lane_dir[lane_count][lane] >= 0)
+        return (int)s_trf_dyn_lane_dir[lane_count][lane];
+    if (lane_count <= 1)
+        return 0;
+    {
+        int left_half = (lane * 2 < lane_count);
+        return s_trf_dyn_oncoming_left ? left_half : !left_half;
+    }
+}
+
+/* Span of the 1ST-PLACE RACE CAR — humans AND AI racers (user rule: traffic
+ * appears ahead of whoever leads the race; a last-place human otherwise sees
+ * traffic materializing around themselves on the minimap). Skips decoration/
+ * absent slots (state 3) and slots with no car bound. Falls back to the lead
+ * human when no racer qualifies (e.g. degenerate solo states). Note: on
+ * circuits the comparison is ring-relative like every other span comparison
+ * in this module, so right at the lap seam the anchor may briefly trail. */
+static int trf_dyn_race_span_lead(void)
+{
+    int n = g_traffic_slot_base;
+    int best = -0x7FFFFFFF;
+    if (n > g_active_actor_count) n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (int s = 0; s < n; s++) {
+        char *a = actor_ptr(s);
+        void *cdef = NULL;
+        int sp;
+        if (!a) continue;
+        if (g_slot_state[s] == 3) continue;          /* decoration / absent */
+        memcpy(&cdef, a + 0x1B8, sizeof(cdef));      /* car_definition_ptr */
+        if (!cdef) continue;
+        sp = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_NORMALIZED);
+        if (sp > best) best = sp;
+    }
+    return (best == -0x7FFFFFFF) ? ai_player_span_lead() : best;
+}
+
+/* 1 when moving `slot` into `cand_lane` would put it in a lane of the
+ * OPPOSITE drive direction. Inert (0) in faithful mode, where lanes carry
+ * no direction and the SmartAI lane-changer keeps its original freedom. */
+static int trf_dyn_lane_change_blocked(int slot, int lane_count, int cand_lane)
+{
+    int32_t *rs;
+    if (!td5_ai_traffic_dynamic_active()) return 0;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    rs = route_state(slot);
+    if (!rs) return 0;
+    return trf_dyn_lane_direction(lane_count, cand_lane) !=
+           (rs[RS_ROUTE_DIRECTION_POLARITY] & 1);
+}
+
+static uint32_t trf_dyn_rand(void)
+{
+    /* Numerical Recipes LCG; top bits are the usable ones. */
+    s_trf_dyn_rng = s_trf_dyn_rng * 1664525u + 1013904223u;
+    return s_trf_dyn_rng >> 8;
+}
+
+int td5_ai_traffic_dynamic_active(void)
+{
+    return g_td5.ini.traffic_dynamic && g_td5.traffic_enabled && s_trf_dyn_seeded;
+}
+
+int td5_ai_traffic_dynamic_parked(int slot)
+{
+    if (!td5_ai_traffic_dynamic_active()) return 0;
+    if (slot < g_traffic_slot_base ||
+        slot >= g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS ||
+        slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    return s_trf_dyn_state[slot] == TRF_DYN_INACTIVE;
+}
+
+int td5_ai_traffic_get_draw_alpha(int slot)
+{
+    if (!td5_ai_traffic_dynamic_active()) return 255;
+    if (slot < g_traffic_slot_base ||
+        slot >= g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS ||
+        slot >= TD5_MAX_TOTAL_ACTORS) return 255;
+    return (int)s_trf_dyn_alpha[slot];
+}
+
+/* Concurrency cap from the track-select Traffic volume row.
+ * Defensive: code paths that only set the legacy boolean (cup save restore,
+ * forced-on game types) leave traffic_volume at 0 — treat enabled+no-volume
+ * as Heavy (the classic 6-car density). */
+static int trf_dyn_cap(void)
+{
+    static const int k_cap[4] = { 0, 2, 4, 6 };
+    int v = g_td5.traffic_volume;
+    if (v <= 0) v = g_td5.traffic_enabled ? 3 : 0;
+    if (v > 3) v = 3;
+    return (k_cap[v] > TD5_MAX_TRAFFIC_SLOTS) ? TD5_MAX_TRAFFIC_SLOTS : k_cap[v];
+}
+
+/* Volume also paces the spawner: Light is sparse, Heavy is busy. */
+static int trf_dyn_spawn_period(void)
+{
+    int p = g_td5.ini.traffic_dyn_period;
+    int v = g_td5.traffic_volume;
+    if (v <= 0) v = g_td5.traffic_enabled ? 3 : 0;
+    if (v == 1) p *= 2;
+    else if (v >= 3) p = (p * 2) / 3;
+    if (p < 5) p = 5;
+    /* +/-50% jitter so spawns don't metronome. */
+    return p / 2 + (int)(trf_dyn_rand() % (uint32_t)p);
+}
+
+/* Wrap-aware |span distance| from `span_norm` to the NEAREST local player.
+ * Wrapping only applies on circuits (the ring); point-to-point distances are
+ * plain differences on the normalized span axis. */
+static int trf_dyn_min_player_dist(int span_norm)
+{
+    int humans = g_td5.num_human_players;
+    int ring = td5_track_get_ring_length();
+    int is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+    int best = 0x7FFFFFFF;
+    if (humans < 1) humans = 1;
+    if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
+    for (int s = 0; s < humans; s++) {
+        int ps = (int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED);
+        int d = span_norm - ps;
+        if (is_circuit && ring > 0) {
+            int half = ring / 2;
+            while (d > half)  d -= ring;
+            while (d < -half) d += ring;
+        }
+        if (d < 0) d = -d;
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+/* Place `slot` at (span, lane, polarity) on the canonical main ring.
+ * Same placement chain as the faithful recycle LEFT branch
+ * [CONFIRMED @ 0x004354B5-0x004356CE + shared zero block LAB_0043588D]. */
+static void trf_dyn_place(int slot, int span, int lane, int polarity)
+{
+    char    *a  = actor_ptr(slot);
+    int32_t *rs = route_state(slot);
+    uint8_t *rsb = (uint8_t *)rs;
+
+    rs[RS_ROUTE_DIRECTION_POLARITY] = polarity ? 1 : 0;
+    *(int32_t *)(rsb + 0x68) = slot * 4 + 0x10;   /* DAT_004afbc8 mirror */
+    rs[RS_ROUTE_TABLE_SELECTOR] = 0;
+
+    ACTOR_I16(a, ACTOR_SPAN_RAW)      = (int16_t)span;
+    ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = (uint8_t)lane;
+
+    td5_track_init_actor_segment_placement(
+        (int16_t *)(a + ACTOR_SPAN_RAW),
+        (int32_t *)(a + ACTOR_WORLD_POS_X));
+    td5_track_compute_heading((TD5_Actor *)a);
+    if (polarity)
+        ACTOR_I32(a, ACTOR_YAW_ACCUM) += 0x80000;  /* oncoming: 180 deg flip */
+    td5_physics_reset_actor_state((TD5_Actor *)a);
+    td5_ai_seed_actor_track_progress_offset(slot);
+    td5_track_normalize_actor_wrap((TD5_Actor *)a);
+
+    /* Shared post-placement state zero (mirrors recycle LAB_0043588D). */
+    *(int32_t *)(a + 0x314) = 0;
+    *(int32_t *)(a + 0x30C) = 0;
+    *(int8_t  *)(a + 0x379) = 0;
+    *(int32_t *)(a + 0x1F0) = 0;
+    *(int32_t *)(a + 0x1F8) = 0;
+    *(int32_t *)(a + 0x1C0) = 0;
+    *(int32_t *)(a + 0x1C4) = 0;
+    *(int32_t *)(a + 0x1C8) = 0;
+    *(int32_t *)(a + 0x1CC) = 0;
+    *(int32_t *)(a + 0x1D0) = 0;
+    *(int32_t *)(a + 0x1D4) = 0;
+    *(int16_t *)(a + 0x338) = 0;
+    *(int32_t *)(rsb + 0x88) = 0;
+    *(int32_t *)(rsb + 0xF0) = 0;
+    *(int32_t *)(rsb + 0x7C) = -1;
+    rs[RS_RECOVERY_STAGE]   = 0;
+    rs[RS_ENCOUNTER_HANDLE] = -1;
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        g_traffic_recovery_stage[slot] = 0;
+        s_traffic_stuck_frames[slot]   = 0;
+        s_traffic_lane_bias[slot]      = 0;
+    }
+}
+
+/* Pick a random clear, non-slow lane on `span`; the drive direction is the
+ * LANE's direction (learned from TRAFFIC.BUS / side heuristic), written to
+ * *out_polarity. -1 when nothing qualifies.
+ *
+ * "Non-slow" is a HARD filter only when the span actually has a fast/slow
+ * MIX (a shoulder next to asphalt — the user rule targets shoulders). When
+ * EVERY lane is slow-flagged the whole road surface is alternate (e.g.
+ * Moscow's cobblestone district sets the 0x10 alternate-surface bit on all
+ * lanes) and refusing it starves the spawner for the entire stretch — there,
+ * any clear lane qualifies. */
+static int trf_dyn_pick_lane(int slot, int span, int lane_count, int *out_polarity)
+{
+    int start = (lane_count > 1) ? (int)(trf_dyn_rand() % (uint32_t)lane_count) : 0;
+    int any_fast = 0;
+    for (int lane = 0; lane < lane_count; lane++) {
+        if (!td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane))) {
+            any_fast = 1;
+            break;
+        }
+    }
+    for (int k = 0; k < lane_count; k++) {
+        int lane = (start + k) % lane_count;
+        int pol  = trf_dyn_lane_direction(lane_count, lane);
+        if (any_fast &&
+            td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
+            continue;   /* user rule: never spawn on a slow (shoulder) lane */
+        if (!traffic_lane_is_clear(slot, span, lane, pol))
+            continue;
+        *out_polarity = pol;
+        return lane;
+    }
+    return -1;
+}
+
+/* Try to place `slot` at a random span [win_lo..win_hi] ahead of `anchor`
+ * (-1 = the live RACE LEADER, any racer slot, human or AI — user rule:
+ * traffic appears in front of 1st place, and only retires once the TRAILING
+ * human has passed it; AI racers never retire traffic). Race-init seeding
+ * passes the START-LINE span explicitly because at init time the grid is not
+ * placed yet and every actor's span still reads 0 — anchoring on the live
+ * "leader" there scattered seeds around the lap line, ignoring the
+ * start-clearance zone on circuits (the Scotland race-start bug).
+ * Returns 1 on success. */
+static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
+{
+    int ring   = td5_track_get_ring_length();
+    int limit  = (ring > 0) ? ring : td5_track_get_span_count();
+    int is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+
+    if (win_hi < win_lo) win_hi = win_lo;
+    if (limit <= 16) return 0;   /* degenerate strip */
+
+    for (int attempt = 0; attempt < 8; attempt++) {
+        int ps   = (anchor >= 0) ? anchor
+                                 : trf_dyn_race_span_lead(); /* live race leader */
+        int dist = win_lo + (int)(trf_dyn_rand() % (uint32_t)(win_hi - win_lo + 1));
+        int span = ps + dist;
+        int lane_count, lane, polarity;
+
+        if (is_circuit && ring > 0) {
+            span %= ring;
+            if (span < 0) span += ring;
+        }
+        /* Keep off the track-edge spans where the faithful route plan brakes
+         * (span < 3 || span >= ring-8, cf. Stage 3 @ 0x00435FAA). */
+        if (span < 3 || span >= limit - 8) continue;
+
+        /* Start-line clearance ([Traffic] SpawnStartOffset, user rule): no
+         * traffic placements within N spans AFTER the start line, so the
+         * grid/launch stretch stays clear. Wrap-aware on circuits (the zone
+         * repeats each lap). */
+        if (g_td5.ini.traffic_dyn_start_offset > 0) {
+            int rel = span - g_td5.track_start_span_index;
+            if (is_circuit && ring > 0) {
+                rel %= ring;
+                if (rel < 0) rel += ring;
+            }
+            if (rel >= 0 && rel < g_td5.ini.traffic_dyn_start_offset)
+                continue;
+        }
+
+        /* The window must hold against EVERY local player, not just the one
+         * we rolled (multiplayer: no spawning on top of another pane). */
+        if (trf_dyn_min_player_dist(span) < win_lo) continue;
+
+        lane_count = td5_track_span_lane_count_at(span);
+        if (lane_count <= 0) continue;
+
+        /* Direction follows the LANE (authored TRAFFIC.BUS map / side
+         * heuristic) — a car never drives against its lane's direction. */
+        polarity = 0;
+        lane = trf_dyn_pick_lane(slot, span, lane_count, &polarity);
+        if (lane < 0) continue;
+
+        trf_dyn_place(slot, span, lane, polarity);
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_dyn_spawn: slot=%d span=%d lane=%d/%d oncoming=%d "
+                  "player_dist=%d attempt=%d",
+                  slot, span, lane, lane_count, polarity,
+                  trf_dyn_min_player_dist(span), attempt);
+        return 1;
+    }
+    return 0;
+}
+
+/* Race-start seeding: scatter up to `cap` cars around the players (no fade —
+ * they were "always there"), park the rest. Replaces the queue fill of
+ * InitializeTrafficActorsFromQueue when dynamic mode is on. */
+void td5_ai_traffic_dynamic_race_init(void)
+{
+    int t_base = g_traffic_slot_base;
+    int t_end  = g_active_actor_count;
+    int cap, placed = 0;
+
+    if (t_end > t_base + TD5_MAX_TRAFFIC_SLOTS)
+        t_end = t_base + TD5_MAX_TRAFFIC_SLOTS;
+    if (t_end > TD5_MAX_TOTAL_ACTORS) t_end = TD5_MAX_TOTAL_ACTORS;
+
+    memset(s_trf_dyn_state, TRF_DYN_INACTIVE, sizeof(s_trf_dyn_state));
+    memset(s_trf_dyn_alpha, 0, sizeof(s_trf_dyn_alpha));
+    s_trf_dyn_rng      = 0x54443552u ^ ((uint32_t)g_td5.track_index * 2654435761u);
+    s_trf_dyn_cooldown = 0;
+    s_trf_dyn_seeded   = 1;
+
+    /* Learn the per-track lane→direction map from the authored TRAFFIC.BUS
+     * records (4-byte {span, flags bit0 = oncoming, lane}, -1 span sentinel
+     * [CONFIRMED @ 0x004353CE]). Junction-table entries (lane >= the span's
+     * lane-count nibble — the original's REMAP branch @ 0x004359C1) are
+     * skipped: their lane index refers to the alternate table. Also derives
+     * which HALF of the road carries oncoming traffic, as the fallback for
+     * unseen (lane_count, lane) combos and for tracks without a queue
+     * (TD6 conversions default to oncoming-on-the-left-half). */
+    memset(s_trf_dyn_lane_dir, -1, sizeof(s_trf_dyn_lane_dir));
+    s_trf_dyn_oncoming_left = 1;
+    s_trf_dyn_oncoming_pct  = 0;
+    if (g_traffic_queue_base) {
+        static int16_t votes[TRF_DYN_MAX_LANES + 1][TRF_DYN_MAX_LANES][2];
+        const uint8_t *qp = g_traffic_queue_base;
+        int total = 0, oncoming = 0;
+        /* side accumulator: normalized lane position (0..256 across the road)
+         * summed separately for forward and oncoming entries. */
+        int32_t side_sum[2] = { 0, 0 };
+        int32_t side_n[2]   = { 0, 0 };
+        memset(votes, 0, sizeof(votes));
+        for (int i = 0; i < 4096; i++, qp += 4) {
+            int16_t q_span = (int16_t)(qp[0] | (qp[1] << 8));
+            int pol, lane, lc;
+            if (q_span == -1) break;
+            pol  = (int)(qp[2] & 1u);
+            lane = (int)qp[3];
+            lc   = td5_track_span_lane_count_at((int)q_span);
+            total++;
+            if (pol) oncoming++;
+            if (lc < 1 || lc > TRF_DYN_MAX_LANES || lane >= lc)
+                continue;   /* junction-table entry or unusable span */
+            votes[lc][lane][pol]++;
+            side_sum[pol] += ((lane * 2 + 1) * 128) / lc;   /* 0..256 centre pos */
+            side_n[pol]++;
+        }
+        for (int lc = 1; lc <= TRF_DYN_MAX_LANES; lc++)
+            for (int lane = 0; lane < lc; lane++)
+                if (votes[lc][lane][0] | votes[lc][lane][1])
+                    s_trf_dyn_lane_dir[lc][lane] =
+                        (votes[lc][lane][1] > votes[lc][lane][0]) ? 1 : 0;
+        if (side_n[0] > 0 && side_n[1] > 0) {
+            s_trf_dyn_oncoming_left =
+                (side_sum[1] / side_n[1]) < (side_sum[0] / side_n[0]);
+        }
+        if (total > 0)
+            s_trf_dyn_oncoming_pct = (oncoming * 100) / total;
+    }
+
+    cap = trf_dyn_cap();
+    for (int slot = t_base; slot < t_end; slot++) {
+        /* Seed anchored on the START-LINE span (the grid isn't placed yet at
+         * init time — live actor spans all read 0 here), scattered across a
+         * 100-span stretch just past the start-clearance zone, so the road is
+         * already populated where the field will first encounter traffic. */
+        int seed_lo = g_td5.ini.traffic_dyn_start_offset + 8;
+        if (placed < cap &&
+            trf_dyn_spawn_in_window(slot, g_td5.track_start_span_index,
+                                    seed_lo, seed_lo + 100)) {
+            s_trf_dyn_state[slot] = TRF_DYN_ACTIVE;
+            s_trf_dyn_alpha[slot] = 255;
+            placed++;
+        } else {
+            /* Parked: every consumer (AI/physics/V2V/render/minimap/audio)
+             * skips INACTIVE slots, so the zeroed pose is never observed. */
+            s_trf_dyn_state[slot] = TRF_DYN_INACTIVE;
+            s_trf_dyn_alpha[slot] = 0;
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+              "traffic_dyn_init: seeded %d/%d cars (volume=%d cap=%d oncoming=%d%% "
+              "oncoming_left=%d window=[%d..%d] despawn=%d fade=%d period=%d speed=%d%% "
+              "start_clear=%d@%d)",
+              placed, t_end - t_base, g_td5.traffic_volume, cap,
+              s_trf_dyn_oncoming_pct, s_trf_dyn_oncoming_left,
+              g_td5.ini.traffic_dyn_spawn_min, g_td5.ini.traffic_dyn_spawn_max,
+              g_td5.ini.traffic_dyn_despawn, g_td5.ini.traffic_dyn_fade_ticks,
+              g_td5.ini.traffic_dyn_period, g_td5.ini.traffic_dyn_speed_pct,
+              g_td5.ini.traffic_dyn_start_offset, g_td5.track_start_span_index);
+}
+
+/* Per-sim-tick driver — fades, despawn checks, spawn cadence.
+ * Called once per tick from td5_ai_pre_tick. */
+void td5_ai_traffic_dynamic_tick(void)
+{
+    int t_base, t_end, fade_step, on_road = 0;
+
+    if (!td5_ai_traffic_dynamic_active()) return;
+    if (!g_actor_base || !g_route_state_base) return;
+    t_base = g_traffic_slot_base;
+    t_end  = g_active_actor_count;
+    if (t_end <= t_base) return;
+    if (t_end > t_base + TD5_MAX_TRAFFIC_SLOTS) t_end = t_base + TD5_MAX_TRAFFIC_SLOTS;
+    if (t_end > TD5_MAX_TOTAL_ACTORS) t_end = TD5_MAX_TOTAL_ACTORS;
+
+    fade_step = 255 / g_td5.ini.traffic_dyn_fade_ticks;
+    if (fade_step < 1) fade_step = 1;
+
+    for (int slot = t_base; slot < t_end; slot++) {
+        char *a = actor_ptr(slot);
+        switch (s_trf_dyn_state[slot]) {
+        case TRF_DYN_FADE_IN:
+            s_trf_dyn_alpha[slot] = (int16_t)(s_trf_dyn_alpha[slot] + fade_step);
+            if (s_trf_dyn_alpha[slot] >= 255) {
+                s_trf_dyn_alpha[slot] = 255;
+                s_trf_dyn_state[slot] = TRF_DYN_ACTIVE;
+            }
+            on_road++;
+            break;
+
+        case TRF_DYN_ACTIVE: {
+            int sp, behind, ahead, ring, is_circuit;
+            /* Never retire the live cop (mirrors recycle's slot-9 guard
+             * @ 0x0043545B). */
+            if (slot == 9 && g_encounter_tracked_handle != -1) { on_road++; break; }
+            /* Live corridor = [trailing HUMAN - despawn .. race LEADER +
+             * despawn]. A car only retires once the LAST human has passed it
+             * by DespawnDistance (signed — cars still AHEAD of a last-place
+             * human stay alive for them to encounter), or if it somehow ends
+             * up far past the race leader. AI racers never retire traffic. */
+            sp = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_NORMALIZED);
+            behind = sp - ai_player_span_trailing();
+            ahead  = sp - trf_dyn_race_span_lead();
+            ring = td5_track_get_ring_length();
+            is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+            if (is_circuit && ring > 0) {
+                int half = ring / 2;
+                while (behind > half)  behind -= ring;
+                while (behind < -half) behind += ring;
+                while (ahead > half)   ahead -= ring;
+                while (ahead < -half)  ahead += ring;
+            }
+            /* Ahead-of-leader bound is a generous CLEANUP (despawn+spawn_max,
+             * ~115 spans — past the ~88-128 actor render cull): a SpeedScale'd
+             * traffic car can genuinely outrun the race leader, and fading it
+             * at the plain despawn distance was visible from the leader's
+             * seat ("traffic disappears in front of me").
+             *
+             * Stuck replacement is DEBOUNCED on s_traffic_stuck_frames (45
+             * ticks ≈ 1.5s continuously recovery-frozen, counted by the
+             * AntiFreeze layer): the Stage-2 recovery latch also arms
+             * TRANSIENTLY for a tick or two on curves (esp. oncoming cars),
+             * and replacing on a transient latch vanished healthy cars in
+             * plain sight. (With [Traffic] AntiFreeze=0 the counter stays 0 —
+             * stuck cars then just brake until the corridor passes them.) */
+            if (behind < -g_td5.ini.traffic_dyn_despawn ||
+                ahead  >  g_td5.ini.traffic_dyn_despawn +
+                          g_td5.ini.traffic_dyn_spawn_max ||
+                (g_traffic_recovery_stage[slot] != 0 &&
+                 s_traffic_stuck_frames[slot] >= 45 &&
+                 /* far enough that the fade is unobtrusive; nearer stuck cars
+                  * are realigned in place by AntiFreeze instead */
+                 trf_dyn_min_player_dist(sp) > g_td5.ini.traffic_dyn_despawn)) {
+                s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
+                TD5_LOG_I(LOG_TAG,
+                          "traffic_dyn_despawn: slot=%d behind_trail=%d ahead_lead=%d "
+                          "recovery=%d stuck=%d (fading out)",
+                          slot, behind, ahead, g_traffic_recovery_stage[slot],
+                          s_traffic_stuck_frames[slot]);
+            }
+            on_road++;
+            break;
+        }
+
+        case TRF_DYN_FADE_OUT:
+            s_trf_dyn_alpha[slot] = (int16_t)(s_trf_dyn_alpha[slot] - fade_step);
+            if (s_trf_dyn_alpha[slot] <= 0) {
+                s_trf_dyn_alpha[slot] = 0;
+                s_trf_dyn_state[slot] = TRF_DYN_INACTIVE;
+                /* Park: freeze all motion so the hidden actor stays put. */
+                *(int32_t *)(a + 0x314) = 0;   /* longitudinal speed */
+                *(int32_t *)(a + 0x1C0) = 0;
+                *(int32_t *)(a + 0x1C4) = 0;
+                *(int32_t *)(a + 0x1C8) = 0;
+                *(int32_t *)(a + 0x1CC) = 0;   /* lin vel x */
+                *(int32_t *)(a + 0x1D0) = 0;
+                *(int32_t *)(a + 0x1D4) = 0;   /* lin vel z */
+                ACTOR_U8(a, ACTOR_BRAKE_FLAG) = 1;
+            } else {
+                on_road++;
+            }
+            break;
+
+        default: /* TRF_DYN_INACTIVE */
+            break;
+        }
+    }
+
+    /* Spawn cadence. Prefer slot 9 (the cop-capable slot) so speeding
+     * pursuits can still trigger; round-robin the rest. */
+    if (s_trf_dyn_cooldown > 0) s_trf_dyn_cooldown--;
+    if (on_road < trf_dyn_cap() && s_trf_dyn_cooldown <= 0) {
+        int pick = -1;
+        if (9 >= t_base && 9 < t_end && s_trf_dyn_state[9] == TRF_DYN_INACTIVE)
+            pick = 9;
+        if (pick < 0) {
+            for (int slot = t_base; slot < t_end; slot++) {
+                if (s_trf_dyn_state[slot] == TRF_DYN_INACTIVE) { pick = slot; break; }
+            }
+        }
+        static int s_trf_dyn_starved = 0;
+        if (pick >= 0 &&
+            trf_dyn_spawn_in_window(pick, -1, g_td5.ini.traffic_dyn_spawn_min,
+                                    g_td5.ini.traffic_dyn_spawn_max)) {
+            s_trf_dyn_state[pick] = TRF_DYN_FADE_IN;
+            s_trf_dyn_alpha[pick] = 0;
+            s_trf_dyn_cooldown = trf_dyn_spawn_period();
+            s_trf_dyn_starved = 0;
+        } else {
+            s_trf_dyn_cooldown = 10;   /* nothing placeable right now — retry soon */
+            /* Persistent failure is a data/window problem worth surfacing
+             * (e.g. all-slow surface stretch, track-end window, no clear
+             * lanes). One line per ~10s of continuous starvation. */
+            if ((++s_trf_dyn_starved % 30) == 0) {
+                TD5_LOG_W(LOG_TAG,
+                          "traffic_dyn_starved: %d consecutive spawn failures "
+                          "(lead_span=%d ring=%d span_count=%d on_road=%d cap=%d)",
+                          s_trf_dyn_starved, ai_player_span_lead(),
+                          td5_track_get_ring_length(), td5_track_get_span_count(),
+                          on_road, trf_dyn_cap());
+            }
+        }
+    }
+}
+
 void td5_ai_update_traffic_route_plan(int slot) {
     int32_t *rs = route_state(slot);
     char *actor  = actor_ptr(slot);
@@ -6221,7 +6858,20 @@ void td5_ai_update_traffic_route_plan(int slot) {
      * clean brake-until-recycle. Restoring the faithful behavior here. */
 
     /* --- Stage 1: Recycle --- */
-    td5_ai_recycle_traffic_actor();
+    if (td5_ai_traffic_dynamic_active()) {
+        /* [dynamic-traffic] The queue recycle is replaced by the distance
+         * spawner (td5_ai_traffic_dynamic_tick, driven from td5_ai_pre_tick).
+         * A parked (despawned) car has no route plan at all — hold the brake
+         * and bail before any heading/recovery logic can run on its frozen
+         * pose. */
+        if (td5_ai_traffic_dynamic_parked(slot)) {
+            ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            return;
+        }
+    } else {
+        td5_ai_recycle_traffic_actor();
+    }
 
     /* [S20 AntiFreeze] un-stick a traffic car that the faithful recovery brake
      * has frozen and the player-relative recycle can't reach (parked player). */
@@ -6354,7 +7004,13 @@ void td5_ai_update_traffic_route_plan(int slot) {
     {
         int16_t span_raw = ACTOR_I16(actor, ACTOR_SPAN_RAW);
         int ring_length = td5_track_get_ring_length();
-        int near_edge = (span_raw < 3 || (ring_length > 0 && span_raw >= ring_length - 8));
+        /* [dynamic-traffic OnCircuits] the near-edge brake is P2P track-END
+         * logic (orig g_trackTotalSpanCount-8 guard); on a CIRCUIT spans
+         * [ring-8..ring)+[0..3) are just the lap line and braking there would
+         * stall every traffic car once per lap. Inert for faithful mode —
+         * the original never has circuit traffic to begin with. */
+        int near_edge = (g_td5.track_type != TD5_TRACK_CIRCUIT) &&
+                        (span_raw < 3 || (ring_length > 0 && span_raw >= ring_length - 8));
         int on_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
 
         if ((near_edge && on_canonical)
@@ -6395,6 +7051,15 @@ void td5_ai_update_traffic_route_plan(int slot) {
             if (scaled > 0x4E) scaled = 0x4E;   /* ~1.30x ceiling */
             cruise = scaled;
         }
+    }
+    /* [dynamic-traffic] cruise-speed scale ([Traffic] SpeedScale %, default
+     * 150). The traffic dynamics (IntegrateVehicleFrictionForces port) feed
+     * throttle = cruise*4 into a linear force balance, so the emergent top
+     * speed tracks this scale. Applied BEFORE the SmartAI car-following ease
+     * so queueing behind a slower car still slows the follower. */
+    if (td5_ai_traffic_dynamic_active()) {
+        cruise = (cruise * g_td5.ini.traffic_dyn_speed_pct) / 100;
+        if (cruise > 0xB4) cruise = 0xB4;   /* 3x faithful — int16 cmd, sane ceiling */
     }
     /* [SmartAI] car-following: ease the cruise throttle when a car sits close
      * ahead in the same lane so traffic queues instead of nose-to-tail tunnelling.

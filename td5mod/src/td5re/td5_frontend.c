@@ -2698,7 +2698,9 @@ void frontend_init_race_schedule(void) {
      * read by InitRace / td5_ai. Mirrors ConfigureGameTypeFlags @ 0x00410CA0
      * case 0. */
     if (s_selected_game_type == 0) {
-        g_td5.traffic_enabled           = s_game_option_traffic;
+        /* [dynamic-traffic] 4-state volume row: 0=Off 1=Low 2=Medium 3=High. */
+        g_td5.traffic_volume            = s_game_option_traffic & 3;
+        g_td5.traffic_enabled           = (g_td5.traffic_volume != 0);
         g_td5.special_encounter_enabled = s_game_option_cops;
     }
 
@@ -4265,6 +4267,18 @@ int ConfigureGameTypeFlags(void) {
         break;
     }
 
+    /* [dynamic-traffic] Normalize the traffic VOLUME for every game type.
+     * Single Race honors the user's 4-state row (0=Off 1=Light 2=Normal
+     * 3=Heavy → traffic_enabled = volume != 0); cup/cop types that force
+     * traffic on get the classic full density (Heavy). Every faithful
+     * consumer keeps reading the traffic_enabled boolean. */
+    if (s_selected_game_type == 0) {
+        g_td5.traffic_volume  = s_game_option_traffic & 3;
+        g_td5.traffic_enabled = (g_td5.traffic_volume != 0);
+    } else {
+        g_td5.traffic_volume = g_td5.traffic_enabled ? 3 : 0;
+    }
+
     /* For cup types 1-6, check series schedule for end sentinel (99) */
     if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
         int sched_idx = s_selected_game_type - 1;
@@ -5250,6 +5264,8 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
 
 static void frontend_render_game_options_overlay(float sx, float sy) {
     const char *on_off[] = { "OFF", "ON" };
+    /* [dynamic-traffic] 4-state traffic volume row. */
+    const char *traffic_vol[] = { "OFF", "LOW", "MEDIUM", "HIGH" };
     const char *difficulty[] = { "EASY", "NORMAL", "HARD" };  /* orig middle label: NORMAL */
     /* [CONFIRMED @ Language.dll SNK_DynamicsTxt, indexed directly by
      * gDynamicsConfigShadow @0x00466014 at ScreenGameOptions 0x0041FECF]:
@@ -5263,7 +5279,7 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
      * remaining option values shifted up one button index. Laps is now shown and
      * edited in the Quick Race menu and the Track Selection screen. */
     frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_game_option_traffic & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, traffic_vol[s_game_option_traffic & 3], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
@@ -6182,6 +6198,8 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
      * track preview (x=412). */
     {
         const char *on_off[2] = { "OFF", "ON" };
+        /* [dynamic-traffic] 4-state traffic volume row. */
+        const char *traffic_vol[4] = { "OFF", "LOW", "MEDIUM", "HIGH" };
         char vb[8];
         float vx = 350.0f * sx;
         if (s_buttons[2].active) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
@@ -6189,7 +6207,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         if (s_buttons[3].active && !s_buttons[3].hidden) { snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
             fe_draw_text(vx, (float)(s_buttons[3].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
         if (s_buttons[4].active)
-            fe_draw_text(vx, (float)(s_buttons[4].y + 6) * sy, on_off[s_game_option_traffic & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
+            fe_draw_text(vx, (float)(s_buttons[4].y + 6) * sy, traffic_vol[s_game_option_traffic & 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         if (s_buttons[5].active)
             fe_draw_text(vx, (float)(s_buttons[5].y + 6) * sy, on_off[s_game_option_cops & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
     }

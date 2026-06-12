@@ -4580,6 +4580,28 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_ref         = 1;
         break;
 
+    case TD5_PRESET_VEHICLE_FADE:
+        /* [dynamic-traffic] Whole-car fade for GTA-style traffic spawn/despawn.
+         * SRCALPHA/INVSRCALPHA with the fade in the per-vertex diffuse alpha
+         * (MODULATEALPHA: texture * diffuse incl. alpha). z_write stays ON —
+         * unlike the shared translucent presets — so the mesh's own front
+         * faces still occlude its back faces mid-fade; without it a fading
+         * car renders inside-out. alpha_ref=1, NOT TRANSLUCENT_ANISO's 0x80:
+         * the fade routinely sits below 50% alpha and a 0x80 cutoff would
+         * alpha-test the whole car away for the first half of the fade-in. */
+        s->blend_enable      = 1;
+        s->src_blend         = D3D6BLEND_SRCALPHA;
+        s->dest_blend        = D3D6BLEND_INVSRCALPHA;
+        s->z_enable          = 1;
+        s->z_write           = 1;
+        s->z_func            = 0;  /* LEQUAL */
+        s->mag_filter        = 2;  /* LINEAR — same as the opaque body preset */
+        s->min_filter        = 2;
+        s->texblend_mode     = D3DTBLEND_MODULATEALPHA;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 1;
+        break;
+
     case TD5_PRESET_SKY:
         /* Sky dome — faithful match to original SetRaceRenderStatePreset(0)
          * @ 0x0040b070 case 0 (final fallthrough block 0x40b0d8-0x40b0e9):

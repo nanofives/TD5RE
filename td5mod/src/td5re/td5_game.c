@@ -1817,10 +1817,23 @@ int td5_game_init_race_session(void) {
         memcpy(&levelinf_traffic_flag, g_track_environment_config + 0x30, sizeof(int32_t));
         TD5_LOG_I(LOG_TAG, "InitRace step 4a: LEVELINF traffic flag (+0x30) = %d", levelinf_traffic_flag);
         if (levelinf_traffic_flag == 0 && g_td5.traffic_enabled) {
-            TD5_LOG_I(LOG_TAG,
-                      "InitRace step 4a: LEVELINF+0x30=0 on track=%d (is_circuit=%d) — clearing traffic_enabled",
-                      g_td5.track_index, g_track_is_circuit);
-            g_td5.traffic_enabled = 0;
+            /* [dynamic-traffic OnCircuits] The dynamic spawner needs no
+             * TRAFFIC.BUS and handles ring wrap, so circuits (and TD6
+             * conversions, whose synthesized LEVELINF zeroes this flag) can
+             * carry ambient traffic — keep the toggle's value and let step 5b
+             * fall back to a default model row. Faithful behavior (clear)
+             * with Dynamic=0 or OnCircuits=0. */
+            if (g_td5.ini.traffic_dynamic && g_td5.ini.traffic_dyn_circuits) {
+                TD5_LOG_I(LOG_TAG,
+                          "InitRace step 4a: LEVELINF+0x30=0 on track=%d (is_circuit=%d) "
+                          "— OVERRIDDEN by [Traffic] Dynamic+OnCircuits (traffic stays on)",
+                          g_td5.track_index, g_track_is_circuit);
+            } else {
+                TD5_LOG_I(LOG_TAG,
+                          "InitRace step 4a: LEVELINF+0x30=0 on track=%d (is_circuit=%d) — clearing traffic_enabled",
+                          g_td5.track_index, g_track_is_circuit);
+                g_td5.traffic_enabled = 0;
+            }
         }
     }
 
@@ -1976,6 +1989,19 @@ int td5_game_init_race_session(void) {
             int traffic_slot  = g_traffic_slot_base + ti;  /* slots 6..11 (legacy base) */
             int traffic_model = td5_asset_resolve_traffic_model_index(
                 g_td5.track_index, /*reverse=*/0, ti);
+            if (traffic_model < 0 &&
+                g_td5.ini.traffic_dynamic && g_td5.ini.traffic_dyn_circuits) {
+                /* [dynamic-traffic OnCircuits] circuits / TD6 conversions have
+                 * no row in the per-track traffic-model tables (pool_idx>=25
+                 * in the original). Borrow track 0's (Moscow's) model set so
+                 * the dynamic spawner has meshes to dress its actors with. */
+                traffic_model = td5_asset_resolve_traffic_model_index(0, 0, ti);
+                if (traffic_model >= 0)
+                    TD5_LOG_I(LOG_TAG,
+                              "InitRace step 5b: track_index=%d slot_in_pool=%d "
+                              "using fallback traffic model %d (track-0 row)",
+                              g_td5.track_index, ti, traffic_model);
+            }
             if (traffic_model < 0) {
                 TD5_LOG_I(LOG_TAG,
                           "InitRace step 5b: track_index=%d slot_in_pool=%d has no traffic model (pool_idx>=25 or unavailable)",

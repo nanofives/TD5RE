@@ -601,6 +601,24 @@ void td5_render_set_vehicle_tint(int slot, uint32_t rgb)
     s_vehicle_tint[slot] = rgb & 0x00FFFFFFu;
 }
 
+/* [dynamic-traffic] Whole-actor draw fade (0..255, 255 = opaque/normal).
+ * Set per actor around its draws in td5_render_actors_for_view; consumed by
+ * flush_immediate_internal (vertex alpha scale + preset remap) and by the
+ * direct-draw car accessories (shadow, wheels, brake lights, reflection).
+ * MUST flush the pending immediate batch on change — the batch can otherwise
+ * carry one actor's triangles into the next actor's alpha. */
+static int s_actor_draw_alpha = 255;
+static void flush_immediate_internal(void);
+
+void td5_render_set_actor_draw_alpha(int alpha)
+{
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
+    if (alpha == s_actor_draw_alpha) return;
+    flush_immediate_internal();
+    s_actor_draw_alpha = alpha;
+}
+
 /* Per-slot "this is a ported TD6 car" flag. TD6 cars have a grayscale body and
  * no meaningful env-map reflection mesh (envmodel.dat is unused), so the
  * TD5-faithful chrome/projection reflection overlay must NOT run on them: in a
@@ -912,6 +930,29 @@ static void flush_immediate_internal(void)
         if ((s_imm_verts[i].diffuse & 0xFF000000u) == 0) {
             uint32_t lum = s_imm_verts[i].diffuse & 0x3FF;
             s_imm_verts[i].diffuse = s_color_lut[lum];
+        }
+    }
+
+    /* [dynamic-traffic] Whole-actor fade: scale every vertex's diffuse alpha
+     * by the current actor fade (the VEHICLE_FADE preset blends on it). For
+     * type-3 (additive) pages alpha is meaningless (ONE/ONE) — scale RGB
+     * instead so glows dim with the body. Runs BEFORE the deferred-additive
+     * stash below so deferred batches carry the faded colors. */
+    if (s_actor_draw_alpha < 255) {
+        uint32_t fade = (uint32_t)s_actor_draw_alpha;
+        int additive = (s_current_texture_page >= 0 &&
+                        td5_asset_get_page_transparency(s_current_texture_page) == 3);
+        for (int i = 0; i < s_imm_vert_count; i++) {
+            uint32_t d = s_imm_verts[i].diffuse;
+            if (additive) {
+                uint32_t r = (((d >> 16) & 0xFFu) * fade) >> 8;
+                uint32_t g = (((d >>  8) & 0xFFu) * fade) >> 8;
+                uint32_t b = (((d      ) & 0xFFu) * fade) >> 8;
+                s_imm_verts[i].diffuse = (d & 0xFF000000u) | (r << 16) | (g << 8) | b;
+            } else {
+                uint32_t a = (((d >> 24) & 0xFFu) * fade) >> 8;
+                s_imm_verts[i].diffuse = (d & 0x00FFFFFFu) | (a << 24);
+            }
         }
     }
 
@@ -3009,6 +3050,12 @@ void td5_render_actors_for_view(int view_index)
                 TD5_Actor *sa = td5_game_get_actor(slot);
                 if (!sa || !td5_render_get_vehicle_mesh(slot))
                     continue;
+                /* [dynamic-traffic] despawned traffic casts no shadow; a fading
+                 * car's shadow fades with it (alpha consumed inside the shadow
+                 * draw helpers via s_actor_draw_alpha). */
+                int shadow_fade = td5_ai_traffic_get_draw_alpha(slot);
+                if (shadow_fade == 0)
+                    continue;
                 if (slot == camera_target_slot && camera_preset_active)
                     continue;   /* bumper/interior cam: own car (incl. shadow) suppressed */
                 if (drag_mode && slot < TD5_MAX_RACER_SLOTS &&
@@ -3030,7 +3077,9 @@ void td5_render_actors_for_view(int view_index)
                             continue;   /* span-distance cull (mirrors body loop) */
                     }
                 }
+                td5_render_set_actor_draw_alpha(shadow_fade);
                 render_vehicle_shadow_quad(sa);
+                td5_render_set_actor_draw_alpha(255);
                 shadow_drawn++;
             }
             {
@@ -3051,6 +3100,14 @@ void td5_render_actors_for_view(int view_index)
             float depth;
 
             if (!actor || !mesh)
+                continue;
+
+            /* [dynamic-traffic] despawned traffic is invisible; a spawning /
+             * despawning car fades (alpha applied around the mesh dispatch
+             * below — 255 for every racer and for dynamic-off, so the classic
+             * path is untouched). */
+            int actor_fade = td5_ai_traffic_get_draw_alpha(slot);
+            if (actor_fade == 0)
                 continue;
 
             /* Bumper / interior camera own-car skip (orig RenderRaceActorForView
@@ -3169,7 +3226,13 @@ void td5_render_actors_for_view(int view_index)
                 float interp_x = (float)actor->world_pos.x + (float)actor->linear_velocity_x * frac;
                 float interp_y = (float)actor->world_pos.y + (float)actor->linear_velocity_y * frac;
                 float interp_z = (float)actor->world_pos.z + (float)actor->linear_velocity_z * frac;
-                if (slot < TD5_MAX_RACER_SLOTS) {
+                /* [FIX 2026-06-12 traffic-wheel gate drift] racer gate must be
+                 * g_traffic_slot_base (see wheel/brake gate below) — with the
+                 * 16-slot TD5_MAX_RACER_SLOTS the chassis lift was wrongly
+                 * applied to traffic slots 6..11 too, sinking traffic bodies
+                 * 36 units into the road (orig traffic block @ 0x40BD20 skips
+                 * the lift). */
+                if (slot < g_traffic_slot_base) {
                     /* g_trackHeightBaseOffset = -36 normally, -18 under playback.
                      * Subtract (offset << 8) in fp8 → equivalent to adding
                      * (-offset) world units after the /256 conversion below. */
@@ -3248,7 +3311,13 @@ void td5_render_actors_for_view(int view_index)
              * body" fix to cover the inter-actor case ("other cars' shadows
              * render over my car") while keeping the player-self fix intact. */
 
+            /* [dynamic-traffic] fade bracket: the setter flushes the pending
+             * immediate batch on every change, so faded triangles can never be
+             * batched with another actor's. The trailing reset also flushes
+             * this car's tail vertices while the fade is still active. */
+            td5_render_set_actor_draw_alpha(actor_fade);
             td5_render_prepared_mesh(mesh);
+            td5_render_set_actor_draw_alpha(255);
 
             /* [S23 2026-06-05] UNIFIED vehicle reflection — TD5 cars now match
              * TD6 cars. The chrome/env-map "mode 2" overlay was a PORT-ONLY
@@ -3291,7 +3360,15 @@ void td5_render_actors_for_view(int view_index)
              * depth-tested per the 2026-06-02 inter-actor overlay fix; shadows
              * stay in the pre-pass for ALL actors since the traffic branch DOES
              * queue shadow quads.) */
-            if (slot < TD5_MAX_RACER_SLOTS) {
+            /* [FIX 2026-06-12 traffic-wheel gate drift] "Racer slots only"
+             * must be slot < g_traffic_slot_base, NOT TD5_MAX_RACER_SLOTS:
+             * that constant was 6 when the 2026-06-02 fix was written but the
+             * N-way work bumped it to 16, silently re-including traffic slots
+             * 6..11 — traffic got wheel billboards built from slot-0 wheel
+             * geometry again (user-visible as randomly wrong traffic wheels).
+             * g_traffic_slot_base is the racer/traffic boundary in every
+             * field layout (6 legacy, 16 big splits). */
+            if (slot < g_traffic_slot_base) {
                 render_vehicle_wheel_billboards(actor, slot);
                 render_vehicle_brake_lights(actor, slot);
             }
@@ -3864,6 +3941,12 @@ static void td5_render_apply_page_blend_preset(int page_id)
     if (t == 3)      p = TD5_PRESET_ADDITIVE;
     else if (t == 2) p = TD5_PRESET_TRANSLUCENT_ANISO;
     else             p = TD5_PRESET_OPAQUE_LINEAR;
+    /* [dynamic-traffic] A fading car body must alpha-blend regardless of page
+     * type. Additive pages keep ONE/ONE (the fade is folded into their RGB by
+     * the flush fixup); opaque/color-key pages remap to the fade preset whose
+     * alpha_ref=1 won't clip sub-50% fade alphas like ANISO's 0x80 would. */
+    if (s_actor_draw_alpha < 255 && p != TD5_PRESET_ADDITIVE)
+        p = TD5_PRESET_VEHICLE_FADE;
     td5_plat_render_set_preset(p);
     TD5_LOG_D(LOG_TAG, "page_blend_preset: page=%d type=%d preset=%d", page_id, t, (int)p);
 }
@@ -5497,7 +5580,9 @@ static void render_vehicle_shadow_quad_legacy(const TD5_Actor *actor)
         verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV
                             - SHADOW_DEPTH_Z_BIAS;
         verts[i].rhw      = inv_z;
-        verts[i].diffuse  = 0xFFFFFFFFu;   /* white — alpha comes from texture */
+        /* white — alpha comes from texture, scaled by the actor fade
+         * ([dynamic-traffic]; 255 = identity, MODULATEALPHA preset). */
+        verts[i].diffuse  = ((uint32_t)s_actor_draw_alpha << 24) | 0x00FFFFFFu;
         verts[i].specular = 0;
         verts[i].tex_u    = uvs[i][0];
         verts[i].tex_v    = uvs[i][1];
@@ -5715,7 +5800,14 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
         verts[n].screen_y = -vy * s_focal_length * inv_z + s_center_y;
         verts[n].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - SHADOW_DEPTH_Z_BIAS;
         verts[n].rhw      = inv_z;
-        verts[n].diffuse  = ((uint32_t)g->alpha[n] << 24); /* black RGB + soft alpha (BGRA) */
+        /* black RGB + soft alpha (BGRA), scaled by the actor fade
+         * ([dynamic-traffic]; identity when no fade is active). */
+        {
+            uint32_t sa = (uint32_t)g->alpha[n];
+            if (s_actor_draw_alpha < 255)
+                sa = (sa * (uint32_t)s_actor_draw_alpha) >> 8;
+            verts[n].diffuse = sa << 24;
+        }
         verts[n].specular = 0;
         verts[n].tex_u    = 0.0f;
         verts[n].tex_v    = 0.0f;
