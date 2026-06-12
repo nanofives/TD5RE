@@ -341,6 +341,16 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "TrafficAntiFreeze",        &g_td5.ini.traffic_antifreeze },
         { "TrafficAntiFreezeFrames",  &g_td5.ini.traffic_antifreeze_frames },
         { "TrafficPlayerCollide",     &g_td5.ini.traffic_player_collide },
+        /* Dynamic (GTA-style) traffic spawner */
+        { "TrafficDynamic",           &g_td5.ini.traffic_dynamic },
+        { "TrafficSpawnAheadMin",     &g_td5.ini.traffic_dyn_spawn_min },
+        { "TrafficSpawnAheadMax",     &g_td5.ini.traffic_dyn_spawn_max },
+        { "TrafficDespawnDistance",   &g_td5.ini.traffic_dyn_despawn },
+        { "TrafficFadeTicks",         &g_td5.ini.traffic_dyn_fade_ticks },
+        { "TrafficSpawnPeriod",       &g_td5.ini.traffic_dyn_period },
+        { "TrafficSpeedScale",        &g_td5.ini.traffic_dyn_speed_pct },
+        { "TrafficSpawnStartOffset",  &g_td5.ini.traffic_dyn_start_offset },
+        { "TrafficOnCircuits",        &g_td5.ini.traffic_dyn_circuits },
         { "Player1Joystick",      &g_td5.ini.player1_joystick },
         { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
@@ -677,7 +687,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
     g_td5.ini.checkpoint_timers  = td5_ini_int("GameOptions", "CheckpointTimers", 1);
-    g_td5.ini.traffic            = td5_ini_int("GameOptions", "Traffic", 1);
+    /* Traffic is now a VOLUME, not a boolean: 0=Off 1=Low 2=Medium 3=High.
+     * Legacy INIs carrying the old ON value (1) land on Light. Default Heavy
+     * matches the classic always-6-cars density. */
+    g_td5.ini.traffic            = td5_ini_int("GameOptions", "Traffic", 3);
+    if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
+    if (g_td5.ini.traffic > 3) g_td5.ini.traffic = 3;
     g_td5.ini.cops               = td5_ini_int("GameOptions", "Cops", 1);
     g_td5.ini.difficulty         = td5_ini_int("GameOptions", "Difficulty", 1);
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
@@ -731,6 +746,36 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.traffic_antifreeze_frames = td5_ini_int("Traffic", "AntiFreezeFrames", 120);
     if (g_td5.ini.traffic_antifreeze_frames < 15) g_td5.ini.traffic_antifreeze_frames = 15;
     g_td5.ini.traffic_player_collide    = td5_ini_int("Traffic", "PlayerCollide", 1);
+    /* Dynamic (GTA-style) traffic spawner. All distances in track spans —
+     * the same metric the original recycle uses (0x28 spans @ 0x004353EB). */
+    g_td5.ini.traffic_dynamic        = td5_ini_int("Traffic", "Dynamic", 1);
+    g_td5.ini.traffic_dyn_spawn_min  = td5_ini_int("Traffic", "SpawnAheadMin", 25);
+    g_td5.ini.traffic_dyn_spawn_max  = td5_ini_int("Traffic", "SpawnAheadMax", 50);
+    g_td5.ini.traffic_dyn_despawn    = td5_ini_int("Traffic", "DespawnDistance", 65);
+    g_td5.ini.traffic_dyn_fade_ticks = td5_ini_int("Traffic", "FadeTicks", 12);
+    g_td5.ini.traffic_dyn_period     = td5_ini_int("Traffic", "SpawnPeriod", 45);
+    /* Cruise-speed scale for dynamic traffic (% of the faithful 0x3C cruise;
+     * the simplified traffic dynamics' emergent top speed scales with it). */
+    g_td5.ini.traffic_dyn_speed_pct  = td5_ini_int("Traffic", "SpeedScale", 150);
+    if (g_td5.ini.traffic_dyn_speed_pct < 50)  g_td5.ini.traffic_dyn_speed_pct = 50;
+    if (g_td5.ini.traffic_dyn_speed_pct > 300) g_td5.ini.traffic_dyn_speed_pct = 300;
+    /* Start-line clearance: no traffic placements within N spans after the
+     * start line (keeps the grid/launch stretch clear). 0 disables. */
+    g_td5.ini.traffic_dyn_start_offset = td5_ini_int("Traffic", "SpawnStartOffset", 200);
+    if (g_td5.ini.traffic_dyn_start_offset < 0) g_td5.ini.traffic_dyn_start_offset = 0;
+    /* Dynamic traffic on circuits / LEVELINF-no-traffic tracks (incl. TD6
+     * conversions, whose synthesized LEVELINF zeroes the traffic flag).
+     * 0 = faithful: those tracks never see traffic. */
+    g_td5.ini.traffic_dyn_circuits = td5_ini_int("Traffic", "OnCircuits", 1);
+    if (g_td5.ini.traffic_dyn_spawn_min < 5)  g_td5.ini.traffic_dyn_spawn_min = 5;
+    if (g_td5.ini.traffic_dyn_spawn_max < g_td5.ini.traffic_dyn_spawn_min + 1)
+        g_td5.ini.traffic_dyn_spawn_max = g_td5.ini.traffic_dyn_spawn_min + 1;
+    /* Despawn must exceed the spawn window or fresh spawns despawn instantly. */
+    if (g_td5.ini.traffic_dyn_despawn < g_td5.ini.traffic_dyn_spawn_max + 5)
+        g_td5.ini.traffic_dyn_despawn = g_td5.ini.traffic_dyn_spawn_max + 5;
+    if (g_td5.ini.traffic_dyn_fade_ticks < 1)   g_td5.ini.traffic_dyn_fade_ticks = 1;
+    if (g_td5.ini.traffic_dyn_fade_ticks > 255) g_td5.ini.traffic_dyn_fade_ticks = 255;
+    if (g_td5.ini.traffic_dyn_period < 5)       g_td5.ini.traffic_dyn_period = 5;
     g_td5.ini.player1_joystick   = td5_ini_int("GameOptions", "Player1Joystick", 0);
     g_td5.ini.player2_joystick   = td5_ini_int("GameOptions", "Player2Joystick", 0);
 

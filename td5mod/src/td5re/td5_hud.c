@@ -4360,6 +4360,9 @@ void td5_hud_render_minimap(int actor_slot)
     for (int t = g_traffic_slot_base; t < total_actors && t < TD5_MAX_TOTAL_ACTORS; t++) {
         if (!td5_render_get_vehicle_mesh(t))
             continue;
+        /* [dynamic-traffic] despawned (parked) traffic has no minimap dot. */
+        if (td5_ai_traffic_get_draw_alpha(t) == 0)
+            continue;
         int16_t traffic_span = actor_span_index(t);
         int span_delta;
         if (g_track_is_circuit) {

@@ -1607,7 +1607,9 @@ void Screen_GameOptions(void) {
                     s_game_option_checkpoint_timers ^= 1;
                     s_inner_state = 4;
                 } else if (active_button == 1) {
-                    s_game_option_traffic ^= 1;
+                    /* [dynamic-traffic] 4-state volume: Off/Light/Normal/Heavy,
+                     * direction-aware so LEFT steps back through the cycle. */
+                    s_game_option_traffic = (s_game_option_traffic + delta) & 3;
                     s_inner_state = 4;
                 } else if (active_button == 2) {
                     s_game_option_cops ^= 1;

@@ -3213,6 +3213,12 @@ void td5_physics_update_traffic(TD5_Actor *actor)
      * Transcribed from Ghidra decompilation; every SAR uses
      * truncate-toward-zero rounding: (x + ((x>>31)&mask)) >> shift. */
 
+    /* [dynamic-traffic] A parked (despawned) traffic car is frozen in place —
+     * no friction integration, no route advance. Covers both the main
+     * dispatch and the countdown traffic step. No-op when Dynamic=0. */
+    if (td5_ai_traffic_dynamic_parked(actor->slot_index))
+        return;
+
 
     #define SAR12(x) (((x) + (((x) >> 31) & 0xFFF)) >> 12)
     #define SAR10(x) (((x) + (((x) >> 31) & 0x3FF)) >> 10)
@@ -4703,7 +4709,10 @@ void td5_physics_resolve_vehicle_contacts(void)
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
         int32_t radius;
 
-        if (!actor->car_definition_ptr) {
+        if (!actor->car_definition_ptr ||
+            /* [dynamic-traffic] parked cars are intangible — keep their ghost
+             * pose out of the broadphase so nobody collides with a hidden car. */
+            td5_ai_traffic_dynamic_parked(i)) {
             memset(g_actor_aabb[i], 0, sizeof(g_actor_aabb[i]));
             continue;
         }
@@ -4731,6 +4740,7 @@ void td5_physics_resolve_vehicle_contacts(void)
         TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
 
         if (!a->car_definition_ptr) continue;
+        if (td5_ai_traffic_dynamic_parked(i)) continue;  /* [dynamic-traffic] intangible */
 
         int32_t seg_a = a->track_span_normalized;
         if (seg_a < 0) seg_a = 0;

@@ -2058,8 +2058,8 @@ void Screen_TrackSelection(void) {
                     s_game_option_laps += delta;
                     if (s_game_option_laps < 0) s_game_option_laps = 0;
                     if (s_game_option_laps > 9) s_game_option_laps = 9;
-                } else if (selected_button == 4) {     /* traffic on/off */
-                    s_game_option_traffic = (s_game_option_traffic + delta) & 1;
+                } else if (selected_button == 4) {     /* traffic volume Off/Light/Normal/Heavy */
+                    s_game_option_traffic = (s_game_option_traffic + delta) & 3;
                 } else if (selected_button == 5) {     /* police on/off */
                     s_game_option_cops = (s_game_option_cops + delta) & 1;
                 }
@@ -2076,8 +2076,11 @@ void Screen_TrackSelection(void) {
                 } else {
                     g_td5.reverse_direction = s_track_direction;
                     /* [S02 (c) 2026-06-04] Persist the lap choice (re-homed from
-                     * Game Options, which no longer owns this setting). */
-                    g_td5.ini.laps = s_game_option_laps;
+                     * Game Options, which no longer owns this setting).
+                     * [dynamic-traffic] Persist the traffic volume picked on
+                     * this screen too. */
+                    g_td5.ini.laps    = s_game_option_laps;
+                    g_td5.ini.traffic = s_game_option_traffic & 3;
                     td5_ini_persist_options();
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 6;

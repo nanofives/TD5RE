@@ -90,6 +90,22 @@ int  td5_ai_find_nearest_route_peer(int *route_state);
  * must outlive the race; pass NULL to clear. */
 void td5_ai_set_traffic_queue(const uint8_t *data, int size);
 
+/* --- Dynamic (GTA-style) traffic spawner [PORT ENHANCEMENT 2026-06-11] ---
+ * Gated by [Traffic] Dynamic + the track-select Traffic volume row.
+ * Distance-driven spawn/despawn with render fade; see td5_ai.c module
+ * comment. Dynamic=0 keeps the faithful queue init/recycle untouched. */
+int  td5_ai_traffic_dynamic_active(void);
+/* 1 when `slot` is a traffic slot currently parked (despawned). Consumers
+ * (traffic physics, V2V broadphase) skip parked slots entirely. */
+int  td5_ai_traffic_dynamic_parked(int slot);
+/* Render/audio fade for `slot`: 0 = hidden/parked, 255 = fully visible.
+ * Always 255 for racer slots or when dynamic traffic is off. */
+int  td5_ai_traffic_get_draw_alpha(int slot);
+/* Once-per-sim-tick driver (called from td5_ai_pre_tick). */
+void td5_ai_traffic_dynamic_tick(void);
+/* Race-start seeding (called from td5_ai_init_traffic_actors). */
+void td5_ai_traffic_dynamic_race_init(void);
+
 /* --- Wanted mode (cop chase game type 8) --- */
 /* Award damage to a cop slot on player<->cop V2V collision.
  * Mirrors AwardWantedDamageScore @ 0x43D690. Decrements gWantedDamageStateTable

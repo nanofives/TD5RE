@@ -26,6 +26,7 @@
 #include "td5_game.h"  /* td5_game_get_player_slot, is_replay_active, etc. */
 #include "td5re.h"
 #include "td5_vfx.h"
+#include "td5_ai.h"    /* td5_ai_traffic_get_draw_alpha (dynamic-traffic fade) */
 
 /* Full actor struct needed for field-level access (engine speed, slip, position) */
 #include "../../../re/include/td5_actor_struct.h"
@@ -1343,6 +1344,13 @@ void td5_sound_update_audio_mix(void)
                 float dist = sqrtf(dx * dx + dz * dz);
 
                 int t_vol_atten = sound_attenuate_volume(t_vol, dist);
+                /* [dynamic-traffic] engine loop fades with the car and is
+                 * silent while the slot is parked (255 = identity). */
+                {
+                    int t_fade = td5_ai_traffic_get_draw_alpha(t);
+                    if (t_fade < 255)
+                        t_vol_atten = (t_vol_atten * t_fade) / 255;
+                }
                 int t_final_pitch = t_pitch;
                 if (t_vol_atten > 0) {
                     float doppler = sound_compute_doppler_ratio(
