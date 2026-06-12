@@ -49,6 +49,8 @@ void td5_frontend_tick(void);
 
 /* --- Screen navigation --- */
 void td5_frontend_set_screen(TD5_ScreenIndex index);
+void td5_frontend_return_to_lobby(void);
+void td5_frontend_leave_net_session(void);
 TD5_ScreenIndex td5_frontend_get_screen(void);
 
 /* --- Display loop (called from game tick in MENU state) --- */

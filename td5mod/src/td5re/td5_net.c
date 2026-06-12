@@ -77,6 +77,7 @@
 #define WS2_DISC_PING        6   /* host -> client RTT probe (token = send time) */
 #define WS2_DISC_PONG        7   /* client -> host echo                          */
 #define WS2_DISC_ROSTER_INFO 8   /* host -> all: per-slot names + latency        */
+#define WS2_DISC_CAR_INFO    9   /* client -> host: my car/paint pick (S31)      */
 
 /** JOIN_NAK reason codes (also surfaced via td5_net_get_join_nak_reason). */
 #define WS2_NAK_FULL         1
@@ -255,6 +256,15 @@ typedef struct DiscoveryMsg {
 } DiscoveryMsg;
 
 /* PING/PONG RTT probe (small; magic-tagged on the game socket). */
+typedef struct CarInfoMsg {          /* S31: client announces its car pick */
+    uint32_t    magic;
+    uint32_t    disc_type;           /* WS2_DISC_CAR_INFO */
+    uint32_t    slot;
+    int32_t     car;
+    int32_t     paint;
+    int32_t     td6_color;          /* [S31] chosen TD6 body RGB (-1 = none) */
+} CarInfoMsg;
+
 typedef struct PingMsg {
     uint32_t    magic;
     uint32_t    disc_type;
@@ -275,6 +285,17 @@ typedef struct RosterInfoMsg {
 
 /* --- Winsock2 UDP backend state --- */
 static SOCKET       s_ws2_socket = INVALID_SOCKET;
+
+/* --- S31: race-config replication state ---------------------------------
+ * s_race_config is armed on the host when it broadcasts DXPSTART (the same
+ * bytes the clients get) and on clients when DXPSTART arrives. Consumers
+ * (race schedule, InitRace seeding) gate on g_td5.network_active, so a
+ * stale config from an earlier session cannot leak into local races. */
+static TD5_NetRaceConfig s_race_config;
+static int     s_race_config_valid = 0;
+static int32_t s_slot_car[TD5_NET_MAX_PLAYERS]   = { -1, -1, -1, -1, -1, -1 };
+static int32_t s_slot_paint[TD5_NET_MAX_PLAYERS] = { 0 };
+static int32_t s_slot_td6_color[TD5_NET_MAX_PLAYERS] = { -1, -1, -1, -1, -1, -1 };
 static WSAEVENT     s_ws2_event = WSA_INVALID_EVENT;
 static int          s_ws2_started;
 static int          s_ws2_socket_bound;
@@ -283,6 +304,12 @@ static SOCKADDR_IN  s_ws2_host_addr;
 static SOCKADDR_IN  s_ws2_peer_addrs[TD5_NET_MAX_PLAYERS];
 static int          s_ws2_peer_valid[TD5_NET_MAX_PLAYERS];
 static SOCKET       s_ws2_disc_socket = INVALID_SOCKET;
+/* [S31] Dedicated BROWSE socket (ephemeral port). Queries are sent and the
+ * ANNOUNCE replies received here, NOT on the shared 37051 discovery socket:
+ * with two instances on one machine both bound to 37051 (SO_REUSEADDR), the
+ * host's unicast reply to a 37051 source was delivered to the FIRST binder
+ * (the host itself) and the browser never saw any session. */
+static SOCKET       s_ws2_browse_socket = INVALID_SOCKET;
 static SOCKADDR_IN  s_ws2_enum_host_addrs[MAX_ENUM_SESSIONS];
 
 /* ========================================================================
@@ -660,32 +687,32 @@ static void handle_data_targeted(uint32_t sender, const void *data, int size)
 static void handle_start(uint32_t sender, const void *data, int size)
 {
     (void)sender;
-    (void)data;
-    (void)size;
 
     TD5_LOG_I(NET_LOG, "Received DXPSTART");
+
+    /* S31: the payload (after the type dword) carries the host's race config
+     * -- adopt it so this machine launches the same track/cars/seed. */
+    if (data && size >= 4 + (int)sizeof(TD5_NetRaceConfig)) {
+        memcpy(&s_race_config, (const uint8_t *)data + 4, sizeof(TD5_NetRaceConfig));
+        s_race_config_valid = 1;
+        TD5_LOG_I(NET_LOG, "DXPSTART config: seed=0x%08X track=%d dir=%d",
+                  s_race_config.rng_seed, s_race_config.track_index,
+                  s_race_config.reverse_direction);
+    } else {
+        TD5_LOG_W(NET_LOG, "DXPSTART without race config (size=%d)", size);
+    }
 
     /* Queue for game thread */
     ring_push(TD5_DXPSTART, NULL, 0);
 
-    /* Auto-reply with ACK_REPLY if we are a client */
-    if (!s_is_host) {
-        uint32_t reply_type = TD5_DXPACK_REPLY;
-        send_to_player(s_roster[s_local_slot].id, reply_type, &reply_type, 4);
-        /* Actually send to host, not to self */
-        if (s_transport_send) {
-            uint32_t buf[1] = { TD5_DXPACK_REPLY };
-            /* Find host ID */
-            int i;
-            for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
-                if (s_roster[i].active && i != s_local_slot) {
-                    /* In the original, send to g_hostDirectPlayPlayerId.
-                       We find the host slot (slot with lowest ID or marked host). */
-                    break;
-                }
-            }
-            s_transport_send(0, buf, 4); /* send to host (id 0 = host convention) */
-        }
+    /* Reply with a SINGLE ACK_REPLY to the host. (A previous version also
+     * called send_to_player(own id, ...), which the client-side address
+     * fallback ALSO routed to the host -- with >=2 clients the resulting
+     * double-ACK could zero the host's pending-ack counter before every
+     * client had actually acked.) */
+    if (!s_is_host && s_transport_send) {
+        uint32_t one[1] = { TD5_DXPACK_REPLY };
+        s_transport_send(0, one, 4); /* id 0 routes to the host on clients */
     }
 }
 
@@ -809,9 +836,40 @@ static void handle_roster(uint32_t sender, const void *data, int size)
  */
 static void handle_disconnect(uint32_t sender, const void *data, int size)
 {
-    (void)sender;
     (void)data;
     (void)size;
+
+    /* [S31] HOST receiving a CLIENT's disconnect (kick honoured, lobby exit,
+     * app close): free that roster slot and tell everyone. Without this the
+     * row lingered forever and a rejoin grabbed a NEW slot ("kicked player
+     * still listed; 3 players after rejoining"). Only a CLIENT losing its
+     * link to the host flags connection_lost. */
+    if (s_is_host) {
+        int slot = find_slot_by_id(sender);
+        TD5_LOG_W(NET_LOG, "Received DXPDISCONNECT from id=%u (slot %d)",
+                  sender, slot);
+        if (slot > 0 && slot < TD5_NET_MAX_PLAYERS) {
+            int i, n = 0;
+            s_roster[slot].active  = 0;
+            s_roster[slot].id      = 0;
+            s_roster[slot].name[0] = '\0';
+            s_ws2_peer_valid[slot] = 0;
+            s_slot_car[slot]   = -1;
+            s_slot_paint[slot] = 0;
+            for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+                if (s_roster[i].active) n++;
+            s_player_count = n;
+            s_slot_td6_color[slot] = -1;
+            ws2_broadcast_roster_info();
+            /* Mid-race: the lockstep barrier may be blocked waiting on this
+             * client's input. Wake it -- the freed slot is no longer counted,
+             * so the host merges the remaining players and races on (the
+             * window froze for the full 20 s timeout otherwise). */
+            SetEvent(s_evt_frame_ack);
+        }
+        ring_push(TD5_DXPDISCONNECT, NULL, 0);
+        return;
+    }
 
     TD5_LOG_W(NET_LOG, "Received DXPDISCONNECT");
 
@@ -1196,10 +1254,39 @@ static int ws2_transport_join_direct(const char *host_ip, int game_port)
 }
 
 /* Broadcast the discovery QUERY (LAN broadcast + loopback for same-machine). */
+static int ws2_browse_init(void)
+{
+    SOCKADDR_IN bind_addr;
+    BOOL opt_broadcast = TRUE;
+    u_long nonblocking = 1;
+
+    if (s_ws2_browse_socket != INVALID_SOCKET)
+        return 1;
+    s_ws2_browse_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s_ws2_browse_socket == INVALID_SOCKET)
+        return 0;
+    setsockopt(s_ws2_browse_socket, SOL_SOCKET, SO_BROADCAST,
+               (const char *)&opt_broadcast, sizeof(opt_broadcast));
+    ioctlsocket(s_ws2_browse_socket, FIONBIO, &nonblocking);
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port = 0;   /* ephemeral: replies come back uniquely to us */
+    if (bind(s_ws2_browse_socket, (const struct sockaddr *)&bind_addr,
+             (int)sizeof(bind_addr)) == SOCKET_ERROR) {
+        closesocket(s_ws2_browse_socket);
+        s_ws2_browse_socket = INVALID_SOCKET;
+        return 0;
+    }
+    return 1;
+}
+
 static void ws2_send_disc_query(void)
 {
     SOCKADDR_IN bcast_addr, lo_addr;
     DiscoveryMsg query;
+    if (!ws2_browse_init())
+        return;
     memset(&query, 0, sizeof(query));
     query.magic = WS2_DISCOVERY_MAGIC;
     query.disc_type = WS2_DISC_QUERY;
@@ -1208,14 +1295,14 @@ static void ws2_send_disc_query(void)
     bcast_addr.sin_family = AF_INET;
     bcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
     bcast_addr.sin_port = htons(WS2_DISCOVERY_PORT);
-    sendto(s_ws2_disc_socket, (const char *)&query, sizeof(query), 0,
+    sendto(s_ws2_browse_socket, (const char *)&query, sizeof(query), 0,
            (const struct sockaddr *)&bcast_addr, (int)sizeof(bcast_addr));
 
     memset(&lo_addr, 0, sizeof(lo_addr));
     lo_addr.sin_family = AF_INET;
     lo_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     lo_addr.sin_port = htons(WS2_DISCOVERY_PORT);
-    sendto(s_ws2_disc_socket, (const char *)&query, sizeof(query), 0,
+    sendto(s_ws2_browse_socket, (const char *)&query, sizeof(query), 0,
            (const struct sockaddr *)&lo_addr, (int)sizeof(lo_addr));
 }
 
@@ -1233,16 +1320,15 @@ static void ws2_send_disc_query(void)
 static DWORD s_ws2_enum_win_start = 0;   /* GetTickCount of the active window, 0 = none */
 static DWORD s_ws2_enum_last_bcast = 0;
 static DWORD s_ws2_enum_last_call  = 0;
+static DWORD s_ws2_enum_seen[MAX_ENUM_SESSIONS];  /* [S31] last ANNOUNCE per entry */
 
 static int ws2_transport_enum(void)
 {
     DWORD now;
     int i;
 
-    if (s_ws2_disc_socket == INVALID_SOCKET) {
-        if (!ws2_discovery_init())
-            return 0;
-    }
+    if (!ws2_browse_init())
+        return 0;
     now = GetTickCount();
 
     if (s_ws2_enum_win_start == 0 || (now - s_ws2_enum_last_call) > 1500) {
@@ -1255,6 +1341,12 @@ static int ws2_transport_enum(void)
         s_ws2_enum_last_bcast = now;
     } else if ((now - s_ws2_enum_last_bcast) >= 250 &&
                (now - s_ws2_enum_win_start) < 2000) {
+        ws2_send_disc_query();
+        s_ws2_enum_last_bcast = now;
+    } else if ((now - s_ws2_enum_last_bcast) >= 3000) {
+        /* [S31] Steady-state auto-refresh: the browser stays open, so keep
+         * asking every ~3 s -- a host that starts AFTER the window closed
+         * still shows up without leaving and re-entering the screen. */
         ws2_send_disc_query();
         s_ws2_enum_last_bcast = now;
     }
@@ -1270,26 +1362,37 @@ static int ws2_transport_enum(void)
         struct timeval tv;
 
         FD_ZERO(&readfds);
-        FD_SET(s_ws2_disc_socket, &readfds);
+        FD_SET(s_ws2_browse_socket, &readfds);
         tv.tv_sec = 0;
         tv.tv_usec = 0;
         if (select(0, &readfds, NULL, NULL, &tv) <= 0)
             break;
 
-        ret = recvfrom(s_ws2_disc_socket, (char *)&resp, sizeof(resp), 0,
+        ret = recvfrom(s_ws2_browse_socket, (char *)&resp, sizeof(resp), 0,
                        (struct sockaddr *)&from_addr, &from_len);
         if (ret < (int)sizeof(DiscoveryMsg)) continue;
         if (resp.magic != WS2_DISCOVERY_MAGIC) continue;
         if (resp.disc_type != WS2_DISC_ANNOUNCE) continue;
         if (resp.sealed) continue;
 
-        /* Dedup by host address+game port (a host answers each rebroadcast). */
+        /* Dedup by host address+game port (a host answers each rebroadcast).
+         * A SAME-MACHINE host answers the browse query twice -- once via the
+         * broadcast (reply sourced from the LAN adapter IP) and once via the
+         * explicit loopback send (reply from 127.0.0.1) -- so an announce
+         * whose source or stored twin is loopback with the same name+port is
+         * the same session, not a second one. */
         dup = 0; slot = s_enum_session_count;
         for (i = 0; i < s_enum_session_count; i++) {
-            if (s_ws2_enum_host_addrs[i].sin_addr.s_addr == from_addr.sin_addr.s_addr &&
-                s_ws2_enum_host_addrs[i].sin_port == htons(resp.game_port)) {
-                slot = i; dup = 1; break;
-            }
+            int same_addr =
+                (s_ws2_enum_host_addrs[i].sin_addr.s_addr == from_addr.sin_addr.s_addr &&
+                 s_ws2_enum_host_addrs[i].sin_port == htons(resp.game_port));
+            int loop_pair =
+                ((s_ws2_enum_host_addrs[i].sin_addr.s_addr == htonl(INADDR_LOOPBACK) ||
+                  from_addr.sin_addr.s_addr == htonl(INADDR_LOOPBACK)) &&
+                 s_ws2_enum_host_addrs[i].sin_port == htons(resp.game_port) &&
+                 strncmp(s_enum_sessions[i].name, resp.session_name,
+                         sizeof(s_enum_sessions[i].name) - 1) == 0);
+            if (same_addr || loop_pair) { slot = i; dup = 1; break; }
         }
         if (!dup && slot >= MAX_ENUM_SESSIONS) continue;   /* list full */
 
@@ -1301,11 +1404,32 @@ static int ws2_transport_enum(void)
         s_enum_sessions[slot].game_type    = resp.game_type;
         s_ws2_enum_host_addrs[slot] = from_addr;
         s_ws2_enum_host_addrs[slot].sin_port = htons(resp.game_port);
+        s_ws2_enum_seen[slot] = now;
 
         if (!dup) {
             TD5_LOG_I(NET_LOG, "Enum: found session \"%s\" (%u/%u)",
                       resp.session_name, resp.player_count, resp.max_players);
             s_enum_session_count++;
+        }
+    }
+
+    /* [S31] Expire entries whose host stopped answering (~3 missed refresh
+     * cycles) so a closed session drops off the auto-refreshing list. Only
+     * meaningful in the steady state -- during the initial window every
+     * entry is younger than the threshold anyway. */
+    for (i = 0; i < s_enum_session_count; ) {
+        if ((now - s_ws2_enum_seen[i]) > 10000) {
+            int k;
+            TD5_LOG_I(NET_LOG, "Enum: session \"%s\" expired (host silent)",
+                      s_enum_sessions[i].name);
+            for (k = i; k < s_enum_session_count - 1; k++) {
+                s_enum_sessions[k]       = s_enum_sessions[k + 1];
+                s_ws2_enum_host_addrs[k] = s_ws2_enum_host_addrs[k + 1];
+                s_ws2_enum_seen[k]       = s_ws2_enum_seen[k + 1];
+            }
+            s_enum_session_count--;
+        } else {
+            i++;
         }
     }
     return s_enum_session_count;
@@ -1548,6 +1672,10 @@ static void ws2_discovery_shutdown(void)
         closesocket(s_ws2_disc_socket);
         s_ws2_disc_socket = INVALID_SOCKET;
     }
+    if (s_ws2_browse_socket != INVALID_SOCKET) {
+        closesocket(s_ws2_browse_socket);
+        s_ws2_browse_socket = INVALID_SOCKET;
+    }
 }
 
 /** Host: tell a joiner we rejected them (session full / wrong password). */
@@ -1760,6 +1888,20 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
             pong.disc_type = WS2_DISC_PONG;
             sendto(s_ws2_socket, (const char *)&pong, sizeof(pong), 0,
                    (const struct sockaddr *)from_addr, (int)sizeof(*from_addr));
+        }
+        break;
+
+    case WS2_DISC_CAR_INFO:
+        /* S31: a client announced its car/paint pick. Host-only. */
+        if (s_is_host && size >= (int)sizeof(CarInfoMsg)) {
+            const CarInfoMsg *cm = (const CarInfoMsg *)buf;
+            if (cm->slot < TD5_NET_MAX_PLAYERS) {
+                s_slot_car[cm->slot]       = cm->car;
+                s_slot_paint[cm->slot]     = cm->paint;
+                s_slot_td6_color[cm->slot] = cm->td6_color;
+                TD5_LOG_I(NET_LOG, "CAR_INFO: slot %u car=%d paint=%d color=%06X",
+                          cm->slot, cm->car, cm->paint, (unsigned)cm->td6_color);
+            }
         }
         break;
 
@@ -2142,6 +2284,12 @@ void td5_net_shutdown(void)
 
     TD5_LOG_I(NET_LOG, "Shutting down network subsystem");
 
+    /* S31: tell the peers we're leaving BEFORE tearing the transport down,
+     * so a host quit doesn't leave clients sitting in a dead lobby (the
+     * DXPDISCONNECT handler sets s_connection_lost on the receivers). */
+    if ((s_is_host || s_is_client) && s_transport_send)
+        td5_net_send(TD5_DXPDISCONNECT, NULL, 0);
+
     /* Stop worker thread and close events */
     stop_worker();
 
@@ -2346,10 +2494,16 @@ static void net_build_status_text(void)
                      "Hosting LAN game on %s:%d", ip, s_game_port);
         }
     } else if (s_is_client) {
-        snprintf(s_status_text, sizeof(s_status_text),
-                 "Connecting to %s:%u ...",
-                 inet_ntoa(s_ws2_host_addr.sin_addr),
-                 (unsigned)ntohs(s_ws2_host_addr.sin_port));
+        if (s_local_slot >= 0)   /* JOIN_ACK received -> we are in */
+            snprintf(s_status_text, sizeof(s_status_text),
+                     "Connected to %s:%u",
+                     inet_ntoa(s_ws2_host_addr.sin_addr),
+                     (unsigned)ntohs(s_ws2_host_addr.sin_port));
+        else
+            snprintf(s_status_text, sizeof(s_status_text),
+                     "Connecting to %s:%u ...",
+                     inet_ntoa(s_ws2_host_addr.sin_addr),
+                     (unsigned)ntohs(s_ws2_host_addr.sin_port));
     } else {
         s_status_text[0] = '\0';
     }
@@ -2559,6 +2713,7 @@ int td5_net_get_upnp_status(void)
 
 const char *td5_net_get_status_text(void)
 {
+    net_build_status_text();   /* [S31] live: "Connecting" flips to "Connected" */
     return s_status_text;
 }
 
@@ -2695,6 +2850,9 @@ int td5_net_handle_host_frame(uint32_t *control_bits, float *frame_dt)
             return 0;
     }
 
+    if (s_connection_lost)
+        return 0;
+
     /* 2. Store local input and mark as received */
     s_player_sync_table[s_local_slot] = control_bits[s_local_slot];
     s_player_sync_received[s_local_slot] = 1;
@@ -2723,11 +2881,23 @@ int td5_net_handle_host_frame(uint32_t *control_bits, float *frame_dt)
         if (all_received) goto done_waiting;
     }
 
-    wait_result = WaitForSingleObject(s_evt_frame_ack, SYNC_TIMEOUT_MS);
+    /* Wait in short slices so a peer quit (DXPDISCONNECT -> s_connection_lost)
+     * aborts the barrier in <=250 ms instead of blocking the game thread for
+     * the full 20 s timeout (the window reads as frozen). */
+    {
+        DWORD waited = 0;
+        for (;;) {
+            wait_result = WaitForSingleObject(s_evt_frame_ack, 250);
+            if (wait_result == WAIT_OBJECT_0 || s_connection_lost) break;
+            waited += 250;
+            if (waited >= SYNC_TIMEOUT_MS) break;
+        }
+    }
     if (wait_result != WAIT_OBJECT_0) {
         s_waiting_for_frame_ack = 0;
-        TD5_LOG_W(NET_LOG, "Host HandlePadHost: timed out waiting for client inputs");
-        return 0; /* Caller sets ESC bit, disconnects */
+        TD5_LOG_W(NET_LOG, "Host HandlePadHost: %s waiting for client inputs",
+                  s_connection_lost ? "connection lost" : "timed out");
+        return 0; /* Caller quits the race */
     }
 
 done_waiting:
@@ -2755,15 +2925,20 @@ merge_and_broadcast:
     s_outbound_frame.frame_delta_time = *frame_dt;
     s_outbound_frame.sync_sequence = s_sync_sequence;
 
+    /* Reset per-frame receive flags BEFORE broadcasting [S31 deadlock fix]:
+     * a client sends its NEXT frame the instant the broadcast lands, and on
+     * a low-latency link that next frame can beat a post-broadcast wipe --
+     * its received flag would be erased and both sides stall to the 20 s
+     * timeout. Clearing first is race-free: no client can send frame N+1
+     * until it has seen broadcast N. */
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        s_player_sync_received[i] = 0;
+
     /* Broadcast to all players (DPID=0 = broadcast) */
     send_frame_to_all(&s_outbound_frame);
 
     /* Increment sequence counter */
     s_sync_sequence++;
-
-    /* Reset per-frame receive flags */
-    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
-        s_player_sync_received[i] = 0;
 
     /* 5. Copy merged controlBits back to caller */
     for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
@@ -2798,7 +2973,7 @@ int td5_net_handle_client_frame(uint32_t *control_bits, float *frame_dt)
     uint32_t host_id = 0;
     int i;
 
-    if (!s_active)
+    if (!s_active || s_connection_lost)
         return 0;
 
     /* 1. Check for pending resync */
@@ -2827,19 +3002,34 @@ int td5_net_handle_client_frame(uint32_t *control_bits, float *frame_dt)
         }
     }
 
-    if (s_transport_send)
-        s_transport_send(host_id, &send_frame, FRAME_MSG_SIZE);
-
-    /* 4. Wait for host's broadcast */
+    /* 4. Arm the wait BEFORE sending [S31 deadlock fix]: on a low-latency
+     * link the host's broadcast can land before a post-send ResetEvent, and
+     * resetting then throws the auto-reset signal away -> both sides stall
+     * to the 20 s timeout. The broadcast for THIS frame cannot precede our
+     * own send (the host needs our input to merge), so arming first is
+     * race-free. */
     s_waiting_for_frame_ack = 1;
     ResetEvent(s_evt_frame_ack);
 
-    wait_result = WaitForSingleObject(s_evt_frame_ack, SYNC_TIMEOUT_MS);
+    if (s_transport_send)
+        s_transport_send(host_id, &send_frame, FRAME_MSG_SIZE);
+
+    /* Sliced wait: see the host-side comment -- bail fast on a dead link. */
+    {
+        DWORD waited = 0;
+        for (;;) {
+            wait_result = WaitForSingleObject(s_evt_frame_ack, 250);
+            if (wait_result == WAIT_OBJECT_0 || s_connection_lost) break;
+            waited += 250;
+            if (waited >= SYNC_TIMEOUT_MS) break;
+        }
+    }
     s_waiting_for_frame_ack = 0;
 
     if (wait_result != WAIT_OBJECT_0) {
-        TD5_LOG_W(NET_LOG, "Client HandlePadClient: timed out waiting for host broadcast");
-        return 0; /* Caller sets ESC bit, disconnects */
+        TD5_LOG_W(NET_LOG, "Client HandlePadClient: %s waiting for host broadcast",
+                  s_connection_lost ? "connection lost" : "timed out");
+        return 0; /* Caller quits the race */
     }
 
     /* Check if resync was triggered during the wait */
@@ -2946,6 +3136,60 @@ int td5_net_enumerate_sessions(void)
  *   - Type 9 (DISCONNECT): targeted to specific player
  *   - Type 10 (RESYNCREQ): targeted to each active client (sets up ack counters)
  */
+/* ========================================================================
+ * S31 -- race-config replication API
+ * ======================================================================== */
+
+/** Record this machine's car/paint pick; clients also announce it to the
+ *  host over the control channel. Called on every lobby entry (including
+ *  the return from CHANGE CAR). */
+void td5_net_set_local_car(int car_index, int paint_index, int td6_color)
+{
+    if (s_local_slot >= 0 && s_local_slot < TD5_NET_MAX_PLAYERS) {
+        s_slot_car[s_local_slot]       = car_index;
+        s_slot_paint[s_local_slot]     = paint_index;
+        s_slot_td6_color[s_local_slot] = td6_color;
+    }
+    if (!s_is_host && s_ws2_socket != INVALID_SOCKET && s_local_slot >= 0) {
+        CarInfoMsg msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.magic     = WS2_DISCOVERY_MAGIC;
+        msg.disc_type = WS2_DISC_CAR_INFO;
+        msg.slot      = (uint32_t)s_local_slot;
+        msg.car       = car_index;
+        msg.paint     = paint_index;
+        msg.td6_color = td6_color;
+        sendto(s_ws2_socket, (const char *)&msg, (int)sizeof(msg), 0,
+               (const struct sockaddr *)&s_ws2_host_addr,
+               (int)sizeof(s_ws2_host_addr));
+    }
+}
+
+/** The latest announced TD6 body colour for a slot (-1 = none chosen). */
+int td5_net_get_slot_td6_color(int slot)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS)
+        return -1;
+    return s_slot_td6_color[slot];
+}
+
+/** Host: the latest announced car/paint for a slot (-1 car = none yet). */
+int td5_net_get_slot_car(int slot, int *car_index, int *paint_index)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS) return 0;
+    if (car_index)   *car_index   = s_slot_car[slot];
+    if (paint_index) *paint_index = s_slot_paint[slot];
+    return 1;
+}
+
+/** The armed race config (host: as broadcast; client: as received). */
+int td5_net_get_race_config(TD5_NetRaceConfig *out)
+{
+    if (!s_race_config_valid) return 0;
+    if (out) *out = s_race_config;
+    return 1;
+}
+
 int td5_net_send(TD5_NetMsgType type, const void *data, int size)
 {
     uint8_t buf[RING_ENTRY_SIZE];
@@ -2973,9 +3217,28 @@ int td5_net_send(TD5_NetMsgType type, const void *data, int size)
         return 0;
 
     case TD5_DXPDATA:
+    case TD5_DXPDATA_TARGETED: {
+        /* Wire layout [4B type][4B payload_size][N payload] -- handle_data /
+         * handle_data_targeted read the size dword at +4 and the payload at
+         * +8. td5_net_send used to omit the size field, so receivers parsed
+         * the first 4 payload bytes as the length and surfaced the REMAINDER
+         * as the message: the lobby kick (payload[0]=0x12) arrived as zeros
+         * and was silently dropped. */
+        uint8_t wire[RING_ENTRY_SIZE];
+        uint32_t psz = (uint32_t)size;
+        if (size + 8 > (int)sizeof(wire)) {
+            TD5_LOG_E(NET_LOG, "Send message too large: type=%d size=%d", type, size);
+            return 0;
+        }
+        memcpy(wire, &type, 4);
+        memcpy(wire + 4, &psz, 4);
+        if (data && size > 0)
+            memcpy(wire + 8, data, (size_t)size);
+        s_transport_send(0, wire, size + 8);
+        break;
+    }
     case TD5_DXPCHAT:
-    case TD5_DXPDATA_TARGETED:
-        /* Broadcast to all */
+        /* Broadcast to all ([4B type][string] -- handle_chat reads at +4) */
         s_transport_send(0, buf, total_size);
         break;
 
@@ -2984,12 +3247,17 @@ int td5_net_send(TD5_NetMsgType type, const void *data, int size)
         if (!s_is_host) return 0;
         s_pending_ack_count = 0;
         s_expected_ack_count = 0;
+        /* S31: archive the race config we are about to broadcast so the
+         * host's own launch path reads the exact bytes the clients get. */
+        if (data && size >= (int)sizeof(TD5_NetRaceConfig)) {
+            memcpy(&s_race_config, data, sizeof(TD5_NetRaceConfig));
+            s_race_config_valid = 1;
+        }
         for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
             if (i == s_local_slot) continue;
             if (s_roster[i].active) {
-                /* Check if this slot is participating (from data bitmask) */
-                uint32_t start_msg[1] = { TD5_DXPSTART };
-                s_transport_send(s_roster[i].id, start_msg, 4);
+                /* S31: the full payload (race config) rides with the START */
+                s_transport_send(s_roster[i].id, buf, total_size);
                 s_pending_ack_count++;
                 s_expected_ack_count++;
             }
@@ -3117,6 +3385,23 @@ int td5_net_is_active(void)
 {
     return s_active;
 }
+
+/* [S31] Race over: drop the lockstep-active latch + per-frame sync state.
+ * Without this, td5_net_is_active() stayed TRUE after a race, and the lobby's
+ * client auto-launch ("DXPSTART rendezvous active") fired the instant anyone
+ * re-entered or joined the lobby -- the race re-started immediately. */
+void td5_net_race_done(void)
+{
+    int i;
+    if (!s_active)
+        return;
+    s_active = 0;
+    s_sync_sequence = 0;
+    s_waiting_for_frame_ack = 0;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        s_player_sync_received[i] = 0;
+    TD5_LOG_I(NET_LOG, "Race done: lockstep sync deactivated");
+}
 int td5_net_local_slot(void)
 {
     return s_local_slot;
@@ -3144,4 +3429,13 @@ const char *td5_net_get_enum_session_name(int index)
     if (index < 0 || index >= s_enum_session_count)
         return "";
     return s_enum_sessions[index].name;
+}
+
+int td5_net_get_enum_session_info(int index, int *player_count, int *max_players)
+{
+    if (index < 0 || index >= s_enum_session_count)
+        return 0;
+    if (player_count) *player_count = s_enum_sessions[index].player_count;
+    if (max_players)  *max_players  = s_enum_sessions[index].max_players;
+    return 1;
 }

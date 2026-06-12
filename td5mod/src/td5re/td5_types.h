@@ -282,6 +282,11 @@ typedef enum TD5_InputBits {
     TD5_INPUT_GEAR_DOWN     = 0x00800000,  /* bit 23 — original default: Z */
     TD5_INPUT_CAMERA_CHANGE = 0x01000000,  /* bit 24 — original default: T */
     TD5_INPUT_REAR_VIEW     = 0x02000000,  /* bit 25 — original default: X */
+    TD5_INPUT_NET_PAUSE     = 0x04000000,  /* bit 26 — [S31] net pause latch: held
+                                            * while the local pause menu is open in
+                                            * a net race; the MERGED bit freezes the
+                                            * sim on every machine the same lockstep
+                                            * round (no physics consumer reads it) */
     TD5_INPUT_ANALOG_Y_FLAG = 0x08000000,
     TD5_INPUT_PAUSE         = 0x20000000,  /* bit 29 — hardcoded: P */
     TD5_INPUT_ESCAPE        = 0x40000000,  /* bit 30 — hardcoded: Escape */

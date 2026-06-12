@@ -39,7 +39,10 @@ static uint32_t s_mp_join_prev    = 0;     /* lobby join-scan mask last frame (e
 /* --- S10 net-play: explicit connection modes (LAN / Direct-IP) --- */
 static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direct join) */
 
-static int  s_lobby_modal_armed;        /* 1 once the opening Enter is released */
+int  s_cs_edit;                         /* S31 host-setup: 1=name, 2=password editing */
+static int  s_cs_direct;                /* S31 host-setup: 1 = Direct-IP host, 0 = LAN */
+static int  s_cs_esc_guard;             /* swallow the ESC that cancelled an edit */
+static int  s_kick_button_slot[5];      /* lobby kick button k -> net slot */
 
 static int  s_net_join_pending_ui;      /* awaiting JOIN_ACK before entering lobby */
 
@@ -57,13 +60,19 @@ static int  s_participant_flags[6];     /* DAT_0049725c[6] */
 
 static int  s_race_active_flag;         /* DAT_00497324 */
 
-static int  s_chat_dirty;              /* DAT_0049640c */
 
 static uint32_t s_last_poll_timestamp;  /* DAT_004968a8 */
 
-static char s_chat_input_buffer[64];    /* DAT_004972cc */
+/* [S31] Per-slot READY latch (clients toggle via the lobby READY button,
+ * broadcast as DXPDATA opcode 0x18 {op, slot, state}); reset on every lobby
+ * entry. The roster overlay draws the green READY tag from this. */
+uint8_t     s_slot_ready[6];
+static int  s_my_ready;
+static int  s_car_announce_done;  /* [S31] set once CAR_INFO went out with a
+                                   * valid slot (JOIN_ACK can land after the
+                                   * first lobby entry's announce attempt) */
 
-static char s_create_session_name[64];
+char s_create_session_name[64];
 
 static void frontend_set_text_input_prompt(const char *p) {
     if (p && p[0]) {
@@ -462,8 +471,10 @@ void Screen_LanMenu(void) {
             break;
         }
         if (s_input_ready) {
-            if (s_button_index == 0)              /* HOST -> name entry + create */
+            if (s_button_index == 0) {            /* HOST -> setup screen */
+                s_cs_direct = 0;
                 td5_frontend_set_screen(TD5_SCREEN_CREATE_SESSION);
+            }
             else if (s_button_index == 1)         /* DISCOVER -> session list */
                 td5_frontend_set_screen(TD5_SCREEN_SESSION_PICKER);
             else if (s_button_index == 2)         /* BACK */
@@ -511,15 +522,9 @@ void Screen_DirectConnect(void) {
     case 1: /* chooser interaction */
         frontend_present_buffer();
         if (s_input_ready) {
-            if (s_button_index == 0) {            /* HOST */
-                if (td5_net_create_session_ex("TD5RE Game", frontend_net_player_name(),
-                                              6, s_net_cfg_game_port, s_net_cfg_enable_upnp)) {
-                    s_network_active = 1;
-                    s_inner_state = 4;            /* show host status */
-                } else {
-                    TD5_LOG_W(LOG_TAG, "Direct host create failed");
-                    td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
-                }
+            if (s_button_index == 0) {            /* HOST -> setup screen [S31] */
+                s_cs_direct = 1;
+                td5_frontend_set_screen(TD5_SCREEN_CREATE_SESSION);
             } else if (s_button_index == 1) {     /* JOIN */
                 snprintf(s_net_direct_ip, sizeof(s_net_direct_ip), "127.0.0.1");
                 s_inner_state = 2;
@@ -627,50 +632,70 @@ void Screen_DirectConnect(void) {
     }
 }
 
-/* S10: set the SESSION_PICKER selector (button 0) label from s_net_session_sel
- * (discover-only: 0..count-1 are the discovered LAN sessions; hosting is the
- * separate LAN-menu "HOST" option). */
-static void frontend_net_label_session_selector(void) {
+/* [S31] SESSION_PICKER list: one row button per discovered LAN session
+ * (indices 0..5) + BACK (6). Rows refresh every frame as discovery replies
+ * arrive; ENTER on a row joins that session directly. */
+static int s_picker_prev_count = -1;
+static void frontend_net_update_session_list(void) {
     int count = td5_net_get_enum_session_count();
-    char buf[64];
-    if (count <= 0) {
-        s_net_session_sel = 0;
-        snprintf(buf, sizeof(buf), "(NO LAN GAMES FOUND)");
-    } else {
-        if (s_net_session_sel < 0) s_net_session_sel = count - 1;   /* wrap */
-        if (s_net_session_sel >= count) s_net_session_sel = 0;
-        snprintf(buf, sizeof(buf), "%s  (%d/%d)",
-                 td5_net_get_enum_session_name(s_net_session_sel),
-                 s_net_session_sel + 1, count);
+    int i;
+    for (i = 0; i < 6 && i < FE_MAX_BUTTONS; i++) {
+        if (!s_buttons[i].active) continue;
+        if (i < count) {
+            int cur = 0, max = 0;
+            td5_net_get_enum_session_info(i, &cur, &max);
+            snprintf(s_buttons[i].label, sizeof(s_buttons[i].label),
+                     "%s  %d/%d", td5_net_get_enum_session_name(i), cur, max);
+            s_buttons[i].hidden   = 0;
+            s_buttons[i].disabled = 0;
+        } else if (i == 0 && count <= 0) {
+            snprintf(s_buttons[i].label, sizeof(s_buttons[i].label),
+                     "(SEARCHING FOR LAN GAMES...)");
+            s_buttons[i].hidden   = 0;
+            s_buttons[i].disabled = 1;
+        } else {
+            s_buttons[i].label[0] = '\0';
+            s_buttons[i].hidden   = 1;
+            s_buttons[i].disabled = 1;
+        }
     }
-    strncpy(s_buttons[0].label, buf, sizeof(s_buttons[0].label) - 1);
-    s_buttons[0].label[sizeof(s_buttons[0].label) - 1] = '\0';
+    /* First session appearing: pull the selection up onto the list (it
+     * parked on BACK while every row was disabled). */
+    if (s_picker_prev_count <= 0 && count > 0 && s_selected_button == 6)
+        s_selected_button = 0;
+    s_picker_prev_count = count;
 }
 
 void Screen_SessionPicker(void) {
-    /* [PERF 2026-06-06] LAN discovery is now non-blocking + incremental, so poll it
-     * every frame after init: the session list fills in live as hosts answer,
-     * instead of the old 500ms select-poll freeze on the entry frame. */
+    /* [PERF 2026-06-06] LAN discovery is non-blocking + incremental: poll it
+     * every frame after init so the list fills in live as hosts answer. */
     if (s_inner_state >= 1) {
         td5_net_enumerate_sessions();
-        frontend_net_label_session_selector();
+        frontend_net_update_session_list();
     }
     switch (s_inner_state) {
-    case 0: /* Init: kick off LAN discovery + build the session selector */
+    case 0: /* Init: kick off LAN discovery + build the session list */
+    {
+        int i;
         frontend_init_return_screen(TD5_SCREEN_SESSION_PICKER);
         TD5_LOG_D(LOG_TAG, "SessionPicker: init (LAN discovery)");
         td5_net_set_mode(TD5_NET_MODE_LAN);
         td5_net_enumerate_sessions();             /* start a discovery window (non-blocking) */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* [FIXED 2026-06-02, runtime @0x499c78] list (120,193) 496x128; OK (120,377) 96; BACK (232,377) 112. */
-        frontend_create_button(SNK_ChooseSessionButTxt, 120, 193, 496, 128);  /* slot 0: session selector */
-        frontend_create_button(SNK_OkButTxt,     120, 377,  96, 0x20);   /* slot 1 */
-        frontend_create_button(SNK_BackButTxt,   232, 377, 112, 0x20);   /* slot 2 */
-        s_net_session_sel = 0;
-        frontend_net_label_session_selector();
+        for (i = 0; i < 6; i++) {                 /* 0..5: session rows */
+            int bi = frontend_create_button("", 120, 150 + i * 38, 420, 0x20);
+            if (bi >= 0 && bi < FE_MAX_BUTTONS) {
+                s_buttons[bi].hidden   = 1;
+                s_buttons[bi].disabled = 1;
+            }
+        }
+        frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);   /* 6 */
+        s_picker_prev_count = -1;
+        frontend_net_update_session_list();
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
+    }
 
     case 1: /* Build session list */
         s_inner_state = 2;
@@ -689,26 +714,18 @@ void Screen_SessionPicker(void) {
             s_inner_state = 5;
             break;
         }
-        if (s_input_ready) {
-            /* Slot 0 = session selector (host or join target), slot 1 = OK, slot 2 = Back. */
-            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            int delta = frontend_option_delta();
-            if (active_button == 0 && delta != 0) {
-                s_net_session_sel += (delta > 0) ? 1 : -1;
-                frontend_net_label_session_selector();
-                frontend_play_sfx(2);
-            } else if (s_button_index == 1) { /* OK -> join the selected session */
-                if (td5_net_get_enum_session_count() <= 0) {
-                    frontend_play_sfx(10);        /* nothing to join */
-                } else if (td5_net_join_session(s_net_session_sel, frontend_net_player_name())) {
+        if (s_input_ready && s_button_index >= 0) {
+            if (s_button_index <= 5) {        /* session row -> join it */
+                if (s_button_index < td5_net_get_enum_session_count() &&
+                    td5_net_join_session(s_button_index, frontend_net_player_name())) {
                     s_network_active = 1;
                     s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
                     s_inner_state = 5;
                 } else {
-                    TD5_LOG_W(LOG_TAG, "LAN join %d failed", s_net_session_sel);
+                    TD5_LOG_W(LOG_TAG, "LAN join %d failed", s_button_index);
                     frontend_play_sfx(10);
                 }
-            } else if (s_button_index == 2) { /* Back -> LAN menu */
+            } else if (s_button_index == 6) { /* Back -> LAN menu */
                 s_return_screen = TD5_SCREEN_LAN_MENU;
                 s_inner_state = 5;
             }
@@ -733,17 +750,26 @@ void Screen_SessionPicker(void) {
 
 void Screen_CreateSession(void) {
     switch (s_inner_state) {
-    case 0: /* Init: show "Enter New Session Name" text input */
+    case 0: /* Init: HOST GAME setup — name / max players / password [S31] */
         frontend_init_return_screen(TD5_SCREEN_CREATE_SESSION);
-        TD5_LOG_D(LOG_TAG, "CreateSession: init");
+        TD5_LOG_D(LOG_TAG, "CreateSession: init (direct=%d)", s_cs_direct);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* The text-input widget IS the name field (gold frame at 120,193);
-         * only BACK is a real button (index 0). */
-        frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
-        memset(s_create_session_name, 0, sizeof(s_create_session_name));
-        strcpy(s_create_session_name, "New Session");
-        frontend_begin_text_input(s_create_session_name, (int)sizeof(s_create_session_name));
-        frontend_set_text_input_prompt("ENTER SESSION NAME");
+        frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 */
+        {   /* 1: MAX PLAYERS — selector-style (value + ◄ ► inside the button,
+             * drawn in the post-button pass like the other selector widgets) */
+            int bi = frontend_create_button("", 120, 208, 224, 0x20);
+            if (bi >= 0 && bi < FE_MAX_BUTTONS)
+                s_buttons[bi].is_selector = 1;
+        }
+        frontend_create_button("PASSWORD",     120, 256, 224, 0x20);  /* 2 */
+        frontend_create_button("HOST",         120, 320, 160, 0x20);  /* 3 */
+        frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);  /* 4 */
+        if (s_create_session_name[0] == '\0')
+            strcpy(s_create_session_name, "New Session");
+        if (s_lobby_max_players < 2 || s_lobby_max_players > 6)
+            s_lobby_max_players = 6;
+        s_cs_edit = 0;
+        s_cs_esc_guard = 0;
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -755,29 +781,94 @@ void Screen_CreateSession(void) {
         }
         break;
 
-    case 2: /* Name input */
-        frontend_handle_text_input_key();   /* process keystrokes into the buffer */
-        if (frontend_check_escape()) {       /* ESC == BACK (-> LAN menu) */
-            s_return_screen = TD5_SCREEN_LAN_MENU;
-            s_inner_state = 3;
-            break;
-        }
-        if (frontend_text_input_confirmed()) {
-            /* S10: actually host a LAN session under the entered name. */
-            td5_net_set_mode(TD5_NET_MODE_LAN);
-            if (td5_net_create_session(s_create_session_name, frontend_net_player_name(), 6)) {
-                s_network_active = 1;
-                s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
-            } else {
-                TD5_LOG_W(LOG_TAG, "LAN host create failed");
-                s_return_screen = TD5_SCREEN_LAN_MENU;
+    case 2: /* Setup interaction [S31] */
+        if (s_cs_edit) {
+            /* Editing NAME or PASSWORD: Enter confirms, ESC cancels (and is
+             * swallowed so it cannot double as BACK). */
+            frontend_handle_text_input_key();
+            if (td5_plat_input_key_pressed(0x01)) {
+                s_cs_edit = 0;
+                s_text_input_state = 0;
+                s_cs_esc_guard = 1;
+                td5_plat_input_flush_chars();
+            } else if (frontend_text_input_confirmed()) {
+                s_cs_edit = 0;
+                s_text_input_state = 0;
             }
+            break;
+        }
+        if (s_cs_esc_guard) {
+            if (!td5_plat_input_key_pressed(0x01)) s_cs_esc_guard = 0;
+            break;
+        }
+        if (frontend_check_escape()) {       /* ESC == BACK */
+            s_return_screen = s_cs_direct ? TD5_SCREEN_DIRECT_CONNECT
+                                          : TD5_SCREEN_LAN_MENU;
             s_inner_state = 3;
             break;
         }
-        if (s_input_ready && s_button_index == 0) {   /* BACK -> LAN menu */
-            s_return_screen = TD5_SCREEN_LAN_MENU;
-            s_inner_state = 3;
+        /* MAX PLAYERS row: Left/Right adjust while it is the selected row. */
+        if (s_selected_button == 1) {
+            if (s_arrow_input & 1) {
+                if (s_lobby_max_players > 2) s_lobby_max_players--;
+                frontend_play_sfx(2);
+            } else if (s_arrow_input & 2) {
+                if (s_lobby_max_players < 6) s_lobby_max_players++;
+                frontend_play_sfx(2);
+            }
+        }
+        if (s_input_ready && s_button_index >= 0) {
+            switch (s_button_index) {
+            case 0: /* SESSION NAME */
+                frontend_begin_text_input(s_create_session_name,
+                                          (int)sizeof(s_create_session_name));
+                frontend_set_text_input_prompt("SESSION NAME");
+                s_cs_edit = 1;
+                break;
+            case 1: /* MAX PLAYERS: activate = cycle */
+                s_lobby_max_players = (s_lobby_max_players >= 6)
+                                          ? 2 : s_lobby_max_players + 1;
+                frontend_play_sfx(2);
+                break;
+            case 2: /* PASSWORD */
+                frontend_begin_text_input(s_lobby_password,
+                                          (int)sizeof(s_lobby_password));
+                frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
+                s_cs_edit = 2;
+                break;
+            case 3: { /* HOST */
+                int ok;
+                td5_net_set_mode(s_cs_direct ? TD5_NET_MODE_DIRECT
+                                             : TD5_NET_MODE_LAN);
+                if (s_cs_direct)
+                    ok = td5_net_create_session_ex(s_create_session_name,
+                                                   frontend_net_player_name(),
+                                                   s_lobby_max_players,
+                                                   s_net_cfg_game_port,
+                                                   s_net_cfg_enable_upnp);
+                else
+                    ok = td5_net_create_session(s_create_session_name,
+                                                frontend_net_player_name(),
+                                                s_lobby_max_players);
+                if (ok) {
+                    td5_net_set_session_limits(s_lobby_max_players,
+                                               s_lobby_password);
+                    s_network_active = 1;
+                    s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
+                } else {
+                    TD5_LOG_W(LOG_TAG, "host create failed (direct=%d)", s_cs_direct);
+                    s_return_screen = s_cs_direct ? TD5_SCREEN_DIRECT_CONNECT
+                                                  : TD5_SCREEN_LAN_MENU;
+                }
+                s_inner_state = 3;
+                break;
+            }
+            case 4: /* BACK */
+                s_return_screen = s_cs_direct ? TD5_SCREEN_DIRECT_CONNECT
+                                              : TD5_SCREEN_LAN_MENU;
+                s_inner_state = 3;
+                break;
+            }
         }
         break;
 
@@ -814,17 +905,32 @@ void Screen_NetworkLobby(void) {
 #ifndef TD5RE_RELEASE
         /* Dev hook: TD5RE_NET_LOBBY=1 boots straight into a host lobby (e.g.
          * --StartScreen=11) so the lobby UI can be inspected without a 2nd PC. */
-        if (!s_network_active && getenv("TD5RE_NET_LOBBY")) {
+        if (!s_network_active && getenv("TD5RE_NET_LOBBY") &&
+            getenv("TD5RE_NET_LOBBY")[0]) {   /* empty string = unset */
+            const char *nl = getenv("TD5RE_NET_LOBBY");
             td5_net_init();
             td5_net_set_mode(TD5_NET_MODE_DIRECT);
-            td5_net_create_session_ex("DevLobby", frontend_net_player_name(), 6,
-                                      g_td5.ini.net_game_port, 0);
+            if (nl[0] == 'j' || nl[0] == 'J') {
+                /* dev: join a loopback host (2-instance lockstep testing) */
+                td5_net_join_direct("127.0.0.1", g_td5.ini.net_game_port,
+                                    frontend_net_player_name());
+            } else {
+                td5_net_create_session_ex("DevLobby", frontend_net_player_name(), 6,
+                                          g_td5.ini.net_game_port, 0);
+            }
             s_network_active = 1;
         }
 #endif
 
+        /* S31: (re)announce this machine's car pick to the host -- runs on
+         * every lobby entry, including the return from CHANGE CAR. */
+        td5_net_set_local_car(s_selected_car, s_selected_paint,
+                              g_td5.ini.td6_paint_color);
+        s_car_announce_done = (td5_net_local_slot() >= 0);
+
         /* Kick check: if kicked flag set, destroy session, go to SessionLocked */
         if (s_kicked_flag) {
+            s_kicked_flag = 0;   /* consume -- only frontend boot cleared it before */
             s_race_active_flag = 0;
             s_network_active = 0;
             frontend_net_destroy();
@@ -853,17 +959,40 @@ void Screen_NetworkLobby(void) {
          * indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=EXIT 4=OPTIONS(host).
          * [2026-06-07] Added SELECT TRACK -> the track picker (returns to the
          * lobby via flow_context==4); rows below it shift down one slot (0x28). */
-        frontend_create_button(SNK_StartButTxt,     400, 110, 190, 0x28); /* 0 START */
-        frontend_create_button(SNK_ChangeCarButTxt, 400, 158, 190, 0x28); /* 1 CHANGE CAR */
-        frontend_create_button("SELECT TRACK",      400, 206, 190, 0x28); /* 2 SELECT TRACK */
-        frontend_create_button(SNK_ExitButTxt,      400, 254, 190, 0x28); /* 3 EXIT */
-        if (frontend_net_is_host())
-            frontend_create_button("OPTIONS",       400, 302, 190, 0x28); /* 4 (host) */
+        /* [S31] Button 0: the host STARTS the race; clients toggle READY.
+         * Width 180 so SELECT TRACK fits inside the frame. */
+        frontend_create_button(frontend_net_is_host() ? SNK_StartButTxt
+                                                      : "READY",
+                                                    430, 110, 180, 0x20); /* 0 */
+        frontend_create_button(SNK_ChangeCarButTxt, 430, 150, 180, 0x20); /* 1 CHANGE CAR */
+        frontend_create_button("SELECT TRACK",      430, 190, 180, 0x20); /* 2 SELECT TRACK */
+        frontend_create_button(SNK_ExitButTxt,      430, 230, 180, 0x20); /* 3 EXIT */
+        /* [S31] Track choice is the host's call (the DXPSTART config overrides
+         * any client-side pick anyway) -- hide SELECT TRACK for joiners. */
+        if (!frontend_net_is_host()) {
+            s_buttons[2].hidden   = 1;
+            s_buttons[2].disabled = 1;
+        }
+        /* [S31 redesign] indices 4..8: per-row KICK buttons (host only) —
+         * positioned/unhidden each frame next to the joined remote players;
+         * the exit-door icon is drawn over them in the post-button pass. */
+        if (frontend_net_is_host()) {
+            int k;
+            for (k = 0; k < 5; k++) {
+                int bi = frontend_create_button("", 0, 0, 26, 22);
+                if (bi >= 0 && bi < FE_MAX_BUTTONS) {
+                    s_buttons[bi].hidden   = 1;
+                    s_buttons[bi].disabled = 1;
+                }
+                s_kick_button_slot[k] = -1;
+            }
+        }
 
-        memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
-        s_lobby_modal = 0;
+        /* [S31] READY state resets on every lobby entry (incl. the CHANGE
+         * CAR return) -- joiners press READY again. */
+        memset(s_slot_ready, 0, sizeof(s_slot_ready));
+        s_my_ready = 0;
 
-        s_chat_dirty = (s_network_active) ? 1 : 0;
         s_lobby_action = 0;
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -879,66 +1008,23 @@ void Screen_NetworkLobby(void) {
         break;
 
     case 2: /* TRANSITION COMPLETE / ENABLE INPUT */
-        /* Set up text input: buffer ptr, max 60 chars, enable */
-        s_text_input_state = 1;
+        /* S31: chat is OPT-IN (press T in the lobby). Keeping the text-input
+         * flag armed here suppressed the keyboard nav FIFO for the whole
+         * lobby (frontend_poll_input flushes nav while a text field is open),
+         * which made every lobby button unreachable by keyboard. */
+        frontend_reset_text_input();   /* also drops a stale confirm latch */
         s_inner_state = 3;
         break;
 
     case 3: /* MAIN INTERACTIVE LOBBY */
-        /* Render background and chat input */
         frontend_present_buffer();
 
-#ifndef TD5RE_RELEASE
-        /* Dev hook: TD5RE_NET_LOBBY=2 auto-opens the OPTIONS modal once. */
-        {
-            static int s_dev_modal_once = 0;
-            const char *lv = getenv("TD5RE_NET_LOBBY");
-            if (lv && lv[0] == '2' && !s_dev_modal_once && !s_lobby_modal &&
-                frontend_net_is_host()) {
-                s_dev_modal_once = 1;
-                s_lobby_max_players = td5_net_get_max_players();
-                if (s_lobby_max_players < 2 || s_lobby_max_players > 6) s_lobby_max_players = 6;
-                s_lobby_password[0] = '\0';
-                frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
-                frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
-                s_lobby_modal_armed = 1;   /* dev auto-open: no Enter to wait on */
-                s_lobby_modal = 1;
-            }
-        }
-#endif
-
-        /* S10b: host OPTIONS modal (max players + password) — takes input focus
-         * while open. Password edits via the WM_CHAR text path; Left/Right adjust
-         * max players; Enter applies + closes; Esc cancels. */
-        if (s_lobby_modal) {
-            /* Wait for the OPTIONS-Enter (which opened this modal) to be released
-             * before accepting input — otherwise its WM_CHAR key-repeat '\r'
-             * instantly confirms and closes the modal ("can't change options"). */
-            if (!s_lobby_modal_armed) {
-                td5_plat_input_flush_chars();
-                if (!td5_plat_input_key_pressed(0x1C))   /* Enter scancode */
-                    s_lobby_modal_armed = 1;
-                break;
-            }
-            frontend_handle_text_input_key();
-            if (frontend_text_input_confirmed()) {
-                td5_net_set_session_limits(s_lobby_max_players, s_lobby_password);
-                TD5_LOG_I(LOG_TAG, "Lobby options: max=%d password=%s",
-                          s_lobby_max_players, s_lobby_password[0] ? "set" : "none");
-                s_lobby_modal = 0;
-                s_text_input_state = 1;             /* restore chat input */
-                frontend_play_sfx(3);
-            } else if (s_arrow_input & 1) {          /* LEFT (robust poll edge) */
-                if (s_lobby_max_players > 2) s_lobby_max_players--;
-                frontend_play_sfx(2);
-            } else if (s_arrow_input & 2) {          /* RIGHT */
-                if (s_lobby_max_players < 6) s_lobby_max_players++;
-                frontend_play_sfx(2);
-            } else if (td5_plat_input_key_pressed(0x01)) {   /* ESC = cancel */
-                s_lobby_modal = 0;
-                s_text_input_state = 1;
-            }
-            break;
+        /* [S31] Late car announce: the state-0 attempt is a no-op while the
+         * JOIN handshake hasn't assigned our slot yet. */
+        if (!s_car_announce_done && td5_net_local_slot() >= 0) {
+            td5_net_set_local_car(s_selected_car, s_selected_paint,
+                                  g_td5.ini.td6_paint_color);
+            s_car_announce_done = 1;
         }
 
         /* ESC backs out of the lobby = the EXIT action (tear the session down so
@@ -947,7 +1033,6 @@ void Screen_NetworkLobby(void) {
             TD5_LOG_I(LOG_TAG, "NetworkLobby: ESC -> exit (destroy session)");
             frontend_net_destroy();
             s_network_active = 0;
-            s_lobby_modal = 0;
             td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
             return;
         }
@@ -957,9 +1042,101 @@ void Screen_NetworkLobby(void) {
          * joined (slots populated by the JOIN handshake / DXPROSTER). */
         {
             int slot;
-            for (slot = 0; slot < 6; slot++)
+            for (slot = 0; slot < 6; slot++) {
                 s_participant_flags[slot] = td5_net_is_slot_active(slot) ? 1 : 0;
+                if (!s_participant_flags[slot])
+                    s_slot_ready[slot] = 0;   /* left/kicked -> not ready */
+            }
         }
+
+        /* [S31 redesign] place the per-row KICK buttons (host): kick button k
+         * sits at the right edge of the k-th remote player's roster row. */
+        if (frontend_net_is_host()) {
+            int prow = 0, k = 0;
+            int pslot;
+            for (pslot = 0; pslot < TD5_NET_MAX_PLAYERS; pslot++) {
+                if (!td5_net_is_slot_active(pslot)) continue;
+                if (pslot != td5_net_local_slot() && k < 5) {
+                    int bi = 4 + k;
+                    if (bi < FE_MAX_BUTTONS && s_buttons[bi].active) {
+                        s_buttons[bi].x = FE_LOBBY_X + FE_LOBBY_PANEL_W - 38;
+                        s_buttons[bi].y = FE_LOBBY_ROW0_Y + prow * FE_LOBBY_ROW_H - 3;
+                        s_buttons[bi].hidden   = 0;
+                        s_buttons[bi].disabled = 0;
+                        s_kick_button_slot[k]  = pslot;
+                        k++;
+                    }
+                }
+                prow++;
+            }
+            for (; k < 5; k++) {
+                int bi = 4 + k;
+                if (bi < FE_MAX_BUTTONS) {
+                    s_buttons[bi].hidden   = 1;
+                    s_buttons[bi].disabled = 1;
+                }
+                s_kick_button_slot[k] = -1;
+            }
+        }
+
+        /* S31: drain queued net messages. The only lobby-relevant opcode is
+         * LOBBY_KICK (DXPDATA payload[0]=0x12, payload[1]=target slot). */
+        {
+            uint8_t nbuf[64];
+            int ntype;
+            memset(nbuf, 0, sizeof(nbuf));
+            while ((ntype = frontend_net_receive(nbuf, sizeof(nbuf))) >= 0) {
+                if (ntype == (int)TD5_DXPDATA && nbuf[0] == 0x12 &&
+                    !frontend_net_is_host() &&
+                    (int)nbuf[1] == td5_net_local_slot()) {
+                    TD5_LOG_I(LOG_TAG, "NetworkLobby: kicked by host");
+                    s_kicked_flag = 1;
+                } else if (ntype == (int)TD5_DXPDATA && nbuf[0] == 0x18 &&
+                           nbuf[1] < 6) {
+                    /* [S31] READY toggle from a client. */
+                    s_slot_ready[nbuf[1]] = nbuf[2] ? 1 : 0;
+                }
+                memset(nbuf, 0, sizeof(nbuf));
+            }
+        }
+        if (s_kicked_flag) {
+            s_kicked_flag = 0;
+            s_race_active_flag = 0;
+            s_network_active = 0;
+            frontend_net_destroy();
+            td5_frontend_set_screen(TD5_SCREEN_SESSION_LOCKED);
+            return;
+        }
+
+        /* S31: the host quit (or the link died) -> leave the dead lobby.
+         * td5_net_shutdown now broadcasts DXPDISCONNECT, which sets
+         * s_connection_lost on every receiver. */
+        if (!frontend_net_is_host() && td5_net_is_connection_lost()) {
+            TD5_LOG_I(LOG_TAG, "NetworkLobby: connection lost -> leaving lobby");
+            s_race_active_flag = 0;
+            s_network_active = 0;
+            frontend_net_destroy();
+            td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
+            return;
+        }
+
+#ifndef TD5RE_RELEASE
+        /* Dev hook: TD5RE_NET_AUTOSTART=1 -- the host fires START automatically
+         * once a client has joined (headless 2-instance lockstep testing). */
+        {
+            static int s_dev_autostart_done = 0;
+            const char *as = getenv("TD5RE_NET_AUTOSTART");
+            if (!s_dev_autostart_done && as && as[0] &&   /* empty = unset */
+                frontend_net_is_host() && td5_net_get_player_count() >= 2) {
+                s_dev_autostart_done = 1;
+                TD5_LOG_I(LOG_TAG, "NetworkLobby: dev autostart (players=%d)",
+                          td5_net_get_player_count());
+                s_lobby_action = 2;
+                s_inner_state = 5;
+                return;
+            }
+        }
+#endif
 
         /* S10: a client auto-launches into the race once the host's DXPSTART
          * rendezvous has activated lockstep sync (td5_net_is_active). The host
@@ -967,6 +1144,25 @@ void Screen_NetworkLobby(void) {
         if ((s_lobby_action == 3) ||
             (!frontend_net_is_host() && td5_net_is_active())) {
             TD5_LOG_I(LOG_TAG, "NetworkLobby: client race start (sync active)");
+            /* S31: adopt the host's race config before building the schedule. */
+            {
+                TD5_NetRaceConfig ncfg;
+                if (td5_net_get_race_config(&ncfg)) {
+                    s_selected_track  = ncfg.track_index;
+                    s_track_direction = ncfg.reverse_direction;
+                    /* [S31] The race reads g_td5.reverse_direction, which only
+                     * the track screen's OK handler used to set -- a client
+                     * (or a host that never opened the track screen) raced the
+                     * wrong way. Difficulty picks the AI car-pool row, so it
+                     * must match everywhere too. */
+                    g_td5.reverse_direction = ncfg.reverse_direction;
+                    g_td5.difficulty_tier   = ncfg.difficulty;
+                    TD5_LOG_I(LOG_TAG,
+                              "NetworkLobby: adopted host config track=%d dir=%d diff=%d seed=0x%08X",
+                              ncfg.track_index, ncfg.reverse_direction,
+                              ncfg.difficulty, ncfg.rng_seed);
+                }
+            }
             s_launching_net_race = 1;
             s_race_active_flag = 1;
             frontend_init_race_schedule();
@@ -994,7 +1190,20 @@ void Screen_NetworkLobby(void) {
                     s_lobby_action = 2;
                     s_inner_state = 5; /* multi-player ready check -> DXPSTART */
                 }
-                /* Client: waits for the host's DXPSTART (handled in the sync poll). */
+                else {
+                    /* [S31] Client: toggle READY and tell the host (the race
+                     * itself starts on the host's DXPSTART). */
+                    s_my_ready = !s_my_ready;
+                    if (td5_net_local_slot() >= 0 && td5_net_local_slot() < 6)
+                        s_slot_ready[td5_net_local_slot()] = (uint8_t)s_my_ready;
+                    {
+                        uint8_t rd_msg[8] = {0x18, 0, 0, 0, 0, 0, 0, 0};
+                        rd_msg[1] = (uint8_t)td5_net_local_slot();
+                        rd_msg[2] = (uint8_t)s_my_ready;
+                        frontend_net_send(1, rd_msg, 8);
+                    }
+                    frontend_play_sfx(3);
+                }
                 break;
 
             case 1: /* CHANGE CAR */
@@ -1002,36 +1211,38 @@ void Screen_NetworkLobby(void) {
                 td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
                 return;
 
-            case 2: /* SELECT TRACK -> the track picker. flow_context==4 makes the
-                     * track screen's exit dispatch return here (not launch a race),
-                     * so the host can set the track and come back to the lobby. */
-                s_flow_context = 4;
-                td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
-                return;
+            case 2: /* SELECT TRACK -> the track picker (host only; hidden for
+                     * joiners). flow_context==4 makes the track screen's exit
+                     * dispatch return here (not launch a race). */
+                if (frontend_net_is_host()) {
+                    s_flow_context = 4;
+                    td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
+                    return;
+                }
+                break;
 
             case 3: /* EXIT -> tear down the session and leave the lobby */
                 TD5_LOG_I(LOG_TAG, "NetworkLobby: exit -> destroy session");
                 frontend_net_destroy();
                 s_network_active = 0;
-                s_lobby_modal = 0;
                 td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
                 return;
 
-            case 4: /* OPTIONS (host) -> open the max-players/password modal */
-                if (frontend_net_is_host()) {
-                    s_lobby_max_players = td5_net_get_max_players();
-                    if (s_lobby_max_players < 2 || s_lobby_max_players > 6)
-                        s_lobby_max_players = 6;
-                    s_lobby_password[0] = '\0';
-                    frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
-                    frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
-                    s_lobby_modal_armed = 0;   /* arm after the Enter is released */
-                    s_lobby_modal = 1;
-                    frontend_play_sfx(3);
-                }
-                break;
-
             default:
+                /* [S31 redesign] indices 4..8 = per-row KICK buttons (host). */
+                if (frontend_net_is_host() &&
+                    s_button_index >= 4 && s_button_index <= 8) {
+                    int ks = s_kick_button_slot[s_button_index - 4];
+                    if (ks >= 0 && td5_net_is_slot_active(ks) &&
+                        ks != td5_net_local_slot()) {
+                        uint8_t kick_msg[8] = {0x12, 0, 0, 0, 0, 0, 0, 0};
+                        kick_msg[1] = (uint8_t)ks;
+                        frontend_net_send(1, kick_msg, 8);
+                        frontend_play_sfx(3);
+                        TD5_LOG_I(LOG_TAG, "NetworkLobby: kick sent for slot %d", ks);
+                    }
+                    break;
+                }
                 s_lobby_action = 0;
                 break;
             }
@@ -1040,28 +1251,12 @@ void Screen_NetworkLobby(void) {
         /* Process network messages */
         /* Check for disconnect */
         if (s_kicked_flag) {
+            s_kicked_flag = 0;
             frontend_net_destroy();
             td5_frontend_set_screen(TD5_SCREEN_SESSION_LOCKED);
             return;
         }
 
-        /* Update lobby player list display */
-        /* Poll network input */
-
-        /* Check text input confirmed (Enter pressed) -> chat submit */
-        if (frontend_text_input_confirmed()) {
-            s_inner_state = 4;
-        }
-        break;
-
-    case 4: /* CHAT TEXT SUBMISSION */
-        /* Process chat input buffer: check admin commands, emoticons */
-        /* If valid, send as DXPCHAT (type 2) */
-        if (s_chat_input_buffer[0] != '\0') {
-            frontend_net_send(2, s_chat_input_buffer, (int)strlen(s_chat_input_buffer) + 1);
-        }
-        memset(s_chat_input_buffer, 0, sizeof(s_chat_input_buffer));
-        s_inner_state = 2; /* re-enable text input */
         break;
 
     case 5: /* PLAYER READY CHECK (host only) */
@@ -1179,7 +1374,7 @@ void Screen_NetworkLobby(void) {
                 if (s_participant_flags[slot] && s_per_slot_status[slot] != 2) {
                     /* Kick non-ready: send LOBBY_KICK (opcode 0x12) */
                     uint8_t kick_msg[8] = {0x12, 0, 0, 0, 0, 0, 0, 0};
-                    kick_msg[4] = (uint8_t)slot;
+                    kick_msg[1] = (uint8_t)slot;
                     frontend_net_send(1, kick_msg, 8);
                     s_participant_flags[slot] = 0;
                 }
@@ -1262,8 +1457,46 @@ void Screen_NetworkLobby(void) {
         s_anim_tick += 2 * s_fe_logic_ticks;
         if (s_anim_tick >= 8) {
             s_race_active_flag = 1;
-            /* Send DXPSTART (message type 4) */
-            frontend_net_send(4, s_participant_flags, 0);
+            /* S31: build the authoritative race config and broadcast it in the
+             * DXPSTART payload -- seed, track, direction, per-slot cars. The
+             * clients adopt it before running their race schedule; the host's
+             * own schedule reads back the archived copy, so every machine
+             * builds the identical grid from the identical RNG stream. */
+            {
+                TD5_NetRaceConfig cfg;
+                int slot, c, p;
+                memset(&cfg, 0, sizeof(cfg));
+                cfg.rng_seed          = (uint32_t)td5_plat_time_ms() ^
+                                        ((uint32_t)rand() << 16);
+                cfg.track_index       = s_selected_track;
+                cfg.reverse_direction = s_track_direction;
+                /* Live frontend choices, NOT g_td5.* -- those are only
+                 * refreshed by the schedule (which runs AFTER this config is
+                 * broadcast) and were stale ("AI players are not loading"). */
+                cfg.lap_count         = s_game_option_laps + 1;
+                cfg.num_opponents     = s_num_ai_opponents;
+                if (cfg.num_opponents < 0)  cfg.num_opponents = 0;
+                if (cfg.num_opponents > TD5_MAX_RACER_SLOTS - 2)
+                    cfg.num_opponents = TD5_MAX_RACER_SLOTS - 2;
+                cfg.difficulty        = g_td5.difficulty_tier;
+                for (slot = 0; slot < 6; slot++) {
+                    int col = td5_net_get_slot_td6_color(slot);
+                    cfg.car_index[slot]   = 0;
+                    cfg.paint_index[slot] = 0;
+                    /* 0xFFFFFF = "leave the grey base art" -- the same value
+                     * the painter treats as no-op, so machines that never
+                     * announced a colour render identically everywhere. */
+                    cfg.td6_color[slot]   = (col >= 0) ? col : 0x00FFFFFF;
+                    if (td5_net_get_slot_car(slot, &c, &p) && c >= 0) {
+                        cfg.car_index[slot]   = c;
+                        cfg.paint_index[slot] = p;
+                    }
+                }
+                frontend_net_send(4, &cfg, (int)sizeof(cfg));
+                TD5_LOG_I(LOG_TAG,
+                          "NetworkLobby: DXPSTART config seed=0x%08X track=%d dir=%d",
+                          cfg.rng_seed, cfg.track_index, cfg.reverse_direction);
+            }
             s_inner_state = 0x11;
         }
         break;
@@ -1277,6 +1510,19 @@ void Screen_NetworkLobby(void) {
         (void)frontend_net_receive(recv_buf, sizeof(recv_buf));
         if (td5_net_is_active()) {
             TD5_LOG_I(LOG_TAG, "NetworkLobby: host race start (sync active)");
+            /* [S31] The host launches HERE (not through the state-3 client
+             * block), so commit the broadcast config on this path too --
+             * g_td5.reverse_direction is otherwise only written by the track
+             * screen's OK handler and could be stale. */
+            {
+                TD5_NetRaceConfig ncfg;
+                if (td5_net_get_race_config(&ncfg)) {
+                    s_selected_track        = ncfg.track_index;
+                    s_track_direction       = ncfg.reverse_direction;
+                    g_td5.reverse_direction = ncfg.reverse_direction;
+                    g_td5.difficulty_tier   = ncfg.difficulty;
+                }
+            }
             s_launching_net_race = 1;
             s_race_active_flag = 1;
             frontend_init_race_schedule();

@@ -27,6 +27,7 @@
 #include "td5_render.h"
 #include "td5_track.h"
 #include "td5_game.h"
+#include "td5_net.h"      /* [S31] td5_net_get_slot_name for the PAUSED BY overlay */
 #include "td5_save.h"
 #include "td5_physics.h"
 #include "td5_ai.h"
@@ -135,6 +136,7 @@ static const char *s_eng_pause_strings[] = {
     "SOUND",          (const char *)(intptr_t)0,
     "CONTINUE",       (const char *)(intptr_t)2,
     "RESTART RACE",   (const char *)(intptr_t)2,
+    "BACK TO LOBBY",  (const char *)(intptr_t)2,
     "QUIT TO MENU",   (const char *)(intptr_t)2,
     "EXIT GAME",      (const char *)(intptr_t)2,
     NULL
@@ -1333,6 +1335,42 @@ void td5_hud_draw_disconnect_overlays(void)
         td5_vui_text_centered(cx, cy - line_h * 0.5f, l1, 0xFFFFFFFFu, ts, ts);
         td5_vui_text_centered(cx, cy + line_h * 0.6f, l2, 0xFFFFC050u, ts * 0.85f, ts * 0.85f);
     }
+}
+
+/* [S31] Net-race pause indicator: a REMOTE player opened their pause menu,
+ * so the whole lockstep race is frozen. Dim the view and say who paused. */
+void td5_hud_draw_net_pause_overlay(void)
+{
+    int slot = td5_game_net_remote_pause_slot();
+    char l1[64];
+    const char *nm;
+    if (slot < 0) return;
+
+    const TD5_HudViewLayout *vl = &s_view_layout[0];   /* net races: 1 pane */
+    float L = vl->vp_int_left,  T = vl->vp_int_top;
+    float R = vl->vp_int_right, B = vl->vp_int_bottom;
+    float w = R - L, h = B - T;
+    if (w < 2.0f || h < 2.0f) return;
+
+    td5_vui_quad(L, T, w, h, 0x90000000u, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+
+    nm = td5_net_get_slot_name(slot);
+    snprintf(l1, sizeof l1, "PAUSED BY %s", (nm && nm[0]) ? nm : "PLAYER");
+
+    float ts = w / 640.0f;
+    if (ts > 1.5f)  ts = 1.5f;
+    if (ts < 0.35f) ts = 0.35f;
+    float maxw = w * 0.88f;
+    for (int guard = 0; guard < 10; guard++) {
+        if (td5_vui_text_width(l1, ts) <= maxw) break;
+        ts *= 0.88f;
+    }
+    float cx = (L + R) * 0.5f;
+    float cy = (T + B) * 0.5f;
+    float line_h = 26.0f * ts;
+    td5_vui_text_centered(cx, cy - line_h * 0.5f, l1, 0xFFFFFFFFu, ts, ts);
+    td5_vui_text_centered(cx, cy + line_h * 0.6f, "WAITING FOR THEM TO CONTINUE",
+                          0xFFFFC050u, ts * 0.7f, ts * 0.7f);
 }
 
 /* Called each frame while paused to update SELBOX position and slider thumb positions.
@@ -4681,8 +4719,10 @@ void td5_hud_init_pause_menu(int page_index)
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
+        /* [S31] 7 selectable rows now (BACK TO LOBBY added) -- the bottom
+         * row's selbox reaches ~+79, so the panel bottom grows to +84. */
         PAUSE_ADD(-s_pause_half_width, -56.0f,
-                   s_pause_half_width,  68.0f,
+                   s_pause_half_width,  84.0f,
                    bu, bv, bu, bv,
                    blackbox_e->texture_page, 0xFFFFFFFF);
     }

@@ -364,7 +364,6 @@ int  s_cheat_unlock_all;         /* DAT_00496298 */
 int  s_network_active;           /* g_networkSessionActive / DAT_004962bc */
 int  s_nickname_from_mpopts;     /* nickname screen entered from Multiplayer Options */
 /* --- S10b: lobby options modal (host) + join-password prompt --- */
-int  s_lobby_modal;              /* 0=closed, 1=OPTIONS modal open */
 int  s_lobby_max_players = 6;    /* modal: max players (2..6) */
 char s_lobby_password[32];       /* modal: host join password (also reused for join prompt) */
 int  s_net_session_sel;          /* SESSION_PICKER cursor: 0=host, 1..N=join */
@@ -2677,10 +2676,13 @@ void frontend_init_race_schedule(void) {
      * Inert outside Quick Race. Clamping + split-grid resolution live in
      * frontend_commit_pane_layout (shared with the AutoRace SpectateScreens
      * override so the two paths cannot drift). */
-    frontend_commit_pane_layout(eff_humans,
+    /* [S31 net] A network race renders ONE full-screen view per machine
+     * (each pinned to that machine's own car in InitRace step 17) — the
+     * net players are racer SLOTS, not local split panes. */
+    frontend_commit_pane_layout(s_launching_net_race ? 1 : eff_humans,
                                 (s_current_screen == TD5_SCREEN_QUICK_RACE)
                                     ? s_num_spectate_screens : 0);
-    int eff_panes = eff_humans + g_td5.num_spectate_screens;
+    int eff_panes = (s_launching_net_race ? 1 : eff_humans) + g_td5.num_spectate_screens;
     g_td5.network_active    = s_launching_net_race;   /* S10: net race engages lockstep */
     s_launching_net_race    = 0;                      /* one-shot intent */
 
@@ -2712,13 +2714,64 @@ void frontend_init_race_schedule(void) {
     slot_ext_id[0]  = s_selected_car;
     slot_variant[0] = s_selected_paint;
 
+    /* [S31 NET 2026-06-10] Network race: identical grids everywhere. Fill the
+     * net-player slots from the host-broadcast config and reseed the CRT with
+     * the shared seed so the rand()-driven AI fill below picks the SAME cars
+     * on every machine. Lockstep has no state correction -- a different
+     * carparam on any slot is a permanent desync. */
+    TD5_NetRaceConfig net_cfg;
+    int net_cfg_valid = 0;
+    if (g_td5.network_active) {
+        if (td5_net_get_race_config(&net_cfg)) {
+            int np = td5_net_get_player_count();
+            net_cfg_valid = 1;
+            if (np > TD5_MAX_RACER_SLOTS) np = TD5_MAX_RACER_SLOTS;
+            for (i = 0; i < np && i < 6; i++) {
+                slot_active[i]  = 1;
+                slot_ext_id[i]  = (net_cfg.car_index[i] >= 0) ? net_cfg.car_index[i] : 0;
+                slot_variant[i] = net_cfg.paint_index[i];
+            }
+            /* The AI fill below must not overwrite the net players' slots
+             * (it used to start at slot 1 and stomp every client's car). */
+            if (np > start_slot) start_slot = np;
+            /* [S31] TD6 body colours ride the config too: the asset painter
+             * otherwise colours slot 0 with the LOCAL machine's INI choice
+             * and other humans with the AI hash -- every machine rendered
+             * its own idea of the field ("client sees the same car twice,
+             * host sees correctly"). */
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
+                td5_asset_set_human_td6_color(
+                    i, (i < np && i < 6) ? net_cfg.td6_color[i] : -1);
+            for (i = 0; i < np && i < 6; i++)
+                TD5_LOG_I(LOG_TAG,
+                          "InitRaceSchedule: net slot%d car=%d paint=%d color=%06X",
+                          i, net_cfg.car_index[i], net_cfg.paint_index[i],
+                          (unsigned)net_cfg.td6_color[i]);
+            /* Opponent count is host-authoritative: it decides how many racer
+             * slots InitRace enables -- a mismatch is a different grid.
+             * InitRace computes the field as humans(1) + num_ai_opponents, so
+             * fold the EXTRA net players into the opponent count: the field
+             * is np humans + the host-chosen AI cars. */
+            g_td5.num_ai_opponents = net_cfg.num_opponents + (np - 1);
+            if (g_td5.num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
+                g_td5.num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
+            TD5_LOG_I(LOG_TAG,
+                      "InitRaceSchedule: net config applied (np=%d opp=%d seed=0x%08X)",
+                      np, net_cfg.num_opponents, net_cfg.rng_seed);
+        } else {
+            TD5_LOG_W(LOG_TAG,
+                      "InitRaceSchedule: network race WITHOUT a host config");
+        }
+    }
+
     /* In-race per-viewport identity (coloured frame + name plate): cleared for
      * every race, populated below only for the multiplayer flow. */
     td5_hud_clear_player_identities();
 
     /* [PORT ENHANCEMENT 2026-06] Multiplayer lobby flow: each human slot uses the
-     * car that player chose in the sequential car select. */
-    if (s_mp_flow) {
+     * car that player chose in the sequential car select. ([S31] skipped for
+     * net races: a stale local flag would overwrite the replicated grid.) */
+    if (s_mp_flow && !g_td5.network_active) {
         slot_ext_id[0]  = s_mp_player_car[0];
         slot_variant[0] = s_mp_player_paint[0];
         /* Each human slot is painted with that player's chosen TD6 colour (no-op
@@ -2745,7 +2798,8 @@ void frontend_init_race_schedule(void) {
      * race, so the constant is swapped here. Time Trials is solo and must NOT
      * fall into this branch. (Skipped for the N-way multiplayer lobby flow,
      * which already populated the human slots above.) */
-    if ((s_two_player_mode || s_selected_game_type == 9) && !s_mp_flow) {
+    if ((s_two_player_mode || s_selected_game_type == 9) && !s_mp_flow &&
+        !g_td5.network_active) {
         slot_active[1]  = 1;
         slot_ext_id[1]  = s_p2_car;
         slot_variant[1] = 0;
@@ -2781,7 +2835,16 @@ void frontend_init_race_schedule(void) {
      *   - Port calls srand(0x1A2B3C4D) with ZERO preamble burns.
      *   - Both sides start AI-car selection from rand #1 → identical picks.
      * [CONFIRMED @ td5_quickrace_hook.js:180-186, td5_quickrace.py:261] */
-    if (g_td5.ini.race_trace_enabled) {
+    if (net_cfg_valid) {
+        /* [S31 NET] Every machine must run the AI car fill from the SAME
+         * rand() stream: seed with the host-broadcast seed, no preamble burn
+         * (every machine runs this exact path). The wall-clock srand below
+         * used to run AFTER the net seed was applied and silently wiped it --
+         * each machine then picked its own AI grid ("cars are different
+         * between client and server"). The fixed-trace seed masked this in
+         * the headless A/B runs by overriding both sides identically. */
+        srand(net_cfg.rng_seed);
+    } else if (g_td5.ini.race_trace_enabled) {
         /* Under race_trace_enabled the Frida quickrace hook calls
          * _srand(0x1A2B3C4D) IMMEDIATELY before InitializeRaceSeriesSchedule()
          * with zero preamble rand() calls between them (hook bypasses
@@ -2817,7 +2880,7 @@ void frontend_init_race_schedule(void) {
         (void)rand();
     }
 
-    if (s_selected_game_type == 2) {
+    if (s_selected_game_type == 2 && !g_td5.network_active) {
         /* === Path 1: Quick Race (gameType == 2, Era) [CONFIRMED @ 0x0040dac0] ===
          * Original loop body consumes THREE rand() calls per iteration:
          *   rand #1 -> ext_id (& 7, optionally +8 if player car > 7)
@@ -2845,7 +2908,7 @@ void frontend_init_race_schedule(void) {
             TD5_LOG_I(LOG_TAG, "InitRaceSchedule: quick-race slot%d ext_id=%d var=%d attempts=%d",
                       i, ext_id, slot_variant[i], attempts);
         }
-    } else if (s_selected_game_type == 5) {
+    } else if (s_selected_game_type == 5 && !g_td5.network_active) {
         /* === Path 2: Cup/Masters (gameType == 5) [CONFIRMED @ 0x0040dac0] ===
          * Scans s_masters_roster_flags[] for state==1 entries, claims them (sets to 2),
          * reads ext car id from s_masters_roster[]. */
@@ -2969,6 +3032,11 @@ void frontend_init_race_schedule(void) {
      * [CONFIRMED @ 0x0040DADC → built into "CARSKIN%d.TGA" @ 0x00442949]. */
     g_td5.ai_car_variants[0] = (slot_variant[0] >= 0 && slot_variant[0] <= 3)
                                ? slot_variant[0] : 0;
+    /* [S31] Slot 0's CAR index too: net races load every slot from
+     * ai_car_indices (g_td5.car_index is the LOCAL player's pick, which on a
+     * client is not slot 0). Non-net keeps loading slot 0 from car_index. */
+    g_td5.ai_car_indices[0] = (slot_ext_id[0] >= 0 && slot_ext_id[0] < TD5_CAR_COUNT)
+                              ? slot_ext_id[0] : 0;
 
     TD5_LOG_I(LOG_TAG, "InitializeRaceSeriesSchedule: car=%d (resolved=%d) track=%d level=%d screen=%d type=%d ai=[%d,%d,%d,%d,%d]",
               s_selected_car, g_td5.car_index, g_td5.track_index,
@@ -3847,6 +3915,18 @@ int frontend_text_input_confirmed(void) {
     return (s_text_input_ctx.confirm_state != 0) || (s_text_input_state == 2);
 }
 
+/* [S31] Drop any latched text-input confirm. confirm_state is set on commit
+ * and was only ever cleared by the next frontend_begin_text_input, so a
+ * screen that polls frontend_text_input_confirmed() OUTSIDE an active edit
+ * (the network lobby's chat-submit check runs every interactive frame) saw
+ * a confirm latched on a PRIOR screen -- e.g. the CREATE SESSION name edit --
+ * as TRUE forever, looping the lobby through its chat-submit states and
+ * eating ~2/3 of all button presses ("kick/start/nav don't work"). */
+void frontend_reset_text_input(void) {
+    s_text_input_state = 0;
+    s_text_input_ctx.confirm_state = 0;
+}
+
 /* --- Cheat Code Detection --- */
 
 static void frontend_push_cheat_char(char ch) {
@@ -3961,6 +4041,27 @@ static void frontend_recover_surfaces(void) {
 }
 void frontend_post_quit(void) {
     g_td5.quit_requested = 1;
+}
+
+/* [S31] Post-race BACK TO LOBBY: pick the lobby this race was launched from. */
+void td5_frontend_return_to_lobby(void) {
+    if (s_network_active) {
+        td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
+    } else if (s_mp_flow) {
+        td5_frontend_set_screen(TD5_SCREEN_MP_LOBBY);
+    } else {
+        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+    }
+}
+
+/* [S31] Leaving a net race for the MAIN MENU = leaving the session (peers
+ * were already told via RACE_LEFT and return to their lobby). */
+void td5_frontend_leave_net_session(void) {
+    if (s_network_active) {
+        TD5_LOG_I(LOG_TAG, "leaving net session (quit to menu)");
+        frontend_net_destroy();
+        s_network_active = 0;
+    }
 }
 
 
@@ -7791,62 +7892,102 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
     char line[96];
     const char *status;
 
-    /* Roster panel backdrop (left column). */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(40.0f * sx, 96.0f * sy, 340.0f * sx, 220.0f * sy, 0xC0101C30, -1, 0, 0, 0, 0);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    /* [S31 redesign] Roster panel rendered as an UNSELECTABLE BUTTON — the
+     * same neon rounded-rect frame the menu buttons use (unselected palette,
+     * never highlighted) — left-aligned with the NET PLAY title
+     * (FE_LOBBY_X == FE_TITLE_LEFT_X). */
+    fe_draw_button_frame((float)FE_LOBBY_X * sx, (float)FE_LOBBY_PANEL_Y * sy,
+                         (float)FE_LOBBY_PANEL_W * sx, (float)FE_LOBBY_PANEL_H * sy,
+                         1 /* unselected */, sx, sy);
 
-    fe_draw_text(56.0f * sx, 106.0f * sy, "PLAYERS IN LOBBY", 0xFF00FF00, sx, sy);
+    fe_draw_text((FE_LOBBY_X + 18.0f) * sx, (FE_LOBBY_PANEL_Y + 14.0f) * sy,
+                 "PLAYERS IN LOBBY", 0xFF00FF00, sx, sy);
     for (slot = 0; slot < TD5_NET_MAX_PLAYERS; slot++) {
         const char *name;
+        const char *tag;
         int lat;
         if (!td5_net_is_slot_active(slot)) continue;
         name = td5_net_get_slot_name(slot);
         if (!name[0]) name = "Player";
+        tag = (slot == 0) ? " (HOST)" : "";
         lat = td5_net_get_slot_latency_ms(slot);
         if (slot == td5_net_local_slot())
-            snprintf(line, sizeof(line), "%d. %s (you)", slot + 1, name);
+            snprintf(line, sizeof(line), "%d. %s%s (YOU)", slot + 1, name, tag);
         else if (lat >= 0)
-            snprintf(line, sizeof(line), "%d. %s   %dms", slot + 1, name, lat);
+            snprintf(line, sizeof(line), "%d. %s%s   %dms", slot + 1, name, tag, lat);
         else
-            snprintf(line, sizeof(line), "%d. %s   --", slot + 1, name);
-        fe_draw_text(60.0f * sx, (136.0f + row * 22.0f) * sy, line, 0xFFFFFFFF, sx, sy);
+            snprintf(line, sizeof(line), "%d. %s%s   --", slot + 1, name, tag);
+        fe_draw_small_text((FE_LOBBY_X + 22.0f) * sx,
+                           (float)(FE_LOBBY_ROW0_Y + row * FE_LOBBY_ROW_H + 4) * sy,
+                           line, 0xFFFFFFFF, sx, sy);
+        /* [S31] Green READY tag (clients toggle it with the READY button). */
+        if (slot != 0 && s_slot_ready[slot])
+            fe_draw_small_text((FE_LOBBY_X + FE_LOBBY_PANEL_W - 88.0f) * sx,
+                               (float)(FE_LOBBY_ROW0_Y + row * FE_LOBBY_ROW_H + 4) * sy,
+                               "READY", 0xFF40FF40u, sx, sy);
         row++;
     }
-    /* Host/connect status line at the bottom of the panel. */
+    /* Host/connect status at the bottom of the panel. */
     status = td5_net_get_status_text();
     if (status[0])
-        fe_draw_small_text(56.0f * sx, 298.0f * sy, status, 0xFFA8C0E0, sx, sy);
+        fe_draw_small_text((FE_LOBBY_X + 18.0f) * sx, 290.0f * sy, status,
+                           0xFFA8C0E0, sx, sy);
 }
 
-/* S10b: the OPTIONS modal is drawn in a POST-button pass (the action buttons are
- * rendered after the per-screen overlay, so drawing the modal in the overlay let
- * the buttons paint over it). Called from td5_frontend_render_ui_rects after the
- * button loop so it covers everything. */
-static void frontend_render_lobby_modal(float sx, float sy) {
-    char buf[72], mask[33];
+
+/* [S31] HOST GAME setup values, edited IN PLACE: while a field is being
+ * edited its value text becomes the live edit buffer with a caret — no
+ * separate text-input widget is drawn over the screen. */
+static void frontend_render_create_session_overlay(float sx, float sy) {
+    char buf[72], mask[34];
     int n, k;
-    if (!s_lobby_modal) return;
-
-    /* Heavy backdrop so the whole lobby (incl. buttons) is hidden behind it. */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xE6000000, -1, 0, 0, 0, 0);
-    fe_draw_quad(150.0f * sx, 140.0f * sy, 340.0f * sx, 200.0f * sy, 0xF8102845, -1, 0, 0, 0, 0);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-
-    fe_draw_text_centered(320.0f * sx, 154.0f * sy, "GAME OPTIONS", 0xFFFFD040, sx, sy);
-    snprintf(buf, sizeof(buf), "MAX PLAYERS:  < %d >", s_lobby_max_players);
-    fe_draw_text_centered(320.0f * sx, 196.0f * sy, buf, 0xFFFFFFFF, sx, sy);
+    uint32_t c_name = (s_cs_edit == 1) ? 0xFFFFE080u : 0xFFFFFFFFu;
+    uint32_t c_pass = (s_cs_edit == 2) ? 0xFFFFE080u : 0xFFFFFFFFu;
+    snprintf(buf, sizeof(buf), "%s%s", s_create_session_name,
+             (s_cs_edit == 1) ? "_" : "");
+    fe_draw_text(368.0f * sx, 166.0f * sy, buf, c_name, sx, sy);
     n = (int)strlen(s_lobby_password);
     if (n > 32) n = 32;
     for (k = 0; k < n; k++) mask[k] = '*';
     mask[n] = '\0';
-    snprintf(buf, sizeof(buf), "PASSWORD: %s_", mask);
-    fe_draw_text_centered(320.0f * sx, 226.0f * sy, buf, 0xFFFFFFFF, sx, sy);
-    fe_draw_small_text(180.0f * sx, 286.0f * sy,
-                       "<- -> set MAX   -   type PASSWORD", 0xFFB0B0B0, sx, sy);
-    fe_draw_small_text(180.0f * sx, 306.0f * sy,
-                       "ENTER = done    ESC = cancel", 0xFFB0B0B0, sx, sy);
+    if (s_cs_edit == 2)
+        snprintf(buf, sizeof(buf), "%s_", mask);
+    else
+        snprintf(buf, sizeof(buf), "%s", n ? mask : "(OPEN)");
+    fe_draw_text(368.0f * sx, 262.0f * sy, buf, c_pass, sx, sy);
+}
+
+/* [S31] MAX PLAYERS selector content — POST-button pass so the centred
+ * value + the ◄ ► arrows draw on top of the button frame (same pattern as
+ * the car-select nav bar). */
+static void frontend_render_create_session_postpass(float sx, float sy) {
+    char buf[40];
+    float bx, by, bw, bh, tw;
+    if (s_current_screen != TD5_SCREEN_CREATE_SESSION) return;
+    if (!s_buttons[1].active) return;
+    frontend_get_button_render_rect(1, sx, sy, &bx, &by, &bw, &bh);
+    snprintf(buf, sizeof(buf), "MAX PLAYERS: %d", s_lobby_max_players);
+    tw = fe_measure_text(buf, sx, sy);
+    fe_draw_text(bx + (bw - tw) * 0.5f, by, buf, 0xFFFFFFFF, sx, sy);
+    fe_draw_option_arrows(1, sx, sy);
+}
+
+/* [S31 redesign] Exit-door icons over the lobby's per-row KICK buttons —
+ * drawn in the POST-button pass (the slot the old OPTIONS modal used) so
+ * they sit on top of the button frames, tracking the slide-in animation. */
+static void frontend_render_lobby_kick_icons(float sx, float sy) {
+    int k;
+    if (s_current_screen != TD5_SCREEN_NETWORK_LOBBY) return;
+    for (k = 4; k <= 8 && k < FE_MAX_BUTTONS; k++) {
+        float bx, by, bw, bh;
+        if (!s_buttons[k].active || s_buttons[k].hidden) continue;
+        frontend_get_button_render_rect(k, sx, sy, &bx, &by, &bw, &bh);
+        /* exit sign: right-pointing arrow leaving through the door bar */
+        td5_vui_arrow(bx + bw * 0.14f, by + bh * 0.28f,
+                      bw * 0.42f, bh * 0.44f, 1, 0xFFFFC8C8u);
+        fe_draw_quad(bx + bw * 0.64f, by + bh * 0.18f,
+                     bw * 0.12f, bh * 0.64f, 0xFFFFC8C8u, -1, 0, 0, 0, 0);
+    }
 }
 
 void td5_frontend_render_ui_rects(void) {
@@ -7973,7 +8114,8 @@ void td5_frontend_render_ui_rects(void) {
         if (s_text_input_state != 0) frontend_render_text_input();
         break;
     case TD5_SCREEN_CREATE_SESSION:
-        if (s_inner_state == 2 && s_text_input_state != 0) frontend_render_text_input();
+        /* [S31] values are edited in place — no separate input widget. */
+        frontend_render_create_session_overlay(sx, sy);
         break;
     case TD5_SCREEN_DIRECT_CONNECT:
         /* Only during the IP-entry (3) / password-entry (8) sub-states. */
@@ -8239,7 +8381,9 @@ void td5_frontend_render_ui_rects(void) {
      * it covers the whole lobby (the per-screen overlay above runs BEFORE the
      * buttons, which would otherwise paint over the modal). */
     if (s_current_screen == TD5_SCREEN_NETWORK_LOBBY)
-        frontend_render_lobby_modal(sx, sy);
+        frontend_render_lobby_kick_icons(sx, sy);
+    if (s_current_screen == TD5_SCREEN_CREATE_SESSION)
+        frontend_render_create_session_postpass(sx, sy);
 
     /* Nav bar text drawn after buttons so it renders on top of the button frame.
      * (button 0 is the nav bar: button loop draws the 9-slice frame, then we

@@ -76,6 +76,7 @@ int  td5_net_enumerate_sessions(void);
 /* --- Messaging --- */
 int  td5_net_send(TD5_NetMsgType type, const void *data, int size);
 int  td5_net_receive(TD5_NetMsgType *type, void **data, int *size);
+void td5_net_race_done(void);
 
 /* --- State query --- */
 int  td5_net_is_host(void);
@@ -86,5 +87,28 @@ int  td5_net_local_slot(void);
 int  td5_net_is_connection_lost(void);
 int  td5_net_get_enum_session_count(void);
 const char *td5_net_get_enum_session_name(int index);
+int  td5_net_get_enum_session_info(int index, int *player_count, int *max_players);
+
+/* --- S31 network race config (2026-06-10) -------------------------------
+ * Host-authoritative race parameters broadcast in the DXPSTART payload so
+ * every machine launches the SAME race. Lockstep has no state correction,
+ * so a per-machine difference in any of these (track, direction, any
+ * slot's carparam, or the RNG stream) is a guaranteed permanent desync. */
+typedef struct TD5_NetRaceConfig {
+    uint32_t rng_seed;            /* InitRace srand + schedule AI-pick seed */
+    int32_t  track_index;
+    int32_t  reverse_direction;
+    int32_t  lap_count;           /* informational (net races force 4) */
+    int32_t  num_opponents;       /* AI opponent count (decides active slots) */
+    int32_t  difficulty;          /* difficulty tier (AI car pool row) */
+    int32_t  td6_color[6];        /* per-slot TD6 body RGB (0xFFFFFF = unpainted) */
+    int32_t  car_index[6];        /* per net slot (TD5_NET_MAX_PLAYERS) */
+    int32_t  paint_index[6];
+} TD5_NetRaceConfig;
+
+void td5_net_set_local_car(int car_index, int paint_index, int td6_color);
+int  td5_net_get_slot_td6_color(int slot);
+int  td5_net_get_slot_car(int slot, int *car_index, int *paint_index);
+int  td5_net_get_race_config(TD5_NetRaceConfig *out);
 
 #endif /* TD5_NET_H */

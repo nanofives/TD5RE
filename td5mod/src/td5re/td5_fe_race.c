@@ -1504,11 +1504,17 @@ void Screen_CarSelection(void) {
                     s_selected_game_type != 8 && s_selected_game_type != 5) {
                     frontend_play_sfx(10); /* rejection */
                 } else {
-                    /* Accept selection → forward to track selection */
+                    /* Accept selection → forward to track selection.
+                     * [S31] Net-lobby flow (host AND client): CHANGE CAR
+                     * returns to the LOBBY — the track is the host's call
+                     * via SELECT TRACK, and a client must never reach the
+                     * track picker (it can launch a race). */
                     if (s_selected_game_type == 5) {
                         s_masters_roster_flags[s_selected_car] = 2; /* taken */
                     }
-                    s_return_screen = TD5_SCREEN_TRACK_SELECTION;
+                    s_return_screen = s_network_active
+                                        ? TD5_SCREEN_NETWORK_LOBBY
+                                        : TD5_SCREEN_TRACK_SELECTION;
                     s_inner_state = 0x14; /* slide-out prep */
                 }
             }
@@ -1516,7 +1522,9 @@ void Screen_CarSelection(void) {
 
             case 5: /* Back */
                 s_drag_carselect_pass = 0;
-                s_return_screen = TD5_SCREEN_RACE_TYPE_MENU;
+                s_return_screen = s_network_active
+                                    ? TD5_SCREEN_NETWORK_LOBBY   /* [S31] */
+                                    : TD5_SCREEN_RACE_TYPE_MENU;
                 s_inner_state = 0x14;
                 break;
             }
