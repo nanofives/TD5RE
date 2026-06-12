@@ -262,6 +262,7 @@ typedef struct CarInfoMsg {          /* S31: client announces its car pick */
     uint32_t    slot;
     int32_t     car;
     int32_t     paint;
+    int32_t     td6_color;          /* [S31] chosen TD6 body RGB (-1 = none) */
 } CarInfoMsg;
 
 typedef struct PingMsg {
@@ -294,6 +295,7 @@ static TD5_NetRaceConfig s_race_config;
 static int     s_race_config_valid = 0;
 static int32_t s_slot_car[TD5_NET_MAX_PLAYERS]   = { -1, -1, -1, -1, -1, -1 };
 static int32_t s_slot_paint[TD5_NET_MAX_PLAYERS] = { 0 };
+static int32_t s_slot_td6_color[TD5_NET_MAX_PLAYERS] = { -1, -1, -1, -1, -1, -1 };
 static WSAEVENT     s_ws2_event = WSA_INVALID_EVENT;
 static int          s_ws2_started;
 static int          s_ws2_socket_bound;
@@ -857,7 +859,13 @@ static void handle_disconnect(uint32_t sender, const void *data, int size)
             for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
                 if (s_roster[i].active) n++;
             s_player_count = n;
+            s_slot_td6_color[slot] = -1;
             ws2_broadcast_roster_info();
+            /* Mid-race: the lockstep barrier may be blocked waiting on this
+             * client's input. Wake it -- the freed slot is no longer counted,
+             * so the host merges the remaining players and races on (the
+             * window froze for the full 20 s timeout otherwise). */
+            SetEvent(s_evt_frame_ack);
         }
         ring_push(TD5_DXPDISCONNECT, NULL, 0);
         return;
@@ -1888,10 +1896,11 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
         if (s_is_host && size >= (int)sizeof(CarInfoMsg)) {
             const CarInfoMsg *cm = (const CarInfoMsg *)buf;
             if (cm->slot < TD5_NET_MAX_PLAYERS) {
-                s_slot_car[cm->slot]   = cm->car;
-                s_slot_paint[cm->slot] = cm->paint;
-                TD5_LOG_I(NET_LOG, "CAR_INFO: slot %u car=%d paint=%d",
-                          cm->slot, cm->car, cm->paint);
+                s_slot_car[cm->slot]       = cm->car;
+                s_slot_paint[cm->slot]     = cm->paint;
+                s_slot_td6_color[cm->slot] = cm->td6_color;
+                TD5_LOG_I(NET_LOG, "CAR_INFO: slot %u car=%d paint=%d color=%06X",
+                          cm->slot, cm->car, cm->paint, (unsigned)cm->td6_color);
             }
         }
         break;
@@ -3134,11 +3143,12 @@ int td5_net_enumerate_sessions(void)
 /** Record this machine's car/paint pick; clients also announce it to the
  *  host over the control channel. Called on every lobby entry (including
  *  the return from CHANGE CAR). */
-void td5_net_set_local_car(int car_index, int paint_index)
+void td5_net_set_local_car(int car_index, int paint_index, int td6_color)
 {
     if (s_local_slot >= 0 && s_local_slot < TD5_NET_MAX_PLAYERS) {
-        s_slot_car[s_local_slot]   = car_index;
-        s_slot_paint[s_local_slot] = paint_index;
+        s_slot_car[s_local_slot]       = car_index;
+        s_slot_paint[s_local_slot]     = paint_index;
+        s_slot_td6_color[s_local_slot] = td6_color;
     }
     if (!s_is_host && s_ws2_socket != INVALID_SOCKET && s_local_slot >= 0) {
         CarInfoMsg msg;
@@ -3148,10 +3158,19 @@ void td5_net_set_local_car(int car_index, int paint_index)
         msg.slot      = (uint32_t)s_local_slot;
         msg.car       = car_index;
         msg.paint     = paint_index;
+        msg.td6_color = td6_color;
         sendto(s_ws2_socket, (const char *)&msg, (int)sizeof(msg), 0,
                (const struct sockaddr *)&s_ws2_host_addr,
                (int)sizeof(s_ws2_host_addr));
     }
+}
+
+/** The latest announced TD6 body colour for a slot (-1 = none chosen). */
+int td5_net_get_slot_td6_color(int slot)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS)
+        return -1;
+    return s_slot_td6_color[slot];
 }
 
 /** Host: the latest announced car/paint for a slot (-1 car = none yet). */

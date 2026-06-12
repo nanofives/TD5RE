@@ -68,6 +68,9 @@ static uint32_t s_last_poll_timestamp;  /* DAT_004968a8 */
  * entry. The roster overlay draws the green READY tag from this. */
 uint8_t     s_slot_ready[6];
 static int  s_my_ready;
+static int  s_car_announce_done;  /* [S31] set once CAR_INFO went out with a
+                                   * valid slot (JOIN_ACK can land after the
+                                   * first lobby entry's announce attempt) */
 
 char s_create_session_name[64];
 
@@ -921,7 +924,9 @@ void Screen_NetworkLobby(void) {
 
         /* S31: (re)announce this machine's car pick to the host -- runs on
          * every lobby entry, including the return from CHANGE CAR. */
-        td5_net_set_local_car(s_selected_car, s_selected_paint);
+        td5_net_set_local_car(s_selected_car, s_selected_paint,
+                              g_td5.ini.td6_paint_color);
+        s_car_announce_done = (td5_net_local_slot() >= 0);
 
         /* Kick check: if kicked flag set, destroy session, go to SessionLocked */
         if (s_kicked_flag) {
@@ -1013,6 +1018,14 @@ void Screen_NetworkLobby(void) {
 
     case 3: /* MAIN INTERACTIVE LOBBY */
         frontend_present_buffer();
+
+        /* [S31] Late car announce: the state-0 attempt is a no-op while the
+         * JOIN handshake hasn't assigned our slot yet. */
+        if (!s_car_announce_done && td5_net_local_slot() >= 0) {
+            td5_net_set_local_car(s_selected_car, s_selected_paint,
+                                  g_td5.ini.td6_paint_color);
+            s_car_announce_done = 1;
+        }
 
         /* ESC backs out of the lobby = the EXIT action (tear the session down so
          * no dangling host/session leaks). Mirrors button index 3. */
@@ -1461,8 +1474,13 @@ void Screen_NetworkLobby(void) {
                 cfg.num_opponents     = g_td5.num_ai_opponents;
                 cfg.difficulty        = g_td5.difficulty_tier;
                 for (slot = 0; slot < 6; slot++) {
+                    int col = td5_net_get_slot_td6_color(slot);
                     cfg.car_index[slot]   = 0;
                     cfg.paint_index[slot] = 0;
+                    /* 0xFFFFFF = "leave the grey base art" -- the same value
+                     * the painter treats as no-op, so machines that never
+                     * announced a colour render identically everywhere. */
+                    cfg.td6_color[slot]   = (col >= 0) ? col : 0x00FFFFFF;
                     if (td5_net_get_slot_car(slot, &c, &p) && c >= 0) {
                         cfg.car_index[slot]   = c;
                         cfg.paint_index[slot] = p;

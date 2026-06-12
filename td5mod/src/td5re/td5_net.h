@@ -101,11 +101,13 @@ typedef struct TD5_NetRaceConfig {
     int32_t  lap_count;           /* informational (net races force 4) */
     int32_t  num_opponents;       /* AI opponent count (decides active slots) */
     int32_t  difficulty;          /* difficulty tier (AI car pool row) */
+    int32_t  td6_color[6];        /* per-slot TD6 body RGB (0xFFFFFF = unpainted) */
     int32_t  car_index[6];        /* per net slot (TD5_NET_MAX_PLAYERS) */
     int32_t  paint_index[6];
 } TD5_NetRaceConfig;
 
-void td5_net_set_local_car(int car_index, int paint_index);
+void td5_net_set_local_car(int car_index, int paint_index, int td6_color);
+int  td5_net_get_slot_td6_color(int slot);
 int  td5_net_get_slot_car(int slot, int *car_index, int *paint_index);
 int  td5_net_get_race_config(TD5_NetRaceConfig *out);
 

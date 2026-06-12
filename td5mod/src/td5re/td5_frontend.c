@@ -2734,6 +2734,19 @@ void frontend_init_race_schedule(void) {
             /* The AI fill below must not overwrite the net players' slots
              * (it used to start at slot 1 and stomp every client's car). */
             if (np > start_slot) start_slot = np;
+            /* [S31] TD6 body colours ride the config too: the asset painter
+             * otherwise colours slot 0 with the LOCAL machine's INI choice
+             * and other humans with the AI hash -- every machine rendered
+             * its own idea of the field ("client sees the same car twice,
+             * host sees correctly"). */
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
+                td5_asset_set_human_td6_color(
+                    i, (i < np && i < 6) ? net_cfg.td6_color[i] : -1);
+            for (i = 0; i < np && i < 6; i++)
+                TD5_LOG_I(LOG_TAG,
+                          "InitRaceSchedule: net slot%d car=%d paint=%d color=%06X",
+                          i, net_cfg.car_index[i], net_cfg.paint_index[i],
+                          (unsigned)net_cfg.td6_color[i]);
             /* Opponent count is host-authoritative: it decides how many racer
              * slots InitRace enables -- a mismatch is a different grid. */
             g_td5.num_ai_opponents = net_cfg.num_opponents;
