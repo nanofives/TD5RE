@@ -834,9 +834,34 @@ static void handle_roster(uint32_t sender, const void *data, int size)
  */
 static void handle_disconnect(uint32_t sender, const void *data, int size)
 {
-    (void)sender;
     (void)data;
     (void)size;
+
+    /* [S31] HOST receiving a CLIENT's disconnect (kick honoured, lobby exit,
+     * app close): free that roster slot and tell everyone. Without this the
+     * row lingered forever and a rejoin grabbed a NEW slot ("kicked player
+     * still listed; 3 players after rejoining"). Only a CLIENT losing its
+     * link to the host flags connection_lost. */
+    if (s_is_host) {
+        int slot = find_slot_by_id(sender);
+        TD5_LOG_W(NET_LOG, "Received DXPDISCONNECT from id=%u (slot %d)",
+                  sender, slot);
+        if (slot > 0 && slot < TD5_NET_MAX_PLAYERS) {
+            int i, n = 0;
+            s_roster[slot].active  = 0;
+            s_roster[slot].id      = 0;
+            s_roster[slot].name[0] = '\0';
+            s_ws2_peer_valid[slot] = 0;
+            s_slot_car[slot]   = -1;
+            s_slot_paint[slot] = 0;
+            for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+                if (s_roster[i].active) n++;
+            s_player_count = n;
+            ws2_broadcast_roster_info();
+        }
+        ring_push(TD5_DXPDISCONNECT, NULL, 0);
+        return;
+    }
 
     TD5_LOG_W(NET_LOG, "Received DXPDISCONNECT");
 
@@ -1287,6 +1312,7 @@ static void ws2_send_disc_query(void)
 static DWORD s_ws2_enum_win_start = 0;   /* GetTickCount of the active window, 0 = none */
 static DWORD s_ws2_enum_last_bcast = 0;
 static DWORD s_ws2_enum_last_call  = 0;
+static DWORD s_ws2_enum_seen[MAX_ENUM_SESSIONS];  /* [S31] last ANNOUNCE per entry */
 
 static int ws2_transport_enum(void)
 {
@@ -1307,6 +1333,12 @@ static int ws2_transport_enum(void)
         s_ws2_enum_last_bcast = now;
     } else if ((now - s_ws2_enum_last_bcast) >= 250 &&
                (now - s_ws2_enum_win_start) < 2000) {
+        ws2_send_disc_query();
+        s_ws2_enum_last_bcast = now;
+    } else if ((now - s_ws2_enum_last_bcast) >= 3000) {
+        /* [S31] Steady-state auto-refresh: the browser stays open, so keep
+         * asking every ~3 s -- a host that starts AFTER the window closed
+         * still shows up without leaving and re-entering the screen. */
         ws2_send_disc_query();
         s_ws2_enum_last_bcast = now;
     }
@@ -1364,11 +1396,32 @@ static int ws2_transport_enum(void)
         s_enum_sessions[slot].game_type    = resp.game_type;
         s_ws2_enum_host_addrs[slot] = from_addr;
         s_ws2_enum_host_addrs[slot].sin_port = htons(resp.game_port);
+        s_ws2_enum_seen[slot] = now;
 
         if (!dup) {
             TD5_LOG_I(NET_LOG, "Enum: found session \"%s\" (%u/%u)",
                       resp.session_name, resp.player_count, resp.max_players);
             s_enum_session_count++;
+        }
+    }
+
+    /* [S31] Expire entries whose host stopped answering (~3 missed refresh
+     * cycles) so a closed session drops off the auto-refreshing list. Only
+     * meaningful in the steady state -- during the initial window every
+     * entry is younger than the threshold anyway. */
+    for (i = 0; i < s_enum_session_count; ) {
+        if ((now - s_ws2_enum_seen[i]) > 10000) {
+            int k;
+            TD5_LOG_I(NET_LOG, "Enum: session \"%s\" expired (host silent)",
+                      s_enum_sessions[i].name);
+            for (k = i; k < s_enum_session_count - 1; k++) {
+                s_enum_sessions[k]       = s_enum_sessions[k + 1];
+                s_ws2_enum_host_addrs[k] = s_ws2_enum_host_addrs[k + 1];
+                s_ws2_enum_seen[k]       = s_ws2_enum_seen[k + 1];
+            }
+            s_enum_session_count--;
+        } else {
+            i++;
         }
     }
     return s_enum_session_count;
