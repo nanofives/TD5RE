@@ -90,6 +90,12 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot);
  * TD6 car body. TD5 cars/AI keep tint 0 and render unchanged. */
 void td5_render_set_vehicle_tint(int slot, uint32_t rgb);
 
+/* [WHEEL OVERHAUL 2026-06-12] Per-slot procedural wheel STYLE index. Assigned
+ * once per race (random, from the deterministic per-race RNG so netplay stays
+ * in sync). Wrapped into the style-table range. -1 / unset slots fall back to a
+ * stable per-slot hash. Honoured only when TD5RE_WHEEL_OVERHAUL != 0. */
+void td5_render_set_wheel_style(int slot, int style);
+
 /* Mark a slot as holding a ported TD6 car (transcoded mesh). Suppresses the
  * chrome/projection reflection overlay for that slot (TD6 cars have a grayscale
  * body + unused env-map mesh, so the overlay misrenders as a "lights shader" in

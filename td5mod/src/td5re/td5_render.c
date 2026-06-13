@@ -727,6 +727,9 @@ static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_ver
 /* Vehicle shadow + wheel billboard + brake light + reflection rendering */
 static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
+static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot);  /* wheel overhaul */
+static int  wheel_overhaul_enabled(void);
+static int  wheel_traffic_enabled(void);
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
 static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
 static void render_tracked_actor_marker(const TD5_Actor *actor,
@@ -1060,7 +1063,8 @@ static void inspect_cam_load_env(void)
     if (el && el[0]) s_inspect_el_deg = (float)atof(el);
     if (ds && ds[0]) s_inspect_dist  = (float)atof(ds);
     if (sl && sl[0]) s_inspect_slot  = atoi(sl);
-    if (s_inspect_slot < 0 || s_inspect_slot > 5)
+    /* [wheel-overhaul dev] allow framing traffic slots too (was capped at 5). */
+    if (s_inspect_slot < 0 || s_inspect_slot >= TD5_ACTOR_MAX_TOTAL_SLOTS)
         s_inspect_slot = 0;
     TD5_LOG_W(LOG_TAG, "InspectCam ON: slot=%d az=%.1f el=%.1f dist=%.1f",
               s_inspect_slot, s_inspect_az_deg, s_inspect_el_deg, s_inspect_dist);
@@ -3368,10 +3372,21 @@ void td5_render_actors_for_view(int view_index)
              * geometry again (user-visible as randomly wrong traffic wheels).
              * g_traffic_slot_base is the racer/traffic boundary in every
              * field layout (6 legacy, 16 big splits). */
-            if (slot < g_traffic_slot_base) {
+            /* [WHEEL OVERHAUL 2026-06-12] Unified wheel renderer for ALL
+             * vehicle classes. Racers/police/TD6 cars (slot < base) always get
+             * wheels; traffic gets the same procedural wheels when the overhaul
+             * + traffic toggle are on (its baked mesh wheels still draw — a
+             * converter pass to strip them is the follow-up). Brake lights stay
+             * racer-only (faithful — traffic never drew them). */
+            int is_racer = (slot < g_traffic_slot_base);
+            if (wheel_overhaul_enabled()) {
+                if (is_racer || wheel_traffic_enabled())
+                    render_vehicle_wheels_unified(actor, slot);
+            } else if (is_racer) {
                 render_vehicle_wheel_billboards(actor, slot);
-                render_vehicle_brake_lights(actor, slot);
             }
+            if (is_racer)
+                render_vehicle_brake_lights(actor, slot);
 
             /* (Vehicle shadow drawn in the per-view shadow pre-pass above.) */
 
@@ -6529,6 +6544,290 @@ static void wheel_lookup_static_hed(void)
  * rationale and the documented invariants that DO hold (CW-from-+Z yaw,
  * billboard position, UV mapping).
  */
+
+/* ============================================================================
+ *  UNIFIED PROCEDURAL WHEEL SYSTEM  (overhaul 2026-06-12)
+ *
+ *  Replaces the per-class wheel handling with ONE renderer used by racers,
+ *  police, TD6 cars AND traffic:
+ *    - higher-poly tire cylinder (WHEEL_SEG_HI facets vs the old octagon)
+ *    - styled rim: procedural spoke designs + per-style colour
+ *    - tire AND rim share ONE steering-yaw + projection helper, which
+ *      structurally guarantees the rim stays synced with the tire (the old
+ *      code rotated the hub disc with the OPPOSITE sign convention to the
+ *      tire ring, so the rim swung the wrong way under steering).
+ *    - per-race RANDOM style per slot (td5_render_set_wheel_style), assigned
+ *      from the deterministic per-race RNG so netplay stays in sync.
+ *
+ *  A/B: TD5RE_WHEEL_OVERHAUL=0 falls back to render_vehicle_wheel_billboards.
+ *       TD5RE_WHEEL_TRAFFIC=0 keeps traffic on its baked-in mesh wheels.
+ * ========================================================================== */
+#define WHEEL_SEG_HI     24      /* tire tread facets (was WHEEL_SEGMENTS = 8) */
+#define WHEEL_RIM_SEG    18      /* rim-face perimeter facets */
+#define WHEEL_STYLE_MAX_SPOKES 16  /* max spokes across k_wheel_styles (sizes scratch buffers) */
+#define WHEEL_WHITE_PAGE 899     /* 1x1 white (shared shadow/HUD page): texel*diffuse = diffuse */
+
+typedef struct {
+    const char *name;
+    int      spokes;     /* spoke count (0 = smooth dish, no spokes) */
+    uint32_t rim_col;    /* ARGB rim face colour */
+    uint32_t spoke_col;  /* ARGB spoke colour */
+    uint32_t hub_col;    /* ARGB centre hub-cap colour */
+    float    hub_frac;   /* hub radius / rim_radius */
+    float    face_frac;  /* rim-face outer radius / rim_radius */
+    float    spoke_hw;   /* spoke half-angular-width (radians) */
+} WheelStyle;
+
+/* Six procedurally-distinct rim designs. Differentiated by spoke count/width
+ * AND colour so they read apart at race distance even flat-shaded. */
+static const WheelStyle k_wheel_styles[] = {
+    /* name        spk  rim_col     spoke_col   hub_col     hubF   faceF  spkHW */
+    { "5-spoke",    5, 0xFFC4C8CEu, 0xFF26292Eu, 0xFF44484Eu, 0.30f, 0.80f, 0.17f }, /* silver  */
+    { "6-spoke",    6, 0xFFB89433u, 0xFF1C1C1Cu, 0xFF2A2A2Au, 0.28f, 0.80f, 0.13f }, /* gold    */
+    { "mesh",      10, 0xFF5A5E64u, 0xFF101216u, 0xFF303338u, 0.24f, 0.80f, 0.09f }, /* gunmetal*/
+    { "dish",       0, 0xFFD2D6DAu, 0xFF000000u, 0xFF3A3E44u, 0.42f, 0.80f, 0.00f }, /* smooth  */
+    { "twin-5",    10, 0xFF9CA2A8u, 0xFF202226u, 0xFF34373Cu, 0.26f, 0.80f, 0.08f }, /* silver  */
+    { "turbofan",  16, 0xFF34373Du, 0xFFB8BCC0u, 0xFF202327u, 0.20f, 0.80f, 0.22f }, /* dark/light */
+};
+#define WHEEL_STYLE_COUNT ((int)(sizeof(k_wheel_styles) / sizeof(k_wheel_styles[0])))
+
+static int8_t s_wheel_style[TD5_MAX_TOTAL_ACTORS];   /* per-slot, -1 = unset */
+static int    s_wheel_style_init = 0;
+static int    s_wheel_white_uploaded = 0;
+
+static int wheel_overhaul_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_OVERHAUL"); cached = (e && e[0] == '0') ? 0 : 1; }
+    return cached;
+}
+static int wheel_traffic_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_TRAFFIC"); cached = (e && e[0] == '0') ? 0 : 1; }
+    return cached;
+}
+
+/* Set a slot's wheel style (called at race init with a per-race RNG roll). */
+void td5_render_set_wheel_style(int slot, int style) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    int n = WHEEL_STYLE_COUNT;
+    s_wheel_style[slot] = (int8_t)(((style % n) + n) % n);
+}
+
+static int wheel_style_for_slot(int slot) {
+    if (!s_wheel_style_init) {
+        for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) s_wheel_style[i] = -1;
+        s_wheel_style_init = 1;
+    }
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    int s = s_wheel_style[slot];
+    if (s < 0) s = (slot * 7 + 3) % WHEEL_STYLE_COUNT;  /* stable fallback before assignment */
+    return s;
+}
+
+/* Project a wheel-LOCAL point (lx along axle, ly vertical, lz longitudinal)
+ * through the SINGLE shared steering-yaw convention (CW-from-+Z, same as the
+ * faithful tire ring) and the vehicle render matrix. Tire and rim both call
+ * this, so they can never desync under steering. Returns 0 if behind near. */
+static int wheel_project(const float *m, float wx, float wy, float wz,
+                         float lx, float ly, float lz, float cs, float sn,
+                         float u, float v, uint32_t col, TD5_D3DVertex *out)
+{
+    float rx =  lx * cs + lz * sn;
+    float rz = -lx * sn + lz * cs;
+    float px = wx + rx, py = wy + ly, pz = wz + rz;
+    float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+    float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+    float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
+    if (vz <= s_near_clip) return 0;
+    float iz = 1.0f / vz;
+    out->screen_x = -vx * s_focal_length * iz + s_center_x;
+    out->screen_y = -vy * s_focal_length * iz + s_center_y;
+    out->depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+    out->rhw      = iz;
+    out->diffuse  = col;
+    out->specular = 0;
+    out->tex_u    = u;
+    out->tex_v    = v;
+    return 1;
+}
+
+static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
+{
+    const float *m = s_render_transform.m;
+
+    if (!s_wheel_lookup_done)
+        wheel_lookup_static_hed();
+    if (!s_wheel_white_uploaded) {
+        static const uint32_t k_white = 0xFFFFFFFFu;
+        td5_plat_render_upload_texture(WHEEL_WHITE_PAGE, &k_white, 1, 1, 2);
+        s_wheel_white_uploaded = 1;
+    }
+
+    /* Wheel dimensions from cardef (racers/police/TD6 cars); traffic has no
+     * per-actor cardef -> sensible defaults so traffic still gets wheels. */
+    float rim_radius = WHEEL_RADIUS_DEFAULT;
+    float axle_halfw = WHEEL_HALFW_DEFAULT;
+    if (actor->car_definition_ptr) {
+        int16_t r  = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x82);
+        int16_t hw = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x84);
+        if (r  > 0) rim_radius = (float)r * WHEEL_RADIUS_SCALE;
+        if (hw > 0) axle_halfw = (float)hw;
+    }
+
+    /* Hub spin odometer (same fields/scale as the legacy path). */
+    int32_t slip_front_12 = (int32_t)actor->accumulated_tire_slip_z * -4;
+    int32_t slip_rear_12  = (int32_t)actor->accumulated_tire_slip_x * -4;
+    float front_spin = (float)slip_front_12 * ((float)M_PI / 2048.0f);
+    float rear_spin  = (float)slip_rear_12  * ((float)M_PI / 2048.0f);
+
+    const WheelStyle *st = &k_wheel_styles[wheel_style_for_slot(slot)];
+    float face_r = rim_radius * st->face_frac;
+    float hub_r  = rim_radius * st->hub_frac;
+    /* Outboard layering epsilon (scaled to car) so rim layers don't z-fight. */
+    float eps = axle_halfw * 0.06f + 0.4f;
+
+    /* Traffic vehicles carry their wheels baked into the body mesh and never
+     * populate wheel_display_angles. Synthesize a 4-wheel layout from the mesh
+     * bounding radius so the unified renderer can draw them too. (The baked
+     * mesh wheels still draw underneath — a converter pass to strip them is the
+     * follow-up; until then TD5RE_WHEEL_TRAFFIC=0 disables this.) Order: FL, FR,
+     * RL, RR with (w&1)=right. */
+    int16_t synth[4][3];
+    int use_synth = 0;
+    if (actor->wheel_display_angles[0][0] == 0 && actor->wheel_display_angles[0][1] == 0 &&
+        actor->wheel_display_angles[0][2] == 0 && actor->wheel_display_angles[1][0] == 0) {
+        TD5_MeshHeader *mh = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS)
+                             ? s_vehicle_meshes[slot] : NULL;
+        float rb = (mh && mh->bounding_radius > 1.0f) ? mh->bounding_radius : 360.0f;
+        float track = rb * 0.38f;        /* lateral half-track */
+        float front =  rb * 0.55f;       /* front axle Z */
+        float rear  = -rb * 0.60f;       /* rear axle Z  */
+        float wy0   = (mh ? mh->bounding_center_y : 0.0f) - rb * 0.34f;  /* wheel centre Y */
+        int16_t zf = (int16_t)front, zr = (int16_t)rear, tx = (int16_t)track, wy16 = (int16_t)wy0;
+        synth[0][0] = -tx; synth[0][1] = wy16; synth[0][2] = zf;   /* FL */
+        synth[1][0] =  tx; synth[1][1] = wy16; synth[1][2] = zf;   /* FR */
+        synth[2][0] = -tx; synth[2][1] = wy16; synth[2][2] = zr;   /* RL */
+        synth[3][0] =  tx; synth[3][1] = wy16; synth[3][2] = zr;   /* RR */
+        use_synth = 1;
+    }
+
+    for (int w = 0; w < 4; w++) {
+        float wx = use_synth ? (float)synth[w][0] : (float)actor->wheel_display_angles[w][0];
+        float wy = use_synth ? (float)synth[w][1] : (float)actor->wheel_display_angles[w][1];
+        float wz = use_synth ? (float)synth[w][2] : (float)actor->wheel_display_angles[w][2];
+        if (wx == 0.0f && wy == 0.0f && wz == 0.0f)
+            continue;
+
+        float inner_off = (w & 1) ? -axle_halfw :  axle_halfw;
+        float outer_off = (w & 1) ?  axle_halfw : -axle_halfw;
+        float ob = (outer_off >= 0.0f) ? 1.0f : -1.0f;   /* outboard direction */
+
+        /* Front-wheel steering yaw (CW-from-+Z) — applied via wheel_project to
+         * BOTH tire and rim, so they stay locked together. */
+        float cs = 1.0f, sn = 0.0f;
+        if (w < 2) {
+            float steer_rad = (float)(actor->steering_command >> 8) * ((float)M_PI / 2048.0f);
+            cs = cosf(steer_rad);
+            sn = sinf(steer_rad);
+        }
+        float spin = (w < 2) ? front_spin : rear_spin;
+
+        /* ---- Tire tread cylinder (higher-poly, black) ---- */
+        TD5_D3DVertex tv[2 * (WHEEL_SEG_HI + 1)];
+        int ok = 1;
+        for (int i = 0; i <= WHEEL_SEG_HI && ok; i++) {
+            float a  = (float)i * (2.0f * (float)M_PI / (float)WHEEL_SEG_HI);
+            float ly = cosf(a) * rim_radius;
+            float lz = sinf(a) * rim_radius;
+            if (!wheel_project(m, wx, wy, wz, inner_off, ly, lz, cs, sn,
+                               s_tire_u, s_tire_v, 0xFFFFFFFFu, &tv[i])) { ok = 0; break; }
+            if (!wheel_project(m, wx, wy, wz, outer_off, ly, lz, cs, sn,
+                               s_tire_u, s_tire_v, 0xFFFFFFFFu, &tv[WHEEL_SEG_HI + 1 + i])) { ok = 0; break; }
+        }
+        if (!ok) continue;   /* wheel partly behind near plane — skip (legacy behaviour) */
+
+        uint16_t tidx[WHEEL_SEG_HI * 12];
+        int ti = 0;
+        for (int i = 0; i < WHEEL_SEG_HI; i++) {
+            uint16_t i0 = (uint16_t)i, i1 = (uint16_t)(i + 1);
+            uint16_t o0 = (uint16_t)(WHEEL_SEG_HI + 1 + i), o1 = (uint16_t)(WHEEL_SEG_HI + 1 + i + 1);
+            tidx[ti++] = i0; tidx[ti++] = o0; tidx[ti++] = o1;
+            tidx[ti++] = i0; tidx[ti++] = o1; tidx[ti++] = i1;
+            tidx[ti++] = i0; tidx[ti++] = o1; tidx[ti++] = o0;   /* back faces */
+            tidx[ti++] = i0; tidx[ti++] = i1; tidx[ti++] = o1;
+        }
+        flush_immediate_internal();
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        td5_plat_render_bind_texture(s_wheel_tex_page);
+        td5_plat_render_draw_tris(tv, 2 * (WHEEL_SEG_HI + 1), tidx, ti);
+
+        /* ---- Styled rim assembly (one white-page draw, per-vertex colour) ---- */
+        TD5_D3DVertex rv[2 + 2 * (WHEEL_RIM_SEG + 1) + WHEEL_STYLE_MAX_SPOKES * 4];
+        uint16_t ridx[WHEEL_RIM_SEG * 12 + WHEEL_STYLE_MAX_SPOKES * 12];
+        int rn = 0, ri = 0, rim_ok = 1;
+        float lx_face = outer_off;
+        float lx_spk  = outer_off + ob * eps;
+        float lx_hub  = outer_off + ob * eps * 2.0f;
+
+        /* Rim face fan: centre + perimeter at face_r (colour rim_col). */
+        int face_c = rn;
+        rim_ok &= wheel_project(m, wx, wy, wz, lx_face, 0, 0, cs, sn, 0.5f, 0.5f, st->rim_col, &rv[rn++]);
+        int face_ring = rn;
+        for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
+            float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
+            rim_ok &= wheel_project(m, wx, wy, wz, lx_face, cosf(a)*face_r, sinf(a)*face_r,
+                                    cs, sn, 0.5f, 0.5f, st->rim_col, &rv[rn++]);
+        }
+        if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
+            uint16_t a = (uint16_t)(face_ring + i), b = (uint16_t)(face_ring + i + 1);
+            ridx[ri++] = (uint16_t)face_c; ridx[ri++] = a; ridx[ri++] = b;
+            ridx[ri++] = (uint16_t)face_c; ridx[ri++] = b; ridx[ri++] = a;  /* double-sided */
+        }
+
+        /* Spokes: thin radial quads hub_r..face_r, spun with the wheel. */
+        if (rim_ok && st->spokes > 0) {
+            int ns = st->spokes; if (ns > WHEEL_STYLE_MAX_SPOKES) ns = WHEEL_STYLE_MAX_SPOKES;
+            for (int s = 0; s < ns && rim_ok; s++) {
+                float ca = spin + (float)s * (2.0f * (float)M_PI / (float)ns);
+                float a0 = ca - st->spoke_hw, a1 = ca + st->spoke_hw;
+                int base = rn;
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a0)*hub_r,  sinf(a0)*hub_r,  cs, sn, 0.5f, 0.5f, st->spoke_col, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a1)*hub_r,  sinf(a1)*hub_r,  cs, sn, 0.5f, 0.5f, st->spoke_col, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a1)*face_r, sinf(a1)*face_r, cs, sn, 0.5f, 0.5f, st->spoke_col, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a0)*face_r, sinf(a0)*face_r, cs, sn, 0.5f, 0.5f, st->spoke_col, &rv[rn++]);
+                if (!rim_ok) break;
+                uint16_t b0=(uint16_t)base,b1=(uint16_t)(base+1),b2=(uint16_t)(base+2),b3=(uint16_t)(base+3);
+                ridx[ri++]=b0; ridx[ri++]=b1; ridx[ri++]=b2;  ridx[ri++]=b0; ridx[ri++]=b2; ridx[ri++]=b3;
+                ridx[ri++]=b0; ridx[ri++]=b2; ridx[ri++]=b1;  ridx[ri++]=b0; ridx[ri++]=b3; ridx[ri++]=b2;
+            }
+        }
+
+        /* Hub cap fan (covers spoke roots), most outboard. */
+        if (rim_ok) {
+            int hub_c = rn;
+            rim_ok &= wheel_project(m, wx, wy, wz, lx_hub, 0, 0, cs, sn, 0.5f, 0.5f, st->hub_col, &rv[rn++]);
+            int hub_ring = rn;
+            for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
+                float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_hub, cosf(a)*hub_r, sinf(a)*hub_r,
+                                        cs, sn, 0.5f, 0.5f, st->hub_col, &rv[rn++]);
+            }
+            if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
+                uint16_t a = (uint16_t)(hub_ring + i), b = (uint16_t)(hub_ring + i + 1);
+                ridx[ri++] = (uint16_t)hub_c; ridx[ri++] = a; ridx[ri++] = b;
+                ridx[ri++] = (uint16_t)hub_c; ridx[ri++] = b; ridx[ri++] = a;
+            }
+        }
+
+        if (rim_ok && ri > 0) {
+            flush_immediate_internal();
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            td5_plat_render_bind_texture(WHEEL_WHITE_PAGE);
+            td5_plat_render_draw_tris(rv, rn, ridx, ri);
+        }
+    }
+}
+
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 {
     const float *m = s_render_transform.m;

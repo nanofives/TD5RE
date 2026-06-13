@@ -1393,6 +1393,21 @@ void td5_game_inject_demo_results(void)
  * at step 1, then all heavy asset loading follows. No progress bar.
  * ======================================================================== */
 
+/* [WHEEL OVERHAUL 2026-06-12] Roll a random procedural wheel style for every
+ * slot (racers + traffic) from a SEPARATE xorshift stream seeded off the race
+ * seed. Using a private stream (not the CRT rand() gameplay/AI consume) keeps
+ * the faithful rand() sequence — and /diff-race parity — untouched, while
+ * staying identical on every netplay machine (same race_seed) and reproducible
+ * on replay. */
+static void td5_game_assign_wheel_styles(uint32_t race_seed) {
+    uint32_t s = race_seed ^ 0x9E3779B9u;   /* decorrelate from the gameplay seed */
+    if (s == 0) s = 0xA5A5A5A5u;            /* xorshift fixed-point guard */
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;   /* xorshift32 */
+        td5_render_set_wheel_style(i, (int)(s & 0x7FFFFFFFu));  /* setter wraps to style count */
+    }
+}
+
 int td5_game_init_race_session(void) {
     #define CK(n) TD5_LOG_I(LOG_TAG, "CK: %s", n)
     CK("ck0_start");
@@ -1545,6 +1560,11 @@ int td5_game_init_race_session(void) {
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 0/19: CRT reseeded (seed=0x%08X) + 12 seed-table rands drained",
                   session_seed);
+
+        /* [WHEEL OVERHAUL] Per-race random wheel style per slot, from a private
+         * stream off the same seed (does NOT touch the CRT rand() drained
+         * above, so faithful AI/traffic RNG is unchanged). */
+        td5_game_assign_wheel_styles(session_seed);
     }
 
     /* ---- Step 1: Display random loading screen TGA (rand()%20) ---- */
