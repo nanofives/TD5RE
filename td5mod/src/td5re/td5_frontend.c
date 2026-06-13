@@ -341,6 +341,10 @@ int             s_game_option_checkpoint_timers = 1;
 int             s_game_option_traffic = 1;
 int             s_game_option_cops = 1;
 int             s_game_option_difficulty = 1;
+/* [2026-06-12] Per-race AI difficulty picked on the Track Selection screen
+ * (0..2, seeded from g_td5.difficulty_tier on entry, committed back on OK).
+ * Quick Race never shows the row and keeps the Game Options global. */
+int             s_race_difficulty = 1;
 int             s_game_option_dynamics = 0;
 int             s_game_option_collisions = 1;
 int             s_sound_option_sfx_mode;
@@ -6200,6 +6204,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         const char *on_off[2] = { "OFF", "ON" };
         /* [dynamic-traffic] 4-state traffic volume row. */
         const char *traffic_vol[4] = { "OFF", "LOW", "MEDIUM", "HIGH" };
+        const char *difficulty[3] = { "EASY", "NORMAL", "HARD" };
         char vb[8];
         float vx = 350.0f * sx;
         if (s_buttons[2].active) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
@@ -6210,6 +6215,8 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
             fe_draw_text(vx, (float)(s_buttons[4].y + 6) * sy, traffic_vol[s_game_option_traffic & 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         if (s_buttons[5].active)
             fe_draw_text(vx, (float)(s_buttons[5].y + 6) * sy, on_off[s_game_option_cops & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
+        if (s_buttons[6].active && !s_buttons[6].hidden)  /* per-race AI difficulty (hidden in Quick Race) */
+            fe_draw_text(vx, (float)(s_buttons[6].y + 6) * sy, difficulty[s_race_difficulty % 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
     }
 
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
@@ -8370,13 +8377,15 @@ void td5_frontend_render_ui_rects(void) {
             frontend_render_td6_color_panel(sx, sy);
             break;
         case TD5_SCREEN_TRACK_SELECTION:
-            /* Track(0) selector + the race-option rows (AI/laps/traffic/police =
-             * buttons 2..5). [PORT ENHANCEMENT 2026-06] */
+            /* Track(0) selector + the race-option rows (AI/laps/traffic/police/
+             * difficulty = buttons 2..6; difficulty self-skips when hidden in
+             * Quick Race context). [PORT ENHANCEMENT 2026-06] */
             fe_draw_option_arrows(0, sx, sy);
             fe_draw_option_arrows(2, sx, sy);
             fe_draw_option_arrows(3, sx, sy);
             fe_draw_option_arrows(4, sx, sy);
             fe_draw_option_arrows(5, sx, sy);
+            fe_draw_option_arrows(6, sx, sy);
             break;
         case TD5_SCREEN_CONTROL_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] arrows on PLAYER(0) + CONTROLLER SELECTION(1). */

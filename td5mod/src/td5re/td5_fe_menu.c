@@ -983,6 +983,29 @@ void Screen_MainMenu(void) {
         TD5_LOG_I(LOG_TAG, "MainMenu: seeded circuit_lap_count=%d (laps_option=%d)",
                   g_td5.circuit_lap_count, s_game_option_laps);
 
+        /* [FIX 2026-06-12 mp-roster-leak] A finished local-MP / classic-2P
+         * session must not leak into the next flow: after a 3-player race the
+         * lobby's s_mp_flow + s_two_player_mode stayed set, so the next Quick
+         * Race (or any race-menu mode) pulled all 3 humans into the race
+         * (frontend_init_race_schedule gates >1 human on these flags). Every
+         * MP/2P flow starts FROM this menu (the MP lobby re-arms the flags on
+         * START, the 2P button sets s_two_player_mode itself), so main-menu
+         * entry always means "no active session" — clear the flags and drop
+         * the per-player EXCLUSIVE device bindings so every pad feeds the
+         * shared menu polling again. The single-player race start re-binds
+         * slot 0 to whichever controller navigated (s_active_menu_device). */
+        if (s_mp_flow || s_two_player_mode) {
+            int p;
+            TD5_LOG_I(LOG_TAG,
+                      "MainMenu: clearing stale MP session (mp_flow=%d 2p=%d humans=%d)",
+                      s_mp_flow, s_two_player_mode, s_num_human_players);
+            s_mp_flow = 0;
+            s_mp_simul = 0;
+            s_two_player_mode = 0;
+            for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+                td5_input_set_input_source(p, 0);
+        }
+
         /* Apply saved options from config shadow into live globals */
         /* Configure controller bindings for both player slots */
 

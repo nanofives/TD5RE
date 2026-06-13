@@ -183,6 +183,10 @@ void Screen_MultiplayerLobby(void) {
         frontend_reset_buttons();
         frontend_create_button(SNK_StartRaceTxt, 220, 300, 200, 32);  /* 0 START */
         frontend_create_button(SNK_BackButTxt,   260, 360, 120, 32);  /* 1 BACK */
+        /* Backing out of the pad-driven car grid lands here with the mouse
+         * cursor hidden (the grid hides it) — restore it, this screen has
+         * clickable START/BACK buttons. [cursor-fix 2026-06-12] */
+        frontend_set_cursor_visible(1);
         s_selected_button = 0;
         s_anim_complete = 0;
         frontend_begin_timed_animation();
