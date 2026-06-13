@@ -6569,25 +6569,29 @@ static void wheel_lookup_static_hed(void)
 
 typedef struct {
     const char *name;
-    int      spokes;     /* spoke count (0 = smooth dish, no spokes) */
-    uint32_t rim_col;    /* ARGB rim face colour */
-    uint32_t spoke_col;  /* ARGB spoke colour */
-    uint32_t hub_col;    /* ARGB centre hub-cap colour */
-    float    hub_frac;   /* hub radius / rim_radius */
-    float    face_frac;  /* rim-face outer radius / rim_radius */
-    float    spoke_hw;   /* spoke half-angular-width (radians) */
+    int      spokes;     /* spoke count (0 = smooth dish — full metal disc) */
+    uint32_t metal;      /* ARGB rim ring + spokes + hub (the bright metal)  */
+    uint32_t back;       /* ARGB dark backing seen BETWEEN the spokes        */
+    float    face_frac;  /* rim outer radius / rim_radius                    */
+    float    spoke_hw;   /* spoke half-angular-width (radians)               */
 } WheelStyle;
 
-/* Six procedurally-distinct rim designs. Differentiated by spoke count/width
- * AND colour so they read apart at race distance even flat-shaded. */
+#define WHEEL_HUB_FRAC  0.20f    /* hub-cap radius / rim_radius            */
+#define WHEEL_LIP_FRAC  0.78f    /* rim-ring inner edge as frac of face_r  */
+
+/* Six procedurally-distinct rim designs: bright-metal SPOKES over a DARK
+ * backing disc (so the gaps between spokes read as a real wheel, not a flat
+ * plate), bounded by a metal rim ring, with a small metal hub. Metal tones are
+ * mid-range (the rim is full-bright / unlit, so white reads as glowing). dish
+ * (0 spokes) makes back==metal so it's a smooth solid disc. */
 static const WheelStyle k_wheel_styles[] = {
-    /* name        spk  rim_col     spoke_col   hub_col     hubF   faceF  spkHW */
-    { "5-spoke",    5, 0xFFC4C8CEu, 0xFF26292Eu, 0xFF44484Eu, 0.30f, 0.80f, 0.17f }, /* silver  */
-    { "6-spoke",    6, 0xFFB89433u, 0xFF1C1C1Cu, 0xFF2A2A2Au, 0.28f, 0.80f, 0.13f }, /* gold    */
-    { "mesh",      10, 0xFF5A5E64u, 0xFF101216u, 0xFF303338u, 0.24f, 0.80f, 0.09f }, /* gunmetal*/
-    { "dish",       0, 0xFFD2D6DAu, 0xFF000000u, 0xFF3A3E44u, 0.42f, 0.80f, 0.00f }, /* smooth  */
-    { "twin-5",    10, 0xFF9CA2A8u, 0xFF202226u, 0xFF34373Cu, 0.26f, 0.80f, 0.08f }, /* silver  */
-    { "turbofan",  16, 0xFF34373Du, 0xFFB8BCC0u, 0xFF202327u, 0.20f, 0.80f, 0.22f }, /* dark/light */
+    /* name        spk  metal       back        faceF  spkHW */
+    { "5-spoke",    5, 0xFF9CA0A6u, 0xFF161719u, 0.62f, 0.15f }, /* silver        */
+    { "6-spoke",    6, 0xFF9A7C24u, 0xFF161412u, 0.62f, 0.12f }, /* gold          */
+    { "mesh",      12, 0xFF7E8288u, 0xFF131517u, 0.62f, 0.06f }, /* many thin     */
+    { "dish",       0, 0xFF8A8E94u, 0xFF8A8E94u, 0.60f, 0.00f }, /* smooth disc   */
+    { "twin-5",    10, 0xFF8E9298u, 0xFF161719u, 0.62f, 0.06f }, /* silver twin-5 */
+    { "turbofan",  16, 0xFF70747Au, 0xFF101214u, 0.64f, 0.16f }, /* wide turbofan */
 };
 #define WHEEL_STYLE_COUNT ((int)(sizeof(k_wheel_styles) / sizeof(k_wheel_styles[0])))
 
@@ -6632,8 +6636,13 @@ static int wheel_project(const float *m, float wx, float wy, float wz,
                          float lx, float ly, float lz, float cs, float sn,
                          float u, float v, uint32_t col, TD5_D3DVertex *out)
 {
-    float rx =  lx * cs + lz * sn;
-    float rz = -lx * sn + lz * cs;
+    /* Steering yaw [cos -sin; sin cos] — the convention the ORIGINAL hub/rim
+     * used (0x00446F00), which is the visually-correct turn direction. (The
+     * old tire ring used the transpose, which read as inverted steering; tire
+     * and rim now share THIS one helper so they stay synced AND turn the right
+     * way.) [user feedback 2026-06-13: prior unify-to-tire was inverted] */
+    float rx = lx * cs - lz * sn;
+    float rz = lx * sn + lz * cs;
     float px = wx + rx, py = wy + ly, pz = wz + rz;
     float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
     float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
@@ -6681,8 +6690,9 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
     float rear_spin  = (float)slip_rear_12  * ((float)M_PI / 2048.0f);
 
     const WheelStyle *st = &k_wheel_styles[wheel_style_for_slot(slot)];
-    float face_r = rim_radius * st->face_frac;
-    float hub_r  = rim_radius * st->hub_frac;
+    float face_r = rim_radius * st->face_frac;     /* rim outer radius */
+    float lip_r  = face_r * WHEEL_LIP_FRAC;        /* rim-ring inner edge */
+    float hub_r  = rim_radius * WHEEL_HUB_FRAC;    /* hub-cap radius */
     /* Outboard layering epsilon (scaled to car) so rim layers don't z-fight. */
     float eps = axle_halfw * 0.06f + 0.4f;
 
@@ -6702,7 +6712,15 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         float track = rb * 0.38f;        /* lateral half-track */
         float front =  rb * 0.55f;       /* front axle Z */
         float rear  = -rb * 0.60f;       /* rear axle Z  */
-        float wy0   = (mh ? mh->bounding_center_y : 0.0f) - rb * 0.34f;  /* wheel centre Y */
+        /* Wheel-centre Y. Was -rb*0.34 which sank traffic wheels under the road
+         * (user: "barely visible — lift TD5 traffic + police off the ground").
+         * Raised toward the body centre + a tunable nudge so the wheels sit at
+         * the ground line. TD5RE_WHEEL_TRAFFIC_LIFT=N (body-units, default 18)
+         * shifts them further up if a model still rides low. */
+        static float s_tlift = -1.0f;
+        if (s_tlift < 0.0f) { const char *e = getenv("TD5RE_WHEEL_TRAFFIC_LIFT");
+                              s_tlift = (e && e[0]) ? (float)atof(e) : 18.0f; }
+        float wy0   = (mh ? mh->bounding_center_y : 0.0f) - rb * 0.22f + s_tlift;  /* wheel centre Y */
         int16_t zf = (int16_t)front, zr = (int16_t)rear, tx = (int16_t)track, wy16 = (int16_t)wy0;
         synth[0][0] = -tx; synth[0][1] = wy16; synth[0][2] = zf;   /* FL */
         synth[1][0] =  tx; synth[1][1] = wy16; synth[1][2] = zf;   /* FR */
@@ -6761,40 +6779,70 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         td5_plat_render_bind_texture(s_wheel_tex_page);
         td5_plat_render_draw_tris(tv, 2 * (WHEEL_SEG_HI + 1), tidx, ti);
 
-        /* ---- Styled rim assembly (one white-page draw, per-vertex colour) ---- */
-        TD5_D3DVertex rv[2 + 2 * (WHEEL_RIM_SEG + 1) + WHEEL_STYLE_MAX_SPOKES * 4];
-        uint16_t ridx[WHEEL_RIM_SEG * 12 + WHEEL_STYLE_MAX_SPOKES * 12];
+        /* ---- Styled rim assembly (one white-page draw, per-vertex colour) ----
+         * Layers, innermost(at outer_off) -> outermost: dark backing disc, then
+         * (outboard +eps) the metal spokes + rim ring, then (+2eps) the metal
+         * hub cap. The backing showing between the spokes is what makes it read
+         * as a wheel instead of a flat plate. All double-sided so the far-side
+         * wheels show a rim too. */
+        TD5_D3DVertex rv[ (WHEEL_RIM_SEG+2)            /* backing fan      */
+                        + 2*(WHEEL_RIM_SEG+1)          /* rim ring         */
+                        + WHEEL_STYLE_MAX_SPOKES*4     /* spokes           */
+                        + (WHEEL_RIM_SEG+2) ];         /* hub fan          */
+        uint16_t ridx[ WHEEL_RIM_SEG*6                 /* backing (2-sided)*/
+                     + WHEEL_RIM_SEG*12                /* rim ring (2-sided)*/
+                     + WHEEL_STYLE_MAX_SPOKES*12       /* spokes (2-sided) */
+                     + WHEEL_RIM_SEG*6 ];              /* hub (2-sided)    */
         int rn = 0, ri = 0, rim_ok = 1;
-        float lx_face = outer_off;
+        float lx_back = outer_off;
         float lx_spk  = outer_off + ob * eps;
         float lx_hub  = outer_off + ob * eps * 2.0f;
 
-        /* Rim face fan: centre + perimeter at face_r (colour rim_col). */
-        int face_c = rn;
-        rim_ok &= wheel_project(m, wx, wy, wz, lx_face, 0, 0, cs, sn, 0.5f, 0.5f, st->rim_col, &rv[rn++]);
-        int face_ring = rn;
+        /* (1) Dark backing disc (fan) at face_r. */
+        int bc = rn;
+        rim_ok &= wheel_project(m, wx, wy, wz, lx_back, 0, 0, cs, sn, 0.5f, 0.5f, st->back, &rv[rn++]);
+        int bring = rn;
         for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
             float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
-            rim_ok &= wheel_project(m, wx, wy, wz, lx_face, cosf(a)*face_r, sinf(a)*face_r,
-                                    cs, sn, 0.5f, 0.5f, st->rim_col, &rv[rn++]);
+            rim_ok &= wheel_project(m, wx, wy, wz, lx_back, cosf(a)*face_r, sinf(a)*face_r,
+                                    cs, sn, 0.5f, 0.5f, st->back, &rv[rn++]);
         }
         if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
-            uint16_t a = (uint16_t)(face_ring + i), b = (uint16_t)(face_ring + i + 1);
-            ridx[ri++] = (uint16_t)face_c; ridx[ri++] = a; ridx[ri++] = b;
-            ridx[ri++] = (uint16_t)face_c; ridx[ri++] = b; ridx[ri++] = a;  /* double-sided */
+            uint16_t a=(uint16_t)(bring+i), b=(uint16_t)(bring+i+1);
+            ridx[ri++]=(uint16_t)bc; ridx[ri++]=a; ridx[ri++]=b;
+            ridx[ri++]=(uint16_t)bc; ridx[ri++]=b; ridx[ri++]=a;
         }
 
-        /* Spokes: thin radial quads hub_r..face_r, spun with the wheel. */
+        /* (2) Metal rim ring (annulus lip_r..face_r). */
+        if (rim_ok) {
+            int r0 = rn;
+            for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
+                float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
+                float ca = cosf(a), sa = sinf(a);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, ca*lip_r,  sa*lip_r,  cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, ca*face_r, sa*face_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
+            }
+            if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
+                uint16_t i0=(uint16_t)(r0+i*2), o0=(uint16_t)(r0+i*2+1);
+                uint16_t i1=(uint16_t)(r0+i*2+2), o1=(uint16_t)(r0+i*2+3);
+                ridx[ri++]=i0; ridx[ri++]=o0; ridx[ri++]=o1;  ridx[ri++]=i0; ridx[ri++]=o1; ridx[ri++]=i1;
+                ridx[ri++]=i0; ridx[ri++]=o1; ridx[ri++]=o0;  ridx[ri++]=i0; ridx[ri++]=i1; ridx[ri++]=o1;
+            }
+        }
+
+        /* (3) Metal spokes: thin radial quads hub_r..lip_r, spun with the wheel.
+         * The dark backing shows between them. (dish has 0 spokes -> backing is
+         * already metal-coloured, so it reads as a smooth disc.) */
         if (rim_ok && st->spokes > 0) {
             int ns = st->spokes; if (ns > WHEEL_STYLE_MAX_SPOKES) ns = WHEEL_STYLE_MAX_SPOKES;
             for (int s = 0; s < ns && rim_ok; s++) {
                 float ca = spin + (float)s * (2.0f * (float)M_PI / (float)ns);
                 float a0 = ca - st->spoke_hw, a1 = ca + st->spoke_hw;
                 int base = rn;
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a0)*hub_r,  sinf(a0)*hub_r,  cs, sn, 0.5f, 0.5f, st->spoke_col, &rv[rn++]);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a1)*hub_r,  sinf(a1)*hub_r,  cs, sn, 0.5f, 0.5f, st->spoke_col, &rv[rn++]);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a1)*face_r, sinf(a1)*face_r, cs, sn, 0.5f, 0.5f, st->spoke_col, &rv[rn++]);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a0)*face_r, sinf(a0)*face_r, cs, sn, 0.5f, 0.5f, st->spoke_col, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a0)*hub_r, sinf(a0)*hub_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a1)*hub_r, sinf(a1)*hub_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a1)*lip_r, sinf(a1)*lip_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a0)*lip_r, sinf(a0)*lip_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
                 if (!rim_ok) break;
                 uint16_t b0=(uint16_t)base,b1=(uint16_t)(base+1),b2=(uint16_t)(base+2),b3=(uint16_t)(base+3);
                 ridx[ri++]=b0; ridx[ri++]=b1; ridx[ri++]=b2;  ridx[ri++]=b0; ridx[ri++]=b2; ridx[ri++]=b3;
@@ -6802,20 +6850,20 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
             }
         }
 
-        /* Hub cap fan (covers spoke roots), most outboard. */
+        /* (4) Metal hub cap fan (covers spoke roots), most outboard. */
         if (rim_ok) {
-            int hub_c = rn;
-            rim_ok &= wheel_project(m, wx, wy, wz, lx_hub, 0, 0, cs, sn, 0.5f, 0.5f, st->hub_col, &rv[rn++]);
-            int hub_ring = rn;
+            int hc = rn;
+            rim_ok &= wheel_project(m, wx, wy, wz, lx_hub, 0, 0, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
+            int hring = rn;
             for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
                 float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
                 rim_ok &= wheel_project(m, wx, wy, wz, lx_hub, cosf(a)*hub_r, sinf(a)*hub_r,
-                                        cs, sn, 0.5f, 0.5f, st->hub_col, &rv[rn++]);
+                                        cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
             }
             if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
-                uint16_t a = (uint16_t)(hub_ring + i), b = (uint16_t)(hub_ring + i + 1);
-                ridx[ri++] = (uint16_t)hub_c; ridx[ri++] = a; ridx[ri++] = b;
-                ridx[ri++] = (uint16_t)hub_c; ridx[ri++] = b; ridx[ri++] = a;
+                uint16_t a=(uint16_t)(hring+i), b=(uint16_t)(hring+i+1);
+                ridx[ri++]=(uint16_t)hc; ridx[ri++]=a; ridx[ri++]=b;
+                ridx[ri++]=(uint16_t)hc; ridx[ri++]=b; ridx[ri++]=a;
             }
         }
 
