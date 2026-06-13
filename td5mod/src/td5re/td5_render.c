@@ -6563,42 +6563,44 @@ static void wheel_lookup_static_hed(void)
  *       TD5RE_WHEEL_TRAFFIC=0 keeps traffic on its baked-in mesh wheels.
  * ========================================================================== */
 #define WHEEL_SEG_HI     24      /* tire tread facets (was WHEEL_SEGMENTS = 8) */
-#define WHEEL_RIM_SEG    18      /* rim-face perimeter facets */
-#define WHEEL_STYLE_MAX_SPOKES 16  /* max spokes across k_wheel_styles (sizes scratch buffers) */
-#define WHEEL_WHITE_PAGE 899     /* 1x1 white (shared shadow/HUD page): texel*diffuse = diffuse */
 
-typedef struct {
-    const char *name;
-    int      spokes;     /* spoke count (0 = smooth dish — full metal disc) */
-    uint32_t metal;      /* ARGB rim ring + spokes + hub (the bright metal)  */
-    uint32_t back;       /* ARGB dark backing seen BETWEEN the spokes        */
-    float    face_frac;  /* rim outer radius / rim_radius                    */
-    float    spoke_hw;   /* spoke half-angular-width (radians)               */
-} WheelStyle;
-
-#define WHEEL_HUB_FRAC  0.20f    /* hub-cap radius / rim_radius            */
-#define WHEEL_LIP_FRAC  0.78f    /* rim-ring inner edge as frac of face_r  */
-
-/* Six procedurally-distinct rim designs. The wheel interior is DARK-dominant: a
- * dark backing disc fills the face, with THIN bright-metal spokes + a bright
- * outer rim lip + a small hub on top. The dark backing showing between thin
- * spokes is what makes it read as a real spoked wheel rather than a flat metal
- * plate. (back is ALWAYS dark — even 'dish' is a dark disc with a bright lip,
- * so nothing renders as a solid bright disc.) */
-static const WheelStyle k_wheel_styles[] = {
-    /* name        spk  metal       back        faceF  spkHW */
-    { "5-spoke",    5, 0xFF9498A0u, 0xFF131517u, 0.62f, 0.11f }, /* silver        */
-    { "6-spoke",    6, 0xFF8E7022u, 0xFF131210u, 0.62f, 0.10f }, /* gold          */
-    { "mesh",      12, 0xFF82868Cu, 0xFF111315u, 0.62f, 0.055f},/* many thin     */
-    { "dish",       0, 0xFF8A8E94u, 0xFF131517u, 0.60f, 0.00f }, /* smooth (ringed)*/
-    { "twin-5",    10, 0xFF8C9096u, 0xFF131517u, 0.62f, 0.055f},/* twin-5        */
-    { "turbofan",  10, 0xFF767A80u, 0xFF0F1113u, 0.64f, 0.11f }, /* turbofan      */
+/* Rim texture pool: real per-car alloy-wheel art (carhubN.png — a 64x64 sheet
+ * of four 32x32 motion-blur sub-frames). One is randomly assigned per slot so
+ * every car/traffic vehicle gets a proper-looking, varied rim. Loaded once into
+ * dedicated pages 994.. (clear of cars 800-843, frontend <=960, fonts 970-971,
+ * envmap 990-993, sky 1020). Chosen for visual variety: snowflake, 5-spoke
+ * star, chrome multi-spoke, complex, classic 5-spoke, dark thin, steel,
+ * 5-spoke smooth. */
+#define WHEEL_RIM_TEX_BASE 994
+static const char *k_wheel_rim_srcs[] = {
+    "re/assets/cars/sky/carhub0.png",
+    "re/assets/cars/bmw/carhub0.png",
+    "re/assets/cars/jag/carhub0.png",
+    "re/assets/cars/vip/carhub0.png",
+    "re/assets/cars/gto/carhub0.png",
+    "re/assets/cars/cob/carhub0.png",
+    "re/assets/cars/day/carhub0.png",
+    "re/assets/cars/mus/carhub0.png",
 };
-#define WHEEL_STYLE_COUNT ((int)(sizeof(k_wheel_styles) / sizeof(k_wheel_styles[0])))
+#define WHEEL_STYLE_COUNT ((int)(sizeof(k_wheel_rim_srcs) / sizeof(k_wheel_rim_srcs[0])))
 
 static int8_t s_wheel_style[TD5_MAX_TOTAL_ACTORS];   /* per-slot, -1 = unset */
 static int    s_wheel_style_init = 0;
-static int    s_wheel_white_uploaded = 0;
+static int    s_wheel_pool_loaded = 0;   /* rim-texture pool uploaded */
+
+/* Lazily upload the rim-texture pool (once). Carhub PNGs have alpha=0 outside
+ * the wheel disc, so an alpha-tested textured quad renders a clean round rim. */
+static void wheel_load_rim_pool(void) {
+    if (s_wheel_pool_loaded) return;
+    s_wheel_pool_loaded = 1;
+    for (int i = 0; i < WHEEL_STYLE_COUNT; i++) {
+        if (!td5_asset_load_png_texture(WHEEL_RIM_TEX_BASE + i, k_wheel_rim_srcs[i],
+                                        TD5_COLORKEY_NONE))
+            TD5_LOG_W(LOG_TAG, "wheel rim pool: failed to load %s", k_wheel_rim_srcs[i]);
+    }
+    TD5_LOG_I(LOG_TAG, "wheel rim pool: %d alloy textures loaded at page %d..",
+              WHEEL_STYLE_COUNT, WHEEL_RIM_TEX_BASE);
+}
 
 static int wheel_overhaul_enabled(void) {
     static int cached = -1;
@@ -6634,15 +6636,6 @@ static int wheel_style_for_slot(int slot) {
     int s = s_wheel_style[slot];
     if (s < 0) s = (slot * 7 + 3) % WHEEL_STYLE_COUNT;  /* stable fallback before assignment */
     return s;
-}
-
-/* Brighten an ARGB colour by `add` per RGB channel (clamped) — used for the
- * rim LIP so the wheel has a defined bright outer ring vs the spokes. */
-static uint32_t wheel_brighten(uint32_t argb, int add) {
-    int b = (int)(argb & 0xFF)        + add; if (b > 255) b = 255;
-    int g = (int)((argb >> 8) & 0xFF) + add; if (g > 255) g = 255;
-    int r = (int)((argb >> 16) & 0xFF)+ add; if (r > 255) r = 255;
-    return (argb & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
 /* Project a wheel-LOCAL point (lx along axle, ly vertical, lz longitudinal)
@@ -6683,11 +6676,7 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
 
     if (!s_wheel_lookup_done)
         wheel_lookup_static_hed();
-    if (!s_wheel_white_uploaded) {
-        static const uint32_t k_white = 0xFFFFFFFFu;
-        td5_plat_render_upload_texture(WHEEL_WHITE_PAGE, &k_white, 1, 1, 2);
-        s_wheel_white_uploaded = 1;
-    }
+    wheel_load_rim_pool();
 
     /* Wheel dimensions from cardef (racers/police/TD6 cars); traffic has no
      * per-actor cardef -> sensible defaults so traffic still gets wheels. */
@@ -6700,21 +6689,30 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         if (hw > 0) axle_halfw = (float)hw;
     }
 
-    /* Hub spin odometer (same fields/scale as the legacy path). */
+    /* Wheel spin odometer (same fields/scale as the original hub @0x446F00):
+     * the slip accumulators grow with distance travelled, so cos/sin of them
+     * gives a continuously-rotating angle. Used to ROTATE the textured rim so
+     * the wheel visibly spins (front wheels spin on slip_z, rear on slip_x). */
     int32_t slip_front_12 = (int32_t)actor->accumulated_tire_slip_z * -4;
     int32_t slip_rear_12  = (int32_t)actor->accumulated_tire_slip_x * -4;
     float front_spin = (float)slip_front_12 * ((float)M_PI / 2048.0f);
     float rear_spin  = (float)slip_rear_12  * ((float)M_PI / 2048.0f);
 
-    const WheelStyle *st = &k_wheel_styles[wheel_style_for_slot(slot)];
-    float face_r = rim_radius * st->face_frac;     /* rim outer radius */
-    float lip_r  = face_r * WHEEL_LIP_FRAC;        /* rim-ring inner edge */
-    float hub_r  = rim_radius * WHEEL_HUB_FRAC;    /* hub-cap radius */
-    uint32_t lip_col = wheel_brighten(st->metal, 0x2A);  /* bright outer rim lip */
-    /* Outboard layering epsilon (scaled to car). Generous so the metal spokes
-     * sit clearly IN FRONT of the dark backing disc and don't z-fight it into a
-     * solid-looking face (the "flat" look). */
-    float eps = axle_halfw * 0.14f + 1.6f;
+    /* Rim texture page for this slot's randomly-assigned alloy design. */
+    int rim_page = WHEEL_RIM_TEX_BASE + (wheel_style_for_slot(slot) % WHEEL_STYLE_COUNT);
+    /* The alloy art's circle should fill most of the wheel, leaving a thin
+     * black tire ring around it. */
+    float tex_r = rim_radius * 0.84f;
+    /* Motion-blur sub-frame by speed (same as the original hub-cap @0x446F00):
+     * frame = min(|long_speed|>>14, 3); col = frame&1, row = frame>>1. The 64x64
+     * sheet holds four 32x32 sub-tiles; sample with a 1.5px margin so LINEAR
+     * sampling can't bleed across sub-frame boundaries. */
+    int32_t spd_raw = actor->longitudinal_speed;
+    uint32_t spd_abs = (uint32_t)(spd_raw < 0 ? -spd_raw : spd_raw);
+    int frame = (int)(spd_abs >> 14); if (frame > 3) frame = 3;
+    int fcol = frame & 1, frow = frame >> 1;
+    float ru0 = ((float)(fcol * 32) + 1.5f) / 64.0f, ru1 = ((float)(fcol * 32 + 32) - 1.5f) / 64.0f;
+    float rv0 = ((float)(frow * 32) + 1.5f) / 64.0f, rv1 = ((float)(frow * 32 + 32) - 1.5f) / 64.0f;
 
     /* Traffic vehicles carry their wheels baked into the body mesh and never
      * populate wheel_display_angles. Synthesize a 4-wheel layout from the mesh
@@ -6758,7 +6756,6 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
 
         float inner_off = (w & 1) ? -axle_halfw :  axle_halfw;
         float outer_off = (w & 1) ?  axle_halfw : -axle_halfw;
-        float ob = (outer_off >= 0.0f) ? 1.0f : -1.0f;   /* outboard direction */
 
         /* Front-wheel steering yaw (CW-from-+Z) — applied via wheel_project to
          * BOTH tire and rim, so they stay locked together. */
@@ -6768,7 +6765,6 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
             cs = cosf(steer_rad);
             sn = sinf(steer_rad);
         }
-        float spin = (w < 2) ? front_spin : rear_spin;
 
         /* ---- Tire tread cylinder (higher-poly, black) ---- */
         TD5_D3DVertex tv[2 * (WHEEL_SEG_HI + 1)];
@@ -6799,99 +6795,37 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         td5_plat_render_bind_texture(s_wheel_tex_page);
         td5_plat_render_draw_tris(tv, 2 * (WHEEL_SEG_HI + 1), tidx, ti);
 
-        /* ---- Styled rim assembly (one white-page draw, per-vertex colour) ----
-         * Layers, innermost(at outer_off) -> outermost: dark backing disc, then
-         * (outboard +eps) the metal spokes + rim ring, then (+2eps) the metal
-         * hub cap. The backing showing between the spokes is what makes it read
-         * as a wheel instead of a flat plate. All double-sided so the far-side
-         * wheels show a rim too. */
-        TD5_D3DVertex rv[ (WHEEL_RIM_SEG+2)            /* backing fan      */
-                        + 2*(WHEEL_RIM_SEG+1)          /* rim ring         */
-                        + WHEEL_STYLE_MAX_SPOKES*4     /* spokes           */
-                        + (WHEEL_RIM_SEG+2) ];         /* hub fan          */
-        uint16_t ridx[ WHEEL_RIM_SEG*6                 /* backing (2-sided)*/
-                     + WHEEL_RIM_SEG*12                /* rim ring (2-sided)*/
-                     + WHEEL_STYLE_MAX_SPOKES*12       /* spokes (2-sided) */
-                     + WHEEL_RIM_SEG*6 ];              /* hub (2-sided)    */
-        int rn = 0, ri = 0, rim_ok = 1;
-        float lx_back = outer_off;
-        float lx_spk  = outer_off + ob * eps;
-        float lx_hub  = outer_off + ob * eps * 2.0f;
-
-        /* (1) Dark backing disc (fan) at face_r. */
-        int bc = rn;
-        rim_ok &= wheel_project(m, wx, wy, wz, lx_back, 0, 0, cs, sn, 0.5f, 0.5f, st->back, &rv[rn++]);
-        int bring = rn;
-        for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
-            float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
-            rim_ok &= wheel_project(m, wx, wy, wz, lx_back, cosf(a)*face_r, sinf(a)*face_r,
-                                    cs, sn, 0.5f, 0.5f, st->back, &rv[rn++]);
-        }
-        if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
-            uint16_t a=(uint16_t)(bring+i), b=(uint16_t)(bring+i+1);
-            ridx[ri++]=(uint16_t)bc; ridx[ri++]=a; ridx[ri++]=b;
-            ridx[ri++]=(uint16_t)bc; ridx[ri++]=b; ridx[ri++]=a;
-        }
-
-        /* (2) Bright metal rim ring/lip (annulus lip_r..face_r). */
-        if (rim_ok) {
-            int r0 = rn;
-            for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
-                float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
-                float ca = cosf(a), sa = sinf(a);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, ca*lip_r,  sa*lip_r,  cs, sn, 0.5f, 0.5f, lip_col, &rv[rn++]);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, ca*face_r, sa*face_r, cs, sn, 0.5f, 0.5f, lip_col, &rv[rn++]);
+        /* ---- Textured rim face: real alloy-wheel art (carhub pool) ----
+         * A single alpha-tested textured quad in the wheel plane at the outer
+         * face. The carhub PNG is transparent outside the wheel disc, so
+         * OPAQUE_LINEAR's alpha test discards the quad corners → clean round
+         * rim. The quad is ROTATED about the axle by the spin odometer so the
+         * wheel visibly spins, and steering yaw is applied via wheel_project
+         * (same helper as the tire) so the rim turns with the wheel. */
+        {
+            float spin = (w < 2) ? front_spin : rear_spin;
+            float sc = cosf(spin), ss = sinf(spin);
+            /* corner (ly,lz) pre-spin + matching sub-tile UV */
+            static const float cly[4] = {  1.0f,  1.0f, -1.0f, -1.0f };
+            static const float clz[4] = { -1.0f,  1.0f,  1.0f, -1.0f };
+            const float cu[4] = { ru0, ru1, ru1, ru0 };
+            const float cv[4] = { rv0, rv0, rv1, rv1 };
+            TD5_D3DVertex q[4];
+            int qok = 1;
+            for (int c = 0; c < 4 && qok; c++) {
+                float pl = cly[c] * tex_r, pz = clz[c] * tex_r;
+                float ly = pl * sc - pz * ss;   /* rotate by spin about the axle */
+                float lz = pl * ss + pz * sc;
+                qok &= wheel_project(m, wx, wy, wz, outer_off, ly, lz, cs, sn,
+                                     cu[c], cv[c], 0xFFFFFFFFu, &q[c]);
             }
-            if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
-                uint16_t i0=(uint16_t)(r0+i*2), o0=(uint16_t)(r0+i*2+1);
-                uint16_t i1=(uint16_t)(r0+i*2+2), o1=(uint16_t)(r0+i*2+3);
-                ridx[ri++]=i0; ridx[ri++]=o0; ridx[ri++]=o1;  ridx[ri++]=i0; ridx[ri++]=o1; ridx[ri++]=i1;
-                ridx[ri++]=i0; ridx[ri++]=o1; ridx[ri++]=o0;  ridx[ri++]=i0; ridx[ri++]=i1; ridx[ri++]=o1;
+            if (qok) {
+                static const uint16_t qi[12] = { 0,1,2, 0,2,3,  0,2,1, 0,3,2 }; /* double-sided */
+                flush_immediate_internal();
+                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);  /* alpha test discards transparent corners */
+                td5_plat_render_bind_texture(rim_page);
+                td5_plat_render_draw_tris(q, 4, qi, 12);
             }
-        }
-
-        /* (3) Metal spokes: thin radial quads hub_r..lip_r, spun with the wheel.
-         * The dark backing shows between them. (dish has 0 spokes -> backing is
-         * already metal-coloured, so it reads as a smooth disc.) */
-        if (rim_ok && st->spokes > 0) {
-            int ns = st->spokes; if (ns > WHEEL_STYLE_MAX_SPOKES) ns = WHEEL_STYLE_MAX_SPOKES;
-            for (int s = 0; s < ns && rim_ok; s++) {
-                float ca = spin + (float)s * (2.0f * (float)M_PI / (float)ns);
-                float a0 = ca - st->spoke_hw, a1 = ca + st->spoke_hw;
-                int base = rn;
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a0)*hub_r, sinf(a0)*hub_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a1)*hub_r, sinf(a1)*hub_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a1)*lip_r, sinf(a1)*lip_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, cosf(a0)*lip_r, sinf(a0)*lip_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
-                if (!rim_ok) break;
-                uint16_t b0=(uint16_t)base,b1=(uint16_t)(base+1),b2=(uint16_t)(base+2),b3=(uint16_t)(base+3);
-                ridx[ri++]=b0; ridx[ri++]=b1; ridx[ri++]=b2;  ridx[ri++]=b0; ridx[ri++]=b2; ridx[ri++]=b3;
-                ridx[ri++]=b0; ridx[ri++]=b2; ridx[ri++]=b1;  ridx[ri++]=b0; ridx[ri++]=b3; ridx[ri++]=b2;
-            }
-        }
-
-        /* (4) Metal hub cap fan (covers spoke roots), most outboard. */
-        if (rim_ok) {
-            int hc = rn;
-            rim_ok &= wheel_project(m, wx, wy, wz, lx_hub, 0, 0, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
-            int hring = rn;
-            for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
-                float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_hub, cosf(a)*hub_r, sinf(a)*hub_r,
-                                        cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
-            }
-            if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
-                uint16_t a=(uint16_t)(hring+i), b=(uint16_t)(hring+i+1);
-                ridx[ri++]=(uint16_t)hc; ridx[ri++]=a; ridx[ri++]=b;
-                ridx[ri++]=(uint16_t)hc; ridx[ri++]=b; ridx[ri++]=a;
-            }
-        }
-
-        if (rim_ok && ri > 0) {
-            flush_immediate_internal();
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            td5_plat_render_bind_texture(WHEEL_WHITE_PAGE);
-            td5_plat_render_draw_tris(rv, rn, ridx, ri);
         }
     }
 }
