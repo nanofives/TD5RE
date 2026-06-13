@@ -6579,19 +6579,20 @@ typedef struct {
 #define WHEEL_HUB_FRAC  0.20f    /* hub-cap radius / rim_radius            */
 #define WHEEL_LIP_FRAC  0.78f    /* rim-ring inner edge as frac of face_r  */
 
-/* Six procedurally-distinct rim designs: bright-metal SPOKES over a DARK
- * backing disc (so the gaps between spokes read as a real wheel, not a flat
- * plate), bounded by a metal rim ring, with a small metal hub. Metal tones are
- * mid-range (the rim is full-bright / unlit, so white reads as glowing). dish
- * (0 spokes) makes back==metal so it's a smooth solid disc. */
+/* Six procedurally-distinct rim designs. The wheel interior is DARK-dominant: a
+ * dark backing disc fills the face, with THIN bright-metal spokes + a bright
+ * outer rim lip + a small hub on top. The dark backing showing between thin
+ * spokes is what makes it read as a real spoked wheel rather than a flat metal
+ * plate. (back is ALWAYS dark — even 'dish' is a dark disc with a bright lip,
+ * so nothing renders as a solid bright disc.) */
 static const WheelStyle k_wheel_styles[] = {
     /* name        spk  metal       back        faceF  spkHW */
-    { "5-spoke",    5, 0xFF9CA0A6u, 0xFF161719u, 0.62f, 0.15f }, /* silver        */
-    { "6-spoke",    6, 0xFF9A7C24u, 0xFF161412u, 0.62f, 0.12f }, /* gold          */
-    { "mesh",      12, 0xFF7E8288u, 0xFF131517u, 0.62f, 0.06f }, /* many thin     */
-    { "dish",       0, 0xFF8A8E94u, 0xFF8A8E94u, 0.60f, 0.00f }, /* smooth disc   */
-    { "twin-5",    10, 0xFF8E9298u, 0xFF161719u, 0.62f, 0.06f }, /* silver twin-5 */
-    { "turbofan",  16, 0xFF70747Au, 0xFF101214u, 0.64f, 0.16f }, /* wide turbofan */
+    { "5-spoke",    5, 0xFF9498A0u, 0xFF131517u, 0.62f, 0.11f }, /* silver        */
+    { "6-spoke",    6, 0xFF8E7022u, 0xFF131210u, 0.62f, 0.10f }, /* gold          */
+    { "mesh",      12, 0xFF82868Cu, 0xFF111315u, 0.62f, 0.055f},/* many thin     */
+    { "dish",       0, 0xFF8A8E94u, 0xFF131517u, 0.60f, 0.00f }, /* smooth (ringed)*/
+    { "twin-5",    10, 0xFF8C9096u, 0xFF131517u, 0.62f, 0.055f},/* twin-5        */
+    { "turbofan",  10, 0xFF767A80u, 0xFF0F1113u, 0.64f, 0.11f }, /* turbofan      */
 };
 #define WHEEL_STYLE_COUNT ((int)(sizeof(k_wheel_styles) / sizeof(k_wheel_styles[0])))
 
@@ -6618,6 +6619,13 @@ void td5_render_set_wheel_style(int slot, int style) {
 }
 
 static int wheel_style_for_slot(int slot) {
+    /* Dev override: TD5RE_WHEEL_FORCE_STYLE=N forces every slot to style N
+     * (so each design can be inspected deterministically). */
+    static int s_force = -2;
+    if (s_force == -2) { const char *e = getenv("TD5RE_WHEEL_FORCE_STYLE");
+                         s_force = (e && e[0]) ? atoi(e) : -1; }
+    if (s_force >= 0) return s_force % WHEEL_STYLE_COUNT;
+
     if (!s_wheel_style_init) {
         for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) s_wheel_style[i] = -1;
         s_wheel_style_init = 1;
@@ -6626,6 +6634,15 @@ static int wheel_style_for_slot(int slot) {
     int s = s_wheel_style[slot];
     if (s < 0) s = (slot * 7 + 3) % WHEEL_STYLE_COUNT;  /* stable fallback before assignment */
     return s;
+}
+
+/* Brighten an ARGB colour by `add` per RGB channel (clamped) — used for the
+ * rim LIP so the wheel has a defined bright outer ring vs the spokes. */
+static uint32_t wheel_brighten(uint32_t argb, int add) {
+    int b = (int)(argb & 0xFF)        + add; if (b > 255) b = 255;
+    int g = (int)((argb >> 8) & 0xFF) + add; if (g > 255) g = 255;
+    int r = (int)((argb >> 16) & 0xFF)+ add; if (r > 255) r = 255;
+    return (argb & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
 /* Project a wheel-LOCAL point (lx along axle, ly vertical, lz longitudinal)
@@ -6693,8 +6710,11 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
     float face_r = rim_radius * st->face_frac;     /* rim outer radius */
     float lip_r  = face_r * WHEEL_LIP_FRAC;        /* rim-ring inner edge */
     float hub_r  = rim_radius * WHEEL_HUB_FRAC;    /* hub-cap radius */
-    /* Outboard layering epsilon (scaled to car) so rim layers don't z-fight. */
-    float eps = axle_halfw * 0.06f + 0.4f;
+    uint32_t lip_col = wheel_brighten(st->metal, 0x2A);  /* bright outer rim lip */
+    /* Outboard layering epsilon (scaled to car). Generous so the metal spokes
+     * sit clearly IN FRONT of the dark backing disc and don't z-fight it into a
+     * solid-looking face (the "flat" look). */
+    float eps = axle_halfw * 0.14f + 1.6f;
 
     /* Traffic vehicles carry their wheels baked into the body mesh and never
      * populate wheel_display_angles. Synthesize a 4-wheel layout from the mesh
@@ -6813,14 +6833,14 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
             ridx[ri++]=(uint16_t)bc; ridx[ri++]=b; ridx[ri++]=a;
         }
 
-        /* (2) Metal rim ring (annulus lip_r..face_r). */
+        /* (2) Bright metal rim ring/lip (annulus lip_r..face_r). */
         if (rim_ok) {
             int r0 = rn;
             for (int i = 0; i <= WHEEL_RIM_SEG && rim_ok; i++) {
                 float a = (float)i * (2.0f * (float)M_PI / (float)WHEEL_RIM_SEG);
                 float ca = cosf(a), sa = sinf(a);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, ca*lip_r,  sa*lip_r,  cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
-                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, ca*face_r, sa*face_r, cs, sn, 0.5f, 0.5f, st->metal, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, ca*lip_r,  sa*lip_r,  cs, sn, 0.5f, 0.5f, lip_col, &rv[rn++]);
+                rim_ok &= wheel_project(m, wx, wy, wz, lx_spk, ca*face_r, sa*face_r, cs, sn, 0.5f, 0.5f, lip_col, &rv[rn++]);
             }
             if (rim_ok) for (int i = 0; i < WHEEL_RIM_SEG; i++) {
                 uint16_t i0=(uint16_t)(r0+i*2), o0=(uint16_t)(r0+i*2+1);
