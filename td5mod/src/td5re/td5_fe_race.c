@@ -61,7 +61,7 @@ static uint32_t mp_simul_player_nav(int player);
 static void mp_simul_drop_handle(int *cache, int player, int n);
 static void mp_simul_refresh_pane(int player);
 static void mp_simul_free_all_panes(int n);
-static void mp_simul_cycle_paint(int p, int step);
+static void mp_simul_cycle_paint(int p, int step, int sfx);
 static void frontend_mp_simul_carsel_init(void);
 static void mp_simul_back_to_lobby(int n);
 static void frontend_mp_simul_carsel_update(void);
@@ -771,8 +771,10 @@ static void mp_simul_free_all_panes(int n) {
 }
 
 /* Cycle a pane's paint/colour by `step` (+1/-1). TD6 cars walk the body-colour
- * palette; TD5 cars cycle their 4 paint schemes (no-op for paintless cars). */
-static void mp_simul_cycle_paint(int p, int step) {
+ * palette; TD5 cars cycle their 4 paint schemes (no-op for paintless cars).
+ * `sfx`=0 mutes the cycle ping — hold-to-scroll repeat fires pass 0 so the
+ * sound plays only on the initial press, not 7x/sec while held. */
+static void mp_simul_cycle_paint(int p, int step, int sfx) {
     int car = s_mp_player_car[p];
     if (frontend_car_paintable(car)) {
         int idx = s_mp_player_color_idx[p] + step;
@@ -780,14 +782,14 @@ static void mp_simul_cycle_paint(int p, int step) {
         if (idx >= TD6_PALETTE_N) idx = 0;
         s_mp_player_color_idx[p] = idx;
         s_mp_player_color[p]     = (int)s_td6_palette[idx];
-        frontend_play_sfx(2);
+        if (sfx) frontend_play_sfx(2);
     } else if (!frontend_car_is_td6(car) && frontend_car_has_paint(car)) {
         int pa = s_mp_player_paint[p] + step;
         if (pa < 0) pa = 3;
         if (pa > 3) pa = 0;
         s_mp_player_paint[p] = pa;
         mp_simul_refresh_pane(p);
-        frontend_play_sfx(2);
+        if (sfx) frontend_play_sfx(2);
     }
 }
 
@@ -908,6 +910,8 @@ static void frontend_mp_simul_carsel_update(void) {
              * stays edge-only; on (rare) both-held, RIGHT wins. */
             int lr_fire = (s_mp_pane_btn[p] == MP_BTN_CAR || s_mp_pane_btn[p] == MP_BTN_PAINT)
                           ? mp_repeat_fire(p, bits & 3u, edge & 3u, now) : 0;
+            int lr_edge = (edge & 3u) != 0;  /* initial press: keep the cycle sound;
+                                              * repeat fires are silent (user request) */
             int left  = lr_fire && !(bits & 2u);
             int right = lr_fire && (bits & 2u) != 0;
             switch (s_mp_pane_btn[p]) {
@@ -917,11 +921,11 @@ static void frontend_mp_simul_carsel_update(void) {
                     s_mp_player_car[p]   = car;
                     s_mp_player_paint[p] = 0;   /* reset paint on car change (matches single-player) */
                     mp_simul_refresh_pane(p);
-                    frontend_play_sfx(5);
+                    if (lr_edge) frontend_play_sfx(5);
                 }
                 break;
             case MP_BTN_PAINT:
-                if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1);
+                if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1, lr_edge);
                 break;
             case MP_BTN_STATS:
                 if (act) { mp_simul_load_pane_spec(p, car); s_mp_pane_substate[p] = 1; frontend_play_sfx(3); }
