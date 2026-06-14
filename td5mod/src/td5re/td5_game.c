@@ -6594,8 +6594,14 @@ void td5_game_begin_fade_out(int param) {
          * demo) race — the original suppresses all normal HUD elements there
          * (replay bitmask = 0x80000000 only). This also keeps the ESC-abort path
          * from triggering a star when the played-back car happens to lead. */
+        /* BACK TO LOBBY is a quit, not a win — never fire the victory star on
+         * it (the star sets s_race_end_radial_pulse_enabled, which SUPPRESSES
+         * the normal full-screen fade). Excluding it here makes BACK TO LOBBY
+         * play the same plain black wipe across ALL viewports as QUIT TO MENU.
+         * [MP back-to-lobby transition 2026-06-13] */
         int star_fired = (player && player->race_position == 0 &&
-                          !s_pause_exit_pending && !td5_game_is_cinematic_race());
+                          !s_pause_exit_pending && !s_pause_lobby_pending &&
+                          !td5_game_is_cinematic_race());
         /* DIAG (race-finish-transition /fix): make the star-gate decision observable. */
         TD5_LOG_I(LOG_TAG,
                   "STAR-GATE: param=%d net=%d gt=%d drag=%d race_position=%d pause_exit=%d -> star=%s",

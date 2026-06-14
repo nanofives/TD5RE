@@ -815,7 +815,13 @@ void td5_sound_update_audio_mix(void)
     /* ----------------------------------------------------------------
      * A. Compute listener velocity deltas (for Doppler)
      * ---------------------------------------------------------------- */
-    for (int vp = 0; vp < 2; vp++) {
+    /* [MP audio 2026-06-13] Velocity delta for EVERY human viewport (was just 2)
+     * so the nearest-listener engine attenuation below has valid Doppler vel for
+     * players 3+. Arrays are sized [TD5_MAX_VIEWPORTS]. */
+    int n_listeners = g_td5.viewport_count;
+    if (n_listeners < 1) n_listeners = 1;
+    if (n_listeners > TD5_MAX_VIEWPORTS) n_listeners = TD5_MAX_VIEWPORTS;
+    for (int vp = 0; vp < n_listeners; vp++) {
         for (int c = 0; c < 3; c++) {
             s_listener_vel[vp][c] = s_listener_pos[vp][c] - s_listener_prev_pos[vp][c];
             s_listener_prev_pos[vp][c] = s_listener_pos[vp][c];
@@ -1167,16 +1173,31 @@ void td5_sound_update_audio_mix(void)
                     spatial_pan = 0;
                 }
 
-                float dx = ((float)s_active_listener_pos[0] - (float)actor->world_pos.x)
-                           * TD5_SOUND_DISTANCE_SCALE;
-                float dz = ((float)s_active_listener_pos[2] - (float)actor->world_pos.z)
-                           * TD5_SOUND_DISTANCE_SCALE;
-                float dist_sq = dx * dx + dz * dz;
-                float dist;
-                if (td5_game_is_replay_active()) {
-                    dist = sqrtf(dist_sq) * TD5_SOUND_REPLAY_DIST_SCALE;
-                } else {
-                    dist = sqrtf(dist_sq);
+                /* [MP audio 2026-06-13] Attenuate by distance to the NEAREST
+                 * human listener over ALL split-screen viewports — not just the
+                 * current pass's listener. The mixer only runs 2 listener passes
+                 * (the slot pool has just a base + duplicate range), so without
+                 * this a car far from players 1&2 — e.g. player 3's OWN car in
+                 * their own pane — attenuates to silence even with a human right
+                 * on it. Picking the closest human makes every player's car
+                 * audible. (Single-player / 2-player behaviour is unchanged: with
+                 * 1-2 listeners the nearest is the same one used before.) */
+                const int32_t *near_vel = s_active_listener_vel;
+                float dx = 0.0f, dz = 0.0f, dist;
+                {
+                    float best = -1.0f;
+                    for (int li = 0; li < n_listeners; li++) {
+                        float lx = ((float)s_listener_pos[li][0] - (float)actor->world_pos.x)
+                                   * TD5_SOUND_DISTANCE_SCALE;
+                        float lz = ((float)s_listener_pos[li][2] - (float)actor->world_pos.z)
+                                   * TD5_SOUND_DISTANCE_SCALE;
+                        float d2 = lx * lx + lz * lz;
+                        if (best < 0.0f || d2 < best) {
+                            best = d2; dx = lx; dz = lz; near_vel = s_listener_vel[li];
+                        }
+                    }
+                    dist = sqrtf(best);
+                    if (td5_game_is_replay_active()) dist *= TD5_SOUND_REPLAY_DIST_SCALE;
                 }
 
                 int vol_atten = sound_attenuate_volume(engine_vol, dist);
@@ -1184,7 +1205,7 @@ void td5_sound_update_audio_mix(void)
                 int final_pitch = engine_pitch;
                 if (vol_atten > 0) {
                     float doppler = sound_compute_doppler_ratio(
-                        s_active_listener_vel,
+                        near_vel,
                         &actor->linear_velocity_x,
                         dx, dz, dist);
                     final_pitch = sound_apply_doppler_pitch(engine_pitch, doppler);
