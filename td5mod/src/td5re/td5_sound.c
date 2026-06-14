@@ -915,10 +915,23 @@ void td5_sound_update_audio_mix(void)
         num_passes     = 1;
         viewer_vehicle = s_reverb_actor_index;
         pan            = 0;
-    } else {
-        num_passes     = 2;  /* [PORT] audio capped at 2 listener passes */
+    } else if (g_td5.viewport_count == 2) {
+        num_passes     = 2;  /* classic 2-player: base + duplicate slot range, L/R pan */
         viewer_vehicle = 0; /* first pass: vehicle 0, will increment */
         pan            = -10000;
+    } else {
+        /* [MP audio 2026-06-13] 3+ split-screen players: ONE engine voice per
+         * car (single pass, base slot range only). The voice pool has just a
+         * base + duplicate range, so the 2-pass scheme already plays every car
+         * TWICE and half-exhausts the pool at 2 players; a 3rd/4th player then
+         * steals voices and their cars go silent. With one pass + the
+         * nearest-listener attenuation (below), each car is heard at the volume
+         * of whichever human is closest, using half the voices — so every
+         * player's car is audible. Center pan (per-ear panning is meaningless
+         * across 3-4 panes on a single audio output). */
+        num_passes     = 1;
+        viewer_vehicle = 0;
+        pan            = 0;
     }
 
     /* ----------------------------------------------------------------
