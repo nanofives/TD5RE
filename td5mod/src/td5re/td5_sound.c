@@ -1048,6 +1048,12 @@ void td5_sound_update_audio_mix(void)
                 dx *= TD5_SOUND_DISTANCE_SCALE;
                 dz *= TD5_SOUND_DISTANCE_SCALE;
                 float dist = sqrtf(dx * dx + dz * dz);
+                /* [MP audio 2026-06-13] In 3+ split-screen the skid car is the
+                 * hardest-drifting HUMAN, but s_active_listener_pos is player 1's
+                 * camera — so the screech was attenuated by distance to player 1
+                 * and went silent for everyone but player 1. It's that human's
+                 * OWN drift in their OWN pane, so play it at full volume. */
+                if (multi_audio) { dx = 0.0f; dz = 0.0f; dist = 0.0f; }
 
                 int vol_scaled;
                 if (tracked_vol < 0) {
