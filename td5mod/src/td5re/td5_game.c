@@ -4046,20 +4046,14 @@ int td5_game_run_race_frame(void) {
                 /* Navigation: [REWORK 2026-06-05/S15] 6 selectable rows
                  * (VIEW / SOUND / CONTINUE / RESTART RACE / QUIT TO MENU / EXIT GAME).
                  * Original had 5 rows (RunAudioOptionsOverlay @ 0x0043BF70). */
-                if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 7;
-                if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 6) % 7;
-
-                /* [MP 2026-06-13] BACK TO LOBBY (row 4) only makes sense in a
-                 * multiplayer/network session — there's no lobby to return to in
-                 * a single-player race. Skip it during navigation so the cursor
-                 * can't land on it (the HUD also greys it out). */
-                {
-                    int pause_is_mp = (g_td5.network_active || g_td5.num_human_players > 1);
-                    if (!pause_is_mp && s_pause_menu_cursor == 4) {
-                        if (key_up && !s_prev_up)        s_pause_menu_cursor = 3;
-                        else                             s_pause_menu_cursor = 5; /* down / default */
-                    }
-                }
+                /* [MP 2026-06-13] BACK TO LOBBY (row 4) only exists in a
+                 * multiplayer/network session — it's removed from the single-
+                 * player pause menu (see td5_hud_init_pause_menu), which then has
+                 * 6 rows instead of 7. Wrap navigation over the live row count so
+                 * QUIT TO MENU / EXIT GAME stay reachable and there's no gap. */
+                int pause_rows = (g_td5.network_active || g_td5.num_human_players > 1) ? 7 : 6;
+                if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % pause_rows;
+                if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + pause_rows - 1) % pause_rows;
 
                 /* Left/right adjusts sliders for rows 0-2.
                  * [CONFIRMED @ 0x0043C211] CONTINUOUS while held — (&DAT_004B135C)[cursor] ± 0.02f, clamp [0,1].
@@ -4163,9 +4157,12 @@ int td5_game_run_race_frame(void) {
                         }
                         TD5_LOG_I(LOG_TAG, "Pause menu: BACK TO LOBBY, starting fade-out");
                         td5_game_begin_fade_out(0);
-                    } else if (s_pause_menu_cursor == 5) {
+                    } else if (s_pause_menu_cursor ==
+                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 5 : 4)) {
                         /* QUIT TO MENU — leave the race, return to the frontend
-                         * (was "EXIT"; behaviour unchanged, only relabelled). */
+                         * (was "EXIT"; behaviour unchanged, only relabelled).
+                         * Row 5 in MP, row 4 in single-player (BACK TO LOBBY
+                         * removed there). [MP 2026-06-13] */
                         s_pause_menu_active = 0;
                         s_pause_exit_pending = 1;
                         /* PART A (user 2026-06-02): capture the player's CURRENT
@@ -4202,9 +4199,11 @@ int td5_game_run_race_frame(void) {
                         /* Trigger fade-out; resources released when fade completes.
                          * Original (0x43C317): calls BeginRaceFadeOutTransition(0). */
                         td5_game_begin_fade_out(0);
-                    } else if (s_pause_menu_cursor == 6) {
+                    } else if (s_pause_menu_cursor ==
+                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 6 : 5)) {
                         /* EXIT GAME — clean application shutdown (distinct from
-                         * QUIT TO MENU). Sets the same quit latch the frontend
+                         * QUIT TO MENU). Row 6 in MP, row 5 in single-player.
+                         * Sets the same quit latch the frontend
                          * Quit button uses (g_td5.quit_requested); the main loop
                          * tears the app down on its next iteration. Persist any
                          * pending volume change first so it survives the exit. */
