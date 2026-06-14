@@ -815,7 +815,13 @@ void td5_sound_update_audio_mix(void)
     /* ----------------------------------------------------------------
      * A. Compute listener velocity deltas (for Doppler)
      * ---------------------------------------------------------------- */
-    for (int vp = 0; vp < 2; vp++) {
+    /* [MP audio 2026-06-13] Velocity delta for EVERY human viewport (was just 2)
+     * so the nearest-listener engine attenuation below has valid Doppler vel for
+     * players 3+. Arrays are sized [TD5_MAX_VIEWPORTS]. */
+    int n_listeners = g_td5.viewport_count;
+    if (n_listeners < 1) n_listeners = 1;
+    if (n_listeners > TD5_MAX_VIEWPORTS) n_listeners = TD5_MAX_VIEWPORTS;
+    for (int vp = 0; vp < n_listeners; vp++) {
         for (int c = 0; c < 3; c++) {
             s_listener_vel[vp][c] = s_listener_pos[vp][c] - s_listener_prev_pos[vp][c];
             s_listener_prev_pos[vp][c] = s_listener_pos[vp][c];
@@ -909,10 +915,45 @@ void td5_sound_update_audio_mix(void)
         num_passes     = 1;
         viewer_vehicle = s_reverb_actor_index;
         pan            = 0;
-    } else {
-        num_passes     = 2;  /* [PORT] audio capped at 2 listener passes */
+    } else if (g_td5.viewport_count == 2) {
+        num_passes     = 2;  /* classic 2-player: base + duplicate slot range, L/R pan */
         viewer_vehicle = 0; /* first pass: vehicle 0, will increment */
         pan            = -10000;
+    } else {
+        /* [MP audio 2026-06-13] 3+ split-screen players: ONE engine voice per
+         * car (single pass, base slot range only). The voice pool has just a
+         * base + duplicate range, so the 2-pass scheme already plays every car
+         * TWICE and half-exhausts the pool at 2 players; a 3rd/4th player then
+         * steals voices and their cars go silent. With one pass + the
+         * nearest-listener attenuation (below), each car is heard at the volume
+         * of whichever human is closest, using half the voices — so every
+         * player's car is audible. Center pan (per-ear panning is meaningless
+         * across 3-4 panes on a single audio output). */
+        num_passes     = 1;
+        viewer_vehicle = 0;
+        pan            = 0;
+    }
+
+    /* [MP audio 2026-06-13] 3+ split-screen players share a SINGLE pass (one
+     * voice per car). Treat EVERY human car as "local" (full engine + idle loop,
+     * like the viewer) so players 2/3/4 aren't quieter than player 1, and route
+     * the one shared SkidBit voice to whichever human is drifting HARDEST so the
+     * tyre screech isn't player-1-only. (1-/2-player keep the per-pass viewer
+     * model unchanged.) */
+    int multi_audio = (g_td5.viewport_count > 2);
+    int num_human   = g_td5.num_human_players;
+    if (num_human < 1) num_human = 1;
+    if (num_human > TD5_SOUND_MAX_RACE_VEHICLES) num_human = TD5_SOUND_MAX_RACE_VEHICLES;
+    int skid_human = 0;
+    if (multi_audio) {
+        int best_slip = -1;
+        for (int h = 0; h < num_human; h++) {
+            TD5_Actor *ha = td5_game_get_actor(h);
+            if (!ha) continue;
+            int sf = ha->front_axle_slip_excess, sr = ha->rear_axle_slip_excess;
+            int sm = (sf > sr) ? sf : sr;
+            if (sm > best_slip) { best_slip = sm; skid_human = h; }
+        }
     }
 
     /* ----------------------------------------------------------------
@@ -940,10 +981,20 @@ void td5_sound_update_audio_mix(void)
 
             int state_idx = pass + veh * 2;
 
+            /* Which car drives the shared SkidBit/tracked screech this pass:
+             * the per-pass viewer normally, or the hardest-drifting human in 3+
+             * split-screen. [MP audio 2026-06-13] */
+            int is_skid_car = multi_audio ? (veh == skid_human)
+                                          : ((int)veh == td5_game_get_player_slot(pass));
+            /* Which cars get the full "local" engine treatment (direct volume +
+             * idle loop): the per-pass viewer normally, every human in 3+. */
+            int is_local_eng = multi_audio ? (veh < num_human)
+                                           : ((int)veh == (int)viewer_vehicle);
+
             /* ----------------------------------------------------------
              * Viewer vehicle horn/siren tracked audio (per-vehicle)
              * ---------------------------------------------------------- */
-            if ((int)veh == td5_game_get_player_slot(pass)) {
+            if (is_skid_car) {
                 /* Horn/siren tracked-audio mix for the viewer vehicle. The
                  * "dead vehicle" identity check is applied at the play/modify
                  * decision below (see comment there). */
@@ -997,6 +1048,12 @@ void td5_sound_update_audio_mix(void)
                 dx *= TD5_SOUND_DISTANCE_SCALE;
                 dz *= TD5_SOUND_DISTANCE_SCALE;
                 float dist = sqrtf(dx * dx + dz * dz);
+                /* [MP audio 2026-06-13] In 3+ split-screen the skid car is the
+                 * hardest-drifting HUMAN, but s_active_listener_pos is player 1's
+                 * camera — so the screech was attenuated by distance to player 1
+                 * and went silent for everyone but player 1. It's that human's
+                 * OWN drift in their OWN pane, so play it at full volume. */
+                if (multi_audio) { dx = 0.0f; dz = 0.0f; dist = 0.0f; }
 
                 int vol_scaled;
                 if (tracked_vol < 0) {
@@ -1110,8 +1167,9 @@ void td5_sound_update_audio_mix(void)
 
                 /* State change: stop old, start new */
                 if (cur_state == ENGINE_STATE_STOPPED) {
-                    /* First time: if this is the viewer, also start the idle loop */
-                    if ((int)veh == (int)viewer_vehicle &&
+                    /* First time: local cars (viewer / every human in 3+) also
+                     * start the idle loop so they sound as full as player 1. */
+                    if (is_local_eng &&
                         !td5_game_is_replay_active() &&
                         !slot_is_playing(veh * 3 + 1 + slot_offset)) {
                         slot_play(veh * 3 + 1 + slot_offset, 1, 0, 0, 1000);
@@ -1128,9 +1186,10 @@ void td5_sound_update_audio_mix(void)
             }
 
             /* ----------------------------------------------------------
-             * Viewer vehicle: direct volume/pitch (no distance atten)
+             * Local car (viewer / every human in 3+): direct volume/pitch
+             * (no distance attenuation) so all human cars are full volume.
              * ---------------------------------------------------------- */
-            if ((int)veh == (int)viewer_vehicle && !td5_game_is_replay_active()) {
+            if (is_local_eng && !td5_game_is_replay_active()) {
                 int steer_pan = pan;
                 /* Steering-based pan for single-player (subtle L/R shift) */
                 if (raw_speed > 999 && g_td5.split_screen_mode == 0) {
@@ -1167,16 +1226,45 @@ void td5_sound_update_audio_mix(void)
                     spatial_pan = 0;
                 }
 
-                float dx = ((float)s_active_listener_pos[0] - (float)actor->world_pos.x)
-                           * TD5_SOUND_DISTANCE_SCALE;
-                float dz = ((float)s_active_listener_pos[2] - (float)actor->world_pos.z)
-                           * TD5_SOUND_DISTANCE_SCALE;
-                float dist_sq = dx * dx + dz * dz;
-                float dist;
-                if (td5_game_is_replay_active()) {
-                    dist = sqrtf(dist_sq) * TD5_SOUND_REPLAY_DIST_SCALE;
-                } else {
-                    dist = sqrtf(dist_sq);
+                /* [MP audio 2026-06-13] Attenuate by distance to the NEAREST
+                 * HUMAN PLAYER'S CAR (slots 0..num_human_players-1), not the
+                 * current pass's listener. Rationale: the mixer runs only 1-2
+                 * listener passes (the slot pool has just a base + duplicate
+                 * range), AND the camera only fills g_camWorldPos for viewports
+                 * 0-1 — so listeners 2+ were stuck at the origin and players 3/4's
+                 * cars attenuated to silence in their own panes. Using the human
+                 * cars themselves as the listeners is robust (no dependence on
+                 * the camera / viewport-slot maps): a car near ANY human plays
+                 * loud, so every player hears their own car + nearby rivals.
+                 * (1-player: the single human == the old listener; 2-player: the
+                 * two human cars ≈ the two camera listeners — both unchanged.) */
+                const int32_t *near_vel = s_active_listener_vel;
+                float dx = 0.0f, dz = 0.0f, dist;
+                {
+                    int nh = g_td5.num_human_players;
+                    if (nh < 1) nh = 1;
+                    if (nh > TD5_SOUND_MAX_RACE_VEHICLES) nh = TD5_SOUND_MAX_RACE_VEHICLES;
+                    float best = -1.0f;
+                    for (int hl = 0; hl < nh; hl++) {
+                        TD5_Actor *ha = td5_game_get_actor(hl);
+                        if (!ha) continue;
+                        float lx = ((float)ha->world_pos.x - (float)actor->world_pos.x)
+                                   * TD5_SOUND_DISTANCE_SCALE;
+                        float lz = ((float)ha->world_pos.z - (float)actor->world_pos.z)
+                                   * TD5_SOUND_DISTANCE_SCALE;
+                        float d2 = lx * lx + lz * lz;
+                        if (best < 0.0f || d2 < best) {
+                            best = d2; dx = lx; dz = lz;
+                            near_vel = &ha->linear_velocity_x;  /* listener vel = that car's */
+                        }
+                    }
+                    if (best < 0.0f) {  /* no valid human actor — fall back to pass listener */
+                        dx = ((float)s_active_listener_pos[0] - (float)actor->world_pos.x) * TD5_SOUND_DISTANCE_SCALE;
+                        dz = ((float)s_active_listener_pos[2] - (float)actor->world_pos.z) * TD5_SOUND_DISTANCE_SCALE;
+                        best = dx * dx + dz * dz;
+                    }
+                    dist = sqrtf(best);
+                    if (td5_game_is_replay_active()) dist *= TD5_SOUND_REPLAY_DIST_SCALE;
                 }
 
                 int vol_atten = sound_attenuate_volume(engine_vol, dist);
@@ -1184,7 +1272,7 @@ void td5_sound_update_audio_mix(void)
                 int final_pitch = engine_pitch;
                 if (vol_atten > 0) {
                     float doppler = sound_compute_doppler_ratio(
-                        s_active_listener_vel,
+                        near_vel,
                         &actor->linear_velocity_x,
                         dx, dz, dist);
                     final_pitch = sound_apply_doppler_pitch(engine_pitch, doppler);

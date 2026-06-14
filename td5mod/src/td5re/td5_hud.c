@@ -1947,20 +1947,27 @@ void td5_hud_init_layout(void)
         float vp_l = s_view_layout[v].vp_int_left;
         float vp_t = s_view_layout[v].vp_int_top;
 
+        /* [user 2026-06-13] Speedometer cluster +15%. All speedo elements are
+         * anchored to the bottom-right corner via sx/sy offsets, so a scaled
+         * ssx/ssy grows the dial+digits+gear uniformly about the corner; the
+         * needle-render block applies the SAME 1.15 so everything stays aligned. */
+        float ssx = sx * 1.15f;
+        float ssy = sy * 1.15f;
+
         /* --- Speedometer dial --- */
         TD5_AtlasEntry *speedo = td5_asset_find_atlas_entry(NULL, "SPEEDO");
         if (v == 0) {
             hud_log_atlas_status("SPEEDO", speedo);
         }
-        float speedo_x = vp_r - sx * 96.0f - sx * 16.0f;
-        float speedo_y = vp_b - sy * 96.0f - sy * 8.0f;
+        float speedo_x = vp_r - ssx * 96.0f - ssx * 16.0f;
+        float speedo_y = vp_b - ssy * 96.0f - ssy * 8.0f;
 
         uint8_t *view_base = s_hud_prim_storage + (size_t)s_cur_view * HUD_VIEW_BLOCK;
         hud_build_quad(
             view_base + SPEEDO_QUAD_OFF,
             0, speedo->texture_page,
             speedo_x, speedo_y,
-            speedo_x + sx * 96.0f, speedo_y + sy * 96.0f,
+            speedo_x + ssx * 96.0f, speedo_y + ssy * 96.0f,
             (float)speedo->atlas_x + 0.5f,
             (float)speedo->atlas_y + 0.5f,
             (float)(speedo->atlas_x + speedo->width) - 0.5f,
@@ -1974,9 +1981,9 @@ void td5_hud_init_layout(void)
             hud_log_atlas_status("SPEEDOFONT", s_speedofont_atlas);
         }
 
-        float font_glyph_w = sx * 15.0f;
-        float font_x_start = vp_r - sx * 60.0f;
-        float font_y = vp_b - sy * 23.0f - sy * 8.0f;
+        float font_glyph_w = ssx * 15.0f;
+        float font_x_start = vp_r - ssx * 60.0f;
+        float font_y = vp_b - ssy * 23.0f - ssy * 8.0f;
 
         /* Build 3 digit quads (ones, tens, hundreds -- right to left)
          * [DA-T3 audit 2026-05-22] orig step = font_glyph_w + 2.0f
@@ -1988,7 +1995,7 @@ void td5_hud_init_layout(void)
                 view_base + SPEEDFONT_BASE_OFF + d * TD5_HUD_GLYPH_QUAD_SIZE,
                 0, s_speedofont_atlas->texture_page,
                 dx, font_y,
-                dx + font_glyph_w, font_y + sy * 23.0f,
+                dx + font_glyph_w, font_y + ssy * 23.0f,
                 0.0f, 0.0f, 0.0f, 0.0f, /* UV set at render time per digit */
                 0xFFFFFFFF, HUD_DEPTH
             );
@@ -2000,14 +2007,14 @@ void td5_hud_init_layout(void)
             hud_log_atlas_status("GEARNUMBERS", s_gearnumbers_atlas);
         }
 
-        float gear_x = vp_r - sx * 32.0f;
-        float gear_y = vp_b - sy * 16.0f - sy * 56.0f;
+        float gear_x = vp_r - ssx * 32.0f;
+        float gear_y = vp_b - ssy * 16.0f - ssy * 56.0f;
 
         hud_build_quad(
             view_base + GEAR_QUAD_OFF,
             0, s_gearnumbers_atlas->texture_page,
             gear_x, gear_y,
-            gear_x + sx * 16.0f, gear_y + sy * 16.0f,
+            gear_x + ssx * 16.0f, gear_y + ssy * 16.0f,
             0.0f, 0.0f, 0.0f, 0.0f, /* UV set at render time */
             0xFFFFFFFF, HUD_DEPTH
         );
@@ -2607,8 +2614,8 @@ static void hud_set_minimap_for_view(int v)
 {
     TD5_HudViewLayout *vl = &s_view_layout[v];
     float sx = vl->scale_x, sy = vl->scale_y;
-    s_minimap_width   = sx * 100.0f;
-    s_minimap_height  = sy * 100.0f;
+    s_minimap_width   = sx * 115.0f;   /* [user 2026-06-13] +15% minimap */
+    s_minimap_height  = sy * 115.0f;
     s_minimap_dot_size = sx * 7.0f;
     s_minimap_x = vl->vp_int_left + sx * 8.0f;
     s_minimap_y = vl->vp_int_bottom - s_minimap_height - sy * 8.0f;
@@ -2883,9 +2890,16 @@ void td5_hud_render_overlays(float dt)
             float cos_a = td5_cos_12bit(needle_angle);
             float sin_a = td5_sin_12bit(needle_angle);
 
+            /* [user 2026-06-13] Speedometer +15%. Every speedo element is
+             * anchored to the bottom-right corner via sx/sy offsets, so scaling
+             * sx/sy by 1.15 for the whole cluster (dial, needle, digits, gear)
+             * grows it uniformly about that corner and stays aligned. */
+            const float SPEEDO_SCALE = 1.15f;
+            float ssx = sx * SPEEDO_SCALE;
+            float ssy = sy * SPEEDO_SCALE;
             /* Needle center is at speedometer center */
-            float cx = vl->vp_int_right - sx * 64.0f;
-            float cy = vl->vp_int_bottom - sy * 56.0f;
+            float cx = vl->vp_int_right - ssx * 64.0f;
+            float cy = vl->vp_int_bottom - ssy * 56.0f;
 
             /* When the vectorized dial is active it is drawn as a true CIRCLE
              * (radius from sy), so the needle uses a uniform sy scale on both
@@ -2896,8 +2910,8 @@ void td5_hud_render_overlays(float dt)
             /* Vector dial: circular needle (uniform sy scale) so it stays inside
              * the circular SDF dial. Baked-dial fallback keeps the faithful
              * elliptical sx/sy needle. */
-            float nsx = use_vec ? sy : sx;
-            float nsy = sy;
+            float nsx = use_vec ? ssy : ssx;
+            float nsy = ssy;
 
             /* V0: near end (9 units into dial), V2: far tip (45 units out) */
             float near_x = cx - cos_a * nsx * 9.0f;
@@ -3001,11 +3015,11 @@ void td5_hud_render_overlays(float dt)
              * Inter-digit gap is 2.0 [CONFIRMED @ 0x45d6d8]. */
             /* Bigger digits, kept at the same spot (left anchor + original
              * bottom edge, growing upward). */
-            float sf_gw = sx * 19.0f;
-            float dh    = sy * 32.0f;
+            float sf_gw = ssx * 19.0f;   /* speed digits scale with the +15% dial */
+            float dh    = ssy * 32.0f;
             float sf_step = sf_gw + 2.0f;
-            float sf_x0 = vl->vp_int_right - sx * 60.0f;
-            float sf_y1 = vl->vp_int_bottom - sy * 7.0f;   /* original bottom edge */
+            float sf_x0 = vl->vp_int_right - ssx * 60.0f;
+            float sf_y1 = vl->vp_int_bottom - ssy * 7.0f;   /* original bottom edge */
             float sf_y0 = sf_y1 - dh;
             float digit_u_base = (float)s_speedofont_atlas->atlas_x;
             float digit_v_base = (float)s_speedofont_atlas->atlas_y;
@@ -3029,7 +3043,7 @@ void td5_hud_render_overlays(float dt)
              * BEFORE the needle (immediate-mode call order = z-order) so the
              * needle/digits paint on top of the dial face. */
             if (use_vec) {
-                hud_vector_speedo_tach(cx, cy, sy);
+                hud_vector_speedo_tach(cx, cy, ssy);   /* +15% radius */
             } else {
                 hud_submit_quad(view_base + SPEEDO_QUAD_OFF);
             }
@@ -3217,16 +3231,22 @@ void td5_hud_render_overlays(float dt)
             float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
             float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
 
-            /* Build and submit a centered digit quad */
+            /* Build and submit a centered digit quad. [user 2026-06-13: race
+             * countdown numbers too small] Scaled up COUNTDOWN_DIGIT_SCALE× and
+             * properly centred on the view (the old anchor sat the digit a full
+             * cell left of centre). */
+            const float COUNTDOWN_DIGIT_SCALE = 2.2f;
+            float dw = sx * 16.0f * COUNTDOWN_DIGIT_SCALE;
+            float dh = sy * 24.0f * COUNTDOWN_DIGIT_SCALE;
             TD5_SpriteQuad indicator_quad;
-            float ind_x = vl->center_x - sx * 16.0f;
-            float ind_y = vl->center_y - sy * 24.0f;
+            float ind_x = vl->center_x - dw * 0.5f;
+            float ind_y = vl->center_y - dh * 0.5f;
 
             hud_build_quad(
                 &indicator_quad,
                 0, s_numbers_atlas->texture_page,
                 ind_x, ind_y,
-                ind_x + sx * 16.0f, ind_y + sy * 24.0f,
+                ind_x + dw, ind_y + dh,
                 u0, v0, u0 + 15.0f, v0 + 23.0f,
                 0xFFFFFFFF, HUD_DEPTH
             );
@@ -4584,8 +4604,8 @@ void td5_hud_render_minimap(int actor_slot)
 void td5_hud_init_minimap_layout(void)
 {
     /* Compute minimap dimensions from scale factors */
-    s_minimap_width  = s_scale_x * 100.0f;
-    s_minimap_height = s_scale_y * 100.0f;
+    s_minimap_width  = s_scale_x * 115.0f;   /* [user 2026-06-13] +15% minimap */
+    s_minimap_height = s_scale_y * 115.0f;
     s_minimap_dot_size = s_scale_x * 7.0f;
 
     /* Allocate minimap quad buffer */
@@ -4918,13 +4938,17 @@ void td5_hud_init_pause_menu(int page_index)
      * title at -52 keeps a 4px margin). From binary 0x43B7C0: single-texel
      * sample. Texture alpha (A=128 after ARGB channel remap) provides
      * semi-transparency naturally. */
+    /* [MP 2026-06-13] BACK TO LOBBY only exists in a multiplayer/network session.
+     * Single-player drops that row entirely (see the build loop below), so the
+     * panel is one row shorter. */
+    int pause_mp = (g_td5.network_active || g_td5.num_human_players > 1);
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
-        /* [S31] 7 selectable rows now (BACK TO LOBBY added) -- the bottom
-         * row's selbox reaches ~+79, so the panel bottom grows to +84. */
+        /* MP = 7 selectable rows (bottom selbox ~+79 -> panel +84); single-player
+         * = 6 rows (BACK TO LOBBY removed) -> panel +68. */
         PAUSE_ADD(-s_pause_half_width, -56.0f,
-                   s_pause_half_width,  84.0f,
+                   s_pause_half_width,  pause_mp ? 84.0f : 68.0f,
                    bu, bv, bu, bv,
                    blackbox_e->texture_page, 0xFFFFFFFF);
     }
@@ -5005,6 +5029,14 @@ void td5_hud_init_pause_menu(int page_index)
     while (pausetxt && s_pause_menu_strings && string_offset < 0x80) {
         const char *str = s_pause_menu_strings[string_offset / 4];
         if (str == NULL) break;
+
+        /* [MP 2026-06-13] Omit BACK TO LOBBY in single-player (no lobby). Skip
+         * WITHOUT advancing text_y so the rows below (QUIT TO MENU / EXIT GAME)
+         * close the gap and shift up — the menu becomes a clean 6-row layout. */
+        if (!pause_mp && strcmp(str, "BACK TO LOBBY") == 0) {
+            string_offset += 8;
+            continue;
+        }
 
         int alignment = *(int *)((uint8_t *)s_pause_menu_strings + string_offset + 4);
         int len = (int)strlen(str);
