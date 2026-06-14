@@ -2271,16 +2271,20 @@ void td5_hud_draw_finish_position(int position)
      *  indicator number" and "in the middle of the screen".] The indicator
      *  (see td5_hud_render_overlays) draws sx*16 x sy*24 — match it exactly and
      *  drop the prior 1.5x blow-up that read "bigger than the indicator". */
-    float sx = s_view_layout[0].scale_x;
-    float sy = s_view_layout[0].scale_y;
+    /* Draw in the CURRENT view's pane (s_cur_view), not always view 0, so each
+     * split-screen viewport shows its OWN finishing-place digit when that
+     * player finishes. [MP per-viewport finish 2026-06-13] */
+    int vw = (s_cur_view >= 0 && s_cur_view < s_view_count) ? s_cur_view : 0;
+    float sx = s_view_layout[vw].scale_x;
+    float sy = s_view_layout[vw].scale_y;
     float w = 16.0f * sx;
     float h = 24.0f * sy;
     /* Center in HUD/view space (the indicator's basis), NOT g_td5.render_width —
      * HUD quads live in the per-view layout space (vp_left..vp_right), which is
      * what the checkpoint indicator centers on. Using g_td5.render_width put the
      * digit off-center because the backbuffer != HUD virtual width. */
-    float cx = s_view_layout[0].center_x;
-    float cy = s_view_layout[0].center_y;
+    float cx = s_view_layout[vw].center_x;
+    float cy = s_view_layout[vw].center_y;
     float x0 = cx - w * 0.5f;
     float y0 = cy - h * 0.5f;
 
@@ -3229,14 +3233,20 @@ void td5_hud_render_overlays(float dt)
             hud_submit_quad(&indicator_quad);
         }
 
-        /* Finishing-position victory digit — drawn HERE inside the per-view loop
-         * (the same render context as the speedo/indicator, which land correctly).
-         * The post-per-view-loop HUD pass applied an ~(80,66) viewport-relative
-         * offset that pushed the digit off-centre. Main view only. */
-        if (v == 0 && g_td5.race_end_fade_state > 0) {
-            extern int td5_game_get_victory_position(void);
-            int fpos = td5_game_get_victory_position();
-            if (fpos > 0) td5_hud_draw_finish_position(fpos);
+        /* Finishing-position digit — drawn HERE inside the per-view loop (same
+         * render context as the speedo/indicator, which land correctly).
+         * [MP per-viewport finish 2026-06-13] Shown on ANY view whose player has
+         * crossed the line — so each split-screen player gets their own
+         * end-of-race indicator the instant they finish, while the others keep
+         * racing. Falls back to the global victory position for view 0 during
+         * the full race-end fade. */
+        {
+            int vplace = td5_game_slot_finish_place(g_actor_slot_map[v]);
+            if (vplace <= 0 && v == 0 && g_td5.race_end_fade_state > 0) {
+                extern int td5_game_get_victory_position(void);
+                vplace = td5_game_get_victory_position();
+            }
+            if (vplace > 0) td5_hud_draw_finish_position(vplace);
         }
 
         s_cur_view++;
