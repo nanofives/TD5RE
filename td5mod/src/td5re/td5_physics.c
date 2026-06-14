@@ -41,6 +41,7 @@
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* td5_input_ff_play_effect (wall impact FF) */
+#include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
@@ -862,27 +863,46 @@ void td5_physics_apply_render_interpolation(float subtick_fraction)
     }
 }
 
-/* [task#14 2026-06-13] TD6 breakable-prop collision (port of TD6.exe FUN_00441070
- * + the impulse core of FUN_0043e700). Props are INVISIBLE collision volumes on
- * the baked world geometry (lampposts/bins/etc.; London ships ~199, other TD6
- * tracks ~none). For each of the 4 wheel contact points, if it's within
- * radius*16 world units of a prop, reflect the inward velocity (restitution ~0.5)
- * so the car bounces off the (already-visible) street furniture instead of
- * driving through it. The exact debris-burst + impact-sound (FUN_004363f0 /
- * FUN_00431930) are render/audio-time in TD6 and left as Phase-2 polish; this is
- * the sim-time collision core. No-op on tracks without props. */
+/* [task#14 2026-06-14] TD6 breakable-prop collision + break effect (port of
+ * TD6.exe FUN_00441070 broadphase + the impulse/break core of FUN_0043e700).
+ * Props are collision volumes anchored to the baked world geometry (the visible
+ * lampposts/bins/traffic-furniture; London ships ~199, other TD6 tracks ~none).
+ *
+ * BREAK MODEL: street furniture is light, so a hit doesn't bounce the car off a
+ * wall — it knocks the prop over. For each wheel within radius*16 world units of
+ * an un-broken prop we (1) absorb ~25% of the inward velocity (a thud, not a
+ * rebound), (2) if the approach was hard enough (>0x3200, the same threshold the
+ * wall handler uses) play a crash SFX + FF rumble + queue a debris dust-burst,
+ * and (3) mark the prop broken one-shot so the car then plows straight through
+ * it. Any actor (player/AI/traffic) can break a prop. No-op on non-prop tracks. */
+static int td6_props_enabled(void)
+{
+    static int s = -1;   /* A/B knob: TD5RE_TD6_PROPS=0 disables prop collision */
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_PROPS"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
 static void td5_physics_check_td6_props(TD5_Actor *actor)
 {
     int n, i, w;
-    int32_t cx, cz, vx, vz, vx0, vz0;
+    int32_t cx, cz, vx, vz, vx0, vz0, speed;
     if (!actor) return;
+    if (!td6_props_enabled()) return;
     n = td5_track_td6_prop_count();
     if (n <= 0) return;
-    cx = actor->world_pos.x; cz = actor->world_pos.z;
     vx = vx0 = actor->linear_velocity_x;
     vz = vz0 = actor->linear_velocity_z;
+    /* Speed gate: only interact with props while genuinely driving (>~5 MPH).
+     * This stops the start grid (cars spawned at spans 2-17, ON the props at
+     * spans 2/5/9) and the stationary countdown from kicking cars into the
+     * rails — the "invisible wall at the start" — and also means a prop only
+     * breaks when you actually drive into it at speed. */
+    speed = (int32_t)td5_isqrt((uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
+    if (speed < 0x1800) return;
+    cx = actor->world_pos.x; cz = actor->world_pos.z;
     for (i = 0; i < n; i++) {
         int32_t px, pz, rw, span, cdx, cdz;
+        if (td5_track_td6_prop_is_broken(i)) continue;   /* already knocked over */
         if (!td5_track_td6_prop_get(i, &px, &pz, &rw, &span)) continue;
         /* broadphase: chassis vs prop (world units) before the 4 wheel tests */
         cdx = (cx - px) >> 8; cdz = (cz - pz) >> 8;
@@ -894,15 +914,40 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
             int32_t dz = (actor->wheel_contact_pos[w].z - pz) >> 8;
             int64_t d2 = (int64_t)dx * dx + (int64_t)dz * dz;
             if (d2 < (int64_t)rw * rw) {
-                int32_t dist = (int32_t)td5_isqrt((uint32_t)d2);
-                int64_t vn;
-                if (dist < 1) dist = 1;
-                /* velocity component along the prop->wheel (outward) normal */
-                vn = ((int64_t)vx * dx + (int64_t)vz * dz) / dist;
-                if (vn < 0) {                       /* approaching -> reflect */
-                    int64_t imp = (-vn * 3) / 2;    /* (1 + restitution 0.5) */
-                    vx += (int32_t)(imp * dx / dist);
-                    vz += (int32_t)(imp * dz / dist);
+                /* Impact strength = the car's PLANAR SPEED (raw linear-velocity
+                 * units, ~1252 per MPH so 0x3200 ~= 10 MPH). Earlier this used
+                 * the inward-normal velocity component, but discrete/glancing
+                 * wheel contacts make that read ~0 -> the "strength=0, no
+                 * sound/debris" bug. Total speed is robust to contact angle. */
+                int32_t strength = (int32_t)td5_isqrt(
+                        (uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
+                /* mild thud: shed ~1/8 of velocity (light street furniture — you
+                 * plow through, you don't bounce off a wall) */
+                vx -= vx >> 3;
+                vz -= vz >> 3;
+                td5_track_td6_prop_set_broken(i);   /* one-shot: now drive through */
+                TD5_LOG_D(LOG_TAG, "TD6 prop break: idx=%d slot=%d strength=%d span=%d",
+                          i, (int)actor->slot_index, strength, span);
+                if (strength > 0x3200) {
+                    int32_t why = actor->wheel_contact_pos[w].y;
+                    int32_t wpos[3] = { px, why, pz };
+                    int variant = (strength < 0x19000) ? 0x16 : 0x1b;
+                    int mag     = (strength < 0x19000) ? 0x5622 : 0x2198;
+                    int volume  = (strength < 0x19000) ? 1 : 4;
+                    int32_t pitch = strength - 0x2000;
+                    int32_t ff_mag;
+                    if (pitch < 0x400) pitch = 0x400;
+                    else if (pitch > 0x800) pitch = 0x800;
+                    /* crash SFX (mirrors the wall-impact param order @0x406B70) */
+                    td5_sound_play_at_position(variant, pitch, mag, wpos, volume);
+                    ff_mag = strength >> 2;
+                    if (ff_mag > 99999) ff_mag = 100000;
+                    td5_input_ff_play_effect((int)actor->slot_index, 2,
+                                             ff_mag, ff_mag * 10);
+                    td5_vfx_queue_prop_break((float)px * (1.0f / 256.0f),
+                                             (float)why * (1.0f / 256.0f),
+                                             (float)pz * (1.0f / 256.0f),
+                                             strength);
                 }
                 break;                              /* one hit per prop */
             }

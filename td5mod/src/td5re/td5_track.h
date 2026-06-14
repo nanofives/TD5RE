@@ -126,6 +126,9 @@ void             td5_track_load_td6_props(const void *data, size_t size);
 int              td5_track_td6_prop_count(void);
 int              td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
                                         int *out_radius_w, int *out_span);
+int              td5_track_td6_prop_is_broken(int i);
+void             td5_track_td6_prop_set_broken(int i);
+void             td5_track_td6_props_reset_broken(void);
 int              td5_track_get_span_lane_count(int span_index);
 /* Per-lane surface type for a span (reuses surface_type_for_span_lane).
  * Returns the surface byte: 0x00-0x0F = main-road surface (low nibble of
@@ -277,6 +280,11 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor);
  * Caller is responsible for flushing via td5_render_debug_lines_flush().
  * span_radius is the number of spans before/after `center_span` to draw. */
 void td5_track_debug_emit_collision_lines(int center_span, int span_radius);
+
+/* --- Debug overlay: mark TD6 breakable props within max_dist world units of
+ * (gx,gz) as magenta poles (grey when broken), at ground_y. Caller flushes. */
+void td5_track_debug_emit_prop_markers(float gx, float ground_y, float gz,
+                                       float max_dist);
 
 /* --- Forward/Reverse boundary contact resolution ---
  * FUN_00406F50 / FUN_004070E0 — check probes against the track's

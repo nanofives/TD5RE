@@ -156,7 +156,7 @@ static int              s_td6_surface_grid_rows = 0;
  * + (above an impact speed) debris + sound (TD6.exe FUN_00441070/FUN_0043e700).
  * Record = 16 bytes: type@0(0xFF term), radius@1, strip-seg u16@4, posX i32@8
  * (24.8), posZ i32@12. */
-typedef struct { int32_t px, pz; int16_t span; uint8_t radius, type; } TD6Prop;
+typedef struct { int32_t px, pz; int16_t span; uint8_t radius, type, broken; } TD6Prop;
 static TD6Prop          s_td6_props[512];
 static int              s_td6_prop_count = 0;
 
@@ -6048,6 +6048,7 @@ void td5_track_load_td6_props(const void *data, size_t size)
                 TD6Prop *pr = &s_td6_props[s_td6_prop_count++];
                 pr->type   = r[0];
                 pr->radius = r[1];
+                pr->broken = 0;
                 pr->span   = (int16_t)(r[4] | ((uint16_t)r[5] << 8));
                 pr->px     = (int32_t)(r[8]  | ((uint32_t)r[9]  << 8) | ((uint32_t)r[10] << 16) | ((uint32_t)r[11] << 24));
                 pr->pz     = (int32_t)(r[12] | ((uint32_t)r[13] << 8) | ((uint32_t)r[14] << 16) | ((uint32_t)r[15] << 24));
@@ -6071,6 +6072,28 @@ int td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
     if (out_radius_w) *out_radius_w = (int)s_td6_props[i].radius * 16;
     if (out_span)     *out_span = (int)s_td6_props[i].span;
     return 1;
+}
+
+/* [task#14] Per-prop "broken" one-shot state. A prop breaks on first impact:
+ * the break effect (knock + crash sound + debris) fires once, then the prop
+ * goes inert so the car plows through the knocked-over street furniture
+ * instead of repeatedly thudding off it. Reset at race (re)start. */
+int td5_track_td6_prop_is_broken(int i)
+{
+    if (i < 0 || i >= s_td6_prop_count) return 1;   /* OOB -> treat as inert */
+    return s_td6_props[i].broken;
+}
+
+void td5_track_td6_prop_set_broken(int i)
+{
+    if (i < 0 || i >= s_td6_prop_count) return;
+    s_td6_props[i].broken = 1;
+}
+
+void td5_track_td6_props_reset_broken(void)
+{
+    int i;
+    for (i = 0; i < s_td6_prop_count; i++) s_td6_props[i].broken = 0;
 }
 
 /**
@@ -6752,6 +6775,44 @@ static void emit_span_wireframe(int span_index, uint32_t rail_color,
 }
 
 #define TD5_DBG_MAX_SPANS 8192
+
+/* [task#14] Debug overlay: mark every TD6 breakable prop within max_dist world
+ * units of (gx,gz). Each marker is a vertical magenta pole + a base cross sized
+ * to the prop's collision radius, so you can SEE where the invisible collision
+ * volumes sit and whether they line up with the baked street furniture. Broken
+ * props draw dim grey. ground_y is the player's world Y (props sit near it on
+ * the mostly-flat urban tracks). Pushes via td5_render_debug_line_world();
+ * caller flushes. Drawn under the F12 / [Debug] Collisions overlay. */
+void td5_track_debug_emit_prop_markers(float gx, float ground_y, float gz,
+                                       float max_dist)
+{
+    int n = td5_track_td6_prop_count();
+    int i;
+    float d2max = max_dist * max_dist;
+    for (i = 0; i < n; i++) {
+        int32_t px, pz; int rw, span;
+        float x, z, dx, dz, r;
+        uint32_t col;
+        if (!td5_track_td6_prop_get(i, &px, &pz, &rw, &span)) continue;
+        x = (float)px * (1.0f / 256.0f);
+        z = (float)pz * (1.0f / 256.0f);
+        dx = x - gx; dz = z - gz;
+        if (dx * dx + dz * dz > d2max) continue;
+        r = (float)rw;                                   /* collision radius (world) */
+        col = td5_track_td6_prop_is_broken(i) ? 0xFF606060u   /* grey = broken */
+                                              : 0xFFFF20FFu;  /* magenta = standing */
+        /* vertical pole */
+        td5_render_debug_line_world(x, ground_y, z, x, ground_y + 600.0f, z, col);
+        /* base cross (shows the hit radius) */
+        td5_render_debug_line_world(x - r, ground_y, z, x + r, ground_y, z, col);
+        td5_render_debug_line_world(x, ground_y, z - r, x, ground_y, z + r, col);
+        /* a small cap so the pole top is easy to spot */
+        td5_render_debug_line_world(x - 60.0f, ground_y + 600.0f, z,
+                                    x + 60.0f, ground_y + 600.0f, z, col);
+        td5_render_debug_line_world(x, ground_y + 600.0f, z - 60.0f,
+                                    x, ground_y + 600.0f, z + 60.0f, col);
+    }
+}
 
 void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
 {

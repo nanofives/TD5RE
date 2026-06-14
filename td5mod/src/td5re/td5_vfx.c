@@ -227,6 +227,69 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
  * Exhaust smoke (0x429CF0) = 0x2000. Set before spawn, auto-resets after. */
 static int32_t s_smoke_vel_y = 0x600;
 
+/* [task#14] TD6 prop-break debris: sim->render hand-off. Physics (sim-time)
+ * queues a break burst at a world point via td5_vfx_queue_prop_break(); the
+ * per-view particle update (render-time) drains it into each view's bank
+ * (frustum-gated), so a knocked-over lamppost/bin throws a short dust burst.
+ * served[] (per 2-way particle bank) prevents double-spawn; the event ages out
+ * after a few drain calls so both split-screen banks get served exactly once. */
+#define VFX_MAX_BREAK_EVENTS 16
+typedef struct {
+    float   wx, wy, wz;     /* world coords (float units, matches spawn API)   */
+    int     strength;       /* impact magnitude (inward approach speed, 24.8)  */
+    uint8_t alive, age;
+    uint8_t served[2];      /* particle banks are 2-way (view_index & 1)       */
+} VfxBreakEvent;
+static VfxBreakEvent s_break_events[VFX_MAX_BREAK_EVENTS];
+
+static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
+                                        float wz, int variant, int view_index);
+
+/* [task#14] Public sim-time entry: queue a debris burst at a world point.
+ * strength is the inward approach speed (24.8); bigger = more puffs. */
+void td5_vfx_queue_prop_break(float wx, float wy, float wz, int strength)
+{
+    int i;
+    for (i = 0; i < VFX_MAX_BREAK_EVENTS; i++) {
+        if (!s_break_events[i].alive) {
+            s_break_events[i].wx = wx;
+            s_break_events[i].wy = wy;
+            s_break_events[i].wz = wz;
+            s_break_events[i].strength = strength;
+            s_break_events[i].alive = 1;
+            s_break_events[i].age = 0;
+            s_break_events[i].served[0] = 0;
+            s_break_events[i].served[1] = 0;
+            return;
+        }
+    }
+    /* queue full (>16 breaks between frames): drop — visual-only, harmless */
+}
+
+/* Drain pending breaks into the given particle bank (vi = view_index & 1).
+ * Called once per view per frame from td5_vfx_update_particles. */
+static void vfx_emit_prop_breaks(int vi)
+{
+    int i, p;
+    if (vi < 0 || vi > 1) return;
+    for (i = 0; i < VFX_MAX_BREAK_EVENTS; i++) {
+        VfxBreakEvent *e = &s_break_events[i];
+        if (!e->alive) continue;
+        if (!e->served[vi]) {
+            int puffs = (e->strength > 0x8000) ? 6 : 4;
+            e->served[vi] = 1;
+            for (p = 0; p < puffs; p++) {
+                float jx = (float)((rand() % 240) - 120);
+                float jz = (float)((rand() % 240) - 120);
+                s_smoke_vel_y = 0x1400 + (rand() % 0x0C00);   /* upward burst */
+                vfx_spawn_smoke_at_position(NULL, e->wx + jx, e->wy + 32.0f,
+                                            e->wz + jz, p & 3, vi);
+            }
+        }
+        if (++e->age >= 4) { e->alive = 0; }   /* serve up to 2 banks, then expire */
+    }
+}
+
 /* ========================================================================
  * Static state -- all VFX subsystem globals
  * ======================================================================== */
@@ -1078,6 +1141,10 @@ void td5_vfx_update_particles(int view_index) {
     s_current_view_index = view_index;
     int vi = view_index & 1;
     int active_particles = 0;
+
+    /* [task#14] Spawn any queued TD6 prop-break debris bursts into this bank
+     * before the per-particle update (so they animate this frame). */
+    vfx_emit_prop_breaks(vi);
 
     uint8_t *bank = s_particle_banks[vi];
     for (int i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {

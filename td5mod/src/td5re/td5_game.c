@@ -1828,6 +1828,10 @@ int td5_game_init_race_session(void) {
     td5_asset_load_level(g_td5.track_index);
     g_track_is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
     g_track_type_mode = g_track_is_circuit ? 1 : 0;
+    /* [task#14] Un-break all TD6 breakable props for the new race (lampposts/
+     * bins re-stand). Load already zeroes these; this also covers a same-track
+     * restart that reuses the already-loaded level. No-op on non-prop tracks. */
+    td5_track_td6_props_reset_broken();
     TD5_LOG_I(LOG_TAG, "InitRace step 4/19: level runtime loaded track=%d is_circuit=%d", g_td5.track_index, g_track_is_circuit);
     CK("ck4_after_load_level");
 
@@ -5086,6 +5090,13 @@ int td5_game_run_race_frame(void) {
                 int wire_span = *(int16_t *)((uint8_t *)wire_actor + 0x80);
                 td5_render_debug_lines_reset();
                 td5_track_debug_emit_collision_lines(wire_span, 40);
+                /* [task#14] mark nearby TD6 breakable props (magenta poles) so
+                 * their invisible collision volumes are visible for testing. */
+                td5_track_debug_emit_prop_markers(
+                    (float)wire_actor->world_pos.x * (1.0f / 256.0f),
+                    (float)wire_actor->world_pos.y * (1.0f / 256.0f),
+                    (float)wire_actor->world_pos.z * (1.0f / 256.0f),
+                    40000.0f);
                 td5_render_debug_lines_flush();
             }
         }

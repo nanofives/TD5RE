@@ -112,6 +112,11 @@ void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index);
  * spawns from probe_RR/RL midpoint via td5_vfx_spawn_smoke_puff_at_point. */
 void td5_vfx_spawn_random_smoke_puff(TD5_Actor *actor, int view_index);
 
+/* [task#14] Queue a TD6 prop-break debris burst at a world point (float units).
+ * Called sim-time by physics when a breakable prop is struck; drained at
+ * render-time into each particle bank. strength = inward approach speed (24.8). */
+void td5_vfx_queue_prop_break(float wx, float wy, float wz, int strength);
+
 /* ========================================================================
  * Taillights
  * ======================================================================== */
