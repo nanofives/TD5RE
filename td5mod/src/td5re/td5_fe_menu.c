@@ -983,6 +983,30 @@ void Screen_MainMenu(void) {
         TD5_LOG_I(LOG_TAG, "MainMenu: seeded circuit_lap_count=%d (laps_option=%d)",
                   g_td5.circuit_lap_count, s_game_option_laps);
 
+        /* [MP leak fix 2026-06-13] Clear any leftover multiplayer session state
+         * on main-menu entry. After a local split-screen MP race, s_mp_flow +
+         * s_two_player_mode + s_num_human_players stayed set, so the next Quick
+         * Race (or any race-menu mode) reused the MP grid — e.g. a 3-player MP
+         * race then launched a single Quick Race with 3 split-screen viewports.
+         * Every MP/2P flow re-arms these from its own lobby/menu, so main-menu
+         * entry always means "no active session": reset the flags + player count
+         * and drop the per-player EXCLUSIVE device bindings so all pads feed the
+         * shared menu polling again. The single-player race path rebinds slot 0
+         * to whichever controller navigated. */
+        if (s_mp_flow || s_two_player_mode || s_num_human_players > 1) {
+            int p;
+            TD5_LOG_I(LOG_TAG,
+                      "MainMenu: clearing stale MP session (mp_flow=%d 2p=%d humans=%d)",
+                      s_mp_flow, s_two_player_mode, s_num_human_players);
+            s_mp_flow           = 0;
+            s_mp_simul          = 0;
+            s_two_player_mode   = 0;
+            s_num_human_players = 1;
+            g_td5.split_screen_mode = 0;
+            for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+                td5_input_set_input_source(p, 0);
+        }
+
         /* Apply saved options from config shadow into live globals */
         /* Configure controller bindings for both player slots */
 

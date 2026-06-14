@@ -4049,6 +4049,18 @@ int td5_game_run_race_frame(void) {
                 if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % 7;
                 if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + 6) % 7;
 
+                /* [MP 2026-06-13] BACK TO LOBBY (row 4) only makes sense in a
+                 * multiplayer/network session — there's no lobby to return to in
+                 * a single-player race. Skip it during navigation so the cursor
+                 * can't land on it (the HUD also greys it out). */
+                {
+                    int pause_is_mp = (g_td5.network_active || g_td5.num_human_players > 1);
+                    if (!pause_is_mp && s_pause_menu_cursor == 4) {
+                        if (key_up && !s_prev_up)        s_pause_menu_cursor = 3;
+                        else                             s_pause_menu_cursor = 5; /* down / default */
+                    }
+                }
+
                 /* Left/right adjusts sliders for rows 0-2.
                  * [CONFIRMED @ 0x0043C211] CONTINUOUS while held — (&DAT_004B135C)[cursor] ± 0.02f, clamp [0,1].
                  * Row 0 "VIEW"  (DAT_004B135C) → [0x00466EA8] view distance, no audio call [0x0043C379]
@@ -4122,10 +4134,14 @@ int td5_game_run_race_frame(void) {
                         TD5_LOG_I(LOG_TAG, "Pause menu: RESTART RACE selected, starting fade-out");
                         td5_game_begin_fade_out(0);
                         }
-                    } else if (s_pause_menu_cursor == 4) {
+                    } else if (s_pause_menu_cursor == 4 &&
+                               (g_td5.network_active || g_td5.num_human_players > 1)) {
                         /* BACK TO LOBBY [S31] -- end the race and return to the
                          * lobby it came from: network lobby (LAN/direct-IP),
                          * local-MP lobby, or the main menu in single player.
+                         * [MP 2026-06-13] Single-player has no lobby — the row is
+                         * greyed + cursor-skipped, and this guard makes it inert
+                         * even if somehow reached.
                          * Net: tell the peers; lockstep cannot continue without
                          * us, so their race ends through the same fade and they
                          * land back in the lobby too (session stays alive). */

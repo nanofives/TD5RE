@@ -1124,10 +1124,15 @@ void td5_hud_draw_pause_overlay(void)
             for (int c = 0; s[c]; c++) { td5_glyph g; td5_font_get((unsigned char)s[c], PAUSE_TTF_CAP, &g); }
         }
         td5_font_flush_uploads();
+        /* [MP 2026-06-13] Grey out BACK TO LOBBY in single-player (no lobby to
+         * return to; the cursor also skips it). */
+        int pause_mp = (g_td5.network_active || g_td5.num_human_players > 1);
         /* pass 2: lay out + draw (cache hits) */
         for (int li = 0; li < s_pause_vui_line_count; li++) {
             PauseTextLine *L = &s_pause_vui_lines[li];
             const char *s = L->s;
+            uint32_t line_col = (!pause_mp && strcmp(L->s, "BACK TO LOBBY") == 0)
+                                ? 0xFF6A6A6Au : 0xFFFFFFFFu;
             float total_w = 0.0f;
             for (int c = 0; s[c]; c++)
                 total_w += td5_font_advance((unsigned char)s[c], PAUSE_TTF_CAP) + PAUSE_TTF_TRACK;
@@ -1146,7 +1151,7 @@ void td5_hud_draw_pause_overlay(void)
                     float gx = (float)(int)(curx + g.xoff + 0.5f);
                     float gy = (float)(int)(baseline + g.yoff + 0.5f);
                     td5_vui_quad(gx, gy, g.w, g.h,
-                                 0xFFFFFFFFu, g.page, g.u0, g.v0, g.u1, g.v1);
+                                 line_col, g.page, g.u0, g.v0, g.u1, g.v1);
                 }
                 curx += g.advance + PAUSE_TTF_TRACK;
             }
@@ -1162,8 +1167,11 @@ void td5_hud_draw_pause_overlay(void)
         float cx, cy;
         hud_screen_center(&cx, &cy);
         const float INV = 1.0f / 256.0f;          /* pause SDF page is 256x256 */
+        int pause_mp = (g_td5.network_active || g_td5.num_human_players > 1);
         for (int li = 0; li < s_pause_vui_line_count; li++) {
             PauseTextLine *L = &s_pause_vui_lines[li];
+            uint32_t line_col = (!pause_mp && strcmp(L->s, "BACK TO LOBBY") == 0)
+                                ? 0xFF6A6A6Au : 0xFFFFFFFFu;  /* grey when no lobby */
             int len = (int)strlen(L->s);
             float start_x;
             if (L->alignment == 2) {
@@ -1186,7 +1194,7 @@ void td5_hud_draw_pause_overlay(void)
                 float u1 = (gu + 0.5f + (float)(glyph_w - 1)) * INV, v1 = (gv + 16.5f) * INV;
                 td5_vui_msdf_quad(cx + curx + 0.5f, cy + L->y + 0.5f,
                                   (float)(glyph_w - 1), 15.5f,
-                                  0xFFFFFFFFu, page, u0, v0, u1, v1);
+                                  line_col, page, u0, v0, u1, v1);
                 curx += (float)(glyph_w + 2);
             }
         }
