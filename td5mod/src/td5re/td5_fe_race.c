@@ -61,7 +61,7 @@ static uint32_t mp_simul_player_nav(int player);
 static void mp_simul_drop_handle(int *cache, int player, int n);
 static void mp_simul_refresh_pane(int player);
 static void mp_simul_free_all_panes(int n);
-static void mp_simul_cycle_paint(int p, int step);
+static void mp_simul_cycle_paint(int p, int step, int sfx);
 static void frontend_mp_simul_carsel_init(void);
 static void mp_simul_back_to_lobby(int n);
 static void frontend_mp_simul_carsel_update(void);
@@ -572,6 +572,11 @@ void Screen_QuickRaceMenu(void) {
         frontend_update_laps_button_visibility(QR_BTN_LAPS);
         frontend_quickrace_clamp_counts();
 
+        /* Mouse-interactive screen: restore the cursor in case the prior screen
+         * (pad-driven MP grid, harness StartScreen jump) left it hidden.
+         * [cursor-fix 2026-06-12] */
+        frontend_set_cursor_visible(1);
+
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -800,8 +805,10 @@ static void mp_simul_free_all_panes(int n) {
 }
 
 /* Cycle a pane's paint/colour by `step` (+1/-1). TD6 cars walk the body-colour
- * palette; TD5 cars cycle their 4 paint schemes (no-op for paintless cars). */
-static void mp_simul_cycle_paint(int p, int step) {
+ * palette; TD5 cars cycle their 4 paint schemes (no-op for paintless cars).
+ * `sfx`=0 mutes the cycle ping — hold-to-scroll repeat fires pass 0 so the
+ * sound plays only on the initial press, not 7x/sec while held. */
+static void mp_simul_cycle_paint(int p, int step, int sfx) {
     int car = s_mp_player_car[p];
     if (frontend_car_paintable(car)) {
         int idx = s_mp_player_color_idx[p] + step;
@@ -809,14 +816,14 @@ static void mp_simul_cycle_paint(int p, int step) {
         if (idx >= TD6_PALETTE_N) idx = 0;
         s_mp_player_color_idx[p] = idx;
         s_mp_player_color[p]     = (int)s_td6_palette[idx];
-        frontend_play_sfx(2);
+        if (sfx) frontend_play_sfx(2);
     } else if (!frontend_car_is_td6(car) && frontend_car_has_paint(car)) {
         int pa = s_mp_player_paint[p] + step;
         if (pa < 0) pa = 3;
         if (pa > 3) pa = 0;
         s_mp_player_paint[p] = pa;
         mp_simul_refresh_pane(p);
-        frontend_play_sfx(2);
+        if (sfx) frontend_play_sfx(2);
     }
 }
 
@@ -888,6 +895,8 @@ static void mp_simul_back_to_lobby(int n) {
     td5_frontend_set_screen(TD5_SCREEN_MP_LOBBY);
 }
 
+static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now); /* fwd: defined with the setup window below */
+
 static void frontend_mp_simul_carsel_update(void) {
     int p, n = s_num_human_players;
     int all_ready = 1, want_back = 0;
@@ -927,7 +936,18 @@ static void frontend_mp_simul_carsel_update(void) {
         if (edge & 4) { s_mp_pane_btn[p] = (s_mp_pane_btn[p] + MP_BTN_COUNT - 1) % MP_BTN_COUNT; frontend_play_sfx(2); }
         if (edge & 8) { s_mp_pane_btn[p] = (s_mp_pane_btn[p] + 1) % MP_BTN_COUNT;                 frontend_play_sfx(2); }
         {
-            int left = (edge & 1) != 0, right = (edge & 2) != 0, act = (edge & 0x10) != 0;
+            int act = (edge & 0x10) != 0;
+            /* [hold-to-scroll 2026-06-12] CAR/PAINT ◄► auto-repeat: first fire
+             * on the rising edge, then steady repeat while held — same
+             * mp_repeat_fire pattern (320ms arm / 130ms rate) the colour grid
+             * already uses. Bits pre-masked to LEFT|RIGHT so vertical row nav
+             * stays edge-only; on (rare) both-held, RIGHT wins. */
+            int lr_fire = (s_mp_pane_btn[p] == MP_BTN_CAR || s_mp_pane_btn[p] == MP_BTN_PAINT)
+                          ? mp_repeat_fire(p, bits & 3u, edge & 3u, now) : 0;
+            int lr_edge = (edge & 3u) != 0;  /* initial press: keep the cycle sound;
+                                              * repeat fires are silent (user request) */
+            int left  = lr_fire && !(bits & 2u);
+            int right = lr_fire && (bits & 2u) != 0;
             switch (s_mp_pane_btn[p]) {
             case MP_BTN_CAR:
                 if (left || right) {
@@ -935,11 +955,11 @@ static void frontend_mp_simul_carsel_update(void) {
                     s_mp_player_car[p]   = car;
                     s_mp_player_paint[p] = 0;   /* reset paint on car change (matches single-player) */
                     mp_simul_refresh_pane(p);
-                    frontend_play_sfx(5);
+                    if (lr_edge) frontend_play_sfx(5);
                 }
                 break;
             case MP_BTN_PAINT:
-                if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1);
+                if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1, lr_edge);
                 break;
             case MP_BTN_STATS:
                 if (act) { mp_simul_load_pane_spec(p, car); s_mp_pane_substate[p] = 1; frontend_play_sfx(3); }
@@ -1160,6 +1180,82 @@ static void frontend_mp_setup_update(void) {
     }
 }
 
+/* [hold-to-scroll 2026-06-12] Which ◄►-cycling row started the current car-
+ * preview reload animation (0=CAR, 1=PAINT, 2=CONFIG; -1 = none). When the
+ * slide-in completes (case 14) and the direction is STILL held on that row,
+ * the next cycle fires immediately so holding the key/button keeps the
+ * change animation looping. The original is strictly edge-triggered (edge
+ * mask @0x00414BC4 fires once per press; presses during the anim are
+ * discarded) — this is a port enhancement, no original constants exist. */
+static int s_carsel_hold_btn = -1;
+
+/* Current LEFT/RIGHT hold state for the single-player car-select FSM:
+ * keyboard level (DIK arrows) OR'd with the aggregated gamepad nav bits
+ * (s_fe_gamepad_nav, refreshed by frontend_poll_input every frame, including
+ * during the preview animation states). Returns -1 / +1 / 0 (0 also when
+ * both directions are held). */
+static int carsel_held_lr(void) {
+    int l = td5_plat_input_key_pressed(0xCB) || (s_fe_gamepad_nav & 1u);
+    int r = td5_plat_input_key_pressed(0xCD) || (s_fe_gamepad_nav & 2u);
+    if (l && !r) return -1;
+    if (r && !l) return +1;
+    return 0;
+}
+
+/* Apply one ◄► value-cycle on car-select row `btn` (0=CAR, 1=PAINT for TD5
+ * cars, 2=CONFIG scheme). Shared by the case-7 edge path and the case-14
+ * hold-to-scroll continuation. Returns 1 when the change must kick the
+ * preview-reload animation (inner state 10), 0 when nothing changed. */
+static int carsel_apply_cycle(int btn, int delta) {
+    switch (btn) {
+    case 0: /* Car: cycle index */
+        if (s_selected_game_type == 5) {
+            /* Masters: cycle through roster, skip AI slots */
+            int attempts = 0;
+            do {
+                s_selected_car += delta;
+                if (s_selected_car < 0) s_selected_car = 14;
+                if (s_selected_car > 14) s_selected_car = 0;
+                attempts++;
+            } while (s_masters_roster_flags[s_selected_car] == 1 && attempts < 15);
+        } else {
+            /* Default/era/cop ranges. For the full single-race roster
+             * this skips the locked-TD5/police gap so TD6 cars (37-75)
+             * are reachable; narrower ranges wrap plainly. */
+            s_selected_car = frontend_car_cycle_step(s_selected_car, delta,
+                                                     s_car_roster_min, s_car_roster_max);
+        }
+        /* [FIXED 2026-06-01] orig (0x40E8xx) resets paint + wheel/config
+         * scheme to 0 on EVERY car change. s_paint_active is NOT cleared on
+         * car change: the chosen paint colour carries over to the next car
+         * (and survives a race) — it's a single remembered colour for all
+         * TD6 cars. */
+        s_selected_paint = 0;
+        s_selected_config = 0;
+        return 1;
+
+    case 1: { /* Paint: TD5 cars cycle paint 0-3 (TD6 colour panel is a PRESS,
+               * never a cycle; cop cars 0x1C-0x24 have no paint). */
+        int actual_car = (s_selected_game_type == 5) ?
+                         s_masters_roster[s_selected_car] : s_selected_car;
+        if (frontend_car_paintable(frontend_current_car_index())) return 0;
+        if (actual_car >= 0x1C && actual_car <= 0x24) return 0;
+        s_selected_paint += delta;
+        if (s_selected_paint < 0) s_selected_paint = 3;
+        if (s_selected_paint > 3) s_selected_paint = 0;
+        return 1;
+    }
+
+    case 2: /* Stats row ◄►: wheel/config scheme 0..3 wrap.
+             * [CONFIRMED @ 0x40DFC0 case 7 g_frontendButtonIndex==2] */
+        s_selected_config += delta;
+        if (s_selected_config < 0) s_selected_config = 3;
+        if (s_selected_config > 3) s_selected_config = 0;
+        return 1;
+    }
+    return 0;
+}
+
 void Screen_CarSelection(void) {
     /* Multiplayer simultaneous flow (2+ humans) takes over this screen with its
      * own per-pane panes + per-device input: phase 0 = name/colour setup window,
@@ -1293,6 +1389,7 @@ void Screen_CarSelection(void) {
 
         /* Create label surface */
         s_car_preview_overlay = 0;
+        s_carsel_hold_btn = -1;   /* no hold-to-scroll chain pending on entry */
         frontend_load_selected_car_preview();
         s_inner_state = 1;
         break;
@@ -1444,34 +1541,12 @@ void Screen_CarSelection(void) {
                 }
             }
             if (active_button >= 0) switch (active_button) {
-            case 0: /* Car: L/R arrows cycle car index */
-                if (delta != 0) {
-                    if (s_selected_game_type == 5) {
-                        /* Masters: cycle through roster, skip AI slots */
-                        int attempts = 0;
-                        do {
-                            s_selected_car += delta;
-                            if (s_selected_car < 0) s_selected_car = 14;
-                            if (s_selected_car > 14) s_selected_car = 0;
-                            attempts++;
-                        } while (s_masters_roster_flags[s_selected_car] == 1 && attempts < 15);
-                    } else {
-                        /* Default/era/cop ranges. For the full single-race roster
-                         * this skips the locked-TD5/police gap so TD6 cars (37-75)
-                         * are reachable; narrower ranges wrap plainly. */
-                        s_selected_car = frontend_car_cycle_step(s_selected_car, delta,
-                                                                 s_car_roster_min, s_car_roster_max);
-                    }
-                    /* [FIXED 2026-06-01] orig (0x40E8xx) resets paint + wheel/config
-                     * scheme to 0 on EVERY car change. The color panel stays open
-                     * across TD6->TD6 changes; it auto-hides after the switch if the
-                     * new car is a TD5 car (see the post-switch check). */
-                    s_selected_paint = 0;
-                    s_selected_config = 0;
-                    /* s_paint_active is NOT cleared on car change: the chosen
-                     * paint colour carries over to the next car (and survives a
-                     * race) — it's a single remembered colour for all TD6 cars. */
-                    s_inner_state = 10; /* trigger new car image load */
+            case 0: /* Car: L/R arrows cycle car index (the color panel stays open
+                     * across TD6->TD6 changes; it auto-hides after the switch if
+                     * the new car is a TD5 car — see the post-switch check). */
+                if (delta != 0 && carsel_apply_cycle(0, delta)) {
+                    s_carsel_hold_btn = 0;  /* arm hold-to-scroll continuation */
+                    s_inner_state = 10;     /* trigger new car image load */
                 }
                 break;
 
@@ -1484,16 +1559,9 @@ void Screen_CarSelection(void) {
                         frontend_set_color_panel(1);
                         frontend_play_sfx(3);
                     }
-                } else if (delta != 0) {
-                    /* TD5: cycle paint 0-3 (disabled for cop cars 0x1C-0x24). */
-                    int actual_car = (s_selected_game_type == 5) ?
-                                     s_masters_roster[s_selected_car] : s_selected_car;
-                    if (actual_car < 0x1C || actual_car > 0x24) {
-                        s_selected_paint += delta;
-                        if (s_selected_paint < 0) s_selected_paint = 3;
-                        if (s_selected_paint > 3) s_selected_paint = 0;
-                        s_inner_state = 10; /* re-render */
-                    }
+                } else if (delta != 0 && carsel_apply_cycle(1, delta)) {
+                    s_carsel_hold_btn = 1;
+                    s_inner_state = 10; /* re-render */
                 }
                 break;
 
@@ -1501,10 +1569,10 @@ void Screen_CarSelection(void) {
                      * [CONFIRMED @ 0x40DFC0 case 7 g_frontendButtonIndex==2: arrow cycles
                      * g_carSelectWheelSchemeTransient 0..3 wrap; press enters state 0xf.] */
                 if (delta != 0) {
-                    s_selected_config += delta;
-                    if (s_selected_config < 0) s_selected_config = 3;
-                    if (s_selected_config > 3) s_selected_config = 0;
-                    s_inner_state = 10; /* re-render preview with new scheme */
+                    if (carsel_apply_cycle(2, delta)) {
+                        s_carsel_hold_btn = 2;
+                        s_inner_state = 10; /* re-render preview with new scheme */
+                    }
                 } else if (s_button_index == 2) {
                     s_car_preview_overlay = 1;
                     s_inner_state = 15;
@@ -1648,6 +1716,24 @@ void Screen_CarSelection(void) {
              * frame_counter == 0x19 (slide-in complete) — fires every car cycle. */
             frontend_play_sfx(4);
             s_inner_state = 7; /* return to interaction */
+            /* [hold-to-scroll 2026-06-12] If the direction that started this
+             * cycle is STILL held and the highlight is still on the same row,
+             * chain straight into the next change so holding the key/button
+             * keeps the car-change animation looping (port enhancement; the
+             * original discards presses during the anim — states 8-0x13 never
+             * read nav @0x40DFC0). Releasing, swapping rows (UP/DOWN queue
+             * during the anim) or the modal colour panel breaks the chain. */
+            {
+                int dir = carsel_held_lr();
+                if (dir != 0 && s_carsel_hold_btn >= 0 &&
+                    s_selected_button == s_carsel_hold_btn &&
+                    !s_color_panel_visible &&
+                    carsel_apply_cycle(s_carsel_hold_btn, dir)) {
+                    s_inner_state = 10; /* loop the change animation */
+                } else {
+                    s_carsel_hold_btn = -1;
+                }
+            }
         }
         break;
 
@@ -1980,11 +2066,27 @@ void Screen_TrackSelection(void) {
         frontend_create_button(SNK_LapsButTxt,      120, 217, 224, 32); /* 3: laps */
         frontend_create_button(SNK_TrafficButTxt,   120, 257, 224, 32); /* 4: traffic */
         frontend_create_button(SNK_CopsButTxt,      120, 297, 224, 32); /* 5: police */
-        frontend_create_button(SNK_OkButTxt,        120, 377,  96, 32); /* 6: OK */
+        /* [PORT ENHANCEMENT 2026-06-12] Per-race AI difficulty. Seeded from the
+         * tier ConfigureGameTypeFlags derived at mode selection (= the Game
+         * Options global for game-type 0), applied to g_td5.difficulty_tier on
+         * OK. Quick Race (flow context 2) keeps the Game Options global — the
+         * row is still CREATED there (index stability: OK=6→7, Back=7→8) but
+         * hidden+disabled, exactly like the Quick Race Players row. */
+        { int bd = frontend_create_button(SNK_DifficultyButTxt, 120, 337, 224, 32); /* 6: AI difficulty */
+          if (bd >= 0 && s_flow_context == 2) { s_buttons[bd].hidden = 1; s_buttons[bd].disabled = 1; }
+        }
+        s_race_difficulty = g_td5.difficulty_tier;
+        if (s_race_difficulty < 0) s_race_difficulty = 0;
+        if (s_race_difficulty > 2) s_race_difficulty = 2;
+        frontend_create_button(SNK_OkButTxt,        120, 377,  96, 32); /* 7: OK */
         /* Quick Race mode: no Back button */
         if (s_flow_context != 2) {
-            frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);  /* 7: Back */
+            frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);  /* 8: Back */
         }
+        /* The MP simultaneous car grid (pad-driven) hides the mouse cursor and
+         * its all-ready path lands directly here — restore it so this screen's
+         * mouse interaction is usable on every entry path. [cursor-fix 2026-06-12] */
+        frontend_set_cursor_visible(1);
 
         /* Network track-pick (entered from the lobby's SELECT TRACK, flow
          * context 4): the global ESC/back handler navigates to s_return_screen,
@@ -2081,8 +2183,8 @@ void Screen_TrackSelection(void) {
                 s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
             }
 
-            /* [PORT ENHANCEMENT 2026-06] race-option rows (AI/laps/traffic/police). */
-            if (delta != 0 && selected_button >= 2 && selected_button <= 5) {
+            /* [PORT ENHANCEMENT 2026-06] race-option rows (AI/laps/traffic/police/difficulty). */
+            if (delta != 0 && selected_button >= 2 && selected_button <= 6) {
                 if (selected_button == 2) {            /* AI opponents */
                     s_num_ai_opponents += delta;
                     if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
@@ -2096,11 +2198,17 @@ void Screen_TrackSelection(void) {
                     s_game_option_traffic = (s_game_option_traffic + delta) & 3;
                 } else if (selected_button == 5) {     /* police on/off */
                     s_game_option_cops = (s_game_option_cops + delta) & 1;
+                } else if (selected_button == 6 && !s_buttons[6].hidden) {
+                    /* Per-race AI difficulty 0..2, wraps both ways (matches the
+                     * Game Options row + orig 0x00420060 wrap behaviour). */
+                    s_race_difficulty += delta;
+                    if (s_race_difficulty < 0) s_race_difficulty = 2;
+                    if (s_race_difficulty > 2) s_race_difficulty = 0;
                 }
                 frontend_play_sfx(2);
             }
 
-            if (s_button_index == 6) { /* OK */
+            if (s_button_index == 7) { /* OK */
                 /* Lock enforcement */
                 int locked = (s_selected_track >= 0 && s_selected_track < 37 &&
                              s_track_lock_table[s_selected_track] != 0 &&
@@ -2116,12 +2224,24 @@ void Screen_TrackSelection(void) {
                     g_td5.ini.laps    = s_game_option_laps;
                     g_td5.ini.traffic = s_game_option_traffic & 3;
                     td5_ini_persist_options();
+                    /* [2026-06-12] Per-race AI difficulty: commit the row into
+                     * the live tier read by InitializeRaceActorRuntime
+                     * (@0x00432E60) + AdjustCheckpointTimersByDifficulty
+                     * (@0x0040A530). NOT persisted to the INI — the Game
+                     * Options global is untouched, and ConfigureGameTypeFlags
+                     * re-derives the tier from it on the next main-menu mode
+                     * selection, so Quick Race never inherits this pick. */
+                    if (!s_buttons[6].hidden && g_td5.difficulty_tier != s_race_difficulty) {
+                        TD5_LOG_I(LOG_TAG, "TrackSel OK: per-race difficulty tier %d -> %d",
+                                  g_td5.difficulty_tier, s_race_difficulty);
+                        g_td5.difficulty_tier = s_race_difficulty;
+                    }
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 6;
                 }
             }
 
-            if (s_button_index == 7) { /* Back */
+            if (s_button_index == 8) { /* Back */
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 6;
             }

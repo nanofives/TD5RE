@@ -987,8 +987,9 @@ void Screen_MainMenu(void) {
          * on main-menu entry. After a local split-screen MP race, s_mp_flow +
          * s_two_player_mode + s_num_human_players stayed set, so the next Quick
          * Race (or any race-menu mode) reused the MP grid — e.g. a 3-player MP
-         * race then launched a single Quick Race with 3 split-screen viewports.
-         * Every MP/2P flow re-arms these from its own lobby/menu, so main-menu
+         * race then launched a single Quick Race with 3 split-screen viewports
+         * (frontend_init_race_schedule gates >1 human on these flags). Every
+         * MP/2P flow re-arms these from its own lobby/menu, so main-menu
          * entry always means "no active session": reset the flags + player count
          * and drop the per-player EXCLUSIVE device bindings so all pads feed the
          * shared menu polling again. The single-player race path rebinds slot 0

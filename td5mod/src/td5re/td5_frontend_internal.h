@@ -399,6 +399,7 @@ extern int             s_game_option_checkpoint_timers;
 extern int             s_game_option_collisions;
 extern int             s_game_option_difficulty;
 extern int             s_game_option_dynamics;
+extern int             s_race_difficulty;   /* per-race AI difficulty row on Track Selection (0..2) */
 extern int             s_sound_option_music_volume;
 extern int             s_sound_option_sfx_mode;
 extern int             s_sound_option_sfx_volume;
