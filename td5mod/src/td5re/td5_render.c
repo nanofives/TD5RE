@@ -2030,6 +2030,98 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
     }
 }
 
+/* ===================== TD6 PER-AREA LIGHTING ZONES (#21) =====================
+ * The original TD6 applies a per-area scene light (ambient + one directional
+ * SUN) chosen by the player's span from a 15-zone table (read from TD6.exe
+ * @0x00487b28). Most of London is the default zone (grey sun, dir≈(-0.61,0.5,
+ * 0.61), intensity 0.43, ambient 0.375); tunnels/underpasses switch the sun OFF
+ * (dir 0) and shift ambient — that "different shading per area" is what the
+ * port lacked.
+ *
+ * Our TD6 track geometry is drawn with the #13 BAKED per-vertex grey (the
+ * prelit path below skips s_light_dirs/s_ambient), so the zone is applied as a
+ * per-vertex MODULATION of that baked grey, NORMALISED so the DEFAULT zone is
+ * identity: open areas render exactly as before (no regression) and only the
+ * tunnels/transitions visibly change (the sun flattens out). London-only for
+ * now (the table encodes London's span layout). A/B: TD5RE_TD6_LIGHTZONES. */
+typedef struct { int16_t start, end; float dx, dy, dz, dir_i, amb; } TD6LightZone;
+static const TD6LightZone k_td6_london_zones[] = {
+    {    0,  268, -0.6123f,0.5f,0.6123f, 0.4297f, 0.3750f },
+    {  269,  282, -0.6123f,0.5f,0.6123f, 0.0000f, 0.3906f },
+    {  283,  794, -0.6123f,0.5f,0.6123f, 0.4297f, 0.3750f },
+    {  795, 1000, -0.6123f,0.5f,0.6123f, 0.0000f, 0.3906f },
+    { 1001, 1847, -0.6123f,0.5f,0.6123f, 0.4297f, 0.3750f },
+    { 1848, 1854, -0.6123f,0.5f,0.6123f, 0.0000f, 0.3438f },
+    { 1855, 1972, -0.6123f,0.5f,0.6123f, 0.4297f, 0.3750f },
+    { 1973, 1976, -0.6123f,0.5f,0.6123f, 0.0000f, 0.4063f },
+    { 1977, 2076, -0.6123f,0.5f,0.6123f, 0.4297f, 0.3750f },
+    { 2077, 2142, -0.6123f,0.5f,0.6123f, 0.0000f, 0.4297f },
+    { 2143, 2835, -0.6123f,0.5f,0.6123f, 0.4297f, 0.3750f },
+    { 2836, 2855, -0.6123f,0.5f,0.6123f, 0.4297f, 0.3750f },
+    { 2856, 2859, -0.6123f,0.5f,0.6123f, 0.0000f, 0.3438f },
+    { 2860, 2875, -0.6123f,0.5f,0.6123f, 0.4297f, 0.3750f },
+    { 2876, 3026, -0.6123f,0.5f,0.6123f, 0.0000f, 0.3906f },
+};
+#define TD6_ZONE_DEF_DIR_I 0.4297f
+#define TD6_ZONE_DEF_AMB   0.3750f
+static const float k_td6_zone_def_dir[3] = { -0.6123f, 0.5f, 0.6123f };
+
+static int   s_td6_lightzones  = -1;                /* A/B knob (read once) */
+static int   s_td6_zone_active = 0;                 /* London + knob on */
+static float s_td6_zone_amb    = TD6_ZONE_DEF_AMB;  /* current zone (set per view) */
+static float s_td6_zone_dir_i  = TD6_ZONE_DEF_DIR_I;
+static float s_td6_zone_dir[3] = { -0.6123f, 0.5f, 0.6123f };
+
+/* Per-view: select the lighting zone covering player_span and set the current
+ * zone globals (with a stateless span-based crossfade at zone edges, so
+ * split-screen views stay independent). Call once per view before that view's
+ * track + actor geometry is lit by td5_render_compute_vertex_lighting. */
+void td5_render_update_light_zone(int player_span)
+{
+    if (s_td6_lightzones < 0) {
+        const char *e = getenv("TD5RE_TD6_LIGHTZONES");
+        s_td6_lightzones = (e && e[0] == '0') ? 0 : 1;
+    }
+    /* London (level 12) only — the table encodes London's span layout. */
+    s_td6_zone_active = (s_td6_lightzones && g_active_td6_level == 12);
+    if (!s_td6_zone_active) {
+        s_td6_zone_amb = TD6_ZONE_DEF_AMB; s_td6_zone_dir_i = TD6_ZONE_DEF_DIR_I;
+        s_td6_zone_dir[0] = k_td6_zone_def_dir[0];
+        s_td6_zone_dir[1] = k_td6_zone_def_dir[1];
+        s_td6_zone_dir[2] = k_td6_zone_def_dir[2];
+        return;
+    }
+    int n = (int)(sizeof k_td6_london_zones / sizeof k_td6_london_zones[0]);
+    int zi = -1;
+    for (int i = 0; i < n; i++)
+        if (player_span >= k_td6_london_zones[i].start &&
+            player_span <= k_td6_london_zones[i].end) { zi = i; break; }
+    float a = TD6_ZONE_DEF_AMB, di = TD6_ZONE_DEF_DIR_I;
+    float dx = k_td6_zone_def_dir[0], dy = k_td6_zone_def_dir[1], dz = k_td6_zone_def_dir[2];
+    if (zi >= 0) {
+        const TD6LightZone *z = &k_td6_london_zones[zi];
+        a = z->amb; di = z->dir_i; dx = z->dx; dy = z->dy; dz = z->dz;
+        /* edge crossfade with the neighbour zone over FADE spans */
+        const int FADE = 4;
+        const TD6LightZone *nb = NULL; float t = 1.0f;
+        if (player_span - z->start < FADE && zi > 0) {
+            nb = &k_td6_london_zones[zi - 1];
+            t = (float)(player_span - z->start + 1) / (float)(FADE + 1);
+        } else if (z->end - player_span < FADE && zi + 1 < n) {
+            nb = &k_td6_london_zones[zi + 1];
+            t = (float)(z->end - player_span + 1) / (float)(FADE + 1);
+        }
+        if (nb) {
+            float u = 1.0f - t;
+            a  = a  * t + nb->amb   * u;
+            di = di * t + nb->dir_i * u;
+            dx = dx * t + nb->dx * u; dy = dy * t + nb->dy * u; dz = dz * t + nb->dz * u;
+        }
+    }
+    s_td6_zone_amb = a; s_td6_zone_dir_i = di;
+    s_td6_zone_dir[0] = dx; s_td6_zone_dir[1] = dy; s_td6_zone_dir[2] = dz;
+}
+
 void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 {
     if (!mesh) return;
@@ -2039,6 +2131,9 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
      * blob is read-only in the render path); normals stay blob (read-only). */
     TD5_MeshVertex *verts   = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
     TD5_VertexNormal *norms = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
+    /* Blob (read-only original) — read the un-modulated baked grey from here so
+     * the per-frame zone modulation never compounds on the workspace copy. */
+    TD5_MeshVertex *vb = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
     if (!verts || !norms || count <= 0) return;
 
     /* Paint tint (TD6 cars). 0/white => the original luminance-index path below
@@ -2077,11 +2172,31 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     int prelit = (s_td6_vlight && slot < 0);
 
     for (int i = 0; i < count; i++) {
-        if (prelit && (verts[i].lighting & 0xFF000000u) != 0u)
-            continue;   /* baked TD6 vertex light -> keep it */
         float nx = norms[i].nx;
         float ny = norms[i].ny;
         float nz = norms[i].nz;
+
+        if (prelit && (vb[i].lighting & 0xFF000000u) != 0u) {
+            if (s_td6_zone_active) {
+                /* [task#21] Modulate the original baked grey by the current
+                 * lighting zone, normalised so the DEFAULT zone is identity:
+                 * factor = zone_light(n) / default_light(n). In a tunnel the
+                 * sun is off (dir_i=0) so the previously sunlit faces fall to
+                 * the ambient level -> the area flattens. */
+                int base = (int)(vb[i].lighting & 0xFFu);
+                float zd = nx*s_td6_zone_dir[0] + ny*s_td6_zone_dir[1] + nz*s_td6_zone_dir[2];
+                float dd = nx*k_td6_zone_def_dir[0] + ny*k_td6_zone_def_dir[1] + nz*k_td6_zone_def_dir[2];
+                if (zd < 0.0f) zd = 0.0f;
+                if (dd < 0.0f) dd = 0.0f;
+                float zl = s_td6_zone_amb     + s_td6_zone_dir_i  * zd;
+                float dl = TD6_ZONE_DEF_AMB   + TD6_ZONE_DEF_DIR_I * dd;
+                float f  = (dl > 0.001f) ? (zl / dl) : 1.0f;
+                int g = clampi((int)((float)base * f), TD5_LIGHTING_MIN, TD5_LIGHTING_MAX);
+                verts[i].lighting = 0xFF000000u | ((uint32_t)g << 16) |
+                                    ((uint32_t)g << 8) | (uint32_t)g;
+            }
+            continue;   /* baked TD6 vertex light: zone-modulated above, or kept */
+        }
 
         /* 3-light diffuse accumulation */
         float intensity = 0.0f;
@@ -2624,6 +2739,9 @@ void td5_render_actors_for_view(int view_index)
         TD5_Actor *player = td5_game_get_actor(td5_game_get_player_slot(view_index));
         if (player) {
             player_span = (int)player->track_span_raw;
+            /* [task#21] select this view's TD6 lighting zone before its geometry
+             * is lit (per-view so split-screen panes stay independent). */
+            td5_render_update_light_zone(player_span);
             int ring = td5_track_get_ring_length();
             /* Branch-road cull center. The original render walk windows the
              * track display list on the actor's WRAPPED/normalized span

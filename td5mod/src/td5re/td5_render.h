@@ -86,6 +86,12 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh);
 /* slot >= 0 applies that slot's paint tint (s_vehicle_tint); slot < 0 = no tint. */
 void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot);
 
+/* [task#21] TD6 per-area lighting zones: select the zone covering player_span
+ * and set the current scene ambient + directional sun (modulated into the baked
+ * track grey by compute_vertex_lighting). Call once per view before lighting.
+ * London-only for now; A/B via TD5RE_TD6_LIGHTZONES. */
+void td5_render_update_light_zone(int player_span);
+
 /* Per-slot paint TINT (0xRRGGBB; 0 = white/identity). Used to color a grayscale
  * TD6 car body. TD5 cars/AI keep tint 0 and render unchanged. */
 void td5_render_set_vehicle_tint(int slot, uint32_t rgb);
