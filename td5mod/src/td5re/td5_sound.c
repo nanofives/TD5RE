@@ -934,6 +934,28 @@ void td5_sound_update_audio_mix(void)
         pan            = 0;
     }
 
+    /* [MP audio 2026-06-13] 3+ split-screen players share a SINGLE pass (one
+     * voice per car). Treat EVERY human car as "local" (full engine + idle loop,
+     * like the viewer) so players 2/3/4 aren't quieter than player 1, and route
+     * the one shared SkidBit voice to whichever human is drifting HARDEST so the
+     * tyre screech isn't player-1-only. (1-/2-player keep the per-pass viewer
+     * model unchanged.) */
+    int multi_audio = (g_td5.viewport_count > 2);
+    int num_human   = g_td5.num_human_players;
+    if (num_human < 1) num_human = 1;
+    if (num_human > TD5_SOUND_MAX_RACE_VEHICLES) num_human = TD5_SOUND_MAX_RACE_VEHICLES;
+    int skid_human = 0;
+    if (multi_audio) {
+        int best_slip = -1;
+        for (int h = 0; h < num_human; h++) {
+            TD5_Actor *ha = td5_game_get_actor(h);
+            if (!ha) continue;
+            int sf = ha->front_axle_slip_excess, sr = ha->rear_axle_slip_excess;
+            int sm = (sf > sr) ? sf : sr;
+            if (sm > best_slip) { best_slip = sm; skid_human = h; }
+        }
+    }
+
     /* ----------------------------------------------------------------
      * Main viewport loop
      * ---------------------------------------------------------------- */
@@ -959,10 +981,20 @@ void td5_sound_update_audio_mix(void)
 
             int state_idx = pass + veh * 2;
 
+            /* Which car drives the shared SkidBit/tracked screech this pass:
+             * the per-pass viewer normally, or the hardest-drifting human in 3+
+             * split-screen. [MP audio 2026-06-13] */
+            int is_skid_car = multi_audio ? (veh == skid_human)
+                                          : ((int)veh == td5_game_get_player_slot(pass));
+            /* Which cars get the full "local" engine treatment (direct volume +
+             * idle loop): the per-pass viewer normally, every human in 3+. */
+            int is_local_eng = multi_audio ? (veh < num_human)
+                                           : ((int)veh == (int)viewer_vehicle);
+
             /* ----------------------------------------------------------
              * Viewer vehicle horn/siren tracked audio (per-vehicle)
              * ---------------------------------------------------------- */
-            if ((int)veh == td5_game_get_player_slot(pass)) {
+            if (is_skid_car) {
                 /* Horn/siren tracked-audio mix for the viewer vehicle. The
                  * "dead vehicle" identity check is applied at the play/modify
                  * decision below (see comment there). */
@@ -1129,8 +1161,9 @@ void td5_sound_update_audio_mix(void)
 
                 /* State change: stop old, start new */
                 if (cur_state == ENGINE_STATE_STOPPED) {
-                    /* First time: if this is the viewer, also start the idle loop */
-                    if ((int)veh == (int)viewer_vehicle &&
+                    /* First time: local cars (viewer / every human in 3+) also
+                     * start the idle loop so they sound as full as player 1. */
+                    if (is_local_eng &&
                         !td5_game_is_replay_active() &&
                         !slot_is_playing(veh * 3 + 1 + slot_offset)) {
                         slot_play(veh * 3 + 1 + slot_offset, 1, 0, 0, 1000);
@@ -1147,9 +1180,10 @@ void td5_sound_update_audio_mix(void)
             }
 
             /* ----------------------------------------------------------
-             * Viewer vehicle: direct volume/pitch (no distance atten)
+             * Local car (viewer / every human in 3+): direct volume/pitch
+             * (no distance attenuation) so all human cars are full volume.
              * ---------------------------------------------------------- */
-            if ((int)veh == (int)viewer_vehicle && !td5_game_is_replay_active()) {
+            if (is_local_eng && !td5_game_is_replay_active()) {
                 int steer_pan = pan;
                 /* Steering-based pan for single-player (subtle L/R shift) */
                 if (raw_speed > 999 && g_td5.split_screen_mode == 0) {
