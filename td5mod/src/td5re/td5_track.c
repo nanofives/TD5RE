@@ -599,6 +599,28 @@ void td5_track_get_span_edges(int span_index,
  * ------------------------------------------------------------------------ */
 static int td6_branches_enabled(void);   /* fwd decl (task#17, defined below) */
 
+/* [task#8 FIX 2026-06-14] TD6 SHALLOW-WALL DEADZONE. The year-long "invisible
+ * wall at the beginning / span 110" is the collision firing a HARD wall response
+ * on shallow penetrations (|pen| ~120-300) at TD6 road-TAPER spans (type 7, e.g.
+ * London 37/68/89) and section-boundary spans. A taper span's left/right rail
+ * jogs inward over the span (London span 89 shifts +2250u in X), so a car driving
+ * straight clips the angled rail by a little -> small pen -> hard jolt that reads
+ * as an invisible wall, even though the road is geometrically continuous and
+ * wide (1500u). Genuine off-road excursions penetrate deeply (thousands), so a
+ * small deadzone lets cars follow tapering rails smoothly while still stopping
+ * real run-offs. TD6-only (g_active_td6_level>0); native TD5 untouched. Env
+ * TD5RE_TD6_WALL_DEADZONE overrides the default (0 = old behaviour). */
+static int td6_wall_deadzone(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TD6_WALL_DEADZONE");
+        s = e ? atoi(e) : 320;   /* world-units of slack before a TD6 wall fires */
+        if (s < 0) s = 0;
+    }
+    return s;
+}
+
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
     static uint32_t s_wall_tick = 0;
@@ -712,6 +734,11 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * tracks never hit this (their |pen| stays small). */
     const int32_t WALL_PEN_TELEPORT_LIMIT = 2000;
 
+    /* [task#8] TD6 shallow-wall deadzone (td6_wall_deadzone): a wall fires only
+     * once penetration exceeds this slack, suppressing the false taper /
+     * section-boundary "invisible walls". 0 on native TD5. */
+    const int32_t WALL_DEADZONE = (g_active_td6_level > 0) ? td6_wall_deadzone() : 0;
+
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
@@ -730,13 +757,13 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int64_t p = (int64_t)((pz - sp->origin_z) - left.ref_z) * left.nnz
                       + (int64_t)((px - left.ref_x) - sp->origin_x) * left.nnx;
             pen_l = (int32_t)((p + ((p >> 63) & 0xFFF)) >> 12);
-            hit_l = (pen_l < 0);
+            hit_l = (pen_l < -WALL_DEADZONE);
         }
         if (test_right) {
             int64_t p = (int64_t)((pz - sp->origin_z) - right.ref_z) * right.nnz
                       + (int64_t)((px - right.ref_x) - sp->origin_x) * right.nnx;
             pen_r = (int32_t)((p + ((p >> 63) & 0xFFF)) >> 12);
-            hit_r = (pen_r < 0);
+            hit_r = (pen_r < -WALL_DEADZONE);
         }
 
         /* Degenerate-span guard: a probe cannot be outside BOTH rails of a
