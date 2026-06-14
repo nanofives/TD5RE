@@ -332,6 +332,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SmartAI",              &g_td5.ini.smart_ai },
         { "SmartAIAggression",    &g_td5.ini.smart_ai_aggression },
         { "SmartAILeash",         &g_td5.ini.smart_ai_leash },
+        { "SmartAIRays",          &g_td5.ini.smart_ai_rays },
         /* Traffic (S20 smart traffic) */
         { "TrafficSmart",         &g_td5.ini.traffic_smart },
         { "TrafficWallAvoid",     &g_td5.ini.traffic_wall_avoid },
@@ -734,6 +735,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.smart_ai_leash = td5_ini_int("GameOptions", "SmartAILeash", 3);
     if (g_td5.ini.smart_ai_leash < 0) g_td5.ini.smart_ai_leash = 0;
     if (g_td5.ini.smart_ai_leash > 9) g_td5.ini.smart_ai_leash = 9;
+    /* Ray-sensing decision brain (wall/car rays + curvature-aware corner line);
+     * default ON. Falls back to the discrete-lane SmartAI scorer when 0. */
+    g_td5.ini.smart_ai_rays = td5_ini_int("GameOptions", "SmartAIRays", 1);
+    if (g_td5.ini.smart_ai_rays < 0) g_td5.ini.smart_ai_rays = 0;
+    if (g_td5.ini.smart_ai_rays > 1) g_td5.ini.smart_ai_rays = 1;
     /* S20 Smart Traffic (source-port enhancement; all default ON, traffic-only). */
     g_td5.ini.traffic_smart           = td5_ini_int("Traffic", "TrafficSmart", 1);
     g_td5.ini.traffic_wall_avoid      = td5_ini_int("Traffic", "WallAvoid", 1);

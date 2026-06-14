@@ -336,10 +336,22 @@ typedef struct TD5_GlobalState {
          *   smart_ai_leash      : gentle symmetric catch-up leash strength,
          *                         0 = none .. 9 = strong (default 3). Independent
          *                         of the faithful CatchupAssist; only active when
-         *                         smart_ai = 1. */
+         *                         smart_ai = 1.
+         *   smart_ai_rays       : ray-sensing decision brain (default 1 = on).
+         *                         When on (and smart_ai = 1) the opponents/traffic
+         *                         sense walls + cars with a forward ray fan and
+         *                         take a curvature-aware outside-in-outside racing
+         *                         line with slow-in/fast-out corner braking.
+         *                         When 0, SmartAI falls back to the older
+         *                         discrete-lane scorer + hard wall-margin clamp.
+         *                         Three-level ladder for A/B:
+         *                           smart_ai=0           -> byte-faithful AI
+         *                           smart_ai=1, rays=0    -> discrete-lane SmartAI
+         *                           smart_ai=1, rays=1    -> ray brain (default). */
         int  smart_ai;
         int  smart_ai_aggression;
         int  smart_ai_leash;
+        int  smart_ai_rays;
         /* --- S20 Smart Traffic (source-port enhancement, all default ON) ---
          * The original background traffic is scripted/reactive (flat 0x3c cruise,
          * deterministic junction route, no active wall avoidance). These knobs
