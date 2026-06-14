@@ -5198,7 +5198,10 @@ int td5_game_run_race_frame(void) {
 
     /* Feed camera position into the sound system as listener position.
      * g_camWorldPos is in 24.8 fixed-point, which is the same coordinate
-     * space td5_sound expects (matching actor world_pos). */
+     * space td5_sound expects (matching actor world_pos). NOTE: the camera
+     * solve only fills viewports 0-1; the mixer's per-car volume uses the human
+     * players' CAR positions directly (td5_sound_update_audio_mix) so panes 2+
+     * being unset here no longer silences their cars. */
     for (int vp = 0; vp < g_td5.viewport_count && vp < TD5_MAX_VIEWPORTS; vp++) {
         td5_sound_set_listener_pos(vp,
             g_camWorldPos[vp][0],

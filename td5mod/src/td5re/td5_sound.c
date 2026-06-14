@@ -1187,27 +1187,41 @@ void td5_sound_update_audio_mix(void)
                 }
 
                 /* [MP audio 2026-06-13] Attenuate by distance to the NEAREST
-                 * human listener over ALL split-screen viewports — not just the
-                 * current pass's listener. The mixer only runs 2 listener passes
-                 * (the slot pool has just a base + duplicate range), so without
-                 * this a car far from players 1&2 — e.g. player 3's OWN car in
-                 * their own pane — attenuates to silence even with a human right
-                 * on it. Picking the closest human makes every player's car
-                 * audible. (Single-player / 2-player behaviour is unchanged: with
-                 * 1-2 listeners the nearest is the same one used before.) */
+                 * HUMAN PLAYER'S CAR (slots 0..num_human_players-1), not the
+                 * current pass's listener. Rationale: the mixer runs only 1-2
+                 * listener passes (the slot pool has just a base + duplicate
+                 * range), AND the camera only fills g_camWorldPos for viewports
+                 * 0-1 — so listeners 2+ were stuck at the origin and players 3/4's
+                 * cars attenuated to silence in their own panes. Using the human
+                 * cars themselves as the listeners is robust (no dependence on
+                 * the camera / viewport-slot maps): a car near ANY human plays
+                 * loud, so every player hears their own car + nearby rivals.
+                 * (1-player: the single human == the old listener; 2-player: the
+                 * two human cars ≈ the two camera listeners — both unchanged.) */
                 const int32_t *near_vel = s_active_listener_vel;
                 float dx = 0.0f, dz = 0.0f, dist;
                 {
+                    int nh = g_td5.num_human_players;
+                    if (nh < 1) nh = 1;
+                    if (nh > TD5_SOUND_MAX_RACE_VEHICLES) nh = TD5_SOUND_MAX_RACE_VEHICLES;
                     float best = -1.0f;
-                    for (int li = 0; li < n_listeners; li++) {
-                        float lx = ((float)s_listener_pos[li][0] - (float)actor->world_pos.x)
+                    for (int hl = 0; hl < nh; hl++) {
+                        TD5_Actor *ha = td5_game_get_actor(hl);
+                        if (!ha) continue;
+                        float lx = ((float)ha->world_pos.x - (float)actor->world_pos.x)
                                    * TD5_SOUND_DISTANCE_SCALE;
-                        float lz = ((float)s_listener_pos[li][2] - (float)actor->world_pos.z)
+                        float lz = ((float)ha->world_pos.z - (float)actor->world_pos.z)
                                    * TD5_SOUND_DISTANCE_SCALE;
                         float d2 = lx * lx + lz * lz;
                         if (best < 0.0f || d2 < best) {
-                            best = d2; dx = lx; dz = lz; near_vel = s_listener_vel[li];
+                            best = d2; dx = lx; dz = lz;
+                            near_vel = &ha->linear_velocity_x;  /* listener vel = that car's */
                         }
+                    }
+                    if (best < 0.0f) {  /* no valid human actor — fall back to pass listener */
+                        dx = ((float)s_active_listener_pos[0] - (float)actor->world_pos.x) * TD5_SOUND_DISTANCE_SCALE;
+                        dz = ((float)s_active_listener_pos[2] - (float)actor->world_pos.z) * TD5_SOUND_DISTANCE_SCALE;
+                        best = dx * dx + dz * dz;
                     }
                     dist = sqrtf(best);
                     if (td5_game_is_replay_active()) dist *= TD5_SOUND_REPLAY_DIST_SCALE;
