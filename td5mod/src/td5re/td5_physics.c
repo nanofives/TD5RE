@@ -7287,7 +7287,33 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
              * 4-wheel attitude SOLVER (0x00446030) is correct. X,Z stay static
              * (cardef); only Y tracks the spring, grounded wheels only (the loop's
              * airborne `continue` mirrors the orig's damage_lockout gate). */
-            actor->wheel_display_angles[i][1] = (int16_t)((int32_t)body_wy + susp_offset);
+            /* [WHEEL OVERHAUL 2026-06-12] Render-only suspension clamp so the
+             * wheel can't ride up INTO the chassis (or droop absurdly far) on
+             * hard bumps. disp_y = cwy - sp_div is the wheel-centre Y arm; cwy
+             * is its rest position, so (disp_y - cwy) = -sp_div is the visual
+             * travel. Bound |travel| to WHEEL_VIS_TRAVEL body-units. This
+             * touches ONLY the rendered wheel position — body_wy (which feeds
+             * the faithful chassis ground-snap below) is left intact, so
+             * gameplay/diff-race parity is unchanged. A/B: TD5RE_WHEEL_SUSP_CLAMP=0
+             * disables; TD5RE_WHEEL_VIS_TRAVEL=N overrides the limit. */
+            int32_t disp_y = (int32_t)body_wy + susp_offset;   /* = cwy - sp_div */
+            {
+                static int s_clamp_on = -1, s_travel = -1;
+                if (s_clamp_on < 0) {
+                    const char *e = getenv("TD5RE_WHEEL_SUSP_CLAMP");
+                    s_clamp_on = (e && e[0] == '0') ? 0 : 1;
+                    const char *t = getenv("TD5RE_WHEEL_VIS_TRAVEL");
+                    s_travel = (t && t[0]) ? atoi(t) : 40;   /* body-units */
+                    if (s_travel < 1) s_travel = 1;
+                }
+                if (s_clamp_on) {
+                    int32_t lo = (int32_t)cwy - s_travel;
+                    int32_t hi = (int32_t)cwy + s_travel;
+                    if (disp_y < lo) disp_y = lo;
+                    if (disp_y > hi) disp_y = hi;
+                }
+            }
+            actor->wheel_display_angles[i][1] = (int16_t)disp_y;
 
             int32_t wheel_y = actor->wheel_contact_pos[i].y;
             contact_y_sum += (int64_t)(wheel_y + (int32_t)rot_y * -0x100);

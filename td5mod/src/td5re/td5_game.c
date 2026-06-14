@@ -512,6 +512,11 @@ static uint32_t s_race_end_timer_start;
 #define TD5_VICTORY_HOLD_MS 2500u
 static uint32_t s_victory_hold_start;   /* ms timestamp the star armed (0 = none) */
 static int      s_finish_position_display; /* 1-based place captured at finish (0 = none) */
+/* [MP per-viewport finish 2026-06-13] 1-based finishing place captured PER SLOT
+ * the moment that slot crosses the line (0 = still racing). Drives each
+ * split-screen viewport's own end-of-race indicator + coast-to-stop, so one
+ * player finishing no longer ends the race for the others. */
+static int      s_slot_finish_place[TD5_MAX_RACER_SLOTS];
 
 static int      s_replay_mode;       /* 1 = input-playback "View Replay" race */
 static int      s_demo_mode;         /* 1 = attract-mode demo race */
@@ -1273,6 +1278,16 @@ int td5_game_slot_is_finished(int slot)
     return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
 }
 
+/* [MP per-viewport finish 2026-06-13] 1-based finishing place captured when
+ * this slot crossed the line, or 0 if it is still racing. The HUD draws this as
+ * a per-viewport end-of-race indicator so each split-screen player gets their
+ * own finish transition independent of the others. */
+int td5_game_slot_finish_place(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_slot_finish_place[slot];
+}
+
 /* 0-based finish position for a slot (0=1st, 1=2nd, ...).
  * [CONFIRMED @ 0x004233E0 dispatch] mirrors DAT_0048d988._2_2_ — the int16 at
  * offset +2 of s_results entry (stride 0x14 = 20 bytes), written by the sort
@@ -1392,6 +1407,21 @@ void td5_game_inject_demo_results(void)
  * 33-step synchronous race bootstrap. The loading screen is displayed
  * at step 1, then all heavy asset loading follows. No progress bar.
  * ======================================================================== */
+
+/* [WHEEL OVERHAUL 2026-06-12] Roll a random procedural wheel style for every
+ * slot (racers + traffic) from a SEPARATE xorshift stream seeded off the race
+ * seed. Using a private stream (not the CRT rand() gameplay/AI consume) keeps
+ * the faithful rand() sequence — and /diff-race parity — untouched, while
+ * staying identical on every netplay machine (same race_seed) and reproducible
+ * on replay. */
+static void td5_game_assign_wheel_styles(uint32_t race_seed) {
+    uint32_t s = race_seed ^ 0x9E3779B9u;   /* decorrelate from the gameplay seed */
+    if (s == 0) s = 0xA5A5A5A5u;            /* xorshift fixed-point guard */
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;   /* xorshift32 */
+        td5_render_set_wheel_style(i, (int)(s & 0x7FFFFFFFu));  /* setter wraps to style count */
+    }
+}
 
 int td5_game_init_race_session(void) {
     #define CK(n) TD5_LOG_I(LOG_TAG, "CK: %s", n)
@@ -1545,6 +1575,11 @@ int td5_game_init_race_session(void) {
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 0/19: CRT reseeded (seed=0x%08X) + 12 seed-table rands drained",
                   session_seed);
+
+        /* [WHEEL OVERHAUL] Per-race random wheel style per slot, from a private
+         * stream off the same seed (does NOT touch the CRT rand() drained
+         * above, so faithful AI/traffic RNG is unchanged). */
+        td5_game_assign_wheel_styles(session_seed);
     }
 
     /* ---- Step 1: Display random loading screen TGA (rand()%20) ---- */
@@ -1568,6 +1603,7 @@ int td5_game_init_race_session(void) {
         s_slot_state[i].companion_1 = 0;
         s_slot_state[i].companion_2 = 0;
         s_slot_state[i].reserved    = 0;
+        s_slot_finish_place[i]      = 0;  /* per-viewport finish indicator reset */
     }
     /* If split-screen, slots 1..num_human_players-1 are also human players
      * [PORT ENHANCEMENT: N-way split, was just slot 1]. */
@@ -3744,6 +3780,14 @@ int td5_game_run_race_frame(void) {
         for (pf = 0; pf < TD5_MAX_RACER_SLOTS; pf++) {
             if (s_slot_state[pf].state == 3) continue;  /* disabled */
             advance_pending_finish_state(pf, frame_accum);
+            /* [MP per-viewport finish] Capture this slot's place the moment it
+             * finishes (companion_1 0->1), for its viewport's own indicator. */
+            if (s_slot_state[pf].companion_1 && s_slot_finish_place[pf] == 0) {
+                TD5_Actor *fa = td5_game_get_actor(pf);
+                s_slot_finish_place[pf] = fa ? (int)fa->race_position + 1 : 1;
+                TD5_LOG_I(LOG_TAG, "Viewport finish: slot=%d place=%d",
+                          pf, s_slot_finish_place[pf]);
+            }
         }
 
         int completion = check_race_completion(frame_accum);
@@ -4570,13 +4614,22 @@ int td5_game_run_race_frame(void) {
          * slot that gets AI-coasted is overridden) and BEFORE td5_physics_tick
          * (so the brake is integrated THIS tick). Human slots only: an AI-driven
          * slot 0 (attract mode) and AI co-op slots keep driving. */
-        if (g_td5.race_end_fade_state > 0) {
+        /* [MP per-viewport finish 2026-06-13] Brake a human slot to a stop
+         * EITHER when the whole race is ending (global fade) OR the moment THAT
+         * player personally finishes — so a finished split-screen player coasts
+         * to a halt in their own pane while the others keep racing. A finished
+         * slot's state flips to 2, so td5_input_update_player_control already
+         * stopped feeding it input (it coasts); forcing the brake here brings it
+         * to rest instead of drifting on momentum. */
+        {
             int hp = g_td5.num_human_players;
             if (hp < 1) hp = 1;
             if (hp > TD5_MAX_RACER_SLOTS) hp = TD5_MAX_RACER_SLOTS;
             for (int fb = 0; fb < hp; fb++) {
                 if (fb == 0 && g_td5.ini.player_is_ai) continue;  /* attract slot keeps driving */
                 if (fb > 0 && g_td5.ini.others_ai)     continue;  /* AI-driven co-op slots */
+                if (g_td5.race_end_fade_state == 0 &&
+                    s_slot_state[fb].companion_1 == 0) continue;  /* still racing */
                 TD5_Actor *fa = td5_game_get_actor(fb);
                 if (!fa) continue;
                 uint8_t *fp = (uint8_t *)fa;
@@ -5418,14 +5471,31 @@ static int check_race_completion(uint32_t sim_delta) {
             }
         }
     } else {
-        /* Normal race: require all active slots to finish */
+        /* Normal race: the race ends when every HUMAN player has finished;
+         * unfinished AI no longer block once all humans are done.
+         *
+         * [MP per-viewport finish 2026-06-13] Previously this ended the race as
+         * soon as SLOT 0 finished (the `i != 0 && slot-0 done -> continue`
+         * exception treated every other slot — including other human players —
+         * as non-blocking). In split-screen MP that ended the race for everyone
+         * the instant player 1 crossed the line. Now each human must finish; in
+         * single-player (humans==1) this reduces to "slot 0 done", unchanged. */
+        int humans = g_td5.num_human_players;
+        if (humans < 1) humans = 1;
+        if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+
+        int all_humans_done = 1;
+        for (i = 0; i < humans; i++) {
+            if (s_slot_state[i].state == 3) continue;  /* disabled */
+            if (s_slot_state[i].companion_1 == 0) { all_humans_done = 0; break; }
+        }
+
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
             if (s_slot_state[i].state == 3) continue;  /* disabled */
             if (s_slot_state[i].companion_1 == 0) {     /* not finished */
-                /* Exception: if slot 0 is done, allow spectator mode exit */
-                if (i != 0 && s_metrics[0].post_finish_metric_base != 0) {
-                    continue;  /* allow unfinished AI if player done */
-                }
+                int is_human = (i < humans);
+                /* Unfinished AI don't hold up the results once humans are done. */
+                if (!is_human && all_humans_done) continue;
                 all_finished = 0;
                 break;
             }

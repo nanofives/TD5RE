@@ -727,6 +727,9 @@ static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_ver
 /* Vehicle shadow + wheel billboard + brake light + reflection rendering */
 static void render_vehicle_shadow_quad(const TD5_Actor *actor);
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
+static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot);  /* wheel overhaul */
+static int  wheel_overhaul_enabled(void);
+static int  wheel_traffic_enabled(void);
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
 static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
 static void render_tracked_actor_marker(const TD5_Actor *actor,
@@ -1060,7 +1063,8 @@ static void inspect_cam_load_env(void)
     if (el && el[0]) s_inspect_el_deg = (float)atof(el);
     if (ds && ds[0]) s_inspect_dist  = (float)atof(ds);
     if (sl && sl[0]) s_inspect_slot  = atoi(sl);
-    if (s_inspect_slot < 0 || s_inspect_slot > 5)
+    /* [wheel-overhaul dev] allow framing traffic slots too (was capped at 5). */
+    if (s_inspect_slot < 0 || s_inspect_slot >= TD5_ACTOR_MAX_TOTAL_SLOTS)
         s_inspect_slot = 0;
     TD5_LOG_W(LOG_TAG, "InspectCam ON: slot=%d az=%.1f el=%.1f dist=%.1f",
               s_inspect_slot, s_inspect_az_deg, s_inspect_el_deg, s_inspect_dist);
@@ -3368,10 +3372,21 @@ void td5_render_actors_for_view(int view_index)
              * geometry again (user-visible as randomly wrong traffic wheels).
              * g_traffic_slot_base is the racer/traffic boundary in every
              * field layout (6 legacy, 16 big splits). */
-            if (slot < g_traffic_slot_base) {
+            /* [WHEEL OVERHAUL 2026-06-12] Unified wheel renderer for ALL
+             * vehicle classes. Racers/police/TD6 cars (slot < base) always get
+             * wheels; traffic gets the same procedural wheels when the overhaul
+             * + traffic toggle are on (its baked mesh wheels still draw — a
+             * converter pass to strip them is the follow-up). Brake lights stay
+             * racer-only (faithful — traffic never drew them). */
+            int is_racer = (slot < g_traffic_slot_base);
+            if (wheel_overhaul_enabled()) {
+                if (is_racer || wheel_traffic_enabled())
+                    render_vehicle_wheels_unified(actor, slot);
+            } else if (is_racer) {
                 render_vehicle_wheel_billboards(actor, slot);
-                render_vehicle_brake_lights(actor, slot);
             }
+            if (is_racer)
+                render_vehicle_brake_lights(actor, slot);
 
             /* (Vehicle shadow drawn in the per-view shadow pre-pass above.) */
 
@@ -6529,6 +6544,292 @@ static void wheel_lookup_static_hed(void)
  * rationale and the documented invariants that DO hold (CW-from-+Z yaw,
  * billboard position, UV mapping).
  */
+
+/* ============================================================================
+ *  UNIFIED PROCEDURAL WHEEL SYSTEM  (overhaul 2026-06-12)
+ *
+ *  Replaces the per-class wheel handling with ONE renderer used by racers,
+ *  police, TD6 cars AND traffic:
+ *    - higher-poly tire cylinder (WHEEL_SEG_HI facets vs the old octagon)
+ *    - styled rim: procedural spoke designs + per-style colour
+ *    - tire AND rim share ONE steering-yaw + projection helper, which
+ *      structurally guarantees the rim stays synced with the tire (the old
+ *      code rotated the hub disc with the OPPOSITE sign convention to the
+ *      tire ring, so the rim swung the wrong way under steering).
+ *    - per-race RANDOM style per slot (td5_render_set_wheel_style), assigned
+ *      from the deterministic per-race RNG so netplay stays in sync.
+ *
+ *  A/B: TD5RE_WHEEL_OVERHAUL=0 falls back to render_vehicle_wheel_billboards.
+ *       TD5RE_WHEEL_TRAFFIC=0 keeps traffic on its baked-in mesh wheels.
+ * ========================================================================== */
+#define WHEEL_SEG_HI     24      /* tire tread facets (was WHEEL_SEGMENTS = 8) */
+
+/* Rim texture pool: real per-car alloy-wheel art (carhubN.png — a 64x64 sheet
+ * of four 32x32 motion-blur sub-frames). One is randomly assigned per slot so
+ * every car/traffic vehicle gets a proper-looking, varied rim. Loaded once into
+ * dedicated pages 994.. (clear of cars 800-843, frontend <=960, fonts 970-971,
+ * envmap 990-993, sky 1020). Chosen for visual variety: snowflake, 5-spoke
+ * star, chrome multi-spoke, complex, classic 5-spoke, dark thin, steel,
+ * 5-spoke smooth. */
+#define WHEEL_RIM_TEX_BASE 994
+static const char *k_wheel_rim_srcs[] = {
+    "re/assets/cars/sky/carhub0.png",
+    "re/assets/cars/bmw/carhub0.png",
+    "re/assets/cars/jag/carhub0.png",
+    "re/assets/cars/vip/carhub0.png",
+    "re/assets/cars/gto/carhub0.png",
+    "re/assets/cars/cob/carhub0.png",
+    "re/assets/cars/day/carhub0.png",
+    "re/assets/cars/mus/carhub0.png",
+};
+#define WHEEL_STYLE_COUNT ((int)(sizeof(k_wheel_rim_srcs) / sizeof(k_wheel_rim_srcs[0])))
+
+static int8_t s_wheel_style[TD5_MAX_TOTAL_ACTORS];   /* per-slot, -1 = unset */
+static int    s_wheel_style_init = 0;
+static int    s_wheel_pool_loaded = 0;   /* rim-texture pool uploaded */
+
+/* Lazily upload the rim-texture pool (once). Carhub PNGs have alpha=0 outside
+ * the wheel disc, so an alpha-tested textured quad renders a clean round rim. */
+static void wheel_load_rim_pool(void) {
+    if (s_wheel_pool_loaded) return;
+    s_wheel_pool_loaded = 1;
+    for (int i = 0; i < WHEEL_STYLE_COUNT; i++) {
+        if (!td5_asset_load_png_texture(WHEEL_RIM_TEX_BASE + i, k_wheel_rim_srcs[i],
+                                        TD5_COLORKEY_NONE))
+            TD5_LOG_W(LOG_TAG, "wheel rim pool: failed to load %s", k_wheel_rim_srcs[i]);
+    }
+    TD5_LOG_I(LOG_TAG, "wheel rim pool: %d alloy textures loaded at page %d..",
+              WHEEL_STYLE_COUNT, WHEEL_RIM_TEX_BASE);
+}
+
+static int wheel_overhaul_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_OVERHAUL"); cached = (e && e[0] == '0') ? 0 : 1; }
+    return cached;
+}
+static int wheel_traffic_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_TRAFFIC"); cached = (e && e[0] == '0') ? 0 : 1; }
+    return cached;
+}
+
+/* Set a slot's wheel style (called at race init with a per-race RNG roll). */
+void td5_render_set_wheel_style(int slot, int style) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    int n = WHEEL_STYLE_COUNT;
+    s_wheel_style[slot] = (int8_t)(((style % n) + n) % n);
+}
+
+static int wheel_style_for_slot(int slot) {
+    /* Dev override: TD5RE_WHEEL_FORCE_STYLE=N forces every slot to style N
+     * (so each design can be inspected deterministically). */
+    static int s_force = -2;
+    if (s_force == -2) { const char *e = getenv("TD5RE_WHEEL_FORCE_STYLE");
+                         s_force = (e && e[0]) ? atoi(e) : -1; }
+    if (s_force >= 0) return s_force % WHEEL_STYLE_COUNT;
+
+    if (!s_wheel_style_init) {
+        for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) s_wheel_style[i] = -1;
+        s_wheel_style_init = 1;
+    }
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    int s = s_wheel_style[slot];
+    if (s < 0) s = (slot * 7 + 3) % WHEEL_STYLE_COUNT;  /* stable fallback before assignment */
+    return s;
+}
+
+/* Project a wheel-LOCAL point (lx along axle, ly vertical, lz longitudinal)
+ * through the SINGLE shared steering-yaw convention (CW-from-+Z, same as the
+ * faithful tire ring) and the vehicle render matrix. Tire and rim both call
+ * this, so they can never desync under steering. Returns 0 if behind near. */
+static int wheel_project(const float *m, float wx, float wy, float wz,
+                         float lx, float ly, float lz, float cs, float sn,
+                         float u, float v, uint32_t col, TD5_D3DVertex *out)
+{
+    /* Steering yaw [cos -sin; sin cos] — the convention the ORIGINAL hub/rim
+     * used (0x00446F00), which is the visually-correct turn direction. (The
+     * old tire ring used the transpose, which read as inverted steering; tire
+     * and rim now share THIS one helper so they stay synced AND turn the right
+     * way.) [user feedback 2026-06-13: prior unify-to-tire was inverted] */
+    float rx = lx * cs - lz * sn;
+    float rz = lx * sn + lz * cs;
+    float px = wx + rx, py = wy + ly, pz = wz + rz;
+    float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+    float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+    float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
+    if (vz <= s_near_clip) return 0;
+    float iz = 1.0f / vz;
+    out->screen_x = -vx * s_focal_length * iz + s_center_x;
+    out->screen_y = -vy * s_focal_length * iz + s_center_y;
+    out->depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+    out->rhw      = iz;
+    out->diffuse  = col;
+    out->specular = 0;
+    out->tex_u    = u;
+    out->tex_v    = v;
+    return 1;
+}
+
+static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
+{
+    const float *m = s_render_transform.m;
+
+    if (!s_wheel_lookup_done)
+        wheel_lookup_static_hed();
+    wheel_load_rim_pool();
+
+    /* Wheel dimensions from cardef (racers/police/TD6 cars); traffic has no
+     * per-actor cardef -> sensible defaults so traffic still gets wheels. */
+    float rim_radius = WHEEL_RADIUS_DEFAULT;
+    float axle_halfw = WHEEL_HALFW_DEFAULT;
+    if (actor->car_definition_ptr) {
+        int16_t r  = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x82);
+        int16_t hw = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x84);
+        if (r  > 0) rim_radius = (float)r * WHEEL_RADIUS_SCALE;
+        if (hw > 0) axle_halfw = (float)hw;
+    }
+
+    /* Wheel spin odometer (same fields/scale as the original hub @0x446F00):
+     * the slip accumulators grow with distance travelled, so cos/sin of them
+     * gives a continuously-rotating angle. Used to ROTATE the textured rim so
+     * the wheel visibly spins (front wheels spin on slip_z, rear on slip_x). */
+    int32_t slip_front_12 = (int32_t)actor->accumulated_tire_slip_z * -4;
+    int32_t slip_rear_12  = (int32_t)actor->accumulated_tire_slip_x * -4;
+    float front_spin = (float)slip_front_12 * ((float)M_PI / 2048.0f);
+    float rear_spin  = (float)slip_rear_12  * ((float)M_PI / 2048.0f);
+
+    /* Rim texture page for this slot's randomly-assigned alloy design. */
+    int rim_page = WHEEL_RIM_TEX_BASE + (wheel_style_for_slot(slot) % WHEEL_STYLE_COUNT);
+    /* The alloy art's circle should fill most of the wheel, leaving a thin
+     * black tire ring around it. */
+    float tex_r = rim_radius * 0.84f;
+    /* Motion-blur sub-frame by speed (same as the original hub-cap @0x446F00):
+     * frame = min(|long_speed|>>14, 3); col = frame&1, row = frame>>1. The 64x64
+     * sheet holds four 32x32 sub-tiles; sample with a 1.5px margin so LINEAR
+     * sampling can't bleed across sub-frame boundaries. */
+    int32_t spd_raw = actor->longitudinal_speed;
+    uint32_t spd_abs = (uint32_t)(spd_raw < 0 ? -spd_raw : spd_raw);
+    int frame = (int)(spd_abs >> 14); if (frame > 3) frame = 3;
+    int fcol = frame & 1, frow = frame >> 1;
+    float ru0 = ((float)(fcol * 32) + 1.5f) / 64.0f, ru1 = ((float)(fcol * 32 + 32) - 1.5f) / 64.0f;
+    float rv0 = ((float)(frow * 32) + 1.5f) / 64.0f, rv1 = ((float)(frow * 32 + 32) - 1.5f) / 64.0f;
+
+    /* Traffic vehicles carry their wheels baked into the body mesh and never
+     * populate wheel_display_angles. Synthesize a 4-wheel layout from the mesh
+     * bounding radius so the unified renderer can draw them too. (The baked
+     * mesh wheels still draw underneath — a converter pass to strip them is the
+     * follow-up; until then TD5RE_WHEEL_TRAFFIC=0 disables this.) Order: FL, FR,
+     * RL, RR with (w&1)=right. */
+    int16_t synth[4][3];
+    int use_synth = 0;
+    if (actor->wheel_display_angles[0][0] == 0 && actor->wheel_display_angles[0][1] == 0 &&
+        actor->wheel_display_angles[0][2] == 0 && actor->wheel_display_angles[1][0] == 0) {
+        TD5_MeshHeader *mh = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS)
+                             ? s_vehicle_meshes[slot] : NULL;
+        float rb = (mh && mh->bounding_radius > 1.0f) ? mh->bounding_radius : 360.0f;
+        float track = rb * 0.38f;        /* lateral half-track */
+        float front =  rb * 0.55f;       /* front axle Z */
+        float rear  = -rb * 0.60f;       /* rear axle Z  */
+        /* Wheel-centre Y. Was -rb*0.34 which sank traffic wheels under the road
+         * (user: "barely visible — lift TD5 traffic + police off the ground").
+         * Raised toward the body centre + a tunable nudge so the wheels sit at
+         * the ground line. TD5RE_WHEEL_TRAFFIC_LIFT=N (body-units, default 18)
+         * shifts them further up if a model still rides low. */
+        static float s_tlift = -1.0f;
+        if (s_tlift < 0.0f) { const char *e = getenv("TD5RE_WHEEL_TRAFFIC_LIFT");
+                              s_tlift = (e && e[0]) ? (float)atof(e) : 18.0f; }
+        float wy0   = (mh ? mh->bounding_center_y : 0.0f) - rb * 0.22f + s_tlift;  /* wheel centre Y */
+        int16_t zf = (int16_t)front, zr = (int16_t)rear, tx = (int16_t)track, wy16 = (int16_t)wy0;
+        synth[0][0] = -tx; synth[0][1] = wy16; synth[0][2] = zf;   /* FL */
+        synth[1][0] =  tx; synth[1][1] = wy16; synth[1][2] = zf;   /* FR */
+        synth[2][0] = -tx; synth[2][1] = wy16; synth[2][2] = zr;   /* RL */
+        synth[3][0] =  tx; synth[3][1] = wy16; synth[3][2] = zr;   /* RR */
+        use_synth = 1;
+    }
+
+    for (int w = 0; w < 4; w++) {
+        float wx = use_synth ? (float)synth[w][0] : (float)actor->wheel_display_angles[w][0];
+        float wy = use_synth ? (float)synth[w][1] : (float)actor->wheel_display_angles[w][1];
+        float wz = use_synth ? (float)synth[w][2] : (float)actor->wheel_display_angles[w][2];
+        if (wx == 0.0f && wy == 0.0f && wz == 0.0f)
+            continue;
+
+        float inner_off = (w & 1) ? -axle_halfw :  axle_halfw;
+        float outer_off = (w & 1) ?  axle_halfw : -axle_halfw;
+
+        /* Front-wheel steering yaw (CW-from-+Z) — applied via wheel_project to
+         * BOTH tire and rim, so they stay locked together. */
+        float cs = 1.0f, sn = 0.0f;
+        if (w < 2) {
+            float steer_rad = (float)(actor->steering_command >> 8) * ((float)M_PI / 2048.0f);
+            cs = cosf(steer_rad);
+            sn = sinf(steer_rad);
+        }
+
+        /* ---- Tire tread cylinder (higher-poly, black) ---- */
+        TD5_D3DVertex tv[2 * (WHEEL_SEG_HI + 1)];
+        int ok = 1;
+        for (int i = 0; i <= WHEEL_SEG_HI && ok; i++) {
+            float a  = (float)i * (2.0f * (float)M_PI / (float)WHEEL_SEG_HI);
+            float ly = cosf(a) * rim_radius;
+            float lz = sinf(a) * rim_radius;
+            if (!wheel_project(m, wx, wy, wz, inner_off, ly, lz, cs, sn,
+                               s_tire_u, s_tire_v, 0xFFFFFFFFu, &tv[i])) { ok = 0; break; }
+            if (!wheel_project(m, wx, wy, wz, outer_off, ly, lz, cs, sn,
+                               s_tire_u, s_tire_v, 0xFFFFFFFFu, &tv[WHEEL_SEG_HI + 1 + i])) { ok = 0; break; }
+        }
+        if (!ok) continue;   /* wheel partly behind near plane — skip (legacy behaviour) */
+
+        uint16_t tidx[WHEEL_SEG_HI * 12];
+        int ti = 0;
+        for (int i = 0; i < WHEEL_SEG_HI; i++) {
+            uint16_t i0 = (uint16_t)i, i1 = (uint16_t)(i + 1);
+            uint16_t o0 = (uint16_t)(WHEEL_SEG_HI + 1 + i), o1 = (uint16_t)(WHEEL_SEG_HI + 1 + i + 1);
+            tidx[ti++] = i0; tidx[ti++] = o0; tidx[ti++] = o1;
+            tidx[ti++] = i0; tidx[ti++] = o1; tidx[ti++] = i1;
+            tidx[ti++] = i0; tidx[ti++] = o1; tidx[ti++] = o0;   /* back faces */
+            tidx[ti++] = i0; tidx[ti++] = i1; tidx[ti++] = o1;
+        }
+        flush_immediate_internal();
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        td5_plat_render_bind_texture(s_wheel_tex_page);
+        td5_plat_render_draw_tris(tv, 2 * (WHEEL_SEG_HI + 1), tidx, ti);
+
+        /* ---- Textured rim face: real alloy-wheel art (carhub pool) ----
+         * A single alpha-tested textured quad in the wheel plane at the outer
+         * face. The carhub PNG is transparent outside the wheel disc, so
+         * OPAQUE_LINEAR's alpha test discards the quad corners → clean round
+         * rim. The quad is ROTATED about the axle by the spin odometer so the
+         * wheel visibly spins, and steering yaw is applied via wheel_project
+         * (same helper as the tire) so the rim turns with the wheel. */
+        {
+            float spin = (w < 2) ? front_spin : rear_spin;
+            float sc = cosf(spin), ss = sinf(spin);
+            /* corner (ly,lz) pre-spin + matching sub-tile UV */
+            static const float cly[4] = {  1.0f,  1.0f, -1.0f, -1.0f };
+            static const float clz[4] = { -1.0f,  1.0f,  1.0f, -1.0f };
+            const float cu[4] = { ru0, ru1, ru1, ru0 };
+            const float cv[4] = { rv0, rv0, rv1, rv1 };
+            TD5_D3DVertex q[4];
+            int qok = 1;
+            for (int c = 0; c < 4 && qok; c++) {
+                float pl = cly[c] * tex_r, pz = clz[c] * tex_r;
+                float ly = pl * sc - pz * ss;   /* rotate by spin about the axle */
+                float lz = pl * ss + pz * sc;
+                qok &= wheel_project(m, wx, wy, wz, outer_off, ly, lz, cs, sn,
+                                     cu[c], cv[c], 0xFFFFFFFFu, &q[c]);
+            }
+            if (qok) {
+                static const uint16_t qi[12] = { 0,1,2, 0,2,3,  0,2,1, 0,3,2 }; /* double-sided */
+                flush_immediate_internal();
+                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);  /* alpha test discards transparent corners */
+                td5_plat_render_bind_texture(rim_page);
+                td5_plat_render_draw_tris(q, 4, qi, 12);
+            }
+        }
+    }
+}
+
 static void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 {
     const float *m = s_render_transform.m;
