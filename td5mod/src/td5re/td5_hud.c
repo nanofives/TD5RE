@@ -3735,8 +3735,13 @@ static int minimap_emit_checkpoint_dash(uint8_t *span_base, uint8_t *vert_base, 
     float len = sqrtf(dx * dx + dy * dy);
     if (len < 2.0f) return 0;
     float px = -dy / len, py = dx / len;     /* unit perpendicular = dash thickness axis */
-    const float half = 1.5f;                 /* dash half-thickness in px */
-    const int NDASH = 7;                     /* odd -> a dash at both rails */
+    /* Thicker + amber so the checkpoint line reads clearly over the grey road on
+     * the green minimap (the earlier 1.5px white dashes were ~invisible). Scale
+     * thickness a touch with the minimap size so it holds up at any resolution. */
+    float half = s_minimap_width * 0.010f;   /* dash half-thickness in px */
+    if (half < 2.0f) half = 2.0f;
+    const uint32_t DASH_COL = 0xFFFFC828u;   /* amber */
+    const int NDASH = 5;                     /* odd -> a dash at both rails */
     int drawn = 0;
     for (int k = 0; k < NDASH; k++) {
         if (k & 1) continue;                 /* gaps on odd segments */
@@ -3749,7 +3754,7 @@ static int minimap_emit_checkpoint_dash(uint8_t *span_base, uint8_t *vert_base, 
             bx + px * half, by + py * half,
             bx - px * half, by - py * half,
             ax - px * half, ay - py * half,
-            0.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFFF, HUD_DEPTH);
+            0.0f, 0.0f, 0.0f, 0.0f, DASH_COL, HUD_DEPTH);
         hud_submit_quad(&q);
         drawn++;
     }
