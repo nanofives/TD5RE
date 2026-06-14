@@ -547,6 +547,21 @@ void Screen_QuickRaceMenu(void) {
         }
         frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(6),  96, 32); /* QR_BTN_OK */
         frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(6), 112, 32); /* QR_BTN_BACK */
+        /* [2026-06-12] Dev-only toggles to the RIGHT of the Opponents row (y=row3):
+         * PlayerIsAI (slot 0 = AI) and AutoThrottle (trace auto-throttle). They sit
+         * past the Opponents value column; A/Enter flips them, the label shows state.
+         * Created AFTER OK/Back so QR_BTN_OK/BACK indices stay 7/8. Hidden in release. */
+        { int bp = frontend_create_button("Player AI", FE_QR_VALUE_X + 24, QR_ROW_Y(3), 134, 32); /* QR_BTN_PLAYERAI */
+          int bt = frontend_create_button("Auto-Thr",  FE_QR_VALUE_X + 162, QR_ROW_Y(3), 134, 32); /* QR_BTN_AUTOTHR */
+          if (bp >= 0) snprintf(s_buttons[bp].label, sizeof s_buttons[bp].label,
+                                "Player AI: %s", g_td5.ini.player_is_ai ? "ON" : "OFF");
+          if (bt >= 0) snprintf(s_buttons[bt].label, sizeof s_buttons[bt].label,
+                                "Auto-Thr: %s", g_td5.ini.auto_throttle ? "ON" : "OFF");
+#ifdef TD5RE_RELEASE
+          if (bp >= 0) { s_buttons[bp].hidden = 1; s_buttons[bp].disabled = 1; }
+          if (bt >= 0) { s_buttons[bt].hidden = 1; s_buttons[bt].disabled = 1; }
+#endif
+        }
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
@@ -646,6 +661,25 @@ void Screen_QuickRaceMenu(void) {
                 s_num_spectate_screens += delta;
                 frontend_quickrace_clamp_counts();
                 frontend_play_sfx(2);
+            }
+
+            /* [2026-06-12] Dev toggles (right of Opponents row): flip on A/Enter.
+             * Apply live to g_td5.ini (read at race start) + refresh the label. */
+            if (s_button_index == QR_BTN_PLAYERAI && s_button_count > QR_BTN_PLAYERAI &&
+                !s_buttons[QR_BTN_PLAYERAI].hidden) {
+                g_td5.ini.player_is_ai = !g_td5.ini.player_is_ai;
+                snprintf(s_buttons[QR_BTN_PLAYERAI].label, sizeof s_buttons[QR_BTN_PLAYERAI].label,
+                         "Player AI: %s", g_td5.ini.player_is_ai ? "ON" : "OFF");
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "QuickRace dev toggle: PlayerIsAI=%d", g_td5.ini.player_is_ai);
+            }
+            if (s_button_index == QR_BTN_AUTOTHR && s_button_count > QR_BTN_AUTOTHR &&
+                !s_buttons[QR_BTN_AUTOTHR].hidden) {
+                g_td5.ini.auto_throttle = !g_td5.ini.auto_throttle;
+                snprintf(s_buttons[QR_BTN_AUTOTHR].label, sizeof s_buttons[QR_BTN_AUTOTHR].label,
+                         "Auto-Thr: %s", g_td5.ini.auto_throttle ? "ON" : "OFF");
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "QuickRace dev toggle: AutoThrottle=%d", g_td5.ini.auto_throttle);
             }
 
             if (s_button_index == QR_BTN_OK) {

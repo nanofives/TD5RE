@@ -648,6 +648,15 @@ int td5_game_get_total_actor_count(void)
  * connector draws. The original reads the count as a single byte. */
 int td5_game_get_minimap_checkpoint_count(void)
 {
+    /* [2026-06-12 task#11] TD6 tracks have no native checkpoint records
+     * (s_active_checkpoint is empty), but we synthesize functional checkpoints
+     * from the in-track banner meshes into s_td6_cp_spans. Surface THOSE to the
+     * minimap so the dashed checkpoint markers draw on migrated TD6 tracks like
+     * the original game. Native TD5 keeps s_active_checkpoint. */
+    if (g_active_td6_level > 0 && s_td6_cp_count > 0) {
+        int c = s_td6_cp_count;
+        return (c > 5) ? 5 : c;
+    }
     int c = (int)(uint8_t)s_active_checkpoint.checkpoint_count;
     if (c > 5) c = 5; /* checkpoints[] is sized 5 */
     return c;
@@ -657,6 +666,8 @@ int td5_game_get_minimap_checkpoint_span(int idx)
 {
     if (idx < 0 || idx >= td5_game_get_minimap_checkpoint_count())
         return -1;
+    if (g_active_td6_level > 0 && s_td6_cp_count > 0)
+        return s_td6_cp_spans[idx];
     return (int)s_active_checkpoint.checkpoints[idx].span_threshold;
 }
 
@@ -2037,6 +2048,20 @@ int td5_game_init_race_session(void) {
                               "InitRace step 5b: track_index=%d slot_in_pool=%d "
                               "using fallback traffic model %d (track-0 row)",
                               g_td5.track_index, ti, traffic_model);
+            }
+            /* [2026-06-12] TD6 CITY traffic: replace the borrowed track-0 cars
+             * with the REAL imported per-city TD6 models (London/Paris/Rome/NY/
+             * Hong Kong). Overrides whatever was resolved above for the 5 city
+             * tracks; non-city TD6 (circuits) and native TD5 are unaffected. */
+            {
+                int td6_city_base = td5_asset_td6_city_traffic_base(g_active_td6_level);
+                if (td6_city_base >= 0) {
+                    traffic_model = td6_city_base + ti;
+                    TD5_LOG_I(LOG_TAG,
+                              "InitRace step 5b: TD6 city level=%d slot_in_pool=%d "
+                              "-> real city traffic model %d",
+                              g_active_td6_level, ti, traffic_model);
+                }
             }
             if (traffic_model < 0) {
                 TD5_LOG_I(LOG_TAG,

@@ -286,11 +286,18 @@ def _pack_mesh(tris, billboard, ox, oy, oz):
                          0, tp, 0, len(lst), 0, 0)
         for p3, (nx, ny, nz) in lst:
             for s in range(3):
-                px, py, pz, tu, tv = p3[s]
+                px, py, pz, tu, tv, gl = p3[s]
                 vo = out_verts + w * TD5_VSTRIDE
+                # [2026-06-12 task#13] TD6 BAKED per-vertex lighting: when the
+                # source vertex carries a baked grey (>0), emit it as a full ARGB
+                # diffuse (alpha=0xFF) so (a) the renderer's color-LUT step is
+                # bypassed and (b) compute_vertex_lighting skips it (preserving the
+                # artist shade) under TD5RE_TD6_VLIGHT. gl==0 verts keep the old
+                # placeholder (alpha 0) so the renderer still synth-lights them.
+                light = (0xFF000000 | (gl << 16) | (gl << 8) | gl) if gl > 0 else 0xFF
                 struct.pack_into("<fff fff I ff ff", buf, vo,
                                  px - sub_x, py - sub_y, pz - sub_z,
-                                 0.0, 0.0, 0.0, 0xFF, tu, tv, 0.0, 0.0)
+                                 0.0, 0.0, 0.0, light, tu, tv, 0.0, 0.0)
                 no = out_norms + w * TD5_NSTRIDE
                 struct.pack_into("<fffi", buf, no, nx, ny, nz, 1)
                 w += 1
@@ -384,12 +391,17 @@ def _deindex_mesh(blob, moff, tree_pages=frozenset(),
     # load_translation(origin/256) doesn't double-count.
     fold_x, fold_y, fold_z = ox / 256.0, oy / 256.0, oz / 256.0
 
-    # Read source positions+uv from a command's OWN vertex buffer.
+    # Read source positions+uv (+ baked per-vertex light) from a command's OWN
+    # vertex buffer. TD6 verts carry artist-baked greyscale lighting at +0x10
+    # (RGBA, R=G=B, e.g. 0x77/0xa9). We thread the grey byte through so _pack_mesh
+    # can emit it as the TD5 vertex diffuse (task #13) instead of fake-lighting
+    # from synthetic normals.
     def vpos(cmd_voff, vi):
         sv = cmd_voff + vi * TD6_VSTRIDE
         return (_f32(blob, sv) + fold_x, _f32(blob, sv + 4) + fold_y,
                 _f32(blob, sv + 8) + fold_z,
-                _f32(blob, sv + 0x18), _f32(blob, sv + 0x1C))
+                _f32(blob, sv + 0x18), _f32(blob, sv + 0x1C),
+                blob[sv + 0x10])
 
     pages_used = sorted({tp for tp, _, _ in cmd_records})
     # Flatten to a triangle list with COMPUTED face normals oriented to the
@@ -650,7 +662,13 @@ def _billboard_pages(names):
     out = set()
     for i, n in enumerate(names):
         nl = n.lower()
-        if "tree" not in nl:
+        # Tree CANOPIES ('Ntree') and TRUNKS ('NtTrunkN') are flat single-quad
+        # sprites that must face the camera. A trunk is a world-fixed flat quad
+        # (verified: ~1200 wide x 2600 tall x ~170 thin in Z) — driving past it
+        # goes EDGE-ON and it vanishes, leaving floating canopies with no trunk.
+        # Billboard them too. Tree WALLS ('treew') and other large fixed backdrops
+        # are real surfaces and must stay world-fixed.
+        if "tree" not in nl and "trunk" not in nl:
             continue
         if "treew" in nl or "wall" in nl or "backd" in nl or "fence" in nl:
             continue
@@ -725,6 +743,16 @@ def _build_page_64(img):
     transparent, which TD5 renders as alpha=0); opaque images become type 0.
     Returns (page_bytes, page_type)."""
     from PIL import Image
+    # Inspect alpha on the ORIGINAL image, BEFORE resizing: PIL premultiplies an
+    # RGBA image on resize, so an all-zero alpha would zero the RGB to black first.
+    # Many TD6 wall/building/dirt TGAs (1walln, 10build, N2dirt, ...) carry an
+    # UNUSED/garbage all-zero alpha channel but real RGB — a genuinely all-
+    # transparent texture would be invisible, which is never intended. So when the
+    # alpha is fully zero, DROP it (-> opaque) before the resize to keep the RGB
+    # (was rendering those walls/buildings solid black = "missing textures").
+    if img.mode in ("RGBA", "LA", "PA"):
+        if img.convert("RGBA").getchannel("A").getextrema()[1] == 0:
+            img = img.convert("RGB")
     img = img.resize((64, 64), Image.BILINEAR)
     keyed = False
     alpha = None
@@ -774,10 +802,27 @@ def build_textures_dat(td6_level: int, page_count: int, verbose=True):
     pages = []
     missing = 0
     keyed = 0
+    from_static = 0
+    # SHARED global prop archive: TD6 keeps common props (Bench, redtape, 1bollard,
+    # 1crate, ...) in Test Drive 6/static.zip, NOT in every level's texture{N}.zip.
+    # When a named texture is absent from the level zip, fall back to static.zip so
+    # those props get their real texture instead of a grey placeholder.
+    static_zp = os.path.join(os.path.dirname(TD6_LEVELS), "static.zip")
+    static_lut = {}
+    if os.path.exists(static_zp):
+        try:
+            with zipfile.ZipFile(static_zp) as _sz:
+                static_lut = {n.lower(): n for n in _sz.namelist()}
+        except Exception:
+            static_lut = {}
     for pg in range(page_count):
         img = None
         if pg < len(names):
             tga = read_zip_entry(zp, names[pg])
+            if not tga and names[pg].lower() in static_lut:
+                tga = read_zip_entry(static_zp, static_lut[names[pg].lower()])
+                if tga:
+                    from_static += 1
             if tga:
                 try:
                     img = Image.open(io.BytesIO(tga))
@@ -805,7 +850,8 @@ def build_textures_dat(td6_level: int, page_count: int, verbose=True):
     out += body
     if verbose:
         print(f"  textures.dat: {page_count} pages from {os.path.basename(zp)} "
-              f"({len(names)} dir entries, {keyed} alpha-keyed, {missing} grey); out={len(out)} bytes")
+              f"({len(names)} dir entries, {keyed} alpha-keyed, {from_static} from static.zip, "
+              f"{missing} grey); out={len(out)} bytes")
     return bytes(out)
 
 
@@ -914,8 +960,20 @@ def build_sky(td6_level: int, od: str, verbose=True):
 #   [+2] 255 (validity/■ sentinel; 0..3 means "junction zone, skip")
 # left.trk == right.trk for the centreline. Without these the AI steers off the
 # TD6 track at curves (drives out of bounds); with them it follows the racing line.
-def build_routes(strip: bytes, circuit: bool = True):
+def build_routes(strip: bytes, circuit: bool = True, spline: bytes = None):
     """Synthesize the AI corridor as DISTINCT left + right route tables.
+
+    When `spline` (a SPLINE*.TD6 file, 4 bytes/main-road-span [laneA,flagA,laneB,
+    flagB]) is given, the lane bytes are taken from TD6's AUTHORED RACING LINE
+    instead of the flat road-edge default: LEFT.TRK lane = laneA (inner line),
+    RIGHT.TRK lane = laneB (outer line). Both are 0..255 lateral fractions that
+    map directly to our route byte (RE'd: TD6_SampleRoutePoint @0x42a8c0 == TD5
+    SampleTrackTargetPoint). The corridor narrows + shifts to the apex on corners,
+    so the AI drives the designed line, not the centreline. The per-span THRESHOLD
+    byte (corner-speed governor; 0=hard brake, 255=no cap) is derived from the
+    racing-line CURVATURE so the AI also slows for corners. Branch spans (s>=ring,
+    not in the spline) keep the geometric default. See
+    [reference_td6_spline_racing_line_route_system_2026-06-12].
 
     The AI builds its lateral steering corridor from the LEFT route lane byte
     and the RIGHT route lane byte (td5_track_compute_signed_offset, per
@@ -983,24 +1041,46 @@ def build_routes(strip: bytes, circuit: bool = True):
         h12 = int(round((math.atan2(dx, dz) / (2 * math.pi)) * 4096)) & 0xFFF
         return max(4, min(253, int(round(h12 * 256 / 0x102C))))
 
+    # TD6 racing line from the spline (laneA/laneB per main-road span).
+    sp_ring = (len(spline) // 4) if spline else 0
+
+    def spline_curv_threshold(s):
+        """Corner-speed cap from the racing-line curvature: 255 on a straight,
+        dropping toward ~80 on the sharpest corners (heading swing over +/-K
+        spans). Mirrors native TD5's per-span threshold byte the AI brakes on."""
+        h0 = heading_byte((s - K) % span_cnt if circuit else max(0, s - K))
+        h1 = heading_byte((s + K) % span_cnt if circuit else min(span_cnt - 1, s + K))
+        d = abs(h1 - h0)                 # 0..255 heading-byte units
+        if d > 128:
+            d = 256 - d                  # wrap to shortest turn
+        # d ~ 0 straight, ~30+ a sharp corner. Map to [80,255], clamped.
+        return max(80, 255 - d * 5)
+
     for s in range(span_cnt):
         b = heading_byte(s)
         _lv, _rv, lanes, _ox, _oz = span_fields(s)
         L = lanes if lanes >= 1 else 1
         sh = 0 if lanes <= 2 else max(1, int(round(lanes * SHOULDER_FRAC)))
-        # Trace-confirmed: the AI tracks the LEFT route's lateral position as its
-        # racing line. Put LEFT at the ROAD CENTRE (byte 128 = centre of the
-        # symmetric road) so the AI drives the middle of the paved road, not the
-        # left edge. RIGHT = right road edge — a DISTINCT bound (avoids the
-        # zero-width corridor that made the single-centreline route jitter).
-        left_byte = 128
-        right_byte = max(left_byte + 8, min(255, int(round((L - sh) / L * 255))))
+        if spline and s < sp_ring:
+            # TD6 AUTHORED RACING LINE: left=laneA (inner), right=laneB (outer).
+            left_byte = spline[s * 4 + 0]
+            right_byte = spline[s * 4 + 2]
+            if right_byte < left_byte:           # keep left<right (corridor sense)
+                left_byte, right_byte = right_byte, left_byte
+            if right_byte - left_byte < 8:        # never a zero-width corridor
+                right_byte = min(255, left_byte + 8)
+            thr = spline_curv_threshold(s)
+        else:
+            # Geometric fallback (branch spans / no spline): centre + road edge.
+            left_byte = 128
+            right_byte = max(left_byte + 8, min(255, int(round((L - sh) / L * 255))))
+            thr = 255
         left[s * 3 + 0] = left_byte
         left[s * 3 + 1] = b
-        left[s * 3 + 2] = 255
+        left[s * 3 + 2] = thr
         right[s * 3 + 0] = right_byte
         right[s * 3 + 1] = b
-        right[s * 3 + 2] = 255
+        right[s * 3 + 2] = thr
     return bytes(left), bytes(right)
 
 
@@ -1083,6 +1163,35 @@ def remap_surface(strip: bytes, shoulders: bool = True, road_only: bool = False)
     return bytes(out), n_grass, n_shoulder
 
 
+def remap_type11_links(strip: bytes):
+    """Correct TD6 junction `link_prev` (+0x0A) for the span types the route
+    walker FOLLOWS via link_prev: type-9 (SENTINEL_START) and type-11 (backward
+    junction).
+
+    RE'd in TD6.exe + geometry-verified (2026-06-12): TD6's exporter writes the
+    junction target into link_next (+0x08) for BOTH of these, and leaves link_prev
+    a per-section GARBAGE constant — out-of-range (41050/10262) OR in-range-but-
+    bogus (London span 744 link_prev=2070, 545k units away). link_next is co-
+    located with the span for ALL London type-9/11 spans, so set
+    link_prev = link_next UNCONDITIONALLY for these two types. Without it the
+    branch/sentinel resolves to a displaced span -> teleport / launch / fall-
+    through near junctions. Native-safe by construction (only TD6 strips reach
+    this; native TD5's link_prev is valid and these types are TD6-shaped here)."""
+    span_off, ring, vtx_off, vtx_cnt, total = struct.unpack_from("<5I", strip, 0)
+    out = bytearray(strip)
+    patched = 0
+    for i in range(total):
+        o = span_off + i * SPAN_STRIDE
+        if out[o] != 9 and out[o] != 11:
+            continue
+        nxt = struct.unpack_from("<h", out, o + 8)[0]      # link_next (signed)
+        prev = struct.unpack_from("<h", out, o + 10)[0]    # link_prev (signed)
+        if 0 <= nxt < total and prev != nxt:
+            struct.pack_into("<h", out, o + 10, nxt)
+            patched += 1
+    return bytes(out), patched
+
+
 # Fraction of each side of a road span treated as grass shoulder (tunable; the
 # paved road is the centre 1-2*SHOULDER_FRAC of the strip width). 0.25 -> road
 # is the centre ~half. Lower = wider road / thinner verges.
@@ -1116,16 +1225,20 @@ def convert_milestone_a(td6_level: int, td5_level: int, circuit: int,
             print(f"  wrote {name:14} {len(data):8} bytes")
 
     strip, n_grass, n_shoulder = remap_surface(strip, shoulders=shoulders, road_only=road_only)
+    strip, n_t11 = remap_type11_links(strip)
     if verbose:
         if road_only:
             print(f"  surface remap: ROAD-ONLY (urban) — all spans -> road, no grass/shoulders")
         else:
             print(f"  surface remap: {n_grass} whole-grass spans + {n_shoulder} road spans w/ grass shoulders")
+        print(f"  type-11 link fix: {n_t11} backward-junction link_prev <- link_next")
     write("STRIP.DAT", strip)
     if stripb:
         stripb, n_grass_b, n_shoulder_b = remap_surface(stripb, shoulders=shoulders, road_only=road_only)
+        stripb, n_t11_b = remap_type11_links(stripb)
         if verbose:
             print(f"  surface remap (STRIPB): {n_grass_b} whole-grass + {n_shoulder_b} shoulders")
+            print(f"  type-11 link fix (STRIPB): {n_t11_b} backward-junction link_prev <- link_next")
     write("STRIPB.DAT", stripb)
     write("LEVELINF.DAT", synth_levelinf(circuit))
     # AI corridor: DISTINCT left/right road edges (not a single centreline) so the

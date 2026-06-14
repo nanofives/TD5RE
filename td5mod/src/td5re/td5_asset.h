@@ -300,6 +300,10 @@ int td5_asset_load_traffic_model(int model_index, int slot);
  */
 int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot_in_pool);
 
+/* Map the active TD6 city level (8=Paris,9=NY,10=Rome,11=HK,12=London) to its
+ * imported per-city traffic-model base index (31/37/43/49/55), or -1. */
+int td5_asset_td6_city_traffic_base(int td6_level);
+
 /* Returns the 1-based track-pool record ("world_x") used to select the
  * trackside replay-camera profile table (profile index = return - 1). 0 means
  * no profiles for this track/direction (reverse may be unavailable). */

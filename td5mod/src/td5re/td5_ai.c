@@ -32,6 +32,7 @@
 #include <string.h>
 #include <math.h>
 #include <limits.h>
+#include <stdlib.h>   /* getenv/atoi — TD6 AI steering-damping knob */
 
 #define LOG_TAG "ai"
 
@@ -2125,6 +2126,67 @@ void td5_ai_init_race_actor_runtime(void) {
  * (mirroring the Frida probe's return-address classification). */
 
 
+/* [task#19 2026-06-12] TD6 AI steering damping.
+ * The faithful cascade (td5_ai_update_steering_bias) adds a FLAT ±steer_weight
+ * per tick whenever the heading deviation is in the mid band (0x100..0x401).
+ * For RACERS the weight is 0x20000 — LARGER than the ±0x18000 saturation clamp —
+ * so a single mid-band tick snaps the steering to full lock; when the heading
+ * error flips sign (which it does every few ticks on TD6's curvy converted
+ * routes + pulsing-lane_count geometry that scrapes the rails) the car slams
+ * full-lock the other way => the reported violent zig-zag, wall scrapes and lost
+ * speed. The original never hits the mid band on its hand-authored TD5 routes,
+ * so this is a TD6-data problem, fixed by ramping the steering over several
+ * ticks instead of snapping. Scale the weight down on TD6 only (native TD5 is
+ * byte-faithful and untouched). Knob TD5RE_TD6_AI_STEER = percent of the
+ * faithful weight (default 30; 100 = faithful, clamped 5..100). */
+/* [task#19] A/B knob for the TD6 drivable-band clamp in smart_lane_bias
+ * (TD5RE_TD6_AI_BAND=0 disables; default on). */
+static int td6_ai_band_enabled(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_AI_BAND"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
+/* [task#19] TD6 proportional+self-centering steering law (port of TD6.exe's
+ * FUN_0043a290). TD6 (a later engine build) REWROTE the 1999 TD5 steering
+ * cascade we ported: TD5 uses BANDED flat slams (±0x8000/±0x20000 per tick in
+ * the mid deviation band) and NO centering (holds the last value), which limit-
+ * cycles on TD6's curvy converted routes. TD6 instead ramps the steering toward
+ * a PROPORTIONAL target (|deviation|*gain) at the speed-scaled rate cap, and
+ * SELF-CENTERS (decays toward 0) when aligned. TD5RE_TD6_AI_PROP=0 disables
+ * (back to the faithful banded cascade). */
+static int td6_prop_steer_enabled(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_AI_PROP"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
+/* Proportional gain: steer cap = |signed_deviation| * gain (deviation is a
+ * 12-bit angle 0..0x800). TD6's per-car gain is iVar3/8 in [0..0x100]; 0x80 is a
+ * stable midpoint. Knob TD5RE_TD6_AI_GAIN (clamped 0x10..0x100). */
+static int32_t td6_steer_gain(void) {
+    static int g = -1;
+    if (g < 0) {
+        const char *e = getenv("TD5RE_TD6_AI_GAIN");
+        g = (e && e[0]) ? atoi(e) : 0x80;
+        if (g < 0x10)  g = 0x10;
+        if (g > 0x100) g = 0x100;
+    }
+    return g;
+}
+
+static int32_t td5_ai_td6_steer_weight(int32_t w) {
+    static int s_pct = -1;
+    if (s_pct < 0) {
+        const char *e = getenv("TD5RE_TD6_AI_STEER");
+        s_pct = (e && e[0]) ? atoi(e) : 100;   /* default OFF: weight-damping alone didn't help */
+        if (s_pct < 5)   s_pct = 5;
+        if (s_pct > 100) s_pct = 100;
+    }
+    if (g_active_td6_level <= 0 || s_pct >= 100) return w;
+    return (int32_t)(((int64_t)w * (int64_t)s_pct) / 100);
+}
+
 void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
     /* Literal translation of UpdateActorSteeringBias @ 0x4340C0.
      *
@@ -2163,6 +2225,55 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
 
     left_dev  = route_state[RS_LEFT_DEVIATION];
     right_dev = route_state[RS_RIGHT_DEVIATION];
+
+    /* [task#19 2026-06-12] TD6 proportional + self-centering steering law
+     * (port of TD6.exe FUN_0043a290 @0x0043a290). Replaces the banded TD5 slam
+     * on TD6 tracks for normal driving (param_2 != 0). Derive the SIGNED angular
+     * deviation from our RIGHT deviation (RIGHT in [0,0x800] = steer right by
+     * that much; (0x800,0xFFF] wraps to a left error): sdev = +right..-left,
+     * matching TD6's `((target-heading-0x800)&0xfff)-0x800`. Then: ramp the
+     * steering command toward a proportional cap (|sdev|*gain) at the speed-
+     * scaled rate cap, decelerating through zero on a reversal, and DECAY toward
+     * 0 (self-centre, 4x rate) when aligned — exactly TD6's three branches
+     * (flags&1 / flags&2 / flags&3==0). The steering-ramp accumulator (+0x33A)
+     * eases the correction in, as in TD6. */
+    if (param_2 != 0 && g_active_td6_level > 0 && td6_prop_steer_enabled()) {
+        int32_t cur   = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+        int16_t ramp  = ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM);
+        int32_t sdev  = (right_dev < left_dev) ? -right_dev : left_dev;  /* + = steer positive (cascade sign) */
+        int32_t inner = (iVar6 * 0x40) / (iVar4 + 0x40);          /* speed/slip term */
+        int32_t rate  = (int32_t)(0xC0000 / (inner + 0x40));      /* TD6 per-tick rate cap */
+        int32_t mag   = (sdev < 0) ? -sdev : sdev;
+        int32_t cap   = mag * td6_steer_gain();                   /* proportional target */
+        if (cap > 0x18000) cap = 0x18000;
+
+        if (sdev > 0x40) {                       /* steer RIGHT toward +cap */
+            if (ramp < 0x100) ramp += 0x40;
+            if (cur < 0) cur += rate * 2;        /* decel through zero on reversal */
+            else         cur += ((int32_t)ramp * rate) >> 8;
+            if (cur > cap) cur = cap;
+        } else if (sdev < -0x40) {               /* steer LEFT toward -cap */
+            if (ramp < 0x100) ramp += 0x40;
+            if (cur > 0) cur -= rate * 2;
+            else         cur -= ((int32_t)ramp * rate) >> 8;
+            if (cur < -cap) cur = -cap;
+        } else {                                 /* aligned: SELF-CENTRE (decay to 0) */
+            if (ramp > 0) ramp -= 0x40;
+            int32_t dec = rate * 4;
+            if (cur > dec)       cur -= dec;
+            else if (cur < -dec) cur += dec;
+            else                 cur = 0;
+        }
+        if (cur > 0x18000)       cur = 0x18000;
+        else if (cur < -0x18000) cur = -0x18000;
+
+        ACTOR_I16(actor, ACTOR_STEERING_RAMP_ACCUM) = ramp;
+        ACTOR_I32(actor, ACTOR_STEERING_CMD)        = cur;
+        if ((g_ai_frame_counter % 60u) == 0u)
+            TD5_LOG_I(LOG_TAG, "td6_prop_steer: slot=%d sdev=%d cap=%d rate=%d out=%d",
+                      slot, sdev, cap, rate, cur);
+        return;
+    }
 
     if (left_dev < 0x800) {
         if (left_dev < 0x401) {
@@ -3993,6 +4104,38 @@ static void td5_ai_smart_lane_bias(int slot) {
     }
     (void)aggression;
 
+    /* [task#19 2026-06-12] TD6 DRIVABLE-BAND clamp. On wide TD6 city spans only
+     * the central route band is paved road; the outer width is plaza/sidewalk,
+     * and the rail width PULSES ~6x (a 16000u plaza span next to a 2620u "gate"
+     * span). The spread logic above fans cars across the FULL width into the
+     * plaza; when the road then narrows to the gate they SLAM the wall -> the
+     * reported zig-zag/scrape/slow. Confine the target to the band spanned by the
+     * LEFT and RIGHT route lines (the actual drivable road) so the car threads
+     * the gates. WALL_MARGIN (0.11 of the full width) is far too loose on a
+     * 16000u span (1760u from the rail is still deep in the plaza). Native TD5 is
+     * untouched (the whole width is road there). Skipped on branch corridors
+     * (handled by the on_branch path). Knob TD5RE_TD6_AI_BAND=0 disables. */
+    if (g_active_td6_level > 0 && !on_branch && td6_ai_band_enabled()) {
+        const uint8_t *lt  = g_route_tables[0];
+        const uint8_t *rtb = g_route_tables[1];
+        size_t idx = (size_t)(unsigned)look_span * 3u;
+        if (lt && rtb && idx < g_route_table_sizes[0] && idx < g_route_table_sizes[1]) {
+            double ul = (double)lt[idx]  / 256.0;
+            double ur = (double)rtb[idx] / 256.0;
+            if (ul > ur) { double t = ul; ul = ur; ur = t; }
+            /* SHRINK the band slightly toward its centre (not widen it): the road
+             * width pulses ~6x, so on a wide/plaza span a car sitting at the band
+             * EDGE is fine, but when the road narrows to the next "gate" span that
+             * same edge IS the wall. Keeping cars inside the route lines (with a
+             * little inward bias) lets them thread the gates without scraping. */
+            double m = (ur - ul) * 0.10;          /* pull each side inward 10% */
+            ul += m; ur -= m;
+            if (ur < ul) { double c = (ul + ur) * 0.5; ul = ur = c; }
+            if (target_u < ul) target_u = ul;
+            if (target_u > ur) target_u = ur;
+        }
+    }
+
     /* (4) WALL: never aim within WALL_MARGIN of a rail — the single guard that
      * keeps the car off the boundary whether the authored line hugs a rail, a
      * surface nudge went wide, or we're threading a tight branch. */
@@ -4691,6 +4834,7 @@ void td5_ai_update_track_behavior(int slot) {
      * ~0 torque and therefore ~0 omega, so the countdown grid-hold period
      * naturally leaves actors still. */
     steer_weight = (threshold_result != 0) ? 0x10000 : 0x20000;
+    steer_weight = td5_ai_td6_steer_weight(steer_weight);  /* [task#19] TD6: damp mid-band slam */
     td5_ai_update_steering_bias(rs, steer_weight);
     TD5_LOG_I(LOG_TAG, "track_behavior: slot=%d thr=%d weight=0x%X",
               slot, threshold_result, steer_weight);
@@ -6485,6 +6629,63 @@ static void trf_dyn_place(int slot, int span, int lane, int polarity)
     }
 }
 
+/* [task#18 2026-06-12] TD6 drivable lane band from the route tables.
+ * On wide TD6 city strips only the CENTRAL lanes are paved road; the outer
+ * lanes are sidewalk. The strip lane bitmask does NOT mark them (London's is
+ * all zero), so td5_track_surface_is_slow can't gate them and traffic happily
+ * drives on the pavement. The route tables DO encode the road: LEFT.TRK's lane
+ * byte is the left racing line and RIGHT.TRK's the right line, each a lateral
+ * position 0..255 across the full rail-to-rail width. Convert both to lane
+ * indices -> the drivable band [lo,hi]; clamp traffic into it so cars keep off
+ * the kerb. Native TD5 (g_active_td6_level==0) is untouched — the whole width
+ * is road there. Branch-region spans (>= ring) have no route coverage, so the
+ * helper returns 0 and the caller leaves the lane unclamped. Returns 1 when a
+ * band narrower than the full lane range was derived.
+ * `route_span` is a normalized (main-ring) span index == the route-table row. */
+static int td5_ai_td6_drivable_band(int route_span, int lane_count,
+                                    int *out_lo, int *out_hi)
+{
+    int lo = 0, hi = (lane_count > 0) ? lane_count - 1 : 0;
+    if (out_lo) *out_lo = lo;
+    if (out_hi) *out_hi = hi;
+    if (g_active_td6_level <= 0 || lane_count <= 2 || route_span < 0)
+        return 0;
+    {
+        const uint8_t *lt = g_route_tables[0];
+        const uint8_t *rt = g_route_tables[1];
+        size_t idx = (size_t)(unsigned)route_span * 3u;
+        int lb, rb;
+        if (!lt || !rt ||
+            idx >= g_route_table_sizes[0] || idx >= g_route_table_sizes[1]) {
+            /* [task#20 2026-06-13] BRANCH / no-route-coverage span: the route table
+             * only covers the main ring, so branch corridors (and the wide fork
+             * spans) had NO band -> traffic wandered into the plaza/gate walls
+             * (user: traffic "crash into walls and zig-zag" on branches). Fall back
+             * to the CENTRAL HALF of the road, which is the drivable band the TD6
+             * surface grid encodes (London row = [7,7,1,1,1,1,7,7] = central 4/8 =
+             * road, outer = sidewalk). Keeps branch traffic on the corridor road. */
+            int m = lane_count / 4;
+            lo = m;
+            hi = lane_count - 1 - m;
+            if (hi < lo) hi = lo;
+            if (out_lo) *out_lo = lo;
+            if (out_hi) *out_hi = hi;
+            return (lo > 0 || hi < lane_count - 1);
+        }
+        lb = (int)lt[idx];
+        rb = (int)rt[idx];
+        if (lb > rb) { int t = lb; lb = rb; rb = t; }
+        lo = (lb * lane_count) / 256;
+        hi = (rb * lane_count) / 256;
+        if (lo < 0) lo = 0;
+        if (hi > lane_count - 1) hi = lane_count - 1;
+        if (hi < lo) hi = lo;
+    }
+    if (out_lo) *out_lo = lo;
+    if (out_hi) *out_hi = hi;
+    return (lo > 0 || hi < lane_count - 1);
+}
+
 /* Pick a random clear, non-slow lane on `span`; the drive direction is the
  * LANE's direction (learned from TRAFFIC.BUS / side heuristic), written to
  * *out_polarity. -1 when nothing qualifies.
@@ -6499,6 +6700,9 @@ static int trf_dyn_pick_lane(int slot, int span, int lane_count, int *out_polari
 {
     int start = (lane_count > 1) ? (int)(trf_dyn_rand() % (uint32_t)lane_count) : 0;
     int any_fast = 0;
+    int band_lo = 0, band_hi = lane_count - 1;
+    /* [task#18] TD6: confine spawns to the paved central band (route tables). */
+    td5_ai_td6_drivable_band(span, lane_count, &band_lo, &band_hi);
     for (int lane = 0; lane < lane_count; lane++) {
         if (!td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane))) {
             any_fast = 1;
@@ -6508,6 +6712,8 @@ static int trf_dyn_pick_lane(int slot, int span, int lane_count, int *out_polari
     for (int k = 0; k < lane_count; k++) {
         int lane = (start + k) % lane_count;
         int pol  = trf_dyn_lane_direction(lane_count, lane);
+        if (lane < band_lo || lane > band_hi)
+            continue;   /* [task#18] outside the drivable band = sidewalk */
         if (any_fast &&
             td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
             continue;   /* user rule: never spawn on a slow (shoulder) lane */
@@ -6569,6 +6775,19 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
         /* The window must hold against EVERY local player, not just the one
          * we rolled (multiplayer: no spawning on top of another pane). */
         if (trf_dyn_min_player_dist(span) < win_lo) continue;
+
+        /* [task#20 2026-06-13] Populate TD6 branch corridors with traffic. The
+         * chosen main-ring span has passed all proximity/clearance checks; ~1/3 of
+         * the time, if a branch corridor PARALLELS this main span and branches are
+         * drivable, spawn the car on the branch instead so the alternate routes
+         * aren't empty (user: "traffic can't drive on branches"). The branch span
+         * is contiguous, so the walker traverses it and rejoins the main ring at
+         * the corridor end like any other car. */
+        if (g_active_td6_level > 0 && td5_track_td6_branches_drivable() &&
+            (trf_dyn_rand() % 3u) == 0u) {
+            int bspan = td5_track_main_to_branch_span(span);
+            if (bspan >= 0) span = bspan;
+        }
 
         lane_count = td5_track_span_lane_count_at(span);
         if (lane_count <= 0) continue;
@@ -7196,6 +7415,22 @@ void td5_ai_update_traffic_route_plan(int slot) {
                     td5_track_get_span_lane_count(target_span), target_sub_lane);
             }
 
+            /* [task#18 2026-06-12] TD6: keep traffic off the sidewalk. The lane
+             * choosers above can pick any lane 0..lane_count-1, but on wide TD6
+             * city strips only the central route band is paved. Clamp the target
+             * lane into the drivable band derived from the route tables (no-op on
+             * native TD5 and on branch spans without route coverage). */
+            {
+                int blo, bhi;
+                if (td5_ai_td6_drivable_band(
+                        target_span,
+                        td5_track_get_span_lane_count(target_span),
+                        &blo, &bhi)) {
+                    if (target_sub_lane < blo) target_sub_lane = blo;
+                    else if (target_sub_lane > bhi) target_sub_lane = bhi;
+                }
+            }
+
             int target_x = 0, target_y = 0, target_z = 0;
 
             if (td5_track_get_span_lane_world(target_span, target_sub_lane,
@@ -7249,7 +7484,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
     }
 
     /* --- Stage 6: Steering --- */
-    td5_ai_update_steering_bias(rs, 0x8000);
+    td5_ai_update_steering_bias(rs, td5_ai_td6_steer_weight(0x8000));  /* [task#19] TD6 traffic too */
 
     /* --- Stage 7: Peer avoidance / yield --- */
     peer = td5_ai_find_nearest_route_peer(rs);

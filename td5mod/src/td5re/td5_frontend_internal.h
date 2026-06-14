@@ -349,6 +349,10 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 #define QR_BTN_SPLITSCREENS 6 /* [2026-06-08] AI spectator split-screens (dev-only) */
 #define QR_BTN_OK         7
 #define QR_BTN_BACK       8
+/* [2026-06-12] dev-only toggles placed to the RIGHT of the Opponents row:
+ * PlayerIsAI (slot 0 driven by AI) and AutoThrottle (trace auto-throttle). */
+#define QR_BTN_PLAYERAI   9
+#define QR_BTN_AUTOTHR    10
 
 /* Quick Race layout: caption buttons in a left column, the selected value in a
  * right column, all rows uniformly spaced.

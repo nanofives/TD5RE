@@ -131,6 +131,22 @@ static int16_t s_surface_friction[32];  /* DAT_00474900: shared friction per sur
 static int16_t s_surface_grip[32];      /* DAT_004748C0: player-only per-wheel grip */
 static int16_t s_gear_torque[16];       /* DAT_00467394: per-gear torque multipliers */
 
+/* [task#15 2026-06-13] TD6 surface routing. On TD6 tracks td5_track_get_surface_type
+ * returns 0x80|grid_class (the per-lane SURFACE-GRID class), which must index the
+ * ported TD6 grip/drag tables (td5_track @0x0049d7b8/0x0049d7f8) instead of the
+ * TD5 surface tables. These helpers keep every physics call site one-liner-clean
+ * and leave native TD5 (no 0x80 bit) byte-identical. */
+static inline int32_t phys_surface_grip(int surface)
+{
+    if (td5_track_td6_surface_grid_loaded()) return td5_track_td6_surface_grip_q8(surface & 0x1F);
+    return (int32_t)s_surface_friction[surface & 0x1F];
+}
+static inline int32_t phys_surface_drag(int surface)
+{
+    if (td5_track_td6_surface_grid_loaded()) return td5_track_td6_surface_drag(surface & 0x1F);
+    return (int32_t)s_surface_grip[surface & 0x1F];
+}
+
 /* --- Globals matching original binary layout --- */
 static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
 
@@ -846,6 +862,58 @@ void td5_physics_apply_render_interpolation(float subtick_fraction)
     }
 }
 
+/* [task#14 2026-06-13] TD6 breakable-prop collision (port of TD6.exe FUN_00441070
+ * + the impulse core of FUN_0043e700). Props are INVISIBLE collision volumes on
+ * the baked world geometry (lampposts/bins/etc.; London ships ~199, other TD6
+ * tracks ~none). For each of the 4 wheel contact points, if it's within
+ * radius*16 world units of a prop, reflect the inward velocity (restitution ~0.5)
+ * so the car bounces off the (already-visible) street furniture instead of
+ * driving through it. The exact debris-burst + impact-sound (FUN_004363f0 /
+ * FUN_00431930) are render/audio-time in TD6 and left as Phase-2 polish; this is
+ * the sim-time collision core. No-op on tracks without props. */
+static void td5_physics_check_td6_props(TD5_Actor *actor)
+{
+    int n, i, w;
+    int32_t cx, cz, vx, vz, vx0, vz0;
+    if (!actor) return;
+    n = td5_track_td6_prop_count();
+    if (n <= 0) return;
+    cx = actor->world_pos.x; cz = actor->world_pos.z;
+    vx = vx0 = actor->linear_velocity_x;
+    vz = vz0 = actor->linear_velocity_z;
+    for (i = 0; i < n; i++) {
+        int32_t px, pz, rw, span, cdx, cdz;
+        if (!td5_track_td6_prop_get(i, &px, &pz, &rw, &span)) continue;
+        /* broadphase: chassis vs prop (world units) before the 4 wheel tests */
+        cdx = (cx - px) >> 8; cdz = (cz - pz) >> 8;
+        if ((int64_t)cdx * cdx + (int64_t)cdz * cdz >
+            (int64_t)(rw + 6000) * (rw + 6000))
+            continue;
+        for (w = 0; w < 4; w++) {
+            int32_t dx = (actor->wheel_contact_pos[w].x - px) >> 8;
+            int32_t dz = (actor->wheel_contact_pos[w].z - pz) >> 8;
+            int64_t d2 = (int64_t)dx * dx + (int64_t)dz * dz;
+            if (d2 < (int64_t)rw * rw) {
+                int32_t dist = (int32_t)td5_isqrt((uint32_t)d2);
+                int64_t vn;
+                if (dist < 1) dist = 1;
+                /* velocity component along the prop->wheel (outward) normal */
+                vn = ((int64_t)vx * dx + (int64_t)vz * dz) / dist;
+                if (vn < 0) {                       /* approaching -> reflect */
+                    int64_t imp = (-vn * 3) / 2;    /* (1 + restitution 0.5) */
+                    vx += (int32_t)(imp * dx / dist);
+                    vz += (int32_t)(imp * dz / dist);
+                }
+                break;                              /* one hit per prop */
+            }
+        }
+    }
+    if (vx != vx0 || vz != vz0) {
+        actor->linear_velocity_x = vx;
+        actor->linear_velocity_z = vz;
+    }
+}
+
 void td5_physics_tick(void)
 {
     int total;
@@ -1180,6 +1248,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             /* AI racer (slot < 6). Traffic handled by the slot>=6 branch above. */
             td5_physics_update_ai(actor);
         }
+        /* [task#14] TD6 breakable-prop collision (player + AI racers), after the
+         * per-tick position/velocity update so wheel contacts are current. */
+        td5_physics_check_td6_props(actor);
     } else if (actor->vehicle_mode == 1 && !g_game_paused) {
         /* 6b. Scripted recovery mode [CONFIRMED @ 0x00406881 / 0x00409BF0 + 0x00409D20]
          * Tier 2 NOT_PORTED port (2026-05-24): replaces the prior partial
@@ -1568,7 +1639,7 @@ void td5_physics_update_player(TD5_Actor *actor)
     rear_load = rear_load * (half_wb + susp_defl) / full_wb;
 
     for (i = 0; i < 4; i++) {
-        int32_t sf = (int32_t)s_surface_friction[surface_wheel[i] & 0x1F];
+        int32_t sf = phys_surface_grip(surface_wheel[i]);   /* [task#15] TD6-aware */
         int32_t load = (i < 2) ? front_load : rear_load;
         /* D5 — SAR-RZ-8 per axle grip [CONFIRMED @ 0x00404253-0x004042B7].
          * Original idiom: IMUL grip_table,load; CDQ; AND EDX,0xFF; ADD; SAR 8.
@@ -1621,7 +1692,7 @@ void td5_physics_update_player(TD5_Actor *actor)
      * Formula: v -= ((v >> 8) * drag_coeff) >> 12
      * Condition: throttle < 0x20 || gear < 2 → use 0x6C (coast), else 0x6A (drive) */
     {
-        int32_t surf_drag = (int32_t)s_surface_grip[surface_center & 0x1F];
+        int32_t surf_drag = phys_surface_drag(surface_center);   /* [task#15] TD6-aware */
         int32_t damp_coeff;
         if (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2)
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_BASE);
@@ -2101,10 +2172,10 @@ void td5_physics_update_player(TD5_Actor *actor)
      * The grip[] array is for slip-circle limiting only.
      * Formula: sf[i] * wheel_drive[i] >> 8, where sf = raw table value (e.g. 256 for asphalt).
      * Prior port used grip[i] (56-80 after load+clamp) which is ~2x too small. */
-    int32_t sf_fl = (int32_t)s_surface_friction[surface_wheel[0] & 0x1F];
-    int32_t sf_fr = (int32_t)s_surface_friction[surface_wheel[1] & 0x1F];
-    int32_t sf_rl = (int32_t)s_surface_friction[surface_wheel[2] & 0x1F];
-    int32_t sf_rr = (int32_t)s_surface_friction[surface_wheel[3] & 0x1F];
+    int32_t sf_fl = phys_surface_grip(surface_wheel[0]);   /* [task#15] TD6-aware */
+    int32_t sf_fr = phys_surface_grip(surface_wheel[1]);
+    int32_t sf_rl = phys_surface_grip(surface_wheel[2]);
+    int32_t sf_rr = phys_surface_grip(surface_wheel[3]);
     /* D10 — SAR-RZ-8 per wheel-grip product [CONFIRMED @ 0x004046DC-0x00404734].
      * Original idiom: IMUL grip,drive; CDQ; AND EDX,0xFF; ADD; SAR EAX,8.
      * Plain `>> 8` rounds toward -inf for negative products (rolling reverse). */
@@ -2789,7 +2860,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t rear_load  = ((front_weight << 8) / total_weight) * (half_wb + susp_defl) / half_wb;
 
     /* Grip from surface friction * load [CONFIRMED @ 0x4050B8] */
-    int32_t sf = (int32_t)s_surface_friction[surface & 0x1F];
+    int32_t sf = phys_surface_grip(surface);   /* [task#15] TD6-aware */
     int32_t grip_front = (sf * front_load + 128) >> 8;
     int32_t grip_rear  = (sf * rear_load + 128) >> 8;
 
@@ -2800,7 +2871,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
 
     /* --- 4. Velocity drag in WORLD frame [CONFIRMED @ 0x404EC0] --- */
     {
-        int32_t surf_drag = (int32_t)s_surface_grip[surface & 0x1F];
+        int32_t surf_drag = phys_surface_drag(surface);   /* [task#15] TD6-aware */
         int32_t damp_coeff;
         if (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2)
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_BASE);
@@ -4933,6 +5004,19 @@ void td5_physics_resolve_vehicle_contacts(void)
                 int32_t dxp, dzp, rr;
                 int64_t d2;
                 if (!tr->car_definition_ptr) continue;
+                /* [2026-06-12] Don't collide with INVISIBLE traffic. Dynamic
+                 * traffic despawns by fading draw alpha to 0 (the renderer then
+                 * skips the car), but the actor stays parked at its last span
+                 * with a live car_definition_ptr -> the player rams an unrendered
+                 * car = the "invisible wall on span 110" report (LOW volume cap=2
+                 * left 4 despawned cars parked at span ~110). Gate collision on the
+                 * SAME visibility the renderer uses, so you only ever hit traffic
+                 * you can see. get_draw_alpha() returns 255 when dynamic traffic is
+                 * off, so classic-mode collision is unchanged. [2026-06-12b]
+                 * Also skip PARKED (inactive) slots outright — belt-and-suspenders
+                 * in case a slot is mid-state with a transient non-zero alpha. */
+                if (td5_ai_traffic_dynamic_parked(t) ||
+                    td5_ai_traffic_get_draw_alpha(t) == 0) continue;
                 dxp = (player->world_pos.x >> 8) - (tr->world_pos.x >> 8);
                 dzp = (player->world_pos.z >> 8) - (tr->world_pos.z >> 8);
                 rr  = prad + (int32_t)CDEF_S(tr, CDEF_COLLISION_RADIUS);

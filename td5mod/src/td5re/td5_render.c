@@ -2063,7 +2063,22 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     const float *l1 = &s_light_dirs[3];
     const float *l2 = &s_light_dirs[6];
 
+    /* [2026-06-12 task#13] TD6 BAKED per-vertex lighting. The TD6 converter now
+     * emits the artist-baked vertex grey as a full ARGB diffuse (alpha=0xFF) for
+     * track geometry; preserve it instead of overwriting with our synthetic
+     * 3-light guess, so faces shade like the original TD6 'lighting engine'.
+     * Track geometry only (slot < 0) — vehicles keep synthetic lighting + paint
+     * tint. A/B via TD5RE_TD6_VLIGHT (default on); =0 falls back to synthetic. */
+    static int s_td6_vlight = -1;
+    if (s_td6_vlight < 0) {
+        const char *e = getenv("TD5RE_TD6_VLIGHT");
+        s_td6_vlight = (e && e[0] == '0') ? 0 : 1;
+    }
+    int prelit = (s_td6_vlight && slot < 0);
+
     for (int i = 0; i < count; i++) {
+        if (prelit && (verts[i].lighting & 0xFF000000u) != 0u)
+            continue;   /* baked TD6 vertex light -> keep it */
         float nx = norms[i].nx;
         float ny = norms[i].ny;
         float nz = norms[i].nz;

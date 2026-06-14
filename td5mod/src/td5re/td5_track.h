@@ -105,6 +105,27 @@ int  td5_track_load_runtime_data(int track_index, int reverse);
 /* --- Span access --- */
 int              td5_track_get_span_count(void);
 int              td5_track_get_ring_length(void);
+/* TD6 branch->main span remap (port of TD6.exe FUN_0045d040): a branch corridor
+ * span maps to its parallel main-ring span via the segment-remap table; main
+ * spans pass through unchanged. */
+int              td5_track_branch_to_main_span(int span);
+/* Inverse: a main-ring span -> the parallel branch-corridor span, or -1 if none. */
+int              td5_track_main_to_branch_span(int main_span);
+/* Are TD6 branch corridors currently drivable (walker takes/traverses them)? */
+int              td5_track_td6_branches_drivable(void);
+/* TD6 per-lane surface grid (header[6]): class at (span, lateral byte 0..255),
+ * and the class->grip(8.8 fixed,0x100=1.0)/drag coefficient tables. -1 class /
+ * 0x100 grip / 0 drag when no TD6 grid is loaded. */
+int              td5_track_td6_surface_class(int span_index, int lateral_byte);
+int              td5_track_td6_surface_grip_q8(int cls);
+int              td5_track_td6_surface_drag(int cls);
+int              td5_track_td6_surface_grid_loaded(void);
+/* TD6 breakable props (level<N>.tcl): load/clear the prop table, query count and
+ * per-prop world pos (24.8) + collision radius (world units) + anchor span. */
+void             td5_track_load_td6_props(const void *data, size_t size);
+int              td5_track_td6_prop_count(void);
+int              td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
+                                        int *out_radius_w, int *out_span);
 int              td5_track_get_span_lane_count(int span_index);
 /* Per-lane surface type for a span (reuses surface_type_for_span_lane).
  * Returns the surface byte: 0x00-0x0F = main-road surface (low nibble of

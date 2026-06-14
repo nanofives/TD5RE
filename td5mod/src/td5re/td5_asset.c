@@ -2417,6 +2417,18 @@ int td5_asset_load_level(int track_index)
             levelinf_data = NULL;
         }
 
+        /* [task#14 2026-06-13] TD6 breakable props (LEVEL.TCL — invisible collision
+         * volumes on the baked geometry; London ships ~199). load returns NULL on
+         * native TD5 / tracks without props, which clears the prop table. */
+        {
+            static const char *s_prop_names[1] = { "LEVEL.TCL" };
+            int prop_sz = 0;
+            void *prop_data = load_first_available_level_entry(track_index, s_prop_names, 1,
+                                                               &prop_sz, NULL, 0);
+            td5_track_load_td6_props(prop_data, (size_t)(prop_sz > 0 ? prop_sz : 0));
+            free(prop_data);
+        }
+
         /* [TD6 AUTHORITATIVE TRACK TYPE] For migrated TD6 tracks, derive circuit
          * vs point-to-point from the port's single source of truth
          * (k_td6_menu_slots: finish_span>0 = point-to-point, finish_span==0 =
@@ -3712,7 +3724,10 @@ const char *td5_asset_get_car_zip_path(int car_index)
  * ======================================================================== */
 #define TD5_TRAFFIC_TEXTURE_PAGE_BASE 820
 #define TD5_TRAFFIC_ZIP               "traffic.zip"
-#define TD5_TRAFFIC_MODEL_COUNT       31
+/* model0..30 = original TD5 traffic cars; 31..60 = the imported REAL per-city
+ * TD6 traffic cars (convert_td6_traffic.py): London 31-36, Paris 37-42,
+ * Rome 43-48, New York 49-54, Hong Kong 55-60. */
+#define TD5_TRAFFIC_MODEL_COUNT       61
 
 int td5_asset_load_traffic_model(int model_index, int slot)
 {
@@ -3850,6 +3865,25 @@ static const int32_t s_traffic_model_table[6][6] = {
     /* row 4 */ { 22, 20, 23, 21, 19, 24 },
     /* row 5 */ { 26, 27, 28, 25, 29, 30 },
 };
+
+/* TD6 CITY traffic: the migrated P2P city tracks have no row in the TD5 6-row
+ * traffic-model table, so they borrowed track-0 (Moscow) cars. We imported the
+ * REAL per-city TD6 traffic models (convert_td6_traffic.py) at high indices;
+ * map the active TD6 level -> the city's 6-model base. Returns -1 when the
+ * level is not one of the 5 TD6 cities (keep the TD5 table / track-0 borrow).
+ * Level numbers are the converted-asset level (g_active_td6_level): Paris=8,
+ * NewYork=9, Rome=10, HongKong=11, London=12 (per k_td6_menu_slots). */
+int td5_asset_td6_city_traffic_base(int td6_level)
+{
+    switch (td6_level) {
+    case  8: return 37;   /* Paris     (level000) -> model37..42 */
+    case  9: return 49;   /* New York  (level001) -> model49..54 */
+    case 10: return 43;   /* Rome      (level002) -> model43..48 */
+    case 11: return 55;   /* Hong Kong (level003) -> model55..60 */
+    case 12: return 31;   /* London    (level004) -> model31..36 */
+    default: return -1;
+    }
+}
 
 int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot_in_pool)
 {

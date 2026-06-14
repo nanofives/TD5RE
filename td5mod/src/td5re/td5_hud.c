@@ -3464,14 +3464,21 @@ static int minimap_normalize_span(int raw_span)
     int ring_length = g_td5.track_span_ring_length;
     if (ring_length <= 0) ring_length = g_strip_span_count;
     int norm = raw_span;
-    if (norm >= ring_length &&
-        s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
-        for (int si = s_minimap_seg_branch_start;
-             si < s_minimap_seg_primary_end; si++) {
-            if (norm <= (int)s_minimap_seg_end[si]) {
-                norm += (int)s_minimap_seg_branch[si]
-                      - (int)s_minimap_seg_start[si];
-                break;
+    if (norm >= ring_length) {
+        /* [task#20 2026-06-13] TD6: collapse a branch span to its parallel MAIN
+         * span via the authoritative strip segment-remap table (the minimap's own
+         * seg-table stores TD6 corridor rows with branch=-1 and can't supply the
+         * parent). Keeps cross-branch racer/traffic dots on the right main span. */
+        if (g_active_td6_level > 0) {
+            norm = td5_track_branch_to_main_span(raw_span);
+        } else if (s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
+            for (int si = s_minimap_seg_branch_start;
+                 si < s_minimap_seg_primary_end; si++) {
+                if (norm <= (int)s_minimap_seg_end[si]) {
+                    norm += (int)s_minimap_seg_branch[si]
+                          - (int)s_minimap_seg_start[si];
+                    break;
+                }
             }
         }
     }
@@ -3658,6 +3665,77 @@ static int minimap_emit_road_quad(uint8_t *span_base, uint8_t *vert_base,
     return 1;
 }
 
+/* [task#11 2026-06-12] Emit a DASHED perpendicular checkpoint marker across the
+ * road at `cp_span`. The original TD6 minimap shows dashed lines at each
+ * checkpoint; the port previously only drew the invisible road-fill connector
+ * quads there (Quad3/Quad4), so no marker was visible (user: "dashes missing").
+ * Draw the left-rail -> right-rail line broken into dashes (every other segment)
+ * in bright white. Window-AABB + stray culled like the road quads. Returns 1 if
+ * any dash was drawn. */
+static int minimap_emit_checkpoint_dash(uint8_t *span_base, uint8_t *vert_base, int cp_span,
+                                        float offset_x, float offset_z,
+                                        float cos_h, float sin_h,
+                                        float mm_cx, float mm_cy)
+{
+    if (!span_base || !vert_base) return 0;
+    if (cp_span < 0 || cp_span >= g_strip_span_count) return 0;
+
+    uint8_t *s = span_base + cp_span * 24;
+    int32_t ox = *(int32_t *)(s + 0x0C);
+    int32_t oz = *(int32_t *)(s + 0x14);
+
+    uint16_t vi_l  = *(uint16_t *)(s + 0x04);
+    uint8_t  type  = s[0];
+    uint8_t  nib   = s[3] & 0x0F;
+    int32_t  col0  = s_minimap_vtx_delta_col0[type & 0x07];
+    int32_t  vi_r  = (int32_t)vi_l + (int32_t)nib + col0;
+    if (vi_r < 0) return 0;
+
+    int16_t *vl = (int16_t *)(vert_base + (uint32_t)vi_l * 6);
+    int16_t *vr = (int16_t *)(vert_base + (uint32_t)vi_r * 6);
+
+    float wx_l = (float)((int)vl[0] + ox) + offset_x;
+    float wz_l = (float)((int)vl[2] + oz) + offset_z;
+    float wx_r = (float)((int)vr[0] + ox) + offset_x;
+    float wz_r = (float)((int)vr[2] + oz) + offset_z;
+
+    float lx = mm_cx + (wx_l * cos_h + wz_l * sin_h) * s_minimap_world_scale_x;
+    float ly = mm_cy + (wz_l * cos_h - wx_l * sin_h) * s_minimap_world_scale_y;
+    float rx = mm_cx + (wx_r * cos_h + wz_r * sin_h) * s_minimap_world_scale_x;
+    float ry = mm_cy + (wz_r * cos_h - wx_r * sin_h) * s_minimap_world_scale_y;
+
+    float mm_l = s_minimap_x, mm_t = s_minimap_y;
+    float mm_rr = s_minimap_x + s_minimap_width, mm_b = s_minimap_y + s_minimap_height;
+    float min_x = lx < rx ? lx : rx, max_x = lx < rx ? rx : lx;
+    float min_y = ly < ry ? ly : ry, max_y = ly < ry ? ry : ly;
+    if (max_x < mm_l || min_x > mm_rr || max_y < mm_t || min_y > mm_b) return 0;
+    if (minimap_quad_is_stray(min_x, max_x, min_y, max_y)) return 0;
+
+    float dx = rx - lx, dy = ry - ly;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 2.0f) return 0;
+    float px = -dy / len, py = dx / len;     /* unit perpendicular = dash thickness axis */
+    const float half = 1.5f;                 /* dash half-thickness in px */
+    const int NDASH = 7;                     /* odd -> a dash at both rails */
+    int drawn = 0;
+    for (int k = 0; k < NDASH; k++) {
+        if (k & 1) continue;                 /* gaps on odd segments */
+        float t0 = (float)k / (float)NDASH, t1 = (float)(k + 1) / (float)NDASH;
+        float ax = lx + dx * t0, ay = ly + dy * t0;
+        float bx = lx + dx * t1, by = ly + dy * t1;
+        TD5_SpriteQuad q;
+        hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+            ax + px * half, ay + py * half,
+            bx + px * half, by + py * half,
+            bx - px * half, by - py * half,
+            ax - px * half, ay - py * half,
+            0.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFFF, HUD_DEPTH);
+        hud_submit_quad(&q);
+        drawn++;
+    }
+    return drawn > 0;
+}
+
 /* Vectorized minimap "grid" (VectorUI). The original tiles a small rose "+"
  * SCANBACK sprite 4x4; this replaces it with a clean radar-style grid: a darker
  * semi-transparent GREEN background panel + continuous lighter-green grid lines
@@ -3767,8 +3845,16 @@ void td5_hud_render_minimap(int actor_slot)
      * span (a no-op that spams the log + rescans the whole strip, and could even
      * mis-recenter to a coincidentally-close origin). The circuit ring-walk
      * below centres via `player_span % ring`, which tolerates a slightly-stale
-     * tracker, so skip this P2P-tuned heuristic on circuits. */
-    if (!circuit) {
+     * tracker, so skip this P2P-tuned heuristic on circuits.
+     *
+     * [2026-06-12] Also skip on TD6 tracks (g_active_td6_level > 0): their span
+     * ORIGIN is SECTION-CONSTANT (per-vertex offsets carry the real road
+     * movement), so it sits ~17000u from the car on EVERY span — far past the
+     * 4000u threshold — making this misfire every single frame (97k+ log lines +
+     * full-strip rescans per London race, and it can mis-recenter the player dot
+     * to a coincidentally-close section origin). The boundary-walk tracker is
+     * already correct by span INDEX on TD6. */
+    if (!circuit && g_active_td6_level == 0) {
         int32_t px = actor_world_x(actor_slot) >> 8; /* 24.8 FP → world units */
         int32_t pz = actor_world_z(actor_slot) >> 8;
         uint8_t *sb = (uint8_t *)g_strip_span_base;
@@ -3808,14 +3894,25 @@ void td5_hud_render_minimap(int actor_slot)
     int ring_length = g_td5.track_span_ring_length;
     if (ring_length <= 0) ring_length = g_strip_span_count;
     int remapped_span = (int)player_span;
-    if (remapped_span >= ring_length &&
-        s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
-        for (int si = s_minimap_seg_branch_start;
-             si < s_minimap_seg_primary_end; si++) {
-            if (remapped_span <= (int)s_minimap_seg_end[si]) {
-                remapped_span += (int)s_minimap_seg_branch[si]
-                               - (int)s_minimap_seg_start[si];
-                break;
+    if (remapped_span >= ring_length) {
+        if (g_active_td6_level > 0) {
+            /* [task#20 2026-06-13] TD6: use the authoritative segment-remap table
+             * (branch span -> parallel MAIN span) so the road walk CENTRES on the
+             * main ring the branch parallels — otherwise the walk starts at a
+             * garbage span and the main road lands off-window, leaving only the
+             * branch corridors visible (user: "on a branch the minimap only shows
+             * the branch, not all the geometry"). The minimap's own seg-table now
+             * stores corridor rows with branch=-1, so it can't supply the parent;
+             * the strip jump table can. */
+            remapped_span = td5_track_branch_to_main_span((int)player_span);
+        } else if (s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
+            for (int si = s_minimap_seg_branch_start;
+                 si < s_minimap_seg_primary_end; si++) {
+                if (remapped_span <= (int)s_minimap_seg_end[si]) {
+                    remapped_span += (int)s_minimap_seg_branch[si]
+                                   - (int)s_minimap_seg_start[si];
+                    break;
+                }
             }
         }
     }
@@ -4181,6 +4278,38 @@ void td5_hud_render_minimap(int actor_slot)
         }
     }
 
+    /* [task#10 2026-06-12] TD6 branch corridors on the P2P (non-circuit) minimap.
+     * London et al. are flagged is_circuit=0, so the circuit branch-row draw
+     * below never runs, and the P2P branch-quad draw only fires for TD5-style
+     * mirror links (which TD6 has none of -> "branches missing on minimap").
+     * Draw the appended TD6 corridor rows here, each at its own world position;
+     * the window AABB cull inside minimap_emit_road_quad keeps only the corridors
+     * near the player. */
+    if (!circuit && g_active_td6_level > 0 && span_base && vert_base &&
+        s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
+        int td6_branch_drawn = 0;
+        for (int bi = s_minimap_seg_branch_start; bi < s_minimap_seg_primary_end; bi++) {
+            int bstart = (int)s_minimap_seg_start[bi];
+            int bend   = (int)s_minimap_seg_end[bi];
+            if (bend <= bstart) continue;
+            for (int bs = bstart; bs <= bend; bs += 6) {
+                int bf = bs + 5;
+                if (bf > bend) bf = bend;
+                if (minimap_emit_road_quad(span_base, vert_base, bs, bf,
+                                           offset_x, offset_z, cos_h, sin_h,
+                                           mm_cx, mm_cy))
+                    td6_branch_drawn++;
+            }
+        }
+        {
+            static int s_td6_branch_log = 0;
+            if ((s_td6_branch_log++ % 60) == 0)
+                TD5_LOG_I(LOG_TAG, "minimap TD6 branch corridors: rows=%d drawn=%d",
+                          (int)(s_minimap_seg_primary_end - s_minimap_seg_branch_start),
+                          td6_branch_drawn);
+        }
+    }
+
     /* --- Circuit road walk (port enhancement; orig early-returned) ---
      * Re-enables the minimap road geometry for circuit tracks. The MAIN LOOP is
      * drawn by a player-centred ring walk modelled on the main track render's
@@ -4252,6 +4381,30 @@ void td5_hud_render_minimap(int actor_slot)
                           (int)s_minimap_seg_primary_end - (int)s_minimap_seg_branch_start,
                           g_strip_span_count);
             }
+        }
+    }
+
+    /* [task#11 2026-06-12] TD6 checkpoint dashes. Draw a dashed line across the
+     * road at each checkpoint span so migrated TD6 tracks show the checkpoint
+     * markers the original game does. Runs for both P2P and circuit TD6 tracks;
+     * the dash helper culls to the minimap window. Native TD5 keeps its existing
+     * connector-quad behaviour (gate on TD6). */
+    if (g_active_td6_level > 0 && span_base && vert_base) {
+        int cp_count = td5_game_get_minimap_checkpoint_count();
+        int cp_drawn = 0;
+        for (int ci = 0; ci < cp_count; ci++) {
+            int cs = td5_game_get_minimap_checkpoint_span(ci);
+            if (cs < 0) continue;
+            if (minimap_emit_checkpoint_dash(span_base, vert_base, cs,
+                                             offset_x, offset_z, cos_h, sin_h,
+                                             mm_cx, mm_cy))
+                cp_drawn++;
+        }
+        {
+            static int s_cp_dash_log = 0;
+            if ((s_cp_dash_log++ % 60) == 0)
+                TD5_LOG_I(LOG_TAG, "minimap TD6 checkpoint dashes: count=%d drawn=%d",
+                          cp_count, cp_drawn);
         }
     }
 
@@ -4627,6 +4780,42 @@ void td5_hud_init_minimap_layout(void)
         }
     }
     s_minimap_seg_primary_end = branch_write;
+
+    /* [task#10 2026-06-12] TD6 branch corridors. The TD5 mirror logic above does
+     * NOT model TD6 branches: they are not same-length parallels of the main road
+     * but explicit type-9 SENTINEL_START .. type-10 SENTINEL_END corridors living
+     * in the [ring, total) branch region, each carrying its own origin+vertices
+     * (drawn at its own world position). The type-8 fork's branch link is in
+     * +0x08 (link_next), which the type-0x08 segment-end path above discards, so
+     * the appended mirror rows are garbage for TD6. DISCARD them and append one
+     * row per real corridor (start..end run) instead. The branch-corridor draw
+     * (P2P + circuit) then renders each run; the window AABB cull keeps only the
+     * corridors near the player, so a branch shows as you approach its fork —
+     * matching the original TD6 minimap which draws the branch pieces. */
+    if (g_active_td6_level > 0 && g_strip_span_base) {
+        uint8_t *sb2 = (uint8_t *)g_strip_span_base;
+        int total = g_strip_span_count;
+        int ring  = g_td5.track_span_ring_length;
+        int i2 = (ring > 0 && ring < total) ? ring : 0;
+        int bw = s_minimap_seg_branch_start;     /* overwrite the mirror rows */
+        while (i2 < total && bw < MINIMAP_SEG_MAX) {
+            if (sb2[i2 * 24] == 9) {             /* SENTINEL_START */
+                int j = i2 + 1;
+                while (j < total && sb2[j * 24] != 10) j++;   /* walk to SENTINEL_END */
+                int cend = (j < total) ? j : (total - 1);
+                s_minimap_seg_start[bw]  = (int16_t)i2;
+                s_minimap_seg_end[bw]    = (int16_t)cend;
+                s_minimap_seg_branch[bw] = (int16_t)-1;
+                bw++;
+                i2 = cend + 1;
+            } else {
+                i2++;
+            }
+        }
+        s_minimap_seg_primary_end = bw;
+        TD5_LOG_I(LOG_TAG, "minimap_init: TD6 corridors appended=%d (ring=%d total=%d)",
+                  bw - (int)s_minimap_seg_branch_start, ring, total);
+    }
 
     TD5_LOG_I(LOG_TAG, "minimap_init: seg_table primaries=%d branches_appended=%d total_spans=%d",
               (int)s_minimap_seg_branch_start,
