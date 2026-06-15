@@ -2383,17 +2383,21 @@ static void td5_input_ff_update_jolt(int slot)
     }
 
     /* ---- Drive / decay the jolt on slot 1 (FRONTAL -> high motor) ---- */
+    /* [stuck-motor fix 2026-06-15] Drive while ticks remain; do NOT zero the
+     * magnitude on the expiry frame — that pre-zero made the `else if (mag != 0)`
+     * release branch DEAD (ticks==0 always coincided with mag==0), so the motor
+     * was left asserted at its last pulse value forever ("whenever something
+     * triggers FF it gets stuck"). Leaving mag set lets the next frame's else-if
+     * actually call td5_plat_ff_stop and release the motor. */
     if (s_ff_pulse_ticks[slot] > 0) {
         td5_plat_ff_constant(dev, TD5_FF_SLOT_FRONTAL, s_ff_pulse_mag[slot]);
         s_ff_pulse_ticks[slot]--;
-        if (s_ff_pulse_ticks[slot] == 0) s_ff_pulse_mag[slot] = 0;
     } else if (s_ff_pulse_mag[slot] != 0) {
-        /* Pulse expired: release the slot so it stops asserting force. [stuck-motor
-         * fix 2026-06-15] Frontal V2V/wall collisions now feed THIS same pulse
-         * (td5_input_ff_collision), so there is no separate persistent collision
-         * effect to protect — always stop. The OLD collision_active guard here left
-         * the motor asserted forever once a start-line contact latched the flag
-         * (the reported "vibrates on race start and never stops"). */
+        /* Pulse expired: release the slot so it stops asserting force. Frontal
+         * V2V/wall collisions now feed THIS same pulse (td5_input_ff_collision),
+         * so there is no separate persistent collision effect to protect — always
+         * stop. (The OLD collision_active guard left the motor asserted forever
+         * once a start-line contact latched the flag.) */
         s_ff_pulse_mag[slot] = 0;
         td5_plat_ff_stop(dev, TD5_FF_SLOT_FRONTAL);
     }
@@ -2402,7 +2406,6 @@ static void td5_input_ff_update_jolt(int slot)
     if (s_ff_side_ticks[slot] > 0) {
         td5_plat_ff_constant(dev, TD5_FF_SLOT_SIDE, s_ff_side_mag[slot]);
         s_ff_side_ticks[slot]--;
-        if (s_ff_side_ticks[slot] == 0) s_ff_side_mag[slot] = 0;
     } else if (s_ff_side_mag[slot] != 0) {
         s_ff_side_mag[slot] = 0;
         td5_plat_ff_stop(dev, TD5_FF_SLOT_SIDE);

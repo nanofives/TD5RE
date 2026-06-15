@@ -2372,6 +2372,17 @@ void td5_plat_input_joystick_learn_rest(int device_slot)
     s_neutral_rest_valid = 1;
 }
 
+/* [nav UP-stuck fix 2026-06-15] A DirectInput POV hat is "centered" (not pressed)
+ * when its value is 0xFFFFFFFF *per the docs* — but many drivers report a centered
+ * hat as 0xFFFF (65535), or stuff junk in the high word. The old `!= 0xFFFFFFFFu`
+ * test then treated a resting hat as deg=655, which `deg > 270` reads as a
+ * permanent UP — so the UP edge never re-armed and "can't navigate up" (down/
+ * left/right unaffected). Treat any value whose low word is 0xFFFF as centered. */
+static int pov_centered(DWORD pov)
+{
+    return (pov == 0xFFFFFFFFu) || ((pov & 0xFFFFu) == 0xFFFFu) || ((pov / 100u) > 360u);
+}
+
 /* 1 once the joystick has fully RETURNED TO REST: no buttons / dpad, sticks near
  * centre, every axis (incl. off-centre-resting triggers/sliders) back within a
  * band of its learned rest, and motionless for a few frames. Gates per-action
@@ -2395,7 +2406,7 @@ int td5_plat_input_joystick_neutral(int device_slot)
     /* Any button or dpad held resets the settle timer. */
     for (i = 0; i < 32; i++)
         if (js.rgbButtons[i] & 0x80) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
-    if (js.rgdwPOV[0] != 0xFFFFFFFFu) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
+    if (!pov_centered(js.rgdwPOV[0])) { s_neutral_have_prev = 0; s_neutral_stable_count = 0; return 0; }
 
     /* Sticks (lX/lY/lRx/lRy) must be near centre. */
     sticks[0] = js.lX; sticks[1] = js.lY; sticks[2] = js.lRx; sticks[3] = js.lRy;
@@ -2656,7 +2667,7 @@ uint32_t td5_plat_input_frontend_nav(void)
         cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
         if (cx < -T) db |= 1; if (cx > T) db |= 2;
         if (cy < -T) db |= 4; if (cy > T) db |= 8;   /* stick up = lY low = UP */
-        if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+        if (!pov_centered(js.rgdwPOV[0])) {
             DWORD deg = js.rgdwPOV[0] / 100;
             if (deg > 270 || deg <  90) db |= 4;
             if (deg >  90 && deg < 270) db |= 8;
@@ -2689,7 +2700,7 @@ uint32_t td5_plat_input_joystick_nav(int device_slot)
     cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
     if (cx < -T) db |= 1; if (cx > T) db |= 2;
     if (cy < -T) db |= 4; if (cy > T) db |= 8;       /* stick up = lY low = UP */
-    if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+    if (!pov_centered(js.rgdwPOV[0])) {
         DWORD deg = js.rgdwPOV[0] / 100;
         if (deg > 270 || deg <  90) db |= 4;
         if (deg >  90 && deg < 270) db |= 8;
@@ -2726,7 +2737,7 @@ uint32_t td5_plat_input_device_nav(int enum_index)
     cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
     if (cx < -T) db |= 1; if (cx > T) db |= 2;
     if (cy < -T) db |= 4; if (cy > T) db |= 8;       /* stick up = lY low = UP */
-    if (js.rgdwPOV[0] != 0xFFFFFFFFu) {
+    if (!pov_centered(js.rgdwPOV[0])) {
         DWORD deg = js.rgdwPOV[0] / 100;
         if (deg > 270 || deg <  90) db |= 4;
         if (deg >  90 && deg < 270) db |= 8;
