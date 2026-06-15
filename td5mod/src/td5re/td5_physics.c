@@ -504,6 +504,217 @@ static inline int32_t td5_physics_mp_catchup_mult(int slot)
 }
 
 /* ========================================================================
+ * Manual-gearbox performance boost — PORT-ONLY. [MANUAL BOOST 2026-06-15, #2]
+ *
+ * A car driven in MANUAL gearbox mode gets +N% ACCELERATION and +N% TOP SPEED
+ * over the same car in AUTOMATIC mode, for ALL cars (player, AI, traffic).
+ * Per-slot gearbox mode is the byte at actor +0x378 — the SAME field the
+ * drive/airborne gearbox dispatch already reads (==0 → manual, !=0 →
+ * automatic; see the field_0x378 checks in td5_physics_update_player). The
+ * acceleration half scales drive torque at the single drive-torque chokepoint
+ * (td5_physics_compute_drive_torque, after the MP/Hard catch-up blocks); the
+ * top-speed half raises the speed_limit at each drive-side gate by the same
+ * Q8 factor. Automatic cars read a 1.0 factor → byte-unchanged.
+ *
+ * The factor is Q8 (0x100 = 1.0). For the default 20% it is 0x100 + (0x100 *
+ * 20 / 100) = 0x100 + 0x33 = 0x133. Applied with the same biased-toward-zero
+ * signed >>8 idiom as the catch-up multipliers so it composes cleanly.
+ *
+ * DETERMINISM: gated on the actor +0x378 gearbox byte (replicated/local input
+ * state) and a launch-config Q8 factor — no rand()/wall-clock — so torque and
+ * the speed gate stay bit-identical across lockstep clients.
+ *
+ * KNOBS: TD5RE_MANUAL_BOOST (env, cached once) DEFAULT 1 (ON); "0"/"n"/"f"
+ * disables → factor 1.0 → byte-unchanged. TD5RE_MANUAL_BOOST_PCT (env, cached
+ * once) DEFAULT 20, clamped 0..100.
+ * ======================================================================== */
+
+/* Resolved manual-boost factor, Q8 (0x100 = 1.0 = inert). -1 = unresolved. */
+static int32_t s_manual_boost_q8 = -1;
+
+/* Resolve TD5RE_MANUAL_BOOST / _PCT once into a cached Q8 factor; logged once.
+ * getenv is launch config (same on every client), not sim input, so caching it
+ * does not break lockstep determinism. */
+static int32_t td5_physics_manual_boost_q8(void)
+{
+    if (s_manual_boost_q8 < 0) {
+        const char *e = getenv("TD5RE_MANUAL_BOOST");
+        int on = 1;  /* default ON */
+        int pct = 20;
+        if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'))
+            on = 0;
+        e = getenv("TD5RE_MANUAL_BOOST_PCT");
+        if (e && e[0]) {
+            pct = atoi(e);
+            if (pct < 0)   pct = 0;
+            if (pct > 100) pct = 100;
+        }
+        s_manual_boost_q8 = on ? (MP_CATCHUP_Q8_ONE + (MP_CATCHUP_Q8_ONE * pct) / 100)
+                               : MP_CATCHUP_Q8_ONE;
+        TD5_LOG_I(LOG_TAG,
+                  "manual_boost: TD5RE_MANUAL_BOOST=%d pct=%d -> factor=%d/256 "
+                  "(+accel +top-speed for manual gearbox, all cars)",
+                  on, pct, s_manual_boost_q8);
+    }
+    return s_manual_boost_q8;
+}
+
+/* Per-actor drive-side boost factor, Q8 (0x100 = 1.0). Returns the manual-boost
+ * factor when the actor is in MANUAL gearbox mode (byte +0x378 == 0), else 1.0.
+ * Used to scale both drive torque (acceleration) and the speed_limit gate
+ * (top speed) so a manual car accelerates harder AND tops out higher. */
+static inline int32_t td5_physics_actor_manual_boost_q8(const TD5_Actor *actor)
+{
+    /* field_0x378 == 0 → manual, != 0 → automatic [see gearbox dispatch] */
+    if (actor && *((const uint8_t *)actor + 0x378) == 0)
+        return td5_physics_manual_boost_q8();
+    return MP_CATCHUP_Q8_ONE;
+}
+
+/* Raise a per-car speed limit by a Q8 factor (top-speed half of the manual
+ * boost). speed_limit is non-negative (top_speed << 8), so the simple Q8
+ * multiply + >>8 is exact and never needs the negative bias. Inert at 1.0. */
+static inline int32_t td5_physics_apply_speed_limit_boost(int32_t speed_limit, int32_t q8)
+{
+    if (q8 == MP_CATCHUP_Q8_ONE)
+        return speed_limit;
+    return (int32_t)(((int64_t)speed_limit * (int64_t)q8) >> 8);
+}
+
+/* ========================================================================
+ * Force-feedback signal getters — PORT-ONLY. [FF SIGNALS 2026-06-15, #1]
+ *
+ * Per-slot driving-state signals consumed by td5_input.c to drive force-feedback
+ * effects. All three are refreshed exactly once per fixed-30Hz sim tick by
+ * td5_physics_update_ff_signals() (wired into td5_physics_tick AFTER the per-actor
+ * integration loop, so they read settled post-integration state), then read any
+ * number of times per render frame by the input layer. Backing store is a set of
+ * file-static per-slot arrays sized TD5_MAX_RACER_SLOTS.
+ *
+ * DETERMINISM: every input is replicated/local sim state (body-frame lateral vs
+ * longitudinal speed, current_gear, engine RPM, redline tuning) and integer math —
+ * no rand()/wall-clock/render-rate — so the signals are identical on every lockstep
+ * client and on a replay. Getters return 0 for out-of-range slots.
+ *
+ * Fields used (verified offsets, re/include/td5_actor_struct.h):
+ *   drift level   : lateral_speed (+0x318) vs longitudinal_speed (+0x314)
+ *   gear-change   : current_gear (+0x36B), sim-tick edge-detected
+ *   at-redline    : engine_speed_accum (+0x310) vs redline tuning (+0x72)
+ * ======================================================================== */
+
+/* Below this body-frame longitudinal speed (8.8 fp, ~one unit) the car is too
+ * slow for a meaningful drift reading — report 0 so a stationary/creeping car
+ * never buzzes the wheel. */
+#define FF_DRIFT_MIN_LONG_SPEED   0x100
+/* Lateral/longitudinal slip ratio (Q8) below which we treat the car as tracking
+ * straight (no drift). ~0x40 = 0.25 → ~14 deg of slide before drift registers. */
+#define FF_DRIFT_RATIO_DEADZONE   0x40
+/* Redline proximity window, percent: at-redline when rpm >= redline*(100-N)/100. */
+#define FF_REDLINE_PCT            5
+
+static int      s_ff_drift_level[TD5_MAX_RACER_SLOTS];   /* 0 = not drifting, else ~1..255 */
+static uint32_t s_ff_gear_seq[TD5_MAX_RACER_SLOTS];      /* increments on each gear change */
+static int      s_ff_at_redline[TD5_MAX_RACER_SLOTS];    /* 1 = engine near redline */
+static uint8_t  s_ff_prev_gear[TD5_MAX_RACER_SLOTS];     /* last tick's current_gear (edge detect) */
+static int      s_ff_prev_seeded[TD5_MAX_RACER_SLOTS];   /* 1 once prev_gear holds a real sample */
+
+/* Forward decl: the carparam accessor get_phys() (and the PHYS_* tuning macros)
+ * are defined further down this file, but the FF redline check below needs it. */
+static inline int16_t *get_phys(TD5_Actor *a);
+
+/* Refresh all per-slot FF signals for THIS sim tick. Called once per tick from
+ * td5_physics_tick after integration; pure function of settled actor state. */
+void td5_physics_update_ff_signals(void)
+{
+    int total, racer_cap, slot;
+
+    if (!g_actor_table_base)
+        return;
+
+    total = td5_game_get_total_actor_count();
+    if (total <= 0)
+        return;
+
+    /* Racer slots only (humans + AI) — traffic carries no FF. */
+    racer_cap = (total < g_traffic_slot_base) ? total : g_traffic_slot_base;
+    if (racer_cap > TD5_MAX_RACER_SLOTS)
+        racer_cap = TD5_MAX_RACER_SLOTS;
+
+    for (slot = 0; slot < racer_cap; slot++) {
+        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        int16_t  *phys;
+        int32_t   v_long, v_lat, abs_long, abs_lat;
+        uint8_t   gear;
+
+        /* --- Drift level: lateral slip relative to longitudinal speed. --- */
+        v_long = a->longitudinal_speed;
+        v_lat  = a->lateral_speed;
+        abs_long = v_long < 0 ? -v_long : v_long;
+        abs_lat  = v_lat  < 0 ? -v_lat  : v_lat;
+        if (abs_long < FF_DRIFT_MIN_LONG_SPEED) {
+            s_ff_drift_level[slot] = 0;
+        } else {
+            /* ratio = |lat| / |long| in Q8 (0x100 = sliding as fast sideways as
+             * forward). Subtract the straight-tracking deadzone, then scale the
+             * remainder into ~1..255 (full scale ≈ a 45deg slide). */
+            int32_t ratio = (int32_t)(((int64_t)abs_lat << 8) / (int64_t)abs_long);
+            ratio -= FF_DRIFT_RATIO_DEADZONE;
+            if (ratio <= 0) {
+                s_ff_drift_level[slot] = 0;
+            } else {
+                int32_t lvl = ratio;            /* Q8 over the deadzone */
+                if (lvl > 255) lvl = 255;       /* clamp to ~1..255 */
+                if (lvl < 1)   lvl = 1;
+                s_ff_drift_level[slot] = lvl;
+            }
+        }
+
+        /* --- Gear-change sequence: edge-detect current_gear once per tick. --- */
+        gear = a->current_gear;
+        if (!s_ff_prev_seeded[slot]) {
+            s_ff_prev_gear[slot] = gear;        /* seed; no spurious first-tick edge */
+            s_ff_prev_seeded[slot] = 1;
+        } else if (gear != s_ff_prev_gear[slot]) {
+            s_ff_gear_seq[slot]++;
+            s_ff_prev_gear[slot] = gear;
+        }
+
+        /* --- At-redline: engine RPM within FF_REDLINE_PCT% of the redline. --- */
+        s_ff_at_redline[slot] = 0;
+        phys = get_phys(a);
+        if (phys) {
+            int32_t rpm     = a->engine_speed_accum;
+            int32_t redline = (int32_t)*(const int16_t *)((const uint8_t *)phys + 0x72); /* PHYS_REDLINE_RPM, defined later */
+            if (redline > 0 &&
+                rpm >= redline - (redline * FF_REDLINE_PCT) / 100) {
+                s_ff_at_redline[slot] = 1;
+            }
+        }
+    }
+}
+
+int td5_physics_get_drift_level(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return 0;
+    return s_ff_drift_level[slot];
+}
+
+uint32_t td5_physics_gear_change_seq(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return 0;
+    return s_ff_gear_seq[slot];
+}
+
+int td5_physics_at_redline(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return 0;
+    return s_ff_at_redline[slot];
+}
+
+/* ========================================================================
  * Hard-difficulty AI catch-up — PORT-ONLY. [HARD CATCHUP 2026-06-15, item #13]
  *
  * On HARD difficulty, AI OPPONENTS that are BEHIND the human player get a drive-
@@ -1568,6 +1779,12 @@ void td5_physics_tick(void)
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
         td5_physics_update_vehicle_actor(actor);
     }
+
+    /* [FF SIGNALS #1] Refresh per-slot force-feedback signals (drift level /
+     * gear-change sequence / at-redline) once per sim tick, right after the
+     * per-actor integration loop so they read this tick's settled state. Pure
+     * replicated-state integer math, consumed by td5_input.c per render frame. */
+    td5_physics_update_ff_signals();
 
     /* Run V2V resolution UNCONDITIONALLY each sub-tick — matches
      * RunRaceFrame @ 0x0042B580 which calls ResolveVehicleContacts every
@@ -2657,6 +2874,11 @@ void td5_physics_update_player(TD5_Actor *actor)
 
             int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
             int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
+            /* [MANUAL BOOST #2] Top-speed half: a manual-gearbox car (byte
+             * +0x378 == 0) tops out +N% higher. 1.0 (no change) for automatic
+             * or knob-off → byte-faithful limit. */
+            speed_limit = td5_physics_apply_speed_limit_boost(
+                              speed_limit, td5_physics_actor_manual_boost_q8(actor));
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
             if (abs_speed <= speed_limit) {
@@ -2814,6 +3036,9 @@ void td5_physics_update_player(TD5_Actor *actor)
             drive_torque = td5_physics_compute_drive_torque(actor);
             int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
             int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
+            /* [MANUAL BOOST #2] Top-speed half: +N% limit in manual gearbox. */
+            speed_limit = td5_physics_apply_speed_limit_boost(
+                              speed_limit, td5_physics_actor_manual_boost_q8(actor));
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
             if (abs_speed <= speed_limit) {
                 switch (dt_type) {
@@ -3873,7 +4098,12 @@ void td5_physics_update_ai(TD5_Actor *actor)
              * local_3c = local_40; then skips to LAB_00405285 which does *2. */
             front_drive = (drive_torque + ((drive_torque >> 31) & 3)) >> 2;
             rear_drive  = front_drive;
-            if (v_long > speed_limit) {
+            /* [MANUAL BOOST #2] Top-speed half (AI drive gate): a manual-gearbox
+             * AI car (byte +0x378 == 0) tops out +N% higher. 1.0 for automatic
+             * or knob-off → byte-faithful gate. Drive-side only (brake clamps
+             * below use lateral_speed/v_long, not speed_limit). */
+            if (v_long > td5_physics_apply_speed_limit_boost(
+                             speed_limit, td5_physics_actor_manual_boost_q8(actor))) {
                 front_drive = 0;
                 rear_drive  = 0;
             }
@@ -4725,16 +4955,17 @@ static int traffic_hit_tame_enabled(void)
     return s;
 }
 
-/* [task #14] TD5RE_TRAFFIC_HITBOX_SCALE (default 0.8) — multiplier applied to a
- * TRAFFIC car's OBB half-extents (half-width / front-Z / rear-Z) in the V2V
+/* [task #14 / #16] TD5RE_TRAFFIC_HITBOX_SCALE (default 0.70) — multiplier applied
+ * to a TRAFFIC car's OBB half-extents (half-width / front-Z / rear-Z) in the V2V
  * corner test so the collision box matches the visible model instead of being
  * noticeably larger (the player "crashes" onto traffic without visually
- * touching). Scales only when at least one of the pair is traffic, so racer-on-
- * racer contacts stay byte-faithful. "1"/"1.0" disables (no shrink). */
+ * touching). Lowered from 0.8 -> 0.70 (#16: traffic hitbox still felt too big).
+ * Scales only when at least one of the pair is traffic, so racer-on-racer
+ * contacts stay byte-faithful. "1"/"1.0" disables (no shrink). */
 static float traffic_hitbox_scale(void)
 {
     static int   s_init = 0;
-    static float s_scale = 0.8f;
+    static float s_scale = 0.70f;
     if (!s_init) {
         const char *e = getenv("TD5RE_TRAFFIC_HITBOX_SCALE");
         if (e && e[0]) {
@@ -11105,6 +11336,20 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
         int32_t mult = td5_physics_hard_catchup_mult(actor->slot_index);
         if (mult != MP_CATCHUP_Q8_ONE) {
             int64_t scaled = (int64_t)torque * (int64_t)mult;
+            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
+
+    /* [MANUAL BOOST #2] Acceleration half: a car in MANUAL gearbox mode (byte
+     * +0x378 == 0) gets +N% drive torque (default +20%). Applies to ALL cars
+     * (player / AI / traffic) since it keys only on the per-actor gearbox byte.
+     * The top-speed half lives at the speed_limit gates in the callers. 1.0 (no
+     * boost) for automatic cars or when the knob is off, so they are unchanged.
+     * Same biased-toward-zero signed >>8 idiom as the catch-up blocks above. */
+    {
+        int32_t mboost = td5_physics_actor_manual_boost_q8(actor);
+        if (mboost != MP_CATCHUP_Q8_ONE) {
+            int64_t scaled = (int64_t)torque * (int64_t)mboost;
             torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
         }
     }

@@ -1139,6 +1139,61 @@ static int td5_camera_probe_ground_floor(uintptr_t actor, int cam_x, int cam_z,
     return 1;
 }
 
+/* ========================================================================
+ * [ITEM #18 camera] TD5RE_REPLAY_CAM_FIX (default 1) — in REPLAY mode some
+ * cinematic trackside cameras render BELOW the road surface (you see the
+ * underside of the track). The authored trackside profiles drive the eye Y
+ * directly: the static cam (UpdateStaticTracksideCamera / case-0 inline) reads
+ * a strip vertex + height_param, the spline cam (UpdateSplineTracksideCamera)
+ * evaluates authored control points, and the orbit cam (UpdateTracksideOrbit-
+ * Camera) adds a stored-pitch Y offset to the car Y. On dipping terrain (or a
+ * negative stored-pitch / low height_param) that authored eye can land under
+ * the ground, so the camera looks up through the track.
+ *
+ * Fix: after UpdateTracksideCamera on the replay paths, CLAMP the trackside
+ * EYE world Y up to the track surface height at the camera's XZ (plus a small
+ * clearance). We reuse the chase invisible-car floor probe
+ * (td5_camera_probe_ground_floor → td5_track_compute_contact_height_bestlane):
+ * it self-validates the walk and returns 0 on an untrustworthy result (we then
+ * leave the eye untouched). One-sided RAISE only — never lower the eye, never
+ * move the look-at target. Applied ONLY on the replay/cinematic trackside path
+ * (the trackside updaters' eye XZ); the vehicle-relative replay cams (behaviour
+ * 1/2/7/8) follow the car and are not affected. "0" reverts.
+ * ======================================================================== */
+static int td5_camera_replay_cam_fix(void)
+{
+    static int s_mode = -1;
+    if (s_mode < 0) {
+        const char *e = getenv("TD5RE_REPLAY_CAM_FIX");
+        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return s_mode;
+}
+
+/* Raise eye[1] to the track surface (+clearance) at eye XZ if the trackside
+ * replay camera dipped below it. Returns 1 when the eye was raised, 0 when it
+ * was left untouched (fix disabled, no trustworthy floor, or already above).
+ * One-sided: never lowers the eye. Does NOT touch the look-at target. */
+static int td5_camera_replay_eye_floor_clamp(uintptr_t actor, int view, int *eye)
+{
+    if (!td5_camera_replay_cam_fix()) return 0;
+    if (!actor || !eye) return 0;
+
+    int floor_y;
+    if (!td5_camera_probe_ground_floor(actor, eye[0], eye[2], &floor_y))
+        return 0;                       /* untrustworthy walk — leave eye as-is */
+    if (eye[1] >= floor_y) return 0;    /* already at/above surface — no change */
+
+    static uint32_t s_replay_floor_log_ctr;
+    if ((s_replay_floor_log_ctr++ % 120u) == 0u)
+        TD5_LOG_D(LOG_TAG,
+                  "replay trackside eye floor v%d: eye Y %d -> %d (behavior=%d)",
+                  view, eye[1], floor_y, g_camBehaviorType[view]);
+
+    eye[1] = floor_y;
+    return 1;
+}
+
 void UpdateChaseCamera(int actor, int do_track_heading, int view)
 {
     int fly_in_threshold = g_flyInThreshold;
@@ -1908,6 +1963,15 @@ static void cam_solve_view(int v)
         SelectTracksideCameraProfile((int)actor, v);
         UpdateTracksideCamera((int)actor, v);
         eye_lock = 0; tgt_lock = 1;     /* trackside eye is world-fixed; look-at tracks car */
+        /* [ITEM #18 camera] Keep the cinematic trackside eye above the road
+         * surface (one-sided raise). The captured eye lives in C->eye; the
+         * basis is rebuilt downstream in td5_camera_apply_view from this eye +
+         * the (untouched) captured look-at target, so raising C->eye[1] here is
+         * sufficient — no re-orient needed. Vehicle-relative behaviours (1/2/
+         * 7/8) leave build_mode==1 and follow the car, so this only affects the
+         * look-at trackside cams (static / spline / orbit). */
+        if (C->build_mode == 0)
+            td5_camera_replay_eye_floor_clamp((uintptr_t)actor, v, C->eye);
     } else if (g_raceCameraPresetMode[v] != 0 && !g_td5.paused) {
         UpdateVehicleRelativeCamera((int)actor, v);   /* bumper / in-car (euler basis) */
         eye_lock = 1; tgt_lock = 1;
@@ -3582,6 +3646,34 @@ void td5_camera_update_transition_state(int p, int vi)
                   vi, g_actorSlotForView[vi]);
         SelectTracksideCameraProfile((int)actor, vi);
         UpdateTracksideCamera((int)actor, vi);
+
+        /* [ITEM #18 camera] Legacy per-frame path: the trackside eye is in
+         * g_camWorldPos[vi] and the basis was already built from it. Raise the
+         * eye above the road surface if a look-at trackside cam (static / spline
+         * / orbit, behaviours 0/3/4/5/6/9/10) dipped under it, then re-pin the
+         * position + re-orient from the raised eye toward the SAME look-at the
+         * trackside cases use (car pos + velocity*subTick). The look-at target
+         * is reconstructed identically — not moved. Vehicle-relative cams
+         * (1/2/7/8) follow the car, so they are skipped. */
+        {
+            int bt = g_camBehaviorType[vi];
+            int is_lookat = (bt == 0 || bt == 3 || bt == 4 || bt == 5 ||
+                             bt == 6 || bt == 9 || bt == 10);
+            if (is_lookat &&
+                td5_camera_replay_eye_floor_clamp((uintptr_t)actor, vi,
+                                                  g_camWorldPos[vi])) {
+                uintptr_t ap = (uintptr_t)actor;
+                int car_target[3];
+                car_target[0] = *(int *)(ap + 0x1FC) +
+                    (int)((float)*(int *)(ap + 0x1CC) * g_subTickFraction + 0.5f);
+                car_target[1] = *(int *)(ap + 0x200) +
+                    (int)((float)*(int *)(ap + 0x1D0) * g_subTickFraction + 0.5f);
+                car_target[2] = *(int *)(ap + 0x204) +
+                    (int)((float)*(int *)(ap + 0x1D4) * g_subTickFraction + 0.5f);
+                SetCameraWorldPosition(g_camWorldPos[vi]);
+                OrientCameraTowardTarget(car_target, g_tracksideYawOffset[vi]);
+            }
+        }
     } else if (g_replay_mode) {
         /* Replay fallback (no trackside profiles): behave like the chase/bumper
          * path below so the played-back car stays on screen. */

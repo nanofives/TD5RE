@@ -271,6 +271,36 @@ static int s_tracked_veh_actor;        /* Original: DAT_004c380c */
 static int s_siren_active_flag;        /* Original: DAT_004c3880 */
 static int s_siren_refreshed;          /* Original: DAT_004c3844 */
 
+/* Police/siren positional-audio fix (#15, PORT ENHANCEMENT 2026-06-15).
+ *
+ * Two bugs in the tracked-vehicle (cop siren) audio path:
+ *   1. DISTANCE: the siren fade level lives in the 0..0x1000 domain, but every
+ *      other positional loop (engine line ~1248, traffic line ~1505) pre-scales
+ *      its level by >> 5 into 0..0x7F before sound_attenuate_volume(). The siren
+ *      path passed the raw 0x1000 level straight in; since the attenuator
+ *      computes (atten * raw_vol) / 0x7F and clamps to 0x7F, a 0x1000 input
+ *      stays >= 0x7F until the cop is extremely far -> siren pinned at full
+ *      volume regardless of distance.
+ *   2. HARD CUT: the fade processing snapped the level to FULL or 0 in a single
+ *      tick, so the siren popped on at chase start and cut off abruptly at
+ *      chase end instead of fading.
+ *
+ * Both fixes are gated on TD5RE_POLICE_AUDIO_FIX (default ON; "0" reverts to the
+ * old raw-level + binary-snap behavior). */
+#define TD5_SOUND_SIREN_FADE_RAMP_STEP 0x100  /* per-tick ramp -> ~0.5s @ 30Hz */
+static int sound_police_audio_fix_enabled(void)
+{
+    static int s_enabled = -1;   /* -1 = env not yet read */
+    if (s_enabled < 0) {
+        const char *env = getenv("TD5RE_POLICE_AUDIO_FIX");
+        s_enabled = (env && env[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "police-audio fix %s (TD5RE_POLICE_AUDIO_FIX=%s)",
+                  s_enabled ? "ENABLED" : "disabled",
+                  env ? env : "default");
+    }
+    return s_enabled;
+}
+
 /* Cop-chase siren on/off toggle (PORT ENHANCEMENT, user-requested 2026-05-30).
  *
  * In the original, the siren is gated on the horn control bit (0x200000):
@@ -976,11 +1006,27 @@ void td5_sound_update_audio_mix(void)
      * ---------------------------------------------------------------- */
     if (s_tracked_veh_active == 0 || s_tracked_veh_fade_level != 0 ||
         s_tracked_veh_fade_target != 0) {
-        /* Snap fade level to target (instant binary fade) */
-        if (s_tracked_veh_fade_level < s_tracked_veh_fade_target) {
-            s_tracked_veh_fade_level = TD5_SOUND_SIREN_FADE_FULL;
-        } else if (s_tracked_veh_fade_target < s_tracked_veh_fade_level) {
-            s_tracked_veh_fade_level = 0;
+        if (sound_police_audio_fix_enabled()) {
+            /* #15 fix: ramp the fade level toward the target (~0.5s @ 30Hz)
+             * instead of snapping, so the siren fades in on activation and
+             * fades out smoothly when the chase ends. The slots are stopped
+             * below only once the level reaches 0 (target stays 0). */
+            if (s_tracked_veh_fade_level < s_tracked_veh_fade_target) {
+                s_tracked_veh_fade_level += TD5_SOUND_SIREN_FADE_RAMP_STEP;
+                if (s_tracked_veh_fade_level > s_tracked_veh_fade_target)
+                    s_tracked_veh_fade_level = s_tracked_veh_fade_target;
+            } else if (s_tracked_veh_fade_target < s_tracked_veh_fade_level) {
+                s_tracked_veh_fade_level -= TD5_SOUND_SIREN_FADE_RAMP_STEP;
+                if (s_tracked_veh_fade_level < s_tracked_veh_fade_target)
+                    s_tracked_veh_fade_level = s_tracked_veh_fade_target;
+            }
+        } else {
+            /* Snap fade level to target (instant binary fade) */
+            if (s_tracked_veh_fade_level < s_tracked_veh_fade_target) {
+                s_tracked_veh_fade_level = TD5_SOUND_SIREN_FADE_FULL;
+            } else if (s_tracked_veh_fade_target < s_tracked_veh_fade_level) {
+                s_tracked_veh_fade_level = 0;
+            }
         }
     } else {
         /* Active but both fade level and target are zero: stop siren.
@@ -1435,7 +1481,18 @@ void td5_sound_update_audio_mix(void)
                            * TD5_SOUND_DISTANCE_SCALE * TD5_SOUND_REPLAY_DIST_SCALE;
                 float dist = sqrtf(dx * dx + dz * dz);
 
-                int siren_vol = sound_attenuate_volume(s_tracked_veh_fade_level, dist);
+                /* #15 fix: the fade level is in the 0..0x1000 domain; pre-scale
+                 * it by >> 5 into the 0..0x7F domain (clamped) before the
+                 * distance attenuator, exactly like the engine (>> 5, ~1248)
+                 * and traffic (>> 5, ~1505) loops do. Without this the raw
+                 * 0x1000 level overwhelms sound_attenuate_volume() and the siren
+                 * stays pinned at full volume regardless of distance. */
+                int siren_level = s_tracked_veh_fade_level;
+                if (sound_police_audio_fix_enabled()) {
+                    siren_level >>= 5;
+                    if (siren_level > 0x7F) siren_level = 0x7F;
+                }
+                int siren_vol = sound_attenuate_volume(siren_level, dist);
                 int siren_pitch = TD5_SOUND_SIREN_FREQ;
 
                 if (siren_vol > 0) {

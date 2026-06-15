@@ -166,6 +166,42 @@ static int frontend_net_local_slot(void) {
     return td5_net_local_slot();
 }
 
+/**
+ * [BUG #4 2026-06] Vertical offset (UI/layout space) to centre a per-player
+ * accent SWATCH on the player-name FONT cap-band in the MP/net lobby roster.
+ *
+ * The roster render (frontend_render_mp_lobby_overlay in td5_frontend.c — NOT
+ * editable from here) draws the swatch quad and the name text at the SAME row
+ * Y. But fe_draw_text anchors text at the glyph CELL TOP, and the MontBlanc
+ * main face caps occupy cell rows ~8..23 of the 24px cell, so the cap-band
+ * CENTRE sits at  y + 15.5*text_scale  (same 15.5f anchor td5_hud.c uses for
+ * its name plates). A swatch drawn at the bare row Y therefore reads too high.
+ * Returning  15.5*text_scale - swatch_h*0.5  shifts a swatch of height
+ * swatch_h so its centre lands on that cap-band centre.
+ *
+ * WIRING (the parent edits td5_frontend.c): in frontend_render_mp_lobby_overlay
+ * add this offset to the swatch quad's row_y BEFORE it is scaled by sy, i.e.
+ *     row_y += frontend_lobby_swatch_y_offset(0.8f, 14.0f);
+ * (0.8f = the lobby name text_scale, 14.0f = the swatch height in layout space;
+ * the quad is then drawn at row_y * sy as today).
+ *
+ * Gated by TD5RE_LOBBY_ALIGN (default ON); "0" returns 0.0f for legacy
+ * (swatch flush with the cell top). Env read is cached + logged once.
+ */
+float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h) {
+    static int s_lobby_align = -1;   /* -1=unread, 0=legacy, 1=aligned */
+    if (s_lobby_align < 0) {
+        const char *e = getenv("TD5RE_LOBBY_ALIGN");
+        s_lobby_align = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        TD5_LOG_I(LOG_TAG, "lobby swatch align: %s",
+                  s_lobby_align ? "on (centre swatch on text cap-band)"
+                                : "off (legacy cell-top)");
+    }
+    if (!s_lobby_align)
+        return 0.0f;
+    return 15.5f * text_scale - swatch_h * 0.5f;
+}
+
 /* ========================================================================
  * [30] Multiplayer Lobby  (PORT ENHANCEMENT 2026-06)
  *

@@ -163,6 +163,19 @@ void td5_physics_resolve_vehicle_contacts(void);
  * range or non-racer slot returns 0. Safe to call every frame. */
 uint32_t td5_physics_get_crash_fx(int slot, int32_t *out_mag, int *out_age);
 
+/* --- Force-feedback signal getters (FF SIGNALS, #1) ---
+ * Per-slot driving-state signals for the force-feedback layer (td5_input.c).
+ * All three are refreshed once per fixed-30Hz sim tick by
+ * td5_physics_update_ff_signals() (called from td5_physics_tick after the
+ * per-actor integration loop) and read per render frame. Deterministic:
+ * integer math over replicated/local sim state (body-frame lateral vs
+ * longitudinal speed, current_gear at actor +0x36B, engine RPM at actor +0x310
+ * vs redline tuning +0x72). All return 0 for out-of-range slots. */
+void     td5_physics_update_ff_signals(void);
+int      td5_physics_get_drift_level(int slot);   /* 0 = not drifting, else ~1..255 from lateral vs longitudinal slip */
+uint32_t td5_physics_gear_change_seq(int slot);   /* increments on each gear change (current_gear at actor +0x36B), sim-tick edge-detected */
+int      td5_physics_at_redline(int slot);        /* 1 if engine RPM (actor +0x310) within ~5% of redline (tuning +0x72) */
+
 /* --- Wall collision response (FUN_00406980) ---
  * probe_x_fp8 / probe_z_fp8: probe world position in 24.8 fixed point.
  * Required to compute the lever-arm tangential offset that drives the

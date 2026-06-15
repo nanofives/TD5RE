@@ -7235,8 +7235,13 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
         if (!accent)
             accent = k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu;
 
-        /* Accent swatch (white tex tinted to the identity colour, full alpha). */
-        fe_draw_quad((float)FE_LOBBY_X * sx, row_y * sy,
+        /* Accent swatch (white tex tinted to the identity colour, full alpha).
+         * [#4] Center the swatch on the name's cap-band — fe_draw_text anchors at
+         * the glyph cell-top, so a same-y swatch reads too high. Offset helper is
+         * defined in td5_fe_net.c (TD5RE_LOBBY_ALIGN). Name text below keeps row_y. */
+        extern float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h);
+        fe_draw_quad((float)FE_LOBBY_X * sx,
+                     (row_y + frontend_lobby_swatch_y_offset(0.8f, 14.0f)) * sy,
                      16.0f * sx, 14.0f * sy,
                      0xFF000000u | accent, -1, 0.0f, 0.0f, 1.0f, 1.0f);
 
