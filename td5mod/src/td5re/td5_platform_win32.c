@@ -2383,6 +2383,17 @@ static int pov_centered(DWORD pov)
     return (pov == 0xFFFFFFFFu) || ((pov & 0xFFFFu) == 0xFFFFu) || ((pov / 100u) > 360u);
 }
 
+/* [stuck-axis nav fix 2026-06-15] Per-enumerated-device stick liveness. A stick
+ * axis is only trusted for menu nav once it has been observed AT REST (inside the
+ * deadband). Some pads power on reporting a missing or trigger-style axis as a
+ * constant min/max; that would assert a PERMANENT direction — the nav edge never
+ * re-arms ("can't navigate up") and the car-select hold-repeat's held-direction
+ * never releases ("holding never stops"). A real self-centering stick passes on
+ * the first at-rest frame, so normal stick nav is unaffected. Indexed by the
+ * enumerated device index used by scan_dev(). */
+static unsigned char s_js_x_live[16];
+static unsigned char s_js_y_live[16];
+
 /* 1 once the joystick has fully RETURNED TO REST: no buttons / dpad, sticks near
  * centre, every axis (incl. off-centre-resting triggers/sliders) back within a
  * band of its learned rest, and motionless for a few frames. Gates per-action
@@ -2665,8 +2676,13 @@ uint32_t td5_plat_input_frontend_nav(void)
 
         cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
         cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
-        if (cx < -T) db |= 1; if (cx > T) db |= 2;
-        if (cy < -T) db |= 4; if (cy > T) db |= 8;   /* stick up = lY low = UP */
+        /* Trust a stick axis only after it has been seen at rest (see s_js_*_live):
+         * an axis pegged from power-on never centers, so it can never jam a
+         * direction. The dpad (POV) and buttons below are always honoured. */
+        if (cx >= -T && cx <= T) s_js_x_live[i] = 1;
+        if (cy >= -T && cy <= T) s_js_y_live[i] = 1;
+        if (s_js_x_live[i]) { if (cx < -T) db |= 1; if (cx > T) db |= 2; }
+        if (s_js_y_live[i]) { if (cy < -T) db |= 4; if (cy > T) db |= 8; }  /* stick up = lY low = UP */
         if (!pov_centered(js.rgdwPOV[0])) {
             DWORD deg = js.rgdwPOV[0] / 100;
             if (deg > 270 || deg <  90) db |= 4;
