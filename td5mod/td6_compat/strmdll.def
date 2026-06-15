@@ -1,0 +1,5 @@
+LIBRARY strmdll.dll
+EXPORTS
+    CreateAsfFormatSet
+    SelectHelper
+    SelectMediaStream
