@@ -92,6 +92,11 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot);
  * London-only for now; A/B via TD5RE_TD6_LIGHTZONES. */
 void td5_render_update_light_zone(int player_span);
 
+/* [task#14] Draw the visible TD6 breakable-prop boxes for this view (texture-free
+ * grey boxes at each un-broken prop). Call once per view after the track + actors
+ * are drawn. London/TD6 only; A/B via TD5RE_TD6_PROP_MESH. */
+void render_td6_props(const TD5_Actor *ref);
+
 /* Per-slot paint TINT (0xRRGGBB; 0 = white/identity). Used to color a grayscale
  * TD6 car body. TD5 cars/AI keep tint 0 and render unchanged. */
 void td5_render_set_vehicle_tint(int slot, uint32_t rgb);

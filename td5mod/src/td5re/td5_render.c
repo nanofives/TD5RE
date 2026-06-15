@@ -6238,6 +6238,114 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
+/* [task#14] VISIBLE breakable props. The TD6 .tcl props are invisible collision
+ * volumes (the break — knock + crash SFX + debris — is in td5_physics). Draw a
+ * texture-free grey BOX at each un-broken prop so they actually SPAWN and vanish
+ * when smashed. Camera-projected exactly like the raycast shadow above; ground Y
+ * approximated from the viewed actor (London is flat). Per-face flat shading
+ * gives a 3D read; both tri windings are emitted so backface culling can't hide
+ * a face. Env TD5RE_TD6_PROP_MESH (=0 off). Called once per view from td5_game. */
+static int td6_prop_mesh_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_PROP_MESH"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
+void render_td6_props(const TD5_Actor *ref)
+{
+    if (!td6_prop_mesh_enabled() || g_active_td6_level <= 0 || !ref) return;
+    int n = td5_track_td6_prop_count();
+    if (n <= 0) return;
+
+    const float inv256 = 1.0f / 256.0f;
+    const float gx = (float)ref->world_pos.x * inv256;
+    const float gy = (float)ref->world_pos.y * inv256;
+    const float gz = (float)ref->world_pos.z * inv256;
+    const float MAXD = 50000.0f;
+
+    static const uint32_t FACE_COL[6] = {
+        0xFFCFCFCFu, 0xFF4C4C4Cu,   /* top, bottom */
+        0xFFAAAAAAu, 0xFF6E6E6Eu,   /* +x,  -x */
+        0xFF9A9A9Au, 0xFF787878u    /* +z,  -z */
+    };
+    static const int FACE[6][4] = {
+        {4,5,6,7}, {3,2,1,0},       /* top, bottom */
+        {1,2,6,5}, {3,0,4,7},       /* +x, -x */
+        {2,3,7,6}, {0,1,5,4}        /* +z, -z */
+    };
+
+    int drew_any = 0;
+    for (int i = 0; i < n; i++) {
+        int32_t px, pz; int rw, span;
+        float cx, cz, ax, az, hw, y0, y1;
+        float wx[8], wy[8], wz[8], sx[8], sy[8], sd[8], sr[8];
+        TD5_D3DVertex vb[24];
+        uint16_t ib[72];
+        int c, f, nv, ni, behind;
+
+        if (td5_track_td6_prop_is_broken(i)) continue;
+        if (!td5_track_td6_prop_get(i, &px, &pz, &rw, &span)) continue;
+        cx = (float)px * inv256; cz = (float)pz * inv256;
+        ax = cx - gx; az = cz - gz;
+        if (ax * ax + az * az > MAXD * MAXD) continue;
+
+        hw = (float)rw * 0.40f;
+        if (hw > 220.0f) hw = 220.0f;
+        if (hw < 70.0f)  hw = 70.0f;
+        y0 = gy - 80.0f; y1 = gy + 560.0f;
+
+        wx[0]=cx-hw; wx[1]=cx+hw; wx[2]=cx+hw; wx[3]=cx-hw;
+        wx[4]=cx-hw; wx[5]=cx+hw; wx[6]=cx+hw; wx[7]=cx-hw;
+        wz[0]=cz-hw; wz[1]=cz-hw; wz[2]=cz+hw; wz[3]=cz+hw;
+        wz[4]=cz-hw; wz[5]=cz-hw; wz[6]=cz+hw; wz[7]=cz+hw;
+        wy[0]=wy[1]=wy[2]=wy[3]=y0; wy[4]=wy[5]=wy[6]=wy[7]=y1;
+
+        behind = 0;
+        for (c = 0; c < 8; c++) {
+            float ddx = wx[c] - s_camera_pos[0];
+            float ddy = wy[c] - s_camera_pos[1];
+            float ddz = wz[c] - s_camera_pos[2];
+            float vx = ddx*s_camera_basis[0] + ddy*s_camera_basis[1] + ddz*s_camera_basis[2];
+            float vy = ddx*s_camera_basis[3] + ddy*s_camera_basis[4] + ddz*s_camera_basis[5];
+            float vz = ddx*s_camera_basis[6] + ddy*s_camera_basis[7] + ddz*s_camera_basis[8];
+            float invz;
+            if (vz <= s_near_clip) { behind = 1; break; }
+            invz = 1.0f / vz;
+            sx[c] = -vx * s_focal_length * invz + s_center_x;
+            sy[c] = -vy * s_focal_length * invz + s_center_y;
+            sd[c] = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+            sr[c] = invz;
+        }
+        if (behind) continue;
+
+        nv = 0; ni = 0;
+        for (f = 0; f < 6; f++) {
+            int base = nv, k;
+            for (k = 0; k < 4; k++) {
+                int ci = FACE[f][k];
+                TD5_D3DVertex *v = &vb[nv++];
+                v->screen_x = sx[ci]; v->screen_y = sy[ci];
+                v->depth_z  = sd[ci]; v->rhw = sr[ci];
+                v->diffuse  = FACE_COL[f]; v->specular = 0;
+                v->tex_u = 0.0f; v->tex_v = 0.0f;
+            }
+            ib[ni++]=(uint16_t)(base+0); ib[ni++]=(uint16_t)(base+1); ib[ni++]=(uint16_t)(base+2);
+            ib[ni++]=(uint16_t)(base+0); ib[ni++]=(uint16_t)(base+2); ib[ni++]=(uint16_t)(base+3);
+            ib[ni++]=(uint16_t)(base+0); ib[ni++]=(uint16_t)(base+2); ib[ni++]=(uint16_t)(base+1);
+            ib[ni++]=(uint16_t)(base+0); ib[ni++]=(uint16_t)(base+3); ib[ni++]=(uint16_t)(base+2);
+        }
+
+        if (!drew_any) {
+            flush_immediate_internal();
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            td5_plat_render_bind_texture(SHADOW_WHITE_TEX_PAGE);
+            drew_any = 1;
+        }
+        td5_plat_render_draw_tris(vb, nv, ib, ni);
+    }
+}
+
 /* Dispatcher (keeps the name the per-view shadow pre-pass calls): the new
  * conforming raycast mesh by default, the legacy textured quad when the A/B
  * env knob TD5RE_SHADOW_RAYCAST=0 is set. */
