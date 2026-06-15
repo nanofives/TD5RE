@@ -405,11 +405,26 @@ static int32_t ai_angle_from_vector(int32_t dx, int32_t dz) {
  * table with raw returns heading bytes for the wrong ring position and
  * makes the recovery-misalignment check at 0x00434FE0 fire at every
  * branch entry — the visible symptom is the AI braking into the turn. */
+/* [CRASH FIX 2026-06-15 Scotland/level016] Bounds-checked route-table byte read
+ * (lane at k=0, heading at k=1). Returns 0 (safe default) when the span lies past
+ * the route table: some TD6-converted tracks ship LEFT/RIGHT.TRK SHORTER than the
+ * strip's span count, so an in-ring span (Scotland span 3092 vs a shorter table)
+ * exceeded the table and OOB-crashed (0xC0000005 — #20 Newcastle class). `table`
+ * must be g_route_tables[0] or [1]. Pure safety bound: identical result for any
+ * in-range span, only the crashing out-of-range read is replaced with 0. */
+static int ai_route_byte(const uint8_t *table, int span, int k) {
+    if (!table || span < 0) return 0;
+    size_t sz  = (table == g_route_tables[1]) ? g_route_table_sizes[1]
+                                              : g_route_table_sizes[0];
+    size_t off = (size_t)(unsigned)span * 3u + (unsigned)k;
+    return (off < sz) ? (int)table[off] : 0;
+}
+
 static int32_t ai_route_heading_for_actor(const int32_t *rs, const char *actor) {
     const uint8_t *rb = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
     int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
     if (rb && sp >= 0) {
-        return (((int)rb[(size_t)(unsigned)sp * 3u + 1u] * 0x102C) >> 8) & 0xFFF;
+        return (((int)ai_route_byte(rb, sp, 1) * 0x102C) >> 8) & 0xFFF;
     }
     return 0;
 }
@@ -652,7 +667,7 @@ void td5_ai_correct_spawn_heading(int slot) {
     if (span < 0) return;
 
     route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-    rb = route_bytes ? (int32_t)route_bytes[(size_t)(unsigned)span * 3u + 1u] : 0;
+    rb = ai_route_byte(route_bytes, span, 1);
 
     if (route_bytes && rb >= 4) {
         /* Primary path: derive the spawn heading from the route byte.
@@ -934,7 +949,7 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
     {
         const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
         if (!table) return 0;
-        route_byte = (int)table[(size_t)(unsigned)route_byte_idx * 3u];
+        route_byte = ai_route_byte(table, route_byte_idx, 0);
         if (!td5_track_sample_target_point(sample_span, route_byte,
                                            &target_x, &target_z,
                                            cardef8 + track_offset_bias)) {
@@ -961,7 +976,7 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
      * change in between. */
     {
         const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-        route_byte = (int)table[(size_t)(unsigned)route_byte_idx * 3u];
+        route_byte = ai_route_byte(table, route_byte_idx, 0);
         if (!td5_track_sample_target_point(sample_span, route_byte,
                                            &target_x, &target_z,
                                            cardef0 + track_offset_bias)) {
@@ -1271,7 +1286,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
             const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
             int route_byte_now = 0;
             if (table && span_norm_i >= 0) {
-                route_byte_now = (int)table[(size_t)(unsigned)span_norm_i * 3u];
+                route_byte_now = ai_route_byte(table, span_norm_i, 0);
             }
             if (classify == 1 && cardef) {
                 int32_t off = td5_track_compute_signed_offset(
