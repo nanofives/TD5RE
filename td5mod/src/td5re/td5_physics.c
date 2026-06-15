@@ -122,6 +122,14 @@ static int   traffic_hit_tame_enabled(void);
 static float traffic_hitbox_scale(void);
 static void  traffic_clamp_above_ground(TD5_Actor *t);
 
+/* [item #4] Racer (slot 0..g_traffic_slot_base-1) OBB hitbox-fit scale, defined
+ * lower in the file but referenced from obb_corner_test / apply_collision_response.
+ * Brings the player/AI collision box in line with the visible chassis (the cardef
+ * OBB is authored larger than the mesh) so V2V contacts no longer fire across a
+ * visible gap. Returns 1.0 (no shrink) when TD5RE_HITBOX_FIT=0. */
+static float racer_hitbox_scale(void);
+static float actor_hitbox_scale(const TD5_Actor *act);
+
 /* ========================================================================
  * Per-racer race telemetry (#10 race-end summary)
  * ========================================================================
@@ -4411,25 +4419,26 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t front_z_b = (int32_t)CDEF_S(b, CDEF_FRONT_Z_EXTENT);
     int32_t rear_z_b  = (int32_t)CDEF_S(b, CDEF_REAR_Z_EXTENT);
 
-    /* [task #14] Shrink a TRAFFIC car's collision box to match its visible mesh.
-     * The cardef OBB extents are noticeably larger than the model, so the player
-     * "crashes" onto a traffic car before visibly touching it. Scale only the
-     * traffic actor(s) in the pair; racer-on-racer boxes stay byte-faithful.
+    /* [task #14 / item #4] Shrink each car's collision box to match its visible
+     * mesh. The cardef OBB extents are authored noticeably larger than the model,
+     * so a car "crashes" onto another before visibly touching it ("invisible
+     * crash"). Each actor is scaled by its own factor: TRAFFIC keeps the
+     * TD5RE_TRAFFIC_HITBOX_SCALE shrink (0.8); RACERS (player + AI opponents) now
+     * use TD5RE_HITBOX_SCALE (0.85, item #4) instead of the byte-faithful full box.
      * Self-consistent: every corner / penetration value below derives from these
-     * scaled extents. Default 0.8; "1" disables. */
+     * scaled extents. Each scale returns 1.0 when its knob is off. */
     {
-        float hbs = traffic_hitbox_scale();
-        if (hbs < 1.0f) {
-            if (a->slot_index >= g_traffic_slot_base) {
-                half_w_a  = (int32_t)((float)half_w_a  * hbs);
-                front_z_a = (int32_t)((float)front_z_a * hbs);
-                rear_z_a  = (int32_t)((float)rear_z_a  * hbs);
-            }
-            if (b->slot_index >= g_traffic_slot_base) {
-                half_w_b  = (int32_t)((float)half_w_b  * hbs);
-                front_z_b = (int32_t)((float)front_z_b * hbs);
-                rear_z_b  = (int32_t)((float)rear_z_b  * hbs);
-            }
+        float hbs_a = actor_hitbox_scale(a);
+        float hbs_b = actor_hitbox_scale(b);
+        if (hbs_a < 1.0f) {
+            half_w_a  = (int32_t)((float)half_w_a  * hbs_a);
+            front_z_a = (int32_t)((float)front_z_a * hbs_a);
+            rear_z_a  = (int32_t)((float)rear_z_a  * hbs_a);
+        }
+        if (hbs_b < 1.0f) {
+            half_w_b  = (int32_t)((float)half_w_b  * hbs_b);
+            front_z_b = (int32_t)((float)front_z_b * hbs_b);
+            rear_z_b  = (int32_t)((float)rear_z_b  * hbs_b);
         }
     }
 
@@ -4739,6 +4748,57 @@ static float traffic_hitbox_scale(void)
     return s_scale;
 }
 
+/* [item #4] TD5RE_HITBOX_FIT (default ON) + TD5RE_HITBOX_SCALE (default 0.85) —
+ * multiplier applied to a RACER's OBB half-extents (half-width / front-Z / rear-Z)
+ * in the V2V corner test + impulse branch-split, the analog of
+ * TD5RE_TRAFFIC_HITBOX_SCALE but for the player and AI opponents (slots
+ * 0..g_traffic_slot_base-1). The cardef OBB is authored noticeably larger than the
+ * visible chassis mesh (see the "playability slop" in v2v_depenetrate_pair and the
+ * traffic-shrink note in obb_corner_test), so without this the player takes a
+ * collision response — impulse / speed loss / the acute-crash shake — while there is
+ * still a visible gap to the other car ("invisible crash"). Conservative default
+ * (0.85): cars still collide on genuine contact, just not across the gap.
+ *
+ * TD5RE_HITBOX_FIT=0 returns 1.0 (no shrink) -> byte-faithful racer boxes.
+ * TD5RE_HITBOX_SCALE overrides the magnitude (clamped to [0.5, 1.0] — never inflate,
+ * sane floor so cars cannot pass through each other). This affects vehicle-vs-vehicle
+ * only; the player-vs-wall path is probe-based (wheel corners cross the rail, no
+ * half-width added) so it is not inflated and is intentionally left faithful. */
+static float racer_hitbox_scale(void)
+{
+    static int   s_init = 0;
+    static float s_scale = 0.85f;
+    if (!s_init) {
+        const char *fit = getenv("TD5RE_HITBOX_FIT");
+        if (fit && fit[0] == '0') {
+            s_scale = 1.0f;   /* knob OFF -> faithful (no shrink) */
+        } else {
+            const char *e = getenv("TD5RE_HITBOX_SCALE");
+            if (e && e[0]) {
+                s_scale = (float)atof(e);
+                if (s_scale < 0.5f) s_scale = 0.5f;   /* sane floor — still collides */
+                if (s_scale > 1.0f) s_scale = 1.0f;   /* never inflate */
+            }
+        }
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "racer_hitbox_scale: TD5RE_HITBOX_FIT/SCALE -> %.3f", s_scale);
+    }
+    return s_scale;
+}
+
+/* [item #4] Effective OBB half-extent scale for one actor in a V2V pair: traffic
+ * actors keep their existing TD5RE_TRAFFIC_HITBOX_SCALE shrink, racers (player + AI)
+ * use the new racer_hitbox_scale. A single helper so obb_corner_test and
+ * apply_collision_response derive identical scaled extents (the impulse branch-split
+ * re-reads the cardef, so it must match the corner test or the side/front decision
+ * would use a different box than the overlap that produced the contact). */
+static float actor_hitbox_scale(const TD5_Actor *act)
+{
+    if (act && act->slot_index >= g_traffic_slot_base)
+        return traffic_hitbox_scale();
+    return racer_hitbox_scale();
+}
+
 /* Clamp a (presumed traffic) actor's world_pos.y so it never sits below the
  * track surface at its current span — the "traffic clips through the ground"
  * recovery for task #9. Uses the same barycentric ground query the traffic pose
@@ -4940,6 +5000,21 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t half_w_A   = (int32_t)CDEF_S(A, CDEF_HALF_WIDTH);
     int32_t front_z_A  = (int32_t)CDEF_S(A, CDEF_FRONT_Z_EXTENT);
     int32_t rear_z_A   = (int32_t)CDEF_S(A, CDEF_REAR_Z_EXTENT);
+
+    /* [item #4] Use the SAME scaled box obb_corner_test used to generate the
+     * corner data below. The side-vs-front/rear split compares |side_extent| =
+     * half_w_A - |cx_A| against the front/rear depth; cx_A/cz_A were already
+     * computed from the shrunk extents, so half_w_A/front_z_A/rear_z_A must match
+     * or the branch decision (and its push direction) would reference a different
+     * box than the overlap. No-op when the knob is off (scale == 1.0). */
+    {
+        float hbs_A = actor_hitbox_scale(A);
+        if (hbs_A < 1.0f) {
+            half_w_A  = (int32_t)((float)half_w_A  * hbs_A);
+            front_z_A = (int32_t)((float)front_z_A * hbs_A);
+            rear_z_A  = (int32_t)((float)rear_z_A  * hbs_A);
+        }
+    }
 
     int32_t abs_cx_A   = cx_A < 0 ? -cx_A : cx_A;
     int32_t side_extent = half_w_A - abs_cx_A;

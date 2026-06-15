@@ -45,16 +45,23 @@ extern int AngleFromVector12(int x, int z);
  *
  *   offset  size  field
  *   0       8     magic       = "TD5RPLY\0"
- *   8       4     version     = 1
+ *   8       4     version     = 2
  *   12      4     track_index
  *   16      4     entry_count
  *   20      4     last_frame_index
- *   24      N*8   entries[entry_count]   (TD5_InputRecordEntry)
- */
-#define TD5_REPLAY_MAGIC      "TD5RPLY"      /* 8 bytes incl. NUL */
-#define TD5_REPLAY_MAGIC_LEN  8
-#define TD5_REPLAY_VERSION    1u
-#define TD5_REPLAY_HDR_BYTES  24
+ *   24      4     start_span_offset   [v2+; BUG 5b — absent in v1, treated as 0]
+ *   28      N*8   entries[entry_count]   (TD5_InputRecordEntry)
+ *
+ * [BUG 5b 2026-06-15] Version bumped 1 -> 2 to carry start_span_offset so a
+ * persisted replay recorded with a non-zero --StartSpanOffset replays faithfully.
+ * v1 files (24-byte header, no offset) still load: the loader reads the smaller
+ * header and defaults the offset to 0. */
+#define TD5_REPLAY_MAGIC        "TD5RPLY"      /* 8 bytes incl. NUL */
+#define TD5_REPLAY_MAGIC_LEN    8
+#define TD5_REPLAY_VERSION      2u
+#define TD5_REPLAY_VERSION_V1   1u
+#define TD5_REPLAY_HDR_BYTES    28             /* v2 header size (writer) */
+#define TD5_REPLAY_HDR_BYTES_V1 24             /* v1 header size (legacy reader) */
 
 typedef struct TD5_ReplayFileHeader {
     char     magic[TD5_REPLAY_MAGIC_LEN];
@@ -62,6 +69,7 @@ typedef struct TD5_ReplayFileHeader {
     int32_t  track_index;
     int32_t  entry_count;
     int32_t  last_frame_index;
+    int32_t  start_span_offset;   /* [BUG 5b] v2+; 0 for legacy v1 files */
 } TD5_ReplayFileHeader;
 
 static uint32_t s_poll_log_counter = 0;
@@ -1661,11 +1669,26 @@ int td5_input_write_open(const char *path)
     s_rec.frame_cursor = 0;
     s_rec.last_word0 = 0;
     s_rec.last_word1 = 0;
+    /* [BUG 5b 2026-06-15] Capture the dev StartSpanOffset so a later View Replay
+     * re-applies the same per-slot grid shift this run is recorded under. Without
+     * this the playback re-reads whatever the live INI/CLI offset happens to be,
+     * spawning the cars at a different span than recorded -> the played-back input
+     * diverges from frame 0. Same mechanism as the captured RNG seed. */
+    s_rec.start_span_offset = (int32_t)g_td5.ini.start_span_offset;
 
     s_replay_recording_open = 1;
-    TD5_LOG_I(LOG_TAG, "Replay write open: path=%s track=%d",
-              s_replay_log_path, s_rec.track_index);
+    TD5_LOG_I(LOG_TAG, "Replay write open: path=%s track=%d start_span_offset=%d",
+              s_replay_log_path, s_rec.track_index, s_rec.start_span_offset);
     return 1;
+}
+
+/* [BUG 5b 2026-06-15] StartSpanOffset captured at record time. The game applies
+ * it on playback (see td5_game_init_race_session) so a replay recorded with a
+ * non-zero offset reproduces the recorded spawn positions. 0 = no offset (also
+ * the value for legacy in-memory buffers / v1 disk files). */
+int32_t td5_input_replay_start_span_offset(void)
+{
+    return s_rec.start_span_offset;
 }
 
 /* Flush the recorded buffer to disk in the documented file format.
@@ -1688,10 +1711,11 @@ static int td5_input_replay_flush_to_disk(const char *path)
         entries_to_write = (int32_t)TD5_INPUT_REC_MAX_ENTRIES;
 
     memcpy(hdr.magic, TD5_REPLAY_MAGIC, TD5_REPLAY_MAGIC_LEN);
-    hdr.version          = TD5_REPLAY_VERSION;
-    hdr.track_index      = s_rec.track_index;
-    hdr.entry_count      = entries_to_write;
-    hdr.last_frame_index = s_rec.last_frame_index;
+    hdr.version           = TD5_REPLAY_VERSION;
+    hdr.track_index       = s_rec.track_index;
+    hdr.entry_count       = entries_to_write;
+    hdr.last_frame_index  = s_rec.last_frame_index;
+    hdr.start_span_offset = s_rec.start_span_offset;  /* [BUG 5b] */
 
     f = fopen(path, "wb");
     if (!f) {
@@ -1719,8 +1743,9 @@ static int td5_input_replay_flush_to_disk(const char *path)
     }
 
     fclose(f);
-    TD5_LOG_I(LOG_TAG, "Replay persist: wrote %s (%d entries, %d frames, track=%d)",
-              path, entries_to_write, hdr.last_frame_index + 1, hdr.track_index);
+    TD5_LOG_I(LOG_TAG, "Replay persist: wrote %s (v%u, %d entries, %d frames, track=%d, start_span_offset=%d)",
+              path, hdr.version, entries_to_write, hdr.last_frame_index + 1,
+              hdr.track_index, hdr.start_span_offset);
     return 1;
 }
 
@@ -1813,9 +1838,14 @@ static int td5_input_replay_load_from_disk(const char *path)
         return 0;
     }
 
-    got = fread(&hdr, 1, TD5_REPLAY_HDR_BYTES, f);
-    if (got != TD5_REPLAY_HDR_BYTES) {
-        TD5_LOG_W(LOG_TAG, "Replay load: short header read %zu/%d", got, TD5_REPLAY_HDR_BYTES);
+    /* [BUG 5b] Read the v1-compatible 24-byte prefix first, then the v2
+     * start_span_offset tail only if the file declares v2+. This keeps legacy
+     * v1 replays loadable (offset defaults to 0). hdr is zeroed so the offset
+     * field is 0 unless explicitly read below. */
+    memset(&hdr, 0, sizeof(hdr));
+    got = fread(&hdr, 1, TD5_REPLAY_HDR_BYTES_V1, f);
+    if (got != TD5_REPLAY_HDR_BYTES_V1) {
+        TD5_LOG_W(LOG_TAG, "Replay load: short header read %zu/%d", got, TD5_REPLAY_HDR_BYTES_V1);
         fclose(f);
         return 0;
     }
@@ -1824,11 +1854,21 @@ static int td5_input_replay_load_from_disk(const char *path)
         fclose(f);
         return 0;
     }
-    if (hdr.version != TD5_REPLAY_VERSION) {
-        TD5_LOG_W(LOG_TAG, "Replay load: version=%u expected=%u",
-                  hdr.version, TD5_REPLAY_VERSION);
+    if (hdr.version != TD5_REPLAY_VERSION && hdr.version != TD5_REPLAY_VERSION_V1) {
+        TD5_LOG_W(LOG_TAG, "Replay load: version=%u expected=%u or %u",
+                  hdr.version, TD5_REPLAY_VERSION, TD5_REPLAY_VERSION_V1);
         fclose(f);
         return 0;
+    }
+    if (hdr.version >= TD5_REPLAY_VERSION) {
+        /* v2+: pull the start_span_offset that follows the v1 prefix. */
+        got = fread(&hdr.start_span_offset, 1, sizeof(hdr.start_span_offset), f);
+        if (got != sizeof(hdr.start_span_offset)) {
+            TD5_LOG_W(LOG_TAG, "Replay load: short v2 header read %zu/%zu",
+                      got, sizeof(hdr.start_span_offset));
+            fclose(f);
+            return 0;
+        }
     }
     if (hdr.entry_count < 0 || hdr.entry_count > (int32_t)TD5_INPUT_REC_MAX_ENTRIES) {
         TD5_LOG_W(LOG_TAG, "Replay load: insane entry_count=%d (cap=%u)",
@@ -1846,9 +1886,10 @@ static int td5_input_replay_load_from_disk(const char *path)
     /* Replace in-memory state. memset clears the entries array so any
      * unread tail beyond entry_count is well-defined. */
     memset(&s_rec, 0, sizeof(s_rec));
-    s_rec.track_index      = hdr.track_index;
-    s_rec.entry_count      = hdr.entry_count;
-    s_rec.last_frame_index = hdr.last_frame_index;
+    s_rec.track_index       = hdr.track_index;
+    s_rec.entry_count       = hdr.entry_count;
+    s_rec.last_frame_index  = hdr.last_frame_index;
+    s_rec.start_span_offset = hdr.start_span_offset;  /* [BUG 5b] 0 for v1 files */
 
     body_bytes = (size_t)hdr.entry_count * sizeof(TD5_InputRecordEntry);
     if (body_bytes > 0) {
@@ -1868,8 +1909,9 @@ static int td5_input_replay_load_from_disk(const char *path)
         TD5_LOG_W(LOG_TAG, "Replay load: track mismatch (file=%d current=%d) — "
                   "playback will desync", hdr.track_index, g_td5.track_index);
     }
-    TD5_LOG_I(LOG_TAG, "Replay load: read %s (%d entries, %d frames, track=%d)",
-              path, hdr.entry_count, hdr.last_frame_index + 1, hdr.track_index);
+    TD5_LOG_I(LOG_TAG, "Replay load: read %s (v%u, %d entries, %d frames, track=%d, start_span_offset=%d)",
+              path, hdr.version, hdr.entry_count, hdr.last_frame_index + 1,
+              hdr.track_index, hdr.start_span_offset);
     return 1;
 }
 

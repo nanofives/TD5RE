@@ -576,6 +576,18 @@ static void tick_wanted_target_tracker(void) {
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
 static int      s_prev_pause_act;      /* edge detector for the rebindable PAUSE action */
+/* [BUG 5a 2026-06-15] Per-FRAME ESC edge for the cinematic (View Replay / attract
+ * demo) abort. The faithful ESC handling lives INSIDE the fixed-step sim while-loop
+ * (s_prev_esc_state, esc_edge), which only runs on frames that drain a 30 Hz tick.
+ * At render rates above 30 Hz most frames drain zero ticks, so a brief ESC tap that
+ * lands entirely on no-tick frames was never edge-detected and the replay would not
+ * exit (the controller exit worked because it latches a one-shot across frames).
+ * s_prev_esc_frame mirrors the live ESC key once per frame, OUTSIDE the loop, and
+ * arms s_replay_esc_exit on the rising edge during a cinematic race so the abort is
+ * caught regardless of tick cadence. Gated by TD5RE_REPLAY_EXIT (shared with the
+ * controller exit): "0" reverts to the in-loop-ESC-only behaviour. */
+static int      s_prev_esc_frame;      /* per-frame edge detector for cinematic ESC exit */
+static int      s_replay_esc_exit;     /* one-shot: set on a per-frame ESC edge in a cinematic race */
 /* [BUGFIX #15 2026-06-15] Pause-menu nav edge-detection state. PROMOTED from
  * function-static block locals to file scope so the pause-menu OPEN block can
  * SEED them with the currently-held direction keys (UP is usually accelerate,
@@ -2462,10 +2474,54 @@ int td5_game_init_race_session(void) {
          * original never mutates g_trackStartSpanIndex after the table load).
          * Per-slot application happens in the spawn loop below, sign-extended
          * to 16 bits exactly like the Frida writeS16 path. */
-        if (g_td5.ini.start_span_offset != 0) {
+        /* [BUG 5b 2026-06-15] Replay StartSpanOffset restore. A replay records
+         * only player INPUT; the spawn positions come from the dev StartSpanOffset
+         * (g_td5.ini.start_span_offset), read fresh HERE at both record and
+         * playback. If the live INI/CLI offset at playback differs from the one
+         * the run was recorded under, the cars spawn at a different span and the
+         * recorded input — which assumes the recorded spawn — plays back from the
+         * wrong start, so the whole run diverges. The recorded value is captured
+         * into the replay buffer at WriteOpen (and persisted in the v2 file
+         * header); on playback use THAT value (not the live one) for the per-slot
+         * spawn below, so playback reproduces the recorded grid. We resolve it into
+         * a local (effective_start_span_offset) instead of mutating the global ini,
+         * so a later non-replay race in this session still spawns from its own
+         * configured offset. Gated by TD5RE_REPLAY_OFFSET_FIX (cached): "0" reverts
+         * to using the live offset (old, diverging behaviour). */
+        int effective_start_span_offset = g_td5.ini.start_span_offset;
+        if (s_replay_mode) {
+            static int s_replay_off_init = 0;
+            static int s_replay_off_enabled = 1;
+            if (!s_replay_off_init) {
+                const char *e = getenv("TD5RE_REPLAY_OFFSET_FIX");
+                s_replay_off_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+                s_replay_off_init = 1;
+                TD5_LOG_I(LOG_TAG, "Replay StartSpanOffset restore: %s",
+                          s_replay_off_enabled ? "enabled" : "disabled (live offset)");
+            }
+            if (s_replay_off_enabled) {
+                /* For the default in-memory View Replay the recorded buffer (and
+                 * its captured offset) survives from the recording's WriteOpen, so
+                 * it is already available. A disk-persisted replay does not load
+                 * until InitRace step 12 (below, after the spawn loop), so pull it
+                 * in now; the step-12 read_open reloads + resets the read cursor,
+                 * so this early load is idempotent. */
+                if (g_td5.ini.replay_persist_to_disk)
+                    td5_input_read_open("replay.td5");
+                int captured = (int)td5_input_replay_start_span_offset();
+                if (captured != effective_start_span_offset) {
+                    TD5_LOG_I(LOG_TAG,
+                              "InitRace: replay start_span_offset live=%d -> recorded=%d",
+                              effective_start_span_offset, captured);
+                }
+                effective_start_span_offset = captured;
+            }
+        }
+
+        if (effective_start_span_offset != 0) {
             TD5_LOG_I(LOG_TAG,
                       "start_span_offset=%d will be applied per-slot (16-bit sign-extended)",
-                      g_td5.ini.start_span_offset);
+                      effective_start_span_offset);
         }
 
         /* Publish start_span as g_trackStartSpanIndex — consumed by the
@@ -2544,8 +2600,11 @@ int td5_game_init_race_session(void) {
                  * that IS the 16-bit wraparound the original/hook produce.
                  * NO remap: original FUN_00434350 stores CX directly at
                  * 0x00434377 with no bounds check; actor fields get the raw
-                 * int16 value even if negative. */
-                int raw = start_span + span_offsets[effective_slot] + g_td5.ini.start_span_offset;
+                 * int16 value even if negative.
+                 * [BUG 5b] effective_start_span_offset = the live offset normally,
+                 * or the value captured when this replay was recorded (so playback
+                 * spawns on the recorded grid). */
+                int raw = start_span + span_offsets[effective_slot] + effective_start_span_offset;
                 span_index = (int)(int16_t)(raw & 0xFFFF);
             } else {
                 span_index = 1;
@@ -3153,6 +3212,8 @@ int td5_game_init_race_session(void) {
 #endif
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
     s_prev_pause_act = 1;          /* suppress false PAUSE-action edge on first frame */
+    s_prev_esc_frame = 1;          /* [BUG 5a] suppress false per-frame cinematic-ESC edge on first frame */
+    s_replay_esc_exit = 0;         /* [BUG 5a] no pending cinematic-ESC exit at race start */
     g_td5.sim_tick_budget = 0.0f;
     g_td5.sim_time_accumulator = 0;
     g_td5.simulation_tick_counter = 0;
@@ -3981,6 +4042,33 @@ int td5_game_run_race_frame(void) {
     int ticks_this_frame = 0;
     s_pause_input_done = 0;  /* allow pause input once this frame */
 
+    /* [BUG 5a 2026-06-15] Per-frame ESC edge for the cinematic abort.
+     * Detected here, OUTSIDE the fixed-step loop, so a brief ESC tap exits a
+     * View Replay / attract demo even on frames that drain zero sim ticks (the
+     * in-loop esc_edge below misses those entirely at >30 Hz render rates).
+     * Arms the one-shot s_replay_esc_exit, which the cinematic-abort block ORs
+     * into its trigger; the latch persists across no-tick frames until consumed.
+     * Gated by TD5RE_REPLAY_EXIT (shared with the controller exit): "0" reverts
+     * to in-loop-ESC-only. */
+    {
+        static int s_replay_esc_init = 0;
+        static int s_replay_esc_enabled = 1;
+        if (!s_replay_esc_init) {
+            const char *e = getenv("TD5RE_REPLAY_EXIT");
+            s_replay_esc_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_replay_esc_init = 1;
+            TD5_LOG_I(LOG_TAG, "Replay per-frame ESC-exit: %s",
+                      s_replay_esc_enabled ? "enabled" : "disabled (in-loop ESC only)");
+        }
+        int esc_frame_now = td5_plat_input_key_pressed(0x01);
+        if (s_replay_esc_enabled && esc_frame_now && !s_prev_esc_frame &&
+            td5_game_is_cinematic_race()) {
+            s_replay_esc_exit = 1;
+            TD5_LOG_I(LOG_TAG, "Replay: per-frame ESC edge -> exit requested");
+        }
+        s_prev_esc_frame = esc_frame_now;
+    }
+
     const int max_ticks_per_frame =
         (g_td5.ini.trace_fast_forward > 1.0f)
             ? ((int)g_td5.ini.trace_fast_forward + 8)
@@ -4052,7 +4140,12 @@ int td5_game_run_race_frame(void) {
          * [CONFIRMED orig PollRaceSessionInput @0x42C470: when g_inputPlaybackActive
          *  the pause/MuteAll block is skipped and the abort block ORs bit 30 →
          *  fade-out. The original used a simple ESC-to-exit, NOT a pause menu.] */
-        if ((esc_edge || td5_input_replay_exit_requested()) && td5_game_is_cinematic_race() &&
+        /* [BUG 5a] s_replay_esc_exit is the per-frame ESC latch armed above the
+         * loop; consume it here so a no-tick-frame ESC tap still aborts. */
+        int replay_esc_edge = s_replay_esc_exit;
+        s_replay_esc_exit = 0;
+        if ((esc_edge || replay_esc_edge || td5_input_replay_exit_requested()) &&
+            td5_game_is_cinematic_race() &&
             !s_replay_abort_pending &&
             g_td5.race_end_fade_state == 0) {
             s_replay_abort_pending = 1;

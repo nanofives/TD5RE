@@ -3557,6 +3557,21 @@ static int frontend_shift_nav_active(void) {
     return frontend_shift_nav_on() && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 }
 
+/* [fix 2026-06-15] Single-click activation: a click on a hovered button selects
+ * AND confirms it in one click. The legacy "first click selects, second confirms"
+ * read as an inconsistent double-click. Knob TD5RE_MOUSE_SINGLE_CLICK (default on;
+ * "0" restores the faithful select-then-confirm). */
+static int frontend_mouse_single_click_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MOUSE_SINGLE_CLICK");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "mouse single-click activate %s (TD5RE_MOUSE_SINGLE_CLICK=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 /* Apply ONE menu navigation event — a single cursor move or confirm. Shared by
  * the gamepad immediate-edge path and the keyboard WM_KEYDOWN FIFO drain so both
  * behave identically: exactly one move per press, matching the original's
@@ -3568,6 +3583,11 @@ static int frontend_shift_nav_active(void) {
  * move itself is suppressed while the panel is open. */
 static void frontend_apply_nav_event(unsigned code) {
     int spatial_nav = (s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
+    /* [fix 2026-06-15] Quick Race uses GEOMETRIC up/down nav so the dev "Span
+     * Offset" button (high button index but a low visual row) is reachable by
+     * pressing DOWN from "AI Screens" — index-order nav skipped it. LEFT/RIGHT in
+     * QR still cycle the focused selector's value (handled in the QR FSM). */
+    int vnav = spatial_nav || (s_current_screen == TD5_SCREEN_QUICK_RACE);
     switch (code) {
     case TD5_NAVKEY_LEFT:
         /* [TASK B] SHIFT+LEFT = horizontal focus move (geometric same-row pick),
@@ -3581,7 +3601,15 @@ static void frontend_apply_nav_event(unsigned code) {
             break;
         }
         s_arrow_input |= 1;
-        if (!s_color_panel_visible) {
+        /* [2026-06-15 BUG #13] Plain LEFT (no SHIFT) ONLY cycles the focused
+         * selector's value (via the s_arrow_input bit, consumed in the tick). It
+         * must NOT also move focus horizontally — that displaced focus onto the
+         * value-column button to the right while cycling. Horizontal focus move now
+         * requires SHIFT (handled above). The spatial_nav (Controller-Binding)
+         * screen has NO value selectors, so plain LEFT there still legitimately
+         * moves focus geometrically. Gated by TD5RE_SHIFT_NAV: "0" restores the old
+         * cycle-and-move behavior. */
+        if (!s_color_panel_visible && (spatial_nav || !frontend_shift_nav_on())) {
             int moved = spatial_nav ? frontend_move_selected_button_spatial(-1, 0)
                                     : frontend_cycle_selected_button_horizontal(-1);
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
@@ -3597,7 +3625,9 @@ static void frontend_apply_nav_event(unsigned code) {
             break;
         }
         s_arrow_input |= 2;
-        if (!s_color_panel_visible) {
+        /* [2026-06-15 BUG #13] Plain RIGHT only cycles the value; horizontal focus
+         * move requires SHIFT (see LEFT above). */
+        if (!s_color_panel_visible && (spatial_nav || !frontend_shift_nav_on())) {
             int moved = spatial_nav ? frontend_move_selected_button_spatial(1, 0)
                                     : frontend_cycle_selected_button_horizontal(1);
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
@@ -3606,8 +3636,8 @@ static void frontend_apply_nav_event(unsigned code) {
     case TD5_NAVKEY_UP:
         s_arrow_input |= 4;
         if (!s_color_panel_visible) {
-            int moved = spatial_nav ? frontend_move_selected_button_spatial(0, -1)
-                                    : frontend_cycle_selected_button_vertical(-1);
+            int moved = vnav ? frontend_move_selected_button_spatial(0, -1)
+                             : frontend_cycle_selected_button_vertical(-1);
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
             /* No sound on a no-target edge move — faithful to the original shared
              * nav handler @0x00426580, which is SILENT when no neighbour exists. */
@@ -3616,8 +3646,8 @@ static void frontend_apply_nav_event(unsigned code) {
     case TD5_NAVKEY_DOWN:
         s_arrow_input |= 8;
         if (!s_color_panel_visible) {
-            int moved = spatial_nav ? frontend_move_selected_button_spatial(0, 1)
-                                    : frontend_cycle_selected_button_vertical(1);
+            int moved = vnav ? frontend_move_selected_button_spatial(0, 1)
+                             : frontend_cycle_selected_button_vertical(1);
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
         }
         break;
@@ -3835,6 +3865,15 @@ static void frontend_poll_input(void) {
         td5_plat_input_flush_nav();
     }
 
+    /* [fix 2026-06-15] While SHIFT is held, SHIFT+Left/Right is reserved for
+     * horizontal focus nav (apply_nav_event moves focus on the shift branch).
+     * Clear any Left/Right CYCLE bits here so a queued arrow that drained a frame
+     * after the shift-state check can't ALSO cycle the value (the reported
+     * "shift+arrow still cycles AND navigates"). Skipped while the colour panel is
+     * open — it reads the arrow bits for its swatch cursor. */
+    if (frontend_shift_nav_active() && !s_color_panel_visible)
+        s_arrow_input &= ~(1u | 2u);
+
     /* Credits/extras scroll: press ANY key (or click / gamepad button) to skip
      * the credits and quit the game. Edge-detected against a key held over from
      * the menu so the YES press that opened the credits can't instantly exit.
@@ -3873,33 +3912,37 @@ static void frontend_poll_input(void) {
         }
         if (hit_button >= 0) {
             int i = hit_button;
+            /* Arrow-zone edge cycling applies only to the already-selected button
+             * (click within 20px of its left/right edge). */
+            int arrow_zone = 0;
             if (i == s_selected_button) {
-                /* Already selected: check arrow zones (20px from edges) */
-                int arrow_zone = 0;
                 if (s_mouse_x >= s_buttons[i].x + s_buttons[i].w - 0x14) {
                     arrow_zone = 1;   /* RIGHT */
                 } else if (s_mouse_x < s_buttons[i].x + 0x14) {
                     arrow_zone = -1;  /* LEFT */
                 }
-
-                if (arrow_zone != 0) {
-                    /* Arrow click: set arrow input directly, play feedback */
-                    if (arrow_zone > 0) s_arrow_input |= 2;  /* RIGHT */
-                    else                s_arrow_input |= 1;  /* LEFT */
-                    frontend_play_sfx(2);
-                } else {
-                    /* Center click on selected button: confirm */
-                    s_button_index = i;
-                    s_input_ready = 1;
-                    s_mouse_flash_button = i;
-                    s_mouse_flash_until = now + 180;
-                    s_mouse_confirm_button = -1;
-                    frontend_play_sfx(3);
-                    TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse",
-                              s_button_index, s_buttons[s_button_index].label);
-                }
+            }
+            if (arrow_zone != 0) {
+                /* Arrow click: set arrow input directly, play feedback */
+                if (arrow_zone > 0) s_arrow_input |= 2;  /* RIGHT */
+                else                s_arrow_input |= 1;  /* LEFT */
+                frontend_play_sfx(2);
+            } else if (frontend_mouse_single_click_on() || i == s_selected_button) {
+                /* [fix 2026-06-15] Single click on a hovered button selects AND
+                 * confirms it (one click). With the knob off, only the already-
+                 * selected button confirms (faithful select-then-confirm). */
+                s_selected_button = i;
+                s_selection_from_mouse = 1;
+                s_button_index = i;
+                s_input_ready = 1;
+                s_mouse_flash_button = i;
+                s_mouse_flash_until = now + 180;
+                s_mouse_confirm_button = -1;
+                frontend_play_sfx(3);
+                TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse",
+                          i, s_buttons[i].label);
             } else {
-                /* Different button: select it (first click selects, second confirms) */
+                /* Knob off + a different button: select only (faithful). */
                 s_selected_button = i;
                 s_selection_from_mouse = 1;
                 frontend_play_sfx(2);
@@ -5491,6 +5534,21 @@ static int frontend_qr_span_field_on(void) {
     }
     return v;
 }
+/* [2026-06-15 BUG #14] TD5RE_SPAN_CARET (default ON; "0" reverts). When on, the
+ * QR span-offset edit caret is sized to the value font's cap band (rows 8..23 of
+ * the 24px glyph cell, matching fe_draw_text) so it stands as tall as the digits
+ * and sits ON them. A prior nudge over-shrank it (3px down, 12px tall) so it sat
+ * above and short of the digits; "0" restores that legacy caret. */
+static int frontend_span_caret_fix_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_SPAN_CARET");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "QuickRace span-offset caret cap-height fix (#14) %s (TD5RE_SPAN_CARET=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
 /* Editable digit buffer for the span field (mirrors g_td5.ini.start_span_offset,
  * which td5_game.c InitRace applies per-slot with 16-bit wrap). A leading '-' is
  * allowed for negative offsets. */
@@ -5831,10 +5889,18 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
      * Car/Track/.../OK/Back nav ring is untouched. */
     if (frontend_qr_random_icon_on()) {
         float ix, iy;
+        const int iw = FE_QR_RAND_ICON_W, ih = FE_QR_RAND_ICON_W;
+        /* [fix 2026-06-15] The chip lights only when the MOUSE is over the icon
+         * itself — NOT when the adjacent Car/Track row is focused (which made the
+         * chip look "selected" while hovering Car/Track). */
         frontend_qr_rand_icon_xy(QR_BTN_CAR, &ix, &iy);
-        frontend_draw_randomize_icon(ix, iy, sx, sy, s_selected_button == QR_BTN_CAR);
+        frontend_draw_randomize_icon(ix, iy, sx, sy,
+            s_mouse_x >= (int)ix && s_mouse_x < (int)ix + iw &&
+            s_mouse_y >= (int)iy && s_mouse_y < (int)iy + ih);
         frontend_qr_rand_icon_xy(QR_BTN_TRACK, &ix, &iy);
-        frontend_draw_randomize_icon(ix, iy, sx, sy, s_selected_button == QR_BTN_TRACK);
+        frontend_draw_randomize_icon(ix, iy, sx, sy,
+            s_mouse_x >= (int)ix && s_mouse_x < (int)ix + iw &&
+            s_mouse_y >= (int)iy && s_mouse_y < (int)iy + ih);
     }
 
 #ifndef TD5RE_RELEASE
@@ -5867,8 +5933,19 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
             float ty = ((float)by + (32.0f - FE_QR_VALUE_LINE_H) * 0.5f) * sy;
             float tw = fe_measure_text(shown, sx * gs, sy * gs);
             uint32_t blink = ((td5_plat_time_ms() / 500u) & 1u) ? 0xFF80FF80u : 0x3380FF80u;
-            fe_draw_quad((float)FE_QR_VALUE_X * sx + tw + 2.0f * sx, ty,
-                         6.0f * sx * gs, 16.0f * sy * gs, blink, -1, 0, 0, 0, 0);
+            /* [2026-06-15 BUG #14] frontend_draw_qr_value draws the value via
+             * fe_draw_text at `ty` = the glyph CELL-TOP, and fe_draw_text places
+             * caps at design rows 8..23 of the 24px cell (cap height 15px). Size the
+             * caret to that exact cap band so it is as tall as the digits and sits
+             * ON them. The prior nudge (3px down, 12px tall) sat above/short of the
+             * digits; TD5RE_SPAN_CARET=0 restores it. */
+            float cy = ty + 3.0f * sy * gs, ch = 12.0f * sy * gs;  /* legacy (over-shrunk) */
+            if (frontend_span_caret_fix_on()) {
+                cy = ty + 8.0f * sy * gs;                          /* cap top  (design row 8)  */
+                ch = 15.0f * sy * gs;                              /* cap height (rows 8..23)  */
+            }
+            fe_draw_quad((float)FE_QR_VALUE_X * sx + tw + 2.0f * sx, cy,
+                         6.0f * sx * gs, ch, blink, -1, 0, 0, 0, 0);
         }
     }
 #endif /* !TD5RE_RELEASE */
@@ -10082,18 +10159,47 @@ uint32_t mp_setup_grid_color(int col, int row) {
 
 
 
+/* [2026-06-15 BUG #5] TD5RE_KBD_GRID (default ON; "0" reverts). The on-screen
+ * QWERTY's pad nav (td5_fe_race.c) moves the cursor by COLUMN INDEX preserved
+ * across rows (UP/DOWN keep `col`, clamped to the new row's length) — a pure grid
+ * model. But the render USED to center each row by its own length
+ * (rowx = ax + (aw - kw*len)*0.5f), so a given column index sat at a DIFFERENT
+ * screen-x in each row (rows are 10/10/9/7 keys). The highlight (drawn at that
+ * same index) therefore landed on a key that was NOT geometrically above/below
+ * the previous selection — e.g. UP from 'C' (row3 col2) selected 'D' (row2 col2)
+ * while the key visually above 'C' was 'F', so the move looked wrong AND the box
+ * appeared over the "wrong" letter. Fix: align every row to a common left origin
+ * with one fixed cell width, so column index -> identical x in every row. Now the
+ * index-based nav steps to the key directly above/below and the highlight sits
+ * exactly on the selected key. "0" restores the old centered (mismatched) rows. */
+static int frontend_kbd_grid_align_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_KBD_GRID");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "On-screen QWERTY column-aligned grid (#5) %s (TD5RE_KBD_GRID=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 /* On-screen QWERTY for pad name entry — compact: each row is just over the
  * uppercase cap height (MP_KBD_ROW_H), width spans the pane content. */
 static void mp_setup_render_kbd(int p, float ax, float ay, float aw, float ah,
                                 uint32_t accent, float sx, float sy) {
     int row, col;
+    int grid_align = frontend_kbd_grid_align_on();
     float rh = MP_KBD_ROW_H;
     (void)ah;
     for (row = 0; row < MP_KBD_LETTER_ROWS; row++) {
         const char *r = k_mp_kbd_rows[row];
         int len = (int)strlen(r);
         float kw = aw / 10.0f;
-        float rowx = ax + (aw - kw * (float)len) * 0.5f;
+        /* [BUG #5] Left-align every row to a common origin so column index N is at
+         * the SAME x in every row (matches the index-preserving pad nav). The old
+         * per-row centering (kept under TD5RE_KBD_GRID=0) put the same col index at
+         * a different x per row, desyncing nav target vs highlight. */
+        float rowx = grid_align ? ax : ax + (aw - kw * (float)len) * 0.5f;
         float ry = ay + (float)row * rh;
         for (col = 0; col < len; col++) {
             float kx = rowx + (float)col * kw;

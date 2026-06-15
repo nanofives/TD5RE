@@ -128,6 +128,18 @@ typedef struct TD5_InputRecordBuffer {
     int32_t  track_index;
     int32_t  entry_count;
     int32_t  last_frame_index;
+    /* [BUG 5b 2026-06-15] StartSpanOffset captured at WriteOpen (record) so a
+     * View Replay can re-apply the SAME per-slot grid shift the recorded run
+     * used. The dev StartSpanOffset (g_td5.ini.start_span_offset) moves every
+     * car further along the track at spawn; it is read fresh in
+     * td5_game_init_race_session at BOTH record and playback. If the live INI/CLI
+     * offset differs at playback (or a persisted replay is loaded in a session
+     * with a different offset) the player spawns at a different span than when
+     * recorded, so the recorded input plays back from the wrong start and the run
+     * diverges. The game reads this back via td5_input_replay_start_span_offset()
+     * and overrides the live offset on playback. Same treatment as the captured
+     * RNG seed. */
+    int32_t  start_span_offset;
     TD5_InputRecordEntry entries[TD5_INPUT_REC_MAX_ENTRIES];
 
     /* Write state */
@@ -302,6 +314,14 @@ void td5_input_write_frame(uint32_t word0, uint32_t word1, int strip_mode);
 int  td5_input_read_open(const char *path);
 void td5_input_read_close(void);
 int  td5_input_read_frame(uint32_t *word0, uint32_t *word1);
+
+/* [BUG 5b 2026-06-15] StartSpanOffset captured into the replay buffer at record
+ * time (WriteOpen). The game reads this on playback to re-apply the same grid
+ * shift the recorded run used, so a replay recorded with a non-zero
+ * --StartSpanOffset plays back faithfully even if the live INI/CLI offset
+ * differs. Returns 0 for replays recorded before this field existed (legacy
+ * in-memory buffers and v1 on-disk files load it as 0 = no offset). */
+int32_t td5_input_replay_start_span_offset(void);
 
 /* ========================================================================
  * Public API -- Force Feedback

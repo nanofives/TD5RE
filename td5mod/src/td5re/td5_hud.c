@@ -74,6 +74,38 @@ static int hud_dpi_scale_on(void)
     return s;
 }
 
+/* [#10 BITMAP HUD-TEXT DPI 2026-06-15] When VectorUI is OFF, td5_hud_queue_text
+ * falls back to the fixed-pixel bitmap glyph atlas, which built every glyph quad
+ * at its native cell size with NO window scale — so the per-pane POSITION ("1ST")
+ * and TIME labels stayed a fixed size while the speedo/minimap (drawn as sx/sy
+ * quads) grew with the window. When on (default), the bitmap glyph path applies
+ * the SAME hud_active_text_scale() + hud_scale_text_pos() the VectorUI path
+ * already uses, so the position/time labels scale with DPI like the rest of the
+ * HUD. Set TD5RE_HUD_TEXT_DPI=0 for the legacy fixed-pixel bitmap text. */
+static int hud_text_dpi_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_HUD_TEXT_DPI");
+        TD5_LOG_I(LOG_TAG, "bitmap HUD-text DPI scaling: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* [#3 DEMO-MODE HUD 2026-06-15] When the attract/demo flag g_demo_mode is set,
+ * hide EVERY in-race HUD element (speedo, minimap, timers, labels, split
+ * dividers, etc.) and draw only a single centred "DEMO MODE" caption. Default on;
+ * set TD5RE_DEMO_HUD=0 to keep the full HUD during the demo. */
+static int hud_demo_hud_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_DEMO_HUD");
+        TD5_LOG_I(LOG_TAG, "demo-mode HUD hide (caption only): %s", s ? "on" : "off");
+    }
+    return s;
+}
+
 /* (3) Baseline multiplier on the in-race HUD text/element scale [user follow-up
  * 2026-06-14: "in-race elements too big"]. The high-DPI factor above tracks the
  * window size; this trims the BASELINE so the race text/elements render ~25%
@@ -1474,10 +1506,17 @@ static void hud_draw_mp_car_labels(void)
             float dist = 1.0f / rhw;         /* view-space depth (world units) */
             if (dist > CUT_D) continue;      /* too far -> no label */
 
-            /* Linear distance shrink between NEAR_D and FAR_D. */
+            /* [#9 SMOOTH LABEL SCALE 2026-06-15] Continuously shrink the label with
+             * distance instead of the old stepped/linear ramp. t is the 0..1
+             * normalised depth between NEAR_D (full size) and FAR_D (floor size);
+             * the SAME near/far cutoffs are kept. A smoothstep ease (3t^2 - 2t^3)
+             * gives a smooth, monotonic size falloff with no visible size "steps"
+             * as a car drifts toward/away, and zero slope at both ends so the size
+             * settles gently at the near/far clamps rather than snapping. */
             float t = (dist - NEAR_D) / (FAR_D - NEAR_D);
             if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-            float dscale = SCALE_NEAR + (SCALE_FAR - SCALE_NEAR) * t;
+            float te = t * t * (3.0f - 2.0f * t);   /* smoothstep */
+            float dscale = SCALE_NEAR + (SCALE_FAR - SCALE_NEAR) * te;
 
             /* Pane-local -> full render-target coords. */
             float fx = L + sx;
@@ -1548,6 +1587,12 @@ static void hud_draw_mp_car_labels(void)
 void td5_hud_draw_player_id_overlays(void)
 {
     int views = s_view_count;
+    /* [#3 DEMO-MODE HUD 2026-06-15] During the demo, hide the per-pane player
+     * identity frames + name plates AND the MP car labels (drawn at the tail of
+     * this function) — the only on-screen element is the centred "DEMO MODE"
+     * caption from td5_hud_render_overlays. Gate off (TD5RE_DEMO_HUD=0) to keep
+     * them. */
+    if (g_demo_mode != 0 && hud_demo_hud_on()) return;
     if (!s_hud_id_active) return;
     if (views < 2) return;                  /* only meaningful when split */
     if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
@@ -1934,9 +1979,19 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
         buf[i] = (char)s_char_remap[c & 0x7F];
     }
 
-    /* If centered, compute total width and offset X */
+    /* [#10 BITMAP HUD-TEXT DPI 2026-06-15] Scale the bitmap glyphs with the window
+     * the SAME way the VectorUI path (above) already does, so the per-pane
+     * POSITION/TIME labels grow with DPI like the speedo/minimap instead of
+     * staying at their native cell size. sc==1.0 (knob off, or scaling disabled)
+     * reproduces the legacy fixed-pixel layout byte-for-byte. The start position
+     * is re-anchored to the pane corner/centre by the same hud_scale_text_pos used
+     * by the VectorUI branch. */
+    float sc = hud_text_dpi_on() ? hud_active_text_scale() : 1.0f;
     float cursor_x = (float)x;
     float cursor_y = (float)y;
+    if (sc != 1.0f) {
+        hud_scale_text_pos(&cursor_x, &cursor_y, centered, sc);
+    }
 
     if (centered) {
         float total_w = 0.0f;
@@ -1944,8 +1999,8 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
             uint8_t gi = (uint8_t)buf[i];
             total_w += glyphs[gi].width;
         }
-        /* Total advance = sum of widths + (len-1) spacing pixels */
-        cursor_x -= ((float)(len - 1) + total_w) * 0.5f;
+        /* Total advance = sum of widths + (len-1) spacing pixels (scaled). */
+        cursor_x -= ((float)(len - 1) + total_w) * 0.5f * sc;
     }
 
     /* Build a sprite quad for each glyph */
@@ -1954,20 +2009,21 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
     for (int i = 0; i < len; i++) {
         uint8_t gi = (uint8_t)buf[i];
         TD5_GlyphRecord *g = &glyphs[gi];
+        float gw = g->width * sc, gh = g->height * sc;
 
         hud_build_quad(
             quad_ptr,
             0,                          /* mode: standard */
             tex_page,
             cursor_x, cursor_y,                       /* top-left */
-            cursor_x + g->width, cursor_y + g->height, /* bottom-right */
+            cursor_x + gw, cursor_y + gh,             /* bottom-right (scaled) */
             g->atlas_u, g->atlas_v,                    /* UV top-left */
             g->atlas_u + g->width, g->atlas_v + g->height, /* UV bottom-right */
             0xFFFFFFFF,                 /* white diffuse */
             HUD_DEPTH
         );
 
-        cursor_x += g->width + 1.0f;
+        cursor_x += (g->width + 1.0f) * sc;
         quad_ptr += TD5_HUD_GLYPH_QUAD_SIZE;
     }
 
@@ -2802,11 +2858,19 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
 
     /* Attract demo: show "DEMO MODE" text (orig g_replayModeFlag!=0 path). */
     if (g_demo_mode != 0) {
-        td5_hud_queue_text(0,
-            (int)vp_half_w,
-            (int)(vp_top + 16.0f),
-            1, /* centered */
-            "%s", s_hud_string_table[10]); /* "DEMO MODE" */
+        /* [#3 DEMO-MODE HUD 2026-06-15] When the demo-HUD knob is on, ALL the
+         * per-pane status text (this DEMO line, plus the position/timer/wanted
+         * lines below) is suppressed: td5_hud_render_overlays draws ONE centred
+         * "DEMO MODE" caption for the whole screen instead, so nothing here should
+         * also draw it (that would double up, once per pane). Just return. With the
+         * knob off, keep the legacy per-pane DEMO caption. */
+        if (!hud_demo_hud_on()) {
+            td5_hud_queue_text(0,
+                (int)vp_half_w,
+                (int)(vp_top + 16.0f),
+                1, /* centered */
+                "%s", s_hud_string_table[10]); /* "DEMO MODE" */
+        }
         return;
     }
 
@@ -3348,18 +3412,54 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     }
     if (maxx <= minx || maxz <= minz) return;
 
-    /* Fit the world AABB into the cell with padding, uniform scale (track keeps
-     * its real aspect), centred. Screen Y grows down; world Z maps to screen Y. */
+    /* [#8 2026-06-15] Fit the whole-track world AABB into the cell, choosing the
+     * orientation in {0deg, 90deg-left} that BEST FILLS the cell, then zooming to
+     * fit. The track footprint has a long axis; if the cell's long axis differs
+     * from the footprint's, rotating the drawing 90deg lets it grow bigger before
+     * hitting a cell edge — maximising the use of the (often very non-square)
+     * split-screen cell.
+     *
+     * Uniform scale keeps the track's real shape. With no rotation world X->screen
+     * X and world Z->screen Y. A 90deg LEFT (CCW, screen Y-down) rotation maps the
+     * relative point (dx,dz) -> (dz,-dx), so the drawing's screen-X span becomes
+     * the world Z extent and its screen-Y span becomes the world X extent. We
+     * compute the fit scale for both and keep whichever is LARGER (fills more of
+     * the cell). The arrows/labels below reuse the same MAPPX/MAPPY, so they
+     * rotate and zoom with the road. */
     float pad = (cr - cl) * 0.10f;
     float in_w = (cr - cl) - 2.0f * pad, in_h = (cb - ct) - 2.0f * pad;
     if (in_w < 8.0f || in_h < 8.0f) return;
     float wx_w = maxx - minx, wz_h = maxz - minz;
-    float sxf = in_w / wx_w, syf = in_h / wz_h;
-    float fit = (sxf < syf) ? sxf : syf;
+    if (wx_w < 1.0f) wx_w = 1.0f;
+    if (wz_h < 1.0f) wz_h = 1.0f;
+
+    /* fit_0: no rotation (X->W, Z->H). fit_90: 90deg (Z->W, X->H). */
+    float fit_0  = (in_w / wx_w < in_h / wz_h) ? (in_w / wx_w) : (in_h / wz_h);
+    float fit_90 = (in_w / wz_h < in_h / wx_w) ? (in_w / wz_h) : (in_h / wx_w);
+    int   rot90  = (fit_90 > fit_0);
+    float fit    = rot90 ? fit_90 : fit_0;
+
+    {
+        static int s_map_rot_log = 0;
+        if ((s_map_rot_log++ % 240) == 0)
+            TD5_LOG_I(LOG_TAG,
+                      "grid-filler map: bbox=%.0fx%.0f cell=%.0fx%.0f fit0=%.4f fit90=%.4f -> %s (zoom=%.4f)",
+                      wx_w, wz_h, in_w, in_h, fit_0, fit_90,
+                      rot90 ? "rot90-left" : "no-rot", fit);
+    }
+
     float wcx = (minx + maxx) * 0.5f, wcz = (minz + maxz) * 0.5f;
     float ccx = (cl + cr) * 0.5f,     ccy = (ct + cb) * 0.5f;
-    #define MAPX(WX) (ccx + ((WX) - wcx) * fit)
-    #define MAPY(WZ) (ccy + ((WZ) - wcz) * fit)
+    /* Two-argument map: takes BOTH world coords so the optional 90deg rotation can
+     * mix the axes. Centre the relative coords, (optionally) rotate, scale by the
+     * chosen fit, then re-centre into the cell. rot90 = 90deg LEFT (CCW, screen
+     * Y-down): screen (X,Y) <- (dz, -dx). Every projected point below goes through
+     * these so the road, branches, dots, arrows and labels all rotate + zoom
+     * together. */
+    #define MAPPX(WX, WZ) ( rot90 ? (ccx + ((WZ) - wcz) * fit) \
+                                  : (ccx + ((WX) - wcx) * fit) )
+    #define MAPPY(WX, WZ) ( rot90 ? (ccy - ((WX) - wcx) * fit) \
+                                  : (ccy + ((WZ) - wcz) * fit) )
 
     /* Faint panel so the cell reads as a deliberate map, not a render glitch. */
     td5_vui_quad(cl, ct, cr - cl, cb - ct, 0x66101820u, -1, 0, 0, 0, 0);
@@ -3388,7 +3488,7 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
         int16_t *vr = (int16_t *)(vert_base + (uint32_t)vi_r * 6);
         float cxw = ((float)((int)vl[0] + ox) + (float)((int)vr[0] + ox)) * 0.5f;
         float czw = ((float)((int)vl[2] + oz) + (float)((int)vr[2] + oz)) * 0.5f;
-        float sxp = MAPX(cxw), syp = MAPY(czw);
+        float sxp = MAPPX(cxw, czw), syp = MAPPY(cxw, czw);
         if (have_prev) hud_filler_line(prev_x, prev_y, sxp, syp, road_half, ROAD_COL);
         else { first_x = sxp; first_y = syp; }
         prev_x = sxp; prev_y = syp; have_prev = 1;
@@ -3400,7 +3500,7 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
      * each main-ring span, enumerate the parallel branch corridors via the strip
      * jump table (td5_track_count_branch_corridors / _branch_corridor_span) and
      * stitch each corridor's span centres into its own polyline, using the SAME
-     * MAPX/MAPY fit as the main ring. Corridors live in [ring, total_spans); they
+     * MAPPX/MAPPY fit as the main ring. Corridors live in [ring, total_spans); they
      * run parallel to the main road, so they project inside the cell — any that
      * fall outside are clipped by the caller's per-cell scissor (matching how the
      * minimap windows its branch quads). Drawn a touch dimmer than the main road
@@ -3430,7 +3530,7 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
                 int16_t *bvr = (int16_t *)(vert_base + (uint32_t)bvi_r * 6);
                 float bcxw = ((float)((int)bvl[0] + box) + (float)((int)bvr[0] + box)) * 0.5f;
                 float bczw = ((float)((int)bvl[2] + boz) + (float)((int)bvr[2] + boz)) * 0.5f;
-                float bsxp = MAPX(bcxw), bsyp = MAPY(bczw);
+                float bsxp = MAPPX(bcxw, bczw), bsyp = MAPPY(bcxw, bczw);
                 if (bhave[w]) hud_filler_line(bprev_x[w], bprev_y[w], bsxp, bsyp,
                                               road_half, BRANCH_COL);
                 bprev_x[w] = bsxp; bprev_y[w] = bsyp; bhave[w] = 1;
@@ -3455,10 +3555,15 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
         if (td5_game_get_slot_state(r) == 3) continue;       /* decoration slot */
         float wx = (float)actor_world_x(r) * (1.0f / 256.0f);
         float wz = (float)actor_world_z(r) * (1.0f / 256.0f);
-        lab[n].dx = MAPX(wx); lab[n].dy = MAPY(wz);
+        lab[n].dx = MAPPX(wx, wz); lab[n].dy = MAPPY(wx, wz);
         uint32_t h12 = (uint32_t)((actor_heading(r) >> 8) & 0xFFF);
-        lab[n].fx = td5_sin_12bit(h12);
-        lab[n].fy = td5_cos_12bit(h12);
+        /* Forward in unrotated map space is (sin h, cos h) over (screenX,screenY).
+         * [#8] Rotate it the SAME way as the positions when the map is turned 90deg
+         * left so the arrow keeps pointing the way the car actually drives. */
+        float fwd_x = td5_sin_12bit(h12);
+        float fwd_y = td5_cos_12bit(h12);
+        lab[n].fx = rot90 ? fwd_y  : fwd_x;
+        lab[n].fy = rot90 ? -fwd_x : fwd_y;
         lab[n].col = s_hud_id_accent[r] ? s_hud_id_accent[r] : hud_filler_slot_color(r);
         if (s_hud_id_name[r][0]) snprintf(lab[n].nm, sizeof lab[n].nm, "%s", s_hud_id_name[r]);
         else                     snprintf(lab[n].nm, sizeof lab[n].nm, "CAR %d", r + 1);
@@ -3530,8 +3635,8 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
         hud_filler_arrow(lab[i].dx, lab[i].dy, arr_half,
                          lab[i].fx, lab[i].fy, lab[i].col);
     }
-    #undef MAPX
-    #undef MAPY
+    #undef MAPPX
+    #undef MAPPY
 }
 
 /* STANDINGS widget for one empty cell: stacked accent rows, 1st on top. */
@@ -3627,6 +3732,12 @@ static void hud_draw_empty_cells(void)
 
         td5_render_set_clip_rect(cl, cr, ct, cb);
 
+        /* [#8 2026-06-15] Solid BLACK backing behind the empty cell FIRST, so the
+         * map/standings widget reads as a deliberate panel on a clean black field
+         * (and the last race frame's scene doesn't bleed through the empty pane).
+         * Drawn before the widget's own faint backdrop, which then layers on top. */
+        td5_vui_quad(cl, ct, cr - cl, cb - ct, 0xFF000000u, -1, 0, 0, 0, 0);
+
         /* k-th empty cell -> content id (clamp into the 2-entry array; treat
          * EMPTY/unset (0) and MAP (1) both as the MAP default, 2 = STANDINGS). */
         int k = v - views; if (k < 0) k = 0; if (k > 1) k = 1;
@@ -3639,6 +3750,52 @@ static void hud_draw_empty_cells(void)
 void td5_hud_render_overlays(float dt)
 {
     /* dt is normalized 30 Hz frame time from td5_game.c. */
+
+    /* [#3 DEMO-MODE HUD 2026-06-15] During the attract/demo (g_demo_mode), hide
+     * the ENTIRE in-race HUD — speedo, minimap, timers, position/lap labels,
+     * split dividers, MP car labels, FPS/debug overlay, etc. — and draw ONLY a
+     * single centred "DEMO MODE" caption. Early-return here so none of the
+     * per-view widgets, the post-loop overlays, or the split dividers below run.
+     * The per-pane status text + player-id/MP-label paths self-gate on the same
+     * knob (see td5_hud_draw_status_text / td5_hud_draw_player_id_overlays), so
+     * this caption is the only HUD element on screen. Gate off (TD5RE_DEMO_HUD=0)
+     * to keep the full HUD during the demo. */
+    if (g_demo_mode != 0 && hud_demo_hud_on()) {
+        float cx = g_render_width_f  * 0.5f;
+        float cy = g_render_height_f * 0.5f;
+        /* Screen-level scale (min of W/640, H/480), matching the post-loop
+         * overlays + pause panel; trimmed by the in-race size multiplier so the
+         * caption tracks the window like the rest of the HUD would. */
+        float ssx = g_render_width_f  * (1.0f / 640.0f);
+        float ssy = g_render_height_f * (1.0f / 480.0f);
+        float sc  = (ssx < ssy) ? ssx : ssy;
+        sc *= hud_size_mul();
+        if (sc < 0.05f) sc = 1.0f;
+        const char *cap = s_hud_string_table ? s_hud_string_table[10] : "DEMO MODE";
+
+        /* Resolution-independent VectorUI text when available; otherwise fall back
+         * to the bitmap glyph queue so the caption still shows with VectorUI off.
+         * Caps span 15 design-px (cell-top anchor), so lift the y by 15.5 cap-units
+         * to vertically centre the caption on the screen. */
+        if (g_td5.ini.vector_ui && (td5_hudfont_ready() || td5_vui_hudfont_page() >= 0)) {
+            float ts = sc * 1.6f;   /* a touch larger than body text — it's the only element */
+            td5_vui_text_centered(cx, cy - 15.5f * ts, cap, 0xFFFFFFFFu, ts, ts);
+        } else {
+            /* Bitmap path: queue centred at screen coords. With the anchor flag
+             * off, the #10 bitmap-DPI path scales the glyph size by the screen
+             * scale and multiplies y by that same factor (hud_scale_text_pos),
+             * so pre-divide y by sc to land back at the screen centre. (x is
+             * centred, which hud_scale_text_pos leaves untouched.) When the #10
+             * knob is off sc collapses to 1 there, so the raw centre is used. */
+            s_hud_text_anchor_to_view = 0;
+            s_cur_scale = NULL;
+            float qy = hud_text_dpi_on() ? (cy / sc) : cy;
+            td5_hud_queue_text(0, (int)cx, (int)qy, 1, "%s", cap);
+            td5_hud_flush_text();
+        }
+        return;
+    }
+
     s_cur_view = 0;
     s_hud_text_anchor_to_view = 1;   /* race text re-anchors to its pane */
 

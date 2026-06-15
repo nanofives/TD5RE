@@ -6973,6 +6973,61 @@ static int wheel_traffic_enabled(void) {
     if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_TRAFFIC"); cached = (e && e[0] == '0') ? 0 : 1; }
     return cached;
 }
+/* [BUG 3a — traffic wheels outside the chassis on the WIDTH axis]
+ * Traffic slots never load their own carparam.dat; InitRace seeds each traffic
+ * slot's cardef by COPYING SLOT 0's (the PLAYER car's) cardef
+ * (td5_physics_seed_traffic_cardef_from_player), so traffic inherits the player
+ * car's wheel hardpoints (wheel_display_angles[w][0], the lateral arm @cardef
+ * +0x40..) AND the player car's axle half-width (cardef +0x84). When the player
+ * is in a wide car, every traffic car gets that wide axle track and its tyres
+ * splay proud of the (often narrower) traffic body mesh — worst on Sydney where
+ * the model set's bodies are narrow. Fix is render-only (the inherited arm feeds
+ * ONLY the visual for traffic): clamp the traffic wheel lateral position + tyre
+ * half-width to the traffic model's OWN mesh half-width, so the wheels always sit
+ * inside the bodywork regardless of the borrowed cardef. Racers untouched.
+ * TD5RE_WHEEL_TRACK_FIX=0 reverts to the inherited (player-car) track. */
+static int wheel_track_fix_enabled(void) {
+    /* "0" (exactly) disables; unset = on; any other value (incl. a tuning
+     * fraction like "0.5") enables, with the cap block parsing the number. */
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_TRACK_FIX");
+                      cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1; }
+    return cached;
+}
+/* [BUG 3b — traffic wheels don't spin]
+ * The faithful traffic dynamics (td5_physics_update_traffic, orig
+ * IntegrateVehicleFrictionForces @0x4438F0) update longitudinal_speed but NEVER
+ * advance accumulated_tire_slip_x/z — the original game drew no spinning wheels
+ * for traffic, so it had no reason to. The unified renderer derives wheel spin
+ * from those slip odometers, so for traffic they stay 0 and the wheels are
+ * frozen. Synthesize a deterministic spin odometer here from the traffic
+ * actor's own longitudinal_speed (advanced once per SIM TICK, viewport-count
+ * independent, no rand()). TD5RE_TRAFFIC_WHEEL_SPIN=0 reverts (frozen wheels). */
+static int traffic_wheel_spin_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_TRAFFIC_WHEEL_SPIN"); cached = (e && e[0] == '0') ? 0 : 1; }
+    return cached;
+}
+/* [BUG 6 — inner (inboard) wheel face is texture-less]
+ * The unified renderer caps only the OUTBOARD wheel face (the carhub alloy
+ * disc); the inboard end of the tyre tube is left open, so from any angle that
+ * exposes it the wheel reads as a blank/black hole. The original drew the
+ * INWHEEL atlas texture (s_inwheel_*, loaded but otherwise UNUSED) on the inner
+ * face. Draw a matching INWHEEL-textured disc on the inboard face.
+ * TD5RE_WHEEL_INNER_TEX=0 reverts (open inner face). */
+static int wheel_inner_tex_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_INNER_TEX"); cached = (e && e[0] == '0') ? 0 : 1; }
+    return cached;
+}
+
+/* Per-slot synthesized wheel-spin phase (BUG 3b). Advanced once per sim tick by
+ * the traffic actor's longitudinal_speed so it is independent of viewport count
+ * and frame rate, and fully deterministic (netplay/replay safe). Stored in the
+ * same 12-bit angle units as the slip odometer the racer path uses. */
+static int32_t s_traffic_spin_phase[TD5_MAX_TOTAL_ACTORS];
+static uint32_t s_traffic_spin_tick[TD5_MAX_TOTAL_ACTORS];
+static int      s_traffic_spin_init = 0;
 
 /* Set a slot's wheel style (called at race init with a per-race RNG roll). */
 void td5_render_set_wheel_style(int slot, int style) {
@@ -7050,6 +7105,34 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         if (hw > 0) axle_halfw = (float)hw;
     }
 
+    /* [BUG 3a] Traffic-only outer-stance cap (the "wheels outside the chassis on
+     * the width axis" report). Traffic inherits the PLAYER car's wheel hardpoints
+     * + axle half-width (see wheel_track_fix_enabled() note), which can be wider
+     * than this traffic model's body. Cap the OUTERMOST tyre face (wheel-centre
+     * |X| + axle_halfw) to the traffic model's own mesh half-width so the tyres
+     * always tuck under the bodywork. The cap fraction of the bounding radius is
+     * the same 0.30 the synth path uses for the wheel CENTRE, plus headroom for
+     * the half-width; clamp only narrows, never widens. Racers are never capped
+     * (they use their own authentic hardpoints). */
+    float traffic_outer_cap = 0.0f;  /* 0 = no cap */
+    if (slot >= g_traffic_slot_base && wheel_track_fix_enabled()) {
+        TD5_MeshHeader *mh = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS)
+                             ? s_vehicle_meshes[slot] : NULL;
+        float rb = (mh && mh->bounding_radius > 1.0f) ? mh->bounding_radius : 360.0f;
+        /* Body half-WIDTH is ~0.30..0.36*rb of the bounding SPHERE radius; cap the
+         * tyre's outer face just inside that. TD5RE_WHEEL_TRACK_FIX may be set to
+         * a numeric fraction to tune the cap (default 0.34). */
+        static float s_cap_frac = -1.0f;
+        if (s_cap_frac < 0.0f) {
+            const char *e = getenv("TD5RE_WHEEL_TRACK_FIX");
+            float v = (e && e[0]) ? (float)atof(e) : 0.0f;
+            s_cap_frac = (v > 0.0f && v <= 1.0f) ? v : 0.34f;
+            TD5_LOG_I(LOG_TAG, "traffic wheel outer-stance cap = %.3f * bounding_radius",
+                      s_cap_frac);
+        }
+        traffic_outer_cap = rb * s_cap_frac;
+    }
+
     /* Wheel spin odometer (same fields/scale as the original hub @0x446F00):
      * the slip accumulators grow with distance travelled, so cos/sin of them
      * gives a continuously-rotating angle. Used to ROTATE the textured rim so
@@ -7058,6 +7141,34 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
     int32_t slip_rear_12  = (int32_t)actor->accumulated_tire_slip_x * -4;
     float front_spin = (float)slip_front_12 * ((float)M_PI / 2048.0f);
     float rear_spin  = (float)slip_rear_12  * ((float)M_PI / 2048.0f);
+
+    /* [BUG 3b] Traffic slots never advance the slip odometer, so the formula
+     * above yields 0 and their wheels are frozen. Replace it with a per-slot
+     * phase advanced ONCE PER SIM TICK by the traffic actor's longitudinal_speed
+     * (matching the >>8 scale the racer slip accumulator uses, then the same *-4
+     * → 12-bit-angle scaling), so the wheels roll at a speed that tracks the car
+     * and stays identical across viewports / frame rates. Both axles use the same
+     * phase (traffic has no per-axle slip split). */
+    if (slot >= g_traffic_slot_base && slot < TD5_MAX_TOTAL_ACTORS &&
+        traffic_wheel_spin_enabled()) {
+        if (!s_traffic_spin_init) {
+            for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+                s_traffic_spin_phase[i] = 0;
+                s_traffic_spin_tick[i]  = 0xFFFFFFFFu;
+            }
+            s_traffic_spin_init = 1;
+        }
+        uint32_t cur_tick = (uint32_t)g_td5.simulation_tick_counter;
+        if (s_traffic_spin_tick[slot] != cur_tick) {
+            s_traffic_spin_tick[slot] = cur_tick;
+            /* same per-tick increment the racer odometer accumulates:
+             * accumulated_tire_slip_z += longitudinal_speed >> 8 */
+            s_traffic_spin_phase[slot] += (actor->longitudinal_speed >> 8);
+        }
+        int32_t spin_12 = s_traffic_spin_phase[slot] * -4;
+        front_spin = (float)spin_12 * ((float)M_PI / 2048.0f);
+        rear_spin  = front_spin;
+    }
 
     /* Rim texture page for this slot's randomly-assigned alloy design. */
     int rim_page = WHEEL_RIM_TEX_BASE + (wheel_style_for_slot(slot) % WHEEL_STYLE_COUNT);
@@ -7133,8 +7244,27 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         if (wx == 0.0f && wy == 0.0f && wz == 0.0f)
             continue;
 
-        float inner_off = (w & 1) ? -axle_halfw :  axle_halfw;
-        float outer_off = (w & 1) ?  axle_halfw : -axle_halfw;
+        float wheel_halfw = axle_halfw;
+        /* [BUG 3a] Pull a traffic wheel inboard until its outer tyre face sits at
+         * the model's half-width cap. Shrink the hub lateral offset first (keeps
+         * the tyre at full width); only if the half-width alone still overshoots
+         * do we also narrow the tyre. Never widens (cap==0 → disabled). Skipped
+         * for the synth layout, whose stance is already tuned (rb*0.30). */
+        if (traffic_outer_cap > 0.0f && !use_synth) {
+            float side = (wx < 0.0f) ? -1.0f : 1.0f;
+            float hub_mag = wx * side;                  /* |wx| */
+            if (hub_mag + wheel_halfw > traffic_outer_cap) {
+                float new_hub = traffic_outer_cap - wheel_halfw;
+                if (new_hub < 0.0f) {                   /* tyre alone too wide */
+                    new_hub = 0.0f;
+                    wheel_halfw = traffic_outer_cap;
+                }
+                wx = side * new_hub;
+            }
+        }
+
+        float inner_off = (w & 1) ? -wheel_halfw :  wheel_halfw;
+        float outer_off = (w & 1) ?  wheel_halfw : -wheel_halfw;
 
         /* Front-wheel steering yaw (CW-from-+Z) — applied via wheel_project to
          * BOTH tire and rim, so they stay locked together. */
@@ -7203,6 +7333,39 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
                 flush_immediate_internal();
                 td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);  /* alpha test discards transparent corners */
                 td5_plat_render_bind_texture(rim_page);
+                td5_plat_render_draw_tris(q, 4, qi, 12);
+            }
+        }
+
+        /* ---- Inboard wheel face: INWHEEL texture (BUG 6) ----
+         * The tyre tube was open on the inboard end, so the inside of the wheel
+         * read as a texture-less hole. Cap it with the INWHEEL atlas texture
+         * (the original game's inner-wheel art, s_inwheel_*), as a disc in the
+         * wheel plane at inner_off. Same spin + steering as the outer rim so it
+         * stays locked to the wheel. Sampled from tpage5 (s_wheel_tex_page). */
+        if (wheel_inner_tex_enabled()) {
+            float spin = (w < 2) ? front_spin : rear_spin;
+            float sc = cosf(spin), ss = sinf(spin);
+            static const float cly[4] = {  1.0f,  1.0f, -1.0f, -1.0f };
+            static const float clz[4] = { -1.0f,  1.0f,  1.0f, -1.0f };
+            const float cu[4] = { s_inwheel_u0, s_inwheel_u1, s_inwheel_u1, s_inwheel_u0 };
+            const float cv[4] = { s_inwheel_v0, s_inwheel_v0, s_inwheel_v1, s_inwheel_v1 };
+            /* Fill the wheel disc (rim_radius), not the smaller alloy inset. */
+            float in_r = rim_radius;
+            TD5_D3DVertex q[4];
+            int qok = 1;
+            for (int c = 0; c < 4 && qok; c++) {
+                float pl = cly[c] * in_r, pz = clz[c] * in_r;
+                float ly = pl * sc - pz * ss;
+                float lz = pl * ss + pz * sc;
+                qok &= wheel_project(m, wx, wy, wz, inner_off, ly, lz, cs, sn,
+                                     cu[c], cv[c], 0xFFFFFFFFu, &q[c]);
+            }
+            if (qok) {
+                static const uint16_t qi[12] = { 0,1,2, 0,2,3,  0,2,1, 0,3,2 }; /* double-sided */
+                flush_immediate_internal();
+                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+                td5_plat_render_bind_texture(s_wheel_tex_page);
                 td5_plat_render_draw_tris(q, 4, qi, 12);
             }
         }

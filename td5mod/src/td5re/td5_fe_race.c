@@ -63,7 +63,7 @@ static uint32_t mp_simul_player_nav(int player);
 static void mp_simul_drop_handle(int *cache, int player, int n);
 static void mp_simul_refresh_pane(int player);
 static void mp_simul_free_all_panes(int n);
-static void mp_simul_cycle_paint(int p, int step);
+static void mp_simul_cycle_paint(int p, int step, int sfx);
 static void frontend_mp_simul_carsel_init(void);
 static void mp_simul_back_to_lobby(int n);
 static void frontend_mp_simul_carsel_update(void);
@@ -76,6 +76,7 @@ static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> posit
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
+static int frontend_carsel_hold_enabled(void);   /* [#2/#7] TD5RE_CARSEL_HOLD gate (defined below) */
 
 static int      s_mp_player_color_idx[TD5_MAX_HUMAN_PLAYERS]; /* palette cursor for TD6 colour cycling */
 
@@ -451,40 +452,42 @@ static int frontend_random_icon_on(void) {
 #define FE_RAND_ICON_W 28
 #define FE_RAND_ICON_H 28
 
-/* [item #7] Reusable randomize-icon drawer. (x,y) is the chip's TOP-LEFT in the
- * 640x480 virtual canvas; sx/sy = window/canvas scale (same convention as every
- * other frontend overlay). Draws a small rounded chip carrying a die "5" dot
- * pattern (a recognisable "roll/shuffle" glyph) and brightens when focused.
- * NON-STATIC so another screen can reuse it (caller adds its own extern). */
+/* [item #7 / #12 2026-06-15] Reusable randomize-icon drawer. (x,y) is the chip's
+ * TOP-LEFT in the 640x480 virtual canvas; sx/sy = window/canvas scale (same
+ * convention as every other frontend overlay). Draws a die "5" dot pattern (a
+ * recognisable "roll/shuffle" glyph). The rounded CHIP + rim highlight is drawn
+ * ONLY when `focused` — when unselected there is NO background, just the white
+ * pips (user request #12: drop the gray background when unselected, show the chip
+ * only when it is the selected/focused button). NON-STATIC so another screen can
+ * reuse it (caller adds its own extern). */
 void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focused) {
     const float w = (float)FE_RAND_ICON_W;
     const float h = (float)FE_RAND_ICON_H;
     const float px = x * sx, py = y * sy, pw = w * sx, ph = h * sy;
 
-    /* Amber accent when focused (matches the menu-header / results amber), a
-     * dim steel chip otherwise. */
-    const uint32_t chip_focus = 0xFF3A4660u;   /* lit steel-blue interior */
-    const uint32_t chip_idle  = 0xCC202831u;   /* dim interior            */
-    const uint32_t rim_focus  = 0xFFFFCC33u;   /* amber rim when focused   */
-    const uint32_t rim_idle   = 0xFF7995FFu;   /* selector-blue rim        */
-    const uint32_t dot_col    = 0xFFFFFFFFu;   /* white pips               */
-    const uint32_t fill = focused ? chip_focus : chip_idle;
-    const uint32_t rim  = focused ? rim_focus  : rim_idle;
+    const uint32_t dot_col    = 0xFFFFFFFFu;   /* white pips (always drawn) */
 
-    /* Chip: prefer the procedural neon rounded-rect (crisp at any res); fall back
-     * to a solid quad + a manual 4-edge border when shapes aren't available. */
-    if (td5_vui_shapes_available()) {
-        td5_vui_roundrect(px, py, pw, ph,
-                          5.0f * sy, 5.0f * sy,     /* corner radii */
-                          2.0f * sx, 2.0f * sy,     /* rim thickness */
-                          rim, rim, rim, fill, 1.0f);
-    } else {
-        td5_vui_quad(px, py, pw, ph, fill, -1, 0, 0, 0, 0);
-        float bx = 2.0f * sx, byb = 2.0f * sy;
-        td5_vui_quad(px, py, pw, byb, rim, -1, 0, 0, 0, 0);            /* top    */
-        td5_vui_quad(px, py + ph - byb, pw, byb, rim, -1, 0, 0, 0, 0); /* bottom */
-        td5_vui_quad(px, py, bx, ph, rim, -1, 0, 0, 0, 0);            /* left   */
-        td5_vui_quad(px + pw - bx, py, bx, ph, rim, -1, 0, 0, 0, 0);  /* right  */
+    /* [#12] Chip + rim ONLY when focused — no background when unselected. The
+     * focused chip uses the amber rim (matches the menu-header / results amber)
+     * over a lit steel interior. */
+    if (focused) {
+        const uint32_t chip_focus = 0xFF3A4660u;   /* lit steel-blue interior */
+        const uint32_t rim_focus  = 0xFFFFCC33u;   /* amber rim when focused   */
+        /* Prefer the procedural neon rounded-rect (crisp at any res); fall back
+         * to a solid quad + a manual 4-edge border when shapes aren't available. */
+        if (td5_vui_shapes_available()) {
+            td5_vui_roundrect(px, py, pw, ph,
+                              5.0f * sy, 5.0f * sy,     /* corner radii */
+                              2.0f * sx, 2.0f * sy,     /* rim thickness */
+                              rim_focus, rim_focus, rim_focus, chip_focus, 1.0f);
+        } else {
+            td5_vui_quad(px, py, pw, ph, chip_focus, -1, 0, 0, 0, 0);
+            float bx = 2.0f * sx, byb = 2.0f * sy;
+            td5_vui_quad(px, py, pw, byb, rim_focus, -1, 0, 0, 0, 0);            /* top    */
+            td5_vui_quad(px, py + ph - byb, pw, byb, rim_focus, -1, 0, 0, 0, 0); /* bottom */
+            td5_vui_quad(px, py, bx, ph, rim_focus, -1, 0, 0, 0, 0);            /* left   */
+            td5_vui_quad(px + pw - bx, py, bx, ph, rim_focus, -1, 0, 0, 0, 0);  /* right  */
+        }
     }
 
     /* Die "5" pip pattern: four corners + centre, inside the chip's inner area.
@@ -1025,8 +1028,10 @@ static void mp_simul_free_all_panes(int n) {
 }
 
 /* Cycle a pane's paint/colour by `step` (+1/-1). TD6 cars walk the body-colour
- * palette; TD5 cars cycle their 4 paint schemes (no-op for paintless cars). */
-static void mp_simul_cycle_paint(int p, int step) {
+ * palette; TD5 cars cycle their 4 paint schemes (no-op for paintless cars).
+ * `sfx`=0 mutes the cycle ping — hold-to-repeat (Task #7) passes 0 so the sound
+ * plays only on the initial press, not at the repeat rate while held. */
+static void mp_simul_cycle_paint(int p, int step, int sfx) {
     int car = s_mp_player_car[p];
     if (frontend_car_paintable(car)) {
         int idx = s_mp_player_color_idx[p] + step;
@@ -1034,14 +1039,14 @@ static void mp_simul_cycle_paint(int p, int step) {
         if (idx >= TD6_PALETTE_N) idx = 0;
         s_mp_player_color_idx[p] = idx;
         s_mp_player_color[p]     = (int)s_td6_palette[idx];
-        frontend_play_sfx(2);
+        if (sfx) frontend_play_sfx(2);
     } else if (!frontend_car_is_td6(car) && frontend_car_has_paint(car)) {
         int pa = s_mp_player_paint[p] + step;
         if (pa < 0) pa = 3;
         if (pa > 3) pa = 0;
         s_mp_player_paint[p] = pa;
         mp_simul_refresh_pane(p);
-        frontend_play_sfx(2);
+        if (sfx) frontend_play_sfx(2);
     }
 }
 
@@ -1098,6 +1103,7 @@ static void frontend_mp_simul_carsel_init(void) {
         s_mp_pane_spec_car[p]    = -1;
         s_mp_pane_preview[p]     = 0;
         s_mp_pane_overlay[p]     = 0;
+        s_mp_rep_ms[p]           = 0;   /* [#7] clean CAR/PAINT hold-repeat timer */
         /* Seed the edge tracker with whatever's held now (the START press is
          * probably still down) so it isn't read as an instant action. */
         s_mp_pane_nav_prev[p]    = mp_simul_player_nav(p);
@@ -1168,7 +1174,25 @@ static void frontend_mp_simul_carsel_update(void) {
         if (edge & 4) { s_mp_pane_btn[p] = (s_mp_pane_btn[p] + MP_BTN_COUNT - 1) % MP_BTN_COUNT; frontend_play_sfx(2); }
         if (edge & 8) { s_mp_pane_btn[p] = (s_mp_pane_btn[p] + 1) % MP_BTN_COUNT;                 frontend_play_sfx(2); }
         {
-            int left = (edge & 1) != 0, right = (edge & 2) != 0, act = (edge & 0x10) != 0;
+            int act = (edge & 0x10) != 0;
+            /* [#7 2026-06-15 MP hold-to-change] CAR/PAINT ◄► auto-repeat: first fire
+             * on the rising edge, then a steady repeat while the direction is HELD —
+             * reusing the same mp_repeat_fire helper (320ms arm / 130ms rate) the
+             * colour grid already uses, gated by the SAME TD5RE_CARSEL_HOLD knob as
+             * the single-player selector. With the knob OFF this collapses to
+             * edge-only (one step per press, the previous behaviour). Direction bits
+             * are pre-masked to LEFT|RIGHT so vertical row nav stays strictly
+             * edge-driven; on the (rare) both-held frame RIGHT wins. Only CAR/PAINT
+             * repeat — STATS/TRANS/OK stay edge-only (act). */
+            int on_lr  = (s_mp_pane_btn[p] == MP_BTN_CAR || s_mp_pane_btn[p] == MP_BTN_PAINT);
+            int lr_fire = !on_lr ? 0
+                        : frontend_carsel_hold_enabled()
+                              ? mp_repeat_fire(p, bits & 3u, edge & 3u, now)  /* hold-repeat */
+                              : ((edge & 3u) != 0);                            /* edge-only fallback */
+            int lr_edge = (edge & 3u) != 0;   /* initial press keeps the cycle sound;
+                                               * repeat fires are silent (user request) */
+            int left  = lr_fire && !(bits & 2u);
+            int right = lr_fire && (bits & 2u) != 0;
             switch (s_mp_pane_btn[p]) {
             case MP_BTN_CAR:
                 if (left || right) {
@@ -1176,11 +1200,11 @@ static void frontend_mp_simul_carsel_update(void) {
                     s_mp_player_car[p]   = car;
                     s_mp_player_paint[p] = 0;   /* reset paint on car change (matches single-player) */
                     mp_simul_refresh_pane(p);
-                    frontend_play_sfx(5);
+                    if (lr_edge) frontend_play_sfx(5);
                 }
                 break;
             case MP_BTN_PAINT:
-                if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1);
+                if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1, lr_edge);
                 break;
             case MP_BTN_STATS:
                 if (act) { mp_simul_load_pane_spec(p, car); s_mp_pane_substate[p] = 1; frontend_play_sfx(3); }
@@ -1602,6 +1626,21 @@ void Screen_MpPosition(void) {
     }
 }
 
+/* [#2/#7 2026-06-15] Shared gate for car-select LEFT/RIGHT hold-to-cycle, used by
+ * BOTH the single-player selector (frontend_carsel_hold_repeat) and the
+ * simultaneous-MP grid (Task #7). Cached once, logged once.
+ * Knob: TD5RE_CARSEL_HOLD (default on; "0" restores single-step-per-press). */
+static int frontend_carsel_hold_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("TD5RE_CARSEL_HOLD");
+        enabled = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "car-select hold-to-cycle (#2/#7) %s (TD5RE_CARSEL_HOLD=%s)",
+                  enabled ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return enabled;
+}
+
 /* [#2 2026-06-15 hold-to-cycle] Single-player car-select LEFT/RIGHT auto-repeat.
  *
  * Root cause of the regression: keyboard menu nav is drained from the platform
@@ -1609,9 +1648,8 @@ void Screen_MpPosition(void) {
  * (td5_platform_win32.c WM_KEYDOWN: `if (!(lParam & (1L<<30)))`), and the
  * gamepad path is pure rising-edge (`!s_prev_*_state`). So `s_arrow_input` —
  * which frontend_option_delta() reads — fires exactly ONCE per physical press,
- * and holding a direction no longer kept cycling cars. (The simultaneous-MP
- * grid already worked around this with its own held-state repeat, mp_repeat_fire;
- * the single-player car selector had no such helper, so it lost hold-to-cycle.)
+ * and holding a direction no longer kept cycling cars. The simultaneous-MP grid
+ * (Task #7) shares the same fix via mp_repeat_fire gated on the SAME knob.
  *
  * Fix, contained to this screen: read the LIVE held direction (keyboard arrows +
  * any gamepad's nav bits) and, after a short arm delay, re-synthesize the
@@ -1621,17 +1659,10 @@ void Screen_MpPosition(void) {
  *
  * Knob: TD5RE_CARSEL_HOLD (default on; "0" restores single-step-per-press). */
 static int frontend_carsel_hold_repeat(void) {
-    static int  enabled = -1;
     static uint32_t next_ms = 0;     /* next allowed repeat fire (0 = disarmed) */
     static uint32_t prev_held = 0;   /* held bits last frame (for edge detect)  */
 
-    if (enabled < 0) {
-        const char *e = getenv("TD5RE_CARSEL_HOLD");
-        enabled = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "car-select hold-to-cycle (#2) %s (TD5RE_CARSEL_HOLD=%s)",
-                  enabled ? "ENABLED" : "disabled", e ? e : "default");
-    }
-    if (!enabled) return 0;
+    if (!frontend_carsel_hold_enabled()) return 0;
 
     /* Live HELD direction: keyboard arrows (scancodes) + aggregate gamepad nav.
      * s_fe_gamepad_nav is the held pad snapshot frontend_poll_input already took
@@ -1840,22 +1871,31 @@ void Screen_CarSelection(void) {
             frontend_create_button(SNK_BackButTxt, 118, 369, 96, 32);
         /* [#14] RANDOMIZE: a dedicated control for the Car selector. Created LAST
          * so the Car/Paint/Config/Auto/OK/Back indices used by the action switch
-         * (cases 0..5) are unchanged; navigation is geometric so it's reachable
-         * from the Car row. Activating it rolls a random selectable car.
+         * (cases 0..5) are unchanged. Activating it rolls a random selectable car.
          * (frontend_apply_color_panel_layout only repositions buttons 0..5, so this
          * one keeps its fixed position.) Skipped in network mode so the Back button
          * (created only when !network) keeps index 5 and RANDOMIZE can't collide
          * with the case-5 (Back) switch arm; net car-select picks are a deliberate
          * per-client choice anyway, not randomized.
          * [item #7 2026-06-15] NEW default form = a small ICON just to the RIGHT of
-         * the Car selector (Car rect = 46,169,168,32 -> right edge 214; icon at
-         * x=218 on the same row). The car preview begins at x=232 but its left
-         * margin is empty background where the chip lands, and the icon overlay is
-         * composited after the preview, so it reads cleanly. The hit-rect is
-         * created HIDDEN so the generic button loop skips its frame+label; the icon
-         * is painted in frontend_render_carsel_randomize_icon. The button stays
-         * clickable + keyboard-navigable (mouse/nav skip only disabled, not
-         * hidden). TD5RE_RANDOM_ICON=0 restores the legacy full-width button. */
+         * the Car selector (x=218, on its OWN sub-row y=171 — 2px below the Car row
+         * y=169). The hit-rect is created HIDDEN so the generic button loop skips
+         * its frame+label; the icon is painted in frontend_render_carsel_randomize_icon
+         * (chip only when focused, #12).
+         * [#12 2026-06-15 nav-selectable] KEY POINT: the icon's .y (171) is kept
+         * DISTINCT from the Car selector's .y (169) on purpose. The car screen
+         * navigates by INDEX+ROW (frontend_cycle_selected_button_by_row): a DISTINCT
+         * row means (a) the Car row's LEFT/RIGHT keeps cycling the car VALUE (no
+         * same-row neighbour to hijack the key), and (b) this icon — the highest
+         * button index, on a different row — is reached by pressing UP from the Car
+         * row (the vertical cycler wraps past the top to the highest different-row
+         * button). It is `active`, only `hidden` (skips the 9-slice loop) and never
+         * `disabled` except while the colour picker is open, so neither
+         * frontend_cycle_selected_button_by_row NOR frontend_spatial_pick (both
+         * ignore `hidden`) exclude it. Sharing the Car row's .y would have BROKEN
+         * value cycling, so do NOT "align" it. The cross-file note (report) covers
+         * enabling true geometric nav for an even more natural RIGHT-to-icon feel.
+         * TD5RE_RANDOM_ICON=0 restores the legacy full-width button. */
         if (frontend_random_button_on() && !s_network_active) {
             if (frontend_random_icon_on()) {
                 s_carsel_rand_btn = frontend_create_button(NULL, 218, 171,
@@ -2562,14 +2602,21 @@ void Screen_TrackSelection(void) {
         }
         /* [#14] RANDOMIZE: dedicated control for the Track selector. Created LAST
          * so the Track/Forwards/Opponents/.../OK/Back indices (0..7) used by the
-         * action handlers are unchanged; geometric nav reaches it from the Track
-         * row. Activating it picks a random track.
+         * action handlers are unchanged. Activating it picks a random track.
          * [item #7 2026-06-15] NEW default form = a small ICON to the RIGHT of the
-         * Track selector (Track rect = 120,97,224,32 -> right edge 344). Hit-rect
-         * created HIDDEN so the generic button loop skips its frame+label; the icon
-         * is painted in frontend_render_trksel_randomize_icon. Stays clickable +
-         * keyboard-navigable (mouse/nav skip only disabled, not hidden).
-         * TD5RE_RANDOM_ICON=0 restores the legacy full-width button. */
+         * Track selector (x=348, on its OWN sub-row y=99 — 2px below the Track row
+         * y=97). Hit-rect created HIDDEN so the generic button loop skips its
+         * frame+label; the icon is painted in frontend_render_trksel_randomize_icon
+         * (chip only when focused, #12).
+         * [#12 2026-06-15 nav-selectable] As on car-select, the icon's .y (99) is
+         * kept DISTINCT from the Track selector's .y (97): the screen navigates by
+         * INDEX+ROW, so a distinct row keeps the Track row's LEFT/RIGHT cycling the
+         * track VALUE while this (highest-index, different-row) icon is reached by
+         * pressing UP from the Track row (the vertical cycler wraps to the highest
+         * different-row button). It is `active`, only `hidden`, never `disabled`, so
+         * neither frontend_cycle_selected_button_by_row nor frontend_spatial_pick
+         * (both ignore `hidden`) exclude it. Do NOT "align" it to the Track row —
+         * that would hijack the value-cycle key. TD5RE_RANDOM_ICON=0 = full button. */
         if (frontend_random_button_on()) {
             if (frontend_random_icon_on()) {
                 s_trksel_rand_btn = frontend_create_button(NULL, 348, 99,
@@ -2972,10 +3019,85 @@ static int frontend_summary_speed_disp(int raw, int kph) {
                : (raw * 256 + 625) / 1252;  /* MPH [CONFIRMED @0x438ed4] */
 }
 
-/* SHORT car name (config.nfo line 1, e.g. "'97 CAMARO") for a RACE SLOT, read
- * lazily from the car's archive and cached. Mirrors the frontend's High-Scores
- * short-name reader; per-slot car index comes from g_td5.ai_car_indices[] (set
- * for every slot incl. slot 0 at race schedule build). */
+/* [#17 2026-06-15] Knob for the race-results AI car-name fix. Default ON =
+ * proper pretty display name (the same name the High-Scores / car-select screens
+ * show); TD5RE_SUMMARY_CARNAME=0 restores the legacy raw config.nfo line-1 read
+ * with the "CAR %d" / underscore-style fallback. */
+static int frontend_summary_carname_pretty(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_SUMMARY_CARNAME");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "race-results AI car names (#17) %s (TD5RE_SUMMARY_CARNAME=%s)",
+                  v ? "PRETTY display name" : "legacy raw", e ? e : "default");
+    }
+    return v;
+}
+
+/* Copy `src` into dst[dst_cap], converting '_' -> ' ' and stopping at EOL/NUL
+ * (and at the first whitespace when stop_at_space). Mirrors td5_frontend.c's
+ * frontend_copy_pretty_text (file-static there, so it can't be shared) so summary
+ * names read identically to the rest of the UI — no underscores, no raw IDs.
+ * Returns 1 if it wrote a non-empty string. */
+static int frontend_summary_copy_pretty(char *dst, size_t dst_cap, const char *src, int stop_at_space) {
+    size_t di = 0;
+    if (!dst || dst_cap == 0) return 0;
+    dst[0] = '\0';
+    if (!src) return 0;
+    while (*src && di + 1 < dst_cap) {
+        char ch = *src++;
+        if (ch == '\r' || ch == '\n') break;
+        if (stop_at_space && (ch == ' ' || ch == '\t')) break;
+        dst[di++] = (ch == '_') ? ' ' : ch;
+    }
+    dst[di] = '\0';
+    return dst[0] != '\0';
+}
+
+/* Read line `line_no` (0-based) of `entry` in `archive`, prettified into out.
+ * first_token=1 keeps only the first whitespace token (the config.eng display-name
+ * convention). Returns 1 on a non-empty result. Used to mirror the High-Scores
+ * short-name and the car-select display-name readers without touching the
+ * file-static helpers in td5_frontend.c. */
+static int frontend_summary_read_pretty_line(const char *entry, const char *archive,
+                                             int line_no, int first_token,
+                                             char *out, size_t out_cap) {
+    int sz = 0, ok = 0;
+    char *data;
+    if (!out || out_cap == 0) return 0;
+    out[0] = '\0';
+    if (!archive) return 0;
+    data = (char *)td5_asset_open_and_read(entry, archive, &sz);
+    if (data && sz > 0) {
+        int i = 0, ln = 0;
+        while (ln < line_no && i < sz) {                 /* skip to the target line */
+            while (i < sz && data[i] != '\n' && data[i] != '\r') i++;
+            while (i < sz && (data[i] == '\r' || data[i] == '\n')) i++;
+            ln++;
+        }
+        /* Copy the raw line slice into a bounded temp, then prettify into out. */
+        char raw[64]; int j = 0;
+        while (i < sz && j + 1 < (int)sizeof(raw) &&
+               data[i] != '\r' && data[i] != '\n' && data[i] != '\0')
+            raw[j++] = data[i++];
+        raw[j] = '\0';
+        ok = frontend_summary_copy_pretty(out, out_cap, raw, first_token);
+    }
+    if (data) free(data);
+    return ok;
+}
+
+/* SHORT car name for a RACE SLOT, read lazily from the car's archive and cached.
+ * [#17] Returns the PROPER pretty display name — the same name the High-Scores
+ * table (frontend_get_car_short_name) and the car-select screens
+ * (frontend_get_car_display_name) show — so AI cars no longer render the raw car
+ * ID / an underscore-style name. Source order matches those readers: config.nfo
+ * line 1 (short name) -> config.eng token 0 -> config.nfo line 0 -> zip basename,
+ * all with '_' converted to ' '. Per-slot car index comes from
+ * g_td5.ai_car_indices[] (set for every slot incl. slot 0 at schedule build).
+ * Those UI readers are file-static in td5_frontend.c (not exported in any header),
+ * so the pretty + fallback chain is replicated here rather than extern-called.
+ * TD5RE_SUMMARY_CARNAME=0 restores the legacy raw read. */
 static const char *frontend_summary_car_name(int slot) {
     static char  s_name[TD5_MAX_RACER_SLOTS][24];
     static int   s_loaded[TD5_MAX_RACER_SLOTS];
@@ -2986,23 +3108,59 @@ static const char *frontend_summary_car_name(int slot) {
     s_loaded[slot]  = 1;
     s_for_car[slot] = car;
     s_name[slot][0] = '\0';
-    if (car >= 0 && car < TD5_CAR_COUNT && s_car_zip_paths[car]) {
-        int sz = 0;
-        char *data = (char *)td5_asset_open_and_read("config.nfo", s_car_zip_paths[car], &sz);
-        if (data && sz > 0) {
-            int i = 0;
-            while (i < sz && data[i] != '\n' && data[i] != '\r') i++;   /* skip line 0 */
-            while (i < sz && (data[i] == '\r' || data[i] == '\n')) i++;
-            int j = 0;
-            while (i < sz && j + 1 < (int)sizeof(s_name[slot]) &&
-                   data[i] != '\r' && data[i] != '\n' && data[i] != '\0')
-                s_name[slot][j++] = data[i++];
-            s_name[slot][j] = '\0';
+
+    const char *zip = (car >= 0 && car < TD5_CAR_COUNT) ? s_car_zip_paths[car] : NULL;
+
+    if (!frontend_summary_carname_pretty()) {
+        /* Legacy path: raw config.nfo line 1, "CAR %d" fallback. */
+        if (zip) {
+            int sz = 0;
+            char *data = (char *)td5_asset_open_and_read("config.nfo", zip, &sz);
+            if (data && sz > 0) {
+                int i = 0;
+                while (i < sz && data[i] != '\n' && data[i] != '\r') i++;   /* skip line 0 */
+                while (i < sz && (data[i] == '\r' || data[i] == '\n')) i++;
+                int j = 0;
+                while (i < sz && j + 1 < (int)sizeof(s_name[slot]) &&
+                       data[i] != '\r' && data[i] != '\n' && data[i] != '\0')
+                    s_name[slot][j++] = data[i++];
+                s_name[slot][j] = '\0';
+            }
+            if (data) free(data);
         }
-        if (data) free(data);
+        if (!s_name[slot][0])
+            snprintf(s_name[slot], sizeof(s_name[slot]), "CAR %d", car);
+        return s_name[slot];
     }
-    if (!s_name[slot][0])
-        snprintf(s_name[slot], sizeof(s_name[slot]), "CAR %d", car);
+
+    /* Pretty path (default): match the High-Scores / car-select name chain. */
+    if (zip) {
+        /* 1) config.nfo line 1 = the short name the High-Scores table uses. */
+        if (frontend_summary_read_pretty_line("config.nfo", zip, 1, 0,
+                                              s_name[slot], sizeof(s_name[slot])))
+            return s_name[slot];
+        /* 2) config.eng token 0 = the car-select DISPLAY name (first whitespace
+         *    token, prettified) — same as frontend_get_car_display_name. */
+        if (frontend_summary_read_pretty_line("config.eng", zip, 0, 1,
+                                              s_name[slot], sizeof(s_name[slot])))
+            return s_name[slot];
+        /* 3) config.nfo line 0 = the long display line (whole line). */
+        if (frontend_summary_read_pretty_line("config.nfo", zip, 0, 0,
+                                              s_name[slot], sizeof(s_name[slot])))
+            return s_name[slot];
+        /* 4) zip basename minus extension, prettified. */
+        {
+            const char *base = strrchr(zip, '/');
+            base = base ? base + 1 : zip;
+            if (frontend_summary_copy_pretty(s_name[slot], sizeof(s_name[slot]), base, 0)) {
+                char *dot = strrchr(s_name[slot], '.');
+                if (dot) *dot = '\0';
+                if (s_name[slot][0]) return s_name[slot];
+            }
+        }
+    }
+    /* Absolute last resort (no archive at all): a neutral label, no underscores. */
+    snprintf(s_name[slot], sizeof(s_name[slot]), "CAR %d", car);
     return s_name[slot];
 }
 
