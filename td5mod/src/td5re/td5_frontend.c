@@ -3590,6 +3590,24 @@ static int frontend_mouse_single_click_on(void) {
     return v;
 }
 
+/* Re-assert the software cursor whenever the mouse actually moves. Cursor
+ * visibility is otherwise toggled only at a handful of screen-settle points
+ * (main menu / car-select / track-select) and is HIDDEN during every slide
+ * transition, so navigating to a screen that never explicitly re-shows it left
+ * the pointer invisible — the reported "cursor disappears after navigating a
+ * bit". Mouse motion now brings it back on any frontend screen.
+ * Knob TD5RE_CURSOR_ON_MOVE (default on; "0" reverts to screen-driven only). */
+static int frontend_cursor_on_move_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_CURSOR_ON_MOVE");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "cursor-on-move %s (TD5RE_CURSOR_ON_MOVE=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 /* Apply ONE menu navigation event — a single cursor move or confirm. Shared by
  * the gamepad immediate-edge path and the keyboard WM_KEYDOWN FIFO drain so both
  * behave identically: exactly one move per press, matching the original's
@@ -3842,6 +3860,11 @@ static void frontend_poll_input(void) {
     if (s_mouse_y > 479) s_mouse_y = 479;
     mouse_moved = (s_mouse_x != s_prev_mouse_x || s_mouse_y != s_prev_mouse_y);
     if (mouse_moved) had_activity = 1;
+    /* [fix 2026-06-15] Moving the mouse re-shows the cursor on every frontend
+     * screen (see frontend_cursor_on_move_on). s_prev_mouse_{x,y} start at -1 so
+     * the very first poll counts as "moved" once and asserts a visible cursor. */
+    if (mouse_moved && frontend_cursor_on_move_on())
+        frontend_set_cursor_visible(1);
 
     /* Mouse click: catch both held-edge presses and short clicks between frames. */
     mouse_state = GetAsyncKeyState(VK_LBUTTON);

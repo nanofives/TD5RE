@@ -252,6 +252,11 @@ static uint32_t s_ff_gear_seen [TD5_MAX_RACER_SLOTS];
 static uint32_t s_ff_crash_seen[TD5_MAX_RACER_SLOTS];
 static int      s_ff_pulse_mag  [TD5_MAX_RACER_SLOTS];
 static int      s_ff_pulse_ticks[TD5_MAX_RACER_SLOTS];
+/* [FF stuck-motor fix 2026-06-15] SIDE-collision (slot 2 / low motor) decaying
+ * pulse, the low-motor analogue of the frontal jolt above. V2V/wall collisions
+ * now feed these instead of a persistent motor write that was never cleared. */
+static int      s_ff_side_mag   [TD5_MAX_RACER_SLOTS];
+static int      s_ff_side_ticks [TD5_MAX_RACER_SLOTS];
 
 /* TD5RE_FORCE_FEEDBACK (cached): master gate for the physics-driven vibration.
  * Default ON; "0" reverts to the prior behaviour (steering + terrain FF only,
@@ -281,6 +286,7 @@ static int td5_ff_vibration_enabled(void)
 #define TD5_FF_GEAR_PULSE_TICKS       2   /* render-frames the gear bump holds */
 #define TD5_FF_CRASH_PULSE_MAG_MAX 10000  /* full-scale strong crash jolt */
 #define TD5_FF_CRASH_PULSE_TICKS      4   /* render-frames the crash jolt holds */
+#define TD5_FF_COLLISION_PULSE_TICKS  6   /* render-frames a V2V/wall collision jolt holds before auto-release */
 #define TD5_FF_CRASH_NEW_AGE_TICKS    3   /* a crash is "new" if age <= this (sim ticks) */
 /* Crash impact magnitude is large (acute threshold 250000); scale it to the FF
  * domain. >>5 maps ~250000 -> ~7800 and saturates to 10000 by ~320000. */
@@ -342,6 +348,8 @@ int td5_input_init(void)
     memset(s_ff_crash_seen, 0, sizeof(s_ff_crash_seen));
     memset(s_ff_pulse_mag, 0, sizeof(s_ff_pulse_mag));
     memset(s_ff_pulse_ticks, 0, sizeof(s_ff_pulse_ticks));
+    memset(s_ff_side_mag, 0, sizeof(s_ff_side_mag));
+    memset(s_ff_side_ticks, 0, sizeof(s_ff_side_ticks));
     memset(s_fe_cam_held, 0, sizeof(s_fe_cam_held));
     memset(s_fe_front_held, 0, sizeof(s_fe_front_held));
     memset(s_replay_log_path, 0, sizeof(s_replay_log_path));
@@ -2253,6 +2261,8 @@ int td5_input_ff_init(void)
             s_ff_crash_seen[p]  = td5_physics_get_crash_fx(p, NULL, NULL);
             s_ff_pulse_mag[p]   = 0;
             s_ff_pulse_ticks[p] = 0;
+            s_ff_side_mag[p]    = 0;
+            s_ff_side_ticks[p]  = 0;
         }
     }
 
@@ -2372,19 +2382,37 @@ static void td5_input_ff_update_jolt(int slot)
         }
     }
 
-    /* ---- Drive / decay the jolt on slot 1 (constant force) ---- */
+    /* ---- Drive / decay the jolt on slot 1 (FRONTAL -> high motor) ---- */
     if (s_ff_pulse_ticks[slot] > 0) {
         td5_plat_ff_constant(dev, TD5_FF_SLOT_FRONTAL, s_ff_pulse_mag[slot]);
         s_ff_pulse_ticks[slot]--;
         if (s_ff_pulse_ticks[slot] == 0) s_ff_pulse_mag[slot] = 0;
     } else if (s_ff_pulse_mag[slot] != 0) {
-        /* Pulse expired: release the slot so it stops asserting force — unless a
-         * V2V/wall collision effect (td5_input_ff_collision, same slot) is in
-         * recovery, in which case leave it to that path. */
+        /* Pulse expired: release the slot so it stops asserting force. [stuck-motor
+         * fix 2026-06-15] Frontal V2V/wall collisions now feed THIS same pulse
+         * (td5_input_ff_collision), so there is no separate persistent collision
+         * effect to protect — always stop. The OLD collision_active guard here left
+         * the motor asserted forever once a start-line contact latched the flag
+         * (the reported "vibrates on race start and never stops"). */
         s_ff_pulse_mag[slot] = 0;
-        if (s_ff.collision_active[slot] == 0)
-            td5_plat_ff_stop(dev, TD5_FF_SLOT_FRONTAL);
+        td5_plat_ff_stop(dev, TD5_FF_SLOT_FRONTAL);
     }
+
+    /* ---- Drive / decay the SIDE collision pulse on slot 2 (low motor) ---- */
+    if (s_ff_side_ticks[slot] > 0) {
+        td5_plat_ff_constant(dev, TD5_FF_SLOT_SIDE, s_ff_side_mag[slot]);
+        s_ff_side_ticks[slot]--;
+        if (s_ff_side_ticks[slot] == 0) s_ff_side_mag[slot] = 0;
+    } else if (s_ff_side_mag[slot] != 0) {
+        s_ff_side_mag[slot] = 0;
+        td5_plat_ff_stop(dev, TD5_FF_SLOT_SIDE);
+    }
+
+    /* Terrain-dampen latch counts down so it can't stick on. The old code only
+     * ever cleared it on the one-time terrain-effect start, so any collision left
+     * it asserted for the rest of the race. */
+    if (s_ff.collision_active[slot] > 0)
+        s_ff.collision_active[slot]--;
 }
 
 void td5_input_ff_update(void)
@@ -2411,9 +2439,14 @@ void td5_input_ff_stop(void)
         s_ff.steer_effect_started[dev] = 0;
         s_ff.terrain_effect_started[dev] = 0;
         /* [FF SIGNALS #1] drop any in-flight crash/gear jolt so a stopped device
-         * doesn't resume buzzing when effects restart. */
+         * doesn't resume buzzing when effects restart. [stuck-motor fix 2026-06-15]
+         * also drop the side-collision pulse and the terrain-dampen latch so a
+         * pause/race-end leaves every motor at zero. */
         s_ff_pulse_mag[dev] = 0;
         s_ff_pulse_ticks[dev] = 0;
+        s_ff_side_mag[dev] = 0;
+        s_ff_side_ticks[dev] = 0;
+        s_ff.collision_active[dev] = 0;
     }
 }
 
@@ -2653,6 +2686,29 @@ void td5_input_ff_play_effect(int slot, int effect_slot, int magnitude,
  *   orig has no equivalent damping). Switch logic, clamps, and slot
  *   assignment byte-faithful. */
 
+/* [stuck-motor fix 2026-06-15] Arm a collision as a DECAYING pulse that the FF
+ * manager (td5_input_ff_update_jolt) drives and auto-releases each frame, rather
+ * than the old td5_input_ff_play_effect path which started a CONSTANT force that
+ * was never stopped (the motor then buzzed for the rest of the race). slot 1
+ * (FRONTAL) -> high-motor pulse, slot 2 (SIDE) -> low-motor pulse. max() so a
+ * stronger jolt already in flight isn't cut short by a glancing follow-up. */
+static void ff_arm_collision_pulse(int slot, int effect_slot, int mag)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    if (mag <= 0) return;
+    if (effect_slot == TD5_FF_SLOT_FRONTAL) {
+        if (mag > s_ff_pulse_mag[slot]) s_ff_pulse_mag[slot] = mag;
+        if (TD5_FF_COLLISION_PULSE_TICKS > s_ff_pulse_ticks[slot])
+            s_ff_pulse_ticks[slot] = TD5_FF_COLLISION_PULSE_TICKS;
+    } else { /* TD5_FF_SLOT_SIDE */
+        if (mag > s_ff_side_mag[slot]) s_ff_side_mag[slot] = mag;
+        if (TD5_FF_COLLISION_PULSE_TICKS > s_ff_side_ticks[slot])
+            s_ff_side_ticks[slot] = TD5_FF_COLLISION_PULSE_TICKS;
+    }
+    /* Arm the terrain-dampen countdown (auto-expires in the FF manager). */
+    s_ff.collision_active[slot] = TD5_FF_COLLISION_PULSE_TICKS;
+}
+
 void td5_input_ff_collision(int contact_side, int actor_a_slot,
                             int actor_b_slot, int raw_magnitude)
 {
@@ -2684,17 +2740,10 @@ void td5_input_ff_collision(int contact_side, int actor_a_slot,
         break;
     }
 
-    /* Fire effect on vehicle A's player */
-    if (actor_a_slot >= 0 && actor_a_slot < TD5_MAX_RACER_SLOTS) {
-        td5_input_ff_play_effect(actor_a_slot, slot_a_effect, mag_a, 0);
-        s_ff.collision_active[actor_a_slot] = 1;
-    }
-
-    /* Fire effect on vehicle B's player */
-    if (actor_b_slot >= 0 && actor_b_slot < TD5_MAX_RACER_SLOTS) {
-        td5_input_ff_play_effect(actor_b_slot, slot_b_effect, mag_b, 0);
-        s_ff.collision_active[actor_b_slot] = 1;
-    }
+    /* Arm a decaying pulse on each vehicle's player (auto-releases in the FF
+     * manager — no more persistent, never-stopped collision force). */
+    ff_arm_collision_pulse(actor_a_slot, slot_a_effect, mag_a);
+    ff_arm_collision_pulse(actor_b_slot, slot_b_effect, mag_b);
 }
 
 /* ========================================================================

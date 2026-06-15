@@ -4368,7 +4368,13 @@ int td5_game_run_race_frame(void) {
              * init re-plays it, the others tear the race down). */
             td5_sound_cd_stop();
             td5_sound_set_paused(1);  /* [item 24] suspend ALL audio at once on pause (gated TD5RE_PAUSE_MUTE) */
-            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 2, SFX muted, music stopped)");
+            /* [FF stuck-motor fix 2026-06-15] The sim (and its FF update inside
+             * PollRaceSessionInput) freezes while paused, so any motor asserted at
+             * the moment of pause would stay latched — the reported "force feedback
+             * doesn't stop on the pause menu". Zero all motors now; the per-frame FF
+             * update naturally resumes them on CONTINUE. */
+            td5_input_ff_stop();
+            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 2, SFX muted, music stopped, FF stopped)");
         }
         if (s_pause_menu_active) {
             /* Process pause menu input ONCE per frame (not per tick) to avoid
