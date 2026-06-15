@@ -5506,6 +5506,11 @@ int td5_game_run_race_frame(void) {
             }
         }
 
+        /* [task#14] Visible TD6 breakable-prop boxes — solid scene geometry,
+         * after track + actors, before translucent VFX (single-view path). */
+        if (!td5_render_photobooth_active())
+            render_td6_props(td5_game_get_actor(g_actorSlotForView[vp]));
+
         /* VFX: tire tracks, particles */
         if (!td5_render_photobooth_active()) {
             td5_vfx_render_tire_tracks();
