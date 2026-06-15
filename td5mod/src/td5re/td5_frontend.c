@@ -606,6 +606,7 @@ static int  s_prev_mouse_hover_button = -1;
 static uint32_t s_mouse_confirm_until;
 static int  s_mouse_flash_button = -1;
 static uint32_t s_mouse_flash_until;
+static uint32_t s_mouse_act_until;   /* debounce horizon: absorb the 2nd click of a rapid double-click after a mouse activation */
 
 /* Fade state */
 int      s_fade_active;
@@ -3912,7 +3913,15 @@ static void frontend_poll_input(void) {
      * when clicking on the already-selected button, if mouse is within 20px (0x14)
      * of the right edge, set arrow_input RIGHT; within 20px of left edge, set LEFT.
      * This enables mouse-driven left/right cycling on options screens. */
-    if (s_mouse_clicked) {
+    if (s_mouse_clicked && frontend_mouse_single_click_on() && now < s_mouse_act_until) {
+        /* [fix 2026-06-15] Absorb the 2nd click of a rapid double-click: with
+         * single-click activation a double-click would otherwise fire TWICE — the
+         * 2nd click bleeding into whatever button sits under the cursor on the next
+         * screen ("button reacts the first time"). Swallow any click within the
+         * debounce window armed by the activation below. Only arms after an actual
+         * activation, so arrow-zone cycling / selection clicks are unaffected. */
+        s_mouse_click_latched = 0;
+    } else if (s_mouse_clicked) {
         /* Find which button the mouse is over */
         int hit_button = -1;
         for (int i = 0; i < FE_MAX_BUTTONS; i++) {
@@ -3951,6 +3960,7 @@ static void frontend_poll_input(void) {
                 s_mouse_flash_button = i;
                 s_mouse_flash_until = now + 180;
                 s_mouse_confirm_button = -1;
+                s_mouse_act_until = now + 300;   /* a 2nd click within 300ms = a double-click, absorbed above */
                 frontend_play_sfx(3);
                 TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse",
                           i, s_buttons[i].label);
