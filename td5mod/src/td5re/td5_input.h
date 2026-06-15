@@ -271,18 +271,21 @@ int      td5_input_get_rear_view(int slot);
  * Public API -- Frontend camera-button edge getters (#6 support)
  *
  * Edge-triggered (return 1 exactly once per press), per LOCAL human player
- * index (0..s_active_players-1, NOT an actor slot). They poll that player's
- * configured device in the FRONTEND/menu context — the same per-action binding
- * decode the in-race poll uses, so a controller's CHANGE-CAMERA / FRONT-REAR-
- * VIEW bindings are honoured even though no race owns the device. Consumed by
- * the MP position screen (td5_fe_race.c). Safe to call every frame from the
- * frontend; reading CONSUMES the edge (a held button fires once per press).
- * Each maintains its own per-player held-latch, independent of the in-race
- * rear-view / camera-cooldown state.
- *   _change_camera reads the CHANGE VIEW binding  (TD5_INPUT_CAMERA_CHANGE)
- *   _front_view    reads the FRONT/REAR VIEW binding (TD5_INPUT_REAR_VIEW)
- * Gated by TD5RE_FRONTEND_CAM_BUTTONS (cached; default ON). "0" makes both
- * always return 0 (the edge latches are never armed). */
+ * index (0..s_active_players-1, NOT an actor slot). Drive the MP position screen
+ * (td5_fe_race.c) even though no race owns the device. Safe to call every frame
+ * from the frontend; reading CONSUMES the edge (a held button fires once per
+ * press). Gated by TD5RE_FRONTEND_CAM_BUTTONS (cached; default ON). "0" makes
+ * both always return 0 (the edge latches are never armed).
+ *   _change_camera = CHANGE VIEW (keyboard TD5_INPUT_CAMERA_CHANGE) OR a
+ *                    controller's Start/Menu button.
+ *   _front_view    = FRONT/REAR VIEW (keyboard TD5_INPUT_REAR_VIEW); on a
+ *                    controller it currently needs a bound device.
+ * [BUG #13] In the frontend the keyboard is read by td5_plat_input_poll, but the
+ * pad lives only on the shared NON-exclusive scan handles (no per-slot exclusive
+ * device exists pre-race), so the joystick is read via td5_plat_input_frontend_nav.
+ * That scan reader exposes only nav buttons (dir/A/B/Start), so just CHANGE-CAMERA
+ * (Start/Menu, the one free signal) is pad-driven here; FRONT-VIEW needs a
+ * platform scan action-button accessor (see td5_input.c). */
 int td5_input_frontend_change_camera_pressed(int player);
 int td5_input_frontend_front_view_pressed(int player);
 

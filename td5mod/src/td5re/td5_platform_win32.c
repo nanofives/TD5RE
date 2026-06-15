@@ -114,6 +114,10 @@ static LPDIRECTINPUTDEVICE8A s_di_mouse      = NULL;
  * this to 2. Each race player binds to the keyboard or one of the joysticks. */
 #define TD5_PLAT_MAX_JS_SLOTS 9
 static LPDIRECTINPUTDEVICE8A s_di_joystick[TD5_PLAT_MAX_JS_SLOTS] = { NULL };
+/* Instance GUID of the device bound to each slot (mirrors s_device_guids[idx]
+ * of whatever td5_plat_input_set_device opened). Lets the FF layer map a slot
+ * back to its enumerated device for XInput detection. [#1 2026-06-15] */
+static GUID s_di_joystick_guid[TD5_PLAT_MAX_JS_SLOTS];
 /* 9-slot binding table per player, mirroring the original DAT_00463FC4 row:
  *   [0]=active flag, [1]/[2]=axis assignment (4=X-like, 5=Y-like, swappable),
  *   [3..8]=6 button actions (value 2..10 selects physical button = value-2).
@@ -2180,6 +2184,7 @@ void td5_plat_input_set_device(int slot, int device_index)
             IDirectInputDevice8_Release(s_di_joystick[slot]);
             s_di_joystick[slot] = NULL;
         }
+        ZeroMemory(&s_di_joystick_guid[slot], sizeof(s_di_joystick_guid[slot]));
         TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s",
                   slot, device_index, "Keyboard");
         return;
@@ -2224,8 +2229,13 @@ void td5_plat_input_set_device(int slot, int device_index)
             TD5_LOG_W(LOG_TAG, "Input device select: CreateDevice failed hr=0x%08lX slot=%d device=%d (%s)",
                       (unsigned long)hr, slot, device_index, s_device_names[device_index]);
             s_di_joystick[slot] = NULL;
+            ZeroMemory(&s_di_joystick_guid[slot], sizeof(s_di_joystick_guid[slot]));
             return;
         }
+
+        /* Remember which enumerated device this slot is now bound to, so the FF
+         * layer can identify it for XInput rumble routing. [#1 2026-06-15] */
+        s_di_joystick_guid[slot] = s_device_guids[device_index];
 
         /* DIJOYSTATE2 format — matches the struct the poll reads. */
         IDirectInputDevice8_SetDataFormat(s_di_joystick[slot], &c_dfDIJoystick2);
@@ -2730,6 +2740,229 @@ uint32_t td5_plat_input_device_nav(int enum_index)
 }
 
 /* ========================================================================
+ * XInput rumble (force-feedback for gamepads) [#1 2026-06-15]
+ *
+ * 8BitDo pads (and most modern XInput gamepads) expose rumble via XInput
+ * (XInputSetState + XINPUT_VIBRATION), NOT DirectInput force-feedback EFFECTS.
+ * On such a device IDirectInputDevice8::GetCapabilities reports no
+ * DIDC_FORCEFEEDBACK and the DI-effect path (below) silently no-ops, so FF
+ * "does nothing". This block adds an XInput rumble output and the FF entry
+ * points (td5_plat_ff_constant / td5_plat_ff_stop) prefer it for any device
+ * that turns out to be XInput-capable; DI effects remain the path for wheels.
+ *
+ * Knob TD5RE_FF_XINPUT (cached): default ON; "0" reverts to DI-effects only.
+ *
+ * Linkage: XInput is loaded DYNAMICALLY (LoadLibraryA + GetProcAddress, like
+ * the dwmapi block in td5_plat_init) so a missing xinput DLL can never break
+ * startup and the build needs NO -lxinput. We declare the tiny ABI we use here
+ * rather than #include <xinput.h> (mirrors the inline-typedef dwmapi precedent).
+ * ======================================================================== */
+
+typedef struct TD5_XINPUT_VIBRATION { WORD wLeftMotorSpeed; WORD wRightMotorSpeed; } TD5_XINPUT_VIBRATION;
+/* XInputGetState wants an XINPUT_STATE; we only read dwPacketNumber + need the
+ * right byte size, so use a fixed 16-byte blob (dwPacketNumber + XINPUT_GAMEPAD). */
+typedef struct TD5_XINPUT_STATE { DWORD dwPacketNumber; BYTE pad[12]; } TD5_XINPUT_STATE;
+typedef DWORD (WINAPI *PFN_XInputSetState)(DWORD, TD5_XINPUT_VIBRATION *);
+typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD, TD5_XINPUT_STATE *);
+
+#define TD5_XINPUT_MAX_USERS 4   /* XUSER_MAX_COUNT */
+#define TD5_ERROR_SUCCESS    0L
+
+static PFN_XInputSetState s_xi_set = NULL;
+static PFN_XInputGetState s_xi_get = NULL;
+static int  s_xi_loaded = 0;     /* DLL probed (1 even if not found) */
+static int  s_xi_avail  = 0;     /* both procs resolved */
+/* Per-player-slot XInput routing: the XInput user index (0..3) the slot's pad
+ * was assigned, or -1 = not an XInput device (use DI effects). Cached low/high
+ * motor magnitudes (0..65535) so we only XInputSetState on change, and so the
+ * four DI effect-slots can each own one motor without stomping the other. */
+static int  s_xi_user[TD5_PLAT_MAX_JS_SLOTS];
+static WORD s_xi_low [TD5_PLAT_MAX_JS_SLOTS];   /* low-freq (heavy) motor (resolved) */
+static WORD s_xi_high[TD5_PLAT_MAX_JS_SLOTS];   /* high-freq (light) motor */
+/* The low motor is driven by two independent contributors so a stop on one
+ * doesn't silence the other: [0]=steering/side (slots 0/2), [1]=terrain buzz
+ * (slot 3). The resolved s_xi_low is max(contrib[0],contrib[1]). */
+static WORD s_xi_low_contrib[TD5_PLAT_MAX_JS_SLOTS][2];
+
+/* TD5RE_FF_XINPUT (cached): master gate for the XInput rumble path. Default ON. */
+static int td5_ff_xinput_enabled(void)
+{
+    static int s_init = 0;
+    static int s_on = 1;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_FF_XINPUT");
+        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "FF XInput rumble path: %s",
+                  s_on ? "enabled (default)" : "disabled (DI effects only)");
+    }
+    return s_on;
+}
+
+/* Lazily resolve XInput once. Tries the modern DLLs first, then the legacy ones.
+ * Idempotent; safe to call before any device exists. */
+static int td5_xinput_load(void)
+{
+    static const char *names[] = {
+        "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll", "xinput1_2.dll", "xinput1_1.dll"
+    };
+    HMODULE h = NULL;
+    int i;
+    if (s_xi_loaded) return s_xi_avail;
+    s_xi_loaded = 1;
+    for (i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
+        h = LoadLibraryA(names[i]);
+        if (h) break;
+    }
+    if (h) {
+        s_xi_set = (PFN_XInputSetState)(void *)GetProcAddress(h, "XInputSetState");
+        s_xi_get = (PFN_XInputGetState)(void *)GetProcAddress(h, "XInputGetState");
+        s_xi_avail = (s_xi_set != NULL && s_xi_get != NULL);
+        /* Keep the DLL loaded for the lifetime of the app (matches dwmapi). */
+    }
+    TD5_LOG_I(LOG_TAG, "XInput load: %s (dll=%s)",
+              s_xi_avail ? "available" : "unavailable",
+              (i < (int)(sizeof(names)/sizeof(names[0])) && h) ? names[i] : "<none>");
+    return s_xi_avail;
+}
+
+/* Is the DirectInput device at enumeration index `device_index` an XInput pad?
+ *
+ * MSDN-documented detection: an XInput device's name in the raw-input device
+ * list contains the substring "IG_"; its DirectInput PRODUCT GUID encodes the
+ * VID/PID in Data1 (== MAKELONG(VID,PID)). We scan GetRawInputDeviceList for
+ * HID devices whose name contains "IG_", parse their VID_xxxx&PID_xxxx, and
+ * test whether the device's product-GUID device-id matches. Uses only
+ * user32/GetRawInputDeviceInfo (no extra lib). Returns 1 if XInput. */
+static int td5_device_is_xinput(int device_index)
+{
+    UINT n_dev = 0, i;
+    PRAWINPUTDEVICELIST list = NULL;
+    DWORD target_id;            /* MAKELONG(VID,PID) for this DI device */
+    int is_xi = 0;
+
+    if (device_index <= 0 || device_index >= s_device_count || device_index >= 16)
+        return 0;
+    target_id = (DWORD)s_device_product_guids[device_index].Data1;
+
+    if (GetRawInputDeviceList(NULL, &n_dev, sizeof(RAWINPUTDEVICELIST)) != 0 || n_dev == 0)
+        return 0;
+    list = (PRAWINPUTDEVICELIST)malloc(sizeof(RAWINPUTDEVICELIST) * n_dev);
+    if (!list) return 0;
+    if (GetRawInputDeviceList(list, &n_dev, sizeof(RAWINPUTDEVICELIST)) == (UINT)-1) {
+        free(list);
+        return 0;
+    }
+
+    for (i = 0; i < n_dev && !is_xi; i++) {
+        char name[512];
+        UINT name_len = (UINT)sizeof(name);
+        unsigned int vid = 0, pid = 0;
+        const char *p;
+        if (list[i].dwType != RIM_TYPEHID) continue;
+        if (GetRawInputDeviceInfoA(list[i].hDevice, RIDI_DEVICENAME, name, &name_len) == (UINT)-1)
+            continue;
+        if (!strstr(name, "IG_")) continue;   /* not an XInput-class device */
+        /* Device path looks like \\?\HID#VID_045E&PID_028E&IG_00#... */
+        p = strstr(name, "VID_");
+        if (p) sscanf(p + 4, "%4x", &vid);
+        p = strstr(name, "PID_");
+        if (p) sscanf(p + 4, "%4x", &pid);
+        if (vid && pid && (DWORD)MAKELONG(vid, pid) == target_id)
+            is_xi = 1;
+    }
+    free(list);
+    return is_xi;
+}
+
+/* Pick an XInput user index (0..3) for a slot whose DI device is XInput-class.
+ * XInput exposes no DI-instance correlation, so we hand out connected user
+ * indices in ascending order, skipping ones already claimed by another slot.
+ * Returns -1 if none free/connected. */
+static int td5_xinput_assign_user(int device_slot)
+{
+    int u, s;
+    if (!s_xi_get) return -1;
+    for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
+        TD5_XINPUT_STATE st;
+        int claimed = 0;
+        for (s = 0; s < TD5_PLAT_MAX_JS_SLOTS; s++)
+            if (s != device_slot && s_xi_user[s] == u) { claimed = 1; break; }
+        if (claimed) continue;
+        ZeroMemory(&st, sizeof(st));
+        if (s_xi_get((DWORD)u, &st) == TD5_ERROR_SUCCESS)
+            return u;   /* connected and free */
+    }
+    return -1;
+}
+
+/* Push the slot's cached low/high motor magnitudes to its XInput pad. */
+static void td5_xinput_push(int device_slot)
+{
+    TD5_XINPUT_VIBRATION vib;
+    int u;
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return;
+    u = s_xi_user[device_slot];
+    if (u < 0 || !s_xi_set) return;
+    vib.wLeftMotorSpeed  = s_xi_low [device_slot];
+    vib.wRightMotorSpeed = s_xi_high[device_slot];
+    s_xi_set((DWORD)u, &vib);
+}
+
+/* Map a DI effect magnitude (0..DI_FFNOMINALMAX) to a motor word (0..65535). */
+static WORD td5_xinput_scale(int magnitude)
+{
+    long m;
+    if (magnitude < 0) magnitude = -magnitude;
+    if (magnitude > DI_FFNOMINALMAX) magnitude = DI_FFNOMINALMAX;
+    m = ((long)magnitude * 65535L) / DI_FFNOMINALMAX;
+    if (m > 65535L) m = 65535L;
+    return (WORD)m;
+}
+
+/* Route one effect-slot write to the XInput motors.
+ *   slot 1 (TD5_FF_SLOT_FRONTAL — crash/gear JOLTS) -> HIGH-freq motor.
+ *   slot 0/2 (steering/side constant) + slot 3 (terrain/drift/redline buzz)
+ *     -> LOW-freq motor (the heavy motor; max of the contributors wins so the
+ *      steering pull and the buzz don't cancel). Returns 1 if handled here. */
+static int td5_xinput_route_effect(int device_slot, int slot, int magnitude)
+{
+    WORD w;
+    if (!s_xi_loaded) return 0;                  /* ff_init never ran -> s_xi_user not armed */
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return 0;
+    if (s_xi_user[device_slot] < 0) return 0;   /* not an XInput device */
+    w = td5_xinput_scale(magnitude);
+    if (slot == 1) {
+        s_xi_high[device_slot] = w;                       /* sharp jolt motor */
+    } else {
+        /* low motor is shared by the steering/side (slots 0/2 -> contrib[0])
+         * and terrain/drift buzz (slot 3 -> contrib[1]); resolved = max. */
+        s_xi_low_contrib[device_slot][slot == 3 ? 1 : 0] = w;
+        s_xi_low[device_slot] = s_xi_low_contrib[device_slot][0] > s_xi_low_contrib[device_slot][1]
+                              ? s_xi_low_contrib[device_slot][0] : s_xi_low_contrib[device_slot][1];
+    }
+    td5_xinput_push(device_slot);
+    return 1;
+}
+
+/* Route one effect-slot STOP to the XInput motors. Returns 1 if handled here. */
+static int td5_xinput_route_stop(int device_slot, int slot)
+{
+    if (!s_xi_loaded) return 0;                  /* ff_init never ran -> s_xi_user not armed */
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return 0;
+    if (s_xi_user[device_slot] < 0) return 0;
+    if (slot == 1) {
+        s_xi_high[device_slot] = 0;
+    } else {
+        s_xi_low_contrib[device_slot][slot == 3 ? 1 : 0] = 0;
+        s_xi_low[device_slot] = s_xi_low_contrib[device_slot][0] > s_xi_low_contrib[device_slot][1]
+                              ? s_xi_low_contrib[device_slot][0] : s_xi_low_contrib[device_slot][1];
+    }
+    td5_xinput_push(device_slot);
+    return 1;
+}
+
+/* ========================================================================
  * Force Feedback
  * ======================================================================== */
 
@@ -2820,6 +3053,18 @@ static int td5_ff_create_periodic_effect(int dev, int slot)
 int td5_plat_ff_init(int device_slot)
 {
     DIDEVCAPS caps;
+    int xinput_ready = 0;
+
+    /* s_xi_user[] is zero-initialized by the C runtime, but 0 is a VALID XInput
+     * user index, so on first entry mark every slot "not XInput" (-1). */
+    {
+        static int s_xi_user_inited = 0;
+        if (!s_xi_user_inited) {
+            int s;
+            for (s = 0; s < TD5_PLAT_MAX_JS_SLOTS; s++) s_xi_user[s] = -1;
+            s_xi_user_inited = 1;
+        }
+    }
 
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
         return 0;
@@ -2828,6 +3073,41 @@ int td5_plat_ff_init(int device_slot)
     /* Force feedback runs on this player's joystick (the wheel/pad). */
     if (!s_di_joystick[device_slot]) {
         return 0;
+    }
+
+    /* [#1 2026-06-15] Prefer XInput rumble for XInput-capable pads (8BitDo &
+     * most modern gamepads), which expose rumble via XInputSetState and report
+     * NO DIDC_FORCEFEEDBACK to DirectInput (so the DI-effect path below would
+     * silently no-op on them). Wheels keep the DI-effect path. We resolve which
+     * enumerated device this slot is bound to via its instance GUID, test it for
+     * XInput, and claim a user index. DI-effect init still runs afterwards so a
+     * device that happens to support both keeps the richer effect path too. */
+    s_xi_user[device_slot] = -1;
+    s_xi_low[device_slot] = s_xi_high[device_slot] = 0;
+    s_xi_low_contrib[device_slot][0] = s_xi_low_contrib[device_slot][1] = 0;
+    if (td5_ff_xinput_enabled() && td5_xinput_load()) {
+        int di = -1, k;
+        for (k = 1; k < s_device_count && k < 16; k++) {
+            if (IsEqualGUID(&s_device_guids[k], &s_di_joystick_guid[device_slot])) {
+                di = k;
+                break;
+            }
+        }
+        if (di > 0 && td5_device_is_xinput(di)) {
+            int u = td5_xinput_assign_user(device_slot);
+            if (u >= 0) {
+                s_xi_user[device_slot] = u;
+                xinput_ready = 1;
+                td5_xinput_push(device_slot);   /* ensure motors start at rest */
+                TD5_LOG_I(LOG_TAG,
+                          "FF: slot=%d device=%d (%s) using XInput rumble user=%d",
+                          device_slot, di, s_device_names[di], u);
+            } else {
+                TD5_LOG_W(LOG_TAG,
+                          "FF: slot=%d device=%d is XInput but no free user index",
+                          device_slot, di);
+            }
+        }
     }
 
     /* Re-init: drop any prior effects for this device first. */
@@ -2845,8 +3125,15 @@ int td5_plat_ff_init(int device_slot)
     caps.dwSize = sizeof(caps);
     if (FAILED(IDirectInputDevice8_GetCapabilities(s_ff[device_slot].device, &caps)) ||
         !(caps.dwFlags & DIDC_FORCEFEEDBACK)) {
+        /* No DI force-feedback (the 8BitDo / typical-gamepad case). If we routed
+         * this slot to XInput rumble above, FF is still functional — report
+         * success so the input layer drives effects (which we forward to the
+         * motors). Otherwise this device truly has no FF. */
         ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
-        return 0;
+        if (xinput_ready) {
+            TD5_LOG_I(LOG_TAG, "FF init ok (XInput rumble only): dev=%d", device_slot);
+        }
+        return xinput_ready;
     }
 
     s_ff[device_slot].is_wheel = ((GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_DRIVING) ||
@@ -2858,7 +3145,7 @@ int td5_plat_ff_init(int device_slot)
             EnumConstantForceEffectsCallback, &s_ff[device_slot].effectGuid, DIEFT_ALL)) ||
         !IsEqualGUID(&s_ff[device_slot].effectGuid, &GUID_ConstantForce)) {
         ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
-        return 0;
+        return xinput_ready;   /* XInput rumble still usable if it was assigned */
     }
 
     if (!td5_ff_create_constant_effect(device_slot, 0, s_ff[device_slot].axes[0], 0) ||
@@ -2867,10 +3154,11 @@ int td5_plat_ff_init(int device_slot)
         !td5_ff_create_periodic_effect(device_slot, 3)) {
         td5_ff_release_effects(device_slot);
         ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
-        return 0;
+        return xinput_ready;   /* XInput rumble still usable if it was assigned */
     }
 
-    TD5_LOG_I(LOG_TAG, "FF init ok: dev=%d is_wheel=%d", device_slot, s_ff[device_slot].is_wheel);
+    TD5_LOG_I(LOG_TAG, "FF init ok: dev=%d is_wheel=%d xinput_user=%d",
+              device_slot, s_ff[device_slot].is_wheel, s_xi_user[device_slot]);
     return 1;
 }
 
@@ -2882,6 +3170,13 @@ void td5_plat_ff_shutdown(void)
             td5_ff_release_effects(dev);
         }
         ZeroMemory(&s_ff[dev], sizeof(s_ff[dev]));
+        /* Stop the motors and release the XInput routing for this slot. */
+        if (s_xi_user[dev] >= 0) {
+            s_xi_low[dev] = s_xi_high[dev] = 0;
+            s_xi_low_contrib[dev][0] = s_xi_low_contrib[dev][1] = 0;
+            td5_xinput_push(dev);
+        }
+        s_xi_user[dev] = -1;
     }
 }
 
@@ -2892,7 +3187,15 @@ void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
         return;
     }
-    if (slot < 0 || slot >= 4 || !s_ff[device_slot].effects[slot]) {
+    if (slot < 0 || slot >= 4) {
+        return;
+    }
+    /* [#1 2026-06-15] XInput-routed device: drive the motors instead of DI
+     * effects (an XInput-only pad has no s_ff[...].effects[] at all). */
+    if (td5_xinput_route_effect(device_slot, slot, magnitude)) {
+        return;
+    }
+    if (!s_ff[device_slot].effects[slot]) {
         return;
     }
 
@@ -2960,7 +3263,14 @@ void td5_plat_ff_stop(int device_slot, int slot)
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
         return;
     }
-    if (slot < 0 || slot >= 4 || !s_ff[device_slot].effects[slot]) {
+    if (slot < 0 || slot >= 4) {
+        return;
+    }
+    /* [#1 2026-06-15] XInput-routed device: clear that effect's motor. */
+    if (td5_xinput_route_stop(device_slot, slot)) {
+        return;
+    }
+    if (!s_ff[device_slot].effects[slot]) {
         return;
     }
     IDirectInputEffect_Stop(s_ff[device_slot].effects[slot]);

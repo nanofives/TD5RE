@@ -86,6 +86,30 @@ void td5_game_resolve_split_grid(int views, int *cols, int *rows);
 void td5_game_get_pane_rect(int views, int v, int w, int h,
                             int *x, int *y, int *pw, int *ph);
 
+/* [#9 SPLIT-LAYOUT FIX 2026-06-15] Position-screen cell mapping.
+ *
+ * The "choose your screen" picker lets each player park their pane in ANY grid
+ * cell, so the panes are a permutation of cells (not always the contiguous head
+ * 0..N-1) and the empty/map cell is not always the tail. These two queries make
+ * the viewport rects (td5_game) and the empty-cell filler (HUD) agree on which
+ * cells are panes and which are free:
+ *
+ *   td5_game_get_pane_cell(views, v)
+ *     -> the grid cell (row-major over the resolved cols x rows) that viewport v
+ *        is laid out in. Identity (returns v) when the layout fix is off or no
+ *        permutation was committed (AutoRace / harness / non-positioned MP).
+ *
+ *   td5_game_split_cell_is_viewport(views, cell)
+ *     -> 1 if a player viewport occupies `cell`, else 0. The HUD must iterate all
+ *        cols*rows cells and draw the map/standings filler ONLY where this is 0,
+ *        rather than assuming the empties are the tail (views..cols*rows-1) —
+ *        that assumption is what put a pane on top of the empty/map cell (#9b).
+ *
+ * Both reflect the map built in td5_game_init_viewport_layout(); call them only
+ * after it has run (i.e. in-race). */
+int  td5_game_get_pane_cell(int views, int v);
+int  td5_game_split_cell_is_viewport(int views, int cell);
+
 /* --- Intro / Legal --- */
 void td5_game_play_intro_movie(void);
 void td5_game_show_legal_screens(void);

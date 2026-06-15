@@ -35,6 +35,11 @@ extern uint8_t *g_actor_table_base;
 /* Defined in td5_render.c (AngleFromVector12 LUT at 0x0040A720) */
 extern int AngleFromVector12(int x, int z);
 
+/* [#2 2026-06-15] Defined in td5_frontend.c. Per-local-player menu transmission:
+ * 1 = MANUAL, 0 = AUTO. Lets a MANUAL menu pick actually put the car into manual.
+ * (td5_input.c does not include td5_frontend.h, so declare it locally.) */
+extern int td5_frontend_get_player_manual(int player);
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -615,11 +620,27 @@ void td5_input_poll_race_session(void)
          * 0x0042c51e OR bit28 -> 0x00402e97 actor+0x378=0 -> 0x00404529 auto-gear
          * call skipped]. This loop only iterates active human players
          * (i < s_active_players), so the AI opponent in drag is unaffected.
-         * Otherwise honor the [GameOptions] AutoGearbox INI key. */
-        if (g_td5.ini.auto_gearbox && !g_td5.drag_race_enabled) {
-            s_control_bits[i] &= ~0x10000000u;   /* auto */
-        } else {
-            s_control_bits[i] |=  0x10000000u;   /* manual (AutoGearbox=0 or drag race) */
+         * Otherwise honor the [GameOptions] AutoGearbox INI key.
+         *
+         * [#2 2026-06-15] The car-select MANUAL/AUTOMATIC toggle now also drives
+         * this: if THIS player picked MANUAL in the menu, set the manual bit even
+         * when AutoGearbox=1 (per-player in split-screen via
+         * td5_frontend_get_player_manual). Gated by TD5RE_MANUAL_GEARBOX (default
+         * ON; "0" reverts to the legacy auto_gearbox/drag-only behaviour). */
+        {
+            static int s_manual_gearbox = -1;
+            if (s_manual_gearbox < 0) {
+                const char *e = getenv("TD5RE_MANUAL_GEARBOX");
+                s_manual_gearbox = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+                TD5_LOG_I(LOG_TAG, "menu manual gearbox (#2) %s (TD5RE_MANUAL_GEARBOX=%s)",
+                          s_manual_gearbox ? "ENABLED" : "disabled", e ? e : "default");
+            }
+            int want_manual = !g_td5.ini.auto_gearbox || g_td5.drag_race_enabled ||
+                              (s_manual_gearbox && td5_frontend_get_player_manual(i));
+            if (want_manual)
+                s_control_bits[i] |=  0x10000000u;   /* manual (gear keys honored) */
+            else
+                s_control_bits[i] &= ~0x10000000u;   /* auto */
         }
 
         /* Camera change with cooldown */
@@ -1727,21 +1748,47 @@ int td5_input_get_rear_view(int slot)
 /* ========================================================================
  * Frontend camera-button edge getters (#6 support)
  *
- * Edge-triggered, per LOCAL human player. They poll the player's configured
- * device THROUGH THE SAME per-action binding decode the in-race poll uses
- * (td5_plat_input_poll reads the keyboard always, and the joystick bound to
- * that player slot if one exists), then test the decoded control bits:
- *   CHANGE VIEW (binding action 8) -> TD5_INPUT_CAMERA_CHANGE
- *   FRONT/REAR VIEW (binding action 9) -> TD5_INPUT_REAR_VIEW
- * so a controller's CHANGE-CAMERA / FRONT-VIEW buttons drive the MP position
- * screen even though no race owns the device. Each keeps its own per-player
- * held-latch so a held button fires once per press; the latches are separate
- * from the in-race rear-view / camera-cooldown state, so calling these in the
- * frontend never disturbs an in-race session. Gated by
+ * Edge-triggered, per LOCAL human player. Test the player's CHANGE-CAMERA /
+ * FRONT-VIEW controls in the FRONTEND/menu context so a controller can drive
+ * the MP position screen even though no race owns the device. Each keeps its own
+ * per-player held-latch so a held button fires once per press; the latches are
+ * separate from the in-race rear-view / camera-cooldown state, so calling these
+ * in the frontend never disturbs an in-race session. Gated by
  * TD5RE_FRONTEND_CAM_BUTTONS (cached; default ON) — "0" leaves the latches
  * disarmed and both getters return 0 (consumers fall back to keyboard nav).
  * (The per-player held-latches s_fe_cam_held / s_fe_front_held are declared near
  * the top of this file so td5_input_init can zero them.)
+ *
+ * TWO input sources are merged, because the frontend reads them through two
+ * DIFFERENT subsystems:
+ *
+ *   KEYBOARD — td5_plat_input_poll() always decodes the rebindable keyboard
+ *   binding table (CHANGE VIEW = action 8 -> TD5_INPUT_CAMERA_CHANGE,
+ *   FRONT/REAR VIEW = action 9 -> TD5_INPUT_REAR_VIEW), regardless of which
+ *   device a slot is "assigned", so the keyboard path works as-is.
+ *
+ *   JOYSTICK — [BUG #13 2026-06-15] In the frontend NO per-slot EXCLUSIVE
+ *   joystick exists: the MP setup flow deliberately calls
+ *   td5_input_set_input_source(p, 0) for every slot (td5_fe_race.c
+ *   frontend_mp_setup_init) so the shared NON-exclusive scan handles can be
+ *   polled for menu nav. But td5_plat_input_poll()'s joystick block only fires
+ *   when s_di_joystick[slot] is non-NULL — which it never is here — so it
+ *   returned KEYBOARD-ONLY bits and the pad's CHANGE-CAMERA / FRONT-VIEW did
+ *   nothing. The live frontend pad is reachable only through the exported scan
+ *   reader td5_plat_input_frontend_nav() (the same path the menus already use).
+ *   We OR its signals in so a controller works pre-race like the keyboard.
+ *
+ *   PLATFORM GAP (reported, not fixable from this module): the scan reader only
+ *   decodes nav buttons (dir / A=0x10 / B=0x20 / Start=0x40 i.e. physical
+ *   buttons 0/1/7); it does NOT decode the CHANGE-VIEW (default btn 6) or
+ *   REAR-VIEW (default btn 9) action buttons, and there is no exported
+ *   scan-device action-button reader. Of the scan signals, only Start/Menu is
+ *   free on the MP position screen (dir = cell move, A = ready, B = back), so
+ *   the pad's Start/Menu button drives CHANGE-CAMERA (the layout cycle — the
+ *   reported control). FRONT-VIEW (empty-cell content) has no free scan signal,
+ *   so on the pad it still needs an exclusive device (works post-bind / in
+ *   race); fully fixing it pre-bind needs a platform td5_plat_input_*
+ *   scan action-button accessor (see report).
  * ======================================================================== */
 
 static int td5_fe_cam_buttons_enabled(void)
@@ -1758,23 +1805,47 @@ static int td5_fe_cam_buttons_enabled(void)
     return s_on;
 }
 
-/* Shared edge detector for a frontend control bit. `held` is the per-player
- * debounce latch (by reference). Returns 1 exactly on the rising edge. */
-static int td5_fe_button_edge(int player, uint32_t bit, uint8_t *held)
+/* Rising edge of an aggregated frontend-pad nav bit, with a SINGLE shared latch
+ * (NOT per-player). The pad scan path (td5_plat_input_frontend_nav: bit 1 LEFT
+ * 2 RIGHT 4 UP 8 DOWN 0x10 A 0x20 B 0x40 Start/Menu) reads every connected
+ * joystick via the shared scan handles and can't attribute a press to a slot, so
+ * the edge must fire exactly ONCE per press for the whole screen — important
+ * because the consumer loops players and `break`s on the first hit
+ * (td5_fe_race.c), which with a per-player latch + a shared signal would re-fire
+ * on the next frame via an unlatched player. Called once per frame (from the
+ * player-0 path of the change-camera getter). `held` is the per-action shared
+ * latch (by reference). */
+static int td5_fe_pad_nav_edge(uint32_t pad_nav_bit, uint8_t *held)
+{
+    int now = (pad_nav_bit && (td5_plat_input_frontend_nav() & pad_nav_bit))
+              ? 1 : 0;
+    int edge = (now && !*held) ? 1 : 0;
+    *held = (uint8_t)now;
+    return edge;
+}
+
+/* Per-player edge detector for a frontend camera control's KEYBOARD source.
+ * `kb_bit` is the control bit td5_plat_input_poll decodes for this player (also
+ * carries this slot's EXCLUSIVE joystick if one happens to be bound — e.g. when
+ * re-entered mid-session). `held` is the per-player debounce latch (by
+ * reference). Returns 1 on the rising edge. */
+static int td5_fe_button_edge(int player, uint32_t kb_bit, uint8_t *held)
 {
     if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
     if (!td5_fe_cam_buttons_enabled()) { *held = 0; return 0; }
 
     TD5_InputState st;
     memset(&st, 0, sizeof(st));
-    /* Poll this player's device; the platform decodes its configured bindings
-     * into the same control-bit set the in-race poll produces. Keyboard players
-     * read the live keyboard; joystick players read the device bound to their
-     * slot (if any). The device slot index equals the local player index, as on
-     * the in-race poll path. */
+    /* Keyboard (+ this slot's exclusive joystick if one happens to be bound):
+     * the platform decodes the configured bindings into the in-race control-bit
+     * set. The device slot index equals the local player index, as on the
+     * in-race poll path. In the pre-race frontend no exclusive device is bound,
+     * so this carries the keyboard bits only — the pad signal is handled
+     * separately by td5_fe_pad_nav_edge so its single press isn't multi-fired
+     * across players. */
     td5_plat_input_poll(player, &st);
 
-    int now = (st.buttons & bit) ? 1 : 0;
+    int now = (st.buttons & kb_bit) ? 1 : 0;
     int edge = (now && !*held) ? 1 : 0;
     *held = (uint8_t)now;
     return edge;
@@ -1782,14 +1853,36 @@ static int td5_fe_button_edge(int player, uint32_t bit, uint8_t *held)
 
 int td5_input_frontend_change_camera_pressed(int player)
 {
+    /* Shared latch for the pad's Start/Menu edge (one per screen, not per
+     * player) so a single Start press cycles the layout exactly once. */
+    static uint8_t s_pad_cam_held = 0;
+    int pad = 0;
     if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
-    return td5_fe_button_edge(player, (uint32_t)TD5_INPUT_CAMERA_CHANGE,
-                              &s_fe_cam_held[player]);
+
+    /* Keyboard CHANGE VIEW per player (also this slot's exclusive joystick if
+     * one happens to be bound). td5_fe_button_edge disarms s_fe_cam_held when
+     * the feature is off. */
+    int kb = td5_fe_button_edge(player, (uint32_t)TD5_INPUT_CAMERA_CHANGE,
+                                &s_fe_cam_held[player]);
+
+    /* OR the pad's Start/Menu (0x40) — the one scan nav signal free on the MP
+     * position screen — evaluated ONCE for the whole screen (on player 0) so a
+     * controller cycles the grid LAYOUT like the keyboard ([BUG #13]). */
+    if (player == 0) {
+        if (td5_fe_cam_buttons_enabled()) pad = td5_fe_pad_nav_edge(0x40u, &s_pad_cam_held);
+        else                              s_pad_cam_held = 0;
+    }
+    return kb || pad;
 }
 
 int td5_input_frontend_front_view_pressed(int player)
 {
     if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    /* Keyboard FRONT/REAR VIEW, plus this slot's exclusive joystick if bound.
+     * No FREE frontend-pad scan signal remains for a second action (see the
+     * PLATFORM GAP note above), so there is no pad term here: on a controller
+     * this needs a bound device (post-bind / in race) until a platform scan
+     * action-button reader exists. */
     return td5_fe_button_edge(player, (uint32_t)TD5_INPUT_REAR_VIEW,
                               &s_fe_front_held[player]);
 }

@@ -74,6 +74,77 @@ static int  s_car_announce_done;  /* [S31] set once CAR_INFO went out with a
 
 char s_create_session_name[64];
 
+/* ========================================================================
+ * [BUG #10 2026-06] BACK TO LOBBY keeps the previously-selected CONTROLLERS.
+ *
+ * The press-to-join lobby records each player's controller in the shared
+ * s_mp_join_device[]/s_mp_joined_count working set (owned by td5_frontend.c).
+ * But Screen_MultiplayerLobby's case-0 init unconditionally wipes that set on
+ * EVERY entry — including the round-trip BACK TO LOBBY from the car-select grid
+ * (mp_simul_back_to_lobby) or a finished race (td5_frontend_return_to_lobby
+ * with s_mp_flow set). So returning to the lobby dropped every player's pad and
+ * forced everyone to re-press their controller to re-join.
+ *
+ * Fix: a process-lifetime snapshot of the device map, mirroring the existing
+ * MpSession roster store (which already survives Main-Menu cleanup but does NOT
+ * carry the device assignment). The lobby's START handler snapshots the map as
+ * the players leave for car-select; case-0 RESTORES it instead of wiping when
+ * we are RETURNING within the same MP flow (s_mp_flow still set — only the
+ * Main-Menu cleanup / td5_frontend_init clear it, i.e. a genuinely fresh lobby
+ * entry). Frontend-only, never routed through the net config structs.
+ *
+ * Gated by TD5RE_LOBBY_KEEP_PADS (default ON; exactly "0" restores the old
+ * wipe-every-time behaviour). Env read cached + logged once.
+ * ======================================================================== */
+static int  s_lobby_pads_valid;                       /* 1 once START snapshotted a map */
+static int  s_lobby_pads_count;                       /* snapshotted joined-player count */
+static int  s_lobby_pads_device[TD5_MAX_HUMAN_PLAYERS];/* snapshotted per-player device idx */
+
+static int lobby_keep_pads_enabled(void) {
+    static int s_cached = -1;   /* -1=unread, 0=legacy wipe, 1=keep */
+    if (s_cached < 0) {
+        const char *e = getenv("TD5RE_LOBBY_KEEP_PADS");
+        s_cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;   /* default ON */
+        TD5_LOG_I(LOG_TAG, "lobby keep pads: %s",
+                  s_cached ? "on (restore controllers on back-to-lobby)"
+                           : "off (legacy re-pick every entry)");
+    }
+    return s_cached;
+}
+
+/* Snapshot the live join map into the process-lifetime store (called as the
+ * players leave the lobby with a confirmed roster). */
+static void lobby_pads_save(void) {
+    int p;
+    if (!lobby_keep_pads_enabled()) return;
+    s_lobby_pads_count = s_mp_joined_count;
+    if (s_lobby_pads_count < 0) s_lobby_pads_count = 0;
+    if (s_lobby_pads_count > TD5_MAX_HUMAN_PLAYERS)
+        s_lobby_pads_count = TD5_MAX_HUMAN_PLAYERS;
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+        s_lobby_pads_device[p] = s_mp_join_device[p];
+    s_lobby_pads_valid = 1;
+}
+
+/* Restore the snapshotted join map into the live working set on a back-to-lobby
+ * round-trip. Returns 1 if it restored a non-empty roster (so case-0 can skip
+ * the wipe), 0 otherwise (fresh entry / feature off / nothing stored). */
+static int lobby_pads_restore(void) {
+    int p;
+    if (!lobby_keep_pads_enabled()) return 0;
+    if (!s_lobby_pads_valid || s_lobby_pads_count <= 0) return 0;
+    /* Only on a genuine return within the same MP flow. A fresh lobby entry from
+     * the main menu has had s_mp_flow cleared by the Main-Menu cleanup, so the
+     * stale snapshot must NOT leak back in. */
+    if (!s_mp_flow) return 0;
+    s_mp_joined_count = s_lobby_pads_count;
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+        s_mp_join_device[p] = s_lobby_pads_device[p];
+    TD5_LOG_I(LOG_TAG, "MP Lobby: restored %d controller(s) on back-to-lobby",
+              s_mp_joined_count);
+    return 1;
+}
+
 static void frontend_set_text_input_prompt(const char *p) {
     if (p && p[0]) {
         strncpy(s_text_input_prompt, p, sizeof(s_text_input_prompt) - 1);
@@ -220,8 +291,13 @@ void Screen_MultiplayerLobby(void) {
          * The device list is already kept current by init + the WM_DEVICECHANGE
          * rescan, td5_plat_input_scan_join builds its scan handles lazily, and the
          * per-frame join scan below picks up any hot-plug within a frame or two. */
-        s_mp_joined_count = 0;
-        memset(s_mp_join_device, 0, sizeof(s_mp_join_device));
+        /* [BUG #10] On a back-to-lobby round-trip (same MP flow) restore the
+         * previously-bound controllers so nobody has to re-press; a fresh entry
+         * from the main menu falls through to the legacy clean wipe. */
+        if (!lobby_pads_restore()) {
+            s_mp_joined_count = 0;
+            memset(s_mp_join_device, 0, sizeof(s_mp_join_device));
+        }
         s_mp_join_prev = td5_plat_input_scan_join();/* ignore inputs already held on entry */
         frontend_reset_buttons();
         frontend_create_button(SNK_StartRaceTxt, 220, 300, 200, 32);  /* 0 START */
@@ -284,6 +360,10 @@ void Screen_MultiplayerLobby(void) {
             s_num_human_players = s_mp_joined_count;
             s_two_player_mode   = 1;       /* engage split-screen multiplayer */
             s_mp_flow           = 1;
+            /* [BUG #10] Snapshot the confirmed controller map so a later BACK TO
+             * LOBBY (from car-select or the finished race) restores each player's
+             * pad instead of forcing a re-pick. */
+            lobby_pads_save();
             /* 2+ players pick simultaneously in a grid (each on their own pad);
              * a lone player just gets the normal single-player car select. */
             s_mp_simul          = (s_mp_joined_count >= 2);

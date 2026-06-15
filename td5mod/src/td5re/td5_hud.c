@@ -1484,13 +1484,22 @@ static void hud_draw_mp_car_labels(void)
         td5_render_load_rotation(&cam_rot);
         td5_render_load_translation(&zero_pos);  /* m[9..11] = basis*(-camPos) */
 
-        /* Label every OTHER human player's car in this pane. Viewport u is owned
-         * by human slot g_actor_slot_map[u]; skip u==v (the pane owner). */
-        for (int u = 0; u < views; u++) {
-            if (u == v) continue;
-            int slot = g_actor_slot_map[u];
-            if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+        /* [#7 LABEL EVERY PLAYER 2026-06-15] Label every OTHER human player's car
+         * in this pane. The previous version iterated the VIEWPORTS (u<views) and
+         * labelled each pane's owner — so it only ever drew a car that was itself
+         * a pane owner, AND under the #6 MP position-select remap (viewport ->
+         * arbitrary actor slot, td5_frontend_mp_view_actor_slot) two panes could
+         * resolve to the same slot / a human's slot might not be any pane's owner,
+         * leaving only player 1's label on screen. Iterate the RACER SLOTS instead
+         * and gate on the per-slot MP identity: td5_hud_set_player_identity stamps a
+         * non-zero accent (| 0xFF000000) for exactly the human slots (0..humans-1)
+         * and leaves AI/unused slots at 0, so s_hud_id_accent[slot]!=0 is a clean
+         * "this slot is a human player" test. Result: every human's car is labelled
+         * in every pane it's visible in, regardless of the viewport<->slot mapping.
+         * Skip the pane owner (never label your own car). */
+        for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
             if (slot == owner) continue;     /* never label your own car */
+            if (!s_hud_id_accent[slot]) continue;  /* not a human MP identity */
 
             uint8_t *a = (uint8_t *)actor_ptr(slot);
             int32_t vx = *(int32_t *)(a + 0x1CC);   /* linear_velocity_x */
@@ -2389,7 +2398,14 @@ void td5_hud_init_layout(void)
     }
     for (int v = 0; v < views; v++) {
         int px, py, pw, ph;
-        td5_game_get_pane_rect(views, v, g_td5.render_width, g_td5.render_height,
+        /* [#9 2026-06-15] Place pane v's HUD overlays in the grid CELL that pane v
+         * actually renders into (the position screen permutes panes across cells),
+         * so each pane's speedo/timer/minimap sit over the right viewport rather
+         * than the identity cell v. td5_game_get_pane_cell returns v when the
+         * layout fix is off / no permutation committed, so this is byte-identical
+         * for AutoRace / the harness / non-positioned MP. */
+        int cell = td5_game_get_pane_cell(views, v);
+        td5_game_get_pane_rect(views, cell, g_td5.render_width, g_td5.render_height,
                                &px, &py, &pw, &ph);
         s_view_layout[v].scale_x  = s_scale_x;
         s_view_layout[v].scale_y  = s_scale_y;
@@ -3692,8 +3708,10 @@ static void hud_filler_draw_standings(float cl, float ct, float cr, float cb)
     }
 }
 
-/* Fill every empty grid cell (s_view_count .. cols*rows-1) with its configured
- * widget. Sets/restores a per-cell hardware clip rect around each draw. */
+/* Fill every grid cell NOT occupied by a player viewport (per the authoritative
+ * td5_game_split_cell_is_viewport query, which honours the position screen's cell
+ * permutation) with its configured widget. Sets/restores a per-cell hardware clip
+ * rect around each draw. */
 static void hud_draw_empty_cells(void)
 {
     if (!hud_grid_filler_on()) return;
@@ -3702,8 +3720,18 @@ static void hud_draw_empty_cells(void)
      * established MP signal in this file is num_human_players > 1 (see the MP car
      * labels at hud_mp_car_labels_on usage and the pause-sync gate). */
     if (g_td5.num_human_players <= 1) return;
-    int views = s_view_count;
+    /* [#9 EMPTY-CELL OVERLAP FIX 2026-06-15] Derive occupancy from the
+     * authoritative split-cell queries (td5_game), which reflect the position
+     * screen's per-player cell PERMUTATION built in td5_game_init_viewport_layout.
+     * Panes are no longer guaranteed to fill the contiguous head 0..N-1 (a player
+     * can park their pane in any cell), so the old "empty cells are the tail
+     * views..total-1" assumption put a map/standings filler on top of a player's
+     * viewport. Now we iterate EVERY grid cell and draw the filler only where
+     * td5_game_split_cell_is_viewport() reports the cell is free; the per-empty
+     * content index is a running count of empties (not cell - views). */
+    int views = g_td5.viewport_count;
     if (views < 1) return;
+    if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
     int cols, rows;
     td5_game_resolve_split_grid(views, &cols, &rows);
     int total = cols * rows;
@@ -3717,11 +3745,16 @@ static void hud_draw_empty_cells(void)
                       g_td5.split_missing_content[0], g_td5.split_missing_content[1]);
     }
 
-    for (int v = views; v < total; v++) {
+    int empties_seen = 0;
+    for (int cell = 0; cell < total; cell++) {
+        /* Authoritative occupancy: skip any cell a player viewport renders into. */
+        if (td5_game_split_cell_is_viewport(views, cell)) continue;
+
         int px, py, pw, ph;
-        td5_game_get_pane_rect(views, v, g_td5.render_width, g_td5.render_height,
+        td5_game_get_pane_rect(views, cell, g_td5.render_width, g_td5.render_height,
                                &px, &py, &pw, &ph);
         if (pw < 8 || ph < 8) continue;
+
         float cl = (float)px, ct = (float)py;
         float cr = (float)(px + pw), cb = (float)(py + ph);
 
@@ -3739,8 +3772,10 @@ static void hud_draw_empty_cells(void)
         td5_vui_quad(cl, ct, cr - cl, cb - ct, 0xFF000000u, -1, 0, 0, 0, 0);
 
         /* k-th empty cell -> content id (clamp into the 2-entry array; treat
-         * EMPTY/unset (0) and MAP (1) both as the MAP default, 2 = STANDINGS). */
-        int k = v - views; if (k < 0) k = 0; if (k > 1) k = 1;
+         * EMPTY/unset (0) and MAP (1) both as the MAP default, 2 = STANDINGS).
+         * k counts empties in cell order (not cell - views), so the content
+         * assignment is stable under the position screen's cell permutation. */
+        int k = empties_seen++; if (k < 0) k = 0; if (k > 1) k = 1;
         int content = g_td5.split_missing_content[k];
         if (content == 2) hud_filler_draw_standings(cl, ct, cr, cb);
         else              hud_filler_draw_map(cl, ct, cr, cb);

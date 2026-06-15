@@ -416,6 +416,19 @@ int td5_frontend_mp_view_actor_slot(int cell) {
     return -1;                                        /* unclaimed cell -> identity */
 }
 
+/* [#2 2026-06-15] Local player p's MENU transmission choice: 1 = MANUAL, 0 = AUTO.
+ * In a multi-human (split-screen) setup each player picks their own gearbox via
+ * s_mp_player_trans[p]; the single-player flow uses the shared s_selected_transmission.
+ * Both use 1=Manual/0=Auto. Read by td5_input.c so selecting MANUAL in the menu
+ * actually puts that player's car into manual (the physics side already keeps a
+ * manual car from auto-shifting). Out-of-range players default to AUTO (0). */
+int td5_frontend_get_player_manual(int player) {
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    if (s_num_human_players > 1)
+        return s_mp_player_trans[player] ? 1 : 0;
+    return (player == 0 && s_selected_transmission) ? 1 : 0;
+}
+
 /* On-screen QWERTY (pad name entry): 4 letter rows + a special row (SPACE/DEL/DONE). */
 const char *const k_mp_kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM" };
 #define MP_KBD_SPECIAL     MP_KBD_LETTER_ROWS
@@ -4080,6 +4093,23 @@ static void frontend_commit_text_input(void) {
               s_text_input_ctx.buffer ? s_text_input_ctx.buffer : "");
 }
 
+/* [2026-06-15 BUG #5] TD5RE_NAME_UPPERCASE (default ON; "0" allows mixed case).
+ * The original name entry is uppercase only; lowercase typed via the PC keyboard
+ * looks wrong. When ON, lowercase a-z typed into the keyboard name field below are
+ * folded to A-Z before being stored in the name buffer. This affects only the
+ * keyboard WM_CHAR path (player/session/profile name); the pad on-screen QWERTY
+ * grid already inputs uppercase (k_mp_kbd_rows) and is unaffected. */
+static int frontend_name_uppercase_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_NAME_UPPERCASE");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "Keyboard name entry forced UPPERCASE (#5) %s (TD5RE_NAME_UPPERCASE=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 void frontend_handle_text_input_key(void) {
     int len, ch;
     if (s_text_input_state != 1 || !s_text_input_ctx.buffer) return;
@@ -4115,6 +4145,11 @@ void frontend_handle_text_input_key(void) {
         if (ch == 0x1B || ch == '\t') continue;    /* Esc/Tab handled elsewhere */
         if (ch < 32 || ch > 126) continue;         /* printable ASCII only */
         if (len >= s_text_input_ctx.capacity - 1) continue;
+
+        /* [BUG #5] Fold lowercase letters to uppercase so keyboard-typed names
+         * match the original's uppercase-only name entry (knob-gated). */
+        if (ch >= 'a' && ch <= 'z' && frontend_name_uppercase_on())
+            ch -= ('a' - 'A');
 
         memmove(&s_text_input_ctx.buffer[s_text_input_ctx.caret + 1],
                 &s_text_input_ctx.buffer[s_text_input_ctx.caret],
@@ -10019,7 +10054,14 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
                  ((uint32_t)(0xB0 * anim_t) << 24) | 0x101018u, -1, 0, 0, 1, 1);
 
     for (p = 0; p < n; p++) {
-        int col = p % cols, row = p / cols;
+        /* [#6 2026-06-15] Place each pane at the player's CHOSEN position cell
+         * (from the split-screen position picker) instead of identity p, so a
+         * player parked bottom-right while choosing a screen also picks their car
+         * bottom-right. Unclaimed cells draw nothing (this loop only iterates the
+         * human players). Identity when the positions feature is off. */
+        extern int frontend_mp_player_pane_cell(int);  /* defined in td5_fe_race.c */
+        int cell = frontend_mp_player_pane_cell(p);
+        int col = cell % cols, row = cell / cols;
         float px = (float)col * pane_w, py = (float)row * pane_h;
         float cx, pyr, pt, pe, rise;
         uint32_t rgb  = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;  /* chosen identity colour */
@@ -10460,12 +10502,18 @@ static void frontend_mp_setup_render(float sx, float sy) {
             continue;
         }
 
-        /* idle: NAME / COLOUR / OK buttons */
+        /* idle: NAME / COLOUR / OK buttons.
+         * [#3 2026-06-15] When profile management is enabled the band has a 4th
+         * slot for the PROFILE button (drawn by fe_race's
+         * frontend_mp_setup_profile_render); reserve its row here and pin OK to
+         * the LAST slot so the nav band lines up with the profile overlay. */
         {
+            extern int mp_profiles_enabled(void);   /* defined in td5_fe_race.c */
+            int slots = mp_profiles_enabled() ? 4 : MP_SET_COUNT;
             float bx = px + 8.0f, bw = pane_w - 16.0f;
             float bsy = ay + 4.0f;
             float room = (pyr + pane_h - 12.0f) - bsy;
-            float bh = room / (float)MP_SET_COUNT - 3.0f;
+            float bh = room / (float)slots - 3.0f;
             int focus = s_mp_setup_btn[p];
             float yy = bsy;
             if (bh < 12.0f) bh = 12.0f;
@@ -10475,7 +10523,8 @@ static void frontend_mp_setup_render(float sx, float sy) {
             yy += bh + 3.0f;
             mp_simul_draw_btn(bx, yy, bw, bh, "COLOUR", focus == MP_SET_COLOUR, pcol, 0,
                               NULL, s_mp_player_accent[p], sx, sy);
-            yy += bh + 3.0f;
+            /* PROFILE (slot 2) is drawn by frontend_mp_setup_profile_render. */
+            yy = bsy + (float)(slots - 1) * (bh + 3.0f);
             mp_simul_draw_btn(bx, yy, bw, bh, "OK", focus == MP_SET_OK, pcol, 0, NULL, -1, sx, sy);
         }
     }

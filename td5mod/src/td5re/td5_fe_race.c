@@ -79,8 +79,17 @@ __attribute__((weak)) int td5_input_frontend_front_view_pressed(int player) {
 void frontend_mp_position_render2(float sx, float sy);
 
 /* [#11] Profile-management overlay renderer for the MP name/colour step.
- * Exported; td5_frontend.c calls it right after frontend_mp_setup_render(). */
+ * Exported; td5_frontend.c calls it right after frontend_mp_setup_render(). Also
+ * draws the [#4] "LEAVE? Y/N" confirm overlay (works with TD5RE_PROFILES off). */
 void frontend_mp_setup_profile_render(float sx, float sy);
+
+/* [#6] Grid cell that human player p occupies (s_mp_player_cell[p] when positions
+ * are active, else identity). Exported so the MP CAR-SELECT grid render in
+ * td5_frontend.c can place each player in THEIR chosen pane (see the REPORT for the
+ * one-line render change). [#12] frontend_mp_flow_reset() clears the per-flow
+ * "position picker already shown" latch so a NEW race re-offers the layout. */
+int  frontend_mp_player_pane_cell(int p);
+void frontend_mp_flow_reset(void);
 
 /* Public small-font helpers (defined in td5_frontend.c; the only fe_draw_* the
  * linker exposes — fe_draw_quad/fe_draw_text/fe_draw_text_centered are static
@@ -102,7 +111,10 @@ static void mp_pos_small_centered(float cx_px, float y_px, const char *t,
  * in td5_frontend.c). This file reuses it; no separate knob added for #6. */
 /* [#11] Knob: TD5RE_PROFILES (default ON; exactly "0" disables the profile panel
  * + the PROFILE button, reverting the name/colour step to NAME/COLOUR/OK only). */
-static int mp_profiles_enabled(void) {
+/* [#3 2026-06-15] Exported (was file-static) so the idle nav-band layout in
+ * frontend_mp_setup_render (td5_frontend.c) can widen the band to 4 slots
+ * (NAME/COLOUR/PROFILE/OK) when profiles are enabled. Declared extern there. */
+int mp_profiles_enabled(void) {
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("TD5RE_PROFILES");
@@ -1354,15 +1366,51 @@ static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now) {
 /* [#11] MP profile-management constants + per-player panel cursor state. Declared
  * here (before frontend_mp_setup_init) so init can reset them; the helper
  * functions + the panel-input handler are defined just below frontend_mp_setup_init. */
-#define MP_SET_PROFILE 3                          /* 4th nav item (after OK=2) */
+#define MP_SET_PROFILE 3                          /* button id (the header enum only goes to OK=2) */
 #define MP_PROF_ACT_COUNT 3                       /* SAVE / LOAD / DELETE actions */
 enum { MP_PROF_ACT_SAVE = 0, MP_PROF_ACT_LOAD, MP_PROF_ACT_DELETE };
 static int s_mp_prof_focus[TD5_MAX_HUMAN_PLAYERS];   /* 0 = action row, 1 = list */
 static int s_mp_prof_act[TD5_MAX_HUMAN_PLAYERS];     /* MP_PROF_ACT_* */
 static int s_mp_prof_sel[TD5_MAX_HUMAN_PLAYERS];     /* selected list index */
-#define MP_PROF_LOADED_MAX 32
-static char s_prof_loaded_names[MP_PROF_LOADED_MAX][16];   /* session "loaded" set (by name) */
-static int  s_prof_loaded_count = 0;
+
+/* [#3 2026-06-15] PROFILE sits BETWEEN COLOUR and OK (order NAME, COLOUR, PROFILE,
+ * OK) — both in the up/down NAV sequence and in the on-screen button stack. The
+ * shared header enum is fixed (NAME=0, COLOUR=1, OK=2) and MP_SET_PROFILE=3 keeps
+ * the button id stable, so we drive navigation through an explicit ORDER table
+ * instead of plain modulo on the id. mp_set_nav_order(profiles_on) returns the
+ * visible sequence; mp_set_nav_step() advances s_mp_setup_btn within it. The same
+ * order index also fixes the render slot (see frontend_mp_setup_profile_render and
+ * the companion td5_frontend.c band change documented in the REPORT). */
+static const int k_mp_set_order_prof[4] = { MP_SET_NAME, MP_SET_COLOUR, MP_SET_PROFILE, MP_SET_OK };
+static const int k_mp_set_order_noprof[3] = { MP_SET_NAME, MP_SET_COLOUR, MP_SET_OK };
+static const int *mp_set_nav_order(int profiles_on, int *count) {
+    if (profiles_on) { *count = 4; return k_mp_set_order_prof; }
+    *count = 3; return k_mp_set_order_noprof;
+}
+/* Visible-slot index (0-based, top-to-bottom) of a button id in the current order;
+ * -1 if not present. Used by the render to place PROFILE between COLOUR and OK. */
+static int mp_set_slot_of(int btn, int profiles_on) {
+    int i, cnt; const int *ord = mp_set_nav_order(profiles_on, &cnt);
+    for (i = 0; i < cnt; i++) if (ord[i] == btn) return i;
+    return -1;
+}
+/* Step s_mp_setup_btn[p] by +/-1 through the visible order (wraps). */
+static void mp_set_nav_step(int p, int dir, int profiles_on) {
+    int i, cnt; const int *ord = mp_set_nav_order(profiles_on, &cnt);
+    int cur = mp_set_slot_of(s_mp_setup_btn[p], profiles_on);
+    if (cur < 0) cur = 0;
+    i = (cur + (dir < 0 ? cnt - 1 : 1)) % cnt;
+    s_mp_setup_btn[p] = ord[i];
+}
+
+/* [#11 2026-06-15] PROFILE in-use is tracked PER PLAYER (which stored profile name
+ * each player currently HOLDS) rather than a write-once name set, so freeing /
+ * re-loading / leaving a player releases its profile. "In use" = some CURRENT
+ * holder claims that name. s_mp_prof_held[p][0]=='\0' means player p holds none.
+ * mp_prof_set_held() upserts player p's holder (releasing the previous, which is
+ * implicit since each slot stores exactly one name); the per-name query scans the
+ * holders. (Replaces the old append-only s_prof_loaded_names[]/count.) */
+static char s_mp_prof_held[TD5_MAX_HUMAN_PLAYERS][16];
 
 static void frontend_mp_setup_init(void) {
     int p, n = s_num_human_players;
@@ -1376,6 +1424,11 @@ static void frontend_mp_setup_init(void) {
     frontend_set_cursor_visible(0);
     for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
         td5_input_set_input_source(p, 0);   /* drop exclusives so scan handles poll */
+
+    /* [#11] Fresh setup = nobody is HOLDING a profile yet (releases anything a
+     * prior setup/race pinned IN USE). Holders are (re)claimed only by an explicit
+     * SAVE/LOAD below; restoring a player's name/accent does NOT re-pin a profile. */
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) s_mp_prof_held[p][0] = '\0';
 
     for (p = 0; p < n; p++) {
         /* [MP SESSION PERSISTENCE 2026-06] Phase-0 setup: prefer the session-saved
@@ -1429,26 +1482,30 @@ static void frontend_mp_setup_init(void) {
  * so that init can reset them.)
  * ====================================================================== */
 
-static int mp_prof_name_loaded(const char *name) {
-    int i;
+/* [#11] Is `name` currently HELD by any player OTHER than `except_p` (pass -1 to
+ * mean "by anyone")? Replaces the append-only loaded-set query: scans the live
+ * per-player holders so a release (load-different / clear / leave) immediately
+ * frees the name. Both the LOAD gate and the list "(IN USE)" greying use it. */
+static int mp_prof_name_in_use_ex(const char *name, int except_p) {
+    int q;
     if (!name || !name[0]) return 0;
-    for (i = 0; i < s_prof_loaded_count; i++)
-        if (_stricmp(s_prof_loaded_names[i], name) == 0) return 1;
+    for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) {
+        if (q == except_p) continue;
+        if (_stricmp(s_mp_prof_held[q], name) == 0) return 1;
+    }
     return 0;
 }
-static void mp_prof_mark_loaded(const char *name) {
-    if (!name || !name[0]) return;
-    if (mp_prof_name_loaded(name)) return;
-    if (s_prof_loaded_count >= MP_PROF_LOADED_MAX) return;
-    strncpy(s_prof_loaded_names[s_prof_loaded_count], name,
-            sizeof(s_prof_loaded_names[0]) - 1);
-    s_prof_loaded_names[s_prof_loaded_count][sizeof(s_prof_loaded_names[0]) - 1] = '\0';
-    s_prof_loaded_count++;
+/* Set player p's CURRENT holder to `name` (NULL/empty releases). Implicitly drops
+ * whatever p held before, so loading a different profile frees the old one. */
+static void mp_prof_set_held(int p, const char *name) {
+    if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return;
+    if (!name || !name[0]) { s_mp_prof_held[p][0] = '\0'; return; }
+    strncpy(s_mp_prof_held[p], name, sizeof(s_mp_prof_held[p]) - 1);
+    s_mp_prof_held[p][sizeof(s_mp_prof_held[p]) - 1] = '\0';
 }
-/* When a player re-opens PROFILE and overwrites/changes their name, an old
- * "loaded" mark could pin a name nobody uses anymore — but the rule is about
- * not loading the SAME stored profile twice, so marks persist for the session
- * intentionally. (No unmark on panel close.) */
+static void mp_prof_release(int p) {                      /* p stops holding any profile */
+    if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) s_mp_prof_held[p][0] = '\0';
+}
 
 /* Build current player identity into a TD5_Profile for SAVE. */
 static void mp_prof_fill_from_player(int p, TD5_Profile *out) {
@@ -1516,25 +1573,28 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
                 TD5_Profile pr;
                 mp_prof_fill_from_player(p, &pr);
                 int slot = td5_save_profile_save(&pr);
-                /* Saving makes it "yours" for the session (so a second player can't
-                 * also load the same one). */
-                if (slot >= 0) mp_prof_mark_loaded(pr.name);
+                /* [#11] Saving makes it THIS player's held profile for the session
+                 * (so a second player can't also load it); releases whatever p held
+                 * before. Per-player, so it frees when p loads another / leaves. */
+                if (slot >= 0) mp_prof_set_held(p, pr.name);
                 frontend_play_sfx(slot >= 0 ? 3 : 10);
-                TD5_LOG_I(LOG_TAG, "MP profile: P%d SAVE '%s' -> slot %d", p, pr.name, slot);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d SAVE '%s' -> slot %d (held)", p, pr.name, slot);
             } else {
                 frontend_play_sfx(10);   /* need a name first */
             }
         } else if (act == MP_PROF_ACT_LOAD) {
             TD5_Profile pr;
             if (cnt > 0 && td5_save_profile_get(s_mp_prof_sel[p], &pr)) {
-                if (mp_prof_name_loaded(pr.name)) {
-                    frontend_play_sfx(10);   /* already loaded this session -> blocked */
-                    TD5_LOG_I(LOG_TAG, "MP profile: P%d LOAD '%s' BLOCKED (already loaded)", p, pr.name);
+                /* [#11] Block only if ANOTHER player currently holds it; p re-loading
+                 * its own held profile is fine. Loading releases p's previous hold. */
+                if (mp_prof_name_in_use_ex(pr.name, p)) {
+                    frontend_play_sfx(10);   /* in use by another player -> blocked */
+                    TD5_LOG_I(LOG_TAG, "MP profile: P%d LOAD '%s' BLOCKED (in use by another)", p, pr.name);
                 } else {
                     mp_prof_apply_to_player(p, &pr);
-                    mp_prof_mark_loaded(pr.name);
+                    mp_prof_set_held(p, pr.name);   /* releases p's prior hold implicitly */
                     frontend_play_sfx(3);
-                    TD5_LOG_I(LOG_TAG, "MP profile: P%d LOAD '%s' (car=%d)", p, pr.name, pr.car);
+                    TD5_LOG_I(LOG_TAG, "MP profile: P%d LOAD '%s' (car=%d, now held)", p, pr.name, pr.car);
                 }
             } else {
                 frontend_play_sfx(10);
@@ -1543,6 +1603,11 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
             TD5_Profile pr;
             if (cnt > 0 && td5_save_profile_get(s_mp_prof_sel[p], &pr) &&
                 td5_save_profile_delete(s_mp_prof_sel[p])) {
+                int q;
+                /* [#11] A deleted profile can't be in use by anyone — release every
+                 * holder of that name (the store reindexes; holders are by name). */
+                for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++)
+                    if (_stricmp(s_mp_prof_held[q], pr.name) == 0) mp_prof_release(q);
                 frontend_play_sfx(3);
                 mp_prof_clamp_sel(p);
                 TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE '%s'", p, pr.name);
@@ -1558,10 +1623,29 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
     }
 }
 
+/* [#4 2026-06-15] Back/cancel out of the MP NAME/COLOUR setup screen drops the
+ * whole roster (names, colours, profiles, positions) back to the lobby, so a
+ * stray B is costly. Guard it with a CONFIRM prompt: the first Back ARMS a
+ * "LEAVE? Y/N" overlay (drawn by frontend_mp_setup_profile_render); A/confirm
+ * leaves, B/ESC cancels, and it auto-disarms after a few seconds so nobody gets
+ * stuck. Knob TD5RE_MP_BACK_CONFIRM (default on; "0" = old instant back). */
+static int mp_back_confirm_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_BACK_CONFIRM");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP setup back-confirm (#4) %s (TD5RE_MP_BACK_CONFIRM=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+static int      s_mp_setup_confirm_back = 0;   /* 1 = "LEAVE? Y/N" prompt is up */
+static uint32_t s_mp_setup_confirm_ms   = 0;   /* arm time (for the auto-disarm timeout) */
+#define MP_BACK_CONFIRM_TIMEOUT_MS 5000u
+
 static void frontend_mp_setup_update(void) {
     int p, n = s_num_human_players;
     int all_ready = 1, want_back = 0;
-    int set_count = mp_profiles_enabled() ? (MP_SET_PROFILE + 1) : MP_SET_COUNT;
     uint32_t now = td5_plat_time_ms();
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
@@ -1569,8 +1653,37 @@ static void frontend_mp_setup_update(void) {
     if (s_inner_state == 0x20) {   /* slide-in animation */
         for (p = 0; p < n; p++) s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
         frontend_check_escape();
+        s_mp_setup_confirm_back = 0;   /* never carry a stale prompt into a fresh slide-in */
         if (now - s_mp_simul_anim_ms >= MP_SIMUL_ANIM_MS) s_inner_state = 0x21;
         return;
+    }
+
+    /* [#4] "LEAVE? Y/N" prompt is up: modal — A (any player) confirms the exit,
+     * B/ESC cancels, and it auto-disarms after the timeout. Swallow this frame's
+     * nav so the keypress doesn't also drive the panes underneath. */
+    if (s_mp_setup_confirm_back) {
+        int confirm = 0, cancel = 0;
+        for (p = 0; p < n; p++) {
+            uint32_t bits = mp_simul_player_nav(p);
+            uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
+            s_mp_pane_nav_prev[p] = bits;
+            if (edge & 0x10) confirm = 1;   /* A = yes, leave */
+            if (edge & 0x20) cancel  = 1;   /* B = no, stay   */
+        }
+        if (frontend_check_escape()) cancel = 1;
+        if (!confirm && now - s_mp_setup_confirm_ms >= MP_BACK_CONFIRM_TIMEOUT_MS) cancel = 1;
+        if (confirm) {
+            s_mp_setup_confirm_back = 0;
+            TD5_LOG_I(LOG_TAG, "MP setup: back CONFIRMED -> lobby");
+            mp_simul_back_to_lobby(n);
+            return;
+        }
+        if (cancel) {
+            s_mp_setup_confirm_back = 0;
+            frontend_play_sfx(5);
+            TD5_LOG_I(LOG_TAG, "MP setup: back cancelled");
+        }
+        return;   /* hold here until resolved */
     }
 
     for (p = 0; p < n; p++) {
@@ -1638,11 +1751,16 @@ static void frontend_mp_setup_update(void) {
             continue;
         }
 
-        /* idle: navigate NAME / COLOUR / [PROFILE] / OK. PROFILE is a 4th item
-         * present only when TD5RE_PROFILES is on (set_count includes it then). */
-        if (edge & 4) { s_mp_setup_btn[p] = (s_mp_setup_btn[p] + set_count - 1) % set_count; frontend_play_sfx(2); }
-        if (edge & 8) { s_mp_setup_btn[p] = (s_mp_setup_btn[p] + 1) % set_count; frontend_play_sfx(2); }
-        if (s_mp_setup_btn[p] >= set_count) s_mp_setup_btn[p] = MP_SET_NAME;   /* knob toggled off */
+        /* idle: navigate NAME / COLOUR / [PROFILE] / OK. [#3] PROFILE sits BETWEEN
+         * COLOUR and OK — drive the cursor through the explicit ORDER table (not
+         * plain modulo on the id) so UP/DOWN visit NAME->COLOUR->PROFILE->OK. With
+         * TD5RE_PROFILES off the order is NAME->COLOUR->OK (PROFILE absent). */
+        {
+            int pon = mp_profiles_enabled();
+            if (mp_set_slot_of(s_mp_setup_btn[p], pon) < 0) s_mp_setup_btn[p] = MP_SET_NAME; /* knob toggled / stale id */
+            if (edge & 4) { mp_set_nav_step(p, -1, pon); frontend_play_sfx(2); }
+            if (edge & 8) { mp_set_nav_step(p, +1, pon); frontend_play_sfx(2); }
+        }
         if (edge & 0x10) {
             if (s_mp_setup_btn[p] == MP_SET_NAME)   { s_mp_setup_sub[p] = 1; if (isk) td5_plat_input_flush_chars(); frontend_play_sfx(3); }
             else if (s_mp_setup_btn[p] == MP_SET_COLOUR) { s_mp_setup_sub[p] = 2; frontend_play_sfx(3); }
@@ -1671,7 +1789,21 @@ static void frontend_mp_setup_update(void) {
             }
         if (!handled) want_back = 1;
     }
-    if (want_back) { mp_simul_back_to_lobby(n); return; }
+    if (want_back) {
+        /* [#4] Confirm before dropping everyone's setup. First Back arms the
+         * "LEAVE? Y/N" overlay; the modal block above resolves it next frames.
+         * Knob off -> the legacy instant back. */
+        if (mp_back_confirm_enabled()) {
+            s_mp_setup_confirm_back = 1;
+            s_mp_setup_confirm_ms   = now;
+            td5_plat_input_flush_nav();   /* don't let the same B leak into the prompt */
+            frontend_play_sfx(2);
+            TD5_LOG_I(LOG_TAG, "MP setup: back requested -> confirm prompt");
+            return;
+        }
+        mp_simul_back_to_lobby(n);
+        return;
+    }
 
     for (p = 0; p < n; p++)
         if (!s_mp_player_ready[p]) { all_ready = 0; break; }
@@ -1692,13 +1824,42 @@ static void frontend_mp_setup_update(void) {
     }
 }
 
+/* [#12 2026-06-15] RE-ASK THE LAYOUT EACH RACE. The old gate (s_mp_session
+ * pos_assigned, set on first commit) was "once per session" — a brand-new race
+ * setup with the same player count silently reused the prior layout and never
+ * offered the position screen again. We relax it WITHOUT touching the session
+ * struct (owned by td5_frontend.c): a per-FLOW flag, cleared at fresh MP-flow
+ * entry (Screen_CarSelection's !s_mp_simul branch -> frontend_mp_flow_reset),
+ * forces the picker the first time positions are entered in each new flow. Within
+ * a single setup (back out of the picker to name/colour and re-confirm) the flag
+ * stays set, so mp_session_restore_positions can skip it and we don't nag.
+ * Knob TD5RE_MP_POS_REASK (default on; "0" = legacy once-per-session-remembered). */
+static int mp_pos_reask_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_POS_REASK");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP position re-ask each race (#12) %s (TD5RE_MP_POS_REASK=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+static int s_mp_pos_shown_this_flow = 0;   /* picker already offered in the current MP flow */
+
+/* Called from Screen_CarSelection when a FRESH MP flow begins (s_mp_simul 0->1),
+ * so the next position-enter re-offers the picker for the new race. */
+void frontend_mp_flow_reset(void) {
+    s_mp_pos_shown_this_flow = 0;
+}
+
 /* [#8] Decide what happens after name/colour setup completes: show the position
- * picker, or skip it. Gate "once per session / re-show on new player": show only
- * if positions aren't assigned for the CURRENT human count. When skipping we
- * either restore the stored cells (knob on, count matches) or fall back to
- * identity (knob off / nothing stored) and go straight to the car grid. */
+ * picker, or skip it. Gate "re-ask each race / re-show on new player": show when
+ * positions aren't assigned for the CURRENT human count, OR (#12) this is the
+ * first position-enter of a fresh race flow. When skipping we restore the stored
+ * cells (count matches) or fall back to identity and go straight to the car grid. */
 static void frontend_mp_position_enter(void) {
     int n = s_num_human_players;
+    int reask = mp_pos_reask_enabled() && !s_mp_pos_shown_this_flow;   /* [#12] */
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
 
@@ -1710,26 +1871,50 @@ static void frontend_mp_position_enter(void) {
         TD5_LOG_I(LOG_TAG, "MP setup: positions disabled -> car select (%d players)", n);
         return;
     }
-    if (mp_session_restore_positions(n)) {
+    /* [#12] On a fresh flow, ALWAYS offer the picker (skip the remembered-skip);
+     * thereafter within the flow the remembered cells may be reused without nag. */
+    if (!reask && mp_session_restore_positions(n)) {
         /* Already chosen this session for this exact count: reuse, skip picker. */
         s_mp_phase = 1;
         s_inner_state = 0;
         TD5_LOG_I(LOG_TAG, "MP setup: positions remembered -> car select (%d players)", n);
         return;
     }
-    /* Fresh / player-count changed: show the picker. Start from identity so the
-     * grid is well-defined, clear ready latches, seed per-player edge trackers. */
+    /* Show the picker. Clear ready latches, seed per-player edge trackers. Start
+     * from identity, EXCEPT when re-asking with a remembered layout for this exact
+     * count — then pre-seed the last cells so the player tweaks rather than redoes
+     * (mp_session_restore_positions populates s_mp_player_cell[] when it returns 1). */
     {
         int p;
-        mp_positions_reset_identity();
+        if (!(reask && mp_session_restore_positions(n)))
+            mp_positions_reset_identity();
         for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
             s_mp_player_ready[p]  = 0;
             s_mp_rep_ms[p]        = 0;
             s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
         }
     }
+    s_mp_pos_shown_this_flow = 1;   /* [#12] offered once this flow; don't nag on re-confirm */
     td5_frontend_set_screen(TD5_SCREEN_MP_POSITION);   /* resets s_inner_state, buttons */
-    TD5_LOG_I(LOG_TAG, "MP setup: -> position picker (%d players)", n);
+    TD5_LOG_I(LOG_TAG, "MP setup: -> position picker (%d players, reask=%d)", n, reask);
+}
+
+/* [#6 2026-06-15] Grid CELL (viewport, row-major) that human player p occupies in
+ * the chosen split layout. Single source of truth for "which pane is player p's",
+ * shared by the MP CAR-SELECT grid render so a player assigned bottom-right in the
+ * position screen ALSO sits bottom-right while picking a car (and an empty cell
+ * stays empty). Returns s_mp_player_cell[p] when positions are active+committed,
+ * else identity p — so AutoRace / the knob-off path are byte-identical to before.
+ * Exported: frontend_mp_simul_carsel_render (td5_frontend.c) calls this instead of
+ * the identity `p % cols, p / cols` (see the REPORT for the one-line change). The
+ * game-side viewport map already consumes the inverse via td5_frontend_mp_view_actor_slot. */
+int frontend_mp_player_pane_cell(int p) {
+    if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return p;
+    if (!mp_positions_enabled()) return p;
+    {
+        int cell = s_mp_player_cell[p];
+        return (cell >= 0 && cell < TD5_MAX_HUMAN_PLAYERS) ? cell : p;
+    }
 }
 
 /* [#6 2026-06-15 rework] Split-screen POSITION picker ("CHOOSE YOUR SCREEN").
@@ -2061,15 +2246,39 @@ void frontend_mp_position_render2(float sx, float sy) {
 
 /* [#11] Profile-management overlay for the MP name/colour step. Drawn ON TOP of
  * frontend_mp_setup_render (which owns the NAME/COLOUR/OK pane); td5_frontend.c
- * must call this right after it (see the REPORT). Two parts per pane:
- *   (a) idle: a 4th "PROFILE" chip below the OK button (highlighted when the
- *       player's nav cursor is on MP_SET_PROFILE);
+ * must call this right after it (already wired). Two parts per pane:
+ *   (a) idle: the "PROFILE" button drawn BETWEEN COLOUR and OK ([#3]; slot 2 of a
+ *       4-slot band, highlighted when the player's nav cursor is on MP_SET_PROFILE);
  *   (b) sub==3: a centred panel over the pane with the SAVE/LOAD/DELETE action
- *       row + the scrollable profile list (already-loaded-this-session entries
- *       greyed). Inert when TD5RE_PROFILES=0 or during the slide-in. */
+ *       row + the scrollable profile list (in-use entries greyed).
+ * PLUS [#4]: the "LEAVE? Y/N" confirm overlay, drawn for ALL knob states (it sits
+ * before the TD5RE_PROFILES early-return). Inert per-part when its knob is off. */
 void frontend_mp_setup_profile_render(float sx, float sy) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0;
+
+    /* [#4] LEAVE? Y/N — independent of TD5RE_PROFILES; only needs the name/colour
+     * step active and the prompt armed by frontend_mp_setup_update. */
+    if (s_mp_simul && s_mp_phase == 0 && s_inner_state == 0x21 && s_mp_setup_confirm_back) {
+        float bw = 240.0f, bh = 70.0f;
+        float bx = 320.0f - bw * 0.5f, by = 200.0f;
+        td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xA0000000u, -1, 0, 0, 1, 1); /* dim all */
+        td5_vui_quad(bx * sx, by * sy, bw * sx, bh * sy, 0xF0101820u, -1, 0, 0, 1, 1);
+        {
+            float t = 2.0f; uint32_t bc = 0xFFFFCC33u;
+            td5_vui_quad(bx * sx, by * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
+            td5_vui_quad(bx * sx, (by + bh - t) * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
+            td5_vui_quad(bx * sx, by * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
+            td5_vui_quad((bx + bw - t) * sx, by * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
+        }
+        td5_vui_text_centered(320.0f * sx, (by + 12.0f) * sy, "LEAVE SETUP?", 0xFFFFE060u, sx, sy);
+        mp_pos_small_centered(320.0f * sx, (by + 36.0f) * sy,
+                              "LOSES EVERYONE'S NAMES + COLOURS", 0xFFB0B0B0u, sx, sy);
+        mp_pos_small_centered(320.0f * sx, (by + 50.0f) * sy,
+                              "A = YES, LEAVE     B = NO, STAY", 0xFFFFFFFFu, sx, sy);
+        return;   /* the prompt is modal; don't draw the chips/panels underneath */
+    }
+
     if (!mp_profiles_enabled()) return;
     if (!s_mp_simul || s_mp_phase != 0) return;          /* only the name/colour step */
     if (s_inner_state != 0x21) return;                   /* skip during slide-in */
@@ -2090,15 +2299,25 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
             uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
             int sub = s_mp_setup_sub[p];
 
-            /* (a) idle PROFILE chip — a compact chip anchored to the pane's bottom
-             * margin (below the static NAME/COLOUR/OK band the setup render owns),
-             * so it never overlaps those three buttons regardless of pane size. */
+            /* (a) [#3] idle PROFILE button — placed in the SAME 4-slot band the
+             * companion td5_frontend.c band draws (NAME=0, COLOUR=1, PROFILE=2,
+             * OK=3), so PROFILE sits visually between COLOUR and OK. Geometry MUST
+             * match frontend_mp_setup_render's idle band (see the REPORT for the
+             * required 3->4 slot change there): with the slide-in done (rise=0)
+             *   ay=py+22, bsy=ay+4, room=(py+pane_h-12)-bsy, bh=room/4-3 (clamp
+             *   12..26); slot i top = bsy + i*(bh+3). We draw slot 2. */
             if (!s_mp_player_ready[p] && sub == 0) {
-                float bh = 13.0f;
+                float ay  = py + 22.0f;
+                float bsy = ay + 4.0f;
+                float room = (py + pane_h - 12.0f) - bsy;
+                float bh = room / 4.0f - 3.0f;       /* 4 slots: NAME/COLOUR/PROFILE/OK */
                 float bx = px + 8.0f, bw = pane_w - 16.0f;
-                float yy = py + pane_h - bh - 3.0f;     /* hug the pane bottom */
+                float yy;
                 int focus = (s_mp_setup_btn[p] == MP_SET_PROFILE);
-                /* chip: amber rim when focused, faint steel otherwise. */
+                if (bh < 12.0f) bh = 12.0f;
+                if (bh > 26.0f) bh = 26.0f;
+                yy = bsy + 2.0f * (bh + 3.0f);       /* slot index 2 (between COLOUR and OK) */
+                /* button body: amber rim when focused, faint steel otherwise. */
                 td5_vui_quad(bx * sx, yy * sy, bw * sx, bh * sy,
                              focus ? (rgb | 0xC0000000u) : 0x70202838u, -1, 0, 0, 1, 1);
                 {
@@ -2159,7 +2378,10 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                         int sel = (s_mp_prof_focus[p] == 1 && s_mp_prof_sel[p] == idx);
                         int loaded;
                         if (!td5_save_profile_get(idx, &pr)) continue;
-                        loaded = mp_prof_name_loaded(pr.name);
+                        /* [#11] "in use" = held by ANOTHER player (mirrors the LOAD
+                         * gate): this player's OWN held profile stays selectable, so
+                         * a release elsewhere ungreys it immediately. */
+                        loaded = mp_prof_name_in_use_ex(pr.name, p);
                         if (sel)
                             td5_vui_quad((panx + 2) * sx, ry * sy, (panw - 4) * sx, 10.0f * sy,
                                          0x90303848u, -1, 0, 0, 1, 1);
@@ -2246,7 +2468,8 @@ void Screen_CarSelection(void) {
      * phase 1 = the car-select grid. Single-player / classic-2P / network fall
      * through to the original state machine below. */
     if (s_mp_flow && s_num_human_players >= 2) {
-        if (!s_mp_simul) { s_mp_simul = 1; s_mp_phase = 0; s_inner_state = 0; }
+        if (!s_mp_simul) { s_mp_simul = 1; s_mp_phase = 0; s_inner_state = 0;
+                           frontend_mp_flow_reset(); }   /* [#12] re-offer the position screen for this new race */
         /* 0x20 = slide-in animation, 0x21 = interactive; anything else (fresh
          * inner-state 0 on entry / phase change) (re)initialises the phase. */
         if (s_mp_phase == 0) {

@@ -502,6 +502,32 @@ typedef struct ViewportRect {
 
 static ViewportRect s_viewports[TD5_MAX_VIEWPORTS];
 
+/* [#9 SPLIT-LAYOUT FIX 2026-06-15] Per-race viewport -> grid-cell map.
+ * s_view_cell[vp] = the split-grid cell (0..cols*rows-1, row-major) that
+ * viewport vp is laid out in. Built once per race in
+ * td5_game_init_viewport_layout() from the position-screen permutation
+ * (td5_frontend_mp_view_actor_slot): each viewport is placed in the cell its
+ * driver actually CHOSE, and the cell(s) no player chose are left for the HUD
+ * map/standings filler. Without the fix (or with the identity permutation that
+ * AutoRace / the harness / non-positioned MP use) this is simply vp==cell, so
+ * the layout is byte-identical to the old "panes fill cells 0..N-1" behaviour.
+ * s_view_cell_count mirrors the live viewport_count for query-time clamping. */
+static int s_view_cell[TD5_MAX_VIEWPORTS];
+static int s_view_cell_count = 0;
+
+/* TD5RE_SPLIT_LAYOUT_FIX: default ON; exactly "0" reverts to the legacy
+ * identity cell map (viewport vp -> cell vp, empty cells = the tail). Cached. */
+static int td5_split_layout_fix_on(void) {
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("TD5RE_SPLIT_LAYOUT_FIX");
+        s_cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "split-layout cell map (#9) %s (TD5RE_SPLIT_LAYOUT_FIX=%s)",
+                  s_cached ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return s_cached;
+}
+
 /* Replay / benchmark timing */
 static uint32_t s_race_end_timer_start;
 
@@ -3081,7 +3107,14 @@ int td5_game_init_race_session(void) {
          * stay byte-unchanged. Frontend/render only — the deterministic sim and
          * net path are untouched (this just repoints which camera each pane uses). */
         if (vp < g_td5.viewport_count) {
-            int mapped = td5_frontend_mp_view_actor_slot(vp);
+            /* [#9 2026-06-15] Look up the actor by the pane's grid CELL, not the
+             * raw viewport index: the position screen permutes panes across cells,
+             * so viewport vp renders cell td5_game_get_pane_cell(vp), and that is
+             * the cell whose chosen player must drive this pane's camera. With the
+             * layout fix off / no permutation, get_pane_cell returns vp, so this is
+             * byte-identical to the old identity map. */
+            int mapped = td5_frontend_mp_view_actor_slot(
+                             td5_game_get_pane_cell(g_td5.viewport_count, vp));
             if (mapped >= 0 && mapped < g_td5.total_actor_count)
                 slot = mapped;
         }
@@ -7265,6 +7298,12 @@ void td5_game_init_viewport_layout(void) {
 
     g_td5.viewport_count = views;
 
+    /* Reset the cell map to identity (vp -> cell vp) up front; the positioned
+     * branch below overwrites it. This keeps the queries well-defined even on
+     * the single-view / fallback paths. */
+    s_view_cell_count = views;
+    for (int vp = 0; vp < TD5_MAX_VIEWPORTS; vp++) s_view_cell[vp] = vp;
+
     if (views <= 1) {
         s_viewports[0].x = 0; s_viewports[0].y = 0;
         s_viewports[0].w = w; s_viewports[0].h = h;
@@ -7272,13 +7311,45 @@ void td5_game_init_viewport_layout(void) {
         return;
     }
 
-    /* The N players fill the first N cells of the cols x rows grid (row-major);
-     * any extra "missing" cells stay empty here (their content is a deferred
-     * follow-up). Grid resolved by the shared helper so the HUD agrees. */
+    /* Grid resolved by the shared helper so the HUD agrees on cols x rows. */
     td5_game_resolve_split_grid(views, &cols, &rows);
 
+    /* [#9 SPLIT-LAYOUT FIX] Build the viewport -> cell map from the position
+     * screen's permutation. For each grid cell in row-major order ask the
+     * frontend which actor (if any) the player parked there; every OCCUPIED
+     * cell becomes the next viewport's home cell, so panes land in the cells the
+     * players chose and the cell(s) nobody chose are left free for the HUD
+     * map/standings filler. mp_view_actor_slot() returns -1 for every cell when
+     * the feature is inactive (knob off, nothing committed, or not the local MP
+     * flow) — in that case the loop below contributes nothing and we keep the
+     * identity map seeded above, so AutoRace / the harness / non-positioned MP
+     * stay byte-identical (panes fill cells 0..N-1, empty cells are the tail). */
+    if (td5_split_layout_fix_on()) {
+        int total = cols * rows;
+        if (total > TD5_MAX_VIEWPORTS) total = TD5_MAX_VIEWPORTS;
+        int assigned = 0;
+        for (int cell = 0; cell < total && assigned < views; cell++) {
+            int actor = td5_frontend_mp_view_actor_slot(cell);
+            if (actor >= 0) s_view_cell[assigned++] = cell;
+        }
+        /* Only adopt the permutation if it accounts for every viewport; a
+         * partial map (e.g. fewer committed cells than panes, or spectator panes
+         * with no picker entry) would otherwise leave some panes without a cell.
+         * In that case fall back to the identity map (already seeded). */
+        if (assigned == views) {
+            TD5_LOG_I(LOG_TAG, "Viewport layout: positioned cell map [%d %d %d %d %d %d %d %d %d]",
+                      s_view_cell[0], s_view_cell[1], s_view_cell[2], s_view_cell[3],
+                      s_view_cell[4], s_view_cell[5], s_view_cell[6], s_view_cell[7],
+                      s_view_cell[8]);
+        } else {
+            for (int vp = 0; vp < TD5_MAX_VIEWPORTS; vp++) s_view_cell[vp] = vp;
+        }
+    }
+
+    /* Lay out each pane at ITS cell (row-major over cols x rows), not at vp.
+     * With the identity map this is the legacy "panes fill cells 0..N-1". */
     for (int vp = 0; vp < views; vp++) {
-        td5_game_get_pane_rect(views, vp, w, h,
+        td5_game_get_pane_rect(views, s_view_cell[vp], w, h,
                                &s_viewports[vp].x, &s_viewports[vp].y,
                                &s_viewports[vp].w, &s_viewports[vp].h);
     }
@@ -7286,6 +7357,30 @@ void td5_game_init_viewport_layout(void) {
     TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d spectate=%d count=%d grid=%dx%d %dx%d",
               g_td5.split_screen_mode, g_td5.num_human_players, g_td5.num_spectate_screens,
               g_td5.viewport_count, cols, rows, w, h);
+}
+
+/* [#9] Grid cell (0..cols*rows-1, row-major) that viewport v is laid out in.
+ * Single source for the HUD: a cell IS a viewport iff some v maps to it, so the
+ * HUD draws the map/standings filler only in cells this never returns. Returns v
+ * unchanged for out-of-range v or when the layout fix is off (identity map). */
+int td5_game_get_pane_cell(int views, int v) {
+    (void)views;
+    if (v < 0 || v >= TD5_MAX_VIEWPORTS) return v;
+    if (v >= s_view_cell_count) return v;
+    return s_view_cell[v];
+}
+
+/* [#9] 1 iff grid cell `cell` is occupied by a player viewport (so the HUD must
+ * NOT draw an empty-cell map/standings there); 0 iff the cell is free. The HUD
+ * should iterate all cols*rows cells and fill only the cells where this is 0,
+ * instead of assuming the empties are the contiguous tail (views..cols*rows-1) —
+ * which is wrong once the position screen permutes which cell each pane uses. */
+int td5_game_split_cell_is_viewport(int views, int cell) {
+    int n = (views < s_view_cell_count) ? views : s_view_cell_count;
+    if (n > TD5_MAX_VIEWPORTS) n = TD5_MAX_VIEWPORTS;
+    for (int v = 0; v < n; v++)
+        if (s_view_cell[v] == cell) return 1;
+    return 0;
 }
 
 /* ========================================================================

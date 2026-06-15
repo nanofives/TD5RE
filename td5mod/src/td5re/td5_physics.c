@@ -504,17 +504,82 @@ static inline int32_t td5_physics_mp_catchup_mult(int slot)
 }
 
 /* ========================================================================
+ * Gearbox mode (manual vs automatic) — the per-actor flag. [#2 2026-06-15]
+ *
+ * The PER-ACTOR gearbox mode lives in the byte at actor +0x378. This is the
+ * SAME byte the original input path writes every tick as
+ *     actor[0x378] = ~(g_playerControlBits >> 28) & 1     (UpdatePlayerVehicleControlState @ 0x00402E60)
+ * where control-bit 28 is the auto/manual TOGGLE. So:
+ *     +0x378 == 0  ⟺  bit 28 SET  ⟺  MANUAL gearbox
+ *     +0x378 != 0  ⟺  bit 28 clear ⟺ AUTOMATIC gearbox
+ * The actor-struct header labels +0x378 "throttle_input_active" because in the
+ * common (automatic) case the original folds throttle-active into the same byte;
+ * but for the GEARBOX dispatch the original keys on this exact byte (see the
+ * "field_0x378 == 0 → manual" checks in td5_physics_update_player at the on-
+ * ground / airborne branches, and UpdateAutomaticGearSelection being CALLED only
+ * on the !=0 (auto) side). The byte IS the authoritative gearbox-mode flag — the
+ * earlier "+0x378 may be the wrong flag" worry was unfounded: there is no other
+ * per-actor manual/auto field, and +0x378 carries the mode every tick.
+ *
+ * ⚠ KNOWN MENU-SIDE BUG (cross-file, NOT fixable here — see report): the
+ * frontend car-select "Automatic / Manual" toggle writes only s_selected_
+ * transmission (display + MP persistence) and NEVER reaches the input layer.
+ * td5_input.c keys control-bit 28 off g_td5.ini.auto_gearbox (the INI key) only,
+ * so picking "Manual" in the menu does nothing — the car stays in whatever
+ * AutoGearbox= says (default 1 = automatic) and therefore auto-shifts. The
+ * physics gate below is correct; the wiring fix belongs in td5_input.c.
+ * ======================================================================== */
+
+/* TRUE when the actor is in MANUAL gearbox mode (byte +0x378 == 0). Single
+ * canonical predicate so every manual-vs-auto decision in this file reads the
+ * same flag the same way. Null-safe (treats NULL as automatic). */
+static inline int td5_physics_actor_is_manual_gearbox(const TD5_Actor *actor)
+{
+    return actor && *((const uint8_t *)actor + 0x378) == 0;
+}
+
+/* TD5RE_MANUAL_GEARBOX (env, cached once) DEFAULT 1 (ON). When OFF ("0"/"n"/"f")
+ * the manual-gearbox behaviour layer is disabled: the manual performance boost
+ * is forced to 1.0 AND a manual car is treated as automatic for the auto-shift
+ * decision (defensive — restores pre-#2 behaviour for A/B). Launch config, not
+ * sim input, so caching is lockstep-safe. */
+static int s_manual_gearbox_on = -1;
+static int td5_physics_manual_gearbox_enabled(void)
+{
+    if (s_manual_gearbox_on < 0) {
+        const char *e = getenv("TD5RE_MANUAL_GEARBOX");
+        s_manual_gearbox_on =
+            (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' ||
+                   e[0] == 'f' || e[0] == 'F')) ? 0 : 1;   /* default ON */
+        TD5_LOG_I(LOG_TAG,
+                  "manual_gearbox: TD5RE_MANUAL_GEARBOX=%d (1=manual cars never auto-shift)",
+                  s_manual_gearbox_on);
+    }
+    return s_manual_gearbox_on;
+}
+
+/* TRUE when the auto-shift FSM should run for this actor THIS tick. An actor in
+ * MANUAL mode (+0x378 == 0) must NOT auto-shift — the player shifts via the
+ * gear-up/down inputs (td5_input.c writes actor[0x36B]). Automatic actors (all
+ * AI/traffic, and the human player in auto mode) always auto-shift. With
+ * TD5RE_MANUAL_GEARBOX=0 every actor auto-shifts (faithful pre-#2 fallback). */
+static inline int td5_physics_actor_should_auto_shift(const TD5_Actor *actor)
+{
+    if (!td5_physics_manual_gearbox_enabled())
+        return 1;                                   /* knob off → always auto */
+    return !td5_physics_actor_is_manual_gearbox(actor);
+}
+
+/* ========================================================================
  * Manual-gearbox performance boost — PORT-ONLY. [MANUAL BOOST 2026-06-15, #2]
  *
  * A car driven in MANUAL gearbox mode gets +N% ACCELERATION and +N% TOP SPEED
  * over the same car in AUTOMATIC mode, for ALL cars (player, AI, traffic).
- * Per-slot gearbox mode is the byte at actor +0x378 — the SAME field the
- * drive/airborne gearbox dispatch already reads (==0 → manual, !=0 →
- * automatic; see the field_0x378 checks in td5_physics_update_player). The
- * acceleration half scales drive torque at the single drive-torque chokepoint
- * (td5_physics_compute_drive_torque, after the MP/Hard catch-up blocks); the
- * top-speed half raises the speed_limit at each drive-side gate by the same
- * Q8 factor. Automatic cars read a 1.0 factor → byte-unchanged.
+ * The acceleration half scales drive torque at the single drive-torque
+ * chokepoint (td5_physics_compute_drive_torque, after the MP/Hard catch-up
+ * blocks); the top-speed half raises the speed_limit at each drive-side gate by
+ * the same Q8 factor. Automatic cars (and a manual car when the gearbox layer is
+ * off) read a 1.0 factor → byte-unchanged.
  *
  * The factor is Q8 (0x100 = 1.0). For the default 20% it is 0x100 + (0x100 *
  * 20 / 100) = 0x100 + 0x33 = 0x133. Applied with the same biased-toward-zero
@@ -526,7 +591,8 @@ static inline int32_t td5_physics_mp_catchup_mult(int slot)
  *
  * KNOBS: TD5RE_MANUAL_BOOST (env, cached once) DEFAULT 1 (ON); "0"/"n"/"f"
  * disables → factor 1.0 → byte-unchanged. TD5RE_MANUAL_BOOST_PCT (env, cached
- * once) DEFAULT 20, clamped 0..100.
+ * once) DEFAULT 20, clamped 0..100. The boost additionally requires the gearbox
+ * layer (TD5RE_MANUAL_GEARBOX) to be ON.
  * ======================================================================== */
 
 /* Resolved manual-boost factor, Q8 (0x100 = 1.0 = inert). -1 = unresolved. */
@@ -560,13 +626,16 @@ static int32_t td5_physics_manual_boost_q8(void)
 }
 
 /* Per-actor drive-side boost factor, Q8 (0x100 = 1.0). Returns the manual-boost
- * factor when the actor is in MANUAL gearbox mode (byte +0x378 == 0), else 1.0.
- * Used to scale both drive torque (acceleration) and the speed_limit gate
- * (top speed) so a manual car accelerates harder AND tops out higher. */
+ * factor when the actor is in MANUAL gearbox mode (byte +0x378 == 0) AND the
+ * gearbox layer is enabled, else 1.0. Used to scale both drive torque
+ * (acceleration) and the speed_limit gate (top speed) so a manual car
+ * accelerates harder AND tops out higher. */
 static inline int32_t td5_physics_actor_manual_boost_q8(const TD5_Actor *actor)
 {
-    /* field_0x378 == 0 → manual, != 0 → automatic [see gearbox dispatch] */
-    if (actor && *((const uint8_t *)actor + 0x378) == 0)
+    /* +0x378 == 0 → manual [authoritative gearbox-mode flag; see header above].
+     * Gated by TD5RE_MANUAL_GEARBOX so the whole manual layer toggles together. */
+    if (td5_physics_manual_gearbox_enabled() &&
+        td5_physics_actor_is_manual_gearbox(actor))
         return td5_physics_manual_boost_q8();
     return MP_CATCHUP_Q8_ONE;
 }
@@ -579,6 +648,83 @@ static inline int32_t td5_physics_apply_speed_limit_boost(int32_t speed_limit, i
     if (q8 == MP_CATCHUP_Q8_ONE)
         return speed_limit;
     return (int32_t)(((int64_t)speed_limit * (int64_t)q8) >> 8);
+}
+
+/* ========================================================================
+ * Power-relative uphill-slope decel scaling — PORT-ONLY. [#8 2026-06-15]
+ *
+ * The gravity-along-slope term (section 14a-slope in td5_physics_update_player,
+ * knob TD5RE_SLOPE_DECEL) subtracts a FIXED velocity delta per tick regardless
+ * of how powerful the car is. That delta is the same absolute amount for a
+ * 260 mph supercar and a slow truck, so on a weak car it eats a far larger
+ * FRACTION of the modest forward speed it can muster — weak cars crawl uphill.
+ *
+ * Scale the UPHILL decel DOWN for lower-powered cars, proportional to the car's
+ * TOP-SPEED rating (tuning +0x74, PHYS_TOP_SPEED — the most monotonic per-car
+ * "how fast/strong is it" number; raw values observed ~0x3A1..0x433 = 929..1075
+ * for the AI difficulty templates, player cars in the same band). The scale is
+ *     s = clamp(top_speed / REF, FLOOR, 1.0)
+ * so a car at/above REF keeps full decel and the weakest car keeps at least
+ * FLOOR of it. Applied as a Q12 fixed-point factor on the (already negative)
+ * uphill g_long only; downhill is untouched.
+ *
+ * KNOBS: TD5RE_SLOPE_DECEL_LIGHT (env, cached) DEFAULT 1 (ON); "0"/"n"/"f" →
+ * scale forced to 1.0 (every car gets the full TD5RE_SLOPE_DECEL uphill term,
+ * pre-#8 behaviour). TD5RE_SLOPE_DECEL_REF (env, cached) DEFAULT 1075 — the
+ * top-speed rating that earns full uphill decel. TD5RE_SLOPE_DECEL_FLOOR_PCT
+ * (env, cached) DEFAULT 45, clamped 5..100 — the minimum % of the uphill decel
+ * any car keeps. All launch config (not sim input) so caching is lockstep-safe;
+ * the only sim input is the per-car top_speed → deterministic.
+ * ======================================================================== */
+#define SLOPE_LIGHT_Q12_ONE  0x1000   /* Q12 1.0 */
+
+static int s_slope_light_init = 0;
+static int s_slope_light_on   = 1;     /* default ON */
+static int s_slope_light_ref  = 1075;  /* top_speed earning full decel (0x433) */
+static int s_slope_light_floor_q12 = (SLOPE_LIGHT_Q12_ONE * 45) / 100;  /* 0.45 */
+
+static void td5_physics_slope_light_resolve(void)
+{
+    if (s_slope_light_init) return;
+    {
+        const char *e = getenv("TD5RE_SLOPE_DECEL_LIGHT");
+        if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' ||
+                  e[0] == 'f' || e[0] == 'F'))
+            s_slope_light_on = 0;
+        e = getenv("TD5RE_SLOPE_DECEL_REF");
+        if (e && e[0]) {
+            int r = atoi(e);
+            if (r > 0) s_slope_light_ref = r;
+        }
+        e = getenv("TD5RE_SLOPE_DECEL_FLOOR_PCT");
+        if (e && e[0]) {
+            int p = atoi(e);
+            if (p < 5)   p = 5;
+            if (p > 100) p = 100;
+            s_slope_light_floor_q12 = (SLOPE_LIGHT_Q12_ONE * p) / 100;
+        }
+    }
+    s_slope_light_init = 1;
+    TD5_LOG_I(LOG_TAG,
+              "slope_decel_light: TD5RE_SLOPE_DECEL_LIGHT=%d ref=%d floor=%d/4096 "
+              "(weak cars get proportionally less uphill decel)",
+              s_slope_light_on, s_slope_light_ref, s_slope_light_floor_q12);
+}
+
+/* Per-car Q12 scale (0x1000 = full uphill decel) for the given top-speed rating.
+ * 1.0 when the feature is off or top_speed is unknown (<=0). */
+static int32_t td5_physics_slope_light_scale_q12(int32_t top_speed)
+{
+    td5_physics_slope_light_resolve();
+    if (!s_slope_light_on || top_speed <= 0 || s_slope_light_ref <= 0)
+        return SLOPE_LIGHT_Q12_ONE;
+    {
+        int32_t s = (int32_t)(((int64_t)top_speed * SLOPE_LIGHT_Q12_ONE) /
+                              s_slope_light_ref);
+        if (s > SLOPE_LIGHT_Q12_ONE)        s = SLOPE_LIGHT_Q12_ONE;
+        if (s < s_slope_light_floor_q12)    s = s_slope_light_floor_q12;
+        return s;
+    }
 }
 
 /* ========================================================================
@@ -2846,7 +2992,9 @@ void td5_physics_update_player(TD5_Actor *actor)
          * throttle=-256 which would make auto_gear set gear=REVERSE,
          * corrupting the forward gear state. */
         if (!actor->brake_flag) {
-            if (*((const uint8_t *)actor + 0x378) == 0) {
+            /* Manual gearbox (+0x378==0): reverse-throttle-sign only — faithful
+             * original on-ground behaviour (no auto-shift on ground regardless). */
+            if (td5_physics_actor_is_manual_gearbox(actor)) {
                 td5_physics_reverse_throttle_sign(actor);
             }
             /* No auto_gear_select call here — orig's on-ground branch
@@ -3024,11 +3172,18 @@ void td5_physics_update_player(TD5_Actor *actor)
 
         if (!actor->brake_flag && throttle != 0) {
             /* Gearbox dispatch [CONFIRMED @ 0x404521]:
-             * field_0x378 == 0 → manual, != 0 → automatic */
-            if (*((const uint8_t *)actor + 0x378) == 0) {
-                td5_physics_reverse_throttle_sign(actor);
-            } else {
+             * field_0x378 == 0 → manual, != 0 → automatic.
+             * [#2 2026-06-15] Route through the canonical should-auto-shift
+             * predicate so a MANUAL car (+0x378==0) never auto-shifts here — the
+             * player drives the gears via the gear-up/down inputs, which write
+             * actor[0x36B] in td5_input.c. Auto cars (AI/traffic + auto-mode
+             * player) take the auto_gear FSM. TD5RE_MANUAL_GEARBOX=0 forces the
+             * old always-auto fallback. (When manual, mirror the original's
+             * reverse-throttle-sign step so REVERSE gear still drives backward.) */
+            if (td5_physics_actor_should_auto_shift(actor)) {
                 td5_physics_auto_gear_select(actor);
+            } else {
+                td5_physics_reverse_throttle_sign(actor);
             }
             td5_physics_update_engine_speed(actor);
 
@@ -3688,8 +3843,17 @@ void td5_physics_update_player(TD5_Actor *actor)
             int32_t g_ny    = (g_gravity_constant * ny) >> 12;
             int32_t g_long  = (g_ny * fwd_dot) >> 12;   /* >0 downhill, <0 uphill */
             /* Apply the multiplier only on the decelerating (uphill) side. */
+            int32_t light_q12 = SLOPE_LIGHT_Q12_ONE;
             if (g_long < 0) {
                 g_long = (int32_t)((float)g_long * s_slope_mult);
+                /* [#8 2026-06-15] Weaken the uphill decel for lower-powered cars
+                 * so a slow car does not crawl uphill. Scale by the car's top-
+                 * speed rating (Q12, clamped to a floor); fast cars unchanged.
+                 * Downhill (g_long > 0) is left at full strength. */
+                light_q12 = td5_physics_slope_light_scale_q12(
+                                (int32_t)PHYS_S(actor, PHYS_TOP_SPEED));
+                if (light_q12 != SLOPE_LIGHT_Q12_ONE)
+                    g_long = (int32_t)(((int64_t)g_long * light_q12) >> 12);
             }
             /* Rotate the longitudinal slope force back to world XZ along heading. */
             actor->linear_velocity_x += (g_long * sin_h) >> 12;
@@ -3697,8 +3861,10 @@ void td5_physics_update_player(TD5_Actor *actor)
 
             if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
                 TD5_LOG_I(LOG_TAG,
-                    "slope_decel slot0: ny=%d fwd_dot=%d g_long=%d mult=%.2f vlong=%d",
-                    ny, fwd_dot, g_long, s_slope_mult, v_long);
+                    "slope_decel slot0: ny=%d fwd_dot=%d g_long=%d mult=%.2f "
+                    "top_spd=%d light_q12=%d vlong=%d",
+                    ny, fwd_dot, g_long, s_slope_mult,
+                    (int)PHYS_S(actor, PHYS_TOP_SPEED), light_q12, v_long);
             }
         }
     }

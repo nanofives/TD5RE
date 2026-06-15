@@ -362,16 +362,26 @@ typedef struct TD5_FFState {
  *  the per-player joystick slot (0..TD5_PLAT_MAX_JS_SLOTS-1, == player index).
  *  Returns 0 on failure (no device, or device has no FF). Idempotent per slot.
  *  [PORT ENHANCEMENT 2026-06] N-way: each human player's device gets its own
- *  effect set so vibration is delivered per-player, not just on slot 0. */
+ *  effect set so vibration is delivered per-player, not just on slot 0.
+ *  [#1 2026-06-15] If the bound device is an XInput pad (8BitDo & most modern
+ *  gamepads — these expose rumble via XInput, NOT DI force-feedback effects),
+ *  this routes the slot's FF through XInput rumble and returns success even when
+ *  the device reports no DirectInput FF capability. Knob TD5RE_FF_XINPUT
+ *  (default ON; "0" = DI effects only). DI-effect FF is kept for wheels. */
 int  td5_plat_ff_init(int device_slot);
 
 /** Stop all effects on all devices and shutdown. */
 void td5_plat_ff_shutdown(void);
 
-/** Play an effect on one device. effect_slot 0..3, magnitude -10000..+10000. */
+/** Play an effect on one device. effect_slot 0..3, magnitude -10000..+10000.
+ *  [#1 2026-06-15] On an XInput-routed device the effect slot maps to a motor:
+ *  slot 1 (crash/gear jolts) -> high-freq (light) motor; slots 0/2 (steering/
+ *  side) + slot 3 (terrain/drift/redline buzz) -> low-freq (heavy) motor. The
+ *  input layer (td5_input.c) calls this unchanged; the routing is internal. */
 void td5_plat_ff_constant(int device_slot, int effect_slot, int magnitude);
 
-/** Stop one active effect slot on one device. */
+/** Stop one active effect slot on one device. (On an XInput-routed device this
+ *  clears that effect's motor contribution.) */
 void td5_plat_ff_stop(int device_slot, int effect_slot);
 
 /* ========================================================================
