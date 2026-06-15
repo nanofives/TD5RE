@@ -63,6 +63,11 @@ void td5_frontend_release_resources(void);
 /* --- Auto-race (skip frontend, launch from INI settings) --- */
 void td5_frontend_auto_race_setup(void);
 
+/* --- MP split-screen position select (#6): cell -> actor slot to show there.
+ * Returns -1 when positions are not active (knob off / not assigned / not the
+ * local MP race), so the InitRace viewport map keeps the identity default. --- */
+int  td5_frontend_mp_view_actor_slot(int cell);
+
 /* --- UI rendering helpers --- */
 void td5_frontend_render_ui_rects(void);
 void td5_frontend_flush_sprite_blits(void);

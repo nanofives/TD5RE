@@ -106,10 +106,17 @@ static int frontend_net_receive(void *buf, int max_size) {
     if (!td5_net_receive(&type, &data, &size))
         return -1;
 
-    /* Copy payload into caller's buffer */
-    if (data && size > 0 && buf && max_size > 0) {
-        int copy_size = (size < max_size) ? size : max_size;
-        memcpy(buf, data, (size_t)copy_size);
+    /* Copy payload into caller's buffer, ALWAYS leaving a NUL terminator: the
+     * wire payload is not guaranteed terminated, so a consumer that treats it
+     * as a C string (e.g. chat text) could otherwise over-read past it. Binary
+     * opcode consumers read small fixed offsets, well inside max_size-1. */
+    if (buf && max_size > 0) {
+        int copy_size = 0;
+        if (data && size > 0) {
+            copy_size = (size < max_size - 1) ? size : max_size - 1;
+            memcpy(buf, data, (size_t)copy_size);
+        }
+        ((char *)buf)[copy_size] = '\0';
     }
 
     return (int)type;
@@ -246,13 +253,24 @@ void Screen_MultiplayerLobby(void) {
             s_mp_simul          = (s_mp_joined_count >= 2);
             s_mp_phase          = 0;       /* start at the name + colour setup window */
             for (p = 0; p < s_mp_joined_count; p++) {
-                s_mp_player_car[p]    = s_selected_car;
-                s_mp_player_paint[p]  = 0;
-                s_mp_player_color[p]  = -1;
+                /* [MP SESSION PERSISTENCE 2026-06] Re-entering the MP menu in the
+                 * same process run restores each player's saved identity + car
+                 * (name/accent/car/paint/color/trans) from the persistent store;
+                 * otherwise seed defaults exactly as before. ready/pane_nav are
+                 * per-session runtime state and always reset. Gated by
+                 * TD5RE_MP_SESSION (when off / not yet valid this is byte-identical
+                 * to the old wipe-every-time behaviour). */
+                if (mp_session_is_valid() && p < mp_session_count()) {
+                    mp_session_restore_player(p);
+                } else {
+                    s_mp_player_car[p]    = s_selected_car;
+                    s_mp_player_paint[p]  = 0;
+                    s_mp_player_color[p]  = -1;
+                    s_mp_player_name[p][0] = '\0';
+                    s_mp_player_accent[p] = (int)(k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
+                }
                 s_mp_player_ready[p]  = 0;
                 s_mp_pane_nav_prev[p] = 0;
-                s_mp_player_name[p][0] = '\0';
-                s_mp_player_accent[p] = (int)(k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
                 /* Simultaneous select reads each pad through the still-alive,
                  * NON-exclusive scan handles, so per-player EXCLUSIVE devices
                  * (which would release those handles) are NOT bound until the

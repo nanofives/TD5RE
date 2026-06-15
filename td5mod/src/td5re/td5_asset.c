@@ -3734,7 +3734,7 @@ int td5_asset_load_traffic_model(int model_index, int slot)
     char mesh_name[32];
     char skin_name[32];
 
-    if (slot < 0 || slot >= 12) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) {
         TD5_LOG_W(LOG_TAG, "traffic slot=%d out of range", slot);
         return 0;
     }
@@ -3769,7 +3769,9 @@ int td5_asset_load_traffic_model(int model_index, int slot)
     /* Traffic slots live in [6..11]; subtract 6 so we get a 0..5 index into
      * the dedicated traffic texture page block. */
     int traffic_idx = (slot >= g_traffic_slot_base) ? (slot - g_traffic_slot_base) : slot;
-    int skin_page   = TD5_TRAFFIC_TEXTURE_PAGE_BASE + traffic_idx;
+    /* Only 6 dedicated traffic texture pages exist; slots past the 6th reuse them
+     * (matches the model_slot wrap in InitRace), so 16 traffic cars share 6 skins. */
+    int skin_page   = TD5_TRAFFIC_TEXTURE_PAGE_BASE + (traffic_idx % 6);
 
     char png_path[256];
     int skin_ok = 0;
@@ -3887,10 +3889,11 @@ int td5_asset_td6_city_traffic_base(int td6_level)
 
 int td5_asset_resolve_traffic_model_index(int track_index, int reverse, int slot_in_pool)
 {
-    if (slot_in_pool < 0 || slot_in_pool >= 6) {
+    if (slot_in_pool < 0) {
         TD5_LOG_W(LOG_TAG, "traffic resolve: slot_in_pool=%d out of range", slot_in_pool);
         return -1;
     }
+    slot_in_pool %= 6;   /* only 6 models per track; extra traffic slots reuse them */
 
     /* Drag strip path @ 0x0042AD21: schedule_index < 0 forces g_trackPoolIndex = 30,
      * which fails the `< 0x19` traffic gate — no models loaded. */

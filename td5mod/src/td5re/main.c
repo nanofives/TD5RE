@@ -687,12 +687,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
     g_td5.ini.checkpoint_timers  = td5_ini_int("GameOptions", "CheckpointTimers", 1);
-    /* Traffic is now a VOLUME, not a boolean: 0=Off 1=Low 2=Medium 3=High.
-     * Legacy INIs carrying the old ON value (1) land on Light. Default Heavy
-     * matches the classic always-6-cars density. */
+    /* Traffic is now a VOLUME, not a boolean: 0=Off 1=Low 2=Medium 3=High
+     * 4=Very High. Legacy INIs carrying the old ON value (1) land on Light.
+     * Default Heavy matches the classic always-6-cars density. */
     g_td5.ini.traffic            = td5_ini_int("GameOptions", "Traffic", 3);
     if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
-    if (g_td5.ini.traffic > 3) g_td5.ini.traffic = 3;
+    if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
+        g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
     g_td5.ini.cops               = td5_ini_int("GameOptions", "Cops", 1);
     g_td5.ini.difficulty         = td5_ini_int("GameOptions", "Difficulty", 1);
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);

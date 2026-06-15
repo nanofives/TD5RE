@@ -1631,9 +1631,12 @@ void Screen_GameOptions(void) {
                     s_game_option_checkpoint_timers ^= 1;
                     s_inner_state = 4;
                 } else if (active_button == 1) {
-                    /* [dynamic-traffic] 4-state volume: Off/Light/Normal/Heavy,
-                     * direction-aware so LEFT steps back through the cycle. */
-                    s_game_option_traffic = (s_game_option_traffic + delta) & 3;
+                    /* [dynamic-traffic] 5-state volume: Off/Light/Normal/Heavy/
+                     * Very-High, direction-aware so LEFT steps back through the
+                     * cycle (delta may be negative). */
+                    s_game_option_traffic =
+                        ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
+                         + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
                     s_inner_state = 4;
                 } else if (active_button == 2) {
                     s_game_option_cops ^= 1;
@@ -1663,7 +1666,11 @@ void Screen_GameOptions(void) {
                  * Selection, which persist g_td5.ini.laps themselves).
                  * [S02 (c) 2026-06-04] */
                 g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
+                /* [dynamic-traffic] Persist the full 0..4 volume (5-state row). */
                 g_td5.ini.traffic           = s_game_option_traffic;
+                if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
+                if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
+                    g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
                 g_td5.ini.cops              = s_game_option_cops;
                 g_td5.ini.difficulty        = s_game_option_difficulty;
                 g_td5.ini.dynamics          = s_game_option_dynamics;

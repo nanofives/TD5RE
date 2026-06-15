@@ -576,6 +576,19 @@ static void tick_wanted_target_tracker(void) {
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
 static int      s_prev_pause_act;      /* edge detector for the rebindable PAUSE action */
+/* [BUGFIX #15 2026-06-15] Pause-menu nav edge-detection state. PROMOTED from
+ * function-static block locals to file scope so the pause-menu OPEN block can
+ * SEED them with the currently-held direction keys (UP is usually accelerate,
+ * DOWN is brake). Without seeding, opening the menu while holding UP fired the
+ * up-nav edge on the first menu frame and moved the cursor off CONTINUE (row 2)
+ * onto SOUND (row 1). Latching the held state on open makes navigation act only
+ * on a fresh release-then-press edge after the menu is up. Keyboard + pad. */
+static int      s_prev_down;           /* edge detector: pause-menu DOWN nav */
+static int      s_prev_up;             /* edge detector: pause-menu UP nav */
+static int      s_prev_left;           /* edge detector: pause-menu LEFT (slider) */
+static int      s_prev_right;          /* edge detector: pause-menu RIGHT (slider) */
+static int      s_prev_enter;          /* edge detector: pause-menu CONFIRM (Enter / pad A) */
+static int      s_prev_jb;             /* edge detector: pause-menu pad B = back/continue */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
 static int      s_pause_restart_pending; /* [REWORK 2026-06-05/S15] 1 = pause-menu RESTART RACE fade in progress, return 3 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
@@ -1109,6 +1122,16 @@ int td5_game_get_player_lap(int slot)
     return (int)s_metrics[slot].checkpoint_index;
 }
 
+/* Live forward-progress span index (actor +0x82) for a slot, or 0 when out of
+ * range / no actor. Used by the race-results table to estimate a still-racing
+ * car's finish time from its pace (remaining spans / average pace). */
+int td5_game_get_slot_span(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    TD5_Actor *a = td5_game_get_actor(slot);
+    return a ? (int)a->track_span_normalized : 0;
+}
+
 /* Returns cumulative race timer ticks (30/sec) for lap_index 0,
  * or the split time for lap_index 1-9. Used by HUD. */
 int32_t td5_game_get_race_timer(int slot, int lap_index)
@@ -1177,6 +1200,14 @@ int32_t td5_game_get_result_top_speed(int slot)
         if (actor) v = (int32_t)actor->peak_speed;
     }
     return v;
+}
+
+/* [#10] Per-racer extended telemetry accessor for the post-race summary screen.
+ * Thin forwarder to the physics-owned g_race_metrics[] array (collisions, air
+ * time, drifts, plus a running top/avg from planar velocity). NULL out of range. */
+const TD5_RaceMetrics *td5_game_get_metrics(int slot)
+{
+    return td5_physics_get_metrics(slot);
 }
 
 /* Returns the average speed accumulator (raw) for a given slot.
@@ -1434,6 +1465,16 @@ static void td5_game_assign_wheel_styles(uint32_t race_seed) {
     }
 }
 
+/* Public getter for the active per-race RNG seed (s_saved_race_seed). This is the
+ * REPLICATED seed: set from the host-broadcast session_seed at race start (and
+ * restored from the recorded value for replays), so it is bit-identical on every
+ * netplay peer and across a replay. Sim-deterministic features that must agree
+ * across machines (e.g. the AI random branch choice in td5_ai.c) seed a private,
+ * sim-tick-only RNG stream from this value rather than the shared CRT rand() —
+ * whose sequence is consumed at render rate and therefore diverges between peers
+ * running at different frame rates. */
+uint32_t td5_game_get_race_seed(void) { return s_saved_race_seed; }
+
 int td5_game_init_race_session(void) {
     #define CK(n) TD5_LOG_I(LOG_TAG, "CK: %s", n)
     CK("ck0_start");
@@ -1607,6 +1648,11 @@ int td5_game_init_race_session(void) {
     td5_plat_heap_reset();
     TD5_LOG_I(LOG_TAG, "InitRace step 2/19: heap reset complete");
     CK("ck2_after_heap_reset");
+
+    /* [#10 race telemetry] Zero all per-racer summary metrics at the start of
+     * every race so the post-race summary reflects only this race. Accumulated
+     * each live sim tick by td5_physics_accumulate_metrics(). */
+    td5_physics_reset_metrics();
 
     /* ---- Step 3: Configure race slot states (player/AI/disabled) ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -2036,17 +2082,21 @@ int td5_game_init_race_session(void) {
         && !g_td5.network_active
         && g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS) {
         int traffic_loaded = 0;
-        for (int ti = 0; ti < 6; ti++) {
-            int traffic_slot  = g_traffic_slot_base + ti;  /* slots 6..11 (legacy base) */
+        for (int ti = 0; ti < TD5_MAX_TRAFFIC_SLOTS; ti++) {
+            int traffic_slot  = g_traffic_slot_base + ti;  /* slots 6..21 (legacy base) */
+            /* Only 6 distinct traffic car models exist per track; slots past the
+             * 6th reuse them (model_slot wraps, matching the skin-page wrap in
+             * td5_asset_load_traffic_model). */
+            int model_slot    = ti % 6;
             int traffic_model = td5_asset_resolve_traffic_model_index(
-                g_td5.track_index, /*reverse=*/0, ti);
+                g_td5.track_index, /*reverse=*/0, model_slot);
             if (traffic_model < 0 &&
                 g_td5.ini.traffic_dynamic && g_td5.ini.traffic_dyn_circuits) {
                 /* [dynamic-traffic OnCircuits] circuits / TD6 conversions have
                  * no row in the per-track traffic-model tables (pool_idx>=25
                  * in the original). Borrow track 0's (Moscow's) model set so
                  * the dynamic spawner has meshes to dress its actors with. */
-                traffic_model = td5_asset_resolve_traffic_model_index(0, 0, ti);
+                traffic_model = td5_asset_resolve_traffic_model_index(0, 0, model_slot);
                 if (traffic_model >= 0)
                     TD5_LOG_I(LOG_TAG,
                               "InitRace step 5b: track_index=%d slot_in_pool=%d "
@@ -2060,7 +2110,7 @@ int td5_game_init_race_session(void) {
             {
                 int td6_city_base = td5_asset_td6_city_traffic_base(g_active_td6_level);
                 if (td6_city_base >= 0) {
-                    traffic_model = td6_city_base + ti;
+                    traffic_model = td6_city_base + model_slot;
                     TD5_LOG_I(LOG_TAG,
                               "InitRace step 5b: TD6 city level=%d slot_in_pool=%d "
                               "-> real city traffic model %d",
@@ -2089,8 +2139,8 @@ int td5_game_init_race_session(void) {
             }
         }
         TD5_LOG_I(LOG_TAG,
-                  "InitRace step 5b/19: traffic vehicle assets loaded (%d/6 slots, track_index=%d)",
-                  traffic_loaded, g_td5.track_index);
+                  "InitRace step 5b/19: traffic vehicle assets loaded (%d/%d slots, track_index=%d)",
+                  traffic_loaded, TD5_MAX_TRAFFIC_SLOTS, g_td5.track_index);
     } else {
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 5b/19: traffic disabled (traffic_enabled=%d time_trial=%d drag=%d net=%d split=%d traffic_base=%d)",
@@ -2841,6 +2891,18 @@ int td5_game_init_race_session(void) {
      * (vp0->slot0; vp1->slot1 when a 2nd actor exists). */
     for (int vp = 0; vp < TD5_MAX_VIEWPORTS; vp++) {
         int slot = (vp < g_td5.viewport_count && vp < g_td5.total_actor_count) ? vp : 0;
+        /* [#6 MP POSITION SELECT 2026-06-15] If the local-MP position picker
+         * assigned cells, viewport vp (= grid cell vp, row-major) shows the actor
+         * of the player who chose that cell. The accessor returns -1 unless the
+         * positions feature is active (knob on + committed + the local MP flow),
+         * so AutoRace / the harness / non-positioned MP keep the identity map and
+         * stay byte-unchanged. Frontend/render only — the deterministic sim and
+         * net path are untouched (this just repoints which camera each pane uses). */
+        if (vp < g_td5.viewport_count) {
+            int mapped = td5_frontend_mp_view_actor_slot(vp);
+            if (mapped >= 0 && mapped < g_td5.total_actor_count)
+                slot = mapped;
+        }
         g_actorSlotForView[vp] = slot;
         g_actor_slot_map[vp]   = slot;
     }
@@ -3990,7 +4052,8 @@ int td5_game_run_race_frame(void) {
          * [CONFIRMED orig PollRaceSessionInput @0x42C470: when g_inputPlaybackActive
          *  the pause/MuteAll block is skipped and the abort block ORs bit 30 →
          *  fade-out. The original used a simple ESC-to-exit, NOT a pause menu.] */
-        if (esc_edge && td5_game_is_cinematic_race() && !s_replay_abort_pending &&
+        if ((esc_edge || td5_input_replay_exit_requested()) && td5_game_is_cinematic_race() &&
+            !s_replay_abort_pending &&
             g_td5.race_end_fade_state == 0) {
             s_replay_abort_pending = 1;
             /* View Replay was launched from the results screen → return there
@@ -4011,6 +4074,26 @@ int td5_game_run_race_frame(void) {
                                        * Rows: 0=VIEW 1=SOUND 2=CONTINUE
                                        * 3=RESTART RACE 4=QUIT TO MENU 5=EXIT GAME.
                                        * ENTER then dismisses in one keypress. */
+            /* [BUGFIX #15 2026-06-15] Consume the currently-held direction keys so
+             * the menu's nav edge-detection treats them as ALREADY pressed. UP is
+             * usually accelerate and DOWN is brake; without this seed, opening the
+             * menu mid-throttle fired the up/down nav edge on the first menu frame
+             * and bumped the cursor off CONTINUE. Latch s_prev_* = held state now
+             * (same key/pad reads as the nav block below) so only a fresh
+             * release-then-press moves the cursor. Keyboard + controller. */
+            {
+                uint32_t jnav_open = 0;
+                int hp = g_td5.num_human_players;
+                if (hp < 1) hp = 1;
+                if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+                for (int pi = 0; pi < hp; pi++) jnav_open |= td5_plat_input_joystick_nav(pi);
+                s_prev_up    = td5_plat_input_key_pressed(0xC8) || (jnav_open & 0x04);
+                s_prev_down  = td5_plat_input_key_pressed(0xD0) || (jnav_open & 0x08);
+                s_prev_left  = td5_plat_input_key_pressed(0xCB) || (jnav_open & 0x01);
+                s_prev_right = td5_plat_input_key_pressed(0xCD) || (jnav_open & 0x02);
+                s_prev_enter = td5_plat_input_key_pressed(0x1C) || (jnav_open & 0x10);
+                s_prev_jb    = (jnav_open & 0x20) ? 1 : 0;
+            }
             td5_sound_set_sfx_muted(1);  /* silence engine/skid SFX on pause
                                           * (mirrors DXSound::MuteAll @0x0042C470). */
             /* [REWORK 2026-06-05/S15] Silence the in-race music (CD audio) while
@@ -4018,6 +4101,7 @@ int td5_game_run_race_frame(void) {
              * resume to gameplay; left stopped on RESTART/QUIT/EXIT (RESTART's
              * init re-plays it, the others tear the race down). */
             td5_sound_cd_stop();
+            td5_sound_set_paused(1);  /* [item 24] suspend ALL audio at once on pause (gated TD5RE_PAUSE_MUTE) */
             TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 2, SFX muted, music stopped)");
         }
         if (s_pause_menu_active) {
@@ -4026,9 +4110,9 @@ int td5_game_run_race_frame(void) {
             if (!s_pause_input_done) {
                 s_pause_input_done = 1;
 
-                static int s_prev_down = 0, s_prev_up = 0;
-                static int s_prev_left = 0, s_prev_right = 0;
-                static int s_prev_enter = 0;
+                /* Nav edge-detection state (s_prev_down/up/left/right/enter/jb)
+                 * is file-static and SEEDED on menu-open with the held keys
+                 * [BUGFIX #15], so held UP/DOWN can't auto-navigate on frame 1. */
                 /* [PORT ENHANCEMENT 2026-06] Aggregate joystick nav from every human
                  * player's in-race device (dpad/left stick = move, A = confirm) so the
                  * pause menu is navigable with the pad, not just the keyboard. The
@@ -4226,7 +4310,6 @@ int td5_game_run_race_frame(void) {
                 /* Joystick B = back = continue (close the menu), mirroring the
                  * frontend B=back convention. [PORT ENHANCEMENT 2026-06] */
                 {
-                    static int s_prev_jb = 0;
                     int jb = (jnav & 0x20) ? 1 : 0;
                     if (jb && !s_prev_jb) s_pause_menu_active = 0;
                     s_prev_jb = jb;
@@ -4265,6 +4348,7 @@ int td5_game_run_race_frame(void) {
                 td5_sound_set_sfx_muted(s_pause_menu_cursor == 1 ? 0 : 1);
             } else if (pause_menu_was_active) {
                 td5_sound_set_sfx_muted(0);
+                td5_sound_set_paused(0);  /* [item 24] resume audio + restore music volume */
                 if (!s_pause_exit_pending && !s_pause_restart_pending && !g_td5.quit_requested) {
                     td5_sound_cd_play(g_td5.track_index % 10 + 1);  /* same call as InitRace step 16 */
                     TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
@@ -4685,6 +4769,18 @@ int td5_game_run_race_frame(void) {
         }
 
         td5_physics_tick();
+
+        /* [#10 race telemetry] Accumulate per-racer summary metrics for this
+         * LIVE race sim tick (top/avg speed, collisions, air time, drifts).
+         * Placed here — after the live td5_physics_tick(), inside the
+         * deterministic sub-tick loop and PAST the countdown/pause `continue`
+         * guards above — so it runs exactly once per genuine race tick from
+         * replicated state only (lockstep- and replay-deterministic). The
+         * countdown-boundary td5_physics_tick() call does NOT accumulate (cars
+         * are stationary during the count-in). Cheap; runs regardless of the
+         * summary-screen knob so the data is always available for A/B. */
+        td5_physics_accumulate_metrics();
+
         td5_game_trace_stage("post_physics", ticks_this_frame);
         td5_game_trace_stage("post_ai", ticks_this_frame);
 

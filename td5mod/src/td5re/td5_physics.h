@@ -104,6 +104,21 @@ void td5_physics_update_suspension_response(TD5_Actor *actor);
 /* --- Attitude / Recovery --- */
 void td5_physics_clamp_attitude(TD5_Actor *actor);
 void td5_physics_reset_actor_state(TD5_Actor *actor);
+
+/* --- Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15) ---
+ * Reposition a stuck player's car a few spans back, centred on the track,
+ * upright, with linear+angular velocity zeroed and heading aligned to the
+ * track's forward direction at that span. `slot` is the actor slot. Safe to call
+ * from the deterministic sim tick; clears the slot's auto-stuck timer. Gated by
+ * TD5RE_STUCK_RECOVERY (default ON); the number of spans back is
+ * TD5RE_RECOVERY_SPANS_BACK (default 3). Returns 1 if the car was repositioned,
+ * 0 if it could not be (no track / non-racer slot / knob off).
+ *
+ * The per-tick driver below runs both the AUTOMATIC stuck-detection and the
+ * MANUAL (R / L3) recovery for every local human player; it is called from
+ * td5_physics_tick. Restricted to non-network play for v1. */
+int  td5_physics_recover_player(int slot);
+void td5_physics_update_stuck_recovery(void);
 void td5_physics_missing_wheel_correction(TD5_Actor *actor);
 void td5_physics_state0f_damping(TD5_Actor *actor);
 
@@ -136,6 +151,17 @@ void td5_physics_set_collisions(int enabled);
 int  td5_physics_get_collisions_flag(void);  /* mirror of *0x00463188 — pilot trace use */
 void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b);
 void td5_physics_resolve_vehicle_contacts(void);
+
+/* --- Acute high-speed crash feedback (PORT-ONLY, item #12) ---
+ * On a genuinely high-speed PLAYER crash (impact above an acute threshold,
+ * with 3D Collisions enabled), the physics scrubs extra forward speed and
+ * records a per-slot crash-fx event behind TD5RE_CRASH_FX (default ON).
+ * Other modules (HUD/VFX/audio) poll this every frame to fire a one-shot
+ * reaction. Returns the per-slot crash sequence id (0 = no acute crash yet),
+ * and fills *out_mag (last acute impact magnitude) and *out_age (sim ticks
+ * since the crash; 0 = same tick). Null out-params are tolerated; an out-of-
+ * range or non-racer slot returns 0. Safe to call every frame. */
+uint32_t td5_physics_get_crash_fx(int slot, int32_t *out_mag, int *out_age);
 
 /* --- Wall collision response (FUN_00406980) ---
  * probe_x_fp8 / probe_z_fp8: probe world position in 24.8 fixed point.

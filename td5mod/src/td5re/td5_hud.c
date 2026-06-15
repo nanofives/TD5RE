@@ -51,6 +51,162 @@ static inline void hud_screen_center(float *cx, float *cy)
     *cy = g_render_height_f * 0.5f;
 }
 
+/* ------------------------------------------------------------------------
+ * HUD wave knobs (all default = fixed/on; set the env var to "0" for the
+ * pre-fix behaviour). Read once, cached. [HUD HIGH-DPI / TTF wave 2026-06-14]
+ * ------------------------------------------------------------------------ */
+static int hud_knob_on(const char *name)
+{
+    /* default on (return 1) unless the var is explicitly "0" */
+    const char *e = getenv(name);
+    return (e && e[0] == '0') ? 0 : 1;
+}
+
+/* (1) Scale in-race race text + the whole pause overlay with the window size,
+ * the same way the speedo/minimap already do. */
+static int hud_dpi_scale_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_HUD_DPI_SCALE");
+        TD5_LOG_I(LOG_TAG, "HUD high-DPI text/pause scaling: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* (3) Baseline multiplier on the in-race HUD text/element scale [user follow-up
+ * 2026-06-14: "in-race elements too big"]. The high-DPI factor above tracks the
+ * window size; this trims the BASELINE so the race text/elements render ~25%
+ * smaller while still scaling with the window. Applied as a constant factor on
+ * hud_active_text_scale(), so it multiplies BOTH the glyph cap and the
+ * line-pitch/anchor math (which derive from the same scale) — no overlap drift.
+ * Tunable: TD5RE_HUD_SCALE = the multiplier in percent (default 75 => 0.75x).
+ * "0" or unset both mean default (75); set e.g. 100 for the old size, 50 for
+ * half. The pause overlay keeps its own 1:1 window scale (hud_pause_scale). */
+static float hud_size_mul(void)
+{
+    static float s = -1.0f;
+    if (s < 0.0f) {
+        const char *e = getenv("TD5RE_HUD_SCALE");
+        long pct = (e && e[0]) ? strtol(e, NULL, 10) : 0;
+        /* 0 / blank / non-numeric -> default 75%. Clamp to a sane 10..400%. */
+        if (pct <= 0)   pct = 75;
+        if (pct < 10)   pct = 10;
+        if (pct > 400)  pct = 400;
+        s = (float)pct / 100.0f;
+        TD5_LOG_I(LOG_TAG, "HUD in-race text/element size multiplier: %.2fx", (double)s);
+    }
+    return s;
+}
+
+/* (2) Route the 3/2/1/GO race-start countdown digit through the TTF font path
+ * instead of the NUMBERS bitmap atlas. */
+static int hud_countdown_ttf_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_COUNTDOWN_TTF");
+        TD5_LOG_I(LOG_TAG, "countdown TTF font: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* (18) Render the replay "R" indicator with the TTF font (same blink cadence /
+ * transparency) instead of the REPLAY texture. */
+static int hud_replay_r_ttf_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_REPLAY_R_TTF");
+        TD5_LOG_I(LOG_TAG, "replay R indicator TTF: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* (23) Fix the branched-circuit minimap: centre the road walk on the branch-
+ * collapsed (parallel-main) span and window car/traffic dots by collapsed span,
+ * so all geometry + every marker render regardless of which branch you're on. */
+static int hud_minimap_branch_fix_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_MINIMAP_BRANCH_FIX");
+        TD5_LOG_I(LOG_TAG, "minimap branch fix: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* [#6 2026-06-15] Minimap forward look-ahead. The in-race minimap walked a fixed
+ * 48-quad window (~144 spans ahead) so on sharp turns the player could see the
+ * end of the drawn track. When on (default), extend the forward span window so
+ * more track renders ahead. Set TD5RE_MINIMAP_AHEAD=0 for the original 48-quad
+ * reach. The walk count is clamped to MINIMAP_SEG_MAX (256) so it never overflows
+ * the segment arrays. */
+static int hud_minimap_ahead_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_MINIMAP_AHEAD");
+        TD5_LOG_I(LOG_TAG, "minimap forward look-ahead: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* [#9 MP CAR LABELS 2026-06-15] Floating name labels over the OTHER players'
+ * cars in each split-screen pane (coloured plate + black text, shrinking with
+ * distance, gone beyond a cutoff). Default on; set TD5RE_MP_CAR_LABELS=0 to
+ * disable. */
+static int hud_mp_car_labels_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_MP_CAR_LABELS");
+        TD5_LOG_I(LOG_TAG, "MP car name labels: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* [#11 EMPTY GRID-CELL FILLER 2026-06-15] When the split-screen grid has empty
+ * cells (player count < cols*rows, e.g. 3 players in a 2x2), fill each empty cell
+ * with either a whole-track MAP (default / content id 0 or 1) or a STANDINGS list
+ * (content id 2), per g_td5.split_missing_content[]. Default on; set
+ * TD5RE_GRID_FILLER=0 to leave empty cells black (legacy behaviour). */
+static int hud_grid_filler_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_GRID_FILLER");
+        TD5_LOG_I(LOG_TAG, "split-screen empty-cell filler: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* [#5 2026-06-15] Tighten the inter-digit spacing of the speedometer readout.
+ * The left-most digit stays put; the per-digit advance (pitch) shrinks so the
+ * other digits move toward it, closing the gaps a little. Default on; set
+ * TD5RE_SPEEDO_SPACING=0 to restore the original glyph_w + 2px pitch. */
+static int hud_speedo_spacing_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_SPEEDO_SPACING");
+        TD5_LOG_I(LOG_TAG, "speedo digit tighten: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* Pause-overlay scale: the pause panel is screen-centred (not per-view), so it
+ * uses the global render scale (min of W/640, H/480 to keep it square), matching
+ * the speedo's uniform-scale convention. */
+static float hud_pause_scale(void)
+{
+    if (!hud_dpi_scale_on()) return 1.0f;
+    float sx = g_render_width_f  * (1.0f / 640.0f);
+    float sy = g_render_height_f * (1.0f / 480.0f);
+    float s  = (sx < sy) ? sx : sy;
+    return (s > 0.05f) ? s : 1.0f;
+}
+
 /* ========================================================================
  * HUD-owned globals (migrated from td5re_stubs.c)
  * ======================================================================== */
@@ -1107,16 +1263,20 @@ void td5_hud_draw_pause_overlay(void)
          * selbox CENTRE is at L->y + 11. Put the cap centre there:
          *   cap_centre = baseline - CAP/2 = L->y + BASELINE - CAP/2 == L->y + 11
          *   => BASELINE = 11 + CAP/2  (= 17 for CAP 12). */
-        const float PAUSE_TTF_CAP      = 12.0f;
-        const float PAUSE_TTF_BASELINE = 17.0f;   /* 11 + CAP/2; centres caps on the selbox */
+        /* [HUD high-DPI 2026-06-14] Scale cap + offsets by the same screen scale
+         * the panel/selbox were rebuilt with, so the text grows with the panel
+         * and stays centred on each (scaled) selbox row. ps==1.0 => old layout. */
+        float ps = hud_pause_scale();
+        const float PAUSE_TTF_CAP      = 12.0f * ps;
+        const float PAUSE_TTF_BASELINE = 17.0f * ps;   /* 11 + CAP/2; centres caps on the selbox */
         const float PAUSE_TTF_TRACK    = 0.0f;
         float cx, cy;
         hud_screen_center(&cx, &cy);
         static int s_logged_pause_ttf = 0;
         if (!s_logged_pause_ttf) {
             s_logged_pause_ttf = 1;
-            TD5_LOG_I(LOG_TAG, "pause menu: native TTF active (cap=%.1f baseline=%.1f)",
-                      (double)PAUSE_TTF_CAP, (double)PAUSE_TTF_BASELINE);
+            TD5_LOG_I(LOG_TAG, "pause menu: native TTF active (cap=%.1f baseline=%.1f ps=%.2f)",
+                      (double)PAUSE_TTF_CAP, (double)PAUSE_TTF_BASELINE, (double)ps);
         }
         /* pass 1: rasterise every glyph into the shared atlas, then ONE GPU upload */
         for (int li = 0; li < s_pause_vui_line_count; li++) {
@@ -1132,8 +1292,8 @@ void td5_hud_draw_pause_overlay(void)
             for (int c = 0; s[c]; c++)
                 total_w += td5_font_advance((unsigned char)s[c], PAUSE_TTF_CAP) + PAUSE_TTF_TRACK;
             float start_x  = (L->alignment == 2) ? -(total_w * 0.5f)
-                                                 : (4.0f - s_pause_half_width);
-            float baseline = cy + L->y + PAUSE_TTF_BASELINE;
+                                                 : ((4.0f - s_pause_half_width) * ps);
+            float baseline = cy + L->y * ps + PAUSE_TTF_BASELINE;
             float curx     = cx + start_x;
             for (int c = 0; s[c]; c++) {
                 td5_glyph g; td5_font_get((unsigned char)s[c], PAUSE_TTF_CAP, &g);
@@ -1161,6 +1321,7 @@ void td5_hud_draw_pause_overlay(void)
         int page = td5_vui_pausefont_page();
         float cx, cy;
         hud_screen_center(&cx, &cy);
+        float ps = hud_pause_scale();   /* [HUD high-DPI 2026-06-14] scale to match panel */
         const float INV = 1.0f / 256.0f;          /* pause SDF page is 256x256 */
         for (int li = 0; li < s_pause_vui_line_count; li++) {
             PauseTextLine *L = &s_pause_vui_lines[li];
@@ -1172,9 +1333,9 @@ void td5_hud_draw_pause_overlay(void)
                     uint8_t ch = (uint8_t)L->s[c];
                     total_w += (float)(((g_pause_glyph_widths[ch] * 2) / 3) + 2);
                 }
-                start_x = -(total_w * 0.5f);
+                start_x = -(total_w * 0.5f) * ps;
             } else {
-                start_x = 4.0f - s_pause_half_width;
+                start_x = (4.0f - s_pause_half_width) * ps;
             }
             float curx = start_x;
             for (int c = 0; c < len; c++) {
@@ -1184,10 +1345,10 @@ void td5_hud_draw_pause_overlay(void)
                 float gv = (float)(ch >> 4)   * 16.0f;
                 float u0 = (gu + 0.5f) * INV,                 v0 = (gv + 0.5f)  * INV;
                 float u1 = (gu + 0.5f + (float)(glyph_w - 1)) * INV, v1 = (gv + 16.5f) * INV;
-                td5_vui_msdf_quad(cx + curx + 0.5f, cy + L->y + 0.5f,
-                                  (float)(glyph_w - 1), 15.5f,
+                td5_vui_msdf_quad(cx + curx + 0.5f * ps, cy + L->y * ps + 0.5f * ps,
+                                  (float)(glyph_w - 1) * ps, 15.5f * ps,
                                   0xFFFFFFFFu, page, u0, v0, u1, v1);
-                curx += (float)(glyph_w + 2);
+                curx += (float)(glyph_w + 2) * ps;
             }
         }
     }
@@ -1208,6 +1369,176 @@ void td5_hud_draw_pause_overlay(void)
  * td5_vui_text_centered is crisp MSDF text. Both fall back to the bitmap path
  * when VectorUI is disabled, so this needs no quad pre-bake.
  * ======================================================================== */
+/* ========================================================================
+ * [#9 MP CAR LABELS 2026-06-15] Floating name labels over the OTHER players'
+ * cars, drawn per split-screen pane. SOURCE-PORT FEATURE.
+ *
+ * Each label is a world-space billboard anchored above the target car's roof,
+ * projected to screen through THAT pane's camera (the same renderer transform
+ * pipeline the VFX particles / wanted-damage indicator use:
+ * td5_camera_get_basis -> td5_render_load_rotation + load_translation(0) ->
+ * td5_render_transform_and_project of the world point). The label shrinks with
+ * camera distance and disappears past a cutoff so far cars don't clutter.
+ *
+ * The renderer's projection is per-PANE: td5_render_configure_projection sets
+ * the focal length + a pane-LOCAL screen centre, and the per-view render pass
+ * used a hardware viewport offset to place those local coords on screen. By HUD
+ * time the viewport is reset to full-screen, so projected coords come back
+ * pane-local (0..pane_w / 0..pane_h) and we add the pane's screen offset
+ * (vp_int_left/top) to land them in the full render target.
+ *
+ * Camera funcs live in td5_camera.c (no header included here on purpose — see
+ * rule: only td5_hud.c is edited; these are forward extern prototypes matching
+ * the codebase's inline-extern convention). The render/transform funcs come
+ * from td5_render.h (already included).
+ * ======================================================================== */
+extern void td5_camera_apply_view(int view);
+extern void td5_camera_get_basis(float *right, float *up, float *forward);
+
+static void hud_draw_mp_car_labels(void)
+{
+    int views = s_view_count;
+    if (!hud_mp_car_labels_on()) return;
+    if (!s_hud_id_active) return;            /* MP identities not set -> off */
+    if (views < 2) return;                   /* only meaningful when split */
+    /* Multiple humans share the screen (split). network_active single-pane
+     * netplay has only one local human per machine, so there is no "other
+     * player's car in my pane" to label there. */
+    if (g_td5.num_human_players < 2) return;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    /* Sub-tick position interpolation, matching the rendered car body
+     * (td5_render.c: world_pos + linear_velocity * g_subTickFraction). */
+    extern float g_subTickFraction;
+    float frac = g_subTickFraction;
+    if (frac < 0.0f) frac = 0.0f; else if (frac > 1.0f) frac = 1.0f;
+
+    const float FP = 1.0f / 256.0f;          /* 24.8 fixed -> world units */
+
+    /* Above-roof anchor. World is Y-DOWN (td5_render.c: +Y world pushes a car
+     * DOWN toward the ground), so SUBTRACTING from world-Y lifts the anchor
+     * above the roof. ~600 world units sits comfortably over a car body. */
+    const float ROOF_LIFT_WS = 600.0f;
+
+    /* Distance shrink / cutoff, expressed in view-space depth (= 1/rhw, the
+     * camera->point distance along the view axis, world units). NEAR_D and far
+     * are tuned for the chase camera: full size up close, shrinking linearly to
+     * the floor scale by FAR_D, and skipped entirely past CUT_D. */
+    const float NEAR_D = 2500.0f;            /* >= this distance: start shrinking */
+    const float FAR_D  = 22000.0f;           /* <= floor scale by here */
+    const float CUT_D  = 30000.0f;           /* beyond this: do not draw */
+    const float SCALE_NEAR = 1.0f;           /* multiplier on the base text scale */
+    const float SCALE_FAR  = 0.35f;
+
+    for (int v = 0; v < views; v++) {
+        const TD5_HudViewLayout *vl = &s_view_layout[v];
+        float L = vl->vp_int_left,  T = vl->vp_int_top;
+        float R = vl->vp_int_right, B = vl->vp_int_bottom;
+        float pane_w = R - L, pane_h = B - T;
+        int owner = g_actor_slot_map[v];
+        if (pane_w < 2.0f || pane_h < 2.0f) continue;
+
+        /* Re-establish pane v's camera + projection (idempotent for the default
+         * new pipeline: it rebuilds from the cached pose at the current
+         * sub-tick fraction, reproducing exactly the camera that rendered this
+         * pane). */
+        td5_camera_apply_view(v);
+        td5_render_configure_projection((int)(pane_w + 0.5f), (int)(pane_h + 0.5f));
+
+        TD5_Mat3x3 cam_rot;
+        td5_camera_get_basis(&cam_rot.m[0], &cam_rot.m[3], &cam_rot.m[6]);
+        TD5_Vec3f zero_pos = { 0.0f, 0.0f, 0.0f };
+        td5_render_push_transform();
+        td5_render_load_rotation(&cam_rot);
+        td5_render_load_translation(&zero_pos);  /* m[9..11] = basis*(-camPos) */
+
+        /* Label every OTHER human player's car in this pane. Viewport u is owned
+         * by human slot g_actor_slot_map[u]; skip u==v (the pane owner). */
+        for (int u = 0; u < views; u++) {
+            if (u == v) continue;
+            int slot = g_actor_slot_map[u];
+            if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+            if (slot == owner) continue;     /* never label your own car */
+
+            uint8_t *a = (uint8_t *)actor_ptr(slot);
+            int32_t vx = *(int32_t *)(a + 0x1CC);   /* linear_velocity_x */
+            int32_t vz = *(int32_t *)(a + 0x1D4);   /* linear_velocity_z */
+            float wx = ((float)actor_world_x(slot) + (float)vx * frac) * FP;
+            float wy = ((float)(*(int32_t *)(a + 0x200)) - ROOF_LIFT_WS) * FP; /* roof, Y up = -Y */
+            float wz = ((float)actor_world_z(slot) + (float)vz * frac) * FP;
+
+            float sx, sy, sz, rhw;
+            if (!td5_render_transform_and_project(wx, wy, wz, &sx, &sy, &sz, &rhw))
+                continue;                    /* behind the near plane */
+            if (rhw <= 0.0f) continue;
+            float dist = 1.0f / rhw;         /* view-space depth (world units) */
+            if (dist > CUT_D) continue;      /* too far -> no label */
+
+            /* Linear distance shrink between NEAR_D and FAR_D. */
+            float t = (dist - NEAR_D) / (FAR_D - NEAR_D);
+            if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+            float dscale = SCALE_NEAR + (SCALE_FAR - SCALE_NEAR) * t;
+
+            /* Pane-local -> full render-target coords. */
+            float fx = L + sx;
+            float fy = T + sy;
+
+            /* Base text scale: track the pane size (same convention as the name
+             * plate / disconnect modal: width/640), trimmed by the round-2 HUD
+             * size multiplier, then by the distance factor. Clamp so it stays
+             * legible at mid distance but never dominates the pane. */
+            float base_ts = (pane_w / 640.0f) * hud_size_mul();
+            float ts = base_ts * dscale;
+            if (ts < 0.32f) ts = 0.32f;
+            if (ts > 1.20f) ts = 1.20f;
+
+            uint32_t accent = s_hud_id_accent[slot] ? s_hud_id_accent[slot]
+                                                    : 0xFFB0B0B0u;
+            char nm[20];
+            if (s_hud_id_name[slot][0]) snprintf(nm, sizeof nm, "%s", s_hud_id_name[slot]);
+            else                        snprintf(nm, sizeof nm, "PLAYER %d", slot + 1);
+
+            /* Plate sized to the text (same cap-height math the bottom name
+             * plate uses: visible caps span 15 design-px; fe/vui text anchors y
+             * at the glyph CELL top, caps centred 15.5*ts below it). */
+            float tw      = td5_vui_text_width(nm, ts);
+            float cap_h   = 15.0f * ts;
+            float pad_y   = 4.0f  * ts;
+            float plate_h = cap_h + 2.0f * pad_y;
+            float plate_w = tw + 10.0f * ts;
+            /* Centre the plate horizontally on the projected anchor and sit its
+             * BOTTOM just above the anchor point (so it floats over the roof). */
+            float plate_l = fx - plate_w * 0.5f;
+            float plate_b = fy;
+            float plate_t = plate_b - plate_h;
+
+            /* Clamp horizontally inside the pane so an off-centre car's label
+             * stays readable instead of bleeding into the neighbouring pane. */
+            if (plate_l < L + 1.0f)              plate_l = L + 1.0f;
+            if (plate_l + plate_w > R - 1.0f)    plate_l = R - 1.0f - plate_w;
+            /* If the anchor is above the pane top, skip (car is off the top of
+             * this view); a tiny sliver is fine, fully above is not. */
+            if (plate_b < T + 2.0f) continue;
+
+            /* Accent background, black text (light accents) / white (dark). */
+            td5_vui_quad(plate_l, plate_t, plate_w, plate_h, accent, -1, 0, 0, 0, 0);
+            int r8 = (accent >> 16) & 0xFF, g8 = (accent >> 8) & 0xFF, b8 = accent & 0xFF;
+            int lum = (r8 * 30 + g8 * 59 + b8 * 11) / 100;
+            uint32_t tcol = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
+            float ny = (plate_t + plate_b) * 0.5f - 15.5f * ts;  /* caps centred in plate */
+            td5_vui_text_centered(plate_l + plate_w * 0.5f, ny, nm, tcol, ts, ts);
+        }
+
+        td5_render_pop_transform();
+    }
+
+    /* Restore full-screen projection (the documented post-per-view-loop state;
+     * mirrors the reset at the top of td5_hud_render_overlays' minimap path).
+     * Subsequent overlays draw in full render-target coords. */
+    td5_render_configure_projection((int)g_render_width_f, (int)g_render_height_f);
+    td5_render_set_projection_center(g_render_width_f * 0.5f, g_render_height_f * 0.5f);
+}
+
 /* ========================================================================
  * Per-viewport player identity: a coloured frame in the player's accent colour
  * around each split-screen pane + a name plate flush along the BOTTOM edge of
@@ -1275,6 +1606,14 @@ void td5_hud_draw_player_id_overlays(void)
             td5_vui_text_centered(cx, ny, nm, tcol, ts, ts);
         }
     }
+
+    /* [#9] Floating name labels over the OTHER players' cars in each pane.
+     * Same MP-identity / split gate as the frames above. (This function is
+     * called twice per frame from RunRaceFrame; the labels are opaque accent
+     * plates + black text, so a second identical draw is visually idempotent,
+     * exactly like the frames/plates above — and the projection state is
+     * restored to full-screen inside, so call count does not leak state.) */
+    hud_draw_mp_car_labels();
 }
 
 void td5_hud_draw_disconnect_overlays(void)
@@ -1392,6 +1731,10 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
 
     float cx, cy;
     hud_screen_center(&cx, &cy);
+    /* [HUD high-DPI 2026-06-14] Same screen scale the panel was rebuilt with this
+     * frame (td5_hud_init_pause_menu above), so the selbox + sliders stay aligned
+     * with the scaled panel/text. */
+    float ps = hud_pause_scale();
     float fracs[2] = { view_dist_frac, sfx_frac };  /* row 0 = VIEW, row 1 = SOUND */
 
     {
@@ -1411,8 +1754,8 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
         float su0 = (float)s_pause_selbox_atlas->atlas_x + 0.5f;
         float sv0 = (float)s_pause_selbox_atlas->atlas_y + 0.5f;
         hud_build_quad(s_pause_sel_box, 0, s_pause_selbox_atlas->texture_page,
-                       cx + s_pause_selbox_x0, cy + row_y,
-                       cx + s_pause_selbox_x1, cy + row_y + 16.0f,
+                       cx + s_pause_selbox_x0 * ps, cy + row_y * ps,
+                       cx + s_pause_selbox_x1 * ps, cy + (row_y + 16.0f) * ps,
                        su0, sv0, su0 + 255.0f, sv0 + 15.0f,
                        0xFFFFFFFF, HUD_DEPTH);
     }
@@ -1432,8 +1775,8 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
         float slu1 = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_x + 0.5f + frac * 255.0f : 0.25f;
         float slv  = s_pause_slider_atlas ? (float)s_pause_slider_atlas->atlas_y + 0.5f : 0.25f;
         hud_build_quad(s_pause_slider_ptrs[row], 0, sl_page,
-                       cx + s_pause_bar_x0, cy + row_y - 28.0f,
-                       cx + fill_x1,        cy + row_y - 22.0f,
+                       cx + s_pause_bar_x0 * ps, cy + (row_y - 28.0f) * ps,
+                       cx + fill_x1 * ps,        cy + (row_y - 22.0f) * ps,
                        slu0, slv, slu1, slv,
                        0xFFFFFFFF, HUD_DEPTH);
     }
@@ -1446,9 +1789,82 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
  * (td5_vui_text). Recorded (not drawn immediately) so they layer on top of the
  * gauge/scene exactly like the bitmap flush did. Falls back to the bitmap glyph
  * atlas when VectorUI is off or the MSDF font is unavailable. */
-typedef struct { float x, y; int centered; char s[64]; } HudVuiText;
+typedef struct { float x, y; int centered; float scale; char s[64]; } HudVuiText;
 static HudVuiText s_hud_vui_text[96];
 static int        s_hud_vui_text_count;
+
+/* Uniform HUD text scale for the active view (the same factor the speedo/minimap
+ * use, already aspect-fitted to the pane). s_cur_scale points at the active
+ * view's layout during ALL race-text queueing (both td5_hud_render_overlays and
+ * td5_hud_draw_status_text set it before queueing). 1.0 when scaling is off or no
+ * view is active. [HUD high-DPI 2026-06-14] */
+static int s_hud_text_anchor_to_view = 1;   /* fwd: see below */
+static float hud_active_text_scale(void)
+{
+    if (!hud_dpi_scale_on()) return 1.0f;
+    /* (3) Trim the BASELINE by the size multiplier (default 0.75) on top of the
+     * window-tracking factor below, so in-race text/elements render ~25% smaller
+     * but still scale with the window. e->scale carries this through to BOTH the
+     * glyph cap and the line-pitch/anchor math, keeping them consistent. */
+    float mul = hud_size_mul();
+    /* Post-loop overlays (FPS/debug) draw at absolute screen coords -> use the
+     * screen-level scale, not the (possibly tiny) last pane's scale. */
+    if (!s_hud_text_anchor_to_view) {
+        float sx = g_render_width_f  * (1.0f / 640.0f);
+        float sy = g_render_height_f * (1.0f / 480.0f);
+        float s  = (sx < sy) ? sx : sy;
+        s *= mul;
+        return (s > 0.05f) ? s : 1.0f;
+    }
+    if (!s_cur_scale) return 1.0f;
+    float s = ((const TD5_HudViewLayout *)s_cur_scale)->scale_x * mul;
+    return (s > 0.05f) ? s : 1.0f;
+}
+
+/* When the FPS/debug overlay text is queued (after the per-view loop), it uses
+ * ABSOLUTE render-target coords anchored to the screen's top-left, so it must
+ * NOT be re-anchored to a pane corner — only its glyph size scales. Set false
+ * around those queue calls. (Forward-declared above for hud_active_text_scale.) */
+
+/* Re-anchor a queued race-text position so it grows away from its pane corner
+ * (or centre) by `scale`, instead of off-screen, when high-DPI scaling is on.
+ * Mirrors how the speedo/minimap anchor their scaled elements to the pane edges.
+ * No-op (returns the input) when scaling is off or no view layout is active. */
+static void hud_scale_text_pos(float *x, float *y, int centered, float scale)
+{
+    if (scale == 1.0f) return;
+
+    /* Screen-anchored text (FPS counter + debug overlay): these are queued AFTER
+     * the per-view loop at absolute top-left coords (s_hud_text_anchor_to_view==0)
+     * and were previously NOT re-anchored, so only the glyph SIZE scaled while the
+     * per-line y stayed fixed -> stacked lines collided once the cap exceeded the
+     * raw 14px row pitch. [FIX #13 overlap 2026-06-14] Scale the y (and left-
+     * anchored x) about the screen top-left by the SAME factor as the glyph cap so
+     * the line pitch and baseline step grow with the text and never overlap. */
+    if (!s_hud_text_anchor_to_view) {
+        *y *= scale;
+        if (!centered) *x *= scale;   /* both columns are left-anchored at x=8 */
+        return;
+    }
+
+    if (!s_cur_scale) return;
+    const TD5_HudViewLayout *vl = (const TD5_HudViewLayout *)s_cur_scale;
+
+    /* Vertical: race text is top-anchored within the pane. */
+    *y = vl->vp_int_top + (*y - vl->vp_int_top) * scale;
+
+    if (centered) {
+        /* Keep centred about the pane centre (the centring math handles width). */
+        *x = vl->center_x + (*x - vl->center_x) * scale;
+        return;
+    }
+    /* Horizontal: anchor to whichever pane edge the text sits nearer, so left-
+     * aligned corner labels and right-aligned timers both stay inside the pane. */
+    float dl = *x - vl->vp_int_left;     /* >=0 for left-anchored */
+    float dr = *x - vl->vp_int_right;    /* <=0 for right-anchored */
+    if (-dr < dl) *x = vl->vp_int_right + dr * scale;  /* nearer right edge */
+    else          *x = vl->vp_int_left  + dl * scale;  /* nearer left edge  */
+}
 
 /* [HUD TTF SWAP 2026-06-05] The in-race HUD overlay text renders in the menu's
  * SECONDARY native face (Rajdhani, td5_hudfont_*) when loaded, instead of the
@@ -1489,7 +1905,14 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
         int n = (int)(sizeof(s_hud_vui_text) / sizeof(s_hud_vui_text[0]));
         if (s_hud_vui_text_count < n) {
             HudVuiText *e = &s_hud_vui_text[s_hud_vui_text_count++];
-            e->x = (float)x;  e->y = (float)y;  e->centered = centered;
+            /* [HUD high-DPI 2026-06-14] Scale the glyph size with the window and
+             * re-anchor the position to the pane corner so labels/timers grow
+             * inside the pane instead of off-screen. scale==1.0 => byte-identical
+             * to the old fixed-pixel layout. */
+            float fx = (float)x, fy = (float)y;
+            e->scale = hud_active_text_scale();
+            hud_scale_text_pos(&fx, &fy, centered, e->scale);
+            e->x = fx;  e->y = fy;  e->centered = centered;
             strncpy(e->s, buf, sizeof(e->s) - 1);
             e->s[sizeof(e->s) - 1] = '\0';
         }
@@ -1578,23 +2001,27 @@ void td5_hud_flush_text(void)
             TD5_LOG_I(LOG_TAG, "HUD text: native TTF active (cap=%.1f baseline=%.1f)",
                       (double)HUD_TTF_CAP, (double)HUD_TTF_BASELINE);
         }
-        /* pass 1: rasterise every glyph into the shared atlas, then ONE upload */
+        /* pass 1: rasterise every glyph into the shared atlas, then ONE upload.
+         * [HUD high-DPI 2026-06-14] cap scales per entry so larger windows get a
+         * proportionally larger race font (cap*scale rounds to the cache key). */
         for (int i = 0; i < s_hud_vui_text_count; i++) {
-            const char *s = s_hud_vui_text[i].s;
-            for (int k = 0; s[k]; k++) { td5_glyph g; td5_hudfont_get((unsigned char)s[k], HUD_TTF_CAP, &g); }
+            HudVuiText *e = &s_hud_vui_text[i];
+            float cap = HUD_TTF_CAP * e->scale;
+            for (int k = 0; e->s[k]; k++) { td5_glyph g; td5_hudfont_get((unsigned char)e->s[k], cap, &g); }
         }
         td5_font_flush_uploads();
         /* pass 2: lay out + draw (cache hits) */
         for (int i = 0; i < s_hud_vui_text_count; i++) {
             HudVuiText *e = &s_hud_vui_text[i];
             const char *s = e->s;
+            float cap = HUD_TTF_CAP * e->scale;
             float total_w = 0.0f;
-            for (int k = 0; s[k]; k++) total_w += td5_hudfont_advance((unsigned char)s[k], HUD_TTF_CAP);
+            for (int k = 0; s[k]; k++) total_w += td5_hudfont_advance((unsigned char)s[k], cap);
             float cx = e->x;
             if (e->centered) cx -= total_w * 0.5f;
-            float baseline = e->y + HUD_TTF_BASELINE;
+            float baseline = e->y + HUD_TTF_BASELINE * e->scale;
             for (int k = 0; s[k]; k++) {
-                td5_glyph g; td5_hudfont_get((unsigned char)s[k], HUD_TTF_CAP, &g);
+                td5_glyph g; td5_hudfont_get((unsigned char)s[k], cap, &g);
                 if (g.valid && g.w > 0.0f) {
                     float gx = (float)(int)(cx + g.xoff + 0.5f);
                     float gy = (float)(int)(baseline + g.yoff + 0.5f);
@@ -1620,15 +2047,17 @@ void td5_hud_flush_text(void)
                 uint8_t gi = s_char_remap[(uint8_t)e->s[k] & 0x7F];
                 total_w += glyphs[gi].width;
             }
+            /* [HUD high-DPI 2026-06-14] scale glyph size + advance by e->scale. */
+            float sc = e->scale;
             float cx = e->x;
-            if (e->centered) cx -= ((float)(len - 1) + total_w) * 0.5f;
+            if (e->centered) cx -= ((float)(len - 1) + total_w) * 0.5f * sc;
             for (int k = 0; k < len; k++) {
                 uint8_t gi = s_char_remap[(uint8_t)e->s[k] & 0x7F];
                 TD5_GlyphRecord *g = &glyphs[gi];
                 float u0 = g->atlas_u * INV,                v0 = g->atlas_v * INV;
                 float u1 = (g->atlas_u + g->width)  * INV,  v1 = (g->atlas_v + g->height) * INV;
-                td5_vui_msdf_quad(cx, e->y, g->width, g->height, 0xFFFFFFFFu, page, u0, v0, u1, v1);
-                cx += g->width + 1.0f;
+                td5_vui_msdf_quad(cx, e->y, g->width * sc, g->height * sc, 0xFFFFFFFFu, page, u0, v0, u1, v1);
+                cx += (g->width + 1.0f) * sc;
             }
         }
         s_hud_vui_text_count = 0;
@@ -2357,6 +2786,7 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
     if (g_special_render_mode != 0) return;
 
     s_cur_scale = (float *)&s_view_layout[view_index];
+    s_hud_text_anchor_to_view = 1;   /* status text re-anchors to its pane */
     float vp_half_w = s_view_layout[view_index].half_width;
     float vp_top    = s_view_layout[view_index].vp_int_top;
     float vp_bottom = s_view_layout[view_index].vp_int_bottom;
@@ -2738,10 +3168,479 @@ static void hud_vector_speed_digit(int d, float x, float y, float w, float h, ui
                       (gx + 29.5f) * INV, (gy + 47.5f) * INV);
 }
 
+/* Draw a single ASCII character through the native HUD TTF (Rajdhani — the same
+ * face the rest of the in-race text uses), centred on (cx, cy) with caps `cap_px`
+ * tall, in `color`. Adds a 1/16-cap black drop-shadow so a bright digit stays
+ * legible over light scenery. Returns 1 if drawn via the TTF, 0 if it is not
+ * loaded (so the caller can fall back to the bitmap path). Used by the race
+ * countdown digit. (The replay "R" draws its glyph inline without a shadow to
+ * stay faithful to the plain REPLAY texture.) [HUD TTF wave 2026-06-14] */
+static int hud_draw_centered_ttf_char(char ch, float cx, float cy,
+                                      float cap_px, uint32_t color)
+{
+    if (!td5_hudfont_ready() || cap_px < 1.0f) return 0;
+
+    /* Rasterise + upload first so the cache is warm before we lay out. */
+    td5_glyph g;
+    td5_hudfont_get((unsigned char)ch, cap_px, &g);
+    td5_font_flush_uploads();
+    td5_hudfont_get((unsigned char)ch, cap_px, &g);
+    if (!g.valid || g.w <= 0.0f) return 1;   /* TTF active but glyph empty */
+
+    /* Centre the glyph cell on (cx, cy). xoff/yoff position the raster relative
+     * to the pen/baseline; centring the cell of size (w,h) is enough here. */
+    float gx = cx - g.w * 0.5f;
+    float gy = cy - g.h * 0.5f;
+
+    float off = cap_px * (1.0f / 16.0f);
+    if (off < 1.0f) off = 1.0f;
+    /* Drop-shadow alpha tracks the digit's own alpha so a fading/blinking glyph
+     * (replay R) keeps shadow + glyph in sync. */
+    uint32_t shadow = 0x000000u | (color & 0xFF000000u);
+    td5_vui_quad(gx + off, gy + off, g.w, g.h, shadow, g.page, g.u0, g.v0, g.u1, g.v1);
+    td5_vui_quad(gx, gy, g.w, g.h, color, g.page, g.u0, g.v0, g.u1, g.v1);
+    return 1;
+}
+
+/* ========================================================================
+ * [#11 EMPTY GRID-CELL FILLER 2026-06-15]  SOURCE-PORT FEATURE.
+ *
+ * Fill the unused panes of a split-screen grid (cells s_view_count ..
+ * cols*rows-1) with one of two informative widgets so they aren't dead black:
+ *
+ *   - MAP  (default, content id 0/unset or 1): a NON-rotated, NON-recentred,
+ *     UN-culled whole-track overview (like the track-selection preview). The
+ *     whole route is fit into the cell; every active racer is a dot in its
+ *     accent colour with a NAME label and a thin connector line from the label
+ *     to the dot. Labels run a vertical declutter pass so they + their lines
+ *     don't pile on top of each other.
+ *
+ *   - STANDINGS (content id 2): one accent-coloured rectangle per racer stacked
+ *     1st-on-top -> last-on-bottom (live order via td5_game_get_race_order),
+ *     with luminance-picked black/white text "N. NAME".
+ *
+ * Everything is drawn with the same immediate-mode primitives the rest of the
+ * HUD uses (hud_build_quad_warped/hud_submit_quad for shapes — each its own
+ * draw call honouring the current scissor — and td5_vui_* for crisp text), so a
+ * per-cell hardware clip rect keeps the widget inside its pane. The caller
+ * restores the full-screen clip + projection centre after this returns.
+ * ======================================================================== */
+
+/* [#1 2026-06-15] Branch-corridor enumeration (defined in td5_track.c but not yet
+ * declared in td5_track.h). Used by the empty-cell MAP overlay to add the fork
+ * corridors to the drawn track outline so branches aren't missing from the map.
+ * td5_track_count_branch_corridors(main_span) -> how many parallel branches;
+ * td5_track_branch_corridor_span(main_span, which) -> the which-th branch span
+ * (0-based, jump-table order), or -1 when out of range / no table. */
+extern int td5_track_count_branch_corridors(int main_span);
+extern int td5_track_branch_corridor_span(int main_span, int which);
+
+/* Stable, bright, well-separated fallback accent for a racer slot that has no MP
+ * identity colour (AI opponents, or single-player). Spreads hue by slot via a
+ * fixed 6-colour wheel so dots/labels stay distinguishable. */
+static uint32_t hud_filler_slot_color(int slot)
+{
+    static const uint32_t wheel[6] = {
+        0xFFE24A4Au, /* red    */
+        0xFF4A8CE2u, /* blue   */
+        0xFF46C84Eu, /* green  */
+        0xFFE2C84Au, /* amber  */
+        0xFFB066E2u, /* purple */
+        0xFF46C8C8u, /* teal   */
+    };
+    return wheel[((slot % 6) + 6) % 6];
+}
+
+/* Draw a thin line segment (a + b are screen px) as a 1x1-white warped quad,
+ * tinted `col`, `half` px half-thickness. Clipped by the active scissor. */
+static void hud_filler_line(float ax, float ay, float bx, float by,
+                            float half, uint32_t col)
+{
+    float dx = bx - ax, dy = by - ay;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.5f) return;
+    float px = -dy / len * half, py = dx / len * half;   /* perpendicular offset */
+    TD5_SpriteQuad q;
+    hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+        ax + px, ay + py, bx + px, by + py,
+        bx - px, by - py, ax - px, ay - py,
+        0.0f, 0.0f, 0.0f, 0.0f, col, HUD_DEPTH);
+    hud_submit_quad(&q);
+}
+
+/* [#1 2026-06-15] Draw a triangular ARROW marker centred at (cx,cy) pointing in
+ * the car's facing direction, `half` px from centre to tip. `dirx`/`diry` is the
+ * unit forward direction in MAP screen space (screen Y grows down). Built as a
+ * single warped quad shaped like an arrowhead: tip + two back corners + a notched
+ * back-centre, so the silhouette reads as an arrow rather than a square. The
+ * forward axis is (dirx,diry); the lateral axis is its perpendicular (-diry,dirx). */
+static void hud_filler_arrow(float cx, float cy, float half,
+                             float dirx, float diry, uint32_t col)
+{
+    /* Normalise the direction (defensive — caller passes a unit vector). */
+    float dl = sqrtf(dirx * dirx + diry * diry);
+    if (dl < 1e-4f) { dirx = 0.0f; diry = -1.0f; }
+    else            { dirx /= dl; diry /= dl; }
+    float perpx = -diry, perpy = dirx;           /* +90deg in screen space */
+
+    float tipx = cx + dirx * half;
+    float tipy = cy + diry * half;
+    /* Two rear corners splayed out by the lateral axis, pulled back along -forward. */
+    float backf = half * 0.85f;                  /* how far the base sits behind centre */
+    float wide  = half * 0.80f;                  /* half-width of the arrow base */
+    float blx = cx - dirx * backf + perpx * wide;
+    float bly = cy - diry * backf + perpy * wide;
+    float brx = cx - dirx * backf - perpx * wide;
+    float bry = cy - diry * backf - perpy * wide;
+    /* Notched back-centre (tucked forward) gives the classic arrowhead concavity. */
+    float ncx = cx - dirx * (backf * 0.35f);
+    float ncy = cy - diry * (backf * 0.35f);
+
+    /* hud_build_quad_warped takes 4 corners in TL,BL,BR,TR order; we map them to
+     * tip -> left-back -> notch -> right-back so the quad traces the arrowhead. */
+    TD5_SpriteQuad q;
+    hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+        tipx, tipy,   /* "TL" = tip            */
+        blx,  bly,    /* "BL" = left rear      */
+        ncx,  ncy,    /* "BR" = back notch     */
+        brx,  bry,    /* "TR" = right rear     */
+        0.0f, 0.0f, 0.0f, 0.0f, col, HUD_DEPTH);
+    hud_submit_quad(&q);
+}
+
+/* MAP widget for one empty cell. Projects the whole track route + all racer dots
+ * + decluttered labels into [cl,ct,cr,cb] (already clipped by the caller). */
+static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
+{
+    uint8_t *span_base = (uint8_t *)g_strip_span_base;
+    uint8_t *vert_base = (uint8_t *)g_strip_vertex_base;
+    if (!span_base || !vert_base || g_strip_span_count <= 1) return;
+
+    /* Walk just the main ring (branch spans live past it and would blow up the
+     * extent); fall back to the full strip when no ring length is known. */
+    int ring = g_td5.track_span_ring_length;
+    if (ring <= 0 || ring > g_strip_span_count) ring = g_strip_span_count;
+
+    /* Pass 1: world-space AABB of both rails over the ring. */
+    float minx = 1e30f, maxx = -1e30f, minz = 1e30f, maxz = -1e30f;
+    for (int si = 0; si < ring; si++) {
+        uint8_t *s = span_base + si * 24;
+        int32_t ox = *(int32_t *)(s + 0x0C);
+        int32_t oz = *(int32_t *)(s + 0x14);
+        uint16_t vi_l = *(uint16_t *)(s + 0x04);
+        uint8_t  type = s[0];
+        uint8_t  nib  = s[3] & 0x0F;
+        int32_t  col0 = s_minimap_vtx_delta_col0[type & 0x07];
+        int32_t  vi_r = (int32_t)vi_l + (int32_t)nib + col0;
+        if (vi_r < 0) continue;
+        int16_t *vl = (int16_t *)(vert_base + (uint32_t)vi_l * 6);
+        int16_t *vr = (int16_t *)(vert_base + (uint32_t)vi_r * 6);
+        float lx = (float)((int)vl[0] + ox), lz = (float)((int)vl[2] + oz);
+        float rx = (float)((int)vr[0] + ox), rz = (float)((int)vr[2] + oz);
+        if (lx < minx) minx = lx;
+        if (lx > maxx) maxx = lx;
+        if (rx < minx) minx = rx;
+        if (rx > maxx) maxx = rx;
+        if (lz < minz) minz = lz;
+        if (lz > maxz) maxz = lz;
+        if (rz < minz) minz = rz;
+        if (rz > maxz) maxz = rz;
+    }
+    if (maxx <= minx || maxz <= minz) return;
+
+    /* Fit the world AABB into the cell with padding, uniform scale (track keeps
+     * its real aspect), centred. Screen Y grows down; world Z maps to screen Y. */
+    float pad = (cr - cl) * 0.10f;
+    float in_w = (cr - cl) - 2.0f * pad, in_h = (cb - ct) - 2.0f * pad;
+    if (in_w < 8.0f || in_h < 8.0f) return;
+    float wx_w = maxx - minx, wz_h = maxz - minz;
+    float sxf = in_w / wx_w, syf = in_h / wz_h;
+    float fit = (sxf < syf) ? sxf : syf;
+    float wcx = (minx + maxx) * 0.5f, wcz = (minz + maxz) * 0.5f;
+    float ccx = (cl + cr) * 0.5f,     ccy = (ct + cb) * 0.5f;
+    #define MAPX(WX) (ccx + ((WX) - wcx) * fit)
+    #define MAPY(WZ) (ccy + ((WZ) - wcz) * fit)
+
+    /* Faint panel so the cell reads as a deliberate map, not a render glitch. */
+    td5_vui_quad(cl, ct, cr - cl, cb - ct, 0x66101820u, -1, 0, 0, 0, 0);
+
+    /* Road: thin centreline polyline around the ring (whole-track overview). The
+     * centre of each span is (left_rail + right_rail)/2; connect consecutive
+     * centres, closing the loop. Robust + cheap vs. per-type quad geometry. */
+    float road_half = (cr - cl) * 0.006f; if (road_half < 1.0f) road_half = 1.0f;
+    const uint32_t ROAD_COL = 0xFFB4B4B4u;
+    float prev_x = 0.0f, prev_y = 0.0f; int have_prev = 0;
+    float first_x = 0.0f, first_y = 0.0f;
+    int   step = (ring > 240) ? (ring / 240) : 1;   /* cap to ~240 segments */
+    if (step < 1) step = 1;
+    for (int si = 0; si <= ring; si += step) {
+        int idx = (si >= ring) ? 0 : si;            /* close the loop */
+        uint8_t *s = span_base + idx * 24;
+        int32_t ox = *(int32_t *)(s + 0x0C);
+        int32_t oz = *(int32_t *)(s + 0x14);
+        uint16_t vi_l = *(uint16_t *)(s + 0x04);
+        uint8_t  type = s[0];
+        uint8_t  nib  = s[3] & 0x0F;
+        int32_t  col0 = s_minimap_vtx_delta_col0[type & 0x07];
+        int32_t  vi_r = (int32_t)vi_l + (int32_t)nib + col0;
+        if (vi_r < 0) { have_prev = 0; continue; }
+        int16_t *vl = (int16_t *)(vert_base + (uint32_t)vi_l * 6);
+        int16_t *vr = (int16_t *)(vert_base + (uint32_t)vi_r * 6);
+        float cxw = ((float)((int)vl[0] + ox) + (float)((int)vr[0] + ox)) * 0.5f;
+        float czw = ((float)((int)vl[2] + oz) + (float)((int)vr[2] + oz)) * 0.5f;
+        float sxp = MAPX(cxw), syp = MAPY(czw);
+        if (have_prev) hud_filler_line(prev_x, prev_y, sxp, syp, road_half, ROAD_COL);
+        else { first_x = sxp; first_y = syp; }
+        prev_x = sxp; prev_y = syp; have_prev = 1;
+        if (si >= ring) hud_filler_line(prev_x, prev_y, first_x, first_y, road_half, ROAD_COL);
+    }
+
+    /* [#1 2026-06-15] BRANCH CORRIDORS: the loop above walks the main ring only,
+     * so forks (alternate corridors) were missing from the overlay outline. For
+     * each main-ring span, enumerate the parallel branch corridors via the strip
+     * jump table (td5_track_count_branch_corridors / _branch_corridor_span) and
+     * stitch each corridor's span centres into its own polyline, using the SAME
+     * MAPX/MAPY fit as the main ring. Corridors live in [ring, total_spans); they
+     * run parallel to the main road, so they project inside the cell — any that
+     * fall outside are clipped by the caller's per-cell scissor (matching how the
+     * minimap windows its branch quads). Drawn a touch dimmer than the main road
+     * so the primary route still reads as the dominant line. */
+    {
+        #define MAP_MAX_CORRIDORS 4
+        const uint32_t BRANCH_COL = 0xFF8C8C8Cu;
+        float bprev_x[MAP_MAX_CORRIDORS], bprev_y[MAP_MAX_CORRIDORS];
+        int   bhave[MAP_MAX_CORRIDORS];
+        for (int w = 0; w < MAP_MAX_CORRIDORS; w++) bhave[w] = 0;
+        for (int si = 0; si < ring; si += step) {
+            int nc = td5_track_count_branch_corridors(si);
+            if (nc > MAP_MAX_CORRIDORS) nc = MAP_MAX_CORRIDORS;
+            for (int w = 0; w < nc; w++) {
+                int bsp = td5_track_branch_corridor_span(si, w);
+                if (bsp < 0 || bsp >= g_strip_span_count) { bhave[w] = 0; continue; }
+                uint8_t *bs = span_base + bsp * 24;
+                int32_t  box = *(int32_t *)(bs + 0x0C);
+                int32_t  boz = *(int32_t *)(bs + 0x14);
+                uint16_t bvi_l = *(uint16_t *)(bs + 0x04);
+                uint8_t  btype = bs[0];
+                uint8_t  bnib  = bs[3] & 0x0F;
+                int32_t  bcol0 = s_minimap_vtx_delta_col0[btype & 0x07];
+                int32_t  bvi_r = (int32_t)bvi_l + (int32_t)bnib + bcol0;
+                if (bvi_r < 0) { bhave[w] = 0; continue; }
+                int16_t *bvl = (int16_t *)(vert_base + (uint32_t)bvi_l * 6);
+                int16_t *bvr = (int16_t *)(vert_base + (uint32_t)bvi_r * 6);
+                float bcxw = ((float)((int)bvl[0] + box) + (float)((int)bvr[0] + box)) * 0.5f;
+                float bczw = ((float)((int)bvl[2] + boz) + (float)((int)bvr[2] + boz)) * 0.5f;
+                float bsxp = MAPX(bcxw), bsyp = MAPY(bczw);
+                if (bhave[w]) hud_filler_line(bprev_x[w], bprev_y[w], bsxp, bsyp,
+                                              road_half, BRANCH_COL);
+                bprev_x[w] = bsxp; bprev_y[w] = bsyp; bhave[w] = 1;
+            }
+            /* Drop the polyline state for corridor slots this span doesn't feed so
+             * a gap in the table doesn't bridge two unrelated corridors. */
+            for (int w = nc; w < MAP_MAX_CORRIDORS; w++) bhave[w] = 0;
+        }
+        #undef MAP_MAX_CORRIDORS
+    }
+
+    /* Gather active racers -> projected dot + name + colour + facing direction.
+     * fx/fy is the car's forward heading expressed in MAP screen space (the map
+     * uses no rotation, so heading maps straight through): the body-longitudinal
+     * world direction is (sin h, cos h) over (X,Z) [see the speedo body-frame
+     * projection], and the map sends world X->screen X, world Z->screen Y, so the
+     * on-screen forward is (sin h, cos h) too. h is the 12-bit yaw at actor+0x1F4
+     * (euler_accum.yaw >> 8), 0x1000 = full circle. */
+    struct { float dx, dy, ly, fx, fy; uint32_t col; char nm[20]; } lab[TD5_MAX_RACER_SLOTS];
+    int n = 0;
+    for (int r = 0; r < g_racer_count && r < TD5_MAX_RACER_SLOTS; r++) {
+        if (td5_game_get_slot_state(r) == 3) continue;       /* decoration slot */
+        float wx = (float)actor_world_x(r) * (1.0f / 256.0f);
+        float wz = (float)actor_world_z(r) * (1.0f / 256.0f);
+        lab[n].dx = MAPX(wx); lab[n].dy = MAPY(wz);
+        uint32_t h12 = (uint32_t)((actor_heading(r) >> 8) & 0xFFF);
+        lab[n].fx = td5_sin_12bit(h12);
+        lab[n].fy = td5_cos_12bit(h12);
+        lab[n].col = s_hud_id_accent[r] ? s_hud_id_accent[r] : hud_filler_slot_color(r);
+        if (s_hud_id_name[r][0]) snprintf(lab[n].nm, sizeof lab[n].nm, "%s", s_hud_id_name[r]);
+        else                     snprintf(lab[n].nm, sizeof lab[n].nm, "CAR %d", r + 1);
+        n++;
+    }
+
+    /* Label text size tracks the cell, trimmed by the HUD size multiplier. */
+    float ts = ((cr - cl) / 640.0f) * hud_size_mul();
+    if (ts < 0.30f) ts = 0.30f;
+    if (ts > 0.70f) ts = 0.70f;
+    float cap_h = 15.0f * ts;
+    float row_h = cap_h + 4.0f * ts;       /* min vertical gap between labels */
+
+    /* Anti-overlap pass: order labels by dot-y, then sweep top->bottom forcing a
+     * minimum row pitch so neither the labels nor their connector lines collide.
+     * ly starts at the dot's y and only gets pushed down as needed. */
+    for (int i = 0; i < n; i++) lab[i].ly = lab[i].dy;
+    for (int i = 0; i < n - 1; i++)            /* selection sort by ly (small n) */
+        for (int j = i + 1; j < n; j++)
+            if (lab[j].ly < lab[i].ly) { typeof(lab[0]) t = lab[i]; lab[i] = lab[j]; lab[j] = t; }
+    float top_limit = ct + cap_h * 0.5f + 2.0f;
+    float bot_limit = cb - cap_h * 0.5f - 2.0f;
+    for (int i = 0; i < n; i++) {
+        if (lab[i].ly < top_limit) lab[i].ly = top_limit;
+        if (i > 0 && lab[i].ly < lab[i - 1].ly + row_h)
+            lab[i].ly = lab[i - 1].ly + row_h;
+    }
+    /* If we ran past the bottom, shift the whole stack up to fit. */
+    if (n > 0 && lab[n - 1].ly > bot_limit) {
+        float shift = lab[n - 1].ly - bot_limit;
+        for (int i = 0; i < n; i++) {
+            lab[i].ly -= shift;
+            if (lab[i].ly < top_limit) lab[i].ly = top_limit;
+        }
+    }
+
+    /* Draw connector line, label plate + text, then the dot on top. Place the
+     * label on whichever side of the cell centre keeps it inside the cell. */
+    for (int i = 0; i < n; i++) {
+        float tw = td5_vui_text_width(lab[i].nm, ts);
+        float pad_x = 4.0f * ts, pad_y = 2.0f * ts;
+        float plate_w = tw + 2.0f * pad_x, plate_h = cap_h + 2.0f * pad_y;
+        int left_side = (lab[i].dx > (cl + cr) * 0.5f);   /* dot on right -> label left */
+        float plate_l = left_side ? (lab[i].dx - 8.0f - plate_w) : (lab[i].dx + 8.0f);
+        if (plate_l < cl + 1.0f)               plate_l = cl + 1.0f;
+        if (plate_l + plate_w > cr - 1.0f)     plate_l = cr - 1.0f - plate_w;
+        float plate_t = lab[i].ly - plate_h * 0.5f;
+        if (plate_t < ct + 1.0f)               plate_t = ct + 1.0f;
+        if (plate_t + plate_h > cb - 1.0f)     plate_t = cb - 1.0f - plate_h;
+        /* connector: label anchor (nearest plate edge mid) -> dot */
+        float anchor_x = left_side ? (plate_l + plate_w) : plate_l;
+        float anchor_y = plate_t + plate_h * 0.5f;
+        hud_filler_line(anchor_x, anchor_y, lab[i].dx, lab[i].dy,
+                        road_half * 0.8f, lab[i].col);
+        /* plate + luminance-picked text */
+        td5_vui_quad(plate_l, plate_t, plate_w, plate_h, lab[i].col, -1, 0, 0, 0, 0);
+        int r8 = (lab[i].col >> 16) & 0xFF, g8 = (lab[i].col >> 8) & 0xFF, b8 = lab[i].col & 0xFF;
+        int lum = (r8 * 30 + g8 * 59 + b8 * 11) / 100;
+        uint32_t tcol = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
+        float ny = (plate_t + plate_t + plate_h) * 0.5f - 15.5f * ts;
+        td5_vui_text_centered(plate_l + plate_w * 0.5f, ny, lab[i].nm, tcol, ts, ts);
+        /* [#1 2026-06-15] Marker last so it sits on top of the line/plate. An ARROW
+         * pointing in the car's facing direction (fx,fy) replaces the old square
+         * dot; keep the per-player accent colour and a black outline arrow behind
+         * it for contrast against the road line. */
+        float arr_half = (cr - cl) * 0.018f; if (arr_half < 3.0f) arr_half = 3.0f;
+        hud_filler_arrow(lab[i].dx, lab[i].dy, arr_half + 1.0f,
+                         lab[i].fx, lab[i].fy, 0xFF000000u);   /* outline */
+        hud_filler_arrow(lab[i].dx, lab[i].dy, arr_half,
+                         lab[i].fx, lab[i].fy, lab[i].col);
+    }
+    #undef MAPX
+    #undef MAPY
+}
+
+/* STANDINGS widget for one empty cell: stacked accent rows, 1st on top. */
+static void hud_filler_draw_standings(float cl, float ct, float cr, float cb)
+{
+    /* Faint backdrop so the list reads as deliberate. */
+    td5_vui_quad(cl, ct, cr - cl, cb - ct, 0x66101820u, -1, 0, 0, 0, 0);
+
+    /* Collect the live race order (leader first), active racers only. */
+    int slots[TD5_MAX_RACER_SLOTS]; int n = 0;
+    for (int pos = 0; pos < g_racer_count && pos < TD5_MAX_RACER_SLOTS; pos++) {
+        int slot = td5_game_get_race_order(pos);
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+        if (td5_game_get_slot_state(slot) == 3) continue;    /* decoration slot */
+        slots[n++] = slot;
+    }
+    if (n <= 0) return;
+
+    float pad = (cr - cl) * 0.06f;
+    float x0 = cl + pad, x1 = cr - pad;
+    float y0 = ct + pad, y1 = cb - pad;
+    float gap = 2.0f;
+    float row_h = (y1 - y0 - gap * (float)(n - 1)) / (float)n;
+    if (row_h < 6.0f) row_h = 6.0f;
+
+    /* Text sized to the row height (caps span 15 design-px). Leave breathing room. */
+    float ts = (row_h * 0.62f) / 15.0f;
+    {
+        float maxts = ((cr - cl) / 640.0f) * hud_size_mul() * 1.4f;
+        if (maxts > 0.05f && ts > maxts) ts = maxts;
+    }
+    if (ts < 0.28f) ts = 0.28f;
+
+    for (int i = 0; i < n; i++) {
+        int slot = slots[i];
+        float ry = y0 + (float)i * (row_h + gap);
+        uint32_t col = s_hud_id_accent[slot] ? s_hud_id_accent[slot]
+                                             : hud_filler_slot_color(slot);
+        td5_vui_quad(x0, ry, x1 - x0, row_h, col, -1, 0, 0, 0, 0);
+
+        int r8 = (col >> 16) & 0xFF, g8 = (col >> 8) & 0xFF, b8 = col & 0xFF;
+        int lum = (r8 * 30 + g8 * 59 + b8 * 11) / 100;
+        uint32_t tcol = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;  /* black on light */
+
+        char nm[20];
+        if (s_hud_id_name[slot][0]) snprintf(nm, sizeof nm, "%s", s_hud_id_name[slot]);
+        else                        snprintf(nm, sizeof nm, "CAR %d", slot + 1);
+        char line[28];
+        snprintf(line, sizeof line, "%d. %s", i + 1, nm);
+
+        float ny = ry + row_h * 0.5f - 15.5f * ts;   /* cell-top anchor -> caps centred */
+        td5_vui_text(x0 + 6.0f * ts, ny, line, tcol, ts, ts);
+    }
+}
+
+/* Fill every empty grid cell (s_view_count .. cols*rows-1) with its configured
+ * widget. Sets/restores a per-cell hardware clip rect around each draw. */
+static void hud_draw_empty_cells(void)
+{
+    if (!hud_grid_filler_on()) return;
+    /* [#1 2026-06-15] MULTIPLAYER-ONLY: the empty-cell map/standings overlay is a
+     * split-screen feature; in single-player leave any empty cell black. The
+     * established MP signal in this file is num_human_players > 1 (see the MP car
+     * labels at hud_mp_car_labels_on usage and the pause-sync gate). */
+    if (g_td5.num_human_players <= 1) return;
+    int views = s_view_count;
+    if (views < 1) return;
+    int cols, rows;
+    td5_game_resolve_split_grid(views, &cols, &rows);
+    int total = cols * rows;
+    if (total <= views) return;             /* grid is full -> no empty cells */
+
+    {
+        static int s_filler_log = 0;
+        if ((s_filler_log++ % 120) == 0)
+            TD5_LOG_I(LOG_TAG, "grid filler: views=%d grid=%dx%d empties=%d content[0]=%d content[1]=%d",
+                      views, cols, rows, total - views,
+                      g_td5.split_missing_content[0], g_td5.split_missing_content[1]);
+    }
+
+    for (int v = views; v < total; v++) {
+        int px, py, pw, ph;
+        td5_game_get_pane_rect(views, v, g_td5.render_width, g_td5.render_height,
+                               &px, &py, &pw, &ph);
+        if (pw < 8 || ph < 8) continue;
+        float cl = (float)px, ct = (float)py;
+        float cr = (float)(px + pw), cb = (float)(py + ph);
+
+        /* Inset a hair so the widget never paints over the divider seams. */
+        float inset = 2.0f;
+        cl += inset; ct += inset; cr -= inset; cb -= inset;
+        if (cr - cl < 8.0f || cb - ct < 8.0f) continue;
+
+        td5_render_set_clip_rect(cl, cr, ct, cb);
+
+        /* k-th empty cell -> content id (clamp into the 2-entry array; treat
+         * EMPTY/unset (0) and MAP (1) both as the MAP default, 2 = STANDINGS). */
+        int k = v - views; if (k < 0) k = 0; if (k > 1) k = 1;
+        int content = g_td5.split_missing_content[k];
+        if (content == 2) hud_filler_draw_standings(cl, ct, cr, cb);
+        else              hud_filler_draw_map(cl, ct, cr, cb);
+    }
+}
+
 void td5_hud_render_overlays(float dt)
 {
     /* dt is normalized 30 Hz frame time from td5_game.c. */
     s_cur_view = 0;
+    s_hud_text_anchor_to_view = 1;   /* race text re-anchors to its pane */
 
     for (int v = 0; v < s_view_count; v++) {
         s_cur_view = v;
@@ -3017,7 +3916,13 @@ void td5_hud_render_overlays(float dt)
              * bottom edge, growing upward). */
             float sf_gw = ssx * 19.0f;   /* speed digits scale with the +15% dial */
             float dh    = ssy * 32.0f;
-            float sf_step = sf_gw + 2.0f;
+            /* [#5 2026-06-15] Inter-digit pitch. Original advance is glyph_w + 2px
+             * [CONFIRMED @ 0x45d6d8]; when the tighten knob is on, drop the 2px gap
+             * and pull each digit ~14% closer (pitch = glyph_w * 0.86). The glyph
+             * WIDTH (sf_gw) is unchanged so digits aren't squished — only the
+             * advance shrinks. sf_x0 (the left-most digit anchor, below) is left
+             * untouched, so only the non-leftmost digits move left. */
+            float sf_step = hud_speedo_spacing_on() ? (sf_gw * 0.86f) : (sf_gw + 2.0f);
             float sf_x0 = vl->vp_int_right - ssx * 60.0f;
             float sf_y1 = vl->vp_int_bottom - ssy * 7.0f;   /* original bottom edge */
             float sf_y0 = sf_y1 - dh;
@@ -3211,9 +4116,38 @@ void td5_hud_render_overlays(float dt)
             s_prev_span_pos[v] = (int)cur_span;
         }
 
-        /* --- Bit 31: Replay banner (flashes every 32 ticks) --- */
+        /* --- Bit 31: Replay banner / "R" indicator (flashes every 32 ticks) --- */
         if ((flags & TD5_HUD_REPLAY_BANNER) && (g_tick_counter & 0x20)) {
-            hud_submit_quad(view_base + 0x7EC);
+            /* (18) [2026-06-14] Render the replay "R" with the native HUD TTF
+             * instead of the REPLAY texture, preserving the original look: same
+             * top-left box, same on/off blink cadence (g_tick_counter & 0x20, so
+             * the glyph is simply present this frame), and the alpha comes from
+             * the glyph coverage just like the texture's. Falls back to the
+             * texture quad when the TTF isn't loaded or the knob is off. */
+            int drawn_r = 0;
+            if (hud_replay_r_ttf_on() && td5_hudfont_ready()) {
+                /* Same 60x60 box the REPLAY quad occupies (see td5_hud_init_layout:
+                 * replay_x = sx*16 + vp_l, replay_y = sy*16 + vp_t, size sx*60 x
+                 * sy*60). Centre an "R" cap ~44px (in the 60px cell) inside it. */
+                float rbx = sx * 16.0f + vl->vp_int_left;
+                float rby = sy * 16.0f + vl->vp_int_top;
+                float rcx = rbx + sx * 30.0f;
+                float rcy = rby + sy * 30.0f;
+                float cap = sy * 44.0f;
+
+                td5_glyph g;
+                td5_hudfont_get('R', cap, &g);
+                td5_font_flush_uploads();
+                td5_hudfont_get('R', cap, &g);
+                if (g.valid && g.w > 0.0f) {
+                    td5_vui_quad(rcx - g.w * 0.5f, rcy - g.h * 0.5f, g.w, g.h,
+                                 0xFFFFFFFFu, g.page, g.u0, g.v0, g.u1, g.v1);
+                }
+                drawn_r = 1;   /* TTF active: don't also draw the texture */
+            }
+            if (!drawn_r) {
+                hud_submit_quad(view_base + 0x7EC);
+            }
         }
 
         /* --- Indicator digit (countdown/finish) --- */
@@ -3225,32 +4159,43 @@ void td5_hud_render_overlays(float dt)
          * countdown-timer indicator>=4 suppression in UpdateRaceCameraTransitionTimer). */
         if (s_indicator_state[v] >= 1 && s_indicator_state[v] <= 9 && s_numbers_atlas) {
             int digit_val = s_indicator_state[v];
-            int col = digit_val % 5;
-            int row = digit_val / 5;
 
-            float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
-            float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
-
-            /* Build and submit a centered digit quad. [user 2026-06-13: race
-             * countdown numbers too small] Scaled up COUNTDOWN_DIGIT_SCALE× and
-             * properly centred on the view (the old anchor sat the digit a full
-             * cell left of centre). */
+            /* [user 2026-06-13: race countdown numbers too small] The digit is
+             * blown up COUNTDOWN_DIGIT_SCALE× and centred on the view. */
             const float COUNTDOWN_DIGIT_SCALE = 2.2f;
-            float dw = sx * 16.0f * COUNTDOWN_DIGIT_SCALE;
-            float dh = sy * 24.0f * COUNTDOWN_DIGIT_SCALE;
-            TD5_SpriteQuad indicator_quad;
-            float ind_x = vl->center_x - dw * 0.5f;
-            float ind_y = vl->center_y - dh * 0.5f;
 
-            hud_build_quad(
-                &indicator_quad,
-                0, s_numbers_atlas->texture_page,
-                ind_x, ind_y,
-                ind_x + dw, ind_y + dh,
-                u0, v0, u0 + 15.0f, v0 + 23.0f,
-                0xFFFFFFFF, HUD_DEPTH
-            );
-            hud_submit_quad(&indicator_quad);
+            /* (2) [2026-06-14] Route the 3/2/1 countdown digit through the native
+             * HUD TTF (same face as the other vector race text) instead of the
+             * NUMBERS bitmap atlas. Falls back to the bitmap cell when the TTF
+             * isn't loaded or the knob is off. Cap height matches the bitmap
+             * cell's 24px glyph at the same scale, so the size is unchanged. */
+            int drawn_ttf = 0;
+            if (hud_countdown_ttf_on()) {
+                float cap = sy * 24.0f * COUNTDOWN_DIGIT_SCALE;
+                drawn_ttf = hud_draw_centered_ttf_char((char)('0' + digit_val),
+                                                       vl->center_x, vl->center_y,
+                                                       cap, 0xFFFFFFFFu);
+            }
+            if (!drawn_ttf) {
+                int col = digit_val % 5;
+                int row = digit_val / 5;
+                float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
+                float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
+                float dw = sx * 16.0f * COUNTDOWN_DIGIT_SCALE;
+                float dh = sy * 24.0f * COUNTDOWN_DIGIT_SCALE;
+                TD5_SpriteQuad indicator_quad;
+                float ind_x = vl->center_x - dw * 0.5f;
+                float ind_y = vl->center_y - dh * 0.5f;
+                hud_build_quad(
+                    &indicator_quad,
+                    0, s_numbers_atlas->texture_page,
+                    ind_x, ind_y,
+                    ind_x + dw, ind_y + dh,
+                    u0, v0, u0 + 15.0f, v0 + 23.0f,
+                    0xFFFFFFFF, HUD_DEPTH
+                );
+                hud_submit_quad(&indicator_quad);
+            }
         }
 
         /* Finishing-position digit — drawn HERE inside the per-view loop (same
@@ -3272,6 +4217,11 @@ void td5_hud_render_overlays(float dt)
         s_cur_view++;
     }
 
+    /* Past the per-view loop: FPS/debug text uses absolute screen coords, so
+     * stop re-anchoring queued text to a pane corner (glyph size still scales
+     * via the screen-level factor). [HUD high-DPI 2026-06-14] */
+    s_hud_text_anchor_to_view = 0;
+
     /* --- Minimap (per-view) [PORT: N-way + circuit enhancement] ---
      * Drawn inside each pane via the per-view minimap layout. For a single view
      * this is identical to the legacy full-screen minimap.
@@ -3286,6 +4236,11 @@ void td5_hud_render_overlays(float dt)
             td5_hud_render_minimap(g_actor_slot_map[v]);
         }
     }
+
+    /* [#11] Fill empty split-screen grid cells (no player) with a track MAP or a
+     * STANDINGS list. Runs after the per-view minimap loop and sets its own
+     * per-cell clip rect; the full-screen restore below resets it. */
+    hud_draw_empty_cells();
 
     /* Restore full-screen viewport and projection center.
      * Passing half-dims restores the projection origin to screen center, matching
@@ -3973,6 +4928,16 @@ void td5_hud_render_minimap(int actor_slot)
     int branch_rendered = 0;
     int skip_bounds = 0, skip_vtx = 0, skip_aabb = 0;
 
+    /* [#6 2026-06-15] Forward look-ahead window size (quads). Original is 0x30
+     * (48) quads at ~6 spans each; the walk starts ~144 spans behind the player
+     * so only ~144 spans render ahead and the road ends mid-screen on sharp
+     * turns. With the look-ahead knob on, extend the count so forward reach about
+     * doubles (look-behind is set by start_span and is unchanged). Clamped to
+     * MINIMAP_SEG_MAX (256) so neither this walk nor the circuit walk below can
+     * run past the segment arrays. */
+    int mm_walk_quads = hud_minimap_ahead_on() ? 72 : 0x30;
+    if (mm_walk_quads > MINIMAP_SEG_MAX) mm_walk_quads = MINIMAP_SEG_MAX;
+
     /* Current primary segment index (local_90 in the original).
      * Scan the primary rows to find the segment that contains start_span.
      * [CONFIRMED @ 0x43A335-0x43A470] — original uses this index throughout
@@ -3991,7 +4956,7 @@ void td5_hud_render_minimap(int actor_slot)
     /* `!circuit`: the P2P segment-walk is skipped entirely on circuit tracks —
      * the circuit ring-walk below replaces it. The branch-remap / start_span /
      * cur_seg setup above is computed but unused when circuit (harmless). */
-    for (int i = 0; !circuit && span_base && vert_base && i < 0x30; i++) {
+    for (int i = 0; !circuit && span_base && vert_base && i < mm_walk_quads; i++) {
         /* Pre-iter segment advance [CONFIRMED @ 0x43A426]:
          * while (seg_end[cur_seg] < local_a4) cur_seg++ */
         while (cur_seg + 1 < s_minimap_seg_branch_start &&
@@ -4354,12 +5319,26 @@ void td5_hud_render_minimap(int actor_slot)
         int circuit_rendered = 0;
         int circuit_branches  = 0;
         if (ring > 0 && span_base && vert_base) {
-            int center = (int)player_span % ring;
+            /* (23) [2026-06-14] Centre on the BRANCH-COLLAPSED span. When the
+             * player drives a branch, raw player_span >= ring, so `player_span %
+             * ring` lands at a garbage ring position -> the main loop is walked
+             * far from the player and AABB-culled, leaving only the branch quads
+             * near the player visible ("on the right branch you only see branch
+             * pieces"). remapped_span is the parallel MAIN span (computed above
+             * for both TD6 and native branched circuits); using it centres the
+             * ring walk on the road the branch parallels. On the main ring
+             * remapped_span == player_span, so this is a no-op there. */
+            int center_span = hud_minimap_branch_fix_on() ? remapped_span : (int)player_span;
+            int center = center_span % ring;
             if (center < 0) center += ring;
             /* start_span = ((player_span/24) - 6) * 24 — 144 spans behind the
              * player, same formula as the P2P path [orig @ 0x43A372-0x43A3B7]. */
             int start = (center / 24 - 6) * 24;
-            for (int i = 0; i < 0x30; i++) {            /* 48 quads (orig while < 0x30) */
+            /* [#6 2026-06-15] Same extended forward window as the P2P walk
+             * (mm_walk_quads; 72 with the look-ahead knob on, 48 off, clamped to
+             * MINIMAP_SEG_MAX). The break-at-a-lap guard below still bounds this to
+             * one ring, so a small ring is never over-walked. */
+            for (int i = 0; i < mm_walk_quads; i++) {   /* orig was while < 0x30 */
                 int near_raw = start + i * 6;           /* advance ~6 spans / quad */
                 if (near_raw - start >= ring) break;    /* covered a full lap; stop */
                 int far_raw  = near_raw + 5;
@@ -4453,8 +5432,28 @@ void td5_hud_render_minimap(int actor_slot)
         int16_t racer_span = actor_span_index(r);
         int span_delta;
         if (g_track_is_circuit) {
-            span_delta = ((g_strip_span_count / 2 - (int)racer_span) + (int)player_span)
-                         % g_strip_span_count - g_strip_span_count / 2;
+            /* (23) [2026-06-14] Window cross-branch dots by the BRANCH-COLLAPSED
+             * span around the RING (not the raw span around the total count). On
+             * a branched circuit a racer on the main ring vs a player on a branch
+             * (raw span >= ring) get a huge raw delta -> the dot is culled and NO
+             * markers show. Collapsing both to their parallel-main span + wrapping
+             * modulo the ring puts them on the same scale so every marker renders.
+             * Main-ring tracks (no branches) collapse to themselves and wrap on
+             * ring==span_count -> identical to the old behaviour. */
+            if (hud_minimap_branch_fix_on()) {
+                int ring = g_td5.track_span_ring_length;
+                if (ring <= 0) ring = g_strip_span_count;
+                int rn = minimap_normalize_span((int)racer_span) % ring;
+                int pn = remapped_span % ring;
+                if (rn < 0) rn += ring;
+                if (pn < 0) pn += ring;
+                /* +ring before %ring keeps the intermediate non-negative so a dot
+                 * near the start/finish seam isn't dropped by a negative modulo. */
+                span_delta = (((ring / 2 - rn) + pn) % ring + ring) % ring - ring / 2;
+            } else {
+                span_delta = ((g_strip_span_count / 2 - (int)racer_span) + (int)player_span)
+                             % g_strip_span_count - g_strip_span_count / 2;
+            }
         } else {
             /* Branch-aware gate: compare branch-collapsed (normalized) spans,
              * matching the original which reads actor+0x82 for both player and
@@ -4554,8 +5553,20 @@ void td5_hud_render_minimap(int actor_slot)
         int16_t traffic_span = actor_span_index(t);
         int span_delta;
         if (g_track_is_circuit) {
-            span_delta = ((g_strip_span_count / 2 - (int)traffic_span) + (int)player_span)
-                         % g_strip_span_count - g_strip_span_count / 2;
+            /* (23) [2026-06-14] Same branch-collapsed, ring-wrapped window as the
+             * racer loop so cross-branch traffic dots aren't culled. */
+            if (hud_minimap_branch_fix_on()) {
+                int ring = g_td5.track_span_ring_length;
+                if (ring <= 0) ring = g_strip_span_count;
+                int tn = minimap_normalize_span((int)traffic_span) % ring;
+                int pn = remapped_span % ring;
+                if (tn < 0) tn += ring;
+                if (pn < 0) pn += ring;
+                span_delta = (((ring / 2 - tn) + pn) % ring + ring) % ring - ring / 2;
+            } else {
+                span_delta = ((g_strip_span_count / 2 - (int)traffic_span) + (int)player_span)
+                             % g_strip_span_count - g_strip_span_count / 2;
+            }
         } else {
             /* Same branch-collapsed gate as the racer loop above so traffic on
              * a different branch than the player isn't culled by the raw-span
@@ -4917,6 +5928,15 @@ void td5_hud_init_pause_menu(int page_index)
     float cx, cy;
     hud_screen_center(&cx, &cy);
 
+    /* [HUD high-DPI 2026-06-14] Scale every panel/selbox/slider/text offset by
+     * the uniform screen scale so the whole pause overlay grows with the window
+     * (the speedo/minimap already do). ps==1.0 => byte-identical fixed layout.
+     * The selbox/slider live-update (td5_hud_update_pause_overlay) and the TTF/
+     * SDF text (td5_hud_draw_pause_overlay) read the SAME ps, so all parts stay
+     * aligned; the menu is rebuilt every frame from the live centre so there is
+     * no baked-vs-live drift on a dim/scale change. */
+    float ps = hud_pause_scale();
+
     s_pause_page_index = page_index;
 
 #define PAUSE_BUF(n) (s_pause_quad_buf + (n) * 0xB8)
@@ -4924,7 +5944,8 @@ void td5_hud_init_pause_menu(int page_index)
     do { \
         if (s_pause_quad_count < TD5_HUD_PAUSE_MAX_QUADS) { \
             hud_build_quad(PAUSE_BUF(s_pause_quad_count), 0, (page), \
-                           cx + (x0), cy + (y0), cx + (x1), cy + (y1), \
+                           cx + (x0) * ps, cy + (y0) * ps, \
+                           cx + (x1) * ps, cy + (y1) * ps, \
                            (u0), (v0), (u1), (v1), (col), HUD_DEPTH); \
             s_pause_quad_count++; \
         } \

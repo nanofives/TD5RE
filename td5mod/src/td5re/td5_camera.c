@@ -13,6 +13,7 @@
 #include "td5_platform.h"
 #include "td5_hud.h"
 #include "td5_ai.h"     /* td5_compute_heading_delta */
+#include "td5_physics.h" /* td5_physics_get_crash_fx — crash-shake driver (Item #12) */
 #include "td5re.h"
 /* Per-track trackside (replay) camera profile data, extracted from
  * TD5_d3d.exe @0x473780 (re/tools/extract_trackside_cam_profiles.py).
@@ -239,6 +240,192 @@ static int td5_camera_use_new_pipeline(void)
 static float cam_integ_step(void)
 {
     return td5_camera_use_new_pipeline() ? 1.0f : g_subTickFraction;
+}
+
+/* ========================================================================
+ * [TASK 22] TD5RE_GROUND_CAM_FIX (default 1) — fix the in-car / "ground"
+ * (bumper) camera coming out upside-down in the default new pipeline.
+ *
+ * Root cause: the in-car/bumper view (preset 6, mode 1) and the trackside
+ * replay offset views (behaviour types 1/2/7/8) build their basis from the
+ * car's Euler angles via BuildCameraBasisFromAngles (0x42d0b0), which applies
+ * NO coordinate flip. The port's D3D11 transform consumes g_cameraBasis with
+ * the opposite up/right handedness, so that un-flipped basis renders rolled
+ * 180° about forward = upside down. UpdateVehicleRelativeCamera compensates
+ * with a 180°-about-forward roll (negate right + up rows), but in the NEW
+ * pipeline (TD5RE_CAM_NEW=1, default) td5_camera_apply_view rebuilds the basis
+ * per render frame from the captured angles WITHOUT re-applying that flip, so
+ * the compensation is discarded and the in-car cam is upside-down again.
+ *
+ * Fix: re-apply the same handedness flip in apply_view's euler-basis branch
+ * (and, for consistency, give the trackside offset cams the same flip), plus a
+ * small upward lift so the bumper eye sits at a usable hood/window height
+ * instead of scraping the ground. "0" restores the (buggy) old behaviour.
+ * ======================================================================== */
+static int td5_camera_ground_cam_fix(void)
+{
+    static int s_mode = -1;
+    if (s_mode < 0) {
+        const char *e = getenv("TD5RE_GROUND_CAM_FIX");
+        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return s_mode;
+}
+
+/* Upward lift (24.8 FP world units) applied to the in-car/bumper eye so it
+ * sits at roughly windscreen height rather than at the ground. ~150 world
+ * units. Overridable via TD5RE_GROUND_CAM_LIFT (world units). */
+static int td5_camera_ground_cam_lift(void)
+{
+    static int s_lift = -1;
+    if (s_lift < 0) {
+        const char *e = getenv("TD5RE_GROUND_CAM_LIFT");
+        int wu = (e && e[0]) ? atoi(e) : 150;   /* default ~150 world units */
+        if (wu < 0) wu = 0;
+        s_lift = wu << 8;                        /* world units -> 24.8 FP */
+    }
+    return s_lift;
+}
+
+/* Apply the D3D11 in-car handedness correction: a 180° roll about forward
+ * (negate the right + up rows of g_cameraBasis, keep forward). Matches the
+ * compensation baked into UpdateVehicleRelativeCamera. Determinant preserved;
+ * look direction unchanged. */
+static void cam_apply_incar_handedness_flip(void)
+{
+    g_cameraBasis[0] = -g_cameraBasis[0];   /* right.x */
+    g_cameraBasis[1] = -g_cameraBasis[1];   /* right.y */
+    g_cameraBasis[2] = -g_cameraBasis[2];   /* right.z */
+    g_cameraBasis[3] = -g_cameraBasis[3];   /* up.x */
+    g_cameraBasis[4] = -g_cameraBasis[4];   /* up.y */
+    g_cameraBasis[5] = -g_cameraBasis[5];   /* up.z */
+}
+
+/* ========================================================================
+ * [TASK 19] TD5RE_CAM_WALL_AVOID (default 1) — pull the camera in before it
+ * clips through a wall/rail, in BOTH gameplay (chase) and replay (trackside)
+ * views. The 2D segment raycast lives in td5_camera_raycast_to_wall (further
+ * down). The clip is applied:
+ *   - per render frame in td5_camera_apply_view for the new pipeline (covers
+ *     chase + trackside replay look-at cameras), and
+ *   - in td5_camera_finalize_chase_pos for the legacy per-frame chase path.
+ * "0" disables the avoidance (camera may clip walls, as the original does).
+ * ======================================================================== */
+static int td5_camera_wall_avoid(void)
+{
+    static int s_mode = -1;
+    if (s_mode < 0) {
+        const char *e = getenv("TD5RE_CAM_WALL_AVOID");
+        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return s_mode;
+}
+
+/* ========================================================================
+ * [ITEM #12] TD5RE_CRASH_SHAKE (default 1) — decaying screen shake on a
+ * recent heavy crash. Consumes the per-slot crash sequence published by the
+ * physics module via td5_physics_get_crash_fx(slot, &mag, &age): when the
+ * sequence id is non-zero and the crash is recent (age < SHAKE_DECAY ticks)
+ * we add a small, decaying positional jitter (and a tiny angular wobble) to
+ * the finished per-frame camera eye in td5_camera_apply_view — the single
+ * authoritative per-frame eye-write for the default new pipeline, so the
+ * shake never enters the per-tick interpolation base (no determinism /
+ * replay impact) and decays smoothly at any FPS.
+ *
+ * The jitter is DERIVED DETERMINISTICALLY from the sim tick + slot + age
+ * (sine of tick*large-prime), NOT rand(), so it stays netplay-safe even
+ * though the camera itself never feeds the sim. "0" reverts to no shake
+ * (byte-identical camera output). */
+static int td5_camera_crash_shake(void)
+{
+    static int s_mode = -1;
+    if (s_mode < 0) {
+        const char *e = getenv("TD5RE_CRASH_SHAKE");
+        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return s_mode;
+}
+
+/* Shake lifetime in sim ticks (linear falloff to 0 at this age). 24 ticks
+ * @30Hz ≈ 0.8s. Matches the "age < 24" recency window in the contract. */
+#define TD5_CRASH_SHAKE_DECAY    24
+/* Peak positional jitter, 24.8 FP world units, at full intensity (~70 wu). */
+#define TD5_CRASH_SHAKE_POS_FP   (70 << 8)
+/* Peak angular wobble, 12-bit angle units (0x1000 = full circle); ~3.5 deg. */
+#define TD5_CRASH_SHAKE_ANG      40
+/* Crash magnitude that maps to full-intensity shake. The physics module only
+ * records an event for ACUTE impacts (impact_mag > ~250000, see
+ * td5_physics.c CRASH_FX_ACUTE_MAG), so every reported crash already clears
+ * the floor; this reference (~4x the acute threshold) gives a usable
+ * "big vs huge" gradient above it rather than always saturating. */
+#define TD5_CRASH_SHAKE_MAG_REF  1000000
+
+/* Deterministic pseudo-random in [-1,1] from an integer key (sine of a large
+ * prime multiple — netplay-safe, no rand()). */
+static float cam_crash_noise(uint32_t key)
+{
+    /* 2654435761u = Knuth's multiplicative hash constant (a large prime-ish
+     * odd) — spreads adjacent keys far apart before the sine wrap. */
+    float a = (float)(key * 2654435761u & 0xFFFFFFu);
+    return sinf(a * 0.000312f);   /* arbitrary irrational-ish freq → decorrelated */
+}
+
+/* Compute this view's decaying crash shake. Returns 1 and fills the eye
+ * offset (24.8 FP) + angular wobble (12-bit) when a recent crash is active
+ * for the view's player slot; 0 otherwise. */
+static int td5_camera_compute_crash_shake(int view, int eye_ofs[3], short ang_ofs[3])
+{
+    if (!td5_camera_crash_shake()) return 0;
+    if (view < 0 || view >= TD5_MAX_VIEWPORTS) return 0;
+
+    int slot = g_actorSlotForView[view];
+    if (slot < 0) return 0;
+
+    int32_t mag = 0;
+    int age = 0;
+    uint32_t seq = td5_physics_get_crash_fx(slot, &mag, &age);
+    if (seq == 0) return 0;                         /* no crash yet */
+    if (age < 0 || age >= TD5_CRASH_SHAKE_DECAY) return 0;  /* stale */
+
+    /* Linear decay 1.0 -> 0.0 over the decay window. */
+    float decay = 1.0f - (float)age / (float)TD5_CRASH_SHAKE_DECAY;
+
+    /* Magnitude scale (0..1), saturating at the reference impact. */
+    if (mag < 0) mag = -mag;
+    float mscale = (float)mag / (float)TD5_CRASH_SHAKE_MAG_REF;
+    if (mscale > 1.0f) mscale = 1.0f;
+
+    float intensity = decay * mscale;
+    if (intensity <= 0.0f) return 0;
+
+    /* Deterministic jitter keyed on tick + slot + axis + crash sequence, so a
+     * fresh crash (new seq) re-randomizes and successive ticks decorrelate. */
+    uint32_t base = (uint32_t)g_td5.simulation_tick_counter * 977u
+                  + (uint32_t)slot * 131u + seq * 0x9E37u;
+    float jx = cam_crash_noise(base + 0u);
+    float jy = cam_crash_noise(base + 101u);
+    float jz = cam_crash_noise(base + 211u);
+    float jr = cam_crash_noise(base + 307u);
+
+    float amp = intensity * (float)TD5_CRASH_SHAKE_POS_FP;
+    eye_ofs[0] = (int)(jx * amp);
+    /* Vertical jolt slightly muted (vertical camera motion reads stronger). */
+    eye_ofs[1] = (int)(jy * amp * 0.5f);
+    eye_ofs[2] = (int)(jz * amp);
+
+    short wob = (short)(int)(jr * intensity * (float)TD5_CRASH_SHAKE_ANG);
+    ang_ofs[0] = 0;        /* leave pitch alone (look direction stays put) */
+    ang_ofs[1] = 0;        /* yaw handled via positional jitter */
+    ang_ofs[2] = wob;      /* small roll wobble = "rattle" */
+
+    {
+        static uint32_t s_shake_log_ctr;
+        if ((s_shake_log_ctr++ % 30u) == 0u)
+            TD5_LOG_I(LOG_TAG,
+                "crash shake v%d slot=%d seq=%u age=%d mag=%d intensity=%.2f",
+                view, slot, seq, age, (int)mag, intensity);
+    }
+    return 1;
 }
 
 void td5_camera_solve_tick_all(void);
@@ -1344,6 +1531,12 @@ after_flyin:
 static float g_camWallClipRatio[TD5_MAX_VIEWPORTS] =
     { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
+/* [TASK 19] Separate per-view damping state for the new-pipeline wall clip in
+ * td5_camera_apply_view (kept distinct from the legacy chase clip above so the
+ * two never fight over the same state). 1.0 = no clip. */
+static float g_camWallClipRatioApply[TD5_MAX_VIEWPORTS] =
+    { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+
 /* Spans to check on each side of the chassis span. The chase camera sits
  * roughly 1500-2100 world units behind the car; 4 spans @ ~500-1000 units
  * each covers the worst-case envelope. */
@@ -1550,37 +1743,47 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     int cam_y_desired = base_y + off1;
     int cam_z_desired = pos_z + off2 + vel_z_interp;
 
-    /* Wall-clip raycast (port enhancement, see comment block above).
+    /* Wall-clip raycast (port enhancement, see comment block above). [TASK 19]
      * Ray origin = car center (with vel extrapolation); end = desired
      * camera. If a wall blocks the line, t < 1 and we pull camera in to
      * t * SAFETY along the chase offset. Y is left at desired since the
-     * test is 2D and the camera already sits above wall tops in practice. */
+     * test is 2D and the camera already sits above wall tops in practice.
+     *
+     * Skip here while CAPTURING for the new pipeline (s_cam_capture_view >= 0):
+     * td5_camera_apply_view does the single authoritative per-frame clip then,
+     * so clipping the captured (sub-tick 0) eye too would double-pull it.
+     * Disabled entirely when TD5RE_CAM_WALL_AVOID=0. */
     int chassis_span = (int)(*(short *)(actor + 0x80));
-    int32_t car_x_ray = pos_x + vel_x_interp;
-    int32_t car_z_ray = pos_z + vel_z_interp;
-    float raw_t = td5_camera_raycast_to_wall(car_x_ray, car_z_ray,
-                                             cam_x_desired, cam_z_desired,
-                                             chassis_span);
-    if (raw_t < TD5_CAM_WALL_MIN_RATIO) raw_t = TD5_CAM_WALL_MIN_RATIO;
-    if (raw_t > 1.0f) raw_t = 1.0f;
+    float clip;
+    if (s_cam_capture_view < 0 && td5_camera_wall_avoid()) {
+        int32_t car_x_ray = pos_x + vel_x_interp;
+        int32_t car_z_ray = pos_z + vel_z_interp;
+        float raw_t = td5_camera_raycast_to_wall(car_x_ray, car_z_ray,
+                                                 cam_x_desired, cam_z_desired,
+                                                 chassis_span);
+        if (raw_t < TD5_CAM_WALL_MIN_RATIO) raw_t = TD5_CAM_WALL_MIN_RATIO;
+        if (raw_t > 1.0f) raw_t = 1.0f;
 
-    /* Damp toward the new ratio. Use a snappier response when pulling IN
-     * (raw_t < current) so the camera doesn't lag a fast wall-poke, but a
-     * slower release when going back out — this matches typical chase-cam
-     * conventions and prevents the camera from oscillating against a wall. */
-    float cur = g_camWallClipRatio[v];
-    float damp = (raw_t < cur) ? (TD5_CAM_WALL_DAMP * 2.0f) : TD5_CAM_WALL_DAMP;
-    if (damp > 1.0f) damp = 1.0f;
-    cur = cur + (raw_t - cur) * damp;
-    if (cur < TD5_CAM_WALL_MIN_RATIO) cur = TD5_CAM_WALL_MIN_RATIO;
-    if (cur > 1.0f) cur = 1.0f;
-    g_camWallClipRatio[v] = cur;
+        /* Damp toward the new ratio. Use a snappier response when pulling IN
+         * (raw_t < current) so the camera doesn't lag a fast wall-poke, but a
+         * slower release when going back out — this matches typical chase-cam
+         * conventions and prevents the camera from oscillating against a wall. */
+        float cur = g_camWallClipRatio[v];
+        float damp = (raw_t < cur) ? (TD5_CAM_WALL_DAMP * 2.0f) : TD5_CAM_WALL_DAMP;
+        if (damp > 1.0f) damp = 1.0f;
+        cur = cur + (raw_t - cur) * damp;
+        if (cur < TD5_CAM_WALL_MIN_RATIO) cur = TD5_CAM_WALL_MIN_RATIO;
+        if (cur > 1.0f) cur = 1.0f;
+        g_camWallClipRatio[v] = cur;
 
-    /* Apply the (damped) clip. Only the X/Z (lateral) offset is shrunk —
-     * Y stays at desired so the camera doesn't dive when it pulls forward. */
-    float clip = cur * TD5_CAM_WALL_SAFETY;
-    if (clip > 1.0f) clip = 1.0f;
-    if (clip < 0.0f) clip = 0.0f;
+        /* Apply the (damped) clip. Only the X/Z (lateral) offset is shrunk —
+         * Y stays at desired so the camera doesn't dive when it pulls forward. */
+        clip = cur * TD5_CAM_WALL_SAFETY;
+        if (clip > 1.0f) clip = 1.0f;
+        if (clip < 0.0f) clip = 0.0f;
+    } else {
+        clip = 1.0f;   /* capturing for new pipeline, or avoidance disabled */
+    }
 
     g_camWorldPos[v][0] = pos_x + vel_x_interp +
                           (int)((float)off0 * clip + 0.5f);
@@ -1827,14 +2030,80 @@ void td5_camera_apply_view(int view)
 
     g_depthFovFactor = cam_lerp_i(P->fov_factor, C->fov_factor, f);
     s_cam_capture_view = -1;          /* build live, not capture */
-    SetCameraWorldPosition(eye);
+
+    /* [ITEM #12] Decaying crash shake for this view's player slot. Computed
+     * once here (per render frame) and applied to the finished eye below;
+     * never captured into the per-tick pose, so determinism is untouched. */
+    int   shake_eye[3] = {0,0,0};
+    short shake_ang[3] = {0,0,0};
+    int   shake_active = td5_camera_compute_crash_shake(v, shake_eye, shake_ang);
+
     if (C->build_mode == 1) {
+        /* In-car / bumper ("ground") cam + trackside offset replay cams.
+         * [TASK 22] Lift the eye to a usable hood/window height and re-apply
+         * the D3D11 handedness flip that BuildCameraBasisFromAngles lacks (the
+         * new pipeline rebuilds the basis here, discarding the flip baked into
+         * UpdateVehicleRelativeCamera at solve time). */
+        if (td5_camera_ground_cam_fix())
+            eye[1] += td5_camera_ground_cam_lift();
+        if (shake_active) {
+            eye[0] += shake_eye[0]; eye[1] += shake_eye[1]; eye[2] += shake_eye[2];
+        }
+        SetCameraWorldPosition(eye);
         short ang[3];
         ang[0] = cam_lerp_angle(P->angles[0], C->angles[0], f);
         ang[1] = cam_lerp_angle(P->angles[1], C->angles[1], f);
         ang[2] = cam_lerp_angle(P->angles[2], C->angles[2], f);
+        if (shake_active) {
+            /* Tiny roll "rattle" — the in-car basis is built straight from
+             * these euler angles, so a small roll term reads as a jolt. */
+            ang[2] = (short)((int)ang[2] + (int)shake_ang[2]);
+        }
         BuildCameraBasisFromAngles(ang);
+        if (td5_camera_ground_cam_fix())
+            cam_apply_incar_handedness_flip();
     } else {
+        /* Look-at cameras (chase + trackside orbit/static/spline). [TASK 19]
+         * Pull the eye in before it clips a wall/rail, covering BOTH gameplay
+         * chase and replay trackside (this is the only per-frame eye-write for
+         * the new pipeline). Ray = look-at target -> eye; if a wall blocks it,
+         * shrink the eye-target vector by the (damped) hit ratio. */
+        if (td5_camera_wall_avoid() && C->anchor_valid) {
+            TD5_Actor *wa = camera_actor_for_view(v);
+            if (wa) {
+                int chassis_span = (int)(*(short *)((uintptr_t)wa + 0x80));
+                float raw_t = td5_camera_raycast_to_wall(
+                    target[0], target[2], eye[0], eye[2], chassis_span);
+                if (raw_t < TD5_CAM_WALL_MIN_RATIO) raw_t = TD5_CAM_WALL_MIN_RATIO;
+                if (raw_t > 1.0f) raw_t = 1.0f;
+                /* Snappier when pulling IN, slower releasing out (avoids
+                 * oscillation against a wall) — same policy as the chase clip. */
+                float cur = g_camWallClipRatioApply[v];
+                float damp = (raw_t < cur) ? (TD5_CAM_WALL_DAMP * 2.0f) : TD5_CAM_WALL_DAMP;
+                if (damp > 1.0f) damp = 1.0f;
+                cur = cur + (raw_t - cur) * damp;
+                if (cur < TD5_CAM_WALL_MIN_RATIO) cur = TD5_CAM_WALL_MIN_RATIO;
+                if (cur > 1.0f) cur = 1.0f;
+                g_camWallClipRatioApply[v] = cur;
+                float clip = cur * TD5_CAM_WALL_SAFETY;
+                if (clip < 0.0f) clip = 0.0f; else if (clip > 1.0f) clip = 1.0f;
+                if (clip < 1.0f) {
+                    /* Pull the whole eye-target vector in (X/Y/Z) so a clipped
+                     * eye also rises toward the car instead of dropping low. */
+                    eye[0] = target[0] + (int)((float)(eye[0] - target[0]) * clip + 0.5f);
+                    eye[1] = target[1] + (int)((float)(eye[1] - target[1]) * clip + 0.5f);
+                    eye[2] = target[2] + (int)((float)(eye[2] - target[2]) * clip + 0.5f);
+                }
+            }
+        }
+        /* [ITEM #12] Jitter the eye AFTER the wall-avoid clip so the rattle
+         * rides on the clipped position. The shake is small (~tens of world
+         * units) so it won't re-clip into geometry; the look-at target is left
+         * untouched so the followed car stays centred while the frame shakes. */
+        if (shake_active) {
+            eye[0] += shake_eye[0]; eye[1] += shake_eye[1]; eye[2] += shake_eye[2];
+        }
+        SetCameraWorldPosition(eye);
         OrientCameraTowardTarget(target, (unsigned int)C->yaw_offset);
     }
 }
@@ -3077,6 +3346,11 @@ int td5_camera_init(void)
     memset(s_debug_camera_frame, 0, sizeof(s_debug_camera_frame));
     TD5_LOG_I(LOG_TAG, "camera init: active_mode=%s preset=%d",
               camera_mode_name_for_view(0, 0), s_active_preset);
+    /* [TASK 22 / TASK 19] one-time knob report. */
+    TD5_LOG_I(LOG_TAG,
+              "camera knobs: GROUND_CAM_FIX=%d (lift=%d FP) CAM_WALL_AVOID=%d",
+              td5_camera_ground_cam_fix(), td5_camera_ground_cam_lift(),
+              td5_camera_wall_avoid());
     return 1;
 }
 

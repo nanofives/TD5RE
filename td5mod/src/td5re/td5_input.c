@@ -139,6 +139,16 @@ static int32_t s_camera_cooldown[TD5_MAX_RACER_SLOTS];
 /** Rear view flag per-player (mirrors 0x466F88). */
 static int32_t s_rear_view[TD5_MAX_RACER_SLOTS];
 
+/* [STUCK RECOVERY 2026-06-15] Per-local-player manual car-recovery edge.
+ * Indexed by local human player index (0..s_active_players-1), keyed the same
+ * way as s_rear_view / s_camera_cooldown above. The poll arms s_recovery_request
+ * on the RISING edge of the recovery button (keyboard R / joystick L3) and
+ * s_recovery_held debounces so a held button fires once per press. The physics
+ * sim drains the request via td5_input_recovery_requested(). PORT ENHANCEMENT —
+ * no original analog (the 1999 game had no player car-reset). */
+static uint8_t s_recovery_request[TD5_MAX_HUMAN_PLAYERS];
+static uint8_t s_recovery_held[TD5_MAX_HUMAN_PLAYERS];
+
 /* ========================================================================
  * Internal State -- Input Source Config
  *
@@ -166,6 +176,18 @@ static int s_nitro_pending[TD5_MAX_HUMAN_PLAYERS] = { 0 };
 
 static int s_playback_active = 0;
 static int s_replay_mode_flag = 0;
+
+/* [PORT ENHANCEMENT 2026-06-14 task#18] Controller exit-replay detection.
+ * The faithful replay-abort path (td5_game.c) only watches the raw ESC key, so
+ * there was no way to LEAVE a replay with a controller. While replay is playing
+ * we live-poll the pads for a "leave/cancel" button (Start/Menu -> PAUSE bit,
+ * Back/View -> CHANGE VIEW bit) and latch a one-shot edge here. The game layer
+ * reads td5_input_replay_exit_requested() and OR's it into its ESC abort edge.
+ * s_replay_exit_btn_held debounces so a held button fires the exit only once.
+ * Gate: TD5RE_REPLAY_EXIT (cached) — "0" disables the controller exit (old
+ * behaviour: ESC-keyboard only). Default = enabled. */
+static int s_replay_exit_requested = 0;   /* one-shot: set on edge, cleared by reader */
+static int s_replay_exit_btn_held  = 0;   /* debounce latch across frames */
 
 /* Set by write_open, cleared by write_close. When the [Replay] PersistToDisk
  * flag is on, td5_input_shutdown uses this to flush a partial recording
@@ -234,6 +256,8 @@ int td5_input_init(void)
     memset(s_nos_cooldown, 0, sizeof(s_nos_cooldown));
     memset(s_camera_cooldown, 0, sizeof(s_camera_cooldown));
     memset(s_rear_view, 0, sizeof(s_rear_view));
+    memset(s_recovery_request, 0, sizeof(s_recovery_request));
+    memset(s_recovery_held, 0, sizeof(s_recovery_held));
     memset(&s_rec, 0, sizeof(s_rec));
     memset(&s_ff, 0, sizeof(s_ff));
     memset(s_replay_log_path, 0, sizeof(s_replay_log_path));
@@ -372,6 +396,33 @@ void td5_input_apply_device_selection(void)
 void td5_input_set_playback_active(int v)       { s_playback_active = v; }
 int  td5_input_is_playback_active(void)         { return s_playback_active; }
 void td5_input_set_replay_mode(int v)           { s_replay_mode_flag = v; }
+
+/* [PORT ENHANCEMENT 2026-06-14 task#18] One-shot: returns 1 once when a
+ * controller Back/Start was pressed during replay playback (see the playback
+ * branch of td5_input_poll_race_session). Reading CONSUMES the request so the
+ * exit fires exactly once per press. The game layer should OR this into its
+ * replay/cinematic ESC abort edge. Always 0 when not in playback (the latch is
+ * only ever set inside the playback branch). */
+int  td5_input_replay_exit_requested(void)
+{
+    int r = s_replay_exit_requested;
+    s_replay_exit_requested = 0;
+    return r;
+}
+
+/* [STUCK RECOVERY 2026-06-15] One-shot per-local-player manual-recovery edge.
+ * Drained by the deterministic physics tick. `player` is the LOCAL human player
+ * index (0..s_active_players-1), not the actor slot — the caller maps slot ->
+ * player via g_actorSlotForView. Reading consumes the edge. Returns 0 for any
+ * out-of-range index or when the latch was never armed (knob off / no press). */
+int  td5_input_recovery_requested(int player)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    int r = s_recovery_request[player];
+    s_recovery_request[player] = 0;
+    return r;
+}
+
 void td5_input_set_nos_enabled(int v)           { s_nos_enabled = v; }
 void td5_input_set_cop_mode(int v)              { s_cop_mode = v; }
 void td5_input_set_nitro_pending(int p, int v)  { if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) s_nitro_pending[p] = v; }
@@ -400,6 +451,53 @@ void td5_input_poll_race_session(void)
             s_control_bits[0] |= (uint32_t)TD5_INPUT_STUNNED;  /* bit 30 = 0x40000000 */
             /* Actually escape is bit 30 */
             s_control_bits[0] |= 0x40000000u;
+        }
+
+        /* [PORT ENHANCEMENT 2026-06-14 task#18] Controller exit-replay.
+         * Recorded input drives the sim during playback, so the live pad is
+         * free — repurpose its Back/Start button as "leave replay". Live-poll
+         * each active player's device (the platform poll reads hardware
+         * regardless of playback state) and edge-detect Start/Menu (decoded as
+         * TD5_INPUT_PAUSE) or Back/View (decoded as TD5_INPUT_CAMERA_CHANGE).
+         * The result is latched in s_replay_exit_requested for the game layer
+         * (see td5_input_replay_exit_requested). We also OR the ESCAPE control
+         * bit so any control-bit-based consumer sees the abort too. */
+        {
+            static int s_replay_exit_init = 0;
+            static int s_replay_exit_enabled = 1;
+            if (!s_replay_exit_init) {
+                const char *e = getenv("TD5RE_REPLAY_EXIT");
+                s_replay_exit_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+                s_replay_exit_init = 1;
+                TD5_LOG_I(LOG_TAG, "Replay controller-exit: %s",
+                          s_replay_exit_enabled ? "enabled" : "disabled (ESC only)");
+            }
+
+            int exit_btn_now = 0;
+            if (s_replay_exit_enabled) {
+                int players = s_active_players;
+                if (players < 1) players = 1;
+                if (players > TD5_MAX_HUMAN_PLAYERS) players = TD5_MAX_HUMAN_PLAYERS;
+                /* The exit button is a controller action; ignore keyboard players
+                 * (their ESC is handled above). Back/Start map through the decoded
+                 * PAUSE / CHANGE VIEW bits regardless of per-pad rebinding. */
+                const uint32_t k_exit_bits = (uint32_t)TD5_INPUT_PAUSE |
+                                             (uint32_t)TD5_INPUT_CAMERA_CHANGE;
+                for (int pi = 0; pi < players; pi++) {
+                    if (s_input_source[pi] == 0) continue;   /* keyboard slot */
+                    TD5_InputState pst;
+                    memset(&pst, 0, sizeof(pst));
+                    td5_plat_input_poll(pi, &pst);
+                    if (pst.buttons & k_exit_bits) { exit_btn_now = 1; break; }
+                }
+            }
+
+            if (exit_btn_now && !s_replay_exit_btn_held) {
+                s_replay_exit_requested = 1;            /* one-shot edge */
+                s_control_bits[0] |= 0x40000000u;       /* ESCAPE bit, belt-and-suspenders */
+                TD5_LOG_I(LOG_TAG, "Replay: controller Back/Start -> exit requested");
+            }
+            s_replay_exit_btn_held = exit_btn_now;
         }
         goto post_poll;
     }
@@ -510,6 +608,60 @@ void td5_input_poll_race_session(void)
                 TD5_LOG_I(LOG_TAG, "rear view ON: player=%d", i);
             }
             s_rear_view[i] = 1;
+        }
+
+        /* [STUCK RECOVERY 2026-06-15] Manual car-recovery edge for this local
+         * human player. Triggers: keyboard R (DIK_R = 0x13) and joystick L3
+         * (left-stick click = physical button 8 in the standard Xbox-via-
+         * DirectInput layout; A0 B1 X2 Y3 LB4 RB5 Back6 Start7 L3=8 R3=9).
+         *
+         * This sits in the NORMAL (non-playback) poll branch, so it is inert
+         * during replay watching — no collision with the replay-exit-on-R path
+         * (td5_input_replay_exit_requested), which only runs in the playback
+         * branch above.
+         *
+         * Keyboard R is honoured only for player 0: the slot-0 keyboard default
+         * binds CHANGE VIEW to DIK_T (0x14), so R is free; the split-screen P2
+         * keyboard default binds CHANGE VIEW to DIK_R (0x13), so claiming R for
+         * recovery there would double-purpose that player's view key. L3 is free
+         * on every layout (R3 is REAR VIEW, L3 is unused) so it works for any
+         * local joystick player.
+         *
+         * Edge-triggered via s_recovery_held so a held button recovers once per
+         * press. Gated by TD5RE_STUCK_RECOVERY (cached): "0" never arms the
+         * latch, so the whole feature (manual + the physics auto path) is off. */
+        {
+            static int s_recovery_init = 0;
+            static int s_recovery_enabled = 1;
+            if (!s_recovery_init) {
+                const char *e = getenv("TD5RE_STUCK_RECOVERY");
+                s_recovery_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+                s_recovery_init = 1;
+                TD5_LOG_I(LOG_TAG, "Stuck recovery (manual R / L3): %s",
+                          s_recovery_enabled ? "enabled" : "disabled");
+            }
+
+            int recover_now = 0;
+            if (s_recovery_enabled && !s_replay_mode_flag && !s_escape_fade_active) {
+                if (s_input_source[i] == 0) {
+                    /* Keyboard player — R only for player 0 (see note above). */
+                    if (i == 0 && td5_plat_input_key_pressed(0x13))  /* DIK_R */
+                        recover_now = 1;
+                } else {
+                    /* Joystick player — L3 (physical button 8). The device slot
+                     * index equals the player index for the in-race poll. */
+                    if (td5_plat_input_joystick_buttons(i) & (1u << 8))
+                        recover_now = 1;
+                }
+            }
+
+            if (i >= 0 && i < TD5_MAX_HUMAN_PLAYERS) {
+                if (recover_now && !s_recovery_held[i]) {
+                    s_recovery_request[i] = 1;       /* one-shot edge */
+                    TD5_LOG_I(LOG_TAG, "recovery requested: player=%d", i);
+                }
+                s_recovery_held[i] = (uint8_t)recover_now;
+            }
         }
     }
 
@@ -816,17 +968,65 @@ void td5_input_update_player_control(int slot)
         /* ---- Path B: Analog steering ---- */
         int raw_x = (int)(bits & 0x1FF) - TD5_INPUT_JS_AXIS_CENTER;
 
+        /* [PORT ENHANCEMENT 2026-06-14 task#15] Non-linear (expo) steering curve.
+         * The raw analog stick axis is desensitised in the small/mid range so a
+         * gentle stick deflection steers gently, while FULL deflection still
+         * reaches full lock. Applies ONLY to analog stick steering (this Path B);
+         * digital/keyboard steering (Path A above) is untouched and stays
+         * full/instant. Knob TD5RE_STEER_EXPO (cached once):
+         *   0   = linear  -> byte-identical to the faithful old behaviour
+         *   0.6 = default -> out = (1-e)*x + e*x^3, sign- and endpoint-preserving
+         * The curve is applied on the normalised deflection x = raw_x/250 in
+         * [-1..+1] (x=0 -> 0, x=+/-1 -> +/-1 exactly), then mapped back into the
+         * same +/-250 axis domain so the existing speed-dependent limit scale and
+         * the fixed-point divide-by-250 below are reused unchanged. Any deadzone
+         * the platform layer already applied to the packed axis survives: x near 0
+         * maps to an even smaller output, never larger. */
+        static int   s_steer_expo_init = 0;
+        static float s_steer_expo = 0.6f;          /* default expo strength */
+        if (!s_steer_expo_init) {
+            const char *e = getenv("TD5RE_STEER_EXPO");
+            if (e && e[0]) {
+                float v = (float)atof(e);
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;             /* e>1 would invert mid-slope */
+                s_steer_expo = v;
+            }
+            s_steer_expo_init = 1;
+            TD5_LOG_I(LOG_TAG, "Analog steer expo: strength=%.3f (%s)",
+                      s_steer_expo,
+                      (s_steer_expo > 0.0f) ? "expo" : "linear");
+        }
+
+        int eff_x = raw_x;
+        if (s_steer_expo > 0.0f && raw_x != 0) {
+            /* Normalise by the +250 half-range; the axis can read slightly past
+             * +/-1 (raw 0..0x1FF vs centre 250) so clamp x to [-1..+1] to keep
+             * the cubic monotonic and the endpoint exact. */
+            float x = (float)raw_x / (float)TD5_INPUT_JS_AXIS_CENTER;
+            if (x > 1.0f) x = 1.0f;
+            if (x < -1.0f) x = -1.0f;
+            float e = s_steer_expo;
+            float curved = (1.0f - e) * x + e * (x * x * x);  /* sign preserved */
+            int mapped = (int)(curved * (float)TD5_INPUT_JS_AXIS_CENTER +
+                               (curved >= 0.0f ? 0.5f : -0.5f));   /* round to nearest */
+            /* Preserve the saturated endpoint magnitude (full lock) and the sign
+             * of the raw input regardless of float rounding. */
+            if (raw_x > 0 && mapped < 0) mapped = 0;
+            if (raw_x < 0 && mapped > 0) mapped = 0;
+            eff_x = mapped;
+        }
+
         /*
          * Original uses a fixed-point multiply:
-         *   steering_command = (raw_x * steer_limit) / divisor
+         *   steering_command = (eff_x * steer_limit) / divisor
          * The magic constant 0x10624DD3 is approx 1/250 in fixed-point.
-         * Result: steering_command = raw_x * steer_limit / 250
+         * Result: steering_command = eff_x * steer_limit / 250
+         * (eff_x == raw_x when expo is linear, so the linear path is unchanged.)
          */
-        int64_t product = (int64_t)raw_x * (int64_t)(raw_x < 0 ? neg_limit : pos_limit);
-        /* Divide by 250 (the axis range) using the same magic constant approach */
         int64_t magic = (int64_t)0x10624DD3;
-        if (raw_x >= 0) magic = -(int64_t)0x10624DD3;
-        int64_t hi = (magic * (int64_t)(raw_x * (raw_x < 0 ? neg_limit : pos_limit))) >> 32;
+        if (eff_x >= 0) magic = -(int64_t)0x10624DD3;
+        int64_t hi = (magic * (int64_t)(eff_x * (eff_x < 0 ? neg_limit : pos_limit))) >> 32;
         s_steering_cmd[slot] = (int)((hi >> 4) - (hi >> 31));
     }
 
@@ -992,19 +1192,36 @@ void td5_input_update_player_control(int slot)
      * behavior. */
     if (bits & 0x100000u) {
         s_handbrake[slot] = 1;                 /* rear-grip cut + slip-z gate — always */
-        if (bits & TD5_INPUT_THROTTLE) {
-            /* [FIX 2026-06-02 power-slide/donut] On throttle + handbrake: keep the
-             * forward drive (do NOT override to the -256 brake throttle, do NOT set
+        /* [FIX 2026-06-15 item #8] TD5RE_HANDBRAKE_BRAKE (default ON): the handbrake
+         * must actually slow the car even while accelerating. When ON, always engage
+         * the faithful original brake path (throttle=-256, brake=1) regardless of the
+         * throttle bit — restoring the literal original (@0x004033fb always forces
+         * throttle=-256+brake). The rear-grip cut via s_handbrake still gives slidey
+         * handbrake turns. When set to "0", revert to the donut/power-slide deviation
+         * below (throttle+handbrake keeps forward drive, no brake). */
+        static int s_hb_brake_init = 0;
+        static int s_hb_brake = 1;                 /* default ON = always brakes */
+        if (!s_hb_brake_init) {
+            const char *e = getenv("TD5RE_HANDBRAKE_BRAKE");
+            s_hb_brake = (e && e[0] == '0') ? 0 : 1;
+            s_hb_brake_init = 1;
+            TD5_LOG_I(LOG_TAG, "Handbrake-while-accel: %s",
+                      s_hb_brake ? "always brakes" : "donut (throttle held, no brake)");
+        }
+        if (s_hb_brake || !(bits & TD5_INPUT_THROTTLE)) {
+            /* Handbrake brakes the car to a stop (faithful). Default path; also the
+             * handbrake-only (off throttle) path when the donut deviation is enabled. */
+            s_throttle[slot]  = (int16_t)0xFF00;  /* -256: full brake throttle */
+            s_brake[slot]     = 1;                 /* brake lights + brake path */
+        } else {
+            /* [donut deviation, TD5RE_HANDBRAKE_BRAKE=0] On throttle + handbrake: keep
+             * the forward drive (do NOT override to the -256 brake throttle, do NOT set
              * brake_flag) so the rear breaks loose UNDER POWER -> the car power-
              * slides / donuts instead of braking to a stop. The literal original
              * always forces throttle=-256+brake (@0x004033fb), which precludes a
              * handbrake donut; this is a deliberate port deviation for that gameplay.
              * s_throttle/s_brake keep their decoded forward values (throttle=0x100,
              * brake=0 from the accelerate branch above). */
-        } else {
-            /* Handbrake-only (off throttle): brake the car to a stop (faithful). */
-            s_throttle[slot]  = (int16_t)0xFF00;  /* -256: full brake throttle */
-            s_brake[slot]     = 1;                 /* brake lights + brake path */
         }
         TD5_LOG_I(LOG_TAG, "handbrake ON slot=%d: throttle=%d brake=%d hb=1",
                   slot, (int)s_throttle[slot], (int)s_brake[slot]);

@@ -33,7 +33,7 @@
 #define TD5_ACTOR_STRIDE            0x388       /* 904 bytes per actor */
 #define TD5_ACTOR_MAX_RACER_SLOTS   6
 #define TD5_ACTOR_MAX_TRAFFIC_SLOTS 6
-#define TD5_ACTOR_MAX_TOTAL_SLOTS   12          /* 6 racers + 6 traffic */
+#define TD5_ACTOR_MAX_TOTAL_SLOTS   32          /* PORT: render/per-slot array bound — N-way racers + up to 16 traffic (orig 6+6=12) */
 #define TD5_ACTOR_BASE_ADDR         0x004AB108  /* gRuntimeSlotActorTable */
 
 #define TD5_FIXED_POINT_SHIFT       8           /* 24.8 fixed-point */

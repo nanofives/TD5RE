@@ -23,6 +23,50 @@
 typedef struct { int width; int height; } BgGalImg;
 typedef struct { const char *label; int cols; int rows; } MpSplitLayout;
 
+/* ---- multiplayer SESSION-PERSISTENT store (RAM, lives for the whole process
+ * run) ----
+ * Survives every menu/lobby transition so re-entering the MP menu in the same
+ * session keeps each player's name / accent colour / car (+paint/color/trans).
+ * Owned by td5_frontend.c (single static s_mp_session, zero-init); other
+ * frontend TUs save/restore one player at a time via the helpers below. Gated by
+ * env TD5RE_MP_SESSION (default ON; "0" => the old wipe-every-time behaviour, in
+ * which case `valid` never goes true and behaviour is byte-identical to before).
+ * NB the position-select screen is a planned follow-up: the cell[]/pos_* fields
+ * are RESERVED for that agent and stay 0 until it wires them. */
+typedef struct {
+    int  valid;                              /* 1 once a race has snapshotted a roster */
+    int  count;                              /* number of human players captured */
+    char name[TD5_MAX_HUMAN_PLAYERS][16];
+    int  accent[TD5_MAX_HUMAN_PLAYERS];      /* 0x00RRGGBB identity colour */
+    int  car[TD5_MAX_HUMAN_PLAYERS];
+    int  paint[TD5_MAX_HUMAN_PLAYERS];
+    int  color[TD5_MAX_HUMAN_PLAYERS];       /* TD6 body colour (0xRRGGBB, -1 = none) */
+    int  trans[TD5_MAX_HUMAN_PLAYERS];       /* 0 = Automatic, 1 = Manual */
+    /* --- reserved for the position-select screen agent (leave at 0) --- */
+    int  cell[TD5_MAX_HUMAN_PLAYERS];        /* chosen viewport/grid cell per player */
+    int  pos_assigned;                       /* 1 once positions have been chosen */
+    int  pos_count_committed;                /* player count at position-commit time */
+} MpSession;
+
+int  mp_session_enabled(void);               /* TD5RE_MP_SESSION knob (cached) */
+int  mp_session_is_valid(void);              /* s_mp_session.valid && enabled */
+int  mp_session_count(void);                 /* captured human count (0 if invalid) */
+void mp_session_save_player(int p);          /* live arrays[p] -> store[p] */
+void mp_session_restore_player(int p);       /* store[p] -> live arrays[p] (if valid && p<count) */
+
+/* ---- MP split-screen POSITION SELECT (#6/#8) ----
+ * s_mp_player_cell[p] = the grid cell human player p occupies (default identity).
+ * Owned by td5_frontend.c; written by the picker (Screen_MpPosition, in
+ * td5_fe_race.c), persisted into / restored from s_mp_session by the helpers.
+ * Gated by env TD5RE_MP_POSITIONS (default ON; "0" => skip picker + identity). */
+extern int  s_mp_player_cell[TD5_MAX_HUMAN_PLAYERS];
+int  mp_positions_enabled(void);             /* TD5RE_MP_POSITIONS knob (cached) */
+void mp_positions_reset_identity(void);      /* live cells -> identity (cell[p]=p) */
+void mp_session_commit_positions(int humans);/* live cells -> store; mark assigned */
+int  mp_session_restore_positions(int humans);/* store -> live cells; 1 if usable (skip picker) */
+void Screen_MpPosition(void);                /* the picker screen handler */
+void frontend_mp_position_render(float sx, float sy);  /* its render (in td5_frontend.c) */
+
 /* ---- shared texture-page allocations ---- */
 #define SHARED_PAGE_WHITE     899
 #define SHARED_PAGE_FONT_MSDF 970   /* free page (frontend uses 888-955) */
@@ -198,6 +242,14 @@ void frontend_init_race_schedule(void);
 void frontend_init_return_screen(TD5_ScreenIndex screen);
 void frontend_net_destroy(void);
 void frontend_play_sfx(int id);
+#ifndef TD5RE_RELEASE
+/* [2026-06-15 TASK A1] Dev-only: toggle the Quick Race span-offset field's
+ * "input active" state (click-to-type). Owned by td5_frontend.c (which holds the
+ * editable buffer + render); called from the QR_BTN_SPAN activation branch in the
+ * Screen_QuickRaceMenu FSM (td5_fe_race.c). Commits the buffer to
+ * g_td5.ini.start_span_offset on each toggle and plays the confirm cue. */
+void frontend_qr_span_toggle_active(void);
+#endif
 void frontend_present_buffer(void);
 void frontend_render_session_locked_overlay(float sx, float sy);
 void frontend_reset_buttons(void);
@@ -353,6 +405,10 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
  * PlayerIsAI (slot 0 driven by AI) and AutoThrottle (trace auto-throttle). */
 #define QR_BTN_PLAYERAI   9
 #define QR_BTN_AUTOTHR    10
+/* [2026-06-15] dev-only click-to-type span-offset field, its own row below the
+ * "AI Screens" row (QR_BTN_SPLITSCREENS). Created LAST so the OK/Back/PlayerAI/
+ * AutoThr indices above are unchanged; hidden+disabled in release. */
+#define QR_BTN_SPAN       11
 
 /* Quick Race layout: caption buttons in a left column, the selected value in a
  * right column, all rows uniformly spaced.
@@ -365,7 +421,11 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 #define QR_COL_X       120    /* button left edge (clears the black left bar)     */
 #define QR_BTN_W       208    /* button width (right edge = 328)          */
 #define QR_ROW_Y0       96    /* first row y                              */
-#define QR_ROW_DY       56    /* uniform vertical gap between rows         */
+/* [2026-06-15 TASK A2] Row pitch tightened 56 -> 44 so the added dev "Span
+ * Offset" row (8 rows total, 0..7) fits the 480px canvas with OK/Back at row 7
+ * (y = 96 + 7*44 = 404, 32px tall -> bottom 436). 32px buttons leave a 12px gap
+ * between rows; the title rests at ~17 so the first row at 96 stays clear. */
+#define QR_ROW_DY       44    /* uniform vertical gap between rows         */
 #define QR_ROW_Y(n)     (QR_ROW_Y0 + (n) * QR_ROW_DY)
 #define FE_QR_VALUE_X  336    /* value column left edge (clear of button @328)  */
 #define FE_QR_VALUE_SCALE 0.9f /* value glyph scale — matches the button-caption size */

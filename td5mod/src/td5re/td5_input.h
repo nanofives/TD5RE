@@ -276,6 +276,16 @@ void td5_input_set_action_bindings(int player, const uint32_t *codes, int count)
 void td5_input_apply_device_selection(void);
 void td5_input_set_playback_active(int v);
 int  td5_input_is_playback_active(void);
+int  td5_input_replay_exit_requested(void);  /* [item 18] one-shot: controller Back/Start pressed during replay */
+/* [STUCK RECOVERY 2026-06-15] One-shot per-player edge: returns 1 exactly once
+ * when this LOCAL human player just pressed the manual car-recovery button
+ * (keyboard R / joystick L3, left-stick click). `player` is the local human
+ * player index (0..s_active_players-1), NOT the actor slot. Reading CONSUMES the
+ * edge so a held button fires recovery only once per press. Always 0 during
+ * replay playback (the manual-recovery latch is only updated on the live poll's
+ * normal-input branch). Gated by TD5RE_STUCK_RECOVERY (default ON); when the
+ * knob is "0" the latch is never armed and this always returns 0. */
+int  td5_input_recovery_requested(int player);
 void td5_input_set_replay_mode(int v);
 void td5_input_set_nos_enabled(int v);
 void td5_input_set_cop_mode(int v);

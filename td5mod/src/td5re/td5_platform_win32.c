@@ -346,6 +346,61 @@ static int              s_last_bound_texture_page = -1;
 static HANDLE s_game_heap = NULL;
 
 /* ========================================================================
+ * Application icon
+ * ------------------------------------------------------------------------
+ * The TD5 icon ships as a multi-size resource (16/32/48/256) embedded by
+ * windres from td5re.rc -> td5re.ico under the lowest resource id (1), so
+ * Explorer/taskbar pick it as the default application icon.
+ *
+ * The actual visible window is created by the D3D11 wrapper
+ * (TD5_D3D11_Display class in d3d11_backend.c) whose WNDCLASS leaves
+ * hIcon/hIconSm NULL -> Windows would otherwise show the generic default
+ * icon on the taskbar / Alt-Tab / title bar. We override it at runtime via
+ * WM_SETICON, and also set the WNDCLASS icons on the fallback window we
+ * create ourselves.
+ *
+ * Use LoadImage (not LoadIcon): LoadIcon always returns the *large*
+ * (SM_CXICON, usually 32px) frame, so a single LoadIcon handle reused for
+ * ICON_SMALL forces Windows to downscale 32->16 (blurry). LoadImage with
+ * the small/large system metrics selects the matching 16px / 32px frame
+ * from the multi-size .ico.
+ * ======================================================================== */
+#define TD5RE_APP_ICON_ID 1
+
+/* Load the embedded app icon at a specific pixel size; falls back to the
+ * system default application icon if the resource is missing. */
+static HICON td5_load_app_icon(int cx, int cy)
+{
+    HINSTANCE hinst = GetModuleHandleA(NULL);
+    HICON h = (HICON)LoadImageA(hinst, MAKEINTRESOURCE(TD5RE_APP_ICON_ID),
+                                IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
+    if (!h)
+        h = (HICON)LoadImageA(NULL, IDI_APPLICATION, IMAGE_ICON, cx, cy,
+                              LR_DEFAULTCOLOR | LR_SHARED);
+    return h;
+}
+
+/* Apply the TD5 icon to a created window (big = Alt-Tab/title, small =
+ * taskbar/title-bar). Safe to call repeatedly; handles are owned by the
+ * caller for the window lifetime (process-lifetime windows -> never freed). */
+static void td5_apply_window_icons(HWND hwnd)
+{
+    HICON hBig, hSmall;
+    if (!hwnd)
+        return;
+    hBig   = td5_load_app_icon(GetSystemMetrics(SM_CXICON),
+                               GetSystemMetrics(SM_CYICON));
+    hSmall = td5_load_app_icon(GetSystemMetrics(SM_CXSMICON),
+                               GetSystemMetrics(SM_CYSMICON));
+    if (hBig)   SendMessageA(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hBig);
+    if (hSmall) SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hSmall);
+    /* Also stamp the window-class icons so any default/derived paint uses
+     * the TD5 icon. The wrapper's class registered them as NULL. */
+    if (hSmall) SetClassLongPtrA(hwnd, GCLP_HICONSM, (LONG_PTR)hSmall);
+    if (hBig)   SetClassLongPtrA(hwnd, GCLP_HICON,   (LONG_PTR)hBig);
+}
+
+/* ========================================================================
  * Initialization -- called by the wrapper/loader after device creation
  * ======================================================================== */
 
@@ -374,13 +429,10 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
         s_original_wndproc = (WNDPROC)SetWindowLongPtrA(s_hwnd, GWLP_WNDPROC,
                                                          (LONG_PTR)TD5_WndProc);
 
-        /* Set window icon (use first resource icon, fall back to default app icon) */
-        HICON hIcon = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCE(1));
-        if (!hIcon) hIcon = LoadIconA(NULL, IDI_APPLICATION);
-        if (hIcon) {
-            SendMessageA(s_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hIcon);
-            SendMessageA(s_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
-        }
+        /* Set the TD5 app icon on the wrapper's display window (the visible
+         * window) so the taskbar / Alt-Tab / title bar use it instead of the
+         * generic default. Big = 32px frame, small = 16px frame. */
+        td5_apply_window_icons(s_hwnd);
 
         /* Windows 11 dark mode title bar */
         typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
@@ -587,16 +639,20 @@ int td5_plat_window_create(const char *title, const TD5_DisplayMode *mode)
         DWORD style;
         RECT wr;
 
-        HICON hIcon = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCE(1));
-        if (!hIcon) hIcon = LoadIconA(NULL, IDI_APPLICATION);
+        /* Big icon for the class/Alt-Tab, small for the title bar/taskbar,
+         * each picked from the matching frame of the multi-size .ico. */
+        HICON hIconBig = td5_load_app_icon(GetSystemMetrics(SM_CXICON),
+                                           GetSystemMetrics(SM_CYICON));
+        HICON hIconSm  = td5_load_app_icon(GetSystemMetrics(SM_CXSMICON),
+                                           GetSystemMetrics(SM_CYSMICON));
 
         ZeroMemory(&wc, sizeof(wc));
         wc.cbSize        = sizeof(wc);
         wc.style         = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc   = TD5_WndProc;
         wc.hInstance      = GetModuleHandleA(NULL);
-        wc.hIcon          = hIcon;
-        wc.hIconSm        = hIcon;
+        wc.hIcon          = hIconBig;
+        wc.hIconSm        = hIconSm;
         wc.hCursor        = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground  = (HBRUSH)GetStockObject(BLACK_BRUSH);
         wc.lpszClassName  = "TD5RE_Window";
@@ -626,10 +682,10 @@ int td5_plat_window_create(const char *title, const TD5_DisplayMode *mode)
         }
 
         if (!s_hwnd) return 0;
-        if (hIcon) {
-            SendMessageA(s_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hIcon);
-            SendMessageA(s_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
-        }
+        if (hIconBig)
+            SendMessageA(s_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hIconBig);
+        if (hIconSm)
+            SendMessageA(s_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
         ShowCursor(FALSE);
         SetCursor(NULL);
         s_window_w = w;

@@ -376,6 +376,13 @@ typedef struct RenderScratch {
     int scene_has_renderer_geometry;
     int in_sky_draw;
     int in_reflection_overlay;
+    /* [task#21] TD6 car body z-fix. When >0, clip_and_submit_polygon snaps each
+     * vertex depth to a fine grid (so coincident/near-coplanar faces of the
+     * single de-indexed TD6 body mesh resolve to the SAME depth and tie stably by
+     * submission order instead of flickering) and pulls the body a hair toward
+     * the camera (so the painted shell wins the tie against the geometry behind
+     * it). Set only around a ported-TD6 car body's mesh draw; 0 otherwise. */
+    float td6_car_zbias;
     uint8_t actor_light_zone[TD5_ACTOR_MAX_TOTAL_SLOTS];  /* per-pane light-zone cache */
     /* [Phase B parallel-build] Per-pane mesh-vertex WORKSPACE. The mesh
      * transform used to write view coords IN-PLACE into the SHARED mesh blob
@@ -450,6 +457,7 @@ static __thread RenderScratch *g_rs = &g_rs_default;
 #define s_scene_has_renderer_geometry (g_rs->scene_has_renderer_geometry)
 #define s_in_sky_draw               (g_rs->in_sky_draw)
 #define s_in_reflection_overlay     (g_rs->in_reflection_overlay)
+#define s_td6_car_zbias             (g_rs->td6_car_zbias)
 #define s_actor_light_zone          (g_rs->actor_light_zone)
 
 /* [Phase B Stage 2b] Per-pane RenderScratch pool. Workers bind their pane's
@@ -631,6 +639,40 @@ void td5_render_set_vehicle_is_td6(int slot, int is_td6)
 {
     if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
     s_vehicle_is_td6[slot] = is_td6 ? 1 : 0;
+}
+
+/* [task#21] TD6 car body z-fight fix. Ported TD6 cars are transcoded to a SINGLE
+ * de-indexed triangle list (td5_asset_transcode_td6_mesh: one dispatch_type=0
+ * command). The artist mesh has interior trim / glass surrounds modelled
+ * coplanar with the painted outer shell, and the engine draws them all in one
+ * opaque pass with CullMode=NONE. Those coplanar faces tie on the depth test;
+ * with sub-tick camera/body interpolation jittering each face's projected depth
+ * by a different sub-LSB amount every frame, the LEQUAL winner flips frame to
+ * frame -> the reported "internal geometry pokes through the body and flickers".
+ *
+ * Render-side fix (no per-face metadata needed, order-independent): while a TD6
+ * car body is drawn we (1) SNAP each vertex depth to a fine grid so faces whose
+ * true depths are within one grid step collapse to the SAME depth and resolve by
+ * stable submission order (deterministic across frames -> no flicker), and (2)
+ * pull the whole body a hair toward the camera so the shell wins its tie against
+ * the geometry immediately behind it. The grid step is tiny vs the car's depth
+ * extent (a car spans ~2.5e-5 in normalized depth in a chase cam, the step is
+ * ~1.5e-6) so legitimately-separated faces stay distinct, and the body-vs-ground
+ * depth gap is far larger than the step+pull so the body never sinks into the
+ * road. A/B: TD5RE_TD6_CAR_ZFIX=0 disables it. */
+#define TD6_CAR_ZFIX_PULL_VIEWZ   (3.0f)   /* toward-camera, view-z units        */
+#define TD6_CAR_ZFIX_SNAP_VIEWZ   (0.20f)  /* depth snap grid, view-z units      */
+static int td6_car_zfix_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_TD6_CAR_ZFIX");
+        cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "TD6 car body z-fix %s (pull=%.1f snap=%.2f view-z)",
+                  cached ? "ON" : "OFF",
+                  (double)TD6_CAR_ZFIX_PULL_VIEWZ, (double)TD6_CAR_ZFIX_SNAP_VIEWZ);
+    }
+    return cached;
 }
 
 /* [S23] Per-slot authored rear/brake-light positions (model space, int16[3] ×2).
@@ -1157,6 +1199,41 @@ static void update_render_camera_from_game(void)
     td5_camera_get_basis(&s_camera_basis[0], &s_camera_basis[3], &s_camera_basis[6]);
     td5_camera_get_position(&s_camera_pos[0], &s_camera_pos[1], &s_camera_pos[2]);
 
+    /* [billboard-tree fix 2026-06-15] Snapshot the yaw-stripped camera-secondary
+     * basis into this g_rs so the camera-facing billboard branch in
+     * td5_render_span_display_list has a valid rotation.
+     *
+     * ROOT CAUSE: g_rs->camera_secondary (RenderScratch) is zero-initialized and
+     * was ONLY populated by td5_render_bake_camera(), which the renderer calls
+     * exclusively on the THREADED multi-pane path (td5_game.c, mt_threaded,
+     * viewport_count>2). On the SERIAL / single- or double-viewport path (the
+     * common case — e.g. Moscow solo) the renderer refreshes the camera via THIS
+     * function instead, which never copied the secondary basis. The billboard
+     * branch then loaded an all-zero 3x3 into the transform rotation, collapsing
+     * every tree quad's 4 vertices onto the single translation point → zero-area
+     * quad → rejected by the degenerate-triangle test in clip_and_submit_polygon
+     * → trees render INVISIBLE in-scene (while the regular fence/grass meshes,
+     * which use s_camera_basis populated above, render fine). Copying the basis
+     * here fixes both paths (bake_camera's own copy below becomes redundant but
+     * harmless). g_rs-local, so threaded panes still each get their own.
+     *
+     * Gated by TD5RE_BILLBOARD_TREE_FIX (default ON); set =0 to reproduce the
+     * original invisible-tree behaviour for A/B. */
+    {
+        extern float g_cameraSecondaryUnscaled[9];   /* td5_camera.c (billboard basis) */
+        static int s_bb_fix = -1;      /* -1 unread, 0 off, 1 on */
+        if (s_bb_fix < 0) {
+            const char *e = getenv("TD5RE_BILLBOARD_TREE_FIX");
+            s_bb_fix = (e && e[0] == '0') ? 0 : 1;
+            TD5_LOG_I(LOG_TAG,
+                      "billboard-tree fix: %s (TD5RE_BILLBOARD_TREE_FIX; serial-path "
+                      "camera_secondary bake — fixes invisible in-scene trees)",
+                      s_bb_fix ? "ON" : "OFF");
+        }
+        if (s_bb_fix)
+            memcpy(s_camera_secondary, g_cameraSecondaryUnscaled, 9 * sizeof(float));
+    }
+
 #ifndef TD5RE_RELEASE
     /* Optional debug inspection-camera override (env-gated, dev only). */
     if (!s_inspect_loaded)
@@ -1337,6 +1414,12 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     }
 
     /* --- Perspective projection --- */
+    /* [task#21] TD6 car body z-fix: snap depth to a fine grid + a toward-camera
+     * pull so coplanar interior/shell faces resolve stably (no per-frame flicker)
+     * and the shell wins. Active only while a ported-TD6 car body is drawn
+     * (s_td6_car_zbias>0); screen position still uses RAW vz so geometry is
+     * unmoved — only the depth COMPARE value changes. */
+    const float zfix = s_td6_car_zbias;   /* 0 = inactive */
     for (int i = 0; i < out_count; i++) {
         float inv_z = 1.0f / out_vz[i];
         clipped[i].screen_x = -out_vx[i] * s_focal_length * inv_z + s_center_x;
@@ -1346,7 +1429,14 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
          *   v[2] *= 1.5278e-5f;  (= 1/65479)
          * Port previously did vz/65536 with no near offset → ~64 z-unit depth
          * bias near camera. Now matches orig. */
-        clipped[i].depth_z  = (out_vz[i] - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+        float dvz = out_vz[i];
+        if (zfix > 0.0f) {
+            /* snap to the grid (collapses sub-grid coplanar differences) then
+             * pull toward the camera by the per-body bias. */
+            dvz = floorf(dvz / TD6_CAR_ZFIX_SNAP_VIEWZ + 0.5f) * TD6_CAR_ZFIX_SNAP_VIEWZ
+                  - zfix;
+        }
+        clipped[i].depth_z  = (dvz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
         clipped[i].rhw      = inv_z;
         clipped[i].diffuse  = out_color[i];
         clipped[i].specular = 0;
@@ -2401,6 +2491,26 @@ void td5_render_span_display_list(void *display_list_block)
     static int s_debug_reject_blob = 0;
     static int s_debug_accept = 0;
     static int s_debug_dl_calls = 0;
+    /* [task#7] Billboard-tree (header tag 1/2) diagnostics: do camera-facing
+     * tree/sign meshes actually reach the billboard branch, or are they rejected
+     * upstream? Counts let the user tell "render culls them" (a code bug) from
+     * "they're not in the stream" (the stale-asset origin-fold bug — an asset
+     * regen, NOT a render fix). */
+    static int s_dbg_bb_seen = 0;     /* meshes with tag 1/2 passing ptr+header checks */
+    static int s_dbg_bb_culled = 0;   /* ... then rejected by the frustum sphere test  */
+    static int s_dbg_bb_drawn = 0;    /* ... reaching the camera-facing billboard branch */
+
+    /* [DIAGNOSTIC] TD5RE_BILLBOARD_DEBUG (default off): render billboard tree
+     * quads opaque + solid-coloured (ignore texture & alpha key) to disambiguate
+     * a geometry/transform/cull bug from a texture/alpha bug by eye. */
+    static int s_bb_debug_solid = -1;
+    if (s_bb_debug_solid < 0) {
+        const char *e = getenv("TD5RE_BILLBOARD_DEBUG");
+        s_bb_debug_solid = (e && e[0] && e[0] != '0') ? 1 : 0;
+        TD5_LOG_I(LOG_TAG,
+                  "billboard debug-solid: %s (TD5RE_BILLBOARD_DEBUG; opaque magenta "
+                  "tree quads via white page 899)", s_bb_debug_solid ? "ON" : "OFF");
+    }
 
     if (!display_list_block) return;
 
@@ -2450,6 +2560,10 @@ void td5_render_span_display_list(void *display_list_block)
         }
         s_debug_accept++;
 
+        /* [task#7] Is this a camera-facing billboard mesh (header tag 1/2)? */
+        int dbg_is_bb = (mesh->texture_page_id == 1 || mesh->texture_page_id == 2);
+        if (dbg_is_bb) s_dbg_bb_seen++;
+
         /* Frustum cull via bounding sphere — bounding center is already in
            render-float world space (original reads +0x10/14/18 directly,
            no origin offset added) [CONFIRMED @ 0x42dcad] */
@@ -2461,6 +2575,21 @@ void td5_render_span_display_list(void *display_list_block)
         /* Validate bounding data isn't NaN/Inf */
         if (r != r || r < 0.0f) continue;
         if (cx != cx || cy != cy || cz != cz) continue;
+
+        /* [task#7] One-shot dump of the first few billboard meshes' bounding
+         * centres: clustered near (0,0,0) == the stale origin-fold asset bug
+         * (trees piled at world origin -> culled everywhere but the start);
+         * spread out == the converter folded origins correctly. */
+        if (dbg_is_bb) {
+            static int s_bb_dump = 0;
+            if (s_bb_dump < 8) {
+                TD5_LOG_I(LOG_TAG,
+                    "BB_TREE_MESH tag=%d bc=(%.1f,%.1f,%.1f) origin_raw=(%.1f,%.1f,%.1f) r=%.1f",
+                    (int)mesh->texture_page_id, cx, cy, cz,
+                    mesh->origin_x, mesh->origin_y, mesh->origin_z, r);
+                s_bb_dump++;
+            }
+        }
 
         {
             static int s_span_diag = 0;
@@ -2478,8 +2607,10 @@ void td5_render_span_display_list(void *display_list_block)
             }
         }
 
-        if (!td5_render_is_sphere_visible(cx, cy, cz, r))
+        if (!td5_render_is_sphere_visible(cx, cy, cz, r)) {
+            if (dbg_is_bb) s_dbg_bb_culled++;   /* [task#7] */
             continue;
+        }
 
         /* Build world-to-view basis from mesh origin — origin is in integer-
            coordinate space, must scale by 1/256 to match camera (render-float
@@ -2509,6 +2640,7 @@ void td5_render_span_display_list(void *display_list_block)
          * billboard quad off-screen. */
         int billboard_tag = (int)mesh->texture_page_id;
         if (billboard_tag == 1 || billboard_tag == 2) {
+            s_dbg_bb_drawn++;   /* [task#7] reached the camera-facing branch */
             /* per-pane billboard basis (baked from g_cameraSecondaryUnscaled in
              * td5_render_bake_camera) — reading the shared global here would make
              * all threaded panes orient billboards with the last pane's camera. */
@@ -2521,7 +2653,34 @@ void td5_render_span_display_list(void *display_list_block)
              * Per-vertex intensity comes from the asset's baked values
              * (pre-dimmed for type-3 additive billboards by
              * td5_track_dim_additive_billboard_meshes at track load). */
+
+            /* [DIAGNOSTIC] TD5RE_BILLBOARD_DEBUG=1 (default off): render the tree
+             * quads OPAQUE + solid magenta — bind the 1x1 white page (page 899,
+             * type-0 => OPAQUE_LINEAR, no alpha-key discard) via tex_page_override
+             * and overwrite the just-transformed workspace verts' diffuse with an
+             * opaque colour (high alpha byte skips the flush colour-LUT remap).
+             * This isolates GEOMETRY from TEXTURE/ALPHA: if solid magenta quads
+             * appear where trees should be, the geometry/transform/cull is sound
+             * and any remaining invisibility is texture/alpha; if STILL nothing,
+             * the quads are collapsed/culled (geometry). Pair with
+             * TD5RE_BILLBOARD_TREE_FIX to confirm the camera_secondary root
+             * cause: FIX=0+DEBUG=1 stays blank (collapsed), FIX=1+DEBUG=1 shows
+             * solid quads (basis now valid). */
+            int bb_dbg_restore_override = g_rs->tex_page_override;
+            if (s_bb_debug_solid) {
+                int vc = mesh->total_vertex_count;
+                if (g_rs->vtx_work && vc > 0 && vc <= g_rs->vtx_work_cap) {
+                    for (int vi = 0; vi < vc; vi++)
+                        g_rs->vtx_work[vi].lighting = 0xFFFF00FFu; /* opaque magenta (ARGB) */
+                }
+                g_rs->tex_page_override = 899; /* SHARED_PAGE_WHITE: 1x1 opaque white */
+            }
+
             td5_render_prepared_mesh(mesh);
+
+            if (s_bb_debug_solid)
+                g_rs->tex_page_override = bb_dbg_restore_override;
+
             s_debug_span_meshes_submitted++;
             td5_render_pop_transform();
         } else {
@@ -2543,6 +2702,14 @@ void td5_render_span_display_list(void *display_list_block)
             "rej_off=%d rej_blob=%d",
             s_debug_dl_calls, s_debug_accept, s_debug_reject_ptr,
             s_debug_reject_counts, s_debug_reject_offsets, s_debug_reject_blob);
+        /* [task#7] billboard-tree reachability. seen=0 -> NO tag-1/2 meshes in
+         * the stream (asset/converter problem, not render). seen>0 & drawn~=seen
+         * -> they DO reach the camera-facing branch (render path OK). culled
+         * dominating seen -> frustum-culled (suspect stale origin-fold piling
+         * them at world origin; see BB_TREE_MESH bc dumps above). */
+        TD5_LOG_I(LOG_TAG,
+            "billboard-tree(tag1/2): seen=%d culled=%d drawn=%d",
+            s_dbg_bb_seen, s_dbg_bb_culled, s_dbg_bb_drawn);
     }
 }
 
@@ -3453,7 +3620,17 @@ void td5_render_actors_for_view(int view_index)
              * batched with another actor's. The trailing reset also flushes
              * this car's tail vertices while the fade is still active. */
             td5_render_set_actor_draw_alpha(actor_fade);
+            /* [task#21] TD6 car body z-fight fix: depth snap + toward-camera pull
+             * for the duration of THIS body's draw, so coplanar interior/shell
+             * faces of the single de-indexed TD6 mesh stop flickering. Ported-TD6
+             * cars only (s_vehicle_is_td6); TD5 cars are byte-unchanged. The
+             * prepared-mesh call flushes its own batch, so resetting to 0 right
+             * after cannot leak the bias into other geometry. */
+            int td6_zfix = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS &&
+                            s_vehicle_is_td6[slot] && td6_car_zfix_enabled());
+            if (td6_zfix) s_td6_car_zbias = TD6_CAR_ZFIX_PULL_VIEWZ;
             td5_render_prepared_mesh(mesh);
+            if (td6_zfix) s_td6_car_zbias = 0.0f;
             td5_render_set_actor_draw_alpha(255);
 
             /* [S23 2026-06-05] UNIFIED vehicle reflection — TD5 cars now match
@@ -5553,6 +5730,34 @@ static int shadow_raycast_enabled(void)
     return cached;
 }
 
+/* [task#4] Shadow anti-flicker (cached once): TD5RE_SHADOW_ANTIFLICKER=0 -> off.
+ * Two render-side stabilisers (the raycast PROBE/cache itself lives in
+ * td5_track.c and is untouched):
+ *   (1) per-node ground-Y LOW-PASS across the 30Hz grid rebuilds, so the
+ *       conforming mesh stops STEPPING (the "pop") every sim tick as the
+ *       downward raycast lands on a new span / barycentric cell; XZ still tracks
+ *       the car each tick + sub-tick so there is no positional lag.
+ *   (2) a slightly stronger toward-camera depth pull (below) so the coarse 7x9
+ *       shadow surface reliably wins the depth tie against the finely-tessellated
+ *       road it is cast on — between grid nodes the linear shadow dips under a
+ *       road that bulges up, and the old 2-view-z pull let those pixels z-fight
+ *       (angle-dependent shimmer). */
+static int shadow_antiflicker_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_SHADOW_ANTIFLICKER");
+        cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "shadow anti-flicker %s", cached ? "ON" : "OFF");
+    }
+    return cached;
+}
+/* Smoothing weight for the new raycast Y each tick (0..1): higher = snappier,
+ * lower = smoother but laggier on real slopes. 0.5 halves the step each tick
+ * (~settles in a few ticks) which removes the visible pop without perceptible
+ * terrain lag. */
+#define SHADOW_Y_SMOOTH   (0.5f)
+
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
 static float s_shadow_u0, s_shadow_v0, s_shadow_u1, s_shadow_v1;
@@ -5829,6 +6034,15 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
     if (max_sp > 0 && seed_span >= max_sp) seed_span = max_sp - 1;
     int seed_lane = (int)actor->track_sub_lane_index;
 
+    /* [task#4] Low-pass the per-node ground Y across the 30Hz rebuild to kill the
+     * per-tick "pop". Only when the previous grid is from the IMMEDIATELY PRECEDING
+     * tick (consecutive) — on the first build, after a span/teleport gap, or after
+     * being off-screen the old Ys are stale, so snap instead of easing toward them.
+     * g->base[n][1] still holds last tick's smoothed Y at this point. */
+    uint32_t cur_tick = (uint32_t)g_td5.simulation_tick_counter;
+    int smooth_y = (shadow_antiflicker_enabled() && g->valid &&
+                    g->built_tick + 1u == cur_tick);
+
     for (int r = 0; r < SHADOW_GRID_ROWS; r++) {
         float tF = (SHADOW_GRID_ROWS > 1) ? (float)r / (float)(SHADOW_GRID_ROWS - 1) : 0.0f;
         for (int c = 0; c < SHADOW_GRID_COLS; c++) {
@@ -5851,21 +6065,25 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
             int32_t nz_fp = (int32_t)lroundf(nz * 256.0f);
             int32_t gy    = 0;
             if (max_sp > 0) {
-                TD5_TrackProbeState probe;
-                memset(&probe, 0, sizeof(probe));
-                probe.span_index     = (int16_t)seed_span;
-                probe.sub_lane_index = (int8_t)seed_lane;
-                td5_track_update_probe_position(&probe, nx_fp, nz_fp);
-                int ps = (int)probe.span_index;
-                int pl = (int)probe.sub_lane_index;
-                if (ps < 0) ps = 0;
-                if (ps >= max_sp) ps = max_sp - 1;
-                gy = td5_track_compute_contact_height_with_normal(ps, pl, nx_fp, nz_fp, NULL);
+                /* [task#4 2026-06-15] Stable per-(slot,node) ground probe:
+                 * persistent seed + converging walk so a node doesn't oscillate
+                 * between adjacent spans on a slope (the uphill shadow-flicker
+                 * source). Internally falls back to the old chassis-seeded
+                 * single-step path when TD5RE_SHADOW_PROBE_FIX=0. */
+                gy = td5_track_shadow_probe_height((int)actor->slot_index, n,
+                                                   seed_span, seed_lane,
+                                                   nx_fp, nz_fp, NULL);
             }
 
             float ny = (float)gy * inv256;
             if (ny > maxWY) ny = maxWY;   /* never above the wheel plane -> never on the car body */
             if (ny < floorY) ny = floorY; /* generous floor so real dips still show */
+
+            /* [task#4] ease toward the fresh raycast Y instead of snapping. */
+            if (smooth_y) {
+                float prevY = g->base[n][1];
+                ny = prevY + (ny - prevY) * SHADOW_Y_SMOOTH;
+            }
 
             g->base[n][0] = nx;
             g->base[n][1] = ny;
@@ -5923,6 +6141,16 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
     const float dy = (float)actor->linear_velocity_y * frac * inv256;
     const float dz = (float)actor->linear_velocity_z * frac * inv256;
 
+    /* [task#4] Depth pull toward camera. The coarse 7x9 shadow surface is a
+     * linear approximation of the finely-tessellated road, so between nodes the
+     * road can bulge ABOVE the shadow plane and z-fight the old 2-view-z pull
+     * (angle-dependent shimmer). Anti-flicker raises the pull to ~6 view-z, still
+     * an order of magnitude below the car-body depth gap (tens of view-z) so it
+     * can never reach the body. =0 keeps the historical SHADOW_DEPTH_Z_BIAS. */
+    const float shadow_depth_bias = shadow_antiflicker_enabled()
+        ? (6.0f * DEPTH_NORMALIZE_INV)
+        : SHADOW_DEPTH_Z_BIAS;
+
     TD5_D3DVertex verts[SHADOW_GRID_NODES];
     for (int n = 0; n < SHADOW_GRID_NODES; n++) {
         float wx = g->base[n][0] + dx;
@@ -5946,7 +6174,7 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
         float inv_z = 1.0f / vz;
         verts[n].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[n].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-        verts[n].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - SHADOW_DEPTH_Z_BIAS;
+        verts[n].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - shadow_depth_bias;
         verts[n].rhw      = inv_z;
         /* black RGB + soft alpha (BGRA), scaled by the actor fade
          * ([dynamic-traffic]; identity when no fade is active). */
@@ -6011,7 +6239,7 @@ static void render_vehicle_shadow_quad(const TD5_Actor *actor)
 static int   s_braked_page = -1;
 static float s_braked_u0, s_braked_v0, s_braked_u1, s_braked_v1;
 static int   s_braked_lookup_done = 0;
-static uint8_t s_brake_brightness[12]; /* per-slot brightness ramp */
+static uint8_t s_brake_brightness[TD5_ACTOR_MAX_TOTAL_SLOTS]; /* per-slot brightness ramp */
 
 /* [FIX 2026-06-02 inter-actor overlay] Small toward-camera depth pull for the
  * brake billboard, in view-z units (expressed via DEPTH_NORMALIZE_INV so it
@@ -6076,7 +6304,7 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     if (!actor) return;
     if (!s_braked_lookup_done) brake_light_lookup_atlas();
     if (s_braked_page < 0) return;
-    if (slot < 0 || slot >= 12) return;
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
 
     /* Read brake_flag at actor+0x36D; also light on the HANDBRAKE (+0x36E). */
     const uint8_t *ap = (const uint8_t *)actor;
@@ -6860,7 +7088,25 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         TD5_MeshHeader *mh = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS)
                              ? s_vehicle_meshes[slot] : NULL;
         float rb = (mh && mh->bounding_radius > 1.0f) ? mh->bounding_radius : 360.0f;
-        float track = rb * 0.38f;        /* lateral half-track */
+        /* [task#5] Lateral half-track as a fraction of the mesh bounding radius.
+         * rb is the bounding SPHERE radius, dominated by the car's diagonal
+         * (length), so the body half-WIDTH is only ~0.34..0.36*rb at the widest
+         * point. The old 0.38*rb placed the wheel CENTRE at/just outside that
+         * edge, so the tyres splayed proud of the bodywork ("traffic wheels
+         * outside the chassis"). 0.30*rb tucks the wheel centre comfortably
+         * INBOARD of the body edge so the tyre sits under the wing on the common
+         * roster while still reading as a normal stance. TD5RE_SYNTH_WHEEL_TRACK
+         * overrides it (=0 restores the old 0.38 splay). */
+        static float s_synth_track = -1.0f;
+        if (s_synth_track < 0.0f) {
+            const char *e = getenv("TD5RE_SYNTH_WHEEL_TRACK");
+            if (e && e[0] == '0' && e[1] == '\0') s_synth_track = 0.38f; /* "0" = old */
+            else s_synth_track = (e && e[0]) ? (float)atof(e) : 0.30f;
+            if (s_synth_track <= 0.0f) s_synth_track = 0.30f;             /* guard */
+            TD5_LOG_I(LOG_TAG, "synth traffic wheel half-track = %.3f * bounding_radius",
+                      s_synth_track);
+        }
+        float track = rb * s_synth_track; /* lateral half-track */
         float front =  rb * 0.55f;       /* front axle Z */
         float rear  = -rb * 0.60f;       /* rear axle Z  */
         /* Wheel-centre Y. Was -rb*0.34 which sank traffic wheels under the road

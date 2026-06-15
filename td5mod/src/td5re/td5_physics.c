@@ -116,6 +116,43 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
                                      int32_t heading_target, int32_t impactForce);
 
+/* [tasks #9/#14] V2V traffic-taming knob accessors + ground clamp, defined
+ * lower in the file but referenced from obb_corner_test / collision_detect_*. */
+static int   traffic_hit_tame_enabled(void);
+static float traffic_hitbox_scale(void);
+static void  traffic_clamp_above_ground(TD5_Actor *t);
+
+/* ========================================================================
+ * Per-racer race telemetry (#10 race-end summary)
+ * ========================================================================
+ * Accumulated INSIDE the deterministic sim tick from replicated actor state
+ * only (planar velocity / lateral slip / wheel-contact mask), so it is
+ * lockstep- and replay-deterministic. Declared in td5re.h. See
+ * td5_physics_accumulate_metrics() (called once per LIVE race tick from
+ * td5_game_run_race_frame after td5_physics_tick) and the collision flag
+ * sites in td5_physics_wall_response / apply_collision_response. */
+TD5_RaceMetrics g_race_metrics[TD5_MAX_RACER_SLOTS];
+
+/* Drift detection thresholds (raw 24.8 body-frame speed units, matching the
+ * actor's longitudinal_speed / lateral_speed scale):
+ *   - DRIFT_MIN_FWD : must be moving forward this fast to count as a drift
+ *     (~12 MPH) so a stationary/parked spin or low-speed wiggle is ignored.
+ *   - lateral slip ratio: |lateral_speed| * 4 >= |longitudinal_speed| means the
+ *     sideways component is at least ~25% of forward speed = a real slide.
+ *   - DRIFT_HOLD_TICKS : a drift must be held this many sim ticks (15 @30Hz =
+ *     0.5 s) before it is counted, and is counted exactly ONCE per slide. */
+#define TD5_DRIFT_MIN_FWD     0x3000   /* ~12 MPH in raw 24.8 fwd units */
+#define TD5_DRIFT_HOLD_TICKS  15       /* 0.5 s at the 30 Hz sim tick */
+
+/* Mark a per-slot collision event for THIS sim tick (rising edge counted in
+ * td5_physics_accumulate_metrics). Safe for any slot value; ignores traffic /
+ * out-of-range slots since only racer slots carry summary metrics. */
+static inline void td5_physics_mark_collision(int slot)
+{
+    if (slot >= 0 && slot < TD5_MAX_RACER_SLOTS)
+        g_race_metrics[slot].hit_this_tick = 1;
+}
+
 /* ========================================================================
  * Key globals
  *
@@ -171,6 +208,52 @@ static int32_t g_difficulty_hard = 0;
 static int32_t g_total_actor_count = 6;
 static int32_t g_race_slot_state[TD5_MAX_RACER_SLOTS]; /* 1=human, 0=AI per slot */
 
+/* Viewport -> actor-slot map (defined in td5_game.c). Used by the stuck-recovery
+ * driver to map a local human player index back to its actor slot, and to read
+ * that player's one-shot manual-recovery edge from the input layer. */
+extern int g_actorSlotForView[TD5_MAX_VIEWPORTS];
+
+/* ========================================================================
+ * Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15)
+ *
+ * Two triggers recover a LOCAL HUMAN player's car that is pinned/stuck:
+ *   1. MANUAL  — keyboard R / joystick L3 (edge from td5_input layer).
+ *   2. AUTOMATIC — stuck for > 3 s (90 ticks): no forward progress AND
+ *      near-zero planar speed AND no throttle, for 90 consecutive ticks.
+ * The reset repositions the actor a few spans back, centred on the track,
+ * upright, velocities zeroed, heading aligned to the track forward direction.
+ *
+ * All of this runs from the deterministic 30 Hz sim tick (td5_physics_tick),
+ * so it is replay-deterministic. DETERMINISM/NETPLAY: the AUTO path keys off
+ * planar speed + track high-water (both replicated state), but the MANUAL path
+ * reads LOCAL input only — it is NOT exchanged over the lockstep protocol, so
+ * for v1 the whole recovery driver is restricted to non-network play (gated on
+ * !g_td5.network_active). See the report for the lockstep follow-up.
+ *
+ * Knobs (cached on first use):
+ *   TD5RE_STUCK_RECOVERY     default ON  — master gate (manual + auto).
+ *   TD5RE_RECOVERY_SPANS_BACK default 3  — spans to move back on reset.
+ * ======================================================================== */
+
+#define TD5_RECOVERY_STUCK_TICKS    90   /* 3 s at fixed 30 Hz */
+/* Planar speed (24.8 longitudinal+lateral magnitude proxy) below which the car
+ * counts as "not moving". longitudinal/lateral speed are body-frame 8.8; a value
+ * of 100 (~0.4 units/tick) matches the vehicle_stopped<100 gate the input layer
+ * already uses for steering. */
+#define TD5_RECOVERY_SPEED_EPS      100
+#define TD5_RECOVERY_DEFAULT_BACK   3
+
+/* Per-slot stuck-detection accumulators (racer slots only; humans are racers).
+ * s_stuck_ticks counts consecutive "stuck" sim ticks; s_stuck_last_hw is the
+ * track_span_high_water observed last tick (forward-progress probe). Reset on
+ * any throttle input or forward progress, and after a recovery fires. */
+static int     s_stuck_ticks[TD5_MAX_RACER_SLOTS];
+static int     s_stuck_last_hw[TD5_MAX_RACER_SLOTS];
+
+static int     s_recovery_init = 0;
+static int     s_recovery_enabled = 1;     /* TD5RE_STUCK_RECOVERY */
+static int     s_recovery_spans_back = TD5_RECOVERY_DEFAULT_BACK;
+
 /* ---- Per-slot NPC handicap (rubber-banding by prior championship position) ----
  * Mirrors the original's gSlotRaceResult/Bonus/Points tables at
  * 0x004AED40/0x004AED58/0x004AED28 (gSlotRacePointsTable, kept here as
@@ -196,6 +279,473 @@ static int32_t g_slot_race_bonus [TD5_MAX_RACER_SLOTS];
 static int32_t g_slot_race_points[TD5_MAX_RACER_SLOTS];
 static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded bitmask (1=grounded) */
 
+/* ========================================================================
+ * Multiplayer catch-up assist (rubber-banding for HUMAN players) — PORT-ONLY,
+ * NON-FAITHFUL, opt-in. [MP CATCHUP 2026-06-14]
+ *
+ * In a multiplayer race (2+ HUMAN players, split-screen OR net) a human who is
+ * FALLING BEHIND the race leader gets a small, smooth boost to longitudinal
+ * drive force so the pack stays together; the leader (and anyone ahead) is
+ * optionally throttled a touch. This is the classic arcade "catch-up" — it is
+ * NOT the netcode/lag resync (that lives in td5_net.c).
+ *
+ * DETERMINISM (critical — this game runs LOCKSTEP UDP netplay):
+ *   - The per-slot multiplier is a PURE FUNCTION of replicated simulation state:
+ *     each racer's track_span_high_water (+0x086, the same monotonic forward
+ *     span counter UpdateRaceOrder @0x0042F5B0 sorts standings by) and the
+ *     replicated per-slot human/AI table g_race_slot_state[]. Both are identical
+ *     on every client every tick, so every client computes the same multiplier.
+ *   - It is recomputed once per DETERMINISTIC fixed-30Hz sim tick (top of
+ *     td5_physics_tick) and applied inside the integer drive-torque pipeline
+ *     (td5_physics_compute_drive_torque). No rand()/wall-clock/per-viewport or
+ *     other local-only input is read here.
+ *
+ * SCOPE GUARD: applies ONLY when >=2 human racer slots are present (split-screen
+ * or net). Single-player (1 human) leaves every multiplier at 1.0, so the SP
+ * experience is byte-unchanged. AI/traffic slots are never affected.
+ *
+ * KNOBS (env, cached once; CLI/INI not plumbed — env is the source here):
+ *   TD5RE_MP_CATCHUP           master gate, DEFAULT 0 (OFF). "1" = enable.
+ *   TD5RE_MP_CATCHUP_STRENGTH  strength 0..100, DEFAULT 35 (conservative).
+ *                              Scales BOTH the max behind-boost and the leader
+ *                              throttle. 0 behaves like OFF.
+ *   TD5RE_MP_CATCHUP_LEADER    DEFAULT 1: also throttle cars AHEAD (down to a
+ *                              small floor). "0" = boost trailers only, no
+ *                              leader slow-down.
+ * ======================================================================== */
+
+/* Drive-force multiplier is Q8 fixed-point (0x100 = 1.0). */
+#define MP_CATCHUP_Q8_ONE        0x100
+
+/* Gap (in track spans, via track_span_high_water) at which a trailing human
+ * reaches the FULL configured boost. Below this the boost ramps linearly with
+ * the gap; at/above it the boost is clamped. ~30 spans ≈ a few car lengths of
+ * separation on a typical TD5 strip, so the assist eases in smoothly and never
+ * pops. Deterministic constant (same on every client). */
+#define MP_CATCHUP_FULL_GAP_SPANS  30
+
+/* Maximum behind-boost at 100% strength, Q8. 0x100 + 0x60 = 1.375x drive force
+ * at full strength + full gap. At the conservative default strength (35%) the
+ * realised cap is 0x100 + (0x60*35/100) ≈ 1.13x — a gentle nudge, not a warp. */
+#define MP_CATCHUP_MAX_BOOST_Q8    0x60
+
+/* Maximum leader throttle at 100% strength, Q8 (subtracted from 1.0 for cars
+ * AT/AHEAD of the gap window). 0x100 - 0x30 = 0.8125x at full strength; floored
+ * so the leader is never crippled. Scaled by strength like the boost. */
+#define MP_CATCHUP_MAX_LEADER_CUT_Q8  0x30
+
+/* Resolved config (lazy, cached). s_mp_catchup_cfg: -1 = unresolved, 0 = off,
+ * 1 = on. s_mp_catchup_strength: 0..100. s_mp_catchup_leader: 0/1. */
+static int      s_mp_catchup_cfg      = -1;
+static int      s_mp_catchup_strength = 0;
+static int      s_mp_catchup_leader   = 1;
+
+/* Per-racer-slot drive-force multiplier, Q8 (0x100 = 1.0 = no change).
+ * Written once per sim tick by td5_physics_update_mp_catchup(); read in
+ * td5_physics_compute_drive_torque(). Default 1.0 so it is inert until the
+ * feature is enabled AND >=2 humans are racing. */
+static int32_t  s_mp_catchup_mult[TD5_MAX_RACER_SLOTS];
+
+/* Resolve TD5RE_MP_CATCHUP* env knobs once and log the result. Safe to call
+ * every tick (no-op after the first). getenv result is process config, not sim
+ * input, and the SAME on every machine for a given launch, so reading it does
+ * not break lockstep determinism. */
+static void td5_physics_mp_catchup_config(void)
+{
+    const char *e;
+    int i;
+
+    if (s_mp_catchup_cfg >= 0)
+        return;  /* already resolved */
+
+    /* Default ON (user-confirmed 2026-06-15): the MP rubber-band catch-up assist.
+     * Set TD5RE_MP_CATCHUP=0 (or n/f) to disable. The >=2-human scope guard in
+     * td5_physics_update_mp_catchup() still keeps single-player byte-unchanged. */
+    s_mp_catchup_cfg = 1;
+    e = getenv("TD5RE_MP_CATCHUP");
+    if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'))
+        s_mp_catchup_cfg = 0;
+
+    /* Strength 0..100, conservative default 35. */
+    s_mp_catchup_strength = 35;
+    e = getenv("TD5RE_MP_CATCHUP_STRENGTH");
+    if (e && e[0]) {
+        int v = atoi(e);
+        if (v < 0)   v = 0;
+        if (v > 100) v = 100;
+        s_mp_catchup_strength = v;
+    }
+
+    /* Leader throttle on by default. */
+    s_mp_catchup_leader = 1;
+    e = getenv("TD5RE_MP_CATCHUP_LEADER");
+    if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'))
+        s_mp_catchup_leader = 0;
+
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
+        s_mp_catchup_mult[i] = MP_CATCHUP_Q8_ONE;
+
+    TD5_LOG_I(LOG_TAG,
+              "MP catchup: %s strength=%d%% leader_throttle=%s "
+              "(env TD5RE_MP_CATCHUP / _STRENGTH / _LEADER; full_gap=%d spans, "
+              "max_boost=%d/256, max_leader_cut=%d/256)",
+              s_mp_catchup_cfg ? "ON" : "OFF (default)",
+              s_mp_catchup_strength,
+              s_mp_catchup_leader ? "on" : "off",
+              MP_CATCHUP_FULL_GAP_SPANS, MP_CATCHUP_MAX_BOOST_Q8,
+              MP_CATCHUP_MAX_LEADER_CUT_Q8);
+}
+
+/* Recompute the per-slot catch-up drive-force multiplier for THIS sim tick.
+ *
+ * Pure function of replicated sim state (track_span_high_water + g_race_slot_state),
+ * so it is lockstep-deterministic. Called once at the top of td5_physics_tick().
+ *
+ * Algorithm:
+ *   - Count human racer slots (g_race_slot_state==1, slot < g_traffic_slot_base).
+ *     <2 humans (single-player) => every multiplier reset to 1.0, return (the
+ *     SP/MP scope guard — SP is never touched).
+ *   - leader_progress = max(track_span_high_water) over ACTIVE racer slots
+ *     (humans and AI both count toward "who is in front").
+ *   - For each HUMAN slot: gap = leader_progress - my_progress (>=0).
+ *       boost = (MAX_BOOST * strength/100) * min(gap,FULL_GAP)/FULL_GAP
+ *       mult  = 1.0 + boost                       (trailing: speed up)
+ *     For a human AT/ahead of the gap window (gap==0, i.e. the leader, or any
+ *     car within ~0 gap) and TD5RE_MP_CATCHUP_LEADER on:
+ *       cut   = (MAX_LEADER_CUT * strength/100)   (scaled toward the window)
+ *       mult  = 1.0 - cut                         (leader: ease off)
+ *     AI slots are left at 1.0 (never boosted/cut).
+ *
+ * Everything is integer 24.8/Q8; no float, no rounding surprises across clients. */
+static void td5_physics_update_mp_catchup(void)
+{
+    int slot, total, racer_cap, human_count;
+    int32_t leader_progress;
+
+    td5_physics_mp_catchup_config();
+
+    /* Reset to neutral up front so disabled/early-return paths are inert. */
+    for (slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++)
+        s_mp_catchup_mult[slot] = MP_CATCHUP_Q8_ONE;
+
+    if (!s_mp_catchup_cfg || s_mp_catchup_strength <= 0)
+        return;
+    if (!g_actor_table_base)
+        return;
+
+    total = td5_game_get_total_actor_count();
+    if (total <= 0)
+        return;
+    racer_cap = (total < g_traffic_slot_base) ? total : g_traffic_slot_base;
+    if (racer_cap > TD5_MAX_RACER_SLOTS)
+        racer_cap = TD5_MAX_RACER_SLOTS;
+
+    /* Pass 1: count humans + find the leader's progress among active racers. */
+    human_count = 0;
+    leader_progress = INT32_MIN;
+    for (slot = 0; slot < racer_cap; slot++) {
+        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        int32_t prog = (int32_t)a->track_span_high_water;
+        if (g_race_slot_state[slot] == 1)
+            human_count++;
+        if (prog > leader_progress)
+            leader_progress = prog;
+    }
+
+    /* SCOPE GUARD: only engage with 2+ humans (split-screen or net MP). */
+    if (human_count < 2)
+        return;
+
+    /* Pass 2: per-human multiplier from the gap to the leader. */
+    for (slot = 0; slot < racer_cap; slot++) {
+        TD5_Actor *a;
+        int32_t my_prog, gap;
+
+        if (g_race_slot_state[slot] != 1)
+            continue;  /* humans only */
+
+        a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        my_prog = (int32_t)a->track_span_high_water;
+        gap = leader_progress - my_prog;          /* spans behind the leader */
+        if (gap < 0) gap = 0;                     /* defensive (this IS leader) */
+
+        if (gap > 0) {
+            /* Behind: ramp a boost in with the gap, clamp at FULL_GAP. */
+            int32_t g = (gap < MP_CATCHUP_FULL_GAP_SPANS) ? gap
+                                                          : MP_CATCHUP_FULL_GAP_SPANS;
+            /* boost_q8 = MAX_BOOST * strength/100 * g/FULL_GAP, all integer. */
+            int32_t boost = (MP_CATCHUP_MAX_BOOST_Q8 * s_mp_catchup_strength) / 100;
+            boost = (boost * g) / MP_CATCHUP_FULL_GAP_SPANS;
+            s_mp_catchup_mult[slot] = MP_CATCHUP_Q8_ONE + boost;
+        } else if (s_mp_catchup_leader) {
+            /* Leader (gap 0): ease off by the strength-scaled leader cut. */
+            int32_t cut = (MP_CATCHUP_MAX_LEADER_CUT_Q8 * s_mp_catchup_strength) / 100;
+            s_mp_catchup_mult[slot] = MP_CATCHUP_Q8_ONE - cut;
+        }
+        /* else: leader throttle disabled -> stays 1.0 */
+    }
+}
+
+/* Q8 catch-up multiplier for `slot` (0x100 = 1.0). Returns 1.0 for non-racer
+ * slots / out of range so callers can apply it unconditionally. */
+static inline int32_t td5_physics_mp_catchup_mult(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return MP_CATCHUP_Q8_ONE;
+    return s_mp_catchup_mult[slot];
+}
+
+/* ========================================================================
+ * Hard-difficulty AI catch-up — PORT-ONLY. [HARD CATCHUP 2026-06-15, item #13]
+ *
+ * On HARD difficulty, AI OPPONENTS that are BEHIND the human player get a drive-
+ * torque boost so they catch up more aggressively (makes Hard harder). This is
+ * the AI-opponent analogue of the human MP catch-up above and shares its
+ * drive-torque chokepoint (td5_physics_compute_drive_torque) — but it applies
+ * ONLY to AI racer slots and ONLY when g_difficulty_hard is set, so non-hard /
+ * easy / normal play is byte-unchanged.
+ *
+ * The existing init-time NPC handicap (gRaceResultPointsTable, ~td5_physics_
+ * init_vehicle_runtime) only adjusts HUMAN slots (g_race_slot_state==1) and is a
+ * no-op until championship position is plumbed, so it is not the right lever for
+ * "AI catches the player". A live drive-force boost keyed on the gap to the
+ * player is, and like MP catchup it scales ACCELERATION only — the per-car speed
+ * limit in the callers is untouched, so a boosted AI cannot warp past its top
+ * speed; it just builds speed harder when trailing.
+ *
+ * DETERMINISM: a pure function of replicated sim state (track_span_high_water +
+ * g_race_slot_state + g_difficulty_hard), recomputed once per fixed-30Hz tick —
+ * identical on every lockstep client.
+ *
+ * KNOB: TD5RE_HARD_CATCHUP (env, cached once), DEFAULT 1 (ON). "0"/"n"/"f"
+ * disables → AI multiplier stays 1.0 → byte-unchanged even on Hard.
+ * ======================================================================== */
+
+/* Gap (track spans) at which a trailing AI reaches the full hard boost. Matches
+ * the MP catch-up window so both assists ease in over a comparable separation. */
+#define HARD_CATCHUP_FULL_GAP_SPANS  30
+/* Max hard AI boost at full gap, Q8. 0x100 + 0x48 = 1.28x drive force — a ~50%
+ * stronger pull than the MP trailer cap (0x60 only realised at 35% strength ≈
+ * 0x21); here it is unconditional on Hard so the field presses the player. */
+#define HARD_CATCHUP_MAX_BOOST_Q8    0x48
+
+static int      s_hard_catchup_cfg = -1;                 /* -1 unresolved, 0 off, 1 on */
+static int32_t  s_hard_catchup_mult[TD5_MAX_RACER_SLOTS]; /* Q8 per-slot, 1.0 = inert */
+
+/* Resolve TD5RE_HARD_CATCHUP once. Cached file-static; logged once. */
+static void td5_physics_hard_catchup_config(void)
+{
+    const char *e;
+    int i;
+
+    if (s_hard_catchup_cfg >= 0)
+        return;
+
+    s_hard_catchup_cfg = 1;   /* default ON */
+    e = getenv("TD5RE_HARD_CATCHUP");
+    if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'))
+        s_hard_catchup_cfg = 0;
+
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
+        s_hard_catchup_mult[i] = MP_CATCHUP_Q8_ONE;
+
+    TD5_LOG_I(LOG_TAG,
+              "hard_catchup: TD5RE_HARD_CATCHUP=%d (full_gap=%d spans, max_boost=%d/256, "
+              "AI opponents only, hard difficulty only)",
+              s_hard_catchup_cfg, HARD_CATCHUP_FULL_GAP_SPANS, HARD_CATCHUP_MAX_BOOST_Q8);
+}
+
+/* Recompute the per-slot hard AI catch-up multiplier for THIS sim tick. Pure
+ * function of replicated sim state, so lockstep-deterministic. Called once per
+ * tick alongside td5_physics_update_mp_catchup().
+ *
+ * Algorithm: find the human player's progress (max track_span_high_water over
+ * HUMAN racer slots — robust to PlayerIsAI / split-screen). For each AI racer
+ * slot BEHIND that, ramp a boost in with the gap, clamped at FULL_GAP. Humans,
+ * traffic, and cars at/ahead of the player are left at 1.0. Inert unless Hard
+ * AND the knob is on AND at least one human is present. */
+static void td5_physics_update_hard_catchup(void)
+{
+    int slot, total, racer_cap;
+    int32_t player_progress;
+    int have_human;
+
+    td5_physics_hard_catchup_config();
+
+    /* Reset to neutral up front so disabled/early-return paths are inert. */
+    for (slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++)
+        s_hard_catchup_mult[slot] = MP_CATCHUP_Q8_ONE;
+
+    if (!s_hard_catchup_cfg || !g_difficulty_hard)
+        return;
+    if (!g_actor_table_base)
+        return;
+
+    total = td5_game_get_total_actor_count();
+    if (total <= 0)
+        return;
+    racer_cap = (total < g_traffic_slot_base) ? total : g_traffic_slot_base;
+    if (racer_cap > TD5_MAX_RACER_SLOTS)
+        racer_cap = TD5_MAX_RACER_SLOTS;
+
+    /* Pass 1: the player's progress = furthest-along HUMAN racer. */
+    player_progress = INT32_MIN;
+    have_human = 0;
+    for (slot = 0; slot < racer_cap; slot++) {
+        if (g_race_slot_state[slot] != 1)
+            continue;  /* humans only */
+        {
+            TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+            int32_t prog = (int32_t)a->track_span_high_water;
+            if (prog > player_progress)
+                player_progress = prog;
+            have_human = 1;
+        }
+    }
+    if (!have_human)
+        return;  /* nobody to catch up TO */
+
+    /* Pass 2: per-AI multiplier from the gap behind the player. */
+    for (slot = 0; slot < racer_cap; slot++) {
+        TD5_Actor *a;
+        int32_t my_prog, gap, g, boost;
+
+        if (g_race_slot_state[slot] == 1)
+            continue;  /* AI opponents only — never touch humans */
+
+        a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        my_prog = (int32_t)a->track_span_high_water;
+        gap = player_progress - my_prog;          /* spans behind the player */
+        if (gap <= 0)
+            continue;                             /* level/ahead: no boost */
+
+        g = (gap < HARD_CATCHUP_FULL_GAP_SPANS) ? gap : HARD_CATCHUP_FULL_GAP_SPANS;
+        boost = (HARD_CATCHUP_MAX_BOOST_Q8 * g) / HARD_CATCHUP_FULL_GAP_SPANS;
+        s_hard_catchup_mult[slot] = MP_CATCHUP_Q8_ONE + boost;
+    }
+}
+
+/* Q8 hard AI catch-up multiplier for `slot` (0x100 = 1.0). 1.0 for out-of-range
+ * so callers can apply it unconditionally. */
+static inline int32_t td5_physics_hard_catchup_mult(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return MP_CATCHUP_Q8_ONE;
+    return s_hard_catchup_mult[slot];
+}
+
+/* ========================================================================
+ * Acute high-speed crash feedback — PORT-ONLY. [CRASH FX 2026-06-15, item #12]
+ *
+ * The heavy-impact branch in td5_physics_apply_collision_impulse already does a
+ * byte-faithful angular scatter + vertical lift for hits over 90000 when 3D
+ * Collisions are enabled. On a genuinely HIGH-SPEED crash that does not feel
+ * punchy enough: the car keeps most of its forward speed. For PLAYER actors we
+ * add (a) an extra forward-speed scrub so a fast traffic crash visibly bleeds
+ * speed, and (b) a per-slot crash-fx event other modules (HUD/VFX/audio) can
+ * poll to fire a one-shot reaction. Both are gated by TD5RE_CRASH_FX (default
+ * ON); when off, nothing is scrubbed/recorded and the getter returns 0 —
+ * byte-identical to before.
+ *
+ * NOTE: the heavy-impact gate is `g_collisions_enabled == 0`, which (inverted
+ * semantics) means the in-game "3D Collisions" option is ON — so acute crashes
+ * only fire when the player has collisions enabled, consistent with the
+ * existing gate.
+ *
+ * "Acute" threshold: the heavy branch already runs over 90000; the high-impact
+ * vertical lift saturates the port's 200000 clamp at impact_mag == 1,200,000.
+ * Observed v2v_heavy_scatter logs put ordinary traffic taps in the ~90k–180k
+ * range and full-speed head-ons well into the hundreds of thousands, so 250000
+ * (~2.8x the heavy floor) selects a genuinely fast hit without firing on every
+ * fender-bender.
+ * ======================================================================== */
+#define CRASH_FX_ACUTE_MAG   250000   /* impact_mag above which a player hit is "acute" */
+/* Forward-speed scrub on an acute player hit, Q8 (0x100 = 1.0 = keep all speed).
+ * 0x100 - 0x50 = 0xB0/256 ≈ 0.6875, i.e. shed ~31% of planar speed. Vertical
+ * lift (linear_velocity_y) is intentionally left untouched. */
+#define CRASH_FX_SCRUB_KEEP_Q8   0xB0
+
+/* Per-slot crash-fx event state (racer slots only). Written by the acute branch
+ * in td5_physics_apply_collision_impulse, read by td5_physics_get_crash_fx().
+ * s_crash_fx_seq[slot] is a monotonic id bumped once per recorded acute crash
+ * (0 = none yet); _mag holds that crash's impact magnitude; _tick the global sim
+ * tick it happened on (for an age in ticks). */
+static uint32_t s_crash_fx_seq [TD5_MAX_RACER_SLOTS];
+static int32_t  s_crash_fx_mag [TD5_MAX_RACER_SLOTS];
+static int32_t  s_crash_fx_tick[TD5_MAX_RACER_SLOTS];
+
+/* Resolve TD5RE_CRASH_FX once. Cached file-static; logged once. Default ON;
+ * "0"/"n"/"f" disables (no scrub, no event recording, getter returns 0). */
+static int td5_physics_crash_fx_enabled(void)
+{
+    static int s_crash_fx = -1;
+    if (s_crash_fx < 0) {
+        const char *e = getenv("TD5RE_CRASH_FX");
+        s_crash_fx = (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' ||
+                            e[0] == 'f' || e[0] == 'F')) ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "crash_fx: TD5RE_CRASH_FX=%d (acute_mag=%d scrub_keep=%d/256)",
+                  s_crash_fx, CRASH_FX_ACUTE_MAG, CRASH_FX_SCRUB_KEEP_Q8);
+    }
+    return s_crash_fx;
+}
+
+/* Public getter (prototype in td5_physics.h) — other modules poll this every
+ * frame to drive a one-shot crash reaction (HUD shake, VFX, audio). Returns the
+ * per-slot crash sequence id (0 = no acute crash yet), and fills *out_mag with
+ * the last acute impact magnitude and *out_age with the sim ticks elapsed since
+ * the crash (0 = same tick). Null out-params are tolerated; out-of-range or
+ * non-racer slots return 0. Safe to call every frame. */
+uint32_t td5_physics_get_crash_fx(int slot, int32_t *out_mag, int *out_age)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) {
+        if (out_mag) *out_mag = 0;
+        if (out_age) *out_age = 0;
+        return 0;
+    }
+    if (out_mag) *out_mag = s_crash_fx_mag[slot];
+    if (out_age) {
+        int age = (int)g_td5.simulation_tick_counter - s_crash_fx_tick[slot];
+        if (age < 0) age = 0;   /* defensive: counter reset between race sessions */
+        *out_age = age;
+    }
+    return s_crash_fx_seq[slot];
+}
+
+/* Apply the acute-crash effect to one PLAYER actor: scrub planar (forward)
+ * speed by CRASH_FX_SCRUB_KEEP_Q8 (vertical lift untouched) and record a
+ * per-slot crash-fx event (impact_mag, sim tick, bumped sequence id). Caller
+ * must already have confirmed the hit is acute and the actor is a player; this
+ * is a no-op when TD5RE_CRASH_FX is off. */
+static void td5_physics_apply_acute_crash_fx(TD5_Actor *actor, int32_t impact_mag)
+{
+    int slot;
+    if (!td5_physics_crash_fx_enabled()) return;
+    if (!actor) return;
+    slot = actor->slot_index;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+
+    /* Extra forward-speed scrub: bleed the planar velocity by ~31% so a high-
+     * speed crash visibly sheds speed. Vertical lift (linear_velocity_y) is left
+     * alone so the launch from the heavy branch above is preserved. Same biased-
+     * toward-zero signed >>8 idiom the drive pipeline uses. */
+    {
+        int64_t sx = (int64_t)actor->linear_velocity_x * CRASH_FX_SCRUB_KEEP_Q8;
+        int64_t sz = (int64_t)actor->linear_velocity_z * CRASH_FX_SCRUB_KEEP_Q8;
+        actor->linear_velocity_x = (int32_t)((sx + ((sx >> 63) & 0xFF)) >> 8);
+        actor->linear_velocity_z = (int32_t)((sz + ((sz >> 63) & 0xFF)) >> 8);
+    }
+
+    /* Record the crash-fx event for HUD/VFX/audio to poll. */
+    s_crash_fx_mag[slot]  = impact_mag;
+    s_crash_fx_tick[slot] = (int32_t)g_td5.simulation_tick_counter;
+    s_crash_fx_seq[slot]++;
+    if (s_crash_fx_seq[slot] == 0) s_crash_fx_seq[slot] = 1;  /* keep 0 == "none" */
+
+    TD5_LOG_I(LOG_TAG, "crash_fx acute: slot=%d mag=%d seq=%u tick=%d scrub_keep=%d/256",
+              slot, impact_mag, s_crash_fx_seq[slot], s_crash_fx_tick[slot],
+              CRASH_FX_SCRUB_KEEP_Q8);
+}
+
 /* [S18] Per-slot consecutive-ticks-over-attitude-limit counter, used ONLY on
  * migrated TD6 tracks to debounce the MODE-0 recovery latch (see
  * td5_physics_clamp_attitude). Faithful TD5 tracks never touch this. */
@@ -210,10 +760,10 @@ static void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot);
 
 /* Per-slot previous-frame wheel transform results (pre-snap) for gap_270 delta.
  * Using post-snap positions causes huge Y deltas because snap Y != transform Y. */
-static int32_t s_prev_wheel_tx[12][4];  /* [slot][wheel] X transform result */
-static int32_t s_prev_wheel_ty[12][4];  /* [slot][wheel] Y transform result */
-static int32_t s_prev_wheel_tz[12][4];  /* [slot][wheel] Z transform result */
-static uint8_t s_prev_wheel_valid[12];  /* per-slot: 1 if previous transform is valid */
+static int32_t s_prev_wheel_tx[TD5_MAX_TOTAL_ACTORS][4];  /* [slot][wheel] X transform result */
+static int32_t s_prev_wheel_ty[TD5_MAX_TOTAL_ACTORS][4];  /* [slot][wheel] Y transform result */
+static int32_t s_prev_wheel_tz[TD5_MAX_TOTAL_ACTORS][4];  /* [slot][wheel] Z transform result */
+static uint8_t s_prev_wheel_valid[TD5_MAX_TOTAL_ACTORS];  /* per-slot: 1 if previous transform is valid */
 
 /* Per-slot rotated wheel-Y world offset, captured INSIDE
  * td5_physics_refresh_wheel_contacts at the same moment wheel_contact_pos[i].y
@@ -593,6 +1143,12 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          * magnitude; FF rumble channel selected by route heading delta.
          * Visual / audio only — no sim feedback. */
         if (v_perp > 0x3200) {
+            /* [#10 telemetry] A meaningful wall impact (same threshold the
+             * original uses to play the crunch SFX). Flag a collision for this
+             * racer's per-tick edge-detector; the accumulate pass turns a
+             * contiguous run of flagged ticks into a single counted collision. */
+            td5_physics_mark_collision((int)actor->slot_index);
+
             int32_t pitch_arg = v_perp - 0x2000;
             if (pitch_arg < 0x400) pitch_arg = 0x400;
             else if (pitch_arg > 0x800) pitch_arg = 0x800;
@@ -981,6 +1537,20 @@ void td5_physics_tick(void)
      * once the sim loop drains for this render frame. */
     td5_physics_snapshot_prev_world_pos();
 
+    /* [MP CATCHUP] Recompute the per-human catch-up drive multiplier for this
+     * deterministic sim tick BEFORE the per-actor integration loop, so every
+     * actor's drive-torque pass this tick reads a consistent value. Pure
+     * function of replicated state (track_span_high_water + slot human/AI),
+     * so it is identical on every lockstep client. Inert (all 1.0) unless
+     * TD5RE_MP_CATCHUP=1 AND >=2 humans are racing. */
+    td5_physics_update_mp_catchup();
+
+    /* [HARD CATCHUP item #13] Same deal for the Hard-difficulty AI catch-up:
+     * recompute the per-AI-slot drive boost (gap behind the player) once per
+     * tick before integration. Pure replicated-state function; inert (all 1.0)
+     * unless TD5RE_HARD_CATCHUP=1 AND g_difficulty_hard. */
+    td5_physics_update_hard_catchup();
+
     s_physics_tick_counter++;
     if ((s_physics_tick_counter % 60u) == 0u) {
         TD5_LOG_D(LOG_TAG, "Physics tick: actor_count=%d", total);
@@ -1006,6 +1576,128 @@ void td5_physics_tick(void)
      * overlap to 0 over the 160 sub-ticks. [CONFIRMED @ 0x42B5C0 Ghidra
      * pass 2026-05-13: no paused gate around ResolveVehicleContacts.] */
     td5_physics_resolve_vehicle_contacts();
+
+    /* [STUCK RECOVERY 2026-06-15] After this tick's integration + contact
+     * resolution have settled, run the per-local-human stuck-recovery driver:
+     * manual (R / L3) reposition and the 90-tick auto-recover. Deterministic
+     * (sim-tick cadence, replicated/local state); restricted to non-network play
+     * for v1. Inert when TD5RE_STUCK_RECOVERY=0. */
+    td5_physics_update_stuck_recovery();
+}
+
+/* ========================================================================
+ * Race telemetry (#10 race-end summary)
+ * ======================================================================== */
+
+/* 64-bit integer square root (deterministic, no float). The shared td5_isqrt
+ * takes int32_t, but a planar velocity magnitude sum (vx^2+vz^2) at race speed
+ * overflows int32 — keep the whole thing in int64 so top/avg speed are exact. */
+static int64_t td5_isqrt64(int64_t x)
+{
+    if (x <= 0) return 0;
+    int64_t r = 0, b = (int64_t)1 << 62;
+    while (b > x) b >>= 2;
+    while (b > 0) {
+        if (x >= r + b) { x -= r + b; r = (r >> 1) + b; }
+        else            { r >>= 1; }
+        b >>= 2;
+    }
+    return r;
+}
+
+void td5_physics_reset_metrics(void)
+{
+    memset(g_race_metrics, 0, sizeof(g_race_metrics));
+}
+
+const TD5_RaceMetrics *td5_physics_get_metrics(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return NULL;
+    return &g_race_metrics[slot];
+}
+
+/* td5_physics_accumulate_metrics -- one LIVE race sim tick of per-racer
+ * telemetry. Called from td5_game_run_race_frame() once per live tick, AFTER
+ * td5_physics_tick() (so collision flags set during this tick's contact
+ * resolution are visible). NOT called during the start countdown or while
+ * paused — cars are stationary then and nothing should accumulate.
+ *
+ * Determinism: every input here is replicated sim state (planar velocity,
+ * body-frame lateral/longitudinal speed, wheel-contact mask) and integer math
+ * (td5_isqrt), so the result is identical on every lockstep client and on a
+ * replay. No wall-clock, RNG, or render-rate inputs. */
+void td5_physics_accumulate_metrics(void)
+{
+    if (!g_actor_table_base) return;
+
+    int total = td5_game_get_total_actor_count();
+    if (total <= 0) return;
+
+    /* Racer slots only (humans + AI); traffic carries no summary metrics. */
+    int racers = total;
+    if (racers > g_traffic_slot_base) racers = g_traffic_slot_base;
+    if (racers > TD5_MAX_RACER_SLOTS) racers = TD5_MAX_RACER_SLOTS;
+
+    for (int slot = 0; slot < racers; ++slot) {
+        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        if (!a) continue;
+        TD5_RaceMetrics *m = &g_race_metrics[slot];
+
+        /* --- collisions: rising edge of "hit this tick" vs "hit last tick" ---
+         * A sustained scrape (flagged for several consecutive ticks) counts as
+         * ONE collision; a fresh impact after separating counts as another.
+         * Always processed (even after finish) so the edge state stays sane. */
+        if (m->hit_this_tick && !m->hit_prev_tick)
+            m->collisions++;
+        m->hit_prev_tick = m->hit_this_tick;
+        m->hit_this_tick = 0;
+
+        /* Skip the rest once this car has finished — its top/avg/air/drift are
+         * frozen at the finish line (mirrors the original's finish_time==0 gate
+         * on peak/avg speed). A decoration/parked slot stays at ~0 naturally. */
+        if (a->finish_time != 0)
+            continue;
+
+        /* --- speed: planar velocity magnitude in raw display units ---
+         * Same quantity the speedometer shows: sqrt(vx^2+vz^2) is a 24.8 value,
+         * >>8 gives the raw unit that frontend_convert_speed() turns into
+         * MPH/KPH. Uses world planar velocity (not the RPM-encoded
+         * longitudinal_speed, which drops to 0 when the throttle is released). */
+        int32_t vx = a->linear_velocity_x;
+        int32_t vz = a->linear_velocity_z;
+        int64_t mag = td5_isqrt64((int64_t)vx * vx + (int64_t)vz * vz);  /* 24.8 magnitude */
+        int32_t speed_raw = (int32_t)(mag >> 8);                          /* raw display unit */
+        if (speed_raw < 0) speed_raw = 0;
+        if (speed_raw > m->top_speed) m->top_speed = speed_raw;
+        m->speed_sum += speed_raw;
+        m->sample_ticks++;
+
+        /* --- time on air: all four wheels off the ground this tick ---
+         * wheel_contact_bitmask (+0x37C): bit set = that wheel is AIRBORNE; the
+         * physics engine uses ==0x0F (all four airborne) as the "fully airborne"
+         * condition (see refresh exit + airborne_frame_counter gate). */
+        if (a->wheel_contact_bitmask == 0x0F)
+            m->air_ticks++;
+
+        /* --- drifts: sustained lateral slip held > 0.5 s, counted once ---
+         * Body-frame speeds: longitudinal_speed (forward) / lateral_speed
+         * (sideways), both raw 24.8. A drift = moving forward above a floor AND
+         * the sideways component is a sizeable fraction of forward (slip angle),
+         * sustained for TD5_DRIFT_HOLD_TICKS. A single long slide => one drift. */
+        int32_t fwd = a->longitudinal_speed; if (fwd < 0) fwd = -fwd;
+        int32_t lat = a->lateral_speed;       if (lat < 0) lat = -lat;
+        int drifting = (fwd >= TD5_DRIFT_MIN_FWD) && ((int64_t)lat * 4 >= fwd);
+        if (drifting) {
+            m->drift_run_ticks++;
+            if (m->drift_run_ticks >= TD5_DRIFT_HOLD_TICKS && !m->drift_counted) {
+                m->drifts++;
+                m->drift_counted = 1;   /* counted this slide; don't recount */
+            }
+        } else {
+            m->drift_run_ticks = 0;
+            m->drift_counted   = 0;     /* armed for the next slide */
+        }
+    }
 }
 
 /* ========================================================================
@@ -2557,6 +3249,99 @@ void td5_physics_update_player(TD5_Actor *actor)
 
         actor->angular_velocity_yaw += yaw_torque;
 
+        /* [task #16] High-grip oversteer / drift fix. In this model a higher
+         * tire_grip_coeff (PHYS 0x2C) raises the slip-circle limits, so the REAR
+         * axle sustains a larger lateral force (term3 = rear_lat * rear_weight)
+         * before clamping. term3 is the spin-inducing (oversteer) term, and the
+         * faithful yaw damping (section 14c) only fires on FRONT slip excess —
+         * which a high-grip car rarely produces on normal ground — so the rear-
+         * driven yaw goes unchecked and the car oversteers/drifts when it should
+         * hold the line. Add a stability-control yaw-RATE damping that bleeds off
+         * only the EXCESS yaw rate (beyond what the steering input is currently
+         * commanding) so the line holds, applied ONLY on normal/high-friction
+         * ground (so deliberate low-grip slides on grass etc. are preserved).
+         *
+         * [REGRESSION FIX #1 2026-06-15] The first cut of this damper multiplied
+         * the WHOLE accumulated yaw rate (including the steer-commanded turn-in
+         * just added via yaw_torque on this same tick) by up to 0.60/tick, and
+         * the grip gate fires for almost every car because difficulty scaling
+         * pushes tire_grip_coeff to ~1.17x (Normal) / ~1.48x (Hard) of baseline
+         * (td5_physics.c ~10963 / ~10946). Net result: ordinary keyboard turn-in
+         * lost a big slice of its yaw every tick → "stiff / unresponsive" steering,
+         * worse on grippier cars and on Hard. Two changes restore responsiveness
+         * while still curbing true drift:
+         *   1. EXCESS-ONLY: keep a steering-commanded allowance band undamped
+         *      (a multiple of |yaw_torque|, this tick's commanded yaw increment,
+         *      dominated by the steer term1) plus a small floor; damp only the
+         *      surplus |yaw rate| above it. Turn-in (yaw tracks the command)
+         *      passes through unchanged; only yaw that persists after the command
+         *      has been clamped/eased — i.e. real oversteer — gets trimmed.
+         *   2. Gentler gain + cap: damp only a small slice of the SURPLUS (not of
+         *      the whole rate).
+         *
+         * [REGRESSION FIX #2 2026-06-15, item #11 "grip fix may have worked too
+         * good"] After fix #1 cars felt TOO planted — deliberate drifts no longer
+         * held because even the surplus band was trimmed too eagerly. Loosen it so
+         * drifting is possible again and ONLY extreme, persistent oversteer is
+         * still curbed:
+         *   - WIDER undamped allowance band: cmd*8 + 0x60 (was cmd*6 + 0x40), so
+         *     more of the rotation reads as commanded turn-in / a held slide and
+         *     passes through untouched.
+         *   - LOWER gain: 24/256 = ~0.094 per unit-excess (was 32/256 = 0.125).
+         *   - LOWER cap: 38/256 = ~0.15 of the SURPLUS (was 64/256 = 0.25).
+         * Net: turn-in and ordinary drifts survive; only the surplus yaw that
+         * persists well past a wide command band gets a light trim.
+         *
+         * Knob TD5RE_GRIP_DRIFT_FIX (default ON). "0" reverts to no damping. */
+        {
+            static int s_gdf = -1;
+            if (s_gdf < 0) {
+                const char *e = getenv("TD5RE_GRIP_DRIFT_FIX");
+                s_gdf = (e && e[0] == '0') ? 0 : 1;
+                TD5_LOG_I(LOG_TAG, "grip_drift_fix: TD5RE_GRIP_DRIFT_FIX=%d", s_gdf);
+            }
+            /* Only damp when grip is above 1.0x baseline AND the rear is on
+             * high-friction ground (sf ~256 = asphalt; low values = grass/dirt). */
+            const int32_t GRIP_BASELINE = 256;     /* 1.0x in Q8 */
+            if (s_gdf && tire_grip_coeff > GRIP_BASELINE && sf_rl >= 192 && sf_rr >= 192) {
+                int32_t excess = tire_grip_coeff - GRIP_BASELINE;   /* Q8 grip over 1.0 */
+
+                /* Steering-commanded allowance: the yaw the driver is asking for
+                 * this tick is ~|yaw_torque| (term1 = steer term dominates). The
+                 * accumulated rate up to a few ticks' worth of that command is
+                 * intended turn-in and must NOT be damped. Anything past it is the
+                 * rear-driven surplus (drift). Floor keeps tiny commands from
+                 * leaving a near-zero band that nibbles steady-state cornering. */
+                int32_t cmd = yaw_torque < 0 ? -yaw_torque : yaw_torque;
+                int32_t allowance = cmd * 8 + 0x60;     /* ~8 ticks of command + wider floor */
+
+                int32_t avy = actor->angular_velocity_yaw;
+                int32_t avy_mag = avy < 0 ? -avy : avy;
+                int32_t surplus = avy_mag - allowance;  /* yaw beyond the command */
+                if (surplus > 0) {
+                    /* damp_q8 = excess * gain, capped at ~0.15 of the SURPLUS.
+                     * gain 24/256 = ~0.094 per unit-excess: a 1.17x-grip car
+                     * (excess ~44) damps ~4% of the surplus, 1.48x (~123) ~4.5%
+                     * pre-cap, very grippy cars reach the 0.15 cap — and all of
+                     * it bites only the over-rotation, never the commanded turn.
+                     * Tuned DOWN from 32/0.25 so deliberate drifts stay possible
+                     * (item #11); only extreme persistent oversteer is trimmed. */
+                    int32_t damp_q8 = (excess * 24) >> 8;
+                    if (damp_q8 > 38) damp_q8 = 38;       /* cap ~0.15 (38/256) */
+                    int32_t yd = (surplus * damp_q8) >> 8;
+                    if (avy < 0) yd = -yd;               /* damp toward zero */
+                    actor->angular_velocity_yaw = avy - yd;
+                    if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+                        TD5_LOG_I(LOG_TAG,
+                            "grip_drift_fix slot0: grip=%d excess=%d cmd=%d allow=%d "
+                            "surplus=%d damp_q8=%d yd=%d ang_vel=%d",
+                            tire_grip_coeff, excess, cmd, allowance, surplus,
+                            damp_q8, yd, actor->angular_velocity_yaw);
+                    }
+                }
+            }
+        }
+
         if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
             TD5_LOG_I(LOG_TAG,
                       "YAW: torque=%d ang_vel=%d heading=%d t1=%d t2=%d t3=%d idiv=%d",
@@ -2618,6 +3403,72 @@ void td5_physics_update_player(TD5_Actor *actor)
     }
     actor->linear_velocity_x += player_fx;
     actor->linear_velocity_z += player_fz;
+
+    /* --- 14a-slope. Gravity-along-slope longitudinal force [task #6] ---------
+     * PORT ADDITION (gated). The faithful model applies gravity only to
+     * linear_velocity_y (vertical); the longitudinal slope drag emerges purely
+     * from the ground-snap re-projecting velocity onto the incline, which is
+     * weak — the car barely loses speed climbing. Add an explicit gravity-
+     * along-slope force projected onto the heading-forward axis so driving
+     * UPHILL decelerates noticeably more (and downhill stays sane).
+     *
+     * actor->heading_normal (+0x290) is the live surface normal during racer
+     * driving (written by td5_track_compute_runtime_heading_normal via the
+     * cross-product InterpolateTrackSegmentNormal; N_y ~= 4096 flat, dropping
+     * on slopes — see the heading_normal.y comment at the integrate-pose
+     * refresh site). The down-slope acceleration projected onto the (horizontal)
+     * heading-forward direction (sin_h, cos_h) is:
+     *     g_long = g * N_y * (N_x*sin_h + N_z*cos_h)        (two >>12 reductions)
+     * On a climb the normal's horizontal part points backward, so
+     * (N_x*sin_h + N_z*cos_h) < 0 -> g_long < 0 -> deceleration; on a descent
+     * it is > 0 -> a (smaller) acceleration. We rotate g_long back to world XZ
+     * along the heading and add it to linear_velocity.
+     *
+     * Knob TD5RE_SLOPE_DECEL = scalar multiplier on the UPHILL (decelerating)
+     * component (default 2.0 = "stronger than current", which is effectively
+     * zero explicit term). The DOWNHILL (accelerating) component always uses
+     * 1.0x so descents stay physically sane and the car never rockets downhill.
+     * "0" disables the whole term (revert to the old emergent-only behaviour). */
+    {
+        static int   s_slope_init = 0;
+        static float s_slope_mult = 2.0f;   /* uphill decel multiplier (default) */
+        if (!s_slope_init) {
+            const char *e = getenv("TD5RE_SLOPE_DECEL");
+            if (e && e[0]) {
+                s_slope_mult = (float)atof(e);
+                if (s_slope_mult < 0.0f) s_slope_mult = 0.0f;
+            }
+            s_slope_init = 1;
+            TD5_LOG_I(LOG_TAG, "slope_decel: TD5RE_SLOPE_DECEL=%.3f (uphill decel x; downhill always x1)",
+                      s_slope_mult);
+        }
+
+        if (s_slope_mult > 0.0f) {
+            int32_t nx = (int32_t)actor->heading_normal.x;
+            int32_t ny = (int32_t)actor->heading_normal.y;
+            int32_t nz = (int32_t)actor->heading_normal.z;
+            /* Forward (horizontal) projection of the surface normal — sign tells
+             * uphill (<0) vs downhill (>0) along the travel heading. */
+            int32_t fwd_dot = (nx * sin_h + nz * cos_h) >> 12;   /* 12-bit-scaled */
+            /* g_long = g * N_y * fwd_dot, reduced by two >>12. ny ~= 4096 so the
+             * first reduction recovers ~g; the second scales by fwd_dot/4096. */
+            int32_t g_ny    = (g_gravity_constant * ny) >> 12;
+            int32_t g_long  = (g_ny * fwd_dot) >> 12;   /* >0 downhill, <0 uphill */
+            /* Apply the multiplier only on the decelerating (uphill) side. */
+            if (g_long < 0) {
+                g_long = (int32_t)((float)g_long * s_slope_mult);
+            }
+            /* Rotate the longitudinal slope force back to world XZ along heading. */
+            actor->linear_velocity_x += (g_long * sin_h) >> 12;
+            actor->linear_velocity_z += (g_long * cos_h) >> 12;
+
+            if (actor->slot_index == 0 && (actor->frame_counter % 60u) == 0u) {
+                TD5_LOG_I(LOG_TAG,
+                    "slope_decel slot0: ny=%d fwd_dot=%d g_long=%d mult=%.2f vlong=%d",
+                    ny, fwd_dot, g_long, s_slope_mult, v_long);
+            }
+        }
+    }
 
     /* [moved 2026-05-25 — scf-wheelspin-ordering fix]: the section 14a
      * `actor->longitudinal_speed` / `lateral_speed` writeback block formerly
@@ -3560,6 +4411,28 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
     int32_t front_z_b = (int32_t)CDEF_S(b, CDEF_FRONT_Z_EXTENT);
     int32_t rear_z_b  = (int32_t)CDEF_S(b, CDEF_REAR_Z_EXTENT);
 
+    /* [task #14] Shrink a TRAFFIC car's collision box to match its visible mesh.
+     * The cardef OBB extents are noticeably larger than the model, so the player
+     * "crashes" onto a traffic car before visibly touching it. Scale only the
+     * traffic actor(s) in the pair; racer-on-racer boxes stay byte-faithful.
+     * Self-consistent: every corner / penetration value below derives from these
+     * scaled extents. Default 0.8; "1" disables. */
+    {
+        float hbs = traffic_hitbox_scale();
+        if (hbs < 1.0f) {
+            if (a->slot_index >= g_traffic_slot_base) {
+                half_w_a  = (int32_t)((float)half_w_a  * hbs);
+                front_z_a = (int32_t)((float)front_z_a * hbs);
+                rear_z_a  = (int32_t)((float)rear_z_a  * hbs);
+            }
+            if (b->slot_index >= g_traffic_slot_base) {
+                half_w_b  = (int32_t)((float)half_w_b  * hbs);
+                front_z_b = (int32_t)((float)front_z_b * hbs);
+                rear_z_b  = (int32_t)((float)rear_z_b  * hbs);
+            }
+        }
+    }
+
     /* [LISTING ALIGNMENT 0x00408570]: the original's
      *   CollectVehicleCollisionContacts(int param_1, int param_2,
      *                                   int *param_3, int *param_4, short *param_5)
@@ -3824,6 +4697,70 @@ static inline int32_t v2v_sar12_rz_64(int64_t x) {
     return (int32_t)(((x < 0) ? (x + 0xFFF) : x) >> 12);
 }
 
+/* [task #9] TD5RE_TRAFFIC_HIT_TAME (default ON) — when a TRAFFIC car (slot >=
+ * g_traffic_slot_base) is involved in a V2V collision, constrain the response so
+ * it does NOT get launched into the air and cannot sink below the ground:
+ *   - zero/clamp the vertical (Y) component injected by the collision impulse,
+ *   - clamp the overall impulse magnitude that drives the crash-spin lift,
+ *   - clamp post-collision world_pos.y so a traffic car never ends up under the
+ *     track surface (the "clips through the ground" half of the report).
+ * "0" reverts to the byte-faithful (launch + lift) response. */
+static int traffic_hit_tame_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_HIT_TAME");
+        s = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "traffic_hit_tame: TD5RE_TRAFFIC_HIT_TAME=%d", s);
+    }
+    return s;
+}
+
+/* [task #14] TD5RE_TRAFFIC_HITBOX_SCALE (default 0.8) — multiplier applied to a
+ * TRAFFIC car's OBB half-extents (half-width / front-Z / rear-Z) in the V2V
+ * corner test so the collision box matches the visible model instead of being
+ * noticeably larger (the player "crashes" onto traffic without visually
+ * touching). Scales only when at least one of the pair is traffic, so racer-on-
+ * racer contacts stay byte-faithful. "1"/"1.0" disables (no shrink). */
+static float traffic_hitbox_scale(void)
+{
+    static int   s_init = 0;
+    static float s_scale = 0.8f;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_TRAFFIC_HITBOX_SCALE");
+        if (e && e[0]) {
+            s_scale = (float)atof(e);
+            if (s_scale < 0.1f) s_scale = 0.1f;   /* sane floor */
+            if (s_scale > 1.0f) s_scale = 1.0f;   /* never inflate */
+        }
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "traffic_hitbox_scale: TD5RE_TRAFFIC_HITBOX_SCALE=%.3f", s_scale);
+    }
+    return s_scale;
+}
+
+/* Clamp a (presumed traffic) actor's world_pos.y so it never sits below the
+ * track surface at its current span — the "traffic clips through the ground"
+ * recovery for task #9. Uses the same barycentric ground query the traffic pose
+ * integrator uses (td5_track_compute_contact_height_with_normal). No-op if the
+ * car is already at/above ground or the query is unavailable. */
+static void traffic_clamp_above_ground(TD5_Actor *t)
+{
+    int span, lane;
+    int16_t snrm[3] = {0, 1, 0};
+    int32_t ground_y;
+    if (!t) return;
+    span = (int)t->track_span_raw;
+    lane = (int)t->track_sub_lane_index;
+    ground_y = td5_track_compute_contact_height_with_normal(
+        span, lane, t->world_pos.x, t->world_pos.z, snrm);
+    /* world_pos is Y-up 24.8 FP; "below ground" = world_pos.y < ground_y. */
+    if (t->world_pos.y < ground_y) {
+        t->world_pos.y = ground_y;
+        if (t->linear_velocity_y < 0) t->linear_velocity_y = 0;
+    }
+}
+
 /* [FIX 2026-05-28 — traffic crash-spin animation] Port of the heavy-impact
  * TRAFFIC branch of ApplyVehicleCollisionImpulse (orig 0x00408289+). When a
  * traffic vehicle (slot >= 6) takes a heavy hit it enters scripted recovery
@@ -3881,6 +4818,14 @@ static void td5_physics_apply_traffic_crash_spin(TD5_Actor *t, int32_t impact_ma
 
     int32_t lift = impact_mag / 6;
     if (lift > 200000) lift = 200000;
+    /* [task #9] Tame the vertical launch: keep just enough pop to read as a
+     * crash but stop the car flying off the road. The spin animation stays
+     * (driven by the angular spin matrix above, not by Y velocity), so the
+     * tumble is unaffected — only the height is curbed. */
+    if (traffic_hit_tame_enabled()) {
+        const int32_t TRAFFIC_LIFT_CAP = 24000;   /* ~93 world-u/tick (was up to 200000) */
+        if (lift > TRAFFIC_LIFT_CAP) lift = TRAFFIC_LIFT_CAP;
+    }
     t->linear_velocity_y = lift;
 
     t->vehicle_mode = 1;     /* route to scripted-recovery dispatch next tick */
@@ -3917,6 +4862,12 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     if (!penetrator || !target) return;
     if (!penetrator->car_definition_ptr || !target->car_definition_ptr) return;
     (void)corner_idx;
+
+    /* [#10 telemetry] A dispatched OBB corner contact = a real car-to-car
+     * collision; flag both actors for this tick's edge-detector (idempotent —
+     * multiple corners in one tick still count as a single collision). */
+    td5_physics_mark_collision((int)penetrator->slot_index);
+    td5_physics_mark_collision((int)target->slot_index);
 
     TD5_Actor *A = target;      /* frame owner (yaw drives `angle`) */
     TD5_Actor *B = penetrator;  /* other actor */
@@ -4340,8 +5291,29 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             /* Traffic: scripted crash-spin recovery, orig 0x00408289+. */
             td5_physics_apply_traffic_crash_spin(B, impact_mag);
         }
+        /* [CRASH FX 2026-06-15, item #12] On a genuinely high-speed hit, give a
+         * PLAYER actor an extra forward-speed scrub and record a crash-fx event
+         * other modules can poll (HUD shake / VFX / audio). Players only (slot <
+         * g_traffic_slot_base); both A and B are scrubbed if both are players.
+         * Gated by TD5RE_CRASH_FX (default ON) inside the helper; off => no-op.
+         * The faithful angular scatter + vertical lift above are unchanged. */
+        if (impact_mag > CRASH_FX_ACUTE_MAG) {
+            if (A->slot_index < g_traffic_slot_base)
+                td5_physics_apply_acute_crash_fx(A, impact_mag);
+            if (B->slot_index < g_traffic_slot_base)
+                td5_physics_apply_acute_crash_fx(B, impact_mag);
+        }
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d",
                   A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain);
+    }
+
+    /* [task #9] After the full impulse + (optional) heavy scatter, keep any
+     * traffic actor in the pair at/above the track surface so it can never sink
+     * through the ground following a hard hit. Racers are left untouched (their
+     * own ground-snap runs in the pose integrator). No-op when tame is off. */
+    if (traffic_hit_tame_enabled()) {
+        if (A->slot_index >= g_traffic_slot_base) traffic_clamp_above_ground(A);
+        if (B->slot_index >= g_traffic_slot_base) traffic_clamp_above_ground(B);
     }
 
     /* pool14_v2v pilot trace: capture post-state at function exit.
@@ -4410,12 +5382,36 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
     int32_t delta_y = (ny * impulse_scalar) >> 13;
     int32_t delta_z = (nz * impulse_scalar) >> 13;
 
+    /* [task #9] Constrain the response to the horizontal plane for traffic.
+     * This sphere path runs for player-vs-traffic (the explicit S20 collide)
+     * and scripted pairs; its separation vector includes a vertical (Y)
+     * component, so a player ramming a traffic car at speed can punt it
+     * upward. When tame is on and EITHER actor is traffic, drop the Y impulse
+     * for the pair so the bump stays in-plane (the player still gets shoved
+     * sideways/forward exactly as before). */
+    if (traffic_hit_tame_enabled() &&
+        (a->slot_index >= g_traffic_slot_base || b->slot_index >= g_traffic_slot_base)) {
+        delta_y = 0;
+    }
+
     a->linear_velocity_x += delta_x;
     a->linear_velocity_y += delta_y;
     a->linear_velocity_z += delta_z;
     b->linear_velocity_x -= delta_x;
     b->linear_velocity_y -= delta_y;
     b->linear_velocity_z -= delta_z;
+
+    /* [#10 telemetry] A closing sphere overlap that produced a separation
+     * impulse is a real car-to-car contact — flag both actors for this tick. */
+    td5_physics_mark_collision((int)a->slot_index);
+    td5_physics_mark_collision((int)b->slot_index);
+
+    /* [task #9] Belt-and-suspenders: keep any traffic actor in the pair from
+     * ending up below the track surface this tick. */
+    if (traffic_hit_tame_enabled()) {
+        if (a->slot_index >= g_traffic_slot_base) traffic_clamp_above_ground(a);
+        if (b->slot_index >= g_traffic_slot_base) traffic_clamp_above_ground(b);
+    }
 }
 
 /* ========================================================================
@@ -8162,7 +9158,7 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
      * Read old values from the persistent per-slot array (set at end of this
      * function from this frame's transform output, before Y-snap). */
     int slot = actor->slot_index;
-    if (slot < 0 || slot >= 12) slot = 0;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) slot = 0;
 
     /* Per-wheel contact frame computation */
     for (int i = 0; i < 4; i++) {
@@ -8982,6 +9978,39 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
             (int)*(int16_t *)((uint8_t *)actor + 0x80),
             (int)*(int16_t *)((uint8_t *)actor + 0x82),
             (int)g_collisions_enabled, (int)g_active_td6_level);
+
+        /* [task #12] Damp the RETAINED linear velocity on entering roll
+         * recovery. The scripted recovery integrator (integrate_scripted_motion)
+         * only sheds ~1/256 of linear velocity per tick, so a car that was
+         * travelling fast when it rolled past ~90deg keeps almost all of that
+         * momentum through the whole ~59-frame animation and then "accelerates
+         * violently in the direction it was travelling at the moment it rolled".
+         * Shed most of it here, ONCE, at the 0->1 latch transition (this branch
+         * runs exactly when vehicle_mode flips into recovery).
+         *
+         * Knob TD5RE_ROLL_RECOVER_DAMP = retained fraction in [0,1] (default
+         * 0.15 = strong damp, keep 15%). "1" = retain all (old byte-faithful
+         * carry-through); "0" = kill all retained linear velocity. Y is left
+         * to the integrator's gravity so the car still settles onto the road. */
+        {
+            static int   s_rrd_init = 0;
+            static float s_rrd_keep = 0.15f;
+            if (!s_rrd_init) {
+                const char *e = getenv("TD5RE_ROLL_RECOVER_DAMP");
+                if (e && e[0]) {
+                    s_rrd_keep = (float)atof(e);
+                    if (s_rrd_keep < 0.0f) s_rrd_keep = 0.0f;
+                    if (s_rrd_keep > 1.0f) s_rrd_keep = 1.0f;
+                }
+                s_rrd_init = 1;
+                TD5_LOG_I(LOG_TAG, "roll_recover_damp: TD5RE_ROLL_RECOVER_DAMP=%.3f (retained linvel fraction)",
+                          s_rrd_keep);
+            }
+            if (s_rrd_keep < 1.0f) {
+                actor->linear_velocity_x = (int32_t)((float)actor->linear_velocity_x * s_rrd_keep);
+                actor->linear_velocity_z = (int32_t)((float)actor->linear_velocity_z * s_rrd_keep);
+            }
+        }
     }
     actor->vehicle_mode = 1;
     actor->frame_counter = 0;
@@ -9955,6 +10984,56 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
         return 0;
     }
 
+    /* [MP CATCHUP 2026-06-14] Multiplayer rubber-band assist: in a 2+-human
+     * race, scale a HUMAN player's longitudinal drive force by the per-slot
+     * catch-up multiplier (Q8, 0x100 = 1.0). Behind the leader -> >1.0 (catch
+     * up); leader (when enabled) -> <1.0 (ease off). The multiplier is 1.0 for
+     * AI/traffic, for non-racer slots, and whenever the feature is off or there
+     * is <2 humans, so this is a no-op in single-player and faithful play.
+     *
+     * Applied here (the single drive-torque chokepoint feeding all three player
+     * drive paths: on-ground / airborne / reverse) so the assist is consistent
+     * and smooth. It only scales ACCELERATION — top speed (the speed_limit gate
+     * in the callers) is untouched, so it cannot warp a car past the field; it
+     * just lets a trailing player build speed harder. The shift uses the same
+     * biased-toward-zero signed >>8 idiom as the rest of this pipeline.
+     *
+     * DETERMINISM: gated on g_race_slot_state[] + s_mp_catchup_mult[], both of
+     * which are pure replicated sim state recomputed once per tick — identical
+     * on every lockstep client, so torque stays bit-identical across machines. */
+    if (actor->slot_index < g_traffic_slot_base &&
+        actor->slot_index < TD5_MAX_RACER_SLOTS &&
+        g_race_slot_state[actor->slot_index] == 1) {
+        int32_t mult = td5_physics_mp_catchup_mult(actor->slot_index);
+        if (mult != MP_CATCHUP_Q8_ONE) {
+            int64_t scaled = (int64_t)torque * (int64_t)mult;
+            /* signed /256, biased toward zero (matches sar8_rz_42F030 etc.) */
+            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
+
+    /* [HARD CATCHUP item #13] Hard-difficulty AI catch-up: the complement of the
+     * MP block above — scale an AI OPPONENT's drive force up when it is behind
+     * the human player on Hard, so the field presses harder. Applies ONLY to AI
+     * racer slots (non-human, slot < g_traffic_slot_base); humans are handled
+     * above and traffic/non-racer slots return 1.0. The multiplier is 1.0 (no-op)
+     * unless TD5RE_HARD_CATCHUP=1 AND g_difficulty_hard, so non-hard / easy /
+     * normal play is byte-unchanged. Acceleration only (top-speed gate in the
+     * callers untouched). Same biased-toward-zero signed >>8 idiom.
+     *
+     * DETERMINISM: gated on g_race_slot_state[] + g_difficulty_hard +
+     * s_hard_catchup_mult[], all replicated sim state recomputed once per tick. */
+    if (actor->slot_index >= 0 &&
+        actor->slot_index < g_traffic_slot_base &&
+        actor->slot_index < TD5_MAX_RACER_SLOTS &&
+        g_race_slot_state[actor->slot_index] != 1) {
+        int32_t mult = td5_physics_hard_catchup_mult(actor->slot_index);
+        if (mult != MP_CATCHUP_Q8_ONE) {
+            int64_t scaled = (int64_t)torque * (int64_t)mult;
+            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
+
     return torque;
 }
 
@@ -10359,6 +11438,13 @@ void td5_physics_init_vehicle_runtime(void)
      * differ from in-race transforms and cause huge gap_270 transients. */
     memset(s_prev_wheel_valid, 0, sizeof(s_prev_wheel_valid));
 
+    /* [STUCK RECOVERY 2026-06-15] Clear the per-slot auto-stuck accumulators at
+     * race init so values from a previous race in the same session can't carry
+     * over. (The progress probe self-heals on the first live tick anyway, but a
+     * clean reset keeps the auto-timer honest from tick 0.) */
+    memset(s_stuck_ticks,   0, sizeof(s_stuck_ticks));
+    memset(s_stuck_last_hw, 0, sizeof(s_stuck_last_hw));
+
     /* Populate per-slot handicap tables from gRaceResultPointsTable indexed
      * by each slot's prior championship position. See declaration above. */
     for (int s = 0; s < 6; s++) {
@@ -10679,6 +11765,39 @@ void td5_physics_init_vehicle_runtime(void)
                     actor->wheel_display_angles[w][1] = cardef[(0x40 + w * 8 + 2) / 2];
                     actor->wheel_display_angles[w][2] = cardef[(0x40 + w * 8 + 4) / 2];
                     actor->wheel_display_angles[w][3] = cardef[(0x40 + w * 8 + 6) / 2];
+                }
+                /* [task #5] Pull a TRAFFIC car's wheels inward on the width axis.
+                 * Some TD6-imported traffic models carry cardef wheel X offsets
+                 * wider than the chassis, so the wheels render OUTSIDE the body.
+                 * For traffic slots the lateral arm wheel_display_angles[w][0]
+                 * feeds ONLY the render (the traffic pose integrator derives roll/
+                 * pitch from the surface normal + wheel_suspension_pos, never this
+                 * field), so scaling it here moves the visual wheels with zero
+                 * physics side-effect. Racer slots (which DO use this arm for the
+                 * contact frame) are left untouched. Knob TD5RE_TRAFFIC_WHEEL_TRACK
+                 * (default 1.0 = no change; e.g. 0.85 narrows). NOTE: traffic
+                 * models with NO cardef wheel data are wheeled by a separate
+                 * SYNTHESIZED layout in td5_render.c (rb*0.38 half-track) which is
+                 * render-only and out of scope for this file. */
+                if (slot >= g_traffic_slot_base) {
+                    static int   s_twt_init = 0;
+                    static float s_twt = 1.0f;
+                    if (!s_twt_init) {
+                        const char *e = getenv("TD5RE_TRAFFIC_WHEEL_TRACK");
+                        if (e && e[0]) {
+                            s_twt = (float)atof(e);
+                            if (s_twt < 0.1f) s_twt = 0.1f;
+                            if (s_twt > 2.0f) s_twt = 2.0f;
+                        }
+                        s_twt_init = 1;
+                        TD5_LOG_I(LOG_TAG, "traffic_wheel_track: TD5RE_TRAFFIC_WHEEL_TRACK=%.3f", s_twt);
+                    }
+                    if (s_twt != 1.0f) {
+                        for (int w = 0; w < 4; w++) {
+                            actor->wheel_display_angles[w][0] =
+                                (int16_t)((float)actor->wheel_display_angles[w][0] * s_twt);
+                        }
+                    }
                 }
                 TD5_LOG_I(LOG_TAG,
                           "Wheel pos slot=%d: FL=(%d,%d,%d) FR=(%d,%d,%d) RL=(%d,%d,%d) RR=(%d,%d,%d)",
@@ -11102,6 +12221,215 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
               "suspension_envelope slot=%d: max_x=%.1f max_y=%.1f max_z=%.1f "
               "y_val_x=%.1f radius=%d",
               slot, max_x, max_y, max_z, y_val_x, (int)cd[0x80 / 2]);
+}
+
+/* ========================================================================
+ * Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15)
+ * ======================================================================== */
+
+/* Cache the recovery knobs once. TD5RE_STUCK_RECOVERY (default ON) gates the
+ * whole feature; TD5RE_RECOVERY_SPANS_BACK (default 3) is how far back to drop
+ * the car. Logged once like the other [PORT ENHANCEMENT] knobs. */
+static void recovery_init_knobs(void)
+{
+    if (s_recovery_init) return;
+    {
+        const char *e = getenv("TD5RE_STUCK_RECOVERY");
+        s_recovery_enabled = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    {
+        const char *e = getenv("TD5RE_RECOVERY_SPANS_BACK");
+        if (e && e[0]) {
+            int v = atoi(e);
+            if (v < 0) v = 0;
+            if (v > 64) v = 64;            /* sanity clamp */
+            s_recovery_spans_back = v;
+        }
+    }
+    s_recovery_init = 1;
+    TD5_LOG_I(LOG_TAG, "Stuck recovery: %s spans_back=%d",
+              s_recovery_enabled ? "enabled" : "disabled",
+              s_recovery_spans_back);
+}
+
+/* Reposition `slot`'s actor a few spans back, centred, upright, heading aligned
+ * to track forward. Reuses the SPAWN-pose approach: write the span fields +
+ * center-lane world XZ, set yaw via td5_track_compute_heading (geometry forward
+ * heading at that span), then run td5_physics_reset_actor_state which zeroes the
+ * linear+angular velocities and the roll/pitch euler accumulators, ground-snaps
+ * world_pos.y, and rebuilds the rotation matrix from the (now-corrected) yaw via
+ * integrate_pose — exactly the sequence td5_game.c InitRace uses per racer. */
+int td5_physics_recover_player(int slot)
+{
+    recovery_init_knobs();
+    if (!s_recovery_enabled) return 0;
+    if (!g_actor_table_base) return 0;
+    if (slot < 0 || slot >= g_traffic_slot_base || slot >= TD5_MAX_RACER_SLOTS)
+        return 0;
+
+    TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+    if (!actor) return 0;
+
+    int cur_span = (int)actor->track_span_raw;
+    int tgt_span, sub_lane, wx, wy, wz;
+    if (!td5_track_get_recovery_pose(cur_span, s_recovery_spans_back,
+                                     &tgt_span, &sub_lane, &wx, &wy, &wz)) {
+        TD5_LOG_W(LOG_TAG, "recover_player slot=%d: no recovery pose (cur_span=%d)",
+                  slot, cur_span);
+        return 0;
+    }
+
+    /* Seed the track-position block to the target span (mirrors the spawn-time
+     * InitActorTrackSegmentPlacement seed: +0x80/+0x84/+0x86 = span, and the
+     * clamped center sub-lane at +0x8C). +0x82 (normalized) is left to the wrap-
+     * normalizer / per-tick walker, same as spawn. */
+    actor->track_span_raw         = (int16_t)tgt_span;   /* +0x80 */
+    actor->track_span_accumulated = (int16_t)tgt_span;   /* +0x84 */
+    actor->track_span_high_water  = (int16_t)tgt_span;   /* +0x86 */
+    actor->track_sub_lane_index   = (uint8_t)sub_lane;   /* +0x8C */
+
+    /* Center-lane world XZ in 24.8 FP; Y set to the reset sentinel so
+     * reset_actor_state's integrate_pose ground-snaps the car onto the surface
+     * (it overwrites world_pos.y with 0xC0000000 itself, but set it here too so
+     * compute_heading / any pre-reset read sees a sane chassis position). */
+    actor->world_pos.x = wx;                             /* +0x1FC */
+    actor->world_pos.y = (int32_t)0xC0000000;            /* +0x200 (ground-snap sentinel) */
+    actor->world_pos.z = wz;                             /* +0x204 */
+
+    /* Heading aligned to track forward at the target span. compute_heading reads
+     * track_span_raw (+0x80) + sub_lane (+0x8C) just written, and writes
+     * euler_accum.yaw (+0x1F4) + heading_normal (+0x290). On TD6 tracks the
+     * geometry yaw lands ~90 deg off, so re-seed from the route heading exactly
+     * like the spawn path does (td5_game.c). */
+    td5_track_compute_heading(actor);
+    if (g_active_td6_level > 0)
+        td5_ai_correct_spawn_heading(slot);
+
+    /* Zero linear+angular velocity, roll/pitch euler, settle suspension, rebuild
+     * the rotation matrix + render pose, and ground-snap Y. reset_actor_state
+     * preserves euler_accum.yaw (only roll/pitch are zeroed), so the corrected
+     * heading above survives. */
+    td5_physics_reset_actor_state(actor);
+
+    /* reset_actor_state -> integrate_pose -> update_actor_position may have
+     * walked track_span_raw across a boundary; restore it to the recovery span
+     * (same fix-up the spawn loop applies after reset). */
+    actor->track_span_raw = (int16_t)tgt_span;
+
+    /* Clear control-flag residue so the car doesn't immediately re-trip a stuck
+     * heuristic or carry a stale wall/handbrake/reverse latch into the next tick. */
+    actor->brake_flag = 0;          /* +0x36D */
+    actor->handbrake_flag = 0;      /* +0x36E */
+    actor->throttle_state = 1;      /* +0x36F: forward */
+    actor->track_contact_flag = 0;  /* +0x37B: V2W contact */
+
+    /* Reset this slot's auto-stuck timer + progress probe. */
+    s_stuck_ticks[slot]   = 0;
+    s_stuck_last_hw[slot] = (int)actor->track_span_high_water;
+
+    TD5_LOG_I(LOG_TAG,
+              "recover_player: slot=%d cur_span=%d -> span=%d lane=%d pos=(%d,%d,%d)",
+              slot, cur_span, tgt_span, sub_lane,
+              actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
+    return 1;
+}
+
+/* Per-tick driver: run MANUAL (R / L3) + AUTOMATIC stuck-recovery for every
+ * LOCAL HUMAN player. Called from td5_physics_tick (deterministic sim tick).
+ *
+ * Local human players occupy viewports 0..viewport_count-1, each mapped to an
+ * actor slot via g_actorSlotForView[vp]; that vp index is also the input-layer
+ * player index. We only act on slots flagged human (g_race_slot_state==1).
+ *
+ * v1 NETPLAY SCOPE: the manual edge is local-only input (not exchanged over the
+ * lockstep protocol), so to keep remote peers in sync the whole driver is
+ * skipped under an active network session. */
+void td5_physics_update_stuck_recovery(void)
+{
+    recovery_init_knobs();
+    if (!s_recovery_enabled) return;
+    if (!g_actor_table_base) return;
+    if (g_td5.network_active) return;   /* v1: local/non-network only */
+
+    /* During the start countdown / pause the sim is frozen and recovering makes
+     * no sense, but we still DRAIN the manual edge so a press then doesn't leak
+     * forward and fire the instant the race un-pauses. */
+    int act = !g_game_paused;
+
+    int views = g_td5.viewport_count;
+    if (views < 1) views = 1;
+    if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
+
+    for (int vp = 0; vp < views; vp++) {
+        int slot = g_actorSlotForView[vp];
+        if (slot < 0 || slot >= g_traffic_slot_base || slot >= TD5_MAX_RACER_SLOTS)
+            continue;
+        if (g_race_slot_state[slot] != 1)   /* local human racers only */
+            continue;
+
+        TD5_Actor *actor =
+            (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        if (!actor) continue;
+
+        /* ---- MANUAL trigger (edge from input layer, keyed by player index) ----
+         * Always consume the edge so it never leaks across a pause; only act on
+         * it while the sim is live and the car is still racing. */
+        int manual = td5_input_recovery_requested(vp);
+
+        /* Don't recover a car that has already finished the race. */
+        if (actor->finish_time != 0) {
+            s_stuck_ticks[slot]   = 0;
+            s_stuck_last_hw[slot] = (int)actor->track_span_high_water;
+            continue;
+        }
+
+        if (!act) {
+            /* Paused/countdown: keep the progress probe fresh, defer recovery. */
+            s_stuck_last_hw[slot] = (int)actor->track_span_high_water;
+            s_stuck_ticks[slot]   = 0;
+            continue;
+        }
+
+        if (manual) {
+            TD5_LOG_I(LOG_TAG, "manual recovery: player=%d slot=%d", vp, slot);
+            td5_physics_recover_player(slot);
+            continue;   /* timer already cleared inside */
+        }
+
+        /* ---- AUTOMATIC trigger ---- */
+        /* Throttle applied? throttle_input_active (+0x378) = 1 when the
+         * accelerator is pressed (auto-gearbox forces it on; manual sets it from
+         * the input bit). Treat any throttle as "driver is trying" -> not stuck. */
+        int throttle_on = (actor->throttle_input_active != 0);
+
+        /* Forward progress: track_span_high_water advancing (monotonic race-order
+         * counter) is the robust progress probe — it survives lane jitter and the
+         * span_normalized wrap at the start/finish line. */
+        int hw = (int)actor->track_span_high_water;
+        int progressed = (hw != s_stuck_last_hw[slot]);
+        s_stuck_last_hw[slot] = hw;
+
+        /* Planar speed near zero: body-frame longitudinal + lateral magnitude
+         * (both 8.8). abs-sum is a cheap deterministic proxy (no sqrt needed for
+         * a near-zero test). */
+        int32_t fwd = actor->longitudinal_speed;
+        int32_t lat = actor->lateral_speed;
+        int32_t planar = (fwd < 0 ? -fwd : fwd) + (lat < 0 ? -lat : lat);
+        int near_zero = (planar < TD5_RECOVERY_SPEED_EPS);
+
+        if (throttle_on || progressed || !near_zero) {
+            /* Driver accelerating OR making progress OR still moving -> reset. */
+            s_stuck_ticks[slot] = 0;
+            continue;
+        }
+
+        if (++s_stuck_ticks[slot] >= TD5_RECOVERY_STUCK_TICKS) {
+            TD5_LOG_I(LOG_TAG,
+                      "auto recovery: slot=%d stuck %d ticks (hw=%d planar=%d)",
+                      slot, s_stuck_ticks[slot], hw, planar);
+            td5_physics_recover_player(slot);   /* clears the timer */
+        }
+    }
 }
 
 void td5_physics_set_collisions(int enabled)

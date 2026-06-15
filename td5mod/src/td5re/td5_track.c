@@ -1218,6 +1218,84 @@ int td5_track_get_span_lane_world(int span_index, int sub_lane,
     return 1;
 }
 
+/* [STUCK RECOVERY 2026-06-15] Compute a "respawn a few spans back, centred"
+ * pose for the player car-recovery feature. Given the actor's current span and
+ * how many spans to back up, this resolves:
+ *   - a valid TARGET span a few spans behind (wrapping on a closed circuit,
+ *     clamping at span 0 on a point-to-point route),
+ *   - the CENTER sub-lane of that span (same lane_count/2 convention as
+ *     td5_track_get_span_center_world / the grid re-anchor at spawn),
+ *   - the center-lane world XZ (and Y) in 24.8 fixed-point.
+ * The forward HEADING for the pose is left to td5_track_compute_heading(), which
+ * the caller invokes on the actor after writing the span (mirrors the spawn-pose
+ * sequence in td5_game.c InitRace).
+ *
+ * Returns 1 and fills *out_span / *out_sub_lane / *out_x / *out_y / *out_z on
+ * success, 0 if no track is loaded or no drivable span could be resolved (e.g.
+ * the only candidates are junction span-types 9/10, which have no center quad).
+ * Any out-pointer may be NULL. */
+int td5_track_get_recovery_pose(int from_span, int spans_back,
+                                int *out_span, int *out_sub_lane,
+                                int *out_x, int *out_y, int *out_z)
+{
+    int span_count = s_span_count;
+    int ring = g_td5.track_span_ring_length;
+    int target, lane_count, center_lane, tries;
+
+    if (out_span)     *out_span = from_span;
+    if (out_sub_lane) *out_sub_lane = 0;
+    if (out_x) *out_x = 0;
+    if (out_y) *out_y = 0;
+    if (out_z) *out_z = 0;
+
+    if (!s_span_array || !s_vertex_table || span_count <= 0)
+        return 0;
+    if (spans_back < 0) spans_back = 0;
+
+    /* Step back. On a closed circuit (ring length valid) wrap within the ring so
+     * a recovery near the start/finish line lands just before it rather than at
+     * span 0; on a point-to-point route clamp to the first span. */
+    if (ring > 1 && ring <= span_count) {
+        int base = from_span % ring;
+        if (base < 0) base += ring;
+        target = ((base - spans_back) % ring + ring) % ring;
+    } else {
+        target = from_span - spans_back;
+        if (target < 0) target = 0;
+    }
+
+    /* The stepped-back span could be a junction piece (type 9/10) that has no
+     * usable center quad. Walk forward toward the original span until a drivable
+     * span is found (bounded so we never loop forever). */
+    for (tries = 0; tries <= spans_back; tries++) {
+        const TD5_StripSpan *sp;
+        if (target < 0 || target >= span_count) break;
+        sp = &s_span_array[target];
+        if (sp->span_type != 9 && sp->span_type != 10)
+            break;
+        target++;
+    }
+    if (target < 0 || target >= span_count)
+        target = (from_span >= 0 && from_span < span_count) ? from_span : 0;
+
+    {
+        const TD5_StripSpan *sp = &s_span_array[target];
+        lane_count = span_lane_count(sp);
+    }
+    if (lane_count < 1) lane_count = 1;
+    center_lane = lane_count / 2;   /* center lane (matches span-center sampling) */
+
+    if (!td5_track_get_span_lane_world(target, center_lane, out_x, out_y, out_z))
+        return 0;
+
+    if (out_span)     *out_span = target;
+    if (out_sub_lane) *out_sub_lane = center_lane;
+    TD5_LOG_I(LOG_TAG,
+              "recovery_pose: from_span=%d back=%d -> span=%d center_lane=%d/%d",
+              from_span, spans_back, target, center_lane, lane_count);
+    return 1;
+}
+
 /* Byte-faithful port of InitActorTrackSegmentPlacement @ 0x00445F10.
  *
  * Disassembly summary (push EBX/EBP/ESI, ESI = param_1 = &actor+0x80,
@@ -1898,10 +1976,21 @@ int td5_track_load_strip(const void *data, size_t size)
      * (8-byte misalignment). Count is at +0x14 (header[5]); the remap threshold is
      * ring (+0x04). [CONFIRMED: London = 28 records, e.g. (2137,2148,157),
      * (2163,2200,253) — branch->main parallel-alternate mapping.] */
-    if (size >= 8 * 4) {
+    /* [CRASH FIX 2026-06-14 #20 Newcastle] The +0x20 record offset described above
+     * is correct for TD6-converted strips (8-u32 header) but WRONG for native TD5
+     * strips, whose branch records start at +0x18 (original
+     * ResolveActorSegmentBoundary @0x00443FF0 documents "[strip+0x18]=jump_entry[0]").
+     * Using 0x20 on a native BRANCHED circuit (Newcastle/Maui/Courmayeur/
+     * HouseOfBez/MontegoBay) decoded garbage records (lo>hi) -> branch spans were
+     * never normalized -> the un-normalized span indexed the ring-sized
+     * LEFT/RIGHT.TRK route tables out of bounds in td5_ai.c -> crash. Gate the
+     * record offset on g_active_td6_level (set before this function; also read by
+     * the surface-grid block below). Count stays at +0x14 for both. */
+    if (size >= 6 * 4) {
+        size_t jt_off = (g_active_td6_level > 0) ? 0x20u : 0x18u;
         s_jump_entry_count = (int)(*(uint32_t *)(s_strip_blob + 0x14));
-        if (s_jump_entry_count > 0 && size >= 0x20 + (size_t)s_jump_entry_count * 6) {
-            s_jump_entries = s_strip_blob + 0x20;
+        if (s_jump_entry_count > 0 && size >= jt_off + (size_t)s_jump_entry_count * 6) {
+            s_jump_entries = s_strip_blob + jt_off;
         } else {
             s_jump_entry_count = 0;
             s_jump_entries = NULL;
@@ -4055,6 +4144,218 @@ int32_t td5_track_compute_contact_height_bounded(int span_index, int carried_sub
 }
 
 /* ========================================================================
+ * [task#4] Stable per-node ground probe for the conforming vehicle SHADOW.
+ *
+ * This is a RENDER-ONLY helper. It is NOT on any physics path and is never
+ * called by the original-faithful pose code — the physics body/wheel probes
+ * (td5_track_update_probe_position + td5_track_compute_contact_height*) keep
+ * their byte-faithful single-step-per-call semantics untouched.
+ *
+ * WHY THE SHADOW FLICKERS (root cause at the probe/cache level):
+ *   The shadow is a 7x9 mesh; each node down-raycasts the track surface once
+ *   per sim tick (td5_render.c: shadow_build_grid). The render side seeds a
+ *   FRESH probe from the CHASSIS span/lane every node every tick and takes a
+ *   SINGLE single-step walk (td5_track_update_probe_position, single_step=1),
+ *   then reads the barycentric plane (triangle_height). The barycentric height
+ *   is continuous WITHIN a triangle, so a small XZ move yields a smooth Y — the
+ *   steps come ENTIRELY from the node being re-assigned to a different span/
+ *   triangle tick-to-tick:
+ *     - A front/rear node sits near a span boundary. As the chassis crawls
+ *       forward the node flips span S <-> S+1 across ticks.
+ *     - Worse, the single-step cap means a node that truly belongs 2 spans
+ *       ahead of the chassis seed can only advance one span per tick, so it
+ *       LAGS and OSCILLATES with the chassis instead of settling.
+ *     - Spans S and S+1 are different planes; their Ys agree only along the
+ *       shared edge. On FLAT ground that difference ~ 0 (invisible). On a SLOPE
+ *       the per-tick S vs S+1 plane delta IS the slope rise, so the node Y
+ *       STEPS by the climb amount each tick -> the visible pop, worst UPHILL.
+ *
+ * FIX: give each shadow node its OWN persistent span/lane seed (continuity) and
+ * run a CONVERGING (multi-step) walk so the node lands on the span that actually
+ * contains its XZ this tick, regardless of distance from the chassis seed. Once
+ * the span/triangle stops flapping, the already-continuous barycentric height is
+ * smooth across the climb. Cheap: per node, 30Hz, a handful of single-step
+ * iterations that normally converge in 1.
+ *
+ * Knob: TD5RE_SHADOW_PROBE_FIX (default ON). "0" reverts to the exact prior
+ * behavior (fresh chassis-seeded single-step walk), so it composes as a clean
+ * A/B with the render-side TD5RE_SHADOW_ANTIFLICKER smoothing (which stays).
+ * ======================================================================== */
+
+static int shadow_probe_fix_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_SHADOW_PROBE_FIX");
+        cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "shadow probe-fix (per-node span continuity) %s",
+                  cached ? "ON" : "OFF");
+    }
+    return cached;
+}
+
+/* Per-(slot,node) seed for shadow_probe_height continuity. Keep this generous
+ * enough for the 7x9 grid (63 nodes) without coupling to the render macros. */
+#define SHADOW_PROBE_MAX_NODES   64
+typedef struct {
+    int16_t span;        /* last span this node settled on               */
+    int8_t  lane;        /* last sub-lane this node settled on           */
+    int8_t  valid;       /* 0 until first settle / after a reset         */
+    int32_t last_x;      /* last world XZ (24.8) — teleport-gap detection */
+    int32_t last_z;
+    uint32_t tick;       /* sim tick the seed was last written           */
+} ShadowProbeSeed;
+static ShadowProbeSeed s_shadow_probe_seed[TD5_MAX_TOTAL_ACTORS][SHADOW_PROBE_MAX_NODES];
+
+/* If a node's cached seed lands implausibly far from the chassis span we resnap
+ * to the chassis (a node can never be more than ~half the grid length away in
+ * spans). Keeps junction/teleport mis-walks from latching a node onto far
+ * geometry, exactly like the chassis-seeded path it replaces. */
+#define SHADOW_PROBE_MAX_SPAN_DRIFT   6
+
+/**
+ * Stable ground height for one shadow-mesh node.
+ *
+ *   slot          actor->slot_index           (0..TD5_MAX_TOTAL_ACTORS-1)
+ *   node          flat grid node index        (0..SHADOW_PROBE_MAX_NODES-1)
+ *   chassis_span  actor->track_span_raw       (fallback / drift anchor)
+ *   chassis_lane  actor->track_sub_lane_index
+ *   world_x/z     node XZ in 24.8 fixed-point
+ *   out_normal    optional surface normal (int16[3]); may be NULL
+ *
+ * Returns ground contact height in 24.8 fixed-point (same units/clamps as
+ * td5_track_compute_contact_height_with_normal). With the knob OFF this is a
+ * transparent reimplementation of the render side's prior probe pair.
+ */
+int32_t td5_track_shadow_probe_height(int slot, int node,
+                                      int chassis_span, int chassis_lane,
+                                      int32_t world_x, int32_t world_z,
+                                      int16_t *out_normal)
+{
+    int max_sp = s_span_count;
+    if (max_sp <= 0 || !s_span_array || !s_vertex_table) {
+        if (out_normal) { out_normal[0] = 0; out_normal[1] = 4096; out_normal[2] = 0; }
+        return 0;
+    }
+
+    if (chassis_span < 0) chassis_span = 0;
+    if (chassis_span >= max_sp) chassis_span = max_sp - 1;
+    if (chassis_lane < 0) chassis_lane = 0;
+
+    /* --- knob OFF: faithful reproduction of the prior render-side behavior:
+     *     fresh probe seeded at the chassis, ONE single-step walk, bounded
+     *     barycentric height. (No continuity cache — byte-equivalent A/B.) */
+    if (!shadow_probe_fix_enabled() ||
+        slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS ||
+        node < 0 || node >= SHADOW_PROBE_MAX_NODES) {
+        TD5_TrackProbeState probe;
+        memset(&probe, 0, sizeof(probe));
+        probe.span_index     = (int16_t)chassis_span;
+        probe.sub_lane_index = (int8_t)chassis_lane;
+        td5_track_update_probe_position(&probe, world_x, world_z);
+        int ps = (int)probe.span_index;
+        int pl = (int)probe.sub_lane_index;
+        if (ps < 0) ps = 0;
+        if (ps >= max_sp) ps = max_sp - 1;
+        return td5_track_compute_contact_height_with_normal(ps, pl, world_x, world_z, out_normal);
+    }
+
+    ShadowProbeSeed *sd = &s_shadow_probe_seed[slot][node];
+    uint32_t cur_tick = (uint32_t)g_td5.simulation_tick_counter;
+
+    /* Decide the walk seed. Prefer this node's own last-settled span/lane
+     * (continuity) so it doesn't get dragged back to the chassis span every
+     * tick. Fall back to the chassis when the seed is stale: first use, a gap
+     * in ticks (off-screen / paused), a big XZ jump (teleport / camera cut), or
+     * the cached span has drifted too far from the chassis. */
+    int seed_span, seed_lane;
+    int reseed = 0;
+    if (!sd->valid) {
+        reseed = 1;
+    } else if (sd->span < 0 || sd->span >= max_sp) {
+        reseed = 1;
+    } else if (cur_tick != sd->tick + 1u && cur_tick != sd->tick) {
+        /* not the immediately-following (or same) tick -> continuity broken */
+        reseed = 1;
+    } else {
+        /* Large single-tick XZ leap -> the node teleported; chassis is safer.
+         * Threshold ~one span's worth (origin step is large; use a coarse
+         * world-unit gate of 32768 << 8 in 24.8, i.e. one TD6 origin step). */
+        int64_t ddx = (int64_t)world_x - (int64_t)sd->last_x;
+        int64_t ddz = (int64_t)world_z - (int64_t)sd->last_z;
+        const int64_t leap = (int64_t)32768 << 8;
+        if (ddx > leap || ddx < -leap || ddz > leap || ddz < -leap)
+            reseed = 1;
+        else {
+            /* span-drift guard (ring-aware): chassis is the trusted anchor. */
+            int d = (int)sd->span - chassis_span;
+            int ring = g_td5.track_span_ring_length;
+            if (ring > 0) {
+                /* shortest signed distance around the ring */
+                while (d >  ring / 2) d -= ring;
+                while (d < -ring / 2) d += ring;
+            }
+            if (d > SHADOW_PROBE_MAX_SPAN_DRIFT || d < -SHADOW_PROBE_MAX_SPAN_DRIFT)
+                reseed = 1;
+        }
+    }
+
+    if (reseed) {
+        seed_span = chassis_span;
+        seed_lane = chassis_lane;
+    } else {
+        seed_span = (int)sd->span;
+        seed_lane = (int)sd->lane;
+    }
+    if (seed_lane < 0) seed_lane = 0;
+
+    /* CONVERGING walk: drive update_position_recursive with single_step=0 so the
+     * node settles on the span whose quad actually contains its XZ this tick,
+     * however many boundaries away from the seed it is — this is what kills the
+     * one-span-per-tick lag/oscillation on a slope. The walker has its own
+     * TRACK_MAX_RECURSION cap + non-convergence rollback, so this terminates
+     * and degrades to "keep prior span" rather than warping. */
+    {
+        int16_t track_state[8];
+        memset(track_state, 0, sizeof(track_state));
+        track_state[0] = (int16_t)seed_span;
+        ((int8_t *)track_state)[12] = (int8_t)seed_lane;
+        update_position_recursive(track_state, world_x, world_z, 0, /*single_step=*/0);
+
+        int ps = (int)track_state[0];
+        int pl = (int)((int8_t *)track_state)[12];
+        if (ps < 0) ps = 0;
+        if (ps >= max_sp) ps = max_sp - 1;
+        if (pl < 0) pl = 0;
+
+        /* Post-walk drift guard: if convergence still landed implausibly far
+         * from the chassis (degenerate junction quad), fall back to a bounded
+         * local search around the chassis span — same safety the render side's
+         * chassis-seeded path had. */
+        int d = ps - chassis_span;
+        int ring = g_td5.track_span_ring_length;
+        if (ring > 0) { while (d > ring/2) d -= ring; while (d < -ring/2) d += ring; }
+        if (d > SHADOW_PROBE_MAX_SPAN_DRIFT || d < -SHADOW_PROBE_MAX_SPAN_DRIFT) {
+            ps = chassis_span;
+            pl = chassis_lane;
+        }
+
+        /* Store this node's settled seed for next tick's continuity. */
+        sd->span   = (int16_t)ps;
+        sd->lane   = (int8_t)pl;
+        sd->valid  = 1;
+        sd->last_x = world_x;
+        sd->last_z = world_z;
+        sd->tick   = cur_tick;
+
+        /* Bounded lane search for the final height keeps the chosen triangle the
+         * one that actually contains the node (the walk fixes the SPAN; the lane
+         * search fixes which triangle within it), so the plane is continuous. */
+        return td5_track_compute_contact_height_bounded(ps, pl, world_x, world_z, out_normal);
+    }
+}
+
+/* ========================================================================
  * Heading Computation (0x435CE0 / 0x445B90)
  *
  * Derives a 12-bit heading angle from the track segment geometry.
@@ -5994,6 +6295,107 @@ int td5_track_main_to_branch_span(int main_span)
         }
     }
     return -1;
+}
+
+/* [task#8 2026-06-14] Branch-corridor ENUMERATION for the traffic spawner.
+ * td5_track_main_to_branch_span() above returns only the FIRST jump-table record
+ * paralleling `main_span`, so when a fork has more than one alternate corridor
+ * (e.g. a LEFT and a RIGHT branch overlapping the same main run) the spawner only
+ * ever placed cars on that one corridor (user: "traffic only populates the RIGHT
+ * track of a branch"). These two helpers expose ALL matching corridors so the
+ * spawner can roll among every branch of the fork:
+ *   td5_track_count_branch_corridors(main_span)        -> how many parallel branches
+ *   td5_track_branch_corridor_span(main_span, which)   -> the which-th branch span
+ * `which` is 0-based over the matching records in jump-table order; out-of-range
+ * (or no match / no table) returns -1. Same [base, base+len] containment test as
+ * td5_track_main_to_branch_span so behaviour is identical for the first match. */
+int td5_track_count_branch_corridors(int main_span)
+{
+    int ring = g_td5.track_span_ring_length;
+    int count = 0;
+    if (main_span < 0 || ring <= 0 || main_span > ring ||
+        !s_jump_entries || s_jump_entry_count <= 0)
+        return 0;
+    {
+        const uint8_t *e = s_jump_entries;
+        int j;
+        for (j = 0; j < s_jump_entry_count; j++, e += 6) {
+            int lo   = (int)((const uint16_t *)e)[0];
+            int hi   = (int)((const uint16_t *)e)[1];
+            int base = (int)((const uint16_t *)e)[2];
+            int len  = hi - lo;
+            if (main_span >= base && main_span <= base + len)
+                count++;
+        }
+    }
+    return count;
+}
+
+int td5_track_branch_corridor_span(int main_span, int which)
+{
+    int ring = g_td5.track_span_ring_length;
+    int seen = 0;
+    if (main_span < 0 || which < 0 || ring <= 0 || main_span > ring ||
+        !s_jump_entries || s_jump_entry_count <= 0)
+        return -1;
+    {
+        const uint8_t *e = s_jump_entries;
+        int j;
+        for (j = 0; j < s_jump_entry_count; j++, e += 6) {
+            int lo   = (int)((const uint16_t *)e)[0];
+            int hi   = (int)((const uint16_t *)e)[1];
+            int base = (int)((const uint16_t *)e)[2];
+            int len  = hi - lo;
+            if (main_span >= base && main_span <= base + len) {
+                if (seen == which)
+                    return lo + (main_span - base);
+                seen++;
+            }
+        }
+    }
+    return -1;
+}
+
+/* [item#9 2026-06-15] Branch-corridor ENUMERATION (not keyed by a main span).
+ * td5_track_count_branch_corridors / td5_track_branch_corridor_span above answer
+ * "which branch parallels THIS main span", which only helps when the spawner has
+ * already rolled a main span that happens to sit inside a fork window — a rare
+ * alignment, so branch corridors stayed nearly empty (user: "traffic is still
+ * not spawning on the right track of branches"). These two expose the raw
+ * jump-table records so the spawner can pick a corridor DIRECTLY and place a car
+ * anywhere along it:
+ *   td5_track_corridor_count()                       -> number of jump-table records
+ *   td5_track_corridor_info(idx, &b_lo,&b_hi,&m_lo,&m_hi)
+ *       -> the idx-th corridor's BRANCH span range [b_lo,b_hi] (these are the
+ *          displaced corridor spans, >= ring) and the parallel MAIN span range
+ *          [m_lo,m_hi] it bypasses. Returns 1 on success, 0 if idx is out of
+ *          range or no table is loaded. Same record layout as every other
+ *          jump-table consumer here ([branch_lo, branch_hi, main_target], stride
+ *          6; parallel main range = [main_target, main_target+(branch_hi-branch_lo)]). */
+int td5_track_corridor_count(void)
+{
+    if (!s_jump_entries || s_jump_entry_count <= 0) return 0;
+    return s_jump_entry_count;
+}
+
+int td5_track_corridor_info(int idx, int *branch_lo, int *branch_hi,
+                            int *main_lo, int *main_hi)
+{
+    if (idx < 0 || !s_jump_entries || idx >= s_jump_entry_count)
+        return 0;
+    {
+        const uint16_t *e = (const uint16_t *)(s_jump_entries + (size_t)idx * 6);
+        int b_lo = (int)e[0];
+        int b_hi = (int)e[1];
+        int base = (int)e[2];
+        int len  = b_hi - b_lo;            /* corridor length (>= 0 for valid records) */
+        if (len < 0) return 0;             /* malformed record (lo>hi) — skip */
+        if (branch_lo) *branch_lo = b_lo;
+        if (branch_hi) *branch_hi = b_hi;
+        if (main_lo)   *main_lo   = base;
+        if (main_hi)   *main_hi   = base + len;
+    }
+    return 1;
 }
 
 /* Public: are TD6 branch corridors currently drivable (the walker takes/traverses

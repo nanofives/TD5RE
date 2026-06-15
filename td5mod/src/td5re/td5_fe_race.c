@@ -19,6 +19,8 @@
 #include "td5_save.h"
 #include "td5_sound.h"
 #include "td5_hud.h"
+#include "td5_track.h"
+#include "td5_types.h"
 #include "td5re.h"
 #include "td5_snk_strings.h"
 #include "td5_vectorui.h"
@@ -70,6 +72,7 @@ static void mp_setup_name_backspace(int p);
 static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now);
 static void frontend_mp_setup_init(void);
 static void frontend_mp_setup_update(void);
+static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> position picker */
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
@@ -102,6 +105,14 @@ static int  s_p1_car;
 static int  s_p1_paint;
 
 static int  s_track_max;               /* max track index for current mode */
+
+/* [#14 2026-06-15] Dedicated RANDOMIZE buttons placed ABOVE the selector on the
+ * car- and track-selection screens. Created at the next free button index (so the
+ * existing hard-coded button indices used by the action switches are untouched);
+ * navigation is geometric (frontend_spatial_pick), so a higher index above the
+ * selector is still reached by pressing UP. -1 = not created this entry. */
+static int  s_carsel_rand_btn = -1;
+static int  s_trksel_rand_btn = -1;
 
 /* Race results state */
 static int  s_results_button;           /* DAT_00497a64 */
@@ -344,6 +355,184 @@ static void frontend_cycle_track(int delta, int track_min, int track_max) {
     s_selected_track = start;
 }
 
+/* [#14] Pick a random SELECTABLE car within [lo,hi] for the RANDOMIZE button.
+ * Uses the project rand() (the MSVC CRT override in td5_msvc_rand.c). Honours the
+ * same selectability rules as cycling (locked TD5 cars / police gap skipped) by
+ * landing on a random index then stepping forward to the next selectable one.
+ * For the Masters roster (game type 5) the index space is the roster slot list,
+ * so it just picks a non-AI slot. Returns the chosen index (or the input `cur`
+ * unchanged if the range is empty). */
+static int frontend_pick_random_car(int cur, int lo, int hi) {
+    if (hi < lo) return cur;
+    int cand[TD5_CAR_COUNT];
+    int n = 0;
+    for (int i = lo; i <= hi && n < (int)(sizeof(cand)/sizeof(cand[0])); i++) {
+        int ok;
+        if (s_selected_game_type == 5)
+            ok = (i >= 0 && i < 15 && s_masters_roster_flags[i] != 1); /* roster slot, non-AI */
+        else
+            ok = frontend_car_selectable(i);                           /* unlocked, non-gap */
+        if (ok && i != cur) cand[n++] = i;                            /* prefer a change */
+    }
+    if (n == 0) {
+        /* Only the current car qualifies (or the range is a single car): keep it. */
+        return cur;
+    }
+    return cand[rand() % n];
+}
+
+/* [#14] Pick a random track for the RANDOMIZE button: choose a uniformly random
+ * SELECTABLE, present track in [0, track_max) (drag strip + cups excluded, absent
+ * levels skipped), different from the current one when possible. Writes
+ * s_selected_track and returns 1 if it changed, 0 if no alternative exists.
+ * track_max is the exclusive upper bound the caller already computed. */
+static int frontend_pick_random_track(int track_max) {
+    if (track_max <= 0) return 0;
+    /* Collect the valid candidate slots, then pick one. Bounded, deterministic
+     * count of rand() draws (one), and never lands on an excluded/absent slot. */
+    int cand[64];
+    int n = 0;
+    for (int t = 0; t < track_max && n < (int)(sizeof(cand)/sizeof(cand[0])); t++) {
+        if (t == s_selected_track) continue;                      /* prefer a change */
+        if (frontend_track_excluded_from_selector(t)) continue;
+        if (!frontend_track_level_exists(t)) continue;
+        cand[n++] = t;
+    }
+    if (n == 0) {
+        /* Only the current track is valid (or none) -- allow re-picking it so the
+         * button still resolves to a concrete, raceable track. */
+        for (int t = 0; t < track_max && n < (int)(sizeof(cand)/sizeof(cand[0])); t++) {
+            if (frontend_track_excluded_from_selector(t)) continue;
+            if (!frontend_track_level_exists(t)) continue;
+            cand[n++] = t;
+        }
+        if (n == 0) return 0;
+    }
+    int pick = cand[rand() % n];
+    if (pick == s_selected_track) return 0;
+    s_selected_track = pick;
+    return 1;
+}
+
+/* [#14] Master switch for the dedicated RANDOMIZE button (car + track selection).
+ * Default ON: shows the button ABOVE the selector and removes the legacy
+ * random-as-a-list-entry (the 2P track selector's wrap-to -1 "?" slot). Set
+ * TD5RE_RANDOM_BUTTON=0 to restore the old behavior (no button; 2P keeps "?"). */
+static int frontend_random_button_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_RANDOM_BUTTON");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "RANDOMIZE button (#14) %s (TD5RE_RANDOM_BUTTON=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+/* [item #7 2026-06-15] FORM of the randomize control: a compact ICON to the
+ * RIGHT of the selector (NEW default) vs the legacy full-width "Randomize"
+ * button. Gated separately from frontend_random_button_on() (which still decides
+ * whether the control EXISTS at all) so all the existing random_button_on()
+ * consumers — 2P "?" defaults, index guards — stay byte-identical. Default ON =
+ * icon; TD5RE_RANDOM_ICON=0 falls back to the previous full-width button. */
+static int frontend_random_icon_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_RANDOM_ICON");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "RANDOMIZE control form: %s (TD5RE_RANDOM_ICON=%s)",
+                  v ? "small ICON" : "full button", e ? e : "default");
+    }
+    return v;
+}
+
+/* Canvas-space footprint of the randomize ICON (square chip). Kept here so the
+ * button hit-rect (created in the car/track screens) and the drawer agree. */
+#define FE_RAND_ICON_W 28
+#define FE_RAND_ICON_H 28
+
+/* [item #7] Reusable randomize-icon drawer. (x,y) is the chip's TOP-LEFT in the
+ * 640x480 virtual canvas; sx/sy = window/canvas scale (same convention as every
+ * other frontend overlay). Draws a small rounded chip carrying a die "5" dot
+ * pattern (a recognisable "roll/shuffle" glyph) and brightens when focused.
+ * NON-STATIC so another screen can reuse it (caller adds its own extern). */
+void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focused) {
+    const float w = (float)FE_RAND_ICON_W;
+    const float h = (float)FE_RAND_ICON_H;
+    const float px = x * sx, py = y * sy, pw = w * sx, ph = h * sy;
+
+    /* Amber accent when focused (matches the menu-header / results amber), a
+     * dim steel chip otherwise. */
+    const uint32_t chip_focus = 0xFF3A4660u;   /* lit steel-blue interior */
+    const uint32_t chip_idle  = 0xCC202831u;   /* dim interior            */
+    const uint32_t rim_focus  = 0xFFFFCC33u;   /* amber rim when focused   */
+    const uint32_t rim_idle   = 0xFF7995FFu;   /* selector-blue rim        */
+    const uint32_t dot_col    = 0xFFFFFFFFu;   /* white pips               */
+    const uint32_t fill = focused ? chip_focus : chip_idle;
+    const uint32_t rim  = focused ? rim_focus  : rim_idle;
+
+    /* Chip: prefer the procedural neon rounded-rect (crisp at any res); fall back
+     * to a solid quad + a manual 4-edge border when shapes aren't available. */
+    if (td5_vui_shapes_available()) {
+        td5_vui_roundrect(px, py, pw, ph,
+                          5.0f * sy, 5.0f * sy,     /* corner radii */
+                          2.0f * sx, 2.0f * sy,     /* rim thickness */
+                          rim, rim, rim, fill, 1.0f);
+    } else {
+        td5_vui_quad(px, py, pw, ph, fill, -1, 0, 0, 0, 0);
+        float bx = 2.0f * sx, byb = 2.0f * sy;
+        td5_vui_quad(px, py, pw, byb, rim, -1, 0, 0, 0, 0);            /* top    */
+        td5_vui_quad(px, py + ph - byb, pw, byb, rim, -1, 0, 0, 0, 0); /* bottom */
+        td5_vui_quad(px, py, bx, ph, rim, -1, 0, 0, 0, 0);            /* left   */
+        td5_vui_quad(px + pw - bx, py, bx, ph, rim, -1, 0, 0, 0, 0);  /* right  */
+    }
+
+    /* Die "5" pip pattern: four corners + centre, inside the chip's inner area.
+     * Coords in canvas px (relative to x,y), then scaled. */
+    const float d = 4.0f;            /* pip size (canvas px) */
+    const float m = 7.0f;            /* inset of corner pips from chip edge */
+    const float cx = x + w * 0.5f - d * 0.5f;
+    const float cy = y + h * 0.5f - d * 0.5f;
+    const float lx = x + m,          rx = x + w - m - d;
+    const float ty = y + m,          by = y + h - m - d;
+    const float pip[5][2] = {
+        { lx, ty }, { rx, ty },
+        { cx, cy },
+        { lx, by }, { rx, by },
+    };
+    for (int i = 0; i < 5; i++)
+        td5_vui_quad(pip[i][0] * sx, pip[i][1] * sy, d * sx, d * sy,
+                     dot_col, -1, 0, 0, 0, 0);
+}
+
+/* [item #7] Render-path drawers for the randomize ICON on the car- and track-
+ * selection screens. The hit-rect button (s_*_rand_btn) is created HIDDEN so the
+ * generic button loop skips its 9-slice + label; we paint the icon here instead,
+ * at the button's own rect, lit when it holds focus. NON-STATIC so td5_frontend.c
+ * can call them from its render switch (CAR_SELECTION / TRACK_SELECTION). Inert
+ * when the control is off, in full-button form, or the handle isn't live. */
+void frontend_render_carsel_randomize_icon(float sx, float sy) {
+    if (!frontend_random_button_on() || !frontend_random_icon_on()) return;
+    if (!s_anim_complete) return;                                 /* wait for slide-in to settle */
+    int b = s_carsel_rand_btn;
+    if (b < 0 || b >= FE_MAX_BUTTONS) return;
+    if (!s_buttons[b].active || s_buttons[b].hidden == 0) return; /* full-button mode draws itself */
+    if (s_buttons[b].disabled) return;                            /* hidden by the colour picker */
+    frontend_draw_randomize_icon((float)s_buttons[b].x, (float)s_buttons[b].y,
+                                 sx, sy, (s_selected_button == b));
+}
+
+void frontend_render_trksel_randomize_icon(float sx, float sy) {
+    if (!frontend_random_button_on() || !frontend_random_icon_on()) return;
+    if (!s_anim_complete) return;                                 /* wait for slide-in to settle */
+    int b = s_trksel_rand_btn;
+    if (b < 0 || b >= FE_MAX_BUTTONS) return;
+    if (!s_buttons[b].active || s_buttons[b].hidden == 0) return;
+    if (s_buttons[b].disabled) return;
+    frontend_draw_randomize_icon((float)s_buttons[b].x, (float)s_buttons[b].y,
+                                 sx, sy, (s_selected_button == b));
+}
+
 static void frontend_load_selected_car_preview(void) {
     int car_index = frontend_current_car_index();
     if (s_car_preview_surface > 0) {
@@ -493,7 +682,8 @@ static void frontend_quickrace_clamp_counts(void) {
 
 void Screen_QuickRaceMenu(void) {
     switch (s_inner_state) {
-    case 0: /* Init: validate indices, create the 7-row improved layout */
+    case 0: /* Init: validate indices, create the 8-row improved layout (row 6 =
+            * dev Span Offset, row 7 = OK/Back; dev rows hidden in release) */
         frontend_init_return_screen(TD5_SCREEN_QUICK_RACE);
         TD5_LOG_D(LOG_TAG, "QuickRaceMenu: init");
         s_anim_complete = 0;
@@ -545,8 +735,8 @@ void Screen_QuickRaceMenu(void) {
           (void)bi;
 #endif
         }
-        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(6),  96, 32); /* QR_BTN_OK */
-        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(6), 112, 32); /* QR_BTN_BACK */
+        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(7),  96, 32); /* QR_BTN_OK */
+        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(7), 112, 32); /* QR_BTN_BACK */
         /* [2026-06-12] Dev-only toggles to the RIGHT of the Opponents row (y=row3):
          * PlayerIsAI (slot 0 = AI) and AutoThrottle (trace auto-throttle). They sit
          * past the Opponents value column; A/Enter flips them, the label shows state.
@@ -560,6 +750,28 @@ void Screen_QuickRaceMenu(void) {
 #ifdef TD5RE_RELEASE
           if (bp >= 0) { s_buttons[bp].hidden = 1; s_buttons[bp].disabled = 1; }
           if (bt >= 0) { s_buttons[bt].hidden = 1; s_buttons[bt].disabled = 1; }
+#endif
+        }
+        /* [2026-06-15 TASK A1] Dev-only "Span Offset" click-to-type button on its
+         * OWN row below the "AI Screens" row (QR_BTN_SPLITSCREENS @ row5); OK/Back
+         * moved down to row7 above. Created LAST so QR_BTN_OK/BACK/PLAYERAI/AUTOTHR
+         * indices stay 7/8/9/10. Activating it toggles the span input-active state
+         * (frontend_qr_span_toggle_active in td5_frontend.c, which owns the editable
+         * buffer + the value/caret render). Hidden+disabled in release; also gated
+         * by the existing TD5RE_DEV_SPAN_FIELD knob via the widget render path. */
+        { int bs = frontend_create_button("Span Offset", QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32); /* QR_BTN_SPAN */
+#ifdef TD5RE_RELEASE
+          if (bs >= 0) { s_buttons[bs].hidden = 1; s_buttons[bs].disabled = 1; }
+#else
+          /* TD5RE_DEV_SPAN_FIELD=0 hides the whole field (button + value/caret); the
+           * value/caret render in td5_frontend.c gates on the same knob. Cached here
+           * (the canonical one-time log lives in frontend_qr_span_field_on). */
+          static int s_qr_span_btn_on = -1;
+          if (s_qr_span_btn_on < 0) {
+              const char *e = getenv("TD5RE_DEV_SPAN_FIELD");
+              s_qr_span_btn_on = (e && e[0] == '0') ? 0 : 1;
+          }
+          if (bs >= 0 && !s_qr_span_btn_on) { s_buttons[bs].hidden = 1; s_buttons[bs].disabled = 1; }
 #endif
         }
 
@@ -681,6 +893,19 @@ void Screen_QuickRaceMenu(void) {
                 frontend_play_sfx(2);
                 TD5_LOG_I(LOG_TAG, "QuickRace dev toggle: AutoThrottle=%d", g_td5.ini.auto_throttle);
             }
+
+#ifndef TD5RE_RELEASE
+            /* [2026-06-15 TASK A1] Dev "Span Offset" button: A/Enter (or a click)
+             * toggles the click-to-type input-active state. While active, the
+             * widget render path captures typed digits/backspace/'-' into the span
+             * buffer and commits live to g_td5.ini.start_span_offset; pressing
+             * A/Enter again deactivates (commits). State + buffer + render live in
+             * td5_frontend.c (frontend_qr_span_toggle_active). */
+            if (s_button_index == QR_BTN_SPAN && s_button_count > QR_BTN_SPAN &&
+                !s_buttons[QR_BTN_SPAN].hidden) {
+                frontend_qr_span_toggle_active();
+            }
+#endif
 
             if (s_button_index == QR_BTN_OK) {
                 /* Block if car or track is locked */
@@ -842,6 +1067,13 @@ static void frontend_mp_simul_carsel_init(void) {
     s_car_roster_max = TD5_CAR_COUNT - 1;
 
     for (p = 0; p < n; p++) {
+        /* [MP SESSION PERSISTENCE 2026-06] Phase-1 grid: prefer the session-saved
+         * car/paint/color/trans (already mirrored into the live arrays by the
+         * lobby START restore) over the per-entry defaults, so a returning player
+         * keeps their previous pick. Recover the palette cursor from the restored
+         * colour where it matches a swatch (so the paint cycler resumes there).
+         * Gated by TD5RE_MP_SESSION (off / not-yet-valid => defaults, as before). */
+        int has_session = (mp_session_is_valid() && p < mp_session_count());
         int car = s_mp_player_car[p];
         if (car < s_car_roster_min) car = s_car_roster_min;
         if (car > s_car_roster_max) car = s_car_roster_max;
@@ -849,9 +1081,18 @@ static void frontend_mp_simul_carsel_init(void) {
             car = frontend_car_cycle_step(car, 1, s_car_roster_min, s_car_roster_max);
         s_mp_player_car[p]       = car;
         s_mp_player_ready[p]     = 0;
-        s_mp_player_color_idx[p] = p % TD6_PALETTE_N;          /* distinct default colour */
-        s_mp_player_color[p]     = (int)s_td6_palette[s_mp_player_color_idx[p]];
-        s_mp_player_trans[p]     = 0;                          /* Automatic by default */
+        if (has_session) {
+            int k;
+            s_mp_player_color_idx[p] = p % TD6_PALETTE_N;      /* fallback cursor */
+            for (k = 0; k < TD6_PALETTE_N; k++)
+                if ((int)s_td6_palette[k] == s_mp_player_color[p]) { s_mp_player_color_idx[p] = k; break; }
+            /* s_mp_player_color / s_mp_player_paint / s_mp_player_trans keep their
+             * restored values. */
+        } else {
+            s_mp_player_color_idx[p] = p % TD6_PALETTE_N;      /* distinct default colour */
+            s_mp_player_color[p]     = (int)s_td6_palette[s_mp_player_color_idx[p]];
+            s_mp_player_trans[p]     = 0;                      /* Automatic by default */
+        }
         s_mp_pane_btn[p]         = MP_BTN_CAR;
         s_mp_pane_substate[p]    = 0;
         s_mp_pane_spec_car[p]    = -1;
@@ -1025,6 +1266,13 @@ static void frontend_mp_setup_init(void) {
         td5_input_set_input_source(p, 0);   /* drop exclusives so scan handles poll */
 
     for (p = 0; p < n; p++) {
+        /* [MP SESSION PERSISTENCE 2026-06] Phase-0 setup: prefer the session-saved
+         * name + accent for a returning player so the NAME field and identity
+         * colour come up pre-filled (the lobby START restore already mirrors them
+         * into the live arrays; this keeps it correct regardless of entry order).
+         * Gated by TD5RE_MP_SESSION. */
+        if (mp_session_is_valid() && p < mp_session_count())
+            mp_session_restore_player(p);
         if (s_mp_player_accent[p] == 0)
             s_mp_player_accent[p] = (int)(k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
         s_mp_player_ready[p]  = 0;
@@ -1148,16 +1396,263 @@ static void frontend_mp_setup_update(void) {
     if (all_ready) {
         if (s_mp_simul_ready_ms == 0) s_mp_simul_ready_ms = now;
         if (now - s_mp_simul_ready_ms >= 500u) {
-            /* Advance to the car-select grid (phase 1). */
-            s_mp_phase = 1;
+            /* Name + colour done. [#8] Insert the split-screen POSITION picker
+             * here (after lobby + colour, before the car grid) when the feature is
+             * active and not already settled for this roster; otherwise jump
+             * straight to the car grid (phase 1). */
             s_mp_simul_ready_ms = 0;
-            s_inner_state = 0;        /* intercept will run carsel_init next frame */
-            TD5_LOG_I(LOG_TAG, "MP setup: all %d ready -> car select", n);
+            frontend_mp_position_enter();
             return;
         }
     } else {
         s_mp_simul_ready_ms = 0;
     }
+}
+
+/* [#8] Decide what happens after name/colour setup completes: show the position
+ * picker, or skip it. Gate "once per session / re-show on new player": show only
+ * if positions aren't assigned for the CURRENT human count. When skipping we
+ * either restore the stored cells (knob on, count matches) or fall back to
+ * identity (knob off / nothing stored) and go straight to the car grid. */
+static void frontend_mp_position_enter(void) {
+    int n = s_num_human_players;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    if (!mp_positions_enabled()) {
+        /* Feature off: identity mapping, straight to the car grid. */
+        mp_positions_reset_identity();
+        s_mp_phase = 1;
+        s_inner_state = 0;            /* carsel_init runs next frame */
+        TD5_LOG_I(LOG_TAG, "MP setup: positions disabled -> car select (%d players)", n);
+        return;
+    }
+    if (mp_session_restore_positions(n)) {
+        /* Already chosen this session for this exact count: reuse, skip picker. */
+        s_mp_phase = 1;
+        s_inner_state = 0;
+        TD5_LOG_I(LOG_TAG, "MP setup: positions remembered -> car select (%d players)", n);
+        return;
+    }
+    /* Fresh / player-count changed: show the picker. Start from identity so the
+     * grid is well-defined, clear ready latches, seed per-player edge trackers. */
+    {
+        int p;
+        mp_positions_reset_identity();
+        for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
+            s_mp_player_ready[p]  = 0;
+            s_mp_rep_ms[p]        = 0;
+            s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        }
+    }
+    td5_frontend_set_screen(TD5_SCREEN_MP_POSITION);   /* resets s_inner_state, buttons */
+    TD5_LOG_I(LOG_TAG, "MP setup: -> position picker (%d players)", n);
+}
+
+/* [#8] Split-screen POSITION picker handler. Each pad moves its player's chosen
+ * cell with the D-pad (auto-repeat); moving onto another player's cell SWAPS the
+ * two (couch-friendly, no "blocked" feel). A = ready latch, B = back to the
+ * name/colour setup. P1 L/R cycles the split layout (since the local lobby flow
+ * never visits TwoPlayerOptions). All ready -> commit cells to the session and
+ * advance to the car grid (phase 1 of CarSelection). */
+void Screen_MpPosition(void) {
+    int p, n = s_num_human_players;
+    int cols = 1, rows = 1, missing = 0, ncells;
+    int all_ready = 1, want_back = 0;
+    uint32_t now = td5_plat_time_ms();
+    static uint32_t s_pos_ready_ms = 0;
+    static uint32_t s_p1_layout_prev = 0;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    ncells = cols * rows;
+    if (ncells > TD5_MAX_VIEWPORTS) ncells = TD5_MAX_VIEWPORTS;
+
+    s_anim_complete = 1;   /* no slide-in; allow normal flow (and our own ESC) */
+
+    /* Host (player 0) can cycle the split layout with LEFT/RIGHT. Changing it can
+     * shrink the grid, so clamp every cell back into range afterwards. */
+    {
+        int lcnt = 1;
+        uint32_t b0 = mp_simul_player_nav(0);
+        uint32_t e0 = b0 & ~s_p1_layout_prev;
+        s_p1_layout_prev = b0;
+        mp_split_layouts(n, &lcnt);
+        if (lcnt > 1 && (e0 & 3)) {
+            int sel = s_mp_layout_sel + ((e0 & 2) ? 1 : -1);
+            while (sel < 0) sel += lcnt;
+            sel %= lcnt;
+            if (sel != s_mp_layout_sel) {
+                int q, nc;
+                s_mp_layout_sel = sel;
+                mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+                if (cols < 1) cols = 1;
+                if (rows < 1) rows = 1;
+                ncells = cols * rows;
+                if (ncells > TD5_MAX_VIEWPORTS) ncells = TD5_MAX_VIEWPORTS;
+                /* Clamp / de-dup cells: any out-of-range or duplicate cell gets the
+                 * lowest free cell, so the permutation stays a valid bijection. */
+                for (q = 0; q < n; q++) {
+                    int dup = 0, r2;
+                    if (s_mp_player_cell[q] < 0 || s_mp_player_cell[q] >= ncells) dup = 1;
+                    for (r2 = 0; r2 < q && !dup; r2++)
+                        if (s_mp_player_cell[r2] == s_mp_player_cell[q]) dup = 1;
+                    if (dup) {
+                        for (nc = 0; nc < ncells; nc++) {
+                            int taken = 0, r3;
+                            for (r3 = 0; r3 < n; r3++)
+                                if (r3 != q && s_mp_player_cell[r3] == nc) { taken = 1; break; }
+                            if (!taken) { s_mp_player_cell[q] = nc; break; }
+                        }
+                    }
+                }
+                frontend_play_sfx(2);
+            }
+        }
+    }
+
+    for (p = 0; p < n; p++) {
+        uint32_t bits = mp_simul_player_nav(p);
+        uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
+        s_mp_pane_nav_prev[p] = bits;
+
+        if (s_mp_player_ready[p]) {
+            if (edge & 0x10) { s_mp_player_ready[p] = 0; s_pos_ready_ms = 0; frontend_play_sfx(5); }
+            if (edge & 0x20) want_back = 1;
+            continue;
+        }
+        all_ready = 0;
+
+        /* D-pad move with auto-repeat. Compute the target cell from the current
+         * (col,row); if occupied, swap; else move. P1's LEFT/RIGHT is reserved for
+         * the layout cycler above, so for p==0 only UP/DOWN move the cell (P1 can
+         * still place via UP/DOWN; with a 1-row layout P1 simply readies). */
+        if (mp_repeat_fire(p, bits, edge, now)) {
+            int cell = s_mp_player_cell[p];
+            int col = cell % cols, row = cell / cols;
+            int ncol = col, nrow = row, target;
+            if (!(p == 0)) {
+                if (bits & 1) ncol--;
+                if (bits & 2) ncol++;
+            }
+            if (bits & 4) nrow--;
+            if (bits & 8) nrow++;
+            if (ncol < 0) ncol = 0;
+            if (ncol > cols - 1) ncol = cols - 1;
+            if (nrow < 0) nrow = 0;
+            if (nrow > rows - 1) nrow = rows - 1;
+            target = nrow * cols + ncol;
+            if (target >= ncells) target = ncells - 1;
+            if (target != cell) {
+                int q;
+                for (q = 0; q < n; q++) {
+                    if (q != p && s_mp_player_cell[q] == target) {
+                        s_mp_player_cell[q] = cell;   /* swap occupants */
+                        s_mp_player_ready[q] = 0;     /* bumped -> must re-confirm */
+                        s_pos_ready_ms = 0;
+                        break;
+                    }
+                }
+                s_mp_player_cell[p] = target;
+                frontend_play_sfx(2);
+            }
+        }
+
+        if (edge & 0x10) { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }  /* A = ready */
+        if (edge & 0x20) want_back = 1;                                       /* B = back  */
+    }
+
+    if (frontend_check_escape()) want_back = 1;
+
+    if (want_back) {
+        /* Back to the name/colour setup (phase 0). Keep s_mp_simul set so
+         * CarSelection re-enters phase 0 cleanly; clear ready latches. */
+        int q;
+        for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) s_mp_player_ready[q] = 0;
+        s_pos_ready_ms = 0;
+        s_mp_phase = 0;
+        s_inner_state = 0;
+        td5_plat_input_flush_nav();
+        TD5_LOG_I(LOG_TAG, "MP position: back -> name/colour setup");
+        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        return;
+    }
+
+    for (p = 0; p < n; p++)
+        if (!s_mp_player_ready[p]) { all_ready = 0; break; }
+
+    if (all_ready) {
+        if (s_pos_ready_ms == 0) s_pos_ready_ms = now;
+        if (now - s_pos_ready_ms >= 400u) {
+            /* Commit the chosen cells to the session, then advance to the car grid. */
+            mp_session_commit_positions(n);
+            s_pos_ready_ms = 0;
+            s_mp_phase = 1;
+            s_inner_state = 0;        /* CarSelection runs carsel_init next frame */
+            for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) s_mp_player_ready[p] = 0;
+            td5_plat_input_flush_nav();
+            TD5_LOG_I(LOG_TAG, "MP position: committed -> car select (%d players)", n);
+            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+            return;
+        }
+    } else {
+        s_pos_ready_ms = 0;
+    }
+}
+
+/* [#2 2026-06-15 hold-to-cycle] Single-player car-select LEFT/RIGHT auto-repeat.
+ *
+ * Root cause of the regression: keyboard menu nav is drained from the platform
+ * WM_KEYDOWN FIFO, which DELIBERATELY filters OS key auto-repeat
+ * (td5_platform_win32.c WM_KEYDOWN: `if (!(lParam & (1L<<30)))`), and the
+ * gamepad path is pure rising-edge (`!s_prev_*_state`). So `s_arrow_input` —
+ * which frontend_option_delta() reads — fires exactly ONCE per physical press,
+ * and holding a direction no longer kept cycling cars. (The simultaneous-MP
+ * grid already worked around this with its own held-state repeat, mp_repeat_fire;
+ * the single-player car selector had no such helper, so it lost hold-to-cycle.)
+ *
+ * Fix, contained to this screen: read the LIVE held direction (keyboard arrows +
+ * any gamepad's nav bits) and, after a short arm delay, re-synthesize the
+ * s_arrow_input LEFT/RIGHT bit at a steady rate. The first press is still
+ * delivered by the FIFO as before; this only adds the repeats. Returns the arrow
+ * bit to OR into s_arrow_input on a fire frame (1=LEFT, 2=RIGHT), else 0.
+ *
+ * Knob: TD5RE_CARSEL_HOLD (default on; "0" restores single-step-per-press). */
+static int frontend_carsel_hold_repeat(void) {
+    static int  enabled = -1;
+    static uint32_t next_ms = 0;     /* next allowed repeat fire (0 = disarmed) */
+    static uint32_t prev_held = 0;   /* held bits last frame (for edge detect)  */
+
+    if (enabled < 0) {
+        const char *e = getenv("TD5RE_CARSEL_HOLD");
+        enabled = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "car-select hold-to-cycle (#2) %s (TD5RE_CARSEL_HOLD=%s)",
+                  enabled ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    if (!enabled) return 0;
+
+    /* Live HELD direction: keyboard arrows (scancodes) + aggregate gamepad nav.
+     * s_fe_gamepad_nav is the held pad snapshot frontend_poll_input already took
+     * this frame (bit 0 = LEFT, bit 1 = RIGHT), so we reuse it instead of polling
+     * DirectInput a second time. bit 1 = LEFT, bit 2 = RIGHT in s_arrow_input. */
+    uint32_t held = 0;
+    if (td5_plat_input_key_pressed(0xCB) || (s_fe_gamepad_nav & 0x01)) held |= 1; /* Left  */
+    if (td5_plat_input_key_pressed(0xCD) || (s_fe_gamepad_nav & 0x02)) held |= 2; /* Right */
+    if (held == 3) held = 0;            /* both at once: ambiguous, ignore */
+
+    uint32_t now = td5_plat_time_ms();
+    uint32_t edge = held & ~prev_held;
+    prev_held = held;
+
+    if (!held) { next_ms = 0; return 0; }
+    /* Rising edge: the FIFO already delivered this press as the first step, so
+     * here we only ARM the repeat timer (do NOT fire, to avoid a double step). */
+    if (edge) { next_ms = now + 360u; return 0; }
+    /* Held past the arm delay: fire at a steady moderate rate. */
+    if (next_ms && now >= next_ms) { next_ms = now + 110u; return (int)held; }
+    return 0;
 }
 
 void Screen_CarSelection(void) {
@@ -1184,6 +1679,7 @@ void Screen_CarSelection(void) {
         frontend_init_return_screen(TD5_SCREEN_CAR_SELECTION);
         TD5_LOG_D(LOG_TAG, "CarSelection: state 0 - init");
         s_anim_complete = 0;
+        s_carsel_rand_btn = -1;   /* [#14] (re)assigned when buttons are built in case 4 */
 
         /* Reload MainMenu.tga background so that returning from TrackSelection
          * (which loads TrackSelect.tga) restores the correct background.
@@ -1342,6 +1838,33 @@ void Screen_CarSelection(void) {
         frontend_create_button(SNK_OkButTxt,   46, 369,  64, 32);
         if (!s_network_active)
             frontend_create_button(SNK_BackButTxt, 118, 369, 96, 32);
+        /* [#14] RANDOMIZE: a dedicated control for the Car selector. Created LAST
+         * so the Car/Paint/Config/Auto/OK/Back indices used by the action switch
+         * (cases 0..5) are unchanged; navigation is geometric so it's reachable
+         * from the Car row. Activating it rolls a random selectable car.
+         * (frontend_apply_color_panel_layout only repositions buttons 0..5, so this
+         * one keeps its fixed position.) Skipped in network mode so the Back button
+         * (created only when !network) keeps index 5 and RANDOMIZE can't collide
+         * with the case-5 (Back) switch arm; net car-select picks are a deliberate
+         * per-client choice anyway, not randomized.
+         * [item #7 2026-06-15] NEW default form = a small ICON just to the RIGHT of
+         * the Car selector (Car rect = 46,169,168,32 -> right edge 214; icon at
+         * x=218 on the same row). The car preview begins at x=232 but its left
+         * margin is empty background where the chip lands, and the icon overlay is
+         * composited after the preview, so it reads cleanly. The hit-rect is
+         * created HIDDEN so the generic button loop skips its frame+label; the icon
+         * is painted in frontend_render_carsel_randomize_icon. The button stays
+         * clickable + keyboard-navigable (mouse/nav skip only disabled, not
+         * hidden). TD5RE_RANDOM_ICON=0 restores the legacy full-width button. */
+        if (frontend_random_button_on() && !s_network_active) {
+            if (frontend_random_icon_on()) {
+                s_carsel_rand_btn = frontend_create_button(NULL, 218, 171,
+                                                           FE_RAND_ICON_W, FE_RAND_ICON_H);
+                if (s_carsel_rand_btn >= 0) s_buttons[s_carsel_rand_btn].hidden = 1;
+            } else {
+                s_carsel_rand_btn = frontend_create_button("Randomize", 46, 133, 168, 32);
+            }
+        }
         frontend_apply_color_panel_layout();   /* fix positions immediately (picker may be open) */
 
         /* Time Trials: grey out Manual button */
@@ -1385,6 +1908,36 @@ void Screen_CarSelection(void) {
                 return;
             }
         }
+        /* [#2 hold-to-cycle] Re-synthesize LEFT/RIGHT auto-repeat while a
+         * direction is HELD on the Car selector (button 0). The platform nav FIFO
+         * drops OS key auto-repeat and the gamepad path is rising-edge only, so
+         * without this a held arrow cycled the car exactly once. Only fires while
+         * the Car row is focused and no modal (colour picker) is open; the result
+         * is fed through the SAME s_arrow_input -> frontend_option_delta -> case 0
+         * path as a real press, so the cycle/skip/preview-slide logic is unchanged.
+         * Track-row hold-to-cycle (TrackSelection) is intentionally untouched — #2
+         * is scoped to car selection. */
+        if (!s_color_panel_visible && s_button_index < 0 && s_selected_button == 0) {
+            int rep = frontend_carsel_hold_repeat();
+            if (rep) { s_arrow_input |= rep; s_input_ready = 1; }
+        }
+
+        /* [#14] Keep RANDOMIZE out of the way while the TD6 colour picker is open
+         * (the picker fills the column band and is modal). Disabled so it can't be
+         * navigated to or clicked; restored when the picker closes.
+         * [item #7] In ICON form the hit-rect is permanently hidden (the icon is
+         * drawn from the render path, not the button loop) — only toggle disabled
+         * there; in the legacy full-button form keep the original hidden toggle so
+         * that path stays byte-identical. */
+        if (s_carsel_rand_btn >= 0 && s_carsel_rand_btn < FE_MAX_BUTTONS &&
+            s_buttons[s_carsel_rand_btn].active) {
+            if (!frontend_random_icon_on())
+                s_buttons[s_carsel_rand_btn].hidden = s_color_panel_visible;
+            s_buttons[s_carsel_rand_btn].disabled = s_color_panel_visible;
+            if (s_color_panel_visible && s_selected_button == s_carsel_rand_btn)
+                s_selected_button = 0;
+        }
+
         /* Render car preview overlay */
         /* Car-select also enters on a bare mouse CLICK while the colour panel is
          * open, so swatch/map clicks reach the panel — a click doesn't set
@@ -1561,6 +2114,22 @@ void Screen_CarSelection(void) {
                                     : TD5_SCREEN_RACE_TYPE_MENU;
                 s_inner_state = 0x14;
                 break;
+            }
+
+            /* [#14] RANDOMIZE (index beyond the fixed 0..5 switch): roll a random
+             * selectable car, then run the SAME change flow as a manual cycle
+             * (reset paint/config, slide-in via state 10). Pressed on confirm. */
+            if (active_button == s_carsel_rand_btn && s_carsel_rand_btn >= 0) {
+                int old = s_selected_car;
+                s_selected_car = frontend_pick_random_car(s_selected_car,
+                                                          s_car_roster_min, s_car_roster_max);
+                s_selected_paint  = 0;
+                s_selected_config = 0;
+                if (s_color_panel_visible) frontend_set_color_panel(0);
+                frontend_play_sfx(3);
+                TD5_LOG_I(LOG_TAG, "CarSel RANDOMIZE: %d -> %d (roster %d..%d)",
+                          old, s_selected_car, s_car_roster_min, s_car_roster_max);
+                s_inner_state = 10;  /* trigger new-car image load/slide */
             }
 
             /* Auto-hide the color panel + restore PAINT arrows when the selection
@@ -1951,6 +2520,7 @@ void Screen_TrackSelection(void) {
         frontend_init_return_screen(TD5_SCREEN_TRACK_SELECTION);
         TD5_LOG_D(LOG_TAG, "TrackSelection: init");
         s_anim_complete = 0;
+        s_trksel_rand_btn = -1;   /* [#14] (re)assigned with the buttons below */
 
         /* Validate track index for cup modes: skip locked/invalid NPC groups */
         /* Determine track max for current mode */
@@ -1961,8 +2531,13 @@ void Screen_TrackSelection(void) {
         } else {
             s_track_max = s_total_unlocked_tracks;
         }
-        if (s_selected_track >= s_track_max) s_selected_track = (s_two_player_mode ? -1 : 0);
-        if (!s_two_player_mode && s_selected_track < 0) s_selected_track = 0;
+        /* [#14] With the RANDOMIZE button on (default), the 2P "?" (-1) random list
+         * entry is retired, so default an out-of-range/stale selection to track 0 in
+         * every mode. (TD5RE_RANDOM_BUTTON=0 restores the legacy 2P -1 default.) */
+        if (s_selected_track >= s_track_max)
+            s_selected_track = (s_two_player_mode && !frontend_random_button_on()) ? -1 : 0;
+        if (s_selected_track < 0 && (!s_two_player_mode || frontend_random_button_on()))
+            s_selected_track = 0;
         /* Never open parked on a selector-excluded slot — drag strip (19) or a
          * championship cup (20-25), see frontend_track_excluded_from_selector. */
         if (frontend_track_excluded_from_selector(s_selected_track)) s_selected_track = 0;
@@ -1984,6 +2559,25 @@ void Screen_TrackSelection(void) {
         /* Quick Race mode: no Back button */
         if (s_flow_context != 2) {
             frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);  /* 7: Back */
+        }
+        /* [#14] RANDOMIZE: dedicated control for the Track selector. Created LAST
+         * so the Track/Forwards/Opponents/.../OK/Back indices (0..7) used by the
+         * action handlers are unchanged; geometric nav reaches it from the Track
+         * row. Activating it picks a random track.
+         * [item #7 2026-06-15] NEW default form = a small ICON to the RIGHT of the
+         * Track selector (Track rect = 120,97,224,32 -> right edge 344). Hit-rect
+         * created HIDDEN so the generic button loop skips its frame+label; the icon
+         * is painted in frontend_render_trksel_randomize_icon. Stays clickable +
+         * keyboard-navigable (mouse/nav skip only disabled, not hidden).
+         * TD5RE_RANDOM_ICON=0 restores the legacy full-width button. */
+        if (frontend_random_button_on()) {
+            if (frontend_random_icon_on()) {
+                s_trksel_rand_btn = frontend_create_button(NULL, 348, 99,
+                                                           FE_RAND_ICON_W, FE_RAND_ICON_H);
+                if (s_trksel_rand_btn >= 0) s_buttons[s_trksel_rand_btn].hidden = 1;
+            } else {
+                s_trksel_rand_btn = frontend_create_button("Randomize", 120, 57, 224, 32);
+            }
         }
 
         /* Network track-pick (entered from the lobby's SELECT TRACK, flow
@@ -2034,8 +2628,10 @@ void Screen_TrackSelection(void) {
                 /* Cycle track index, skipping tracks whose level zips are absent */
                 if (s_network_active) {
                     frontend_cycle_track(delta, 0, s_track_max + 1);
-                } else if (s_two_player_mode) {
-                    /* 2P supports -1 = random, handled separately */
+                } else if (s_two_player_mode && !frontend_random_button_on()) {
+                    /* [legacy, TD5RE_RANDOM_BUTTON=0] 2P supports -1 = random as a
+                     * list entry, handled separately. With the RANDOMIZE button on
+                     * (default) this wrap-to -1 is removed (see the else branch). */
                     s_selected_track += delta;
                     if (s_selected_track < -1) s_selected_track = s_track_max - 1;
                     if (s_selected_track >= s_track_max) s_selected_track = -1;
@@ -2048,6 +2644,10 @@ void Screen_TrackSelection(void) {
                          !frontend_track_level_exists(s_selected_track)))
                         frontend_cycle_track(delta, 0, s_track_max);
                 } else {
+                    /* [#14] Normal cycling (incl. 2P when the RANDOMIZE button
+                     * replaces the old "?" random list entry): wrap 0..track_max-1,
+                     * never landing on -1. Random is now the dedicated button. */
+                    if (s_selected_track < 0) s_selected_track = 0;  /* drop any stale -1 */
                     frontend_cycle_track(delta, 0, s_track_max);
                 }
                 frontend_play_sfx(2); /* ping2.wav cycle */
@@ -2092,8 +2692,11 @@ void Screen_TrackSelection(void) {
                     s_game_option_laps += delta;
                     if (s_game_option_laps < 0) s_game_option_laps = 0;
                     if (s_game_option_laps > 9) s_game_option_laps = 9;
-                } else if (selected_button == 4) {     /* traffic volume Off/Light/Normal/Heavy */
-                    s_game_option_traffic = (s_game_option_traffic + delta) & 3;
+                } else if (selected_button == 4) {     /* traffic volume Off/Light/Normal/Heavy/Very-High */
+                    /* [dynamic-traffic] 5-state wrap (delta may be negative). */
+                    s_game_option_traffic =
+                        ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
+                         + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
                 } else if (selected_button == 5) {     /* police on/off */
                     s_game_option_cops = (s_game_option_cops + delta) & 1;
                 }
@@ -2114,16 +2717,43 @@ void Screen_TrackSelection(void) {
                      * [dynamic-traffic] Persist the traffic volume picked on
                      * this screen too. */
                     g_td5.ini.laps    = s_game_option_laps;
-                    g_td5.ini.traffic = s_game_option_traffic & 3;
+                    /* [dynamic-traffic] Persist the full 0..4 volume (was & 3,
+                     * which truncated VERY HIGH to OFF on save). */
+                    g_td5.ini.traffic = s_game_option_traffic;
+                    if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
+                    if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
+                        g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
                     td5_ini_persist_options();
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 6;
                 }
             }
 
-            if (s_button_index == 7) { /* Back */
+            /* Back (button 7). Guard against the RANDOMIZE button landing on index
+             * 7 in Quick Race flow (flow_context==2 skips Back, so RANDOMIZE becomes
+             * index 7) — without this, pressing RANDOMIZE there would also trip Back. */
+            if (s_button_index == 7 && s_button_index != s_trksel_rand_btn) { /* Back */
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 6;
+            }
+
+            /* [#14] RANDOMIZE: pick a random track, then run the SAME change flow as
+             * a manual cycle (hide preview this frame, reload + slide-in via 5->9).
+             * track_max is exclusive; network caps at 0x13 like frontend_cycle_track. */
+            if (s_trksel_rand_btn >= 0 && s_button_index == s_trksel_rand_btn) {
+                int bound = s_network_active ? 0x13 : s_track_max;
+                if (frontend_pick_random_track(bound)) {
+                    frontend_play_sfx(3);
+                    TD5_LOG_I(LOG_TAG, "TrackSel RANDOMIZE: track=%d level=%d name=%s",
+                              s_selected_track, td5_asset_level_number(s_selected_track),
+                              frontend_get_track_name(s_selected_track));
+                    s_track_switch_tick = 0;
+                    frontend_update_direction_button_visibility(1, 1);
+                    frontend_update_laps_button_visibility(3);
+                    s_inner_state = 5;
+                } else {
+                    frontend_play_sfx(10); /* nothing else to pick */
+                }
             }
         }
         break;
@@ -2287,6 +2917,261 @@ void Screen_PostRaceHighScore(void) {
     }
 }
 
+/* [item 17 2026-06-14] Race-results screen fixes: entry slide-in animation +
+ * restrict car-cycling to when the selector bar is focused. Gated by
+ * TD5RE_RESULTS_FIX (default on; "0" restores the old behavior). */
+static int results_fix_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_RESULTS_FIX");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "results-screen fix %s (TD5RE_RESULTS_FIX=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+/* ========================================================================
+ * [#10] All-players race-end SUMMARY
+ * ========================================================================
+ *
+ * Reworks the post-race results from the original one-car-at-a-time browse
+ * (the single-slot stat sheet in frontend_render_race_results_overlay) into a
+ * single TABLE that shows EVERY participating racer at once, with per-racer:
+ * finishing POSITION, player/car, TOP SPEED, AVERAGE SPEED, plus the new
+ * telemetry COLLISIONS / TIME ON AIR / DRIFTS (g_race_metrics, accumulated each
+ * sim tick in td5_physics_accumulate_metrics).
+ *
+ * Knob: TD5RE_RACE_SUMMARY (default ON). When ON, Screen_RaceResults disables
+ * the L/R per-car browse (state 6) so the panel stays put and this all-players
+ * table is what shows; "0" restores the faithful one-at-a-time results screen.
+ *
+ * RENDER WIRING (the one cross-file line this needs — see report): the frontend
+ * draw happens in td5_frontend.c's render switch, which clears the frame AFTER
+ * the screen handler runs, so this table must be drawn from the RENDER path.
+ * frontend_render_race_summary_overlay() is exported for that; td5_frontend.c
+ * must call it for TD5_SCREEN_RACE_RESULTS when race_summary_on() (one line +
+ * an extern decl). Until that line lands the OLD single-slot overlay renders. */
+int frontend_race_summary_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_RACE_SUMMARY");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "race-end all-players summary %s (TD5RE_RACE_SUMMARY=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+/* Speed: raw internal units -> MPH/KPH, identical to the HUD speedometer and
+ * frontend_convert_speed (kept local since that helper is file-static to
+ * td5_frontend.c). */
+static int frontend_summary_speed_disp(int raw, int kph) {
+    if (raw < 0) raw = 0;
+    return kph ? (raw * 256 + 389) / 778    /* KPH [CONFIRMED @0x438ebc] */
+               : (raw * 256 + 625) / 1252;  /* MPH [CONFIRMED @0x438ed4] */
+}
+
+/* SHORT car name (config.nfo line 1, e.g. "'97 CAMARO") for a RACE SLOT, read
+ * lazily from the car's archive and cached. Mirrors the frontend's High-Scores
+ * short-name reader; per-slot car index comes from g_td5.ai_car_indices[] (set
+ * for every slot incl. slot 0 at race schedule build). */
+static const char *frontend_summary_car_name(int slot) {
+    static char  s_name[TD5_MAX_RACER_SLOTS][24];
+    static int   s_loaded[TD5_MAX_RACER_SLOTS];
+    static int   s_for_car[TD5_MAX_RACER_SLOTS];
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return "";
+    int car = (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? g_td5.ai_car_indices[slot] : 0;
+    if (s_loaded[slot] && s_for_car[slot] == car) return s_name[slot];
+    s_loaded[slot]  = 1;
+    s_for_car[slot] = car;
+    s_name[slot][0] = '\0';
+    if (car >= 0 && car < TD5_CAR_COUNT && s_car_zip_paths[car]) {
+        int sz = 0;
+        char *data = (char *)td5_asset_open_and_read("config.nfo", s_car_zip_paths[car], &sz);
+        if (data && sz > 0) {
+            int i = 0;
+            while (i < sz && data[i] != '\n' && data[i] != '\r') i++;   /* skip line 0 */
+            while (i < sz && (data[i] == '\r' || data[i] == '\n')) i++;
+            int j = 0;
+            while (i < sz && j + 1 < (int)sizeof(s_name[slot]) &&
+                   data[i] != '\r' && data[i] != '\n' && data[i] != '\0')
+                s_name[slot][j++] = data[i++];
+            s_name[slot][j] = '\0';
+        }
+        if (data) free(data);
+    }
+    if (!s_name[slot][0])
+        snprintf(s_name[slot], sizeof(s_name[slot]), "CAR %d", car);
+    return s_name[slot];
+}
+
+/* Build the ordered list of racer slots to show: finishers first (by finish
+ * position), then any not-yet-finished/DNF racers, capped at the racer field.
+ * Returns the count written to order[]. */
+static int frontend_summary_build_order(int order[TD5_MAX_RACER_SLOTS]) {
+    int total = td5_game_get_total_actor_count();
+    int racers = total < TD5_MAX_RACER_SLOTS ? total : TD5_MAX_RACER_SLOTS;
+    if (racers < 1) racers = 1;
+    char seen[TD5_MAX_RACER_SLOTS]; memset(seen, 0, sizeof(seen));
+    int n = 0;
+    /* Finishers in race-order (position 0 = 1st). */
+    for (int pos = 0; pos < racers; pos++) {
+        int slot = td5_game_get_race_order(pos);
+        if (slot < 0 || slot >= racers) continue;
+        if (td5_game_get_slot_state(slot) == 3) continue;   /* disabled/decoration */
+        if (seen[slot]) continue;
+        seen[slot] = 1;
+        order[n++] = slot;
+    }
+    /* Any remaining active racers the order table didn't list (e.g. DNF). */
+    for (int slot = 0; slot < racers; slot++) {
+        if (seen[slot]) continue;
+        if (td5_game_get_slot_state(slot) == 3) continue;
+        seen[slot] = 1;
+        order[n++] = slot;
+    }
+    if (n < 1) { order[0] = 0; n = 1; }
+    return n;
+}
+
+/* Exported render-path draw for the all-players summary. Coordinates use the
+ * 640x480 virtual canvas (sx/sy = window/canvas), same convention as every
+ * other frontend overlay. Text via the public td5_vui_text API (the only
+ * cross-module text helper; forwards to the frontend bitmap/MSDF text path). */
+/* Small-font results-table helpers shared with the High-Scores overlay
+ * (defined in td5_frontend.c) so this table matches that screen's exact
+ * format: same proportional small font, centred columns, MM:SS.cc times. */
+void  fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
+float fe_measure_small_text(const char *text);
+void  frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type);
+
+/* [r3 2026-06-15] Race-results table, reworked to the HIGH-SCORES format
+ * (frontend_render_high_score_overlay): centred columns in the small
+ * proportional font, two-line headers, the local player highlighted, speeds
+ * carrying their KPH/MPH unit, and a TIME column. Columns:
+ *   NAME | TIME | TOP SPEED | AVG SPEED | COLLISIONS | AIR TIME
+ * The "#" position column and the DRIFT column were dropped per feedback. */
+void frontend_render_race_summary_overlay(float sx, float sy) {
+    if (s_inner_state < 3 || s_inner_state >= 0x0C) return;
+    if (s_network_active) return;   /* net flow skips straight to the lobby */
+
+    int order[TD5_MAX_RACER_SLOTS];
+    int n = frontend_summary_build_order(order);
+    int kph = (td5_save_get_speed_units() != 0);
+    const char *unit = kph ? "KPH" : "MPH";
+    int humans = s_num_human_players; if (humans < 1) humans = 1;
+    const int my_slot = 0;          /* the local player (P1); in SP the sole human */
+
+    /* 4:3-locked glyph scale, exactly like frontend_render_high_score_overlay,
+     * so centred columns stay centred at any window aspect. */
+    const float gsx = sx < sy ? sx : sy;
+    #define SUM_CTR(CX, S) ((CX) * sx - fe_measure_small_text(S) * 0.5f * gsx)
+
+    /* Column CENTRES (640x480 canvas px). */
+    const float c_name = 168.0f;
+    const float c_time = 256.0f;
+    const float c_top  = 336.0f;
+    const float c_avg  = 410.0f;
+    const float c_col  = 486.0f;
+    const float c_air  = 560.0f;
+
+    /* Two-line headers: single labels on the middle line, stacked labels on
+     * top+bottom — mirrors DrawPostRaceHighScoreEntry's y0/y7/y14 rows. */
+    const float h_top = 88.0f, h_mid = 95.0f, h_bot = 102.0f;
+    const float row0  = 122.0f, row_h = 20.0f;
+
+    const uint32_t HDR   = 0xFFFFFFFFu;  /* white headers (High-Scores style)  */
+    const uint32_t SELF  = 0xFFD9C50Cu;  /* gold/yellow = the local player row  */
+    const uint32_t AICOL = 0xFFE0E0E0u;  /* light grey = AI (HS non-highlight)  */
+
+    fe_draw_small_text(SUM_CTR(c_name, "NAME"),       h_mid * sy, "NAME",       HDR, sx, sy);
+    fe_draw_small_text(SUM_CTR(c_time, "TIME"),       h_mid * sy, "TIME",       HDR, sx, sy);
+    fe_draw_small_text(SUM_CTR(c_top,  "TOP"),        h_top * sy, "TOP",        HDR, sx, sy);
+    fe_draw_small_text(SUM_CTR(c_top,  "SPEED"),      h_bot * sy, "SPEED",      HDR, sx, sy);
+    fe_draw_small_text(SUM_CTR(c_avg,  "AVG"),        h_top * sy, "AVG",        HDR, sx, sy);
+    fe_draw_small_text(SUM_CTR(c_avg,  "SPEED"),      h_bot * sy, "SPEED",      HDR, sx, sy);
+    fe_draw_small_text(SUM_CTR(c_col,  "COLLISIONS"), h_mid * sy, "COLLISIONS", HDR, sx, sy);
+    fe_draw_small_text(SUM_CTR(c_air,  "AIR"),        h_top * sy, "AIR",        HDR, sx, sy);
+    fe_draw_small_text(SUM_CTR(c_air,  "TIME"),       h_bot * sy, "TIME",       HDR, sx, sy);
+
+    /* Reference time for DNF pace-estimates: the winner's finish time. */
+    int32_t winner_time = 0;
+    if (n > 0 && td5_game_slot_is_finished(order[0]))
+        winner_time = td5_game_get_result_primary(order[0]);
+
+    int span_count = td5_track_get_span_count();
+    if (span_count <= 0) span_count = 1;
+    int laps_total = (g_track_is_circuit && g_td5.circuit_lap_count > 0)
+                     ? g_td5.circuit_lap_count : 1;
+
+    for (int r = 0; r < n; r++) {
+        int slot = order[r];
+        float y = (row0 + (float)r * row_h) * sy;
+        char buf[40];
+
+        int is_human = (slot < humans);
+        uint32_t row_color = (slot == my_slot) ? SELF
+                           : is_human ? k_mp_player_colors[slot < TD5_MAX_HUMAN_PLAYERS ? slot : 0]
+                           : AICOL;
+
+        /* NAME — humans "P1".."P6"; AI the car's short name. */
+        if (is_human) snprintf(buf, sizeof(buf), "P%d", slot + 1);
+        else          snprintf(buf, sizeof(buf), "%s", frontend_summary_car_name(slot));
+        fe_draw_small_text(SUM_CTR(c_name, buf), y, buf, row_color, sx, sy);
+
+        /* TIME — finishers show their finish time; cars still out show a "~"
+         * estimate: elapsed scaled by (total spans / spans completed), i.e.
+         * holding their average pace over the spans remaining to the end. */
+        {
+            char tb[28];
+            if (td5_game_slot_is_finished(slot)) {
+                int32_t ft = td5_game_get_result_primary(slot);
+                if (ft <= 0) ft = td5_game_get_race_timer(slot, 0);
+                frontend_format_score_time(tb, sizeof(tb), ft, 0);
+            } else {
+                int cur_lap = td5_game_get_player_lap(slot);
+                if (cur_lap < 0) cur_lap = 0;
+                if (cur_lap >= laps_total) cur_lap = laps_total - 1;
+                int cur_span = td5_game_get_slot_span(slot);
+                if (cur_span < 0) cur_span = 0;
+                if (cur_span > span_count) cur_span = span_count;
+                long long done  = (long long)cur_lap * span_count + cur_span;
+                long long total = (long long)laps_total * span_count;
+                if (done  < 1)    done  = 1;
+                if (total < done) total = done;
+                int32_t elapsed = td5_game_get_race_timer(slot, 0);
+                if (elapsed <= 0) elapsed = winner_time;
+                int32_t est = (int32_t)((long long)elapsed * total / done);
+                char inner[24];
+                frontend_format_score_time(inner, sizeof(inner), est, 0);
+                snprintf(tb, sizeof(tb), "~%s", inner);
+            }
+            fe_draw_small_text(SUM_CTR(c_time, tb), y, tb, row_color, sx, sy);
+        }
+
+        const TD5_RaceMetrics *m = td5_game_get_metrics(slot);
+        int top_raw = (int)td5_game_get_result_top_speed(slot);
+        if (top_raw == 0 && m) top_raw = m->top_speed;
+        int avg_raw = (int)td5_game_get_result_avg_speed(slot);
+        if (avg_raw == 0 && m && m->sample_ticks > 0)
+            avg_raw = (int)(m->speed_sum / m->sample_ticks);
+
+        snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(top_raw, kph), unit);
+        fe_draw_small_text(SUM_CTR(c_top, buf), y, buf, row_color, sx, sy);
+        snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(avg_raw, kph), unit);
+        fe_draw_small_text(SUM_CTR(c_avg, buf), y, buf, row_color, sx, sy);
+
+        int collisions = m ? m->collisions : 0;
+        int air_tenths = m ? (m->air_ticks * 10 + 15) / 30 : 0;
+        snprintf(buf, sizeof(buf), "%d", collisions);
+        fe_draw_small_text(SUM_CTR(c_col, buf), y, buf, row_color, sx, sy);
+        snprintf(buf, sizeof(buf), "%d.%ds", air_tenths / 10, air_tenths % 10);
+        fe_draw_small_text(SUM_CTR(c_air, buf), y, buf, row_color, sx, sy);
+    }
+    #undef SUM_CTR
+}
+
 void Screen_RaceResults(void) {
     switch (s_inner_state) {
     case 0: /* Init & routing: sort results, create panel */
@@ -2382,9 +3267,35 @@ void Screen_RaceResults(void) {
          *        ◄► arrows (browse racers); orig creates it NULL-labelled at -0x208.
          *   btn1 OK (96x32) slides to (115,377) — bottom-LEFT.
          * The prior placeholder planted BOTH at y=400, which read as a double OK. */
-        { int bi = frontend_create_button(NULL, 115, 97, 0x208, 0x20);
-          if (bi >= 0) s_buttons[bi].is_selector = 1; }
-        frontend_create_button(SNK_OkButTxt, 115, 377, 0x60, 0x20);
+        /* [item #3 (a) 2026-06-15] When the all-players SUMMARY replaces the old
+         * one-car-at-a-time browse, the selector nav bar at (115,97) is vestigial
+         * (cycling is disabled — see case 6) and its blue 9-slice frame + centred
+         * car-name/◄► overlay sit right on top of the summary's column headers
+         * (hdr_y=96). Hide it: hidden=1 makes the button loop skip the 9-slice,
+         * and pushing its rect off-canvas makes the car-name overlay — which is
+         * NOT hidden-gated and keys off button 0's render rect — draw off-screen
+         * too. Also mark it disabled so nav/mouse skip it (no invisible focus
+         * target); the OK button (index 1) + ESC still exit via the state-6 gate,
+         * which only ever sees a non-disabled confirm (index 1). Default focus is
+         * moved to OK. Create at the normal (115,97) first so the negative-x
+         * auto-layout path isn't triggered, then relocate. Knob OFF / summary OFF
+         * keeps the faithful on-screen selector bar. */
+        {
+            int hide_selector_bar = (results_fix_on() && frontend_race_summary_on());
+            int bi = frontend_create_button(NULL, 115, 97, 0x208, 0x20);
+            if (bi >= 0) {
+                if (hide_selector_bar) {
+                    s_buttons[bi].hidden   = 1;
+                    s_buttons[bi].disabled = 1;
+                    s_buttons[bi].x = 4000; /* off-canvas: no 9-slice, no nav-bar overlay */
+                    s_buttons[bi].y = 4000;
+                } else {
+                    s_buttons[bi].is_selector = 1;
+                }
+            }
+            frontend_create_button(SNK_OkButTxt, 115, 377, 0x60, 0x20);
+            if (hide_selector_bar) s_selected_button = 1;   /* focus the visible OK */
+        }
         s_inner_state = 1;
         break;
 
@@ -2422,6 +3333,12 @@ void Screen_RaceResults(void) {
             break;
         }
         s_anim_tick += 2 * s_fe_logic_ticks;
+        if (results_fix_on()) {
+            /* [item 17b] Entry slide-in: the results panel enters from the right
+             * and settles at rest (was static -> "no entry animation"). */
+            s_results_panel_slide_x = (0x12 - s_anim_tick) * 0x20;
+            if (s_results_panel_slide_x < 0) s_results_panel_slide_x = 0;
+        }
         if (s_anim_tick >= 0x12) {
             /* P8 — DXSound::Play(4) on slide-in completion.
              * [CONFIRMED @ 0x00422480 case 3] Original fires Play(4) inside
@@ -2456,6 +3373,17 @@ void Screen_RaceResults(void) {
              * only as the panel re-enters from the opposite side. */
         s_results_panel_slide_x = 0;  /* clean rest position while in interactive */
         if (s_input_ready) {
+            /* [item 17a 2026-06-14] Only cycle racer cards when the SELECTOR BAR
+             * (button 0, is_selector) is focused — not when the OK button is.
+             * Knob-gated: TD5RE_RESULTS_FIX=0 restores cycling from any focus. */
+            int car_focused = (s_selected_button >= 0 &&
+                               s_selected_button < s_button_count &&
+                               s_buttons[s_selected_button].is_selector);
+            int allow_cycle = (!results_fix_on()) || car_focused;
+            /* [#10] All-players summary shows every racer at once, so the
+             * per-car L/R browse is pointless — disable cycling when the
+             * summary is on (TD5RE_RACE_SUMMARY). OK/confirm still exits. */
+            if (frontend_race_summary_on()) allow_cycle = 0;
             /* [FIX 2026-06-05 results-nav] Only LEFT/RIGHT browse racer slots
              * (the horizontal panel slide). s_arrow_input is a BITMASK
              * (1=LEFT,2=RIGHT,4=UP,8=DOWN), so the old `!= 0` test fired on
@@ -2465,7 +3393,7 @@ void Screen_RaceResults(void) {
              * moves the selection between the selector bar and OK vertically),
              * so here we react to the horizontal bits only and honour their
              * direction: RIGHT -> state 7 (exit right), LEFT -> state 9. */
-            if (s_arrow_input & 2) {          /* RIGHT */
+            if (allow_cycle && (s_arrow_input & 2)) { /* RIGHT */
                 s_results_panel_slide_dir = +1;
                 s_anim_tick = 0;
                 s_inner_state = 7;
@@ -2473,7 +3401,7 @@ void Screen_RaceResults(void) {
                           "RaceResults state 6: RIGHT -> slide-out state 7");
                 break;
             }
-            if (s_arrow_input & 1) {          /* LEFT */
+            if (allow_cycle && (s_arrow_input & 1)) { /* LEFT */
                 s_results_panel_slide_dir = -1;
                 s_anim_tick = 0;
                 s_inner_state = 9;

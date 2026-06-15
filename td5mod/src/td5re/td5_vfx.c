@@ -1542,8 +1542,33 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
      * and the runtime projection bias cancel to ~unity for an in-bounds fall of
      * ~|wind*sim_budget| units/frame, so use net x1 (view_motion). Wind is
      * (0,-250,0)*sim_budget minus camera delta, already rotated to view space. */
-    float advect_x = view_motion[0];
-    float advect_y = view_motion[1];
+    /* [FIX 2026-06-14 rain-upward] The motion vector (wind (0,-250·b,0) minus
+     * camera delta) is rotated to VIEW space by the 3x3 above, but — unlike
+     * every other projected sprite — the rain path then feeds it STRAIGHT into
+     * the screen projection (sy = (pos_y - Y_OFF)·scale/depth) with NO axis
+     * negation, whereas the world/smoke projector negates view X/Y before the
+     * divide (td5_render_transform_and_project -> project_vertex(-vx,-vy,vz)).
+     * The original game's RenderAmbientParticleStreaks (0x00446560) skips the
+     * negation too, BUT it rotates against its cached render-rotation matrix
+     * (g_raceParticlePoolBase[0x1f5]) whose up-vector Y has the OPPOSITE sign to
+     * the port's live g_cameraBasis — the port adds a 180°-roll correction to the
+     * chase basis (td5_camera.c ~2098) plus the chase coord-flip that this cached
+     * matrix lacked. Net: wind_y=-250 with the port's +up.Y basis advects pos_y
+     * NEGATIVE -> screen_y DECREASES -> rain streaks travel UP the screen.
+     * Fix: negate the in-view advect X/Y so the rain lands in the SAME screen-
+     * space convention as all other geometry (down = +screen_y = gravity). Z is
+     * depth and is left untouched. Gated because the basis handedness here is
+     * subtle and has been mis-signed before; default = corrected (falls down).
+     * TD5RE_RAIN_DIR=0 restores the old (upward) behavior for A/B. */
+    static int s_rain_dir = -1;
+    if (s_rain_dir < 0) {
+        const char *e = getenv("TD5RE_RAIN_DIR");
+        s_rain_dir = (e && e[0] == '0') ? 0 : 1;   /* default ON = falls down */
+        TD5_LOG_I(LOG_TAG, "rain direction %s (TD5RE_RAIN_DIR)",
+                  s_rain_dir ? "CORRECTED (down)" : "legacy (up)");
+    }
+    float advect_x = s_rain_dir ? -view_motion[0] : view_motion[0];
+    float advect_y = s_rain_dir ? -view_motion[1] : view_motion[1];
     float advect_z = view_motion[2];
 
     /* Bind the procedural rain shader once for the whole streak batch (the

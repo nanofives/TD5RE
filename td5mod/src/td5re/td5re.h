@@ -113,6 +113,12 @@ extern const int        g_td5re_module_count;
  * Central state structure that modules read/write through td5_game.
  * ======================================================================== */
 
+/* [dynamic-traffic 2026-06] Number of traffic-volume tiers in the selector and
+ * in g_td5.traffic_volume: 0=OFF 1=LOW 2=MEDIUM 3=HIGH 4=VERY HIGH. The frontend
+ * cycles 0..(COUNT-1) and clamps committed values to this range; the AI spawner
+ * (td5_ai.c trf_dyn_*) consumes the resolved 0..4 value. */
+#define TD5_TRAFFIC_VOLUME_COUNT 5
+
 typedef struct TD5_GlobalState {
     /* State machine */
     TD5_GameState   game_state;
@@ -152,7 +158,10 @@ typedef struct TD5_GlobalState {
      * traffic_enabled stays the boolean gate every faithful site already reads
      * (== volume != 0). Consumed by the dynamic spawner's concurrency cap
      * (Low=2 / Medium=4 / High=6 cars); with [Traffic] Dynamic=0 any
-     * non-zero volume behaves like the classic ON (all 6 queue slots). */
+     * non-zero volume behaves like the classic ON (all 6 queue slots).
+     * [dynamic-traffic 2026-06] Extended to a 5-state row: 4=Very High (see
+     * TD5_TRAFFIC_VOLUME_COUNT). The AI spawner (td5_ai.c trf_dyn_*) consumes
+     * value 4 directly; the frontend selector now emits the full 0..4 range. */
     int  traffic_volume;
     int  special_encounter_enabled;
     int  circuit_lap_count;
@@ -601,6 +610,60 @@ extern TD5_GlobalState g_td5;
  * Set by td5_asset_level_number(); 0 = faithful TD5 track. Standalone global (NOT
  * a g_td5 field) so adding it doesn't change the g_td5 struct layout. */
 extern int g_active_td6_level;
+
+/* ========================================================================
+ * Per-racer race telemetry (#10 race-end summary rework)
+ * ========================================================================
+ *
+ * One TD5_RaceMetrics per racer slot, accumulated INSIDE the deterministic
+ * 30 Hz sim tick from replicated actor state only (no wall-clock / render-rate
+ * inputs), so the values are identical on every lockstep netplay client and
+ * reproduce exactly on replay.
+ *
+ *   - reset:      td5_game_init_race_session() (race init, per-slot loop)
+ *   - accumulate: td5_physics_accumulate_metrics(), called once per LIVE race
+ *                 sim tick from td5_game_run_race_frame() right after
+ *                 td5_physics_tick() (i.e. NOT during the start countdown or
+ *                 while paused — cars are stationary then).
+ *   - read:       the post-race summary screen (td5_fe_race.c) via
+ *                 td5_game_get_metrics() / td5_physics_get_metrics().
+ *
+ * Speeds are kept in the engine's RAW internal speed units (same unit as the
+ * actor's longitudinal_speed >> 8 and the HUD speedometer's speed_raw); the
+ * frontend converts to MPH/KPH for display with the speedometer formula
+ * ((raw*256+625)/1252 MPH, (raw*256+389)/778 KPH).
+ *
+ * Stored as a standalone global array (NOT a g_td5 field) so adding it never
+ * changes the g_td5 struct layout that other RE offsets depend on. */
+typedef struct TD5_RaceMetrics {
+    int32_t  top_speed;          /* running max of planar speed magnitude (raw units) */
+    int64_t  speed_sum;          /* sum of per-tick planar speed magnitude (raw units) */
+    int32_t  sample_ticks;       /* number of live sim ticks accumulated (avg = speed_sum / sample_ticks) */
+    int32_t  collisions;         /* count of distinct collision events (V2V impact + hard wall hit) */
+    int32_t  air_ticks;          /* number of live sim ticks spent fully airborne (all 4 wheels off ground) */
+    int32_t  drifts;             /* count of sustained drifts (lateral slip held > 15 ticks = 0.5 s @30Hz) */
+
+    /* --- transient per-tick edge-detect state (engine-private) --- */
+    uint8_t  hit_this_tick;      /* set by collision sites during a sim tick (wall|V2V), cleared each accumulate */
+    uint8_t  hit_prev_tick;      /* previous tick's hit state, for rising-edge collision counting */
+    int32_t  drift_run_ticks;    /* current consecutive-drift tick run; a drift is counted once it crosses 15 */
+    uint8_t  drift_counted;      /* 1 once the current drift run has already been counted (avoid double count) */
+} TD5_RaceMetrics;
+
+/** Per-racer-slot telemetry, indexed 0..TD5_MAX_RACER_SLOTS-1. Defined in
+ *  td5_physics.c, reset in td5_game_init_race_session, read by the summary. */
+extern TD5_RaceMetrics g_race_metrics[TD5_MAX_RACER_SLOTS];
+
+/** Zero all metric slots (called at race init). Defined in td5_physics.c. */
+void td5_physics_reset_metrics(void);
+
+/** Accumulate one live sim tick of telemetry for every active racer slot.
+ *  Called once per live race tick AFTER td5_physics_tick(). Defined in td5_physics.c. */
+void td5_physics_accumulate_metrics(void);
+
+/** Bounds-checked read of a slot's metrics (NULL if slot out of range). */
+const TD5_RaceMetrics *td5_physics_get_metrics(int slot);
+const TD5_RaceMetrics *td5_game_get_metrics(int slot);
 
 /* Persist the in-game-configurable option keys (Display/Audio/GameOptions)
  * from g_td5.ini.* back to td5re.ini (the file s_ini_path resolved at boot).

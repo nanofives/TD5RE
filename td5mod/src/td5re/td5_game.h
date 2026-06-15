@@ -97,6 +97,7 @@ int td5_game_get_total_actor_count(void);
 int td5_game_get_minimap_checkpoint_count(void);
 int td5_game_get_minimap_checkpoint_span(int idx);
 int td5_game_get_player_lap(int slot);
+int td5_game_get_slot_span(int slot);   /* live track_span_normalized (+0x82) for a slot, 0 if none */
 int32_t td5_game_get_race_timer(int slot, int lap_index);
 
 /* 0x430CF0: Allocate from game heap */
@@ -196,5 +197,11 @@ int32_t td5_game_get_wanted_target_tracker(void);
 /* Slot index of the wanted-mode tracked actor (orig g_wantedTargetSlotIndex
  * @ 0x004bf51c; .data-init=0, no binary writers). */
 int     td5_game_get_wanted_target_slot(void);
+
+/* Active per-race RNG seed (replicated: host-broadcast session_seed at race
+ * start, restored from the recording for replays). Sim-deterministic features
+ * that must stay in lockstep across netplay peers seed a private, sim-tick-only
+ * stream from this instead of the shared CRT rand(). */
+uint32_t td5_game_get_race_seed(void);
 
 #endif /* TD5_GAME_H */
