@@ -239,4 +239,42 @@ uint32_t td5_save_get_p2_device_index(void);
 uint32_t td5_save_get_player_device_index(int player);
 void     td5_save_set_player_device_index(int player, uint32_t idx);
 
+/* ========================================================================
+ * Player profiles -- persistent name + colour + car presets
+ *
+ * [PORT ENHANCEMENT 2026-06 #11] Persistent store for the multiplayer
+ * name/colour frontend (td5_fe_race.c). A player configures a display name,
+ * an MP accent/identity colour and their car preset; the profile is saved so
+ * it can be reloaded in a future run. Persisted in td5re_progress.ini under
+ * the [Profiles] section (this module already owns that file). The store is
+ * loaded lazily on first access and rewritten to disk on every save/delete.
+ * ======================================================================== */
+
+typedef struct TD5_Profile {
+    char name[16];     /* player display name */
+    int  accent;       /* MP accent/identity colour index */
+    int  car;          /* last selected car index */
+    int  paint;        /* car paint/variant index */
+    int  color;        /* car colour index (if distinct from paint) */
+    int  trans;        /* transmission/auto pref (0/1) */
+} TD5_Profile;
+#define TD5_MAX_PROFILES 16
+
+/** Number of stored profiles (0..TD5_MAX_PROFILES). */
+int td5_save_profile_count(void);
+
+/** Fetch profile idx into *out. Returns 1 on success, 0 if idx out of range
+ *  or out is NULL. */
+int td5_save_profile_get(int idx, TD5_Profile *out);
+
+/** UPSERT a profile by name (case-insensitive): if a stored profile shares
+ *  the (trimmed) name it is overwritten in place, otherwise a new slot is
+ *  appended. Persists to disk. Returns the slot index, or -1 if the store is
+ *  full, p is NULL, or the name is empty. */
+int td5_save_profile_save(const TD5_Profile *p);
+
+/** Delete profile idx (slots after it shift down). Persists to disk.
+ *  Returns 1 on success, 0 if idx out of range. */
+int td5_save_profile_delete(int idx);
+
 #endif /* TD5_SAVE_H */

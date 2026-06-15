@@ -75,6 +75,8 @@ static int  cfgini_write_cup(const char *path);
 static int  cfgini_read_cup(const char *path);
 static int  cup_load_binary_file(const char *path);   /* legacy CupData.td5 reader */
 static int  cup_is_binary_valid(const char *path);    /* legacy CRC self-check */
+static void profiles_ensure_loaded(void);             /* lazy [Profiles] read */
+static void profiles_read(void);                      /* read [Profiles] from progress.ini */
 
 /* ========================================================================
  * Config.td5 buffer layout (5351 bytes)
@@ -619,6 +621,14 @@ static uint32_t s_cup_progress_marker;                        /* 0x48F364 */
 static uint32_t s_cup_cross_ref_1;                            /* 0x48F368 */
 static uint32_t s_cup_cross_ref_2;                            /* 0x48F370 */
 static uint32_t s_cup_cross_ref_3;                            /* 0x48F378 */
+
+/* -- Player profiles (port enhancement #11) --
+ * Stored in td5re_progress.ini [Profiles]; loaded lazily on first access,
+ * rewritten on every save/delete. s_profiles_loaded gates the lazy read so a
+ * single missing/empty store yields count 0 without re-reading every call. */
+static TD5_Profile s_profiles[TD5_MAX_PROFILES];
+static int         s_profile_count;
+static int         s_profiles_loaded;
 
 /* ========================================================================
  * Initialization / Shutdown
@@ -1893,6 +1903,33 @@ static int cfgini_write_progress(void)
         cfgini_add(&w, "\r\n");
     }
 
+    /* [#11] Player profiles -- persistent name + colour + car presets. Written
+     * after the high-score block so they share this one organized file. Ensure
+     * the store is loaded first: an external td5_save_write_config() (e.g. a
+     * rebind save) must not clobber on-disk profiles with an empty in-memory
+     * set just because the profile API has not been touched yet this run. */
+    profiles_ensure_loaded();
+    cfgini_add(&w, "[Profiles]\r\n");
+    cfgini_add(&w, "; Saved player presets for the multiplayer name/colour screen.\r\n");
+    cfgini_add(&w, "Count = %d\r\n", s_profile_count);
+    for (int i = 0; i < s_profile_count; i++) {
+        const TD5_Profile *pr = &s_profiles[i];
+        char nm[17];
+        memcpy(nm, pr->name, 16);
+        nm[16] = '\0';
+        /* Defensively strip any control byte so it cannot break the INI. */
+        for (int c = 0; c < 16; c++) {
+            if ((unsigned char)nm[c] < 0x20) { nm[c] = '\0'; break; }
+        }
+        cfgini_add(&w, "Profile%dName = %s\r\n", i, nm);
+        cfgini_add(&w, "Profile%dAccent = %d\r\n", i, pr->accent);
+        cfgini_add(&w, "Profile%dCar = %d\r\n", i, pr->car);
+        cfgini_add(&w, "Profile%dPaint = %d\r\n", i, pr->paint);
+        cfgini_add(&w, "Profile%dColor = %d\r\n", i, pr->color);
+        cfgini_add(&w, "Profile%dTrans = %d\r\n", i, pr->trans);
+    }
+    cfgini_add(&w, "\r\n");
+
     return cfgini_flush(&w, cfgini_progress_path());
 }
 
@@ -1937,6 +1974,141 @@ static int cfgini_read_progress(void)
             snprintf(key, sizeof key, "Entry%d.TopSpeed", e); en->top_speed = cfgini_get_i32(f, sec, key, en->top_speed);
         }
     }
+
+    /* [#11] Player profiles share this file -- load them in the same pass. */
+    profiles_read();
+    return 1;
+}
+
+/* ------------------------------ player profiles ---------------------------- */
+
+/* Cached TD5RE_PROFILES knob: 0 disables the persistent profile store (the API
+ * still works in-memory but never reads/writes disk). Default on. Resolved +
+ * logged once. */
+static int profiles_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_PROFILES");
+        cached = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "player profiles %s (TD5RE_PROFILES=%s)",
+                  cached ? "enabled" : "disabled", e ? e : "(unset)");
+    }
+    return cached;
+}
+
+/* Read the [Profiles] section of td5re_progress.ini into the static store.
+ * Tolerates a missing file / absent section (leaves count 0). */
+static void profiles_read(void)
+{
+    s_profile_count = 0;
+    memset(s_profiles, 0, sizeof(s_profiles));
+    if (!profiles_enabled()) return;
+
+    const char *f = cfgini_progress_path();
+    if (!td5_plat_file_exists(f)) return;
+
+    int n = td5_plat_ini_get_int(f, "Profiles", "Count", 0);
+    if (n < 0) n = 0;
+    if (n > TD5_MAX_PROFILES) n = TD5_MAX_PROFILES;
+
+    char val[64];
+    char key[24];
+    int out = 0;
+    for (int i = 0; i < n; i++) {
+        TD5_Profile *pr = &s_profiles[out];
+        snprintf(key, sizeof key, "Profile%dName", i);
+        if (td5_plat_ini_get_str(f, "Profiles", key, "", val, sizeof val) <= 0)
+            continue;                       /* skip nameless / missing slots */
+        size_t nlen = strlen(val);
+        if (nlen > 15) nlen = 15;           /* name field is 16B incl NUL */
+        if (nlen == 0) continue;
+        memset(pr->name, 0, sizeof pr->name);
+        memcpy(pr->name, val, nlen);
+        snprintf(key, sizeof key, "Profile%dAccent", i); pr->accent = cfgini_get_i32(f, "Profiles", key, 0);
+        snprintf(key, sizeof key, "Profile%dCar", i);    pr->car    = cfgini_get_i32(f, "Profiles", key, 0);
+        snprintf(key, sizeof key, "Profile%dPaint", i);  pr->paint  = cfgini_get_i32(f, "Profiles", key, 0);
+        snprintf(key, sizeof key, "Profile%dColor", i);  pr->color  = cfgini_get_i32(f, "Profiles", key, 0);
+        snprintf(key, sizeof key, "Profile%dTrans", i);  pr->trans  = cfgini_get_i32(f, "Profiles", key, 0);
+        out++;
+    }
+    s_profile_count = out;
+}
+
+/* Lazily load the profile store the first time the API is touched. Loading is
+ * gated separately from td5_save_init's progress read so the profile API works
+ * even if a caller reaches it before init (count 0 on a missing store). */
+static void profiles_ensure_loaded(void)
+{
+    if (s_profiles_loaded) return;
+    s_profiles_loaded = 1;
+    profiles_read();
+}
+
+int td5_save_profile_count(void)
+{
+    profiles_ensure_loaded();
+    return s_profile_count;
+}
+
+int td5_save_profile_get(int idx, TD5_Profile *out)
+{
+    profiles_ensure_loaded();
+    if (!out || idx < 0 || idx >= s_profile_count) return 0;
+    *out = s_profiles[idx];
+    return 1;
+}
+
+int td5_save_profile_save(const TD5_Profile *p)
+{
+    profiles_ensure_loaded();
+    if (!p) return -1;
+
+    /* Trim the incoming name to a clean 16B field (NUL-padded, no control
+     * bytes); reject empties -- the name is the upsert key. */
+    char name[16];
+    memset(name, 0, sizeof name);
+    {
+        int j = 0;
+        for (int i = 0; i < 16 && p->name[i]; i++) {
+            if ((unsigned char)p->name[i] < 0x20) break;
+            name[j++] = p->name[i];
+        }
+    }
+    if (name[0] == '\0') return -1;
+
+    /* UPSERT by name (case-insensitive). Both fields are exactly 16 bytes;
+     * _strnicmp with n=16 reads no further even when a full-length name has no
+     * NUL terminator. */
+    int slot = -1;
+    for (int i = 0; i < s_profile_count; i++) {
+        if (_strnicmp(s_profiles[i].name, name, 16) == 0) { slot = i; break; }
+    }
+    if (slot < 0) {
+        if (s_profile_count >= TD5_MAX_PROFILES) return -1;   /* store full */
+        slot = s_profile_count++;
+    }
+
+    s_profiles[slot] = *p;
+    memcpy(s_profiles[slot].name, name, 16);   /* store the cleaned name */
+
+    if (profiles_enabled())
+        cfgini_write_progress();               /* persist whole progress file */
+    return slot;
+}
+
+int td5_save_profile_delete(int idx)
+{
+    profiles_ensure_loaded();
+    if (idx < 0 || idx >= s_profile_count) return 0;
+
+    for (int i = idx; i < s_profile_count - 1; i++)
+        s_profiles[i] = s_profiles[i + 1];
+    s_profile_count--;
+    memset(&s_profiles[s_profile_count], 0, sizeof(s_profiles[0]));
+
+    if (profiles_enabled())
+        cfgini_write_progress();
     return 1;
 }
 

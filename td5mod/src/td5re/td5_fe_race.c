@@ -37,6 +37,81 @@
 #include "td5_color.h"
 #include "td5_frontend_internal.h"
 
+/* ====================================================================== *
+ * [#6 / #11 2026-06-15] MP position-screen rework + profile management.
+ *
+ * Cross-file CONSUMERS (declared extern here; NOT defined in this file):
+ *   - td5_input.c  : per-player rising-edge getters for the CHANGE CAMERA and
+ *                    FRONT VIEW action buttons (keyboard + joystick), used by
+ *                    Screen_MpPosition to (a) cycle the split-screen layout
+ *                    [CHANGE CAMERA] and (b) cycle the empty-cell content
+ *                    selector g_td5.split_missing_content[] [FRONT VIEW].
+ *                    Both return 1 exactly once per physical press for `player`.
+ *   - td5_save.h   : the TD5_Profile store API (already in the header).
+ *   - td5_frontend.c shared frontend state (s_mp_* / s_mp_missing_content /
+ *                    mp_resolve_layout / mp_split_layouts) via the internal hdr.
+ *
+ * Cross-file RENDER hooks REQUIRED in td5_frontend.c (one line each — see the
+ * REPORT): repoint the TD5_SCREEN_MP_POSITION render to frontend_mp_position_render2
+ * and call frontend_mp_setup_profile_render() after frontend_mp_setup_render().
+ * ====================================================================== */
+
+/* [#6] Per-player rising-edge getters for the CHANGE CAMERA and FRONT VIEW
+ * action buttons. The authoritative implementations live in td5_input.c (which
+ * owns the device/keyboard binding + debounce). They are declared + provided here
+ * as WEAK fallbacks so this translation unit links standalone even if the input
+ * module's strong definitions are not present yet: the strong symbol (when it
+ * exists) overrides the weak one; otherwise these return 0 and the two features
+ * (camera=layout-cycle, front-view=empty-cell content) simply never fire. Replace
+ * / delete these stubs once td5_input.c exports the real getters. */
+int td5_input_frontend_change_camera_pressed(int player);
+int td5_input_frontend_front_view_pressed(int player);
+__attribute__((weak)) int td5_input_frontend_change_camera_pressed(int player) {
+    (void)player; return 0;
+}
+__attribute__((weak)) int td5_input_frontend_front_view_pressed(int player) {
+    (void)player; return 0;
+}
+
+/* [#6] New, stable-pulse position-screen renderer (replaces the abrupt-sawtooth
+ * frontend_mp_position_render in td5_frontend.c). Exported so the render switch
+ * can call it; see the REPORT for the one-line td5_frontend.c change. */
+void frontend_mp_position_render2(float sx, float sy);
+
+/* [#11] Profile-management overlay renderer for the MP name/colour step.
+ * Exported; td5_frontend.c calls it right after frontend_mp_setup_render(). */
+void frontend_mp_setup_profile_render(float sx, float sy);
+
+/* Public small-font helpers (defined in td5_frontend.c; the only fe_draw_* the
+ * linker exposes — fe_draw_quad/fe_draw_text/fe_draw_text_centered are static
+ * there). Re-declared up here so the #6/#11 renderers below can use them; the
+ * race-summary renderer further down re-declares the same prototypes locally. */
+void  fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
+float fe_measure_small_text(const char *text);
+
+/* Centred small-font text (px in). Mirrors td5_frontend.c's static
+ * mp_simul_small_centered, which we cannot link to. 4:3-locked glyph width =
+ * min(sx,sy), matching fe_glyph_sx. */
+static void mp_pos_small_centered(float cx_px, float y_px, const char *t,
+                                  uint32_t col, float sx, float sy) {
+    float gsx = (sx < sy) ? sx : sy;
+    fe_draw_small_text(cx_px - fe_measure_small_text(t) * 0.5f * gsx, y_px, t, col, sx, sy);
+}
+
+/* [#6] Knob: TD5RE_MP_POSITIONS already gates the whole picker (mp_positions_enabled
+ * in td5_frontend.c). This file reuses it; no separate knob added for #6. */
+/* [#11] Knob: TD5RE_PROFILES (default ON; exactly "0" disables the profile panel
+ * + the PROFILE button, reverting the name/colour step to NAME/COLOUR/OK only). */
+static int mp_profiles_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_PROFILES");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP profile management (#11) %s (TD5RE_PROFILES=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
 
 /* ---- file-local forward declarations (definitions in source order) ---- */
 static int frontend_load_car_preview_surface(int car_index, int paint_index);
@@ -1276,6 +1351,19 @@ static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now) {
     return 0;
 }
 
+/* [#11] MP profile-management constants + per-player panel cursor state. Declared
+ * here (before frontend_mp_setup_init) so init can reset them; the helper
+ * functions + the panel-input handler are defined just below frontend_mp_setup_init. */
+#define MP_SET_PROFILE 3                          /* 4th nav item (after OK=2) */
+#define MP_PROF_ACT_COUNT 3                       /* SAVE / LOAD / DELETE actions */
+enum { MP_PROF_ACT_SAVE = 0, MP_PROF_ACT_LOAD, MP_PROF_ACT_DELETE };
+static int s_mp_prof_focus[TD5_MAX_HUMAN_PLAYERS];   /* 0 = action row, 1 = list */
+static int s_mp_prof_act[TD5_MAX_HUMAN_PLAYERS];     /* MP_PROF_ACT_* */
+static int s_mp_prof_sel[TD5_MAX_HUMAN_PLAYERS];     /* selected list index */
+#define MP_PROF_LOADED_MAX 32
+static char s_prof_loaded_names[MP_PROF_LOADED_MAX][16];   /* session "loaded" set (by name) */
+static int  s_prof_loaded_count = 0;
+
 static void frontend_mp_setup_init(void) {
     int p, n = s_num_human_players;
     if (n < 2) n = 2;
@@ -1306,6 +1394,9 @@ static void frontend_mp_setup_init(void) {
         s_mp_kbd_row[p]       = 0;
         s_mp_col_col[p]       = 0;
         s_mp_col_row[p]       = 0;
+        s_mp_prof_focus[p]    = 0;   /* [#11] profile-panel cursor reset */
+        s_mp_prof_act[p]      = MP_PROF_ACT_SAVE;
+        s_mp_prof_sel[p]      = 0;
         s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
     }
     s_mp_simul_ready_ms = 0;
@@ -1320,9 +1411,157 @@ static void frontend_mp_setup_init(void) {
     TD5_LOG_I(LOG_TAG, "MP setup window for %d players", n);
 }
 
+/* ====================================================================== *
+ * [#11 2026-06-15] MP PROFILE MANAGEMENT (name/colour step).
+ *
+ * Reachable as a 4th item (PROFILE) on each player's NAME/COLOUR/OK pane. Opens
+ * a panel (s_mp_setup_sub[p] == 3) that lets the player SAVE the just-configured
+ * identity (name + accent + car + paint + colour + transmission) as a persistent
+ * TD5_Profile, or LOAD an existing one (applies its name + accent + car to this
+ * player; EDIT = load, tweak NAME/COLOUR, re-SAVE — upsert-by-name in the store).
+ *
+ * "Load once per session": a profile already LOADED by some player this session
+ * cannot be loaded again by another. Tracked by NAME (the store upserts by name,
+ * so names are unique and stable across the index shuffles a DELETE causes).
+ * The set is process-lifetime (session-static); cleared only by re-launch. The
+ * load list greys out + skips already-loaded entries.
+ * (Constants + per-player cursor statics are declared above frontend_mp_setup_init
+ * so that init can reset them.)
+ * ====================================================================== */
+
+static int mp_prof_name_loaded(const char *name) {
+    int i;
+    if (!name || !name[0]) return 0;
+    for (i = 0; i < s_prof_loaded_count; i++)
+        if (_stricmp(s_prof_loaded_names[i], name) == 0) return 1;
+    return 0;
+}
+static void mp_prof_mark_loaded(const char *name) {
+    if (!name || !name[0]) return;
+    if (mp_prof_name_loaded(name)) return;
+    if (s_prof_loaded_count >= MP_PROF_LOADED_MAX) return;
+    strncpy(s_prof_loaded_names[s_prof_loaded_count], name,
+            sizeof(s_prof_loaded_names[0]) - 1);
+    s_prof_loaded_names[s_prof_loaded_count][sizeof(s_prof_loaded_names[0]) - 1] = '\0';
+    s_prof_loaded_count++;
+}
+/* When a player re-opens PROFILE and overwrites/changes their name, an old
+ * "loaded" mark could pin a name nobody uses anymore — but the rule is about
+ * not loading the SAME stored profile twice, so marks persist for the session
+ * intentionally. (No unmark on panel close.) */
+
+/* Build current player identity into a TD5_Profile for SAVE. */
+static void mp_prof_fill_from_player(int p, TD5_Profile *out) {
+    memset(out, 0, sizeof(*out));
+    strncpy(out->name, s_mp_player_name[p], sizeof(out->name) - 1);
+    out->accent = s_mp_player_accent[p];
+    out->car    = s_mp_player_car[p];
+    out->paint  = s_mp_player_paint[p];
+    out->color  = s_mp_player_color[p];
+    out->trans  = s_mp_player_trans[p];
+}
+
+/* Apply a loaded profile to a player's live identity (name + accent + car). */
+static void mp_prof_apply_to_player(int p, const TD5_Profile *pr) {
+    strncpy(s_mp_player_name[p], pr->name, sizeof(s_mp_player_name[p]) - 1);
+    s_mp_player_name[p][sizeof(s_mp_player_name[p]) - 1] = '\0';
+    s_mp_player_accent[p] = pr->accent;
+    s_mp_player_color[p]  = pr->color;
+    s_mp_player_paint[p]  = pr->paint;
+    s_mp_player_trans[p]  = pr->trans;
+    if (pr->car >= 0 && pr->car < TD5_CAR_COUNT) s_mp_player_car[p] = pr->car;
+}
+
+/* Clamp the per-player list cursor into [0, count). */
+static void mp_prof_clamp_sel(int p) {
+    int cnt = td5_save_profile_count();
+    if (cnt <= 0) { s_mp_prof_sel[p] = 0; return; }
+    if (s_mp_prof_sel[p] < 0)    s_mp_prof_sel[p] = 0;
+    if (s_mp_prof_sel[p] >= cnt) s_mp_prof_sel[p] = cnt - 1;
+}
+
+/* Handle one player's input while the profile panel (sub==3) is open. Returns
+ * nothing; sets s_mp_setup_sub[p]=0 to close. */
+static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t now) {
+    int cnt = td5_save_profile_count();
+    mp_prof_clamp_sel(p);
+
+    /* LEFT/RIGHT pick the action (SAVE/LOAD/DELETE) when focus is the action row;
+     * UP/DOWN move between the action row and the list, and scroll the list. */
+    if (edge & 4) {  /* UP */
+        if (s_mp_prof_focus[p] == 1) s_mp_prof_focus[p] = 0;       /* list -> actions */
+        frontend_play_sfx(2);
+    }
+    if (edge & 8) {  /* DOWN */
+        if (s_mp_prof_focus[p] == 0 && cnt > 0) s_mp_prof_focus[p] = 1; /* actions -> list */
+        frontend_play_sfx(2);
+    }
+    if (s_mp_prof_focus[p] == 0) {
+        if (edge & 1) { s_mp_prof_act[p] = (s_mp_prof_act[p] + MP_PROF_ACT_COUNT - 1) % MP_PROF_ACT_COUNT; frontend_play_sfx(2); }
+        if (edge & 2) { s_mp_prof_act[p] = (s_mp_prof_act[p] + 1) % MP_PROF_ACT_COUNT;                     frontend_play_sfx(2); }
+    } else {
+        /* list scroll with auto-repeat */
+        if (mp_repeat_fire(p, bits & 0x0Cu, edge & 0x0Cu, now)) {
+            if (bits & 4) s_mp_prof_sel[p]--;
+            if (bits & 8) s_mp_prof_sel[p]++;
+            mp_prof_clamp_sel(p);
+        }
+    }
+
+    if (edge & 0x10) {  /* A = activate */
+        int act = s_mp_prof_act[p];
+        if (s_mp_prof_focus[p] == 1) act = MP_PROF_ACT_LOAD;   /* A on the list = LOAD it */
+        if (act == MP_PROF_ACT_SAVE) {
+            if (s_mp_player_name[p][0]) {
+                TD5_Profile pr;
+                mp_prof_fill_from_player(p, &pr);
+                int slot = td5_save_profile_save(&pr);
+                /* Saving makes it "yours" for the session (so a second player can't
+                 * also load the same one). */
+                if (slot >= 0) mp_prof_mark_loaded(pr.name);
+                frontend_play_sfx(slot >= 0 ? 3 : 10);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d SAVE '%s' -> slot %d", p, pr.name, slot);
+            } else {
+                frontend_play_sfx(10);   /* need a name first */
+            }
+        } else if (act == MP_PROF_ACT_LOAD) {
+            TD5_Profile pr;
+            if (cnt > 0 && td5_save_profile_get(s_mp_prof_sel[p], &pr)) {
+                if (mp_prof_name_loaded(pr.name)) {
+                    frontend_play_sfx(10);   /* already loaded this session -> blocked */
+                    TD5_LOG_I(LOG_TAG, "MP profile: P%d LOAD '%s' BLOCKED (already loaded)", p, pr.name);
+                } else {
+                    mp_prof_apply_to_player(p, &pr);
+                    mp_prof_mark_loaded(pr.name);
+                    frontend_play_sfx(3);
+                    TD5_LOG_I(LOG_TAG, "MP profile: P%d LOAD '%s' (car=%d)", p, pr.name, pr.car);
+                }
+            } else {
+                frontend_play_sfx(10);
+            }
+        } else { /* DELETE */
+            TD5_Profile pr;
+            if (cnt > 0 && td5_save_profile_get(s_mp_prof_sel[p], &pr) &&
+                td5_save_profile_delete(s_mp_prof_sel[p])) {
+                frontend_play_sfx(3);
+                mp_prof_clamp_sel(p);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE '%s'", p, pr.name);
+            } else {
+                frontend_play_sfx(10);
+            }
+        }
+    }
+    if (edge & 0x20) {  /* B = close panel (back to NAME/COLOUR/PROFILE/OK) */
+        s_mp_setup_sub[p] = 0;
+        s_mp_rep_ms[p] = 0;
+        frontend_play_sfx(5);
+    }
+}
+
 static void frontend_mp_setup_update(void) {
     int p, n = s_num_human_players;
     int all_ready = 1, want_back = 0;
+    int set_count = mp_profiles_enabled() ? (MP_SET_PROFILE + 1) : MP_SET_COUNT;
     uint32_t now = td5_plat_time_ms();
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
@@ -1387,29 +1626,49 @@ static void frontend_mp_setup_update(void) {
             continue;
         }
 
+        if (s_mp_setup_sub[p] == 3) {            /* [#11] PROFILE management panel */
+            mp_prof_panel_input(p, bits, edge, now);
+            all_ready = 0;
+            continue;
+        }
+
         if (s_mp_player_ready[p]) {
             if (edge & 0x10) { s_mp_player_ready[p] = 0; s_mp_simul_ready_ms = 0; frontend_play_sfx(5); }
             if (edge & 0x20) want_back = 1;
             continue;
         }
 
-        /* idle: navigate NAME / COLOUR / OK */
-        if (edge & 4) { s_mp_setup_btn[p] = (s_mp_setup_btn[p] + MP_SET_COUNT - 1) % MP_SET_COUNT; frontend_play_sfx(2); }
-        if (edge & 8) { s_mp_setup_btn[p] = (s_mp_setup_btn[p] + 1) % MP_SET_COUNT; frontend_play_sfx(2); }
+        /* idle: navigate NAME / COLOUR / [PROFILE] / OK. PROFILE is a 4th item
+         * present only when TD5RE_PROFILES is on (set_count includes it then). */
+        if (edge & 4) { s_mp_setup_btn[p] = (s_mp_setup_btn[p] + set_count - 1) % set_count; frontend_play_sfx(2); }
+        if (edge & 8) { s_mp_setup_btn[p] = (s_mp_setup_btn[p] + 1) % set_count; frontend_play_sfx(2); }
+        if (s_mp_setup_btn[p] >= set_count) s_mp_setup_btn[p] = MP_SET_NAME;   /* knob toggled off */
         if (edge & 0x10) {
             if (s_mp_setup_btn[p] == MP_SET_NAME)   { s_mp_setup_sub[p] = 1; if (isk) td5_plat_input_flush_chars(); frontend_play_sfx(3); }
             else if (s_mp_setup_btn[p] == MP_SET_COLOUR) { s_mp_setup_sub[p] = 2; frontend_play_sfx(3); }
-            else { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }
+            else if (s_mp_setup_btn[p] == MP_SET_PROFILE && mp_profiles_enabled()) {
+                s_mp_setup_sub[p]   = 3;            /* open profile panel */
+                s_mp_prof_focus[p]  = 0;
+                s_mp_prof_act[p]    = MP_PROF_ACT_SAVE;
+                s_mp_rep_ms[p]      = 0;
+                mp_prof_clamp_sel(p);
+                frontend_play_sfx(3);
+            }
+            else { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }   /* OK */
         }
         if (edge & 0x20) want_back = 1;
     }
 
     if (frontend_check_escape()) {
-        /* A keyboard player mid name-entry: ESC just leaves the field. Otherwise
-         * ESC backs the whole setup out to the lobby. */
+        /* A keyboard player mid name-entry OR in the profile panel: ESC just
+         * leaves that sub-screen. Otherwise ESC backs the whole setup out to the
+         * lobby. */
         int handled = 0;
         for (p = 0; p < n; p++)
-            if (s_mp_join_device[p] == 0 && s_mp_setup_sub[p] == 1) { s_mp_setup_sub[p] = 0; handled = 1; }
+            if (s_mp_join_device[p] == 0 &&
+                (s_mp_setup_sub[p] == 1 || s_mp_setup_sub[p] == 3)) {
+                s_mp_setup_sub[p] = 0; s_mp_rep_ms[p] = 0; handled = 1;
+            }
         if (!handled) want_back = 1;
     }
     if (want_back) { mp_simul_back_to_lobby(n); return; }
@@ -1473,19 +1732,29 @@ static void frontend_mp_position_enter(void) {
     TD5_LOG_I(LOG_TAG, "MP setup: -> position picker (%d players)", n);
 }
 
-/* [#8] Split-screen POSITION picker handler. Each pad moves its player's chosen
- * cell with the D-pad (auto-repeat); moving onto another player's cell SWAPS the
- * two (couch-friendly, no "blocked" feel). A = ready latch, B = back to the
- * name/colour setup. P1 L/R cycles the split layout (since the local lobby flow
- * never visits TwoPlayerOptions). All ready -> commit cells to the session and
- * advance to the car grid (phase 1 of CarSelection). */
+/* [#6 2026-06-15 rework] Split-screen POSITION picker ("CHOOSE YOUR SCREEN").
+ *
+ * Per-player controls:
+ *   D-PAD          move this player's cell (auto-repeat). UP/DOWN/LEFT/RIGHT are
+ *                  ALL cell movement now (the old "P1 L/R changes the grid mode"
+ *                  was removed — see below). Moving onto an UNREADY player's cell
+ *                  SWAPS the two; moving onto a READY player's cell is BLOCKED
+ *                  (a ready player cannot be displaced by anyone else).
+ *   A              ready latch (toggles back off when already ready)
+ *   B / ESC        back to the name/colour setup
+ *   CHANGE CAMERA  cycle the split-screen LAYOUT/grid mode (was LEFT/RIGHT —
+ *                  now its own button, keyboard + joystick, any player)
+ *   FRONT VIEW     cycle WHAT fills the empty grid cells (EMPTY / MAP /
+ *                  STANDINGS, s_mp_missing_content[]) — only when the current
+ *                  layout actually HAS empty cells (missing > 0)
+ *
+ * All ready -> commit cells to the session and advance to the car grid. */
 void Screen_MpPosition(void) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0, ncells;
     int all_ready = 1, want_back = 0;
     uint32_t now = td5_plat_time_ms();
     static uint32_t s_pos_ready_ms = 0;
-    static uint32_t s_p1_layout_prev = 0;
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
     mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
@@ -1496,44 +1765,63 @@ void Screen_MpPosition(void) {
 
     s_anim_complete = 1;   /* no slide-in; allow normal flow (and our own ESC) */
 
-    /* Host (player 0) can cycle the split layout with LEFT/RIGHT. Changing it can
-     * shrink the grid, so clamp every cell back into range afterwards. */
+    /* [#6] CHANGE CAMERA cycles the split LAYOUT (replaces the removed LEFT/RIGHT
+     * grid-mode change). Any player's CHANGE CAMERA press advances the layout;
+     * shrinking the grid re-packs every cell so the permutation stays a valid
+     * bijection. Keyboard + joystick via the per-player input getter. */
     {
-        int lcnt = 1;
-        uint32_t b0 = mp_simul_player_nav(0);
-        uint32_t e0 = b0 & ~s_p1_layout_prev;
-        s_p1_layout_prev = b0;
+        int lcnt = 1, cam = 0;
         mp_split_layouts(n, &lcnt);
-        if (lcnt > 1 && (e0 & 3)) {
-            int sel = s_mp_layout_sel + ((e0 & 2) ? 1 : -1);
-            while (sel < 0) sel += lcnt;
-            sel %= lcnt;
-            if (sel != s_mp_layout_sel) {
-                int q, nc;
-                s_mp_layout_sel = sel;
-                mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
-                if (cols < 1) cols = 1;
-                if (rows < 1) rows = 1;
-                ncells = cols * rows;
-                if (ncells > TD5_MAX_VIEWPORTS) ncells = TD5_MAX_VIEWPORTS;
-                /* Clamp / de-dup cells: any out-of-range or duplicate cell gets the
-                 * lowest free cell, so the permutation stays a valid bijection. */
-                for (q = 0; q < n; q++) {
-                    int dup = 0, r2;
-                    if (s_mp_player_cell[q] < 0 || s_mp_player_cell[q] >= ncells) dup = 1;
-                    for (r2 = 0; r2 < q && !dup; r2++)
-                        if (s_mp_player_cell[r2] == s_mp_player_cell[q]) dup = 1;
-                    if (dup) {
-                        for (nc = 0; nc < ncells; nc++) {
-                            int taken = 0, r3;
-                            for (r3 = 0; r3 < n; r3++)
-                                if (r3 != q && s_mp_player_cell[r3] == nc) { taken = 1; break; }
-                            if (!taken) { s_mp_player_cell[q] = nc; break; }
-                        }
+        for (p = 0; p < n; p++)
+            if (td5_input_frontend_change_camera_pressed(p)) { cam = 1; break; }
+        if (cam && lcnt > 1) {
+            int q, nc, sel = (s_mp_layout_sel + 1) % lcnt;
+            s_mp_layout_sel = sel;
+            mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+            if (cols < 1) cols = 1;
+            if (rows < 1) rows = 1;
+            ncells = cols * rows;
+            if (ncells > TD5_MAX_VIEWPORTS) ncells = TD5_MAX_VIEWPORTS;
+            /* Clamp / de-dup cells: any out-of-range or duplicate cell gets the
+             * lowest free cell, so the permutation stays a valid bijection. */
+            for (q = 0; q < n; q++) {
+                int dup = 0, r2;
+                if (s_mp_player_cell[q] < 0 || s_mp_player_cell[q] >= ncells) dup = 1;
+                for (r2 = 0; r2 < q && !dup; r2++)
+                    if (s_mp_player_cell[r2] == s_mp_player_cell[q]) dup = 1;
+                if (dup) {
+                    for (nc = 0; nc < ncells; nc++) {
+                        int taken = 0, r3;
+                        for (r3 = 0; r3 < n; r3++)
+                            if (r3 != q && s_mp_player_cell[r3] == nc) { taken = 1; break; }
+                        if (!taken) { s_mp_player_cell[q] = nc; break; }
                     }
                 }
-                frontend_play_sfx(2);
             }
+            frontend_play_sfx(2);
+            TD5_LOG_I(LOG_TAG, "MP position: CHANGE CAMERA -> layout %d (%dx%d, %d empty)",
+                      s_mp_layout_sel, cols, rows, missing);
+        }
+    }
+
+    /* [#6] FRONT VIEW cycles the empty-cell content selector, but only when the
+     * current layout has empty cells. s_mp_missing_content[] is the SAME array the
+     * Multiplayer Options screen edits and the HUD reads (g_td5.split_missing_content).
+     * We advance both empty-cell slots together (one button, simple couch UX). */
+    if (missing > 0) {
+        int fv = 0;
+        for (p = 0; p < n; p++)
+            if (td5_input_frontend_front_view_pressed(p)) { fv = 1; break; }
+        if (fv) {
+            int k, lim = (missing < 2) ? 1 : 2;
+            for (k = 0; k < lim; k++) {
+                int v = s_mp_missing_content[k] + 1;
+                v %= MP_MISSING_CONTENT_COUNT;
+                s_mp_missing_content[k] = v;
+            }
+            frontend_play_sfx(2);
+            TD5_LOG_I(LOG_TAG, "MP position: FRONT VIEW -> empty-cell content [%d,%d]",
+                      s_mp_missing_content[0], s_mp_missing_content[1]);
         }
     }
 
@@ -1550,17 +1838,16 @@ void Screen_MpPosition(void) {
         all_ready = 0;
 
         /* D-pad move with auto-repeat. Compute the target cell from the current
-         * (col,row); if occupied, swap; else move. P1's LEFT/RIGHT is reserved for
-         * the layout cycler above, so for p==0 only UP/DOWN move the cell (P1 can
-         * still place via UP/DOWN; with a 1-row layout P1 simply readies). */
+         * (col,row); if occupied by an UNREADY player, swap; if occupied by a
+         * READY player, BLOCK the move (ready players are locked in place and can
+         * only be moved by themselves). LEFT/RIGHT now move the cell for EVERY
+         * player (the layout cycler moved to the CHANGE CAMERA button). */
         if (mp_repeat_fire(p, bits, edge, now)) {
             int cell = s_mp_player_cell[p];
             int col = cell % cols, row = cell / cols;
             int ncol = col, nrow = row, target;
-            if (!(p == 0)) {
-                if (bits & 1) ncol--;
-                if (bits & 2) ncol++;
-            }
+            if (bits & 1) ncol--;
+            if (bits & 2) ncol++;
             if (bits & 4) nrow--;
             if (bits & 8) nrow++;
             if (ncol < 0) ncol = 0;
@@ -1570,17 +1857,21 @@ void Screen_MpPosition(void) {
             target = nrow * cols + ncol;
             if (target >= ncells) target = ncells - 1;
             if (target != cell) {
-                int q;
+                int q, blocked = 0, swap_q = -1;
                 for (q = 0; q < n; q++) {
                     if (q != p && s_mp_player_cell[q] == target) {
-                        s_mp_player_cell[q] = cell;   /* swap occupants */
-                        s_mp_player_ready[q] = 0;     /* bumped -> must re-confirm */
-                        s_pos_ready_ms = 0;
+                        if (s_mp_player_ready[q]) blocked = 1;  /* locked occupant */
+                        else                      swap_q  = q;  /* free to swap   */
                         break;
                     }
                 }
-                s_mp_player_cell[p] = target;
-                frontend_play_sfx(2);
+                if (blocked) {
+                    frontend_play_sfx(10);   /* rejection cue: can't displace ready */
+                } else {
+                    if (swap_q >= 0) s_mp_player_cell[swap_q] = cell;  /* swap occupants */
+                    s_mp_player_cell[p] = target;
+                    frontend_play_sfx(2);
+                }
             }
         }
 
@@ -1623,6 +1914,269 @@ void Screen_MpPosition(void) {
         }
     } else {
         s_pos_ready_ms = 0;
+    }
+}
+
+/* [#6] Smooth, SUBTLE pulse in [lo,hi] driven off wall-clock `now`.
+ *
+ * The OLD render (frontend_mp_position_render in td5_frontend.c) used
+ *   0.55 + 0.45 * ((now/60) % 16) / 15
+ * which is a fast 16-step SAWTOOTH that snaps from 1.0 back to 0.55 every ~960ms
+ * and swings a full 0.45 in alpha — that hard reset + wide swing is the
+ * "pulsating" the user reported. This is a continuous TRIANGLE wave (no snap)
+ * over a ~1.6s period with a gentle amplitude, so a player's own cell breathes
+ * just enough to spot it without flickering. No <math.h> dependency. */
+static float mp_pos_pulse(uint32_t now, float lo, float hi) {
+    uint32_t period = 1600u;                 /* full up+down cycle (ms) */
+    uint32_t t = now % period;
+    float tri = (t < period / 2u)            /* 0..1 up, then 1..0 down */
+                ? (float)t / (float)(period / 2u)
+                : 1.0f - (float)(t - period / 2u) / (float)(period / 2u);
+    return lo + (hi - lo) * tri;
+}
+
+/* [#6] Replacement renderer for the "CHOOSE YOUR SCREEN" position picker.
+ * Drawn entirely with the public VectorUI primitives (td5_vui_quad / td5_vui_text)
+ * so it lives in this file; repoint the TD5_SCREEN_MP_POSITION case in
+ * td5_frontend.c from frontend_mp_position_render to this. Differences vs the old
+ * renderer: (1) stable subtle pulse (mp_pos_pulse); (2) READY cells lock-tinted +
+ * a small lock glyph hint; (3) empty cells show the SELECTED content label
+ * (EMPTY/MAP/STANDINGS) not a hard-coded "EMPTY"; (4) footer documents the new
+ * CHANGE CAMERA = LAYOUT and FRONT VIEW = empty-cell-content bindings. */
+void frontend_mp_position_render2(float sx, float sy) {
+    int p, c, n = s_num_human_players;
+    int cols = 1, rows = 1, missing = 0;
+    uint32_t now = td5_plat_time_ms();
+    int ncells, all_ready = 1;
+    int owner[TD5_MAX_VIEWPORTS];
+    float pulse = mp_pos_pulse(now, 0.78f, 1.0f);   /* subtle: 0.78..1.0 */
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    ncells = cols * rows;
+    if (ncells > TD5_MAX_VIEWPORTS) ncells = TD5_MAX_VIEWPORTS;
+
+    /* cell -> occupying player (or -1 = empty). */
+    for (c = 0; c < TD5_MAX_VIEWPORTS; c++) owner[c] = -1;
+    for (p = 0; p < n; p++) {
+        int cell = s_mp_player_cell[p];
+        if (cell >= 0 && cell < ncells) owner[cell] = p;
+        if (!s_mp_player_ready[p]) all_ready = 0;
+    }
+
+    /* Dim full-screen backdrop + title. */
+    td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xC0101018u, -1, 0, 0, 1, 1);
+    td5_vui_text_centered(320.0f * sx, 10.0f * sy, "CHOOSE YOUR SCREEN", 0xFFFFE060u, sx, sy);
+
+    /* Layout grid occupies a centred area below the title, above the footer. */
+    {
+        const float gx = 40.0f, gy = 40.0f, gw = 560.0f, gh = 372.0f;
+        float cw = gw / (float)cols, ch = gh / (float)rows;
+        for (c = 0; c < ncells; c++) {
+            int col = c % cols, row = c / cols;
+            float px = gx + (float)col * cw, py = gy + (float)row * ch;
+            float ccx = px + cw * 0.5f;
+            int occ = owner[c];
+            uint32_t rgb = (occ >= 0) ? ((uint32_t)s_mp_player_accent[occ] & 0x00FFFFFFu) : 0x303040u;
+            int ready = (occ >= 0) && s_mp_player_ready[occ];
+            char buf[40];
+
+            /* cell fill (faint tint of the owner's colour; ready = slightly stronger). */
+            td5_vui_quad((px + 3) * sx, (py + 3) * sy, (cw - 6) * sx, (ch - 6) * sy,
+                         (occ >= 0) ? (rgb | (ready ? 0x60000000u : 0x40000000u)) : 0x40181820u,
+                         -1, 0, 0, 1, 1);
+
+            /* border: owned cells breathe gently (subtle pulse); READY cells are
+             * SOLID + thicker (locked, no pulse); empty cells are a thin steady line. */
+            {
+                float bt = (occ >= 0) ? (ready ? 3.5f : 3.0f) : 1.5f;
+                uint32_t a;
+                if (occ < 0)        a = 0x80000000u;
+                else if (ready)     a = 0xFF000000u;                 /* locked: full, steady */
+                else                a = (uint32_t)(0x60 + (int)(0x9F * pulse)) << 24;
+                uint32_t bc = (rgb | a);
+                td5_vui_quad((px + 3) * sx, (py + 3) * sy, (cw - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+                td5_vui_quad((px + 3) * sx, (py + ch - 3 - bt) * sy, (cw - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+                td5_vui_quad((px + 3) * sx, (py + 3) * sy, bt * sx, (ch - 6) * sy, bc, -1, 0, 0, 1, 1);
+                td5_vui_quad((px + cw - 3 - bt) * sx, (py + 3) * sy, bt * sx, (ch - 6) * sy, bc, -1, 0, 0, 1, 1);
+            }
+
+            /* big cell number (1-based) so players can call out "I'm on 3". */
+            snprintf(buf, sizeof buf, "%d", c + 1);
+            td5_vui_text_centered(ccx * sx, (py + ch * 0.30f) * sy, buf,
+                                  (occ >= 0) ? 0xFFFFFFFFu : 0xFF707080u, sx, sy);
+
+            if (occ >= 0) {
+                if (s_mp_player_name[occ][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[occ]);
+                else                          snprintf(buf, sizeof buf, "PLAYER %d", occ + 1);
+                mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 26.0f) * sy, buf,
+                                        rgb | 0xFF000000u, sx, sy);
+                mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 40.0f) * sy,
+                                        ready ? "READY (LOCKED)" : "MOVE: D-PAD",
+                                        ready ? 0xFF40FF40u : 0xFFB0B0B0u, sx, sy);
+            } else {
+                /* [#6] empty cell shows the SELECTED content (FRONT VIEW cycles it). */
+                int cidx = s_mp_missing_content[0];
+                if (cidx < 0 || cidx >= MP_MISSING_CONTENT_COUNT) cidx = 0;
+                mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 26.0f) * sy,
+                                        k_mp_missing_content[cidx], 0xFF8088A0u, sx, sy);
+                mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 40.0f) * sy,
+                                        "FRONT VIEW: CHANGE", 0xFF707080u, sx, sy);
+            }
+        }
+    }
+
+    /* Footer: controls + layout/content state + all-ready hint. */
+    td5_vui_quad(0.0f, 420.0f * sy, 640.0f * sx, 60.0f * sy, 0xB0080810u, -1, 0, 0, 1, 1);
+    {
+        int lcnt = 1;
+        const MpSplitLayout *opts = mp_split_layouts(n, &lcnt);
+        char lbuf[80];
+        const char *lname = (opts && s_mp_layout_sel >= 0 && s_mp_layout_sel < lcnt)
+                            ? opts[s_mp_layout_sel].label : "SINGLE";
+        td5_vui_text_centered(320.0f * sx, 424.0f * sy,
+                              "D-PAD: MOVE   A: READY   B: BACK", 0xFFFFFFFFu, sx, sy);
+        if (lcnt > 1)
+            snprintf(lbuf, sizeof lbuf, "CHANGE CAMERA: LAYOUT [%s]", lname);
+        else
+            snprintf(lbuf, sizeof lbuf, "LAYOUT: %s", lname);
+        mp_pos_small_centered(320.0f * sx, 444.0f * sy, lbuf, 0xFFFFE060u, sx, sy);
+        if (missing > 0) {
+            int cidx = s_mp_missing_content[0];
+            if (cidx < 0 || cidx >= MP_MISSING_CONTENT_COUNT) cidx = 0;
+            snprintf(lbuf, sizeof lbuf, "FRONT VIEW: EMPTY-CELL CONTENT [%s]",
+                     k_mp_missing_content[cidx]);
+            mp_pos_small_centered(320.0f * sx, 456.0f * sy, lbuf, 0xFF90C0FFu, sx, sy);
+        } else if (all_ready) {
+            mp_pos_small_centered(320.0f * sx, 456.0f * sy, "ALL READY - STARTING CARS...",
+                                    0xFF80FF80u, sx, sy);
+        }
+        if (missing > 0 && all_ready)
+            mp_pos_small_centered(320.0f * sx, 468.0f * sy, "ALL READY - STARTING CARS...",
+                                    0xFF80FF80u, sx, sy);
+    }
+}
+
+/* [#11] Profile-management overlay for the MP name/colour step. Drawn ON TOP of
+ * frontend_mp_setup_render (which owns the NAME/COLOUR/OK pane); td5_frontend.c
+ * must call this right after it (see the REPORT). Two parts per pane:
+ *   (a) idle: a 4th "PROFILE" chip below the OK button (highlighted when the
+ *       player's nav cursor is on MP_SET_PROFILE);
+ *   (b) sub==3: a centred panel over the pane with the SAVE/LOAD/DELETE action
+ *       row + the scrollable profile list (already-loaded-this-session entries
+ *       greyed). Inert when TD5RE_PROFILES=0 or during the slide-in. */
+void frontend_mp_setup_profile_render(float sx, float sy) {
+    int p, n = s_num_human_players;
+    int cols = 1, rows = 1, missing = 0;
+    if (!mp_profiles_enabled()) return;
+    if (!s_mp_simul || s_mp_phase != 0) return;          /* only the name/colour step */
+    if (s_inner_state != 0x21) return;                   /* skip during slide-in */
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+    (void)missing;
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+
+    {
+        float pane_w = 640.0f / (float)cols;
+        float pane_h = 480.0f / (float)rows;
+        for (p = 0; p < n; p++) {
+            int col = p % cols, row = p / cols;
+            float px = (float)col * pane_w, py = (float)row * pane_h;
+            float cx = px + pane_w * 0.5f;
+            uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
+            int sub = s_mp_setup_sub[p];
+
+            /* (a) idle PROFILE chip — a compact chip anchored to the pane's bottom
+             * margin (below the static NAME/COLOUR/OK band the setup render owns),
+             * so it never overlaps those three buttons regardless of pane size. */
+            if (!s_mp_player_ready[p] && sub == 0) {
+                float bh = 13.0f;
+                float bx = px + 8.0f, bw = pane_w - 16.0f;
+                float yy = py + pane_h - bh - 3.0f;     /* hug the pane bottom */
+                int focus = (s_mp_setup_btn[p] == MP_SET_PROFILE);
+                /* chip: amber rim when focused, faint steel otherwise. */
+                td5_vui_quad(bx * sx, yy * sy, bw * sx, bh * sy,
+                             focus ? (rgb | 0xC0000000u) : 0x70202838u, -1, 0, 0, 1, 1);
+                {
+                    float t = 2.0f;
+                    uint32_t bc = focus ? 0xFFFFCC33u : 0xA05A6680u;
+                    td5_vui_quad(bx * sx, yy * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
+                    td5_vui_quad(bx * sx, (yy + bh - t) * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
+                    td5_vui_quad(bx * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
+                    td5_vui_quad((bx + bw - t) * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
+                }
+                mp_pos_small_centered(cx * sx, (yy + (bh - 9.0f) * 0.5f) * sy,
+                                      "PROFILE", 0xFFFFFFFFu, sx, sy);
+            }
+
+            /* (b) open profile panel. */
+            if (sub == 3) {
+                float panx = px + 6.0f, pany = py + 22.0f;
+                float panw = pane_w - 12.0f, panh = pane_h - 28.0f;
+                int cnt = td5_save_profile_count();
+                int i, max_rows, list_top;
+                char buf[48];
+                /* dim the pane + panel frame */
+                td5_vui_quad(panx * sx, pany * sy, panw * sx, panh * sy, 0xE00C0C16u, -1, 0, 0, 1, 1);
+                td5_vui_quad(panx * sx, pany * sy, panw * sx, 2.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
+
+                mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, "PROFILE", 0xFFFFE060u, sx, sy);
+
+                /* action row: SAVE / LOAD / DELETE */
+                {
+                    static const char *acts[MP_PROF_ACT_COUNT] = { "SAVE", "LOAD", "DELETE" };
+                    float ar_y = pany + 16.0f;
+                    float seg = panw / (float)MP_PROF_ACT_COUNT;
+                    int a;
+                    for (a = 0; a < MP_PROF_ACT_COUNT; a++) {
+                        float axp = panx + seg * (float)a;
+                        int on = (s_mp_prof_focus[p] == 0 && s_mp_prof_act[p] == a);
+                        td5_vui_quad((axp + 1) * sx, ar_y * sy, (seg - 2) * sx, 13.0f * sy,
+                                     on ? 0xD0FFCC33u : 0x60303848u, -1, 0, 0, 1, 1);
+                        mp_pos_small_centered((axp + seg * 0.5f) * sx, (ar_y + 2.0f) * sy,
+                                              acts[a], on ? 0xFF101010u : 0xFFD0D0D0u, sx, sy);
+                    }
+                }
+
+                /* profile list (greyed if already loaded this session). */
+                list_top = (int)(pany + 33.0f);
+                max_rows = (int)((panh - 33.0f - 10.0f) / 11.0f);
+                if (max_rows < 1) max_rows = 1;
+                if (cnt == 0) {
+                    mp_pos_small_centered(cx * sx, (float)list_top * sy + 6.0f * sy,
+                                          "(NO SAVED PROFILES)", 0xFF808890u, sx, sy);
+                } else {
+                    int start = 0;
+                    if (s_mp_prof_sel[p] >= max_rows) start = s_mp_prof_sel[p] - max_rows + 1;
+                    for (i = 0; i < max_rows && (start + i) < cnt; i++) {
+                        TD5_Profile pr;
+                        int idx = start + i;
+                        float ry = (float)list_top + (float)i * 11.0f;
+                        int sel = (s_mp_prof_focus[p] == 1 && s_mp_prof_sel[p] == idx);
+                        int loaded;
+                        if (!td5_save_profile_get(idx, &pr)) continue;
+                        loaded = mp_prof_name_loaded(pr.name);
+                        if (sel)
+                            td5_vui_quad((panx + 2) * sx, ry * sy, (panw - 4) * sx, 10.0f * sy,
+                                         0x90303848u, -1, 0, 0, 1, 1);
+                        /* name + a small swatch of the profile's accent. */
+                        snprintf(buf, sizeof buf, "%s%s", pr.name, loaded ? " (IN USE)" : "");
+                        fe_draw_small_text((panx + 14) * sx, ry * sy, buf,
+                                           loaded ? 0xFF606870u : (sel ? 0xFFFFFFFFu : 0xFFC8C8C8u),
+                                           sx, sy);
+                        td5_vui_quad((panx + 3) * sx, (ry + 1.0f) * sy, 8.0f * sx, 8.0f * sy,
+                                     ((uint32_t)pr.accent & 0x00FFFFFFu) | 0xFF000000u, -1, 0, 0, 1, 1);
+                    }
+                }
+
+                mp_pos_small_centered(cx * sx, (pany + panh - 9.0f) * sy,
+                                      "A: DO   UP/DN: PICK   B: BACK", 0xFFB0B0B0u, sx, sy);
+            }
+        }
     }
 }
 

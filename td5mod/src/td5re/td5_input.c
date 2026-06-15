@@ -26,6 +26,7 @@
 #include "td5_ai.h"
 #include "td5_save.h"
 #include "td5_sound.h"   /* td5_sound_toggle_siren — cop-chase siren toggle */
+#include "td5_physics.h" /* FF SIGNALS #1: drift/gear/redline/crash getters for rumble */
 
 /* Defined in td5_game.c */
 extern int    g_actorSlotForView[2];
@@ -157,6 +158,13 @@ static int32_t s_rear_view[TD5_MAX_RACER_SLOTS];
 static uint8_t s_recovery_request[TD5_MAX_HUMAN_PLAYERS];
 static uint8_t s_recovery_held[TD5_MAX_HUMAN_PLAYERS];
 
+/* [#6 support 2026-06-15] Per-local-player held-latches for the frontend
+ * camera-button edge getters (td5_input_frontend_change_camera_pressed /
+ * _front_view_pressed). Declared here so td5_input_init can zero them; defined
+ * once, used only by those getters near the bottom of this file. */
+static uint8_t s_fe_cam_held[TD5_MAX_HUMAN_PLAYERS];
+static uint8_t s_fe_front_held[TD5_MAX_HUMAN_PLAYERS];
+
 /* ========================================================================
  * Internal State -- Input Source Config
  *
@@ -216,6 +224,63 @@ static TD5_InputRecordBuffer s_rec;
 
 static TD5_FFGameState s_ff;
 
+/* [FF SIGNALS 2026-06-15, #1] Physics-driven rumble/vibration state.
+ *
+ * The FF path here is DirectInput EFFECTS, not XInput motors (see
+ * td5_plat_ff_constant in td5_platform_win32.c). There is no low/high motor
+ * pair; instead the device owns four DI effect slots created in
+ * td5_plat_ff_init: slot 0/1/2 = DICONSTANTFORCE (steering / frontal / side),
+ * slot 3 = DIPERIODIC sine (terrain rumble). We map "rumble" types onto the
+ * PERIODIC slot (slot 3 — the natural buzz, the low-motor analogue) and "jolt"
+ * types onto a CONSTANT-FORCE slot (slot 1 = TD5_FF_SLOT_FRONTAL — the
+ * high-motor analogue). The continuous drift/redline buzz is COMPOSED with the
+ * existing terrain magnitude inside td5_input_ff_update_player so the two
+ * writers of slot 3 don't stomp each other; the crash/gear jolts are fired as
+ * short edge-driven pulses on slot 1 from td5_input_ff_update.
+ *
+ * Per-player edge tracking (indexed by player slot, == device slot):
+ *   s_ff_gear_seen  — last-seen td5_physics_gear_change_seq() value
+ *   s_ff_crash_seen — last-seen td5_physics_get_crash_fx() sequence id
+ *   s_ff_pulse_mag / s_ff_pulse_ticks — current jolt magnitude + remaining
+ *     render-frames it stays asserted on slot 1 (a one-shot decays to 0). */
+static uint32_t s_ff_gear_seen [TD5_MAX_RACER_SLOTS];
+static uint32_t s_ff_crash_seen[TD5_MAX_RACER_SLOTS];
+static int      s_ff_pulse_mag  [TD5_MAX_RACER_SLOTS];
+static int      s_ff_pulse_ticks[TD5_MAX_RACER_SLOTS];
+
+/* TD5RE_FORCE_FEEDBACK (cached): master gate for the physics-driven vibration.
+ * Default ON; "0" reverts to the prior behaviour (steering + terrain FF only,
+ * no drift/crash/gear/redline rumble). Resolved once on first use. */
+static int td5_ff_vibration_enabled(void)
+{
+    static int s_init = 0;
+    static int s_on = 1;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_FORCE_FEEDBACK");
+        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "Force feedback vibration: %s",
+                  s_on ? "enabled (drift/crash/gear/redline)" : "disabled");
+    }
+    return s_on;
+}
+
+/* DirectInput periodic/constant magnitudes run 0..DI_FFNOMINALMAX (10000); the
+ * platform layer clamps, but we size our contributions to that domain. The
+ * continuous rumble blends a MEDIUM drift buzz and a LIGHT redline buzz; the
+ * gear/crash JOLT uses a stronger short constant pulse. */
+#define TD5_FF_MAG_MAX            10000   /* DI_FFNOMINALMAX */
+#define TD5_FF_DRIFT_MAG_MAX       6500   /* full-scale drift buzz (medium) */
+#define TD5_FF_REDLINE_MAG         2200   /* light continuous redline buzz */
+#define TD5_FF_GEAR_PULSE_MAG      3000   /* brief low-force gear-shift bump */
+#define TD5_FF_GEAR_PULSE_TICKS       2   /* render-frames the gear bump holds */
+#define TD5_FF_CRASH_PULSE_MAG_MAX 10000  /* full-scale strong crash jolt */
+#define TD5_FF_CRASH_PULSE_TICKS      4   /* render-frames the crash jolt holds */
+#define TD5_FF_CRASH_NEW_AGE_TICKS    3   /* a crash is "new" if age <= this (sim ticks) */
+/* Crash impact magnitude is large (acute threshold 250000); scale it to the FF
+ * domain. >>5 maps ~250000 -> ~7800 and saturates to 10000 by ~320000. */
+#define TD5_FF_CRASH_MAG_SHIFT        5
+
 /* ========================================================================
  * Internal State -- Escape / Fade
  * ======================================================================== */
@@ -268,6 +333,12 @@ int td5_input_init(void)
     memset(s_recovery_held, 0, sizeof(s_recovery_held));
     memset(&s_rec, 0, sizeof(s_rec));
     memset(&s_ff, 0, sizeof(s_ff));
+    memset(s_ff_gear_seen, 0, sizeof(s_ff_gear_seen));
+    memset(s_ff_crash_seen, 0, sizeof(s_ff_crash_seen));
+    memset(s_ff_pulse_mag, 0, sizeof(s_ff_pulse_mag));
+    memset(s_ff_pulse_ticks, 0, sizeof(s_ff_pulse_ticks));
+    memset(s_fe_cam_held, 0, sizeof(s_fe_cam_held));
+    memset(s_fe_front_held, 0, sizeof(s_fe_front_held));
     memset(s_replay_log_path, 0, sizeof(s_replay_log_path));
 
     s_escape_muted = 0;
@@ -1487,6 +1558,12 @@ void td5_input_reset_accumulators(void)
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_nos_latch[i] = 0;
     }
+    /* [#18b replay-fix 2026-06-15] Reset per-race steering accumulators here too —
+     * they were only zeroed at startup, so a replay (or any second race) inherited
+     * the previous run's end-of-race steering state, diverging the first moments of
+     * playback. A race must start steering-neutral. */
+    memset(s_steering_cmd, 0, sizeof(s_steering_cmd));
+    memset(s_steer_ramp,  0, sizeof(s_steer_ramp));
 }
 
 /* ========================================================================
@@ -1645,6 +1722,76 @@ int td5_input_get_rear_view(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
     return s_rear_view[slot];
+}
+
+/* ========================================================================
+ * Frontend camera-button edge getters (#6 support)
+ *
+ * Edge-triggered, per LOCAL human player. They poll the player's configured
+ * device THROUGH THE SAME per-action binding decode the in-race poll uses
+ * (td5_plat_input_poll reads the keyboard always, and the joystick bound to
+ * that player slot if one exists), then test the decoded control bits:
+ *   CHANGE VIEW (binding action 8) -> TD5_INPUT_CAMERA_CHANGE
+ *   FRONT/REAR VIEW (binding action 9) -> TD5_INPUT_REAR_VIEW
+ * so a controller's CHANGE-CAMERA / FRONT-VIEW buttons drive the MP position
+ * screen even though no race owns the device. Each keeps its own per-player
+ * held-latch so a held button fires once per press; the latches are separate
+ * from the in-race rear-view / camera-cooldown state, so calling these in the
+ * frontend never disturbs an in-race session. Gated by
+ * TD5RE_FRONTEND_CAM_BUTTONS (cached; default ON) — "0" leaves the latches
+ * disarmed and both getters return 0 (consumers fall back to keyboard nav).
+ * (The per-player held-latches s_fe_cam_held / s_fe_front_held are declared near
+ * the top of this file so td5_input_init can zero them.)
+ * ======================================================================== */
+
+static int td5_fe_cam_buttons_enabled(void)
+{
+    static int s_init = 0;
+    static int s_on = 1;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_FRONTEND_CAM_BUTTONS");
+        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "Frontend camera buttons: %s",
+                  s_on ? "enabled" : "disabled");
+    }
+    return s_on;
+}
+
+/* Shared edge detector for a frontend control bit. `held` is the per-player
+ * debounce latch (by reference). Returns 1 exactly on the rising edge. */
+static int td5_fe_button_edge(int player, uint32_t bit, uint8_t *held)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    if (!td5_fe_cam_buttons_enabled()) { *held = 0; return 0; }
+
+    TD5_InputState st;
+    memset(&st, 0, sizeof(st));
+    /* Poll this player's device; the platform decodes its configured bindings
+     * into the same control-bit set the in-race poll produces. Keyboard players
+     * read the live keyboard; joystick players read the device bound to their
+     * slot (if any). The device slot index equals the local player index, as on
+     * the in-race poll path. */
+    td5_plat_input_poll(player, &st);
+
+    int now = (st.buttons & bit) ? 1 : 0;
+    int edge = (now && !*held) ? 1 : 0;
+    *held = (uint8_t)now;
+    return edge;
+}
+
+int td5_input_frontend_change_camera_pressed(int player)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    return td5_fe_button_edge(player, (uint32_t)TD5_INPUT_CAMERA_CHANGE,
+                              &s_fe_cam_held[player]);
+}
+
+int td5_input_frontend_front_view_pressed(int player)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    return td5_fe_button_edge(player, (uint32_t)TD5_INPUT_REAR_VIEW,
+                              &s_fe_front_held[player]);
 }
 
 /* ========================================================================
@@ -2000,6 +2147,22 @@ int td5_input_ff_init(void)
 {
     memset(&s_ff, 0, sizeof(s_ff));
 
+    /* [FF SIGNALS #1] Seed the per-player gear/crash edge baselines from the
+     * CURRENT physics sequence ids so a brand-new race doesn't fire a spurious
+     * gear/crash jolt on its first frame (the sequences are monotonic across the
+     * session; only an INCREASE is an event). Clear any pending jolt too. The FF
+     * layer's player slot is the actor slot (== device slot), exactly as
+     * td5_input_ff_update_player treats it. */
+    {
+        int p;
+        for (p = 0; p < TD5_MAX_RACER_SLOTS; p++) {
+            s_ff_gear_seen[p]   = td5_physics_gear_change_seq(p);
+            s_ff_crash_seen[p]  = td5_physics_get_crash_fx(p, NULL, NULL);
+            s_ff_pulse_mag[p]   = 0;
+            s_ff_pulse_ticks[p] = 0;
+        }
+    }
+
     /* CreateRaceForceFeedbackEffects (0x4285B0) creates 4 effect slots PER
      * device:
      *   Slot 0: Constant force -- steering resistance
@@ -2054,6 +2217,83 @@ void td5_input_ff_shutdown(void)
  * The magnitude parameter is not used here — per-player force magnitude
  * is computed from actor state inside td5_input_ff_update_player.
  * ======================================================================== */
+/* [FF SIGNALS 2026-06-15, #1] Per-player crash/gear JOLT update.
+ *
+ * Edge-detects the physics gear-change and acute-crash sequences for one player
+ * (player slot == actor slot == device slot, as elsewhere in the FF path) and
+ * drives a short CONSTANT-FORCE pulse on slot 1 (TD5_FF_SLOT_FRONTAL — the
+ * "high motor" analogue, distinct from the continuous periodic rumble on slot
+ * 3). Rules:
+ *   - CRASH/COLLISION: a STRONG pulse on a NEW acute crash (sequence increased,
+ *     and age small), magnitude scaled by the impact mag.
+ *   - GEAR SWITCH: a brief LOW-force pulse on each gear_change_seq increment.
+ * The pulse magnitude is held for a few render frames then decays to 0, at which
+ * point slot 1 is stopped so it doesn't sit asserted. A crash outranks a gear
+ * bump if they coincide. No-op when TD5RE_FORCE_FEEDBACK is off or this player
+ * has no FF device. */
+static void td5_input_ff_update_jolt(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    if (s_ff.controller_assignment[slot] == 0) return;
+    if (slot >= TD5_MAX_HUMAN_PLAYERS) return;   /* device slots are per human player */
+    if (!td5_ff_vibration_enabled()) return;
+    int dev = slot;
+
+    /* ---- GEAR SWITCH edge: brief LOW-force bump ---- */
+    {
+        uint32_t seq = td5_physics_gear_change_seq(slot);
+        if (seq != s_ff_gear_seen[slot]) {
+            s_ff_gear_seen[slot] = seq;
+            /* Don't override a stronger crash pulse already in flight. */
+            if (TD5_FF_GEAR_PULSE_MAG > s_ff_pulse_mag[slot]) {
+                s_ff_pulse_mag[slot]   = TD5_FF_GEAR_PULSE_MAG;
+                s_ff_pulse_ticks[slot] = TD5_FF_GEAR_PULSE_TICKS;
+            }
+        }
+    }
+
+    /* ---- CRASH/COLLISION edge: STRONG pulse scaled by impact magnitude ---- */
+    {
+        int32_t  mag = 0;
+        int      age = 0;
+        uint32_t cseq = td5_physics_get_crash_fx(slot, &mag, &age);
+        /* "New" crash: a fresh sequence id AND a young event (so re-entering a
+         * race that left a stale non-zero seq, or polling long after the hit,
+         * doesn't fire). */
+        if (cseq != 0 && cseq != s_ff_crash_seen[slot] &&
+            age <= TD5_FF_CRASH_NEW_AGE_TICKS) {
+            s_ff_crash_seen[slot] = cseq;
+            int cm = (mag > 0 ? (int)(mag >> TD5_FF_CRASH_MAG_SHIFT) : 0);
+            if (cm > TD5_FF_CRASH_PULSE_MAG_MAX) cm = TD5_FF_CRASH_PULSE_MAG_MAX;
+            /* Floor so even a borderline-acute hit is clearly felt. */
+            if (cm < TD5_FF_GEAR_PULSE_MAG) cm = TD5_FF_GEAR_PULSE_MAG;
+            if (cm >= s_ff_pulse_mag[slot]) {     /* crash outranks an equal/smaller bump */
+                s_ff_pulse_mag[slot]   = cm;
+                s_ff_pulse_ticks[slot] = TD5_FF_CRASH_PULSE_TICKS;
+            }
+            TD5_LOG_I(LOG_TAG, "FF crash jolt: player=%d mag=%d age=%d -> pulse=%d",
+                      slot, (int)mag, age, s_ff_pulse_mag[slot]);
+        } else if (cseq != s_ff_crash_seen[slot]) {
+            /* Acknowledge an old/late sequence so it can't fire belatedly. */
+            s_ff_crash_seen[slot] = cseq;
+        }
+    }
+
+    /* ---- Drive / decay the jolt on slot 1 (constant force) ---- */
+    if (s_ff_pulse_ticks[slot] > 0) {
+        td5_plat_ff_constant(dev, TD5_FF_SLOT_FRONTAL, s_ff_pulse_mag[slot]);
+        s_ff_pulse_ticks[slot]--;
+        if (s_ff_pulse_ticks[slot] == 0) s_ff_pulse_mag[slot] = 0;
+    } else if (s_ff_pulse_mag[slot] != 0) {
+        /* Pulse expired: release the slot so it stops asserting force — unless a
+         * V2V/wall collision effect (td5_input_ff_collision, same slot) is in
+         * recovery, in which case leave it to that path. */
+        s_ff_pulse_mag[slot] = 0;
+        if (s_ff.collision_active[slot] == 0)
+            td5_plat_ff_stop(dev, TD5_FF_SLOT_FRONTAL);
+    }
+}
+
 void td5_input_ff_update(void)
 {
     /* Dispatch per-player FF update for all active local players.
@@ -2063,8 +2303,10 @@ void td5_input_ff_update(void)
     int players = s_active_players;
     if (players < 1) players = 1;
     if (players > TD5_MAX_HUMAN_PLAYERS) players = TD5_MAX_HUMAN_PLAYERS;
-    for (int p = 0; p < players; p++)
-        td5_input_ff_update_player(p);
+    for (int p = 0; p < players; p++) {
+        td5_input_ff_update_player(p);   /* steering + terrain + drift/redline rumble */
+        td5_input_ff_update_jolt(p);     /* [FF SIGNALS #1] crash/gear jolt pulse */
+    }
     TD5_LOG_D(LOG_TAG, "FF dispatcher: players=%d", players);
 }
 
@@ -2075,6 +2317,10 @@ void td5_input_ff_stop(void)
             td5_plat_ff_stop(dev, slot);
         s_ff.steer_effect_started[dev] = 0;
         s_ff.terrain_effect_started[dev] = 0;
+        /* [FF SIGNALS #1] drop any in-flight crash/gear jolt so a stopped device
+         * doesn't resume buzzing when effects restart. */
+        s_ff_pulse_mag[dev] = 0;
+        s_ff_pulse_ticks[dev] = 0;
     }
 }
 
@@ -2190,6 +2436,45 @@ void td5_input_ff_update_player(int slot)
 
     int terrain_coeff = g_terrain_ff_coefficients[surface_type];
     int terrain_mag = (30 - lateral_force / 10000) * terrain_coeff;
+
+    /* [FF SIGNALS #1] Compose the physics-driven CONTINUOUS rumble onto the same
+     * periodic slot (slot 3 — the buzz / low-motor analogue), so the drift and
+     * redline vibrations ride on top of the terrain effect instead of a second
+     * writer fighting it for the slot. Two contributions:
+     *   - DRIFTING: continuous MEDIUM rumble while drift_level>0, magnitude
+     *     scaled by drift_level (0..255 -> 0..TD5_FF_DRIFT_MAG_MAX).
+     *   - MAX RPM (manual only): LIGHT continuous rumble while at redline. The
+     *     "manual only" rule keys off the actor's auto-gearbox flag (+0x378==0 =>
+     *     manual; the same flag td5_input_update_player_control writes). In auto
+     *     the box upshifts at redline so a sustained redline buzz would be noise;
+     *     in manual the player holds the limiter, which is what we want to feel.
+     * Gate: TD5RE_FORCE_FEEDBACK (default ON). When off, terrain-only (faithful). */
+    if (td5_ff_vibration_enabled()) {
+        int drift = td5_physics_get_drift_level(slot);   /* 0..255 */
+        int rumble = 0;
+        if (drift > 0) {
+            int dmag = (drift * TD5_FF_DRIFT_MAG_MAX) / 255;
+            if (dmag > rumble) rumble = dmag;            /* medium drift buzz */
+        }
+        if (td5_physics_at_redline(slot)) {
+            int manual = 1;
+            if (g_actor_table_base) {
+                uint8_t *aredl = g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE;
+                manual = (aredl[0x378] == 0);            /* +0x378==0 => manual */
+            }
+            if (manual && TD5_FF_REDLINE_MAG > rumble)
+                rumble = TD5_FF_REDLINE_MAG;             /* light redline buzz */
+        }
+        if (rumble > 0) {
+            /* Add the rumble to the terrain magnitude; the platform clamps to
+             * DI_FFNOMINALMAX. Use the larger of (terrain, terrain+rumble floored
+             * at rumble) so a quiet smooth surface still buzzes during a drift. */
+            int composed = terrain_mag + rumble;
+            if (composed < rumble) composed = rumble;
+            if (composed > TD5_FF_MAG_MAX) composed = TD5_FF_MAG_MAX;
+            terrain_mag = composed;
+        }
+    }
 
     if (!s_ff.terrain_effect_started[dev]) {
         /* First play of terrain effect */

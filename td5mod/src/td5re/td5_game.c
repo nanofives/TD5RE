@@ -1823,6 +1823,42 @@ int td5_game_init_race_session(void) {
                   "(slot 0 = human)",
                   humans - 1);
     }
+    /* [DEMO FIX #3 2026-06-15] Attract demo: the PLAYER car (slot 0) must be
+     * AI-driven, exactly like the opponents — it's an attract demo, nobody is
+     * holding the wheel. Mirrors the original InitializeRaceSession @0x0042ACCF
+     *   slot[0].state = 1 - (g_attractModeDemoActive | g_benchmarkModeActive)
+     * which drops slot 0 to state=0 (AI) whenever the attract demo is active.
+     * Dropping slot 0 to state=0 routes it through td5_physics_update_ai +
+     * td5_ai_tick (the opponent path) AND makes the in-race input dispatch skip
+     * td5_input_update_player_control(0) — so the demo car drives itself.
+     *
+     * This is the SAME mechanism g_td5.ini.player_is_ai uses above; demo just
+     * applies it to slot 0 unconditionally while the attract demo runs (no INI
+     * knob needed — the menu sets s_demo_mode via td5_game_set_demo_mode). Demo
+     * never plays back recorded input (that is View Replay / s_replay_mode), so
+     * unlike the player_is_ai parity hack we do NOT also feed slot 0's input —
+     * the AI fully owns the car.
+     *
+     * Gated by TD5RE_DEMO_FIX (cached, default ON): "0" reverts to the old
+     * behaviour (slot 0 stays state=1 in demo → car sits as if a human with no
+     * input were driving). Non-demo races never enter this block (s_demo_mode==0
+     * unless the attract demo launched it), so normal play is byte-unchanged. */
+    if (s_demo_mode) {
+        static int s_demo_fix_init = 0;
+        static int s_demo_fix_enabled = 1;
+        if (!s_demo_fix_init) {
+            const char *e = getenv("TD5RE_DEMO_FIX");
+            s_demo_fix_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_demo_fix_init = 1;
+            TD5_LOG_I(LOG_TAG, "Demo AI-drive (slot 0): %s",
+                      s_demo_fix_enabled ? "enabled" : "disabled (slot 0 stays human)");
+        }
+        if (s_demo_fix_enabled && s_slot_state[0].state == 1) {
+            s_slot_state[0].state = 0;   /* AI-drive the demo player car */
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: demo mode -> slot 0 switched to AI autopilot");
+        }
+    }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         td5_physics_set_race_slot_state(i, s_slot_state[i].state == 1 ? 1 : 0);
@@ -2288,7 +2324,39 @@ int td5_game_init_race_session(void) {
             td5_physics_compute_suspension_envelope(a, s);
         }
 
+        /* [DEMO FIX #3 2026-06-15] The AI module keeps its OWN slot-state table
+         * (td5_ai.c g_slot_state[], separate from this file's s_slot_state[]) and
+         * td5_ai_init_race_actor_runtime() decides slot 0's AI/human state by
+         * reading g_td5.ini.player_is_ai DIRECTLY (td5_ai.c ~L1776) — it does NOT
+         * know about s_demo_mode. So the demo slot-0->AI flip above (s_slot_state)
+         * would route physics through td5_physics_update_ai but the AI BRAIN would
+         * still treat slot 0 as "player" (g_slot_state[0]==1 -> case 0x01 skip) and
+         * never write a steering/throttle command -> the demo car would just idle.
+         *
+         * The AI module reads player_is_ai ONLY here at init (per-tick AI reads the
+         * cached g_slot_state[]; and the AI's track-behavior write runs AFTER the
+         * input dispatch each tick, so it always wins for slot 0). So scope a
+         * player_is_ai=1 override across JUST this init call, then restore it — the
+         * AI sets g_slot_state[0]=0 and drives the demo car, while every other
+         * per-tick reader of player_is_ai (input dispatch / finish-brake / carparam)
+         * sees the real value. This keeps the AI side in sync WITHOUT editing
+         * td5_ai.c (the proper one-line fix is to OR s_demo_mode into the L1776
+         * test there — see report). Gated by the same TD5RE_DEMO_FIX (resolved into
+         * s_slot_state[0]==0 above): if the demo fix is off, slot 0 stays state==1
+         * here and this override no-ops. Non-demo races never enter it. */
+        int demo_pia_saved = g_td5.ini.player_is_ai;
+        int demo_pia_override = (s_demo_mode && s_slot_state[0].state == 0 &&
+                                 !g_td5.ini.player_is_ai);
+        if (demo_pia_override) {
+            g_td5.ini.player_is_ai = 1;
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: demo -> player_is_ai=1 scoped to AI runtime init "
+                      "(AI g_slot_state[0]=0 so the demo car self-drives)");
+        }
         td5_ai_init_race_actor_runtime();
+        if (demo_pia_override) {
+            g_td5.ini.player_is_ai = demo_pia_saved;  /* restore real value */
+        }
 
         /* ---- Step 11b: Position racer actors on grid ---- */
         /* Grid patterns from InitializeRaceSession (0x42B07B-0x42B225):
@@ -2853,6 +2921,61 @@ int td5_game_init_race_session(void) {
     }
     TD5_LOG_I(LOG_TAG, "InitRace step 12/19: input %s initialized",
               s_replay_mode ? "playback" : "recording");
+
+    /* [REPLAY FIX #18 2026-06-15] Replay correctness guard + diagnostic.
+     * A View Replay must reproduce the just-driven race bit-for-bit. The two
+     * deterministic anchors are restored above — the per-race RNG seed (step 0,
+     * s_saved_race_seed) and the recorded StartSpanOffset (the spawn grid,
+     * TD5RE_REPLAY_OFFSET_FIX). Re-assert here that playback is actually armed
+     * and surface the restored anchors in one line so a divergent replay can be
+     * triaged from the log ("seed/offset round-tripped?" vs "sim/camera RNG").
+     *
+     * KNOWN RESIDUAL DIVERGENCE (NOT fixable from td5_game.c — see report):
+     *   1) td5_input.c: td5_input_reset_accumulators() does NOT clear
+     *      s_steering_cmd[]/s_steer_ramp[], so a replay inherits the recorded
+     *      race's END-of-run steering accumulator instead of starting clean —
+     *      the first fraction of a second of steering diverges. Fix: also zero
+     *      those two arrays per race in td5_input_reset_accumulators().
+     *   2) The cinematic trackside camera (td5_camera.c g_tracksideTimer =
+     *      rand()%10000) + audio/particle spawns (td5_sound.c/td5_vfx.c) draw the
+     *      SHARED CRT rand() at RENDER rate, whose draw count differs between the
+     *      recorded run and the replay (different fps) — so the camera cuts to
+     *      different shots and the replay "looks different" even though the CAR
+     *      path is faithful. The SIM path itself is rand()-clean (integer
+     *      physics; AI uses a private per-slot stream off the replicated seed),
+     *      so the car trajectory IS reproduced. Fix: seed the trackside camera
+     *      timer from td5_game_get_race_seed() instead of the shared rand().
+     * Gated by TD5RE_REPLAY_FIX (cached, default ON): "0" silences the guard
+     * (no behavioural change either way — this block only logs + re-arms). */
+    if (s_replay_mode) {
+        static int s_replay_fix_init = 0;
+        static int s_replay_fix_enabled = 1;
+        if (!s_replay_fix_init) {
+            const char *e = getenv("TD5RE_REPLAY_FIX");
+            s_replay_fix_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_replay_fix_init = 1;
+            TD5_LOG_I(LOG_TAG, "Replay correctness guard: %s",
+                      s_replay_fix_enabled ? "enabled" : "disabled");
+        }
+        if (s_replay_fix_enabled) {
+            /* Belt-and-suspenders: make sure the playback path is live even if a
+             * caller flipped only the game-side flag. Without this the sim would
+             * run the recording path and the played-back car would sit idle. */
+            if (!td5_input_is_playback_active()) {
+                td5_input_set_playback_active(1);
+                TD5_LOG_W(LOG_TAG,
+                          "Replay: playback was NOT armed at init -> forced ON");
+            }
+            TD5_LOG_I(LOG_TAG,
+                      "Replay init: seed=0x%08X recorded_span_offset=%d "
+                      "track=%d car=%d reverse=%d (deterministic anchors restored; "
+                      "any remaining drift = input-accumulator/camera-RNG, see code note)",
+                      s_saved_race_seed,
+                      (int)td5_input_replay_start_span_offset(),
+                      g_td5.track_index, g_td5.car_index,
+                      g_td5.reverse_direction);
+        }
+    }
 
     CK("ck13_before_ambient");
     /* ---- Step 13: Load ambient sounds ---- */
@@ -4060,6 +4183,23 @@ int td5_game_run_race_frame(void) {
             TD5_LOG_I(LOG_TAG, "Replay per-frame ESC-exit: %s",
                       s_replay_esc_enabled ? "enabled" : "disabled (in-loop ESC only)");
         }
+        /* [BUG 5a ROOT CAUSE 2026-06-15] Refresh the live keyboard buffer here.
+         * td5_plat_input_key_pressed() reads s_keyboard[], which is ONLY filled
+         * by td5_plat_input_poll() (its GetDeviceState call). During a cinematic
+         * race the in-loop poll (td5_input_poll_race_session) takes the playback
+         * branch and `goto`s past the keyboard read, polling ONLY joystick slots;
+         * and at >30 Hz most frames drain zero sim ticks, so the in-loop poll
+         * never runs at all. Result: s_keyboard[] stays frozen at whatever it held
+         * when replay started, so BOTH this per-frame ESC edge AND the in-playback
+         * ESC check (td5_input.c) read a stale key and the abort never fires —
+         * THE reason "ESC still doesn't exit replay". Pump the platform input once
+         * per frame (slot 0; the poll refreshes s_keyboard regardless of slot),
+         * exactly like td5_frontend_display_loop does, so the live ESC is seen.
+         * Only while cinematic so normal races are byte-unchanged. */
+        if (s_replay_esc_enabled && td5_game_is_cinematic_race()) {
+            TD5_InputState kb_refresh;
+            td5_plat_input_poll(0, &kb_refresh);
+        }
         int esc_frame_now = td5_plat_input_key_pressed(0x01);
         if (s_replay_esc_enabled && esc_frame_now && !s_prev_esc_frame &&
             td5_game_is_cinematic_race()) {
@@ -4847,7 +4987,11 @@ int td5_game_run_race_frame(void) {
             if (hp < 1) hp = 1;
             if (hp > TD5_MAX_RACER_SLOTS) hp = TD5_MAX_RACER_SLOTS;
             for (int fb = 0; fb < hp; fb++) {
-                if (fb == 0 && g_td5.ini.player_is_ai) continue;  /* attract slot keeps driving */
+                /* [DEMO FIX #3] An AI-driven slot 0 keeps driving and is never
+                 * force-braked: player_is_ai (debug) OR the attract demo, which
+                 * drops slot 0 to state==0 above. Mirrors the original, where
+                 * slot[0].state = 1-(demo|benchmark) makes the demo car AI. */
+                if (fb == 0 && (g_td5.ini.player_is_ai || s_demo_mode)) continue;  /* attract slot keeps driving */
                 if (fb > 0 && g_td5.ini.others_ai)     continue;  /* AI-driven co-op slots */
                 if (g_td5.race_end_fade_state == 0 &&
                     s_slot_state[fb].companion_1 == 0) continue;  /* still racing */

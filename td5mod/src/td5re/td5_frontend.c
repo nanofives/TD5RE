@@ -6558,7 +6558,8 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     /* Simultaneous multiplayer: render the per-player grid (setup window in phase
      * 0, car-select grid in phase 1) instead of the single preview + buttons. */
     if (s_mp_simul) {
-        if (s_mp_phase == 0) frontend_mp_setup_render(sx, sy);
+        if (s_mp_phase == 0) { extern void frontend_mp_setup_profile_render(float sx, float sy);  /* [#11] profile save/load panel overlay */
+                               frontend_mp_setup_render(sx, sy); frontend_mp_setup_profile_render(sx, sy); }
         else                 frontend_mp_simul_carsel_render(sx, sy);
         return;
     }
@@ -8873,7 +8874,8 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_mp_lobby_overlay(sx, sy);
         break;
     case TD5_SCREEN_MP_POSITION:
-        frontend_mp_position_render(sx, sy);
+        { extern void frontend_mp_position_render2(float sx, float sy);  /* [#6] reworked: de-pulsed + footer hints + empty-cell labels */
+          frontend_mp_position_render2(sx, sy); }
         break;
     case TD5_SCREEN_CAR_SELECTION:
         frontend_render_car_selection_preview(sx, sy);

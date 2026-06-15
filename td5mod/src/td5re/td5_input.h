@@ -268,6 +268,25 @@ uint8_t  td5_input_get_gear(int slot);
 int      td5_input_get_rear_view(int slot);
 
 /* ========================================================================
+ * Public API -- Frontend camera-button edge getters (#6 support)
+ *
+ * Edge-triggered (return 1 exactly once per press), per LOCAL human player
+ * index (0..s_active_players-1, NOT an actor slot). They poll that player's
+ * configured device in the FRONTEND/menu context — the same per-action binding
+ * decode the in-race poll uses, so a controller's CHANGE-CAMERA / FRONT-REAR-
+ * VIEW bindings are honoured even though no race owns the device. Consumed by
+ * the MP position screen (td5_fe_race.c). Safe to call every frame from the
+ * frontend; reading CONSUMES the edge (a held button fires once per press).
+ * Each maintains its own per-player held-latch, independent of the in-race
+ * rear-view / camera-cooldown state.
+ *   _change_camera reads the CHANGE VIEW binding  (TD5_INPUT_CAMERA_CHANGE)
+ *   _front_view    reads the FRONT/REAR VIEW binding (TD5_INPUT_REAR_VIEW)
+ * Gated by TD5RE_FRONTEND_CAM_BUTTONS (cached; default ON). "0" makes both
+ * always return 0 (the edge latches are never armed). */
+int td5_input_frontend_change_camera_pressed(int player);
+int td5_input_frontend_front_view_pressed(int player);
+
+/* ========================================================================
  * Public API -- Configuration Setters
  *
  * Called by the game/frontend modules to configure the input system.
