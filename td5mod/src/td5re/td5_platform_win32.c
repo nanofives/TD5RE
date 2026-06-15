@@ -2779,9 +2779,14 @@ static int  s_xi_avail  = 0;     /* both procs resolved */
 static int  s_xi_user[TD5_PLAT_MAX_JS_SLOTS];
 static WORD s_xi_low [TD5_PLAT_MAX_JS_SLOTS];   /* low-freq (heavy) motor (resolved) */
 static WORD s_xi_high[TD5_PLAT_MAX_JS_SLOTS];   /* high-freq (light) motor */
-/* The low motor is driven by two independent contributors so a stop on one
- * doesn't silence the other: [0]=steering/side (slots 0/2), [1]=terrain buzz
- * (slot 3). The resolved s_xi_low is max(contrib[0],contrib[1]). */
+/* The low (heavy) motor is driven by two independent EVENT contributors so a
+ * stop on one doesn't silence the other: [0]=side-collision pulse (effect slot
+ * 2), [1]=redline-in-manual rumble (td5_plat_ff_xinput_rumble). The resolved
+ * s_xi_low is max(contrib[0],contrib[1]). [gamepad-rumble fix 2026-06-15]
+ * Continuous wheel forces — steering (slot 0) and terrain (slot 3) — are NOT
+ * routed here any more, so a gamepad is silent during normal driving. */
+#define TD5_XI_LOW_COLLISION 0   /* contributor index: side-collision pulse */
+#define TD5_XI_LOW_REDLINE   1   /* contributor index: redline-in-manual buzz */
 static WORD s_xi_low_contrib[TD5_PLAT_MAX_JS_SLOTS][2];
 
 /* TD5RE_FF_XINPUT (cached): master gate for the XInput rumble path. Default ON. */
@@ -2920,11 +2925,16 @@ static WORD td5_xinput_scale(int magnitude)
     return (WORD)m;
 }
 
-/* Route one effect-slot write to the XInput motors.
- *   slot 1 (TD5_FF_SLOT_FRONTAL — crash/gear JOLTS) -> HIGH-freq motor.
- *   slot 0/2 (steering/side constant) + slot 3 (terrain/drift/redline buzz)
- *     -> LOW-freq motor (the heavy motor; max of the contributors wins so the
- *      steering pull and the buzz don't cancel). Returns 1 if handled here. */
+/* Route one effect-slot write to the XInput motors. [gamepad-rumble fix
+ * 2026-06-15] Only the EVENT-driven effects reach a motor, so a gamepad never
+ * buzzes during normal driving:
+ *   slot 1 (TD5_FF_SLOT_FRONTAL — crash + gear JOLTS) -> HIGH-freq motor.
+ *   slot 2 (TD5_FF_SLOT_SIDE   — side collision)      -> LOW-freq motor.
+ *   slot 0 (steering constant)  and slot 3 (terrain periodic) -> NO motor.
+ * The redline-in-manual buzz uses the other low-motor contributor, set by
+ * td5_plat_ff_xinput_rumble. Returns 1 if this is an XInput device (so the
+ * caller does NOT fall through to the DI-effect path); the slot-0/3 writes are
+ * intentionally consumed-but-silent here. DI FF wheels keep all four slots. */
 static int td5_xinput_route_effect(int device_slot, int slot, int magnitude)
 {
     WORD w;
@@ -2933,19 +2943,22 @@ static int td5_xinput_route_effect(int device_slot, int slot, int magnitude)
     if (s_xi_user[device_slot] < 0) return 0;   /* not an XInput device */
     w = td5_xinput_scale(magnitude);
     if (slot == 1) {
-        s_xi_high[device_slot] = w;                       /* sharp jolt motor */
-    } else {
-        /* low motor is shared by the steering/side (slots 0/2 -> contrib[0])
-         * and terrain/drift buzz (slot 3 -> contrib[1]); resolved = max. */
-        s_xi_low_contrib[device_slot][slot == 3 ? 1 : 0] = w;
+        s_xi_high[device_slot] = w;                       /* sharp crash/gear jolt motor */
+        td5_xinput_push(device_slot);
+    } else if (slot == 2) {
+        /* side-collision pulse -> low motor collision contributor */
+        s_xi_low_contrib[device_slot][TD5_XI_LOW_COLLISION] = w;
         s_xi_low[device_slot] = s_xi_low_contrib[device_slot][0] > s_xi_low_contrib[device_slot][1]
                               ? s_xi_low_contrib[device_slot][0] : s_xi_low_contrib[device_slot][1];
+        td5_xinput_push(device_slot);
     }
-    td5_xinput_push(device_slot);
+    /* slot 0 (steering) and slot 3 (terrain/drift): consumed but NOT routed to a
+     * motor — these are continuous wheel forces that would buzz a gamepad. */
     return 1;
 }
 
-/* Route one effect-slot STOP to the XInput motors. Returns 1 if handled here. */
+/* Route one effect-slot STOP to the XInput motors. Returns 1 if handled here.
+ * Only slots 1/2 own a motor contribution; slots 0/3 are silent no-ops. */
 static int td5_xinput_route_stop(int device_slot, int slot)
 {
     if (!s_xi_loaded) return 0;                  /* ff_init never ran -> s_xi_user not armed */
@@ -2953,12 +2966,14 @@ static int td5_xinput_route_stop(int device_slot, int slot)
     if (s_xi_user[device_slot] < 0) return 0;
     if (slot == 1) {
         s_xi_high[device_slot] = 0;
-    } else {
-        s_xi_low_contrib[device_slot][slot == 3 ? 1 : 0] = 0;
+        td5_xinput_push(device_slot);
+    } else if (slot == 2) {
+        s_xi_low_contrib[device_slot][TD5_XI_LOW_COLLISION] = 0;
         s_xi_low[device_slot] = s_xi_low_contrib[device_slot][0] > s_xi_low_contrib[device_slot][1]
                               ? s_xi_low_contrib[device_slot][0] : s_xi_low_contrib[device_slot][1];
+        td5_xinput_push(device_slot);
     }
-    td5_xinput_push(device_slot);
+    /* slot 0 / slot 3 own no motor contribution -> nothing to clear. */
     return 1;
 }
 
@@ -3256,6 +3271,27 @@ void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
     if (SUCCEEDED(hr)) {
         IDirectInputEffect_Start(s_ff[device_slot].effects[slot], 1, 0);
     }
+}
+
+/* [#1 2026-06-15] GAMEPAD redline-in-manual buzz. Drives the low (heavy) motor's
+ * dedicated redline contributor with `magnitude` (0..DI_FFNOMINALMAX); 0 silences
+ * it. No-op on a DI FF wheel (s_xi_user < 0) — there the redline buzz already
+ * rides on effect slot 3, so the wheel path is untouched. Only the input layer's
+ * redline-in-manual branch calls this, so the gamepad motor sees ONLY redline
+ * here (never terrain/steering/drift). */
+void td5_plat_ff_xinput_rumble(int device_slot, int magnitude)
+{
+    WORD w;
+    if (!s_xi_loaded) return;                    /* ff_init never ran -> not armed */
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return;
+    if (s_xi_user[device_slot] < 0) return;      /* not an XInput device (DI wheel) */
+    w = td5_xinput_scale(magnitude);
+    if (w == s_xi_low_contrib[device_slot][TD5_XI_LOW_REDLINE])
+        return;                                  /* unchanged -> skip the SetState */
+    s_xi_low_contrib[device_slot][TD5_XI_LOW_REDLINE] = w;
+    s_xi_low[device_slot] = s_xi_low_contrib[device_slot][0] > s_xi_low_contrib[device_slot][1]
+                          ? s_xi_low_contrib[device_slot][0] : s_xi_low_contrib[device_slot][1];
+    td5_xinput_push(device_slot);
 }
 
 void td5_plat_ff_stop(int device_slot, int slot)

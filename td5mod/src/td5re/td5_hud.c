@@ -3401,31 +3401,49 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     int ring = g_td5.track_span_ring_length;
     if (ring <= 0 || ring > g_strip_span_count) ring = g_strip_span_count;
 
-    /* Pass 1: world-space AABB of both rails over the ring. */
+    /* Pass 1: world-space AABB of every drawn span's BOTH rails. This must cover
+     * EVERYTHING the passes below project — the main ring AND the branch corridors
+     * — or the zoom-to-fit + centring math (which fits/centres this AABB) leaves
+     * the un-measured geometry to spill past a cell edge. That was the Australia
+     * top-crop: the ring AABB was centred and zoomed to fill the cell, leaving zero
+     * margin, and the branch corridors (drawn through the same projection but never
+     * measured) projected ABOVE the centred ring and got sliced by the cell scissor.
+     * Folding the branch spans in here makes the AABB the true extent of all drawn
+     * road, so the symmetric centre + min(w,h) fit contains the whole map. */
+    #define MAP_FOLD_SPAN_RAILS(SPAN_IDX) do {                                    \
+        int _si = (SPAN_IDX);                                                     \
+        if (_si >= 0 && _si < g_strip_span_count) {                              \
+            uint8_t *s = span_base + _si * 24;                                    \
+            int32_t ox = *(int32_t *)(s + 0x0C);                                  \
+            int32_t oz = *(int32_t *)(s + 0x14);                                  \
+            uint16_t vi_l = *(uint16_t *)(s + 0x04);                              \
+            uint8_t  type = s[0];                                                 \
+            uint8_t  nib  = s[3] & 0x0F;                                          \
+            int32_t  col0 = s_minimap_vtx_delta_col0[type & 0x07];               \
+            int32_t  vi_r = (int32_t)vi_l + (int32_t)nib + col0;                  \
+            if (vi_r >= 0) {                                                      \
+                int16_t *vl = (int16_t *)(vert_base + (uint32_t)vi_l * 6);        \
+                int16_t *vr = (int16_t *)(vert_base + (uint32_t)vi_r * 6);        \
+                float lx = (float)((int)vl[0] + ox), lz = (float)((int)vl[2] + oz); \
+                float rx = (float)((int)vr[0] + ox), rz = (float)((int)vr[2] + oz); \
+                if (lx < minx) minx = lx;  if (lx > maxx) maxx = lx;             \
+                if (rx < minx) minx = rx;  if (rx > maxx) maxx = rx;             \
+                if (lz < minz) minz = lz;  if (lz > maxz) maxz = lz;             \
+                if (rz < minz) minz = rz;  if (rz > maxz) maxz = rz;             \
+            }                                                                    \
+        }                                                                        \
+    } while (0)
+
     float minx = 1e30f, maxx = -1e30f, minz = 1e30f, maxz = -1e30f;
     for (int si = 0; si < ring; si++) {
-        uint8_t *s = span_base + si * 24;
-        int32_t ox = *(int32_t *)(s + 0x0C);
-        int32_t oz = *(int32_t *)(s + 0x14);
-        uint16_t vi_l = *(uint16_t *)(s + 0x04);
-        uint8_t  type = s[0];
-        uint8_t  nib  = s[3] & 0x0F;
-        int32_t  col0 = s_minimap_vtx_delta_col0[type & 0x07];
-        int32_t  vi_r = (int32_t)vi_l + (int32_t)nib + col0;
-        if (vi_r < 0) continue;
-        int16_t *vl = (int16_t *)(vert_base + (uint32_t)vi_l * 6);
-        int16_t *vr = (int16_t *)(vert_base + (uint32_t)vi_r * 6);
-        float lx = (float)((int)vl[0] + ox), lz = (float)((int)vl[2] + oz);
-        float rx = (float)((int)vr[0] + ox), rz = (float)((int)vr[2] + oz);
-        if (lx < minx) minx = lx;
-        if (lx > maxx) maxx = lx;
-        if (rx < minx) minx = rx;
-        if (rx > maxx) maxx = rx;
-        if (lz < minz) minz = lz;
-        if (lz > maxz) maxz = lz;
-        if (rz < minz) minz = rz;
-        if (rz > maxz) maxz = rz;
+        MAP_FOLD_SPAN_RAILS(si);
+        /* Fold this main-ring span's parallel branch corridors too (same spans the
+         * branch-drawing pass below stitches), so forks are inside the fit. */
+        int nc = td5_track_count_branch_corridors(si);
+        for (int w = 0; w < nc; w++)
+            MAP_FOLD_SPAN_RAILS(td5_track_branch_corridor_span(si, w));
     }
+    #undef MAP_FOLD_SPAN_RAILS
     if (maxx <= minx || maxz <= minz) return;
 
     /* [#8 2026-06-15] Fit the whole-track world AABB into the cell, choosing the
@@ -3449,21 +3467,34 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     if (wx_w < 1.0f) wx_w = 1.0f;
     if (wz_h < 1.0f) wz_h = 1.0f;
 
-    /* fit_0: no rotation (X->W, Z->H). fit_90: 90deg (Z->W, X->H). */
+    /* fit_0: no rotation (X->W, Z->H). fit_90: 90deg (Z->W, X->H). Each takes the
+     * MIN of the width-fit and height-fit ratios, so the chosen scale guarantees
+     * BOTH the horizontal AND the vertical bbox extent land inside the inner rect
+     * (a height-limited track can no longer overflow top/bottom). */
     float fit_0  = (in_w / wx_w < in_h / wz_h) ? (in_w / wx_w) : (in_h / wz_h);
     float fit_90 = (in_w / wz_h < in_h / wx_w) ? (in_w / wz_h) : (in_h / wx_w);
     int   rot90  = (fit_90 > fit_0);
     float fit    = rot90 ? fit_90 : fit_0;
 
+    /* On-screen extent of the bbox under the SAME fit + rotation actually used.
+     * rot90 swaps which world axis drives screen width vs. height. These are <=
+     * in_w / in_h by construction (the fit is the limiting min), which is what lets
+     * the centred map sit fully inside the cell with no top/bottom (or side) crop. */
+    float scr_w = (rot90 ? wz_h : wx_w) * fit;
+    float scr_h = (rot90 ? wx_w : wz_h) * fit;
+
     {
         static int s_map_rot_log = 0;
         if ((s_map_rot_log++ % 240) == 0)
             TD5_LOG_I(LOG_TAG,
-                      "grid-filler map: bbox=%.0fx%.0f cell=%.0fx%.0f fit0=%.4f fit90=%.4f -> %s (zoom=%.4f)",
+                      "grid-filler map: bbox=%.0fx%.0f cell=%.0fx%.0f fit0=%.4f fit90=%.4f -> %s (zoom=%.4f) scaled=%.0fx%.0f centred",
                       wx_w, wz_h, in_w, in_h, fit_0, fit_90,
-                      rot90 ? "rot90-left" : "no-rot", fit);
+                      rot90 ? "rot90-left" : "no-rot", fit, scr_w, scr_h);
     }
 
+    /* Centre the (scaled) bbox in the cell on BOTH axes: map the bbox centre
+     * (wcx,wcz) -> cell centre (ccx,ccy). Since scr_w<=in_w and scr_h<=in_h, the
+     * scaled map is inset from every edge by >=pad, so nothing is clipped. */
     float wcx = (minx + maxx) * 0.5f, wcz = (minz + maxz) * 0.5f;
     float ccx = (cl + cr) * 0.5f,     ccy = (ct + cb) * 0.5f;
     /* Two-argument map: takes BOTH world coords so the optional 90deg rotation can

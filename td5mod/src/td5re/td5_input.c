@@ -272,10 +272,10 @@ static int td5_ff_vibration_enabled(void)
 
 /* DirectInput periodic/constant magnitudes run 0..DI_FFNOMINALMAX (10000); the
  * platform layer clamps, but we size our contributions to that domain. The
- * continuous rumble blends a MEDIUM drift buzz and a LIGHT redline buzz; the
- * gear/crash JOLT uses a stronger short constant pulse. */
+ * only continuous rumble is a LIGHT redline buzz (drift rumble retired — see
+ * td5_input_ff_update_player); the gear/crash JOLT uses a stronger short
+ * constant pulse. */
 #define TD5_FF_MAG_MAX            10000   /* DI_FFNOMINALMAX */
-#define TD5_FF_DRIFT_MAG_MAX       6500   /* full-scale drift buzz (medium) */
 #define TD5_FF_REDLINE_MAG         2200   /* light continuous redline buzz */
 #define TD5_FF_GEAR_PULSE_MAG      3000   /* brief low-force gear-shift bump */
 #define TD5_FF_GEAR_PULSE_TICKS       2   /* render-frames the gear bump holds */
@@ -2397,7 +2397,7 @@ void td5_input_ff_update(void)
     if (players < 1) players = 1;
     if (players > TD5_MAX_HUMAN_PLAYERS) players = TD5_MAX_HUMAN_PLAYERS;
     for (int p = 0; p < players; p++) {
-        td5_input_ff_update_player(p);   /* steering + terrain + drift/redline rumble */
+        td5_input_ff_update_player(p);   /* steering + terrain + redline rumble */
         td5_input_ff_update_jolt(p);     /* [FF SIGNALS #1] crash/gear jolt pulse */
     }
     TD5_LOG_D(LOG_TAG, "FF dispatcher: players=%d", players);
@@ -2530,44 +2530,52 @@ void td5_input_ff_update_player(int slot)
     int terrain_coeff = g_terrain_ff_coefficients[surface_type];
     int terrain_mag = (30 - lateral_force / 10000) * terrain_coeff;
 
-    /* [FF SIGNALS #1] Compose the physics-driven CONTINUOUS rumble onto the same
-     * periodic slot (slot 3 — the buzz / low-motor analogue), so the drift and
-     * redline vibrations ride on top of the terrain effect instead of a second
-     * writer fighting it for the slot. Two contributions:
-     *   - DRIFTING: continuous MEDIUM rumble while drift_level>0, magnitude
-     *     scaled by drift_level (0..255 -> 0..TD5_FF_DRIFT_MAG_MAX).
+    /* [FF SIGNALS #1; gamepad-rumble fix 2026-06-15] Compose the ONLY allowed
+     * physics-driven CONTINUOUS rumble — MAX-RPM-in-manual — onto the periodic
+     * slot (slot 3 — the buzz, the low-motor analogue) so it rides on top of the
+     * terrain effect for FF WHEELS rather than a second writer fighting it.
      *   - MAX RPM (manual only): LIGHT continuous rumble while at redline. The
      *     "manual only" rule keys off the actor's auto-gearbox flag (+0x378==0 =>
      *     manual; the same flag td5_input_update_player_control writes). In auto
      *     the box upshifts at redline so a sustained redline buzz would be noise;
      *     in manual the player holds the limiter, which is what we want to feel.
+     *
+     * The continuous DRIFT rumble has been REMOVED entirely: on an XInput gamepad
+     * any continuous slot-3 magnitude becomes a constant motor buzz, which is the
+     * reported "rumbles all the time" bug. Terrain itself stays on slot 3 for FF
+     * wheels but the platform XInput path no longer routes slot 3 to the motors,
+     * so a gamepad never feels terrain/steering/drift — only crash, gear, and
+     * (here) redline-in-manual, the last via td5_plat_ff_xinput_rumble below.
      * Gate: TD5RE_FORCE_FEEDBACK (default ON). When off, terrain-only (faithful). */
+    int redline_rumble = 0;
     if (td5_ff_vibration_enabled()) {
-        int drift = td5_physics_get_drift_level(slot);   /* 0..255 */
-        int rumble = 0;
-        if (drift > 0) {
-            int dmag = (drift * TD5_FF_DRIFT_MAG_MAX) / 255;
-            if (dmag > rumble) rumble = dmag;            /* medium drift buzz */
-        }
         if (td5_physics_at_redline(slot)) {
             int manual = 1;
             if (g_actor_table_base) {
                 uint8_t *aredl = g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE;
                 manual = (aredl[0x378] == 0);            /* +0x378==0 => manual */
             }
-            if (manual && TD5_FF_REDLINE_MAG > rumble)
-                rumble = TD5_FF_REDLINE_MAG;             /* light redline buzz */
+            if (manual)
+                redline_rumble = TD5_FF_REDLINE_MAG;     /* light redline buzz */
         }
-        if (rumble > 0) {
-            /* Add the rumble to the terrain magnitude; the platform clamps to
-             * DI_FFNOMINALMAX. Use the larger of (terrain, terrain+rumble floored
-             * at rumble) so a quiet smooth surface still buzzes during a drift. */
-            int composed = terrain_mag + rumble;
-            if (composed < rumble) composed = rumble;
+        if (redline_rumble > 0) {
+            /* FF WHEEL: add the redline buzz to the terrain magnitude on slot 3;
+             * the platform clamps to DI_FFNOMINALMAX. Floored at the rumble so a
+             * smooth surface still buzzes at the limiter. (No-op on a gamepad —
+             * slot 3 is not motor-routed; redline reaches the gamepad motor only
+             * through the dedicated XInput rumble call below.) */
+            int composed = terrain_mag + redline_rumble;
+            if (composed < redline_rumble) composed = redline_rumble;
             if (composed > TD5_FF_MAG_MAX) composed = TD5_FF_MAG_MAX;
             terrain_mag = composed;
         }
     }
+
+    /* GAMEPAD (XInput) redline buzz: drive a dedicated low-motor contributor with
+     * ONLY the redline-in-manual magnitude (0 otherwise), so the gamepad motor
+     * never picks up terrain/steering/drift. No-op for DI wheels (they already
+     * got the redline buzz folded into slot 3 above). */
+    td5_plat_ff_xinput_rumble(dev, redline_rumble);
 
     if (!s_ff.terrain_effect_started[dev]) {
         /* First play of terrain effect */

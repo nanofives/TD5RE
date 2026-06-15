@@ -1537,12 +1537,59 @@ static void mp_prof_clamp_sel(int p) {
     if (s_mp_prof_sel[p] >= cnt) s_mp_prof_sel[p] = cnt - 1;
 }
 
+/* [#3 2026-06-15] Profile-LIST nav fix. The old handler jumped focus list->actions
+ * on ANY up press (BEFORE the list-scroll block), so UP never decremented the
+ * selection and index 0 was unreachable/unselectable. Knob TD5RE_MP_PROFILE_LIST_NAV
+ * (default on; "0" restores the old "any-up-leaves-the-list" behaviour). */
+static int mp_profile_list_nav_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_PROFILE_LIST_NAV");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP profile list nav (#3) %s (TD5RE_MP_PROFILE_LIST_NAV=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 /* Handle one player's input while the profile panel (sub==3) is open. Returns
  * nothing; sets s_mp_setup_sub[p]=0 to close. */
 static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t now) {
     int cnt = td5_save_profile_count();
     mp_prof_clamp_sel(p);
 
+    if (mp_profile_list_nav_enabled()) {
+        /* [#3] LEFT/RIGHT pick the action (SAVE/LOAD/DELETE) on the action row.
+         * Vertical nav:
+         *   - on the ACTION row, DOWN enters the LIST at the current selection
+         *     (clamped) so index 0 stays reachable (we do NOT advance past it);
+         *   - on the LIST, UP DECREMENTS the selection (auto-repeat) and only
+         *     hands focus back to the action row when ALREADY at the top (sel<=0);
+         *   - on the LIST, DOWN INCREMENTS the selection (auto-repeat).
+         * A on the list LOADs the selected profile (handled below). */
+        if (s_mp_prof_focus[p] == 0) {
+            if (edge & 1) { s_mp_prof_act[p] = (s_mp_prof_act[p] + MP_PROF_ACT_COUNT - 1) % MP_PROF_ACT_COUNT; frontend_play_sfx(2); }
+            if (edge & 2) { s_mp_prof_act[p] = (s_mp_prof_act[p] + 1) % MP_PROF_ACT_COUNT;                     frontend_play_sfx(2); }
+            if ((edge & 8) && cnt > 0) {                 /* DOWN: actions -> list */
+                s_mp_prof_focus[p] = 1;
+                mp_prof_clamp_sel(p);                    /* land on current selection (e.g. index 0) */
+                s_mp_rep_ms[p] = now + 320u;             /* arm so the entering press doesn't also scroll */
+                frontend_play_sfx(2);
+            }
+        } else {
+            /* On the list: UP at the top returns to actions; otherwise UP/DOWN
+             * scroll the selection with auto-repeat. */
+            if ((edge & 4) && s_mp_prof_sel[p] <= 0) {   /* already top -> back to actions */
+                s_mp_prof_focus[p] = 0;
+                s_mp_rep_ms[p] = 0;
+                frontend_play_sfx(2);
+            } else if (mp_repeat_fire(p, bits & 0x0Cu, edge & 0x0Cu, now)) {
+                if (bits & 4) s_mp_prof_sel[p]--;
+                if (bits & 8) s_mp_prof_sel[p]++;
+                mp_prof_clamp_sel(p);
+            }
+        }
+    } else {
     /* LEFT/RIGHT pick the action (SAVE/LOAD/DELETE) when focus is the action row;
      * UP/DOWN move between the action row and the list, and scroll the list. */
     if (edge & 4) {  /* UP */
@@ -1563,6 +1610,7 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
             if (bits & 8) s_mp_prof_sel[p]++;
             mp_prof_clamp_sel(p);
         }
+    }
     }
 
     if (edge & 0x10) {  /* A = activate */
@@ -2253,6 +2301,24 @@ void frontend_mp_position_render2(float sx, float sy) {
  *       row + the scrollable profile list (in-use entries greyed).
  * PLUS [#4]: the "LEAVE? Y/N" confirm overlay, drawn for ALL knob states (it sits
  * before the TD5RE_PROFILES early-return). Inert per-part when its knob is off. */
+
+/* [#2 2026-06-15] The idle PROFILE chip used to draw a dark steel interior fill +
+ * faint half-alpha rim when unfocused, so it READ AS DISABLED next to its enabled
+ * NAME/COLOUR/OK siblings (which draw a transparent interior + full-opacity accent
+ * rim, accent fill when focused). When on, the unfocused PROFILE chip drops the
+ * interior fill and uses a full-opacity accent rim, matching the siblings. Knob
+ * TD5RE_MP_PROFILE_BTN_STYLE (default on; "0" restores the old steel/faint look). */
+static int mp_profile_btn_style_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_PROFILE_BTN_STYLE");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP profile button style (#2) %s (TD5RE_MP_PROFILE_BTN_STYLE=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 void frontend_mp_setup_profile_render(float sx, float sy) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0;
@@ -2317,16 +2383,32 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 if (bh < 12.0f) bh = 12.0f;
                 if (bh > 26.0f) bh = 26.0f;
                 yy = bsy + 2.0f * (bh + 3.0f);       /* slot index 2 (between COLOUR and OK) */
-                /* button body: amber rim when focused, faint steel otherwise. */
-                td5_vui_quad(bx * sx, yy * sy, bw * sx, bh * sy,
-                             focus ? (rgb | 0xC0000000u) : 0x70202838u, -1, 0, 0, 1, 1);
-                {
+                if (mp_profile_btn_style_enabled()) {
+                    /* [#2] ENABLED look matching NAME/COLOUR/OK: transparent interior
+                     * (no fill) unfocused, accent fill when focused; full-opacity
+                     * accent rim either way (was a faint steel fill + half-alpha rim
+                     * that read as disabled). */
+                    uint32_t bc = rgb | 0xFF000000u;     /* full-opacity accent rim */
                     float t = 2.0f;
-                    uint32_t bc = focus ? 0xFFFFCC33u : 0xA05A6680u;
+                    if (focus)                            /* accent fill only when focused */
+                        td5_vui_quad(bx * sx, yy * sy, bw * sx, bh * sy,
+                                     rgb | 0xC0000000u, -1, 0, 0, 1, 1);
                     td5_vui_quad(bx * sx, yy * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
                     td5_vui_quad(bx * sx, (yy + bh - t) * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
                     td5_vui_quad(bx * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
                     td5_vui_quad((bx + bw - t) * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
+                } else {
+                    /* button body: amber rim when focused, faint steel otherwise. */
+                    td5_vui_quad(bx * sx, yy * sy, bw * sx, bh * sy,
+                                 focus ? (rgb | 0xC0000000u) : 0x70202838u, -1, 0, 0, 1, 1);
+                    {
+                        float t = 2.0f;
+                        uint32_t bc = focus ? 0xFFFFCC33u : 0xA05A6680u;
+                        td5_vui_quad(bx * sx, yy * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
+                        td5_vui_quad(bx * sx, (yy + bh - t) * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
+                        td5_vui_quad(bx * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
+                        td5_vui_quad((bx + bw - t) * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
+                    }
                 }
                 mp_pos_small_centered(cx * sx, (yy + (bh - 9.0f) * 0.5f) * sy,
                                       "PROFILE", 0xFFFFFFFFu, sx, sy);
@@ -4669,6 +4751,24 @@ void Screen_RaceResults(void) {
                 if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
                     s_inner_state = 0x11; /* save cup data */
                 } else {
+                    /* [#4 2026-06-15] "Select New Car" (non-cup) re-enters
+                     * CAR_SELECTION, but a local simultaneous-MP flow is still mid-
+                     * setup (s_mp_simul==1, s_mp_phase==1), so Screen_CarSelection's
+                     * 0->1 intercept is skipped, frontend_mp_flow_reset() never runs,
+                     * the s_mp_pos_shown_this_flow latch stays set, and the new race
+                     * jumps STRAIGHT to the car grid (CHOOSE YOUR SCREEN + name/colour
+                     * bypassed). Force the canonical fresh-flow path: clear s_mp_simul
+                     * / s_mp_phase so the intercept fires, resets the flow, re-offers
+                     * the position picker, and shows the picker again. Names/colours
+                     * restore from the saved session. "Race Again" (case 0, identical
+                     * rematch) is intentionally left untouched. Gate TD5RE_MP_POS_REASK
+                     * (default on; "0" = legacy jump-straight-to-grid). */
+                    if (mp_pos_reask_enabled() && s_mp_flow && s_num_human_players >= 2) {
+                        s_mp_simul = 0;
+                        s_mp_phase = 0;
+                        TD5_LOG_I(LOG_TAG, "RaceResults: Select New Car -> reset MP "
+                                  "simul flow (re-ask position screen for new race)");
+                    }
                     td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
                 }
                 break;

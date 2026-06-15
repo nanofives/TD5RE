@@ -606,7 +606,9 @@ static int  s_prev_mouse_hover_button = -1;
 static uint32_t s_mouse_confirm_until;
 static int  s_mouse_flash_button = -1;
 static uint32_t s_mouse_flash_until;
-static uint32_t s_mouse_act_until;   /* debounce horizon: absorb the 2nd click of a rapid double-click after a mouse activation */
+static uint32_t s_mouse_act_until;   /* debounce horizon: absorb the 2nd click of a rapid double-click after a mouse activation (single-click mode) */
+static int      s_dbl_last_button = -1;  /* last button a click landed on (for double-click detection) */
+static uint32_t s_dbl_last_time   = 0;   /* timestamp (ms) of that click */
 
 /* Fade state */
 int      s_fade_active;
@@ -3579,7 +3581,9 @@ static int frontend_mouse_single_click_on(void) {
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("TD5RE_MOUSE_SINGLE_CLICK");
-        v = (e && e[0] == '0') ? 0 : 1;
+        /* DEFAULT OFF (user request 2026-06-15: double-click to activate). "1"/"y"
+         * opts back into single-click activation. */
+        v = (e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y')) ? 1 : 0;
         TD5_LOG_I(LOG_TAG, "mouse single-click activate %s (TD5RE_MOUSE_SINGLE_CLICK=%s)",
                   v ? "ENABLED" : "disabled", e ? e : "default");
     }
@@ -3949,10 +3953,8 @@ static void frontend_poll_input(void) {
                 if (arrow_zone > 0) s_arrow_input |= 2;  /* RIGHT */
                 else                s_arrow_input |= 1;  /* LEFT */
                 frontend_play_sfx(2);
-            } else if (frontend_mouse_single_click_on() || i == s_selected_button) {
-                /* [fix 2026-06-15] Single click on a hovered button selects AND
-                 * confirms it (one click). With the knob off, only the already-
-                 * selected button confirms (faithful select-then-confirm). */
+            } else if (frontend_mouse_single_click_on()) {
+                /* Single-click activation (opt-in: TD5RE_MOUSE_SINGLE_CLICK=1). */
                 s_selected_button = i;
                 s_selection_from_mouse = 1;
                 s_button_index = i;
@@ -3960,15 +3962,35 @@ static void frontend_poll_input(void) {
                 s_mouse_flash_button = i;
                 s_mouse_flash_until = now + 180;
                 s_mouse_confirm_button = -1;
-                s_mouse_act_until = now + 300;   /* a 2nd click within 300ms = a double-click, absorbed above */
+                s_mouse_act_until = now + 300;   /* a 2nd click within 300ms is a double-click, absorbed above */
                 frontend_play_sfx(3);
-                TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse",
+                TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse(1click)",
                           i, s_buttons[i].label);
             } else {
-                /* Knob off + a different button: select only (faithful). */
-                s_selected_button = i;
-                s_selection_from_mouse = 1;
-                frontend_play_sfx(2);
+                /* [fix 2026-06-15] DEFAULT: DOUBLE-CLICK to activate. A single click
+                 * SELECTS (highlights) the button; a 2nd click on the SAME button
+                 * within the system double-click interval ACTIVATES it. */
+                uint32_t dwin = GetDoubleClickTime();
+                if (i == s_dbl_last_button && (uint32_t)(now - s_dbl_last_time) <= dwin) {
+                    s_selected_button = i;
+                    s_selection_from_mouse = 1;
+                    s_button_index = i;
+                    s_input_ready = 1;
+                    s_mouse_flash_button = i;
+                    s_mouse_flash_until = now + 180;
+                    s_mouse_confirm_button = -1;
+                    s_dbl_last_button = -1;   /* consume so a 3rd click doesn't re-fire */
+                    frontend_play_sfx(3);
+                    TD5_LOG_I(LOG_TAG, "Button pressed: index=%d label=\"%s\" source=mouse(dblclick)",
+                              i, s_buttons[i].label);
+                } else {
+                    /* First click: select (highlight) + arm the double-click window. */
+                    s_selected_button = i;
+                    s_selection_from_mouse = 1;
+                    s_dbl_last_button = i;
+                    s_dbl_last_time = now;
+                    frontend_play_sfx(2);
+                }
             }
         }
         s_mouse_click_latched = 0;
