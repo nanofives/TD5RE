@@ -304,37 +304,11 @@ static const char *k_ssdp_search_targets[] = {
     "upnp:rootdevice",
 };
 
-/** Send M-SEARCH datagrams and collect the first usable LOCATION URL. */
-static int upnp_ssdp_find_location(char *loc_url, int loc_len, char *gw_ip, int gw_len)
+/** Send the full M-SEARCH target batch to the SSDP multicast group on socket s.
+ * The egress interface is whatever the caller last selected via IP_MULTICAST_IF. */
+static void upnp_send_msearch_batch(SOCKET s, const SOCKADDR_IN *mcast)
 {
-    SOCKET s;
-    SOCKADDR_IN mcast;
-    DWORD recv_to = SSDP_RECV_MS;
-    u_long ttl = 2;
-    int i, got = 0;
-    DWORD start;
-
-    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s == INVALID_SOCKET) return 0;
-
-    setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, (const char *)&ttl, sizeof(ttl));
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&recv_to, sizeof(recv_to));
-
-    /* [ITEM 4 2026-06-16] The M-SEARCH goes out the OS default multicast
-     * interface. On a multi-homed host (VPN / Hyper-V / WSL virtual adapters)
-     * that can be the WRONG NIC, so the real router never sees it and discovery
-     * "fails" even though UPnP IS available -- a common cause of the host
-     * reporting UPnP FAILED. Pinning IP_MULTICAST_IF to the LAN NIC reaching
-     * the gateway would help, but the route to the gateway isn't known until
-     * AFTER discovery. Left as-is (works on the common single-NIC LAN); the
-     * fallback is the manual port-forward path, now clearly surfaced in the
-     * host status text. */
-
-    memset(&mcast, 0, sizeof(mcast));
-    mcast.sin_family = AF_INET;
-    mcast.sin_port = htons(SSDP_MCAST_PORT);
-    mcast.sin_addr.s_addr = inet_addr(SSDP_MCAST_ADDR);
-
+    int i;
     for (i = 0; i < (int)(sizeof(k_ssdp_search_targets) / sizeof(k_ssdp_search_targets[0])); i++) {
         char msearch[512];
         int n = snprintf(msearch, sizeof(msearch),
@@ -345,7 +319,68 @@ static int upnp_ssdp_find_location(char *loc_url, int loc_len, char *gw_ip, int 
                          "ST: %s\r\n"
                          "\r\n",
                          SSDP_MCAST_ADDR, SSDP_MCAST_PORT, k_ssdp_search_targets[i]);
-        sendto(s, msearch, n, 0, (const struct sockaddr *)&mcast, (int)sizeof(mcast));
+        sendto(s, msearch, n, 0, (const struct sockaddr *)mcast, (int)sizeof(*mcast));
+    }
+}
+
+/** Send M-SEARCH datagrams and collect the first usable LOCATION URL. */
+static int upnp_ssdp_find_location(char *loc_url, int loc_len, char *gw_ip, int gw_len)
+{
+    SOCKET s;
+    SOCKADDR_IN mcast;
+    DWORD recv_to = SSDP_RECV_MS;
+    u_long ttl = 2;
+    int got = 0;
+    DWORD start;
+
+    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return 0;
+
+    setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, (const char *)&ttl, sizeof(ttl));
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&recv_to, sizeof(recv_to));
+
+    memset(&mcast, 0, sizeof(mcast));
+    mcast.sin_family = AF_INET;
+    mcast.sin_port = htons(SSDP_MCAST_PORT);
+    mcast.sin_addr.s_addr = inet_addr(SSDP_MCAST_ADDR);
+
+    /* [2026-06-16] Multi-homed M-SEARCH. A plain sendto() to the SSDP group goes
+     * out only the OS default multicast interface. On a multi-homed host (VPN,
+     * Hyper-V / WSL / VirtualBox virtual adapters, Wi-Fi + Ethernet) that is
+     * frequently NOT the LAN NIC that reaches the router, so the gateway never
+     * sees the probe and discovery reports "FAILED (no router/IGD)" even though
+     * UPnP is available -- the most common real-world false failure. Enumerate
+     * every local IPv4 interface (SIO_GET_INTERFACE_LIST, pure Winsock, no
+     * iphlpapi) and send the discovery batch out EACH up / multicast-capable /
+     * non-loopback NIC via IP_MULTICAST_IF, so whichever one reaches the router
+     * gets the probe. A final batch on the default interface (INADDR_ANY) is
+     * always sent as a fallback (and is the only path if enumeration fails). */
+    {
+        INTERFACE_INFO if_list[32];
+        DWORD bytes = 0;
+        struct in_addr any_if;
+        if (WSAIoctl(s, SIO_GET_INTERFACE_LIST, NULL, 0,
+                     if_list, sizeof(if_list), &bytes, NULL, NULL) == 0) {
+            int n_if = (int)(bytes / sizeof(INTERFACE_INFO));
+            int k;
+            for (k = 0; k < n_if; k++) {
+                u_long flags = if_list[k].iiFlags;
+                struct in_addr ifa = if_list[k].iiAddress.AddressIn.sin_addr;
+                if (!(flags & IFF_UP))        continue;
+                if (flags & IFF_LOOPBACK)     continue;
+                if (!(flags & IFF_MULTICAST)) continue;
+                if (ifa.s_addr == 0 || ifa.s_addr == INADDR_NONE) continue;
+                if (setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF,
+                               (const char *)&ifa, sizeof(ifa)) != 0)
+                    continue;
+                upnp_send_msearch_batch(s, &mcast);
+                TD5_LOG_D(UPNP_LOG, "SSDP M-SEARCH out interface %s", inet_ntoa(ifa));
+            }
+        }
+        /* Reset to the default interface and send once more as the fallback. */
+        any_if.s_addr = INADDR_ANY;
+        setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF, (const char *)&any_if, sizeof(any_if));
+        upnp_send_msearch_batch(s, &mcast);
     }
 
     start = td5_plat_time_ms();
