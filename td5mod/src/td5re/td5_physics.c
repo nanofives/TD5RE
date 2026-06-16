@@ -762,8 +762,13 @@ static int32_t td5_physics_slope_light_scale_q12(int32_t top_speed)
 /* Lateral/longitudinal slip ratio (Q8) below which we treat the car as tracking
  * straight (no drift). ~0x40 = 0.25 → ~14 deg of slide before drift registers. */
 #define FF_DRIFT_RATIO_DEADZONE   0x40
-/* Redline proximity window, percent: at-redline when rpm >= redline*(100-N)/100. */
-#define FF_REDLINE_PCT            5
+/* Redline proximity window, percent: at-redline when rpm >= redline*(100-N)/100.
+ * [FF redline tighten 2026-06-16] 5% fired the manual rev-limiter buzz across the
+ * whole top ~5% of the tacho (felt like "moderate RPM"); this feature is the
+ * limiter BOUNCE, so narrow it to the top 2% — engine_speed_accum (+0x310) and
+ * redline (+0x72) are the SAME fields the speedo needle uses, so 2% ≈ the needle
+ * pinned at the very top. (Gated manual-only at the consumer in td5_input.c.) */
+#define FF_REDLINE_PCT            2
 
 static int      s_ff_drift_level[TD5_MAX_RACER_SLOTS];   /* 0 = not drifting, else ~1..255 */
 static uint32_t s_ff_gear_seq[TD5_MAX_RACER_SLOTS];      /* increments on each gear change */

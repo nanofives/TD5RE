@@ -2692,13 +2692,17 @@ void td5_input_ff_update_player(int slot)
     int drift_rumble   = 0;
     if (td5_ff_vibration_enabled()) {
         if (td5_physics_at_redline(slot)) {
-            int manual = 1;
-            if (g_actor_table_base) {
-                uint8_t *aredl = g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE;
-                manual = (aredl[0x378] == 0);            /* +0x378==0 => manual */
-            }
+            /* [FF redline manual-gate fix 2026-06-16] Gate on the AUTHORITATIVE
+             * manual control bit (28), computed this same poll from the gearbox
+             * selection (auto_gearbox INI / drag / per-player menu MANUAL pick),
+             * NOT the actor +0x378 byte: that byte is dual-used as
+             * throttle_input_active, so it can read "auto" while flooring in manual
+             * (and the reverse), leaking the rev-limiter buzz into AUTOMATIC. Bit
+             * 28 set == MANUAL; clear == AUTOMATIC => no buzz. */
+            int manual = (slot < TD5_MAX_RACER_SLOTS) &&
+                         (s_control_bits[slot] & 0x10000000u) != 0;
             if (manual)
-                redline_rumble = TD5_FF_REDLINE_MAG;     /* light redline buzz */
+                redline_rumble = TD5_FF_REDLINE_MAG;     /* rev-limiter buzz, manual only */
         }
 
         /* DRIFT buzz, proportional to slide magnitude; 0 below the threshold. */
