@@ -114,6 +114,15 @@ int              td5_track_branch_to_main_span(int span);
 int              td5_track_nearest_road_lane(int span_index, int lane);
 /* Inverse: a main-ring span -> the parallel branch-corridor span, or -1 if none. */
 int              td5_track_main_to_branch_span(int main_span);
+/* Branch-corridor id: the remap `base` (parallel main span) for the corridor
+ * containing `branch_span`, or -1 if not a branch span. Used to blacklist forks. */
+int              td5_track_branch_base(int branch_span);
+/* 1 if `branch_span`'s corridor is a blacklisted (off-road/sidewalk) fork that
+ * AI/traffic must not drive (env TD5RE_TD6_BRANCH_BLACKLIST base spans). */
+int              td5_track_branch_blacklisted(int branch_span);
+/* [#18 self-heal] Auto-blacklist a corridor traffic could not traverse (stuck for
+ * seconds = an off-road/sidewalk fork). Walker/spawner then avoid it. Base-keyed. */
+void             td5_track_branch_mark_bad(int branch_span);
 /* Branch-corridor enumeration (jump-table records) for the traffic spawner:
  * td5_track_corridor_count() -> number of corridors; td5_track_corridor_info()
  * fills the idx-th corridor's BRANCH span range [branch_lo,branch_hi] (displaced,

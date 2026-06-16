@@ -145,6 +145,15 @@ static uint32_t        *s_strip_header = NULL;
 static int              s_jump_entry_count = 0;
 static uint8_t         *s_jump_entries = NULL; /* 6-byte entries */
 
+/* [#18] Forbidden branch corridors (off-road/sidewalk forks) keyed by remap base:
+ * s_bl[] is env-seeded (TD5RE_TD6_BRANCH_BLACKLIST, default 439,466); s_learned_bad[]
+ * is auto-discovered at runtime when traffic gets stranded on a fork. Defined here so
+ * the track-load reset (above) and td5_track_branch_blacklisted (below) both see them. */
+static int              s_bl[32];
+static int              s_bl_n = -1;
+static int              s_learned_bad[64];
+static int              s_learned_bad_n = 0;
+
 /** [task#15] TD6 per-lane SURFACE GRID (strip header[6]): 8 cells/row; a span's
  * surf byte (+0x01) selects the row, the wheel's lateral fraction>>5 the column,
  * giving a surface CLASS -> grip/drag (TD6.exe FUN_004465b0). NULL on native TD5. */
@@ -602,11 +611,6 @@ void td5_track_get_span_edges(int span_index,
  *     uninitialised probes).
  * ------------------------------------------------------------------------ */
 static int td6_branches_enabled(void);   /* fwd decl (task#17, defined below) */
-/* [#18/#20] Set while walking a TRAFFIC actor (in td5_track_resolve_actor_segment_
- * boundary): forces traffic to stay on the main ring at TD6 forks even when
- * branches are drivable (player/AI may still branch). TD6 branches are separate
- * parallel streets that read as off-road, so traffic cruising one looks wrong. */
-static int s_walker_force_main = 0;
 
 /* [task#8 FIX 2026-06-14] TD6 SHALLOW-WALL DEADZONE. The year-long "invisible
  * wall at the beginning / span 110" is the collision firing a HARD wall response
@@ -1920,6 +1924,7 @@ int td5_track_load_strip(const void *data, size_t size)
     s_strip_header = NULL;
     s_jump_entry_count = 0;
     s_jump_entries = NULL;
+    s_learned_bad_n = 0;   /* [#18] fresh track -> forget auto-discovered bad forks */
     td5_camera_bind_track_geometry(NULL, NULL);
     free_display_lists();
     if (s_span_display_list_indices) {
@@ -2465,7 +2470,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                  * to the right branch"). Until the corridors are relocated to abut
                  * their forks (deep converter rewrite), keep everyone on the main road
                  * and clamp into its lanes. Native TD5 (g_active_td6_level==0) untouched. */
-                if (g_active_td6_level > 0 && sl >= next_lanes && (!td6_branches_enabled() || s_walker_force_main)) {
+                if (g_active_td6_level > 0 && sl >= next_lanes && (!td6_branches_enabled() || td5_track_branch_blacklisted((int)sp->link_next))) {
                     *sub_lane = next_lanes - 1;
                     new_span = next_idx;
                     TD5_LOG_I(LOG_TAG, "jfwd_td6_main: span=%d sl=%d next_lanes=%d -> span=%d (forced main, displaced branch suppressed)",
@@ -2516,7 +2521,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (g_active_td6_level > 0 && sl >= next_lanes && (!td6_branches_enabled() || s_walker_force_main)) {
+                if (g_active_td6_level > 0 && sl >= next_lanes && (!td6_branches_enabled() || td5_track_branch_blacklisted((int)sp->link_next))) {
                     *sub_lane = next_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x01) */
                     new_span = next_idx;
                 } else if (sl < next_lanes) {
@@ -2575,7 +2580,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes && (!td6_branches_enabled() || s_walker_force_main)) {
+                if (g_active_td6_level > 0 && sl >= prev_lanes && (!td6_branches_enabled() || td5_track_branch_blacklisted((int)sp->link_prev))) {
                     /* TD6: force main for ALL, suppress the ~8000u-displaced branch
                      * (same rationale as fwd case 0x01). Reversing through a London
                      * junction used to follow link_prev onto the displaced branch
@@ -2623,7 +2628,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes && (!td6_branches_enabled() || s_walker_force_main)) {
+                if (g_active_td6_level > 0 && sl >= prev_lanes && (!td6_branches_enabled() || td5_track_branch_blacklisted((int)sp->link_prev))) {
                     *sub_lane = prev_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x04) */
                     new_span = prev_idx;
                 } else if (sl >= prev_lanes) {
@@ -5023,8 +5028,6 @@ void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
 
     if (!actor) return;
 
-    s_walker_force_main = (actor->slot_index >= TRAFFIC_SLOT_BASE) ? 1 : 0;
-
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
 
     /* Line: MOVSX EDX, word ptr [EBX + 0x80] -> sign-extended raw span. */
@@ -6328,6 +6331,69 @@ int td5_track_main_to_branch_span(int main_span)
         }
     }
     return -1;
+}
+
+/* [#18 blacklist] Identify a branch corridor by the MAIN span (remap `base`) it
+ * parallels — the stable id used to blacklist specific forks where traffic must
+ * not drive (off-road/sidewalk branches). Returns the base for the corridor
+ * containing `branch_span`, or -1 if it isn't a branch span. */
+int td5_track_branch_base(int branch_span)
+{
+    const uint8_t *e = s_jump_entries;
+    int j;
+    if (!s_jump_entries || s_jump_entry_count <= 0) return -1;
+    for (j = 0; j < s_jump_entry_count; j++, e += 6) {
+        int lo   = (int)((const uint16_t *)e)[0];
+        int hi   = (int)((const uint16_t *)e)[1];
+        int base = (int)((const uint16_t *)e)[2];
+        if (branch_span >= lo && branch_span <= hi) return base;
+    }
+    return -1;
+}
+
+/* [#18 blacklist] 1 if `branch_span`'s corridor is a forbidden (off-road/sidewalk)
+ * fork that AI/traffic must NOT drive — the walker continues main, the spawner
+ * skips it. Corridors are keyed by remap BASE span. Comma-separated env
+ * TD5RE_TD6_BRANCH_BLACKLIST (base spans); default seeds London's span-440 (439)
+ * + span-466 (466) sidewalk forks. The HUMAN player can still steer onto good
+ * branches; these stay off-limits to everyone since they're off-road. */
+int td5_track_branch_blacklisted(int branch_span)
+{
+    int base, i;
+    if (s_bl_n < 0) {
+        const char *e = getenv("TD5RE_TD6_BRANCH_BLACKLIST");
+        s_bl_n = 0;
+        if (!e || !e[0]) e = "439,466";
+        while (*e && s_bl_n < 32) {
+            if (*e >= '0' && *e <= '9') { s_bl[s_bl_n++] = atoi(e); while (*e >= '0' && *e <= '9') e++; }
+            else e++;
+        }
+        TD5_LOG_I(LOG_TAG, "branch blacklist: %d base span(s)", s_bl_n);
+    }
+    if (branch_span < 0) return 0;
+    base = td5_track_branch_base(branch_span);
+    if (base < 0) return 0;
+    for (i = 0; i < s_bl_n; i++)        if (s_bl[i] == base)        return 1;
+    for (i = 0; i < s_learned_bad_n; i++) if (s_learned_bad[i] == base) return 1;
+    return 0;
+}
+
+/* [#18 self-heal] Auto-blacklist a branch corridor that traffic could not traverse
+ * (a car was stuck/recovery-frozen on it for several seconds -> it's an off-road or
+ * sidewalk fork). After this the walker forces the main road at that fork and the
+ * spawner skips it, so no further cars are stranded there. Good branches never
+ * accumulate stuck cars, so they are never marked. Idempotent; base-keyed. */
+void td5_track_branch_mark_bad(int branch_span)
+{
+    int base = td5_track_branch_base(branch_span), i;
+    if (base < 0) return;
+    for (i = 0; i < s_bl_n; i++)          if (s_bl[i] == base)          return;
+    for (i = 0; i < s_learned_bad_n; i++) if (s_learned_bad[i] == base) return;
+    if (s_learned_bad_n < 64) {
+        s_learned_bad[s_learned_bad_n++] = base;
+        TD5_LOG_I(LOG_TAG, "branch auto-blacklist: base %d (stuck traffic) -> %d learned bad fork(s)",
+                  base, s_learned_bad_n);
+    }
 }
 
 /* [task#8 2026-06-14] Branch-corridor ENUMERATION for the traffic spawner.

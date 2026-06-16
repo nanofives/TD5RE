@@ -7229,15 +7229,22 @@ static int trf_dyn_branches_enabled(void)
     static int s = -1;
     if (s < 0) {
         const char *e = getenv("TD5RE_TRAFFIC_BRANCHES");
-        /* Default OFF: TD6 branches are separate parallel streets ~3300u off the
-         * fork (verified in TD6's strip.dat) that read as off-road/sidewalk, so
-         * traffic cruising one looks wrong (user). =1 restores branch traffic. */
-        s = (e && e[0] == '1') ? 1 : 0;
+        /* Default ON: branches have route tables now and traffic drives the good
+         * ones; the BLACKLIST (TD5RE_TD6_BRANCH_BLACKLIST, default 439+466)
+         * excludes off-road/sidewalk forks — the walker keeps AI/traffic out of
+         * them, the spawner skips them, the despawn net catches stragglers. =0
+         * forces all traffic onto the main ring. */
+        s = (e && e[0] == '0') ? 0 : 1;
         TD5_LOG_I(LOG_TAG, "traffic_branches knob: TD5RE_TRAFFIC_BRANCHES=%d "
                   "(spawn on branch corridors %s)", s, s ? "ON" : "OFF");
     }
     return s;
 }
+
+/* The branch blacklist now lives in td5_track (td5_track_branch_blacklisted) so the
+ * span-walker can suppress AI/traffic forks onto bad corridors. Alias for the local
+ * call sites. */
+#define trf_branch_blacklisted(s) td5_track_branch_blacklisted(s)
 
 /* [task#13 2026-06-14] Spawn-distance multiplier (×16 fixed-point). The per-tick
  * spawner places traffic [SpawnAheadMin..SpawnAheadMax] spans ahead of the race
@@ -7638,7 +7645,8 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
                     : (int)(trf_dyn_rand() % (uint32_t)(ncorr + 1)) - 1;
                 if (corr >= 0) {
                     int bspan = td5_track_branch_corridor_span(main_span, corr);
-                    if (bspan >= 0) span = bspan;
+                    /* [#18 blacklist] don't spawn on a forbidden (off-road) fork */
+                    if (bspan >= 0 && !trf_branch_blacklisted(bspan)) span = bspan;
                 }
             }
         }
@@ -7875,6 +7883,30 @@ void td5_ai_traffic_dynamic_tick(void)
                            (slot != 9 || g_encounter_tracked_handle == -1) &&
                            trf_dyn_min_player_dist(sp) >
                                g_td5.ini.traffic_dyn_despawn + eff_hi;
+            /* [#18 BLACKLIST + SELF-HEAL] Path-independent catch-all for cars that
+             * end up on a branch corridor by any route (spawn pick / walker fork):
+             *  - branch traffic OFF        -> fade ANY branch car (main-ring only);
+             *  - on a BLACKLISTED fork     -> fade (off-road/sidewalk, never drivable);
+             *  - STUCK on a non-listed fork (recovery-frozen for ~3s) -> that fork is
+             *    un-traversable, so AUTO-BLACKLIST its base (walker/spawner avoid it
+             *    henceforth) and fade. Good branches keep their (moving) traffic. */
+            if (g_active_td6_level > 0) {
+                int rawsp = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+                int ringL = td5_track_get_ring_length();
+                if (ringL > 0 && rawsp >= ringL) {
+                    int stuck_on_branch = (g_traffic_recovery_stage[slot] != 0 &&
+                                           s_traffic_stuck_frames[slot] >= 90);
+                    if (stuck_on_branch && trf_dyn_branches_enabled() &&
+                        !trf_branch_blacklisted(rawsp))
+                        td5_track_branch_mark_bad(rawsp);   /* discover off-road fork */
+                    if (!trf_dyn_branches_enabled() ||
+                        trf_branch_blacklisted(rawsp) || stuck_on_branch) {
+                        s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
+                        TD5_LOG_I(LOG_TAG, "traffic_branch_blacklist: slot=%d on branch span=%d stuck=%d -> fade",
+                                  slot, rawsp, stuck_on_branch);
+                    }
+                }
+            }
             if (behind < -g_td5.ini.traffic_dyn_despawn ||
                 ahead  >  g_td5.ini.traffic_dyn_despawn + eff_hi ||
                 far_from_all ||
@@ -9373,7 +9405,10 @@ static void ai_update_single_racer(int slot) {
 /* [#18] A/B knob: TD5RE_TD6_TRAFFIC_ROAD=0 disables the road-lane clamp. */
 static int td6_traffic_road_clamp_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_TRAFFIC_ROAD"); s = (e && e[0] == '0') ? 0 : 1; }
+    /* Default OFF: the per-tick lane nudge oscillated traffic near forks and
+     * tripped the recovery brake ("most don't move"). Master's lane chooser
+     * already avoids slow lanes; =1 re-enables the nudge. */
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_TRAFFIC_ROAD"); s = (e && e[0] == '1') ? 1 : 0; }
     return s;
 }
 
