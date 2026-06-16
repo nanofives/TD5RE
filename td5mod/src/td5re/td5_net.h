@@ -30,6 +30,8 @@
 #define TD5_NET_UPNP_MAPPED      2  /* router opened the port (verified)       */
 #define TD5_NET_UPNP_FAILED      3  /* attempted, router refused / unreachable */
 #define TD5_NET_UPNP_UNAVAILABLE 4  /* disabled by config                      */
+#define TD5_NET_UPNP_DOUBLE_NAT  5  /* mapped, but IGD WAN IP is private        */
+                                    /* (double-NAT: another router in front)    */
 
 int  td5_net_init(void);
 void td5_net_shutdown(void);

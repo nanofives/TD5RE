@@ -151,6 +151,8 @@ static int          s_upnp_status = TD5_NET_UPNP_IDLE;
 static uint16_t     s_upnp_mapped_port;                 /* port we asked UPnP to open */
 static char         s_status_text[192];                 /* UI host/connect status line */
 static char         s_local_ip[64];                     /* our LAN IP (display)  */
+static char         s_external_ip[64];                  /* IGD WAN IP (double-NAT check) */
+static int          net_ip_is_private(const char *dotted); /* fwd: double-NAT test (def below) */
 static uint32_t     s_last_beacon_ms;                   /* periodic LAN ANNOUNCE clock */
 
 /* --- S10: client join handshake (game-socket JOIN_REQ -> JOIN_ACK) --- */
@@ -1210,8 +1212,24 @@ static int ws2_transport_host(const char *name, int max_players)
             td5_upnp_verify_port((uint16_t)s_game_port, 1)) {
             s_upnp_status = TD5_NET_UPNP_MAPPED;
             s_upnp_mapped_port = (uint16_t)s_game_port;
-            TD5_LOG_I(NET_LOG, "UPnP: UDP %u opened + verified on router",
-                      (unsigned)s_game_port);
+            /* [2026-06-16] Double-NAT check. The mapping was accepted by the
+             * nearest IGD, but if that router's OWN WAN IP is private (RFC1918
+             * 10/8, 172.16/12, 192.168/16) or CGNAT (100.64/10), it sits behind
+             * ANOTHER router (e.g. a TP-Link Deco behind a Movistar fiber modem)
+             * -- so the port we just opened is NOT reachable from the internet.
+             * UPnP only opens ONE hop; the upstream router needs its own forward.
+             * Surface it as a distinct status instead of a misleading "opened". */
+            if (td5_upnp_get_external_ip(s_external_ip, sizeof(s_external_ip)) &&
+                net_ip_is_private(s_external_ip)) {
+                s_upnp_status = TD5_NET_UPNP_DOUBLE_NAT;
+                TD5_LOG_W(NET_LOG, "UPnP: UDP %u opened on router, but its WAN IP "
+                          "%s is private -> double-NAT; forward on the upstream router too",
+                          (unsigned)s_game_port, s_external_ip);
+            } else {
+                TD5_LOG_I(NET_LOG, "UPnP: UDP %u opened + verified on router (WAN %s)",
+                          (unsigned)s_game_port,
+                          s_external_ip[0] ? s_external_ip : "?");
+            }
         } else {
             s_upnp_status = TD5_NET_UPNP_FAILED;
             TD5_LOG_W(NET_LOG, "UPnP: could not open UDP %u (manual forward needed)",
@@ -2597,6 +2615,23 @@ static uint32_t net_make_session_token(void)
     return t;
 }
 
+/* True if <dotted> is an RFC1918 / CGNAT / link-local IPv4 address -- i.e. NOT a
+ * public internet address. Used to detect double-NAT: if the IGD's own WAN IP is
+ * private, a UPnP-opened port is still unreachable from the internet. */
+static int net_ip_is_private(const char *dotted)
+{
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!dotted || !dotted[0]) return 0;
+    if (sscanf(dotted, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0;
+    if (a == 10)                          return 1;  /* 10.0.0.0/8         */
+    if (a == 172 && b >= 16 && b <= 31)   return 1;  /* 172.16.0.0/12      */
+    if (a == 192 && b == 168)             return 1;  /* 192.168.0.0/16     */
+    if (a == 100 && b >= 64 && b <= 127)  return 1;  /* 100.64.0.0/10 CGNAT*/
+    if (a == 169 && b == 254)             return 1;  /* 169.254.0.0/16 LL  */
+    if (a == 127 || a == 0)               return 1;  /* loopback / unspec  */
+    return 0;
+}
+
 /**
  * Build the human-readable host/connect status line for the lobby UI
  * (local IP + port, plus UPnP outcome when hosting Direct).
@@ -2616,6 +2651,12 @@ static void net_build_status_text(void)
                 snprintf(s_status_text, sizeof(s_status_text),
                          "Host %s:%d  -  UPnP: port opened on router",
                          ip, s_game_port);
+                break;
+            case TD5_NET_UPNP_DOUBLE_NAT:
+                snprintf(s_status_text, sizeof(s_status_text),
+                         "Host %s:%d  -  UPnP ok but DOUBLE-NAT (WAN %s) - forward UDP %d on upstream router",
+                         ip, s_game_port,
+                         s_external_ip[0] ? s_external_ip : "private", s_game_port);
                 break;
             case TD5_NET_UPNP_MAPPING:
                 snprintf(s_status_text, sizeof(s_status_text),
