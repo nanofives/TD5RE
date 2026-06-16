@@ -596,33 +596,66 @@ static int upnp_soap(const char *action, const char *args_xml, char *resp, int r
 int td5_upnp_map_port(uint16_t port, int udp, const char *desc, int lease_secs)
 {
     char args[512], resp[HTTP_RESP_MAX];
-    int status;
+    int status, attempt, lease = lease_secs;
 
     if (!upnp_wsa_begin()) return 0;
 
     if (!upnp_discover()) { upnp_wsa_end(); return 0; }
 
-    snprintf(args, sizeof(args),
-        "<NewRemoteHost></NewRemoteHost>"
-        "<NewExternalPort>%u</NewExternalPort>"
-        "<NewProtocol>%s</NewProtocol>"
-        "<NewInternalPort>%u</NewInternalPort>"
-        "<NewInternalClient>%s</NewInternalClient>"
-        "<NewEnabled>1</NewEnabled>"
-        "<NewPortMappingDescription>%s</NewPortMappingDescription>"
-        "<NewLeaseDuration>%d</NewLeaseDuration>",
-        (unsigned)port, udp ? "UDP" : "TCP", (unsigned)port,
-        s_local_ip, desc ? desc : "TD5RE", lease_secs);
+    /* AddPortMapping with lease-duration fallback. Many consumer routers --
+     * TP-Link in particular -- reject a PERMANENT lease (NewLeaseDuration=0)
+     * with an HTTP 500 SOAP fault and require a finite lease, while some older
+     * IGDs do the opposite (725 OnlyPermanentLeasesSupported -> need 0). Try the
+     * requested lease first, then flip to the other form on the documented fault
+     * codes (or any generic 500) so a single quirky router doesn't fail us. */
+    for (attempt = 0; attempt < 2; attempt++) {
+        char ec[16];
+        int err = 0;
 
-    status = upnp_soap("AddPortMapping", args, resp, sizeof(resp));
-    upnp_wsa_end();
+        snprintf(args, sizeof(args),
+            "<NewRemoteHost></NewRemoteHost>"
+            "<NewExternalPort>%u</NewExternalPort>"
+            "<NewProtocol>%s</NewProtocol>"
+            "<NewInternalPort>%u</NewInternalPort>"
+            "<NewInternalClient>%s</NewInternalClient>"
+            "<NewEnabled>1</NewEnabled>"
+            "<NewPortMappingDescription>%s</NewPortMappingDescription>"
+            "<NewLeaseDuration>%d</NewLeaseDuration>",
+            (unsigned)port, udp ? "UDP" : "TCP", (unsigned)port,
+            s_local_ip, desc ? desc : "TD5RE", lease);
 
-    if (status == 200) {
-        TD5_LOG_I(UPNP_LOG, "AddPortMapping %s/%u -> %s:%u OK",
-                  udp ? "UDP" : "TCP", (unsigned)port, s_local_ip, (unsigned)port);
-        return 1;
+        status = upnp_soap("AddPortMapping", args, resp, sizeof(resp));
+        if (status == 200) {
+            TD5_LOG_I(UPNP_LOG, "AddPortMapping %s/%u -> %s:%u OK (lease=%d)",
+                      udp ? "UDP" : "TCP", (unsigned)port, s_local_ip,
+                      (unsigned)port, lease);
+            upnp_wsa_end();
+            return 1;
+        }
+
+        /* Pull the UPnP SOAP fault code out of the response so the log states
+         * the REAL reason (718 conflict, 725 lease policy, 402 invalid args...)
+         * instead of a bare HTTP status. */
+        ec[0] = '\0';
+        if (upnp_xml_value(resp, "errorCode", ec, sizeof(ec))) err = atoi(ec);
+        TD5_LOG_W(UPNP_LOG, "AddPortMapping %u failed (HTTP %d, UPnPError %d, lease=%d)",
+                  (unsigned)port, status, err, lease);
+
+        if (attempt != 0) break;            /* only one retry */
+        if (lease == 0 && (err == 402 || err == 501 || err == 0 || status == 500)) {
+            lease = 604800;                 /* 7 days: routers that reject 0 take this */
+            TD5_LOG_I(UPNP_LOG, "AddPortMapping: router refused permanent lease -> retry lease=%d", lease);
+            continue;
+        }
+        if (lease != 0 && err == 725) {     /* OnlyPermanentLeasesSupported */
+            lease = 0;
+            TD5_LOG_I(UPNP_LOG, "AddPortMapping: router wants permanent lease -> retry lease=0");
+            continue;
+        }
+        break;                              /* fault we can't work around */
     }
-    TD5_LOG_W(UPNP_LOG, "AddPortMapping %u failed (HTTP %d)", (unsigned)port, status);
+
+    upnp_wsa_end();
     return 0;
 }
 
