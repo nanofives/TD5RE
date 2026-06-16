@@ -279,16 +279,20 @@ static int td5_ff_vibration_enabled(void)
     return s_on;
 }
 
-/* [item #5(3)] TD5RE_FF_DRIFT (cached): sub-gate for the continuous drift rumble.
- * Default ON; "0" leaves drift out of the continuous-buzz mix entirely (no buzz
- * while sliding). Subordinate to TD5RE_FORCE_FEEDBACK (the master gate). */
+/* [item #5(3); default-OFF 2026-06-16] TD5RE_FF_DRIFT (cached): sub-gate for the
+ * continuous drift rumble. DEFAULT OFF, opt in with "1". Diagnosis (FF DIAG log)
+ * showed the slip metric (|lateral +0x318| / |longitudinal +0x314|) sits at
+ * ~0.75..1.1 during ordinary arcade driving — there is no clean threshold between
+ * baseline cornering slip and an intentional drift, so the continuous buzz fired
+ * during normal driving at moderate RPM. Off until a geometric slip-onset trigger
+ * replaces the raw ratio. Subordinate to TD5RE_FORCE_FEEDBACK (the master gate). */
 static int td5_ff_drift_enabled(void)
 {
     static int s_init = 0;
-    static int s_on = 1;
+    static int s_on = 0;
     if (!s_init) {
         const char *e = getenv("TD5RE_FF_DRIFT");
-        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_on = (e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y')) ? 1 : 0;   /* default OFF (opt-in) */
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "FF drift rumble: %s", s_on ? "enabled" : "disabled");
     }
