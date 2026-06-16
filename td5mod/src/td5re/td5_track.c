@@ -156,9 +156,13 @@ static int              s_td6_surface_grid_rows = 0;
  * + (above an impact speed) debris + sound (TD6.exe FUN_00441070/FUN_0043e700).
  * Record = 16 bytes: type@0(0xFF term), radius@1, strip-seg u16@4, posX i32@8
  * (24.8), posZ i32@12. */
-typedef struct { int32_t px, pz; int16_t span; uint8_t radius, type, broken; } TD6Prop;
-static TD6Prop          s_td6_props[512];
+typedef struct { int32_t px, py, pz; int16_t span, angle; uint8_t radius, type, broken, model;
+                 float ground_y; uint8_t ground_done; } TD6Prop;
+static TD6Prop          s_td6_props[1024];
 static int              s_td6_prop_count = 0;
+/* COL_00..07 bounding radii (world units) -> collision radius per furniture model
+ * (the .mov model byte's low nibble). Matches PROPMESH.BIN. */
+static const int s_td6_col_radius[8] = { 319, 478, 607, 558, 269, 207, 433, 283 };
 
 /** Strip attribute override table */
 static uint8_t         *s_attr_override_table = NULL;
@@ -6459,33 +6463,51 @@ int td5_track_td6_surface_grid_loaded(void)
 
 /* [task#14 2026-06-13] Parse a TD6 level<N>.tcl prop table (16-byte records,
  * 0xFF-type terminator) into s_td6_props. posX/posZ are 24.8 world coords in the
- * same space as the strip vertices (verified). Call once at level load; pass
- * NULL/0 to clear (native TD5 / no props). */
-void td5_track_load_td6_props(const void *data, size_t size)
+ * same space as the strip vertices (verified). td5_track_load_td6_props CLEARS
+ * then loads the main LEVEL.TCL; td5_track_append_td6_props ADDS the branch
+ * LEVELB.TCL (the "b"/left-route props the user found missing at span ~440 — its
+ * span field indexes the b-strip, so ground Y is resolved by nearest main-strip
+ * span, not the span field). Pass NULL/0 to clear (native TD5 / no props). */
+void td5_track_append_td6_props(const void *data, size_t size)
 {
-    s_td6_prop_count = 0;
-    if (!data || size < 16) return;
+    if (!data || size < 24) return;
     {
         const uint8_t *p = (const uint8_t *)data;
-        size_t recs = size / 16;
+        size_t recs = size / 24;
         size_t i;
-        for (i = 0; i < recs && s_td6_prop_count < (int)(sizeof s_td6_props / sizeof s_td6_props[0]); i++) {
-            const uint8_t *r = p + i * 16;
-            if (r[0] == 0xFF) break;            /* terminator */
-            if (r[0] == 0) continue;            /* inactive slot */
+        int cap = (int)(sizeof s_td6_props / sizeof s_td6_props[0]);
+        for (i = 0; i < recs && s_td6_prop_count < cap; i++) {
+            const uint8_t *r = p + i * 24;   /* 24-byte level.mov record */
+            int model;
+            if (r[0] == 0)   continue;       /* serial 0 = terminator/empty slot */
+            if (r[0] == 0xFF) break;
+            model = r[4] & 0x0F;             /* low nibble = COL_<idx> mesh */
+            if (model > 7) model &= 7;
             {
                 TD6Prop *pr = &s_td6_props[s_td6_prop_count++];
-                pr->type   = r[0];
-                pr->radius = r[1];
-                pr->broken = 0;
-                pr->span   = (int16_t)(r[4] | ((uint16_t)r[5] << 8));
-                pr->px     = (int32_t)(r[8]  | ((uint32_t)r[9]  << 8) | ((uint32_t)r[10] << 16) | ((uint32_t)r[11] << 24));
-                pr->pz     = (int32_t)(r[12] | ((uint32_t)r[13] << 8) | ((uint32_t)r[14] << 16) | ((uint32_t)r[15] << 24));
+                pr->type        = r[0];
+                pr->model       = (uint8_t)model;
+                pr->radius      = (uint8_t)(s_td6_col_radius[model] / 16);  /* collision */
+                pr->broken      = 0;
+                pr->ground_y    = 0.0f;
+                pr->ground_done = 0;
+                pr->span    = 0;
+                pr->angle   = (int16_t)((int)r[18] * 16);   /* byte -> 0x1000 angle units */
+                /* X,Z are s32 24.8; Y is s16 24.8 at [16:18] (byte 18 is the angle). */
+                pr->px = (int32_t)(r[12] | ((uint32_t)r[13] << 8) | ((uint32_t)r[14] << 16) | ((uint32_t)r[15] << 24));
+                pr->py = (int32_t)(int16_t)(r[16] | ((uint16_t)r[17] << 8));
+                pr->pz = (int32_t)(r[20] | ((uint32_t)r[21] << 8) | ((uint32_t)r[22] << 16) | ((uint32_t)r[23] << 24));
             }
         }
     }
-    TD5_LOG_I(LOG_TAG, "TD6 props loaded: %d (from %u bytes)",
+    TD5_LOG_I(LOG_TAG, "TD6 MOV props now %d (added from %u bytes)",
               s_td6_prop_count, (unsigned)size);
+}
+
+void td5_track_load_td6_props(const void *data, size_t size)
+{
+    s_td6_prop_count = 0;
+    td5_track_append_td6_props(data, size);
 }
 
 int td5_track_td6_prop_count(void) { return s_td6_prop_count; }
@@ -6503,10 +6525,26 @@ int td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
     return 1;
 }
 
+/* [task#14 MOV] Render-side getter: furniture model (0..7 -> COL mesh), 12-bit
+ * Y-orientation, and the authored Y (24.8). Returns 1 on success. */
+int td5_track_td6_prop_get_mov(int i, int32_t *out_px, int32_t *out_py, int32_t *out_pz,
+                               int *out_model, int *out_angle)
+{
+    if (i < 0 || i >= s_td6_prop_count) return 0;
+    if (out_px)    *out_px    = s_td6_props[i].px;
+    if (out_py)    *out_py    = s_td6_props[i].py;
+    if (out_pz)    *out_pz    = s_td6_props[i].pz;
+    if (out_model) *out_model = (int)s_td6_props[i].model;
+    if (out_angle) *out_angle = (int)s_td6_props[i].angle;
+    return 1;
+}
+
 /* [task#14] Per-prop "broken" one-shot state. A prop breaks on first impact:
  * the break effect (knock + crash sound + debris) fires once, then the prop
  * goes inert so the car plows through the knocked-over street furniture
  * instead of repeatedly thudding off it. Reset at race (re)start. */
+static int s_td6_broken_count = 0;   /* fast early-out for the render-time query */
+
 int td5_track_td6_prop_is_broken(int i)
 {
     if (i < 0 || i >= s_td6_prop_count) return 1;   /* OOB -> treat as inert */
@@ -6516,6 +6554,7 @@ int td5_track_td6_prop_is_broken(int i)
 void td5_track_td6_prop_set_broken(int i)
 {
     if (i < 0 || i >= s_td6_prop_count) return;
+    if (!s_td6_props[i].broken) s_td6_broken_count++;
     s_td6_props[i].broken = 1;
 }
 
@@ -6523,6 +6562,90 @@ void td5_track_td6_props_reset_broken(void)
 {
     int i;
     for (i = 0; i < s_td6_prop_count; i++) s_td6_props[i].broken = 0;
+    s_td6_broken_count = 0;
+}
+
+/* [task#14] Render-time query: is the world point (wx,wz) on top of a SMASHED
+ * prop? Used to HIDE the static furniture mesh (lamppost/sign) that sits on a
+ * broken .tcl prop so the object visibly disappears when you smash it. Threshold
+ * = prop radius + slack (the mesh bbox centre and the collision volume are
+ * co-located but not identical). Cheap no-broken early-out. wx/wz are world
+ * units; prop px/pz are 24.8. */
+int td5_track_td6_broken_count(void) { return s_td6_broken_count; }
+
+int td5_track_td6_prop_broken_near(float wx, float wz)
+{
+    int i;
+    if (s_td6_broken_count <= 0) return 0;
+    for (i = 0; i < s_td6_prop_count; i++) {
+        float pxw, pzw, dx, dz, thr;
+        if (!s_td6_props[i].broken) continue;
+        pxw = (float)s_td6_props[i].px * (1.0f / 256.0f);
+        pzw = (float)s_td6_props[i].pz * (1.0f / 256.0f);
+        dx = wx - pxw; dz = wz - pzw;
+        thr = (float)s_td6_props[i].radius * 16.0f + 350.0f;
+        if (dx * dx + dz * dz < thr * thr) return 1;
+    }
+    return 0;
+}
+
+/* [task#14] World-float ground Y under prop i, by NEAREST loaded strip span to
+ * the prop's world (px/256,pz/256). The .tcl span field can't be trusted for the
+ * appended LEVELB (branch) props — it indexes the b-strip, not the loaded main
+ * strip — so we search by XZ instead. Cached per prop (ground_done) so the box
+ * sits planted and the scan runs at most once. Falls back to the caller's player
+ * Y until the strip is loaded. */
+float td5_track_td6_prop_ground_y(int prop_index, float fallback)
+{
+    TD6Prop *pr;
+    if (prop_index < 0 || prop_index >= s_td6_prop_count) return fallback;
+    pr = &s_td6_props[prop_index];
+    if (pr->ground_done) return pr->ground_y;
+    if (!s_span_array || !s_vertex_table || s_span_count <= 0) return fallback;
+    {
+        const float inv256 = 1.0f / 256.0f;
+        float wx = (float)pr->px * inv256, wz = (float)pr->pz * inv256;
+        float best_d2 = 1e30f, best_y = fallback;
+        int s;
+        /* Optional global tune (env TD5RE_TD6_PROP_Y, world units, +down). The
+         * strip rail vertices sit a little above the rendered road, so a small
+         * negative value can drop residual float without per-prop guesswork. */
+        static float s_yoff = 1e9f;
+        if (s_yoff > 1e8f) { const char *e = getenv("TD5RE_TD6_PROP_Y"); s_yoff = (e && e[0]) ? (float)atof(e) : 0.0f; }
+        /* The props sit OFF the drivable lanes (sidewalk), so a single nearest
+         * span is unstable — adjacent props snap to different spans (road vs the
+         * raised curb/bridge above) and float inconsistently. Instead take the
+         * LOWEST rail-vertex height among ALL spans within R of the prop: the
+         * road is the lowest surface under the prop, curbs/bridges are higher, so
+         * this plants every prop on the road consistently. Nearest is the
+         * fallback if nothing is in range. */
+        {
+            const float R2 = 3000.0f * 3000.0f;
+            float low_y = 1e30f; int found = 0;
+            for (s = 0; s < s_span_count; s++) {
+                const TD5_StripSpan *sp = &s_span_array[s];
+                const TD5_StripVertex *vl = vertex_at((int)sp->left_vertex_index);
+                const TD5_StripVertex *vr = vertex_at((int)sp->right_vertex_index);
+                float ox = (float)(int32_t)sp->origin_x, oy = (float)(int32_t)sp->origin_y;
+                float oz = (float)(int32_t)sp->origin_z;
+                int k; const TD5_StripVertex *vv[2];
+                vv[0] = vl; vv[1] = vr;
+                for (k = 0; k < 2; k++) {
+                    const TD5_StripVertex *v = vv[k];
+                    float vx, vz, dx, dz, d2, gy;
+                    if (!v) continue;
+                    vx = ox + v->x; vz = oz + v->z;
+                    dx = vx - wx; dz = vz - wz; d2 = dx*dx + dz*dz;
+                    gy = oy + v->y;
+                    if (d2 < best_d2) { best_d2 = d2; best_y = gy; }      /* nearest fallback */
+                    if (d2 < R2 && gy < low_y) { low_y = gy; found = 1; } /* lowest in range */
+                }
+            }
+            pr->ground_y = (found ? low_y : best_y) + s_yoff;
+        }
+        pr->ground_done = 1;
+        return pr->ground_y;
+    }
 }
 
 /**

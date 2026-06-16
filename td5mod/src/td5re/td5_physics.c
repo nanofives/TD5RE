@@ -1972,6 +1972,8 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
 {
     int n, i, w;
     int32_t cx, cz, vx, vz, vx0, vz0, speed;
+    int32_t seg_ax, seg_az, seg_dx, seg_dz;
+    int64_t seg_len2;
     if (!actor) return;
     if (!td6_props_enabled()) return;
     n = td5_track_td6_prop_count();
@@ -1984,62 +1986,87 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
      * rails — the "invisible wall at the start" — and also means a prop only
      * breaks when you actually drive into it at speed. */
     speed = (int32_t)td5_isqrt((uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
-    if (speed < 0x1800) return;
+    if (speed < 0x1000) return;   /* ~3 MPH: ignore the stationary start grid */
     cx = actor->world_pos.x; cz = actor->world_pos.z;
+    /* Swept-path anti-tunnelling: at speed the per-tick step can exceed a prop's
+     * radius, so the point-in-circle test could land just before AND just past a
+     * prop without a sampled tick ever being inside it ("sometimes doesn't break
+     * despite running them over"). Build the SEGMENT from last tick's centre to
+     * this one (per-slot cache, world units) and test the prop against it. */
+    {
+        static int32_t s_ppx[16], s_ppz[16];
+        static uint8_t s_ppok[16];
+        int slot = (int)actor->slot_index;
+        if (slot < 0 || slot >= 16) slot = -1;
+        if (slot >= 0 && s_ppok[slot]) { seg_ax = s_ppx[slot] >> 8; seg_az = s_ppz[slot] >> 8; }
+        else                          { seg_ax = cx >> 8;           seg_az = cz >> 8; }
+        if (slot >= 0) { s_ppx[slot] = cx; s_ppz[slot] = cz; s_ppok[slot] = 1; }
+    }
+    seg_dx = (cx >> 8) - seg_ax; seg_dz = (cz >> 8) - seg_az;
+    seg_len2 = (int64_t)seg_dx * seg_dx + (int64_t)seg_dz * seg_dz;
     for (i = 0; i < n; i++) {
-        int32_t px, pz, rw, span, cdx, cdz;
+        int32_t px, pz, rw, hy, pxw, pzw, qx, qz;
+        int64_t closest_d2, t_num;
+        int hit;
         if (td5_track_td6_prop_is_broken(i)) continue;   /* already knocked over */
-        if (!td5_track_td6_prop_get(i, &px, &pz, &rw, &span)) continue;
-        /* broadphase: chassis vs prop (world units) before the 4 wheel tests */
-        cdx = (cx - px) >> 8; cdz = (cz - pz) >> 8;
-        if ((int64_t)cdx * cdx + (int64_t)cdz * cdz >
-            (int64_t)(rw + 6000) * (rw + 6000))
-            continue;
-        for (w = 0; w < 4; w++) {
-            int32_t dx = (actor->wheel_contact_pos[w].x - px) >> 8;
-            int32_t dz = (actor->wheel_contact_pos[w].z - pz) >> 8;
-            int64_t d2 = (int64_t)dx * dx + (int64_t)dz * dz;
-            if (d2 < (int64_t)rw * rw) {
-                /* Impact strength = the car's PLANAR SPEED (raw linear-velocity
-                 * units, ~1252 per MPH so 0x3200 ~= 10 MPH). Earlier this used
-                 * the inward-normal velocity component, but discrete/glancing
-                 * wheel contacts make that read ~0 -> the "strength=0, no
-                 * sound/debris" bug. Total speed is robust to contact angle. */
-                int32_t strength = (int32_t)td5_isqrt(
-                        (uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
-                /* mild thud: shed ~1/8 of velocity (light street furniture — you
-                 * plow through, you don't bounce off a wall) */
-                vx -= vx >> 3;
-                vz -= vz >> 3;
-                td5_track_td6_prop_set_broken(i);   /* one-shot: now drive through */
-                TD5_LOG_D(LOG_TAG, "TD6 prop break: idx=%d slot=%d strength=%d span=%d",
-                          i, (int)actor->slot_index, strength, span);
-                if (strength > 0x3200) {
-                    int32_t why = actor->wheel_contact_pos[w].y;
-                    int32_t wpos[3] = { px, why, pz };
-                    int variant = (strength < 0x19000) ? 0x16 : 0x1b;
-                    int mag     = (strength < 0x19000) ? 0x5622 : 0x2198;
-                    int volume  = (strength < 0x19000) ? 1 : 4;
-                    int32_t pitch = strength - 0x2000;
-                    int32_t ff_mag;
-                    if (pitch < 0x400) pitch = 0x400;
-                    else if (pitch > 0x800) pitch = 0x800;
-                    /* crash SFX (mirrors the wall-impact param order @0x406B70) */
-                    td5_sound_play_at_position(variant, pitch, mag, wpos, volume);
-                    ff_mag = strength >> 2;
-                    if (ff_mag > 99999) ff_mag = 100000;
-                    /* [item #5(1)(2)] Decaying directional pulse via the FF
-                     * collision path (was the old persistent play_effect). Props
-                     * are plowed into head-on, so flag a FRONT contact (0x01);
-                     * actor_b_slot = -1 (single actor). raw ff_mag matches the
-                     * 0..100000 domain td5_input_ff_collision divides down. */
-                    td5_input_ff_collision(0x01, (int)actor->slot_index, -1, ff_mag);
-                    td5_vfx_queue_prop_break((float)px * (1.0f / 256.0f),
-                                             (float)why * (1.0f / 256.0f),
-                                             (float)pz * (1.0f / 256.0f),
-                                             strength);
+        if (!td5_track_td6_prop_get(i, &px, &pz, &rw, NULL)) continue;
+        pxw = px >> 8; pzw = pz >> 8;
+        /* closest point on the swept segment (seg_a -> current) to the prop */
+        t_num = (int64_t)(pxw - seg_ax) * seg_dx + (int64_t)(pzw - seg_az) * seg_dz;
+        if (seg_len2 <= 0 || t_num <= 0) { qx = seg_ax;          qz = seg_az; }
+        else if (t_num >= seg_len2)      { qx = seg_ax + seg_dx; qz = seg_az + seg_dz; }
+        else { qx = seg_ax + (int32_t)(t_num * seg_dx / seg_len2);
+               qz = seg_az + (int32_t)(t_num * seg_dz / seg_len2); }
+        { int32_t ddx = pxw - qx, ddz = pzw - qz;
+          closest_d2 = (int64_t)ddx * ddx + (int64_t)ddz * ddz; }
+        if (closest_d2 > (int64_t)(rw + 6000) * (rw + 6000))
+            continue;                                    /* broadphase */
+        /* Solid hit when the swept car body (half-width ~550) reaches the prop,
+         * OR a wheel is inside. The swept segment kills high-speed tunnelling. */
+        hit = (closest_d2 < (int64_t)(rw + 550) * (rw + 550));
+        hy  = actor->wheel_contact_pos[0].y;
+        if (!hit) {
+            for (w = 0; w < 4; w++) {
+                int32_t dx = (actor->wheel_contact_pos[w].x - px) >> 8;
+                int32_t dz = (actor->wheel_contact_pos[w].z - pz) >> 8;
+                if ((int64_t)dx * dx + (int64_t)dz * dz < (int64_t)rw * rw) {
+                    hit = 1; hy = actor->wheel_contact_pos[w].y; break;
                 }
-                break;                              /* one hit per prop */
+            }
+        }
+        if (!hit) continue;
+        {
+            /* Impact strength = the car's PLANAR SPEED (raw velocity units,
+             * ~1252 per MPH so 0x3200 ~= 10 MPH); robust to contact angle. */
+            int32_t strength = (int32_t)td5_isqrt(
+                    (uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
+            /* Solid thud: shed ~1/4 of velocity so you feel the furniture. */
+            vx -= vx >> 2;
+            vz -= vz >> 2;
+            td5_track_td6_prop_set_broken(i);   /* one-shot: now drive through */
+            TD5_LOG_D(LOG_TAG, "TD6 prop break: idx=%d slot=%d strength=%d",
+                      i, (int)actor->slot_index, strength);
+            if (strength > 0x2400) {
+                int32_t wpos[3] = { px, hy, pz };
+                int variant = (strength < 0x19000) ? 0x16 : 0x1b;
+                int mag     = (strength < 0x19000) ? 0x5622 : 0x2198;
+                int volume  = (strength < 0x19000) ? 1 : 4;
+                int32_t pitch = strength - 0x2000;
+                int32_t ff_mag;
+                if (pitch < 0x400) pitch = 0x400;
+                else if (pitch > 0x800) pitch = 0x800;
+                /* crash SFX (mirrors the wall-impact param order @0x406B70) */
+                td5_sound_play_at_position(variant, pitch, mag, wpos, volume);
+                ff_mag = strength >> 2;
+                if (ff_mag > 99999) ff_mag = 100000;
+                /* Decaying directional FF pulse via the collision path (master's
+                 * newer API): head-on prop plow -> FRONT contact (0x01),
+                 * actor_b_slot = -1 (single actor). */
+                td5_input_ff_collision(0x01, (int)actor->slot_index, -1, ff_mag);
+                td5_vfx_queue_prop_break((float)px * (1.0f / 256.0f),
+                                         (float)hy * (1.0f / 256.0f),
+                                         (float)pz * (1.0f / 256.0f),
+                                         strength);
             }
         }
     }

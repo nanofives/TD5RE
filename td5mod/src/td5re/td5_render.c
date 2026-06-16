@@ -6238,13 +6238,15 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
-/* [task#14] VISIBLE breakable props. The TD6 .tcl props are invisible collision
- * volumes (the break — knock + crash SFX + debris — is in td5_physics). Draw a
- * texture-free grey BOX at each un-broken prop so they actually SPAWN and vanish
- * when smashed. Camera-projected exactly like the raycast shadow above; ground Y
- * approximated from the viewed actor (London is flat). Per-face flat shading
- * gives a 3D read; both tri windings are emitted so backface culling can't hide
- * a face. Env TD5RE_TD6_PROP_MESH (=0 off). Called once per view from td5_game. */
+/* [task#14] VISIBLE BREAKABLE FURNITURE — TD6's smashable street props. RE
+ * (2026-06-16): the VISIBLE props are level.mov (24-byte records) drawn as the
+ * COL_NN.prr MESHES (NOT the invisible level.tcl collision footprints the port
+ * used to render as boxes). Each MOV record picks one of 8 furniture meshes
+ * (byte4&0xF) and places it at a world pos + Y-orientation. We de-indexed the
+ * COL meshes into PROPMESH.BIN (tri-list pos+baked-grey) and draw each un-broken
+ * prop's mesh, rotated by its angle, planted on the nearest-span ground, shaded
+ * by its baked grey × a per-model furniture tint. Smashing sets broken in
+ * td5_physics -> the mesh vanishes + debris. Env TD5RE_TD6_PROP_MESH (=0 off). */
 static int td6_prop_mesh_enabled(void)
 {
     static int s = -1;
@@ -6252,97 +6254,185 @@ static int td6_prop_mesh_enabled(void)
     return s;
 }
 
+/* The 8 de-indexed COL furniture meshes (PROPMESH.BIN). pos = vcount*3 floats
+ * (tri-list, local), col = vcount baked-grey ARGB, min_y for ground planting. */
+#define TD6_PROP_MESH_MAX 12
+typedef struct { float *pos; float *uv; uint32_t *col; int vcount; float min_y; } TD6PropMesh;
+static TD6PropMesh s_td6_pmesh[TD6_PROP_MESH_MAX];
+static int s_td6_pmesh_count = 0;
+
+/* Furniture textures (real TD6 static.zip art), lazily uploaded once into 4
+ * pages. model (COL_NN) -> texture via the London prototype subset. */
+#define TD6_PROP_TEX_BASE 984
+#define TD6_PROP_TEX_N 5
+static const char *k_td6_prop_srcs[TD6_PROP_TEX_N] = {
+    "re/assets/props/td6_bench.png",     /* 0 BENCH    */
+    "re/assets/props/td6_redtape.png",   /* 1 REDTAPE  */
+    "re/assets/props/td6_1bollard.png",  /* 2 1BOLLARD */
+    "re/assets/props/td6_k1box.png",     /* 3 K1BOX    */
+    "re/assets/props/td6_1crate.png",    /* 4 1CRATE   */
+};
+/* model (COL_NN) -> texture index. AUTHORITATIVE (TD6.exe FUN_0044c535 + London
+ * subset row @0x0049be58 = [ff,ff,BENCH,REDTAPE,REDTAPE,1BOLLARD,K1BOX,1CRATE]):
+ * COL_00 slot0 & COL_01 slot1 are 0xff = UNTEXTURED (-1 -> white, vertex-lit);
+ * COL_01 slot2=BENCH, COL_02 slot3 / COL_03,04 slot4 = REDTAPE, COL_05 slot5=
+ * 1BOLLARD (mesh unused in London), COL_06 slot6=K1BOX, COL_07 slot7=1CRATE. */
+static const int k_td6_prop_texidx[8] = { -1, 0, 1, 1, 1, 2, 3, 4 };
+#define TD6_PROP_WHITE_PAGE (TD6_PROP_TEX_BASE + TD6_PROP_TEX_N)  /* dedicated 1x1 white for untextured props */
+static int s_td6_prop_pool_loaded = 0;
+static void td6_prop_load_pool(void)
+{
+    int i;
+    if (s_td6_prop_pool_loaded) return;
+    s_td6_prop_pool_loaded = 1;
+    for (i = 0; i < TD6_PROP_TEX_N; i++)
+        if (!td5_asset_load_png_texture(TD6_PROP_TEX_BASE + i, k_td6_prop_srcs[i], TD5_COLORKEY_NONE))
+            TD5_LOG_W(LOG_TAG, "td6 prop tex: failed %s", k_td6_prop_srcs[i]);
+    { uint32_t white = 0xFFFFFFFFu;  /* own white page (shared 899 can carry HUD/font pixels) */
+      td5_plat_render_upload_texture(TD6_PROP_WHITE_PAGE, &white, 1, 1, 2); }
+}
+
+void td5_render_load_td6_prop_meshes(const void *data, size_t size)
+{
+    int i;
+    for (i = 0; i < s_td6_pmesh_count; i++) {
+        free(s_td6_pmesh[i].pos); free(s_td6_pmesh[i].uv); free(s_td6_pmesh[i].col);
+        s_td6_pmesh[i].pos = NULL; s_td6_pmesh[i].uv = NULL; s_td6_pmesh[i].col = NULL;
+        s_td6_pmesh[i].vcount = 0;
+    }
+    s_td6_pmesh_count = 0;
+    if (!data || size < 8) return;
+    {
+        const uint8_t *p = (const uint8_t *)data;
+        uint32_t mc; int vcounts[TD6_PROP_MESH_MAX]; const uint8_t *vd; size_t off;
+        if (p[0] != 'P' || p[1] != 'M' || p[2] != 'S' || p[3] != '2') return;  /* PMS2 = pos+uv+col */
+        memcpy(&mc, p + 4, 4);
+        if (mc > TD6_PROP_MESH_MAX) mc = TD6_PROP_MESH_MAX;
+        if (size < 8 + (size_t)mc * 8) return;
+        for (i = 0; i < (int)mc; i++) memcpy(&vcounts[i], p + 8 + i * 8, 4);
+        vd = p + 8 + mc * 8; off = 0;
+        for (i = 0; i < (int)mc; i++) {
+            int vc = vcounts[i], v; float miny = 1e30f;
+            if (vc < 0) vc = 0;
+            if ((size_t)(vd - p) + off + (size_t)vc * 24 > size) break;  /* 24B/vert */
+            s_td6_pmesh[i].pos = (float *)malloc((size_t)vc * 3 * sizeof(float));
+            s_td6_pmesh[i].uv  = (float *)malloc((size_t)vc * 2 * sizeof(float));
+            s_td6_pmesh[i].col = (uint32_t *)malloc((size_t)vc * sizeof(uint32_t));
+            s_td6_pmesh[i].vcount =
+                (s_td6_pmesh[i].pos && s_td6_pmesh[i].uv && s_td6_pmesh[i].col) ? vc : 0;
+            for (v = 0; v < s_td6_pmesh[i].vcount; v++) {
+                float buf[5]; uint32_t c;            /* x,y,z,u,v + color */
+                memcpy(buf, vd + off + (size_t)v * 24, 20);
+                memcpy(&c, vd + off + (size_t)v * 24 + 20, 4);
+                s_td6_pmesh[i].pos[v*3+0] = buf[0];
+                s_td6_pmesh[i].pos[v*3+1] = buf[1];
+                s_td6_pmesh[i].pos[v*3+2] = buf[2];
+                s_td6_pmesh[i].uv[v*2+0]  = buf[3];
+                s_td6_pmesh[i].uv[v*2+1]  = buf[4];
+                s_td6_pmesh[i].col[v] = c;
+                if (buf[1] < miny) miny = buf[1];
+            }
+            s_td6_pmesh[i].min_y = (s_td6_pmesh[i].vcount > 0) ? miny : 0.0f;
+            off += (size_t)vc * 24;
+            s_td6_pmesh_count = i + 1;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "TD6 prop meshes loaded: %d", s_td6_pmesh_count);
+}
+
 void render_td6_props(const TD5_Actor *ref)
 {
     if (!td6_prop_mesh_enabled() || g_active_td6_level <= 0 || !ref) return;
     int n = td5_track_td6_prop_count();
-    if (n <= 0) return;
+    if (n <= 0 || s_td6_pmesh_count <= 0) return;
 
     const float inv256 = 1.0f / 256.0f;
     const float gx = (float)ref->world_pos.x * inv256;
     const float gy = (float)ref->world_pos.y * inv256;
     const float gz = (float)ref->world_pos.z * inv256;
     const float MAXD = 50000.0f;
+    int drew = 0, last_page = -1;
 
-    static const uint32_t FACE_COL[6] = {
-        0xFFCFCFCFu, 0xFF4C4C4Cu,   /* top, bottom */
-        0xFFAAAAAAu, 0xFF6E6E6Eu,   /* +x,  -x */
-        0xFF9A9A9Au, 0xFF787878u    /* +z,  -z */
-    };
-    static const int FACE[6][4] = {
-        {4,5,6,7}, {3,2,1,0},       /* top, bottom */
-        {1,2,6,5}, {3,0,4,7},       /* +x, -x */
-        {2,3,7,6}, {0,1,5,4}        /* +z, -z */
-    };
-
-    int drew_any = 0;
     for (int i = 0; i < n; i++) {
-        int32_t px, pz; int rw, span;
-        float cx, cz, ax, az, hw, y0, y1;
-        float wx[8], wy[8], wz[8], sx[8], sy[8], sd[8], sr[8];
-        TD5_D3DVertex vb[24];
-        uint16_t ib[72];
-        int c, f, nv, ni, behind;
+        int32_t px, py, pz; int model, angle, page;
+        const TD6PropMesh *m;
+        float cx, cz, ax, az, base_y, lift, a, ca, sa;
+        int v, vc, ni, t, any;
+        TD5_D3DVertex vb[128];
+        uint16_t ib[384];
+        uint8_t ok[128];
 
         if (td5_track_td6_prop_is_broken(i)) continue;
-        if (!td5_track_td6_prop_get(i, &px, &pz, &rw, &span)) continue;
+        if (!td5_track_td6_prop_get_mov(i, &px, &py, &pz, &model, &angle)) continue;
+        if (model < 0 || model >= s_td6_pmesh_count) continue;
+        m = &s_td6_pmesh[model];
+        if (m->vcount < 3) continue;
         cx = (float)px * inv256; cz = (float)pz * inv256;
         ax = cx - gx; az = cz - gz;
         if (ax * ax + az * az > MAXD * MAXD) continue;
 
-        hw = (float)rw * 0.40f;
-        if (hw > 220.0f) hw = 220.0f;
-        if (hw < 70.0f)  hw = 70.0f;
-        y0 = gy - 80.0f; y1 = gy + 560.0f;
+        base_y = td5_track_td6_prop_ground_y(i, gy);   /* plant on the strip */
+        lift   = base_y - m->min_y;                    /* mesh bottom -> ground */
+        a  = (float)angle * (2.0f * (float)M_PI / 4096.0f);
+        ca = cosf(a); sa = sinf(a);
 
-        wx[0]=cx-hw; wx[1]=cx+hw; wx[2]=cx+hw; wx[3]=cx-hw;
-        wx[4]=cx-hw; wx[5]=cx+hw; wx[6]=cx+hw; wx[7]=cx-hw;
-        wz[0]=cz-hw; wz[1]=cz-hw; wz[2]=cz+hw; wz[3]=cz+hw;
-        wz[4]=cz-hw; wz[5]=cz-hw; wz[6]=cz+hw; wz[7]=cz+hw;
-        wy[0]=wy[1]=wy[2]=wy[3]=y0; wy[4]=wy[5]=wy[6]=wy[7]=y1;
-
-        behind = 0;
-        for (c = 0; c < 8; c++) {
-            float ddx = wx[c] - s_camera_pos[0];
-            float ddy = wy[c] - s_camera_pos[1];
-            float ddz = wz[c] - s_camera_pos[2];
-            float vx = ddx*s_camera_basis[0] + ddy*s_camera_basis[1] + ddz*s_camera_basis[2];
-            float vy = ddx*s_camera_basis[3] + ddy*s_camera_basis[4] + ddz*s_camera_basis[5];
-            float vz = ddx*s_camera_basis[6] + ddy*s_camera_basis[7] + ddz*s_camera_basis[8];
-            float invz;
-            if (vz <= s_near_clip) { behind = 1; break; }
-            invz = 1.0f / vz;
-            sx[c] = -vx * s_focal_length * invz + s_center_x;
-            sy[c] = -vy * s_focal_length * invz + s_center_y;
-            sd[c] = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
-            sr[c] = invz;
-        }
-        if (behind) continue;
-
-        nv = 0; ni = 0;
-        for (f = 0; f < 6; f++) {
-            int base = nv, k;
-            for (k = 0; k < 4; k++) {
-                int ci = FACE[f][k];
-                TD5_D3DVertex *v = &vb[nv++];
-                v->screen_x = sx[ci]; v->screen_y = sy[ci];
-                v->depth_z  = sd[ci]; v->rhw = sr[ci];
-                v->diffuse  = FACE_COL[f]; v->specular = 0;
-                v->tex_u = 0.0f; v->tex_v = 0.0f;
+        vc = m->vcount; if (vc > 128) vc = 128;
+        any = 0;
+        for (v = 0; v < vc; v++) {
+            float lx = m->pos[v*3+0], ly = m->pos[v*3+1], lz = m->pos[v*3+2];
+            float rx = lx*ca + lz*sa, rz = -lx*sa + lz*ca;
+            float wx = cx + rx, wy = lift + ly, wz = cz + rz;
+            float ddx = wx-s_camera_pos[0], ddy = wy-s_camera_pos[1], ddz = wz-s_camera_pos[2];
+            float vx = ddx*s_camera_basis[0]+ddy*s_camera_basis[1]+ddz*s_camera_basis[2];
+            float vyv= ddx*s_camera_basis[3]+ddy*s_camera_basis[4]+ddz*s_camera_basis[5];
+            float vz = ddx*s_camera_basis[6]+ddy*s_camera_basis[7]+ddz*s_camera_basis[8];
+            float invz; int grey, sh;
+            if (vz <= s_near_clip) {
+                ok[v] = 0;
+                vb[v].screen_x=0; vb[v].screen_y=0; vb[v].depth_z=0; vb[v].rhw=0;
+                vb[v].diffuse=0; vb[v].specular=0; vb[v].tex_u=0; vb[v].tex_v=0;
+                continue;
             }
-            ib[ni++]=(uint16_t)(base+0); ib[ni++]=(uint16_t)(base+1); ib[ni++]=(uint16_t)(base+2);
-            ib[ni++]=(uint16_t)(base+0); ib[ni++]=(uint16_t)(base+2); ib[ni++]=(uint16_t)(base+3);
-            ib[ni++]=(uint16_t)(base+0); ib[ni++]=(uint16_t)(base+2); ib[ni++]=(uint16_t)(base+1);
-            ib[ni++]=(uint16_t)(base+0); ib[ni++]=(uint16_t)(base+3); ib[ni++]=(uint16_t)(base+2);
+            invz = 1.0f/vz;
+            /* baked grey (R=G=B) modulates the furniture texture for 3D shading;
+             * gl==0 verts default to near-full brightness. */
+            grey = (int)((m->col[v] >> 16) & 0xFF);
+            sh = (grey > 0) ? (110 + grey * 145 / 255) : 235;
+            if (sh > 255) sh = 255;
+            vb[v].screen_x = -vx *s_focal_length*invz + s_center_x;
+            vb[v].screen_y = -vyv*s_focal_length*invz + s_center_y;
+            vb[v].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+            vb[v].rhw      = invz;
+            vb[v].diffuse  = 0xFF000000u | ((uint32_t)sh<<16) | ((uint32_t)sh<<8) | (uint32_t)sh;
+            vb[v].specular = 0;
+            vb[v].tex_u = m->uv[v*2+0]; vb[v].tex_v = m->uv[v*2+1];
+            ok[v] = 1; any = 1;
         }
+        if (!any) continue;
 
-        if (!drew_any) {
-            flush_immediate_internal();
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            td5_plat_render_bind_texture(SHADOW_WHITE_TEX_PAGE);
-            drew_any = 1;
+        ni = 0;
+        for (t = 0; t + 2 < vc; t += 3) {
+            if (!ok[t] || !ok[t+1] || !ok[t+2]) continue;
+            if (ni + 6 > (int)(sizeof ib / sizeof ib[0])) break;
+            /* both windings so the mesh is solid regardless of cull (z-buffer picks nearest) */
+            ib[ni++]=(uint16_t)t;     ib[ni++]=(uint16_t)(t+1); ib[ni++]=(uint16_t)(t+2);
+            ib[ni++]=(uint16_t)t;     ib[ni++]=(uint16_t)(t+2); ib[ni++]=(uint16_t)(t+1);
         }
-        td5_plat_render_draw_tris(vb, nv, ib, ni);
+        if (ni == 0) continue;
+
+        if (!drew) {
+            flush_immediate_internal();
+            td6_prop_load_pool();
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            drew = 1;
+        }
+        {
+            int ti = k_td6_prop_texidx[model & 7];
+            page = (ti < 0) ? TD6_PROP_WHITE_PAGE : (TD6_PROP_TEX_BASE + ti);
+        }
+        if (page != last_page) { td5_plat_render_bind_texture(page); last_page = page; }
+        td5_plat_render_draw_tris(vb, vc, ib, ni);
+        (void)py;
     }
 }
 

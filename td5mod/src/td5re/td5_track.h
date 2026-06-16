@@ -131,12 +131,21 @@ int              td5_track_td6_surface_grid_loaded(void);
 /* TD6 breakable props (level<N>.tcl): load/clear the prop table, query count and
  * per-prop world pos (24.8) + collision radius (world units) + anchor span. */
 void             td5_track_load_td6_props(const void *data, size_t size);
+void             td5_track_append_td6_props(const void *data, size_t size);
 int              td5_track_td6_prop_count(void);
+int              td5_track_td6_prop_get_mov(int i, int32_t *out_px, int32_t *out_py,
+                                            int32_t *out_pz, int *out_model, int *out_angle);
 int              td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
                                         int *out_radius_w, int *out_span);
 int              td5_track_td6_prop_is_broken(int i);
 void             td5_track_td6_prop_set_broken(int i);
 void             td5_track_td6_props_reset_broken(void);
+/* Render-time: 1 if world point (wx,wz) sits on a SMASHED prop (used to hide the
+ * static furniture mesh on top of it). Fast no-broken early-out. */
+int              td5_track_td6_prop_broken_near(float wx, float wz);
+int              td5_track_td6_broken_count(void);   /* diag: # of smashed props */
+/* World-float ground Y at prop i's anchor span (stable; fallback if no strip). */
+float            td5_track_td6_prop_ground_y(int prop_index, float fallback);
 int              td5_track_get_span_lane_count(int span_index);
 /* Per-lane surface type for a span (reuses surface_type_for_span_lane).
  * Returns the surface byte: 0x00-0x0F = main-road surface (low nibble of

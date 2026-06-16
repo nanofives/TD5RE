@@ -2421,12 +2421,32 @@ int td5_asset_load_level(int track_index)
          * volumes on the baked geometry; London ships ~199). load returns NULL on
          * native TD5 / tracks without props, which clears the prop table. */
         {
-            static const char *s_prop_names[1] = { "LEVEL.TCL" };
-            int prop_sz = 0;
+            /* [task#14 MOV] VISIBLE breakable furniture = level.mov (24-byte recs)
+             * drawn as COL_NN.prr meshes — NOT the invisible level.tcl collision
+             * footprints the port used to render. LEVEL.MOV is the main route,
+             * LEVELB.MOV the branch ("left track") set. Appended into one table. */
+            static const char *s_prop_names[1]  = { "LEVEL.MOV" };
+            static const char *s_propb_names[1] = { "LEVELB.MOV" };
+            int prop_sz = 0, propb_sz = 0;
             void *prop_data = load_first_available_level_entry(track_index, s_prop_names, 1,
                                                                &prop_sz, NULL, 0);
+            void *propb_data;
             td5_track_load_td6_props(prop_data, (size_t)(prop_sz > 0 ? prop_sz : 0));
             free(prop_data);
+            propb_data = load_first_available_level_entry(track_index, s_propb_names, 1,
+                                                          &propb_sz, NULL, 0);
+            td5_track_append_td6_props(propb_data, (size_t)(propb_sz > 0 ? propb_sz : 0));
+            free(propb_data);
+            /* PROPMESH.BIN = the 8 de-indexed COL furniture meshes the renderer
+             * draws per MOV prop (model byte -> mesh). */
+            {
+                static const char *s_pmesh_names[1] = { "PROPMESH.BIN" };
+                int pm_sz = 0;
+                void *pm_data = load_first_available_level_entry(track_index, s_pmesh_names, 1,
+                                                                 &pm_sz, NULL, 0);
+                td5_render_load_td6_prop_meshes(pm_data, (size_t)(pm_sz > 0 ? pm_sz : 0));
+                free(pm_data);
+            }
         }
 
         /* [TD6 AUTHORITATIVE TRACK TYPE] For migrated TD6 tracks, derive circuit

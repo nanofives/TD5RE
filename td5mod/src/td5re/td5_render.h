@@ -97,6 +97,10 @@ void td5_render_update_light_zone(int player_span);
  * are drawn. London/TD6 only; A/B via TD5RE_TD6_PROP_MESH. */
 void render_td6_props(const TD5_Actor *ref);
 
+/* Load the de-indexed COL furniture meshes (PROPMESH.BIN) used by render_td6_props.
+ * Called at TD6 track load; pass NULL/0 to clear. */
+void td5_render_load_td6_prop_meshes(const void *data, size_t size);
+
 /* Per-slot paint TINT (0xRRGGBB; 0 = white/identity). Used to color a grayscale
  * TD6 car body. TD5 cars/AI keep tint 0 and render unchanged. */
 void td5_render_set_vehicle_tint(int slot, uint32_t rgb);
