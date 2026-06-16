@@ -481,6 +481,13 @@ int  s_num_ai_opponents  = 5;    /* 0..(TD5_MAX_RACER_SLOTS-1)        */
  * Inert outside Quick Race; clamped to the AI field + the viewport cap. */
 int  s_num_spectate_screens = 0; /* 0..min(opponents, TD5_MAX_VIEWPORTS-1) */
 int  s_score_category_index;    /* DAT_00497a68: current track in score table */
+/* [#2b 2026-06-16] Post-race high-score TD6 context: 0 = a normal (TD5) track,
+ * uses the authored NPC group; >0 = the active TD6 level number whose genuine
+ * record table (td5_save_get_td6_record_group) the high-score overlay should
+ * render instead of a clamped TD5 group's placeholder names. Set by the post-race
+ * screens (td5_fe_race.c) in their state 0; only consulted while showing the
+ * post-race table (NAME_ENTRY) — the Records browse screen leaves it 0. */
+int  s_postrace_td6_level = 0;
 
 #define FE_MAX_DISPLAY_MODES 64
 static TD5_DisplayMode s_display_modes[FE_MAX_DISPLAY_MODES];
@@ -5597,9 +5604,38 @@ extern void frontend_draw_randomize_icon(float x, float y, float sx, float sy, i
 extern void frontend_render_carsel_randomize_icon(float sx, float sy);
 extern void frontend_render_trksel_randomize_icon(float sx, float sy);
 
+/* [#10 2026-06-16] Dedicated RANDOMIZE button geometry for the Car/Track rows: a
+ * compact button parked at the far-right of the value column (32px row height).
+ * MUST match the identical definitions in td5_fe_race.c (which creates the
+ * buttons) — kept in both .c files to avoid touching shared headers. The value
+ * text reserves (QR_RAND_BTN_W + gap) on the right so a long name wraps before
+ * the button rather than sliding under it. */
+#define QR_RAND_BTN_W   104   /* "Randomize" button width                        */
+#define QR_RAND_BTN_X   (FE_QR_SCREEN_W - FE_QR_RIGHT_MARGIN - QR_RAND_BTN_W) /* 524 */
+#define QR_RAND_RESERVE (QR_RAND_BTN_W + 8)  /* value-column right reserve for it */
+
+/* [#10 2026-06-16] TD5RE_QR_RANDOM_BUTTON gate (default ON). When on, the Quick
+ * Race randomize controls are PROPER nav-selectable buttons (QR_BTN_RAND_CAR /
+ * QR_BTN_RAND_TRACK, created in the QR init in td5_fe_race.c) drawn by the
+ * standard button renderer; the legacy render-path icon/chip + its mouse/'r'
+ * handler are suppressed. "0" reverts to the old icon widgets. NON-STATIC so the
+ * FSM in td5_fe_race.c can read it (extern-declared there). */
+int frontend_qr_random_button_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_QR_RANDOM_BUTTON");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "QuickRace randomize as real BUTTONS (#10) %s (TD5RE_QR_RANDOM_BUTTON=%s)",
+                  v ? "ENABLED" : "disabled (legacy icons)", e ? e : "default");
+    }
+    return v;
+}
+
 /* [item #7] TD5RE_RANDOM_ICON gate, read locally (the sibling file has its own
  * static cache of the same knob; we cache our own copy here per the brief).
- * Default ON; exactly "0" suppresses the Quick Race randomize icons. */
+ * Default ON; exactly "0" suppresses the Quick Race randomize icons.
+ * [#10] The legacy icon path is ALSO suppressed whenever the new real-button
+ * mode (frontend_qr_random_button_on) is on, so the two never double-draw. */
 static int frontend_qr_random_icon_on(void) {
     static int v = -1;
     if (v < 0) {
@@ -5608,6 +5644,8 @@ static int frontend_qr_random_icon_on(void) {
         TD5_LOG_I(LOG_TAG, "QuickRace randomize icons (#7) %s (TD5RE_RANDOM_ICON=%s)",
                   v ? "ENABLED" : "disabled", e ? e : "default");
     }
+    /* Real-button mode wins: don't draw/handle the old chips when it's active. */
+    if (frontend_qr_random_button_on()) return 0;
     return v;
 }
 
@@ -5810,8 +5848,9 @@ static void frontend_qr_rand_icon_xy(int row_btn_idx, float *out_x, float *out_y
 }
 
 /* Roll the selector identified by `which` (0 = Car, 1 = Track) and emit cycle sfx
- * on a real change. */
-static void frontend_qr_roll_selector(int which) {
+ * on a real change. [#10] NON-STATIC: the dedicated Randomize buttons' action in
+ * the Screen_QuickRaceMenu FSM (td5_fe_race.c) calls this via an extern decl. */
+void frontend_qr_roll_selector(int which) {
     if (which == 0) {
         int prev = s_selected_car;
         s_selected_car = frontend_qr_pick_random_car();
@@ -5938,8 +5977,13 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
                     s_track_lock_table[s_selected_track] != 0);
 
     /* [item #7] Reserve the chip strip on the Car/Track rows so a long wrapped
-     * name never slides under the randomize icon. 0 when the icon is off. */
-    int rand_reserve = frontend_qr_random_icon_on() ? (FE_QR_RAND_ICON_W + 6) : 0;
+     * name never slides under the randomize icon. 0 when the icon is off.
+     * [#10] When the randomize controls are real BUTTONS (the new default), the
+     * Randomize button sits at the far-right of the value column instead, so
+     * reserve its (wider) footprint so the name wraps before it. */
+    int rand_reserve = frontend_qr_random_button_on() ? QR_RAND_RESERVE
+                     : frontend_qr_random_icon_on()   ? (FE_QR_RAND_ICON_W + 6)
+                     : 0;
 
     /* Each selected value renders in the right-hand value column at the same
      * glyph size as the button caption, vertically centered on its row, and
@@ -7432,7 +7476,18 @@ static int frontend_convert_speed(int raw, int kph_mode) {
 static void frontend_render_high_score_overlay(float sx, float sy) {
     if (!s_anim_complete || s_inner_state < 6) return;
 
-    const TD5_NpcGroup *grp = td5_save_get_npc_group(s_score_category_index);
+    /* [#2b 2026-06-16] TD6 tracks have no authored NPC group, so the post-race
+     * table must show ONLY genuine records (the player's actual runs) — never the
+     * placeholder names a clamped TD5 group would render. When the post-race flow
+     * flagged a TD6 track (s_postrace_td6_level > 0), pull that level's genuine
+     * record table; if it has none yet, fall through to the "NO RECORDS YET" empty
+     * state below (grp == NULL). The Records browse screen leaves the flag 0, so
+     * it still shows the authored TD5 groups unchanged. */
+    const TD5_NpcGroup *grp;
+    if (s_postrace_td6_level > 0)
+        grp = td5_save_get_td6_record_group(s_postrace_td6_level);
+    else
+        grp = td5_save_get_npc_group(s_score_category_index);
     int speed_kph = td5_save_get_speed_units();  /* drives the AVERAGE/TOP value conversion;
                                                   * the column header is "SPEED" (SNK_SpdTxt),
                                                   * not the unit, per DrawPostRaceHighScoreEntry */
@@ -7458,7 +7513,9 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
                               - fe_measure_small_text(S) * 0.5f * fe_glyph_sx(sx, sy))
 
     if (!grp) {
-        const char *msg = "NO SCORES YET";
+        /* [#2b] TD6 with no genuine records yet shows "NO RECORDS YET" (the player
+         * just hasn't set one) rather than the generic "NO SCORES YET". */
+        const char *msg = (s_postrace_td6_level > 0) ? "NO RECORDS YET" : "NO SCORES YET";
         fe_draw_small_text((320.0f * sx) - (fe_measure_small_text(msg) * 0.5f) * fe_glyph_sx(sx, sy),
                            HS_SF_Y(60), msg, 0xFFCCCCCC, sx, sy);
         return;
@@ -10130,6 +10187,44 @@ static void mp_simul_render_stats(int p, float px, float py, float pw, float ph,
                             0xFFFFE060u, lsx, lsy);
 }
 
+/* [#3 2026-06-16] MP per-player panel MAX-WIDTH cap, matching the IDENTICAL
+ * formula the sibling td5_fe_race.c applies to its in-file overlays (the
+ * position-picker cells + PROFILE chip) so the main name/colour panes
+ * (frontend_mp_setup_render) and the simultaneous car-select panes
+ * (frontend_mp_simul_carsel_render) drawn HERE line up underneath them.
+ *
+ * EXACT FORMULA (canvas width W = 640, cols from mp_resolve_layout):
+ *   pane_w  = min(W / cols, W / 3)          (cap at the 3x3-grid pane = 213.33)
+ *   row_x0  = (W - cols * pane_w) / 2        (centre the capped row)
+ *   px[col] = row_x0 + col * pane_w
+ * With 2 players each pane is capped at 213.33 px and the row is centred;
+ * cols >= 3 is unchanged (pane_w already <= cap, row_x0 == 0). Height stays
+ * W/rows (only WIDTH is capped). Same env var the fe_race helper used. */
+static int frontend_mp_panel_cap_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_PANEL_CAP");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP main-pane width cap (#3) %s (TD5RE_MP_PANEL_CAP=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+/* Writes the capped per-pane width to *pane_w and the centred row's col-0 left
+ * edge to *row_x0 for `cols` columns across a 640px canvas. No-op (full width,
+ * x0=0) when the cap knob is off. */
+static void frontend_mp_panel_capped(int cols, float *pane_w, float *row_x0) {
+    float full = 640.0f / (float)(cols < 1 ? 1 : cols);
+    float w = full;
+    if (frontend_mp_panel_cap_on()) {
+        float cap = 640.0f / 3.0f;
+        if (w > cap) w = cap;
+    }
+    if (pane_w) *pane_w = w;
+    if (row_x0) *row_x0 = (640.0f - (float)cols * w) * 0.5f;
+}
+
 static void frontend_mp_simul_carsel_render(float sx, float sy) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0;
@@ -10145,7 +10240,10 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
     if (s_inner_state == 0x20)
         anim_t = mp_simul_clamp01((float)(now - s_mp_simul_anim_ms) / (float)MP_SIMUL_ANIM_MS);
 
-    float pane_w = 640.0f / (float)cols;
+    /* [#3] Cap pane WIDTH at the 3x3-grid equivalent (640/3) and centre the row,
+     * matching the fe_race overlays so the position-picker/profile chips line up. */
+    float pane_w, row_x0 = 0.0f;
+    frontend_mp_panel_capped(cols, &pane_w, &row_x0);
     float pane_h = 480.0f / (float)rows;
 
     /* Dim the MainMenu background (ramps up with the slide-in). */
@@ -10162,7 +10260,7 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
         extern int frontend_mp_player_pane_cell(int);  /* defined in td5_fe_race.c */
         int cell = frontend_mp_player_pane_cell(p);
         int col = cell % cols, row = cell / cols;
-        float px = (float)col * pane_w, py = (float)row * pane_h;
+        float px = row_x0 + (float)col * pane_w, py = (float)row * pane_h;
         float cx, pyr, pt, pe, rise;
         uint32_t rgb  = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;  /* chosen identity colour */
         uint32_t pcol = rgb | 0xFF000000u;
@@ -10523,7 +10621,10 @@ static void frontend_mp_setup_render(float sx, float sy) {
     if (s_inner_state == 0x20)
         anim_t = mp_simul_clamp01((float)(now - s_mp_simul_anim_ms) / (float)MP_SIMUL_ANIM_MS);
 
-    float pane_w = 640.0f / (float)cols;
+    /* [#3] Same capped/centred pane width as the car-select panes + fe_race
+     * overlays (640/3 cap), so the name/colour row lines up underneath them. */
+    float pane_w, row_x0 = 0.0f;
+    frontend_mp_panel_capped(cols, &pane_w, &row_x0);
     float pane_h = 480.0f / (float)rows;
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
@@ -10532,7 +10633,7 @@ static void frontend_mp_setup_render(float sx, float sy) {
 
     for (p = 0; p < n; p++) {
         int col = p % cols, row = p / cols;
-        float px = (float)col * pane_w, py = (float)row * pane_h;
+        float px = row_x0 + (float)col * pane_w, py = (float)row * pane_h;
         float cx, pyr, pt, pe, rise, ax, ay, aw, ah;
         uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
         uint32_t pcol = rgb | 0xFF000000u;

@@ -118,6 +118,33 @@ const TD5_NpcGroup *td5_save_get_npc_group(int group_index);
  *  [CONFIRMED @ 0x00413BC0 case 4]: original writes directly into g_npcRacerGroupTable. */
 TD5_NpcGroup *td5_save_get_npc_group_mutable(int group_index);
 
+/* ========================================================================
+ * TD6 high-score records (port enhancement #2b 2026-06-16)
+ *
+ * The original 26-group NPC high-score table only covers the 26 authored TD5
+ * tracks (td5_save_get_npc_group returns NULL for >= 26). TD6 tracks have NO
+ * authored group, so the post-race high-score screen used to clamp onto a TD5
+ * group and show its FAKE seed names. These accessors keep a separate, small
+ * per-TD6-track record table (same TD5_NpcGroup layout) holding ONLY genuine
+ * runs the player has set this/previous sessions — never placeholder names.
+ * Persisted in td5re_progress.ini under [TD6Records.LevelNN]; loaded lazily;
+ * gated by TD5RE_TD6_NO_PLACEHOLDER_SCORES (default on — see the .c). When the
+ * knob is off these return NULL / -1 so the legacy clamp path is unaffected.
+ * `td6_level` is the TD6 level number (td5_asset_td6_level_for_slot), 1-based.
+ * ======================================================================== */
+
+/** Read-only TD6 record group for `td6_level`. NULL if the level has no stored
+ *  records yet, the level is out of range, or the feature is disabled. */
+const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level);
+
+/** Insert a genuine record into the TD6 table for `td6_level`, keeping the 5
+ *  entries sorted by `score_type` (0/1/4 = time, lower better; 2 = points,
+ *  higher better). Persists to disk. Returns the inserted rank [0..4], or -1
+ *  if it didn't qualify / the feature is off / args are invalid. */
+int td5_save_td6_record_insert(int td6_level, int score_type,
+                               const char *name, int32_t score,
+                               int car_id, int32_t avg_speed, int32_t top_speed);
+
 /** Returns the speed-units setting (0=MPH, 1=KPH). */
 int td5_save_get_speed_units(void);
 

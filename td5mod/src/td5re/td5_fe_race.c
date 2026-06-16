@@ -214,6 +214,27 @@ static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
 static int frontend_carsel_hold_enabled(void);   /* [#2/#7] TD5RE_CARSEL_HOLD gate (defined below) */
 
+/* [#2b/#10 2026-06-16] Cross-module hooks DEFINED in td5_frontend.c (extern'd
+ * inline here, mirroring the existing extern-in-.c pattern, so no shared header
+ * is touched).
+ *   s_postrace_td6_level       — >0 = the post-race table is a TD6 track; this
+ *                                FSM sets it, the high-score overlay reads it.
+ *   frontend_qr_random_button_on / frontend_qr_roll_selector — the QR randomize
+ *                                BUTTON gate + roll action reused by the dedicated
+ *                                Randomize buttons (#10). */
+extern int  s_postrace_td6_level;
+extern int  frontend_qr_random_button_on(void);
+extern void frontend_qr_roll_selector(int which);
+
+/* [#10] Dedicated RANDOMIZE button geometry (Car/Track rows). MUST match the
+ * identical definitions in td5_frontend.c (which computes the value-text reserve)
+ * — duplicated in both .c files to avoid touching shared headers. Created LAST in
+ * the QR init so these indices follow QR_BTN_SPAN (11) without disturbing it. */
+#define QR_BTN_RAND_CAR   12
+#define QR_BTN_RAND_TRACK 13
+#define QR_RAND_BTN_W     104
+#define QR_RAND_BTN_X     (FE_QR_SCREEN_W - FE_QR_RIGHT_MARGIN - QR_RAND_BTN_W) /* 524 */
+
 static int      s_mp_player_color_idx[TD5_MAX_HUMAN_PLAYERS]; /* palette cursor for TD6 colour cycling */
 
 static uint32_t s_mp_rep_ms[TD5_MAX_HUMAN_PLAYERS];          /* colour-grid auto-repeat next-fire time */
@@ -274,6 +295,69 @@ static int  s_snap_num_ai_opponents = -1;
 
 /* Post-race name entry state (Screen [25]) */
 static int32_t s_post_race_score;       /* DAT_004951d0: player's score for qualification */
+
+/* [#2b 2026-06-16] When the post-race track is TD6 (s_postrace_td6_level > 0),
+ * the score does NOT go into a TD5 NPC group — it goes into the genuine TD6
+ * record store (td5_save). This caches the chosen score TYPE (0 TIME / 1 LAP)
+ * between the case-0 qualification step and the case-4 insert. */
+static int s_postrace_td6_score_type = 0;
+
+/* [#2a 2026-06-16] View-Replay post-race result SNAPSHOT.
+ *
+ * "View Replay" (RaceResults state 0x10 case 1) re-enters the race via
+ * g_td5.race_requested, which calls td5_game_init_race_session — and that RESETS
+ * the live race results (s_results / s_slot_state: slot 0 becomes "not finished",
+ * its finish time / top / avg zeroed). So after returning from the replay, the
+ * post-race high-score NAME-ENTRY (Screen_PostRaceNameEntry case 0) read ZERO for
+ * the player's achieved time and slot_is_finished == 0 -> never qualified ->
+ * rendered an EMPTY high-score table that then fell through to the MAIN MENU
+ * (the user-reported "empty frontend then main menu"). The replay also can't
+ * be guaranteed to re-finish (an ESC-aborted replay leaves slot 0 unfinished).
+ *
+ * Fix (frontend-only; the race<->frontend transition lives in td5_game.c which is
+ * out of scope): capture the genuine post-race qualifying data the moment a
+ * replay is launched, and have NAME-ENTRY fall back to it when the live results
+ * are no longer valid. s_pr_snap_valid latches a captured snapshot; it is cleared
+ * once consumed by NAME-ENTRY and on a fresh real race so a later non-replay race
+ * uses its own live data. Gated by TD5RE_REPLAY_QUIT_FLOW (default on). */
+static int     s_pr_snap_valid    = 0;
+static int     s_pr_snap_finished = 0;
+static int32_t s_pr_snap_primary  = 0;   /* result primary metric (finish time)  */
+static int32_t s_pr_snap_secondary= 0;   /* result secondary metric (points/lap) */
+static int32_t s_pr_snap_best_lap = 0;
+static int32_t s_pr_snap_top      = 0;
+static int32_t s_pr_snap_avg      = 0;
+
+/* [#2a] TD5RE_REPLAY_QUIT_FLOW gate (default on). When on, the post-race replay
+ * preserves the qualifying result across the replay so QUIT routes through the
+ * high-score / name-entry flow instead of an empty frontend -> main menu; "0"
+ * reverts to the prior behaviour (replay wipes the result). Cached + logged once. */
+static int replay_quit_flow_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_REPLAY_QUIT_FLOW");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "post-race replay->quit flow (#2a) %s (TD5RE_REPLAY_QUIT_FLOW=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+/* [#2a] Capture the genuine post-race qualifying data from the LIVE race results
+ * (slot 0) just before a replay re-inits the race and wipes them. */
+static void frontend_postrace_snapshot_capture(void) {
+    s_pr_snap_finished  = td5_game_slot_is_finished(0);
+    s_pr_snap_primary   = td5_game_get_result_primary(0);
+    s_pr_snap_secondary = td5_game_get_result_secondary(0);
+    s_pr_snap_best_lap  = td5_game_get_best_lap_time(0);
+    s_pr_snap_top       = td5_game_get_result_top_speed(0);
+    s_pr_snap_avg       = td5_game_get_result_avg_speed(0);
+    s_pr_snap_valid     = 1;
+    TD5_LOG_I(LOG_TAG, "PostRace snapshot captured for replay: finished=%d primary=%d "
+              "secondary=%d best_lap=%d top=%d avg=%d",
+              s_pr_snap_finished, (int)s_pr_snap_primary, (int)s_pr_snap_secondary,
+              (int)s_pr_snap_best_lap, (int)s_pr_snap_top, (int)s_pr_snap_avg);
+}
 
 /* Snapshotted at NAME_ENTRY case 0 (race-end transition) so case 4 can
  * insert non-zero values even if the actor pool has been torn down by
@@ -581,6 +665,41 @@ static int frontend_random_icon_on(void) {
                   v ? "small ICON" : "full button", e ? e : "default");
     }
     return v;
+}
+
+/* [#2b 2026-06-16] TD6 high-score placeholder suppression. Default ON: a TD6
+ * track's post-race high-score screen shows ONLY genuine records (the player's
+ * real runs) — never the fake seed names a clamped TD5 NPC group would render.
+ * "0" restores the legacy clamp-to-TD5-group-25 placeholder behaviour. Cached +
+ * logged once. Pairs the same-named knob/store in td5_save.c. */
+static int td6_no_placeholder_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_TD6_NO_PLACEHOLDER_SCORES");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "TD6 high-score placeholder suppression (#2b) %s "
+                  "(TD5RE_TD6_NO_PLACEHOLDER_SCORES=%s)",
+                  v ? "ENABLED (real records only)" : "disabled (legacy clamp)",
+                  e ? e : "default");
+    }
+    return v;
+}
+
+/* [#2b] The active TD6 LEVEL for the post-race track (s_selected_track), or 0 if
+ * the track is a normal TD5 track / the feature is off. Uses the established
+ * frontend TD6-track test (td5_asset_td6_level_for_slot > 0); also treats any
+ * track index >= 26 (past the 26 authored TD5 tracks) as TD6 for robustness. */
+static int frontend_postrace_td6_level(void) {
+    if (!td6_no_placeholder_on()) return 0;
+    int t = s_selected_track;
+    if (t < 0) return 0;
+    int lvl = td5_asset_td6_level_for_slot(t);
+    if (lvl > 0) return lvl;
+    if (t >= 26) {                       /* past the 26 authored TD5 tracks */
+        int n = td5_asset_level_number(t);
+        return n > 0 ? n : t;            /* fall back to a stable per-track key */
+    }
+    return 0;
 }
 
 /* Canvas-space footprint of the randomize ICON (square chip). Kept here so the
@@ -914,6 +1033,24 @@ void Screen_QuickRaceMenu(void) {
 #endif
         }
 
+        /* [#10 2026-06-16] Dedicated RANDOMIZE buttons for the Car and Track rows.
+         * Created LAST (indices QR_BTN_RAND_CAR=12 / QR_BTN_RAND_TRACK=13) so every
+         * hard-coded index above is unchanged. They are REAL frontend_create_button
+         * entries — so (a) SHIFT+arrow geometric focus nav can land on them (same
+         * row as Car/Track, to the right) and (b) the standard button renderer
+         * draws them with the normal button format. Their presses are dispatched in
+         * state 4 to frontend_qr_roll_selector. When the knob is off they are
+         * created hidden+disabled and the legacy render-path icon hack runs instead
+         * (frontend_qr_random_icon_on auto-suppresses itself in button mode). */
+        {
+            int rc = frontend_create_button("Randomize", QR_RAND_BTN_X, QR_ROW_Y(0), QR_RAND_BTN_W, 32); /* QR_BTN_RAND_CAR */
+            int rt = frontend_create_button("Randomize", QR_RAND_BTN_X, QR_ROW_Y(1), QR_RAND_BTN_W, 32); /* QR_BTN_RAND_TRACK */
+            if (!frontend_qr_random_button_on()) {
+                if (rc >= 0) { s_buttons[rc].hidden = 1; s_buttons[rc].disabled = 1; }
+                if (rt >= 0) { s_buttons[rt].hidden = 1; s_buttons[rt].disabled = 1; }
+            }
+        }
+
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
          * manage_label=0). Clamp the player/opponent counts. */
@@ -1045,6 +1182,20 @@ void Screen_QuickRaceMenu(void) {
                 frontend_qr_span_toggle_active();
             }
 #endif
+
+            /* [#10] Dedicated RANDOMIZE buttons (Car/Track rows). Activating one
+             * rolls that selector to a random valid value (frontend_qr_roll_selector
+             * also refreshes the Direction/Laps rows on a track roll + plays the
+             * cycle cue). Only when the button mode is on (off => hidden+disabled,
+             * never the active button). */
+            if (frontend_qr_random_button_on() &&
+                s_button_index == QR_BTN_RAND_CAR && s_button_count > QR_BTN_RAND_CAR) {
+                frontend_qr_roll_selector(0);   /* roll CAR */
+            }
+            if (frontend_qr_random_button_on() &&
+                s_button_index == QR_BTN_RAND_TRACK && s_button_count > QR_BTN_RAND_TRACK) {
+                frontend_qr_roll_selector(1);   /* roll TRACK */
+            }
 
             if (s_button_index == QR_BTN_OK) {
                 /* Block if car or track is locked */
@@ -1460,6 +1611,22 @@ static void mp_set_nav_step(int p, int dir, int profiles_on) {
  * implicit since each slot stores exactly one name); the per-name query scans the
  * holders. (Replaces the old append-only s_prof_loaded_names[]/count.) */
 static char s_mp_prof_held[TD5_MAX_HUMAN_PLAYERS][16];
+/* [profile-persist 2026-06-16] Cross-phase snapshot of the per-player profile
+ * holders, kept in sync by mp_prof_set_held/mp_prof_release. frontend_mp_setup_init
+ * restores from this when RE-entering setup (e.g. BACK from car-select) so a loaded
+ * profile is NOT lost and the player needn't reload it; frontend_mp_flow_reset
+ * clears it on a fresh race. Knob TD5RE_MP_PROFILE_PERSIST (default on). */
+static char s_mp_prof_held_saved[TD5_MAX_HUMAN_PLAYERS][16];
+static int mp_profile_persist_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_PROFILE_PERSIST");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP profile persist across car-select back %s (TD5RE_MP_PROFILE_PERSIST=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
 
 static void frontend_mp_setup_init(void) {
     int p, n = s_num_human_players;
@@ -1476,8 +1643,19 @@ static void frontend_mp_setup_init(void) {
 
     /* [#11] Fresh setup = nobody is HOLDING a profile yet (releases anything a
      * prior setup/race pinned IN USE). Holders are (re)claimed only by an explicit
-     * SAVE/LOAD below; restoring a player's name/accent does NOT re-pin a profile. */
-    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) s_mp_prof_held[p][0] = '\0';
+     * SAVE/LOAD below; restoring a player's name/accent does NOT re-pin a profile.
+     * [profile-persist 2026-06-16] EXCEPT on a BACK from car-select: the snapshot
+     * still holds each player's loaded profile, so restore it (the player keeps
+     * their selection and needn't reload). A fresh flow cleared the snapshot in
+     * frontend_mp_flow_reset, so this restores empty there (legacy behavior). */
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
+        if (mp_profile_persist_on()) {
+            strncpy(s_mp_prof_held[p], s_mp_prof_held_saved[p], sizeof(s_mp_prof_held[p]) - 1);
+            s_mp_prof_held[p][sizeof(s_mp_prof_held[p]) - 1] = '\0';
+        } else {
+            s_mp_prof_held[p][0] = '\0';
+        }
+    }
 
     for (p = 0; p < n; p++) {
         /* [MP SESSION PERSISTENCE 2026-06] Phase-0 setup: prefer the session-saved
@@ -1548,12 +1726,16 @@ static int mp_prof_name_in_use_ex(const char *name, int except_p) {
  * whatever p held before, so loading a different profile frees the old one. */
 static void mp_prof_set_held(int p, const char *name) {
     if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return;
-    if (!name || !name[0]) { s_mp_prof_held[p][0] = '\0'; return; }
+    if (!name || !name[0]) { s_mp_prof_held[p][0] = '\0'; s_mp_prof_held_saved[p][0] = '\0'; return; }
     strncpy(s_mp_prof_held[p], name, sizeof(s_mp_prof_held[p]) - 1);
     s_mp_prof_held[p][sizeof(s_mp_prof_held[p]) - 1] = '\0';
+    /* [profile-persist] mirror into the cross-phase snapshot so a BACK from
+     * car-select restores this holder (see frontend_mp_setup_init). */
+    strncpy(s_mp_prof_held_saved[p], s_mp_prof_held[p], sizeof(s_mp_prof_held_saved[p]) - 1);
+    s_mp_prof_held_saved[p][sizeof(s_mp_prof_held_saved[p]) - 1] = '\0';
 }
 static void mp_prof_release(int p) {                      /* p stops holding any profile */
-    if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) s_mp_prof_held[p][0] = '\0';
+    if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) { s_mp_prof_held[p][0] = '\0'; s_mp_prof_held_saved[p][0] = '\0'; }
 }
 
 /* Build current player identity into a TD5_Profile for SAVE. */
@@ -1947,6 +2129,10 @@ static int s_mp_pos_shown_this_flow = 0;   /* picker already offered in the curr
  * so the next position-enter re-offers the picker for the new race. */
 void frontend_mp_flow_reset(void) {
     s_mp_pos_shown_this_flow = 0;
+    /* [profile-persist 2026-06-16] A brand-new race starts with no held profiles,
+     * so clear the cross-phase snapshot (frontend_mp_setup_init restores from it on
+     * a BACK from car-select, but a fresh flow must begin clean). */
+    for (int rp = 0; rp < TD5_MAX_HUMAN_PLAYERS; rp++) s_mp_prof_held_saved[rp][0] = '\0';
 }
 
 /* [#8] Decide what happens after name/colour setup completes: show the position
@@ -3896,6 +4082,10 @@ void Screen_PostRaceHighScore(void) {
         frontend_set_cursor_visible(0);
         frontend_play_sfx(5);
         s_score_category_index = 0;
+        /* [#2b] The Records browse screen walks the 26 authored TD5 groups by L/R;
+         * clear any stale TD6 post-race flag so the overlay shows the TD5 groups
+         * (not a leftover TD6 record table from the last race). */
+        s_postrace_td6_level = 0;
         /* [FIXED 2026-06-01] Records browsing has no "just-inserted" row, so no row
          * is highlighted here. -1 keeps the shared high-score overlay from golding a
          * stale rank (NAME_ENTRY sets s_score_insert_pos to the real inserted rank). */
@@ -4372,6 +4562,16 @@ void Screen_RaceResults(void) {
         frontend_reset_buttons();
         TD5_LOG_I(LOG_TAG, "RaceResults: state 0 - init, game_type=%d",
                   s_selected_game_type);
+
+        /* [#2a] If we land on the results screen with VALID live results (a genuine
+         * finished race — incl. a replay that completed normally and re-finished),
+         * the live data supersedes any pre-replay snapshot, so drop it. Only an
+         * ESC-aborted replay (slot 0 left unfinished) keeps the snapshot alive for
+         * the post-race name-entry fallback. */
+        if (replay_quit_flow_on() && s_pr_snap_valid && td5_game_slot_is_finished(0)) {
+            s_pr_snap_valid = 0;
+            TD5_LOG_D(LOG_TAG, "RaceResults: live results valid — cleared pre-replay snapshot");
+        }
 
         /* P8 — DXSound::Play(5) on screen entry.
          * [CONFIRMED @ 0x00422480 case 0] Original calls DXSound::Play(5) near
@@ -4902,6 +5102,12 @@ void Screen_RaceResults(void) {
                           g_td5.ai_car_indices[1], g_td5.ai_car_indices[2],
                           g_td5.ai_car_indices[3], g_td5.ai_car_indices[4],
                           g_td5.ai_car_indices[5]);
+                /* [#2a] Snapshot the genuine qualifying result NOW, before the
+                 * replay's td5_game_init_race_session wipes the live race results.
+                 * On return from the replay, the post-race high-score NAME-ENTRY
+                 * falls back to this so QUIT still leads to the name-entry / record
+                 * flow instead of an empty frontend -> main menu. */
+                if (replay_quit_flow_on()) frontend_postrace_snapshot_capture();
                 td5_game_set_demo_mode(0);            /* a replay, not a demo */
                 td5_input_set_replay_mode(1);
                 td5_input_set_playback_active(1);
@@ -5081,11 +5287,44 @@ void Screen_PostRaceNameEntry(void) {
         s_post_race_top_speed = td5_game_get_result_top_speed(0);
         s_post_race_avg_speed = td5_game_get_result_avg_speed(0);
 
+        /* [#2b] Detect a TD6 track up front. A single race on a TD6 track has no
+         * authored NPC group; the score belongs in the genuine TD6 record store,
+         * and the high-score table renders that (or "NO RECORDS YET"), never fake
+         * names. Only single-race types reach a TD6 track (cups are TD5-only), so
+         * this is gated to the non-cup branch below. 0 = normal TD5 path. */
+        s_postrace_td6_level = (s_selected_game_type < 1 || s_selected_game_type == 7)
+                               ? frontend_postrace_td6_level() : 0;
+
         /* Compute group index for the high-score table.
          * Cup types 1-6: group = game_type + 0x13 (mirroring original case 0 at 0x413BCF).
          * Drag (type 7):  group = 0x13.
          * Others:         group = s_selected_track (direct schedule index). */
         {
+            /* [#2a] Effective qualifying result. Normally the LIVE slot-0 result;
+             * but if we got here AFTER a View Replay (which re-inits the race and
+             * wipes slot 0's result — see frontend_postrace_snapshot_capture) and
+             * the live result is now stale (slot 0 not finished), fall back to the
+             * snapshot taken before the replay so QUIT still reaches the high-score
+             * / name-entry flow with the GENUINE achieved time, not an empty table
+             * that collapses to the main menu. Consumed here (one shot). Gated by
+             * TD5RE_REPLAY_QUIT_FLOW. */
+            int     eff_finished  = td5_game_slot_is_finished(0);
+            int32_t eff_primary   = td5_game_get_result_primary(0);
+            int32_t eff_secondary = td5_game_get_result_secondary(0);
+            int32_t eff_best_lap  = td5_game_get_best_lap_time(0);
+            if (replay_quit_flow_on() && s_pr_snap_valid && !eff_finished && s_pr_snap_finished) {
+                TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: live result stale after replay — "
+                          "using pre-replay snapshot (primary=%d secondary=%d best_lap=%d)",
+                          (int)s_pr_snap_primary, (int)s_pr_snap_secondary, (int)s_pr_snap_best_lap);
+                eff_finished  = s_pr_snap_finished;
+                eff_primary   = s_pr_snap_primary;
+                eff_secondary = s_pr_snap_secondary;
+                eff_best_lap  = s_pr_snap_best_lap;
+                if (s_post_race_top_speed == 0) s_post_race_top_speed = s_pr_snap_top;
+                if (s_post_race_avg_speed == 0) s_post_race_avg_speed = s_pr_snap_avg;
+            }
+            s_pr_snap_valid = 0;   /* consumed (or not needed) — one shot per replay */
+
             int group_idx;
             if (s_selected_game_type == 7) {
                 group_idx = 0x13;
@@ -5096,8 +5335,21 @@ void Screen_PostRaceNameEntry(void) {
             }
             group_idx = (group_idx < 0) ? 0 : (group_idx >= 26 ? 25 : group_idx);
 
-            const TD5_NpcGroup *grp = td5_save_get_npc_group(group_idx);
-            int group_type = grp ? (grp->header & 3) : 0;
+            /* [#2b] For a TD6 track, derive the score type from its genuine record
+             * group (if any) instead of the clamped TD5 group: TIME for point-to-
+             * point, LAP for circuit; the TD5 group_idx/grp is ignored. */
+            const TD5_NpcGroup *grp;
+            int group_type;
+            if (s_postrace_td6_level > 0) {
+                const TD5_NpcGroup *td6grp = td5_save_get_td6_record_group(s_postrace_td6_level);
+                if (td6grp) group_type = td6grp->header & 3;
+                else        group_type = frontend_track_is_circuit(s_selected_track) ? 1 : 0;
+                s_postrace_td6_score_type = group_type;
+                grp = NULL;                 /* never qualify against a TD5 group */
+            } else {
+                grp = td5_save_get_npc_group(group_idx);
+                group_type = grp ? (grp->header & 3) : 0;
+            }
 
             /* Derive player's score for this group type:
              * 0 = TIME  (primary metric = finish time ticks, lower is better)
@@ -5110,16 +5362,16 @@ void Screen_PostRaceNameEntry(void) {
                 if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
                     /* Cup: use s_results secondary lap time field
                      * [CONFIRMED @ 0x00413C0B]: DAT_0048d990 for cup types */
-                    s_post_race_score = td5_game_get_result_secondary(0);
+                    s_post_race_score = eff_secondary;
                 } else {
-                    s_post_race_score = td5_game_get_result_primary(0);
+                    s_post_race_score = eff_primary;
                 }
             } else if (group_type == 1) {
                 /* Lap time: best lap across all slots */
-                s_post_race_score = td5_game_get_best_lap_time(0);
+                s_post_race_score = eff_best_lap;
             } else if (group_type == 2) {
                 /* Points: secondary metric */
-                s_post_race_score = td5_game_get_result_secondary(0);
+                s_post_race_score = eff_secondary;
             }
 
             /* Qualification check: compare against worst entry (entries[4].score).
@@ -5128,7 +5380,25 @@ void Screen_PostRaceNameEntry(void) {
              * Points-based (type 2): qualifies if player_pts > worst_pts.
              * [CONFIRMED @ 0x00413C5E-0x00413C7E] */
             int qualifies = 0;
-            if (s_post_race_score != 0 && grp != NULL) {
+            if (s_postrace_td6_level > 0) {
+                /* [#2b] TD6: qualify against the GENUINE record table — an empty/
+                 * partial table always has room (so the very first run prompts for
+                 * a name and becomes record #1), otherwise beat the worst of 5. No
+                 * authored entries exist, so a TD6 run can never be blocked by fake
+                 * names. */
+                const TD5_NpcGroup *td6grp = td5_save_get_td6_record_group(s_postrace_td6_level);
+                if (s_post_race_score != 0) {
+                    if (!td6grp) {
+                        qualifies = 1;                         /* first ever record */
+                    } else if (td6grp->entries[4].name[0] == '\0') {
+                        qualifies = 1;                         /* a slot is still free */
+                    } else if (group_type < 2) {
+                        qualifies = (s_post_race_score < td6grp->entries[4].score);
+                    } else {
+                        qualifies = (s_post_race_score > td6grp->entries[4].score);
+                    }
+                }
+            } else if (s_post_race_score != 0 && grp != NULL) {
                 int32_t worst = grp->entries[4].score;
                 if (group_type < 2) {
                     /* time: lower is better; qualify if player < worst */
@@ -5141,9 +5411,11 @@ void Screen_PostRaceNameEntry(void) {
 
             /* 2P mode: player 2 result doesn't go into high score.
              * DQ (slot state not finished): no entry.
-             * [CONFIRMED @ 0x00413C80-0x00413CA4] */
+             * [CONFIRMED @ 0x00413C80-0x00413CA4]
+             * [#2a] eff_finished is the live finish state, or the pre-replay
+             * snapshot when a replay wiped the live result. */
             if (s_two_player_mode) qualifies = 0;
-            if (!td5_game_slot_is_finished(0)) qualifies = 0;
+            if (!eff_finished) qualifies = 0;
 
             TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: group=%d type=%d score=%d qualifies=%d",
                       group_idx, group_type, (int)s_post_race_score, qualifies);
@@ -5228,7 +5500,25 @@ void Screen_PostRaceNameEntry(void) {
          * 3. Write entry at position uVar8: name, score, car_id, avg_speed, top_speed.
          * 4. s_score_insert_pos = uVar8.
          */
-        if (s_post_race_score != 0) {
+        if (s_postrace_td6_level > 0 && s_post_race_score != 0) {
+            /* [#2b] TD6 track: insert into the GENUINE TD6 record store (td5_save),
+             * NOT a clamped TD5 NPC group — so no fake names are ever written and
+             * the record persists per TD6 level. The store handles sorting +
+             * qualification + persistence. The high-score overlay reads the records
+             * via s_postrace_td6_level; s_score_category_index only drives the
+             * nav-bar TITLE, so point it at the raced TD6 track for the right name. */
+            int avg = s_post_race_avg_speed, top = s_post_race_top_speed;
+            int ins_pos = td5_save_td6_record_insert(
+                s_postrace_td6_level, s_postrace_td6_score_type,
+                s_post_race_name, s_post_race_score,
+                (int)(uint8_t)s_selected_car, avg, top);
+            s_score_insert_pos = ins_pos;            /* -1 if it didn't fit */
+            s_score_category_index = s_selected_track;  /* nav-bar title only */
+            s_anim_complete = 1;                     /* unblock the table render */
+            TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: TD6 record insert '%s' score=%d "
+                      "level=%d -> rank=%d", s_post_race_name, (int)s_post_race_score,
+                      s_postrace_td6_level, ins_pos);
+        } else if (s_post_race_score != 0) {
             /* Determine group and type — mirrors case 0 logic */
             int ins_group;
             if (s_selected_game_type == 7) {
@@ -5308,6 +5598,17 @@ void Screen_PostRaceNameEntry(void) {
             }
         } else {
             TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: case 4 skip (score=0, no qualification)");
+        }
+
+        /* [#2b] TD6 tracks always render the records table (genuine records or the
+         * "NO RECORDS YET" empty state), even when the player set no qualifying
+         * time — so unblock the overlay and clear any stale highlight. The overlay
+         * reads the records via s_postrace_td6_level; s_score_category_index only
+         * drives the nav-bar title (the raced TD6 track's name). */
+        if (s_postrace_td6_level > 0) {
+            if (s_post_race_score == 0) s_score_insert_pos = -1;
+            s_score_category_index = s_selected_track;   /* nav-bar title only */
+            s_anim_complete = 1;
         }
 
         /* [FIX 2026-06-07] Create the table-phase buttons. The original
