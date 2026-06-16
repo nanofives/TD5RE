@@ -650,7 +650,6 @@ int  s_sound_volumefill_surface = 0; /* VolumeFill.tga  (volume bar fill)       
 int  s_joypad_icon_surface = 0;      /* JoypadIcon.tga   (64x32 gamepad icon)   */
 int  s_joystick_icon_surface = 0;    /* JoystickIcon.tga (64x32 joystick icon)  */
 int  s_keyboard_icon_surface = 0;    /* KeyboardIcon.tga (64x32 keyboard icon)  */
-int  s_nocontroller_surface = 0;     /* NoControllerText.tga (376x20 warning)   */
 int  s_car_preview_prev_surface;
 int  s_car_preview_next_surface;
 
@@ -876,13 +875,9 @@ int s_buttonbits_tex_page = -1; /* page 897: ButtonBits.tga gradient */
 int s_buttonbits_w = 0, s_buttonbits_h = 0;
 int s_buttonlights_tex_page = -1; /* page 895: ButtonLights.tga indicator */
 int s_buttonlights_w = 0, s_buttonlights_h = 0;
-int s_arrowbuttonz_tex_page = -1; /* page 894: ArrowButtonz.tga 12x36 sprite sheet */
-static int s_title_tex_page[TD5_SCREEN_COUNT];
-static int s_title_tex_w[TD5_SCREEN_COUNT];
-static int s_title_tex_h[TD5_SCREEN_COUNT];
-/* Parallel SDF title pages (VectorUI): same word-strip art as a distance field
- * so the big yellow headers stay crisp at any resolution. 0 = not loaded. */
-static int s_title_msdf_page[TD5_SCREEN_COUNT];
+/* [2026-06-16] The baked per-screen title-strip art (s_title_tex_page[] +
+ * s_title_msdf_page[]) was retired — screen headers render via the title.ttf
+ * Lunatica face (frontend_draw_screen_title + frontend_get_title_text_for_screen). */
 
 /* Forward declarations for functions used before their definitions */
  int frontend_load_tga(const char *name, const char *archive);
@@ -954,10 +949,9 @@ static inline float fe_glyph_sx(float sx, float sy) { return sx < sy ? sx : sy; 
  * 898 = BodyText.tga (font)
  * 897 = ButtonBits.tga (gradient source)
  * 896 = SnkMouse.TGA (cursor)
- * 931-960 = cached per-screen frontend title TGAs
+ * 931-980 = FREE (was cached per-screen title TGAs + parallel SDF title pages;
+ *           title strips retired 2026-06-16, headers render via title.ttf)
  */
-#define FE_TITLE_PAGE_BASE    931
-#define FE_TITLE_MSDF_PAGE_BASE 972  /* parallel SDF title pages 972..980 */
 
 static void frontend_note_activity(void) {
     s_attract_idle_counter = 0;
@@ -1136,40 +1130,10 @@ float frontend_update_timed_animation(int max_tick, uint32_t duration_ms) {
     return t;
 }
 
-static const char *frontend_get_title_tga_for_screen(TD5_ScreenIndex screen) {
-    switch (screen) {
-    case TD5_SCREEN_MAIN_MENU: return "MainMenuText.TGA";
-    case TD5_SCREEN_RACE_TYPE_MENU: return "RaceMenuText.TGA";
-    case TD5_SCREEN_QUICK_RACE: return "QuickRaceText.tga";
-    /* All six options screens share the "OptionsText.tga" menu-header (CreateMenuStringLabelSurface(6)).
-     * [FIXED 2026-06-01: Game/Control/Sound/Display/TwoPlayer Options were missing their title entirely
-     * — the port returned NULL here, so no header drew, while the original draws one on all of them.] */
-    case TD5_SCREEN_OPTIONS_HUB:
-    case TD5_SCREEN_GAME_OPTIONS:
-    case TD5_SCREEN_CONTROL_OPTIONS:
-    case TD5_SCREEN_SOUND_OPTIONS:
-    case TD5_SCREEN_DISPLAY_OPTIONS:
-    case TD5_SCREEN_TWO_PLAYER_OPTIONS: return "OptionsText.tga";
-    case TD5_SCREEN_CAR_SELECTION: return "SelectCarText.tga";
-    case TD5_SCREEN_TRACK_SELECTION: return "TrackSelectText.TGA";
-    /* Name Entry shares the High Scores header (CreateMenuStringLabelSurface(7)) — it's the
-     * qualifying-high-score entry screen. [FIXED 2026-06-02: was NULL → no title drawn.] */
-    case TD5_SCREEN_HIGH_SCORE:
-    case TD5_SCREEN_NAME_ENTRY: return "HighScoresText.TGA";
-    case TD5_SCREEN_RACE_RESULTS: return "ResultsText.tga";
-    case TD5_SCREEN_CONNECTION_BROWSER:
-    case TD5_SCREEN_SESSION_PICKER:
-    case TD5_SCREEN_CREATE_SESSION:
-    case TD5_SCREEN_NETWORK_LOBBY:
-    case TD5_SCREEN_SESSION_LOCKED: return "NetPlayText.TGA";
-    default: return NULL;
-    }
-}
-
 /* Human-readable header text drawn at the top of each screen in the Lunatica
- * title face (td5_titlefont). Mirrors frontend_get_title_tga_for_screen's screen
- * coverage one-for-one; NULL means the screen has no header (same screens that
- * have no title TGA). Rendered uppercase via the title-draw helper. */
+ * title face (td5_titlefont). NULL means the screen has no header. Rendered
+ * uppercase via the title-draw helper. [2026-06-16] This is the sole title
+ * source now — the legacy baked title-strip art (*Text.TGA) was retired. */
 static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     switch (screen) {
     case TD5_SCREEN_MAIN_MENU:          return "MAIN MENU";
@@ -1205,73 +1169,6 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     }
 }
 
-static int frontend_get_title_page_for_screen(TD5_ScreenIndex screen) {
-    switch (screen) {
-    case TD5_SCREEN_MAIN_MENU: return FE_TITLE_PAGE_BASE + 0;
-    case TD5_SCREEN_RACE_TYPE_MENU: return FE_TITLE_PAGE_BASE + 1;
-    case TD5_SCREEN_QUICK_RACE: return FE_TITLE_PAGE_BASE + 2;
-    case TD5_SCREEN_OPTIONS_HUB:
-    case TD5_SCREEN_GAME_OPTIONS:
-    case TD5_SCREEN_CONTROL_OPTIONS:
-    case TD5_SCREEN_SOUND_OPTIONS:
-    case TD5_SCREEN_DISPLAY_OPTIONS:
-    case TD5_SCREEN_TWO_PLAYER_OPTIONS: return FE_TITLE_PAGE_BASE + 3; /* shared OptionsText page */
-    case TD5_SCREEN_CAR_SELECTION: return FE_TITLE_PAGE_BASE + 4;
-    case TD5_SCREEN_TRACK_SELECTION: return FE_TITLE_PAGE_BASE + 5;
-    case TD5_SCREEN_HIGH_SCORE:
-    case TD5_SCREEN_NAME_ENTRY: return FE_TITLE_PAGE_BASE + 6; /* shared HighScoresText page */
-    case TD5_SCREEN_RACE_RESULTS: return FE_TITLE_PAGE_BASE + 7;
-    case TD5_SCREEN_CONNECTION_BROWSER:
-    case TD5_SCREEN_SESSION_PICKER:
-    case TD5_SCREEN_CREATE_SESSION:
-    case TD5_SCREEN_NETWORK_LOBBY:
-    case TD5_SCREEN_SESSION_LOCKED: return FE_TITLE_PAGE_BASE + 8;
-    default: return -1;
-    }
-}
-
-static int frontend_ensure_title_texture(TD5_ScreenIndex screen) {
-    const char *entry = frontend_get_title_tga_for_screen(screen);
-    int page = frontend_get_title_page_for_screen(screen);
-
-    if (!entry || page < 0) return 0;
-    if (screen >= 0 && screen < TD5_SCREEN_COUNT && s_title_tex_page[screen] == page) return 1;
-    /* Title TGAs have black backgrounds in the PNG files → use black colorkey.
-     * [CONFIRMED]: all *Text.png files in re/assets/frontend/ have corners (0,0,0). */
-    if (!frontend_load_tga_colorkey(entry, "Front End/frontend.zip", page,
-                                    &s_title_tex_w[screen], &s_title_tex_h[screen],
-                                    TD5_COLORKEY_BLACK)) {
-        return 0;
-    }
-    s_title_tex_page[screen] = page;
-
-    /* Parallel SDF title (VectorUI): load re/assets/frontend/<base>_msdf.png to a
-     * parallel page so the header can render crisp at any resolution. The strips
-     * are flat menu-font yellow, so the SDF shader's diffuse colour carries the
-     * tint (see the title draw). Failure leaves s_title_msdf_page[screen]=0 and
-     * the draw falls back to the bitmap strip. */
-    if (g_td5.ini.vector_ui && s_ps_msdf &&
-        screen >= 0 && screen < TD5_SCREEN_COUNT && s_title_msdf_page[screen] == 0) {
-        char base[128], sdf_path[256];
-        size_t n = 0;
-        while (entry[n] && entry[n] != '.' && n < sizeof(base) - 1) { base[n] = entry[n]; n++; }
-        base[n] = 0;
-        snprintf(sdf_path, sizeof(sdf_path), "re/assets/frontend/%s_msdf.png", base);
-        void *pixels = NULL;
-        int mw = 0, mh = 0;
-        if (td5_asset_load_png_to_buffer(sdf_path, TD5_COLORKEY_NONE, &pixels, &mw, &mh)) {
-            int mpage = FE_TITLE_MSDF_PAGE_BASE + (page - FE_TITLE_PAGE_BASE);
-            if (td5_plat_render_upload_texture(mpage, pixels, mw, mh, 2)) {
-                s_title_msdf_page[screen] = mpage;
-                TD5_LOG_I(LOG_TAG, "Title SDF loaded: %s page=%d %dx%d", sdf_path, mpage, mw, mh);
-            }
-            free(pixels);
-        } else {
-            TD5_LOG_W(LOG_TAG, "Title SDF not found: %s (falls back to bitmap)", sdf_path);
-        }
-    }
-    return 1;
-}
 
 
 /* TD6 body-only paint overlay (carpicpaint0.png): grayscale body, everything
@@ -4848,7 +4745,6 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_joypad_icon_surface = 0;
     s_joystick_icon_surface = 0;
     s_keyboard_icon_surface = 0;
-    s_nocontroller_surface = 0;
     /* Release recyclable surfaces, but KEEP shared assets on dedicated pages.
      * Shared pages (895-899) hold font, cursor, ButtonBits, mainfont --
      * these are loaded once in init and must survive screen transitions. */
@@ -5262,13 +5158,8 @@ void td5_frontend_release_resources(void) {
     s_buttonbits_w = 0; s_buttonbits_h = 0;
     s_buttonlights_tex_page = -1;
     s_buttonlights_w = 0; s_buttonlights_h = 0;
-    s_arrowbuttonz_tex_page = -1;
     s_white_tex_page = -1;
     s_background_surface = 0;
-    memset(s_title_tex_page, 0, sizeof(s_title_tex_page));
-    memset(s_title_msdf_page, 0, sizeof(s_title_msdf_page));
-    memset(s_title_tex_w, 0, sizeof(s_title_tex_w));
-    memset(s_title_tex_h, 0, sizeof(s_title_tex_h));
 }
 
 /* ========================================================================
@@ -6090,38 +5981,25 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
 }
 
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
-    /* ArrowButtonz.tga: 12x36 sprite sheet (FUN_00426260, original DAT_00496284).
-     * Four 12x9 rows (u spans full width = 0.0..1.0):
-     *   Row 0 v=0.00..0.25  Left  arrow (lighter blue — not used)
-     *   Row 1 v=0.25..0.50  Right arrow (lighter blue — not used)
-     *   Row 2 v=0.50..0.75  Left  arrow (brighter blue)
-     *   Row 3 v=0.75..1.00  Right arrow (brighter blue)
-     * Use bottom rows (2/3) — brighter blue, matches original appearance.
-     * Original FUN_00426260 always passes param_2=1 (confirmed @ 0x00422430). */
+    /* Selector ◄► arrows drawn procedurally via the triangle-SDF shader
+     * (ps_arrow). [2026-06-16] The legacy ArrowButtonz.tga 12x36 sprite-sheet
+     * bitmap fallback was retired — procedural arrows are permanent now. */
     float bx, by, bw, bh;
-    float aw = 12.0f * sx, ah = 9.0f * sy;
     /* Skip hidden buttons (e.g. the Direction toggle on forward-only/circuit
      * tracks) — the selector arrows must vanish with the button frame+label,
      * not leave an empty ◄ ► row floating where the button used to be. */
     if (!s_buttons[btn_idx].active || s_buttons[btn_idx].hidden) return;
+    if (!s_ps_arrow) return;
     frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
 
-    /* VectorUI: procedural triangle-SDF arrows (crisp + AA at any resolution). */
-    if (g_td5.ini.vector_ui && s_ps_arrow) {
+    /* Procedural triangle-SDF arrows (crisp + AA at any resolution). */
+    {
         float aw2 = 13.0f * sx, ah2 = 13.0f * sy;
         float ay  = by + (bh - ah2) * 0.5f;
         uint32_t acol = 0xFF7995FFu;  /* bright selector blue */
         fe_draw_arrow_proc(bx + 4.0f * sx,          ay, aw2, ah2, 0 /*left */, acol);
         fe_draw_arrow_proc(bx + bw - 4.0f*sx - aw2, ay, aw2, ah2, 1 /*right*/, acol);
-        return;
     }
-
-    if (s_arrowbuttonz_tex_page < 0) return;
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
-    fe_draw_quad(bx + 4.0f * sx,          by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
-                 s_arrowbuttonz_tex_page, 0.0f, 0.50f, 1.0f, 0.75f);
-    fe_draw_quad(bx + bw - 4.0f*sx - aw, by + (bh - ah) * 0.5f, aw, ah, 0xFFFFFFFF,
-                 s_arrowbuttonz_tex_page, 0.0f, 0.75f, 1.0f, 1.00f);
 }
 
 static void frontend_render_game_options_overlay(float sx, float sy) {
@@ -9489,63 +9367,14 @@ void td5_frontend_render_ui_rects(void) {
              * title face, replacing the legacy baked title-strip art. LEFT-ALIGNED
              * at a fixed x on every screen so the first letter always starts in
              * the same place. The slide-in Y reuses the legacy strip animation so
-             * the header still slides in from above (rest 21 -> 17). */
+             * the header still slides in from above (rest 21 -> 17).
+             * [2026-06-16] The legacy baked title-strip image/MSDF fallback
+             * (frontend_ensure_title_texture + s_title_tex_page[]) was retired;
+             * title.ttf always ships, so the TTF path is the only one. */
             float t_y = frontend_get_title_render_y(sy) - 4.0f * sy;
             frontend_draw_screen_title(title_text, FE_TITLE_LEFT_X * sx, t_y,
                                        0xFFE3D708u, sx, sy);
-        } else if (frontend_ensure_title_texture(s_current_screen)) {
-        int page = s_title_tex_page[s_current_screen];
-        int title_w = s_title_tex_w[s_current_screen];
-        int title_h = s_title_tex_h[s_current_screen];
-        if (page > 0 && title_w > 0 && title_h > 0) {
-            float title_x = 120.0f * sx; /* original: uVar4-200 = screenW/2-200 = 120 [0x4213D0, 0x41D890, others] */
-            float title_y = frontend_get_title_render_y(sy);
-            float draw_w = (float)title_w * sx;
-            float draw_h = (float)title_h * sy;
-            /* [FIXED 2026-06-01 v2/v3] FAITHFUL menu-header title geometry.
-             * The title is the menu-header label surface (CreateMenuStringLabelSurface) drawn
-             * native-size (NO scaling): for English it's the TGA at its native W/H. The prior
-             * High Scores hack (379x24 @154,29) was measured from the widescreen-PATCHED
-             * TD5_d3d.exe, which stretches the whole 640x480 frontend ~1.23x H / ~1.275x V at
-             * present — that stretch must NOT be baked into native coords. The faithful draw is
-             * QueueFrontendOverlayRect(halfW-200=120, (halfH-0x9f)-YOffset-0x40, nativeW, nativeH).
-             * RESTING Y = (240-0x9f-0)-0x40 = 17 for EVERY menu-header screen (audited across
-             * screens 6,7,8,9,10,11,13,18,19,21,23 — all share this exact CreateMenuStringLabelSurface
-             * formula; runtime-confirmed for 23: globals @0x4962c4 = 308/20/0). Only the MAIN MENU
-             * uses a separate 248x20 strip resting at 21 (frontend_get_title_render_y base). So
-             * shift every non-main-menu title up 4px; the slide-in shape is preserved (the orig
-             * slide also ends at 17: anim*4 - 0xdc + (halfH-0x9f) lands on 17). */
-            /* ALL menu-header titles — INCLUDING the main menu — rest at native 17 =
-             * (halfH-0x9f)-YOffset-0x40. Confirmed by decomp of every screen fn (main menu
-             * @0x415490 case 4 draws the title at (iVar5-YOffset)-0x40, iVar5=halfH-0x9f=81 => 17;
-             * same formula on screens 6,7,8,9,10,11,12,13,14,21,23...). The shared resting base of
-             * 21 came from a widescreen-PATCHED Frida capture (stretched ~1.275x V, untrusted per
-             * the stretch trap). Shift every title up 4px; the slide shape is preserved (orig slide
-             * anim*4-0xdc+(halfH-0x9f) lands on 17, == render_y(-135..21) - 4 = -139..17). */
-            title_y -= 4.0f * sy; /* resting 21 -> 17 */
-            /* Car Selection's menu-header title is left-aligned at native x = halfW-0x110 = 48
-             * (ScreenCarSelection @0x40dfc0 uses uVar10-0x110, not the usual halfW-200=120). */
-            if (s_current_screen == TD5_SCREEN_CAR_SELECTION) {
-                title_x = 48.0f * sx;
-            }
-            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            int tmsdf = (g_td5.ini.vector_ui && s_ps_msdf &&
-                         s_title_msdf_page[s_current_screen] > 0);
-            if (tmsdf) {
-                /* SDF strip carries no colour, so tint with the menu-header
-                 * yellow (227,215,8 = mainfont glyph colour). */
-                td5_plat_render_set_ps_override((void *)s_ps_msdf, SAMP_LINEAR_CLAMP);
-                fe_draw_quad(title_x, title_y, draw_w, draw_h,
-                             0xFFE3D708u, s_title_msdf_page[s_current_screen],
-                             0.0f, 0.0f, 1.0f, 1.0f);
-                td5_plat_render_clear_ps_override();
-            } else {
-                fe_draw_quad(title_x, title_y, draw_w, draw_h,
-                             0xFFFFFFFF, page, 0.0f, 0.0f, 1.0f, 1.0f);
-            }
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         }
-        }   /* end fallback strip blit (title font unavailable) */
     }       /* end if (title_visible) */
 
     /* Draw queued colored rects (with alpha blending for fade overlays) */
@@ -9605,8 +9434,6 @@ void td5_frontend_flush_sprite_blits(void) {
         /* Use translucent mode for color-keyed textures (cursor, mainfont,
          * font, ButtonBits -- all loaded with red color key -> alpha=0). */
         if (cmd->tex_page == s_cursor_tex_page ||
-            (s_current_screen >= 0 && s_current_screen < TD5_SCREEN_COUNT &&
-             cmd->tex_page == s_title_tex_page[s_current_screen]) ||
             cmd->tex_page == s_font_page ||
             cmd->tex_page == s_buttonbits_tex_page ||
             cmd->tex_page == s_buttonlights_tex_page)
@@ -10070,23 +9897,14 @@ static void mp_simul_small_centered(float cx_px, float y_px, const char *t,
     fe_draw_small_text(cx_px - w * 0.5f, y_px, t, c, lsx, lsy);
 }
 
-/* ◄ ► selector arrows in the ORIGINAL game's style (ArrowButtonz.tga sprite, or
- * the VectorUI procedural arrows) at the left/right edges of a button. Native. */
+/* ◄ ► selector arrows (procedural triangle-SDF, ps_arrow) at the left/right
+ * edges of a button. Native. [2026-06-16] The ArrowButtonz.tga sprite bitmap
+ * fallback was retired. */
 static void mp_simul_draw_arrows(float bx, float by, float bw, float bh, float sx, float sy) {
-    float aw = 12.0f, ah = 9.0f;
-    float ay = by + (bh - ah) * 0.5f;
-    if (g_td5.ini.vector_ui && s_ps_arrow) {
-        float a2 = 12.0f, ay2 = by + (bh - a2) * 0.5f;
-        fe_draw_arrow_proc((bx + 3.0f) * sx,           ay2 * sy, a2 * sx, a2 * sy, 0, 0xFF7995FFu);
-        fe_draw_arrow_proc((bx + bw - 3.0f - a2) * sx, ay2 * sy, a2 * sx, a2 * sy, 1, 0xFF7995FFu);
-        return;
-    }
-    if (s_arrowbuttonz_tex_page < 0) return;
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
-    fe_draw_quad((bx + 3.0f) * sx,           ay * sy, aw * sx, ah * sy, 0xFFFFFFFF,
-                 s_arrowbuttonz_tex_page, 0.0f, 0.50f, 1.0f, 0.75f);
-    fe_draw_quad((bx + bw - 3.0f - aw) * sx, ay * sy, aw * sx, ah * sy, 0xFFFFFFFF,
-                 s_arrowbuttonz_tex_page, 0.0f, 0.75f, 1.0f, 1.00f);
+    if (!s_ps_arrow) return;
+    float a2 = 12.0f, ay2 = by + (bh - a2) * 0.5f;
+    fe_draw_arrow_proc((bx + 3.0f) * sx,           ay2 * sy, a2 * sx, a2 * sy, 0, 0xFF7995FFu);
+    fe_draw_arrow_proc((bx + bw - 3.0f - a2) * sx, ay2 * sy, a2 * sx, a2 * sy, 1, 0xFF7995FFu);
 }
 
 /* One compact pane button — the REGULAR TD5 button frame (the same 9-slice / neon

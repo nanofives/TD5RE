@@ -5080,10 +5080,10 @@ void Screen_RaceResults(void) {
                 * frontend_render_race_results_overlay via fe_draw_text + the
                 * MainMenu.tga backdrop (P2), not allocated through
                 * CreateTrackedFrontendSurface, so there is nothing to release.
-                * The title (DAT_00496358) maps to ResultsText.tga which is
-                * cached persistently in s_title_tex_page[] and reused on
-                * re-entry; releasing it here would force a re-decode on every
-                * round-trip. So state 0xC collapses to button-table reset.
+                * The title (DAT_00496358) maps to the RESULTS header, which is
+                * now drawn procedurally via the title.ttf face each frame
+                * (frontend_draw_screen_title) — no baked surface to release.
+                * So state 0xC collapses to button-table reset.
                 * State 0x14 transitions to 0xD (NOT 0xC per the [Ghidra
                 * 2026-05-01 RE: agent corrected the plan]) — no double-free. */
         frontend_reset_buttons();

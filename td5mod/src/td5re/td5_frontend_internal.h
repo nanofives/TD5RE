@@ -96,7 +96,8 @@ extern float s_bg_gal_x, s_bg_gal_y;
 #define SHARED_PAGE_MIN       888  /* lowest shared page -- don't clear below this */
 #define SHARED_PAGE_BG_GALLERY 888 /* 5 pages 888-892: background slideshow pic1-5.tga */
 #define SMALLFONT_PAGE   893
-#define SHARED_PAGE_ARROWBTNZ 894  /* ArrowButtonz.tga 12x36 sprite sheet */
+/* page 894 — FREE (was SHARED_PAGE_ARROWBTNZ; ArrowButtonz.tga retired 2026-06-16,
+ * selector arrows are procedural via ps_arrow) */
 #define SHARED_PAGE_BTNLIGHTS 895
 #define SHARED_PAGE_CURSOR    896
 #define SHARED_PAGE_BUTTONBITS 897
@@ -498,10 +499,8 @@ extern int  s_mp_missing_content[2];
 extern int  s_mp_missing_count;
 extern int  s_music_attract_track;
 extern int  s_music_test_playing_set;
-extern int  s_nocontroller_surface;
 extern int  s_sound_volumebox_surface;
 extern int  s_sound_volumefill_surface;
-extern int s_arrowbuttonz_tex_page;
 extern int s_buttonbits_tex_page;
 extern int s_buttonbits_w;
 extern int s_buttonlights_tex_page;

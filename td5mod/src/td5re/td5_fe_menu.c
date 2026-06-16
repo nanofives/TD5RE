@@ -475,8 +475,13 @@ int td5_frontend_init_resources(void) {
      * 252x132, 12x12 cells. NOTE: the extracted "smalltext.png" is BLACK-on-WHITE
      * (inverted), which would render opaque boxes; the "_white_on_black" variant is the
      * correctly-oriented atlas (black bg → keyed transparent, white glyphs → tintable).
-     * Used by frontend_render_high_score_overlay (true lowercase + descenders). */
-    if (s_smallfont_page < 0) {
+     * Used by frontend_render_high_score_overlay (true lowercase + descenders).
+     * [2026-06-16] BITMAP FALLBACK ONLY: fe_draw_small_text rasterises the menu
+     * TTF (always-shipping) and returns before this page is touched; under
+     * VectorUI the SDF atlas (smalltext_msdf.png) is the next fallback. So skip
+     * the bitmap load when VectorUI is on — the smalltext*.png bitmap atlases are
+     * deletable. (VectorUI-off still needs it for the non-SDF table path.) */
+    if (!g_td5.ini.vector_ui && s_smallfont_page < 0) {
         int sfw = 0, sfh = 0;
         if (frontend_load_tga_colorkey("smalltext_white_on_black.tga", "Front End/frontend.zip",
                                         SMALLFONT_PAGE, &sfw, &sfh, TD5_COLORKEY_BLACK)) {
@@ -533,31 +538,10 @@ int td5_frontend_init_resources(void) {
     }
 
     /* ---- ArrowButtonz (left/right scroll arrows on selector buttons) ----
-     * 12x36 sprite sheet (DAT_00496284 in original, FUN_00426260). Red colorkey.
-     * [2026-06-16] BITMAP FALLBACK ONLY: under VectorUI (default) the selector
-     * arrows are drawn procedurally via ps_arrow (fe_draw_option_arrows returns
-     * before the texture path), so the ArrowButtonz.png asset was retired. Skip
-     * the load entirely when VectorUI is on so there's no "not found" warning. */
-    if (!g_td5.ini.vector_ui && s_arrowbuttonz_tex_page < 0) {
-        s_arrowbuttonz_tex_page = SHARED_PAGE_ARROWBTNZ;
-        {
-            void *pixels = NULL;
-            int aw = 0, ah = 0;
-            if (td5_asset_load_png_to_buffer("re/assets/frontend/ArrowButtonz.png",
-                                              TD5_COLORKEY_RED, &pixels, &aw, &ah)) {
-                if (td5_plat_render_upload_texture(s_arrowbuttonz_tex_page, pixels, aw, ah, 2)) {
-                    TD5_LOG_I(LOG_TAG, "ArrowButtonz loaded (PNG): page=%d %dx%d",
-                              s_arrowbuttonz_tex_page, aw, ah);
-                } else {
-                    s_arrowbuttonz_tex_page = -1;
-                }
-                free(pixels);
-            } else {
-                TD5_LOG_W(LOG_TAG, "Failed to load ArrowButtonz.png");
-                s_arrowbuttonz_tex_page = -1;
-            }
-        }
-    }
+     * [2026-06-16] RETIRED: the selector ◄► arrows are now always drawn
+     * procedurally via ps_arrow (fe_draw_arrow_proc / fe_draw_option_arrows).
+     * The 12x36 ArrowButtonz.tga sprite-sheet bitmap fallback and its load were
+     * removed; the asset is deletable. */
 
     /* ---- ButtonLights (selection indicator dot) ----
      * 16x32 texture. Two 16x16 frames stacked vertically.
@@ -585,8 +569,15 @@ int td5_frontend_init_resources(void) {
         }
     }
 
-    /* ---- SnkMouse.TGA (cursor) ---- */
-    if (s_cursor_tex_page < 0) {
+    /* ---- SnkMouse.TGA (cursor) ----
+     * [2026-06-16] BITMAP FALLBACK ONLY: under VectorUI (default) the cursor is
+     * drawn procedurally via ps_cursor + snkmouse_msdf.png (SDF) by
+     * fe_draw_cursor_proc, and frontend_render_cursor returns before the bitmap
+     * path, so the SnkMouse.png bitmap was retired. Skip the load entirely when
+     * VectorUI is on (same pattern as the ArrowButtonz load above). The
+     * VectorUI-off bitmap fallback (frontend_render_cursor) then uses the 22x30
+     * default in fe_draw_cursor_proc, which equals SnkMouse.png's native size. */
+    if (!g_td5.ini.vector_ui && s_cursor_tex_page < 0) {
         s_cursor_tex_page = SHARED_PAGE_CURSOR;
         /* SnkMouse.png has a red background → use red colorkey. */
         if (!frontend_load_tga_colorkey("snkmouse.tga", "Front End/frontend.zip",
@@ -2317,7 +2308,11 @@ void Screen_ControllerBinding(void) {
         s_joypad_icon_surface   = frontend_load_tga_ck("JoypadIcon.tga",   "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         s_joystick_icon_surface = frontend_load_tga_ck("JoystickIcon.tga", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
         s_keyboard_icon_surface = frontend_load_tga_ck("KeyboardIcon.tga", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
-        s_nocontroller_surface  = frontend_load_tga_ck("NoControllerText.tga", "Front End/frontend.zip", TD5_COLORKEY_BLACK);
+        /* [2026-06-16] NoControllerText.tga retired: the binding screen draws its
+         * header, hints and the per-action "NO CONTROLLER → keyboard" fallback
+         * entirely in the menu TTF (frontend_render_controller_binding_overlay /
+         * _labels via fe_draw_text). The legacy warning bitmap was never blitted
+         * in the port, so the load is removed and the asset is deletable. */
         {
             /* s_ctrl_player was set by Control Options (the player whose CONFIGURE
              * was pressed). Pick the row model from its device type. */
