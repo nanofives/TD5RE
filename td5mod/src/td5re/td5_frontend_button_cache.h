@@ -1,28 +1,25 @@
 /**
- * td5_frontend_button_cache.h -- Baked frontend button surface cache
+ * td5_frontend_button_cache.h -- Baked frontend button surface cache (RETIRED)
  *
- * Phase 6 of frontend mainmenu parity, extended to all eligible frontend
- * screens. Mirrors the original CreateFrontendDisplayModeButton
- * (0x00425DE0) lifecycle:
- *   - <bw> x <2*bh> BGRA texture per button (typically 224x64).
- *   - Top half  (y = 0..bh-1)  = state 1 (unselected, transparent interior).
- *   - Bottom half (y = bh..2*bh-1) = state 0 (selected,  purple interior).
+ * [2026-06-16] This CPU button cache is retired. Under VectorUI (the shipped
+ * default) every frontend button frame is drawn procedurally via the
+ * ps_roundrect shader path, so the cache -- which composited ButtonBits.png +
+ * BodyText.png into a baked 224x64 per-button surface -- was only reachable with
+ * VectorUI OFF, and its only call site has been removed. The implementation in
+ * td5_frontend_button_cache.c is now inert no-op stubs (ensure_page returns -1),
+ * which keeps ButtonBits.png and BodyText.png from being loaded and makes both
+ * source assets deletable.
  *
- * Per-frame rendering becomes a single fe_draw_quad blit reading the half
- * picked by focus, replacing the per-frame 9-slice + per-glyph fan
- * (~21 quads/button -> 1 quad/button).
+ * The declarations below are KEPT so the lifecycle callers in td5_frontend.c
+ * (reset / release_sources / recover) still link unchanged. To restore the real
+ * bake path, recover the pre-2026-06-16 implementation from git history.
  *
- * Eligibility: any non-disabled, non-selector button with a non-empty
- * label. Disabled (state 2) and selector buttons (need arrows + value
- * text on top) fall back to the per-frame 9-slice path.
- *
- * Lifecycle: lazy bake on first render via td5_fe_btncache_ensure_page().
- * Source PNG pixels (ButtonBits + BodyText) are loaded once and retained
- * for re-bakes triggered by label changes (screen transitions reuse
- * button slots with different labels -> cache miss -> re-bake).
- *
- * CPU compositing only -- no GPU render-to-texture. Source pixels are
- * BGRA32 buffers loaded via td5_asset_load_png_to_buffer().
+ * --- Original design (historical) ---
+ * Mirrored CreateFrontendDisplayModeButton (0x00425DE0): a <bw> x <2*bh> BGRA
+ * texture per button (top half = state 1 unselected, bottom half = state 0
+ * selected); per-frame render was one fe_draw_quad blit reading the focus half,
+ * replacing the per-frame 9-slice + per-glyph fan. Lazy bake on first render;
+ * ButtonBits + BodyText source pixels loaded once and retained for re-bakes.
  */
 
 #ifndef TD5_FRONTEND_BUTTON_CACHE_H

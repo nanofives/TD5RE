@@ -647,9 +647,9 @@ int  s_control_options_surface;
  * icon strip) removed along with the SFX Mode row on the sound-options screen. */
 int  s_sound_volumebox_surface = 0;  /* VolumeBox.tga   (volume bar background) */
 int  s_sound_volumefill_surface = 0; /* VolumeFill.tga  (volume bar fill)       */
-int  s_joypad_icon_surface = 0;      /* JoypadIcon.tga   (64x32 gamepad icon)   */
-int  s_joystick_icon_surface = 0;    /* JoystickIcon.tga (64x32 joystick icon)  */
-int  s_keyboard_icon_surface = 0;    /* KeyboardIcon.tga (64x32 keyboard icon)  */
+/* [2026-06-16] s_joypad/joystick/keyboard_icon_surface removed: the device-icon
+ * bitmaps (Joypad/Joystick/KeyboardIcon.png) were loaded by the binding screen
+ * but never blitted (the device label is fully TTF). Loads + handles retired. */
 int  s_car_preview_prev_surface;
 int  s_car_preview_next_surface;
 
@@ -4742,9 +4742,6 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_gallery_pic_index = 0;
     s_gallery_visited_mask = 0;
     s_control_options_surface = 0;
-    s_joypad_icon_surface = 0;
-    s_joystick_icon_surface = 0;
-    s_keyboard_icon_surface = 0;
     /* Release recyclable surfaces, but KEEP shared assets on dedicated pages.
      * Shared pages (895-899) hold font, cursor, ButtonBits, mainfont --
      * these are loaded once in init and must survive screen transitions. */
@@ -5172,7 +5169,10 @@ static void fe_draw_quad(float x, float y, float w, float h,
 
 static void frontend_draw_value_text(float sx, float sy, int x, int y,
                                      const char *text, uint32_t color) {
-    if (!text || !text[0] || s_font_page < 0) return;
+    /* [2026-06-16] Skip only when NEITHER the menu TTF nor the bitmap atlas can
+     * render — fe_draw_text draws via TTF first, so a deleted BodyText.png (atlas
+     * page < 0) must not suppress the (TTF) draw. */
+    if (!text || !text[0] || (!td5_font_ready() && s_font_page < 0)) return;
     fe_draw_text((float)x * sx, (float)y * sy, text, color, sx, sy);
 }
 
@@ -5186,7 +5186,8 @@ static void frontend_draw_value_text(float sx, float sy, int x, int y,
 static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
                                    const char *text, uint32_t color, int reserve_right) {
     if (row_btn_idx < 0 || row_btn_idx >= s_button_count) return;
-    if (!text || !text[0] || s_font_page < 0) return;
+    /* [2026-06-16] TTF-first: don't suppress on a deleted BodyText.png atlas. */
+    if (!text || !text[0] || (!td5_font_ready() && s_font_page < 0)) return;
     const float gs   = FE_QR_VALUE_SCALE;
     const float vx   = (float)FE_QR_VALUE_X * sx;
     const float avail = (float)(FE_QR_SCREEN_W - FE_QR_VALUE_X - FE_QR_RIGHT_MARGIN
@@ -5237,7 +5238,8 @@ static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
 
 static void frontend_draw_value_centered(float sx, float sy, int y,
                                          const char *text, uint32_t color) {
-    if (!text || !text[0] || s_font_page < 0) return;
+    /* [2026-06-16] TTF-first: don't suppress on a deleted BodyText.png atlas. */
+    if (!text || !text[0] || (!td5_font_ready() && s_font_page < 0)) return;
     fe_draw_text_centered((float)FE_VALUE_CENTER_X * sx, (float)y * sy,
                           text, color, sx, sy);
 }
@@ -5942,7 +5944,7 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
      * is the relative per-slot offset td5_game.c InitRace applies with 16-bit wrap
      * to BOTH TD5 and TD6 tracks. Hidden in release (button not shown). */
     if (frontend_qr_span_field_on() && s_button_count > QR_BTN_SPAN &&
-        !s_buttons[QR_BTN_SPAN].hidden && s_font_page >= 0) {
+        !s_buttons[QR_BTN_SPAN].hidden && (td5_font_ready() || s_font_page >= 0)) {
         frontend_qr_span_sync_buf();
         /* While editing, show the live buffer (so a lone "-" or empty mid-edit is
          * visible); otherwise show the committed numeric value. */
@@ -8026,18 +8028,18 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
     }
     if (s_font_page < 0) return;
 
-    /* Resolution-independent MSDF path: same grid/UV/metrics, swapped page +
-     * shader. Falls back to the bitmap atlas when VectorUI is off or the MSDF
-     * assets failed to load. */
-    int msdf = (g_td5.ini.vector_ui && s_msdf_font_page >= 0 && s_ps_msdf != NULL);
-    int page = msdf ? s_msdf_font_page : s_font_page;
+    /* Bitmap glyph-atlas fallback (BodyText.png, page s_font_page). Reached only
+     * when the menu TTF is unavailable (the early-return above). 10 chars/row,
+     * 24x24 cells, per-glyph advance.
+     * [2026-06-16] The MSDF body-text atlas branch was removed (atlas load
+     * retired; s_msdf_font_page is always -1) — the TTF is the sole vector path. */
+    int page = s_font_page;
     float cx = x;
     float texel_w = 1.0f / (float)FONT_TEX_W;
     float cell_h = (float)FONT_CELL * sy;
     float gsx = fe_glyph_sx(sx, sy);   /* 4:3-locked horizontal glyph scale; cell_h keeps sy */
     float trk = (float)FONT_GLYPH_TRACKING * gsx;  /* extra cursor tracking (negative = tighter) */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    if (msdf) td5_plat_render_set_ps_override((void *)s_ps_msdf, SAMP_LINEAR_CLAMP);
     for (int i = 0; text[i]; i++) {
         int c = s_fe_preserve_case ? (unsigned char)text[i] : toupper((unsigned char)text[i]);
         int glyph_index;
@@ -8059,7 +8061,6 @@ static void fe_draw_text(float x, float y, const char *text, uint32_t color, flo
         fe_draw_quad(cx, y, glyph_w, cell_h, color, page, u0, v0, u1, v1);
         cx += glyph_advance + trk;
     }
-    if (msdf) td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
@@ -8134,16 +8135,16 @@ void fe_draw_small_text(float x, float y, const char *text, uint32_t color, floa
     }
 
     if (s_smallfont_page < 0) return;
-    /* Resolution-independent SDF path: same 21x11 grid/UV/metrics, swapped page
-     * + shader. Falls back to the bitmap atlas when VectorUI is off or the SDF
-     * atlas failed to load. */
-    int sdf = (g_td5.ini.vector_ui && s_smallfont_msdf_page >= 0 && s_ps_msdf != NULL);
-    int page = sdf ? s_smallfont_msdf_page : s_smallfont_page;
+    /* Bitmap small-font atlas fallback (page s_smallfont_page). Reached only when
+     * the menu TTF is unavailable (the early-return above). 21x11 grid, per-glyph
+     * advance + vertical offset.
+     * [2026-06-16] The SmallText SDF atlas branch was removed (atlas load retired;
+     * s_smallfont_msdf_page is always -1) — the TTF is the sole vector path. */
+    int page = s_smallfont_page;
     float cx = x;
     float cell_w = (float)SMALLFONT_CELL * sx;
     float cell_h = (float)SMALLFONT_CELL * sy;
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    if (sdf) td5_plat_render_set_ps_override((void *)s_ps_msdf, SAMP_LINEAR_CLAMP);
     for (int i = 0; text[i]; i++) {
         int c = (unsigned char)text[i];
         if (c < 0x20 || c > 0x7f) { cx += 8.0f * sx; continue; }
@@ -8161,7 +8162,6 @@ void fe_draw_small_text(float x, float y, const char *text, uint32_t color, floa
         }
         cx += adv * sx;
     }
-    if (sdf) td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
@@ -9078,67 +9078,44 @@ void td5_frontend_render_ui_rects(void) {
          * [INFERRED from frontend-rendering-internals.md §6 + Frida capture
          *  showing per-button surface ID is constant; the swap is by surface
          *  half (top/bottom) selected by focus, not by interpolated color.] */
-        /* Phase 6: prefer the baked button cache (single quad per button)
-         * when available. The cache holds both halves stacked vertically
-         * (top = state 1 unselected, bottom = state 0 selected); UV picks
-         * by focus. Disabled state still falls through to the per-frame
-         * 9-slice path because state 2 isn't baked. */
+        /* Button frame state: 0 = gold/selected, 1 = blue/unselected, 2 = gray/
+         * disabled. (The original swapped pre-baked surface halves by focus; the
+         * port frames live each frame.) */
         int bb_state;
         int focused = (i == s_selected_button);
         if (s_buttons[i].disabled)            bb_state = 2;
         else if (focused || flash_active)     bb_state = 0;
         else                                   bb_state = 1;
 
-        /* Eligibility for surface caching: any active, non-disabled,
-         * non-selector button with a non-empty static label. Selectors
-         * draw arrows + value text on top of the frame and would need a
-         * different cache layout; disabled buttons render with state 2
-         * (gray) which isn't baked. */
         /* Procedural neon button frame (VectorUI): crisp glow at any resolution.
          * Draws the dark rounded interior + glowing coloured rim, then the label
          * via the SDF text path. Selectors get only the frame (their value text
          * + arrows are drawn separately below). */
         int use_proc = (g_td5.ini.vector_ui && s_ps_roundrect && s_rr_cb);
 
-        int cache_page = -1;
-        if (!use_proc && !s_buttons[i].disabled && !s_buttons[i].is_selector
-            && s_buttons[i].label[0] && s_font_page >= 0) {
-            cache_page = td5_fe_btncache_ensure_page(i, s_buttons[i].label,
-                                                    s_buttons[i].w, s_buttons[i].h,
-                                                    s_font_glyph_advance);
-        }
-
+        /* [2026-06-16] Under VectorUI (the shipped default) the frame is always the
+         * procedural roundrect. The legacy CPU button cache (ButtonBits + BodyText
+         * composite) and the per-frame 9-slice bitmap fallback were only reachable
+         * with VectorUI OFF, so both were retired: the cache call and its draw
+         * branch are gone, and fe_draw_button_frame's internal 9-slice path
+         * self-skips on (s_buttonbits_tex_page < 0). The flat-fill `else` remains
+         * as the final VectorUI-off fallback (no shader, no bitmap). */
         if (use_proc) {
             /* Neon roundrect frame (gold/blue/gray per state) via the shared
              * fe_draw_button_frame() helper — the text-input field uses the same
              * helper so it matches. */
             fe_draw_button_frame(bx, by, bw, bh, bb_state, sx, sy);
-            if (s_buttons[i].label[0] && !s_buttons[i].is_selector && s_font_page >= 0) {
+            if (s_buttons[i].label[0] && !s_buttons[i].is_selector) {
                 float tw = fe_measure_text(s_buttons[i].label, sx, sy);
                 uint32_t tc = s_buttons[i].disabled ? 0xFF888888u : 0xFFFFFFFFu;
                 fe_draw_text(bx + (bw - tw) * 0.5f, by, s_buttons[i].label, tc, sx, sy);
             }
-        } else if (cache_page >= 0) {
-            /* Cache is 224x64 with halves stacked at row 32. Inset v at
-             * the half boundary by half a texel so LINEAR filtering does
-             * not blend row 31 (other half) with row 32. u stays at the
-             * cache edges -- corners fully cover cols 0..25 and 196..223
-             * with opaque content, so there is no need to inset u. */
-            const float kV = 0.5f / 64.0f;
-            float v0 = (bb_state == 0) ? (0.5f + kV) : 0.0f;
-            float v1 = (bb_state == 0) ? 1.0f         : (0.5f - kV);
-            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_quad(bx, by, bw, bh, 0xFFFFFFFF, cache_page,
-                         0.0f, v0, 1.0f, v1);
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         } else if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
-            /* No opaque fill — original blits button surface to screen with
-             * DDBLT_KEYSRC (black = transparent). We draw only the 9-slice
-             * frame with alpha blending; background shows through naturally.
-             * Routed through the shared helper (9-slice path) for parity. */
+            /* VectorUI off + ButtonBits available: 9-slice frame (alpha-blended,
+             * background shows through) via the shared helper. */
             fe_draw_button_frame(bx, by, bw, bh, bb_state, sx, sy);
 
-            if (s_buttons[i].label[0] && s_font_page >= 0) {
+            if (s_buttons[i].label[0]) {
                 float text_w = fe_measure_text(s_buttons[i].label, sx, sy);
                 float tx = bx + (bw - text_w) * 0.5f;
                 float ty = by;
@@ -9148,7 +9125,7 @@ void td5_frontend_render_ui_rects(void) {
             }
         } else {
             fe_draw_quad(bx, by, bw, bh, bg_color, -1, 0, 0, 1, 1);
-            if (s_buttons[i].label[0] && s_font_page >= 0) {
+            if (s_buttons[i].label[0]) {
                 float text_w = fe_measure_text(s_buttons[i].label, sx, sy);
                 float tx = bx + (bw - text_w) * 0.5f;
                 float ty = by;
