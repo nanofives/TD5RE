@@ -155,6 +155,18 @@ static inline char *actor_ptr(int slot) {
     return g_actor_base + slot * ACTOR_STRIDE;
 }
 
+/* [#18] Classify an actor as background TRAFFIC (slot >= the racer slots) vs a
+ * racer/player. Used by the span-walker (td5_track.c) to suppress traffic — and
+ * only traffic — from forking onto a blacklisted sidewalk corridor; racers/player
+ * navigate every branch freely (force-maining them traps the player at the fork). */
+int td5_ai_actor_is_traffic(const void *actor) {
+    long off;
+    if (!actor || !g_actor_base) return 0;
+    off = (const char *)actor - g_actor_base;
+    if (off < 0) return 0;
+    return (int)(off / ACTOR_STRIDE) >= TD5_MAX_RACER_SLOTS;
+}
+
 #define ACTOR_I16(base, off)  (*(int16_t *)((base) + (off)))
 #define ACTOR_I32(base, off)  (*(int32_t *)((base) + (off)))
 #define ACTOR_U8(base, off)   (*(uint8_t *)((base) + (off)))
@@ -7886,7 +7898,10 @@ void td5_ai_traffic_dynamic_tick(void)
             /* [#18 BLACKLIST + SELF-HEAL] Path-independent catch-all for cars that
              * end up on a branch corridor by any route (spawn pick / walker fork):
              *  - branch traffic OFF        -> fade ANY branch car (main-ring only);
-             *  - on a BLACKLISTED fork     -> fade (off-road/sidewalk, never drivable);
+             *  - on a BLACKLISTED fork     -> INSTANT-PARK (off-road/sidewalk, never
+             *    drivable): the walker no longer force-mains traffic (it trapped the
+             *    player), so a car can briefly fork onto a sidewalk; killing it the
+             *    same tick (vs a 0.4s fade) means it never visibly drives there;
              *  - STUCK on a non-listed fork (recovery-frozen for ~3s) -> that fork is
              *    un-traversable, so AUTO-BLACKLIST its base (walker/spawner avoid it
              *    henceforth) and fade. Good branches keep their (moving) traffic. */
@@ -7896,14 +7911,25 @@ void td5_ai_traffic_dynamic_tick(void)
                 if (ringL > 0 && rawsp >= ringL) {
                     int stuck_on_branch = (g_traffic_recovery_stage[slot] != 0 &&
                                            s_traffic_stuck_frames[slot] >= 90);
-                    if (stuck_on_branch && trf_dyn_branches_enabled() &&
-                        !trf_branch_blacklisted(rawsp))
+                    int blacklisted = trf_branch_blacklisted(rawsp);
+                    if (stuck_on_branch && trf_dyn_branches_enabled() && !blacklisted)
                         td5_track_branch_mark_bad(rawsp);   /* discover off-road fork */
-                    if (!trf_dyn_branches_enabled() ||
-                        trf_branch_blacklisted(rawsp) || stuck_on_branch) {
+                    if (!trf_dyn_branches_enabled() || blacklisted) {
+                        /* Known-bad fork: kill instantly so it never shows on the
+                         * sidewalk. Park (freeze + hide) this tick. */
+                        s_trf_dyn_state[slot] = TRF_DYN_INACTIVE;
+                        s_trf_dyn_alpha[slot] = 0;
+                        *(int32_t *)(a + 0x314) = 0;
+                        *(int32_t *)(a + 0x1CC) = 0;
+                        *(int32_t *)(a + 0x1D4) = 0;
+                        ACTOR_U8(a, ACTOR_BRAKE_FLAG) = 1;
+                        TD5_LOG_I(LOG_TAG, "traffic_branch_blacklist: slot=%d on branch span=%d -> instant-park",
+                                  slot, rawsp);
+                        break;   /* slot retired; skip the rest of the ACTIVE handler */
+                    } else if (stuck_on_branch) {
                         s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
-                        TD5_LOG_I(LOG_TAG, "traffic_branch_blacklist: slot=%d on branch span=%d stuck=%d -> fade",
-                                  slot, rawsp, stuck_on_branch);
+                        TD5_LOG_I(LOG_TAG, "traffic_branch_stuck: slot=%d on branch span=%d -> fade",
+                                  slot, rawsp);
                     }
                 }
             }
