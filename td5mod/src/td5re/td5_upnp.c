@@ -320,6 +320,16 @@ static int upnp_ssdp_find_location(char *loc_url, int loc_len, char *gw_ip, int 
     setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, (const char *)&ttl, sizeof(ttl));
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&recv_to, sizeof(recv_to));
 
+    /* [ITEM 4 2026-06-16] The M-SEARCH goes out the OS default multicast
+     * interface. On a multi-homed host (VPN / Hyper-V / WSL virtual adapters)
+     * that can be the WRONG NIC, so the real router never sees it and discovery
+     * "fails" even though UPnP IS available -- a common cause of the host
+     * reporting UPnP FAILED. Pinning IP_MULTICAST_IF to the LAN NIC reaching
+     * the gateway would help, but the route to the gateway isn't known until
+     * AFTER discovery. Left as-is (works on the common single-NIC LAN); the
+     * fallback is the manual port-forward path, now clearly surfaced in the
+     * host status text. */
+
     memset(&mcast, 0, sizeof(mcast));
     mcast.sin_family = AF_INET;
     mcast.sin_port = htons(SSDP_MCAST_PORT);

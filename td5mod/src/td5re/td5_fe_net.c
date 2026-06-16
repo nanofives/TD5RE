@@ -39,14 +39,36 @@ static uint32_t s_mp_join_prev    = 0;     /* lobby join-scan mask last frame (e
 /* --- S10 net-play: explicit connection modes (LAN / Direct-IP) --- */
 static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direct join) */
 
-int  s_cs_edit;                         /* S31 host-setup: 1=name, 2=password editing */
+int  s_cs_edit;                         /* S31 host-setup: 1=name, 2=password, 3=port editing */
 static int  s_cs_direct;                /* S31 host-setup: 1 = Direct-IP host, 0 = LAN */
+static char s_cs_port_buf[8];           /* [ITEM 4] GAME PORT text-entry buffer (Direct host) */
 static int  s_cs_esc_guard;             /* swallow the ESC that cancelled an edit */
 static int  s_kick_button_slot[5];      /* lobby kick button k -> net slot */
 
 static int  s_net_join_pending_ui;      /* awaiting JOIN_ACK before entering lobby */
 
 static uint32_t s_net_join_wait_start;  /* tick when the join wait began (timeout) */
+
+/* [ITEM 5 2026-06-16] On-screen "why the join failed" message. Built from the
+ * net status text + the last JOIN_NAK reason so a Direct-IP / LAN join failure
+ * tells the user host-unreachable vs session-full vs wrong-password instead of
+ * silently bouncing back to the chooser. Shown on the join-failed sub-screen,
+ * then OK/ESC returns to the chooser. */
+static char s_net_join_fail_msg[160];
+
+/* Compose the failure line. nak: 0=timeout/no-response, 1=session full,
+ * 2=wrong/missing password. Keep it short -- it rides a single button label. */
+static void frontend_net_build_join_fail(int nak) {
+    const char *why;
+    switch (nak) {
+    case 1:  why = "SESSION FULL"; break;
+    case 2:  why = "WRONG PASSWORD"; break;
+    default: why = "HOST UNREACHABLE (NO RESPONSE)"; break;
+    }
+    snprintf(s_net_join_fail_msg, sizeof(s_net_join_fail_msg),
+             "COULD NOT CONNECT: %s", why);
+    TD5_LOG_W(LOG_TAG, "join failed: %s", s_net_join_fail_msg);
+}
 
 static int  s_net_cfg_enable_upnp = 1;       /* [Network] EnableUPnP (Direct host) */
 
@@ -143,6 +165,23 @@ static int lobby_pads_restore(void) {
     TD5_LOG_I(LOG_TAG, "MP Lobby: restored %d controller(s) on back-to-lobby",
               s_mp_joined_count);
     return 1;
+}
+
+/* [ITEM 3 2026-06-16] TD5RE_LOBBY_HOST_WATCHDOG (default ON): a client whose
+ * host has gone (clean DXPDISCONNECT *or* an ungraceful drop detected by the
+ * 1 Hz keepalive going silent) exits the dead lobby straight to the MAIN MENU.
+ * "0" restores the legacy behaviour (connection-lost only -> connection
+ * browser; no silence watchdog). */
+static int lobby_host_watchdog_enabled(void) {
+    static int s_cached = -1;   /* -1=unread, 0=legacy, 1=watchdog+menu */
+    if (s_cached < 0) {
+        const char *e = getenv("TD5RE_LOBBY_HOST_WATCHDOG");
+        s_cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;   /* default ON */
+        TD5_LOG_I(LOG_TAG, "lobby host watchdog: %s",
+                  s_cached ? "on (detect host-gone -> main menu)"
+                           : "off (legacy connection-lost -> browser)");
+    }
+    return s_cached;
 }
 
 static void frontend_set_text_input_prompt(const char *p) {
@@ -430,9 +469,15 @@ static const char *frontend_net_player_name(void) {
     return (g_td5.ini.net_nickname[0]) ? g_td5.ini.net_nickname : "Player";
 }
 
-/* S10: split "ip" or "ip:port" into an IP string + port (default game port). */
+/* S10: split "host" or "host:port" into a host string + port (default game
+ * port). [ITEM 6 2026-06-16] "host" is passed through UNCHANGED -- a dotted IP,
+ * a LAN name, or a DDNS hostname all flow straight to td5_net_join_direct(),
+ * whose transport (ws2_transport_join_direct) resolves non-numeric input via
+ * getaddrinfo. We deliberately do NOT validate/reject non-numeric input here:
+ * only the trailing ":port" is split off and parsed; the host text is copied
+ * verbatim so a DDNS name like "myhost.ddns.net" survives intact. */
 static void frontend_net_parse_ip_port(const char *in, char *ip_out, int ip_len, int *port_out) {
-    const char *colon = strchr(in, ':');
+    const char *colon = strrchr(in, ':');   /* rightmost ':' = the port separator */
     *port_out = s_net_cfg_game_port;
     if (colon) {
         int n = (int)(colon - in);
@@ -678,7 +723,8 @@ void Screen_DirectConnect(void) {
         /* The text-input widget IS the field; only BACK is a real button (index 0). */
         frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
         frontend_begin_text_input(s_net_direct_ip, (int)sizeof(s_net_direct_ip));
-        frontend_set_text_input_prompt("ENTER HOST IP[:PORT]");
+        /* [ITEM 6] Hostnames + DDNS names are accepted, not just dotted IPs. */
+        frontend_set_text_input_prompt("ENTER HOST IP / HOSTNAME [:PORT]");
         s_inner_state = 3;
         break;
 
@@ -728,13 +774,17 @@ void Screen_DirectConnect(void) {
             td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
         } else if (td5_net_get_join_nak_reason() == 2) {  /* host needs a password */
             s_inner_state = 7;                            /* prompt + retry */
-        } else if (td5_net_is_connection_lost() ||
+        } else if (td5_net_get_join_nak_reason() == 1 ||  /* session full */
+                   td5_net_is_connection_lost() ||
                    (td5_plat_time_ms() - s_net_join_wait_start) > 8000) {
-            TD5_LOG_W(LOG_TAG, "Direct join: no response / rejected (full)");
+            /* [ITEM 5] Show WHY before bouncing out: full vs no-response. The
+             * NAK reason (if any) is more specific than the timeout. */
+            int nak = td5_net_get_join_nak_reason();
+            frontend_net_build_join_fail(nak);
             s_net_join_pending_ui = 0;
             s_network_active = 0;
             frontend_net_destroy();
-            td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
+            s_inner_state = 9;                            /* failure message */
         }
         break;
 
@@ -767,13 +817,44 @@ void Screen_DirectConnect(void) {
             td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
         }
         break;
+
+    case 9: /* JOIN: connection FAILED -- show the reason (fresh buttons) [ITEM 5] */
+        frontend_reset_buttons();
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_create_button(s_net_join_fail_msg, 80, 193, 480, 0x40); /* 0 message */
+        frontend_create_button(SNK_OkButTxt, 232, 377, 160, 0x20);       /* 1 OK */
+        s_inner_state = 10;
+        break;
+
+    case 10: /* JOIN: failure-message interaction -> back to chooser */
+        frontend_present_buffer();
+        if (s_input_ready) {     /* OK (or the message button) acknowledges */
+            td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
+        }
+        break;
     }
+}
+
+/* [ITEM 1 2026-06-16] TD5RE_LAN_JOIN_WAIT (default ON): join a LAN session via
+ * the wait-for-JOIN_ACK flow (password prompt + clear failure) instead of the
+ * legacy straight-to-lobby jump. "0" restores the old behaviour. */
+static int lan_join_wait_enabled(void) {
+    static int s_cached = -1;   /* -1=unread, 0=legacy jump, 1=wait-for-ACK */
+    if (s_cached < 0) {
+        const char *e = getenv("TD5RE_LAN_JOIN_WAIT");
+        s_cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;   /* default ON */
+        TD5_LOG_I(LOG_TAG, "LAN join wait-for-ACK: %s",
+                  s_cached ? "on (password prompt + clear failure)"
+                           : "off (legacy straight-to-lobby)");
+    }
+    return s_cached;
 }
 
 /* [S31] SESSION_PICKER list: one row button per discovered LAN session
  * (indices 0..5) + BACK (6). Rows refresh every frame as discovery replies
  * arrive; ENTER on a row joins that session directly. */
 static int s_picker_prev_count = -1;
+static int s_picker_join_index = -1;   /* [ITEM 1] session row currently being joined */
 static void frontend_net_update_session_list(void) {
     int count = td5_net_get_enum_session_count();
     int i;
@@ -806,8 +887,11 @@ static void frontend_net_update_session_list(void) {
 
 void Screen_SessionPicker(void) {
     /* [PERF 2026-06-06] LAN discovery is non-blocking + incremental: poll it
-     * every frame after init so the list fills in live as hosts answer. */
-    if (s_inner_state >= 1) {
+     * every frame after init so the list fills in live as hosts answer.
+     * [ITEM 1 2026-06-16] Only during the list build / browse states (1..3) --
+     * the join-wait / password / failure sub-states (5..11) rebuild their own
+     * button layouts, so don't relabel them as session rows here. */
+    if (s_inner_state >= 1 && s_inner_state <= 3) {
         td5_net_enumerate_sessions();
         frontend_net_update_session_list();
     }
@@ -817,6 +901,11 @@ void Screen_SessionPicker(void) {
         int i;
         frontend_init_return_screen(TD5_SCREEN_SESSION_PICKER);
         TD5_LOG_D(LOG_TAG, "SessionPicker: init (LAN discovery)");
+        /* [ITEM 3] Re-arm the net stack on every entry. A prior join attempt
+         * may have torn it down (frontend_net_destroy -> td5_net_shutdown sets
+         * s_initialized=0); td5_net_init is idempotent, so this revives a clean
+         * stack on re-entry without disturbing a still-live one. */
+        td5_net_init();
         td5_net_set_mode(TD5_NET_MODE_LAN);
         td5_net_enumerate_sessions();             /* start a discovery window (non-blocking) */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
@@ -856,9 +945,23 @@ void Screen_SessionPicker(void) {
             if (s_button_index <= 5) {        /* session row -> join it */
                 if (s_button_index < td5_net_get_enum_session_count() &&
                     td5_net_join_session(s_button_index, frontend_net_player_name())) {
+                    s_picker_join_index = s_button_index;   /* [ITEM 1] for password re-join */
+                    /* [ITEM 1 2026-06-16] Don't jump straight to the lobby --
+                     * WAIT for the host's JOIN_ACK, exactly like Direct-IP join
+                     * (Screen_DirectConnect case 5). This makes a passworded LAN
+                     * session prompt for the password instead of hanging at
+                     * "connecting", and surfaces full/no-response failures.
+                     * Gated by TD5RE_LAN_JOIN_WAIT (default ON; "0" restores the
+                     * legacy straight-to-lobby jump). */
                     s_network_active = 1;
-                    s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
-                    s_inner_state = 5;
+                    if (lan_join_wait_enabled()) {
+                        s_net_join_pending_ui = 1;
+                        s_net_join_wait_start = td5_plat_time_ms();
+                        s_inner_state = 7;            /* wait for JOIN_ACK */
+                    } else {
+                        s_return_screen = TD5_SCREEN_NETWORK_LOBBY;
+                        s_inner_state = 5;
+                    }
                 } else {
                     TD5_LOG_W(LOG_TAG, "LAN join %d failed", s_button_index);
                     frontend_play_sfx(10);
@@ -881,6 +984,86 @@ void Screen_SessionPicker(void) {
         }
         break;
 
+    case 7: /* [ITEM 1] JOIN: wait for the host's JOIN_ACK (mirrors DirectConnect 5) */
+        frontend_present_buffer();
+        if (frontend_check_escape()) {        /* cancel the join attempt */
+            s_net_join_pending_ui = 0;
+            s_network_active = 0;
+            frontend_net_destroy();
+            td5_frontend_set_screen(TD5_SCREEN_SESSION_PICKER);
+            return;
+        }
+        if (td5_net_local_slot() >= 0) {
+            s_net_join_pending_ui = 0;
+            s_network_active = 1;
+            td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
+            return;
+        } else if (td5_net_get_join_nak_reason() == 2) {  /* host needs a password */
+            s_inner_state = 8;                            /* prompt + retry */
+        } else if (td5_net_get_join_nak_reason() == 1 ||  /* session full */
+                   td5_net_is_connection_lost() ||
+                   (td5_plat_time_ms() - s_net_join_wait_start) > 8000) {
+            int nak = td5_net_get_join_nak_reason();
+            frontend_net_build_join_fail(nak);
+            s_net_join_pending_ui = 0;
+            s_network_active = 0;
+            frontend_net_destroy();
+            s_inner_state = 10;                           /* failure message */
+        }
+        break;
+
+    case 8: /* [ITEM 1] JOIN: host rejected for a wrong/missing password -> prompt */
+        frontend_reset_buttons();
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
+        s_lobby_password[0] = '\0';
+        frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
+        frontend_set_text_input_prompt("PASSWORD REQUIRED");
+        s_inner_state = 9;
+        break;
+
+    case 9: /* [ITEM 1] JOIN: password entry -> re-join with the password */
+        frontend_handle_text_input_key();
+        if (frontend_text_input_confirmed()) {
+            td5_net_set_join_password(s_lobby_password);
+            /* Re-join the SAME session row. The selection that opened this flow
+             * is still the current row; re-resolve it from the live list. */
+            if (s_picker_join_index >= 0 &&
+                s_picker_join_index < td5_net_get_enum_session_count() &&
+                td5_net_join_session(s_picker_join_index, frontend_net_player_name())) {
+                s_net_join_wait_start = td5_plat_time_ms();
+                s_inner_state = 7;
+            } else {
+                td5_frontend_set_screen(TD5_SCREEN_SESSION_PICKER);
+            }
+            return;
+        }
+        if (s_input_ready && s_button_index == 0) {   /* BACK -> picker */
+            /* Drop the half-open join so the re-entered picker starts clean. */
+            s_net_join_pending_ui = 0;
+            s_network_active = 0;
+            frontend_net_destroy();
+            td5_frontend_set_screen(TD5_SCREEN_SESSION_PICKER);
+            return;
+        }
+        break;
+
+    case 10: /* [ITEM 1/5] JOIN: connection FAILED -- show the reason */
+        frontend_reset_buttons();
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_create_button(s_net_join_fail_msg, 80, 193, 480, 0x40); /* 0 message */
+        frontend_create_button(SNK_OkButTxt, 232, 377, 160, 0x20);       /* 1 OK */
+        s_inner_state = 11;
+        break;
+
+    case 11: /* [ITEM 1/5] JOIN: failure-message interaction -> back to picker */
+        frontend_present_buffer();
+        if (s_input_ready || frontend_check_escape()) {
+            td5_frontend_set_screen(TD5_SCREEN_SESSION_PICKER);
+            return;
+        }
+        break;
+
     default:
         break;
     }
@@ -892,20 +1075,50 @@ void Screen_CreateSession(void) {
         frontend_init_return_screen(TD5_SCREEN_CREATE_SESSION);
         TD5_LOG_D(LOG_TAG, "CreateSession: init (direct=%d)", s_cs_direct);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 */
-        {   /* 1: MAX PLAYERS — selector-style (value + ◄ ► inside the button,
-             * drawn in the post-button pass like the other selector widgets) */
-            int bi = frontend_create_button("", 120, 208, 224, 0x20);
-            if (bi >= 0 && bi < FE_MAX_BUTTONS)
-                s_buttons[bi].is_selector = 1;
+        /* [ITEM 4 2026-06-16] Direct hosting exposes two extra rows the LAN
+         * host doesn't need: a UPnP on/off toggle (index 5) and a GAME PORT
+         * entry (index 6). They slot in BELOW password; only HOST/BACK shift
+         * down. NAME (index 0) + PASSWORD (index 2) keep their ORIGINAL y
+         * (160 / 256) because frontend_render_create_session_overlay (in
+         * td5_frontend.c, not editable here) draws their value text at those
+         * hard-coded rows -- moving the buttons would detach the values. MAX
+         * (index 1) tracks its button so it may move, but is left in place.
+         * The fixed indices 0..4 keep the LAN interaction switch untouched. */
+        if (s_cs_direct) {
+            frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 (value @166) */
+            {   /* 1: MAX PLAYERS — selector-style (value tracks the button) */
+                int bi = frontend_create_button("", 120, 208, 224, 0x20);
+                if (bi >= 0 && bi < FE_MAX_BUTTONS) s_buttons[bi].is_selector = 1;
+            }
+            frontend_create_button("PASSWORD",     120, 256, 224, 0x20);  /* 2 (value @262) */
+            frontend_create_button("HOST",         120, 372, 160, 0x20);  /* 3 */
+            frontend_create_button(SNK_BackButTxt, 120, 412, 112, 0x20);  /* 4 */
+            /* 5/6: UPnP toggle + GAME PORT. Plain-label buttons (NOT selectors)
+             * so the generic button renderer draws the live label -- the
+             * selector value renderer in td5_frontend.c only knows MAX PLAYERS.
+             * The labels are refreshed each interaction frame (case 2). */
+            frontend_create_button("UPNP: ON",     120, 296, 224, 0x20);  /* 5 */
+            frontend_create_button("GAME PORT",    120, 332, 224, 0x20);  /* 6 */
+        } else {
+            frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 */
+            {   /* 1: MAX PLAYERS — selector-style (value + ◄ ► inside the button,
+                 * drawn in the post-button pass like the other selector widgets) */
+                int bi = frontend_create_button("", 120, 208, 224, 0x20);
+                if (bi >= 0 && bi < FE_MAX_BUTTONS)
+                    s_buttons[bi].is_selector = 1;
+            }
+            frontend_create_button("PASSWORD",     120, 256, 224, 0x20);  /* 2 */
+            frontend_create_button("HOST",         120, 320, 160, 0x20);  /* 3 */
+            frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);  /* 4 */
         }
-        frontend_create_button("PASSWORD",     120, 256, 224, 0x20);  /* 2 */
-        frontend_create_button("HOST",         120, 320, 160, 0x20);  /* 3 */
-        frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);  /* 4 */
         if (s_create_session_name[0] == '\0')
             strcpy(s_create_session_name, "New Session");
         if (s_lobby_max_players < 2 || s_lobby_max_players > 6)
             s_lobby_max_players = 6;
+        /* [ITEM 4] Seed the UPnP toggle + game port from the live [Network] cfg
+         * (already mirrored from the ini in Screen_ConnectionBrowser). */
+        if (s_net_cfg_game_port < 1 || s_net_cfg_game_port > 65535)
+            s_net_cfg_game_port = 37050;
         s_cs_edit = 0;
         s_cs_esc_guard = 0;
         s_anim_tick = 0;
@@ -920,9 +1133,17 @@ void Screen_CreateSession(void) {
         break;
 
     case 2: /* Setup interaction [S31] */
+        /* [ITEM 4] Keep the Direct-host UPnP/PORT row labels showing the live
+         * values (these are plain buttons, drawn by the generic renderer). */
+        if (s_cs_direct && 6 < FE_MAX_BUTTONS && s_buttons[5].active) {
+            snprintf(s_buttons[5].label, sizeof(s_buttons[5].label),
+                     "UPNP: %s", s_net_cfg_enable_upnp ? "ON" : "OFF");
+            snprintf(s_buttons[6].label, sizeof(s_buttons[6].label),
+                     "GAME PORT: %d", s_net_cfg_game_port);
+        }
         if (s_cs_edit) {
-            /* Editing NAME or PASSWORD: Enter confirms, ESC cancels (and is
-             * swallowed so it cannot double as BACK). */
+            /* Editing NAME, PASSWORD or GAME PORT: Enter confirms, ESC cancels
+             * (and is swallowed so it cannot double as BACK). */
             frontend_handle_text_input_key();
             if (td5_plat_input_key_pressed(0x01)) {
                 s_cs_edit = 0;
@@ -930,6 +1151,12 @@ void Screen_CreateSession(void) {
                 s_cs_esc_guard = 1;
                 td5_plat_input_flush_chars();
             } else if (frontend_text_input_confirmed()) {
+                if (s_cs_edit == 3) {     /* [ITEM 4] commit the GAME PORT entry */
+                    int p = atoi(s_cs_port_buf);
+                    if (p >= 1 && p <= 65535) s_net_cfg_game_port = p;
+                    else s_net_cfg_game_port = 37050;
+                    snprintf(s_cs_port_buf, sizeof(s_cs_port_buf), "%d", s_net_cfg_game_port);
+                }
                 s_cs_edit = 0;
                 s_text_input_state = 0;
             }
@@ -955,6 +1182,11 @@ void Screen_CreateSession(void) {
                 frontend_play_sfx(2);
             }
         }
+        /* [ITEM 4] UPnP toggle row (Direct host only): Left/Right flip ON/OFF. */
+        if (s_cs_direct && s_selected_button == 5 && (s_arrow_input & 3)) {
+            s_net_cfg_enable_upnp = !s_net_cfg_enable_upnp;
+            frontend_play_sfx(2);
+        }
         if (s_input_ready && s_button_index >= 0) {
             switch (s_button_index) {
             case 0: /* SESSION NAME */
@@ -978,13 +1210,25 @@ void Screen_CreateSession(void) {
                 int ok;
                 td5_net_set_mode(s_cs_direct ? TD5_NET_MODE_DIRECT
                                              : TD5_NET_MODE_LAN);
-                if (s_cs_direct)
+                if (s_cs_direct) {
+                    /* [ITEM 4] Persist the chosen port + UPnP toggle so the
+                     * next launch (and the boot-host CLI path in main.c) reuse
+                     * them. Written via the public string writer formatting the
+                     * int -- the reader (td5_ini_int / GetPrivateProfileIntA)
+                     * parses it straight back. */
+                    char pbuf[16];
+                    g_td5.ini.net_game_port   = s_net_cfg_game_port;
+                    g_td5.ini.net_enable_upnp = s_net_cfg_enable_upnp;
+                    snprintf(pbuf, sizeof(pbuf), "%d", s_net_cfg_game_port);
+                    td5_ini_write_str("Network", "GamePort", pbuf);
+                    td5_ini_write_str("Network", "EnableUPnP",
+                                      s_net_cfg_enable_upnp ? "1" : "0");
                     ok = td5_net_create_session_ex(s_create_session_name,
                                                    frontend_net_player_name(),
                                                    s_lobby_max_players,
                                                    s_net_cfg_game_port,
                                                    s_net_cfg_enable_upnp);
-                else
+                } else
                     ok = td5_net_create_session(s_create_session_name,
                                                 frontend_net_player_name(),
                                                 s_lobby_max_players);
@@ -1005,6 +1249,22 @@ void Screen_CreateSession(void) {
                 s_return_screen = s_cs_direct ? TD5_SCREEN_DIRECT_CONNECT
                                               : TD5_SCREEN_LAN_MENU;
                 s_inner_state = 3;
+                break;
+            case 5: /* [ITEM 4] UPnP toggle: activate = flip ON/OFF */
+                if (s_cs_direct) {
+                    s_net_cfg_enable_upnp = !s_net_cfg_enable_upnp;
+                    frontend_play_sfx(2);
+                }
+                break;
+            case 6: /* [ITEM 4] GAME PORT: open the numeric text entry */
+                if (s_cs_direct) {
+                    snprintf(s_cs_port_buf, sizeof(s_cs_port_buf), "%d",
+                             s_net_cfg_game_port);
+                    frontend_begin_text_input(s_cs_port_buf,
+                                              (int)sizeof(s_cs_port_buf));
+                    frontend_set_text_input_prompt("GAME PORT (DEFAULT 37050)");
+                    s_cs_edit = 3;
+                }
                 break;
             }
         }
@@ -1246,16 +1506,35 @@ void Screen_NetworkLobby(void) {
             return;
         }
 
-        /* S31: the host quit (or the link died) -> leave the dead lobby.
-         * td5_net_shutdown now broadcasts DXPDISCONNECT, which sets
-         * s_connection_lost on every receiver. */
-        if (!frontend_net_is_host() && td5_net_is_connection_lost()) {
-            TD5_LOG_I(LOG_TAG, "NetworkLobby: connection lost -> leaving lobby");
-            s_race_active_flag = 0;
-            s_network_active = 0;
-            frontend_net_destroy();
-            td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
-            return;
+        /* S31/[ITEM 3]: the host quit (or the link died) -> leave the dead lobby.
+         * Two triggers:
+         *   (a) a clean host quit broadcasts DXPDISCONNECT -> s_connection_lost;
+         *   (b) an UNGRACEFUL host quit (process killed, link dropped) sends no
+         *       DXPDISCONNECT, so the 1 Hz host keepalive simply goes silent --
+         *       td5_net_lobby_host_silence_ms() crossing ~6 s catches that (the
+         *       watchdog only arms once the first host packet has arrived, so a
+         *       still-connecting client never trips it). The watchdog + the
+         *       exit-to-main-menu route are gated by TD5RE_LOBBY_HOST_WATCHDOG;
+         *       when off, only the legacy connection-lost -> browser path runs. */
+        if (!frontend_net_is_host()) {
+            int lost    = td5_net_is_connection_lost();
+            int silence = td5_net_lobby_host_silence_ms();
+            int wd_on   = lobby_host_watchdog_enabled();
+            int gone    = lost || (wd_on && silence >= 0 && silence > 6000);
+            if (gone) {
+                TD5_LOG_I(LOG_TAG,
+                          "NetworkLobby: host gone (lost=%d silence=%dms) -> leaving lobby",
+                          lost, silence);
+                s_race_active_flag = 0;
+                s_network_active = 0;
+                frontend_net_destroy();
+                /* [ITEM 3] Exit to the MAIN MENU (not back into the dead lobby
+                 * or the connection browser) when the watchdog owns the exit;
+                 * legacy path keeps the browser destination. */
+                td5_frontend_set_screen(wd_on ? TD5_SCREEN_MAIN_MENU
+                                              : TD5_SCREEN_CONNECTION_BROWSER);
+                return;
+            }
         }
 
 #ifndef TD5RE_RELEASE

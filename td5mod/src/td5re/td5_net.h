@@ -85,6 +85,9 @@ int  td5_net_is_active(void);
 int  td5_net_is_slot_active(int slot);  /* dpu_exref[0xBCC + slot*4]: 1=local, 0=remote/empty */
 int  td5_net_local_slot(void);
 int  td5_net_is_connection_lost(void);
+/* [ITEM 3] ms since the client last heard from the host (lobby keepalive);
+ * -1 if not a client or no host packet has arrived yet. */
+int  td5_net_lobby_host_silence_ms(void);
 int  td5_net_get_enum_session_count(void);
 const char *td5_net_get_enum_session_name(int index);
 int  td5_net_get_enum_session_info(int index, int *player_count, int *max_players);

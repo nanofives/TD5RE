@@ -167,6 +167,12 @@ static int          s_slot_latency[TD5_NET_MAX_PLAYERS];/* per-slot RTT ms (-1 u
 static char         s_slot_name[TD5_NET_MAX_PLAYERS][32];/* client-side roster names           */
 static uint32_t     s_ping_last_ms;                     /* host: last PING broadcast clock     */
 static uint32_t     s_roster_info_last_ms;              /* host: last ROSTER_INFO broadcast    */
+/* [ITEM 3 2026-06-16] client: wall-clock of the last datagram seen from the
+ * host. Lets the lobby detect an UNGRACEFUL host departure (process killed /
+ * link dropped) where no DXPDISCONNECT arrives -- the host's 1 Hz ping +
+ * roster-info keepalive stops, so a stale value means "host gone". 0 = none
+ * seen yet (no watchdog until the first packet lands). */
+static uint32_t     s_client_last_host_ms;
 static uint32_t     s_session_token;                    /* [SEC] per-session token (0 = unknown) */
 
 /* --- Session --- */
@@ -553,6 +559,15 @@ static void handle_app_message(uint32_t sender_id, const void *data, int size)
     if (msg_type > 12) {
         TD5_LOG_W(NET_LOG, "Unknown DXPTYPE %u from sender %u", msg_type, sender_id);
         return;
+    }
+
+    /* [ITEM 3 2026-06-16] On a client, any datagram is proof the host is still
+     * alive (star topology -- clients only converse with the host). Stamp the
+     * keepalive clock so the lobby watchdog can spot an ungraceful host quit. */
+    if (s_is_client && !s_is_host) {
+        uint32_t now = td5_plat_time_ms();
+        if (now == 0) now = 1;   /* keep 0 reserved for "never seen" */
+        s_client_last_host_ms = now;
     }
 
     /* Dispatch to typed handler */
@@ -2592,15 +2607,29 @@ static void net_build_status_text(void)
 
     if (s_is_host) {
         if (s_conn_mode == TD5_NET_MODE_DIRECT) {
+            /* [ITEM 4 2026-06-16] Distinguish the three UPnP outcomes clearly --
+             * MAPPED (router opened the port), FAILED (router refused / no IGD
+             * found -> forward manually), DISABLED (UPnP off in setup). Always
+             * name the UDP port the user must forward in the non-mapped cases. */
             switch (s_upnp_status) {
             case TD5_NET_UPNP_MAPPED:
                 snprintf(s_status_text, sizeof(s_status_text),
                          "Host %s:%d  -  UPnP: port opened on router",
                          ip, s_game_port);
                 break;
+            case TD5_NET_UPNP_MAPPING:
+                snprintf(s_status_text, sizeof(s_status_text),
+                         "Host %s:%d  -  UPnP: mapping port...",
+                         ip, s_game_port);
+                break;
             case TD5_NET_UPNP_FAILED:
                 snprintf(s_status_text, sizeof(s_status_text),
-                         "Host %s:%d  -  UPnP unavailable, forward UDP %d",
+                         "Host %s:%d  -  UPnP FAILED (no router/IGD) - forward UDP %d",
+                         ip, s_game_port, s_game_port);
+                break;
+            case TD5_NET_UPNP_UNAVAILABLE:
+                snprintf(s_status_text, sizeof(s_status_text),
+                         "Host %s:%d  -  UPnP OFF - forward UDP %d manually",
                          ip, s_game_port, s_game_port);
                 break;
             default:
@@ -2647,6 +2676,7 @@ static void net_begin_client_join(const char *player_name)
     ResetEvent(s_evt_frame_ack);
 
     s_join_nak_reason = 0;   /* clear any prior rejection before this attempt */
+    s_client_last_host_ms = 0;   /* [ITEM 3] host-keepalive watchdog: none seen yet */
     s_join_pending = 1;
     ws2_send_join_request(s_local_player_name);
     s_join_attempts = 1;
@@ -3563,6 +3593,17 @@ int td5_net_is_slot_active(int slot)
 int td5_net_is_connection_lost(void)
 {
     return s_connection_lost;
+}
+
+/* [ITEM 3 2026-06-16] Milliseconds since the client last heard from the host
+ * (host ping + roster-info keepalive run at 1 Hz in the lobby). Returns -1 if
+ * inapplicable (we are the host, not a client, or no host packet seen yet) so
+ * the lobby watchdog only arms after the link is genuinely established. */
+int td5_net_lobby_host_silence_ms(void)
+{
+    if (s_is_host || !s_is_client || s_client_last_host_ms == 0)
+        return -1;
+    return (int)(td5_plat_time_ms() - s_client_last_host_ms);
 }
 
 int td5_net_get_enum_session_count(void)

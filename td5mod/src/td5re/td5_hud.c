@@ -254,6 +254,24 @@ static int hud_grid_filler_on(void)
     return s;
 }
 
+/* [#1 NET-RACE FILLER SUPPRESS 2026-06-16] In a LAN/network race the local
+ * machine renders exactly ONE viewport (the player's own car), so the grid has
+ * no legitimate "empty local cells" to fill — yet the split-cell occupancy query
+ * reports every other grid cell as free and the filler paints the track
+ * map/standings over the whole screen. Suppress the empty-cell filler outright
+ * when g_td5.network_active is set. Default on (suppress); set
+ * TD5RE_GRID_FILLER_NET=0 to restore drawing the filler in net races.
+ * Single-machine split-screen (network_active == 0) is unaffected. */
+static int hud_grid_filler_net_suppress_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_GRID_FILLER_NET");
+        TD5_LOG_I(LOG_TAG, "net-race empty-cell filler suppress: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
 /* [#5 2026-06-15] Tighten the inter-digit spacing of the speedometer readout.
  * The left-most digit stays put; the per-digit advance (pitch) shrinks so the
  * other digits move toward it, closing the gaps a little. Default on; set
@@ -3797,6 +3815,13 @@ static void hud_filler_draw_standings(float cl, float ct, float cr, float cb)
 static void hud_draw_empty_cells(void)
 {
     if (!hud_grid_filler_on()) return;
+    /* [#1 NET-RACE FILLER SUPPRESS 2026-06-16] In a network race this machine has
+     * exactly one local viewport, so there are no real "empty local cells" — the
+     * split-cell query would otherwise flag every remote-player cell as free and
+     * the filler would paint the map over the whole screen. Skip it for net races
+     * (knob default); single-machine split-screen (network_active == 0) falls
+     * through unchanged. */
+    if (g_td5.network_active && hud_grid_filler_net_suppress_on()) return;
     /* [#1 2026-06-15] MULTIPLAYER-ONLY: the empty-cell map/standings overlay is a
      * split-screen feature; in single-player leave any empty cell black. The
      * established MP signal in this file is num_human_players > 1 (see the MP car
