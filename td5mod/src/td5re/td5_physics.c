@@ -748,10 +748,17 @@ static int32_t td5_physics_slope_light_scale_q12(int32_t top_speed)
  *   at-redline    : engine_speed_accum (+0x310) vs redline tuning (+0x72)
  * ======================================================================== */
 
-/* Below this body-frame longitudinal speed (8.8 fp, ~one unit) the car is too
- * slow for a meaningful drift reading — report 0 so a stationary/creeping car
- * never buzzes the wheel. */
-#define FF_DRIFT_MIN_LONG_SPEED   0x100
+/* Below this body-frame longitudinal speed the car is too slow for a meaningful
+ * drift reading — report 0. [FF drift over-sensitivity fix 2026-06-16] Raised
+ * from 0x100: at a crawl the |lat|/|long| ratio has a tiny denominator, so the
+ * slightest sideways velocity at the race-start launch spiked drift_level to max
+ * and the gamepad buzzed continuously and never stopped. The drift buzz now needs
+ * a genuine driving speed (so a low-speed launch / creep produces 0). */
+#define FF_DRIFT_MIN_LONG_SPEED   0x8000
+/* AND a meaningful ABSOLUTE sideways speed — a real slide, not steering/contact
+ * jitter — before drift registers (belt-and-suspenders against the small-
+ * denominator spike above). */
+#define FF_DRIFT_MIN_LAT_SPEED    0x2000
 /* Lateral/longitudinal slip ratio (Q8) below which we treat the car as tracking
  * straight (no drift). ~0x40 = 0.25 → ~14 deg of slide before drift registers. */
 #define FF_DRIFT_RATIO_DEADZONE   0x40
@@ -827,7 +834,9 @@ void td5_physics_update_ff_signals(void)
         v_lat  = a->lateral_speed;
         abs_long = v_long < 0 ? -v_long : v_long;
         abs_lat  = v_lat  < 0 ? -v_lat  : v_lat;
-        if (abs_long < FF_DRIFT_MIN_LONG_SPEED) {
+        if (abs_long < FF_DRIFT_MIN_LONG_SPEED || abs_lat < FF_DRIFT_MIN_LAT_SPEED) {
+            /* Too slow, or not enough absolute sideways speed, to be a real slide
+             * (kills the race-start launch buzz from the small-denominator ratio). */
             s_ff_drift_level[slot] = 0;
         } else {
             /* ratio = |lat| / |long| in Q8 (0x100 = sliding as fast sideways as
