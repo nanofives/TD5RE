@@ -589,6 +589,36 @@ static int upnp_soap(const char *action, const char *args_xml, char *resp, int r
     return upnp_http_exchange(host, port, path, "POST", headers, body, resp, resp_len);
 }
 
+/* Does the IGD already map <port>/<proto> to OUR local IP? Uses the cached IGD
+ * and the already-open WSA, so call only from inside another upnp_* entry. */
+static int upnp_mapping_is_ours(uint16_t port, int udp)
+{
+    char args[256], resp[HTTP_RESP_MAX], client[64];
+    snprintf(args, sizeof(args),
+        "<NewRemoteHost></NewRemoteHost>"
+        "<NewExternalPort>%u</NewExternalPort>"
+        "<NewProtocol>%s</NewProtocol>",
+        (unsigned)port, udp ? "UDP" : "TCP");
+    if (upnp_soap("GetSpecificPortMappingEntry", args, resp, sizeof(resp)) != 200)
+        return 0;
+    if (!upnp_xml_value(resp, "NewInternalClient", client, sizeof(client)))
+        return 0;
+    return (s_local_ip[0] && strcmp(client, s_local_ip) == 0);
+}
+
+/* Best-effort DeletePortMapping for the external <port>/<proto> using the cached
+ * IGD + already-open WSA (clears a conflicting entry before we re-add ours). */
+static void upnp_delete_external(uint16_t port, int udp)
+{
+    char args[256], resp[HTTP_RESP_MAX];
+    snprintf(args, sizeof(args),
+        "<NewRemoteHost></NewRemoteHost>"
+        "<NewExternalPort>%u</NewExternalPort>"
+        "<NewProtocol>%s</NewProtocol>",
+        (unsigned)port, udp ? "UDP" : "TCP");
+    upnp_soap("DeletePortMapping", args, resp, sizeof(resp));
+}
+
 /* ========================================================================
  * Public API
  * ======================================================================== */
@@ -597,18 +627,21 @@ int td5_upnp_map_port(uint16_t port, int udp, const char *desc, int lease_secs)
 {
     char args[512], resp[HTTP_RESP_MAX];
     int status, attempt, lease = lease_secs;
+    int tried_delete = 0, tried_finite = 0, tried_perm = 0;
 
     if (!upnp_wsa_begin()) return 0;
 
     if (!upnp_discover()) { upnp_wsa_end(); return 0; }
 
-    /* AddPortMapping with lease-duration fallback. Many consumer routers --
-     * TP-Link in particular -- reject a PERMANENT lease (NewLeaseDuration=0)
-     * with an HTTP 500 SOAP fault and require a finite lease, while some older
-     * IGDs do the opposite (725 OnlyPermanentLeasesSupported -> need 0). Try the
-     * requested lease first, then flip to the other form on the documented fault
-     * codes (or any generic 500) so a single quirky router doesn't fail us. */
-    for (attempt = 0; attempt < 2; attempt++) {
+    /* AddPortMapping with fault-driven recovery. Three real-world router quirks
+     * are handled, each retried at most once:
+     *   - 718 ConflictInMappingEntry: the external port is already mapped. If it
+     *     already points to US we're done; otherwise it is stale (old DHCP IP /
+     *     leftover) so delete it and re-add.
+     *   - permanent-lease refusal (HTTP 500 / 402 / 501 on NewLeaseDuration=0):
+     *     TP-Link and other IGD:2 routers want a finite lease -> retry 7 days.
+     *   - 725 OnlyPermanentLeasesSupported: the inverse -> retry lease=0. */
+    for (attempt = 0; attempt < 4; attempt++) {
         char ec[16];
         int err = 0;
 
@@ -634,25 +667,37 @@ int td5_upnp_map_port(uint16_t port, int udp, const char *desc, int lease_secs)
         }
 
         /* Pull the UPnP SOAP fault code out of the response so the log states
-         * the REAL reason (718 conflict, 725 lease policy, 402 invalid args...)
-         * instead of a bare HTTP status. */
+         * the REAL reason instead of a bare HTTP status. */
         ec[0] = '\0';
         if (upnp_xml_value(resp, "errorCode", ec, sizeof(ec))) err = atoi(ec);
         TD5_LOG_W(UPNP_LOG, "AddPortMapping %u failed (HTTP %d, UPnPError %d, lease=%d)",
                   (unsigned)port, status, err, lease);
 
-        if (attempt != 0) break;            /* only one retry */
-        if (lease == 0 && (err == 402 || err == 501 || err == 0 || status == 500)) {
-            lease = 604800;                 /* 7 days: routers that reject 0 take this */
+        if (err == 718 && !tried_delete) {       /* external port already mapped */
+            tried_delete = 1;
+            if (upnp_mapping_is_ours(port, udp)) {
+                TD5_LOG_I(UPNP_LOG, "AddPortMapping: %u already mapped to us (%s) -> OK",
+                          (unsigned)port, s_local_ip);
+                upnp_wsa_end();
+                return 1;
+            }
+            TD5_LOG_I(UPNP_LOG, "AddPortMapping: %u held by a stale/foreign mapping "
+                      "-> deleting and retrying", (unsigned)port);
+            upnp_delete_external(port, udp);
+            continue;
+        }
+        if (lease == 0 && !tried_finite &&
+            (err == 402 || err == 501 || err == 0 || status == 500)) {
+            lease = 604800; tried_finite = 1;    /* 7 days */
             TD5_LOG_I(UPNP_LOG, "AddPortMapping: router refused permanent lease -> retry lease=%d", lease);
             continue;
         }
-        if (lease != 0 && err == 725) {     /* OnlyPermanentLeasesSupported */
-            lease = 0;
+        if (lease != 0 && !tried_perm && err == 725) {  /* OnlyPermanentLeasesSupported */
+            lease = 0; tried_perm = 1;
             TD5_LOG_I(UPNP_LOG, "AddPortMapping: router wants permanent lease -> retry lease=0");
             continue;
         }
-        break;                              /* fault we can't work around */
+        break;                                   /* fault we can't work around */
     }
 
     upnp_wsa_end();
