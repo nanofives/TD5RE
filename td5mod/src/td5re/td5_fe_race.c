@@ -213,6 +213,7 @@ static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
 static int frontend_carsel_hold_enabled(void);   /* [#2/#7] TD5RE_CARSEL_HOLD gate (defined below) */
+static int frontend_carsel_hold_repeat(void);    /* hold-to-scroll LEFT/RIGHT auto-repeat (defined below); reused by Quick Race */
 
 /* [#2b/#10 2026-06-16] Cross-module hooks DEFINED in td5_frontend.c (extern'd
  * inline here, mirroring the existing extern-in-.c pattern, so no shared header
@@ -1084,6 +1085,21 @@ void Screen_QuickRaceMenu(void) {
         break;
 
     case 4: /* Interactive: cycle car/track/direction/players/opponents, OK/Back */
+        /* [hold-to-scroll on Quick Race 2026-06-16] Re-synthesize LEFT/RIGHT
+         * auto-repeat while a value-cycling row is focused so HOLDING ◄► keeps
+         * cycling, exactly like the car-select selector (reuses the same
+         * frontend_carsel_hold_repeat / TD5RE_CARSEL_HOLD). Plain ◄► only — SHIFT
+         * here is the horizontal focus-move, so skip while SHIFT is held; DIRECTION
+         * is a toggle (not a cycler) and is excluded. */
+        if (s_anim_complete && s_button_index < 0 &&
+            !(td5_plat_input_key_pressed(0x2A) || td5_plat_input_key_pressed(0x36))) {
+            int sb = s_selected_button;
+            if (sb == QR_BTN_CAR || sb == QR_BTN_TRACK || sb == QR_BTN_OPPONENTS ||
+                sb == QR_BTN_PLAYERS || sb == QR_BTN_LAPS || sb == QR_BTN_SPLITSCREENS) {
+                int rep = frontend_carsel_hold_repeat();
+                if (rep) { s_arrow_input |= rep; s_input_ready = 1; }
+            }
+        }
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
