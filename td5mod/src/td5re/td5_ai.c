@@ -7400,6 +7400,25 @@ static int td5_ai_td6_drivable_band(int route_span, int lane_count,
     if (g_active_td6_level <= 0 || lane_count <= 2 || route_span < 0)
         return 0;
     {
+        /* [#18 2026-06-16] BRANCH corridors: the extended branch route rows were
+         * authored as a single CENTER sample (left==right==128) -> the band below
+         * collapses to one lane, so traffic only ever takes the center / one side
+         * of the two-way branch road (user: "traffic on the LEFT track only"). A
+         * branch is a real two-way street, so use the central-HALF band instead,
+         * which straddles the lane-direction split (lanes <lc/2 vs >=lc/2) and so
+         * populates BOTH directions/tracks. Sidewalk-edge lanes stay excluded. */
+        int ringL = td5_track_get_ring_length();
+        if (ringL > 0 && route_span >= ringL) {
+            int m = lane_count / 4;
+            lo = m;
+            hi = lane_count - 1 - m;
+            if (hi < lo) hi = lo;
+            if (out_lo) *out_lo = lo;
+            if (out_hi) *out_hi = hi;
+            return (lo > 0 || hi < lane_count - 1);
+        }
+    }
+    {
         const uint8_t *lt = g_route_tables[0];
         const uint8_t *rt = g_route_tables[1];
         size_t idx = (size_t)(unsigned)route_span * 3u;

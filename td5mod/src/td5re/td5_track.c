@@ -628,7 +628,7 @@ static int td6_wall_deadzone(void)
     static int s = -1;
     if (s < 0) {
         const char *e = getenv("TD5RE_TD6_WALL_DEADZONE");
-        s = e ? atoi(e) : 320;   /* world-units of slack before a TD6 wall fires */
+        s = e ? atoi(e) : 320;   /* world-units of slack before a TAPER wall fires */
         if (s < 0) s = 0;
     }
     return s;
@@ -749,7 +749,10 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
     /* [task#8] TD6 shallow-wall deadzone (td6_wall_deadzone): a wall fires only
      * once penetration exceeds this slack, suppressing the false taper /
-     * section-boundary "invisible walls". 0 on native TD5. */
+     * section-boundary "invisible walls". 0 on native TD5. The slack also softens
+     * REAL walls (the car drives ~slack units in before it fires) — that is the
+     * fundamental trade-off; tune via TD5RE_TD6_WALL_DEADZONE (lower = firmer walls
+     * but the false taper/boundary jolts start to return below ~280). */
     const int32_t WALL_DEADZONE = (g_active_td6_level > 0) ? td6_wall_deadzone() : 0;
 
     for (int pi = 0; pi < 4; pi++) {
