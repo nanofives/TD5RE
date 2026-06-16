@@ -533,9 +533,12 @@ int td5_frontend_init_resources(void) {
     }
 
     /* ---- ArrowButtonz (left/right scroll arrows on selector buttons) ----
-     * 12x36 sprite sheet (DAT_00496284 in original, FUN_00426260).
-     * Red colorkey. */
-    if (s_arrowbuttonz_tex_page < 0) {
+     * 12x36 sprite sheet (DAT_00496284 in original, FUN_00426260). Red colorkey.
+     * [2026-06-16] BITMAP FALLBACK ONLY: under VectorUI (default) the selector
+     * arrows are drawn procedurally via ps_arrow (fe_draw_option_arrows returns
+     * before the texture path), so the ArrowButtonz.png asset was retired. Skip
+     * the load entirely when VectorUI is on so there's no "not found" warning. */
+    if (!g_td5.ini.vector_ui && s_arrowbuttonz_tex_page < 0) {
         s_arrowbuttonz_tex_page = SHARED_PAGE_ARROWBTNZ;
         {
             void *pixels = NULL;
