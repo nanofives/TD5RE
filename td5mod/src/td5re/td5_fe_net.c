@@ -740,8 +740,14 @@ void Screen_DirectConnect(void) {
                 s_net_join_wait_start = td5_plat_time_ms();
                 s_inner_state = 5;                /* wait for JOIN_ACK */
             } else {
-                TD5_LOG_W(LOG_TAG, "Direct join '%s' failed", s_net_direct_ip);
-                td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
+                /* [ITEM 3 2026-06-16] td5_net_join_direct() returns false only
+                 * when the address can't be resolved/parsed -- the old code
+                 * bounced silently to the chooser, so a typo'd or bogus IP gave
+                 * no feedback. Surface it like the timeout/full failures. */
+                TD5_LOG_W(LOG_TAG, "Direct join '%s' failed (bad address)", s_net_direct_ip);
+                snprintf(s_net_join_fail_msg, sizeof(s_net_join_fail_msg),
+                         "COULD NOT CONNECT: INVALID ADDRESS");
+                s_inner_state = 9;                /* failure message */
             }
             break;
         }
@@ -809,7 +815,10 @@ void Screen_DirectConnect(void) {
                 s_net_join_wait_start = td5_plat_time_ms();
                 s_inner_state = 5;
             } else {
-                td5_frontend_set_screen(TD5_SCREEN_DIRECT_CONNECT);
+                /* [ITEM 3] same bad-address feedback on the password re-join. */
+                snprintf(s_net_join_fail_msg, sizeof(s_net_join_fail_msg),
+                         "COULD NOT CONNECT: INVALID ADDRESS");
+                s_inner_state = 9;
             }
             break;
         }
@@ -1085,20 +1094,30 @@ void Screen_CreateSession(void) {
          * (index 1) tracks its button so it may move, but is left in place.
          * The fixed indices 0..4 keep the LAN interaction switch untouched. */
         if (s_cs_direct) {
-            frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 (value @166) */
+            /* [ITEM 1 2026-06-16] Direct-host setup has 7 rows; the old layout
+             * spaced them unevenly (48/48/40/36/40/40) and ran down to y=412.
+             * Re-laid out with a uniform 40px pitch from y=148 so the rows are
+             * evenly spaced and the block sits a little higher. Creation order
+             * fixes the indices (0..6); the y-positions set the VISUAL order
+             * (NAME, MAX, PASSWORD, UPNP, PORT, HOST, BACK). Navigation is
+             * spatial (frontend_spatial_pick), so visual!=index order is fine.
+             * NAME/PASSWORD value text is drawn by the overlay relative to the
+             * live button row now, so re-spacing no longer detaches it. */
+            frontend_create_button("SESSION NAME", 120, 148, 224, 0x20);  /* 0 */
             {   /* 1: MAX PLAYERS — selector-style (value tracks the button) */
-                int bi = frontend_create_button("", 120, 208, 224, 0x20);
+                int bi = frontend_create_button("", 120, 188, 224, 0x20);
                 if (bi >= 0 && bi < FE_MAX_BUTTONS) s_buttons[bi].is_selector = 1;
             }
-            frontend_create_button("PASSWORD",     120, 256, 224, 0x20);  /* 2 (value @262) */
-            frontend_create_button("HOST",         120, 372, 160, 0x20);  /* 3 */
-            frontend_create_button(SNK_BackButTxt, 120, 412, 112, 0x20);  /* 4 */
+            frontend_create_button("PASSWORD",     120, 228, 224, 0x20);  /* 2 */
+            frontend_create_button("HOST",         120, 348, 160, 0x20);  /* 3 */
+            frontend_create_button(SNK_BackButTxt, 120, 388, 112, 0x20);  /* 4 */
             /* 5/6: UPnP toggle + GAME PORT. Plain-label buttons (NOT selectors)
              * so the generic button renderer draws the live label -- the
              * selector value renderer in td5_frontend.c only knows MAX PLAYERS.
-             * The labels are refreshed each interaction frame (case 2). */
-            frontend_create_button("UPNP: ON",     120, 296, 224, 0x20);  /* 5 */
-            frontend_create_button("GAME PORT",    120, 332, 224, 0x20);  /* 6 */
+             * The labels are refreshed each interaction frame (case 2). They sit
+             * between PASSWORD and HOST visually (indices stay 5/6). */
+            frontend_create_button("UPNP: ON",     120, 268, 224, 0x20);  /* 5 */
+            frontend_create_button("GAME PORT",    120, 308, 224, 0x20);  /* 6 */
         } else {
             frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 */
             {   /* 1: MAX PLAYERS — selector-style (value + ◄ ► inside the button,

@@ -8815,11 +8815,20 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
 static void frontend_render_create_session_overlay(float sx, float sy) {
     char buf[72], mask[34];
     int n, k;
+    float bx, by, bw, bh;
     uint32_t c_name = (s_cs_edit == 1) ? 0xFFFFE080u : 0xFFFFFFFFu;
     uint32_t c_pass = (s_cs_edit == 2) ? 0xFFFFE080u : 0xFFFFFFFFu;
     snprintf(buf, sizeof(buf), "%s%s", s_create_session_name,
              (s_cs_edit == 1) ? "_" : "");
-    fe_draw_text(368.0f * sx, 166.0f * sy, buf, c_name, sx, sy);
+    /* [ITEM 1 2026-06-16] Value text rides to the RIGHT of its label button,
+     * anchored to the live button row (index 0 = NAME) instead of a hard-coded
+     * y. The direct-host setup re-spaces its rows, so a fixed y would detach the
+     * value from its row; deriving it from the rect keeps them together and also
+     * tracks the slide-in animation. (+6px matches the original 160->166 offset.) */
+    if (s_buttons[0].active) {
+        frontend_get_button_render_rect(0, sx, sy, &bx, &by, &bw, &bh);
+        fe_draw_text(368.0f * sx, by + 6.0f * sy, buf, c_name, sx, sy);
+    }
     n = (int)strlen(s_lobby_password);
     if (n > 32) n = 32;
     for (k = 0; k < n; k++) mask[k] = '*';
@@ -8828,7 +8837,10 @@ static void frontend_render_create_session_overlay(float sx, float sy) {
         snprintf(buf, sizeof(buf), "%s_", mask);
     else
         snprintf(buf, sizeof(buf), "%s", n ? mask : "(OPEN)");
-    fe_draw_text(368.0f * sx, 262.0f * sy, buf, c_pass, sx, sy);
+    if (s_buttons[2].active) {
+        frontend_get_button_render_rect(2, sx, sy, &bx, &by, &bw, &bh);
+        fe_draw_text(368.0f * sx, by + 6.0f * sy, buf, c_pass, sx, sy);
+    }
 }
 
 /* [S31] MAX PLAYERS selector content — POST-button pass so the centred
@@ -8999,6 +9011,14 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_DIRECT_CONNECT:
         /* Only during the IP-entry (3) / password-entry (8) sub-states. */
         if ((s_inner_state == 3 || s_inner_state == 8) && s_text_input_state != 0)
+            frontend_render_text_input();
+        break;
+    case TD5_SCREEN_SESSION_PICKER:
+        /* [ITEM 4 2026-06-16] LAN join password prompt (inner state 9). Without
+         * this case the text-input widget was never composited, so a passworded
+         * LAN join captured keystrokes invisibly -- the user saw no field and
+         * couldn't tell the password was being typed. Mirrors DIRECT_CONNECT. */
+        if (s_inner_state == 9 && s_text_input_state != 0)
             frontend_render_text_input();
         break;
     case TD5_SCREEN_NETWORK_LOBBY:
