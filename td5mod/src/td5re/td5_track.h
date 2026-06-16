@@ -111,6 +111,14 @@ int              td5_track_get_ring_length(void);
 int              td5_track_branch_to_main_span(int span);
 /* Inverse: a main-ring span -> the parallel branch-corridor span, or -1 if none. */
 int              td5_track_main_to_branch_span(int main_span);
+/* Branch-corridor enumeration (jump-table records) for the traffic spawner:
+ * td5_track_corridor_count() -> number of corridors; td5_track_corridor_info()
+ * fills the idx-th corridor's BRANCH span range [branch_lo,branch_hi] (displaced,
+ * >= ring) and the parallel MAIN range [main_lo,main_hi] it bypasses. Returns 1
+ * on success, 0 if idx is out of range / no table / malformed record. */
+int              td5_track_corridor_count(void);
+int              td5_track_corridor_info(int idx, int *branch_lo, int *branch_hi,
+                                         int *main_lo, int *main_hi);
 /* Are TD6 branch corridors currently drivable (walker takes/traverses them)? */
 int              td5_track_td6_branches_drivable(void);
 /* TD6 per-lane surface grid (header[6]): class at (span, lateral byte 0..255),
@@ -235,6 +243,15 @@ int32_t td5_track_compute_contact_height_bestlane(int span_index,
 int32_t td5_track_compute_contact_height_bounded(int span_index, int carried_sub_lane,
                                                  int32_t world_x, int32_t world_z,
                                                  int16_t *out_normal);
+/* [task#4] Stable per-(slot,node) ground height for the vehicle SHADOW grid:
+ * keeps a persistent per-node span/lane seed + converging walk so a node does
+ * not oscillate between adjacent spans on a slope (uphill shadow flicker).
+ * Gated by TD5RE_SHADOW_PROBE_FIX (default on; off = old chassis-seeded
+ * single-step behavior). Render-only; never used by physics. */
+int32_t td5_track_shadow_probe_height(int slot, int node,
+                                      int chassis_span, int chassis_lane,
+                                      int32_t world_x, int32_t world_z,
+                                      int16_t *out_normal);
 /* Returns nonzero if the most recent contact-height probe capped an upward
  * out-of-quad extrapolation (fast-tilt OOB launch fix). The per-wheel contact
  * refresh reads this immediately after its bestlane call to force the wheel
@@ -253,6 +270,19 @@ int  td5_track_get_span_center_world(int span_index,
                                       int *out_x, int *out_y, int *out_z);
 int  td5_track_get_span_lane_world(int span_index, int sub_lane,
                                     int *out_x, int *out_y, int *out_z);
+
+/* [STUCK RECOVERY 2026-06-15] Resolve a "respawn a few spans back, centred" pose
+ * for the player car-recovery feature. Steps `spans_back` spans behind
+ * `from_span` (wraps on a closed circuit, clamps at span 0 on point-to-point),
+ * skips junction span-types 9/10, picks the target span's CENTER lane, and
+ * returns its center-lane world XYZ (24.8 fixed-point) plus the resolved span +
+ * sub-lane. Heading is NOT computed here — the caller runs td5_track_compute_
+ * heading() on the actor after writing the span (mirrors the spawn-pose path).
+ * Returns 1 on success, 0 if no track is loaded / no drivable span resolved.
+ * Any out-pointer may be NULL. */
+int  td5_track_get_recovery_pose(int from_span, int spans_back,
+                                 int *out_span, int *out_sub_lane,
+                                 int *out_x, int *out_y, int *out_z);
 
 /* Byte-faithful port of InitActorTrackSegmentPlacement @ 0x00445F10.
  * - actor_at_0x80 must point to actor + 0x80 (span_raw int16); the helper

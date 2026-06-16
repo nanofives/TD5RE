@@ -75,6 +75,10 @@ static int  cfgini_write_cup(const char *path);
 static int  cfgini_read_cup(const char *path);
 static int  cup_load_binary_file(const char *path);   /* legacy CupData.td5 reader */
 static int  cup_is_binary_valid(const char *path);    /* legacy CRC self-check */
+static void profiles_ensure_loaded(void);             /* lazy [Profiles] read */
+static void profiles_read(void);                      /* read [Profiles] from progress.ini */
+static void td6_records_ensure_loaded(void);          /* lazy [TD6Records] read */
+static void td6_records_read(void);                   /* read [TD6Records] from progress.ini */
 
 /* ========================================================================
  * Config.td5 buffer layout (5351 bytes)
@@ -620,6 +624,25 @@ static uint32_t s_cup_cross_ref_1;                            /* 0x48F368 */
 static uint32_t s_cup_cross_ref_2;                            /* 0x48F370 */
 static uint32_t s_cup_cross_ref_3;                            /* 0x48F378 */
 
+/* -- Player profiles (port enhancement #11) --
+ * Stored in td5re_progress.ini [Profiles]; loaded lazily on first access,
+ * rewritten on every save/delete. s_profiles_loaded gates the lazy read so a
+ * single missing/empty store yields count 0 without re-reading every call. */
+static TD5_Profile s_profiles[TD5_MAX_PROFILES];
+static int         s_profile_count;
+static int         s_profiles_loaded;
+
+/* -- TD6 high-score records (port enhancement #2b) --
+ * One TD5_NpcGroup-shaped record table per TD6 level, holding ONLY genuine
+ * player runs (no seed/placeholder names). Stored in td5re_progress.ini
+ * [TD6Records.LevelNN]; loaded lazily on first access, rewritten on every
+ * insert. A group with header == -1 means "no records yet" (distinct from a
+ * cleared time group whose header is 0). TD6 levels number up to ~39 (the
+ * highest level<NN>.zip); 48 gives headroom. */
+#define TD5_MAX_TD6_RECORD_LEVELS 48
+static TD5_NpcGroup s_td6_records[TD5_MAX_TD6_RECORD_LEVELS];
+static int          s_td6_records_loaded;
+
 /* ========================================================================
  * Initialization / Shutdown
  * ======================================================================== */
@@ -632,6 +655,13 @@ int td5_save_init(void)
     memset(s_cup_buf, 0, sizeof(s_cup_buf));
     s_cup_buf_size = 0;
     memcpy(s_npc_group_table, k_npc_default_table, sizeof(s_npc_group_table));
+
+    /* TD6 records start EMPTY (header -1) — never seeded with fake names. The
+     * lazy loader (td6_records_ensure_loaded) fills genuine runs from disk. */
+    memset(s_td6_records, 0, sizeof(s_td6_records));
+    for (i = 0; i < TD5_MAX_TD6_RECORD_LEVELS; i++)
+        s_td6_records[i].header = -1;
+    s_td6_records_loaded = 0;
 
     /* Default audio */
     s_sfx_volume = 80;
@@ -1893,6 +1923,62 @@ static int cfgini_write_progress(void)
         cfgini_add(&w, "\r\n");
     }
 
+    /* [#11] Player profiles -- persistent name + colour + car presets. Written
+     * after the high-score block so they share this one organized file. Ensure
+     * the store is loaded first: an external td5_save_write_config() (e.g. a
+     * rebind save) must not clobber on-disk profiles with an empty in-memory
+     * set just because the profile API has not been touched yet this run. */
+    profiles_ensure_loaded();
+    cfgini_add(&w, "[Profiles]\r\n");
+    cfgini_add(&w, "; Saved player presets for the multiplayer name/colour screen.\r\n");
+    cfgini_add(&w, "Count = %d\r\n", s_profile_count);
+    for (int i = 0; i < s_profile_count; i++) {
+        const TD5_Profile *pr = &s_profiles[i];
+        char nm[17];
+        memcpy(nm, pr->name, 16);
+        nm[16] = '\0';
+        /* Defensively strip any control byte so it cannot break the INI. */
+        for (int c = 0; c < 16; c++) {
+            if ((unsigned char)nm[c] < 0x20) { nm[c] = '\0'; break; }
+        }
+        cfgini_add(&w, "Profile%dName = %s\r\n", i, nm);
+        cfgini_add(&w, "Profile%dAccent = %d\r\n", i, pr->accent);
+        cfgini_add(&w, "Profile%dCar = %d\r\n", i, pr->car);
+        cfgini_add(&w, "Profile%dPaint = %d\r\n", i, pr->paint);
+        cfgini_add(&w, "Profile%dColor = %d\r\n", i, pr->color);
+        cfgini_add(&w, "Profile%dTrans = %d\r\n", i, pr->trans);
+    }
+    cfgini_add(&w, "\r\n");
+
+    /* [#2b] TD6 per-track high-score records — genuine player runs only. Same
+     * entry layout as the TD5 high-score groups; header -1 = no records yet, so
+     * those levels are skipped here (nothing to persist). Loaded first so an
+     * unrelated write (e.g. a rebind save) can't drop on-disk TD6 records. */
+    td6_records_ensure_loaded();
+    cfgini_add(&w, "; TD6 high-score records: genuine player runs per TD6 level\r\n");
+    cfgini_add(&w, "; (no authored/seed names). Header: 0=TIME 1=LAP 2=PTS 4=TIME(ms).\r\n\r\n");
+    for (int lv = 0; lv < TD5_MAX_TD6_RECORD_LEVELS; lv++) {
+        const TD5_NpcGroup *grp = &s_td6_records[lv];
+        if (grp->header < 0) continue;        /* no records for this level */
+        cfgini_add(&w, "[TD6Records.Level%02d]\r\n", lv);
+        cfgini_add(&w, "Header = %d\r\n", grp->header);
+        for (int e = 0; e < 5; e++) {
+            const TD5_NpcEntry *en = &grp->entries[e];
+            char nm[17];
+            memcpy(nm, en->name, 16);
+            nm[16] = '\0';
+            for (int c = 0; c < 16; c++) {
+                if ((unsigned char)nm[c] < 0x20) { nm[c] = '\0'; break; }
+            }
+            cfgini_add(&w, "Entry%d.Name = %s\r\n", e, nm);
+            cfgini_add(&w, "Entry%d.Score = %d\r\n", e, en->score);
+            cfgini_add(&w, "Entry%d.Car = %d\r\n", e, en->car_id);
+            cfgini_add(&w, "Entry%d.AvgSpeed = %d\r\n", e, en->avg_speed);
+            cfgini_add(&w, "Entry%d.TopSpeed = %d\r\n", e, en->top_speed);
+        }
+        cfgini_add(&w, "\r\n");
+    }
+
     return cfgini_flush(&w, cfgini_progress_path());
 }
 
@@ -1937,7 +2023,267 @@ static int cfgini_read_progress(void)
             snprintf(key, sizeof key, "Entry%d.TopSpeed", e); en->top_speed = cfgini_get_i32(f, sec, key, en->top_speed);
         }
     }
+
+    /* [#11] Player profiles share this file -- load them in the same pass. */
+    profiles_read();
+    /* [#2b] TD6 records share this file too. */
+    td6_records_read();
     return 1;
+}
+
+/* ------------------------------ player profiles ---------------------------- */
+
+/* Cached TD5RE_PROFILES knob: 0 disables the persistent profile store (the API
+ * still works in-memory but never reads/writes disk). Default on. Resolved +
+ * logged once. */
+static int profiles_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_PROFILES");
+        cached = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "player profiles %s (TD5RE_PROFILES=%s)",
+                  cached ? "enabled" : "disabled", e ? e : "(unset)");
+    }
+    return cached;
+}
+
+/* Read the [Profiles] section of td5re_progress.ini into the static store.
+ * Tolerates a missing file / absent section (leaves count 0). */
+static void profiles_read(void)
+{
+    s_profile_count = 0;
+    memset(s_profiles, 0, sizeof(s_profiles));
+    if (!profiles_enabled()) return;
+
+    const char *f = cfgini_progress_path();
+    if (!td5_plat_file_exists(f)) return;
+
+    int n = td5_plat_ini_get_int(f, "Profiles", "Count", 0);
+    if (n < 0) n = 0;
+    if (n > TD5_MAX_PROFILES) n = TD5_MAX_PROFILES;
+
+    char val[64];
+    char key[24];
+    int out = 0;
+    for (int i = 0; i < n; i++) {
+        TD5_Profile *pr = &s_profiles[out];
+        snprintf(key, sizeof key, "Profile%dName", i);
+        if (td5_plat_ini_get_str(f, "Profiles", key, "", val, sizeof val) <= 0)
+            continue;                       /* skip nameless / missing slots */
+        size_t nlen = strlen(val);
+        if (nlen > 15) nlen = 15;           /* name field is 16B incl NUL */
+        if (nlen == 0) continue;
+        memset(pr->name, 0, sizeof pr->name);
+        memcpy(pr->name, val, nlen);
+        snprintf(key, sizeof key, "Profile%dAccent", i); pr->accent = cfgini_get_i32(f, "Profiles", key, 0);
+        snprintf(key, sizeof key, "Profile%dCar", i);    pr->car    = cfgini_get_i32(f, "Profiles", key, 0);
+        snprintf(key, sizeof key, "Profile%dPaint", i);  pr->paint  = cfgini_get_i32(f, "Profiles", key, 0);
+        snprintf(key, sizeof key, "Profile%dColor", i);  pr->color  = cfgini_get_i32(f, "Profiles", key, 0);
+        snprintf(key, sizeof key, "Profile%dTrans", i);  pr->trans  = cfgini_get_i32(f, "Profiles", key, 0);
+        out++;
+    }
+    s_profile_count = out;
+}
+
+/* Lazily load the profile store the first time the API is touched. Loading is
+ * gated separately from td5_save_init's progress read so the profile API works
+ * even if a caller reaches it before init (count 0 on a missing store). */
+static void profiles_ensure_loaded(void)
+{
+    if (s_profiles_loaded) return;
+    s_profiles_loaded = 1;
+    profiles_read();
+}
+
+int td5_save_profile_count(void)
+{
+    profiles_ensure_loaded();
+    return s_profile_count;
+}
+
+int td5_save_profile_get(int idx, TD5_Profile *out)
+{
+    profiles_ensure_loaded();
+    if (!out || idx < 0 || idx >= s_profile_count) return 0;
+    *out = s_profiles[idx];
+    return 1;
+}
+
+int td5_save_profile_save(const TD5_Profile *p)
+{
+    profiles_ensure_loaded();
+    if (!p) return -1;
+
+    /* Trim the incoming name to a clean 16B field (NUL-padded, no control
+     * bytes); reject empties -- the name is the upsert key. */
+    char name[16];
+    memset(name, 0, sizeof name);
+    {
+        int j = 0;
+        for (int i = 0; i < 16 && p->name[i]; i++) {
+            if ((unsigned char)p->name[i] < 0x20) break;
+            name[j++] = p->name[i];
+        }
+    }
+    if (name[0] == '\0') return -1;
+
+    /* UPSERT by name (case-insensitive). Both fields are exactly 16 bytes;
+     * _strnicmp with n=16 reads no further even when a full-length name has no
+     * NUL terminator. */
+    int slot = -1;
+    for (int i = 0; i < s_profile_count; i++) {
+        if (_strnicmp(s_profiles[i].name, name, 16) == 0) { slot = i; break; }
+    }
+    if (slot < 0) {
+        if (s_profile_count >= TD5_MAX_PROFILES) return -1;   /* store full */
+        slot = s_profile_count++;
+    }
+
+    s_profiles[slot] = *p;
+    memcpy(s_profiles[slot].name, name, 16);   /* store the cleaned name */
+
+    if (profiles_enabled())
+        cfgini_write_progress();               /* persist whole progress file */
+    return slot;
+}
+
+int td5_save_profile_delete(int idx)
+{
+    profiles_ensure_loaded();
+    if (idx < 0 || idx >= s_profile_count) return 0;
+
+    for (int i = idx; i < s_profile_count - 1; i++)
+        s_profiles[i] = s_profiles[i + 1];
+    s_profile_count--;
+    memset(&s_profiles[s_profile_count], 0, sizeof(s_profiles[0]));
+
+    if (profiles_enabled())
+        cfgini_write_progress();
+    return 1;
+}
+
+/* ---------------------------- TD6 high-score records ----------------------- */
+
+/* Cached TD5RE_TD6_NO_PLACEHOLDER_SCORES knob: when ON (default) TD6 tracks use
+ * this genuine-records store instead of clamping onto a TD5 NPC group's fake
+ * names. "0" disables it (returns NULL/-1 so the legacy clamp path renders the
+ * old placeholder list). Resolved + logged once. */
+static int td6_records_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_TD6_NO_PLACEHOLDER_SCORES");
+        cached = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "TD6 genuine high-score records %s (TD5RE_TD6_NO_PLACEHOLDER_SCORES=%s)",
+                  cached ? "enabled (no placeholder names)" : "disabled (legacy clamp)",
+                  e ? e : "(unset)");
+    }
+    return cached;
+}
+
+/* Read the [TD6Records.LevelNN] sections of td5re_progress.ini into the store.
+ * Tolerates a missing file / absent sections (those levels stay header -1). */
+static void td6_records_read(void)
+{
+    for (int lv = 0; lv < TD5_MAX_TD6_RECORD_LEVELS; lv++) {
+        memset(&s_td6_records[lv], 0, sizeof(s_td6_records[lv]));
+        s_td6_records[lv].header = -1;
+    }
+    if (!td6_records_enabled()) return;
+
+    const char *f = cfgini_progress_path();
+    if (!td5_plat_file_exists(f)) return;
+
+    char val[64];
+    char sec[28];
+    char key[24];
+    for (int lv = 0; lv < TD5_MAX_TD6_RECORD_LEVELS; lv++) {
+        snprintf(sec, sizeof sec, "TD6Records.Level%02d", lv);
+        int hdr = cfgini_get_i32(f, sec, "Header", -1);
+        if (hdr < 0) continue;                 /* no records section for this level */
+        TD5_NpcGroup *grp = &s_td6_records[lv];
+        grp->header = hdr;
+        for (int e = 0; e < 5; e++) {
+            TD5_NpcEntry *en = &grp->entries[e];
+            snprintf(key, sizeof key, "Entry%d.Name", e);
+            if (td5_plat_ini_get_str(f, sec, key, "", val, sizeof val) > 0) {
+                size_t nlen = strlen(val);
+                if (nlen > 15) nlen = 15;       /* name field is 16B incl NUL */
+                memset(en->name, 0, 16);
+                memcpy(en->name, val, nlen);
+            }
+            snprintf(key, sizeof key, "Entry%d.Score", e);    en->score     = cfgini_get_i32(f, sec, key, 0);
+            snprintf(key, sizeof key, "Entry%d.Car", e);      en->car_id    = cfgini_get_i32(f, sec, key, 0);
+            snprintf(key, sizeof key, "Entry%d.AvgSpeed", e); en->avg_speed = cfgini_get_i32(f, sec, key, 0);
+            snprintf(key, sizeof key, "Entry%d.TopSpeed", e); en->top_speed = cfgini_get_i32(f, sec, key, 0);
+        }
+    }
+}
+
+/* Lazily load the TD6 record store the first time the API is touched (mirrors
+ * profiles_ensure_loaded so it works even before a config load). */
+static void td6_records_ensure_loaded(void)
+{
+    if (s_td6_records_loaded) return;
+    s_td6_records_loaded = 1;
+    td6_records_read();
+}
+
+const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level)
+{
+    if (!td6_records_enabled()) return NULL;
+    td6_records_ensure_loaded();
+    if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return NULL;
+    if (s_td6_records[td6_level].header < 0) return NULL;   /* no records yet */
+    return &s_td6_records[td6_level];
+}
+
+int td5_save_td6_record_insert(int td6_level, int score_type,
+                               const char *name, int32_t score,
+                               int car_id, int32_t avg_speed, int32_t top_speed)
+{
+    if (!td6_records_enabled()) return -1;
+    td6_records_ensure_loaded();
+    if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return -1;
+    if (score == 0) return -1;                 /* DNF / no real time = no record */
+
+    TD5_NpcGroup *grp = &s_td6_records[td6_level];
+    int type = score_type & 3;                 /* 0/1=time, 2=points (4 -> 0) */
+    if (grp->header < 0) {                      /* first record for this level */
+        grp->header = score_type;
+        memset(grp->entries, 0, sizeof(grp->entries));
+    }
+
+    /* Find the insert rank, keeping the 5 entries sorted (time: lower is better;
+     * points: higher is better). Empty rows (name[0]==0) sort to the bottom. */
+    int ins_pos = 5;
+    for (int k = 0; k < 5; k++) {
+        if (grp->entries[k].name[0] == '\0') { ins_pos = k; break; }  /* fill a gap */
+        if (type < 2) { if (score <= grp->entries[k].score) { ins_pos = k; break; } }
+        else          { if (score >= grp->entries[k].score) { ins_pos = k; break; } }
+    }
+    if (ins_pos >= 5) return -1;               /* didn't beat any of the 5 */
+
+    /* Shift lower entries down one slot, then write the new record. */
+    for (int k = 3; k >= ins_pos; k--)
+        grp->entries[k + 1] = grp->entries[k];
+    TD5_NpcEntry *en = &grp->entries[ins_pos];
+    memset(en, 0, sizeof(*en));
+    if (name) {
+        size_t nlen = strlen(name);
+        if (nlen > 15) nlen = 15;
+        memcpy(en->name, name, nlen);
+    }
+    en->score     = score;
+    en->car_id    = car_id;
+    en->avg_speed = avg_speed;
+    en->top_speed = top_speed;
+
+    cfgini_write_progress();                   /* persist whole progress file */
+    TD5_LOG_I(LOG_TAG, "TD6 record inserted: level=%d rank=%d name='%s' score=%d",
+              td6_level, ins_pos, en->name, (int)score);
+    return ins_pos;
 }
 
 /* ------------------------------- cup resume -------------------------------- */

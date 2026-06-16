@@ -1632,9 +1632,12 @@ void Screen_GameOptions(void) {
                     s_game_option_checkpoint_timers ^= 1;
                     s_inner_state = 4;
                 } else if (active_button == 1) {
-                    /* [dynamic-traffic] 4-state volume: Off/Light/Normal/Heavy,
-                     * direction-aware so LEFT steps back through the cycle. */
-                    s_game_option_traffic = (s_game_option_traffic + delta) & 3;
+                    /* [dynamic-traffic] 5-state volume: Off/Light/Normal/Heavy/
+                     * Very-High, direction-aware so LEFT steps back through the
+                     * cycle (delta may be negative). */
+                    s_game_option_traffic =
+                        ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
+                         + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
                     s_inner_state = 4;
                 } else if (active_button == 2) {
                     s_game_option_cops ^= 1;
@@ -1664,7 +1667,11 @@ void Screen_GameOptions(void) {
                  * Selection, which persist g_td5.ini.laps themselves).
                  * [S02 (c) 2026-06-04] */
                 g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
+                /* [dynamic-traffic] Persist the full 0..4 volume (5-state row). */
                 g_td5.ini.traffic           = s_game_option_traffic;
+                if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
+                if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
+                    g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
                 g_td5.ini.cops              = s_game_option_cops;
                 g_td5.ini.difficulty        = s_game_option_difficulty;
                 g_td5.ini.dynamics          = s_game_option_dynamics;
@@ -2063,6 +2070,26 @@ void Screen_DisplayOptions(void) {
     }
 }
 
+/* [#9 2026-06-16] Knob: TD5RE_MP_OPT_NO_SPLIT (default ON). The split-screen
+ * layout is now chosen in the multiplayer "choose your screen" position screen
+ * (TD5_SCREEN_MP_POSITION), so the Multiplayer Options screen no longer owns it.
+ * Default ON drops the SPLIT LAYOUT selector row AND the dependent empty-cell
+ * (DISPLAY k) rows, re-flowing the remaining rows. Set TD5RE_MP_OPT_NO_SPLIT=0
+ * to restore the old rows. The underlying state (s_mp_layout_sel /
+ * s_mp_missing_content, defined in td5_frontend.c and still consumed by the
+ * race-init layout resolve + the position screen) is left untouched. */
+static int mp_opt_no_split(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_OPT_NO_SPLIT");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG,
+                  "MP Options SPLIT LAYOUT row (#9) %s (TD5RE_MP_OPT_NO_SPLIT=%s)",
+                  v ? "REMOVED" : "shown", e ? e : "default");
+    }
+    return v;
+}
+
 /* (Re)build the Multiplayer Options row buttons for the current player count. */
 static void mp_build_buttons(void)
 {
@@ -2077,6 +2104,11 @@ static void mp_build_buttons(void)
     if (s_mp_layout_sel < 0 || s_mp_layout_sel >= s_mp_layout_optcount)
         s_mp_layout_sel = 0;
     mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
+    /* [#9] When the SPLIT LAYOUT row is removed, the dependent empty-cell rows go
+     * with it: zero the missing count so neither the rows below nor the td5_frontend.c
+     * value/arrow render paths (which gate on s_mp_missing_count) appear. */
+    if (mp_opt_no_split())
+        missing = 0;
     s_mp_missing_count = missing;
 
     frontend_reset_buttons();
@@ -2097,8 +2129,14 @@ static void mp_build_buttons(void)
      * rubber-band, OFF = no player-distance boost/cut). */
     s_mp_btn_catchup = frontend_create_button(SNK_CatchupTxt, 120, y, 0x100, 0x20);
     y += 50;
-    s_mp_btn_layout = frontend_create_button(SNK_MpLayoutButTxt, 120, y, 0x100, 0x20);
-    y += 50;
+    /* [#9] SPLIT LAYOUT selector + its empty-cell (DISPLAY k) rows are owned by
+     * the MP "choose your screen" position screen now; default-on knob skips both
+     * (s_mp_btn_layout / s_mp_btn_missing[] stay -1, missing is forced 0 above) so
+     * the rows below re-flow up with no gap. TD5RE_MP_OPT_NO_SPLIT=0 restores them. */
+    if (!mp_opt_no_split()) {
+        s_mp_btn_layout = frontend_create_button(SNK_MpLayoutButTxt, 120, y, 0x100, 0x20);
+        y += 50;
+    }
     for (int k = 0; k < missing && k < 2; k++) {
         char lbl[24];
         snprintf(lbl, sizeof lbl, "%s %d", SNK_MpDisplayButTxt, k + 1);

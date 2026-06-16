@@ -50,6 +50,11 @@
 /** Per-frame message size on wire */
 #define FRAME_MSG_SIZE      TD5_NET_FRAME_MSG_SIZE      /* 0x80 = 128 bytes */
 
+/** [SEC] Bytes prepended to every lockstep DXPTYPE datagram: the per-session
+ *  auth token envelope [4B token][message]. Control messages (magic-tagged)
+ *  are NOT enveloped -- they lead with WS2_DISCOVERY_MAGIC instead. */
+#define NET_TOKEN_SIZE      4
+
 /** Timeout for lockstep barrier waits (ms) */
 #define SYNC_TIMEOUT_MS     20000
 
@@ -162,6 +167,7 @@ static int          s_slot_latency[TD5_NET_MAX_PLAYERS];/* per-slot RTT ms (-1 u
 static char         s_slot_name[TD5_NET_MAX_PLAYERS][32];/* client-side roster names           */
 static uint32_t     s_ping_last_ms;                     /* host: last PING broadcast clock     */
 static uint32_t     s_roster_info_last_ms;              /* host: last ROSTER_INFO broadcast    */
+static uint32_t     s_session_token;                    /* [SEC] per-session token (0 = unknown) */
 
 /* --- Session --- */
 static SessionInfo  s_session;
@@ -253,6 +259,7 @@ typedef struct DiscoveryMsg {
     uint32_t    has_password;        /* ANNOUNCE: 1 if the session needs a password */
     uint32_t    nak_reason;          /* JOIN_NAK: WS2_NAK_* */
     char        password[32];        /* JOIN_REQ: password the joiner supplies      */
+    uint32_t    session_token;       /* JOIN_ACK: per-session auth token (host->client) */
 } DiscoveryMsg;
 
 /* PING/PONG RTT probe (small; magic-tagged on the game socket). */
@@ -293,6 +300,10 @@ static SOCKET       s_ws2_socket = INVALID_SOCKET;
  * stale config from an earlier session cannot leak into local races. */
 static TD5_NetRaceConfig s_race_config;
 static int     s_race_config_valid = 0;
+static volatile LONG s_race_config_seq = 0;  /* [SEC 2026-06-15] seqlock guarding
+                                              * s_race_config across the worker
+                                              * thread (writer) and game thread
+                                              * (reader); odd = write in flight. */
 static int32_t s_slot_car[TD5_NET_MAX_PLAYERS]   = { -1, -1, -1, -1, -1, -1 };
 static int32_t s_slot_paint[TD5_NET_MAX_PLAYERS] = { 0 };
 static int32_t s_slot_td6_color[TD5_NET_MAX_PLAYERS] = { -1, -1, -1, -1, -1, -1 };
@@ -481,8 +492,10 @@ static DWORD WINAPI worker_thread_proc(LPVOID param)
         }
 
         if (result == WAIT_OBJECT_0 + EVT_RECEIVE) {
-            /* Receive event signaled -- drain all pending messages */
-            uint8_t recv_buf[RING_ENTRY_SIZE];
+            /* Receive event signaled -- drain all pending messages.
+             * +NET_TOKEN_SIZE: a DXPTYPE datagram arrives token-enveloped and is
+             * stripped down to <=RING_ENTRY_SIZE in ws2_transport_recv. */
+            uint8_t recv_buf[RING_ENTRY_SIZE + NET_TOKEN_SIZE];
             uint32_t sender_id = 0;
             int bytes_read;
 
@@ -678,6 +691,18 @@ static void handle_data_targeted(uint32_t sender, const void *data, int size)
     }
 }
 
+/* [SEC 2026-06-15] Publish the race config under the seqlock so a reader on the
+ * game thread (td5_net_get_race_config) can never observe a half-written struct
+ * torn by the worker thread mid-memcpy. Single writer per machine (host: game
+ * thread via td5_net_send; client: worker thread via handle_start). */
+static void race_config_publish(const void *src)
+{
+    InterlockedIncrement(&s_race_config_seq);            /* enter write (odd)  */
+    memcpy(&s_race_config, src, sizeof(s_race_config));
+    s_race_config_valid = 1;
+    InterlockedIncrement(&s_race_config_seq);            /* leave write (even) */
+}
+
 /**
  * Type 4 -- DXPSTART (4 bytes)
  * Host signals race start to each client.
@@ -693,8 +718,7 @@ static void handle_start(uint32_t sender, const void *data, int size)
     /* S31: the payload (after the type dword) carries the host's race config
      * -- adopt it so this machine launches the same track/cars/seed. */
     if (data && size >= 4 + (int)sizeof(TD5_NetRaceConfig)) {
-        memcpy(&s_race_config, (const uint8_t *)data + 4, sizeof(TD5_NetRaceConfig));
-        s_race_config_valid = 1;
+        race_config_publish((const uint8_t *)data + 4);
         TD5_LOG_I(NET_LOG, "DXPSTART config: seed=0x%08X track=%d dir=%d",
                   s_race_config.rng_seed, s_race_config.track_index,
                   s_race_config.reverse_direction);
@@ -1522,10 +1546,56 @@ static int ws2_transport_recv(uint32_t *sender_id, void *buf, int buf_size)
             continue;
         }
 
-        if (sender_id) {
-            *sender_id = ws2_resolve_sender_id(&from_addr);
+        /* [SEC 2026-06-15] DXPTYPE traffic is wrapped in a per-session token
+         * envelope [4B token][message]. Validate + strip it before anything
+         * else: an off-path blind spoofer that never saw the JOIN handshake
+         * cannot guess the random token, so it can't forge frames even knowing
+         * the endpoint addresses. (On-path sniffers can read the token off the
+         * wire -- out of scope; that needs per-packet crypto.) The token is not
+         * known in the pre-join window (== 0) -> fall back to the address check
+         * alone so legitimate early packets aren't dropped. */
+        if (ret < (int)(NET_TOKEN_SIZE + 4))
+            continue;                       /* too short for a token + a type */
+        {
+            uint32_t pkt_token;
+            memcpy(&pkt_token, buf, NET_TOKEN_SIZE);
+            if (s_session_token != 0 && pkt_token != s_session_token) {
+                TD5_LOG_W(NET_LOG, "Dropped DXPTYPE with bad session token");
+                continue;
+            }
+            memmove(buf, (uint8_t *)buf + NET_TOKEN_SIZE,
+                    (size_t)(ret - NET_TOKEN_SIZE));
+            ret -= NET_TOKEN_SIZE;
         }
-        return ret;
+
+        /* [SEC 2026-06-15] Source-validate lockstep DXPTYPE traffic before it
+         * reaches any handler. The protocol is star-topology + host-mediated,
+         * so the ONLY legitimate source is:
+         *   - on a client: the host's address;
+         *   - on the host: a known, joined peer (resolved id != 0).
+         * Dropping anything else stops a spoofed datagram from any other host
+         * on the network from injecting frames / DISCONNECT / ROSTER / RESYNC
+         * (trivial remote kick / roster-hijack / desync). UDP source addresses
+         * are still forgeable off-path -- a per-session token would be the
+         * stronger guarantee -- but this closes the unauthenticated LAN/any-host
+         * case at one choke point covering every DXPTYPE handler. */
+        {
+            uint32_t sid = ws2_resolve_sender_id(&from_addr);
+            if (s_is_host) {
+                if (sid == 0) {
+                    TD5_LOG_W(NET_LOG, "Dropped DXPTYPE from unknown source");
+                    continue;
+                }
+            } else if (from_addr.sin_addr.s_addr != s_ws2_host_addr.sin_addr.s_addr ||
+                       from_addr.sin_port != s_ws2_host_addr.sin_port) {
+                TD5_LOG_W(NET_LOG, "Dropped DXPTYPE from non-host source");
+                continue;
+            }
+            if (sender_id) {
+                *sender_id = sid;
+            }
+            return ret;
+        }
     }
 }
 
@@ -1554,10 +1624,24 @@ static int ws2_transport_send(uint32_t target_id, const void *data, int size)
     const SOCKADDR_IN *target_addr;
     int sent;
     int i;
+    uint8_t pkt[RING_ENTRY_SIZE + NET_TOKEN_SIZE];
+    int     pkt_len;
 
     if (s_ws2_socket == INVALID_SOCKET || !data || size <= 0 || !s_ws2_socket_bound) {
         return 0;
     }
+
+    /* [SEC 2026-06-15] Wrap the message in the per-session token envelope
+     * [4B token][message]; ws2_transport_recv validates + strips it. Senders
+     * always hold a non-zero token by the time they emit DXPTYPE traffic (host:
+     * from session create; client: from JOIN_ACK). */
+    if (size > (int)sizeof(pkt) - NET_TOKEN_SIZE) {
+        TD5_LOG_W(NET_LOG, "send size %d exceeds token envelope", size);
+        return 0;
+    }
+    memcpy(pkt, &s_session_token, NET_TOKEN_SIZE);
+    memcpy(pkt + NET_TOKEN_SIZE, data, (size_t)size);
+    pkt_len = size + NET_TOKEN_SIZE;
 
     if (target_id == 0) {
         if (s_is_host) {
@@ -1566,7 +1650,7 @@ static int ws2_transport_send(uint32_t target_id, const void *data, int size)
                 if (i == s_local_slot || !s_roster[i].active || !s_ws2_peer_valid[i]) {
                     continue;
                 }
-                sent = sendto(s_ws2_socket, (const char *)data, size, 0,
+                sent = sendto(s_ws2_socket, (const char *)pkt, pkt_len, 0,
                               (const struct sockaddr *)&s_ws2_peer_addrs[i],
                               (int)sizeof(s_ws2_peer_addrs[i]));
                 if (sent == SOCKET_ERROR) {
@@ -1587,7 +1671,7 @@ static int ws2_transport_send(uint32_t target_id, const void *data, int size)
         return 0;
     }
 
-    sent = sendto(s_ws2_socket, (const char *)data, size, 0,
+    sent = sendto(s_ws2_socket, (const char *)pkt, pkt_len, 0,
                   (const struct sockaddr *)target_addr, (int)sizeof(*target_addr));
     if (sent == SOCKET_ERROR) {
         TD5_LOG_W(NET_LOG, "sendto(target=%u) failed: %d", target_id, (int)WSAGetLastError());
@@ -1769,6 +1853,7 @@ static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
     ack.assigned_slot = (uint32_t)slot;
     ack.assigned_id   = s_roster[slot].id;
     ack.game_port     = (uint16_t)s_game_port;
+    ack.session_token = s_session_token;   /* [SEC] only sent after the pw gate */
     strncpy(ack.session_name, s_session.name, sizeof(ack.session_name) - 1);
 
     if (reply_socket != INVALID_SOCKET) {
@@ -1858,6 +1943,7 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
             if (slot >= 0 && slot < TD5_NET_MAX_PLAYERS) {
                 s_join_nak_reason = 0;
                 s_local_slot = slot;
+                s_session_token = dm->session_token;   /* [SEC] adopt the session token */
                 s_roster[slot].id = dm->assigned_id ? dm->assigned_id : (uint32_t)(slot + 1);
                 s_roster[slot].active = 1;
                 if (!s_roster[0].active) { s_roster[0].id = 1; s_roster[0].active = 1; }
@@ -1925,8 +2011,14 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
             for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
                 s_roster[i].active = ri->active[i] ? 1 : 0;
                 s_slot_latency[i] = (int)ri->latency_ms[i];
-                snprintf(s_slot_name[i], sizeof(s_slot_name[i]), "%s", ri->names[i]);
-                snprintf(s_roster[i].name, sizeof(s_roster[i].name), "%s", ri->names[i]);
+                /* [SEC 2026-06-15] Bound the read: ri->names[i] is wire data
+                 * and may not be NUL-terminated within its 32 bytes; a bare
+                 * "%s" would over-read past the field/struct/stack recv buffer.
+                 * The precision caps the source scan at the field width. */
+                snprintf(s_slot_name[i], sizeof(s_slot_name[i]), "%.*s",
+                         (int)sizeof(ri->names[i]) - 1, ri->names[i]);
+                snprintf(s_roster[i].name, sizeof(s_roster[i].name), "%.*s",
+                         (int)sizeof(ri->names[i]) - 1, ri->names[i]);
             }
         }
         break;
@@ -2223,6 +2315,7 @@ int td5_net_init(void)
     s_join_nak_reason = 0;
     s_ping_last_ms = 0;
     s_roster_info_last_ms = 0;
+    s_session_token = 0;
     {
         int li;
         for (li = 0; li < TD5_NET_MAX_PLAYERS; li++) {
@@ -2375,12 +2468,19 @@ void td5_net_tick(void)
 
             case WS2_DISC_JOIN_ACK:
                 if (!s_is_host && s_local_slot < 0) {
-                    s_local_slot = (int)disc_msg.assigned_slot;
-                    if (s_local_slot >= 0 && s_local_slot < TD5_NET_MAX_PLAYERS) {
-                        s_roster[s_local_slot].id = disc_msg.assigned_id;
-                        s_roster[s_local_slot].active = 1;
+                    /* [SEC 2026-06-15] Validate the assigned slot BEFORE storing
+                     * it: an out-of-range value used to persist in s_local_slot
+                     * (only the roster write was guarded) and could later index
+                     * s_player_sync_table[] out of bounds. Mirrors the primary
+                     * game-socket JOIN_ACK path in ws2_handle_game_control. */
+                    int slot = (int)disc_msg.assigned_slot;
+                    if (slot >= 0 && slot < TD5_NET_MAX_PLAYERS) {
+                        s_local_slot = slot;
+                        s_session_token = disc_msg.session_token;  /* [SEC] */
+                        s_roster[slot].id = disc_msg.assigned_id;
+                        s_roster[slot].active = 1;
                         TD5_LOG_I(NET_LOG, "Assigned slot %d, id %u",
-                                  s_local_slot, disc_msg.assigned_id);
+                                  slot, disc_msg.assigned_id);
                     }
                 }
                 break;
@@ -2463,6 +2563,25 @@ void td5_net_tick(void)
  *   4. Create local player in slot 0
  *   5. Refresh roster and broadcast
  */
+/* [SEC 2026-06-15] Generate the per-session auth token (host, at session
+ * create). High-res QPC + wall clock so an off-path attacker that never saw
+ * the JOIN handshake cannot predict it; deliberately kept OUT of the CRT
+ * rand() stream (lockstep determinism). Never 0 (reserved "unknown") and never
+ * the discovery magic (that value would collide with the control-message tag
+ * used to demux datagrams on the wire). */
+static uint32_t net_make_session_token(void)
+{
+    LARGE_INTEGER qpc;
+    uint32_t t;
+    QueryPerformanceCounter(&qpc);
+    t = (uint32_t)qpc.QuadPart
+        ^ ((uint32_t)(qpc.QuadPart >> 32) * 2654435761u)
+        ^ (td5_plat_time_ms() * 40503u);
+    if (t == 0) t = 0xA5A5A5A5u;
+    if (t == WS2_DISCOVERY_MAGIC) t ^= 0xFFFFFFFFu;
+    return t;
+}
+
 /**
  * Build the human-readable host/connect status line for the lobby UI
  * (local IP + port, plus UPnP outcome when hosting Direct).
@@ -2517,6 +2636,7 @@ static void net_begin_client_join(const char *player_name)
     s_is_client = 1;
     s_connection_lost = 0;
     s_local_slot = -1;            /* assigned by host via JOIN_ACK / DXPROSTER */
+    s_session_token = 0;          /* [SEC] learned from the host's JOIN_ACK */
     memset(s_roster, 0, sizeof(s_roster));
 
     if (player_name)
@@ -2554,6 +2674,11 @@ int td5_net_create_session_ex(const char *name, const char *player_name,
     s_game_port = (game_port > 0 && game_port <= 65535) ? game_port : WS2_GAME_PORT;
     s_enable_upnp = enable_upnp ? 1 : 0;
     s_upnp_status = TD5_NET_UPNP_IDLE;
+
+    /* [SEC 2026-06-15] Mint this session's auth token. Sent to each client in
+     * its JOIN_ACK (after the password gate) and required on every DXPTYPE
+     * datagram thereafter -- see ws2_transport_send / _recv. */
+    s_session_token = net_make_session_token();
 
     /* Fill session info */
     memset(&s_session, 0, sizeof(s_session));
@@ -3185,6 +3310,28 @@ int td5_net_get_slot_car(int slot, int *car_index, int *paint_index)
 /** The armed race config (host: as broadcast; client: as received). */
 int td5_net_get_race_config(TD5_NetRaceConfig *out)
 {
+    /* [SEC 2026-06-15] Seqlock read: retry until we capture a snapshot taken
+     * outside any writer's update window (even sequence, unchanged across the
+     * copy). The config changes at most once per race, so this almost never
+     * spins; the bounded loop just guarantees forward progress. */
+    int tries;
+    for (tries = 0; tries < 1000; tries++) {
+        LONG s1 = InterlockedCompareExchange(&s_race_config_seq, 0, 0);
+        TD5_NetRaceConfig tmp;
+        int  valid;
+        LONG s2;
+        if (s1 & 1)
+            continue;                       /* writer mid-update */
+        valid = s_race_config_valid;
+        tmp   = s_race_config;              /* struct snapshot */
+        s2    = InterlockedCompareExchange(&s_race_config_seq, 0, 0);
+        if (s1 == s2) {                     /* no write straddled the copy */
+            if (!valid) return 0;
+            if (out) *out = tmp;
+            return 1;
+        }
+    }
+    /* Pathological contention fallback (effectively unreachable). */
     if (!s_race_config_valid) return 0;
     if (out) *out = s_race_config;
     return 1;
@@ -3250,8 +3397,7 @@ int td5_net_send(TD5_NetMsgType type, const void *data, int size)
         /* S31: archive the race config we are about to broadcast so the
          * host's own launch path reads the exact bytes the clients get. */
         if (data && size >= (int)sizeof(TD5_NetRaceConfig)) {
-            memcpy(&s_race_config, data, sizeof(TD5_NetRaceConfig));
-            s_race_config_valid = 1;
+            race_config_publish(data);
         }
         for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
             if (i == s_local_slot) continue;

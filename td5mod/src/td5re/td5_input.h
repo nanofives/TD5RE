@@ -128,6 +128,18 @@ typedef struct TD5_InputRecordBuffer {
     int32_t  track_index;
     int32_t  entry_count;
     int32_t  last_frame_index;
+    /* [BUG 5b 2026-06-15] StartSpanOffset captured at WriteOpen (record) so a
+     * View Replay can re-apply the SAME per-slot grid shift the recorded run
+     * used. The dev StartSpanOffset (g_td5.ini.start_span_offset) moves every
+     * car further along the track at spawn; it is read fresh in
+     * td5_game_init_race_session at BOTH record and playback. If the live INI/CLI
+     * offset differs at playback (or a persisted replay is loaded in a session
+     * with a different offset) the player spawns at a different span than when
+     * recorded, so the recorded input plays back from the wrong start and the run
+     * diverges. The game reads this back via td5_input_replay_start_span_offset()
+     * and overrides the live offset on playback. Same treatment as the captured
+     * RNG seed. */
+    int32_t  start_span_offset;
     TD5_InputRecordEntry entries[TD5_INPUT_REC_MAX_ENTRIES];
 
     /* Write state */
@@ -256,6 +268,28 @@ uint8_t  td5_input_get_gear(int slot);
 int      td5_input_get_rear_view(int slot);
 
 /* ========================================================================
+ * Public API -- Frontend camera-button edge getters (#6 support)
+ *
+ * Edge-triggered (return 1 exactly once per press), per LOCAL human player
+ * index (0..s_active_players-1, NOT an actor slot). Drive the MP position screen
+ * (td5_fe_race.c) even though no race owns the device. Safe to call every frame
+ * from the frontend; reading CONSUMES the edge (a held button fires once per
+ * press). Gated by TD5RE_FRONTEND_CAM_BUTTONS (cached; default ON). "0" makes
+ * both always return 0 (the edge latches are never armed).
+ *   _change_camera = CHANGE VIEW (keyboard TD5_INPUT_CAMERA_CHANGE) OR a
+ *                    controller's Start/Menu button.
+ *   _front_view    = FRONT/REAR VIEW (keyboard TD5_INPUT_REAR_VIEW); on a
+ *                    controller it currently needs a bound device.
+ * [BUG #13] In the frontend the keyboard is read by td5_plat_input_poll, but the
+ * pad lives only on the shared NON-exclusive scan handles (no per-slot exclusive
+ * device exists pre-race), so the joystick is read via td5_plat_input_frontend_nav.
+ * That scan reader exposes only nav buttons (dir/A/B/Start), so just CHANGE-CAMERA
+ * (Start/Menu, the one free signal) is pad-driven here; FRONT-VIEW needs a
+ * platform scan action-button accessor (see td5_input.c). */
+int td5_input_frontend_change_camera_pressed(int player);
+int td5_input_frontend_front_view_pressed(int player);
+
+/* ========================================================================
  * Public API -- Configuration Setters
  *
  * Called by the game/frontend modules to configure the input system.
@@ -276,6 +310,16 @@ void td5_input_set_action_bindings(int player, const uint32_t *codes, int count)
 void td5_input_apply_device_selection(void);
 void td5_input_set_playback_active(int v);
 int  td5_input_is_playback_active(void);
+int  td5_input_replay_exit_requested(void);  /* [item 18] one-shot: controller Back/Start pressed during replay */
+/* [STUCK RECOVERY 2026-06-15] One-shot per-player edge: returns 1 exactly once
+ * when this LOCAL human player just pressed the manual car-recovery button
+ * (keyboard R / joystick L3, left-stick click). `player` is the local human
+ * player index (0..s_active_players-1), NOT the actor slot. Reading CONSUMES the
+ * edge so a held button fires recovery only once per press. Always 0 during
+ * replay playback (the manual-recovery latch is only updated on the live poll's
+ * normal-input branch). Gated by TD5RE_STUCK_RECOVERY (default ON); when the
+ * knob is "0" the latch is never armed and this always returns 0. */
+int  td5_input_recovery_requested(int player);
 void td5_input_set_replay_mode(int v);
 void td5_input_set_nos_enabled(int v);
 void td5_input_set_cop_mode(int v);
@@ -292,6 +336,14 @@ void td5_input_write_frame(uint32_t word0, uint32_t word1, int strip_mode);
 int  td5_input_read_open(const char *path);
 void td5_input_read_close(void);
 int  td5_input_read_frame(uint32_t *word0, uint32_t *word1);
+
+/* [BUG 5b 2026-06-15] StartSpanOffset captured into the replay buffer at record
+ * time (WriteOpen). The game reads this on playback to re-apply the same grid
+ * shift the recorded run used, so a replay recorded with a non-zero
+ * --StartSpanOffset plays back faithfully even if the live INI/CLI offset
+ * differs. Returns 0 for replays recorded before this field existed (legacy
+ * in-memory buffers and v1 on-disk files load it as 0 = no offset). */
+int32_t td5_input_replay_start_span_offset(void);
 
 /* ========================================================================
  * Public API -- Force Feedback

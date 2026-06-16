@@ -63,6 +63,16 @@ void td5_frontend_release_resources(void);
 /* --- Auto-race (skip frontend, launch from INI settings) --- */
 void td5_frontend_auto_race_setup(void);
 
+/* --- MP split-screen position select (#6): cell -> actor slot to show there.
+ * Returns -1 when positions are not active (knob off / not assigned / not the
+ * local MP race), so the InitRace viewport map keeps the identity default. --- */
+int  td5_frontend_mp_view_actor_slot(int cell);
+
+/* --- Per-local-player menu transmission choice (#2): 1 = MANUAL, 0 = AUTO.
+ * Used by td5_input.c to put a car into manual when the menu selects it
+ * (MP uses s_mp_player_trans[player]; single-player uses s_selected_transmission). --- */
+int  td5_frontend_get_player_manual(int player);
+
 /* --- UI rendering helpers --- */
 void td5_frontend_render_ui_rects(void);
 void td5_frontend_flush_sprite_blits(void);

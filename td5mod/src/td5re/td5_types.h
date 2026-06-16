@@ -89,8 +89,8 @@
 #define TD5_MAX_HUMAN_PLAYERS       9       /* up to 9 local split-screen humans */
 #define TD5_MAX_RACER_SLOTS         16      /* humans + AI = total racers */
 #define TD5_MAX_AI_OPPONENTS        (TD5_MAX_RACER_SLOTS - 1)  /* 15 */
-#define TD5_MAX_TRAFFIC_SLOTS       6
-#define TD5_MAX_TOTAL_ACTORS        (TD5_MAX_RACER_SLOTS + TD5_MAX_TRAFFIC_SLOTS)  /* 22 */
+#define TD5_MAX_TRAFFIC_SLOTS       16      /* PORT: raised from 6 — VERY HIGH traffic; extra cars reuse the 6 per-track models */
+#define TD5_MAX_TOTAL_ACTORS        (TD5_MAX_RACER_SLOTS + TD5_MAX_TRAFFIC_SLOTS)  /* 32 */
 #define TD5_TRAFFIC_SLOT_BASE       TD5_MAX_RACER_SLOTS  /* first traffic slot (was hardcoded 6) */
 #define TD5_MAX_VIEWPORTS           9       /* up to 9 split-screen viewports (3x3 grid) */
 #define TD5_LEGACY_RACE_SLOTS       6       /* original max racers; legacy/faithful modes keep this grid */
@@ -377,7 +377,12 @@ typedef enum TD5_ScreenIndex {
     TD5_SCREEN_LAN_MENU           = 31,  /* LAN GAME: host / discover */
     TD5_SCREEN_DIRECT_CONNECT     = 32,  /* DIRECT IP: host / join (IP entry) */
     TD5_SCREEN_NET_NICKNAME       = 33,  /* nickname entry (first net-play visit) */
-    TD5_SCREEN_COUNT               = 34
+    /* [MP POSITION SELECT 2026-06-15] local-MP split-screen cell picker (#8):
+     * inserted between the name/colour setup (phase 0) and the car grid (phase 1)
+     * of the simultaneous car-select flow. Each player picks which split-screen
+     * pane they occupy; see Screen_MpPosition. */
+    TD5_SCREEN_MP_POSITION        = 34,
+    TD5_SCREEN_COUNT               = 35
 } TD5_ScreenIndex;
 
 /* ========================================================================

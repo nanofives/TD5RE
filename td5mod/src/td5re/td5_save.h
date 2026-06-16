@@ -118,6 +118,33 @@ const TD5_NpcGroup *td5_save_get_npc_group(int group_index);
  *  [CONFIRMED @ 0x00413BC0 case 4]: original writes directly into g_npcRacerGroupTable. */
 TD5_NpcGroup *td5_save_get_npc_group_mutable(int group_index);
 
+/* ========================================================================
+ * TD6 high-score records (port enhancement #2b 2026-06-16)
+ *
+ * The original 26-group NPC high-score table only covers the 26 authored TD5
+ * tracks (td5_save_get_npc_group returns NULL for >= 26). TD6 tracks have NO
+ * authored group, so the post-race high-score screen used to clamp onto a TD5
+ * group and show its FAKE seed names. These accessors keep a separate, small
+ * per-TD6-track record table (same TD5_NpcGroup layout) holding ONLY genuine
+ * runs the player has set this/previous sessions — never placeholder names.
+ * Persisted in td5re_progress.ini under [TD6Records.LevelNN]; loaded lazily;
+ * gated by TD5RE_TD6_NO_PLACEHOLDER_SCORES (default on — see the .c). When the
+ * knob is off these return NULL / -1 so the legacy clamp path is unaffected.
+ * `td6_level` is the TD6 level number (td5_asset_td6_level_for_slot), 1-based.
+ * ======================================================================== */
+
+/** Read-only TD6 record group for `td6_level`. NULL if the level has no stored
+ *  records yet, the level is out of range, or the feature is disabled. */
+const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level);
+
+/** Insert a genuine record into the TD6 table for `td6_level`, keeping the 5
+ *  entries sorted by `score_type` (0/1/4 = time, lower better; 2 = points,
+ *  higher better). Persists to disk. Returns the inserted rank [0..4], or -1
+ *  if it didn't qualify / the feature is off / args are invalid. */
+int td5_save_td6_record_insert(int td6_level, int score_type,
+                               const char *name, int32_t score,
+                               int car_id, int32_t avg_speed, int32_t top_speed);
+
 /** Returns the speed-units setting (0=MPH, 1=KPH). */
 int td5_save_get_speed_units(void);
 
@@ -238,5 +265,43 @@ uint32_t td5_save_get_p2_device_index(void);
 /* [PORT ENHANCEMENT 2026-06] generic per-player accessors (player 0..8). */
 uint32_t td5_save_get_player_device_index(int player);
 void     td5_save_set_player_device_index(int player, uint32_t idx);
+
+/* ========================================================================
+ * Player profiles -- persistent name + colour + car presets
+ *
+ * [PORT ENHANCEMENT 2026-06 #11] Persistent store for the multiplayer
+ * name/colour frontend (td5_fe_race.c). A player configures a display name,
+ * an MP accent/identity colour and their car preset; the profile is saved so
+ * it can be reloaded in a future run. Persisted in td5re_progress.ini under
+ * the [Profiles] section (this module already owns that file). The store is
+ * loaded lazily on first access and rewritten to disk on every save/delete.
+ * ======================================================================== */
+
+typedef struct TD5_Profile {
+    char name[16];     /* player display name */
+    int  accent;       /* MP accent/identity colour index */
+    int  car;          /* last selected car index */
+    int  paint;        /* car paint/variant index */
+    int  color;        /* car colour index (if distinct from paint) */
+    int  trans;        /* transmission/auto pref (0/1) */
+} TD5_Profile;
+#define TD5_MAX_PROFILES 16
+
+/** Number of stored profiles (0..TD5_MAX_PROFILES). */
+int td5_save_profile_count(void);
+
+/** Fetch profile idx into *out. Returns 1 on success, 0 if idx out of range
+ *  or out is NULL. */
+int td5_save_profile_get(int idx, TD5_Profile *out);
+
+/** UPSERT a profile by name (case-insensitive): if a stored profile shares
+ *  the (trimmed) name it is overwritten in place, otherwise a new slot is
+ *  appended. Persists to disk. Returns the slot index, or -1 if the store is
+ *  full, p is NULL, or the name is empty. */
+int td5_save_profile_save(const TD5_Profile *p);
+
+/** Delete profile idx (slots after it shift down). Persists to disk.
+ *  Returns 1 on success, 0 if idx out of range. */
+int td5_save_profile_delete(int idx);
 
 #endif /* TD5_SAVE_H */

@@ -1,0 +1,3 @@
+LIBRARY wmaudsdk.dll
+EXPORTS
+    WMAudioCreateReader = WMAudioCreateReader@16 @1

@@ -27,6 +27,7 @@
 #include "td5re.h"
 #include "td5_vfx.h"
 #include "td5_ai.h"    /* td5_ai_traffic_get_draw_alpha (dynamic-traffic fade) */
+#include "td5_physics.h" /* td5_physics_get_crash_fx — crash-SFX trigger (Item #12) */
 
 /* Full actor struct needed for field-level access (engine speed, slip, position) */
 #include "../../../re/include/td5_actor_struct.h"
@@ -270,6 +271,36 @@ static int s_tracked_veh_actor;        /* Original: DAT_004c380c */
 static int s_siren_active_flag;        /* Original: DAT_004c3880 */
 static int s_siren_refreshed;          /* Original: DAT_004c3844 */
 
+/* Police/siren positional-audio fix (#15, PORT ENHANCEMENT 2026-06-15).
+ *
+ * Two bugs in the tracked-vehicle (cop siren) audio path:
+ *   1. DISTANCE: the siren fade level lives in the 0..0x1000 domain, but every
+ *      other positional loop (engine line ~1248, traffic line ~1505) pre-scales
+ *      its level by >> 5 into 0..0x7F before sound_attenuate_volume(). The siren
+ *      path passed the raw 0x1000 level straight in; since the attenuator
+ *      computes (atten * raw_vol) / 0x7F and clamps to 0x7F, a 0x1000 input
+ *      stays >= 0x7F until the cop is extremely far -> siren pinned at full
+ *      volume regardless of distance.
+ *   2. HARD CUT: the fade processing snapped the level to FULL or 0 in a single
+ *      tick, so the siren popped on at chase start and cut off abruptly at
+ *      chase end instead of fading.
+ *
+ * Both fixes are gated on TD5RE_POLICE_AUDIO_FIX (default ON; "0" reverts to the
+ * old raw-level + binary-snap behavior). */
+#define TD5_SOUND_SIREN_FADE_RAMP_STEP 0x100  /* per-tick ramp -> ~0.5s @ 30Hz */
+static int sound_police_audio_fix_enabled(void)
+{
+    static int s_enabled = -1;   /* -1 = env not yet read */
+    if (s_enabled < 0) {
+        const char *env = getenv("TD5RE_POLICE_AUDIO_FIX");
+        s_enabled = (env && env[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "police-audio fix %s (TD5RE_POLICE_AUDIO_FIX=%s)",
+                  s_enabled ? "ENABLED" : "disabled",
+                  env ? env : "default");
+    }
+    return s_enabled;
+}
+
 /* Cop-chase siren on/off toggle (PORT ENHANCEMENT, user-requested 2026-05-30).
  *
  * In the original, the siren is gated on the horn control bit (0x200000):
@@ -303,6 +334,36 @@ static int s_viewport_audio_state;
 
 /** Race end flag (suppresses new sounds during fade-out). Original: DAT_004c3de8. */
 static int s_race_end_flag;
+
+/* ========================================================================
+ * [ITEM #12] Crash impact SFX — per-player-slot crash-sequence tracking.
+ *
+ * The physics module publishes a monotonically-increasing crash sequence id
+ * per actor slot via td5_physics_get_crash_fx(slot, &mag, &age). Each frame
+ * td5_sound_update_crash_sfx() polls every active player slot; when the
+ * returned id exceeds the stored one a NEW heavy impact happened, so we fire
+ * a spatial one-shot crash sound (the dedicated HHit* "heavy hit" bank that
+ * the original loads for collisions) at the crashing car's world position,
+ * with volume scaled by the impact magnitude. Gated by TD5RE_CRASH_SFX
+ * (default ON); "0" reverts to no crash SFX. NOTE: this is PRESENTATION only
+ * (audio playback) — it reads physics state but never writes it, so it has no
+ * effect on simulation / netplay determinism.
+ * ======================================================================== */
+
+/* Heavy-impact ("HHit") bank: first slot + variant count.
+ * From s_ambient_wav_names[]: HHit1..HHit4 live at ambient slots 27..30
+ * (TD5_SOUND_AMBIENT_SLOT_BASE 18 + index 9). These are the original's
+ * dedicated collision/impact one-shots. */
+#define TD5_SOUND_CRASH_HHIT_SLOT   (TD5_SOUND_AMBIENT_SLOT_BASE + 9)  /* 27 */
+#define TD5_SOUND_CRASH_HHIT_COUNT  4
+/* Crash magnitude that maps to full-volume impact. The physics module only
+ * records an event for ACUTE impacts (impact_mag > ~250000, see
+ * td5_physics.c CRASH_FX_ACUTE_MAG), so reported crashes already clear the
+ * floor; this reference (~4x the acute threshold) gives a "big vs huge"
+ * volume gradient above it rather than always playing at max. */
+#define TD5_SOUND_CRASH_MAG_REF     1000000
+
+static uint32_t s_last_crash_seq[TD5_MAX_RACER_SLOTS];
 
 /* ========================================================================
  * Forward declarations (internal helpers)
@@ -377,6 +438,7 @@ int td5_sound_init_race_resources(void)
     memset(s_listener_prev_pos, 0, sizeof(s_listener_prev_pos));
     memset(s_listener_vel, 0, sizeof(s_listener_vel));
     memset(s_gear_state, 0, sizeof(s_gear_state));
+    memset(s_last_crash_seq, 0, sizeof(s_last_crash_seq));  /* [ITEM #12] crash-SFX edge */
 
     s_reverb_actor_index    = 0;
     s_tracked_veh_active    = 0;
@@ -797,6 +859,64 @@ int td5_sound_siren_is_enabled(void)
 }
 
 /* ========================================================================
+ * [ITEM #12] Crash impact SFX trigger
+ * ======================================================================== */
+
+/* TD5RE_CRASH_SFX (default 1): 0 disables the per-slot crash impact sound. */
+static int td5_sound_crash_sfx_enabled(void)
+{
+    static int s_mode = -1;
+    if (s_mode < 0) {
+        const char *e = getenv("TD5RE_CRASH_SFX");
+        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return s_mode;
+}
+
+/* Poll every active player slot for a NEW crash and fire the heavy-hit impact
+ * sound at the crashing car. Called once per frame from the audio mix. */
+static void td5_sound_update_crash_sfx(void)
+{
+    if (!td5_sound_crash_sfx_enabled()) return;
+    if (s_race_end_flag) return;               /* no new SFX during fade-out */
+
+    /* Crash sounds are for the local human cars; cap at the racer-slot count. */
+    int num_human = g_td5.num_human_players;
+    if (num_human < 1) num_human = 1;
+    if (num_human > TD5_MAX_RACER_SLOTS) num_human = TD5_MAX_RACER_SLOTS;
+
+    for (int slot = 0; slot < num_human; slot++) {
+        int32_t mag = 0;
+        int age = 0;
+        uint32_t seq = td5_physics_get_crash_fx(slot, &mag, &age);
+        if (seq == 0) continue;                 /* no crash yet */
+        if (seq <= s_last_crash_seq[slot]) continue;  /* already handled */
+        s_last_crash_seq[slot] = seq;           /* consume this crash */
+
+        TD5_Actor *actor = td5_game_get_actor(slot);
+        if (!actor) continue;
+
+        /* Volume scales with impact magnitude, saturating at the reference
+         * impact. Mapped into the play-at-position 0..0x1000 volume range. */
+        if (mag < 0) mag = -mag;
+        int vol = (int)(((int64_t)mag * 0x1000) / TD5_SOUND_CRASH_MAG_REF);
+        if (vol > 0x1000) vol = 0x1000;
+        if (vol < 0x200)  vol = 0x200;          /* audible floor for light hits */
+
+        int32_t pos[3] = { actor->world_pos.x, actor->world_pos.y, actor->world_pos.z };
+
+        /* Spatial one-shot from the heavy-hit bank (random HHit1..HHit4),
+         * distance-attenuated + split-screen-aware by play_at_position. */
+        td5_sound_play_at_position(TD5_SOUND_CRASH_HHIT_SLOT, vol,
+                                   TD5_SOUND_FREQ_22050, pos,
+                                   TD5_SOUND_CRASH_HHIT_COUNT);
+
+        TD5_LOG_I(LOG_TAG, "crash SFX slot=%d seq=%u mag=%d age=%d vol=%d",
+                  slot, seq, (int)mag, age, vol);
+    }
+}
+
+/* ========================================================================
  * Master Audio Mixer -- UpdateVehicleAudioMix (0x440B00)
  *
  * This is the core per-frame sound function (~800 lines in the original).
@@ -808,10 +928,14 @@ int td5_sound_siren_is_enabled(void)
  *   E. Skid/tire screech
  *   F. Horn playback
  *   G. Traffic engine loops
+ *   H. Crash impact SFX [ITEM #12]
  * ======================================================================== */
 
 void td5_sound_update_audio_mix(void)
 {
+    /* [ITEM #12] Detect + play per-slot crash impacts (new sequence id). */
+    td5_sound_update_crash_sfx();
+
     /* ----------------------------------------------------------------
      * A. Compute listener velocity deltas (for Doppler)
      * ---------------------------------------------------------------- */
@@ -882,11 +1006,27 @@ void td5_sound_update_audio_mix(void)
      * ---------------------------------------------------------------- */
     if (s_tracked_veh_active == 0 || s_tracked_veh_fade_level != 0 ||
         s_tracked_veh_fade_target != 0) {
-        /* Snap fade level to target (instant binary fade) */
-        if (s_tracked_veh_fade_level < s_tracked_veh_fade_target) {
-            s_tracked_veh_fade_level = TD5_SOUND_SIREN_FADE_FULL;
-        } else if (s_tracked_veh_fade_target < s_tracked_veh_fade_level) {
-            s_tracked_veh_fade_level = 0;
+        if (sound_police_audio_fix_enabled()) {
+            /* #15 fix: ramp the fade level toward the target (~0.5s @ 30Hz)
+             * instead of snapping, so the siren fades in on activation and
+             * fades out smoothly when the chase ends. The slots are stopped
+             * below only once the level reaches 0 (target stays 0). */
+            if (s_tracked_veh_fade_level < s_tracked_veh_fade_target) {
+                s_tracked_veh_fade_level += TD5_SOUND_SIREN_FADE_RAMP_STEP;
+                if (s_tracked_veh_fade_level > s_tracked_veh_fade_target)
+                    s_tracked_veh_fade_level = s_tracked_veh_fade_target;
+            } else if (s_tracked_veh_fade_target < s_tracked_veh_fade_level) {
+                s_tracked_veh_fade_level -= TD5_SOUND_SIREN_FADE_RAMP_STEP;
+                if (s_tracked_veh_fade_level < s_tracked_veh_fade_target)
+                    s_tracked_veh_fade_level = s_tracked_veh_fade_target;
+            }
+        } else {
+            /* Snap fade level to target (instant binary fade) */
+            if (s_tracked_veh_fade_level < s_tracked_veh_fade_target) {
+                s_tracked_veh_fade_level = TD5_SOUND_SIREN_FADE_FULL;
+            } else if (s_tracked_veh_fade_target < s_tracked_veh_fade_level) {
+                s_tracked_veh_fade_level = 0;
+            }
         }
     } else {
         /* Active but both fade level and target are zero: stop siren.
@@ -1341,7 +1481,18 @@ void td5_sound_update_audio_mix(void)
                            * TD5_SOUND_DISTANCE_SCALE * TD5_SOUND_REPLAY_DIST_SCALE;
                 float dist = sqrtf(dx * dx + dz * dz);
 
-                int siren_vol = sound_attenuate_volume(s_tracked_veh_fade_level, dist);
+                /* #15 fix: the fade level is in the 0..0x1000 domain; pre-scale
+                 * it by >> 5 into the 0..0x7F domain (clamped) before the
+                 * distance attenuator, exactly like the engine (>> 5, ~1248)
+                 * and traffic (>> 5, ~1505) loops do. Without this the raw
+                 * 0x1000 level overwhelms sound_attenuate_volume() and the siren
+                 * stays pinned at full volume regardless of distance. */
+                int siren_level = s_tracked_veh_fade_level;
+                if (sound_police_audio_fix_enabled()) {
+                    siren_level >>= 5;
+                    if (siren_level > 0x7F) siren_level = 0x7F;
+                }
+                int siren_vol = sound_attenuate_volume(siren_level, dist);
                 int siren_pitch = TD5_SOUND_SIREN_FREQ;
 
                 if (siren_vol > 0) {
@@ -1920,4 +2071,61 @@ void td5_sound_set_race_end(int ended)
 void td5_sound_set_sfx_muted(int muted)
 {
     td5_plat_audio_set_muted(muted);
+}
+
+/* Suspend (1) / resume (0) ALL race audio when the pause menu opens/closes.
+ *
+ * Companion to the window-focus mute path (td5_plat_audio_update_focus_mute in
+ * td5_platform_win32.c, driven once per frame from main.c): focus-loss already
+ * silences everything when the player alt-tabs away; this does the same the
+ * moment the in-race pause menu comes up. Whereas td5_sound_set_sfx_muted only
+ * gates the per-voice SFX (engine/skid/horn/crash/ambient one-shots), pausing
+ * must ALSO take the music down. We cannot read the pause-menu-active state from
+ * here -- it lives in a private static in td5_game.c (s_pause_menu_active) and
+ * g_td5.paused does NOT track the menu -- so the pause code calls this setter
+ * explicitly (see the porting note: pause open -> td5_sound_set_paused(1),
+ * resume -> td5_sound_set_paused(0)).
+ *
+ * Suspend strategy (idempotent, edge-triggered, non-destructive so a resume is
+ * always clean):
+ *   - SFX  : td5_plat_audio_set_muted -- same lever the SOUND-row preview and
+ *            the focus mute use, so they coexist (the per-frame per-row preview
+ *            still wins while the menu is up).
+ *   - Music: drop the CD/MCI device volume to 0 and restore the configured
+ *            level on resume. Volume (not stop) keeps this independent of the
+ *            pause code's own CD stop/replay -- no track number needed here, and
+ *            either ordering ends at the saved volume.
+ *
+ * Gated by TD5RE_PAUSE_MUTE (default ON; "0" restores the old behavior where
+ * pausing left the music playing and relied solely on the SFX mute). */
+void td5_sound_set_paused(int paused)
+{
+    static int s_pause_mute_enabled = -1;   /* -1 = env not yet read */
+    static int s_sound_paused       = 0;    /* current suspend state (edge) */
+
+    if (s_pause_mute_enabled < 0) {
+        const char *env = getenv("TD5RE_PAUSE_MUTE");
+        s_pause_mute_enabled = (env && env[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "pause-mute %s (TD5RE_PAUSE_MUTE=%s)",
+                  s_pause_mute_enabled ? "ENABLED" : "disabled",
+                  env ? env : "default");
+    }
+    if (!s_pause_mute_enabled)
+        return;                              /* old behavior: leave audio alone */
+
+    paused = paused ? 1 : 0;
+    if (paused == s_sound_paused)
+        return;                              /* no change -> nothing to do */
+    s_sound_paused = paused;
+
+    if (paused) {
+        td5_plat_audio_set_muted(1);         /* all per-voice SFX -> silent */
+        td5_plat_cd_set_volume(0);           /* CD/MCI music -> silent (kept) */
+        TD5_LOG_I(LOG_TAG, "pause: all audio SUSPENDED (SFX muted, music vol 0)");
+    } else {
+        td5_plat_audio_set_muted(0);         /* restore SFX */
+        td5_plat_cd_set_volume(g_td5.ini.music_volume);  /* restore music vol */
+        TD5_LOG_I(LOG_TAG, "pause: audio RESUMED (SFX unmuted, music vol=%d)",
+                  g_td5.ini.music_volume);
+    }
 }

@@ -405,11 +405,26 @@ static int32_t ai_angle_from_vector(int32_t dx, int32_t dz) {
  * table with raw returns heading bytes for the wrong ring position and
  * makes the recovery-misalignment check at 0x00434FE0 fire at every
  * branch entry — the visible symptom is the AI braking into the turn. */
+/* [CRASH FIX 2026-06-15 Scotland/level016] Bounds-checked route-table byte read
+ * (lane at k=0, heading at k=1). Returns 0 (safe default) when the span lies past
+ * the route table: some TD6-converted tracks ship LEFT/RIGHT.TRK SHORTER than the
+ * strip's span count, so an in-ring span (Scotland span 3092 vs a shorter table)
+ * exceeded the table and OOB-crashed (0xC0000005 — #20 Newcastle class). `table`
+ * must be g_route_tables[0] or [1]. Pure safety bound: identical result for any
+ * in-range span, only the crashing out-of-range read is replaced with 0. */
+static int ai_route_byte(const uint8_t *table, int span, int k) {
+    if (!table || span < 0) return 0;
+    size_t sz  = (table == g_route_tables[1]) ? g_route_table_sizes[1]
+                                              : g_route_table_sizes[0];
+    size_t off = (size_t)(unsigned)span * 3u + (unsigned)k;
+    return (off < sz) ? (int)table[off] : 0;
+}
+
 static int32_t ai_route_heading_for_actor(const int32_t *rs, const char *actor) {
     const uint8_t *rb = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
     int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
     if (rb && sp >= 0) {
-        return (((int)rb[(size_t)(unsigned)sp * 3u + 1u] * 0x102C) >> 8) & 0xFFF;
+        return (((int)ai_route_byte(rb, sp, 1) * 0x102C) >> 8) & 0xFFF;
     }
     return 0;
 }
@@ -652,7 +667,7 @@ void td5_ai_correct_spawn_heading(int slot) {
     if (span < 0) return;
 
     route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-    rb = route_bytes ? (int32_t)route_bytes[(size_t)(unsigned)span * 3u + 1u] : 0;
+    rb = ai_route_byte(route_bytes, span, 1);
 
     if (route_bytes && rb >= 4) {
         /* Primary path: derive the spawn heading from the route byte.
@@ -810,10 +825,17 @@ static void td5_ai_update_actor_track_bounds(int slot) {
     {
         int route_byte_left  = 0;
         int route_byte_right = 0;
-        if (left_table && span_norm >= 0) {
+        /* [CRASH FIX 2026-06-14 #20] Bound the route-table index. The original
+         * relied on span_norm always being normalized into the ring (< route rows);
+         * a malformed / mis-offset branch jump table could leak an out-of-ring span
+         * here and read past the ring-sized LEFT/RIGHT.TRK tables. Clamp like the
+         * other route-table reads (see ~lines 4122/6659). */
+        if (left_table && span_norm >= 0 &&
+            (size_t)(unsigned)span_norm * 3u < g_route_table_sizes[0]) {
             route_byte_left  = (int)left_table[(size_t)(unsigned)span_norm * 3u];
         }
-        if (right_table && span_norm >= 0) {
+        if (right_table && span_norm >= 0 &&
+            (size_t)(unsigned)span_norm * 3u < g_route_table_sizes[1]) {
             route_byte_right = (int)right_table[(size_t)(unsigned)span_norm * 3u];
         }
         rs[RS_RIGHT_BOUNDARY_A] =
@@ -927,7 +949,7 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
     {
         const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
         if (!table) return 0;
-        route_byte = (int)table[(size_t)(unsigned)route_byte_idx * 3u];
+        route_byte = ai_route_byte(table, route_byte_idx, 0);
         if (!td5_track_sample_target_point(sample_span, route_byte,
                                            &target_x, &target_z,
                                            cardef8 + track_offset_bias)) {
@@ -954,7 +976,7 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
      * change in between. */
     {
         const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-        route_byte = (int)table[(size_t)(unsigned)route_byte_idx * 3u];
+        route_byte = ai_route_byte(table, route_byte_idx, 0);
         if (!td5_track_sample_target_point(sample_span, route_byte,
                                            &target_x, &target_z,
                                            cardef0 + track_offset_bias)) {
@@ -1264,7 +1286,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
             const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
             int route_byte_now = 0;
             if (table && span_norm_i >= 0) {
-                route_byte_now = (int)table[(size_t)(unsigned)span_norm_i * 3u];
+                route_byte_now = ai_route_byte(table, span_norm_i, 0);
             }
             if (classify == 1 && cardef) {
                 int32_t off = td5_track_compute_signed_offset(
@@ -3761,6 +3783,32 @@ static int8_t  g_smart_target_lane[TD5_MAX_TOTAL_ACTORS]; /* COMMITTED lane inde
 static int16_t g_smart_lane_dwell[TD5_MAX_TOTAL_ACTORS];  /* ticks since last committed lane switch */
 static int     g_smart_inited = 0;
 
+/* [task#16 2026-06-15] AI branch pre-commitment. When a fork (type-8 fwd / type-11
+ * bwd junction span) comes into range the car ROLLS ONCE which way to go and locks
+ * the decision until it passes the fork, so it confidently commits to a branch
+ * instead of re-deciding every tick and defaulting to the main road (the
+ * "AI avoids branches" symptom). g_smart_branch_commit_span[slot] is the fork span
+ * the decision is locked to (-1 = no live commitment); _take is 1 to take the
+ * branch (high sub-lanes), 0 to hold the main road (low sub-lanes). */
+static int16_t g_smart_branch_commit_span[TD5_MAX_TOTAL_ACTORS];
+static int8_t  g_smart_branch_commit_take[TD5_MAX_TOTAL_ACTORS];
+
+/* [task#16 netplay determinism 2026-06-15] Private per-car RNG for the branch
+ * coin-flip. Seeded at race init from the REPLICATED race seed (decorrelated +
+ * mixed with the car's slot index) and advanced ONLY on a sim-tick branch
+ * commit — NEVER from the shared CRT rand(), whose stream is also drawn at
+ * render rate (td5_sound pitch, td5_vfx particles, td5_camera timers) and so is
+ * NOT bit-identical across lockstep peers running at different frame rates. The
+ * dynamic-traffic spawner uses the same private-LCG technique (s_trf_dyn_rng /
+ * trf_dyn_rand below). Each peer + replay derives the SAME branch choices. */
+static uint32_t g_smart_branch_rng[TD5_MAX_TOTAL_ACTORS];
+
+/* Numerical Recipes LCG step; the top bits are the usable (well-mixed) ones. */
+static inline uint32_t smart_branch_rand(int slot) {
+    g_smart_branch_rng[slot] = g_smart_branch_rng[slot] * 1664525u + 1013904223u;
+    return g_smart_branch_rng[slot] >> 16;
+}
+
 static inline int smart_iabs(int x) { return x < 0 ? -x : x; }
 
 /* Deterministic integer hash (no runtime RNG — reproducible across replays). */
@@ -3790,6 +3838,10 @@ static float td5_ai_smart_skill(int slot) {
 static void td5_ai_smart_race_init(void) {
     int tier = g_td5.difficulty_tier;
     float base = (tier <= 0) ? 0.42f : (tier == 1 ? 0.63f : 0.86f);
+    /* [task#16] Decorrelate the replicated race seed (cf. td5_game_assign_wheel_
+     * styles) for the private per-car branch RNG. Identical on every peer/replay
+     * because td5_game_get_race_seed() returns the host-broadcast session seed. */
+    uint32_t branch_seed_base = td5_game_get_race_seed() ^ 0x9E3779B9u;
     for (int s = 0; s < TD5_MAX_TOTAL_ACTORS; s++) {
         uint32_t h = smart_hash_u32((uint32_t)s * 2654435761u
                                     + (uint32_t)(tier + 1) * 40503u);
@@ -3803,6 +3855,15 @@ static void td5_ai_smart_race_init(void) {
         g_smart_lane_u[s] = -1.0;   /* snap to the car's actual u on first sight */
         g_smart_target_lane[s] = -1;
         g_smart_lane_dwell[s] = 0;
+        g_smart_branch_commit_span[s] = -1;   /* [task#16] no live fork commitment */
+        g_smart_branch_commit_take[s] = 0;
+        /* [task#16] Per-car private branch RNG seed: race seed mixed with the
+         * slot index (deterministic, distinct per car). Guard against a 0 state
+         * (a degenerate LCG fixed point would never advance). */
+        {
+            uint32_t bs = branch_seed_base + (uint32_t)s * 2654435761u;
+            g_smart_branch_rng[s] = bs ? bs : 0xA5A5A5A5u;
+        }
     }
     g_smart_inited = 1;
     TD5_LOG_I(LOG_TAG, "smart_ai_init: tier=%d base_skill=%.2f aggression=%d leash=%d",
@@ -4155,20 +4216,66 @@ static void smart_sense(int slot, int span_raw, int span_count,
     (void)skill;
 }
 
+/* [task#16 2026-06-15] A/B knob for RANDOM AI branch pre-commitment. Default on.
+ * TD5RE_AI_BRANCH_RANDOM=0 restores the prior congestion-only "prefer main unless
+ * jammed" policy (the AI then rarely takes a fork). Logged once on first read. */
+static int td5_ai_branch_random_enabled(void) {
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_AI_BRANCH_RANDOM");
+        s = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "ai_branch_random knob: TD5RE_AI_BRANCH_RANDOM=%d "
+                  "(AI pre-picks forks at random %s)", s, s ? "ON" : "OFF");
+    }
+    return s;
+}
+
+/* A branch corridor reachable from this fork is genuinely DRIVABLE: always so on
+ * native TD5 (g_active_td6_level==0); on TD6 only when the branch-migration path
+ * is enabled (otherwise the walker force-mains every fork — see resolve_neighbor
+ * in td5_track.c — and steering toward the branch lanes would just scrape a
+ * suppressed-corridor wall). `branch_span` must already be range-checked. */
+static int td5_ai_branch_takeable(int branch_span, int span_count) {
+    if (branch_span < 0 || branch_span >= span_count) return 0;
+    if (g_active_td6_level > 0 && !td5_track_td6_branches_drivable()) return 0;
+    return 1;
+}
+
 /* Strategic branch: scan ahead on the raw strip records for a junction span
  * (type 8 fwd / 11 bwd). At a fork the "branch" route is taken from the HIGH
  * sub-lanes and "main" from the LOW sub-lanes (see td5_track.c junction logic),
  * so we express the preference as a lateral pull (-1 = hug low/main lanes,
  * +1 = hug high/branch lanes) that the lane brain folds into its scoring.
- * Preference = least congested option, tie-broken by a stable per-car bias. */
+ *
+ * [task#16] With TD5RE_AI_BRANCH_RANDOM (default on) the car DECIDES BEFOREHAND:
+ * the first time a fork comes into look-ahead range it rolls ONCE and LOCKS the
+ * choice (take-branch vs stay-main) for that fork, then commits to it until it
+ * is passed. The roll uses the car's PRIVATE per-slot RNG (g_smart_branch_rng,
+ * seeded at race init from the replicated race seed) and is advanced ONLY on a
+ * sim-tick branch commit — NOT the shared CRT rand(), which is also drawn at
+ * render rate (sound/vfx/camera) and so diverges across lockstep peers at
+ * different frame rates. Every netplay client and every replay therefore picks
+ * the SAME branch (no Date/time/render-rate/local-only state). The result is
+ * confident branch-taking instead of the old congestion-only policy that almost
+ * always fell back to the main road ("AI avoids branches"). Congestion still
+ * tilts the odds — a jammed main road makes the branch more likely — but a clear
+ * fork is now a genuine coin-flip, weighted to actually use the branch. */
 static void td5_ai_smart_branch(int slot) {
     g_smart_branch_pull[slot] = 0.0;
     const uint8_t *strips = (const uint8_t *)g_strip_span_base;
     int span_count = td5_track_get_span_count();
-    if (!strips || span_count <= 0) return;
+    if (!strips || span_count <= 0) {
+        if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+            g_smart_branch_commit_span[slot] = -1;
+        return;
+    }
     char *actor = actor_ptr(slot);
     int span = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
-    if (span < 0 || span >= span_count) return;
+    if (span < 0 || span >= span_count) {
+        if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+            g_smart_branch_commit_span[slot] = -1;
+        return;
+    }
 
     float skill = td5_ai_smart_skill(slot);
     int look = 5 + (int)(skill * 8.0f); /* 5..13 spans — react early enough to lane-change before the fork */
@@ -4186,6 +4293,7 @@ static void td5_ai_smart_branch(int slot) {
         int branch_span = (stype == 8)
             ? (int)*(const int16_t *)(const void *)(strips + (size_t)s * 0x18 + 8)
             : (int)*(const int16_t *)(const void *)(strips + (size_t)s * 0x18 + 10);
+        int takeable = td5_ai_branch_takeable(branch_span, span_count);
 
         int cong_main = 0, cong_branch = 0;
         int n = g_active_actor_count;
@@ -4198,31 +4306,88 @@ static void td5_ai_smart_branch(int slot) {
                 smart_iabs(psp - branch_span) <= 2) cong_branch++;
         }
 
-        /* Prefer the MAIN through-route by default. In this engine the side
-         * branches are short detours that are often tighter / wall-lined (e.g.
-         * the Moscow-reverse branch span 2790 scrapes its boundary), and the
-         * main road is the proven racing line — so only divert onto a branch
-         * when the main option is NOTABLY more congested (a real reason to
-         * overtake around traffic), not merely because the branch is emptier. */
         double pref;
-        if (branch_span < 0 || branch_span >= span_count)
-            pref = -1.0;                              /* invalid branch → stay main */
-        else if (cong_main - cong_branch >= 2)
-            pref = +1.0;                              /* main genuinely jammed → use branch */
-        else
-            pref = -1.0;                              /* default: hold the main through-route */
+        if (td5_ai_branch_random_enabled()) {
+            /* [task#16] RANDOM PRE-COMMITMENT. Decide once per fork and lock it.
+             * The walker routes onto the branch from the HIGH sub-lanes, so a
+             * "take" commitment must be made early (while still spans away) for
+             * the lane brain to slide the car across in time — hence the decision
+             * is taken on the FIRST tick the fork enters range and held. */
+            int take;
+            if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+                g_smart_branch_commit_span[slot] == (int16_t)s) {
+                take = g_smart_branch_commit_take[slot];   /* already locked */
+            } else if (!takeable) {
+                take = 0;                                  /* branch unusable → main */
+                if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+                    g_smart_branch_commit_span[slot] = (int16_t)s;
+                    g_smart_branch_commit_take[slot] = 0;
+                }
+            } else {
+                /* Roll the dice with the car's PRIVATE per-slot RNG (seeded at
+                 * race init from the replicated race seed; see g_smart_branch_rng).
+                 * Base ~55% chance to TAKE a clear, valid branch so forks are
+                 * genuinely used; shift the odds by congestion (jammed main → up to
+                 * ~85% take; jammed branch → down to ~30%). EXACTLY ONE LCG step
+                 * per fork commitment (not per tick — the `== s` branch above short-
+                 * circuits re-rolls once committed), so the stream advances only on
+                 * sim-tick branch-commit EVENTS.
+                 *
+                 * Netplay determinism: this stream is derived ONLY from replicated
+                 * sim state (race seed + slot index + the sequence of commit events)
+                 * and is NEVER the shared CRT rand(), whose sequence is also drawn at
+                 * render rate (td5_sound engine pitch, td5_vfx particles, td5_camera
+                 * trackside timers) and therefore diverges between peers/replays at
+                 * different frame rates. Same seed → same branch choices on every
+                 * peer and on replay. (Bounds-guarded: slot must index the per-car
+                 * RNG array; an out-of-range slot — which also cannot store a commit
+                 * — falls back to ~coin-flip without touching the array.) */
+                uint32_t roll = (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+                                    ? smart_branch_rand(slot) : 0x8000u;
+                int r = (int)(roll % 100u);         /* 0..99 */
+                int take_threshold = 45;            /* >= threshold → TAKE branch */
+                int cong_delta = cong_main - cong_branch;
+                take_threshold -= cong_delta * 15;  /* main busier → easier to take */
+                if (take_threshold < 15)  take_threshold = 15;
+                if (take_threshold > 85)  take_threshold = 85;
+                take = (r >= take_threshold) ? 1 : 0;
+                if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+                    g_smart_branch_commit_span[slot] = (int16_t)s;
+                    g_smart_branch_commit_take[slot] = (int8_t)take;
+                }
+                TD5_LOG_I(LOG_TAG,
+                          "ai_branch_commit: slot=%d fork=%d type=%d take=%d "
+                          "r=%d thr=%d main_c=%d branch_c=%d branch=%d",
+                          slot, s, stype, take, r, take_threshold,
+                          cong_main, cong_branch, branch_span);
+            }
+            pref = take ? +1.0 : -1.0;
+        } else {
+            /* Legacy congestion-only policy: hold the main through-route unless it
+             * is notably more congested than the branch. */
+            if (!takeable)
+                pref = -1.0;
+            else if (cong_main - cong_branch >= 2)
+                pref = +1.0;
+            else
+                pref = -1.0;
+        }
         (void)g_smart_branch_pref;
 
         double strength = 1.0 - (double)(d - 1) / (double)look; /* stronger near fork */
         g_smart_branch_pull[slot] = pref * strength;
         if ((g_ai_frame_counter % 60u) == 0u) {
             TD5_LOG_I(LOG_TAG, "smart_branch: slot=%d fork=%d d=%d type=%d "
-                      "main=%d(c%d) branch=%d(c%d) pull=%.2f",
+                      "main=%d(c%d) branch=%d(c%d) takeable=%d pull=%.2f",
                       slot, s, d, stype, main_span, cong_main,
-                      branch_span, cong_branch, g_smart_branch_pull[slot]);
+                      branch_span, cong_branch, takeable, g_smart_branch_pull[slot]);
         }
         return;
     }
+
+    /* No fork in range — drop any stale commitment so the next fork rolls afresh. */
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+        g_smart_branch_commit_span[slot] = -1;
 }
 
 /* Lane brain: score candidate lanes (surface, occupancy, wall, racing-line,
@@ -4329,8 +4494,18 @@ static void td5_ai_smart_lane_bias(int slot) {
              * ramping with fork proximity, so the car arrives correctly placed
              * and enters cleanly instead of clipping the branch wall. Surface /
              * overtake nudges are skipped here — getting onto the right road
-             * matters more than lane choice for these few spans. */
-            double anchor = (pull < 0.0) ? 0.28 : 0.72;
+             * matters more than lane choice for these few spans.
+             *
+             * [task#16 2026-06-15] The walker routes onto the branch only when the
+             * running sub-lane index is >= the post-fork main lane count (see
+             * resolve_neighbor in td5_track.c), i.e. the car must be in the OUTER
+             * (high-u) lanes. The fork span is wider than the main road, so 0.72
+             * sometimes wasn't outer enough to clear next_lanes — a committed
+             * "take" then silently fell back to main. Push the take anchor hard to
+             * the high rail (0.86, just inside WALL_MARGIN) so the sub-lane reliably
+             * lands in the branch range; the "stay" anchor hugs the low lanes (0.18)
+             * so a committed main choice is equally decisive. */
+            double anchor = (pull < 0.0) ? 0.18 : 0.86;
             double w = (pull < 0.0) ? -pull : pull;   /* 0..1 */
             if (w > 1.0) w = 1.0;
             target_u = u_base * (1.0 - w) + anchor * w;
@@ -6865,28 +7040,84 @@ int td5_ai_traffic_get_draw_alpha(int slot)
     return (int)s_trf_dyn_alpha[slot];
 }
 
-/* Concurrency cap from the track-select Traffic volume row.
- * Defensive: code paths that only set the legacy boolean (cup save restore,
- * forced-on game types) leave traffic_volume at 0 — treat enabled+no-volume
- * as Heavy (the classic 6-car density). */
-static int trf_dyn_cap(void)
+/* [task#12 2026-06-15] A/B knob for the consistent-density fixes (proximity
+ * recycle + per-volume retune + VERY HIGH tier). TD5RE_TRAFFIC_DENSITY=0 restores
+ * the prior behaviour (corridor-only despawn, old caps/periods); default on.
+ * Logged once on first read. Independent of TD5RE_TRAFFIC_BRANCHES / _SPAWN_DIST
+ * (those keep their own knobs and stay in effect). */
+static int trf_dyn_density_enabled(void)
 {
-    static const int k_cap[4] = { 0, 2, 4, 6 };
-    int v = g_td5.traffic_volume;
-    if (v <= 0) v = g_td5.traffic_enabled ? 3 : 0;
-    if (v > 3) v = 3;
-    return (k_cap[v] > TD5_MAX_TRAFFIC_SLOTS) ? TD5_MAX_TRAFFIC_SLOTS : k_cap[v];
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_DENSITY");
+        s = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "traffic_density knob: TD5RE_TRAFFIC_DENSITY=%d "
+                  "(proximity recycle + retune + VERY HIGH %s)",
+                  s, s ? "ON" : "OFF");
+    }
+    return s;
 }
 
-/* Volume also paces the spawner: Light is sparse, Heavy is busy. */
+/* Resolved traffic volume 0..4 (Off/Low/Medium/High/Very-High). Code paths that
+ * only set the legacy boolean (cup save restore, forced-on game types) leave
+ * traffic_volume at 0 — treat enabled+no-volume as High (the classic 6-car
+ * density). The frontend selector currently masks the option to 0..3; value 4
+ * (VERY HIGH) is wired here and in main.c's clamp so the frontend can be extended
+ * to emit it without further engine changes. */
+static int trf_dyn_volume(void)
+{
+    int v = g_td5.traffic_volume;
+    if (v <= 0) v = g_td5.traffic_enabled ? 3 : 0;
+    if (v > 4) v = 4;
+    return v;
+}
+
+/* Concurrency cap from the track-select Traffic volume row.
+ *   Off=0  Low=2  Medium=4  High=6  Very-High=16
+ * The hard ceiling is TD5_MAX_TRAFFIC_SLOTS (16 — see td5_types.h). HIGH keeps the
+ * faithful 6; VERY HIGH fills all 16 traffic slots (the extra cars reuse each
+ * track's 6 car models + 6 skin pages — normal for traffic) and packs them near
+ * the player via the tighter spawn window / faster respawn below. */
+static int trf_dyn_cap(void)
+{
+    static const int k_cap[5] = { 0, 2, 4, 6, 16 };
+    int v = trf_dyn_volume();
+    int cap;
+    if (!trf_dyn_density_enabled()) {
+        /* legacy 0..3 caps */
+        static const int k_old[4] = { 0, 2, 4, 6 };
+        int ov = v > 3 ? 3 : v;
+        cap = k_old[ov];
+    } else {
+        cap = k_cap[v];
+    }
+    return (cap > TD5_MAX_TRAFFIC_SLOTS) ? TD5_MAX_TRAFFIC_SLOTS : cap;
+}
+
+/* Volume also paces the spawner: Low is sparse, High busy, Very-High relentless.
+ * The period is the gap (ticks @30Hz) between spawn attempts when below the cap;
+ * a shorter period refills emptied slots faster, which (with the proximity
+ * recycle below) is the main lever that keeps the road consistently full. */
 static int trf_dyn_spawn_period(void)
 {
     int p = g_td5.ini.traffic_dyn_period;
-    int v = g_td5.traffic_volume;
-    if (v <= 0) v = g_td5.traffic_enabled ? 3 : 0;
-    if (v == 1) p *= 2;
-    else if (v >= 3) p = (p * 2) / 3;
-    if (p < 5) p = 5;
+    int v = trf_dyn_volume();
+    if (!trf_dyn_density_enabled()) {
+        /* legacy pacing */
+        if (v == 1) p *= 2;
+        else if (v >= 3) p = (p * 2) / 3;
+    } else {
+        /* Retuned so the tiers are clearly distinct:
+         *   Low      ×2.0   (sparse — a car every few seconds)
+         *   Medium   ×1.0   (stock cadence)
+         *   High     ×0.5   (busy — refills fast)
+         *   VeryHigh ×0.3   (relentless — slots refill almost immediately) */
+        if (v == 1)      p = (p * 2);
+        else if (v == 2) p = p;
+        else if (v == 3) p = (p * 1) / 2;
+        else if (v >= 4) p = (p * 3) / 10;
+    }
+    if (p < 4) p = 4;
     /* +/-50% jitter so spawns don't metronome. */
     return p / 2 + (int)(trf_dyn_rand() % (uint32_t)p);
 }
@@ -6914,6 +7145,164 @@ static int trf_dyn_min_player_dist(int span_norm)
         if (d < best) best = d;
     }
     return best;
+}
+
+/* Wrap-aware |span distance| between two normalized spans (circuit ring-aware). */
+static int trf_dyn_span_dist(int a, int b)
+{
+    int ring = td5_track_get_ring_length();
+    int is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+    int d = a - b;
+    if (is_circuit && ring > 0) {
+        int half = ring / 2;
+        while (d > half)  d -= ring;
+        while (d < -half) d += ring;
+    }
+    return d < 0 ? -d : d;
+}
+
+/* [item#10 2026-06-15] Count ACTIVE/FADING traffic cars within `radius` spans of
+ * `player_span`. Branch-corridor cars (span >= ring) are normalized to their
+ * parallel main span first so they count toward whichever player is near that
+ * stretch of road. Used to find the human who currently has the least traffic. */
+static int trf_dyn_count_traffic_near(int player_span, int radius)
+{
+    int t_base = g_traffic_slot_base;
+    int t_end  = g_active_actor_count;
+    int ring   = td5_track_get_ring_length();
+    int n = 0;
+    if (t_end > t_base + TD5_MAX_TRAFFIC_SLOTS) t_end = t_base + TD5_MAX_TRAFFIC_SLOTS;
+    if (t_end > TD5_MAX_TOTAL_ACTORS) t_end = TD5_MAX_TOTAL_ACTORS;
+    for (int slot = t_base; slot < t_end; slot++) {
+        int sp;
+        if (s_trf_dyn_state[slot] != TRF_DYN_ACTIVE &&
+            s_trf_dyn_state[slot] != TRF_DYN_FADE_IN)
+            continue;
+        sp = (int)(int16_t)ACTOR_I16(actor_ptr(slot), ACTOR_SPAN_NORMALIZED);
+        if (ring > 0 && sp >= ring) {
+            int m = td5_track_branch_to_main_span(sp);   /* fold branch -> main */
+            if (m >= 0) sp = m;
+        }
+        if (trf_dyn_span_dist(sp, player_span) <= radius) n++;
+    }
+    return n;
+}
+
+/* [item#10 2026-06-15] Live-spawn anchor for the consistent-density goal. In a
+ * multi-human (split-screen) race the players can spread far apart; anchoring all
+ * spawns on the FRONT-MOST human (ai_player_span_lead) leaves the trailing
+ * player(s) with little/no nearby traffic. This returns the span of the human who
+ * currently has the FEWEST traffic cars within `radius`, tie-breaking toward the
+ * TRAILING (lowest-span) player, so fresh spawns are steered to whoever is
+ * starved and every human ends up with a comparable amount of traffic. With a
+ * single human this is just that human's span (== ai_player_span_lead), so
+ * single-player behaviour is unchanged. Gated by the caller on
+ * TD5RE_TRAFFIC_DENSITY + num_human_players > 1. */
+static int trf_dyn_starved_player_span(int radius)
+{
+    int humans = g_td5.num_human_players;
+    int best_span;
+    int best_cnt;
+    if (humans < 1) humans = 1;
+    if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
+    best_span = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+    best_cnt  = trf_dyn_count_traffic_near(best_span, radius);
+    for (int s = 1; s < humans; s++) {
+        int sp  = (int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED);
+        int cnt = trf_dyn_count_traffic_near(sp, radius);
+        /* Strictly fewer wins; on a tie prefer the TRAILING (lower-span) player so
+         * the player who is behind is favoured for fresh traffic. */
+        if (cnt < best_cnt || (cnt == best_cnt && sp < best_span)) {
+            best_cnt  = cnt;
+            best_span = sp;
+        }
+    }
+    return best_span;
+}
+
+/* [task#8 2026-06-14] A/B knob for spawning ambient traffic on branch corridors
+ * (both sides of a fork), not just the main/right route. TD5RE_TRAFFIC_BRANCHES=0
+ * restores the prior main-ring-only spawn (TD6 branches stay empty). Default on.
+ * Logged once on first read. */
+static int trf_dyn_branches_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_BRANCHES");
+        s = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "traffic_branches knob: TD5RE_TRAFFIC_BRANCHES=%d "
+                  "(spawn on branch corridors %s)", s, s ? "ON" : "OFF");
+    }
+    return s;
+}
+
+/* [task#13 2026-06-14] Spawn-distance multiplier (×16 fixed-point). The per-tick
+ * spawner places traffic [SpawnAheadMin..SpawnAheadMax] spans ahead of the race
+ * leader; the stock 25..50 window pops cars in close to the player. This knob
+ * scales that window so traffic appears further away. TD5RE_TRAFFIC_SPAWN_DIST is
+ * a decimal multiplier (e.g. "2.0"); "0" restores the stock 1.0x window. Default
+ * 2.0x. Clamped 1.0x..6.0x. Logged once. */
+static int trf_dyn_spawn_dist_x16(void)
+{
+    static int x16 = -1;
+    if (x16 < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_SPAWN_DIST");
+        double m;
+        if (e && e[0] == '0' && e[1] == '\0') {
+            m = 1.0;                         /* explicit "0" = stock window */
+        } else if (e && e[0]) {
+            m = strtod(e, NULL);
+            if (m < 1.0) m = 1.0;            /* never shrink below stock */
+        } else {
+            m = 2.0;                         /* default: twice as far away */
+        }
+        if (m > 6.0) m = 6.0;
+        x16 = (int)(m * 16.0 + 0.5);
+        TD5_LOG_I(LOG_TAG, "traffic_spawn_dist knob: TD5RE_TRAFFIC_SPAWN_DIST x%d/16 "
+                  "(spawn window scaled %d%%)", x16, (x16 * 100) / 16);
+    }
+    return x16;
+}
+
+/* Effective per-tick spawn window after the distance scale, clamped so it never
+ * grows past a safe fraction of the ring (a window wider than ~1/3 of the loop
+ * would wrap onto the player from behind and could starve placement). Returns the
+ * scaled [*lo, *hi]; the despawn cleanup bound below uses the same *hi so a car
+ * spawned far ahead is not immediately faded out. */
+static void trf_dyn_effective_spawn_window(int *lo, int *hi)
+{
+    int base_lo = g_td5.ini.traffic_dyn_spawn_min;
+    int base_hi = g_td5.ini.traffic_dyn_spawn_max;
+    int s16 = trf_dyn_spawn_dist_x16();
+    int elo = (int)(((int64_t)base_lo * s16) >> 4);
+    int ehi = (int)(((int64_t)base_hi * s16) >> 4);
+    int ring = td5_track_get_ring_length();
+    if (elo < base_lo) elo = base_lo;       /* never closer than stock min */
+    /* [task#12 2026-06-15] Busy tiers also fill the NEAR road. _SPAWN_DIST scales
+     * the FAR edge so cars appear in the distance; on HIGH/VERY HIGH we pull the
+     * NEAR edge back down to (near) the stock min so the window spans near→far and
+     * the six slots cover the whole stretch instead of clustering at one distance.
+     * Low/Medium keep the _SPAWN_DIST window unchanged. */
+    if (trf_dyn_density_enabled()) {
+        int v = trf_dyn_volume();
+        if (v >= 4)      elo = base_lo;              /* Very-High: from the stock min */
+        else if (v == 3) elo = (elo + base_lo) / 2; /* High: halfway back toward min */
+        if (elo < base_lo) elo = base_lo;
+    }
+    if (ehi < elo + 1) ehi = elo + 1;
+    if (ring > 0) {
+        /* Keep the FAR edge within ~1/3 of the ring so the spawn point stays
+         * genuinely ahead and there is always placeable road. The NEAR edge
+         * follows it down (but never below the stock min) so the window stays a
+         * valid [lo<hi] range on small loops. */
+        int cap = ring / 3;
+        if (cap < base_hi) cap = base_hi;   /* tiny rings: never below stock */
+        if (ehi > cap) ehi = cap;
+        if (elo > ehi - 1) elo = (ehi - 1 > base_lo) ? ehi - 1 : base_lo;
+        if (ehi < elo + 1) ehi = elo + 1;
+    }
+    if (lo) *lo = elo;
+    if (hi) *hi = ehi;
 }
 
 /* Place `slot` at (span, lane, polarity) on the canonical main ring.
@@ -7063,6 +7452,65 @@ static int trf_dyn_pick_lane(int slot, int span, int lane_count, int *out_polari
     return -1;
 }
 
+/* [task#8] Branch-corridor enumeration helpers (defined in td5_track.c). Declared
+ * in-file (not the shared header) per the same convention as the externs above. */
+extern int td5_track_count_branch_corridors(int main_span);
+extern int td5_track_branch_corridor_span(int main_span, int which);
+
+/* [item#9 2026-06-15] Deliberately pick a MAIN-ring span (within [win_lo..win_hi]
+ * ahead of the anchor `ps`) that is PARALLELED by an active branch corridor, so a
+ * subsequent branch retarget reliably lands a car on a fork. The earlier branch
+ * code only retargeted when the randomly-rolled main span happened to sit inside
+ * a fork window (statistically rare with only a few short fork windows on the
+ * ring), so branch corridors stayed nearly empty (user: "traffic is still not
+ * spawning on the right track of branches"). Returning a main span that is KNOWN
+ * to have a branch lets the spawner run its normal edge / start-clearance /
+ * per-player-proximity checks against that main span (exactly as for any main-road
+ * spawn) and then map it to the branch span — every existing safety check still
+ * applies, and a fork is hit on demand instead of by luck. Returns a ring-relative
+ * main span, or -1 if no corridor overlaps the forward window. */
+static int trf_dyn_pick_branch_main_span(int ps, int win_lo, int win_hi)
+{
+    int ring = td5_track_get_ring_length();
+    int is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+    int ncorr = td5_track_corridor_count();
+    int q_lo[64], q_hi[64];
+    int nq = 0;
+    int wlo = ps + win_lo;
+    int whi = ps + win_hi;
+    if (ncorr <= 0) return -1;
+    if (ncorr > 64) ncorr = 64;
+
+    for (int i = 0; i < ncorr; i++) {
+        int b_lo, b_hi, m_lo, m_hi;
+        int lo, hi;
+        if (!td5_track_corridor_info(i, &b_lo, &b_hi, &m_lo, &m_hi)) continue;
+        if (b_lo < ring) continue;              /* not a displaced corridor */
+        lo = m_lo; hi = m_hi;
+        if (is_circuit && ring > 0) {
+            /* shift the corridor's parallel-main range onto the window's arc so a
+             * corridor that straddles the lap seam still qualifies */
+            while (hi < wlo) lo += ring, hi += ring;
+            while (lo > whi) lo -= ring, hi -= ring;
+        }
+        if (hi < wlo || lo > whi) continue;     /* no overlap with the window */
+        if (lo < wlo) lo = wlo;                  /* clamp to the window */
+        if (hi > whi) hi = whi;
+        if (hi < lo) continue;
+        q_lo[nq] = lo; q_hi[nq] = hi; nq++;
+    }
+    if (nq <= 0) return -1;
+    {
+        int pick = (int)(trf_dyn_rand() % (uint32_t)nq);
+        int m = q_lo[pick] + (int)(trf_dyn_rand() % (uint32_t)(q_hi[pick] - q_lo[pick] + 1));
+        if (is_circuit && ring > 0) {
+            m %= ring;
+            if (m < 0) m += ring;
+        }
+        return m;
+    }
+}
+
 /* Try to place `slot` at a random span [win_lo..win_hi] ahead of `anchor`
  * (-1 = the live RACE LEADER, any racer slot, human or AI — user rule:
  * traffic appears in front of 1st place, and only retires once the TRAILING
@@ -7082,15 +7530,60 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
     if (limit <= 16) return 0;   /* degenerate strip */
 
     for (int attempt = 0; attempt < 8; attempt++) {
-        int ps   = (anchor >= 0) ? anchor
-                                 : trf_dyn_race_span_lead(); /* live race leader */
+        /* [task#12 2026-06-15] Live-spawn anchor. The legacy anchor is the overall
+         * RACE LEADER (any racer, incl. an AI). In a single-player race the AI
+         * leader routinely pulls hundreds of spans ahead of the human, so
+         * leader-anchored spawns appear off-screen ahead of the AI and the
+         * human's surroundings steadily empty out — the user's "traffic gets
+         * sparse / spawns less often as the race goes on." With
+         * TD5RE_TRAFFIC_DENSITY on, anchor live spawns on the FRONT-MOST HUMAN
+         * instead, so traffic always materialises in a human's forward view
+         * regardless of where the AI pack is, and the proximity recycle keeps the
+         * six slots cycling through that view. (Race-init seeding still passes an
+         * explicit start-line anchor.) Knob off → legacy race-leader anchor. */
+        int ps;
+        if (anchor >= 0)
+            ps = anchor;
+        else if (trf_dyn_density_enabled()) {
+            /* [item#10 2026-06-15] In a multi-human race, anchor on whichever human
+             * currently has the LEAST nearby traffic (tie -> trailing player), so
+             * the trailing player(s) get refilled instead of every spawn piling up
+             * around the leader — each human ends up with a comparable amount of
+             * traffic. Single human: this is just that human's span, identical to
+             * the front-most-human anchor. The radius matches the far_from_all
+             * recycle corridor below (despawn + scaled spawn-max) so "starved" here
+             * and "too far to keep" there use the same yardstick. */
+            if (g_td5.num_human_players > 1) {
+                int rhi = 0;
+                trf_dyn_effective_spawn_window(NULL, &rhi);
+                ps = trf_dyn_starved_player_span(g_td5.ini.traffic_dyn_despawn + rhi);
+            } else {
+                ps = ai_player_span_lead();    /* front-most (== only) human */
+            }
+        } else
+            ps = trf_dyn_race_span_lead();     /* legacy: live race leader */
         int dist = win_lo + (int)(trf_dyn_rand() % (uint32_t)(win_hi - win_lo + 1));
         int span = ps + dist;
+        int main_span;
         int lane_count, lane, polarity;
+        int want_branch = 0;
 
         if (is_circuit && ring > 0) {
             span %= ring;
             if (span < 0) span += ring;
+        }
+
+        /* [item#9 2026-06-15] Deliberate branch attempt: roughly every third
+         * placement (when branch corridors are drivable + enabled), aim the spawn
+         * at a main span that is KNOWN to be paralleled by a fork, so the retarget
+         * below reliably populates a branch corridor instead of waiting for a
+         * random main span to land in a (rare) fork window. The chosen main span
+         * then runs through all the normal edge/clearance/proximity checks. Gated
+         * on TD5RE_TRAFFIC_BRANCHES (default on). */
+        if (g_active_td6_level > 0 && td5_track_td6_branches_drivable() &&
+            trf_dyn_branches_enabled() && (trf_dyn_rand() % 3u) == 0u) {
+            int bm = trf_dyn_pick_branch_main_span(ps, win_lo, win_hi);
+            if (bm >= 0) { span = bm; want_branch = 1; }
         }
         /* Keep off the track-edge spans where the faithful route plan brakes
          * (span < 3 || span >= ring-8, cf. Stage 3 @ 0x00435FAA). */
@@ -7114,17 +7607,36 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * we rolled (multiplayer: no spawning on top of another pane). */
         if (trf_dyn_min_player_dist(span) < win_lo) continue;
 
-        /* [task#20 2026-06-13] Populate TD6 branch corridors with traffic. The
-         * chosen main-ring span has passed all proximity/clearance checks; ~1/3 of
-         * the time, if a branch corridor PARALLELS this main span and branches are
-         * drivable, spawn the car on the branch instead so the alternate routes
-         * aren't empty (user: "traffic can't drive on branches"). The branch span
-         * is contiguous, so the walker traverses it and rejoins the main ring at
-         * the corridor end like any other car. */
+        /* [task#8 2026-06-14] Populate ALL branch corridors of a fork, not just
+         * the main/right route. The chosen main-ring span has passed every
+         * proximity/clearance check; if one or more branch corridors PARALLEL this
+         * main span and branches are drivable, roll uniformly over {main road} +
+         * {each branch} and retarget the spawn onto whichever was picked, so both
+         * sides of a fork get traffic (user: "traffic only populates the RIGHT
+         * track of a branch"; with 2 corridors a branch is picked 2/3 of the time).
+         * Earlier this called td5_track_main_to_branch_span(), which returns only
+         * the FIRST matching corridor -> a single branch was ever populated. The
+         * branch span is contiguous, so the walker traverses it and rejoins the
+         * main ring at the corridor end like any other car. Gated on
+         * TD5RE_TRAFFIC_BRANCHES (default on). */
+        main_span = span;
         if (g_active_td6_level > 0 && td5_track_td6_branches_drivable() &&
-            (trf_dyn_rand() % 3u) == 0u) {
-            int bspan = td5_track_main_to_branch_span(span);
-            if (bspan >= 0) span = bspan;
+            trf_dyn_branches_enabled()) {
+            int ncorr = td5_track_count_branch_corridors(main_span);
+            if (ncorr > 0) {
+                /* When this main span was chosen DELIBERATELY for a branch
+                 * (want_branch), always land on a branch corridor — pick one of
+                 * the `ncorr` corridors uniformly. Otherwise roll over {main road}
+                 * + {each branch} with equal weight so forks fill evenly while the
+                 * main road is never starved (the original task#8 behaviour). */
+                int corr = want_branch
+                    ? (int)(trf_dyn_rand() % (uint32_t)ncorr)
+                    : (int)(trf_dyn_rand() % (uint32_t)(ncorr + 1)) - 1;
+                if (corr >= 0) {
+                    int bspan = td5_track_branch_corridor_span(main_span, corr);
+                    if (bspan >= 0) span = bspan;
+                }
+            }
         }
 
         lane_count = td5_track_span_lane_count_at(span);
@@ -7138,9 +7650,9 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
 
         trf_dyn_place(slot, span, lane, polarity);
         TD5_LOG_I(LOG_TAG,
-                  "traffic_dyn_spawn: slot=%d span=%d lane=%d/%d oncoming=%d "
+                  "traffic_dyn_spawn: slot=%d span=%d (main=%d) lane=%d/%d oncoming=%d "
                   "player_dist=%d attempt=%d",
-                  slot, span, lane, lane_count, polarity,
+                  slot, span, main_span, lane, lane_count, polarity,
                   trf_dyn_min_player_dist(span), attempt);
         return 1;
     }
@@ -7244,6 +7756,24 @@ void td5_ai_traffic_dynamic_race_init(void)
               g_td5.ini.traffic_dyn_despawn, g_td5.ini.traffic_dyn_fade_ticks,
               g_td5.ini.traffic_dyn_period, g_td5.ini.traffic_dyn_speed_pct,
               g_td5.ini.traffic_dyn_start_offset, g_td5.track_start_span_index);
+    {
+        /* [task#8/#13] Report the resolved run-time spawn behaviour once per race:
+         * the SCALED per-tick spawn window (the close-pop-in fix) and whether
+         * branch corridors are populated (the branch-traffic fix). The init seed
+         * above intentionally uses the stock close window; these are the values the
+         * in-race spawner uses. */
+        int eff_lo = 0, eff_hi = 0;
+        trf_dyn_effective_spawn_window(&eff_lo, &eff_hi);
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_dyn_runtime: volume=%d cap=%d period~=%d density=%s "
+                  "spawn_window=[%d..%d] (scaled x%d/16) branches=%s td6=%d "
+                  "branches_drivable=%d",
+                  trf_dyn_volume(), trf_dyn_cap(), g_td5.ini.traffic_dyn_period,
+                  trf_dyn_density_enabled() ? "ON" : "OFF",
+                  eff_lo, eff_hi, trf_dyn_spawn_dist_x16(),
+                  trf_dyn_branches_enabled() ? "ON" : "OFF",
+                  g_active_td6_level, td5_track_td6_branches_drivable());
+    }
 }
 
 /* Per-sim-tick driver — fades, despawn checks, spawn cadence.
@@ -7303,6 +7833,13 @@ void td5_ai_traffic_dynamic_tick(void)
              * at the plain despawn distance was visible from the leader's
              * seat ("traffic disappears in front of me").
              *
+             * [task#13] The cleanup distance uses the EFFECTIVE (scaled) spawn
+             * max, not the raw INI value: TD5RE_TRAFFIC_SPAWN_DIST pushes spawns
+             * further ahead, so a car freshly placed near the scaled max must NOT
+             * be inside the despawn corridor or it would fade out the instant it
+             * spawned. Tying the bound to the same scaled max keeps the spawn /
+             * cleanup distances consistent.
+             *
              * Stuck replacement is DEBOUNCED on s_traffic_stuck_frames (45
              * ticks ≈ 1.5s continuously recovery-frozen, counted by the
              * AntiFreeze layer): the Stage-2 recovery latch also arms
@@ -7310,9 +7847,33 @@ void td5_ai_traffic_dynamic_tick(void)
              * and replacing on a transient latch vanished healthy cars in
              * plain sight. (With [Traffic] AntiFreeze=0 the counter stays 0 —
              * stuck cars then just brake until the corridor passes them.) */
+            {
+            int eff_lo, eff_hi;
+            int far_from_all;
+            trf_dyn_effective_spawn_window(&eff_lo, &eff_hi);
+            /* [task#12 2026-06-15] PROXIMITY RECYCLE — the dwindle fix.
+             * The corridor test above is anchored on the TRAILING HUMAN (behind)
+             * and the RACE LEADER (ahead, who may be an AI). When the field
+             * spreads — a fast AI leader pulls away from a slow human, or two
+             * humans drift apart — that corridor grows to hundreds of spans, so
+             * a healthy car that nobody is near NEVER satisfies behind<-despawn
+             * or ahead>despawn+eff_hi. It stays ACTIVE forever, on_road pins at
+             * the cap, the spawner is gated off, and the six slots smear thinly
+             * across the whole gap → "traffic gets sparse / spawns less often as
+             * the race goes on." Recycling any car that is farther than
+             * (despawn + scaled spawn-max) from EVERY human returns its slot to
+             * the pool so a fresh car is placed back near the action, holding the
+             * density steady for the whole race regardless of field spread.
+             * (The fresh car re-enters via FADE_IN ahead of the leader, so this
+             * never strands the leader without traffic.) Gated on
+             * TD5RE_TRAFFIC_DENSITY. */
+            far_from_all = trf_dyn_density_enabled() &&
+                           (slot != 9 || g_encounter_tracked_handle == -1) &&
+                           trf_dyn_min_player_dist(sp) >
+                               g_td5.ini.traffic_dyn_despawn + eff_hi;
             if (behind < -g_td5.ini.traffic_dyn_despawn ||
-                ahead  >  g_td5.ini.traffic_dyn_despawn +
-                          g_td5.ini.traffic_dyn_spawn_max ||
+                ahead  >  g_td5.ini.traffic_dyn_despawn + eff_hi ||
+                far_from_all ||
                 (g_traffic_recovery_stage[slot] != 0 &&
                  s_traffic_stuck_frames[slot] >= 45 &&
                  /* far enough that the fade is unobtrusive; nearer stuck cars
@@ -7321,10 +7882,12 @@ void td5_ai_traffic_dynamic_tick(void)
                 s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
                 TD5_LOG_I(LOG_TAG,
                           "traffic_dyn_despawn: slot=%d behind_trail=%d ahead_lead=%d "
-                          "recovery=%d stuck=%d (fading out)",
-                          slot, behind, ahead, g_traffic_recovery_stage[slot],
+                          "min_player=%d far_from_all=%d recovery=%d stuck=%d (fading out)",
+                          slot, behind, ahead, trf_dyn_min_player_dist(sp),
+                          far_from_all, g_traffic_recovery_stage[slot],
                           s_traffic_stuck_frames[slot]);
             }
+            }   /* eff spawn-window scope */
             on_road++;
             break;
         }
@@ -7366,9 +7929,14 @@ void td5_ai_traffic_dynamic_tick(void)
             }
         }
         static int s_trf_dyn_starved = 0;
+        /* [task#13] Spawn FURTHER from the player: the per-tick window is scaled by
+         * TD5RE_TRAFFIC_SPAWN_DIST (default 2x) so traffic appears in the distance
+         * instead of popping in nearby. Race-init seeding (above) keeps the stock
+         * close window — those cars were "always there" near the start. */
+        int spawn_lo, spawn_hi;
+        trf_dyn_effective_spawn_window(&spawn_lo, &spawn_hi);
         if (pick >= 0 &&
-            trf_dyn_spawn_in_window(pick, -1, g_td5.ini.traffic_dyn_spawn_min,
-                                    g_td5.ini.traffic_dyn_spawn_max)) {
+            trf_dyn_spawn_in_window(pick, -1, spawn_lo, spawn_hi)) {
             s_trf_dyn_state[pick] = TRF_DYN_FADE_IN;
             s_trf_dyn_alpha[pick] = 0;
             s_trf_dyn_cooldown = trf_dyn_spawn_period();
@@ -8642,6 +9210,52 @@ void td5_ai_update_race_actors(void) {
 
 }
 
+/* [item#2 2026-06-15] A/B knob: stop AI cars once a CIRCUIT race is over.
+ * On a circuit the race ends when every human has finished; unfinished AI no
+ * longer block (td5_game.c check_race_completion) and were left in slot-state 0,
+ * so td5_ai_update_track_behavior kept driving them around the loop during the
+ * post-finish fade / results hold (user: "on circuit track AI should stop when
+ * completing the lap"). With TD5RE_AI_FINISH_STOP on, an AI racer still in
+ * state 0 cuts throttle and brakes the moment the race is complete on a circuit,
+ * so it coasts to rest instead of continuing to lap. (AI that finished its own
+ * laps already flips to slot-state 2, which brakes via the case below — this
+ * covers the cars that DIDN'T finish before the race ended.) Off → byte-identical
+ * (AI keeps lapping). Only affects AI actors, only on circuit tracks, only after
+ * the race-end latch. Logged once on first read. */
+static int ai_finish_stop_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_AI_FINISH_STOP");
+        s = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "ai_finish_stop knob: TD5RE_AI_FINISH_STOP=%d "
+                  "(stop AI on circuit race finish %s)", s, s ? "ON" : "OFF");
+    }
+    return s;
+}
+
+/* True when the current race is a finished CIRCUIT race — the post-finish latch
+ * (race_end_fade_state > 0) is set and the track is a closed loop. AI racers
+ * that are still driving (slot-state 0) should brake to a stop here. */
+static int ai_circuit_race_finished(void)
+{
+    return ai_finish_stop_enabled() &&
+           g_track_is_circuit &&
+           g_td5.race_end_fade_state > 0;
+}
+
+/* Coast an AI racer to a stop: cut throttle, brake on, centre the wheel. Mirrors
+ * the finished-slot (state 2) brake command set so the physics integrator decays
+ * the speed to rest. Physics reads encounter_steering_cmd (+0x33E) as the drive
+ * command (0xFF00 = -0x100 = brake/idle, cf. case 0x02 / route-threshold T0). */
+static void ai_apply_stop_command(char *actor)
+{
+    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+    ACTOR_U8(actor,  ACTOR_BRAKE_FLAG)      = 1;
+    ACTOR_U8(actor,  ACTOR_THROTTLE_STATE)  = 0;
+    ACTOR_I32(actor, ACTOR_STEERING_CMD)    = 0;
+}
+
 /**
  * Dispatch a single racer slot based on its state.
  */
@@ -8686,6 +9300,20 @@ static void ai_update_single_racer(int slot) {
             if ((g_td5.simulation_tick_counter % 60u) == 0u) {
                 TD5_LOG_I(LOG_TAG,
                     "drag_ai_drive: slot=%d throttle=0xFF steer=0 brake=0",
+                    slot);
+            }
+            return;
+        }
+
+        /* [item#2] Circuit race over: stop this still-driving AI instead of
+         * lapping the finished circuit. Gated TD5RE_AI_FINISH_STOP (default on),
+         * circuit-only, post-finish only. Slot 0 (PlayerIsAI / a human's empty
+         * slot) is included — it's an AI driver here too. */
+        if (ai_circuit_race_finished()) {
+            ai_apply_stop_command(actor);
+            if ((g_td5.simulation_tick_counter % 60u) == 0u) {
+                TD5_LOG_I(LOG_TAG,
+                    "ai_finish_stop: slot=%d circuit race over -> brake to stop",
                     slot);
             }
             return;

@@ -1,0 +1,11 @@
+LIBRARY DRMClien.DLL
+EXPORTS
+    ??0CDRMLiteCrypto@@QAE@XZ = drm_lite_ctor @1
+    ??1CDRMLiteCrypto@@QAE@XZ = drm_lite_dtor @2
+    ?GetPublicKey@CDRMLiteCrypto@@QAEJPAUPKCERT@@@Z = drm_lite_get_public_key @8
+    DRMOrdinal3 = drm_ordinal_stub @3 NONAME
+    DRMOrdinal4 = drm_ordinal_stub @4 NONAME
+    DRMOrdinal5 = drm_ordinal_stub @5 NONAME
+    DRMOrdinal6 = drm_ordinal_stub @6 NONAME
+    DRMOrdinal7 = drm_ordinal_stub @7 NONAME
+    DRMOrdinal9 = drm_ordinal_stub @9 NONAME

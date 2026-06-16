@@ -502,6 +502,32 @@ typedef struct ViewportRect {
 
 static ViewportRect s_viewports[TD5_MAX_VIEWPORTS];
 
+/* [#9 SPLIT-LAYOUT FIX 2026-06-15] Per-race viewport -> grid-cell map.
+ * s_view_cell[vp] = the split-grid cell (0..cols*rows-1, row-major) that
+ * viewport vp is laid out in. Built once per race in
+ * td5_game_init_viewport_layout() from the position-screen permutation
+ * (td5_frontend_mp_view_actor_slot): each viewport is placed in the cell its
+ * driver actually CHOSE, and the cell(s) no player chose are left for the HUD
+ * map/standings filler. Without the fix (or with the identity permutation that
+ * AutoRace / the harness / non-positioned MP use) this is simply vp==cell, so
+ * the layout is byte-identical to the old "panes fill cells 0..N-1" behaviour.
+ * s_view_cell_count mirrors the live viewport_count for query-time clamping. */
+static int s_view_cell[TD5_MAX_VIEWPORTS];
+static int s_view_cell_count = 0;
+
+/* TD5RE_SPLIT_LAYOUT_FIX: default ON; exactly "0" reverts to the legacy
+ * identity cell map (viewport vp -> cell vp, empty cells = the tail). Cached. */
+static int td5_split_layout_fix_on(void) {
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("TD5RE_SPLIT_LAYOUT_FIX");
+        s_cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "split-layout cell map (#9) %s (TD5RE_SPLIT_LAYOUT_FIX=%s)",
+                  s_cached ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return s_cached;
+}
+
 /* Replay / benchmark timing */
 static uint32_t s_race_end_timer_start;
 
@@ -576,6 +602,31 @@ static void tick_wanted_target_tracker(void) {
 static int      s_pause_input_done;    /* reset per-frame, set after first tick processes input */
 static int      s_prev_esc_state;      /* edge detector for ESC key */
 static int      s_prev_pause_act;      /* edge detector for the rebindable PAUSE action */
+/* [BUG 5a 2026-06-15] Per-FRAME ESC edge for the cinematic (View Replay / attract
+ * demo) abort. The faithful ESC handling lives INSIDE the fixed-step sim while-loop
+ * (s_prev_esc_state, esc_edge), which only runs on frames that drain a 30 Hz tick.
+ * At render rates above 30 Hz most frames drain zero ticks, so a brief ESC tap that
+ * lands entirely on no-tick frames was never edge-detected and the replay would not
+ * exit (the controller exit worked because it latches a one-shot across frames).
+ * s_prev_esc_frame mirrors the live ESC key once per frame, OUTSIDE the loop, and
+ * arms s_replay_esc_exit on the rising edge during a cinematic race so the abort is
+ * caught regardless of tick cadence. Gated by TD5RE_REPLAY_EXIT (shared with the
+ * controller exit): "0" reverts to the in-loop-ESC-only behaviour. */
+static int      s_prev_esc_frame;      /* per-frame edge detector for cinematic ESC exit */
+static int      s_replay_esc_exit;     /* one-shot: set on a per-frame ESC edge in a cinematic race */
+/* [BUGFIX #15 2026-06-15] Pause-menu nav edge-detection state. PROMOTED from
+ * function-static block locals to file scope so the pause-menu OPEN block can
+ * SEED them with the currently-held direction keys (UP is usually accelerate,
+ * DOWN is brake). Without seeding, opening the menu while holding UP fired the
+ * up-nav edge on the first menu frame and moved the cursor off CONTINUE (row 2)
+ * onto SOUND (row 1). Latching the held state on open makes navigation act only
+ * on a fresh release-then-press edge after the menu is up. Keyboard + pad. */
+static int      s_prev_down;           /* edge detector: pause-menu DOWN nav */
+static int      s_prev_up;             /* edge detector: pause-menu UP nav */
+static int      s_prev_left;           /* edge detector: pause-menu LEFT (slider) */
+static int      s_prev_right;          /* edge detector: pause-menu RIGHT (slider) */
+static int      s_prev_enter;          /* edge detector: pause-menu CONFIRM (Enter / pad A) */
+static int      s_prev_jb;             /* edge detector: pause-menu pad B = back/continue */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
 static int      s_pause_restart_pending; /* [REWORK 2026-06-05/S15] 1 = pause-menu RESTART RACE fade in progress, return 3 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
@@ -1109,6 +1160,16 @@ int td5_game_get_player_lap(int slot)
     return (int)s_metrics[slot].checkpoint_index;
 }
 
+/* Live forward-progress span index (actor +0x82) for a slot, or 0 when out of
+ * range / no actor. Used by the race-results table to estimate a still-racing
+ * car's finish time from its pace (remaining spans / average pace). */
+int td5_game_get_slot_span(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    TD5_Actor *a = td5_game_get_actor(slot);
+    return a ? (int)a->track_span_normalized : 0;
+}
+
 /* Returns cumulative race timer ticks (30/sec) for lap_index 0,
  * or the split time for lap_index 1-9. Used by HUD. */
 int32_t td5_game_get_race_timer(int slot, int lap_index)
@@ -1177,6 +1238,14 @@ int32_t td5_game_get_result_top_speed(int slot)
         if (actor) v = (int32_t)actor->peak_speed;
     }
     return v;
+}
+
+/* [#10] Per-racer extended telemetry accessor for the post-race summary screen.
+ * Thin forwarder to the physics-owned g_race_metrics[] array (collisions, air
+ * time, drifts, plus a running top/avg from planar velocity). NULL out of range. */
+const TD5_RaceMetrics *td5_game_get_metrics(int slot)
+{
+    return td5_physics_get_metrics(slot);
 }
 
 /* Returns the average speed accumulator (raw) for a given slot.
@@ -1434,6 +1503,16 @@ static void td5_game_assign_wheel_styles(uint32_t race_seed) {
     }
 }
 
+/* Public getter for the active per-race RNG seed (s_saved_race_seed). This is the
+ * REPLICATED seed: set from the host-broadcast session_seed at race start (and
+ * restored from the recorded value for replays), so it is bit-identical on every
+ * netplay peer and across a replay. Sim-deterministic features that must agree
+ * across machines (e.g. the AI random branch choice in td5_ai.c) seed a private,
+ * sim-tick-only RNG stream from this value rather than the shared CRT rand() —
+ * whose sequence is consumed at render rate and therefore diverges between peers
+ * running at different frame rates. */
+uint32_t td5_game_get_race_seed(void) { return s_saved_race_seed; }
+
 int td5_game_init_race_session(void) {
     #define CK(n) TD5_LOG_I(LOG_TAG, "CK: %s", n)
     CK("ck0_start");
@@ -1608,6 +1687,11 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "InitRace step 2/19: heap reset complete");
     CK("ck2_after_heap_reset");
 
+    /* [#10 race telemetry] Zero all per-racer summary metrics at the start of
+     * every race so the post-race summary reflects only this race. Accumulated
+     * each live sim tick by td5_physics_accumulate_metrics(). */
+    td5_physics_reset_metrics();
+
     /* ---- Step 3: Configure race slot states (player/AI/disabled) ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_slot_state[i].state       = (i == 0) ? 1 : 0;  /* slot 0 = player */
@@ -1764,6 +1848,42 @@ int td5_game_init_race_session(void) {
                   "InitRace: others_ai=1 -> human slots 1..%d on AI autopilot "
                   "(slot 0 = human)",
                   humans - 1);
+    }
+    /* [DEMO FIX #3 2026-06-15] Attract demo: the PLAYER car (slot 0) must be
+     * AI-driven, exactly like the opponents — it's an attract demo, nobody is
+     * holding the wheel. Mirrors the original InitializeRaceSession @0x0042ACCF
+     *   slot[0].state = 1 - (g_attractModeDemoActive | g_benchmarkModeActive)
+     * which drops slot 0 to state=0 (AI) whenever the attract demo is active.
+     * Dropping slot 0 to state=0 routes it through td5_physics_update_ai +
+     * td5_ai_tick (the opponent path) AND makes the in-race input dispatch skip
+     * td5_input_update_player_control(0) — so the demo car drives itself.
+     *
+     * This is the SAME mechanism g_td5.ini.player_is_ai uses above; demo just
+     * applies it to slot 0 unconditionally while the attract demo runs (no INI
+     * knob needed — the menu sets s_demo_mode via td5_game_set_demo_mode). Demo
+     * never plays back recorded input (that is View Replay / s_replay_mode), so
+     * unlike the player_is_ai parity hack we do NOT also feed slot 0's input —
+     * the AI fully owns the car.
+     *
+     * Gated by TD5RE_DEMO_FIX (cached, default ON): "0" reverts to the old
+     * behaviour (slot 0 stays state=1 in demo → car sits as if a human with no
+     * input were driving). Non-demo races never enter this block (s_demo_mode==0
+     * unless the attract demo launched it), so normal play is byte-unchanged. */
+    if (s_demo_mode) {
+        static int s_demo_fix_init = 0;
+        static int s_demo_fix_enabled = 1;
+        if (!s_demo_fix_init) {
+            const char *e = getenv("TD5RE_DEMO_FIX");
+            s_demo_fix_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_demo_fix_init = 1;
+            TD5_LOG_I(LOG_TAG, "Demo AI-drive (slot 0): %s",
+                      s_demo_fix_enabled ? "enabled" : "disabled (slot 0 stays human)");
+        }
+        if (s_demo_fix_enabled && s_slot_state[0].state == 1) {
+            s_slot_state[0].state = 0;   /* AI-drive the demo player car */
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: demo mode -> slot 0 switched to AI autopilot");
+        }
     }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -2036,17 +2156,21 @@ int td5_game_init_race_session(void) {
         && !g_td5.network_active
         && g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS) {
         int traffic_loaded = 0;
-        for (int ti = 0; ti < 6; ti++) {
-            int traffic_slot  = g_traffic_slot_base + ti;  /* slots 6..11 (legacy base) */
+        for (int ti = 0; ti < TD5_MAX_TRAFFIC_SLOTS; ti++) {
+            int traffic_slot  = g_traffic_slot_base + ti;  /* slots 6..21 (legacy base) */
+            /* Only 6 distinct traffic car models exist per track; slots past the
+             * 6th reuse them (model_slot wraps, matching the skin-page wrap in
+             * td5_asset_load_traffic_model). */
+            int model_slot    = ti % 6;
             int traffic_model = td5_asset_resolve_traffic_model_index(
-                g_td5.track_index, /*reverse=*/0, ti);
+                g_td5.track_index, /*reverse=*/0, model_slot);
             if (traffic_model < 0 &&
                 g_td5.ini.traffic_dynamic && g_td5.ini.traffic_dyn_circuits) {
                 /* [dynamic-traffic OnCircuits] circuits / TD6 conversions have
                  * no row in the per-track traffic-model tables (pool_idx>=25
                  * in the original). Borrow track 0's (Moscow's) model set so
                  * the dynamic spawner has meshes to dress its actors with. */
-                traffic_model = td5_asset_resolve_traffic_model_index(0, 0, ti);
+                traffic_model = td5_asset_resolve_traffic_model_index(0, 0, model_slot);
                 if (traffic_model >= 0)
                     TD5_LOG_I(LOG_TAG,
                               "InitRace step 5b: track_index=%d slot_in_pool=%d "
@@ -2060,7 +2184,7 @@ int td5_game_init_race_session(void) {
             {
                 int td6_city_base = td5_asset_td6_city_traffic_base(g_active_td6_level);
                 if (td6_city_base >= 0) {
-                    traffic_model = td6_city_base + ti;
+                    traffic_model = td6_city_base + model_slot;
                     TD5_LOG_I(LOG_TAG,
                               "InitRace step 5b: TD6 city level=%d slot_in_pool=%d "
                               "-> real city traffic model %d",
@@ -2089,8 +2213,8 @@ int td5_game_init_race_session(void) {
             }
         }
         TD5_LOG_I(LOG_TAG,
-                  "InitRace step 5b/19: traffic vehicle assets loaded (%d/6 slots, track_index=%d)",
-                  traffic_loaded, g_td5.track_index);
+                  "InitRace step 5b/19: traffic vehicle assets loaded (%d/%d slots, track_index=%d)",
+                  traffic_loaded, TD5_MAX_TRAFFIC_SLOTS, g_td5.track_index);
     } else {
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 5b/19: traffic disabled (traffic_enabled=%d time_trial=%d drag=%d net=%d split=%d traffic_base=%d)",
@@ -2226,7 +2350,39 @@ int td5_game_init_race_session(void) {
             td5_physics_compute_suspension_envelope(a, s);
         }
 
+        /* [DEMO FIX #3 2026-06-15] The AI module keeps its OWN slot-state table
+         * (td5_ai.c g_slot_state[], separate from this file's s_slot_state[]) and
+         * td5_ai_init_race_actor_runtime() decides slot 0's AI/human state by
+         * reading g_td5.ini.player_is_ai DIRECTLY (td5_ai.c ~L1776) — it does NOT
+         * know about s_demo_mode. So the demo slot-0->AI flip above (s_slot_state)
+         * would route physics through td5_physics_update_ai but the AI BRAIN would
+         * still treat slot 0 as "player" (g_slot_state[0]==1 -> case 0x01 skip) and
+         * never write a steering/throttle command -> the demo car would just idle.
+         *
+         * The AI module reads player_is_ai ONLY here at init (per-tick AI reads the
+         * cached g_slot_state[]; and the AI's track-behavior write runs AFTER the
+         * input dispatch each tick, so it always wins for slot 0). So scope a
+         * player_is_ai=1 override across JUST this init call, then restore it — the
+         * AI sets g_slot_state[0]=0 and drives the demo car, while every other
+         * per-tick reader of player_is_ai (input dispatch / finish-brake / carparam)
+         * sees the real value. This keeps the AI side in sync WITHOUT editing
+         * td5_ai.c (the proper one-line fix is to OR s_demo_mode into the L1776
+         * test there — see report). Gated by the same TD5RE_DEMO_FIX (resolved into
+         * s_slot_state[0]==0 above): if the demo fix is off, slot 0 stays state==1
+         * here and this override no-ops. Non-demo races never enter it. */
+        int demo_pia_saved = g_td5.ini.player_is_ai;
+        int demo_pia_override = (s_demo_mode && s_slot_state[0].state == 0 &&
+                                 !g_td5.ini.player_is_ai);
+        if (demo_pia_override) {
+            g_td5.ini.player_is_ai = 1;
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: demo -> player_is_ai=1 scoped to AI runtime init "
+                      "(AI g_slot_state[0]=0 so the demo car self-drives)");
+        }
         td5_ai_init_race_actor_runtime();
+        if (demo_pia_override) {
+            g_td5.ini.player_is_ai = demo_pia_saved;  /* restore real value */
+        }
 
         /* ---- Step 11b: Position racer actors on grid ---- */
         /* Grid patterns from InitializeRaceSession (0x42B07B-0x42B225):
@@ -2412,10 +2568,54 @@ int td5_game_init_race_session(void) {
          * original never mutates g_trackStartSpanIndex after the table load).
          * Per-slot application happens in the spawn loop below, sign-extended
          * to 16 bits exactly like the Frida writeS16 path. */
-        if (g_td5.ini.start_span_offset != 0) {
+        /* [BUG 5b 2026-06-15] Replay StartSpanOffset restore. A replay records
+         * only player INPUT; the spawn positions come from the dev StartSpanOffset
+         * (g_td5.ini.start_span_offset), read fresh HERE at both record and
+         * playback. If the live INI/CLI offset at playback differs from the one
+         * the run was recorded under, the cars spawn at a different span and the
+         * recorded input — which assumes the recorded spawn — plays back from the
+         * wrong start, so the whole run diverges. The recorded value is captured
+         * into the replay buffer at WriteOpen (and persisted in the v2 file
+         * header); on playback use THAT value (not the live one) for the per-slot
+         * spawn below, so playback reproduces the recorded grid. We resolve it into
+         * a local (effective_start_span_offset) instead of mutating the global ini,
+         * so a later non-replay race in this session still spawns from its own
+         * configured offset. Gated by TD5RE_REPLAY_OFFSET_FIX (cached): "0" reverts
+         * to using the live offset (old, diverging behaviour). */
+        int effective_start_span_offset = g_td5.ini.start_span_offset;
+        if (s_replay_mode) {
+            static int s_replay_off_init = 0;
+            static int s_replay_off_enabled = 1;
+            if (!s_replay_off_init) {
+                const char *e = getenv("TD5RE_REPLAY_OFFSET_FIX");
+                s_replay_off_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+                s_replay_off_init = 1;
+                TD5_LOG_I(LOG_TAG, "Replay StartSpanOffset restore: %s",
+                          s_replay_off_enabled ? "enabled" : "disabled (live offset)");
+            }
+            if (s_replay_off_enabled) {
+                /* For the default in-memory View Replay the recorded buffer (and
+                 * its captured offset) survives from the recording's WriteOpen, so
+                 * it is already available. A disk-persisted replay does not load
+                 * until InitRace step 12 (below, after the spawn loop), so pull it
+                 * in now; the step-12 read_open reloads + resets the read cursor,
+                 * so this early load is idempotent. */
+                if (g_td5.ini.replay_persist_to_disk)
+                    td5_input_read_open("replay.td5");
+                int captured = (int)td5_input_replay_start_span_offset();
+                if (captured != effective_start_span_offset) {
+                    TD5_LOG_I(LOG_TAG,
+                              "InitRace: replay start_span_offset live=%d -> recorded=%d",
+                              effective_start_span_offset, captured);
+                }
+                effective_start_span_offset = captured;
+            }
+        }
+
+        if (effective_start_span_offset != 0) {
             TD5_LOG_I(LOG_TAG,
                       "start_span_offset=%d will be applied per-slot (16-bit sign-extended)",
-                      g_td5.ini.start_span_offset);
+                      effective_start_span_offset);
         }
 
         /* Publish start_span as g_trackStartSpanIndex — consumed by the
@@ -2494,8 +2694,11 @@ int td5_game_init_race_session(void) {
                  * that IS the 16-bit wraparound the original/hook produce.
                  * NO remap: original FUN_00434350 stores CX directly at
                  * 0x00434377 with no bounds check; actor fields get the raw
-                 * int16 value even if negative. */
-                int raw = start_span + span_offsets[effective_slot] + g_td5.ini.start_span_offset;
+                 * int16 value even if negative.
+                 * [BUG 5b] effective_start_span_offset = the live offset normally,
+                 * or the value captured when this replay was recorded (so playback
+                 * spawns on the recorded grid). */
+                int raw = start_span + span_offsets[effective_slot] + effective_start_span_offset;
                 span_index = (int)(int16_t)(raw & 0xFFFF);
             } else {
                 span_index = 1;
@@ -2745,6 +2948,61 @@ int td5_game_init_race_session(void) {
     TD5_LOG_I(LOG_TAG, "InitRace step 12/19: input %s initialized",
               s_replay_mode ? "playback" : "recording");
 
+    /* [REPLAY FIX #18 2026-06-15] Replay correctness guard + diagnostic.
+     * A View Replay must reproduce the just-driven race bit-for-bit. The two
+     * deterministic anchors are restored above — the per-race RNG seed (step 0,
+     * s_saved_race_seed) and the recorded StartSpanOffset (the spawn grid,
+     * TD5RE_REPLAY_OFFSET_FIX). Re-assert here that playback is actually armed
+     * and surface the restored anchors in one line so a divergent replay can be
+     * triaged from the log ("seed/offset round-tripped?" vs "sim/camera RNG").
+     *
+     * KNOWN RESIDUAL DIVERGENCE (NOT fixable from td5_game.c — see report):
+     *   1) td5_input.c: td5_input_reset_accumulators() does NOT clear
+     *      s_steering_cmd[]/s_steer_ramp[], so a replay inherits the recorded
+     *      race's END-of-run steering accumulator instead of starting clean —
+     *      the first fraction of a second of steering diverges. Fix: also zero
+     *      those two arrays per race in td5_input_reset_accumulators().
+     *   2) The cinematic trackside camera (td5_camera.c g_tracksideTimer =
+     *      rand()%10000) + audio/particle spawns (td5_sound.c/td5_vfx.c) draw the
+     *      SHARED CRT rand() at RENDER rate, whose draw count differs between the
+     *      recorded run and the replay (different fps) — so the camera cuts to
+     *      different shots and the replay "looks different" even though the CAR
+     *      path is faithful. The SIM path itself is rand()-clean (integer
+     *      physics; AI uses a private per-slot stream off the replicated seed),
+     *      so the car trajectory IS reproduced. Fix: seed the trackside camera
+     *      timer from td5_game_get_race_seed() instead of the shared rand().
+     * Gated by TD5RE_REPLAY_FIX (cached, default ON): "0" silences the guard
+     * (no behavioural change either way — this block only logs + re-arms). */
+    if (s_replay_mode) {
+        static int s_replay_fix_init = 0;
+        static int s_replay_fix_enabled = 1;
+        if (!s_replay_fix_init) {
+            const char *e = getenv("TD5RE_REPLAY_FIX");
+            s_replay_fix_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_replay_fix_init = 1;
+            TD5_LOG_I(LOG_TAG, "Replay correctness guard: %s",
+                      s_replay_fix_enabled ? "enabled" : "disabled");
+        }
+        if (s_replay_fix_enabled) {
+            /* Belt-and-suspenders: make sure the playback path is live even if a
+             * caller flipped only the game-side flag. Without this the sim would
+             * run the recording path and the played-back car would sit idle. */
+            if (!td5_input_is_playback_active()) {
+                td5_input_set_playback_active(1);
+                TD5_LOG_W(LOG_TAG,
+                          "Replay: playback was NOT armed at init -> forced ON");
+            }
+            TD5_LOG_I(LOG_TAG,
+                      "Replay init: seed=0x%08X recorded_span_offset=%d "
+                      "track=%d car=%d reverse=%d (deterministic anchors restored; "
+                      "any remaining drift = input-accumulator/camera-RNG, see code note)",
+                      s_saved_race_seed,
+                      (int)td5_input_replay_start_span_offset(),
+                      g_td5.track_index, g_td5.car_index,
+                      g_td5.reverse_direction);
+        }
+    }
+
     CK("ck13_before_ambient");
     /* ---- Step 13: Load ambient sounds ---- */
     td5_sound_load_ambient();
@@ -2841,6 +3099,25 @@ int td5_game_init_race_session(void) {
      * (vp0->slot0; vp1->slot1 when a 2nd actor exists). */
     for (int vp = 0; vp < TD5_MAX_VIEWPORTS; vp++) {
         int slot = (vp < g_td5.viewport_count && vp < g_td5.total_actor_count) ? vp : 0;
+        /* [#6 MP POSITION SELECT 2026-06-15] If the local-MP position picker
+         * assigned cells, viewport vp (= grid cell vp, row-major) shows the actor
+         * of the player who chose that cell. The accessor returns -1 unless the
+         * positions feature is active (knob on + committed + the local MP flow),
+         * so AutoRace / the harness / non-positioned MP keep the identity map and
+         * stay byte-unchanged. Frontend/render only — the deterministic sim and
+         * net path are untouched (this just repoints which camera each pane uses). */
+        if (vp < g_td5.viewport_count) {
+            /* [#9 2026-06-15] Look up the actor by the pane's grid CELL, not the
+             * raw viewport index: the position screen permutes panes across cells,
+             * so viewport vp renders cell td5_game_get_pane_cell(vp), and that is
+             * the cell whose chosen player must drive this pane's camera. With the
+             * layout fix off / no permutation, get_pane_cell returns vp, so this is
+             * byte-identical to the old identity map. */
+            int mapped = td5_frontend_mp_view_actor_slot(
+                             td5_game_get_pane_cell(g_td5.viewport_count, vp));
+            if (mapped >= 0 && mapped < g_td5.total_actor_count)
+                slot = mapped;
+        }
         g_actorSlotForView[vp] = slot;
         g_actor_slot_map[vp]   = slot;
     }
@@ -3091,6 +3368,8 @@ int td5_game_init_race_session(void) {
 #endif
     s_prev_esc_state = 1;          /* suppress false ESC edge on first frame */
     s_prev_pause_act = 1;          /* suppress false PAUSE-action edge on first frame */
+    s_prev_esc_frame = 1;          /* [BUG 5a] suppress false per-frame cinematic-ESC edge on first frame */
+    s_replay_esc_exit = 0;         /* [BUG 5a] no pending cinematic-ESC exit at race start */
     g_td5.sim_tick_budget = 0.0f;
     g_td5.sim_time_accumulator = 0;
     g_td5.simulation_tick_counter = 0;
@@ -3919,6 +4198,50 @@ int td5_game_run_race_frame(void) {
     int ticks_this_frame = 0;
     s_pause_input_done = 0;  /* allow pause input once this frame */
 
+    /* [BUG 5a 2026-06-15] Per-frame ESC edge for the cinematic abort.
+     * Detected here, OUTSIDE the fixed-step loop, so a brief ESC tap exits a
+     * View Replay / attract demo even on frames that drain zero sim ticks (the
+     * in-loop esc_edge below misses those entirely at >30 Hz render rates).
+     * Arms the one-shot s_replay_esc_exit, which the cinematic-abort block ORs
+     * into its trigger; the latch persists across no-tick frames until consumed.
+     * Gated by TD5RE_REPLAY_EXIT (shared with the controller exit): "0" reverts
+     * to in-loop-ESC-only. */
+    {
+        static int s_replay_esc_init = 0;
+        static int s_replay_esc_enabled = 1;
+        if (!s_replay_esc_init) {
+            const char *e = getenv("TD5RE_REPLAY_EXIT");
+            s_replay_esc_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_replay_esc_init = 1;
+            TD5_LOG_I(LOG_TAG, "Replay per-frame ESC-exit: %s",
+                      s_replay_esc_enabled ? "enabled" : "disabled (in-loop ESC only)");
+        }
+        /* [BUG 5a ROOT CAUSE 2026-06-15] Refresh the live keyboard buffer here.
+         * td5_plat_input_key_pressed() reads s_keyboard[], which is ONLY filled
+         * by td5_plat_input_poll() (its GetDeviceState call). During a cinematic
+         * race the in-loop poll (td5_input_poll_race_session) takes the playback
+         * branch and `goto`s past the keyboard read, polling ONLY joystick slots;
+         * and at >30 Hz most frames drain zero sim ticks, so the in-loop poll
+         * never runs at all. Result: s_keyboard[] stays frozen at whatever it held
+         * when replay started, so BOTH this per-frame ESC edge AND the in-playback
+         * ESC check (td5_input.c) read a stale key and the abort never fires —
+         * THE reason "ESC still doesn't exit replay". Pump the platform input once
+         * per frame (slot 0; the poll refreshes s_keyboard regardless of slot),
+         * exactly like td5_frontend_display_loop does, so the live ESC is seen.
+         * Only while cinematic so normal races are byte-unchanged. */
+        if (s_replay_esc_enabled && td5_game_is_cinematic_race()) {
+            TD5_InputState kb_refresh;
+            td5_plat_input_poll(0, &kb_refresh);
+        }
+        int esc_frame_now = td5_plat_input_key_pressed(0x01);
+        if (s_replay_esc_enabled && esc_frame_now && !s_prev_esc_frame &&
+            td5_game_is_cinematic_race()) {
+            s_replay_esc_exit = 1;
+            TD5_LOG_I(LOG_TAG, "Replay: per-frame ESC edge -> exit requested");
+        }
+        s_prev_esc_frame = esc_frame_now;
+    }
+
     const int max_ticks_per_frame =
         (g_td5.ini.trace_fast_forward > 1.0f)
             ? ((int)g_td5.ini.trace_fast_forward + 8)
@@ -3990,7 +4313,13 @@ int td5_game_run_race_frame(void) {
          * [CONFIRMED orig PollRaceSessionInput @0x42C470: when g_inputPlaybackActive
          *  the pause/MuteAll block is skipped and the abort block ORs bit 30 →
          *  fade-out. The original used a simple ESC-to-exit, NOT a pause menu.] */
-        if (esc_edge && td5_game_is_cinematic_race() && !s_replay_abort_pending &&
+        /* [BUG 5a] s_replay_esc_exit is the per-frame ESC latch armed above the
+         * loop; consume it here so a no-tick-frame ESC tap still aborts. */
+        int replay_esc_edge = s_replay_esc_exit;
+        s_replay_esc_exit = 0;
+        if ((esc_edge || replay_esc_edge || td5_input_replay_exit_requested()) &&
+            td5_game_is_cinematic_race() &&
+            !s_replay_abort_pending &&
             g_td5.race_end_fade_state == 0) {
             s_replay_abort_pending = 1;
             /* View Replay was launched from the results screen → return there
@@ -4011,6 +4340,26 @@ int td5_game_run_race_frame(void) {
                                        * Rows: 0=VIEW 1=SOUND 2=CONTINUE
                                        * 3=RESTART RACE 4=QUIT TO MENU 5=EXIT GAME.
                                        * ENTER then dismisses in one keypress. */
+            /* [BUGFIX #15 2026-06-15] Consume the currently-held direction keys so
+             * the menu's nav edge-detection treats them as ALREADY pressed. UP is
+             * usually accelerate and DOWN is brake; without this seed, opening the
+             * menu mid-throttle fired the up/down nav edge on the first menu frame
+             * and bumped the cursor off CONTINUE. Latch s_prev_* = held state now
+             * (same key/pad reads as the nav block below) so only a fresh
+             * release-then-press moves the cursor. Keyboard + controller. */
+            {
+                uint32_t jnav_open = 0;
+                int hp = g_td5.num_human_players;
+                if (hp < 1) hp = 1;
+                if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+                for (int pi = 0; pi < hp; pi++) jnav_open |= td5_plat_input_joystick_nav(pi);
+                s_prev_up    = td5_plat_input_key_pressed(0xC8) || (jnav_open & 0x04);
+                s_prev_down  = td5_plat_input_key_pressed(0xD0) || (jnav_open & 0x08);
+                s_prev_left  = td5_plat_input_key_pressed(0xCB) || (jnav_open & 0x01);
+                s_prev_right = td5_plat_input_key_pressed(0xCD) || (jnav_open & 0x02);
+                s_prev_enter = td5_plat_input_key_pressed(0x1C) || (jnav_open & 0x10);
+                s_prev_jb    = (jnav_open & 0x20) ? 1 : 0;
+            }
             td5_sound_set_sfx_muted(1);  /* silence engine/skid SFX on pause
                                           * (mirrors DXSound::MuteAll @0x0042C470). */
             /* [REWORK 2026-06-05/S15] Silence the in-race music (CD audio) while
@@ -4018,7 +4367,14 @@ int td5_game_run_race_frame(void) {
              * resume to gameplay; left stopped on RESTART/QUIT/EXIT (RESTART's
              * init re-plays it, the others tear the race down). */
             td5_sound_cd_stop();
-            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 2, SFX muted, music stopped)");
+            td5_sound_set_paused(1);  /* [item 24] suspend ALL audio at once on pause (gated TD5RE_PAUSE_MUTE) */
+            /* [FF stuck-motor fix 2026-06-15] The sim (and its FF update inside
+             * PollRaceSessionInput) freezes while paused, so any motor asserted at
+             * the moment of pause would stay latched — the reported "force feedback
+             * doesn't stop on the pause menu". Zero all motors now; the per-frame FF
+             * update naturally resumes them on CONTINUE. */
+            td5_input_ff_stop();
+            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 2, SFX muted, music stopped, FF stopped)");
         }
         if (s_pause_menu_active) {
             /* Process pause menu input ONCE per frame (not per tick) to avoid
@@ -4026,9 +4382,9 @@ int td5_game_run_race_frame(void) {
             if (!s_pause_input_done) {
                 s_pause_input_done = 1;
 
-                static int s_prev_down = 0, s_prev_up = 0;
-                static int s_prev_left = 0, s_prev_right = 0;
-                static int s_prev_enter = 0;
+                /* Nav edge-detection state (s_prev_down/up/left/right/enter/jb)
+                 * is file-static and SEEDED on menu-open with the held keys
+                 * [BUGFIX #15], so held UP/DOWN can't auto-navigate on frame 1. */
                 /* [PORT ENHANCEMENT 2026-06] Aggregate joystick nav from every human
                  * player's in-race device (dpad/left stick = move, A = confirm) so the
                  * pause menu is navigable with the pad, not just the keyboard. The
@@ -4226,7 +4582,6 @@ int td5_game_run_race_frame(void) {
                 /* Joystick B = back = continue (close the menu), mirroring the
                  * frontend B=back convention. [PORT ENHANCEMENT 2026-06] */
                 {
-                    static int s_prev_jb = 0;
                     int jb = (jnav & 0x20) ? 1 : 0;
                     if (jb && !s_prev_jb) s_pause_menu_active = 0;
                     s_prev_jb = jb;
@@ -4265,6 +4620,7 @@ int td5_game_run_race_frame(void) {
                 td5_sound_set_sfx_muted(s_pause_menu_cursor == 1 ? 0 : 1);
             } else if (pause_menu_was_active) {
                 td5_sound_set_sfx_muted(0);
+                td5_sound_set_paused(0);  /* [item 24] resume audio + restore music volume */
                 if (!s_pause_exit_pending && !s_pause_restart_pending && !g_td5.quit_requested) {
                     td5_sound_cd_play(g_td5.track_index % 10 + 1);  /* same call as InitRace step 16 */
                     TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
@@ -4670,7 +5026,11 @@ int td5_game_run_race_frame(void) {
             if (hp < 1) hp = 1;
             if (hp > TD5_MAX_RACER_SLOTS) hp = TD5_MAX_RACER_SLOTS;
             for (int fb = 0; fb < hp; fb++) {
-                if (fb == 0 && g_td5.ini.player_is_ai) continue;  /* attract slot keeps driving */
+                /* [DEMO FIX #3] An AI-driven slot 0 keeps driving and is never
+                 * force-braked: player_is_ai (debug) OR the attract demo, which
+                 * drops slot 0 to state==0 above. Mirrors the original, where
+                 * slot[0].state = 1-(demo|benchmark) makes the demo car AI. */
+                if (fb == 0 && (g_td5.ini.player_is_ai || s_demo_mode)) continue;  /* attract slot keeps driving */
                 if (fb > 0 && g_td5.ini.others_ai)     continue;  /* AI-driven co-op slots */
                 if (g_td5.race_end_fade_state == 0 &&
                     s_slot_state[fb].companion_1 == 0) continue;  /* still racing */
@@ -4685,6 +5045,18 @@ int td5_game_run_race_frame(void) {
         }
 
         td5_physics_tick();
+
+        /* [#10 race telemetry] Accumulate per-racer summary metrics for this
+         * LIVE race sim tick (top/avg speed, collisions, air time, drifts).
+         * Placed here — after the live td5_physics_tick(), inside the
+         * deterministic sub-tick loop and PAST the countdown/pause `continue`
+         * guards above — so it runs exactly once per genuine race tick from
+         * replicated state only (lockstep- and replay-deterministic). The
+         * countdown-boundary td5_physics_tick() call does NOT accumulate (cars
+         * are stationary during the count-in). Cheap; runs regardless of the
+         * summary-screen knob so the data is always available for A/B. */
+        td5_physics_accumulate_metrics();
+
         td5_game_trace_stage("post_physics", ticks_this_frame);
         td5_game_trace_stage("post_ai", ticks_this_frame);
 
@@ -6932,6 +7304,12 @@ void td5_game_init_viewport_layout(void) {
 
     g_td5.viewport_count = views;
 
+    /* Reset the cell map to identity (vp -> cell vp) up front; the positioned
+     * branch below overwrites it. This keeps the queries well-defined even on
+     * the single-view / fallback paths. */
+    s_view_cell_count = views;
+    for (int vp = 0; vp < TD5_MAX_VIEWPORTS; vp++) s_view_cell[vp] = vp;
+
     if (views <= 1) {
         s_viewports[0].x = 0; s_viewports[0].y = 0;
         s_viewports[0].w = w; s_viewports[0].h = h;
@@ -6939,13 +7317,45 @@ void td5_game_init_viewport_layout(void) {
         return;
     }
 
-    /* The N players fill the first N cells of the cols x rows grid (row-major);
-     * any extra "missing" cells stay empty here (their content is a deferred
-     * follow-up). Grid resolved by the shared helper so the HUD agrees. */
+    /* Grid resolved by the shared helper so the HUD agrees on cols x rows. */
     td5_game_resolve_split_grid(views, &cols, &rows);
 
+    /* [#9 SPLIT-LAYOUT FIX] Build the viewport -> cell map from the position
+     * screen's permutation. For each grid cell in row-major order ask the
+     * frontend which actor (if any) the player parked there; every OCCUPIED
+     * cell becomes the next viewport's home cell, so panes land in the cells the
+     * players chose and the cell(s) nobody chose are left free for the HUD
+     * map/standings filler. mp_view_actor_slot() returns -1 for every cell when
+     * the feature is inactive (knob off, nothing committed, or not the local MP
+     * flow) — in that case the loop below contributes nothing and we keep the
+     * identity map seeded above, so AutoRace / the harness / non-positioned MP
+     * stay byte-identical (panes fill cells 0..N-1, empty cells are the tail). */
+    if (td5_split_layout_fix_on()) {
+        int total = cols * rows;
+        if (total > TD5_MAX_VIEWPORTS) total = TD5_MAX_VIEWPORTS;
+        int assigned = 0;
+        for (int cell = 0; cell < total && assigned < views; cell++) {
+            int actor = td5_frontend_mp_view_actor_slot(cell);
+            if (actor >= 0) s_view_cell[assigned++] = cell;
+        }
+        /* Only adopt the permutation if it accounts for every viewport; a
+         * partial map (e.g. fewer committed cells than panes, or spectator panes
+         * with no picker entry) would otherwise leave some panes without a cell.
+         * In that case fall back to the identity map (already seeded). */
+        if (assigned == views) {
+            TD5_LOG_I(LOG_TAG, "Viewport layout: positioned cell map [%d %d %d %d %d %d %d %d %d]",
+                      s_view_cell[0], s_view_cell[1], s_view_cell[2], s_view_cell[3],
+                      s_view_cell[4], s_view_cell[5], s_view_cell[6], s_view_cell[7],
+                      s_view_cell[8]);
+        } else {
+            for (int vp = 0; vp < TD5_MAX_VIEWPORTS; vp++) s_view_cell[vp] = vp;
+        }
+    }
+
+    /* Lay out each pane at ITS cell (row-major over cols x rows), not at vp.
+     * With the identity map this is the legacy "panes fill cells 0..N-1". */
     for (int vp = 0; vp < views; vp++) {
-        td5_game_get_pane_rect(views, vp, w, h,
+        td5_game_get_pane_rect(views, s_view_cell[vp], w, h,
                                &s_viewports[vp].x, &s_viewports[vp].y,
                                &s_viewports[vp].w, &s_viewports[vp].h);
     }
@@ -6953,6 +7363,30 @@ void td5_game_init_viewport_layout(void) {
     TD5_LOG_I(LOG_TAG, "Viewport layout: mode=%d humans=%d spectate=%d count=%d grid=%dx%d %dx%d",
               g_td5.split_screen_mode, g_td5.num_human_players, g_td5.num_spectate_screens,
               g_td5.viewport_count, cols, rows, w, h);
+}
+
+/* [#9] Grid cell (0..cols*rows-1, row-major) that viewport v is laid out in.
+ * Single source for the HUD: a cell IS a viewport iff some v maps to it, so the
+ * HUD draws the map/standings filler only in cells this never returns. Returns v
+ * unchanged for out-of-range v or when the layout fix is off (identity map). */
+int td5_game_get_pane_cell(int views, int v) {
+    (void)views;
+    if (v < 0 || v >= TD5_MAX_VIEWPORTS) return v;
+    if (v >= s_view_cell_count) return v;
+    return s_view_cell[v];
+}
+
+/* [#9] 1 iff grid cell `cell` is occupied by a player viewport (so the HUD must
+ * NOT draw an empty-cell map/standings there); 0 iff the cell is free. The HUD
+ * should iterate all cols*rows cells and fill only the cells where this is 0,
+ * instead of assuming the empties are the contiguous tail (views..cols*rows-1) —
+ * which is wrong once the position screen permutes which cell each pane uses. */
+int td5_game_split_cell_is_viewport(int views, int cell) {
+    int n = (views < s_view_cell_count) ? views : s_view_cell_count;
+    if (n > TD5_MAX_VIEWPORTS) n = TD5_MAX_VIEWPORTS;
+    for (int v = 0; v < n; v++)
+        if (s_view_cell[v] == cell) return 1;
+    return 0;
 }
 
 /* ========================================================================

@@ -360,6 +360,28 @@ static int upnp_ssdp_find_location(char *loc_url, int loc_len, char *gw_ip, int 
         memcpy(loc_url, loc, (size_t)ln);
         loc_url[ln] = '\0';
 
+        /* [SEC 2026-06-15] If LOCATION carries an IP literal, it must be the
+         * SSDP responder's own address. Otherwise any host answering the
+         * M-SEARCH could redirect our device-description GET (and the follow-up
+         * SOAP) to an arbitrary address -- an SSDP-spoof -> SSRF lever.
+         * Hostnames are left alone (legitimate but rare; not trivially
+         * redirectable without DNS control). Off-path source spoofing remains
+         * possible, but this blocks the trivial LAN case. */
+        {
+            char loc_host[128], loc_path[256];
+            int  loc_port = 80;
+            if (upnp_parse_url(loc_url, loc_host, sizeof(loc_host),
+                               &loc_port, loc_path, sizeof(loc_path))) {
+                unsigned long loc_ip = inet_addr(loc_host);
+                if (loc_ip != INADDR_NONE && loc_ip != from.sin_addr.s_addr) {
+                    TD5_LOG_W(UPNP_LOG,
+                              "SSDP: LOCATION host %s != responder %s -- ignoring",
+                              loc_host, inet_ntoa(from.sin_addr));
+                    continue;
+                }
+            }
+        }
+
         /* remember the responder's IP as the gateway host */
         snprintf(gw_ip, (size_t)gw_len, "%s", inet_ntoa(from.sin_addr));
         got = 1;

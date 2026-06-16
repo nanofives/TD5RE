@@ -362,16 +362,41 @@ typedef struct TD5_FFState {
  *  the per-player joystick slot (0..TD5_PLAT_MAX_JS_SLOTS-1, == player index).
  *  Returns 0 on failure (no device, or device has no FF). Idempotent per slot.
  *  [PORT ENHANCEMENT 2026-06] N-way: each human player's device gets its own
- *  effect set so vibration is delivered per-player, not just on slot 0. */
+ *  effect set so vibration is delivered per-player, not just on slot 0.
+ *  [#1 2026-06-15] If the bound device is an XInput pad (8BitDo & most modern
+ *  gamepads — these expose rumble via XInput, NOT DI force-feedback effects),
+ *  this routes the slot's FF through XInput rumble and returns success even when
+ *  the device reports no DirectInput FF capability. Knob TD5RE_FF_XINPUT
+ *  (default ON; "0" = DI effects only). DI-effect FF is kept for wheels. */
 int  td5_plat_ff_init(int device_slot);
 
 /** Stop all effects on all devices and shutdown. */
 void td5_plat_ff_shutdown(void);
 
-/** Play an effect on one device. effect_slot 0..3, magnitude -10000..+10000. */
+/** Play an effect on one device. effect_slot 0..3, magnitude -10000..+10000.
+ *  [#1 2026-06-15] On an XInput-routed device (gamepad) the effect slot maps to
+ *  a motor ONLY for the event-driven effects, so a gamepad never buzzes during
+ *  normal driving:
+ *    slot 1 (crash + gear jolts) -> high-freq (light) motor;
+ *    slot 2 (side-collision)     -> low-freq (heavy) motor;
+ *    slots 0 (steering constant) and 3 (terrain periodic) are NOT routed to any
+ *      motor (they are continuous wheel forces; on a pad they were the reported
+ *      "rumbles all the time"). For the redline-in-manual buzz use
+ *      td5_plat_ff_xinput_rumble below. DI force-feedback wheels are unaffected:
+ *      they still receive all four slots as DI effects.
+ *  The input layer (td5_input.c) calls this unchanged; the routing is internal. */
 void td5_plat_ff_constant(int device_slot, int effect_slot, int magnitude);
 
-/** Stop one active effect slot on one device. */
+/** [#1 2026-06-15] Drive a GAMEPAD's low-freq (heavy) motor with a dedicated
+ *  continuous "rumble" contributor (magnitude 0..10000), used for the MAX-RPM-
+ *  in-manual buzz. Kept separate from the DI effect slots so the gamepad motor
+ *  picks up ONLY this (and the slot 1/2 event pulses), never terrain/steering/
+ *  drift. No-op on a DirectInput FF wheel — there the redline buzz already rides
+ *  on effect slot 3, so the wheel path is unchanged. magnitude 0 silences it. */
+void td5_plat_ff_xinput_rumble(int device_slot, int magnitude);
+
+/** Stop one active effect slot on one device. (On an XInput-routed device this
+ *  clears that effect's motor contribution.) */
 void td5_plat_ff_stop(int device_slot, int effect_slot);
 
 /* ========================================================================

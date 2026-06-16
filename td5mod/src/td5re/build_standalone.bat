@@ -104,16 +104,25 @@ for %%F in (!TD5RE_SRCS!) do (
 if !FAIL!==1 goto :fail
 
 REM ---------------------------------------------------------------------------
-REM Compile resource file (icon)
+REM Compile resource file (icon). This is shared by DEV and RELEASE -- both link
+REM !RESOBJ! below, so the TD5 app icon (td5re.rc -> td5re.ico, multi-size
+REM 16/32/48/256 under resource id 1) is embedded in BOTH td5re.exe and
+REM td5re_release.exe. A missing/failed resource is treated as FATAL: shipping a
+REM release exe with the generic default Windows icon is a regression, so we stop
+REM the build rather than silently drop the icon.
 REM ---------------------------------------------------------------------------
 echo Compiling td5re.rc...
+del !BUILDDIR!\td5re_res.o 2>nul
 "%WINDRES%" -F pe-i386 -i %SRCDIR%\td5re.rc -o !BUILDDIR!\td5re_res.o
 if errorlevel 1 (
-    echo WARNING: windres failed, icon will not be embedded
-    set "RESOBJ="
-) else (
-    set "RESOBJ=!BUILDDIR!\td5re_res.o"
+    echo ERROR: windres failed -- app icon would be missing, aborting build
+    goto :fail
 )
+if not exist !BUILDDIR!\td5re_res.o (
+    echo ERROR: windres produced no resource object, aborting build
+    goto :fail
+)
+set "RESOBJ=!BUILDDIR!\td5re_res.o"
 
 REM ---------------------------------------------------------------------------
 REM Build static archive from all td5re .o files (excluding main.o).

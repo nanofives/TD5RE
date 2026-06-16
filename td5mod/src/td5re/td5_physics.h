@@ -104,6 +104,21 @@ void td5_physics_update_suspension_response(TD5_Actor *actor);
 /* --- Attitude / Recovery --- */
 void td5_physics_clamp_attitude(TD5_Actor *actor);
 void td5_physics_reset_actor_state(TD5_Actor *actor);
+
+/* --- Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15) ---
+ * Reposition a stuck player's car a few spans back, centred on the track,
+ * upright, with linear+angular velocity zeroed and heading aligned to the
+ * track's forward direction at that span. `slot` is the actor slot. Safe to call
+ * from the deterministic sim tick; clears the slot's auto-stuck timer. Gated by
+ * TD5RE_STUCK_RECOVERY (default ON); the number of spans back is
+ * TD5RE_RECOVERY_SPANS_BACK (default 3). Returns 1 if the car was repositioned,
+ * 0 if it could not be (no track / non-racer slot / knob off).
+ *
+ * The per-tick driver below runs both the AUTOMATIC stuck-detection and the
+ * MANUAL (R / L3) recovery for every local human player; it is called from
+ * td5_physics_tick. Restricted to non-network play for v1. */
+int  td5_physics_recover_player(int slot);
+void td5_physics_update_stuck_recovery(void);
 void td5_physics_missing_wheel_correction(TD5_Actor *actor);
 void td5_physics_state0f_damping(TD5_Actor *actor);
 
@@ -136,6 +151,43 @@ void td5_physics_set_collisions(int enabled);
 int  td5_physics_get_collisions_flag(void);  /* mirror of *0x00463188 — pilot trace use */
 void td5_physics_apply_collision_impulse(TD5_Actor *a, TD5_Actor *b);
 void td5_physics_resolve_vehicle_contacts(void);
+
+/* --- Acute high-speed crash feedback (PORT-ONLY, item #12) ---
+ * On a genuinely high-speed PLAYER crash (impact above an acute threshold,
+ * with 3D Collisions enabled), the physics scrubs extra forward speed and
+ * records a per-slot crash-fx event behind TD5RE_CRASH_FX (default ON).
+ * Other modules (HUD/VFX/audio) poll this every frame to fire a one-shot
+ * reaction. Returns the per-slot crash sequence id (0 = no acute crash yet),
+ * and fills *out_mag (last acute impact magnitude) and *out_age (sim ticks
+ * since the crash; 0 = same tick). Null out-params are tolerated; an out-of-
+ * range or non-racer slot returns 0. Safe to call every frame. */
+uint32_t td5_physics_get_crash_fx(int slot, int32_t *out_mag, int *out_age);
+
+/* --- Force-feedback signal getters (FF SIGNALS, #1) ---
+ * Per-slot driving-state signals for the force-feedback layer (td5_input.c).
+ * All three are refreshed once per fixed-30Hz sim tick by
+ * td5_physics_update_ff_signals() (called from td5_physics_tick after the
+ * per-actor integration loop) and read per render frame. Deterministic:
+ * integer math over replicated/local sim state (body-frame lateral vs
+ * longitudinal speed, current_gear at actor +0x36B, engine RPM at actor +0x310
+ * vs redline tuning +0x72). All return 0 for out-of-range slots. */
+void     td5_physics_update_ff_signals(void);
+int      td5_physics_get_drift_level(int slot);   /* 0 = not drifting, else ~1..255 from lateral vs longitudinal slip */
+uint32_t td5_physics_gear_change_seq(int slot);   /* increments on each gear change (current_gear at actor +0x36B), sim-tick edge-detected */
+int      td5_physics_at_redline(int slot);        /* 1 if engine RPM (actor +0x310) within ~5% of redline (tuning +0x72) */
+
+/* --- Air-time landing event (FF SIGNALS, item #5(4); PORT-ONLY) ---
+ * Edge-detected once per fixed-30Hz tick by td5_physics_update_ff_signals():
+ * when an actor that was meaningfully airborne (airborne_frame_counter past a
+ * floor, all four wheels off the ground) regains ground contact this tick, the
+ * downward vertical impact speed (|linear_velocity_y| at the landing frame) is
+ * latched and a per-slot landing sequence id is bumped. The FF layer polls this
+ * to fire a decaying jolt scaled by the impact. Returns the per-slot landing
+ * sequence id (0 = no landing yet); fills *out_impact with the last landing's
+ * vertical impact speed (raw 24.8 units, always >= 0). Null out-param tolerated;
+ * out-of-range / non-racer slots return 0. Deterministic (replicated sim state).
+ * Behind TD5RE_FF_LANDING (default ON); off => never records, getter stays 0. */
+uint32_t td5_physics_get_landing_fx(int slot, int32_t *out_impact);
 
 /* --- Wall collision response (FUN_00406980) ---
  * probe_x_fp8 / probe_z_fp8: probe world position in 24.8 fixed point.
