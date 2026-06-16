@@ -3169,8 +3169,21 @@ int td5_game_init_race_session(void) {
     {
         char sky_path[256];
         int level_num = td5_asset_level_number(g_td5.track_index);
+        /* [reverse-sky 2026-06-16] Backwards races load the level's reverse-
+         * direction sky (BACKSKY) instead of FORWSKY. Forward-only tracks ship
+         * no BACKSKY, so probe for it and fall back to FORWSKY when absent —
+         * td5_render_load_sky no-ops on a missing file (leaving no sky), which we
+         * must avoid for a reverse race. */
+        const char *sky_name = "FORWSKY";
+        if (g_td5.reverse_direction) {
+            char probe[256];
+            snprintf(probe, sizeof(probe),
+                     "re/assets/levels/level%03d/BACKSKY.png", level_num);
+            FILE *bf = fopen(probe, "rb");
+            if (bf) { fclose(bf); sky_name = "BACKSKY"; }
+        }
         snprintf(sky_path, sizeof(sky_path),
-                 "re/assets/levels/level%03d/FORWSKY.png", level_num);
+                 "re/assets/levels/level%03d/%s.png", level_num, sky_name);
         td5_render_load_sky(sky_path);
     }
 
