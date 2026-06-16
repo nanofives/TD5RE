@@ -299,6 +299,23 @@ static int td5_ff_drift_enabled(void)
     return s_on;
 }
 
+/* [stronger collisions 2026-06-16] Live-tunable collision pulse gain (Q8). Default
+ * TD5_FF_COLLISION_GAIN_Q8; override with TD5RE_FF_COLLISION_GAIN (decimal or 0x..,
+ * e.g. 0x600 = 6.0x) to dial collision strength without a rebuild. Clamped 1x..16x. */
+static int ff_collision_gain_q8(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_FF_COLLISION_GAIN");
+        long g = (e && e[0]) ? strtol(e, NULL, 0) : 0x400;   /* default == TD5_FF_COLLISION_GAIN_Q8 (defined below) */
+        if (g < 0x100) g = 0x100;     /* never weaker than 1.0x */
+        if (g > 0x1000) g = 0x1000;   /* cap at 16x */
+        v = (int)g;
+        TD5_LOG_I(LOG_TAG, "FF collision gain Q8 = 0x%X (TD5RE_FF_COLLISION_GAIN=%s)", v, e ? e : "default");
+    }
+    return v;
+}
+
 /* [item #5(2)] TD5RE_FF_COLLISION_DIR (cached): sub-gate for DIRECTIONAL
  * collisions. Default ON: a left-side impact biases the LOW (left) motor, a
  * right-side impact the HIGH (right) motor (XInput), and the DI wheel gets the
@@ -328,8 +345,8 @@ static int td5_ff_collision_dir_enabled(void)
 #define TD5_FF_GEAR_PULSE_MAG      3000   /* brief low-force gear-shift bump */
 #define TD5_FF_GEAR_PULSE_TICKS       2   /* render-frames the gear bump holds */
 #define TD5_FF_CRASH_PULSE_MAG_MAX 10000  /* full-scale strong crash jolt */
-#define TD5_FF_CRASH_PULSE_TICKS      4   /* render-frames the crash jolt holds */
-#define TD5_FF_COLLISION_PULSE_TICKS  6   /* render-frames a V2V/wall collision jolt holds before auto-release */
+#define TD5_FF_CRASH_PULSE_TICKS      8   /* render-frames the crash jolt holds [stronger collisions 2026-06-16, was 4] */
+#define TD5_FF_COLLISION_PULSE_TICKS 12   /* render-frames a V2V/wall collision jolt holds before auto-release [stronger 2026-06-16, was 6] */
 #define TD5_FF_CRASH_NEW_AGE_TICKS    3   /* a crash is "new" if age <= this (sim ticks) */
 /* Crash impact magnitude is large (acute threshold 250000); scale it to the FF
  * domain. >>5 maps ~250000 -> ~7800 and saturates to 10000 by ~320000. */
@@ -340,9 +357,11 @@ static int td5_ff_collision_dir_enabled(void)
  * ordinary wall scrapes then land far below DI_FFNOMINALMAX and feel weak. Scale
  * the divided magnitude up (Q8: 0x100 = 1.0x) and floor it so even a glancing hit
  * is clearly felt, then clamp to the DI nominal max so we never exceed the device
- * range. 0x200 = 2.0x makes wall/car hits punchy without saturating every tap. */
-#define TD5_FF_COLLISION_GAIN_Q8   0x200  /* 2.0x boost on the divided collision mag */
-#define TD5_FF_COLLISION_FLOOR     2600   /* min felt collision pulse (clearly perceptible) */
+ * range. [stronger collisions 2026-06-16] 0x400 = 4.0x (was 2.0x) so moderate
+ * wall/car hits saturate toward full motor; floor raised so even light contacts
+ * are clearly felt. Tune live with TD5RE_FF_COLLISION_GAIN (Q8, e.g. 0x600=6x). */
+#define TD5_FF_COLLISION_GAIN_Q8   0x400  /* 4.0x boost on the divided collision mag */
+#define TD5_FF_COLLISION_FLOOR     4500   /* min felt collision pulse (clearly perceptible) */
 
 /* [item #5(3)] Continuous DRIFT rumble. Proportional to td5_physics_get_drift_level
  * (0 = not drifting, ~1..255). EXACTLY 0 below the threshold so a car tracking
@@ -2859,7 +2878,7 @@ void td5_input_ff_collision(int contact_side, int actor_a_slot,
      * we never exceed DI_FFNOMINALMAX. (raw==0 -> mag 0 stays 0: no spurious
      * pulse from a zero-magnitude call.) */
     if (mag > 0) {
-        mag = (int)(((long)mag * TD5_FF_COLLISION_GAIN_Q8) >> 8);   /* Q8 gain */
+        mag = (int)(((long)mag * ff_collision_gain_q8()) >> 8);   /* Q8 gain (live-tunable) */
         if (mag < TD5_FF_COLLISION_FLOOR) mag = TD5_FF_COLLISION_FLOOR;
     }
     if (mag > TD5_INPUT_FF_COLLISION_MAX) mag = TD5_INPUT_FF_COLLISION_MAX;
