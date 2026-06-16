@@ -602,6 +602,11 @@ void td5_track_get_span_edges(int span_index,
  *     uninitialised probes).
  * ------------------------------------------------------------------------ */
 static int td6_branches_enabled(void);   /* fwd decl (task#17, defined below) */
+/* [#18/#20] Set while walking a TRAFFIC actor (in td5_track_resolve_actor_segment_
+ * boundary): forces traffic to stay on the main ring at TD6 forks even when
+ * branches are drivable (player/AI may still branch). TD6 branches are separate
+ * parallel streets that read as off-road, so traffic cruising one looks wrong. */
+static int s_walker_force_main = 0;
 
 /* [task#8 FIX 2026-06-14] TD6 SHALLOW-WALL DEADZONE. The year-long "invisible
  * wall at the beginning / span 110" is the collision firing a HARD wall response
@@ -2460,7 +2465,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                  * to the right branch"). Until the corridors are relocated to abut
                  * their forks (deep converter rewrite), keep everyone on the main road
                  * and clamp into its lanes. Native TD5 (g_active_td6_level==0) untouched. */
-                if (g_active_td6_level > 0 && sl >= next_lanes && !td6_branches_enabled()) {
+                if (g_active_td6_level > 0 && sl >= next_lanes && (!td6_branches_enabled() || s_walker_force_main)) {
                     *sub_lane = next_lanes - 1;
                     new_span = next_idx;
                     TD5_LOG_I(LOG_TAG, "jfwd_td6_main: span=%d sl=%d next_lanes=%d -> span=%d (forced main, displaced branch suppressed)",
@@ -2511,7 +2516,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (g_active_td6_level > 0 && sl >= next_lanes && !td6_branches_enabled()) {
+                if (g_active_td6_level > 0 && sl >= next_lanes && (!td6_branches_enabled() || s_walker_force_main)) {
                     *sub_lane = next_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x01) */
                     new_span = next_idx;
                 } else if (sl < next_lanes) {
@@ -2570,7 +2575,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes && !td6_branches_enabled()) {
+                if (g_active_td6_level > 0 && sl >= prev_lanes && (!td6_branches_enabled() || s_walker_force_main)) {
                     /* TD6: force main for ALL, suppress the ~8000u-displaced branch
                      * (same rationale as fwd case 0x01). Reversing through a London
                      * junction used to follow link_prev onto the displaced branch
@@ -2618,7 +2623,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes && !td6_branches_enabled()) {
+                if (g_active_td6_level > 0 && sl >= prev_lanes && (!td6_branches_enabled() || s_walker_force_main)) {
                     *sub_lane = prev_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x04) */
                     new_span = prev_idx;
                 } else if (sl >= prev_lanes) {
@@ -5017,6 +5022,8 @@ void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
     uint8_t *entry_base;
 
     if (!actor) return;
+
+    s_walker_force_main = (actor->slot_index >= TRAFFIC_SLOT_BASE) ? 1 : 0;
 
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
 

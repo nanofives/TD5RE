@@ -7229,7 +7229,10 @@ static int trf_dyn_branches_enabled(void)
     static int s = -1;
     if (s < 0) {
         const char *e = getenv("TD5RE_TRAFFIC_BRANCHES");
-        s = (e && e[0] == '0') ? 0 : 1;
+        /* Default OFF: TD6 branches are separate parallel streets ~3300u off the
+         * fork (verified in TD6's strip.dat) that read as off-road/sidewalk, so
+         * traffic cruising one looks wrong (user). =1 restores branch traffic. */
+        s = (e && e[0] == '1') ? 1 : 0;
         TD5_LOG_I(LOG_TAG, "traffic_branches knob: TD5RE_TRAFFIC_BRANCHES=%d "
                   "(spawn on branch corridors %s)", s, s ? "ON" : "OFF");
     }
@@ -7520,6 +7523,7 @@ static int trf_dyn_pick_branch_main_span(int ps, int win_lo, int win_hi)
  * "leader" there scattered seeds around the lap line, ignoring the
  * start-clearance zone on circuits (the Scotland race-start bug).
  * Returns 1 on success. */
+
 static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
 {
     int ring   = td5_track_get_ring_length();
