@@ -107,6 +107,55 @@ static void mp_pos_small_centered(float cx_px, float y_px, const char *t,
     fe_draw_small_text(cx_px - fe_measure_small_text(t) * 0.5f * gsx, y_px, t, col, sx, sy);
 }
 
+/* [#3 2026-06-16] MP per-player panel MAX-WIDTH cap. With few players the split
+ * layout makes each pane very wide (2 players -> cols=2 -> 320 px each; the
+ * "CHOOSE YOUR SCREEN" cells span 280 px). Cap each pane at the width it would
+ * have in a 3x3 grid (canvas/3) and centre the resulting row in the canvas.
+ *
+ * EXACT FORMULA (canvas width W = 640, cols from mp_resolve_layout):
+ *   pane_full = W / cols
+ *   cap       = W / 3                       == 213.333 px   (the 3x3-equivalent)
+ *   pane_w    = min(pane_full, cap)
+ *   row_used  = cols * pane_w
+ *   row_x0    = (W - row_used) / 2          (centres the row; +0 when uncapped)
+ *   px[col]   = row_x0 + col * pane_w
+ * Capping kicks in only when cols < 3 (1->213, 2->213; 3+ already <= cap so
+ * pane_w is unchanged and row_x0 == 0, i.e. the >=3-player layouts are
+ * untouched). Height is left at canvas/rows (only WIDTH is capped, per spec).
+ *
+ * Knob TD5RE_MP_PANEL_CAP (default on; "0" restores edge-to-edge full-width
+ * panes). Cached once, logged once.
+ *
+ * SCOPE NOTE: this only governs the per-player panels RENDERED IN THIS FILE (the
+ * position-picker cells + the profile/PROFILE-chip overlay). The main name/colour
+ * setup panes and the simultaneous car-select panes are drawn in td5_frontend.c
+ * (frontend_mp_setup_render / frontend_mp_simul_carsel_render); for the overlay to
+ * sit on top of them they must adopt this identical formula. See the REPORT. */
+static int mp_panel_cap_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_PANEL_CAP");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP per-player panel width cap (#3) %s (TD5RE_MP_PANEL_CAP=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+/* Capped pane width + centred row origin for `cols` columns across `canvas_w`.
+ * Writes the per-pane width to *pane_w and the row's left edge (col 0) to *row_x0.
+ * No-op (full width, x0=0) when the cap knob is off. */
+static void mp_panel_capped(float canvas_w, int cols, float *pane_w, float *row_x0) {
+    float full = canvas_w / (float)(cols < 1 ? 1 : cols);
+    float w = full;
+    if (mp_panel_cap_on()) {
+        float cap = canvas_w / 3.0f;
+        if (w > cap) w = cap;
+    }
+    if (pane_w)  *pane_w  = w;
+    if (row_x0)  *row_x0  = (canvas_w - (float)cols * w) * 0.5f;
+}
+
 /* [#6] Knob: TD5RE_MP_POSITIONS already gates the whole picker (mp_positions_enabled
  * in td5_frontend.c). This file reuses it; no separate knob added for #6. */
 /* [#11] Knob: TD5RE_PROFILES (default ON; exactly "0" disables the profile panel
@@ -2206,10 +2255,13 @@ void frontend_mp_position_render2(float sx, float sy) {
     /* Layout grid occupies a centred area below the title, above the footer. */
     {
         const float gx = 40.0f, gy = 40.0f, gw = 560.0f, gh = 372.0f;
-        float cw = gw / (float)cols, ch = gh / (float)rows;
+        /* [#3] Cap cell WIDTH at the 3x3-equivalent (gw/3) and centre the row in
+         * the gw band so 1-2 cells don't stretch edge to edge. */
+        float cw, ch = gh / (float)rows, row_x0 = 0.0f;
+        mp_panel_capped(gw, cols, &cw, &row_x0);
         for (c = 0; c < ncells; c++) {
             int col = c % cols, row = c / cols;
-            float px = gx + (float)col * cw, py = gy + (float)row * ch;
+            float px = gx + row_x0 + (float)col * cw, py = gy + (float)row * ch;
             float ccx = px + cw * 0.5f;
             int occ = owner[c];
             uint32_t rgb = (occ >= 0) ? ((uint32_t)s_mp_player_accent[occ] & 0x00FFFFFFu) : 0x303040u;
@@ -2319,6 +2371,84 @@ static int mp_profile_btn_style_enabled(void) {
     return v;
 }
 
+/* [#7 2026-06-16] Vertically centre the "LEAVE SETUP?" confirm-modal text within
+ * its box rect. The title + the two sub-lines were anchored with hard-coded top
+ * offsets (+12/+36/+50) that left the block sitting high in the 70px box; when ON
+ * the block is centred. Knob TD5RE_LEAVE_MODAL_CENTER (default on; "0" restores
+ * the old fixed offsets). */
+static int leave_modal_center_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_LEAVE_MODAL_CENTER");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "LEAVE-SETUP modal text centring (#7) %s (TD5RE_LEAVE_MODAL_CENTER=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+/* [#6 2026-06-16] Draw ONE name/colour-pane chip pixel-identically to its
+ * NAME/COLOUR/OK siblings. The siblings render through td5_frontend.c's static
+ * mp_simul_draw_btn() -> static fe_draw_button_frame_fill(), neither of which is
+ * linkable from this translation unit. fe_draw_button_frame_fill's live path
+ * (VectorUI, g_td5.ini.vector_ui defaults to 1) is a single fe_draw_roundrect
+ * call whose PUBLIC mirror is td5_vui_roundrect (identical args) — so this
+ * replicates mp_simul_draw_btn EXACTLY: the same frame constants, the same
+ * focused accent-fill / unfocused border-only treatment, the same readable-label
+ * luminance pick, and the same SMALLFONT-cap-centred label. (No arrows / value /
+ * swatch — PROFILE is a plain button like OK.) Geometry is supplied by the caller
+ * so it lands in the shared 4-slot band. */
+static void mp_profile_chip_draw(float x, float y, float w, float h,
+                                 const char *label, int focused, uint32_t pcol,
+                                 float sx, float sy) {
+    /* SMALLFONT_TTF_CAP (9.0f) and fe_glyph_sx (min(sx,sy)) are file-static in
+     * td5_frontend.c; mirror the exact same values here. */
+    const float smallcap = 9.0f;
+    const float gsx = (sx < sy) ? sx : sy;
+    uint32_t rgb = pcol & 0x00FFFFFFu;
+    uint32_t tc  = 0xFFFFFFFFu;
+    float ty = (y + (h - smallcap) * 0.5f) * sy;   /* vertically centred (= mp_simul_draw_btn) */
+
+    /* fe_draw_button_frame_fill(.., bb_state = focused?0:1, interior = rgb|FF, ..)
+     * VectorUI path -> fe_draw_roundrect with these EXACT constants (td5_frontend.c
+     * lines 8350-8358). bb_state 0 (focused/selected) fills with the accent; the
+     * unfocused state draws the blue rim with a transparent interior. */
+    if (g_td5.ini.vector_ui && td5_vui_shapes_available()) {
+        uint32_t mid_c, inner_c, outer_c;
+        float fillA;
+        if (focused) { mid_c = 0xFFD9CA00u; inner_c = 0xFFA08C00u; outer_c = 0xFF3C2F00u; fillA = 1.0f; }
+        else         { mid_c = 0xFF7995FFu; inner_c = 0xFF496BDCu; outer_c = 0xFF001675u; fillA = 0.0f; }
+        td5_vui_roundrect(x * sx, y * sy, w * sx, h * sy,
+                          20.0f * sy /*r_large TL/BR*/, 5.0f * sy /*r_small TR/BL*/,
+                          6.0f * sy  /*border side*/,  2.0f * sy /*border top/bot*/,
+                          mid_c, inner_c, outer_c, rgb | 0xFF000000u, fillA);
+    } else {
+        /* VectorUI off: fe_draw_button_frame_fill's 9-slice path (static, not
+         * linkable). Fall back to a flat accent frame so the chip still reads as
+         * a sibling button; gated identically to the proc path above. */
+        uint32_t bc = rgb | 0xFF000000u;
+        float t = 2.0f;
+        if (focused)
+            td5_vui_quad(x * sx, y * sy, w * sx, h * sy, rgb | 0xC0000000u, -1, 0, 0, 1, 1);
+        td5_vui_quad(x * sx, y * sy, w * sx, t * sy, bc, -1, 0, 0, 1, 1);
+        td5_vui_quad(x * sx, (y + h - t) * sy, w * sx, t * sy, bc, -1, 0, 0, 1, 1);
+        td5_vui_quad(x * sx, y * sy, t * sx, h * sy, bc, -1, 0, 0, 1, 1);
+        td5_vui_quad((x + w - t) * sx, y * sy, t * sx, h * sy, bc, -1, 0, 0, 1, 1);
+    }
+
+    /* Focused label colour = readable over the accent fill (mp_simul_draw_btn's
+     * luminance test); unfocused stays white. */
+    if (focused) {
+        int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+        int lum = (r * 30 + g * 59 + b * 11) / 100;
+        tc = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
+    }
+    {
+        float lw = fe_measure_small_text(label) * gsx;
+        fe_draw_small_text((x + w * 0.5f) * sx - lw * 0.5f, ty, label, tc, sx, sy);
+    }
+}
+
 void frontend_mp_setup_profile_render(float sx, float sy) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0;
@@ -2337,11 +2467,32 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
             td5_vui_quad(bx * sx, by * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
             td5_vui_quad((bx + bw - t) * sx, by * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
         }
-        td5_vui_text_centered(320.0f * sx, (by + 12.0f) * sy, "LEAVE SETUP?", 0xFFFFE060u, sx, sy);
-        mp_pos_small_centered(320.0f * sx, (by + 36.0f) * sy,
-                              "LOSES EVERYONE'S NAMES + COLOURS", 0xFFB0B0B0u, sx, sy);
-        mp_pos_small_centered(320.0f * sx, (by + 50.0f) * sy,
-                              "A = YES, LEAVE     B = NO, STAY", 0xFFFFFFFFu, sx, sy);
+        /* [#7] Vertically centre the title + the two sub-lines within the box.
+         * Glyph CAP heights: the main (title) font and the small font; the gaps
+         * between the three baselines preserve the original visual rhythm
+         * (title, then sub, then options). The whole stack is offset so it sits
+         * centred in the bh-tall box (was hard-anchored near the top at +12). */
+        if (leave_modal_center_on()) {
+            const float title_cap = 14.0f;       /* main-font cap (title) */
+            const float small_cap = 9.0f;        /* small-font cap (sub-lines) */
+            const float gap_title = 10.0f;       /* title cap bottom -> sub top */
+            const float gap_sub   = 5.0f;        /* sub cap bottom  -> options top */
+            float block_h = title_cap + gap_title + small_cap + gap_sub + small_cap;
+            float ty0 = by + (bh - block_h) * 0.5f;            /* title top */
+            float ty1 = ty0 + title_cap + gap_title;           /* sub top   */
+            float ty2 = ty1 + small_cap + gap_sub;             /* options top */
+            td5_vui_text_centered(320.0f * sx, ty0 * sy, "LEAVE SETUP?", 0xFFFFE060u, sx, sy);
+            mp_pos_small_centered(320.0f * sx, ty1 * sy,
+                                  "LOSES EVERYONE'S NAMES + COLOURS", 0xFFB0B0B0u, sx, sy);
+            mp_pos_small_centered(320.0f * sx, ty2 * sy,
+                                  "A = YES, LEAVE     B = NO, STAY", 0xFFFFFFFFu, sx, sy);
+        } else {
+            td5_vui_text_centered(320.0f * sx, (by + 12.0f) * sy, "LEAVE SETUP?", 0xFFFFE060u, sx, sy);
+            mp_pos_small_centered(320.0f * sx, (by + 36.0f) * sy,
+                                  "LOSES EVERYONE'S NAMES + COLOURS", 0xFFB0B0B0u, sx, sy);
+            mp_pos_small_centered(320.0f * sx, (by + 50.0f) * sy,
+                                  "A = YES, LEAVE     B = NO, STAY", 0xFFFFFFFFu, sx, sy);
+        }
         return;   /* the prompt is modal; don't draw the chips/panels underneath */
     }
 
@@ -2356,11 +2507,16 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
     if (rows < 1) rows = 1;
 
     {
-        float pane_w = 640.0f / (float)cols;
+        /* [#3] Cap pane WIDTH at the 3x3-equivalent (640/3) and centre the row so
+         * 1-2 panes don't render edge to edge. MUST match the (capped) setup panes
+         * in td5_frontend.c so this overlay's PROFILE chip + panel sit on top of
+         * them — see mp_panel_capped's SCOPE NOTE and the REPORT. */
+        float pane_w, row_x0 = 0.0f;
         float pane_h = 480.0f / (float)rows;
+        mp_panel_capped(640.0f, cols, &pane_w, &row_x0);
         for (p = 0; p < n; p++) {
             int col = p % cols, row = p / cols;
-            float px = (float)col * pane_w, py = (float)row * pane_h;
+            float px = row_x0 + (float)col * pane_w, py = (float)row * pane_h;
             float cx = px + pane_w * 0.5f;
             uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
             int sub = s_mp_setup_sub[p];
@@ -2384,21 +2540,16 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 if (bh > 26.0f) bh = 26.0f;
                 yy = bsy + 2.0f * (bh + 3.0f);       /* slot index 2 (between COLOUR and OK) */
                 if (mp_profile_btn_style_enabled()) {
-                    /* [#2] ENABLED look matching NAME/COLOUR/OK: transparent interior
-                     * (no fill) unfocused, accent fill when focused; full-opacity
-                     * accent rim either way (was a faint steel fill + half-alpha rim
-                     * that read as disabled). */
-                    uint32_t bc = rgb | 0xFF000000u;     /* full-opacity accent rim */
-                    float t = 2.0f;
-                    if (focus)                            /* accent fill only when focused */
-                        td5_vui_quad(bx * sx, yy * sy, bw * sx, bh * sy,
-                                     rgb | 0xC0000000u, -1, 0, 0, 1, 1);
-                    td5_vui_quad(bx * sx, yy * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
-                    td5_vui_quad(bx * sx, (yy + bh - t) * sy, bw * sx, t * sy, bc, -1, 0, 0, 1, 1);
-                    td5_vui_quad(bx * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
-                    td5_vui_quad((bx + bw - t) * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
+                    /* [#6] Route through the SAME drawing the NAME/COLOUR/OK
+                     * siblings use (mp_simul_draw_btn -> fe_draw_button_frame_fill),
+                     * replicated exactly in mp_profile_chip_draw (the siblings'
+                     * helper is file-static in td5_frontend.c and not linkable
+                     * here). This includes the label centring, so the explicit
+                     * mp_pos_small_centered "PROFILE" below is no longer needed. */
+                    mp_profile_chip_draw(bx, yy, bw, bh, "PROFILE", focus,
+                                         rgb | 0xFF000000u, sx, sy);
                 } else {
-                    /* button body: amber rim when focused, faint steel otherwise. */
+                    /* [#6 disabled] legacy steel/amber inline look. */
                     td5_vui_quad(bx * sx, yy * sy, bw * sx, bh * sy,
                                  focus ? (rgb | 0xC0000000u) : 0x70202838u, -1, 0, 0, 1, 1);
                     {
@@ -2409,9 +2560,9 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                         td5_vui_quad(bx * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
                         td5_vui_quad((bx + bw - t) * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
                     }
+                    mp_pos_small_centered(cx * sx, (yy + (bh - 9.0f) * 0.5f) * sy,
+                                          "PROFILE", 0xFFFFFFFFu, sx, sy);
                 }
-                mp_pos_small_centered(cx * sx, (yy + (bh - 9.0f) * 0.5f) * sy,
-                                      "PROFILE", 0xFFFFFFFFu, sx, sy);
             }
 
             /* (b) open profile panel. */
@@ -3837,6 +3988,26 @@ static int results_fix_on(void) {
     return v;
 }
 
+/* [#1 2026-06-16] Race-results ENTRY slide-in. Every other frontend screen
+ * advances its slide-in state via frontend_update_timed_animation(0x27, 650)
+ * (650 ms; see Screen_QuickRaceMenu/TrackSelection case 3, Screen_CarSelection
+ * case 3, Screen_PostRaceHighScore case 3) — the results screen instead used a
+ * bespoke tick counter, and the default all-players SUMMARY view (drawn at fixed
+ * column centres) ignored the panel slide entirely, so it "popped" in with NO
+ * animation. When ON, state 3 is driven by the SAME timed-animation helper and
+ * the summary table slides in horizontally with the panel; "0" restores the old
+ * tick-based behaviour (and the summary's static draw). */
+static int results_anim_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_RESULTS_ANIM");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "results-screen entry slide-in (#1) %s (TD5RE_RESULTS_ANIM=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 /* ========================================================================
  * [#10] All-players race-end SUMMARY
  * ========================================================================
@@ -4083,7 +4254,12 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
     /* 4:3-locked glyph scale, exactly like frontend_render_high_score_overlay,
      * so centred columns stay centred at any window aspect. */
     const float gsx = sx < sy ? sx : sy;
-    #define SUM_CTR(CX, S) ((CX) * sx - fe_measure_small_text(S) * 0.5f * gsx)
+    /* [#1] Entry slide-in: states 7-0xB drive s_results_panel_slide_x for the
+     * one-car browse; state 3 now drives it too (see Screen_RaceResults), so the
+     * whole table glides in/out with the panel instead of popping. The offset is
+     * a CANVAS-px delta applied to every column centre. */
+    const float sum_slide = results_anim_on() ? (float)s_results_panel_slide_x : 0.0f;
+    #define SUM_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
 
     /* Column CENTRES (640x480 canvas px). */
     const float c_name = 168.0f;
@@ -4319,6 +4495,10 @@ void Screen_RaceResults(void) {
     case 1: case 2: /* Present buffer, reset counter */
         frontend_present_buffer();
         s_anim_tick = 0;
+        /* [#1] Seed the shared timed-animation clock so state 3 can drive the
+         * slide-in the same way every other screen does (begin resets
+         * s_anim_start_ms; matches Screen_TrackSelection state 0). */
+        if (results_anim_on()) frontend_begin_timed_animation();
         s_inner_state++;
         break;
 
@@ -4349,14 +4529,31 @@ void Screen_RaceResults(void) {
             s_inner_state = 0x0C;
             break;
         }
-        s_anim_tick += 2 * s_fe_logic_ticks;
-        if (results_fix_on()) {
-            /* [item 17b] Entry slide-in: the results panel enters from the right
-             * and settles at rest (was static -> "no entry animation"). */
-            s_results_panel_slide_x = (0x12 - s_anim_tick) * 0x20;
+        /* [#1] Entry slide-in. When ON, drive the SAME 650 ms timed animation
+         * every other screen's case-3 uses (frontend_update_timed_animation
+         * sets s_anim_tick 0..0x27 and returns the 0..1 progress) and derive the
+         * panel offset from it so the slide GLIDES in instead of popping — the
+         * old tick path only moved s_results_panel_slide_x, which the default
+         * summary view ignores. Advance when the helper reports >= 1.0f, exactly
+         * like Screen_QuickRaceMenu/PostRaceHighScore. */
+        int slide_done;
+        if (results_anim_on()) {
+            float t = frontend_update_timed_animation(0x27, 650);
+            /* Enter from the right edge (+0x220) and settle to rest (0), matching
+             * the L/R browse slide magnitude used by states 7-10. */
+            s_results_panel_slide_x = (int)((1.0f - t) * (float)0x220 + 0.5f);
             if (s_results_panel_slide_x < 0) s_results_panel_slide_x = 0;
+            slide_done = (t >= 1.0f);
+        } else {
+            s_anim_tick += 2 * s_fe_logic_ticks;
+            if (results_fix_on()) {
+                /* [item 17b legacy] panel enters from the right, settles at rest. */
+                s_results_panel_slide_x = (0x12 - s_anim_tick) * 0x20;
+                if (s_results_panel_slide_x < 0) s_results_panel_slide_x = 0;
+            }
+            slide_done = (s_anim_tick >= 0x12);
         }
-        if (s_anim_tick >= 0x12) {
+        if (slide_done) {
             /* P8 — DXSound::Play(4) on slide-in completion.
              * [CONFIRMED @ 0x00422480 case 3] Original fires Play(4) inside
              * the AdvanceFrontendTickAndCheckReady ready-branch immediately
@@ -4372,6 +4569,7 @@ void Screen_RaceResults(void) {
              * enables the shared ESC handler and gates the selector nav-bar car-name +
              * ◄► render — without it the top selector bar drew empty. [FIXED 2026-06-02] */
             s_anim_complete = 1;
+            s_results_panel_slide_x = 0;   /* [#1] snap to rest (clear any rounding residue) */
             s_inner_state = 4;
         }
         break;

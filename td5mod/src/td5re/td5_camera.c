@@ -2466,8 +2466,33 @@ void UpdateRaceCameraTransitionState(int actor, int view)
     int v = view;
     int actor_idx = *(unsigned char *)(actor + 0x375);
 
+    /* [#11 (a)/(b) FIX 2026-06-16 — slot 8/9 fly-in OOB] g_actorAliveTable is a
+     * flat per-slot byte table sized [TD5_MAX_TOTAL_ACTORS] (32). The original
+     * binary read the alive flag with a 4-byte stride because it addressed a
+     * per-actor *record* array (DAT-bank addressing); the port collapsed that to
+     * one byte per slot but kept the `* 4`, so the index runs 4x too far:
+     *   slot 0->0, slot 7->28 (last in-bounds), slot 8->32 (OOB), slot 9->36 (OOB).
+     * Viewport 8 ("Player 9") follows racer slot 8 (InitRace identity map) whose
+     * +0x375 slot_index is 8, so this read overflows into the adjacent globals
+     * (g_lookLeftRight[]). When that garbage byte is non-zero the fly-in takes the
+     * "alive -> HUD indicator only" early-return and SKIPS the cinematic countdown
+     * camera move + spring advance for that pane — exactly the missing slot-9
+     * countdown pan, and an undefined read that also feeds the slot-8/9 jitter.
+     * Index by slot directly (stride 1) — the faithful flat-table lookup — and
+     * bound-guard so no actor slot can ever index past the table again. The flag
+     * is never set in the port (kept as a static 0 table), so for the in-bounds
+     * slots this is behaviour-identical; it only removes the OOB for slot >= 8.
+     * Gate: TD5RE_FIX_FLYIN_BOUND=0 restores the (buggy) `* 4` for A/B. */
+    static int s_flyin_bound_fix = -1;
+    if (s_flyin_bound_fix < 0) {
+        const char *e = getenv("TD5RE_FIX_FLYIN_BOUND");
+        s_flyin_bound_fix = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    int alive_idx = s_flyin_bound_fix ? actor_idx : (actor_idx * 4);
+
     /* If actor is alive, delegate to HUD indicator update */
-    if (g_actorAliveTable[actor_idx * 4] != 0) {
+    if (alive_idx >= 0 && alive_idx < TD5_MAX_TOTAL_ACTORS &&
+        g_actorAliveTable[alive_idx] != 0) {
         UpdateCameraTransitionHudIndicator(v, (unsigned int)actor_idx);
         return;
     }

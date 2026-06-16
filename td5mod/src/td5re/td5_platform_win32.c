@@ -2806,14 +2806,16 @@ static int  s_xi_avail  = 0;     /* both procs resolved */
 static int  s_xi_user[TD5_PLAT_MAX_JS_SLOTS];
 static WORD s_xi_low [TD5_PLAT_MAX_JS_SLOTS];   /* low-freq (heavy) motor (resolved) */
 static WORD s_xi_high[TD5_PLAT_MAX_JS_SLOTS];   /* high-freq (light) motor */
-/* The low (heavy) motor is driven by two independent EVENT contributors so a
- * stop on one doesn't silence the other: [0]=side-collision pulse (effect slot
- * 2), [1]=redline-in-manual rumble (td5_plat_ff_xinput_rumble). The resolved
+/* The low (heavy) motor is driven by two independent contributors so a stop on
+ * one doesn't silence the other: [0]=side-collision pulse (effect slot 2),
+ * [1]=continuous buzz (redline-in-manual OR drift — the input layer passes the
+ * louder of the two to td5_plat_ff_xinput_rumble; #5(3) 2026-06-16). The resolved
  * s_xi_low is max(contrib[0],contrib[1]). [gamepad-rumble fix 2026-06-15]
  * Continuous wheel forces — steering (slot 0) and terrain (slot 3) — are NOT
- * routed here any more, so a gamepad is silent during normal driving. */
+ * routed here, so a gamepad is silent during steady normal driving; the buzz
+ * contributor is 0 whenever the car is neither at the limiter nor sliding. */
 #define TD5_XI_LOW_COLLISION 0   /* contributor index: side-collision pulse */
-#define TD5_XI_LOW_REDLINE   1   /* contributor index: redline-in-manual buzz */
+#define TD5_XI_LOW_REDLINE   1   /* contributor index: continuous buzz (redline-in-manual / drift) */
 static WORD s_xi_low_contrib[TD5_PLAT_MAX_JS_SLOTS][2];
 
 /* TD5RE_FF_XINPUT (cached): master gate for the XInput rumble path. Default ON. */
@@ -3300,12 +3302,13 @@ void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
     }
 }
 
-/* [#1 2026-06-15] GAMEPAD redline-in-manual buzz. Drives the low (heavy) motor's
- * dedicated redline contributor with `magnitude` (0..DI_FFNOMINALMAX); 0 silences
- * it. No-op on a DI FF wheel (s_xi_user < 0) — there the redline buzz already
- * rides on effect slot 3, so the wheel path is untouched. Only the input layer's
- * redline-in-manual branch calls this, so the gamepad motor sees ONLY redline
- * here (never terrain/steering/drift). */
+/* [#1 2026-06-15; #5(3) 2026-06-16] GAMEPAD continuous-buzz motor. Drives the low
+ * (heavy) motor's dedicated buzz contributor with `magnitude` (0..DI_FFNOMINALMAX);
+ * 0 silences it. No-op on a DI FF wheel (s_xi_user < 0) — there the same buzz
+ * already rides on effect slot 3, so the wheel path is untouched. The input layer
+ * passes the louder of redline-in-manual and drift here (0 when neither applies),
+ * so the gamepad motor sees ONLY that buzz (never terrain/steering) and returns to
+ * silence the moment the car stops drifting / leaves the limiter. */
 void td5_plat_ff_xinput_rumble(int device_slot, int magnitude)
 {
     WORD w;

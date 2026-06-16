@@ -7293,9 +7293,51 @@ static void frontend_render_controller_binding_labels(float sx, float sy) {
 
 /* [PORT ENHANCEMENT 2026-06] MULTIPLAYER lobby overlay: header + the list of
  * joined players (in join order) with their device + READY, drawn each frame. */
+/* [#8] TD5RE_LOBBY_BUTTONS gate. Default ON; exactly "0" restores the original
+ * stacked START/BACK layout (200x32 @ y300 / 120x32 @ y360, set by
+ * Screen_MultiplayerLobby in td5_fe_net.c) together with the join/start/back
+ * help line. When ON, the MP-lobby START + BACK buttons are re-laid SIDE BY
+ * SIDE at equal width, lowered a little, and the help legend is dropped. */
+static int frontend_lobby_buttons_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_LOBBY_BUTTONS");
+        v = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP lobby button re-layout (#8) %s (TD5RE_LOBBY_BUTTONS=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 static void frontend_render_mp_lobby_overlay(float sx, float sy) {
     int p;
+    int relayout = frontend_lobby_buttons_on();
     if (!s_anim_complete) return;
+
+    /* [#8] Re-lay the lobby's two action buttons (created by Screen_MultiplayerLobby
+     * as 0=START, 1=BACK) SIDE BY SIDE, SAME WIDTH, lowered a little. s_buttons[]
+     * is the layout source of truth (frontend_get_button_render_rect + the mouse
+     * hit-test both read x/y/w/h), and this overlay runs every frame just before
+     * the generic button-draw loop, so updating the rects here is sufficient and
+     * keeps both buttons fully functional (nav/SPACE/ESC are index-based; the
+     * mouse rect follows). Two equal 150-wide buttons + 16px gap = 316px, centred
+     * about x=320 (left edge 162), both at y=372 (below the original y300/y360). */
+    if (relayout && s_button_count >= 2 &&
+        s_buttons[0].active && s_buttons[1].active) {
+        const int btn_w  = 150;   /* equal width for both */
+        const int btn_h  = 32;
+        const int gap    = 16;
+        const int btn_y  = 372;   /* a little further down */
+        const int left_x = 320 - (btn_w * 2 + gap) / 2;   /* 162 */
+        s_buttons[0].x = left_x;                 /* START (left)  */
+        s_buttons[0].y = btn_y;
+        s_buttons[0].w = btn_w;
+        s_buttons[0].h = btn_h;
+        s_buttons[1].x = left_x + btn_w + gap;   /* BACK (right)  */
+        s_buttons[1].y = btn_y;
+        s_buttons[1].w = btn_w;
+        s_buttons[1].h = btn_h;
+    }
 
     /* [title font 2026-06] The orange "MULTIPLAYER" title was removed — the
      * screen now shows the standard top header "MULTIPLAYER" (Lunatica title
@@ -7348,9 +7390,12 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
     if (s_mp_joined_count == 0)
         fe_draw_text_centered(320.0f * sx, 150.0f * sy, "( no players yet )", 0xFF888888, sx*0.8f, sy*0.8f);
 
-    fe_draw_text_centered(320.0f * sx, 340.0f * sy,
-                          "ENTER / A = JOIN     SPACE = START     ESC / B = BACK",
-                          0xFF999999, sx*0.62f, sy*0.62f);
+    /* [#8] The single join/start/back help legend is dropped under the default
+     * (side-by-side button) layout; TD5RE_LOBBY_BUTTONS=0 keeps the old line. */
+    if (!relayout)
+        fe_draw_text_centered(320.0f * sx, 340.0f * sy,
+                              "ENTER / A = JOIN     SPACE = START     ESC / B = BACK",
+                              0xFF999999, sx*0.62f, sy*0.62f);
 }
 
 void frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type) {

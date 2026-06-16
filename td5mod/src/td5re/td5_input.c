@@ -252,6 +252,10 @@ static uint32_t s_ff_gear_seen [TD5_MAX_RACER_SLOTS];
 static uint32_t s_ff_crash_seen[TD5_MAX_RACER_SLOTS];
 static int      s_ff_pulse_mag  [TD5_MAX_RACER_SLOTS];
 static int      s_ff_pulse_ticks[TD5_MAX_RACER_SLOTS];
+/* [item #5(4)] Last-seen landing sequence id per player, so an airborne->grounded
+ * landing fires its jolt exactly once (the physics seq is monotonic). The landing
+ * jolt reuses the slot-1 (FRONTAL/high-motor) decaying pulse above. */
+static uint32_t s_ff_land_seen [TD5_MAX_RACER_SLOTS];
 /* [FF stuck-motor fix 2026-06-15] SIDE-collision (slot 2 / low motor) decaying
  * pulse, the low-motor analogue of the frontal jolt above. V2V/wall collisions
  * now feed these instead of a persistent motor write that was never cleared. */
@@ -270,7 +274,42 @@ static int td5_ff_vibration_enabled(void)
         s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "Force feedback vibration: %s",
-                  s_on ? "enabled (drift/crash/gear/redline)" : "disabled");
+                  s_on ? "enabled (drift/crash/gear/redline/landing)" : "disabled");
+    }
+    return s_on;
+}
+
+/* [item #5(3)] TD5RE_FF_DRIFT (cached): sub-gate for the continuous drift rumble.
+ * Default ON; "0" leaves drift out of the continuous-buzz mix entirely (no buzz
+ * while sliding). Subordinate to TD5RE_FORCE_FEEDBACK (the master gate). */
+static int td5_ff_drift_enabled(void)
+{
+    static int s_init = 0;
+    static int s_on = 1;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_FF_DRIFT");
+        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "FF drift rumble: %s", s_on ? "enabled" : "disabled");
+    }
+    return s_on;
+}
+
+/* [item #5(2)] TD5RE_FF_COLLISION_DIR (cached): sub-gate for DIRECTIONAL
+ * collisions. Default ON: a left-side impact biases the LOW (left) motor, a
+ * right-side impact the HIGH (right) motor (XInput), and the DI wheel gets the
+ * matching constant-force direction. "0" reverts to the faithful symmetric
+ * frontal/side mapping (left and right impacts feel the same). */
+static int td5_ff_collision_dir_enabled(void)
+{
+    static int s_init = 0;
+    static int s_on = 1;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_FF_COLLISION_DIR");
+        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "FF directional collisions: %s",
+                  s_on ? "enabled (left=low motor, right=high motor)" : "disabled (symmetric)");
     }
     return s_on;
 }
@@ -291,6 +330,36 @@ static int td5_ff_vibration_enabled(void)
 /* Crash impact magnitude is large (acute threshold 250000); scale it to the FF
  * domain. >>5 maps ~250000 -> ~7800 and saturates to 10000 by ~320000. */
 #define TD5_FF_CRASH_MAG_SHIFT        5
+
+/* [item #5(1)] Collision pulse STRENGTH. The faithful td5_input_ff_collision
+ * divides the raw impact by TD5_INPUT_FF_COLLISION_DIV (10) and caps at 10000;
+ * ordinary wall scrapes then land far below DI_FFNOMINALMAX and feel weak. Scale
+ * the divided magnitude up (Q8: 0x100 = 1.0x) and floor it so even a glancing hit
+ * is clearly felt, then clamp to the DI nominal max so we never exceed the device
+ * range. 0x200 = 2.0x makes wall/car hits punchy without saturating every tap. */
+#define TD5_FF_COLLISION_GAIN_Q8   0x200  /* 2.0x boost on the divided collision mag */
+#define TD5_FF_COLLISION_FLOOR     2600   /* min felt collision pulse (clearly perceptible) */
+
+/* [item #5(3)] Continuous DRIFT rumble. Proportional to td5_physics_get_drift_level
+ * (0 = not drifting, ~1..255). EXACTLY 0 below the threshold so a car tracking
+ * straight never buzzes. Scaled so a hard slide approaches a light/medium buzz —
+ * intentionally below the crash/redline ceiling so it reads as "tyres scrubbing",
+ * not an alarm. Like the redline buzz it rides the low motor (gamepad) / slot-3
+ * periodic (wheel) and is recomputed every frame (0 when not drifting => the
+ * continuous-buzz contributor returns to 0, so it can never stick on). */
+#define TD5_FF_DRIFT_LEVEL_MIN       24   /* drift_level below this => 0 rumble (~14deg+ slide already deadzoned in physics) */
+#define TD5_FF_DRIFT_MAG_MAX       3200   /* rumble at full (255) drift level */
+#define TD5_FF_DRIFT_MAG_FLOOR     1100   /* min buzz once over the threshold so onset is felt */
+
+/* [item #5(4)] Air-time LANDING jolt. A decaying pulse fired when the physics
+ * landing signal reports a touchdown (td5_physics_get_landing_fx). Scaled by the
+ * downward vertical impact speed (raw 24.8). >>3 maps a stiff ~50000-unit drop
+ * to ~6250 and a big drop saturates to the cap; floored so even a light hop is
+ * felt. Held a few frames then released by the same decay path as the crash jolt. */
+#define TD5_FF_LANDING_PULSE_TICKS    4   /* render-frames the landing jolt holds */
+#define TD5_FF_LANDING_MAG_SHIFT      3   /* impact >> this maps vertical speed -> FF domain */
+#define TD5_FF_LANDING_MAG_MAX     9000   /* cap (just under full-scale) */
+#define TD5_FF_LANDING_MAG_FLOOR   2800   /* min felt landing jolt */
 
 /* ========================================================================
  * Internal State -- Escape / Fade
@@ -346,6 +415,7 @@ int td5_input_init(void)
     memset(&s_ff, 0, sizeof(s_ff));
     memset(s_ff_gear_seen, 0, sizeof(s_ff_gear_seen));
     memset(s_ff_crash_seen, 0, sizeof(s_ff_crash_seen));
+    memset(s_ff_land_seen, 0, sizeof(s_ff_land_seen));
     memset(s_ff_pulse_mag, 0, sizeof(s_ff_pulse_mag));
     memset(s_ff_pulse_ticks, 0, sizeof(s_ff_pulse_ticks));
     memset(s_ff_side_mag, 0, sizeof(s_ff_side_mag));
@@ -2259,6 +2329,7 @@ int td5_input_ff_init(void)
         for (p = 0; p < TD5_MAX_RACER_SLOTS; p++) {
             s_ff_gear_seen[p]   = td5_physics_gear_change_seq(p);
             s_ff_crash_seen[p]  = td5_physics_get_crash_fx(p, NULL, NULL);
+            s_ff_land_seen[p]   = td5_physics_get_landing_fx(p, NULL); /* [#5(4)] don't fire a stale landing on race start */
             s_ff_pulse_mag[p]   = 0;
             s_ff_pulse_ticks[p] = 0;
             s_ff_side_mag[p]    = 0;
@@ -2379,6 +2450,31 @@ static void td5_input_ff_update_jolt(int slot)
         } else if (cseq != s_ff_crash_seen[slot]) {
             /* Acknowledge an old/late sequence so it can't fire belatedly. */
             s_ff_crash_seen[slot] = cseq;
+        }
+    }
+
+    /* ---- AIR-TIME LANDING edge: decaying jolt scaled by vertical impact ----
+     * [item #5(4)] When the physics landing signal reports a fresh touchdown
+     * (sequence increased), fire a pulse on the slot-1 (FRONTAL/high-motor) decay
+     * path, scaled by the downward vertical impact speed. Reuses the same pulse
+     * the crash/gear jolts use, so it auto-releases — no stuck motor. Gated by
+     * TD5RE_FF_LANDING inside the physics getter (off => seq never advances). */
+    {
+        int32_t  impact = 0;
+        uint32_t lseq = td5_physics_get_landing_fx(slot, &impact);
+        if (lseq != 0 && lseq != s_ff_land_seen[slot]) {
+            s_ff_land_seen[slot] = lseq;
+            int lm = (impact > 0 ? (int)(impact >> TD5_FF_LANDING_MAG_SHIFT) : 0);
+            if (lm > TD5_FF_LANDING_MAG_MAX) lm = TD5_FF_LANDING_MAG_MAX;
+            if (lm < TD5_FF_LANDING_MAG_FLOOR) lm = TD5_FF_LANDING_MAG_FLOOR;
+            if (lm >= s_ff_pulse_mag[slot]) {     /* don't cut a stronger crash jolt short */
+                s_ff_pulse_mag[slot]   = lm;
+                s_ff_pulse_ticks[slot] = TD5_FF_LANDING_PULSE_TICKS;
+            }
+            TD5_LOG_I(LOG_TAG, "FF landing jolt: player=%d impact=%d -> pulse=%d",
+                      slot, (int)impact, s_ff_pulse_mag[slot]);
+        } else if (lseq != s_ff_land_seen[slot]) {
+            s_ff_land_seen[slot] = lseq;          /* acknowledge any stale seq */
         }
     }
 
@@ -2566,24 +2662,34 @@ void td5_input_ff_update_player(int slot)
     int terrain_coeff = g_terrain_ff_coefficients[surface_type];
     int terrain_mag = (30 - lateral_force / 10000) * terrain_coeff;
 
-    /* [FF SIGNALS #1; gamepad-rumble fix 2026-06-15] Compose the ONLY allowed
-     * physics-driven CONTINUOUS rumble — MAX-RPM-in-manual — onto the periodic
-     * slot (slot 3 — the buzz, the low-motor analogue) so it rides on top of the
-     * terrain effect for FF WHEELS rather than a second writer fighting it.
+    /* [FF SIGNALS #1; gamepad-rumble fix 2026-06-15; drift re-added #5(3) 2026-06-16]
+     * Compose the physics-driven CONTINUOUS rumbles onto the periodic slot (slot 3
+     * — the buzz, the low-motor analogue) so they ride on top of the terrain
+     * effect for FF WHEELS rather than a second writer fighting it. Two sources,
+     * each EXACTLY 0 when its condition is absent (so neither can stick on):
      *   - MAX RPM (manual only): LIGHT continuous rumble while at redline. The
      *     "manual only" rule keys off the actor's auto-gearbox flag (+0x378==0 =>
      *     manual; the same flag td5_input_update_player_control writes). In auto
      *     the box upshifts at redline so a sustained redline buzz would be noise;
      *     in manual the player holds the limiter, which is what we want to feel.
+     *   - DRIFT: rumble proportional to td5_physics_get_drift_level (0 = tracking
+     *     straight). The physics getter already deadzones small slip, and we
+     *     additionally require drift_level >= TD5_FF_DRIFT_LEVEL_MIN, so a car
+     *     driving normally produces drift_rumble == 0 and the buzz vanishes.
      *
-     * The continuous DRIFT rumble has been REMOVED entirely: on an XInput gamepad
-     * any continuous slot-3 magnitude becomes a constant motor buzz, which is the
-     * reported "rumbles all the time" bug. Terrain itself stays on slot 3 for FF
-     * wheels but the platform XInput path no longer routes slot 3 to the motors,
-     * so a gamepad never feels terrain/steering/drift — only crash, gear, and
-     * (here) redline-in-manual, the last via td5_plat_ff_xinput_rumble below.
-     * Gate: TD5RE_FORCE_FEEDBACK (default ON). When off, terrain-only (faithful). */
+     * The DRIFT rumble was previously REMOVED to fix an always-on-buzz bug; it is
+     * safe to re-add because (a) it is 0 whenever the car is not actually sliding,
+     * (b) it is folded into the SAME continuous-buzz value the redline path uses
+     * (no extra platform contributor that could be left asserted), and (c) it is
+     * pushed every frame, so the moment a slide ends the value returns to 0 and
+     * td5_plat_ff_xinput_rumble drives the motor contributor back to silence. On a
+     * gamepad the continuous buzz reaches ONLY the dedicated low-motor contributor
+     * via td5_plat_ff_xinput_rumble (slot 3 itself is not motor-routed), so steady
+     * normal driving leaves every gamepad motor at zero.
+     * Master gate: TD5RE_FORCE_FEEDBACK; drift sub-gate: TD5RE_FF_DRIFT (both
+     * default ON). When the master gate is off, terrain-only (faithful). */
     int redline_rumble = 0;
+    int drift_rumble   = 0;
     if (td5_ff_vibration_enabled()) {
         if (td5_physics_at_redline(slot)) {
             int manual = 1;
@@ -2594,24 +2700,47 @@ void td5_input_ff_update_player(int slot)
             if (manual)
                 redline_rumble = TD5_FF_REDLINE_MAG;     /* light redline buzz */
         }
-        if (redline_rumble > 0) {
-            /* FF WHEEL: add the redline buzz to the terrain magnitude on slot 3;
-             * the platform clamps to DI_FFNOMINALMAX. Floored at the rumble so a
-             * smooth surface still buzzes at the limiter. (No-op on a gamepad —
-             * slot 3 is not motor-routed; redline reaches the gamepad motor only
-             * through the dedicated XInput rumble call below.) */
-            int composed = terrain_mag + redline_rumble;
-            if (composed < redline_rumble) composed = redline_rumble;
-            if (composed > TD5_FF_MAG_MAX) composed = TD5_FF_MAG_MAX;
-            terrain_mag = composed;
+
+        /* DRIFT buzz, proportional to slide magnitude; 0 below the threshold. */
+        if (td5_ff_drift_enabled()) {
+            int dl = td5_physics_get_drift_level(slot);  /* 0, else ~1..255 */
+            if (dl >= TD5_FF_DRIFT_LEVEL_MIN) {
+                /* Scale drift_level (1..255) -> [FLOOR..MAG_MAX], floored at onset
+                 * so the start of a slide is felt. Integer math (deterministic). */
+                int span = TD5_FF_DRIFT_MAG_MAX - TD5_FF_DRIFT_MAG_FLOOR;
+                if (span < 0) span = 0;
+                drift_rumble = TD5_FF_DRIFT_MAG_FLOOR + (dl * span) / 255;
+                if (drift_rumble > TD5_FF_DRIFT_MAG_MAX) drift_rumble = TD5_FF_DRIFT_MAG_MAX;
+            }
+            /* else: drift_rumble stays 0 -> no buzz when not sliding. */
         }
     }
 
-    /* GAMEPAD (XInput) redline buzz: drive a dedicated low-motor contributor with
-     * ONLY the redline-in-manual magnitude (0 otherwise), so the gamepad motor
-     * never picks up terrain/steering/drift. No-op for DI wheels (they already
-     * got the redline buzz folded into slot 3 above). */
-    td5_plat_ff_xinput_rumble(dev, redline_rumble);
+    /* The single continuous-buzz value: the louder of redline and drift. Both are
+     * 0 when their condition is absent, so this is 0 during steady normal driving
+     * -> the gamepad motor contributor is set to 0 (silence) and the wheel slot-3
+     * gets only its terrain magnitude. */
+    int continuous_buzz = (redline_rumble > drift_rumble) ? redline_rumble : drift_rumble;
+
+    if (continuous_buzz > 0) {
+        /* FF WHEEL: add the buzz to the terrain magnitude on slot 3; the platform
+         * clamps to DI_FFNOMINALMAX. Floored at the buzz so a smooth surface still
+         * vibrates while at the limiter / sliding. (No-op on a gamepad — slot 3 is
+         * not motor-routed; the buzz reaches the gamepad motor only through the
+         * dedicated XInput rumble call below.) */
+        int composed = terrain_mag + continuous_buzz;
+        if (composed < continuous_buzz) composed = continuous_buzz;
+        if (composed > TD5_FF_MAG_MAX) composed = TD5_FF_MAG_MAX;
+        terrain_mag = composed;
+    }
+
+    /* GAMEPAD (XInput) continuous buzz: drive a dedicated low-motor contributor
+     * with ONLY the redline-in-manual/drift magnitude (0 otherwise), so the
+     * gamepad motor never picks up terrain/steering. Pushed every frame, so when
+     * the car stops drifting / leaves the limiter the value returns to 0 and the
+     * motor goes silent — no stuck rumble. No-op for DI wheels (they already got
+     * the buzz folded into slot 3 above). */
+    td5_plat_ff_xinput_rumble(dev, continuous_buzz);
 
     if (!s_ff.terrain_effect_started[dev]) {
         /* First play of terrain effect */
@@ -2716,6 +2845,15 @@ void td5_input_ff_collision(int contact_side, int actor_a_slot,
                             int actor_b_slot, int raw_magnitude)
 {
     int mag = raw_magnitude / TD5_INPUT_FF_COLLISION_DIV;
+
+    /* [item #5(1)] STRONGER collisions: boost the divided magnitude and floor it
+     * so wall/car hits are clearly felt, then clamp to the device nominal max so
+     * we never exceed DI_FFNOMINALMAX. (raw==0 -> mag 0 stays 0: no spurious
+     * pulse from a zero-magnitude call.) */
+    if (mag > 0) {
+        mag = (int)(((long)mag * TD5_FF_COLLISION_GAIN_Q8) >> 8);   /* Q8 gain */
+        if (mag < TD5_FF_COLLISION_FLOOR) mag = TD5_FF_COLLISION_FLOOR;
+    }
     if (mag > TD5_INPUT_FF_COLLISION_MAX) mag = TD5_INPUT_FF_COLLISION_MAX;
 
     int mag_a = mag;
@@ -2723,6 +2861,21 @@ void td5_input_ff_collision(int contact_side, int actor_a_slot,
 
     int slot_a_effect, slot_b_effect;
 
+    /* [item #5(2)] DIRECTIONAL collisions. The contact_side bitmask carries the
+     * impact side; we use LEFT (0x10/0x20) vs RIGHT (0x40/0x80) to drive the
+     * correct side of the device:
+     *   - left-side impact  -> SIDE  slot (slot 2 -> XInput LOW/left motor;
+     *                          DI wheel X-axis constant force)
+     *   - right-side impact -> FRONTAL slot (slot 1 -> XInput HIGH/right motor;
+     *                          DI wheel Y-axis constant force, distinct direction)
+     * NOTE: XInput's low/high motors are FREQUENCY-not-spatial (a gamepad has no
+     * true left/right shaker), but routing left->low and right->high still makes a
+     * left impact feel audibly/tactilely DISTINCT from a right one; on a DI wheel
+     * the two slots are different constant-force axes/directions, which IS spatial.
+     * The faithful a/b frontal-vs-side mapping is preserved for front/rear hits and
+     * for the second vehicle (B) of a V2V pair, and as the fallback when the
+     * directional sub-knob is off. */
+    int dir = td5_ff_collision_dir_enabled();
     switch (contact_side) {
     case 0x01: case 0x02: case 0x04: case 0x08:
         /* Front/rear contact: A gets frontal impact, B gets side impact */
@@ -2730,10 +2883,21 @@ void td5_input_ff_collision(int contact_side, int actor_a_slot,
         slot_b_effect = TD5_FF_SLOT_SIDE;
         break;
 
-    case 0x10: case 0x20: case 0x40: case 0x80:
-        /* Left/right contact: B gets frontal impact, A gets side impact */
+    case 0x10: case 0x20:
+        /* LEFT-side contact. Directional: A (the impacted car) -> SIDE (low/left
+         * motor). B (the other car, hit on ITS right) -> FRONTAL. Symmetric
+         * fallback keeps the original A=SIDE/B=FRONTAL. */
         slot_a_effect = TD5_FF_SLOT_SIDE;
         slot_b_effect = TD5_FF_SLOT_FRONTAL;
+        break;
+
+    case 0x40: case 0x80:
+        /* RIGHT-side contact. Directional: A -> FRONTAL (high/right motor); the
+         * distinct routing vs the LEFT case above is what makes left/right feel
+         * different on both gamepad and wheel. When the sub-knob is off, fall back
+         * to the faithful A=SIDE/B=FRONTAL so behaviour matches the legacy switch. */
+        slot_a_effect = dir ? TD5_FF_SLOT_FRONTAL : TD5_FF_SLOT_SIDE;
+        slot_b_effect = dir ? TD5_FF_SLOT_SIDE    : TD5_FF_SLOT_FRONTAL;
         break;
 
     default:

@@ -176,6 +176,19 @@ int      td5_physics_get_drift_level(int slot);   /* 0 = not drifting, else ~1..
 uint32_t td5_physics_gear_change_seq(int slot);   /* increments on each gear change (current_gear at actor +0x36B), sim-tick edge-detected */
 int      td5_physics_at_redline(int slot);        /* 1 if engine RPM (actor +0x310) within ~5% of redline (tuning +0x72) */
 
+/* --- Air-time landing event (FF SIGNALS, item #5(4); PORT-ONLY) ---
+ * Edge-detected once per fixed-30Hz tick by td5_physics_update_ff_signals():
+ * when an actor that was meaningfully airborne (airborne_frame_counter past a
+ * floor, all four wheels off the ground) regains ground contact this tick, the
+ * downward vertical impact speed (|linear_velocity_y| at the landing frame) is
+ * latched and a per-slot landing sequence id is bumped. The FF layer polls this
+ * to fire a decaying jolt scaled by the impact. Returns the per-slot landing
+ * sequence id (0 = no landing yet); fills *out_impact with the last landing's
+ * vertical impact speed (raw 24.8 units, always >= 0). Null out-param tolerated;
+ * out-of-range / non-racer slots return 0. Deterministic (replicated sim state).
+ * Behind TD5RE_FF_LANDING (default ON); off => never records, getter stays 0. */
+uint32_t td5_physics_get_landing_fx(int slot, int32_t *out_impact);
+
 /* --- Wall collision response (FUN_00406980) ---
  * probe_x_fp8 / probe_z_fp8: probe world position in 24.8 fixed point.
  * Required to compute the lever-arm tangential offset that drives the

@@ -40,7 +40,7 @@
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
-#include "td5_input.h"    /* td5_input_ff_play_effect (wall impact FF) */
+#include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
 #include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_platform.h"
@@ -764,6 +764,36 @@ static int      s_ff_at_redline[TD5_MAX_RACER_SLOTS];    /* 1 = engine near redl
 static uint8_t  s_ff_prev_gear[TD5_MAX_RACER_SLOTS];     /* last tick's current_gear (edge detect) */
 static int      s_ff_prev_seeded[TD5_MAX_RACER_SLOTS];   /* 1 once prev_gear holds a real sample */
 
+/* [item #5(4)] Air-time landing detection state. A landing fires when the actor
+ * was airborne long enough last tick (airborne_frame_counter >= floor, all four
+ * wheels off) and has any ground contact this tick. We track last tick's
+ * airborne_frame_counter so the edge is detected once, and latch the downward
+ * vertical impact speed (|linear_velocity_y|) sampled the moment before ground
+ * contact resettles it. s_ff_land_seq is a monotonic per-slot id (0 = none). */
+#define FF_LANDING_MIN_AIRBORNE_TICKS  4    /* must have been airborne >= this (~0.13s @30Hz) to count */
+#define FF_LANDING_MIN_IMPACT        0x600  /* below this downward speed the landing is too soft to feel */
+/* Own per-slot consecutive-all-airborne tick counter, RESET on ground contact —
+ * unlike actor.airborne_frame_counter, which the engine never resets (it only
+ * stops growing), so it can't gate air-time per individual jump. */
+static int16_t  s_ff_air_ticks[TD5_MAX_RACER_SLOTS];        /* consecutive all-4-airborne ticks (reset on ground) */
+static uint32_t s_ff_land_seq[TD5_MAX_RACER_SLOTS];          /* increments on each felt landing */
+static int32_t  s_ff_land_impact[TD5_MAX_RACER_SLOTS];       /* last landing's vertical impact speed (>=0) */
+
+/* TD5RE_FF_LANDING (cached): gate the air-time landing event. Default ON; "0"
+ * disables landing detection (no seq bump, getter stays 0 -> no landing jolt). */
+static int td5_ff_landing_enabled(void)
+{
+    static int s_on = -1;
+    if (s_on < 0) {
+        const char *e = getenv("TD5RE_FF_LANDING");
+        s_on = (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' ||
+                      e[0] == 'f' || e[0] == 'F')) ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "FF air-time landing: TD5RE_FF_LANDING=%d (min_air=%d ticks min_impact=%d)",
+                  s_on, FF_LANDING_MIN_AIRBORNE_TICKS, FF_LANDING_MIN_IMPACT);
+    }
+    return s_on;
+}
+
 /* Forward decl: the carparam accessor get_phys() (and the PHYS_* tuning macros)
  * are defined further down this file, but the FF redline check below needs it. */
 static inline int16_t *get_phys(TD5_Actor *a);
@@ -836,6 +866,43 @@ void td5_physics_update_ff_signals(void)
                 s_ff_at_redline[slot] = 1;
             }
         }
+
+        /* --- Air-time landing: airborne->grounded transition this tick. ---
+         * wheel_contact_bitmask is per-wheel AIRBORNE (1=airborne); == 0x0F means
+         * all four wheels off the ground. We accumulate consecutive all-airborne
+         * ticks in s_ff_air_ticks (our own counter, RESET on ground contact). A
+         * landing fires when the car was airborne long enough (>= the floor) up to
+         * last tick and now has at least one wheel back on the ground. Sample the
+         * DOWNWARD vertical impact speed: negative linear_velocity_y is descent, so
+         * we take max(-vy, 0); a car that grounds while still rising registers no
+         * jolt. The reset-on-ground counter makes the air-time gate fire once per
+         * jump (not just the first jump of the race). */
+        {
+            int all_airborne = (a->wheel_contact_bitmask == 0x0F);
+            if (!all_airborne &&
+                td5_ff_landing_enabled() &&
+                s_ff_air_ticks[slot] >= FF_LANDING_MIN_AIRBORNE_TICKS)
+            {
+                int32_t vy = a->linear_velocity_y;
+                int32_t impact = (vy < 0) ? -vy : 0;   /* downward speed only */
+                if (impact >= FF_LANDING_MIN_IMPACT) {
+                    s_ff_land_impact[slot] = impact;
+                    s_ff_land_seq[slot]++;
+                    if (s_ff_land_seq[slot] == 0) s_ff_land_seq[slot] = 1; /* keep 0 == none */
+                    TD5_LOG_I(LOG_TAG, "ff_landing: slot=%d air_ticks=%d impact=%d seq=%u",
+                              slot, (int)s_ff_air_ticks[slot], impact, s_ff_land_seq[slot]);
+                }
+            }
+            /* Update the consecutive air-time counter: grow while all-airborne,
+             * reset the moment any wheel grounds (so the next jump starts at 0 and
+             * the air-time floor is per-jump). Clamp to avoid int16 overflow on a
+             * very long fall. */
+            if (all_airborne) {
+                if (s_ff_air_ticks[slot] < 0x7FF0) s_ff_air_ticks[slot]++;
+            } else {
+                s_ff_air_ticks[slot] = 0;
+            }
+        }
     }
 }
 
@@ -858,6 +925,21 @@ int td5_physics_at_redline(int slot)
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
         return 0;
     return s_ff_at_redline[slot];
+}
+
+/* [item #5(4)] Public getter (prototype in td5_physics.h) — the FF layer polls
+ * this each frame and fires a decaying jolt on a new landing. Returns the
+ * per-slot landing sequence id (0 = none yet) and fills *out_impact with the
+ * last landing's downward vertical impact speed (raw 24.8 units, >= 0). Mirrors
+ * td5_physics_get_crash_fx's contract; out-of-range / non-racer slots return 0. */
+uint32_t td5_physics_get_landing_fx(int slot, int32_t *out_impact)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) {
+        if (out_impact) *out_impact = 0;
+        return 0;
+    }
+    if (out_impact) *out_impact = s_ff_land_impact[slot];
+    return s_ff_land_seq[slot];
 }
 
 /* ========================================================================
@@ -1556,10 +1638,17 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
             }
             uint32_t local_flags = (side < 0) ? 0u : (uint32_t)(side + 1);
             if ((int32_t)hd > 0x3FF && (int32_t)hd < 0xC00) local_flags ^= 3;
+            /* [item #5(1)(2)] Route the wall impact through td5_input_ff_collision
+             * (decaying directional pulse) instead of the old persistent
+             * td5_input_ff_play_effect: local_flags 1/2 encode the contact side, so
+             * map them to the LEFT (0x10) / RIGHT (0x40) contact-side bits the FF
+             * layer uses to pick the impacted-side motor. actor_b_slot = -1 (single
+             * actor, ignored). The raw ff_mag is in the same 0..100000 domain
+             * td5_input_ff_collision expects (it divides by COLLISION_DIV). */
             if (local_flags == 1) {
-                td5_input_ff_play_effect((int)actor->slot_index, 2, ff_mag, ff_mag * 10);
+                td5_input_ff_collision(0x10, (int)actor->slot_index, -1, ff_mag);
             } else if (local_flags == 2) {
-                td5_input_ff_play_effect((int)actor->slot_index, 1, ff_mag, ff_mag * 10);
+                td5_input_ff_collision(0x40, (int)actor->slot_index, -1, ff_mag);
             }
         }
     }
@@ -1863,8 +1952,12 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
                     td5_sound_play_at_position(variant, pitch, mag, wpos, volume);
                     ff_mag = strength >> 2;
                     if (ff_mag > 99999) ff_mag = 100000;
-                    td5_input_ff_play_effect((int)actor->slot_index, 2,
-                                             ff_mag, ff_mag * 10);
+                    /* [item #5(1)(2)] Decaying directional pulse via the FF
+                     * collision path (was the old persistent play_effect). Props
+                     * are plowed into head-on, so flag a FRONT contact (0x01);
+                     * actor_b_slot = -1 (single actor). raw ff_mag matches the
+                     * 0..100000 domain td5_input_ff_collision divides down. */
+                    td5_input_ff_collision(0x01, (int)actor->slot_index, -1, ff_mag);
                     td5_vfx_queue_prop_break((float)px * (1.0f / 256.0f),
                                              (float)why * (1.0f / 256.0f),
                                              (float)pz * (1.0f / 256.0f),
@@ -2110,10 +2203,25 @@ void td5_physics_run_paused_engine_step(void)
     if (total <= 0) return;
     if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
 
-    /* Only racer slots (0..5) participate in the paused engine branch.
-     * Traffic (6..11) goes through its own integration path in orig
-     * (UpdateTrafficVehiclePose) and never runs UpdateVehicleEngineSpeedSmoothed. */
-    int racers = total < 6 ? total : 6;
+    /* Racer slots participate in the paused engine branch (pre-rev during the
+     * 3-2-1). Traffic goes through its own integration path in orig
+     * (UpdateTrafficVehiclePose) and never runs UpdateVehicleEngineSpeedSmoothed.
+     * [#11c 2026-06-16] Use the runtime racer/traffic boundary g_traffic_slot_base
+     * (the sibling paused-metrics loop above already does), NOT a hardcoded 6 —
+     * with a >6-racer field g_traffic_slot_base becomes 16, so the old 6 left
+     * slots 6..N idling through the countdown (no engine build-up, "doesn't show
+     * accelerating beforehand" on AI viewports 8/9). Knob TD5RE_COUNTDOWN_REV_ALL
+     * (default on; "0" restores the legacy 6). */
+    int rev_all = 1;
+    {
+        static int v = -1;
+        if (v < 0) { const char *e = getenv("TD5RE_COUNTDOWN_REV_ALL"); v = (e && e[0] == '0') ? 0 : 1; }
+        rev_all = v;
+    }
+    int racers = total;
+    int rev_cap = rev_all ? g_traffic_slot_base : 6;
+    if (racers > rev_cap) racers = rev_cap;
+    if (racers > TD5_MAX_RACER_SLOTS) racers = TD5_MAX_RACER_SLOTS;
 
     for (int slot = 0; slot < racers; ++slot) {
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);

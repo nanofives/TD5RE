@@ -143,6 +143,30 @@ static int hud_countdown_ttf_on(void)
     return s;
 }
 
+/* [#11 COUNTDOWN ON EVERY VIEW 2026-06-16] During the race-start countdown, draw
+ * the 3/2/1 digit on EVERY viewport from the shared countdown timer instead of the
+ * per-view s_indicator_state[] array. With many panes (e.g. a 3x3 SpectateScreens
+ * dev race) the camera fly-in's UpdateCameraTransitionHudIndicator (td5_camera.c)
+ * overwrites s_indicator_state[v] with the pane car's race_position+2 every tick
+ * (its one-shot can't fire while the grid is paused), and tick_race_countdown()
+ * only re-asserts the digit on a LEVEL transition (~1 tick in 40). So for most of
+ * the countdown the high panes hold race_position+2 — and the pane following the
+ * LAST-place car gets >=10, which the digit block suppresses (the <=9 atlas clamp),
+ * leaving e.g. "AI Viewport Player 9" with no digit. When on (default), the digit
+ * for the countdown window is derived from g_cameraTransitionActive directly (the
+ * exact level math tick_race_countdown uses), so it is identical and present on
+ * every pane; the indicator array is still used outside the countdown (finish
+ * place). Set TD5RE_COUNTDOWN_ALLVIEWS=0 for the legacy per-view-array behaviour. */
+static int hud_countdown_allviews_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_COUNTDOWN_ALLVIEWS");
+        TD5_LOG_I(LOG_TAG, "countdown digit on every viewport: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
 /* (18) Render the replay "R" indicator with the TTF font (same blink cadence /
  * transparency) instead of the REPLAY texture. */
 static int hud_replay_r_ttf_on(void)
@@ -194,6 +218,23 @@ static int hud_mp_car_labels_on(void)
     if (s < 0) {
         s = hud_knob_on("TD5RE_MP_CAR_LABELS");
         TD5_LOG_I(LOG_TAG, "MP car name labels: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* [#4 LINEAR MP LABEL SCALE 2026-06-16] Scale each floating MP car label LINEARLY
+ * with the camera->car distance: ~nothing when the car is far, growing straight-
+ * line up to the player's OWN bottom-of-pane name-plate size when the car is near.
+ * The previous ramp used a smoothstep ease toward a 0.35x floor, so it was neither
+ * linear nor did it shrink to nothing far away. When on (default) the glyph scale
+ * is full*(1 - t) with t the 0..1 linear depth between NEAR_D and FAR_D; set
+ * TD5RE_MP_LABEL_SCALE=0 for the legacy smoothstep-to-floor ramp. */
+static int hud_mp_label_scale_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_MP_LABEL_SCALE");
+        TD5_LOG_I(LOG_TAG, "MP car label linear distance scale: %s", s ? "on" : "off");
     }
     return s;
 }
@@ -1515,30 +1556,40 @@ static void hud_draw_mp_car_labels(void)
             float dist = 1.0f / rhw;         /* view-space depth (world units) */
             if (dist > CUT_D) continue;      /* too far -> no label */
 
-            /* [#9 SMOOTH LABEL SCALE 2026-06-15] Continuously shrink the label with
-             * distance instead of the old stepped/linear ramp. t is the 0..1
-             * normalised depth between NEAR_D (full size) and FAR_D (floor size);
-             * the SAME near/far cutoffs are kept. A smoothstep ease (3t^2 - 2t^3)
-             * gives a smooth, monotonic size falloff with no visible size "steps"
-             * as a car drifts toward/away, and zero slope at both ends so the size
-             * settles gently at the near/far clamps rather than snapping. */
+            /* Normalised 0..1 depth between NEAR_D (closest, t=0) and FAR_D
+             * (farthest, t=1); the SAME near/far cutoffs feed both ramps below. */
             float t = (dist - NEAR_D) / (FAR_D - NEAR_D);
             if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-            float te = t * t * (3.0f - 2.0f * t);   /* smoothstep */
-            float dscale = SCALE_NEAR + (SCALE_FAR - SCALE_NEAR) * te;
 
             /* Pane-local -> full render-target coords. */
             float fx = L + sx;
             float fy = T + sy;
 
-            /* Base text scale: track the pane size (same convention as the name
-             * plate / disconnect modal: width/640), trimmed by the round-2 HUD
-             * size multiplier, then by the distance factor. Clamp so it stays
-             * legible at mid distance but never dominates the pane. */
-            float base_ts = (pane_w / 640.0f) * hud_size_mul();
-            float ts = base_ts * dscale;
-            if (ts < 0.32f) ts = 0.32f;
-            if (ts > 1.20f) ts = 1.20f;
+            float ts;
+            if (hud_mp_label_scale_on()) {
+                /* [#4 LINEAR MP LABEL SCALE 2026-06-16] Grow the label LINEARLY with
+                 * proximity: full size when near, ~nothing when far. "Full" is the
+                 * exact size of the player's OWN bottom-of-pane name plate
+                 * (td5_hud_draw_player_id_overlays: ts = (w/640)*0.95, clamp 0.40..1.2)
+                 * so a car right next to you reads at the same size as your own plate.
+                 * Linear in distance: ts = full * (1 - t), so t=0 (near) -> full and
+                 * t=1 (far) -> 0. No smoothstep / no 1/z curve. A tiny floor keeps a
+                 * just-visible sliver right up to the CUT_D cutoff instead of popping
+                 * to nothing one pixel early. */
+                float full_ts = (pane_w / 640.0f) * 0.95f;
+                if (full_ts < 0.40f) full_ts = 0.40f;
+                if (full_ts > 1.20f) full_ts = 1.20f;
+                ts = full_ts * (1.0f - t);
+                if (ts < 0.04f) ts = 0.04f;   /* ~nothing, but not exactly 0 */
+            } else {
+                /* Legacy ramp: smoothstep ease toward a 0.35x floor (never -> 0). */
+                float te = t * t * (3.0f - 2.0f * t);   /* smoothstep */
+                float dscale = SCALE_NEAR + (SCALE_FAR - SCALE_NEAR) * te;
+                float base_ts = (pane_w / 640.0f) * hud_size_mul();
+                ts = base_ts * dscale;
+                if (ts < 0.32f) ts = 0.32f;
+                if (ts > 1.20f) ts = 1.20f;
+            }
 
             uint32_t accent = s_hud_id_accent[slot] ? s_hud_id_accent[slot]
                                                     : 0xFFB0B0B0u;
@@ -4380,8 +4431,23 @@ void td5_hud_render_overlays(float dt)
          * would index row>=2, outside the glyph region, drawing a "blue square".
          * Suppress those instead of sampling garbage (mirrors the existing
          * countdown-timer indicator>=4 suppression in UpdateRaceCameraTransitionTimer). */
-        if (s_indicator_state[v] >= 1 && s_indicator_state[v] <= 9 && s_numbers_atlas) {
-            int digit_val = s_indicator_state[v];
+        /* [#11 COUNTDOWN ON EVERY VIEW 2026-06-16] Prefer the shared countdown timer
+         * as the digit source while the race-start countdown is running, so EVERY
+         * pane shows the same 3/2/1 even when the camera fly-in has clobbered this
+         * pane's s_indicator_state[v] with a race_position+2 value (>=10 for the
+         * last-place car -> previously blank, e.g. "AI Viewport Player 9"). Outside
+         * the countdown (timer == 0) the per-view indicator array still drives the
+         * finish-position digit. See hud_countdown_allviews_on(). The level math is
+         * the same as tick_race_countdown(): level = timer/0x2800, digit = level+1
+         * for level<=2 (i.e. 3/2/1), else 0/hidden. */
+        extern int g_cameraTransitionActive;   /* td5_camera.c countdown timer */
+        int indicator_digit = s_indicator_state[v];
+        if (hud_countdown_allviews_on() && g_cameraTransitionActive > 0) {
+            int cd_level = g_cameraTransitionActive / 0x2800;
+            indicator_digit = (cd_level <= 2) ? (cd_level + 1) : 0;
+        }
+        if (indicator_digit >= 1 && indicator_digit <= 9 && s_numbers_atlas) {
+            int digit_val = indicator_digit;
 
             /* [user 2026-06-13: race countdown numbers too small] The digit is
              * blown up COUNTDOWN_DIGIT_SCALE× and centred on the view. */
