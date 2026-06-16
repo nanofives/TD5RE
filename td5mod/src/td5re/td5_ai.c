@@ -9366,6 +9366,13 @@ static void ai_update_single_racer(int slot) {
  * Dispatch a single traffic slot.
  * Slot 9 is hijacked to racer AI when encounter is active.
  */
+/* [#18] A/B knob: TD5RE_TD6_TRAFFIC_ROAD=0 disables the road-lane clamp. */
+static int td6_traffic_road_clamp_enabled(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_TRAFFIC_ROAD"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
 static void ai_update_single_traffic(int slot) {
     /* Slot 9 encounter hijack */
     if (slot == 9 && g_encounter_tracked_handle != -1) {
@@ -9377,6 +9384,19 @@ static void ai_update_single_traffic(int slot) {
 
     /* Normal traffic update */
     td5_ai_update_traffic_route_plan(slot);
+
+    /* [#18] Keep TD6 traffic on the paved band: if the route plan left this car
+     * on a sidewalk/shoulder lane (the converter's route bytes can point there),
+     * nudge it one lane/tick toward the nearest road lane. Stopgap until the TD6
+     * route-network model (#20) lands; gated to TD6 + the A/B knob. */
+    if (g_active_td6_level > 0 && td6_traffic_road_clamp_enabled()) {
+        char *a = actor_ptr(slot);
+        int span = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+        int cur  = (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX);
+        int road = td5_track_nearest_road_lane(span, cur);
+        if (road != cur)
+            ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = (uint8_t)(cur + (road > cur ? 1 : -1));
+    }
     /* UpdateTrafficActorMotion(slot) would follow in the physics module */
 }
 

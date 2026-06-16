@@ -109,6 +109,9 @@ int              td5_track_get_ring_length(void);
  * span maps to its parallel main-ring span via the segment-remap table; main
  * spans pass through unchanged. */
 int              td5_track_branch_to_main_span(int span);
+/* [#18] Nearest non-slow (road) lane to `lane` in `span` — keeps traffic off the
+ * TD6 sidewalk/shoulder lanes. Returns `lane` if no road lane is found. */
+int              td5_track_nearest_road_lane(int span_index, int lane);
 /* Inverse: a main-ring span -> the parallel branch-corridor span, or -1 if none. */
 int              td5_track_main_to_branch_span(int main_span);
 /* Branch-corridor enumeration (jump-table records) for the traffic spawner:

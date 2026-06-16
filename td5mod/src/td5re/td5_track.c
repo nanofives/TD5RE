@@ -6280,6 +6280,28 @@ int td5_track_branch_to_main_span(int span)
  * span, return the parallel BRANCH-corridor span (lo + (main - base)) of a branch
  * that bypasses it, or -1 if no branch parallels this main span. Lets the traffic
  * spawner populate branch corridors with cars parallel to the main road. */
+/* [#18] Nearest DRIVABLE (non-slow) lane to `lane` within `span_index`, searching
+ * outward. TD6 sidewalk/shoulder lanes report as "slow" via the surface grid, so
+ * this keeps traffic on the paved band. Returns `lane` unchanged when the surface
+ * grid is unavailable or every lane is slow. */
+int td5_track_nearest_road_lane(int span_index, int lane)
+{
+    int lc, d;
+    if (span_index < 0 || span_index >= s_span_count) return lane;
+    lc = span_lane_count(&s_span_array[span_index]);
+    if (lc < 1) return lane;
+    if (lane < 0) lane = 0;
+    if (lane >= lc) lane = lc - 1;
+    if (!td5_track_surface_is_slow(td5_track_get_span_lane_surface(span_index, lane)))
+        return lane;                                   /* already on the road */
+    for (d = 1; d < lc; d++) {
+        int a = lane - d, b = lane + d;
+        if (a >= 0 && !td5_track_surface_is_slow(td5_track_get_span_lane_surface(span_index, a))) return a;
+        if (b < lc && !td5_track_surface_is_slow(td5_track_get_span_lane_surface(span_index, b))) return b;
+    }
+    return lane;
+}
+
 int td5_track_main_to_branch_span(int main_span)
 {
     int ring = g_td5.track_span_ring_length;
