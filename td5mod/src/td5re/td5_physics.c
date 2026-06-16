@@ -727,6 +727,68 @@ static int32_t td5_physics_slope_light_scale_q12(int32_t top_speed)
     }
 }
 
+/* ------------------------------------------------------------------------
+ * Hill-climb drive-torque assist — PORT-ONLY. [2026-06-16]
+ *
+ * On steep uphill grades the gravity-along-slope term (section 14a-slope)
+ * subtracts more longitudinal speed per tick than a mid-power car's drive
+ * torque can replace, so the car decelerates to a stall partway up the
+ * incline (Scotland's ~45-degree cliff in a Camaro). Boost the drive torque
+ * proportionally to how steep the climb is so the engine can overcome
+ * gravity on a cliff. Flat ground and downhill are untouched (the boost is
+ * gated on the uphill side and ramps from 1.0x at flat). It scales the drive
+ * torque only — the abs_speed<=speed_limit gate still caps top speed, so this
+ * does NOT raise flat-ground top speed (up==0 there -> 1.0x).
+ *
+ * Knobs:
+ *   TD5RE_HILL_ASSIST       default ON ("0" disables -> old stall behaviour)
+ *   TD5RE_HILL_ASSIST_MAX   peak drive-torque multiplier % at/above the
+ *                           reference grade (default 260 = 2.6x), 100..600.
+ * The steepness measure is the surface normal's forward projection along the
+ * heading; at a 45-degree climb that magnitude is ~sin(45)*4096 = 2896. A
+ * squared ramp keeps gentle rolling hills almost unaffected while strongly
+ * boosting a true cliff. */
+#define HILL_ASSIST_REF_UP 2896    /* fwd-projection magnitude at ~45 deg */
+static int s_hill_assist_init     = 0;
+static int s_hill_assist_on       = 1;
+static int s_hill_assist_max_q12  = (4096 * 260) / 100;   /* 2.6x default */
+
+static void td5_physics_hill_assist_resolve(void)
+{
+    const char *e, *m;
+    if (s_hill_assist_init) return;
+    e = getenv("TD5RE_HILL_ASSIST");
+    if (e && e[0] == '0' && e[1] == '\0') s_hill_assist_on = 0;
+    m = getenv("TD5RE_HILL_ASSIST_MAX");
+    if (m && m[0]) {
+        int p = atoi(m);
+        if (p < 100) p = 100;
+        else if (p > 600) p = 600;
+        s_hill_assist_max_q12 = (4096 * p) / 100;
+    }
+    s_hill_assist_init = 1;
+    TD5_LOG_I(LOG_TAG, "hill_assist: %s max=%d/4096 (drive-torque boost vs uphill grade)",
+              s_hill_assist_on ? "on" : "off", s_hill_assist_max_q12);
+}
+
+/* Q12 drive-torque multiplier for the current uphill steepness. up_mag is the
+ * (>=0) forward-projection magnitude of the surface normal (0 flat, ~2896 at
+ * 45 deg). Returns 0x1000 (1.0x) when off or on flat/downhill ground. */
+static int32_t td5_physics_hill_assist_q12(int32_t up_mag)
+{
+    int32_t extra, boost;
+    int64_t r, r2;
+    td5_physics_hill_assist_resolve();
+    if (!s_hill_assist_on || up_mag <= 0) return 4096;
+    extra = s_hill_assist_max_q12 - 4096;            /* >=0 */
+    r = ((int64_t)up_mag << 12) / HILL_ASSIST_REF_UP;  /* grade ratio, Q12 */
+    if (r > 4096) r = 4096;                          /* clamp at the ref grade */
+    r2 = (r * r) >> 12;                              /* squared ramp, Q12 */
+    boost = 4096 + (int32_t)(((int64_t)extra * r2) >> 12);
+    if (boost > s_hill_assist_max_q12) boost = s_hill_assist_max_q12;
+    return boost;
+}
+
 /* ========================================================================
  * Force-feedback signal getters — PORT-ONLY. [FF SIGNALS 2026-06-15, #1]
  *
@@ -3141,6 +3203,24 @@ void td5_physics_update_player(TD5_Actor *actor)
              * returns 0 via the actor+0x33e multiply inside the gear curve,
              * so wheel_drive stays zero and no force is added below. */
             drive_torque = td5_physics_compute_drive_torque(actor);
+
+            /* [HILL ASSIST 2026-06-16] Boost drive torque on uphill grades so a
+             * steep climb (Scotland ~45deg, mid-power car) doesn't stall mid-
+             * cliff. Uphill => the surface normal's forward projection along the
+             * heading is negative; use its magnitude as the steepness. Downhill
+             * and flat (fwd_dot>=0) get no boost. drive_torque is 0 at idle
+             * throttle so coasting uphill is unaffected (assist helps only when
+             * the player is actually trying to climb). */
+            {
+                int32_t nx_h = (int32_t)actor->heading_normal.x;
+                int32_t nz_h = (int32_t)actor->heading_normal.z;
+                int32_t fwd_dot_h = (nx_h * sin_h + nz_h * cos_h) >> 12;  /* <0 uphill */
+                if (fwd_dot_h < 0) {
+                    int32_t ha_q12 = td5_physics_hill_assist_q12(-fwd_dot_h);
+                    if (ha_q12 != 4096)
+                        drive_torque = (int32_t)(((int64_t)drive_torque * ha_q12) >> 12);
+                }
+            }
 
             int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
             int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
