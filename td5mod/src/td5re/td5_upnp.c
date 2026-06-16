@@ -593,30 +593,54 @@ static int upnp_soap(const char *action, const char *args_xml, char *resp, int r
  * and the already-open WSA, so call only from inside another upnp_* entry. */
 static int upnp_mapping_is_ours(uint16_t port, int udp)
 {
-    char args[256], resp[HTTP_RESP_MAX], client[64];
+    char args[256], resp[HTTP_RESP_MAX], client[64], iport[16];
+    int status;
     snprintf(args, sizeof(args),
         "<NewRemoteHost></NewRemoteHost>"
         "<NewExternalPort>%u</NewExternalPort>"
         "<NewProtocol>%s</NewProtocol>",
         (unsigned)port, udp ? "UDP" : "TCP");
-    if (upnp_soap("GetSpecificPortMappingEntry", args, resp, sizeof(resp)) != 200)
+    status = upnp_soap("GetSpecificPortMappingEntry", args, resp, sizeof(resp));
+    if (status != 200) {
+        char ec[16] = ""; int err = 0;
+        if (upnp_xml_value(resp, "errorCode", ec, sizeof(ec))) err = atoi(ec);
+        TD5_LOG_W(UPNP_LOG, "GetSpecificPortMappingEntry %u: HTTP %d UPnPError %d",
+                  (unsigned)port, status, err);
         return 0;
-    if (!upnp_xml_value(resp, "NewInternalClient", client, sizeof(client)))
-        return 0;
-    return (s_local_ip[0] && strcmp(client, s_local_ip) == 0);
+    }
+    client[0] = iport[0] = '\0';
+    upnp_xml_value(resp, "NewInternalClient", client, sizeof(client));
+    upnp_xml_value(resp, "NewInternalPort",   iport,  sizeof(iport));
+    TD5_LOG_I(UPNP_LOG, "existing mapping %u/%s -> client=%s iport=%s (we are %s)",
+              (unsigned)port, udp ? "UDP" : "TCP",
+              client[0] ? client : "?", iport[0] ? iport : "?",
+              s_local_ip[0] ? s_local_ip : "?");
+    return (s_local_ip[0] && client[0] && strcmp(client, s_local_ip) == 0);
 }
 
 /* Best-effort DeletePortMapping for the external <port>/<proto> using the cached
- * IGD + already-open WSA (clears a conflicting entry before we re-add ours). */
-static void upnp_delete_external(uint16_t port, int udp)
+ * IGD + already-open WSA (clears a conflicting entry before we re-add ours).
+ * Returns 1 if the router accepted the delete, 0 otherwise. */
+static int upnp_delete_external(uint16_t port, int udp)
 {
-    char args[256], resp[HTTP_RESP_MAX];
+    char args[256], resp[HTTP_RESP_MAX], ec[16];
+    int status, err = 0;
     snprintf(args, sizeof(args),
         "<NewRemoteHost></NewRemoteHost>"
         "<NewExternalPort>%u</NewExternalPort>"
         "<NewProtocol>%s</NewProtocol>",
         (unsigned)port, udp ? "UDP" : "TCP");
-    upnp_soap("DeletePortMapping", args, resp, sizeof(resp));
+    status = upnp_soap("DeletePortMapping", args, resp, sizeof(resp));
+    if (status == 200) {
+        TD5_LOG_I(UPNP_LOG, "DeletePortMapping %u OK", (unsigned)port);
+        return 1;
+    }
+    ec[0] = '\0';
+    if (upnp_xml_value(resp, "errorCode", ec, sizeof(ec))) err = atoi(ec);
+    TD5_LOG_W(UPNP_LOG, "DeletePortMapping %u refused (HTTP %d UPnPError %d) "
+              "-- router won't let us remove a foreign/static mapping",
+              (unsigned)port, status, err);
+    return 0;
 }
 
 /* ========================================================================
