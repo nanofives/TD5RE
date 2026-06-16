@@ -740,6 +740,12 @@ static int  s_proj_effect_mode;   /* 0=disabled, 2=enabled (g_vehicleProjectionE
 static int  s_envmap_page_count;  /* number of uploaded environs textures */
 static int  s_envmap_pages[ENVMAP_MAX_PAGES]; /* D3D page IDs, indexed 0..count-1 by entry */
 static int  s_environs_level;     /* level_number used to key the per-track tables */
+/* [unified car look] The chrome/env-map "mode 2" reflection overlay is disabled
+ * for ALL cars (it painted scrolling environs "lights" onto the TD6 grayscale
+ * bodies). File-scope so the loader also skips fetching the now-never-drawn
+ * environs reflection textures. Flip to 1 AND restore re/assets/environs/ (re-
+ * extractable from original/) to revert the all-racer chrome. */
+static const int s_vehicle_reflection_overlay_enabled = 0;
 
 /* Per-actor light-zone index, mirroring actor->field_0x377 in the original.
  * ApplyTrackLightingForVehicleSegment @ 0x00430150 walks the per-track zone
@@ -3646,8 +3652,9 @@ void td5_render_actors_for_view(int view_index)
              * overlay — so it is now disabled for ALL cars and the divergent
              * !s_vehicle_is_td6 gate is removed. The overlay + projection-effect
              * update are kept behind this flag for easy revert; flip to 1 to
-             * restore the all-racer chrome (the TD6 grayscale caveat returns). */
-            static const int s_vehicle_reflection_overlay_enabled = 0;
+             * restore the all-racer chrome (the TD6 grayscale caveat returns).
+             * [2026-06-16] flag moved to file scope so the environs loader skips
+             * fetching the textures while the overlay is off. */
             if (s_vehicle_reflection_overlay_enabled &&
                 s_proj_effect_mode == 2 && slot < TD5_MAX_RACER_SLOTS &&
                 !s_photobooth_active) {
@@ -4508,8 +4515,17 @@ int td5_render_load_environs_textures(int level_number)
     s_environs_level = level_number;
     for (int i = 0; i < TD5_ACTOR_MAX_TOTAL_SLOTS; i++) s_actor_light_zone[i] = 0;
 
-    s_envmap_page_count = td5_asset_load_environs_pages(
-        level_number, ENVMAP_TEXTURE_PAGE_BASE, ENVMAP_MAX_PAGES, s_envmap_pages);
+    /* [2026-06-16] Only fetch the environs REFLECTION textures when the chrome
+     * overlay that consumes them is enabled — it's disabled (unified car look),
+     * so skip the load entirely (the textures were loaded-but-never-drawn). The
+     * per-span light-zone setup above (s_environs_level / s_actor_light_zone) is
+     * a SEPARATE system and stays unconditional. */
+    if (s_vehicle_reflection_overlay_enabled) {
+        s_envmap_page_count = td5_asset_load_environs_pages(
+            level_number, ENVMAP_TEXTURE_PAGE_BASE, ENVMAP_MAX_PAGES, s_envmap_pages);
+    } else {
+        s_envmap_page_count = 0;
+    }
 
     /* Enable projection effect if we loaded at least one texture */
     s_proj_effect_mode = (s_envmap_page_count > 0) ? 2 : 0;
