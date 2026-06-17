@@ -1758,6 +1758,31 @@ int td5_track_surface_is_slow(int surface_type)
     return 0;
 }
 
+/* [#18 2026-06-16] Traffic-drivable ROAD band for a TD6 span: the contiguous run
+ * of lanes sharing the CENTER lane's surface-grid class. The centre lane is always
+ * carriageway, so this excludes the sidewalk/verge EDGE lanes — which are a
+ * different grid class that td5_track_surface_is_slow() does NOT catch (London
+ * sidewalk = full grip + zero drag, so the slow-lane filter never excludes it).
+ * Keeps traffic on the actual road (both directions) and off the kerb. Returns 1
+ * when a proper sub-range was found (some edge lane is a different class). */
+int td5_track_td6_road_band(int span_index, int lane_count, int *out_lo, int *out_hi)
+{
+    int center, cc, lo, hi;
+    if (lane_count <= 1) {
+        if (out_lo) *out_lo = 0;
+        if (out_hi) *out_hi = (lane_count > 0) ? lane_count - 1 : 0;
+        return 0;
+    }
+    center = lane_count / 2;
+    cc = td5_track_get_span_lane_surface(span_index, center);
+    lo = hi = center;
+    while (lo > 0 && td5_track_get_span_lane_surface(span_index, lo - 1) == cc) lo--;
+    while (hi < lane_count - 1 && td5_track_get_span_lane_surface(span_index, hi + 1) == cc) hi++;
+    if (out_lo) *out_lo = lo;
+    if (out_hi) *out_hi = hi;
+    return (lo > 0 || hi < lane_count - 1);
+}
+
 static void *build_span_strip_display_list(int span_index)
 {
     const TD5_StripSpan *sp;

@@ -7400,20 +7400,29 @@ static int td5_ai_td6_drivable_band(int route_span, int lane_count,
     if (g_active_td6_level <= 0 || lane_count <= 2 || route_span < 0)
         return 0;
     {
-        /* [#18 2026-06-16] BRANCH corridors: the extended branch route rows were
-         * authored as a single CENTER sample (left==right==128) -> the band below
-         * collapses to ~one lane, so traffic clusters in the median and reads as
-         * "one track". A branch is a real two-way street; use the FULL lane span so
-         * traffic spreads across both visible sides. The per-lane surface filter in
-         * trf_dyn_pick_lane still excludes any sidewalk-class edge lanes, so cars
-         * stay on the branch's actual road. */
+        /* [#18 2026-06-16] BRANCH corridors have no route-table coverage. Derive the
+         * band straight from the SURFACE GRID: the contiguous road-class lanes about
+         * the centre (excludes the sidewalk/verge edge lanes that surface_is_slow
+         * misses). This keeps branch traffic on the actual two-way road — both
+         * directions, off the kerb — instead of the median-only or full-width
+         * heuristics. Falls through to the central-half fallback if the grid is flat. */
         int ringL = td5_track_get_ring_length();
         if (ringL > 0 && route_span >= ringL) {
-            lo = 0;
-            hi = (lane_count > 0) ? lane_count - 1 : 0;
-            if (out_lo) *out_lo = lo;
-            if (out_hi) *out_hi = hi;
-            return 0;   /* no band restriction; surface filter handles edges */
+            int rl, rh;
+            if (td5_track_td6_road_band(route_span, lane_count, &rl, &rh)) {
+                if (out_lo) *out_lo = rl;
+                if (out_hi) *out_hi = rh;
+                return 1;
+            }
+            /* grid is flat (no distinct kerb) -> central half keeps cars centred */
+            {
+                int m = lane_count / 4;
+                lo = m; hi = lane_count - 1 - m;
+                if (hi < lo) hi = lo;
+                if (out_lo) *out_lo = lo;
+                if (out_hi) *out_hi = hi;
+                return (lo > 0 || hi < lane_count - 1);
+            }
         }
     }
     {
@@ -7446,6 +7455,17 @@ static int td5_ai_td6_drivable_band(int route_span, int lane_count,
         if (lo < 0) lo = 0;
         if (hi > lane_count - 1) hi = lane_count - 1;
         if (hi < lo) hi = lo;
+        /* [#18 2026-06-16] Intersect with the surface road-band so the route band
+         * never includes a sidewalk-class edge lane (kerb is full-grip, so the
+         * slow-lane filter misses it). Only tightens, never widens. */
+        {
+            int rl, rh;
+            if (td5_track_td6_road_band(route_span, lane_count, &rl, &rh)) {
+                if (lo < rl) lo = rl;
+                if (hi > rh) hi = rh;
+                if (hi < lo) hi = lo;
+            }
+        }
     }
     if (out_lo) *out_lo = lo;
     if (out_hi) *out_hi = hi;

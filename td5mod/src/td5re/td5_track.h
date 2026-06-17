@@ -170,6 +170,9 @@ int              td5_track_get_span_lane_surface(int span_index, int lane);
  * smart-traffic chooser should avoid: the alternate-surface bit (0x10) is set,
  * or the base surface is DIRT(3)/GRAVEL(4). Asphalt (dry/wet) is not slow. */
 int              td5_track_surface_is_slow(int surface_type);
+/* [#18] Traffic-drivable road band (contiguous lanes of the centre lane's surface
+ * class) — excludes sidewalk/verge edges that surface_is_slow misses. 1 if found. */
+int              td5_track_td6_road_band(int span_index, int lane_count, int *out_lo, int *out_hi);
 int              td5_track_branch_to_junction(int span_idx);
 int              td5_track_get_fwd_sentinel(void);
 /* Junction-table lookup for orig UpdateRaceActors @ 0x00436A70 route_table
