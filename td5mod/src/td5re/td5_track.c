@@ -3524,6 +3524,25 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     pos_x = *(int32_t *)((uint8_t *)actor + 0x1FC); /* world_pos.x */
     pos_z = *(int32_t *)((uint8_t *)actor + 0x204); /* world_pos.z */
 
+    /* [#20 TELEPORT DETECTOR] Log when the FOCUSED player car (0x4AB108) jumps more
+     * than ~4000 world-units in one tick — captures the exact before/after span +
+     * position at a teleport so the cause is pinned (correlate with wall_contact /
+     * branch_return lines at the same tick). Focused car only, cheap. */
+    if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
+        static int32_t s_tp_px = 0, s_tp_pz = 0; static int s_tp_have = 0;
+        if (s_tp_have) {
+            int32_t dxw = (pos_x - s_tp_px) >> 8;
+            int32_t dzw = (pos_z - s_tp_pz) >> 8;
+            if (dxw > 4000 || dxw < -4000 || dzw > 4000 || dzw < -4000) {
+                TD5_LOG_W(LOG_TAG, "TELEPORT_DETECT: rev=%d span_raw=%d norm=%d "
+                          "pos (%d,%d)->(%d,%d) jump=(%d,%d)",
+                          g_td5.reverse_direction, (int)track_state[0], (int)track_state[1],
+                          s_tp_px >> 8, s_tp_pz >> 8, pos_x >> 8, pos_z >> 8, dxw, dzw);
+            }
+        }
+        s_tp_px = pos_x; s_tp_pz = pos_z; s_tp_have = 1;
+    }
+
     /* Chassis walker: single-pass per call (single_step=1) — matches original
      * 0x004440F0 which has NO outer loop, every case returns immediately.
      * [Ghidra-verified 2026-05-12]. Earlier port used multi-pass iteration
