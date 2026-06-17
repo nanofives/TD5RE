@@ -6386,11 +6386,11 @@ int td5_track_branch_blacklisted(int branch_span)
     if (s_bl_n < 0) {
         const char *e = getenv("TD5RE_TD6_BRANCH_BLACKLIST");
         s_bl_n = 0;
-        /* London sidewalk forks (base = parallel main span): 439 (span-440) + 466
-         * + 775 (span-780) user-reported; 502/557/569/670 auto-discovered by the
-         * self-heal (traffic stuck = un-drivable). Seeding the known set avoids a
-         * ~3s probe car per race; the self-heal still finds any others at runtime. */
-        if (!e || !e[0]) e = "439,466,502,557,569,670,775";
+        /* London sidewalk forks (base = parallel main span): 253 (span-253) + 439
+         * (span-440) + 466 + 775 (span-780) user-reported; 502/557/569/670 auto-
+         * discovered by the self-heal (traffic stuck = un-drivable). Seeding the
+         * known set avoids a ~3s probe car per race; self-heal finds any others. */
+        if (!e || !e[0]) e = "253,439,466,502,557,569,670,775";
         while (*e && s_bl_n < 32) {
             if (*e >= '0' && *e <= '9') { s_bl[s_bl_n++] = atoi(e); while (*e >= '0' && *e <= '9') e++; }
             else e++;
