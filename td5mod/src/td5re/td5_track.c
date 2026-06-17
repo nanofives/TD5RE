@@ -2818,6 +2818,22 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
         }
     }
 
+    /* [#20 reverse] Hard main-ring guard. The reverse strip (STRIPB) is valid, but
+     * the port's reverse junction handling can mis-walk a main-ring chassis onto a
+     * BRANCH span (>= ring) at/near a fork, after which the wall code references the
+     * far branch rail -> huge penetration -> reject -> ground-probe TELEPORT. Reverse
+     * branch driving isn't supported, so never let a main-ring chassis cross onto a
+     * branch in reverse: keep it on the main span it came from. (Forward unaffected;
+     * a chassis legitimately ON a branch — span_idx>=ring — is left alone.) */
+    if (g_td5.reverse_direction) {
+        int ringR = g_td5.track_span_ring_length;
+        if (ringR > 0 && span_idx < ringR && new_span >= ringR) {
+            TD5_LOG_I(LOG_TAG, "reverse_main_guard: span=%d blocked branch %d -> stay main",
+                      span_idx, new_span);
+            new_span = span_idx;
+        }
+    }
+
     /* Clamp span index to valid range */
     if (new_span < 0) new_span = 0;
     if (new_span >= s_span_count) new_span = s_span_count - 1;
