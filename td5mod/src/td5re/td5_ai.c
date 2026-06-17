@@ -7269,7 +7269,12 @@ static int trf_brake_near_spans(void)
     static int s = -1;
     if (s < 0) {
         const char *e = getenv("TD5RE_TRAFFIC_BRAKE_NEAR");
-        s = e ? atoi(e) : 4;
+        /* 8 spans (was 4): 4 left too little stopping distance, so cars closed up and
+         * OVERLAPPED before the brake took hold; 8 keeps a visible following gap while
+         * still far below the old unbounded behaviour (which braked for cars ~30 spans
+         * ahead and chain-stopped). The TTC closing-rate formula handles anything
+         * beyond this. Env TD5RE_TRAFFIC_BRAKE_NEAR. */
+        s = e ? atoi(e) : 8;
         if (s < 1) s = 1;
     }
     return s;
