@@ -7228,6 +7228,42 @@ static int traffic_wheel_spin_enabled(void) {
     if (cached < 0) { const char *e = getenv("TD5RE_TRAFFIC_WHEEL_SPIN"); cached = (e && e[0] == '0') ? 0 : 1; }
     return cached;
 }
+/* [WHEELS-TOO-LOW on NON-FOCUSED cars — 2026-06-17]
+ * The unified wheel renderer draws every car's wheels through the SAME
+ * s_render_transform that drew its body (m[9..11] = the actor's view-space
+ * translation set by td5_render_load_translation in td5_render_actors_for_view).
+ *
+ * For RACER slots (slot < g_traffic_slot_base) the body translation already
+ * carries the render-Y "ground plant" lift (td5_render.c:~3545,
+ * `interp_y -= height_base_offset<<8` => +36/+18 world-Y DOWN), and because the
+ * wheels share that transform they inherit the same lift — so the focused player
+ * AND the AI racers (which run the identical render + physics path) draw their
+ * wheels at the correct gap. That path is left byte-identical here.
+ *
+ * TRAFFIC slots (slot >= g_traffic_slot_base) get NO body render-lift (the gate
+ * at td5_render.c:~3545 excludes them — the traffic body is planted in physics
+ * via world_pos.y = ground_y - height_offset instead). Their wheels are SYNTHED
+ * from the mesh bounds (wy0 = bounding_center_y - rb*0.22 + s_tlift) and never
+ * referenced to the racer ground convention, so they sit BELOW the body line —
+ * the "non-focused wheels dropped/sunken" report. Raise the synthesized wheel
+ * centre by the same body-lift magnitude the racers use so traffic wheels meet
+ * the body/ground line that the racer (focused + AI) wheels already use.
+ * A/B: TD5RE_WHEEL_LIFT_FIX=0 restores the old (un-aligned) synth wheel Y. */
+static int wheel_lift_fix_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_LIFT_FIX"); cached = (e && e[0] == '0') ? 0 : 1; }
+    return cached;
+}
+/* The racer body render-lift magnitude (body-units), mirroring the
+ * height_base_offset used by the body draw at td5_render.c:~3549:
+ *   normal gameplay -> 36, replay playback -> 18.
+ * Returned as a positive "raise the wheel toward the body" amount; in the synth
+ * wheel's body-local frame +Y is UP (see the s_tlift comment), so adding this
+ * lifts the traffic wheel to the racer ground convention. */
+static float wheel_body_lift_magnitude(void) {
+    extern int td5_input_is_playback_active(void);
+    return td5_input_is_playback_active() ? 18.0f : 36.0f;
+}
 /* [BUG 6 — inner (inboard) wheel face is texture-less]
  * The unified renderer caps only the OUTBOARD wheel face (the carhub alloy
  * disc); the inboard end of the tyre tube is left open, so from any angle that
@@ -7448,7 +7484,14 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         static float s_tlift = -1.0f;
         if (s_tlift < 0.0f) { const char *e = getenv("TD5RE_WHEEL_TRAFFIC_LIFT");
                               s_tlift = (e && e[0]) ? (float)atof(e) : 18.0f; }
-        float wy0   = (mh ? mh->bounding_center_y : 0.0f) - rb * 0.22f + s_tlift;  /* wheel centre Y */
+        /* [WHEELS-TOO-LOW fix] Align the synth (traffic) wheel vertical reference
+         * with the body's render lift. The traffic body gets NO render-Y lift
+         * (only racers do, at td5_render.c:~3545), so without this the synth
+         * wheels sit below the body/ground line that the racer (focused + AI)
+         * wheels already use. Raise them by the same body-lift magnitude the
+         * racers receive. A/B: TD5RE_WHEEL_LIFT_FIX=0 reverts. */
+        float lift_align = wheel_lift_fix_enabled() ? wheel_body_lift_magnitude() : 0.0f;
+        float wy0   = (mh ? mh->bounding_center_y : 0.0f) - rb * 0.22f + s_tlift + lift_align;  /* wheel centre Y */
         int16_t zf = (int16_t)front, zr = (int16_t)rear, tx = (int16_t)track, wy16 = (int16_t)wy0;
         synth[0][0] = -tx; synth[0][1] = wy16; synth[0][2] = zf;   /* FL */
         synth[1][0] =  tx; synth[1][1] = wy16; synth[1][2] = zf;   /* FR */
