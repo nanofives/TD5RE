@@ -155,18 +155,6 @@ static inline char *actor_ptr(int slot) {
     return g_actor_base + slot * ACTOR_STRIDE;
 }
 
-/* [#18] Classify an actor as background TRAFFIC (slot >= the racer slots) vs a
- * racer/player. Used by the span-walker (td5_track.c) to suppress traffic — and
- * only traffic — from forking onto a blacklisted sidewalk corridor; racers/player
- * navigate every branch freely (force-maining them traps the player at the fork). */
-int td5_ai_actor_is_traffic(const void *actor) {
-    long off;
-    if (!actor || !g_actor_base) return 0;
-    off = (const char *)actor - g_actor_base;
-    if (off < 0) return 0;
-    return (int)(off / ACTOR_STRIDE) >= TD5_MAX_RACER_SLOTS;
-}
-
 #define ACTOR_I16(base, off)  (*(int16_t *)((base) + (off)))
 #define ACTOR_I32(base, off)  (*(int32_t *)((base) + (off)))
 #define ACTOR_U8(base, off)   (*(uint8_t *)((base) + (off)))
@@ -4243,10 +4231,9 @@ static int td5_ai_branch_random_enabled(void) {
 }
 
 /* A branch corridor reachable from this fork is genuinely DRIVABLE: always so on
- * native TD5 (g_active_td6_level==0); on TD6 only when the branch-migration path
- * is enabled (otherwise the walker force-mains every fork — see resolve_neighbor
- * in td5_track.c — and steering toward the branch lanes would just scrape a
- * suppressed-corridor wall). `branch_span` must already be range-checked. */
+ * `branch_span` must already be range-checked. (TD6 branches are connected
+ * drivable roads, so td5_track_td6_branches_drivable() is always true on a TD6
+ * track; the gate is kept for symmetry with native handling.) */
 static int td5_ai_branch_takeable(int branch_span, int span_count) {
     if (branch_span < 0 || branch_span >= span_count) return 0;
     if (g_active_td6_level > 0 && !td5_track_td6_branches_drivable()) return 0;
@@ -7241,11 +7228,9 @@ static int trf_dyn_branches_enabled(void)
     static int s = -1;
     if (s < 0) {
         const char *e = getenv("TD5RE_TRAFFIC_BRANCHES");
-        /* Default ON: branches have route tables now and traffic drives the good
-         * ones; the BLACKLIST (TD5RE_TD6_BRANCH_BLACKLIST, default 439+466)
-         * excludes off-road/sidewalk forks — the walker keeps AI/traffic out of
-         * them, the spawner skips them, the despawn net catches stragglers. =0
-         * forces all traffic onto the main ring. */
+        /* Default ON: branches are connected drivable roads with route tables, so
+         * traffic spawns on and drives them like the main ring. =0 forces all
+         * traffic onto the main ring only. */
         s = (e && e[0] == '0') ? 0 : 1;
         TD5_LOG_I(LOG_TAG, "traffic_branches knob: TD5RE_TRAFFIC_BRANCHES=%d "
                   "(spawn on branch corridors %s)", s, s ? "ON" : "OFF");
@@ -7786,9 +7771,7 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * AGAINST the player's forward flow through the junction. The lane picker
          * still validates clearance in the requested direction and falls back to
          * the lane's natural direction if no oncoming lane is free, so the car is
-         * never starved. Blacklisted forks never reach here (on_branch stays 0 for
-         * a blacklisted bspan above), so cross-traffic never spawns on a
-         * sidewalk/plaza fork. Netplay-safe: trf_dyn_rand() is the lockstep RNG, so
+         * never starved. Netplay-safe: trf_dyn_rand() is the lockstep RNG, so
          * every peer/replay rolls the same cross decision. NOTE/LIMITATION: TD6
          * branches are PARALLEL-alternate corridors, not true perpendicular roads —
          * the data has no crossing geometry — so "cross-traffic" here is realised as

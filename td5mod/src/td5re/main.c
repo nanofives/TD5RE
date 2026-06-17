@@ -370,7 +370,6 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SpectateScreens",      &g_td5.ini.spectate_screens },
         { "ThreadedPanes",        &g_td5.ini.threaded_panes },
         { "OverrideTrackZip",     &g_td5.ini.override_track_zip },
-        { "TD6FlattenJunctions",  &g_td5.ini.td6_flatten_junctions },
         { "OverrideStartSpan",    &g_td5.ini.override_start_span },
         { "SkipIntro",            &g_td5.ini.skip_intro },
         { "DebugOverlay",         &g_td5.ini.debug_overlay },
@@ -796,8 +795,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.spectate_screens  = td5_ini_int("Game", "SpectateScreens", 0);   /* 0 = off; N = N AI cars in their own pane (dev profiling) */
     g_td5.ini.threaded_panes    = td5_ini_int("Render", "ThreadedPanes", 0);   /* 1 = record split-screen panes (>2) on worker threads (deferred contexts) */
     g_td5.ini.override_track_zip = td5_ini_int("Game", "OverrideTrackZip", 0);  /* 0 = faithful; >0 = TD6 level NNN */
-    g_td5.ini.td6_flatten_junctions = td5_ini_int("GameOptions", "TD6FlattenJunctions", 1); /* sever TD6 fork branches -> single loop */
-    if (g_td5.ini.td6_flatten_junctions) g_td5.ini.td6_flatten_junctions = 1;
     g_td5.ini.override_start_span = td5_ini_int("Game", "OverrideStartSpan", 0); /* TD6 grid start span; 0 = auto */
     g_td5.ini.skip_intro        = td5_ini_int("Game", "SkipIntro", 1);
     g_td5.ini.debug_overlay     = td5_ini_int("Game", "DebugOverlay", 0);
