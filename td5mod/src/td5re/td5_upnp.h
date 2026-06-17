@@ -46,6 +46,22 @@ int td5_upnp_map_port(uint16_t port, int udp, const char *desc, int lease_secs);
 int td5_upnp_verify_port(uint16_t port, int udp);
 
 /**
+ * Whether SSDP discovery found a UPnP IGD (router) at all. Valid after a
+ * td5_upnp_map_port() / discovery attempt. Lets callers tell "no UPnP router"
+ * apart from "router found but the mapping was refused".
+ * @return 1 if an IGD is known/cached, 0 otherwise.
+ */
+int td5_upnp_found_igd(void);
+
+/**
+ * The UPnP SOAP fault code from the last td5_upnp_map_port() AddPortMapping
+ * attempt (0 = success / not attempted). Notable values: 718 the external port
+ * is already mapped (often a static forward in the router UI), 714 no such
+ * entry, 725/402/501 lease-policy / argument faults.
+ */
+int td5_upnp_last_map_fault(void);
+
+/**
  * Query the IGD's WAN-side (public) IP via GetExternalIPAddress.
  * @param buf  receives a null-terminated dotted-quad string.
  * @param len  size of buf.

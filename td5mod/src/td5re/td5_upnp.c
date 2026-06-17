@@ -45,6 +45,7 @@
 
 /* ----- cached IGD state (populated by upnp_discover) ----- */
 static int  s_have_igd;
+static int  s_last_map_fault;     /* last AddPortMapping UPnPError (0=none/ok)  */
 static char s_control_url[512];   /* absolute control URL for the WAN service */
 static char s_service_type[160];  /* WANIPConnection:1 or WANPPPConnection:1  */
 static char s_local_ip[64];       /* our LAN IP on the route to the IGD       */
@@ -653,6 +654,8 @@ int td5_upnp_map_port(uint16_t port, int udp, const char *desc, int lease_secs)
     int status, attempt, lease = lease_secs;
     int tried_delete = 0, tried_finite = 0, tried_perm = 0;
 
+    s_last_map_fault = 0;
+
     if (!upnp_wsa_begin()) return 0;
 
     if (!upnp_discover()) { upnp_wsa_end(); return 0; }
@@ -694,6 +697,7 @@ int td5_upnp_map_port(uint16_t port, int udp, const char *desc, int lease_secs)
          * the REAL reason instead of a bare HTTP status. */
         ec[0] = '\0';
         if (upnp_xml_value(resp, "errorCode", ec, sizeof(ec))) err = atoi(ec);
+        s_last_map_fault = err ? err : (status == 200 ? 0 : 500);
         TD5_LOG_W(UPNP_LOG, "AddPortMapping %u failed (HTTP %d, UPnPError %d, lease=%d)",
                   (unsigned)port, status, err, lease);
 
@@ -726,6 +730,16 @@ int td5_upnp_map_port(uint16_t port, int udp, const char *desc, int lease_secs)
 
     upnp_wsa_end();
     return 0;
+}
+
+int td5_upnp_found_igd(void)
+{
+    return s_have_igd;
+}
+
+int td5_upnp_last_map_fault(void)
+{
+    return s_last_map_fault;
 }
 
 int td5_upnp_verify_port(uint16_t port, int udp)

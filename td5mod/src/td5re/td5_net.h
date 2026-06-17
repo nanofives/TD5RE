@@ -32,6 +32,8 @@
 #define TD5_NET_UPNP_UNAVAILABLE 4  /* disabled by config                      */
 #define TD5_NET_UPNP_DOUBLE_NAT  5  /* mapped, but IGD WAN IP is private        */
                                     /* (double-NAT: another router in front)    */
+#define TD5_NET_UPNP_PORT_CONFLICT 6 /* IGD found but the port is already        */
+                                     /* forwarded (static rule) -> 714/718       */
 
 int  td5_net_init(void);
 void td5_net_shutdown(void);

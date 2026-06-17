@@ -1230,9 +1230,25 @@ static int ws2_transport_host(const char *name, int max_players)
                           (unsigned)s_game_port,
                           s_external_ip[0] ? s_external_ip : "?");
             }
+        } else if (td5_upnp_found_igd()) {
+            /* The router answered SSDP but refused the mapping. Distinguish a
+             * port collision (714/718 -- the port is already forwarded, usually
+             * a leftover static rule in the router UI) from a generic refusal,
+             * so the status text stops claiming "no router/IGD". */
+            int f = td5_upnp_last_map_fault();
+            if (f == 718 || f == 714 || f == 501) {
+                s_upnp_status = TD5_NET_UPNP_PORT_CONFLICT;
+                TD5_LOG_W(NET_LOG, "UPnP: UDP %u already forwarded on the router "
+                          "(fault %d) -- remove that rule or pick another port",
+                          (unsigned)s_game_port, f);
+            } else {
+                s_upnp_status = TD5_NET_UPNP_FAILED;
+                TD5_LOG_W(NET_LOG, "UPnP: router refused UDP %u mapping (fault %d) "
+                          "-- forward manually", (unsigned)s_game_port, f);
+            }
         } else {
             s_upnp_status = TD5_NET_UPNP_FAILED;
-            TD5_LOG_W(NET_LOG, "UPnP: could not open UDP %u (manual forward needed)",
+            TD5_LOG_W(NET_LOG, "UPnP: no UPnP router found for UDP %u (manual forward needed)",
                       (unsigned)s_game_port);
         }
     } else {
@@ -2663,9 +2679,14 @@ static void net_build_status_text(void)
                          "Host %s:%d  -  UPnP: mapping port...",
                          ip, s_game_port);
                 break;
+            case TD5_NET_UPNP_PORT_CONFLICT:
+                snprintf(s_status_text, sizeof(s_status_text),
+                         "Host %s:%d  -  UPnP: UDP %d already forwarded on router - remove that rule or change port",
+                         ip, s_game_port, s_game_port);
+                break;
             case TD5_NET_UPNP_FAILED:
                 snprintf(s_status_text, sizeof(s_status_text),
-                         "Host %s:%d  -  UPnP FAILED (no router/IGD) - forward UDP %d",
+                         "Host %s:%d  -  UPnP: no router or mapping refused - forward UDP %d manually",
                          ip, s_game_port, s_game_port);
                 break;
             case TD5_NET_UPNP_UNAVAILABLE:
