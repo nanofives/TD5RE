@@ -3528,7 +3528,7 @@ void td5_track_update_actor_position(TD5_Actor *actor)
      * than ~4000 world-units in one tick — captures the exact before/after span +
      * position at a teleport so the cause is pinned (correlate with wall_contact /
      * branch_return lines at the same tick). Focused car only, cheap. */
-    if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
+    if (actor->slot_index == 0) {
         int32_t pos_y = *(int32_t *)((uint8_t *)actor + 0x200); /* world_pos.y */
         static int32_t s_tp_px = 0, s_tp_py = 0, s_tp_pz = 0; static int s_tp_have = 0;
         if (s_tp_have) {
