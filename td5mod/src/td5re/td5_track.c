@@ -629,8 +629,11 @@ static int td6_routenet_enabled(void);   /* fwd decl (#20, defined below) */
  * TD5RE_TD6_WALLCAP=0 restores the old reject. */
 static int td6_wallcap_enabled(void)
 {
+    /* DEFAULT OFF: capping deep penetrations (vs rejecting) REGRESSED forward
+     * branches — the reject is the correct handling for the bogus far-span refs at
+     * a fork; capping pushes along the wrong normal -> teleport. Opt-in only. */
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_WALLCAP"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_WALLCAP"); s = (e && e[0] == '1') ? 1 : 0; }
     return s && (g_active_td6_level > 0);
 }
 
