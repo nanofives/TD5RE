@@ -3531,7 +3531,14 @@ static void frontend_apply_nav_event(unsigned code) {
      * Offset" button (high button index but a low visual row) is reachable by
      * pressing DOWN from "AI Screens" — index-order nav skipped it. LEFT/RIGHT in
      * QR still cycle the focused selector's value (handled in the QR FSM). */
-    int vnav = spatial_nav || (s_current_screen == TD5_SCREEN_QUICK_RACE);
+    /* [2026-06-16] CREATE_SESSION also needs GEOMETRIC up/down: the direct-host
+     * UPnP toggle + GAME PORT field are high button indices (5/6) sitting at low
+     * visual rows (between PASSWORD and HOST), so index-order nav skipped them --
+     * same class as the Quick Race span-offset field. LEFT/RIGHT stay value-cycle
+     * (spatial_nav unchanged), so the UPnP/MAX selectors still adjust. */
+    int vnav = spatial_nav
+            || (s_current_screen == TD5_SCREEN_QUICK_RACE)
+            || (s_current_screen == TD5_SCREEN_CREATE_SESSION);
     switch (code) {
     case TD5_NAVKEY_LEFT:
         /* [TASK B] SHIFT+LEFT = horizontal focus move (geometric same-row pick),
