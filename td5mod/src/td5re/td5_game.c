@@ -6366,9 +6366,16 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
          * travel — a spun-out car moving backward cannot skip sectors to
          * reach 0xF and illegitimately trip the start-line lap increment.
          * --------------------------------------------------------------- */
-        if (g_td5.ini.override_track_zip == 0) {  /* native sector anti-cut gate;
-            * override (TD6) tracks use the simple armed start-line crossing above
-            * and must NOT run this (checkpoint_bitmask is reused as armed latch). */
+        if (g_active_td6_level == 0) {  /* native sector anti-cut gate;
+            * ALL TD6 tracks (g_active_td6_level>0) — whether OverrideTrackZip OR a
+            * MENU-SELECTED slot (e.g. Egypt DefaultTrack=31) — use the simple armed
+            * start-line crossing above and must NOT run this, because it reuses
+            * checkpoint_bitmask as the 1-bit armed latch. [#20 EGYPT LAP FIX] The old
+            * gate (override_track_zip==0) was TRUE for menu-selected TD6 circuits, so
+            * this sector dispatch ran and set bitmask=0x01 at the first sector near the
+            * start, which the TD6 lap logic misread as "armed at far side" -> false lap
+            * at span ~19 -> race ended after a few spans. Keying on g_active_td6_level
+            * matches the lap-logic condition at the top of this block. */
             int32_t remaining = total_spans - track_start * 2;
             int32_t boundary  = track_start * 2 + 1;
             int32_t step      = remaining / 5;   /* matches orig; signed div */

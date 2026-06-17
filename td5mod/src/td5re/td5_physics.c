@@ -10100,7 +10100,7 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * (g_active_td6_level == 0) are byte-IDENTICAL — this block is skipped.
          * Only the wheel's GROUND read is corrected; its own XZ/sub_lane (hence
          * genuine camber) is preserved. */
-        if (g_active_td6_level > 0) {
+        if (g_active_td6_level > 0 && !td5_track_td6_faithful()) {
             int chassis_span = (int)actor->track_span_raw;
             int max_sp_ref = td5_track_get_span_count();
             if (chassis_span >= 0 && chassis_span < max_sp_ref &&

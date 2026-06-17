@@ -281,6 +281,13 @@ int32_t td5_track_shadow_probe_height(int slot, int node,
  * refresh reads this immediately after its bestlane call to force the wheel
  * airborne instead of letting it "ground" on a fictional extrapolated plane. */
 int td5_track_last_contact_was_capped(void);
+/* [#20 2026-06-17 CONNECTED-BRANCH] Nonzero when the active track is TD6 and the
+ * faithful-branch path is engaged (TD5RE_TD6_FAITHFUL != 0, default on). TD6 branch
+ * corridors are geometrically connected to their forks exactly like native TD5
+ * (verified: re/tools/connect_branches.py — entry gap 0, rejoin within one span), so
+ * the displaced-branch band-aids must be suppressed and TD6 driven like native.
+ * Consumed by the physics S18 ground-reject (td5_physics.c) among others. */
+int td5_track_td6_faithful(void);
 int  td5_track_probe_height(int world_x, int world_z, int current_span,
                              int *out_y, int *out_surface_type);
 void td5_track_get_span_edges(int span_index,

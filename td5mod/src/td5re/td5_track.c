@@ -621,6 +621,26 @@ void td5_track_get_span_edges(int span_index,
 static int td6_branches_enabled(void);   /* fwd decl (task#17, defined below) */
 static int td6_routenet_enabled(void);   /* fwd decl (#20, defined below) */
 
+/* [#20 2026-06-17 — CONNECTED-BRANCH CORRECTION] The year-long "TD6 branch corridors
+ * are world-displaced ~8000u" premise was a MEASUREMENT ARTIFACT. The old
+ * td6_branch_audit compared the fork's near-RIGHT corner to the branch's near-LEFT
+ * corner — the diagonal across the wide (8-lane) fork span — not the connecting edges.
+ * Raw coordinates (re/tools/connect_branches.py characterize) prove the branch's NEAR
+ * edge is BYTE-IDENTICAL to the fork's branch-OPENING (far-right-lane) edge: entry gap
+ * 0, rejoin within one span, heading aligned — on London (TD6) AND on native Newcastle,
+ * which drives that same connected geometry correctly with NO band-aids. So TD6
+ * branches need the FAITHFUL native path, not displacement coping. When this is on
+ * (default), the TD6-only band-aids (resolve_neighbor force-main, synthetic main/branch
+ * boundary wall, wall-cap/reject inflation, shallow-wall deadzone, junction flatten,
+ * and the physics S18 chassis-on-branch ground reject) are SUPPRESSED so TD6 drives
+ * branches exactly like native TD5. TD5RE_TD6_FAITHFUL=0 restores the old band-aids. */
+int td5_track_td6_faithful(void)
+{
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_FAITHFUL"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s && (g_active_td6_level > 0);
+}
+
 /* [#8/#20 2026-06-17] TD6 deep-wall handling: CAP the wall correction instead of
  * REJECTING it. A rejected deep penetration applies no wall response, so the chassis
  * stays on a bad span reference and the ground probe then RELOCATES it = the
@@ -636,6 +656,10 @@ static int td6_wallcap_enabled(void)
      * moderate band to WALL_PEN_TELEPORT_LIMIT. TD6 only. TD5RE_TD6_WALLCAP=0 reverts. */
     static int s = -1;
     if (s < 0) { const char *e = getenv("TD5RE_TD6_WALLCAP"); s = (e && e[0] == '0') ? 0 : 1; }
+    /* Faithful (connected-branch) path: TD6 walls behave like native — the original
+     * single reject at 2000, no cap. Connected geometry keeps |pen| small so it never
+     * fires; the cap/inflated-reject only existed for the phantom displacement. */
+    if (td5_track_td6_faithful()) return 0;
     return s && (g_active_td6_level > 0);
 }
 
@@ -658,6 +682,9 @@ static int td6_wall_deadzone(void)
         s = e ? atoi(e) : 320;   /* world-units of slack before a TAPER wall fires */
         if (s < 0) s = 0;
     }
+    /* Faithful path: no deadzone — native walls fire on contact (the taper "invisible
+     * wall" it softened was the same connected geometry the band-aids misread). */
+    if (td5_track_td6_faithful()) return 0;
     return s;
 }
 
@@ -710,7 +737,8 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * never reaches the branch overlap. Native TD5 (g_active_td6_level==0)
      * untouched. */
     int rc = lane_count;
-    if (g_active_td6_level > 0 && (type == 8 || type == 11) && !td6_branches_enabled()) {
+    if (g_active_td6_level > 0 && (type == 8 || type == 11) &&
+        !td6_branches_enabled() && !td5_track_td6_faithful()) {
         int adj = (type == 8) ? span_idx + 1 : span_idx - 1;
         if (adj >= 0 && adj < s_span_count) {
             int main_lc = span_lane_count(&s_span_array[adj]);
@@ -2127,7 +2155,7 @@ int td5_track_load_strip(const void *data, size_t size)
      * onto them. TD6-only (g_active_td6_level) + [GameOptions] TD6FlattenJunctions
      * — faithful TD5 junctions (short rejoining detours) are never touched. */
     if (g_active_td6_level > 0 && g_td5.ini.td6_flatten_junctions &&
-        !td6_branches_enabled() &&   /* [task#17] keep branch links for drivable branches */
+        !td6_branches_enabled() && !td5_track_td6_faithful() &&   /* [task#17/#20] keep branch links for drivable/faithful branches */
         s_span_array && s_span_count > 0 && g_td5.track_span_ring_length > 0) {
         int ring = g_td5.track_span_ring_length;
         int total = s_span_count;
@@ -2192,6 +2220,55 @@ int td5_track_load_strip(const void *data, size_t size)
                   type_counts[3], type_counts[4], type_counts[5],
                   type_counts[6], type_counts[7], type_counts[8],
                   type_counts[9], type_counts[10], type_counts[11]);
+    }
+
+    /* [#20 BRANCH-GEOMETRY AUDIT — load-time, no driving] For every fork span
+     * (type 8 fwd / 11 bwd) on the main ring, dump the WORLD gap a car crosses
+     * when the walker switches it from the fork onto the branch (link_next /
+     * link_prev). The player drives toward the fork's RIGHT edge; if the branch
+     * road's LEFT edge starts there the entry is seamless (gap~0), if it starts
+     * thousands of units away the span switch teleports the car. This pins the
+     * exact per-fork displacement headlessly so the relocation fix can target
+     * real numbers instead of the "~8000u" estimate. Runs for ANY branched
+     * track (native TD5 or TD6) so the displacement can be compared directly —
+     * answers "is this a TD6-conversion artifact or inherent to branches?".
+     * One-shot. */
+    if (s_span_array && s_vertex_table && s_span_count > 0 &&
+        g_td5.track_span_ring_length > 1 &&
+        g_td5.track_span_ring_length < s_span_count) {
+        int ring = g_td5.track_span_ring_length;
+        if (ring < 2 || ring > s_span_count) ring = s_span_count;
+        int forks = 0, displaced = 0, seamless = 0;
+        for (int i = 0; i < ring; i++) {
+            TD5_StripSpan *f = &s_span_array[i];
+            int type = f->span_type;
+            int branch = -1;
+            if (type == 8)       branch = (int)f->link_next;
+            else if (type == 11) branch = (int)f->link_prev;
+            else continue;
+            if (branch < ring || branch >= s_span_count) continue; /* only appended branches */
+            forks++;
+            int flc = span_lane_count(f); if (flc < 1) flc = 1;
+            /* fork RIGHT edge (NE corner = left_vertex_index + lane_count) */
+            TD5_StripVertex *f_re = vertex_at((int)f->left_vertex_index + flc);
+            int32_t frx = (int32_t)f->origin_x + (int32_t)f_re->x;
+            int32_t frz = (int32_t)f->origin_z + (int32_t)f_re->z;
+            /* branch LEFT edge (NW corner = left_vertex_index + 0) */
+            TD5_StripSpan *b = &s_span_array[branch];
+            TD5_StripVertex *b_le = vertex_at((int)b->left_vertex_index);
+            int32_t blx = (int32_t)b->origin_x + (int32_t)b_le->x;
+            int32_t blz = (int32_t)b->origin_z + (int32_t)b_le->z;
+            int32_t gx = blx - frx, gz = blz - frz;
+            int32_t gdist = (int32_t)sqrtf((float)gx * (float)gx + (float)gz * (float)gz);
+            if (gdist > 1500) displaced++; else seamless++;
+            TD5_LOG_I(LOG_TAG,
+                      "td6_branch_audit: fork=%d type=%d branch=%d lc=%d "
+                      "fork_R(%d,%d) branch_L(%d,%d) gap=(%d,%d) dist=%d%s",
+                      i, type, branch, flc, frx, frz, blx, blz, gx, gz, gdist,
+                      gdist > 1500 ? " DISPLACED" : "");
+        }
+        TD5_LOG_I(LOG_TAG, "td6_branch_audit SUMMARY: forks=%d seamless=%d displaced=%d ring=%d total=%d",
+                  forks, seamless, displaced, ring, s_span_count);
     }
 
     return 1;
@@ -2569,7 +2646,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                  * to the right branch"). Until the corridors are relocated to abut
                  * their forks (deep converter rewrite), keep everyone on the main road
                  * and clamp into its lanes. Native TD5 (g_active_td6_level==0) untouched. */
-                if (g_active_td6_level > 0 && sl >= next_lanes &&
+                if (g_active_td6_level > 0 && !td5_track_td6_faithful() && sl >= next_lanes &&
                     (!td6_branches_enabled() || g_td5.reverse_direction ||
                      (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_next)))) {
                     *sub_lane = next_lanes - 1;
@@ -2622,7 +2699,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (g_active_td6_level > 0 && sl >= next_lanes &&
+                if (g_active_td6_level > 0 && !td5_track_td6_faithful() && sl >= next_lanes &&
                     (!td6_branches_enabled() || g_td5.reverse_direction ||
                      (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_next)))) {
                     *sub_lane = next_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x01) */
@@ -2683,7 +2760,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes &&
+                if (g_active_td6_level > 0 && !td5_track_td6_faithful() && sl >= prev_lanes &&
                     (!td6_branches_enabled() || g_td5.reverse_direction ||
                      (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_prev)))) {
                     /* TD6: force main for ALL, suppress the ~8000u-displaced branch
@@ -2733,7 +2810,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes &&
+                if (g_active_td6_level > 0 && !td5_track_td6_faithful() && sl >= prev_lanes &&
                     (!td6_branches_enabled() || g_td5.reverse_direction ||
                      (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_prev)))) {
                     *sub_lane = prev_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x04) */
@@ -2825,7 +2902,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
      * branch driving isn't supported, so never let a main-ring chassis cross onto a
      * branch in reverse: keep it on the main span it came from. (Forward unaffected;
      * a chassis legitimately ON a branch — span_idx>=ring — is left alone.) */
-    if (g_td5.reverse_direction) {
+    if (g_td5.reverse_direction && !td5_track_td6_faithful()) {
         int ringR = g_td5.track_span_ring_length;
         if (ringR > 0 && span_idx < ringR && new_span >= ringR) {
             TD5_LOG_I(LOG_TAG, "reverse_main_guard: span=%d blocked branch %d -> stay main",
