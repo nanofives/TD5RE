@@ -2471,7 +2471,12 @@ static int td6_routenet_enabled(void)
         s = (e && e[0] == '1') ? 1 : 0;
         TD5_LOG_I(LOG_TAG, "td6 route-network mode: %s", s ? "ON (no branch band-aids)" : "off");
     }
-    return s;
+    /* [#20] FORWARD-ONLY: gap=0 connectivity was verified on the forward strip.
+     * REVERSE loads STRIPB (reverse-numbered, not yet validated) — dropping the
+     * band-aids there removed the boundary collision (clip-through). Keep the
+     * band-aids in reverse until STRIPB's branch geometry is checked. Not cached
+     * (reverse_direction changes per race). */
+    return s && !g_td5.reverse_direction;
 }
 
 static int td6_branches_enabled(void)
