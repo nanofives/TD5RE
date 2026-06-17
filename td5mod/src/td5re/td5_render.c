@@ -6261,9 +6261,14 @@ typedef struct { float *pos; float *uv; uint32_t *col; int vcount; float min_y; 
 static TD6PropMesh s_td6_pmesh[TD6_PROP_MESH_MAX];
 static int s_td6_pmesh_count = 0;
 
-/* Furniture textures (real TD6 static.zip art), lazily uploaded once into 4
- * pages. model (COL_NN) -> texture via the London prototype subset. */
-#define TD6_PROP_TEX_BASE 984
+/* Furniture textures (real TD6 static.zip art), lazily uploaded once into 6
+ * pages (5 source + 1 white). model (COL_NN) -> texture via the London subset.
+ * [2026-06-16 BUGFIX] Base was 984 — which is the runtime FONT glyph atlas page
+ * (td5_font.c ATLAS_PAGE 984). Uploading the prop textures clobbered the font
+ * atlas the moment props came into view -> "HUD stops rendering font after a
+ * while". Moved to 990 (font owns 984, frontend <=983, fallback 1021; 990-995
+ * free) so the two never share a page. */
+#define TD6_PROP_TEX_BASE 990
 #define TD6_PROP_TEX_N 5
 static const char *k_td6_prop_srcs[TD6_PROP_TEX_N] = {
     "re/assets/props/td6_bench.png",     /* 0 BENCH    */
