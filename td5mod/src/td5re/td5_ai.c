@@ -7260,6 +7260,45 @@ static int trf_dyn_branches_enabled(void)
     return s;
 }
 
+/* [#16 cross-traffic 2026-06-17] A/B knob for CROSS-TRAFFIC AT INTERSECTIONS.
+ * When a dynamic-traffic car spawns on a TD6 BRANCH corridor (the drivable
+ * alternate route taken at a junction), a fraction of those spawns are forced to
+ * the OPPOSITE polarity (oncoming) so they drive AGAINST the player's flow
+ * through the junction — giving the read of cross-traffic at intersections.
+ * DEFAULT OFF (opt-in until drive-tested): TD5RE_CROSS_TRAFFIC=1 enables it.
+ *
+ * Returns the cross-traffic FRACTION as N/16 (0 = off). "1" maps to the default
+ * fraction; an explicit integer/decimal sets the fraction directly. Clamped so a
+ * minority (never all) of branch spawns are oncoming, keeping a believable two-way
+ * mix rather than a wall of head-on cars. Logged once. */
+static int trf_cross_traffic_x16(void)
+{
+    static int x16 = -2;
+    if (x16 == -2) {
+        const char *e = getenv("TD5RE_CROSS_TRAFFIC");
+        if (!e || !e[0] || e[0] == '0') {
+            x16 = 0;                              /* default OFF */
+        } else {
+            double f = strtod(e, NULL);
+            /* "1" (the common on-switch) means "enabled at the default fraction",
+             * NOT 100% oncoming. Any other value is read as the literal fraction. */
+            if (f == 1.0) f = 0.5;                /* default: ~half of branch spawns */
+            if (f < 0.0) f = 0.0;
+            if (f > 0.75) f = 0.75;               /* never more than 3/4 oncoming */
+            x16 = (int)(f * 16.0 + 0.5);
+        }
+        TD5_LOG_I(LOG_TAG, "cross_traffic knob: TD5RE_CROSS_TRAFFIC -> %d/16 "
+                  "(oncoming fraction on branch corridors; 0 = off)", x16);
+    }
+    return x16;
+}
+
+/* True when cross-traffic is enabled at all (any non-zero fraction). */
+static int trf_cross_traffic_enabled(void)
+{
+    return trf_cross_traffic_x16() > 0;
+}
+
 /* [#18] Width (in spans) of the traffic emergency-brake "proximity gate": a peer
  * this close AHEAD in-lane brakes the car immediately; farther peers are handled by
  * the closing-rate TTC formula. Default 4 (the faithful comment's "within 4 spans").
@@ -7508,12 +7547,22 @@ static int td5_ai_td6_drivable_band(int route_span, int lane_count,
  * EVERY lane is slow-flagged the whole road surface is alternate (e.g.
  * Moscow's cobblestone district sets the 0x10 alternate-surface bit on all
  * lanes) and refusing it starves the spawner for the entire stretch — there,
- * any clear lane qualifies. */
-static int trf_dyn_pick_lane(int slot, int span, int lane_count, int *out_polarity)
+ * any clear lane qualifies.
+ *
+ * [#16 cross-traffic 2026-06-17] `desired_pol` is a direction HINT: -1 = use
+ * each lane's natural direction (the original behaviour); 0/1 = prefer to spawn
+ * a car driving in that polarity (1 = oncoming, against the player's forward
+ * flow). When a hint is given we try the matching-direction lanes first AND
+ * validate clearance in that requested direction (the clearance test is
+ * direction-dependent — see traffic_lane_is_clear), then fall back to the
+ * natural-direction pass so a hinted spawn is never starved. */
+static int trf_dyn_pick_lane_dir(int slot, int span, int lane_count,
+                                 int desired_pol, int *out_polarity)
 {
     int start = (lane_count > 1) ? (int)(trf_dyn_rand() % (uint32_t)lane_count) : 0;
     int any_fast = 0;
     int band_lo = 0, band_hi = lane_count - 1;
+    int pass;
     /* [task#18] TD6: confine spawns to the paved central band (route tables). */
     td5_ai_td6_drivable_band(span, lane_count, &band_lo, &band_hi);
     for (int lane = 0; lane < lane_count; lane++) {
@@ -7522,21 +7571,30 @@ static int trf_dyn_pick_lane(int slot, int span, int lane_count, int *out_polari
             break;
         }
     }
-    for (int k = 0; k < lane_count; k++) {
-        int lane = (start + k) % lane_count;
-        int pol  = trf_dyn_lane_direction(lane_count, lane);
-        if (lane < band_lo || lane > band_hi)
-            continue;   /* [task#18] outside the drivable band = sidewalk */
-        if (any_fast &&
-            td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
-            continue;   /* user rule: never spawn on a slow (shoulder) lane */
-        if (!traffic_lane_is_clear(slot, span, lane, pol))
-            continue;
-        *out_polarity = pol;
-        return lane;
+    /* Pass 0 honours `desired_pol` (skipped when no hint); pass 1 is the
+     * original natural-direction fallback. */
+    for (pass = (desired_pol >= 0) ? 0 : 1; pass <= 1; pass++) {
+        for (int k = 0; k < lane_count; k++) {
+            int lane = (start + k) % lane_count;
+            int nat  = trf_dyn_lane_direction(lane_count, lane);
+            int pol  = (pass == 0) ? (desired_pol & 1) : nat;
+            if (lane < band_lo || lane > band_hi)
+                continue;   /* [task#18] outside the drivable band = sidewalk */
+            if (any_fast &&
+                td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
+                continue;   /* user rule: never spawn on a slow (shoulder) lane */
+            if (!traffic_lane_is_clear(slot, span, lane, pol))
+                continue;
+            *out_polarity = pol;
+            return lane;
+        }
     }
     return -1;
 }
+/* NOTE: the previous wrapper `trf_dyn_pick_lane(slot,span,lane_count,out)` was a
+ * thin alias for `trf_dyn_pick_lane_dir(..., -1, ...)`; it had a single call site
+ * which now passes the cross-traffic hint directly, so the alias was removed to
+ * avoid an unused-static warning. Pass desired_pol = -1 for the old behaviour. */
 
 /* [task#8] Branch-corridor enumeration helpers (defined in td5_track.c). Declared
  * in-file (not the shared header) per the same convention as the externs above. */
@@ -7654,6 +7712,8 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
         int main_span;
         int lane_count, lane, polarity;
         int want_branch = 0;
+        int on_branch = 0;       /* [#16] set when the spawn retargets onto a branch corridor */
+        int cross_pol = -1;      /* [#16] desired-direction hint for the lane picker (-1 = none) */
 
         if (is_circuit && ring > 0) {
             span %= ring;
@@ -7722,7 +7782,10 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
                 if (corr >= 0) {
                     int bspan = td5_track_branch_corridor_span(main_span, corr);
                     /* [#18 blacklist] don't spawn on a forbidden (off-road) fork */
-                    if (bspan >= 0 && !trf_branch_blacklisted(bspan)) span = bspan;
+                    if (bspan >= 0 && !trf_branch_blacklisted(bspan)) {
+                        span = bspan;
+                        on_branch = 1;   /* [#16] this car is on a crossing branch corridor */
+                    }
                 }
             }
         }
@@ -7730,18 +7793,39 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
         lane_count = td5_track_span_lane_count_at(span);
         if (lane_count <= 0) continue;
 
-        /* Direction follows the LANE (authored TRAFFIC.BUS map / side
-         * heuristic) — a car never drives against its lane's direction. */
+        /* [#16 cross-traffic 2026-06-17] If this car landed on a BRANCH corridor
+         * (a crossing route taken at a junction) and cross-traffic is enabled,
+         * force a fraction of these spawns to ONCOMING (polarity 1) so they drive
+         * AGAINST the player's forward flow through the junction. The lane picker
+         * still validates clearance in the requested direction and falls back to
+         * the lane's natural direction if no oncoming lane is free, so the car is
+         * never starved. Blacklisted forks never reach here (on_branch stays 0 for
+         * a blacklisted bspan above), so cross-traffic never spawns on a
+         * sidewalk/plaza fork. Netplay-safe: trf_dyn_rand() is the lockstep RNG, so
+         * every peer/replay rolls the same cross decision. NOTE/LIMITATION: TD6
+         * branches are PARALLEL-alternate corridors, not true perpendicular roads —
+         * the data has no crossing geometry — so "cross-traffic" here is realised as
+         * OPPOSITE-DIRECTION traffic on the junction's branch route. It reads as
+         * cross-traffic where a branch meets the main ring at the junction, which is
+         * the best the parallel-branch data supports. */
+        cross_pol = -1;
+        if (on_branch && trf_cross_traffic_enabled() &&
+            (int)(trf_dyn_rand() % 16u) < trf_cross_traffic_x16())
+            cross_pol = 1;   /* oncoming = against the player's forward flow */
+
+        /* Direction follows the LANE (authored TRAFFIC.BUS map / side heuristic)
+         * unless the cross-traffic hint above asked for oncoming — a car never
+         * drives against its lane's direction in normal (non-cross) flow. */
         polarity = 0;
-        lane = trf_dyn_pick_lane(slot, span, lane_count, &polarity);
+        lane = trf_dyn_pick_lane_dir(slot, span, lane_count, cross_pol, &polarity);
         if (lane < 0) continue;
 
         trf_dyn_place(slot, span, lane, polarity);
         TD5_LOG_I(LOG_TAG,
                   "traffic_dyn_spawn: slot=%d span=%d (main=%d) lane=%d/%d oncoming=%d "
-                  "player_dist=%d attempt=%d",
+                  "cross=%d player_dist=%d attempt=%d",
                   slot, span, main_span, lane, lane_count, polarity,
-                  trf_dyn_min_player_dist(span), attempt);
+                  (cross_pol == 1), trf_dyn_min_player_dist(span), attempt);
         return 1;
     }
     return 0;
