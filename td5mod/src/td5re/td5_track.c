@@ -6415,7 +6415,7 @@ int td5_track_branch_blacklisted(int branch_span)
          * (span-440) + 466 + 775 (span-780) user-reported; 502/557/569/670 auto-
          * discovered by the self-heal (traffic stuck = un-drivable). Seeding the
          * known set avoids a ~3s probe car per race; self-heal finds any others. */
-        if (!e || !e[0]) e = "253,439,466,502,557,569,670,775";
+        if (!e || !e[0]) e = "223,253,439,466,502,557,569,670,775";
         while (*e && s_bl_n < 32) {
             if (*e >= '0' && *e <= '9') { s_bl[s_bl_n++] = atoi(e); while (*e >= '0' && *e <= '9') e++; }
             else e++;

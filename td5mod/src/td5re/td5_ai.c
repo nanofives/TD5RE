@@ -215,6 +215,13 @@ static int32_t g_actor_route_steer_bias[TD5_MAX_TOTAL_ACTORS];
 /* Per-actor forward track component */
 static int32_t g_actor_forward_track_component[TD5_MAX_TOTAL_ACTORS];
 
+/* [#18] Consecutive ticks a traffic car has been ~motionless ON A BRANCH span.
+ * A car parked on a branch for several seconds (not necessarily in the heading-
+ * recovery latch — e.g. brake-stopped on a displaced plaza fork) is on an
+ * un-drivable corridor: self-heal blacklists its base and fades it. Reset off-branch
+ * or when moving. */
+static int s_trf_branch_idle[TD5_MAX_TOTAL_ACTORS];
+
 /* Slot state: 0x00=AI, 0x01=player, 0x02=finished/dead */
 static int32_t g_slot_state[TD5_MAX_TOTAL_ACTORS];
 
@@ -7253,6 +7260,21 @@ static int trf_dyn_branches_enabled(void)
     return s;
 }
 
+/* [#18] Width (in spans) of the traffic emergency-brake "proximity gate": a peer
+ * this close AHEAD in-lane brakes the car immediately; farther peers are handled by
+ * the closing-rate TTC formula. Default 4 (the faithful comment's "within 4 spans").
+ * Env TD5RE_TRAFFIC_BRAKE_NEAR. */
+static int trf_brake_near_spans(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_BRAKE_NEAR");
+        s = e ? atoi(e) : 4;
+        if (s < 1) s = 1;
+    }
+    return s;
+}
+
 /* The branch blacklist now lives in td5_track (td5_track_branch_blacklisted) so the
  * span-walker can suppress AI/traffic forks onto bad corridors. Alias for the local
  * call sites. */
@@ -7946,17 +7968,34 @@ void td5_ai_traffic_dynamic_tick(void)
                 int rawsp = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
                 int ringL = td5_track_get_ring_length();
                 if (ringL > 0 && rawsp >= ringL) {
-                    int stuck_on_branch = (g_traffic_recovery_stage[slot] != 0 &&
-                                           s_traffic_stuck_frames[slot] >= 90);
+                    /* Idle-on-branch: ~motionless for 90 ticks (3s) on a branch = parked
+                     * on an un-drivable corridor (e.g. brake-stopped on a plaza fork),
+                     * which the heading-recovery latch does NOT catch. */
+                    int32_t vx = ACTOR_I32(a, ACTOR_LIN_VEL_X) >> 8;
+                    int32_t vz = ACTOR_I32(a, ACTOR_LIN_VEL_Z) >> 8;
+                    if (vx > -8 && vx < 8 && vz > -8 && vz < 8) {
+                        if (s_trf_branch_idle[slot] < 100000) s_trf_branch_idle[slot]++;
+                    } else {
+                        s_trf_branch_idle[slot] = 0;
+                    }
+                    int idle_stuck = (s_trf_branch_idle[slot] >= 90);
+                    int stuck_on_branch = idle_stuck ||
+                        (g_traffic_recovery_stage[slot] != 0 && s_traffic_stuck_frames[slot] >= 90);
                     int blacklisted = trf_branch_blacklisted(rawsp);
                     if (stuck_on_branch && trf_dyn_branches_enabled() && !blacklisted)
                         td5_track_branch_mark_bad(rawsp);   /* discover off-road fork */
-                    if ((!trf_dyn_branches_enabled() || blacklisted || stuck_on_branch) &&
-                        trf_dyn_min_player_dist(sp) > g_td5.ini.traffic_dyn_despawn) {
+                    /* idle_stuck cars are clearly dead -> fade at ANY distance (even in
+                     * view, the user sees them frozen). Other cases stay far-only so a
+                     * car the player just pushed onto a branch is never yanked away. */
+                    if (idle_stuck ||
+                        ((!trf_dyn_branches_enabled() || blacklisted || stuck_on_branch) &&
+                         trf_dyn_min_player_dist(sp) > g_td5.ini.traffic_dyn_despawn)) {
                         s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
-                        TD5_LOG_I(LOG_TAG, "traffic_branch_fade: slot=%d on branch span=%d blk=%d stuck=%d (far) -> fade",
-                                  slot, rawsp, blacklisted, stuck_on_branch);
+                        TD5_LOG_I(LOG_TAG, "traffic_branch_fade: slot=%d on branch span=%d blk=%d idle=%d stuck=%d -> fade",
+                                  slot, rawsp, blacklisted, idle_stuck, stuck_on_branch);
                     }
+                } else {
+                    s_trf_branch_idle[slot] = 0;   /* off-branch: reset idle counter */
                 }
             }
             if (behind < -g_td5.ini.traffic_dyn_despawn ||
@@ -8552,8 +8591,14 @@ void td5_ai_update_traffic_route_plan(int slot) {
                 peer, polarity);
         }
 
-        /* Proximity gate [CONFIRMED @ 0x43646A]: if peer within 4 spans and moving, brake now */
-        if (span_diff_dir > -4 && self_speed > 0) {
+        /* Proximity gate [CONFIRMED @ 0x43646A]: if peer within 4 spans and moving, brake now.
+         * [#18 2026-06-16 FIX] The faithful intent is "within 4 spans", but the port
+         * checked only the LOWER bound (> -4) — so a peer up to ~30 spans AHEAD in the
+         * same lane tripped this emergency brake, and traffic chain-stopped behind any
+         * car ahead however far. Restore the near-zone upper bound; farther peers fall
+         * through to the TTC formula below, which brakes only when actually closing.
+         * Env TD5RE_TRAFFIC_BRAKE_NEAR (default 4) tunes the gate width. */
+        if (span_diff_dir > -4 && span_diff_dir < trf_brake_near_spans() && self_speed > 0) {
             if (smart_ease) {
                 /* Clear lane found — keep rolling (gentle throttle) while the
                  * lane bias above steers around the obstacle next tick. */
