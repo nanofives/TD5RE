@@ -10136,11 +10136,21 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                     int ring = g_td5.track_span_ring_length;
                     int chassis_on_branch = (ring > 0 && chassis_span >= ring);
                     int probe_on_branch   = (ring > 0 && probe_span   >= ring);
-                    if (chassis_on_branch && !probe_on_branch) {
+                    /* [#20 2026-06-17] REVERSE seam: in a reverse race the chassis
+                     * span is often mis-assigned to the degenerate LAP-SEAM main span
+                     * (London STRIPB span ~2135: one rail jogs ~12500u to close the
+                     * loop), whose ground extrapolates thousands of units below the
+                     * car -> the car is dropped through the floor = the reverse
+                     * "teleport". The chassis isn't on a BRANCH there (span<ring), so
+                     * the structural test below missed it. Treat a gross mismatch in
+                     * reverse the same way: the stable WHEEL ground wins, not the
+                     * suspect chassis-span ground. Forward unaffected. */
+                    if ((chassis_on_branch || g_td5.reverse_direction) && !probe_on_branch) {
                         TD5_LOG_W(LOG_TAG,
-                            "S18 chassis-span reject: i=%d chassis_span=%d (stuck on branch) "
+                            "S18 chassis-span reject: i=%d chassis_span=%d (%s) "
                             "vs probe_span=%d — keep wheel ground gy=%d (bogus ref_gy=%d)",
-                            i, chassis_span, probe_span, ground_y, ground_ref);
+                            i, chassis_span, chassis_on_branch ? "stuck on branch" : "reverse seam",
+                            probe_span, ground_y, ground_ref);
                     } else {
                         TD5_LOG_I(LOG_TAG,
                             "S18 wheel-teleport reject: i=%d probe_span=%d chassis_span=%d "
