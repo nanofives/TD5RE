@@ -10076,95 +10076,13 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * the car falls under gravity instead, matching the original. */
         int wheel_capped = td5_track_last_contact_was_capped();
 
-        /* [S18 FIX — TD6 branch-fork wheel-probe teleport / chassis-launch]
-         * On the migrated TD6 synth tracks each branch begins with a type-9
-         * SENTINEL_START span whose link_prev points at a DISTANT span (e.g.
-         * Rome branch span 2357 -> link_prev=85). The per-wheel contact probe is
-         * walked independently (td5_track_update_probe_position above), so a
-         * wheel that sits slightly behind the chassis crosses the sentinel's
-         * BACKWARD boundary and the walker follows that wrap-link, TELEPORTING
-         * the wheel's probe to the far span (captured: "S18 WHEEL i=2
-         * probe_span=85 gy=-47872" while the real ground is -368896). That far
-         * span's plane, extrapolated to the wheel's true XZ, reads ~1250 units
-         * too high; the chassis Y-snap then averages that one bogus-high wheel
-         * and ROCKETS the car ~600 units/tick into the air until recovery yanks
-         * it (the user's "down-slope" blow-up — the terrain here is dead flat).
-         *
-         * Reject it: re-probe the ground from the CHASSIS span (which carries a
-         * stable running position and did NOT teleport) at this wheel's XZ. If
-         * the wheel-span ground is a wild outlier vs that reference (|diff| >
-         * 256 world units — far beyond any real suspension travel / camber /
-         * slope, but well under the ~1250-unit teleport error), the wheel probe
-         * jumped to unrelated geometry, so use the chassis-span ground+normal
-         * instead and clear the spurious cap. Faithful TD5 tracks
-         * (g_active_td6_level == 0) are byte-IDENTICAL — this block is skipped.
-         * Only the wheel's GROUND read is corrected; its own XZ/sub_lane (hence
-         * genuine camber) is preserved. */
-        if (g_active_td6_level > 0 && !td5_track_td6_faithful()) {
-            int chassis_span = (int)actor->track_span_raw;
-            int max_sp_ref = td5_track_get_span_count();
-            if (chassis_span >= 0 && chassis_span < max_sp_ref &&
-                chassis_span != probe_span) {
-                int16_t ref_normal[3] = {0, 4096, 0};
-                int32_t ground_ref = td5_track_compute_contact_height_bounded(
-                    chassis_span, (int)actor->wheel_probes[i].sub_lane_index,
-                    actor->wheel_contact_pos[i].x, actor->wheel_contact_pos[i].z,
-                    ref_normal);
-                int ref_capped = td5_track_last_contact_was_capped();
-                int32_t diff = ground_y - ground_ref;
-                if (!ref_capped && (diff > 0x10000 || diff < -0x10000)) {
-                    /* A gross mismatch means ONE of {wheel-span, chassis-span}
-                     * jumped to unrelated geometry. The original block always
-                     * trusted the chassis span — right when a WHEEL probe
-                     * teleported. But on dense TD6 junctions the CHASSIS itself
-                     * gets stuck on a distant branch span while the wheels stay
-                     * correctly on the main road; blindly trusting the chassis
-                     * then snaps the good wheels to a far ground = the car drops
-                     * through the floor. Decide by consistency with the body's
-                     * own Y: the real ground sits within ~suspension travel of
-                     * the chassis body, the bogus one is ~100k+ units away. */
-                    /* Decide which span is the liar by a STRUCTURAL test, not by
-                     * body height (the body Y is itself corrupt once the car has
-                     * been displaced, which creates a feedback loop that keeps it
-                     * stuck airborne). On migrated TD6 tracks the appended branch
-                     * spans (index >= ring_length) sit far from the main ring, so:
-                     *   chassis on a BRANCH span + wheel on a MAIN span  => the
-                     *   chassis is stuck on a displaced branch and its ground is
-                     *   garbage (~366000 off) -> KEEP the good wheel ground.
-                     * Otherwise a wheel probe teleported (the original case) -> use
-                     * the stable chassis-span ground. */
-                    int ring = g_td5.track_span_ring_length;
-                    int chassis_on_branch = (ring > 0 && chassis_span >= ring);
-                    int probe_on_branch   = (ring > 0 && probe_span   >= ring);
-                    /* [#20 2026-06-17] REVERSE seam: in a reverse race the chassis
-                     * span is often mis-assigned to the degenerate LAP-SEAM main span
-                     * (London STRIPB span ~2135: one rail jogs ~12500u to close the
-                     * loop), whose ground extrapolates thousands of units below the
-                     * car -> the car is dropped through the floor = the reverse
-                     * "teleport". The chassis isn't on a BRANCH there (span<ring), so
-                     * the structural test below missed it. Treat a gross mismatch in
-                     * reverse the same way: the stable WHEEL ground wins, not the
-                     * suspect chassis-span ground. Forward unaffected. */
-                    if ((chassis_on_branch || g_td5.reverse_direction) && !probe_on_branch) {
-                        TD5_LOG_W(LOG_TAG,
-                            "S18 chassis-span reject: i=%d chassis_span=%d (%s) "
-                            "vs probe_span=%d — keep wheel ground gy=%d (bogus ref_gy=%d)",
-                            i, chassis_span, chassis_on_branch ? "stuck on branch" : "reverse seam",
-                            probe_span, ground_y, ground_ref);
-                    } else {
-                        TD5_LOG_I(LOG_TAG,
-                            "S18 wheel-teleport reject: i=%d probe_span=%d chassis_span=%d "
-                            "gy=%d -> ref_gy=%d (diff=%d)",
-                            i, probe_span, chassis_span, ground_y, ground_ref, diff);
-                        ground_y = ground_ref;
-                        span_normal[0] = ref_normal[0];
-                        span_normal[1] = ref_normal[1];
-                        span_normal[2] = ref_normal[2];
-                        wheel_capped = 0;
-                    }
-                }
-            }
-        }
+        /* [#20 2026-06-17] The old "S18" chassis-span ground reject lived here —
+         * a TD6-only block that, on the false "displaced branch" premise, discarded
+         * the chassis-span ground when a wheel probed a different span (and pulled
+         * the car branch->main = the "teleport to the left track"). Branch geometry
+         * is actually CONNECTED (verified; see re/tools/connect_branches.py),
+         * so TD6 uses the native path with no special wheel-ground override — byte-
+         * identical to faithful TD5. Removed once the faithful path was confirmed. */
 
         /* Write surface normal to wheel_contact_velocities[i][0..2] (actor+0x250+i*8).
          * Original: FUN_00445A70 computes cross-product of span edge vectors >> 12,
