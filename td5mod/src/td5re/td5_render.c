@@ -6263,12 +6263,13 @@ static int s_td6_pmesh_count = 0;
 
 /* Furniture textures (real TD6 static.zip art), lazily uploaded once into 6
  * pages (5 source + 1 white). model (COL_NN) -> texture via the London subset.
- * [2026-06-16 BUGFIX] Base was 984 — which is the runtime FONT glyph atlas page
- * (td5_font.c ATLAS_PAGE 984). Uploading the prop textures clobbered the font
- * atlas the moment props came into view -> "HUD stops rendering font after a
- * while". Moved to 990 (font owns 984, frontend <=983, fallback 1021; 990-995
- * free) so the two never share a page. */
-#define TD6_PROP_TEX_BASE 990
+ * [2026-06-16 BUGFIX] Base was 984 = the runtime FONT glyph atlas (td5_font.c
+ * ATLAS_PAGE 984); props clobbered it -> "HUD stops rendering font". Moved to 990,
+ * but that overlapped the ALLOY-RIM pool (WHEEL_RIM_TEX_BASE 994..1001) and the
+ * envmap (990-993) -> cars showed the crate/redtape prop texture on their wheels.
+ * 994-1001 rims, 984 font, 990-993 envmap, 1020 sky, 1021 fallback, cars 800-843,
+ * track <=983 — so 1002-1007 is the free 6-page window for props. */
+#define TD6_PROP_TEX_BASE 1002
 #define TD6_PROP_TEX_N 5
 static const char *k_td6_prop_srcs[TD6_PROP_TEX_N] = {
     "re/assets/props/td6_bench.png",     /* 0 BENCH    */
