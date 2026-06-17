@@ -555,6 +555,7 @@ void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing);
 #define FE_LOBBY_ROW_H     24
 
 extern char s_create_session_name[64];
+extern char s_cs_port_buf[8];     /* GAME PORT inline field buffer (direct host) */
 extern int  s_cs_edit;
 extern uint8_t s_slot_ready[6];   /* [S31] per-slot lobby READY latch */
 void frontend_reset_text_input(void);

@@ -8841,6 +8841,21 @@ static void frontend_render_create_session_overlay(float sx, float sy) {
         frontend_get_button_render_rect(2, sx, sy, &bx, &by, &bw, &bh);
         fe_draw_text(368.0f * sx, by + 6.0f * sy, buf, c_pass, sx, sy);
     }
+
+    /* [2026-06-16] GAME PORT inline field (Direct host only, button index 6).
+     * Label button on the left, the editable number on the RIGHT (x=368) like
+     * NAME/PASSWORD -- the old code only updated the button label with the
+     * COMMITTED port, so typing into the field showed nothing. s_cs_port_buf is
+     * kept in sync with the committed value (init / commit / cancel), so this
+     * shows the live value when idle and the typed digits + caret while editing
+     * (s_cs_edit == 3). */
+    if (s_buttons[6].active) {
+        uint32_t c_port = (s_cs_edit == 3) ? 0xFFFFE080u : 0xFFFFFFFFu;
+        frontend_get_button_render_rect(6, sx, sy, &bx, &by, &bw, &bh);
+        snprintf(buf, sizeof(buf), "%s%s", s_cs_port_buf,
+                 (s_cs_edit == 3) ? "_" : "");
+        fe_draw_text(368.0f * sx, by + 6.0f * sy, buf, c_port, sx, sy);
+    }
 }
 
 /* [S31] MAX PLAYERS selector content — POST-button pass so the centred

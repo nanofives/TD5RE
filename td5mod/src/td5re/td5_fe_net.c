@@ -41,7 +41,7 @@ static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direc
 
 int  s_cs_edit;                         /* S31 host-setup: 1=name, 2=password, 3=port editing */
 static int  s_cs_direct;                /* S31 host-setup: 1 = Direct-IP host, 0 = LAN */
-static char s_cs_port_buf[8];           /* [ITEM 4] GAME PORT text-entry buffer (Direct host) */
+char s_cs_port_buf[8];                  /* [ITEM 4] GAME PORT text-entry buffer (Direct host); read by the overlay */
 static int  s_cs_esc_guard;             /* swallow the ESC that cancelled an edit */
 static int  s_kick_button_slot[5];      /* lobby kick button k -> net slot */
 
@@ -1138,6 +1138,10 @@ void Screen_CreateSession(void) {
          * (already mirrored from the ini in Screen_ConnectionBrowser). */
         if (s_net_cfg_game_port < 1 || s_net_cfg_game_port > 65535)
             s_net_cfg_game_port = 37050;
+        /* [2026-06-16] Seed the GAME PORT text buffer so the inline field (drawn
+         * to the right of the button by frontend_render_create_session_overlay)
+         * shows the live value before it is ever edited. */
+        snprintf(s_cs_port_buf, sizeof(s_cs_port_buf), "%d", s_net_cfg_game_port);
         s_cs_edit = 0;
         s_cs_esc_guard = 0;
         s_anim_tick = 0;
@@ -1152,19 +1156,23 @@ void Screen_CreateSession(void) {
         break;
 
     case 2: /* Setup interaction [S31] */
-        /* [ITEM 4] Keep the Direct-host UPnP/PORT row labels showing the live
-         * values (these are plain buttons, drawn by the generic renderer). */
-        if (s_cs_direct && 6 < FE_MAX_BUTTONS && s_buttons[5].active) {
+        /* [ITEM 4] Keep the Direct-host UPnP toggle label showing the live value
+         * (a plain button drawn by the generic renderer). GAME PORT (index 6) is
+         * now a LABEL-ONLY button; its value is drawn as an inline field to the
+         * right by frontend_render_create_session_overlay, like NAME/PASSWORD. */
+        if (s_cs_direct && 5 < FE_MAX_BUTTONS && s_buttons[5].active) {
             snprintf(s_buttons[5].label, sizeof(s_buttons[5].label),
                      "UPNP: %s", s_net_cfg_enable_upnp ? "ON" : "OFF");
-            snprintf(s_buttons[6].label, sizeof(s_buttons[6].label),
-                     "GAME PORT: %d", s_net_cfg_game_port);
         }
         if (s_cs_edit) {
             /* Editing NAME, PASSWORD or GAME PORT: Enter confirms, ESC cancels
              * (and is swallowed so it cannot double as BACK). */
             frontend_handle_text_input_key();
             if (td5_plat_input_key_pressed(0x01)) {
+                /* Cancelling a port edit -> restore the field to the committed
+                 * value so the inline display doesn't keep the typed garbage. */
+                if (s_cs_edit == 3)
+                    snprintf(s_cs_port_buf, sizeof(s_cs_port_buf), "%d", s_net_cfg_game_port);
                 s_cs_edit = 0;
                 s_text_input_state = 0;
                 s_cs_esc_guard = 1;
