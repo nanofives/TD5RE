@@ -92,6 +92,9 @@ int  td5_net_is_connection_lost(void);
 /* [ITEM 3] ms since the client last heard from the host (lobby keepalive);
  * -1 if not a client or no host packet has arrived yet. */
 int  td5_net_lobby_host_silence_ms(void);
+/* Re-baseline the host-keepalive clock (client only) so a long detour through a
+ * lobby sub-screen doesn't carry stale silence into the watchdog. */
+void td5_net_lobby_touch_host_clock(void);
 int  td5_net_get_enum_session_count(void);
 const char *td5_net_get_enum_session_name(int index);
 int  td5_net_get_enum_session_info(int index, int *player_count, int *max_players);

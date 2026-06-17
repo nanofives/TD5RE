@@ -1326,6 +1326,10 @@ void Screen_NetworkLobby(void) {
     case 0: /* INITIALIZATION */
         frontend_init_return_screen(TD5_SCREEN_NETWORK_LOBBY);
         TD5_LOG_D(LOG_TAG, "NetworkLobby: state 0 - init");
+        /* [2026-06-16] Re-baseline the host-keepalive clock on (re)entry so a
+         * long detour through Change Car / Select Track doesn't carry stale
+         * silence that instantly trips the host-gone watchdog. */
+        td5_net_lobby_touch_host_clock();
 
 #ifndef TD5RE_RELEASE
         /* Dev hook: TD5RE_NET_LOBBY=1 boots straight into a host lobby (e.g.

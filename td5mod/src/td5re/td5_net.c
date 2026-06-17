@@ -3668,6 +3668,23 @@ int td5_net_lobby_host_silence_ms(void)
     return (int)(td5_plat_time_ms() - s_client_last_host_ms);
 }
 
+/* [2026-06-16] Re-baseline the host-keepalive clock to "now" (clients only).
+ * Called when the client (re)enters the lobby so a long detour through a
+ * sub-screen (Change Car / Select Track) does not carry STALE silence that
+ * instantly trips the watchdog -- the host gets a fresh window to prove it is
+ * alive (a real keepalive lands within ~1 s; a genuinely dead host still trips
+ * after the threshold). No-op for the host / before the first host packet. */
+void td5_net_lobby_touch_host_clock(void)
+{
+    if (s_is_host || !s_is_client || s_client_last_host_ms == 0)
+        return;
+    {
+        uint32_t now = td5_plat_time_ms();
+        if (now == 0) now = 1;
+        s_client_last_host_ms = now;
+    }
+}
+
 int td5_net_get_enum_session_count(void)
 {
     return s_enum_session_count;

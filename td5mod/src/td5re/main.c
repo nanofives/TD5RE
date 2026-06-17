@@ -1088,6 +1088,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * are accurate. Without this, Sleep(16) may sleep ~30ms (15.6ms default). */
     timeBeginPeriod(1);
 
+    /* [2026-06-16] Opt OUT of Windows 11 background execution-speed throttling
+     * (EcoQoS). When a window is not in the foreground, Win11 may put the process
+     * in "Efficiency mode" and slow its CPU/timer scheduling dramatically. For
+     * netplay that starved a BACKGROUNDED host instance's 1 Hz lobby keepalive,
+     * so a client (whose window was focused, e.g. picking a car) saw the host go
+     * "silent" for many seconds and the lobby watchdog dropped it to the menu --
+     * a false disconnect, very visible when testing two instances on one PC.
+     * Resolved dynamically so it simply no-ops on pre-Win11 / older SDKs. */
+    {
+        typedef struct {
+            ULONG Version;
+            ULONG ControlMask;
+            ULONG StateMask;
+        } TD5_PROC_POWER_THROTTLING;
+        /* PROCESS_POWER_THROTTLING_CURRENT_VERSION=1,
+         * PROCESS_POWER_THROTTLING_EXECUTION_SPEED=0x1 */
+        typedef BOOL (WINAPI *SetProcInfo_t)(HANDLE, int, PVOID, DWORD);
+        HMODULE k32 = GetModuleHandleA("kernel32.dll");
+        SetProcInfo_t pSetProcInfo = k32 ? (SetProcInfo_t)(void *)
+            GetProcAddress(k32, "SetProcessInformation") : NULL;
+        if (pSetProcInfo) {
+            TD5_PROC_POWER_THROTTLING pt;
+            memset(&pt, 0, sizeof(pt));
+            pt.Version     = 1;       /* PROCESS_POWER_THROTTLING_CURRENT_VERSION */
+            pt.ControlMask = 0x1;     /* manage EXECUTION_SPEED ...               */
+            pt.StateMask   = 0;       /* ...and DISABLE the throttling (full speed)*/
+            /* ProcessPowerThrottling == 4 */
+            pSetProcInfo(GetCurrentProcess(), 4, &pt, (DWORD)sizeof(pt));
+        }
+    }
+
     /* All output goes to td5re_debug.log — no console window needed. */
 
     /* ---------------------------------------------------------------
