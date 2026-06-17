@@ -619,6 +619,7 @@ void td5_track_get_span_edges(int span_index,
  *     uninitialised probes).
  * ------------------------------------------------------------------------ */
 static int td6_branches_enabled(void);   /* fwd decl (task#17, defined below) */
+static int td6_routenet_enabled(void);   /* fwd decl (#20, defined below) */
 
 /* [task#8 FIX 2026-06-14] TD6 SHALLOW-WALL DEADZONE. The year-long "invisible
  * wall at the beginning / span 110" is the collision firing a HARD wall response
@@ -817,7 +818,12 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
          * which would leave the chassis stranded on the branch -> ground-probe
          * teleport, exactly the span-300 case). Cap keeps the correction
          * non-explosive. */
+        /* [#20] In route-network mode the fork's right rail is NOT a wall — it's
+         * the OPENING into the connected branch road. Suppress the synthetic
+         * boundary entirely so the chassis crosses into the branch instead of being
+         * shoved back to the main road (the "teleport near the branch wall"). */
         int boundary_wall = (rc < lane_count);
+        if (boundary_wall && td6_routenet_enabled()) { hit_r = 0; }
         if (hit_r && pen_r <= -WALL_PEN_TELEPORT_LIMIT && !boundary_wall) {
             TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d RIGHT span=%d type=%d pen=%d "
                       "REJECTED (bogus -> would teleport)", actor->slot_index,
@@ -2449,6 +2455,25 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
  * the force-main + boundary-wall so the walker takes & traverses the branch
  * (experimental; default 0 keeps the safe boundary-wall that just stops the
  * teleport). Read once. */
+/* [#20 2026-06-17] ROUTE-NETWORK mode. The earlier branch handling treated the
+ * remap [lo,hi,base] table as GEOMETRIC and band-aided the displacement with a
+ * synthetic main/branch boundary wall (push chassis back to main) + a branch-return
+ * span snap — both TELEPORT the car when it nears/enters a branch. But the data
+ * proves the branch START shares the FORK's world origin (gap=0 across all 56
+ * London junctions): branches are REAL connected alternate roads. Route-net mode
+ * DROPS those band-aids so the chassis drives the branch geometry naturally. Knob
+ * TD5RE_TD6_ROUTENET (default OFF during bring-up; implies branches drivable). */
+static int td6_routenet_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TD6_ROUTENET");
+        s = (e && e[0] == '1') ? 1 : 0;
+        TD5_LOG_I(LOG_TAG, "td6 route-network mode: %s", s ? "ON (no branch band-aids)" : "off");
+    }
+    return s;
+}
+
 static int td6_branches_enabled(void)
 {
     static int s = -1;
@@ -2456,6 +2481,7 @@ static int td6_branches_enabled(void)
         const char *e = getenv("TD5RE_TD6_BRANCHES");
         s = (e && e[0] == '1') ? 1 : 0;
     }
+    if (td6_routenet_enabled()) return 1;   /* [#20] route-net implies drivable branches */
     return s;
 }
 
@@ -2726,7 +2752,8 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
      * This safety net only protects against walker producing truly
      * invalid spans (e.g. branch road data without a terminator). */
     if ((sp->span_type < 8 || sp->span_type > 11) &&
-        (new_span < 0 || new_span >= s_span_count)) {
+        (new_span < 0 || new_span >= s_span_count) &&
+        !td6_routenet_enabled()) {   /* [#20] no progress-table snap; clamp below instead */
         int ring = g_td5.track_span_ring_length;
         if (span_idx >= ring && s_jump_entries && s_jump_entry_count > 0) {
             for (int j = 0; j < s_jump_entry_count; j++) {
