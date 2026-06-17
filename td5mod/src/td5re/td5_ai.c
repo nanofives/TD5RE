@@ -215,13 +215,6 @@ static int32_t g_actor_route_steer_bias[TD5_MAX_TOTAL_ACTORS];
 /* Per-actor forward track component */
 static int32_t g_actor_forward_track_component[TD5_MAX_TOTAL_ACTORS];
 
-/* [#18] Consecutive ticks a traffic car has been ~motionless ON A BRANCH span.
- * A car parked on a branch for several seconds (not necessarily in the heading-
- * recovery latch — e.g. brake-stopped on a displaced plaza fork) is on an
- * un-drivable corridor: self-heal blacklists its base and fades it. Reset off-branch
- * or when moving. */
-static int s_trf_branch_idle[TD5_MAX_TOTAL_ACTORS];
-
 /* Slot state: 0x00=AI, 0x01=player, 0x02=finished/dead */
 static int32_t g_slot_state[TD5_MAX_TOTAL_ACTORS];
 
@@ -7319,11 +7312,6 @@ static int trf_brake_near_spans(void)
     return s;
 }
 
-/* The branch blacklist now lives in td5_track (td5_track_branch_blacklisted) so the
- * span-walker can suppress AI/traffic forks onto bad corridors. Alias for the local
- * call sites. */
-#define trf_branch_blacklisted(s) td5_track_branch_blacklisted(s)
-
 /* [task#13 2026-06-14] Spawn-distance multiplier (×16 fixed-point). The per-tick
  * spawner places traffic [SpawnAheadMin..SpawnAheadMax] spans ahead of the race
  * leader; the stock 25..50 window pops cars in close to the player. This knob
@@ -7781,8 +7769,7 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
                     : (int)(trf_dyn_rand() % (uint32_t)(ncorr + 1)) - 1;
                 if (corr >= 0) {
                     int bspan = td5_track_branch_corridor_span(main_span, corr);
-                    /* [#18 blacklist] don't spawn on a forbidden (off-road) fork */
-                    if (bspan >= 0 && !trf_branch_blacklisted(bspan)) {
+                    if (bspan >= 0) {
                         span = bspan;
                         on_branch = 1;   /* [#16] this car is on a crossing branch corridor */
                     }
@@ -8043,50 +8030,10 @@ void td5_ai_traffic_dynamic_tick(void)
                            (slot != 9 || g_encounter_tracked_handle == -1) &&
                            trf_dyn_min_player_dist(sp) >
                                g_td5.ini.traffic_dyn_despawn + eff_hi;
-            /* [#18 BLACKLIST + SELF-HEAL] Non-destructive catch-all for cars on a
-             * branch corridor. The earlier INSTANT-PARK was too aggressive — it
-             * killed a car the moment it touched a blacklisted branch, so a car the
-             * PLAYER pushed onto a branch vanished in their face. Instead:
-             *  - SELF-HEAL: a car stranded (recovery-frozen ~3s) on a non-listed fork
-             *    reveals it's off-road -> blacklist its base so the SPAWNER avoids it;
-             *  - REMOVE a branch car ONLY when it is already FAR from every player
-             *    (out of view) or branch traffic is off — a gentle FADE, never a kill,
-             *    and never while the player is right next to it. Good (non-listed,
-             *    moving) branch traffic is untouched. */
-            if (g_active_td6_level > 0) {
-                int rawsp = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
-                int ringL = td5_track_get_ring_length();
-                if (ringL > 0 && rawsp >= ringL) {
-                    /* Idle-on-branch: ~motionless for 90 ticks (3s) on a branch = parked
-                     * on an un-drivable corridor (e.g. brake-stopped on a plaza fork),
-                     * which the heading-recovery latch does NOT catch. */
-                    int32_t vx = ACTOR_I32(a, ACTOR_LIN_VEL_X) >> 8;
-                    int32_t vz = ACTOR_I32(a, ACTOR_LIN_VEL_Z) >> 8;
-                    if (vx > -8 && vx < 8 && vz > -8 && vz < 8) {
-                        if (s_trf_branch_idle[slot] < 100000) s_trf_branch_idle[slot]++;
-                    } else {
-                        s_trf_branch_idle[slot] = 0;
-                    }
-                    int idle_stuck = (s_trf_branch_idle[slot] >= 90);
-                    int stuck_on_branch = idle_stuck ||
-                        (g_traffic_recovery_stage[slot] != 0 && s_traffic_stuck_frames[slot] >= 90);
-                    int blacklisted = trf_branch_blacklisted(rawsp);
-                    if (stuck_on_branch && trf_dyn_branches_enabled() && !blacklisted)
-                        td5_track_branch_mark_bad(rawsp);   /* discover off-road fork */
-                    /* idle_stuck cars are clearly dead -> fade at ANY distance (even in
-                     * view, the user sees them frozen). Other cases stay far-only so a
-                     * car the player just pushed onto a branch is never yanked away. */
-                    if (idle_stuck ||
-                        ((!trf_dyn_branches_enabled() || blacklisted || stuck_on_branch) &&
-                         trf_dyn_min_player_dist(sp) > g_td5.ini.traffic_dyn_despawn)) {
-                        s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
-                        TD5_LOG_I(LOG_TAG, "traffic_branch_fade: slot=%d on branch span=%d blk=%d idle=%d stuck=%d -> fade",
-                                  slot, rawsp, blacklisted, idle_stuck, stuck_on_branch);
-                    }
-                } else {
-                    s_trf_branch_idle[slot] = 0;   /* off-branch: reset idle counter */
-                }
-            }
+            /* [#20] (Removed) The branch idle-fade + blacklist self-heal that used to
+             * sit here coped with traffic stranded on "displaced/off-road" forks.
+             * Branches are connected drivable roads, so branch traffic is ordinary
+             * traffic handled by the general despawn (behind/ahead/far) below. */
             if (behind < -g_td5.ini.traffic_dyn_despawn ||
                 ahead  >  g_td5.ini.traffic_dyn_despawn + eff_hi ||
                 far_from_all ||
