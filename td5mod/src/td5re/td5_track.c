@@ -153,6 +153,14 @@ static int              s_bl[32];
 static int              s_bl_n = -1;
 static int              s_learned_bad[64];
 static int              s_learned_bad_n = 0;
+/* [#18] Set while the chassis-walker runs for a TRAFFIC actor (vs racer/player):
+ * traffic is force-mained at blacklisted forks so it stays on the main road and
+ * never forks onto a sidewalk branch. Racers/player are left free — force-maining
+ * them clamps the chassis sideways at the junction and traps it (player got stuck
+ * at the base-466 fork). Player-pushed cars are unaffected (this is a fork choice,
+ * not a kill), so they don't vanish. */
+static int              s_walker_is_traffic = 0;
+extern int              td5_ai_actor_is_traffic(const void *actor);
 
 /** [task#15] TD6 per-lane SURFACE GRID (strip header[6]): 8 cells/row; a span's
  * surf byte (+0x01) selects the row, the wheel's lateral fraction>>5 the column,
@@ -2473,7 +2481,9 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                  * to the right branch"). Until the corridors are relocated to abut
                  * their forks (deep converter rewrite), keep everyone on the main road
                  * and clamp into its lanes. Native TD5 (g_active_td6_level==0) untouched. */
-                if (g_active_td6_level > 0 && sl >= next_lanes && !td6_branches_enabled()) {
+                if (g_active_td6_level > 0 && sl >= next_lanes &&
+                    (!td6_branches_enabled() ||
+                     (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_next)))) {
                     *sub_lane = next_lanes - 1;
                     new_span = next_idx;
                     TD5_LOG_I(LOG_TAG, "jfwd_td6_main: span=%d sl=%d next_lanes=%d -> span=%d (forced main, displaced branch suppressed)",
@@ -2524,7 +2534,9 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (g_active_td6_level > 0 && sl >= next_lanes && !td6_branches_enabled()) {
+                if (g_active_td6_level > 0 && sl >= next_lanes &&
+                    (!td6_branches_enabled() ||
+                     (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_next)))) {
                     *sub_lane = next_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x01) */
                     new_span = next_idx;
                 } else if (sl < next_lanes) {
@@ -2583,7 +2595,9 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes && !td6_branches_enabled()) {
+                if (g_active_td6_level > 0 && sl >= prev_lanes &&
+                    (!td6_branches_enabled() ||
+                     (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_prev)))) {
                     /* TD6: force main for ALL, suppress the ~8000u-displaced branch
                      * (same rationale as fwd case 0x01). Reversing through a London
                      * junction used to follow link_prev onto the displaced branch
@@ -2631,7 +2645,9 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes && !td6_branches_enabled()) {
+                if (g_active_td6_level > 0 && sl >= prev_lanes &&
+                    (!td6_branches_enabled() ||
+                     (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_prev)))) {
                     *sub_lane = prev_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x04) */
                     new_span = prev_idx;
                 } else if (sl >= prev_lanes) {
@@ -3396,6 +3412,9 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     /* Track position state is at actor + 0x80 */
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
 
+    /* [#18] Branch-fork suppression scope: traffic only (see resolve_neighbor). */
+    s_walker_is_traffic = td5_ai_actor_is_traffic(actor);
+
     /* World position in 24.8 fixed-point */
     pos_x = *(int32_t *)((uint8_t *)actor + 0x1FC); /* world_pos.x */
     pos_z = *(int32_t *)((uint8_t *)actor + 0x204); /* world_pos.z */
@@ -3410,6 +3429,7 @@ void td5_track_update_actor_position(TD5_Actor *actor)
      * walker incurs at most a 1-tick lag after V2V push / spawn jumps,
      * which the next-tick call resolves. */
     update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
+    s_walker_is_traffic = 0;   /* [#18] reset: stray probe walks default to non-traffic */
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;
@@ -6366,11 +6386,11 @@ int td5_track_branch_blacklisted(int branch_span)
     if (s_bl_n < 0) {
         const char *e = getenv("TD5RE_TD6_BRANCH_BLACKLIST");
         s_bl_n = 0;
-        /* London sidewalk forks: 439 (span-440) + 466 user-reported; 502/557/569
-         * auto-discovered (traffic got stuck = un-drivable; they cluster in the
-         * main-502..575 plaza). Seeding them avoids a ~3s probe car per race; the
-         * self-heal still finds any others at runtime. */
-        if (!e || !e[0]) e = "439,466,502,557,569";
+        /* London sidewalk forks (base = parallel main span): 439 (span-440) + 466
+         * + 775 (span-780) user-reported; 502/557/569/670 auto-discovered by the
+         * self-heal (traffic stuck = un-drivable). Seeding the known set avoids a
+         * ~3s probe car per race; the self-heal still finds any others at runtime. */
+        if (!e || !e[0]) e = "439,466,502,557,569,670,775";
         while (*e && s_bl_n < 32) {
             if (*e >= '0' && *e <= '9') { s_bl[s_bl_n++] = atoi(e); while (*e >= '0' && *e <= '9') e++; }
             else e++;

@@ -7402,20 +7402,18 @@ static int td5_ai_td6_drivable_band(int route_span, int lane_count,
     {
         /* [#18 2026-06-16] BRANCH corridors: the extended branch route rows were
          * authored as a single CENTER sample (left==right==128) -> the band below
-         * collapses to one lane, so traffic only ever takes the center / one side
-         * of the two-way branch road (user: "traffic on the LEFT track only"). A
-         * branch is a real two-way street, so use the central-HALF band instead,
-         * which straddles the lane-direction split (lanes <lc/2 vs >=lc/2) and so
-         * populates BOTH directions/tracks. Sidewalk-edge lanes stay excluded. */
+         * collapses to ~one lane, so traffic clusters in the median and reads as
+         * "one track". A branch is a real two-way street; use the FULL lane span so
+         * traffic spreads across both visible sides. The per-lane surface filter in
+         * trf_dyn_pick_lane still excludes any sidewalk-class edge lanes, so cars
+         * stay on the branch's actual road. */
         int ringL = td5_track_get_ring_length();
         if (ringL > 0 && route_span >= ringL) {
-            int m = lane_count / 4;
-            lo = m;
-            hi = lane_count - 1 - m;
-            if (hi < lo) hi = lo;
+            lo = 0;
+            hi = (lane_count > 0) ? lane_count - 1 : 0;
             if (out_lo) *out_lo = lo;
             if (out_hi) *out_hi = hi;
-            return (lo > 0 || hi < lane_count - 1);
+            return 0;   /* no band restriction; surface filter handles edges */
         }
     }
     {
@@ -7914,16 +7912,16 @@ void td5_ai_traffic_dynamic_tick(void)
                            (slot != 9 || g_encounter_tracked_handle == -1) &&
                            trf_dyn_min_player_dist(sp) >
                                g_td5.ini.traffic_dyn_despawn + eff_hi;
-            /* [#18 BLACKLIST + SELF-HEAL] Path-independent catch-all for cars that
-             * end up on a branch corridor by any route (spawn pick / walker fork):
-             *  - branch traffic OFF        -> fade ANY branch car (main-ring only);
-             *  - on a BLACKLISTED fork     -> INSTANT-PARK (off-road/sidewalk, never
-             *    drivable): the walker no longer force-mains traffic (it trapped the
-             *    player), so a car can briefly fork onto a sidewalk; killing it the
-             *    same tick (vs a 0.4s fade) means it never visibly drives there;
-             *  - STUCK on a non-listed fork (recovery-frozen for ~3s) -> that fork is
-             *    un-traversable, so AUTO-BLACKLIST its base (walker/spawner avoid it
-             *    henceforth) and fade. Good branches keep their (moving) traffic. */
+            /* [#18 BLACKLIST + SELF-HEAL] Non-destructive catch-all for cars on a
+             * branch corridor. The earlier INSTANT-PARK was too aggressive — it
+             * killed a car the moment it touched a blacklisted branch, so a car the
+             * PLAYER pushed onto a branch vanished in their face. Instead:
+             *  - SELF-HEAL: a car stranded (recovery-frozen ~3s) on a non-listed fork
+             *    reveals it's off-road -> blacklist its base so the SPAWNER avoids it;
+             *  - REMOVE a branch car ONLY when it is already FAR from every player
+             *    (out of view) or branch traffic is off — a gentle FADE, never a kill,
+             *    and never while the player is right next to it. Good (non-listed,
+             *    moving) branch traffic is untouched. */
             if (g_active_td6_level > 0) {
                 int rawsp = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
                 int ringL = td5_track_get_ring_length();
@@ -7933,22 +7931,11 @@ void td5_ai_traffic_dynamic_tick(void)
                     int blacklisted = trf_branch_blacklisted(rawsp);
                     if (stuck_on_branch && trf_dyn_branches_enabled() && !blacklisted)
                         td5_track_branch_mark_bad(rawsp);   /* discover off-road fork */
-                    if (!trf_dyn_branches_enabled() || blacklisted) {
-                        /* Known-bad fork: kill instantly so it never shows on the
-                         * sidewalk. Park (freeze + hide) this tick. */
-                        s_trf_dyn_state[slot] = TRF_DYN_INACTIVE;
-                        s_trf_dyn_alpha[slot] = 0;
-                        *(int32_t *)(a + 0x314) = 0;
-                        *(int32_t *)(a + 0x1CC) = 0;
-                        *(int32_t *)(a + 0x1D4) = 0;
-                        ACTOR_U8(a, ACTOR_BRAKE_FLAG) = 1;
-                        TD5_LOG_I(LOG_TAG, "traffic_branch_blacklist: slot=%d on branch span=%d -> instant-park",
-                                  slot, rawsp);
-                        break;   /* slot retired; skip the rest of the ACTIVE handler */
-                    } else if (stuck_on_branch) {
+                    if ((!trf_dyn_branches_enabled() || blacklisted || stuck_on_branch) &&
+                        trf_dyn_min_player_dist(sp) > g_td5.ini.traffic_dyn_despawn) {
                         s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
-                        TD5_LOG_I(LOG_TAG, "traffic_branch_stuck: slot=%d on branch span=%d -> fade",
-                                  slot, rawsp);
+                        TD5_LOG_I(LOG_TAG, "traffic_branch_fade: slot=%d on branch span=%d blk=%d stuck=%d (far) -> fade",
+                                  slot, rawsp, blacklisted, stuck_on_branch);
                     }
                 }
             }
