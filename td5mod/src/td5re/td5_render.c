@@ -6278,12 +6278,16 @@ static const char *k_td6_prop_srcs[TD6_PROP_TEX_N] = {
     "re/assets/props/td6_k1box.png",     /* 3 K1BOX    */
     "re/assets/props/td6_1crate.png",    /* 4 1CRATE   */
 };
-/* model (COL_NN) -> texture index. AUTHORITATIVE (TD6.exe FUN_0044c535 + London
- * subset row @0x0049be58 = [ff,ff,BENCH,REDTAPE,REDTAPE,1BOLLARD,K1BOX,1CRATE]):
- * COL_00 slot0 & COL_01 slot1 are 0xff = UNTEXTURED (-1 -> white, vertex-lit);
- * COL_01 slot2=BENCH, COL_02 slot3 / COL_03,04 slot4 = REDTAPE, COL_05 slot5=
- * 1BOLLARD (mesh unused in London), COL_06 slot6=K1BOX, COL_07 slot7=1CRATE. */
-static const int k_td6_prop_texidx[8] = { -1, 0, 1, 1, 1, 2, 3, 4 };
+/* model (COL_NN) -> texture index, indexed by MOV model (r[4]&0xF). AUTHORITATIVE
+ * (TD6.exe FUN_0044c535 + London subset row @0x0049be58):
+ *   model 0 = ff (untextured)   model 4 = REDTAPE (1)
+ *   model 1 = ff (untextured)   model 5 = 1BOLLARD (2)
+ *   model 2 = BENCH (0)         model 6 = K1BOX (3)
+ *   model 3 = REDTAPE (1)       model 7 = 1CRATE (4)
+ * [#20 2026-06-17] FIX: the table was transcribed shifted ({-1,0,1,1,1,2,3,4}),
+ * which mapped the BENCH mesh (model 2 = COL_02) to texidx 1 = REDTAPE -> benches
+ * rendered with the red/white tape texture. Corrected to match the row above. */
+static const int k_td6_prop_texidx[8] = { -1, -1, 0, 1, 1, 2, 3, 4 };
 #define TD6_PROP_WHITE_PAGE (TD6_PROP_TEX_BASE + TD6_PROP_TEX_N)  /* dedicated 1x1 white for untextured props */
 static int s_td6_prop_pool_loaded = 0;
 static void td6_prop_load_pool(void)
@@ -6377,8 +6381,12 @@ void render_td6_props(const TD5_Actor *ref)
         ax = cx - gx; az = cz - gz;
         if (ax * ax + az * az > MAXD * MAXD) continue;
 
-        base_y = td5_track_td6_prop_ground_y(i, gy);   /* plant on the strip */
+        /* [#20] Plant on the real track surface under the prop (td5_track_td6_prop_ground_y
+         * now uses the car/shadow ground probe at the prop XZ). The authored MOV Y is
+         * NOT the ground (planting at it floated the props), so it is not used here. */
+        base_y = td5_track_td6_prop_ground_y(i, gy);
         lift   = base_y - m->min_y;                    /* mesh bottom -> ground */
+        (void)py;                                      /* MOV Y not used for planting */
         a  = (float)angle * (2.0f * (float)M_PI / 4096.0f);
         ca = cosf(a); sa = sinf(a);
 
@@ -6438,7 +6446,6 @@ void render_td6_props(const TD5_Actor *ref)
         }
         if (page != last_page) { td5_plat_render_bind_texture(page); last_page = page; }
         td5_plat_render_draw_tris(vb, vc, ib, ni);
-        (void)py;
     }
 }
 

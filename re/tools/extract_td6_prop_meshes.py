@@ -56,9 +56,13 @@ def _png_write(path, w, h, rows):
                 + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 def convert_furniture_textures():
-    """SOLID (opaque) PNGs: the COL meshes have full-face UVs, so the cutout
-    sprites' transparent margin is filled with each texture's own average colour
-    to avoid see-through holes. Vertical flip (TGA bottom-up) + BGRA->RGBA."""
+    """PRESERVE the TGA alpha channel: the furniture sprites are CUTOUTS (e.g. the
+    bench's ornate cast-iron end has see-through gaps; the original Bench.tga marks
+    them alpha<40). [#20 2026-06-17 FIX] The old version forced alpha=255 and filled
+    transparent pixels with the texture's average colour "to avoid see-through holes"
+    — but those holes are the point (the bench rendered as a solid brown block). The
+    renderer alpha-tests (OPAQUE_LINEAR alpha_ref=1) so transparent pixels are cut
+    out. Vertical flip (TGA bottom-up) + BGRA->RGBA, alpha kept verbatim."""
     if not os.path.exists(TD6_STATIC):
         print("static.zip MISSING — skip furniture textures"); return
     os.makedirs(PROPS_DIR, exist_ok=True)
@@ -72,11 +76,6 @@ def convert_furniture_textures():
         idlen = raw[0]; w, h = struct.unpack("<HH", raw[12:16]); desc = raw[17]
         botup = (desc & 0x20) == 0
         px = raw[18 + idlen: 18 + idlen + w * h * 4]
-        so = [0, 0, 0, 0]
-        for i in range(w * h):
-            if px[i*4+3] > 40:
-                so[0] += px[i*4+2]; so[1] += px[i*4+1]; so[2] += px[i*4]; so[3] += 1
-        fr, fg, fb = (round(so[0]/max(1, so[3])), round(so[1]/max(1, so[3])), round(so[2]/max(1, so[3])))
         rows = []
         for sy in range(h):
             y = (h - 1 - sy) if botup else sy
@@ -84,8 +83,7 @@ def convert_furniture_textures():
             for x in range(w):
                 i = (y*w + x) * 4
                 b, g, r, a = px[i], px[i+1], px[i+2], px[i+3]
-                if a < 40: r, g, b = fr, fg, fb
-                row += bytes((r, g, b, 255))
+                row += bytes((r, g, b, a))   # keep alpha -> cutout gaps stay transparent
             rows.append(bytes(row))
         _png_write(os.path.join(PROPS_DIR, f"td6_{name}.png"), w, h, rows)
     print(f"furniture textures -> {PROPS_DIR}/td6_*.png ({len(FURNITURE_TGAS)})")

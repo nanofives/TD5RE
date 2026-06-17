@@ -2749,18 +2749,24 @@ int td5_game_init_race_session(void) {
                 continue;
 
             /* [TD6 GRID CENTERING — track-scoped] On the wide TD6 city strips the
-             * paved road is the CENTRE of the strip (sidewalks are the outer
-             * lanes), but the grid lanes (1,2) sit near the left rail, so the
-             * player spawns on the sidewalk. Re-anchor the grid to the strip
-             * mid-lane (== the AI route centre, byte 128) while keeping the
-             * relative lane spread. The formula is a no-op on narrow strips
-             * (lane_count <= 4 -> centre == 1), so normal-width TD6 circuits and
-             * all faithful TD5 tracks are unaffected; only genuinely wide strips
-             * shift. */
+             * paved road is only PART of the strip (sidewalks/verge are the outer
+             * lanes), but the grid lanes (1,2) sit near the left rail, so the player
+             * spawns off the road. Re-anchor the grid to the centre of the actual
+             * ROAD BAND (the contiguous run of lanes sharing the centre lane's surface
+             * class), keeping the relative lane spread. [#20] The earlier version used
+             * the GEOMETRIC strip centre ((lc-1)/2), which only lands on the road when
+             * the road is centred — false on e.g. London STRIPB span 20 (road at the
+             * right cells) -> cars spawned on grass. The road band is road-aware and
+             * works in both directions. No-op on narrow strips / faithful TD5. */
             if (g_active_td6_level > 0) {
                 int lc = td5_track_span_lane_count_at(span_index);
-                if (lc > 4)
-                    sub_lane = (lc - 1) / 2 + (active_lanes[effective_slot] - 1);
+                if (lc > 4) {
+                    int band_lo = 0, band_hi = lc - 1;
+                    td5_track_td6_road_band(span_index, lc, &band_lo, &band_hi);
+                    sub_lane = (band_lo + band_hi) / 2 + (active_lanes[effective_slot] - 1);
+                    if (sub_lane < band_lo) sub_lane = band_lo;
+                    if (sub_lane > band_hi) sub_lane = band_hi;
+                }
             }
 
             /* InitActorTrackSegmentPlacement @ 0x00445F10 seeds:

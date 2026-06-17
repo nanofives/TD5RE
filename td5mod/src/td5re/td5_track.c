@@ -6349,17 +6349,22 @@ int td5_track_td6_branches_drivable(void)
 }
 
 /* [task#15 2026-06-13] TD6 surface CLASS -> grip/drag coefficients, ported
- * verbatim from TD6.exe: lateral grip table @0x0049d7b8 (8.8 fixed, 0x100=1.0)
- * and rolling-drag/speed-penalty table @0x0049d7f8 (int16). Only class 5 (grass)
- * and 10 (gravel) carry drag; class 1/7 (road/sidewalk) are full grip + zero
- * drag, class 16 is low-grip (0.74) but no drag. */
+ * from TD6.exe: lateral grip table @0x0049d7b8 (8.8 fixed, 0x100=1.0) and
+ * rolling-drag/speed-penalty table @0x0049d7f8 (int16). class 5 (grass) and 10
+ * (gravel) carry drag; class 1/7 (road/sidewalk) are full grip + zero drag.
+ * [#20 2026-06-17] class 16 is the off-road/verge actually used by the migrated TD6
+ * tracks (London's grid uses classes {0,1,3,4,7,16}; class 5/10 never appear). It is
+ * low-grip (0.74) — added a grass-equivalent rolling drag so driving on it slows the
+ * car ("grass doesn't slow down" report). The drag table is now 32 entries and the
+ * lookup guard reaches it. */
 static const int16_t k_td6_surface_grip[32] = {
     0x100,0x100,0x100,0x100,0x100,0x0d0,0x0e0,0x100,0x100,0x100,0x0e0,0x100,
     0x100,0x100,0x100,0x0dc,0x0be,0x0f4,0x08a,0x0ea,0x0ea,0x0ea,0x0ea,0x0ea,
     0x0ea,0x0ea,0x0ea,0x0ea,0x0ea,0x0ea,0x0ea,0x0ea
 };
-static const int16_t k_td6_surface_drag[16] = {
-    0,0,0,0,0,2,0,0,0,0,8,0,0,0,0,0
+static const int16_t k_td6_surface_drag[32] = {
+    0,0,0,0,0,2,0,0,0,0,8,0,0,0,0,0,
+    2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0   /* [16] = off-road/verge drag (grass-equivalent) */
 };
 
 /* Surface class at (span, lateral byte 0..255). -1 when no TD6 grid is loaded or
@@ -6387,7 +6392,7 @@ int td5_track_td6_surface_grip_q8(int cls)
 /* Class -> rolling-drag / per-tick speed penalty (0 = none). */
 int td5_track_td6_surface_drag(int cls)
 {
-    if (cls < 0 || cls >= 16) return 0;
+    if (cls < 0 || cls >= 32) return 0;
     return (int)k_td6_surface_drag[cls];
 }
 
@@ -6430,10 +6435,16 @@ void td5_track_append_td6_props(const void *data, size_t size)
                 pr->ground_y    = 0.0f;
                 pr->ground_done = 0;
                 pr->span    = 0;
-                pr->angle   = (int16_t)((int)r[18] * 16);   /* byte -> 0x1000 angle units */
-                /* X,Z are s32 24.8; Y is s16 24.8 at [16:18] (byte 18 is the angle). */
+                /* [#20] X, Y, Z are ALL s32 24.8 at [12:16]/[16:20]/[20:24] (byte 18 is
+                 * the Y high-byte, NOT an angle). The ROTATION is the single orientation
+                 * BYTE at [9], scaled <<4 into 0x1000 (full-circle) units: it varies
+                 * per-instance (benches along a curving frontage fan out a little). Byte
+                 * [10] is NOT part of it — it's constant within an area (07 one plaza, 01
+                 * another), so reading [9:10] as a u16 made every bench in a plaza share
+                 * one angle = "all facing the same way". [8]=01 / [11]=00 are constant. */
+                pr->angle   = (int16_t)(((int)r[9] << 4) & 0xFFF);
                 pr->px = (int32_t)(r[12] | ((uint32_t)r[13] << 8) | ((uint32_t)r[14] << 16) | ((uint32_t)r[15] << 24));
-                pr->py = (int32_t)(int16_t)(r[16] | ((uint16_t)r[17] << 8));
+                pr->py = (int32_t)(r[16] | ((uint32_t)r[17] << 8) | ((uint32_t)r[18] << 16) | ((uint32_t)r[19] << 24));
                 pr->pz = (int32_t)(r[20] | ((uint32_t)r[21] << 8) | ((uint32_t)r[22] << 16) | ((uint32_t)r[23] << 24));
             }
         }
@@ -6543,43 +6554,42 @@ float td5_track_td6_prop_ground_y(int prop_index, float fallback)
     {
         const float inv256 = 1.0f / 256.0f;
         float wx = (float)pr->px * inv256, wz = (float)pr->pz * inv256;
-        float best_d2 = 1e30f, best_y = fallback;
-        int s;
-        /* Optional global tune (env TD5RE_TD6_PROP_Y, world units, +down). The
-         * strip rail vertices sit a little above the rendered road, so a small
-         * negative value can drop residual float without per-prop guesswork. */
-        static float s_yoff = 1e9f;
-        if (s_yoff > 1e8f) { const char *e = getenv("TD5RE_TD6_PROP_Y"); s_yoff = (e && e[0]) ? (float)atof(e) : 0.0f; }
-        /* The props sit OFF the drivable lanes (sidewalk), so a single nearest
-         * span is unstable — adjacent props snap to different spans (road vs the
-         * raised curb/bridge above) and float inconsistently. Instead take the
-         * LOWEST rail-vertex height among ALL spans within R of the prop: the
-         * road is the lowest surface under the prop, curbs/bridges are higher, so
-         * this plants every prop on the road consistently. Nearest is the
-         * fallback if nothing is in range. */
-        {
-            const float R2 = 3000.0f * 3000.0f;
-            float low_y = 1e30f; int found = 0;
-            for (s = 0; s < s_span_count; s++) {
-                const TD5_StripSpan *sp = &s_span_array[s];
-                const TD5_StripVertex *vl = vertex_at((int)sp->left_vertex_index);
-                const TD5_StripVertex *vr = vertex_at((int)sp->right_vertex_index);
-                float ox = (float)(int32_t)sp->origin_x, oy = (float)(int32_t)sp->origin_y;
-                float oz = (float)(int32_t)sp->origin_z;
-                int k; const TD5_StripVertex *vv[2];
-                vv[0] = vl; vv[1] = vr;
-                for (k = 0; k < 2; k++) {
-                    const TD5_StripVertex *v = vv[k];
-                    float vx, vz, dx, dz, d2, gy;
-                    if (!v) continue;
-                    vx = ox + v->x; vz = oz + v->z;
-                    dx = vx - wx; dz = vz - wz; d2 = dx*dx + dz*dz;
-                    gy = oy + v->y;
-                    if (d2 < best_d2) { best_d2 = d2; best_y = gy; }      /* nearest fallback */
-                    if (d2 < R2 && gy < low_y) { low_y = gy; found = 1; } /* lowest in range */
-                }
+        /* [#20 2026-06-17] Plant on the ACTUAL track surface under the prop, using
+         * the same ground-contact probe the car/shadow use. The old method (lowest
+         * LEFT/RIGHT-rail vertex within 3000u) never sampled the SIDEWALK lanes the
+         * props actually stand on, and missed off-road props entirely (London benches
+         * sit 5-14k from the rails) -> it fell back to an arbitrary far vertex and the
+         * prop floated. Step 1: find the nearest span by rail-vertex distance to seed
+         * the walk. Step 2: walk a probe to the prop XZ (px/pz are 24.8) and read the
+         * best-lane surface height there (returns 24.8 -> world units). */
+        int best_span = 0; float best_d2 = 1e30f; int s;
+        for (s = 0; s < s_span_count; s++) {
+            const TD5_StripSpan *sp = &s_span_array[s];
+            const TD5_StripVertex *vl = vertex_at((int)sp->left_vertex_index);
+            const TD5_StripVertex *vr = vertex_at((int)sp->right_vertex_index);
+            float ox = (float)(int32_t)sp->origin_x, oz = (float)(int32_t)sp->origin_z;
+            int k; const TD5_StripVertex *vv[2]; vv[0] = vl; vv[1] = vr;
+            for (k = 0; k < 2; k++) {
+                const TD5_StripVertex *v = vv[k];
+                float vx, vz, dx, dz, d2;
+                if (!v) continue;
+                vx = ox + v->x; vz = oz + v->z;
+                dx = vx - wx; dz = vz - wz; d2 = dx*dx + dz*dz;
+                if (d2 < best_d2) { best_d2 = d2; best_span = s; }
             }
-            pr->ground_y = (found ? low_y : best_y) + s_yoff;
+        }
+        {
+            TD5_TrackProbeState probe;
+            int32_t gy24; int ps;
+            memset(&probe, 0, sizeof(probe));
+            probe.span_index = (int16_t)best_span;
+            probe.sub_lane_index = 0;
+            td5_track_update_probe_position(&probe, pr->px, pr->pz);
+            ps = (int)probe.span_index;
+            if (ps < 0) ps = 0;
+            if (ps >= s_span_count) ps = s_span_count - 1;
+            gy24 = td5_track_compute_contact_height_bestlane(ps, pr->px, pr->pz, NULL);
+            pr->ground_y = (float)gy24 * inv256;
         }
         pr->ground_done = 1;
         return pr->ground_y;

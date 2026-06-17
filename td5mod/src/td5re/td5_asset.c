@@ -2423,20 +2423,19 @@ int td5_asset_load_level(int track_index)
         {
             /* [task#14 MOV] VISIBLE breakable furniture = level.mov (24-byte recs)
              * drawn as COL_NN.prr meshes — NOT the invisible level.tcl collision
-             * footprints the port used to render. LEVEL.MOV is the main route,
-             * LEVELB.MOV the branch ("left track") set. Appended into one table. */
+             * footprints the port used to render. [#20 2026-06-17] LEVEL.MOV and
+             * LEVELB.MOV are the SAME furniture for the two driving directions (~92%
+             * identical positions), NOT a main + branch set — loading BOTH rendered
+             * every bench twice ("duplicated benches"). Load only the active
+             * direction's table: LEVEL.MOV forward, LEVELB.MOV reverse. */
             static const char *s_prop_names[1]  = { "LEVEL.MOV" };
             static const char *s_propb_names[1] = { "LEVELB.MOV" };
-            int prop_sz = 0, propb_sz = 0;
-            void *prop_data = load_first_available_level_entry(track_index, s_prop_names, 1,
+            const char **prop_names = g_td5.reverse_direction ? s_propb_names : s_prop_names;
+            int prop_sz = 0;
+            void *prop_data = load_first_available_level_entry(track_index, prop_names, 1,
                                                                &prop_sz, NULL, 0);
-            void *propb_data;
             td5_track_load_td6_props(prop_data, (size_t)(prop_sz > 0 ? prop_sz : 0));
             free(prop_data);
-            propb_data = load_first_available_level_entry(track_index, s_propb_names, 1,
-                                                          &propb_sz, NULL, 0);
-            td5_track_append_td6_props(propb_data, (size_t)(propb_sz > 0 ? propb_sz : 0));
-            free(propb_data);
             /* PROPMESH.BIN = the 8 de-indexed COL furniture meshes the renderer
              * draws per MOV prop (model byte -> mesh). */
             {
