@@ -621,6 +621,19 @@ void td5_track_get_span_edges(int span_index,
 static int td6_branches_enabled(void);   /* fwd decl (task#17, defined below) */
 static int td6_routenet_enabled(void);   /* fwd decl (#20, defined below) */
 
+/* [#8/#20 2026-06-17] TD6 deep-wall handling: CAP the wall correction instead of
+ * REJECTING it. A rejected deep penetration applies no wall response, so the chassis
+ * stays on a bad span reference and the ground probe then RELOCATES it = the
+ * "teleport near a wall" (worst in REVERSE/STRIPB, where rail refs run deep). Capping
+ * pushes the car back a bounded amount instead — a correction, never a teleport.
+ * TD5RE_TD6_WALLCAP=0 restores the old reject. */
+static int td6_wallcap_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_WALLCAP"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s && (g_active_td6_level > 0);
+}
+
 /* [task#8 FIX 2026-06-14] TD6 SHALLOW-WALL DEADZONE. The year-long "invisible
  * wall at the beginning / span 110" is the collision firing a HARD wall response
  * on shallow penetrations (|pen| ~120-300) at TD6 road-TAPER spans (type 7, e.g.
@@ -796,15 +809,19 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
          * (walker-lag glitch) -> skip rather than fight it. */
         if (hit_l && hit_r) continue;
 
-        if (hit_l && pen_l <= -WALL_PEN_TELEPORT_LIMIT) {
+        if (hit_l && pen_l <= -WALL_PEN_TELEPORT_LIMIT && !td6_wallcap_enabled()) {
             TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d LEFT span=%d type=%d pen=%d "
                       "REJECTED (bogus -> would teleport)", actor->slot_index,
                       span_idx, type, pen_l);
         } else if (hit_l) {
+            int32_t pl = pen_l;
+            if (td6_wallcap_enabled() && pl < -WALL_PEN_TELEPORT_LIMIT)
+                pl = -WALL_PEN_TELEPORT_LIMIT;   /* [#8] cap instead of reject -> no teleport */
             double rad = atan2((double)left.nnx, (double)(-left.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-            td5_physics_wall_response(actor, wall_angle, pen_l, 1,
+            td5_physics_wall_response(actor, wall_angle, pl, 1,
                                       probe_block[pi].x, probe_block[pi].z);
+            pen_l = pl;
             td5_physics_rebuild_pose(actor);
             if (diag_slot0 || pen_l < -100)
                 TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d type=%d sub=%d pen=%d angle=%d",
@@ -824,14 +841,15 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
          * shoved back to the main road (the "teleport near the branch wall"). */
         int boundary_wall = (rc < lane_count);
         if (boundary_wall && td6_routenet_enabled()) { hit_r = 0; }
-        if (hit_r && pen_r <= -WALL_PEN_TELEPORT_LIMIT && !boundary_wall) {
+        if (hit_r && pen_r <= -WALL_PEN_TELEPORT_LIMIT && !boundary_wall &&
+            !td6_wallcap_enabled()) {
             TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d RIGHT span=%d type=%d pen=%d "
                       "REJECTED (bogus -> would teleport)", actor->slot_index,
                       span_idx, type, pen_r);
         } else if (hit_r) {
             int32_t pr = pen_r;
-            if (boundary_wall && pr < -WALL_PEN_TELEPORT_LIMIT)
-                pr = -WALL_PEN_TELEPORT_LIMIT;   /* cap the TD6 boundary correction */
+            if ((boundary_wall || td6_wallcap_enabled()) && pr < -WALL_PEN_TELEPORT_LIMIT)
+                pr = -WALL_PEN_TELEPORT_LIMIT;   /* [#8] cap (boundary OR TD6 geometric) -> no teleport */
             double rad = atan2((double)right.nnx, (double)(-right.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
             td5_physics_wall_response(actor, wall_angle, pr, 2,
