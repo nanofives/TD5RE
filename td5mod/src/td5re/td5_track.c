@@ -2507,7 +2507,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                  * their forks (deep converter rewrite), keep everyone on the main road
                  * and clamp into its lanes. Native TD5 (g_active_td6_level==0) untouched. */
                 if (g_active_td6_level > 0 && sl >= next_lanes &&
-                    (!td6_branches_enabled() ||
+                    (!td6_branches_enabled() || g_td5.reverse_direction ||
                      (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_next)))) {
                     *sub_lane = next_lanes - 1;
                     new_span = next_idx;
@@ -2560,7 +2560,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
                 if (g_active_td6_level > 0 && sl >= next_lanes &&
-                    (!td6_branches_enabled() ||
+                    (!td6_branches_enabled() || g_td5.reverse_direction ||
                      (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_next)))) {
                     *sub_lane = next_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x01) */
                     new_span = next_idx;
@@ -2621,7 +2621,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
                 if (g_active_td6_level > 0 && sl >= prev_lanes &&
-                    (!td6_branches_enabled() ||
+                    (!td6_branches_enabled() || g_td5.reverse_direction ||
                      (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_prev)))) {
                     /* TD6: force main for ALL, suppress the ~8000u-displaced branch
                      * (same rationale as fwd case 0x01). Reversing through a London
@@ -2671,7 +2671,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
                 if (g_active_td6_level > 0 && sl >= prev_lanes &&
-                    (!td6_branches_enabled() ||
+                    (!td6_branches_enabled() || g_td5.reverse_direction ||
                      (s_walker_is_traffic && td5_track_branch_blacklisted((int)sp->link_prev)))) {
                     *sub_lane = prev_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x04) */
                     new_span = prev_idx;
