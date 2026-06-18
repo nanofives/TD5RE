@@ -2636,19 +2636,32 @@ int td5_game_init_race_session(void) {
          * drive-throughs in advance_pending_finish_state (split + player HUD
          * ack), with no fail-timer and without gating the finish. */
         /* Synthesized checkpoints are FORWARD-strip spans (extracted from the
-         * forward checkpoint-banner meshes). In reverse the player's normalized
-         * span counts up the reverse-numbered STRIPB, so the forward thresholds
-         * would fire at the wrong physical points and in the wrong order. They
-         * are non-gating (split times + HUD flash only — they never end the
-         * race), so simply suppress them in reverse rather than mirroring the
-         * spans. P2P reverse still finishes on s_td6_finish_span; circuits stay
-         * lap-based. */
-        s_td6_cp_count = (g_active_td6_level > 0 && !g_td5.reverse_direction)
+         * forward checkpoint-banner meshes). In reverse the player drives the
+         * reverse-numbered STRIPB and the normalized span counts up 0..ring-1, so
+         * MIRROR each forward span F to its STRIPB span (ring-1-F) and sort ascending
+         * — then the same ascending-basis drive-through detection fires at the right
+         * physical points, in reverse order. Non-gating (split times + minimap
+         * markers); P2P reverse still finishes on s_td6_finish_span. */
+        s_td6_cp_count = (g_active_td6_level > 0)
             ? td5_asset_td6_checkpoint_spans(g_active_td6_level, s_td6_cp_spans)
             : 0;
-        if (g_active_td6_level > 0 && g_td5.reverse_direction)
-            TD5_LOG_I(LOG_TAG,
-                      "TD6 reverse: synthesized checkpoints suppressed (forward-keyed spans)");
+        if (s_td6_cp_count > 0 && g_td5.reverse_direction) {
+            int ring = td5_track_get_ring_length();
+            if (ring > 1) {
+                int i, j;
+                for (i = 0; i < s_td6_cp_count; i++) {
+                    int rs = ring - 1 - s_td6_cp_spans[i];
+                    if (rs < 0) rs = 0; else if (rs >= ring) rs = ring - 1;
+                    s_td6_cp_spans[i] = rs;
+                }
+                for (i = 1; i < s_td6_cp_count; i++) {   /* insertion sort ascending */
+                    int v = s_td6_cp_spans[i];
+                    for (j = i - 1; j >= 0 && s_td6_cp_spans[j] > v; j--)
+                        s_td6_cp_spans[j + 1] = s_td6_cp_spans[j];
+                    s_td6_cp_spans[j + 1] = v;
+                }
+            }
+        }
         memset(s_td6_cp_index, 0, sizeof(s_td6_cp_index));
         if (s_td6_cp_count > 0) {
             TD5_LOG_I(LOG_TAG,
@@ -6146,7 +6159,11 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
      * (s_td6_finish_span == 0) keep the normalized span — laps wrap there and
      * the normalized value is the correct lap-relative position. */
     int td6_cp_basis = (int)actor_span;
-    if (s_td6_finish_span > 0 && actor)
+    /* Forward P2P gates on the RAW accumulator (+0x84) to dodge the reverse-at-start
+     * normalized-span wrap. In REVERSE the player drives STRIPB forward so the
+     * normalized span (+0x82) counts up monotonically and is the right basis (the raw
+     * accumulator stays negative when driving the reverse direction). */
+    if (s_td6_finish_span > 0 && actor && !g_td5.reverse_direction)
         td6_cp_basis = (int)*(int16_t *)((uint8_t *)actor + 0x84);
     if (s_td6_cp_count > 0 &&
         s_td6_cp_index[slot] < s_td6_cp_count &&
