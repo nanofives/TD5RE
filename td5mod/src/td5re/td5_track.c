@@ -6379,7 +6379,10 @@ static const int16_t k_td6_surface_grip[32] = {
 };
 static const int16_t k_td6_surface_drag[32] = {
     0,0,0,0,0,2,0,0,0,0,8,0,0,0,0,0,
-    2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0   /* [16] = off-road/verge drag (grass-equivalent) */
+    16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0  /* [16] = off-road/verge (grass): heavy rolling
+                                       * drag so grass clearly bleeds speed, not just
+                                       * grip (was 2 -> only +17% over the coast base,
+                                       * unnoticeable while driving). grip stays 0x0be. */
 };
 
 /* Surface class at (span, lateral byte 0..255). -1 when no TD6 grid is loaded or
