@@ -6381,12 +6381,13 @@ void render_td6_props(const TD5_Actor *ref)
         ax = cx - gx; az = cz - gz;
         if (ax * ax + az * az > MAXD * MAXD) continue;
 
-        /* [#20] Plant on the real track surface under the prop (td5_track_td6_prop_ground_y
-         * now uses the car/shadow ground probe at the prop XZ). The authored MOV Y is
-         * NOT the ground (planting at it floated the props), so it is not used here. */
+        /* [#20] Plant FLAT on the track surface under the prop (yaw only). Matches the
+         * original: props are glued to the ground horizontally; on a slope the high side
+         * rests on the ground and the rest clips into the terrain (NOT tilted to the
+         * slope normal). td5_track_td6_prop_ground_y gives the planting height. */
         base_y = td5_track_td6_prop_ground_y(i, gy);
         lift   = base_y - m->min_y;                    /* mesh bottom -> ground */
-        (void)py;                                      /* MOV Y not used for planting */
+        (void)py;                                      /* MOV Y handled inside ground_y */
         a  = (float)angle * (2.0f * (float)M_PI / 4096.0f);
         ca = cosf(a); sa = sinf(a);
 

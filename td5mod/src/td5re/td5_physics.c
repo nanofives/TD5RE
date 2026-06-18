@@ -1968,6 +1968,17 @@ static int td6_props_enabled(void)
     return s;
 }
 
+/* [#20 pushable] A/B knob: TD5RE_TD6_PUSH=0 reverts to break-everything-on-contact.
+ * Default on: props (MOV byte-6 mass != 0) are SHOVED and the car's speed penalty
+ * scales with mass (light props barely slow it); a prop only BREAKS on a hard,
+ * heavy impulse. Matches the original (RE: mass=0 immovable, break when impulse>30000). */
+static int td6_push_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_PUSH"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
 static void td5_physics_check_td6_props(TD5_Actor *actor)
 {
     int n, i, w;
@@ -1988,21 +1999,35 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
     speed = (int32_t)td5_isqrt((uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
     if (speed < 0x1000) return;   /* ~3 MPH: ignore the stationary start grid */
     cx = actor->world_pos.x; cz = actor->world_pos.z;
-    /* Swept-path anti-tunnelling: at speed the per-tick step can exceed a prop's
-     * radius, so the point-in-circle test could land just before AND just past a
-     * prop without a sampled tick ever being inside it ("sometimes doesn't break
-     * despite running them over"). Build the SEGMENT from last tick's centre to
-     * this one (per-slot cache, world units) and test the prop against it. */
+    /* Model the car body as a CAPSULE along its HEADING: segment [center +/- fwd*
+     * half_len], radius half_width (=550, folded into the rw+550 test below). The
+     * earlier swept-segment + velocity-forward-reach mis-fired BOTH ways — the
+     * velocity direction lies when you turn (kick before you touch / miss entirely),
+     * and a prop sitting directly ahead BETWEEN the front wheels fell in the centre
+     * test's blind spot (>550 from centre, inside no wheel). A heading-aligned
+     * capsule covers the whole footprint, fires exactly at contact, and is steer-
+     * correct. half_len is derived from the frontmost wheel so the front cap
+     * (half_len + half_width) lands on the bumper for any car. */
     {
-        static int32_t s_ppx[16], s_ppz[16];
-        static uint8_t s_ppok[16];
-        int slot = (int)actor->slot_index;
-        if (slot < 0 || slot >= 16) slot = -1;
-        if (slot >= 0 && s_ppok[slot]) { seg_ax = s_ppx[slot] >> 8; seg_az = s_ppz[slot] >> 8; }
-        else                          { seg_ax = cx >> 8;           seg_az = cz >> 8; }
-        if (slot >= 0) { s_ppx[slot] = cx; s_ppz[slot] = cz; s_ppok[slot] = 1; }
+        int32_t yaw = (int32_t)actor->display_angles.yaw & 0xFFF;
+        float fwx = td5_sin_12bit((uint32_t)yaw);
+        float fwz = td5_cos_12bit((uint32_t)yaw);
+        float maxp = 0.0f;
+        int   wi;
+        int32_t half_len;
+        for (wi = 0; wi < 4; wi++) {
+            float rx = (float)(actor->wheel_contact_pos[wi].x - cx) * (1.0f / 256.0f);
+            float rz = (float)(actor->wheel_contact_pos[wi].z - cz) * (1.0f / 256.0f);
+            float p  = rx * fwx + rz * fwz; if (p < 0.0f) p = -p;   /* longitudinal */
+            if (p > maxp) maxp = p;
+        }
+        half_len = (int32_t)maxp - 300;   /* + bumper overhang (~250) - cap radius (550) */
+        if (half_len < 50) half_len = 50;
+        seg_ax = (cx >> 8) - (int32_t)(fwx * (float)half_len);
+        seg_az = (cz >> 8) - (int32_t)(fwz * (float)half_len);
+        seg_dx = (int32_t)(fwx * (float)(half_len * 2));
+        seg_dz = (int32_t)(fwz * (float)(half_len * 2));
     }
-    seg_dx = (cx >> 8) - seg_ax; seg_dz = (cz >> 8) - seg_az;
     seg_len2 = (int64_t)seg_dx * seg_dx + (int64_t)seg_dz * seg_dz;
     for (i = 0; i < n; i++) {
         int32_t px, pz, rw, hy, pxw, pzw, qx, qz;
@@ -2040,12 +2065,34 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
              * ~1252 per MPH so 0x3200 ~= 10 MPH); robust to contact angle. */
             int32_t strength = (int32_t)td5_isqrt(
                     (uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
-            /* Solid thud: shed ~1/4 of velocity so you feel the furniture. */
-            vx -= vx >> 2;
-            vz -= vz >> 2;
-            td5_track_td6_prop_set_broken(i);   /* one-shot: now drive through */
-            TD5_LOG_D(LOG_TAG, "TD6 prop break: idx=%d slot=%d strength=%d",
-                      i, (int)actor->slot_index, strength);
+            int mass = td5_track_td6_prop_mass(i);   /* MOV byte 6; 0 = immovable */
+            int m4 = mass * 4; if (m4 < 1) m4 = 1;   /* TD6 internal mass = byte6<<2 */
+            int do_break;
+            if (!td6_push_enabled() || mass == 0) {
+                /* [#20] Legacy / immovable: solid thud (shed ~1/4 speed). Immovable
+                 * props never break; with the knob off everything breaks as before. */
+                vx -= vx >> 2; vz -= vz >> 2;
+                do_break = (td6_push_enabled() ? 0 : 1);
+            } else {
+                /* [#20 PUSHABLE] Shove the prop in the car's travel direction, scaled
+                 * inversely by mass (light bench m4=100 ~0.89x car speed, heavy m4=664
+                 * ~0.55x) — the kick the user liked. The car slows proportionally to
+                 * mass (light barely, heavy noticeably). Prop slides/decays + slide-cap
+                 * via td5_track_td6_props_tick. */
+                int32_t dvx = (int32_t)(((int64_t)vx0 * 800) / (800 + m4));
+                int32_t dvz = (int32_t)(((int64_t)vz0 * 800) / (800 + m4));
+                td5_track_td6_prop_push(i, dvx, dvz);
+                vx -= (int32_t)(((int64_t)vx * m4) / (4000 + m4));
+                vz -= (int32_t)(((int64_t)vz * m4) / (4000 + m4));
+                /* Break only on a hard, heavy impulse (mass-weighted speed). Light
+                 * furniture (low mass) is effectively unbreakable — it just shoves. */
+                do_break = ((int64_t)strength * mass > 6000000LL);
+                if (do_break) { vx -= vx >> 2; vz -= vz >> 2; }
+            }
+            if (do_break)
+                td5_track_td6_prop_set_broken(i);   /* one-shot: now drive through */
+            TD5_LOG_D(LOG_TAG, "TD6 prop hit: idx=%d slot=%d strength=%d mass=%d %s",
+                      i, (int)actor->slot_index, strength, mass, do_break ? "BREAK" : "push");
             if (strength > 0x2400) {
                 int32_t wpos[3] = { px, hy, pz };
                 int variant = (strength < 0x19000) ? 0x16 : 0x1b;
@@ -2055,18 +2102,17 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
                 int32_t ff_mag;
                 if (pitch < 0x400) pitch = 0x400;
                 else if (pitch > 0x800) pitch = 0x800;
-                /* crash SFX (mirrors the wall-impact param order @0x406B70) */
+                /* crash/thud SFX (mirrors the wall-impact param order @0x406B70) */
                 td5_sound_play_at_position(variant, pitch, mag, wpos, volume);
                 ff_mag = strength >> 2;
                 if (ff_mag > 99999) ff_mag = 100000;
-                /* Decaying directional FF pulse via the collision path (master's
-                 * newer API): head-on prop plow -> FRONT contact (0x01),
-                 * actor_b_slot = -1 (single actor). */
                 td5_input_ff_collision(0x01, (int)actor->slot_index, -1, ff_mag);
-                td5_vfx_queue_prop_break((float)px * (1.0f / 256.0f),
-                                         (float)hy * (1.0f / 256.0f),
-                                         (float)pz * (1.0f / 256.0f),
-                                         strength);
+                /* debris burst only when the prop actually BREAKS (not on a push) */
+                if (do_break)
+                    td5_vfx_queue_prop_break((float)px * (1.0f / 256.0f),
+                                             (float)hy * (1.0f / 256.0f),
+                                             (float)pz * (1.0f / 256.0f),
+                                             strength);
             }
         }
     }
@@ -2570,6 +2616,13 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         /* [task#14] TD6 breakable-prop collision (player + AI racers), after the
          * per-tick position/velocity update so wheel contacts are current. */
         td5_physics_check_td6_props(actor);
+        /* [#20 pushable] Slide/decay pushed props ONCE per sim tick (this loop runs
+         * per actor; guard on the tick counter so the integrator advances once). */
+        {
+            static uint32_t s_last_prop_tick = 0xFFFFFFFFu;
+            uint32_t t = (uint32_t)g_td5.simulation_tick_counter;
+            if (t != s_last_prop_tick) { s_last_prop_tick = t; td5_track_td6_props_tick(); }
+        }
     } else if (actor->vehicle_mode == 1 && !g_game_paused) {
         /* 6b. Scripted recovery mode [CONFIRMED @ 0x00406881 / 0x00409BF0 + 0x00409D20]
          * Tier 2 NOT_PORTED port (2026-05-24): replaces the prior partial

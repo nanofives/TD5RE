@@ -138,6 +138,11 @@ void             td5_track_append_td6_props(const void *data, size_t size);
 int              td5_track_td6_prop_count(void);
 int              td5_track_td6_prop_get_mov(int i, int32_t *out_px, int32_t *out_py,
                                             int32_t *out_pz, int *out_model, int *out_angle);
+/* [#20 pushable] Mass (MOV byte 6; 0=immovable), add slide velocity (24.8/tick),
+ * and the once-per-tick integrator that slides/decays/settles pushed props. */
+int              td5_track_td6_prop_mass(int i);
+void             td5_track_td6_prop_push(int i, int32_t dvx, int32_t dvz);
+void             td5_track_td6_props_tick(void);
 int              td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
                                         int *out_radius_w, int *out_span);
 int              td5_track_td6_prop_is_broken(int i);

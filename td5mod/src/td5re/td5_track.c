@@ -157,7 +157,10 @@ static int              s_td6_surface_grid_rows = 0;
  * Record = 16 bytes: type@0(0xFF term), radius@1, strip-seg u16@4, posX i32@8
  * (24.8), posZ i32@12. */
 typedef struct { int32_t px, py, pz; int16_t span, angle; uint8_t radius, type, broken, model;
-                 float ground_y; uint8_t ground_done; } TD6Prop;
+                 float ground_y; uint8_t ground_done;
+                 /* [#20 pushable] mass (MOV byte 6); runtime slide state (24.8 world):
+                  * vx/vz = velocity per tick, ox/oz = accumulated displacement from px/pz. */
+                 uint8_t mass; int32_t vx, vz, ox, oz; } TD6Prop;
 static TD6Prop          s_td6_props[1024];
 static int              s_td6_prop_count = 0;
 /* COL_00..07 bounding radii (world units) -> collision radius per furniture model
@@ -1696,20 +1699,32 @@ int td5_track_surface_is_slow(int surface_type)
  * when a proper sub-range was found (some edge lane is a different class). */
 int td5_track_td6_road_band(int span_index, int lane_count, int *out_lo, int *out_hi)
 {
-    int center, cc, lo, hi;
+    int i, best_lo = 0, best_hi, best_w = -1;
     if (lane_count <= 1) {
         if (out_lo) *out_lo = 0;
         if (out_hi) *out_hi = (lane_count > 0) ? lane_count - 1 : 0;
         return 0;
     }
-    center = lane_count / 2;
-    cc = td5_track_get_span_lane_surface(span_index, center);
-    lo = hi = center;
-    while (lo > 0 && td5_track_get_span_lane_surface(span_index, lo - 1) == cc) lo--;
-    while (hi < lane_count - 1 && td5_track_get_span_lane_surface(span_index, hi + 1) == cc) hi++;
-    if (out_lo) *out_lo = lo;
-    if (out_hi) *out_hi = hi;
-    return (lo > 0 || hi < lane_count - 1);
+    best_hi = lane_count - 1;
+    /* [#20 2026-06-17] The drivable road is the WIDEST contiguous run of one surface
+     * class. The earlier version seeded at the GEOMETRIC centre and grew the centre
+     * lane's class — but on reverse strips the road is off-centre (London STRIPB ~span
+     * 20 = [3,3,16,16,7,1,1,1], road=class1 at cells 5-7, centre=sidewalk), so the band
+     * (and the spawn that centres on it) landed on the sidewalk. The widest run is the
+     * carriageway in both directions (forward = [7,7,1,1,1,1,7,7] -> class1 cells 2-5),
+     * so this is forward-identical for London and finds the real road in reverse. */
+    i = 0;
+    while (i < lane_count) {
+        int c = td5_track_get_span_lane_surface(span_index, i);
+        int j = i;
+        while (j + 1 < lane_count &&
+               td5_track_get_span_lane_surface(span_index, j + 1) == c) j++;
+        if (j - i > best_w) { best_w = j - i; best_lo = i; best_hi = j; }
+        i = j + 1;
+    }
+    if (out_lo) *out_lo = best_lo;
+    if (out_hi) *out_hi = best_hi;
+    return (best_lo > 0 || best_hi < lane_count - 1);
 }
 
 static void *build_span_strip_display_list(int span_index)
@@ -6434,6 +6449,8 @@ void td5_track_append_td6_props(const void *data, size_t size)
                 pr->broken      = 0;
                 pr->ground_y    = 0.0f;
                 pr->ground_done = 0;
+                pr->mass = r[6];                /* [#20 pushable] MOV byte 6 = mass/movability */
+                pr->vx = pr->vz = pr->ox = pr->oz = 0;
                 pr->span    = 0;
                 /* [#20] X, Y, Z are ALL s32 24.8 at [12:16]/[16:20]/[20:24] (byte 18 is
                  * the Y high-byte, NOT an angle). The ROTATION is the single orientation
@@ -6467,8 +6484,8 @@ int td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
                            int *out_radius_w, int *out_span)
 {
     if (i < 0 || i >= s_td6_prop_count) return 0;
-    if (out_px)       *out_px = s_td6_props[i].px;
-    if (out_pz)       *out_pz = s_td6_props[i].pz;
+    if (out_px)       *out_px = s_td6_props[i].px + s_td6_props[i].ox;  /* [#20] displaced when pushed */
+    if (out_pz)       *out_pz = s_td6_props[i].pz + s_td6_props[i].oz;
     if (out_radius_w) *out_radius_w = (int)s_td6_props[i].radius * 16;
     if (out_span)     *out_span = (int)s_td6_props[i].span;
     return 1;
@@ -6480,12 +6497,63 @@ int td5_track_td6_prop_get_mov(int i, int32_t *out_px, int32_t *out_py, int32_t 
                                int *out_model, int *out_angle)
 {
     if (i < 0 || i >= s_td6_prop_count) return 0;
-    if (out_px)    *out_px    = s_td6_props[i].px;
+    if (out_px)    *out_px    = s_td6_props[i].px + s_td6_props[i].ox;  /* [#20] displaced when pushed */
     if (out_py)    *out_py    = s_td6_props[i].py;
-    if (out_pz)    *out_pz    = s_td6_props[i].pz;
+    if (out_pz)    *out_pz    = s_td6_props[i].pz + s_td6_props[i].oz;
     if (out_model) *out_model = (int)s_td6_props[i].model;
     if (out_angle) *out_angle = (int)s_td6_props[i].angle;
     return 1;
+}
+
+/* [#20 pushable] Mass (MOV byte 6). 0 = immovable; larger = harder to push / slows
+ * the car more. London props are 25..166. */
+int td5_track_td6_prop_mass(int i)
+{
+    if (i < 0 || i >= s_td6_prop_count) return 0;
+    return (int)s_td6_props[i].mass;
+}
+
+/* [#20 pushable] Add slide velocity to prop i (24.8 world units / tick), in the
+ * same units the car integrates (world_pos += linear_velocity). Ignored once broken. */
+void td5_track_td6_prop_push(int i, int32_t dvx, int32_t dvz)
+{
+    if (i < 0 || i >= s_td6_prop_count) return;
+    if (td5_track_td6_prop_is_broken(i)) return;
+    s_td6_props[i].vx += dvx;
+    s_td6_props[i].vz += dvz;
+}
+
+/* [#20 pushable] Per-sim-tick integrator: slide pushed props (ox/oz += v), decay with
+ * ~6%/tick rolling drag (matches TD6 v -= v*0xFA/0x1000), settle when slow so they
+ * come to rest. Deterministic (no RNG) -> netplay/replay safe. Call ONCE per tick. */
+void td5_track_td6_props_tick(void)
+{
+    int i;
+    for (i = 0; i < s_td6_prop_count; i++) {
+        TD6Prop *pr = &s_td6_props[i];
+        if (pr->vx == 0 && pr->vz == 0) continue;
+        pr->ox += pr->vx;
+        pr->oz += pr->vz;
+        pr->vx -= (pr->vx * 250) >> 12;
+        pr->vz -= (pr->vz * 250) >> 12;
+        if (pr->vx < 0x80 && pr->vx > -0x80 && pr->vz < 0x80 && pr->vz > -0x80) {
+            pr->vx = 0; pr->vz = 0;            /* settle (<0.5 world units/tick) */
+        }
+        /* [#20] Containment: the building walls are render-only MODELS.DAT (no
+         * collision), so cap the total slide distance from the prop's authored spot —
+         * a prop can be shoved a believable distance but never travels through a wall /
+         * off the map. Hitting the cap stops it dead. (~1200 world units.) */
+        {
+            const int32_t MAXSLIDE = 2000 << 8;   /* 24.8 world units */
+            int64_t d2 = (int64_t)pr->ox * pr->ox + (int64_t)pr->oz * pr->oz;
+            if (d2 > (int64_t)MAXSLIDE * MAXSLIDE) {
+                float inv = (float)MAXSLIDE / sqrtf((float)d2);
+                pr->ox = (int32_t)((float)pr->ox * inv);
+                pr->oz = (int32_t)((float)pr->oz * inv);
+                pr->vx = 0; pr->vz = 0;
+            }
+        }
+    }
 }
 
 /* [task#14] Per-prop "broken" one-shot state. A prop breaks on first impact:
@@ -6554,43 +6622,36 @@ float td5_track_td6_prop_ground_y(int prop_index, float fallback)
     {
         const float inv256 = 1.0f / 256.0f;
         float wx = (float)pr->px * inv256, wz = (float)pr->pz * inv256;
-        /* [#20 2026-06-17] Plant on the ACTUAL track surface under the prop, using
-         * the same ground-contact probe the car/shadow use. The old method (lowest
-         * LEFT/RIGHT-rail vertex within 3000u) never sampled the SIDEWALK lanes the
-         * props actually stand on, and missed off-road props entirely (London benches
-         * sit 5-14k from the rails) -> it fell back to an arbitrary far vertex and the
-         * prop floated. Step 1: find the nearest span by rail-vertex distance to seed
-         * the walk. Step 2: walk a probe to the prop XZ (px/pz are 24.8) and read the
-         * best-lane surface height there (returns 24.8 -> world units). */
-        int best_span = 0; float best_d2 = 1e30f; int s;
+        /* [#20 2026-06-17] Plant at the NEAREST ROAD-SURFACE height — the centre Y of
+         * the span whose centre is closest to the prop in XZ (= the actual surface the
+         * car drives on near the prop). Earlier attempts read TOO HIGH: the strip
+         * contact PROBE extrapolates the road plane sideways to off-road props
+         * (~constant 12500 across the garden vs the ~12166 the car actually drives), and
+         * the authored MOV Y is the original's terrain placement that our strip-based
+         * world doesn't match. The nearest span CENTRE is the real, un-extrapolated road
+         * height beside the prop, and it's lower — so benches sit on the ground (higher
+         * terrain may clip through them, matching the original "highest part on the
+         * ground, rest clips"). */
+        float best_d2 = 1e30f; float ground = fallback; int s;
         for (s = 0; s < s_span_count; s++) {
             const TD5_StripSpan *sp = &s_span_array[s];
-            const TD5_StripVertex *vl = vertex_at((int)sp->left_vertex_index);
-            const TD5_StripVertex *vr = vertex_at((int)sp->right_vertex_index);
-            float ox = (float)(int32_t)sp->origin_x, oz = (float)(int32_t)sp->origin_z;
-            int k; const TD5_StripVertex *vv[2]; vv[0] = vl; vv[1] = vr;
-            for (k = 0; k < 2; k++) {
-                const TD5_StripVertex *v = vv[k];
-                float vx, vz, dx, dz, d2;
-                if (!v) continue;
-                vx = ox + v->x; vz = oz + v->z;
-                dx = vx - wx; dz = vz - wz; d2 = dx*dx + dz*dz;
-                if (d2 < best_d2) { best_d2 = d2; best_span = s; }
+            int lc = span_lane_count(sp); if (lc < 1) lc = 1;
+            const TD5_StripVertex *a = vertex_at((int)sp->left_vertex_index);
+            const TD5_StripVertex *b = vertex_at((int)sp->left_vertex_index + lc);
+            const TD5_StripVertex *c = vertex_at((int)sp->right_vertex_index);
+            const TD5_StripVertex *d = vertex_at((int)sp->right_vertex_index + lc);
+            float ccx, ccz, dx, dz, d2;
+            if (!a || !b || !c || !d) continue;
+            ccx = (float)(int32_t)sp->origin_x + ((float)a->x + (float)b->x + (float)c->x + (float)d->x) * 0.25f;
+            ccz = (float)(int32_t)sp->origin_z + ((float)a->z + (float)b->z + (float)c->z + (float)d->z) * 0.25f;
+            dx = ccx - wx; dz = ccz - wz; d2 = dx*dx + dz*dz;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                ground = (float)(int32_t)sp->origin_y +
+                         ((float)a->y + (float)b->y + (float)c->y + (float)d->y) * 0.25f;
             }
         }
-        {
-            TD5_TrackProbeState probe;
-            int32_t gy24; int ps;
-            memset(&probe, 0, sizeof(probe));
-            probe.span_index = (int16_t)best_span;
-            probe.sub_lane_index = 0;
-            td5_track_update_probe_position(&probe, pr->px, pr->pz);
-            ps = (int)probe.span_index;
-            if (ps < 0) ps = 0;
-            if (ps >= s_span_count) ps = s_span_count - 1;
-            gy24 = td5_track_compute_contact_height_bestlane(ps, pr->px, pr->pz, NULL);
-            pr->ground_y = (float)gy24 * inv256;
-        }
+        pr->ground_y = ground;
         pr->ground_done = 1;
         return pr->ground_y;
     }
