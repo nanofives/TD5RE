@@ -1341,12 +1341,24 @@ static void append_projected_triangle(const TD5_D3DVertex *v0,
  *   plane, perspective projection formula, UV/color interp on cut edges)
  *   are preserved. See the Phase 5(d) D3D Pipeline manifest at file footer
  *   for the full address list. */
+/* [#20 HK reverse] When >0, drop any polygon with a vertex above this model-space Y
+ * — set ONLY while drawing the in-road HK building submeshes (entry 509 sub 8/10/11)
+ * so their WALLS/ROOF go but their road-level faces stay (the submesh bundles the
+ * road surface with the building, so dropping the whole submesh holed the road). */
+static float s_hk_clip_y = 0.0f;
+
 static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
                                     int tex_page)
 {
     /* Working buffer for clipped polygon (max 8 verts after clipping) */
     TD5_D3DVertex clipped[8];
     int clipped_count = 0;
+
+    if (s_hk_clip_y > 0.0f) {
+        int hk;
+        for (hk = 0; hk < vert_count; hk++)
+            if (vert_data[hk].pos_y > s_hk_clip_y) return;
+    }
 
     float near_z = s_near_clip;
 
@@ -2582,6 +2594,24 @@ void td5_render_span_display_list(void *display_list_block)
         if (r != r || r < 0.0f) continue;
         if (cx != cx || cy != cy || cz != cz) continue;
 
+        /* [#20 HK reverse] DELIBERATE DEVIATION (user-requested): remove the building
+         * standing in the Hong Kong REVERSE racing line (models entry 509 sub 8/10/11,
+         * matched by EXACT bounding centre). Each of those submeshes spans from road
+         * level up to the roof, so instead of dropping them whole (which holed the
+         * road) we set a clip height: clip_and_submit_polygon then drops their WALL/
+         * ROOF faces and KEEPS their road-level faces. Neighbours (different centres)
+         * and the road are untouched. HK (level 11) reverse only; forward keeps it. */
+        s_hk_clip_y = 0.0f;
+        if (g_active_td6_level == 11 && g_td5.reverse_direction && cy > 5000.0f) {
+            static const float hk_bldg[3][2] = {
+                { 411028.0f, 1731209.0f }, { 416336.0f, 1725277.0f }, { 413088.0f, 1725313.0f } };
+            int bi;
+            for (bi = 0; bi < 3; bi++) {
+                float dbx = cx - hk_bldg[bi][0], dbz = cz - hk_bldg[bi][1];
+                if (dbx * dbx + dbz * dbz < 350.0f * 350.0f) { s_hk_clip_y = 3500.0f; break; }
+            }
+        }
+
         /* [task#7] One-shot dump of the first few billboard meshes' bounding
          * centres: clustered near (0,0,0) == the stale origin-fold asset bug
          * (trees piled at world origin -> culled everywhere but the start);
@@ -2701,6 +2731,7 @@ void td5_render_span_display_list(void *display_list_block)
             s_debug_span_meshes_submitted++;
         }
     }
+    s_hk_clip_y = 0.0f;   /* [#20 HK reverse] don't leak the building clip into vehicles/other */
 
     if ((s_debug_dl_calls % 500) == 1) {
         TD5_LOG_I(LOG_TAG,
