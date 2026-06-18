@@ -72,8 +72,11 @@ def regen(asset_level, td6_level, circuit):
 
 
 if __name__ == "__main__":
-    # default: London (asset 12, TD6 level 4, P2P)
-    targets = [(12, 4, 0)]
+    # default: ALL 11 migrated TD6 tracks (asset_level, td6_level, circuit). circuit
+    # per k_td6_menu_slots: London/Paris/NewYork/Rome/HongKong = P2P (0); the rest
+    # (Pelton/Ireland/Tahoe/CapeHatteras/Switzerland/Egypt) = circuit (1).
+    targets = [(12, 4, 0), (8, 0, 0), (9, 1, 0), (10, 2, 0), (11, 3, 0),
+               (7, 10, 1), (18, 11, 1), (19, 15, 1), (20, 16, 1), (21, 17, 1), (22, 18, 1)]
     if len(sys.argv) >= 4:
         targets = [(int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))]
     for asset, td6, circ in targets:
