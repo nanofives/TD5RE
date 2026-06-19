@@ -5677,7 +5677,7 @@ static int frontend_qr_pick_random_car(void) {
  * (mirrors frontend_pick_random_track + the QR cycler's exclusive bound). Writes
  * s_selected_track and returns 1 on change. */
 static int frontend_qr_pick_random_track(void) {
-    int track_max = s_network_active ? 0x13 : s_total_unlocked_tracks; /* exclusive */
+    int track_max = s_total_unlocked_tracks; /* exclusive (net incl. TD6 26-36 now) */
     if (track_max <= 0) return 0;
     if (track_max > 64) track_max = 64;
     int cand[64];

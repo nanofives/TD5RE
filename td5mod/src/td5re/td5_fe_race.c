@@ -905,7 +905,7 @@ static void frontend_delete_cup_data(void) {
 /* Cycle s_selected_track by delta, skipping the Drag Strip (schedule index 19)
  * and any track whose level data is absent. One full revolution then give up. */
 static void frontend_quickrace_cycle_track(int delta) {
-    int track_max = s_network_active ? 0x13 : s_total_unlocked_tracks; /* exclusive bound */
+    int track_max = s_total_unlocked_tracks; /* exclusive bound (net incl. TD6 26-36 now) */
     if (track_max <= 0) return;
     int start = s_selected_track;
     int attempts = track_max + 1;
@@ -3848,14 +3848,13 @@ void Screen_TrackSelection(void) {
         s_trksel_rand_btn = -1;   /* [#14] (re)assigned with the buttons below */
 
         /* Validate track index for cup modes: skip locked/invalid NPC groups */
-        /* Determine track max for current mode */
-        if (s_network_active) {
-            s_track_max = 18; /* 19 tracks total */
-        } else if (s_two_player_mode) {
-            s_track_max = s_total_unlocked_tracks;
-        } else {
-            s_track_max = s_total_unlocked_tracks;
-        }
+        /* Determine track max for current mode. [2026-06-19] Net play can now
+         * pick the migrated TD6 tracks (menu slots 26-36) too: both peers share
+         * identical assets and the selected slot index propagates in the race
+         * config, so it loads deterministically. Previously net was capped at 18
+         * (the 19 native TD5 tracks), hiding every TD6 track from the host's
+         * picker. All modes now use the full unlocked bound. */
+        s_track_max = s_total_unlocked_tracks;
         /* [#14] With the RANDOMIZE button on (default), the 2P "?" (-1) random list
          * entry is retired, so default an out-of-range/stale selection to track 0 in
          * every mode. (TD5RE_RANDOM_BUTTON=0 restores the legacy 2P -1 default.) */
@@ -4108,7 +4107,7 @@ void Screen_TrackSelection(void) {
              * a manual cycle (hide preview this frame, reload + slide-in via 5->9).
              * track_max is exclusive; network caps at 0x13 like frontend_cycle_track. */
             if (s_trksel_rand_btn >= 0 && s_button_index == s_trksel_rand_btn) {
-                int bound = s_network_active ? 0x13 : s_track_max;
+                int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
                 if (frontend_pick_random_track(bound)) {
                     frontend_play_sfx(3);
                     TD5_LOG_I(LOG_TAG, "TrackSel RANDOMIZE: track=%d level=%d name=%s",
