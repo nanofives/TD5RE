@@ -3699,7 +3699,7 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     for (int i = 0; i < n; i++) lab[i].ly = lab[i].dy;
     for (int i = 0; i < n - 1; i++)            /* selection sort by ly (small n) */
         for (int j = i + 1; j < n; j++)
-            if (lab[j].ly < lab[i].ly) { typeof(lab[0]) t = lab[i]; lab[i] = lab[j]; lab[j] = t; }
+            if (lab[j].ly < lab[i].ly) { __typeof__(lab[0]) t = lab[i]; lab[i] = lab[j]; lab[j] = t; }
     float top_limit = ct + cap_h * 0.5f + 2.0f;
     float bot_limit = cb - cap_h * 0.5f - 2.0f;
     for (int i = 0; i < n; i++) {

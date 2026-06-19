@@ -98,7 +98,7 @@ int td5re_init(void) {
     int saved_w = g_td5.render_width;
     int saved_h = g_td5.render_height;
     int saved_intro = g_td5.intro_movie_pending;
-    typeof(g_td5.ini) saved_ini = g_td5.ini;
+    __typeof__(g_td5.ini) saved_ini = g_td5.ini;
     memset(&g_td5, 0, sizeof(g_td5));
 
     /* Restore main.c settings */

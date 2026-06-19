@@ -45,6 +45,7 @@ jobs:
             build/d3d3.o build/device3.o build/viewport3.o \
             build/texture2.o build/d3d11_backend.o build/png_loader.o
 
+      # Module list mirrors build_standalone.bat (TD5RE_SRCS_COMMON) — keep in sync.
       - name: Build td5re.exe (source port)
         run: |
           cd td5mod/src/td5re
@@ -55,12 +56,15 @@ jobs:
           CFLAGS="-c -O2 -Wall -Wextra -m32 -std=c11 -I. -I$WRAPPER_SRCDIR -DTD5_INFLATE_USE_ZLIB"
 
           SRCS="td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c \
-                td5_render.c td5_frontend.c td5_hud.c td5_sound.c td5_input.c \
-                td5_asset.c td5_inflate.c td5_save.c td5_net.c td5_camera.c \
-                td5_vfx.c td5_fmv.c td5_platform_win32.c td5re_stubs.c main.c"
+                td5_render.c td5_frontend.c td5_fe_net.c td5_fe_race.c td5_fe_menu.c \
+                td5_frontend_button_cache.c td5_font.c td5_hud.c td5_sound.c td5_input.c \
+                td5_asset.c td5_assetsrc.c deps/cjson/cJSON.c td5_inflate.c td5_save.c \
+                td5_net.c td5_upnp.c td5_camera.c td5_vfx.c td5_fmv.c td5_benchmark.c \
+                td5_trace.c td5_trig_lut_data.c td5_profile.c td5_jobs.c td5_rcmd.c \
+                td5_platform_win32.c td5_msvc_rand.c main.c"
 
           for src in $SRCS; do
-            name="${src%.c}"
+            name=$(basename "${src%.c}")
             gcc $CFLAGS "$src" -o "build/$name.o"
           done
 
@@ -73,60 +77,28 @@ jobs:
           ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
           ar rcs build/libtd5re.a $ARCHIVE_OBJS
 
-          gcc -m32 -static -o build/td5re.exe \
+          gcc -m32 -mwindows -static -o build/td5re.exe \
             build/main.o $RES_OBJ \
             -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
             -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
             -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
             -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
+            -lmfplat -lmfreadwrite -lmfuuid \
             -Wl,--enable-stdcall-fixup \
             -Wl,--allow-multiple-definition
 
-      - name: Build td5_mod.asi
-        run: |
-          cd td5mod
-          MINHOOK=deps/minhook-1.3.4
-          mkdir -p build build/scripts
-          CFLAGS="-c -O2 -Wall -DWIN32 -m32"
-
-          gcc $CFLAGS -I"$MINHOOK/include" -I"$MINHOOK/src"     "$MINHOOK/src/hook.c"          -o build/hook.o
-          gcc $CFLAGS -I"$MINHOOK/include" -I"$MINHOOK/src"     "$MINHOOK/src/buffer.c"        -o build/buffer.o
-          gcc $CFLAGS -I"$MINHOOK/include" -I"$MINHOOK/src"     "$MINHOOK/src/trampoline.c"    -o build/trampoline.o
-          gcc $CFLAGS -I"$MINHOOK/include" -I"$MINHOOK/src/hde" "$MINHOOK/src/hde/hde32.c"     -o build/hde32.o
-
-          gcc $CFLAGS -I"$MINHOOK/include" -Isrc                 src/td5_mod.c                  -o build/td5_mod.o
-          gcc $CFLAGS -I"$MINHOOK/include" -Isrc                 src/td5_tuning.c               -o build/td5_tuning.o
-          gcc $CFLAGS                      -Isrc                 src/td5_asset_dump.c            -o build/td5_asset_dump.o
-          gcc $CFLAGS -Wno-unused-function -Isrc -Iddraw_wrapper/src src/td5_png_replace.c      -o build/td5_png_replace.o
-
-          gcc -m32 -shared -static -o build/scripts/td5_mod.asi \
-            build/td5_mod.o build/td5_tuning.o build/td5_asset_dump.o \
-            build/td5_png_replace.o \
-            build/hook.o build/buffer.o build/trampoline.o build/hde32.o \
-            -lkernel32 -luser32 -lgdi32 -s
-
       # -----------------------------------------------------------------------
-      # Package artifacts and create GitHub Release
+      # Package artifact and create GitHub Release
       # -----------------------------------------------------------------------
       - name: Package artifacts
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
 
-          # td5re source port
           mkdir -p dist/td5re
           cp td5mod/src/td5re/build/td5re.exe dist/td5re/
           cd dist
           7z a "td5re-${TAG}-win32.zip" td5re/
-          cd ..
-
-          # ASI mod
-          mkdir -p dist/td5mod
-          cp td5mod/build/scripts/td5_mod.asi dist/td5mod/
-          # Include ini if present
-          [ -f scripts/td5_mod.ini ] && cp scripts/td5_mod.ini dist/td5mod/ || true
-          cd dist
-          7z a "td5-mod-${TAG}-win32.zip" td5mod/
           cd ..
 
       - name: Create GitHub Release
@@ -138,4 +110,3 @@ jobs:
           generate_release_notes: true
           files: |
             dist/td5re-${{ github.ref_name }}-win32.zip
-            dist/td5-mod-${{ github.ref_name }}-win32.zip
