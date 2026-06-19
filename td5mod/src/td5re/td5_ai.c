@@ -7294,28 +7294,32 @@ static int trf_dyn_branches_enabled(void)
  * alternate route taken at a junction), a fraction of those spawns are forced to
  * the OPPOSITE polarity (oncoming) so they drive AGAINST the player's flow
  * through the junction — giving the read of cross-traffic at intersections.
- * DEFAULT OFF (opt-in until drive-tested): TD5RE_CROSS_TRAFFIC=1 enables it.
+ * DEFAULT ON at a moderate fraction (#16 implemented 2026-06-19). Disable with
+ * TD5RE_CROSS_TRAFFIC=0; set an explicit fraction (e.g. 0.5) to tune it.
  *
- * Returns the cross-traffic FRACTION as N/16 (0 = off). "1" maps to the default
- * fraction; an explicit integer/decimal sets the fraction directly. Clamped so a
- * minority (never all) of branch spawns are oncoming, keeping a believable two-way
- * mix rather than a wall of head-on cars. Logged once. */
+ * Returns the cross-traffic FRACTION as N/16 (0 = off). When unset it defaults
+ * to a believable minority; "1" maps to the default fraction; an explicit
+ * decimal sets the fraction directly. Clamped so a minority (never all) of
+ * branch spawns are oncoming, keeping a two-way mix rather than a wall of
+ * head-on cars. Logged once. */
 static int trf_cross_traffic_x16(void)
 {
     static int x16 = -2;
     if (x16 == -2) {
         const char *e = getenv("TD5RE_CROSS_TRAFFIC");
-        if (!e || !e[0] || e[0] == '0') {
-            x16 = 0;                              /* default OFF */
-        } else {
-            double f = strtod(e, NULL);
+        double f;
+        if (e && e[0]) {
+            f = strtod(e, NULL);                  /* explicit value; "0" disables */
             /* "1" (the common on-switch) means "enabled at the default fraction",
              * NOT 100% oncoming. Any other value is read as the literal fraction. */
-            if (f == 1.0) f = 0.5;                /* default: ~half of branch spawns */
-            if (f < 0.0) f = 0.0;
-            if (f > 0.75) f = 0.75;               /* never more than 3/4 oncoming */
-            x16 = (int)(f * 16.0 + 0.5);
+            if (f == 1.0) f = 0.5;
+        } else {
+            f = 0.35;                             /* [#16] default ON: an occasional
+                                                   * oncoming car on junction branches */
         }
+        if (f < 0.0) f = 0.0;
+        if (f > 0.75) f = 0.75;                   /* never more than 3/4 oncoming */
+        x16 = (int)(f * 16.0 + 0.5);
         TD5_LOG_I(LOG_TAG, "cross_traffic knob: TD5RE_CROSS_TRAFFIC -> %d/16 "
                   "(oncoming fraction on branch corridors; 0 = off)", x16);
     }

@@ -193,6 +193,26 @@ static inline int32_t phys_surface_drag(int surface)
     return (int32_t)s_surface_grip[surface & 0x1F];
 }
 
+/* [#15 2026-06-19] TD6 grass/verge SLIDE. The faithful [MIN,MAX] grip clamp caps
+ * a low-grip TD6 surface (class 16 = 0.74, 18 = 0.54) back UP to road level, so
+ * the verge only saps acceleration (the raw longitudinal grip), not cornering —
+ * grass never feels like grass. Re-apply the surface's grip ratio to the already
+ * CLAMPED lateral grip so a wheel that drifts onto the verge actually loses
+ * cornering traction and the car slides. TD6-only; native TD5 untouched.
+ * A/B: TD5RE_TD6_GRASS_SLIDE (default on; =0 reverts to the faithful clamp). */
+static inline int32_t phys_td6_grass_slide(int32_t grip, int surface)
+{
+    static int s_en = -1;
+    if (s_en < 0) {
+        const char *e = getenv("TD5RE_TD6_GRASS_SLIDE");
+        s_en = (e && e[0] == '0') ? 0 : 1;
+    }
+    if (!s_en || !td5_track_td6_surface_grid_loaded()) return grip;
+    int q8 = td5_track_td6_surface_grip_q8(surface & 0x1F);   /* 0x100 = full grip */
+    if (q8 >= 0x100) return grip;                             /* full-grip surface: unchanged */
+    return (int32_t)(((int64_t)grip * (int64_t)q8) >> 8);    /* scale by the surface ratio */
+}
+
 /* --- Globals matching original binary layout --- */
 static int32_t g_gravity_constant = TD5_GRAVITY_NORMAL;
 
@@ -3020,6 +3040,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         grip[i] = SAR_RZ_8(sf * load);
         if (grip[i] < TD5_PLAYER_GRIP_MIN) grip[i] = TD5_PLAYER_GRIP_MIN;
         if (grip[i] > TD5_PLAYER_GRIP_MAX) grip[i] = TD5_PLAYER_GRIP_MAX;
+        grip[i] = phys_td6_grass_slide(grip[i], surface_wheel[i]);  /* [#15] verge slide */
     }
 
     if (actor->slot_index == 0 && (actor->frame_counter % 120u) == 0u) {
@@ -4445,6 +4466,8 @@ void td5_physics_update_ai(TD5_Actor *actor)
     if (grip_front > TD5_AI_GRIP_MAX) grip_front = TD5_AI_GRIP_MAX;
     if (grip_rear < TD5_AI_GRIP_MIN) grip_rear = TD5_AI_GRIP_MIN;
     if (grip_rear > TD5_AI_GRIP_MAX) grip_rear = TD5_AI_GRIP_MAX;
+    grip_front = phys_td6_grass_slide(grip_front, surface);  /* [#15] verge slide */
+    grip_rear  = phys_td6_grass_slide(grip_rear,  surface);
 
     /* --- 4. Velocity drag in WORLD frame [CONFIRMED @ 0x404EC0] --- */
     {
