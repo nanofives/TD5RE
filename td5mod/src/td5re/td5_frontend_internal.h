@@ -255,6 +255,9 @@ void frontend_present_buffer(void);
 void frontend_render_session_locked_overlay(float sx, float sy);
 void frontend_reset_buttons(void);
 void td5_frontend_set_screen(TD5_ScreenIndex index);
+void td5_frontend_show_net_disconnect(const char *reason);
+extern int g_net_disconnect_mode;          /* [2026-06-19] 1 = SessionLocked dialog shows the net-disconnect notice */
+extern char g_net_disconnect_reason[64];
 #define FE_MAX_BUTTONS 16
 
 typedef struct {

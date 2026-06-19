@@ -51,6 +51,10 @@ void td5_frontend_tick(void);
 void td5_frontend_set_screen(TD5_ScreenIndex index);
 void td5_frontend_return_to_lobby(void);
 void td5_frontend_leave_net_session(void);
+/* [2026-06-19] Show the "CONNECTION LOST" notice (then return to the main menu)
+ * after a netplay session drops -- host timeout, host quit/DXPDISCONNECT, or a
+ * mid-race lockstep loss. Pass a short human-readable reason (or NULL). */
+void td5_frontend_show_net_disconnect(const char *reason);
 TD5_ScreenIndex td5_frontend_get_screen(void);
 
 /* --- Display loop (called from game tick in MENU state) --- */

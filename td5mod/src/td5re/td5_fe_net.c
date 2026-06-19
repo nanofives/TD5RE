@@ -1573,8 +1573,13 @@ void Screen_NetworkLobby(void) {
                 /* [ITEM 3] Exit to the MAIN MENU (not back into the dead lobby
                  * or the connection browser) when the watchdog owns the exit;
                  * legacy path keeps the browser destination. */
-                td5_frontend_set_screen(wd_on ? TD5_SCREEN_MAIN_MENU
-                                              : TD5_SCREEN_CONNECTION_BROWSER);
+                /* [2026-06-19] Show the CONNECTION LOST notice (then main menu)
+                 * instead of silently jumping; covers host timeout + host quit. */
+                if (wd_on)
+                    td5_frontend_show_net_disconnect(lost ? "The host left the session"
+                                                          : "The host timed out");
+                else
+                    td5_frontend_set_screen(TD5_SCREEN_CONNECTION_BROWSER);
                 return;
             }
         }
@@ -2025,8 +2030,12 @@ void Screen_SessionLocked(void) {
         }
         break;
 
-    case 5: /* Wait for confirm -> main menu */
-        if (s_input_ready) {
+    case 5: /* Wait for confirm -> main menu (the net-disconnect notice also
+             * auto-times out so an unattended client doesn't sit here forever). */
+        if (g_net_disconnect_mode) s_anim_tick += s_fe_logic_ticks;
+        if (s_input_ready ||
+            (g_net_disconnect_mode && s_anim_tick > 0x20 + 480 /* ~8s past slide-in */)) {
+            g_net_disconnect_mode = 0;
             td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         }
         break;

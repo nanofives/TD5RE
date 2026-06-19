@@ -1069,11 +1069,18 @@ int td5_game_tick(void) {
                     TD5_LOG_I(LOG_TAG, "Race exited -> back to lobby");
                     td5_frontend_return_to_lobby();
                 } else if (result == 2) {
-                    /* ESC quit — go to main menu. [S31] Choosing the MAIN MENU
-                     * from a net race means leaving the session. */
-                    TD5_LOG_I(LOG_TAG, "Race aborted (ESC) -> main menu");
+                    /* ESC quit OR a net lockstep loss -> leave the session. A
+                     * genuine connection loss (host quit / timeout / dropped link)
+                     * shows the CONNECTION LOST notice; a deliberate ESC goes
+                     * straight to the main menu. [2026-06-19] */
+                    int net_lost = g_td5.network_active && td5_net_is_connection_lost();
+                    TD5_LOG_I(LOG_TAG, "Race aborted -> %s",
+                              net_lost ? "connection-lost notice" : "main menu");
                     td5_frontend_leave_net_session();
-                    td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                    if (net_lost)
+                        td5_frontend_show_net_disconnect("Lost connection to the host");
+                    else
+                        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
                 } else {
                     /* Normal race finish — go to race results screen */
                     TD5_LOG_I(LOG_TAG, "Race finished -> results screen");

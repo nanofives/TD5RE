@@ -2837,6 +2837,15 @@ void frontend_init_race_schedule(void) {
              * InitRace computes the field as humans(1) + num_ai_opponents, so
              * fold the EXTRA net players into the opponent count: the field
              * is np humans + the host-chosen AI cars. */
+            /* [2026-06-19] The grid is sized num_human_players + num_ai_opponents.
+             * For net, THIS machine has exactly ONE local human viewport; every
+             * OTHER player is folded into the opponent count via (np-1) below. But
+             * g_td5.num_human_players was set to `humans` (= the joined count, e.g.
+             * 2) above, so the other humans were counted TWICE -> an extra phantom
+             * AI car ("0 opponents selected but I see 1"; 3 cars for a 2-player
+             * race). Force the local human count to 1 so the field is exactly
+             * np humans + the host-chosen AI cars. */
+            g_td5.num_human_players = 1;
             g_td5.num_ai_opponents = net_cfg.num_opponents + (np - 1);
             if (g_td5.num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
                 g_td5.num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
@@ -4690,6 +4699,23 @@ static int frontend_screen_wants_fade(TD5_ScreenIndex s) {
  *
  * Navigation: resets inner state, timestamps, sets active screen.
  * ======================================================================== */
+
+/* [2026-06-19] Net disconnect notice. When a netplay session drops (host
+ * timeout, host quit/DXPDISCONNECT, or a mid-race lockstep loss), route here to
+ * show a "CONNECTION LOST" screen that then returns to the main menu instead of
+ * silently dumping the player back. Reuses the Screen_SessionLocked notice
+ * dialog with a mode flag (see frontend_render_session_locked_overlay +
+ * Screen_SessionLocked's case 5 auto-timeout). Shared with td5_fe_net.c. */
+int  g_net_disconnect_mode = 0;
+char g_net_disconnect_reason[64] = {0};
+
+void td5_frontend_show_net_disconnect(const char *reason) {
+    snprintf(g_net_disconnect_reason, sizeof(g_net_disconnect_reason), "%s",
+             (reason && reason[0]) ? reason : "Connection to host lost");
+    g_net_disconnect_mode = 1;
+    TD5_LOG_I(LOG_TAG, "Net disconnect -> notice screen: %s", g_net_disconnect_reason);
+    td5_frontend_set_screen(TD5_SCREEN_SESSION_LOCKED);
+}
 
 void td5_frontend_set_screen(TD5_ScreenIndex index) {
     TD5_ScreenIndex previous = s_current_screen;
@@ -8748,10 +8774,16 @@ void frontend_render_session_locked_overlay(float sx, float sy) {
     /* [FIXED 2026-06-01] NO box — color-keyed-black transparent panel, text only (same
      * pipeline as the cup dialogs). The prior 0xCC000000 translucent quad was a port invention. */
 
-    /* "SORRY" at y=0x00 [CONFIRMED Language.dll: SorryTxt = "SORRY"] */
-    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "SORRY",          0xFFFFFFFF, sx, sy);
-    /* "SESSION LOCKED" at y=0x38=56 [CONFIRMED Language.dll: SeshLockedTxt = "SESSION LOCKED"] */
-    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "SESSION LOCKED", 0xFFFFFFFF, sx, sy);
+    /* [2026-06-19] This notice dialog doubles as the net-disconnect screen. */
+    if (g_net_disconnect_mode) {
+        fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONNECTION LOST",       0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, g_net_disconnect_reason, 0xFFC0C0C0, sx, sy);
+    } else {
+        /* "SORRY" at y=0x00 [CONFIRMED Language.dll: SorryTxt = "SORRY"] */
+        fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "SORRY",          0xFFFFFFFF, sx, sy);
+        /* "SESSION LOCKED" at y=0x38=56 [CONFIRMED Language.dll: SeshLockedTxt = "SESSION LOCKED"] */
+        fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "SESSION LOCKED", 0xFFFFFFFF, sx, sy);
+    }
 
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
