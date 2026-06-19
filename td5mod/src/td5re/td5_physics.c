@@ -1510,10 +1510,32 @@ static int32_t atan2_fixed12(int32_t dx, int32_t dz)
 /* Impulse numerator scale factor [CONFIRMED @ 0x406aae] */
 #define V2W_NUM_SCALE       0x1100
 
+/* [#10 NEAR-WALL CAMERA ZOOM 2026-06-19] Per-racer-slot countdown (in sim ticks)
+ * set when a wheel probe clips a wall deeply. The chase camera zooms in while
+ * this is > 0 so the wall geometry cannot occlude the car. Cosmetic (camera
+ * only) — decremented in the camera per-tick update. Defined here because the
+ * wall-contact response is the producer. */
+int16_t g_actor_near_wall[TD5_MAX_RACER_SLOTS];
+
 void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
                                int32_t probe_x_fp8, int32_t probe_z_fp8)
 {
+    /* [#10] A deep wall clip arms the chase-cam zoom for this racer. penetration
+     * is negative when the probe is outside the rail; the more negative, the
+     * deeper the clip. Racer slots only (traffic has no camera). Knob
+     * TD5RE_WALL_CAM_ZOOM (default on); "0" disables the zoom entirely. */
+    if (actor->slot_index >= 0 && actor->slot_index < TD5_MAX_RACER_SLOTS &&
+        penetration < -250) {
+        static int s_wall_cam = -1;
+        if (s_wall_cam < 0) {
+            const char *e = getenv("TD5RE_WALL_CAM_ZOOM");
+            s_wall_cam = (!e || e[0] != '0') ? 1 : 0;
+        }
+        if (s_wall_cam)
+            g_actor_near_wall[actor->slot_index] = 8;   /* ~0.27s hold at 30Hz */
+    }
+
     /* Pre-impulse attitude snapshot (slot 0) — lets us see whether wall
      * response is the proximate trigger of a pitch/roll spike. */
     int32_t pre_av_roll  = actor->angular_velocity_roll;
@@ -4186,15 +4208,32 @@ void td5_physics_update_player(TD5_Actor *actor)
             /* Apply the multiplier only on the decelerating (uphill) side. */
             int32_t light_q12 = SLOPE_LIGHT_Q12_ONE;
             if (g_long < 0) {
-                g_long = (int32_t)((float)g_long * s_slope_mult);
-                /* [#8 2026-06-15] Weaken the uphill decel for lower-powered cars
-                 * so a slow car does not crawl uphill. Scale by the car's top-
-                 * speed rating (Q12, clamped to a floor); fast cars unchanged.
-                 * Downhill (g_long > 0) is left at full strength. */
-                light_q12 = td5_physics_slope_light_scale_q12(
-                                (int32_t)PHYS_S(actor, PHYS_TOP_SPEED));
-                if (light_q12 != SLOPE_LIGHT_Q12_ONE)
-                    g_long = (int32_t)(((int64_t)g_long * light_q12) >> 12);
+                /* [#6 2026-06-19] Once the car has braked all the way down to
+                 * GEAR 1 (TD5_GEAR_FIRST), stop applying the uphill slope
+                 * resistance entirely so it can always crawl up the hill in
+                 * first instead of stalling to 0 and being unable to accelerate.
+                 * Higher gears still feel the slope, so on a climb the car
+                 * naturally brakes down through the gears until it reaches first,
+                 * then holds a steady low-gear climb. Knob TD5RE_SLOPE_GEAR1_FREE
+                 * (default on). */
+                static int s_gear1_free = -1;
+                if (s_gear1_free < 0) {
+                    const char *eg = getenv("TD5RE_SLOPE_GEAR1_FREE");
+                    s_gear1_free = (!eg || eg[0] != '0') ? 1 : 0;
+                }
+                if (s_gear1_free && actor->current_gear <= TD5_GEAR_FIRST) {
+                    g_long = 0;   /* gear 1 (or lower): no uphill slope drag */
+                } else {
+                    g_long = (int32_t)((float)g_long * s_slope_mult);
+                    /* [#8 2026-06-15] Weaken the uphill decel for lower-powered
+                     * cars so a slow car does not crawl uphill. Scale by the
+                     * car's top-speed rating (Q12, clamped to a floor); fast cars
+                     * unchanged. Downhill (g_long > 0) is left at full strength. */
+                    light_q12 = td5_physics_slope_light_scale_q12(
+                                    (int32_t)PHYS_S(actor, PHYS_TOP_SPEED));
+                    if (light_q12 != SLOPE_LIGHT_Q12_ONE)
+                        g_long = (int32_t)(((int64_t)g_long * light_q12) >> 12);
+                }
             }
             /* Rotate the longitudinal slope force back to world XZ along heading. */
             actor->linear_velocity_x += (g_long * sin_h) >> 12;

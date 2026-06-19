@@ -1512,7 +1512,7 @@ static const struct { int slot; int level; int start_span; int finish_span; floa
      * keeps the player on the road. Rome ships no finish gantry and its road
      * stays a walled 6-8 lanes to the end, so it keeps span_cnt-8 (2348). */
     { 32,  8,  76, 2762, 0.08f },  /* PARIS      (TD6 level000, P2P, start~76  finish 1finish~2762) */
-    { 33,  9,  59, 2523, 0.08f },  /* NEW YORK   (TD6 level001, P2P, start~59  finish Finish~2523)  */
+    { 33,  9,  59, 2523, 0.15f },  /* NEW YORK   (TD6 level001, P2P, start~59  finish Finish~2523) — [#12 2026-06-19] pitch 0.08->0.15 to LOWER the too-high horizon (both fwd+back); TD5RE_SKY_PITCH overrides at runtime */
     { 34, 10,  51, 2348, 0.08f },  /* ROME       (TD6 level002, P2P, start=Check01 gantry~51, walled to end) */
     { 35, 11,  70, 2014, 0.08f },  /* HONG KONG  (TD6 level003, P2P, start~70  finish 1finish~2014)  */
     { 36, 12,  20, 2083, 0.08f },  /* LONDON     (TD6 level004, P2P, start~28  finish Kfin~2083)     */

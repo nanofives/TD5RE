@@ -1496,13 +1496,28 @@ after_flyin:
                                  (int)*(short *)(actor + 0x20A) +
                                  g_camYawOffset[v]);
 
+    /* [#10 NEAR-WALL ZOOM 2026-06-19] Pull the chase camera in while this view's
+     * car is clipping a wall, so the wall geometry can't hide it. The TTL is
+     * armed in td5_physics_wall_response (a deep wheel clip) and decays one tick
+     * per solve here; the radius spring below smooths the move in and back out.
+     * Cosmetic / camera-only, so safe in netplay. */
+    float wall_zoom = 1.0f;
+    {
+        extern int16_t g_actor_near_wall[];
+        int wslot = g_actorSlotForView[v];
+        if (wslot >= 0 && wslot < TD5_MAX_RACER_SLOTS && g_actor_near_wall[wslot] > 0) {
+            wall_zoom = 0.62f;          /* ~38% closer while pinned to a wall */
+            g_actor_near_wall[wslot]--;
+        }
+    }
+
     {
         short *orient = g_camOrientShort[v];
         orient[0] = (short)((unsigned int)(int)(SinFloat12bit(look_angle) *
-                    g_camOrbitRadiusScale[v] + 0.5f) >> 8);
+                    (g_camOrbitRadiusScale[v] * wall_zoom) + 0.5f) >> 8);
         orient[1] = (short)((unsigned int)g_camElevationAngleFP[v] >> 8);
         orient[2] = -(short)((unsigned int)(int)(CosFloat12bit(look_angle) *
-                    g_camOrbitRadiusScale[v] + 0.5f) >> 8);
+                    (g_camOrbitRadiusScale[v] * wall_zoom) + 0.5f) >> 8);
 
         /* Transform through terrain rotation matrix.
          * BuildRotationMatrixFromAngles now uses the same swapped sin/cos

@@ -427,8 +427,23 @@ void td5_sound_tick(void)
  * td5_sound_init_race_resources -- prepare for race audio.
  * Called at the start of InitializeRaceSession.
  */
+/* [#8 PAUSE-MUTE STATE 2026-06-19] File-scope so the race-init below can reset it.
+ * The pause-mute edge state used to be a function-local static in
+ * td5_sound_set_paused(); a stale value carried across races meant the 2nd+ race's
+ * pause hit the "no change" early-out and never re-applied the mute (engine kept
+ * playing). Reset it per race + force audio audible on race start. */
+static int s_sound_paused = 0;
+
 int td5_sound_init_race_resources(void)
 {
+    /* [#8] Fresh audio state for this race: drop any leftover pause suspend from
+     * a previous race that ended while paused (which would otherwise leave the
+     * engine/SFX stuck or the next race silent), and clear the pause edge so the
+     * next pause correctly re-applies the mute. */
+    s_sound_paused = 0;
+    td5_plat_audio_set_muted(0);
+    td5_plat_cd_set_volume(g_td5.ini.music_volume);
+
     memset(s_engine_state, 0, sizeof(s_engine_state));
     memset(s_traffic_engine_state, 0, sizeof(s_traffic_engine_state));
     memset(s_tracked_audio_state, 0, sizeof(s_tracked_audio_state));
@@ -2143,7 +2158,7 @@ void td5_sound_set_sfx_muted(int muted)
 void td5_sound_set_paused(int paused)
 {
     static int s_pause_mute_enabled = -1;   /* -1 = env not yet read */
-    static int s_sound_paused       = 0;    /* current suspend state (edge) */
+    /* s_sound_paused is now file-scope (reset per race in init) — see [#8]. */
 
     if (s_pause_mute_enabled < 0) {
         const char *env = getenv("TD5RE_PAUSE_MUTE");

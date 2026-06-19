@@ -6871,6 +6871,10 @@ void td5_ai_init_traffic_actors(void) {
 /* Per-actor smart-traffic state (indexed by actor slot). */
 static int8_t   s_traffic_lane_bias[TD5_MAX_TOTAL_ACTORS];     /* situational lane offset (-1/0/+1), 1-tick latency */
 static int      s_traffic_stuck_frames[TD5_MAX_TOTAL_ACTORS];  /* AntiFreeze: consecutive recovery-frozen ticks */
+/* [#3 COLLISION-DEADLOCK ESCAPE 2026-06-19] */
+static int      s_traffic_stall_frames[TD5_MAX_TOTAL_ACTORS];  /* consecutive near-stopped ticks */
+static int16_t  s_traffic_escape_ticks[TD5_MAX_TOTAL_ACTORS];  /* remaining escape-burst ticks */
+static int8_t   s_traffic_escape_side[TD5_MAX_TOTAL_ACTORS];   /* current escape steer side (-1/+1) */
 
 /* Per-race diagnostic counters — observe which behaviours actually trigger
  * (the rate-limited per-event logs can miss firings). Dumped periodically. */
@@ -6890,6 +6894,9 @@ static void td5_traffic_smart_reset(void) {
     for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
         s_traffic_lane_bias[i] = 0;
         s_traffic_stuck_frames[i] = 0;
+        s_traffic_stall_frames[i] = 0;
+        s_traffic_escape_ticks[i] = 0;
+        s_traffic_escape_side[i]  = 0;
     }
     memset(&s_smart_stat, 0, sizeof(s_smart_stat));
 }
@@ -6935,6 +6942,67 @@ static void traffic_smart_antifreeze(int slot, char *actor, int32_t *rs) {
         TD5_LOG_I(LOG_TAG,
                   "traffic_antifreeze: slot=%d unstuck at span=%d (cleared recovery + realigned)",
                   slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW));
+}
+
+/* [#3 COLLISION-DEADLOCK ESCAPE 2026-06-19] Safety net for traffic cars that pile
+ * into each other (or geometry) and cannot free themselves. When a traffic car
+ * has been effectively stopped for ~1.5 s — and it is NOT a deliberate stop
+ * (broken-down / parked-despawn / cop) — force a brief "steer-away" burst: brake
+ * off, throttle on, and a hard steering command to one side, so it peels off
+ * whatever it is jammed against. The steer side alternates on each engagement
+ * (seeded by slot parity so adjacent jammed cars peel opposite ways), so a car
+ * that jams a wall on one try escapes the other way next time. It drives the same
+ * control fields normal traffic uses, applied as a POST-override at the end of the
+ * per-slot update. Deterministic (speed + tick counters + slot parity, no rand)
+ * -> MP-lockstep safe. The existing 45-tick stuck despawn stays as the last-resort
+ * backstop. Knob TD5RE_TRAFFIC_ESCAPE (default on). */
+static int traffic_escape_enabled(void) {
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_ESCAPE");
+        s = (!e || e[0] != '0') ? 1 : 0;
+    }
+    return s;
+}
+
+static void traffic_collision_escape(int slot) {
+    if (!traffic_escape_enabled()) return;
+    if (slot < g_traffic_slot_base || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (g_cop_is_cop[slot]) return;                         /* cops run their own driver */
+
+    char *actor = actor_ptr(slot);
+
+    if (g_actor_broken_down[slot] || td5_ai_traffic_dynamic_parked(slot)) {
+        s_traffic_stall_frames[slot] = 0;
+        s_traffic_escape_ticks[slot] = 0;
+        return;                                             /* deliberate stop, not a jam */
+    }
+
+    /* Active escape burst: override the route plan's brake with a forward
+     * steer-away so the car physically peels off the obstacle. */
+    if (s_traffic_escape_ticks[slot] > 0) {
+        s_traffic_escape_ticks[slot]--;
+        ACTOR_U8(actor,  ACTOR_BRAKE_FLAG)     = 0;
+        ACTOR_U8(actor,  ACTOR_THROTTLE_STATE) = 1;
+        ACTOR_I32(actor, ACTOR_STEERING_CMD)   =
+            (int32_t)s_traffic_escape_side[slot] * 0x12000;  /* near full-lock to one side */
+        return;
+    }
+
+    /* Detect a jam: near-zero forward speed for ~1.5 s straight. */
+    int32_t spd  = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+    int32_t aspd = (spd < 0) ? -spd : spd;
+    if (aspd < 0x1800) {
+        if (++s_traffic_stall_frames[slot] >= 45) {          /* ~1.5 s jammed */
+            s_traffic_stall_frames[slot] = 0;
+            int8_t prev = s_traffic_escape_side[slot];
+            if (prev == 0) prev = (slot & 1) ? (int8_t)1 : (int8_t)-1;
+            s_traffic_escape_side[slot] = (int8_t)-prev;      /* alternate each attempt */
+            s_traffic_escape_ticks[slot] = 24;                /* ~0.8 s burst */
+        }
+    } else {
+        s_traffic_stall_frames[slot] = 0;                     /* moving fine */
+    }
 }
 
 /* [dynamic-traffic] forward decls — defined in the dynamic-traffic module
@@ -7707,6 +7775,9 @@ static void trf_dyn_place(int slot, int span, int lane, int polarity)
         g_traffic_recovery_stage[slot] = 0;
         s_traffic_stuck_frames[slot]   = 0;
         s_traffic_lane_bias[slot]      = 0;
+        s_traffic_stall_frames[slot]   = 0;
+        s_traffic_escape_ticks[slot]   = 0;
+        s_traffic_escape_side[slot]    = 0;
     }
 }
 
@@ -10154,6 +10225,11 @@ static void ai_update_single_traffic(int slot) {
         if (road != cur)
             ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = (uint8_t)(cur + (road > cur ? 1 : -1));
     }
+
+    /* [#3 2026-06-19] Safety net: if this car has been jammed/stopped too long,
+     * post-override the route plan with a brief steer-away burst so it frees
+     * itself instead of grinding against another car forever. */
+    traffic_collision_escape(slot);
     /* UpdateTrafficActorMotion(slot) would follow in the physics module */
 }
 

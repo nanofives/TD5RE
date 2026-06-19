@@ -1984,12 +1984,20 @@ int td5_input_frontend_change_camera_pressed(int player)
                                 &s_fe_cam_held[player]);
 
     /* OR the pad's Start/Menu (0x40) — the one scan nav signal free on the MP
-     * position screen — evaluated ONCE for the whole screen (on player 0) so a
-     * controller cycles the grid LAYOUT like the keyboard ([BUG #13]). */
-    if (player == 0) {
-        if (td5_fe_cam_buttons_enabled()) pad = td5_fe_pad_nav_edge(0x40u, &s_pad_cam_held);
-        else                              s_pad_cam_held = 0;
-    }
+     * position screen — so a controller cycles the grid LAYOUT like the keyboard
+     * ([BUG #13]).
+     *
+     * [#18c] The aggregated scan reader (td5_plat_input_frontend_nav) can't
+     * attribute a press to a slot, so a SINGLE shared latch fires the edge
+     * exactly once per press for the whole screen. Previously this was gated to
+     * player 0 only; now it is evaluated on whichever player the consumer checks
+     * FIRST this frame (it loops players and breaks on the first hit), so the pad
+     * START works regardless of which player index owns the iteration — not just
+     * player 0. The shared latch + first-evaluation-wins keeps it single-fire:
+     * the first player call this frame computes the rising edge and updates the
+     * latch; later same-frame calls read the now-set latch and return 0. */
+    if (td5_fe_cam_buttons_enabled()) pad = td5_fe_pad_nav_edge(0x40u, &s_pad_cam_held);
+    else                              s_pad_cam_held = 0;
     return kb || pad;
 }
 

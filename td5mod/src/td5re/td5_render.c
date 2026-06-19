@@ -3426,9 +3426,14 @@ void td5_render_actors_for_view(int view_index)
                     continue;
                 if (slot == camera_target_slot && camera_preset_active)
                     continue;   /* bumper/interior cam: own car (incl. shadow) suppressed */
-                if (drag_mode && slot < TD5_MAX_RACER_SLOTS &&
+                /* [#14 2026-06-19] Skip INACTIVE racer slots (state==3) in ALL
+                 * modes, not just drag: an unused grid slot whose mesh is still
+                 * loaded was casting a shadow (and rendering a body below) as a
+                 * stationary "ghost" car when the race had fewer than the max
+                 * opponents. Traffic slots (>= base) keep their own fade gate. */
+                if (slot < g_traffic_slot_base &&
                     td5_game_get_slot_state(slot) == 3)
-                    continue;   /* drag decoration slot */
+                    continue;   /* inactive racer slot (was drag-only) */
                 if (slot != camera_target_slot) {
                     TD5_Actor *owner = td5_game_get_actor(camera_target_slot);
                     if (owner) {
@@ -3507,7 +3512,10 @@ void td5_render_actors_for_view(int view_index)
              * catches state==3 slots (their assets aren't loaded), making
              * this a defense-in-depth check that also prevents stale-mesh
              * rendering across race transitions. */
-            if (drag_mode && slot < TD5_MAX_RACER_SLOTS) {
+            /* [#14 2026-06-19] Skip inactive racer slots (state==3) in ALL modes
+             * (see the shadow pre-pass) so empty grid slots don't render as ghost
+             * cars; the original drag-only decoration gate is subsumed by this. */
+            if (slot < g_traffic_slot_base) {
                 int ss = td5_game_get_slot_state(slot);
                 if (ss == 3)
                     continue;

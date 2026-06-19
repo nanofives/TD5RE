@@ -9413,8 +9413,19 @@ void td5_frontend_render_ui_rects(void) {
     if (s_current_screen == TD5_SCREEN_RACE_RESULTS) {
         title_visible = (s_inner_state >= 3 && s_inner_state <= 0x0B) ? 1 : 0;
     }
-    /* The simultaneous grid car-select draws its own per-pane headers. */
-    if (s_mp_simul) title_visible = 0;
+    /* The simultaneous grid car-select draws its own per-pane headers (the
+     * SELECT CAR / PROFILE SELECTION grids draw their own title inline). A few
+     * screens that stay live WHILE s_mp_simul is set rely on the GLOBAL title
+     * path, so exempt them:
+     *   - NETWORK_LOBBY: a post-race return must not inherit a stale s_mp_simul
+     *     that blanks its "NET PLAY" header [#24];
+     *   - TRACK_SELECTION: the MP flow keeps s_mp_simul set across track-select
+     *     (so backing out re-enters the car grid), which otherwise suppressed the
+     *     shared "SELECT TRACK" header [#20]. */
+    if (s_mp_simul &&
+        s_current_screen != TD5_SCREEN_NETWORK_LOBBY &&
+        s_current_screen != TD5_SCREEN_TRACK_SELECTION)
+        title_visible = 0;
 
     if (title_visible) {
         const char *title_text = frontend_get_title_text_for_screen(s_current_screen);
@@ -10135,6 +10146,13 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
     fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy,
                  ((uint32_t)(0xB0 * anim_t) << 24) | 0x101018u, -1, 0, 0, 1, 1);
 
+    /* [#19] Standard top title. The global title-strip path suppresses titles
+     * while s_mp_simul is set (the grid draws its own per-pane headers), so the
+     * screen header is drawn here directly. */
+    if (td5_titlefont_ready())
+        frontend_draw_screen_title("SELECT CAR", FE_TITLE_LEFT_X * sx, 17.0f * sy,
+                                   0xFFE3D708u, sx, sy);
+
     for (p = 0; p < n; p++) {
         /* [#6 2026-06-15] Place each pane at the player's CHOSEN position cell
          * (from the split-screen position picker) instead of identity p, so a
@@ -10512,8 +10530,24 @@ static void frontend_mp_setup_render(float sx, float sy) {
     float pane_h = 480.0f / (float)rows;
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy,
-                 ((uint32_t)(0xB0 * anim_t) << 24) | 0x101018u, -1, 0, 0, 1, 1);
+    /* [#18a] Profile/name-colour setup: by default DON'T darken the background so
+     * the MainMenu art stays visible behind the panes. Set TD5RE_MP_SETUP_DIM=1 to
+     * restore the old full-screen scrim. */
+    {
+        static int s_draw_dim = -1;
+        if (s_draw_dim < 0)
+            s_draw_dim = (getenv("TD5RE_MP_SETUP_DIM") != NULL &&
+                          getenv("TD5RE_MP_SETUP_DIM")[0] == '1');
+        if (s_draw_dim)
+            fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy,
+                         ((uint32_t)(0xB0 * anim_t) << 24) | 0x101018u, -1, 0, 0, 1, 1);
+    }
+
+    /* [#18a] Standard top title (Lunatica face) so the setup step matches every
+     * other menu's header. */
+    if (td5_titlefont_ready())
+        frontend_draw_screen_title("PROFILE SELECTION", FE_TITLE_LEFT_X * sx, 17.0f * sy,
+                                   0xFFE3D708u, sx, sy);
 
     for (p = 0; p < n; p++) {
         int col = p % cols, row = p / cols;
@@ -10559,7 +10593,9 @@ static void frontend_mp_setup_render(float sx, float sy) {
             mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.42f) * sy, "READY", 0xFF40FF40u, sx, sy);
             snprintf(buf, sizeof buf, "%s", s_mp_player_name[p][0] ? s_mp_player_name[p] : "(no name)");
             mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.42f + 14.0f) * sy, buf, 0xFFFFFFFFu, sx, sy);
-            mp_simul_small_centered(cx * sx, (pyr + pane_h - 16.0f) * sy, "A = CHANGE   B = LOBBY",
+            /* [#16] Nudged up ~10px so the profile-management hint clears the pane
+             * bottom edge / footer band. */
+            mp_simul_small_centered(cx * sx, (pyr + pane_h - 26.0f) * sy, "A = CHANGE   B = LOBBY",
                                     0xFFB0B0B0u, sx, sy);
             continue;
         }
@@ -10575,8 +10611,12 @@ static void frontend_mp_setup_render(float sx, float sy) {
             if (isk)
                 mp_simul_small_centered(cx * sx, (fy + 24.0f) * sy,
                                         "TYPE NAME - ENTER=DONE  ESC=BACK", 0xFFFFE060u, sx, sy);
-            else
+            else {
                 mp_setup_render_kbd(p, ax, fy + 19.0f, aw, MP_KBD_BLOCK_H, pcol, sx, sy);
+                /* [#15c] Pad hints below the on-screen keyboard (inside the pane). */
+                mp_simul_small_centered(cx * sx, (fy + 19.0f + MP_KBD_BLOCK_H + 3.0f) * sy,
+                                        "X = DELETE   START = DONE", 0xFFB0B0B0u, sx, sy);
+            }
             continue;
         }
 

@@ -1526,6 +1526,10 @@ static void frontend_mp_simul_carsel_update(void) {
                 if (act) { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }
                 break;
             }
+            /* [#19] START (0x40) is a one-press "ready up" from any focused
+             * button (mirrors the OK action) so a pad player can lock in without
+             * navigating to OK first. */
+            if (edge & 0x40) { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }
         }
     }
 
@@ -2005,10 +2009,16 @@ static void frontend_mp_setup_update(void) {
             } else {
                 int row = s_mp_kbd_row[p], col = s_mp_kbd_col[p];
                 int rowlen = (row < MP_KBD_LETTER_ROWS) ? (int)strlen(k_mp_kbd_rows[row]) : 3;
-                if (edge & 1) { if (col > 0) col--; frontend_play_sfx(2); }
-                if (edge & 2) { if (col < rowlen - 1) col++; frontend_play_sfx(2); }
-                if (edge & 4) { if (row > 0) row--; frontend_play_sfx(2); }
-                if (edge & 8) { if (row < MP_KBD_ROWS - 1) row++; frontend_play_sfx(2); }
+                /* [#15b] Hold-to-move: the d-pad cursor auto-repeats while a
+                 * direction stays held (first step on the rising edge, then a
+                 * steady rate) — same mp_repeat_fire idiom as the colour grid. */
+                if (mp_repeat_fire(p, bits & 0x0Fu, edge & 0x0Fu, now)) {
+                    if (bits & 1) { if (col > 0) col--; }
+                    if (bits & 2) { if (col < rowlen - 1) col++; }
+                    if (bits & 4) { if (row > 0) row--; }
+                    if (bits & 8) { if (row < MP_KBD_ROWS - 1) row++; }
+                    frontend_play_sfx(2);
+                }
                 rowlen = (row < MP_KBD_LETTER_ROWS) ? (int)strlen(k_mp_kbd_rows[row]) : 3;
                 if (col > rowlen - 1) col = rowlen - 1;
                 s_mp_kbd_row[p] = row; s_mp_kbd_col[p] = col;
@@ -2018,6 +2028,8 @@ static void frontend_mp_setup_update(void) {
                     else if (col == 1) { mp_setup_name_backspace(p); frontend_play_sfx(2); }
                     else { s_mp_setup_sub[p] = 0; frontend_play_sfx(3); }   /* DONE */
                 }
+                /* [#15a] X (0x80) = delete one character (same as BACKSPACE). */
+                if (edge & 0x80) { mp_setup_name_backspace(p); frontend_play_sfx(2); }
                 if (edge & 0x40) { s_mp_setup_sub[p] = 0; frontend_play_sfx(3); }  /* Start = finish */
                 if (edge & 0x20) { s_mp_setup_sub[p] = 0; frontend_play_sfx(5); }
             }
@@ -2502,6 +2514,42 @@ static float mp_pos_pulse(uint32_t now, float lo, float hi) {
     return lo + (hi - lo) * tri;
 }
 
+/* [#18b] Standard frontend screen header in the Lunatica title face, drawn for
+ * the fe_race screens that own their own render (so the global title-strip path
+ * in td5_frontend.c — which is suppressed while s_mp_simul is set — doesn't draw
+ * it). Mirrors frontend_draw_screen_title (static in td5_frontend.c) using the
+ * PUBLIC title-font API + the public td5_vui_quad textured-glyph primitive; the
+ * only cosmetic difference is no faux-italic shear (td5_vui_quad is axis-aligned).
+ * Left-aligned with the first letter at left_x, cap tops landing near top_y. */
+#define FE_RACE_TITLE_CAP_PX 24.0f    /* design cap height (px at 480-tall reference) */
+#define FE_RACE_TITLE_LEFT_X 126.0f   /* design x where the first letter starts (= td5_frontend FE_TITLE_LEFT_X) */
+#define FE_RACE_TITLE_TRACK  (-1.5f)  /* extra letter tracking (design px; negative = tighter) */
+static void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
+                                      uint32_t color, float sx, float sy) {
+    if (!text || !td5_titlefont_ready()) return;
+    const float cap_px   = FE_RACE_TITLE_CAP_PX * sy;
+    const float baseline = top_y + cap_px;                /* cap tops land near top_y */
+    const float hscale   = (sx < sy) ? (sx / sy) : 1.0f;  /* condense like fe_draw_text on narrow windows */
+    const float trkn     = FE_RACE_TITLE_TRACK * sy * hscale;
+    float pen = left_x;
+    int i;
+    for (i = 0; text[i]; i++) {                            /* pass 1: rasterise into atlas */
+        td5_glyph g; td5_titlefont_get(toupper((unsigned char)text[i]), cap_px, &g);
+        (void)g;
+    }
+    td5_font_flush_uploads();                              /* one GPU upload for new glyphs */
+    for (i = 0; text[i]; i++) {                            /* pass 2: draw (cache hits) */
+        int ch = toupper((unsigned char)text[i]);
+        td5_glyph g; td5_titlefont_get(ch, cap_px, &g);
+        if (g.valid && g.w > 0.0f) {
+            float gx = pen + g.xoff * hscale;
+            float gy = baseline + g.yoff;                 /* glyph quad top edge */
+            td5_vui_quad(gx, gy, g.w * hscale, g.h, color, g.page, g.u0, g.v0, g.u1, g.v1);
+        }
+        pen += g.advance * hscale + trkn;
+    }
+}
+
 /* [#6] Replacement renderer for the "CHOOSE YOUR SCREEN" position picker.
  * Drawn entirely with the public VectorUI primitives (td5_vui_quad / td5_vui_text)
  * so it lives in this file; repoint the TD5_SCREEN_MP_POSITION case in
@@ -2535,7 +2583,13 @@ void frontend_mp_position_render2(float sx, float sy) {
 
     /* Dim full-screen backdrop + title. */
     td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xC0101018u, -1, 0, 0, 1, 1);
-    td5_vui_text_centered(320.0f * sx, 10.0f * sy, "CHOOSE YOUR SCREEN", 0xFFFFE060u, sx, sy);
+    /* [#18b] Standard top header (Lunatica face) to match the other menus; fall
+     * back to the old plain centred text only if the title font isn't ready. */
+    if (td5_titlefont_ready())
+        fe_race_draw_screen_title("CHOOSE YOUR SCREEN", FE_RACE_TITLE_LEFT_X * sx, 17.0f * sy,
+                                  0xFFE3D708u, sx, sy);
+    else
+        td5_vui_text_centered(320.0f * sx, 10.0f * sy, "CHOOSE YOUR SCREEN", 0xFFFFE060u, sx, sy);
 
     /* Layout grid occupies a centred area below the title, above the footer. */
     {
@@ -2606,25 +2660,28 @@ void frontend_mp_position_render2(float sx, float sy) {
         char lbuf[80];
         const char *lname = (opts && s_mp_layout_sel >= 0 && s_mp_layout_sel < lcnt)
                             ? opts[s_mp_layout_sel].label : "SINGLE";
-        td5_vui_text_centered(320.0f * sx, 424.0f * sy,
+        /* [#18c] Re-spaced so the small label lines don't overlap: the big nav
+         * line moves up to y=422 and the ~9px-cap small lines spread to 440 / 454
+         * / 466 (>=14px apart instead of the old 12px that clipped). */
+        td5_vui_text_centered(320.0f * sx, 422.0f * sy,
                               "D-PAD: MOVE   A: READY   B: BACK", 0xFFFFFFFFu, sx, sy);
         if (lcnt > 1)
             snprintf(lbuf, sizeof lbuf, "CHANGE CAMERA: LAYOUT [%s]", lname);
         else
             snprintf(lbuf, sizeof lbuf, "LAYOUT: %s", lname);
-        mp_pos_small_centered(320.0f * sx, 444.0f * sy, lbuf, 0xFFFFE060u, sx, sy);
+        mp_pos_small_centered(320.0f * sx, 440.0f * sy, lbuf, 0xFFFFE060u, sx, sy);
         if (missing > 0) {
             int cidx = s_mp_missing_content[0];
             if (cidx < 0 || cidx >= MP_MISSING_CONTENT_COUNT) cidx = 0;
             snprintf(lbuf, sizeof lbuf, "FRONT VIEW: EMPTY-CELL CONTENT [%s]",
                      k_mp_missing_content[cidx]);
-            mp_pos_small_centered(320.0f * sx, 456.0f * sy, lbuf, 0xFF90C0FFu, sx, sy);
+            mp_pos_small_centered(320.0f * sx, 454.0f * sy, lbuf, 0xFF90C0FFu, sx, sy);
         } else if (all_ready) {
-            mp_pos_small_centered(320.0f * sx, 456.0f * sy, "ALL READY - STARTING CARS...",
+            mp_pos_small_centered(320.0f * sx, 454.0f * sy, "ALL READY - STARTING CARS...",
                                     0xFF80FF80u, sx, sy);
         }
         if (missing > 0 && all_ready)
-            mp_pos_small_centered(320.0f * sx, 468.0f * sy, "ALL READY - STARTING CARS...",
+            mp_pos_small_centered(320.0f * sx, 466.0f * sy, "ALL READY - STARTING CARS...",
                                     0xFF80FF80u, sx, sy);
     }
 }
@@ -2976,6 +3033,34 @@ static int frontend_carsel_hold_repeat(void) {
      * here we only ARM the repeat timer (do NOT fire, to avoid a double step). */
     if (edge) { next_ms = now + 360u; return 0; }
     /* Held past the arm delay: fire at a steady moderate rate. */
+    if (next_ms && now >= next_ms) { next_ms = now + 110u; return (int)held; }
+    return 0;
+}
+
+/* [#21] Track-selection LEFT/RIGHT hold-to-scroll. Same pattern + knob as the
+ * car-select repeater above (own statics so the two screens don't share the
+ * edge/arm latch). frontend_option_delta() already delivers the FIRST press from
+ * the WM_KEYDOWN FIFO / gamepad rising edge; this ADDS the repeats while a
+ * direction stays held, so holding LEFT/RIGHT on the track selector auto-cycles.
+ * Returns the s_arrow_input direction bit to OR in on a fire frame (1=LEFT,
+ * 2=RIGHT), else 0. Knob: TD5RE_CARSEL_HOLD (shared with car-select). */
+static int frontend_trksel_hold_repeat(void) {
+    static uint32_t next_ms = 0;     /* next allowed repeat fire (0 = disarmed) */
+    static uint32_t prev_held = 0;   /* held bits last frame (for edge detect)  */
+
+    if (!frontend_carsel_hold_enabled()) return 0;
+
+    uint32_t held = 0;
+    if (td5_plat_input_key_pressed(0xCB) || (s_fe_gamepad_nav & 0x01)) held |= 1; /* Left  */
+    if (td5_plat_input_key_pressed(0xCD) || (s_fe_gamepad_nav & 0x02)) held |= 2; /* Right */
+    if (held == 3) held = 0;            /* both at once: ambiguous, ignore */
+
+    uint32_t now = td5_plat_time_ms();
+    uint32_t edge = held & ~prev_held;
+    prev_held = held;
+
+    if (!held) { next_ms = 0; return 0; }
+    if (edge) { next_ms = now + 360u; return 0; }   /* first step came via the FIFO; just arm */
     if (next_ms && now >= next_ms) { next_ms = now + 110u; return (int)held; }
     return 0;
 }
@@ -3971,6 +4056,15 @@ void Screen_TrackSelection(void) {
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            /* [#21] Hold-to-scroll: while the TRACK selector (button 0) is focused
+             * and no edge fired this frame, fold in the auto-repeat so holding
+             * LEFT/RIGHT keeps cycling tracks (first press still comes from the
+             * edge delta above). */
+            if (selected_button == 0 && delta == 0) {
+                int hb = frontend_trksel_hold_repeat();
+                if (hb == 1)      delta = -1;
+                else if (hb == 2) delta = +1;
+            }
             if (selected_button == 0 && delta != 0) {
                 /* Cycle track index, skipping tracks whose level zips are absent */
                 if (s_network_active) {
@@ -4105,20 +4199,32 @@ void Screen_TrackSelection(void) {
 
             /* [#14] RANDOMIZE: pick a random track, then run the SAME change flow as
              * a manual cycle (hide preview this frame, reload + slide-in via 5->9).
-             * track_max is exclusive; network caps at 0x13 like frontend_cycle_track. */
-            if (s_trksel_rand_btn >= 0 && s_button_index == s_trksel_rand_btn) {
-                int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
-                if (frontend_pick_random_track(bound)) {
-                    frontend_play_sfx(3);
-                    TD5_LOG_I(LOG_TAG, "TrackSel RANDOMIZE: track=%d level=%d name=%s",
-                              s_selected_track, td5_asset_level_number(s_selected_track),
-                              frontend_get_track_name(s_selected_track));
-                    s_track_switch_tick = 0;
-                    frontend_update_direction_button_visibility(1, 1);
-                    frontend_update_laps_button_visibility(3);
-                    s_inner_state = 5;
-                } else {
-                    frontend_play_sfx(10); /* nothing else to pick */
+             * track_max is exclusive; network caps at 0x13 like frontend_cycle_track.
+             * [#22] Also triggered by the keyboard 'R' key (edge-latched below), so
+             * randomize works without the mouse. */
+            {
+                /* 'R' (DIK 0x13) one-shot: latch the rising edge so holding R
+                 * randomizes once per press, not every frame. */
+                static int s_trksel_r_held = 0;
+                int r_now  = td5_plat_input_key_pressed(0x13) ? 1 : 0;
+                int r_edge = (r_now && !s_trksel_r_held) ? 1 : 0;
+                s_trksel_r_held = r_now;
+                int do_random = (s_trksel_rand_btn >= 0 && s_button_index == s_trksel_rand_btn) ||
+                                r_edge;
+                if (do_random) {
+                    int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
+                    if (frontend_pick_random_track(bound)) {
+                        frontend_play_sfx(3);
+                        TD5_LOG_I(LOG_TAG, "TrackSel RANDOMIZE: track=%d level=%d name=%s",
+                                  s_selected_track, td5_asset_level_number(s_selected_track),
+                                  frontend_get_track_name(s_selected_track));
+                        s_track_switch_tick = 0;
+                        frontend_update_direction_button_visibility(1, 1);
+                        frontend_update_laps_button_visibility(3);
+                        s_inner_state = 5;
+                    } else {
+                        frontend_play_sfx(10); /* nothing else to pick */
+                    }
                 }
             }
         }

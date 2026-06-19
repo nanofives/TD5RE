@@ -1332,6 +1332,11 @@ void Screen_NetworkLobby(void) {
     case 0: /* INITIALIZATION */
         frontend_init_return_screen(TD5_SCREEN_NETWORK_LOBBY);
         TD5_LOG_D(LOG_TAG, "NetworkLobby: state 0 - init");
+        /* [#24] The netplay lobby uses the GLOBAL title path; clear the
+         * split-screen simultaneous-grid flag on entry so a post-race return
+         * never inherits a stale s_mp_simul that would blank the "NET PLAY"
+         * header (root-cause partner to the lobby title-gate exemption). */
+        s_mp_simul = 0;
         /* [2026-06-16] Re-baseline the host-keepalive clock on (re)entry so a
          * long detour through Change Car / Select Track doesn't carry stale
          * silence that instantly trips the host-gone watchdog. */

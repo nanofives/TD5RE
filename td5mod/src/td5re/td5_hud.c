@@ -1486,6 +1486,19 @@ void td5_hud_draw_pause_overlay(void)
 extern void td5_camera_apply_view(int view);
 extern void td5_camera_get_basis(float *right, float *up, float *forward);
 
+/* [#23 MP LABEL DISTANCE 2026-06-19] World-unit thresholds for the floating
+ * other-player labels, env-tunable so they can be seen from further away and
+ * reach full size sooner. TD5RE_MP_LABEL_NEAR = full-size plateau out to this
+ * distance; _FAR = distance at which the linear shrink hits its floor; _CUT =
+ * drop the label entirely past this. <=0 / unset -> the (widened) default. */
+static float hud_mp_label_dist(const char *env, float def)
+{
+    const char *e = getenv(env);
+    if (!e || !e[0]) return def;
+    float v = (float)atof(e);
+    return (v > 0.0f) ? v : def;
+}
+
 static void hud_draw_mp_car_labels(void)
 {
     int views = s_view_count;
@@ -1515,9 +1528,14 @@ static void hud_draw_mp_car_labels(void)
      * camera->point distance along the view axis, world units). NEAR_D and far
      * are tuned for the chase camera: full size up close, shrinking linearly to
      * the floor scale by FAR_D, and skipped entirely past CUT_D. */
-    const float NEAR_D = 2500.0f;            /* >= this distance: start shrinking */
-    const float FAR_D  = 22000.0f;           /* <= floor scale by here */
-    const float CUT_D  = 30000.0f;           /* beyond this: do not draw */
+    /* [#23 2026-06-19] Widened from 2500/22000/30000 so other players' labels
+     * appear from further away and stay full size sooner (env-overridable). */
+    static float NEAR_D = -1.0f, FAR_D = -1.0f, CUT_D = -1.0f;
+    if (NEAR_D < 0.0f) {
+        NEAR_D = hud_mp_label_dist("TD5RE_MP_LABEL_NEAR",  6000.0f);  /* full-size plateau */
+        FAR_D  = hud_mp_label_dist("TD5RE_MP_LABEL_FAR",  30000.0f);  /* shrink-floor distance */
+        CUT_D  = hud_mp_label_dist("TD5RE_MP_LABEL_CUT",  42000.0f);  /* hard cutoff */
+    }
     const float SCALE_NEAR = 1.0f;           /* multiplier on the base text scale */
     const float SCALE_FAR  = 0.35f;
 
@@ -1595,8 +1613,12 @@ static void hud_draw_mp_car_labels(void)
                  * just-visible sliver right up to the CUT_D cutoff instead of popping
                  * to nothing one pixel early. */
                 float full_ts = (pane_w / 640.0f) * 0.95f;
+                /* [#2 2026-06-19] Match the bottom name-plate's DPI size trim
+                 * (hud_size_mul, the FPS/MS indicator's factor) so a near label
+                 * reads at exactly the player's own plate size. */
+                if (hud_dpi_scale_on()) full_ts *= hud_size_mul();
                 if (full_ts < 0.40f) full_ts = 0.40f;
-                if (full_ts > 1.20f) full_ts = 1.20f;
+                if (full_ts > 1.60f) full_ts = 1.60f;
                 ts = full_ts * (1.0f - t);
                 if (ts < 0.04f) ts = 0.04f;   /* ~nothing, but not exactly 0 */
             } else {
@@ -1709,7 +1731,12 @@ void td5_hud_draw_player_id_overlays(void)
         if (s_hud_id_name[slot][0]) snprintf(nm, sizeof nm, "%s", s_hud_id_name[slot]);
         else                        snprintf(nm, sizeof nm, "PLAYER %d", slot + 1);
         ts = (w / 640.0f) * 0.95f;
-        if (ts > 1.2f) ts = 1.2f;
+        /* [#2 MP LABEL DPI 2026-06-19] Apply the same size trim the FPS/MS
+         * indicator uses (hud_active_text_scale -> hud_size_mul, default 0.75)
+         * so this bottom position/name plate keeps the FPS indicator's relative
+         * size as the window DPI scales, instead of running large at high DPI. */
+        if (hud_dpi_scale_on()) ts *= hud_size_mul();
+        if (ts > 1.6f) ts = 1.6f;
         if (ts < 0.40f) ts = 0.40f;
         cx = (L + R) * 0.5f;
         tw = td5_vui_text_width(nm, ts);
@@ -3359,6 +3386,47 @@ static int hud_draw_centered_ttf_char(char ch, float cx, float cy,
     return 1;
 }
 
+/* [#1 CHECKPOINT TIMER FONT 2026-06-19] Draw the P2P checkpoint countdown timer
+ * (the metric-digits FINISH_TIMER value) through the native HUD TTF — the same
+ * Rajdhani face as the race-start 3/2/1 countdown — DPI-scaled to the view,
+ * instead of the fixed-pixel NUMBERS bitmap atlas (which never scaled with DPI).
+ * Sized a little smaller than the giant countdown: countdown caps are sy*24*2.2,
+ * this uses sy*24*MUL with MUL default 1.40 (env TD5RE_CKPT_TIMER_SCALE, percent).
+ * Returns 1 if drawn via TTF, 0 if the font isn't ready / the countdown-TTF knob
+ * is off (the caller then falls back to the original bitmap-digit quads). */
+static int hud_draw_checkpoint_timer_ttf(int view_idx, uint32_t value)
+{
+    if (!hud_countdown_ttf_on() || !td5_hudfont_ready()) return 0;
+    if (view_idx < 0 || view_idx >= MAX_HUD_VIEWS) return 0;
+    const TD5_HudViewLayout *vl = &s_view_layout[view_idx];
+    float sy = vl->scale_y;
+    if (sy < 0.05f) sy = 1.0f;
+
+    static float mul = -1.0f;
+    if (mul < 0.0f) {
+        const char *e = getenv("TD5RE_CKPT_TIMER_SCALE");
+        long pct = (e && e[0]) ? strtol(e, NULL, 10) : 0;
+        if (pct <= 0)  pct = 140;            /* 1.40x of the 24px base (< 2.2x countdown) */
+        if (pct < 30)  pct = 30;
+        if (pct > 400) pct = 400;
+        mul = (float)pct / 100.0f;
+    }
+
+    float cap = sy * 24.0f * mul;
+    float ts  = cap * (1.0f / 15.0f);        /* td5_vui_text_centered: caps span 15*ts */
+    char buf[8];
+    snprintf(buf, sizeof buf, "%u", (unsigned)(value % 1000u));
+
+    float cx      = vl->center_x;
+    float caps_cy = vl->vp_top + cap * 0.5f + 6.0f * sy;  /* sit just below the pane top */
+    float ny      = caps_cy - 15.5f * ts;    /* cell-top so caps centre at caps_cy */
+    float off     = cap * (1.0f / 16.0f);
+    if (off < 1.0f) off = 1.0f;
+    td5_vui_text_centered(cx + off, ny + off, buf, 0xFF000000u, ts, ts);  /* drop shadow */
+    td5_vui_text_centered(cx, ny, buf, 0xFFFFFFFFu, ts, ts);
+    return 1;
+}
+
 /* ========================================================================
  * [#11 EMPTY GRID-CELL FILLER 2026-06-15]  SOURCE-PORT FEATURE.
  *
@@ -4335,14 +4403,23 @@ void td5_hud_render_overlays(float dt)
         if ((flags & TD5_HUD_METRIC_DIGITS) && g_special_encounter != 0 && s_numbers_atlas != NULL) {
             int metric_ok = td5_hud_build_metric_digits();
             if (metric_ok) {
-                /* Submit the 4th digit if in odometer mode */
-                if (g_hud_metric_mode == TD5_METRIC_ODOMETER) {
-                    hud_submit_quad(view_base + 0x734);
+                /* [#1 2026-06-19] The checkpoint countdown (FINISH_TIMER mode)
+                 * draws through the race-countdown TTF, DPI-scaled; only fall
+                 * back to the fixed-pixel bitmap digits if the TTF didn't draw.
+                 * Other metric modes (FPS/odometer/gear) keep the bitmap path. */
+                int drew_ttf = 0;
+                if (g_hud_metric_mode == TD5_METRIC_FINISH_TIMER)
+                    drew_ttf = hud_draw_checkpoint_timer_ttf(s_cur_view, s_metric_value);
+                if (!drew_ttf) {
+                    /* Submit the 4th digit if in odometer mode */
+                    if (g_hud_metric_mode == TD5_METRIC_ODOMETER) {
+                        hud_submit_quad(view_base + 0x734);
+                    }
+                    /* Submit hundreds, tens, ones */
+                    hud_submit_quad(view_base + 0x454);
+                    hud_submit_quad(view_base + 0x50C);
+                    hud_submit_quad(view_base + 0x5C4);
                 }
-                /* Submit hundreds, tens, ones */
-                hud_submit_quad(view_base + 0x454);
-                hud_submit_quad(view_base + 0x50C);
-                hud_submit_quad(view_base + 0x5C4);
             }
         }
 

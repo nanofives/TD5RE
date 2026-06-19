@@ -404,6 +404,31 @@ static void td5_apply_window_icons(HWND hwnd)
     if (hBig)   SetClassLongPtrA(hwnd, GCLP_HICON,   (LONG_PTR)hBig);
 }
 
+/* Give the process an explicit AppUserModelID so the Windows taskbar groups
+ * our window under its OWN button and renders THAT window's icon, instead of
+ * borrowing a cached icon from the host/launcher process. Without this, fresh
+ * machines (or a launcher with no AUMID) can show the generic default icon on
+ * the taskbar even though the window-class / WM_SETICON icon is correct -- this
+ * is the classic "icon works on the dev box but not on other PCs" symptom.
+ *
+ * Declared inline (mirrors the DwmSetWindowAttribute / XInput precedent) to
+ * avoid pulling the heavy <shobjidl.h> COM header under WIN32_LEAN_AND_MEAN;
+ * the symbol resolves at link time from shell32 (-lshell32). Best-effort: any
+ * failure (older OS, missing export) is silently ignored. */
+static void td5_set_app_user_model_id(void)
+{
+    typedef HRESULT (WINAPI *PFN_SetCurrentProcessExplicitAppUserModelID)(PCWSTR);
+    HMODULE hShell = LoadLibraryA("shell32.dll");
+    if (hShell) {
+        PFN_SetCurrentProcessExplicitAppUserModelID pSet =
+            (PFN_SetCurrentProcessExplicitAppUserModelID)
+            GetProcAddress(hShell, "SetCurrentProcessExplicitAppUserModelID");
+        if (pSet)
+            pSet(L"TD5RE.SourcePort");
+        /* keep shell32 loaded for the process lifetime; do not FreeLibrary */
+    }
+}
+
 /* ========================================================================
  * Initialization -- called by the wrapper/loader after device creation
  * ======================================================================== */
@@ -413,6 +438,11 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
     s_ddraw4     = (WrapperDirectDraw *)ddraw4;
     s_d3ddevice3 = (WrapperDevice *)d3ddevice3;
     s_primary    = (WrapperSurface *)primary_surface;
+
+    /* Set the taskbar identity before the window icon is applied below so the
+     * taskbar button uses our window's TD5 icon on every machine, not just the
+     * dev box. Harmless if it returns early (no window yet in some paths). */
+    td5_set_app_user_model_id();
 
     /* In standalone mode g_backend.hwnd is NULL (to avoid message forwarding
      * loops in DisplayWindowProc). Use the backend display window directly
@@ -2692,6 +2722,7 @@ uint32_t td5_plat_input_frontend_nav(void)
         }
         if (js.rgbButtons[0] & 0x80) db |= 0x10;     /* A = confirm/select */
         if (js.rgbButtons[1] & 0x80) db |= 0x20;     /* B = back/cancel    */
+        if (js.rgbButtons[2] & 0x80) db |= 0x80;     /* [#15] X = delete (name entry) */
         if (db) {
             bits |= db;
             if (db & 0x10) s_plat_active_js = i;      /* A press marks this pad active */
@@ -2725,6 +2756,7 @@ uint32_t td5_plat_input_joystick_nav(int device_slot)
     }
     if (js.rgbButtons[0] & 0x80) db |= 0x10;         /* A = confirm/select */
     if (js.rgbButtons[1] & 0x80) db |= 0x20;         /* B = back/cancel    */
+    if (js.rgbButtons[2] & 0x80) db |= 0x80;         /* [#15] X = delete (name entry) */
     return db;
 }
 
@@ -2762,6 +2794,7 @@ uint32_t td5_plat_input_device_nav(int enum_index)
     }
     if (js.rgbButtons[0] & 0x80) db |= 0x10;         /* A = confirm/select */
     if (js.rgbButtons[1] & 0x80) db |= 0x20;         /* B = back/cancel    */
+    if (js.rgbButtons[2] & 0x80) db |= 0x80;         /* [#15] X = delete (name entry) */
     if (js.rgbButtons[7] & 0x80) db |= 0x40;         /* Start / Menu        */
     return db;
 }

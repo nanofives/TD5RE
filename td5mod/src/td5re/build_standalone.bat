@@ -112,8 +112,19 @@ REM release exe with the generic default Windows icon is a regression, so we sto
 REM the build rather than silently drop the icon.
 REM ---------------------------------------------------------------------------
 echo Compiling td5re.rc...
+REM The .ico is referenced by td5re.rc via a relative path; if it is absent at
+REM build time (e.g. not checked out / not git-tracked on another machine),
+REM windres can still succeed but embed an empty/placeholder icon, shipping an
+REM exe that falls back to the generic default Windows icon on other computers.
+REM Catch that FATALLY here rather than silently shipping no icon.
+if not exist %SRCDIR%\td5re.ico (
+    echo ERROR: td5re.ico missing -- app icon would be absent, aborting build
+    goto :fail
+)
 del !BUILDDIR!\td5re_res.o 2>nul
-"%WINDRES%" -F pe-i386 -i %SRCDIR%\td5re.rc -o !BUILDDIR!\td5re_res.o
+REM --include-dir %SRCDIR% makes the relative "td5re.ico" reference in td5re.rc
+REM resolve deterministically regardless of windres' working directory.
+"%WINDRES%" -F pe-i386 --include-dir %SRCDIR% -i %SRCDIR%\td5re.rc -o !BUILDDIR!\td5re_res.o
 if errorlevel 1 (
     echo ERROR: windres failed -- app icon would be missing, aborting build
     goto :fail
@@ -153,7 +164,7 @@ echo Linking !EXE!...
     !BUILDDIR!\main.o !RESOBJ! ^
     -L!BUILDDIR! -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive ^
     -L%WRAPPER_BUILDDIR% -lddraw_wrapper ^
-    -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 ^
+    -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 -lshell32 ^
     -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 -lmfplat -lmfreadwrite -lmfuuid -lole32 ^
     -Wl,-Map=!BUILDDIR!\!MAPFILE! ^
     -Wl,--enable-stdcall-fixup ^
