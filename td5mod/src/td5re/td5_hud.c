@@ -5712,8 +5712,18 @@ void td5_hud_render_minimap(int actor_slot)
         int cp_drawn = 0;
         for (int ci = 0; ci < cp_count; ci++) {
             int cs = td5_game_get_minimap_checkpoint_span(ci);
+            int bs;
             if (cs < 0) continue;
             if (minimap_emit_checkpoint_dash(span_base, vert_base, cs,
+                                             offset_x, offset_z, cos_h, sin_h,
+                                             mm_cx, mm_cy))
+                cp_drawn++;
+            /* [#10] If the route forks across this checkpoint, also dash the
+             * parallel BRANCH corridor span so the marker shows on BOTH tracks
+             * (user: "checkpoint line only on one track of a branch"). */
+            bs = td5_track_main_to_branch_span(cs);
+            if (bs >= 0 && bs != cs &&
+                minimap_emit_checkpoint_dash(span_base, vert_base, bs,
                                              offset_x, offset_z, cos_h, sin_h,
                                              mm_cx, mm_cy))
                 cp_drawn++;

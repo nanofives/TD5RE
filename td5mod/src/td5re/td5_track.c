@@ -156,9 +156,16 @@ static int              s_td6_surface_grid_rows = 0;
  * + (above an impact speed) debris + sound (TD6.exe FUN_00441070/FUN_0043e700).
  * Record = 16 bytes: type@0(0xFF term), radius@1, strip-seg u16@4, posX i32@8
  * (24.8), posZ i32@12. */
-typedef struct { int32_t px, pz; int16_t span; uint8_t radius, type, broken; } TD6Prop;
-static TD6Prop          s_td6_props[512];
+typedef struct { int32_t px, py, pz; int16_t span, angle; uint8_t radius, type, broken, model;
+                 float ground_y; uint8_t ground_done;
+                 /* [#20 pushable] mass (MOV byte 6); runtime slide state (24.8 world):
+                  * vx/vz = velocity per tick, ox/oz = accumulated displacement from px/pz. */
+                 uint8_t mass; int32_t vx, vz, ox, oz; } TD6Prop;
+static TD6Prop          s_td6_props[1024];
 static int              s_td6_prop_count = 0;
+/* COL_00..07 bounding radii (world units) -> collision radius per furniture model
+ * (the .mov model byte's low nibble). Matches PROPMESH.BIN. */
+static const int s_td6_col_radius[8] = { 319, 478, 607, 558, 269, 207, 433, 283 };
 
 /** Strip attribute override table */
 static uint8_t         *s_attr_override_table = NULL;
@@ -597,29 +604,14 @@ void td5_track_get_span_edges(int span_index,
  *   - Traffic actors (slot >= 6) are skipped (fixed AI paths, possibly
  *     uninitialised probes).
  * ------------------------------------------------------------------------ */
-static int td6_branches_enabled(void);   /* fwd decl (task#17, defined below) */
 
-/* [task#8 FIX 2026-06-14] TD6 SHALLOW-WALL DEADZONE. The year-long "invisible
- * wall at the beginning / span 110" is the collision firing a HARD wall response
- * on shallow penetrations (|pen| ~120-300) at TD6 road-TAPER spans (type 7, e.g.
- * London 37/68/89) and section-boundary spans. A taper span's left/right rail
- * jogs inward over the span (London span 89 shifts +2250u in X), so a car driving
- * straight clips the angled rail by a little -> small pen -> hard jolt that reads
- * as an invisible wall, even though the road is geometrically continuous and
- * wide (1500u). Genuine off-road excursions penetrate deeply (thousands), so a
- * small deadzone lets cars follow tapering rails smoothly while still stopping
- * real run-offs. TD6-only (g_active_td6_level>0); native TD5 untouched. Env
- * TD5RE_TD6_WALL_DEADZONE overrides the default (0 = old behaviour). */
-static int td6_wall_deadzone(void)
-{
-    static int s = -1;
-    if (s < 0) {
-        const char *e = getenv("TD5RE_TD6_WALL_DEADZONE");
-        s = e ? atoi(e) : 320;   /* world-units of slack before a TD6 wall fires */
-        if (s < 0) s = 0;
-    }
-    return s;
-}
+/* [#20 2026-06-17] Removed the TD6 displacement band-aids and their toggles
+ * (td5_track_td6_faithful / TD5RE_TD6_FAITHFUL, td6_wallcap_enabled /
+ * TD5RE_TD6_WALLCAP, td6_wall_deadzone / TD5RE_TD6_WALL_DEADZONE). They existed to
+ * cope with a branch "displacement" that turned out to be a measurement artifact —
+ * branch corridors are geometrically connected to their forks (verified via
+ * re/tools/connect_branches.py: entry gap 0). TD6 now drives branches via the native
+ * faithful walker + standard wall response, exactly like native TD5. */
 
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
@@ -657,26 +649,11 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     int lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
 
-    /* [2026-06-12] TD6 JUNCTION RIGHT-WALL AT THE MAIN/BRANCH BOUNDARY.
-     * A TD6 fork span (type 8 fwd / 11 bwd) is a WIDE span whose left lanes are
-     * the main road and whose right lanes physically overlap the (displaced)
-     * branch corridor. If the player drives into those right lanes, force-main
-     * keeps the tracked span on the NARROW main road while the chassis sits
-     * thousands of units past the main's right rail -> the ground probe
-     * extrapolates -> launch/teleport (verified London span 252->253: junction
-     * 7 lanes, main 3 lanes, chassis 7891u past 253's rail). FIX: put the right
-     * wall at the main/branch boundary (lane = the main continuation's lane
-     * count, vertex li_base+rc) so the car is funneled into the main lanes and
-     * never reaches the branch overlap. Native TD5 (g_active_td6_level==0)
-     * untouched. */
+    /* [#20] Right wall = the geometric right edge. The old TD6 "main/branch
+     * boundary" synthetic wall existed to keep a force-mained car off the
+     * (mis-measured "displaced") branch; branches are connected and force-main is
+     * gone, so the right rail is just the span's right edge as on native TD5. */
     int rc = lane_count;
-    if (g_active_td6_level > 0 && (type == 8 || type == 11) && !td6_branches_enabled()) {
-        int adj = (type == 8) ? span_idx + 1 : span_idx - 1;
-        if (adj >= 0 && adj < s_span_count) {
-            int main_lc = span_lane_count(&s_span_array[adj]);
-            if (main_lc >= 1 && main_lc < lane_count) rc = main_lc;
-        }
-    }
 
     int li_base = (int)sp->left_vertex_index;
     int ri_base = (int)sp->right_vertex_index;
@@ -732,12 +709,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * Reject those. The engine already does the equivalent for wheels (S18
      * wheel-teleport reject); this adds it to the wall-response path. Faithful
      * tracks never hit this (their |pen| stays small). */
-    const int32_t WALL_PEN_TELEPORT_LIMIT = 2000;
-
-    /* [task#8] TD6 shallow-wall deadzone (td6_wall_deadzone): a wall fires only
-     * once penetration exceeds this slack, suppressing the false taper /
-     * section-boundary "invisible walls". 0 on native TD5. */
-    const int32_t WALL_DEADZONE = (g_active_td6_level > 0) ? td6_wall_deadzone() : 0;
+    const int32_t WALL_PEN_REJECT_LIMIT = 2000;
 
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
@@ -745,10 +717,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         int sub_lane = (int)actor->wheel_probes[pi].sub_lane_index;
 
         int test_left  = (left.ok  && sub_lane < 1);
-        /* rc == lane_count except on TD6 forks, where the right wall is the
-         * main/branch boundary -> test as soon as the wheel reaches the last
-         * MAIN lane so the car is stopped before the branch overlap. */
-        int test_right = (right.ok && sub_lane >= rc - 1);
+        int test_right = (right.ok && sub_lane >= rc - 1);   /* rc == lane_count */
 
         int32_t pen_l = 0, pen_r = 0;
         int hit_l = 0, hit_r = 0;
@@ -757,13 +726,13 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             int64_t p = (int64_t)((pz - sp->origin_z) - left.ref_z) * left.nnz
                       + (int64_t)((px - left.ref_x) - sp->origin_x) * left.nnx;
             pen_l = (int32_t)((p + ((p >> 63) & 0xFFF)) >> 12);
-            hit_l = (pen_l < -WALL_DEADZONE);
+            hit_l = (pen_l < 0);
         }
         if (test_right) {
             int64_t p = (int64_t)((pz - sp->origin_z) - right.ref_z) * right.nnz
                       + (int64_t)((px - right.ref_x) - sp->origin_x) * right.nnx;
             pen_r = (int32_t)((p + ((p >> 63) & 0xFFF)) >> 12);
-            hit_r = (pen_r < -WALL_DEADZONE);
+            hit_r = (pen_r < 0);
         }
 
         /* Degenerate-span guard: a probe cannot be outside BOTH rails of a
@@ -771,7 +740,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
          * (walker-lag glitch) -> skip rather than fight it. */
         if (hit_l && hit_r) continue;
 
-        if (hit_l && pen_l <= -WALL_PEN_TELEPORT_LIMIT) {
+        if (hit_l && pen_l <= -WALL_PEN_REJECT_LIMIT) {
             TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d LEFT span=%d type=%d pen=%d "
                       "REJECTED (bogus -> would teleport)", actor->slot_index,
                       span_idx, type, pen_l);
@@ -785,29 +754,16 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                 TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d LEFT span=%d type=%d sub=%d pen=%d angle=%d",
                           actor->slot_index, pi, span_idx, type, sub_lane, pen_l, wall_angle);
         }
-        /* The teleport-reject only applies to the GEOMETRIC right edge
-         * (rc == lane_count). On a TD6 fork the right rail is the synthetic
-         * main/branch BOUNDARY (rc < lane_count): a deep penetration there means
-         * the chassis lunged toward the displaced branch, and the correct
-         * response is a CAPPED push back toward the main road (never a reject,
-         * which would leave the chassis stranded on the branch -> ground-probe
-         * teleport, exactly the span-300 case). Cap keeps the correction
-         * non-explosive. */
-        int boundary_wall = (rc < lane_count);
-        if (hit_r && pen_r <= -WALL_PEN_TELEPORT_LIMIT && !boundary_wall) {
+        if (hit_r && pen_r <= -WALL_PEN_REJECT_LIMIT) {
             TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d RIGHT span=%d type=%d pen=%d "
                       "REJECTED (bogus -> would teleport)", actor->slot_index,
                       span_idx, type, pen_r);
         } else if (hit_r) {
-            int32_t pr = pen_r;
-            if (boundary_wall && pr < -WALL_PEN_TELEPORT_LIMIT)
-                pr = -WALL_PEN_TELEPORT_LIMIT;   /* cap the TD6 boundary correction */
             double rad = atan2((double)right.nnx, (double)(-right.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-            td5_physics_wall_response(actor, wall_angle, pr, 2,
+            td5_physics_wall_response(actor, wall_angle, pen_r, 2,
                                       probe_block[pi].x, probe_block[pi].z);
             td5_physics_rebuild_pose(actor);
-            pen_r = pr;
             if (diag_slot0 || pen_r < -100)
                 TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d type=%d sub=%d pen=%d angle=%d",
                           actor->slot_index, pi, span_idx, type, sub_lane, pen_r, wall_angle);
@@ -938,12 +894,41 @@ void td5_track_bind_boundary_sentinels(int level_number)
      * (td5_track_resolve_wall_contacts) still runs, and faithful (non-override)
      * levels are byte-identical. */
     if (g_active_td6_level > 0) {
-        s_boundary_fwd_sentinel = -1;
-        s_boundary_rev_sentinel = 9999;
-        TD5_LOG_I(LOG_TAG,
-                  "boundary sentinels: override track (level=%d) -> DISABLED "
-                  "(substituted TD6 geometry has no native end-of-level boundary)",
-                  level_number);
+        /* [endwall 2026-06-18] TD6 P2P tracks ship no native end-of-level
+         * boundary, so the player/cars could drive off the first/last span and
+         * fall out of the world. Re-enable the boundary handler for TD6
+         * POINT-TO-POINT levels (8..12 = Paris/NewYork/Rome/HongKong/London) with
+         * sentinels at the real first/last drivable spans, capping BOTH physical
+         * ends — this serves forward and reverse alike (same physical road). TD6
+         * circuits loop and need no caps. The historical "seam teleport" that
+         * forced this off is now guarded by a penetration reject in
+         * fwd_rev_resolve_contact. Disable via TD5RE_TD6_ENDWALL=0. */
+        static int s_endwall = -1;
+        int is_p2p = (g_active_td6_level >= 8 && g_active_td6_level <= 12);
+        /* Cap at the MAIN-ROAD ends. s_span_count is the PHYSICAL count (2763 on
+         * London) which includes the displaced branch corridors; the through-road
+         * is only `ring` spans (2136). Use the ring so the end cap lands on the
+         * real road end, not in branch territory. */
+        int ring = td5_track_get_ring_length();
+        if (ring <= 16) ring = s_span_count;   /* fallback if ring not yet resolved */
+        if (s_endwall < 0) {
+            const char *e = getenv("TD5RE_TD6_ENDWALL");
+            s_endwall = (e && e[0] == '0') ? 0 : 1;
+        }
+        if (s_endwall && is_p2p && ring > 16) {
+            s_boundary_fwd_sentinel = 2;
+            s_boundary_rev_sentinel = ring - 3;
+            TD5_LOG_I(LOG_TAG,
+                      "boundary sentinels: TD6 P2P (level=%d) -> END CAPS fwd=%d rev=%d "
+                      "(ring=%d span_count=%d)", level_number, s_boundary_fwd_sentinel,
+                      s_boundary_rev_sentinel, ring, s_span_count);
+        } else {
+            s_boundary_fwd_sentinel = -1;
+            s_boundary_rev_sentinel = 9999;
+            TD5_LOG_I(LOG_TAG,
+                      "boundary sentinels: override track (level=%d) -> DISABLED "
+                      "(circuit, or endwall off)", level_number);
+        }
         return;
     }
 
@@ -1012,6 +997,18 @@ static void fwd_rev_resolve_contact(TD5_Actor *actor,
     int32_t pen = (int32_t)((pen64 + ((pen64 >> 63) & 0xFFF)) >> 12);
 
     if (pen >= 0) return;  /* probe inside the playable region */
+
+    /* [endwall 2026-06-18] A penetration of THOUSANDS means the boundary span's
+     * edge vertices momentarily resolve far from the probe — the historical TD6
+     * "seam teleport" that forced the boundary handler off. Reject it so the
+     * re-enabled end cap can never launch the car off the track; a legitimate
+     * end-cap hit is small (the car decelerates against it each tick). Mirrors
+     * the lateral wall's WALL_PEN_REJECT_LIMIT guard. */
+    if (pen <= -2000) {
+        TD5_LOG_W(LOG_TAG, "%s_contact: slot=%d boundary=%d pen=%d REJECTED (bogus)",
+                  reverse_mode ? "reverse" : "forward", actor->slot_index, boundary, pen);
+        return;
+    }
 
     /* Tangent along the edge (NOT the outward normal) feeds the angle. */
     double rad = atan2((double)edge_dz, (double)edge_dx);
@@ -1734,6 +1731,43 @@ int td5_track_surface_is_slow(int surface_type)
     return 0;
 }
 
+/* [#18 2026-06-16] Traffic-drivable ROAD band for a TD6 span: the contiguous run
+ * of lanes sharing the CENTER lane's surface-grid class. The centre lane is always
+ * carriageway, so this excludes the sidewalk/verge EDGE lanes — which are a
+ * different grid class that td5_track_surface_is_slow() does NOT catch (London
+ * sidewalk = full grip + zero drag, so the slow-lane filter never excludes it).
+ * Keeps traffic on the actual road (both directions) and off the kerb. Returns 1
+ * when a proper sub-range was found (some edge lane is a different class). */
+int td5_track_td6_road_band(int span_index, int lane_count, int *out_lo, int *out_hi)
+{
+    int i, best_lo = 0, best_hi, best_w = -1;
+    if (lane_count <= 1) {
+        if (out_lo) *out_lo = 0;
+        if (out_hi) *out_hi = (lane_count > 0) ? lane_count - 1 : 0;
+        return 0;
+    }
+    best_hi = lane_count - 1;
+    /* [#20 2026-06-17] The drivable road is the WIDEST contiguous run of one surface
+     * class. The earlier version seeded at the GEOMETRIC centre and grew the centre
+     * lane's class — but on reverse strips the road is off-centre (London STRIPB ~span
+     * 20 = [3,3,16,16,7,1,1,1], road=class1 at cells 5-7, centre=sidewalk), so the band
+     * (and the spawn that centres on it) landed on the sidewalk. The widest run is the
+     * carriageway in both directions (forward = [7,7,1,1,1,1,7,7] -> class1 cells 2-5),
+     * so this is forward-identical for London and finds the real road in reverse. */
+    i = 0;
+    while (i < lane_count) {
+        int c = td5_track_get_span_lane_surface(span_index, i);
+        int j = i;
+        while (j + 1 < lane_count &&
+               td5_track_get_span_lane_surface(span_index, j + 1) == c) j++;
+        if (j - i > best_w) { best_w = j - i; best_lo = i; best_hi = j; }
+        i = j + 1;
+    }
+    if (out_lo) *out_lo = best_lo;
+    if (out_hi) *out_hi = best_hi;
+    return (best_lo > 0 || best_hi < lane_count - 1);
+}
+
 static void *build_span_strip_display_list(int span_index)
 {
     const TD5_StripSpan *sp;
@@ -2025,39 +2059,10 @@ int td5_track_load_strip(const void *data, size_t size)
                   sg, s_td6_surface_grid_rows);
     }
 
-    /* [TD6 JUNCTION FLATTEN] Migrated TD6 tracks pack many road forks whose
-     * branch corridors are appended far away (span index >= ring_length). The
-     * TD5 span-walk follows a junction span's branch link (link_next on type 8,
-     * link_prev on type 11) onto those displaced branches, stranding the chassis
-     * on a geometrically-distant span -> the whole junction glitch class
-     * (teleport / fall-through / launch / render-cull invisible geometry; see
-     * td5_track.c:614). TD6 forks are not the race route and are undrivable
-     * anyway, so SEVER the branch links: clear the link that points from a
-     * MAIN-RING junction span to a BRANCH span, leaving a clean single-loop
-     * corridor the engine handles like a native TD5 track. The branch road meshes
-     * still render (decorative side streets); the car can no longer be walked
-     * onto them. TD6-only (g_active_td6_level) + [GameOptions] TD6FlattenJunctions
-     * — faithful TD5 junctions (short rejoining detours) are never touched. */
-    if (g_active_td6_level > 0 && g_td5.ini.td6_flatten_junctions &&
-        !td6_branches_enabled() &&   /* [task#17] keep branch links for drivable branches */
-        s_span_array && s_span_count > 0 && g_td5.track_span_ring_length > 0) {
-        int ring = g_td5.track_span_ring_length;
-        int total = s_span_count;
-        int severed = 0;
-        if (ring > total) ring = total;
-        for (int i = 0; i < ring; i++) {            /* main-ring spans only */
-            TD5_StripSpan *s = &s_span_array[i];
-            if (s->span_type == 8) {
-                int t = (int)s->link_next;
-                if (t >= ring && t < total) { s->link_next = -1; severed++; }
-            } else if (s->span_type == 11) {
-                int t = (int)s->link_prev;          /* corrected by the assetsrc link_prev fix */
-                if (t >= ring && t < total) { s->link_prev = -1; severed++; }
-            }
-        }
-        TD5_LOG_I(LOG_TAG, "TD6 junction flatten: severed %d branch link(s) "
-                  "(ring=%d total=%d) -> single-loop corridor", severed, ring, total);
-    }
+    /* [#20] (Removed) The TD6 "junction flatten" used to sever fork->branch links
+     * to make a single loop, on the premise that branches were undrivable displaced
+     * corridors. Branches are connected and drivable (faithful path), so the links
+     * are kept and the engine walks them like native TD5. */
 
     /* Bind runtime pointers (patch sentinels) */
     td5_track_bind_runtime_pointers();
@@ -2393,21 +2398,9 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
     return result;
 }
 
-/* [2026-06-12 task#17 branch-migration rewrite] TD6 branches are DRIVABLE
- * alternate-route corridors (fork -> type-9 start -> ~35 spans -> type-10 end ->
- * rejoin main ring), not displaced geometry. When TD5RE_TD6_BRANCHES=1 we DROP
- * the force-main + boundary-wall so the walker takes & traverses the branch
- * (experimental; default 0 keeps the safe boundary-wall that just stops the
- * teleport). Read once. */
-static int td6_branches_enabled(void)
-{
-    static int s = -1;
-    if (s < 0) {
-        const char *e = getenv("TD5RE_TD6_BRANCHES");
-        s = (e && e[0] == '1') ? 1 : 0;
-    }
-    return s;
-}
+/* [#20 2026-06-17] The TD5RE_TD6_BRANCHES / TD5RE_TD6_ROUTENET toggles were retired:
+ * TD6 branches are connected drivable roads, so branch driving is always on (see
+ * td5_track_td6_branches_drivable). */
 
 /**
  * Resolve neighbor span index for a given crossing direction.
@@ -2447,21 +2440,10 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                /* [2026-06-12] TD6: FORCE MAIN ROAD at every fork, for ALL drivers.
-                 * London's branch corridor (link_next) is stored ~8000u displaced
-                 * from the fork (geometry-verified: span 156 branch 2137 gap 7812u,
-                 * 300->2201 7896u, ...), while the main road (span+1) connects
-                 * seamlessly (gap 0). The faithful rule sends a car with sub_lane >=
-                 * next_lanes onto the branch -> ~8000u sideways jump ("always teleports
-                 * to the right branch"). Until the corridors are relocated to abut
-                 * their forks (deep converter rewrite), keep everyone on the main road
-                 * and clamp into its lanes. Native TD5 (g_active_td6_level==0) untouched. */
-                if (g_active_td6_level > 0 && sl >= next_lanes && !td6_branches_enabled()) {
-                    *sub_lane = next_lanes - 1;
-                    new_span = next_idx;
-                    TD5_LOG_I(LOG_TAG, "jfwd_td6_main: span=%d sl=%d next_lanes=%d -> span=%d (forced main, displaced branch suppressed)",
-                              span_idx, sl, next_lanes, new_span);
-                } else if (sl < next_lanes) {
+                /* [#20] Faithful fork decision (TD6 branches are connected, not
+                 * displaced): sub_lane < next_lanes stays on the main road (span+1),
+                 * otherwise follow the branch via link_next. Same path native TD5 uses. */
+                if (sl < next_lanes) {
                     /* Main road — no sub_lane delta; walker applies -1 */
                     new_span = next_idx;
                     TD5_LOG_I(LOG_TAG, "jfwd_main: span=%d sl=%d next_lanes=%d -> span=%d",
@@ -2507,10 +2489,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (g_active_td6_level > 0 && sl >= next_lanes && !td6_branches_enabled()) {
-                    *sub_lane = next_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x01) */
-                    new_span = next_idx;
-                } else if (sl < next_lanes) {
+                if (sl < next_lanes) {
                     new_span = next_idx;
                 } else {
                     new_span = (int)sp->link_next;
@@ -2566,15 +2545,8 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes && !td6_branches_enabled()) {
-                    /* TD6: force main for ALL, suppress the ~8000u-displaced branch
-                     * (same rationale as fwd case 0x01). Reversing through a London
-                     * junction used to follow link_prev onto the displaced branch
-                     * corridor -> teleport. */
-                    *sub_lane = prev_lanes - 1;
-                    new_span = prev_idx;
-                } else if (sl >= prev_lanes) {
-                    /* Branch road (native TD5 only) */
+                if (sl >= prev_lanes) {
+                    /* Branch road via link_prev (faithful; TD6 branches connected) */
                     new_span = (int)sp->link_prev;
                     if (new_span >= 0 && new_span < s_span_count) {
                         int branch_lanes = span_lane_count(&s_span_array[new_span]);
@@ -2614,10 +2586,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
-                if (g_active_td6_level > 0 && sl >= prev_lanes && !td6_branches_enabled()) {
-                    *sub_lane = prev_lanes - 1;   /* TD6: force main for ALL, suppress displaced branch (see case 0x04) */
-                    new_span = prev_idx;
-                } else if (sl >= prev_lanes) {
+                if (sl >= prev_lanes) {
                     new_span = (int)sp->link_prev;
                     if (new_span >= 0 && new_span < s_span_count) {
                         int branch_lanes = span_lane_count(&s_span_array[new_span]);
@@ -2668,7 +2637,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
      * This safety net only protects against walker producing truly
      * invalid spans (e.g. branch road data without a terminator). */
     if ((sp->span_type < 8 || sp->span_type > 11) &&
-        (new_span < 0 || new_span >= s_span_count)) {
+        (new_span < 0 || new_span >= s_span_count)) {   /* OOB safety net only */
         int ring = g_td5.track_span_ring_length;
         if (span_idx >= ring && s_jump_entries && s_jump_entry_count > 0) {
             for (int j = 0; j < s_jump_entry_count; j++) {
@@ -2695,6 +2664,7 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             }
         }
     }
+
 
     /* Clamp span index to valid range */
     if (new_span < 0) new_span = 0;
@@ -6276,6 +6246,28 @@ int td5_track_branch_to_main_span(int span)
  * span, return the parallel BRANCH-corridor span (lo + (main - base)) of a branch
  * that bypasses it, or -1 if no branch parallels this main span. Lets the traffic
  * spawner populate branch corridors with cars parallel to the main road. */
+/* [#18] Nearest DRIVABLE (non-slow) lane to `lane` within `span_index`, searching
+ * outward. TD6 sidewalk/shoulder lanes report as "slow" via the surface grid, so
+ * this keeps traffic on the paved band. Returns `lane` unchanged when the surface
+ * grid is unavailable or every lane is slow. */
+int td5_track_nearest_road_lane(int span_index, int lane)
+{
+    int lc, d;
+    if (span_index < 0 || span_index >= s_span_count) return lane;
+    lc = span_lane_count(&s_span_array[span_index]);
+    if (lc < 1) return lane;
+    if (lane < 0) lane = 0;
+    if (lane >= lc) lane = lc - 1;
+    if (!td5_track_surface_is_slow(td5_track_get_span_lane_surface(span_index, lane)))
+        return lane;                                   /* already on the road */
+    for (d = 1; d < lc; d++) {
+        int a = lane - d, b = lane + d;
+        if (a >= 0 && !td5_track_surface_is_slow(td5_track_get_span_lane_surface(span_index, a))) return a;
+        if (b < lc && !td5_track_surface_is_slow(td5_track_get_span_lane_surface(span_index, b))) return b;
+    }
+    return lane;
+}
+
 int td5_track_main_to_branch_span(int main_span)
 {
     int ring = g_td5.track_span_ring_length;
@@ -6295,6 +6287,75 @@ int td5_track_main_to_branch_span(int main_span)
         }
     }
     return -1;
+}
+
+/* [#20] (Removed, then partially RESTORED 2026-06-18) The blanket branch
+ * blacklist (off-road/displaced theory) was removed because branches are
+ * connected drivable roads. But SOME individual forks on a city track really do
+ * dead-end on a sidewalk/verge, and the user flags those by span while driving.
+ * This restores a TARGETED, per-track blacklist: it keys on the fork's PARALLEL
+ * MAIN span (the through-road point where the corridor diverges), so the same
+ * physical fork is skipped whether the player drives forward or reverse. Only
+ * the traffic SPAWNER consumes it (cars are never placed on a blacklisted
+ * corridor); the walker/AI/player still route freely. The runtime self-heal and
+ * the whole-track force-main are NOT restored.
+ *
+ * The flagged spans are given in the REVERSE driving direction (that's how the
+ * user reported them); for a forward race we mirror each candidate base into
+ * reverse coords (ring-1-base) before comparing, so one list serves both ways.
+ * Env override: TD5RE_TD6_BRANCH_BLACKLIST="s1,s2,..." (spans as measured driving
+ * REVERSE). A tolerance window absorbs the "around span N" imprecision. */
+#define TD6_BL_TOL 24
+static int s_td6_bl[48];
+static int s_td6_bl_n = -1;
+
+static void td6_bl_init(void)
+{
+    const char *e;
+    if (s_td6_bl_n >= 0) return;
+    s_td6_bl_n = 0;
+    e = getenv("TD5RE_TD6_BRANCH_BLACKLIST");
+    if (e && e[0]) {
+        while (*e && s_td6_bl_n < 48) {
+            if (*e >= '0' && *e <= '9') {
+                s_td6_bl[s_td6_bl_n++] = atoi(e);
+                while (*e >= '0' && *e <= '9') e++;
+            } else e++;
+        }
+    } else if (g_active_td6_level == 12) {
+        /* London (port level 12): reverse-direction fork spans the user flagged
+         * as dead-end sidewalk branches (2026-06-18). */
+        static const int lon[] = {
+            488, 604, 668, 736, 790, 862, 1130, 1300, 1341, 1684, 1852
+        };
+        size_t i;
+        for (i = 0; i < sizeof(lon) / sizeof(lon[0]); i++)
+            s_td6_bl[s_td6_bl_n++] = lon[i];
+    }
+    TD5_LOG_I(LOG_TAG, "td6 branch blacklist: %d fork span(s) (level=%d; "
+              "env TD5RE_TD6_BRANCH_BLACKLIST overrides)", s_td6_bl_n, g_active_td6_level);
+}
+
+/* 1 if the fork whose corridor `span` belongs to (or, for a main span, the fork
+ * at `span`) is blacklisted in the current driving direction. */
+int td5_track_branch_blacklisted(int span)
+{
+    int base, ring, cmp, i;
+    if (g_active_td6_level <= 0 || span < 0) return 0;
+    td6_bl_init();
+    if (s_td6_bl_n <= 0) return 0;
+    base = td5_track_branch_to_main_span(span);  /* branch->parallel main; main->itself */
+    if (base < 0) base = span;
+    /* The list is in REVERSE coords. Driving forward, mirror the base to reverse
+     * coords so the same fork matches both ways (same physical road, equal ring). */
+    ring = td5_track_get_ring_length();
+    cmp = (!g_td5.reverse_direction && ring > 1) ? (ring - 1 - base) : base;
+    for (i = 0; i < s_td6_bl_n; i++) {
+        int d = cmp - s_td6_bl[i];
+        if (d < 0) d = -d;
+        if (d <= TD6_BL_TOL) return 1;
+    }
+    return 0;
 }
 
 /* [task#8 2026-06-14] Branch-corridor ENUMERATION for the traffic spawner.
@@ -6398,26 +6459,34 @@ int td5_track_corridor_info(int idx, int *branch_lo, int *branch_hi,
     return 1;
 }
 
-/* Public: are TD6 branch corridors currently drivable (the walker takes/traverses
- * them instead of force-maining)? Wraps the file-static td6_branches_enabled knob
- * so other modules (traffic spawner) can gate branch behaviour on the same flag. */
+/* Public: are TD6 branch corridors drivable? Always yes on a TD6 track — branches
+ * are connected alternate roads (verified) the walker drives natively, so the AI /
+ * traffic spawner targets branch lanes by default with no env toggle. [#20] */
 int td5_track_td6_branches_drivable(void)
 {
-    return td6_branches_enabled();
+    return (g_active_td6_level > 0);
 }
 
 /* [task#15 2026-06-13] TD6 surface CLASS -> grip/drag coefficients, ported
- * verbatim from TD6.exe: lateral grip table @0x0049d7b8 (8.8 fixed, 0x100=1.0)
- * and rolling-drag/speed-penalty table @0x0049d7f8 (int16). Only class 5 (grass)
- * and 10 (gravel) carry drag; class 1/7 (road/sidewalk) are full grip + zero
- * drag, class 16 is low-grip (0.74) but no drag. */
+ * from TD6.exe: lateral grip table @0x0049d7b8 (8.8 fixed, 0x100=1.0) and
+ * rolling-drag/speed-penalty table @0x0049d7f8 (int16). class 5 (grass) and 10
+ * (gravel) carry drag; class 1/7 (road/sidewalk) are full grip + zero drag.
+ * [#20 2026-06-17] class 16 is the off-road/verge actually used by the migrated TD6
+ * tracks (London's grid uses classes {0,1,3,4,7,16}; class 5/10 never appear). It is
+ * low-grip (0.74) — added a grass-equivalent rolling drag so driving on it slows the
+ * car ("grass doesn't slow down" report). The drag table is now 32 entries and the
+ * lookup guard reaches it. */
 static const int16_t k_td6_surface_grip[32] = {
     0x100,0x100,0x100,0x100,0x100,0x0d0,0x0e0,0x100,0x100,0x100,0x0e0,0x100,
     0x100,0x100,0x100,0x0dc,0x0be,0x0f4,0x08a,0x0ea,0x0ea,0x0ea,0x0ea,0x0ea,
     0x0ea,0x0ea,0x0ea,0x0ea,0x0ea,0x0ea,0x0ea,0x0ea
 };
-static const int16_t k_td6_surface_drag[16] = {
-    0,0,0,0,0,2,0,0,0,0,8,0,0,0,0,0
+static const int16_t k_td6_surface_drag[32] = {
+    0,0,0,0,0,2,0,0,0,0,8,0,0,0,0,0,
+    16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0  /* [16] = off-road/verge (grass): heavy rolling
+                                       * drag so grass clearly bleeds speed, not just
+                                       * grip (was 2 -> only +17% over the coast base,
+                                       * unnoticeable while driving). grip stays 0x0be. */
 };
 
 /* Surface class at (span, lateral byte 0..255). -1 when no TD6 grid is loaded or
@@ -6445,7 +6514,7 @@ int td5_track_td6_surface_grip_q8(int cls)
 /* Class -> rolling-drag / per-tick speed penalty (0 = none). */
 int td5_track_td6_surface_drag(int cls)
 {
-    if (cls < 0 || cls >= 16) return 0;
+    if (cls < 0 || cls >= 32) return 0;
     return (int)k_td6_surface_drag[cls];
 }
 
@@ -6459,33 +6528,59 @@ int td5_track_td6_surface_grid_loaded(void)
 
 /* [task#14 2026-06-13] Parse a TD6 level<N>.tcl prop table (16-byte records,
  * 0xFF-type terminator) into s_td6_props. posX/posZ are 24.8 world coords in the
- * same space as the strip vertices (verified). Call once at level load; pass
- * NULL/0 to clear (native TD5 / no props). */
-void td5_track_load_td6_props(const void *data, size_t size)
+ * same space as the strip vertices (verified). td5_track_load_td6_props CLEARS
+ * then loads the main LEVEL.TCL; td5_track_append_td6_props ADDS the branch
+ * LEVELB.TCL (the "b"/left-route props the user found missing at span ~440 — its
+ * span field indexes the b-strip, so ground Y is resolved by nearest main-strip
+ * span, not the span field). Pass NULL/0 to clear (native TD5 / no props). */
+void td5_track_append_td6_props(const void *data, size_t size)
 {
-    s_td6_prop_count = 0;
-    if (!data || size < 16) return;
+    if (!data || size < 24) return;
     {
         const uint8_t *p = (const uint8_t *)data;
-        size_t recs = size / 16;
+        size_t recs = size / 24;
         size_t i;
-        for (i = 0; i < recs && s_td6_prop_count < (int)(sizeof s_td6_props / sizeof s_td6_props[0]); i++) {
-            const uint8_t *r = p + i * 16;
-            if (r[0] == 0xFF) break;            /* terminator */
-            if (r[0] == 0) continue;            /* inactive slot */
+        int cap = (int)(sizeof s_td6_props / sizeof s_td6_props[0]);
+        for (i = 0; i < recs && s_td6_prop_count < cap; i++) {
+            const uint8_t *r = p + i * 24;   /* 24-byte level.mov record */
+            int model;
+            if (r[0] == 0)   continue;       /* serial 0 = terminator/empty slot */
+            if (r[0] == 0xFF) break;
+            model = r[4] & 0x0F;             /* low nibble = COL_<idx> mesh */
+            if (model > 7) model &= 7;
             {
                 TD6Prop *pr = &s_td6_props[s_td6_prop_count++];
-                pr->type   = r[0];
-                pr->radius = r[1];
-                pr->broken = 0;
-                pr->span   = (int16_t)(r[4] | ((uint16_t)r[5] << 8));
-                pr->px     = (int32_t)(r[8]  | ((uint32_t)r[9]  << 8) | ((uint32_t)r[10] << 16) | ((uint32_t)r[11] << 24));
-                pr->pz     = (int32_t)(r[12] | ((uint32_t)r[13] << 8) | ((uint32_t)r[14] << 16) | ((uint32_t)r[15] << 24));
+                pr->type        = r[0];
+                pr->model       = (uint8_t)model;
+                pr->radius      = (uint8_t)(s_td6_col_radius[model] / 16);  /* collision */
+                pr->broken      = 0;
+                pr->ground_y    = 0.0f;
+                pr->ground_done = 0;
+                pr->mass = r[6];                /* [#20 pushable] MOV byte 6 = mass/movability */
+                pr->vx = pr->vz = pr->ox = pr->oz = 0;
+                pr->span    = 0;
+                /* [#20] X, Y, Z are ALL s32 24.8 at [12:16]/[16:20]/[20:24] (byte 18 is
+                 * the Y high-byte, NOT an angle). The ROTATION is the single orientation
+                 * BYTE at [9], scaled <<4 into 0x1000 (full-circle) units: it varies
+                 * per-instance (benches along a curving frontage fan out a little). Byte
+                 * [10] is NOT part of it — it's constant within an area (07 one plaza, 01
+                 * another), so reading [9:10] as a u16 made every bench in a plaza share
+                 * one angle = "all facing the same way". [8]=01 / [11]=00 are constant. */
+                pr->angle   = (int16_t)(((int)r[9] << 4) & 0xFFF);
+                pr->px = (int32_t)(r[12] | ((uint32_t)r[13] << 8) | ((uint32_t)r[14] << 16) | ((uint32_t)r[15] << 24));
+                pr->py = (int32_t)(r[16] | ((uint32_t)r[17] << 8) | ((uint32_t)r[18] << 16) | ((uint32_t)r[19] << 24));
+                pr->pz = (int32_t)(r[20] | ((uint32_t)r[21] << 8) | ((uint32_t)r[22] << 16) | ((uint32_t)r[23] << 24));
             }
         }
     }
-    TD5_LOG_I(LOG_TAG, "TD6 props loaded: %d (from %u bytes)",
+    TD5_LOG_I(LOG_TAG, "TD6 MOV props now %d (added from %u bytes)",
               s_td6_prop_count, (unsigned)size);
+}
+
+void td5_track_load_td6_props(const void *data, size_t size)
+{
+    s_td6_prop_count = 0;
+    td5_track_append_td6_props(data, size);
 }
 
 int td5_track_td6_prop_count(void) { return s_td6_prop_count; }
@@ -6496,17 +6591,84 @@ int td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
                            int *out_radius_w, int *out_span)
 {
     if (i < 0 || i >= s_td6_prop_count) return 0;
-    if (out_px)       *out_px = s_td6_props[i].px;
-    if (out_pz)       *out_pz = s_td6_props[i].pz;
+    if (out_px)       *out_px = s_td6_props[i].px + s_td6_props[i].ox;  /* [#20] displaced when pushed */
+    if (out_pz)       *out_pz = s_td6_props[i].pz + s_td6_props[i].oz;
     if (out_radius_w) *out_radius_w = (int)s_td6_props[i].radius * 16;
     if (out_span)     *out_span = (int)s_td6_props[i].span;
     return 1;
+}
+
+/* [task#14 MOV] Render-side getter: furniture model (0..7 -> COL mesh), 12-bit
+ * Y-orientation, and the authored Y (24.8). Returns 1 on success. */
+int td5_track_td6_prop_get_mov(int i, int32_t *out_px, int32_t *out_py, int32_t *out_pz,
+                               int *out_model, int *out_angle)
+{
+    if (i < 0 || i >= s_td6_prop_count) return 0;
+    if (out_px)    *out_px    = s_td6_props[i].px + s_td6_props[i].ox;  /* [#20] displaced when pushed */
+    if (out_py)    *out_py    = s_td6_props[i].py;
+    if (out_pz)    *out_pz    = s_td6_props[i].pz + s_td6_props[i].oz;
+    if (out_model) *out_model = (int)s_td6_props[i].model;
+    if (out_angle) *out_angle = (int)s_td6_props[i].angle;
+    return 1;
+}
+
+/* [#20 pushable] Mass (MOV byte 6). 0 = immovable; larger = harder to push / slows
+ * the car more. London props are 25..166. */
+int td5_track_td6_prop_mass(int i)
+{
+    if (i < 0 || i >= s_td6_prop_count) return 0;
+    return (int)s_td6_props[i].mass;
+}
+
+/* [#20 pushable] Add slide velocity to prop i (24.8 world units / tick), in the
+ * same units the car integrates (world_pos += linear_velocity). Ignored once broken. */
+void td5_track_td6_prop_push(int i, int32_t dvx, int32_t dvz)
+{
+    if (i < 0 || i >= s_td6_prop_count) return;
+    if (td5_track_td6_prop_is_broken(i)) return;
+    s_td6_props[i].vx += dvx;
+    s_td6_props[i].vz += dvz;
+}
+
+/* [#20 pushable] Per-sim-tick integrator: slide pushed props (ox/oz += v), decay with
+ * ~6%/tick rolling drag (matches TD6 v -= v*0xFA/0x1000), settle when slow so they
+ * come to rest. Deterministic (no RNG) -> netplay/replay safe. Call ONCE per tick. */
+void td5_track_td6_props_tick(void)
+{
+    int i;
+    for (i = 0; i < s_td6_prop_count; i++) {
+        TD6Prop *pr = &s_td6_props[i];
+        if (pr->vx == 0 && pr->vz == 0) continue;
+        pr->ox += pr->vx;
+        pr->oz += pr->vz;
+        pr->vx -= (pr->vx * 250) >> 12;
+        pr->vz -= (pr->vz * 250) >> 12;
+        if (pr->vx < 0x80 && pr->vx > -0x80 && pr->vz < 0x80 && pr->vz > -0x80) {
+            pr->vx = 0; pr->vz = 0;            /* settle (<0.5 world units/tick) */
+        }
+        /* [#20] Containment: the building walls are render-only MODELS.DAT (no
+         * collision), so cap the total slide distance from the prop's authored spot —
+         * a prop can be shoved a believable distance but never travels through a wall /
+         * off the map. Hitting the cap stops it dead. (~1200 world units.) */
+        {
+            const int32_t MAXSLIDE = 2000 << 8;   /* 24.8 world units */
+            int64_t d2 = (int64_t)pr->ox * pr->ox + (int64_t)pr->oz * pr->oz;
+            if (d2 > (int64_t)MAXSLIDE * MAXSLIDE) {
+                float inv = (float)MAXSLIDE / sqrtf((float)d2);
+                pr->ox = (int32_t)((float)pr->ox * inv);
+                pr->oz = (int32_t)((float)pr->oz * inv);
+                pr->vx = 0; pr->vz = 0;
+            }
+        }
+    }
 }
 
 /* [task#14] Per-prop "broken" one-shot state. A prop breaks on first impact:
  * the break effect (knock + crash sound + debris) fires once, then the prop
  * goes inert so the car plows through the knocked-over street furniture
  * instead of repeatedly thudding off it. Reset at race (re)start. */
+static int s_td6_broken_count = 0;   /* fast early-out for the render-time query */
+
 int td5_track_td6_prop_is_broken(int i)
 {
     if (i < 0 || i >= s_td6_prop_count) return 1;   /* OOB -> treat as inert */
@@ -6516,6 +6678,7 @@ int td5_track_td6_prop_is_broken(int i)
 void td5_track_td6_prop_set_broken(int i)
 {
     if (i < 0 || i >= s_td6_prop_count) return;
+    if (!s_td6_props[i].broken) s_td6_broken_count++;
     s_td6_props[i].broken = 1;
 }
 
@@ -6523,6 +6686,82 @@ void td5_track_td6_props_reset_broken(void)
 {
     int i;
     for (i = 0; i < s_td6_prop_count; i++) s_td6_props[i].broken = 0;
+    s_td6_broken_count = 0;
+}
+
+/* [task#14] Render-time query: is the world point (wx,wz) on top of a SMASHED
+ * prop? Used to HIDE the static furniture mesh (lamppost/sign) that sits on a
+ * broken .tcl prop so the object visibly disappears when you smash it. Threshold
+ * = prop radius + slack (the mesh bbox centre and the collision volume are
+ * co-located but not identical). Cheap no-broken early-out. wx/wz are world
+ * units; prop px/pz are 24.8. */
+int td5_track_td6_broken_count(void) { return s_td6_broken_count; }
+
+int td5_track_td6_prop_broken_near(float wx, float wz)
+{
+    int i;
+    if (s_td6_broken_count <= 0) return 0;
+    for (i = 0; i < s_td6_prop_count; i++) {
+        float pxw, pzw, dx, dz, thr;
+        if (!s_td6_props[i].broken) continue;
+        pxw = (float)s_td6_props[i].px * (1.0f / 256.0f);
+        pzw = (float)s_td6_props[i].pz * (1.0f / 256.0f);
+        dx = wx - pxw; dz = wz - pzw;
+        thr = (float)s_td6_props[i].radius * 16.0f + 350.0f;
+        if (dx * dx + dz * dz < thr * thr) return 1;
+    }
+    return 0;
+}
+
+/* [task#14] World-float ground Y under prop i, by NEAREST loaded strip span to
+ * the prop's world (px/256,pz/256). The .tcl span field can't be trusted for the
+ * appended LEVELB (branch) props — it indexes the b-strip, not the loaded main
+ * strip — so we search by XZ instead. Cached per prop (ground_done) so the box
+ * sits planted and the scan runs at most once. Falls back to the caller's player
+ * Y until the strip is loaded. */
+float td5_track_td6_prop_ground_y(int prop_index, float fallback)
+{
+    TD6Prop *pr;
+    if (prop_index < 0 || prop_index >= s_td6_prop_count) return fallback;
+    pr = &s_td6_props[prop_index];
+    if (pr->ground_done) return pr->ground_y;
+    if (!s_span_array || !s_vertex_table || s_span_count <= 0) return fallback;
+    {
+        const float inv256 = 1.0f / 256.0f;
+        float wx = (float)pr->px * inv256, wz = (float)pr->pz * inv256;
+        /* [#20 2026-06-17] Plant at the NEAREST ROAD-SURFACE height — the centre Y of
+         * the span whose centre is closest to the prop in XZ (= the actual surface the
+         * car drives on near the prop). Earlier attempts read TOO HIGH: the strip
+         * contact PROBE extrapolates the road plane sideways to off-road props
+         * (~constant 12500 across the garden vs the ~12166 the car actually drives), and
+         * the authored MOV Y is the original's terrain placement that our strip-based
+         * world doesn't match. The nearest span CENTRE is the real, un-extrapolated road
+         * height beside the prop, and it's lower — so benches sit on the ground (higher
+         * terrain may clip through them, matching the original "highest part on the
+         * ground, rest clips"). */
+        float best_d2 = 1e30f; float ground = fallback; int s;
+        for (s = 0; s < s_span_count; s++) {
+            const TD5_StripSpan *sp = &s_span_array[s];
+            int lc = span_lane_count(sp); if (lc < 1) lc = 1;
+            const TD5_StripVertex *a = vertex_at((int)sp->left_vertex_index);
+            const TD5_StripVertex *b = vertex_at((int)sp->left_vertex_index + lc);
+            const TD5_StripVertex *c = vertex_at((int)sp->right_vertex_index);
+            const TD5_StripVertex *d = vertex_at((int)sp->right_vertex_index + lc);
+            float ccx, ccz, dx, dz, d2;
+            if (!a || !b || !c || !d) continue;
+            ccx = (float)(int32_t)sp->origin_x + ((float)a->x + (float)b->x + (float)c->x + (float)d->x) * 0.25f;
+            ccz = (float)(int32_t)sp->origin_z + ((float)a->z + (float)b->z + (float)c->z + (float)d->z) * 0.25f;
+            dx = ccx - wx; dz = ccz - wz; d2 = dx*dx + dz*dz;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                ground = (float)(int32_t)sp->origin_y +
+                         ((float)a->y + (float)b->y + (float)c->y + (float)d->y) * 0.25f;
+            }
+        }
+        pr->ground_y = ground;
+        pr->ground_done = 1;
+        return pr->ground_y;
+    }
 }
 
 /**

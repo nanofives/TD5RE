@@ -2636,19 +2636,51 @@ int td5_game_init_race_session(void) {
          * drive-throughs in advance_pending_finish_state (split + player HUD
          * ack), with no fail-timer and without gating the finish. */
         /* Synthesized checkpoints are FORWARD-strip spans (extracted from the
-         * forward checkpoint-banner meshes). In reverse the player's normalized
-         * span counts up the reverse-numbered STRIPB, so the forward thresholds
-         * would fire at the wrong physical points and in the wrong order. They
-         * are non-gating (split times + HUD flash only — they never end the
-         * race), so simply suppress them in reverse rather than mirroring the
-         * spans. P2P reverse still finishes on s_td6_finish_span; circuits stay
-         * lap-based. */
-        s_td6_cp_count = (g_active_td6_level > 0 && !g_td5.reverse_direction)
+         * forward checkpoint-banner meshes). In reverse the player drives the
+         * reverse-numbered STRIPB and the normalized span counts up 0..ring-1, so
+         * MIRROR each forward span F to its STRIPB span (ring-1-F) and sort ascending
+         * — then the same ascending-basis drive-through detection fires at the right
+         * physical points, in reverse order. Non-gating (split times + minimap
+         * markers); P2P reverse still finishes on s_td6_finish_span. */
+        s_td6_cp_count = (g_active_td6_level > 0)
             ? td5_asset_td6_checkpoint_spans(g_active_td6_level, s_td6_cp_spans)
             : 0;
-        if (g_active_td6_level > 0 && g_td5.reverse_direction)
-            TD5_LOG_I(LOG_TAG,
-                      "TD6 reverse: synthesized checkpoints suppressed (forward-keyed spans)");
+        if (s_td6_cp_count > 0 && g_td5.reverse_direction) {
+            int ring = td5_track_get_ring_length();
+            if (ring > 1) {
+                int i, j;
+                for (i = 0; i < s_td6_cp_count; i++) {
+                    int rs = ring - 1 - s_td6_cp_spans[i];
+                    if (rs < 0) rs = 0; else if (rs >= ring) rs = ring - 1;
+                    s_td6_cp_spans[i] = rs;
+                }
+                for (i = 1; i < s_td6_cp_count; i++) {   /* insertion sort ascending */
+                    int v = s_td6_cp_spans[i];
+                    for (j = i - 1; j >= 0 && s_td6_cp_spans[j] > v; j--)
+                        s_td6_cp_spans[j + 1] = s_td6_cp_spans[j];
+                    s_td6_cp_spans[j + 1] = v;
+                }
+            }
+        }
+        /* [#reverse-finish 2026-06-18] In a REVERSE P2P race the player drives
+         * STRIPB forward — the raw accumulator (+0x84) climbs from the grid up to
+         * the far end — and the race FINISHES at the physical FORWARD START (the
+         * reverse course ends where the forward course began). That is the mirror
+         * of start_span (ring-1-start_span), NOT the forward finish span: the
+         * forward finish mirrors to the reverse START and would end the race a few
+         * dozen spans in. Mirror it so the finish (and its banner) line up with the
+         * actual reverse end. */
+        if (s_td6_finish_span > 0 && g_td5.reverse_direction) {
+            int ring = td5_track_get_ring_length();
+            if (ring > 1) {
+                int fs = ring - 1 - start_span;
+                if (fs < 1) fs = 1; else if (fs >= ring) fs = ring - 1;
+                TD5_LOG_I(LOG_TAG,
+                          "TD6 reverse finish span: start=%d fwd_finish=%d -> rev_finish=%d (ring=%d)",
+                          start_span, s_td6_finish_span, fs, ring);
+                s_td6_finish_span = fs;
+            }
+        }
         memset(s_td6_cp_index, 0, sizeof(s_td6_cp_index));
         if (s_td6_cp_count > 0) {
             TD5_LOG_I(LOG_TAG,
@@ -2749,18 +2781,24 @@ int td5_game_init_race_session(void) {
                 continue;
 
             /* [TD6 GRID CENTERING — track-scoped] On the wide TD6 city strips the
-             * paved road is the CENTRE of the strip (sidewalks are the outer
-             * lanes), but the grid lanes (1,2) sit near the left rail, so the
-             * player spawns on the sidewalk. Re-anchor the grid to the strip
-             * mid-lane (== the AI route centre, byte 128) while keeping the
-             * relative lane spread. The formula is a no-op on narrow strips
-             * (lane_count <= 4 -> centre == 1), so normal-width TD6 circuits and
-             * all faithful TD5 tracks are unaffected; only genuinely wide strips
-             * shift. */
+             * paved road is only PART of the strip (sidewalks/verge are the outer
+             * lanes), but the grid lanes (1,2) sit near the left rail, so the player
+             * spawns off the road. Re-anchor the grid to the centre of the actual
+             * ROAD BAND (the contiguous run of lanes sharing the centre lane's surface
+             * class), keeping the relative lane spread. [#20] The earlier version used
+             * the GEOMETRIC strip centre ((lc-1)/2), which only lands on the road when
+             * the road is centred — false on e.g. London STRIPB span 20 (road at the
+             * right cells) -> cars spawned on grass. The road band is road-aware and
+             * works in both directions. No-op on narrow strips / faithful TD5. */
             if (g_active_td6_level > 0) {
                 int lc = td5_track_span_lane_count_at(span_index);
-                if (lc > 4)
-                    sub_lane = (lc - 1) / 2 + (active_lanes[effective_slot] - 1);
+                if (lc > 4) {
+                    int band_lo = 0, band_hi = lc - 1;
+                    td5_track_td6_road_band(span_index, lc, &band_lo, &band_hi);
+                    sub_lane = (band_lo + band_hi) / 2 + (active_lanes[effective_slot] - 1);
+                    if (sub_lane < band_lo) sub_lane = band_lo;
+                    if (sub_lane > band_hi) sub_lane = band_hi;
+                }
             }
 
             /* InitActorTrackSegmentPlacement @ 0x00445F10 seeds:
@@ -5392,6 +5430,11 @@ int td5_game_run_race_frame(void) {
                 }
             }
 
+            /* [task#14] Visible TD6 breakable-prop boxes — solid scene geometry,
+             * drawn after track + actors, before the translucent VFX. */
+            if (!td5_render_photobooth_active())
+                render_td6_props(td5_game_get_actor(g_actorSlotForView[vp]));
+
             if (!td5_render_photobooth_active()) {
                 td5_vfx_render_tire_tracks();
                 td5_vfx_render_tire_marks();
@@ -5500,6 +5543,11 @@ int td5_game_run_race_frame(void) {
                 td5_render_debug_lines_flush();
             }
         }
+
+        /* [task#14] Visible TD6 breakable-prop boxes — solid scene geometry,
+         * after track + actors, before translucent VFX (single-view path). */
+        if (!td5_render_photobooth_active())
+            render_td6_props(td5_game_get_actor(g_actorSlotForView[vp]));
 
         /* VFX: tire tracks, particles */
         if (!td5_render_photobooth_active()) {
@@ -6130,7 +6178,11 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
      * (s_td6_finish_span == 0) keep the normalized span — laps wrap there and
      * the normalized value is the correct lap-relative position. */
     int td6_cp_basis = (int)actor_span;
-    if (s_td6_finish_span > 0 && actor)
+    /* Forward P2P gates on the RAW accumulator (+0x84) to dodge the reverse-at-start
+     * normalized-span wrap. In REVERSE the player drives STRIPB forward so the
+     * normalized span (+0x82) counts up monotonically and is the right basis (the raw
+     * accumulator stays negative when driving the reverse direction). */
+    if (s_td6_finish_span > 0 && actor && !g_td5.reverse_direction)
         td6_cp_basis = (int)*(int16_t *)((uint8_t *)actor + 0x84);
     if (s_td6_cp_count > 0 &&
         s_td6_cp_index[slot] < s_td6_cp_count &&
@@ -6356,9 +6408,16 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
          * travel — a spun-out car moving backward cannot skip sectors to
          * reach 0xF and illegitimately trip the start-line lap increment.
          * --------------------------------------------------------------- */
-        if (g_td5.ini.override_track_zip == 0) {  /* native sector anti-cut gate;
-            * override (TD6) tracks use the simple armed start-line crossing above
-            * and must NOT run this (checkpoint_bitmask is reused as armed latch). */
+        if (g_active_td6_level == 0) {  /* native sector anti-cut gate;
+            * ALL TD6 tracks (g_active_td6_level>0) — whether OverrideTrackZip OR a
+            * MENU-SELECTED slot (e.g. Egypt DefaultTrack=31) — use the simple armed
+            * start-line crossing above and must NOT run this, because it reuses
+            * checkpoint_bitmask as the 1-bit armed latch. [#20 EGYPT LAP FIX] The old
+            * gate (override_track_zip==0) was TRUE for menu-selected TD6 circuits, so
+            * this sector dispatch ran and set bitmask=0x01 at the first sector near the
+            * start, which the TD6 lap logic misread as "armed at far side" -> false lap
+            * at span ~19 -> race ended after a few spans. Keying on g_active_td6_level
+            * matches the lap-logic condition at the top of this block. */
             int32_t remaining = total_spans - track_start * 2;
             int32_t boundary  = track_start * 2 + 1;
             int32_t step      = remaining / 5;   /* matches orig; signed div */

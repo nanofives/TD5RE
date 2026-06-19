@@ -109,8 +109,16 @@ int              td5_track_get_ring_length(void);
  * span maps to its parallel main-ring span via the segment-remap table; main
  * spans pass through unchanged. */
 int              td5_track_branch_to_main_span(int span);
+/* [#18] Nearest non-slow (road) lane to `lane` in `span` — keeps traffic off the
+ * TD6 sidewalk/shoulder lanes. Returns `lane` if no road lane is found. */
+int              td5_track_nearest_road_lane(int span_index, int lane);
 /* Inverse: a main-ring span -> the parallel branch-corridor span, or -1 if none. */
 int              td5_track_main_to_branch_span(int main_span);
+/* [#20 2026-06-18] 1 if the fork that `span` belongs to (corridor span) or sits at
+ * (main span) is blacklisted as a dead-end sidewalk branch on the current track.
+ * Direction-aware (the flagged list is mirrored for forward vs reverse). Consumed
+ * by the traffic spawner so cars are never placed on these corridors. */
+int              td5_track_branch_blacklisted(int span);
 /* Branch-corridor enumeration (jump-table records) for the traffic spawner:
  * td5_track_corridor_count() -> number of corridors; td5_track_corridor_info()
  * fills the idx-th corridor's BRANCH span range [branch_lo,branch_hi] (displaced,
@@ -131,12 +139,26 @@ int              td5_track_td6_surface_grid_loaded(void);
 /* TD6 breakable props (level<N>.tcl): load/clear the prop table, query count and
  * per-prop world pos (24.8) + collision radius (world units) + anchor span. */
 void             td5_track_load_td6_props(const void *data, size_t size);
+void             td5_track_append_td6_props(const void *data, size_t size);
 int              td5_track_td6_prop_count(void);
+int              td5_track_td6_prop_get_mov(int i, int32_t *out_px, int32_t *out_py,
+                                            int32_t *out_pz, int *out_model, int *out_angle);
+/* [#20 pushable] Mass (MOV byte 6; 0=immovable), add slide velocity (24.8/tick),
+ * and the once-per-tick integrator that slides/decays/settles pushed props. */
+int              td5_track_td6_prop_mass(int i);
+void             td5_track_td6_prop_push(int i, int32_t dvx, int32_t dvz);
+void             td5_track_td6_props_tick(void);
 int              td5_track_td6_prop_get(int i, int32_t *out_px, int32_t *out_pz,
                                         int *out_radius_w, int *out_span);
 int              td5_track_td6_prop_is_broken(int i);
 void             td5_track_td6_prop_set_broken(int i);
 void             td5_track_td6_props_reset_broken(void);
+/* Render-time: 1 if world point (wx,wz) sits on a SMASHED prop (used to hide the
+ * static furniture mesh on top of it). Fast no-broken early-out. */
+int              td5_track_td6_prop_broken_near(float wx, float wz);
+int              td5_track_td6_broken_count(void);   /* diag: # of smashed props */
+/* World-float ground Y at prop i's anchor span (stable; fallback if no strip). */
+float            td5_track_td6_prop_ground_y(int prop_index, float fallback);
 int              td5_track_get_span_lane_count(int span_index);
 /* Per-lane surface type for a span (reuses surface_type_for_span_lane).
  * Returns the surface byte: 0x00-0x0F = main-road surface (low nibble of
@@ -149,6 +171,9 @@ int              td5_track_get_span_lane_surface(int span_index, int lane);
  * smart-traffic chooser should avoid: the alternate-surface bit (0x10) is set,
  * or the base surface is DIRT(3)/GRAVEL(4). Asphalt (dry/wet) is not slow. */
 int              td5_track_surface_is_slow(int surface_type);
+/* [#18] Traffic-drivable road band (contiguous lanes of the centre lane's surface
+ * class) — excludes sidewalk/verge edges that surface_is_slow misses. 1 if found. */
+int              td5_track_td6_road_band(int span_index, int lane_count, int *out_lo, int *out_hi);
 int              td5_track_branch_to_junction(int span_idx);
 int              td5_track_get_fwd_sentinel(void);
 /* Junction-table lookup for orig UpdateRaceActors @ 0x00436A70 route_table

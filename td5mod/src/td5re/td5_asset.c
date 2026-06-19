@@ -1488,8 +1488,8 @@ static const struct { int slot; int level; int start_span; int finish_span; floa
     { 26,  7, 312,    0, 0.08f },  /* PELTON RACEWAY  (TD6 level010, circuit)  */
     { 27, 18,  70,    0, 0.08f },  /* IRELAND         (TD6 level011, circuit)  */
     { 28, 19,  32,    0, 0.08f },  /* LAKE TAHOE      (TD6 level015, circuit)  */
-    { 29, 20, 371,    0, 0.08f },  /* CAPE HATTERAS   (TD6 level016, circuit)  */
-    { 30, 21, 346,    0, 0.08f },  /* SWITZERLAND     (TD6 level017, circuit)  */
+    { 29, 20, 468,    0, 0.08f },  /* CAPE HATTERAS   (TD6 level016, circuit; start/finish banner @ span 468) */
+    { 30, 21, 138,    0, 0.08f },  /* SWITZERLAND     (TD6 level017, circuit; start/finish banner @ span 138) */
     { 31, 22,  10,    0, 0.08f },  /* EGYPT           (TD6 level018, circuit)  */
     /* P2P start_span = the track's START-BANNER span (from the in-track 'start'
      * banner mesh). The grid spreads BACKWARD from start_span (offsets -3..-18,
@@ -2421,12 +2421,31 @@ int td5_asset_load_level(int track_index)
          * volumes on the baked geometry; London ships ~199). load returns NULL on
          * native TD5 / tracks without props, which clears the prop table. */
         {
-            static const char *s_prop_names[1] = { "LEVEL.TCL" };
+            /* [task#14 MOV] VISIBLE breakable furniture = level.mov (24-byte recs)
+             * drawn as COL_NN.prr meshes — NOT the invisible level.tcl collision
+             * footprints the port used to render. [#20 2026-06-17] LEVEL.MOV and
+             * LEVELB.MOV are the SAME furniture for the two driving directions (~92%
+             * identical positions), NOT a main + branch set — loading BOTH rendered
+             * every bench twice ("duplicated benches"). Load only the active
+             * direction's table: LEVEL.MOV forward, LEVELB.MOV reverse. */
+            static const char *s_prop_names[1]  = { "LEVEL.MOV" };
+            static const char *s_propb_names[1] = { "LEVELB.MOV" };
+            const char **prop_names = g_td5.reverse_direction ? s_propb_names : s_prop_names;
             int prop_sz = 0;
-            void *prop_data = load_first_available_level_entry(track_index, s_prop_names, 1,
+            void *prop_data = load_first_available_level_entry(track_index, prop_names, 1,
                                                                &prop_sz, NULL, 0);
             td5_track_load_td6_props(prop_data, (size_t)(prop_sz > 0 ? prop_sz : 0));
             free(prop_data);
+            /* PROPMESH.BIN = the 8 de-indexed COL furniture meshes the renderer
+             * draws per MOV prop (model byte -> mesh). */
+            {
+                static const char *s_pmesh_names[1] = { "PROPMESH.BIN" };
+                int pm_sz = 0;
+                void *pm_data = load_first_available_level_entry(track_index, s_pmesh_names, 1,
+                                                                 &pm_sz, NULL, 0);
+                td5_render_load_td6_prop_meshes(pm_data, (size_t)(pm_sz > 0 ? pm_sz : 0));
+                free(pm_data);
+            }
         }
 
         /* [TD6 AUTHORITATIVE TRACK TYPE] For migrated TD6 tracks, derive circuit

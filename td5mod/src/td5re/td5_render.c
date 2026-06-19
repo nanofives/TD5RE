@@ -1341,12 +1341,59 @@ static void append_projected_triangle(const TD5_D3DVertex *v0,
  *   plane, perspective projection formula, UV/color interp on cut edges)
  *   are preserved. See the Phase 5(d) D3D Pipeline manifest at file footer
  *   for the full address list. */
+/* [#20 HK reverse] When >0, drop any polygon with a vertex above this model-space Y
+ * — set ONLY while drawing the in-road HK building submeshes (entry 509 sub 8/10/11)
+ * so their WALLS/ROOF go but their road-level faces stay (the submesh bundles the
+ * road surface with the building, so dropping the whole submesh holed the road). */
+static float s_hk_clip_y = 0.0f;
+
+/* [banners] Track SIGN panels (START/FINISH + the numbered 1..N gantries) are
+ * flat double-sided meshes: with the global CullMode=NONE both the front and
+ * the back face draw back-to-back and z-fight ("clipping"). Cull the
+ * away-facing side so only the banner facing the car shows. Scoped to banner
+ * TEXTURE PAGES during the level-geometry pass, so road, walls, tunnel
+ * interiors, buildings, billboards and cars are never affected (the existing
+ * CullMode=NONE behaviour is preserved everywhere else — track and car meshes
+ * have opposite winding conventions, so a global cull can't pick one sign).
+ * TD6 banner pages are the textures.dir indices == runtime cmd->texture_page_id
+ * (the converter preserves them; see k_td6_rev_banner). The screen-winding
+ * sign that means "facing away" is set empirically and flippable via env knob
+ * (TD5RE_BANNER_CULL=0 disables; TD5RE_BANNER_CULL_FLIP=1 swaps the kept side
+ * if banners end up showing their back). */
+static const struct { short level, page; } k_td6_banner_pages[] = {
+    /* Paris 8 */    {8,164},{8,218},{8,163},{8,188},{8,192},{8,205},
+    /* NewYork 9 */  {9,316},{9,317},{9,327},{9,306},{9,312},{9,271},{9,274},{9,303},
+    /* Rome 10 */    {10,342},{10,343},{10,353},{10,354},{10,355},{10,357},{10,358},{10,365},{10,366},
+    /* HongKong 11 */{11,216},{11,235},{11,215},{11,192},{11,228},{11,236},
+    /* London 12 */  {12,59},{12,60},{12,57},{12,58},{12,102},{12,157},{12,158},{12,188},
+};
+static int s_level_pass_active   = 0;  /* set only while drawing level geometry */
+static int s_banner_cull         = -1; /* -1 uninit; 0 off; 1 on (env TD5RE_BANNER_CULL) */
+static int s_banner_cull_keep_pos = 0; /* which screen-winding sign faces the camera */
+
+static int td6_is_banner_page(int page)
+{
+    int lvl = g_active_td6_level;
+    size_t i;
+    if (lvl <= 0) return 0;
+    for (i = 0; i < sizeof(k_td6_banner_pages) / sizeof(k_td6_banner_pages[0]); i++)
+        if (k_td6_banner_pages[i].level == lvl && k_td6_banner_pages[i].page == page)
+            return 1;
+    return 0;
+}
+
 static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
                                     int tex_page)
 {
     /* Working buffer for clipped polygon (max 8 verts after clipping) */
     TD5_D3DVertex clipped[8];
     int clipped_count = 0;
+
+    if (s_hk_clip_y > 0.0f) {
+        int hk;
+        for (hk = 0; hk < vert_count; hk++)
+            if (vert_data[hk].pos_y > s_hk_clip_y) return;
+    }
 
     float near_z = s_near_clip;
 
@@ -1465,6 +1512,15 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         if (cross == 0.0f) {
             s_debug_clip_backface_rejects++;
             return;
+        }
+        /* [banners] one-sided cull for track sign panels only (see
+         * k_td6_banner_pages). Everything else keeps CullMode=NONE. */
+        if (s_level_pass_active && s_banner_cull && td6_is_banner_page(tex_page)) {
+            int facing_away = s_banner_cull_keep_pos ? (cross < 0.0f) : (cross > 0.0f);
+            if (facing_away) {
+                s_debug_clip_backface_rejects++;
+                return;
+            }
         }
     }
 
@@ -2479,6 +2535,55 @@ int td5_render_test_mesh_frustum(TD5_MeshHeader *mesh, float *out_depth)
     return 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * [reverse banners] TD6 P2P tracks bake START/FINISH + numbered 1..N banner
+ * gantries at fixed spans in the LEVEL geometry, shared by both race
+ * directions. Driven in REVERSE the player meets them in the opposite order,
+ * so the START gantry sits at the finish line and the "4" banner is the first
+ * one passed. We swap the banner TEXTURE PAGES at render time so reverse reads
+ * START at the (reverse) start, FINISH at the (reverse) end, and the numbered
+ * banners count 1,2,3,4 in pass order.
+ *
+ * Pages are textures.dir indices == runtime cmd->texture_page_id (preserved by
+ * convert_td6_tracks.py; the converter also emits tex_NNN.png at that index, so
+ * BOTH the source and target pages are loaded level textures). Keyed by
+ * g_active_td6_level. Pairs below are the START<->FINISH swap plus the numbered
+ * k<->(N+1-k) reversal (slot-paired across gantry posts, clamped to the other
+ * role's last slot; the middle checkpoint of an odd count maps to itself and is
+ * omitted). Banner textures are referenced ONLY by their gantry meshes, so
+ * remapping a page never touches road/building geometry. Derived from the
+ * authoritative per-role groups in re/tools (convert/extract banner classifiers).
+ * ------------------------------------------------------------------------- */
+static const struct { short level, from, to; } k_td6_rev_banner[] = {
+    /* Paris (lvl 8): start[164] finish[218] cp[163,188,192,205] */
+    {8,164,218},{8,218,164},{8,163,205},{8,205,163},{8,188,192},{8,192,188},
+    /* NewYork (lvl 9): start[316,317,327] finish[306] cp[312,271,274,303] */
+    {9,316,306},{9,317,306},{9,327,306},{9,306,316},
+    {9,312,303},{9,303,312},{9,271,274},{9,274,271},
+    /* Rome (lvl 10): no start/finish gantry; cp[{342,343},353,{354,355},{357,358,365},366] */
+    {10,342,366},{10,343,366},{10,366,342},
+    {10,353,357},{10,357,353},{10,358,353},{10,365,353},
+    /* HongKong (lvl 11): start[216] finish[235] cp[215,192,228,236] */
+    {11,216,235},{11,235,216},{11,215,236},{11,236,215},{11,192,228},{11,228,192},
+    /* London (lvl 12): start[59,60] finish[57,58] cp[102,157,158,188] */
+    {12,59,57},{12,60,58},{12,57,59},{12,58,60},
+    {12,102,188},{12,188,102},{12,157,158},{12,158,157},
+};
+
+/* Set only while drawing LEVEL geometry in reverse on a TD6 track, so the
+ * shared per-cmd dispatcher (also used by vehicles/props) never remaps them. */
+static int s_td6_banner_remap_active = 0;
+
+static int td6_reverse_banner_page(int page)
+{
+    int lvl = g_active_td6_level;
+    size_t i;
+    for (i = 0; i < sizeof(k_td6_rev_banner) / sizeof(k_td6_rev_banner[0]); i++)
+        if (k_td6_rev_banner[i].level == lvl && k_td6_rev_banner[i].from == page)
+            return k_td6_rev_banner[i].to;
+    return page;
+}
+
 /* --- Mesh Rendering --- */
 
 void td5_render_span_display_list(void *display_list_block)
@@ -2528,6 +2633,25 @@ void td5_render_span_display_list(void *display_list_block)
     TD5_LOG_D(LOG_TAG,
               "span display list: block=%p mesh_range=[0,%d)",
               display_list_block, count);
+
+    /* [reverse banners] enable START<->FINISH + numbered banner-page swap for
+     * this level-geometry pass only (cleared after the loop so vehicles/props
+     * sharing td5_render_prepared_mesh are never remapped). */
+    s_td6_banner_remap_active = (g_active_td6_level > 0 && g_td5.reverse_direction) ? 1 : 0;
+
+    /* [banners] mark the level-geometry pass so the one-sided banner cull in
+     * clip_and_submit_polygon applies (and never touches cars/HUD). */
+    if (s_banner_cull < 0) {
+        const char *e = getenv("TD5RE_BANNER_CULL");
+        const char *f = getenv("TD5RE_BANNER_CULL_FLIP");
+        s_banner_cull = (e && e[0] == '0') ? 0 : 1;
+        /* Default keeps the front (text-readable) face; verified on London —
+         * the other sign showed the mirrored back. FLIP swaps back if needed. */
+        s_banner_cull_keep_pos = (f && f[0] && f[0] != '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "banner cull: %s (keep_sign=%s; TD5RE_BANNER_CULL/_FLIP)",
+                  s_banner_cull ? "ON" : "OFF", s_banner_cull_keep_pos ? "pos" : "neg");
+    }
+    s_level_pass_active = 1;
 
     for (int i = 0; i < count; i++) {
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
@@ -2581,6 +2705,24 @@ void td5_render_span_display_list(void *display_list_block)
         /* Validate bounding data isn't NaN/Inf */
         if (r != r || r < 0.0f) continue;
         if (cx != cx || cy != cy || cz != cz) continue;
+
+        /* [#20 HK reverse] DELIBERATE DEVIATION (user-requested): remove the building
+         * standing in the Hong Kong REVERSE racing line (models entry 509 sub 8/10/11,
+         * matched by EXACT bounding centre). Each of those submeshes spans from road
+         * level up to the roof, so instead of dropping them whole (which holed the
+         * road) we set a clip height: clip_and_submit_polygon then drops their WALL/
+         * ROOF faces and KEEPS their road-level faces. Neighbours (different centres)
+         * and the road are untouched. HK (level 11) reverse only; forward keeps it. */
+        s_hk_clip_y = 0.0f;
+        if (g_active_td6_level == 11 && g_td5.reverse_direction && cy > 5000.0f) {
+            static const float hk_bldg[3][2] = {
+                { 411028.0f, 1731209.0f }, { 416336.0f, 1725277.0f }, { 413088.0f, 1725313.0f } };
+            int bi;
+            for (bi = 0; bi < 3; bi++) {
+                float dbx = cx - hk_bldg[bi][0], dbz = cz - hk_bldg[bi][1];
+                if (dbx * dbx + dbz * dbz < 350.0f * 350.0f) { s_hk_clip_y = 3500.0f; break; }
+            }
+        }
 
         /* [task#7] One-shot dump of the first few billboard meshes' bounding
          * centres: clustered near (0,0,0) == the stale origin-fold asset bug
@@ -2701,6 +2843,9 @@ void td5_render_span_display_list(void *display_list_block)
             s_debug_span_meshes_submitted++;
         }
     }
+    s_hk_clip_y = 0.0f;   /* [#20 HK reverse] don't leak the building clip into vehicles/other */
+    s_td6_banner_remap_active = 0;  /* [reverse banners] level-geometry pass only */
+    s_level_pass_active = 0;        /* [banners] one-sided cull off outside level geometry */
 
     if ((s_debug_dl_calls % 500) == 1) {
         TD5_LOG_I(LOG_TAG,
@@ -2814,6 +2959,9 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
             patched.vertex_data_ptr = (uint32_t)(uintptr_t)rs_vtx_rebase(cmd_verts);
             if (g_rs->tex_page_override >= 0)
                 patched.texture_page_id = (int16_t)g_rs->tex_page_override;
+            else if (s_td6_banner_remap_active)
+                patched.texture_page_id =
+                    (int16_t)td6_reverse_banner_page(patched.texture_page_id);
             s_dispatch_table[opcode](&patched, rs_vtx_rebase(base_verts));
 
             /* Advance running cursor by vertices consumed */
@@ -6238,6 +6386,218 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
+/* [task#14] VISIBLE BREAKABLE FURNITURE — TD6's smashable street props. RE
+ * (2026-06-16): the VISIBLE props are level.mov (24-byte records) drawn as the
+ * COL_NN.prr MESHES (NOT the invisible level.tcl collision footprints the port
+ * used to render as boxes). Each MOV record picks one of 8 furniture meshes
+ * (byte4&0xF) and places it at a world pos + Y-orientation. We de-indexed the
+ * COL meshes into PROPMESH.BIN (tri-list pos+baked-grey) and draw each un-broken
+ * prop's mesh, rotated by its angle, planted on the nearest-span ground, shaded
+ * by its baked grey × a per-model furniture tint. Smashing sets broken in
+ * td5_physics -> the mesh vanishes + debris. Env TD5RE_TD6_PROP_MESH (=0 off). */
+static int td6_prop_mesh_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_PROP_MESH"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
+/* The 8 de-indexed COL furniture meshes (PROPMESH.BIN). pos = vcount*3 floats
+ * (tri-list, local), col = vcount baked-grey ARGB, min_y for ground planting. */
+#define TD6_PROP_MESH_MAX 12
+typedef struct { float *pos; float *uv; uint32_t *col; int vcount; float min_y; } TD6PropMesh;
+static TD6PropMesh s_td6_pmesh[TD6_PROP_MESH_MAX];
+static int s_td6_pmesh_count = 0;
+
+/* Furniture textures (real TD6 static.zip art), lazily uploaded once into 6
+ * pages (5 source + 1 white). model (COL_NN) -> texture via the London subset.
+ * [2026-06-16 BUGFIX] Base was 984 = the runtime FONT glyph atlas (td5_font.c
+ * ATLAS_PAGE 984); props clobbered it -> "HUD stops rendering font". Moved to 990,
+ * but that overlapped the ALLOY-RIM pool (WHEEL_RIM_TEX_BASE 994..1001) and the
+ * envmap (990-993) -> cars showed the crate/redtape prop texture on their wheels.
+ * 994-1001 rims, 984 font, 990-993 envmap, 1020 sky, 1021 fallback, cars 800-843,
+ * track <=983 — so 1002-1007 is the free 6-page window for props. */
+#define TD6_PROP_TEX_BASE 1002
+#define TD6_PROP_TEX_N 5
+static const char *k_td6_prop_srcs[TD6_PROP_TEX_N] = {
+    "re/assets/props/td6_bench.png",     /* 0 BENCH    */
+    "re/assets/props/td6_redtape.png",   /* 1 REDTAPE  */
+    "re/assets/props/td6_1bollard.png",  /* 2 1BOLLARD */
+    "re/assets/props/td6_k1box.png",     /* 3 K1BOX    */
+    "re/assets/props/td6_1crate.png",    /* 4 1CRATE   */
+};
+/* model (COL_NN) -> texture index, indexed by MOV model (r[4]&0xF). AUTHORITATIVE
+ * (TD6.exe FUN_0044c535 + London subset row @0x0049be58):
+ *   model 0 = ff (untextured)   model 4 = REDTAPE (1)
+ *   model 1 = ff (untextured)   model 5 = 1BOLLARD (2)
+ *   model 2 = BENCH (0)         model 6 = K1BOX (3)
+ *   model 3 = REDTAPE (1)       model 7 = 1CRATE (4)
+ * [#20 2026-06-17] FIX: the table was transcribed shifted ({-1,0,1,1,1,2,3,4}),
+ * which mapped the BENCH mesh (model 2 = COL_02) to texidx 1 = REDTAPE -> benches
+ * rendered with the red/white tape texture. Corrected to match the row above. */
+static const int k_td6_prop_texidx[8] = { -1, -1, 0, 1, 1, 2, 3, 4 };
+#define TD6_PROP_WHITE_PAGE (TD6_PROP_TEX_BASE + TD6_PROP_TEX_N)  /* dedicated 1x1 white for untextured props */
+static int s_td6_prop_pool_loaded = 0;
+static void td6_prop_load_pool(void)
+{
+    int i;
+    if (s_td6_prop_pool_loaded) return;
+    s_td6_prop_pool_loaded = 1;
+    for (i = 0; i < TD6_PROP_TEX_N; i++)
+        if (!td5_asset_load_png_texture(TD6_PROP_TEX_BASE + i, k_td6_prop_srcs[i], TD5_COLORKEY_NONE))
+            TD5_LOG_W(LOG_TAG, "td6 prop tex: failed %s", k_td6_prop_srcs[i]);
+    { uint32_t white = 0xFFFFFFFFu;  /* own white page (shared 899 can carry HUD/font pixels) */
+      td5_plat_render_upload_texture(TD6_PROP_WHITE_PAGE, &white, 1, 1, 2); }
+}
+
+void td5_render_load_td6_prop_meshes(const void *data, size_t size)
+{
+    int i;
+    for (i = 0; i < s_td6_pmesh_count; i++) {
+        free(s_td6_pmesh[i].pos); free(s_td6_pmesh[i].uv); free(s_td6_pmesh[i].col);
+        s_td6_pmesh[i].pos = NULL; s_td6_pmesh[i].uv = NULL; s_td6_pmesh[i].col = NULL;
+        s_td6_pmesh[i].vcount = 0;
+    }
+    s_td6_pmesh_count = 0;
+    if (!data || size < 8) return;
+    {
+        const uint8_t *p = (const uint8_t *)data;
+        uint32_t mc; int vcounts[TD6_PROP_MESH_MAX]; const uint8_t *vd; size_t off;
+        if (p[0] != 'P' || p[1] != 'M' || p[2] != 'S' || p[3] != '2') return;  /* PMS2 = pos+uv+col */
+        memcpy(&mc, p + 4, 4);
+        if (mc > TD6_PROP_MESH_MAX) mc = TD6_PROP_MESH_MAX;
+        if (size < 8 + (size_t)mc * 8) return;
+        for (i = 0; i < (int)mc; i++) memcpy(&vcounts[i], p + 8 + i * 8, 4);
+        vd = p + 8 + mc * 8; off = 0;
+        for (i = 0; i < (int)mc; i++) {
+            int vc = vcounts[i], v; float miny = 1e30f;
+            if (vc < 0) vc = 0;
+            if ((size_t)(vd - p) + off + (size_t)vc * 24 > size) break;  /* 24B/vert */
+            s_td6_pmesh[i].pos = (float *)malloc((size_t)vc * 3 * sizeof(float));
+            s_td6_pmesh[i].uv  = (float *)malloc((size_t)vc * 2 * sizeof(float));
+            s_td6_pmesh[i].col = (uint32_t *)malloc((size_t)vc * sizeof(uint32_t));
+            s_td6_pmesh[i].vcount =
+                (s_td6_pmesh[i].pos && s_td6_pmesh[i].uv && s_td6_pmesh[i].col) ? vc : 0;
+            for (v = 0; v < s_td6_pmesh[i].vcount; v++) {
+                float buf[5]; uint32_t c;            /* x,y,z,u,v + color */
+                memcpy(buf, vd + off + (size_t)v * 24, 20);
+                memcpy(&c, vd + off + (size_t)v * 24 + 20, 4);
+                s_td6_pmesh[i].pos[v*3+0] = buf[0];
+                s_td6_pmesh[i].pos[v*3+1] = buf[1];
+                s_td6_pmesh[i].pos[v*3+2] = buf[2];
+                s_td6_pmesh[i].uv[v*2+0]  = buf[3];
+                s_td6_pmesh[i].uv[v*2+1]  = buf[4];
+                s_td6_pmesh[i].col[v] = c;
+                if (buf[1] < miny) miny = buf[1];
+            }
+            s_td6_pmesh[i].min_y = (s_td6_pmesh[i].vcount > 0) ? miny : 0.0f;
+            off += (size_t)vc * 24;
+            s_td6_pmesh_count = i + 1;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "TD6 prop meshes loaded: %d", s_td6_pmesh_count);
+}
+
+void render_td6_props(const TD5_Actor *ref)
+{
+    if (!td6_prop_mesh_enabled() || g_active_td6_level <= 0 || !ref) return;
+    int n = td5_track_td6_prop_count();
+    if (n <= 0 || s_td6_pmesh_count <= 0) return;
+
+    const float inv256 = 1.0f / 256.0f;
+    const float gx = (float)ref->world_pos.x * inv256;
+    const float gy = (float)ref->world_pos.y * inv256;
+    const float gz = (float)ref->world_pos.z * inv256;
+    const float MAXD = 50000.0f;
+    int drew = 0, last_page = -1;
+
+    for (int i = 0; i < n; i++) {
+        int32_t px, py, pz; int model, angle, page;
+        const TD6PropMesh *m;
+        float cx, cz, ax, az, base_y, lift, a, ca, sa;
+        int v, vc, ni, t, any;
+        TD5_D3DVertex vb[128];
+        uint16_t ib[384];
+        uint8_t ok[128];
+
+        if (td5_track_td6_prop_is_broken(i)) continue;
+        if (!td5_track_td6_prop_get_mov(i, &px, &py, &pz, &model, &angle)) continue;
+        if (model < 0 || model >= s_td6_pmesh_count) continue;
+        m = &s_td6_pmesh[model];
+        if (m->vcount < 3) continue;
+        cx = (float)px * inv256; cz = (float)pz * inv256;
+        ax = cx - gx; az = cz - gz;
+        if (ax * ax + az * az > MAXD * MAXD) continue;
+
+        /* [#20] Plant FLAT on the track surface under the prop (yaw only). Matches the
+         * original: props are glued to the ground horizontally; on a slope the high side
+         * rests on the ground and the rest clips into the terrain (NOT tilted to the
+         * slope normal). td5_track_td6_prop_ground_y gives the planting height. */
+        base_y = td5_track_td6_prop_ground_y(i, gy);
+        lift   = base_y - m->min_y;                    /* mesh bottom -> ground */
+        (void)py;                                      /* MOV Y handled inside ground_y */
+        a  = (float)angle * (2.0f * (float)M_PI / 4096.0f);
+        ca = cosf(a); sa = sinf(a);
+
+        vc = m->vcount; if (vc > 128) vc = 128;
+        any = 0;
+        for (v = 0; v < vc; v++) {
+            float lx = m->pos[v*3+0], ly = m->pos[v*3+1], lz = m->pos[v*3+2];
+            float rx = lx*ca + lz*sa, rz = -lx*sa + lz*ca;
+            float wx = cx + rx, wy = lift + ly, wz = cz + rz;
+            float ddx = wx-s_camera_pos[0], ddy = wy-s_camera_pos[1], ddz = wz-s_camera_pos[2];
+            float vx = ddx*s_camera_basis[0]+ddy*s_camera_basis[1]+ddz*s_camera_basis[2];
+            float vyv= ddx*s_camera_basis[3]+ddy*s_camera_basis[4]+ddz*s_camera_basis[5];
+            float vz = ddx*s_camera_basis[6]+ddy*s_camera_basis[7]+ddz*s_camera_basis[8];
+            float invz; int grey, sh;
+            if (vz <= s_near_clip) {
+                ok[v] = 0;
+                vb[v].screen_x=0; vb[v].screen_y=0; vb[v].depth_z=0; vb[v].rhw=0;
+                vb[v].diffuse=0; vb[v].specular=0; vb[v].tex_u=0; vb[v].tex_v=0;
+                continue;
+            }
+            invz = 1.0f/vz;
+            /* baked grey (R=G=B) modulates the furniture texture for 3D shading;
+             * gl==0 verts default to near-full brightness. */
+            grey = (int)((m->col[v] >> 16) & 0xFF);
+            sh = (grey > 0) ? (110 + grey * 145 / 255) : 235;
+            if (sh > 255) sh = 255;
+            vb[v].screen_x = -vx *s_focal_length*invz + s_center_x;
+            vb[v].screen_y = -vyv*s_focal_length*invz + s_center_y;
+            vb[v].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+            vb[v].rhw      = invz;
+            vb[v].diffuse  = 0xFF000000u | ((uint32_t)sh<<16) | ((uint32_t)sh<<8) | (uint32_t)sh;
+            vb[v].specular = 0;
+            vb[v].tex_u = m->uv[v*2+0]; vb[v].tex_v = m->uv[v*2+1];
+            ok[v] = 1; any = 1;
+        }
+        if (!any) continue;
+
+        ni = 0;
+        for (t = 0; t + 2 < vc; t += 3) {
+            if (!ok[t] || !ok[t+1] || !ok[t+2]) continue;
+            if (ni + 6 > (int)(sizeof ib / sizeof ib[0])) break;
+            /* both windings so the mesh is solid regardless of cull (z-buffer picks nearest) */
+            ib[ni++]=(uint16_t)t;     ib[ni++]=(uint16_t)(t+1); ib[ni++]=(uint16_t)(t+2);
+            ib[ni++]=(uint16_t)t;     ib[ni++]=(uint16_t)(t+2); ib[ni++]=(uint16_t)(t+1);
+        }
+        if (ni == 0) continue;
+
+        if (!drew) {
+            flush_immediate_internal();
+            td6_prop_load_pool();
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            drew = 1;
+        }
+        {
+            int ti = k_td6_prop_texidx[model & 7];
+            page = (ti < 0) ? TD6_PROP_WHITE_PAGE : (TD6_PROP_TEX_BASE + ti);
+        }
+        if (page != last_page) { td5_plat_render_bind_texture(page); last_page = page; }
+        td5_plat_render_draw_tris(vb, vc, ib, ni);
+    }
+}
+
 /* Dispatcher (keeps the name the per-view shadow pre-pass calls): the new
  * conforming raycast mesh by default, the legacy textured quad when the A/B
  * env knob TD5RE_SHADOW_RAYCAST=0 is set. */
@@ -7024,6 +7384,42 @@ static int traffic_wheel_spin_enabled(void) {
     if (cached < 0) { const char *e = getenv("TD5RE_TRAFFIC_WHEEL_SPIN"); cached = (e && e[0] == '0') ? 0 : 1; }
     return cached;
 }
+/* [WHEELS-TOO-LOW on NON-FOCUSED cars — 2026-06-17]
+ * The unified wheel renderer draws every car's wheels through the SAME
+ * s_render_transform that drew its body (m[9..11] = the actor's view-space
+ * translation set by td5_render_load_translation in td5_render_actors_for_view).
+ *
+ * For RACER slots (slot < g_traffic_slot_base) the body translation already
+ * carries the render-Y "ground plant" lift (td5_render.c:~3545,
+ * `interp_y -= height_base_offset<<8` => +36/+18 world-Y DOWN), and because the
+ * wheels share that transform they inherit the same lift — so the focused player
+ * AND the AI racers (which run the identical render + physics path) draw their
+ * wheels at the correct gap. That path is left byte-identical here.
+ *
+ * TRAFFIC slots (slot >= g_traffic_slot_base) get NO body render-lift (the gate
+ * at td5_render.c:~3545 excludes them — the traffic body is planted in physics
+ * via world_pos.y = ground_y - height_offset instead). Their wheels are SYNTHED
+ * from the mesh bounds (wy0 = bounding_center_y - rb*0.22 + s_tlift) and never
+ * referenced to the racer ground convention, so they sit BELOW the body line —
+ * the "non-focused wheels dropped/sunken" report. Raise the synthesized wheel
+ * centre by the same body-lift magnitude the racers use so traffic wheels meet
+ * the body/ground line that the racer (focused + AI) wheels already use.
+ * A/B: TD5RE_WHEEL_LIFT_FIX=0 restores the old (un-aligned) synth wheel Y. */
+static int wheel_lift_fix_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_LIFT_FIX"); cached = (e && e[0] == '0') ? 0 : 1; }
+    return cached;
+}
+/* The racer body render-lift magnitude (body-units), mirroring the
+ * height_base_offset used by the body draw at td5_render.c:~3549:
+ *   normal gameplay -> 36, replay playback -> 18.
+ * Returned as a positive "raise the wheel toward the body" amount; in the synth
+ * wheel's body-local frame +Y is UP (see the s_tlift comment), so adding this
+ * lifts the traffic wheel to the racer ground convention. */
+static float wheel_body_lift_magnitude(void) {
+    extern int td5_input_is_playback_active(void);
+    return td5_input_is_playback_active() ? 18.0f : 36.0f;
+}
 /* [BUG 6 — inner (inboard) wheel face is texture-less]
  * The unified renderer caps only the OUTBOARD wheel face (the carhub alloy
  * disc); the inboard end of the tyre tube is left open, so from any angle that
@@ -7244,7 +7640,14 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         static float s_tlift = -1.0f;
         if (s_tlift < 0.0f) { const char *e = getenv("TD5RE_WHEEL_TRAFFIC_LIFT");
                               s_tlift = (e && e[0]) ? (float)atof(e) : 18.0f; }
-        float wy0   = (mh ? mh->bounding_center_y : 0.0f) - rb * 0.22f + s_tlift;  /* wheel centre Y */
+        /* [WHEELS-TOO-LOW fix] Align the synth (traffic) wheel vertical reference
+         * with the body's render lift. The traffic body gets NO render-Y lift
+         * (only racers do, at td5_render.c:~3545), so without this the synth
+         * wheels sit below the body/ground line that the racer (focused + AI)
+         * wheels already use. Raise them by the same body-lift magnitude the
+         * racers receive. A/B: TD5RE_WHEEL_LIFT_FIX=0 reverts. */
+        float lift_align = wheel_lift_fix_enabled() ? wheel_body_lift_magnitude() : 0.0f;
+        float wy0   = (mh ? mh->bounding_center_y : 0.0f) - rb * 0.22f + s_tlift + lift_align;  /* wheel centre Y */
         int16_t zf = (int16_t)front, zr = (int16_t)rear, tx = (int16_t)track, wy16 = (int16_t)wy0;
         synth[0][0] = -tx; synth[0][1] = wy16; synth[0][2] = zf;   /* FL */
         synth[1][0] =  tx; synth[1][1] = wy16; synth[1][2] = zf;   /* FR */

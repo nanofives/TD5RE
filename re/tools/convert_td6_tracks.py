@@ -668,7 +668,10 @@ def _billboard_pages(names):
         # goes EDGE-ON and it vanishes, leaving floating canopies with no trunk.
         # Billboard them too. Tree WALLS ('treew') and other large fixed backdrops
         # are real surfaces and must stay world-fixed.
-        if "tree" not in nl and "trunk" not in nl:
+        # PALMS ('palma'/'palmb'/'palmleaf', e.g. Egypt/Hong Kong) are flat
+        # vegetation cards exactly like point trees and must also face the camera
+        # (user: "Egypt 2D trees don't rotate, look flat from some angles").
+        if "tree" not in nl and "trunk" not in nl and "palm" not in nl:
             continue
         if "treew" in nl or "wall" in nl or "backd" in nl or "fence" in nl:
             continue
@@ -1241,10 +1244,14 @@ def convert_milestone_a(td6_level: int, td5_level: int, circuit: int,
             print(f"  type-11 link fix (STRIPB): {n_t11_b} backward-junction link_prev <- link_next")
     write("STRIPB.DAT", stripb)
     write("LEVELINF.DAT", synth_levelinf(circuit))
-    # AI corridor: DISTINCT left/right road edges (not a single centreline) so the
-    # AI has real lateral bounds = the paved road, and stops wandering into the
-    # grass-shoulder sub-lanes. build_routes returns (left, right).
-    left_routes, right_routes = build_routes(strip, circuit=bool(circuit))
+    # AI corridor: TD6's AUTHORED RACING LINE from the spline (spline1.td6 = laneA/laneB
+    # lateral fractions per main-road span, narrowing+shifting to the apex on corners);
+    # build_routes falls back to the flat road-edge corridor for branch spans / if the
+    # spline is absent. Passing the spline is what makes the AI hold the real line past
+    # in-road obstacles (e.g. the HK reverse building corner) like native TD6. returns
+    # (left, right). [2026-06-18: spline was being dropped (spline=None) -> flat line.]
+    left_routes, right_routes = build_routes(strip, circuit=bool(circuit),
+                                             spline=read_zip_entry(zp, "spline1.td6"))
     write("LEFT.TRK", left_routes)
     write("RIGHT.TRK", right_routes)
 
@@ -1258,7 +1265,8 @@ def convert_milestone_a(td6_level: int, td5_level: int, circuit: int,
     # ships reverse geometry — forward-only tracks (no stripb) get no reverse data,
     # so td5_asset_track_has_reverse() correctly keeps them forward-only.
     if stripb:
-        left_rev, right_rev = build_routes(stripb, circuit=bool(circuit))
+        left_rev, right_rev = build_routes(stripb, circuit=bool(circuit),
+                                          spline=read_zip_entry(zp, "spline1b.td6"))
         write("LEFTB.TRK", left_rev)
         write("RIGHTB.TRK", right_rev)
 

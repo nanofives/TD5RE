@@ -1968,10 +1968,23 @@ static int td6_props_enabled(void)
     return s;
 }
 
+/* [#20 pushable] A/B knob: TD5RE_TD6_PUSH=0 reverts to break-everything-on-contact.
+ * Default on: props (MOV byte-6 mass != 0) are SHOVED and the car's speed penalty
+ * scales with mass (light props barely slow it); a prop only BREAKS on a hard,
+ * heavy impulse. Matches the original (RE: mass=0 immovable, break when impulse>30000). */
+static int td6_push_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_PUSH"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
 static void td5_physics_check_td6_props(TD5_Actor *actor)
 {
     int n, i, w;
     int32_t cx, cz, vx, vz, vx0, vz0, speed;
+    int32_t seg_ax, seg_az, seg_dx, seg_dz;
+    int64_t seg_len2;
     if (!actor) return;
     if (!td6_props_enabled()) return;
     n = td5_track_td6_prop_count();
@@ -1984,62 +1997,122 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
      * rails — the "invisible wall at the start" — and also means a prop only
      * breaks when you actually drive into it at speed. */
     speed = (int32_t)td5_isqrt((uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
-    if (speed < 0x1800) return;
+    if (speed < 0x1000) return;   /* ~3 MPH: ignore the stationary start grid */
     cx = actor->world_pos.x; cz = actor->world_pos.z;
+    /* Model the car body as a CAPSULE along its HEADING: segment [center +/- fwd*
+     * half_len], radius half_width (=550, folded into the rw+550 test below). The
+     * earlier swept-segment + velocity-forward-reach mis-fired BOTH ways — the
+     * velocity direction lies when you turn (kick before you touch / miss entirely),
+     * and a prop sitting directly ahead BETWEEN the front wheels fell in the centre
+     * test's blind spot (>550 from centre, inside no wheel). A heading-aligned
+     * capsule covers the whole footprint, fires exactly at contact, and is steer-
+     * correct. half_len is derived from the frontmost wheel so the front cap
+     * (half_len + half_width) lands on the bumper for any car. */
+    {
+        int32_t yaw = (int32_t)actor->display_angles.yaw & 0xFFF;
+        float fwx = td5_sin_12bit((uint32_t)yaw);
+        float fwz = td5_cos_12bit((uint32_t)yaw);
+        float maxp = 0.0f;
+        int   wi;
+        int32_t half_len;
+        for (wi = 0; wi < 4; wi++) {
+            float rx = (float)(actor->wheel_contact_pos[wi].x - cx) * (1.0f / 256.0f);
+            float rz = (float)(actor->wheel_contact_pos[wi].z - cz) * (1.0f / 256.0f);
+            float p  = rx * fwx + rz * fwz; if (p < 0.0f) p = -p;   /* longitudinal */
+            if (p > maxp) maxp = p;
+        }
+        half_len = (int32_t)maxp - 300;   /* + bumper overhang (~250) - cap radius (550) */
+        if (half_len < 50) half_len = 50;
+        seg_ax = (cx >> 8) - (int32_t)(fwx * (float)half_len);
+        seg_az = (cz >> 8) - (int32_t)(fwz * (float)half_len);
+        seg_dx = (int32_t)(fwx * (float)(half_len * 2));
+        seg_dz = (int32_t)(fwz * (float)(half_len * 2));
+    }
+    seg_len2 = (int64_t)seg_dx * seg_dx + (int64_t)seg_dz * seg_dz;
     for (i = 0; i < n; i++) {
-        int32_t px, pz, rw, span, cdx, cdz;
+        int32_t px, pz, rw, hy, pxw, pzw, qx, qz;
+        int64_t closest_d2, t_num;
+        int hit;
         if (td5_track_td6_prop_is_broken(i)) continue;   /* already knocked over */
-        if (!td5_track_td6_prop_get(i, &px, &pz, &rw, &span)) continue;
-        /* broadphase: chassis vs prop (world units) before the 4 wheel tests */
-        cdx = (cx - px) >> 8; cdz = (cz - pz) >> 8;
-        if ((int64_t)cdx * cdx + (int64_t)cdz * cdz >
-            (int64_t)(rw + 6000) * (rw + 6000))
-            continue;
-        for (w = 0; w < 4; w++) {
-            int32_t dx = (actor->wheel_contact_pos[w].x - px) >> 8;
-            int32_t dz = (actor->wheel_contact_pos[w].z - pz) >> 8;
-            int64_t d2 = (int64_t)dx * dx + (int64_t)dz * dz;
-            if (d2 < (int64_t)rw * rw) {
-                /* Impact strength = the car's PLANAR SPEED (raw linear-velocity
-                 * units, ~1252 per MPH so 0x3200 ~= 10 MPH). Earlier this used
-                 * the inward-normal velocity component, but discrete/glancing
-                 * wheel contacts make that read ~0 -> the "strength=0, no
-                 * sound/debris" bug. Total speed is robust to contact angle. */
-                int32_t strength = (int32_t)td5_isqrt(
-                        (uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
-                /* mild thud: shed ~1/8 of velocity (light street furniture — you
-                 * plow through, you don't bounce off a wall) */
-                vx -= vx >> 3;
-                vz -= vz >> 3;
+        if (!td5_track_td6_prop_get(i, &px, &pz, &rw, NULL)) continue;
+        pxw = px >> 8; pzw = pz >> 8;
+        /* closest point on the swept segment (seg_a -> current) to the prop */
+        t_num = (int64_t)(pxw - seg_ax) * seg_dx + (int64_t)(pzw - seg_az) * seg_dz;
+        if (seg_len2 <= 0 || t_num <= 0) { qx = seg_ax;          qz = seg_az; }
+        else if (t_num >= seg_len2)      { qx = seg_ax + seg_dx; qz = seg_az + seg_dz; }
+        else { qx = seg_ax + (int32_t)(t_num * seg_dx / seg_len2);
+               qz = seg_az + (int32_t)(t_num * seg_dz / seg_len2); }
+        { int32_t ddx = pxw - qx, ddz = pzw - qz;
+          closest_d2 = (int64_t)ddx * ddx + (int64_t)ddz * ddz; }
+        if (closest_d2 > (int64_t)(rw + 6000) * (rw + 6000))
+            continue;                                    /* broadphase */
+        /* Solid hit when the swept car body (half-width ~550) reaches the prop,
+         * OR a wheel is inside. The swept segment kills high-speed tunnelling. */
+        hit = (closest_d2 < (int64_t)(rw + 550) * (rw + 550));
+        hy  = actor->wheel_contact_pos[0].y;
+        if (!hit) {
+            for (w = 0; w < 4; w++) {
+                int32_t dx = (actor->wheel_contact_pos[w].x - px) >> 8;
+                int32_t dz = (actor->wheel_contact_pos[w].z - pz) >> 8;
+                if ((int64_t)dx * dx + (int64_t)dz * dz < (int64_t)rw * rw) {
+                    hit = 1; hy = actor->wheel_contact_pos[w].y; break;
+                }
+            }
+        }
+        if (!hit) continue;
+        {
+            /* Impact strength = the car's PLANAR SPEED (raw velocity units,
+             * ~1252 per MPH so 0x3200 ~= 10 MPH); robust to contact angle. */
+            int32_t strength = (int32_t)td5_isqrt(
+                    (uint32_t)((int64_t)vx * vx + (int64_t)vz * vz));
+            int mass = td5_track_td6_prop_mass(i);   /* MOV byte 6; 0 = immovable */
+            int m4 = mass * 4; if (m4 < 1) m4 = 1;   /* TD6 internal mass = byte6<<2 */
+            int do_break;
+            if (!td6_push_enabled() || mass == 0) {
+                /* [#20] Legacy / immovable: solid thud (shed ~1/4 speed). Immovable
+                 * props never break; with the knob off everything breaks as before. */
+                vx -= vx >> 2; vz -= vz >> 2;
+                do_break = (td6_push_enabled() ? 0 : 1);
+            } else {
+                /* [#20 PUSHABLE] Shove the prop in the car's travel direction, scaled
+                 * inversely by mass (light bench m4=100 ~0.89x car speed, heavy m4=664
+                 * ~0.55x) — the kick the user liked. The car slows proportionally to
+                 * mass (light barely, heavy noticeably). Prop slides/decays + slide-cap
+                 * via td5_track_td6_props_tick. */
+                int32_t dvx = (int32_t)(((int64_t)vx0 * 800) / (800 + m4));
+                int32_t dvz = (int32_t)(((int64_t)vz0 * 800) / (800 + m4));
+                td5_track_td6_prop_push(i, dvx, dvz);
+                vx -= (int32_t)(((int64_t)vx * m4) / (4000 + m4));
+                vz -= (int32_t)(((int64_t)vz * m4) / (4000 + m4));
+                /* Break only on a hard, heavy impulse (mass-weighted speed). Light
+                 * furniture (low mass) is effectively unbreakable — it just shoves. */
+                do_break = ((int64_t)strength * mass > 6000000LL);
+                if (do_break) { vx -= vx >> 2; vz -= vz >> 2; }
+            }
+            if (do_break)
                 td5_track_td6_prop_set_broken(i);   /* one-shot: now drive through */
-                TD5_LOG_D(LOG_TAG, "TD6 prop break: idx=%d slot=%d strength=%d span=%d",
-                          i, (int)actor->slot_index, strength, span);
-                if (strength > 0x3200) {
-                    int32_t why = actor->wheel_contact_pos[w].y;
-                    int32_t wpos[3] = { px, why, pz };
-                    int variant = (strength < 0x19000) ? 0x16 : 0x1b;
-                    int mag     = (strength < 0x19000) ? 0x5622 : 0x2198;
-                    int volume  = (strength < 0x19000) ? 1 : 4;
-                    int32_t pitch = strength - 0x2000;
-                    int32_t ff_mag;
-                    if (pitch < 0x400) pitch = 0x400;
-                    else if (pitch > 0x800) pitch = 0x800;
-                    /* crash SFX (mirrors the wall-impact param order @0x406B70) */
-                    td5_sound_play_at_position(variant, pitch, mag, wpos, volume);
-                    ff_mag = strength >> 2;
-                    if (ff_mag > 99999) ff_mag = 100000;
-                    /* [item #5(1)(2)] Decaying directional pulse via the FF
-                     * collision path (was the old persistent play_effect). Props
-                     * are plowed into head-on, so flag a FRONT contact (0x01);
-                     * actor_b_slot = -1 (single actor). raw ff_mag matches the
-                     * 0..100000 domain td5_input_ff_collision divides down. */
-                    td5_input_ff_collision(0x01, (int)actor->slot_index, -1, ff_mag);
+            TD5_LOG_D(LOG_TAG, "TD6 prop hit: idx=%d slot=%d strength=%d mass=%d %s",
+                      i, (int)actor->slot_index, strength, mass, do_break ? "BREAK" : "push");
+            if (strength > 0x2400) {
+                int32_t wpos[3] = { px, hy, pz };
+                int variant = (strength < 0x19000) ? 0x16 : 0x1b;
+                int mag     = (strength < 0x19000) ? 0x5622 : 0x2198;
+                int volume  = (strength < 0x19000) ? 1 : 4;
+                int32_t pitch = strength - 0x2000;
+                int32_t ff_mag;
+                if (pitch < 0x400) pitch = 0x400;
+                else if (pitch > 0x800) pitch = 0x800;
+                /* crash/thud SFX (mirrors the wall-impact param order @0x406B70) */
+                td5_sound_play_at_position(variant, pitch, mag, wpos, volume);
+                ff_mag = strength >> 2;
+                if (ff_mag > 99999) ff_mag = 100000;
+                td5_input_ff_collision(0x01, (int)actor->slot_index, -1, ff_mag);
+                /* debris burst only when the prop actually BREAKS (not on a push) */
+                if (do_break)
                     td5_vfx_queue_prop_break((float)px * (1.0f / 256.0f),
-                                             (float)why * (1.0f / 256.0f),
+                                             (float)hy * (1.0f / 256.0f),
                                              (float)pz * (1.0f / 256.0f),
                                              strength);
-                }
-                break;                              /* one hit per prop */
             }
         }
     }
@@ -2543,6 +2616,13 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         /* [task#14] TD6 breakable-prop collision (player + AI racers), after the
          * per-tick position/velocity update so wheel contacts are current. */
         td5_physics_check_td6_props(actor);
+        /* [#20 pushable] Slide/decay pushed props ONCE per sim tick (this loop runs
+         * per actor; guard on the tick counter so the integrator advances once). */
+        {
+            static uint32_t s_last_prop_tick = 0xFFFFFFFFu;
+            uint32_t t = (uint32_t)g_td5.simulation_tick_counter;
+            if (t != s_last_prop_tick) { s_last_prop_tick = t; td5_track_td6_props_tick(); }
+        }
     } else if (actor->vehicle_mode == 1 && !g_game_paused) {
         /* 6b. Scripted recovery mode [CONFIRMED @ 0x00406881 / 0x00409BF0 + 0x00409D20]
          * Tier 2 NOT_PORTED port (2026-05-24): replaces the prior partial
@@ -10049,85 +10129,13 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * the car falls under gravity instead, matching the original. */
         int wheel_capped = td5_track_last_contact_was_capped();
 
-        /* [S18 FIX — TD6 branch-fork wheel-probe teleport / chassis-launch]
-         * On the migrated TD6 synth tracks each branch begins with a type-9
-         * SENTINEL_START span whose link_prev points at a DISTANT span (e.g.
-         * Rome branch span 2357 -> link_prev=85). The per-wheel contact probe is
-         * walked independently (td5_track_update_probe_position above), so a
-         * wheel that sits slightly behind the chassis crosses the sentinel's
-         * BACKWARD boundary and the walker follows that wrap-link, TELEPORTING
-         * the wheel's probe to the far span (captured: "S18 WHEEL i=2
-         * probe_span=85 gy=-47872" while the real ground is -368896). That far
-         * span's plane, extrapolated to the wheel's true XZ, reads ~1250 units
-         * too high; the chassis Y-snap then averages that one bogus-high wheel
-         * and ROCKETS the car ~600 units/tick into the air until recovery yanks
-         * it (the user's "down-slope" blow-up — the terrain here is dead flat).
-         *
-         * Reject it: re-probe the ground from the CHASSIS span (which carries a
-         * stable running position and did NOT teleport) at this wheel's XZ. If
-         * the wheel-span ground is a wild outlier vs that reference (|diff| >
-         * 256 world units — far beyond any real suspension travel / camber /
-         * slope, but well under the ~1250-unit teleport error), the wheel probe
-         * jumped to unrelated geometry, so use the chassis-span ground+normal
-         * instead and clear the spurious cap. Faithful TD5 tracks
-         * (g_active_td6_level == 0) are byte-IDENTICAL — this block is skipped.
-         * Only the wheel's GROUND read is corrected; its own XZ/sub_lane (hence
-         * genuine camber) is preserved. */
-        if (g_active_td6_level > 0) {
-            int chassis_span = (int)actor->track_span_raw;
-            int max_sp_ref = td5_track_get_span_count();
-            if (chassis_span >= 0 && chassis_span < max_sp_ref &&
-                chassis_span != probe_span) {
-                int16_t ref_normal[3] = {0, 4096, 0};
-                int32_t ground_ref = td5_track_compute_contact_height_bounded(
-                    chassis_span, (int)actor->wheel_probes[i].sub_lane_index,
-                    actor->wheel_contact_pos[i].x, actor->wheel_contact_pos[i].z,
-                    ref_normal);
-                int ref_capped = td5_track_last_contact_was_capped();
-                int32_t diff = ground_y - ground_ref;
-                if (!ref_capped && (diff > 0x10000 || diff < -0x10000)) {
-                    /* A gross mismatch means ONE of {wheel-span, chassis-span}
-                     * jumped to unrelated geometry. The original block always
-                     * trusted the chassis span — right when a WHEEL probe
-                     * teleported. But on dense TD6 junctions the CHASSIS itself
-                     * gets stuck on a distant branch span while the wheels stay
-                     * correctly on the main road; blindly trusting the chassis
-                     * then snaps the good wheels to a far ground = the car drops
-                     * through the floor. Decide by consistency with the body's
-                     * own Y: the real ground sits within ~suspension travel of
-                     * the chassis body, the bogus one is ~100k+ units away. */
-                    /* Decide which span is the liar by a STRUCTURAL test, not by
-                     * body height (the body Y is itself corrupt once the car has
-                     * been displaced, which creates a feedback loop that keeps it
-                     * stuck airborne). On migrated TD6 tracks the appended branch
-                     * spans (index >= ring_length) sit far from the main ring, so:
-                     *   chassis on a BRANCH span + wheel on a MAIN span  => the
-                     *   chassis is stuck on a displaced branch and its ground is
-                     *   garbage (~366000 off) -> KEEP the good wheel ground.
-                     * Otherwise a wheel probe teleported (the original case) -> use
-                     * the stable chassis-span ground. */
-                    int ring = g_td5.track_span_ring_length;
-                    int chassis_on_branch = (ring > 0 && chassis_span >= ring);
-                    int probe_on_branch   = (ring > 0 && probe_span   >= ring);
-                    if (chassis_on_branch && !probe_on_branch) {
-                        TD5_LOG_W(LOG_TAG,
-                            "S18 chassis-span reject: i=%d chassis_span=%d (stuck on branch) "
-                            "vs probe_span=%d — keep wheel ground gy=%d (bogus ref_gy=%d)",
-                            i, chassis_span, probe_span, ground_y, ground_ref);
-                    } else {
-                        TD5_LOG_I(LOG_TAG,
-                            "S18 wheel-teleport reject: i=%d probe_span=%d chassis_span=%d "
-                            "gy=%d -> ref_gy=%d (diff=%d)",
-                            i, probe_span, chassis_span, ground_y, ground_ref, diff);
-                        ground_y = ground_ref;
-                        span_normal[0] = ref_normal[0];
-                        span_normal[1] = ref_normal[1];
-                        span_normal[2] = ref_normal[2];
-                        wheel_capped = 0;
-                    }
-                }
-            }
-        }
+        /* [#20 2026-06-17] The old "S18" chassis-span ground reject lived here —
+         * a TD6-only block that, on the false "displaced branch" premise, discarded
+         * the chassis-span ground when a wheel probed a different span (and pulled
+         * the car branch->main = the "teleport to the left track"). Branch geometry
+         * is actually CONNECTED (verified; see re/tools/connect_branches.py),
+         * so TD6 uses the native path with no special wheel-ground override — byte-
+         * identical to faithful TD5. Removed once the faithful path was confirmed. */
 
         /* Write surface normal to wheel_contact_velocities[i][0..2] (actor+0x250+i*8).
          * Original: FUN_00445A70 computes cross-product of span edge vectors >> 12,
@@ -11598,6 +11606,50 @@ static inline int32_t sar9_rz_42F030(int32_t x) {
  *
  * Audit: re/analysis/pilot_0042F030_audit.md
  */
+/* [gear-1 accel 2026-06-18] Speed-dependent drive-torque shaping for the HUMAN
+ * player (user: "make acceleration faster at low speed and weaker at high speed,
+ * mimic gear 1" — which also strengthens hill starts). Returns a Q8 multiplier:
+ * BOOST at/below LOW% of the car's top speed, tapering linearly to CUT at/above
+ * HIGH%. 0x100 (unchanged) when off or top speed is unknown. Player-only so AI
+ * pacing is untouched. Knobs:
+ *   TD5RE_GEAR1_ACCEL=0      disable (default on)
+ *   TD5RE_GEAR1_BOOST_PCT    low-speed torque %  (default 150 = 1.5x)
+ *   TD5RE_GEAR1_CUT_PCT      high-speed torque % (default 70  = 0.7x)
+ *   TD5RE_GEAR1_LOW_PCT      boost holds below this % of top speed (default 12)
+ *   TD5RE_GEAR1_HIGH_PCT     cut reached at/above this % of top speed (default 75) */
+static int32_t td5_physics_gear1_accel_q8(TD5_Actor *actor)
+{
+    static int inited = 0, on = 1, boost = 150, cut = 70, lowp = 12, highp = 75;
+    int32_t top, spd, lo, hi, bq, cq;
+    if (!inited) {
+        const char *e;
+        inited = 1;
+        e = getenv("TD5RE_GEAR1_ACCEL");     if (e && e[0] == '0') on = 0;
+        e = getenv("TD5RE_GEAR1_BOOST_PCT"); if (e && e[0]) boost = atoi(e);
+        e = getenv("TD5RE_GEAR1_CUT_PCT");   if (e && e[0]) cut   = atoi(e);
+        e = getenv("TD5RE_GEAR1_LOW_PCT");   if (e && e[0]) lowp  = atoi(e);
+        e = getenv("TD5RE_GEAR1_HIGH_PCT");  if (e && e[0]) highp = atoi(e);
+        if (boost < 100) boost = 100; else if (boost > 400) boost = 400;
+        if (cut   < 20)  cut   = 20;  else if (cut   > 100) cut   = 100;
+        if (lowp  < 0)   lowp  = 0;   else if (lowp  > 90)  lowp  = 90;
+        if (highp <= lowp) highp = lowp + 1; else if (highp > 100) highp = 100;
+        TD5_LOG_I(LOG_TAG, "gear1 accel: %s boost=%d%% cut=%d%% low=%d%% high=%d%% "
+                  "(TD5RE_GEAR1_*)", on ? "ON" : "OFF", boost, cut, lowp, highp);
+    }
+    if (!on) return 0x100;
+    top = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+    if (top <= 0) return 0x100;
+    spd = actor->longitudinal_speed;
+    if (spd < 0) spd = -spd;                              /* 24.8 magnitude */
+    lo = (int32_t)((((int64_t)top * lowp)  / 100) << 8);  /* top is in HUD units */
+    hi = (int32_t)((((int64_t)top * highp) / 100) << 8);
+    bq = (boost * 0x100) / 100;
+    cq = (cut   * 0x100) / 100;
+    if (spd <= lo) return bq;
+    if (spd >= hi || hi <= lo) return cq;
+    return bq + (int32_t)(((int64_t)(cq - bq) * (spd - lo)) / (hi - lo));
+}
+
 int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 {
     /* Entry trace hook (pure-leaf function; no state to snapshot at exit). */
@@ -11718,6 +11770,19 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
         int32_t mboost = td5_physics_actor_manual_boost_q8(actor);
         if (mboost != MP_CATCHUP_Q8_ONE) {
             int64_t scaled = (int64_t)torque * (int64_t)mboost;
+            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
+
+    /* [gear-1 accel #2026-06-18] HUMAN-player-only speed shaping: strong low-end,
+     * tapered top-end (mimics gear 1; also helps hill starts). Composes after the
+     * catch-up/manual multipliers. g_race_slot_state==1 is the human-driven slot
+     * (AI racers / traffic are untouched, preserving pacing). */
+    if (actor->slot_index >= 0 && actor->slot_index < TD5_MAX_RACER_SLOTS &&
+        g_race_slot_state[actor->slot_index] == 1) {
+        int32_t g1 = td5_physics_gear1_accel_q8(actor);
+        if (g1 != 0x100) {
+            int64_t scaled = (int64_t)torque * (int64_t)g1;
             torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
         }
     }
