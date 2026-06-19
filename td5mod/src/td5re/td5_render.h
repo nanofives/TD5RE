@@ -86,11 +86,9 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh);
 /* slot >= 0 applies that slot's paint tint (s_vehicle_tint); slot < 0 = no tint. */
 void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot);
 
-/* [task#21] TD6 per-area lighting zones: select the zone covering player_span
- * and set the current scene ambient + directional sun (modulated into the baked
- * track grey by compute_vertex_lighting). Call once per view before lighting.
- * London-only for now; A/B via TD5RE_TD6_LIGHTZONES. */
-void td5_render_update_light_zone(int player_span);
+/* [task#21 TD6 per-area lighting zones — REMOVED/DEFERRED 2026-06-19 at user
+ * request; see the note in td5_render.c. The RE + LIGHTZONES.BIN extractor
+ * (re/tools/extract_td6_lightzones.py) are kept for a future revisit.] */
 
 /* [task#14] Draw the visible TD6 breakable-prop boxes for this view (texture-free
  * grey boxes at each un-broken prop). Call once per view after the track + actors

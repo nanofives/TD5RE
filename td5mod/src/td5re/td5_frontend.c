@@ -2412,6 +2412,11 @@ static void frontend_build_speed_pool(void) {
         int top;
         if (frontend_car_is_cop(id))
             continue;                      /* skip cop-chase cars (TD5 33-36 + TD6 46-49) */
+        if (id == 30)
+            continue;                      /* [2026-06-19] exclude the Pitbull Special
+                                            * (index 30, sp8.zip) from the AI opponent
+                                            * pool at user request — it's a bonus car and
+                                            * lands in the top speed band as an opponent */
         top = frontend_read_car_top_speed(id);
         if (top <= 0) continue;            /* skip cars with no/garbage carparam */
         s_speed_pool_ids[n]    = id;

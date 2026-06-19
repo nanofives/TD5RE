@@ -1914,6 +1914,10 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
  * atlas when VectorUI is off or the MSDF font is unavailable. */
 typedef struct { float x, y; int centered; float scale; char s[64]; } HudVuiText;
 static HudVuiText s_hud_vui_text[96];
+/* One-shot size multiplier for the NEXT td5_hud_queue_text call (1.0 = normal).
+ * Lets a caller (e.g. the WRONG WAY caption) draw an oversized label without a
+ * wider API; reset to 1.0 by queue_text after it's consumed. */
+static float s_hud_next_text_scale = 1.0f;
 static int        s_hud_vui_text_count;
 
 /* Uniform HUD text scale for the active view (the same factor the speedo/minimap
@@ -2020,6 +2024,10 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
 
     int len = (int)strlen(buf);
 
+    /* Consume the one-shot size multiplier (1.0 unless a caller bumped it). */
+    float scl_mul = s_hud_next_text_scale;
+    s_hud_next_text_scale = 1.0f;
+
     /* VectorUI: record the raw ASCII string for crisp rendering at flush — via
      * the native HUD TTF (Rajdhani) when loaded, else the HUD-font SDF. The
      * original glyph table / char remap is applied in the SDF path; the TTF path
@@ -2033,7 +2041,7 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
              * inside the pane instead of off-screen. scale==1.0 => byte-identical
              * to the old fixed-pixel layout. */
             float fx = (float)x, fy = (float)y;
-            e->scale = hud_active_text_scale();
+            e->scale = hud_active_text_scale() * scl_mul;
             hud_scale_text_pos(&fx, &fy, centered, e->scale);
             e->x = fx;  e->y = fy;  e->centered = centered;
             strncpy(e->s, buf, sizeof(e->s) - 1);
@@ -2064,7 +2072,7 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
      * reproduces the legacy fixed-pixel layout byte-for-byte. The start position
      * is re-anchored to the pane corner/centre by the same hud_scale_text_pos used
      * by the VectorUI branch. */
-    float sc = hud_text_dpi_on() ? hud_active_text_scale() : 1.0f;
+    float sc = (hud_text_dpi_on() ? hud_active_text_scale() : 1.0f) * scl_mul;
     float cursor_x = (float)x;
     float cursor_y = (float)y;
     if (sc != 1.0f) {
@@ -4381,11 +4389,11 @@ void td5_hud_render_overlays(float dt)
                             (s_wrong_way_counter[v] > 2);
 
             if (wrong_way) {
-                /* Slow, readable blink: ON for 48 of every 64 ticks (~75% duty),
-                 * i.e. half the rate of the old (tick & 0x1F) > 8 cadence which
-                 * read as a fast flicker (user feedback 2026-06-05). Mostly-on so
-                 * the warning stays legible while still pulsing for attention. */
-                if ((g_tick_counter & 0x3Fu) < 0x30u) {
+                /* Slow, readable blink: ON for 96 of every 128 ticks (~75% duty).
+                 * Slowed again 2026-06-19 (was 0x3F/0x30 = 64-tick period) at user
+                 * request — flicker a little slower. Mostly-on so the warning stays
+                 * legible while still pulsing for attention. */
+                if ((g_tick_counter & 0x7Fu) < 0x60u) {
                     /* Pre-baked U-turn icon (UTURN sprite, centered). */
                     hud_submit_quad(view_base + 0x67C);
                     /* [FIX 2026-06-05 wrong-way warning — source-port HUD, no
@@ -4398,10 +4406,14 @@ void td5_hud_render_overlays(float dt)
                      * this view's s_wrong_way_counter[v], so each split-screen pane
                      * shows its own warning. s_hud_string_table[6] is the SNK
                      * "WRONG WAY" label (see s_default_position_strings[6]). */
+                    /* [2026-06-19] Bigger caption, moved higher (0.28->0.14 of the
+                     * pane) so it sits ABOVE the U-turn icon/HUD textures instead of
+                     * overlapping them. 1.6x via the one-shot size multiplier. */
+                    s_hud_next_text_scale = 1.6f;
                     td5_hud_queue_text(0,
                         (int)vl->center_x,
                         (int)(vl->vp_int_top +
-                              (vl->vp_int_bottom - vl->vp_int_top) * 0.28f),
+                              (vl->vp_int_bottom - vl->vp_int_top) * 0.14f),
                         1,
                         "%s", s_hud_string_table[6]);
                 }
