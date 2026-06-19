@@ -1885,6 +1885,20 @@ int td5_game_init_race_session(void) {
                       "InitRace: demo mode -> slot 0 switched to AI autopilot");
         }
     }
+    /* [ITEM 2 2026-06-19] Network race: every roster-occupied slot is a HUMAN
+     * player driven by the lockstep-exchanged input bits, not AI. The roster
+     * (td5_net_is_slot_active) is replicated identically on every peer, so this
+     * marks the SAME slots on all machines -> deterministic. (Marking only the
+     * LOCAL slot would DESYNC: the host would mark slot 0 while a client marks
+     * slot 1, handing the AI module a different slot set per machine.) Without
+     * this, a joining client's own car (net slot >= 1) stayed state=0 and the
+     * AI overwrote its controls every tick -- the "player is AI" the user saw.
+     * Runs last so it overrides the grid-fill / disable passes above. */
+    if (g_td5.network_active) {
+        for (int i = 0; i < TD5_MAX_RACER_SLOTS && i < TD5_NET_MAX_PLAYERS; i++)
+            if (td5_net_is_slot_active(i))
+                s_slot_state[i].state = 1;
+    }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         td5_physics_set_race_slot_state(i, s_slot_state[i].state == 1 ? 1 : 0);

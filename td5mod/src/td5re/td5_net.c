@@ -2075,6 +2075,21 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
     default:
         break;
     }
+
+    /* [ITEM 1 2026-06-19] Refresh the client's host-alive clock on any host
+     * keepalive control datagram. The lobby keepalive arrives as magic-tagged
+     * PING / ROSTER_INFO (1 Hz) plus the JOIN_ACK -- all dispatched here and
+     * NEVER through the DXPTYPE worker drain that stamps s_client_last_host_ms
+     * (see handle_app_message). Without this the clock was armed once at join
+     * and never refreshed, so the lobby watchdog measured silence against a
+     * stale stamp and kicked the client to the main menu after ~6 s. Host-
+     * originated types only; a client only converses with its host here. */
+    if (s_is_client && !s_is_host &&
+        (type == WS2_DISC_PING || type == WS2_DISC_ROSTER_INFO ||
+         type == WS2_DISC_JOIN_ACK)) {
+        uint32_t now = td5_plat_time_ms();
+        s_client_last_host_ms = now ? now : 1;
+    }
 }
 
 /** Client-side: send a magic JOIN_REQ (player name + password) to the host. */

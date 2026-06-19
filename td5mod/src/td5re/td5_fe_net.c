@@ -1132,6 +1132,12 @@ void Screen_CreateSession(void) {
         }
         if (s_create_session_name[0] == '\0')
             strcpy(s_create_session_name, "New Session");
+        /* [ITEM 3 2026-06-19] Start the host password blank on each new session.
+         * s_lobby_password is SHARED with the JOIN flow, so a password typed to
+         * join a passworded host would otherwise leak into this host field. The
+         * join paths clear it themselves before prompting (cases 7/8), so
+         * blanking here is safe and only affects host setup. */
+        s_lobby_password[0] = '\0';
         if (s_lobby_max_players < 2 || s_lobby_max_players > 6)
             s_lobby_max_players = 6;
         /* [ITEM 4] Seed the UPnP toggle + game port from the live [Network] cfg
@@ -1446,7 +1452,12 @@ void Screen_NetworkLobby(void) {
         break;
 
     case 3: /* MAIN INTERACTIVE LOBBY */
-        frontend_present_buffer();
+        /* [ITEM 4 2026-06-19] Removed the redundant frontend_present_buffer()
+         * that ran here every lobby frame. The frontend display loop already
+         * presents once per frame; the extra vblank-synced Present(1) meant TWO
+         * presents per lobby frame, and with VSync on + the single-back-buffer
+         * BitBlt swap chain they serialized across separate vblanks, halving the
+         * lobby frame rate (the 30 fps on a 60 Hz panel the user reported). */
 
         /* [S31] Late car announce: the state-0 attempt is a no-op while the
          * JOIN handshake hasn't assigned our slot yet. */
