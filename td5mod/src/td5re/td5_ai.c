@@ -1811,6 +1811,20 @@ void td5_ai_init_race_actor_runtime(void) {
                       "others_ai=1 -> AI g_slot_state[1..%d]=0 (slot 0 = human)",
                       (humans < g_traffic_slot_base ? humans : g_traffic_slot_base) - 1);
     }
+    /* [ITEM 2 2026-06-19] Network race: the AI's g_slot_state MUST agree with
+     * td5_game.c's s_slot_state (see the split-screen note above) or the AI
+     * drives a human's car. Mark every roster-occupied slot human -- the roster
+     * is replicated identically on every peer, so this is deterministic. Without
+     * it, a joining client's own slot stayed g_slot_state=0 and the AI overwrote
+     * its controls every tick ("player is AI" on the client). s_slot_state alone
+     * (td5_game.c) was NOT enough -- the AI reads THIS array. */
+    if (g_td5.network_active) {
+        extern int td5_net_is_slot_active(int slot);
+        int k;
+        for (k = 0; k < g_traffic_slot_base; k++)
+            if (td5_net_is_slot_active(k))
+                g_slot_state[k] = 1;
+    }
     /* Wanted mode (cop chase): slots 2-5 are inactive (no AI, no physics dispatch).
      * Mirrors gRaceSlotStateTable init at 0x42ABF8 for non-zero game types. */
     if (g_td5.wanted_mode_enabled) {

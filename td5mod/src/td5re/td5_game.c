@@ -3863,10 +3863,15 @@ static TD5_Actor *td5_game_local_player_actor(void)
  * TD5RE_NET_RENDER_DECOUPLE=0 to revert to the legacy once-per-frame exchange
  * (race capped at the lockstep round-trip rate). */
 static int net_render_decouple_enabled(void) {
-    static int init = 0, on = 1;
+    static int init = 0, on = 0;
     if (!init) {
         const char *e = getenv("TD5RE_NET_RENDER_DECOUPLE");
-        on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        /* [2026-06-19] DEFAULT OFF — regressed: the render thread still BLOCKS on
+         * the exchange (now per tick), and without the per-frame dt phase-align
+         * the blocks got LONGER, dropping the client to ~15 fps. True decoupling
+         * needs the sim/exchange off the render thread (input-delay or a worker
+         * thread). Opt in with =1 to experiment. */
+        on = (e && e[0] == '1') ? 1 : 0;   /* default OFF */
         init = 1;
         TD5_LOG_I(LOG_TAG, "Netplay render decouple: %s",
                   on ? "ON (exchange per sim tick, render free-runs)"
@@ -3931,6 +3936,17 @@ static int td5_game_net_sync_frame(int apply_dt_correction) {
             }
         }
     }
+
+    /* [2026-06-19] A peer is leaving the race (back-to-lobby / quit / restart
+     * pending -- set locally by our own pause menu, or just drained from a
+     * peer's 0x17/0x19 above). Lockstep cannot continue, so SKIP the blocking
+     * exchange and let the fade-out run. Without this the next barrier waits on
+     * FRAMEs the departed peer will never send -> the client froze ~20s then
+     * fell through to the MENU instead of the lobby. (The net worker also
+     * SetEvents s_evt_frame_ack on 0x17/0x19 so a peer already blocked in the
+     * wait wakes promptly enough to reach this drain.) */
+    if (s_pause_lobby_pending || s_pause_exit_pending || s_pause_restart_pending)
+        return 0;
 
     ok = td5_net_is_host() ? td5_net_handle_host_frame(bits, &dt)
                            : td5_net_handle_client_frame(bits, &dt);

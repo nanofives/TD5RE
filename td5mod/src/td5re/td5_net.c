@@ -670,6 +670,17 @@ static void handle_data(uint32_t sender, const void *data, int size)
         if (payload_size > (uint32_t)(size - 8))
             payload_size = (uint32_t)(size - 8);
         ring_push(TD5_DXPDATA, p + 8, (int)payload_size);
+        /* [2026-06-19] Wake a blocked lockstep wait on a race-exit control
+         * message: 0x17 (RACE_LEFT / back-to-lobby) or 0x19 (host restart).
+         * These ride the DXPDATA ring and are drained at the TOP of the game
+         * thread's net-sync -- but while it is blocked waiting for a FRAME the
+         * departing peer has stopped sending, it would sit out the full ~20s
+         * SYNC_TIMEOUT and then fall through to the MENU. Signalling here lets it
+         * wake within a frame, consume the last bits for one tick, and drain the
+         * message on the next sync -> a clean, prompt back-to-lobby. */
+        if (payload_size >= 1 && s_evt_frame_ack &&
+            (p[8] == 0x17 || p[8] == 0x19))
+            SetEvent(s_evt_frame_ack);
     } else {
         ring_push(TD5_DXPDATA, NULL, 0);
     }
