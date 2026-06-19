@@ -5862,7 +5862,24 @@ static int shadow_antiflicker_enabled(void)
  * lower = smoother but laggier on real slopes. 0.5 halves the step each tick
  * (~settles in a few ticks) which removes the visible pop without perceptible
  * terrain lag. */
-#define SHADOW_Y_SMOOTH   (0.5f)
+/* [#4 2026-06-19] Temporal low-pass factor for the per-node shadow ground Y (ease
+ * toward the fresh raycast each tick). Lowered from 0.50 -> 0.35 to further damp
+ * the residual uphill span-boundary flicker; downhill is already stable so a
+ * stronger low-pass is a near-no-op there. Env-tunable TD5RE_SHADOW_Y_SMOOTH
+ * (percent 1..100; lower = smoother/slightly laggier, higher = snappier/more flicker). */
+static float shadow_y_smooth(void)
+{
+    static float cached = -1.0f;
+    if (cached < 0.0f) {
+        const char *e = getenv("TD5RE_SHADOW_Y_SMOOTH");
+        long pct = (e && e[0]) ? strtol(e, NULL, 10) : 0;
+        if (pct <= 0)   pct = 35;          /* default 0.35 */
+        if (pct < 1)    pct = 1;
+        if (pct > 100)  pct = 100;
+        cached = (float)pct / 100.0f;
+    }
+    return cached;
+}
 
 static int   s_shadow_lookup_done = 0;
 static int   s_shadow_page        = -1;
@@ -6188,7 +6205,7 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
             /* [task#4] ease toward the fresh raycast Y instead of snapping. */
             if (smooth_y) {
                 float prevY = g->base[n][1];
-                ny = prevY + (ny - prevY) * SHADOW_Y_SMOOTH;
+                ny = prevY + (ny - prevY) * shadow_y_smooth();
             }
 
             g->base[n][0] = nx;
