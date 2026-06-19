@@ -114,6 +114,11 @@ int              td5_track_branch_to_main_span(int span);
 int              td5_track_nearest_road_lane(int span_index, int lane);
 /* Inverse: a main-ring span -> the parallel branch-corridor span, or -1 if none. */
 int              td5_track_main_to_branch_span(int main_span);
+/* [#20 2026-06-18] 1 if the fork that `span` belongs to (corridor span) or sits at
+ * (main span) is blacklisted as a dead-end sidewalk branch on the current track.
+ * Direction-aware (the flagged list is mirrored for forward vs reverse). Consumed
+ * by the traffic spawner so cars are never placed on these corridors. */
+int              td5_track_branch_blacklisted(int span);
 /* Branch-corridor enumeration (jump-table records) for the traffic spawner:
  * td5_track_corridor_count() -> number of corridors; td5_track_corridor_info()
  * fills the idx-th corridor's BRANCH span range [branch_lo,branch_hi] (displaced,

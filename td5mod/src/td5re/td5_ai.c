@@ -7187,6 +7187,43 @@ static int trf_dyn_count_traffic_near(int player_span, int radius)
     return n;
 }
 
+/* [proximity gate 2026-06-18] Stop traffic from spawning in a knot. A fresh
+ * spawn is rejected when the stretch of road around the candidate span already
+ * holds >= cluster_max ACTIVE/FADING cars within +/- cluster_radius spans (all
+ * lanes; branch-corridor cars fold to their parallel main span via
+ * trf_dyn_count_traffic_near). This complements the per-lane clearance
+ * (traffic_lane_is_clear), which only blocks the SAME lane within a few spans
+ * and so let cars pile up across adjacent lanes / nearby spans (user: London
+ * reverse ~span 223 spawned a clump). Both knobs are tunable; MAX=0 disables.
+ *   TD5RE_TRAFFIC_CLUSTER_SPANS  radius in spans (default 8 = the clearance reach)
+ *   TD5RE_TRAFFIC_CLUSTER_MAX    cars allowed in that window before rejecting
+ *                                (default auto: 2, or 4 on VERY HIGH so dense
+ *                                 modes still fill; 0 = gate off) */
+static int trf_dyn_cluster_radius(void)
+{
+    static int r = -1;
+    if (r < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_CLUSTER_SPANS");
+        r = e ? atoi(e) : 8;
+        if (r < 1) r = 1;
+    }
+    return r;
+}
+
+static int trf_dyn_cluster_max(void)
+{
+    static int cached = -2;   /* -2 = unread; -1 = auto; >=0 = explicit (0 = off) */
+    if (cached == -2) {
+        const char *e = getenv("TD5RE_TRAFFIC_CLUSTER_MAX");
+        cached = (e && e[0]) ? atoi(e) : -1;
+        TD5_LOG_I(LOG_TAG, "traffic_cluster gate: max=%s radius=%d "
+                  "(TD5RE_TRAFFIC_CLUSTER_MAX/_SPANS; 0 = off)",
+                  (e && e[0]) ? e : "auto", trf_dyn_cluster_radius());
+    }
+    if (cached >= 0) return cached;
+    return (trf_dyn_volume() >= 4) ? 4 : 2;   /* VERY HIGH packs tighter */
+}
+
 /* [item#10 2026-06-15] Live-spawn anchor for the consistent-density goal. In a
  * multi-human (split-screen) race the players can spread far apart; anchoring all
  * spawns on the FRONT-MOST human (ai_player_span_lead) leaves the trailing
@@ -7727,6 +7764,17 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * we rolled (multiplayer: no spawning on top of another pane). */
         if (trf_dyn_min_player_dist(span) < win_lo) continue;
 
+        /* [proximity gate] Don't clump: skip this span if its stretch of road
+         * already holds enough traffic. `span` here is the main-ring candidate
+         * (branch retarget below folds back to it for counting), matching how
+         * trf_dyn_count_traffic_near normalizes branch cars to their main span. */
+        {
+            int cmax = trf_dyn_cluster_max();
+            if (cmax > 0 &&
+                trf_dyn_count_traffic_near(span, trf_dyn_cluster_radius()) >= cmax)
+                continue;
+        }
+
         /* [task#8 2026-06-14] Populate ALL branch corridors of a fork, not just
          * the main/right route. The chosen main-ring span has passed every
          * proximity/clearance check; if one or more branch corridors PARALLEL this
@@ -7754,6 +7802,14 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
                     : (int)(trf_dyn_rand() % (uint32_t)(ncorr + 1)) - 1;
                 if (corr >= 0) {
                     int bspan = td5_track_branch_corridor_span(main_span, corr);
+                    /* [#20 2026-06-18] Never place traffic on a blacklisted fork
+                     * (user-flagged dead-end sidewalk corridor). If this attempt
+                     * was deliberately aiming at a branch, retry a fresh span;
+                     * otherwise just stay on the main road. */
+                    if (bspan >= 0 && td5_track_branch_blacklisted(bspan)) {
+                        if (want_branch) continue;
+                        bspan = -1;
+                    }
                     if (bspan >= 0) {
                         span = bspan;
                         on_branch = 1;   /* [#16] this car is on a crossing branch corridor */

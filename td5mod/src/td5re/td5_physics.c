@@ -11606,6 +11606,50 @@ static inline int32_t sar9_rz_42F030(int32_t x) {
  *
  * Audit: re/analysis/pilot_0042F030_audit.md
  */
+/* [gear-1 accel 2026-06-18] Speed-dependent drive-torque shaping for the HUMAN
+ * player (user: "make acceleration faster at low speed and weaker at high speed,
+ * mimic gear 1" — which also strengthens hill starts). Returns a Q8 multiplier:
+ * BOOST at/below LOW% of the car's top speed, tapering linearly to CUT at/above
+ * HIGH%. 0x100 (unchanged) when off or top speed is unknown. Player-only so AI
+ * pacing is untouched. Knobs:
+ *   TD5RE_GEAR1_ACCEL=0      disable (default on)
+ *   TD5RE_GEAR1_BOOST_PCT    low-speed torque %  (default 150 = 1.5x)
+ *   TD5RE_GEAR1_CUT_PCT      high-speed torque % (default 70  = 0.7x)
+ *   TD5RE_GEAR1_LOW_PCT      boost holds below this % of top speed (default 12)
+ *   TD5RE_GEAR1_HIGH_PCT     cut reached at/above this % of top speed (default 75) */
+static int32_t td5_physics_gear1_accel_q8(TD5_Actor *actor)
+{
+    static int inited = 0, on = 1, boost = 150, cut = 70, lowp = 12, highp = 75;
+    int32_t top, spd, lo, hi, bq, cq;
+    if (!inited) {
+        const char *e;
+        inited = 1;
+        e = getenv("TD5RE_GEAR1_ACCEL");     if (e && e[0] == '0') on = 0;
+        e = getenv("TD5RE_GEAR1_BOOST_PCT"); if (e && e[0]) boost = atoi(e);
+        e = getenv("TD5RE_GEAR1_CUT_PCT");   if (e && e[0]) cut   = atoi(e);
+        e = getenv("TD5RE_GEAR1_LOW_PCT");   if (e && e[0]) lowp  = atoi(e);
+        e = getenv("TD5RE_GEAR1_HIGH_PCT");  if (e && e[0]) highp = atoi(e);
+        if (boost < 100) boost = 100; else if (boost > 400) boost = 400;
+        if (cut   < 20)  cut   = 20;  else if (cut   > 100) cut   = 100;
+        if (lowp  < 0)   lowp  = 0;   else if (lowp  > 90)  lowp  = 90;
+        if (highp <= lowp) highp = lowp + 1; else if (highp > 100) highp = 100;
+        TD5_LOG_I(LOG_TAG, "gear1 accel: %s boost=%d%% cut=%d%% low=%d%% high=%d%% "
+                  "(TD5RE_GEAR1_*)", on ? "ON" : "OFF", boost, cut, lowp, highp);
+    }
+    if (!on) return 0x100;
+    top = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+    if (top <= 0) return 0x100;
+    spd = actor->longitudinal_speed;
+    if (spd < 0) spd = -spd;                              /* 24.8 magnitude */
+    lo = (int32_t)((((int64_t)top * lowp)  / 100) << 8);  /* top is in HUD units */
+    hi = (int32_t)((((int64_t)top * highp) / 100) << 8);
+    bq = (boost * 0x100) / 100;
+    cq = (cut   * 0x100) / 100;
+    if (spd <= lo) return bq;
+    if (spd >= hi || hi <= lo) return cq;
+    return bq + (int32_t)(((int64_t)(cq - bq) * (spd - lo)) / (hi - lo));
+}
+
 int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 {
     /* Entry trace hook (pure-leaf function; no state to snapshot at exit). */
@@ -11726,6 +11770,19 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
         int32_t mboost = td5_physics_actor_manual_boost_q8(actor);
         if (mboost != MP_CATCHUP_Q8_ONE) {
             int64_t scaled = (int64_t)torque * (int64_t)mboost;
+            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
+
+    /* [gear-1 accel #2026-06-18] HUMAN-player-only speed shaping: strong low-end,
+     * tapered top-end (mimics gear 1; also helps hill starts). Composes after the
+     * catch-up/manual multipliers. g_race_slot_state==1 is the human-driven slot
+     * (AI racers / traffic are untouched, preserving pacing). */
+    if (actor->slot_index >= 0 && actor->slot_index < TD5_MAX_RACER_SLOTS &&
+        g_race_slot_state[actor->slot_index] == 1) {
+        int32_t g1 = td5_physics_gear1_accel_q8(actor);
+        if (g1 != 0x100) {
+            int64_t scaled = (int64_t)torque * (int64_t)g1;
             torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
         }
     }

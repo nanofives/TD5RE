@@ -1347,6 +1347,41 @@ static void append_projected_triangle(const TD5_D3DVertex *v0,
  * road surface with the building, so dropping the whole submesh holed the road). */
 static float s_hk_clip_y = 0.0f;
 
+/* [banners] Track SIGN panels (START/FINISH + the numbered 1..N gantries) are
+ * flat double-sided meshes: with the global CullMode=NONE both the front and
+ * the back face draw back-to-back and z-fight ("clipping"). Cull the
+ * away-facing side so only the banner facing the car shows. Scoped to banner
+ * TEXTURE PAGES during the level-geometry pass, so road, walls, tunnel
+ * interiors, buildings, billboards and cars are never affected (the existing
+ * CullMode=NONE behaviour is preserved everywhere else — track and car meshes
+ * have opposite winding conventions, so a global cull can't pick one sign).
+ * TD6 banner pages are the textures.dir indices == runtime cmd->texture_page_id
+ * (the converter preserves them; see k_td6_rev_banner). The screen-winding
+ * sign that means "facing away" is set empirically and flippable via env knob
+ * (TD5RE_BANNER_CULL=0 disables; TD5RE_BANNER_CULL_FLIP=1 swaps the kept side
+ * if banners end up showing their back). */
+static const struct { short level, page; } k_td6_banner_pages[] = {
+    /* Paris 8 */    {8,164},{8,218},{8,163},{8,188},{8,192},{8,205},
+    /* NewYork 9 */  {9,316},{9,317},{9,327},{9,306},{9,312},{9,271},{9,274},{9,303},
+    /* Rome 10 */    {10,342},{10,343},{10,353},{10,354},{10,355},{10,357},{10,358},{10,365},{10,366},
+    /* HongKong 11 */{11,216},{11,235},{11,215},{11,192},{11,228},{11,236},
+    /* London 12 */  {12,59},{12,60},{12,57},{12,58},{12,102},{12,157},{12,158},{12,188},
+};
+static int s_level_pass_active   = 0;  /* set only while drawing level geometry */
+static int s_banner_cull         = -1; /* -1 uninit; 0 off; 1 on (env TD5RE_BANNER_CULL) */
+static int s_banner_cull_keep_pos = 0; /* which screen-winding sign faces the camera */
+
+static int td6_is_banner_page(int page)
+{
+    int lvl = g_active_td6_level;
+    size_t i;
+    if (lvl <= 0) return 0;
+    for (i = 0; i < sizeof(k_td6_banner_pages) / sizeof(k_td6_banner_pages[0]); i++)
+        if (k_td6_banner_pages[i].level == lvl && k_td6_banner_pages[i].page == page)
+            return 1;
+    return 0;
+}
+
 static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
                                     int tex_page)
 {
@@ -1477,6 +1512,15 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         if (cross == 0.0f) {
             s_debug_clip_backface_rejects++;
             return;
+        }
+        /* [banners] one-sided cull for track sign panels only (see
+         * k_td6_banner_pages). Everything else keeps CullMode=NONE. */
+        if (s_level_pass_active && s_banner_cull && td6_is_banner_page(tex_page)) {
+            int facing_away = s_banner_cull_keep_pos ? (cross < 0.0f) : (cross > 0.0f);
+            if (facing_away) {
+                s_debug_clip_backface_rejects++;
+                return;
+            }
         }
     }
 
@@ -2491,6 +2535,55 @@ int td5_render_test_mesh_frustum(TD5_MeshHeader *mesh, float *out_depth)
     return 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * [reverse banners] TD6 P2P tracks bake START/FINISH + numbered 1..N banner
+ * gantries at fixed spans in the LEVEL geometry, shared by both race
+ * directions. Driven in REVERSE the player meets them in the opposite order,
+ * so the START gantry sits at the finish line and the "4" banner is the first
+ * one passed. We swap the banner TEXTURE PAGES at render time so reverse reads
+ * START at the (reverse) start, FINISH at the (reverse) end, and the numbered
+ * banners count 1,2,3,4 in pass order.
+ *
+ * Pages are textures.dir indices == runtime cmd->texture_page_id (preserved by
+ * convert_td6_tracks.py; the converter also emits tex_NNN.png at that index, so
+ * BOTH the source and target pages are loaded level textures). Keyed by
+ * g_active_td6_level. Pairs below are the START<->FINISH swap plus the numbered
+ * k<->(N+1-k) reversal (slot-paired across gantry posts, clamped to the other
+ * role's last slot; the middle checkpoint of an odd count maps to itself and is
+ * omitted). Banner textures are referenced ONLY by their gantry meshes, so
+ * remapping a page never touches road/building geometry. Derived from the
+ * authoritative per-role groups in re/tools (convert/extract banner classifiers).
+ * ------------------------------------------------------------------------- */
+static const struct { short level, from, to; } k_td6_rev_banner[] = {
+    /* Paris (lvl 8): start[164] finish[218] cp[163,188,192,205] */
+    {8,164,218},{8,218,164},{8,163,205},{8,205,163},{8,188,192},{8,192,188},
+    /* NewYork (lvl 9): start[316,317,327] finish[306] cp[312,271,274,303] */
+    {9,316,306},{9,317,306},{9,327,306},{9,306,316},
+    {9,312,303},{9,303,312},{9,271,274},{9,274,271},
+    /* Rome (lvl 10): no start/finish gantry; cp[{342,343},353,{354,355},{357,358,365},366] */
+    {10,342,366},{10,343,366},{10,366,342},
+    {10,353,357},{10,357,353},{10,358,353},{10,365,353},
+    /* HongKong (lvl 11): start[216] finish[235] cp[215,192,228,236] */
+    {11,216,235},{11,235,216},{11,215,236},{11,236,215},{11,192,228},{11,228,192},
+    /* London (lvl 12): start[59,60] finish[57,58] cp[102,157,158,188] */
+    {12,59,57},{12,60,58},{12,57,59},{12,58,60},
+    {12,102,188},{12,188,102},{12,157,158},{12,158,157},
+};
+
+/* Set only while drawing LEVEL geometry in reverse on a TD6 track, so the
+ * shared per-cmd dispatcher (also used by vehicles/props) never remaps them. */
+static int s_td6_banner_remap_active = 0;
+
+static int td6_reverse_banner_page(int page)
+{
+    int lvl = g_active_td6_level;
+    size_t i;
+    for (i = 0; i < sizeof(k_td6_rev_banner) / sizeof(k_td6_rev_banner[0]); i++)
+        if (k_td6_rev_banner[i].level == lvl && k_td6_rev_banner[i].from == page)
+            return k_td6_rev_banner[i].to;
+    return page;
+}
+
 /* --- Mesh Rendering --- */
 
 void td5_render_span_display_list(void *display_list_block)
@@ -2540,6 +2633,25 @@ void td5_render_span_display_list(void *display_list_block)
     TD5_LOG_D(LOG_TAG,
               "span display list: block=%p mesh_range=[0,%d)",
               display_list_block, count);
+
+    /* [reverse banners] enable START<->FINISH + numbered banner-page swap for
+     * this level-geometry pass only (cleared after the loop so vehicles/props
+     * sharing td5_render_prepared_mesh are never remapped). */
+    s_td6_banner_remap_active = (g_active_td6_level > 0 && g_td5.reverse_direction) ? 1 : 0;
+
+    /* [banners] mark the level-geometry pass so the one-sided banner cull in
+     * clip_and_submit_polygon applies (and never touches cars/HUD). */
+    if (s_banner_cull < 0) {
+        const char *e = getenv("TD5RE_BANNER_CULL");
+        const char *f = getenv("TD5RE_BANNER_CULL_FLIP");
+        s_banner_cull = (e && e[0] == '0') ? 0 : 1;
+        /* Default keeps the front (text-readable) face; verified on London —
+         * the other sign showed the mirrored back. FLIP swaps back if needed. */
+        s_banner_cull_keep_pos = (f && f[0] && f[0] != '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "banner cull: %s (keep_sign=%s; TD5RE_BANNER_CULL/_FLIP)",
+                  s_banner_cull ? "ON" : "OFF", s_banner_cull_keep_pos ? "pos" : "neg");
+    }
+    s_level_pass_active = 1;
 
     for (int i = 0; i < count; i++) {
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
@@ -2732,6 +2844,8 @@ void td5_render_span_display_list(void *display_list_block)
         }
     }
     s_hk_clip_y = 0.0f;   /* [#20 HK reverse] don't leak the building clip into vehicles/other */
+    s_td6_banner_remap_active = 0;  /* [reverse banners] level-geometry pass only */
+    s_level_pass_active = 0;        /* [banners] one-sided cull off outside level geometry */
 
     if ((s_debug_dl_calls % 500) == 1) {
         TD5_LOG_I(LOG_TAG,
@@ -2845,6 +2959,9 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
             patched.vertex_data_ptr = (uint32_t)(uintptr_t)rs_vtx_rebase(cmd_verts);
             if (g_rs->tex_page_override >= 0)
                 patched.texture_page_id = (int16_t)g_rs->tex_page_override;
+            else if (s_td6_banner_remap_active)
+                patched.texture_page_id =
+                    (int16_t)td6_reverse_banner_page(patched.texture_page_id);
             s_dispatch_table[opcode](&patched, rs_vtx_rebase(base_verts));
 
             /* Advance running cursor by vertices consumed */

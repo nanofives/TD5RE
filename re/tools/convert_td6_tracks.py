@@ -668,7 +668,10 @@ def _billboard_pages(names):
         # goes EDGE-ON and it vanishes, leaving floating canopies with no trunk.
         # Billboard them too. Tree WALLS ('treew') and other large fixed backdrops
         # are real surfaces and must stay world-fixed.
-        if "tree" not in nl and "trunk" not in nl:
+        # PALMS ('palma'/'palmb'/'palmleaf', e.g. Egypt/Hong Kong) are flat
+        # vegetation cards exactly like point trees and must also face the camera
+        # (user: "Egypt 2D trees don't rotate, look flat from some angles").
+        if "tree" not in nl and "trunk" not in nl and "palm" not in nl:
             continue
         if "treew" in nl or "wall" in nl or "backd" in nl or "fence" in nl:
             continue

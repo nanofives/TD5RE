@@ -1488,8 +1488,8 @@ static const struct { int slot; int level; int start_span; int finish_span; floa
     { 26,  7, 312,    0, 0.08f },  /* PELTON RACEWAY  (TD6 level010, circuit)  */
     { 27, 18,  70,    0, 0.08f },  /* IRELAND         (TD6 level011, circuit)  */
     { 28, 19,  32,    0, 0.08f },  /* LAKE TAHOE      (TD6 level015, circuit)  */
-    { 29, 20, 371,    0, 0.08f },  /* CAPE HATTERAS   (TD6 level016, circuit)  */
-    { 30, 21, 346,    0, 0.08f },  /* SWITZERLAND     (TD6 level017, circuit)  */
+    { 29, 20, 468,    0, 0.08f },  /* CAPE HATTERAS   (TD6 level016, circuit; start/finish banner @ span 468) */
+    { 30, 21, 138,    0, 0.08f },  /* SWITZERLAND     (TD6 level017, circuit; start/finish banner @ span 138) */
     { 31, 22,  10,    0, 0.08f },  /* EGYPT           (TD6 level018, circuit)  */
     /* P2P start_span = the track's START-BANNER span (from the in-track 'start'
      * banner mesh). The grid spreads BACKWARD from start_span (offsets -3..-18,

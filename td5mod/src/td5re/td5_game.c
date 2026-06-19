@@ -2662,6 +2662,25 @@ int td5_game_init_race_session(void) {
                 }
             }
         }
+        /* [#reverse-finish 2026-06-18] In a REVERSE P2P race the player drives
+         * STRIPB forward — the raw accumulator (+0x84) climbs from the grid up to
+         * the far end — and the race FINISHES at the physical FORWARD START (the
+         * reverse course ends where the forward course began). That is the mirror
+         * of start_span (ring-1-start_span), NOT the forward finish span: the
+         * forward finish mirrors to the reverse START and would end the race a few
+         * dozen spans in. Mirror it so the finish (and its banner) line up with the
+         * actual reverse end. */
+        if (s_td6_finish_span > 0 && g_td5.reverse_direction) {
+            int ring = td5_track_get_ring_length();
+            if (ring > 1) {
+                int fs = ring - 1 - start_span;
+                if (fs < 1) fs = 1; else if (fs >= ring) fs = ring - 1;
+                TD5_LOG_I(LOG_TAG,
+                          "TD6 reverse finish span: start=%d fwd_finish=%d -> rev_finish=%d (ring=%d)",
+                          start_span, s_td6_finish_span, fs, ring);
+                s_td6_finish_span = fs;
+            }
+        }
         memset(s_td6_cp_index, 0, sizeof(s_td6_cp_index));
         if (s_td6_cp_count > 0) {
             TD5_LOG_I(LOG_TAG,

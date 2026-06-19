@@ -894,12 +894,41 @@ void td5_track_bind_boundary_sentinels(int level_number)
      * (td5_track_resolve_wall_contacts) still runs, and faithful (non-override)
      * levels are byte-identical. */
     if (g_active_td6_level > 0) {
-        s_boundary_fwd_sentinel = -1;
-        s_boundary_rev_sentinel = 9999;
-        TD5_LOG_I(LOG_TAG,
-                  "boundary sentinels: override track (level=%d) -> DISABLED "
-                  "(substituted TD6 geometry has no native end-of-level boundary)",
-                  level_number);
+        /* [endwall 2026-06-18] TD6 P2P tracks ship no native end-of-level
+         * boundary, so the player/cars could drive off the first/last span and
+         * fall out of the world. Re-enable the boundary handler for TD6
+         * POINT-TO-POINT levels (8..12 = Paris/NewYork/Rome/HongKong/London) with
+         * sentinels at the real first/last drivable spans, capping BOTH physical
+         * ends — this serves forward and reverse alike (same physical road). TD6
+         * circuits loop and need no caps. The historical "seam teleport" that
+         * forced this off is now guarded by a penetration reject in
+         * fwd_rev_resolve_contact. Disable via TD5RE_TD6_ENDWALL=0. */
+        static int s_endwall = -1;
+        int is_p2p = (g_active_td6_level >= 8 && g_active_td6_level <= 12);
+        /* Cap at the MAIN-ROAD ends. s_span_count is the PHYSICAL count (2763 on
+         * London) which includes the displaced branch corridors; the through-road
+         * is only `ring` spans (2136). Use the ring so the end cap lands on the
+         * real road end, not in branch territory. */
+        int ring = td5_track_get_ring_length();
+        if (ring <= 16) ring = s_span_count;   /* fallback if ring not yet resolved */
+        if (s_endwall < 0) {
+            const char *e = getenv("TD5RE_TD6_ENDWALL");
+            s_endwall = (e && e[0] == '0') ? 0 : 1;
+        }
+        if (s_endwall && is_p2p && ring > 16) {
+            s_boundary_fwd_sentinel = 2;
+            s_boundary_rev_sentinel = ring - 3;
+            TD5_LOG_I(LOG_TAG,
+                      "boundary sentinels: TD6 P2P (level=%d) -> END CAPS fwd=%d rev=%d "
+                      "(ring=%d span_count=%d)", level_number, s_boundary_fwd_sentinel,
+                      s_boundary_rev_sentinel, ring, s_span_count);
+        } else {
+            s_boundary_fwd_sentinel = -1;
+            s_boundary_rev_sentinel = 9999;
+            TD5_LOG_I(LOG_TAG,
+                      "boundary sentinels: override track (level=%d) -> DISABLED "
+                      "(circuit, or endwall off)", level_number);
+        }
         return;
     }
 
@@ -968,6 +997,18 @@ static void fwd_rev_resolve_contact(TD5_Actor *actor,
     int32_t pen = (int32_t)((pen64 + ((pen64 >> 63) & 0xFFF)) >> 12);
 
     if (pen >= 0) return;  /* probe inside the playable region */
+
+    /* [endwall 2026-06-18] A penetration of THOUSANDS means the boundary span's
+     * edge vertices momentarily resolve far from the probe — the historical TD6
+     * "seam teleport" that forced the boundary handler off. Reject it so the
+     * re-enabled end cap can never launch the car off the track; a legitimate
+     * end-cap hit is small (the car decelerates against it each tick). Mirrors
+     * the lateral wall's WALL_PEN_REJECT_LIMIT guard. */
+    if (pen <= -2000) {
+        TD5_LOG_W(LOG_TAG, "%s_contact: slot=%d boundary=%d pen=%d REJECTED (bogus)",
+                  reverse_mode ? "reverse" : "forward", actor->slot_index, boundary, pen);
+        return;
+    }
 
     /* Tangent along the edge (NOT the outward normal) feeds the angle. */
     double rad = atan2((double)edge_dz, (double)edge_dx);
@@ -6248,11 +6289,74 @@ int td5_track_main_to_branch_span(int main_span)
     return -1;
 }
 
-/* [#20] (Removed) The traffic branch blacklist (td5_track_branch_base /
- * td5_track_branch_blacklisted / td5_track_branch_mark_bad + the
- * TD5RE_TD6_BRANCH_BLACKLIST seed and runtime self-heal) kept traffic off forks
- * believed to be "off-road/displaced sidewalk" corridors. Branches are connected
- * drivable roads, so traffic uses every fork like the main road. */
+/* [#20] (Removed, then partially RESTORED 2026-06-18) The blanket branch
+ * blacklist (off-road/displaced theory) was removed because branches are
+ * connected drivable roads. But SOME individual forks on a city track really do
+ * dead-end on a sidewalk/verge, and the user flags those by span while driving.
+ * This restores a TARGETED, per-track blacklist: it keys on the fork's PARALLEL
+ * MAIN span (the through-road point where the corridor diverges), so the same
+ * physical fork is skipped whether the player drives forward or reverse. Only
+ * the traffic SPAWNER consumes it (cars are never placed on a blacklisted
+ * corridor); the walker/AI/player still route freely. The runtime self-heal and
+ * the whole-track force-main are NOT restored.
+ *
+ * The flagged spans are given in the REVERSE driving direction (that's how the
+ * user reported them); for a forward race we mirror each candidate base into
+ * reverse coords (ring-1-base) before comparing, so one list serves both ways.
+ * Env override: TD5RE_TD6_BRANCH_BLACKLIST="s1,s2,..." (spans as measured driving
+ * REVERSE). A tolerance window absorbs the "around span N" imprecision. */
+#define TD6_BL_TOL 24
+static int s_td6_bl[48];
+static int s_td6_bl_n = -1;
+
+static void td6_bl_init(void)
+{
+    const char *e;
+    if (s_td6_bl_n >= 0) return;
+    s_td6_bl_n = 0;
+    e = getenv("TD5RE_TD6_BRANCH_BLACKLIST");
+    if (e && e[0]) {
+        while (*e && s_td6_bl_n < 48) {
+            if (*e >= '0' && *e <= '9') {
+                s_td6_bl[s_td6_bl_n++] = atoi(e);
+                while (*e >= '0' && *e <= '9') e++;
+            } else e++;
+        }
+    } else if (g_active_td6_level == 12) {
+        /* London (port level 12): reverse-direction fork spans the user flagged
+         * as dead-end sidewalk branches (2026-06-18). */
+        static const int lon[] = {
+            488, 604, 668, 736, 790, 862, 1130, 1300, 1341, 1684, 1852
+        };
+        size_t i;
+        for (i = 0; i < sizeof(lon) / sizeof(lon[0]); i++)
+            s_td6_bl[s_td6_bl_n++] = lon[i];
+    }
+    TD5_LOG_I(LOG_TAG, "td6 branch blacklist: %d fork span(s) (level=%d; "
+              "env TD5RE_TD6_BRANCH_BLACKLIST overrides)", s_td6_bl_n, g_active_td6_level);
+}
+
+/* 1 if the fork whose corridor `span` belongs to (or, for a main span, the fork
+ * at `span`) is blacklisted in the current driving direction. */
+int td5_track_branch_blacklisted(int span)
+{
+    int base, ring, cmp, i;
+    if (g_active_td6_level <= 0 || span < 0) return 0;
+    td6_bl_init();
+    if (s_td6_bl_n <= 0) return 0;
+    base = td5_track_branch_to_main_span(span);  /* branch->parallel main; main->itself */
+    if (base < 0) base = span;
+    /* The list is in REVERSE coords. Driving forward, mirror the base to reverse
+     * coords so the same fork matches both ways (same physical road, equal ring). */
+    ring = td5_track_get_ring_length();
+    cmp = (!g_td5.reverse_direction && ring > 1) ? (ring - 1 - base) : base;
+    for (i = 0; i < s_td6_bl_n; i++) {
+        int d = cmp - s_td6_bl[i];
+        if (d < 0) d = -d;
+        if (d <= TD6_BL_TOL) return 1;
+    }
+    return 0;
+}
 
 /* [task#8 2026-06-14] Branch-corridor ENUMERATION for the traffic spawner.
  * td5_track_main_to_branch_span() above returns only the FIRST jump-table record
