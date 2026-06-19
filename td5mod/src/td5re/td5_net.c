@@ -202,6 +202,10 @@ static volatile LONG s_ring_read;           /* consumer index (game thread) */
 static uint32_t     s_sync_sequence;        /* g_directPlaySyncSequence */
 static uint32_t     s_player_sync_table[TD5_NET_MAX_PLAYERS]; /* received controlBits per slot */
 static int          s_player_sync_received[TD5_NET_MAX_PLAYERS]; /* flag: input received this frame */
+/* [#5 2026-06-19] Non-blocking lockstep state (render-decouple). Persist across
+ * the poll calls within one round; reset at race start (and on resync). */
+static int          s_nb_host_started = 0;   /* host: local input stored this round */
+static int          s_nb_client_sent  = 0;   /* client: input sent, awaiting host broadcast */
 static float        s_received_frame_dt;    /* frame dt from host broadcast */
 
 /* --- Resync barrier state --- */
@@ -2402,6 +2406,8 @@ int td5_net_init(void)
     memset(s_player_sync_table, 0, sizeof(s_player_sync_table));
     memset(s_player_sync_received, 0, sizeof(s_player_sync_received));
     memset(&s_outbound_frame, 0, sizeof(s_outbound_frame));
+    s_nb_host_started = 0;   /* [#5] reset non-blocking lockstep round state */
+    s_nb_client_sent  = 0;
 
     s_evt_receive = NULL;
     s_evt_stop = NULL;
@@ -3292,6 +3298,111 @@ int td5_net_handle_client_frame(uint32_t *control_bits, float *frame_dt)
 
     /* 7. syncSequence validated in handle_frame() */
 
+    return 1;
+}
+
+/* ============================================================================
+ * Non-blocking lockstep (render-decouple, #5 2026-06-19)
+ *
+ * The blocking handle_host/client_frame above stall the GAME THREAD until the
+ * peer's packet lands, which chains the RENDER rate to the lockstep round-trip
+ * (a 60 Hz host caps a 180 Hz client at 60). These split the exchange into
+ * "send/store once" + "poll" so the caller can render an interpolated frame
+ * while a round is in flight instead of blocking. One round == one 30 Hz tick;
+ * the handshake keeps both peers on the same round, so it stays deterministic.
+ *
+ * Returns: 1 = round complete (control_bits filled with the merged input),
+ *          0 = pending (call again next render frame),
+ *         -1 = failed (connection lost / quit). State persists across calls
+ *              within a round via s_nb_host_started / s_nb_client_sent.
+ * ==========================================================================*/
+int td5_net_host_frame_nb(uint32_t *control_bits, float *frame_dt)
+{
+    int i;
+    if (!s_active || !s_is_host)
+        return -1;
+    if (InterlockedCompareExchange(&s_sync_generation, 0, 0) != 0) {
+        if (!run_resync_barrier_host())
+            return -1;
+        s_nb_host_started = 0;
+    }
+    if (s_connection_lost)
+        return -1;
+
+    if (!s_nb_host_started) {
+        s_player_sync_table[s_local_slot]    = control_bits[s_local_slot];
+        s_player_sync_received[s_local_slot] = 1;
+        s_nb_host_started = 1;
+    }
+    /* Non-blocking: are all active clients' inputs in yet? */
+    if (count_active_remote_players() > 0) {
+        for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
+            if (i == s_local_slot) continue;
+            if (!s_roster[i].active) continue;
+            if (!s_player_sync_received[i])
+                return 0;   /* pending */
+        }
+    }
+    /* All in -> merge + broadcast (mirrors handle_host_frame:merge_and_broadcast). */
+    memset(&s_outbound_frame, 0, sizeof(s_outbound_frame));
+    s_outbound_frame.msg_type = TD5_DXPFRAME;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        s_outbound_frame.control_bits[i] = s_roster[i].active ? s_player_sync_table[i] : 0;
+    s_outbound_frame.frame_delta_time = *frame_dt;
+    s_outbound_frame.sync_sequence    = s_sync_sequence;
+    /* Reset receive flags BEFORE broadcasting (same deadlock-avoidance as the
+     * blocking path: a client's next frame can beat a post-broadcast wipe). */
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        s_player_sync_received[i] = 0;
+    send_frame_to_all(&s_outbound_frame);
+    s_sync_sequence++;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        control_bits[i] = s_outbound_frame.control_bits[i];
+    s_nb_host_started = 0;
+    return 1;
+}
+
+int td5_net_client_frame_nb(uint32_t *control_bits, float *frame_dt)
+{
+    DWORD r;
+    int i;
+    if (!s_active || s_connection_lost)
+        return -1;
+    if (InterlockedCompareExchange(&s_sync_generation, 0, 0) != 0) {
+        if (s_is_host) { s_nb_client_sent = 0; return td5_net_host_frame_nb(control_bits, frame_dt); }
+        if (!run_resync_barrier_client())
+            return -1;
+        s_nb_client_sent = 0;
+    }
+
+    if (!s_nb_client_sent) {
+        TD5_NetFrame send_frame;
+        uint32_t host_id = 0;
+        memset(&send_frame, 0, sizeof(send_frame));
+        send_frame.msg_type = TD5_DXPFRAME;
+        if (s_local_slot >= 0 && s_local_slot < TD5_NET_MAX_PLAYERS)
+            send_frame.control_bits[s_local_slot] = control_bits[s_local_slot];
+        for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+            if (s_roster[i].active && i != s_local_slot) { host_id = s_roster[i].id; break; }
+        /* Arm BEFORE sending (low-latency-link deadlock fix, same as blocking). */
+        s_waiting_for_frame_ack = 1;
+        ResetEvent(s_evt_frame_ack);
+        if (s_transport_send)
+            s_transport_send(host_id, &send_frame, FRAME_MSG_SIZE);
+        s_nb_client_sent = 1;
+    }
+    /* Poll (timeout 0) for the host's broadcast instead of blocking. */
+    r = WaitForSingleObject(s_evt_frame_ack, 0);
+    if (r != WAIT_OBJECT_0) {
+        if (s_connection_lost)
+            return -1;
+        return 0;   /* pending */
+    }
+    s_waiting_for_frame_ack = 0;
+    s_nb_client_sent = 0;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        control_bits[i] = s_player_sync_table[i];
+    *frame_dt = s_received_frame_dt;
     return 1;
 }
 

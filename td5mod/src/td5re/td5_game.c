@@ -3866,12 +3866,14 @@ static int net_render_decouple_enabled(void) {
     static int init = 0, on = 0;
     if (!init) {
         const char *e = getenv("TD5RE_NET_RENDER_DECOUPLE");
-        /* [2026-06-19] DEFAULT OFF — regressed: the render thread still BLOCKS on
-         * the exchange (now per tick), and without the per-frame dt phase-align
-         * the blocks got LONGER, dropping the client to ~15 fps. True decoupling
-         * needs the sim/exchange off the render thread (input-delay or a worker
-         * thread). Opt in with =1 to experiment. */
-        on = (e && e[0] == '1') ? 1 : 0;   /* default OFF */
+        /* [2026-06-19] Render-decouple via NON-BLOCKING per-tick lockstep
+         * (td5_game_net_try_sync + td5_net_*_frame_nb): render free-runs at the
+         * monitor rate and interpolates while the 30 Hz sim advances one tick per
+         * completed round, so a 180 Hz client is no longer paced by a 60 Hz host.
+         * DEFAULT OFF (experimental, needs 2-machine validation) — enable with =1
+         * on BOTH peers. The earlier blocking per-tick attempt regressed to ~15
+         * fps; this one POLLS instead of stalling the render thread. */
+        on = (e && e[0] == '1') ? 1 : 0;   /* default OFF — opt-in */
         init = 1;
         TD5_LOG_I(LOG_TAG, "Netplay render decouple: %s",
                   on ? "ON (exchange per sim tick, render free-runs)"
@@ -4010,6 +4012,89 @@ static int td5_game_net_sync_frame(int apply_dt_correction) {
     }
 
     return 0;
+}
+
+/* [#5 2026-06-19] Non-blocking per-tick lockstep for the DECOUPLED render path.
+ * Unlike td5_game_net_sync_frame (which blocks the render thread on the peer),
+ * this samples local input, exchanges ONE round non-blocking, and returns:
+ *   1 = round complete (merged bits pushed to all slots; run the sim tick),
+ *   0 = pending (no peer input yet -> render an interpolated frame, retry),
+ *  -1 = failed (connection lost; quit-to-menu fade armed).
+ * Render frames that get 0 free-run at monitor rate (g_subTickFraction holds at
+ * 1.0, already clamped) while the 30 Hz sim waits for the next lockstep round. */
+static int td5_game_net_try_sync(void) {
+    extern int td5_net_host_frame_nb(uint32_t *control_bits, float *frame_dt);
+    extern int td5_net_client_frame_nb(uint32_t *control_bits, float *frame_dt);
+    uint32_t bits[TD5_NET_MAX_PLAYERS];
+    int local = td5_net_local_slot();
+    int i, r;
+    float dt = g_td5.normalized_frame_dt;
+    if (local < 0 || local >= TD5_NET_MAX_PLAYERS) local = 0;
+
+    td5_input_poll_race_session();
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) bits[i] = 0;
+    bits[local] = td5_input_get_control_bits(0);
+    if (s_pause_menu_active)
+        bits[local] |= (uint32_t)TD5_INPUT_NET_PAUSE;
+
+    /* Drain in-race ring messages (peer back-to-lobby 0x17 / host restart 0x19),
+     * same as td5_game_net_sync_frame. */
+    {
+        TD5_NetMsgType mtype;
+        void *mdata;
+        int msize;
+        while (td5_net_receive(&mtype, &mdata, &msize)) {
+            if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
+                ((const uint8_t *)mdata)[0] == 0x19 && !s_pause_restart_pending) {
+                s_pause_menu_active = 0;
+                s_pause_restart_pending = 1;
+                td5_game_begin_fade_out(0);
+            } else if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
+                ((const uint8_t *)mdata)[0] == 0x17 &&
+                !s_pause_exit_pending && !s_pause_lobby_pending) {
+                TD5_Actor *pl = td5_game_local_player_actor();
+                s_pause_menu_active = 0;
+                s_pause_lobby_pending = 1;
+                s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+                td5_game_begin_fade_out(0);
+            }
+        }
+    }
+    /* Race is exiting -> stop lockstepping, let the fade run (freeze fix). */
+    if (s_pause_lobby_pending || s_pause_exit_pending || s_pause_restart_pending)
+        return 1;
+
+    r = td5_net_is_host() ? td5_net_host_frame_nb(bits, &dt)
+                          : td5_net_client_frame_nb(bits, &dt);
+    if (r == 0)
+        return 0;   /* round not ready -> render interpolated, retry next frame */
+    if (r < 0) {
+        /* Lockstep failed -> run the quit-to-menu fade (clone of the blocking
+         * path's failure handling). */
+        if (!s_pause_exit_pending) {
+            TD5_Actor *pl = td5_game_local_player_actor();
+            s_pause_menu_active = 0;
+            s_pause_exit_pending = 1;
+            s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+            td5_game_begin_fade_out(0);
+        }
+        return -1;
+    }
+
+    /* Round complete: push host-merged authoritative input into every slot. */
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++)
+        td5_input_set_control_bits(i, bits[i]);
+    /* Derive this round's synced pause state from the merged bits. */
+    s_net_pause_round = 0;
+    s_net_pause_slot  = -1;
+    for (i = 0; i < TD5_NET_MAX_PLAYERS; i++) {
+        if (bits[i] & (uint32_t)TD5_INPUT_NET_PAUSE) {
+            s_net_pause_round = 1;
+            if (i != local && s_net_pause_slot < 0)
+                s_net_pause_slot = i;
+        }
+    }
+    return 1;
 }
 
 /* ========================================================================
@@ -4372,16 +4457,21 @@ int td5_game_run_race_frame(void) {
            ticks_this_frame < max_ticks_per_frame) {
         /* --- Input polling / lockstep exchange ---
          * Local-only play polls the controller every substep. Networked play:
-         *  - decoupled (default): exchange ONE lockstep round HERE, per sim tick,
-         *    so render frames that drain zero ticks skip the blocking barrier and
-         *    free-run. The exchange polls local input + sets the merged bits, and
-         *    keeps flowing during a net pause (the accumulator advances regardless
-         *    so this loop still iterates), so peers resume on the same round.
+         *  - decoupled (knob on): exchange ONE lockstep round HERE per sim tick,
+         *    NON-BLOCKING. If the peer's input for this round hasn't arrived,
+         *    td5_game_net_try_sync() returns 0 and we break -> this render frame
+         *    free-runs and interpolates (g_subTickFraction holds at 1.0) instead
+         *    of stalling, so a 180 Hz client is no longer paced by a 60 Hz host.
+         *    The 30 Hz sim still advances exactly one tick per completed round
+         *    (deterministic). Keeps flowing during a net pause (the accumulator
+         *    advances regardless, so this loop still iterates).
          *  - legacy (knob off): input was sampled + exchanged once per frame above
          *    and the merged bits are held constant; re-polling would clobber them. */
         if (net_lockstep) {
-            if (net_decoupled && td5_game_net_sync_frame(0))
-                break;   /* lockstep failed -> fade-out armed; stop draining ticks */
+            if (net_decoupled) {
+                int nb = td5_game_net_try_sync();
+                if (nb <= 0) break;   /* 0 = round pending (interpolate); -1 = failed (fade armed) */
+            }
         } else {
             td5_input_poll_race_session();
         }
