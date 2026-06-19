@@ -832,6 +832,43 @@ void td5_sound_stop_tracked_vehicle_audio(void)
 }
 
 /**
+ * [POLICE rewrite 2026-06-19] Drive the cop-chase siren from the rewritten
+ * traffic chase. Called once per frame from the audio tick (after the listener
+ * position is set). When the POLICE option is on and a cop is actively chasing,
+ * it positions the (single) distance-attenuated siren channel on the NEAREST
+ * chasing cop to the listener — so the siren swells as a pursuit closes on you
+ * and fades as it pulls away (the existing sound_attenuate_volume in the mixer
+ * does the distance math). When POLICE is off, or no cop is chasing, the siren
+ * is simply not refreshed and the mixer's post-loop timeout fades it out.
+ *
+ * Purely cosmetic: runs in the per-frame audio path (never the sim tick) and
+ * uses the LOCAL camera, so per-peer distance differences carry no netplay
+ * desync risk. The which-cop-is-chasing state it reads is deterministic sim
+ * state shared by all peers; only the local distance weighting differs.
+ */
+void td5_sound_update_police_siren(void)
+{
+    int nearest;
+    /* POLICE option off -> cops are silent. */
+    if (!g_td5.special_encounter_enabled) return;
+    /* Cop Chase game mode drives the siren via its own horn-toggle path. */
+    if (td5_game_is_wanted_mode()) return;
+
+    nearest = td5_ai_nearest_chasing_cop(s_listener_pos[0][0], s_listener_pos[0][2]);
+    if (nearest < 0) return;   /* no active chase -> not refreshed -> fades out */
+
+    if (s_siren_active_flag == 0) {
+        s_tracked_veh_active_p2 = 1;
+        s_tracked_veh_active    = 1;
+    }
+    /* Attenuate by the nearest chasing cop's distance to the listener. */
+    s_tracked_veh_actor       = nearest;
+    s_tracked_veh_fade_target = TD5_SOUND_SIREN_FADE_FULL;
+    s_siren_refreshed   = 1;
+    s_siren_active_flag = 1;
+}
+
+/**
  * td5_sound_toggle_siren (PORT ENHANCEMENT, user-requested 2026-05-30).
  *
  * Flip the cop-chase siren on/off. Called on a horn-key press edge from

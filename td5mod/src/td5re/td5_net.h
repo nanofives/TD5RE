@@ -111,6 +111,12 @@ typedef struct TD5_NetRaceConfig {
     int32_t  lap_count;           /* informational (net races force 4) */
     int32_t  num_opponents;       /* AI opponent count (decides active slots) */
     int32_t  difficulty;          /* difficulty tier (AI car pool row) */
+    /* [POLICE rewrite 2026-06-19] Traffic + cops run in net races now (the
+     * spawner + chase are lockstep-deterministic). These replicate the HOST's
+     * choices so spawn caps + the cop cadence match on every peer — a
+     * per-machine difference here would desync the spawner. */
+    int32_t  traffic_volume;      /* 0=Off..4=VeryHigh (host's [GameOptions] Traffic) */
+    int32_t  cops;                /* POLICE option: 1 = cops on, 0 = off */
     int32_t  td6_color[6];        /* per-slot TD6 body RGB (0xFFFFFF = unpainted) */
     int32_t  car_index[6];        /* per net slot (TD5_NET_MAX_PLAYERS) */
     int32_t  paint_index[6];

@@ -782,7 +782,8 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
 static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
 static void render_tracked_actor_marker(const TD5_Actor *actor,
                                         const TD5_Mat3x3 *body_rot,
-                                        const TD5_Vec3f *body_pos);
+                                        const TD5_Vec3f *body_pos,
+                                        int32_t intensity);
 
 /** 7-entry dispatch table matching original at 0x473b9c */
 typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
@@ -3770,7 +3771,20 @@ void td5_render_actors_for_view(int view_index)
                 slot == td5_game_get_wanted_target_slot()) {
                 /* Pass the SAME body transform the mesh used (view_rot +
                  * render_pos) so the strobe is welded to the car body. */
-                render_tracked_actor_marker(actor, &view_rot, &render_pos);
+                render_tracked_actor_marker(actor, &view_rot, &render_pos,
+                                            td5_game_get_wanted_target_tracker());
+            }
+
+            /* [POLICE rewrite 2026-06-19] A chasing police cop wears the same
+             * red/blue strobe (welded to its body) whenever the POLICE option
+             * is on — the chase rewrite's cop identity. Steady full intensity
+             * (td5_ai_cop_glow_intensity), independent of the wanted-mode
+             * tracker. Runs in this shared per-view actor loop, so it covers
+             * both split-screen and single-view automatically. */
+            if (g_td5.special_encounter_enabled &&
+                td5_ai_cop_is_chasing(slot)) {
+                render_tracked_actor_marker(actor, &view_rot, &render_pos,
+                                            td5_ai_cop_glow_intensity(slot));
             }
 
             /* Wanted-mode damage indicator overlay — orig
@@ -3800,6 +3814,10 @@ void td5_render_actors_for_view(int view_index)
             int wanted_smoke_ok = g_td5.wanted_mode_enabled != 0 &&
                                   slot < TD5_MAX_RACER_SLOTS &&
                                   g_wanted_damage_state[slot] == 0;
+            /* [POLICE rewrite 2026-06-19] A broken-down vehicle (traffic, cop, or
+             * a chased racer that crashed) smokes from its chassis. Covers all
+             * slots, not just racers, so traffic/cops smoke too. */
+            int broken_smoke_ok = td5_ai_actor_is_broken_down(slot);
             if (!(slot == camera_target_slot && camera_preset_active)) {
                 /* Orig 0x40C7A5: SpawnRandomVehicleSmokePuff(actor, slot) —
                  * engine-rev gated random smoke puff. Called per visible
@@ -3809,7 +3827,7 @@ void td5_render_actors_for_view(int view_index)
                  * surrounding rear-wheel/wanted-smoke skip. */
                 td5_vfx_spawn_random_smoke_puff(actor, view_index);
                 td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
-                if (wanted_smoke_ok) {
+                if (wanted_smoke_ok || broken_smoke_ok) {
                     td5_vfx_spawn_smoke(actor);
                 }
             }
@@ -6879,14 +6897,15 @@ static int s_tracked_marker_phase[TD5_VFX_TRACKED_MARKER_COUNT];
  * carry the visible color. */
 static void render_tracked_actor_marker(const TD5_Actor *actor,
                                         const TD5_Mat3x3 *body_rot,
-                                        const TD5_Vec3f *body_pos)
+                                        const TD5_Vec3f *body_pos,
+                                        int32_t intensity)
 {
     if (!actor) return;
     if (!td5_vfx_tracked_marker_initialized()) return;
 
-    /* Intensity 0..0x1000 — 0 means nothing to draw (orig early-exits
-     * via the wanted_target_tracker_active gate at the callsite). */
-    int32_t intensity = td5_game_get_wanted_target_tracker();
+    /* Intensity 0..0x1000 — 0 means nothing to draw. Passed by the caller
+     * (the wanted-target tracker for Cop Chase mode, or a steady value for a
+     * chasing police cop in the rewritten traffic chase). */
     if (intensity <= 0) return;
 
     float fIntensity = (float)intensity;

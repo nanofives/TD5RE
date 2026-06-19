@@ -267,6 +267,101 @@ static int32_t g_encounter_ref_slot;                /* 0x4B0630 */
  * brake band in UpdateSpecialEncounterControl. Defaults to 0 in static memory. */
 static int32_t g_special_encounter_min_fwd_track_threshold;
 
+/* ========================================================================
+ * Police chase rewrite (2026-06-19) — multi-cop, deterministic, MP-safe.
+ *
+ * A cop is a TRAFFIC vehicle (any traffic slot) flagged at spawn: every
+ * CopRatio-th regular spawn becomes a cop. It cruises as normal traffic
+ * (COP_IDLE) until a racer passes it, then chases that ONE racer (no two
+ * cops on the same car) at up to CopCatchup% of the chased car's speed with
+ * no top-speed cap, following it through branches, until it overtakes it
+ * (COP_PULLOVER -> forces the target to a full stop), loses it (traffic
+ * despawn distance), or the target breaks down.
+ *
+ * Every array below is written ONLY inside the sim tick from replicated
+ * actor state (positions, spans, speeds, g_slot_state) -> identical on every
+ * lockstep peer. The chase/branch decisions consume NO RNG; any cop spawn
+ * randomness uses the private seeded LCG trf_dyn_rand(). The cosmetics
+ * (glow / siren / smoke) read this state through the public API and run in
+ * the per-frame render path, after the sim loop. ====================== */
+enum {
+    COP_IDLE     = 0,  /* not a cop, or a cop cruising as normal traffic */
+    COP_CHASING  = 1,  /* actively pursuing g_cop_target[slot] */
+    COP_PULLOVER = 2   /* caught the target; forcing it to a full stop */
+};
+static uint8_t g_cop_is_cop[TD5_MAX_TOTAL_ACTORS];        /* 1 = this traffic slot is a cop car */
+static uint8_t g_cop_phase[TD5_MAX_TOTAL_ACTORS];         /* COP_IDLE / COP_CHASING / COP_PULLOVER */
+static int8_t  g_cop_target[TD5_MAX_TOTAL_ACTORS];        /* racer slot being chased, or -1 */
+static int8_t  g_actor_pursued_by[TD5_MAX_TOTAL_ACTORS];  /* which cop slot chases this actor, or -1 */
+static uint8_t g_actor_broken_down[TD5_MAX_TOTAL_ACTORS]; /* 1 = crashed/disabled: parked + smoking */
+static int16_t g_actor_broken_ticks[TD5_MAX_TOTAL_ACTORS];/* remaining broken-down ticks */
+static int16_t g_cop_glow_phase[TD5_MAX_TOTAL_ACTORS];    /* steady strobe intensity ramp per cop */
+static int32_t s_cop_spawn_counter;                       /* deterministic 1:CopRatio cop cadence */
+
+/* Chase tuning (spans / fixed-point speed). All in the same units the
+ * surrounding AI uses; gaps are computed on the folded main ring so they are
+ * branch-safe. */
+/* "Passed by" window: a cop always spawns AHEAD of every racer, so the first
+ * time a racer's along-track gap goes positive it has genuinely overtaken the
+ * cop. The window is wide so a fast racer that jumps several spans in one 30Hz
+ * tick is still caught (the original ==2 single-span test missed fast passes). */
+#define COP_TRIGGER_LO       0   /* alongside counts as a pass */
+#define COP_TRIGGER_HI      15   /* up to 15 spans ahead still counts as "just passed" */
+#define COP_OVERTAKE_MARGIN  1   /* cop ahead of target by >=this many spans = overtaken */
+#define COP_STOP_SPEED  0x2000   /* |longitudinal speed| at/under which a target counts as stopped */
+#define COP_FULL_THROTTLE 0x0300 /* strong forward drive command while catching up */
+
+/* Reset all police-chase per-slot state (global init + per-race). */
+static void cop_state_reset(void) {
+    memset(g_cop_is_cop, 0, sizeof(g_cop_is_cop));
+    memset(g_cop_phase, 0, sizeof(g_cop_phase));
+    memset(g_actor_broken_down, 0, sizeof(g_actor_broken_down));
+    memset(g_actor_broken_ticks, 0, sizeof(g_actor_broken_ticks));
+    memset(g_cop_glow_phase, 0, sizeof(g_cop_glow_phase));
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+        g_cop_target[i]       = -1;
+        g_actor_pursued_by[i] = -1;
+    }
+    s_cop_spawn_counter = 0;
+}
+
+/* End the chase a cop is running: release its target's "pursued-by" lock and
+ * return the cop to COP_IDLE — but it STAYS a cop (g_cop_is_cop kept) so it can
+ * acquire the next car that passes it. */
+static void cop_end_chase(int slot) {
+    int t;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    t = g_cop_target[slot];
+    if (t >= 0 && t < TD5_MAX_TOTAL_ACTORS && g_actor_pursued_by[t] == slot)
+        g_actor_pursued_by[t] = -1;
+    g_cop_target[slot] = -1;
+    g_cop_phase[slot]  = COP_IDLE;
+    g_cop_glow_phase[slot] = 0;
+}
+
+/* Fully strip a slot's cop identity (called when the traffic slot is recycled
+ * / despawned so a future ordinary spawn doesn't inherit cop-ness). */
+static void cop_release(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    cop_end_chase(slot);
+    g_cop_is_cop[slot] = 0;
+}
+
+/* Age the broken-down state once per sim tick (deterministic): count each
+ * timer down and clear the flag at zero. The actual PARKING of a broken
+ * traffic/cop slot happens in ai_update_single_traffic (so the per-slot drive
+ * doesn't overwrite it); racer slots keep control (the flag there only ends a
+ * chase + emits smoke). Called every tick from td5_ai_update_race_actors,
+ * independent of the POLICE gate so ordinary broken traffic still smokes. */
+static void cop_tick_broken_down(void) {
+    for (int s = 0; s < TD5_MAX_TOTAL_ACTORS; s++) {
+        if (!g_actor_broken_down[s]) continue;
+        if (g_actor_broken_ticks[s] > 0) g_actor_broken_ticks[s]--;
+        if (g_actor_broken_ticks[s] <= 0)
+            g_actor_broken_down[s] = 0;
+    }
+}
+
 /* Per-car torque triplets table (9 cars x 3 dwords at 0x466F90) */
 static int32_t g_car_torque_triplets[9 * 3];
 
@@ -449,6 +544,7 @@ int td5_ai_init(void) {
     g_encounter_control_active_latch = 0;
     g_encounter_steer_bias_latch = 0;
     g_encounter_phase_flag = 0;
+    cop_state_reset();
     g_active_actor_count = 6;
     g_lateral_avoidance_direction = 0;
     g_ai_frame_counter = 0;
@@ -478,6 +574,74 @@ void td5_ai_shutdown(void) {
 int td5_ai_is_encounter_active(int slot) {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
     return g_encounter_active[slot] != 0;
+}
+
+/* ========================================================================
+ * Police chase — public API for the cosmetic layer (render/sound).
+ *
+ * These read the deterministic sim state computed in the AI tick. They are
+ * pure queries (no sim writes) and are safe to call from the per-frame
+ * render/audio path; the values are identical on every peer for any given
+ * sim tick, but the consumers may further weight them by the LOCAL camera
+ * (e.g. siren distance), which is purely cosmetic. ====================== */
+
+/* 1 when `slot` is a cop currently engaged in a chase (pursuing or pulling a
+ * caught target over). Gated by the POLICE option at the call sites. */
+int td5_ai_cop_is_chasing(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    return g_cop_is_cop[slot] &&
+           (g_cop_phase[slot] == COP_CHASING || g_cop_phase[slot] == COP_PULLOVER);
+}
+
+/* Steady strobe intensity (0..0x1000) for the cop-light glow over a chasing
+ * cop. Mirrors the wanted-target-tracker scale the strobe renderer expects,
+ * but stays full/steady instead of decaying (cops glow for the whole chase). */
+int td5_ai_cop_glow_intensity(int slot) {
+    if (!td5_ai_cop_is_chasing(slot)) return 0;
+    return 0x1000;
+}
+
+/* 1 when `slot` (racer OR traffic/cop) is in the broken-down state set by a
+ * hard collision in td5_physics.c — used to emit smoke + keep it parked. */
+int td5_ai_actor_is_broken_down(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    return g_actor_broken_down[slot] != 0;
+}
+
+/* 1 when `slot` is currently the target of some cop's chase. td5_physics.c uses
+ * this so a hard crash by a chased racer flags it broken-down (ending the
+ * pursuit) without flagging ordinary racers who merely bumped something. */
+int td5_ai_actor_is_pursued(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    return g_actor_pursued_by[slot] != -1;
+}
+
+/* Flag an actor as broken down for `g_td5.ini.cop_smoke_ticks` ticks. Called
+ * from the physics collision response on a hard V2V / wall impact for traffic
+ * and cop slots. Idempotent refresh while already broken. Player/AI racer
+ * slots are left to the existing crash-fx path (this is for traffic/cops). */
+void td5_ai_mark_actor_broken_down(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    g_actor_broken_down[slot] = 1;
+    g_actor_broken_ticks[slot] = (int16_t)g_td5.ini.cop_smoke_ticks;
+}
+
+/* Nearest chasing cop to the given listener world position (24.8 fixed), or
+ * -1 if none. td5_sound.c uses this to drive the (single) siren channel from
+ * the closest active chase, then attenuates by that cop's distance. */
+int td5_ai_nearest_chasing_cop(int32_t listener_x, int32_t listener_z) {
+    int best = -1;
+    int64_t best_d2 = 0;
+    if (!g_actor_base) return -1;
+    for (int s = 0; s < TD5_MAX_TOTAL_ACTORS; s++) {
+        if (!td5_ai_cop_is_chasing(s)) continue;
+        char *a = actor_ptr(s);
+        int64_t dx = (int64_t)ACTOR_I32(a, ACTOR_WORLD_POS_X) - listener_x;
+        int64_t dz = (int64_t)ACTOR_I32(a, ACTOR_WORLD_POS_Z) - listener_z;
+        int64_t d2 = dx * dx + dz * dz;
+        if (best < 0 || d2 < best_d2) { best = s; best_d2 = d2; }
+    }
+    return best;
 }
 
 /* [FIX 2026-05-24 OVERSIGHT: missing-gates-and-arrest-counter; orig 0x0043D690
@@ -4320,7 +4484,36 @@ static void td5_ai_smart_branch(int slot) {
         }
 
         double pref;
-        if (td5_ai_branch_random_enabled()) {
+        if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&
+            g_cop_target[slot] >= 0 && g_cop_target[slot] < TD5_MAX_TOTAL_ACTORS) {
+            /* [POLICE rewrite 2026-06-19] Chase branch policy: take whichever
+             * side of the fork (main continuation vs branch) is closer IN WORLD
+             * UNITS to the chased car. This makes the cop follow the player onto
+             * a branch, and when the player is already past the fork it picks
+             * the side that minimizes the unit gap — exactly the requested
+             * "choose the branch the player is in / the closest-in-units branch".
+             * Deterministic: replicated world positions + track geometry, no RNG. */
+            int take = 0;
+            if (takeable && branch_span >= 0 && branch_span < span_count) {
+                char *cop_tgt = actor_ptr(g_cop_target[slot]);
+                int64_t tx = (int64_t)(ACTOR_I32(cop_tgt, ACTOR_WORLD_POS_X) >> 8);
+                int64_t tz = (int64_t)(ACTOR_I32(cop_tgt, ACTOR_WORLD_POS_Z) >> 8);
+                int blx, blz, brx, brz, mlx, mlz, mrx, mrz;
+                if (td5_track_get_span_route_frame(branch_span, &blx, &blz, &brx, &brz) &&
+                    td5_track_get_span_route_frame(main_span,   &mlx, &mlz, &mrx, &mrz)) {
+                    int64_t bcx = ((int64_t)blx + brx) / 2, bcz = ((int64_t)blz + brz) / 2;
+                    int64_t mcx = ((int64_t)mlx + mrx) / 2, mcz = ((int64_t)mlz + mrz) / 2;
+                    int64_t db = (bcx - tx) * (bcx - tx) + (bcz - tz) * (bcz - tz);
+                    int64_t dm = (mcx - tx) * (mcx - tx) + (mcz - tz) * (mcz - tz);
+                    take = (db < dm) ? 1 : 0;
+                }
+            }
+            if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+                g_smart_branch_commit_span[slot] = (int16_t)s;
+                g_smart_branch_commit_take[slot] = (int8_t)take;
+            }
+            pref = take ? +1.0 : -1.0;
+        } else if (td5_ai_branch_random_enabled()) {
             /* [task#16] RANDOM PRE-COMMITMENT. Decide once per fork and lock it.
              * The walker routes onto the branch from the HIGH sub-lanes, so a
              * "take" commitment must be made early (while still spans away) for
@@ -5222,6 +5415,19 @@ void td5_ai_update_track_behavior(int slot) {
 
                 if (td5_track_sample_target_point(target_span, route_byte,
                                                    &target_x, &target_z, lateral_bias)) {
+                    /* [POLICE rewrite 2026-06-19] A chasing cop aims its
+                     * look-ahead straight at the car it's pursuing (its world
+                     * XZ) instead of the route waypoint, so the steering cascade
+                     * + SmartAI avoidance below drive it toward the target while
+                     * still threading traffic and corners. Both positions are
+                     * replicated sim state -> identical on every peer. */
+                    if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&
+                        g_cop_target[slot] >= 0 &&
+                        g_cop_target[slot] < TD5_MAX_TOTAL_ACTORS) {
+                        char *cop_tgt = actor_ptr(g_cop_target[slot]);
+                        target_x = ACTOR_I32(cop_tgt, ACTOR_WORLD_POS_X);
+                        target_z = ACTOR_I32(cop_tgt, ACTOR_WORLD_POS_Z);
+                    }
                     /* (c) Delta vector: target - actor, shift from 24.8 FP to integer
                      * [CONFIRMED @ 0x4352A1-0x4352C8] */
                     int32_t actor_x = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
@@ -7893,6 +8099,7 @@ void td5_ai_traffic_dynamic_race_init(void)
     s_trf_dyn_rng      = 0x54443552u ^ ((uint32_t)g_td5.track_index * 2654435761u);
     s_trf_dyn_cooldown = 0;
     s_trf_dyn_seeded   = 1;
+    cop_state_reset();   /* police-chase per-race state (deterministic) */
 
     /* Learn the per-track lane→direction map from the authored TRAFFIC.BUS
      * records (4-byte {span, flags bit0 = oncoming, lane}, -1 span sentinel
@@ -8084,21 +8291,22 @@ void td5_ai_traffic_dynamic_tick(void)
              * never strands the leader without traffic.) Gated on
              * TD5RE_TRAFFIC_DENSITY. */
             far_from_all = trf_dyn_density_enabled() &&
-                           (slot != 9 || g_encounter_tracked_handle == -1) &&
+                           !td5_ai_cop_is_chasing(slot) &&
                            trf_dyn_min_player_dist(sp) >
                                g_td5.ini.traffic_dyn_despawn + eff_hi;
             /* [#20] (Removed) The branch idle-fade + blacklist self-heal that used to
              * sit here coped with traffic stranded on "displaced/off-road" forks.
              * Branches are connected drivable roads, so branch traffic is ordinary
              * traffic handled by the general despawn (behind/ahead/far) below. */
-            if (behind < -g_td5.ini.traffic_dyn_despawn ||
+            if (!td5_ai_cop_is_chasing(slot) &&
+                (behind < -g_td5.ini.traffic_dyn_despawn ||
                 ahead  >  g_td5.ini.traffic_dyn_despawn + eff_hi ||
                 far_from_all ||
                 (g_traffic_recovery_stage[slot] != 0 &&
                  s_traffic_stuck_frames[slot] >= 45 &&
                  /* far enough that the fade is unobtrusive; nearer stuck cars
                   * are realigned in place by AntiFreeze instead */
-                 trf_dyn_min_player_dist(sp) > g_td5.ini.traffic_dyn_despawn)) {
+                 trf_dyn_min_player_dist(sp) > g_td5.ini.traffic_dyn_despawn))) {
                 s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
                 TD5_LOG_I(LOG_TAG,
                           "traffic_dyn_despawn: slot=%d behind_trail=%d ahead_lead=%d "
@@ -8117,6 +8325,9 @@ void td5_ai_traffic_dynamic_tick(void)
             if (s_trf_dyn_alpha[slot] <= 0) {
                 s_trf_dyn_alpha[slot] = 0;
                 s_trf_dyn_state[slot] = TRF_DYN_INACTIVE;
+                /* Police: a recycled slot loses its cop identity + any chase
+                 * lock, so a future ordinary spawn here isn't born a cop. */
+                if (g_cop_is_cop[slot]) cop_release(slot);
                 /* Park: freeze all motion so the hidden actor stays put. */
                 *(int32_t *)(a + 0x314) = 0;   /* longitudinal speed */
                 *(int32_t *)(a + 0x1C0) = 0;
@@ -8161,6 +8372,24 @@ void td5_ai_traffic_dynamic_tick(void)
             s_trf_dyn_alpha[pick] = 0;
             s_trf_dyn_cooldown = trf_dyn_spawn_period();
             s_trf_dyn_starved = 0;
+            /* Police 1-in-CopRatio cadence (deterministic: counter advances on
+             * each successful spawn, identical on every lockstep peer). A fresh
+             * spawn is an ordinary traffic car; after CopRatio regular cars the
+             * next spawn is flagged a cop (only when the POLICE option is on).
+             * An IDLE cop cruises as normal traffic until a racer passes it. */
+            g_cop_is_cop[pick] = 0;
+            g_cop_phase[pick]  = COP_IDLE;
+            g_cop_target[pick] = -1;
+            if (g_encounter_enabled) {
+                if (s_cop_spawn_counter >= g_td5.ini.cop_ratio) {
+                    g_cop_is_cop[pick]  = 1;
+                    s_cop_spawn_counter = 0;
+                    TD5_LOG_I(LOG_TAG, "cop_spawn: slot=%d flagged COP (1 per %d cars)",
+                              pick, g_td5.ini.cop_ratio);
+                } else {
+                    s_cop_spawn_counter++;
+                }
+            }
         } else {
             s_trf_dyn_cooldown = 10;   /* nothing placeable right now — retry soon */
             /* Persistent failure is a data/window problem worth surfacing
@@ -8845,7 +9074,157 @@ extern void td5_physics_reset_actor_state(TD5_Actor *actor);
  * UpdateSpecialTrafficEncounter — byte-faithful port of 0x00434DA0.
  * Called from UpdateRaceActors (0x00436A70) at end of traffic loop.
  */
+/* ========================================================================
+ * Multi-cop chase scheduler (rewrite 2026-06-19) — replaces the original
+ * single-cop, slot-9 `UpdateSpecialTrafficEncounter`. Runs once per sim tick
+ * after the racer + traffic loops; deterministic (no RNG, only replicated
+ * actor state) so it is lockstep-safe in netplay.
+ *
+ * Per cop (any traffic slot flagged at spawn):
+ *   IDLE     -> acquire the first un-pursued racer that just passed it.
+ *   CHASING  -> drive at the target (cop_drive); end on overtake / too-far /
+ *               target-broke-down. (Driving is in ai_update_single_traffic.)
+ *   PULLOVER -> force the overtaken target to brake to a full stop, then end.
+ * The "force the target to a stop" is signalled via g_encounter_active[target]
+ * (consumed by the human input path + the AI racer path).
+ * ======================================================================== */
 void td5_ai_update_special_encounter(void) {
+    int span_count, ring_len, t_base, t_end, racer_n;
+
+    /* POLICE option off -> no chases (and the cosmetic siren/glow gate on the
+     * same g_td5.special_encounter_enabled, so cops are silent + invisible). */
+    if (!g_encounter_enabled) return;
+    if (!g_actor_base) return;
+
+    span_count = td5_track_get_span_count();
+    ring_len   = td5_track_get_ring_length();
+    if (ring_len <= 0) ring_len = span_count;
+
+    t_base = g_traffic_slot_base;
+    t_end  = g_active_actor_count;
+    if (t_end > t_base + TD5_MAX_TRAFFIC_SLOTS) t_end = t_base + TD5_MAX_TRAFFIC_SLOTS;
+    if (t_end > TD5_MAX_TOTAL_ACTORS) t_end = TD5_MAX_TOTAL_ACTORS;
+
+    /* Racer candidate slots = players + AI opponents (0 .. traffic base). */
+    racer_n = g_traffic_slot_base;
+    if (racer_n > g_active_actor_count) racer_n = g_active_actor_count;
+    if (racer_n > TD5_MAX_TOTAL_ACTORS) racer_n = TD5_MAX_TOTAL_ACTORS;
+
+    for (int k = t_base; k < t_end; k++) {
+        char *cop;
+        int   cop_main, phase, tgt, gap;
+
+        if (!g_cop_is_cop[k]) continue;
+        if (td5_ai_traffic_dynamic_parked(k)) continue;   /* not on the road */
+
+        /* A cop that itself broke down (crashed) abandons its chase + releases
+         * any pull-over hold on its target. */
+        if (g_actor_broken_down[k]) {
+            if (g_cop_phase[k] != COP_IDLE) {
+                int bt = g_cop_target[k];
+                if (g_cop_phase[k] == COP_PULLOVER &&
+                    bt >= 0 && bt < TD5_MAX_TOTAL_ACTORS)
+                    g_encounter_active[bt] = 0;
+                cop_end_chase(k);
+            }
+            continue;
+        }
+
+        cop = actor_ptr(k);
+        /* Fold branch-corridor spans onto the main ring so cop/target gaps are
+         * comparable even when one of them is on a branch. */
+        cop_main = td5_track_branch_to_main_span((int)ACTOR_I16(cop, ACTOR_SPAN_RAW));
+        phase    = g_cop_phase[k];
+
+        if (phase == COP_IDLE) {
+            /* Acquire the FIRST (lowest-slot = deterministic) racer that just
+             * passed this cop and isn't already pursued by another cop. */
+            int chosen = -1;
+            for (int c = 0; c < racer_n; c++) {
+                char *cand;
+                int   st, cgap;
+                if (g_actor_pursued_by[c] != -1) continue;     /* no double-chase */
+                st = g_slot_state[c];
+                if (st != 0 && st != 1) continue;              /* not an active racer */
+                if (g_actor_broken_down[c]) continue;
+                cand = actor_ptr(c);
+                cgap = smart_span_gap(cop_main,
+                          td5_track_branch_to_main_span((int)ACTOR_I16(cand, ACTOR_SPAN_RAW)),
+                          ring_len);
+                /* "passed by" = now just ahead of the cop (1..COP_TRIGGER_HI
+                 * spans), moving forward, above the speeding threshold. */
+                if (cgap < COP_TRIGGER_LO || cgap > COP_TRIGGER_HI) continue;
+                if (ACTOR_I32(cand, ACTOR_LONGITUDINAL_SPEED) <= g_td5.ini.cop_min_speed) continue;
+                if (g_actor_forward_track_component[c] <= 0) continue;
+                chosen = c;
+                break;
+            }
+            if (chosen >= 0) {
+                g_cop_target[k]            = (int8_t)chosen;
+                g_actor_pursued_by[chosen] = (int8_t)k;
+                g_cop_phase[k]             = COP_CHASING;
+                TD5_LOG_I(LOG_TAG, "cop_chase START: cop=%d target=%d", k, chosen);
+            }
+            continue;
+        }
+
+        /* CHASING or PULLOVER — validate the target, then maintain. */
+        tgt = g_cop_target[k];
+        if (tgt < 0 || tgt >= racer_n) { cop_end_chase(k); continue; }
+
+        /* End: the chased car broke down (crashed into traffic/car/wall). */
+        if (g_actor_broken_down[tgt]) {
+            if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
+            TD5_LOG_I(LOG_TAG, "cop_chase END (target broke down): cop=%d target=%d", k, tgt);
+            cop_end_chase(k);
+            continue;
+        }
+
+        {
+            char *tactor   = actor_ptr(tgt);
+            int   tgt_main = td5_track_branch_to_main_span((int)ACTOR_I16(tactor, ACTOR_SPAN_RAW));
+            gap = smart_span_gap(cop_main, tgt_main, ring_len);  /* >0 = target ahead of cop */
+
+            /* End: target escaped — same distance metric as traffic despawn. */
+            if (smart_iabs(gap) > g_td5.ini.traffic_dyn_despawn) {
+                if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
+                TD5_LOG_I(LOG_TAG, "cop_chase END (too far): cop=%d target=%d gap=%d", k, tgt, gap);
+                cop_end_chase(k);
+                continue;
+            }
+
+            if (phase == COP_CHASING) {
+                /* Overtake: cop drew level/ahead -> force the target to pull over. */
+                if (gap <= -COP_OVERTAKE_MARGIN) {
+                    g_cop_phase[k]          = COP_PULLOVER;
+                    g_encounter_active[tgt] = 1;
+                    TD5_LOG_I(LOG_TAG, "cop_chase OVERTAKE: cop=%d target=%d -> PULLOVER", k, tgt);
+                }
+                continue;
+            }
+
+            /* COP_PULLOVER: hold the target braked until it is fully stopped. */
+            {
+                int32_t tspeed = ACTOR_I32(tactor, ACTOR_LONGITUDINAL_SPEED);
+                int32_t tabs   = tspeed < 0 ? -tspeed : tspeed;
+                g_encounter_active[tgt] = 1;     /* keep forcing the stop */
+                if (tabs <= COP_STOP_SPEED) {
+                    g_encounter_active[tgt] = 0;
+                    TD5_LOG_I(LOG_TAG, "cop_chase COMPLETE (target stopped): cop=%d target=%d", k, tgt);
+                    cop_end_chase(k);
+                } else if (gap > COP_OVERTAKE_MARGIN) {
+                    /* Target slipped back ahead of the cop -> resume the pursuit. */
+                    g_encounter_active[tgt] = 0;
+                    g_cop_phase[k] = COP_CHASING;
+                }
+            }
+        }
+    }
+}
+
+#if 0  /* Legacy single-cop encounter (slot 9) — superseded by the multi-cop
+        * scheduler above. Kept disabled for reference during bring-up. */
+void td5_ai_update_special_encounter_legacy(void) {
     int32_t handle;
     char *cop;        /* actor[9] */
     int32_t cop_span_norm;     /* actor[9] +0x82 (cop is always traffic slot 9) */
@@ -9135,6 +9514,7 @@ void td5_ai_update_special_encounter(void) {
         }
     }
 }
+#endif  /* legacy single-cop encounter */
 
 /**
  * UpdateSpecialEncounterControl  (0x00434BA0)
@@ -9160,7 +9540,29 @@ void td5_ai_update_special_encounter(void) {
  * Fast-path writes target actor_ptr(slot), NOT actor_ptr(9). DAT_004ad152
  * is the player's SPAN_NORMALIZED snapshot — it gates the brake band.
  */
+/* Pull-over control (rewrite 2026-06-19): when the multi-cop scheduler has
+ * flagged `slot` as being pulled over (g_encounter_active[slot] != 0, set when
+ * a cop overtakes it), force that car to brake to a full stop. Called for
+ * HUMAN players from the input path (td5_input.c); AI-racer targets get the
+ * same stop applied in ai_update_single_racer. No-op otherwise. Replaces the
+ * faithful single-cop heading/brake control (kept below under #if 0). */
 void td5_ai_update_encounter_control(int slot) {
+    char *actor_self;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (!g_encounter_active[slot]) return;
+    actor_self = actor_ptr(slot);
+    /* Stop command: brake on, drive command = idle/brake (0xFF00), throttle
+     * off, wheel centred. Physics decays the speed to rest (mirrors
+     * ai_apply_stop_command / the finished-slot brake set). */
+    ACTOR_U8(actor_self,  ACTOR_BRAKE_FLAG)      = 1;
+    ACTOR_I16(actor_self, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+    ACTOR_U8(actor_self,  ACTOR_THROTTLE_STATE)  = 0;
+    ACTOR_I32(actor_self, ACTOR_STEERING_CMD)    = 0;
+}
+
+#if 0  /* Legacy single-cop encounter control — superseded by the pull-over
+        * control above. Kept disabled for reference during bring-up. */
+void td5_ai_update_encounter_control_legacy(int slot) {
     char    *actor_self   = actor_ptr(slot);
     int32_t *rs_self      = route_state(slot);
     int      tracked      = g_encounter_tracked_handle;
@@ -9325,6 +9727,7 @@ teardown:
     ACTOR_U8(actor_self, ACTOR_ENCOUNTER_STATE) =
         (uint8_t)(ACTOR_U8(actor_self, ACTOR_ENCOUNTER_STATE) + 1);
 }
+#endif  /* legacy single-cop encounter control */
 
 /* ========================================================================
  * Master Dispatcher  (0x436A70  UpdateRaceActors)
@@ -9392,6 +9795,9 @@ teardown:
 void td5_ai_update_race_actors(void) {
     int i;
 
+    /* Age broken-down traffic/cops (parks them + drives the smoke) every tick,
+     * independent of the POLICE gate. */
+    cop_tick_broken_down();
 
     /* --- Step 1: Rubber-band already computed in td5_ai_tick --- */
     td5_ai_refresh_route_state();
@@ -9491,6 +9897,14 @@ static void ai_update_single_racer(int slot) {
 
     switch (state) {
     case 0x00: /* AI racer */
+        /* [POLICE rewrite] An AI racer being pulled over by a cop (the scheduler
+         * set g_encounter_active[slot]) is forced to brake to a stop, the same
+         * way the human input path forces a human target via
+         * td5_ai_update_encounter_control. */
+        if (g_encounter_active[slot]) {
+            ai_apply_stop_command(actor);
+            return;
+        }
         /* Wanted mode gate [CONFIRMED @ UpdateRaceActors 0x436E1D]:
          * Original: run UpdateActorTrackBehavior only when
          *   (g_wantedModeEnabled == 0) || (gWantedDamageStateTable[slot] != 0)
@@ -9602,12 +10016,58 @@ static int td6_traffic_road_clamp_enabled(void) {
     return s;
 }
 
+/* Drive a CHASING cop. The heavy lifting reuses the racer AI: the aim-point
+ * override inside td5_ai_update_track_behavior points this cop's look-ahead at
+ * the chased car's world position, so the entire tuned steering cascade +
+ * SmartAI ray/lane avoidance steer it toward the target while threading
+ * traffic and corners. After that, force the catch-up throttle: full forward
+ * while below CopCatchup% of the target's speed, coast at/above it. The cop's
+ * physics top-speed cap is removed in td5_physics.c so it can actually reach
+ * 1.5x. Pure function of replicated state -> lockstep-safe. */
+static void cop_drive(int slot) {
+    char *cop = actor_ptr(slot);
+    int   tgt = g_cop_target[slot];
+
+    /* Run the racer AI (steering + base throttle). The aim override reads
+     * g_cop_phase/g_cop_target directly. */
+    td5_ai_update_track_behavior(slot);
+
+    if (tgt >= 0 && tgt < TD5_MAX_TOTAL_ACTORS) {
+        int32_t tspd = ACTOR_I32(actor_ptr(tgt), ACTOR_LONGITUDINAL_SPEED);
+        int32_t cspd = ACTOR_I32(cop, ACTOR_LONGITUDINAL_SPEED);
+        int32_t tabs = tspd < 0 ? -tspd : tspd;
+        int32_t cabs = cspd < 0 ? -cspd : cspd;
+        /* Target speed scaled by CopCatchup% (default 150 = 1.5x). Floor the
+         * cap so a cop never fully idles while chasing a crawling car. */
+        int32_t cap = (int32_t)((int64_t)tabs * g_td5.ini.cop_catchup_pct / 100);
+        if (cap < g_td5.ini.cop_min_speed) cap = g_td5.ini.cop_min_speed;
+        ACTOR_U8(cop, ACTOR_BRAKE_FLAG) = 0;
+        if (cabs < cap) {
+            /* Strong forward drive command (physics reads ENCOUNTER_STEER as the
+             * signed throttle; positive = accelerate). */
+            ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = (int16_t)COP_FULL_THROTTLE;
+        } else {
+            /* At/above the catch-up cap -> coast so it tops out near 1.5x. */
+            ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = 0;
+        }
+    }
+}
+
 static void ai_update_single_traffic(int slot) {
-    /* Slot 9 encounter hijack */
-    if (slot == 9 && g_encounter_tracked_handle != -1) {
-        /* Run full AI racer path instead of traffic */
-        td5_ai_update_track_behavior(9);
-        /* UpdateVehicleActor(9) would follow in the physics module */
+    /* Broken-down traffic/cop: park it (brake, no throttle) so it sits and
+     * smokes until the timer clears + it is recycled. Skip all driving. */
+    if (g_actor_broken_down[slot]) {
+        ai_apply_stop_command(actor_ptr(slot));
+        return;
+    }
+
+    /* Police: a CHASING cop drives as a racer aimed at its target (cop_drive
+     * runs the full racer AI with the aim-point overridden onto the chased car,
+     * then forces the catch-up throttle). An IDLE or PULLOVER cop drives as
+     * ordinary traffic (so it cruises before a chase and coasts to a halt in
+     * front of the target while pulling it over). */
+    if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING) {
+        cop_drive(slot);
         return;
     }
 

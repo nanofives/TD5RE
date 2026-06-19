@@ -1551,18 +1551,42 @@ int td5_game_init_race_session(void) {
          * (0x42ABD5) -- but drag mode also forces the MANUAL gearbox in the
          * input layer (bit 28), which silently disabled the brake-at-
          * standstill auto-REVERSE latch ("can't reverse in net races"). The
-         * port runs REAL races over lockstep; what must stay OFF is the
-         * rand()-consuming systems (traffic / encounters / wanted) -- they
-         * are the determinism envelope, not drag mode. Laps ride the host's
-         * DXPSTART config. */
+         * port runs REAL races over lockstep. Laps ride the host's DXPSTART
+         * config.
+         *
+         * [POLICE rewrite 2026-06-19] Traffic + the cop chase USED to be forced
+         * off here because they were the "rand()-consuming determinism
+         * envelope". The rewrite makes both lockstep-deterministic: the spawner
+         * uses a private race-seeded LCG (trf_dyn_rand, never CRT rand()), the
+         * spawn anchor is the replicated front-most human, and every cop chase
+         * decision is a pure function of replicated actor state (no RNG). So we
+         * now RUN traffic + cops in net races, adopting the HOST's replicated
+         * traffic volume + POLICE setting so spawn caps + cop cadence are
+         * identical on every peer. Wanted mode (the Cop Chase game type) stays
+         * off in net. */
         TD5_NetRaceConfig ncfg_l;
-        TD5_LOG_I(LOG_TAG, "InitRace: network session — real race, encounters/traffic off");
         g_td5.drag_race_enabled = 0;
-        g_td5.special_encounter_enabled = 0;
         g_td5.wanted_mode_enabled = 0;
-        g_td5.traffic_enabled = 0;
-        if (td5_net_get_race_config(&ncfg_l) && ncfg_l.lap_count > 0)
-            g_td5.circuit_lap_count = ncfg_l.lap_count;
+        if (td5_net_get_race_config(&ncfg_l)) {
+            if (ncfg_l.lap_count > 0)
+                g_td5.circuit_lap_count = ncfg_l.lap_count;
+            g_td5.traffic_volume = ncfg_l.traffic_volume;
+            if (g_td5.traffic_volume < 0) g_td5.traffic_volume = 0;
+            if (g_td5.traffic_volume > TD5_TRAFFIC_VOLUME_COUNT - 1)
+                g_td5.traffic_volume = TD5_TRAFFIC_VOLUME_COUNT - 1;
+            g_td5.traffic_enabled = (g_td5.traffic_volume > 0) ? 1 : 0;
+            g_td5.special_encounter_enabled = ncfg_l.cops ? 1 : 0;
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: network session — real race, traffic_vol=%d cops=%d "
+                      "(replicated from host)",
+                      g_td5.traffic_volume, g_td5.special_encounter_enabled);
+        } else {
+            /* No replicated config yet — keep traffic/cops off (safe default). */
+            g_td5.traffic_enabled = 0;
+            g_td5.special_encounter_enabled = 0;
+            TD5_LOG_W(LOG_TAG,
+                      "InitRace: network session — no race config, traffic/cops off");
+        }
     }
     if (g_td5.split_screen_mode > 0) {
         /* [PORT: N-way] The original disables traffic + special encounters in
@@ -5858,6 +5882,10 @@ int td5_game_run_race_frame(void) {
             td5_sound_update_vehicle_looping_state(i);
         }
     }
+    /* [POLICE rewrite] Drive the cop-chase siren from the nearest actively-
+     * chasing traffic cop (gated by the POLICE option), distance-attenuated to
+     * the local camera. Cosmetic / post-sim — no netplay effect. */
+    td5_sound_update_police_siren();
     td5_sound_update_audio_mix();
     /* [CONFIRMED @ 0x00440B00]: ambient weather (rain) sound runs each
      * frame after the vehicle audio mix, gated by weather particle density. */

@@ -1943,6 +1943,11 @@ void Screen_NetworkLobby(void) {
                 if (cfg.num_opponents > TD5_MAX_RACER_SLOTS - 2)
                     cfg.num_opponents = TD5_MAX_RACER_SLOTS - 2;
                 cfg.difficulty        = g_td5.difficulty_tier;
+                /* [POLICE rewrite] Replicate the host's traffic volume + POLICE
+                 * setting so the deterministic spawner + cop cadence match on
+                 * every peer. */
+                cfg.traffic_volume    = g_td5.ini.traffic;
+                cfg.cops              = g_td5.ini.cops;
                 for (slot = 0; slot < 6; slot++) {
                     int col = td5_net_get_slot_td6_color(slot);
                     cfg.car_index[slot]   = 0;

@@ -129,6 +129,24 @@ void td5_ai_update_encounter_control(int slot);
  * session (only while a tracked encounter is actually engaged). */
 int  td5_ai_is_encounter_active(int slot);
 
+/* --- Police chase rewrite (2026-06-19) — cosmetic-layer queries ---------
+ * The chase logic is deterministic sim state (td5_ai.c); these are read by
+ * the per-frame render/audio path. See the "Police chase rewrite" block in
+ * td5_ai.c. */
+/* 1 when `slot` is a cop currently chasing (or pulling over) a racer. */
+int  td5_ai_cop_is_chasing(int slot);
+/* Steady strobe intensity (0..0x1000) for the cop-light glow; 0 if not chasing. */
+int  td5_ai_cop_glow_intensity(int slot);
+/* 1 when `slot` (racer or traffic/cop) is in the broken-down/parked state. */
+int  td5_ai_actor_is_broken_down(int slot);
+/* 1 when `slot` is currently being chased by a cop (read by td5_physics.c). */
+int  td5_ai_actor_is_pursued(int slot);
+/* Flag `slot` broken down for cop_smoke_ticks (called from td5_physics.c on a
+ * hard traffic/cop collision). */
+void td5_ai_mark_actor_broken_down(int slot);
+/* Nearest chasing cop to a listener world pos (24.8), or -1 — drives the siren. */
+int  td5_ai_nearest_chasing_cop(int32_t listener_x, int32_t listener_z);
+
 /* 0x434040: Compute actor route heading delta */
 uint32_t td5_compute_heading_delta(void *route_entry);
 

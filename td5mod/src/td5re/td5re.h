@@ -417,6 +417,14 @@ typedef struct TD5_GlobalState {
          * per-frame player-vs-each-traffic collision test by world proximity that
          * bypasses the span bucket, so you always bump traffic you overlap. */
         int  traffic_player_collide;    /* 1 = explicit player<->traffic collision (default 1) */
+        /* Police chase (rewrite 2026-06-19). The cop is a traffic vehicle that
+         * starts chasing the first racer that passes it. Master on/off is the
+         * existing [GameOptions] Cops toggle; these tune the rewritten behavior.
+         * Section [Police] in td5re.ini; each has a --Key=N CLI override. */
+        int  cop_ratio;          /* 1 cop per N regular traffic spawns (default 7, min 1) */
+        int  cop_catchup_pct;    /* cop target speed = this % of the chased car's speed (default 150 = 1.5x; clamped 100..300) */
+        int  cop_min_speed;      /* chased car must exceed this longitudinal speed to trigger a chase (default 0x15638, faithful gate) */
+        int  cop_smoke_ticks;    /* how long a broken-down traffic/cop emits smoke + stays parked, 30Hz ticks (default 150 = 5s) */
         /* Per-player joystick selection (0 = keyboard, >=1 = 1-based enumerated
          * joystick index). Overrides the device index persisted in Config.td5.
          * The original supports up to 2 simultaneous joystick devices. */

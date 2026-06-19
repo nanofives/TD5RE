@@ -352,6 +352,11 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "TrafficSpeedScale",        &g_td5.ini.traffic_dyn_speed_pct },
         { "TrafficSpawnStartOffset",  &g_td5.ini.traffic_dyn_start_offset },
         { "TrafficOnCircuits",        &g_td5.ini.traffic_dyn_circuits },
+        /* Police chase rewrite */
+        { "CopRatio",                 &g_td5.ini.cop_ratio },
+        { "CopCatchup",               &g_td5.ini.cop_catchup_pct },
+        { "CopMinSpeed",              &g_td5.ini.cop_min_speed },
+        { "CopSmokeTicks",            &g_td5.ini.cop_smoke_ticks },
         { "Player1Joystick",      &g_td5.ini.player1_joystick },
         { "Player2Joystick",      &g_td5.ini.player2_joystick },
         { "PlayerIsAI",           &g_td5.ini.player_is_ai },
@@ -782,6 +787,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (g_td5.ini.traffic_dyn_fade_ticks < 1)   g_td5.ini.traffic_dyn_fade_ticks = 1;
     if (g_td5.ini.traffic_dyn_fade_ticks > 255) g_td5.ini.traffic_dyn_fade_ticks = 255;
     if (g_td5.ini.traffic_dyn_period < 5)       g_td5.ini.traffic_dyn_period = 5;
+    /* [Police] cop-chase rewrite tuning. Master on/off is [GameOptions] Cops. */
+    g_td5.ini.cop_ratio       = td5_ini_int("Police", "CopRatio", 7);
+    if (g_td5.ini.cop_ratio < 1) g_td5.ini.cop_ratio = 1;
+    g_td5.ini.cop_catchup_pct = td5_ini_int("Police", "CopCatchup", 150);
+    if (g_td5.ini.cop_catchup_pct < 100) g_td5.ini.cop_catchup_pct = 100;
+    if (g_td5.ini.cop_catchup_pct > 300) g_td5.ini.cop_catchup_pct = 300;
+    g_td5.ini.cop_min_speed   = td5_ini_int("Police", "CopMinSpeed", 0x15638);
+    if (g_td5.ini.cop_min_speed < 0) g_td5.ini.cop_min_speed = 0;
+    g_td5.ini.cop_smoke_ticks = td5_ini_int("Police", "CopSmokeTicks", 150);
+    if (g_td5.ini.cop_smoke_ticks < 1) g_td5.ini.cop_smoke_ticks = 1;
     g_td5.ini.player1_joystick   = td5_ini_int("GameOptions", "Player1Joystick", 0);
     g_td5.ini.player2_joystick   = td5_ini_int("GameOptions", "Player2Joystick", 0);
 

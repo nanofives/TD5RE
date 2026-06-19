@@ -1203,6 +1203,12 @@ static inline int32_t td5_physics_hard_catchup_mult(int slot)
  * fender-bender.
  * ======================================================================== */
 #define CRASH_FX_ACUTE_MAG   250000   /* impact_mag above which a player hit is "acute" */
+/* [POLICE rewrite 2026-06-19] Approach-speed (iVar11) into a wall above which a
+ * CHASED racer or a CHASING cop "breaks down" (ends the pursuit). Deliberately
+ * high so only a genuine head-on crash counts, not a scrape; ordinary traffic
+ * is never broken by walls (it routinely brushes TD6 rails). Tunable from
+ * drive-test. */
+#define COP_WALL_BREAK_VPERP  20000
 /* Forward-speed scrub on an acute player hit, Q8 (0x100 = 1.0 = keep all speed).
  * 0x100 - 0x50 = 0xB0/256 ≈ 0.6875, i.e. shed ~31% of planar speed. Vertical
  * lift (linear_velocity_y) is intentionally left untouched. */
@@ -1570,6 +1576,18 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
      * round-off in lv_x/lv_z on separating contacts. Faithful behavior is
      * to skip the entire writeback block when iVar11 < 0. */
     if (iVar11 >= 0) {
+        /* [POLICE rewrite 2026-06-19] A high-speed head-on wall hit breaks down
+         * a CHASED racer (ending the pursuit) or a CHASING cop. iVar11 is the
+         * approach speed into the wall; the threshold is high so only a genuine
+         * crash counts. Ordinary traffic is left alone. */
+        if (iVar11 > COP_WALL_BREAK_VPERP) {
+            int wslot = actor->slot_index;
+            if (td5_ai_actor_is_pursued(wslot) || td5_ai_cop_is_chasing(wslot)) {
+                td5_ai_mark_actor_broken_down(wslot);
+                TD5_LOG_I(LOG_TAG, "cop_wall_break: slot=%d vperp=%d (broke down)",
+                          wslot, iVar11);
+            }
+        }
         /* Impulse numerator = ((K>>8) * -0x1100) >> 12 with Borland round-
          * toward-zero on the negative >>12. D2 audit. The compiler-time
          * constant evaluation here yields a different result from the
@@ -1829,6 +1847,18 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 #define PHYS_SPEED_SCALE        0x78
 #define PHYS_HANDBRAKE_MOD      0x7A
 #define PHYS_SLIP_COUPLING      0x7C
+
+/* [POLICE rewrite 2026-06-19] Effective top-speed rating (tuning +0x74). A
+ * chasing police cop has NO top-speed cap — it must be able to overtake any
+ * car — so it gets a very high rating (its real speed is still bounded to ~1.5x
+ * the chased car by the catch-up throttle in cop_drive). Everyone else uses the
+ * per-car tuning value, so non-cops are byte-identical. The actor's own slot
+ * index lives at +0x375. */
+static inline int32_t phys_top_speed_rating(TD5_Actor *actor) {
+    int slot = (int)((const uint8_t *)actor)[0x375];   /* ACTOR_SLOT_INDEX */
+    if (td5_ai_cop_is_chasing(slot)) return 0x7FFF;    /* effectively uncapped */
+    return (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+}
 
 #define CDEF_FRONT_Z_EXTENT     0x04   /* positive */
 #define CDEF_HALF_WIDTH         0x08   /* positive */
@@ -3324,7 +3354,7 @@ void td5_physics_update_player(TD5_Actor *actor)
             }
 
             int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
-            int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
+            int32_t speed_limit = phys_top_speed_rating(actor) << 8;
             /* [MANUAL BOOST #2] Top-speed half: a manual-gearbox car (byte
              * +0x378 == 0) tops out +N% higher. 1.0 (no change) for automatic
              * or knob-off → byte-faithful limit. */
@@ -3493,7 +3523,7 @@ void td5_physics_update_player(TD5_Actor *actor)
             /* Drive torque while airborne [CONFIRMED @ 0x404560-0x4045AE] */
             drive_torque = td5_physics_compute_drive_torque(actor);
             int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
-            int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
+            int32_t speed_limit = phys_top_speed_rating(actor) << 8;
             /* [MANUAL BOOST #2] Top-speed half: +N% limit in manual gearbox. */
             speed_limit = td5_physics_apply_speed_limit_boost(
                               speed_limit, td5_physics_actor_manual_boost_q8(actor));
@@ -4538,7 +4568,7 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t front_drive = 0, rear_drive = 0;
     int32_t brake_front = (int32_t)PHYS_S(actor, PHYS_BRAKE_FRONT);
     int32_t brake_rear  = (int32_t)PHYS_S(actor, PHYS_BRAKE_REAR);
-    int32_t speed_limit = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED) << 8;
+    int32_t speed_limit = phys_top_speed_rating(actor) << 8;
     int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
     /* Drivetrain dispatch — verbatim port of UpdateAIVehicleDynamics @ 0x004051A0.
@@ -6079,6 +6109,16 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                 td5_physics_apply_acute_crash_fx(A, impact_mag);
             if (B->slot_index < g_traffic_slot_base)
                 td5_physics_apply_acute_crash_fx(B, impact_mag);
+            /* [POLICE rewrite 2026-06-19] A hard hit BREAKS DOWN a car: traffic
+             * and cops park + smoke; a chased racer's "broke down" also ends the
+             * pursuit. Ordinary (un-chased) racers keep control — they only get
+             * the crash-fx above. */
+            if (A->slot_index >= g_traffic_slot_base ||
+                td5_ai_actor_is_pursued(A->slot_index))
+                td5_ai_mark_actor_broken_down(A->slot_index);
+            if (B->slot_index >= g_traffic_slot_base ||
+                td5_ai_actor_is_pursued(B->slot_index))
+                td5_ai_mark_actor_broken_down(B->slot_index);
         }
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d",
                   A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain);
