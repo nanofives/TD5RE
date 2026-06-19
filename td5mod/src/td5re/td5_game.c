@@ -3863,17 +3863,20 @@ static TD5_Actor *td5_game_local_player_actor(void)
  * TD5RE_NET_RENDER_DECOUPLE=0 to revert to the legacy once-per-frame exchange
  * (race capped at the lockstep round-trip rate). */
 static int net_render_decouple_enabled(void) {
-    static int init = 0, on = 0;
+    static int init = 0, on = 1;
     if (!init) {
         const char *e = getenv("TD5RE_NET_RENDER_DECOUPLE");
         /* [2026-06-19] Render-decouple via NON-BLOCKING per-tick lockstep
          * (td5_game_net_try_sync + td5_net_*_frame_nb): render free-runs at the
          * monitor rate and interpolates while the 30 Hz sim advances one tick per
          * completed round, so a 180 Hz client is no longer paced by a 60 Hz host.
-         * DEFAULT OFF (experimental, needs 2-machine validation) — enable with =1
-         * on BOTH peers. The earlier blocking per-tick attempt regressed to ~15
-         * fps; this one POLLS instead of stalling the render thread. */
-        on = (e && e[0] == '1') ? 1 : 0;   /* default OFF — opt-in */
+         * DEFAULT ON — this is the standard netplay path now. It POLLS the peer
+         * instead of stalling the render thread (the earlier blocking per-tick
+         * attempt did, -> 15 fps). Set =0 ON BOTH PEERS to fall back to the legacy
+         * blocking per-frame exchange (caps the client at the host's refresh) if a
+         * desync ever turns up -- the two paths use different round cadences, so
+         * both machines must run the same setting. */
+        on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
         init = 1;
         TD5_LOG_I(LOG_TAG, "Netplay render decouple: %s",
                   on ? "ON (exchange per sim tick, render free-runs)"
