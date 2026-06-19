@@ -3853,7 +3853,33 @@ static TD5_Actor *td5_game_local_player_actor(void)
     return td5_game_get_actor(slot);
 }
 
-static int td5_game_net_sync_frame(void) {
+/* [#5 2026-06-19] Decouple render from the lockstep barrier. When ON (default),
+ * the network input exchange runs once per 30 Hz SIM TICK (inside the fixed-step
+ * loop) instead of once per RENDER FRAME, so render frames that drain no tick
+ * skip the blocking peer-wait and free-run at the monitor refresh rate. The sim
+ * stays a deterministic 30 Hz lockstep: each tick is one mutual round, so both
+ * peers keep an identical round/tick count (the handshake itself matches them,
+ * which is why the per-frame dt-correction is unneeded in this path). Set
+ * TD5RE_NET_RENDER_DECOUPLE=0 to revert to the legacy once-per-frame exchange
+ * (race capped at the lockstep round-trip rate). */
+static int net_render_decouple_enabled(void) {
+    static int init = 0, on = 1;
+    if (!init) {
+        const char *e = getenv("TD5RE_NET_RENDER_DECOUPLE");
+        on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        init = 1;
+        TD5_LOG_I(LOG_TAG, "Netplay render decouple: %s",
+                  on ? "ON (exchange per sim tick, render free-runs)"
+                     : "OFF (legacy once-per-frame exchange)");
+    }
+    return on;
+}
+
+/* apply_dt_correction: 1 = legacy once-per-frame call (the client adopts the
+ * host's dt so its per-frame tick COUNT matches the host's). 0 = per-tick
+ * decoupled call (one round == one tick, so the handshake already matches tick
+ * counts and the accumulator fixup must be skipped). */
+static int td5_game_net_sync_frame(int apply_dt_correction) {
     uint32_t bits[TD5_NET_MAX_PLAYERS];
     int local = td5_net_local_slot();
     int i, ok;
@@ -3932,7 +3958,7 @@ static int td5_game_net_sync_frame(void) {
     /* Client adopts the host's dt; correct this frame's accumulator, which
      * update_frame_timing() already advanced by the LOCAL dt. uint32 wrap is
      * safe because the accumulator was just incremented by old_delta. */
-    if (!td5_net_is_host() && dt != local_dt) {
+    if (apply_dt_correction && !td5_net_is_host() && dt != local_dt) {
         uint32_t old_delta = td5_game_normalized_dt_to_accum(local_dt);
         uint32_t new_delta = td5_game_normalized_dt_to_accum(dt);
         g_td5.sim_time_accumulator += new_delta - old_delta;
@@ -4128,8 +4154,13 @@ int td5_game_run_race_frame(void) {
      * substep below (mirrors the original's once-per-frame network poll).
      * Non-network play keeps polling once per substep, inside the loop. */
     int net_lockstep = (g_td5.network_active && td5_net_is_active());
-    if (net_lockstep)
-        td5_game_net_sync_frame();
+    /* [#5 2026-06-19] Decoupled (default): exchange per SIM TICK inside the
+     * fixed-step loop below so render free-runs at monitor rate. Legacy (knob
+     * off): exchange ONCE here and hold the merged bits constant across this
+     * frame's substeps (mirrors the original's once-per-frame network poll). */
+    int net_decoupled = net_lockstep && net_render_decouple_enabled();
+    if (net_lockstep && !net_decoupled)
+        td5_game_net_sync_frame(1);
 
     td5_profile_begin_frame();   /* race-frame profiler timeline (zones via trace_stage + render/present below) */
     td5_game_trace_stage("frame_begin", 0);
@@ -4323,12 +4354,21 @@ int td5_game_run_race_frame(void) {
 
     while (g_td5.sim_time_accumulator > 0xFFFF &&
            ticks_this_frame < max_ticks_per_frame) {
-        /* --- Input polling ---
-         * Network play already sampled + exchanged input once per frame above
-         * (net_lockstep); re-polling here would clobber the merged authoritative
-         * bits, so only the local-only path polls per substep. */
-        if (!net_lockstep)
+        /* --- Input polling / lockstep exchange ---
+         * Local-only play polls the controller every substep. Networked play:
+         *  - decoupled (default): exchange ONE lockstep round HERE, per sim tick,
+         *    so render frames that drain zero ticks skip the blocking barrier and
+         *    free-run. The exchange polls local input + sets the merged bits, and
+         *    keeps flowing during a net pause (the accumulator advances regardless
+         *    so this loop still iterates), so peers resume on the same round.
+         *  - legacy (knob off): input was sampled + exchanged once per frame above
+         *    and the merged bits are held constant; re-polling would clobber them. */
+        if (net_lockstep) {
+            if (net_decoupled && td5_game_net_sync_frame(0))
+                break;   /* lockstep failed -> fade-out armed; stop draining ticks */
+        } else {
             td5_input_poll_race_session();
+        }
 
         /* --- Camera angle caching (per viewport) --- */
         /* Original (0x0042b84e) gates camera inside the pause-flag check.
