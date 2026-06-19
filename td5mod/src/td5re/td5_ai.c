@@ -296,6 +296,7 @@ static int8_t  g_actor_pursued_by[TD5_MAX_TOTAL_ACTORS];  /* which cop slot chas
 static uint8_t g_actor_broken_down[TD5_MAX_TOTAL_ACTORS]; /* 1 = crashed/disabled: parked + smoking */
 static int16_t g_actor_broken_ticks[TD5_MAX_TOTAL_ACTORS];/* remaining broken-down ticks */
 static int16_t g_cop_glow_phase[TD5_MAX_TOTAL_ACTORS];    /* steady strobe intensity ramp per cop */
+static int16_t g_cop_cooldown[TD5_MAX_TOTAL_ACTORS];      /* ticks before a cop may re-acquire after a chase */
 static int32_t s_cop_spawn_counter;                       /* deterministic 1:CopRatio cop cadence */
 
 /* Chase tuning (spans / fixed-point speed). All in the same units the
@@ -309,7 +310,8 @@ static int32_t s_cop_spawn_counter;                       /* deterministic 1:Cop
 #define COP_TRIGGER_HI      15   /* up to 15 spans ahead still counts as "just passed" */
 #define COP_OVERTAKE_MARGIN  1   /* cop ahead of target by >=this many spans = overtaken */
 #define COP_STOP_SPEED  0x2000   /* |longitudinal speed| at/under which a target counts as stopped */
-#define COP_FULL_THROTTLE 0x0300 /* strong forward drive command while catching up */
+#define COP_FULL_THROTTLE 0x0200 /* forward drive command while catching up (gentler accel) */
+#define COP_RECHASE_COOLDOWN 150 /* ~5s a cop cruises normally before it may re-acquire after a chase */
 
 /* Reset all police-chase per-slot state (global init + per-race). */
 static void cop_state_reset(void) {
@@ -318,6 +320,7 @@ static void cop_state_reset(void) {
     memset(g_actor_broken_down, 0, sizeof(g_actor_broken_down));
     memset(g_actor_broken_ticks, 0, sizeof(g_actor_broken_ticks));
     memset(g_cop_glow_phase, 0, sizeof(g_cop_glow_phase));
+    memset(g_cop_cooldown, 0, sizeof(g_cop_cooldown));
     for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
         g_cop_target[i]       = -1;
         g_actor_pursued_by[i] = -1;
@@ -337,6 +340,9 @@ static void cop_end_chase(int slot) {
     g_cop_target[slot] = -1;
     g_cop_phase[slot]  = COP_IDLE;
     g_cop_glow_phase[slot] = 0;
+    /* Cruise normally for a while before this cop may re-acquire — stops the
+     * "same cop chases me again the instant the last chase ends" loop. */
+    g_cop_cooldown[slot] = COP_RECHASE_COOLDOWN;
 }
 
 /* Fully strip a slot's cop identity (called when the traffic slot is recycled
@@ -593,12 +599,22 @@ int td5_ai_cop_is_chasing(int slot) {
            (g_cop_phase[slot] == COP_CHASING || g_cop_phase[slot] == COP_PULLOVER);
 }
 
-/* Steady strobe intensity (0..0x1000) for the cop-light glow over a chasing
- * cop. Mirrors the wanted-target-tracker scale the strobe renderer expects,
- * but stays full/steady instead of decaying (cops glow for the whole chase). */
+/* Steady strobe intensity for the cop-light glow over a chasing cop. The
+ * marker's quad radii scale linearly with this, so 0x1000 is the wanted-mode
+ * full size; cops use a larger value so the lights read clearly from a
+ * distance (env TD5RE_COP_GLOW overrides). Stays steady (no decay) for the
+ * whole chase. */
 int td5_ai_cop_glow_intensity(int slot) {
+    static int s_glow = -1;
+    if (s_glow < 0) {
+        const char *e = getenv("TD5RE_COP_GLOW");
+        s_glow = e ? atoi(e) : 0x3000;     /* 3x the wanted-mode size */
+        if (s_glow < 0x400)  s_glow = 0x400;
+        if (s_glow > 0x8000) s_glow = 0x8000;
+        TD5_LOG_I(LOG_TAG, "cop_glow intensity = 0x%X (env TD5RE_COP_GLOW)", s_glow);
+    }
     if (!td5_ai_cop_is_chasing(slot)) return 0;
-    return 0x1000;
+    return s_glow;
 }
 
 /* 1 when `slot` (racer OR traffic/cop) is in the broken-down state set by a
@@ -614,6 +630,14 @@ int td5_ai_actor_is_broken_down(int slot) {
 int td5_ai_actor_is_pursued(int slot) {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
     return g_actor_pursued_by[slot] != -1;
+}
+
+/* 1 when `slot` is a cop car (any phase, incl. idle-cruising). td5_render.c
+ * uses this to draw the dedicated police mesh over the slot so cops look like
+ * cops in traffic, not ordinary cars. */
+int td5_ai_actor_is_cop(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    return g_cop_is_cop[slot] != 0;
 }
 
 /* Flag an actor as broken down for `g_td5.ini.cop_smoke_ticks` ticks. Called
@@ -5415,19 +5439,14 @@ void td5_ai_update_track_behavior(int slot) {
 
                 if (td5_track_sample_target_point(target_span, route_byte,
                                                    &target_x, &target_z, lateral_bias)) {
-                    /* [POLICE rewrite 2026-06-19] A chasing cop aims its
-                     * look-ahead straight at the car it's pursuing (its world
-                     * XZ) instead of the route waypoint, so the steering cascade
-                     * + SmartAI avoidance below drive it toward the target while
-                     * still threading traffic and corners. Both positions are
-                     * replicated sim state -> identical on every peer. */
-                    if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&
-                        g_cop_target[slot] >= 0 &&
-                        g_cop_target[slot] < TD5_MAX_TOTAL_ACTORS) {
-                        char *cop_tgt = actor_ptr(g_cop_target[slot]);
-                        target_x = ACTOR_I32(cop_tgt, ACTOR_WORLD_POS_X);
-                        target_z = ACTOR_I32(cop_tgt, ACTOR_WORLD_POS_Z);
-                    }
+                    /* [POLICE rewrite 2026-06-19] A chasing cop drives the ROUTE
+                     * like a fast AI racer (NOT homing on the target's exact
+                     * position — that snapped its heading into the target's rear
+                     * and DISCARDED the SmartAI lane/ray avoidance, so it rammed
+                     * instead of overtaking). Route-following + SmartAI
+                     * avoidance + the branch-follow override + the 1.5x catch-up
+                     * throttle make it close in and OVERTAKE naturally, the way
+                     * an AI opponent passes a slower car. */
                     /* (c) Delta vector: target - actor, shift from 24.8 FP to integer
                      * [CONFIRMED @ 0x4352A1-0x4352C8] */
                     int32_t actor_x = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
@@ -7495,6 +7514,19 @@ static int trf_dyn_branches_enabled(void)
     return s;
 }
 
+/* Branch traffic spawning is allowed when the knob is on AND the track has
+ * branch corridors (jump table populated). Works for BOTH TD6 city tracks and
+ * TD5 tracks (e.g. Moscow) — now that td5_track_normalize_actor_wrap folds a
+ * branch car's SPAN_NORMALIZED to its parallel main span on ALL tracks (not
+ * just TD6), TD5 branch cars get valid route guidance + despawn distances and
+ * drive the corridor like any other car. Previously gated TD6-only, so TD5
+ * forks never got branch traffic (user: "traffic not spawning on the right
+ * track of a branch"). */
+static int trf_dyn_branch_spawn_ok(void)
+{
+    return trf_dyn_branches_enabled() && td5_track_corridor_count() > 0;
+}
+
 /* [#16 cross-traffic 2026-06-17] A/B knob for CROSS-TRAFFIC AT INTERSECTIONS.
  * When a dynamic-traffic car spawns on a TD6 BRANCH corridor (the drivable
  * alternate route taken at a junction), a fraction of those spawns are forced to
@@ -7961,8 +7993,7 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * random main span to land in a (rare) fork window. The chosen main span
          * then runs through all the normal edge/clearance/proximity checks. Gated
          * on TD5RE_TRAFFIC_BRANCHES (default on). */
-        if (g_active_td6_level > 0 && td5_track_td6_branches_drivable() &&
-            trf_dyn_branches_enabled() && (trf_dyn_rand() % 3u) == 0u) {
+        if (trf_dyn_branch_spawn_ok() && (trf_dyn_rand() % 3u) == 0u) {
             int bm = trf_dyn_pick_branch_main_span(ps, win_lo, win_hi);
             if (bm >= 0) { span = bm; want_branch = 1; }
         }
@@ -8012,8 +8043,7 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * main ring at the corridor end like any other car. Gated on
          * TD5RE_TRAFFIC_BRANCHES (default on). */
         main_span = span;
-        if (g_active_td6_level > 0 && td5_track_td6_branches_drivable() &&
-            trf_dyn_branches_enabled()) {
+        if (trf_dyn_branch_spawn_ok()) {
             int ncorr = td5_track_count_branch_corridors(main_span);
             if (ncorr > 0) {
                 /* When this main span was chosen DELIBERATELY for a branch
@@ -9137,6 +9167,9 @@ void td5_ai_update_special_encounter(void) {
         phase    = g_cop_phase[k];
 
         if (phase == COP_IDLE) {
+            /* Cruise normally during the post-chase cooldown (don't immediately
+             * re-acquire the car it just chased). */
+            if (g_cop_cooldown[k] > 0) { g_cop_cooldown[k]--; continue; }
             /* Acquire the FIRST (lowest-slot = deterministic) racer that just
              * passed this cop and isn't already pursued by another cop. */
             int chosen = -1;
@@ -9145,9 +9178,18 @@ void td5_ai_update_special_encounter(void) {
                 int   st, cgap;
                 if (g_actor_pursued_by[c] != -1) continue;     /* no double-chase */
                 st = g_slot_state[c];
-                if (st != 0 && st != 1) continue;              /* not an active racer */
+                /* Cops chase HUMAN players only (state 1), never AI opponents. */
+                if (st != 1) continue;
                 if (g_actor_broken_down[c]) continue;
                 cand = actor_ptr(c);
+                /* Line of sight: a cop can't START a chase across a fork. If the
+                 * player is on a branch corridor and the cop is on the main road
+                 * (or vice-versa) the cop can't see them, so don't acquire. (An
+                 * already-running chase still follows the player onto branches.)
+                 * Branch corridor spans are >= the main-ring length. */
+                if (((int)ACTOR_I16(cop,  ACTOR_SPAN_RAW) >= ring_len) !=
+                    ((int)ACTOR_I16(cand, ACTOR_SPAN_RAW) >= ring_len))
+                    continue;
                 cgap = smart_span_gap(cop_main,
                           td5_track_branch_to_main_span((int)ACTOR_I16(cand, ACTOR_SPAN_RAW)),
                           ring_len);
@@ -9163,6 +9205,20 @@ void td5_ai_update_special_encounter(void) {
                 g_cop_target[k]            = (int8_t)chosen;
                 g_actor_pursued_by[chosen] = (int8_t)k;
                 g_cop_phase[k]             = COP_CHASING;
+                /* If the cop was ONCOMING traffic (facing the wrong way), swing
+                 * it around to the race direction so it gives chase cleanly
+                 * instead of doing a reverse-arc: clear the oncoming polarity and
+                 * re-seed its heading forward from the track. Forward-facing cops
+                 * are left untouched. */
+                if (route_state(k)[RS_ROUTE_DIRECTION_POLARITY] != 0) {
+                    route_state(k)[RS_ROUTE_DIRECTION_POLARITY] = 0;
+                    td5_track_compute_heading((TD5_Actor *)cop);
+                    /* Drop the backward (oncoming) momentum so it accelerates
+                     * forward cleanly instead of sliding backward while facing
+                     * forward. */
+                    ACTOR_I32(cop, ACTOR_LIN_VEL_X) = 0;
+                    ACTOR_I32(cop, ACTOR_LIN_VEL_Z) = 0;
+                }
                 TD5_LOG_I(LOG_TAG, "cop_chase START: cop=%d target=%d", k, chosen);
             }
             continue;
@@ -10028,9 +10084,19 @@ static void cop_drive(int slot) {
     char *cop = actor_ptr(slot);
     int   tgt = g_cop_target[slot];
 
-    /* Run the racer AI (steering + base throttle). The aim override reads
-     * g_cop_phase/g_cop_target directly. */
+    /* Run the racer AI: route-following + SmartAI lane/ray avoidance + speed
+     * easing/braking for traffic and walls. This sets the steering, the
+     * BRAKE_FLAG, and a base throttle command. */
     td5_ai_update_track_behavior(slot);
+
+    /* If the SmartAI decided to BRAKE (imminent wall / car ahead), RESPECT it —
+     * do not boost the throttle this tick. The old code force-cleared BRAKE_FLAG
+     * and pinned full throttle every tick, so the cop ignored all avoidance and
+     * plowed through traffic and walls (erratic, lots of collisions). Letting it
+     * brake means it slows for hazards and only sprints when the way is clear;
+     * the ray-sensing still STEERS it around cars, so it overtakes by swerving. */
+    if (ACTOR_U8(cop, ACTOR_BRAKE_FLAG))
+        return;
 
     if (tgt >= 0 && tgt < TD5_MAX_TOTAL_ACTORS) {
         int32_t tspd = ACTOR_I32(actor_ptr(tgt), ACTOR_LONGITUDINAL_SPEED);
@@ -10040,13 +10106,15 @@ static void cop_drive(int slot) {
         /* Target speed scaled by CopCatchup% (default 150 = 1.5x). Floor the
          * cap so a cop never fully idles while chasing a crawling car. */
         int32_t cap = (int32_t)((int64_t)tabs * g_td5.ini.cop_catchup_pct / 100);
+        int16_t ai_cmd = ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER);
         if (cap < g_td5.ini.cop_min_speed) cap = g_td5.ini.cop_min_speed;
-        ACTOR_U8(cop, ACTOR_BRAKE_FLAG) = 0;
         if (cabs < cap) {
-            /* Strong forward drive command (physics reads ENCOUNTER_STEER as the
-             * signed throttle; positive = accelerate). */
-            ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = (int16_t)COP_FULL_THROTTLE;
-        } else {
+            /* Below the catch-up cap and not braking -> boost the throttle, but
+             * never BELOW what the AI already commanded (so a SmartAI ease for a
+             * slower car ahead is preserved — we only ever speed it up). */
+            if (ai_cmd >= 0 && (int16_t)COP_FULL_THROTTLE > ai_cmd)
+                ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = (int16_t)COP_FULL_THROTTLE;
+        } else if (ai_cmd > 0) {
             /* At/above the catch-up cap -> coast so it tops out near 1.5x. */
             ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = 0;
         }

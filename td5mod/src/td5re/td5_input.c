@@ -1341,13 +1341,6 @@ void td5_input_update_player_control(int slot)
                     ((uint8_t *)a_actor)[0x36F] = throttle_st;
                 }
             }
-        } else if (encounter_active) {
-            /* FUN_00434BA0 [CONFIRMED @ 0x434BA0] UpdateSpecialEncounterControl.
-             * In the original, this modifies the cop (encounter) actor's heading/
-             * brake — it does NOT set the player's throttle/brake directly.
-             * Player control values carry forward from the previous frame. */
-            td5_ai_update_encounter_control(slot);
-            TD5_LOG_D(LOG_TAG, "encounter_control: slot=%d", slot);
         } else {
             /* No brake: reset throttle_state to forward [CONFIRMED @ 0x403180] */
             s_brake[slot] = 0;
@@ -1428,6 +1421,30 @@ void td5_input_update_player_control(int slot)
                   slot, (int)s_throttle[slot], (int)s_brake[slot]);
     } else {
         s_handbrake[slot] = 0;
+    }
+
+    /* [POLICE pullover 2026-06-19] When a cop has overtaken this player
+     * (g_encounter_active[slot], set by the chase scheduler), force the car to
+     * brake to a STOP immediately — regardless of throttle/brake input — and
+     * hold at rest. Runs AFTER the normal throttle/brake + handbrake decode (the
+     * same post-override pattern), so it overrides whatever the player pressed:
+     * the brake starts the instant the cop passes, not when the player lets off.
+     * throttle_state (+0x36F) is forced to 1 (forward) so the brake->reverse
+     * latch never arms — the car brakes, it does NOT reverse. Once stopped it
+     * holds with no brake (so auto-reverse can't engage) and no throttle, until
+     * the cop releases (target reaches 0 speed) and encounter_active clears. */
+    if (encounter_active) {
+        TD5_Actor *a_actor = td5_game_get_actor(slot);
+        if (speed >= 100) {
+            s_throttle[slot] = (int16_t)0xFF00;  /* full brake (forward gear) */
+            s_brake[slot]    = 1;
+        } else {
+            s_throttle[slot] = 0;                /* stopped: coast-hold, no brake */
+            s_brake[slot]    = 0;
+        }
+        s_reverse_req[slot] = 0;
+        s_handbrake[slot]   = 0;
+        if (a_actor) ((uint8_t *)a_actor)[0x36F] = 1;  /* forward gear — never reverse */
     }
 
     /* ---- NOS / Horn ---- */

@@ -153,6 +153,8 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh);
 void td5_render_actors_for_view(int view_index);
 void td5_render_set_vehicle_mesh(int slot, TD5_MeshHeader *mesh);
 TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot);
+/* [POLICE rewrite] Dedicated police mesh drawn over cop slots (NULL = none). */
+void td5_render_set_cop_mesh(TD5_MeshHeader *mesh);
 
 /* --- Projection --- */
 void td5_render_configure_projection(int width, int height);

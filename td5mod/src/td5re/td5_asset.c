@@ -3820,6 +3820,68 @@ int td5_asset_load_traffic_model(int model_index, int slot)
     return 1;
 }
 
+/* [POLICE rewrite 2026-06-19] Load a dedicated POLICE mesh for cop cars.
+ *
+ * Unlike td5_asset_load_traffic_model this is NOT bound to an actor slot: it
+ * loads model<N>.prr + skin<N>.tga into a DEDICATED texture page (clear of the
+ * 6 shared traffic pages, so loading the police skin can't recolour ordinary
+ * traffic) and RETURNS the prepared mesh. td5_render keeps the pointer and
+ * draws it over any slot that is a cop (td5_ai_actor_is_cop). Loaded once per
+ * race; the result is cached per model index so a same-model reload is free
+ * and never leaks. Returns NULL if the police model isn't present (caller then
+ * falls back to the slot's ordinary mesh). */
+#define TD5_COP_TEXTURE_PAGE 850   /* free: between traffic (820-825) and FE (900+) */
+TD5_MeshHeader *td5_asset_load_cop_mesh(int model_index)
+{
+    static TD5_MeshHeader *s_cached_mesh = NULL;
+    static int             s_cached_index = -1;
+
+    if (model_index < 0 || model_index >= TD5_TRAFFIC_MODEL_COUNT)
+        return NULL;
+    if (s_cached_mesh && s_cached_index == model_index)
+        return s_cached_mesh;   /* already loaded this race */
+
+    char mesh_name[32], skin_name[32];
+    snprintf(mesh_name, sizeof(mesh_name), "model%d.prr", model_index);
+    snprintf(skin_name, sizeof(skin_name), "skin%d.tga",  model_index);
+
+    int mesh_size = 0;
+    void *mesh_data = td5_asset_open_and_read(mesh_name, TD5_TRAFFIC_ZIP, &mesh_size);
+    if (!mesh_data || mesh_size < (int)sizeof(TD5_MeshHeader)) {
+        if (mesh_data) free(mesh_data);
+        TD5_LOG_W(LOG_TAG, "cop mesh: model%d.prr not found/too small in %s",
+                  model_index, TD5_TRAFFIC_ZIP);
+        return NULL;
+    }
+
+    TD5_MeshHeader *mesh = (TD5_MeshHeader *)mesh_data;
+    td5_track_prepare_mesh_resource(mesh);
+
+    char png_path[256];
+    int skin_ok = 0;
+    if (td5_asset_resolve_png_path(skin_name, TD5_TRAFFIC_ZIP, png_path, sizeof(png_path)))
+        skin_ok = td5_asset_load_png_texture(TD5_COP_TEXTURE_PAGE, png_path, TD5_COLORKEY_NONE);
+    if (!skin_ok)
+        TD5_LOG_W(LOG_TAG, "cop mesh: skin%d PNG not found (cop will draw untextured)",
+                  model_index);
+
+    mesh->texture_page_id = (int16_t)TD5_COP_TEXTURE_PAGE;
+    TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+    for (int c = 0; c < mesh->command_count; c++)
+        cmds[c].texture_page_id = (int16_t)TD5_COP_TEXTURE_PAGE;
+
+    /* Replace any previously-cached cop mesh (different model / new race). */
+    if (s_cached_mesh && s_cached_mesh != mesh) {
+        free(s_cached_mesh);
+    }
+    s_cached_mesh  = mesh;
+    s_cached_index = model_index;
+    TD5_LOG_I(LOG_TAG, "cop mesh: model=%d loaded (%d verts, %d cmds, page=%d)",
+              model_index, mesh->total_vertex_count, mesh->command_count,
+              TD5_COP_TEXTURE_PAGE);
+    return mesh;
+}
+
 /* ========================================================================
  * Traffic Model Selection -- chain from track_index to model_index
  *

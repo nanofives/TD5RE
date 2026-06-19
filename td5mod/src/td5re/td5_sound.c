@@ -855,7 +855,12 @@ void td5_sound_update_police_siren(void)
     if (td5_game_is_wanted_mode()) return;
 
     nearest = td5_ai_nearest_chasing_cop(s_listener_pos[0][0], s_listener_pos[0][2]);
-    if (nearest < 0) return;   /* no active chase -> not refreshed -> fades out */
+    if (nearest < 0) {
+        /* No active chase -> stop the siren (begin fade-out). Just leaving it
+         * un-refreshed didn't reliably silence it, so stop it explicitly. */
+        td5_sound_stop_tracked_vehicle_audio();
+        return;
+    }
 
     if (s_siren_active_flag == 0) {
         s_tracked_veh_active_p2 = 1;

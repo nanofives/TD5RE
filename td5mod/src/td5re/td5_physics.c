@@ -1204,11 +1204,16 @@ static inline int32_t td5_physics_hard_catchup_mult(int slot)
  * ======================================================================== */
 #define CRASH_FX_ACUTE_MAG   250000   /* impact_mag above which a player hit is "acute" */
 /* [POLICE rewrite 2026-06-19] Approach-speed (iVar11) into a wall above which a
- * CHASED racer or a CHASING cop "breaks down" (ends the pursuit). Deliberately
- * high so only a genuine head-on crash counts, not a scrape; ordinary traffic
- * is never broken by walls (it routinely brushes TD6 rails). Tunable from
- * drive-test. */
+ * traffic car / cop / chased racer "breaks down" (halt + smoke; ends a pursuit).
+ * Deliberately high so only a genuine head-on crash counts, not a scrape.
+ * Tunable from drive-test. */
 #define COP_WALL_BREAK_VPERP  20000
+/* V2V impact magnitude above which a TRAFFIC car / cop / chased racer breaks
+ * down. Lower than CRASH_FX_ACUTE_MAG (the player crash-fx) because traffic
+ * crashes at lower speed, but still above the ordinary-tap range (~90k-180k,
+ * per the v2v_heavy_scatter logs) so a normal bump doesn't wreck a car — only a
+ * strong crash does. */
+#define COP_BREAK_MAG  200000
 /* Forward-speed scrub on an acute player hit, Q8 (0x100 = 1.0 = keep all speed).
  * 0x100 - 0x50 = 0xB0/256 ≈ 0.6875, i.e. shed ~31% of planar speed. Vertical
  * lift (linear_velocity_y) is intentionally left untouched. */
@@ -1582,9 +1587,12 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          * crash counts. Ordinary traffic is left alone. */
         if (iVar11 > COP_WALL_BREAK_VPERP) {
             int wslot = actor->slot_index;
-            if (td5_ai_actor_is_pursued(wslot) || td5_ai_cop_is_chasing(wslot)) {
+            /* Any TRAFFIC car / cop that slams a wall hard breaks down (halt +
+             * smoke); so does a chased racer (ends the pursuit). Un-chased racers
+             * keep control. */
+            if (wslot >= g_traffic_slot_base || td5_ai_actor_is_pursued(wslot)) {
                 td5_ai_mark_actor_broken_down(wslot);
-                TD5_LOG_I(LOG_TAG, "cop_wall_break: slot=%d vperp=%d (broke down)",
+                TD5_LOG_I(LOG_TAG, "wall_break: slot=%d vperp=%d (broke down)",
                           wslot, iVar11);
             }
         }
@@ -6109,10 +6117,13 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                 td5_physics_apply_acute_crash_fx(A, impact_mag);
             if (B->slot_index < g_traffic_slot_base)
                 td5_physics_apply_acute_crash_fx(B, impact_mag);
-            /* [POLICE rewrite 2026-06-19] A hard hit BREAKS DOWN a car: traffic
-             * and cops park + smoke; a chased racer's "broke down" also ends the
-             * pursuit. Ordinary (un-chased) racers keep control — they only get
-             * the crash-fx above. */
+        }
+        /* [POLICE rewrite 2026-06-19] A strong V2V crash BREAKS DOWN a car:
+         * traffic and cops HALT + smoke (like a real wreck); a chased racer's
+         * "broke down" ends the pursuit. Own (lower) threshold than the player
+         * crash-fx so slower traffic-vs-traffic wrecks still count. Ordinary
+         * (un-chased) racers keep control. */
+        if (impact_mag > COP_BREAK_MAG) {
             if (A->slot_index >= g_traffic_slot_base ||
                 td5_ai_actor_is_pursued(A->slot_index))
                 td5_ai_mark_actor_broken_down(A->slot_index);

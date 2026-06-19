@@ -285,6 +285,11 @@ void        td5_asset_set_human_td6_color(int slot, int rgb);
  */
 int td5_asset_load_traffic_model(int model_index, int slot);
 
+/* [POLICE rewrite] Load a dedicated POLICE mesh (model<N>.prr + skin) into its
+ * own texture page and RETURN it (not slot-bound), cached per race. td5_render
+ * draws it over cop slots. NULL if the model is absent. See td5_asset.c. */
+TD5_MeshHeader *td5_asset_load_cop_mesh(int model_index);
+
 /**
  * Resolve the traffic model index for a given race slot (0..5) based on the
  * active track. Mirrors the two-level lookup chain inside

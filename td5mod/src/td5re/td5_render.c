@@ -2904,6 +2904,12 @@ TD5_MeshHeader *td5_render_get_vehicle_mesh(int slot)
     return s_vehicle_meshes[slot];
 }
 
+/* [POLICE rewrite 2026-06-19] The dedicated police mesh drawn over cop slots
+ * (set once per race by td5_game from td5_asset_load_cop_mesh; NULL = none, cops
+ * then draw their ordinary traffic mesh). */
+static TD5_MeshHeader *s_cop_mesh = NULL;
+void td5_render_set_cop_mesh(TD5_MeshHeader *mesh) { s_cop_mesh = mesh; }
+
 /* When set, td5_render_apply_page_blend_preset skips its preset override so
  * the caller-installed TD5_PRESET_SKY (z_test=1, z_write=0) survives the
  * batch flush. Without this, the page-type→preset remap inside
@@ -3456,7 +3462,12 @@ void td5_render_actors_for_view(int view_index)
         for (int slot = 0; slot < total_actors; slot++) {
             if (s_photobooth_active && slot != 0) continue;  /* booth: player car only */
             TD5_Actor *actor = td5_game_get_actor(slot);
-            TD5_MeshHeader *mesh = td5_render_get_vehicle_mesh(slot);
+            /* [POLICE rewrite 2026-06-19] Draw the dedicated police mesh over any
+             * cop slot (idle or chasing) so cops read as police cars in traffic,
+             * not ordinary cars. VISUAL only — physics/wheels/HUD still use the
+             * slot's real mesh. Falls back to the slot mesh if no cop mesh. */
+            TD5_MeshHeader *mesh = (s_cop_mesh && td5_ai_actor_is_cop(slot))
+                                   ? s_cop_mesh : td5_render_get_vehicle_mesh(slot);
             TD5_Mat3x3 view_rot;
             TD5_Vec3f render_pos;
             float depth;
@@ -3814,10 +3825,12 @@ void td5_render_actors_for_view(int view_index)
             int wanted_smoke_ok = g_td5.wanted_mode_enabled != 0 &&
                                   slot < TD5_MAX_RACER_SLOTS &&
                                   g_wanted_damage_state[slot] == 0;
-            /* [POLICE rewrite 2026-06-19] A broken-down vehicle (traffic, cop, or
-             * a chased racer that crashed) smokes from its chassis. Covers all
-             * slots, not just racers, so traffic/cops smoke too. */
-            int broken_smoke_ok = td5_ai_actor_is_broken_down(slot);
+            /* [POLICE rewrite 2026-06-19] A broken-down TRAFFIC car or COP smokes
+             * from its chassis. Restricted to non-racers (slot >= traffic base):
+             * a chased racer / the player is also flagged broken-down to END the
+             * chase on a hard crash, but the player should NOT smoke for it (that
+             * read as "smoke on my own car"). Only traffic/cops get the smoke. */
+            int broken_smoke_ok = !is_racer && td5_ai_actor_is_broken_down(slot);
             if (!(slot == camera_target_slot && camera_preset_active)) {
                 /* Orig 0x40C7A5: SpawnRandomVehicleSmokePuff(actor, slot) —
                  * engine-rev gated random smoke puff. Called per visible

@@ -2198,15 +2198,28 @@ int td5_game_init_race_session(void) {
     if (g_td5.traffic_enabled
         && !g_td5.time_trial_enabled
         && !g_td5.drag_race_enabled
-        && !g_td5.network_active
+        /* [POLICE rewrite 2026-06-19] Traffic now runs in net races, so load its
+         * meshes here too (was gated !network_active when net had no traffic) —
+         * otherwise net traffic/cops would be invisible. */
         && g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS) {
         int traffic_loaded = 0;
+        /* [POLICE rewrite 2026-06-19] The per-track POLICE car lives at a fixed
+         * traffic-pool slot (TD5 = slot 3, the original cop-slot-9 model; TD6
+         * city = slot 5, the city police car). Keep CIVILIAN traffic OFF that
+         * slot so the only police-liveried cars on the road are actual cops
+         * (which draw the police mesh via the cop override) — otherwise the
+         * road fills with police-looking civilians and the player can't tell
+         * which car will give chase. */
+        int police_pool_slot =
+            (td5_asset_td6_city_traffic_base(g_active_td6_level) >= 0) ? 5 : 3;
         for (int ti = 0; ti < TD5_MAX_TRAFFIC_SLOTS; ti++) {
             int traffic_slot  = g_traffic_slot_base + ti;  /* slots 6..21 (legacy base) */
             /* Only 6 distinct traffic car models exist per track; slots past the
              * 6th reuse them (model_slot wraps, matching the skin-page wrap in
              * td5_asset_load_traffic_model). */
             int model_slot    = ti % 6;
+            if (model_slot == police_pool_slot)
+                model_slot = 0;   /* civilians never use the police model */
             int traffic_model = td5_asset_resolve_traffic_model_index(
                 g_td5.track_index, /*reverse=*/0, model_slot);
             if (traffic_model < 0 &&
@@ -2260,7 +2273,32 @@ int td5_game_init_race_session(void) {
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 5b/19: traffic vehicle assets loaded (%d/%d slots, track_index=%d)",
                   traffic_loaded, TD5_MAX_TRAFFIC_SLOTS, g_td5.track_index);
+
+        /* [POLICE rewrite 2026-06-19] Resolve + load each track's DEDICATED
+         * police mesh so cops read as the right police car (not an ordinary
+         * car). The original speeding cop was traffic slot 9 = traffic-pool
+         * slot 3, so pool slot 3 is the game's per-track police model (e.g.
+         * Moscow = model 12, the ГАИ van). A TD6 city uses that city's police
+         * model (pool slot 5 = city_base+5, e.g. London lopol=36). Only when a
+         * track has no dedicated police model (e.g. a circuit with no traffic
+         * row) do we fall back to the London police car (36). Cosmetic, loaded
+         * once on its own texture page; NULL -> cops draw their normal mesh. */
+        {
+            int td6_base  = td5_asset_td6_city_traffic_base(g_active_td6_level);
+            int cop_model;
+            if (td6_base >= 0) {
+                cop_model = td6_base + 5;                /* TD6 city police */
+            } else {
+                cop_model = td5_asset_resolve_traffic_model_index(
+                                g_td5.track_index, /*reverse=*/0, /*pool slot*/3);
+                if (cop_model < 0) cop_model = 36;       /* fallback: London police */
+            }
+            td5_render_set_cop_mesh(td5_asset_load_cop_mesh(cop_model));
+            TD5_LOG_I(LOG_TAG, "InitRace step 5b: cop mesh model=%d (td6_base=%d track=%d)",
+                      cop_model, td6_base, g_td5.track_index);
+        }
     } else {
+        td5_render_set_cop_mesh(NULL);   /* no traffic -> no cops -> no cop mesh */
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 5b/19: traffic disabled (traffic_enabled=%d time_trial=%d drag=%d net=%d split=%d traffic_base=%d)",
                   g_td5.traffic_enabled, g_td5.time_trial_enabled,
@@ -5884,8 +5922,12 @@ int td5_game_run_race_frame(void) {
     }
     /* [POLICE rewrite] Drive the cop-chase siren from the nearest actively-
      * chasing traffic cop (gated by the POLICE option), distance-attenuated to
-     * the local camera. Cosmetic / post-sim — no netplay effect. */
-    td5_sound_update_police_siren();
+     * the local camera. Cosmetic / post-sim — no netplay effect. Silenced while
+     * the pause menu is up (the sim is frozen — no siren on pause). */
+    if (s_pause_menu_active)
+        td5_sound_stop_tracked_vehicle_audio();
+    else
+        td5_sound_update_police_siren();
     td5_sound_update_audio_mix();
     /* [CONFIRMED @ 0x00440B00]: ambient weather (rain) sound runs each
      * frame after the vehicle audio mix, gated by weather particle density. */

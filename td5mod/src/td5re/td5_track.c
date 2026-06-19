@@ -4889,16 +4889,23 @@ int td5_track_normalize_actor_wrap(TD5_Actor *actor)
 
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
 
-    /* [task#20 2026-06-13] TD6 branch->main normalization (the rework). On a TD6
-     * track an actor on a branch corridor (current strip span +0x80 > ring) must
-     * normalize +0x82 to its PARALLEL MAIN span via the segment-remap table
-     * (TD6.exe FUN_0045d040 = td5_track_branch_to_main_span), NOT the TD5 modulo
-     * wrap below — otherwise the far branch index (e.g. 2163) leaks into +0x82 and
-     * progress / lap / checkpoint / the minimap dot all read the wrong position.
-     * Main-road spans (+0x80 <= ring) fall through to the faithful wrap. Lap count
-     * still comes from the accumulated counter (+0x84), unchanged. TD6-only +
-     * needs the (now-correctly-parsed) segment table. */
-    if (g_active_td6_level > 0 && s_jump_entries && s_jump_entry_count > 0) {
+    /* [task#20 2026-06-13] Branch->main normalization (the rework). An actor on a
+     * branch corridor (current strip span +0x80 > ring) must normalize +0x82 to
+     * its PARALLEL MAIN span via the segment-remap table (TD6.exe FUN_0045d040 =
+     * td5_track_branch_to_main_span), NOT the modulo wrap below — otherwise the
+     * far branch index (e.g. 2163) leaks into +0x82 and the route-table reads /
+     * progress / lap / checkpoint / minimap dot all read the wrong position (a
+     * branch CAR then steers off garbage route bytes and vanishes, and its
+     * despawn distance reads hundreds of spans off).
+     *
+     * [POLICE/branch-traffic 2026-06-19] Originally gated on g_active_td6_level>0,
+     * but TD5 tracks (e.g. Moscow) ALSO have branch corridors with a jump table —
+     * their branch cars hit the exact same bug. The real requirement is simply
+     * "this track has a branch remap table" (s_jump_entries), which is parsed
+     * from STRIP.DAT for TD5 and TD6 alike, so drop the TD6 gate. Main-road spans
+     * (+0x80 <= ring) still fall through to the faithful modulo wrap; only actors
+     * actually on a branch corridor are affected. */
+    if (s_jump_entries && s_jump_entry_count > 0) {
         int raw_idx = (int)track_state[0];        /* +0x80: actual strip span */
         if (raw_idx > ring_length) {
             int mapped = td5_track_branch_to_main_span(raw_idx);
