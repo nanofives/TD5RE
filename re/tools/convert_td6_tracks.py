@@ -671,9 +671,21 @@ def _billboard_pages(names):
         # PALMS ('palma'/'palmb'/'palmleaf', e.g. Egypt/Hong Kong) are flat
         # vegetation cards exactly like point trees and must also face the camera
         # (user: "Egypt 2D trees don't rotate, look flat from some angles").
-        if "tree" not in nl and "trunk" not in nl and "palm" not in nl:
-            continue
-        if "treew" in nl or "wall" in nl or "backd" in nl or "fence" in nl:
+        is_foliage = ("tree" in nl or "trunk" in nl or "palm" in nl) and not (
+            "treew" in nl or "wall" in nl or "backd" in nl or "fence" in nl)
+        # [statue/landmark billboards 2026-06-19] The New York Statue of Liberty
+        # is a flat textured CARD ('1liberty1'/'1liberty2', NY texture1.zip pages
+        # 294/295) that the de-indexer otherwise emits as world-fixed solid
+        # geometry (btag=0), so it stays edge-on / flat from some camera angles.
+        # The user wants it to always face the camera like the tree sprites.
+        # Match by NAME ('liberty') so the flag is data-driven and CANNOT leak to
+        # any other track: 'liberty' appears ONLY in NY's texture1.zip (verified
+        # across all TD6 texture0..14.zip — Paris/Rome statues use '*Statu*'
+        # names and are deliberately NOT matched here to avoid changing them).
+        # Like trees, the liberty card is split into its own sub-mesh and
+        # base-anchored, so neighbouring harbour water/walls stay world-fixed.
+        is_landmark = "liberty" in nl
+        if not (is_foliage or is_landmark):
             continue
         out.add(i)
     return frozenset(out)

@@ -1371,6 +1371,7 @@ static const struct { short level, page; } k_td6_banner_pages[] = {
 static int s_level_pass_active   = 0;  /* set only while drawing level geometry */
 static int s_banner_cull         = -1; /* -1 uninit; 0 off; 1 on (env TD5RE_BANNER_CULL) */
 static int s_banner_cull_keep_pos = 0; /* which screen-winding sign faces the camera */
+static int s_banner_cull_revflip  = -1; /* [#9] auto-flip kept side in reverse (env TD5RE_TD6_BANNER_REVFLIP) */
 
 static int td6_is_banner_page(int page)
 {
@@ -1517,7 +1518,14 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         /* [banners] one-sided cull for track sign panels only (see
          * k_td6_banner_pages). Everything else keeps CullMode=NONE. */
         if (s_level_pass_active && s_banner_cull && td6_is_banner_page(tex_page)) {
-            int facing_away = s_banner_cull_keep_pos ? (cross < 0.0f) : (cross > 0.0f);
+            /* [#9 2026-06-19] Auto-flip the kept (camera-facing) winding sign in
+             * reverse — each P2P banner panel's screen winding flips when driven
+             * backward, so the forward keep-side would cull the now-camera-facing
+             * face and the banners disappear. Scoped to banner pages in the level
+             * pass only (never other geometry). TD5RE_TD6_BANNER_REVFLIP=0 reverts. */
+            int keep_pos = s_banner_cull_keep_pos;
+            if (s_banner_cull_revflip == 1 && g_td5.reverse_direction) keep_pos = !keep_pos;
+            int facing_away = keep_pos ? (cross < 0.0f) : (cross > 0.0f);
             if (facing_away) {
                 s_debug_clip_backface_rejects++;
                 return;
@@ -2552,8 +2560,15 @@ void td5_render_span_display_list(void *display_list_block)
         /* Default keeps the front (text-readable) face; verified on London —
          * the other sign showed the mirrored back. FLIP swaps back if needed. */
         s_banner_cull_keep_pos = (f && f[0] && f[0] != '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "banner cull: %s (keep_sign=%s; TD5RE_BANNER_CULL/_FLIP)",
-                  s_banner_cull ? "ON" : "OFF", s_banner_cull_keep_pos ? "pos" : "neg");
+        /* [#9 2026-06-19] In REVERSE the banner panels' screen winding flips, so
+         * the forward-tuned kept side discards the camera-facing face and the
+         * banners vanish (Paris-backwards report). Auto-flip the kept side in
+         * reverse; "0" disables (then use _FLIP manually). */
+        const char *rf = getenv("TD5RE_TD6_BANNER_REVFLIP");
+        s_banner_cull_revflip = (rf && rf[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "banner cull: %s (keep_sign=%s revflip=%d; TD5RE_BANNER_CULL/_FLIP/_TD6_BANNER_REVFLIP)",
+                  s_banner_cull ? "ON" : "OFF", s_banner_cull_keep_pos ? "pos" : "neg",
+                  s_banner_cull_revflip);
     }
     s_level_pass_active = 1;
 
