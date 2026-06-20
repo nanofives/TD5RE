@@ -211,6 +211,7 @@ static void frontend_mp_setup_update(void);
 static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> position picker */
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
+static void frontend_update_difficulty_button_visibility(int diff_btn_idx);  /* [R5] hide when 0 opponents */
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
 static int frontend_carsel_hold_enabled(void);   /* [#2/#7] TD5RE_CARSEL_HOLD gate (defined below) */
 static int frontend_carsel_hold_repeat(void);    /* hold-to-scroll LEFT/RIGHT auto-repeat (defined below); reused by Quick Race */
@@ -723,26 +724,30 @@ void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focu
 
     const uint32_t dot_col    = 0xFFFFFFFFu;   /* white pips (always drawn) */
 
-    /* [#12] Chip + rim ONLY when focused — no background when unselected. The
-     * focused chip uses the amber rim (matches the menu-header / results amber)
-     * over a lit steel interior. */
-    if (focused) {
-        const uint32_t chip_focus = 0xFF3A4660u;   /* lit steel-blue interior */
-        const uint32_t rim_focus  = 0xFFFFCC33u;   /* amber rim when focused   */
+    /* [R6b 2026-06-19] ALWAYS draw the chip + border so the icon reads as a real
+     * button like its OK/Back siblings (the prior "[#12] focused-only chip" left it
+     * borderless/invisible when unselected — the reported regression). Unfocused =
+     * the dim blue button frame (matches fe_draw_button_frame_fill's unselected
+     * blue stops) over a transparent-ish steel interior; focused = the amber rim +
+     * lit interior. */
+    {
+        uint32_t chip_c, rim_c;
+        if (focused) { chip_c = 0xFF3A4660u; rim_c = 0xFFFFCC33u; }  /* lit steel + amber */
+        else         { chip_c = 0x90202838u; rim_c = 0xFF496BDCu; }  /* dim steel + button-blue rim */
         /* Prefer the procedural neon rounded-rect (crisp at any res); fall back
          * to a solid quad + a manual 4-edge border when shapes aren't available. */
         if (td5_vui_shapes_available()) {
             td5_vui_roundrect(px, py, pw, ph,
                               5.0f * sy, 5.0f * sy,     /* corner radii */
                               2.0f * sx, 2.0f * sy,     /* rim thickness */
-                              rim_focus, rim_focus, rim_focus, chip_focus, 1.0f);
+                              rim_c, rim_c, rim_c, chip_c, 1.0f);
         } else {
-            td5_vui_quad(px, py, pw, ph, chip_focus, -1, 0, 0, 0, 0);
+            td5_vui_quad(px, py, pw, ph, chip_c, -1, 0, 0, 0, 0);
             float bx = 2.0f * sx, byb = 2.0f * sy;
-            td5_vui_quad(px, py, pw, byb, rim_focus, -1, 0, 0, 0, 0);            /* top    */
-            td5_vui_quad(px, py + ph - byb, pw, byb, rim_focus, -1, 0, 0, 0, 0); /* bottom */
-            td5_vui_quad(px, py, bx, ph, rim_focus, -1, 0, 0, 0, 0);            /* left   */
-            td5_vui_quad(px + pw - bx, py, bx, ph, rim_focus, -1, 0, 0, 0, 0);  /* right  */
+            td5_vui_quad(px, py, pw, byb, rim_c, -1, 0, 0, 0, 0);            /* top    */
+            td5_vui_quad(px, py + ph - byb, pw, byb, rim_c, -1, 0, 0, 0, 0); /* bottom */
+            td5_vui_quad(px, py, bx, ph, rim_c, -1, 0, 0, 0, 0);            /* left   */
+            td5_vui_quad(px + pw - bx, py, bx, ph, rim_c, -1, 0, 0, 0, 0);  /* right  */
         }
     }
 
@@ -2347,12 +2352,29 @@ void Screen_MpPosition(void) {
     /* [#6] CHANGE CAMERA cycles the split LAYOUT (replaces the removed LEFT/RIGHT
      * grid-mode change). Any player's CHANGE CAMERA press advances the layout;
      * shrinking the grid re-packs every cell so the permutation stays a valid
-     * bijection. Keyboard + joystick via the per-player input getter. */
+     * bijection.
+     *
+     * [R3 2026-06-19] The prior pad path went through the AGGREGATED scan reader
+     * (td5_plat_input_frontend_nav, via td5_input_frontend_change_camera_pressed),
+     * which DECODES buttons 0/1/2 (A/B/X) but NOT button 7 (START/0x40) — so the
+     * pad's START never produced a 0x40 bit and the layout never cycled. The
+     * per-player device reader td5_plat_input_device_nav DOES decode START (0x40),
+     * so detect the camera/layout button straight from each player's OWN pad here
+     * with a per-player edge latch. Also accept X (0x80) — that IS in the scan set
+     * and is free on this screen — so either a START or an X press cycles the grid.
+     * Keyboard CHANGE-VIEW still flows via the getter. */
     {
         int lcnt = 1, cam = 0;
+        static uint8_t s_pos_cam_held[TD5_MAX_HUMAN_PLAYERS];
         mp_split_layouts(n, &lcnt);
-        for (p = 0; p < n; p++)
-            if (td5_input_frontend_change_camera_pressed(p)) { cam = 1; break; }
+        for (p = 0; p < n; p++) {
+            int dev = s_mp_join_device[p];
+            uint32_t db = (dev > 0) ? td5_plat_input_device_nav(dev) : 0u;
+            int pad_now = (db & (0x40u | 0x80u)) ? 1 : 0;       /* START or X */
+            int pad_edge = (pad_now && !s_pos_cam_held[p]) ? 1 : 0;
+            s_pos_cam_held[p] = (uint8_t)pad_now;
+            if (pad_edge || td5_input_frontend_change_camera_pressed(p)) { cam = 1; }
+        }
         if (cam && lcnt > 1) {
             int q, nc, sel = (s_mp_layout_sel + 1) % lcnt;
             s_mp_layout_sel = sel;
@@ -2581,8 +2603,10 @@ void frontend_mp_position_render2(float sx, float sy) {
         if (!s_mp_player_ready[p]) all_ready = 0;
     }
 
-    /* Dim full-screen backdrop + title. */
-    td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xC0101018u, -1, 0, 0, 1, 1);
+    /* [R4a 2026-06-19] The full-screen darkening overlay (0xC0 alpha) made this
+     * screen read too OPAQUE — removed at user request so the MainMenu art shows
+     * through like the other MP setup steps. The per-cell tints + footer band below
+     * still provide enough contrast for the grid. */
     /* [#18b] Standard top header (Lunatica face) to match the other menus; fall
      * back to the old plain centred text only if the title font isn't ready. */
     if (td5_titlefont_ready())
@@ -2660,16 +2684,17 @@ void frontend_mp_position_render2(float sx, float sy) {
         char lbuf[80];
         const char *lname = (opts && s_mp_layout_sel >= 0 && s_mp_layout_sel < lcnt)
                             ? opts[s_mp_layout_sel].label : "SINGLE";
-        /* [#18c] Re-spaced so the small label lines don't overlap: the big nav
-         * line moves up to y=422 and the ~9px-cap small lines spread to 440 / 454
-         * / 466 (>=14px apart instead of the old 12px that clipped). */
-        td5_vui_text_centered(320.0f * sx, 422.0f * sy,
-                              "D-PAD: MOVE   A: READY   B: BACK", 0xFFFFFFFFu, sx, sy);
+        /* [R4b 2026-06-19] ONE clean WHITE instructions line — the change-camera
+         * (layout) hint is folded into it and the separate YELLOWISH "LAYOUT [..]"
+         * line that overlapped it is removed. START or X on the pad (kbd CHANGE
+         * VIEW) cycles the split LAYOUT; the current layout name is shown inline. */
         if (lcnt > 1)
-            snprintf(lbuf, sizeof lbuf, "CHANGE CAMERA: LAYOUT [%s]", lname);
+            snprintf(lbuf, sizeof lbuf,
+                     "D-PAD: MOVE   A: READY   B: BACK   START/X: LAYOUT [%s]", lname);
         else
-            snprintf(lbuf, sizeof lbuf, "LAYOUT: %s", lname);
-        mp_pos_small_centered(320.0f * sx, 440.0f * sy, lbuf, 0xFFFFE060u, sx, sy);
+            snprintf(lbuf, sizeof lbuf,
+                     "D-PAD: MOVE   A: READY   B: BACK   LAYOUT: %s", lname);
+        td5_vui_text_centered(320.0f * sx, 422.0f * sy, lbuf, 0xFFFFFFFFu, sx, sy);
         if (missing > 0) {
             int cidx = s_mp_missing_content[0];
             if (cidx < 0 || cidx >= MP_MISSING_CONTENT_COUNT) cidx = 0;
@@ -2852,13 +2877,16 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
         /* [#3] Cap pane WIDTH at the 3x3-equivalent (640/3) and centre the row so
          * 1-2 panes don't render edge to edge. MUST match the (capped) setup panes
          * in td5_frontend.c so this overlay's PROFILE chip + panel sit on top of
-         * them — see mp_panel_capped's SCOPE NOTE and the REPORT. */
+         * them — see mp_panel_capped's SCOPE NOTE and the REPORT.
+         * [R1 2026-06-19] Mirror frontend_mp_setup_render's 40px top title band so
+         * the PROFILE chip/panel track the panes that were pushed below the title. */
+        const float mp_title_band = 40.0f;
         float pane_w, row_x0 = 0.0f;
-        float pane_h = 480.0f / (float)rows;
+        float pane_h = (480.0f - mp_title_band) / (float)rows;
         mp_panel_capped(640.0f, cols, &pane_w, &row_x0);
         for (p = 0; p < n; p++) {
             int col = p % cols, row = p / cols;
-            float px = row_x0 + (float)col * pane_w, py = (float)row * pane_h;
+            float px = row_x0 + (float)col * pane_w, py = mp_title_band + (float)row * pane_h;
             float cx = px + pane_w * 0.5f;
             uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
             int sub = s_mp_setup_sub[p];
@@ -3022,7 +3050,12 @@ static int frontend_carsel_hold_repeat(void) {
     uint32_t held = 0;
     if (td5_plat_input_key_pressed(0xCB) || (s_fe_gamepad_nav & 0x01)) held |= 1; /* Left  */
     if (td5_plat_input_key_pressed(0xCD) || (s_fe_gamepad_nav & 0x02)) held |= 2; /* Right */
-    if (held == 3) held = 0;            /* both at once: ambiguous, ignore */
+    /* [R2 2026-06-19] If BOTH show at once (a noisy/biased analog X axis on one
+     * pad can leave the opposite bit asserted), keep the freshly-pressed direction
+     * instead of zeroing the pair — the old `held == 3 -> 0` cancelled a legitimate
+     * LEFT whenever a lingering RIGHT bit was present, which read as "LEFT does
+     * nothing". prev_held isolates the newly-risen bit. */
+    if (held == 3) { uint32_t fresh = held & ~prev_held; held = fresh ? fresh : 0; }
 
     uint32_t now = td5_plat_time_ms();
     uint32_t edge = held & ~prev_held;
@@ -3053,7 +3086,10 @@ static int frontend_trksel_hold_repeat(void) {
     uint32_t held = 0;
     if (td5_plat_input_key_pressed(0xCB) || (s_fe_gamepad_nav & 0x01)) held |= 1; /* Left  */
     if (td5_plat_input_key_pressed(0xCD) || (s_fe_gamepad_nav & 0x02)) held |= 2; /* Right */
-    if (held == 3) held = 0;            /* both at once: ambiguous, ignore */
+    /* [R2 2026-06-19] Prefer the freshly-pressed direction when both bits show at
+     * once (see frontend_carsel_hold_repeat) instead of zeroing the pair, so a
+     * legitimate LEFT isn't cancelled by a lingering/biased RIGHT bit. */
+    if (held == 3) { uint32_t fresh = held & ~prev_held; held = fresh ? fresh : 0; }
 
     uint32_t now = td5_plat_time_ms();
     uint32_t edge = held & ~prev_held;
@@ -3898,6 +3934,22 @@ static void frontend_update_laps_button_visibility(int laps_btn_idx) {
     if (!is_circuit && s_selected_button == laps_btn_idx) s_selected_button = 0;
 }
 
+/* [R5 2026-06-19] Per-race AI difficulty is meaningless with no AI cars, so HIDE
+ * the difficulty row (button 6) whenever the opponent count is 0. Also stays
+ * hidden in Quick Race flow (flow_context==2), which already hides it at create
+ * time. Called on init and whenever the opponent count changes, so toggling
+ * opponents to/from 0 shows/hides the row live. Don't leave nav focus parked on
+ * a hidden row. */
+static void frontend_update_difficulty_button_visibility(int diff_btn_idx) {
+    if (diff_btn_idx < 0 || diff_btn_idx >= s_button_count) return;
+    int hide = (s_num_ai_opponents <= 0) || (s_flow_context == 2);
+    s_buttons[diff_btn_idx].hidden   = hide;
+    s_buttons[diff_btn_idx].disabled = hide;
+    TD5_LOG_I(LOG_TAG, "Difficulty row: opponents=%d flow=%d -> %s",
+              s_num_ai_opponents, s_flow_context, hide ? "hidden" : "SHOWN");
+    if (hide && s_selected_button == diff_btn_idx) s_selected_button = 0;
+}
+
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label) {
     if (dir_btn_idx < 0 || dir_btn_idx >= s_button_count) return;
     int has_reverse = (s_selected_track < 0)
@@ -3970,9 +4022,11 @@ void Screen_TrackSelection(void) {
          * OK. Quick Race (flow context 2) keeps the Game Options global — the
          * row is still CREATED there (index stability: OK=6→7, Back=7→8) but
          * hidden+disabled, exactly like the Quick Race Players row. */
-        { int bd = frontend_create_button(SNK_DifficultyButTxt, 120, 337, 224, 32); /* 6: AI difficulty */
-          if (bd >= 0 && s_flow_context == 2) { s_buttons[bd].hidden = 1; s_buttons[bd].disabled = 1; }
-        }
+        frontend_create_button(SNK_DifficultyButTxt, 120, 337, 224, 32); /* 6: AI difficulty */
+        /* [R5] Hide the difficulty row when there are 0 opponents (and still in
+         * Quick Race flow). frontend_update_difficulty_button_visibility folds in
+         * the old flow_context==2 hide; refreshed in case 4 when opponents change. */
+        frontend_update_difficulty_button_visibility(6);
         s_race_difficulty = g_td5.difficulty_tier;
         if (s_race_difficulty < 0) s_race_difficulty = 0;
         if (s_race_difficulty > 2) s_race_difficulty = 2;
@@ -4129,6 +4183,8 @@ void Screen_TrackSelection(void) {
                     if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
                     if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
                         s_num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
+                    /* [R5] Show/hide the difficulty row live as opponents cross 0. */
+                    frontend_update_difficulty_button_visibility(6);
                 } else if (selected_button == 3 && !s_buttons[3].hidden) {  /* laps (value+1) */
                     s_game_option_laps += delta;
                     if (s_game_option_laps < 0) s_game_option_laps = 0;
@@ -4209,8 +4265,18 @@ void Screen_TrackSelection(void) {
                 int r_now  = td5_plat_input_key_pressed(0x13) ? 1 : 0;
                 int r_edge = (r_now && !s_trksel_r_held) ? 1 : 0;
                 s_trksel_r_held = r_now;
-                int do_random = (s_trksel_rand_btn >= 0 && s_button_index == s_trksel_rand_btn) ||
-                                r_edge;
+                /* [R6a 2026-06-19] Fire ONLY on an EXPLICIT activation of the rand
+                 * button (A/Enter or a click set s_button_index == rand) or the R
+                 * key. Require the activation to AGREE with the live focus
+                 * (s_selected_button) so a stray s_button_index that aliases the
+                 * rand index (e.g. an overlapping/hidden-rect click while focus is
+                 * elsewhere, or an index collision in a flow with fewer buttons)
+                 * can't randomize on a focus-change/leave. The R key is its own
+                 * unambiguous trigger and bypasses the focus check. */
+                int btn_activated = (s_trksel_rand_btn >= 0 &&
+                                     s_button_index == s_trksel_rand_btn &&
+                                     s_selected_button == s_trksel_rand_btn);
+                int do_random = btn_activated || r_edge;
                 if (do_random) {
                     int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
                     if (frontend_pick_random_track(bound)) {

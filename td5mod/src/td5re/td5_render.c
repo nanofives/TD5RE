@@ -3536,6 +3536,22 @@ void td5_render_actors_for_view(int view_index)
                     continue;
             }
 
+            /* [#R13 ghostdiag 2026-06-19] Pin which slots actually render (the
+             * "traffic ghosts" the user still sees with few opponents). The
+             * state==3 gate above already drops inactive racers, so anything that
+             * logs here is genuinely drawn — its state/fade/is_traffic reveals
+             * whether the ghosts are active opponents, lingering traffic, etc.
+             * Logs the first view's surviving slots ~every 240 frames -> engine.log. */
+            {
+                static uint32_t s_gd = 0;
+                if (view_index == 0 && slot == 0) s_gd++;
+                if (view_index == 0 && (s_gd % 240u) == 0u)
+                    TD5_LOG_I(LOG_TAG,
+                        "[ghostdiag] slot=%d state=%d fade=%d is_traffic=%d base=%d total=%d",
+                        slot, td5_game_get_slot_state(slot), actor_fade,
+                        (slot >= g_traffic_slot_base), g_traffic_slot_base, total_actors);
+            }
+
             /* Span-distance actor cull (mirrors original RenderRaceActorForView
              * @ 0x0040C2FD): for non-owner actors, compute |delta_spans| with
              * ring wrap and skip body+wheel+smoke render when delta >= cull

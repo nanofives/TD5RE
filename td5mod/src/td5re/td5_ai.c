@@ -659,6 +659,14 @@ int td5_ai_nearest_chasing_cop(int32_t listener_x, int32_t listener_z) {
     if (!g_actor_base) return -1;
     for (int s = 0; s < TD5_MAX_TOTAL_ACTORS; s++) {
         if (!td5_ai_cop_is_chasing(s)) continue;
+        /* [#R12 2026-06-19] Only sound the siren when a cop is chasing a HUMAN
+         * player's car, not an AI opponent — otherwise the player heard a siren
+         * "despite not being on a chase" (a cop was pursuing a nearby AI).
+         * g_slot_state[tgt]==1 marks a human racer slot; cop targets are always
+         * racer slots (< TD5_MAX_RACER_SLOTS). */
+        int tgt = g_cop_target[s];
+        if (tgt < 0 || tgt >= TD5_MAX_RACER_SLOTS || g_slot_state[tgt] != 1)
+            continue;
         char *a = actor_ptr(s);
         int64_t dx = (int64_t)ACTOR_I32(a, ACTOR_WORLD_POS_X) - listener_x;
         int64_t dz = (int64_t)ACTOR_I32(a, ACTOR_WORLD_POS_Z) - listener_z;

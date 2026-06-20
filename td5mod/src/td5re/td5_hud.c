@@ -1533,8 +1533,8 @@ static void hud_draw_mp_car_labels(void)
     static float NEAR_D = -1.0f, FAR_D = -1.0f, CUT_D = -1.0f;
     if (NEAR_D < 0.0f) {
         NEAR_D = hud_mp_label_dist("TD5RE_MP_LABEL_NEAR",  6000.0f);  /* full-size plateau */
-        FAR_D  = hud_mp_label_dist("TD5RE_MP_LABEL_FAR",  30000.0f);  /* shrink-floor distance */
-        CUT_D  = hud_mp_label_dist("TD5RE_MP_LABEL_CUT",  42000.0f);  /* hard cutoff */
+        FAR_D  = hud_mp_label_dist("TD5RE_MP_LABEL_FAR",  22000.0f);  /* shrink-floor distance */
+        CUT_D  = hud_mp_label_dist("TD5RE_MP_LABEL_CUT",  30000.0f);  /* hard cutoff (now true XZ dist) */
     }
     const float SCALE_NEAR = 1.0f;           /* multiplier on the base text scale */
     const float SCALE_FAR  = 0.35f;
@@ -1589,11 +1589,21 @@ static void hud_draw_mp_car_labels(void)
             if (!td5_render_transform_and_project(wx, wy, wz, &sx, &sy, &sz, &rhw))
                 continue;                    /* behind the near plane */
             if (rhw <= 0.0f) continue;
-            float dist = 1.0f / rhw;         /* view-space depth (world units) */
+            /* [#R7 2026-06-19] Use the TRUE camera->car XZ distance, not the
+             * view-space depth (1/rhw). Depth underestimates distance for an
+             * off-axis car (a car far to the side reads "near"), which is why a
+             * far player's label kept popping in at certain camera angles. The
+             * true distance is angle-independent. g_camWorldPos[v] is the raw
+             * 24.8 camera world position for this pane; FP scales to world units
+             * to match NEAR_D/FAR_D/CUT_D. */
+            extern int g_camWorldPos[][3];
+            int64_t dcx = (int64_t)actor_world_x(slot) - (int64_t)g_camWorldPos[v][0];
+            int64_t dcz = (int64_t)actor_world_z(slot) - (int64_t)g_camWorldPos[v][2];
+            float dist = sqrtf((float)(dcx * dcx + dcz * dcz)) * FP;
             if (dist > CUT_D) continue;      /* too far -> no label */
 
-            /* Normalised 0..1 depth between NEAR_D (closest, t=0) and FAR_D
-             * (farthest, t=1); the SAME near/far cutoffs feed both ramps below. */
+            /* Normalised 0..1 between NEAR_D (closest, t=0) and FAR_D (farthest,
+             * t=1); the SAME near/far cutoffs feed both ramps below. */
             float t = (dist - NEAR_D) / (FAR_D - NEAR_D);
             if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
 
@@ -4021,6 +4031,30 @@ void td5_hud_render_overlays(float dt)
         s_cur_view = v;
         s_cur_flags = s_hud_flags[v];
         s_cur_scale = (float *)&s_view_layout[v];
+        s_hud_text_anchor_to_view = 1;   /* race text stays pane-anchored */
+        /* [#R8 2026-06-19] In MP split-screen, size the per-pane status text
+         * (race position, lap/total time, etc.) at the SCREEN scale like the
+         * FPS/MS overlay — the pane scale_x is sfrac-reduced so the labels read
+         * smaller than FPS. Only the QUEUED TEXT reads s_cur_scale->scale_x (via
+         * hud_active_text_scale); the speedo/minimap/countdown read
+         * vl->scale_x/_y directly, so pointing s_cur_scale at a temp layout with
+         * scale_x = the screen scale enlarges ONLY the text, while anchor=1 keeps
+         * it positioned in its pane. Knob TD5RE_MP_HUD_SCREEN_SCALE (default on). */
+        {
+            static int s_mp_screen_scale = -1;
+            if (s_mp_screen_scale < 0) {
+                const char *e = getenv("TD5RE_MP_HUD_SCREEN_SCALE");
+                s_mp_screen_scale = (!e || e[0] != '0') ? 1 : 0;
+            }
+            if (s_view_count > 1 && s_mp_screen_scale) {
+                static TD5_HudViewLayout s_status_layout;
+                s_status_layout = s_view_layout[v];          /* keep pane vp coords */
+                float ssx = g_render_width_f  * (1.0f / 640.0f);
+                float ssy = g_render_height_f * (1.0f / 480.0f);
+                s_status_layout.scale_x = (ssx < ssy) ? ssx : ssy;  /* screen scale, like FPS */
+                s_cur_scale = (float *)&s_status_layout;
+            }
+        }
         int actor_slot = g_actor_slot_map[v];
 
         TD5_HudViewLayout *vl = &s_view_layout[v];

@@ -1506,7 +1506,7 @@ after_flyin:
         extern int16_t g_actor_near_wall[];
         int wslot = g_actorSlotForView[v];
         if (wslot >= 0 && wslot < TD5_MAX_RACER_SLOTS && g_actor_near_wall[wslot] > 0) {
-            wall_zoom = 0.62f;          /* ~38% closer while pinned to a wall */
+            wall_zoom = 0.55f;          /* ~45% closer while pinned to a wall */
             g_actor_near_wall[wslot]--;
         }
     }

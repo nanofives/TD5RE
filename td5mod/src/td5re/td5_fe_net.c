@@ -324,6 +324,12 @@ void Screen_MultiplayerLobby(void) {
     case 0:
         frontend_init_return_screen(TD5_SCREEN_MP_LOBBY);
         TD5_LOG_I(LOG_TAG, "MP Lobby: init");
+        /* [R9 2026-06-19] Clear the simultaneous-grid flag on entry so a post-race
+         * return to THIS (local split-screen) lobby never inherits a stale
+         * s_mp_simul that blanks the global "MULTIPLAYER" header — the local-lobby
+         * partner to the title-suppression exemption + the NETWORK_LOBBY [#24]
+         * fix. The MP flow re-asserts s_mp_simul on the next CarSelection entry. */
+        s_mp_simul = 0;
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* [PERF 2026-06-06] Dropped a td5_input_enumerate_devices() here — it was a
          * ~120ms blocking IDirectInput8::EnumDevices on the lobby's entry frame.

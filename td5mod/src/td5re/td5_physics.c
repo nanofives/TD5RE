@@ -1525,15 +1525,21 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
      * is negative when the probe is outside the rail; the more negative, the
      * deeper the clip. Racer slots only (traffic has no camera). Knob
      * TD5RE_WALL_CAM_ZOOM (default on); "0" disables the zoom entirely. */
-    if (actor->slot_index >= 0 && actor->slot_index < TD5_MAX_RACER_SLOTS &&
-        penetration < -250) {
+    if (actor->slot_index >= 0 && actor->slot_index < TD5_MAX_RACER_SLOTS) {
         static int s_wall_cam = -1;
+        static int s_wall_cam_pen = 0;
         if (s_wall_cam < 0) {
             const char *e = getenv("TD5RE_WALL_CAM_ZOOM");
             s_wall_cam = (!e || e[0] != '0') ? 1 : 0;
+            const char *p = getenv("TD5RE_WALL_CAM_PEN");
+            s_wall_cam_pen = (p && p[0]) ? atoi(p) : 100;  /* min penetration to arm */
+            if (s_wall_cam_pen < 10) s_wall_cam_pen = 10;
         }
-        if (s_wall_cam)
-            g_actor_near_wall[actor->slot_index] = 8;   /* ~0.27s hold at 30Hz */
+        /* [#R11 2026-06-19] Lowered the arm threshold (was -250, rarely hit) and
+         * lengthened the hold (was 8 ticks — too short for the radius spring to
+         * visibly settle) so the zoom actually engages on a normal wall scrape. */
+        if (s_wall_cam && penetration < -s_wall_cam_pen)
+            g_actor_near_wall[actor->slot_index] = 22;  /* ~0.7s hold at 30Hz */
     }
 
     /* Pre-impulse attitude snapshot (slot 0) — lets us see whether wall

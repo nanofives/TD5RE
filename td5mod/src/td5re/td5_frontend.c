@@ -9419,11 +9419,16 @@ void td5_frontend_render_ui_rects(void) {
      * path, so exempt them:
      *   - NETWORK_LOBBY: a post-race return must not inherit a stale s_mp_simul
      *     that blanks its "NET PLAY" header [#24];
+     *   - MP_LOBBY (30): the LOCAL split-screen lobby is a DISTINCT screen from
+     *     NETWORK_LOBBY (11); the post-LOCAL-MP-race return lands here with
+     *     s_mp_simul still set, which blanked its "MULTIPLAYER" header — this was
+     *     the screen the prior NETWORK_LOBBY-only fix missed [R9 2026-06-19];
      *   - TRACK_SELECTION: the MP flow keeps s_mp_simul set across track-select
      *     (so backing out re-enters the car grid), which otherwise suppressed the
      *     shared "SELECT TRACK" header [#20]. */
     if (s_mp_simul &&
         s_current_screen != TD5_SCREEN_NETWORK_LOBBY &&
+        s_current_screen != TD5_SCREEN_MP_LOBBY &&
         s_current_screen != TD5_SCREEN_TRACK_SELECTION)
         title_visible = 0;
 
@@ -10139,7 +10144,10 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
      * matching the fe_race overlays so the position-picker/profile chips line up. */
     float pane_w, row_x0 = 0.0f;
     frontend_mp_panel_capped(cols, &pane_w, &row_x0);
-    float pane_h = 480.0f / (float)rows;
+    /* [R1] Reserve a top band for the "SELECT CAR" title so the panes start BELOW
+     * it instead of overlapping the title text. Panes occupy y=[MP_TITLE_BAND,480). */
+    const float mp_title_band = 40.0f;
+    float pane_h = (480.0f - mp_title_band) / (float)rows;
 
     /* Dim the MainMenu background (ramps up with the slide-in). */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
@@ -10162,7 +10170,7 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
         extern int frontend_mp_player_pane_cell(int);  /* defined in td5_fe_race.c */
         int cell = frontend_mp_player_pane_cell(p);
         int col = cell % cols, row = cell / cols;
-        float px = row_x0 + (float)col * pane_w, py = (float)row * pane_h;
+        float px = row_x0 + (float)col * pane_w, py = mp_title_band + (float)row * pane_h;
         float cx, pyr, pt, pe, rise;
         uint32_t rgb  = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;  /* chosen identity colour */
         uint32_t pcol = rgb | 0xFF000000u;
@@ -10527,7 +10535,10 @@ static void frontend_mp_setup_render(float sx, float sy) {
      * overlays (640/3 cap), so the name/colour row lines up underneath them. */
     float pane_w, row_x0 = 0.0f;
     frontend_mp_panel_capped(cols, &pane_w, &row_x0);
-    float pane_h = 480.0f / (float)rows;
+    /* [R1] Reserve a top band for the "PROFILE SELECTION" title so the panes start
+     * BELOW it instead of overlapping the title text. */
+    const float mp_title_band = 40.0f;
+    float pane_h = (480.0f - mp_title_band) / (float)rows;
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     /* [#18a] Profile/name-colour setup: by default DON'T darken the background so
@@ -10551,7 +10562,7 @@ static void frontend_mp_setup_render(float sx, float sy) {
 
     for (p = 0; p < n; p++) {
         int col = p % cols, row = p / cols;
-        float px = row_x0 + (float)col * pane_w, py = (float)row * pane_h;
+        float px = row_x0 + (float)col * pane_w, py = mp_title_band + (float)row * pane_h;
         float cx, pyr, pt, pe, rise, ax, ay, aw, ah;
         uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
         uint32_t pcol = rgb | 0xFF000000u;

@@ -2723,6 +2723,7 @@ uint32_t td5_plat_input_frontend_nav(void)
         if (js.rgbButtons[0] & 0x80) db |= 0x10;     /* A = confirm/select */
         if (js.rgbButtons[1] & 0x80) db |= 0x20;     /* B = back/cancel    */
         if (js.rgbButtons[2] & 0x80) db |= 0x80;     /* [#15] X = delete (name entry) */
+        if (js.rgbButtons[7] & 0x80) db |= 0x40;     /* [#R3] Start = layout/confirm (was only on device_nav) */
         if (db) {
             bits |= db;
             if (db & 0x10) s_plat_active_js = i;      /* A press marks this pad active */
