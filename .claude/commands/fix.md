@@ -298,66 +298,80 @@ Rules for this step:
 
 **Wait for an explicit "yes / merge / ship it" from the user.** Do NOT run this step automatically after Step 3. The user typically iterates across several worktrees before deciding which one is the keeper.
 
-When the user approves, merge the branch back into master in the main tree, push, then tear down the worktree:
+This is the **same single-shot robust flow as `/end` Steps 5–6** — merge under a lock, build-once-deploy-by-copy, push with reject-retry, then immediate junction-safe teardown. Resolve any conflicts **in this session** (don't punt them to the user). For the full rationale (merge lock, build-once-copy, junction safeguards) see `end.md`; the executable version is reproduced here so a mid-`/fix` approval can ship without invoking `/end` separately.
+
+When the user approves:
 
 ```bash
 cd C:/Users/maria/Desktop/Proyectos/TD5RE
 
-# Make sure the main tree is clean before merging. If there are uncommitted
-# changes here from non-/fix work, STOP and ask the user — do not stash or
-# discard their work.
-git status --porcelain
+# --- 1. Acquire the merge lock (serialize against parallel-session /end + /fix). ---
+LOCK="C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/.merge.lock"
+ACQUIRED=0
+for attempt in $(seq 1 40); do
+    if mkdir "${LOCK}" 2>/dev/null; then
+        printf 'tag=%s pid=%s ts=%s\n' "${SESSION_TAG}" "$$" "$(date +%s)" > "${LOCK}/owner"; ACQUIRED=1; break
+    fi
+    if [ -f "${LOCK}/owner" ]; then
+        LOCK_TS="$(awk -F= '/ts=/{print $NF}' "${LOCK}/owner" 2>/dev/null | tr -dc 0-9)"
+        [ -n "${LOCK_TS}" ] && [ $(( $(date +%s) - LOCK_TS )) -gt 900 ] && { echo "Reclaiming stale lock"; rm -rf "${LOCK}"; continue; }
+        echo "Another session holds the merge lock ($(cat "${LOCK}/owner")) — waiting…"
+    fi
+    ping -n 4 127.0.0.1 >/dev/null 2>&1 || true   # no-sleep ~3s wait (foreground sleep is blocked)
+done
+[ "${ACQUIRED}" -eq 1 ] || { echo "Could not acquire merge lock — retry shortly."; exit 1; }
 
-# HARD GUARD (pre-merge): abort if the branch would delete or modify anything
-# under original/ or re/ (outside re/assets/static/*.dat). These paths are
-# junctions or large tracked/runtime data and must never be touched by a /fix.
+# --- 2. Main tree must be clean (release lock + ask user if dirty from non-/fix work). ---
+[ -n "$(git status --porcelain)" ] && { echo "Main tree dirty — commit/stash first."; rm -rf "${LOCK}"; exit 1; }
+
+# --- 3. Re-sync if origin moved during the session (rebase branch + rebuild). ---
+git fetch origin master --quiet
+if [ "$(git rev-list --count master..origin/master)" -gt 0 ]; then
+    git checkout master && git merge --ff-only origin/master
+    git -C "${WORKTREE_DIR}" rebase origin/master   # conflicts → resolve in-session (see rules below)
+    ( cd "${WORKTREE_DIR}/td5mod/src/td5re" && ./build_all.bat 2>&1 | tail -20 )
+else
+    git checkout master
+fi
+
+# --- 4. Forbidden-path guard + precondition. ---
 BAD_DIFF="$(git diff --name-status master.."${SESSION_TAG}" \
-    | awk '$2 ~ /^(original\/|re\/)/ && $2 !~ /^re\/assets\/static\/.*\.dat$/ {print}')"
-if [ -n "${BAD_DIFF}" ]; then
-    echo "REFUSING TO MERGE — branch ${SESSION_TAG} touches forbidden paths:"
-    echo "${BAD_DIFF}"
-    echo ""
-    echo "These paths (original/**, re/** outside re/assets/static/*.dat) must"
-    echo "never be modified by a /fix branch. Inspect the branch manually before"
-    echo "deciding what to do."
-    exit 1
-fi
+    | awk '$2 ~ /^(original\/|re\/)/ && $2 !~ /^re\/(analysis|sessions|assets\/static\/.*\.dat)$/ {print}')"
+[ -n "${BAD_DIFF}" ] && { echo "REFUSING TO MERGE — forbidden paths:"; echo "${BAD_DIFF}"; rm -rf "${LOCK}"; exit 1; }
+test -d original && test -d re/assets || { echo "PRECONDITION FAILED: original/ or re/assets/ missing."; rm -rf "${LOCK}"; exit 1; }
 
-# Remember where original/ and re/ currently point so we can post-verify.
-test -d original && test -d re/assets || {
-    echo "PRECONDITION FAILED: main tree is missing original/ or re/assets/."
-    echo "Do NOT merge into a broken main tree. Investigate first."
-    exit 1
-}
-
-# Merge the worktree branch. Use --no-ff so the worktree's history stays
-# visible as a single logical fix, which helps when bisecting later.
+# --- 5. Merge + post-guard. ---
 git merge --no-ff "${SESSION_TAG}" -m "Merge ${SESSION_TAG}: <one-line description>"
-
-# HARD GUARD (post-merge): verify the merge didn't destroy original/ or re/.
-# If it did, revert the merge commit before pushing so main stays intact.
 if [ ! -d original ] || [ ! -d re/assets ]; then
-    echo "POST-MERGE FAILURE: original/ or re/assets/ disappeared after merge."
-    echo "Reverting the merge commit to protect the main tree."
-    git reset --hard ORIG_HEAD
-    echo "Main tree restored. Do NOT push. Investigate ${SESSION_TAG} before retrying."
-    exit 1
+    echo "POST-MERGE FAILURE: irreplaceable data gone. Reverting."; git reset --hard ORIG_HEAD; rm -rf "${LOCK}"; exit 1
 fi
 
-git push origin master
+# --- 6. BUILD ONCE, DEPLOY BY COPY: the worktree already built the merged tree. ---
+cp "${WORKTREE_DIR}/td5re.exe"         td5re.exe         2>/dev/null || echo "WARN: dev exe not copied"
+cp "${WORKTREE_DIR}/td5re_release.exe" td5re_release.exe 2>/dev/null || echo "WARN: release exe not copied"
 
-# Tear down: remove the worktree directory, then delete the merged branch.
-git worktree remove "${WORKTREE_DIR}"
-git branch -d "${SESSION_TAG}"
+# --- 7. Push (one reject-retry) + verify. ---
+if ! git push origin master 2>&1; then
+    git fetch origin master --quiet
+    git merge --ff-only origin/master || { echo "origin diverged — resolve manually."; rm -rf "${LOCK}"; exit 1; }
+    git push origin master
+fi
+git fetch origin master --quiet
+[ "$(git rev-list --count origin/master..master)" -gt 0 ] && { echo "Push pending — surface to user."; rm -rf "${LOCK}"; exit 1; }
+echo "origin/master in sync."
+
+# --- 8. Release lock (teardown only touches our own worktree). ---
+rm -rf "${LOCK}"
 ```
 
+**Then tear down immediately using the junction-safe block from [Abandoning a worktree](#abandoning-a-worktree) below** — pre-unlink the mingw junction (PowerShell reparse-delete), verify it's gone, `git worktree remove --force`, pre/post canary, `git branch -d`. Do NOT use the bare `git worktree remove` without the pre-unlink; `--force` follows the junction into main and wipes the toolchain.
+
 Rules for this step:
-- If `git merge` reports conflicts (another session merged something that collides), STOP and report the conflicting files to the user — do NOT auto-resolve.
-- If `git merge` reports `Your local changes ... would be overwritten by merge` (main tree has uncommitted work), STOP and report the file list. Do NOT stash or discard. The user must commit/clean main first; then either retry the merge, or — if the fix branch was created from old master and the merge would back out unrelated work — fall back to `git cherry-pick <fix-commits>` onto current master. Either path STILL requires the same post-merge guard, push, and teardown below.
-- If `git worktree remove` fails because files are locked (e.g., `td5re.exe` still running), ask the user to close the game, then retry. Do NOT use `--force` without confirmation.
-- If `git push` fails (no remote, auth error, etc.), report the error to the user and stop — do not retry destructively. The merge commit is already in local master, so there's nothing to clean up.
-- Only delete the branch with `-d` (safe, rejects unmerged branches). Never use `-D`.
-- **Push is mandatory.** Whether the fix landed via `git merge --no-ff` or via fallback `git cherry-pick`, the workflow is not done until `git push origin master` succeeds and `git rev-list --count origin/master..master` returns `0`. Verify both before declaring the fix shipped.
+- **Resolve conflicts in this session** (rebase in step 3 or the merge in step 5): read both sides, preserve both intents, `git add` + continue, build to verify. Escalate to the user ONLY for genuinely incompatible-intent conflicts. Never `-X ours/theirs` blind, never `git rebase --skip`. (Same protocol as `/end` Step 1.)
+- If `git merge` reports `Your local changes would be overwritten` (main tree has uncommitted work), the clean-tree guard in step 2 already caught it — STOP and report; do NOT stash/discard.
+- Teardown lock-handling: if `git worktree remove --force` fails because `td5re.exe`/a log is still open, name the holding process and retry; if still locked, the merge is DONE — leave the worktree registered for the next sweep, never half-remove it.
+- Only `git branch -d` (rejects unmerged branches). Never `-D` here.
+- **Push is mandatory** — not done until `git rev-list --count origin/master..master` returns `0`.
 
 ### Step 4.5: Propagate new master into sibling /fix worktrees (merge + re-populate)
 
@@ -1397,6 +1411,7 @@ Read the log **tail** (last 100-200 lines) to see what happened at runtime. Use 
 - The Ghidra research agent does ALL MCP work. Main context never sees raw decompilation output.
 - Code edits, builds, and test runs happen inside the Step-0 worktree at `${WORKTREE_DIR}` — never in the main tree. The worktree is the unit of isolation between parallel `/fix` sessions.
 - Do NOT merge to master or push until the user explicitly approves (Step 4). Worktrees are meant to coexist and be picked between.
+- On approval, Step 4 is the **same single-shot robust merge as `/end`**: merge under the `mkdir` lock, build-once-deploy-by-copy (the worktree's recheck-built exes are the deliverable — never a redundant post-merge rebuild), push with reject-retry, then **immediate junction-safe teardown**. Resolve any rebase/merge conflict **in this session** (preserve both intents, build to verify); escalate only on genuinely incompatible-intent conflicts.
 - Run every self-verifiable check yourself (build, screenshots, CSV sweep, logs). But when confirming the fix genuinely requires the user's hands on the controls (driving/playing feel, real controllers, subjective audio/visual), **ask first and wait until they're ready** — prep `manual_drive.exe`, give a one-line test brief, and don't claim the fix confirmed/shipped on an untested manual gate. See [When the fix needs the user to test](#when-the-fix-needs-the-user-to-test-ask-first).
 - If the research agent can't find the relevant function, ask the user for hints (function name, address, or module) before retrying.
 - If build fails after edits, try fixing compile errors directly (up to 2 attempts), then escalate to user.
