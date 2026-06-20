@@ -2738,6 +2738,22 @@ uint32_t td5_plat_input_frontend_nav(void)
         if (js.rgbButtons[1] & 0x80) db |= 0x20;     /* B = back/cancel    */
         if (js.rgbButtons[2] & 0x80) db |= 0x80;     /* [#15] X = delete (name entry) */
         if (js.rgbButtons[7] & 0x80) db |= 0x40;     /* [#R3] Start = layout/confirm (was only on device_nav) */
+        /* [#R3-5 DIAG 2026-06-19] The deadzone+threshold fix didn't resolve the
+         * "can't go UP/LEFT" report, so log exactly what the pad produces — raw
+         * axes, POV, decoded cx/cy, the live-gate flags, and the nav bits — on
+         * every direction-bit change (plus a periodic rest sample). -> engine.log.
+         * Remove once the controller behaviour is understood. */
+        {
+            static uint32_t s_navdiag_prev[16];
+            static uint32_t s_navdiag_div = 0;
+            if ((db & 0x0Fu) != (s_navdiag_prev[i] & 0x0Fu) || ((++s_navdiag_div % 150u) == 0u)) {
+                TD5_LOG_I(LOG_TAG,
+                    "navdiag dev%d: lX=%ld lY=%ld POV=0x%lX cx=%ld cy=%ld live=%d/%d db=0x%02X",
+                    i, (long)js.lX, (long)js.lY, (unsigned long)js.rgdwPOV[0],
+                    (long)cx, (long)cy, s_js_x_live[i], s_js_y_live[i], (unsigned)db);
+            }
+            s_navdiag_prev[i] = db;
+        }
         if (db) {
             bits |= db;
             if (db & 0x10) s_plat_active_js = i;      /* A press marks this pad active */

@@ -2549,6 +2549,12 @@ static float mp_pos_pulse(uint32_t now, float lo, float hi) {
  * PUBLIC title-font API + the public td5_vui_quad textured-glyph primitive; the
  * only cosmetic difference is no faux-italic shear (td5_vui_quad is axis-aligned).
  * Left-aligned with the first letter at left_x, cap tops landing near top_y. */
+/* [R4 2026-06-19] Shared MP simultaneous-pane layout bands — MUST equal the
+ * FE_MP_TOP_BAND/FE_MP_BOTTOM_BAND literals in td5_frontend.c. Used by the
+ * PROFILE-chip overlay (frontend_mp_setup_profile_render) so the chip stays glued
+ * to the pushed-down setup panes, and by the CHOOSE YOUR SCREEN grid below. */
+#define FE_MP_TOP_BAND     85.0f
+#define FE_MP_BOTTOM_BAND  44.0f
 #define FE_RACE_TITLE_CAP_PX 24.0f    /* design cap height (px at 480-tall reference) */
 #define FE_RACE_TITLE_LEFT_X 126.0f   /* design x where the first letter starts (= td5_frontend FE_TITLE_LEFT_X) */
 #define FE_RACE_TITLE_TRACK  (-1.5f)  /* extra letter tracking (design px; negative = tighter) */
@@ -2621,9 +2627,13 @@ void frontend_mp_position_render2(float sx, float sy) {
     else
         td5_vui_text_centered(320.0f * sx, 10.0f * sy, "CHOOSE YOUR SCREEN", 0xFFFFE060u, sx, sy);
 
-    /* Layout grid occupies a centred area below the title, above the footer. */
+    /* Layout grid occupies a centred area below the title, above the footer.
+     * [R4 2026-06-19] Drop the grid top to the shared FE_MP_TOP_BAND (85, was 40)
+     * so the cells start below the title + the background art's upper decoration
+     * line, consistent with every other MP screen. The footer band starts at y420,
+     * so shrink the grid height to keep the same ~8px gap above it. */
     {
-        const float gx = 40.0f, gy = 40.0f, gw = 560.0f, gh = 372.0f;
+        const float gx = 40.0f, gy = FE_MP_TOP_BAND, gw = 560.0f, gh = 412.0f - FE_MP_TOP_BAND;
         /* [#3] Cap cell WIDTH at the 3x3-equivalent (gw/3) and centre the row in
          * the gw band so 1-2 cells don't stretch edge to edge. */
         float cw, ch = gh / (float)rows, row_x0 = 0.0f;
@@ -2886,11 +2896,13 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
          * them — see mp_panel_capped's SCOPE NOTE and the REPORT.
          * [R1 2026-06-19] Mirror frontend_mp_setup_render's top title band so the
          * PROFILE chip/panel track the panes that were pushed below the title.
-         * [R3-2 2026-06-19] Mirror the SHORTER pane band (top 50 + bottom 44) so the
-         * PROFILE chip stays glued to the (now shorter, mid-screen) setup panes —
-         * these two constants MUST equal frontend_mp_setup_render's. */
-        const float mp_title_band  = 50.0f;
-        const float mp_bottom_band = 44.0f;
+         * [R3-2 2026-06-19] Mirror the SHORTER pane band so the PROFILE chip stays
+         * glued to the (now shorter, mid-screen) setup panes — these two constants
+         * MUST equal frontend_mp_setup_render's.
+         * [R4 2026-06-19] Both bands now come from the shared FE_MP_TOP_BAND (85) /
+         * FE_MP_BOTTOM_BAND (44) — same literals as td5_frontend.c. */
+        const float mp_title_band  = FE_MP_TOP_BAND;
+        const float mp_bottom_band = FE_MP_BOTTOM_BAND;
         float pane_w, row_x0 = 0.0f;
         float pane_h = (480.0f - mp_title_band - mp_bottom_band) / (float)rows;
         mp_panel_capped(640.0f, cols, &pane_w, &row_x0);

@@ -434,6 +434,17 @@ const char *const k_mp_kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "
 #define MP_KBD_SPECIAL     MP_KBD_LETTER_ROWS
 #define MP_KBD_ROW_H       14.4f                       /* compact: ~20% over the cap height (9) */
 #define MP_KBD_BLOCK_H     (MP_KBD_ROWS * MP_KBD_ROW_H)
+/* [R4 2026-06-19] Shared MULTIPLAYER simultaneous-pane layout bands (design space,
+ * 640x480). Every MP setup screen reserves FE_MP_TOP_BAND at the top so the
+ * panes/boxes (including their coloured header bars) start clearly BELOW the
+ * screen title AND the MainMenu background art's upper decorative line (~y85);
+ * the prior 40/50px band was too small and the boxes overlapped both. A matching
+ * FE_MP_BOTTOM_BAND keeps the boxes off the art's lower text lines.
+ * CROSS-FILE COUPLING: td5_fe_race.c's frontend_mp_setup_profile_render (the
+ * PROFILE chip overlay) and frontend_mp_position_render2 (CHOOSE YOUR SCREEN grid)
+ * define the SAME literals — keep all three in sync. */
+#define FE_MP_TOP_BAND     85.0f
+#define FE_MP_BOTTOM_BAND  44.0f
 /* Background-colour picker: a compact 16x16 pure HSV palette (no preselected
  * swatch rows, no white bar). */
  void frontend_mp_setup_init(void);
@@ -10158,9 +10169,14 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
     float pane_w, row_x0 = 0.0f;
     frontend_mp_panel_capped(cols, &pane_w, &row_x0);
     /* [R1] Reserve a top band for the "SELECT CAR" title so the panes start BELOW
-     * it instead of overlapping the title text. Panes occupy y=[MP_TITLE_BAND,480). */
-    const float mp_title_band = 40.0f;
-    float pane_h = (480.0f - mp_title_band) / (float)rows;
+     * it instead of overlapping the title text.
+     * [R4 2026-06-19] Raise to the shared FE_MP_TOP_BAND (85) to match every other
+     * MP screen — the old 40px let the panes overlap the title + the background
+     * art's upper decoration line. Reserve a matching bottom band so the panes
+     * occupy the same comfortable middle band as the profile-setup screen. */
+    const float mp_title_band  = FE_MP_TOP_BAND;
+    const float mp_bottom_band = FE_MP_BOTTOM_BAND;
+    float pane_h = (480.0f - mp_title_band - mp_bottom_band) / (float)rows;
 
     /* Dim the MainMenu background (ramps up with the slide-in). */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
@@ -10556,9 +10572,13 @@ static void frontend_mp_setup_render(float sx, float sy) {
      * BOTTOM band so the boxes occupy a comfortable MIDDLE band — title clear above,
      * the art's 3 text lines clear below. Both bands MUST match the companion
      * fe_race.c profile-chip overlay (which positions PROFILE relative to the same
-     * py/pane_h), or the chip drifts off the pane. */
-    const float mp_title_band  = 50.0f;
-    const float mp_bottom_band = 44.0f;
+     * py/pane_h), or the chip drifts off the pane.
+     * [R4 2026-06-19] Boxes were still too high (overlapping the title + the
+     * background art's upper decoration bar). Use the shared FE_MP_TOP_BAND (85)
+     * so the panes start below that line, applied consistently across every MP
+     * screen. The companion fe_race.c profile-chip overlay uses the SAME literals. */
+    const float mp_title_band  = FE_MP_TOP_BAND;
+    const float mp_bottom_band = FE_MP_BOTTOM_BAND;
     float pane_h = (480.0f - mp_title_band - mp_bottom_band) / (float)rows;
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
