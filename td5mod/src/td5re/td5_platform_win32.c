@@ -2627,6 +2627,20 @@ static LPDIRECTINPUTDEVICE8A scan_dev(int i)
             range.diph.dwObj = 0;
             range.lMin = 0; range.lMax = 0x1F4;
             IDirectInputDevice8_SetProperty(s_di_scan[i], DIPROP_RANGE, &range.diph);
+            /* [#R3-5 2026-06-19] Deadzone the scan device too (the in-race device
+             * already has one). Without it, an analog stick that rests/biases
+             * off-centre never reports inside the nav live-band, so the per-axis
+             * live-gate never latches and UP/LEFT can't fire while DOWN/RIGHT do.
+             * A 20% deadzone makes a resting/biased stick report centre. */
+            {
+                DIPROPDWORD dz;
+                dz.diph.dwSize       = sizeof(DIPROPDWORD);
+                dz.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+                dz.diph.dwHow        = DIPH_DEVICE;
+                dz.diph.dwObj        = 0;
+                dz.dwData            = 2000;  /* 20% of [0,10000] */
+                IDirectInputDevice8_SetProperty(s_di_scan[i], DIPROP_DEADZONE, &dz.diph);
+            }
             IDirectInputDevice8_Acquire(s_di_scan[i]);
         } else {
             s_di_scan[i] = NULL;
@@ -2690,7 +2704,7 @@ uint32_t td5_plat_input_frontend_nav(void)
 {
     uint32_t bits = 0;
     int i;
-    const long T = 130;
+    const long T = 90;   /* [#R3-5] lowered 130->90 so an off-centre/asymmetric stick still reaches UP/LEFT */
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
         uint32_t db = 0;
@@ -2742,7 +2756,7 @@ uint32_t td5_plat_input_joystick_nav(int device_slot)
     DIJOYSTATE2 js;
     uint32_t db = 0;
     long cx, cy;
-    const long T = 130;
+    const long T = 90;   /* [#R3-5] lowered 130->90 so an off-centre/asymmetric stick still reaches UP/LEFT */
     if (!td5_plat_js_read(device_slot, &js)) return 0;
     cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
     cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
@@ -2771,7 +2785,7 @@ uint32_t td5_plat_input_device_nav(int enum_index)
     DIJOYSTATE2 js;
     uint32_t db = 0;
     long cx, cy;
-    const long T = 130;
+    const long T = 90;   /* [#R3-5] lowered 130->90 so an off-centre/asymmetric stick still reaches UP/LEFT */
     LPDIRECTINPUTDEVICE8A dev;
     if (enum_index <= 0 || enum_index >= s_device_count || enum_index >= 16) return 0;
     dev = scan_dev(enum_index);

@@ -273,6 +273,12 @@ static int  s_track_max;               /* max track index for current mode */
  * selector is still reached by pressing UP. -1 = not created this entry. */
 static int  s_carsel_rand_btn = -1;
 static int  s_trksel_rand_btn = -1;
+/* [R3-3 2026-06-19] Previously-focused button on the Track-select screen, so case
+ * 4 can tell a focus-CHANGE onto the Track selector (button 0) apart from an
+ * explicit LEFT/RIGHT pressed while already on it. -2 = "fresh, treat the next
+ * frame as an entry" (reset at screen init so a stale L/R bit can't cycle on the
+ * first interactive frame); set to the live focus each interactive frame. */
+static int  s_trksel_prev_focus = -2;
 
 /* Race results state */
 static int  s_results_button;           /* DAT_00497a64 */
@@ -2878,11 +2884,15 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
          * 1-2 panes don't render edge to edge. MUST match the (capped) setup panes
          * in td5_frontend.c so this overlay's PROFILE chip + panel sit on top of
          * them — see mp_panel_capped's SCOPE NOTE and the REPORT.
-         * [R1 2026-06-19] Mirror frontend_mp_setup_render's 40px top title band so
-         * the PROFILE chip/panel track the panes that were pushed below the title. */
-        const float mp_title_band = 40.0f;
+         * [R1 2026-06-19] Mirror frontend_mp_setup_render's top title band so the
+         * PROFILE chip/panel track the panes that were pushed below the title.
+         * [R3-2 2026-06-19] Mirror the SHORTER pane band (top 50 + bottom 44) so the
+         * PROFILE chip stays glued to the (now shorter, mid-screen) setup panes —
+         * these two constants MUST equal frontend_mp_setup_render's. */
+        const float mp_title_band  = 50.0f;
+        const float mp_bottom_band = 44.0f;
         float pane_w, row_x0 = 0.0f;
-        float pane_h = (480.0f - mp_title_band) / (float)rows;
+        float pane_h = (480.0f - mp_title_band - mp_bottom_band) / (float)rows;
         mp_panel_capped(640.0f, cols, &pane_w, &row_x0);
         for (p = 0; p < n; p++) {
             int col = p % cols, row = p / cols;
@@ -3983,6 +3993,7 @@ void Screen_TrackSelection(void) {
         TD5_LOG_D(LOG_TAG, "TrackSelection: init");
         s_anim_complete = 0;
         s_trksel_rand_btn = -1;   /* [#14] (re)assigned with the buttons below */
+        s_trksel_prev_focus = -2; /* [R3-3] treat the first interactive frame as a focus-entry (no cycle) */
 
         /* Validate track index for cup modes: skip locked/invalid NPC groups */
         /* Determine track max for current mode. [2026-06-19] Net play can now
@@ -4110,15 +4121,37 @@ void Screen_TrackSelection(void) {
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            /* [R3-3 2026-06-19] Suppress the track CYCLE on the single frame focus
+             * first LANDS on the Track selector (button 0). Same class as the R6
+             * randomize-on-leave fix: a focus-change event must not be read as a
+             * value change. Moving focus onto button 0 (e.g. pressing UP from the
+             * Direction row, or a diagonal analog stick whose horizontal bias also
+             * sets the LEFT/RIGHT bit) was cycling the track immediately — both via
+             * a stale s_arrow_input L/R bit AND via the hold-repeater's stale
+             * static timer (frontend_trksel_hold_repeat is only CALLED while
+             * selected_button==0, so its prev_held/next_ms freeze when focus is
+             * elsewhere and can fire a phantom repeat the instant focus returns).
+             * Tracking the previously-focused button lets us drop the delta for
+             * exactly that entry frame; an EXPLICIT LEFT/RIGHT pressed on a later
+             * frame (when focus is already settled on 0) still cycles normally.
+             * s_trksel_prev_focus is a module static reset to -2 at screen init. */
+            int focus_entered_track = (selected_button == 0 && s_trksel_prev_focus != 0);
+            s_trksel_prev_focus = selected_button;
             /* [#21] Hold-to-scroll: while the TRACK selector (button 0) is focused
              * and no edge fired this frame, fold in the auto-repeat so holding
              * LEFT/RIGHT keeps cycling tracks (first press still comes from the
-             * edge delta above). */
+             * edge delta above). frontend_trksel_hold_repeat() is still CALLED on
+             * the entry frame (so its prev_held/next_ms re-sync to the live held
+             * state and can't fire a phantom repeat next frame), but its result is
+             * discarded there. */
             if (selected_button == 0 && delta == 0) {
                 int hb = frontend_trksel_hold_repeat();
-                if (hb == 1)      delta = -1;
-                else if (hb == 2) delta = +1;
+                if (!focus_entered_track) {
+                    if (hb == 1)      delta = -1;
+                    else if (hb == 2) delta = +1;
+                }
             }
+            if (focus_entered_track) delta = 0;   /* landing focus here is not a track change */
             if (selected_button == 0 && delta != 0) {
                 /* Cycle track index, skipping tracks whose level zips are absent */
                 if (s_network_active) {

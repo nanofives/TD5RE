@@ -401,6 +401,27 @@ static int     s_td6_cp_count = 0;
 static int     s_td6_cp_spans[5];
 static uint8_t s_td6_cp_index[TD5_MAX_RACER_SLOTS];
 
+/* [#R3-7 2026-06-19] TD6 P2P checkpoint-timer knobs. TD6.exe shipped NO checkpoint
+ * timer for these tracks (RE-confirmed: the system was removed), so there are no
+ * original values — these are tunable invented defaults (packed hi-byte = seconds). */
+static int td6_cp_timer_enabled(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_CP_TIMER"); s = (!e || e[0] != '0') ? 1 : 0; }
+    return s;
+}
+static int td6_cp_time_secs(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_CP_TIME"); int v = (e && e[0]) ? atoi(e) : 0;
+                 s = (v >= 10 && v <= 250) ? v : 90; }
+    return s;
+}
+static int td6_cp_bonus_secs(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_TD6_CP_BONUS"); int v = (e && e[0]) ? atoi(e) : -1;
+                 s = (v >= 0 && v <= 250) ? v : 30; }
+    return s;
+}
+
 /* LEVELINF.DAT additional fields */
 static int32_t s_levelinf_track_subvariant;  /* +0x54: 36 for race, -1 for cup */
 static int32_t s_levelinf_span_count;        /* +0x58: track ring length (redundant with STRIP.DAT) */
@@ -3449,6 +3470,33 @@ int td5_game_init_race_session(void) {
         }
     }
 
+    /* [#R3-7 2026-06-19] TD6 P2P checkpoint timer. TD6.exe shipped NONE for these
+     * city tracks (RE-confirmed), so synthesize the TD5-format record from the
+     * already-extracted TD6 checkpoint spans (s_td6_cp_spans) and force the gates
+     * on. Placed AFTER the LEVELINF read (which zeroes the record when +0x08==0)
+     * and BEFORE Step 21 (which seeds the timer). Values are tunable invented
+     * defaults (packed hi-byte = whole seconds; lo 0x3B matches the originals). */
+    int td6_cp_active = 0;
+    if (g_active_td6_level > 0 && s_td6_cp_count > 0 && td6_cp_timer_enabled()) {
+        int cp_secs    = td6_cp_time_secs();
+        int bonus_secs = td6_cp_bonus_secs();
+        int n = s_td6_cp_count; if (n > 5) n = 5;
+        memset(&s_active_checkpoint, 0, sizeof(s_active_checkpoint));
+        s_active_checkpoint.checkpoint_count = (uint16_t)n;
+        s_active_checkpoint.initial_time     = (uint16_t)(((cp_secs & 0xFF) << 8) | 0x3B);
+        for (int ci = 0; ci < n; ci++) {
+            s_active_checkpoint.checkpoints[ci].span_threshold = (uint16_t)s_td6_cp_spans[ci];
+            s_active_checkpoint.checkpoints[ci].time_bonus =
+                (ci < n - 1) ? (uint16_t)((bonus_secs & 0xFF) << 8) : 0;  /* last cp = finish */
+        }
+        s_levelinf_checkpoint_config = 1;   /* enable the per-tick checkpoint watch (gate @ 6746) */
+        g_special_encounter          = 1;   /* enable the timer decrement + the HUD digit */
+        td6_cp_active = 1;
+        TD5_LOG_I(LOG_TAG,
+            "TD6 checkpoint timer synthesized: level=%d count=%d initial=%ds bonus=%ds/cp",
+            g_active_td6_level, n, cp_secs, bonus_secs);
+    }
+
     /* ---- Step 21: Adjust checkpoint timers by difficulty ---- */
     /* Original AdjustCheckpointTimersByDifficulty @ 0x0040A530 is called
      * per-slot from InitializeRaceVehicleRuntime @ 0x0042F140. The scaling
@@ -3460,7 +3508,7 @@ int td5_game_init_race_session(void) {
      * which stays at the raw value. */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state == 3) continue;   /* disabled slot */
-        if (g_td5.checkpoint_timers_enabled &&
+        if ((g_td5.checkpoint_timers_enabled || td6_cp_active) &&
             g_td5.track_type != TD5_TRACK_CIRCUIT) {
             adjust_checkpoint_timers(i);
         } else {

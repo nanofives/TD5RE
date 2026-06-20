@@ -4212,6 +4212,26 @@ int32_t td5_track_shadow_probe_height(int slot, int node,
     if (chassis_span >= max_sp) chassis_span = max_sp - 1;
     if (chassis_lane < 0) chassis_lane = 0;
 
+    /* [#R3-11 2026-06-19] STABLE shadow (default on): use the CHASSIS span's
+     * ground plane for EVERY node instead of re-resolving each node's own span.
+     * The per-node span resolution flips between adjacent spans at a boundary on
+     * a slope, jumping that node's Y frame-to-frame -> the persistent uphill
+     * shadow flicker (the temporal low-pass only masked part of it). The shadow
+     * grid is only car-sized, so the chassis span's plane extrapolated to each
+     * node is both accurate AND continuous (one plane = no flicker). Downhill,
+     * which already looked fine, is unchanged. TD5RE_SHADOW_STABLE=0 reverts to
+     * the per-node converging probe below. */
+    {
+        static int s_shadow_stable = -1;
+        if (s_shadow_stable < 0) {
+            const char *e = getenv("TD5RE_SHADOW_STABLE");
+            s_shadow_stable = (!e || e[0] != '0') ? 1 : 0;
+        }
+        if (s_shadow_stable)
+            return td5_track_compute_contact_height_with_normal(
+                       chassis_span, chassis_lane, world_x, world_z, out_normal);
+    }
+
     /* --- knob OFF: faithful reproduction of the prior render-side behavior:
      *     fresh probe seeded at the chassis, ONE single-step walk, bounded
      *     barycentric height. (No continuity cache — byte-equivalent A/B.) */

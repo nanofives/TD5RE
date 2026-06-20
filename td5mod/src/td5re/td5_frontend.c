@@ -7282,7 +7282,20 @@ static int frontend_lobby_buttons_on(void) {
 static void frontend_render_mp_lobby_overlay(float sx, float sy) {
     int p;
     int relayout = frontend_lobby_buttons_on();
-    if (!s_anim_complete) return;
+    /* [R3-1 2026-06-19] DO NOT early-return on !s_anim_complete. The MP lobby
+     * (screen 30) is NOT in frontend_screen_has_button_anim()/_get_button_anim_state,
+     * so its START/BACK buttons do NOT slide in — they render at their STATIC base
+     * rects from frame 1. But this overlay (which re-lays those two buttons SIDE BY
+     * SIDE and draws the roster/header) used to bail out for the whole ~650ms entry
+     * "animation" (Screen_MultiplayerLobby states 1..3). Result: the generic button
+     * loop drew START+BACK at their CREATION positions (big START @220,300, small
+     * BACK @260,360, stacked) with no header, then — the instant s_anim_complete
+     * flipped — the buttons JUMPED to the side-by-side layout and the header/roster
+     * popped in. That snap read as "a lone START screen, then the real START+BACK
+     * screen replaces it" (the user's flash report). Rendering the full overlay
+     * (re-layout + header + roster) every frame makes the screen complete from the
+     * first frame, so there is no two-stage load. (The dead 650ms timer still runs
+     * before the interactive state, but the screen now looks identical throughout.) */
 
     /* [#8] Re-lay the lobby's two action buttons (created by Screen_MultiplayerLobby
      * as 0=START, 1=BACK) SIDE BY SIDE, SAME WIDTH, lowered a little. s_buttons[]
@@ -10536,9 +10549,17 @@ static void frontend_mp_setup_render(float sx, float sy) {
     float pane_w, row_x0 = 0.0f;
     frontend_mp_panel_capped(cols, &pane_w, &row_x0);
     /* [R1] Reserve a top band for the "PROFILE SELECTION" title so the panes start
-     * BELOW it instead of overlapping the title text. */
-    const float mp_title_band = 40.0f;
-    float pane_h = (480.0f - mp_title_band) / (float)rows;
+     * BELOW it instead of overlapping the title text.
+     * [R3-2 2026-06-19] The panes were still spanning all the way to y=480, so they
+     * reached into the background art's lower text lines and sat tight under the
+     * title. Grow the top band (more air under the title) AND reserve a matching
+     * BOTTOM band so the boxes occupy a comfortable MIDDLE band — title clear above,
+     * the art's 3 text lines clear below. Both bands MUST match the companion
+     * fe_race.c profile-chip overlay (which positions PROFILE relative to the same
+     * py/pane_h), or the chip drifts off the pane. */
+    const float mp_title_band  = 50.0f;
+    const float mp_bottom_band = 44.0f;
+    float pane_h = (480.0f - mp_title_band - mp_bottom_band) / (float)rows;
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     /* [#18a] Profile/name-colour setup: by default DON'T darken the background so

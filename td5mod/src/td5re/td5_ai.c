@@ -298,6 +298,17 @@ static int16_t g_actor_broken_ticks[TD5_MAX_TOTAL_ACTORS];/* remaining broken-do
 static int16_t g_cop_glow_phase[TD5_MAX_TOTAL_ACTORS];    /* steady strobe intensity ramp per cop */
 static int16_t g_cop_cooldown[TD5_MAX_TOTAL_ACTORS];      /* ticks before a cop may re-acquire after a chase */
 static int32_t s_cop_spawn_counter;                       /* deterministic 1:CopRatio cop cadence */
+/* [R3-12 COP NO-PROGRESS WATCHDOG 2026-06-19] Per-cop chase progress tracker:
+ * the best (smallest) main-ring |gap| this cop has achieved toward its current
+ * target, and how many consecutive ticks it has gone WITHOUT improving on that
+ * best. A cop that loops a branch corridor keeps moving (own span advances) but
+ * never closes on the target, so the overtake / too-far / target-down end
+ * conditions never fire and it circles forever. When no-progress exceeds
+ * COP_STALL_TICKS the chase is abandoned (-> IDLE), and the cop resumes ordinary
+ * traffic driving, whose route plan walks it back onto the main ring. Reset on
+ * every (re)acquire. Pure function of replicated span state -> lockstep-safe. */
+static int32_t s_cop_best_gap[TD5_MAX_TOTAL_ACTORS];      /* smallest |gap| to target seen this chase */
+static int16_t s_cop_stall_ticks[TD5_MAX_TOTAL_ACTORS];   /* ticks since |gap| last improved */
 
 /* Chase tuning (spans / fixed-point speed). All in the same units the
  * surrounding AI uses; gaps are computed on the folded main ring so they are
@@ -312,6 +323,14 @@ static int32_t s_cop_spawn_counter;                       /* deterministic 1:Cop
 #define COP_STOP_SPEED  0x2000   /* |longitudinal speed| at/under which a target counts as stopped */
 #define COP_FULL_THROTTLE 0x0200 /* forward drive command while catching up (gentler accel) */
 #define COP_RECHASE_COOLDOWN 150 /* ~5s a cop cruises normally before it may re-acquire after a chase */
+/* [R3-12] No-progress watchdog: a chasing cop that fails to shrink its |gap| to
+ * the target by >= COP_STALL_IMPROVE spans for COP_STALL_TICKS consecutive ticks
+ * (~7s at 30Hz) is looping / stuck (typically a branch corridor) -> end the
+ * chase. Generous so a cop merely pacing a same-speed target (gap steady, not
+ * growing) is NOT dropped: a real pace holds gap ~constant but the overtake path
+ * still closes it over time; only a genuine no-closure loop trips this. */
+#define COP_STALL_TICKS    210   /* ~7s of zero net closure -> abandon the chase */
+#define COP_STALL_IMPROVE    2   /* spans of |gap| reduction that counts as progress */
 
 /* Reset all police-chase per-slot state (global init + per-race). */
 static void cop_state_reset(void) {
@@ -321,9 +340,11 @@ static void cop_state_reset(void) {
     memset(g_actor_broken_ticks, 0, sizeof(g_actor_broken_ticks));
     memset(g_cop_glow_phase, 0, sizeof(g_cop_glow_phase));
     memset(g_cop_cooldown, 0, sizeof(g_cop_cooldown));
+    memset(s_cop_stall_ticks, 0, sizeof(s_cop_stall_ticks));
     for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
         g_cop_target[i]       = -1;
         g_actor_pursued_by[i] = -1;
+        s_cop_best_gap[i]     = 0x7FFFFFFF;   /* [R3-12] no progress baseline yet */
     }
     s_cop_spawn_counter = 0;
 }
@@ -340,9 +361,24 @@ static void cop_end_chase(int slot) {
     g_cop_target[slot] = -1;
     g_cop_phase[slot]  = COP_IDLE;
     g_cop_glow_phase[slot] = 0;
+    /* [R3-12] Clear the no-progress watchdog so a re-acquire starts fresh. */
+    s_cop_best_gap[slot]   = 0x7FFFFFFF;
+    s_cop_stall_ticks[slot] = 0;
     /* Cruise normally for a while before this cop may re-acquire — stops the
      * "same cop chases me again the instant the last chase ends" loop. */
     g_cop_cooldown[slot] = COP_RECHASE_COOLDOWN;
+}
+
+/* [R3-12] A/B knob: end a chase when the cop makes no net progress toward the
+ * target for COP_STALL_TICKS (the looping-cop recovery). TD5RE_COP_STALL_END=0
+ * restores the prior unbounded chase. Default on. */
+static int cop_stall_end_enabled(void) {
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_COP_STALL_END");
+        s = (!e || e[0] != '0') ? 1 : 0;
+    }
+    return s;
 }
 
 /* Fully strip a slot's cop identity (called when the traffic slot is recycled
@@ -424,12 +460,22 @@ static uint32_t g_ai_frame_counter;
  * and its AI is frozen [CONFIRMED @ UpdateRaceActors 0x436E1D gate]. */
 int16_t g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
 
+/* [R3-10] Anti-pileup persistent escape-lane state. Declared here (not in the
+ * smart-traffic block below) because td5_ai_smart_traffic_lane — defined earlier
+ * in the file — reads it to bias the jam-escape car toward its cleared lane.
+ * Written by traffic_collision_escape; reset in td5_traffic_smart_reset. */
+static int8_t   s_traffic_escape_lane[TD5_MAX_TOTAL_ACTORS];    /* cleared-lane side (-1/0/+1)     */
+static int16_t  s_traffic_escape_lane_ttl[TD5_MAX_TOTAL_ACTORS];/* ticks the lane bias persists    */
+
 /* ========================================================================
  * Forward declarations (internal helpers)
  * ======================================================================== */
 
 static void ai_update_single_racer(int slot);
 static void ai_update_single_traffic(int slot);
+/* [R3-10] used by traffic_escape_pick_side, which is defined before it. */
+static int traffic_lane_is_clear(int self_slot, int self_span,
+                                 int target_lane, int polarity);
 
 uint8_t *td5_ai_get_physics_template(void) {
     return g_ai_physics_template;
@@ -4122,6 +4168,36 @@ static int smart_span_gap(int from_span, int to_span, int span_count) {
     return g;
 }
 
+/* [R3-8 BIG-FIELD PHANTOM-PEER FILTER 2026-06-19] 1 when slot `i` is a real,
+ * on-road car that the AI peer-scans should react to; 0 for slots that hold no
+ * live car. In a >6-racer field (g_traffic_slot_base==16) the racer region is
+ * 0..15 but only `humans+opponents` of those are actually spawned — the rest are
+ * marked decoration (g_slot_state==3) and NEVER placed on the track, so their
+ * pose fields (span / world-pos / lane) are stale/zero. The peer scans iterate
+ * g_active_actor_count (32 with traffic) and previously filtered only FINISHED
+ * racers (state 2), so those un-spawned decoration slots showed up as phantom
+ * cars clustered at span 0 / the world origin: real racers + traffic braked,
+ * swerved and lane-changed to dodge ghosts -> the "cars stutter/glitch with >5
+ * opponents" report. Excludes: out-of-range, decoration (state 3), finished
+ * racers (state 2), an unbound car_definition_ptr (the same "absent slot" test
+ * the dynamic-traffic lead-span scan already uses), and the dynamic-traffic
+ * parked (despawned) slots. Pure function of replicated state (g_slot_state +
+ * the actor's own bound-ness) -> identical on every lockstep peer. */
+static int ai_peer_is_present(int i) {
+    char *a;
+    if (i < 0 || i >= TD5_MAX_TOTAL_ACTORS) return 0;
+    if (i < g_traffic_slot_base) {
+        /* racer region: skip finished (2) and decoration/absent (3) slots */
+        if (g_slot_state[i] == 2 || g_slot_state[i] == 3) return 0;
+    } else if (td5_ai_traffic_dynamic_parked(i)) {
+        return 0;   /* despawned traffic: no live pose */
+    }
+    a = actor_ptr(i);
+    if (!a) return 0;
+    if (ACTOR_I32(a, ACTOR_CAR_DEF_PTR) == 0) return 0;   /* never spawned */
+    return 1;
+}
+
 typedef struct { double u; int gap; int32_t speed; int slot; } SmartBlocker;
 
 /* Collect actors within [-1 .. lookahead] spans of self (incl. the human in
@@ -4133,7 +4209,7 @@ static int smart_gather_blockers(int self_slot, int self_span, int span_count,
     int cnt = 0;
     for (int i = 0; i < n && cnt < max_out; i++) {
         if (i == self_slot) continue;
-        if (i < g_traffic_slot_base && g_slot_state[i] == 2) continue; /* finished */
+        if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
         char *a = actor_ptr(i);
         if (!a) continue;
         int peer_span = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
@@ -4363,7 +4439,7 @@ static void smart_sense(int slot, int span_raw, int span_count,
     if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
     for (int i = 0; i < n && ncar < TD5_MAX_TOTAL_ACTORS; i++) {
         if (i == slot) continue;
-        if (i < g_traffic_slot_base && g_slot_state[i] == 2) continue;  /* finished */
+        if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
         char *a = actor_ptr(i);
         if (!a) continue;
         int gap = smart_span_gap(span_raw, (int)ACTOR_I16(a, ACTOR_SPAN_RAW), span_count);
@@ -4509,6 +4585,7 @@ static void td5_ai_smart_branch(int slot) {
         if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
         for (int i = 0; i < n; i++) {
             if (i == slot) continue;
+            if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
             int psp = (int)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
             if (smart_iabs(psp - main_span) <= 2) cong_main++;
             if (branch_span >= 0 && branch_span < span_count &&
@@ -5060,12 +5137,24 @@ static int td5_ai_smart_traffic_lane(int slot, int target_span, int lane_count,
     if (base < 0) base = 0;
     if (base >= lane_count) base = lane_count - 1;
 
+    /* [R3-10] Anti-pileup lane commit: while a recent jam-escape's lane bias is
+     * live (set by traffic_collision_escape), shift the reference lane toward the
+     * cleared side so the scoring + ±1 step below actually move this car OUT of
+     * the lane it kept re-jamming in, instead of the occupancy score settling it
+     * right back. Deterministic (replicated escape state). */
+    if (s_traffic_escape_lane_ttl[slot] > 0 && s_traffic_escape_lane[slot] != 0) {
+        base += (int)s_traffic_escape_lane[slot];
+        if (base < 0) base = 0;
+        if (base >= lane_count) base = lane_count - 1;
+    }
+
     int occ[SMART_MAX_LANES];
     for (int l = 0; l < lane_count; l++) occ[l] = 0;
     int n = g_active_actor_count;
     if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
     for (int i = 0; i < n; i++) {
         if (i == slot) continue;
+        if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
         char *a = actor_ptr(i);
         int psp = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
         int gap = smart_span_gap(self_span, psp, span_count);
@@ -5106,6 +5195,7 @@ static int td5_ai_smart_traffic_cruise_scale(int slot) {
     int nearest = 99;
     for (int i = 0; i < n; i++) {
         if (i == slot) continue;
+        if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
         char *a = actor_ptr(i);
         if ((int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) != self_lane) continue;
         int gap = smart_span_gap(self_span, (int)ACTOR_I16(a, ACTOR_SPAN_RAW), span_count);
@@ -6883,6 +6973,23 @@ static int      s_traffic_stuck_frames[TD5_MAX_TOTAL_ACTORS];  /* AntiFreeze: co
 static int      s_traffic_stall_frames[TD5_MAX_TOTAL_ACTORS];  /* consecutive near-stopped ticks */
 static int16_t  s_traffic_escape_ticks[TD5_MAX_TOTAL_ACTORS];  /* remaining escape-burst ticks */
 static int8_t   s_traffic_escape_side[TD5_MAX_TOTAL_ACTORS];   /* current escape steer side (-1/+1) */
+/* [R3-10 ANTI-PILEUP STRENGTHEN 2026-06-19] Forward-PROGRESS jam detection +
+ * persistent escape lane. The old escape only fired on |speed|<thresh for 45
+ * ticks, so a car that keeps BUMPING (grinding forward a few units, never fully
+ * stopping) never qualified and ground against its neighbour forever. These
+ * track real along-track progress via ACTOR_SPAN_ACCUM (monotonic, remap-immune)
+ * over a sliding window: too few spans of progress over the window == jammed,
+ * regardless of instantaneous speed. After a burst, an escape LANE bias + a
+ * cooldown make the car commit to a clear lane instead of re-braking into the
+ * same peer and re-jamming. All deterministic (replicated span accum + tick
+ * counters + slot parity, no rand) -> MP-lockstep safe. */
+static int16_t  s_traffic_prog_accum[TD5_MAX_TOTAL_ACTORS];    /* span-accum at window start */
+static int16_t  s_traffic_prog_window[TD5_MAX_TOTAL_ACTORS];   /* ticks elapsed in this window */
+static int16_t  s_traffic_lowprog[TD5_MAX_TOTAL_ACTORS];       /* consecutive low-progress ticks */
+static uint8_t  s_traffic_lowprog_latch[TD5_MAX_TOTAL_ACTORS]; /* 1 = last window showed no progress */
+static int16_t  s_traffic_escape_cooldown[TD5_MAX_TOTAL_ACTORS];/* post-escape re-arm suppression */
+/* s_traffic_escape_lane / s_traffic_escape_lane_ttl are declared near the top
+ * globals (td5_ai_smart_traffic_lane, defined earlier, reads them). */
 
 /* Per-race diagnostic counters — observe which behaviours actually trigger
  * (the rate-limited per-event logs can miss firings). Dumped periodically. */
@@ -6905,6 +7012,13 @@ static void td5_traffic_smart_reset(void) {
         s_traffic_stall_frames[i] = 0;
         s_traffic_escape_ticks[i] = 0;
         s_traffic_escape_side[i]  = 0;
+        s_traffic_prog_accum[i]   = 0;
+        s_traffic_prog_window[i]  = 0;
+        s_traffic_lowprog[i]      = 0;
+        s_traffic_lowprog_latch[i] = 0;
+        s_traffic_escape_cooldown[i] = 0;
+        s_traffic_escape_lane[i]  = 0;
+        s_traffic_escape_lane_ttl[i] = 0;
     }
     memset(&s_smart_stat, 0, sizeof(s_smart_stat));
 }
@@ -6973,6 +7087,40 @@ static int traffic_escape_enabled(void) {
     return s;
 }
 
+/* [R3-10] Anti-pileup tuning. JAM = low FORWARD progress (not just low speed):
+ * fewer than JAM_MIN_SPANS of span-accum gained over a JAM_WINDOW-tick window
+ * counts the window as "no progress"; LOWPROG_TICKS such ticks in a row arm the
+ * escape. This catches the grind-bumpers the speed-only test missed. After the
+ * burst the car commits to a clear lane for ESCAPE_LANE_TTL ticks and suppresses
+ * re-arming for ESCAPE_COOLDOWN ticks so it does not instantly re-jam. */
+#define TRAFFIC_JAM_WINDOW       30   /* ~1s progress-sampling window            */
+#define TRAFFIC_JAM_MIN_SPANS     1   /* < this many spans/window == stalled     */
+#define TRAFFIC_LOWPROG_TICKS    45   /* ~1.5s of no progress -> escape          */
+#define TRAFFIC_ESCAPE_BURST     36   /* ~1.2s steer-away burst (was 24)         */
+#define TRAFFIC_ESCAPE_COOLDOWN  30   /* ~1s after a burst before re-arming      */
+#define TRAFFIC_ESCAPE_LANE_TTL  90   /* ~3s commit to the cleared lane          */
+
+/* [R3-10] Pick the side (-1/+1) with more lateral room for `slot` to escape
+ * toward: compare lane occupancy just ahead on each side via the existing
+ * lane-clear scan. Falls back to slot-parity-alternation (deterministic) when
+ * both sides are equally (un)clear, so adjacent jammed cars peel opposite ways.
+ * Pure function of replicated lane/span state -> lockstep-safe. */
+static int8_t traffic_escape_pick_side(int slot, char *actor) {
+    int span  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    int lane  = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+    int pol   = (int)(route_state(slot)[RS_ROUTE_DIRECTION_POLARITY] & 1);
+    int left_clear  = traffic_lane_is_clear(slot, span, lane - 1, pol);
+    int right_clear = traffic_lane_is_clear(slot, span, lane + 1, pol);
+    if (left_clear && !right_clear) return (int8_t)-1;
+    if (right_clear && !left_clear) return (int8_t)+1;
+    /* Tie: alternate off the previous side (seeded by parity). */
+    {
+        int8_t prev = s_traffic_escape_side[slot];
+        if (prev == 0) prev = (slot & 1) ? (int8_t)1 : (int8_t)-1;
+        return (int8_t)-prev;
+    }
+}
+
 static void traffic_collision_escape(int slot) {
     if (!traffic_escape_enabled()) return;
     if (slot < g_traffic_slot_base || slot >= TD5_MAX_TOTAL_ACTORS) return;
@@ -6981,10 +7129,27 @@ static void traffic_collision_escape(int slot) {
     char *actor = actor_ptr(slot);
 
     if (g_actor_broken_down[slot] || td5_ai_traffic_dynamic_parked(slot)) {
-        s_traffic_stall_frames[slot] = 0;
-        s_traffic_escape_ticks[slot] = 0;
+        s_traffic_stall_frames[slot]    = 0;
+        s_traffic_escape_ticks[slot]    = 0;
+        s_traffic_lowprog[slot]         = 0;
+        s_traffic_lowprog_latch[slot]   = 0;
+        s_traffic_escape_cooldown[slot] = 0;
+        s_traffic_escape_lane[slot]     = 0;
+        s_traffic_escape_lane_ttl[slot] = 0;
+        s_traffic_prog_window[slot]     = 0;
         return;                                             /* deliberate stop, not a jam */
     }
+
+    /* Persistent escape-lane commit: count down the TTL. Both lane choosers
+     * (td5_ai_smart_traffic_lane and traffic_smart_choose_lane) read
+     * s_traffic_escape_lane/_ttl DIRECTLY to bias toward the cleared side while
+     * this is live, so the car heads into a different lane instead of re-braking
+     * into the same peer. (Not routed through s_traffic_lane_bias — the route
+     * plan zeroes that every tick before the chooser runs.) */
+    if (s_traffic_escape_lane_ttl[slot] > 0)
+        s_traffic_escape_lane_ttl[slot]--;
+    if (s_traffic_escape_cooldown[slot] > 0)
+        s_traffic_escape_cooldown[slot]--;
 
     /* Active escape burst: override the route plan's brake with a forward
      * steer-away so the car physically peels off the obstacle. */
@@ -6997,19 +7162,54 @@ static void traffic_collision_escape(int slot) {
         return;
     }
 
-    /* Detect a jam: near-zero forward speed for ~1.5 s straight. */
+    /* Jam detection. TWO signals, either one arms the escape:
+     *  (1) near-zero SPEED for LOWPROG_TICKS straight (the classic full-stop jam);
+     *  (2) low forward PROGRESS — < JAM_MIN_SPANS of span-accum gained over a
+     *      JAM_WINDOW-tick window — which catches a car that keeps BUMPING and
+     *      grinding forward a hair at a time but never actually advances.
+     * Both feed the same s_traffic_lowprog counter. */
     int32_t spd  = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
     int32_t aspd = (spd < 0) ? -spd : spd;
-    if (aspd < 0x1800) {
-        if (++s_traffic_stall_frames[slot] >= 45) {          /* ~1.5 s jammed */
-            s_traffic_stall_frames[slot] = 0;
-            int8_t prev = s_traffic_escape_side[slot];
-            if (prev == 0) prev = (slot & 1) ? (int8_t)1 : (int8_t)-1;
-            s_traffic_escape_side[slot] = (int8_t)-prev;      /* alternate each attempt */
-            s_traffic_escape_ticks[slot] = 24;                /* ~0.8 s burst */
+
+    /* Sliding progress window on the monotonic span accumulator. The result is
+     * LATCHED until the next window completes, so a grind-bumper (speed never
+     * fully zero) is flagged jammed on EVERY tick of the window, not just on the
+     * single tick the window closes — otherwise the per-tick lowprog counter
+     * would barely advance and the escape would take ~45s to arm. */
+    if (s_traffic_prog_window[slot] == 0)
+        s_traffic_prog_accum[slot] = ACTOR_I16(actor, ACTOR_SPAN_ACCUM);
+    if (++s_traffic_prog_window[slot] >= TRAFFIC_JAM_WINDOW) {
+        int prog = (int)(int16_t)(ACTOR_I16(actor, ACTOR_SPAN_ACCUM) -
+                                  s_traffic_prog_accum[slot]);
+        if (prog < 0) prog = -prog;                          /* oncoming counts down */
+        s_traffic_lowprog_latch[slot] = (prog < TRAFFIC_JAM_MIN_SPANS) ? 1 : 0;
+        s_traffic_prog_window[slot] = 0;                     /* restart the window */
+    }
+
+    if (aspd < 0x1800 || s_traffic_lowprog_latch[slot]) {
+        /* Don't re-arm immediately after a burst (let the steer-away land). */
+        if (s_traffic_escape_cooldown[slot] == 0 &&
+            ++s_traffic_lowprog[slot] >= TRAFFIC_LOWPROG_TICKS) {
+            s_traffic_lowprog[slot]      = 0;
+            s_traffic_escape_side[slot]  = traffic_escape_pick_side(slot, actor);
+            s_traffic_escape_ticks[slot] = TRAFFIC_ESCAPE_BURST;
+            /* Commit to the cleared lane after the burst so the route plan heads
+             * there instead of re-braking into the same neighbour. */
+            s_traffic_escape_lane[slot]     = s_traffic_escape_side[slot];
+            s_traffic_escape_lane_ttl[slot] = TRAFFIC_ESCAPE_LANE_TTL;
+            s_traffic_escape_cooldown[slot] = TRAFFIC_ESCAPE_BURST + TRAFFIC_ESCAPE_COOLDOWN;
+            if ((g_ai_frame_counter % 30u) == 0u)
+                TD5_LOG_I(LOG_TAG,
+                    "traffic_escape: slot=%d JAM (spd=%d prog_latch=%d) -> burst side=%d "
+                    "lane_commit=%d", slot, aspd, (int)s_traffic_lowprog_latch[slot],
+                    s_traffic_escape_side[slot], s_traffic_escape_lane[slot]);
         }
+        /* legacy near-stopped counter (diagnostic; the actual stuck-despawn
+         * backstop keys off s_traffic_stuck_frames in the AntiFreeze layer). */
+        s_traffic_stall_frames[slot]++;
     } else {
         s_traffic_stall_frames[slot] = 0;                     /* moving fine */
+        if (s_traffic_lowprog[slot] > 0) s_traffic_lowprog[slot]--;
     }
 }
 
@@ -7029,6 +7229,7 @@ static int traffic_lane_is_clear(int self_slot, int self_span,
         char *a;
         int lane, span, diff;
         if (i == self_slot) continue;
+        if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
         a = actor_ptr(i);
         if (!a) continue;
         lane = (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX);
@@ -7123,6 +7324,17 @@ static int traffic_smart_choose_lane(int slot, int target_span,
     /* situational lane change (1-tick latency) */
     if (g_td5.ini.traffic_lookahead && s_traffic_lane_bias[slot] != 0) {
         int cand = lane + s_traffic_lane_bias[slot];
+        if (cand >= 0 && cand < lane_count &&
+            !trf_dyn_lane_change_blocked(slot, lane_count, cand))
+            lane = cand;
+    }
+
+    /* [R3-10] Anti-pileup lane commit: while a recent jam-escape's lane bias is
+     * live, step toward the cleared side so the car leaves the lane it kept
+     * re-jamming in. Read directly (not via s_traffic_lane_bias, which the route
+     * plan clears every tick). Deterministic (replicated escape state). */
+    if (s_traffic_escape_lane_ttl[slot] > 0 && s_traffic_escape_lane[slot] != 0) {
+        int cand = lane + (int)s_traffic_escape_lane[slot];
         if (cand >= 0 && cand < lane_count &&
             !trf_dyn_lane_change_blocked(slot, lane_count, cand))
             lane = cand;
@@ -7786,6 +7998,13 @@ static void trf_dyn_place(int slot, int span, int lane, int polarity)
         s_traffic_stall_frames[slot]   = 0;
         s_traffic_escape_ticks[slot]   = 0;
         s_traffic_escape_side[slot]    = 0;
+        /* [R3-10] clear anti-pileup progress/lane-commit state on (re)placement */
+        s_traffic_lowprog[slot]         = 0;
+        s_traffic_lowprog_latch[slot]   = 0;
+        s_traffic_prog_window[slot]     = 0;
+        s_traffic_escape_cooldown[slot] = 0;
+        s_traffic_escape_lane[slot]     = 0;
+        s_traffic_escape_lane_ttl[slot] = 0;
     }
 }
 
@@ -9284,6 +9503,9 @@ void td5_ai_update_special_encounter(void) {
                 g_cop_target[k]            = (int8_t)chosen;
                 g_actor_pursued_by[chosen] = (int8_t)k;
                 g_cop_phase[k]             = COP_CHASING;
+                /* [R3-12] Arm the no-progress watchdog for this fresh chase. */
+                s_cop_best_gap[k]          = 0x7FFFFFFF;
+                s_cop_stall_ticks[k]       = 0;
                 /* If the cop was ONCOMING traffic (facing the wrong way), swing
                  * it around to the race direction so it gives chase cleanly
                  * instead of doing a reverse-arc: clear the oncoming polarity and
@@ -9329,6 +9551,28 @@ void td5_ai_update_special_encounter(void) {
             }
 
             if (phase == COP_CHASING) {
+                /* [R3-12] No-progress watchdog: track the smallest |gap| achieved
+                 * toward the target. Each tick that betters the best by
+                 * COP_STALL_IMPROVE spans resets the stall timer; otherwise it
+                 * counts up. A cop looping a branch keeps driving but never closes
+                 * -> the timer runs out and the chase is abandoned (the cop's
+                 * ordinary route plan then walks it back onto the main ring). This
+                 * is in ADDITION to the too-far end above, which only catches a
+                 * cop falling behind, not one orbiting at a fixed distance. */
+                if (cop_stall_end_enabled()) {
+                    int agap = smart_iabs(gap);
+                    if (agap <= s_cop_best_gap[k] - COP_STALL_IMPROVE) {
+                        s_cop_best_gap[k]    = agap;
+                        s_cop_stall_ticks[k] = 0;
+                    } else if (++s_cop_stall_ticks[k] >= COP_STALL_TICKS) {
+                        TD5_LOG_I(LOG_TAG,
+                            "cop_chase END (no progress %d ticks, looping/stuck): "
+                            "cop=%d target=%d gap=%d best=%d",
+                            (int)s_cop_stall_ticks[k], k, tgt, gap, s_cop_best_gap[k]);
+                        cop_end_chase(k);
+                        continue;
+                    }
+                }
                 /* Overtake: cop drew level/ahead -> force the target to pull over. */
                 if (gap <= -COP_OVERTAKE_MARGIN) {
                     g_cop_phase[k]          = COP_PULLOVER;

@@ -1530,6 +1530,21 @@ static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
                 s_debug_clip_backface_rejects++;
                 return;
             }
+            /* [#R3-6 2026-06-19] In reverse the kept face is the BACK of the sign,
+             * so its texture reads MIRRORED (Paris/NY-backwards "banner flipped
+             * horizontally"). Un-mirror by flipping U about the triangle's U
+             * extent — each banner triangle spans the full quad U-range, so
+             * (umin+umax - u) mirrors the whole sign. Same gate as the revflip. */
+            if (s_banner_cull_revflip == 1 && g_td5.reverse_direction) {
+                float umin = clipped[0].tex_u, umax = clipped[0].tex_u;
+                for (int i = 1; i < clipped_count; i++) {
+                    if (clipped[i].tex_u < umin) umin = clipped[i].tex_u;
+                    if (clipped[i].tex_u > umax) umax = clipped[i].tex_u;
+                }
+                float usum = umin + umax;
+                for (int i = 0; i < clipped_count; i++)
+                    clipped[i].tex_u = usum - clipped[i].tex_u;
+            }
         }
     }
 

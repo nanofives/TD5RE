@@ -3416,7 +3416,9 @@ static int hud_draw_checkpoint_timer_ttf(int view_idx, uint32_t value)
     if (mul < 0.0f) {
         const char *e = getenv("TD5RE_CKPT_TIMER_SCALE");
         long pct = (e && e[0]) ? strtol(e, NULL, 10) : 0;
-        if (pct <= 0)  pct = 140;            /* 1.40x of the 24px base (< 2.2x countdown) */
+        /* [#R3-9 2026-06-19] 30% smaller than the race countdown: countdown is
+         * 2.20x the 24px base, so 0.70*2.20 = 1.54x. Same Rajdhani TTF face. */
+        if (pct <= 0)  pct = 154;            /* 1.54x base = 70% of the 2.2x countdown */
         if (pct < 30)  pct = 30;
         if (pct > 400) pct = 400;
         mul = (float)pct / 100.0f;

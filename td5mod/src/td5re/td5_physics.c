@@ -1532,7 +1532,10 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
             const char *e = getenv("TD5RE_WALL_CAM_ZOOM");
             s_wall_cam = (!e || e[0] != '0') ? 1 : 0;
             const char *p = getenv("TD5RE_WALL_CAM_PEN");
-            s_wall_cam_pen = (p && p[0]) ? atoi(p) : 100;  /* min penetration to arm */
+            /* [#R3-4 2026-06-19] Lowered 100 -> 40: the zoom only fired sometimes
+             * (esp. reversing into a wall, where contact is gentler -> shallower
+             * penetration). 40 arms on almost any real wall contact. */
+            s_wall_cam_pen = (p && p[0]) ? atoi(p) : 40;   /* min penetration to arm */
             if (s_wall_cam_pen < 10) s_wall_cam_pen = 10;
         }
         /* [#R11 2026-06-19] Lowered the arm threshold (was -250, rarely hit) and
