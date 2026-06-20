@@ -149,7 +149,11 @@ static void mp_panel_capped(float canvas_w, int cols, float *pane_w, float *row_
     float full = canvas_w / (float)(cols < 1 ? 1 : cols);
     float w = full;
     if (mp_panel_cap_on()) {
-        float cap = canvas_w / 3.0f;
+        /* [layout 2026-06-19] Cap at HALF the canvas (was a third) so a 2-column grid
+         * fills it edge-to-edge and only a 1-column grid is restrained — matches
+         * frontend_mp_panel_capped in td5_frontend.c so the PROFILE chip + the
+         * choose-your-screen grid line up with the (widened) setup/car-select panes. */
+        float cap = canvas_w / 2.0f;
         if (w > cap) w = cap;
     }
     if (pane_w)  *pane_w  = w;
@@ -2554,7 +2558,14 @@ static float mp_pos_pulse(uint32_t now, float lo, float hi) {
  * PROFILE-chip overlay (frontend_mp_setup_profile_render) so the chip stays glued
  * to the pushed-down setup panes, and by the CHOOSE YOUR SCREEN grid below. */
 #define FE_MP_TOP_BAND     85.0f
-#define FE_MP_BOTTOM_BAND  44.0f
+/* [layout 2026-06-19] MUST equal td5_frontend.c — bottom band shrunk so cards reach
+ * the bottom edge; horizontal band clears the art's left black bar and reaches the
+ * right edge. The PROFILE-chip overlay below uses these so it stays glued to the
+ * widened setup panes. */
+#define FE_MP_BOTTOM_BAND  14.0f
+#define FE_MP_LEFT_MARGIN  112.0f
+#define FE_MP_RIGHT_EDGE   628.0f
+#define FE_MP_USABLE_W     (FE_MP_RIGHT_EDGE - FE_MP_LEFT_MARGIN)
 #define FE_RACE_TITLE_CAP_PX 24.0f    /* design cap height (px at 480-tall reference) */
 #define FE_RACE_TITLE_LEFT_X 126.0f   /* design x where the first letter starts (= td5_frontend FE_TITLE_LEFT_X) */
 #define FE_RACE_TITLE_TRACK  (-1.5f)  /* extra letter tracking (design px; negative = tighter) */
@@ -2633,7 +2644,13 @@ void frontend_mp_position_render2(float sx, float sy) {
      * line, consistent with every other MP screen. The footer band starts at y420,
      * so shrink the grid height to keep the same ~8px gap above it. */
     {
-        const float gx = 40.0f, gy = FE_MP_TOP_BAND, gw = 560.0f, gh = 412.0f - FE_MP_TOP_BAND;
+        /* [layout 2026-06-19] Span the shared horizontal band (clears the art's left
+         * black bar, reaches the right edge). gx is the band's left margin; gw==usable
+         * width feeds the capped row helper. NOTE: unlike the profile/car-select
+         * screens, THIS screen owns a fixed footer band at y420, so the grid bottom
+         * stays at ~412 (8px gap above the footer) rather than FE_MP_BOTTOM_BAND. */
+        const float gx = FE_MP_LEFT_MARGIN, gy = FE_MP_TOP_BAND, gw = FE_MP_USABLE_W;
+        const float gh = 412.0f - FE_MP_TOP_BAND;
         /* [#3] Cap cell WIDTH at the 3x3-equivalent (gw/3) and centre the row in
          * the gw band so 1-2 cells don't stretch edge to edge. */
         float cw, ch = gh / (float)rows, row_x0 = 0.0f;
@@ -2905,7 +2922,12 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
         const float mp_bottom_band = FE_MP_BOTTOM_BAND;
         float pane_w, row_x0 = 0.0f;
         float pane_h = (480.0f - mp_title_band - mp_bottom_band) / (float)rows;
-        mp_panel_capped(640.0f, cols, &pane_w, &row_x0);
+        /* [layout 2026-06-19] Lay panes across the shared usable band (offset by the
+         * left margin) so the PROFILE chip tracks frontend_mp_setup_render's widened
+         * panes. mp_panel_capped returns a band-relative row_x0 (centred in
+         * FE_MP_USABLE_W); add FE_MP_LEFT_MARGIN to land it in the band. */
+        mp_panel_capped(FE_MP_USABLE_W, cols, &pane_w, &row_x0);
+        row_x0 += FE_MP_LEFT_MARGIN;
         for (p = 0; p < n; p++) {
             int col = p % cols, row = p / cols;
             float px = row_x0 + (float)col * pane_w, py = mp_title_band + (float)row * pane_h;

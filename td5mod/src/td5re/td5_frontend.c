@@ -444,7 +444,20 @@ const char *const k_mp_kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "
  * PROFILE chip overlay) and frontend_mp_position_render2 (CHOOSE YOUR SCREEN grid)
  * define the SAME literals — keep all three in sync. */
 #define FE_MP_TOP_BAND     85.0f
-#define FE_MP_BOTTOM_BAND  44.0f
+/* [layout 2026-06-19] Shrunk the bottom band (was 44) so the cards extend toward
+ * the bottom screen edge — the art's lower text lines sit above y~466, so ~14px is
+ * plenty of clearance. Cards now occupy y[85..466] instead of stopping at y436. */
+#define FE_MP_BOTTOM_BAND  14.0f
+/* [layout 2026-06-19] Shared horizontal grid band for the MP simultaneous-pane
+ * screens. The MainMenu background art has a black bar down the LEFT (~110px), so
+ * the cards must start RIGHT of it; they extend out to near the right screen edge.
+ * The grid spans x[FE_MP_LEFT_MARGIN .. FE_MP_RIGHT_EDGE] (usable width ~516) so
+ * with more players the cards stay as large as the available area allows, instead
+ * of being capped to a narrow centred 640/3 column with a wide right gap.
+ * CROSS-FILE COUPLING: td5_fe_race.c defines the SAME literals — keep in sync. */
+#define FE_MP_LEFT_MARGIN  112.0f
+#define FE_MP_RIGHT_EDGE   628.0f
+#define FE_MP_USABLE_W     (FE_MP_RIGHT_EDGE - FE_MP_LEFT_MARGIN)
 /* Background-colour picker: a compact 16x16 pure HSV palette (no preselected
  * swatch rows, no white bar). */
  void frontend_mp_setup_init(void);
@@ -10139,14 +10152,24 @@ static int frontend_mp_panel_cap_on(void) {
  * edge to *row_x0 for `cols` columns across a 640px canvas. No-op (full width,
  * x0=0) when the cap knob is off. */
 static void frontend_mp_panel_capped(int cols, float *pane_w, float *row_x0) {
-    float full = 640.0f / (float)(cols < 1 ? 1 : cols);
+    /* [layout 2026-06-19] Lay the columns across the usable band
+     * x[FE_MP_LEFT_MARGIN..FE_MP_RIGHT_EDGE] (clears the art's left black bar,
+     * reaches the right edge) instead of the full 640 starting at x=0. The cap is
+     * the 3-column-equivalent of the BAND (usable/3) so a 3x3 grid fills the band
+     * edge-to-edge and 1-2 cols stay centred in it without a wide right gap. */
+    float c = (float)(cols < 1 ? 1 : cols);
+    float full = FE_MP_USABLE_W / c;
     float w = full;
     if (frontend_mp_panel_cap_on()) {
-        float cap = 640.0f / 3.0f;
+        /* [layout 2026-06-19] Cap at HALF the usable band (was a third). This lets a
+         * 2-column grid fill the band edge-to-edge (bigger 2-player cards, no wide
+         * right gap) and a 3-column grid fills it anyway (516/3 < 516/2). The cap
+         * only restrains the degenerate 1-column case to a half-band centred card. */
+        float cap = FE_MP_USABLE_W / 2.0f;
         if (w > cap) w = cap;
     }
     if (pane_w) *pane_w = w;
-    if (row_x0) *row_x0 = (640.0f - (float)cols * w) * 0.5f;
+    if (row_x0) *row_x0 = FE_MP_LEFT_MARGIN + (FE_MP_USABLE_W - c * w) * 0.5f;
 }
 
 static void frontend_mp_simul_carsel_render(float sx, float sy) {
@@ -10178,10 +10201,10 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
     const float mp_bottom_band = FE_MP_BOTTOM_BAND;
     float pane_h = (480.0f - mp_title_band - mp_bottom_band) / (float)rows;
 
-    /* Dim the MainMenu background (ramps up with the slide-in). */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy,
-                 ((uint32_t)(0xB0 * anim_t) << 24) | 0x101018u, -1, 0, 0, 1, 1);
+    /* [layout 2026-06-19] Full-screen darkening scrim REMOVED at user request so
+     * the MainMenu background art shows through at full brightness (matches the
+     * profile-setup + choose-your-screen screens). The per-pane translucent
+     * backdrops below still give the cards enough contrast. */
 
     /* [#19] Standard top title. The global title-strip path suppresses titles
      * while s_mp_simul is set (the grid draws its own per-pane headers), so the
@@ -10466,9 +10489,11 @@ void frontend_mp_position_render(float sx, float sy) {
         if (!s_mp_player_ready[p]) all_ready = 0;
     }
 
-    /* Dim full-screen backdrop + title. */
+    /* [layout 2026-06-19] DEAD PATH: the active CHOOSE YOUR SCREEN render is now
+     * frontend_mp_position_render2 (td5_fe_race.c, wired at the TD5_SCREEN_MP_POSITION
+     * case). The full-screen 0xC0101018 darkening scrim is removed here too so this
+     * fallback can't reintroduce the dim if ever re-pointed. */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xC0101018u, -1, 0, 0, 1, 1);
     fe_draw_text_centered(320.0f * sx, 10.0f * sy, "CHOOSE YOUR SCREEN", 0xFFFFE060u, sx, sy);
 
     /* Layout grid occupies a centred area below the title, above the footer. */
