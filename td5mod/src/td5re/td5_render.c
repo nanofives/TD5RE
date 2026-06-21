@@ -3894,7 +3894,12 @@ void td5_render_actors_for_view(int view_index)
                  * surrounding rear-wheel/wanted-smoke skip. */
                 td5_vfx_spawn_random_smoke_puff(actor, view_index);
                 td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
-                if (wanted_smoke_ok || broken_smoke_ok) {
+                if (broken_smoke_ok) {
+                    /* [#5 2026-06-20] A wrecked traffic/cop car smokes from its
+                     * ROOF (dense, lifted column) so a totalled car clearly reads
+                     * as dead — not the chassis-centre exhaust wisp. */
+                    td5_vfx_spawn_wreck_smoke(actor);
+                } else if (wanted_smoke_ok) {
                     td5_vfx_spawn_smoke(actor);
                 }
             }
@@ -6151,6 +6156,108 @@ static float shadow_smoothstep(float a, float b, float x)
  * raycast at every node for the true ground Y, and the baked soft footprint
  * alpha. Stored in world space at sub-tick fraction 0 (the per-frame sub-tick
  * shift is applied at projection time). */
+/* [#7 WHEEL-PLANE SHADOW 2026-06-20] Default ON. Derive the shadow's ground Y
+ * from the plane through the FOUR WHEEL-CONTACT points (probe_FL/FR/RL/RR, which
+ * physics integrates smoothly each tick) instead of re-probing the track span at
+ * every grid node. The per-node — and even the "stable" per-chassis — span probe
+ * RE-RESOLVES which span contains the point every frame, and on a slope that
+ * resolution flips between adjacent spans, jumping the Y → the persistent uphill
+ * FLICKER. It also returns a bad/zero height on some spans, which clamped the
+ * shadow under the terrain → an OPPONENT's shadow vanished at some heights. The
+ * wheel-contact plane has neither failure mode: it is continuous (no span
+ * lookup), always valid (the wheels are on the ground by construction), and
+ * conforms to the car's real pitch/roll. TD5RE_SHADOW_WHEELPLANE=0 reverts to
+ * the old track-span probe. */
+static int shadow_wheelplane_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_SHADOW_WHEELPLANE"); s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
+/* [#7b WORLD-LIFT 2026-06-20] The vehicle shadow is a ground decal coplanar with
+ * the road, and the LEQUAL depth test + small toward-camera bias could not win
+ * the tie: the shadow sat a hair BELOW the road render surface, so the road
+ * occluded the whole shadow and it only peeked through at the SPAN-BOUNDARY seam
+ * (the road mesh's depth discontinuity) — the "dark line under the car aligned
+ * with the span divider", and the soft blob was otherwise invisible. Raising the
+ * shadow a small amount in WORLD Y puts it just above the road so it wins the
+ * tie everywhere, while staying far below walls / kerbs / car bodies (which are
+ * much higher), so those still occlude it correctly. The lift is a fraction of
+ * the car's half-length so it auto-scales with the world unit. TD5RE_SHADOW_LIFT
+ * (percent of half-length, default 6 — required for visibility, see #7c; 0 = no lift). */
+static float shadow_lift_frac(void)
+{
+    static float f = -1.0f;
+    if (f < 0.0f) {
+        const char *e = getenv("TD5RE_SHADOW_LIFT");
+        /* [#7c 2026-06-21] Kept at 6. The lift is REQUIRED for visibility: with the
+         * port's separate shadow projection the toward-camera depth bias alone does
+         * NOT reliably win the coplanar tie, so the road occludes the whole shadow
+         * (verified: dropping this to 2 made the countdown shadows VANISH). The
+         * opponent "desync on slopes" was NOT this float (it persisted at 2%); its
+         * real cause was the #4 low-pass LAG on the smooth wheel-plane Y, now gated
+         * to the raycast path only (see smooth_y below). 0 = no lift (debug). */
+        long pct = (e && e[0]) ? strtol(e, NULL, 10) : 6;
+        if (pct < 0)   pct = 0;
+        if (pct > 100) pct = 100;
+        f = (float)pct / 100.0f;
+    }
+    return f;
+}
+
+/* [#7c UPHILL-CEILING 2026-06-21] Slope-proportional EXTRA world-Y lift gain.
+ * DEFAULT OFF (0). Rationale: a slope-proportional WORLD-Y lift floats the shadow
+ * up by an amount that grows with the grade, and from a distance that reads as the
+ * OPPONENT shadow detaching from the car on slopes ("desync up & down" — user
+ * report 2026-06-21). The real band fix is the relaxed CEILING below (the shadow
+ * now FOLLOWS the rising road instead of being flattened under it), which makes
+ * shadow & road ~coplanar so the existing toward-camera DEPTH bias wins the tie
+ * WITHOUT any extra float. The slope lift is kept as an opt-in A/B knob only.
+ * Env TD5RE_SHADOW_LIFT_SLOPE (percent gain, default 0; >0 re-enables the float). */
+static float shadow_lift_slope_gain(void)
+{
+    static float f = -1.0f;
+    if (f < 0.0f) {
+        const char *e = getenv("TD5RE_SHADOW_LIFT_SLOPE");
+        long pct = (e && e[0]) ? strtol(e, NULL, 10) : 0;
+        if (pct < 0)   pct = 0;
+        if (pct > 400) pct = 400;
+        f = (float)pct / 100.0f;
+        TD5_LOG_I(LOG_TAG, "shadow slope-lift gain = %.2f (0 = off, no float)", f);
+    }
+    return f;
+}
+
+/* Least-squares fit of the plane Y = a*X + b*Z + c through the four wheel
+ * contacts (XZ in render units, Y the contact height). Returns 1 on success; on
+ * a near-degenerate system (wheels collinear — never for a real car) returns 0
+ * and the caller uses a flat plane at the mean height. */
+static int shadow_fit_wheel_plane(const float xz[4][2], const float y[4],
+                                  float *out_a, float *out_b, float *out_c)
+{
+    double Sx=0,Sz=0,Sy=0,Sxx=0,Szz=0,Sxz=0,Sxy=0,Szy=0;
+    for (int i = 0; i < 4; i++) {
+        double X = xz[i][0], Z = xz[i][1], Y = y[i];
+        Sx += X; Sz += Z; Sy += Y;
+        Sxx += X*X; Szz += Z*Z; Sxz += X*Z;
+        Sxy += X*Y; Szy += Z*Y;
+    }
+    /* Solve the 3x3 normal equations via Cramer's rule.
+     *   [Sxx Sxz Sx][a]   [Sxy]
+     *   [Sxz Szz Sz][b] = [Szy]
+     *   [Sx  Sz  4 ][c]   [Sy ]   */
+    double det =
+        Sxx*(Szz*4.0 - Sz*Sz) - Sxz*(Sxz*4.0 - Sz*Sx) + Sx*(Sxz*Sz - Szz*Sx);
+    if (det > -1e-6 && det < 1e-6) return 0;
+    double idet = 1.0 / det;
+    double a = (Sxy*(Szz*4.0 - Sz*Sz) - Sxz*(Szy*4.0 - Sz*Sy) + Sx*(Szy*Sz - Szz*Sy)) * idet;
+    double b = (Sxx*(Szy*4.0 - Sz*Sy) - Sxy*(Sxz*4.0 - Sz*Sx) + Sx*(Sxz*Sy - Szy*Sx)) * idet;
+    double c = (Sxx*(Szz*Sy - Sz*Szy) - Sxz*(Sxz*Sy - Sx*Szy) + Sxy*(Sxz*Sz - Szz*Sx)) * idet;
+    *out_a = (float)a; *out_b = (float)b; *out_c = (float)c;
+    return 1;
+}
+
 static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
 {
     const float inv256 = 1.0f / 256.0f;
@@ -6171,6 +6278,21 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
         cz += corner[i][1];
     }
     cx *= 0.25f; cz *= 0.25f;
+
+    /* [#7 2026-06-20] Fit the wheel-contact ground plane from the four UNSCALED
+     * wheel XZ + contact Y, BEFORE the footprint is scaled out. Evaluated per
+     * node below (when enabled) in place of the flicker-prone span probe. */
+    int   wp_ok = 0;
+    float wp_a = 0.0f, wp_b = 0.0f, wp_c = 0.0f;
+    if (shadow_wheelplane_enabled()) {
+        wp_ok = shadow_fit_wheel_plane(corner, cornerY, &wp_a, &wp_b, &wp_c);
+        if (!wp_ok) {   /* degenerate (collinear wheels) -> flat plane at mean Y */
+            wp_a = wp_b = 0.0f;
+            wp_c = 0.25f * (cornerY[0] + cornerY[1] + cornerY[2] + cornerY[3]);
+            wp_ok = 1;
+        }
+    }
+
     /* Scale the footprint outward from the centroid (body overhang past the
      * wheels) — same footprint as the legacy SHADOW_CORNER_SCALE quad. */
     for (int i = 0; i < 4; i++) {
@@ -6178,13 +6300,27 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
         corner[i][1] = cz + (corner[i][1] - cz) * SHADOW_CORNER_SCALE;
     }
 
-    /* Per-node ground Y is clamped to this band. CEILING = the highest wheel
-     * contact (maxWY): the shadow may never rise ABOVE the wheel plane, because
-     * the car body sits above that plane — so the shadow can no longer climb
-     * onto the rear/side of the car (the angle-dependent "shadow on the car").
-     * It also catches a scaled-out node whose single-step ground walk lands on a
-     * mis-extrapolated span and returns a bogus-high Y. FLOOR is generous (one
-     * footprint half-length below the lowest wheel) so real dips still show. */
+    /* Per-node ground Y is clamped to a band [floorY, ceilY].
+     *
+     * [#7c UPHILL-CEILING 2026-06-21 — RE-confirmed] The CEILING is the fix for
+     * the persistent uphill no-shadow band. RE of the ORIGINAL (RenderRaceActor-
+     * ForView @0x0040C120) shows it applies NO Y ceiling at all: the four shadow
+     * corner Ys are the raw wheel Ys scaled out by 1.25 in every axis, so on a
+     * climb the leading corners legitimately sit ABOVE the rear wheels (the road
+     * keeps rising ahead). The port's old tight ceiling (== maxWY, the highest
+     * wheel) FLATTENED the footprint's front nodes — which are scaled out past the
+     * front wheels, up-slope — down to wheel height, sinking them BELOW the rising
+     * per-span road poly so the road occluded them (LEQUAL) -> the no-shadow band
+     * at the span seam ahead. The flat 6% lift could not clear a real grade.
+     *
+     * So for the smooth, bounded WHEEL-PLANE path use a GENEROUS ceiling
+     * (maxWY + half_len, symmetric with floorY): the front edge can now follow the
+     * road up the hill, while a pathological wheel-contact Y is still bounded. The
+     * RAYCAST FALLBACK keeps the tight maxWY ceiling — its single-step ground walk
+     * CAN land on a mis-extrapolated span and return a bogus-high Y (the original
+     * reason the ceiling existed). The shadow still cannot land on the car: every
+     * car body is drawn AFTER all shadows in the pre-pass and overpaints them.
+     * FLOOR stays generous (one footprint half-length below the lowest wheel). */
     float minWY = cornerY[0], maxWY = cornerY[0];
     for (int i = 1; i < 4; i++) {
         if (cornerY[i] < minWY) minWY = cornerY[i];
@@ -6196,6 +6332,9 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
     float bmz = 0.5f * (corner[2][1] + corner[3][1]);
     float half_len = 0.5f * sqrtf((fmx - bmx) * (fmx - bmx) + (fmz - bmz) * (fmz - bmz));
     float floorY = minWY - half_len;
+    /* [#7c] Relaxed ceiling on the wheel-plane path (lets the uphill front edge
+     * follow the road); tight maxWY on the raycast fallback (bogus-span guard). */
+    float ceilY  = wp_ok ? (maxWY + half_len) : maxWY;
 
     int max_sp    = td5_track_get_span_count();
     int seed_span = (int)actor->track_span_raw;
@@ -6203,13 +6342,45 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
     if (max_sp > 0 && seed_span >= max_sp) seed_span = max_sp - 1;
     int seed_lane = (int)actor->track_sub_lane_index;
 
+    /* [#7b] World-Y lift that floats the shadow just above the road so it wins the
+     * coplanar depth tie (otherwise the road occludes it -> the span-seam line).
+     * A fraction of the car half-length, so it scales with the world unit.
+     * [#7c] Plus a slope-proportional term: the coarse linear mesh undershoots the
+     * road that keeps curving up between nodes on a grade, so scale extra clearance
+     * with the wheel-plane gradient |grad| (rise/run). Flat ground (grad ~ 0) keeps
+     * the planted base lift and never floats; steeper grades get more margin. */
+    float wp_slope    = wp_ok ? sqrtf(wp_a * wp_a + wp_b * wp_b) : 0.0f;
+    float shadow_lift = half_len * (shadow_lift_frac() + shadow_lift_slope_gain() * wp_slope);
+
+    /* [#7c] One-time diagnostic: confirm the relaxed ceiling + slope-lift are live
+     * (logs on the first STEEP grade so the values are meaningful, not on flat
+     * spawn). Per-build state event, not a per-frame spam point. */
+    {
+        static int s_uphill_log = 0;
+        if (!s_uphill_log && wp_ok && wp_slope > 0.05f) {
+            s_uphill_log = 1;
+            TD5_LOG_I(LOG_TAG,
+                      "shadow uphill: slot=%d slope=%.3f maxWY=%.1f ceilY=%.1f "
+                      "half_len=%.1f lift=%.2f (band-fix live)",
+                      (int)actor->slot_index, wp_slope, maxWY, ceilY,
+                      half_len, shadow_lift);
+        }
+    }
+
     /* [task#4] Low-pass the per-node ground Y across the 30Hz rebuild to kill the
-     * per-tick "pop". Only when the previous grid is from the IMMEDIATELY PRECEDING
-     * tick (consecutive) — on the first build, after a span/teleport gap, or after
-     * being off-screen the old Ys are stale, so snap instead of easing toward them.
-     * g->base[n][1] still holds last tick's smoothed Y at this point. */
+     * per-tick "pop" of the RAYCAST probe (its per-node span re-resolution flips the
+     * Y between adjacent spans on a slope).
+     * [#7c 2026-06-21] GATED to the raycast fallback (!wp_ok). The #7 wheel-plane Y is
+     * already continuous tick-to-tick (the four wheel contacts move smoothly over the
+     * continuous ground — no span lookup, no pop), so low-passing it adds NO benefit
+     * and only LAGS the shadow Y behind the car as it climbs/descends. On a steady
+     * grade a first-order low-pass trails a ramp by a constant offset; viewed side-on
+     * THAT lag is the OPPONENT "shadow desync on slopes" the player (viewed down-axis)
+     * hides. So the wheel-plane path tracks the car instantly. Smoothing still applies
+     * to the raycast fallback, and only when the previous grid is the IMMEDIATELY
+     * PRECEDING tick (consecutive); after a gap the old Ys are stale, so snap. */
     uint32_t cur_tick = (uint32_t)g_td5.simulation_tick_counter;
-    int smooth_y = (shadow_antiflicker_enabled() && g->valid &&
+    int smooth_y = (shadow_antiflicker_enabled() && g->valid && !wp_ok &&
                     g->built_tick + 1u == cur_tick);
 
     for (int r = 0; r < SHADOW_GRID_ROWS; r++) {
@@ -6226,27 +6397,34 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
             float nx = (1.0f - tF) * fx + tF * bx;
             float nz = (1.0f - tF) * fz + tF * bz;
 
-            /* Ray cast from above: resolve the containing span at this node
-             * (single-step walk seeded at the chassis span), then read the
-             * barycentric ground height. Same calls physics uses per body
-             * corner — captures cross-span slope/crest that a flat quad misses. */
-            int32_t nx_fp = (int32_t)lroundf(nx * 256.0f);
-            int32_t nz_fp = (int32_t)lroundf(nz * 256.0f);
-            int32_t gy    = 0;
-            if (max_sp > 0) {
-                /* [task#4 2026-06-15] Stable per-(slot,node) ground probe:
-                 * persistent seed + converging walk so a node doesn't oscillate
-                 * between adjacent spans on a slope (the uphill shadow-flicker
-                 * source). Internally falls back to the old chassis-seeded
-                 * single-step path when TD5RE_SHADOW_PROBE_FIX=0. */
-                gy = td5_track_shadow_probe_height((int)actor->slot_index, n,
-                                                   seed_span, seed_lane,
-                                                   nx_fp, nz_fp, NULL);
+            /* Node ground Y. [#7] Default: evaluate the smooth wheel-contact
+             * plane (no span lookup -> no uphill oscillation/flicker, always a
+             * valid height -> opponent shadows never drop out). Fallback (knob
+             * off): the per-node raycast probe that re-resolves the span at this
+             * node — captures cross-span crests a plane misses, but oscillates on
+             * slopes. */
+            float ny;
+            if (wp_ok) {
+                ny = wp_a * nx + wp_b * nz + wp_c;
+            } else {
+                int32_t nx_fp = (int32_t)lroundf(nx * 256.0f);
+                int32_t nz_fp = (int32_t)lroundf(nz * 256.0f);
+                int32_t gy    = 0;
+                if (max_sp > 0) {
+                    gy = td5_track_shadow_probe_height((int)actor->slot_index, n,
+                                                       seed_span, seed_lane,
+                                                       nx_fp, nz_fp, NULL);
+                }
+                ny = (float)gy * inv256;
             }
-
-            float ny = (float)gy * inv256;
-            if (ny > maxWY) ny = maxWY;   /* never above the wheel plane -> never on the car body */
+            if (ny > ceilY) ny = ceilY;   /* [#7c] relaxed band: uphill front edge follows the rising road (body drawn after overpaints any climb) */
             if (ny < floorY) ny = floorY; /* generous floor so real dips still show */
+
+            /* [#7b] Float the whole shadow just above the road so it wins the
+             * coplanar depth tie (else the road occludes it -> the span-seam
+             * line). Applied AFTER the wheel-plane clamp (so it sits a hair above
+             * the wheel plane) but stays far below the car body / walls. */
+            ny += shadow_lift;
 
             /* [task#4] ease toward the fresh raycast Y instead of snapping. */
             if (smooth_y) {
@@ -6335,10 +6513,15 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
         float vy = ddx * s_camera_basis[3] + ddy * s_camera_basis[4] + ddz * s_camera_basis[5];
         float vz = ddx * s_camera_basis[6] + ddy * s_camera_basis[7] + ddz * s_camera_basis[8];
 
-        /* The whole ground patch sits under/just in front of the car; if any
-         * node falls behind the near plane the shadow is off-screen — skip it
-         * (matches the legacy quad's near-clip reject). */
-        if (vz <= s_near_clip) return;
+        /* [#7 2026-06-20] Near-plane handling. A node BEHIND the camera (vz <= 0)
+         * means the car straddles the camera -> drop the whole shadow. But the
+         * old test dropped the ENTIRE shadow when ANY node merely entered the near
+         * GAP (0 < vz <= near) — so an opponent close ahead, or one cresting a
+         * rise right in front, lost its shadow for several frames ("invisible at
+         * some heights"). Clamp near-gap nodes to the near plane instead, keeping
+         * the visible part of the patch drawn. */
+        if (vz <= 0.0f) return;
+        if (vz < s_near_clip) vz = s_near_clip;
 
         float inv_z = 1.0f / vz;
         verts[n].screen_x = -vx * s_focal_length * inv_z + s_center_x;
