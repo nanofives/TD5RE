@@ -6648,6 +6648,10 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         if (s_mp_phase == 0) { extern void frontend_mp_setup_profile_render(float sx, float sy);  /* [#11] profile save/load panel overlay */
                                frontend_mp_setup_render(sx, sy); frontend_mp_setup_profile_render(sx, sy); }
         else                 frontend_mp_simul_carsel_render(sx, sy);
+        /* [disconnect-modal 2026-06-21] reconnect overlay on top of BOTH the
+         * name/colour (phase 0) and car-select (phase 1) steps. */
+        { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+          frontend_mp_setup_disconnect_render(sx, sy); }
         return;
     }
     int actual_car = frontend_current_car_index();
@@ -7370,21 +7374,17 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
         uint32_t accent;
         uint32_t row_color = 0xFF33FF33u;   /* normal: green "joined/ready" row */
         float row_y = (float)(FE_LOBBY_ROW0_Y + p * FE_LOBBY_ROW_H);
-        /* A joystick slot (device index >= 1) whose enumerated name no longer
-         * resolves has been physically unplugged since it joined. This is the
-         * back-to-lobby case: lobby_pads_restore() keeps each player's saved
-         * device index, but the WM_DEVICECHANGE rescan re-enumerates ATTACHED-
-         * ONLY, so the missing pad's index falls out of range and
-         * td5_input_get_device_name() returns NULL. Flag it as DISCONNECTED in
-         * red instead of an opaque "?". Device 0 is the keyboard and always
-         * resolves to "Keyboard", so it never trips this branch. */
-        if (!dev || !dev[0]) {
-            if (s_mp_join_device[p] != 0) {
-                dev = "(DISCONNECTED)";
-                row_color = 0xFFFF4040u;   /* red highlight for a lost controller */
-            } else {
-                dev = "?";
-            }
+        /* [disconnect-modal 2026-06-21, merged] Surface a lost pad. Detection
+         * uses td5_plat_input_device_is_lost() — it actively polls the shared
+         * scan handle, so it catches an unplug even when the enumeration hasn't
+         * dropped the index yet (more robust than the bare NULL-name check). A
+         * lost joystick reads "(DISCONNECTED)" with a red row highlight; an
+         * unnamed-but-present pad reads "CONTROLLER"; device 0 is the keyboard. */
+        if (s_mp_join_device[p] > 0 && td5_plat_input_device_is_lost(s_mp_join_device[p])) {
+            dev = "(DISCONNECTED)";
+            row_color = 0xFFFF4040u;   /* red highlight for a lost controller */
+        } else if (!dev || !dev[0]) {
+            dev = (s_mp_join_device[p] > 0) ? "CONTROLLER" : "KEYBOARD";
         }
 
         /* Name + accent: prefer the live working values; fall back to the
@@ -9085,6 +9085,9 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_MP_POSITION:
         { extern void frontend_mp_position_render2(float sx, float sy);  /* [#6] reworked: de-pulsed + footer hints + empty-cell labels */
           frontend_mp_position_render2(sx, sy); }
+        /* [disconnect-modal 2026-06-21] reconnect overlay on the CHOOSE YOUR SCREEN picker. */
+        { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+          frontend_mp_setup_disconnect_render(sx, sy); }
         break;
     case TD5_SCREEN_CAR_SELECTION:
         frontend_render_car_selection_preview(sx, sy);
@@ -9509,23 +9512,23 @@ void td5_frontend_render_ui_rects(void) {
         }
     }       /* end if (title_visible) */
 
-    /* [DISCONNECT BANNER] Once players have joined the local MP flow with
-     * controllers, surface a lost pad on EVERY post-lobby frontend screen, not
-     * just the lobby roster. A joined joystick whose enumerated name no longer
-     * resolves has been unplugged (same signal the lobby roster uses: the
-     * WM_DEVICECHANGE rescan re-enumerates ATTACHED-ONLY, so the stale device
-     * index falls out of range and td5_input_get_device_name() returns NULL).
-     * Gated on s_mp_flow (set at lobby START, cleared on return to the main
-     * menu) so it only appears across car-select / position / track-select /
-     * name-entry; skipped on the lobby itself, which already flags it per-row. */
-    if (s_mp_flow && s_current_screen != TD5_SCREEN_MP_LOBBY) {
+    /* [DISCONNECT BANNER 2026-06-21, merged] Lightweight complement to the MP
+     * setup disconnect MODAL: surface a lost pad on the post-lobby screens the
+     * modal does NOT cover. The modal (frontend_mp_setup_disconnect_render) owns
+     * CAR_SELECTION and MP_POSITION (freeze + reconnect); the lobby owns its
+     * per-row label. This passive bottom banner covers the remainder of the MP
+     * flow (e.g. TRACK_SELECTION, NAME_ENTRY) where a freeze would be wrong.
+     * Detection uses td5_plat_input_device_is_lost() for parity with both. Gated
+     * on s_mp_flow (set at lobby START, cleared on return to the main menu). */
+    if (s_mp_flow &&
+        s_current_screen != TD5_SCREEN_MP_LOBBY &&
+        s_current_screen != TD5_SCREEN_CAR_SELECTION &&
+        s_current_screen != TD5_SCREEN_MP_POSITION) {
         int dp[TD5_MAX_HUMAN_PLAYERS], ndp = 0, pi;
         for (pi = 0; pi < s_mp_joined_count && pi < TD5_MAX_HUMAN_PLAYERS; pi++) {
             int didx = s_mp_join_device[pi];
-            const char *dn;
-            if (didx == 0) continue;            /* keyboard never "disconnects" */
-            dn = td5_input_get_device_name(didx);
-            if (!dn || !dn[0]) dp[ndp++] = pi + 1;
+            if (didx <= 0) continue;            /* keyboard never "disconnects" */
+            if (td5_plat_input_device_is_lost(didx)) dp[ndp++] = pi + 1;
         }
         if (ndp > 0) {
             char wb[96];

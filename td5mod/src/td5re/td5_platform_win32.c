@@ -2317,6 +2317,44 @@ int td5_plat_input_joystick_is_lost(int device_slot)
     return s_js_lost[device_slot];
 }
 
+/* [disconnect-modal 2026-06-21] Persistent-loss query for an ENUMERATED device
+ * (1-based index into the scan handles, as stored in s_mp_join_device). The MP
+ * setup flow polls pads through the non-exclusive scan handles (scan_dev /
+ * td5_plat_input_device_nav), NOT the in-race exclusive per-player slots that
+ * s_js_lost tracks — so this maintains its own streak/latch over the scan path.
+ * It ACTIVELY polls here (rather than reading a latch updated elsewhere) so that
+ * a caller spinning on it while the setup is frozen also detects reconnection:
+ * a successful GetDeviceState clears the latch, mirroring the in-race re-Acquire
+ * recovery. The same FAIL_THRESHOLD as the in-race detector debounces a one-
+ * frame INPUTLOST from an alt-tab focus change. */
+static int s_scan_fail_streak[16] = { 0 };
+static int s_scan_lost[16]        = { 0 };
+static LPDIRECTINPUTDEVICE8A scan_dev(int i);   /* defined below (lobby scan helper) */
+int td5_plat_input_device_is_lost(int enum_index)
+{
+    LPDIRECTINPUTDEVICE8A dev;
+    DIJOYSTATE2 js;
+    if (enum_index <= 0 || enum_index >= s_device_count || enum_index >= 16) return 0;
+    dev = scan_dev(enum_index);   /* (re)creates + acquires the handle if possible */
+    if (!dev) {
+        if (++s_scan_fail_streak[enum_index] >= TD5_JS_LOST_FAIL_THRESHOLD)
+            s_scan_lost[enum_index] = 1;
+        return s_scan_lost[enum_index];
+    }
+    if (FAILED(IDirectInputDevice8_Poll(dev))) {
+        IDirectInputDevice8_Acquire(dev);   /* re-Acquire on transient INPUTLOST / replug */
+        IDirectInputDevice8_Poll(dev);
+    }
+    if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) {
+        if (++s_scan_fail_streak[enum_index] >= TD5_JS_LOST_FAIL_THRESHOLD)
+            s_scan_lost[enum_index] = 1;
+    } else {
+        s_scan_fail_streak[enum_index] = 0;
+        s_scan_lost[enum_index]        = 0;   /* good read => present (cleared on reconnect) */
+    }
+    return s_scan_lost[enum_index];
+}
+
 /* Push the per-player 9-slot joystick binding table into the platform poll.
  * Mirrors td5_plat_input_set_keyboard_bindings; without this the control-config
  * screen's joystick bindings would be a write-only dead end. count<=9. */

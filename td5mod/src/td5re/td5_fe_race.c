@@ -91,6 +91,13 @@ void frontend_mp_setup_profile_render(float sx, float sy);
 int  frontend_mp_player_pane_cell(int p);
 void frontend_mp_flow_reset(void);
 
+/* [disconnect-modal 2026-06-21] Shared controller-disconnect modal for the MP
+ * simultaneous-setup flow (name/colour, CHOOSE YOUR SCREEN picker, car-select).
+ * Exported render: td5_frontend.c draws it on top of the MP setup + picker render
+ * paths. Mirrors the in-race per-viewport reconnect modal. The matching update-
+ * side freeze is frontend_mp_setup_disconnect_check (static, below). */
+void frontend_mp_setup_disconnect_render(float sx, float sy);
+
 /* Public small-font helpers (defined in td5_frontend.c; the only fe_draw_* the
  * linker exposes — fe_draw_quad/fe_draw_text/fe_draw_text_centered are static
  * there). Re-declared up here so the #6/#11 renderers below can use them; the
@@ -213,6 +220,7 @@ static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now);
 static void frontend_mp_setup_init(void);
 static void frontend_mp_setup_update(void);
 static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> position picker */
+static int  frontend_mp_setup_disconnect_check(int n); /* [disconnect-modal] freeze on lost pad */
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_difficulty_button_visibility(int diff_btn_idx);  /* [R5] hide when 0 opponents */
@@ -1533,6 +1541,10 @@ static void frontend_mp_simul_carsel_update(void) {
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
 
+    /* [disconnect-modal] A pad dropped mid car-select -> freeze + show the
+     * reconnect modal until it returns (ESC aborts to the lobby). */
+    if (frontend_mp_setup_disconnect_check(n)) return;
+
     /* Slide-in animation phase: no input; keep edge trackers fresh so a held
      * START button isn't treated as a press once interaction begins. */
     if (s_inner_state == 0x20) {
@@ -2037,6 +2049,9 @@ static void frontend_mp_setup_update(void) {
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
 
+    /* [disconnect-modal] freeze + reconnect modal if a pad dropped mid-setup. */
+    if (frontend_mp_setup_disconnect_check(n)) return;
+
     if (s_inner_state == 0x20) {   /* slide-in animation */
         for (p = 0; p < n; p++) s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
         frontend_check_escape();
@@ -2417,6 +2432,8 @@ void Screen_MpPosition(void) {
     static uint32_t s_pos_ready_ms = 0;
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    /* [disconnect-modal] freeze + reconnect modal if a pad dropped mid-pick. */
+    if (frontend_mp_setup_disconnect_check(n)) return;
     mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
@@ -2808,6 +2825,111 @@ void frontend_mp_position_render2(float sx, float sy) {
             mp_pos_small_centered(320.0f * sx, 466.0f * sy, "ALL READY - STARTING CARS...",
                                     0xFF80FF80u, sx, sy);
     }
+}
+
+/* [disconnect-modal 2026-06-21] ============================================
+ * Controller-disconnect handling for the MP simultaneous-setup flow.
+ *
+ * The 1999 game had no hot-plug handling, and the port only modaled a dropped
+ * pad IN-RACE (td5_game_update_device_disconnect + the per-viewport HUD modal).
+ * A pad yanked DURING setup just went dead — its panes stopped responding and
+ * the lobby roster showed a bare "?". This mirrors the in-race treatment across
+ * ALL THREE simultaneous-setup steps (name/colour, CHOOSE YOUR SCREEN picker,
+ * car-select grid): freeze input + show a "RECONNECT TO CONTINUE" modal, and
+ * auto-resume the instant the pad returns (td5_plat_input_device_is_lost clears
+ * its latch on the next good read). ESC while frozen aborts the whole flow back
+ * to the lobby so a pad that can't be replugged never hard-traps the menu.
+ *
+ * s_mp_disc_mask: bit p set => joined player p's pad is currently lost. Each
+ * setup screen's update calls frontend_mp_setup_disconnect_check(n) at the very
+ * top; a non-zero return means "frozen", so the caller returns immediately. The
+ * shared overlay frontend_mp_setup_disconnect_render is drawn on top by the
+ * td5_frontend.c render dispatch for those screens. */
+static uint32_t s_mp_disc_mask = 0;
+#ifndef TD5RE_RELEASE
+static int s_mp_disc_sim = 0;          /* F9 dev toggle: simulate all joystick pads lost */
+static int s_mp_disc_sim_prev_f9 = 0;
+#endif
+
+static int frontend_mp_setup_disconnect_check(int n) {
+    uint32_t mask = 0;
+    int p;
+    if (n < 1) n = 1;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+#ifndef TD5RE_RELEASE
+    /* F9 rising edge toggles a simulated disconnect of every joystick player, so
+     * the modal can be exercised without physically unplugging a controller. */
+    {
+        int f9 = td5_plat_input_key_pressed(0x43);
+        if (f9 && !s_mp_disc_sim_prev_f9) s_mp_disc_sim = !s_mp_disc_sim;
+        s_mp_disc_sim_prev_f9 = f9;
+    }
+#endif
+
+    for (p = 0; p < n; p++) {
+        int dev = s_mp_join_device[p];
+        if (dev <= 0) continue;                  /* keyboard (dev 0) never disconnects */
+        if (td5_plat_input_device_is_lost(dev)
+#ifndef TD5RE_RELEASE
+            || s_mp_disc_sim
+#endif
+           )
+            mask |= (1u << p);
+    }
+
+    if (mask && !s_mp_disc_mask) {
+        frontend_play_sfx(10);                   /* alert cue (same as a blocked move) */
+        TD5_LOG_W(LOG_TAG, "MP setup: controller disconnect (player mask=0x%X) -> freeze", mask);
+    } else if (!mask && s_mp_disc_mask) {
+        TD5_LOG_I(LOG_TAG, "MP setup: controller reconnected -> resume");
+    }
+    s_mp_disc_mask = mask;
+
+    if (!mask) return 0;
+
+    /* Frozen. Keep every pad's edge tracker fresh so a button HELD across the
+     * reconnect isn't read as a fresh press on resume (mirrors the slide-in
+     * anim's tracker refresh). ESC = abort the whole MP flow to the lobby. */
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+        s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+    if (frontend_check_escape()) {
+        TD5_LOG_W(LOG_TAG, "MP setup: ESC during disconnect -> abort to lobby");
+        s_mp_disc_mask = 0;
+#ifndef TD5RE_RELEASE
+        s_mp_disc_sim = 0;
+#endif
+        mp_simul_back_to_lobby(n);
+    }
+    return 1;
+}
+
+void frontend_mp_setup_disconnect_render(float sx, float sy) {
+    int p, n = s_num_human_players;
+    float cy = 252.0f;
+    char buf[64];
+    if (!s_mp_disc_mask) return;
+    if (n < 1) n = 1;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    /* Dim the whole 640x480 virtual canvas, then the centred reconnect message
+     * + one accent-coloured "PLUG IN PLAYER n" line per affected player. */
+    td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xB8000000u, -1, 0, 0, 1, 1);
+    td5_vui_text_centered(320.0f * sx, 200.0f * sy, "CONTROLLER DISCONNECTED", 0xFFFF5050u, sx, sy);
+    td5_vui_text_centered(320.0f * sx, 224.0f * sy, "RECONNECT TO CONTINUE",   0xFFFFFFFFu, sx, sy);
+    for (p = 0; p < n; p++) {
+        uint32_t rgb;
+        if (!(s_mp_disc_mask & (1u << p))) continue;
+        rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
+        if (!rgb) rgb = 0xC0C0C0u;
+        if (s_mp_player_name[p][0])
+            snprintf(buf, sizeof buf, "%s - PLUG IN PLAYER %d", s_mp_player_name[p], p + 1);
+        else
+            snprintf(buf, sizeof buf, "PLUG IN PLAYER %d", p + 1);
+        mp_pos_small_centered(320.0f * sx, cy * sy, buf, rgb | 0xFF000000u, sx, sy);
+        cy += 16.0f;
+    }
+    mp_pos_small_centered(320.0f * sx, (cy + 6.0f) * sy, "(ESC = back to lobby)", 0xFF909090u, sx, sy);
 }
 
 /* [#11] Profile-management overlay for the MP name/colour step. Drawn ON TOP of

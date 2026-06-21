@@ -252,6 +252,15 @@ uint32_t td5_plat_input_joystick_buttons(int device_slot);
  *  modal. Source-port feature (no original DirectInput hot-plug handling). */
 int td5_plat_input_joystick_is_lost(int device_slot);
 
+/** [disconnect-modal 2026-06-21] 1 if the ENUMERATED device at this 1-based
+ *  index (s_mp_join_device value) is persistently lost. Unlike
+ *  td5_plat_input_joystick_is_lost (which reads the in-race exclusive per-player
+ *  slots), this ACTIVELY polls the shared frontend scan handle each call and
+ *  latches loss, so it works during the MP setup flow (lobby/picker/car-select)
+ *  AND detects reconnection while the setup is frozen. 0 for the keyboard
+ *  (index 0) or an out-of-range index. Source-port feature. */
+int td5_plat_input_device_is_lost(int enum_index);
+
 /* ------------------------------------------------------------------------
  * Per-action joystick binding (PORT ENHANCEMENT 2026-06)
  *
