@@ -9509,6 +9509,43 @@ void td5_frontend_render_ui_rects(void) {
         }
     }       /* end if (title_visible) */
 
+    /* [DISCONNECT BANNER] Once players have joined the local MP flow with
+     * controllers, surface a lost pad on EVERY post-lobby frontend screen, not
+     * just the lobby roster. A joined joystick whose enumerated name no longer
+     * resolves has been unplugged (same signal the lobby roster uses: the
+     * WM_DEVICECHANGE rescan re-enumerates ATTACHED-ONLY, so the stale device
+     * index falls out of range and td5_input_get_device_name() returns NULL).
+     * Gated on s_mp_flow (set at lobby START, cleared on return to the main
+     * menu) so it only appears across car-select / position / track-select /
+     * name-entry; skipped on the lobby itself, which already flags it per-row. */
+    if (s_mp_flow && s_current_screen != TD5_SCREEN_MP_LOBBY) {
+        int dp[TD5_MAX_HUMAN_PLAYERS], ndp = 0, pi;
+        for (pi = 0; pi < s_mp_joined_count && pi < TD5_MAX_HUMAN_PLAYERS; pi++) {
+            int didx = s_mp_join_device[pi];
+            const char *dn;
+            if (didx == 0) continue;            /* keyboard never "disconnects" */
+            dn = td5_input_get_device_name(didx);
+            if (!dn || !dn[0]) dp[ndp++] = pi + 1;
+        }
+        if (ndp > 0) {
+            char wb[96];
+            int off, k;
+            if (ndp == 1)
+                snprintf(wb, sizeof wb, "PLAYER %d CONTROLLER (DISCONNECTED)", dp[0]);
+            else {
+                off = snprintf(wb, sizeof wb, "CONTROLLER (DISCONNECTED): P%d", dp[0]);
+                for (k = 1; k < ndp && off > 0 && off < (int)sizeof wb - 6; k++)
+                    off += snprintf(wb + off, sizeof wb - (size_t)off, ", P%d", dp[k]);
+            }
+            /* Dark-red bar pinned to the bottom edge + centred text, drawn last
+             * so it sits on top of whatever the active screen rendered. */
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(0.0f, sh - 22.0f * sy, sw, 22.0f * sy, 0xD0401010u, -1, 0, 0, 1, 1);
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_text_centered(320.0f * sx, 462.0f * sy, wb, 0xFFFF5050u, sx * 0.8f, sy * 0.8f);
+        }
+    }
+
     /* Draw queued colored rects (with alpha blending for fade overlays) */
     for (int i = 0; i < s_draw_queue_count; i++) {
         FE_DrawCmd *cmd = &s_draw_queue[i];
