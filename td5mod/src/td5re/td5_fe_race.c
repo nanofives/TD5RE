@@ -960,6 +960,21 @@ void Screen_QuickRaceMenu(void) {
             * dev Span Offset, row 7 = OK/Back; dev rows hidden in release) */
         frontend_init_return_screen(TD5_SCREEN_QUICK_RACE);
         TD5_LOG_D(LOG_TAG, "QuickRaceMenu: init");
+        /* [Bug B fix 2026-06-21] Normalize the game type to single-race every
+         * time the Quick Race menu opens, regardless of entry path. Previously
+         * this relied solely on the main-menu "Quick Race" button
+         * (td5_fe_menu.c:1042-1043) stamping s_selected_game_type=0 before
+         * navigating here; re-entry paths that bypass it (e.g. after a Time
+         * Trial, which sets s_selected_game_type=7 + solo_mode_synth=1) left the
+         * stale type, so the launched race behaved like a Time Trial.
+         * ConfigureGameTypeFlags also clears solo_mode_synth (see its reset
+         * block) and re-applies the Quick Race traffic/cop options. */
+        if (s_selected_game_type != 0) {
+            TD5_LOG_I(LOG_TAG, "QuickRaceMenu: normalizing stale game_type=%d -> 0",
+                      s_selected_game_type);
+        }
+        s_selected_game_type = 0;
+        ConfigureGameTypeFlags();
         s_anim_complete = 0;
         /* Load background: same as main menu */
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");

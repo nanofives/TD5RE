@@ -4431,6 +4431,13 @@ int ConfigureGameTypeFlags(void) {
     g_td5.traffic_enabled = 0;
     g_td5.special_encounter_enabled = 0;
     g_td5.race_rule_variant = 0;
+    /* [Bug B fix 2026-06-21] solo_mode_synth is set by case 7 (Time Trials) and
+     * was NEVER cleared anywhere, so it persisted across game-type changes:
+     * after one Time Trial a subsequent Quick Race ran with slots 1..5 forced
+     * inactive (td5_ai.c solo path) — "it still wants to launch a time trials
+     * race" (no opponents). Clear it here in the common reset; only case 7
+     * re-enables it below. */
+    g_td5.solo_mode_synth = 0;
 
     /* AI-car tier per original's ConfigureGameTypeFlags @ 0x00410CA0.
      * Mapping: 1/2→0, 3/4/5→1, 6/7→2. Cases 0/8/9 leave prior value

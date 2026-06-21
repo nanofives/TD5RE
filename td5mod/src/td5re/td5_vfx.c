@@ -3135,6 +3135,44 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor) {
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
 }
 
+/* [#5 WRECK ROOF SMOKE 2026-06-20] Persistent column of smoke rising from the
+ * ROOF of a wrecked (broken-down) traffic/cop car, so a totalled car visibly
+ * reads as dead. Unlike td5_vfx_spawn_smoke (chassis-centre exhaust, 50% gate),
+ * this:
+ *   - spawns from above the chassis centre (+ROOF_LIFT world units) so the
+ *     column sits on top of the body, not hidden inside it;
+ *   - has no probability gate (one puff per visible wreck per frame) so the
+ *     plume is dense and continuous;
+ *   - drifts upward (s_smoke_vel_y) so it billows up like a real wreck.
+ * Roof lift is in float world units (a car is ~64u wide, see
+ * TRACKED_MARKER_BASE_HALF_XY); ~24u sits just above the roofline. Tunable via
+ * TD5RE_WRECK_SMOKE_LIFT for drive-test. */
+void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor) {
+    if (!actor) return;
+
+    static float roof_lift = -1.0f;
+    if (roof_lift < 0.0f) {
+        const char *e = getenv("TD5RE_WRECK_SMOKE_LIFT");
+        float v = (e && e[0]) ? (float)atof(e) : 24.0f;
+        if (v < 0.0f)   v = 0.0f;
+        if (v > 200.0f) v = 200.0f;
+        roof_lift = v;
+    }
+
+    uint8_t *ap = (uint8_t *)actor;
+    int32_t pos_x, pos_y, pos_z;
+    memcpy(&pos_x, ap + 0x1FC, 4);
+    memcpy(&pos_y, ap + 0x200, 4);
+    memcpy(&pos_z, ap + 0x204, 4);
+
+    float mid_x = (float)pos_x * FP_TO_FLOAT;
+    float mid_y = (float)pos_y * FP_TO_FLOAT + roof_lift;   /* lift to the roofline */
+    float mid_z = (float)pos_z * FP_TO_FLOAT;
+
+    s_smoke_vel_y = 0x900;   /* steady upward billow (vs exhaust's lazy 0x600) */
+    vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
+}
+
 /**
  * SpawnVehicleSmokePuffAtPoint (0x00429FD0)
  *

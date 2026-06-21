@@ -104,6 +104,9 @@ void td5_vfx_update_tire_track_emitters(TD5_Actor *actor, int view_index);
  * ======================================================================== */
 
 void td5_vfx_spawn_smoke(TD5_Actor *actor);
+/* Roof-column smoke for a wrecked (broken-down) traffic/cop car — denser and
+ * lifted to the roofline vs the chassis-centre exhaust above. [#5 2026-06-20] */
+void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor);
 void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index);
 
 /* Engine-rev gated random smoke puff (orig 0x00401370 SpawnRandomVehicleSmokePuff).

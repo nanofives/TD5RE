@@ -7582,6 +7582,19 @@ float td5_game_get_frame_dt(void) {
  * (Distinct from td5_game_get_finish_position(slot), which reads the results
  * table's 0-based final_position and is only valid after results are built.) */
 int td5_game_get_victory_position(void) {
+    /* [Bug A fix 2026-06-21] The centered finishing-place digit
+     * (td5_hud_draw_finish_position) is a VICTORY flourish rendered from the PNG
+     * NUMBERS atlas. It must appear only on a genuine race finish — NOT during a
+     * pause-menu-initiated exit fade (Quit to menu / Back to lobby / Restart),
+     * all of which also stamp s_finish_position_display and raise
+     * race_end_fade_state. Those paths made the big bitmap digit pop up during
+     * the quit transition ("old number of position with the PNG atlas"); the
+     * player's place still shows via the top-left TTF position label during the
+     * fade. Returning 0 here suppresses ONLY the centered digit's race-end-fade
+     * fallback in td5_hud_render_overlays (the per-slot genuine-finish path keys
+     * off s_slot_finish_place, which a quit never sets). */
+    if (s_pause_exit_pending || s_pause_lobby_pending || s_pause_restart_pending)
+        return 0;
     return s_finish_position_display;
 }
 
