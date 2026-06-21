@@ -3068,26 +3068,23 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
 
         /* Flash out over the last 30 frames (odd frames hidden). */
         if (g_wanted_msg_timer < 330 || (g_wanted_msg_timer & 1) == 0) {
-            const char *l1 = g_wanted_msg_line1[g_wanted_msg_index * 2];
-            const char *l2 = g_wanted_msg_line2[g_wanted_msg_index * 2];
+            /* [COP-CHASE 2026-06-21] Generic objective banner — the crime-specific
+             * "SUSPECT IS WANTED FOR <X>" text was removed at user request. Single
+             * big line in the UPPER-THIRD, clear of the top-centre score and the
+             * centre countdown digit. */
+            const char *msg = "CHASE THE SUSPECTS";
             float pane_h = vp_bottom - vp_top;
             if (pane_h < 1.0f) pane_h = 480.0f;
             float cx = s_view_layout[view_index].center_x;
             if (td5_hudfont_ready()) {
-                /* Big vector banner in the UPPER-THIRD: clear of the top-centre
-                 * ARRESTS/POINTS score and the centre countdown digit. */
                 float sy  = s_view_layout[view_index].scale_y;
-                float cap = sy * 18.0f;                       /* much bigger than the score */
-                float y1  = vp_top + pane_h * 0.22f;          /* caps centre, line 1 */
-                float y2  = y1 + cap * 1.45f;                 /* line 2 below          */
-                hud_draw_wanted_banner_line(cx, y1, cap, l1, 0xFFFFFFFFu);  /* white header */
-                hud_draw_wanted_banner_line(cx, y2, cap, l2, 0xFFFFC050u);  /* amber crime  */
+                float cap = sy * 20.0f;                       /* big single-line banner */
+                float y1  = vp_top + pane_h * 0.24f;          /* caps centre */
+                hud_draw_wanted_banner_line(cx, y1, cap, msg, 0xFFFFFFFFu);
             } else {
-                /* Bitmap fallback (vector_ui off): top, smaller, via the queue path. */
-                s_hud_next_text_scale = 1.6f;
-                td5_hud_queue_text(0, (int)cx, (int)(vp_top + 18.0f), 1, "%s", l1);
-                s_hud_next_text_scale = 1.6f;
-                td5_hud_queue_text(0, (int)cx, (int)(vp_top + 34.0f), 1, "%s", l2);
+                /* Bitmap fallback (vector_ui off): top, via the queue path. */
+                s_hud_next_text_scale = 1.8f;
+                td5_hud_queue_text(0, (int)cx, (int)(vp_top + 20.0f), 1, "%s", msg);
             }
         }
     }
@@ -6970,22 +6967,31 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
      * crisp solid-colour geometry from the 1×1 white page so it stays sharp at any
      * resolution. TD5RE_COPCHASE_VECTOR=0 falls back to the real sprites below. */
     if (td5_hud_copchase_vector_enabled()) {
+        /* Real DOWN-ARROW (a vertical shaft + a wider arrowhead, NOT a bare
+         * triangle), cyan with a blue outline, floating above the suspect and
+         * pointing down at it. */
         const float aw = FV2, ah = FV2;
-        const float apex_x = sx;
-        const float apex_y = sy - ah * 0.5f;        /* tip floats above the car, points down */
-        const float top_y  = sy - ah * 1.5f;        /* arrow base (wide top) */
-        const float a_l = sx - aw * 0.5f, a_r = sx + aw * 0.5f;
+        const float cx    = sx;                     /* arrow centre x */
+        const float top_y = sy - ah * 1.6f;         /* shaft top */
+        const float mid_y = top_y + ah * 0.52f;     /* shaft → head transition */
+        const float tip_y = top_y + ah;             /* arrow tip (points down at car) */
+        const float sh_w  = aw * 0.30f;             /* shaft width */
+        const float hd_w  = aw;                     /* arrowhead width */
         const uint32_t cyan = 0xFF91FEFDu;          /* ~(145,254,253) light-blue fill */
         const uint32_t blue = 0xFF6478FFu;          /* periwinkle-blue outline        */
         float ob = FV1 * 3.0f; if (ob < 1.5f) ob = 1.5f;
 
-        /* Blue outline triangle (slightly larger) then the cyan arrowhead. */
-        hud_solid_tri(a_l - ob, top_y - ob, a_r + ob, top_y - ob,
-                      apex_x, apex_y + ob * 1.5f, sz, rhw, blue);
-        hud_solid_tri(a_l, top_y, a_r, top_y, apex_x, apex_y, sz, rhw, cyan);
+        /* Blue outline (slightly larger) — shaft rect + head triangle. */
+        hud_solid_quad(cx - sh_w*0.5f - ob, top_y - ob, cx + sh_w*0.5f + ob, mid_y + ob, sz, rhw, blue);
+        hud_solid_tri (cx - hd_w*0.5f - ob, mid_y - ob, cx + hd_w*0.5f + ob, mid_y - ob, cx, tip_y + ob*1.5f, sz, rhw, blue);
+        /* Cyan fill — shaft rect + head triangle. */
+        hud_solid_quad(cx - sh_w*0.5f, top_y, cx + sh_w*0.5f, mid_y, sz, rhw, cyan);
+        hud_solid_tri (cx - hd_w*0.5f, mid_y, cx + hd_w*0.5f, mid_y, cx, tip_y, sz, rhw, cyan);
 
-        /* Bust-progress bar pinned to the RIGHT of the arrow head, same height. */
-        const float bar_l = a_r + FV1 * 5.0f;
+        /* Bust-progress bar pinned to the RIGHT of the arrow, same height. It FILLS
+         * FROM THE BOTTOM UP as you ram the suspect (full = arrest): green at the
+         * bottom → red at the top, matching the original DAMAGEB1 sprite. */
+        const float bar_l = cx + hd_w*0.5f + FV1 * 5.0f;
         const float bar_w = FV2 * 0.30f;
         const float bar_r = bar_l + bar_w;
         const float bar_t = top_y;
@@ -6994,11 +7000,12 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
                        sz, rhw, 0xC0200000u);       /* dark backing for the empty meter */
         float fillh = bar_h * damage_frac;          /* damage_frac = bust progress (0→1) */
         if (fillh > 0.5f) {
-            const uint32_t red = 0xFFFB0500u;       /* top (251,5,0) */
-            uint8_t fr_ = (uint8_t)(0xFB + (int)((float)(0x00 - 0xFB) * damage_frac));
-            uint8_t fg_ = (uint8_t)(0x05 + (int)((float)(0xFF - 0x05) * damage_frac));
-            uint32_t bot = 0xFF000000u | ((uint32_t)fr_ << 16) | ((uint32_t)fg_ << 8);
-            hud_grad_quad(bar_l, bar_t, bar_r, bar_t + fillh, sz, rhw, red, bot);
+            const uint32_t green = 0xFF00FF00u;     /* bottom (0,255,0) */
+            uint8_t tr = (uint8_t)(251.0f * damage_frac);
+            uint8_t tg = (uint8_t)(5.0f + 250.0f * (1.0f - damage_frac));
+            uint32_t topc = 0xFF000000u | ((uint32_t)tr << 16) | ((uint32_t)tg << 8);
+            float fill_top = bar_t + bar_h - fillh; /* grows UP from the bottom */
+            hud_grad_quad(bar_l, fill_top, bar_r, bar_t + bar_h, sz, rhw, topc, green);
         }
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         return;
