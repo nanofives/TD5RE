@@ -7368,8 +7368,24 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
         const char *dev = td5_input_get_device_name(s_mp_join_device[p]);
         const char *name;
         uint32_t accent;
+        uint32_t row_color = 0xFF33FF33u;   /* normal: green "joined/ready" row */
         float row_y = (float)(FE_LOBBY_ROW0_Y + p * FE_LOBBY_ROW_H);
-        if (!dev || !dev[0]) dev = "?";
+        /* A joystick slot (device index >= 1) whose enumerated name no longer
+         * resolves has been physically unplugged since it joined. This is the
+         * back-to-lobby case: lobby_pads_restore() keeps each player's saved
+         * device index, but the WM_DEVICECHANGE rescan re-enumerates ATTACHED-
+         * ONLY, so the missing pad's index falls out of range and
+         * td5_input_get_device_name() returns NULL. Flag it as DISCONNECTED in
+         * red instead of an opaque "?". Device 0 is the keyboard and always
+         * resolves to "Keyboard", so it never trips this branch. */
+        if (!dev || !dev[0]) {
+            if (s_mp_join_device[p] != 0) {
+                dev = "(DISCONNECTED)";
+                row_color = 0xFFFF4040u;   /* red highlight for a lost controller */
+            } else {
+                dev = "?";
+            }
+        }
 
         /* Name + accent: prefer the live working values; fall back to the
          * session store so returning players show their saved identity before
@@ -7399,7 +7415,7 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
             snprintf(line, sizeof line, "PLAYER %d  -  %s  -  %s",
                      p + 1, dev, SNK_ReadyTxt);
         fe_draw_text((float)(FE_LOBBY_X + 22) * sx, row_y * sy,
-                     line, 0xFF33FF33u, sx*0.8f, sy*0.8f);
+                     line, row_color, sx*0.8f, sy*0.8f);
     }
     if (s_mp_joined_count == 0)
         fe_draw_text_centered(320.0f * sx, 150.0f * sy, "( no players yet )", 0xFF888888, sx*0.8f, sy*0.8f);
