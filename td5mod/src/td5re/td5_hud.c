@@ -2030,6 +2030,34 @@ static void hud_scale_text_pos(float *x, float *y, int centered, float scale)
     else          *x = vl->vp_int_left  + dl * scale;  /* nearer left edge  */
 }
 
+/* [COP-CHASE HUD 2026-06-21] Tunables for the cop-chase HUD polish:
+ *   TD5RE_COPCHASE_HUD_SCALE = POINTS/ARRESTS readout size, percent (default 135).
+ *   TD5RE_COPCHASE_VECTOR    = 1 (default) draws the suspect damage/health bar as
+ *                              crisp solid-colour vector geometry instead of the
+ *                              DAMAGE/DAMAGEB1 bitmap atlas sprites; 0 = legacy. */
+static float copchase_hud_text_scale(void) {
+    static float cached = -1.0f;
+    if (cached < 0.0f) {
+        const char *e = getenv("TD5RE_COPCHASE_HUD_SCALE");
+        int pct = e ? atoi(e) : 135;
+        if (pct < 50)  pct = 50;
+        if (pct > 400) pct = 400;
+        cached = (float)pct / 100.0f;
+        TD5_LOG_I(LOG_TAG, "cop-chase HUD text scale = %.2fx (TD5RE_COPCHASE_HUD_SCALE)", (double)cached);
+    }
+    return cached;
+}
+static int td5_hud_copchase_vector_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_COPCHASE_VECTOR");
+        cached = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "cop-chase vector indicators %s (TD5RE_COPCHASE_VECTOR)",
+                  cached ? "ENABLED" : "disabled (legacy sprites)");
+    }
+    return cached;
+}
+
 /* [HUD TTF SWAP 2026-06-05] The in-race HUD overlay text renders in the menu's
  * SECONDARY native face (Rajdhani, td5_hudfont_*) when loaded, instead of the
  * HUD-font SDF / tpage5 bitmap. Like the pause menu, the HUD text path is
@@ -3425,17 +3453,39 @@ static int hud_draw_checkpoint_timer_ttf(int view_idx, uint32_t value)
     }
 
     float cap = sy * 24.0f * mul;
-    float ts  = cap * (1.0f / 15.0f);        /* td5_vui_text_centered: caps span 15*ts */
     char buf[8];
     snprintf(buf, sizeof buf, "%u", (unsigned)(value % 1000u));
 
-    float cx      = vl->center_x;
-    float caps_cy = vl->vp_top + cap * 0.5f + 6.0f * sy;  /* sit just below the pane top */
-    float ny      = caps_cy - 15.5f * ts;    /* cell-top so caps centre at caps_cy */
-    float off     = cap * (1.0f / 16.0f);
+    /* [#2 2026-06-20] Lay the digits out directly in the Rajdhani HUD face — the
+     * SAME face the in-race overlay text (position / lap / time) uses — so the
+     * checkpoint countdown matches it exactly. The previous td5_vui_text_centered
+     * path drew through fe_draw_text, which uses the frontend MENU face (a
+     * different typeface), so the number visibly clashed with the rest of the HUD.
+     * Mirrors the overlay flush layout (td5_hud_flush_text): centre the digit
+     * string on the pane centre, place the baseline so the caps centre sits just
+     * below the pane top, with a 1/16-cap black drop-shadow for legibility. */
+    for (int k = 0; buf[k]; k++) { td5_glyph g; td5_hudfont_get((unsigned char)buf[k], cap, &g); }
+    td5_font_flush_uploads();
+
+    float total_w = 0.0f;
+    for (int k = 0; buf[k]; k++) total_w += td5_hudfont_advance((unsigned char)buf[k], cap);
+
+    float cx       = vl->center_x;
+    float caps_cy  = vl->vp_top + cap * 0.5f + 6.0f * sy;  /* sit just below the pane top */
+    float baseline = caps_cy + cap * 0.5f;                 /* caps centre at caps_cy */
+    float pen      = cx - total_w * 0.5f;
+    float off      = cap * (1.0f / 16.0f);
     if (off < 1.0f) off = 1.0f;
-    td5_vui_text_centered(cx + off, ny + off, buf, 0xFF000000u, ts, ts);  /* drop shadow */
-    td5_vui_text_centered(cx, ny, buf, 0xFFFFFFFFu, ts, ts);
+    for (int k = 0; buf[k]; k++) {
+        td5_glyph g; td5_hudfont_get((unsigned char)buf[k], cap, &g);
+        if (g.valid && g.w > 0.0f) {
+            float gx = pen + g.xoff;
+            float gy = baseline + g.yoff;
+            td5_vui_quad(gx + off, gy + off, g.w, g.h, 0xFF000000u, g.page, g.u0, g.v0, g.u1, g.v1);  /* shadow */
+            td5_vui_quad(gx, gy, g.w, g.h, 0xFFFFFFFFu, g.page, g.u0, g.v0, g.u1, g.v1);
+        }
+        pen += g.advance;
+    }
     return 1;
 }
 
@@ -4103,10 +4153,15 @@ void td5_hud_render_overlays(float dt)
                  * against the original's on-screen HUD ("POINTS N" under
                  * "ARRESTS N"). [FIX 2026-05-31] The score accrues to the
                  * player/cop at accumulated_score (+0x2C8). */
+                /* [COP-CHASE 2026-06-21] Top-CENTRE, larger HUD face, sits just
+                 * below the ARRESTS line (drawn from the LAP_COUNTER block). The
+                 * user-requested cop-chase scoreboard layout (was small text in the
+                 * top-left corner). Scale via TD5RE_COPCHASE_HUD_SCALE. */
+                s_hud_next_text_scale = copchase_hud_text_scale();
                 td5_hud_queue_text(0,
-                    (int)(vl->vp_int_left + 8.0f),
-                    (int)(vl->vp_int_top + 24.0f),
-                    0,
+                    (int)vl->center_x,
+                    (int)(vl->vp_int_top + 30.0f),
+                    1,
                     "POINTS %d", (int)td5_game_get_result_secondary(0));
             } else {
                 td5_hud_queue_text(0,
@@ -4136,10 +4191,14 @@ void td5_hud_render_overlays(float dt)
                  * suspect's damage bar is fully depleted). Label confirmed
                  * against the original's on-screen HUD ("ARRESTS N", top line).
                  * [FIX 2026-05-31 — was the guessed "BUSTS".] */
+                /* [COP-CHASE 2026-06-21] Render top-CENTRE (pane centre, just below
+                 * the top edge) in a slightly larger HUD face, stacked ABOVE the
+                 * POINTS line. */
+                s_hud_next_text_scale = copchase_hud_text_scale();
                 td5_hud_queue_text(0,
-                    (int)(vl->vp_int_left + 8.0f),
+                    (int)vl->center_x,
                     (int)(vl->vp_int_top + 8.0f),
-                    0,
+                    1,
                     "ARRESTS %d", td5_game_get_wanted_kills(0));
             } else {
                 td5_hud_queue_text(0,
@@ -6788,6 +6847,33 @@ static int hud_wanted_active_slot(void) {
     return td5_ai_get_wanted_overlay_slot();
 }
 
+/* [COP-CHASE 2026-06-21] Solid-colour screen-space quad for the vectorised
+ * cop-chase suspect health bar — binds the HUD 1x1 white page so the per-vertex
+ * diffuse IS the visible colour (no atlas sprite). Coords are render-target
+ * pixels at the projected billboard depth (sz/rhw) so it composites with the 3D
+ * scene exactly like the legacy DAMAGE sprite it replaces. */
+static void hud_fill_solid_quad(float l, float t, float r, float b,
+                                float sz, float rhw, uint32_t color)
+{
+    TD5_D3DVertex q[4];
+    q[0].screen_x = l; q[0].screen_y = t;
+    q[1].screen_x = l; q[1].screen_y = b;
+    q[2].screen_x = r; q[2].screen_y = t;
+    q[3].screen_x = r; q[3].screen_y = b;
+    for (int i = 0; i < 4; i++) {
+        q[i].depth_z  = sz;
+        q[i].rhw      = rhw;
+        q[i].diffuse  = color;
+        q[i].specular = 0;
+        q[i].tex_u    = 0.0f;   /* 1x1 white texel -> flat colour */
+        q[i].tex_v    = 0.0f;
+    }
+    uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
+    td5_plat_render_draw_tris(q, 4, idx, 6);
+}
+
 void td5_hud_update_wanted_damage_indicator(int actor_slot)
 {
     /* Gate matches orig 0x0043d4f5:
@@ -6852,6 +6938,49 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
     float frame_top    = sy - (FV2 * 0.5f + FV2);
     float frame_right  = frame_left + FV2;
     float frame_bottom = frame_top  + FV2;
+
+    /* [COP-CHASE VECTORISE 2026-06-21] Draw the suspect health bar as crisp
+     * solid-colour vector geometry instead of the DAMAGE/DAMAGEB1 bitmap sprites:
+     *   - dark translucent backdrop (whole frame)
+     *   - health fill draining top-down (remaining health anchored at the bottom,
+     *     same direction as the orig needle), coloured green->red by health
+     *   - a thin white outline
+     * Resolution-independent (no atlas), so it stays crisp at any window size.
+     * Toggle off with TD5RE_COPCHASE_VECTOR=0 to fall back to the legacy sprites. */
+    if (td5_hud_copchase_vector_enabled()) {
+        float bw = FV1 * 2.0f;
+        if (bw < 1.0f) bw = 1.0f;                 /* outline / inset thickness */
+
+        /* Backdrop behind the whole frame. */
+        hud_fill_solid_quad(frame_left, frame_top, frame_right, frame_bottom,
+                            sz, rhw, 0xC0101018u);
+
+        /* Health fill: top inset grows with damage (drains from the top), so the
+         * remaining health reads as a green->red bar anchored at the bottom. */
+        float fill_top = frame_top + FV2 * damage_frac;
+        if (fill_top < frame_top + bw) fill_top = frame_top + bw;
+        if ((frame_bottom - bw) - fill_top > 0.5f) {
+            uint8_t hr = (uint8_t)(0x20 + (int)((float)(0xE0 - 0x20) * damage_frac));
+            uint8_t hg = (uint8_t)(0xC0 + (int)((float)(0x30 - 0xC0) * damage_frac));
+            uint8_t hb = (uint8_t)(0x40 + (int)((float)(0x20 - 0x40) * damage_frac));
+            uint32_t fill_color = 0xFF000000u | ((uint32_t)hr << 16)
+                                              | ((uint32_t)hg << 8) | (uint32_t)hb;
+            hud_fill_solid_quad(frame_left + bw, fill_top,
+                                frame_right - bw, frame_bottom - bw,
+                                sz, rhw, fill_color);
+        }
+
+        /* White outline (4 thin edge quads). */
+        const uint32_t edge = 0xFFFFFFFFu;
+        hud_fill_solid_quad(frame_left,      frame_top,         frame_right,     frame_top + bw,    sz, rhw, edge);
+        hud_fill_solid_quad(frame_left,      frame_bottom - bw, frame_right,     frame_bottom,      sz, rhw, edge);
+        hud_fill_solid_quad(frame_left,      frame_top,         frame_left + bw, frame_bottom,      sz, rhw, edge);
+        hud_fill_solid_quad(frame_right - bw, frame_top,        frame_right,     frame_bottom,      sz, rhw, edge);
+
+        /* Restore opaque preset so it doesn't leak into the next per-actor pass. */
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        return;
+    }
 
     /* [FIX 2026-05-24 damage-bar-atlas; orig 0x0043d4e0]
      * Orig InitializeWantedHudOverlays @ 0x0043d2d0 calls

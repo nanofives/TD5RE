@@ -2816,6 +2816,17 @@ void frontend_init_race_schedule(void) {
         g_td5.special_encounter_enabled = s_game_option_cops;
     }
 
+    /* [COP-CHASE 2026-06-21] Cop Chase / wanted mode never spawns the separate
+     * traffic-police "encounter" cop — the player is already the pursuer. Force
+     * it off at race launch regardless of any stale POLICE toggle state (the row
+     * is hidden in this mode; ConfigureGameTypeFlags case 8 already zeroes it, and
+     * this is the belt-and-suspenders chokepoint so no other path can re-enable
+     * it). Keeps cops out of traffic for the whole cop-chase race. */
+    if (g_td5.wanted_mode_enabled && g_td5.special_encounter_enabled) {
+        g_td5.special_encounter_enabled = 0;
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: cop chase -> special-encounter (traffic police) forced OFF");
+    }
+
     TD5_LOG_I(LOG_TAG,
               "InitRaceSchedule: split=%d grid=%dx%d humans=%d opp=%d eff=%d spectate=%d panes=%d 2p=%d layout_sel=%d",
               g_td5.split_screen_mode, g_td5.split_grid_cols, g_td5.split_grid_rows,
@@ -7031,7 +7042,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
             if (tvi > TD5_TRAFFIC_VOLUME_COUNT - 1) tvi = TD5_TRAFFIC_VOLUME_COUNT - 1;
             fe_draw_text(vx, (float)(s_buttons[4].y + 6) * sy, traffic_vol[tvi], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         }
-        if (s_buttons[5].active)
+        if (s_buttons[5].active && !s_buttons[5].hidden)  /* police on/off (hidden in cop chase) */
             fe_draw_text(vx, (float)(s_buttons[5].y + 6) * sy, on_off[s_game_option_cops & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         if (s_buttons[6].active && !s_buttons[6].hidden)  /* per-race AI difficulty (hidden in Quick Race) */
             fe_draw_text(vx, (float)(s_buttons[6].y + 6) * sy, difficulty[s_race_difficulty % 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
@@ -7453,9 +7464,19 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
      * record table; if it has none yet, fall through to the "NO RECORDS YET" empty
      * state below (grp == NULL). The Records browse screen leaves the flag 0, so
      * it still shows the authored TD5 groups unchanged. */
+    /* [2026-06-19] The High Scores BROWSE screen now lists the 11 migrated TD6
+     * tracks too (category indices 26..36, after the TD5 tracks+cups). For those
+     * slots, pull the TD6 record table for the slot's converted level — which
+     * falls back to placeholder names/times until a genuine run is set, exactly
+     * like the TD5 tracks. The post-race flow still routes through
+     * s_postrace_td6_level (set to the raced level), so check it first. */
     const TD5_NpcGroup *grp;
+    int browse_td6_level = (s_postrace_td6_level <= 0)
+                           ? td5_asset_td6_level_for_slot(s_score_category_index) : 0;
     if (s_postrace_td6_level > 0)
         grp = td5_save_get_td6_record_group(s_postrace_td6_level);
+    else if (browse_td6_level > 0)
+        grp = td5_save_get_td6_record_group(browse_td6_level);
     else
         grp = td5_save_get_npc_group(s_score_category_index);
     int speed_kph = td5_save_get_speed_units();  /* drives the AVERAGE/TOP value conversion;
@@ -7485,7 +7506,7 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     if (!grp) {
         /* [#2b] TD6 with no genuine records yet shows "NO RECORDS YET" (the player
          * just hasn't set one) rather than the generic "NO SCORES YET". */
-        const char *msg = (s_postrace_td6_level > 0) ? "NO RECORDS YET" : "NO SCORES YET";
+        const char *msg = (s_postrace_td6_level > 0 || browse_td6_level > 0) ? "NO RECORDS YET" : "NO SCORES YET";
         fe_draw_small_text((320.0f * sx) - (fe_measure_small_text(msg) * 0.5f) * fe_glyph_sx(sx, sy),
                            HS_SF_Y(60), msg, 0xFFCCCCCC, sx, sy);
         return;

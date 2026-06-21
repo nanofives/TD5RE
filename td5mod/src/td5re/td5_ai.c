@@ -309,6 +309,20 @@ static int32_t s_cop_spawn_counter;                       /* deterministic 1:Cop
  * every (re)acquire. Pure function of replicated span state -> lockstep-safe. */
 static int32_t s_cop_best_gap[TD5_MAX_TOTAL_ACTORS];      /* smallest |gap| to target seen this chase */
 static int16_t s_cop_stall_ticks[TD5_MAX_TOTAL_ACTORS];   /* ticks since |gap| last improved */
+/* [#4 SUSTAINED OVERTAKE 2026-06-20] Consecutive ticks this cop has held a lead
+ * (gap <= -COP_OVERTAKE_MARGIN) over its target. The pull-over brake only fires
+ * once the cop has STAYED ahead for COP_OVERTAKE_HOLD_TICKS (~1s) — a momentary
+ * draw-level on a swerve no longer instantly stops the target, and the cop keeps
+ * chasing through the hold instead of giving up the moment it noses ahead. Any
+ * tick the target is level/ahead again resets it to 0. */
+static int16_t s_cop_overtake_ticks[TD5_MAX_TOTAL_ACTORS];
+/* [#6 CHASE SPIN-UP 2026-06-20] Ticks since this cop's chase began. For the
+ * first COP_CHASE_SPINUP_TICKS the cop drives as an ordinary AI racer (corner
+ * speed-easing + route-line settling intact) BEFORE the 1.5x catch-up throttle
+ * is force-pinned. Without it a cop floored from a slow cruise (or a
+ * velocity-zeroed oncoming flip) the instant a chase started and overshot the
+ * first corner straight into a wall. Reset on acquire / chase-end. */
+static int16_t s_cop_chase_ticks[TD5_MAX_TOTAL_ACTORS];
 
 /* Chase tuning (spans / fixed-point speed). All in the same units the
  * surrounding AI uses; gaps are computed on the folded main ring so they are
@@ -331,6 +345,10 @@ static int16_t s_cop_stall_ticks[TD5_MAX_TOTAL_ACTORS];   /* ticks since |gap| l
  * still closes it over time; only a genuine no-closure loop trips this. */
 #define COP_STALL_TICKS    210   /* ~7s of zero net closure -> abandon the chase */
 #define COP_STALL_IMPROVE    2   /* spans of |gap| reduction that counts as progress */
+/* [#4] Hold time the cop must stay overtaken (gap <= -margin) before the target
+ * is forced to brake. 30 ticks = ~1s at 30Hz. Tunable via TD5RE_COP_OVERTAKE_HOLD
+ * (ticks); 0 restores the old instant-on-overtake behaviour. */
+#define COP_OVERTAKE_HOLD_TICKS 30
 
 /* Reset all police-chase per-slot state (global init + per-race). */
 static void cop_state_reset(void) {
@@ -341,6 +359,8 @@ static void cop_state_reset(void) {
     memset(g_cop_glow_phase, 0, sizeof(g_cop_glow_phase));
     memset(g_cop_cooldown, 0, sizeof(g_cop_cooldown));
     memset(s_cop_stall_ticks, 0, sizeof(s_cop_stall_ticks));
+    memset(s_cop_overtake_ticks, 0, sizeof(s_cop_overtake_ticks));
+    memset(s_cop_chase_ticks, 0, sizeof(s_cop_chase_ticks));
     for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
         g_cop_target[i]       = -1;
         g_actor_pursued_by[i] = -1;
@@ -364,6 +384,10 @@ static void cop_end_chase(int slot) {
     /* [R3-12] Clear the no-progress watchdog so a re-acquire starts fresh. */
     s_cop_best_gap[slot]   = 0x7FFFFFFF;
     s_cop_stall_ticks[slot] = 0;
+    /* [#4] Clear the sustained-overtake hold so the next chase starts fresh. */
+    s_cop_overtake_ticks[slot] = 0;
+    /* [#6] Clear the chase spin-up timer for the next acquire. */
+    s_cop_chase_ticks[slot] = 0;
     /* Cruise normally for a while before this cop may re-acquire — stops the
      * "same cop chases me again the instant the last chase ends" loop. */
     g_cop_cooldown[slot] = COP_RECHASE_COOLDOWN;
@@ -379,6 +403,40 @@ static int cop_stall_end_enabled(void) {
         s = (!e || e[0] != '0') ? 1 : 0;
     }
     return s;
+}
+
+/* [#4] Ticks the cop must hold its overtake before the target is forced to brake.
+ * TD5RE_COP_OVERTAKE_HOLD overrides COP_OVERTAKE_HOLD_TICKS (ticks @30Hz); 0 =
+ * instant-on-overtake (the old behaviour). Clamped to a sane range. */
+static int cop_overtake_hold_ticks(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_COP_OVERTAKE_HOLD");
+        long t = (e && e[0]) ? strtol(e, NULL, 10) : COP_OVERTAKE_HOLD_TICKS;
+        if (t < 0)   t = 0;
+        if (t > 300) t = 300;
+        v = (int)t;
+    }
+    return v;
+}
+
+/* [#6] Chase spin-up window: for this many ticks after a chase begins, a cop
+ * drives as a plain AI racer (which eases for corners and settles onto the
+ * racing line) BEFORE the 1.5x catch-up throttle is force-pinned. 20 ticks
+ * (~0.67s @30Hz) is enough to align + get rolling without letting the player
+ * escape. TD5RE_COP_CHASE_SPINUP overrides it; 0 = instant sprint (old, crashy)
+ * behaviour. Clamped. */
+#define COP_CHASE_SPINUP_TICKS 20
+static int cop_chase_spinup_ticks(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_COP_CHASE_SPINUP");
+        long t = (e && e[0]) ? strtol(e, NULL, 10) : COP_CHASE_SPINUP_TICKS;
+        if (t < 0)   t = 0;
+        if (t > 300) t = 300;
+        v = (int)t;
+    }
+    return v;
 }
 
 /* Fully strip a slot's cop identity (called when the traffic slot is recycled
@@ -398,6 +456,10 @@ static void cop_release(int slot) {
 static void cop_tick_broken_down(void) {
     for (int s = 0; s < TD5_MAX_TOTAL_ACTORS; s++) {
         if (!g_actor_broken_down[s]) continue;
+        /* [#5 2026-06-20] ticks < 0 = a PERMANENT wreck: it never self-recovers;
+         * it stays parked + smoking until td5_ai_recycle_traffic_actor reclaims
+         * the slot by distance. Only the (legacy A/B) timed mode counts down. */
+        if (g_actor_broken_ticks[s] < 0) continue;
         if (g_actor_broken_ticks[s] > 0) g_actor_broken_ticks[s]--;
         if (g_actor_broken_ticks[s] <= 0)
             g_actor_broken_down[s] = 0;
@@ -686,14 +748,31 @@ int td5_ai_actor_is_cop(int slot) {
     return g_cop_is_cop[slot] != 0;
 }
 
-/* Flag an actor as broken down for `g_td5.ini.cop_smoke_ticks` ticks. Called
- * from the physics collision response on a hard V2V / wall impact for traffic
- * and cop slots. Idempotent refresh while already broken. Player/AI racer
- * slots are left to the existing crash-fx path (this is for traffic/cops). */
+/* [#5 2026-06-20] Wrecks are PERMANENT by default: a totalled traffic/cop car
+ * never drives itself again — it sits and smokes until the slot is recycled out
+ * by distance (td5_ai_recycle_traffic_actor clears the flag). Set
+ * TD5RE_WRECK_PERMANENT=0 to restore the old timed recovery (cop_smoke_ticks
+ * then drives again). */
+static int wreck_permanent_enabled(void) {
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_WRECK_PERMANENT");
+        s = (!e || e[0] != '0') ? 1 : 0;
+    }
+    return s;
+}
+
+/* Flag an actor as broken down (a wreck). Called from the physics collision
+ * response on a hard V2V / wall impact for traffic and cop slots. Idempotent
+ * while already broken. Player/AI racer slots are left to the existing crash-fx
+ * path (this is for traffic/cops; for a pursued racer it only ends the chase).
+ * Permanent by default (ticks = -1); see wreck_permanent_enabled(). */
 void td5_ai_mark_actor_broken_down(int slot) {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
     g_actor_broken_down[slot] = 1;
-    g_actor_broken_ticks[slot] = (int16_t)g_td5.ini.cop_smoke_ticks;
+    g_actor_broken_ticks[slot] = wreck_permanent_enabled()
+        ? (int16_t)-1
+        : (int16_t)g_td5.ini.cop_smoke_ticks;
 }
 
 /* Nearest chasing cop to the given listener world position (24.8 fixed), or
@@ -6374,6 +6453,14 @@ void td5_ai_recycle_traffic_actor(void) {
         }
     }
 
+    /* [#5 2026-06-20] A recycled slot is a fresh car: clear any (permanent) wreck
+     * state so the reused slot drives again and the traffic pool is never starved
+     * by totalled cars left behind the player. */
+    if (best_slot >= 0 && best_slot < TD5_MAX_TOTAL_ACTORS) {
+        g_actor_broken_down[best_slot]  = 0;
+        g_actor_broken_ticks[best_slot] = 0;
+    }
+
     TD5_LOG_I(LOG_TAG,
               "recycle_traffic: slot=%d player_span=%d q_span=%d q_lane=%u q_flags=0x%02X dist=%d",
               best_slot, (int)player_span_norm, (int)q_span, q_byte_3, q_flags, best_dist);
@@ -9506,6 +9593,10 @@ void td5_ai_update_special_encounter(void) {
                 /* [R3-12] Arm the no-progress watchdog for this fresh chase. */
                 s_cop_best_gap[k]          = 0x7FFFFFFF;
                 s_cop_stall_ticks[k]       = 0;
+                /* [#6] Start the chase spin-up: drive as a normal AI racer first
+                 * (corner-safe) before the catch-up sprint, so the cop doesn't
+                 * floor itself into a wall the instant the chase begins. */
+                s_cop_chase_ticks[k]       = 0;
                 /* If the cop was ONCOMING traffic (facing the wrong way), swing
                  * it around to the race direction so it gives chase cleanly
                  * instead of doing a reverse-arc: clear the oncoming polarity and
@@ -9573,11 +9664,23 @@ void td5_ai_update_special_encounter(void) {
                         continue;
                     }
                 }
-                /* Overtake: cop drew level/ahead -> force the target to pull over. */
+                /* Overtake: the cop must STAY ahead (gap <= -margin) for a sustained
+                 * window before it forces the target to pull over. A brief draw-level
+                 * on a swerve no longer instantly brakes the target, and the cop keeps
+                 * pursuing through the hold rather than giving up the moment it noses
+                 * ahead. The counter resets whenever the target is level/ahead again,
+                 * so only a held lead counts. [#4 2026-06-20] */
                 if (gap <= -COP_OVERTAKE_MARGIN) {
-                    g_cop_phase[k]          = COP_PULLOVER;
-                    g_encounter_active[tgt] = 1;
-                    TD5_LOG_I(LOG_TAG, "cop_chase OVERTAKE: cop=%d target=%d -> PULLOVER", k, tgt);
+                    if (++s_cop_overtake_ticks[k] >= cop_overtake_hold_ticks()) {
+                        g_cop_phase[k]          = COP_PULLOVER;
+                        g_encounter_active[tgt] = 1;
+                        s_cop_overtake_ticks[k] = 0;
+                        TD5_LOG_I(LOG_TAG,
+                            "cop_chase OVERTAKE (held %d ticks): cop=%d target=%d -> PULLOVER",
+                            cop_overtake_hold_ticks(), k, tgt);
+                    }
+                } else {
+                    s_cop_overtake_ticks[k] = 0;   /* target level/ahead again -> reset hold */
                 }
                 continue;
             }
@@ -10395,29 +10498,71 @@ static int td6_traffic_road_clamp_enabled(void) {
     return s;
 }
 
-/* Drive a CHASING cop. The heavy lifting reuses the racer AI: the aim-point
- * override inside td5_ai_update_track_behavior points this cop's look-ahead at
- * the chased car's world position, so the entire tuned steering cascade +
- * SmartAI ray/lane avoidance steer it toward the target while threading
- * traffic and corners. After that, force the catch-up throttle: full forward
- * while below CopCatchup% of the target's speed, coast at/above it. The cop's
- * physics top-speed cap is removed in td5_physics.c so it can actually reach
- * 1.5x. Pure function of replicated state -> lockstep-safe. */
+/* Drive a traffic slot as ordinary traffic: route plan + (TD6) road-lane clamp
+ * + jam-escape. Factored out of ai_update_single_traffic so a CHASING cop can
+ * reuse the SAME road-following driver (see cop_drive). */
+static void traffic_drive_normal(int slot) {
+    td5_ai_update_traffic_route_plan(slot);
+
+    if (g_active_td6_level > 0 && td6_traffic_road_clamp_enabled()) {
+        char *a = actor_ptr(slot);
+        int span = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+        int cur  = (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX);
+        int road = td5_track_nearest_road_lane(span, cur);
+        if (road != cur)
+            ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = (uint8_t)(cur + (road > cur ? 1 : -1));
+    }
+
+    traffic_collision_escape(slot);
+}
+
+/* [#6 2026-06-20] A/B knob: TD5RE_COP_RACER_DRIVE=1 restores the old chase
+ * driver (the racer AI, td5_ai_update_track_behavior). Default 0 = the
+ * road-safe traffic driver. The racer driver assumes the car is already on the
+ * racing line; a cop acquired from a traffic lane (often hard against a wall)
+ * oversteered off the line into the wall the instant a chase started. The
+ * traffic driver KEEPS the cop on the road (idle cops use it and never crash),
+ * so a chasing cop now follows the road toward the player and just drives it
+ * fast. */
+static int cop_racer_drive_enabled(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_COP_RACER_DRIVE"); s = (e && e[0] == '1') ? 1 : 0; }
+    return s;
+}
+
+/* Drive a CHASING cop. By default it drives as ordinary (road-following)
+ * traffic — which provably keeps it on the road — and is simply made FAST: once
+ * spun up, the catch-up throttle is forced (full forward while below CopCatchup%
+ * of the target's speed, coast at/above it; the physics top-speed cap is removed
+ * in td5_physics.c so it can reach 1.5x). The chase scheduler (span-based
+ * overtake/pullover) is unaffected. TD5RE_COP_RACER_DRIVE=1 reverts to the old
+ * racer-AI driver. Pure function of replicated state -> lockstep-safe. */
 static void cop_drive(int slot) {
     char *cop = actor_ptr(slot);
     int   tgt = g_cop_target[slot];
 
-    /* Run the racer AI: route-following + SmartAI lane/ray avoidance + speed
-     * easing/braking for traffic and walls. This sets the steering, the
+    /* Run the chosen base driver. The traffic driver follows the road/route
+     * toward the player and keeps the cop on the paved band; the (legacy) racer
+     * driver does racing-line + SmartAI avoidance. Either sets steering, the
      * BRAKE_FLAG, and a base throttle command. */
-    td5_ai_update_track_behavior(slot);
+    if (cop_racer_drive_enabled())
+        td5_ai_update_track_behavior(slot);
+    else
+        traffic_drive_normal(slot);
 
-    /* If the SmartAI decided to BRAKE (imminent wall / car ahead), RESPECT it —
-     * do not boost the throttle this tick. The old code force-cleared BRAKE_FLAG
-     * and pinned full throttle every tick, so the cop ignored all avoidance and
-     * plowed through traffic and walls (erratic, lots of collisions). Letting it
-     * brake means it slows for hazards and only sprints when the way is clear;
-     * the ray-sensing still STEERS it around cars, so it overtakes by swerving. */
+    /* [#6 2026-06-20] Chase spin-up: for the first cop_chase_spinup_ticks() of a
+     * fresh chase, DON'T force the catch-up throttle — let the base driver above
+     * bring the cop up to speed gently and settle it onto the road before the
+     * sprint, so it never floors itself into a wall the instant a chase starts. */
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        if (s_cop_chase_ticks[slot] < (int16_t)0x7FFF) s_cop_chase_ticks[slot]++;
+        if (s_cop_chase_ticks[slot] <= cop_chase_spinup_ticks())
+            return;
+    }
+
+    /* If the base driver decided to BRAKE (imminent hazard / congestion), RESPECT
+     * it — don't boost the throttle this tick. So the cop slows for hazards and
+     * only sprints when the way is clear. */
     if (ACTOR_U8(cop, ACTOR_BRAKE_FLAG))
         return;
 
@@ -10462,26 +10607,11 @@ static void ai_update_single_traffic(int slot) {
         return;
     }
 
-    /* Normal traffic update */
-    td5_ai_update_traffic_route_plan(slot);
-
-    /* [#18] Keep TD6 traffic on the paved band: if the route plan left this car
-     * on a sidewalk/shoulder lane (the converter's route bytes can point there),
-     * nudge it one lane/tick toward the nearest road lane. Stopgap until the TD6
-     * route-network model (#20) lands; gated to TD6 + the A/B knob. */
-    if (g_active_td6_level > 0 && td6_traffic_road_clamp_enabled()) {
-        char *a = actor_ptr(slot);
-        int span = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
-        int cur  = (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX);
-        int road = td5_track_nearest_road_lane(span, cur);
-        if (road != cur)
-            ACTOR_U8(a, ACTOR_SUB_LANE_INDEX) = (uint8_t)(cur + (road > cur ? 1 : -1));
-    }
-
-    /* [#3 2026-06-19] Safety net: if this car has been jammed/stopped too long,
-     * post-override the route plan with a brief steer-away burst so it frees
-     * itself instead of grinding against another car forever. */
-    traffic_collision_escape(slot);
+    /* Normal traffic update: route plan + (TD6) road-lane clamp + jam-escape.
+     * [#18] The road clamp keeps TD6 traffic off sidewalk/shoulder lanes; the
+     * collision-escape frees a car jammed too long. (Both now live in
+     * traffic_drive_normal, shared with the chasing-cop driver.) */
+    traffic_drive_normal(slot);
     /* UpdateTrafficActorMotion(slot) would follow in the physics module */
 }
 

@@ -2231,14 +2231,15 @@ static void td6_records_ensure_loaded(void)
 }
 
 /* [#11 TD6 PLACEHOLDER HIGH SCORES 2026-06-19] Placeholder high-score tables for
- * the migrated TD6 city tracks (Paris/NewYork/Rome/HongKong/London = levels 8..12),
- * shown until a genuine run is recorded — names + times to beat, exactly like the
- * TD5 tracks have. Copied from the TD5 default NPC groups so the score units, names
- * and cars are all valid, into a SEPARATE buffer so the genuine on-disk store
- * (s_td6_records) is never polluted or persisted with placeholder names. Disable
- * with TD5RE_TD6_HIGHSCORE_PLACEHOLDERS=0 (then empty cities just show no records). */
-#define TD6_PLACEHOLDER_LO 8
-#define TD6_PLACEHOLDER_HI 12
+ * the migrated TD6 tracks — both the P2P cities (Paris/NewYork/Rome/HongKong/
+ * London = levels 8..12) AND the circuits (Pelton/Ireland/LakeTahoe/CapeHatteras/
+ * Switzerland/Egypt = levels 7,18..22), shown until a genuine run is recorded —
+ * names + times to beat, exactly like the TD5 tracks have. Copied from the TD5
+ * default NPC groups so the score units, names and cars are all valid, into a
+ * SEPARATE buffer so the genuine on-disk store (s_td6_records) is never polluted
+ * or persisted with placeholder names. Generalised 2026-06-19 to cover EVERY TD6
+ * level so the High Scores browse screen lists every TD6 track like TD5. Disable
+ * with TD5RE_TD6_HIGHSCORE_PLACEHOLDERS=0 (then empty tracks just show no records). */
 static const TD5_NpcGroup *td6_placeholder_group(int td6_level)
 {
     static int enabled = -1;
@@ -2247,9 +2248,9 @@ static const TD5_NpcGroup *td6_placeholder_group(int td6_level)
         enabled = (e && e[0] == '0') ? 0 : 1;
     }
     if (!enabled) return NULL;
-    if (td6_level < TD6_PLACEHOLDER_LO || td6_level > TD6_PLACEHOLDER_HI) return NULL;
+    if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return NULL;
 
-    static TD5_NpcGroup s_ph[TD6_PLACEHOLDER_HI - TD6_PLACEHOLDER_LO + 1];
+    static TD5_NpcGroup s_ph[TD5_MAX_TD6_RECORD_LEVELS];
     static int s_ph_ready = 0;
     if (!s_ph_ready) {
         /* s_npc_group_table is a byte buffer laid out as an array of TD5_NpcGroup
@@ -2258,13 +2259,13 @@ static const TD5_NpcGroup *td6_placeholder_group(int td6_level)
         const TD5_NpcGroup *groups = (const TD5_NpcGroup *)s_npc_group_table;
         int ngroups = TD5_CONFIG_NPC_GROUPS;
         if (ngroups < 1) ngroups = 1;
-        for (int c = 0; c <= TD6_PLACEHOLDER_HI - TD6_PLACEHOLDER_LO; c++) {
-            s_ph[c] = groups[c % ngroups];             /* vary names/times per city */
+        for (int c = 0; c < TD5_MAX_TD6_RECORD_LEVELS; c++) {
+            s_ph[c] = groups[c % ngroups];             /* vary names/times per level */
             s_ph[c].header = 0;                        /* time-type table */
         }
         s_ph_ready = 1;
     }
-    return &s_ph[td6_level - TD6_PLACEHOLDER_LO];
+    return &s_ph[td6_level];
 }
 
 const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level)

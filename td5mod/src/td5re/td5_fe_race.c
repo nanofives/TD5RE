@@ -4060,6 +4060,24 @@ static void frontend_update_difficulty_button_visibility(int diff_btn_idx) {
     if (hide && s_selected_button == diff_btn_idx) s_selected_button = 0;
 }
 
+/* [COP-CHASE 2026-06-21] The POLICE (traffic-cop "encounter") row is meaningless
+ * in Cop Chase game mode: the player IS the pursuer, and the separate
+ * traffic-police system is force-disabled there (ConfigureGameTypeFlags case 8 +
+ * the InitRaceSchedule wanted-mode guard). So HIDE+disable the row whenever
+ * Cop Chase / wanted mode is the selected game type, exactly like the Laps and
+ * Difficulty rows. Gated on g_td5.wanted_mode_enabled, which ConfigureGameTypeFlags
+ * has already set by the time the track selector opens. Called on screen entry. */
+static void frontend_update_police_button_visibility(int police_btn_idx) {
+    if (police_btn_idx < 0 || police_btn_idx >= s_button_count) return;
+    int hide = g_td5.wanted_mode_enabled ? 1 : 0;
+    s_buttons[police_btn_idx].hidden   = hide;
+    s_buttons[police_btn_idx].disabled = hide;
+    TD5_LOG_I(LOG_TAG, "Police row: wanted_mode=%d -> %s",
+              g_td5.wanted_mode_enabled, hide ? "hidden (cop chase)" : "SHOWN");
+    /* Don't leave the highlight parked on a now-hidden row. */
+    if (hide && s_selected_button == police_btn_idx) s_selected_button = 0;
+}
+
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label) {
     if (dir_btn_idx < 0 || dir_btn_idx >= s_button_count) return;
     int has_reverse = (s_selected_track < 0)
@@ -4138,6 +4156,8 @@ void Screen_TrackSelection(void) {
          * Quick Race flow). frontend_update_difficulty_button_visibility folds in
          * the old flow_context==2 hide; refreshed in case 4 when opponents change. */
         frontend_update_difficulty_button_visibility(6);
+        /* [COP-CHASE 2026-06-21] Hide the POLICE row in Cop Chase / wanted mode. */
+        frontend_update_police_button_visibility(5);
         s_race_difficulty = g_td5.difficulty_tier;
         if (s_race_difficulty < 0) s_race_difficulty = 0;
         if (s_race_difficulty > 2) s_race_difficulty = 2;
@@ -4327,7 +4347,7 @@ void Screen_TrackSelection(void) {
                     s_game_option_traffic =
                         ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
                          + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
-                } else if (selected_button == 5) {     /* police on/off */
+                } else if (selected_button == 5 && !s_buttons[5].hidden) {  /* police on/off */
                     s_game_option_cops = (s_game_option_cops + delta) & 1;
                 } else if (selected_button == 6 && !s_buttons[6].hidden) {
                     /* Per-race AI difficulty 0..2, wraps both ways (matches the
@@ -4546,10 +4566,13 @@ void Screen_PostRaceHighScore(void) {
             int delta = frontend_option_delta();
             if (delta != 0) {
                 s_score_category_index += delta;
-                /* High score screen: all 26 tracks+cups accessible regardless of lock state.
-                 * Simple wrap [0..0x19]. */
-                if (s_score_category_index > 0x19) s_score_category_index = 0;
-                if (s_score_category_index < 0)    s_score_category_index = 0x19;
+                /* High score screen: all 26 TD5 tracks+cups (0..0x19) PLUS the 11
+                 * migrated TD6 tracks (display indices 26..36) are accessible
+                 * regardless of lock state. Simple wrap [0..36]; the overlay shows
+                 * TD6 placeholder records for the 26..36 slots (see
+                 * frontend_render_high_score_overlay). */
+                if (s_score_category_index > 36) s_score_category_index = 0;
+                if (s_score_category_index < 0)  s_score_category_index = 36;
                 /* Menu-move nav sound on track change. The original plays sound id 2
                  * (DXSound::Play(2)) centrally for arrow-capable L/R changes in the
                  * shared frontend input handler [CONFIRMED @ 0x0042687c, handler

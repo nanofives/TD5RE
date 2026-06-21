@@ -7327,6 +7327,20 @@ void td5_game_begin_fade_out(int param) {
     g_td5.race_end_fade_state = 1;
     s_fade_accumulator = 0.0f;
 
+    /* [#3 2026-06-20] Kill the race-start countdown the instant ANY exit fade
+     * begins (quit / back-to-lobby / finish / restart all route through here).
+     * g_cameraTransitionActive is only ever re-armed to 0xA000 by the next
+     * race's reset_race_countdown(); it is NEVER cleared on exit, so if the
+     * player leaves a race WHILE the 3/2/1 fly-in is still counting down (timer
+     * still > 0), the digit kept rendering over the fade-out and bled into the
+     * results / menu — the "old countdown when exiting a race" residual. Forcing
+     * it to 0 here (HIDDEN, not armed) makes the countdown vanish immediately;
+     * the RESTART path re-arms it cleanly when the same race re-inits. */
+    g_cameraTransitionActive = 0;
+    s_race_countdown_ticks   = 0;
+    s_race_countdown_state   = 0;
+    set_countdown_indicator_state(0);
+
     /* [CONFIRMED @ 0x0042cc30..0x0042cc73 BeginRaceFadeOutTransition; Tier 4
      * port 2026-05-24, REGR-FIX 2026-05-25] Radial-pulse gate. Orig checks:
      *   param_1 == 1 && g_humanPlayerCount == 1 && actor+0x383 == 0 &&
@@ -7937,6 +7951,15 @@ int td5_game_get_traffic_variant(int traffic_index) {
 int td5_game_get_cop_actor_index(void) { return g_td5.wanted_mode_enabled ? 0 : -1; }
 /* [CONFIRMED]: g_wantedModeEnabled @ 0x4AAF68 set at InitializeRaceSession */
 int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
+/* [COP-CHASE SIREN 2026-06-21] Expose the pause-menu state to the audio layer.
+ * The cop-chase horn-siren refresh (td5_sound_update_vehicle_looping_state)
+ * otherwise keeps s_siren_active_flag latched on every paused frame, so the
+ * re-activation path that re-issues slot_play after the mixer stops the siren
+ * channels never fires on resume -> the siren stays silent. Gating that refresh
+ * on this getter lets the post-loop timeout clear the flag during pause so the
+ * siren cleanly re-arms when the race resumes. Mirrors how the rewritten
+ * traffic-cop siren (td5_sound_update_police_siren) is already pause-gated. */
+int td5_game_is_pause_menu_active(void) { return s_pause_menu_active; }
 /* [CONFIRMED @ 0x0043D7C0 AdvanceGlobalSkyRotation]: increments
  * g_wantedTargetTrackerActive (0x004BF500) by 0x400 when not paused. */
 void td5_game_advance_sky_rotation(void) {

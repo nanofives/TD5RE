@@ -1224,6 +1224,25 @@ static inline int32_t td5_physics_hard_catchup_mult(int slot)
  * per the v2v_heavy_scatter logs) so a normal bump doesn't wreck a car — only a
  * strong crash does. */
 #define COP_BREAK_MAG  200000
+/* [#5 FATAL NPC COLLISION 2026-06-20] When a TRAFFIC or COP car is involved in a
+ * V2V hit, the dramatic "3D collision" heavy scatter+lift AND the wreck (break
+ * down -> park, roof smoke, immobile) trigger at this LOWER magnitude than the
+ * faithful racer-vs-racer 90000 floor, so crashing into traffic/cops feels fatal
+ * and totals them much more readily (user request). Racer-vs-racer keeps 90000.
+ * 60000 sits just under the ordinary-tap floor so a solid hit wrecks the NPC but
+ * a gentle nudge does not. Tunable via TD5RE_NPC_FATAL_MAG. */
+#define NPC_FATAL_MAG_DEFAULT  60000
+static int32_t npc_fatal_mag(void) {
+    static int32_t v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_NPC_FATAL_MAG");
+        long m = (e && e[0]) ? strtol(e, NULL, 10) : NPC_FATAL_MAG_DEFAULT;
+        if (m < 1000)    m = 1000;
+        if (m > 1000000) m = 1000000;
+        v = (int32_t)m;
+    }
+    return v;
+}
 /* Forward-speed scrub on an acute player hit, Q8 (0x100 = 1.0 = keep all speed).
  * 0x100 - 0x50 = 0xB0/256 ≈ 0.6875, i.e. shed ~31% of planar speed. Vertical
  * lift (linear_velocity_y) is intentionally left untouched. */
@@ -1897,6 +1916,21 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 #define PHYS_HANDBRAKE_MOD      0x7A
 #define PHYS_SLIP_COUPLING      0x7C
 
+/* [COP-CHASE 2026-06-21] AI suspect top-speed penalty in Cop Chase / wanted mode,
+ * as a percent of the per-car rating (default 70 = 30% slower) so the suspect
+ * stays catchable on higher difficulties. Tunable: TD5RE_COPCHASE_AI_SPEED_PCT. */
+static int copchase_ai_speed_pct(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_COPCHASE_AI_SPEED_PCT");
+        int pct = e ? atoi(e) : 70;
+        if (pct < 10)  pct = 10;
+        if (pct > 100) pct = 100;
+        cached = pct;
+    }
+    return cached;
+}
+
 /* [POLICE rewrite 2026-06-19] Effective top-speed rating (tuning +0x74). A
  * chasing police cop has NO top-speed cap — it must be able to overtake any
  * car — so it gets a very high rating (its real speed is still bounded to ~1.5x
@@ -1906,7 +1940,13 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 static inline int32_t phys_top_speed_rating(TD5_Actor *actor) {
     int slot = (int)((const uint8_t *)actor)[0x375];   /* ACTOR_SLOT_INDEX */
     if (td5_ai_cop_is_chasing(slot)) return 0x7FFF;    /* effectively uncapped */
-    return (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+    int32_t rating = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+    /* [COP-CHASE 2026-06-21] Slow the AI suspect(s) so a Cop Chase is winnable.
+     * Human slots (the player cop, slots 0..num_human_players-1) keep full speed;
+     * non-wanted modes are byte-faithful. */
+    if (td5_game_is_wanted_mode() && slot >= g_td5.num_human_players)
+        rating = (rating * copchase_ai_speed_pct()) / 100;
+    return rating;
 }
 
 #define CDEF_FRONT_Z_EXTENT     0x04   /* positive */
@@ -6138,7 +6178,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * lives at the SAME address (DAT_00463188) as the original's `g_cameraMode`;
      * `td5_physics_set_collisions(1)` writes 0, so `== 0` means collisions ON --
      * byte-faithful to the original's gate. */
-    if (impact_mag > 90000 && g_collisions_enabled == 0) {
+    /* [#5 2026-06-20] Heavy-crash gate. Racer-vs-racer keeps the faithful 90000
+     * floor; a pair that includes a TRAFFIC or COP car trips the dramatic 3D
+     * collision (scatter+lift) AND the wreck at the lower npc_fatal_mag() so
+     * those hits feel fatal and total the NPC much more readily. */
+    int a_is_npc = (A->slot_index >= g_traffic_slot_base);
+    int b_is_npc = (B->slot_index >= g_traffic_slot_base);
+    int32_t heavy_gate = (a_is_npc || b_is_npc) ? npc_fatal_mag() : 90000;
+    if (impact_mag > heavy_gate && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
         int32_t kick_ry = scatter / 2;            /* roll & yaw delta magnitude */
@@ -6190,19 +6237,17 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             if (B->slot_index < g_traffic_slot_base)
                 td5_physics_apply_acute_crash_fx(B, impact_mag);
         }
-        /* [POLICE rewrite 2026-06-19] A strong V2V crash BREAKS DOWN a car:
-         * traffic and cops HALT + smoke (like a real wreck); a chased racer's
-         * "broke down" ends the pursuit. Own (lower) threshold than the player
-         * crash-fx so slower traffic-vs-traffic wrecks still count. Ordinary
-         * (un-chased) racers keep control. */
-        if (impact_mag > COP_BREAK_MAG) {
-            if (A->slot_index >= g_traffic_slot_base ||
-                td5_ai_actor_is_pursued(A->slot_index))
-                td5_ai_mark_actor_broken_down(A->slot_index);
-            if (B->slot_index >= g_traffic_slot_base ||
-                td5_ai_actor_is_pursued(B->slot_index))
-                td5_ai_mark_actor_broken_down(B->slot_index);
-        }
+        /* [#5 2026-06-20, was POLICE rewrite 2026-06-19] This heavy crash WRECKS
+         * every involved TRAFFIC/COP car: it breaks down -> parks, smokes from
+         * the roof, and can never drive itself again (permanent). A chased racer
+         * is also flagged so its "broke down" ENDS the pursuit, but racers/the
+         * player are never immobilised or smoked (handled downstream). Because we
+         * are already inside the (NPC-lowered) heavy gate, no separate magnitude
+         * test is needed — a fatal hit on traffic/cops always totals them. */
+        if (a_is_npc || td5_ai_actor_is_pursued(A->slot_index))
+            td5_ai_mark_actor_broken_down(A->slot_index);
+        if (b_is_npc || td5_ai_actor_is_pursued(B->slot_index))
+            td5_ai_mark_actor_broken_down(B->slot_index);
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d",
                   A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain);
     }

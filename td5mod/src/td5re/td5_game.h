@@ -213,6 +213,9 @@ int  td5_game_is_cinematic_race(void);
 int  td5_game_get_traffic_variant(int traffic_index);
 int  td5_game_get_cop_actor_index(void);
 int  td5_game_is_wanted_mode(void);
+/* 1 while the in-race pause menu is open. Read by the audio layer to suspend the
+ * cop-chase siren refresh during pause so it re-arms cleanly on resume. */
+int  td5_game_is_pause_menu_active(void);
 void td5_game_advance_sky_rotation(void);
 /* Cop-chase tracked-marker intensity (orig g_wantedTargetTrackerActive
  * @ 0x004BF500; decays 0x200/sub-tick, clamped to [0, 0x1000]). Consumed
