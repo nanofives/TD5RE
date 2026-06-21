@@ -282,6 +282,16 @@ static int     s_recovery_init = 0;
 static int     s_recovery_enabled = 1;     /* TD5RE_STUCK_RECOVERY */
 static int     s_recovery_spans_back = TD5_RECOVERY_DEFAULT_BACK;
 
+/* [GENTLE FLIP-RECOVERY 2026-06-21] Forward decls (definitions live just after
+ * the stuck-recovery block). For a LOCAL HUMAN, the byte-faithful scripted-
+ * recovery tumble (vehicle_mode==1) is replaced with a ~1s gentle coast that
+ * keeps the car's existing motion, levels it back upright, then hands off to
+ * the same in-place ground-snap "recovery teleport". See
+ * td5_physics_gentle_recovery_coast. Knob TD5RE_RECOVERY_GENTLE (default ON). */
+static int  recovery_gentle_enabled(void);
+static int  recovery_gentle_for_actor(const TD5_Actor *actor);
+static void td5_physics_gentle_recovery_coast(TD5_Actor *actor);
+
 /* ---- Per-slot NPC handicap (rubber-banding by prior championship position) ----
  * Mirrors the original's gSlotRaceResult/Bonus/Points tables at
  * 0x004AED40/0x004AED58/0x004AED28 (gSlotRacePointsTable, kept here as
@@ -2713,6 +2723,19 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             if (t != s_last_prop_tick) { s_last_prop_tick = t; td5_track_td6_props_tick(); }
         }
     } else if (actor->vehicle_mode == 1 && !g_game_paused) {
+        if (recovery_gentle_for_actor(actor)) {
+            /* [GENTLE FLIP-RECOVERY 2026-06-21] Local human player: replace the
+             * byte-faithful 59-frame tumble (collision_spin × saved_orientation
+             * twist + flatspin/drag impulses) AND the port-only crash camera
+             * shake with a ~1s gentle coast that keeps the car's existing motion
+             * and levels it upright, then hands off to the SAME in-place ground-
+             * snap reset (the "recovery teleport"). The original NEVER shakes the
+             * screen during recovery (Ghidra-confirmed: no camera/render reader
+             * of vehicle_mode/frame_counter shakes), so suppressing the shake
+             * also restores faithfulness. Knob TD5RE_RECOVERY_GENTLE=0 reverts to
+             * the faithful path in the else branch below. */
+            td5_physics_gentle_recovery_coast(actor);
+        } else {
         /* 6b. Scripted recovery mode [CONFIRMED @ 0x00406881 / 0x00409BF0 + 0x00409D20]
          * Tier 2 NOT_PORTED port (2026-05-24): replaces the prior partial
          * gravity+damping placeholder with the full byte-faithful chain:
@@ -2801,6 +2824,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
         update_engine_speed_smoothed(actor);
         td5_physics_integrate_scripted_motion(actor);
+        }  /* end byte-faithful recovery (else branch of gentle coast) */
     } else if (g_game_paused) {
         /* Paused branch — listing 0x00406881-690B, line-by-line.
          *
@@ -10810,7 +10834,11 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
                 TD5_LOG_I(LOG_TAG, "roll_recover_damp: TD5RE_ROLL_RECOVER_DAMP=%.3f (retained linvel fraction)",
                           s_rrd_keep);
             }
-            if (s_rrd_keep < 1.0f) {
+            if (s_rrd_keep < 1.0f && !recovery_gentle_for_actor(actor)) {
+                /* [GENTLE FLIP-RECOVERY 2026-06-21] When the gentle coast owns
+                 * this player's recovery it needs the car's REAL momentum to
+                 * "continue the motion" (and eases it down itself), so skip the
+                 * latch-time slash here. The faithful path still slashes. */
                 actor->linear_velocity_x = (int32_t)((float)actor->linear_velocity_x * s_rrd_keep);
                 actor->linear_velocity_z = (int32_t)((float)actor->linear_velocity_z * s_rrd_keep);
             }
@@ -13304,6 +13332,168 @@ void td5_physics_update_stuck_recovery(void)
                       slot, s_stuck_ticks[slot], hw, planar);
             td5_physics_recover_player(slot);   /* clears the timer */
         }
+    }
+}
+
+/* ========================================================================
+ * Gentle flip-recovery (PORT ENHANCEMENT 2026-06-21)
+ *
+ * The byte-faithful scripted recovery (vehicle_mode==1) tumbles the car for 59
+ * frames via the compounding collision_spin × saved_orientation twist plus the
+ * ComputeActorWorldBoundingVolume flatspin/drag impulses, then snap-respawns in
+ * place (ResetVehicleActorState @ 0x00405D70 — preserves world_pos.x/z, only
+ * ground-snaps Y). Together with the PORT-ONLY crash camera shake (td5_camera
+ * ITEM #12 — the ORIGINAL never shakes during recovery, Ghidra-confirmed) that
+ * reads as "weird + shaky".
+ *
+ * For a LOCAL HUMAN player this replaces the tumble with a gentle coast: keep
+ * the car's existing translation (eased down), smoothly level roll+pitch back
+ * toward upright (keep yaw/heading), hold height (no sink/fall), and after the
+ * coast window hand off to the SAME in-place ground-snap reset — i.e. "gentle
+ * continuation of the motion, then the recovery teleport". The crash shake is
+ * held off for the duration (td5_physics_recovery_shake_suppressed).
+ *
+ * The byte-faithful path is untouched for AI / traffic / network-replicated AI
+ * slots and when the knob is off.
+ *
+ * Knobs:
+ *   TD5RE_RECOVERY_GENTLE       (default 1)     master gate
+ *   TD5RE_RECOVERY_COAST_TICKS  (default 30)    ~1s @ 30Hz before the teleport
+ *   TD5RE_RECOVERY_COAST_DECAY  (default 0.92)  per-tick horizontal vel retain
+ *   TD5RE_RECOVERY_LEVEL_DECAY  (default 0.80)  per-tick roll/pitch retain (->0)
+ * ======================================================================== */
+static int   s_rgentle_init        = 0;
+static int   s_rgentle_enabled     = 1;
+static int   s_rgentle_coast_ticks = 30;
+static float s_rgentle_coast_decay = 0.92f;
+static float s_rgentle_level_decay = 0.80f;
+
+static void recovery_gentle_init(void)
+{
+    if (s_rgentle_init) return;
+    s_rgentle_init = 1;
+    {
+        const char *e;
+        if ((e = getenv("TD5RE_RECOVERY_GENTLE")) && e[0] == '0')
+            s_rgentle_enabled = 0;
+        if ((e = getenv("TD5RE_RECOVERY_COAST_TICKS")) && e[0]) {
+            int v = atoi(e);
+            if (v < 1)   v = 1;
+            if (v > 240) v = 240;          /* sanity clamp (~8s max) */
+            s_rgentle_coast_ticks = v;
+        }
+        if ((e = getenv("TD5RE_RECOVERY_COAST_DECAY")) && e[0]) {
+            float f = (float)atof(e);
+            if (f < 0.0f) f = 0.0f;
+            if (f > 1.0f) f = 1.0f;
+            s_rgentle_coast_decay = f;
+        }
+        if ((e = getenv("TD5RE_RECOVERY_LEVEL_DECAY")) && e[0]) {
+            float f = (float)atof(e);
+            if (f < 0.0f) f = 0.0f;
+            if (f > 1.0f) f = 1.0f;
+            s_rgentle_level_decay = f;
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+              "Gentle flip-recovery: %s coast_ticks=%d coast_decay=%.3f level_decay=%.3f",
+              s_rgentle_enabled ? "enabled" : "disabled",
+              s_rgentle_coast_ticks, s_rgentle_coast_decay, s_rgentle_level_decay);
+}
+
+static int recovery_gentle_enabled(void)
+{
+    recovery_gentle_init();
+    return s_rgentle_enabled;
+}
+
+/* True when `actor` is a local-human racer (the only case the gentle coast
+ * owns). AI, traffic and the byte-faithful path are excluded. The human gate is
+ * the REPLICATED g_race_slot_state so all net peers agree on which slots take
+ * the gentle path (the trigger is the deterministic attitude latch, not local
+ * input — unlike the stuck-recovery feature, so no netplay skip is needed). */
+static int recovery_gentle_for_actor(const TD5_Actor *actor)
+{
+    if (!recovery_gentle_enabled()) return 0;
+    if (!actor) return 0;
+    if (actor->slot_index >= g_traffic_slot_base) return 0;
+    if (actor->slot_index >= TD5_MAX_RACER_SLOTS)  return 0;
+    if (g_race_slot_state[actor->slot_index] != 1) return 0;   /* human racers only */
+    return 1;
+}
+
+/* Public (camera) query: 1 while `slot` is a human in gentle flip-recovery, so
+ * the crash-FX screen shake (a port-only addition) is held off for the duration
+ * — matching the original, which never shakes during recovery. */
+int td5_physics_recovery_shake_suppressed(int slot)
+{
+    if (!recovery_gentle_enabled()) return 0;
+    if (!g_actor_table_base) return 0;
+    if (slot < 0 || slot >= g_traffic_slot_base || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (g_race_slot_state[slot] != 1) return 0;
+    {
+        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        return (a && a->vehicle_mode == 1) ? 1 : 0;
+    }
+}
+
+/* Per-tick gentle coast for a human player in flip-recovery (vehicle_mode==1).
+ * frame_counter is already incremented at the top of update_vehicle_actor; once
+ * it reaches the coast window we hand off to the byte-faithful in-place reset
+ * (the "recovery teleport"). No spin matrix, no flatspin probe pass, no shake. */
+static void td5_physics_gentle_recovery_coast(TD5_Actor *actor)
+{
+    /* 1. Smoothly level roll + pitch back toward upright; keep yaw (heading).
+     *    display_angles.{roll,yaw,pitch} are signed int16 holding 12-bit angles. */
+    actor->display_angles.roll  = (int16_t)((float)actor->display_angles.roll  * s_rgentle_level_decay);
+    actor->display_angles.pitch = (int16_t)((float)actor->display_angles.pitch * s_rgentle_level_decay);
+
+    /* Rebuild rotation_matrix from {roll,yaw,pitch}; keep the 24.8 euler
+     * accumulators and saved_orientation in sync for any downstream reader. */
+    BuildRotationMatrixFromAngles(actor->rotation_matrix.m, &actor->display_angles.roll);
+    actor->euler_accum.roll  = (int32_t)actor->display_angles.roll  << 8;
+    actor->euler_accum.yaw   = (int32_t)actor->display_angles.yaw   << 8;
+    actor->euler_accum.pitch = (int32_t)actor->display_angles.pitch << 8;
+    memcpy(&actor->saved_orientation, &actor->rotation_matrix, 9 * sizeof(float));
+
+    /* No residual spin — suppress the violent tumble. */
+    actor->angular_velocity_roll  = 0;
+    actor->angular_velocity_yaw   = 0;
+    actor->angular_velocity_pitch = 0;
+
+    /* 2. Gentle horizontal coast — continue the car's motion, eased down. Hold
+     *    height (no gravity, no ground probe here) so it neither sinks nor
+     *    free-falls during the coast; the reset ground-snaps Y precisely. */
+    {
+        int32_t vx = (int32_t)((float)actor->linear_velocity_x * s_rgentle_coast_decay);
+        int32_t vz = (int32_t)((float)actor->linear_velocity_z * s_rgentle_coast_decay);
+        actor->linear_velocity_x = vx;
+        actor->linear_velocity_z = vz;
+        actor->linear_velocity_y = 0;          /* freeze height */
+        actor->world_pos.x += vx;
+        actor->world_pos.z += vz;
+    }
+
+    /* 3. Keep chassis track position + render pose current. */
+    td5_track_update_actor_position(actor);
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+
+    if (actor->slot_index == 0 && ((unsigned)actor->frame_counter % 10u) == 0u) {
+        TD5_LOG_I(LOG_TAG,
+            "gentle_recovery_coast: slot=%d t=%u/%d roll=%d pitch=%d vx=%d vz=%d",
+            (int)actor->slot_index, (unsigned)actor->frame_counter, s_rgentle_coast_ticks,
+            (int)actor->display_angles.roll, (int)actor->display_angles.pitch,
+            actor->linear_velocity_x, actor->linear_velocity_z);
+    }
+
+    /* 4. End of the coast window -> the recovery teleport (in-place ground-snap). */
+    if ((int)actor->frame_counter >= s_rgentle_coast_ticks) {
+        TD5_LOG_I(LOG_TAG,
+            "gentle_recovery_coast: slot=%d teleport (gentle coast %d ticks done)",
+            (int)actor->slot_index, s_rgentle_coast_ticks);
+        td5_physics_reset_actor_state(actor);
     }
 }
 

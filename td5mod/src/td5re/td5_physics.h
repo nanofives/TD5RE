@@ -163,6 +163,12 @@ void td5_physics_resolve_vehicle_contacts(void);
  * range or non-racer slot returns 0. Safe to call every frame. */
 uint32_t td5_physics_get_crash_fx(int slot, int32_t *out_mag, int *out_age);
 
+/* [GENTLE FLIP-RECOVERY 2026-06-21] 1 while `slot` is a local human in the
+ * gentle flip-recovery coast (vehicle_mode==1, TD5RE_RECOVERY_GENTLE on); the
+ * camera uses it to hold off the (port-only) crash screen shake for the
+ * recovery's duration. 0 otherwise. Safe to call every frame. */
+int td5_physics_recovery_shake_suppressed(int slot);
+
 /* --- Force-feedback signal getters (FF SIGNALS, #1) ---
  * Per-slot driving-state signals for the force-feedback layer (td5_input.c).
  * All three are refreshed once per fixed-30Hz sim tick by
