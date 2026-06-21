@@ -786,7 +786,17 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
          * lives in this same branch in the original, so toggling off also lets
          * the cop-light pulse decay — siren and lights stay coupled, as in the
          * original where both are driven by this horn-gated call. */
-        if (s_siren_user_enabled) {
+        /* [COP-CHASE SIREN PAUSE FIX 2026-06-21] Do NOT refresh the siren while the
+         * pause menu is open. The pause path also calls td5_sound_stop_tracked_vehicle_audio
+         * (fade out) and the mixer then physically stops the siren channels + clears
+         * s_tracked_veh_active. If we kept refreshing here, s_siren_active_flag would
+         * stay latched at 1 every paused frame, so on resume the
+         * `s_siren_active_flag == 0` re-activation branch below — the ONLY place that
+         * re-arms s_tracked_veh_active=1 to re-issue slot_play — would never fire and
+         * the siren would stay dead. Skipping the refresh during pause lets the mixer's
+         * post-loop timeout clear the flag, so resume re-arms and re-plays cleanly.
+         * Mirrors the pause gating already on td5_sound_update_police_siren. */
+        if (s_siren_user_enabled && !td5_game_is_pause_menu_active()) {
             if (s_siren_active_flag == 0) {
                 /* Activate tracked vehicle audio (siren) */
                 s_tracked_veh_active_p2 = 1;

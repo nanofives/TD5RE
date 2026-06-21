@@ -2030,6 +2030,31 @@ static void hud_scale_text_pos(float *x, float *y, int centered, float scale)
     else          *x = vl->vp_int_left  + dl * scale;  /* nearer left edge  */
 }
 
+/* [COP-CHASE HUD 2026-06-21] Tunables for the cop-chase HUD polish:
+ *   TD5RE_COPCHASE_HUD_SCALE = ARRESTS/POINTS readout size, percent (default 135).
+ *   TD5RE_COPCHASE_VECTOR    = 1 (default) draws the suspect chase indicator as
+ *                              the faithful cyan down-ARROW + red→green bust BAR in
+ *                              crisp vector geometry; 0 = the legacy DAMAGE sprites. */
+static float copchase_hud_text_scale(void) {
+    static float cached = -1.0f;
+    if (cached < 0.0f) {
+        const char *e = getenv("TD5RE_COPCHASE_HUD_SCALE");
+        int pct = e ? atoi(e) : 135;
+        if (pct < 50)  pct = 50;
+        if (pct > 400) pct = 400;
+        cached = (float)pct / 100.0f;
+    }
+    return cached;
+}
+static int td5_hud_copchase_vector_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_COPCHASE_VECTOR");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
 /* [HUD TTF SWAP 2026-06-05] The in-race HUD overlay text renders in the menu's
  * SECONDARY native face (Rajdhani, td5_hudfont_*) when loaded, instead of the
  * HUD-font SDF / tpage5 bitmap. Like the pause menu, the HUD text path is
@@ -2964,6 +2989,30 @@ void td5_hud_draw_finish_position(int position)
  *  sweep 2026-05-21.
  * ======================================================================== */
 
+/* [COP-CHASE 2026-06-21] Draw one centred line of the wanted-objective banner in
+ * the big HUD vector face at an EXPLICIT position (bypasses the queue_text DPI
+ * scaling so it lands exactly where we want — upper-third, clear of the top-centre
+ * score and the centre countdown digit). caps_cy = vertical centre of the caps. */
+static void hud_draw_wanted_banner_line(float cx, float caps_cy, float cap,
+                                        const char *s, uint32_t color) {
+    for (int k = 0; s[k]; k++) { td5_glyph g; td5_hudfont_get((unsigned char)s[k], cap, &g); }
+    td5_font_flush_uploads();
+    float total_w = 0.0f;
+    for (int k = 0; s[k]; k++) total_w += td5_hudfont_advance((unsigned char)s[k], cap);
+    float baseline = caps_cy + cap * 0.5f;
+    float pen = cx - total_w * 0.5f;
+    float off = cap * (1.0f / 16.0f); if (off < 1.0f) off = 1.0f;
+    for (int k = 0; s[k]; k++) {
+        td5_glyph g; td5_hudfont_get((unsigned char)s[k], cap, &g);
+        if (g.valid && g.w > 0.0f) {
+            float gx = pen + g.xoff, gy = baseline + g.yoff;
+            td5_vui_quad(gx + off, gy + off, g.w, g.h, 0xFF000000u, g.page, g.u0, g.v0, g.u1, g.v1);
+            td5_vui_quad(gx, gy, g.w, g.h, color, g.page, g.u0, g.v0, g.u1, g.v1);
+        }
+        pen += g.advance;
+    }
+}
+
 void td5_hud_draw_status_text(int player_slot, int view_index)
 {
     /* Skip during special render mode */
@@ -3004,23 +3053,42 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
         return;
     }
 
-    /* Wanted mode messages */
-    if (g_td5.wanted_mode_enabled != 0 && s_is_first_player != 0 && g_wanted_msg_timer < 300) {
-        g_wanted_msg_timer++;
+    /* Wanted mode messages — the suspect's "SUSPECT IS WANTED FOR <crime>" objective.
+     * [COP-CHASE 2026-06-21] Moved to the UPPER-THIRD and drawn MUCH larger so it
+     * clears the relocated top-centre ARRESTS/POINTS scoreboard and the centre
+     * countdown banner. Shown from race start (g_wanted_msg_timer begins at 0) so
+     * it's readable through the pre-race countdown; the crime re-randomises on the
+     * first ram (td5_ai.c). Faithful 2-line wording (g_wanted_msg_line1/2). */
+    if (g_td5.wanted_mode_enabled != 0 && s_is_first_player != 0 && g_wanted_msg_timer < 360) {
+        /* Don't burn the display timer during the pre-race countdown — hold the
+         * objective solid until the race is actually running, then it lives its
+         * full ~10s and blinks out. */
+        if (!td5_game_is_countdown_active())
+            g_wanted_msg_timer++;
 
-        /* Flash after frame 270 (odd frames hidden) */
-        if (g_wanted_msg_timer < 270 || (g_wanted_msg_timer & 1) == 0) {
-            td5_hud_queue_text(0,
-                (int)vp_half_w,
-                (int)(vp_top + 16.0f),
-                1, /* centered */
-                "%s", g_wanted_msg_line1[g_wanted_msg_index * 2]);
-
-            td5_hud_queue_text(0,
-                (int)s_view_layout[view_index].half_width,
-                (int)(vp_top + 32.0f),
-                1,
-                "%s", g_wanted_msg_line2[g_wanted_msg_index * 2]);
+        /* Flash out over the last 30 frames (odd frames hidden). */
+        if (g_wanted_msg_timer < 330 || (g_wanted_msg_timer & 1) == 0) {
+            const char *l1 = g_wanted_msg_line1[g_wanted_msg_index * 2];
+            const char *l2 = g_wanted_msg_line2[g_wanted_msg_index * 2];
+            float pane_h = vp_bottom - vp_top;
+            if (pane_h < 1.0f) pane_h = 480.0f;
+            float cx = s_view_layout[view_index].center_x;
+            if (td5_hudfont_ready()) {
+                /* Big vector banner in the UPPER-THIRD: clear of the top-centre
+                 * ARRESTS/POINTS score and the centre countdown digit. */
+                float sy  = s_view_layout[view_index].scale_y;
+                float cap = sy * 18.0f;                       /* much bigger than the score */
+                float y1  = vp_top + pane_h * 0.22f;          /* caps centre, line 1 */
+                float y2  = y1 + cap * 1.45f;                 /* line 2 below          */
+                hud_draw_wanted_banner_line(cx, y1, cap, l1, 0xFFFFFFFFu);  /* white header */
+                hud_draw_wanted_banner_line(cx, y2, cap, l2, 0xFFFFC050u);  /* amber crime  */
+            } else {
+                /* Bitmap fallback (vector_ui off): top, smaller, via the queue path. */
+                s_hud_next_text_scale = 1.6f;
+                td5_hud_queue_text(0, (int)cx, (int)(vp_top + 18.0f), 1, "%s", l1);
+                s_hud_next_text_scale = 1.6f;
+                td5_hud_queue_text(0, (int)cx, (int)(vp_top + 34.0f), 1, "%s", l2);
+            }
         }
     }
 
@@ -4103,10 +4171,14 @@ void td5_hud_render_overlays(float dt)
                  * against the original's on-screen HUD ("POINTS N" under
                  * "ARRESTS N"). [FIX 2026-05-31] The score accrues to the
                  * player/cop at accumulated_score (+0x2C8). */
+                /* [COP-CHASE 2026-06-21] Top-CENTRE, larger HUD face, just below the
+                 * ARRESTS line (from the LAP_COUNTER block). Scale via
+                 * TD5RE_COPCHASE_HUD_SCALE. */
+                s_hud_next_text_scale = copchase_hud_text_scale();
                 td5_hud_queue_text(0,
-                    (int)(vl->vp_int_left + 8.0f),
-                    (int)(vl->vp_int_top + 24.0f),
-                    0,
+                    (int)vl->center_x,
+                    (int)(vl->vp_int_top + 30.0f),
+                    1,
                     "POINTS %d", (int)td5_game_get_result_secondary(0));
             } else {
                 td5_hud_queue_text(0,
@@ -4136,10 +4208,13 @@ void td5_hud_render_overlays(float dt)
                  * suspect's damage bar is fully depleted). Label confirmed
                  * against the original's on-screen HUD ("ARRESTS N", top line).
                  * [FIX 2026-05-31 — was the guessed "BUSTS".] */
+                /* [COP-CHASE 2026-06-21] Top-CENTRE, larger HUD face, stacked ABOVE
+                 * the POINTS line. */
+                s_hud_next_text_scale = copchase_hud_text_scale();
                 td5_hud_queue_text(0,
-                    (int)(vl->vp_int_left + 8.0f),
+                    (int)vl->center_x,
                     (int)(vl->vp_int_top + 8.0f),
-                    0,
+                    1,
                     "ARRESTS %d", td5_game_get_wanted_kills(0));
             } else {
                 td5_hud_queue_text(0,
@@ -6788,6 +6863,46 @@ static int hud_wanted_active_slot(void) {
     return td5_ai_get_wanted_overlay_slot();
 }
 
+/* [COP-CHASE 2026-06-21] Solid / vertical-gradient / triangle screen-space
+ * primitives for the vectorised cop-chase chase indicator. They bind the HUD 1x1
+ * white page so the per-vertex diffuse IS the colour (no atlas sprite), and use
+ * the projected billboard depth (sz/rhw) so they composite with the 3D scene
+ * exactly like the DAMAGE/DAMAGEB1 sprites they replace. */
+static void hud_solid_quad(float l, float t, float r, float b,
+                           float sz, float rhw, uint32_t color) {
+    TD5_D3DVertex q[4];
+    q[0].screen_x=l; q[0].screen_y=t;  q[1].screen_x=l; q[1].screen_y=b;
+    q[2].screen_x=r; q[2].screen_y=t;  q[3].screen_x=r; q[3].screen_y=b;
+    for (int i=0;i<4;i++){ q[i].depth_z=sz; q[i].rhw=rhw; q[i].diffuse=color; q[i].specular=0; q[i].tex_u=0.0f; q[i].tex_v=0.0f; }
+    uint16_t idx[6]={0,1,2,1,3,2};
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
+    td5_plat_render_draw_tris(q,4,idx,6);
+}
+static void hud_grad_quad(float l, float t, float r, float b,
+                          float sz, float rhw, uint32_t top, uint32_t bot) {
+    TD5_D3DVertex q[4];
+    q[0].screen_x=l; q[0].screen_y=t; q[0].diffuse=top;
+    q[1].screen_x=l; q[1].screen_y=b; q[1].diffuse=bot;
+    q[2].screen_x=r; q[2].screen_y=t; q[2].diffuse=top;
+    q[3].screen_x=r; q[3].screen_y=b; q[3].diffuse=bot;
+    for (int i=0;i<4;i++){ q[i].depth_z=sz; q[i].rhw=rhw; q[i].specular=0; q[i].tex_u=0.0f; q[i].tex_v=0.0f; }
+    uint16_t idx[6]={0,1,2,1,3,2};
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
+    td5_plat_render_draw_tris(q,4,idx,6);
+}
+static void hud_solid_tri(float x0,float y0,float x1,float y1,float x2,float y2,
+                          float sz, float rhw, uint32_t color) {
+    TD5_D3DVertex q[3];
+    q[0].screen_x=x0; q[0].screen_y=y0;  q[1].screen_x=x1; q[1].screen_y=y1;  q[2].screen_x=x2; q[2].screen_y=y2;
+    for (int i=0;i<3;i++){ q[i].depth_z=sz; q[i].rhw=rhw; q[i].diffuse=color; q[i].specular=0; q[i].tex_u=0.0f; q[i].tex_v=0.0f; }
+    uint16_t idx[3]={0,1,2};
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
+    td5_plat_render_draw_tris(q,3,idx,3);
+}
+
 void td5_hud_update_wanted_damage_indicator(int actor_slot)
 {
     /* Gate matches orig 0x0043d4f5:
@@ -6845,6 +6960,49 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
      * over the suspect cars. fVar2 -> fVar1*48, needle -> fVar1*12 (keeps 4:1).] */
     const float FV2 = FV1 * 48.0f;                          /* frame side (px) — 3x orig */
     const float fill_w = FV1 * 12.0f;                       /* DAMAGEB1 needle width — 3x orig */
+
+    /* [COP-CHASE INDICATOR 2026-06-21] Faithful vector recreation of the original
+     * chase indicator (orig UpdateWantedDamageIndicator @ 0x0043D4E0): a cyan
+     * down-ARROW hovering above the suspect, with a red→green BUST-PROGRESS bar
+     * pinned to its RIGHT side. The bar FILLS top-down as you ram the suspect —
+     * full bar = arrest — it is NOT a draining health bar. (Original: DAMAGE = the
+     * 32×32 cyan arrow sprite, DAMAGEB1 = the 4×32 red→green bar fill.) Drawn as
+     * crisp solid-colour geometry from the 1×1 white page so it stays sharp at any
+     * resolution. TD5RE_COPCHASE_VECTOR=0 falls back to the real sprites below. */
+    if (td5_hud_copchase_vector_enabled()) {
+        const float aw = FV2, ah = FV2;
+        const float apex_x = sx;
+        const float apex_y = sy - ah * 0.5f;        /* tip floats above the car, points down */
+        const float top_y  = sy - ah * 1.5f;        /* arrow base (wide top) */
+        const float a_l = sx - aw * 0.5f, a_r = sx + aw * 0.5f;
+        const uint32_t cyan = 0xFF91FEFDu;          /* ~(145,254,253) light-blue fill */
+        const uint32_t blue = 0xFF6478FFu;          /* periwinkle-blue outline        */
+        float ob = FV1 * 3.0f; if (ob < 1.5f) ob = 1.5f;
+
+        /* Blue outline triangle (slightly larger) then the cyan arrowhead. */
+        hud_solid_tri(a_l - ob, top_y - ob, a_r + ob, top_y - ob,
+                      apex_x, apex_y + ob * 1.5f, sz, rhw, blue);
+        hud_solid_tri(a_l, top_y, a_r, top_y, apex_x, apex_y, sz, rhw, cyan);
+
+        /* Bust-progress bar pinned to the RIGHT of the arrow head, same height. */
+        const float bar_l = a_r + FV1 * 5.0f;
+        const float bar_w = FV2 * 0.30f;
+        const float bar_r = bar_l + bar_w;
+        const float bar_t = top_y;
+        const float bar_h = ah;
+        hud_solid_quad(bar_l - ob, bar_t - ob, bar_r + ob, bar_t + bar_h + ob,
+                       sz, rhw, 0xC0200000u);       /* dark backing for the empty meter */
+        float fillh = bar_h * damage_frac;          /* damage_frac = bust progress (0→1) */
+        if (fillh > 0.5f) {
+            const uint32_t red = 0xFFFB0500u;       /* top (251,5,0) */
+            uint8_t fr_ = (uint8_t)(0xFB + (int)((float)(0x00 - 0xFB) * damage_frac));
+            uint8_t fg_ = (uint8_t)(0x05 + (int)((float)(0xFF - 0x05) * damage_frac));
+            uint32_t bot = 0xFF000000u | ((uint32_t)fr_ << 16) | ((uint32_t)fg_ << 8);
+            hud_grad_quad(bar_l, bar_t, bar_r, bar_t + fillh, sz, rhw, red, bot);
+        }
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        return;
+    }
 
     /* Frame square: orig cx = anchorX - fVar2*0.5, cy = anchorY - (fVar2*0.5 +
      * fVar2) — centered on the projected anchor and lifted ~1.5*fVar2 above. */

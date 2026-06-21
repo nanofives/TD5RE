@@ -1897,6 +1897,21 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 #define PHYS_HANDBRAKE_MOD      0x7A
 #define PHYS_SLIP_COUPLING      0x7C
 
+/* [COP-CHASE 2026-06-21] AI suspect top-speed penalty in Cop Chase / wanted mode,
+ * as a percent of the per-car rating (default 70 = 30% slower) so the suspect
+ * stays catchable on higher difficulties. Tunable: TD5RE_COPCHASE_AI_SPEED_PCT. */
+static int copchase_ai_speed_pct(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_COPCHASE_AI_SPEED_PCT");
+        int pct = e ? atoi(e) : 70;
+        if (pct < 10)  pct = 10;
+        if (pct > 100) pct = 100;
+        cached = pct;
+    }
+    return cached;
+}
+
 /* [POLICE rewrite 2026-06-19] Effective top-speed rating (tuning +0x74). A
  * chasing police cop has NO top-speed cap — it must be able to overtake any
  * car — so it gets a very high rating (its real speed is still bounded to ~1.5x
@@ -1906,7 +1921,12 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 static inline int32_t phys_top_speed_rating(TD5_Actor *actor) {
     int slot = (int)((const uint8_t *)actor)[0x375];   /* ACTOR_SLOT_INDEX */
     if (td5_ai_cop_is_chasing(slot)) return 0x7FFF;    /* effectively uncapped */
-    return (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+    int32_t rating = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+    /* Slow the AI suspect(s) so a Cop Chase is winnable. Human slots (the player
+     * cop, 0..num_human_players-1) keep full speed; non-wanted modes byte-faithful. */
+    if (td5_game_is_wanted_mode() && slot >= g_td5.num_human_players)
+        rating = (rating * copchase_ai_speed_pct()) / 100;
+    return rating;
 }
 
 #define CDEF_FRONT_Z_EXTENT     0x04   /* positive */

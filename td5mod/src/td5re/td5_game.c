@@ -7937,6 +7937,14 @@ int td5_game_get_traffic_variant(int traffic_index) {
 int td5_game_get_cop_actor_index(void) { return g_td5.wanted_mode_enabled ? 0 : -1; }
 /* [CONFIRMED]: g_wantedModeEnabled @ 0x4AAF68 set at InitializeRaceSession */
 int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
+/* [COP-CHASE SIREN 2026-06-21] Expose pause-menu state to the audio layer so the
+ * cop-chase horn-siren refresh can be suspended while paused, letting it re-arm
+ * cleanly on resume (see td5_sound_update_vehicle_looping_state). */
+int td5_game_is_pause_menu_active(void) { return s_pause_menu_active; }
+/* [COP-CHASE 2026-06-21] 1 during the pre-race countdown (camera-transition timer
+ * still running, cars held); 0 once the race is running. Lets the wanted-objective
+ * banner hold solid through the countdown instead of burning its display timer. */
+int td5_game_is_countdown_active(void) { return g_cameraTransitionActive != 0; }
 /* [CONFIRMED @ 0x0043D7C0 AdvanceGlobalSkyRotation]: increments
  * g_wantedTargetTrackerActive (0x004BF500) by 0x400 when not paused. */
 void td5_game_advance_sky_rotation(void) {
