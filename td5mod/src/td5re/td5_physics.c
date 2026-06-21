@@ -7483,6 +7483,115 @@ static inline int32_t arith_round_shift(int32_t x, int32_t mask, int32_t shift)
  * Audit reference: re/analysis/pilot_004057F0_audit.md (pool6, 2026-05-14).
  * Effective level: L4 (byte-faithful per static audit; upstream-blocked).
  */
+
+/* [FIX 2026-06-21] QoL damp for the documented "wcb=0 chassis launch" on steep
+ * DESCENTS (user repro: Scotland ~span 2078, a real ~33° descent; cf. the TODO
+ * notes above re: edinburgh_chassis_launch / wcb=0 transient). Driving DOWN a
+ * steep grade, the contact/suspension path accrues spurious UPWARD chassis
+ * velocity and the car takes off. descent_damp_apply() is called once per actor
+ * from the SHARED td5_physics_integrate_pose (covering the 4-wheel PLAYER and the
+ * 2-axle AI OPPONENTS alike — both populate wheel contacts there): when the
+ * actor has ground contact AND the ground DROPPED this tick (descent) yet
+ * linear_velocity_y is positive (rising), it replaces that velocity with the
+ * ground's own drop rate so the chassis FOLLOWS the hill down instead of
+ * launching. Scoped tight: it never fires while fully airborne (real jumps) or
+ * on uphills (ground rising, dg > 0). Default ON; TD5RE_DESCENT_DAMP=0 reverts.
+ * Per-slot state for netplay determinism (getenv is identical launch config on
+ * every peer; the damp is a deterministic function of replicated sim state). */
+static int descent_damp_enabled(void)
+{
+    static int s_en = -1;
+    if (s_en < 0) {
+        const char *e = getenv("TD5RE_DESCENT_DAMP");
+        s_en = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s_en;
+}
+static int32_t s_descent_prev_ground[16];
+static int     s_descent_prev_valid[16];
+/* Min per-tick ground DROP (24.8 fp) counted as "descending". The steep Scotland
+ * section drops ~76800 fp/tick at speed; 8000 ignores flat-ground noise while
+ * catching any genuine descent. */
+#define DESCENT_DAMP_MIN_DROP 8000
+/* Max UPWARD chassis velocity (24.8 fp) tolerated for a GROUNDED car. ~16000 (≈63
+ * world units/tick = a brisk vertical climb) clears real bumps/kerbs but clamps
+ * the launch/snap spike (which reaches tens of thousands). Jumps go airborne first
+ * (early return), so ramps/crests are unaffected. */
+#define DESCENT_DAMP_MAX_UP 16000
+
+/* [FIX 2026-06-21] Slope-roll damp. The wheel-derived attitude (attitude_from_wheels)
+ * tips the car side-to-side on steep grades because the right-side wheel probes
+ * over-walk a span and read asymmetric heights (the documented "rolls out of
+ * control on steep slopes" residual — exposed once the descent-launch was fixed).
+ * On a STEEP grade driven roughly STRAIGHT, the true roll should be ~0, so scale
+ * the computed roll toward level. Cornering / banked turns keep their real roll
+ * (high yaw rate gates the damp off). Default ON; TD5RE_ROLL_DAMP=0 reverts. */
+static int roll_damp_enabled(void)
+{
+    static int s_en = -1;
+    if (s_en < 0) {
+        const char *e = getenv("TD5RE_ROLL_DAMP");
+        s_en = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s_en;
+}
+/* |pitch| (12-bit angle, abs in [0,2048]) above which the grade counts as steep.
+ * ~205 ≈ 18°. */
+#define ROLL_DAMP_PITCH_MIN 205
+/* |angular_velocity_yaw| below which the car counts as going straight (not
+ * cornering). Conservative so only genuinely-straight descents are damped. */
+#define ROLL_DAMP_YAW_MAX   1500
+/* Fraction of the wheel-derived roll KEPT on a steep straight grade (Q8).
+ * 0x50 ≈ 0.31 → most of the spurious slope-tilt removed, a little kept so the
+ * transition isn't a hard snap. */
+#define ROLL_DAMP_KEEP_Q8   0x50
+
+static void descent_damp_apply(TD5_Actor *actor)
+{
+    if (!descent_damp_enabled()) return;
+    int dslot = actor->slot_index & 0x0F;
+    /* Average ONLY the grounded wheels (an airborne wheel_contact_pos.y is the
+     * un-snapped transform Y and would pollute the ground reference). Any grounded
+     * wheel gives a valid descent reference — on a bouncy descent the car often
+     * has only partial contact while it pumps upward velocity. */
+    int32_t gnd_sum = 0; int gnd_cnt = 0;
+    for (int wi = 0; wi < 4; wi++) {
+        if (((actor->wheel_contact_bitmask >> wi) & 1) == 0) {   /* bit clear = grounded */
+            gnd_sum += actor->wheel_contact_pos[wi].y; gnd_cnt++;
+        }
+    }
+    if (gnd_cnt == 0) { s_descent_prev_valid[dslot] = 0; return; }  /* airborne: no ref */
+    int32_t gnd = gnd_sum / gnd_cnt;
+#ifndef TD5RE_RELEASE
+    int32_t before_vy = actor->linear_velocity_y;
+#endif
+    if (s_descent_prev_valid[dslot] && actor->linear_velocity_y > 0) {
+        int32_t dg = gnd - s_descent_prev_ground[dslot];
+        if (dg < -DESCENT_DAMP_MIN_DROP)     /* ground dropped -> descent */
+            actor->linear_velocity_y = dg;   /* follow the hill down, don't launch */
+    }
+    /* Backstop: a GROUNDED car cannot plausibly have a large UPWARD velocity —
+     * only a launch / ground-probe spike produces it. Clamp it even when the
+     * descent test above didn't fire (catches the AI snap-spike and any partial-
+     * contact moment the descent gate misses). Real jumps go through the airborne
+     * early-return above, so ramps/crests are untouched. */
+    if (actor->linear_velocity_y > DESCENT_DAMP_MAX_UP)
+        actor->linear_velocity_y = DESCENT_DAMP_MAX_UP;
+#ifndef TD5RE_RELEASE
+    if (actor->slot_index <= 1 && actor->linear_velocity_y != before_vy) {
+        static int s_dd_budget = 1500;
+        if (s_dd_budget > 0) {
+            s_dd_budget--;
+            TD5_LOG_I(LOG_TAG, "descent-damp slot=%d vy %d->%d gnd=%d gnd_cnt=%d",
+                      (int)actor->slot_index, before_vy,
+                      actor->linear_velocity_y, gnd, gnd_cnt);
+        }
+    }
+#endif
+    s_descent_prev_ground[dslot] = gnd;
+    s_descent_prev_valid[dslot]  = 1;
+}
+
 void td5_physics_update_suspension_response(TD5_Actor *actor)
 {
     /* Faithful port of UpdateVehicleSuspensionResponse @ 0x004057F0.
@@ -7740,6 +7849,12 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
          * after launching off a road bump. */
         actor->linear_velocity_y += bounce + g_gravity_constant;
     }
+
+    /* [FIX 2026-06-21] Descent-launch damp for the PLAYER (this-tick wheel
+     * contacts, applied after the faithful bounce write, before integrate_pose
+     * integrates Y). AI opponents are damped from integrate_pose instead (they
+     * never run this function). See descent_damp_apply(). */
+    descent_damp_apply(actor);
 
     if (cnt_grounded > 0) {
         /* Per-pattern angular velocity clamps [CONFIRMED @ 0x00405a6a..
@@ -9109,6 +9224,24 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             if (mask_stable) {
                 actor->angular_velocity_roll = d_roll;
             }
+
+            /* [FIX 2026-06-21] Slope-roll damp: on a STEEP grade driven roughly
+             * STRAIGHT, scale the wheel-derived roll toward level (the spurious
+             * over-walk tilt). Cornering keeps its roll (yaw-rate gate). See
+             * roll_damp_enabled(). */
+            if (roll_damp_enabled()) {
+                int32_t pitch_abs = (int32_t)new_pitch & 0xFFF;       /* 12-bit */
+                if (pitch_abs > 0x800) pitch_abs = 0x1000 - pitch_abs; /* fold to [0,2048] */
+                int32_t yaw_rate = actor->angular_velocity_yaw;
+                if (yaw_rate < 0) yaw_rate = -yaw_rate;
+                if (pitch_abs > ROLL_DAMP_PITCH_MIN && yaw_rate < ROLL_DAMP_YAW_MAX) {
+                    int32_t roll_s = (int32_t)new_roll & 0xFFF;        /* 12-bit */
+                    if (roll_s > 0x800) roll_s -= 0x1000;              /* -> signed */
+                    roll_s = (roll_s * ROLL_DAMP_KEEP_Q8) >> 8;        /* scale toward 0 */
+                    new_roll = (int16_t)(roll_s & 0xFFF);
+                }
+            }
+
             actor->display_angles.roll = new_roll;
             actor->euler_accum.roll    = (int32_t)new_roll << 8;
         }
@@ -9487,6 +9620,17 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                     }
                     actor->linear_velocity_y = snap_vy;
                 }
+            }
+
+            /* [FIX 2026-06-21] Descent-launch damp for AI OPPONENTS, applied AFTER
+             * the snap that injects their vertical velocity (the player is damped
+             * in td5_physics_update_suspension_response and is skipped here, so it
+             * is never double-processed). Same human-player test as the dispatch
+             * (td5_physics.c:2717); traffic uses a separate integrator. Runs inside
+             * `contact_count > 0`, i.e. only while grounded. See descent_damp_apply(). */
+            if (!(actor->slot_index < g_traffic_slot_base &&
+                  g_race_slot_state[actor->slot_index] == 1)) {
+                descent_damp_apply(actor);
             }
           } /* end velocity snap guard */
         } else {
