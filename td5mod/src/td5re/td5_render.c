@@ -3831,16 +3831,18 @@ void td5_render_actors_for_view(int view_index)
              *   slot == g_wantedTargetSlotIndex (=0)
              * The render call lives in td5_render.c:render_tracked_actor_marker
              * (port of 0x0043cde0). Visuals stay inert in non-wanted modes. */
+            /* [COP-CHASE 2026-06-21] The red/blue strobe (cop lights) is TOGGLED
+             * on/off with the HORN key. Gate it directly on the siren-toggle state
+             * (s_siren_user_enabled) so a horn press flips the lights immediately at
+             * full intensity — the marker's own phase animation supplies the flash.
+             * Horn toggles the lights + siren together (as in the original); the
+             * toggle persists across pause/resume. */
+            extern int td5_sound_siren_is_enabled(void);
             if (g_td5.wanted_mode_enabled &&
-                slot == td5_game_get_wanted_target_slot()) {
-                /* [COP-CHASE 2026-06-21] The player IS the cop — keep the red/blue
-                 * strobe (cop lights) STEADILY ON for the whole pursuit at full
-                 * intensity, instead of requiring the horn-toggled siren to drive
-                 * the wanted-target tracker (which the user couldn't reliably turn
-                 * on, and which decayed to nothing). The marker's own phase
-                 * animation supplies the flash; the horn still toggles the SIREN
-                 * sound separately. Pass the SAME body transform the mesh used so
-                 * the strobe stays welded to the car body. */
+                slot == td5_game_get_wanted_target_slot() &&
+                td5_sound_siren_is_enabled()) {
+                /* Pass the SAME body transform the mesh used so the strobe stays
+                 * welded to the car body. */
                 render_tracked_actor_marker(actor, &view_rot, &render_pos, 0x1000);
             }
 
