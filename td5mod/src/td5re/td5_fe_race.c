@@ -1458,6 +1458,57 @@ static void mp_simul_back_to_lobby(int n) {
     td5_frontend_set_screen(TD5_SCREEN_MP_LOBBY);
 }
 
+/* [2026-06-20] BACK from the car-select GRID steps back ONE stage to the
+ * "CHOOSE YOUR SCREEN" position picker (when positions are enabled) instead of
+ * dropping the whole flow to the lobby. Two reasons:
+ *   (1) it re-shows the position screen on the way back (user request), and
+ *   (2) it keeps s_mp_simul SET, so the per-player profile snapshot is NOT wiped.
+ *       (The lobby path cleared s_mp_simul; re-entering car-select then ran the
+ *       s_mp_simul 0->1 reset = frontend_mp_flow_reset, which clears
+ *       s_mp_prof_held_saved[] — losing each joystick's loaded profile.)
+ * The picker's own BACK continues to the name/colour setup, whose BACK (after the
+ * confirm prompt) still reaches the lobby — so the lobby stays reachable, just one
+ * step further out. With positions OFF there is no picker, so step back to the
+ * name/colour setup (phase 0) instead, still keeping the flow alive.
+ * Knob TD5RE_MP_CARSEL_BACK_POS=0 restores the legacy straight-to-lobby BACK. */
+static int mp_carsel_back_pos_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_CARSEL_BACK_POS");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP car-select BACK -> position picker %s (TD5RE_MP_CARSEL_BACK_POS=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+static void mp_simul_carsel_back(int n) {
+    int q;
+    if (!mp_carsel_back_pos_on()) { mp_simul_back_to_lobby(n); return; }
+    /* Keep the flow + every player's profile/name/colour/cell; just drop the
+     * per-pane preview surfaces and clear the ready latches so the prior stage
+     * re-arms. s_mp_simul stays SET (no frontend_mp_flow_reset on re-entry). */
+    mp_simul_free_all_panes(n);
+    td5_plat_input_flush_nav();
+    for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) {
+        s_mp_player_ready[q]  = 0;
+        s_mp_pane_nav_prev[q] = mp_simul_player_nav(q);
+    }
+    s_mp_simul_ready_ms = 0;
+    if (mp_positions_enabled()) {
+        /* Re-show the CHOOSE YOUR SCREEN picker; it reads the already-committed
+         * s_mp_player_cell[] so players see (and can tweak) their prior layout. */
+        TD5_LOG_I(LOG_TAG, "CarSelect grid: back -> choose-your-screen position picker");
+        td5_frontend_set_screen(TD5_SCREEN_MP_POSITION);
+    } else {
+        /* No picker when positions are off — back to name/colour setup (phase 0). */
+        s_mp_phase = 0;
+        s_inner_state = 0;
+        TD5_LOG_I(LOG_TAG, "CarSelect grid: back -> name/colour setup (positions off)");
+        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+    }
+}
+
 static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now); /* fwd: defined with the setup window below */
 
 static void frontend_mp_simul_carsel_update(void) {
@@ -1549,7 +1600,7 @@ static void frontend_mp_simul_carsel_update(void) {
     }
 
     if (frontend_check_escape()) want_back = 1;  /* keyboard ESC / aggregated gamepad B */
-    if (want_back) { mp_simul_back_to_lobby(n); return; }
+    if (want_back) { mp_simul_carsel_back(n); return; }   /* [2026-06-20] -> position picker, keep profiles */
 
     for (p = 0; p < n; p++)
         if (!s_mp_player_ready[p]) { all_ready = 0; break; }

@@ -10172,6 +10172,93 @@ static void frontend_mp_panel_capped(int cols, float *pane_w, float *row_x0) {
     if (row_x0) *row_x0 = FE_MP_LEFT_MARGIN + (FE_MP_USABLE_W - c * w) * 0.5f;
 }
 
+/* [adaptive 2-col 2026-06-20] Decide the INTERNAL card layout for a car-select
+ * pane of the given size. A TWO-COLUMN card — car image + at-a-glance stat bars
+ * on the LEFT, the CAR/PAINT/MORE STATS/transmission/OK stack on the RIGHT (the
+ * player-name banner + car name still span the full width up top) — needs the
+ * pane to be both WIDE enough to split into two readable columns AND TALL enough
+ * to stack the 5 buttons / car / stats per column (the user's "if the boxes are
+ * tall enough"). So the trigger is a MINIMUM width AND a MINIMUM height: the
+ * common 2-up (258x381), up/down (258x190) and 2x2 (258x190) panes all qualify;
+ * narrow 3-column grids (172-wide) and the very short stacked rows (127-tall)
+ * stay single-column. The two-column body then fills the free space (buttons
+ * distributed down the right column, stats stretched to the bottom of the left).
+ *
+ * Knob TD5RE_MP_CARSEL_2COL: unset/other = adaptive; "1" = force two-column on
+ * every pane; "0" = force the pre-2026-06-20 single-column stack everywhere. */
+#define MP_2COL_MIN_W 200.0f   /* pane must be at least this wide to split into two columns */
+#define MP_2COL_MIN_H 150.0f   /* ...and at least this tall to be worth it ("tall enough") */
+static int mp_carsel_two_col(float pane_w, float pane_h) {
+    static int mode = -1;   /* 0 = force off, 1 = adaptive, 2 = force on */
+    if (mode < 0) {
+        const char *e = getenv("TD5RE_MP_CARSEL_2COL");
+        mode = (e && e[0] == '1' && e[1] == '\0') ? 2
+             : (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP car-select 2-column card layout %s (TD5RE_MP_CARSEL_2COL=%s)",
+                  mode == 2 ? "FORCED ON" : mode == 0 ? "FORCED OFF" : "adaptive",
+                  e ? e : "default");
+    }
+    if (mode != 1) return mode == 2;
+    return (pane_w >= MP_2COL_MIN_W && pane_h >= MP_2COL_MIN_H) ? 1 : 0;
+}
+
+/* Draw player p's car preview (+ TD6 body-paint overlay) fitted into the rect,
+ * keeping the 408:280 car-pic aspect and centred both ways. Shared by the single-
+ * and two-column card layouts. */
+static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah,
+                                   float sx, float sy) {
+    int car = s_mp_player_car[p];
+    int td6 = frontend_car_is_td6(car);
+    float ar = 408.0f / 280.0f;
+    float dw = aw, dh = aw / ar, dx, dy;
+    if (dh > ah) { dh = ah; dw = ah * ar; }
+    dx = ax + (aw - dw) * 0.5f;
+    dy = ay + (ah - dh) * 0.5f;
+    if (s_mp_pane_preview[p] > 0)
+        fe_draw_surface_rect(s_mp_pane_preview[p], dx * sx, dy * sy, dw * sx, dh * sy, 0xFFFFFFFF);
+    if (td6 && frontend_car_paintable(car) && s_mp_pane_overlay[p] > 0)
+        fe_draw_surface_rect(s_mp_pane_overlay[p], dx * sx, dy * sy, dw * sx, dh * sy,
+                             frontend_rgb_to_bgra((uint32_t)s_mp_player_color[p]));
+}
+
+/* Draw one car-select pane button by MP_BTN_* index — keeps the PAINT variants
+ * (TD6 swatch / TD5 "n/4" / paintless "-"), the ◄► arrows on the selector rows,
+ * and the focus styling in ONE place so the single- and two-column layouts stay
+ * in sync. */
+static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
+                                      float bw, float bh, float sx, float sy) {
+    int car = s_mp_player_car[p];
+    int td6 = frontend_car_is_td6(car);
+    int focus = (s_mp_pane_btn[p] == which);
+    uint32_t pcol = ((uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu) | 0xFF000000u;
+    char vbuf[24];
+    switch (which) {
+    case MP_BTN_CAR:
+        mp_simul_draw_btn(bx, by, bw, bh, "CAR", focus, pcol, 1, NULL, -1, sx, sy);
+        break;
+    case MP_BTN_PAINT:
+        if (td6 && frontend_car_paintable(car))
+            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, NULL,
+                              s_mp_player_color[p], sx, sy);
+        else if (!td6 && frontend_car_has_paint(car)) {
+            snprintf(vbuf, sizeof vbuf, "%d/4", s_mp_player_paint[p] + 1);
+            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, vbuf, -1, sx, sy);
+        } else
+            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 0, "-", -1, sx, sy);
+        break;
+    case MP_BTN_STATS:
+        mp_simul_draw_btn(bx, by, bw, bh, "MORE STATS", focus, pcol, 0, NULL, -1, sx, sy);
+        break;
+    case MP_BTN_TRANS:
+        mp_simul_draw_btn(bx, by, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTOMATIC",
+                          focus, pcol, 0, NULL, -1, sx, sy);
+        break;
+    case MP_BTN_OK:
+        mp_simul_draw_btn(bx, by, bw, bh, "OK", focus, pcol, 0, NULL, -1, sx, sy);
+        break;
+    }
+}
+
 static void frontend_mp_simul_carsel_render(float sx, float sy) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0;
@@ -10227,7 +10314,6 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
         uint32_t rgb  = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;  /* chosen identity colour */
         uint32_t pcol = rgb | 0xFF000000u;
         int car   = s_mp_player_car[p];
-        int td6   = frontend_car_is_td6(car);
         int ready = s_mp_player_ready[p];
         int stats = (s_mp_pane_substate[p] == 1);
         char buf[64];
@@ -10264,43 +10350,81 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
         snprintf(buf, sizeof buf, "%s", frontend_get_car_display_name(car));
         mp_simul_small_centered(cx * sx, (pyr + 21) * sy, buf, 0xFFFFFFFFu, sx, sy);
 
-        /* Car image (below the name). */
-        {
-            float avail_w = pane_w - 20.0f;
-            float avail_h = pane_h * 0.38f;
-            float ar = 408.0f / 280.0f;
-            float dw = avail_w, dh = dw / ar, dx, dy;
-            if (dh > avail_h) { dh = avail_h; dw = dh * ar; }
-            dx = cx - dw * 0.5f;
-            dy = pyr + 32.0f;
-            if (s_mp_pane_preview[p] > 0)
-                fe_draw_surface_rect(s_mp_pane_preview[p], dx * sx, dy * sy, dw * sx, dh * sy, 0xFFFFFFFF);
-            if (td6 && frontend_car_paintable(car) && s_mp_pane_overlay[p] > 0)
-                fe_draw_surface_rect(s_mp_pane_overlay[p], dx * sx, dy * sy, dw * sx, dh * sy,
-                                     frontend_rgb_to_bgra((uint32_t)s_mp_player_color[p]));
-        }
-
+        /* READY panes: chosen car centred with a READY badge, no menu. */
         if (ready) {
+            float avail_w = pane_w - 20.0f;
+            mp_simul_draw_pane_car(p, cx - avail_w * 0.5f, pyr + 32.0f, avail_w, pane_h * 0.38f, sx, sy);
             mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.66f) * sy, "READY", 0xFF40FF40u, sx, sy);
-            mp_simul_small_centered(cx * sx, (pyr + pane_h - 16.0f) * sy, "A = CHANGE   B = LOBBY",
+            mp_simul_small_centered(cx * sx, (pyr + pane_h - 16.0f) * sy, "A = CHANGE   B = BACK",
                                     0xFFB0B0B0u, sx, sy);
             continue;
         }
 
-        /* Button stack (CAR / PAINT / [stat bars] / MORE STATS / AUTO-MANUAL / OK).
-         * The at-a-glance stat panel sits between PAINT and MORE STATS; it's the
-         * flex element so the 5 buttons keep their [9,22]px size and the panel
-         * shrinks (down to thin label-less bars) when a small split runs out of
-         * room. */
-        {
+        /* Stat bars (both layouts) need the cached spec sheet (loaded even before
+         * MORE STATS is opened). */
+        mp_simul_load_pane_spec(p, car);
+
+        if (mp_carsel_two_col(pane_w, pane_h)) {
+            /* TWO-COLUMN card: car image + at-a-glance stat bars on the LEFT, the
+             * CAR / PAINT / MORE STATS / transmission / OK stack on the RIGHT. The
+             * name banner + car name above still span the full width. Every element
+             * is sized from the pane's ACTUAL free space (no fixed pixel sizes): the
+             * column widths are fractions of the pane width, the car takes its snug
+             * fit, the stat bars stretch to the bottom of the left column, and the 5
+             * buttons are spread evenly down the full right column. So the card
+             * grows/shrinks to fill whatever cell the split-screen grid gives it. */
+            float gap = 6.0f;
+            float col_top = pyr + 31.0f;                 /* just below the car name */
+            float col_bot = pyr + pane_h - 8.0f;
+            float col_h   = col_bot - col_top;
+            float lx = px + 8.0f;
+            float usable = pane_w - 16.0f - gap;
+            float lcw = usable * 0.46f;                    /* car/stats column (narrower) */
+            float rcw = usable - lcw;                      /* button column (wider, fits AUTOMATIC) */
+            float rx = lx + lcw + gap;
+            /* LEFT: car snug at the top (no dead band above/below a width-limited
+             * landscape car-pic), then the stat bars STRETCHED to fill the rest of
+             * the column down to col_bot. */
+            float car_fit = lcw / (408.0f / 280.0f) + 18.0f;   /* natural height at this width + margin */
+            float car_h   = col_h * 0.52f;
+            float bars_y, bars_h;
+            if (car_h > car_fit) car_h = car_fit;
+            bars_y = col_top + car_h + 4.0f;
+            bars_h = col_bot - bars_y;
+            mp_simul_draw_pane_car(p, lx, col_top, lcw, car_h, sx, sy);
+            if (bars_h > 8.0f)
+                frontend_draw_car_stat_bars(lx, bars_y, lcw, bars_h,
+                                            s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
+                                            s_mp_pane_spec[p][14], pcol, 1, sx, sy);
+            /* RIGHT: the 5 buttons spread evenly down the WHOLE column (one row each
+             * = col_h / MP_BTN_COUNT) so they always fill the height instead of
+             * clumping at a fixed size — capped so they don't get comically tall in
+             * a big 2-up pane. */
+            {
+                float slot = col_h / (float)MP_BTN_COUNT;
+                float bh = slot - 5.0f;
+                int b;
+                if (bh > 44.0f) bh = 44.0f;
+                if (bh < 10.0f) bh = 10.0f;
+                for (b = 0; b < MP_BTN_COUNT; b++) {
+                    float yy = col_top + (float)b * slot + (slot - bh) * 0.5f;
+                    mp_simul_draw_pane_button(p, b, rx, yy, rcw, bh, sx, sy);
+                }
+            }
+        } else {
+            /* SINGLE-COLUMN stack (classic): car image, then CAR / PAINT /
+             * [stat bars] / MORE STATS / AUTO-MANUAL / OK. The at-a-glance stat
+             * panel between PAINT and MORE STATS is the flex element — it shrinks
+             * (down to thin label-less bars) when a small split runs out of room
+             * while the 5 buttons keep their [10,28]px size. */
+            float avail_h = pane_h * 0.38f;
             float bx = px + 8.0f, bw = pane_w - 16.0f;
-            float bsy = pyr + 32.0f + pane_h * 0.38f + 4.0f;
+            float bsy = pyr + 32.0f + avail_h + 4.0f;
             float room = (pyr + pane_h - 18.0f) - bsy;
             float bh = (room - 10.0f) / 6.2f;   /* 5 buttons + ~1.2-button stat panel + gaps */
-            int focus = s_mp_pane_btn[p];
-            float yy = bsy;
-            float panel_h;
-            char vbuf[24];
+            float yy = bsy, panel_h;
+            mp_simul_draw_pane_car(p, cx - (pane_w - 20.0f) * 0.5f, pyr + 32.0f,
+                                   pane_w - 20.0f, avail_h, sx, sy);
             if (bh < 10.0f) bh = 10.0f;
             if (bh > 28.0f) bh = 28.0f;   /* taller buttons where the pane has room */
             panel_h = bh * 1.2f;
@@ -10308,29 +10432,15 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
                 panel_h = room - 5.0f * bh - 10.0f;
                 if (panel_h < 8.0f) panel_h = 8.0f;
             }
-
-            mp_simul_draw_btn(bx, yy, bw, bh, "CAR", focus == MP_BTN_CAR, pcol, 1, NULL, -1, sx, sy);
-            yy += bh + 2.0f;
-            if (td6 && frontend_car_paintable(car))
-                mp_simul_draw_btn(bx, yy, bw, bh, "PAINT", focus == MP_BTN_PAINT, pcol, 1, NULL,
-                                  s_mp_player_color[p], sx, sy);
-            else if (!td6 && frontend_car_has_paint(car)) {
-                snprintf(vbuf, sizeof vbuf, "%d/4", s_mp_player_paint[p] + 1);
-                mp_simul_draw_btn(bx, yy, bw, bh, "PAINT", focus == MP_BTN_PAINT, pcol, 1, vbuf, -1, sx, sy);
-            } else
-                mp_simul_draw_btn(bx, yy, bw, bh, "PAINT", focus == MP_BTN_PAINT, pcol, 0, "-", -1, sx, sy);
-            yy += bh + 2.0f;
-            mp_simul_load_pane_spec(p, car);   /* cached; bars need the spec even before MORE STATS is opened */
+            mp_simul_draw_pane_button(p, MP_BTN_CAR,   bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
+            mp_simul_draw_pane_button(p, MP_BTN_PAINT, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
             frontend_draw_car_stat_bars(bx, yy, bw, panel_h,
                                         s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
                                         s_mp_pane_spec[p][14], pcol, 1, sx, sy);
             yy += panel_h + 2.0f;
-            mp_simul_draw_btn(bx, yy, bw, bh, "MORE STATS", focus == MP_BTN_STATS, pcol, 0, NULL, -1, sx, sy);
-            yy += bh + 2.0f;
-            mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTOMATIC",
-                              focus == MP_BTN_TRANS, pcol, 0, NULL, -1, sx, sy);
-            yy += bh + 2.0f;
-            mp_simul_draw_btn(bx, yy, bw, bh, "OK", focus == MP_BTN_OK, pcol, 0, NULL, -1, sx, sy);
+            mp_simul_draw_pane_button(p, MP_BTN_STATS, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
+            mp_simul_draw_pane_button(p, MP_BTN_TRANS, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
+            mp_simul_draw_pane_button(p, MP_BTN_OK,    bx, yy, bw, bh, sx, sy);
         }
 
         /* STATS spec sheet overlays the car + menu (both kept semi-visible). */
