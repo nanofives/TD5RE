@@ -381,6 +381,13 @@ static int td5_camera_compute_crash_shake(int view, int eye_ofs[3], short ang_of
     int slot = g_actorSlotForView[view];
     if (slot < 0) return 0;
 
+    /* [GENTLE FLIP-RECOVERY 2026-06-21] The original never shakes the screen
+     * during scripted recovery (vehicle_mode==1) — the crash shake is a port-
+     * only addition. Hold it off while this slot is in gentle flip-recovery so
+     * the recovery reads as a calm coast, not a rattle. (Physics-side gate:
+     * TD5RE_RECOVERY_GENTLE.) */
+    if (td5_physics_recovery_shake_suppressed(slot)) return 0;
+
     int32_t mag = 0;
     int age = 0;
     uint32_t seq = td5_physics_get_crash_fx(slot, &mag, &age);
