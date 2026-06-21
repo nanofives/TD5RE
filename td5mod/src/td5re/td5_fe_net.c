@@ -425,8 +425,9 @@ void Screen_MultiplayerLobby(void) {
                  * per-session runtime state and always reset. Gated by
                  * TD5RE_MP_SESSION (when off / not yet valid this is byte-identical
                  * to the old wipe-every-time behaviour). */
-                if (mp_session_is_valid() && p < mp_session_count()) {
-                    mp_session_restore_player(p);
+                if (mp_session_restore_player_for_device(p)) {
+                    /* [per-device 2026-06-21] restored the profile this device
+                     * (s_mp_join_device[p]) used earlier this session. */
                 } else {
                     s_mp_player_car[p]    = s_selected_car;
                     s_mp_player_paint[p]  = 0;

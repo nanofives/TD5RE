@@ -42,6 +42,10 @@ typedef struct {
     int  paint[TD5_MAX_HUMAN_PLAYERS];
     int  color[TD5_MAX_HUMAN_PLAYERS];       /* TD6 body colour (0xRRGGBB, -1 = none) */
     int  trans[TD5_MAX_HUMAN_PLAYERS];       /* 0 = Automatic, 1 = Manual */
+    int  device[TD5_MAX_HUMAN_PLAYERS];      /* [per-device 2026-06-21] enumerated input
+                                              * device (s_mp_join_device) that occupied this
+                                              * slot, so a profile is restored to whatever
+                                              * pad it was set with, regardless of join order */
     /* --- reserved for the position-select screen agent (leave at 0) --- */
     int  cell[TD5_MAX_HUMAN_PLAYERS];        /* chosen viewport/grid cell per player */
     int  pos_assigned;                       /* 1 once positions have been chosen */
@@ -51,8 +55,14 @@ typedef struct {
 int  mp_session_enabled(void);               /* TD5RE_MP_SESSION knob (cached) */
 int  mp_session_is_valid(void);              /* s_mp_session.valid && enabled */
 int  mp_session_count(void);                 /* captured human count (0 if invalid) */
-void mp_session_save_player(int p);          /* live arrays[p] -> store[p] */
+void mp_session_save_player(int p);          /* live arrays[p] -> store[p] (records device) */
+void mp_session_save_live_roster(int humans);/* [persist-on-edit] mirror live roster -> store
+                                              * + mark valid, so profiles survive backing out
+                                              * to the main menu before a race ever commits */
 void mp_session_restore_player(int p);       /* store[p] -> live arrays[p] (if valid && p<count) */
+int  mp_session_by_device(void);             /* TD5RE_MP_SESSION_BY_DEVICE knob (cached) */
+int  mp_session_restore_player_for_device(int p); /* store slot matching s_mp_join_device[p] ->
+                                              * live arrays[p]; 1 if a profile was restored */
 
 /* ---- MP split-screen POSITION SELECT (#6/#8) ----
  * s_mp_player_cell[p] = the grid cell human player p occupies (default identity).

@@ -1545,6 +1545,10 @@ static void frontend_mp_simul_carsel_update(void) {
      * reconnect modal until it returns (ESC aborts to the lobby). */
     if (frontend_mp_setup_disconnect_check(n)) return;
 
+    /* [persist-on-edit 2026-06-21] Keep the session store in sync with the live
+     * car picks so they survive backing out (even to the main menu) pre-race. */
+    mp_session_save_live_roster(n);
+
     /* Slide-in animation phase: no input; keep edge trackers fresh so a held
      * START button isn't treated as a press once interaction begins. */
     if (s_inner_state == 0x20) {
@@ -1783,8 +1787,7 @@ static void frontend_mp_setup_init(void) {
          * colour come up pre-filled (the lobby START restore already mirrors them
          * into the live arrays; this keeps it correct regardless of entry order).
          * Gated by TD5RE_MP_SESSION. */
-        if (mp_session_is_valid() && p < mp_session_count())
-            mp_session_restore_player(p);
+        mp_session_restore_player_for_device(p);   /* [per-device 2026-06-21] */
         if (s_mp_player_accent[p] == 0)
             s_mp_player_accent[p] = (int)(k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
         s_mp_player_ready[p]  = 0;
@@ -2051,6 +2054,10 @@ static void frontend_mp_setup_update(void) {
 
     /* [disconnect-modal] freeze + reconnect modal if a pad dropped mid-setup. */
     if (frontend_mp_setup_disconnect_check(n)) return;
+
+    /* [persist-on-edit 2026-06-21] Keep the session store in sync with the live
+     * name/colour so they survive backing out (even to the main menu) pre-race. */
+    mp_session_save_live_roster(n);
 
     if (s_inner_state == 0x20) {   /* slide-in animation */
         for (p = 0; p < n; p++) s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
@@ -2330,6 +2337,23 @@ static int mp_pos_reask_enabled(void) {
     }
     return v;
 }
+/* [always-show 2026-06-21] User wants the CHOOSE YOUR SCREEN selector shown
+ * EVERY time the name/colour profile step completes — even when the profiles are
+ * remembered for the session and even on a within-flow re-confirm (back out of
+ * the car grid and re-advance). When ON (default) the per-flow "already shown"
+ * latch is ignored for the show/skip decision; the picker still PRE-SEEDS the
+ * remembered cells so it is a quick re-confirm, not a redo. TD5RE_MP_POS_ALWAYS=0
+ * restores the legacy show-once-per-flow behaviour (still gated by MP_POS_REASK). */
+static int mp_pos_always_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_POS_ALWAYS");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP position ALWAYS-show selector %s (TD5RE_MP_POS_ALWAYS=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
 static int s_mp_pos_shown_this_flow = 0;   /* picker already offered in the current MP flow */
 
 /* Called from Screen_CarSelection when a FRESH MP flow begins (s_mp_simul 0->1),
@@ -2349,7 +2373,12 @@ void frontend_mp_flow_reset(void) {
  * cells (count matches) or fall back to identity and go straight to the car grid. */
 static void frontend_mp_position_enter(void) {
     int n = s_num_human_players;
-    int reask = mp_pos_reask_enabled() && !s_mp_pos_shown_this_flow;   /* [#12] */
+    /* [#12] re-ask each race; [always-show 2026-06-21] when TD5RE_MP_POS_ALWAYS is
+     * on (default) ignore the within-flow latch so the selector re-appears after
+     * EVERY profile confirm (the user keeps profiles for the session but still
+     * wants to pick the screen each time). */
+    int reask = mp_pos_reask_enabled() &&
+                (mp_pos_always_enabled() || !s_mp_pos_shown_this_flow);
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
 

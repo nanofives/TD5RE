@@ -311,6 +311,33 @@ int mp_session_count(void) {
     return mp_session_is_valid() ? s_mp_session.count : 0;
 }
 
+/* [per-device 2026-06-21] TD5RE_MP_SESSION_BY_DEVICE: default ON. When on, a
+ * stored profile is keyed by the input DEVICE it was set with, so a controller
+ * keeps its name/colour/car for the whole session even if the join order (and
+ * thus the player slot) changes between races. "0" reverts to the legacy
+ * by-player-index keying. Cached. */
+int mp_session_by_device(void) {
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("TD5RE_MP_SESSION_BY_DEVICE");
+        s_cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP session keying: %s",
+                  s_cached ? "by device" : "by player index");
+    }
+    return s_cached;
+}
+
+/* Return the stored session slot whose captured device == dev, or -1. The
+ * keyboard (dev 0) is shareable but the lobby admits it at most once, so a
+ * single match is unambiguous. */
+static int mp_session_slot_for_device(int dev) {
+    int k;
+    if (!mp_session_is_valid()) return -1;
+    for (k = 0; k < s_mp_session.count && k < TD5_MAX_HUMAN_PLAYERS; k++)
+        if (s_mp_session.device[k] == dev) return k;
+    return -1;
+}
+
 void mp_session_save_player(int p) {
     if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return;
     memcpy(s_mp_session.name[p], s_mp_player_name[p], sizeof(s_mp_session.name[p]));
@@ -320,6 +347,23 @@ void mp_session_save_player(int p) {
     s_mp_session.paint[p]  = s_mp_player_paint[p];
     s_mp_session.color[p]  = s_mp_player_color[p];
     s_mp_session.trans[p]  = s_mp_player_trans[p];
+    s_mp_session.device[p] = s_mp_join_device[p];   /* [per-device] key for restore */
+}
+
+/* [persist-on-edit 2026-06-21] Mirror the live MP roster (players 0..humans-1)
+ * into the session store and mark it valid. The roster used to be saved ONLY at
+ * race commit, so setting up profiles and then backing out to the main menu
+ * (without racing) lost them. Calling this each interactive frame of the MP
+ * setup makes the store always reflect the latest profiles, so profiles survive
+ * every exit path (back-to-lobby, back-to-main-menu, accidental). Cheap. */
+void mp_session_save_live_roster(int humans) {
+    int p;
+    if (!mp_session_enabled()) return;
+    if (humans < 0) humans = 0;
+    if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
+    for (p = 0; p < humans; p++) mp_session_save_player(p);
+    s_mp_session.valid = 1;
+    s_mp_session.count = humans;
 }
 
 void mp_session_restore_player(int p) {
@@ -334,16 +378,50 @@ void mp_session_restore_player(int p) {
     s_mp_player_trans[p]  = s_mp_session.trans[p];
 }
 
+/* [per-device 2026-06-21] Restore the stored profile for whatever device player
+ * p just joined with (s_mp_join_device[p]) into the live arrays[p]. Keeps each
+ * physical controller's profile across the session regardless of join order.
+ * Returns 1 if a profile was restored, 0 if none matched (caller seeds
+ * defaults). TD5RE_MP_SESSION_BY_DEVICE=0 falls back to legacy by-index. */
+int mp_session_restore_player_for_device(int p) {
+    int k;
+    if (!mp_session_is_valid()) return 0;
+    if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    if (mp_session_by_device()) {
+        k = mp_session_slot_for_device(s_mp_join_device[p]);
+        if (k < 0) return 0;             /* this device has no saved profile yet */
+    } else {
+        k = p;                            /* legacy: store slot == player index */
+        if (k >= s_mp_session.count) return 0;
+    }
+    memcpy(s_mp_player_name[p], s_mp_session.name[k], sizeof(s_mp_player_name[p]));
+    s_mp_player_name[p][sizeof(s_mp_player_name[p]) - 1] = '\0';
+    s_mp_player_accent[p] = s_mp_session.accent[k];
+    s_mp_player_car[p]    = s_mp_session.car[k];
+    s_mp_player_paint[p]  = s_mp_session.paint[k];
+    s_mp_player_color[p]  = s_mp_session.color[k];
+    s_mp_player_trans[p]  = s_mp_session.trans[k];
+    return 1;
+}
+
 /* Display helpers for the lobby roster: read the persisted name/accent for a
  * player WITHOUT clobbering the live working arrays (used to label a freshly
- * joined slot before any restore runs). Return NULL/0 when nothing stored. */
+ * joined slot before any restore runs). Device-keyed to match the restore so a
+ * returning controller previews its own saved identity. NULL/0 when nothing. */
+static int mp_session_preview_slot(int p) {
+    if (!mp_session_is_valid() || p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return -1;
+    if (mp_session_by_device()) return mp_session_slot_for_device(s_mp_join_device[p]);
+    return (p < s_mp_session.count) ? p : -1;
+}
 static const char *mp_session_player_name(int p) {
-    if (!mp_session_is_valid() || p < 0 || p >= s_mp_session.count) return NULL;
-    return s_mp_session.name[p][0] ? s_mp_session.name[p] : NULL;
+    int k = mp_session_preview_slot(p);
+    if (k < 0) return NULL;
+    return s_mp_session.name[k][0] ? s_mp_session.name[k] : NULL;
 }
 static int mp_session_player_accent(int p) {
-    if (!mp_session_is_valid() || p < 0 || p >= s_mp_session.count) return 0;
-    return s_mp_session.accent[p];
+    int k = mp_session_preview_slot(p);
+    if (k < 0) return 0;
+    return s_mp_session.accent[k];
 }
 
 /* ---- MP split-screen POSITION SELECT (#6/#8) ----
@@ -10069,12 +10147,38 @@ static void mp_simul_small_centered(float cx_px, float y_px, const char *t,
     fe_draw_small_text(cx_px - w * 0.5f, y_px, t, c, lsx, lsy);
 }
 
+/* [responsive 2026-06-21] Largest scale multiplier (<=1) at which the small-font
+ * string `t` fits within max_w_px at base scale (lsx,lsy). 1.0 if it already
+ * fits / is empty. The MP split-screen cards shrink to as small as ~172x127 (9
+ * players, 3x3 grid); names + button labels drawn at the fixed small-font scale
+ * used to overflow those panes. This lets every label shrink to stay inside its
+ * box so all UI elements remain fully visible regardless of pane size. */
+static float mp_fit_scale(const char *t, float max_w_px, float lsx, float lsy) {
+    float w;
+    if (!t || !t[0] || max_w_px <= 0.0f) return 1.0f;
+    w = fe_measure_small_text(t) * fe_glyph_sx(lsx, lsy);
+    return (w <= max_w_px) ? 1.0f : (max_w_px / w);
+}
+
+/* Centred small text auto-shrunk to fit max_w_px (see mp_fit_scale). */
+static void mp_simul_small_centered_fit(float cx_px, float y_px, const char *t,
+                                        uint32_t c, float lsx, float lsy, float max_w_px) {
+    float s  = mp_fit_scale(t, max_w_px, lsx, lsy);
+    float w  = fe_measure_small_text(t) * fe_glyph_sx(lsx * s, lsy * s);
+    fe_draw_small_text(cx_px - w * 0.5f, y_px, t, c, lsx * s, lsy * s);
+}
+
 /* ◄ ► selector arrows (procedural triangle-SDF, ps_arrow) at the left/right
  * edges of a button. Native. [2026-06-16] The ArrowButtonz.tga sprite bitmap
  * fallback was retired. */
 static void mp_simul_draw_arrows(float bx, float by, float bw, float bh, float sx, float sy) {
     if (!s_ps_arrow) return;
-    float a2 = 12.0f, ay2 = by + (bh - a2) * 0.5f;
+    /* [responsive 2026-06-21] Cap the glyph to the button height so it never
+     * sticks out of a short button in a small split-screen pane. */
+    float a2 = 12.0f;
+    if (a2 > bh - 2.0f) a2 = bh - 2.0f;
+    if (a2 < 5.0f)      a2 = 5.0f;
+    float ay2 = by + (bh - a2) * 0.5f;
     fe_draw_arrow_proc((bx + 3.0f) * sx,           ay2 * sy, a2 * sx, a2 * sy, 0, 0xFF7995FFu);
     fe_draw_arrow_proc((bx + bw - 3.0f - a2) * sx, ay2 * sy, a2 * sx, a2 * sy, 1, 0xFF7995FFu);
 }
@@ -10102,19 +10206,34 @@ static void mp_simul_draw_btn(float x, float y, float w, float h, const char *la
         tc = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
     }
     if (arrows) mp_simul_draw_arrows(x, y, w, h, sx, sy);
-    if (arrows) {
-        fe_draw_small_text((x + 17.0f) * sx, ty, label, tc, sx, sy);
-    } else {
-        float lw = fe_measure_small_text(label) * fe_glyph_sx(sx, sy);
-        fe_draw_small_text((x + w * 0.5f) * sx - lw * 0.5f, ty, label, tc, sx, sy);
+
+    /* [responsive 2026-06-21] Fit the label between the left arrow and the
+     * value/swatch on the right, shrinking it for narrow panes so long labels
+     * (AUTOMATIC / MORE STATS) never overflow the button. */
+    float val_w  = (val && swatch_rgb < 0) ? fe_measure_small_text(val) * fe_glyph_sx(sx, sy) : 0.0f;
+    float l_left = (arrows ? (x + 17.0f) : (x + 4.0f)) * sx;
+    float l_right;
+    if (swatch_rgb >= 0)   l_right = (redge - 17.0f) * sx;
+    else if (val)          l_right = redge * sx - val_w - 4.0f * sx;
+    else                   l_right = (arrows ? (x + w - 18.0f) : (x + w - 4.0f)) * sx;
+    {
+        float ls   = mp_fit_scale(label, l_right - l_left, sx, sy);
+        float lsx2 = sx * ls, lsy2 = sy * ls;
+        float lty  = (y + (h - SMALLFONT_TTF_CAP * ls) * 0.5f) * sy;
+        if (arrows) {
+            fe_draw_small_text(l_left, lty, label, tc, lsx2, lsy2);
+        } else {
+            float lw = fe_measure_small_text(label) * fe_glyph_sx(lsx2, lsy2);
+            fe_draw_small_text((x + w * 0.5f) * sx - lw * 0.5f, lty, label, tc, lsx2, lsy2);
+        }
     }
+
     if (swatch_rgb >= 0) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         fe_draw_quad((redge - 15.0f) * sx, (y + h * 0.5f - 5.0f) * sy, 15.0f * sx, 10.0f * sy,
                      frontend_rgb_to_bgra((uint32_t)swatch_rgb), -1, 0, 0, 1, 1);
     } else if (val) {
-        float vw = fe_measure_small_text(val) * fe_glyph_sx(sx, sy);
-        fe_draw_small_text(redge * sx - vw, ty, val, tc, sx, sy);
+        fe_draw_small_text(redge * sx - val_w, ty, val, tc, sx, sy);
     }
 }
 
@@ -10407,19 +10526,19 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
                      rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-        mp_simul_small_centered(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy);
+        mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy, (pane_w - 8.0f) * sx);
 
         /* Car NAME above the image (request). */
         snprintf(buf, sizeof buf, "%s", frontend_get_car_display_name(car));
-        mp_simul_small_centered(cx * sx, (pyr + 21) * sy, buf, 0xFFFFFFFFu, sx, sy);
+        mp_simul_small_centered_fit(cx * sx, (pyr + 21) * sy, buf, 0xFFFFFFFFu, sx, sy, (pane_w - 10.0f) * sx);
 
         /* READY panes: chosen car centred with a READY badge, no menu. */
         if (ready) {
             float avail_w = pane_w - 20.0f;
             mp_simul_draw_pane_car(p, cx - avail_w * 0.5f, pyr + 32.0f, avail_w, pane_h * 0.38f, sx, sy);
-            mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.66f) * sy, "READY", 0xFF40FF40u, sx, sy);
-            mp_simul_small_centered(cx * sx, (pyr + pane_h - 16.0f) * sy, "A = CHANGE   B = BACK",
-                                    0xFFB0B0B0u, sx, sy);
+            mp_simul_small_centered_fit(cx * sx, (pyr + pane_h * 0.66f) * sy, "READY", 0xFF40FF40u, sx, sy, (pane_w - 12.0f) * sx);
+            mp_simul_small_centered_fit(cx * sx, (pyr + pane_h - 16.0f) * sy, "A = CHANGE   B = BACK",
+                                    0xFFB0B0B0u, sx, sy, (pane_w - 8.0f) * sx);
             continue;
         }
 
@@ -10835,18 +10954,18 @@ static void frontend_mp_setup_render(float sx, float sy) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
                      rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-        mp_simul_small_centered(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy);
+        mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy, (pane_w - 8.0f) * sx);
 
         ax = px + 6.0f; ay = pyr + 22.0f; aw = pane_w - 12.0f; ah = pane_h - 28.0f;
 
         if (ready) {
-            mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.42f) * sy, "READY", 0xFF40FF40u, sx, sy);
+            mp_simul_small_centered_fit(cx * sx, (pyr + pane_h * 0.42f) * sy, "READY", 0xFF40FF40u, sx, sy, (pane_w - 12.0f) * sx);
             snprintf(buf, sizeof buf, "%s", s_mp_player_name[p][0] ? s_mp_player_name[p] : "(no name)");
-            mp_simul_small_centered(cx * sx, (pyr + pane_h * 0.42f + 14.0f) * sy, buf, 0xFFFFFFFFu, sx, sy);
+            mp_simul_small_centered_fit(cx * sx, (pyr + pane_h * 0.42f + 14.0f) * sy, buf, 0xFFFFFFFFu, sx, sy, (pane_w - 10.0f) * sx);
             /* [#16] Nudged up ~10px so the profile-management hint clears the pane
              * bottom edge / footer band. */
-            mp_simul_small_centered(cx * sx, (pyr + pane_h - 26.0f) * sy, "A = CHANGE   B = LOBBY",
-                                    0xFFB0B0B0u, sx, sy);
+            mp_simul_small_centered_fit(cx * sx, (pyr + pane_h - 26.0f) * sy, "A = CHANGE   B = LOBBY",
+                                    0xFFB0B0B0u, sx, sy, (pane_w - 8.0f) * sx);
             continue;
         }
 
@@ -10859,21 +10978,21 @@ static void frontend_mp_setup_render(float sx, float sy) {
             fe_draw_small_text((ax + 4.0f) * sx, (fy + (16.0f - SMALLFONT_TTF_CAP) * 0.5f) * sy,
                                buf, 0xFFFFFFFFu, sx, sy);
             if (isk)
-                mp_simul_small_centered(cx * sx, (fy + 24.0f) * sy,
-                                        "TYPE NAME - ENTER=DONE  ESC=BACK", 0xFFFFE060u, sx, sy);
+                mp_simul_small_centered_fit(cx * sx, (fy + 24.0f) * sy,
+                                        "TYPE NAME - ENTER=DONE  ESC=BACK", 0xFFFFE060u, sx, sy, (pane_w - 8.0f) * sx);
             else {
                 mp_setup_render_kbd(p, ax, fy + 19.0f, aw, MP_KBD_BLOCK_H, pcol, sx, sy);
                 /* [#15c] Pad hints below the on-screen keyboard (inside the pane). */
-                mp_simul_small_centered(cx * sx, (fy + 19.0f + MP_KBD_BLOCK_H + 3.0f) * sy,
-                                        "X = DELETE   START = DONE", 0xFFB0B0B0u, sx, sy);
+                mp_simul_small_centered_fit(cx * sx, (fy + 19.0f + MP_KBD_BLOCK_H + 3.0f) * sy,
+                                        "X = DELETE   START = DONE", 0xFFB0B0B0u, sx, sy, (pane_w - 8.0f) * sx);
             }
             continue;
         }
 
         if (sub == 2) {                 /* COLOUR picker (compact 16x16) */
             mp_setup_render_colorgrid(p, ax, ay + 2.0f, aw, MP_KBD_BLOCK_H, sx, sy);
-            mp_simul_small_centered(cx * sx, (ay + 2.0f + MP_KBD_BLOCK_H + 3.0f) * sy,
-                                    "A=OK  B=BACK", 0xFFFFE060u, sx, sy);
+            mp_simul_small_centered_fit(cx * sx, (ay + 2.0f + MP_KBD_BLOCK_H + 3.0f) * sy,
+                                    "A=OK  B=BACK", 0xFFFFE060u, sx, sy, (pane_w - 8.0f) * sx);
             continue;
         }
 
