@@ -5842,6 +5842,24 @@ static inline int32_t v2v_scale_pct(int32_t x, int32_t pct)
     return (int32_t)(((int64_t)x * pct) / 100);
 }
 
+/* [MP GAME MODES: TIME TRIAL 2026-06-22] In time trial every player races the
+ * clock and PASSES THROUGH the others (ghosts). True only for human-vs-human
+ * pairs, so car-vs-traffic and car-vs-wall still resolve normally and each
+ * viewport interacts with traffic on its own. Applied to BOTH V2V paths (the
+ * impulse resolver and the anti-tunnel depenetration). Knob
+ * TD5RE_TT_NO_COLLISION=0 restores solid player-vs-player contact. */
+static int tt_pair_passthrough(int slot_a, int slot_b)
+{
+    static int knob = -1;
+    if (knob < 0) {
+        const char *e = getenv("TD5RE_TT_NO_COLLISION");
+        knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    if (!knob) return 0;
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_TIME_TRIAL) return 0;
+    return v2v_slot_is_human(slot_a) && v2v_slot_is_human(slot_b);
+}
+
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
                                      int32_t heading_target, int32_t impactForce)
@@ -7035,6 +7053,9 @@ void td5_physics_resolve_vehicle_contacts(void)
                     int32_t ddz = az - bz; if (ddz < 0) ddz = -ddz;
                     if (ddx > r || ddz > r) continue;
 
+                    /* [TIME TRIAL] don't separate two players — they ghost. */
+                    if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index)) continue;
+
                     int32_t pen = v2v_depenetrate_pair(a, b);
                     if (pen > 0) {
                         moved[i] = moved[j] = 1;
@@ -7136,6 +7157,9 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
 {
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
+
+    /* [TIME TRIAL] human-vs-human pairs pass through each other (ghost). */
+    if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index)) return;
 
     int a_scripted = (a->vehicle_mode != 0) ||
                      (a->wheel_contact_bitmask >= 0x0F);

@@ -1632,6 +1632,25 @@ int td5_game_init_race_session(void) {
         }
     }
 
+#ifndef TD5RE_RELEASE
+    /* [MP GAME MODES test hook 2026-06-22] Force the MP game mode for solo
+     * drive-testing without the local split-screen vote screen:
+     *   TD5RE_MP_MODE_FORCE=1 time trial, 2 cup, 3 cop chase (0 = race).
+     * Dev build only. Note: human-vs-human effects (e.g. TT pass-through) need
+     * >=2 human slots; in a solo race only slot 0 is human, so the force lets
+     * you exercise the code path + logs even when the visible effect needs MP. */
+    {
+        const char *mf = getenv("TD5RE_MP_MODE_FORCE");
+        if (mf && mf[0]) {
+            int m = atoi(mf);
+            if (m >= 0 && m < TD5_MP_MODE_COUNT) {
+                g_td5.mp_mode_config.mode = m;
+                TD5_LOG_I(LOG_TAG, "InitRace: MP mode FORCED to %d (TD5RE_MP_MODE_FORCE)", m);
+            }
+        }
+    }
+#endif
+
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
      * @ 0x004B0FA8). This is the runtime gate read by both the HUD timer
      * widget (RenderRaceHudOverlays @ 0x004391CC) and the per-actor timer
