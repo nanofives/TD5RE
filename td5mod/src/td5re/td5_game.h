@@ -235,6 +235,10 @@ int  td5_game_mp_cup_points(int slot);
 int  td5_game_mp_cup_team(int slot);
 int  td5_game_mp_cup_team_mode(void);
 int  td5_game_mp_cup_track(void);
+
+/* [MP GAME MODES: TRAFFIC FAIRNESS 2026-06-22] 1 when local split-screen MP
+ * should keep shared traffic deterministic (no permanent player-caused wrecks). */
+int  td5_game_mp_traffic_fair(void);
 /* 1 while the in-race pause menu is open (audio layer reads this to suspend the
  * cop-chase siren refresh during pause so it re-arms on resume). */
 int  td5_game_is_pause_menu_active(void);

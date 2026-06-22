@@ -8148,6 +8148,23 @@ void td5_game_mp_cup_advance(void) {
 
 void td5_game_mp_cup_end(void) { s_mpcup_active = 0; }
 
+/* [MP GAME MODES: TRAFFIC FAIRNESS 2026-06-22] In local split-screen MP the
+ * traffic stream is shared across viewports. To keep it fair ("everyone sees the
+ * same cars at the same time"), a player's collision must NOT permanently wreck
+ * background traffic — a totaled car would become a static obstacle for every
+ * viewport even though only one player caused it. With this on, plain traffic
+ * takes the hit (free-slide) and then recovers to its deterministic lane; cops
+ * and pursued racers are unaffected. Knob TD5RE_MP_TRAFFIC_FAIR=0 disables.
+ * Off in single-player (byte-faithful). */
+int td5_game_mp_traffic_fair(void) {
+    static int knob = -1;
+    if (knob < 0) {
+        const char *e = getenv("TD5RE_MP_TRAFFIC_FAIR");
+        knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return knob && g_td5.split_screen_mode > 0 && g_td5.num_human_players >= 2;
+}
+
 /* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot for cop-chase /
  * wanted mode. Single-player wanted (game_type 8) keeps the player (slot 0) as
  * the cop ramming AI suspects; MP cop chase uses the host-configured cop_slot

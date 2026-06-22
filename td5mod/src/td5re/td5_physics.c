@@ -6376,10 +6376,22 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * player are never immobilised or smoked (handled downstream). Because we
          * are already inside the (NPC-lowered) heavy gate, no separate magnitude
          * test is needed — a fatal hit on traffic/cops always totals them. */
-        if (a_is_npc || td5_ai_actor_is_pursued(A->slot_index))
-            td5_ai_mark_actor_broken_down(A->slot_index);
-        if (b_is_npc || td5_ai_actor_is_pursued(B->slot_index))
-            td5_ai_mark_actor_broken_down(B->slot_index);
+        /* [MP TRAFFIC FAIRNESS 2026-06-22] In fair split-screen MP, don't
+         * PERMANENTLY total plain background traffic (keep the shared stream
+         * deterministic so every viewport sees the same cars — it free-slides
+         * then recovers). Cops and pursued racers still wreck normally. */
+        {
+            int fair = td5_game_mp_traffic_fair();
+            int sa = (int)A->slot_index, sb = (int)B->slot_index;
+            int plain_a = (sa >= g_traffic_slot_base) &&
+                          !td5_ai_actor_is_pursued(sa) && !td5_ai_cop_is_chasing(sa);
+            int plain_b = (sb >= g_traffic_slot_base) &&
+                          !td5_ai_actor_is_pursued(sb) && !td5_ai_cop_is_chasing(sb);
+            if ((a_is_npc || td5_ai_actor_is_pursued(sa)) && !(fair && plain_a))
+                td5_ai_mark_actor_broken_down(sa);
+            if ((b_is_npc || td5_ai_actor_is_pursued(sb)) && !(fair && plain_b))
+                td5_ai_mark_actor_broken_down(sb);
+        }
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d",
                   A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain);
     }
