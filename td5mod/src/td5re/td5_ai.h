@@ -135,6 +135,9 @@ int  td5_ai_is_encounter_active(int slot);
  * td5_ai.c. */
 /* 1 when `slot` is a cop currently chasing (or pulling over) a racer. */
 int  td5_ai_cop_is_chasing(int slot);
+/* [MP COP CHASE 2026-06-22] Arm a racer slot as an AI-driven cop (is_ai=0 =
+ * human cop, no-op). The chase driver takes the slot over each tick. */
+void td5_ai_cop_chase_setup(int cop_slot, int is_ai);
 /* Steady strobe intensity (0..0x1000) for the cop-light glow; 0 if not chasing. */
 int  td5_ai_cop_glow_intensity(int slot);
 /* 1 when `slot` (racer or traffic/cop) is in the broken-down/parked state. */

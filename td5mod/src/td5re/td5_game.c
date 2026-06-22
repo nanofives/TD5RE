@@ -1658,8 +1658,14 @@ int td5_game_init_race_session(void) {
      * split-screen only for now — the net path above leaves wanted mode off. */
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
         g_td5.wanted_mode_enabled = 1;
-        TD5_LOG_I(LOG_TAG, "InitRace: MP COP CHASE active — cop slot=%d",
-                  g_td5.mp_mode_config.cop_slot);
+        /* Optional AI-driven cop: mark the cop slot so the AI chase driver takes
+         * it over (faster, road-safe, targets the nearest suspect). */
+        td5_ai_cop_chase_setup(td5_game_cop_chase_cop_slot(),
+                               g_td5.mp_mode_config.cop_is_ai);
+        TD5_LOG_I(LOG_TAG, "InitRace: MP COP CHASE active — cop slot=%d ai=%d win=%d head_start=%d",
+                  g_td5.mp_mode_config.cop_slot, g_td5.mp_mode_config.cop_is_ai,
+                  g_td5.mp_mode_config.cop_win_condition,
+                  g_td5.mp_mode_config.suspect_head_start);
     }
 
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
@@ -2871,6 +2877,14 @@ int td5_game_init_race_session(void) {
                  * or the value captured when this replay was recorded (so playback
                  * spawns on the recorded grid). */
                 int raw = start_span + span_offsets[effective_slot] + effective_start_span_offset;
+                /* [MP COP CHASE 2026-06-22] The cop spawns BEHIND the suspects by
+                 * suspect_head_start spans, so the suspects (the other players)
+                 * start together a little further ahead. */
+                if (g_td5.wanted_mode_enabled &&
+                    g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
+                    slot == td5_game_cop_chase_cop_slot()) {
+                    raw -= g_td5.mp_mode_config.suspect_head_start;
+                }
                 span_index = (int)(int16_t)(raw & 0xFFFF);
             } else {
                 span_index = 1;
@@ -6253,6 +6267,44 @@ void td5_game_release_race_resources(void) {
  *   Phase 2: Cooldown accumulator; when > TD5_RACE_END_DWELL, build results
  * ======================================================================== */
 
+/* [MP COP CHASE win conditions 2026-06-22] Count active (non-disabled) suspects
+ * and how many are busted (damage bar depleted). */
+static int mp_cop_chase_count_suspects(int *busted_out) {
+    int cop = td5_game_cop_chase_cop_slot();
+    int active = 0, busted = 0, s;
+    if (cop < 0) { if (busted_out) *busted_out = 0; return 0; }
+    for (s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
+        if (!td5_game_cop_chase_is_suspect(s)) continue;
+        if (s_slot_state[s].state == 3) continue;        /* disabled slot */
+        active++;
+        if (g_wanted_damage_state[s] <= 0) busted++;      /* arrested */
+    }
+    if (busted_out) *busted_out = busted;
+    return active;
+}
+
+/* Returns 1 when the cop-chase win condition ends the race early. BUST_ALL: cop
+ * wins once every suspect is arrested. SUDDEN_DEATH: cop wins on the first
+ * arrest. MOST_BUSTS: no early end — the race runs to its natural finish and the
+ * arrest tally decides. */
+static int mp_cop_chase_resolved(void) {
+    int active, busted = 0, wc;
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE) return 0;
+    if (!g_td5.wanted_mode_enabled) return 0;
+    active = mp_cop_chase_count_suspects(&busted);
+    if (active <= 0) return 0;
+    wc = g_td5.mp_mode_config.cop_win_condition;
+    if (wc == TD5_COP_WIN_SUDDEN_DEATH && busted >= 1) {
+        TD5_LOG_I(LOG_TAG, "Cop chase: SUDDEN DEATH — first arrest, cop wins");
+        return 1;
+    }
+    if (wc == TD5_COP_WIN_BUST_ALL && busted >= active) {
+        TD5_LOG_I(LOG_TAG, "Cop chase: BUST ALL — all %d suspects arrested, cop wins", active);
+        return 1;
+    }
+    return 0;
+}
+
 static int check_race_completion(uint32_t sim_delta) {
     int i;
 
@@ -6266,6 +6318,16 @@ static int check_race_completion(uint32_t sim_delta) {
             build_results_table();
             return 1;
         }
+        return 0;
+    }
+
+    /* [MP COP CHASE] Win condition can end the race early (bust-all / sudden
+     * death). Mirrors the all-finished latch: start the post-finish dwell, then
+     * phase 2 builds the results next tick. */
+    if (mp_cop_chase_resolved()) {
+        s_post_finish_cooldown = 1;
+        s_race_end_timer_start = td5_plat_time_ms();
+        TD5_LOG_I(LOG_TAG, "Cop chase: win condition met -> race end");
         return 0;
     }
 

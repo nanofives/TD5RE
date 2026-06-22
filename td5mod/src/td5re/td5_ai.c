@@ -10766,11 +10766,51 @@ void td5_ai_pre_tick(void) {
  *   racer slots: ai_update_single_racer(slot) [CONFIRMED @ 0x436E1D]
  *   traffic slots: ai_update_single_traffic(slot)
  * ======================================================================== */
+/* [MP COP CHASE 2026-06-22] Arm a RACER slot as an AI-driven cop so the chase
+ * driver (cop_drive) takes it over in td5_ai_update_actor and phys_top_speed
+ * uncaps it (td5_ai_cop_is_chasing). is_ai==0 leaves the slot human-driven. */
+void td5_ai_cop_chase_setup(int cop_slot, int is_ai) {
+    if (cop_slot < 0 || cop_slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (!is_ai) return;
+    g_cop_is_cop[cop_slot] = 1;
+    g_cop_phase[cop_slot]  = COP_CHASING;
+    g_cop_target[cop_slot] = -1;
+    TD5_LOG_I(LOG_TAG, "cop_chase_setup: slot=%d AI cop armed", cop_slot);
+}
+
+/* Pick the nearest still-active suspect (by track span) as the AI cop's chase
+ * target — gives cop_drive its catch-up speed reference. */
+static void mp_cop_pick_target(int cop_slot) {
+    char *cop = actor_ptr(cop_slot);
+    int cop_span, best = -1, best_d = 0x7FFFFFFF, s;
+    if (!cop) return;
+    cop_span = (int)ACTOR_I16(cop, ACTOR_SPAN_RAW);
+    for (s = 0; s < g_traffic_slot_base && s < TD5_MAX_RACER_SLOTS; s++) {
+        char *a; int d;
+        if (!td5_game_cop_chase_is_suspect(s)) continue;
+        if (g_wanted_damage_state[s] <= 0) continue;   /* already arrested */
+        a = actor_ptr(s);
+        if (!a) continue;
+        d = (int)ACTOR_I16(a, ACTOR_SPAN_RAW) - cop_span;
+        if (d < 0) d = -d;
+        if (d < best_d) { best_d = d; best = s; }
+    }
+    g_cop_target[cop_slot] = best;
+}
+
 void td5_ai_update_actor(int slot) {
     if (slot < 0 || slot >= g_active_actor_count)
         return;
 
     if (slot < g_traffic_slot_base) {
+        /* [MP COP CHASE] An AI-driven cop racer slot chases the suspects via the
+         * road-safe cop driver (cop_drive) instead of the normal racer AI. */
+        if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&
+            g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) {
+            mp_cop_pick_target(slot);
+            cop_drive(slot);
+            return;
+        }
         ai_update_single_racer(slot);
     } else {
         ai_update_single_traffic(slot);
