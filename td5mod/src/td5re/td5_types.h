@@ -382,8 +382,75 @@ typedef enum TD5_ScreenIndex {
      * of the simultaneous car-select flow. Each player picks which split-screen
      * pane they occupy; see Screen_MpPosition. */
     TD5_SCREEN_MP_POSITION        = 34,
-    TD5_SCREEN_COUNT               = 35
+    /* [MP GAME MODES 2026-06-22] new multiplayer mode-select pipeline, inserted
+     * after the viewport picker (34) and before car selection (20). The host
+     * votes/locks a mode (35), everyone configures its options (36); the cup
+     * winners/podium (37) shows after the final race of a cup series. */
+    TD5_SCREEN_MP_MODE_VOTE       = 35,  /* Screen_MpModeVote   — pick the game mode */
+    TD5_SCREEN_MP_MODE_CONFIG     = 36,  /* Screen_MpModeConfig — per-mode options */
+    TD5_SCREEN_CUP_WINNERS        = 37,  /* Screen_CupWinners   — final cup standings */
+    TD5_SCREEN_COUNT               = 38
 } TD5_ScreenIndex;
+
+/* ========================================================================
+ * Multiplayer game modes  [MP GAME MODES 2026-06-22]
+ * ======================================================================== */
+
+#define TD5_CUP_MAX_RACES 12   /* max tracks in a cup series (matches original
+                                * cup schedule length; sentinel-terminated) */
+
+/** Selectable multiplayer game mode (the new mode-vote screen). Maps onto the
+ *  existing game_type / ConfigureGameTypeFlags flags at race init rather than
+ *  overloading the 0..9 game-type enum. */
+typedef enum TD5_MpGameMode {
+    TD5_MP_MODE_RACE        = 0,  /* regular race (existing behaviour)            */
+    TD5_MP_MODE_TIME_TRIAL  = 1,  /* live simultaneous, no player-vs-player crash */
+    TD5_MP_MODE_CUP         = 2,  /* best-of-X series, points, optional teams     */
+    TD5_MP_MODE_COP_CHASE   = 3,  /* one designated cop chases the suspects       */
+    TD5_MP_MODE_COUNT       = 4
+} TD5_MpGameMode;
+
+/** Cop-chase win/lose rule (mode-config screen). */
+typedef enum TD5_CopWinCondition {
+    TD5_COP_WIN_BUST_ALL     = 0, /* cop wins iff every suspect busted before finish */
+    TD5_COP_WIN_MOST_BUSTS   = 1, /* race to finish/timer; most busts decides        */
+    TD5_COP_WIN_SUDDEN_DEATH = 2  /* cop wins on first bust; else suspects win        */
+} TD5_CopWinCondition;
+
+/** How the cop slot is chosen. */
+typedef enum TD5_CopPickMode {
+    TD5_COP_PICK_HOST_ASSIGN = 0,
+    TD5_COP_PICK_VOLUNTEER   = 1,
+    TD5_COP_PICK_RANDOM      = 2
+} TD5_CopPickMode;
+
+/** Per-session MP mode configuration. Edited on the mode-config screen by the
+ *  host and replicated host->clients in the DXPSTART payload so every peer boots
+ *  the same mode + options (lockstep has no state correction — any per-machine
+ *  difference here is a guaranteed desync). All fields int32_t for a stable wire
+ *  layout. */
+typedef struct TD5_MpModeConfig {
+    int32_t mode;                 /* TD5_MpGameMode */
+
+    /* --- Time trial --- */
+    int32_t tt_checkpoint_target; /* checkpoints/laps to win (0 = full race)        */
+
+    /* --- Cup --- */
+    int32_t cup_race_count;                       /* races in the series (best of X) */
+    int32_t cup_track_indices[TD5_CUP_MAX_RACES]; /* host-picked track list          */
+    int32_t cup_team_mode;                        /* 0 = free-for-all, 1 = teams     */
+    int32_t team_of_slot[TD5_NET_MAX_PLAYERS];    /* team id per slot (team mode)     */
+    int32_t cup_points_scheme;                    /* 0 = classic {15,12,10,5,4,3}     */
+
+    /* --- Cop chase --- */
+    int32_t cop_slot;             /* which slot is the cop                          */
+    int32_t cop_pick_mode;        /* TD5_CopPickMode                                */
+    int32_t cop_is_ai;            /* 1 = AI drives the cop car                      */
+    int32_t cop_ai_difficulty;    /* 0..2 speed/aggression tier for the AI cop      */
+    int32_t cop_win_condition;    /* TD5_CopWinCondition                            */
+    int32_t suspect_head_start;   /* spans the suspects spawn ahead of the cop      */
+    int32_t suspect_debuff_pct;   /* top-speed % applied to suspects (e.g. 70)      */
+} TD5_MpModeConfig;
 
 /* ========================================================================
  * Vector / Matrix Types

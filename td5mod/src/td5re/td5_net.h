@@ -120,6 +120,12 @@ typedef struct TD5_NetRaceConfig {
     int32_t  td6_color[6];        /* per-slot TD6 body RGB (0xFFFFFF = unpainted) */
     int32_t  car_index[6];        /* per net slot (TD5_NET_MAX_PLAYERS) */
     int32_t  paint_index[6];
+    /* [MP GAME MODES 2026-06-22] Replicated game mode + per-mode options chosen
+     * on the host's mode-vote/mode-config screens. All-int32 layout; copied
+     * wholesale with the rest of the config (the DXPSTART payload + race_config
+     * memcpy already use sizeof(TD5_NetRaceConfig), so growing the struct
+     * replicates these fields with no extra wire code). */
+    TD5_MpModeConfig mode_config;
 } TD5_NetRaceConfig;
 
 void td5_net_set_local_car(int car_index, int paint_index, int td6_color);

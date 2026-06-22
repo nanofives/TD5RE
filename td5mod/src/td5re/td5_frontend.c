@@ -114,6 +114,9 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [32] */ Screen_DirectConnect,      /* S10 net-play UX */
     /* [33] */ Screen_NetNickname,        /* S10 net-play UX */
     /* [34] */ Screen_MpPosition,         /* MP split-screen position picker (#8) */
+    /* [35] */ Screen_MpModeVote,         /* MP game-mode vote (2026-06-22)       */
+    /* [36] */ Screen_MpModeConfig,       /* MP per-mode options (2026-06-22)     */
+    /* [37] */ Screen_CupWinners,         /* cup final standings/podium (2026-06-22) */
 };
 
 /* ========================================================================

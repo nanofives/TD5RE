@@ -1597,10 +1597,16 @@ int td5_game_init_race_session(void) {
                 g_td5.traffic_volume = TD5_TRAFFIC_VOLUME_COUNT - 1;
             g_td5.traffic_enabled = (g_td5.traffic_volume > 0) ? 1 : 0;
             g_td5.special_encounter_enabled = ncfg_l.cops ? 1 : 0;
+            /* [MP GAME MODES 2026-06-22] Adopt the host's replicated game mode +
+             * per-mode options so every peer runs the identical mode. Behaviour
+             * gating off this lands per work-package (TT/cup/cop-chase); here we
+             * only propagate the replicated choice. */
+            g_td5.mp_mode_config = ncfg_l.mode_config;
             TD5_LOG_I(LOG_TAG,
                       "InitRace: network session — real race, traffic_vol=%d cops=%d "
-                      "(replicated from host)",
-                      g_td5.traffic_volume, g_td5.special_encounter_enabled);
+                      "mp_mode=%d (replicated from host)",
+                      g_td5.traffic_volume, g_td5.special_encounter_enabled,
+                      g_td5.mp_mode_config.mode);
         } else {
             /* No replicated config yet — keep traffic/cops off (safe default). */
             g_td5.traffic_enabled = 0;

@@ -1973,6 +1973,9 @@ void Screen_NetworkLobby(void) {
                         cfg.paint_index[slot] = p;
                     }
                 }
+                /* [MP GAME MODES 2026-06-22] Replicate the host's chosen game
+                 * mode + per-mode options so every peer boots the same mode. */
+                cfg.mode_config = g_td5.mp_mode_config;
                 frontend_net_send(4, &cfg, (int)sizeof(cfg));
                 TD5_LOG_I(LOG_TAG,
                           "NetworkLobby: DXPSTART config seed=0x%08X track=%d dir=%d",
@@ -2055,6 +2058,58 @@ void Screen_SessionLocked(void) {
             g_net_disconnect_mode = 0;
             td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         }
+        break;
+    }
+}
+
+/* ========================================================================
+ * MP GAME MODES (2026-06-22) — mode vote / mode config / cup winners
+ *
+ * SCAFFOLD: these handlers are registered in the screen table but not yet
+ * reached by the live MP flow (the car/position transition wiring lands in a
+ * later step). Bodies are intentionally minimal so the screens compile green
+ * and, if entered prematurely, fall through to a safe screen instead of
+ * softlocking. The interactive vote/config UI + net plumbing replace these.
+ * ======================================================================== */
+
+void Screen_MpModeVote(void) {
+    switch (s_inner_state) {
+    case 0:
+        TD5_LOG_I(LOG_TAG, "Screen_MpModeVote: enter (scaffold, host=%d)",
+                  td5_net_is_host());
+        s_inner_state = 1;
+        break;
+    default:
+        /* Placeholder pass-through until the interactive UI is built. */
+        g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
+        td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+        break;
+    }
+}
+
+void Screen_MpModeConfig(void) {
+    switch (s_inner_state) {
+    case 0:
+        TD5_LOG_I(LOG_TAG, "Screen_MpModeConfig: enter (scaffold, mode=%d)",
+                  g_td5.mp_mode_config.mode);
+        s_inner_state = 1;
+        break;
+    default:
+        /* Placeholder pass-through to car selection until options UI is built. */
+        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        break;
+    }
+}
+
+void Screen_CupWinners(void) {
+    switch (s_inner_state) {
+    case 0:
+        TD5_LOG_I(LOG_TAG, "Screen_CupWinners: enter (scaffold)");
+        s_inner_state = 1;
+        break;
+    default:
+        /* Placeholder: return to the main menu until the podium UI is built. */
+        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         break;
     }
 }
