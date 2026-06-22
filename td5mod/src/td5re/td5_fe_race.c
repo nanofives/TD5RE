@@ -2702,6 +2702,10 @@ static int s_mode_vote[TD5_MAX_HUMAN_PLAYERS];
 #define MV_GAP  66       /* row pitch          */
 #define MP_TITLE_LEFT_X 126.0f
 #define MP_TITLE_TOP_Y  17.0f
+/* Canonical frontend title/accent gold — MUST match the standard screens
+ * (SELECT CAR / PROFILE SELECTION / the global title path), which all use
+ * 0xFFE3D708 at FE_TITLE_LEFT_X, y=17. See FRONTEND_SCREEN_GUIDE.md. */
+#define MP_TITLE_GOLD   0xFFE3D708u
 
 static int      s_mode_back_confirm = 0;   /* 1 = "LEAVE TO LOBBY?" modal up */
 static uint32_t s_mode_host_prev    = 0;   /* host pad/keyboard edge tracker */
@@ -2720,7 +2724,7 @@ static uint32_t mp_slot_color(int slot) {
 /* Shared yes/no confirm modal render (drawn on top in the post-button pass). */
 static void mp_confirm_modal_render(float sx, float sy, const char *prompt) {
     td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xC0000000u, -1, 0, 0, 1, 1);
-    td5_vui_text_centered(320.0f * sx, 208.0f * sy, prompt, 0xFFFFE060u, sx, sy);
+    td5_vui_text_centered(320.0f * sx, 208.0f * sy, prompt, MP_TITLE_GOLD, sx, sy);
     mp_pos_small_centered(320.0f * sx, 244.0f * sy,
                           "A / ENTER = YES        B / ESC = NO", 0xFFFFFFFFu, sx, sy);
 }
@@ -2861,7 +2865,7 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
     /* Standard top-left title (background + button frames are drawn by the
      * shared render; we only overlay content). */
     fe_race_draw_screen_title("SELECT GAME MODE", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
-                              0xFFFFE060u, sx, sy);
+                              MP_TITLE_GOLD, sx, sy);
 
     /* Host indicator: P1 colour swatch + short label. */
     td5_vui_quad((float)MV_BX * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
@@ -3043,7 +3047,7 @@ void frontend_mp_mode_config_render(float sx, float sy) {
     char vb[40];
 
     fe_race_draw_screen_title("GAME MODE OPTIONS", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
-                              0xFFFFE060u, sx, sy);
+                              MP_TITLE_GOLD, sx, sy);
     td5_vui_text(((float)CFG_BX) * sx, 70.0f * sy, name, 0xFFFFFFFFu, sx, sy);
 
     count = mp_cfg_build(opts);
@@ -3059,10 +3063,10 @@ void frontend_mp_mode_config_render(float sx, float sy) {
         else
             snprintf(vb, sizeof vb, "%d", v);
         td5_vui_text_centered(valc * sx, ty * sy, vb,
-                              sel ? 0xFFFFE060u : 0xFFC0C8D0u, sx, sy);
+                              sel ? MP_TITLE_GOLD : 0xFFC0C8D0u, sx, sy);
         if (sel) {   /* ◄ ► around the focused value */
-            td5_vui_arrow((valc - 34.0f) * sx, (ty - 1.0f) * sy, 11.0f * sx, 14.0f * sy, 0, 0xFFFFE060u);
-            td5_vui_arrow((valc + 26.0f) * sx, (ty - 1.0f) * sy, 11.0f * sx, 14.0f * sy, 1, 0xFFFFE060u);
+            td5_vui_arrow((valc - 34.0f) * sx, (ty - 1.0f) * sy, 11.0f * sx, 14.0f * sy, 0, MP_TITLE_GOLD);
+            td5_vui_arrow((valc + 26.0f) * sx, (ty - 1.0f) * sy, 11.0f * sx, 14.0f * sy, 1, MP_TITLE_GOLD);
         }
     }
     if (count == 0)
@@ -3103,7 +3107,7 @@ void frontend_cup_winners_render(float sx, float sy) {
     float y;
 
     fe_race_draw_screen_title("CUP WINNERS", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
-                              0xFFFFE060u, sx, sy);
+                              MP_TITLE_GOLD, sx, sy);
     snprintf(buf, sizeof buf, "FINAL STANDINGS  (%d RACES)", td5_game_mp_cup_race_count());
     td5_vui_text_centered(320.0f * sx, 74.0f * sy, buf, 0xFFB0B8C0u, sx, sy);
 
@@ -3136,7 +3140,7 @@ void frontend_cup_winners_render(float sx, float sy) {
             if (tm >= 0 && tm < 4) tot[tm] += td5_game_mp_cup_points(order[i]);
         }
         y += 8.0f;
-        td5_vui_text_centered(320.0f * sx, y * sy, "TEAM TOTALS", 0xFFFFE060u, sx, sy);
+        td5_vui_text_centered(320.0f * sx, y * sy, "TEAM TOTALS", MP_TITLE_GOLD, sx, sy);
         y += 26.0f;
         for (k = 0; k < 4; k++) {
             if (tot[k] == 0) continue;
