@@ -4211,6 +4211,21 @@ static void frontend_update_difficulty_button_visibility(int diff_btn_idx) {
     if (hide && s_selected_button == diff_btn_idx) s_selected_button = 0;
 }
 
+/* [COP-CHASE 2026-06-21] HIDE the POLICE (traffic-cop "encounter") row in Cop
+ * Chase game mode: the player IS the pursuer there, and the separate traffic-police
+ * system is force-disabled (ConfigureGameTypeFlags case 8 + the InitRaceSchedule
+ * guard). Mirrors the Laps/Difficulty row helpers; gated on g_td5.wanted_mode_enabled
+ * which ConfigureGameTypeFlags has already set when the track selector opens. */
+static void frontend_update_police_button_visibility(int police_btn_idx) {
+    if (police_btn_idx < 0 || police_btn_idx >= s_button_count) return;
+    int hide = g_td5.wanted_mode_enabled ? 1 : 0;
+    s_buttons[police_btn_idx].hidden   = hide;
+    s_buttons[police_btn_idx].disabled = hide;
+    TD5_LOG_I(LOG_TAG, "Police row: wanted_mode=%d -> %s",
+              g_td5.wanted_mode_enabled, hide ? "hidden (cop chase)" : "SHOWN");
+    if (hide && s_selected_button == police_btn_idx) s_selected_button = 0;
+}
+
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label) {
     if (dir_btn_idx < 0 || dir_btn_idx >= s_button_count) return;
     int has_reverse = (s_selected_track < 0)
@@ -4289,6 +4304,8 @@ void Screen_TrackSelection(void) {
          * Quick Race flow). frontend_update_difficulty_button_visibility folds in
          * the old flow_context==2 hide; refreshed in case 4 when opponents change. */
         frontend_update_difficulty_button_visibility(6);
+        /* [COP-CHASE 2026-06-21] Hide the POLICE row in Cop Chase / wanted mode. */
+        frontend_update_police_button_visibility(5);
         s_race_difficulty = g_td5.difficulty_tier;
         if (s_race_difficulty < 0) s_race_difficulty = 0;
         if (s_race_difficulty > 2) s_race_difficulty = 2;
@@ -4478,7 +4495,7 @@ void Screen_TrackSelection(void) {
                     s_game_option_traffic =
                         ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
                          + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
-                } else if (selected_button == 5) {     /* police on/off */
+                } else if (selected_button == 5 && !s_buttons[5].hidden) {  /* police on/off */
                     s_game_option_cops = (s_game_option_cops + delta) & 1;
                 } else if (selected_button == 6 && !s_buttons[6].hidden) {
                     /* Per-race AI difficulty 0..2, wraps both ways (matches the

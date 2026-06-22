@@ -2894,6 +2894,16 @@ void frontend_init_race_schedule(void) {
         g_td5.special_encounter_enabled = s_game_option_cops;
     }
 
+    /* [COP-CHASE 2026-06-21] Cop Chase / wanted mode never spawns the separate
+     * traffic-police "encounter" cop — the player is already the pursuer. Force it
+     * off at race launch regardless of any stale POLICE toggle (the row is hidden in
+     * this mode; ConfigureGameTypeFlags case 8 already zeroes it — this is the
+     * belt-and-suspenders chokepoint so no path can re-enable it). */
+    if (g_td5.wanted_mode_enabled && g_td5.special_encounter_enabled) {
+        g_td5.special_encounter_enabled = 0;
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: cop chase -> special-encounter (traffic police) forced OFF");
+    }
+
     TD5_LOG_I(LOG_TAG,
               "InitRaceSchedule: split=%d grid=%dx%d humans=%d opp=%d eff=%d spectate=%d panes=%d 2p=%d layout_sel=%d",
               g_td5.split_screen_mode, g_td5.split_grid_cols, g_td5.split_grid_rows,
@@ -7113,7 +7123,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
             if (tvi > TD5_TRAFFIC_VOLUME_COUNT - 1) tvi = TD5_TRAFFIC_VOLUME_COUNT - 1;
             fe_draw_text(vx, (float)(s_buttons[4].y + 6) * sy, traffic_vol[tvi], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         }
-        if (s_buttons[5].active)
+        if (s_buttons[5].active && !s_buttons[5].hidden)  /* police on/off (hidden in cop chase) */
             fe_draw_text(vx, (float)(s_buttons[5].y + 6) * sy, on_off[s_game_option_cops & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         if (s_buttons[6].active && !s_buttons[6].hidden)  /* per-race AI difficulty (hidden in Quick Race) */
             fe_draw_text(vx, (float)(s_buttons[6].y + 6) * sy, difficulty[s_race_difficulty % 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);

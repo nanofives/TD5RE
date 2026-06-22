@@ -3831,13 +3831,19 @@ void td5_render_actors_for_view(int view_index)
              *   slot == g_wantedTargetSlotIndex (=0)
              * The render call lives in td5_render.c:render_tracked_actor_marker
              * (port of 0x0043cde0). Visuals stay inert in non-wanted modes. */
+            /* [COP-CHASE 2026-06-21] The red/blue strobe (cop lights) is TOGGLED
+             * on/off with the HORN key. Gate it directly on the siren-toggle state
+             * (s_siren_user_enabled) so a horn press flips the lights immediately at
+             * full intensity — the marker's own phase animation supplies the flash.
+             * Horn toggles the lights + siren together (as in the original); the
+             * toggle persists across pause/resume. */
+            extern int td5_sound_siren_is_enabled(void);
             if (g_td5.wanted_mode_enabled &&
-                td5_game_get_wanted_target_tracker() > 0 &&
-                slot == td5_game_get_wanted_target_slot()) {
-                /* Pass the SAME body transform the mesh used (view_rot +
-                 * render_pos) so the strobe is welded to the car body. */
-                render_tracked_actor_marker(actor, &view_rot, &render_pos,
-                                            td5_game_get_wanted_target_tracker());
+                slot == td5_game_get_wanted_target_slot() &&
+                td5_sound_siren_is_enabled()) {
+                /* Pass the SAME body transform the mesh used so the strobe stays
+                 * welded to the car body. */
+                render_tracked_actor_marker(actor, &view_rot, &render_pos, 0x1000);
             }
 
             /* [POLICE rewrite 2026-06-19] A chasing police cop wears the same
