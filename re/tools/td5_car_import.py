@@ -602,9 +602,13 @@ def cmd_import(args):
         for i in range(4):
             _make_carpic(skin_img, os.path.join(car_out, f"carpic{i}.png"), name=args.name)
 
-    # Physics: copy the donor's carparam.json (assetsrc re-encodes -> carparam.dat).
+    # Physics: an explicit --carparam-json (e.g. edited in the Car Studio) wins;
+    # otherwise copy the donor's carparam.json (assetsrc re-encodes -> carparam.dat).
     donor_param = os.path.join(donor_dir, "carparam.json")
-    if os.path.isfile(donor_param):
+    if args.carparam_json and os.path.isfile(args.carparam_json):
+        shutil.copyfile(args.carparam_json, os.path.join(car_out, "carparam.json"))
+        print(f"  carparam: using supplied {os.path.basename(args.carparam_json)}")
+    elif os.path.isfile(donor_param):
         shutil.copyfile(donor_param, os.path.join(car_out, "carparam.json"))
     elif os.path.isfile(os.path.join(donor_dir, "carparam.dat")):
         shutil.copyfile(os.path.join(donor_dir, "carparam.dat"),
@@ -674,6 +678,114 @@ def cmd_verify(args):
     return 0 if ok else 1
 
 
+# ===========================================================================
+# new command (scaffold a custom car by cloning a donor)
+# ===========================================================================
+def cmd_new(args):
+    code = args.code if args.code.startswith("custom_") else "custom_" + args.code
+    if "." in code:
+        print("ERROR: --code must not contain '.'", file=sys.stderr)
+        return 2
+    donor_dir = args.donor if os.path.isdir(args.donor) else os.path.join(args.out_dir, args.donor)
+    if not os.path.isdir(donor_dir):
+        print(f"ERROR: donor dir not found: {donor_dir}", file=sys.stderr)
+        return 2
+    car_out = os.path.join(args.out_dir, code)
+    os.makedirs(car_out, exist_ok=True)
+    # Clone the donor's runtime files so the new car is immediately drivable; the
+    # author then swaps mesh/skin/stats via the Studio or `import`.
+    for f in os.listdir(donor_dir):
+        if f.startswith(".") or f.endswith((".dat", ".log")):
+            continue
+        src = os.path.join(donor_dir, f)
+        if os.path.isfile(src):
+            shutil.copyfile(src, os.path.join(car_out, f))
+    name = args.name or code.replace("custom_", "").replace("_", " ").upper()
+    write_config_nfo(os.path.join(car_out, "config.nfo"), name, name)
+    print(f"scaffolded {car_out} (clone of {os.path.basename(donor_dir)}) as '{name}'")
+    print("  edit it in the Car Studio, or: td5_car_import.py import --model ... "
+          f"--code {code}")
+    return 0
+
+
+# ===========================================================================
+# doctor command (validate a car folder)
+# ===========================================================================
+def cmd_doctor(args):
+    d = args.car_dir
+    warns, errs = [], []
+
+    def need(f):
+        if not os.path.isfile(os.path.join(d, f)):
+            errs.append(f"missing {f}")
+
+    hb = os.path.join(d, "himodel.bin")
+    if not os.path.isfile(hb):
+        hb = os.path.join(d, "himodel.dat")
+    if not os.path.isfile(hb):
+        errs.append("missing himodel.bin/.dat")
+        mesh = None
+    else:
+        try:
+            data = open(hb, "rb").read()
+            rt = struct.unpack_from("<h", data, 0)[0]
+            m = mesh_tool.decode(data, "himodel")
+            mesh = m.get("mesh")
+            if mesh is None:
+                print(f"  note: render_type 0x{rt:x} (TD6 indexed) — not validated further")
+        except Exception as e:
+            errs.append(f"himodel parse failed: {e}")
+            mesh = None
+
+    for f in ("carskin0.png", "carhub0.png", "config.nfo"):
+        need(f)
+    if not (os.path.isfile(os.path.join(d, "carparam.json")) or
+            os.path.isfile(os.path.join(d, "carparam.dat"))):
+        errs.append("missing carparam.json/.dat")
+
+    if mesh is not None:
+        ntri = sum(c["tri"] for c in mesh["commands"])
+        nq = sum(c["quad"] for c in mesh["commands"])
+        if ntri + nq == 0:
+            errs.append("mesh has no triangles")
+        if ntri > 6000:
+            warns.append(f"{ntri} triangles — high for the software renderer (native ~200-450)")
+        verts = mesh["vertices"]
+        if verts:
+            import math
+            xs = [v["pos"][0] for v in verts]; ys = [v["pos"][1] for v in verts]; zs = [v["pos"][2] for v in verts]
+            dx, dy, dz = max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)
+            if not (200 < dz < 6000):
+                warns.append(f"length (Z) {dz:.0f} unusual — native cars ~1500 (re-import with --scale)")
+            pages = sorted({c["texture_page_id"] for c in mesh["commands"]})
+            if pages and 7 not in pages and 8 not in pages:
+                warns.append(f"command texture pages {pages} — body usually page 7")
+            # Wheels inside the body envelope?
+            cpj = os.path.join(d, "carparam.json")
+            if os.path.isfile(cpj):
+                try:
+                    cp = json.load(open(cpj))
+                    for w in ("wheel_pos_FL", "wheel_pos_FR", "wheel_pos_RL", "wheel_pos_RR"):
+                        if w in cp and isinstance(cp[w], dict):
+                            x, y, z = cp[w]["value"][:3]
+                            if abs(x) > dx * 0.75 or abs(z) > dz * 0.6:
+                                warns.append(f"{w}=({x},{y},{z}) sits outside the body bbox "
+                                             f"(WxL {dx:.0f}x{dz:.0f}) — wheels may float")
+                except Exception:
+                    pass
+
+    label = os.path.basename(os.path.abspath(d))
+    for e in errs:
+        print(f"  FAIL {label}: {e}")
+    for w in warns:
+        print(f"  WARN {label}: {w}")
+    if not errs and not warns:
+        print(f"  OK   {label}: all checks passed")
+    elif not errs:
+        print(f"  OK   {label}: drivable ({len(warns)} warning(s))")
+    return 1 if errs else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Import custom cars / convert textures for TD5RE")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -687,6 +799,8 @@ def main():
     pi.add_argument("--donor", default="vip", help="donor car (carparam/sounds/hub)")
     pi.add_argument("--skin", default=None, help="body texture image (any format)")
     pi.add_argument("--carpic", default=None, help="showroom thumbnail image")
+    pi.add_argument("--carparam-json", default=None,
+                    help="use this carparam.json verbatim (else copy donor's)")
     pi.add_argument("--stats", default=None, help="JSON of config.nfo stat fields")
     pi.add_argument("--scale", default="auto", help="'auto' (fit length) or a float")
     pi.add_argument("--up", default="y", choices=["y", "z"], help="model up axis")
@@ -708,6 +822,17 @@ def main():
     pv = sub.add_parser("verify", help="validate a produced car folder")
     pv.add_argument("car_dir")
     pv.set_defaults(func=cmd_verify)
+
+    pn = sub.add_parser("new", help="scaffold a custom car by cloning a donor")
+    pn.add_argument("--code", required=True, help="folder name (custom_<x>)")
+    pn.add_argument("--name", default=None, help="display name")
+    pn.add_argument("--donor", default="vip", help="donor car to clone")
+    pn.add_argument("--out-dir", default="re/assets/cars", help="cars root")
+    pn.set_defaults(func=cmd_new)
+
+    pd = sub.add_parser("doctor", help="validate a car folder (mesh/files/wheels/dims)")
+    pd.add_argument("car_dir")
+    pd.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args()
     return args.func(args)

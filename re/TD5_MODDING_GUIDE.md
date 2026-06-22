@@ -240,6 +240,18 @@ into a complete car the engine auto-enumerates in **SELECT CAR**. Drop the
 produced folder into `re/assets/cars/` named `custom_<name>/` and it appears as
 an extra car slot (index 76+) the next launch — **no source edit, no rebuild**.
 
+**The easy way — Car Studio (visual editor):**
+```bash
+python re/tools/td5_car_studio.py        # opens a browser GUI
+```
+A local web app with a **3D viewport** that loads your model, overlays the
+carparam **wheel positions as gizmos** (place wheels visually), previews your
+skin on the body, lets you edit every live physics/stat field, and **builds the
+car with one click**. Orient/scale/flip update live, so you fix "facing
+backward / wrong size" before building. It drives the same `td5_car_import.py`
+underneath. (three.js is vendored into `car_studio/vendor/` on first run — needs
+internet once, offline after.) The CLI below is the scripting equivalent.
+
 **Requirements:** Python with `numpy` + `pillow` (`pip install numpy pillow`).
 
 **Import a car:**
@@ -276,9 +288,11 @@ python re/tools/td5_car_import.py texture in.jpg carskin0.png --size 256 --squar
 # optional colour-key transparency: --colorkey black|blue88|red|cyan
 ```
 
-**Validate** a produced car (round-trips `himodel.bin` through `mesh_tool`):
+**Other CLI commands:**
 ```bash
-python re/tools/td5_car_import.py verify re/assets/cars/custom_mycar
+python re/tools/td5_car_import.py new --code custom_x --donor vip   # scaffold a clone to edit
+python re/tools/td5_car_import.py doctor re/assets/cars/custom_x    # validate (tris/files/wheels/dims)
+python re/tools/td5_car_import.py verify re/assets/cars/custom_x    # round-trip himodel.bin
 ```
 
 **Limits & notes:**

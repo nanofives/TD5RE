@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TD5 Car Studio</title>
+<script type="importmap">__IMPORTMAP__</script>
+<style>
+  :root { --bg:#14161c; --panel:#1d2027; --edge:#2c313c; --fg:#d7dbe3; --muted:#8b93a3;
+          --accent:#3aa0ff; --good:#46c46a; --warn:#e2b13a; --bad:#e2554a; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+              font:13px/1.45 system-ui,Segoe UI,Arial,sans-serif; }
+  #app { display:flex; height:100vh; }
+  #view { flex:1; position:relative; min-width:0; }
+  #canvasWrap { position:absolute; inset:0; }
+  #hud { position:absolute; left:10px; top:8px; color:var(--muted); font-size:12px;
+         pointer-events:none; text-shadow:0 1px 2px #000; }
+  #hud b { color:var(--fg); }
+  #panel { width:340px; background:var(--panel); border-left:1px solid var(--edge);
+           overflow-y:auto; padding:12px 14px 40px; }
+  h1 { font-size:15px; margin:2px 0 10px; letter-spacing:.3px; }
+  h1 small { color:var(--muted); font-weight:400; font-size:11px; }
+  .grp { border:1px solid var(--edge); border-radius:7px; margin:0 0 10px; }
+  .grp > summary { cursor:pointer; padding:7px 10px; font-weight:600; color:#bcd3ef;
+                   list-style:none; user-select:none; }
+  .grp > summary::-webkit-details-marker { display:none; }
+  .grp[open] > summary { border-bottom:1px solid var(--edge); }
+  .grp .body { padding:8px 10px; }
+  label.row { display:flex; align-items:center; gap:8px; margin:5px 0; }
+  label.row span { flex:0 0 116px; color:var(--muted); }
+  label.row .desc { flex:0 0 116px; }
+  input[type=text], input[type=number], select, textarea {
+     flex:1; min-width:0; background:#11131a; color:var(--fg); border:1px solid var(--edge);
+     border-radius:5px; padding:4px 6px; font:inherit; }
+  textarea { width:100%; resize:vertical; min-height:34px; font-size:11px; }
+  .xyz { display:flex; gap:5px; flex:1; }
+  .xyz input { width:100%; }
+  button { background:#222733; color:var(--fg); border:1px solid var(--edge);
+           border-radius:6px; padding:7px 10px; cursor:pointer; font:inherit; }
+  button:hover { border-color:#3c4658; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#04121f;
+                   font-weight:700; width:100%; padding:9px; margin-top:4px; }
+  .filebtn { display:block; width:100%; text-align:center; margin:3px 0; }
+  .hint { color:var(--muted); font-size:11px; margin:3px 0 8px; }
+  #status { white-space:pre-wrap; font:11px/1.4 ui-monospace,Consolas,monospace;
+            background:#11131a; border:1px solid var(--edge); border-radius:6px;
+            padding:8px; margin-top:8px; max-height:180px; overflow:auto; }
+  .ok{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  .seg { display:flex; gap:4px; flex:1; }
+  .seg button { flex:1; padding:4px 0; }
+  .seg button.on { background:var(--accent); color:#04121f; border-color:var(--accent); }
+  input[type=file] { display:none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <div id="canvasWrap"></div>
+    <div id="hud">
+      <div>drag = orbit · wheel = zoom · right-drag = pan</div>
+      <div id="hudStats"></div>
+    </div>
+  </div>
+  <div id="panel">
+    <h1>TD5 Car Studio <small id="ver"></small></h1>
+
+    <details class="grp" open><summary>1 · Model</summary><div class="body">
+      <label class="filebtn"><button type="button" onclick="modelFile.click()">Load model (glTF / OBJ)</button></label>
+      <input type="file" id="modelFile" accept=".glb,.gltf,.obj">
+      <div class="hint" id="modelInfo">no model loaded</div>
+      <label class="row"><span>Forward</span><div class="seg" id="segFwd">
+        <button data-v="-z" class="on">-Z</button><button data-v="+z">+Z</button>
+        <button data-v="-x">-X</button><button data-v="+x">+X</button></div></label>
+      <label class="row"><span>Up axis</span><div class="seg" id="segUp">
+        <button data-v="y" class="on">Y</button><button data-v="z">Z</button></div></label>
+      <label class="row"><span>Scale</span><input type="text" id="scale" value="auto"></label>
+      <label class="row"><span>Flip texture V</span><input type="checkbox" id="flipv"></label>
+      <label class="row"><span>Show wheels</span><input type="checkbox" id="showWheels" checked></label>
+    </div></details>
+
+    <details class="grp" open><summary>2 · Identity</summary><div class="body">
+      <label class="row"><span>Name</span><input type="text" id="name" value="My Custom Car"></label>
+      <label class="row"><span>Short</span><input type="text" id="short" value=""></label>
+      <label class="row"><span>Folder</span><input type="text" id="code" value="custom_mycar"></label>
+      <label class="row"><span>Donor (physics)</span><select id="donor"></select></label>
+    </div></details>
+
+    <details class="grp"><summary>3 · Texture</summary><div class="body">
+      <label class="filebtn"><button type="button" onclick="skinFile.click()">Load body skin (any image)</button></label>
+      <input type="file" id="skinFile" accept="image/*">
+      <div class="hint" id="skinInfo">no skin — neutral grey</div>
+    </div></details>
+
+    <div id="physics"></div>
+
+    <button class="primary" id="buildBtn">Build car ▸</button>
+    <label class="row" style="margin-top:6px"><span>Showroom pic</span>
+      <span style="flex:1;color:var(--muted);font-size:11px">use current 3D view</span>
+      <input type="checkbox" id="useView" checked></label>
+    <div id="status">Ready. Load a model and pick a donor, then Build.</div>
+  </div>
+</div>
+<script type="module" src="/car_studio.js"></script>
+</body>
+</html>
