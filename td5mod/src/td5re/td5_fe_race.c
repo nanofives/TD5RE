@@ -2840,60 +2840,147 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
                           0xFFAAB2C0u, sx, sy);
 }
 
+/* [MP GAME MODES: CONFIG SCREEN 2026-06-22] Per-mode option editor. Each option
+ * points at an int32 field in g_td5.mp_mode_config; enum_labels (when set) name
+ * the discrete values, otherwise the value renders as a plain number. */
+typedef struct {
+    const char        *label;
+    int32_t           *val;
+    int                min, max, step;
+    const char *const *enum_labels;   /* NULL => numeric */
+    int                enum_count;
+} MpCfgOpt;
+
+#define MP_CFG_MAX_OPTS 6
+static int s_cfg_sel = 0;
+
+static const char *const k_cfg_offon[2]  = { "OFF", "ON" };
+static const char *const k_cfg_wincon[3] = { "BUST ALL", "MOST BUSTS", "SUDDEN DEATH" };
+
+static int mp_cfg_build(MpCfgOpt *o) {
+    TD5_MpModeConfig *c = &g_td5.mp_mode_config;
+    int n = 0;
+    switch (c->mode) {
+    case TD5_MP_MODE_TIME_TRIAL:
+        o[n].label="CHECKPOINT TARGET"; o[n].val=&c->tt_checkpoint_target; o[n].min=0;  o[n].max=10; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
+        break;
+    case TD5_MP_MODE_CUP:
+        o[n].label="RACES";            o[n].val=&c->cup_race_count;       o[n].min=1;  o[n].max=TD5_CUP_MAX_RACES; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
+        o[n].label="TEAMS";            o[n].val=&c->cup_team_mode;        o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
+        break;
+    case TD5_MP_MODE_COP_CHASE:
+        o[n].label="COP SLOT";         o[n].val=&c->cop_slot;            o[n].min=0;  o[n].max=5;  o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
+        o[n].label="AI COP";           o[n].val=&c->cop_is_ai;           o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
+        o[n].label="WIN CONDITION";    o[n].val=&c->cop_win_condition;   o[n].min=0;  o[n].max=2;  o[n].step=1; o[n].enum_labels=k_cfg_wincon; o[n].enum_count=3; n++;
+        o[n].label="HEAD START";       o[n].val=&c->suspect_head_start;  o[n].min=0;  o[n].max=40; o[n].step=2; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
+        o[n].label="SUSPECT SPEED %";  o[n].val=&c->suspect_debuff_pct;  o[n].min=40; o[n].max=100;o[n].step=5; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
+        break;
+    default: /* TD5_MP_MODE_RACE — no extra options */
+        break;
+    }
+    return n;
+}
+
 void Screen_MpModeConfig(void) {
-    int n = s_num_human_players;
+    MpCfgOpt opts[MP_CFG_MAX_OPTS];
+    int n = s_num_human_players, count;
+    uint32_t bits, edge;
     if (n < 1) n = 1;
 
     if (s_inner_state == 0) {
         int p;
+#ifndef TD5RE_RELEASE
+        /* Dev: jumping straight here (--StartScreen=36) with TD5RE_MP_MODE_FORCE
+         * seeds the mode + defaults so the per-mode options are visible/testable
+         * without walking the vote screen. */
+        const char *mf = getenv("TD5RE_MP_MODE_FORCE");
+        if (mf && mf[0] && g_td5.mp_mode_config.mode == TD5_MP_MODE_RACE) {
+            int m = atoi(mf);
+            if (m > 0 && m < TD5_MP_MODE_COUNT) mp_mode_config_apply_defaults(m);
+        }
+#endif
         for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
             s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        s_cfg_sel       = 0;
         s_anim_complete = 1;
         s_inner_state   = 1;
-        TD5_LOG_I(LOG_TAG, "MP mode config: enter (mode=%d) [minimal confirm; options WP0d]",
-                  g_td5.mp_mode_config.mode);
+        TD5_LOG_I(LOG_TAG, "MP mode config: enter (mode=%d)", g_td5.mp_mode_config.mode);
         return;
     }
 
     if (frontend_mp_setup_disconnect_check(n)) return;
 
-    {   /* Host-only confirm / back for now (per-mode option editing = WP0d). */
-        uint32_t bits = mp_simul_player_nav(0);
-        uint32_t edge = bits & ~s_mp_pane_nav_prev[0];
-        s_mp_pane_nav_prev[0] = bits;
-        if (edge & 0x10) {
-            frontend_play_sfx(3);
-            td5_plat_input_flush_nav();
-            TD5_LOG_I(LOG_TAG, "MP mode config: host confirmed mode=%d -> car select",
-                      g_td5.mp_mode_config.mode);
-            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
-            return;
-        }
-        if (edge & 0x20) {
-            frontend_play_sfx(5);
-            td5_plat_input_flush_nav();
-            td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE);
-            return;
+    count = mp_cfg_build(opts);
+    if (s_cfg_sel >= count) s_cfg_sel = (count > 0) ? count - 1 : 0;
+    if (s_cfg_sel < 0) s_cfg_sel = 0;
+
+    /* Host (player 0) edits: UP/DOWN select option, LEFT/RIGHT change value. */
+    bits = mp_simul_player_nav(0);
+    edge = bits & ~s_mp_pane_nav_prev[0];
+    s_mp_pane_nav_prev[0] = bits;
+
+    if (count > 0) {
+        if ((edge & 4) && s_cfg_sel > 0)         { s_cfg_sel--; frontend_play_sfx(2); }
+        if ((edge & 8) && s_cfg_sel < count - 1) { s_cfg_sel++; frontend_play_sfx(2); }
+        if (edge & 3) {
+            MpCfgOpt *o = &opts[s_cfg_sel];
+            int v = *o->val;
+            if (edge & 1) v -= o->step;
+            if (edge & 2) v += o->step;
+            if (v < o->min) v = o->min;
+            if (v > o->max) v = o->max;
+            if (v != *o->val) { *o->val = v; frontend_play_sfx(2); }
         }
     }
 
-    if (frontend_check_escape()) {
+    if (edge & 0x10) {                       /* A = confirm -> car select */
+        frontend_play_sfx(3);
+        td5_plat_input_flush_nav();
+        TD5_LOG_I(LOG_TAG, "MP mode config: host confirmed mode=%d -> car select",
+                  g_td5.mp_mode_config.mode);
+        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        return;
+    }
+    if ((edge & 0x20) || frontend_check_escape()) {   /* B = back -> vote */
+        frontend_play_sfx(5);
         td5_plat_input_flush_nav();
         td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE);
+        return;
     }
 }
 
 void frontend_mp_mode_config_render(float sx, float sy) {
-    int mode = g_td5.mp_mode_config.mode;
+    MpCfgOpt opts[MP_CFG_MAX_OPTS];
+    int mode = g_td5.mp_mode_config.mode, count, i;
     const char *name = (mode >= 0 && mode < TD5_MP_MODE_COUNT) ? k_mp_mode_names[mode] : "?";
+    char buf[64];
+    float y = 150.0f;
+
+    count = mp_cfg_build(opts);
 
     td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xCC000000u, -1, 0, 0, 1, 1);
-    td5_vui_text_centered(320.0f * sx, 60.0f * sy, "GAME MODE OPTIONS", 0xFFFFE060u, sx, sy);
-    td5_vui_text_centered(320.0f * sx, 150.0f * sy, name, 0xFFFFFFFFu, sx, sy);
-    mp_pos_small_centered(320.0f * sx, 196.0f * sy,
-                          "Per-mode options coming next", 0xFF98A0B0u, sx, sy);
-    mp_pos_small_centered(320.0f * sx, 320.0f * sy,
-                          "P1 (HOST): A continue - B back", 0xFFC0C8D0u, sx, sy);
+    td5_vui_text_centered(320.0f * sx, 64.0f * sy, "GAME MODE OPTIONS", 0xFFFFE060u, sx, sy);
+    td5_vui_text_centered(320.0f * sx, 96.0f * sy, name, 0xFFFFFFFFu, sx, sy);
+
+    if (count == 0) {
+        mp_pos_small_centered(320.0f * sx, 170.0f * sy,
+                              "No options - press A to continue", 0xFF98A0B0u, sx, sy);
+    }
+    for (i = 0; i < count; i++) {
+        MpCfgOpt *o = &opts[i];
+        int v = *o->val, sel = (i == s_cfg_sel);
+        uint32_t col = sel ? 0xFFFFE060u : 0xFFC0C8D0u;
+        if (o->enum_labels && v >= 0 && v < o->enum_count)
+            snprintf(buf, sizeof buf, "%s%s:  < %s >", sel ? "> " : "  ", o->label, o->enum_labels[v]);
+        else
+            snprintf(buf, sizeof buf, "%s%s:  < %d >", sel ? "> " : "  ", o->label, v);
+        td5_vui_text_centered(320.0f * sx, y * sy, buf, col, sx, sy);
+        y += 30.0f;
+    }
+
+    mp_pos_small_centered(320.0f * sx, 128.0f * sy,
+                          "P1 (HOST): UP/DOWN select - LEFT/RIGHT change - A continue - B back",
+                          0xFFAAB2C0u, sx, sy);
 }
 
 /* [#6] Smooth, SUBTLE pulse in [lo,hi] driven off wall-clock `now`.
