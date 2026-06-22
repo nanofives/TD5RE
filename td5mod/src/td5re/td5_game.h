@@ -213,6 +213,11 @@ int  td5_game_is_cinematic_race(void);
 int  td5_game_get_traffic_variant(int traffic_index);
 int  td5_game_get_cop_actor_index(void);
 int  td5_game_is_wanted_mode(void);
+/* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot (-1 if not a cop
+ * chase) + suspect test. SP wanted -> cop slot 0; MP cop chase -> configured
+ * cop_slot with every other racer a suspect. */
+int  td5_game_cop_chase_cop_slot(void);
+int  td5_game_cop_chase_is_suspect(int slot);
 /* 1 while the in-race pause menu is open (audio layer reads this to suspend the
  * cop-chase siren refresh during pause so it re-arms on resume). */
 int  td5_game_is_pause_menu_active(void);

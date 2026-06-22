@@ -1952,9 +1952,12 @@ static inline int32_t phys_top_speed_rating(TD5_Actor *actor) {
     int slot = (int)((const uint8_t *)actor)[0x375];   /* ACTOR_SLOT_INDEX */
     if (td5_ai_cop_is_chasing(slot)) return 0x7FFF;    /* effectively uncapped */
     int32_t rating = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
-    /* Slow the AI suspect(s) so a Cop Chase is winnable. Human slots (the player
-     * cop, 0..num_human_players-1) keep full speed; non-wanted modes byte-faithful. */
-    if (td5_game_is_wanted_mode() && slot >= g_td5.num_human_players)
+    /* Slow the SUSPECT(s) so a Cop Chase is winnable. The cop keeps full speed;
+     * every other racer (suspect) is debuffed. SP wanted (cop=slot 0) debuffs
+     * the AI slots 1..5 exactly as before; MP cop chase debuffs every non-cop
+     * racer (incl. human suspects, per "same debuff on the other players").
+     * Non-cop-chase races are byte-faithful (is_suspect returns 0). */
+    if (td5_game_cop_chase_is_suspect(slot))
         rating = (rating * copchase_ai_speed_pct()) / 100;
     return rating;
 }
@@ -6248,10 +6251,18 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * [CONFIRMED]: both A-is-player and B-is-player paths call AwardWantedDamageScore
      * on the cop slot with impact magnitude. */
     if (td5_game_is_wanted_mode()) {
-        if (A->slot_index == 0 && B->slot_index >= 1 && B->slot_index < 6)
-            td5_ai_wanted_cop_hit(B->slot_index, impact_mag);
-        else if (B->slot_index == 0 && A->slot_index >= 1 && A->slot_index < 6)
-            td5_ai_wanted_cop_hit(A->slot_index, impact_mag);
+        /* [MP COP CHASE] Generalized from the SP "slot 0 is the cop" gate: a ram
+         * between the COP slot and any SUSPECT (non-cop racer) decrements that
+         * suspect's damage bar. SP (cop=0) reproduces the old slot-0-vs-1..5
+         * behaviour exactly. */
+        int cop = td5_game_cop_chase_cop_slot();
+        int sa = (int)A->slot_index, sb = (int)B->slot_index;
+        if (cop >= 0) {
+            if (sa == cop && td5_game_cop_chase_is_suspect(sb))
+                td5_ai_wanted_cop_hit(sb, impact_mag);
+            else if (sb == cop && td5_game_cop_chase_is_suspect(sa))
+                td5_ai_wanted_cop_hit(sa, impact_mag);
+        }
     }
 
     /* Traffic recovery escalation (> 50000 and traffic slot). [N-way 2026-06-04]

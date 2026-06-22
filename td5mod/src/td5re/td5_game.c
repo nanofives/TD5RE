@@ -1651,6 +1651,17 @@ int td5_game_init_race_session(void) {
     }
 #endif
 
+    /* [MP GAME MODES: COP CHASE 2026-06-22] The MP cop-chase mode reuses the
+     * wanted-mode machinery (a player-cop rams the other racers — the suspects —
+     * to deplete their damage bar). Turn wanted mode on; the effective cop slot
+     * comes from mp_mode_config.cop_slot (see td5_game_cop_chase_cop_slot). Local
+     * split-screen only for now — the net path above leaves wanted mode off. */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
+        g_td5.wanted_mode_enabled = 1;
+        TD5_LOG_I(LOG_TAG, "InitRace: MP COP CHASE active — cop slot=%d",
+                  g_td5.mp_mode_config.cop_slot);
+    }
+
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
      * @ 0x004B0FA8). This is the runtime gate read by both the HUD timer
      * widget (RenderRaceHudOverlays @ 0x004391CC) and the per-actor timer
@@ -7973,7 +7984,31 @@ int td5_game_get_traffic_variant(int traffic_index) {
  * Orig's tracked-vehicle audio fires when slot_iter == 0, so the siren
  * source is the player's actor (slot 0). The port previously returned 1,
  * routing the siren onto an opponent AI. */
-int td5_game_get_cop_actor_index(void) { return g_td5.wanted_mode_enabled ? 0 : -1; }
+/* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot for cop-chase /
+ * wanted mode. Single-player wanted (game_type 8) keeps the player (slot 0) as
+ * the cop ramming AI suspects; MP cop chase uses the host-configured cop_slot
+ * and makes every OTHER racer a suspect. Returns -1 when not a cop chase.
+ * (Returning 0 for SP keeps every existing call byte-identical.) */
+int td5_game_cop_chase_cop_slot(void) {
+    if (!g_td5.wanted_mode_enabled) return -1;
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) {
+        int s = g_td5.mp_mode_config.cop_slot;
+        if (s < 0 || s >= TD5_MAX_RACER_SLOTS) s = 0;   /* must be a racer slot */
+        return s;
+    }
+    return 0;
+}
+
+/* True when `slot` is a racer SUSPECT (a non-cop racer) in a cop chase. */
+int td5_game_cop_chase_is_suspect(int slot) {
+    int cop = td5_game_cop_chase_cop_slot();
+    if (cop < 0) return 0;
+    return slot >= 0 && slot < TD5_MAX_RACER_SLOTS && slot != cop;
+}
+
+int td5_game_get_cop_actor_index(void) {
+    return g_td5.wanted_mode_enabled ? td5_game_cop_chase_cop_slot() : -1;
+}
 /* [CONFIRMED]: g_wantedModeEnabled @ 0x4AAF68 set at InitializeRaceSession */
 int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
 /* [COP-CHASE SIREN 2026-06-21] Expose pause-menu state to the audio layer so the
@@ -8004,7 +8039,11 @@ int32_t td5_game_get_wanted_target_tracker(void) {
  * tracked actor used by the cop-chase marker render gate. Orig .data-
  * init = 0 (player slot); no binary writers. */
 int td5_game_get_wanted_target_slot(void) {
-    return 0;
+    /* [MP COP CHASE] The "target slot" is the COP — the racer that must NOT be
+     * damaged (td5_ai_wanted_cop_hit gate) and who earns the ram/bust points.
+     * SP returns 0 (player-cop), identical to before. */
+    int cop = td5_game_cop_chase_cop_slot();
+    return cop < 0 ? 0 : cop;
 }
 
 void *td5_game_heap_alloc(size_t size) {

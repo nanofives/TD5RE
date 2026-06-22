@@ -896,7 +896,10 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
     extern int g_wanted_msg_timer;   /* td5_hud.c */
     extern int g_wanted_msg_index;
 
-    if (cop_slot < 1 || cop_slot >= TD5_MAX_RACER_SLOTS) return;
+    /* `cop_slot` here is actually the SUSPECT being rammed (legacy name). Any
+     * racer slot can be a suspect now (MP cop chase may make slot 0 a suspect);
+     * the COP itself is excluded by Gate 3 below (target-slot == cop). */
+    if (cop_slot < 0 || cop_slot >= TD5_MAX_RACER_SLOTS) return;
 
     /* Gate 1 [orig 0x0043D690 entry]: impact must be material (> 9999). */
     if (impact_mag <= 9999) return;
