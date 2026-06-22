@@ -164,6 +164,13 @@ typedef struct {
 #define TD5_BASE_CAR_COUNT 37
 #define TD5_CAR_COUNT      76
 
+/* Drop-in custom cars (re/assets/cars/custom_<name>/) occupy slots TD5_CAR_COUNT..
+ * TD5_CAR_SLOT_MAX-1. TD5_CAR_SLOT_MAX is the ARRAY DIMENSION for the per-car
+ * frontend caches; TD5_CAR_COUNT stays the built-in logical count, and
+ * td5_car_total_count() (= 76 + discovered custom) is the live roster bound. */
+#include "td5_customcar.h"               /* TD5_CUSTOM_CAR_MAX + registry API */
+#define TD5_CAR_SLOT_MAX   (TD5_CAR_COUNT + TD5_CUSTOM_CAR_MAX)
+
 /* ---- frontend surface cache ---- */
 #define FE_MAX_SURFACES    31
 #define FE_SURFACE_PAGE_BASE 900  /* texture pages 900-931 reserved for frontend */
@@ -289,7 +296,7 @@ extern char s_text_input_prompt[40];
 const char *frontend_get_track_name(int track_index);
 extern FE_Surface s_surfaces[FE_MAX_SURFACES];
 extern const char *const k_mp_kbd_rows[];
-extern const char *s_car_zip_paths[TD5_CAR_COUNT];
+extern const char *s_car_zip_paths[TD5_CAR_SLOT_MAX];
 extern const int s_cup_schedules[][13];
 extern const uint32_t s_td6_palette[TD6_PALETTE_N];
 extern const uint8_t s_track_schedule_to_tga_index[37];
@@ -353,7 +360,7 @@ extern int s_track_preview_surface;
 extern int s_track_switch_tick;
 extern uint32_t s_fe_gamepad_nav;
 extern uint32_t s_mp_simul_anim_ms;
-extern uint8_t s_car_lock_table[TD5_CAR_COUNT];
+extern uint8_t s_car_lock_table[TD5_CAR_SLOT_MAX];
 extern uint8_t s_track_lock_table[37];
 int ConfigureGameTypeFlags(void);
 int frontend_advance_tick(void);
