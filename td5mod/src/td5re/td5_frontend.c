@@ -10,6 +10,7 @@
 
 #include "td5_frontend.h"
 #include "td5_asset.h"
+#include "td5_track_registry.h"  /* custom-track registry: name/slot lookups + slot headroom */
 #include "td5_frontend_button_cache.h"
 #include "td5_game.h"
 #include "td5_profile.h"
@@ -633,7 +634,10 @@ int             s_sound_option_music_volume = 80;
 
 /* Lock tables (simplified inline representation) */
 uint8_t s_car_lock_table[TD5_CAR_SLOT_MAX]; /* DAT_00463e4c (0-36); 37-75 = TD6, 76+ = custom; all always unlocked */
-uint8_t s_track_lock_table[37];  /* DAT_004668B0 (orig 26); 26-30 = migrated TD6 P2P slots */
+/* Sized base(37)+custom headroom so custom-track slots (>=37) read in-bounds
+ * (always 0 = unlocked; the static global is zero-initialized and never written
+ * non-zero past slot 36). See td5_track_registry.h. */
+uint8_t s_track_lock_table[TD5_CUSTOM_TRACK_SLOT_BASE + TD5_CUSTOM_TRACK_MAX];  /* DAT_004668B0 (orig 26); 26-36 = TD6; 37+ = custom */
 int  s_total_unlocked_cars;      /* DAT_00463e0c */
 int  s_total_unlocked_tracks;    /* DAT_00466840 */
 int  s_cheat_unlock_all;         /* DAT_00496298 */
@@ -1586,6 +1590,12 @@ const char *frontend_get_track_name(int track_index) {
     int name_index = track_index;
     if (track_index < 0)
         return "RANDOM TRACK";
+    /* Custom tracks (slots >= 37) come from the runtime registry manifest. */
+    if (track_index >= TD5_CUSTOM_TRACK_SLOT_BASE) {
+        const char *custom = td5_track_registry_name_for_slot(track_index);
+        if (custom)
+            return custom;
+    }
     if (track_index < (int)(sizeof(s_track_schedule_to_name_index) / sizeof(s_track_schedule_to_name_index[0]))) {
         name_index = s_track_schedule_to_name_index[track_index];
     }
@@ -4431,6 +4441,8 @@ static void frontend_update_cheat_codes(void) {
             memset(s_track_lock_table, 0, sizeof(s_track_lock_table));
             s_total_unlocked_cars = 37;
             s_total_unlocked_tracks = 37;   /* incl. migrated TD6 slots 26-36 */
+            if (td5_track_registry_slot_max() > s_total_unlocked_tracks)
+                s_total_unlocked_tracks = td5_track_registry_slot_max();  /* + custom tracks */
         } else {
             int t;
             td5_save_get_car_lock_table(s_car_lock_table, TD5_BASE_CAR_COUNT);
@@ -4450,6 +4462,8 @@ static void frontend_update_cheat_codes(void) {
                 if (s_track_lock_table[t] == 0)
                     s_total_unlocked_tracks = t + 1;
             }
+            if (td5_track_registry_slot_max() > s_total_unlocked_tracks)
+                s_total_unlocked_tracks = td5_track_registry_slot_max();  /* + custom tracks */
         }
     }
 }

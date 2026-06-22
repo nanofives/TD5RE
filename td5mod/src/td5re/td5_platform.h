@@ -592,6 +592,16 @@ void td5_plat_fx_soft_end(void);
  *  td5_plat_render_draw_tris re-binds standard state. */
 void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count);
 
+/** Draw pre-transformed, FLAT (textureless) triangles: a white texture is
+ *  modulated so the per-vertex diffuse becomes the pixel color directly; fog
+ *  and alpha-test are off; opaque blend; depth test on, depth write off.
+ *  Mirrors td5_plat_render_draw_lines but TRIANGLELIST + indexed. Used by the
+ *  custom-track STRIP-ribbon render fallback (a level with no MODELS.DAT mesh).
+ *  Bypasses the regular state cache; the next td5_plat_render_draw_tris
+ *  re-binds standard state. */
+void td5_plat_render_draw_tris_flat(const TD5_D3DVertex *verts, int vert_count,
+                                    const uint16_t *indices, int index_count);
+
 /** Set render state preset (0-3). */
 void td5_plat_render_set_preset(TD5_RenderPreset preset);
 

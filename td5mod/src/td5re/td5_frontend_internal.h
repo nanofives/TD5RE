@@ -370,7 +370,7 @@ extern int s_track_switch_tick;
 extern uint32_t s_fe_gamepad_nav;
 extern uint32_t s_mp_simul_anim_ms;
 extern uint8_t s_car_lock_table[TD5_CAR_SLOT_MAX];
-extern uint8_t s_track_lock_table[37];
+extern uint8_t s_track_lock_table[];  /* sized in td5_frontend.c: 37 native/cup/TD6 + custom headroom */
 int ConfigureGameTypeFlags(void);
 int frontend_advance_tick(void);
 int frontend_car_has_paint(int car_index);

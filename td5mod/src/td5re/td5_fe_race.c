@@ -20,6 +20,7 @@
 #include "td5_sound.h"
 #include "td5_hud.h"
 #include "td5_track.h"
+#include "td5_track_registry.h"  /* custom-track registry: selector bound + has-slot */
 #include "td5_types.h"
 #include "td5re.h"
 #include "td5_snk_strings.h"
@@ -579,6 +580,12 @@ static int frontend_track_is_cup_slot(int track_index) {
  * slots 20-25 directly, not through these cyclers). Quick Race already excluded
  * the drag strip; this unifies it with Track Selection. [user request 2026-06-05] */
 static int frontend_track_excluded_from_selector(int track_index) {
+    /* Custom slots (>=37) are selectable ONLY when the registry actually has a
+     * track there. Otherwise an unregistered slot in [37, slot_max) would
+     * resolve via td5_asset_level_number's native fallback to level001 and show
+     * up as a phantom "Moscow" entry in the cycler. */
+    if (track_index >= TD5_CUSTOM_TRACK_SLOT_BASE)
+        return !td5_track_registry_has_slot(track_index);
     return track_index == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX ||
            frontend_track_is_cup_slot(track_index);
 }
@@ -7102,6 +7109,8 @@ void Screen_CupWon(void) {
                     if (s_track_lock_table[t] == 0)
                         s_total_unlocked_tracks = t + 1;
                 }
+                if (td5_track_registry_slot_max() > s_total_unlocked_tracks)
+                    s_total_unlocked_tracks = td5_track_registry_slot_max();  /* + custom tracks */
             }
         }
 

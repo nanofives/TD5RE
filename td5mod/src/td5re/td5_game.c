@@ -10,6 +10,7 @@
 
 #include "td5_game.h"
 #include "td5_track.h"
+#include "td5_track_registry.h"
 #include "td5_fmv.h"
 #include "td5_sound.h"
 #include "td5_input.h"
@@ -2675,6 +2676,16 @@ int td5_game_init_race_session(void) {
                           td6_ss, rev_ss, rev_ring, track_span_count);
                 start_span = rev_ss;
             }
+        }
+
+        /* [CUSTOM TRACK] Honor the registry start span directly, INCLUDING 0
+         * (the span-0 start/finish line of a custom circuit, which the td6_ss>0
+         * gate above cannot express). Custom levels otherwise fall through to
+         * the out-of-range clamp below (start_span defaulted to span_count). */
+        if (td5_track_registry_has_level(level_num)) {
+            int css = td5_track_registry_start_span_for_level(level_num);
+            if (css >= 0 && css < track_span_count)
+                start_span = css;
         }
 
         /* TD6 track migration / out-of-range robustness: the per-level

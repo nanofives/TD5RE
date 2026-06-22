@@ -2992,6 +2992,13 @@ void td5_render_set_cop_mesh(TD5_MeshHeader *mesh) { s_cop_mesh = mesh; }
  * correctly in scope. */
 /* s_in_sky_draw moved to RenderScratch (Phase B Stage 1). */
 
+/* Custom-track STRIP-ribbon render fallback (defined below, near the debug-line
+ * helpers it reuses). Draws the collision ribbon as a solid road when a level
+ * has no MODELS.DAT mesh table. */
+static void td5_render_fallback_strip_ribbon(int center_span, int window,
+                                             int ring, int total_spans,
+                                             int is_circuit);
+
 void td5_render_actors_for_view(int view_index)
 {
     /*
@@ -3422,6 +3429,14 @@ void td5_render_actors_for_view(int view_index)
                 rendered_spans++;
             }
         }
+
+        /* [CUSTOM TRACK] When the level ships no MODELS.DAT mesh table (e.g. a
+         * track built by re/tools/td5_trackgen.py), paint the STRIP collision
+         * ribbon as a solid road so the track is visible and drivable. Gated on
+         * the absence of a mesh table so faithful TD5/TD6 tracks never pay it. */
+        if (!s_photobooth_active && td5_track_get_models_display_list_count() == 0)
+            td5_render_fallback_strip_ribbon(eff_player, cull_window, ring,
+                                             total_spans, is_circuit);
         #undef TD5_RENDER_SUBMITTED_CAP
     }
 
@@ -10031,6 +10046,102 @@ void td5_render_debug_line_world(float x0, float y0, float z0,
         s_debug_line_verts[s_debug_line_count++] = va;
         s_debug_line_verts[s_debug_line_count++] = vb;
     }
+}
+
+/* Custom-track STRIP-ribbon render fallback.
+ *
+ * A level built by re/tools/td5_trackgen.py ships only the collision/logic
+ * ribbon (strip.json) and no MODELS.DAT mesh, so the normal display-list walk
+ * draws nothing. This paints each span in the player's view window as a solid
+ * road quad (asphalt grey) with brighter rail lines, reusing the debug-line
+ * projection and the flat textureless triangle draw. Both tri windings are
+ * emitted so the road shows regardless of the rasterizer's cull mode.
+ *
+ * Span quad corners (each span owns near + far rows of (lanes+1) vertices):
+ *   near-left  = left_vertex_index + 0      near-right = left_vertex_index  + lanes
+ *   far-left   = right_vertex_index + 0      far-right  = right_vertex_index + lanes
+ */
+static void td5_render_fallback_strip_ribbon(int center_span, int window,
+                                             int ring, int total_spans,
+                                             int is_circuit)
+{
+    enum { RIBBON_BATCH = 48 };               /* quads per flat-tri flush */
+    TD5_D3DVertex vb[RIBBON_BATCH * 4];
+    uint16_t      ib[RIBBON_BATCH * 12];      /* 4 tris/quad (2 + reversed winding) */
+    int qn = 0;
+    const uint32_t road_col = 0xFF44464Cu;    /* asphalt grey (ARGB) */
+    const uint32_t edge_col = 0xFFB0B0B8u;    /* rail / lane lines */
+    int span;
+
+    if (window < 1) window = 1;
+    if (window > 256) window = 256;           /* bound the per-frame work */
+
+    for (span = center_span - window; span <= center_span + window; span++) {
+        int si = span;
+        TD5_StripSpan *sp;
+        TD5_StripVertex *nl, *nr, *fl, *fr;
+        int lanes, li, ri, base, k;
+        float w[4][3];
+        TD5_D3DVertex c[4];
+
+        if (is_circuit && ring > 0) {
+            while (si < 0)      si += ring;
+            while (si >= ring)  si -= ring;
+        } else if (si < 0 || si >= total_spans) {
+            continue;
+        }
+        sp = td5_track_get_span(si);
+        if (!sp) continue;
+
+        lanes = sp->pad_02[1] & 0x0F;          /* low nibble of the packed lane byte */
+        if (lanes < 1) lanes = 1;
+        li = (int)sp->left_vertex_index;
+        ri = (int)sp->right_vertex_index;
+        nl = td5_track_get_vertex(li);
+        nr = td5_track_get_vertex(li + lanes);
+        fl = td5_track_get_vertex(ri);
+        fr = td5_track_get_vertex(ri + lanes);
+        if (!nl || !nr || !fl || !fr) continue;
+
+        /* world position = span origin + local int16 vertex (same float space
+         * as the camera, exactly like the collision wireframe). */
+        w[0][0] = (float)(sp->origin_x + nl->x); w[0][1] = (float)(sp->origin_y + nl->y); w[0][2] = (float)(sp->origin_z + nl->z);
+        w[1][0] = (float)(sp->origin_x + nr->x); w[1][1] = (float)(sp->origin_y + nr->y); w[1][2] = (float)(sp->origin_z + nr->z);
+        w[2][0] = (float)(sp->origin_x + fl->x); w[2][1] = (float)(sp->origin_y + fl->y); w[2][2] = (float)(sp->origin_z + fl->z);
+        w[3][0] = (float)(sp->origin_x + fr->x); w[3][1] = (float)(sp->origin_y + fr->y); w[3][2] = (float)(sp->origin_z + fr->z);
+
+        /* project all four corners; drop the whole quad if any is behind the
+         * near clip (the projection has no near-plane clipper). */
+        if (!debug_line_project(w[0][0], w[0][1], w[0][2], road_col, &c[0])) continue;
+        if (!debug_line_project(w[1][0], w[1][1], w[1][2], road_col, &c[1])) continue;
+        if (!debug_line_project(w[2][0], w[2][1], w[2][2], road_col, &c[2])) continue;
+        if (!debug_line_project(w[3][0], w[3][1], w[3][2], road_col, &c[3])) continue;
+
+        base = qn * 4;
+        for (k = 0; k < 4; k++) vb[base + k] = c[k];
+        {
+            int io = qn * 12;
+            uint16_t b = (uint16_t)base;
+            /* corners: 0=near-left 1=near-right 2=far-left 3=far-right */
+            ib[io + 0] = b + 0; ib[io + 1] = b + 1; ib[io + 2] = b + 2;
+            ib[io + 3] = b + 1; ib[io + 4] = b + 3; ib[io + 5] = b + 2;
+            ib[io + 6] = b + 0; ib[io + 7] = b + 2; ib[io + 8] = b + 1;   /* reversed winding */
+            ib[io + 9] = b + 1; ib[io + 10] = b + 2; ib[io + 11] = b + 3;
+        }
+        qn++;
+
+        /* side rails as lines for a clearer road edge / drivability cue */
+        td5_render_debug_line_world(w[0][0], w[0][1], w[0][2], w[2][0], w[2][1], w[2][2], edge_col);
+        td5_render_debug_line_world(w[1][0], w[1][1], w[1][2], w[3][0], w[3][1], w[3][2], edge_col);
+
+        if (qn >= RIBBON_BATCH) {
+            td5_plat_render_draw_tris_flat(vb, qn * 4, ib, qn * 12);
+            qn = 0;
+        }
+    }
+    if (qn > 0)
+        td5_plat_render_draw_tris_flat(vb, qn * 4, ib, qn * 12);
+    td5_render_debug_lines_flush();
 }
 
 /* ============================================================

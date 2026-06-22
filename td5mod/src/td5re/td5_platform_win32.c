@@ -4813,6 +4813,71 @@ void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
     if (!rc) s_last_bound_texture_page = -1;
 }
 
+void td5_plat_render_draw_tris_flat(const TD5_D3DVertex *verts, int vert_count,
+                                    const uint16_t *indices, int index_count)
+{
+    if (td5_rcmd_recording()) { td5_rcmd_draw_tris(verts, vert_count, indices, index_count); return; }
+    WrapperRecCtx *rc = g_wrapper_rec;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
+    ID3D11Buffer *ib    = rc ? rc->ib : g_backend.dynamic_ib;
+    ID3D11Buffer *cbvp  = rc ? rc->cb_viewport : g_backend.cb_viewport;
+    ID3D11Buffer *cbfog = rc ? rc->cb_fog : g_backend.cb_fog;
+    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
+    UINT stride = TD5_VERTEX_STRIDE;
+    UINT offset = 0;
+    UINT base_vertex = 0, start_index = 0;
+
+    if (!ctx || !verts || vert_count < 3 || !indices || index_count < 3) return;
+    if (!g_backend.white_srv) return;
+
+    if (!Backend_StreamUpload(verts, (UINT)vert_count, stride,
+                              (const void *)indices, (UINT)index_count,
+                              &base_vertex, &start_index))
+        return;
+
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb, &stride, &offset);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    ID3D11DeviceContext_IASetIndexBuffer(ctx, ib, DXGI_FORMAT_R16_UINT, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
+        D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
+
+    /* PS_MODULATE * white texel = vertex color (flat shaded, no source texture). */
+    ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shaders[PS_MODULATE], NULL, 0);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
+    {
+        FogCB fog = {0};
+        fog.fogEnabled = 0;
+        fog.alphaTestEnabled = 0;
+        fog.alphaRef = 0.0f;
+        ID3D11DeviceContext_UpdateSubresource(ctx,
+            (ID3D11Resource*)cbfog, 0, NULL, &fog, 0, 0);
+    }
+
+    ID3D11DeviceContext_RSSetState(ctx, g_backend.rs_state);
+    /* Z test on (road occludes against sky / itself), Z write off (a flat-color
+     * ribbon needs no depth ordering; later opaque actors still draw on top). */
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx,
+        g_backend.ds_states[DS_Z_ON_WRITE_OFF], 0);
+    ID3D11DeviceContext_OMSetBlendState(ctx,
+        g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
+
+    ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, start_index, (INT)base_vertex);
+
+    st->current_blend_idx = -1;
+    st->current_ds_idx    = -1;
+    st->current_samp_idx  = -1;
+    st->current_ps_idx    = -1;
+    st->dirty = 1;
+    if (rc) rc->current_srv = NULL; else g_backend.current_srv = NULL;
+    if (!rc) s_last_bound_texture_page = -1;
+}
+
 void td5_plat_render_set_preset(TD5_RenderPreset preset)
 {
     if (td5_rcmd_recording()) { td5_rcmd_set_preset((int)preset); return; }

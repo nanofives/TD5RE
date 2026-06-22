@@ -7,6 +7,7 @@
 #include "td5_game.h"
 #include "td5_physics.h"
 #include "td5_track.h"
+#include "td5_track_registry.h"
 #include "td5_ai.h"
 #include "td5_render.h"
 #include "td5_frontend.h"
@@ -40,6 +41,7 @@ const TD5_Module g_td5re_modules[] = {
     { "sound",    td5_sound_init,    td5_sound_shutdown    },
     { "render",   td5_render_init,   td5_render_shutdown   },
     { "track",    td5_track_init,    td5_track_shutdown    },
+    { "trackreg", td5_track_registry_init, td5_track_registry_shutdown }, /* custom-track manifest: after track, before frontend */
     { "physics",  td5_physics_init,  td5_physics_shutdown  },
     { "ai",       td5_ai_init,       td5_ai_shutdown       },
     { "camera",   td5_camera_init,   td5_camera_shutdown   },
