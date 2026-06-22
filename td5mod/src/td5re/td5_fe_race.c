@@ -4714,10 +4714,13 @@ void Screen_PostRaceHighScore(void) {
             int delta = frontend_option_delta();
             if (delta != 0) {
                 s_score_category_index += delta;
-                /* High score screen: all 26 tracks+cups accessible regardless of lock state.
-                 * Simple wrap [0..0x19]. */
-                if (s_score_category_index > 0x19) s_score_category_index = 0;
-                if (s_score_category_index < 0)    s_score_category_index = 0x19;
+                /* High score screen: all 26 TD5 tracks+cups (0..0x19) PLUS the 11
+                 * migrated TD6 tracks (display indices 26..36) are accessible
+                 * regardless of lock state. Simple wrap [0..36]; the overlay shows
+                 * TD6 placeholder records for the 26..36 slots (see
+                 * frontend_render_high_score_overlay). */
+                if (s_score_category_index > 36) s_score_category_index = 0;
+                if (s_score_category_index < 0)  s_score_category_index = 36;
                 /* Menu-move nav sound on track change. The original plays sound id 2
                  * (DXSound::Play(2)) centrally for arrow-capable L/R changes in the
                  * shared frontend input handler [CONFIRMED @ 0x0042687c, handler

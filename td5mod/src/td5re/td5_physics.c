@@ -119,6 +119,8 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
 /* [tasks #9/#14] V2V traffic-taming knob accessors + ground clamp, defined
  * lower in the file but referenced from obb_corner_test / collision_detect_*. */
 static int   traffic_hit_tame_enabled(void);
+static int   wreck_immobile_enabled(void);
+static int   wreck_mass_pct(void);
 static float traffic_hitbox_scale(void);
 static void  traffic_clamp_above_ground(TD5_Actor *t);
 
@@ -1224,6 +1226,25 @@ static inline int32_t td5_physics_hard_catchup_mult(int slot)
  * per the v2v_heavy_scatter logs) so a normal bump doesn't wreck a car — only a
  * strong crash does. */
 #define COP_BREAK_MAG  200000
+/* [#5 FATAL NPC COLLISION 2026-06-20] When a TRAFFIC or COP car is involved in a
+ * V2V hit, the dramatic "3D collision" heavy scatter+lift AND the wreck (break
+ * down -> park, roof smoke, immobile) trigger at this LOWER magnitude than the
+ * faithful racer-vs-racer 90000 floor, so crashing into traffic/cops feels fatal
+ * and totals them much more readily (user request). Racer-vs-racer keeps 90000.
+ * 60000 sits just under the ordinary-tap floor so a solid hit wrecks the NPC but
+ * a gentle nudge does not. Tunable via TD5RE_NPC_FATAL_MAG. */
+#define NPC_FATAL_MAG_DEFAULT  60000
+static int32_t npc_fatal_mag(void) {
+    static int32_t v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_NPC_FATAL_MAG");
+        long m = (e && e[0]) ? strtol(e, NULL, 10) : NPC_FATAL_MAG_DEFAULT;
+        if (m < 1000)    m = 1000;
+        if (m > 1000000) m = 1000000;
+        v = (int32_t)m;
+    }
+    return v;
+}
 /* Forward-speed scrub on an acute player hit, Q8 (0x100 = 1.0 = keep all speed).
  * 0x100 - 0x50 = 0xB0/256 ≈ 0.6875, i.e. shed ~31% of planar speed. Vertical
  * lift (linear_velocity_y) is intentionally left untouched. */
@@ -1237,6 +1258,15 @@ static inline int32_t td5_physics_hard_catchup_mult(int slot)
 static uint32_t s_crash_fx_seq [TD5_MAX_RACER_SLOTS];
 static int32_t  s_crash_fx_mag [TD5_MAX_RACER_SLOTS];
 static int32_t  s_crash_fx_tick[TD5_MAX_RACER_SLOTS];
+
+/* [#1 WRECK STAND-STILL 2026-06-21] Free-slide window (ticks) for a broken-down
+ * traffic car: armed by a real V2V ram in the impulse resolver, counted down in
+ * td5_physics_update_traffic. While > 0 the wreck coasts (so the player can shove
+ * it aside, issue #2); at 0 it is anchored and stands still. Sized for all (incl.
+ * traffic) slots. */
+#define WRECK_PUSH_TICKS       45      /* ~1.5s of free slide after a ram */
+#define WRECK_PUSH_MIN_IMPACT  0x400   /* min V2V impact_mag that counts as a real shove */
+static int16_t s_wreck_push_ticks[TD5_MAX_TOTAL_ACTORS];
 
 /* Resolve TD5RE_CRASH_FX once. Cached file-static; logged once. Default ON;
  * "0"/"n"/"f" disables (no scrub, no event recording, getter returns 0). */
@@ -3562,7 +3592,9 @@ void td5_physics_update_player(TD5_Actor *actor)
                  * brake BUTTON's reverse transition (orig achieves it via
                  * airborne-microbump auto-gear, too sticky to reproduce on
                  * ground), so it must not fire for the handbrake. */
-                if (abs_vlong < 0x100 && !actor->handbrake_flag) {
+                if (abs_vlong < 0x100 && !actor->handbrake_flag &&
+                    !(wreck_immobile_enabled() && actor->slot_index >= 0 &&
+                      td5_ai_actor_is_broken_down((int)actor->slot_index))) {
                     actor->current_gear = TD5_GEAR_REVERSE;
                     actor->brake_flag = 0;
                 }
@@ -5025,6 +5057,28 @@ void td5_physics_update_traffic(TD5_Actor *actor)
     if (td5_ai_traffic_dynamic_parked(actor->slot_index))
         return;
 
+    /* [#1 WRECK STAND-STILL 2026-06-21] A broken-down (wrecked) traffic car must
+     * stand still — NOT reverse. The AI stop-command leaves encounter_steering_cmd
+     * = -0x100, which this integrator turns into throttle = -1024 and applies as a
+     * BACKWARD force (step 9), so a wreck accelerated backwards forever. Fix: a
+     * wreck never self-propels (throttle forced 0 below) and is ANCHORED (zero
+     * velocity, skip integration) so it sits where it died — UNLESS a recent V2V
+     * ram left it inside its free-slide window (s_wreck_push_ticks), during which
+     * it coasts so the player can shove it aside (issue #2). Knob TD5RE_WRECK_IMMOBILE. */
+    int wreck_no_throttle = 0;
+    if (wreck_immobile_enabled() &&
+        td5_ai_actor_is_broken_down(actor->slot_index)) {
+        int si = (int)actor->slot_index;
+        if (si >= 0 && si < TD5_MAX_TOTAL_ACTORS && s_wreck_push_ticks[si] > 0) {
+            s_wreck_push_ticks[si]--;       /* sliding from a fresh ram -> coast */
+            wreck_no_throttle = 1;          /* but never self-propel */
+        } else {
+            actor->linear_velocity_x = 0;   /* anchored: stand still */
+            actor->linear_velocity_z = 0;
+            actor->longitudinal_speed = 0;
+            return;
+        }
+    }
 
     #define SAR12(x) (((x) + (((x) >> 31) & 0xFFF)) >> 12)
     #define SAR10(x) (((x) + (((x) >> 31) & 0x3FF)) >> 10)
@@ -5053,6 +5107,7 @@ void td5_physics_update_traffic(TD5_Actor *actor)
     int32_t sin_s  = sin_fixed12(steer12 & 0xFFF);
 
     int32_t throttle = (int32_t)actor->encounter_steering_cmd * 4;  /* iVar9 */
+    if (wreck_no_throttle) throttle = 0;   /* [#1] a wreck never drives itself */
 
     /* 3. Body-frame velocity [@ 0x004439BB-0x004439EC] */
     int32_t lat_body  = SAR12(cos_h * vx - sin_h * vz);  /* iVar14 */
@@ -5556,6 +5611,46 @@ static int traffic_hit_tame_enabled(void)
     return s;
 }
 
+/* [#1 WRECK IMMOBILE 2026-06-21] A broken-down (wrecked) car must sit still, not
+ * reverse. The brake path's port-only low-speed REVERSE hand-off (gear=REVERSE +
+ * clear brake) turns the wreck's negative stop-command into sustained backward
+ * drive — the reported "broken cars reverse and keep accelerating backwards".
+ * Suppress that hand-off for a broken car so it just brakes to rest and stays
+ * (it is still pushable by a fresh collision). Default ON; TD5RE_WRECK_IMMOBILE=0
+ * reverts. */
+static int wreck_immobile_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_WRECK_IMMOBILE");
+        s = (e && e[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "wreck_immobile: TD5RE_WRECK_IMMOBILE=%d", s);
+    }
+    return s;
+}
+
+/* [#2 LIGHT WRECK 2026-06-21] Make a broken-down car easy to shove out of the
+ * way: scale its V2V mass term (+0x88, which behaves as an INVERSE mass here —
+ * a bigger value = lighter / more mobile, so the wreck gains MORE velocity from
+ * a hit while the car that hits it loses LESS and plows through). Verified:
+ * dv = impulse*mass is written straight to linear_velocity (td5_physics.c ~6060),
+ * and |dv_wreck| rises monotonically with the wreck's mass term. Percentage of
+ * the stock mass; default 400 (= 4x lighter). TD5RE_WRECK_MASS_PCT=100 disables.
+ * Clamped to [100,2000] so a wreck is never made HEAVIER than stock. */
+static int wreck_mass_pct(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_WRECK_MASS_PCT");
+        long p = (e && e[0]) ? strtol(e, NULL, 10) : 400;
+        if (p < 100)  p = 100;
+        if (p > 2000) p = 2000;
+        v = (int)p;
+        TD5_LOG_I(LOG_TAG, "wreck_mass_pct: TD5RE_WRECK_MASS_PCT=%d", v);
+    }
+    return v;
+}
+
 /* [task #14 / #16] TD5RE_TRAFFIC_HITBOX_SCALE (default 0.70) — multiplier applied
  * to a TRAFFIC car's OBB half-extents (half-width / front-Z / rear-Z) in the V2V
  * corner test so the collision box matches the visible model instead of being
@@ -5791,6 +5886,20 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * audit-v2v-mass-clamp 2026-05-14. */
     int32_t mass_A = (int32_t)CDEF_S(A, 0x88);
     int32_t mass_B = (int32_t)CDEF_S(B, 0x88);
+
+    /* [#2 LIGHT WRECK 2026-06-21] Boost a broken-down car's inverse-mass term so
+     * it shoves aside easily and barely slows the car that hits it. See
+     * wreck_mass_pct(). slot_index>=0 guards the (rare) sentinel; the broken-down
+     * flag is replicated, so this stays netplay-deterministic. */
+    {
+        int wp = wreck_mass_pct();
+        if (wp != 100) {
+            if (A->slot_index >= 0 && td5_ai_actor_is_broken_down((int)A->slot_index))
+                mass_A = (mass_A * wp) / 100;
+            if (B->slot_index >= 0 && td5_ai_actor_is_broken_down((int)B->slot_index))
+                mass_B = (mass_B * wp) / 100;
+        }
+    }
 
     /* --- 2. Rotate both velocities into A's local (contact) frame --- */
     int32_t cos_a = cos_fixed12(angle);
@@ -6078,6 +6187,20 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int64_t impact_signed = (int64_t)(mass_A + mass_B) * impulse;
     int32_t impact_mag = (int32_t)(impact_signed < 0 ? -impact_signed : impact_signed);
 
+    /* [#1 WRECK PUSH WINDOW 2026-06-21] A real ram on a broken-down (anchored)
+     * wreck opens its free-slide window so it can be shoved aside — otherwise the
+     * stand-still anchor in td5_physics_update_traffic re-freezes it next tick.
+     * Gated on a meaningful impact so merely resting against a wreck does not keep
+     * nudging it. */
+    if (impact_mag > WRECK_PUSH_MIN_IMPACT) {
+        if (A->slot_index >= 0 && A->slot_index < TD5_MAX_TOTAL_ACTORS &&
+            td5_ai_actor_is_broken_down((int)A->slot_index))
+            s_wreck_push_ticks[A->slot_index] = WRECK_PUSH_TICKS;
+        if (B->slot_index >= 0 && B->slot_index < TD5_MAX_TOTAL_ACTORS &&
+            td5_ai_actor_is_broken_down((int)B->slot_index))
+            s_wreck_push_ticks[B->slot_index] = WRECK_PUSH_TICKS;
+    }
+
     TD5_LOG_I(LOG_TAG, "v2v_impulse: side=%d slot_A=%d slot_B=%d mA=%d mB=%d "
               "cxA=%d czA=%d cxB=%d czB=%d imp=%d mag=%d toi=%d",
               is_side_branch, A->slot_index, B->slot_index, mass_A, mass_B,
@@ -6158,7 +6281,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * lives at the SAME address (DAT_00463188) as the original's `g_cameraMode`;
      * `td5_physics_set_collisions(1)` writes 0, so `== 0` means collisions ON --
      * byte-faithful to the original's gate. */
-    if (impact_mag > 90000 && g_collisions_enabled == 0) {
+    /* [#5 2026-06-20] Heavy-crash gate. Racer-vs-racer keeps the faithful 90000
+     * floor; a pair that includes a TRAFFIC or COP car trips the dramatic 3D
+     * collision (scatter+lift) AND the wreck at the lower npc_fatal_mag() so
+     * those hits feel fatal and total the NPC much more readily. */
+    int a_is_npc = (A->slot_index >= g_traffic_slot_base);
+    int b_is_npc = (B->slot_index >= g_traffic_slot_base);
+    int32_t heavy_gate = (a_is_npc || b_is_npc) ? npc_fatal_mag() : 90000;
+    if (impact_mag > heavy_gate && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
         int32_t kick_ry = scatter / 2;            /* roll & yaw delta magnitude */
@@ -6210,19 +6340,17 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             if (B->slot_index < g_traffic_slot_base)
                 td5_physics_apply_acute_crash_fx(B, impact_mag);
         }
-        /* [POLICE rewrite 2026-06-19] A strong V2V crash BREAKS DOWN a car:
-         * traffic and cops HALT + smoke (like a real wreck); a chased racer's
-         * "broke down" ends the pursuit. Own (lower) threshold than the player
-         * crash-fx so slower traffic-vs-traffic wrecks still count. Ordinary
-         * (un-chased) racers keep control. */
-        if (impact_mag > COP_BREAK_MAG) {
-            if (A->slot_index >= g_traffic_slot_base ||
-                td5_ai_actor_is_pursued(A->slot_index))
-                td5_ai_mark_actor_broken_down(A->slot_index);
-            if (B->slot_index >= g_traffic_slot_base ||
-                td5_ai_actor_is_pursued(B->slot_index))
-                td5_ai_mark_actor_broken_down(B->slot_index);
-        }
+        /* [#5 2026-06-20, was POLICE rewrite 2026-06-19] This heavy crash WRECKS
+         * every involved TRAFFIC/COP car: it breaks down -> parks, smokes from
+         * the roof, and can never drive itself again (permanent). A chased racer
+         * is also flagged so its "broke down" ENDS the pursuit, but racers/the
+         * player are never immobilised or smoked (handled downstream). Because we
+         * are already inside the (NPC-lowered) heavy gate, no separate magnitude
+         * test is needed — a fatal hit on traffic/cops always totals them. */
+        if (a_is_npc || td5_ai_actor_is_pursued(A->slot_index))
+            td5_ai_mark_actor_broken_down(A->slot_index);
+        if (b_is_npc || td5_ai_actor_is_pursued(B->slot_index))
+            td5_ai_mark_actor_broken_down(B->slot_index);
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d",
                   A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain);
     }

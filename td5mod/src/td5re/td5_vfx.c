@@ -3169,7 +3169,24 @@ void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor) {
     float mid_y = (float)pos_y * FP_TO_FLOAT + roof_lift;   /* lift to the roofline */
     float mid_z = (float)pos_z * FP_TO_FLOAT;
 
-    s_smoke_vel_y = 0x900;   /* steady upward billow (vs exhaust's lazy 0x600) */
+    /* [WRECK SMOKE RISE 2026-06-21] The plume must visibly billow UP off the
+     * roof. The smoke integrator (td5_vfx_update_particles type 0) drags only
+     * X/Z, not Y, so this value is the constant rise in 24.8 world-units/tick.
+     * The old 0x900 (9 u/tick) was a gentle drift that read as "stuck on the
+     * roof" once the incidental tumble smoke that used to mask it was gated off
+     * for traffic. Default 0x2000 (32 u/tick) gives a clear rising column;
+     * tunable via TD5RE_WRECK_SMOKE_RISE (accepts 0x-hex or decimal). */
+    static int32_t wreck_rise = -1;
+    if (wreck_rise < 0) {
+        const char *e = getenv("TD5RE_WRECK_SMOKE_RISE");
+        long v = (e && e[0]) ? strtol(e, NULL, 0) : 0x2000;
+        if (v < 0)      v = 0;
+        if (v > 0x8000) v = 0x8000;
+        wreck_rise = (int32_t)v;
+        TD5_LOG_I(LOG_TAG, "wreck smoke rise = 0x%X (%d u/tick)",
+                  wreck_rise, wreck_rise >> 8);
+    }
+    s_smoke_vel_y = wreck_rise;   /* brisk upward billow (vs exhaust's lazy 0x600) */
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
 }
 

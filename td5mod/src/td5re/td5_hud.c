@@ -3490,17 +3490,39 @@ static int hud_draw_checkpoint_timer_ttf(int view_idx, uint32_t value)
     }
 
     float cap = sy * 24.0f * mul;
-    float ts  = cap * (1.0f / 15.0f);        /* td5_vui_text_centered: caps span 15*ts */
     char buf[8];
     snprintf(buf, sizeof buf, "%u", (unsigned)(value % 1000u));
 
-    float cx      = vl->center_x;
-    float caps_cy = vl->vp_top + cap * 0.5f + 6.0f * sy;  /* sit just below the pane top */
-    float ny      = caps_cy - 15.5f * ts;    /* cell-top so caps centre at caps_cy */
-    float off     = cap * (1.0f / 16.0f);
+    /* [#2 2026-06-20] Lay the digits out directly in the Rajdhani HUD face — the
+     * SAME face the in-race overlay text (position / lap / time) uses — so the
+     * checkpoint countdown matches it exactly. The previous td5_vui_text_centered
+     * path drew through fe_draw_text, which uses the frontend MENU face (a
+     * different typeface), so the number visibly clashed with the rest of the HUD.
+     * Mirrors the overlay flush layout (td5_hud_flush_text): centre the digit
+     * string on the pane centre, place the baseline so the caps centre sits just
+     * below the pane top, with a 1/16-cap black drop-shadow for legibility. */
+    for (int k = 0; buf[k]; k++) { td5_glyph g; td5_hudfont_get((unsigned char)buf[k], cap, &g); }
+    td5_font_flush_uploads();
+
+    float total_w = 0.0f;
+    for (int k = 0; buf[k]; k++) total_w += td5_hudfont_advance((unsigned char)buf[k], cap);
+
+    float cx       = vl->center_x;
+    float caps_cy  = vl->vp_top + cap * 0.5f + 6.0f * sy;  /* sit just below the pane top */
+    float baseline = caps_cy + cap * 0.5f;                 /* caps centre at caps_cy */
+    float pen      = cx - total_w * 0.5f;
+    float off      = cap * (1.0f / 16.0f);
     if (off < 1.0f) off = 1.0f;
-    td5_vui_text_centered(cx + off, ny + off, buf, 0xFF000000u, ts, ts);  /* drop shadow */
-    td5_vui_text_centered(cx, ny, buf, 0xFFFFFFFFu, ts, ts);
+    for (int k = 0; buf[k]; k++) {
+        td5_glyph g; td5_hudfont_get((unsigned char)buf[k], cap, &g);
+        if (g.valid && g.w > 0.0f) {
+            float gx = pen + g.xoff;
+            float gy = baseline + g.yoff;
+            td5_vui_quad(gx + off, gy + off, g.w, g.h, 0xFF000000u, g.page, g.u0, g.v0, g.u1, g.v1);  /* shadow */
+            td5_vui_quad(gx, gy, g.w, g.h, 0xFFFFFFFFu, g.page, g.u0, g.v0, g.u1, g.v1);
+        }
+        pen += g.advance;
+    }
     return 1;
 }
 

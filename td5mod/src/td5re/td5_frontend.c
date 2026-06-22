@@ -7557,9 +7557,19 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
      * record table; if it has none yet, fall through to the "NO RECORDS YET" empty
      * state below (grp == NULL). The Records browse screen leaves the flag 0, so
      * it still shows the authored TD5 groups unchanged. */
+    /* [2026-06-19] The High Scores BROWSE screen now lists the 11 migrated TD6
+     * tracks too (category indices 26..36, after the TD5 tracks+cups). For those
+     * slots, pull the TD6 record table for the slot's converted level — which
+     * falls back to placeholder names/times until a genuine run is set, exactly
+     * like the TD5 tracks. The post-race flow still routes through
+     * s_postrace_td6_level (set to the raced level), so check it first. */
     const TD5_NpcGroup *grp;
+    int browse_td6_level = (s_postrace_td6_level <= 0)
+                           ? td5_asset_td6_level_for_slot(s_score_category_index) : 0;
     if (s_postrace_td6_level > 0)
         grp = td5_save_get_td6_record_group(s_postrace_td6_level);
+    else if (browse_td6_level > 0)
+        grp = td5_save_get_td6_record_group(browse_td6_level);
     else
         grp = td5_save_get_npc_group(s_score_category_index);
     int speed_kph = td5_save_get_speed_units();  /* drives the AVERAGE/TOP value conversion;
@@ -7589,7 +7599,7 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     if (!grp) {
         /* [#2b] TD6 with no genuine records yet shows "NO RECORDS YET" (the player
          * just hasn't set one) rather than the generic "NO SCORES YET". */
-        const char *msg = (s_postrace_td6_level > 0) ? "NO RECORDS YET" : "NO SCORES YET";
+        const char *msg = (s_postrace_td6_level > 0 || browse_td6_level > 0) ? "NO RECORDS YET" : "NO SCORES YET";
         fe_draw_small_text((320.0f * sx) - (fe_measure_small_text(msg) * 0.5f) * fe_glyph_sx(sx, sy),
                            HS_SF_Y(60), msg, 0xFFCCCCCC, sx, sy);
         return;
