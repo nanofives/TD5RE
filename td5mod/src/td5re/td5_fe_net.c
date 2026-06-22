@@ -2072,34 +2072,10 @@ void Screen_SessionLocked(void) {
  * softlocking. The interactive vote/config UI + net plumbing replace these.
  * ======================================================================== */
 
-void Screen_MpModeVote(void) {
-    switch (s_inner_state) {
-    case 0:
-        TD5_LOG_I(LOG_TAG, "Screen_MpModeVote: enter (scaffold, host=%d)",
-                  td5_net_is_host());
-        s_inner_state = 1;
-        break;
-    default:
-        /* Placeholder pass-through until the interactive UI is built. */
-        g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
-        td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
-        break;
-    }
-}
-
-void Screen_MpModeConfig(void) {
-    switch (s_inner_state) {
-    case 0:
-        TD5_LOG_I(LOG_TAG, "Screen_MpModeConfig: enter (scaffold, mode=%d)",
-                  g_td5.mp_mode_config.mode);
-        s_inner_state = 1;
-        break;
-    default:
-        /* Placeholder pass-through to car selection until options UI is built. */
-        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
-        break;
-    }
-}
+/* Screen_MpModeVote + Screen_MpModeConfig are implemented in td5_fe_race.c
+ * (they reuse that file's local split-screen per-player input statics:
+ * s_num_human_players, mp_simul_player_nav, s_mp_player_ready, k_mp_player_colors,
+ * mp_pos_small_centered, ...). Only Screen_CupWinners stays here for now. */
 
 void Screen_CupWinners(void) {
     switch (s_inner_state) {

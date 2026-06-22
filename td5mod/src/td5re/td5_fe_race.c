@@ -217,6 +217,11 @@ static void frontend_mp_simul_carsel_update(void);
 static void mp_setup_name_append(int p, char c);
 static void mp_setup_name_backspace(int p);
 static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now);
+/* [MP GAME MODES 2026-06-22] */
+static int  mp_game_modes_enabled(void);              /* env TD5RE_MP_GAME_MODES (default ON) */
+static void mp_mode_config_apply_defaults(int mode);  /* reset per-mode options to defaults  */
+void frontend_mp_mode_vote_render(float sx, float sy);   /* dispatched from td5_frontend.c */
+void frontend_mp_mode_config_render(float sx, float sy);
 static void frontend_mp_setup_init(void);
 static void frontend_mp_setup_update(void);
 static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> position picker */
@@ -2631,13 +2636,264 @@ void Screen_MpPosition(void) {
             s_inner_state = 0;        /* CarSelection runs carsel_init next frame */
             for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) s_mp_player_ready[p] = 0;
             td5_plat_input_flush_nav();
-            TD5_LOG_I(LOG_TAG, "MP position: committed -> car select (%d players)", n);
-            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+            /* [MP GAME MODES 2026-06-22] Insert the game-mode vote (then per-mode
+             * config) BETWEEN the screen picker and the car grid, per the user's
+             * flow. s_mp_phase stays 1 so the eventual return lands on the car
+             * grid. Knob TD5RE_MP_GAME_MODES=0 restores the direct car-select. */
+            if (mp_game_modes_enabled()) {
+                TD5_LOG_I(LOG_TAG, "MP position: committed -> game-mode vote (%d players)", n);
+                td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE);
+            } else {
+                TD5_LOG_I(LOG_TAG, "MP position: committed -> car select (%d players)", n);
+                td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+            }
             return;
         }
     } else {
         s_pos_ready_ms = 0;
     }
+}
+
+/* ========================================================================
+ * MP GAME MODES (2026-06-22) — game-mode vote + per-mode config screens
+ *
+ * Local split-screen MP only (the network case picks the mode host-only in the
+ * lobby — separate follow-up). Inserted between the screen picker
+ * (Screen_MpPosition) and the car grid. Player 0 is the HOST: their highlight
+ * is the binding pick (votes are advisory). Every local player casts a vote
+ * shown as a colour-coded arrow (left) + a live tally (right).
+ * ======================================================================== */
+
+/* Knob: TD5RE_MP_GAME_MODES=0 restores the direct MpPosition->car-select flow. */
+static int mp_game_modes_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_MP_GAME_MODES");
+        cached = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return cached;
+}
+
+static const char *const k_mp_mode_names[TD5_MP_MODE_COUNT] = {
+    "REGULAR RACE", "TIME TRIAL", "CUP", "COP CHASE"
+};
+static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
+    "Classic race to the finish",
+    "Race the clock - players pass through each other",
+    "Best-of-X series, points by position",
+    "One cop hunts the rest before time runs out",
+};
+
+/* Each local player's current pick (index into TD5_MpGameMode). Player 0's pick
+ * is the host highlight and the value that gets locked in. */
+static int s_mode_vote[TD5_MAX_HUMAN_PLAYERS];
+
+/* Reset the per-mode option block to sane defaults when a mode is locked. The
+ * mode-config screen (WP0d) edits these; behaviour gating lands per mode WP. */
+static void mp_mode_config_apply_defaults(int mode) {
+    TD5_MpModeConfig *c = &g_td5.mp_mode_config;
+    c->mode = mode;
+    switch (mode) {
+    case TD5_MP_MODE_TIME_TRIAL:
+        c->tt_checkpoint_target = 0;            /* 0 = full race */
+        break;
+    case TD5_MP_MODE_CUP:
+        c->cup_race_count    = 3;
+        c->cup_team_mode     = 0;
+        c->cup_points_scheme = 0;               /* classic {15,12,10,5,4,3} */
+        break;
+    case TD5_MP_MODE_COP_CHASE:
+        c->cop_slot           = 0;              /* host is the cop by default */
+        c->cop_pick_mode      = TD5_COP_PICK_HOST_ASSIGN;
+        c->cop_is_ai          = 0;
+        c->cop_ai_difficulty  = 1;
+        c->cop_win_condition  = TD5_COP_WIN_BUST_ALL;
+        c->suspect_head_start = 12;
+        c->suspect_debuff_pct = 70;
+        break;
+    default:                                    /* TD5_MP_MODE_RACE: no extra opts */
+        break;
+    }
+}
+
+void Screen_MpModeVote(void) {
+    int p, n = s_num_human_players;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    if (s_inner_state == 0) {
+        for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
+            s_mode_vote[p]        = TD5_MP_MODE_RACE;
+            s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);  /* swallow held buttons */
+        }
+        s_anim_complete = 1;
+        s_inner_state   = 1;
+        TD5_LOG_I(LOG_TAG, "MP mode vote: enter (%d players)", n);
+        return;
+    }
+
+    /* [disconnect-modal] freeze + reconnect overlay if a pad dropped. */
+    if (frontend_mp_setup_disconnect_check(n)) return;
+
+    for (p = 0; p < n; p++) {
+        uint32_t bits = mp_simul_player_nav(p);
+        uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
+        s_mp_pane_nav_prev[p] = bits;
+
+        /* UP/DOWN move this player's vote (edge = one step per press). */
+        if (edge & 4) {
+            if (s_mode_vote[p] > 0) { s_mode_vote[p]--; frontend_play_sfx(2); }
+        }
+        if (edge & 8) {
+            if (s_mode_vote[p] < TD5_MP_MODE_COUNT - 1) { s_mode_vote[p]++; frontend_play_sfx(2); }
+        }
+
+        /* Only the HOST (player 0) locks the mode / backs out. */
+        if (p == 0) {
+            if (edge & 0x10) {                              /* A = lock the highlight */
+                mp_mode_config_apply_defaults(s_mode_vote[0]);
+                frontend_play_sfx(3);
+                td5_plat_input_flush_nav();
+                TD5_LOG_I(LOG_TAG, "MP mode vote: host locked mode=%d (%s)",
+                          s_mode_vote[0], k_mp_mode_names[s_mode_vote[0]]);
+                td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+                return;
+            }
+            if (edge & 0x20) {                              /* B = back to screen picker */
+                frontend_play_sfx(5);
+                td5_plat_input_flush_nav();
+                td5_frontend_set_screen(TD5_SCREEN_MP_POSITION);
+                return;
+            }
+        }
+    }
+
+    if (frontend_check_escape()) {
+        td5_plat_input_flush_nav();
+        td5_frontend_set_screen(TD5_SCREEN_MP_POSITION);
+    }
+}
+
+void frontend_mp_mode_vote_render(float sx, float sy) {
+    int p, m, n = s_num_human_players;
+    /* Keep all content within ~[60,400] virtual-y: the frontend canvas is
+     * uniform-scaled and the top/bottom of the 480-tall design space can be
+     * cropped on wide windows. 4 buttons centred about y=240 + footer. */
+    const float bx = 168.0f, bw = 304.0f, bh = 46.0f;
+    const float y0 = 104.0f, gap = 74.0f;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xCC000000u, -1, 0, 0, 1, 1);
+    td5_vui_text_centered(320.0f * sx, 66.0f * sy, "SELECT GAME MODE", 0xFFFFE060u, sx, sy);
+
+    for (m = 0; m < TD5_MP_MODE_COUNT; m++) {
+        float    by      = y0 + (float)m * gap;
+        int      host_on = (s_mode_vote[0] == m);
+        uint32_t fill    = host_on ? 0xF02A3550u : 0xC0141821u;
+        uint32_t mid     = host_on ? 0xFFFFE060u : 0xFF6A7686u;
+        uint32_t inner   = host_on ? 0xFFFFF0A0u : 0xFF8A96A6u;
+        uint32_t outer   = host_on ? 0xFF806020u : 0xFF2A3038u;
+        int      cnt     = 0, stack;
+
+        td5_vui_roundrect(bx * sx, by * sy, bw * sx, bh * sy,
+                          12.0f * sy, 12.0f * sy, 2.0f * sx, 2.0f * sy,
+                          mid, inner, outer, fill, 1.0f);
+        td5_vui_text_centered((bx + bw * 0.5f) * sx, (by + 10.0f) * sy,
+                              k_mp_mode_names[m], host_on ? 0xFFFFFFFFu : 0xFFB0B8C0u, sx, sy);
+        mp_pos_small_centered((bx + bw * 0.5f) * sx, (by + 32.0f) * sy,
+                              k_mp_mode_desc[m], 0xFF8890A0u, sx, sy);
+
+        /* Per-player vote arrows on the LEFT (stacked if several share a pick). */
+        stack = 0;
+        for (p = 0; p < n; p++) {
+            uint32_t col;
+            if (s_mode_vote[p] != m) continue;
+            col = (k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu) | 0xFF000000u;
+            td5_vui_arrow((bx - 20.0f - (float)stack * 15.0f) * sx,
+                          (by + bh * 0.5f - 9.0f) * sy,
+                          15.0f * sx, 18.0f * sy, 1 /*point right*/, col);
+            stack++;
+        }
+        cnt = stack;
+
+        /* Tally on the RIGHT: "xN" + one colour chip per voter. */
+        if (cnt > 0) {
+            char tb[8];
+            snprintf(tb, sizeof tb, "x%d", cnt);
+            td5_vui_text((bx + bw + 12.0f) * sx, (by + 8.0f) * sy, tb, 0xFFFFFFFFu, sx, sy);
+            for (p = 0, stack = 0; p < n; p++) {
+                uint32_t col;
+                if (s_mode_vote[p] != m) continue;
+                col = (k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu) | 0xFF000000u;
+                td5_vui_quad((bx + bw + 12.0f + (float)stack * 11.0f) * sx, (by + 30.0f) * sy,
+                             8.0f * sx, 8.0f * sy, col, -1, 0, 0, 1, 1);
+                stack++;
+            }
+        }
+    }
+
+    /* Control hint directly under the title (the bottom of the 480-tall design
+     * space is cropped on wide windows, so a footer line there isn't reliable). */
+    mp_pos_small_centered(320.0f * sx, 88.0f * sy,
+                          "P1=HOST: UP/DOWN choose, A lock, B back   -   OTHERS vote with UP/DOWN",
+                          0xFFAAB2C0u, sx, sy);
+}
+
+void Screen_MpModeConfig(void) {
+    int n = s_num_human_players;
+    if (n < 1) n = 1;
+
+    if (s_inner_state == 0) {
+        int p;
+        for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+            s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        s_anim_complete = 1;
+        s_inner_state   = 1;
+        TD5_LOG_I(LOG_TAG, "MP mode config: enter (mode=%d) [minimal confirm; options WP0d]",
+                  g_td5.mp_mode_config.mode);
+        return;
+    }
+
+    if (frontend_mp_setup_disconnect_check(n)) return;
+
+    {   /* Host-only confirm / back for now (per-mode option editing = WP0d). */
+        uint32_t bits = mp_simul_player_nav(0);
+        uint32_t edge = bits & ~s_mp_pane_nav_prev[0];
+        s_mp_pane_nav_prev[0] = bits;
+        if (edge & 0x10) {
+            frontend_play_sfx(3);
+            td5_plat_input_flush_nav();
+            TD5_LOG_I(LOG_TAG, "MP mode config: host confirmed mode=%d -> car select",
+                      g_td5.mp_mode_config.mode);
+            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+            return;
+        }
+        if (edge & 0x20) {
+            frontend_play_sfx(5);
+            td5_plat_input_flush_nav();
+            td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE);
+            return;
+        }
+    }
+
+    if (frontend_check_escape()) {
+        td5_plat_input_flush_nav();
+        td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE);
+    }
+}
+
+void frontend_mp_mode_config_render(float sx, float sy) {
+    int mode = g_td5.mp_mode_config.mode;
+    const char *name = (mode >= 0 && mode < TD5_MP_MODE_COUNT) ? k_mp_mode_names[mode] : "?";
+
+    td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xCC000000u, -1, 0, 0, 1, 1);
+    td5_vui_text_centered(320.0f * sx, 60.0f * sy, "GAME MODE OPTIONS", 0xFFFFE060u, sx, sy);
+    td5_vui_text_centered(320.0f * sx, 150.0f * sy, name, 0xFFFFFFFFu, sx, sy);
+    mp_pos_small_centered(320.0f * sx, 196.0f * sy,
+                          "Per-mode options coming next", 0xFF98A0B0u, sx, sy);
+    mp_pos_small_centered(320.0f * sx, 320.0f * sy,
+                          "P1 (HOST): A continue - B back", 0xFFC0C8D0u, sx, sy);
 }
 
 /* [#6] Smooth, SUBTLE pulse in [lo,hi] driven off wall-clock `now`.

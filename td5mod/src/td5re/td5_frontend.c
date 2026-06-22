@@ -9200,6 +9200,18 @@ void td5_frontend_render_ui_rects(void) {
         { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
           frontend_mp_setup_disconnect_render(sx, sy); }
         break;
+    case TD5_SCREEN_MP_MODE_VOTE:   /* [MP GAME MODES 2026-06-22] */
+        { extern void frontend_mp_mode_vote_render(float sx, float sy);
+          frontend_mp_mode_vote_render(sx, sy); }
+        { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+          frontend_mp_setup_disconnect_render(sx, sy); }
+        break;
+    case TD5_SCREEN_MP_MODE_CONFIG: /* [MP GAME MODES 2026-06-22] */
+        { extern void frontend_mp_mode_config_render(float sx, float sy);
+          frontend_mp_mode_config_render(sx, sy); }
+        { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+          frontend_mp_setup_disconnect_render(sx, sy); }
+        break;
     case TD5_SCREEN_CAR_SELECTION:
         frontend_render_car_selection_preview(sx, sy);
         break;
