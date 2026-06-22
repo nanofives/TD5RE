@@ -5853,10 +5853,15 @@ void Screen_RaceResults(void) {
              * and slot 2 (View Race Data) are identical across both branches;
              * only slots 0/3/4 differ. ConfigureGameTypeFlags has runtime
              * side effects (mode globals) so it stays gated to cup races. */
-            const int is_cup = (s_selected_game_type >= 1 &&
+            /* [MP CUP] The MP cup mode behaves as a cup here (Next-Cup-Race /
+             * winners routing) without the SP game-type machinery. */
+            const int mp_cup = td5_game_mp_cup_active();
+            const int sp_cup = (s_selected_game_type >= 1 &&
                                 s_selected_game_type != 7 &&
                                 s_selected_game_type != 9);
-            const int next_valid = is_cup ? ConfigureGameTypeFlags() : 1;
+            const int is_cup = mp_cup || sp_cup;
+            const int next_valid = mp_cup ? td5_game_mp_cup_has_next()
+                                          : (sp_cup ? ConfigureGameTypeFlags() : 1);
             /* [FIXED 2026-06-01] byte-exact SNK_ labels (results action menu, state 0xD):
              * SNK_NextCupRace/RaceAgain/SaveRaceStatus/SelectNewCar/Quit, OK = SNK_OkButTxt. */
             const char *btn0 = is_cup ? SNK_NextCupRace    : SNK_RaceAgain;
@@ -5935,6 +5940,9 @@ void Screen_RaceResults(void) {
                 }
                 if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
                     s_race_within_series++;
+                }
+                if (td5_game_mp_cup_active()) {   /* [MP CUP] next race in the series */
+                    td5_game_mp_cup_advance();
                 }
                 frontend_init_race_schedule();
                 break;
@@ -6059,7 +6067,16 @@ void Screen_RaceResults(void) {
                      * single-race quit path here only needs the screen jump.
                      * Game types 7 (Drag) and 9 (Drag Race) fall under "cup"
                      * here because the dispatch only special-cases <1, NOT 7/9. */
-                    if (s_selected_game_type < 1) {
+                    if (td5_game_mp_cup_active()) {
+                        if (!td5_game_mp_cup_has_next()) {
+                            /* [MP CUP] series finished -> winners/podium screen. */
+                            td5_frontend_set_screen(TD5_SCREEN_CUP_WINNERS);
+                        } else {
+                            /* Quit mid-series -> abandon the cup to the main menu. */
+                            td5_game_mp_cup_end();
+                            td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                        }
+                    } else if (s_selected_game_type < 1) {
                         td5_frontend_set_screen(TD5_SCREEN_NAME_ENTRY);  /* 0x19 */
                     } else if (!s_results_cup_complete) {
                         td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);   /* 5 */

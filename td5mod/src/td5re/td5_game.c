@@ -6316,6 +6316,7 @@ static int check_race_completion(uint32_t sim_delta) {
             TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", TD5_RACE_END_DWELL);
             s_post_finish_cooldown = 0;
             build_results_table();
+            td5_game_mp_cup_award();   /* [MP CUP] tally this race's points */
             return 1;
         }
         return 0;
@@ -8046,6 +8047,107 @@ int td5_game_get_traffic_variant(int traffic_index) {
  * Orig's tracked-vehicle audio fires when slot_iter == 0, so the siren
  * source is the player's actor (slot 0). The port previously returned 1,
  * routing the siren onto an opponent AI. */
+/* ========================================================================
+ * MP CUP (2026-06-22) — self-contained best-of-X series for the "Cup" game
+ * mode. Independent of the SP championship (s_cup_schedules / s_race_within_
+ * series) to avoid entangling that state machine. Drives a track list, per-
+ * position points, optional teams, and routes to the winners/podium screen.
+ * ======================================================================== */
+static int s_mpcup_active     = 0;
+static int s_mpcup_race_count = 0;
+static int s_mpcup_current    = 0;   /* 0-based index of the race in progress */
+static int s_mpcup_awarded    = 0;   /* points already tallied for this race  */
+static int s_mpcup_team_mode  = 0;
+static int s_mpcup_tracks[TD5_CUP_MAX_RACES];
+static int s_mpcup_points[TD5_MAX_RACER_SLOTS];
+static int s_mpcup_team[TD5_MAX_RACER_SLOTS];
+
+/* Points by finishing position (0-based). Matches the original cup ladder
+ * {15,12,10,5,4,3} @ 0x00463a18. */
+static const int k_mpcup_points[6] = { 15, 12, 10, 5, 4, 3 };
+
+static void mpcup_build_track_list(void) {
+    int i, n = g_td5.mp_mode_config.cup_race_count, have_cfg = 0;
+    if (n < 1) n = 3;
+    if (n > TD5_CUP_MAX_RACES) n = TD5_CUP_MAX_RACES;
+    s_mpcup_race_count = n;
+    for (i = 0; i < n; i++)
+        if (g_td5.mp_mode_config.cup_track_indices[i] > 0) { have_cfg = 1; break; }
+    for (i = 0; i < n; i++) {
+        /* Host-configured list when present, else a rotation from the picked
+         * track. Keep on the racing-track range (0..18); skip the drag strip. */
+        int t = have_cfg ? g_td5.mp_mode_config.cup_track_indices[i]
+                         : (g_td5.track_index + i);
+        if (t < 0) t = 0;
+        t %= 19;
+        s_mpcup_tracks[i] = t;
+    }
+}
+
+void td5_game_mp_cup_begin(void) {
+    int i;
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_CUP) { s_mpcup_active = 0; return; }
+    mpcup_build_track_list();
+    s_mpcup_current   = 0;
+    s_mpcup_awarded   = 0;
+    s_mpcup_team_mode = g_td5.mp_mode_config.cup_team_mode;
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        s_mpcup_points[i] = 0;
+        s_mpcup_team[i] = (i < TD5_NET_MAX_PLAYERS)
+                          ? g_td5.mp_mode_config.team_of_slot[i] : 0;
+    }
+    s_mpcup_active = 1;
+    TD5_LOG_I(LOG_TAG, "MP CUP begin: races=%d team_mode=%d track[0]=%d",
+              s_mpcup_race_count, s_mpcup_team_mode, s_mpcup_tracks[0]);
+}
+
+int  td5_game_mp_cup_active(void)     { return s_mpcup_active; }
+int  td5_game_mp_cup_current(void)    { return s_mpcup_current; }
+int  td5_game_mp_cup_race_count(void) { return s_mpcup_race_count; }
+int  td5_game_mp_cup_team_mode(void)  { return s_mpcup_team_mode; }
+int  td5_game_mp_cup_has_next(void) {
+    return s_mpcup_active && (s_mpcup_current + 1 < s_mpcup_race_count);
+}
+int  td5_game_mp_cup_points(int slot) {
+    return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_mpcup_points[slot] : 0;
+}
+int  td5_game_mp_cup_team(int slot) {
+    return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_mpcup_team[slot] : 0;
+}
+int  td5_game_mp_cup_track(void) {
+    if (!s_mpcup_active) return -1;
+    if (s_mpcup_current < 0 || s_mpcup_current >= s_mpcup_race_count) return -1;
+    return s_mpcup_tracks[s_mpcup_current];
+}
+
+/* Tally points by finishing position for the race that just completed. */
+void td5_game_mp_cup_award(void) {
+    int slot;
+    if (!s_mpcup_active || s_mpcup_awarded) return;
+    for (slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
+        int pos;
+        if (s_slot_state[slot].state == 3) continue;   /* inactive slot */
+        pos = td5_game_get_finish_position(slot);       /* 0-based; -1 if DNF */
+        if (pos < 0 || pos >= 6) pos = 5;               /* DNF -> last place */
+        s_mpcup_points[slot] += k_mpcup_points[pos];
+    }
+    s_mpcup_awarded = 1;
+    TD5_LOG_I(LOG_TAG, "MP CUP race %d/%d points tallied",
+              s_mpcup_current + 1, s_mpcup_race_count);
+}
+
+void td5_game_mp_cup_advance(void) {
+    if (!s_mpcup_active) return;
+    if (s_mpcup_current + 1 < s_mpcup_race_count) {
+        s_mpcup_current++;
+        s_mpcup_awarded = 0;
+        TD5_LOG_I(LOG_TAG, "MP CUP advance -> race %d/%d track=%d",
+                  s_mpcup_current + 1, s_mpcup_race_count, td5_game_mp_cup_track());
+    }
+}
+
+void td5_game_mp_cup_end(void) { s_mpcup_active = 0; }
+
 /* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot for cop-chase /
  * wanted mode. Single-player wanted (game_type 8) keeps the player (slot 0) as
  * the cop ramming AI suspects; MP cop chase uses the host-configured cop_slot

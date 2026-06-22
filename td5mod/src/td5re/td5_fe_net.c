@@ -2080,12 +2080,77 @@ void Screen_SessionLocked(void) {
 void Screen_CupWinners(void) {
     switch (s_inner_state) {
     case 0:
-        TD5_LOG_I(LOG_TAG, "Screen_CupWinners: enter (scaffold)");
-        s_inner_state = 1;
+        TD5_LOG_I(LOG_TAG, "Screen_CupWinners: enter (races=%d)",
+                  td5_game_mp_cup_race_count());
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_reset_buttons();
+        frontend_create_button(SNK_OkButTxt, 320 - 60, 400, 120, 28);
+        s_anim_complete = 1;
+        s_inner_state   = 1;
         break;
     default:
-        /* Placeholder: return to the main menu until the podium UI is built. */
-        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+        /* Confirm (button / ESC) returns to the main menu and ends the cup. */
+        if ((s_input_ready && s_button_index >= 0) || frontend_check_escape()) {
+            td5_game_mp_cup_end();
+            td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+        }
         break;
+    }
+}
+
+/* Final cup standings / podium — sorted by accumulated points (desc). Team
+ * totals are shown when team mode is on. Drawn with the public VectorUI text. */
+void frontend_cup_winners_render(float sx, float sy) {
+    extern const uint32_t k_mp_player_colors[];
+    int order[TD5_MAX_RACER_SLOTS], n = 0, i, j;
+    char buf[64];
+    float y;
+
+    td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xE0000000u, -1, 0, 0, 1, 1);
+    td5_vui_text_centered(320.0f * sx, 60.0f * sy, "CUP WINNERS", 0xFFFFE060u, sx, sy);
+    snprintf(buf, sizeof buf, "FINAL STANDINGS  (%d RACES)", td5_game_mp_cup_race_count());
+    td5_vui_text_centered(320.0f * sx, 92.0f * sy, buf, 0xFFB0B8C0u, sx, sy);
+
+    /* Collect active racer slots, then selection-sort by points (descending). */
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
+        if (td5_game_get_slot_state(i) != 3) order[n++] = i;
+    for (i = 0; i < n; i++)
+        for (j = i + 1; j < n; j++)
+            if (td5_game_mp_cup_points(order[j]) > td5_game_mp_cup_points(order[i])) {
+                int t = order[i]; order[i] = order[j]; order[j] = t;
+            }
+
+    y = 132.0f;
+    for (i = 0; i < n && i < 6; i++) {
+        int slot = order[i];
+        uint32_t col = (k_mp_player_colors[slot % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu) | 0xFF000000u;
+        if (td5_game_mp_cup_team_mode())
+            snprintf(buf, sizeof buf, "%d.  PLAYER %d  (TEAM %d)  -  %d PTS",
+                     i + 1, slot + 1, td5_game_mp_cup_team(slot) + 1,
+                     td5_game_mp_cup_points(slot));
+        else
+            snprintf(buf, sizeof buf, "%d.  PLAYER %d  -  %d PTS",
+                     i + 1, slot + 1, td5_game_mp_cup_points(slot));
+        td5_vui_text_centered(320.0f * sx, y * sy, buf,
+                              (i == 0) ? 0xFFFFFFFFu : col, sx, sy);
+        y += 30.0f;
+    }
+
+    /* Team totals (when teams are on): sum points per team id, up to 4 teams. */
+    if (td5_game_mp_cup_team_mode()) {
+        int tot[4] = {0,0,0,0}, k;
+        for (i = 0; i < n; i++) {
+            int tm = td5_game_mp_cup_team(order[i]);
+            if (tm >= 0 && tm < 4) tot[tm] += td5_game_mp_cup_points(order[i]);
+        }
+        y += 8.0f;
+        td5_vui_text_centered(320.0f * sx, y * sy, "TEAM TOTALS", 0xFFFFE060u, sx, sy);
+        y += 26.0f;
+        for (k = 0; k < 4; k++) {
+            if (tot[k] == 0) continue;
+            snprintf(buf, sizeof buf, "TEAM %d  -  %d PTS", k + 1, tot[k]);
+            td5_vui_text_centered(320.0f * sx, y * sy, buf, 0xFFC0C8D0u, sx, sy);
+            y += 24.0f;
+        }
     }
 }

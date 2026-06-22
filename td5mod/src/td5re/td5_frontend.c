@@ -2808,6 +2808,16 @@ void frontend_init_race_schedule(void) {
                         ? s_attract_track
                         : s_selected_track;
 
+    /* [MP CUP 2026-06-22] Begin the series on the first cup race (seeds its track
+     * list from the picked track) and force the current cup race's track. */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_CUP) {
+        if (!td5_game_mp_cup_active()) td5_game_mp_cup_begin();
+        {
+            int ct = td5_game_mp_cup_track();
+            if (ct >= 0) { s_selected_track = ct; g_td5.track_index = ct; }
+        }
+    }
+
     /* --- Local human count + split-screen layout (PORT ENHANCEMENT 2026-06) ---
      * s_num_human_players is the single source of truth, set by EITHER the Quick
      * Race "Players" selector OR the rebuilt Multiplayer Options "PLAYERS" button
@@ -9211,6 +9221,10 @@ void td5_frontend_render_ui_rects(void) {
           frontend_mp_mode_config_render(sx, sy); }
         { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
           frontend_mp_setup_disconnect_render(sx, sy); }
+        break;
+    case TD5_SCREEN_CUP_WINNERS:    /* [MP CUP 2026-06-22] */
+        { extern void frontend_cup_winners_render(float sx, float sy);
+          frontend_cup_winners_render(sx, sy); }
         break;
     case TD5_SCREEN_CAR_SELECTION:
         frontend_render_car_selection_preview(sx, sy);
