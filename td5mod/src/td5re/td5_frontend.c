@@ -9210,22 +9210,9 @@ void td5_frontend_render_ui_rects(void) {
         { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
           frontend_mp_setup_disconnect_render(sx, sy); }
         break;
-    case TD5_SCREEN_MP_MODE_VOTE:   /* [MP GAME MODES 2026-06-22] */
-        { extern void frontend_mp_mode_vote_render(float sx, float sy);
-          frontend_mp_mode_vote_render(sx, sy); }
-        { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
-          frontend_mp_setup_disconnect_render(sx, sy); }
-        break;
-    case TD5_SCREEN_MP_MODE_CONFIG: /* [MP GAME MODES 2026-06-22] */
-        { extern void frontend_mp_mode_config_render(float sx, float sy);
-          frontend_mp_mode_config_render(sx, sy); }
-        { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
-          frontend_mp_setup_disconnect_render(sx, sy); }
-        break;
-    case TD5_SCREEN_CUP_WINNERS:    /* [MP CUP 2026-06-22] */
-        { extern void frontend_cup_winners_render(float sx, float sy);
-          frontend_cup_winners_render(sx, sy); }
-        break;
+    /* [MP GAME MODES 2026-06-22] vote / config / cup-winners overlays are drawn
+     * in the POST-button pass below so their two-line labels + value text
+     * composite ON TOP of the standard button frames. */
     case TD5_SCREEN_CAR_SELECTION:
         frontend_render_car_selection_preview(sx, sy);
         break;
@@ -9471,6 +9458,22 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_SOUND_OPTIONS:
             for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
+            break;
+        case TD5_SCREEN_MP_MODE_VOTE:   /* [MP GAME MODES 2026-06-22] on top of frames */
+            { extern void frontend_mp_mode_vote_render(float sx, float sy);
+              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+              frontend_mp_mode_vote_render(sx, sy);
+              frontend_mp_setup_disconnect_render(sx, sy); }
+            break;
+        case TD5_SCREEN_MP_MODE_CONFIG:
+            { extern void frontend_mp_mode_config_render(float sx, float sy);
+              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+              frontend_mp_mode_config_render(sx, sy);
+              frontend_mp_setup_disconnect_render(sx, sy); }
+            break;
+        case TD5_SCREEN_CUP_WINNERS:
+            { extern void frontend_cup_winners_render(float sx, float sy);
+              frontend_cup_winners_render(sx, sy); }
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,

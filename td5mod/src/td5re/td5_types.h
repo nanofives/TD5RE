@@ -433,7 +433,8 @@ typedef struct TD5_MpModeConfig {
     int32_t mode;                 /* TD5_MpGameMode */
 
     /* --- Time trial --- */
-    int32_t tt_checkpoint_target; /* checkpoints/laps to win (0 = full race)        */
+    int32_t tt_checkpoint_start;  /* count from this checkpoint (0..4)               */
+    int32_t tt_checkpoint_finish; /* win at this checkpoint (> start; 5 = finish line)*/
 
     /* --- Cup --- */
     int32_t cup_race_count;                       /* races in the series (best of X) */
