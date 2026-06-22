@@ -4964,7 +4964,10 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->z_enable     = 1;  /* LEQUAL — walls/crests/kerbs occlude ground decals again */
         s->z_write      = 0;
         s->z_func       = 0;  /* LEQUAL */
-        s->polygon_offset    = 0;  /* vertex-level view-z pulls handle the tie instead */
+        s->polygon_offset    = 0;  /* vertex-level view-z pull + the world-Y lift
+                                    * (td5_render.c shadow_lift_frac) win the tie;
+                                    * a rasterizer pull would shove the shadow over
+                                    * kerbs/walls (the regression LEQUAL fixed). */
         s->mag_filter   = 0;
         s->min_filter   = 0;
         s->texblend_mode = D3DTBLEND_MODULATEALPHA;

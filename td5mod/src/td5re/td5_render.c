@@ -675,6 +675,30 @@ static int td6_car_zfix_enabled(void)
     return cached;
 }
 
+/* [TRAFFIC CRASH SMOKE 2026-06-21] Per user spec: a TRAFFIC/cop car must smoke
+ * ONLY when it has taken a FATAL hit (it becomes a broken-down wreck). Default
+ * OFF: traffic does NOT emit the incidental engine-rev puff + wheelspin smoke.
+ * Those two emitters fire whenever a car's wheels slip or its RPM sits in the
+ * puff window — which a traffic car hits while tumbling through a NON-fatal
+ * crash-spin, then drops the instant it recovers and grips again, producing the
+ * reported "smoke during the collision, gone after recovery". With this off a
+ * recovering traffic car shows nothing; only a totalled one keeps its wreck
+ * plume. Set TD5RE_TRAFFIC_RECOVER_SMOKE=1 to restore the old always-on
+ * incidental traffic smoke for A/B. Racers (player + AI opponents) are never
+ * gated by this — their incidental smoke stays faithful. */
+static int traffic_recover_smoke_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_RECOVER_SMOKE");
+        cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+        TD5_LOG_I(LOG_TAG, "traffic recover-smoke %s -> traffic smokes only-when-fatal=%s",
+                  cached ? "ON (legacy incidental smoke)" : "OFF",
+                  cached ? "no" : "yes");
+    }
+    return cached;
+}
+
 /* [S23] Per-slot authored rear/brake-light positions (model space, int16[3] ×2).
  * Ported TD6 cars carry WRONG taillight values in the binary carparam.dat at
  * +0x60/+0x68 — that is NOT TD6's brake-light field. TD6.exe instead reads the
@@ -3897,9 +3921,21 @@ void td5_render_actors_for_view(int view_index)
                  * actor per frame, unconditional on wanted-mode (it's the
                  * "labouring engine" puff visible during slow climbs etc.).
                  * Skipped under cinematic-preset for consistency with the
-                 * surrounding rear-wheel/wanted-smoke skip. */
-                td5_vfx_spawn_random_smoke_puff(actor, view_index);
-                td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
+                 * surrounding rear-wheel/wanted-smoke skip.
+                 *
+                 * [TRAFFIC CRASH SMOKE 2026-06-21] Restrict these two incidental
+                 * emitters to RACERS. For TRAFFIC/cops they fired during the
+                 * non-fatal crash-spin (slipping wheels / high RPM while the car
+                 * tumbled) and then stopped on recovery — the "smoke during the
+                 * crash, gone after recovery" the user reported. Per spec a
+                 * traffic car smokes ONLY on a FATAL hit, handled by the
+                 * broken-down wreck plume just below; a recovering traffic car
+                 * now shows nothing. Racer smoke is unchanged. Knob
+                 * TD5RE_TRAFFIC_RECOVER_SMOKE=1 restores the old behaviour. */
+                if (is_racer || traffic_recover_smoke_enabled()) {
+                    td5_vfx_spawn_random_smoke_puff(actor, view_index);
+                    td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
+                }
                 if (broken_smoke_ok) {
                     /* [#5 2026-06-20] A wrecked traffic/cop car smokes from its
                      * ROOF (dense, lifted column) so a totalled car clearly reads
