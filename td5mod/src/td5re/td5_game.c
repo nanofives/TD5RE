@@ -1668,19 +1668,13 @@ int td5_game_init_race_session(void) {
                   g_td5.mp_mode_config.suspect_head_start);
     }
 
-    /* [MP TIME TRIAL 2026-06-22] Time trial now races against AI opponents (the
-     * old no-opponents behaviour is removed). Fill the racer field with AI so the
-     * player isn't alone; the OTHER HUMAN players are non-colliding ghosts while
-     * the AI are solid race opponents. time_trial_enabled stays 0 so the solo
-     * 2-slot limit (below) doesn't apply. */
-    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL && !g_td5.network_active) {
-        int want = TD5_LEGACY_RACE_SLOTS - g_td5.num_human_players;
-        if (want < 0) want = 0;
-        if (g_td5.num_ai_opponents < want) g_td5.num_ai_opponents = want;
+    /* [MP TIME TRIAL 2026-06-22] TT races against AI opponents; time_trial_enabled
+     * stays 0 so the solo 2-slot limit (below) doesn't apply. The AI COUNT is set
+     * up front in frontend_init_race_schedule (mp_tt_fill_opponents) so the AI car
+     * pool is built — bumping num_ai_opponents HERE would spawn AI with no car
+     * definition (crash). */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL && !g_td5.network_active)
         g_td5.time_trial_enabled = 0;
-        TD5_LOG_I(LOG_TAG, "InitRace: MP TIME TRIAL — AI opponents=%d (humans=%d)",
-                  g_td5.num_ai_opponents, g_td5.num_human_players);
-    }
 
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
      * @ 0x004B0FA8). This is the runtime gate read by both the HUD timer

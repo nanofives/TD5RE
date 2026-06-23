@@ -2848,6 +2848,17 @@ void frontend_init_race_schedule(void) {
         if (humans < 1) humans = 1;
         if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
 
+        /* [MP TIME TRIAL 2026-06-22] Auto-fill the AI field for time trial (its
+         * manual opponents selector is hidden). Set s_num_ai_opponents HERE,
+         * before the AI count is committed + the AI car pool is built below, so
+         * every opponent gets a car definition (setting it later = spawn with no
+         * car def = crash). */
+        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL) {
+            int fill = TD5_LEGACY_RACE_SLOTS - humans;
+            if (fill < 0) fill = 0;
+            s_num_ai_opponents = fill;
+        }
+
         /* [PORT ENHANCEMENT 2026-06] Single-player: the active menu controller
          * (whoever navigated here) becomes the driver = player 0's device. */
         if (!s_mp_flow) {

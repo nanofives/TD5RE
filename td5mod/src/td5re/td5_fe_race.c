@@ -1054,13 +1054,6 @@ void Screen_QuickRaceMenu(void) {
           if (bt >= 0) { s_buttons[bt].hidden = 1; s_buttons[bt].disabled = 1; }
 #endif
         }
-        /* [MP TIME TRIAL 2026-06-22] AI opponents are auto-filled in time trial,
-         * so the manual Opponents selector is removed from this setup screen. */
-        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL &&
-            QR_BTN_OPPONENTS >= 0 && QR_BTN_OPPONENTS < FE_MAX_BUTTONS) {
-            s_buttons[QR_BTN_OPPONENTS].hidden = 1;
-            s_buttons[QR_BTN_OPPONENTS].disabled = 1;
-        }
         /* [2026-06-15 TASK A1] Dev-only "Span Offset" click-to-type button on its
          * OWN row below the "AI Screens" row (QR_BTN_SPLITSCREENS @ row5); OK/Back
          * moved down to row7 above. Created LAST so QR_BTN_OK/BACK/PLAYERAI/AUTOTHR
@@ -5002,6 +4995,12 @@ void Screen_TrackSelection(void) {
         frontend_update_difficulty_button_visibility(6);
         /* [COP-CHASE 2026-06-21] Hide the POLICE row in Cop Chase / wanted mode. */
         frontend_update_police_button_visibility(5);
+        /* [MP TIME TRIAL 2026-06-22] AI opponents are auto-filled in time trial,
+         * so hide the manual OPPONENTS row (button 2) on the track selector. */
+        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL) {
+            s_buttons[2].hidden = 1;
+            s_buttons[2].disabled = 1;
+        }
         s_race_difficulty = g_td5.difficulty_tier;
         if (s_race_difficulty < 0) s_race_difficulty = 0;
         if (s_race_difficulty > 2) s_race_difficulty = 2;
