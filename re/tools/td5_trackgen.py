@@ -825,6 +825,98 @@ def sample_spec(kind, name=None):
 
 
 # ==========================================================================
+# Programmatic API (used by the Track Studio web tool)
+# ==========================================================================
+def build_track(spec_raw, assets_root=None, slot=None, level=None):
+    """Build a track from a neutral centerline spec (dict) and register it.
+    Pass slot/level to overwrite an existing custom track (editing); omit to
+    auto-assign. Returns a result dict. Used by td5_track_studio.py."""
+    assets_root = assets_root or _default_assets_root()
+    spec = normalize_spec(spec_raw)
+    level_no = pick_level_number(assets_root, level)
+    manifest = load_manifest(assets_root)
+    slot_n = pick_slot(manifest, slot)
+    out_dir, nspans = write_level(assets_root, level_no, spec)
+    entry, manifest_path = update_manifest(assets_root, slot_n, level_no, spec, nspans)
+    return {"ok": True, "slot": slot_n, "level": level_no, "dir": out_dir,
+            "spans": nspans, "circuit": bool(spec["circuit"]), "entry": entry}
+
+
+def extract_track(assets_root, level_no, name=None, decimate_to=72):
+    """Reverse an existing levelNNN/ into an editable centerline spec (main ring).
+
+    A centerline node is the midpoint of each span's left/right rail; lane count,
+    width and surface come from the span; circuit flag, checkpoints, weather and
+    fog come from levelinf.json. The dense per-span centerline is decimated to
+    ~decimate_to nodes for editing (the build resamples on the way back out).
+    Branch corridors (spans past the ring) are NOT extracted yet -- a warning is
+    returned. Returns (spec_dict, warnings_list).
+    """
+    assets_root = assets_root or _default_assets_root()
+    ld = os.path.join(levels_dir(assets_root), "level%03d" % int(level_no))
+    with open(os.path.join(ld, "strip.json"), encoding="utf-8") as f:
+        strip = json.load(f)
+    hdr = strip["header"]; spans = strip["spans"]; verts = strip["vertices"]
+    ring = max(1, hdr[1]); total = hdr[4]
+    nv = len(verts)
+    dense = []
+    for i in range(ring):
+        s = spans[i]
+        lanes = s[3] & 0x0F
+        if lanes < 1:
+            lanes = 1
+        lvi = s[4]
+        if lvi < 0 or lvi >= nv:
+            continue
+        ri = min(lvi + lanes, nv - 1)
+        L = verts[lvi]; R = verts[ri]
+        ox, oy, oz = s[8], s[9], s[10]
+        cx = ox + (L[0] + R[0]) * 0.5
+        cy = oy + (L[1] + R[1]) * 0.5
+        cz = oz + (L[2] + R[2]) * 0.5
+        width = math.hypot(R[0] - L[0], R[2] - L[2]) or (lanes * DEFAULT_LANE_WIDTH)
+        dense.append({"x": round(cx, 1), "z": round(cz, 1), "y": round(cy, 1),
+                      "lanes": lanes, "width": round(width, 1), "surface": s[1] & 0x0F})
+    # decimate evenly for editing (keep the shape, drop the per-span density)
+    if decimate_to and len(dense) > decimate_to:
+        step = len(dense) / float(decimate_to)
+        nodes = [dense[int(k * step)] for k in range(decimate_to)]
+    else:
+        nodes = dense
+    if len(nodes) < 2:
+        raise ValueError("level %d has too few usable spans to extract" % level_no)
+
+    spec = {"name": (name or ("LEVEL %d" % level_no)).upper()[:30],
+            "circuit": True, "nodes": nodes, "checkpoints": "auto:4",
+            "weather": 2, "fog": {"enabled": 0, "r": 0, "g": 0, "b": 0},
+            "traffic_enable": 0, "branches": []}
+
+    li_path = os.path.join(ld, "levelinf.json")
+    if os.path.isfile(li_path):
+        with open(li_path, encoding="utf-8") as f:
+            li = json.load(f)
+
+        def _v(key, dflt=0):
+            x = li.get(key)
+            if isinstance(x, dict):
+                x = x.get("value", dflt)
+            return dflt if x is None else x
+
+        spec["circuit"] = (_v("track_type", 1) == 1)
+        spec["weather"] = int(_v("weather_type", 2))
+        spec["traffic_enable"] = int(_v("traffic_enable", 0))
+        if int(_v("fog_enabled", 0)):
+            spec["fog"] = {"enabled": 1, "r": int(_v("fog_color_r", 0)),
+                           "g": int(_v("fog_color_g", 0)), "b": int(_v("fog_color_b", 0))}
+
+    warnings = []
+    if total > ring:
+        warnings.append("track has %d branch span(s); branches aren't extracted yet "
+                        "(they'll be dropped if you rebuild)" % (total - ring))
+    return spec, warnings
+
+
+# ==========================================================================
 # CLI
 # ==========================================================================
 def _default_assets_root():
