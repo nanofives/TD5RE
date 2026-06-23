@@ -67,6 +67,12 @@ static void dbglog(const char *fmt, ...) {
 extern void td5_platform_win32_init(void *ddraw4, void *d3ddevice3,
                                     void *primary_surface);
 
+/* Sets the process AppUserModelID so the taskbar groups our window under its
+ * own button and renders THAT window's TD5 icon. MUST run before any window is
+ * created (Backend_CreateDevice), else the taskbar button keeps the
+ * process-default identity and shows the generic icon on fresh machines. */
+extern void td5_platform_win32_set_app_id(void);
+
 /* ========================================================================
  * Default display configuration
  * ======================================================================== */
@@ -642,6 +648,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     _controlfp(_RC_DOWN | _PC_64, _MCW_RC | _MCW_PC);
 
     SetUnhandledExceptionFilter(td5_crash_handler);
+
+    /* Claim our taskbar identity BEFORE any window is created (Backend_CreateDevice
+     * below). Windows fixes a top-level window's taskbar grouping/icon when its
+     * button is first created; setting the AppUserModelID afterwards is too late
+     * to re-home it, which is why a freshly-synced PC (no cached icon association)
+     * showed the generic icon instead of the TD5 icon. Set early -> the button is
+     * born under our identity and uses the embedded TD5 icon on every machine. */
+    td5_platform_win32_set_app_id();
 
     /* Initialize multi-file logging (creates log/ dir, rotates old sessions) */
     td5_plat_log_init();

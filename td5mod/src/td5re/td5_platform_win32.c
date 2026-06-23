@@ -414,11 +414,26 @@ static void td5_apply_window_icons(HWND hwnd)
  * Declared inline (mirrors the DwmSetWindowAttribute / XInput precedent) to
  * avoid pulling the heavy <shobjidl.h> COM header under WIN32_LEAN_AND_MEAN;
  * the symbol resolves at link time from shell32 (-lshell32). Best-effort: any
- * failure (older OS, missing export) is silently ignored. */
-static void td5_set_app_user_model_id(void)
+ * failure (older OS, missing export) is silently ignored.
+ *
+ * MUST be called BEFORE the app presents any UI (before the display window is
+ * created / shown). Windows assigns the taskbar button its grouping identity
+ * when the button is first created; setting the AUMID afterwards leaves the
+ * existing button under the process-default identity and it never re-homes to
+ * our window's icon. Set too late, a freshly-installed PC (no cached icon
+ * association) shows the generic default icon -- the classic "icon works on the
+ * dev box but is blank on another computer" symptom. main.c:WinMain therefore
+ * calls this at the very top, before Backend_CreateDevice() builds the window.
+ * Idempotent (guarded) so the later platform-init path is a harmless no-op. */
+void td5_platform_win32_set_app_id(void)
 {
+    static int s_app_id_set = 0;
     typedef HRESULT (WINAPI *PFN_SetCurrentProcessExplicitAppUserModelID)(PCWSTR);
-    HMODULE hShell = LoadLibraryA("shell32.dll");
+    HMODULE hShell;
+    if (s_app_id_set)
+        return;
+    s_app_id_set = 1;
+    hShell = LoadLibraryA("shell32.dll");
     if (hShell) {
         PFN_SetCurrentProcessExplicitAppUserModelID pSet =
             (PFN_SetCurrentProcessExplicitAppUserModelID)
@@ -439,10 +454,13 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
     s_d3ddevice3 = (WrapperDevice *)d3ddevice3;
     s_primary    = (WrapperSurface *)primary_surface;
 
-    /* Set the taskbar identity before the window icon is applied below so the
-     * taskbar button uses our window's TD5 icon on every machine, not just the
-     * dev box. Harmless if it returns early (no window yet in some paths). */
-    td5_set_app_user_model_id();
+    /* Taskbar identity is normally set at the very top of WinMain (before the
+     * window exists). This fallback covers alternate entry flows (e.g. the
+     * wrapper-DLL path) where WinMain did not run; the call is guarded so when
+     * WinMain already set it this is a no-op. NOTE: by this point the window is
+     * already shown, so a first-time set here is too late to re-home the taskbar
+     * button -- WinMain is the path that actually fixes the blank-icon symptom. */
+    td5_platform_win32_set_app_id();
 
     /* In standalone mode g_backend.hwnd is NULL (to avoid message forwarding
      * loops in DisplayWindowProc). Use the backend display window directly
