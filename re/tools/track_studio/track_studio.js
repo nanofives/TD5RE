@@ -72,6 +72,7 @@ let drawingBranch = null;           // {lanes, nodes:[]} while drawing
 let roadTex = null, groundTex = null;   // preview textures
 let showLanes = false, editNodes = true, showCpGates = true;
 let currentLevel = null, currentAssets = null;   // imported track's source + its assets
+let envLoaded = false;                            // environment geometry present -> hide ribbon fill
 const raycaster = new THREE.Raycaster();
 const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);  // view-space ground (y=0)
 
@@ -132,13 +133,16 @@ function ribbon(nodes, circuit, opts) {
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   geo.computeVertexNormals();
-  const useTex = roadTex && !opts.ghost;
-  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
-    map: useTex ? roadTex : null, vertexColors: !useTex,
-    side: THREE.DoubleSide, roughness: 0.95, metalness: 0.0,
-    transparent: !!opts.ghost, opacity: opts.ghost ? 0.6 : 1.0,
-  }));
-  g.add(mesh);
+  // when the real environment geometry is loaded, hide the filled main ribbon so
+  // it doesn't z-fight the env road; keep rails/rungs/handles as editing overlay.
+  if (!(envLoaded && !opts.ghost)) {
+    const useTex = roadTex && !opts.ghost;
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      map: useTex ? roadTex : null, vertexColors: !useTex,
+      side: THREE.DoubleSide, transparent: !!opts.ghost, opacity: opts.ghost ? 0.6 : 1.0,
+    }));
+    g.add(mesh);
+  }
   // rail edge lines
   const railMat = new THREE.LineBasicMaterial({ color: opts.edge != null ? opts.edge : 0xc4c8d0 });
   for (const side of [L, R]) {
@@ -509,7 +513,11 @@ $('skyTexFile').onchange = (e) => {
     scene.background = t; URL.revokeObjectURL(url); setStatus('Skybox applied.', 'ok');
   }, undefined, () => { URL.revokeObjectURL(url); setStatus('skybox load failed', 'bad'); });
 };
-$('clearTexBtn').onclick = () => { roadTex = groundTex = null; scene.background = new THREE.Color(0x12141a); rebuild(false); setStatus('Cleared textures + skybox.', 'ok'); };
+$('clearTexBtn').onclick = () => {
+  roadTex = groundTex = null; scene.background = new THREE.Color(0x12141a);
+  $('roadTexSel').value = ''; $('groundTexSel').value = '';
+  rebuild(false); setStatus('Cleared textures + skybox.', 'ok');
+};
 $('showLanes').onchange = (e) => { showLanes = e.target.checked; rebuild(false); };
 $('editNodes').onchange = (e) => { editNodes = e.target.checked; if (!editNodes) selected = -1; rebuild(false); };
 
@@ -536,22 +544,24 @@ async function refreshTrackAssets() {
   } catch (e) { /* ignore */ }
 }
 $('roadTexSel').onchange = async (e) => {
-  if (!e.target.value || currentLevel == null) return;
+  if (!e.target.value) { roadTex = null; rebuild(false); setStatus('Road texture cleared.', 'ok'); return; }
+  if (currentLevel == null) return;
   try { roadTex = await trackTexture(currentLevel, e.target.value); rebuild(false); setStatus('Road texture from track applied.', 'ok'); }
   catch { setStatus('texture load failed', 'bad'); }
 };
 $('groundTexSel').onchange = async (e) => {
-  if (!e.target.value || currentLevel == null) return;
+  if (!e.target.value) { groundTex = null; rebuild(false); setStatus('Ground texture cleared.', 'ok'); return; }
+  if (currentLevel == null) return;
   try { const t = await trackTexture(currentLevel, e.target.value); t.repeat.set(24, 24); groundTex = t; rebuild(false); setStatus('Ground texture from track applied.', 'ok'); }
   catch { setStatus('texture load failed', 'bad'); }
 };
 $('skyTrackBtn').onclick = async () => {
   if (!currentAssets || !currentAssets.skybox.length) { setStatus('no skybox in this track', 'warn'); return; }
-  try { const t = await trackTexture(currentLevel, currentAssets.skybox[0], false); t.mapping = THREE.EquirectangularReflectionMapping; scene.background = t; setStatus('Skybox from track applied.', 'ok'); }
+  try { const t = await trackTexture(currentLevel, currentAssets.skybox[0]); t.mapping = THREE.EquirectangularReflectionMapping; scene.background = t; setStatus('Skybox from track applied.', 'ok'); }
   catch { setStatus('skybox load failed', 'bad'); }
 };
 $('cpGates').onchange = (e) => { showCpGates = e.target.checked; rebuild(false); };
-$('clearEnvBtn').onclick = () => { while (envRoot.children.length) envRoot.remove(envRoot.children[0]); setStatus('Cleared environment.', 'ok'); };
+$('clearEnvBtn').onclick = () => { while (envRoot.children.length) envRoot.remove(envRoot.children[0]); envLoaded = false; rebuild(false); setStatus('Cleared environment.', 'ok'); };
 $('loadEnvBtn').onclick = async () => {
   if (currentLevel == null) { setStatus('Import a track first.', 'warn'); return; }
   setStatus('Loading environment (decoding models.bin, may take a moment)…');
@@ -565,14 +575,18 @@ $('loadEnvBtn').onclick = async () => {
       while (envRoot.children.length) envRoot.remove(envRoot.children[0]);
       gltf.scene.traverse((o) => {
         if (o.isMesh) {
-          const page = (o.userData && o.userData.prr) ? o.userData.prr.texture_page_id : -1;
+          const prr = (o.userData && o.userData.prr) || (o.parent && o.parent.userData && o.parent.userData.prr);
+          const page = prr ? prr.texture_page_id : -1;
           const tex = texMap[page];
-          o.material = new THREE.MeshStandardMaterial({ map: tex || null,
-            color: tex ? 0xffffff : 0x9aa0ac, side: THREE.DoubleSide, roughness: 1.0 });
+          // unlit: the game bakes vertex lighting; StandardMaterial without good
+          // normals renders these meshes black, so MeshBasic shows the texture.
+          o.material = new THREE.MeshBasicMaterial({ map: tex || null,
+            color: tex ? 0xffffff : 0x8b9099, side: THREE.DoubleSide });
         }
       });
       envRoot.add(gltf.scene); envRoot.position.set(-center.x, -center.y, -center.z);
-      setStatus('Environment loaded.', 'ok');
+      envLoaded = true; rebuild(false);
+      setStatus('Environment loaded' + (Object.keys(texMap).length ? ' (textured).' : ' (no texture pages found).'), 'ok');
     }, (err) => setStatus('GLB parse error: ' + err, 'bad'));
   } catch (e) { setStatus('environment load failed: ' + e, 'bad'); }
 };
