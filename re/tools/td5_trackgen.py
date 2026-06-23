@@ -122,6 +122,15 @@ DEFAULT_SPAN_LENGTH = 1500    # target span length; the centerline is resampled 
                               # ~1500-unit Moscow-like spans). Set span_length=0 to
                               # keep the authored nodes verbatim.
 
+# Point-to-point grid run-up: the engine's staggered starting grid spawns cars
+# BEHIND the start line (offsets down to -18 spans for a 6-car grid). A custom
+# P2P track starting at span 0 would push every car to a negative span, which
+# the engine collapses to span 1 -> the whole grid stacks. So a P2P start span
+# sits this many spans into the track, leaving room for the grid behind it
+# (matches how the shipped P2P tracks start ~76 spans in). Circuits don't need
+# this — negative grid spans wrap onto the ring.
+P2P_GRID_RUNUP = 18
+
 # Custom levels start above the 19 native + 11 TD6 levels (max existing = 39).
 DEFAULT_CUSTOM_LEVEL_BASE = 40
 # Frontend track tables are sized [37]; custom selectable slots start here.
@@ -550,12 +559,24 @@ def pick_slot(manifest, requested=None):
 def update_manifest(assets_root, slot, level_no, spec, nspans):
     manifest = load_manifest(assets_root)
     cp_count, _ = resolve_checkpoints(spec, nspans)
+    if spec["circuit"]:
+        start_span = 0                                    # negative grid spans wrap onto the ring
+    else:
+        # P2P: sit the start line a grid run-up into the track so the staggered
+        # grid (down to -18 spans) lands on valid spans instead of stacking.
+        start_span = min(P2P_GRID_RUNUP, max(1, nspans - 2))
+        if nspans < P2P_GRID_RUNUP + 4:
+            sys.stderr.write(
+                "WARNING: point-to-point track is short (%d spans); the starting "
+                "grid needs ~%d run-up spans, so the race may be very short and the "
+                "grid may still crowd. Author more centerline nodes for a longer "
+                "track.\n" % (nspans, P2P_GRID_RUNUP))
     entry = {
         "slot": int(slot),
         "level": int(level_no),
         "name": spec["name"],
         "circuit": bool(spec["circuit"]),
-        "start_span": 0,
+        "start_span": start_span,
         "finish_span": 0 if spec["circuit"] else max(0, nspans - 1),
         "sky_pitch": 0.08,
         "tga": -1,
