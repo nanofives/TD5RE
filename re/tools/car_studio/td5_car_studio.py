@@ -46,6 +46,7 @@ ENTRY_ADDONS = ["loaders/GLTFLoader.js", "loaders/OBJLoader.js", "loaders/FBXLoa
 # Filled from CLI in main().
 CARS_DIR = "re/assets/cars"
 USE_LOCAL_VENDOR = False
+BLENDER_PATH = None        # --blender / BLENDER_PATH env; else auto-detected
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +223,62 @@ def do_build(req):
 
 
 # ---------------------------------------------------------------------------
+# .blend support — there is no in-browser .blend reader (it's Blender's native
+# binary format), so convert it to glb HEADLESSLY via a local Blender install.
+# ---------------------------------------------------------------------------
+def find_blender():
+    import shutil as _sh, glob as _g
+    cand = BLENDER_PATH or os.environ.get("BLENDER_PATH")
+    if cand and os.path.isfile(cand):
+        return cand
+    w = _sh.which("blender")
+    if w:
+        return w
+    for pat in (r"C:\Program Files\Blender Foundation\Blender*\blender.exe",
+                r"C:\Program Files (x86)\Steam\steamapps\common\Blender\blender.exe",
+                "/Applications/Blender.app/Contents/MacOS/Blender",
+                "/usr/bin/blender", "/usr/local/bin/blender"):
+        hits = sorted(_g.glob(pat))
+        if hits:
+            return hits[-1]
+    return None
+
+
+def convert_blend_to_glb(blend_bytes):
+    """Run Blender in background to export the .blend as a GLB (textures packed).
+    Returns (glb_bytes, None) or (None, error_message)."""
+    import subprocess, tempfile, shutil
+    blender = find_blender()
+    if not blender:
+        return None, ("Blender not found. Install Blender and ensure it's on PATH, "
+                      "or start the studio with --blender <path> (or set BLENDER_PATH). "
+                      "Alternatively export the .blend to glTF Binary (.glb) yourself.")
+    tmp = tempfile.mkdtemp(prefix="td5blend_")
+    try:
+        blend_path = os.path.join(tmp, "in.blend")
+        out_path = os.path.join(tmp, "out.glb")
+        script_path = os.path.join(tmp, "exp.py")
+        with open(blend_path, "wb") as f:
+            f.write(blend_bytes)
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write("import bpy\n"
+                    "bpy.ops.export_scene.gltf(filepath=r'%s', export_format='GLB',\n"
+                    "    use_visible=True, export_apply=True)\n" % out_path)
+        try:
+            r = subprocess.run([blender, "--background", blend_path, "--python", script_path],
+                               capture_output=True, text=True, timeout=240)
+        except Exception as e:
+            return None, f"Blender invocation failed: {e}"
+        if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+            tail = ((r.stderr or "") + (r.stdout or ""))[-1500:]
+            return None, "Blender export produced no glb.\n" + tail
+        with open(out_path, "rb") as f:
+            return f.read(), None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
@@ -294,6 +351,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 import traceback
                 self._send(500, {"error": str(e), "trace": traceback.format_exc()})
+        elif self.path == "/api/convert_blend":
+            try:
+                glb, err = convert_blend_to_glb(_b64_to_bytes(req.get("blend_b64")))
+                if err:
+                    self._send(200, {"ok": False, "error": err})
+                else:
+                    self._send(200, {"ok": True, "glb_b64": base64.b64encode(glb).decode()})
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
         elif self.path == "/api/doctor":
             import contextlib
             d = os.path.join(CARS_DIR, req.get("code", ""))
@@ -312,8 +378,11 @@ def main():
     ap.add_argument("--cars-dir", default="re/assets/cars")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--revendor", action="store_true", help="re-download three.js")
+    ap.add_argument("--blender", default=None, help="path to blender.exe (for .blend import; else auto-detect / BLENDER_PATH)")
     args = ap.parse_args()
+    global BLENDER_PATH
     CARS_DIR = args.cars_dir
+    BLENDER_PATH = args.blender
 
     if not os.path.isdir(STUDIO_DIR):
         print(f"ERROR: {STUDIO_DIR} missing (car_studio/ UI files).", file=sys.stderr)

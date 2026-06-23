@@ -245,7 +245,8 @@ $('skinFile').addEventListener('change', (e) => { const f = e.target.files[0]; i
 
 // ---- model loading ---------------------------------------------------------
 const gltf = new GLTFLoader(), obj = new OBJLoader(), fbx = new FBXLoader();
-const MODEL_EXT = ['glb', 'gltf', 'obj', 'fbx'];
+const MODEL_EXT = ['glb', 'gltf', 'obj', 'fbx', 'blend'];
+function b64ToAb(b64) { const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; }
 const IMG_EXT = ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif'];   // browser-loadable (TGA isn't)
 const extOf = (n) => n.toLowerCase().split('.').pop();
 
@@ -271,6 +272,19 @@ $('modelFile').addEventListener('change', (e) => {
         // the object synchronously; embedded textures load, external ones miss
         // (multi-select the image, or convert via Blender -> glTF).
         loadedObject = fbx.parse(fr.result, ''); onLoaded();
+      } else if (mext === 'blend') {
+        // No in-browser .blend reader — the server runs Blender headlessly to
+        // export a glb (textures packed), which we then load like any glb.
+        setStatus('Converting .blend via Blender… (first run can take ~10s)');
+        fetch('/api/convert_blend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blend_b64: abToB64(fr.result) }) })
+          .then((r) => r.json()).then((res) => {
+            if (!res.ok) { setStatus('.blend: ' + res.error, 'bad'); return; }
+            const glb = b64ToAb(res.glb_b64);
+            modelBytes = glb; modelName = modelF.name.replace(/\.blend$/i, '.glb');
+            gltf.parse(glb, '', (g) => { loadedObject = g.scene; onLoaded(); setStatus('Loaded .blend (Blender → glb).', 'ok'); },
+              (err) => setStatus('converted glb parse error: ' + err, 'bad'));
+          }).catch((e) => setStatus('.blend convert request failed: ' + e, 'bad'));
       } else {
         gltf.parse(fr.result, '', (g) => { loadedObject = g.scene; onLoaded(); },
           (err) => setStatus('glTF parse error: ' + err, 'bad'));

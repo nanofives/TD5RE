@@ -244,9 +244,10 @@ an extra car slot (index 76+) the next launch — **no source edit, no rebuild**
 ```bash
 python re/tools/car_studio/td5_car_studio.py        # opens a browser GUI
 ```
-A local web app with a **3D viewport** that loads your model (glTF/GLB, OBJ, or
-**FBX** — Studio-only; the CLI reads glTF/OBJ. `.blend`: export from Blender as
-glTF Binary), overlays the
+A local web app with a **3D viewport** that loads your model (glTF/GLB, OBJ,
+**FBX**, or **`.blend`** — Studio-only; the CLI reads glTF/OBJ. `.blend` is
+converted to glb by a local **Blender** install, auto-detected or via
+`--blender <path>` / `BLENDER_PATH`), overlays the
 carparam **wheel positions as gizmos** (place wheels visually), previews your
 skin on the body, lets you edit every live physics/stat field, and **builds the
 car with one click**. Orient/scale/flip update live, so you fix "facing

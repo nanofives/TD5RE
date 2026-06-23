@@ -95,11 +95,12 @@
     <h1>TD5 Car Studio <small id="ver"></small></h1>
 
     <details class="grp" open><summary>1 · Model</summary><div class="body">
-      <label class="filebtn"><button type="button" onclick="modelFile.click()">Load model (glTF / OBJ / FBX)</button></label>
-      <input type="file" id="modelFile" accept=".glb,.gltf,.obj,.fbx,.png,.jpg,.jpeg,.bmp,.webp" multiple>
+      <label class="filebtn"><button type="button" onclick="modelFile.click()">Load model (glTF / OBJ / FBX / blend)</button></label>
+      <input type="file" id="modelFile" accept=".glb,.gltf,.obj,.fbx,.blend,.png,.jpg,.jpeg,.bmp,.webp" multiple>
       <div class="hint">glTF/GLB &amp; FBX embedded textures load automatically. OBJ (and FBX with
         external textures) carry no embedded image — multi-select the model + its image to skin it.
-        <code>.blend</code> isn't supported; export it from Blender as glTF Binary (.glb).</div>
+        <code>.blend</code> is converted via a local <b>Blender</b> install (auto-detected, or start
+        the studio with <code>--blender &lt;path&gt;</code>).</div>
       <div class="hint" id="modelInfo">no model loaded</div>
       <label class="row"><span>Forward</span><div class="seg" id="segFwd">
         <button data-v="-z" class="on">-Z</button><button data-v="+z">+Z</button>
