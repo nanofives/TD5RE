@@ -99,6 +99,14 @@ function tangent(nodes, i, circuit) {
   return [dx / m, dz / m];
 }
 function nodeWidth(nd) { return nd.width || (nd.lanes || spec.default_lanes) * spec.lane_width; }
+function nearestNode(p) {   // index of the main node closest to p (XZ) -- branch fork/rejoin
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < spec.nodes.length; i++) {
+    const dx = spec.nodes[i].x - p.x, dz = spec.nodes[i].z - p.z, d = dx * dx + dz * dz;
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
 
 // Build a ribbon mesh (triangles) + edge/centre lines for a node list.
 function ribbon(nodes, circuit, opts) {
@@ -196,10 +204,15 @@ function rebuild(fit) {
 
   // main ribbon
   root.add(ribbon(spec.nodes, !!spec.circuit, {}));
-  // branches (ghost tint)
+  // branches (ghost tint) -- connect each to the main road at the nearest fork /
+  // rejoin node (mirrors the converter), so the preview has no gap at the ends.
   for (const br of spec.branches) {
-    if (br.nodes && br.nodes.length >= 2)
-      root.add(ribbon(br.nodes.map(p => ({ ...p, lanes: br.lanes, width: (br.width || br.lanes * spec.lane_width) })), false, { color: 0x3a5a7a, edge: 0x6fa8e0, ghost: true }));
+    if (!(br.nodes && br.nodes.length >= 2)) continue;
+    const w = br.width || br.lanes * spec.lane_width;
+    const fork = nearestNode(br.nodes[0]), rejoin = nearestNode(br.nodes[br.nodes.length - 1]);
+    const conn = [spec.nodes[fork], ...br.nodes, spec.nodes[rejoin]]
+      .map(p => ({ x: p.x, z: p.z, y: p.y || 0, lanes: br.lanes, width: w, surface: br.surface || 0 }));
+    root.add(ribbon(conn, false, { color: 0x3a5a7a, edge: 0x6fa8e0, ghost: true }));
   }
   // node handles (only when node editing is enabled)
   if (editNodes) {
@@ -568,7 +581,7 @@ $('loadEnvBtn').onclick = async () => {
   try {
     const texMap = {};
     if (currentAssets) for (const tx of currentAssets.textures) {
-      const m = tx.match(/(\d+)/); if (m) { try { texMap[+m[1]] = await trackTexture(currentLevel, tx, false); } catch {} }
+      const m = tx.match(/(\d+)/); if (m) { try { texMap[+m[1]] = await trackTexture(currentLevel, tx); } catch {} }
     }
     const buf = await (await fetch('/api/model?level=' + currentLevel)).arrayBuffer();
     gltfLoader.parse(buf, '', (gltf) => {
