@@ -3433,10 +3433,20 @@ void td5_render_actors_for_view(int view_index)
         /* [CUSTOM TRACK] When the level ships no MODELS.DAT mesh table (e.g. a
          * track built by re/tools/td5_trackgen.py), paint the STRIP collision
          * ribbon as a solid road so the track is visible and drivable. Gated on
-         * the absence of a mesh table so faithful TD5/TD6 tracks never pay it. */
-        if (!s_photobooth_active && td5_track_get_models_display_list_count() == 0)
-            td5_render_fallback_strip_ribbon(eff_player, cull_window, ring,
+         * the absence of a mesh table so faithful TD5/TD6 tracks never pay it.
+         *
+         * Use a wide, SPEED-INDEPENDENT span window (not cull_window, which is
+         * velocity-scaled and collapses to a handful of spans at low speed -> the
+         * road vanishes a short way ahead). A circuit draws the whole ring (cheap
+         * for the small tracks the converter makes); point-to-point uses a large
+         * fixed reach. Behind-camera spans self-cull in the projector. */
+        if (!s_photobooth_active && td5_track_get_models_display_list_count() == 0) {
+            int ribbon_win = 256;
+            if (is_circuit && ring > 0 && (ring / 2 + 1) < ribbon_win)
+                ribbon_win = ring / 2 + 1;
+            td5_render_fallback_strip_ribbon(eff_player, ribbon_win, ring,
                                              total_spans, is_circuit);
+        }
         #undef TD5_RENDER_SUBMITTED_CAP
     }
 

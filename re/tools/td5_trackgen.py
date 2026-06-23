@@ -116,6 +116,11 @@ INT16_MIN, INT16_MAX = -32768, 32767
 DEFAULT_LANE_WIDTH = 1500     # world units per lane (matches Moscow ~1500)
 DEFAULT_LANES = 4
 DEFAULT_SURFACE = 0           # 0 dry asphalt
+DEFAULT_SPAN_LENGTH = 1500    # target span length; the centerline is resampled to
+                              # this so spans match engine assumptions (AI lookahead,
+                              # grid spacing, minimap, render window are tuned for
+                              # ~1500-unit Moscow-like spans). Set span_length=0 to
+                              # keep the authored nodes verbatim.
 
 # Custom levels start above the 19 native + 11 TD6 levels (max existing = 39).
 DEFAULT_CUSTOM_LEVEL_BASE = 40
@@ -205,8 +210,64 @@ def normalize_spec(raw, circuit_override=None):
     for n in nodes:
         if n["width"] is None:
             n["width"] = n["lanes"] * spec["lane_width"]
+
+    # Resample the centerline to ~span_length spacing so spans match the engine's
+    # ~1500-unit assumptions (sparse authored nodes otherwise make wide, coarse
+    # spans that break AI lookahead / grid spacing / the minimap).
+    spec["span_length"] = float(raw.get("span_length", DEFAULT_SPAN_LENGTH))
+    if spec["span_length"] > 0:
+        nodes = resample_centerline(nodes, spec["span_length"], spec["circuit"])
     spec["nodes"] = nodes
     return spec
+
+
+def resample_centerline(nodes, target_len, circuit):
+    """Resample the centerline to ~target_len spacing along its arc length.
+
+    Position (x,z,y) is linearly interpolated; the discrete attributes
+    (lanes/width/surface) are carried from the nearer source node. A circuit is
+    treated as a closed loop (the last sample does not duplicate the first).
+    """
+    n = len(nodes)
+    pts = [(nd["x"], nd["z"]) for nd in nodes]
+    seq = list(range(n)) + [0] if circuit else list(range(n))
+
+    seg = []          # (a_idx, b_idx, length)
+    seg_start = []    # arc length at each segment start
+    total = 0.0
+    for i in range(len(seq) - 1):
+        a, b = pts[seq[i]], pts[seq[i + 1]]
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        seg_start.append(total)
+        seg.append((seq[i], seq[i + 1], d))
+        total += d
+    if total < 1e-6 or not seg:
+        return nodes
+
+    count = max(3 if circuit else 2, int(round(total / target_len)))
+    step = total / count
+    sample_ts = [k * step for k in range(count if circuit else count + 1)]
+
+    out = []
+    for t in sample_ts:
+        if t >= total:
+            t = total - 1e-3
+        j = 0
+        while j < len(seg) - 1 and seg_start[j + 1] <= t:
+            j += 1
+        a_idx, b_idx, d = seg[j]
+        local = (t - seg_start[j]) / d if d > 1e-9 else 0.0
+        a, b = nodes[a_idx], nodes[b_idx]
+        src = a if local < 0.5 else b
+        out.append({
+            "x": a["x"] + (b["x"] - a["x"]) * local,
+            "z": a["z"] + (b["z"] - a["z"]) * local,
+            "y": a["y"] + (b["y"] - a["y"]) * local,
+            "lanes": src["lanes"],
+            "width": a["width"] + (b["width"] - a["width"]) * local,
+            "surface": src["surface"],
+        })
+    return out
 
 
 # ==========================================================================
