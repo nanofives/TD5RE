@@ -1668,11 +1668,10 @@ int td5_game_init_race_session(void) {
                   g_td5.mp_mode_config.suspect_head_start);
     }
 
-    /* [MP TIME TRIAL 2026-06-22] TT races against AI opponents; time_trial_enabled
-     * stays 0 so the solo 2-slot limit (below) doesn't apply. The AI COUNT is set
-     * up front in frontend_init_race_schedule (mp_tt_fill_opponents) so the AI car
-     * pool is built — bumping num_ai_opponents HERE would spawn AI with no car
-     * definition (crash). */
+    /* [MP TIME TRIAL 2026-06-22] TT has NO AI opponents — only the human players
+     * (frontend_init_race_schedule forces num_ai_opponents=0, so the AI-fill below
+     * disables every non-human slot). time_trial_enabled stays 0 so the solo
+     * 2-slot limit doesn't apply (we keep all the human slots, not just 2). */
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL && !g_td5.network_active)
         g_td5.time_trial_enabled = 0;
 
