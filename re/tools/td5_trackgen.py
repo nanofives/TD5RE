@@ -871,6 +871,133 @@ def pick_level_number(assets_root, requested=None):
     return n
 
 
+# ==========================================================================
+# In-game textured road: generate a models.bin (one road quad per span) + a
+# single asphalt texture page, so the engine renders/textures the custom track
+# instead of the flat strip-ribbon fallback (which only triggers when a level
+# ships no MODELS.DAT). Verified format against real level meshes: render_type
+# 259, command dispatch_type 0 / vptr 0, vertices pos/view/light/tex/proj;
+# CULL_NONE so winding is free; entry index = span>>2.
+# ==========================================================================
+ROAD_TEXTURE_PAGE = 0
+ROAD_VERTEX_LIGHT = 0xFFFFFFFF
+
+
+def _mesh_tool():
+    return _load_module("mesh_tool", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "mesh_tool.py"))
+
+
+def _asphalt_page(seed=0x9e3779b1):
+    """A 16-shade grey asphalt page: (BGR palette bytes, 4096 index bytes).
+    Deterministic FNV-style hash noise so builds are reproducible."""
+    pal = bytearray()
+    for i in range(16):
+        s = 0x30 + i * 2                      # 0x30..0x4E grey
+        pal += bytes((s, s, s))               # B, G, R (engine reads B,G,R)
+    idx = bytearray(4096)
+    h = seed & 0xFFFFFFFF
+    for p in range(4096):
+        h = ((h ^ (p * 2654435761)) * 16777619) & 0xFFFFFFFF
+        idx[p] = (h >> 13) & 0x0F
+    return bytes(pal), bytes(idx)
+
+
+def _decode_page_png(pal, idx):
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    px = bytearray(64 * 64 * 4)
+    for i in range(4096):
+        ci = idx[i] * 3
+        px[i * 4 + 0] = pal[ci + 2]           # R
+        px[i * 4 + 1] = pal[ci + 1]           # G
+        px[i * 4 + 2] = pal[ci + 0]           # B
+        px[i * 4 + 3] = 255
+    import io as _io
+    buf = _io.BytesIO()
+    Image.frombytes("RGBA", (64, 64), bytes(px)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def write_road_textures(out_dir):
+    """Write textures.src/ with one opaque asphalt page (page 0), in the layout
+    td5_assetsrc.c packs into TEXTURES.DAT."""
+    pal, idx = _asphalt_page()
+    src = os.path.join(out_dir, "textures.src")
+    os.makedirs(os.path.join(src, "pages"), exist_ok=True)
+    manifest = {"_format": "td5_textures", "_version": 1, "page_count": 1,
+                "pages": [{"offset": 8, "pad_hex": "000000", "type": 0,
+                           "palette_hex": pal.hex()}]}
+    with open(os.path.join(src, "textures.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    with open(os.path.join(src, "indices.bin"), "wb") as f:
+        f.write(idx)
+    png = _decode_page_png(pal, idx)
+    if png:
+        with open(os.path.join(src, "pages", "page_000.png"), "wb") as f:
+            f.write(png)
+
+
+def build_road_model(header, spans, vertices, light=ROAD_VERTEX_LIGHT):
+    """A models 'model' (entry -> mesh-index lists) of one textured road quad per
+    span, grouped 4-per-entry (entry = span>>2) so the engine's display-list walk
+    finds it."""
+    nv = len(vertices)
+    nspans = len(spans)
+    n_entries = (nspans + 3) >> 2
+    entries = [[] for _ in range(max(1, n_entries))]
+    meshes = []
+    for i in range(nspans):
+        s = spans[i]
+        lanes = max(1, s[3] & 0x0F)
+        lvi, rvi = s[4], s[5]
+        if lvi < 0 or rvi < 0 or lvi >= nv or rvi >= nv:
+            continue
+        rli = min(lvi + lanes, nv - 1)
+        rri = min(rvi + lanes, nv - 1)
+        ox, oy, oz = s[8], s[9], s[10]
+
+        def _w(vi):
+            v = vertices[vi]
+            return (ox + v[0], oy + v[1], oz + v[2])
+
+        corners = [_w(lvi), _w(rli), _w(rri), _w(rvi)]   # nearL, nearR, farR, farL
+        uvs = [(0.0, 0.0), (float(lanes), 0.0), (float(lanes), 1.0), (0.0, 1.0)]
+        verts = [{"pos": [float(p[0]), float(p[1]), float(p[2])],
+                  "view": [0.0, 0.0, 0.0], "light": light,
+                  "tex": [u, v], "proj": [0.0, 0.0]}
+                 for p, (u, v) in zip(corners, uvs)]
+        cx = sum(p[0] for p in corners) / 4.0
+        cy = sum(p[1] for p in corners) / 4.0
+        cz = sum(p[2] for p in corners) / 4.0
+        rad = max(math.sqrt((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2)
+                  for p in corners) or 1.0
+        meshes.append({"render_type": 259, "texture_page_id": ROAD_TEXTURE_PAGE,
+                       "bounding": [rad, cx, cy, cz], "origin": [0.0, 0.0, 0.0],
+                       "reserved_28": 0,
+                       "commands": [{"dispatch_type": 0, "texture_page_id": ROAD_TEXTURE_PAGE,
+                                     "reserved_04": 0, "tri": 0, "quad": 1, "vptr": 0}],
+                       "vertices": verts, "normals": None})
+        entries[i >> 2].append(len(meshes) - 1)
+    return {"kind": "models", "entry_count": len(entries),
+            "entries": entries, "meshes": meshes}
+
+
+def write_textured_road(out_dir, header, spans, vertices):
+    """Write models.bin (textured road) + textures.src/ asphalt page. Returns the
+    mesh count, or 0 if nothing was generated."""
+    model = build_road_model(header, spans, vertices)
+    if not model["meshes"]:
+        return 0
+    blob = _mesh_tool().build_dat(model)
+    with open(os.path.join(out_dir, "models.bin"), "wb") as f:
+        f.write(blob)
+    write_road_textures(out_dir)
+    return len(model["meshes"])
+
+
 def write_level(assets_root, level_no, spec):
     """Write the full levelNNN/ source set. Returns (dir, ring_spans)."""
     header, spans, vertices, jump_entries = build_geometry(spec)
@@ -898,6 +1025,21 @@ def write_level(assets_root, level_no, spec):
     _wj("levelinf.json", emit_levelinf(spec, nspans))
     _wj("checkpt.json", emit_checkpt())
     _wj("traffic.json", emit_traffic(spec, nspans))
+
+    # Textured in-game road: generate models.bin + an asphalt texture page so the
+    # engine renders/textures the track instead of the flat strip-ribbon fallback.
+    # Default on; set spec["textured"]=False to ship a fallback-only (flat) track.
+    if spec.get("textured", True):
+        try:
+            n = write_textured_road(out_dir, header, spans, vertices)
+            if n:
+                sys.stderr.write("generated textured road: %d span meshes + asphalt page\n" % n)
+        except Exception as e:                       # never block a build on the mesh gen
+            for stale in ("models.bin",):
+                p = os.path.join(out_dir, stale)
+                if os.path.isfile(p):
+                    os.remove(p)
+            sys.stderr.write("textured-road generation skipped (%s); using flat fallback\n" % e)
     return out_dir, nspans
 
 

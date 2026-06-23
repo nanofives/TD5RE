@@ -353,6 +353,7 @@ function updatePanel() {
   $('traffic').value = String(spec.traffic_enable || 0);
   $('fog').value = String((spec.fog && spec.fog.enabled) || 0);
   $('fogColorRow').style.display = (spec.fog && spec.fog.enabled) ? '' : 'none';
+  $('texturedRoad').checked = spec.textured !== false;
   // node editor
   const n = spec.nodes[selected];
   $('nodeInfo').textContent = n
@@ -394,6 +395,7 @@ $('laneWidth').addEventListener('change', e => { spec.lane_width = +e.target.val
 $('weather').addEventListener('change', e => { spec.weather = +e.target.value; });
 $('traffic').addEventListener('change', e => { spec.traffic_enable = +e.target.value; });
 $('fog').addEventListener('change', e => { spec.fog = spec.fog || {}; spec.fog.enabled = +e.target.value; updatePanel(); });
+$('texturedRoad').addEventListener('change', e => { spec.textured = e.target.checked; });
 $('fogColor').addEventListener('change', e => {
   const h = e.target.value; spec.fog = spec.fog || { enabled: 1 };
   spec.fog.r = parseInt(h.slice(1, 3), 16); spec.fog.g = parseInt(h.slice(3, 5), 16); spec.fog.b = parseInt(h.slice(5, 7), 16);
@@ -511,6 +513,7 @@ function normalizeIn(s) {
   s.fog = s.fog || { enabled: 0, r: 0, g: 0, b: 0 };
   if (s.lane_width == null) s.lane_width = 1500;
   if (s.default_lanes == null) s.default_lanes = 4;
+  if (s.textured === undefined) s.textured = true;
   return s;
 }
 
