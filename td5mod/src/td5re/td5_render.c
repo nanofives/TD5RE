@@ -10142,23 +10142,36 @@ static void td5_render_fallback_strip_ribbon(int center_span, int window,
     const uint32_t edge_col = 0xFFB0B0B8u;    /* rail edge cue */
     const float nearz = s_near_clip + 1.0f;
     static const int tri_idx[2][3] = { {0, 1, 2}, {1, 3, 2} };
-    int span;
+    int span, ring_iters, branch_base, total_iters;
 
     if (window < 1) window = 1;
     if (window > 256) window = 256;           /* bound the per-frame work */
 
-    for (span = center_span - window; span <= center_span + window; span++) {
-        int si = span;
+    /* Iterate the player-centred ring window first, then EVERY branch-corridor
+     * span [ring, total_spans) so forks / shortcuts (which live past the main
+     * ring) are drawn too -- otherwise a branch road would be invisible. */
+    ring_iters  = window * 2 + 1;
+    branch_base = (ring > 0 && total_spans > ring) ? ring : total_spans;
+    total_iters = ring_iters + (total_spans - branch_base);
+
+    for (span = 0; span < total_iters; span++) {
+        int si;
         TD5_StripSpan *sp;
         TD5_StripVertex *nl, *nr, *fl, *fr;
         int lanes, li, ri, ti;
         TD5_RibbonCamV corner[4];
 
-        if (is_circuit && ring > 0) {
-            while (si < 0)      si += ring;
-            while (si >= ring)  si -= ring;
-        } else if (si < 0 || si >= total_spans) {
-            continue;
+        if (span < ring_iters) {
+            si = center_span - window + span;       /* ring window (player-centred) */
+            if (is_circuit && ring > 0) {
+                while (si < 0)      si += ring;
+                while (si >= ring)  si -= ring;
+            } else if (si < 0 || si >= total_spans) {
+                continue;
+            }
+        } else {
+            si = branch_base + (span - ring_iters); /* branch corridor spans */
+            if (si < 0 || si >= total_spans) continue;
         }
         sp = td5_track_get_span(si);
         if (!sp) continue;

@@ -296,6 +296,23 @@ def _tangent(nodes, i, circuit):
     return (dx / m, dz / m)
 
 
+SPAN_TYPE_JUNCTION_FWD = 8        # fork: outer lanes peel off via link_next
+
+
+def _row_points_offset(node, tangent, lane_count, total_width, lateral_center):
+    """lane_count+1 rail points across `total_width`, whose lateral midpoint is
+    shifted `lateral_center` along left_dir from the node (used to widen a fork
+    junction toward the branch side). Returns world (x,y,z) tuples."""
+    tx, tz = tangent
+    lx, lz = (tz, -tx)
+    half = total_width * 0.5
+    pts = []
+    for k in range(lane_count + 1):
+        lat = lateral_center + half - (total_width * k / lane_count)
+        pts.append((node["x"] + lx * lat, node["y"], node["z"] + lz * lat))
+    return pts
+
+
 def _row_points(node, tangent, lane_count):
     """(lane_count+1) rail points across the road, LEFT edge -> RIGHT edge.
 
@@ -313,65 +330,143 @@ def _row_points(node, tangent, lane_count):
     return pts
 
 
+BRANCH_WIDEN_SPANS = 3            # spans before the fork that widen so the
+                                 # driver can steer into the peel-off lanes
+
+
+def _emit_span_rows(vertices, near_pts, far_pts, origin, err_idx):
+    """Append a span's near then far vertex rows; return (lvi, rvi)."""
+    ox, oy, oz = origin
+    lvi = len(vertices)
+    for (wx, wy, wz) in near_pts:
+        vertices.append(_local_vtx(wx, wy, wz, ox, oy, oz, err_idx))
+    rvi = len(vertices)
+    for (wx, wy, wz) in far_pts:
+        vertices.append(_local_vtx(wx, wy, wz, ox, oy, oz, err_idx))
+    return lvi, rvi
+
+
+def _nearest_node(main_nodes, p):
+    best, bestd = 0, None
+    for i, nd in enumerate(main_nodes):
+        d = (nd["x"] - p["x"]) ** 2 + (nd["z"] - p["z"]) ** 2
+        if bestd is None or d < bestd:
+            bestd, best = d, i
+    return best
+
+
 def build_geometry(spec):
-    """Return (header, spans, vertices) lists ready for strip.json."""
-    if spec.get("branches"):
-        # The neutral spec reserves a 'branches' field, but branch/junction
-        # emission (span types 8/11 + link_next wiring + the [lo,hi,base] jump
-        # table) is a follow-on. Warn loudly rather than silently dropping it so
-        # a user authoring forks knows they won't appear yet.
-        sys.stderr.write(
-            "WARNING: %d branch(es) in the spec are NOT emitted yet "
-            "(branch support is a follow-on); building the main line only.\n"
-            % len(spec["branches"]))
+    """Return (header, spans, vertices, jump_entries) ready for strip.json.
+
+    Branches (spec['branches']) attach to the main road by geometry: each forks
+    off the main span nearest its first node and rejoins nearest its last node.
+    The fork span is widened (main+branch lanes) over a short run-up and marked
+    type 8 (JUNCTION_FWD); an actor that steers into the outer lanes peels off
+    via link_next to the branch corridor (spans appended past the ring), which
+    link_next's back to the rejoin main span. A [lo,hi,base] jump entry maps the
+    branch spans onto the main ring for progress/lap tracking.
+    """
     nodes = spec["nodes"]
     circuit = spec["circuit"]
     n = len(nodes)
     nspans = n if circuit else (n - 1)
-
+    lane_width = spec["lane_width"]
     tangents = [_tangent(nodes, i, circuit) for i in range(n)]
+
+    # --- resolve branches against the (already resampled) main line ---
+    branches = []
+    for br in spec.get("branches", []):
+        raw = [{"x": float(p["x"]), "z": float(p["z"]), "y": float(p.get("y", 0.0)),
+                "lanes": int(br.get("lanes", spec["default_lanes"])),
+                "surface": int(br.get("surface", spec["default_surface"]))}
+               for p in br.get("nodes", [])]
+        for bn in raw:
+            bn["width"] = float(br["width"]) if "width" in br else bn["lanes"] * lane_width
+        if spec["span_length"] > 0 and len(raw) >= 2:
+            raw = resample_centerline(raw, spec["span_length"], circuit=False)
+        if len(raw) < 2:
+            sys.stderr.write("WARNING: branch has < 2 nodes; skipped.\n")
+            continue
+        fork = _nearest_node(nodes, raw[0])
+        rejoin = _nearest_node(nodes, raw[-1])
+        if not circuit and rejoin <= fork:
+            sys.stderr.write("WARNING: branch rejoin is at/before its fork; skipped.\n")
+            continue
+        branches.append({"nodes": raw, "fork": fork, "rejoin": rejoin,
+                         "lanes": raw[0]["lanes"]})
+
+    # mark widened main spans: widen_map[span] = (total_lanes, lateral_center, branch|None)
+    widen_map = {}
+    for br in branches:
+        main_lanes = nodes[br["fork"]]["lanes"]
+        total = main_lanes + br["lanes"]
+        a = nodes[br["fork"]]
+        tx, tz = tangents[br["fork"]]; lx, lz = (tz, -tx)
+        b0 = br["nodes"][0]
+        side = (b0["x"] - a["x"]) * lx + (b0["z"] - a["z"]) * lz   # >0 left, <0 right
+        shift = br["lanes"] * lane_width * 0.5
+        lateral_center = shift if side > 0 else -shift
+        br["total_lanes"] = total
+        for k in range(BRANCH_WIDEN_SPANS + 1):
+            si = br["fork"] - k
+            if circuit:
+                si %= nspans
+            if 0 <= si < nspans:
+                widen_map[si] = (total, lateral_center, br if k == 0 else None)
 
     spans = []
     vertices = []
-    surface_default = spec["default_surface"]
 
+    # --- main ring ---
     for si in range(nspans):
         a_idx = si
         b_idx = (si + 1) % n if circuit else (si + 1)
         a = nodes[a_idx]; b = nodes[b_idx]
-        lanes = a["lanes"]                       # this span's lane_count
-        # near + far rows (both subdivided into lanes+1 across each node's width)
-        near = _row_points(a, tangents[a_idx], lanes)
-        far = _row_points(b, tangents[b_idx], lanes)
+        origin = (int(round(a["x"])), int(round(a["y"])), int(round(a["z"])))
+        wide = widen_map.get(si)
+        if wide:
+            total, lat_c, fork_br = wide
+            tw = total * lane_width
+            near = _row_points_offset(a, tangents[a_idx], total, tw, lat_c)
+            far = _row_points_offset(b, tangents[b_idx], total, tw, lat_c)
+            lvi, rvi = _emit_span_rows(vertices, near, far, origin, si)
+            stype = SPAN_TYPE_JUNCTION_FWD if fork_br else SPAN_TYPE_QUAD
+            spans.append([stype, a["surface"] & 0x0F, 0, total & 0x0F,
+                          lvi & U16, rvi & U16, U16, U16, *origin])  # fork link_next patched below
+        else:
+            lanes = a["lanes"]
+            near = _row_points(a, tangents[a_idx], lanes)
+            far = _row_points(b, tangents[b_idx], lanes)
+            lvi, rvi = _emit_span_rows(vertices, near, far, origin, si)
+            spans.append([SPAN_TYPE_QUAD, a["surface"] & 0x0F, 0, lanes & 0x0F,
+                          lvi & U16, rvi & U16, U16, U16, *origin])
 
-        ox, oy, oz = int(round(a["x"])), int(round(a["y"])), int(round(a["z"]))
-        lvi = len(vertices)
-        for (wx, wy, wz) in near:
-            vertices.append(_local_vtx(wx, wy, wz, ox, oy, oz, si))
-        rvi = len(vertices)
-        for (wx, wy, wz) in far:
-            vertices.append(_local_vtx(wx, wy, wz, ox, oy, oz, si))
+    # --- branch corridors (appended past the ring) + link wiring + jump table ---
+    jump_entries = []
+    for br in branches:
+        bnodes = br["nodes"]
+        m = len(bnodes)
+        btan = [_tangent(bnodes, i, circuit=False) for i in range(m)]
+        branch_start = len(spans)
+        for k in range(m - 1):
+            a = bnodes[k]; b = bnodes[k + 1]
+            lanes = a["lanes"]
+            origin = (int(round(a["x"])), int(round(a["y"])), int(round(a["z"])))
+            near = _row_points(a, btan[k], lanes)
+            far = _row_points(b, btan[k + 1], lanes)
+            lvi, rvi = _emit_span_rows(vertices, near, far, origin, branch_start + k)
+            link_next = (br["rejoin"] & U16) if k == m - 2 else U16
+            spans.append([SPAN_TYPE_QUAD, a["surface"] & 0x0F, 0, lanes & 0x0F,
+                          lvi & U16, rvi & U16, link_next, U16, *origin])
+        branch_end = len(spans) - 1
+        spans[br["fork"]][6] = branch_start & U16            # fork -> branch start
+        jump_entries.append((branch_start, branch_end, br["fork"]))
 
-        surface_byte = (a["surface"] & 0x0F)     # low nibble = primary surface
-        packed = (lanes & 0x0F)                  # high nibble height_offset = 0 (no transitions)
-        spans.append([
-            SPAN_TYPE_QUAD,      # type
-            surface_byte,        # surface
-            0,                   # lane_bitmask (all lanes -> primary surface)
-            packed,              # packed lanes|height
-            lvi & U16,           # left_vertex_index (near row)
-            rvi & U16,           # right_vertex_index (far row)
-            U16,                 # link_next = -1 (linear; bind patches sentinels)
-            U16,                 # link_prev = -1
-            ox, oy, oz,          # origin
-        ])
-
-    # Header: [span_off, ring_len, vtx_off, vtx_count, total_spans]
     span_off = STRIP_HEADER_WORDS * 4 + PRE_SPAN_BYTES        # 20 + 196 = 216
     vtx_off = span_off + SPAN_STRIDE * len(spans)
-    ring_len = nspans
+    ring_len = nspans                                         # main ring only
     header = [span_off, ring_len, vtx_off, len(vertices), len(spans)]
-    return header, spans, vertices
+    return header, spans, vertices, jump_entries
 
 
 def _local_vtx(wx, wy, wz, ox, oy, oz, span_idx):
@@ -391,12 +486,32 @@ def _local_vtx(wx, wy, wz, ox, oy, oz, span_idx):
 # ==========================================================================
 # strip.json / route emission
 # ==========================================================================
-def emit_strip_json(header, spans, vertices):
+def _build_pre_span(jump_entries):
+    """Pre-span region: u32 jump_count + 6-byte [lo,hi,base] entries, then zero
+    padding to at least the native 196-byte reserve (so span_off stays 216 for
+    <=32 branches; the encoder uses the actual length regardless)."""
+    jump_entries = jump_entries or []
+    blob = bytearray()
+    blob += struct.pack("<I", len(jump_entries))
+    for (lo, hi, base) in jump_entries:
+        blob += struct.pack("<HHh", lo & 0xFFFF, hi & 0xFFFF, int(base))
+    if len(blob) < PRE_SPAN_BYTES:
+        blob += b"\x00" * (PRE_SPAN_BYTES - len(blob))
+    return bytes(blob)
+
+
+def emit_strip_json(header, spans, vertices, jump_entries=None):
+    pre = _build_pre_span(jump_entries)
+    # header[0]=span table offset, header[2]=vertex table offset -- recompute from
+    # the actual pre-span length so a non-default jump table stays self-consistent.
+    span_off = STRIP_HEADER_WORDS * 4 + len(pre)
+    vtx_off = span_off + SPAN_STRIDE * len(spans)
+    hdr = [span_off, header[1], vtx_off, len(vertices), len(spans)]
     return {
         "_format": "td5_strip",
         "_version": 1,
-        "header": header,
-        "pre_span_hex": ("00" * PRE_SPAN_BYTES),     # no-branch reserve (jump_count=0)
+        "header": hdr,
+        "pre_span_hex": pre.hex(),
         "spans": spans,
         "pre_vertex_hex": "",
         "vertices": vertices,
@@ -510,10 +625,11 @@ def pick_level_number(assets_root, requested=None):
 
 
 def write_level(assets_root, level_no, spec):
-    """Write the full levelNNN/ source set. Returns (dir, nspans)."""
-    header, spans, vertices = build_geometry(spec)
-    nspans = len(spans)
-    strip_obj = emit_strip_json(header, spans, vertices)
+    """Write the full levelNNN/ source set. Returns (dir, ring_spans)."""
+    header, spans, vertices, jump_entries = build_geometry(spec)
+    ring = header[1]            # main racing line (checkpoints/finish/laps use this)
+    nspans = ring              # branch corridor spans live past the ring
+    strip_obj = emit_strip_json(header, spans, vertices, jump_entries)
     strip_bytes = strip_json_to_bytes(strip_obj)               # validates round-trip layout
     left_csv, right_csv = emit_routes(strip_bytes, spec["circuit"])
 
