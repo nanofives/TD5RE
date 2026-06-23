@@ -62,9 +62,13 @@ import sys
 
 import numpy as np
 
-# mesh_tool lives alongside this file and owns the exact PRR byte layout
-# (_pack_mesh / decode / model_equal). We build a `model` dict and let it emit.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# mesh_tool owns the exact PRR byte layout (_pack_mesh / decode / model_equal).
+# It is the shared RE codec and lives one level up in re/tools/; add both this
+# folder and the parent so `import mesh_tool` resolves whether this file is run
+# from re/tools/car_studio/ (its home) or copied elsewhere alongside mesh_tool.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))   # re/tools/ (shared mesh_tool codec)
 import mesh_tool  # noqa: E402
 
 try:

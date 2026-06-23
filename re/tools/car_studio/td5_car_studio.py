@@ -31,11 +31,11 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-STUDIO_DIR = os.path.join(HERE, "car_studio")
-VENDOR_DIR = os.path.join(STUDIO_DIR, "vendor")
+HERE = os.path.dirname(os.path.abspath(__file__))   # re/tools/car_studio/
+STUDIO_DIR = HERE                                    # index.html / car_studio.js live here
+VENDOR_DIR = os.path.join(HERE, "vendor")            # three.js downloaded here on first run
 sys.path.insert(0, HERE)
-import td5_car_import as importer  # noqa: E402
+import td5_car_import as importer  # noqa: E402  (the build engine, in this folder)
 
 THREE_VER = "0.160.0"
 CDN = f"https://unpkg.com/three@{THREE_VER}"

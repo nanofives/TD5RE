@@ -235,14 +235,14 @@ Vehicle sounds are loaded per-car from `cars/*.zip` via `LoadVehicleSoundBank`. 
 
 ### 2.6 Custom Cars (3D model import) — drop-in, no rebuild
 
-`re/tools/td5_car_import.py` imports any **glTF (.glb/.gltf)** or **OBJ** model
+`re/tools/car_studio/td5_car_import.py` imports any **glTF (.glb/.gltf)** or **OBJ** model
 into a complete car the engine auto-enumerates in **SELECT CAR**. Drop the
 produced folder into `re/assets/cars/` named `custom_<name>/` and it appears as
 an extra car slot (index 76+) the next launch — **no source edit, no rebuild**.
 
 **The easy way — Car Studio (visual editor):**
 ```bash
-python re/tools/td5_car_studio.py        # opens a browser GUI
+python re/tools/car_studio/td5_car_studio.py        # opens a browser GUI
 ```
 A local web app with a **3D viewport** that loads your model, overlays the
 carparam **wheel positions as gizmos** (place wheels visually), previews your
@@ -256,7 +256,7 @@ internet once, offline after.) The CLI below is the scripting equivalent.
 
 **Import a car:**
 ```bash
-python re/tools/td5_car_import.py import \
+python re/tools/car_studio/td5_car_import.py import \
     --model mycar.glb --name "My Cool Car" --skin body.png \
     [--code custom_mycar] [--donor vip] [--out-dir re/assets/cars]
 ```
@@ -284,15 +284,15 @@ survey — see also `td5_car_import.py`'s module docstring):
 **Convert a texture** (the engine reads **PNG natively** and byte-swaps to BGRA
 itself, so "engine-readable" just means a correctly-sized RGBA PNG):
 ```bash
-python re/tools/td5_car_import.py texture in.jpg carskin0.png --size 256 --square
+python re/tools/car_studio/td5_car_import.py texture in.jpg carskin0.png --size 256 --square
 # optional colour-key transparency: --colorkey black|blue88|red|cyan
 ```
 
 **Other CLI commands:**
 ```bash
-python re/tools/td5_car_import.py new --code custom_x --donor vip   # scaffold a clone to edit
-python re/tools/td5_car_import.py doctor re/assets/cars/custom_x    # validate (tris/files/wheels/dims)
-python re/tools/td5_car_import.py verify re/assets/cars/custom_x    # round-trip himodel.bin
+python re/tools/car_studio/td5_car_import.py new --code custom_x --donor vip   # scaffold a clone to edit
+python re/tools/car_studio/td5_car_import.py doctor re/assets/cars/custom_x    # validate (tris/files/wheels/dims)
+python re/tools/car_studio/td5_car_import.py verify re/assets/cars/custom_x    # round-trip himodel.bin
 ```
 
 **Limits & notes:**
