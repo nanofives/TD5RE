@@ -5860,7 +5860,12 @@ static int tt_pair_passthrough(int slot_a, int slot_b)
     }
     if (!knob) return 0;
     if (g_td5.mp_mode_config.mode != TD5_MP_MODE_TIME_TRIAL) return 0;
-    return v2v_slot_is_human(slot_a) && v2v_slot_is_human(slot_b);
+    /* Both are HUMAN players (slots 0..num_human_players-1) — the same definition
+     * the ghost RENDER uses, so what you see (a ghost) and what you collide with
+     * agree. Don't key off g_race_slot_state here (not reliably set for local
+     * split-screen humans). AI opponents are NOT humans -> they still collide. */
+    return slot_a >= 0 && slot_a < g_td5.num_human_players &&
+           slot_b >= 0 && slot_b < g_td5.num_human_players;
 }
 
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
@@ -7013,7 +7018,12 @@ void td5_physics_resolve_vehicle_contacts(void)
                     }
                 }
 
-                if (a_scripted || b_scripted) {
+                /* [TIME TRIAL] human-vs-human pairs pass THROUGH each other
+                 * (ghosts) — skip the V2V impulse entirely. This is the real V2V
+                 * dispatch (the broadphase), not resolve_collision_pair. */
+                if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index)) {
+                    /* no contact */
+                } else if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
                 } else {
                     collision_detect_full(a, b, i, j);
