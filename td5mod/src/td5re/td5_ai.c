@@ -7639,7 +7639,7 @@ static int trf_per_viewport_knob(void)
  * an identity map (vp == slot) but resolve it via the game table to be safe. */
 static int trf_viewport_of_slot(int slot)
 {
-    int vc = g_td5.viewport_count;
+    int vc = s_trf_vp_count;   /* the partition count (== num_human_players) */
     if (vc > TD5_MAX_VIEWPORTS) vc = TD5_MAX_VIEWPORTS;
     for (int v = 0; v < vc; v++)
         if (td5_game_get_player_slot(v) == slot) return v;
@@ -7684,7 +7684,12 @@ static void trf_per_viewport_setup(void)
     s_trf_per_vp   = 0;
     s_trf_vp_count = 1;
     s_trf_vp_k     = TD5_MAX_TRAFFIC_SLOTS;
-    vc = g_td5.viewport_count;
+    /* Partition by num_human_players, NOT viewport_count: traffic init runs at
+     * InitRace step ~4 but the viewport layout (viewport_count) isn't set until
+     * step ~17, so viewport_count is still 1 here. In split-screen each human is
+     * one viewport with an identity slot map, so num_human_players is the right
+     * (and already-set) partition count. */
+    vc = g_td5.num_human_players;
     if (!trf_per_viewport_knob()) return;
     if (g_td5.mp_mode_config.mode != TD5_MP_MODE_TIME_TRIAL) return;
     if (vc <= 1) return;
