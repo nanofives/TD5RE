@@ -396,7 +396,7 @@ static char s_post_race_name[32];
 
 static int frontend_load_car_preview_surface(int car_index, int paint_index) {
     char entry[32];
-    if (car_index < 0 || car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
+    if (car_index < 0 || car_index >= td5_car_total_count() || !s_car_zip_paths[car_index])
         return 0;
     snprintf(entry, sizeof(entry), "CarPic%d.tga", paint_index & 3);
     /* Car preview PNGs have a blue (0,0,90) background — key it out so the
@@ -484,11 +484,11 @@ static int frontend_td5_car_cap_inclusive(void) {
  *                       with the cop cars excluded.
  * The gap (td5_cap+1 .. 36) — locked TD5 cars + police — is skipped. */
 static int frontend_car_selectable(int i) {
-    if (i < 0 || i >= TD5_CAR_COUNT) return 0;
+    if (i < 0 || i >= td5_car_total_count()) return 0;
     if (s_selected_game_type == 8)                  /* Cop Chase: cops only */
         return frontend_car_is_cop(i);
     if (frontend_car_is_cop(i)) return 0;           /* cops excluded everywhere else */
-    if (i >= TD5_BASE_CAR_COUNT) return 1;          /* TD6 */
+    if (i >= TD5_BASE_CAR_COUNT) return 1;          /* TD6 (37-75) + custom (76+) */
     return i <= frontend_td5_car_cap_inclusive();   /* unlocked TD5 (police excluded by cap) */
 }
 
@@ -605,7 +605,7 @@ static void frontend_cycle_track(int delta, int track_min, int track_max) {
  * unchanged if the range is empty). */
 static int frontend_pick_random_car(int cur, int lo, int hi) {
     if (hi < lo) return cur;
-    int cand[TD5_CAR_COUNT];
+    int cand[TD5_CAR_SLOT_MAX];
     int n = 0;
     for (int i = lo; i <= hi && n < (int)(sizeof(cand)/sizeof(cand[0])); i++) {
         int ok;
@@ -3470,8 +3470,10 @@ void Screen_CarSelection(void) {
             /* TD6 cars (37-75) are always selectable, so the cycle range runs to
              * the full roster. frontend_car_cycle_step skips the locked-TD5 /
              * police gap (cap+1 .. 36), so the visible original-car set is
-             * unchanged while the TD6 cars become reachable. */
-            s_car_roster_max = TD5_CAR_COUNT - 1;
+             * unchanged while the TD6 cars become reachable. Drop-in custom cars
+             * (td5_customcar, slots 76+) extend the upper bound so they are
+             * reachable too. */
+            s_car_roster_max = td5_car_total_count() - 1;
             break;
         }
 
@@ -4928,7 +4930,7 @@ static const char *frontend_summary_car_name(int slot) {
     s_for_car[slot] = car;
     s_name[slot][0] = '\0';
 
-    const char *zip = (car >= 0 && car < TD5_CAR_COUNT) ? s_car_zip_paths[car] : NULL;
+    const char *zip = (car >= 0 && car < td5_car_total_count()) ? s_car_zip_paths[car] : NULL;
 
     if (!frontend_summary_carname_pretty()) {
         /* Legacy path: raw config.nfo line 1, "CAR %d" fallback. */

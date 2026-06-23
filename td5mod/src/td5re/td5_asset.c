@@ -27,6 +27,7 @@
 
 #include "td5_asset.h"
 #include "td5_assetsrc.h" /* pack-on-load editable sources (step 0) */
+#include "td5_customcar.h" /* drop-in custom car registry (slots 76+) */
 #include "td5_track.h"
 #include "td5_platform.h"
 #include "td5re.h"
@@ -3497,6 +3498,15 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
     } else if (car_index >= 0 &&
                car_index < (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0]))) {
         snprintf(zip_path, sizeof(zip_path), "%s", s_car_zip_paths[car_index]);
+    } else if (car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])) &&
+               td5_customcar_zip_path(car_index -
+                   (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))) {
+        /* Drop-in custom car (re/assets/cars/custom_<name>/) at roster slot 76+. */
+        const char *cz = td5_customcar_zip_path(car_index -
+                   (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])));
+        snprintf(zip_path, sizeof(zip_path), "%s", cz);
+        TD5_LOG_I(LOG_TAG, "vehicle slot=%d: custom car index=%d -> %s",
+                  slot, car_index, cz);
     } else {
         snprintf(zip_path, sizeof(zip_path), "cars/car%02d.zip", car_index);
     }
@@ -3725,10 +3735,12 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
 
 const char *td5_asset_get_car_zip_path(int car_index)
 {
-    if (car_index < 0 ||
-        car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
+    int builtin = (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0]));
+    if (car_index < 0)
         return NULL;
-    return s_car_zip_paths[car_index];
+    if (car_index < builtin)
+        return s_car_zip_paths[car_index];
+    return td5_customcar_zip_path(car_index - builtin);   /* NULL if out of range */
 }
 
 /* ========================================================================

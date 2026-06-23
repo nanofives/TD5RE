@@ -233,6 +233,79 @@ All can be overridden by placing loose files with matching names in the game dir
 
 Vehicle sounds are loaded per-car from `cars/*.zip` via `LoadVehicleSoundBank`. Ambient sounds are loaded per-track. Override by placing loose files with matching names.
 
+### 2.6 Custom Cars (3D model import) — drop-in, no rebuild
+
+`re/tools/car_studio/td5_car_import.py` imports any **glTF (.glb/.gltf)** or **OBJ** model
+into a complete car the engine auto-enumerates in **SELECT CAR**. Drop the
+produced folder into `re/assets/cars/` named `custom_<name>/` and it appears as
+an extra car slot (index 76+) the next launch — **no source edit, no rebuild**.
+
+**The easy way — Car Studio (visual editor):**
+```bash
+python re/tools/car_studio/td5_car_studio.py        # opens a browser GUI
+```
+A local web app with a **3D viewport** that loads your model, overlays the
+carparam **wheel positions as gizmos** (place wheels visually), previews your
+skin on the body, lets you edit every live physics/stat field, and **builds the
+car with one click**. Orient/scale/flip update live, so you fix "facing
+backward / wrong size" before building. It drives the same `td5_car_import.py`
+underneath. (three.js is vendored into `car_studio/vendor/` on first run — needs
+internet once, offline after.) The CLI below is the scripting equivalent.
+
+**Requirements:** Python with `numpy` + `pillow` (`pip install numpy pillow`).
+
+**Import a car:**
+```bash
+python re/tools/car_studio/td5_car_import.py import \
+    --model mycar.glb --name "My Cool Car" --skin body.png \
+    [--code custom_mycar] [--donor vip] [--out-dir re/assets/cars]
+```
+Writes `re/assets/cars/custom_mycar/` containing `himodel.bin` (the mesh),
+`carparam.json` (physics, copied from `--donor`), `carskin0-3.png` (your
+texture), `carhub0-3.png`, `carpic0-3.png` (showroom placeholder), `config.nfo`
+(name + stats), and the donor's engine `*.wav`. Launch the game → **Quick Race →
+SELECT CAR** → cycle past the stock cars to your car.
+
+**How the mesh maps to the engine** (locked from `mesh_tool.py` + a native-car
+survey — see also `td5_car_import.py`'s module docstring):
+- A TD5 car is ~**1500 (length, Z) × 650 (width, X) × 350 (height, Y)** world
+  units, origin at the geometric centre, **Y-up**. The importer auto-centres and
+  uniform-scales your model to that length so the donor wheels line up. Override
+  with `--scale FLOAT`. If the car faces backward, flip `--forward +z`. If the
+  texture is upside-down, add `--flip-v`.
+- The body is emitted as a single `render_type 0x103` (TD5-native, no transcode)
+  mesh of de-indexed float triangles on **texture page 7** (the loader maps page
+  7 → `carskin0`). **Wheels are not part of the mesh** — they render as sprites
+  positioned by `carparam.json` wheel coords, textured by `carhub`. Tune wheel
+  placement by editing `carparam.json` (see 2.3) or picking a closer `--donor`.
+- Keep it low-poly: native cars are ~200-450 triangles. The software renderer
+  handles a few thousand, but the tool warns past ~6000 — decimate in Blender first.
+
+**Convert a texture** (the engine reads **PNG natively** and byte-swaps to BGRA
+itself, so "engine-readable" just means a correctly-sized RGBA PNG):
+```bash
+python re/tools/car_studio/td5_car_import.py texture in.jpg carskin0.png --size 256 --square
+# optional colour-key transparency: --colorkey black|blue88|red|cyan
+```
+
+**Other CLI commands:**
+```bash
+python re/tools/car_studio/td5_car_import.py new --code custom_x --donor vip   # scaffold a clone to edit
+python re/tools/car_studio/td5_car_import.py doctor re/assets/cars/custom_x    # validate (tris/files/wheels/dims)
+python re/tools/car_studio/td5_car_import.py verify re/assets/cars/custom_x    # round-trip himodel.bin
+```
+
+**Limits & notes:**
+- Up to `TD5_CUSTOM_CAR_MAX` (16) custom cars; they occupy slots 76+ and are
+  always unlocked. Folder names must start `custom_` and contain no `.`.
+- Discovery is **sorted by folder name** so a car gets the same slot index on
+  every machine. For **netplay**, every peer must have the **identical**
+  `custom_*` folders (same constraint as tracks/builds) or the car index will
+  mismatch and desync — keep custom cars to single-player / hotseat unless all
+  peers share the exact set.
+- Engine side: `td5_customcar.c` scans at `td5_frontend_init`; the in-race loader
+  (`td5_asset.c`) and frontend roster resolve slot 76+ through the registry.
+
 ---
 
 ## 3. Code Modding

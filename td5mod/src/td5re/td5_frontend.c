@@ -627,7 +627,7 @@ int             s_sound_option_music_volume = 80;
  * sizes the port-side roster tables. */
 
 /* Lock tables (simplified inline representation) */
-uint8_t s_car_lock_table[TD5_CAR_COUNT];    /* DAT_00463e4c (0-36); 37-75 = TD6, always unlocked */
+uint8_t s_car_lock_table[TD5_CAR_SLOT_MAX]; /* DAT_00463e4c (0-36); 37-75 = TD6, 76+ = custom; all always unlocked */
 uint8_t s_track_lock_table[37];  /* DAT_004668B0 (orig 26); 26-30 = migrated TD6 P2P slots */
 int  s_total_unlocked_cars;      /* DAT_00463e0c */
 int  s_total_unlocked_tracks;    /* DAT_00466840 */
@@ -1078,7 +1078,7 @@ int frontend_find_surface_by_source(const char *name, const char *archive) {
 
 /* UI order matches original binary table at 0x00463e24 for 0-36 (DO NOT REORDER).
  * 37-75 = ported Test Drive 6 cars (must match td5_asset.c s_car_zip_paths order). */
-const char *s_car_zip_paths[TD5_CAR_COUNT] = {
+const char *s_car_zip_paths[TD5_CAR_SLOT_MAX] = {  /* [76..] filled at init from custom-car scan */
     "cars/vip.zip",  /* 0  - VIPER            - unlocked */
     "cars/97c.zip",  /* 1  - '97 CAMARO       - unlocked */
     "cars/frd.zip",  /* 2  - SALEEN MUSTANG   - unlocked */
@@ -1197,8 +1197,8 @@ const uint8_t s_track_schedule_to_tga_index[37] = {
     96, 97, 98, 99,100        /* slots 32-36: TD6 P2P cities -> trak0096..0100 */
 };
 
-static char s_car_display_names[TD5_CAR_COUNT][64];
-static uint8_t s_car_display_names_loaded[TD5_CAR_COUNT];
+static char s_car_display_names[TD5_CAR_SLOT_MAX][64];
+static uint8_t s_car_display_names_loaded[TD5_CAR_SLOT_MAX];
 
 static float frontend_clamp01(float t) {
     if (t < 0.0f) return 0.0f;
@@ -1292,7 +1292,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
  * Returns <=0 if absent (a TD5 car, or a TD6 car whose preview predates
  * carpicpaint generation). */
 int frontend_load_car_paint_overlay_surface(int car_index) {
-    if (car_index < 0 || car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
+    if (car_index < 0 || car_index >= td5_car_total_count() || !s_car_zip_paths[car_index])
         return 0;
     const char *archive = s_car_zip_paths[car_index];
 
@@ -1607,10 +1607,17 @@ static void frontend_get_track_display_name(int track_index, int truncate_at_com
     out[di] = '\0';
 }
 
+/* Live selectable car count: 76 built-in + drop-in custom cars discovered in
+ * re/assets/cars/custom_<name>/ (td5_customcar). Declared in td5_customcar.h and
+ * defined here because TD5_CAR_COUNT is authoritative in the frontend. */
+int td5_car_total_count(void) {
+    return TD5_CAR_COUNT + td5_customcar_count();
+}
+
 static const char *frontend_get_car_display_name(int car_index) {
     static const char *fallback = "UNKNOWN CAR";
     char line[128];
-    if (car_index < 0 || car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))
+    if (car_index < 0 || car_index >= td5_car_total_count())
         return fallback;
     if (s_car_display_names_loaded[car_index]) return s_car_display_names[car_index];
     /* [CONFIRMED @ 0x4667A8] English archive entry = "config.eng"; token 0 = display name.
@@ -1640,10 +1647,10 @@ static const char *frontend_get_car_display_name(int car_index) {
  * indexed by car type @0x413010), NOT the long line-0 name ("1997 CHEVROLET CAMARO...")
  * that frontend_get_car_display_name returns and that overflows the narrow 108px column.
  * Falls back to the long display name if line 1 is absent. */
-static char s_car_short_names[TD5_CAR_COUNT][24];
-static int  s_car_short_loaded[TD5_CAR_COUNT];
+static char s_car_short_names[TD5_CAR_SLOT_MAX][24];
+static int  s_car_short_loaded[TD5_CAR_SLOT_MAX];
 static const char *frontend_get_car_short_name(int car_index) {
-    if (car_index < 0 || car_index >= TD5_CAR_COUNT)
+    if (car_index < 0 || car_index >= td5_car_total_count())
         return frontend_get_car_display_name(car_index);
     if (s_car_short_loaded[car_index]) return s_car_short_names[car_index];
     s_car_short_loaded[car_index] = 1;
@@ -2418,7 +2425,10 @@ int frontend_advance_tick(void) {
  * Mirrors DAT_00463E24[37] from the original binary (confirmed by RE).
  * Quick-race default: all cup_schedule_track[i] = 0 → type index 7 (XKR).
  */
-static const int s_ext_car_to_type_index[TD5_CAR_COUNT] = {
+/* [TD5_CAR_COUNT..TD5_CAR_SLOT_MAX-1] (custom cars) zero-fill -> type index 0;
+ * custom cars are quick-race only and never flow through the cup/difficulty
+ * mapping that reads this table, so the value is unused for them. */
+static const int s_ext_car_to_type_index[TD5_CAR_SLOT_MAX] = {
      7,  2, 17, 33, 22, 31, 32, 34, 18, 14,
      1, 15, 13,  9, 11,  5,  0, 35,  8,  3,
      4, 12, 26, 10, 36, 16, 19, 25, 20, 23,
@@ -6530,7 +6540,7 @@ void frontend_load_car_spec_fields(int car_index) {
     if (car_index == s_car_spec_car) return;
     s_car_spec_car = car_index;
     for (field = 0; field < 17; field++) s_car_spec[field][0] = '\0';
-    if (car_index < 0 || car_index >= TD5_CAR_COUNT) return;
+    if (car_index < 0 || car_index >= td5_car_total_count()) return;
     data = (char *)td5_asset_open_and_read("config.nfo", s_car_zip_paths[car_index], &sz);
     if (!data || sz <= 0) return;
     field = 0; i = 0;
@@ -9753,6 +9763,22 @@ done:
 int td5_frontend_init(void) {
     TD5_LOG_I(LOG_TAG, "td5_frontend_init");
 
+    /* Discover drop-in custom cars (re/assets/cars/custom_<name>/) and register them
+     * as extra roster slots [TD5_CAR_COUNT..]. Idempotent: the scan runs once;
+     * filling the path/lock entries each init is harmless. The in-race vehicle
+     * loader (td5_asset.c) resolves these same slots via td5_customcar_zip_path,
+     * so the registry is the single source of truth across both arrays. */
+    {
+        int custom = td5_customcar_init();
+        for (int ci = 0; ci < custom && (TD5_CAR_COUNT + ci) < TD5_CAR_SLOT_MAX; ci++) {
+            s_car_zip_paths[TD5_CAR_COUNT + ci] = td5_customcar_zip_path(ci);
+            s_car_lock_table[TD5_CAR_COUNT + ci] = 0;   /* custom cars always unlocked */
+        }
+        if (custom > 0)
+            TD5_LOG_I(LOG_TAG, "registered %d custom car(s) at slots %d..%d",
+                      custom, TD5_CAR_COUNT, TD5_CAR_COUNT + custom - 1);
+    }
+
     s_current_screen = TD5_SCREEN_STARTUP_INIT;
     s_inner_state = 0;
     s_anim_tick = 0;
@@ -10139,7 +10165,7 @@ void mp_simul_load_pane_spec(int p, int car) {
     if (s_mp_pane_spec_car[p] == car) return;
     s_mp_pane_spec_car[p] = car;
     for (field = 0; field < 17; field++) s_mp_pane_spec[p][field][0] = '\0';
-    if (car < 0 || car >= TD5_CAR_COUNT) return;
+    if (car < 0 || car >= td5_car_total_count()) return;
     data = (char *)td5_asset_open_and_read("config.nfo", s_car_zip_paths[car], &sz);
     if (!data || sz <= 0) return;
     field = 0; i = 0;
