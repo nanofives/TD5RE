@@ -1914,6 +1914,12 @@ static const int s_auto_button_y_offset[] = {
 static int s_auto_button_idx = 0;
 int s_selected_button = 0;
 static int s_selection_from_mouse = 0; /* 1 when last selection came from mouse hover */
+/* 1 when THIS frame's s_input_ready was raised by an actual mouse click on a
+ * button (not a keyboard Enter / gamepad A, which the shared nav aggregates from
+ * ALL devices). Reset every poll. Lets host-only screens (MP mode vote) accept a
+ * mouse lock — the mouse is the host's single device — while ignoring a non-host
+ * pad's A that the aggregated nav would otherwise turn into a confirm. */
+static int s_confirm_was_mouse = 0;
 
 void frontend_reset_buttons(void) {
     for (int i = 0; i < FE_MAX_BUTTONS; i++) {
@@ -2888,6 +2894,13 @@ void frontend_init_race_schedule(void) {
         else
             ai = TD5_LEGACY_RACE_SLOTS - humans;
         if (ai < 0) ai = 0;
+        /* [MP COP CHASE AI COP 2026-06-23] An AI cop drives the first non-human
+         * slot (td5_game_cop_chase_cop_slot), so guarantee at least one AI
+         * opponent exists to be that cop — otherwise the cop slot would be empty
+         * and player 1 would end up the cop. */
+        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
+            g_td5.mp_mode_config.cop_is_ai && ai < 1)
+            ai = 1;
         if (ai > TD5_MAX_RACER_SLOTS - humans) ai = TD5_MAX_RACER_SLOTS - humans;
 
         g_td5.num_human_players = humans;
@@ -3276,6 +3289,22 @@ void frontend_init_race_schedule(void) {
         }
     }
 
+    /* [MP COP CHASE AI COP 2026-06-23] Give the AI cop a POLICE car so it reads
+     * unmistakably as the cop (not "just another racer"). The AI cop occupies the
+     * first non-human slot (= num_human_players); TD5 police liveries are ext_id
+     * 33..36 (loadable as racer cars — the original lets the player drive one in
+     * cop chase). */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active &&
+        g_td5.mp_mode_config.cop_is_ai) {
+        int cop = g_td5.num_human_players;
+        if (cop >= 1 && cop < TD5_MAX_RACER_SLOTS && 33 < TD5_CAR_COUNT) {
+            slot_active[cop]  = 1;
+            slot_ext_id[cop]  = 33;   /* TD5 police car */
+            slot_variant[cop] = 0;
+            TD5_LOG_I(LOG_TAG, "InitRaceSchedule: AI cop slot %d -> police car (ext_id 33)", cop);
+        }
+    }
+
     /* Store ext_ids directly as car indices.
      * s_car_zip_paths is indexed by ext_id (display order), NOT by the original
      * binary's gCarZipPathTable type_index. The s_ext_car_to_type_index conversion
@@ -3447,6 +3476,13 @@ int frontend_option_delta(void) {
     if (s_arrow_input & 1) return -1;
     if (s_arrow_input & 2) return 1;
     return 0;
+}
+
+/* 1 if this frame's s_input_ready confirm came from an actual mouse click on a
+ * button (not a keyboard Enter / gamepad A). Host-only MP screens use this to
+ * accept a host mouse lock while ignoring the aggregated all-device pad confirm. */
+int frontend_input_confirm_was_mouse(void) {
+    return s_confirm_was_mouse;
 }
 
 static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
@@ -3843,6 +3879,7 @@ static void frontend_poll_input(void) {
     s_input_ready = 0;
     s_button_index = -1;
     s_arrow_input = 0;
+    s_confirm_was_mouse = 0;
 
     hwnd = (HWND)(DWORD_PTR)Backend_GetDisplayWindow();
     if (!frontend_is_window_active()) {
@@ -4065,6 +4102,7 @@ static void frontend_poll_input(void) {
                 s_selection_from_mouse = 1;
                 s_button_index = i;
                 s_input_ready = 1;
+                s_confirm_was_mouse = 1;
                 s_mouse_flash_button = i;
                 s_mouse_flash_until = now + 180;
                 s_mouse_confirm_button = -1;
@@ -4082,6 +4120,7 @@ static void frontend_poll_input(void) {
                     s_selection_from_mouse = 1;
                     s_button_index = i;
                     s_input_ready = 1;
+                    s_confirm_was_mouse = 1;
                     s_mouse_flash_button = i;
                     s_mouse_flash_until = now + 180;
                     s_mouse_confirm_button = -1;

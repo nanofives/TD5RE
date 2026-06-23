@@ -2852,8 +2852,16 @@ void Screen_MpModeVote(void) {
         if (s_mode_vote[0] >= TD5_MP_MODE_COUNT) s_mode_vote[0] = TD5_MP_MODE_COUNT - 1;
         s_selected_button = s_mode_vote[0];     /* host highlight = host pick */
 
-        /* Mouse click / keyboard ENTER on a mode button = host lock. */
-        if (s_input_ready && s_button_index >= 0 && s_button_index < TD5_MP_MODE_COUNT) {
+        /* MOUSE click on a mode button = host lock (the mouse is the host's lone
+         * device). Keyboard ENTER / gamepad A are deliberately NOT taken from the
+         * shared nav here: frontend's td5_plat_input_frontend_nav() aggregates
+         * EVERY pad's A into s_input_ready, so a NON-host player's confirm would
+         * otherwise lock in the host's highlighted pick. The host's OWN
+         * keyboard/pad confirm is already handled per-device in the loop above
+         * (p==0, edge & 0x10), so this mouse-only gate loses nothing for the host
+         * while preventing other players from triggering the selection. */
+        if (s_input_ready && frontend_input_confirm_was_mouse() &&
+            s_button_index >= 0 && s_button_index < TD5_MP_MODE_COUNT) {
             s_mode_vote[0] = s_button_index; s_selected_button = s_button_index; host_lock = 1;
         }
         if (frontend_check_escape()) host_back = 1;
@@ -3081,7 +3089,13 @@ void frontend_mp_mode_config_render(float sx, float sy) {
     int mode = g_td5.mp_mode_config.mode, count, i;
     const char *name = (mode >= 0 && mode < TD5_MP_MODE_COUNT) ? k_mp_mode_names[mode] : "MODE";
     char title[48], vb[40];
-    const float valc = (float)CFG_BX + (float)CFG_BW - 78.0f;   /* value column centre */
+    /* Value column: BLUE selector arrows flank a centred value with enough
+     * clearance for the widest cop-chase label ("SUDDEN DEATH"). The old single
+     * valc = CFG_BW-78 with -38/+28 arrow offsets sat the arrows ON TOP of wide
+     * values; widen + symmetrise so they never overlap the text. */
+    const float val_l = (float)CFG_BX + 232.0f;                /* left arrow x  */
+    const float val_r = (float)CFG_BX + (float)CFG_BW - 24.0f; /* right arrow x */
+    const float valc  = (val_l + 12.0f + val_r) * 0.5f;        /* value centre  */
 
     /* Title = "<MODE> OPTIONS" (e.g. TIME TRIAL OPTIONS), top-left, #E3D708. */
     snprintf(title, sizeof title, "%s OPTIONS", name);
@@ -3103,9 +3117,9 @@ void frontend_mp_mode_config_render(float sx, float sy) {
         else
             snprintf(vb, sizeof vb, "%d", v);
         td5_vui_text_centered(valc * sx, ty * sy, vb, 0xFFFFFFFFu, sx, sy);
-        /* quick-race-style BLUE selector arrows around the value (every row). */
-        td5_vui_arrow((valc - 38.0f) * sx, ay * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
-        td5_vui_arrow((valc + 28.0f) * sx, ay * sy, 12.0f * sx, 14.0f * sy, 1, 0xFF7995FFu);
+        /* quick-race-style BLUE selector arrows flanking the value (every row). */
+        td5_vui_arrow(val_l * sx, ay * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
+        td5_vui_arrow(val_r * sx, ay * sy, 12.0f * sx, 14.0f * sy, 1, 0xFF7995FFu);
     }
     if (count == 0)
         mp_pos_small_centered(320.0f * sx, 150.0f * sy,
@@ -3135,7 +3149,9 @@ void Screen_CupWinners(void) {
         frontend_play_sfx(3);
         td5_plat_input_flush_nav();
         td5_game_mp_cup_end();
-        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+        /* [MP 2026-06-23] Cup series done -> back to the lobby (return_to_lobby
+         * picks MP/net lobby when a session is active, else MAIN_MENU). */
+        td5_frontend_return_to_lobby();
     }
 }
 
@@ -4917,7 +4933,12 @@ static void frontend_update_difficulty_button_visibility(int diff_btn_idx) {
  * which ConfigureGameTypeFlags has already set when the track selector opens. */
 static void frontend_update_police_button_visibility(int police_btn_idx) {
     if (police_btn_idx < 0 || police_btn_idx >= s_button_count) return;
-    int hide = g_td5.wanted_mode_enabled ? 1 : 0;
+    /* Hide in cop chase: the player(s) ARE the pursuit, the separate traffic-cop
+     * encounter is force-disabled. wanted_mode_enabled is only set at race init,
+     * so the MP cop-chase flow (mode == COP_CHASE) must be checked directly —
+     * otherwise the row showed on the MP track selector before the race. */
+    int hide = (g_td5.wanted_mode_enabled ||
+                g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) ? 1 : 0;
     s_buttons[police_btn_idx].hidden   = hide;
     s_buttons[police_btn_idx].disabled = hide;
     TD5_LOG_I(LOG_TAG, "Police row: wanted_mode=%d -> %s",
@@ -5461,7 +5482,11 @@ void Screen_PostRaceHighScore(void) {
                 TD5_LOG_I(LOG_TAG, "PostRaceHighScore: writing config (high-score flush)");
                 td5_save_write_config(NULL);
             } else {
-                td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                /* [MP 2026-06-23] After a multiplayer race the post-race screens
+                 * should return to the LOBBY (so players can set up another),
+                 * not the main menu. return_to_lobby -> MP/net lobby when a
+                 * session is active, else MAIN_MENU (single-player unchanged). */
+                td5_frontend_return_to_lobby();
             }
         }
         break;

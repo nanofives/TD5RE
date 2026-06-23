@@ -2335,6 +2335,15 @@ int td5_plat_input_device_is_lost(int enum_index)
     LPDIRECTINPUTDEVICE8A dev;
     DIJOYSTATE2 js;
     if (enum_index <= 0 || enum_index >= s_device_count || enum_index >= 16) return 0;
+    /* [focus 2026-06-23] While the window is unfocused (alt-tab) DirectInput
+     * cannot read the pad — GetDeviceState fails every frame — which would trip
+     * the lost-latch and pop "CONTROLLER DISCONNECTED" on a mere focus change.
+     * Hold the current latch and skip the fail-streak while unfocused; a real
+     * unplug is still detected on the first poll after focus returns. (The
+     * in-race detector is already focus-safe: its poll is skipped when unfocused,
+     * so s_js_lost never moves — this aligns the frontend scan path with it.) */
+    if (s_hwnd && GetForegroundWindow() != s_hwnd)
+        return s_scan_lost[enum_index];
     dev = scan_dev(enum_index);   /* (re)creates + acquires the handle if possible */
     if (!dev) {
         if (++s_scan_fail_streak[enum_index] >= TD5_JS_LOST_FAIL_THRESHOLD)

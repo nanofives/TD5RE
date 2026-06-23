@@ -3059,20 +3059,25 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
      * countdown banner. Shown from race start (g_wanted_msg_timer begins at 0) so
      * it's readable through the pre-race countdown; the crime re-randomises on the
      * first ram (td5_ai.c). Faithful 2-line wording (g_wanted_msg_line1/2). */
-    if (g_td5.wanted_mode_enabled != 0 && s_is_first_player != 0 && g_wanted_msg_timer < 360) {
+    /* [AI COP 2026-06-23] Per-pane objective: the COP hunts, a SUSPECT evades. In
+     * MP cop chase show it on EVERY pane (each player sees their own role); SP
+     * wanted keeps the single first-pane banner. */
+    int wb_pane_slot = g_actor_slot_map[view_index];
+    int wb_mp_cop    = (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active);
+    int wb_show      = wb_mp_cop ? 1 : (s_is_first_player != 0);
+    if (g_td5.wanted_mode_enabled != 0 && wb_show && g_wanted_msg_timer < 360) {
         /* Don't burn the display timer during the pre-race countdown — hold the
          * objective solid until the race is actually running, then it lives its
-         * full ~10s and blinks out. */
-        if (!td5_game_is_countdown_active())
+         * full ~10s and blinks out. Advance once per frame (first pane only). */
+        if (!td5_game_is_countdown_active() && s_is_first_player != 0)
             g_wanted_msg_timer++;
 
         /* Flash out over the last 30 frames (odd frames hidden). */
         if (g_wanted_msg_timer < 330 || (g_wanted_msg_timer & 1) == 0) {
-            /* [COP-CHASE 2026-06-21] Generic objective banner — the crime-specific
-             * "SUSPECT IS WANTED FOR <X>" text was removed at user request. Single
-             * big line in the UPPER-THIRD, clear of the top-centre score and the
-             * centre countdown digit. */
-            const char *msg = "CHASE THE SUSPECTS";
+            /* Objective depends on THIS pane's role: a suspect evades, the cop
+             * hunts. (SP wanted / the human-cop pane -> "CHASE THE SUSPECTS".) */
+            const char *msg = (wb_mp_cop && wb_pane_slot != td5_game_cop_chase_cop_slot())
+                              ? "EVADE THE COP" : "CHASE THE SUSPECTS";
             float pane_h = vp_bottom - vp_top;
             if (pane_h < 1.0f) pane_h = 480.0f;
             float cx = s_view_layout[view_index].center_x;
@@ -4192,13 +4197,19 @@ void td5_hud_render_overlays(float dt)
                  * player/cop at accumulated_score (+0x2C8). */
                 /* [COP-CHASE 2026-06-21] Top-CENTRE, larger HUD face, just below the
                  * ARRESTS line (from the LAP_COUNTER block). Scale via
-                 * TD5RE_COPCHASE_HUD_SCALE. */
-                s_hud_next_text_scale = copchase_hud_text_scale();
-                td5_hud_queue_text(0,
-                    (int)vl->center_x,
-                    (int)(vl->vp_int_top + 30.0f),
-                    1,
-                    "POINTS %d", (int)td5_game_get_result_secondary(0));
+                 * TD5RE_COPCHASE_HUD_SCALE.
+                 * [AI COP 2026-06-23] Show the cop score (POINTS/ARRESTS) only on
+                 * the COP's own pane — keyed off the effective cop slot, NOT a
+                 * hardcoded slot 0. With an AI cop no human pane is the cop, so the
+                 * suspects no longer see (and read as) the cop. */
+                if (actor_slot == td5_game_cop_chase_cop_slot()) {
+                    s_hud_next_text_scale = copchase_hud_text_scale();
+                    td5_hud_queue_text(0,
+                        (int)vl->center_x,
+                        (int)(vl->vp_int_top + 30.0f),
+                        1,
+                        "POINTS %d", (int)td5_game_get_result_secondary(actor_slot));
+                }
             } else {
                 td5_hud_queue_text(0,
                     (int)(vl->vp_int_left + 8.0f),
@@ -4228,13 +4239,16 @@ void td5_hud_render_overlays(float dt)
                  * against the original's on-screen HUD ("ARRESTS N", top line).
                  * [FIX 2026-05-31 — was the guessed "BUSTS".] */
                 /* [COP-CHASE 2026-06-21] Top-CENTRE, larger HUD face, stacked ABOVE
-                 * the POINTS line. */
-                s_hud_next_text_scale = copchase_hud_text_scale();
-                td5_hud_queue_text(0,
-                    (int)vl->center_x,
-                    (int)(vl->vp_int_top + 8.0f),
-                    1,
-                    "ARRESTS %d", td5_game_get_wanted_kills(0));
+                 * the POINTS line. [AI COP 2026-06-23] cop's own pane only (see
+                 * the POINTS block) — keyed off the effective cop slot. */
+                if (actor_slot == td5_game_cop_chase_cop_slot()) {
+                    s_hud_next_text_scale = copchase_hud_text_scale();
+                    td5_hud_queue_text(0,
+                        (int)vl->center_x,
+                        (int)(vl->vp_int_top + 8.0f),
+                        1,
+                        "ARRESTS %d", td5_game_get_wanted_kills(actor_slot));
+                }
             } else {
                 td5_hud_queue_text(0,
                     (int)(vl->vp_int_left + 8.0f),

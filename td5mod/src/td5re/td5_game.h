@@ -218,6 +218,12 @@ int  td5_game_is_wanted_mode(void);
  * cop_slot with every other racer a suspect. */
 int  td5_game_cop_chase_cop_slot(void);
 int  td5_game_cop_chase_is_suspect(int slot);
+/* Active racer count for an MP cop chase (human suspects + an AI-cop slot when
+ * the cop is an AI). 0 = not an MP cop chase -> callers keep the faithful SP
+ * wanted-mode 2-slot field. Keeps the field-size decisions (g_racer_count,
+ * s_slot_state, the AI's g_slot_state) consistent so the AI cop slot stays
+ * active instead of being disabled with slots 2..5. */
+int  td5_game_mp_cop_chase_field(void);
 
 /* [MP GAME MODES: CUP 2026-06-22] Self-contained best-of-X series orchestrator
  * for the "Cup" mode. begin() arms the series (track list, zeroed standings,

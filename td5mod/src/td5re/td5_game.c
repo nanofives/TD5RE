@@ -390,6 +390,26 @@ static int32_t s_levelinf_checkpoint_config;   /* +0x08 from LEVELINF.DAT */
  * so reaching this span is the only finish trigger). */
 static int s_td6_finish_span = 0;
 
+/* [MP TIME TRIAL — segment checkpoints] The TT mode-config screen offers a START
+ * (0..4) and FINISH (1..5) checkpoint on EVERY track. The range is fixed 0..5
+ * (not per-track), so a "checkpoint" here is simply a fifth of the track ring:
+ * cp 0 = start line, cp 5 = finish line. This is independent of any per-track
+ * native checkpoint data (s_active_checkpoint). mp_tt_checkpoint_span() maps a
+ * checkpoint index to its absolute ring span. */
+static int mp_tt_checkpoint_span(int cp_idx) {
+    int ring = g_td5.track_span_ring_length;
+    if (ring <= 0) ring = td5_track_get_span_count();
+    if (ring <= 0) return 0;
+    if (cp_idx <= 0) return 0;
+    if (cp_idx >= 5) return ring;
+    return (int)(((long)cp_idx * (long)ring) / 5);
+}
+
+/* TT segment finish span (>0): end the TT race when forward progress reaches it.
+ * 0 = run to the track's normal finish (finish cp == 5, or any non-TT mode).
+ * Resolved once at race init; consumed by advance_pending_finish_state. */
+static int s_tt_finish_span = 0;
+
 /* [TD6 SYNTHESIZED CHECKPOINTS] Drive-through markers derived from the in-track
  * ring/banner mesh positions (TD6.exe ships NO checkpoint-trigger data — RE'd
  * 2026-06-04: CHECKPT.NUM is loaded but never read, the banner-texture tables
@@ -1659,12 +1679,13 @@ int td5_game_init_race_session(void) {
      * split-screen only for now — the net path above leaves wanted mode off. */
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
         g_td5.wanted_mode_enabled = 1;
-        /* Optional AI-driven cop: mark the cop slot so the AI chase driver takes
-         * it over (faster, road-safe, targets the nearest suspect). */
-        td5_ai_cop_chase_setup(td5_game_cop_chase_cop_slot(),
-                               g_td5.mp_mode_config.cop_is_ai);
+        /* NOTE: the AI cop is armed LATER (after td5_ai_init_traffic_actors, whose
+         * cop_state_reset() in the dynamic-traffic seeding would otherwise WIPE the
+         * arming — that bug made the AI cop revert to a regular racer and the cop
+         * role fall back onto player 1). See the td5_ai_cop_chase_setup call after
+         * step 14 below. */
         TD5_LOG_I(LOG_TAG, "InitRace: MP COP CHASE active — cop slot=%d ai=%d win=%d head_start=%d",
-                  g_td5.mp_mode_config.cop_slot, g_td5.mp_mode_config.cop_is_ai,
+                  td5_game_cop_chase_cop_slot(), g_td5.mp_mode_config.cop_is_ai,
                   g_td5.mp_mode_config.cop_win_condition,
                   g_td5.mp_mode_config.suspect_head_start);
     }
@@ -1911,11 +1932,16 @@ int td5_game_init_race_session(void) {
      * Port uses ACTOR_ENCOUNTER_STATE (offset 0x384) in place of the separate
      * damage table — initialize it to 0x1000 so cops run from tick 1. */
     if (g_td5.wanted_mode_enabled) {
-        for (int i = 2; i < TD5_MAX_RACER_SLOTS; i++) {
-            s_slot_state[i].state = 3;  /* disabled — matches original */
+        /* MP cop chase keeps the human suspects + the AI-cop slot active; SP
+         * wanted mode keeps the faithful slots 0-1. Slots 0..humans-1 are already
+         * human (1) and the AI-cop slot (= num_human_players) is AI (0); only the
+         * slots past the field get disabled. */
+        int keep = td5_game_mp_cop_chase_field();
+        if (keep <= 0) keep = 2;   /* SP wanted: slot 0 player + slot 1 AI suspect */
+        for (int i = keep; i < TD5_MAX_RACER_SLOTS; i++) {
+            s_slot_state[i].state = 3;  /* disabled */
         }
-        TD5_LOG_I(LOG_TAG,
-                  "Cop Chase: slots 2..5 disabled (original racerCount=2 for game_type!=0)");
+        TD5_LOG_I(LOG_TAG, "Cop Chase: active field=%d, slots %d..5 disabled", keep, keep);
     }
     /* Player-as-AI autopilot: mirrors original attract-mode at
      * InitializeRaceSession 0x0042ACCF, which writes
@@ -2022,7 +2048,9 @@ int td5_game_init_race_session(void) {
     if (g_td5.time_trial_enabled) {
         g_racer_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
     } else if (g_td5.wanted_mode_enabled) {
-        g_racer_count = 2;  /* slot 0 = player, slot 1 = cop AI */
+        /* MP cop chase: human suspects + AI-cop slot. SP wanted: faithful 2. */
+        int f = td5_game_mp_cop_chase_field();
+        g_racer_count = (f > 0) ? f : 2;  /* SP: slot 0 = player, slot 1 = cop AI */
     } else if (g_td5.num_human_players >= 1) {
         /* Single race / Quick Race: humans + opponents (<=6) [PORT ENHANCEMENT].
          * Default (1+5) yields 6 — legacy behavior. */
@@ -2164,9 +2192,13 @@ int td5_game_init_race_session(void) {
      * stay varied via the normal opponent roster — only the player is police
      * (CONFIRMED: orig opponent loop @ 0x0040DD5B uses the difficulty roster,
      * not the police set). */
-    if (g_td5.wanted_mode_enabled) {
-        /* Valid cop cars = TD5 police 33..36 OR the ported TD6 cops cp1..cp4
-         * (roster 46..49). Anything else falls back to the Police Cerbera (33). */
+    if (g_td5.wanted_mode_enabled && td5_game_cop_chase_cop_slot() == 0) {
+        /* Force the police car ONLY when SLOT 0 is the cop — SP wanted mode, or MP
+         * cop chase where the host (slot 0) is the human cop. When the cop is an AI
+         * or another player, slot 0 is a SUSPECT and KEEPS its chosen car (the cop
+         * gets its police car via the schedule + the cop render path). This fixes
+         * "player 1 is a cop despite choosing another car" in AI-cop chase.
+         * Valid cop cars = TD5 police 33..36 OR ported TD6 cops cp1..cp4 (46..49). */
         int is_cop = (g_td5.car_index >= 33 && g_td5.car_index <= 36) ||
                      (g_td5.car_index >= 46 && g_td5.car_index <= 49);
         if (!is_cop) {
@@ -2178,6 +2210,9 @@ int td5_game_init_race_session(void) {
             TD5_LOG_I(LOG_TAG, "Cop Chase: player car %d already a police car",
                       g_td5.car_index);
         }
+    } else if (g_td5.wanted_mode_enabled) {
+        TD5_LOG_I(LOG_TAG, "Cop Chase: slot 0 is a suspect (cop slot=%d) — keeping chosen car %d",
+                  td5_game_cop_chase_cop_slot(), g_td5.car_index);
     }
 
     /* ---- Step 5: Load vehicle assets and sound banks for all active slots ---- */
@@ -2782,6 +2817,28 @@ int td5_game_init_race_session(void) {
                       effective_start_span_offset);
         }
 
+        /* [MP TIME TRIAL] TT spawns differently from a normal grid: every car
+         * starts on the SAME span (no down-track stagger) but on a DIFFERENT lane
+         * (handled in the spawn loop below). The grid sits AT the chosen START
+         * checkpoint's absolute ring span (cp 0 = the track's normal start line;
+         * cp 1..4 = the absolute ring fraction, the SAME mapping the FINISH
+         * checkpoint uses, so a checkpoint index is one consistent span). */
+        int tt_mode = (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL &&
+                       !g_td5.network_active);
+        int tt_spawn_span = start_span;
+        if (tt_mode && g_td5.mp_mode_config.tt_checkpoint_start > 0) {
+            tt_spawn_span = mp_tt_checkpoint_span(g_td5.mp_mode_config.tt_checkpoint_start);
+            TD5_LOG_I(LOG_TAG, "MP TT start checkpoint: cp=%d -> spawn_span=%d (ring=%d)",
+                      g_td5.mp_mode_config.tt_checkpoint_start, tt_spawn_span,
+                      g_td5.track_span_ring_length);
+        }
+
+        /* [MP COP CHASE 2026-06-23] Like TT, cop chase spawns everyone TOGETHER on
+         * the same span (the start line) on different lanes — the AI cop right
+         * beside the suspects, no down-track stagger and no positional head start —
+         * so the chase begins fair + simultaneous (per user request). */
+        int mp_cop_mode = (td5_game_mp_cop_chase_field() > 0);
+
         /* Publish start_span as g_trackStartSpanIndex — consumed by the
          * circuit 4-case sector dispatch in advance_pending_finish_state
          * (verbatim port of CheckRaceCompletionState @ 0x00409E80). This
@@ -2793,6 +2850,20 @@ int td5_game_init_race_session(void) {
          * P2P branch — the only finish trigger for checkpoint-less TD6 P2P
          * tracks. */
         s_td6_finish_span = td5_asset_td6_finish_span_for_level(level_num);
+
+        /* [MP TIME TRIAL] Resolve the segment FINISH span: end the TT race at the
+         * chosen finish checkpoint. cp 5 ("finish line") -> 0 = use the track's
+         * normal finish (native checkpoints / laps); cp 1..4 -> the ring fraction. */
+        s_tt_finish_span = 0;
+        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL && !g_td5.network_active &&
+            g_td5.mp_mode_config.tt_checkpoint_finish > 0 &&
+            g_td5.mp_mode_config.tt_checkpoint_finish < 5) {
+            s_tt_finish_span =
+                mp_tt_checkpoint_span(g_td5.mp_mode_config.tt_checkpoint_finish);
+            TD5_LOG_I(LOG_TAG, "MP TT segment finish: cp=%d -> span=%d (ring=%d)",
+                      g_td5.mp_mode_config.tt_checkpoint_finish, s_tt_finish_span,
+                      g_td5.track_span_ring_length);
+        }
 
         /* [TD6 SYNTHESIZED CHECKPOINTS] Resolve this track's checkpoint spans
          * once. Gated on g_active_td6_level (NOT level_num) so faithful TD5
@@ -2894,14 +2965,22 @@ int td5_game_init_race_session(void) {
                  * [BUG 5b] effective_start_span_offset = the live offset normally,
                  * or the value captured when this replay was recorded (so playback
                  * spawns on the recorded grid). */
-                int raw = start_span + span_offsets[effective_slot] + effective_start_span_offset;
-                /* [MP COP CHASE 2026-06-22] The cop spawns BEHIND the suspects by
-                 * suspect_head_start spans, so the suspects (the other players)
-                 * start together a little further ahead. */
-                if (g_td5.wanted_mode_enabled &&
-                    g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
-                    slot == td5_game_cop_chase_cop_slot()) {
-                    raw -= g_td5.mp_mode_config.suspect_head_start;
+                /* TT and MP cop chase spawn every car on the SAME span (lanes are
+                 * spread instead, below); for cop chase the AI cop starts right
+                 * beside the suspects — no positional head start — so the chase is
+                 * fair + simultaneous. Other modes keep the per-slot down-track
+                 * stagger off start_span. */
+                int raw;
+                if (tt_mode) {
+                    raw = tt_spawn_span + effective_start_span_offset;
+                } else if (mp_cop_mode) {
+                    raw = start_span + effective_start_span_offset;
+                    /* The cop starts a few spans BEHIND the suspects (it has a gap
+                     * to close); suspects line up together at start_span. */
+                    if (slot == td5_game_cop_chase_cop_slot())
+                        raw -= g_td5.mp_mode_config.suspect_head_start;
+                } else {
+                    raw = start_span + span_offsets[effective_slot] + effective_start_span_offset;
                 }
                 span_index = (int)(int16_t)(raw & 0xFFFF);
             } else {
@@ -2990,6 +3069,33 @@ int td5_game_init_race_session(void) {
                     if (sub_lane < band_lo) sub_lane = band_lo;
                     if (sub_lane > band_hi) sub_lane = band_hi;
                 }
+            }
+
+            /* [MP TIME TRIAL — grid lanes] TT cars all share the start span, so
+             * spread the players ACROSS the lanes instead of down-track. Each
+             * player gets a DISTINCT lane (the block is centred on the drivable
+             * road); when there are more players than lanes, reuse a lane modulo
+             * the lane count — TT cars pass through each other (tt_pair_passthrough)
+             * so an overlap is harmless. Overrides the default grid lane above
+             * (incl. the TD6 road-band case, which only sets the band here). */
+            if (tt_mode || mp_cop_mode) {
+                int lc = td5_track_span_lane_count_at(span_index);
+                int lane_lo = 0, lane_hi = (lc > 0 ? lc - 1 : 0);
+                if (g_active_td6_level > 0 && lc > 4)
+                    td5_track_td6_road_band(span_index, lc, &lane_lo, &lane_hi);
+                int lanes = lane_hi - lane_lo + 1;
+                if (lanes < 1) lanes = 1;
+                /* Grid size: TT = the human players; cop chase = the suspects +
+                 * the AI-cop slot (so the cop gets its own lane next to them). */
+                int grid_n = tt_mode ? g_td5.num_human_players
+                                     : td5_game_mp_cop_chase_field();
+                if (grid_n < 1) grid_n = 1;
+                if (grid_n <= lanes)
+                    sub_lane = lane_lo + (lanes - grid_n) / 2 + effective_slot;  /* centred, distinct */
+                else
+                    sub_lane = lane_lo + (effective_slot % lanes);              /* reuse when out */
+                if (sub_lane < lane_lo) sub_lane = lane_lo;
+                if (sub_lane > lane_hi) sub_lane = lane_hi;
             }
 
             /* InitActorTrackSegmentPlacement @ 0x00445F10 seeds:
@@ -3288,6 +3394,16 @@ int td5_game_init_race_session(void) {
      * happen earlier than the original"). The function self-gates on
      * g_racerCount <= 6, so a bare call is inert when traffic is disabled. */
     td5_ai_init_traffic_actors();
+
+    /* [MP COP CHASE AI COP 2026-06-23] Arm the AI cop HERE — AFTER
+     * td5_ai_init_traffic_actors(), whose dynamic-traffic seeding calls
+     * cop_state_reset() and would wipe an earlier arming. Without this the AI cop
+     * slot (= num_human_players) reverted to a regular AI racer, so the cop role
+     * visibly fell back onto a human and the AI just drove as another player. */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active &&
+        g_td5.mp_mode_config.cop_is_ai) {
+        td5_ai_cop_chase_setup(td5_game_cop_chase_cop_slot(), 1);
+    }
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
     /* [PORT ENHANCEMENT] N-way split: one input slot per local human. Players
@@ -6583,6 +6699,28 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
     /* Already finished */
     if (s_slot_state[slot].companion_1 != 0) return;
 
+    /* [MP TIME TRIAL — segment finish] When a finish checkpoint < 5 is chosen the
+     * TT race ends at that ring span, regardless of track type (circuit or P2P)
+     * and before the circuit/P2P branches below. Gate on forward progress via the
+     * RAW accumulator (+0x84) — like the TD6 P2P finish — so a reverse near the
+     * start can't wrap the normalized span up to ring-1 and false-trigger. The UI
+     * forces finish > start, so the spawn span is always below s_tt_finish_span
+     * (no instant finish). s_tt_finish_span is 0 outside TT / for finish cp == 5,
+     * making this a no-op on every other mode/track. */
+    if (s_tt_finish_span > 0 && actor) {
+        int32_t raw_acc = (int32_t)*(int16_t *)((uint8_t *)actor + 0x84);
+        if (raw_acc >= s_tt_finish_span) {
+            m->post_finish_metric_base = m->cumulative_timer;
+            s_slot_state[slot].companion_1 = 1;
+            s_slot_state[slot].companion_2 = 1;
+            s_slot_state[slot].state = 2;
+            TD5_LOG_I(LOG_TAG,
+                      "Actor finish: slot=%d mode=tt-segment raw=%d finish=%d timer=%d",
+                      slot, (int)raw_acc, s_tt_finish_span, m->cumulative_timer);
+            return;
+        }
+    }
+
     /* [TD6 SYNTHESIZED CHECKPOINTS] Register a drive-through when this actor
      * reaches the next synthesized checkpoint span (derived from the in-track
      * ring/banner meshes — TD6.exe has no checkpoint-trigger data). Records a
@@ -8210,11 +8348,40 @@ int td5_game_mp_traffic_fair(void) {
 int td5_game_cop_chase_cop_slot(void) {
     if (!g_td5.wanted_mode_enabled) return -1;
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) {
+        /* [AI COP 2026-06-23] When the cop is an AI, it occupies the first
+         * NON-human slot so every human stays a suspect driving their own car.
+         * (Previously the cop_slot default 0 made player 1 the AI cop — the
+         * "selected a viper but plays as a cop" report.) frontend_init_race_
+         * schedule forces >=1 AI opponent in this mode so the slot exists. The
+         * human-cop path keeps the role-screen-picked slot. */
+        if (g_td5.mp_mode_config.cop_is_ai) {
+            int s = g_td5.num_human_players;
+            if (s < 0) s = 0;
+            if (s >= TD5_MAX_RACER_SLOTS) s = TD5_MAX_RACER_SLOTS - 1;
+            return s;
+        }
         int s = g_td5.mp_mode_config.cop_slot;
         if (s < 0 || s >= TD5_MAX_RACER_SLOTS) s = 0;   /* must be a racer slot */
         return s;
     }
     return 0;
+}
+
+/* [MP COP CHASE 2026-06-23] Active racer count for an MP cop chase: the human
+ * suspects + one AI-cop slot when the cop is an AI. Returns 0 for everything
+ * else (SP wanted mode, non-cop-chase) so callers fall back to the faithful
+ * 2-slot wanted field. The faithful "slots 2..5 inactive" wanted-mode rule (one
+ * player-cop + one AI suspect) does not fit MP cop chase, which needs N human
+ * suspects plus an AI cop — without this the AI cop slot was disabled and the
+ * cop role fell back onto player 1. */
+int td5_game_mp_cop_chase_field(void) {
+    if (!g_td5.wanted_mode_enabled) return 0;
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE || g_td5.network_active)
+        return 0;
+    int f = g_td5.num_human_players + (g_td5.mp_mode_config.cop_is_ai ? 1 : 0);
+    if (f < 2) f = 2;
+    if (f > TD5_MAX_RACER_SLOTS) f = TD5_MAX_RACER_SLOTS;
+    return f;
 }
 
 /* True when `slot` is a racer SUSPECT (a non-cop racer) in a cop chase. */
