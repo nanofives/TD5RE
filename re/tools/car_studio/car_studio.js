@@ -400,6 +400,7 @@ function groupEl(title, fields) {
     row.appendChild(lbl);
 
     if (key.startsWith('wheel_pos_') && Array.isArray(fld.value)) {
+      row.classList.add('wheelrow');
       const box = document.createElement('div'); box.className = 'xyz';
       const inps = ['x','y','z'].map((ax, i) => {
         const inp = document.createElement('input'); inp.type = 'number'; inp.value = fld.value[i]; inp.title = ax.toUpperCase();

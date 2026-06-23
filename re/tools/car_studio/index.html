@@ -35,8 +35,14 @@
      flex:1; min-width:0; background:#11131a; color:var(--fg); border:1px solid var(--edge);
      border-radius:5px; padding:4px 6px; font:inherit; }
   textarea { width:100%; resize:vertical; min-height:34px; font-size:11px; }
-  .xyz { display:flex; gap:5px; flex:1; }
-  .xyz input { width:100%; }
+  /* number spinners eat ~16px each — drop them so values fit the narrow boxes */
+  input[type=number] { -moz-appearance:textfield; appearance:textfield; }
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+  .xyz { display:flex; gap:4px; flex:1; }
+  .xyz input { width:100%; padding:4px 4px; text-align:right; }
+  /* wheel rows: shrink the label so the 3 X/Y/Z boxes get the width */
+  label.row.wheelrow > span { flex:0 0 56px; }
   button { background:#222733; color:var(--fg); border:1px solid var(--edge);
            border-radius:6px; padding:7px 10px; cursor:pointer; font:inherit; }
   button:hover { border-color:#3c4658; }
