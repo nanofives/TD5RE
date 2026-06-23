@@ -315,6 +315,27 @@ def _row_points_offset(node, tangent, lane_count, total_width, lateral_center):
     return pts
 
 
+def _row_points_taper(node, tangent, main_lanes, branch_lanes, lane_width, t):
+    """A (main+branch)-lane row where the INNER main lanes are at full width and
+    the OUTER branch lanes are extended to the RIGHT by factor t in [0,1]
+    (t=0 -> collapsed onto the main road's right edge, so the road is effectively
+    main_lanes wide; t=1 -> full branch width). Used to taper the road open over
+    the run-up to a fork (and closed after a rejoin) so the widening is gradual
+    instead of a sudden bulge. Vertex count is constant (main+branch+1) so
+    consecutive spans still share edges cleanly. Returns world (x,y,z) tuples."""
+    tx, tz = tangent
+    lx, lz = (tz, -tx)
+    half_main = main_lanes * lane_width * 0.5
+    pts = []
+    for k in range(main_lanes + branch_lanes + 1):
+        if k <= main_lanes:
+            lat = half_main - k * lane_width                       # main road (fixed)
+        else:
+            lat = -half_main - (k - main_lanes) * lane_width * t   # branch lanes (tapered)
+        pts.append((node["x"] + lx * lat, node["y"], node["z"] + lz * lat))
+    return pts
+
+
 def _row_points(node, tangent, lane_count):
     """(lane_count+1) rail points across the road, LEFT edge -> RIGHT edge.
 
@@ -406,17 +427,24 @@ def build_geometry(spec):
         # outer verts and ENDS at the rejoin span's near-row outer verts (the
         # last blanes+1 of each wide row).
         fork_exit = (fork + 1) % n if circuit else min(fork + 1, n - 1)
-        fork_outer = _row_points_offset(nodes[fork_exit], tangents[fork_exit],
-                                        total, tw, lat_c)[main_lanes:]
-        rejoin_outer = _row_points_offset(nodes[rejoin], tangents[rejoin],
-                                          total, tw, lat_c)[main_lanes:]
+        fork_outer = _row_points_taper(nodes[fork_exit], tangents[fork_exit],
+                                       main_lanes, blanes, lane_width, 1.0)[main_lanes:]
+        rejoin_outer = _row_points_taper(nodes[rejoin], tangents[rejoin],
+                                         main_lanes, blanes, lane_width, 1.0)[main_lanes:]
 
         def _ctr(pts):
             return {"x": 0.5 * (pts[0][0] + pts[-1][0]),
                     "y": 0.5 * (pts[0][1] + pts[-1][1]),
                     "z": 0.5 * (pts[0][2] + pts[-1][2])}
 
-        path = [_ctr(fork_outer)] + user + [_ctr(rejoin_outer)]
+        # The corridor centreline RUNS from the fork-outer centre to the
+        # rejoin-outer centre. The user's first/last nodes only say WHERE to
+        # attach (they set fork/rejoin above); keeping them as path points would
+        # sit a near-duplicate next to the anchor and kink the corridor back on
+        # itself (overlapping geometry at the ends). Use only the interior user
+        # nodes for the shape.
+        mid = user[1:-1] if len(user) >= 2 else []
+        path = [_ctr(fork_outer)] + mid + [_ctr(rejoin_outer)]
         for bn in path:
             bn["lanes"] = blanes; bn["surface"] = bsurf; bn["width"] = bwidth
         if spec["span_length"] > 0:
@@ -425,25 +453,39 @@ def build_geometry(spec):
             sys.stderr.write("WARNING: branch has < 2 nodes after resampling; skipped.\n")
             continue
         branches.append({"nodes": path, "fork": fork, "rejoin": rejoin, "lanes": blanes,
-                         "total": total, "lat_c": lat_c,
+                         "main_lanes": main_lanes, "total": total,
                          "fork_outer": fork_outer, "rejoin_outer": rejoin_outer})
 
-    # mark widened main spans: a run-up BEFORE the fork (so the driver can move
-    # into the peel-off lanes) and a run-out AT/AFTER the rejoin (so the branch
-    # merges back into a wide section). widen_map[span] = (total, lat_c, fork|None)
+    # Per-node taper factor (0 = main width, 1 = full branch width) so the road
+    # opens GRADUALLY over the run-up to a fork (and closes after a rejoin)
+    # instead of a sudden bulge. node_taper[node] is shared by both rows of a
+    # widened span, so consecutive spans share edges cleanly. widen_map marks the
+    # widened span set; widen_map[span] = (main_lanes, branch_lanes, fork|None).
+    W = max(1, BRANCH_WIDEN_SPANS)
+    node_taper = {}
     widen_map = {}
+
+    def _ramp(idx, t):
+        node_taper[idx] = max(node_taper.get(idx, 0.0), t)
+
     for br in branches:
-        total, lat_c = br["total"], br["lat_c"]
-        for k in range(BRANCH_WIDEN_SPANS + 1):           # fork run-up [fork-W .. fork]
-            si = br["fork"] - k
-            if circuit: si %= nspans
+        M, B = br["main_lanes"], br["lanes"]
+        fork, rejoin = br["fork"], br["rejoin"]
+        fexit = (fork + 1) % n if circuit else min(fork + 1, n - 1)
+        _ramp(fexit, 1.0)                                  # fork exit: full width (peel)
+        for k in range(W + 2):                             # taper 1 .. 0 each side
+            t = max(0.0, (W - k) / float(W))
+            fi = (fork - k) % n if circuit else fork - k
+            if 0 <= fi < n: _ramp(fi, t)
+            ri = (rejoin + k) % n if circuit else rejoin + k
+            if 0 <= ri < n: _ramp(ri, t)
+        for k in range(W + 1):                             # widened span set
+            si = (fork - k) % nspans if circuit else fork - k
             if 0 <= si < nspans and si not in widen_map:
-                widen_map[si] = (total, lat_c, br if k == 0 else None)
-        for k in range(BRANCH_WIDEN_SPANS + 1):           # rejoin run-out [rejoin .. rejoin+W]
-            si = br["rejoin"] + k
-            if circuit: si %= nspans
-            if 0 <= si < nspans and si not in widen_map:
-                widen_map[si] = (total, lat_c, None)
+                widen_map[si] = (M, B, br if k == 0 else None)
+            sj = (rejoin + k) % nspans if circuit else rejoin + k
+            if 0 <= sj < nspans and sj not in widen_map:
+                widen_map[sj] = (M, B, None)
 
     spans = []
     vertices = []
@@ -456,11 +498,13 @@ def build_geometry(spec):
         origin = (int(round(a["x"])), int(round(a["y"])), int(round(a["z"])))
         wide = widen_map.get(si)
         if wide:
-            total, lat_c, fork_br = wide
-            tw = total * lane_width
-            near = _row_points_offset(a, tangents[a_idx], total, tw, lat_c)
-            far = _row_points_offset(b, tangents[b_idx], total, tw, lat_c)
+            M, B, fork_br = wide
+            t_near = node_taper.get(a_idx, 0.0)
+            t_far = node_taper.get(b_idx, 0.0)
+            near = _row_points_taper(a, tangents[a_idx], M, B, lane_width, t_near)
+            far = _row_points_taper(b, tangents[b_idx], M, B, lane_width, t_far)
             lvi, rvi = _emit_span_rows(vertices, near, far, origin, si)
+            total = M + B
             stype = SPAN_TYPE_JUNCTION_FWD if fork_br else SPAN_TYPE_QUAD
             spans.append([stype, a["surface"] & 0x0F, 0, total & 0x0F,
                           lvi & U16, rvi & U16, U16, U16, *origin])  # fork link_next patched below
