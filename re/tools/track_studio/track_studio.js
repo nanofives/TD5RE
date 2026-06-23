@@ -575,6 +575,14 @@ $('skyTrackBtn').onclick = async () => {
 };
 $('cpGates').onchange = (e) => { showCpGates = e.target.checked; rebuild(false); };
 $('clearEnvBtn').onclick = () => { while (envRoot.children.length) envRoot.remove(envRoot.children[0]); envLoaded = false; rebuild(false); setStatus('Cleared environment.', 'ok'); };
+function envMaterial(tex, type) {   // unlit; transparency per page type (0 opaque,1 keyed,2 semi,3 additive)
+  const base = { map: tex || null, color: tex ? 0xffffff : 0x8b9099, side: THREE.DoubleSide };
+  if (!tex) return new THREE.MeshBasicMaterial(base);
+  if (type === 1) return new THREE.MeshBasicMaterial({ ...base, transparent: true, alphaTest: 0.5 });
+  if (type === 2) return new THREE.MeshBasicMaterial({ ...base, transparent: true });
+  if (type === 3) return new THREE.MeshBasicMaterial({ ...base, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+  return new THREE.MeshBasicMaterial(base);
+}
 $('loadEnvBtn').onclick = async () => {
   if (currentLevel == null) { setStatus('Import a track first.', 'warn'); return; }
   setStatus('Loading environment (decoding models.bin, may take a moment)…');
@@ -586,17 +594,16 @@ $('loadEnvBtn').onclick = async () => {
       const pages = new Set();
       gltf.scene.traverse((o) => { if (o.isMesh && o.userData && o.userData.page != null) pages.add(o.userData.page); });
       setStatus(`Loading environment textures (${pages.size} pages)…`);
+      const types = (currentAssets && currentAssets.page_types) || {};
       const texMap = {};
       await Promise.all([...pages].map(async (p) => {
-        try { texMap[p] = await trackTexture(currentLevel, `page_${String(p).padStart(3, '0')}.png`); }
+        try { texMap[p] = await trackTexture(currentLevel, `page_${String(p).padStart(3, '0')}.png`, false); }
         catch { texMap[p] = null; }
       }));
       gltf.scene.traverse((o) => {
         if (o.isMesh) {
-          const tex = texMap[o.userData ? o.userData.page : -1];
-          // unlit (the game bakes vertex lighting; StandardMaterial renders these black)
-          o.material = new THREE.MeshBasicMaterial({ map: tex || null,
-            color: tex ? 0xffffff : 0x8b9099, side: THREE.DoubleSide, alphaTest: 0.5 });
+          const page = o.userData ? o.userData.page : -1;
+          o.material = envMaterial(texMap[page], types[page] | 0);
         }
       });
       while (envRoot.children.length) envRoot.remove(envRoot.children[0]);

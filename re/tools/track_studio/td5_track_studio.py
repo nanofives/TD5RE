@@ -56,7 +56,8 @@ try:
     mesh_tool = _load_module("mesh_tool", os.path.join(TOOLS_DIR, "mesh_tool.py"))  # needs numpy
 except Exception as _e:  # noqa
     mesh_tool = None
-_glb_cache = {}   # level -> glb bytes (env geometry; built once)
+_glb_cache = {}    # level -> glb bytes (env geometry; built once)
+_page_cache = {}   # (level, page) -> rgba png bytes with transparency baked
 
 
 # --------------------------------------------------------------------------
@@ -195,9 +196,23 @@ def _pages_dir(level):
     return os.path.join(_level_dir(level), "textures.src", "pages")
 
 
+def _texjson(level):
+    p = os.path.join(_level_dir(level), "textures.src", "textures.json")
+    if os.path.isfile(p):
+        with open(p) as f:
+            return json.load(f)
+    return None
+
+
+def _page_types(level):
+    """page index -> type (0 opaque, 1 index-0 keyed, 2 semi, 3 additive)."""
+    tj = _texjson(level)
+    return {i: int(p.get("type", 0)) for i, p in enumerate(tj.get("pages", []))} if tj else {}
+
+
 def list_assets(level):
-    """Real per-page textures (textures.src/pages/page_NNN.png), skybox images, and
-    whether env geometry exists -- backs the 'from selected track' loaders."""
+    """Real per-page textures (textures.src/pages/page_NNN.png), their transparency
+    types, skybox images, and whether env geometry exists -- backs the loaders."""
     ld = _level_dir(level)
     pdir = _pages_dir(level)
     if os.path.isdir(pdir):
@@ -206,13 +221,54 @@ def list_assets(level):
         td = os.path.join(ld, "textures")
         textures = sorted(f for f in os.listdir(td) if f.lower().endswith((".png", ".tga"))) if os.path.isdir(td) else []
     sky = [f for f in ("forwsky.png", "backsky.png") if os.path.isfile(os.path.join(ld, f))]
-    return {"textures": textures, "skybox": sky,
+    return {"textures": textures, "skybox": sky, "page_types": _page_types(level),
             "has_models": os.path.isfile(os.path.join(ld, "models.bin")) and mesh_tool is not None}
 
 
+def _decode_page_rgba(level, page):
+    """page_NNN.png with alpha baked per the page 'type' (faithful to the engine's
+    keyed/semi/additive decode): type 1/3 -> palette index 0 transparent, type 2 ->
+    half alpha. Returns PNG bytes, or None to fall back to the raw file."""
+    key = (int(level), int(page))
+    if key in _page_cache:
+        return _page_cache[key]
+    png_path = os.path.join(_pages_dir(level), "page_%03d.png" % int(page))
+    if not os.path.isfile(png_path):
+        return None
+    try:
+        from PIL import Image
+        import numpy as np
+    except Exception:
+        return None
+    tj = _texjson(level)
+    pages = tj.get("pages", []) if tj else []
+    ptype = int(pages[page].get("type", 0)) if page < len(pages) else 0
+    arr = np.array(Image.open(png_path).convert("RGBA"))
+    if ptype in (1, 3):
+        idx_path = os.path.join(_level_dir(level), "textures.src", "indices.bin")
+        if os.path.isfile(idx_path):
+            with open(idx_path, "rb") as f:
+                f.seek(int(page) * 4096)
+                idx = np.frombuffer(f.read(4096), dtype=np.uint8)
+            if idx.size == 4096:
+                arr[:, :, 3] = np.where(idx.reshape(64, 64) == 0, 0, 255).astype(np.uint8)
+    elif ptype == 2:
+        arr[:, :, 3] = 0x80
+    out = io.BytesIO()
+    Image.fromarray(arr, "RGBA").save(out, "PNG")
+    _page_cache[key] = out.getvalue()
+    return _page_cache[key]
+
+
 def serve_asset(level, name):
-    """(bytes, content_type) for a level page texture / skybox PNG, or None."""
+    """(bytes, content_type) for a level page texture / skybox PNG, or None.
+    Page textures get their transparency baked in from the page type."""
     safe = os.path.basename(name or "")
+    m = re.match(r"page_(\d+)\.png$", safe)
+    if m:
+        dec = _decode_page_rgba(level, int(m.group(1)))
+        if dec:
+            return dec, "image/png"
     ld = _level_dir(level)
     for cand in (os.path.join(_pages_dir(level), safe),
                  os.path.join(ld, "textures", safe), os.path.join(ld, safe)):
@@ -242,17 +298,26 @@ def build_model_glb(level):
     pos_by, uv_by = defaultdict(list), defaultdict(list)
     for m in model["meshes"]:
         vs, cur = m["vertices"], 0
+        # Billboard/prop meshes (trees, signs, checkpoint banners) store their
+        # vertices around 0 and are placed in the world at their bounding centre;
+        # structural meshes already carry world-space vertices. Distinguish by
+        # comparing vertex magnitude to the bounding-centre magnitude, then shift
+        # the local ones so everything lands in its real place (not piled at 0,0).
+        bnd = m["bounding"]            # [radius, cx, cy, cz]
+        bmag = abs(bnd[1]) + abs(bnd[3])
+        vmax = max((abs(v["pos"][0]) + abs(v["pos"][2]) for v in vs), default=0)
+        ox, oy, oz = (bnd[1], bnd[2], bnd[3]) if (bmag > 100000 and vmax < bmag * 0.5) else (0.0, 0.0, 0.0)
         for c in m["commands"]:
             tri, quad, page = c["tri"], c["quad"], c["texture_page_id"]
             P, U = pos_by[page], uv_by[page]
             for t in range(tri):
                 for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
-                    P.append(vs[k]["pos"]); U.append(vs[k]["tex"])
+                    p = vs[k]["pos"]; P.append([p[0] + ox, p[1] + oy, p[2] + oz]); U.append(vs[k]["tex"])
             qb = cur + tri * 3
             for q in range(quad):
                 b = qb + q * 4
                 for k in (b, b + 1, b + 2, b, b + 2, b + 3):
-                    P.append(vs[k]["pos"]); U.append(vs[k]["tex"])
+                    p = vs[k]["pos"]; P.append([p[0] + ox, p[1] + oy, p[2] + oz]); U.append(vs[k]["tex"])
             cur += tri * 3 + quad * 4
     gb = mesh_tool._Glb()
     meshes, nodes = [], []
