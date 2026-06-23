@@ -1,0 +1,13 @@
+# Centerline with per-point width -> Track Studio auto-detects lane counts.
+# columns: x,z,width   (width / lane_width rounds to a lane count; ~1500 per lane)
+x,z,width
+0,0,4500
+0,40000,4500
+30000,70000,6000
+60000,70000,9000
+90000,50000,9000
+100000,10000,6000
+80000,-30000,4500
+40000,-40000,4500
+0,-30000,4500
+-10000,0,4500

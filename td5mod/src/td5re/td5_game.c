@@ -10,6 +10,7 @@
 
 #include "td5_game.h"
 #include "td5_track.h"
+#include "td5_track_registry.h"
 #include "td5_fmv.h"
 #include "td5_sound.h"
 #include "td5_input.h"
@@ -2677,6 +2678,16 @@ int td5_game_init_race_session(void) {
             }
         }
 
+        /* [CUSTOM TRACK] Honor the registry start span directly, INCLUDING 0
+         * (the span-0 start/finish line of a custom circuit, which the td6_ss>0
+         * gate above cannot express). Custom levels otherwise fall through to
+         * the out-of-range clamp below (start_span defaulted to span_count). */
+        if (td5_track_registry_has_level(level_num)) {
+            int css = td5_track_registry_start_span_for_level(level_num);
+            if (css >= 0 && css < track_span_count)
+                start_span = css;
+        }
+
         /* TD6 track migration / out-of-range robustness: the per-level
          * start-span tables are indexed by level number and only meaningful for
          * the 39 shipped TD5 tracks. An OverrideTrackZip'd TD6 track (or any
@@ -2931,6 +2942,25 @@ int td5_game_init_race_session(void) {
                 TD5_LOG_I(LOG_TAG,
                           "Drag spawn override: slot=%d span=%d lane=%d",
                           slot, span_index, sub_lane);
+            }
+
+            /* [CUSTOM CIRCUIT GRID WRAP] A circuit with a low start_span (e.g. a
+             * custom track starting at span 0) yields NEGATIVE spawn spans for the
+             * backward grid offsets (start_span - 6/-12/-18...). Without wrapping,
+             * each fails td5_track_get_span() and collapses to span 1 below,
+             * STACKING the whole grid on one span (cars clip; the jammed AI can't
+             * navigate). Wrap onto the ring instead. Faithful circuits use a high
+             * start_span so span_index is already in range -> this is a no-op for
+             * them (and never touches point-to-point or drag spawns). */
+            if (g_track_is_circuit && !drag_mode_spawn && track_span_count > 0) {
+                int ringw = (g_td5.track_span_ring_length > 0)
+                            ? g_td5.track_span_ring_length : track_span_count;
+                int wrapped = span_index % ringw;
+                if (wrapped < 0) wrapped += ringw;
+                if (wrapped != span_index) {
+                    span_index = wrapped;
+                    actor_span = wrapped;
+                }
             }
 
             sp = td5_track_get_span(span_index);

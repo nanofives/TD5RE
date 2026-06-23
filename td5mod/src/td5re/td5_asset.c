@@ -29,6 +29,7 @@
 #include "td5_assetsrc.h" /* pack-on-load editable sources (step 0) */
 #include "td5_customcar.h" /* drop-in custom car registry (slots 76+) */
 #include "td5_track.h"
+#include "td5_track_registry.h" /* custom-track registry: level/finish-span lookups */
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_render.h"
@@ -1538,6 +1539,14 @@ int td5_asset_td6_start_span_for_level(int level_num)
     for (i = 0; i < sizeof(k_td6_menu_slots) / sizeof(k_td6_menu_slots[0]); i++)
         if (k_td6_menu_slots[i].level == level_num)
             return k_td6_menu_slots[i].start_span;
+    /* Custom tracks carry their grid/start span in the registry manifest.
+     * (A circuit start span of 0 reads as "not found" here; the spawn path in
+     * td5_game.c honors a registry start span of 0 directly for custom levels.) */
+    if (td5_track_registry_has_level(level_num)) {
+        int ss = td5_track_registry_start_span_for_level(level_num);
+        if (ss > 0)
+            return ss;
+    }
     return 0;
 }
 
@@ -1561,6 +1570,13 @@ int td5_asset_td6_finish_span_for_level(int level_num)
     for (i = 0; i < sizeof(k_td6_menu_slots) / sizeof(k_td6_menu_slots[0]); i++)
         if (k_td6_menu_slots[i].level == level_num)
             return k_td6_menu_slots[i].finish_span;
+    /* Custom point-to-point tracks carry their finish span in the registry
+     * manifest; circuits report 0 there (lap-based, no finish trigger). */
+    if (td5_track_registry_has_level(level_num)) {
+        int fs = td5_track_registry_finish_span_for_level(level_num);
+        if (fs > 0)
+            return fs;
+    }
     return 0;
 }
 
@@ -1644,6 +1660,20 @@ int td5_asset_level_number(int track_index)
             return td6;
         }
     }
+
+    /* [CUSTOM TRACK REGISTRY] Slots >= 37 are user-built tracks from the runtime
+     * manifest (re/assets/levels/custom_tracks.json, via td5_trackgen.py). They
+     * resolve to their own levelNNN/ directory but are NOT TD6 -- leave
+     * g_active_td6_level = 0 so the TD6-specific branch/seam band-aids stay off
+     * (custom strip geometry is generated clean by the converter). */
+    if (track_index >= TD5_CUSTOM_TRACK_SLOT_BASE) {
+        int custom = td5_track_registry_level_for_slot(track_index);
+        if (custom > 0) {
+            g_active_td6_level = 0;
+            return custom;
+        }
+    }
+
     g_active_td6_level = 0;   /* faithful TD5 track */
 
     /* Drag race hardcodes level030.zip [CONFIRMED @ InitializeRaceSession

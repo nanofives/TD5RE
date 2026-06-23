@@ -1,0 +1,9 @@
+# x,z,y,width,lanes,surface  -- a point-to-point sprint with a lane drop
+x,z,width,lanes
+0,0,9000,6
+0,8000,9000,6
+1500,16000,6000,4
+4000,24000,6000,4
+4000,33000,6000,4
+1500,41000,9000,6
+0,50000,9000,6

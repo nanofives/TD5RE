@@ -20,6 +20,7 @@
 #include "td5_save.h"
 #include "td5_sound.h"
 #include "td5_hud.h"
+#include "td5_track_registry.h"  /* custom-track registry: selector bound */
 #include "td5re.h"
 #include "td5_snk_strings.h"
 #include "td5_credits.h"
@@ -602,6 +603,8 @@ int td5_frontend_init_resources(void) {
             if (s_track_lock_table[t] == 0) /* 0 = unlocked in frontend table */
                 s_total_unlocked_tracks = t + 1; /* extend range to include this cup track */
         }
+        if (td5_track_registry_slot_max() > s_total_unlocked_tracks)
+            s_total_unlocked_tracks = td5_track_registry_slot_max(); /* + custom registry tracks (>=37) */
     }
     TD5_LOG_I(LOG_TAG, "Progression: unlocked_cars=%d unlocked_tracks=%d cup_tier=0x%02X cheat_unlock=%d",
               s_total_unlocked_cars, s_total_unlocked_tracks, td5_save_get_cup_tier(), s_cheat_unlock_all);

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TD5 Track Studio</title>
+<script type="importmap">__IMPORTMAP__</script>
+<style>
+:root{
+  --bg:#14161c; --panel:#1d2027; --edge:#2c313c; --fg:#d7dbe3; --muted:#8b93a3;
+  --accent:#3aa0ff; --good:#46c46a; --warn:#e2b13a; --bad:#e2554a;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+  font-family:"Segoe UI",Arial,sans-serif;font-size:13px}
+#app{display:flex;height:100vh;width:100vw;overflow:hidden}
+#view{flex:1 1 auto;position:relative;min-width:0}
+#canvasWrap{position:absolute;inset:0}
+#hud{position:absolute;left:10px;bottom:8px;color:var(--muted);font-size:12px;
+  pointer-events:none;text-shadow:0 1px 2px #000}
+#hud b{color:var(--fg)}
+#panel{flex:0 0 360px;background:var(--panel);border-left:1px solid var(--edge);
+  overflow-y:auto;padding:12px 14px}
+h1{font-size:16px;margin:2px 0 10px}
+h1 small{color:var(--muted);font-weight:400;font-size:11px}
+.grp{border:1px solid var(--edge);border-radius:8px;margin:8px 0;background:#191c23}
+.grp>summary{cursor:pointer;padding:8px 10px;font-weight:600;list-style:none;
+  color:var(--fg);user-select:none}
+.grp>summary::-webkit-details-marker{display:none}
+.grp>summary:before{content:"▸ ";color:var(--muted)}
+.grp[open]>summary:before{content:"▾ "}
+.grp .body{padding:8px 10px;border-top:1px solid var(--edge)}
+.row{display:flex;align-items:center;gap:8px;margin:6px 0}
+.row>span:first-child{flex:0 0 96px;color:var(--muted)}
+input,select,button{font:inherit;color:var(--fg);background:#11141a;
+  border:1px solid var(--edge);border-radius:6px;padding:5px 7px}
+input[type=number]{width:84px}
+input[type=text]{flex:1;min-width:0}
+select{flex:1;min-width:0}
+input[type=checkbox]{accent-color:var(--accent)}
+button{cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#06121f;
+  font-weight:700;width:100%;padding:9px;margin-top:8px}
+button.sm{padding:4px 8px}
+.btnrow{display:flex;gap:6px;flex-wrap:wrap}
+.xyz{display:flex;gap:4px}.xyz input{width:100%}
+#status{margin-top:10px;padding:8px;border-radius:6px;background:#11141a;
+  border:1px solid var(--edge);color:var(--muted);white-space:pre-wrap;font-size:12px;
+  max-height:160px;overflow:auto}
+.pill{display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;
+  border:1px solid var(--edge);color:var(--muted)}
+.hint{color:var(--muted);font-size:11px;margin:4px 0}
+.tag-circuit{color:var(--good)} .tag-p2p{color:var(--warn)}
+#nodeInfo{color:var(--muted);font-size:12px;margin-bottom:4px}
+hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <div id="canvasWrap"></div>
+    <div id="hud">
+      <div>WASD = fly · Q/E = down/up · Shift = faster · drag empty = orbit · wheel = zoom · drag a node to move it</div>
+      <div id="hudStats"></div>
+    </div>
+  </div>
+
+  <div id="panel">
+    <h1>TD5 Track Studio <small id="ver"></small></h1>
+
+    <details class="grp" open><summary>1 · Track</summary><div class="body">
+      <div class="row"><span>Import level</span>
+        <select id="importSel"></select></div>
+      <div class="btnrow">
+        <button class="sm" id="importBtn">Import ▸</button>
+        <button class="sm" id="refreshBtn">↻ list</button>
+      </div>
+      <div class="hint">…or start from a sample / blank:</div>
+      <div class="btnrow">
+        <button class="sm" data-sample="oval">Oval</button>
+        <button class="sm" data-sample="figure8">Figure-8</button>
+        <button class="sm" data-sample="straight">Straight</button>
+        <button class="sm" id="blankBtn">Blank</button>
+      </div>
+      <div class="hint">…or load an external centerline file (auto-detects lanes &amp; branches):</div>
+      <div class="btnrow">
+        <button class="sm" id="loadFileBtn">Load file (CSV/JSON)…</button>
+      </div>
+      <input type="file" id="trackFile" accept=".csv,.json,.txt" style="display:none">
+    </div></details>
+
+    <details class="grp" open><summary>2 · Identity</summary><div class="body">
+      <div class="row"><span>Name</span><input type="text" id="name" maxlength="30" value="MY TRACK"></div>
+      <div class="row"><span>Type</span>
+        <select id="circuit">
+          <option value="1">Circuit (laps)</option>
+          <option value="0">Point-to-point</option>
+        </select></div>
+      <div class="row"><span>Lane width</span><input type="number" id="laneWidth" value="1500" min="400" step="100"></div>
+    </div></details>
+
+    <details class="grp" open><summary>3 · Selected node</summary><div class="body">
+      <div id="nodeInfo">Click a node to select it.</div>
+      <div class="row"><span>Lanes</span><input type="number" id="nLanes" value="4" min="1" max="12"></div>
+      <div class="row"><span>Width</span><input type="number" id="nWidth" value="6000" min="800" step="100"></div>
+      <div class="row"><span>Surface</span>
+        <select id="nSurface">
+          <option value="0">Dry asphalt</option><option value="1">Wet</option>
+          <option value="2">Dirt</option><option value="3">Gravel</option>
+        </select></div>
+      <div class="btnrow">
+        <button class="sm" id="addNode">+ node after</button>
+        <button class="sm" id="delNode">– delete node</button>
+      </div>
+      <div class="hint">Shift-click an edge to insert a node there. Apply-to-all below.</div>
+      <div class="btnrow">
+        <button class="sm" id="applyAll">apply lanes/width to all</button>
+        <button class="sm" id="detectLanes">detect lanes from width</button>
+      </div>
+    </div></details>
+
+    <details class="grp"><summary>4 · Branches</summary><div class="body">
+      <div id="branchList" class="hint">No branches.</div>
+      <div class="btnrow">
+        <button class="sm" id="addBranch">+ draw branch</button>
+        <button class="sm" id="delBranch">– last branch</button>
+      </div>
+      <div class="hint">Click "draw branch", then click points across the track and Finish. Branches peel off the right side and rejoin where they end.</div>
+      <div class="btnrow" id="branchDrawCtl" style="display:none">
+        <input type="number" id="branchLanes" value="3" min="1" max="8" title="branch lanes">
+        <button class="sm" id="finishBranch">Finish branch</button>
+        <button class="sm" id="cancelBranch">Cancel</button>
+      </div>
+    </div></details>
+
+    <details class="grp"><summary>5 · Checkpoints</summary><div class="body">
+      <div class="row"><span>Mode</span>
+        <select id="cpMode"><option value="auto">Auto (evenly)</option>
+          <option value="manual">Manual (pick nodes)</option></select></div>
+      <div class="row" id="cpAutoRow"><span>Count</span><input type="number" id="cpCount" value="4" min="1" max="7"></div>
+      <div id="cpManual" class="hint" style="display:none">Shift+C on a selected node to toggle a checkpoint there.</div>
+    </div></details>
+
+    <details class="grp"><summary>6 · Environment</summary><div class="body">
+      <div class="row"><span>Weather</span>
+        <select id="weather"><option value="2">Clear</option><option value="0">Rain</option>
+          <option value="1">Snow (cut)</option></select></div>
+      <div class="row"><span>Traffic</span>
+        <select id="traffic"><option value="0">Off</option><option value="1">On</option></select></div>
+      <div class="row"><span>Fog</span>
+        <select id="fog"><option value="0">Off</option><option value="1">On</option></select></div>
+      <div class="row" id="fogColorRow" style="display:none"><span>Fog color</span>
+        <input type="color" id="fogColor" value="#9aa6b4"></div>
+      <label class="row"><span>Textured road</span><input type="checkbox" id="texturedRoad" checked></label>
+      <div class="hint">On: the build generates a textured road (models.bin + asphalt) shown
+        in-game. Off: flat fallback road.</div>
+    </div></details>
+
+    <details class="grp"><summary>7 · View / textures</summary><div class="body">
+      <label class="row"><span>Edit nodes</span><input type="checkbox" id="editNodes"></label>
+      <label class="row"><span>Show lanes</span><input type="checkbox" id="showLanes"></label>
+      <div class="btnrow">
+        <button class="sm" id="roadTexBtn">Road texture…</button>
+        <button class="sm" id="groundTexBtn">Ground texture…</button>
+      </div>
+      <div class="btnrow">
+        <button class="sm" id="skyTexBtn">Skybox…</button>
+        <button class="sm" id="clearTexBtn">Clear textures</button>
+      </div>
+      <input type="file" id="roadTexFile" accept="image/*" style="display:none">
+      <input type="file" id="groundTexFile" accept="image/*" style="display:none">
+      <input type="file" id="skyTexFile" accept="image/*" style="display:none">
+      <hr>
+      <div class="hint">From the selected (imported) track:</div>
+      <div class="btnrow">
+        <button class="sm" id="loadEnvBtn">Load environment</button>
+        <button class="sm" id="skyTrackBtn">Sky from track</button>
+        <button class="sm" id="clearEnvBtn">Clear env</button>
+      </div>
+      <label class="row"><span>Checkpoint gates</span><input type="checkbox" id="cpGates" checked></label>
+      <div class="hint">"Load environment" pulls the track's scenery (models.bin) + its
+        texture pages; the dropdowns apply a track texture to the road / ground.
+        Textures &amp; skybox are preview-only. Turn off "Edit nodes" to look around freely.</div>
+    </div></details>
+
+    <button class="primary" id="buildBtn">Build &amp; register track ▸</button>
+    <div id="status">Ready. Import a level or start from a sample, edit, then Build.</div>
+  </div>
+</div>
+<script type="module" src="/track_studio.js"></script>
+</body>
+</html>

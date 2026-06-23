@@ -2992,6 +2992,13 @@ void td5_render_set_cop_mesh(TD5_MeshHeader *mesh) { s_cop_mesh = mesh; }
  * correctly in scope. */
 /* s_in_sky_draw moved to RenderScratch (Phase B Stage 1). */
 
+/* Custom-track STRIP-ribbon render fallback (defined below, near the debug-line
+ * helpers it reuses). Draws the collision ribbon as a solid road when a level
+ * has no MODELS.DAT mesh table. */
+static void td5_render_fallback_strip_ribbon(int center_span, int window,
+                                             int ring, int total_spans,
+                                             int is_circuit);
+
 void td5_render_actors_for_view(int view_index)
 {
     /*
@@ -3421,6 +3428,24 @@ void td5_render_actors_for_view(int view_index)
                 if (!s_photobooth_active) td5_render_span_display_list(display_list);
                 rendered_spans++;
             }
+        }
+
+        /* [CUSTOM TRACK] When the level ships no MODELS.DAT mesh table (e.g. a
+         * track built by re/tools/td5_trackgen.py), paint the STRIP collision
+         * ribbon as a solid road so the track is visible and drivable. Gated on
+         * the absence of a mesh table so faithful TD5/TD6 tracks never pay it.
+         *
+         * Use a wide, SPEED-INDEPENDENT span window (not cull_window, which is
+         * velocity-scaled and collapses to a handful of spans at low speed -> the
+         * road vanishes a short way ahead). A circuit draws the whole ring (cheap
+         * for the small tracks the converter makes); point-to-point uses a large
+         * fixed reach. Behind-camera spans self-cull in the projector. */
+        if (!s_photobooth_active && td5_track_get_models_display_list_count() == 0) {
+            int ribbon_win = 256;
+            if (is_circuit && ring > 0 && (ring / 2 + 1) < ribbon_win)
+                ribbon_win = ring / 2 + 1;
+            td5_render_fallback_strip_ribbon(eff_player, ribbon_win, ring,
+                                             total_spans, is_circuit);
         }
         #undef TD5_RENDER_SUBMITTED_CAP
     }
@@ -10031,6 +10056,183 @@ void td5_render_debug_line_world(float x0, float y0, float z0,
         s_debug_line_verts[s_debug_line_count++] = va;
         s_debug_line_verts[s_debug_line_count++] = vb;
     }
+}
+
+/* --- Near-plane clip + project helpers for the custom-track ribbon fallback.
+ * The debug-line projector DROPS any primitive that has a vertex behind the
+ * near plane. With a chase camera that silently deletes the very span the
+ * player is driving over (its near edge sits behind the camera) plus the next
+ * span or two -> the road "vanishes" around the car as you drive (observed:
+ * the car floats over a void with only the far curve drawn). These helpers
+ * clip each road triangle to the near plane instead, so the partial span still
+ * draws. Use the same file-static camera state as debug_line_project. ------- */
+typedef struct { float vx, vy, vz; } TD5_RibbonCamV;
+
+static TD5_RibbonCamV ribbon_world_to_cam(float wx, float wy, float wz)
+{
+    float dx = wx - s_camera_pos[0];
+    float dy = wy - s_camera_pos[1];
+    float dz = wz - s_camera_pos[2];
+    TD5_RibbonCamV v;
+    v.vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
+    v.vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
+    v.vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
+    return v;
+}
+
+static void ribbon_cam_to_vertex(TD5_RibbonCamV v, uint32_t argb, TD5_D3DVertex *out)
+{
+    float inv_z = 1.0f / v.vz;
+    out->screen_x = -v.vx * s_focal_length * inv_z + s_center_x;
+    out->screen_y = -v.vy * s_focal_length * inv_z + s_center_y;
+    out->depth_z  = (v.vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+    out->rhw      = inv_z;
+    out->diffuse  = argb;
+    out->specular = 0;
+    out->tex_u    = 0.0f;
+    out->tex_v    = 0.0f;
+}
+
+/* Clip a 3-vertex camera-space triangle to vz >= nearz (Sutherland-Hodgman,
+ * one plane). Writes up to 4 output verts (convex) and returns the count
+ * (0 = fully behind the near plane). */
+static int ribbon_clip_near(const TD5_RibbonCamV *tri, float nearz, TD5_RibbonCamV *out)
+{
+    int n = 0, i;
+    for (i = 0; i < 3; i++) {
+        TD5_RibbonCamV a = tri[i];
+        TD5_RibbonCamV b = tri[(i + 1) % 3];
+        int a_in = (a.vz >= nearz);
+        int b_in = (b.vz >= nearz);
+        if (a_in) out[n++] = a;
+        if (a_in != b_in) {
+            float t = (nearz - a.vz) / (b.vz - a.vz);
+            TD5_RibbonCamV c;
+            c.vx = a.vx + (b.vx - a.vx) * t;
+            c.vy = a.vy + (b.vy - a.vy) * t;
+            c.vz = nearz;
+            out[n++] = c;
+        }
+    }
+    return n;
+}
+
+/* Custom-track STRIP-ribbon render fallback.
+ *
+ * A level built by re/tools/td5_trackgen.py ships only the collision/logic
+ * ribbon (strip.json) and no MODELS.DAT mesh, so the normal display-list walk
+ * draws nothing. This paints each span in the player's view window as a solid
+ * road surface (asphalt grey) with brighter rail edge cues, near-plane clipped
+ * so the span around the car never drops out. Both tri windings are emitted so
+ * the road shows regardless of the rasterizer's cull mode.
+ *
+ * Span quad corners (each span owns near + far rows of (lanes+1) vertices):
+ *   0=near-left  = left_vertex_index + 0     1=near-right = left_vertex_index  + lanes
+ *   2=far-left   = right_vertex_index + 0     3=far-right  = right_vertex_index + lanes
+ */
+static void td5_render_fallback_strip_ribbon(int center_span, int window,
+                                             int ring, int total_spans,
+                                             int is_circuit)
+{
+    enum { RIBBON_TRI_CAP = 128 };            /* triangles per flat-tri flush */
+    TD5_D3DVertex vb[RIBBON_TRI_CAP * 3];
+    uint16_t      ib[RIBBON_TRI_CAP * 6];     /* front + reversed winding */
+    int tri_n = 0;
+    const uint32_t road_col = 0xFF44464Cu;    /* asphalt grey (ARGB) */
+    const uint32_t edge_col = 0xFFB0B0B8u;    /* rail edge cue */
+    const float nearz = s_near_clip + 1.0f;
+    static const int tri_idx[2][3] = { {0, 1, 2}, {1, 3, 2} };
+    int span, ring_iters, branch_base, total_iters;
+
+    if (window < 1) window = 1;
+    if (window > 256) window = 256;           /* bound the per-frame work */
+
+    /* Iterate the player-centred ring window first, then EVERY branch-corridor
+     * span [ring, total_spans) so forks / shortcuts (which live past the main
+     * ring) are drawn too -- otherwise a branch road would be invisible. */
+    ring_iters  = window * 2 + 1;
+    branch_base = (ring > 0 && total_spans > ring) ? ring : total_spans;
+    total_iters = ring_iters + (total_spans - branch_base);
+
+    for (span = 0; span < total_iters; span++) {
+        int si;
+        TD5_StripSpan *sp;
+        TD5_StripVertex *nl, *nr, *fl, *fr;
+        int lanes, li, ri, ti;
+        TD5_RibbonCamV corner[4];
+
+        if (span < ring_iters) {
+            si = center_span - window + span;       /* ring window (player-centred) */
+            if (is_circuit && ring > 0) {
+                while (si < 0)      si += ring;
+                while (si >= ring)  si -= ring;
+            } else if (si < 0 || si >= total_spans) {
+                continue;
+            }
+        } else {
+            si = branch_base + (span - ring_iters); /* branch corridor spans */
+            if (si < 0 || si >= total_spans) continue;
+        }
+        sp = td5_track_get_span(si);
+        if (!sp) continue;
+
+        lanes = sp->pad_02[1] & 0x0F;          /* low nibble of the packed lane byte */
+        if (lanes < 1) lanes = 1;
+        li = (int)sp->left_vertex_index;
+        ri = (int)sp->right_vertex_index;
+        nl = td5_track_get_vertex(li);
+        nr = td5_track_get_vertex(li + lanes);
+        fl = td5_track_get_vertex(ri);
+        fr = td5_track_get_vertex(ri + lanes);
+        if (!nl || !nr || !fl || !fr) continue;
+
+        /* world = span origin + local int16 vertex, then into camera space */
+        corner[0] = ribbon_world_to_cam((float)(sp->origin_x + nl->x), (float)(sp->origin_y + nl->y), (float)(sp->origin_z + nl->z));
+        corner[1] = ribbon_world_to_cam((float)(sp->origin_x + nr->x), (float)(sp->origin_y + nr->y), (float)(sp->origin_z + nr->z));
+        corner[2] = ribbon_world_to_cam((float)(sp->origin_x + fl->x), (float)(sp->origin_y + fl->y), (float)(sp->origin_z + fl->z));
+        corner[3] = ribbon_world_to_cam((float)(sp->origin_x + fr->x), (float)(sp->origin_y + fr->y), (float)(sp->origin_z + fr->z));
+
+        /* whole span behind the near plane -> nothing to draw */
+        if (corner[0].vz < nearz && corner[1].vz < nearz &&
+            corner[2].vz < nearz && corner[3].vz < nearz)
+            continue;
+
+        for (ti = 0; ti < 2; ti++) {
+            TD5_RibbonCamV in[3], poly[4];
+            int m, f;
+            in[0] = corner[tri_idx[ti][0]];
+            in[1] = corner[tri_idx[ti][1]];
+            in[2] = corner[tri_idx[ti][2]];
+            m = ribbon_clip_near(in, nearz, poly);     /* 0, 3 or 4 verts */
+            for (f = 1; f + 1 < m; f++) {              /* fan into (m-2) tris */
+                int base;
+                if (tri_n >= RIBBON_TRI_CAP) {
+                    td5_plat_render_draw_tris_flat(vb, tri_n * 3, ib, tri_n * 6);
+                    tri_n = 0;
+                }
+                base = tri_n * 3;
+                ribbon_cam_to_vertex(poly[0],     road_col, &vb[base + 0]);
+                ribbon_cam_to_vertex(poly[f],     road_col, &vb[base + 1]);
+                ribbon_cam_to_vertex(poly[f + 1], road_col, &vb[base + 2]);
+                ib[tri_n * 6 + 0] = (uint16_t)(base + 0);
+                ib[tri_n * 6 + 1] = (uint16_t)(base + 1);
+                ib[tri_n * 6 + 2] = (uint16_t)(base + 2);
+                ib[tri_n * 6 + 3] = (uint16_t)(base + 0);   /* reversed winding */
+                ib[tri_n * 6 + 4] = (uint16_t)(base + 2);
+                ib[tri_n * 6 + 5] = (uint16_t)(base + 1);
+                tri_n++;
+            }
+        }
+
+        /* near->far rail edge cues (lines self-clip; thin cue, fine to drop) */
+        td5_render_debug_line_world((float)(sp->origin_x + nl->x), (float)(sp->origin_y + nl->y), (float)(sp->origin_z + nl->z),
+                                    (float)(sp->origin_x + fl->x), (float)(sp->origin_y + fl->y), (float)(sp->origin_z + fl->z), edge_col);
+        td5_render_debug_line_world((float)(sp->origin_x + nr->x), (float)(sp->origin_y + nr->y), (float)(sp->origin_z + nr->z),
+                                    (float)(sp->origin_x + fr->x), (float)(sp->origin_y + fr->y), (float)(sp->origin_z + fr->z), edge_col);
+    }
+    if (tri_n > 0)
+        td5_plat_render_draw_tris_flat(vb, tri_n * 3, ib, tri_n * 6);
+    td5_render_debug_lines_flush();
 }
 
 /* ============================================================
