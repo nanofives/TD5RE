@@ -909,10 +909,46 @@ def extract_track(assets_root, level_no, name=None, decimate_to=72):
             spec["fog"] = {"enabled": 1, "r": int(_v("fog_color_r", 0)),
                            "g": int(_v("fog_color_g", 0)), "b": int(_v("fog_color_b", 0))}
 
+    # --- branch corridors: each type-9 (SENTINEL_START) .. type-10 (SENTINEL_END)
+    # run in [ring, total) is a branch; its per-span rail-midpoint centreline
+    # becomes an editable branch node list (decimated). The rebuild re-anchors it
+    # to the nearest main node, so an imported fork survives a round-trip. ---
     warnings = []
-    if total > ring:
-        warnings.append("track has %d branch span(s); branches aren't extracted yet "
-                        "(they'll be dropped if you rebuild)" % (total - ring))
+    branches = []
+    i = ring
+    while i < total:
+        if spans[i][0] == 9:
+            j = i + 1
+            while j < total and spans[j][0] != 10:
+                j += 1
+            end = j if j < total else total - 1
+            bn = []
+            for k in range(i, end + 1):
+                s = spans[k]
+                bl = s[3] & 0x0F or 1
+                lvi = s[4]
+                if lvi < 0 or lvi >= nv:
+                    continue
+                rr = min(lvi + bl, nv - 1)
+                L = verts[lvi]; R = verts[rr]
+                bn.append({"x": round(s[8] + (L[0] + R[0]) * 0.5, 1),
+                           "y": round(s[9] + (L[1] + R[1]) * 0.5, 1),
+                           "z": round(s[10] + (R[2] + L[2]) * 0.5, 1)})
+            if len(bn) >= 2:
+                if len(bn) > 24:
+                    st = len(bn) / 24.0
+                    bn = [bn[int(q * st)] for q in range(24)]
+                branches.append({"lanes": spans[i][3] & 0x0F or 3, "nodes": bn})
+            i = end + 1
+        else:
+            i += 1
+    spec["branches"] = branches
+    if total > ring and not branches:
+        warnings.append("track has %d branch span(s) but no type-9/10 corridor was "
+                        "found; branches not imported" % (total - ring))
+    elif branches:
+        warnings.append("imported %d branch(es) -- re-check the fork/rejoin after editing"
+                        % len(branches))
     return spec, warnings
 
 

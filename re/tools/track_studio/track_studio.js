@@ -27,7 +27,38 @@ function resize() {
   camera.aspect = w / h; camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize); resize();
-(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+
+// WASD fly/pan: W/S forward-back, A/D strafe (ground-projected), Q/E down/up,
+// Shift = faster. Speed scales with zoom so it feels the same at any distance.
+const moveKeys = {};
+const _up = new THREE.Vector3(0, 1, 0);
+const inField = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA');
+function clearMove() { for (const k in moveKeys) moveKeys[k] = false; }
+addEventListener('keydown', (e) => {
+  if (inField(e.target)) return;
+  const k = e.key.toLowerCase();
+  if (k.length === 1 && 'wasdqe'.includes(k)) moveKeys[k] = true;
+  moveKeys.shift = e.shiftKey;
+});
+addEventListener('keyup', (e) => { const k = e.key.toLowerCase(); if (k.length === 1 && k in moveKeys) moveKeys[k] = false; moveKeys.shift = e.shiftKey; });
+addEventListener('blur', clearMove);
+addEventListener('focusin', (e) => { if (inField(e.target)) clearMove(); });
+function applyWASD() {
+  const m = moveKeys;
+  if (!(m.w || m.a || m.s || m.d || m.q || m.e)) return;
+  const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd); fwd.y = 0;
+  if (fwd.lengthSq() < 1e-9) fwd.set(0, 0, -1); fwd.normalize();
+  const right = new THREE.Vector3().crossVectors(fwd, _up).normalize();
+  const speed = camera.position.distanceTo(controls.target) * 0.018 * (m.shift ? 3 : 1);
+  const d = new THREE.Vector3();
+  if (m.w) d.add(fwd); if (m.s) d.sub(fwd);
+  if (m.d) d.add(right); if (m.a) d.sub(right);
+  if (d.lengthSq() > 0) { d.normalize().multiplyScalar(speed); camera.position.add(d); controls.target.add(d); }
+  const vy = (m.e ? 1 : 0) - (m.q ? 1 : 0);
+  if (vy) { camera.position.y += vy * speed; controls.target.y += vy * speed; }
+}
+
+(function loop() { requestAnimationFrame(loop); applyWASD(); controls.update(); renderer.render(scene, camera); })();
 
 // ---------------------------------------------------------------- state
 let spec = blankSpec();
@@ -99,6 +130,11 @@ function ribbon(nodes, circuit, opts) {
     const pts = side.slice(); if (circuit) pts.push(side[0]);
     g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts.map(v => v.clone().setY(v.y + 4))), railMat));
   }
+  // span-boundary rungs -- a cross line at every node so individual spans show
+  const rp = [];
+  for (let i = 0; i < N; i++) { rp.push(L[i].clone().setY(L[i].y + 3), R[i].clone().setY(R[i].y + 3)); }
+  g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(rp),
+    new THREE.LineBasicMaterial({ color: opts.rung != null ? opts.rung : 0x707a8c, transparent: true, opacity: 0.85 })));
   return g;
 }
 
@@ -127,7 +163,7 @@ function rebuild(fit) {
       root.add(ribbon(br.nodes.map(p => ({ ...p, lanes: br.lanes, width: (br.width || br.lanes * spec.lane_width) })), false, { color: 0x3a5a7a, edge: 0x6fa8e0, ghost: true }));
   }
   // node handles
-  const hgeo = new THREE.SphereGeometry(Math.max(300, maxr * 0.012), 12, 10);
+  const hgeo = new THREE.SphereGeometry(Math.max(220, maxr * 0.0085), 10, 8);
   spec.nodes.forEach((n, i) => {
     const m = new THREE.Mesh(hgeo, new THREE.MeshBasicMaterial({ color: i === selected ? 0xffd23a : 0x46c46a }));
     m.position.copy(V(n)).setY(V(n).y + 120); m.userData.idx = i; root.add(m); handles.push(m);

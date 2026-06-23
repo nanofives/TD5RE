@@ -118,10 +118,40 @@ def _levels_dir():
     return trackgen.levels_dir(ASSETS_DIR)
 
 
+# level number -> display name, mirroring the engine tables
+# (td5_frontend.c s_track_display_names + the schedule maps; td5_asset.c
+# k_td6_menu_slots). Lets the import list show "MOSCOW, RUSSIA" not "LEVEL 23".
+def _level_names():
+    names = ["DRAG STRIP", "MONTEGO BAY, JAMAICA", "HOUSE OF BEZ, ENGLAND",
+             "NEWCASTLE, ENGLAND", "MAUI, HAWAII, USA", "COURMAYEUR, ITALY",
+             "JARASH, JORDAN", "CHEDDAR CHEESE, ENGLAND", "MOSCOW, RUSSIA",
+             "BLUE RIDGE PARKWAY, NC, USA", "EDINBURGH, SCOTLAND", "TOKYO, JAPAN",
+             "SYDNEY, AUSTRALIA", "HONOLULU, HAWAII, USA", "MUNICH, GERMANY",
+             "WASHINGTON, DC, USA", "KYOTO, JAPAN", "BERN, SWITZERLAND",
+             "SAN FRANCISCO, CA, USA", "KESWICK, ENGLAND",
+             "CHAMPIONSHIP CUP", "ERA CUP", "CHALLENGE CUP", "PITBULL CUP",
+             "MASTERS CUP", "ULTIMATE CUP",
+             "PELTON RACEWAY", "IRELAND", "LAKE TAHOE, USA", "CAPE HATTERAS, USA",
+             "SWITZERLAND", "EGYPT", "PARIS, FRANCE", "NEW YORK, USA", "ROME, ITALY",
+             "HONG KONG, CHINA", "LONDON, ENGLAND"]
+    sched_name = [8, 10, 12, 9, 6, 3, 4, 5, 13, 11, 19, 18, 17, 16, 15, 14, 7, 1, 2]
+    sched_pool = [11, 9, 7, 10, 13, 16, 15, 14, 6, 8, 0, 1, 2, 3, 4, 5, 12, 18, 17]
+    pool_zip = [1, 2, 3, 4, 5, 6, 13, 14, 15, 16, 17, 23, 25, 26, 27, 28, 29, 37, 39]
+    m = {}
+    for s in range(19):
+        m[pool_zip[sched_pool[s]]] = names[sched_name[s]]
+    for lvl, ni in {7: 26, 18: 27, 19: 28, 20: 29, 21: 30, 22: 31,
+                    8: 32, 9: 33, 10: 34, 11: 35, 12: 36}.items():
+        m[lvl] = names[ni]
+    m[30] = "DRAG STRIP"
+    return m
+
+
 def list_tracks():
     """Custom tracks (from the manifest) + every levelNNN/ available to import."""
     manifest = trackgen.load_manifest(ASSETS_DIR)
     custom_by_level = {int(t["level"]): t for t in manifest.get("tracks", [])}
+    names = _level_names()
     levels = []
     ld = _levels_dir()
     if os.path.isdir(ld):
@@ -133,22 +163,22 @@ def list_tracks():
             if not os.path.isfile(strip):
                 continue
             entry = custom_by_level.get(num)
-            levels.append({"level": num,
-                           "name": entry["name"] if entry else ("LEVEL %d" % num),
-                           "custom": bool(entry),
+            disp = entry["name"] if entry else names.get(num, "LEVEL %d" % num)
+            levels.append({"level": num, "name": disp, "custom": bool(entry),
                            "slot": entry["slot"] if entry else None})
     return {"custom": manifest.get("tracks", []), "levels": levels,
             "slot_base": trackgen.CUSTOM_SLOT_BASE}
 
 
 def do_import(level, name=None):
-    spec, warnings = trackgen.extract_track(ASSETS_DIR, int(level), name=name)
-    # tag the source so a rebuild can overwrite the same slot/level when it's custom
+    level = int(level)
     manifest = trackgen.load_manifest(ASSETS_DIR)
-    for t in manifest.get("tracks", []):
-        if int(t["level"]) == int(level):
-            spec["_slot"] = int(t["slot"]); spec["_level"] = int(t["level"])
-            break
+    custom = next((t for t in manifest.get("tracks", []) if int(t["level"]) == level), None)
+    if not name:
+        name = (custom["name"] if custom else None) or _level_names().get(level)
+    spec, warnings = trackgen.extract_track(ASSETS_DIR, level, name=name, decimate_to=110)
+    if custom:                       # so a rebuild overwrites the same slot/level
+        spec["_slot"] = int(custom["slot"]); spec["_level"] = level
     return {"ok": True, "spec": spec, "warnings": warnings}
 
 
