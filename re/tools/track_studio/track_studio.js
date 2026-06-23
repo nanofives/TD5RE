@@ -475,6 +475,34 @@ $('blankBtn').addEventListener('click', () => {
   setStatus('Blank circuit. Drag nodes / shift-click to add.', 'ok');
 });
 
+// load an external centerline file (CSV/JSON) -> auto-detect lanes + branches
+$('loadFileBtn').addEventListener('click', () => $('trackFile').click());
+$('trackFile').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = async () => {
+    setStatus('Parsing ' + f.name + '…');
+    try {
+      const resp = await fetch('/api/loadfile', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: f.name, text: r.result }) });
+      const d = await resp.json();
+      if (!d.ok) { setStatus('load error: ' + (d.error || JSON.stringify(d)), 'bad'); return; }
+      spec = normalizeIn(d.spec); selected = -1;
+      envLoaded = false; while (envRoot.children.length) envRoot.remove(envRoot.children[0]);
+      rebuild(true); currentLevel = null; refreshTrackAssets();
+      setStatus('Loaded ' + f.name + '. ' + (d.warnings || []).join(' · '), 'ok');
+    } catch (err) { setStatus('load failed: ' + err, 'bad'); }
+  };
+  r.readAsText(f);
+  e.target.value = '';
+});
+$('detectLanes').addEventListener('click', () => {
+  const lw = spec.lane_width || 1500; let changed = 0;
+  for (const n of spec.nodes) if (n.width) { const l = Math.max(1, Math.min(12, Math.round(n.width / lw))); if (l !== n.lanes) changed++; n.lanes = l; }
+  for (const br of spec.branches || []) { const ws = (br.nodes || []).map(p => p.width).filter(Boolean); if (ws.length) br.lanes = Math.max(1, Math.min(12, Math.round(Math.max(...ws) / lw))); }
+  rebuild(false); setStatus(`Re-detected lanes from width (${changed} node(s) changed).`, 'ok');
+});
+
 function normalizeIn(s) {
   s = s || blankSpec();
   s.nodes = (s.nodes || []).map(n => ({ x: +n.x, z: +n.z, y: +(n.y || 0),

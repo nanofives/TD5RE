@@ -83,6 +83,11 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
         <button class="sm" data-sample="straight">Straight</button>
         <button class="sm" id="blankBtn">Blank</button>
       </div>
+      <div class="hint">…or load an external centerline file (auto-detects lanes &amp; branches):</div>
+      <div class="btnrow">
+        <button class="sm" id="loadFileBtn">Load file (CSV/JSON)…</button>
+      </div>
+      <input type="file" id="trackFile" accept=".csv,.json,.txt" style="display:none">
     </div></details>
 
     <details class="grp" open><summary>2 · Identity</summary><div class="body">
@@ -111,6 +116,7 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
       <div class="hint">Shift-click an edge to insert a node there. Apply-to-all below.</div>
       <div class="btnrow">
         <button class="sm" id="applyAll">apply lanes/width to all</button>
+        <button class="sm" id="detectLanes">detect lanes from width</button>
       </div>
     </div></details>
 

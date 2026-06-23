@@ -346,6 +346,24 @@ def do_sample(kind):
     return {"ok": True, "spec": spec, "warnings": []}
 
 
+def do_loadfile(req):
+    """Parse an external centerline file (CSV/JSON, multi-path) and auto-detect
+    lanes (from width) + branches (from extra paths) into an editable spec."""
+    text = req.get("text", "")
+    filename = req.get("filename", "")
+    if not text.strip():
+        return False, {"error": "empty file"}
+    paths, meta = trackgen.parse_paths_text(text, filename)
+    base = os.path.splitext(os.path.basename(filename))[0].upper()[:30]
+    spec = trackgen.detect_spec_from_paths(paths, name=meta.get("name") or base or "IMPORTED",
+                                           circuit=req.get("circuit"), meta=meta)
+    lanes = sorted({n.get("lanes", 4) for n in spec["nodes"]})
+    warnings = ["lanes detected: %s" % lanes]
+    if spec.get("branches"):
+        warnings.append("detected %d branch(es) from extra path(s)" % len(spec["branches"]))
+    return True, {"ok": True, "spec": spec, "warnings": warnings}
+
+
 def do_build(req):
     spec = req.get("spec")
     if not isinstance(spec, dict):
@@ -438,6 +456,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/build":
             try:
                 ok, res = do_build(req)
+                self._send(200 if ok else 400, res)
+            except Exception as e:
+                self._send(500, {"error": str(e), "trace": traceback.format_exc()})
+        elif self.path == "/api/loadfile":
+            try:
+                ok, res = do_loadfile(req)
                 self._send(200 if ok else 400, res)
             except Exception as e:
                 self._send(500, {"error": str(e), "trace": traceback.format_exc()})

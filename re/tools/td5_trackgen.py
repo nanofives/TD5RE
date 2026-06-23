@@ -230,6 +230,169 @@ def normalize_spec(raw, circuit_override=None):
     return spec
 
 
+# --------------------------------------------------------------------------- #
+# Auto-detection: lanes/sublanes from road width, branches from extra paths.
+# Works on external centerline files (CSV/JSON, multi-path) and, via
+# redetect_lanes, on any already-loaded spec (e.g. an imported level).
+# --------------------------------------------------------------------------- #
+
+def lanes_from_width(width, lane_width, default_lanes=DEFAULT_LANES, max_lanes=12):
+    """Auto lane count from road width: round(width / lane_width), clamped >=1."""
+    try:
+        width = float(width); lane_width = float(lane_width)
+    except (TypeError, ValueError):
+        return default_lanes
+    if width <= 0 or lane_width <= 0:
+        return default_lanes
+    return max(1, min(max_lanes, int(round(width / lane_width))))
+
+
+def redetect_lanes(spec, lane_width=None):
+    """In-place: recompute each node's lane count from its width (sublane detection).
+    Nodes/branches keep their width; lanes follow it. Returns the spec."""
+    lw = float(lane_width or spec.get("lane_width") or DEFAULT_LANE_WIDTH)
+    dl = int(spec.get("default_lanes", DEFAULT_LANES))
+    for n in spec.get("nodes", []):
+        if n.get("width"):
+            n["lanes"] = lanes_from_width(n["width"], lw, dl)
+    for br in spec.get("branches", []):
+        ws = [p["width"] for p in br.get("nodes", []) if isinstance(p, dict) and p.get("width")]
+        if ws:
+            br["lanes"] = lanes_from_width(max(ws), lw, dl)
+    return spec
+
+
+def _norm_points(pts):
+    out = []
+    for p in pts:
+        if isinstance(p, dict):
+            out.append({k: p[k] for k in ("x", "y", "z", "width", "lanes", "surface") if k in p})
+        elif isinstance(p, (list, tuple)) and len(p) >= 2:
+            d = {"x": p[0], "z": p[1]}
+            if len(p) >= 3:
+                d["y"] = p[2]
+            if len(p) >= 4:
+                d["width"] = p[3]
+            out.append(d)
+    return out
+
+
+def _paths_from_json(obj):
+    meta = {}
+    if isinstance(obj, dict):
+        if "nodes" in obj:                         # a full spec -> main path + its branches
+            meta = {k: obj[k] for k in ("name", "lane_width", "circuit", "default_lanes",
+                                        "weather", "fog", "traffic_enable", "checkpoints") if k in obj}
+            paths = [obj["nodes"]] + [br["nodes"] for br in obj.get("branches", []) if br.get("nodes")]
+            return [_norm_points(p) for p in paths], meta
+        if "paths" in obj:
+            meta = {k: obj[k] for k in ("name", "lane_width", "circuit") if k in obj}
+            return [_norm_points(p) for p in obj["paths"]], meta
+        return [_norm_points(v) for v in obj.values() if isinstance(v, list)], meta
+    if isinstance(obj, list):
+        if obj and isinstance(obj[0], list):       # list of paths
+            return [_norm_points(p) for p in obj], meta
+        return [_norm_points(obj)], meta           # single point list
+    raise ValueError("unrecognised JSON track structure")
+
+
+def _paths_from_csv(text):
+    paths = [[]]
+    cols = None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            if not s and paths[-1]:                # blank line separates paths
+                paths.append([])
+            continue
+        parts = [p.strip() for p in s.replace("\t", ",").split(",") if p.strip() != ""]
+        if cols is None and any(c.lower() in ("x", "z") for c in parts):
+            cols = [c.lower() for c in parts]
+            continue
+        use = cols or (["x", "z", "y", "width", "lanes", "surface"][:len(parts)])
+        rec, pid = {}, None
+        for c, v in zip(use, parts):
+            if c == "path":
+                pid = int(float(v))
+            elif c in ("lanes", "surface"):
+                rec[c] = int(float(v))
+            else:
+                rec[c] = float(v)
+        if "x" not in rec or "z" not in rec:
+            continue
+        if pid is not None:
+            while len(paths) <= pid:
+                paths.append([])
+            paths[pid].append(rec)
+        else:
+            paths[-1].append(rec)
+    return [p for p in paths if len(p) >= 2]
+
+
+def parse_paths_text(text, filename=""):
+    """Parse a centerline file -> (paths, meta). Paths is a list of point lists
+    {x,z,y?,width?,lanes?,surface?}. JSON (spec / {"paths"} / list-of-paths / point
+    list) or CSV/TSV (x,z[,y,width,lanes,surface]; 'path' column or blank line splits
+    paths; '#' comments + header skipped)."""
+    text = text.lstrip("﻿")
+    if filename.lower().endswith(".json") or text.lstrip()[:1] in "{[":
+        return _paths_from_json(json.loads(text))
+    return _paths_from_csv(text), {}
+
+
+def detect_spec_from_paths(paths, name="IMPORTED TRACK", lane_width=DEFAULT_LANE_WIDTH,
+                           circuit=None, default_lanes=DEFAULT_LANES, meta=None):
+    """Centerline paths -> spec, auto-detecting lanes from per-point width and
+    branches from extra paths (longest path = main road; the rest become branches,
+    attached by the converter to the nearest fork/rejoin)."""
+    meta = meta or {}
+    lane_width = float(meta.get("lane_width", lane_width)) or DEFAULT_LANE_WIDTH
+    dl = int(meta.get("default_lanes", default_lanes))
+    paths = [p for p in paths if p and len(p) >= 2]
+    if not paths:
+        raise ValueError("no usable paths (need >=2 points each)")
+    main = max(paths, key=len)
+    rest = [p for p in paths if p is not main]
+
+    def _node(p):
+        n = {"x": float(p["x"]), "z": float(p["z"]), "y": float(p.get("y", 0.0))}
+        if "width" in p:
+            n["width"] = float(p["width"])
+        if "lanes" in p:
+            n["lanes"] = int(p["lanes"])
+        elif "width" in p:
+            n["lanes"] = lanes_from_width(p["width"], lane_width, dl)
+        else:
+            n["lanes"] = dl
+        if "surface" in p:
+            n["surface"] = int(p["surface"])
+        return n
+
+    nodes = [_node(p) for p in main]
+    branches = []
+    for bp in rest:
+        bl = [lanes_from_width(p["width"], lane_width, dl) if "width" in p
+              else int(p.get("lanes", dl)) for p in bp]
+        branches.append({"nodes": [{"x": float(p["x"]), "z": float(p["z"]),
+                                    "y": float(p.get("y", 0.0))} for p in bp],
+                         "lanes": max(bl) if bl else dl})
+
+    spec = {"name": meta.get("name", name), "lane_width": lane_width, "default_lanes": dl,
+            "nodes": nodes, "branches": branches,
+            "checkpoints": meta.get("checkpoints", "auto:4"),
+            "weather": int(meta.get("weather", 2)),
+            "traffic_enable": int(meta.get("traffic_enable", 0)),
+            "fog": meta.get("fog", {"enabled": 0, "r": 0, "g": 0, "b": 0})}
+    if circuit is not None:
+        spec["circuit"] = bool(circuit)
+    elif "circuit" in meta:
+        spec["circuit"] = bool(meta["circuit"])
+    else:                                          # auto: closed loop if ends meet
+        a, b = nodes[0], nodes[-1]
+        spec["circuit"] = math.hypot(a["x"] - b["x"], a["z"] - b["z"]) < lane_width * 2
+    return spec
+
+
 def resample_centerline(nodes, target_len, circuit):
     """Resample the centerline to ~target_len spacing along its arc length.
 
