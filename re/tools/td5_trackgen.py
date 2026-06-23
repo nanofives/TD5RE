@@ -297,6 +297,8 @@ def _tangent(nodes, i, circuit):
 
 
 SPAN_TYPE_JUNCTION_FWD = 8        # fork: outer lanes peel off via link_next
+SPAN_TYPE_SENTINEL_START = 9      # branch corridor first span (minimap corridor detect)
+SPAN_TYPE_SENTINEL_END = 10       # branch corridor last span; link_next -> rejoin
 
 
 def _row_points_offset(node, tangent, lane_count, total_width, lateral_center):
@@ -373,27 +375,48 @@ def build_geometry(spec):
     lane_width = spec["lane_width"]
     tangents = [_tangent(nodes, i, circuit) for i in range(n)]
 
-    # --- resolve branches against the (already resampled) main line ---
+    # --- resolve branches: attach each to the main road by geometry ---
     branches = []
     for br in spec.get("branches", []):
-        raw = [{"x": float(p["x"]), "z": float(p["z"]), "y": float(p.get("y", 0.0)),
-                "lanes": int(br.get("lanes", spec["default_lanes"])),
-                "surface": int(br.get("surface", spec["default_surface"]))}
-               for p in br.get("nodes", [])]
-        for bn in raw:
-            bn["width"] = float(br["width"]) if "width" in br else bn["lanes"] * lane_width
-        if spec["span_length"] > 0 and len(raw) >= 2:
-            raw = resample_centerline(raw, spec["span_length"], circuit=False)
-        if len(raw) < 2:
-            sys.stderr.write("WARNING: branch has < 2 nodes; skipped.\n")
+        user = [{"x": float(p["x"]), "z": float(p["z"]), "y": float(p.get("y", 0.0))}
+                for p in br.get("nodes", [])]
+        if not user:
             continue
-        fork = _nearest_node(nodes, raw[0])
-        rejoin = _nearest_node(nodes, raw[-1])
+        blanes = int(br.get("lanes", spec["default_lanes"]))
+        bsurf = int(br.get("surface", spec["default_surface"]))
+        bwidth = float(br["width"]) if "width" in br else blanes * lane_width
+        fork = _nearest_node(nodes, user[0])
+        rejoin = _nearest_node(nodes, user[-1])
         if not circuit and rejoin <= fork:
             sys.stderr.write("WARNING: branch rejoin is at/before its fork; skipped.\n")
             continue
-        branches.append({"nodes": raw, "fork": fork, "rejoin": rejoin,
-                         "lanes": raw[0]["lanes"]})
+        main_lanes = nodes[fork]["lanes"]
+        # branch-centreline lateral offset from the main centreline (so the
+        # branch road sits just outside the main road at the join).
+        off = (main_lanes * 0.5 + blanes * 0.5) * lane_width
+
+        def _anchor(mi, toward):
+            tx, tz = tangents[mi]
+            lx, lz = (tz, -tx)
+            side = (toward["x"] - nodes[mi]["x"]) * lx + (toward["z"] - nodes[mi]["z"]) * lz
+            sgn = 1.0 if side >= 0 else -1.0
+            return {"x": nodes[mi]["x"] + sgn * lx * off,
+                    "z": nodes[mi]["z"] + sgn * lz * off,
+                    "y": nodes[mi]["y"]}
+
+        # The peel-off happens at the fork's EXIT node (fork+1), where the wide
+        # junction's outer lanes become the branch -- anchor the corridor there
+        # so its first span coincides with those lanes (no gap at the split).
+        fork_exit = (fork + 1) % n if circuit else min(fork + 1, n - 1)
+        path = [_anchor(fork_exit, user[0])] + user + [_anchor(rejoin, user[-1])]
+        for bn in path:
+            bn["lanes"] = blanes; bn["surface"] = bsurf; bn["width"] = bwidth
+        if spec["span_length"] > 0:
+            path = resample_centerline(path, spec["span_length"], circuit=False)
+        if len(path) < 2:
+            sys.stderr.write("WARNING: branch has < 2 nodes after resampling; skipped.\n")
+            continue
+        branches.append({"nodes": path, "fork": fork, "rejoin": rejoin, "lanes": blanes})
 
     # mark widened main spans: widen_map[span] = (total_lanes, lateral_center, branch|None)
     widen_map = {}
@@ -455,8 +478,15 @@ def build_geometry(spec):
             near = _row_points(a, btan[k], lanes)
             far = _row_points(b, btan[k + 1], lanes)
             lvi, rvi = _emit_span_rows(vertices, near, far, origin, branch_start + k)
-            link_next = (br["rejoin"] & U16) if k == m - 2 else U16
-            spans.append([SPAN_TYPE_QUAD, a["surface"] & 0x0F, 0, lanes & 0x0F,
+            # corridor spans are type-9 (start) .. type-10 (end) so the minimap
+            # corridor detector picks them up; the end span link_next's to rejoin.
+            if k == m - 2:
+                stype, link_next = SPAN_TYPE_SENTINEL_END, (br["rejoin"] & U16)
+            elif k == 0:
+                stype, link_next = SPAN_TYPE_SENTINEL_START, U16
+            else:
+                stype, link_next = SPAN_TYPE_QUAD, U16
+            spans.append([stype, a["surface"] & 0x0F, 0, lanes & 0x0F,
                           lvi & U16, rvi & U16, link_next, U16, *origin])
         branch_end = len(spans) - 1
         spans[br["fork"]][6] = branch_start & U16            # fork -> branch start

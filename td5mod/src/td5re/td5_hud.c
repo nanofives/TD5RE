@@ -6371,7 +6371,13 @@ void td5_hud_init_minimap_layout(void)
      * (P2P + circuit) then renders each run; the window AABB cull keeps only the
      * corridors near the player, so a branch shows as you approach its fork —
      * matching the original TD6 minimap which draws the branch pieces. */
-    if (g_active_td6_level > 0 && g_strip_span_base) {
+    /* Also run for CUSTOM branched tracks (td5_trackgen.py): they are not TD6
+     * (g_active_td6_level == 0) but use the same explicit type-9..type-10
+     * branch-corridor layout in [ring, total). Gate on "has branch spans"
+     * (total > ring) so the mirror rows above are replaced by the real
+     * corridor runs and the fork shows on the minimap. */
+    if ((g_active_td6_level > 0 ||
+         g_strip_span_count > g_td5.track_span_ring_length) && g_strip_span_base) {
         uint8_t *sb2 = (uint8_t *)g_strip_span_base;
         int total = g_strip_span_count;
         int ring  = g_td5.track_span_ring_length;
