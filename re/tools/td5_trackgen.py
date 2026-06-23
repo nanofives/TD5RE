@@ -376,6 +376,13 @@ def build_geometry(spec):
     tangents = [_tangent(nodes, i, circuit) for i in range(n)]
 
     # --- resolve branches: attach each to the main road by geometry ---
+    # Branches ALWAYS peel off the RIGHT (high-sub_lane) side -- that is the side
+    # the engine's type-8 check (sub_lane >= main_lanes) selects. Shipped tracks
+    # (e.g. level007) build a fork as a shared-vertex split: the fork span is
+    # widened to the right, and its far-row OUTER (branch+1) vertices ARE the
+    # branch corridor's first row, while the INNER (main+1) vertices ARE the next
+    # main span's row -- they share the boundary vertex, so there is no gap. The
+    # rejoin mirrors this. We replicate that exactly here.
     branches = []
     for br in spec.get("branches", []):
         user = [{"x": float(p["x"]), "z": float(p["z"]), "y": float(p.get("y", 0.0))}
@@ -391,24 +398,25 @@ def build_geometry(spec):
             sys.stderr.write("WARNING: branch rejoin is at/before its fork; skipped.\n")
             continue
         main_lanes = nodes[fork]["lanes"]
-        # branch-centreline lateral offset from the main centreline (so the
-        # branch road sits just outside the main road at the join).
-        off = (main_lanes * 0.5 + blanes * 0.5) * lane_width
+        total = main_lanes + blanes
+        tw = total * lane_width
+        lat_c = -(blanes * lane_width * 0.5)        # widen the junction to the RIGHT
 
-        def _anchor(mi, toward):
-            tx, tz = tangents[mi]
-            lx, lz = (tz, -tx)
-            side = (toward["x"] - nodes[mi]["x"]) * lx + (toward["z"] - nodes[mi]["z"]) * lz
-            sgn = 1.0 if side >= 0 else -1.0
-            return {"x": nodes[mi]["x"] + sgn * lx * off,
-                    "z": nodes[mi]["z"] + sgn * lz * off,
-                    "y": nodes[mi]["y"]}
-
-        # The peel-off happens at the fork's EXIT node (fork+1), where the wide
-        # junction's outer lanes become the branch -- anchor the corridor there
-        # so its first span coincides with those lanes (no gap at the split).
+        # Shared edge rows: the branch corridor STARTS at the fork span's far-row
+        # outer verts and ENDS at the rejoin span's near-row outer verts (the
+        # last blanes+1 of each wide row).
         fork_exit = (fork + 1) % n if circuit else min(fork + 1, n - 1)
-        path = [_anchor(fork_exit, user[0])] + user + [_anchor(rejoin, user[-1])]
+        fork_outer = _row_points_offset(nodes[fork_exit], tangents[fork_exit],
+                                        total, tw, lat_c)[main_lanes:]
+        rejoin_outer = _row_points_offset(nodes[rejoin], tangents[rejoin],
+                                          total, tw, lat_c)[main_lanes:]
+
+        def _ctr(pts):
+            return {"x": 0.5 * (pts[0][0] + pts[-1][0]),
+                    "y": 0.5 * (pts[0][1] + pts[-1][1]),
+                    "z": 0.5 * (pts[0][2] + pts[-1][2])}
+
+        path = [_ctr(fork_outer)] + user + [_ctr(rejoin_outer)]
         for bn in path:
             bn["lanes"] = blanes; bn["surface"] = bsurf; bn["width"] = bwidth
         if spec["span_length"] > 0:
@@ -416,26 +424,26 @@ def build_geometry(spec):
         if len(path) < 2:
             sys.stderr.write("WARNING: branch has < 2 nodes after resampling; skipped.\n")
             continue
-        branches.append({"nodes": path, "fork": fork, "rejoin": rejoin, "lanes": blanes})
+        branches.append({"nodes": path, "fork": fork, "rejoin": rejoin, "lanes": blanes,
+                         "total": total, "lat_c": lat_c,
+                         "fork_outer": fork_outer, "rejoin_outer": rejoin_outer})
 
-    # mark widened main spans: widen_map[span] = (total_lanes, lateral_center, branch|None)
+    # mark widened main spans: a run-up BEFORE the fork (so the driver can move
+    # into the peel-off lanes) and a run-out AT/AFTER the rejoin (so the branch
+    # merges back into a wide section). widen_map[span] = (total, lat_c, fork|None)
     widen_map = {}
     for br in branches:
-        main_lanes = nodes[br["fork"]]["lanes"]
-        total = main_lanes + br["lanes"]
-        a = nodes[br["fork"]]
-        tx, tz = tangents[br["fork"]]; lx, lz = (tz, -tx)
-        b0 = br["nodes"][0]
-        side = (b0["x"] - a["x"]) * lx + (b0["z"] - a["z"]) * lz   # >0 left, <0 right
-        shift = br["lanes"] * lane_width * 0.5
-        lateral_center = shift if side > 0 else -shift
-        br["total_lanes"] = total
-        for k in range(BRANCH_WIDEN_SPANS + 1):
+        total, lat_c = br["total"], br["lat_c"]
+        for k in range(BRANCH_WIDEN_SPANS + 1):           # fork run-up [fork-W .. fork]
             si = br["fork"] - k
-            if circuit:
-                si %= nspans
-            if 0 <= si < nspans:
-                widen_map[si] = (total, lateral_center, br if k == 0 else None)
+            if circuit: si %= nspans
+            if 0 <= si < nspans and si not in widen_map:
+                widen_map[si] = (total, lat_c, br if k == 0 else None)
+        for k in range(BRANCH_WIDEN_SPANS + 1):           # rejoin run-out [rejoin .. rejoin+W]
+            si = br["rejoin"] + k
+            if circuit: si %= nspans
+            if 0 <= si < nspans and si not in widen_map:
+                widen_map[si] = (total, lat_c, None)
 
     spans = []
     vertices = []
@@ -475,8 +483,10 @@ def build_geometry(spec):
             a = bnodes[k]; b = bnodes[k + 1]
             lanes = a["lanes"]
             origin = (int(round(a["x"])), int(round(a["y"])), int(round(a["z"])))
-            near = _row_points(a, btan[k], lanes)
-            far = _row_points(b, btan[k + 1], lanes)
+            # First/last rows are the SHARED fork/rejoin outer verts (no gap at the
+            # split/merge); interior rows follow the branch path.
+            near = br["fork_outer"]   if k == 0     else _row_points(a, btan[k], lanes)
+            far  = br["rejoin_outer"] if k == m - 2 else _row_points(b, btan[k + 1], lanes)
             lvi, rvi = _emit_span_rows(vertices, near, far, origin, branch_start + k)
             # corridor spans are type-9 (start) .. type-10 (end) so the minimap
             # corridor detector picks them up; the end span link_next's to rejoin.
