@@ -579,27 +579,30 @@ $('loadEnvBtn').onclick = async () => {
   if (currentLevel == null) { setStatus('Import a track first.', 'warn'); return; }
   setStatus('Loading environment (decoding models.bin, may take a moment)…');
   try {
-    const texMap = {};
-    if (currentAssets) for (const tx of currentAssets.textures) {
-      const m = tx.match(/(\d+)/); if (m) { try { texMap[+m[1]] = await trackTexture(currentLevel, tx); } catch {} }
-    }
     const buf = await (await fetch('/api/model?level=' + currentLevel)).arrayBuffer();
-    gltfLoader.parse(buf, '', (gltf) => {
-      while (envRoot.children.length) envRoot.remove(envRoot.children[0]);
+    gltfLoader.parse(buf, '', async (gltf) => {
+      // each node carries its real per-command texture page in extras; load just
+      // those pages (textures.src/pages/page_NNN.png) in parallel, then assign.
+      const pages = new Set();
+      gltf.scene.traverse((o) => { if (o.isMesh && o.userData && o.userData.page != null) pages.add(o.userData.page); });
+      setStatus(`Loading environment textures (${pages.size} pages)…`);
+      const texMap = {};
+      await Promise.all([...pages].map(async (p) => {
+        try { texMap[p] = await trackTexture(currentLevel, `page_${String(p).padStart(3, '0')}.png`); }
+        catch { texMap[p] = null; }
+      }));
       gltf.scene.traverse((o) => {
         if (o.isMesh) {
-          const prr = (o.userData && o.userData.prr) || (o.parent && o.parent.userData && o.parent.userData.prr);
-          const page = prr ? prr.texture_page_id : -1;
-          const tex = texMap[page];
-          // unlit: the game bakes vertex lighting; StandardMaterial without good
-          // normals renders these meshes black, so MeshBasic shows the texture.
+          const tex = texMap[o.userData ? o.userData.page : -1];
+          // unlit (the game bakes vertex lighting; StandardMaterial renders these black)
           o.material = new THREE.MeshBasicMaterial({ map: tex || null,
-            color: tex ? 0xffffff : 0x8b9099, side: THREE.DoubleSide });
+            color: tex ? 0xffffff : 0x8b9099, side: THREE.DoubleSide, alphaTest: 0.5 });
         }
       });
+      while (envRoot.children.length) envRoot.remove(envRoot.children[0]);
       envRoot.add(gltf.scene); envRoot.position.set(-center.x, -center.y, -center.z);
       envLoaded = true; rebuild(false);
-      setStatus('Environment loaded' + (Object.keys(texMap).length ? ' (textured).' : ' (no texture pages found).'), 'ok');
+      setStatus(`Environment loaded (${pages.size} texture pages).`, 'ok');
     }, (err) => setStatus('GLB parse error: ' + err, 'bad'));
   } catch (e) { setStatus('environment load failed: ' + e, 'bad'); }
 };

@@ -191,23 +191,31 @@ def _level_dir(level):
     return os.path.join(_levels_dir(), "level%03d" % int(level))
 
 
+def _pages_dir(level):
+    return os.path.join(_level_dir(level), "textures.src", "pages")
+
+
 def list_assets(level):
-    """Texture pages, skybox images, and whether env geometry exists for a level
-    -- backs the 'from selected track' loaders."""
+    """Real per-page textures (textures.src/pages/page_NNN.png), skybox images, and
+    whether env geometry exists -- backs the 'from selected track' loaders."""
     ld = _level_dir(level)
-    texdir = os.path.join(ld, "textures")
-    textures = sorted(f for f in os.listdir(texdir)
-                      if f.lower().endswith((".png", ".tga"))) if os.path.isdir(texdir) else []
+    pdir = _pages_dir(level)
+    if os.path.isdir(pdir):
+        textures = sorted(f for f in os.listdir(pdir) if f.lower().endswith(".png"))
+    else:                                        # fall back to the (stale) flat textures/
+        td = os.path.join(ld, "textures")
+        textures = sorted(f for f in os.listdir(td) if f.lower().endswith((".png", ".tga"))) if os.path.isdir(td) else []
     sky = [f for f in ("forwsky.png", "backsky.png") if os.path.isfile(os.path.join(ld, f))]
     return {"textures": textures, "skybox": sky,
             "has_models": os.path.isfile(os.path.join(ld, "models.bin")) and mesh_tool is not None}
 
 
 def serve_asset(level, name):
-    """(bytes, content_type) for a level texture/skybox PNG, or None."""
+    """(bytes, content_type) for a level page texture / skybox PNG, or None."""
     safe = os.path.basename(name or "")
     ld = _level_dir(level)
-    for cand in (os.path.join(ld, "textures", safe), os.path.join(ld, safe)):
+    for cand in (os.path.join(_pages_dir(level), safe),
+                 os.path.join(ld, "textures", safe), os.path.join(ld, safe)):
         if os.path.isfile(cand):
             ct = "image/png" if safe.lower().endswith(".png") else "application/octet-stream"
             with open(cand, "rb") as f:
@@ -216,17 +224,53 @@ def serve_asset(level, name):
 
 
 def build_model_glb(level):
-    """Decode the level's models.bin (env geometry) and export a GLB (cached)."""
+    """Decode the level's models.bin and export a GLB grouped by per-command texture
+    page (one node per page, page id in mesh extras) so each surface gets its real
+    page from textures.src/pages/. The mesh-level page id is only a default; the
+    per-command page ids are the faithful per-surface textures. Cached."""
     if mesh_tool is None:
         raise RuntimeError("mesh_tool/numpy unavailable")
+    import numpy as np
+    from collections import defaultdict
     level = int(level)
     if level in _glb_cache:
         return _glb_cache[level]
     path = os.path.join(_level_dir(level), "models.bin")
     if not os.path.isfile(path):
         raise FileNotFoundError("no models.bin for level %d" % level)
-    with open(path, "rb") as f:
-        glb = mesh_tool.export_glb(mesh_tool.decode(f.read(), "models"))
+    model = mesh_tool.decode(open(path, "rb").read(), "models")
+    pos_by, uv_by = defaultdict(list), defaultdict(list)
+    for m in model["meshes"]:
+        vs, cur = m["vertices"], 0
+        for c in m["commands"]:
+            tri, quad, page = c["tri"], c["quad"], c["texture_page_id"]
+            P, U = pos_by[page], uv_by[page]
+            for t in range(tri):
+                for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
+                    P.append(vs[k]["pos"]); U.append(vs[k]["tex"])
+            qb = cur + tri * 3
+            for q in range(quad):
+                b = qb + q * 4
+                for k in (b, b + 1, b + 2, b, b + 2, b + 3):
+                    P.append(vs[k]["pos"]); U.append(vs[k]["tex"])
+            cur += tri * 3 + quad * 4
+    gb = mesh_tool._Glb()
+    meshes, nodes = [], []
+    for page in sorted(pos_by):
+        if not pos_by[page]:
+            continue
+        P = np.array(pos_by[page], np.float32).reshape(-1, 3)
+        U = np.array(uv_by[page], np.float32).reshape(-1, 2)
+        attrs = {"POSITION": gb.add(P, mesh_tool.COMP_FLOAT, "VEC3", minmax=True),
+                 "TEXCOORD_0": gb.add(U, mesh_tool.COMP_FLOAT, "VEC2")}
+        meshes.append({"primitives": [{"attributes": attrs, "mode": 4}], "extras": {"page": int(page)}})
+        nodes.append({"mesh": len(meshes) - 1})
+    gltf = {"asset": {"version": "2.0", "generator": "td5_track_studio"},
+            "buffers": [{"byteLength": len(gb.bin)}],
+            "bufferViews": gb.bufferViews, "accessors": gb.accessors,
+            "meshes": meshes, "nodes": nodes,
+            "scenes": [{"nodes": list(range(len(nodes)))}], "scene": 0}
+    glb = mesh_tool._pack_glb(gltf, bytes(gb.bin))
     _glb_cache[level] = glb
     return glb
 
