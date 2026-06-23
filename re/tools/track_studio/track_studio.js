@@ -66,6 +66,8 @@ let center = new THREE.Vector3();   // world centroid; view pos = world - center
 let selected = -1;
 let handles = [];                   // node handle meshes (index-aligned to spec.nodes)
 let drawingBranch = null;           // {lanes, nodes:[]} while drawing
+let roadTex = null, groundTex = null;   // preview textures
+let showLanes = false, editNodes = true;
 const raycaster = new THREE.Raycaster();
 const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);  // view-space ground (y=0)
 
@@ -98,29 +100,38 @@ function ribbon(nodes, circuit, opts) {
   const g = new THREE.Group();
   if (nodes.length < 2) return g;
   const N = nodes.length, segs = circuit ? N : N - 1;
-  const L = [], R = [], C = [];
+  const L = [], R = [], C = [], lanesAt = [];
   for (let i = 0; i < N; i++) {
     const t = tangent(nodes, i, circuit), lx = t[1], lz = -t[0];
     const half = nodeWidth(nodes[i]) * 0.5;
     const p = V(nodes[i]);
     L.push(new THREE.Vector3(p.x + lx * half, p.y, p.z + lz * half));
     R.push(new THREE.Vector3(p.x - lx * half, p.y, p.z - lz * half));
-    C.push(p);
+    C.push(p); lanesAt.push(Math.max(1, nodes[i].lanes || spec.default_lanes));
   }
-  const pos = [], col = [];
+  const cum = [0];
+  for (let i = 1; i < N; i++) cum.push(cum[i - 1] + C[i].distanceTo(C[i - 1]));
+  const tile = spec.lane_width || 1500;       // texture tile ~ one lane width
+  const pos = [], col = [], uv = [];
   const col3 = (hex) => [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
   for (let s = 0; s < segs; s++) {
     const a = s, b = (s + 1) % N;
+    const va = cum[a] / tile;
+    const vb = (b === 0 ? cum[a] + C[0].distanceTo(C[a]) : cum[b]) / tile;
     const c = col3(opts.color != null ? opts.color : SURF_COLORS[(nodes[a].surface || 0) & 3]);
-    const quad = [L[a], R[a], R[b], L[a], R[b], L[b]];
-    for (const v of quad) { pos.push(v.x, v.y + 2, v.z); col.push(c[0], c[1], c[2]); }
+    const quad = [[L[a], 0, va], [R[a], lanesAt[a], va], [R[b], lanesAt[b], vb],
+                  [L[a], 0, va], [R[b], lanesAt[b], vb], [L[b], 0, vb]];
+    for (const [v, u, vv] of quad) { pos.push(v.x, v.y + 2, v.z); col.push(c[0], c[1], c[2]); uv.push(u, vv); }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   geo.computeVertexNormals();
+  const useTex = roadTex && !opts.ghost;
   const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
-    vertexColors: true, side: THREE.DoubleSide, roughness: 0.95, metalness: 0.0,
+    map: useTex ? roadTex : null, vertexColors: !useTex,
+    side: THREE.DoubleSide, roughness: 0.95, metalness: 0.0,
     transparent: !!opts.ghost, opacity: opts.ghost ? 0.6 : 1.0,
   }));
   g.add(mesh);
@@ -135,6 +146,18 @@ function ribbon(nodes, circuit, opts) {
   for (let i = 0; i < N; i++) { rp.push(L[i].clone().setY(L[i].y + 3), R[i].clone().setY(R[i].y + 3)); }
   g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(rp),
     new THREE.LineBasicMaterial({ color: opts.rung != null ? opts.rung : 0x707a8c, transparent: true, opacity: 0.85 })));
+  // lane / sublane dividers (longitudinal) when enabled
+  if (showLanes) {
+    const lp = [];
+    for (let s = 0; s < segs; s++) {
+      const a = s, b = (s + 1) % N, k = Math.min(lanesAt[a], lanesAt[b]);
+      for (let d = 1; d < k; d++)
+        lp.push(L[a].clone().lerp(R[a], d / lanesAt[a]).setY(L[a].y + 5),
+                L[b].clone().lerp(R[b], d / lanesAt[b]).setY(L[b].y + 5));
+    }
+    if (lp.length) g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(lp),
+      new THREE.LineBasicMaterial({ color: 0xe8e08a, transparent: true, opacity: 0.7 })));
+  }
   return g;
 }
 
@@ -155,6 +178,13 @@ function rebuild(fit) {
   const gsize = Math.max(20000, maxr * 2.4);
   grid = new THREE.GridHelper(gsize, 24, 0x2c3340, 0x1e2430); scene.add(grid);
 
+  // environment/ground texture plane (preview)
+  if (groundTex) {
+    const pm = new THREE.Mesh(new THREE.PlaneGeometry(gsize, gsize),
+      new THREE.MeshStandardMaterial({ map: groundTex, roughness: 1.0 }));
+    pm.rotation.x = -Math.PI / 2; pm.position.y = (miny - center.y) - 40; root.add(pm);
+  }
+
   // main ribbon
   root.add(ribbon(spec.nodes, !!spec.circuit, {}));
   // branches (ghost tint)
@@ -162,12 +192,14 @@ function rebuild(fit) {
     if (br.nodes && br.nodes.length >= 2)
       root.add(ribbon(br.nodes.map(p => ({ ...p, lanes: br.lanes, width: (br.width || br.lanes * spec.lane_width) })), false, { color: 0x3a5a7a, edge: 0x6fa8e0, ghost: true }));
   }
-  // node handles
-  const hgeo = new THREE.SphereGeometry(Math.max(220, maxr * 0.0085), 10, 8);
-  spec.nodes.forEach((n, i) => {
-    const m = new THREE.Mesh(hgeo, new THREE.MeshBasicMaterial({ color: i === selected ? 0xffd23a : 0x46c46a }));
-    m.position.copy(V(n)).setY(V(n).y + 120); m.userData.idx = i; root.add(m); handles.push(m);
-  });
+  // node handles (only when node editing is enabled)
+  if (editNodes) {
+    const hgeo = new THREE.SphereGeometry(Math.max(220, maxr * 0.0085), 10, 8);
+    spec.nodes.forEach((n, i) => {
+      const m = new THREE.Mesh(hgeo, new THREE.MeshBasicMaterial({ color: i === selected ? 0xffd23a : 0x46c46a }));
+      m.position.copy(V(n)).setY(V(n).y + 120); m.userData.idx = i; root.add(m); handles.push(m);
+    });
+  }
   // checkpoints
   const cps = checkpointNodes();
   for (const ci of cps) markAcross(ci, 0xff4d4d);
@@ -237,7 +269,7 @@ let dragIdx = -1, downXY = null;
 renderer.domElement.addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0) return;
   downXY = [ev.clientX, ev.clientY];
-  if (drawingBranch) return;                  // branch points added on click (up)
+  if (drawingBranch || !editNodes) return;    // branch points added on click (up); locked = no drag
   const idx = pickHandle(ev);
   if (idx >= 0) { dragIdx = idx; selected = idx; controls.enabled = false; refreshHandleColors(); updatePanel(); }
 });
@@ -256,7 +288,7 @@ addEventListener('pointerup', (ev) => {
     if (h) { drawingBranch.nodes.push({ x: Math.round(h.x + center.x), z: Math.round(h.z + center.z), y: 0 }); rebuild(false); }
     downXY = null; return;
   }
-  if (!moved && ev.target === renderer.domElement) {        // click = select
+  if (!moved && editNodes && ev.target === renderer.domElement) {   // click = select
     const idx = pickHandle(ev);
     if (idx >= 0) { selected = idx; refreshHandleColors(); updatePanel(); }
     else if (ev.shiftKey) insertNodeAtCursor(ev);            // shift-click empty = add node near cursor
@@ -434,6 +466,32 @@ $('buildBtn').addEventListener('click', async () => {
     loadList();
   } catch (e) { setStatus('build failed: ' + e, 'bad'); }
 });
+
+// ---------------------------------------------------------------- view / textures
+function fileToTexture(file, repeat, cb) {
+  const url = URL.createObjectURL(file);
+  new THREE.TextureLoader().load(url, (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace; tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    if (repeat) tex.repeat.set(repeat, repeat);
+    URL.revokeObjectURL(url); cb(tex);
+  }, undefined, () => { URL.revokeObjectURL(url); setStatus('texture load failed', 'bad'); });
+}
+$('roadTexBtn').onclick = () => $('roadTexFile').click();
+$('roadTexFile').onchange = (e) => { const f = e.target.files[0]; if (f) fileToTexture(f, 0, t => { roadTex = t; rebuild(false); setStatus('Road texture applied (preview).', 'ok'); }); };
+$('groundTexBtn').onclick = () => $('groundTexFile').click();
+$('groundTexFile').onchange = (e) => { const f = e.target.files[0]; if (f) fileToTexture(f, 24, t => { groundTex = t; rebuild(false); setStatus('Ground texture applied (preview).', 'ok'); }); };
+$('skyTexBtn').onclick = () => $('skyTexFile').click();
+$('skyTexFile').onchange = (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f);
+  new THREE.TextureLoader().load(url, (t) => {
+    t.mapping = THREE.EquirectangularReflectionMapping; t.colorSpace = THREE.SRGBColorSpace;
+    scene.background = t; URL.revokeObjectURL(url); setStatus('Skybox applied.', 'ok');
+  }, undefined, () => { URL.revokeObjectURL(url); setStatus('skybox load failed', 'bad'); });
+};
+$('clearTexBtn').onclick = () => { roadTex = groundTex = null; scene.background = new THREE.Color(0x12141a); rebuild(false); setStatus('Cleared textures + skybox.', 'ok'); };
+$('showLanes').onchange = (e) => { showLanes = e.target.checked; rebuild(false); };
+$('editNodes').onchange = (e) => { editNodes = e.target.checked; if (!editNodes) selected = -1; rebuild(false); };
 
 // ---------------------------------------------------------------- boot
 loadList();

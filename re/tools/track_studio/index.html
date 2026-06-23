@@ -148,6 +148,24 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
         <input type="color" id="fogColor" value="#9aa6b4"></div>
     </div></details>
 
+    <details class="grp"><summary>7 · View / textures</summary><div class="body">
+      <label class="row"><span>Edit nodes</span><input type="checkbox" id="editNodes" checked></label>
+      <label class="row"><span>Show lanes</span><input type="checkbox" id="showLanes"></label>
+      <div class="btnrow">
+        <button class="sm" id="roadTexBtn">Road texture…</button>
+        <button class="sm" id="groundTexBtn">Ground texture…</button>
+      </div>
+      <div class="btnrow">
+        <button class="sm" id="skyTexBtn">Skybox…</button>
+        <button class="sm" id="clearTexBtn">Clear textures</button>
+      </div>
+      <input type="file" id="roadTexFile" accept="image/*" style="display:none">
+      <input type="file" id="groundTexFile" accept="image/*" style="display:none">
+      <input type="file" id="skyTexFile" accept="image/*" style="display:none">
+      <div class="hint">Textures &amp; skybox are preview-only (the in-game track uses the
+        flat road render). Turn off "Edit nodes" to look around without moving nodes.</div>
+    </div></details>
+
     <button class="primary" id="buildBtn">Build &amp; register track ▸</button>
     <div id="status">Ready. Import a level or start from a sample, edit, then Build.</div>
   </div>
