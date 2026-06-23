@@ -7149,7 +7149,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         const char *difficulty[3] = { "EASY", "NORMAL", "HARD" };
         char vb[8];
         float vx = 350.0f * sx;
-        if (s_buttons[2].active) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
+        if (s_buttons[2].active && !s_buttons[2].hidden) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
             fe_draw_text(vx, (float)(s_buttons[2].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
         if (s_buttons[3].active && !s_buttons[3].hidden) { snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
             fe_draw_text(vx, (float)(s_buttons[3].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
