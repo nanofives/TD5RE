@@ -3486,6 +3486,11 @@ void td5_render_actors_for_view(int view_index)
                 TD5_Actor *sa = td5_game_get_actor(slot);
                 if (!sa || !td5_render_get_vehicle_mesh(slot))
                     continue;
+                /* [PER-VIEWPORT TRAFFIC] in split-screen time trial each viewport
+                 * renders ONLY its own traffic partition (owner == view_index);
+                 * -1 (shared / racer slot) renders in every view as before. */
+                { int tov = td5_ai_traffic_slot_owner_vp(slot);
+                  if (tov >= 0 && tov != view_index) continue; }
                 /* [dynamic-traffic] despawned traffic casts no shadow; a fading
                  * car's shadow fades with it (alpha consumed inside the shadow
                  * draw helpers via s_actor_draw_alpha). */
@@ -3547,6 +3552,11 @@ void td5_render_actors_for_view(int view_index)
 
             if (!actor || !mesh)
                 continue;
+
+            /* [PER-VIEWPORT TRAFFIC] each viewport draws only its own traffic
+             * partition (owner == view_index); -1 = shared/racer, drawn in all. */
+            { int tov = td5_ai_traffic_slot_owner_vp(slot);
+              if (tov >= 0 && tov != view_index) continue; }
 
             /* [dynamic-traffic] despawned traffic is invisible; a spawning /
              * despawning car fades (alpha applied around the mesh dispatch

@@ -7020,8 +7020,12 @@ void td5_physics_resolve_vehicle_contacts(void)
 
                 /* [TIME TRIAL] human-vs-human pairs pass THROUGH each other
                  * (ghosts) — skip the V2V impulse entirely. This is the real V2V
-                 * dispatch (the broadphase), not resolve_collision_pair. */
-                if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index)) {
+                 * dispatch (the broadphase), not resolve_collision_pair.
+                 * [PER-VIEWPORT TRAFFIC] also skip pairs that belong to different
+                 * viewports' traffic partitions (a player only touches its own
+                 * traffic; cross-partition traffic twins never collide). */
+                if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index) ||
+                    td5_ai_traffic_pair_blocked((int)a->slot_index, (int)b->slot_index)) {
                     /* no contact */
                 } else if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
@@ -7086,8 +7090,11 @@ void td5_physics_resolve_vehicle_contacts(void)
                     int32_t ddz = az - bz; if (ddz < 0) ddz = -ddz;
                     if (ddx > r || ddz > r) continue;
 
-                    /* [TIME TRIAL] don't separate two players — they ghost. */
-                    if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index)) continue;
+                    /* [TIME TRIAL] don't separate two players — they ghost.
+                     * [PER-VIEWPORT TRAFFIC] don't separate cross-partition traffic
+                     * twins or a non-owner player from another viewport's traffic. */
+                    if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index) ||
+                        td5_ai_traffic_pair_blocked((int)a->slot_index, (int)b->slot_index)) continue;
 
                     int32_t pen = v2v_depenetrate_pair(a, b);
                     if (pen > 0) {
@@ -7137,15 +7144,28 @@ void td5_physics_resolve_vehicle_contacts(void)
      * overlap. resolve_collision_pair runs the same OBB test + impulse as the
      * faithful path, so the response is identical — just no longer skipped. */
     if (g_td5.ini.traffic_player_collide && total > g_traffic_slot_base) {
-        TD5_Actor *player = (TD5_Actor *)g_actor_table_base;   /* slot 0 */
-        if (player->car_definition_ptr) {
-            int32_t prad = (int32_t)CDEF_S(player, CDEF_COLLISION_RADIUS);
-            int tmax = (total < TD5_MAX_TOTAL_ACTORS) ? total : TD5_MAX_TOTAL_ACTORS;
+        int tmax = (total < TD5_MAX_TOTAL_ACTORS) ? total : TD5_MAX_TOTAL_ACTORS;
+        /* [PER-VIEWPORT TRAFFIC] When active, run this supplement for EVERY human
+         * viewport's player against ITS OWN traffic partition (so each player can
+         * hit only its own traffic). Otherwise it stays the original slot-0 path. */
+        int per_vp = td5_ai_traffic_per_viewport_active();
+        int vc = per_vp ? g_td5.viewport_count : 1;
+        int vp;
+        if (vc > TD5_MAX_VIEWPORTS) vc = TD5_MAX_VIEWPORTS;
+        for (vp = 0; vp < vc; vp++) {
+            int pslot = per_vp ? td5_game_get_player_slot(vp) : 0;
+            TD5_Actor *player;
+            int32_t prad;
+            if (pslot < 0 || pslot >= g_traffic_slot_base) continue;
+            player = (TD5_Actor *)(g_actor_table_base + (size_t)pslot * TD5_ACTOR_STRIDE);
+            if (!player->car_definition_ptr) continue;
+            prad = (int32_t)CDEF_S(player, CDEF_COLLISION_RADIUS);
             for (int t = g_traffic_slot_base; t < tmax; ++t) {
                 TD5_Actor *tr =
                     (TD5_Actor *)(g_actor_table_base + (size_t)t * TD5_ACTOR_STRIDE);
                 int32_t dxp, dzp, rr;
                 int64_t d2;
+                if (per_vp && td5_ai_traffic_slot_owner_vp(t) != vp) continue; /* own partition only */
                 if (!tr->car_definition_ptr) continue;
                 /* [2026-06-12] Don't collide with INVISIBLE traffic. Dynamic
                  * traffic despawns by fading draw alpha to 0 (the renderer then
@@ -7171,9 +7191,9 @@ void td5_physics_resolve_vehicle_contacts(void)
                  * or OBB orientation. Sphere only impulses when CLOSING, so this
                  * is a no-op once separated (won't fight the broadphase). */
                 TD5_LOG_I(LOG_TAG,
-                          "player_traffic_collide: traffic_slot=%d dist=%d rr=%d span_p=%d span_t=%d "
+                          "player_traffic_collide: player_slot=%d traffic_slot=%d dist=%d rr=%d span_p=%d span_t=%d "
                           "(world-overlap -> sphere collision)",
-                          t, (int)td5_isqrt((int32_t)(d2 > 0x7FFFFFFF ? 0x7FFFFFFF : d2)), rr,
+                          pslot, t, (int)td5_isqrt((int32_t)(d2 > 0x7FFFFFFF ? 0x7FFFFFFF : d2)), rr,
                           player->track_span_normalized, tr->track_span_normalized);
                 collision_detect_simple(player, tr);
             }

@@ -6140,9 +6140,18 @@ extern void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
  * recycling stays byte-identical to the original. Used so traffic is recycled
  * only once the TRAILING player has passed it and respawns ahead of the LEAD
  * player. */
+/* [PER-VIEWPORT TRAFFIC 2026-06-22] When >= 0, the dynamic-traffic spawner /
+ * manager is SCOPED to a single viewport's player: the anchor + proximity helpers
+ * below consider ONLY this racer slot, so each split-screen viewport's traffic set
+ * is placed relative to its own player. -1 (the default) restores the original
+ * all-players behaviour, so every non-scoped caller is byte-identical. */
+static int s_trf_scope_slot = -1;
+
 static int ai_player_span_lead(void)
 {
     int humans = g_td5.num_human_players;
+    if (s_trf_scope_slot >= 0)
+        return (int)(int16_t)ACTOR_I16(actor_ptr(s_trf_scope_slot), ACTOR_SPAN_NORMALIZED);
     if (humans < 1) humans = 1;
     if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
     int ext = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
@@ -6155,6 +6164,8 @@ static int ai_player_span_lead(void)
 static int ai_player_span_trailing(void)
 {
     int humans = g_td5.num_human_players;
+    if (s_trf_scope_slot >= 0)
+        return (int)(int16_t)ACTOR_I16(actor_ptr(s_trf_scope_slot), ACTOR_SPAN_NORMALIZED);
     if (humans < 1) humans = 1;
     if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
     int ext = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
@@ -7599,6 +7610,102 @@ static uint32_t s_trf_dyn_rng;                            /* private LCG state *
 static int      s_trf_dyn_oncoming_pct;                   /* 0..100 from TRAFFIC.BUS mix (diagnostic) */
 static int      s_trf_dyn_seeded;                         /* race_init ran for this race */
 
+/* ---- [PER-VIEWPORT TRAFFIC 2026-06-22] ----------------------------------------
+ * Split-screen TIME TRIAL: each viewport gets its OWN traffic partition (a disjoint
+ * sub-range of the traffic slots), spawned with an IDENTICAL RNG seed but scoped to
+ * its own player (s_trf_scope_slot), so the sets land in matching places yet are
+ * simulated / collided / rendered independently — one player perturbing a traffic
+ * car never shows in another player's pane. INERT unless s_trf_per_vp is set in
+ * race_init (knob on + mp mode == TIME_TRIAL + viewport_count > 1). When inert,
+ * every path below is bypassed and the original shared spawner runs unchanged. */
+int             g_traffic_slot_owner_vp[TD5_MAX_TOTAL_ACTORS]; /* viewport owner; -1 = shared */
+static int      s_trf_per_vp     = 0;     /* per-viewport traffic active this race      */
+static int      s_trf_vp_count   = 1;     /* number of viewports partitioned across     */
+static int      s_trf_vp_k       = TD5_MAX_TRAFFIC_SLOTS;  /* traffic slots per viewport */
+static uint32_t s_trf_dyn_rng_vp[TD5_MAX_VIEWPORTS];      /* per-viewport spawn RNG      */
+static int      s_trf_dyn_cooldown_vp[TD5_MAX_VIEWPORTS]; /* per-viewport spawn cooldown */
+
+static int trf_per_viewport_knob(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TT_PER_VIEWPORT_TRAFFIC");
+        s = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return s;
+}
+
+/* Viewport index whose player occupies racer `slot` (-1 if none). Split-screen is
+ * an identity map (vp == slot) but resolve it via the game table to be safe. */
+static int trf_viewport_of_slot(int slot)
+{
+    int vc = g_td5.viewport_count;
+    if (vc > TD5_MAX_VIEWPORTS) vc = TD5_MAX_VIEWPORTS;
+    for (int v = 0; v < vc; v++)
+        if (td5_game_get_player_slot(v) == slot) return v;
+    return -1;
+}
+
+int td5_ai_traffic_per_viewport_active(void) { return s_trf_per_vp; }
+
+int td5_ai_traffic_slot_owner_vp(int slot)
+{
+    if (!s_trf_per_vp || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return -1;
+    return g_traffic_slot_owner_vp[slot];
+}
+
+/* 1 if a collision between these two slots must be SUPPRESSED for per-viewport
+ * isolation: a traffic car only interacts with its owning viewport's player, and
+ * two traffic cars from DIFFERENT partitions (which sit at matching positions)
+ * must not collide with each other. Returns 0 (allow) whenever per-vp is off. */
+int td5_ai_traffic_pair_blocked(int slot_a, int slot_b)
+{
+    int base, a_traf, b_traf, owner_a, owner_b, vp;
+    if (!s_trf_per_vp) return 0;
+    base    = g_traffic_slot_base;
+    a_traf  = (slot_a >= base);
+    b_traf  = (slot_b >= base);
+    owner_a = (a_traf && slot_a >= 0 && slot_a < TD5_MAX_TOTAL_ACTORS) ? g_traffic_slot_owner_vp[slot_a] : -1;
+    owner_b = (b_traf && slot_b >= 0 && slot_b < TD5_MAX_TOTAL_ACTORS) ? g_traffic_slot_owner_vp[slot_b] : -1;
+    if (a_traf && b_traf)
+        return (owner_a >= 0 && owner_b >= 0 && owner_a != owner_b);
+    if (a_traf) { vp = trf_viewport_of_slot(slot_b); return (owner_a >= 0 && vp >= 0 && vp != owner_a); }
+    if (b_traf) { vp = trf_viewport_of_slot(slot_a); return (owner_b >= 0 && vp >= 0 && vp != owner_b); }
+    return 0;
+}
+
+/* Decide per-viewport activation + fill the slot->owner partition map. Called from
+ * race_init after g_traffic_slot_base / viewport_count are known. */
+static void trf_per_viewport_setup(void)
+{
+    int base = g_traffic_slot_base, v, slot, vc;
+    for (slot = 0; slot < TD5_MAX_TOTAL_ACTORS; slot++)
+        g_traffic_slot_owner_vp[slot] = -1;
+    s_trf_per_vp   = 0;
+    s_trf_vp_count = 1;
+    s_trf_vp_k     = TD5_MAX_TRAFFIC_SLOTS;
+    vc = g_td5.viewport_count;
+    if (!trf_per_viewport_knob()) return;
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_TIME_TRIAL) return;
+    if (vc <= 1) return;
+    if (vc > TD5_MAX_VIEWPORTS) vc = TD5_MAX_VIEWPORTS;
+    s_trf_per_vp   = 1;
+    s_trf_vp_count = vc;
+    s_trf_vp_k     = TD5_MAX_TRAFFIC_SLOTS / vc;
+    if (s_trf_vp_k < 1) s_trf_vp_k = 1;
+    for (v = 0; v < vc; v++) {
+        int pv_lo = base + v * s_trf_vp_k;
+        int pv_hi = pv_lo + s_trf_vp_k;
+        if (v == vc - 1) pv_hi = base + vc * s_trf_vp_k;   /* last gets the slack slots */
+        for (slot = pv_lo; slot < pv_hi && slot < TD5_MAX_TOTAL_ACTORS; slot++)
+            g_traffic_slot_owner_vp[slot] = v;
+        s_trf_dyn_rng_vp[v]      = 0x54443552u ^ ((uint32_t)g_td5.track_index * 2654435761u);
+        s_trf_dyn_cooldown_vp[v] = 0;
+    }
+    TD5_LOG_I(LOG_TAG, "traffic_per_viewport: ON (time trial split-screen) viewports=%d "
+              "slots/vp=%d base=%d", s_trf_vp_count, s_trf_vp_k, base);
+}
+
 /* Per-track lane→direction map learned from the authored TRAFFIC.BUS records:
  * each 4-byte record couples (span, lane, polarity), and the span's strip
  * lane-count nibble keys which road layout the lane index refers to. Indexed
@@ -7638,6 +7745,8 @@ static int trf_dyn_race_span_lead(void)
 {
     int n = g_traffic_slot_base;
     int best = -0x7FFFFFFF;
+    if (s_trf_scope_slot >= 0)   /* per-viewport: anchor on this viewport's player */
+        return (int)(int16_t)ACTOR_I16(actor_ptr(s_trf_scope_slot), ACTOR_SPAN_NORMALIZED);
     if (n > g_active_actor_count) n = g_active_actor_count;
     if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
     for (int s = 0; s < n; s++) {
@@ -7780,6 +7889,16 @@ static int trf_dyn_spawn_period(void)
     return p / 2 + (int)(trf_dyn_rand() % (uint32_t)p);
 }
 
+/* [PER-VIEWPORT TRAFFIC] Per-viewport on-road cap: a normal per-player density,
+ * bounded by the partition size so it never overflows a viewport's slot range. */
+static int trf_per_viewport_cap(void)
+{
+    int c = trf_dyn_cap();
+    if (c > s_trf_vp_k) c = s_trf_vp_k;
+    if (c < 1) c = 1;
+    return c;
+}
+
 /* Wrap-aware |span distance| from `span_norm` to the NEAREST local player.
  * Wrapping only applies on circuits (the ring); point-to-point distances are
  * plain differences on the normalized span axis. */
@@ -7789,9 +7908,14 @@ static int trf_dyn_min_player_dist(int span_norm)
     int ring = td5_track_get_ring_length();
     int is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
     int best = 0x7FFFFFFF;
+    int s_lo = 0;
     if (humans < 1) humans = 1;
     if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
-    for (int s = 0; s < humans; s++) {
+    if (s_trf_scope_slot >= 0) {     /* per-viewport: only this viewport's player */
+        s_lo = s_trf_scope_slot;
+        humans = s_trf_scope_slot + 1;
+    }
+    for (int s = s_lo; s < humans; s++) {
         int ps = (int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED);
         int d = span_norm - ps;
         if (is_circuit && ring > 0) {
@@ -7898,6 +8022,8 @@ static int trf_dyn_starved_player_span(int radius)
     int humans = g_td5.num_human_players;
     int best_span;
     int best_cnt;
+    if (s_trf_scope_slot >= 0)   /* per-viewport: only this viewport's player */
+        return (int)(int16_t)ACTOR_I16(actor_ptr(s_trf_scope_slot), ACTOR_SPAN_NORMALIZED);
     if (humans < 1) humans = 1;
     if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
     best_span = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
@@ -8585,6 +8711,7 @@ void td5_ai_traffic_dynamic_race_init(void)
     s_trf_dyn_cooldown = 0;
     s_trf_dyn_seeded   = 1;
     cop_state_reset();   /* police-chase per-race state (deterministic) */
+    trf_per_viewport_setup();   /* [per-viewport traffic] partition + activation */
 
     /* Learn the per-track lane→direction map from the authored TRAFFIC.BUS
      * records (4-byte {span, flags bit0 = oncoming, lane}, -1 span sentinel
@@ -8635,6 +8762,36 @@ void td5_ai_traffic_dynamic_race_init(void)
     }
 
     cap = trf_dyn_cap();
+    if (s_trf_per_vp) {
+        /* [PER-VIEWPORT TRAFFIC] Seed each partition identically: same start-line
+         * anchor + identical-seed RNG, scoped to its own viewport's player, so every
+         * viewport starts with matching grid traffic in matching places. */
+        for (int vp = 0; vp < s_trf_vp_count; vp++) {
+            int p_lo = t_base + vp * s_trf_vp_k;
+            int p_hi = (vp == s_trf_vp_count - 1) ? (t_base + s_trf_vp_count * s_trf_vp_k)
+                                                  : (p_lo + s_trf_vp_k);
+            int vp_placed = 0, vp_cap = trf_per_viewport_cap();
+            if (p_hi > t_end) p_hi = t_end;
+            s_trf_scope_slot = td5_game_get_player_slot(vp);
+            s_trf_dyn_rng    = s_trf_dyn_rng_vp[vp];
+            for (int slot = p_lo; slot < p_hi; slot++) {
+                int seed_lo = g_td5.ini.traffic_dyn_start_offset + 8;
+                if (vp_placed < vp_cap &&
+                    trf_dyn_spawn_in_window(slot, g_td5.track_start_span_index,
+                                            seed_lo, seed_lo + 100)) {
+                    s_trf_dyn_state[slot] = TRF_DYN_ACTIVE;
+                    s_trf_dyn_alpha[slot] = 255;
+                    vp_placed++;
+                } else {
+                    s_trf_dyn_state[slot] = TRF_DYN_INACTIVE;
+                    s_trf_dyn_alpha[slot] = 0;
+                }
+            }
+            s_trf_dyn_rng_vp[vp] = s_trf_dyn_rng;
+            placed += vp_placed;
+        }
+        s_trf_scope_slot = -1;
+    } else
     for (int slot = t_base; slot < t_end; slot++) {
         /* Seed anchored on the START-LINE span (the grid isn't placed yet at
          * init time — live actor spans all read 0 here), scattered across a
@@ -8703,6 +8860,13 @@ void td5_ai_traffic_dynamic_tick(void)
 
     for (int slot = t_base; slot < t_end; slot++) {
         char *a = actor_ptr(slot);
+        /* [PER-VIEWPORT TRAFFIC] Scope the live-corridor despawn (trailing/lead
+         * span below) to THIS car's owning viewport's player, so a partition's
+         * cars live/retire around their own player, not the global field. */
+        if (s_trf_per_vp) {
+            int ov = g_traffic_slot_owner_vp[slot];
+            s_trf_scope_slot = (ov >= 0) ? td5_game_get_player_slot(ov) : -1;
+        }
         switch (s_trf_dyn_state[slot]) {
         case TRF_DYN_FADE_IN:
             s_trf_dyn_alpha[slot] = (int16_t)(s_trf_dyn_alpha[slot] + fade_step);
@@ -8830,6 +8994,44 @@ void td5_ai_traffic_dynamic_tick(void)
         default: /* TRF_DYN_INACTIVE */
             break;
         }
+    }
+
+    s_trf_scope_slot = -1;   /* clear per-slot despawn scope before the spawn pass */
+
+    /* [PER-VIEWPORT TRAFFIC] Time-trial split-screen: each partition runs its OWN
+     * spawn cadence — scoped to its viewport's player + private identical-seed RNG —
+     * so the sets land in matching places yet stay fully independent (one player
+     * perturbing a car never shows in another pane). No cop logic (TT has no cops). */
+    if (s_trf_per_vp) {
+        for (int vp = 0; vp < s_trf_vp_count; vp++) {
+            int p_lo = t_base + vp * s_trf_vp_k;
+            int p_hi = (vp == s_trf_vp_count - 1) ? (t_base + s_trf_vp_count * s_trf_vp_k)
+                                                  : (p_lo + s_trf_vp_k);
+            int vp_on_road = 0, pick = -1, slot, spawn_lo, spawn_hi;
+            if (p_hi > t_end) p_hi = t_end;
+            if (s_trf_dyn_cooldown_vp[vp] > 0) s_trf_dyn_cooldown_vp[vp]--;
+            for (slot = p_lo; slot < p_hi; slot++)
+                if (s_trf_dyn_state[slot] != TRF_DYN_INACTIVE) vp_on_road++;
+            if (vp_on_road >= trf_per_viewport_cap() || s_trf_dyn_cooldown_vp[vp] > 0)
+                continue;
+            for (slot = p_lo; slot < p_hi; slot++)
+                if (s_trf_dyn_state[slot] == TRF_DYN_INACTIVE) { pick = slot; break; }
+            if (pick < 0) { s_trf_dyn_cooldown_vp[vp] = 10; continue; }
+            s_trf_scope_slot = td5_game_get_player_slot(vp);
+            s_trf_dyn_rng    = s_trf_dyn_rng_vp[vp];
+            trf_dyn_effective_spawn_window(&spawn_lo, &spawn_hi);
+            if (trf_dyn_spawn_in_window(pick, -1, spawn_lo, spawn_hi)) {
+                s_trf_dyn_state[pick] = TRF_DYN_FADE_IN;
+                s_trf_dyn_alpha[pick] = 0;
+                s_trf_dyn_cooldown_vp[vp] = trf_dyn_spawn_period();
+                g_cop_is_cop[pick] = 0; g_cop_phase[pick] = COP_IDLE; g_cop_target[pick] = -1;
+            } else {
+                s_trf_dyn_cooldown_vp[vp] = 10;   /* nothing placeable now — retry soon */
+            }
+            s_trf_dyn_rng_vp[vp] = s_trf_dyn_rng;   /* persist this partition's RNG */
+            s_trf_scope_slot     = -1;
+        }
+        return;
     }
 
     /* Spawn cadence. Prefer slot 9 (the cop-capable slot) so speeding
@@ -10449,8 +10651,16 @@ void td5_ai_update_race_actors(void) {
             traffic_max = TD5_MAX_TOTAL_ACTORS;
 
         for (i = g_traffic_slot_base; i < traffic_max; i++) {
+            /* [PER-VIEWPORT TRAFFIC] scope each car's player-proximity logic
+             * (brake/anchor) to its OWNING viewport's player, so a partition's
+             * traffic reacts only to the player who can see it. */
+            if (s_trf_per_vp) {
+                int ov = g_traffic_slot_owner_vp[i];
+                s_trf_scope_slot = (ov >= 0) ? td5_game_get_player_slot(ov) : -1;
+            }
             ai_update_single_traffic(i);
         }
+        s_trf_scope_slot = -1;
 
         /* --- Step 4: Special encounter check --- */
         td5_ai_update_special_encounter();
