@@ -3118,6 +3118,9 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
             int32_t bound_lo_q, bound_hi_q;
             int32_t dist;
 
+            /* [PER-VIEWPORT TRAFFIC] skip other-partition peers so a car's lateral
+             * avoidance ignores its cross-partition twin (gated; no-op when off). */
+            if (td5_ai_traffic_pair_blocked(self_slot, i)) continue;
             /* Route-id match: rs[3] [CONFIRMED @ 0x00433832] */
             if (route_state_ptr[3] != peer_rs[3]) continue;
             /* self.field_0x82 <= peer.field_0x82 [CONFIRMED @ 0x00433851] */
@@ -3258,6 +3261,9 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
             int32_t dist;
 
             if (i == self_slot) continue;
+            /* [PER-VIEWPORT TRAFFIC] a partition's car avoids only its OWN
+             * viewport's player, not the other pane's (gated; no-op when off). */
+            if (td5_ai_traffic_pair_blocked(self_slot, i)) continue;
             peer_rs = route_state(i);
             peer_actor = actor_ptr(i);
 
@@ -4333,6 +4339,8 @@ static int smart_gather_blockers(int self_slot, int self_span, int span_count,
     int cnt = 0;
     for (int i = 0; i < n && cnt < max_out; i++) {
         if (i == self_slot) continue;
+        /* [PER-VIEWPORT TRAFFIC] same-partition (+ own player) blockers only. */
+        if (td5_ai_traffic_pair_blocked(self_slot, i)) continue;
         if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
         char *a = actor_ptr(i);
         if (!a) continue;
@@ -4563,6 +4571,12 @@ static void smart_sense(int slot, int span_raw, int span_count,
     if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
     for (int i = 0; i < n && ncar < TD5_MAX_TOTAL_ACTORS; i++) {
         if (i == slot) continue;
+        /* [PER-VIEWPORT TRAFFIC] ignore cars from OTHER viewports' partitions: a
+         * car must not see/dodge its cross-partition twin (same position) nor a
+         * player who can't see it — that both desynced the sets and showed traffic
+         * "dodging nothing". Within a partition the cars are identical, so the
+         * avoidance is identical and the partitions stay in lockstep. */
+        if (td5_ai_traffic_pair_blocked(slot, i)) continue;
         if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
         char *a = actor_ptr(i);
         if (!a) continue;
@@ -5915,6 +5929,10 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
 
             /* CMP EBP,EAX / JZ skip @ 0x004336b5 */
             if (i == self_slot) continue;
+            /* [PER-VIEWPORT TRAFFIC] ignore cars from other partitions (the twin
+             * sits at the same span/lane and would read as a 0-distance peer ->
+             * phantom brake + desync). No-op when per-viewport is off. */
+            if (td5_ai_traffic_pair_blocked(self_slot, i)) continue;
 
             peer_actor = actor_ptr(i);
             peer_rs = route_state(i);
@@ -5967,6 +5985,8 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
 
             /* CMP EDI,EAX / JZ skip @ 0x0043374d */
             if (i == self_slot) continue;
+            /* [PER-VIEWPORT TRAFFIC] skip other partitions' cars (gated; no-op off). */
+            if (td5_ai_traffic_pair_blocked(self_slot, i)) continue;
 
             peer_actor = actor_ptr(i);
             peer_rs = route_state(i);
@@ -7372,6 +7392,10 @@ static int traffic_lane_is_clear(int self_slot, int self_span,
         char *a;
         int lane, span, diff;
         if (i == self_slot) continue;
+        /* [PER-VIEWPORT TRAFFIC] only consider same-partition cars (+ own player):
+         * a partition must not see another partition's twin when picking a clear
+         * lane, or the placements desync. */
+        if (td5_ai_traffic_pair_blocked(self_slot, i)) continue;
         if (!ai_peer_is_present(i)) continue;   /* [R3-8] skip phantom/absent slots */
         a = actor_ptr(i);
         if (!a) continue;
@@ -7624,6 +7648,11 @@ static int      s_trf_vp_count   = 1;     /* number of viewports partitioned acr
 static int      s_trf_vp_k       = TD5_MAX_TRAFFIC_SLOTS;  /* traffic slots per viewport */
 static uint32_t s_trf_dyn_rng_vp[TD5_MAX_VIEWPORTS];      /* per-viewport spawn RNG      */
 static int      s_trf_dyn_cooldown_vp[TD5_MAX_VIEWPORTS]; /* per-viewport spawn cooldown */
+/* The partition currently being spawned (>=0) — the existing-traffic density gate
+ * counts ONLY this partition's cars so each partition's placement is identical
+ * (a partition must not "see" another partition's twins when deciding clumping).
+ * -1 = count all traffic (default / non-per-vp). */
+static int      s_trf_spawn_partition = -1;
 
 static int trf_per_viewport_knob(void)
 {
@@ -7962,6 +7991,12 @@ static int trf_dyn_count_traffic_near(int player_span, int radius)
     if (t_end > TD5_MAX_TOTAL_ACTORS) t_end = TD5_MAX_TOTAL_ACTORS;
     for (int slot = t_base; slot < t_end; slot++) {
         int sp;
+        /* [PER-VIEWPORT TRAFFIC] count only the partition being spawned, so each
+         * partition's clump gate behaves identically (ignores other partitions'
+         * twins sitting at the same spans). */
+        if (s_trf_spawn_partition >= 0 &&
+            g_traffic_slot_owner_vp[slot] != s_trf_spawn_partition)
+            continue;
         if (s_trf_dyn_state[slot] != TRF_DYN_ACTIVE &&
             s_trf_dyn_state[slot] != TRF_DYN_FADE_IN)
             continue;
@@ -8778,7 +8813,8 @@ void td5_ai_traffic_dynamic_race_init(void)
             int vp_placed = 0, vp_cap = trf_per_viewport_cap();
             if (p_hi > t_end) p_hi = t_end;
             /* Shared start-line anchor + identical-seed RNG => identical grid. */
-            s_trf_dyn_rng    = s_trf_dyn_rng_vp[vp];
+            s_trf_dyn_rng         = s_trf_dyn_rng_vp[vp];
+            s_trf_spawn_partition = vp;   /* density gate counts only this partition */
             for (int slot = p_lo; slot < p_hi; slot++) {
                 int seed_lo = g_td5.ini.traffic_dyn_start_offset + 8;
                 if (vp_placed < vp_cap &&
@@ -8792,7 +8828,8 @@ void td5_ai_traffic_dynamic_race_init(void)
                     s_trf_dyn_alpha[slot] = 0;
                 }
             }
-            s_trf_dyn_rng_vp[vp] = s_trf_dyn_rng;
+            s_trf_spawn_partition = -1;
+            s_trf_dyn_rng_vp[vp]  = s_trf_dyn_rng;
             placed += vp_placed;
         }
         s_trf_scope_slot = -1;
@@ -9021,7 +9058,8 @@ void td5_ai_traffic_dynamic_tick(void)
             /* Shared anchor/proximity (no per-player scope) + this partition's
              * identical-seed RNG => every partition spawns the SAME car at the
              * SAME place; only the target slot differs. */
-            s_trf_dyn_rng    = s_trf_dyn_rng_vp[vp];
+            s_trf_dyn_rng         = s_trf_dyn_rng_vp[vp];
+            s_trf_spawn_partition = vp;   /* density gate counts only this partition */
             trf_dyn_effective_spawn_window(&spawn_lo, &spawn_hi);
             if (trf_dyn_spawn_in_window(pick, -1, spawn_lo, spawn_hi)) {
                 s_trf_dyn_state[pick] = TRF_DYN_FADE_IN;
@@ -9031,8 +9069,9 @@ void td5_ai_traffic_dynamic_tick(void)
             } else {
                 s_trf_dyn_cooldown_vp[vp] = 10;   /* nothing placeable now — retry soon */
             }
-            s_trf_dyn_rng_vp[vp] = s_trf_dyn_rng;   /* persist this partition's RNG */
-            s_trf_scope_slot     = -1;
+            s_trf_spawn_partition = -1;
+            s_trf_dyn_rng_vp[vp]  = s_trf_dyn_rng;   /* persist this partition's RNG */
+            s_trf_scope_slot      = -1;
         }
         return;
     }
