@@ -4892,7 +4892,10 @@ static void frontend_update_laps_button_visibility(int laps_btn_idx) {
  * a hidden row. */
 static void frontend_update_difficulty_button_visibility(int diff_btn_idx) {
     if (diff_btn_idx < 0 || diff_btn_idx >= s_button_count) return;
-    int hide = (s_num_ai_opponents <= 0) || (s_flow_context == 2);
+    /* Difficulty is opponent-dependent, so hide it when there are 0 opponents,
+     * in Quick Race (flow 2), or in Time Trial (which has no AI opponents). */
+    int hide = (s_num_ai_opponents <= 0) || (s_flow_context == 2) ||
+               (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL);
     s_buttons[diff_btn_idx].hidden   = hide;
     s_buttons[diff_btn_idx].disabled = hide;
     TD5_LOG_I(LOG_TAG, "Difficulty row: opponents=%d flow=%d -> %s",
