@@ -206,53 +206,71 @@ function exportVisibleGLB() {
 }
 
 // ---- skin ------------------------------------------------------------------
+// Priority: a user/auto-supplied skin texture overrides; otherwise keep the
+// model's OWN material if it carries a texture (glTF/GLB embed textures); a
+// plain untextured mesh falls back to neutral grey.
 function applySkin() {
   if (!loadedObject) return;
   loadedObject.traverse((o) => {
     if (!o.isMesh) return;
+    if (o.userData.origMat === undefined) o.userData.origMat = o.material;   // remember once
     if (skinTexture) {
-      const m = new THREE.MeshStandardMaterial({ map: skinTexture, roughness: 0.75, metalness: 0.05 });
-      o.material = m;
-    } else if (!o.material || !o.material.__studioGrey) {
-      o.material = new THREE.MeshStandardMaterial({ color: 0x9a9aa2, roughness: 0.8 });
-      o.material.__studioGrey = true;
+      o.material = new THREE.MeshStandardMaterial({ map: skinTexture, roughness: 0.75, metalness: 0.05 });
+    } else {
+      const orig = o.userData.origMat;
+      const hasMap = orig && (Array.isArray(orig) ? orig.some((m) => m && m.map) : !!orig.map);
+      if (hasMap) {
+        o.material = orig;                  // keep the model's own embedded texture
+      } else if (!o.material || !o.material.__studioGrey) {
+        o.material = new THREE.MeshStandardMaterial({ color: 0x9a9aa2, roughness: 0.8 });
+        o.material.__studioGrey = true;
+      }
     }
   });
 }
 
-// ---- model loading ---------------------------------------------------------
-const gltf = new GLTFLoader(), obj = new OBJLoader();
-$('modelFile').addEventListener('change', (e) => {
-  const file = e.target.files[0]; if (!file) return;
+function loadSkinFromFile(file, fromModel) {
   const fr = new FileReader();
   fr.onload = () => {
-    modelBytes = fr.result; modelName = file.name;
-    const ext = file.name.toLowerCase().split('.').pop();
+    skinDataURL = fr.result;
+    new THREE.TextureLoader().load(fr.result, (t) => {
+      t.colorSpace = THREE.SRGBColorSpace; t.flipY = opts.flipv;
+      skinTexture = t; $('skinInfo').textContent = (fromModel ? 'from model: ' : '') + file.name; applySkin();
+    }, undefined, () => setStatus('could not load image ' + file.name, 'warn'));
+  };
+  fr.readAsDataURL(file);
+}
+$('skinFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) loadSkinFromFile(f, false); });
+
+// ---- model loading ---------------------------------------------------------
+const gltf = new GLTFLoader(), obj = new OBJLoader();
+const MODEL_EXT = ['glb', 'gltf', 'obj'];
+const IMG_EXT = ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif'];   // browser-loadable (TGA isn't)
+const extOf = (n) => n.toLowerCase().split('.').pop();
+
+$('modelFile').addEventListener('change', (e) => {
+  const files = [...e.target.files]; if (!files.length) return;
+  const modelF = files.find((f) => MODEL_EXT.includes(extOf(f.name)));
+  if (!modelF) { setStatus('Pick a .glb/.gltf/.obj (you can multi-select its texture image too).', 'warn'); return; }
+  // OBJ has no embedded texture — if you selected an image alongside it (or any
+  // model + image), use the largest image as the body skin.
+  const imgs = files.filter((f) => IMG_EXT.includes(extOf(f.name)));
+  if (imgs.length) { imgs.sort((a, b) => b.size - a.size); loadSkinFromFile(imgs[0], true); }
+
+  const fr = new FileReader();
+  fr.onload = () => {
+    modelBytes = fr.result; modelName = modelF.name;
     const onLoaded = () => { collectParts(); applyTransform(); renderParts(); };
     try {
-      if (ext === 'obj') {
-        loadedObject = obj.parse(new TextDecoder().decode(fr.result));
-        onLoaded();
+      if (extOf(modelF.name) === 'obj') {
+        loadedObject = obj.parse(new TextDecoder().decode(fr.result)); onLoaded();
       } else {
         gltf.parse(fr.result, '', (g) => { loadedObject = g.scene; onLoaded(); },
           (err) => setStatus('glTF parse error: ' + err, 'bad'));
       }
     } catch (err) { setStatus('model load error: ' + err, 'bad'); }
   };
-  fr.readAsArrayBuffer(file);
-});
-
-$('skinFile').addEventListener('change', (e) => {
-  const file = e.target.files[0]; if (!file) return;
-  const fr = new FileReader();
-  fr.onload = () => {
-    skinDataURL = fr.result;
-    new THREE.TextureLoader().load(fr.result, (t) => {
-      t.colorSpace = THREE.SRGBColorSpace; t.flipY = opts.flipv;
-      skinTexture = t; $('skinInfo').textContent = file.name; applySkin();
-    });
-  };
-  fr.readAsDataURL(file);
+  fr.readAsArrayBuffer(modelF);
 });
 
 // ---- option controls -------------------------------------------------------

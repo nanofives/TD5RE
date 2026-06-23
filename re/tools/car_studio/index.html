@@ -96,7 +96,9 @@
 
     <details class="grp" open><summary>1 · Model</summary><div class="body">
       <label class="filebtn"><button type="button" onclick="modelFile.click()">Load model (glTF / OBJ)</button></label>
-      <input type="file" id="modelFile" accept=".glb,.gltf,.obj">
+      <input type="file" id="modelFile" accept=".glb,.gltf,.obj,.png,.jpg,.jpeg,.bmp,.webp" multiple>
+      <div class="hint">OBJ has no embedded texture — multi-select the <code>.obj</code> + its image to skin it.
+        glTF/GLB embedded textures load automatically.</div>
       <div class="hint" id="modelInfo">no model loaded</div>
       <label class="row"><span>Forward</span><div class="seg" id="segFwd">
         <button data-v="-z" class="on">-Z</button><button data-v="+z">+Z</button>
