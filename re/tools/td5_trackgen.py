@@ -860,6 +860,7 @@ def extract_track(assets_root, level_no, name=None, decimate_to=72):
     ring = max(1, hdr[1]); total = hdr[4]
     nv = len(verts)
     dense = []
+    dense_span = []                 # parallel: which ring span each dense node came from
     for i in range(ring):
         s = spans[i]
         lanes = s[3] & 0x0F
@@ -877,12 +878,14 @@ def extract_track(assets_root, level_no, name=None, decimate_to=72):
         width = math.hypot(R[0] - L[0], R[2] - L[2]) or (lanes * DEFAULT_LANE_WIDTH)
         dense.append({"x": round(cx, 1), "z": round(cz, 1), "y": round(cy, 1),
                       "lanes": lanes, "width": round(width, 1), "surface": s[1] & 0x0F})
+        dense_span.append(i)
     # decimate evenly for editing (keep the shape, drop the per-span density)
     if decimate_to and len(dense) > decimate_to:
         step = len(dense) / float(decimate_to)
-        nodes = [dense[int(k * step)] for k in range(decimate_to)]
+        pick = [int(k * step) for k in range(decimate_to)]
     else:
-        nodes = dense
+        pick = list(range(len(dense)))
+    nodes = [dense[d] for d in pick]
     if len(nodes) < 2:
         raise ValueError("level %d has too few usable spans to extract" % level_no)
 
@@ -908,6 +911,21 @@ def extract_track(assets_root, level_no, name=None, decimate_to=72):
         if int(_v("fog_enabled", 0)):
             spec["fog"] = {"enabled": 1, "r": int(_v("fog_color_r", 0)),
                            "g": int(_v("fog_color_g", 0)), "b": int(_v("fog_color_b", 0))}
+
+        # map the real checkpoint span indices onto the nearest decimated node so
+        # the editor's checkpoint markers sit where the track's checkpoints are.
+        cps = _v("checkpoint_spans", []) or []
+        cpn = int(_v("checkpoint_count", 0))
+        real = [int(c) for c in (cps[:cpn] if cpn else cps) if 0 < int(c) < ring]
+        if real and dense_span:
+            cpnodes = []
+            for sp in real:
+                d = min(range(len(dense_span)), key=lambda j: abs(dense_span[j] - sp))
+                k = min(range(len(pick)), key=lambda j: abs(pick[j] - d))
+                cpnodes.append(k)
+            cpnodes = sorted(set(i for i in cpnodes if 0 < i < len(nodes)))
+            if cpnodes:
+                spec["checkpoints"] = cpnodes
 
     # --- branch corridors: each type-9 (SENTINEL_START) .. type-10 (SENTINEL_END)
     # run in [ring, total) is a branch; its per-span rail-midpoint centreline

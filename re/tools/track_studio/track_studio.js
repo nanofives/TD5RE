@@ -70,7 +70,7 @@ let selected = -1;
 let handles = [];                   // node handle meshes (index-aligned to spec.nodes)
 let drawingBranch = null;           // {lanes, nodes:[]} while drawing
 let roadTex = null, groundTex = null;   // preview textures
-let showLanes = false, editNodes = true, showCpGates = true;
+let showLanes = false, editNodes = false, showCpGates = true;
 let currentLevel = null, currentAssets = null;   // imported track's source + its assets
 let envLoaded = false;                            // environment geometry present -> hide ribbon fill
 const raycaster = new THREE.Raycaster();
@@ -112,6 +112,7 @@ function nearestNode(p) {   // index of the main node closest to p (XZ) -- branc
 function ribbon(nodes, circuit, opts) {
   const g = new THREE.Group();
   if (nodes.length < 2) return g;
+  if (envLoaded) return g;   // env holds the real road at full res -> hide the schematic ribbon
   const N = nodes.length, segs = circuit ? N : N - 1;
   const L = [], R = [], C = [], lanesAt = [];
   for (let i = 0; i < N; i++) {
@@ -141,16 +142,12 @@ function ribbon(nodes, circuit, opts) {
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   geo.computeVertexNormals();
-  // when the real environment geometry is loaded, hide the filled main ribbon so
-  // it doesn't z-fight the env road; keep rails/rungs/handles as editing overlay.
-  if (!(envLoaded && !opts.ghost)) {
-    const useTex = roadTex && !opts.ghost;
-    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      map: useTex ? roadTex : null, vertexColors: !useTex,
-      side: THREE.DoubleSide, transparent: !!opts.ghost, opacity: opts.ghost ? 0.6 : 1.0,
-    }));
-    g.add(mesh);
-  }
+  const useTex = roadTex && !opts.ghost;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    map: useTex ? roadTex : null, vertexColors: !useTex,
+    side: THREE.DoubleSide, transparent: !!opts.ghost, opacity: opts.ghost ? 0.6 : 1.0,
+  }));
+  g.add(mesh);
   // rail edge lines
   const railMat = new THREE.LineBasicMaterial({ color: opts.edge != null ? opts.edge : 0xc4c8d0 });
   for (const side of [L, R]) {
@@ -528,7 +525,6 @@ $('skyTexFile').onchange = (e) => {
 };
 $('clearTexBtn').onclick = () => {
   roadTex = groundTex = null; scene.background = new THREE.Color(0x12141a);
-  $('roadTexSel').value = ''; $('groundTexSel').value = '';
   rebuild(false); setStatus('Cleared textures + skybox.', 'ok');
 };
 $('showLanes').onchange = (e) => { showLanes = e.target.checked; rebuild(false); };
@@ -543,31 +539,16 @@ function trackTexture(level, name, flipY) {
   });
 }
 async function refreshTrackAssets() {
-  for (const sel of [$('roadTexSel'), $('groundTexSel')]) sel.innerHTML = '<option value="">— none —</option>';
   currentAssets = null;
   const env = $('loadEnvBtn'), sky = $('skyTrackBtn');
   env.disabled = sky.disabled = (currentLevel == null);
   if (currentLevel == null) return;
   try {
     currentAssets = await (await fetch('/api/assets?level=' + currentLevel)).json();
-    for (const sel of [$('roadTexSel'), $('groundTexSel')])
-      for (const tx of currentAssets.textures) { const o = document.createElement('option'); o.value = tx; o.textContent = tx; sel.appendChild(o); }
     env.disabled = !currentAssets.has_models;
     sky.disabled = !(currentAssets.skybox && currentAssets.skybox.length);
   } catch (e) { /* ignore */ }
 }
-$('roadTexSel').onchange = async (e) => {
-  if (!e.target.value) { roadTex = null; rebuild(false); setStatus('Road texture cleared.', 'ok'); return; }
-  if (currentLevel == null) return;
-  try { roadTex = await trackTexture(currentLevel, e.target.value); rebuild(false); setStatus('Road texture from track applied.', 'ok'); }
-  catch { setStatus('texture load failed', 'bad'); }
-};
-$('groundTexSel').onchange = async (e) => {
-  if (!e.target.value) { groundTex = null; rebuild(false); setStatus('Ground texture cleared.', 'ok'); return; }
-  if (currentLevel == null) return;
-  try { const t = await trackTexture(currentLevel, e.target.value); t.repeat.set(24, 24); groundTex = t; rebuild(false); setStatus('Ground texture from track applied.', 'ok'); }
-  catch { setStatus('texture load failed', 'bad'); }
-};
 $('skyTrackBtn').onclick = async () => {
   if (!currentAssets || !currentAssets.skybox.length) { setStatus('no skybox in this track', 'warn'); return; }
   try { const t = await trackTexture(currentLevel, currentAssets.skybox[0]); t.mapping = THREE.EquirectangularReflectionMapping; scene.background = t; setStatus('Skybox from track applied.', 'ok'); }
