@@ -40,8 +40,8 @@ import td5_car_physics_ref as physics_ref  # noqa: E402  (fleet hints/ranges/pre
 
 THREE_VER = "0.160.0"
 CDN = f"https://unpkg.com/three@{THREE_VER}"
-ENTRY_ADDONS = ["loaders/GLTFLoader.js", "loaders/OBJLoader.js", "controls/OrbitControls.js",
-                "exporters/GLTFExporter.js"]
+ENTRY_ADDONS = ["loaders/GLTFLoader.js", "loaders/OBJLoader.js", "loaders/FBXLoader.js",
+                "controls/OrbitControls.js", "exporters/GLTFExporter.js"]
 
 # Filled from CLI in main().
 CARS_DIR = "re/assets/cars"

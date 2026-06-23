@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
@@ -243,8 +244,8 @@ function loadSkinFromFile(file, fromModel) {
 $('skinFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) loadSkinFromFile(f, false); });
 
 // ---- model loading ---------------------------------------------------------
-const gltf = new GLTFLoader(), obj = new OBJLoader();
-const MODEL_EXT = ['glb', 'gltf', 'obj'];
+const gltf = new GLTFLoader(), obj = new OBJLoader(), fbx = new FBXLoader();
+const MODEL_EXT = ['glb', 'gltf', 'obj', 'fbx'];
 const IMG_EXT = ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif'];   // browser-loadable (TGA isn't)
 const extOf = (n) => n.toLowerCase().split('.').pop();
 
@@ -261,9 +262,15 @@ $('modelFile').addEventListener('change', (e) => {
   fr.onload = () => {
     modelBytes = fr.result; modelName = modelF.name;
     const onLoaded = () => { collectParts(); applyTransform(); renderParts(); };
+    const mext = extOf(modelF.name);
     try {
-      if (extOf(modelF.name) === 'obj') {
+      if (mext === 'obj') {
         loadedObject = obj.parse(new TextDecoder().decode(fr.result)); onLoaded();
+      } else if (mext === 'fbx') {
+        // FBXLoader.parse takes the ArrayBuffer (binary OR ascii FBX) and returns
+        // the object synchronously; embedded textures load, external ones miss
+        // (multi-select the image, or convert via Blender -> glTF).
+        loadedObject = fbx.parse(fr.result, ''); onLoaded();
       } else {
         gltf.parse(fr.result, '', (g) => { loadedObject = g.scene; onLoaded(); },
           (err) => setStatus('glTF parse error: ' + err, 'bad'));
