@@ -244,13 +244,21 @@ an extra car slot (index 76+) the next launch — **no source edit, no rebuild**
 ```bash
 python re/tools/car_studio/td5_car_studio.py        # opens a browser GUI
 ```
-A local web app with a **3D viewport** that loads your model, overlays the
+A local web app with a **3D viewport** that loads your model (glTF/GLB, OBJ,
+**FBX**, or **`.blend`** — Studio-only; the CLI reads glTF/OBJ. For `.blend`,
+**packed textures are carved out without Blender** and used as the skin; its
+*geometry* needs a local **Blender** (auto-detected / `--blender <path>` /
+`BLENDER_PATH`) — otherwise load the FBX/OBJ for the mesh), overlays the
 carparam **wheel positions as gizmos** (place wheels visually), previews your
 skin on the body, lets you edit every live physics/stat field, and **builds the
 car with one click**. Orient/scale/flip update live, so you fix "facing
-backward / wrong size" before building. It drives the same `td5_car_import.py`
-underneath. (three.js is vendored into `car_studio/vendor/` on first run — needs
-internet once, offline after.) The CLI below is the scripting equivalent.
+backward / wrong size" before building (a green **FRONT** marker shows which way
+the car must face). A **Parts / layers** checklist lists the model's sub-meshes
+(glTF nodes / OBJ `o`/`g` groups) so you can **uncheck stray geometry** — ground
+planes, backdrops, lights — and only the checked parts are built (the viewport
+exports exactly what you see). It drives the same `td5_car_import.py` underneath.
+(three.js is vendored into `car_studio/vendor/` on first run — needs internet
+once, offline after.) The CLI below is the scripting equivalent.
 
 **Requirements:** Python with `numpy` + `pillow` (`pip install numpy pillow`).
 
@@ -293,7 +301,35 @@ python re/tools/car_studio/td5_car_import.py texture in.jpg carskin0.png --size 
 python re/tools/car_studio/td5_car_import.py new --code custom_x --donor vip   # scaffold a clone to edit
 python re/tools/car_studio/td5_car_import.py doctor re/assets/cars/custom_x    # validate (tris/files/wheels/dims)
 python re/tools/car_studio/td5_car_import.py verify re/assets/cars/custom_x    # round-trip himodel.bin
+python re/tools/car_studio/td5_car_import.py blendtex model.blend --out-dir .  # carve packed textures from a .blend (no Blender)
 ```
+
+**Choosing physics values (effects + fleet reference):** the Car Studio's
+**Physics helpers** make `carparam.json` editing non-blind. For every live field
+it shows a plain-language **effect** (what it does + which way ↑ pushes), a
+**fleet-range bar** (the stock min/median/max with a marker at your value and the
+exemplar cars at each end), a **Compare to** any stock car (its values ghost next
+to yours; click to copy), and **archetype presets** (Exotic / Muscle / Agile /
+Heavy / Balanced — the median of those stock cars, applied as a baseline). The
+same data is available on the command line:
+
+```bash
+python re/tools/car_studio/td5_car_import.py stats              # fleet table + presets
+python re/tools/car_studio/td5_car_import.py stats --markdown   # regenerate the table below
+```
+
+A few of the highest-leverage fields (full live table from `stats`; values are the
+36-car fleet at time of writing — regenerate for the current set):
+
+| Field | Effect (↑ = more) | min | median | max |
+|---|---|--:|--:|--:|
+| `top_speed_limit` | higher top speed | 719 | 910 | 1159 |
+| `drive_torque_multiplier` | quicker acceleration | 50 | 82 | 180 |
+| `lateral_slip_stiffness` | more cornering grip | 32 | 256 | 360 |
+| `brake_force` | shorter stops | 400 | 600 | 750 |
+| `collision_mass` | heavier — shrugs off hits | 3 | 16 | 32 |
+| `vehicle_inertia` | more stable, less darty | 120000 | 180000 | 240000 |
+| `handbrake_grip_modifier` | ↓ = looser/easier to slide | 92 | 180 | 212 |
 
 **Limits & notes:**
 - Up to `TD5_CUSTOM_CAR_MAX` (16) custom cars; they occupy slots 76+ and are

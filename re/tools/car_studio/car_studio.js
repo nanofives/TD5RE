@@ -4,7 +4,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
 const TARGET_LENGTH = 1500;            // must match importer TARGET_LENGTH
 const $ = (id) => document.getElementById(id);
@@ -52,7 +54,8 @@ let modelName = '';
 let skinTexture = null;      // applied to preview materials
 let skinDataURL = null;      // sent to build
 let currentCarparam = null;  // donor carparam.json (edited in place)
-let opts = { forward: '-z', up: 'y', scale: 'auto', flipv: false, showWheels: true };
+let parts = [];              // [{name, mesh, tris}] toggleable sub-meshes (glTF nodes / OBJ groups)
+let opts = { forward: '-z', up: 'y', scale: 'auto', flipv: false, showWheels: true, showFront: true };
 
 // ---- transform (mirrors importer _axis_remap + centre + scale) -------------
 function basisMatrix(up, forward) {
@@ -66,19 +69,28 @@ function basisMatrix(up, forward) {
   return m;
 }
 
+// Bounding box over VISIBLE meshes only, so excluding parts re-fits the preview
+// exactly the way the build will (GLTFExporter onlyVisible -> importer re-fits).
+function visibleBox(root) {
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3(), tmp = new THREE.Box3();
+  root.traverse((o) => { if (o.isMesh && o.visible && o.geometry) { tmp.setFromObject(o); box.union(tmp); } });
+  return box;
+}
+
 function applyTransform() {
   modelRoot.clear();
-  if (!loadedObject) { updateWheels(); return; }
+  if (!loadedObject) { updateWheels(); updateFrontMarker(0); return; }
   const B = basisMatrix(opts.up, opts.forward);
   const holder = new THREE.Group();
-  loadedObject.matrixAutoUpdate = false;
-  loadedObject.matrix.copy(B);
-  holder.add(loadedObject);
+  holder.matrixAutoUpdate = false;
+  holder.matrix.copy(B);                 // orient on the holder; loadedObject stays
+  holder.add(loadedObject);              // native so GLTFExporter ships raw geometry
   holder.updateMatrixWorld(true);
 
-  const box = new THREE.Box3().setFromObject(holder);
+  const box = visibleBox(holder);
   const size = new THREE.Vector3(), centre = new THREE.Vector3();
-  box.getSize(size); box.getCenter(centre);
+  if (box.isEmpty()) { size.set(1, 1, 1); centre.set(0, 0, 0); } else { box.getSize(size); box.getCenter(centre); }
   const length = Math.max(size.z, 1e-6);
   const s = (opts.scale === 'auto' || isNaN(parseFloat(opts.scale)))
             ? TARGET_LENGTH / length : parseFloat(opts.scale);
@@ -89,9 +101,11 @@ function applyTransform() {
   modelRoot.scale.setScalar(s);
   modelRoot.add(pivot);
 
-  $('modelInfo').innerHTML =
+  $('modelInfo').dataset.base =
     `<b>${modelName}</b> · ${Math.round(size.x*s)}×${Math.round(size.y*s)}×${Math.round(size.z*s)} (W×H×L) · ×${s.toFixed(3)}`;
   $('hudStats').innerHTML = `scale ×${s.toFixed(3)} · length ${Math.round(size.z*s)}u`;
+  updateModelStats();
+  updateFrontMarker(size.z * s / 2);
   applySkin();
   updateWheels();
 }
@@ -116,53 +130,183 @@ function updateWheels() {
   }
 }
 
+// ---- front-of-car marker ---------------------------------------------------
+// In final game space +Z is the front (carparam front wheels sit at +Z); the
+// marker shows which way the car must face. Rotate the Forward control until the
+// nose points at it.
+const frontGroup = new THREE.Group(); scene.add(frontGroup);
+function makeLabelSprite(text, color) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = color; ctx.font = 'bold 42px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, 128, 36);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  spr.scale.set(420, 105, 1); return spr;
+}
+const frontCone = new THREE.Mesh(new THREE.ConeGeometry(70, 190, 4),
+  new THREE.MeshBasicMaterial({ color: 0x46c46a }));
+frontCone.rotation.x = Math.PI / 2;      // cone tip (+Y) -> +Z (front)
+const frontLabel = makeLabelSprite('FRONT', '#62e58c');
+frontGroup.add(frontCone, frontLabel);
+function updateFrontMarker(halfLen) {
+  frontGroup.visible = opts.showFront && !!loadedObject;
+  const z = (halfLen || 750) + 150;
+  frontCone.position.set(0, 0, z);
+  frontLabel.position.set(0, 240, z);
+}
+updateFrontMarker(750);
+
+// ---- parts / layers (toggle stray geometry; only visible parts are built) ---
+function collectParts() {
+  parts = [];
+  if (!loadedObject) return;
+  let i = 0;
+  loadedObject.traverse((o) => {
+    if (!o.isMesh) return;
+    const g = o.geometry; const pos = g && g.attributes && g.attributes.position;
+    const tris = Math.round((g && g.index ? g.index.count : (pos ? pos.count : 0)) / 3);
+    parts.push({ name: o.name || (o.parent && o.parent.name) || ('part ' + i), mesh: o, tris });
+    o.visible = true; i++;
+  });
+}
+function renderParts() {
+  const host = $('parts'); host.innerHTML = '';
+  $('partsGrp').style.display = parts.length > 1 ? '' : 'none';
+  for (const p of parts) {
+    const row = document.createElement('label'); row.className = 'partrow' + (p.mesh.visible ? '' : ' off');
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = p.mesh.visible;
+    const nm = document.createElement('span'); nm.className = 'pn'; nm.textContent = p.name; nm.title = p.name;
+    const tc = document.createElement('span'); tc.className = 'pt'; tc.textContent = p.tris + '▲';
+    cb.addEventListener('change', () => { p.mesh.visible = cb.checked; applyTransform(); renderParts(); });
+    row.append(cb, nm, tc); host.appendChild(row);
+  }
+}
+function setAllParts(on) { parts.forEach((p) => { p.mesh.visible = on; }); applyTransform(); renderParts(); }
+function keepBiggestPart() {
+  if (!parts.length) return;
+  let big = parts[0]; for (const p of parts) if (p.tris > big.tris) big = p;
+  parts.forEach((p) => { p.mesh.visible = (p === big); }); applyTransform(); renderParts();
+}
+function updateModelStats() {
+  const base = $('modelInfo').dataset.base || '';
+  if (!parts.length) { $('modelInfo').innerHTML = base || 'no model loaded'; return; }
+  const vis = parts.filter((p) => p.mesh.visible);
+  const tris = vis.reduce((a, p) => a + p.tris, 0);
+  $('modelInfo').innerHTML = `${base} · <b>${vis.length}/${parts.length}</b> parts · ${tris}▲`;
+}
+
+// ---- export only-visible geometry for the build (WYSIWYG) -------------------
+const gltfExporter = new GLTFExporter();
+function exportVisibleGLB() {
+  return new Promise((resolve, reject) => {
+    if (!loadedObject) { reject('no model'); return; }
+    gltfExporter.parse(loadedObject, (res) => resolve(res), (err) => reject(err),
+      { binary: true, onlyVisible: true });
+  });
+}
+
 // ---- skin ------------------------------------------------------------------
+// Priority: a user/auto-supplied skin texture overrides; otherwise keep the
+// model's OWN material if it carries a texture (glTF/GLB embed textures); a
+// plain untextured mesh falls back to neutral grey.
 function applySkin() {
   if (!loadedObject) return;
   loadedObject.traverse((o) => {
     if (!o.isMesh) return;
+    if (o.userData.origMat === undefined) o.userData.origMat = o.material;   // remember once
     if (skinTexture) {
-      const m = new THREE.MeshStandardMaterial({ map: skinTexture, roughness: 0.75, metalness: 0.05 });
-      o.material = m;
-    } else if (!o.material || !o.material.__studioGrey) {
-      o.material = new THREE.MeshStandardMaterial({ color: 0x9a9aa2, roughness: 0.8 });
-      o.material.__studioGrey = true;
+      o.material = new THREE.MeshStandardMaterial({ map: skinTexture, roughness: 0.75, metalness: 0.05 });
+    } else {
+      const orig = o.userData.origMat;
+      const hasMap = orig && (Array.isArray(orig) ? orig.some((m) => m && m.map) : !!orig.map);
+      if (hasMap) {
+        o.material = orig;                  // keep the model's own embedded texture
+      } else if (!o.material || !o.material.__studioGrey) {
+        o.material = new THREE.MeshStandardMaterial({ color: 0x9a9aa2, roughness: 0.8 });
+        o.material.__studioGrey = true;
+      }
     }
   });
 }
 
+function applySkinDataURL(url, label) {
+  skinDataURL = url;
+  new THREE.TextureLoader().load(url, (t) => {
+    t.colorSpace = THREE.SRGBColorSpace; t.flipY = opts.flipv;
+    skinTexture = t; $('skinInfo').textContent = label; applySkin();
+  }, undefined, () => setStatus('could not load image ' + label, 'warn'));
+}
+function loadSkinFromFile(file, fromModel) {
+  const fr = new FileReader();
+  fr.onload = () => applySkinDataURL(fr.result, (fromModel ? 'from model: ' : '') + file.name);
+  fr.readAsDataURL(file);
+}
+$('skinFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) loadSkinFromFile(f, false); });
+
 // ---- model loading ---------------------------------------------------------
-const gltf = new GLTFLoader(), obj = new OBJLoader();
+const gltf = new GLTFLoader(), obj = new OBJLoader(), fbx = new FBXLoader();
+const MODEL_EXT = ['glb', 'gltf', 'obj', 'fbx', 'blend'];
+function b64ToAb(b64) { const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; }
+const IMG_EXT = ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif'];   // browser-loadable (TGA isn't)
+const extOf = (n) => n.toLowerCase().split('.').pop();
+
 $('modelFile').addEventListener('change', (e) => {
-  const file = e.target.files[0]; if (!file) return;
+  const files = [...e.target.files]; if (!files.length) return;
+  const modelF = files.find((f) => MODEL_EXT.includes(extOf(f.name)));
+  if (!modelF) { setStatus('Pick a .glb/.gltf/.obj (you can multi-select its texture image too).', 'warn'); return; }
+  // OBJ has no embedded texture — if you selected an image alongside it (or any
+  // model + image), use the largest image as the body skin.
+  const imgs = files.filter((f) => IMG_EXT.includes(extOf(f.name)));
+  if (imgs.length) { imgs.sort((a, b) => b.size - a.size); loadSkinFromFile(imgs[0], true); }
+
   const fr = new FileReader();
   fr.onload = () => {
-    modelBytes = fr.result; modelName = file.name;
-    const ext = file.name.toLowerCase().split('.').pop();
+    modelBytes = fr.result; modelName = modelF.name;
+    const onLoaded = () => { collectParts(); applyTransform(); renderParts(); };
+    const mext = extOf(modelF.name);
     try {
-      if (ext === 'obj') {
-        loadedObject = obj.parse(new TextDecoder().decode(fr.result));
-        applyTransform();
+      if (mext === 'obj') {
+        loadedObject = obj.parse(new TextDecoder().decode(fr.result)); onLoaded();
+      } else if (mext === 'fbx') {
+        // FBXLoader.parse takes the ArrayBuffer (binary OR ascii FBX) and returns
+        // the object synchronously; embedded textures load, external ones miss
+        // (multi-select the image, or convert via Blender -> glTF).
+        loadedObject = fbx.parse(fr.result, ''); onLoaded();
+      } else if (mext === 'blend') {
+        // No in-browser .blend reader. Server carves PACKED textures (no Blender)
+        // and, if Blender is installed, also exports geometry to glb.
+        setStatus('Reading .blend (extracting packed textures; converting geometry if Blender is present)…');
+        fetch('/api/convert_blend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blend_b64: abToB64(fr.result) }) })
+          .then((r) => r.json()).then((res) => {
+            if (res.glb_b64) {                       // Blender gave us full geometry
+              const glb = b64ToAb(res.glb_b64);
+              modelBytes = glb; modelName = modelF.name.replace(/\.blend$/i, '.glb');
+              gltf.parse(glb, '', (g) => { loadedObject = g.scene; onLoaded(); setStatus('Loaded .blend (Blender → glb).', 'ok'); },
+                (err) => setStatus('converted glb parse error: ' + err, 'bad'));
+            } else if (res.textures && res.textures.length) {   // no geometry, but got the texture(s)
+              const t0 = res.textures[0];
+              applySkinDataURL(t0.dataurl, `from .blend (${t0.w}×${t0.h})`);
+              setStatus(`No Blender, so no mesh from the .blend — but extracted ${res.textures.length} packed `
+                + `texture(s) and applied the largest (${t0.w}×${t0.h}) as the skin. Load the FBX/OBJ for the geometry.`, 'warn');
+            } else {
+              const noTex = Array.isArray(res.textures);   // carve ran but found nothing embedded
+              setStatus('.blend: ' + (noTex
+                ? 'no PACKED textures found — this .blend references its textures as EXTERNAL files, '
+                  + 'so nothing is embedded to extract. Use the loose .png/.jpg from the download '
+                  + '(multi-select them with the FBX/OBJ). '
+                : '') + 'No mesh either — load the FBX/OBJ for the geometry'
+                + (res.error ? ' (' + res.error.split('.')[0] + ' for .blend geometry).' : '.'), 'bad');
+            }
+          }).catch((e) => setStatus('.blend request failed: ' + e, 'bad'));
       } else {
-        gltf.parse(fr.result, '', (g) => { loadedObject = g.scene; applyTransform(); },
+        gltf.parse(fr.result, '', (g) => { loadedObject = g.scene; onLoaded(); },
           (err) => setStatus('glTF parse error: ' + err, 'bad'));
       }
     } catch (err) { setStatus('model load error: ' + err, 'bad'); }
   };
-  fr.readAsArrayBuffer(file);
-});
-
-$('skinFile').addEventListener('change', (e) => {
-  const file = e.target.files[0]; if (!file) return;
-  const fr = new FileReader();
-  fr.onload = () => {
-    skinDataURL = fr.result;
-    new THREE.TextureLoader().load(fr.result, (t) => {
-      t.colorSpace = THREE.SRGBColorSpace; t.flipY = opts.flipv;
-      skinTexture = t; $('skinInfo').textContent = file.name; applySkin();
-    });
-  };
-  fr.readAsDataURL(file);
+  fr.readAsArrayBuffer(modelF);
 });
 
 // ---- option controls -------------------------------------------------------
@@ -176,6 +320,89 @@ seg('segFwd', 'forward'); seg('segUp', 'up');
 $('scale').addEventListener('change', (e) => { opts.scale = e.target.value.trim() || 'auto'; applyTransform(); });
 $('flipv').addEventListener('change', (e) => { opts.flipv = e.target.checked; if (skinTexture) { skinTexture.flipY = opts.flipv; skinTexture.needsUpdate = true; } });
 $('showWheels').addEventListener('change', (e) => { opts.showWheels = e.target.checked; updateWheels(); });
+$('showFront').addEventListener('change', (e) => { opts.showFront = e.target.checked; frontGroup.visible = opts.showFront && !!loadedObject; });
+$('partsAll').addEventListener('click', () => setAllParts(true));
+$('partsNone').addEventListener('click', () => setAllParts(false));
+$('partsBiggest').addEventListener('click', keepBiggestPart);
+
+// ---- physics reference (effect hints + fleet ranges + presets) -------------
+let reference = null;        // /api/reference payload
+let compareVals = null;      // {field: value} of the compare car (or null)
+const fieldUI = {};          // key -> { setVal(v), bar, cmp }
+
+function fieldHint(key) { return reference && reference.fields[key] ? reference.fields[key].hint : null; }
+function fleetField(key) {
+  const f = reference && reference.fields[key];
+  return f && f.kind === 'scalar' ? f : null;
+}
+function fpct(f, v) { const r = (f.max - f.min) || 1; return Math.max(0, Math.min(1, (v - f.min) / r)) * 100; }
+
+function makeFleetBar(key) {
+  const f = fleetField(key); if (!f) return null;
+  const wrap = document.createElement('div');
+  const bar = document.createElement('div'); bar.className = 'fleetbar';
+  for (const [v, cls] of [[f.min, ''], [f.median, 'med'], [f.max, '']]) {
+    const t = document.createElement('div'); t.className = 'fb-tick ' + cls; t.style.left = fpct(f, v) + '%'; bar.appendChild(t);
+  }
+  const ghost = document.createElement('div'); ghost.className = 'fb-ghost'; ghost.style.display = 'none';
+  const mark = document.createElement('div'); mark.className = 'fb-mark';
+  bar.append(ghost, mark);
+  const ends = document.createElement('div'); ends.className = 'fb-ends';
+  ends.innerHTML = `<span title="lowest: ${f.min_car.name}">${f.min}</span>`
+    + `<span>med ${Math.round(f.median)}</span>`
+    + `<span title="highest: ${f.max_car.name}">${f.max}</span>`;
+  wrap.append(bar, ends);
+  return {
+    el: wrap,
+    update(v) { mark.style.left = fpct(f, v) + '%'; mark.classList.toggle('out', v < f.min || v > f.max); },
+    ghost(v) { if (v == null) { ghost.style.display = 'none'; } else { ghost.style.display = ''; ghost.style.left = fpct(f, v) + '%'; } },
+  };
+}
+
+function applyCompareGhosts() {
+  for (const key in fieldUI) {
+    const ui = fieldUI[key]; if (!ui) continue;
+    const cv = compareVals ? compareVals[key] : undefined;
+    if (ui.bar) ui.bar.ghost(cv == null || Array.isArray(cv) ? null : cv);
+    if (ui.cmp) {
+      if (cv == null || Array.isArray(cv)) { ui.cmp.style.display = 'none'; }
+      else { ui.cmp.style.display = ''; ui.cmp.textContent = '→ ' + cv; ui.cmp.onclick = () => ui.setVal(cv); }
+    }
+  }
+}
+
+function applyPreset(name) {
+  const preset = reference && reference.presets ? reference.presets[name] : null;
+  if (!preset || !currentCarparam) return;
+  for (const [k, val] of Object.entries(preset)) {
+    if (!currentCarparam[k]) continue;
+    currentCarparam[k].value = Array.isArray(val) ? val.slice() : val;
+    if (fieldUI[k]) fieldUI[k].setVal(currentCarparam[k].value);
+  }
+  setStatus(`Applied "${name}" preset — tune from here, then Build.`, '');
+}
+
+async function loadReference() {
+  try { reference = await (await fetch('/api/reference')).json(); }
+  catch (e) { reference = null; return; }
+  const ps = $('presetSel'); ps.innerHTML = '';
+  for (const name of Object.keys(reference.presets || {})) {
+    const n = reference.preset_members[name] ? reference.preset_members[name].length : 0;
+    const o = document.createElement('option'); o.value = name; o.textContent = `${name} (${n} cars)`; ps.appendChild(o);
+  }
+  const cs = $('compareSel');
+  for (const c of reference.cars || []) {
+    const o = document.createElement('option'); o.value = c.code; o.textContent = `${c.name} (${c.code})`; cs.appendChild(o);
+  }
+}
+async function loadCompare(code) {
+  if (!code) { compareVals = null; applyCompareGhosts(); return; }
+  const r = await fetch('/api/carparam?donor=' + encodeURIComponent(code));
+  const cp = r.ok ? await r.json() : null;
+  compareVals = {};
+  if (cp) for (const [k, v] of Object.entries(cp)) if (v && v.kind === 'live') compareVals[k] = v.value;
+  applyCompareGhosts();
+}
 
 // ---- carparam form ---------------------------------------------------------
 const GROUPS = [
@@ -189,6 +416,7 @@ const GROUPS = [
 
 function buildForm() {
   const host = $('physics'); host.innerHTML = '';
+  Object.keys(fieldUI).forEach((k) => delete fieldUI[k]);
   if (!currentCarparam) return;
   const live = Object.entries(currentCarparam).filter(([, v]) => v && v.kind === 'live');
   const used = new Set();
@@ -200,6 +428,18 @@ function buildForm() {
   }
   const rest = live.filter(([k]) => !used.has(k));
   if (rest.length) host.appendChild(groupEl('Other', rest));
+  applyCompareGhosts();
+}
+
+function addHintLine(body, key, fld) {
+  const hint = fieldHint(key);
+  if (!hint || !hint.effect) return null;
+  const meta = document.createElement('div'); meta.className = 'fmeta';
+  const e = document.createElement('div'); e.className = 'eff';
+  e.innerHTML = hint.more ? `${hint.effect} &middot; <b>↑</b> ${hint.more}` : hint.effect;
+  meta.appendChild(e);
+  body.appendChild(meta);
+  return meta;
 }
 
 function groupEl(title, fields) {
@@ -209,29 +449,39 @@ function groupEl(title, fields) {
   for (const [key, fld] of fields) {
     const row = document.createElement('label'); row.className = 'row';
     const lbl = document.createElement('span'); lbl.textContent = key.replace(/_/g, ' ').replace('wheel pos ', 'wheel ');
-    lbl.title = fld.description || ''; row.appendChild(lbl);
+    const hint = fieldHint(key);
+    lbl.title = (hint && hint.effect) || fld.description || '';
+    row.appendChild(lbl);
+
     if (key.startsWith('wheel_pos_') && Array.isArray(fld.value)) {
+      row.classList.add('wheelrow');
       const box = document.createElement('div'); box.className = 'xyz';
-      ['x','y','z'].forEach((ax, i) => {
-        const inp = document.createElement('input'); inp.type = 'number'; inp.value = fld.value[i];
-        inp.title = ax.toUpperCase();
+      const inps = ['x','y','z'].map((ax, i) => {
+        const inp = document.createElement('input'); inp.type = 'number'; inp.value = fld.value[i]; inp.title = ax.toUpperCase();
         inp.addEventListener('input', () => { fld.value[i] = parseFloat(inp.value) || 0; updateWheels(); });
-        box.appendChild(inp);
+        box.appendChild(inp); return inp;
       });
-      row.appendChild(box);
+      row.appendChild(box); body.appendChild(row);
+      fieldUI[key] = { bar: null, cmp: null,
+        setVal: (arr) => { for (let i = 0; i < 3; i++) { fld.value[i] = arr[i]; inps[i].value = arr[i]; } updateWheels(); } };
     } else if (Array.isArray(fld.value)) {
       const inp = document.createElement('input'); inp.type = 'text'; inp.value = fld.value.join(', ');
-      inp.addEventListener('change', () => {
-        const a = inp.value.split(',').map((s) => parseFloat(s.trim()) || 0);
-        if (a.length === fld.value.length) fld.value = a;
-      });
-      row.appendChild(inp);
+      inp.addEventListener('change', () => { const a = inp.value.split(',').map((s) => parseFloat(s.trim()) || 0); if (a.length === fld.value.length) fld.value = a; });
+      row.appendChild(inp); body.appendChild(row);
+      addHintLine(body, key, fld);
+      fieldUI[key] = { bar: null, cmp: null,
+        setVal: (arr) => { if (Array.isArray(arr)) { for (let i = 0; i < fld.value.length && i < arr.length; i++) fld.value[i] = arr[i]; inp.value = fld.value.join(', '); } } };
     } else {
       const inp = document.createElement('input'); inp.type = 'number'; inp.value = fld.value;
-      inp.addEventListener('input', () => { fld.value = parseFloat(inp.value) || 0; });
-      row.appendChild(inp);
+      const bar = makeFleetBar(key);
+      inp.addEventListener('input', () => { fld.value = parseFloat(inp.value) || 0; if (bar) bar.update(fld.value); });
+      row.appendChild(inp); body.appendChild(row);
+      const meta = addHintLine(body, key, fld) || (() => { const m = document.createElement('div'); m.className = 'fmeta'; body.appendChild(m); return m; })();
+      if (bar) { bar.update(fld.value); meta.appendChild(bar.el); }
+      const cmp = document.createElement('span'); cmp.className = 'cmpval'; cmp.style.display = 'none'; cmp.title = 'compare car value — click to copy'; meta.appendChild(cmp);
+      fieldUI[key] = { bar, cmp,
+        setVal: (v) => { fld.value = v; inp.value = v; if (bar) bar.update(v); } };
     }
-    body.appendChild(row);
   }
   return d;
 }
@@ -266,14 +516,25 @@ function setStatus(msg, cls) { const s = $('status'); s.className = cls || ''; s
 
 $('buildBtn').addEventListener('click', async () => {
   if (!modelBytes) { setStatus('Load a model first.', 'warn'); return; }
+  if (parts.length && !parts.some((p) => p.mesh.visible)) { setStatus('All parts are unchecked — nothing to build.', 'warn'); return; }
   setStatus('Building…');
+  // Build only the VISIBLE parts (WYSIWYG): export the kept geometry to glb and
+  // send THAT, so excluded parts/layers never reach the importer. Fall back to
+  // the original model bytes if the exporter is unavailable.
+  let modelB64, mName;
+  try {
+    const glb = await exportVisibleGLB();
+    modelB64 = abToB64(glb); mName = 'studio_export.glb';
+  } catch (e) {
+    modelB64 = abToB64(modelBytes); mName = modelName;
+  }
   let carpic = null;
   if ($('useView').checked) { try { carpic = renderer.domElement.toDataURL('image/png'); } catch (e) {} }
   const payload = {
     name: $('name').value, short: $('short').value || $('name').value,
     code: $('code').value.trim(), donor: $('donor').value,
     scale: opts.scale, forward: opts.forward, up: opts.up, flip_v: opts.flipv,
-    model_name: modelName, model_b64: abToB64(modelBytes),
+    model_name: mName, model_b64: modelB64,
     skin_b64: skinDataURL, carpic_b64: carpic, carparam: currentCarparam,
   };
   try {
@@ -291,4 +552,17 @@ $('buildBtn').addEventListener('click', async () => {
 
 // ---- boot ------------------------------------------------------------------
 $('ver').textContent = 'three r' + THREE.REVISION;
-loadDonors().catch((e) => setStatus('donor load error: ' + e, 'bad'));
+$('presetApply').addEventListener('click', () => applyPreset($('presetSel').value));
+$('compareSel').addEventListener('change', () => loadCompare($('compareSel').value));
+$('compareCopy').addEventListener('click', () => {
+  if (!compareVals || !currentCarparam) return;
+  for (const k in compareVals) {
+    if (!currentCarparam[k] || !fieldUI[k]) continue;
+    const v = compareVals[k];
+    currentCarparam[k].value = Array.isArray(v) ? v.slice() : v;
+    fieldUI[k].setVal(currentCarparam[k].value);
+  }
+  setStatus('Copied all physics from the compare car — tune, then Build.', '');
+});
+// Reference (hints/ranges/presets) must load before the first form build.
+loadReference().then(loadDonors).catch((e) => setStatus('load error: ' + e, 'bad'));
