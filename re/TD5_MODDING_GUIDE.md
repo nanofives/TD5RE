@@ -295,6 +295,33 @@ python re/tools/car_studio/td5_car_import.py doctor re/assets/cars/custom_x    #
 python re/tools/car_studio/td5_car_import.py verify re/assets/cars/custom_x    # round-trip himodel.bin
 ```
 
+**Choosing physics values (effects + fleet reference):** the Car Studio's
+**Physics helpers** make `carparam.json` editing non-blind. For every live field
+it shows a plain-language **effect** (what it does + which way ↑ pushes), a
+**fleet-range bar** (the stock min/median/max with a marker at your value and the
+exemplar cars at each end), a **Compare to** any stock car (its values ghost next
+to yours; click to copy), and **archetype presets** (Exotic / Muscle / Agile /
+Heavy / Balanced — the median of those stock cars, applied as a baseline). The
+same data is available on the command line:
+
+```bash
+python re/tools/car_studio/td5_car_import.py stats              # fleet table + presets
+python re/tools/car_studio/td5_car_import.py stats --markdown   # regenerate the table below
+```
+
+A few of the highest-leverage fields (full live table from `stats`; values are the
+36-car fleet at time of writing — regenerate for the current set):
+
+| Field | Effect (↑ = more) | min | median | max |
+|---|---|--:|--:|--:|
+| `top_speed_limit` | higher top speed | 719 | 910 | 1159 |
+| `drive_torque_multiplier` | quicker acceleration | 50 | 82 | 180 |
+| `lateral_slip_stiffness` | more cornering grip | 32 | 256 | 360 |
+| `brake_force` | shorter stops | 400 | 600 | 750 |
+| `collision_mass` | heavier — shrugs off hits | 3 | 16 | 32 |
+| `vehicle_inertia` | more stable, less darty | 120000 | 180000 | 240000 |
+| `handbrake_grip_modifier` | ↓ = looser/easier to slide | 92 | 180 | 212 |
+
 **Limits & notes:**
 - Up to `TD5_CUSTOM_CAR_MAX` (16) custom cars; they occupy slots 76+ and are
   always unlocked. Folder names must start `custom_` and contain no `.`.

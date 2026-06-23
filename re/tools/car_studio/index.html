@@ -44,6 +44,22 @@
                    font-weight:700; width:100%; padding:9px; margin-top:4px; }
   .filebtn { display:block; width:100%; text-align:center; margin:3px 0; }
   .hint { color:var(--muted); font-size:11px; margin:3px 0 8px; }
+  .fmeta { margin:1px 0 7px; }
+  .fmeta .eff { color:#9aa6b8; font-size:11px; }
+  .fmeta .eff b { color:#c7d2e0; font-weight:600; }
+  .fleetbar { position:relative; height:7px; margin:4px 2px 2px; background:#11131a;
+              border:1px solid var(--edge); border-radius:4px; }
+  .fb-tick { position:absolute; top:-1px; width:1px; height:7px; background:#3a4150; }
+  .fb-tick.med { background:#5566aa; }
+  .fb-mark { position:absolute; top:-3px; width:9px; height:11px; margin-left:-4px;
+             background:var(--accent); border-radius:2px; box-shadow:0 0 3px #000; }
+  .fb-mark.out { background:var(--bad); }
+  .fb-ghost { position:absolute; top:-2px; width:0; height:0; margin-left:-4px;
+              border-left:4px solid transparent; border-right:4px solid transparent;
+              border-top:7px solid #c9a13a; }
+  .fb-ends { display:flex; justify-content:space-between; font-size:9.5px; color:#6f7891; }
+  .cmpval { color:#d6b25a; cursor:pointer; font-size:11px; margin-left:6px; }
+  .cmpval:hover { text-decoration:underline; }
   #status { white-space:pre-wrap; font:11px/1.4 ui-monospace,Consolas,monospace;
             background:#11131a; border:1px solid var(--edge); border-radius:6px;
             padding:8px; margin-top:8px; max-height:180px; overflow:auto; }
@@ -91,6 +107,17 @@
       <label class="filebtn"><button type="button" onclick="skinFile.click()">Load body skin (any image)</button></label>
       <input type="file" id="skinFile" accept="image/*">
       <div class="hint" id="skinInfo">no skin — neutral grey</div>
+    </div></details>
+
+    <details class="grp" open><summary>4 · Physics helpers</summary><div class="body">
+      <label class="row"><span>Preset</span>
+        <select id="presetSel"></select>
+        <button type="button" id="presetApply" style="flex:0 0 auto">Apply</button></label>
+      <div class="hint" id="presetInfo">archetype baseline (median of those stock cars) — apply, then tune</div>
+      <label class="row"><span>Compare to</span>
+        <select id="compareSel"><option value="">— none —</option></select></label>
+      <div class="hint">each field shows that car's value as a ghost mark + number; click the number to copy it.
+        <button type="button" id="compareCopy" style="margin-top:4px">Copy all physics from compare</button></div>
     </div></details>
 
     <div id="physics"></div>

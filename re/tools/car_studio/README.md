@@ -10,7 +10,8 @@ auto-enumerates them in the SELECT CAR screen (slots 76+) with no rebuild — se
 | File | What it is |
 |------|------------|
 | `td5_car_studio.py` | Web GUI: local server + 3D viewport, the easy way to author a car |
-| `td5_car_import.py` | The build engine + a standalone CLI (`import`/`texture`/`verify`/`new`/`doctor`) |
+| `td5_car_import.py` | The build engine + a standalone CLI (`import`/`texture`/`verify`/`new`/`doctor`/`stats`) |
+| `td5_car_physics_ref.py` | Fleet physics reference: effect hints, per-field min/median/max + exemplar cars, archetype presets (drives the Studio Physics helpers + `stats`) |
 | `index.html`, `car_studio.js` | The browser UI served by the studio |
 | `vendor/` | three.js, downloaded here on first run (git-ignored, regenerates) |
 

@@ -177,6 +177,85 @@ $('scale').addEventListener('change', (e) => { opts.scale = e.target.value.trim(
 $('flipv').addEventListener('change', (e) => { opts.flipv = e.target.checked; if (skinTexture) { skinTexture.flipY = opts.flipv; skinTexture.needsUpdate = true; } });
 $('showWheels').addEventListener('change', (e) => { opts.showWheels = e.target.checked; updateWheels(); });
 
+// ---- physics reference (effect hints + fleet ranges + presets) -------------
+let reference = null;        // /api/reference payload
+let compareVals = null;      // {field: value} of the compare car (or null)
+const fieldUI = {};          // key -> { setVal(v), bar, cmp }
+
+function fieldHint(key) { return reference && reference.fields[key] ? reference.fields[key].hint : null; }
+function fleetField(key) {
+  const f = reference && reference.fields[key];
+  return f && f.kind === 'scalar' ? f : null;
+}
+function fpct(f, v) { const r = (f.max - f.min) || 1; return Math.max(0, Math.min(1, (v - f.min) / r)) * 100; }
+
+function makeFleetBar(key) {
+  const f = fleetField(key); if (!f) return null;
+  const wrap = document.createElement('div');
+  const bar = document.createElement('div'); bar.className = 'fleetbar';
+  for (const [v, cls] of [[f.min, ''], [f.median, 'med'], [f.max, '']]) {
+    const t = document.createElement('div'); t.className = 'fb-tick ' + cls; t.style.left = fpct(f, v) + '%'; bar.appendChild(t);
+  }
+  const ghost = document.createElement('div'); ghost.className = 'fb-ghost'; ghost.style.display = 'none';
+  const mark = document.createElement('div'); mark.className = 'fb-mark';
+  bar.append(ghost, mark);
+  const ends = document.createElement('div'); ends.className = 'fb-ends';
+  ends.innerHTML = `<span title="lowest: ${f.min_car.name}">${f.min}</span>`
+    + `<span>med ${Math.round(f.median)}</span>`
+    + `<span title="highest: ${f.max_car.name}">${f.max}</span>`;
+  wrap.append(bar, ends);
+  return {
+    el: wrap,
+    update(v) { mark.style.left = fpct(f, v) + '%'; mark.classList.toggle('out', v < f.min || v > f.max); },
+    ghost(v) { if (v == null) { ghost.style.display = 'none'; } else { ghost.style.display = ''; ghost.style.left = fpct(f, v) + '%'; } },
+  };
+}
+
+function applyCompareGhosts() {
+  for (const key in fieldUI) {
+    const ui = fieldUI[key]; if (!ui) continue;
+    const cv = compareVals ? compareVals[key] : undefined;
+    if (ui.bar) ui.bar.ghost(cv == null || Array.isArray(cv) ? null : cv);
+    if (ui.cmp) {
+      if (cv == null || Array.isArray(cv)) { ui.cmp.style.display = 'none'; }
+      else { ui.cmp.style.display = ''; ui.cmp.textContent = '→ ' + cv; ui.cmp.onclick = () => ui.setVal(cv); }
+    }
+  }
+}
+
+function applyPreset(name) {
+  const preset = reference && reference.presets ? reference.presets[name] : null;
+  if (!preset || !currentCarparam) return;
+  for (const [k, val] of Object.entries(preset)) {
+    if (!currentCarparam[k]) continue;
+    currentCarparam[k].value = Array.isArray(val) ? val.slice() : val;
+    if (fieldUI[k]) fieldUI[k].setVal(currentCarparam[k].value);
+  }
+  setStatus(`Applied "${name}" preset — tune from here, then Build.`, '');
+}
+
+async function loadReference() {
+  try { reference = await (await fetch('/api/reference')).json(); }
+  catch (e) { reference = null; return; }
+  const ps = $('presetSel'); ps.innerHTML = '';
+  for (const name of Object.keys(reference.presets || {})) {
+    const n = reference.preset_members[name] ? reference.preset_members[name].length : 0;
+    const o = document.createElement('option'); o.value = name; o.textContent = `${name} (${n} cars)`; ps.appendChild(o);
+  }
+  const cs = $('compareSel');
+  for (const c of reference.cars || []) {
+    const o = document.createElement('option'); o.value = c.code; o.textContent = `${c.name} (${c.code})`; cs.appendChild(o);
+  }
+}
+async function loadCompare(code) {
+  if (!code) { compareVals = null; applyCompareGhosts(); return; }
+  const r = await fetch('/api/carparam?donor=' + encodeURIComponent(code));
+  const cp = r.ok ? await r.json() : null;
+  compareVals = {};
+  if (cp) for (const [k, v] of Object.entries(cp)) if (v && v.kind === 'live') compareVals[k] = v.value;
+  applyCompareGhosts();
+}
+
 // ---- carparam form ---------------------------------------------------------
 const GROUPS = [
   ['Wheels & body', (k) => k.startsWith('wheel_pos_') || k === 'suspension_height_ref' || k === 'envelope_reference_y'],
@@ -189,6 +268,7 @@ const GROUPS = [
 
 function buildForm() {
   const host = $('physics'); host.innerHTML = '';
+  Object.keys(fieldUI).forEach((k) => delete fieldUI[k]);
   if (!currentCarparam) return;
   const live = Object.entries(currentCarparam).filter(([, v]) => v && v.kind === 'live');
   const used = new Set();
@@ -200,6 +280,18 @@ function buildForm() {
   }
   const rest = live.filter(([k]) => !used.has(k));
   if (rest.length) host.appendChild(groupEl('Other', rest));
+  applyCompareGhosts();
+}
+
+function addHintLine(body, key, fld) {
+  const hint = fieldHint(key);
+  if (!hint || !hint.effect) return null;
+  const meta = document.createElement('div'); meta.className = 'fmeta';
+  const e = document.createElement('div'); e.className = 'eff';
+  e.innerHTML = hint.more ? `${hint.effect} &middot; <b>↑</b> ${hint.more}` : hint.effect;
+  meta.appendChild(e);
+  body.appendChild(meta);
+  return meta;
 }
 
 function groupEl(title, fields) {
@@ -209,29 +301,38 @@ function groupEl(title, fields) {
   for (const [key, fld] of fields) {
     const row = document.createElement('label'); row.className = 'row';
     const lbl = document.createElement('span'); lbl.textContent = key.replace(/_/g, ' ').replace('wheel pos ', 'wheel ');
-    lbl.title = fld.description || ''; row.appendChild(lbl);
+    const hint = fieldHint(key);
+    lbl.title = (hint && hint.effect) || fld.description || '';
+    row.appendChild(lbl);
+
     if (key.startsWith('wheel_pos_') && Array.isArray(fld.value)) {
       const box = document.createElement('div'); box.className = 'xyz';
-      ['x','y','z'].forEach((ax, i) => {
-        const inp = document.createElement('input'); inp.type = 'number'; inp.value = fld.value[i];
-        inp.title = ax.toUpperCase();
+      const inps = ['x','y','z'].map((ax, i) => {
+        const inp = document.createElement('input'); inp.type = 'number'; inp.value = fld.value[i]; inp.title = ax.toUpperCase();
         inp.addEventListener('input', () => { fld.value[i] = parseFloat(inp.value) || 0; updateWheels(); });
-        box.appendChild(inp);
+        box.appendChild(inp); return inp;
       });
-      row.appendChild(box);
+      row.appendChild(box); body.appendChild(row);
+      fieldUI[key] = { bar: null, cmp: null,
+        setVal: (arr) => { for (let i = 0; i < 3; i++) { fld.value[i] = arr[i]; inps[i].value = arr[i]; } updateWheels(); } };
     } else if (Array.isArray(fld.value)) {
       const inp = document.createElement('input'); inp.type = 'text'; inp.value = fld.value.join(', ');
-      inp.addEventListener('change', () => {
-        const a = inp.value.split(',').map((s) => parseFloat(s.trim()) || 0);
-        if (a.length === fld.value.length) fld.value = a;
-      });
-      row.appendChild(inp);
+      inp.addEventListener('change', () => { const a = inp.value.split(',').map((s) => parseFloat(s.trim()) || 0); if (a.length === fld.value.length) fld.value = a; });
+      row.appendChild(inp); body.appendChild(row);
+      addHintLine(body, key, fld);
+      fieldUI[key] = { bar: null, cmp: null,
+        setVal: (arr) => { if (Array.isArray(arr)) { for (let i = 0; i < fld.value.length && i < arr.length; i++) fld.value[i] = arr[i]; inp.value = fld.value.join(', '); } } };
     } else {
       const inp = document.createElement('input'); inp.type = 'number'; inp.value = fld.value;
-      inp.addEventListener('input', () => { fld.value = parseFloat(inp.value) || 0; });
-      row.appendChild(inp);
+      const bar = makeFleetBar(key);
+      inp.addEventListener('input', () => { fld.value = parseFloat(inp.value) || 0; if (bar) bar.update(fld.value); });
+      row.appendChild(inp); body.appendChild(row);
+      const meta = addHintLine(body, key, fld) || (() => { const m = document.createElement('div'); m.className = 'fmeta'; body.appendChild(m); return m; })();
+      if (bar) { bar.update(fld.value); meta.appendChild(bar.el); }
+      const cmp = document.createElement('span'); cmp.className = 'cmpval'; cmp.style.display = 'none'; cmp.title = 'compare car value — click to copy'; meta.appendChild(cmp);
+      fieldUI[key] = { bar, cmp,
+        setVal: (v) => { fld.value = v; inp.value = v; if (bar) bar.update(v); } };
     }
-    body.appendChild(row);
   }
   return d;
 }
@@ -291,4 +392,17 @@ $('buildBtn').addEventListener('click', async () => {
 
 // ---- boot ------------------------------------------------------------------
 $('ver').textContent = 'three r' + THREE.REVISION;
-loadDonors().catch((e) => setStatus('donor load error: ' + e, 'bad'));
+$('presetApply').addEventListener('click', () => applyPreset($('presetSel').value));
+$('compareSel').addEventListener('change', () => loadCompare($('compareSel').value));
+$('compareCopy').addEventListener('click', () => {
+  if (!compareVals || !currentCarparam) return;
+  for (const k in compareVals) {
+    if (!currentCarparam[k] || !fieldUI[k]) continue;
+    const v = compareVals[k];
+    currentCarparam[k].value = Array.isArray(v) ? v.slice() : v;
+    fieldUI[k].setVal(currentCarparam[k].value);
+  }
+  setStatus('Copied all physics from the compare car — tune, then Build.', '');
+});
+// Reference (hints/ranges/presets) must load before the first form build.
+loadReference().then(loadDonors).catch((e) => setStatus('load error: ' + e, 'bad'));

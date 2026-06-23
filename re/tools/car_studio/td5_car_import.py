@@ -790,6 +790,26 @@ def cmd_doctor(args):
     return 1 if errs else 0
 
 
+# ===========================================================================
+# stats command (fleet physics reference)
+# ===========================================================================
+def cmd_stats(args):
+    import td5_car_physics_ref as ref_mod
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    ref = ref_mod.build_reference(args.cars_dir)
+    if ref.get("error"):
+        print(ref["error"], file=sys.stderr)
+        return 1
+    print(ref_mod.render_table(ref, markdown=args.markdown))
+    if not args.markdown:
+        print("\npresets (median of each archetype's stock cars; apply as a baseline, then tune):")
+        print("  " + ", ".join(f"{k}({len(v)})" for k, v in ref["preset_members"].items()))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Import custom cars / convert textures for TD5RE")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -837,6 +857,11 @@ def main():
     pd = sub.add_parser("doctor", help="validate a car folder (mesh/files/wheels/dims)")
     pd.add_argument("car_dir")
     pd.set_defaults(func=cmd_doctor)
+
+    ps = sub.add_parser("stats", help="fleet physics reference: each field's effect + min/median/max + presets")
+    ps.add_argument("--cars-dir", default="re/assets/cars", help="cars root to scan")
+    ps.add_argument("--markdown", action="store_true", help="emit a markdown table (e.g. for docs)")
+    ps.set_defaults(func=cmd_stats)
 
     args = ap.parse_args()
     return args.func(args)

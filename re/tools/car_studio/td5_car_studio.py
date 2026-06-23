@@ -36,6 +36,7 @@ STUDIO_DIR = HERE                                    # index.html / car_studio.j
 VENDOR_DIR = os.path.join(HERE, "vendor")            # three.js downloaded here on first run
 sys.path.insert(0, HERE)
 import td5_car_import as importer  # noqa: E402  (the build engine, in this folder)
+import td5_car_physics_ref as physics_ref  # noqa: E402  (fleet hints/ranges/presets)
 
 THREE_VER = "0.160.0"
 CDN = f"https://unpkg.com/three@{THREE_VER}"
@@ -266,6 +267,13 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/api/carparam":
             cp = load_carparam(q.get("donor", "vip"))
             self._send(200 if cp else 404, cp or {"error": "no carparam.json"})
+        elif p == "/api/reference":
+            # Fleet physics reference: effect hints + per-field min/median/max +
+            # exemplar cars + archetype presets (td5_car_physics_ref).
+            try:
+                self._send(200, physics_ref.build_reference(CARS_DIR))
+            except Exception as e:
+                self._send(500, {"error": str(e)})
         else:
             self._send(404, {"error": "not found"})
 
