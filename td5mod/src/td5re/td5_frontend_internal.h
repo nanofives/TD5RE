@@ -251,6 +251,7 @@ int frontend_check_escape(void);
 int frontend_create_button(const char *label, int x, int y, int w, int h);
 int frontend_load_tga(const char *name, const char *archive);
 int frontend_option_delta(void);
+int frontend_input_confirm_was_mouse(void);
 int frontend_text_input_confirmed(void);
 void Screen_ConnectionBrowser(void);
 void Screen_CreateSession(void);

@@ -323,6 +323,16 @@ static int16_t s_cop_overtake_ticks[TD5_MAX_TOTAL_ACTORS];
  * velocity-zeroed oncoming flip) the instant a chase started and overshot the
  * first corner straight into a wall. Reset on acquire / chase-end. */
 static int16_t s_cop_chase_ticks[TD5_MAX_TOTAL_ACTORS];
+/* [MP COP CHASE RAM 2026-06-23] Per-cop ramming oscillator: once the cop reaches a
+ * suspect it can't just sit alongside, so it REVERSES to open a gap then LUNGES
+ * forward to crash in — repeating until the suspect is arrested. */
+static uint8_t s_cop_ram_phase[TD5_MAX_TOTAL_ACTORS];   /* COP_RAM_APPROACH/BACKUP/LUNGE */
+static int16_t s_cop_ram_timer[TD5_MAX_TOTAL_ACTORS];   /* ticks left in the current phase */
+/* Stuck detection (e.g. wedged against a wall): count ticks with ~no world-position
+ * movement; once stuck, reverse out with a hard wiggling steer to escape. */
+static int16_t s_cop_ram_stuck[TD5_MAX_TOTAL_ACTORS];
+static int32_t s_cop_ram_lastx[TD5_MAX_TOTAL_ACTORS];
+static int32_t s_cop_ram_lastz[TD5_MAX_TOTAL_ACTORS];
 /* [#3 NO-INSTANT-RE-CHASE 2026-06-21] After a cop SUCCESSFULLY pulls a car over
  * (a chase that ran to COMPLETE) it leaves THAT car alone for a while: it won't
  * re-acquire the same target until the cooldown lapses, so the same cop doesn't
@@ -346,6 +356,37 @@ static int16_t s_cop_rebust_ticks [TD5_MAX_TOTAL_ACTORS];
 #define COP_OVERTAKE_MARGIN  1   /* cop ahead of target by >=this many spans = overtaken */
 #define COP_STOP_SPEED  0x2000   /* |longitudinal speed| at/under which a target counts as stopped */
 #define COP_FULL_THROTTLE 0x0200 /* forward drive command while catching up (gentler accel) */
+/* [MP COP CHASE RAM 2026-06-23] Aggressive ram-the-suspect steering for the AI
+ * cop. Within COP_RAM_SPAN_RANGE spans of the target the cop steers straight at
+ * it (over the racing line); within COP_RAM_LUNGE_SPAN it punches the throttle
+ * through any brake to land the hit. COP_RAM_GAIN is the steering gain on the
+ * heading error (high = sharp turns; the route brain caps |cmd| at 0x18000). */
+#define COP_RAM_SPAN_RANGE 30     /* within this many spans -> ram oscillation zone (fwd/rev);
+                                   * beyond it -> navigate-and-catch-up. Wide so a momentum
+                                   * overshoot during a fwd->rev flip doesn't escape to "far". */
+#define COP_RAM_LUNGE_SPAN 5      /* force forward throttle (close the final gap) */
+#define COP_RAM_GAIN       0x08   /* GENTLE proportional bias (a full-lock slam spun the cop) */
+#define COP_RAM_MAX        0x6000 /* max ram bias added to the route steer (1/4 of full lock 0x18000) */
+#define COP_RAM_DEADBAND   0x40   /* ignore tiny heading errors -> no jitter, leave the route steer */
+#define COP_ALIGNED_DEV    0x200  /* |heading error| within this = suspect dead ahead */
+#define COP_BEHIND_DEV     0x500  /* |heading error| beyond this (~112deg) = suspect is BEHIND
+                                   * (cop overshot / suspect passed) -> brake + turn back */
+/* [MP COP CHASE RAM] Ramming oscillator: reach the suspect, REVERSE to open a gap,
+ * then LUNGE forward to crash in — repeat until it's arrested. */
+/* Ramming cycle (per user spec 2026-06-23): LUNGE at FULL speed into the suspect,
+ * let the COLLISION (or a wall) stop the cop, then REVERSE for a run-up and lunge
+ * again — repeating constantly until the suspect is arrested. */
+enum { COP_RAM_LUNGE = 0, COP_RAM_BACKUP = 1 };
+#define COP_RAM_BACKUP_TICKS 26     /* reverse ~0.85s for a run-up */
+#define COP_RAM_REVERSE      0xFC00 /* firm reverse throttle (~ -1024) */
+#define COP_LUNGE_MIN        16     /* min lunge ticks before a collision triggers the next backup */
+#define COP_STOPPED_TICKS    8      /* low-movement ticks during a lunge = collided/wedged -> reverse */
+#define COP_STUCK_MOVE       0x1000 /* world-units/tick (24.8) below which the cop counts as "not moving" */
+#define COP_SLOW_SPEED       0x4000 /* below this speed the steer may reach full lock (tight turns) */
+#define COP_RAM_CLOSE        4      /* gap at/under which the cop BULLDOZES (constant full throttle into
+                                     * the suspect) instead of coast/brake -> kills the accel/brake jitter */
+#define COP_RETARGET_MARGIN  5      /* switch to a different suspect only if it's this many spans CLOSER
+                                     * (dynamic proximity targeting, with hysteresis to avoid flip-flop) */
 #define COP_RECHASE_COOLDOWN 150 /* ~5s a cop cruises normally before it may re-acquire after a chase */
 /* [R3-12] No-progress watchdog: a chasing cop that fails to shrink its |gap| to
  * the target by >= COP_STALL_IMPROVE spans for COP_STALL_TICKS consecutive ticks
@@ -368,6 +409,11 @@ static void cop_state_reset(void) {
     memset(g_actor_broken_ticks, 0, sizeof(g_actor_broken_ticks));
     memset(g_cop_glow_phase, 0, sizeof(g_cop_glow_phase));
     memset(g_cop_cooldown, 0, sizeof(g_cop_cooldown));
+    memset(s_cop_ram_phase, 0, sizeof(s_cop_ram_phase));
+    memset(s_cop_ram_timer, 0, sizeof(s_cop_ram_timer));
+    memset(s_cop_ram_stuck, 0, sizeof(s_cop_ram_stuck));
+    memset(s_cop_ram_lastx, 0, sizeof(s_cop_ram_lastx));
+    memset(s_cop_ram_lastz, 0, sizeof(s_cop_ram_lastz));
     memset(s_cop_stall_ticks, 0, sizeof(s_cop_stall_ticks));
     memset(s_cop_overtake_ticks, 0, sizeof(s_cop_overtake_ticks));
     memset(s_cop_chase_ticks, 0, sizeof(s_cop_chase_ticks));
@@ -448,6 +494,14 @@ static int cop_chase_spinup_ticks(void) {
         if (t > 300) t = 300;
         v = (int)t;
     }
+    return v;
+}
+
+/* [MP COP CHASE RAM] Knob: TD5RE_COP_RAM=0 disables the aggressive ram-steering
+ * (cop reverts to the road-safe pursuit). Default ON. */
+static int cop_ram_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TD5RE_COP_RAM"); v = (e && e[0] == '0') ? 0 : 1; }
     return v;
 }
 
@@ -2194,9 +2248,14 @@ void td5_ai_init_race_actor_runtime(void) {
     /* Wanted mode (cop chase): slots 2-5 are inactive (no AI, no physics dispatch).
      * Mirrors gRaceSlotStateTable init at 0x42ABF8 for non-zero game types. */
     if (g_td5.wanted_mode_enabled) {
-        for (int k = 2; k < g_traffic_slot_base; k++)
+        /* MP cop chase keeps the human suspects + the AI-cop slot (the cop sits at
+         * slot num_human_players, AI-driven via g_slot_state==0); SP wanted keeps
+         * the faithful slots 0-1. MUST match td5_game.c's s_slot_state field. */
+        int keep = td5_game_mp_cop_chase_field();
+        if (keep <= 0) keep = 2;
+        for (int k = keep; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
-        TD5_LOG_I(LOG_TAG, "wanted_mode: g_slot_state[2..5] = 3 (inactive)");
+        TD5_LOG_I(LOG_TAG, "wanted_mode: g_slot_state[%d..] = 3 (inactive, field=%d)", keep, keep);
     }
     /* Drag race: slots 2..5 are decoration (no AI dispatch). Mirrors the
      * same override in td5_game.c:849-857 so the two parallel slot-state
@@ -10748,12 +10807,28 @@ static void ai_apply_stop_command(char *actor)
     ACTOR_I32(actor, ACTOR_STEERING_CMD)    = 0;
 }
 
+static void cop_drive(int slot);            /* defined below */
+static void mp_cop_pick_target(int cop_slot); /* defined below */
+
 /**
  * Dispatch a single racer slot based on its state.
  */
 static void ai_update_single_racer(int slot) {
     char *actor = actor_ptr(slot);
     int state = g_slot_state[slot];
+
+    /* [MP COP CHASE 2026-06-23] An AI-driven cop racer (g_cop_is_cop, COP_CHASING)
+     * hunts the suspects via the dedicated cop driver (aggressive ram steering)
+     * instead of the normal racer AI. The live per-tick loop (td5_ai_update_race_
+     * actors) calls THIS function for racer slots, so the dispatch MUST live here —
+     * td5_ai_update_actor (where it used to be) is never called. This is why the
+     * cop drove like a regular racer. */
+    if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&
+        g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
+        mp_cop_pick_target(slot);
+        cop_drive(slot);
+        return;
+    }
 
     switch (state) {
     case 0x00: /* AI racer */
@@ -10915,15 +10990,60 @@ static int cop_racer_drive_enabled(void) {
  * in td5_physics.c so it can reach 1.5x). The chase scheduler (span-based
  * overtake/pullover) is unaffected. TD5RE_COP_RACER_DRIVE=1 reverts to the old
  * racer-AI driver. Pure function of replicated state -> lockstep-safe. */
+/* Steer the cop DIRECTLY at its target suspect (world-space heading), overriding
+ * the racing line so it crashes INTO the suspect. High gain => sharp turns. The
+ * yaw store is (actual_angle + 0x800) << 8 (see correct_spawn_heading), so the
+ * cop's facing angle is (yaw>>8) - 0x800; ai_angle_from_vector gives the heading
+ * to the target in the same +Z=0/+X=0x400 clockwise convention. */
+static int32_t cop_heading_error(int slot, int tgt) {
+    char *cop = actor_ptr(slot), *t = actor_ptr(tgt);
+    if (!cop || !t) return 0;
+    int32_t dx   = ACTOR_I32(t, ACTOR_WORLD_POS_X) - ACTOR_I32(cop, ACTOR_WORLD_POS_X);
+    int32_t dz   = ACTOR_I32(t, ACTOR_WORLD_POS_Z) - ACTOR_I32(cop, ACTOR_WORLD_POS_Z);
+    /* ACTOR_YAW_ACCUM>>8 IS the travel direction in the ai_angle_from_vector
+     * convention (verified vs the diagnostic: subtracting 0x800 put a suspect that
+     * was clearly AHEAD at ~157°, which braked the cop forever). */
+    int32_t face = (ACTOR_I32(cop, ACTOR_YAW_ACCUM) >> 8) & 0xFFF;
+    int32_t dev  = (ai_angle_from_vector(dx, dz) - face) & 0xFFF;
+    if (dev > 0x800) dev -= 0x1000;                  /* signed heading error +right/-left */
+    return dev;
+}
+
+/* GENTLE proportional steering bias toward the target, ADDED on top of the route
+ * steer (the route brain keeps the cop ON the road; the bias leans it into the
+ * suspect) and clamped well below full lock — a full-lock slam spun the cop out. */
+static void cop_ram_steer(int slot, int32_t dev) {
+    char *cop = actor_ptr(slot);
+    int32_t spd, maxb, bias, out;
+    if (!cop) return;
+    if (dev > -COP_RAM_DEADBAND && dev < COP_RAM_DEADBAND) return;  /* aligned -> leave route steer */
+    /* Allow a HARD turn when slow (tight U-turn after a hit / repositioning) but keep
+     * it gentle at speed so a fast cop doesn't spin out. */
+    spd = ACTOR_I32(cop, ACTOR_LONGITUDINAL_SPEED);
+    if (spd < 0) spd = -spd;
+    /* Full lock when slow (so it can swerve INTO / U-turn onto the suspect); capped
+     * at speed so a fast chasing cop doesn't spin out. */
+    maxb = (spd < COP_SLOW_SPEED) ? 0x18000 : 0x8000;
+    bias = dev * 0x10;
+    if (bias >  maxb) bias =  maxb;
+    if (bias < -maxb) bias = -maxb;
+    out = ACTOR_I32(cop, ACTOR_STEERING_CMD) + bias;
+    if (out >  0x18000) out =  0x18000;
+    if (out < -0x18000) out = -0x18000;
+    ACTOR_I32(cop, ACTOR_STEERING_CMD) = out;
+}
+
 static void cop_drive(int slot) {
     char *cop = actor_ptr(slot);
     int   tgt = g_cop_target[slot];
 
-    /* Run the chosen base driver. The traffic driver follows the road/route
-     * toward the player and keeps the cop on the paved band; the (legacy) racer
-     * driver does racing-line + SmartAI avoidance. Either sets steering, the
-     * BRAKE_FLAG, and a base throttle command. */
-    if (cop_racer_drive_enabled())
+    /* Run the base driver. A RACER-slot cop (MP cop chase, slot < traffic base)
+     * MUST use the RACER AI (route-follow + throttle) — the traffic driver braked
+     * a racer slot to a dead stop (the cop never moved). A TRAFFIC-slot cop keeps
+     * the traffic driver (keeps it on the paved band). Either sets steering, the
+     * BRAKE_FLAG, and a base throttle command; the catch-up + ram layers below
+     * then override. */
+    if (slot < g_traffic_slot_base || cop_racer_drive_enabled())
         td5_ai_update_track_behavior(slot);
     else
         traffic_drive_normal(slot);
@@ -10938,30 +11058,134 @@ static void cop_drive(int slot) {
             return;
     }
 
-    /* If the base driver decided to BRAKE (imminent hazard / congestion), RESPECT
-     * it — don't boost the throttle this tick. So the cop slows for hazards and
-     * only sprints when the way is clear. */
+    /* [MP COP CHASE — ram oscillator 2026-06-23] Chase the suspect, then crash into
+     * it REPEATEDLY: once adjacent the cop REVERSES to open a run-up gap, then
+     * LUNGES forward to ram — looping until the suspect is arrested. (Just sitting
+     * alongside did no damage; the reverse gives it momentum to hit hard.) */
+    if (cop_ram_enabled() && slot < g_traffic_slot_base &&
+        g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active &&
+        tgt >= 0 && tgt < TD5_MAX_TOTAL_ACTORS) {
+        int cop_span = (int)ACTOR_I16(cop, ACTOR_SPAN_RAW);
+        int tgt_span = (int)ACTOR_I16(actor_ptr(tgt), ACTOR_SPAN_RAW);
+        /* Branch-aware gap: fold branch-corridor spans onto the main ring. Branch
+         * (fork) spans are numbered far PAST the main ring, so a raw difference made
+         * the cop think the suspect was miles away the instant it took a fork -> the
+         * cop went "far" and gave up the chase. smart_span_gap is wrap-aware. */
+        int ring_len = td5_track_get_ring_length();
+        int cop_main = (ring_len > 0) ? td5_track_branch_to_main_span(cop_span) : cop_span;
+        int tgt_main = (ring_len > 0) ? td5_track_branch_to_main_span(tgt_span) : tgt_span;
+        int gap = (ring_len > 0) ? smart_iabs(smart_span_gap(cop_main, tgt_main, ring_len))
+                                 : smart_iabs(cop_span - tgt_span);
+        int32_t dev  = cop_heading_error(slot, tgt);
+        int32_t adev = (dev < 0) ? -dev : dev;
+        int phase = s_cop_ram_phase[slot];
+
+        /* Stuck detection: if the cop has barely moved for a while it's wedged
+         * (typically against a wall) -> reverse out with a hard wiggling steer. */
+        {
+            int32_t cx = ACTOR_I32(cop, ACTOR_WORLD_POS_X);
+            int32_t cz = ACTOR_I32(cop, ACTOR_WORLD_POS_Z);
+            int32_t moved = smart_iabs(cx - s_cop_ram_lastx[slot]) +
+                            smart_iabs(cz - s_cop_ram_lastz[slot]);
+            s_cop_ram_lastx[slot] = cx;
+            s_cop_ram_lastz[slot] = cz;
+            if (moved < COP_STUCK_MOVE) {
+                if (s_cop_ram_stuck[slot] < 0x3FFF) s_cop_ram_stuck[slot]++;
+            } else {
+                s_cop_ram_stuck[slot] = 0;
+            }
+        }
+
+        if ((g_ai_frame_counter % 30u) == 0u)
+            TD5_LOG_I(LOG_TAG,
+                "cop_ram DIAG: slot=%d ramphase=%d tgt=%d cop_span=%d tgt_span=%d "
+                "cop_main=%d tgt_main=%d copbr=%d tgtbr=%d gap=%d "
+                "adev=%d timer=%d stuck=%d steer_cmd=%d throttle=%d face=%d",
+                slot, phase, tgt, cop_span, tgt_span, cop_main, tgt_main,
+                (ring_len > 0 && cop_span >= ring_len), (ring_len > 0 && tgt_span >= ring_len),
+                gap, (int)adev, (int)s_cop_ram_timer[slot],
+                (int)s_cop_ram_stuck[slot],
+                (int)ACTOR_I32(cop, ACTOR_STEERING_CMD),
+                (int)ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER),
+                (int)((ACTOR_I32(cop, ACTOR_YAW_ACCUM) >> 8) & 0xFFF));
+
+        cop_ram_steer(slot, dev);   /* always aim at the suspect (speed-aware) */
+        /* FAR -> navigate toward the suspect. */
+        if (gap > COP_RAM_SPAN_RANGE) {
+            s_cop_ram_phase[slot] = COP_RAM_LUNGE;
+            /* If the suspect is BEHIND the cop (it overshot far past), DON'T keep
+             * driving forward away from it — brake hard; the low-speed (=hard) steer
+             * then U-turns the cop back toward the suspect. This is the "drove off and
+             * never came back" fix. */
+            if (adev >= COP_BEHIND_DEV) {
+                ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+                ACTOR_U8(cop,  ACTOR_BRAKE_FLAG)      = 1;
+                return;
+            }
+            /* Suspect ahead -> catch-up toward it, RESPECTING the base brake so it
+             * doesn't fly off a corner. */
+            if (ACTOR_U8(cop, ACTOR_BRAKE_FLAG))
+                return;
+            {
+                int32_t tabs = ACTOR_I32(actor_ptr(tgt), ACTOR_LONGITUDINAL_SPEED);
+                int32_t cabs = ACTOR_I32(cop, ACTOR_LONGITUDINAL_SPEED);
+                int16_t ai_cmd = ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER);
+                int32_t cap;
+                tabs = tabs < 0 ? -tabs : tabs; cabs = cabs < 0 ? -cabs : cabs;
+                cap = (int32_t)((int64_t)tabs * g_td5.ini.cop_catchup_pct / 100);
+                if (cap < g_td5.ini.cop_min_speed) cap = g_td5.ini.cop_min_speed;
+                if (cabs < cap) {
+                    if (ai_cmd >= 0 && (int16_t)COP_FULL_THROTTLE > ai_cmd)
+                        ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = (int16_t)COP_FULL_THROTTLE;
+                } else if (ai_cmd > 0) {
+                    ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = 0;
+                }
+            }
+            return;
+        }
+
+        /* CLOSE -> alignment-proportional ram (NO reverse — it was too slow/awkward).
+         * The cop only floors while FACING the suspect; the instant the suspect slides
+         * off-centre it COASTS (killing the overshoot fast), and if the suspect ends up
+         * BEHIND it BRAKES hard so the (hard at low speed) steer whips it through a
+         * quick forward U-turn back onto the suspect. A stall kicks it forward. */
+        (void)phase;
+        if (adev >= COP_BEHIND_DEV) {
+            /* Suspect behind (overshot) -> BRAKE hard for a quick steer-driven forward
+             * U-turn back onto it (no reverse). */
+            ACTOR_U8(cop,  ACTOR_BRAKE_FLAG)      = 1;
+            ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+        } else if (gap <= COP_RAM_CLOSE || adev < COP_ALIGNED_DEV) {
+            /* Right on top of the suspect (BULLDOZE — constant full throttle, the hard
+             * steer keeps grinding into it) OR facing it (RAM). No coast/brake here, so
+             * the cop doesn't fall into the short accel/brake jitter once it reaches you;
+             * it keeps pushing/ramming continuously. */
+            ACTOR_U8(cop,  ACTOR_BRAKE_FLAG)      = 0;
+            ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = (int16_t)COP_FULL_THROTTLE;
+        } else {
+            /* Mid-range, suspect off to the side -> COAST so it bleeds speed and the
+             * hard steer curves it back on instead of blasting straight past. */
+            ACTOR_U8(cop,  ACTOR_BRAKE_FLAG)      = 0;
+            ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = 0;
+        }
+        return;
+    }
+
+    /* Not an MP cop chase cop (or ram disabled) -> legacy catch-up driver. */
     if (ACTOR_U8(cop, ACTOR_BRAKE_FLAG))
         return;
-
     if (tgt >= 0 && tgt < TD5_MAX_TOTAL_ACTORS) {
         int32_t tspd = ACTOR_I32(actor_ptr(tgt), ACTOR_LONGITUDINAL_SPEED);
         int32_t cspd = ACTOR_I32(cop, ACTOR_LONGITUDINAL_SPEED);
         int32_t tabs = tspd < 0 ? -tspd : tspd;
         int32_t cabs = cspd < 0 ? -cspd : cspd;
-        /* Target speed scaled by CopCatchup% (default 150 = 1.5x). Floor the
-         * cap so a cop never fully idles while chasing a crawling car. */
-        int32_t cap = (int32_t)((int64_t)tabs * g_td5.ini.cop_catchup_pct / 100);
+        int32_t cap  = (int32_t)((int64_t)tabs * g_td5.ini.cop_catchup_pct / 100);
         int16_t ai_cmd = ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER);
         if (cap < g_td5.ini.cop_min_speed) cap = g_td5.ini.cop_min_speed;
         if (cabs < cap) {
-            /* Below the catch-up cap and not braking -> boost the throttle, but
-             * never BELOW what the AI already commanded (so a SmartAI ease for a
-             * slower car ahead is preserved — we only ever speed it up). */
             if (ai_cmd >= 0 && (int16_t)COP_FULL_THROTTLE > ai_cmd)
                 ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = (int16_t)COP_FULL_THROTTLE;
         } else if (ai_cmd > 0) {
-            /* At/above the catch-up cap -> coast so it tops out near 1.5x. */
             ACTOR_I16(cop, ACTOR_ENCOUNTER_STEER) = 0;
         }
     }
@@ -11027,17 +11251,37 @@ void td5_ai_cop_chase_setup(int cop_slot, int is_ai) {
 static void mp_cop_pick_target(int cop_slot) {
     char *cop = actor_ptr(cop_slot);
     int cop_span, best = -1, best_d = 0x7FFFFFFF, s;
+    /* Suspects are ONLY the active HUMAN players (slots 0..num_human_players-1).
+     * Slots beyond that are disabled decoration cars (their g_wanted_damage_state
+     * is still 0x1000), so the old loop locked the cop onto a PARKED car and drove
+     * into a wall trying to reach it. */
+    int nsusp = g_td5.num_human_players;
+    int cur, cur_d = 0x7FFFFFFF;
     if (!cop) return;
+    if (nsusp > TD5_MAX_RACER_SLOTS) nsusp = TD5_MAX_RACER_SLOTS;
     cop_span = (int)ACTOR_I16(cop, ACTOR_SPAN_RAW);
-    for (s = 0; s < g_traffic_slot_base && s < TD5_MAX_RACER_SLOTS; s++) {
+
+    /* Dynamic proximity targeting: chase the NEAREST active human suspect, switching
+     * to another only when it is clearly closer (COP_RETARGET_MARGIN) so the cop
+     * doesn't flip-flop tick to tick. Drops a target that gets arrested. */
+    for (s = 0; s < nsusp; s++) {
         char *a; int d;
-        if (!td5_game_cop_chase_is_suspect(s)) continue;
+        if (s == cop_slot) continue;                   /* the (human) cop is not a suspect */
         if (g_wanted_damage_state[s] <= 0) continue;   /* already arrested */
         a = actor_ptr(s);
         if (!a) continue;
         d = (int)ACTOR_I16(a, ACTOR_SPAN_RAW) - cop_span;
         if (d < 0) d = -d;
         if (d < best_d) { best_d = d; best = s; }
+    }
+
+    cur = g_cop_target[cop_slot];
+    if (cur >= 0 && cur < nsusp && cur != cop_slot && g_wanted_damage_state[cur] > 0) {
+        int cd = (int)ACTOR_I16(actor_ptr(cur), ACTOR_SPAN_RAW) - cop_span;
+        cur_d = (cd < 0) ? -cd : cd;
+        /* Keep the current suspect unless another is meaningfully closer. */
+        if (best < 0 || best == cur || best_d + COP_RETARGET_MARGIN >= cur_d)
+            return;
     }
     g_cop_target[cop_slot] = best;
 }

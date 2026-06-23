@@ -3569,7 +3569,14 @@ void td5_render_actors_for_view(int view_index)
              * cop slot (idle or chasing) so cops read as police cars in traffic,
              * not ordinary cars. VISUAL only — physics/wheels/HUD still use the
              * slot's real mesh. Falls back to the slot mesh if no cop mesh. */
-            TD5_MeshHeader *mesh = (s_cop_mesh && td5_ai_actor_is_cop(slot))
+            /* [MP COP CHASE 2026-06-23] The MP cop-chase cop drives a real POLICE
+             * CAR (Police Cerbera), so render its OWN mesh — not the generic
+             * traffic-encounter cop mesh. Only traffic cops keep s_cop_mesh. */
+            int draw_cop_mesh = (s_cop_mesh && td5_ai_actor_is_cop(slot));
+            if (draw_cop_mesh && g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
+                !g_td5.network_active && slot == td5_game_cop_chase_cop_slot())
+                draw_cop_mesh = 0;
+            TD5_MeshHeader *mesh = draw_cop_mesh
                                    ? s_cop_mesh : td5_render_get_vehicle_mesh(slot);
             TD5_Mat3x3 view_rot;
             TD5_Vec3f render_pos;
