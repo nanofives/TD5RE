@@ -248,9 +248,13 @@ A local web app with a **3D viewport** that loads your model, overlays the
 carparam **wheel positions as gizmos** (place wheels visually), previews your
 skin on the body, lets you edit every live physics/stat field, and **builds the
 car with one click**. Orient/scale/flip update live, so you fix "facing
-backward / wrong size" before building. It drives the same `td5_car_import.py`
-underneath. (three.js is vendored into `car_studio/vendor/` on first run — needs
-internet once, offline after.) The CLI below is the scripting equivalent.
+backward / wrong size" before building (a green **FRONT** marker shows which way
+the car must face). A **Parts / layers** checklist lists the model's sub-meshes
+(glTF nodes / OBJ `o`/`g` groups) so you can **uncheck stray geometry** — ground
+planes, backdrops, lights — and only the checked parts are built (the viewport
+exports exactly what you see). It drives the same `td5_car_import.py` underneath.
+(three.js is vendored into `car_studio/vendor/` on first run — needs internet
+once, offline after.) The CLI below is the scripting equivalent.
 
 **Requirements:** Python with `numpy` + `pillow` (`pip install numpy pillow`).
 

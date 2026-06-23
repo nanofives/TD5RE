@@ -44,6 +44,12 @@
                    font-weight:700; width:100%; padding:9px; margin-top:4px; }
   .filebtn { display:block; width:100%; text-align:center; margin:3px 0; }
   .hint { color:var(--muted); font-size:11px; margin:3px 0 8px; }
+  .hint code { background:#11131a; border:1px solid var(--edge); border-radius:3px; padding:0 3px; }
+  .partrow { display:flex; align-items:center; gap:7px; padding:2px 0; font-size:12px; }
+  .partrow input { flex:0 0 auto; }
+  .partrow .pn { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .partrow .pt { color:var(--muted); font-size:10.5px; }
+  .partrow.off .pn { color:var(--muted); text-decoration:line-through; }
   .fmeta { margin:1px 0 7px; }
   .fmeta .eff { color:#9aa6b8; font-size:11px; }
   .fmeta .eff b { color:#c7d2e0; font-weight:600; }
@@ -94,6 +100,16 @@
       <label class="row"><span>Scale</span><input type="text" id="scale" value="auto"></label>
       <label class="row"><span>Flip texture V</span><input type="checkbox" id="flipv"></label>
       <label class="row"><span>Show wheels</span><input type="checkbox" id="showWheels" checked></label>
+      <label class="row"><span>Front marker</span><input type="checkbox" id="showFront" checked></label>
+    </div></details>
+
+    <details class="grp" open id="partsGrp" style="display:none"><summary>1b · Parts / layers</summary><div class="body">
+      <div class="hint">uncheck stray geometry (ground, backdrop, lights…) — only checked parts are built.
+        OBJ <code>o</code>/<code>g</code> groups &amp; glTF nodes appear here.</div>
+      <div style="margin:2px 0 6px"><button type="button" id="partsAll">all</button>
+        <button type="button" id="partsNone">none</button>
+        <button type="button" id="partsBiggest">biggest only</button></div>
+      <div id="parts"></div>
     </div></details>
 
     <details class="grp" open><summary>2 · Identity</summary><div class="body">

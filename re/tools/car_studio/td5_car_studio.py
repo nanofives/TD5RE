@@ -40,7 +40,8 @@ import td5_car_physics_ref as physics_ref  # noqa: E402  (fleet hints/ranges/pre
 
 THREE_VER = "0.160.0"
 CDN = f"https://unpkg.com/three@{THREE_VER}"
-ENTRY_ADDONS = ["loaders/GLTFLoader.js", "loaders/OBJLoader.js", "controls/OrbitControls.js"]
+ENTRY_ADDONS = ["loaders/GLTFLoader.js", "loaders/OBJLoader.js", "controls/OrbitControls.js",
+                "exporters/GLTFExporter.js"]
 
 # Filled from CLI in main().
 CARS_DIR = "re/assets/cars"
@@ -60,7 +61,8 @@ def ensure_vendor(revendor=False):
     global USE_LOCAL_VENDOR
     three_path = os.path.join(VENDOR_DIR, "three.module.js")
     jsm_dir = os.path.join(VENDOR_DIR, "jsm")
-    if not revendor and os.path.isfile(three_path) and os.path.isdir(jsm_dir):
+    have_addons = all(os.path.isfile(os.path.join(jsm_dir, a)) for a in ENTRY_ADDONS)
+    if not revendor and os.path.isfile(three_path) and have_addons:
         USE_LOCAL_VENDOR = True
         return True
     try:

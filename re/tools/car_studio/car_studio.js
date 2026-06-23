@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
 const TARGET_LENGTH = 1500;            // must match importer TARGET_LENGTH
 const $ = (id) => document.getElementById(id);
@@ -52,7 +53,8 @@ let modelName = '';
 let skinTexture = null;      // applied to preview materials
 let skinDataURL = null;      // sent to build
 let currentCarparam = null;  // donor carparam.json (edited in place)
-let opts = { forward: '-z', up: 'y', scale: 'auto', flipv: false, showWheels: true };
+let parts = [];              // [{name, mesh, tris}] toggleable sub-meshes (glTF nodes / OBJ groups)
+let opts = { forward: '-z', up: 'y', scale: 'auto', flipv: false, showWheels: true, showFront: true };
 
 // ---- transform (mirrors importer _axis_remap + centre + scale) -------------
 function basisMatrix(up, forward) {
@@ -66,19 +68,28 @@ function basisMatrix(up, forward) {
   return m;
 }
 
+// Bounding box over VISIBLE meshes only, so excluding parts re-fits the preview
+// exactly the way the build will (GLTFExporter onlyVisible -> importer re-fits).
+function visibleBox(root) {
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3(), tmp = new THREE.Box3();
+  root.traverse((o) => { if (o.isMesh && o.visible && o.geometry) { tmp.setFromObject(o); box.union(tmp); } });
+  return box;
+}
+
 function applyTransform() {
   modelRoot.clear();
-  if (!loadedObject) { updateWheels(); return; }
+  if (!loadedObject) { updateWheels(); updateFrontMarker(0); return; }
   const B = basisMatrix(opts.up, opts.forward);
   const holder = new THREE.Group();
-  loadedObject.matrixAutoUpdate = false;
-  loadedObject.matrix.copy(B);
-  holder.add(loadedObject);
+  holder.matrixAutoUpdate = false;
+  holder.matrix.copy(B);                 // orient on the holder; loadedObject stays
+  holder.add(loadedObject);              // native so GLTFExporter ships raw geometry
   holder.updateMatrixWorld(true);
 
-  const box = new THREE.Box3().setFromObject(holder);
+  const box = visibleBox(holder);
   const size = new THREE.Vector3(), centre = new THREE.Vector3();
-  box.getSize(size); box.getCenter(centre);
+  if (box.isEmpty()) { size.set(1, 1, 1); centre.set(0, 0, 0); } else { box.getSize(size); box.getCenter(centre); }
   const length = Math.max(size.z, 1e-6);
   const s = (opts.scale === 'auto' || isNaN(parseFloat(opts.scale)))
             ? TARGET_LENGTH / length : parseFloat(opts.scale);
@@ -89,9 +100,11 @@ function applyTransform() {
   modelRoot.scale.setScalar(s);
   modelRoot.add(pivot);
 
-  $('modelInfo').innerHTML =
+  $('modelInfo').dataset.base =
     `<b>${modelName}</b> · ${Math.round(size.x*s)}×${Math.round(size.y*s)}×${Math.round(size.z*s)} (W×H×L) · ×${s.toFixed(3)}`;
   $('hudStats').innerHTML = `scale ×${s.toFixed(3)} · length ${Math.round(size.z*s)}u`;
+  updateModelStats();
+  updateFrontMarker(size.z * s / 2);
   applySkin();
   updateWheels();
 }
@@ -114,6 +127,82 @@ function updateWheels() {
     w.position.set(x, y, z);
     wheelGroup.add(w);
   }
+}
+
+// ---- front-of-car marker ---------------------------------------------------
+// In final game space +Z is the front (carparam front wheels sit at +Z); the
+// marker shows which way the car must face. Rotate the Forward control until the
+// nose points at it.
+const frontGroup = new THREE.Group(); scene.add(frontGroup);
+function makeLabelSprite(text, color) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = color; ctx.font = 'bold 42px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, 128, 36);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  spr.scale.set(420, 105, 1); return spr;
+}
+const frontCone = new THREE.Mesh(new THREE.ConeGeometry(70, 190, 4),
+  new THREE.MeshBasicMaterial({ color: 0x46c46a }));
+frontCone.rotation.x = Math.PI / 2;      // cone tip (+Y) -> +Z (front)
+const frontLabel = makeLabelSprite('FRONT', '#62e58c');
+frontGroup.add(frontCone, frontLabel);
+function updateFrontMarker(halfLen) {
+  frontGroup.visible = opts.showFront && !!loadedObject;
+  const z = (halfLen || 750) + 150;
+  frontCone.position.set(0, 0, z);
+  frontLabel.position.set(0, 240, z);
+}
+updateFrontMarker(750);
+
+// ---- parts / layers (toggle stray geometry; only visible parts are built) ---
+function collectParts() {
+  parts = [];
+  if (!loadedObject) return;
+  let i = 0;
+  loadedObject.traverse((o) => {
+    if (!o.isMesh) return;
+    const g = o.geometry; const pos = g && g.attributes && g.attributes.position;
+    const tris = Math.round((g && g.index ? g.index.count : (pos ? pos.count : 0)) / 3);
+    parts.push({ name: o.name || (o.parent && o.parent.name) || ('part ' + i), mesh: o, tris });
+    o.visible = true; i++;
+  });
+}
+function renderParts() {
+  const host = $('parts'); host.innerHTML = '';
+  $('partsGrp').style.display = parts.length > 1 ? '' : 'none';
+  for (const p of parts) {
+    const row = document.createElement('label'); row.className = 'partrow' + (p.mesh.visible ? '' : ' off');
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = p.mesh.visible;
+    const nm = document.createElement('span'); nm.className = 'pn'; nm.textContent = p.name; nm.title = p.name;
+    const tc = document.createElement('span'); tc.className = 'pt'; tc.textContent = p.tris + '▲';
+    cb.addEventListener('change', () => { p.mesh.visible = cb.checked; applyTransform(); renderParts(); });
+    row.append(cb, nm, tc); host.appendChild(row);
+  }
+}
+function setAllParts(on) { parts.forEach((p) => { p.mesh.visible = on; }); applyTransform(); renderParts(); }
+function keepBiggestPart() {
+  if (!parts.length) return;
+  let big = parts[0]; for (const p of parts) if (p.tris > big.tris) big = p;
+  parts.forEach((p) => { p.mesh.visible = (p === big); }); applyTransform(); renderParts();
+}
+function updateModelStats() {
+  const base = $('modelInfo').dataset.base || '';
+  if (!parts.length) { $('modelInfo').innerHTML = base || 'no model loaded'; return; }
+  const vis = parts.filter((p) => p.mesh.visible);
+  const tris = vis.reduce((a, p) => a + p.tris, 0);
+  $('modelInfo').innerHTML = `${base} · <b>${vis.length}/${parts.length}</b> parts · ${tris}▲`;
+}
+
+// ---- export only-visible geometry for the build (WYSIWYG) -------------------
+const gltfExporter = new GLTFExporter();
+function exportVisibleGLB() {
+  return new Promise((resolve, reject) => {
+    if (!loadedObject) { reject('no model'); return; }
+    gltfExporter.parse(loadedObject, (res) => resolve(res), (err) => reject(err),
+      { binary: true, onlyVisible: true });
+  });
 }
 
 // ---- skin ------------------------------------------------------------------
@@ -139,12 +228,13 @@ $('modelFile').addEventListener('change', (e) => {
   fr.onload = () => {
     modelBytes = fr.result; modelName = file.name;
     const ext = file.name.toLowerCase().split('.').pop();
+    const onLoaded = () => { collectParts(); applyTransform(); renderParts(); };
     try {
       if (ext === 'obj') {
         loadedObject = obj.parse(new TextDecoder().decode(fr.result));
-        applyTransform();
+        onLoaded();
       } else {
-        gltf.parse(fr.result, '', (g) => { loadedObject = g.scene; applyTransform(); },
+        gltf.parse(fr.result, '', (g) => { loadedObject = g.scene; onLoaded(); },
           (err) => setStatus('glTF parse error: ' + err, 'bad'));
       }
     } catch (err) { setStatus('model load error: ' + err, 'bad'); }
@@ -176,6 +266,10 @@ seg('segFwd', 'forward'); seg('segUp', 'up');
 $('scale').addEventListener('change', (e) => { opts.scale = e.target.value.trim() || 'auto'; applyTransform(); });
 $('flipv').addEventListener('change', (e) => { opts.flipv = e.target.checked; if (skinTexture) { skinTexture.flipY = opts.flipv; skinTexture.needsUpdate = true; } });
 $('showWheels').addEventListener('change', (e) => { opts.showWheels = e.target.checked; updateWheels(); });
+$('showFront').addEventListener('change', (e) => { opts.showFront = e.target.checked; frontGroup.visible = opts.showFront && !!loadedObject; });
+$('partsAll').addEventListener('click', () => setAllParts(true));
+$('partsNone').addEventListener('click', () => setAllParts(false));
+$('partsBiggest').addEventListener('click', keepBiggestPart);
 
 // ---- physics reference (effect hints + fleet ranges + presets) -------------
 let reference = null;        // /api/reference payload
@@ -367,14 +461,25 @@ function setStatus(msg, cls) { const s = $('status'); s.className = cls || ''; s
 
 $('buildBtn').addEventListener('click', async () => {
   if (!modelBytes) { setStatus('Load a model first.', 'warn'); return; }
+  if (parts.length && !parts.some((p) => p.mesh.visible)) { setStatus('All parts are unchecked — nothing to build.', 'warn'); return; }
   setStatus('Building…');
+  // Build only the VISIBLE parts (WYSIWYG): export the kept geometry to glb and
+  // send THAT, so excluded parts/layers never reach the importer. Fall back to
+  // the original model bytes if the exporter is unavailable.
+  let modelB64, mName;
+  try {
+    const glb = await exportVisibleGLB();
+    modelB64 = abToB64(glb); mName = 'studio_export.glb';
+  } catch (e) {
+    modelB64 = abToB64(modelBytes); mName = modelName;
+  }
   let carpic = null;
   if ($('useView').checked) { try { carpic = renderer.domElement.toDataURL('image/png'); } catch (e) {} }
   const payload = {
     name: $('name').value, short: $('short').value || $('name').value,
     code: $('code').value.trim(), donor: $('donor').value,
     scale: opts.scale, forward: opts.forward, up: opts.up, flip_v: opts.flipv,
-    model_name: modelName, model_b64: abToB64(modelBytes),
+    model_name: mName, model_b64: modelB64,
     skin_b64: skinDataURL, carpic_b64: carpic, carparam: currentCarparam,
   };
   try {
