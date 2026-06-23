@@ -291,7 +291,13 @@ $('modelFile').addEventListener('change', (e) => {
               setStatus(`No Blender, so no mesh from the .blend — but extracted ${res.textures.length} packed `
                 + `texture(s) and applied the largest (${t0.w}×${t0.h}) as the skin. Load the FBX/OBJ for the geometry.`, 'warn');
             } else {
-              setStatus('.blend: ' + (res.error || 'nothing recoverable — its textures are external (not packed), or it is zstd-compressed.'), 'bad');
+              const noTex = Array.isArray(res.textures);   // carve ran but found nothing embedded
+              setStatus('.blend: ' + (noTex
+                ? 'no PACKED textures found — this .blend references its textures as EXTERNAL files, '
+                  + 'so nothing is embedded to extract. Use the loose .png/.jpg from the download '
+                  + '(multi-select them with the FBX/OBJ). '
+                : '') + 'No mesh either — load the FBX/OBJ for the geometry'
+                + (res.error ? ' (' + res.error.split('.')[0] + ' for .blend geometry).' : '.'), 'bad');
             }
           }).catch((e) => setStatus('.blend request failed: ' + e, 'bad'));
       } else {
