@@ -37,7 +37,9 @@ scene.add(wheelGroup);
 
 function resize() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
-  renderer.setSize(w, h, false);
+  renderer.setSize(w, h);   // updateStyle=true: pin canvas CSS to w×h so the
+                            // drawing buffer (×devicePixelRatio) can't overflow
+                            // the wrap and cover the side panel on HiDPI screens.
   camera.aspect = w / h; camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize); resize();

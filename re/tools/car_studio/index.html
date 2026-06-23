@@ -12,13 +12,14 @@
   html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
               font:13px/1.45 system-ui,Segoe UI,Arial,sans-serif; }
   #app { display:flex; height:100vh; }
-  #view { flex:1; position:relative; min-width:0; }
-  #canvasWrap { position:absolute; inset:0; }
+  #view { flex:1 1 auto; position:relative; min-width:0; overflow:hidden; }
+  #canvasWrap { position:absolute; inset:0; overflow:hidden; }
+  #canvasWrap canvas { display:block; }
   #hud { position:absolute; left:10px; top:8px; color:var(--muted); font-size:12px;
          pointer-events:none; text-shadow:0 1px 2px #000; }
   #hud b { color:var(--fg); }
-  #panel { width:340px; background:var(--panel); border-left:1px solid var(--edge);
-           overflow-y:auto; padding:12px 14px 40px; }
+  #panel { flex:0 0 340px; width:340px; background:var(--panel); border-left:1px solid var(--edge);
+           overflow-y:auto; padding:12px 14px 40px; z-index:1; }
   h1 { font-size:15px; margin:2px 0 10px; letter-spacing:.3px; }
   h1 small { color:var(--muted); font-weight:400; font-size:11px; }
   .grp { border:1px solid var(--edge); border-radius:7px; margin:0 0 10px; }
