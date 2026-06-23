@@ -101,6 +101,17 @@ int  td5_ai_traffic_dynamic_parked(int slot);
 /* Render/audio fade for `slot`: 0 = hidden/parked, 255 = fully visible.
  * Always 255 for racer slots or when dynamic traffic is off. */
 int  td5_ai_traffic_get_draw_alpha(int slot);
+/* [PER-VIEWPORT TRAFFIC] 1 when split-screen time-trial per-viewport traffic is
+ * active this race (each viewport has its own independent traffic partition). */
+int  td5_ai_traffic_per_viewport_active(void);
+/* Viewport that OWNS traffic `slot` (0..viewport_count-1); -1 = shared/no-gating
+ * (per-viewport off, or a racer slot). Render uses this to draw each viewport
+ * only its own traffic. */
+int  td5_ai_traffic_slot_owner_vp(int slot);
+/* 1 when a collision between `slot_a` and `slot_b` must be SUPPRESSED for
+ * per-viewport isolation (a traffic car only touches its own viewport's player,
+ * and cross-partition traffic-traffic pairs never collide). 0 when per-vp off. */
+int  td5_ai_traffic_pair_blocked(int slot_a, int slot_b);
 /* Once-per-sim-tick driver (called from td5_ai_pre_tick). */
 void td5_ai_traffic_dynamic_tick(void);
 /* Race-start seeding (called from td5_ai_init_traffic_actors). */
@@ -135,6 +146,9 @@ int  td5_ai_is_encounter_active(int slot);
  * td5_ai.c. */
 /* 1 when `slot` is a cop currently chasing (or pulling over) a racer. */
 int  td5_ai_cop_is_chasing(int slot);
+/* [MP COP CHASE 2026-06-22] Arm a racer slot as an AI-driven cop (is_ai=0 =
+ * human cop, no-op). The chase driver takes the slot over each tick. */
+void td5_ai_cop_chase_setup(int cop_slot, int is_ai);
 /* Steady strobe intensity (0..0x1000) for the cop-light glow; 0 if not chasing. */
 int  td5_ai_cop_glow_intensity(int slot);
 /* 1 when `slot` (racer or traffic/cop) is in the broken-down/parked state. */

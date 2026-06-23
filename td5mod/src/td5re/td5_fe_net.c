@@ -1973,6 +1973,9 @@ void Screen_NetworkLobby(void) {
                         cfg.paint_index[slot] = p;
                     }
                 }
+                /* [MP GAME MODES 2026-06-22] Replicate the host's chosen game
+                 * mode + per-mode options so every peer boots the same mode. */
+                cfg.mode_config = g_td5.mp_mode_config;
                 frontend_net_send(4, &cfg, (int)sizeof(cfg));
                 TD5_LOG_I(LOG_TAG,
                           "NetworkLobby: DXPSTART config seed=0x%08X track=%d dir=%d",
@@ -2058,3 +2061,8 @@ void Screen_SessionLocked(void) {
         break;
     }
 }
+
+/* [MP GAME MODES 2026-06-22] Screen_MpModeVote / Screen_MpModeConfig /
+ * Screen_CupWinners (+ their render fns) are all implemented in td5_fe_race.c —
+ * they reuse that file's local split-screen helpers (mp_simul_player_nav,
+ * fe_race_draw_screen_title, mp_pos_small_centered, k_mp_player_colors, ...). */

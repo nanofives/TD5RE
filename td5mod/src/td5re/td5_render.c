@@ -627,6 +627,20 @@ void td5_render_set_actor_draw_alpha(int alpha)
     s_actor_draw_alpha = alpha;
 }
 
+/* [MP GAME MODES: TIME TRIAL 2026-06-22] Non-owner players render translucent
+ * ("ghost") so the player pass-through reads visually. Knob TD5RE_TT_GHOST=0
+ * keeps opponents fully opaque. */
+#define TT_GHOST_ALPHA 130
+static int tt_ghost_enabled(void)
+{
+    static int knob = -1;
+    if (knob < 0) {
+        const char *e = getenv("TD5RE_TT_GHOST");
+        knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return knob;
+}
+
 /* Per-slot "this is a ported TD6 car" flag. TD6 cars have a grayscale body and
  * no meaningful env-map reflection mesh (envmodel.dat is unused), so the
  * TD5-faithful chrome/projection reflection overlay must NOT run on them: in a
@@ -3472,6 +3486,11 @@ void td5_render_actors_for_view(int view_index)
                 TD5_Actor *sa = td5_game_get_actor(slot);
                 if (!sa || !td5_render_get_vehicle_mesh(slot))
                     continue;
+                /* [PER-VIEWPORT TRAFFIC] in split-screen time trial each viewport
+                 * renders ONLY its own traffic partition (owner == view_index);
+                 * -1 (shared / racer slot) renders in every view as before. */
+                { int tov = td5_ai_traffic_slot_owner_vp(slot);
+                  if (tov >= 0 && tov != view_index) continue; }
                 /* [dynamic-traffic] despawned traffic casts no shadow; a fading
                  * car's shadow fades with it (alpha consumed inside the shadow
                  * draw helpers via s_actor_draw_alpha). */
@@ -3534,6 +3553,11 @@ void td5_render_actors_for_view(int view_index)
             if (!actor || !mesh)
                 continue;
 
+            /* [PER-VIEWPORT TRAFFIC] each viewport draws only its own traffic
+             * partition (owner == view_index); -1 = shared/racer, drawn in all. */
+            { int tov = td5_ai_traffic_slot_owner_vp(slot);
+              if (tov >= 0 && tov != view_index) continue; }
+
             /* [dynamic-traffic] despawned traffic is invisible; a spawning /
              * despawning car fades (alpha applied around the mesh dispatch
              * below — 255 for every racer and for dynamic-off, so the classic
@@ -3573,6 +3597,17 @@ void td5_render_actors_for_view(int view_index)
                 int ss = td5_game_get_slot_state(slot);
                 if (ss == 3)
                     continue;
+            }
+
+            /* [MP GAME MODES: TIME TRIAL] Render the OTHER HUMAN players as
+             * translucent ghosts (you pass through them). The viewport's own car,
+             * the AI race opponents, and traffic all stay at their normal alpha —
+             * only humans (slots 0..num_human_players-1) ghost. */
+            if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL &&
+                slot < g_td5.num_human_players && slot != camera_target_slot &&
+                tt_ghost_enabled()) {
+                actor_fade = (actor_fade * TT_GHOST_ALPHA) / 255;
+                if (actor_fade < 1) actor_fade = 1;
             }
 
             /* [#R13 ghostdiag 2026-06-19] Pin which slots actually render (the

@@ -1597,10 +1597,16 @@ int td5_game_init_race_session(void) {
                 g_td5.traffic_volume = TD5_TRAFFIC_VOLUME_COUNT - 1;
             g_td5.traffic_enabled = (g_td5.traffic_volume > 0) ? 1 : 0;
             g_td5.special_encounter_enabled = ncfg_l.cops ? 1 : 0;
+            /* [MP GAME MODES 2026-06-22] Adopt the host's replicated game mode +
+             * per-mode options so every peer runs the identical mode. Behaviour
+             * gating off this lands per work-package (TT/cup/cop-chase); here we
+             * only propagate the replicated choice. */
+            g_td5.mp_mode_config = ncfg_l.mode_config;
             TD5_LOG_I(LOG_TAG,
                       "InitRace: network session — real race, traffic_vol=%d cops=%d "
-                      "(replicated from host)",
-                      g_td5.traffic_volume, g_td5.special_encounter_enabled);
+                      "mp_mode=%d (replicated from host)",
+                      g_td5.traffic_volume, g_td5.special_encounter_enabled,
+                      g_td5.mp_mode_config.mode);
         } else {
             /* No replicated config yet — keep traffic/cops off (safe default). */
             g_td5.traffic_enabled = 0;
@@ -1625,6 +1631,49 @@ int td5_game_init_race_session(void) {
                       "InitRace: <=6 split — traffic + special-encounter kept (PORT deviation)");
         }
     }
+
+#ifndef TD5RE_RELEASE
+    /* [MP GAME MODES test hook 2026-06-22] Force the MP game mode for solo
+     * drive-testing without the local split-screen vote screen:
+     *   TD5RE_MP_MODE_FORCE=1 time trial, 2 cup, 3 cop chase (0 = race).
+     * Dev build only. Note: human-vs-human effects (e.g. TT pass-through) need
+     * >=2 human slots; in a solo race only slot 0 is human, so the force lets
+     * you exercise the code path + logs even when the visible effect needs MP. */
+    {
+        const char *mf = getenv("TD5RE_MP_MODE_FORCE");
+        if (mf && mf[0]) {
+            int m = atoi(mf);
+            if (m >= 0 && m < TD5_MP_MODE_COUNT) {
+                g_td5.mp_mode_config.mode = m;
+                TD5_LOG_I(LOG_TAG, "InitRace: MP mode FORCED to %d (TD5RE_MP_MODE_FORCE)", m);
+            }
+        }
+    }
+#endif
+
+    /* [MP GAME MODES: COP CHASE 2026-06-22] The MP cop-chase mode reuses the
+     * wanted-mode machinery (a player-cop rams the other racers — the suspects —
+     * to deplete their damage bar). Turn wanted mode on; the effective cop slot
+     * comes from mp_mode_config.cop_slot (see td5_game_cop_chase_cop_slot). Local
+     * split-screen only for now — the net path above leaves wanted mode off. */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
+        g_td5.wanted_mode_enabled = 1;
+        /* Optional AI-driven cop: mark the cop slot so the AI chase driver takes
+         * it over (faster, road-safe, targets the nearest suspect). */
+        td5_ai_cop_chase_setup(td5_game_cop_chase_cop_slot(),
+                               g_td5.mp_mode_config.cop_is_ai);
+        TD5_LOG_I(LOG_TAG, "InitRace: MP COP CHASE active — cop slot=%d ai=%d win=%d head_start=%d",
+                  g_td5.mp_mode_config.cop_slot, g_td5.mp_mode_config.cop_is_ai,
+                  g_td5.mp_mode_config.cop_win_condition,
+                  g_td5.mp_mode_config.suspect_head_start);
+    }
+
+    /* [MP TIME TRIAL 2026-06-22] TT has NO AI opponents — only the human players
+     * (frontend_init_race_schedule forces num_ai_opponents=0, so the AI-fill below
+     * disables every non-human slot). time_trial_enabled stays 0 so the solo
+     * 2-slot limit doesn't apply (we keep all the human slots, not just 2). */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL && !g_td5.network_active)
+        g_td5.time_trial_enabled = 0;
 
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
      * @ 0x004B0FA8). This is the runtime gate read by both the HUD timer
@@ -2835,6 +2884,14 @@ int td5_game_init_race_session(void) {
                  * or the value captured when this replay was recorded (so playback
                  * spawns on the recorded grid). */
                 int raw = start_span + span_offsets[effective_slot] + effective_start_span_offset;
+                /* [MP COP CHASE 2026-06-22] The cop spawns BEHIND the suspects by
+                 * suspect_head_start spans, so the suspects (the other players)
+                 * start together a little further ahead. */
+                if (g_td5.wanted_mode_enabled &&
+                    g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
+                    slot == td5_game_cop_chase_cop_slot()) {
+                    raw -= g_td5.mp_mode_config.suspect_head_start;
+                }
                 span_index = (int)(int16_t)(raw & 0xFFFF);
             } else {
                 span_index = 1;
@@ -6217,6 +6274,44 @@ void td5_game_release_race_resources(void) {
  *   Phase 2: Cooldown accumulator; when > TD5_RACE_END_DWELL, build results
  * ======================================================================== */
 
+/* [MP COP CHASE win conditions 2026-06-22] Count active (non-disabled) suspects
+ * and how many are busted (damage bar depleted). */
+static int mp_cop_chase_count_suspects(int *busted_out) {
+    int cop = td5_game_cop_chase_cop_slot();
+    int active = 0, busted = 0, s;
+    if (cop < 0) { if (busted_out) *busted_out = 0; return 0; }
+    for (s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
+        if (!td5_game_cop_chase_is_suspect(s)) continue;
+        if (s_slot_state[s].state == 3) continue;        /* disabled slot */
+        active++;
+        if (g_wanted_damage_state[s] <= 0) busted++;      /* arrested */
+    }
+    if (busted_out) *busted_out = busted;
+    return active;
+}
+
+/* Returns 1 when the cop-chase win condition ends the race early. BUST_ALL: cop
+ * wins once every suspect is arrested. SUDDEN_DEATH: cop wins on the first
+ * arrest. MOST_BUSTS: no early end — the race runs to its natural finish and the
+ * arrest tally decides. */
+static int mp_cop_chase_resolved(void) {
+    int active, busted = 0, wc;
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE) return 0;
+    if (!g_td5.wanted_mode_enabled) return 0;
+    active = mp_cop_chase_count_suspects(&busted);
+    if (active <= 0) return 0;
+    wc = g_td5.mp_mode_config.cop_win_condition;
+    if (wc == TD5_COP_WIN_SUDDEN_DEATH && busted >= 1) {
+        TD5_LOG_I(LOG_TAG, "Cop chase: SUDDEN DEATH — first arrest, cop wins");
+        return 1;
+    }
+    if (wc == TD5_COP_WIN_BUST_ALL && busted >= active) {
+        TD5_LOG_I(LOG_TAG, "Cop chase: BUST ALL — all %d suspects arrested, cop wins", active);
+        return 1;
+    }
+    return 0;
+}
+
 static int check_race_completion(uint32_t sim_delta) {
     int i;
 
@@ -6228,8 +6323,19 @@ static int check_race_completion(uint32_t sim_delta) {
             TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", TD5_RACE_END_DWELL);
             s_post_finish_cooldown = 0;
             build_results_table();
+            td5_game_mp_cup_award();   /* [MP CUP] tally this race's points */
             return 1;
         }
+        return 0;
+    }
+
+    /* [MP COP CHASE] Win condition can end the race early (bust-all / sudden
+     * death). Mirrors the all-finished latch: start the post-finish dwell, then
+     * phase 2 builds the results next tick. */
+    if (mp_cop_chase_resolved()) {
+        s_post_finish_cooldown = 1;
+        s_race_end_timer_start = td5_plat_time_ms();
+        TD5_LOG_I(LOG_TAG, "Cop chase: win condition met -> race end");
         return 0;
     }
 
@@ -7948,7 +8054,149 @@ int td5_game_get_traffic_variant(int traffic_index) {
  * Orig's tracked-vehicle audio fires when slot_iter == 0, so the siren
  * source is the player's actor (slot 0). The port previously returned 1,
  * routing the siren onto an opponent AI. */
-int td5_game_get_cop_actor_index(void) { return g_td5.wanted_mode_enabled ? 0 : -1; }
+/* ========================================================================
+ * MP CUP (2026-06-22) — self-contained best-of-X series for the "Cup" game
+ * mode. Independent of the SP championship (s_cup_schedules / s_race_within_
+ * series) to avoid entangling that state machine. Drives a track list, per-
+ * position points, optional teams, and routes to the winners/podium screen.
+ * ======================================================================== */
+static int s_mpcup_active     = 0;
+static int s_mpcup_race_count = 0;
+static int s_mpcup_current    = 0;   /* 0-based index of the race in progress */
+static int s_mpcup_awarded    = 0;   /* points already tallied for this race  */
+static int s_mpcup_team_mode  = 0;
+static int s_mpcup_tracks[TD5_CUP_MAX_RACES];
+static int s_mpcup_points[TD5_MAX_RACER_SLOTS];
+static int s_mpcup_team[TD5_MAX_RACER_SLOTS];
+
+/* Points by finishing position (0-based). Matches the original cup ladder
+ * {15,12,10,5,4,3} @ 0x00463a18. */
+static const int k_mpcup_points[6] = { 15, 12, 10, 5, 4, 3 };
+
+static void mpcup_build_track_list(void) {
+    int i, n = g_td5.mp_mode_config.cup_race_count, have_cfg = 0;
+    if (n < 1) n = 3;
+    if (n > TD5_CUP_MAX_RACES) n = TD5_CUP_MAX_RACES;
+    s_mpcup_race_count = n;
+    for (i = 0; i < n; i++)
+        if (g_td5.mp_mode_config.cup_track_indices[i] > 0) { have_cfg = 1; break; }
+    for (i = 0; i < n; i++) {
+        /* Host-configured list when present, else a rotation from the picked
+         * track. Keep on the racing-track range (0..18); skip the drag strip. */
+        int t = have_cfg ? g_td5.mp_mode_config.cup_track_indices[i]
+                         : (g_td5.track_index + i);
+        if (t < 0) t = 0;
+        t %= 19;
+        s_mpcup_tracks[i] = t;
+    }
+}
+
+void td5_game_mp_cup_begin(void) {
+    int i;
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_CUP) { s_mpcup_active = 0; return; }
+    mpcup_build_track_list();
+    s_mpcup_current   = 0;
+    s_mpcup_awarded   = 0;
+    s_mpcup_team_mode = g_td5.mp_mode_config.cup_team_mode;
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        s_mpcup_points[i] = 0;
+        s_mpcup_team[i] = (i < TD5_NET_MAX_PLAYERS)
+                          ? g_td5.mp_mode_config.team_of_slot[i] : 0;
+    }
+    s_mpcup_active = 1;
+    TD5_LOG_I(LOG_TAG, "MP CUP begin: races=%d team_mode=%d track[0]=%d",
+              s_mpcup_race_count, s_mpcup_team_mode, s_mpcup_tracks[0]);
+}
+
+int  td5_game_mp_cup_active(void)     { return s_mpcup_active; }
+int  td5_game_mp_cup_current(void)    { return s_mpcup_current; }
+int  td5_game_mp_cup_race_count(void) { return s_mpcup_race_count; }
+int  td5_game_mp_cup_team_mode(void)  { return s_mpcup_team_mode; }
+int  td5_game_mp_cup_has_next(void) {
+    return s_mpcup_active && (s_mpcup_current + 1 < s_mpcup_race_count);
+}
+int  td5_game_mp_cup_points(int slot) {
+    return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_mpcup_points[slot] : 0;
+}
+int  td5_game_mp_cup_team(int slot) {
+    return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_mpcup_team[slot] : 0;
+}
+int  td5_game_mp_cup_track(void) {
+    if (!s_mpcup_active) return -1;
+    if (s_mpcup_current < 0 || s_mpcup_current >= s_mpcup_race_count) return -1;
+    return s_mpcup_tracks[s_mpcup_current];
+}
+
+/* Tally points by finishing position for the race that just completed. */
+void td5_game_mp_cup_award(void) {
+    int slot;
+    if (!s_mpcup_active || s_mpcup_awarded) return;
+    for (slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
+        int pos;
+        if (s_slot_state[slot].state == 3) continue;   /* inactive slot */
+        pos = td5_game_get_finish_position(slot);       /* 0-based; -1 if DNF */
+        if (pos < 0 || pos >= 6) pos = 5;               /* DNF -> last place */
+        s_mpcup_points[slot] += k_mpcup_points[pos];
+    }
+    s_mpcup_awarded = 1;
+    TD5_LOG_I(LOG_TAG, "MP CUP race %d/%d points tallied",
+              s_mpcup_current + 1, s_mpcup_race_count);
+}
+
+void td5_game_mp_cup_advance(void) {
+    if (!s_mpcup_active) return;
+    if (s_mpcup_current + 1 < s_mpcup_race_count) {
+        s_mpcup_current++;
+        s_mpcup_awarded = 0;
+        TD5_LOG_I(LOG_TAG, "MP CUP advance -> race %d/%d track=%d",
+                  s_mpcup_current + 1, s_mpcup_race_count, td5_game_mp_cup_track());
+    }
+}
+
+void td5_game_mp_cup_end(void) { s_mpcup_active = 0; }
+
+/* [MP GAME MODES: TRAFFIC FAIRNESS 2026-06-22] In local split-screen MP the
+ * traffic stream is shared across viewports. To keep it fair ("everyone sees the
+ * same cars at the same time"), a player's collision must NOT permanently wreck
+ * background traffic — a totaled car would become a static obstacle for every
+ * viewport even though only one player caused it. With this on, plain traffic
+ * takes the hit (free-slide) and then recovers to its deterministic lane; cops
+ * and pursued racers are unaffected. Knob TD5RE_MP_TRAFFIC_FAIR=0 disables.
+ * Off in single-player (byte-faithful). */
+int td5_game_mp_traffic_fair(void) {
+    static int knob = -1;
+    if (knob < 0) {
+        const char *e = getenv("TD5RE_MP_TRAFFIC_FAIR");
+        knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return knob && g_td5.split_screen_mode > 0 && g_td5.num_human_players >= 2;
+}
+
+/* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot for cop-chase /
+ * wanted mode. Single-player wanted (game_type 8) keeps the player (slot 0) as
+ * the cop ramming AI suspects; MP cop chase uses the host-configured cop_slot
+ * and makes every OTHER racer a suspect. Returns -1 when not a cop chase.
+ * (Returning 0 for SP keeps every existing call byte-identical.) */
+int td5_game_cop_chase_cop_slot(void) {
+    if (!g_td5.wanted_mode_enabled) return -1;
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) {
+        int s = g_td5.mp_mode_config.cop_slot;
+        if (s < 0 || s >= TD5_MAX_RACER_SLOTS) s = 0;   /* must be a racer slot */
+        return s;
+    }
+    return 0;
+}
+
+/* True when `slot` is a racer SUSPECT (a non-cop racer) in a cop chase. */
+int td5_game_cop_chase_is_suspect(int slot) {
+    int cop = td5_game_cop_chase_cop_slot();
+    if (cop < 0) return 0;
+    return slot >= 0 && slot < TD5_MAX_RACER_SLOTS && slot != cop;
+}
+
+int td5_game_get_cop_actor_index(void) {
+    return g_td5.wanted_mode_enabled ? td5_game_cop_chase_cop_slot() : -1;
+}
 /* [CONFIRMED]: g_wantedModeEnabled @ 0x4AAF68 set at InitializeRaceSession */
 int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
 /* [COP-CHASE SIREN 2026-06-21] Expose pause-menu state to the audio layer so the
@@ -7979,7 +8227,11 @@ int32_t td5_game_get_wanted_target_tracker(void) {
  * tracked actor used by the cop-chase marker render gate. Orig .data-
  * init = 0 (player slot); no binary writers. */
 int td5_game_get_wanted_target_slot(void) {
-    return 0;
+    /* [MP COP CHASE] The "target slot" is the COP — the racer that must NOT be
+     * damaged (td5_ai_wanted_cop_hit gate) and who earns the ram/bust points.
+     * SP returns 0 (player-cop), identical to before. */
+    int cop = td5_game_cop_chase_cop_slot();
+    return cop < 0 ? 0 : cop;
 }
 
 void *td5_game_heap_alloc(size_t size) {

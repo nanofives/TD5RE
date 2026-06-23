@@ -170,6 +170,12 @@ typedef struct TD5_GlobalState {
     int  reverse_direction;
     int  dynamics_mode;  /* 0=arcade, 1=simulation */
 
+    /* [MP GAME MODES 2026-06-22] Live multiplayer mode + per-mode options,
+     * edited on the mode-vote/mode-config screens and applied at race init.
+     * In a net race this mirrors the host's choice (replicated via DXPSTART);
+     * in single-player it stays TD5_MP_MODE_RACE. See TD5_MpModeConfig. */
+    TD5_MpModeConfig mp_mode_config;
+
     /* Quick Race player setup (infra to later replace the Two-Player menu).
      * num_human_players + num_ai_opponents <= TD5_MAX_RACER_SLOTS (16).
      * [PORT ENHANCEMENT 2026-06] N-way split-screen: up to TD5_MAX_HUMAN_PLAYERS

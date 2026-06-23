@@ -1952,9 +1952,12 @@ static inline int32_t phys_top_speed_rating(TD5_Actor *actor) {
     int slot = (int)((const uint8_t *)actor)[0x375];   /* ACTOR_SLOT_INDEX */
     if (td5_ai_cop_is_chasing(slot)) return 0x7FFF;    /* effectively uncapped */
     int32_t rating = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
-    /* Slow the AI suspect(s) so a Cop Chase is winnable. Human slots (the player
-     * cop, 0..num_human_players-1) keep full speed; non-wanted modes byte-faithful. */
-    if (td5_game_is_wanted_mode() && slot >= g_td5.num_human_players)
+    /* Slow the SUSPECT(s) so a Cop Chase is winnable. The cop keeps full speed;
+     * every other racer (suspect) is debuffed. SP wanted (cop=slot 0) debuffs
+     * the AI slots 1..5 exactly as before; MP cop chase debuffs every non-cop
+     * racer (incl. human suspects, per "same debuff on the other players").
+     * Non-cop-chase races are byte-faithful (is_suspect returns 0). */
+    if (td5_game_cop_chase_is_suspect(slot))
         rating = (rating * copchase_ai_speed_pct()) / 100;
     return rating;
 }
@@ -5842,6 +5845,29 @@ static inline int32_t v2v_scale_pct(int32_t x, int32_t pct)
     return (int32_t)(((int64_t)x * pct) / 100);
 }
 
+/* [MP GAME MODES: TIME TRIAL 2026-06-22] In time trial every player races the
+ * clock and PASSES THROUGH the others (ghosts). True only for human-vs-human
+ * pairs, so car-vs-traffic and car-vs-wall still resolve normally and each
+ * viewport interacts with traffic on its own. Applied to BOTH V2V paths (the
+ * impulse resolver and the anti-tunnel depenetration). Knob
+ * TD5RE_TT_NO_COLLISION=0 restores solid player-vs-player contact. */
+static int tt_pair_passthrough(int slot_a, int slot_b)
+{
+    static int knob = -1;
+    if (knob < 0) {
+        const char *e = getenv("TD5RE_TT_NO_COLLISION");
+        knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    if (!knob) return 0;
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_TIME_TRIAL) return 0;
+    /* Both are HUMAN players (slots 0..num_human_players-1) — the same definition
+     * the ghost RENDER uses, so what you see (a ghost) and what you collide with
+     * agree. Don't key off g_race_slot_state here (not reliably set for local
+     * split-screen humans). AI opponents are NOT humans -> they still collide. */
+    return slot_a >= 0 && slot_a < g_td5.num_human_players &&
+           slot_b >= 0 && slot_b < g_td5.num_human_players;
+}
+
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
                                      int32_t heading_target, int32_t impactForce)
@@ -6230,10 +6256,18 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * [CONFIRMED]: both A-is-player and B-is-player paths call AwardWantedDamageScore
      * on the cop slot with impact magnitude. */
     if (td5_game_is_wanted_mode()) {
-        if (A->slot_index == 0 && B->slot_index >= 1 && B->slot_index < 6)
-            td5_ai_wanted_cop_hit(B->slot_index, impact_mag);
-        else if (B->slot_index == 0 && A->slot_index >= 1 && A->slot_index < 6)
-            td5_ai_wanted_cop_hit(A->slot_index, impact_mag);
+        /* [MP COP CHASE] Generalized from the SP "slot 0 is the cop" gate: a ram
+         * between the COP slot and any SUSPECT (non-cop racer) decrements that
+         * suspect's damage bar. SP (cop=0) reproduces the old slot-0-vs-1..5
+         * behaviour exactly. */
+        int cop = td5_game_cop_chase_cop_slot();
+        int sa = (int)A->slot_index, sb = (int)B->slot_index;
+        if (cop >= 0) {
+            if (sa == cop && td5_game_cop_chase_is_suspect(sb))
+                td5_ai_wanted_cop_hit(sb, impact_mag);
+            else if (sb == cop && td5_game_cop_chase_is_suspect(sa))
+                td5_ai_wanted_cop_hit(sa, impact_mag);
+        }
     }
 
     /* Traffic recovery escalation (> 50000 and traffic slot). [N-way 2026-06-04]
@@ -6347,10 +6381,22 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * player are never immobilised or smoked (handled downstream). Because we
          * are already inside the (NPC-lowered) heavy gate, no separate magnitude
          * test is needed — a fatal hit on traffic/cops always totals them. */
-        if (a_is_npc || td5_ai_actor_is_pursued(A->slot_index))
-            td5_ai_mark_actor_broken_down(A->slot_index);
-        if (b_is_npc || td5_ai_actor_is_pursued(B->slot_index))
-            td5_ai_mark_actor_broken_down(B->slot_index);
+        /* [MP TRAFFIC FAIRNESS 2026-06-22] In fair split-screen MP, don't
+         * PERMANENTLY total plain background traffic (keep the shared stream
+         * deterministic so every viewport sees the same cars — it free-slides
+         * then recovers). Cops and pursued racers still wreck normally. */
+        {
+            int fair = td5_game_mp_traffic_fair();
+            int sa = (int)A->slot_index, sb = (int)B->slot_index;
+            int plain_a = (sa >= g_traffic_slot_base) &&
+                          !td5_ai_actor_is_pursued(sa) && !td5_ai_cop_is_chasing(sa);
+            int plain_b = (sb >= g_traffic_slot_base) &&
+                          !td5_ai_actor_is_pursued(sb) && !td5_ai_cop_is_chasing(sb);
+            if ((a_is_npc || td5_ai_actor_is_pursued(sa)) && !(fair && plain_a))
+                td5_ai_mark_actor_broken_down(sa);
+            if ((b_is_npc || td5_ai_actor_is_pursued(sb)) && !(fair && plain_b))
+                td5_ai_mark_actor_broken_down(sb);
+        }
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d",
                   A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain);
     }
@@ -6972,7 +7018,16 @@ void td5_physics_resolve_vehicle_contacts(void)
                     }
                 }
 
-                if (a_scripted || b_scripted) {
+                /* [TIME TRIAL] human-vs-human pairs pass THROUGH each other
+                 * (ghosts) — skip the V2V impulse entirely. This is the real V2V
+                 * dispatch (the broadphase), not resolve_collision_pair.
+                 * [PER-VIEWPORT TRAFFIC] also skip pairs that belong to different
+                 * viewports' traffic partitions (a player only touches its own
+                 * traffic; cross-partition traffic twins never collide). */
+                if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index) ||
+                    td5_ai_traffic_pair_blocked((int)a->slot_index, (int)b->slot_index)) {
+                    /* no contact */
+                } else if (a_scripted || b_scripted) {
                     collision_detect_simple(a, b);
                 } else {
                     collision_detect_full(a, b, i, j);
@@ -7035,6 +7090,12 @@ void td5_physics_resolve_vehicle_contacts(void)
                     int32_t ddz = az - bz; if (ddz < 0) ddz = -ddz;
                     if (ddx > r || ddz > r) continue;
 
+                    /* [TIME TRIAL] don't separate two players — they ghost.
+                     * [PER-VIEWPORT TRAFFIC] don't separate cross-partition traffic
+                     * twins or a non-owner player from another viewport's traffic. */
+                    if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index) ||
+                        td5_ai_traffic_pair_blocked((int)a->slot_index, (int)b->slot_index)) continue;
+
                     int32_t pen = v2v_depenetrate_pair(a, b);
                     if (pen > 0) {
                         moved[i] = moved[j] = 1;
@@ -7083,15 +7144,28 @@ void td5_physics_resolve_vehicle_contacts(void)
      * overlap. resolve_collision_pair runs the same OBB test + impulse as the
      * faithful path, so the response is identical — just no longer skipped. */
     if (g_td5.ini.traffic_player_collide && total > g_traffic_slot_base) {
-        TD5_Actor *player = (TD5_Actor *)g_actor_table_base;   /* slot 0 */
-        if (player->car_definition_ptr) {
-            int32_t prad = (int32_t)CDEF_S(player, CDEF_COLLISION_RADIUS);
-            int tmax = (total < TD5_MAX_TOTAL_ACTORS) ? total : TD5_MAX_TOTAL_ACTORS;
+        int tmax = (total < TD5_MAX_TOTAL_ACTORS) ? total : TD5_MAX_TOTAL_ACTORS;
+        /* [PER-VIEWPORT TRAFFIC] When active, run this supplement for EVERY human
+         * viewport's player against ITS OWN traffic partition (so each player can
+         * hit only its own traffic). Otherwise it stays the original slot-0 path. */
+        int per_vp = td5_ai_traffic_per_viewport_active();
+        int vc = per_vp ? g_td5.viewport_count : 1;
+        int vp;
+        if (vc > TD5_MAX_VIEWPORTS) vc = TD5_MAX_VIEWPORTS;
+        for (vp = 0; vp < vc; vp++) {
+            int pslot = per_vp ? td5_game_get_player_slot(vp) : 0;
+            TD5_Actor *player;
+            int32_t prad;
+            if (pslot < 0 || pslot >= g_traffic_slot_base) continue;
+            player = (TD5_Actor *)(g_actor_table_base + (size_t)pslot * TD5_ACTOR_STRIDE);
+            if (!player->car_definition_ptr) continue;
+            prad = (int32_t)CDEF_S(player, CDEF_COLLISION_RADIUS);
             for (int t = g_traffic_slot_base; t < tmax; ++t) {
                 TD5_Actor *tr =
                     (TD5_Actor *)(g_actor_table_base + (size_t)t * TD5_ACTOR_STRIDE);
                 int32_t dxp, dzp, rr;
                 int64_t d2;
+                if (per_vp && td5_ai_traffic_slot_owner_vp(t) != vp) continue; /* own partition only */
                 if (!tr->car_definition_ptr) continue;
                 /* [2026-06-12] Don't collide with INVISIBLE traffic. Dynamic
                  * traffic despawns by fading draw alpha to 0 (the renderer then
@@ -7117,9 +7191,9 @@ void td5_physics_resolve_vehicle_contacts(void)
                  * or OBB orientation. Sphere only impulses when CLOSING, so this
                  * is a no-op once separated (won't fight the broadphase). */
                 TD5_LOG_I(LOG_TAG,
-                          "player_traffic_collide: traffic_slot=%d dist=%d rr=%d span_p=%d span_t=%d "
+                          "player_traffic_collide: player_slot=%d traffic_slot=%d dist=%d rr=%d span_p=%d span_t=%d "
                           "(world-overlap -> sphere collision)",
-                          t, (int)td5_isqrt((int32_t)(d2 > 0x7FFFFFFF ? 0x7FFFFFFF : d2)), rr,
+                          pslot, t, (int)td5_isqrt((int32_t)(d2 > 0x7FFFFFFF ? 0x7FFFFFFF : d2)), rr,
                           player->track_span_normalized, tr->track_span_normalized);
                 collision_detect_simple(player, tr);
             }
@@ -7136,6 +7210,9 @@ static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int id
 {
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
+
+    /* [TIME TRIAL] human-vs-human pairs pass through each other (ghost). */
+    if (tt_pair_passthrough((int)a->slot_index, (int)b->slot_index)) return;
 
     int a_scripted = (a->vehicle_mode != 0) ||
                      (a->wheel_contact_bitmask >= 0x0F);

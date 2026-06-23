@@ -213,6 +213,32 @@ int  td5_game_is_cinematic_race(void);
 int  td5_game_get_traffic_variant(int traffic_index);
 int  td5_game_get_cop_actor_index(void);
 int  td5_game_is_wanted_mode(void);
+/* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot (-1 if not a cop
+ * chase) + suspect test. SP wanted -> cop slot 0; MP cop chase -> configured
+ * cop_slot with every other racer a suspect. */
+int  td5_game_cop_chase_cop_slot(void);
+int  td5_game_cop_chase_is_suspect(int slot);
+
+/* [MP GAME MODES: CUP 2026-06-22] Self-contained best-of-X series orchestrator
+ * for the "Cup" mode. begin() arms the series (track list, zeroed standings,
+ * teams); award() tallies points by finish position after each race; advance()
+ * moves to the next race; track() is the current race's track index. */
+void td5_game_mp_cup_begin(void);
+void td5_game_mp_cup_award(void);
+void td5_game_mp_cup_advance(void);
+void td5_game_mp_cup_end(void);
+int  td5_game_mp_cup_active(void);
+int  td5_game_mp_cup_has_next(void);
+int  td5_game_mp_cup_current(void);
+int  td5_game_mp_cup_race_count(void);
+int  td5_game_mp_cup_points(int slot);
+int  td5_game_mp_cup_team(int slot);
+int  td5_game_mp_cup_team_mode(void);
+int  td5_game_mp_cup_track(void);
+
+/* [MP GAME MODES: TRAFFIC FAIRNESS 2026-06-22] 1 when local split-screen MP
+ * should keep shared traffic deterministic (no permanent player-caused wrecks). */
+int  td5_game_mp_traffic_fair(void);
 /* 1 while the in-race pause menu is open (audio layer reads this to suspend the
  * cop-chase siren refresh during pause so it re-arms on resume). */
 int  td5_game_is_pause_menu_active(void);

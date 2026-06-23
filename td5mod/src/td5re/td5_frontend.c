@@ -114,6 +114,11 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [32] */ Screen_DirectConnect,      /* S10 net-play UX */
     /* [33] */ Screen_NetNickname,        /* S10 net-play UX */
     /* [34] */ Screen_MpPosition,         /* MP split-screen position picker (#8) */
+    /* [35] */ Screen_MpModeVote,         /* MP game-mode vote (2026-06-22)       */
+    /* [36] */ Screen_MpModeConfig,       /* MP per-mode options (2026-06-22)     */
+    /* [37] */ Screen_CupWinners,         /* cup final standings/podium (2026-06-22) */
+    /* [38] */ Screen_MpCopRoles,         /* cop/suspect role pick (2026-06-22)      */
+    /* [39] */ Screen_MpTeamSelect,       /* cup team pick (2026-06-22)              */
 };
 
 /* ========================================================================
@@ -2805,6 +2810,16 @@ void frontend_init_race_schedule(void) {
                         ? s_attract_track
                         : s_selected_track;
 
+    /* [MP CUP 2026-06-22] Begin the series on the first cup race (seeds its track
+     * list from the picked track) and force the current cup race's track. */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_CUP) {
+        if (!td5_game_mp_cup_active()) td5_game_mp_cup_begin();
+        {
+            int ct = td5_game_mp_cup_track();
+            if (ct >= 0) { s_selected_track = ct; g_td5.track_index = ct; }
+        }
+    }
+
     /* --- Local human count + split-screen layout (PORT ENHANCEMENT 2026-06) ---
      * s_num_human_players is the single source of truth, set by EITHER the Quick
      * Race "Players" selector OR the rebuilt Multiplayer Options "PLAYERS" button
@@ -2832,6 +2847,13 @@ void frontend_init_race_schedule(void) {
             humans = 1;
         if (humans < 1) humans = 1;
         if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
+
+        /* [MP TIME TRIAL 2026-06-22] Time trial has NO AI opponents — only the
+         * human players race the clock, seeing each other as non-colliding
+         * ghosts. Force 0 AI here (before the count is committed) so no AI slots
+         * are activated; the Opponents selector is hidden on the track selector. */
+        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL)
+            s_num_ai_opponents = 0;
 
         /* [PORT ENHANCEMENT 2026-06] Single-player: the active menu controller
          * (whoever navigated here) becomes the driver = player 0's device. */
@@ -7123,7 +7145,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         const char *difficulty[3] = { "EASY", "NORMAL", "HARD" };
         char vb[8];
         float vx = 350.0f * sx;
-        if (s_buttons[2].active) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
+        if (s_buttons[2].active && !s_buttons[2].hidden) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
             fe_draw_text(vx, (float)(s_buttons[2].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
         if (s_buttons[3].active && !s_buttons[3].hidden) { snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
             fe_draw_text(vx, (float)(s_buttons[3].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
@@ -9197,6 +9219,9 @@ void td5_frontend_render_ui_rects(void) {
         { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
           frontend_mp_setup_disconnect_render(sx, sy); }
         break;
+    /* [MP GAME MODES 2026-06-22] vote / config / cup-winners overlays are drawn
+     * in the POST-button pass below so their two-line labels + value text
+     * composite ON TOP of the standard button frames. */
     case TD5_SCREEN_CAR_SELECTION:
         frontend_render_car_selection_preview(sx, sy);
         break;
@@ -9442,6 +9467,34 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_SOUND_OPTIONS:
             for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
+            break;
+        case TD5_SCREEN_MP_MODE_VOTE:   /* [MP GAME MODES 2026-06-22] on top of frames */
+            { extern void frontend_mp_mode_vote_render(float sx, float sy);
+              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+              frontend_mp_mode_vote_render(sx, sy);
+              frontend_mp_setup_disconnect_render(sx, sy); }
+            break;
+        case TD5_SCREEN_MP_MODE_CONFIG:
+            { extern void frontend_mp_mode_config_render(float sx, float sy);
+              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+              frontend_mp_mode_config_render(sx, sy);
+              frontend_mp_setup_disconnect_render(sx, sy); }
+            break;
+        case TD5_SCREEN_CUP_WINNERS:
+            { extern void frontend_cup_winners_render(float sx, float sy);
+              frontend_cup_winners_render(sx, sy); }
+            break;
+        case TD5_SCREEN_MP_COP_ROLES:
+            { extern void frontend_mp_cop_roles_render(float sx, float sy);
+              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+              frontend_mp_cop_roles_render(sx, sy);
+              frontend_mp_setup_disconnect_render(sx, sy); }
+            break;
+        case TD5_SCREEN_MP_TEAM_SELECT:
+            { extern void frontend_mp_team_select_render(float sx, float sy);
+              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+              frontend_mp_team_select_render(sx, sy);
+              frontend_mp_setup_disconnect_render(sx, sy); }
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,

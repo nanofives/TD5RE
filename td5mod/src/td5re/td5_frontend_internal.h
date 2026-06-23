@@ -77,6 +77,15 @@ int  mp_session_restore_positions(int humans);/* store -> live cells; 1 if usabl
 void Screen_MpPosition(void);                /* the picker screen handler */
 void frontend_mp_position_render(float sx, float sy);  /* its render (in td5_frontend.c) */
 
+/* ---- MP GAME MODES (2026-06-22) ----
+ * New MP setup pipeline screens, handlers in td5_fe_net.c. Inserted after the
+ * viewport picker (Screen_MpPosition) and before car selection. */
+void Screen_MpModeVote(void);    /* host votes/locks the game mode; others vote   */
+void Screen_MpModeConfig(void);  /* per-mode options (host edits, clients view)   */
+void Screen_CupWinners(void);    /* final cup standings / podium                  */
+void Screen_MpCopRoles(void);    /* cop chase: each player picks cop / suspect    */
+void Screen_MpTeamSelect(void);  /* cup teams: each player picks their team       */
+
 /* ---- shared texture-page allocations ---- */
 #define SHARED_PAGE_WHITE     899
 #define SHARED_PAGE_FONT_MSDF 970   /* free page (frontend uses 888-955) */
