@@ -162,8 +162,19 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
       <input type="file" id="roadTexFile" accept="image/*" style="display:none">
       <input type="file" id="groundTexFile" accept="image/*" style="display:none">
       <input type="file" id="skyTexFile" accept="image/*" style="display:none">
-      <div class="hint">Textures &amp; skybox are preview-only (the in-game track uses the
-        flat road render). Turn off "Edit nodes" to look around without moving nodes.</div>
+      <hr>
+      <div class="hint">From the selected (imported) track:</div>
+      <div class="btnrow">
+        <button class="sm" id="loadEnvBtn">Load environment</button>
+        <button class="sm" id="skyTrackBtn">Sky from track</button>
+        <button class="sm" id="clearEnvBtn">Clear env</button>
+      </div>
+      <div class="row"><span>Road tex</span><select id="roadTexSel"><option value="">— none —</option></select></div>
+      <div class="row"><span>Ground tex</span><select id="groundTexSel"><option value="">— none —</option></select></div>
+      <label class="row"><span>Checkpoint gates</span><input type="checkbox" id="cpGates" checked></label>
+      <div class="hint">"Load environment" pulls the track's scenery (models.bin) + its
+        texture pages; the dropdowns apply a track texture to the road / ground.
+        Textures &amp; skybox are preview-only. Turn off "Edit nodes" to look around freely.</div>
     </div></details>
 
     <button class="primary" id="buildBtn">Build &amp; register track ▸</button>

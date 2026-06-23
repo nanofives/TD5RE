@@ -36,7 +36,7 @@ VENDOR_DIR = os.path.join(STUDIO_DIR, "vendor")
 ASSETS_DIR = os.path.join(REPO_ROOT, "re", "assets")
 THREE_VER = "0.160.0"
 CDN = f"https://unpkg.com/three@{THREE_VER}"
-ENTRY_ADDONS = ["controls/OrbitControls.js"]                  # we build geometry, no model loaders
+ENTRY_ADDONS = ["controls/OrbitControls.js", "loaders/GLTFLoader.js"]  # GLTFLoader for env geometry
 USE_LOCAL_VENDOR = False
 
 
@@ -52,6 +52,11 @@ def _load_module(name, path):
 
 
 trackgen = _load_module("td5_trackgen", os.path.join(TOOLS_DIR, "td5_trackgen.py"))
+try:
+    mesh_tool = _load_module("mesh_tool", os.path.join(TOOLS_DIR, "mesh_tool.py"))  # needs numpy
+except Exception as _e:  # noqa
+    mesh_tool = None
+_glb_cache = {}   # level -> glb bytes (env geometry; built once)
 
 
 # --------------------------------------------------------------------------
@@ -182,6 +187,50 @@ def do_import(level, name=None):
     return {"ok": True, "spec": spec, "warnings": warnings}
 
 
+def _level_dir(level):
+    return os.path.join(_levels_dir(), "level%03d" % int(level))
+
+
+def list_assets(level):
+    """Texture pages, skybox images, and whether env geometry exists for a level
+    -- backs the 'from selected track' loaders."""
+    ld = _level_dir(level)
+    texdir = os.path.join(ld, "textures")
+    textures = sorted(f for f in os.listdir(texdir)
+                      if f.lower().endswith((".png", ".tga"))) if os.path.isdir(texdir) else []
+    sky = [f for f in ("forwsky.png", "backsky.png") if os.path.isfile(os.path.join(ld, f))]
+    return {"textures": textures, "skybox": sky,
+            "has_models": os.path.isfile(os.path.join(ld, "models.bin")) and mesh_tool is not None}
+
+
+def serve_asset(level, name):
+    """(bytes, content_type) for a level texture/skybox PNG, or None."""
+    safe = os.path.basename(name or "")
+    ld = _level_dir(level)
+    for cand in (os.path.join(ld, "textures", safe), os.path.join(ld, safe)):
+        if os.path.isfile(cand):
+            ct = "image/png" if safe.lower().endswith(".png") else "application/octet-stream"
+            with open(cand, "rb") as f:
+                return f.read(), ct
+    return None
+
+
+def build_model_glb(level):
+    """Decode the level's models.bin (env geometry) and export a GLB (cached)."""
+    if mesh_tool is None:
+        raise RuntimeError("mesh_tool/numpy unavailable")
+    level = int(level)
+    if level in _glb_cache:
+        return _glb_cache[level]
+    path = os.path.join(_level_dir(level), "models.bin")
+    if not os.path.isfile(path):
+        raise FileNotFoundError("no models.bin for level %d" % level)
+    with open(path, "rb") as f:
+        glb = mesh_tool.export_glb(mesh_tool.decode(f.read(), "models"))
+    _glb_cache[level] = glb
+    return glb
+
+
 def do_sample(kind):
     spec = trackgen.sample_spec(kind)
     # return the editable raw form (nodes carry resolved width/lanes already)
@@ -254,6 +303,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, do_import(q.get("level"), q.get("name")))
             elif p == "/api/sample":
                 self._send(200, do_sample(q.get("kind", "oval")))
+            elif p == "/api/assets":
+                self._send(200, list_assets(q.get("level")))
+            elif p == "/api/asset":
+                a = serve_asset(q.get("level"), q.get("name"))
+                if a:
+                    self._send(200, a[0], a[1])
+                else:
+                    self._send(404, {"error": "asset not found"})
+            elif p == "/api/model":
+                self._send(200, build_model_glb(q.get("level")), "model/gltf-binary")
             else:
                 self._send(404, {"error": "not found"})
         except Exception as e:

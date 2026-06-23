@@ -1,6 +1,7 @@
 // TD5 Track Studio -- viewport + editor. Mirrors car_studio.js conventions.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const $ = (id) => document.getElementById(id);
 const SURF_COLORS = [0x4a4d55, 0x33414d, 0x6b5a3c, 0x7d7468]; // dry, wet, dirt, gravel
@@ -19,6 +20,8 @@ controls.enableDamping = true;
 scene.add(new THREE.HemisphereLight(0xffffff, 0x36404f, 1.15));
 const sun = new THREE.DirectionalLight(0xffffff, 1.1); sun.position.set(1, 2, 1); scene.add(sun);
 const root = new THREE.Group(); scene.add(root);   // track geometry, centered on `center`
+const envRoot = new THREE.Group(); scene.add(envRoot);   // imported environment geometry
+const gltfLoader = new GLTFLoader();
 let grid = null;
 
 function resize() {
@@ -67,7 +70,8 @@ let selected = -1;
 let handles = [];                   // node handle meshes (index-aligned to spec.nodes)
 let drawingBranch = null;           // {lanes, nodes:[]} while drawing
 let roadTex = null, groundTex = null;   // preview textures
-let showLanes = false, editNodes = true;
+let showLanes = false, editNodes = true, showCpGates = true;
+let currentLevel = null, currentAssets = null;   // imported track's source + its assets
 const raycaster = new THREE.Raycaster();
 const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);  // view-space ground (y=0)
 
@@ -172,6 +176,7 @@ function rebuild(fit) {
   const c = new THREE.Vector3(); let miny = 1e18, maxr = 0;
   for (const n of spec.nodes) { c.x += n.x; c.z += n.z; c.y += (n.y || 0); miny = Math.min(miny, n.y || 0); }
   c.multiplyScalar(1 / spec.nodes.length); center.copy(c);
+  envRoot.position.set(-center.x, -center.y, -center.z);   // keep env aligned to track
   for (const n of spec.nodes) maxr = Math.max(maxr, Math.hypot(n.x - c.x, n.z - c.z));
 
   // grid sized to the track
@@ -200,9 +205,9 @@ function rebuild(fit) {
       m.position.copy(V(n)).setY(V(n).y + 120); m.userData.idx = i; root.add(m); handles.push(m);
     });
   }
-  // checkpoints
+  // checkpoints (red cross-line + optional gate)
   const cps = checkpointNodes();
-  for (const ci of cps) markAcross(ci, 0xff4d4d);
+  for (const ci of cps) { markAcross(ci, 0xff4d4d); if (showCpGates) markGate(ci); }
   // start / finish
   if (spec.nodes.length) markAcross(0, 0x46c46a, 1.4);
   if (!spec.circuit && spec.nodes.length > 1) markAcross(spec.nodes.length - 1, 0x3aa0ff, 1.4);
@@ -230,6 +235,18 @@ function markAcross(i, color, scale) {
   const b = new THREE.Vector3(p.x - lx * half, p.y + 10, p.z - lz * half);
   root.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]),
     new THREE.LineBasicMaterial({ color, linewidth: 2 })));
+}
+
+function markGate(i) {   // checkpoint indicator: two posts + a top bar across the road
+  const n = spec.nodes[i]; if (!n) return;
+  const t = tangent(spec.nodes, i, !!spec.circuit), lx = t[1], lz = -t[0];
+  const half = nodeWidth(n) * 0.5, p = V(n), h = Math.max(1200, half * 0.7);
+  const lE = new THREE.Vector3(p.x + lx * half, p.y, p.z + lz * half);
+  const rE = new THREE.Vector3(p.x - lx * half, p.y, p.z - lz * half);
+  const top = (v) => v.clone().setY(v.y + h);
+  root.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(
+    [lE, top(lE), rE, top(rE), top(lE), top(rE)]),
+    new THREE.LineBasicMaterial({ color: 0x3ad6ff })));
 }
 
 function checkpointNodes() {
@@ -423,6 +440,7 @@ $('importBtn').addEventListener('click', async () => {
     const r = await fetch('/api/import?level=' + lvl); const d = await r.json();
     if (d.error) { setStatus('import error: ' + d.error, 'bad'); return; }
     spec = normalizeIn(d.spec); selected = -1; rebuild(true);
+    currentLevel = +lvl; refreshTrackAssets();
     setStatus('Imported. ' + (d.warnings && d.warnings.length ? d.warnings.join(' ') : 'Edit and Build.'),
       d.warnings && d.warnings.length ? 'warn' : 'ok');
   } catch (e) { setStatus('import failed: ' + e, 'bad'); }
@@ -430,7 +448,8 @@ $('importBtn').addEventListener('click', async () => {
 document.querySelectorAll('[data-sample]').forEach(btn => btn.addEventListener('click', async () => {
   try {
     const r = await fetch('/api/sample?kind=' + btn.dataset.sample); const d = await r.json();
-    spec = normalizeIn(d.spec); selected = -1; rebuild(true); setStatus('Loaded sample. Edit and Build.', 'ok');
+    spec = normalizeIn(d.spec); selected = -1; rebuild(true);
+    currentLevel = null; refreshTrackAssets(); setStatus('Loaded sample. Edit and Build.', 'ok');
   } catch (e) { setStatus('sample failed: ' + e, 'bad'); }
 }));
 $('blankBtn').addEventListener('click', () => {
@@ -438,7 +457,8 @@ $('blankBtn').addEventListener('click', () => {
   // seed a small starter square so there is something to edit
   const r = 20000;
   spec.nodes = [[r, 0], [0, r], [-r, 0], [0, -r]].map(([x, z]) => ({ x, z, y: 0, lanes: 4, width: 6000, surface: 0 }));
-  selected = -1; rebuild(true); setStatus('Blank circuit. Drag nodes / shift-click to add.', 'ok');
+  selected = -1; rebuild(true); currentLevel = null; refreshTrackAssets();
+  setStatus('Blank circuit. Drag nodes / shift-click to add.', 'ok');
 });
 
 function normalizeIn(s) {
@@ -492,6 +512,70 @@ $('skyTexFile').onchange = (e) => {
 $('clearTexBtn').onclick = () => { roadTex = groundTex = null; scene.background = new THREE.Color(0x12141a); rebuild(false); setStatus('Cleared textures + skybox.', 'ok'); };
 $('showLanes').onchange = (e) => { showLanes = e.target.checked; rebuild(false); };
 $('editNodes').onchange = (e) => { editNodes = e.target.checked; if (!editNodes) selected = -1; rebuild(false); };
+
+// ---------------------------------------------------------------- from selected track
+function trackTexture(level, name, flipY) {
+  return new Promise((res, rej) => {
+    new THREE.TextureLoader().load(`/api/asset?level=${level}&name=${encodeURIComponent(name)}`,
+      (t) => { t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; if (flipY === false) t.flipY = false; res(t); },
+      undefined, rej);
+  });
+}
+async function refreshTrackAssets() {
+  for (const sel of [$('roadTexSel'), $('groundTexSel')]) sel.innerHTML = '<option value="">— none —</option>';
+  currentAssets = null;
+  const env = $('loadEnvBtn'), sky = $('skyTrackBtn');
+  env.disabled = sky.disabled = (currentLevel == null);
+  if (currentLevel == null) return;
+  try {
+    currentAssets = await (await fetch('/api/assets?level=' + currentLevel)).json();
+    for (const sel of [$('roadTexSel'), $('groundTexSel')])
+      for (const tx of currentAssets.textures) { const o = document.createElement('option'); o.value = tx; o.textContent = tx; sel.appendChild(o); }
+    env.disabled = !currentAssets.has_models;
+    sky.disabled = !(currentAssets.skybox && currentAssets.skybox.length);
+  } catch (e) { /* ignore */ }
+}
+$('roadTexSel').onchange = async (e) => {
+  if (!e.target.value || currentLevel == null) return;
+  try { roadTex = await trackTexture(currentLevel, e.target.value); rebuild(false); setStatus('Road texture from track applied.', 'ok'); }
+  catch { setStatus('texture load failed', 'bad'); }
+};
+$('groundTexSel').onchange = async (e) => {
+  if (!e.target.value || currentLevel == null) return;
+  try { const t = await trackTexture(currentLevel, e.target.value); t.repeat.set(24, 24); groundTex = t; rebuild(false); setStatus('Ground texture from track applied.', 'ok'); }
+  catch { setStatus('texture load failed', 'bad'); }
+};
+$('skyTrackBtn').onclick = async () => {
+  if (!currentAssets || !currentAssets.skybox.length) { setStatus('no skybox in this track', 'warn'); return; }
+  try { const t = await trackTexture(currentLevel, currentAssets.skybox[0], false); t.mapping = THREE.EquirectangularReflectionMapping; scene.background = t; setStatus('Skybox from track applied.', 'ok'); }
+  catch { setStatus('skybox load failed', 'bad'); }
+};
+$('cpGates').onchange = (e) => { showCpGates = e.target.checked; rebuild(false); };
+$('clearEnvBtn').onclick = () => { while (envRoot.children.length) envRoot.remove(envRoot.children[0]); setStatus('Cleared environment.', 'ok'); };
+$('loadEnvBtn').onclick = async () => {
+  if (currentLevel == null) { setStatus('Import a track first.', 'warn'); return; }
+  setStatus('Loading environment (decoding models.bin, may take a moment)…');
+  try {
+    const texMap = {};
+    if (currentAssets) for (const tx of currentAssets.textures) {
+      const m = tx.match(/(\d+)/); if (m) { try { texMap[+m[1]] = await trackTexture(currentLevel, tx, false); } catch {} }
+    }
+    const buf = await (await fetch('/api/model?level=' + currentLevel)).arrayBuffer();
+    gltfLoader.parse(buf, '', (gltf) => {
+      while (envRoot.children.length) envRoot.remove(envRoot.children[0]);
+      gltf.scene.traverse((o) => {
+        if (o.isMesh) {
+          const page = (o.userData && o.userData.prr) ? o.userData.prr.texture_page_id : -1;
+          const tex = texMap[page];
+          o.material = new THREE.MeshStandardMaterial({ map: tex || null,
+            color: tex ? 0xffffff : 0x9aa0ac, side: THREE.DoubleSide, roughness: 1.0 });
+        }
+      });
+      envRoot.add(gltf.scene); envRoot.position.set(-center.x, -center.y, -center.z);
+      setStatus('Environment loaded.', 'ok');
+    }, (err) => setStatus('GLB parse error: ' + err, 'bad'));
+  } catch (e) { setStatus('environment load failed: ' + e, 'bad'); }
+};
 
 // ---------------------------------------------------------------- boot
 loadList();
