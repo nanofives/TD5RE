@@ -353,13 +353,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"error": str(e), "trace": traceback.format_exc()})
         elif self.path == "/api/convert_blend":
             try:
-                glb, err = convert_blend_to_glb(_b64_to_bytes(req.get("blend_b64")))
-                if err:
-                    self._send(200, {"ok": False, "error": err})
+                blend = _b64_to_bytes(req.get("blend_b64"))
+                # Always carve PACKED textures (works without Blender). Geometry
+                # needs Blender — attempt the glb export, but the textures stand
+                # on their own so a no-Blender drop still yields a usable skin.
+                textures = [{"dataurl": "data:image/%s;base64,%s" % (t["fmt"], base64.b64encode(t["bytes"]).decode()),
+                             "w": t["w"], "h": t["h"]}
+                            for t in importer.extract_blend_textures(blend)]
+                glb, err = convert_blend_to_glb(blend)
+                resp = {"ok": bool(glb), "textures": textures}
+                if glb:
+                    resp["glb_b64"] = base64.b64encode(glb).decode()
                 else:
-                    self._send(200, {"ok": True, "glb_b64": base64.b64encode(glb).decode()})
+                    resp["error"] = err
+                self._send(200, resp)
             except Exception as e:
-                self._send(500, {"ok": False, "error": str(e)})
+                self._send(500, {"ok": False, "error": str(e), "textures": []})
         elif self.path == "/api/doctor":
             import contextlib
             d = os.path.join(CARS_DIR, req.get("code", ""))

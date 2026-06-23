@@ -245,9 +245,10 @@ an extra car slot (index 76+) the next launch — **no source edit, no rebuild**
 python re/tools/car_studio/td5_car_studio.py        # opens a browser GUI
 ```
 A local web app with a **3D viewport** that loads your model (glTF/GLB, OBJ,
-**FBX**, or **`.blend`** — Studio-only; the CLI reads glTF/OBJ. `.blend` is
-converted to glb by a local **Blender** install, auto-detected or via
-`--blender <path>` / `BLENDER_PATH`), overlays the
+**FBX**, or **`.blend`** — Studio-only; the CLI reads glTF/OBJ. For `.blend`,
+**packed textures are carved out without Blender** and used as the skin; its
+*geometry* needs a local **Blender** (auto-detected / `--blender <path>` /
+`BLENDER_PATH`) — otherwise load the FBX/OBJ for the mesh), overlays the
 carparam **wheel positions as gizmos** (place wheels visually), previews your
 skin on the body, lets you edit every live physics/stat field, and **builds the
 car with one click**. Orient/scale/flip update live, so you fix "facing
@@ -300,6 +301,7 @@ python re/tools/car_studio/td5_car_import.py texture in.jpg carskin0.png --size 
 python re/tools/car_studio/td5_car_import.py new --code custom_x --donor vip   # scaffold a clone to edit
 python re/tools/car_studio/td5_car_import.py doctor re/assets/cars/custom_x    # validate (tris/files/wheels/dims)
 python re/tools/car_studio/td5_car_import.py verify re/assets/cars/custom_x    # round-trip himodel.bin
+python re/tools/car_studio/td5_car_import.py blendtex model.blend --out-dir .  # carve packed textures from a .blend (no Blender)
 ```
 
 **Choosing physics values (effects + fleet reference):** the Car Studio's

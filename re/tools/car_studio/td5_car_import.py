@@ -498,6 +498,71 @@ def _make_carpic(skin_img, out_path, w=408, h=280, name=""):
 
 
 # ===========================================================================
+# .blend packed-texture extraction (NO Blender required)
+# ===========================================================================
+# A .blend stores PACKED images as the verbatim bytes of the original file
+# (PNG/JPEG/…), so we can carve them out by scanning for image signatures —
+# version-independent, no SDNA/struct parsing. Only PACKED textures are
+# recoverable; an external-image .blend embeds nothing. Geometry is NOT
+# recoverable this way (load the FBX/OBJ for the mesh).
+def extract_blend_textures(blend_bytes, min_dim=64):
+    if Image is None:
+        return []
+    data = blend_bytes
+    if data[:2] == b"\x1f\x8b":                       # gzip-compressed .blend
+        import gzip
+        try: data = gzip.decompress(data)
+        except Exception: return []
+    elif data[:4] == b"\x28\xb5\x2f\xfd":             # zstd-compressed (Blender 3.0+ option)
+        dec = None
+        for mod, fn in (("zstandard", lambda m: m.ZstdDecompressor().decompress(data, max_output_size=512 << 20)),
+                        ("zstd", lambda m: m.decompress(data))):
+            try:
+                dec = fn(__import__(mod)); break
+            except Exception:
+                continue
+        if dec is None:
+            return []                                 # compressed, no decompressor available
+        data = dec
+
+    from io import BytesIO
+    blobs = []
+    # PNG: signature .. end of IEND chunk (incl. its CRC)
+    sig, iend = b"\x89PNG\r\n\x1a\n", b"IEND\xae\x42\x60\x82"
+    i = 0
+    while True:
+        s = data.find(sig, i)
+        if s < 0: break
+        e = data.find(iend, s)
+        if e < 0: i = s + 8; continue
+        blobs.append(data[s:e + 8]); i = e + 8
+    # JPEG: SOI .. EOI
+    i = 0
+    while True:
+        s = data.find(b"\xff\xd8\xff", i)
+        if s < 0: break
+        e = data.find(b"\xff\xd9", s + 3)
+        if e < 0: i = s + 3; continue
+        blobs.append(data[s:e + 2]); i = e + 2
+
+    out, seen = [], set()
+    for b in blobs:
+        if b in seen: continue
+        seen.add(b)
+        try:
+            im = Image.open(BytesIO(b)); im.load()
+        except Exception:
+            continue
+        if min(im.width, im.height) < min_dim:        # skip tiny preview/icon images
+            continue
+        fmt = (im.format or "PNG").lower()
+        out.append({"bytes": b, "w": im.width, "h": im.height,
+                    "fmt": "jpeg" if fmt in ("jpeg", "jpg") else "png"})
+    out.sort(key=lambda d: d["w"] * d["h"], reverse=True)
+    return out
+
+
+# ===========================================================================
 # config.nfo
 # ===========================================================================
 def write_config_nfo(out_path, display, short, stats=None):
@@ -810,6 +875,27 @@ def cmd_stats(args):
     return 0
 
 
+# ===========================================================================
+# blendtex command (extract packed textures from a .blend, no Blender)
+# ===========================================================================
+def cmd_blendtex(args):
+    texs = extract_blend_textures(open(args.blend, "rb").read())
+    if not texs:
+        print("No packed textures found — the .blend uses external images (a path, "
+              "not embedded), is compressed without a decoder, or has no images.")
+        return 1
+    os.makedirs(args.out_dir, exist_ok=True)
+    base = os.path.splitext(os.path.basename(args.blend))[0]
+    for i, t in enumerate(texs):
+        ext = "jpg" if t["fmt"] == "jpeg" else "png"
+        p = os.path.join(args.out_dir, f"{base}_tex{i}.{ext}")
+        with open(p, "wb") as f:
+            f.write(t["bytes"])
+        print(f"  {p}  ({t['w']}x{t['h']})")
+    print(f"extracted {len(texs)} packed texture(s) (largest first — usually the body skin)")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Import custom cars / convert textures for TD5RE")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -862,6 +948,11 @@ def main():
     ps.add_argument("--cars-dir", default="re/assets/cars", help="cars root to scan")
     ps.add_argument("--markdown", action="store_true", help="emit a markdown table (e.g. for docs)")
     ps.set_defaults(func=cmd_stats)
+
+    pb = sub.add_parser("blendtex", help="extract PACKED textures from a .blend (no Blender needed)")
+    pb.add_argument("blend", help="path to the .blend file")
+    pb.add_argument("--out-dir", default=".", help="where to write the extracted images")
+    pb.set_defaults(func=cmd_blendtex)
 
     args = ap.parse_args()
     return args.func(args)

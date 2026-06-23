@@ -230,15 +230,16 @@ function applySkin() {
   });
 }
 
+function applySkinDataURL(url, label) {
+  skinDataURL = url;
+  new THREE.TextureLoader().load(url, (t) => {
+    t.colorSpace = THREE.SRGBColorSpace; t.flipY = opts.flipv;
+    skinTexture = t; $('skinInfo').textContent = label; applySkin();
+  }, undefined, () => setStatus('could not load image ' + label, 'warn'));
+}
 function loadSkinFromFile(file, fromModel) {
   const fr = new FileReader();
-  fr.onload = () => {
-    skinDataURL = fr.result;
-    new THREE.TextureLoader().load(fr.result, (t) => {
-      t.colorSpace = THREE.SRGBColorSpace; t.flipY = opts.flipv;
-      skinTexture = t; $('skinInfo').textContent = (fromModel ? 'from model: ' : '') + file.name; applySkin();
-    }, undefined, () => setStatus('could not load image ' + file.name, 'warn'));
-  };
+  fr.onload = () => applySkinDataURL(fr.result, (fromModel ? 'from model: ' : '') + file.name);
   fr.readAsDataURL(file);
 }
 $('skinFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) loadSkinFromFile(f, false); });
@@ -273,18 +274,26 @@ $('modelFile').addEventListener('change', (e) => {
         // (multi-select the image, or convert via Blender -> glTF).
         loadedObject = fbx.parse(fr.result, ''); onLoaded();
       } else if (mext === 'blend') {
-        // No in-browser .blend reader — the server runs Blender headlessly to
-        // export a glb (textures packed), which we then load like any glb.
-        setStatus('Converting .blend via Blender… (first run can take ~10s)');
+        // No in-browser .blend reader. Server carves PACKED textures (no Blender)
+        // and, if Blender is installed, also exports geometry to glb.
+        setStatus('Reading .blend (extracting packed textures; converting geometry if Blender is present)…');
         fetch('/api/convert_blend', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ blend_b64: abToB64(fr.result) }) })
           .then((r) => r.json()).then((res) => {
-            if (!res.ok) { setStatus('.blend: ' + res.error, 'bad'); return; }
-            const glb = b64ToAb(res.glb_b64);
-            modelBytes = glb; modelName = modelF.name.replace(/\.blend$/i, '.glb');
-            gltf.parse(glb, '', (g) => { loadedObject = g.scene; onLoaded(); setStatus('Loaded .blend (Blender → glb).', 'ok'); },
-              (err) => setStatus('converted glb parse error: ' + err, 'bad'));
-          }).catch((e) => setStatus('.blend convert request failed: ' + e, 'bad'));
+            if (res.glb_b64) {                       // Blender gave us full geometry
+              const glb = b64ToAb(res.glb_b64);
+              modelBytes = glb; modelName = modelF.name.replace(/\.blend$/i, '.glb');
+              gltf.parse(glb, '', (g) => { loadedObject = g.scene; onLoaded(); setStatus('Loaded .blend (Blender → glb).', 'ok'); },
+                (err) => setStatus('converted glb parse error: ' + err, 'bad'));
+            } else if (res.textures && res.textures.length) {   // no geometry, but got the texture(s)
+              const t0 = res.textures[0];
+              applySkinDataURL(t0.dataurl, `from .blend (${t0.w}×${t0.h})`);
+              setStatus(`No Blender, so no mesh from the .blend — but extracted ${res.textures.length} packed `
+                + `texture(s) and applied the largest (${t0.w}×${t0.h}) as the skin. Load the FBX/OBJ for the geometry.`, 'warn');
+            } else {
+              setStatus('.blend: ' + (res.error || 'nothing recoverable — its textures are external (not packed), or it is zstd-compressed.'), 'bad');
+            }
+          }).catch((e) => setStatus('.blend request failed: ' + e, 'bad'));
       } else {
         gltf.parse(fr.result, '', (g) => { loadedObject = g.scene; onLoaded(); },
           (err) => setStatus('glTF parse error: ' + err, 'bad'));
