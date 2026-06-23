@@ -8777,7 +8777,7 @@ void td5_ai_traffic_dynamic_race_init(void)
                                                   : (p_lo + s_trf_vp_k);
             int vp_placed = 0, vp_cap = trf_per_viewport_cap();
             if (p_hi > t_end) p_hi = t_end;
-            s_trf_scope_slot = td5_game_get_player_slot(vp);
+            /* Shared start-line anchor + identical-seed RNG => identical grid. */
             s_trf_dyn_rng    = s_trf_dyn_rng_vp[vp];
             for (int slot = p_lo; slot < p_hi; slot++) {
                 int seed_lo = g_td5.ini.traffic_dyn_start_offset + 8;
@@ -8865,13 +8865,9 @@ void td5_ai_traffic_dynamic_tick(void)
 
     for (int slot = t_base; slot < t_end; slot++) {
         char *a = actor_ptr(slot);
-        /* [PER-VIEWPORT TRAFFIC] Scope the live-corridor despawn (trailing/lead
-         * span below) to THIS car's owning viewport's player, so a partition's
-         * cars live/retire around their own player, not the global field. */
-        if (s_trf_per_vp) {
-            int ov = g_traffic_slot_owner_vp[slot];
-            s_trf_scope_slot = (ov >= 0) ? td5_game_get_player_slot(ov) : -1;
-        }
+        /* [PER-VIEWPORT TRAFFIC] Despawn uses the SHARED (all-players) corridor so
+         * every partition retires the same cars at the same time — keeping the
+         * partitions identical-in-place. Independence is collision/render only. */
         switch (s_trf_dyn_state[slot]) {
         case TRF_DYN_FADE_IN:
             s_trf_dyn_alpha[slot] = (int16_t)(s_trf_dyn_alpha[slot] + fade_step);
@@ -9022,7 +9018,9 @@ void td5_ai_traffic_dynamic_tick(void)
             for (slot = p_lo; slot < p_hi; slot++)
                 if (s_trf_dyn_state[slot] == TRF_DYN_INACTIVE) { pick = slot; break; }
             if (pick < 0) { s_trf_dyn_cooldown_vp[vp] = 10; continue; }
-            s_trf_scope_slot = td5_game_get_player_slot(vp);
+            /* Shared anchor/proximity (no per-player scope) + this partition's
+             * identical-seed RNG => every partition spawns the SAME car at the
+             * SAME place; only the target slot differs. */
             s_trf_dyn_rng    = s_trf_dyn_rng_vp[vp];
             trf_dyn_effective_spawn_window(&spawn_lo, &spawn_hi);
             if (trf_dyn_spawn_in_window(pick, -1, spawn_lo, spawn_hi)) {
@@ -10656,16 +10654,8 @@ void td5_ai_update_race_actors(void) {
             traffic_max = TD5_MAX_TOTAL_ACTORS;
 
         for (i = g_traffic_slot_base; i < traffic_max; i++) {
-            /* [PER-VIEWPORT TRAFFIC] scope each car's player-proximity logic
-             * (brake/anchor) to its OWNING viewport's player, so a partition's
-             * traffic reacts only to the player who can see it. */
-            if (s_trf_per_vp) {
-                int ov = g_traffic_slot_owner_vp[i];
-                s_trf_scope_slot = (ov >= 0) ? td5_game_get_player_slot(ov) : -1;
-            }
             ai_update_single_traffic(i);
         }
-        s_trf_scope_slot = -1;
 
         /* --- Step 4: Special encounter check --- */
         td5_ai_update_special_encounter();
