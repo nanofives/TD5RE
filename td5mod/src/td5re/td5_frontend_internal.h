@@ -83,6 +83,8 @@ void frontend_mp_position_render(float sx, float sy);  /* its render (in td5_fro
 void Screen_MpModeVote(void);    /* host votes/locks the game mode; others vote   */
 void Screen_MpModeConfig(void);  /* per-mode options (host edits, clients view)   */
 void Screen_CupWinners(void);    /* final cup standings / podium                  */
+void Screen_MpCopRoles(void);    /* cop chase: each player picks cop / suspect    */
+void Screen_MpTeamSelect(void);  /* cup teams: each player picks their team       */
 
 /* ---- shared texture-page allocations ---- */
 #define SHARED_PAGE_WHITE     899

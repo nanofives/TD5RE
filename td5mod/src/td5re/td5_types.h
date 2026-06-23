@@ -389,7 +389,9 @@ typedef enum TD5_ScreenIndex {
     TD5_SCREEN_MP_MODE_VOTE       = 35,  /* Screen_MpModeVote   — pick the game mode */
     TD5_SCREEN_MP_MODE_CONFIG     = 36,  /* Screen_MpModeConfig — per-mode options */
     TD5_SCREEN_CUP_WINNERS        = 37,  /* Screen_CupWinners   — final cup standings */
-    TD5_SCREEN_COUNT               = 38
+    TD5_SCREEN_MP_COP_ROLES       = 38,  /* Screen_MpCopRoles   — pick cop / suspect  */
+    TD5_SCREEN_MP_TEAM_SELECT     = 39,  /* Screen_MpTeamSelect — pick cup team        */
+    TD5_SCREEN_COUNT               = 40
 } TD5_ScreenIndex;
 
 /* ========================================================================
@@ -440,6 +442,7 @@ typedef struct TD5_MpModeConfig {
     int32_t cup_race_count;                       /* races in the series (best of X) */
     int32_t cup_track_indices[TD5_CUP_MAX_RACES]; /* host-picked track list          */
     int32_t cup_team_mode;                        /* 0 = free-for-all, 1 = teams     */
+    int32_t cup_team_count;                       /* number of teams (2..4, team mode)*/
     int32_t team_of_slot[TD5_NET_MAX_PLAYERS];    /* team id per slot (team mode)     */
     int32_t cup_points_scheme;                    /* 0 = classic {15,12,10,5,4,3}     */
 

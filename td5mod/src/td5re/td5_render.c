@@ -3589,11 +3589,12 @@ void td5_render_actors_for_view(int view_index)
                     continue;
             }
 
-            /* [MP GAME MODES: TIME TRIAL] Render OTHER players translucent so the
-             * ghost pass-through reads visually. The viewport's own car
-             * (camera_target_slot) and traffic stay at their normal alpha. */
+            /* [MP GAME MODES: TIME TRIAL] Render the OTHER HUMAN players as
+             * translucent ghosts (you pass through them). The viewport's own car,
+             * the AI race opponents, and traffic all stay at their normal alpha —
+             * only humans (slots 0..num_human_players-1) ghost. */
             if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL &&
-                slot < g_traffic_slot_base && slot != camera_target_slot &&
+                slot < g_td5.num_human_players && slot != camera_target_slot &&
                 tt_ghost_enabled()) {
                 actor_fade = (actor_fade * TT_GHOST_ALPHA) / 255;
                 if (actor_fade < 1) actor_fade = 1;

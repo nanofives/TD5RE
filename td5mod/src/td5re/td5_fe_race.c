@@ -2763,6 +2763,7 @@ static void mp_mode_config_apply_defaults(int mode) {
     case TD5_MP_MODE_CUP:
         c->cup_race_count    = 3;
         c->cup_team_mode     = 0;
+        c->cup_team_count    = 2;
         c->cup_points_scheme = 0;               /* classic {15,12,10,5,4,3} */
         break;
     case TD5_MP_MODE_COP_CHASE:
@@ -2831,8 +2832,10 @@ void Screen_MpModeVote(void) {
             uint32_t bits = mp_simul_player_nav(p);
             uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
             s_mp_pane_nav_prev[p] = bits;
-            if (edge & 4) { if (s_mode_vote[p] > 0)                  { s_mode_vote[p]--; frontend_play_sfx(2);} }
-            if (edge & 8) { if (s_mode_vote[p] < TD5_MP_MODE_COUNT-1){ s_mode_vote[p]++; frontend_play_sfx(2);} }
+            /* No per-player sfx here — the shared standard nav already plays the
+             * UP/DOWN cue once per input, so adding ours doubled it. */
+            if (edge & 4) { if (s_mode_vote[p] > 0)                  s_mode_vote[p]--; }
+            if (edge & 8) { if (s_mode_vote[p] < TD5_MP_MODE_COUNT-1) s_mode_vote[p]++; }
             if (p == 0) {                       /* host: A=lock, B=back */
                 if (edge & 0x10) host_lock = 1;
                 if (edge & 0x20) host_back = 1;
@@ -2940,9 +2943,12 @@ static int mp_cfg_build(MpCfgOpt *o) {
     case TD5_MP_MODE_CUP:
         o[n].label="RACES";            o[n].val=&c->cup_race_count;       o[n].min=1;  o[n].max=TD5_CUP_MAX_RACES; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
         o[n].label="TEAMS";            o[n].val=&c->cup_team_mode;        o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
+        if (c->cup_team_mode)   /* number-of-teams only when teams are on */
+        { o[n].label="NUMBER OF TEAMS"; o[n].val=&c->cup_team_count; o[n].min=2; o[n].max=4; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++; }
         break;
     case TD5_MP_MODE_COP_CHASE:
-        o[n].label="COP SLOT";         o[n].val=&c->cop_slot;            o[n].min=0;  o[n].max=5;  o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
+        /* No "cop slot" option — when AI cop is OFF, players pick cop/suspect on a
+         * dedicated role screen; when ON, the AI is the cop (skip the role screen). */
         o[n].label="AI COP";           o[n].val=&c->cop_is_ai;           o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
         o[n].label="WIN CONDITION";    o[n].val=&c->cop_win_condition;   o[n].min=0;  o[n].max=2;  o[n].step=1; o[n].enum_labels=k_cfg_wincon; o[n].enum_count=3; n++;
         o[n].label="HEAD START";       o[n].val=&c->suspect_head_start;  o[n].min=0;  o[n].max=40; o[n].step=2; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
@@ -2963,8 +2969,7 @@ static int mp_cfg_build(MpCfgOpt *o) {
 void Screen_MpModeConfig(void) {
     MpCfgOpt opts[MP_CFG_MAX_OPTS];
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
-    int n = s_num_human_players, count, i;
-    int move, hdelta, confirm, back;
+    int n = s_num_human_players, count, i, d;
     if (n < 1) n = 1;
 
     if (s_inner_state == 0) {
@@ -2978,6 +2983,12 @@ void Screen_MpModeConfig(void) {
         }
 #endif
         count = mp_cfg_build(opts);
+        /* Regular race has no options -> skip the config screen entirely. */
+        if (count == 0) {
+            TD5_LOG_I(LOG_TAG, "MP mode config: no options (mode=%d) -> car select", c->mode);
+            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+            return;
+        }
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_reset_buttons();
         for (i = 0; i < count; i++) {
@@ -2987,7 +2998,6 @@ void Screen_MpModeConfig(void) {
         frontend_create_button(SNK_OkButTxt, 320 - 60, CFG_Y0 + count * CFG_GAP + 8, 120, 28);
         s_selected_button   = 0;
         s_mode_back_confirm = 0;
-        s_mode_host_prev    = mp_simul_player_nav(0);
         s_anim_complete     = 1;
         s_inner_state       = 1;
         TD5_LOG_I(LOG_TAG, "MP mode config: enter (mode=%d count=%d)", c->mode, count);
@@ -2998,24 +3008,28 @@ void Screen_MpModeConfig(void) {
 
     count = mp_cfg_build(opts);
 
-    /* "Back to mode select?" confirm modal. */
+    /* "Back to mode select?" confirm modal (ENTER/A = yes, ESC/B = no). The
+     * standard nav supplies s_input_ready on confirm. */
     if (s_mode_back_confirm) {
-        mp_host_input(&move, &hdelta, &confirm, &back);
-        if (confirm) { s_mode_back_confirm = 0; frontend_play_sfx(3); td5_plat_input_flush_nav();
-                       td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE); return; }
-        if (back)    { s_mode_back_confirm = 0; frontend_play_sfx(5); td5_plat_input_flush_nav(); }
+        if (s_input_ready) { s_mode_back_confirm = 0; frontend_play_sfx(3); td5_plat_input_flush_nav();
+                             td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE); return; }
+        if (frontend_check_escape()) { s_mode_back_confirm = 0; frontend_play_sfx(5); td5_plat_input_flush_nav(); }
         return;
     }
 
-    mp_host_input(&move, &hdelta, &confirm, &back);
-    if (move) { s_selected_button += move; frontend_play_sfx(2); }
+    /* Navigation (UP/DOWN) + its sound are handled by the standard nav; just keep
+     * focus in range (count = the OK button). Driving it ourselves too would
+     * double-step (skip a row) and double the nav sound. */
     if (s_selected_button < 0)     s_selected_button = 0;
-    if (s_selected_button > count) s_selected_button = count;    /* count = CONTINUE */
+    if (s_selected_button > count) s_selected_button = count;
 
-    /* LEFT/RIGHT change the focused selector's value (host only). */
-    if (hdelta && s_selected_button < count) {
+    /* LEFT/RIGHT change the focused selector's value (frontend_option_delta reads
+     * the standard arrow bits). Value cycles have no standard sound, so play it
+     * here (the only nav sound on this path). */
+    d = frontend_option_delta();
+    if (d && s_selected_button >= 0 && s_selected_button < count) {
         MpCfgOpt *o = &opts[s_selected_button];
-        int v = *o->val + hdelta * o->step;
+        int v = *o->val + d * o->step;
         if (v < o->min) v = o->min;
         if (v > o->max) v = o->max;
         if (v != *o->val) { *o->val = v; frontend_play_sfx(2); }
@@ -3032,19 +3046,26 @@ void Screen_MpModeConfig(void) {
         }
     }
 
-    /* CONTINUE -> car select. */
-    if ((s_input_ready && s_button_index == count) ||
-        (confirm && s_selected_button == count)) {
-        frontend_play_sfx(3);
+    /* OK -> next step. Cop chase with a HUMAN cop goes to the role-pick screen;
+     * everything else (incl. AI cop) goes straight to car selection. */
+    if (s_input_ready && s_button_index == count) {
         td5_plat_input_flush_nav();
-        TD5_LOG_I(LOG_TAG, "MP mode config: confirmed mode=%d -> car select", c->mode);
-        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        if (c->mode == TD5_MP_MODE_COP_CHASE && !c->cop_is_ai) {
+            TD5_LOG_I(LOG_TAG, "MP mode config: cop chase (human cop) -> role select");
+            td5_frontend_set_screen(TD5_SCREEN_MP_COP_ROLES);
+        } else if (c->mode == TD5_MP_MODE_CUP && c->cup_team_mode) {
+            TD5_LOG_I(LOG_TAG, "MP mode config: cup teams -> team select");
+            td5_frontend_set_screen(TD5_SCREEN_MP_TEAM_SELECT);
+        } else {
+            TD5_LOG_I(LOG_TAG, "MP mode config: confirmed mode=%d -> car select", c->mode);
+            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        }
         return;
     }
-    /* Back -> confirm -> mode vote. */
-    if (back) {
-        s_mode_back_confirm = 1; frontend_play_sfx(2); td5_plat_input_flush_nav();
-        s_mode_host_prev = mp_simul_player_nav(0);
+    /* Back (ESC) -> confirm -> mode vote. */
+    if (frontend_check_escape()) {
+        s_mode_back_confirm = 1;
+        td5_plat_input_flush_nav();
     }
 }
 
@@ -3158,6 +3179,151 @@ void frontend_cup_winners_render(float sx, float sy) {
             td5_vui_text_centered(320.0f * sx, y * sy, buf, 0xFFC0C8D0u, sx, sy);
             y += 24.0f;
         }
+    }
+}
+
+/* ========================================================================
+ * Cop chase ROLE pick (human cop) + Cup TEAM pick — per-player select screens.
+ * Each local player adjusts only their OWN choice with their OWN device
+ * (LEFT/RIGHT); the host confirms with the OK button. One OK button only, so the
+ * standard nav never sounds per-player (avoids the double-sound) — our per-player
+ * cue is the only one. Quick-race blue selector arrows, #E3D708 title.
+ * ======================================================================== */
+#define MP_ROW_VAL_CX  370.0f      /* per-player value column centre */
+
+static int s_cop_role[TD5_MAX_HUMAN_PLAYERS];   /* 1 = cop, 0 = suspect */
+
+static void mp_roleselect_row(float sx, float sy, int p, float y, const char *val) {
+    char nb[24];
+    snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
+    td5_vui_text(150.0f * sx, y * sy, nb, mp_slot_color(p), sx, sy);
+    td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, val, 0xFFFFFFFFu, sx, sy);
+    td5_vui_arrow((MP_ROW_VAL_CX - 52.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
+    td5_vui_arrow((MP_ROW_VAL_CX + 44.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 1, 0xFF7995FFu);
+}
+
+void Screen_MpCopRoles(void) {
+    int p, n = s_num_human_players;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    if (s_inner_state == 0) {
+        for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
+            s_cop_role[p] = (p == 0) ? 1 : 0;   /* default: P1 cop, others suspects */
+            s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        }
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_reset_buttons();
+        frontend_create_button(SNK_OkButTxt, 320 - 60, 388, 120, 28);
+        s_selected_button = 0;
+        s_anim_complete   = 1;
+        s_inner_state     = 1;
+        TD5_LOG_I(LOG_TAG, "MP cop roles: enter (%d players)", n);
+        return;
+    }
+    if (frontend_mp_setup_disconnect_check(n)) return;
+
+    for (p = 0; p < n; p++) {              /* each player toggles their own role */
+        uint32_t bits = mp_simul_player_nav(p);
+        uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
+        s_mp_pane_nav_prev[p] = bits;
+        if (edge & 3) { s_cop_role[p] = !s_cop_role[p]; frontend_play_sfx(2); }
+    }
+
+    if (s_input_ready && s_button_index >= 0) {   /* host OK -> resolve cop + race */
+        int cop = -1;
+        for (p = 0; p < n; p++) if (s_cop_role[p]) { cop = p; break; }
+        if (cop < 0) cop = 0;                       /* always at least one cop */
+        g_td5.mp_mode_config.cop_slot = cop;
+        td5_plat_input_flush_nav();
+        TD5_LOG_I(LOG_TAG, "MP cop roles: cop slot=%d -> car select", cop);
+        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        return;
+    }
+    if (frontend_check_escape()) {
+        td5_plat_input_flush_nav();
+        td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+    }
+}
+
+void frontend_mp_cop_roles_render(float sx, float sy) {
+    int p, n = s_num_human_players;
+    float y = 112.0f;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    fe_race_draw_screen_title("COP CHASE - ROLES", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
+                              MP_TITLE_GOLD, sx, sy);
+    mp_pos_small_centered(320.0f * sx, 82.0f * sy,
+                          "Each player: LEFT/RIGHT to pick COP or SUSPECT", 0xFFC0C8D0u, sx, sy);
+    for (p = 0; p < n; p++) {
+        mp_roleselect_row(sx, sy, p, y, s_cop_role[p] ? "COP" : "SUSPECT");
+        y += 34.0f;
+    }
+}
+
+void Screen_MpTeamSelect(void) {
+    int p, n = s_num_human_players;
+    int teams = g_td5.mp_mode_config.cup_team_count;
+    if (teams < 2) teams = 2;
+    if (teams > 4) teams = 4;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+
+    if (s_inner_state == 0) {
+        for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
+            if (p < TD5_NET_MAX_PLAYERS) {
+                int t = g_td5.mp_mode_config.team_of_slot[p];
+                if (t < 0 || t >= teams) g_td5.mp_mode_config.team_of_slot[p] = p % teams;
+            }
+            s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        }
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_reset_buttons();
+        frontend_create_button(SNK_OkButTxt, 320 - 60, 388, 120, 28);
+        s_selected_button = 0;
+        s_anim_complete   = 1;
+        s_inner_state     = 1;
+        TD5_LOG_I(LOG_TAG, "MP team select: enter (%d players, %d teams)", n, teams);
+        return;
+    }
+    if (frontend_mp_setup_disconnect_check(n)) return;
+
+    for (p = 0; p < n && p < TD5_NET_MAX_PLAYERS; p++) {
+        uint32_t bits = mp_simul_player_nav(p);
+        uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
+        int t = g_td5.mp_mode_config.team_of_slot[p];
+        s_mp_pane_nav_prev[p] = bits;
+        if (edge & 1) { t = (t + teams - 1) % teams; g_td5.mp_mode_config.team_of_slot[p] = t; frontend_play_sfx(2); }
+        if (edge & 2) { t = (t + 1) % teams;         g_td5.mp_mode_config.team_of_slot[p] = t; frontend_play_sfx(2); }
+    }
+
+    if (s_input_ready && s_button_index >= 0) {     /* host OK -> race */
+        td5_plat_input_flush_nav();
+        TD5_LOG_I(LOG_TAG, "MP team select: confirmed -> car select");
+        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        return;
+    }
+    if (frontend_check_escape()) {
+        td5_plat_input_flush_nav();
+        td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+    }
+}
+
+void frontend_mp_team_select_render(float sx, float sy) {
+    int p, n = s_num_human_players;
+    float y = 112.0f;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    fe_race_draw_screen_title("CHOOSE YOUR TEAM", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
+                              MP_TITLE_GOLD, sx, sy);
+    mp_pos_small_centered(320.0f * sx, 82.0f * sy,
+                          "Each player: LEFT/RIGHT to pick a team", 0xFFC0C8D0u, sx, sy);
+    for (p = 0; p < n; p++) {
+        char tb[16];
+        int t = (p < TD5_NET_MAX_PLAYERS) ? g_td5.mp_mode_config.team_of_slot[p] : 0;
+        snprintf(tb, sizeof tb, "TEAM %d", t + 1);
+        mp_roleselect_row(sx, sy, p, y, tb);
+        y += 34.0f;
     }
 }
 

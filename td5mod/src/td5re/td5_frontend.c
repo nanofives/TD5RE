@@ -117,6 +117,8 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [35] */ Screen_MpModeVote,         /* MP game-mode vote (2026-06-22)       */
     /* [36] */ Screen_MpModeConfig,       /* MP per-mode options (2026-06-22)     */
     /* [37] */ Screen_CupWinners,         /* cup final standings/podium (2026-06-22) */
+    /* [38] */ Screen_MpCopRoles,         /* cop/suspect role pick (2026-06-22)      */
+    /* [39] */ Screen_MpTeamSelect,       /* cup team pick (2026-06-22)              */
 };
 
 /* ========================================================================
@@ -9474,6 +9476,18 @@ void td5_frontend_render_ui_rects(void) {
         case TD5_SCREEN_CUP_WINNERS:
             { extern void frontend_cup_winners_render(float sx, float sy);
               frontend_cup_winners_render(sx, sy); }
+            break;
+        case TD5_SCREEN_MP_COP_ROLES:
+            { extern void frontend_mp_cop_roles_render(float sx, float sy);
+              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+              frontend_mp_cop_roles_render(sx, sy);
+              frontend_mp_setup_disconnect_render(sx, sy); }
+            break;
+        case TD5_SCREEN_MP_TEAM_SELECT:
+            { extern void frontend_mp_team_select_render(float sx, float sy);
+              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
+              frontend_mp_team_select_render(sx, sy);
+              frontend_mp_setup_disconnect_render(sx, sy); }
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,
