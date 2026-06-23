@@ -2819,41 +2819,49 @@ void Screen_MpModeVote(void) {
         return;
     }
 
-    /* HOST highlight (standard nav for kbd/mouse, pad-0 for a gamepad host). */
-    mp_host_input(&move, &hdelta, &confirm, &back);
-    if (move) {
-        s_selected_button += move;
-        frontend_play_sfx(2);
-    }
-    if (s_selected_button < 0) s_selected_button = 0;
-    if (s_selected_button >= TD5_MP_MODE_COUNT) s_selected_button = TD5_MP_MODE_COUNT - 1;
-    /* mouse click selects the clicked button directly */
-    if (s_input_ready && s_button_index >= 0 && s_button_index < TD5_MP_MODE_COUNT)
-        s_selected_button = s_button_index;
-    s_mode_vote[0] = s_selected_button;          /* host pick == highlight */
+    /* Per-player votes — EACH local player moves only their OWN arrow via their
+     * OWN device (mp_simul_player_nav per player). Forcing the host highlight
+     * from s_mode_vote[0] below OVERRIDES the shared standard nav, so another
+     * player's pad can no longer drag the host's highlight (fixes the
+     * both-arrows-move cross-talk). */
+    {
+        int host_lock = 0, host_back = 0;
+        (void)move; (void)hdelta; (void)confirm; (void)back;
+        for (p = 0; p < n; p++) {
+            uint32_t bits = mp_simul_player_nav(p);
+            uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
+            s_mp_pane_nav_prev[p] = bits;
+            if (edge & 4) { if (s_mode_vote[p] > 0)                  { s_mode_vote[p]--; frontend_play_sfx(2);} }
+            if (edge & 8) { if (s_mode_vote[p] < TD5_MP_MODE_COUNT-1){ s_mode_vote[p]++; frontend_play_sfx(2);} }
+            if (p == 0) {                       /* host: A=lock, B=back */
+                if (edge & 0x10) host_lock = 1;
+                if (edge & 0x20) host_back = 1;
+            }
+        }
+        if (s_mode_vote[0] < 0) s_mode_vote[0] = 0;
+        if (s_mode_vote[0] >= TD5_MP_MODE_COUNT) s_mode_vote[0] = TD5_MP_MODE_COUNT - 1;
+        s_selected_button = s_mode_vote[0];     /* host highlight = host pick */
 
-    /* OTHER local players vote with their own pads (cannot lock — host decides). */
-    for (p = 1; p < n; p++) {
-        uint32_t bits = mp_simul_player_nav(p);
-        uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
-        s_mp_pane_nav_prev[p] = bits;
-        if (edge & 4) { if (s_mode_vote[p] > 0) { s_mode_vote[p]--; frontend_play_sfx(2);} }
-        if (edge & 8) { if (s_mode_vote[p] < TD5_MP_MODE_COUNT-1) { s_mode_vote[p]++; frontend_play_sfx(2);} }
-    }
+        /* Mouse click / keyboard ENTER on a mode button = host lock. */
+        if (s_input_ready && s_button_index >= 0 && s_button_index < TD5_MP_MODE_COUNT) {
+            s_mode_vote[0] = s_button_index; s_selected_button = s_button_index; host_lock = 1;
+        }
+        if (frontend_check_escape()) host_back = 1;
 
-    if (confirm) {                               /* host locks (kbd/mouse/pad) */
-        mp_mode_config_apply_defaults(s_selected_button);
-        frontend_play_sfx(3);                    /* "locked" cue */
-        td5_plat_input_flush_nav();
-        TD5_LOG_I(LOG_TAG, "MP mode vote: host locked mode=%d", s_selected_button);
-        td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
-        return;
-    }
-    if (back) {                                  /* host back -> confirm to lobby */
-        s_mode_back_confirm = 1;
-        frontend_play_sfx(2);
-        td5_plat_input_flush_nav();
-        s_mode_host_prev = mp_simul_player_nav(0);
+        if (host_lock) {
+            mp_mode_config_apply_defaults(s_mode_vote[0]);
+            frontend_play_sfx(3);               /* "locked" cue */
+            td5_plat_input_flush_nav();
+            TD5_LOG_I(LOG_TAG, "MP mode vote: host locked mode=%d", s_mode_vote[0]);
+            td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+            return;
+        }
+        if (host_back) {
+            s_mode_back_confirm = 1;
+            frontend_play_sfx(2);
+            td5_plat_input_flush_nav();
+            for (p = 0; p < n; p++) s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        }
     }
 }
 
@@ -2877,9 +2885,9 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
         float cx  = (float)MV_BX + MV_BW * 0.5f;
         int   stack;
         /* Two-line label, block-centred on the button (on top of the frame). */
-        td5_vui_text_centered(cx * sx, (byp + 11.0f) * sy,
+        td5_vui_text_centered(cx * sx, (byp + 5.0f) * sy,
                               k_mp_mode_names[m], 0xFFFFFFFFu, sx, sy);
-        mp_pos_small_centered(cx * sx, (byp + 37.0f) * sy,
+        mp_pos_small_centered(cx * sx, (byp + 29.0f) * sy,
                               k_mp_mode_desc[m], 0xFFB8C0CCu, sx, sy);
         /* Per-player vote arrows on the LEFT, vertically centred. */
         stack = 0;
@@ -2946,11 +2954,11 @@ static int mp_cfg_build(MpCfgOpt *o) {
     return n;
 }
 
-#define CFG_BX  150      /* option-row x      */
-#define CFG_BW  340      /* option-row width  */
-#define CFG_BH  30       /* option-row height */
+#define CFG_BX  120      /* option-row x      */
+#define CFG_BW  400      /* option-row width  */
+#define CFG_BH  32       /* option-row height */
 #define CFG_Y0  96       /* first option row  */
-#define CFG_GAP 38       /* row pitch         */
+#define CFG_GAP 40       /* row pitch         */
 
 void Screen_MpModeConfig(void) {
     MpCfgOpt opts[MP_CFG_MAX_OPTS];
@@ -3043,31 +3051,33 @@ void Screen_MpModeConfig(void) {
 void frontend_mp_mode_config_render(float sx, float sy) {
     MpCfgOpt opts[MP_CFG_MAX_OPTS];
     int mode = g_td5.mp_mode_config.mode, count, i;
-    const char *name = (mode >= 0 && mode < TD5_MP_MODE_COUNT) ? k_mp_mode_names[mode] : "?";
-    char vb[40];
+    const char *name = (mode >= 0 && mode < TD5_MP_MODE_COUNT) ? k_mp_mode_names[mode] : "MODE";
+    char title[48], vb[40];
+    const float valc = (float)CFG_BX + (float)CFG_BW - 78.0f;   /* value column centre */
 
-    fe_race_draw_screen_title("GAME MODE OPTIONS", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
+    /* Title = "<MODE> OPTIONS" (e.g. TIME TRIAL OPTIONS), top-left, #E3D708. */
+    snprintf(title, sizeof title, "%s OPTIONS", name);
+    fe_race_draw_screen_title(title, MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
-    td5_vui_text(((float)CFG_BX) * sx, 70.0f * sy, name, 0xFFFFFFFFu, sx, sy);
 
     count = mp_cfg_build(opts);
     for (i = 0; i < count; i++) {
         MpCfgOpt *o = &opts[i];
-        float byp  = (float)(CFG_Y0 + i * CFG_GAP);
-        float ty   = byp + CFG_BH * 0.5f - 8.0f;
-        float valc = (float)CFG_BX + CFG_BW * 0.72f;
-        int   v = *o->val, sel = (i == s_selected_button);
+        float byp = (float)(CFG_Y0 + i * CFG_GAP);
+        float ty  = byp + 1.0f;                       /* row-top ~= vertically centred */
+        float ay  = byp + CFG_BH * 0.5f - 7.0f;       /* arrow row-centre */
+        int   v = *o->val;
+        /* label (left) — never yellow */
         td5_vui_text(((float)CFG_BX + 16.0f) * sx, ty * sy, o->label, 0xFFE6ECF4u, sx, sy);
+        /* value (right) — WHITE, never yellow */
         if (o->enum_labels && v >= 0 && v < o->enum_count)
             snprintf(vb, sizeof vb, "%s", o->enum_labels[v]);
         else
             snprintf(vb, sizeof vb, "%d", v);
-        td5_vui_text_centered(valc * sx, ty * sy, vb,
-                              sel ? MP_TITLE_GOLD : 0xFFC0C8D0u, sx, sy);
-        if (sel) {   /* ◄ ► around the focused value */
-            td5_vui_arrow((valc - 34.0f) * sx, (ty - 1.0f) * sy, 11.0f * sx, 14.0f * sy, 0, MP_TITLE_GOLD);
-            td5_vui_arrow((valc + 26.0f) * sx, (ty - 1.0f) * sy, 11.0f * sx, 14.0f * sy, 1, MP_TITLE_GOLD);
-        }
+        td5_vui_text_centered(valc * sx, ty * sy, vb, 0xFFFFFFFFu, sx, sy);
+        /* quick-race-style BLUE selector arrows around the value (every row). */
+        td5_vui_arrow((valc - 38.0f) * sx, ay * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
+        td5_vui_arrow((valc + 28.0f) * sx, ay * sy, 12.0f * sx, 14.0f * sy, 1, 0xFF7995FFu);
     }
     if (count == 0)
         mp_pos_small_centered(320.0f * sx, 150.0f * sy,
