@@ -467,6 +467,34 @@ Always safe to re-run (locked slots are logged-skipped). Failure here is non-fat
 
 ---
 
+## Step 7e: Publish the release to the LAN server (non-blocking)
+
+**Every `/end` is a release.** The fresh `td5re_release.exe` (copied to the project root in Step 5b) plus `re/assets/` are mirrored to the Pi at `mariano-server.local:8088`, so `update.bat` on every game machine pulls the new build on its next run. `deploy_release.sh` regenerates `manifest.json`, diffs it against the server, and uploads **only changed files** (incremental — a code-only session ships just the exe + manifest), then restarts the nginx host.
+
+This runs **after** the push — the ship is already done in Step 7c. A failure here (Pi offline, SSH key absent, network down) is **non-fatal**: it is reported and the session still closes shipped. Set `TD5RE_SKIP_PUBLISH=1` to skip entirely (e.g. when working away from the LAN).
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+if [ "${TD5RE_SKIP_PUBLISH:-0}" = "1" ]; then
+    PUBLISH="skipped (TD5RE_SKIP_PUBLISH=1)"
+    echo "${PUBLISH}"
+elif bash scripts/deploy_release.sh; then
+    PUBLISH="published to mariano-server.local:8088 — game machines get it on next update.bat"
+else
+    RC=$?
+    if [ "${RC}" -eq 2 ]; then
+        PUBLISH="SKIPPED — Pi unreachable. Run 'bash scripts/deploy_release.sh' when it's online."
+    else
+        PUBLISH="FAILED (rc=${RC}) — ship is safe; re-run 'bash scripts/deploy_release.sh' manually."
+    fi
+    echo "${PUBLISH}"
+fi
+```
+
+A non-zero result here **never** undoes the ship — `/end` already merged and pushed in Step 7c. The publish is best-effort mirroring on top of an already-completed release.
+
+---
+
 ## Step 8: Session close report
 
 ```
@@ -477,6 +505,7 @@ Conflicts resolved this session: <files + one-line how, or 'none'>
 Push:     origin/master in sync
 Worktree: torn down / still registered (locked — will sweep next /end)
 Binaries: td5re.exe + td5re_release.exe copied to project root from the worktree build
+Published: ${PUBLISH}   (LAN server — game machines update via update.bat)
 
 Deferred to memory:    <new TODO entries, or 'none'>
 Resolved this session:  <resolved TODOs, or 'none'>
@@ -500,4 +529,5 @@ Next: <run /fix for deferred stubs | resume a leftover | nothing pending>
 - **Teardown is immediate and junction-safe.** Right after push, before housekeeping. Always pre-unlink the mingw junction with the PowerShell reparse-delete (never `cmd //c rmdir` on this host), verify it's gone, only then `git worktree remove --force`, with pre/post canaries. Never `rm -rf` a worktree path. Never `git branch -D` here.
 - **Housekeeping never blocks the ship and never destroys unmerged work.** Step 7 runs after the worktree is gone; it deletes only branches/worktrees fully contained in master and reports everything else. Skip the worktree-closing parts while sibling `fix-*` worktrees are active.
 - **`/end` ends with `origin/master..master` empty.** The final push (Step 7c) is the last git action. Never report shipped while commits are unpushed.
+- **Every `/end` auto-publishes the release to the LAN server (Step 7e).** After the push, `deploy_release.sh` mirrors `td5re_release.exe` + `re/assets/` to the Pi (`mariano-server.local:8088`, incremental upload). Non-blocking: a Pi-offline/SSH failure (clean exit 2) or any other error is reported, never undoes the ship. Skip with `TD5RE_SKIP_PUBLISH=1`. This is what keeps the downstairs game machines from going stale — they pull the new build via `update.bat`.
 - **Never commit `td5re.ini`, `log/`, build artifacts, or `*.td5` saves.** Stage by explicit allowlist only — never `git add -A`/`.`. `td5re_release.ini` IS tracked; `td5re.ini` is NOT.

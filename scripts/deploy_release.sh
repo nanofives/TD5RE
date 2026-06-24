@@ -19,6 +19,16 @@ SSH_OPTS="-o ConnectTimeout=15 -o BatchMode=yes -o StrictHostKeyChecking=accept-
 SSH_CMD="ssh -i $SSH_KEY $SSH_OPTS"
 META_FILES=(td5re_release.exe td5re_release.ini td5re_update.ps1 update.bat manifest.json)
 
+# Pre-flight: confirm the Pi answers over SSH BEFORE the expensive manifest hash
+# (SHA-256 over ~600 MB of re/assets). Exit 2 (distinct from a real failure) so
+# callers — including /end Step 7e — can treat "Pi off" as a clean skip, not an error.
+echo "[+] Pre-flight: checking $PI_HOST is reachable over SSH ..."
+if ! $SSH_CMD "$PI_HOST" true 2>/dev/null; then
+    echo "[!] $PI_HOST not reachable (SSH key: $SSH_KEY). Nothing was published."
+    echo "    Re-run 'bash scripts/deploy_release.sh' when the Pi is online."
+    exit 2
+fi
+
 echo "[+] (1/6) Regenerating manifest.json ..."
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$ROOT/scripts/make_release_manifest.ps1")"
 

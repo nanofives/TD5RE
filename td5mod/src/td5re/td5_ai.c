@@ -6255,6 +6255,13 @@ static int ai_player_span_trailing(void)
     return ext;
 }
 
+/* [traffic one-way] Forward decl — defined next to the other trf_* knobs below.
+ * When on, every traffic lane is forced to head down-track (polarity 0) so all
+ * traffic flows the SAME direction (user: "the orientation should make the
+ * traffic all head the same way"). Used by the legacy queue spawn paths here
+ * AND the dynamic spawner's lane-direction / cross-traffic helpers. */
+static int trf_oneway_traffic(void);
+
 void td5_ai_recycle_traffic_actor(void) {
     int       racer_count;
     int       best_slot = 0;
@@ -6391,7 +6398,10 @@ void td5_ai_recycle_traffic_actor(void) {
      * Prior port also wrote dword 0x25 (RS_DIRECTION_POLARITY_LEGACY) but that
      * field has no references in the original listing — the defensive
      * dual-write was unnecessary. */
-    rs[RS_ROUTE_DIRECTION_POLARITY] = (int32_t)(q_flags & 1u);
+    /* [traffic one-way] Force polarity 0 so this car follows the route in the
+     * down-track direction; otherwise honour the authored TRAFFIC.BUS bit. */
+    rs[RS_ROUTE_DIRECTION_POLARITY] =
+        trf_oneway_traffic() ? 0 : (int32_t)(q_flags & 1u);
     (void)rs_bytes;
 
     /* dword at rs+0x68 = best_slot*4 + 0x10 [0x00435497]. Purpose unclear
@@ -6444,9 +6454,11 @@ void td5_ai_recycle_traffic_actor(void) {
              * with the +0x800 bias as the original does. */
             td5_track_compute_heading((TD5_Actor *)a);
 
-            /* [0x004356a6-bb] If polarity flag set, add 0x80000 to yaw. */
+            /* [0x004356a6-bb] If polarity flag set, add 0x80000 to yaw (180°
+             * flip = oncoming heading). Suppressed in one-way mode so the car
+             * faces down-track like all other traffic. */
             yaw_pack = ACTOR_I32(a, ACTOR_YAW_ACCUM);
-            if ((q_flags & 1u) != 0u) {
+            if (!trf_oneway_traffic() && (q_flags & 1u) != 0u) {
                 ACTOR_I32(a, ACTOR_YAW_ACCUM) = yaw_pack + 0x80000;
             }
 
@@ -6509,10 +6521,11 @@ void td5_ai_recycle_traffic_actor(void) {
                     (int32_t *)(a + ACTOR_WORLD_POS_X));
             }
 
-            /* [0x00435568-0x00435690 mirror] heading + yaw + polarity. */
+            /* [0x00435568-0x00435690 mirror] heading + yaw + polarity.
+             * One-way mode suppresses the 180° oncoming flip. */
             td5_track_compute_heading((TD5_Actor *)a);
             yaw_pack = ACTOR_I32(a, ACTOR_YAW_ACCUM);
-            if ((q_flags & 1u) != 0u) {
+            if (!trf_oneway_traffic() && (q_flags & 1u) != 0u) {
                 ACTOR_I32(a, ACTOR_YAW_ACCUM) = yaw_pack + 0x80000;
             }
 
@@ -6742,7 +6755,10 @@ void td5_ai_init_traffic_actors(void) {
         queue_byte2 = qp[2];
         queue_byte3 = qp[3];
         orig_queue_span = (int)queue_span;
-        polarity_bit = (int)queue_byte2 & 1;
+        /* [traffic one-way] Force forward heading; otherwise honour TRAFFIC.BUS
+         * bit 0. Zeroing here propagates to the polarity store, both yaw-flip
+         * sites, and the diagnostic log below. */
+        polarity_bit = trf_oneway_traffic() ? 0 : ((int)queue_byte2 & 1);
 
         /* 0x435989-9d: common writes — polarity, local_c, RECOVERY_STAGE=0,
          * DAT_004afc50=0. Polarity goes to dword 0x3F (= gActorRouteDirectionPolarity
@@ -7815,6 +7831,11 @@ static int      s_trf_dyn_oncoming_left;                  /* 1 = oncoming on lef
  * Single-lane spans always drive forward. */
 static int trf_dyn_lane_direction(int lane_count, int lane)
 {
+    /* [traffic one-way] Every lane heads down-track — no oncoming lanes. This is
+     * the single chokepoint for the dynamic spawner: it sets both the spawn
+     * polarity and trf_dyn_lane_change_blocked()'s direction test. */
+    if (trf_oneway_traffic())
+        return 0;
     if (lane_count >= 1 && lane_count <= TRF_DYN_MAX_LANES &&
         lane >= 0 && lane < lane_count &&
         s_trf_dyn_lane_dir[lane_count][lane] >= 0)
@@ -8188,6 +8209,10 @@ static int trf_dyn_branch_spawn_ok(void)
 static int trf_cross_traffic_x16(void)
 {
     static int x16 = -2;
+    /* [traffic one-way] One-way mode means no oncoming cars at all, including
+     * the junction-branch cross-traffic — behaves exactly like
+     * TD5RE_CROSS_TRAFFIC=0 (same lockstep-RNG consumption). */
+    if (trf_oneway_traffic()) return 0;
     if (x16 == -2) {
         const char *e = getenv("TD5RE_CROSS_TRAFFIC");
         double f;
@@ -8230,6 +8255,40 @@ static int trf_brake_near_spans(void)
          * ahead and chain-stopped). The TTC closing-rate formula handles anything
          * beyond this. Env TD5RE_TRAFFIC_BRAKE_NEAR. */
         s = e ? atoi(e) : 8;
+        if (s < 1) s = 1;
+    }
+    return s;
+}
+
+/* [traffic one-way] Make ALL traffic head the SAME direction (down-track). When
+ * on, every lane's drive direction is forced forward (polarity 0): no oncoming
+ * lanes, no junction cross-traffic, and no 180° heading flip on queue spawns.
+ * DEFAULT ON (user: "the orientation should make the traffic all head the same
+ * way"). TD5RE_TRAFFIC_ONEWAY=0 restores the authored two-way / cross-traffic. */
+static int trf_oneway_traffic(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_ONEWAY");
+        s = (e && e[0]) ? (atoi(e) != 0) : 1;   /* default ON */
+        TD5_LOG_I(LOG_TAG, "traffic_oneway knob: TD5RE_TRAFFIC_ONEWAY -> %d "
+                  "(1 = all traffic heads down-track; 0 = two-way/cross-traffic)", s);
+    }
+    return s;
+}
+
+/* [traffic pile-up] Hard minimum following gap (in spans). A same-lane peer
+ * directly AHEAD within this many spans forces an unconditional brake — even
+ * when the SmartAI lane-changer found a clear lane to ease into — because the
+ * lane change has a 1-tick latency and easing here would roll the car onto the
+ * peer this tick. Guarantees traffic "keeps some distance" instead of stacking
+ * nose-to-tail. Default 3; TD5RE_TRAFFIC_MIN_GAP tunes it (>=1). */
+static int trf_min_gap_spans(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_MIN_GAP");
+        s = e ? atoi(e) : 3;
         if (s < 1) s = 1;
     }
     return s;
@@ -9759,15 +9818,23 @@ void td5_ai_update_traffic_route_plan(int slot) {
          * through to the TTC formula below, which brakes only when actually closing.
          * Env TD5RE_TRAFFIC_BRAKE_NEAR (default 4) tunes the gate width. */
         if (span_diff_dir > -4 && span_diff_dir < trf_brake_near_spans() && self_speed > 0) {
-            if (smart_ease) {
-                /* Clear lane found — keep rolling (gentle throttle) while the
-                 * lane bias above steers around the obstacle next tick. */
+            /* [traffic pile-up] A peer directly AHEAD within the minimum gap
+             * overrides the smart-ease lane change: brake now and keep distance.
+             * Easing here (brake off, gentle throttle) would roll us onto the peer
+             * this tick because the lane change has a 1-tick latency — that is the
+             * "traffic driving onto each other" the user reported. Once there is
+             * room (gap > min), the ease/lane-change path resumes. */
+            int too_close = (span_diff_dir > 0 && span_diff_dir <= trf_min_gap_spans());
+            if (smart_ease && !too_close) {
+                /* Clear lane found AND enough room — keep rolling (gentle throttle)
+                 * while the lane bias above steers around the obstacle next tick. */
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0x28; /* eased cruise */
             } else {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
-                TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d proximity gate span_diff=%d", slot, span_diff_dir);
+                TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d proximity gate span_diff=%d too_close=%d",
+                          slot, span_diff_dir, too_close);
             }
             goto ttc_done;
         }
@@ -9793,9 +9860,13 @@ void td5_ai_update_traffic_route_plan(int slot) {
         /* Brake condition [CONFIRMED @ 0x436561–0x43656E]:
          * ttc - 8 <= speed_shifted  &&  ttc >= 0  &&  self_speed > 0 */
         if (iVar13 - 8 <= speed_shifted && iVar13 > -1 && self_speed > 0) {
-            if (smart_ease) {
+            /* [traffic pile-up] Same minimum-gap floor as the proximity gate: a
+             * peer within the min gap directly ahead brakes regardless of a
+             * found lane, so closing traffic keeps distance instead of overlapping. */
+            int too_close = (span_diff_dir > 0 && span_diff_dir <= trf_min_gap_spans());
+            if (smart_ease && !too_close) {
                 /* [S20 smart-traffic] ease instead of hard brake — a clear lane
-                 * exists, so slow gently and steer around next tick. */
+                 * exists and there is room, so slow gently and steer around next tick. */
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0x28;
             } else {

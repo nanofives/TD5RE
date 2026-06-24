@@ -3703,10 +3703,21 @@ int td5_game_init_race_session(void) {
         memset(&s_active_checkpoint, 0, sizeof(s_active_checkpoint));
         s_active_checkpoint.checkpoint_count = (uint16_t)n;
         s_active_checkpoint.initial_time     = (uint16_t)(((cp_secs & 0xFF) << 8) | 0x3B);
+        /* [FIX checkpoint-timer 2026-06-23] On a TD6 P2P track the FINISH is a
+         * SEPARATE span (s_td6_finish_span), so every synthesized banner is an
+         * intermediate checkpoint that must grant time (the user reported "passing
+         * a checkpoint on London doesn't add more time"). Only on a TD6 circuit
+         * (no separate finish span) is the last cp the lap/finish line and so
+         * bonus-less. Previously the last cp was always treated as the bonus-less
+         * finish, which on London's separate-finish P2P silently dropped the 4th
+         * banner's bonus even before the crossing-side bug below. */
+        int last_cp_is_finish = (s_td6_finish_span <= 0);
         for (int ci = 0; ci < n; ci++) {
             s_active_checkpoint.checkpoints[ci].span_threshold = (uint16_t)s_td6_cp_spans[ci];
             s_active_checkpoint.checkpoints[ci].time_bonus =
-                (ci < n - 1) ? (uint16_t)((bonus_secs & 0xFF) << 8) : 0;  /* last cp = finish */
+                (last_cp_is_finish && ci == n - 1)
+                    ? 0
+                    : (uint16_t)((bonus_secs & 0xFF) << 8);
         }
         s_levelinf_checkpoint_config = 1;   /* enable the per-tick checkpoint watch (gate @ 6746) */
         g_special_encounter          = 1;   /* enable the timer decrement + the HUD digit */
@@ -4626,7 +4637,14 @@ int td5_game_run_race_frame(void) {
             advance_pending_finish_state(pf, frame_accum);
             /* [MP per-viewport finish] Capture this slot's place the moment it
              * finishes (companion_1 0->1), for its viewport's own indicator. */
-            if (s_slot_state[pf].companion_1 && s_slot_finish_place[pf] == 0) {
+            /* [FIX timeout-DNF 2026-06-23] Don't capture a finishing place for a
+             * slot that DNF'd on the P2P checkpoint timer (companion_2==2) — a
+             * timeout is a loss, so its viewport shows no finishing-position digit
+             * (matches the original routing a timeout to the FAILED screen rather
+             * than a placed result, RE 0x00422480). A genuine finish sets
+             * companion_2==1 and is unaffected. */
+            if (s_slot_state[pf].companion_1 && s_slot_finish_place[pf] == 0 &&
+                s_slot_state[pf].companion_2 != 2) {
                 TD5_Actor *fa = td5_game_get_actor(pf);
                 s_slot_finish_place[pf] = fa ? (int)fa->race_position + 1 : 1;
                 TD5_LOG_I(LOG_TAG, "Viewport finish: slot=%d place=%d",
@@ -6768,6 +6786,27 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
         int idx = s_td6_cp_index[slot];
         if (idx < 9)
             m->lap_split_times[idx] = (int16_t)m->cumulative_timer;
+        /* [FIX checkpoint-timer 2026-06-23] Add the per-checkpoint time bonus to
+         * the P2P countdown bank. The byte-faithful P2P bonus path (~line 7110,
+         * RE basis 0x00409E80: per-actor timer += signed16 record bonus) is
+         * SKIPPED for TD6 P2P tracks because the s_td6_finish_span>0 branch in the
+         * P2P section returns early before reaching it — so London's checkpoint
+         * timer only ever counted DOWN and never gained time at a banner. Apply
+         * the bonus seeded into s_active_checkpoint at race init here, where the
+         * synthesized crossing is registered. timer_ticks is packed hi-byte=whole
+         * seconds and time_bonus was seeded as (secs<<8), so a plain add mirrors
+         * the original's `timer += bonus`. Gated on g_special_encounter so it only
+         * fires when the TD6 checkpoint timer is actually enabled+seeded. */
+        if (g_special_encounter != 0 &&
+            idx < (int)s_active_checkpoint.checkpoint_count) {
+            int16_t bonus = (int16_t)s_active_checkpoint.checkpoints[idx].time_bonus;
+            if (bonus != 0) {
+                m->timer_ticks += bonus;
+                TD5_LOG_I(LOG_TAG,
+                          "TD6 checkpoint bonus: slot=%d cp=%d +%ds (packed=%d) -> timer_ticks=%d",
+                          slot, idx, (int)(bonus >> 8), (int)bonus, (int)m->timer_ticks);
+            }
+        }
         s_td6_cp_index[slot] = (uint8_t)(idx + 1);
         TD5_LOG_I(LOG_TAG,
                   "TD6 checkpoint: slot=%d cp=%d/%d span=%d timer=%d",
@@ -7664,15 +7703,23 @@ void td5_game_begin_fade_out(int param) {
          * the normal full-screen fade). Excluding it here makes BACK TO LOBBY
          * play the same plain black wipe across ALL viewports as QUIT TO MENU.
          * [MP back-to-lobby transition 2026-06-13] */
-        int star_fired = (player && player->race_position == 0 &&
+        /* [FIX timeout-DNF 2026-06-23] A P2P checkpoint-timer expiry is a LOSS, not
+         * a win, even if the player was still leading on track when time ran out
+         * (race_position==0). The original suppresses the victory star here because
+         * a timeout leaves race_position != 0 (the 0x0042CC20 gate has no dedicated
+         * DNF flag — RE-confirmed). The port keeps the leader at race_position 0 on
+         * timeout, so gate explicitly on the DNF marker the timeout path sets
+         * (tick_pending_finish_timer: companion_2 = 2; a real finish sets it to 1). */
+        int local_dnf = (s_slot_state[0].companion_2 == 2);
+        int star_fired = (player && player->race_position == 0 && !local_dnf &&
                           !s_pause_exit_pending && !s_pause_lobby_pending &&
                           !td5_game_is_cinematic_race());
         /* DIAG (race-finish-transition /fix): make the star-gate decision observable. */
         TD5_LOG_I(LOG_TAG,
-                  "STAR-GATE: param=%d net=%d gt=%d drag=%d race_position=%d pause_exit=%d -> star=%s",
+                  "STAR-GATE: param=%d net=%d gt=%d drag=%d race_position=%d pause_exit=%d dnf=%d -> star=%s",
                   param, (int)g_td5.network_active, (int)g_td5.game_type,
                   (int)g_td5.drag_race_enabled, rp, (int)s_pause_exit_pending,
-                  star_fired ? "FIRED" : "skipped");
+                  local_dnf, star_fired ? "FIRED" : "skipped");
         if (star_fired) {
             td5_hud_reset_radial_pulse();
             /* [CONFIRMED @ 0x0042cc74] orig sets g_raceEndRadialPulseEnabled=1
@@ -7899,6 +7946,22 @@ int td5_game_get_victory_position(void) {
      * off s_slot_finish_place, which a quit never sets). */
     if (s_pause_exit_pending || s_pause_lobby_pending || s_pause_restart_pending)
         return 0;
+    /* [FIX timeout-DNF 2026-06-23] A P2P checkpoint-timer expiry (companion_2==2)
+     * is a LOSS, not a finish — suppress the centered finishing-place digit. The
+     * original routes a timeout to the FAILED results screen with no position
+     * (RE 0x00422480); the port keeps the leader at race_position 0, so key off
+     * the DNF marker instead. The per-viewport genuine-finish path
+     * (s_slot_finish_place) is gated on the same flag at its capture site, so MP
+     * timed-out viewports are covered too. */
+    {
+        int ls = 0;
+        if (g_td5.network_active) {
+            ls = td5_net_local_slot();
+            if (ls < 0 || ls >= TD5_MAX_RACER_SLOTS) ls = 0;
+        }
+        if (s_slot_state[ls].companion_2 == 2)
+            return 0;
+    }
     return s_finish_position_display;
 }
 
