@@ -3076,8 +3076,15 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
         if (g_wanted_msg_timer < 330 || (g_wanted_msg_timer & 1) == 0) {
             /* Objective depends on THIS pane's role: a suspect evades, the cop
              * hunts. (SP wanted / the human-cop pane -> "CHASE THE SUSPECTS".) */
-            const char *msg = (wb_mp_cop && wb_pane_slot != td5_game_cop_chase_cop_slot())
-                              ? "EVADE THE COP" : "CHASE THE SUSPECTS";
+            int wb_is_cop = !(wb_mp_cop && wb_pane_slot != td5_game_cop_chase_cop_slot());
+            const char *msg = wb_is_cop ? "CHASE THE SUSPECTS" : "EVADE THE COP";
+            /* [MP COP CHASE ROLE 2026-06-24] Explicit per-pane role label so each
+             * split-screen player instantly knows whether THEY are the cop or a
+             * suspect ("clarify who's cop, who's suspect"). Cop label gold, suspect
+             * red; drawn on EVERY pane (the objective banner above already loops per
+             * view), so it is no longer P1-only. */
+            const char *role  = wb_is_cop ? "YOU ARE THE COP" : "YOU ARE A SUSPECT";
+            uint32_t    rcol  = wb_is_cop ? 0xFFFFD23Cu : 0xFFFF5050u;
             float pane_h = vp_bottom - vp_top;
             if (pane_h < 1.0f) pane_h = 480.0f;
             float cx = s_view_layout[view_index].center_x;
@@ -3086,10 +3093,41 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
                 float cap = sy * 20.0f;                       /* big single-line banner */
                 float y1  = vp_top + pane_h * 0.24f;          /* caps centre */
                 hud_draw_wanted_banner_line(cx, y1, cap, msg, 0xFFFFFFFFu);
+                if (wb_mp_cop)   /* role label below the objective (clear of top score) */
+                    hud_draw_wanted_banner_line(cx, y1 + cap * 1.35f, cap * 0.78f, role, rcol);
             } else {
                 /* Bitmap fallback (vector_ui off): top, via the queue path. */
                 s_hud_next_text_scale = 1.8f;
                 td5_hud_queue_text(0, (int)cx, (int)(vp_top + 20.0f), 1, "%s", msg);
+                if (wb_mp_cop) {
+                    s_hud_next_text_scale = 1.4f;
+                    td5_hud_queue_text(0, (int)cx, (int)(vp_top + 46.0f), 1, "%s", role);
+                }
+            }
+        }
+    }
+
+    /* [MP COP CHASE ARREST 2026-06-24] When the suspect THIS pane follows has been
+     * fully arrested (wanted damage drained to 0 — see td5_ai_wanted_cop_hit), splash
+     * a big red "ARRESTED" across the centre of that pane. Keyed off the pane's OWN
+     * followed actor (g_actor_slot_map[view_index]) so the arrested player sees it on
+     * THEIR screen — every split-screen pane, not just player 1. Independent of the
+     * objective-banner timer: it holds for as long as the suspect stays busted. */
+    if (g_td5.wanted_mode_enabled != 0 &&
+        g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
+        int arr_slot = g_actor_slot_map[view_index];
+        if (td5_game_cop_chase_is_suspect(arr_slot) &&
+            g_wanted_damage_state[arr_slot] <= 0) {
+            float pane_h = vp_bottom - vp_top;
+            if (pane_h < 1.0f) pane_h = 480.0f;
+            float cx = s_view_layout[view_index].center_x;
+            float cy = vp_top + pane_h * 0.46f;
+            if (td5_hudfont_ready()) {
+                float sy = s_view_layout[view_index].scale_y;
+                hud_draw_wanted_banner_line(cx, cy, sy * 30.0f, "ARRESTED", 0xFFFF2A2Au);
+            } else {
+                s_hud_next_text_scale = 2.6f;
+                td5_hud_queue_text(0, (int)cx, (int)cy, 1, "ARRESTED");
             }
         }
     }
