@@ -1412,6 +1412,12 @@ static int s_banner_cull_keep_pos = 0; /* which screen-winding sign faces the ca
 static int s_banner_cull_revflip  = -1; /* [#9] auto-flip kept side in reverse (env TD5RE_TD6_BANNER_REVFLIP) */
 static int s_banner_align         = -1; /* [START-banner align] -1 uninit; 0 off; 1 on (env TD5RE_BANNER_ALIGN) */
 static int s_banner_align_log     = 0;  /* throttle the per-mesh align log */
+/* [START-banner align] Pending world-space X shift applied by
+ * td5_render_transform_mesh_vertices to OVERHEAD banner verts only (pos_y above
+ * the threshold), so the gantry's ground start-plaza (pos_y~0) is NOT dragged
+ * along. Set per banner mesh in the level draw loop, reset to 0 after. */
+static float s_banner_vshift_x    = 0.0f;
+#define TD6_BANNER_OVERHEAD_Y 1250.0f   /* banner panels sit at Y~2500-4000; ground plaza at Y~0 */
 
 static int td6_is_banner_page(int page)
 {
@@ -2321,10 +2327,18 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
      *
      * Vertex stride: 0x2C (44 bytes). Input XYZ at +0x00, output at +0x0C.
      */
+    /* [START-banner align] When a banner gantry needs lateral re-centring, shift
+     * ONLY its overhead panel verts (pos_y above the threshold) in world X — the
+     * gantry's ground start-plaza (pos_y~0) stays put so it isn't dragged off the
+     * road. Zero for every non-banner mesh (no per-vertex branch cost there). */
+    float bvx = s_banner_vshift_x;
     for (int i = 0; i < count; i++) {
         float px = verts[i].pos_x;
         float py = verts[i].pos_y;
         float pz = verts[i].pos_z;
+
+        if (bvx != 0.0f && py >= TD6_BANNER_OVERHEAD_Y)
+            px += bvx;
 
         verts[i].view_x = px * m[0] + py * m[1] + pz * m[2] + m[9];
         verts[i].view_y = px * m[3] + py * m[4] + pz * m[5] + m[10];
@@ -2834,15 +2848,18 @@ void td5_render_span_display_list(void *display_list_block)
         origin.y = mesh->origin_y * (1.0f / 256.0f);
         origin.z = mesh->origin_z * (1.0f / 256.0f);
 
-        /* [LONDON START BANNER 2026-06-23] Re-centre a TD6 banner gantry over the
-         * road. The whole gantry shifts by ONE common delta = (road-centre X at
-         * the gantry's span) - (gantry group-centre X), so a split START gantry's
-         * two half-panels keep their separation instead of collapsing. Only X is
-         * corrected — Z (longitudinal) and Y (overhead) are authored correctly.
-         * FINISH/checkpoint gantries already sit over their road segment, so their
-         * group-centre == road-centre and the delta is ~0 (skipped). The +/-50000
-         * world-unit window rejects a pathological span mis-match (the far-end road
+        /* [LONDON START BANNER 2026-06-23] Re-centre a TD6 banner gantry's OVERHEAD
+         * panels over the road. The gantry mesh bundles the overhead banner (Y~2500-
+         * 4000) with a ground start-plaza (pages 12/13 at Y~0); only the overhead
+         * panels are mis-placed, so we shift ONLY those (via s_banner_vshift_x in
+         * the vertex transform, Y-gated) and leave the ground plaza where it sits —
+         * shifting the whole mesh dragged the plaza off the road. The shift is one
+         * common delta = (road-centre X at the gantry's span) - (gantry group-centre
+         * X), so a split START gantry's two half-panels keep their separation.
+         * FINISH/checkpoints already sit over their road (group==road -> ~0, skipped).
+         * The +/-50000 window rejects a pathological span mis-match (the far-end road
          * can sit ~1e6 units away) so a banner can never be flung off the map. */
+        s_banner_vshift_x = 0.0f;
         if (s_banner_align && g_active_td6_level > 0 && td6_mesh_uses_banner_page(mesh)) {
             float gx = td6_banner_group_center_x(block, count,
                                                  mesh->bounding_center_z,
@@ -2851,12 +2868,12 @@ void td5_render_span_display_list(void *display_list_block)
             if (td6_banner_roadcenter_x(gx, mesh->bounding_center_z, &rx)) {
                 float bdx = rx - gx;
                 if (bdx > -50000.0f && bdx < 50000.0f && (bdx > 1.0f || bdx < -1.0f)) {
-                    origin.x += bdx;
+                    s_banner_vshift_x = bdx;
                     if (s_banner_align_log < 16) {
                         TD5_LOG_I(LOG_TAG,
-                            "banner align: lvl=%d bc=(%.1f,%.1f) group_x=%.1f road_x=%.1f dx=%.1f",
-                            g_active_td6_level, mesh->bounding_center_x,
-                            mesh->bounding_center_z, gx, rx, bdx);
+                            "banner align: lvl=%d gantry_z=%.0f group_x=%.0f road_x=%.0f dx=%.0f (overhead panels only)",
+                            g_active_td6_level, mesh->bounding_center_z,
+                            gx, rx, bdx);
                         s_banner_align_log++;
                     }
                 }
@@ -2941,6 +2958,7 @@ void td5_render_span_display_list(void *display_list_block)
     s_hk_clip_y = 0.0f;   /* [#20 HK reverse] don't leak the building clip into vehicles/other */
     s_td6_banner_remap_active = 0;  /* [reverse banners] level-geometry pass only */
     s_level_pass_active = 0;        /* [banners] one-sided cull off outside level geometry */
+    s_banner_vshift_x = 0.0f;       /* [START-banner align] never leak into sky/car/other mesh transforms */
 
     if ((s_debug_dl_calls % 500) == 1) {
         TD5_LOG_I(LOG_TAG,
