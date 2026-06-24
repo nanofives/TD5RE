@@ -248,8 +248,13 @@ extern int g_actorSlotForView[TD5_MAX_VIEWPORTS];
  *
  * Two triggers recover a LOCAL HUMAN player's car that is pinned/stuck:
  *   1. MANUAL  — keyboard R / joystick L3 (edge from td5_input layer).
- *   2. AUTOMATIC — stuck for > 3 s (90 ticks): no forward progress AND
- *      near-zero planar speed AND no throttle, for 90 consecutive ticks.
+ *   2. AUTOMATIC — pinned for the dwell (TD5_RECOVERY_STUCK_TICKS): no forward
+ *      progress AND near-zero planar speed AND no throttle/brake AND in actual
+ *      lateral WALL CONTACT (track_contact_flag != 0), for that many ticks.
+ *      The wall-contact requirement is what distinguishes a car genuinely
+ *      pinned against a wall from one merely parked in the open — the latter is
+ *      never auto-recovered (see the FALSE-TRIGGER FIX note at the AUTOMATIC
+ *      trigger below).
  * The reset repositions the actor a few spans back, centred on the track,
  * upright, velocities zeroed, heading aligned to the track forward direction.
  *
@@ -282,7 +287,8 @@ extern int g_actorSlotForView[TD5_MAX_VIEWPORTS];
 /* Per-slot stuck-detection accumulators (racer slots only; humans are racers).
  * s_stuck_ticks counts consecutive "stuck" sim ticks; s_stuck_last_hw is the
  * track_span_high_water observed last tick (forward-progress probe). Reset on
- * any throttle input or forward progress, and after a recovery fires. */
+ * any throttle/brake input, forward progress, non-zero planar speed, or while
+ * the car is NOT in lateral wall contact, and after a recovery fires. */
 static int     s_stuck_ticks[TD5_MAX_RACER_SLOTS];
 static int     s_stuck_last_hw[TD5_MAX_RACER_SLOTS];
 
@@ -13727,16 +13733,36 @@ void td5_physics_update_stuck_recovery(void)
         int32_t planar = (fwd < 0 ? -fwd : fwd) + (lat < 0 ? -lat : lat);
         int near_zero = (planar < TD5_RECOVERY_SPEED_EPS);
 
-        if (throttle_on || braking || progressed || !near_zero) {
-            /* Driver accelerating/braking OR making progress OR still moving -> reset. */
+        /* [FALSE-TRIGGER FIX 2026-06-24 "parked-in-the-open recovery"] A car that
+         * is simply standing still on open road (idle, no input, NOT against a
+         * wall) is NOT "stuck" — nothing is pinning it; the player can drive off
+         * the instant they touch the throttle. The auto-recovery exists only as a
+         * safety net for a car PINNED against a wall it cannot escape, so the
+         * stuck dwell may only accumulate while the car is in actual lateral wall
+         * contact. track_contact_flag (+0x37B) is the port's V2W lateral-contact
+         * marker (0 = none, 1/2 = wall side); it is cleared at (re)spawn and on
+         * every recovery, and is set ONLY when td5_track_resolve_wall_contacts
+         * fires a real lateral penetration — so a car that has not touched a wall
+         * since spawn/recovery reads 0 here and can never be auto-recovered.
+         *
+         * Without this gate, several stationary split-screen players (idle from
+         * the grid, all on open road) tripped the 5 s dwell in lockstep and were
+         * all teleported back together every 5 s ("everyone recovers out of
+         * nowhere"), even though not one of them was stuck on anything. */
+        int wall_contact = (actor->track_contact_flag != 0);
+
+        if (throttle_on || braking || progressed || !near_zero || !wall_contact) {
+            /* Driver accelerating/braking OR making progress OR still moving OR
+             * not pinned against a wall -> not stuck, reset the dwell. */
             s_stuck_ticks[slot] = 0;
             continue;
         }
 
         if (++s_stuck_ticks[slot] >= s_recovery_stuck_ticks) {
             TD5_LOG_I(LOG_TAG,
-                      "auto recovery: slot=%d stuck %d ticks (hw=%d planar=%d)",
-                      slot, s_stuck_ticks[slot], hw, planar);
+                      "auto recovery: slot=%d stuck %d ticks (hw=%d planar=%d wall=%u)",
+                      slot, s_stuck_ticks[slot], hw, planar,
+                      (unsigned)actor->track_contact_flag);
             td5_physics_recover_player(slot);   /* clears the timer */
         }
     }
