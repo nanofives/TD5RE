@@ -7570,8 +7570,48 @@ static void update_race_order(void) {
             int32_t span_b = (s_slot_state[b].state == 3) ? INT32_MIN
                              : (actor_b ? (int32_t)actor_b->track_span_high_water : 0);
 
-            /* Higher span_high = further ahead = better position (lower index) */
-            if (span_a < span_b) {
+            /* Decide whether b ranks ahead of a (swap so the further-along car
+             * gets the lower index / better position). */
+            int swap_ab;
+            if (g_td5.track_type == TD5_TRACK_CIRCUIT) {
+                /* [BUG fix 2026-06-24 — "finished 2nd despite winning" on circuits]
+                 * track_span_high_water (actor+0x86) is an int16_t cumulative span
+                 * counter. The original UpdateRaceOrder @0x0042F5B0 sorts DESC by a
+                 * lap-aware cumulative value [CONFIRMED @0x0042F5E3/0x00443FB0], but
+                 * on a multi-lap circuit the port's int16 high-water can lose its
+                 * cross-lap monotonicity (sign-wrap past 32767, or under-counted
+                 * span crosses), letting an AI on the SAME or a LOWER lap outrank the
+                 * leader — the player crossed the line first yet was written
+                 * race_position 1 ("2nd"). Rank by the INDEPENDENT lap counter
+                 * (checkpoint_index, advanced by the finish-line detector, NOT the
+                 * walker accumulator) FIRST, then by high-water within a lap (where a
+                 * single lap can never overflow int16). For non-overflowing fields
+                 * this is IDENTICAL to the old high-water-only order — high-water is
+                 * monotonic with lap — so working races are unchanged. */
+                int32_t lap_a = (s_slot_state[a].state == 3) ? INT32_MIN
+                                : (int32_t)s_metrics[a].checkpoint_index;
+                int32_t lap_b = (s_slot_state[b].state == 3) ? INT32_MIN
+                                : (int32_t)s_metrics[b].checkpoint_index;
+                if (lap_a != lap_b) {
+                    swap_ab = (lap_a < lap_b);
+                    static int s_lap_rank_logged = 0;
+                    if (!s_lap_rank_logged) {
+                        s_lap_rank_logged = 1;
+                        TD5_LOG_I(LOG_TAG,
+                                  "update_race_order: circuit lap-aware rank active "
+                                  "(slot %d lap=%d hw=%d vs slot %d lap=%d hw=%d)",
+                                  a, (int)lap_a, (int)span_a,
+                                  b, (int)lap_b, (int)span_b);
+                    }
+                } else {
+                    swap_ab = (span_a < span_b);   /* same lap: within-lap progress */
+                }
+            } else {
+                /* P2P: higher span_high = further ahead = better (lower index). */
+                swap_ab = (span_a < span_b);
+            }
+
+            if (swap_ab) {
                 s_race_order[i]     = (uint8_t)b;
                 s_race_order[i + 1] = (uint8_t)a;
                 swapped = 1;

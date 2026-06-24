@@ -2890,6 +2890,11 @@ void td5_hud_set_indicator_state(int view_index, int value)
     s_indicator_state[view_index] = value;
 }
 
+/* Forward decl: the TTF centred-digit helper is defined further down the file
+ * (used by the countdown digit); the finishing-place digit below reuses it. */
+static int hud_draw_centered_ttf_char(char ch, float cx, float cy,
+                                      float cap_px, uint32_t color);
+
 /* ========================================================================
  * Finishing-position center-screen digit (port enhancement, user 2026-05-30)
  *
@@ -2897,14 +2902,37 @@ void td5_hud_set_indicator_state(int view_index, int value)
  * during the race-end victory window. position is 1-based (1 = 1st). The
  * ORIGINAL shows the finishing position only on the post-race results screen
  * (BuildRaceResultsTable @ 0x0040a8c0) — this overlays it on the race view per
- * user request. Reuses the NUMBERS atlas (digit d -> cell (d%5,d/5), 16x24)
- * scaled up, drawn opaque white via the normal translucent-HUD path.
+ * user request.
+ *
+ * [user 2026-06-24: "old number ... instead of the TTF"] Route the digit
+ * through the native HUD TTF (Rajdhani — the SAME face as the race-start
+ * countdown digit and the rest of the in-race vector text) instead of the
+ * legacy NUMBERS bitmap atlas, which read as an "old" pixel digit clashing
+ * with the TTF HUD. Cap height = the bitmap cell's 24px glyph at the view
+ * scale, so the size is unchanged. Gated on the same TD5RE_COUNTDOWN_TTF knob
+ * as the countdown digit; falls back to the NUMBERS bitmap quads below when the
+ * font isn't ready / the knob is off.
  * ======================================================================== */
 void td5_hud_draw_finish_position(int position)
 {
-    if (!s_numbers_atlas) return;
     if (position < 1) position = 1;
     if (position > 9) position = 9;   /* single digit (max 6 racers) */
+
+    /* TTF path (preferred) — same helper the 3/2/1 countdown digit uses. */
+    {
+        int vw_t = (s_cur_view >= 0 && s_cur_view < s_view_count) ? s_cur_view : 0;
+        float sy_t = s_view_layout[vw_t].scale_y;
+        float cx_t = s_view_layout[vw_t].center_x;
+        float cy_t = s_view_layout[vw_t].center_y;
+        if (hud_countdown_ttf_on() &&
+            hud_draw_centered_ttf_char((char)('0' + position), cx_t, cy_t,
+                                       sy_t * 24.0f, 0xFFFFFFFFu)) {
+            return;
+        }
+    }
+
+    /* Bitmap fallback (original NUMBERS-atlas path). */
+    if (!s_numbers_atlas) return;
 
     int digit = position;             /* NUMBERS cell index == digit glyph */
     int col = digit % 5;
