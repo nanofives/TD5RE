@@ -13687,10 +13687,19 @@ void td5_physics_update_stuck_recovery(void)
         }
 
         /* ---- AUTOMATIC trigger ---- */
-        /* Throttle applied? throttle_input_active (+0x378) = 1 when the
-         * accelerator is pressed (auto-gearbox forces it on; manual sets it from
-         * the input bit). Treat any throttle as "driver is trying" -> not stuck. */
-        int throttle_on = (actor->throttle_input_active != 0);
+        /* [ROOT FALSE-TRIGGER FIX 2026-06-24] "Is the driver feeding throttle?" MUST
+         * read the real per-player throttle command, NOT actor +0x378. Despite the
+         * struct label "throttle_input_active", +0x378 is the AUTO/MANUAL GEARBOX flag
+         * (==0 manual, !=0 auto; see the gearbox note ~line 548). Reading it here
+         * meant: AUTOMATIC cars always looked "engaged" (recovery never fired), but
+         * MANUAL cars always looked "not pressing" — so a manual-gearbox car (e.g. a
+         * split-screen player 2 who picked Manual in car-select) got auto-recovered
+         * while slow EVEN WHILE FLOORING THE THROTTLE ("recover out of nowhere").
+         * td5_input_get_throttle(vp) is the actual command: >0 forward, <0
+         * brake/reverse, 0 idle — any non-zero means the driver is on the pedals, so
+         * not stuck. vp is the local input-layer player index. */
+        int16_t thr_cmd = td5_input_get_throttle(vp);
+        int throttle_on = (thr_cmd != 0);
 
         /* [FALSE-TRIGGER FIX 2026-06-23] Active brake/handbrake means the driver is
          * deliberately slowing/stopped (lining up, waiting, easing through a tech
