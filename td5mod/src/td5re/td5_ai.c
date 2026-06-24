@@ -4760,7 +4760,13 @@ static void td5_ai_smart_branch(int slot) {
     }
 
     float skill = td5_ai_smart_skill(slot);
-    int look = 5 + (int)(skill * 8.0f); /* 5..13 spans — react early enough to lane-change before the fork */
+    /* [branch-lookahead 2026-06-23] Decide a few more spans in advance. The fork
+     * is COMMITTED the first tick it enters this range, and the lateral pull
+     * (front-loaded below) starts sliding the car toward the chosen arm from that
+     * tick — so a wider window = earlier, surer branch entry. Raised the floor
+     * 5->7 so even low-skill / fast cars have runway to reach the outer sub-lanes
+     * before the at-crossing route test (td5_track.c cases 8/11). */
+    int look = 7 + (int)(skill * 8.0f); /* 7..15 spans — react early enough to lane-change before the fork */
 
     for (int d = 1; d <= look; d++) {
         int s = span + d;
@@ -4886,7 +4892,24 @@ static void td5_ai_smart_branch(int slot) {
         }
         (void)g_smart_branch_pref;
 
-        double strength = 1.0 - (double)(d - 1) / (double)look; /* stronger near fork */
+        /* [branch-lookahead 2026-06-23] FRONT-LOADED commitment. The car only
+         * routes onto the branch if it is already in the outer sub-lanes when it
+         * CROSSES the fork (the at-crossing sub_lane vs lane_count test in
+         * td5_track.c cases 8/11, faithful to orig UpdateActorTrackPosition
+         * @ 0x004440F0). Sliding there takes several ticks, so the lateral pull
+         * must be substantial for the WHOLE approach, not just at the fork.
+         *
+         * The OLD ramp `1 - (d-1)/look` was ~0 the instant the fork came into
+         * range and only peaked AT the fork: the car committed its decision early
+         * but didn't START turning until it was on top of the fork, couldn't reach
+         * the outer lanes in time, and fell back to the default (right) arm — the
+         * reported "couldn't turn on time" symptom, worst on branch-dense TD6
+         * tracks. Now: ~0.6 strength the moment the fork is detected, ramping to
+         * full at the fork, so the lane brain begins the slide several spans out.
+         * The u-space rate limit downstream still keeps the physical move gentle. */
+        double proximity = (double)(look - d + 1) / (double)look; /* ~1/look far -> 1 at fork */
+        double strength = 0.6 + 0.4 * proximity;                  /* 0.6 far -> 1.0 at fork */
+        if (strength > 1.0) strength = 1.0;
         g_smart_branch_pull[slot] = pref * strength;
         if ((g_ai_frame_counter % 60u) == 0u) {
             TD5_LOG_I(LOG_TAG, "smart_branch: slot=%d fork=%d d=%d type=%d "
@@ -4984,7 +5007,18 @@ static void td5_ai_smart_lane_bias(int slot) {
         if (on_branch) {
             target_u = u_base + se.avoid_u;                /* hold authored branch line + avoid */
         } else if (bpull != 0.0) {
-            double anchor = (bpull < 0.0) ? 0.28 : 0.72;   /* fork placement dominates near forks */
+            /* [branch-lookahead 2026-06-23] Use the SAME proven anchors as the
+             * rays-OFF path below (0.86 take / 0.18 stay). The old rays-ON anchors
+             * (0.72/0.28) were too gentle: near a fork the route line's own u_base
+             * already reaches ~0.78, so a 0.72 take-anchor pulled the car DOWN,
+             * BELOW the line and out of the outer sub-lanes the at-crossing route
+             * test needs (td5_track.c cases 8/11). A committed "take" then silently
+             * fell back to the main arm — observed directly: take=1 cars never left
+             * span 499->500 onto branch 2790. 0.86 sits the car decisively in the
+             * outer lanes so the fork actually routes onto the branch; 0.18 keeps a
+             * "stay" equally decisive below the split threshold. SMART_RAY_MARGIN
+             * (0.06) leaves headroom to 0.94, so neither anchor is clamped. */
+            double anchor = (bpull < 0.0) ? 0.18 : 0.86;
             double w = (bpull < 0.0) ? -bpull : bpull; if (w > 1.0) w = 1.0;
             target_u = u_base * (1.0 - w) + anchor * w + se.avoid_u;
         } else {
