@@ -10522,6 +10522,15 @@ static void frontend_mp_panel_capped(int cols, float *pane_w, float *row_x0) {
  * every pane; "0" = force the pre-2026-06-20 single-column stack everywhere. */
 #define MP_2COL_MIN_W 200.0f   /* pane must be at least this wide to split into two columns */
 #define MP_2COL_MIN_H 150.0f   /* ...and at least this tall to be worth it ("tall enough") */
+/* [big-car 2026-06-23] A WIDE pane that is also this TALL (the default 2-player
+ * side-by-side 2-up pane, ~258x381) has enough vertical room to stack a FULL-WIDTH
+ * car preview over a compact menu. There the cramped two-column card (car squeezed
+ * into a ~46%-wide column, stat bars stretched hundreds of px tall beside it) is the
+ * wrong choice — we route those panes to the single-column stack with an enlarged
+ * car band + shorter buttons so the car picture is as big as possible. Short/wide
+ * up-down + 2x2 panes (~258x190) and narrow 3-col grids fall below this and keep
+ * their existing two-column / classic single-column layout untouched. */
+#define MP_BIGCAR_MIN_H 330.0f
 static int mp_carsel_two_col(float pane_w, float pane_h) {
     static int mode = -1;   /* 0 = force off, 1 = adaptive, 2 = force on */
     if (mode < 0) {
@@ -10698,7 +10707,21 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
          * MORE STATS is opened). */
         mp_simul_load_pane_spec(p, car);
 
-        if (mp_carsel_two_col(pane_w, pane_h)) {
+        /* [big-car 2026-06-23] A tall + wide 2-player 2-up pane (~258x381) skips
+         * the cramped two-column card and uses the enlarged single-column car
+         * stack below so the preview is full-width instead of squeezed into a
+         * ~46%-wide column. Short/2x2/narrow panes are unaffected. */
+        int big_car = (pane_w >= MP_2COL_MIN_W && pane_h >= MP_BIGCAR_MIN_H);
+        {   /* one-shot: confirm the chosen pane layout without per-frame spam */
+            static int s_logged_bigcar = 0;
+            if (!s_logged_bigcar) {
+                s_logged_bigcar = 1;
+                TD5_LOG_I(LOG_TAG, "MP carsel pane layout: n=%d pane=%.0fx%.0f big_car=%d",
+                          n, pane_w, pane_h, big_car);
+            }
+        }
+
+        if (!big_car && mp_carsel_two_col(pane_w, pane_h)) {
             /* TWO-COLUMN card: car image + at-a-glance stat bars on the LEFT, the
              * CAR / PAINT / MORE STATS / transmission / OK stack on the RIGHT. The
              * name banner + car name above still span the full width. Every element
@@ -10750,8 +10773,15 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
              * [stat bars] / MORE STATS / AUTO-MANUAL / OK. The at-a-glance stat
              * panel between PAINT and MORE STATS is the flex element — it shrinks
              * (down to thin label-less bars) when a small split runs out of room
-             * while the 5 buttons keep their [10,28]px size. */
-            float avail_h = pane_h * 0.38f;
+             * while the 5 buttons keep their [10,28]px size.
+             * [big-car 2026-06-23] For the big-car case (tall 2-player 2-up pane)
+             * the car band is enlarged (0.44 vs 0.38) so the preview grows to the
+             * FULL pane width, and the button height cap is lowered (26 vs 28px),
+             * trading the stat-bar/button height the user found "too tall" for a
+             * much bigger car picture. The flex stat panel below absorbs the rest. */
+            float car_frac = big_car ? 0.44f : 0.38f;
+            float btn_cap  = big_car ? 26.0f : 28.0f;
+            float avail_h = pane_h * car_frac;
             float bx = px + 8.0f, bw = pane_w - 16.0f;
             float bsy = pyr + 32.0f + avail_h + 4.0f;
             float room = (pyr + pane_h - 18.0f) - bsy;
@@ -10760,7 +10790,7 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             mp_simul_draw_pane_car(p, cx - (pane_w - 20.0f) * 0.5f, pyr + 32.0f,
                                    pane_w - 20.0f, avail_h, sx, sy);
             if (bh < 10.0f) bh = 10.0f;
-            if (bh > 28.0f) bh = 28.0f;   /* taller buttons where the pane has room */
+            if (bh > btn_cap) bh = btn_cap;   /* taller buttons where the pane has room */
             panel_h = bh * 1.2f;
             if (5.0f * bh + panel_h + 10.0f > room) {   /* buttons hit their floor — shrink the panel */
                 panel_h = room - 5.0f * bh - 10.0f;
