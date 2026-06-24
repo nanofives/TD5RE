@@ -4123,6 +4123,18 @@ void td5_render_actors_for_view(int view_index)
              * chase on a hard crash, but the player should NOT smoke for it (that
              * read as "smoke on my own car"). Only traffic/cops get the smoke. */
             int broken_smoke_ok = !is_racer && td5_ai_actor_is_broken_down(slot);
+            /* [MP COP CHASE ARREST SMOKE 2026-06-24] A fully-arrested suspect (its
+             * wanted damage drained to 0) smokes prominently — the dense roof-lifted
+             * WRECK plume — so the busted car visibly reads as caught. The broken-down
+             * path above is restricted to non-racers (!is_racer), so the human suspect
+             * racers need their own gate here. MP cop chase only; the cop never hits 0
+             * (it takes no ram damage) so it never qualifies. */
+            int arrested_smoke_ok = g_td5.wanted_mode_enabled != 0 &&
+                                    g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
+                                    !g_td5.network_active &&
+                                    slot < TD5_MAX_RACER_SLOTS &&
+                                    td5_game_cop_chase_is_suspect(slot) &&
+                                    g_wanted_damage_state[slot] <= 0;
             if (!(slot == camera_target_slot && camera_preset_active)) {
                 /* Orig 0x40C7A5: SpawnRandomVehicleSmokePuff(actor, slot) —
                  * engine-rev gated random smoke puff. Called per visible
@@ -4144,7 +4156,11 @@ void td5_render_actors_for_view(int view_index)
                     td5_vfx_spawn_random_smoke_puff(actor, view_index);
                     td5_vfx_spawn_rear_wheel_smoke(actor, view_index);
                 }
-                if (broken_smoke_ok) {
+                if (arrested_smoke_ok) {
+                    /* Busted suspect: dense roof-lifted plume (same as a wreck) so
+                     * the arrested car unmistakably reads as caught. */
+                    td5_vfx_spawn_wreck_smoke(actor);
+                } else if (broken_smoke_ok) {
                     /* [#5 2026-06-20] A wrecked traffic/cop car smokes from its
                      * ROOF (dense, lifted column) so a totalled car clearly reads
                      * as dead — not the chassis-centre exhaust wisp. */

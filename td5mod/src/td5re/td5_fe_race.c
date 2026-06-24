@@ -265,6 +265,16 @@ static int  s_car_roster_max;           /* max car index for current mode */
 
 static int  s_car_roster_min;           /* min car index for current mode */
 
+/* [MP COP CHASE 2026-06-24] Per-pane car roster for the simultaneous MP grid. In
+ * cop chase each player's selectable cars depend on their chosen role: the COP
+ * picks a POLICE car only (TD5 33-36 + TD6 cp1-4 46-49), suspects pick the TD5
+ * civilian set (0-32, no police). Every other MP mode keeps the full shared
+ * roster, so these are only consulted when s_mp_simul_copchase is set. */
+static int  s_mp_player_roster_min[TD5_MAX_HUMAN_PLAYERS];
+static int  s_mp_player_roster_max[TD5_MAX_HUMAN_PLAYERS];
+static int  s_mp_player_roster_cop[TD5_MAX_HUMAN_PLAYERS]; /* 1 = police-cars-only pane */
+static int  s_mp_simul_copchase;        /* 1 = grid is a cop-chase race (per-role rosters) */
+
 static int  s_p2_paint;
 
 static int  s_p2_config;
@@ -1408,6 +1418,58 @@ static void mp_simul_cycle_paint(int p, int step, int sfx) {
     }
 }
 
+/* [MP COP CHASE 2026-06-24] Is pane `p` the COP? True only for a cop-chase race
+ * with a HUMAN cop on this player's slot. When the cop is AI, every human evades,
+ * so all panes are suspects. Robust against the role screen being skipped on a
+ * back/re-entry: reads the resolved cop_slot (Screen_MpCopRoles wrote it). */
+static int mp_simul_pane_is_cop(int p) {
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE) return 0;
+    if (g_td5.mp_mode_config.cop_is_ai) return 0;
+    return p == g_td5.mp_mode_config.cop_slot;
+}
+
+/* Does car index `car` belong in pane `p`'s role roster?  Independent of
+ * s_selected_game_type (the MP flow does not reliably stamp game_type==8), so
+ * cop panes test frontend_car_is_cop() directly. Suspect panes (0-32) accept any
+ * non-police index in range; full-roster panes fall back to frontend_car_selectable. */
+static int mp_simul_carsel_valid(int p, int car) {
+    int lo = s_mp_player_roster_min[p], hi = s_mp_player_roster_max[p];
+    if (car < lo || car > hi) return 0;
+    if (s_mp_player_roster_cop[p]) return frontend_car_is_cop(car);     /* police only */
+    if (hi < TD5_BASE_CAR_COUNT)   return 1;                            /* 0-32 civilian */
+    return frontend_car_selectable(car);                               /* full roster */
+}
+
+/* Step pane `p`'s selected car by `delta`, wrapping inside its role roster and
+ * skipping indices that don't match the role (e.g. the cop pane skips the 37-45
+ * non-police gap). Never returns an out-of-range / wrong-role index. */
+static int mp_simul_carsel_step(int p, int cur, int delta) {
+    int lo = s_mp_player_roster_min[p], hi = s_mp_player_roster_max[p];
+    int span = hi - lo + 1;
+    if (span <= 0) return cur;
+    for (int k = 0; k < span; k++) {
+        cur += delta;
+        if (cur < lo) cur = hi;
+        if (cur > hi) cur = lo;
+        if (mp_simul_carsel_valid(p, cur)) return cur;
+    }
+    return cur;
+}
+
+/* Resolve pane `p`'s role roster bounds + cop flag into the per-pane arrays. */
+static void mp_simul_set_pane_roster(int p) {
+    if (s_mp_simul_copchase) {
+        int is_cop = mp_simul_pane_is_cop(p);
+        s_mp_player_roster_cop[p] = is_cop;
+        s_mp_player_roster_min[p] = is_cop ? 33 : 0;
+        s_mp_player_roster_max[p] = is_cop ? TD6_COP_LAST : 32;
+    } else {
+        s_mp_player_roster_cop[p] = 0;
+        s_mp_player_roster_min[p] = 0;
+        s_mp_player_roster_max[p] = TD5_CAR_COUNT - 1;
+    }
+}
+
 static void frontend_mp_simul_carsel_init(void) {
     int p, n = s_num_human_players;
     if (n < 2) n = 2;
@@ -1425,11 +1487,18 @@ static void frontend_mp_simul_carsel_init(void) {
     for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
         td5_input_set_input_source(p, 0);
 
-    /* Full single-race roster (TD6 cars reachable; cycle_step skips locked gaps). */
+    /* Full single-race roster (TD6 cars reachable; cycle_step skips locked gaps).
+     * Kept for any reader of the shared roster; the per-pane rosters below drive
+     * the cop-chase role filter. */
     s_car_roster_min = 0;
     s_car_roster_max = TD5_CAR_COUNT - 1;
 
+    /* [MP COP CHASE 2026-06-24] When this grid is a cop-chase race, each pane gets
+     * a role-specific roster (cop -> police cars, suspect -> civilian cars). */
+    s_mp_simul_copchase = (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE);
+
     for (p = 0; p < n; p++) {
+        mp_simul_set_pane_roster(p);
         /* [MP SESSION PERSISTENCE 2026-06] Phase-1 grid: prefer the session-saved
          * car/paint/color/trans (already mirrored into the live arrays by the
          * lobby START restore) over the per-entry defaults, so a returning player
@@ -1438,10 +1507,11 @@ static void frontend_mp_simul_carsel_init(void) {
          * Gated by TD5RE_MP_SESSION (off / not-yet-valid => defaults, as before). */
         int has_session = (mp_session_is_valid() && p < mp_session_count());
         int car = s_mp_player_car[p];
-        if (car < s_car_roster_min) car = s_car_roster_min;
-        if (car > s_car_roster_max) car = s_car_roster_max;
-        if (!frontend_car_selectable(car))
-            car = frontend_car_cycle_step(car, 1, s_car_roster_min, s_car_roster_max);
+        /* Seed each pane at a car valid for ITS role roster (cop -> police,
+         * suspect -> civilian); step to the next valid one if the saved pick
+         * (or a stale default) lands outside this pane's allowed set. */
+        if (!mp_simul_carsel_valid(p, car))
+            car = mp_simul_carsel_step(p, car, 1);
         s_mp_player_car[p]       = car;
         s_mp_player_ready[p]     = 0;
         if (has_session) {
@@ -1615,7 +1685,13 @@ static void frontend_mp_simul_carsel_update(void) {
             switch (s_mp_pane_btn[p]) {
             case MP_BTN_CAR:
                 if (left || right) {
-                    car = frontend_car_cycle_step(car, right ? +1 : -1, s_car_roster_min, s_car_roster_max);
+                    /* Cop-chase grids cycle inside the pane's role roster (cop ->
+                     * police, suspect -> civilian); every other mode keeps the full
+                     * shared roster cycle (unchanged). */
+                    car = s_mp_simul_copchase
+                        ? mp_simul_carsel_step(p, car, right ? +1 : -1)
+                        : frontend_car_cycle_step(car, right ? +1 : -1,
+                                                  s_car_roster_min, s_car_roster_max);
                     s_mp_player_car[p]   = car;
                     s_mp_player_paint[p] = 0;   /* reset paint on car change (matches single-player) */
                     mp_simul_refresh_pane(p);
