@@ -110,6 +110,12 @@ void td5_game_get_pane_rect(int views, int v, int w, int h,
 int  td5_game_get_pane_cell(int views, int v);
 int  td5_game_split_cell_is_viewport(int views, int cell);
 
+/* [MP audio 2026-06-24] Stereo pan (-10000..+10000) for viewport `vp` from its
+ * pane column in the split grid — outer columns map to L/R so each local
+ * player's car audio can be placed in the speaker matching their on-screen
+ * quadrant. 0 for single-view / horizontal-only splits. In-race only. */
+int  td5_game_get_view_pan(int vp);
+
 /* --- Intro / Legal --- */
 void td5_game_play_intro_movie(void);
 void td5_game_show_legal_screens(void);

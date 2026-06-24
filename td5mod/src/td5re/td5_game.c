@@ -8116,6 +8116,33 @@ int td5_game_get_pane_cell(int views, int v) {
     return s_view_cell[v];
 }
 
+/* [MP audio 2026-06-24] Stereo pan (DirectSound DSBPAN domain: -10000 = full
+ * left .. 0 = centre .. +10000 = full right) for viewport `vp`, derived from
+ * the screen COLUMN of its pane in the resolved split grid. This lets the audio
+ * mixer place each local player's car sound in the speaker matching their
+ * on-screen quadrant: in a 4-pane 2x2 game the left-column players (top-left,
+ * bottom-left) get their engine on the LEFT and the right-column players on the
+ * RIGHT, so every player — not just player 1 — can pick out their own car.
+ *
+ * col 0 -> -TD5_VIEW_PAN_MAX, col (cols-1) -> +TD5_VIEW_PAN_MAX, interior
+ * columns proportional (a 3-wide grid's middle column stays centred). Returns 0
+ * for the single view and for purely horizontal splits (cols == 1: top/middle/
+ * bottom strips cannot be separated by stereo pan). Honours the position-screen
+ * cell permutation via td5_game_get_pane_cell, so it agrees with where the pane
+ * actually renders. Same single-source-of-truth contract as get_pane_rect — call
+ * only in-race (after td5_game_init_viewport_layout). */
+#define TD5_VIEW_PAN_MAX 9000   /* outer columns: strong L/R, not fully hard-panned */
+int td5_game_get_view_pan(int vp) {
+    int views = g_td5.viewport_count;
+    if (views <= 1 || vp < 0) return 0;
+    int cols, rows;
+    td5_game_resolve_split_grid(views, &cols, &rows);
+    if (cols <= 1) return 0;                 /* vertical-only split: no L/R cue */
+    int col = td5_game_get_pane_cell(views, vp) % cols;
+    /* Integer map: (2*col - (cols-1)) / (cols-1) spans exactly [-1, +1]. */
+    return (2 * col - (cols - 1)) * TD5_VIEW_PAN_MAX / (cols - 1);
+}
+
 /* [#9] 1 iff grid cell `cell` is occupied by a player viewport (so the HUD must
  * NOT draw an empty-cell map/standings there); 0 iff the cell is free. The HUD
  * should iterate all cols*rows cells and fill only the cells where this is 0,
