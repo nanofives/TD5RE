@@ -2688,7 +2688,18 @@ void td5_input_ff_update_player(int player)
      * device slot. [PORT ENHANCEMENT 2026-06] no longer capped at js_idx<=1.
      * [MP FF FIX 2026-06-23] dev = device index (per local human); slot = the
      * ACTOR slot that device follows (== device index except on a netplay client
-     * or MP position-select, where the local car is a non-zero actor slot). */
+     * or MP position-select, where the local car is a non-zero actor slot).
+     *
+     * [SPLIT-SCREEN FF FIX 2026-06-24] dev = player is CORRECT here and must NOT
+     * be "faithfully" changed to controller_assignment[player]-1. The original
+     * keyed a GLOBAL DI-device array by g_ffControllerAssignment[player]-1 (a
+     * 1-based chosen JS index) @0x004288E0 / 0x00428A10 because that array was
+     * indexed by enumeration. The port instead binds a PER-SLOT device array
+     * (s_di_joystick[player]) to the player's chosen device at
+     * td5_plat_input_set_device time, so the indirection is already baked in and
+     * dev = player resolves to the player's OWN stick. The only mis-routing was
+     * the port-only XInput user correlation, fixed in td5_xinput_user_for_device
+     * (td5_platform_win32.c). */
     if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
     if (s_ff.controller_assignment[player] == 0) return;
     int dev = player;
