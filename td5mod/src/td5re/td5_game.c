@@ -2292,22 +2292,34 @@ int td5_game_init_race_session(void) {
      *   (2) The gate required split_screen_mode == 0, so split-screen never
      *       loaded traffic meshes (yet td5_ai still spawned the actors — they
      *       were meshless/invisible). The port KEEPS traffic in <=6 splits (see
-     *       the N-way deviation in step 3), so load it there too. Big (>6-racer)
-     *       fields keep traffic at slot base 16; the 12-slot vehicle-mesh array
-     *       (TD5_ACTOR_MAX_TOTAL_SLOTS) can't hold those, so they're excluded by
-     *       gating on g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS (true for
-     *       single + every <=6 split, false for big fields).
+     *       the N-way deviation in step 3), so load it there too.
+     *
+     * [FIX 2026-06-23 big-field-traffic-invisible] Big (>6-racer) fields keep
+     *       traffic at slot base 16 (g_traffic_slot_base..+15). The AI side
+     *       already spawns + simulates those actors (td5_ai_init_traffic_actors,
+     *       gated on g_active_actor_count > g_traffic_slot_base) so the player
+     *       COLLIDES with them — but this loop used to gate on
+     *       g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS and skip the mesh load
+     *       for big fields, so the traffic was collidable-but-INVISIBLE (the
+     *       "8-opponent invisible cars" bug). That gate's premise — a 12-slot
+     *       vehicle-mesh array — is stale: TD5_ACTOR_MAX_TOTAL_SLOTS is now 32
+     *       and td5_asset_load_traffic_model accepts any slot < 32, deriving the
+     *       skin page from (slot - g_traffic_slot_base). So load meshes for ANY
+     *       field whose base spawns traffic — the gate is removed below.
      *
      * Reverse-direction flag (TRAFFIC.BUS entry flags bit 0) is applied in
      * td5_ai_init_traffic_actors / td5_ai_recycle_traffic_actor via +0x80000
      * heading offset [CONFIRMED @ 0x00435786, 0x00435C00]. */
     if (g_td5.traffic_enabled
         && !g_td5.time_trial_enabled
-        && !g_td5.drag_race_enabled
+        && !g_td5.drag_race_enabled) {
         /* [POLICE rewrite 2026-06-19] Traffic now runs in net races, so load its
          * meshes here too (was gated !network_active when net had no traffic) —
-         * otherwise net traffic/cops would be invisible. */
-        && g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS) {
+         * otherwise net traffic/cops would be invisible.
+         * [FIX 2026-06-23 big-field-traffic-invisible] No longer gated on
+         * g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS — see the step-5b header
+         * comment above. The loop below uses g_traffic_slot_base as its base, so
+         * it loads the right slots (6..21 legacy / 16..31 big field) either way. */
         int traffic_loaded = 0;
         /* [POLICE rewrite 2026-06-19] The per-track POLICE car lives at a fixed
          * traffic-pool slot (TD5 = slot 3, the original cop-slot-9 model; TD6
@@ -2319,7 +2331,7 @@ int td5_game_init_race_session(void) {
         int police_pool_slot =
             (td5_asset_td6_city_traffic_base(g_active_td6_level) >= 0) ? 5 : 3;
         for (int ti = 0; ti < TD5_MAX_TRAFFIC_SLOTS; ti++) {
-            int traffic_slot  = g_traffic_slot_base + ti;  /* slots 6..21 (legacy base) */
+            int traffic_slot  = g_traffic_slot_base + ti;  /* 6..21 legacy base / 16..31 big field */
             /* Only 6 distinct traffic car models exist per track; slots past the
              * 6th reuse them (model_slot wraps, matching the skin-page wrap in
              * td5_asset_load_traffic_model). */
@@ -2377,8 +2389,12 @@ int td5_game_init_race_session(void) {
             }
         }
         TD5_LOG_I(LOG_TAG,
-                  "InitRace step 5b/19: traffic vehicle assets loaded (%d/%d slots, track_index=%d)",
-                  traffic_loaded, TD5_MAX_TRAFFIC_SLOTS, g_td5.track_index);
+                  "InitRace step 5b/19: traffic vehicle assets loaded (%d/%d slots, "
+                  "track_index=%d traffic_base=%d %s)",
+                  traffic_loaded, TD5_MAX_TRAFFIC_SLOTS, g_td5.track_index,
+                  g_traffic_slot_base,
+                  g_traffic_slot_base == TD5_LEGACY_RACE_SLOTS ? "legacy-field"
+                                                               : "big-field");
 
         /* [POLICE rewrite 2026-06-19] Resolve + load each track's DEDICATED
          * police mesh so cops read as the right police car (not an ordinary
