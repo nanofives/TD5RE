@@ -4217,6 +4217,11 @@ static void fe_draw_button_frame(float bx, float by, float bw, float bh,
  * car-select grid) tint the focused button with the player's accent colour. */
 static void fe_draw_button_frame_fill(float bx, float by, float bw, float bh,
                                       int bb_state, uint32_t interior, float sx, float sy);
+/* As fe_draw_button_frame_fill but with an explicit rim/corner SCALE (1.0 = the
+ * normal menu look) so a SMALL button can draw a proportionally thinner rim. */
+static void fe_draw_button_frame_fill_scaled(float bx, float by, float bw, float bh,
+                                             int bb_state, uint32_t interior,
+                                             float border_scale, float sx, float sy);
 static int fe_draw_arrow_proc(float x, float y, float w, float h,
                               int dir_right, uint32_t color);
 void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
@@ -6776,8 +6781,17 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     if (frontend_glance_from_fields(f7, f8, f14, &spd, &acc, &hnd))
         frontend_normalize_glance(spd, acc, hnd, &fr[0], &fr[1], &fr[2]);
 
-    /* Frame: the regular blue/unselected button look (non-interactive). */
-    fe_draw_button_frame(bx * sx, by * sy, bw * sx, bh * sy, 1, sx, sy);
+    /* Frame: the regular blue/unselected button look (non-interactive). In the
+     * compact (small-split) panes, thin the rim proportionally to the panel
+     * height so it matches the height-scaled rim of the pane buttons around it
+     * (see mp_simul_draw_btn); the SP panel keeps the full menu-button rim. */
+    {
+        float fscale = bh / 32.0f;
+        if (fscale > 1.0f) fscale = 1.0f;
+        if (fscale < 0.34f) fscale = 0.34f;
+        fe_draw_button_frame_fill_scaled(bx * sx, by * sy, bw * sx, bh * sy, 1,
+                                         0xFF392152u, compact ? fscale : 1.0f, sx, sy);
+    }
 
     /* Full-name label column ("SPEED"/"ACCEL"/"GRIP"); dropped only if the box is
      * far too narrow to fit a label plus a usable bar. */
@@ -8609,9 +8623,18 @@ static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
  * Used by the main button render loop AND by the text-input widget so the
  * nickname / session-name field matches every other button on screen. The
  * roundrect/9-slice paths manage their own blend presets internally. */
-static void fe_draw_button_frame_fill(float bx, float by, float bw, float bh,
-                                      int bb_state, uint32_t interior, float sx, float sy) {
+/* [2026-06-24] As fe_draw_button_frame_fill but the neon roundrect's rim band +
+ * corner radii are multiplied by `border_scale`. The 6px side rim / 20px corner
+ * are tuned for the full ~32px menu buttons; on a tiny button (the MP split-screen
+ * car-select pane buttons shrink to ~11-17px tall in a 6-player 2x3 grid) that fat
+ * rim swallows the button, so callers pass a height-proportional scale < 1 there.
+ * border_scale 1.0 reproduces the menu look byte-for-byte. Only the VectorUI
+ * roundrect path scales (the 9-slice fallback is bitmap-driven, so unscaled). */
+static void fe_draw_button_frame_fill_scaled(float bx, float by, float bw, float bh,
+                                             int bb_state, uint32_t interior,
+                                             float border_scale, float sx, float sy) {
     int use_proc = (g_td5.ini.vector_ui && s_ps_roundrect && s_rr_cb);
+    if (border_scale <= 0.0f) border_scale = 1.0f;
     if (use_proc) {
         /* Border 3-stop gradient + interior fill, colours per state (matches the
          * button render loop exactly). Selected interior = `interior` (default
@@ -8622,14 +8645,19 @@ static void fe_draw_button_frame_fill(float bx, float by, float bw, float bh,
         else                    { mid_c = 0xFF7995FFu; inner_c = 0xFF496BDCu; outer_c = 0xFF001675u; }
         float fillA = (bb_state == 0) ? 1.0f : 0.0f;
         fe_draw_roundrect(bx, by, bw, bh,
-                          20.0f * sy /*large TL/BR*/, 5.0f * sy /*small TR/BL*/,
-                          6.0f * sy  /*side border*/, 2.0f * sy /*top/bottom border*/,
+                          20.0f * border_scale * sy /*large TL/BR*/, 5.0f * border_scale * sy /*small TR/BL*/,
+                          6.0f * border_scale * sy  /*side border*/, 2.0f * border_scale * sy /*top/bottom border*/,
                           mid_c, inner_c, outer_c, interior, fillA);
     } else if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         fe_draw_button_9slice(bx, by, bw, bh, bb_state, interior, sx, sy);
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
     }
+}
+
+static void fe_draw_button_frame_fill(float bx, float by, float bw, float bh,
+                                      int bb_state, uint32_t interior, float sx, float sy) {
+    fe_draw_button_frame_fill_scaled(bx, by, bw, bh, bb_state, interior, 1.0f, sx, sy);
 }
 
 static void fe_draw_button_frame(float bx, float by, float bw, float bh,
@@ -10349,9 +10377,18 @@ static void mp_simul_draw_btn(float x, float y, float w, float h, const char *la
     float ty = (y + (h - SMALLFONT_TTF_CAP) * 0.5f) * sy;   /* vertically centred */
     float redge = arrows ? (x + w - 18.0f) : (x + w - 6.0f);
     /* Transparent background: unselected frame has no interior fill; the focused
-     * one fills with the player's accent colour. */
-    fe_draw_button_frame_fill(x * sx, y * sy, w * sx, h * sy,
-                              focused ? 0 : 1, rgb | 0xFF000000u, sx, sy);
+     * one fills with the player's accent colour.
+     * [2026-06-24] Shrink the neon rim + corner radius proportionally to the
+     * button HEIGHT so the small split-screen pane buttons (a 6-player 2x3 grid
+     * shrinks these to ~11-17px tall) don't carry the fat 6px side rim / 20px
+     * corner sized for the full 32px menu buttons. Clamped so a full-height pane
+     * button (>=32px, e.g. the 2-player big-car panes) keeps the normal look and
+     * a tiny one keeps a thin-but-visible rim (>=~2px). */
+    float bscale = h / 32.0f;
+    if (bscale > 1.0f) bscale = 1.0f;
+    if (bscale < 0.34f) bscale = 0.34f;
+    fe_draw_button_frame_fill_scaled(x * sx, y * sy, w * sx, h * sy,
+                                     focused ? 0 : 1, rgb | 0xFF000000u, bscale, sx, sy);
     if (focused) {
         int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
         int lum = (r * 30 + g * 59 + b * 11) / 100;     /* readable label over the accent */
@@ -10521,7 +10558,16 @@ static void frontend_mp_panel_capped(int cols, float *pane_w, float *row_x0) {
  * Knob TD5RE_MP_CARSEL_2COL: unset/other = adaptive; "1" = force two-column on
  * every pane; "0" = force the pre-2026-06-20 single-column stack everywhere. */
 #define MP_2COL_MIN_W 200.0f   /* pane must be at least this wide to split into two columns */
-#define MP_2COL_MIN_H 150.0f   /* ...and at least this tall to be worth it ("tall enough") */
+/* [2026-06-24] Lowered 150->120 so the 6-player 2x3 grid pane (258x127) — and the
+ * other wide-but-short panes it shares the threshold with: 3-player UP/DOWN
+ * (258x127) and 5-player 2x3 (258x127) — use the TWO-COLUMN card (car + at-a-glance
+ * stat bars on the LEFT, the CAR/PAINT/MORE STATS/transmission/OK stack on the
+ * RIGHT) instead of the single-column stack. At 127px tall the single column
+ * overflowed the pane and pushed AUTOMATIC/OK off the bottom (clipped text); the
+ * two-column card packs the 5 buttons into a parallel column so they all fit.
+ * Narrow 3-column grids (172px wide) still stay single-column via MP_2COL_MIN_W,
+ * and very short 1xN stacks (<120px) also stay single. */
+#define MP_2COL_MIN_H 120.0f   /* ...and at least this tall to be worth it ("tall enough") */
 /* [big-car 2026-06-23] A WIDE pane that is also this TALL (the default 2-player
  * side-by-side 2-up pane, ~258x381) has enough vertical room to stack a FULL-WIDTH
  * car preview over a compact menu. There the cramped two-column card (car squeezed
@@ -10716,8 +10762,9 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             static int s_logged_bigcar = 0;
             if (!s_logged_bigcar) {
                 s_logged_bigcar = 1;
-                TD5_LOG_I(LOG_TAG, "MP carsel pane layout: n=%d pane=%.0fx%.0f big_car=%d",
-                          n, pane_w, pane_h, big_car);
+                TD5_LOG_I(LOG_TAG, "MP carsel pane layout: n=%d pane=%.0fx%.0f big_car=%d two_col=%d",
+                          n, pane_w, pane_h, big_car,
+                          (!big_car && mp_carsel_two_col(pane_w, pane_h)) ? 1 : 0);
             }
         }
 
