@@ -4267,7 +4267,41 @@ void td5_plat_audio_set_master_volume(int volume)
 
 void td5_plat_audio_set_muted(int muted)
 {
-    s_audio_muted = muted ? 1 : 0;
+    int m = muted ? 1 : 0;
+    /* Edge-triggered, mirroring DXSound::MuteAll's `if (g_isSoundMuted == 0)`
+     * guard (M2DX.dll @0x1000d7c0): act only on a real mute/unmute transition. */
+    if (m == s_audio_muted)
+        return;
+    s_audio_muted = m;
+
+    if (m) {
+        /* [PAUSE-MUTE 2026-06-23] Faithful to DXSound::MuteAll @0x1000d7c0, which
+         * iterates the whole sound-buffer table and immediately SetVolume(-10000)
+         * on every live voice. The port's mute used to be purely LAZY (set the
+         * flag and let each voice pick it up on its next per-frame volume
+         * re-apply via audio_effective_cb). That silenced looping voices
+         * (engine/tyre/rain — re-modulated every frame) and blocked NEW one-shots
+         * (audio_effective_cb returns MIN at Play time), but voices ALREADY
+         * playing at the instant of pause that are NOT re-modulated — one-shot
+         * crash/horn/skid SFX — kept their pre-pause volume and stayed audible
+         * under the pause menu ("pausing still plays some sounds"). Force them all
+         * silent now. Unmute leaves restoration to the per-frame mixer
+         * (audio_effective_cb re-applies looping-voice volumes), the port's
+         * equivalent of UnMuteAll's per-buffer attenuation restore @0x1000d800. */
+        int swept = 0;
+        for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+            if (s_ds_channels[i]) {
+                IDirectSoundBuffer_SetVolume(s_ds_channels[i], DSBVOLUME_MIN);
+                swept++;
+            }
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "audio mute: forced %d live voice(s) to silence (MuteAll-faithful)",
+                  swept);
+    } else {
+        TD5_LOG_I(LOG_TAG,
+                  "audio unmute: mixer restores looping voices next frame");
+    }
 }
 
 /* Mute all DirectSound output while the game window is not the foreground
