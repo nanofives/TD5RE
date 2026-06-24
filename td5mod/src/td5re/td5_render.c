@@ -1410,6 +1410,8 @@ static int s_level_pass_active   = 0;  /* set only while drawing level geometry 
 static int s_banner_cull         = -1; /* -1 uninit; 0 off; 1 on (env TD5RE_BANNER_CULL) */
 static int s_banner_cull_keep_pos = 0; /* which screen-winding sign faces the camera */
 static int s_banner_cull_revflip  = -1; /* [#9] auto-flip kept side in reverse (env TD5RE_TD6_BANNER_REVFLIP) */
+static int s_banner_align         = -1; /* [START-banner align] -1 uninit; 0 off; 1 on (env TD5RE_BANNER_ALIGN) */
+static int s_banner_align_log     = 0;  /* throttle the per-mesh align log */
 
 static int td6_is_banner_page(int page)
 {
@@ -1420,6 +1422,92 @@ static int td6_is_banner_page(int page)
         if (k_td6_banner_pages[i].level == lvl && k_td6_banner_pages[i].page == page)
             return 1;
     return 0;
+}
+
+/* [LONDON START BANNER 2026-06-23 — road-centre align]
+ * TD6 START/FINISH/checkpoint banner gantries are baked into the level geometry
+ * as flat meshes with absolute verts (origin=0). London's START gantry (pages
+ * 59/60) was authored with its text panels centred at world X=0, but the road
+ * centreline at the start line sits well off to one side, so the gantry hangs
+ * beside the road and "doesn't read START". FINISH (57/58) is authored over its
+ * own road segment and renders fine. Instead of baking a per-track magic offset,
+ * shift a banner mesh laterally so its centre lines up with the actual road
+ * centre at its longitudinal (Z) position, derived from the engine's own strip
+ * span data — self-correcting, so an already-aligned banner resolves to ~0.
+ * Only VISIBLE banner meshes reach this (post-frustum-cull) and there are only a
+ * handful of gantries on screen, so the per-span scan is cheap. */
+
+/* Does this mesh draw any TD6 banner texture page? Gated to TD6 levels; the
+ * <=512-command guard skips the large road/building meshes cheaply (the banner
+ * gantries themselves are small meshes). */
+static int td6_mesh_uses_banner_page(const TD5_MeshHeader *mesh)
+{
+    const TD5_PrimitiveCmd *cmds;
+    int c, n;
+    if (g_active_td6_level <= 0) return 0;
+    n = mesh->command_count;
+    if (n <= 0 || n > 512) return 0;
+    cmds = (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+    if (!cmds) return 0;
+    for (c = 0; c < n; c++)
+        if (td6_is_banner_page(cmds[c].texture_page_id))
+            return 1;
+    return 0;
+}
+
+/* Absolute road-centre X (world units) at the span nearest (ref_x, ref_z). The
+ * match is 2D (X AND Z): a START gantry's road span and a far-away doubled-back
+ * span can share a Z (London's strip returns to Z~121500 at span 1350, X~-977000),
+ * so a Z-only match would pick the wrong one. Both mesh->bounding_center_* and
+ * td5_track_get_span_center_world() are in the same large-magnitude WORLD-unit
+ * space (NOT integer-coord/256 — verified at runtime: a START gantry reports
+ * bc=(-2750,121500), matching the strip span centres). Returns 0 (no match) or 1. */
+static int td6_banner_roadcenter_x(float ref_x, float ref_z, float *out_rx)
+{
+    int n = td5_track_get_span_count();
+    int s, best = -1;
+    float best_d2 = 0.0f;
+    int rx, ry, rz;
+    for (s = 0; s < n; s++) {
+        int ix, iy, iz;
+        float dx, dz, d2;
+        if (!td5_track_get_span_center_world(s, &ix, &iy, &iz))
+            continue;                       /* skips junction span types 9/10 */
+        dx = (float)ix - ref_x;
+        dz = (float)iz - ref_z;
+        d2 = dx * dx + dz * dz;
+        if (best < 0 || d2 < best_d2) { best_d2 = d2; best = s; }
+    }
+    if (best < 0) return 0;
+    if (!td5_track_get_span_center_world(best, &rx, &ry, &rz)) return 0;
+    if (out_rx) *out_rx = (float)rx;
+    return 1;
+}
+
+/* Average X (world units) of every banner mesh in `block` sharing this gantry's
+ * longitudinal line (Z within TOL of my_z). A START gantry is two half-panels
+ * ("STA" at X=-2750 and "ART" at X=+2750, combined centre 0); the whole gantry
+ * must shift by ONE common delta (road_centre - group_centre) or the halves
+ * collapse onto each other. Falls back to my_x for a single-mesh gantry. */
+static float td6_banner_group_center_x(uint32_t *block, int count,
+                                       float my_z, float my_x)
+{
+    float sum = 0.0f;
+    int nb = 0, j;
+    for (j = 0; j < count; j++) {
+        TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)block[j + 1];
+        float dz;
+        if (!m || (uintptr_t)m < 0x100000u || !td5_track_is_valid_mesh_ptr(m))
+            continue;
+        if (!td6_mesh_uses_banner_page(m))
+            continue;
+        dz = m->bounding_center_z - my_z;
+        if (dz < 0.0f) dz = -dz;
+        if (dz > 2000.0f) continue;         /* different gantry (different Z line) */
+        sum += m->bounding_center_x;
+        nb++;
+    }
+    return (nb > 0) ? (sum / (float)nb) : my_x;
 }
 
 static void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
@@ -2622,6 +2710,12 @@ void td5_render_span_display_list(void *display_list_block)
         TD5_LOG_I(LOG_TAG, "banner cull: %s (keep_sign=%s revflip=%d; TD5RE_BANNER_CULL/_FLIP/_TD6_BANNER_REVFLIP)",
                   s_banner_cull ? "ON" : "OFF", s_banner_cull_keep_pos ? "pos" : "neg",
                   s_banner_cull_revflip);
+        /* [START-banner align] road-centre re-alignment of TD6 banner gantries.
+         * Default ON; TD5RE_BANNER_ALIGN=0 restores the raw authored position. */
+        const char *ba = getenv("TD5RE_BANNER_ALIGN");
+        s_banner_align = (ba && ba[0] == '0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "banner align: %s (TD5RE_BANNER_ALIGN)",
+                  s_banner_align ? "ON" : "OFF");
     }
     s_level_pass_active = 1;
 
@@ -2739,6 +2833,35 @@ void td5_render_span_display_list(void *display_list_block)
         origin.x = mesh->origin_x * (1.0f / 256.0f);
         origin.y = mesh->origin_y * (1.0f / 256.0f);
         origin.z = mesh->origin_z * (1.0f / 256.0f);
+
+        /* [LONDON START BANNER 2026-06-23] Re-centre a TD6 banner gantry over the
+         * road. The whole gantry shifts by ONE common delta = (road-centre X at
+         * the gantry's span) - (gantry group-centre X), so a split START gantry's
+         * two half-panels keep their separation instead of collapsing. Only X is
+         * corrected — Z (longitudinal) and Y (overhead) are authored correctly.
+         * FINISH/checkpoint gantries already sit over their road segment, so their
+         * group-centre == road-centre and the delta is ~0 (skipped). The +/-50000
+         * world-unit window rejects a pathological span mis-match (the far-end road
+         * can sit ~1e6 units away) so a banner can never be flung off the map. */
+        if (s_banner_align && g_active_td6_level > 0 && td6_mesh_uses_banner_page(mesh)) {
+            float gx = td6_banner_group_center_x(block, count,
+                                                 mesh->bounding_center_z,
+                                                 mesh->bounding_center_x);
+            float rx = 0.0f;
+            if (td6_banner_roadcenter_x(gx, mesh->bounding_center_z, &rx)) {
+                float bdx = rx - gx;
+                if (bdx > -50000.0f && bdx < 50000.0f && (bdx > 1.0f || bdx < -1.0f)) {
+                    origin.x += bdx;
+                    if (s_banner_align_log < 16) {
+                        TD5_LOG_I(LOG_TAG,
+                            "banner align: lvl=%d bc=(%.1f,%.1f) group_x=%.1f road_x=%.1f dx=%.1f",
+                            g_active_td6_level, mesh->bounding_center_x,
+                            mesh->bounding_center_z, gx, rx, bdx);
+                        s_banner_align_log++;
+                    }
+                }
+            }
+        }
 
         td5_render_load_translation(&origin);
 
