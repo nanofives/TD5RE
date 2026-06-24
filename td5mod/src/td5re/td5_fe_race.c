@@ -2725,7 +2725,20 @@ static void fe_race_draw_screen_title(const char *text, float left_x, float top_
 /* A standard player-slot colour (opaque). */
 static uint32_t mp_slot_color(int slot) {
     extern const uint32_t k_mp_player_colors[];
-    return (k_mp_player_colors[slot % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu) | 0xFF000000u;
+    /* [colour propagation 2026-06-23] Reflect each player's CHOSEN identity
+     * colour (picked on the profile-setup colour grid, stored in
+     * s_mp_player_accent) so the SELECT GAME MODE vote arrows/squares + host
+     * swatch, the cop-role rows and the cup standings use the player's pick
+     * instead of the default red/blue palette. The position grid + disconnect
+     * overlay already read s_mp_player_accent directly; this brings the rest of
+     * the MP slot-colour UI in line. Falls back to the built-in per-slot palette
+     * when a slot has not picked a colour yet (accent == 0). */
+    uint32_t rgb = 0;
+    if (slot >= 0 && slot < TD5_MAX_HUMAN_PLAYERS)
+        rgb = (uint32_t)s_mp_player_accent[slot] & 0x00FFFFFFu;
+    if (rgb == 0)
+        rgb = k_mp_player_colors[slot % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu;
+    return rgb | 0xFF000000u;
 }
 
 /* Shared yes/no confirm modal render (drawn on top in the post-button pass). */
