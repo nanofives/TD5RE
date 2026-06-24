@@ -2716,6 +2716,7 @@ static int s_mode_vote[TD5_MAX_HUMAN_PLAYERS];
 
 static int      s_mode_back_confirm = 0;   /* 1 = "LEAVE TO LOBBY?" modal up */
 static uint32_t s_mode_host_prev    = 0;   /* host pad/keyboard edge tracker */
+static int      s_cfg_btn_count     = -1;  /* option count the mode-config buttons were built for */
 
 /* fe_race_draw_screen_title is defined lower in this file; forward-declare so
  * the MP render fns above it can draw the standard top-left screen title. */
@@ -2994,10 +2995,29 @@ static int mp_cfg_build(MpCfgOpt *o) {
 #define CFG_Y0  96       /* first option row  */
 #define CFG_GAP 40       /* row pitch         */
 
+/* (Re)build the per-option selector buttons + the OK button and return the
+ * option count (OK button index == count). Must be called whenever the live
+ * option count changes — the CUP "TEAMS" toggle adds/removes the NUMBER OF
+ * TEAMS row at runtime, so a one-time init build would leave that row without
+ * a selectable button and the OK button stranded at the old position. Resets
+ * s_selected_button to 0 (via frontend_reset_buttons); callers restore focus. */
+static int mp_cfg_layout_buttons(void) {
+    MpCfgOpt opts[MP_CFG_MAX_OPTS];
+    int count = mp_cfg_build(opts);
+    int i, b;
+    frontend_reset_buttons();
+    for (i = 0; i < count; i++) {
+        b = frontend_create_button("", CFG_BX, CFG_Y0 + i * CFG_GAP, CFG_BW, CFG_BH);
+        if (b >= 0) s_buttons[b].is_selector = 1;   /* LEFT/RIGHT value widget */
+    }
+    frontend_create_button(SNK_OkButTxt, 320 - 60, CFG_Y0 + count * CFG_GAP + 8, 120, 28);
+    return count;
+}
+
 void Screen_MpModeConfig(void) {
     MpCfgOpt opts[MP_CFG_MAX_OPTS];
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
-    int n = s_num_human_players, count, i, d;
+    int n = s_num_human_players, count, d;
     if (n < 1) n = 1;
 
     if (s_inner_state == 0) {
@@ -3018,12 +3038,7 @@ void Screen_MpModeConfig(void) {
             return;
         }
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        frontend_reset_buttons();
-        for (i = 0; i < count; i++) {
-            int b = frontend_create_button("", CFG_BX, CFG_Y0 + i * CFG_GAP, CFG_BW, CFG_BH);
-            if (b >= 0) s_buttons[b].is_selector = 1;   /* LEFT/RIGHT value widget */
-        }
-        frontend_create_button(SNK_OkButTxt, 320 - 60, CFG_Y0 + count * CFG_GAP + 8, 120, 28);
+        s_cfg_btn_count     = mp_cfg_layout_buttons();   /* selectors + OK button */
         s_selected_button   = 0;
         s_mode_back_confirm = 0;
         s_anim_complete     = 1;
@@ -3035,6 +3050,20 @@ void Screen_MpModeConfig(void) {
     if (frontend_mp_setup_disconnect_check(n)) return;
 
     count = mp_cfg_build(opts);
+
+    /* The CUP "TEAMS" selector adds/removes the NUMBER OF TEAMS row at runtime,
+     * so the option count can diverge from the one-time init build. Re-lay the
+     * buttons whenever it does: the new row gets its own selectable button and
+     * the OK button shifts down to follow it. Preserve focus across the rebuild
+     * (frontend_reset_buttons zeroes s_selected_button). */
+    if (count != s_cfg_btn_count) {
+        int keep = s_selected_button;
+        s_cfg_btn_count = mp_cfg_layout_buttons();
+        if (keep < 0)     keep = 0;
+        if (keep > count) keep = count;   /* count == OK button index */
+        s_selected_button = keep;
+        TD5_LOG_I(LOG_TAG, "MP mode config: options changed -> %d rows, buttons relaid", count);
+    }
 
     /* "Back to mode select?" confirm modal (ENTER/A = yes, ESC/B = no). The
      * standard nav supplies s_input_ready on confirm. */
