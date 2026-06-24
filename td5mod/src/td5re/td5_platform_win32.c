@@ -3027,23 +3027,65 @@ static int td5_device_is_xinput(int device_index)
     return is_xi;
 }
 
-/* Pick an XInput user index (0..3) for a slot whose DI device is XInput-class.
- * XInput exposes no DI-instance correlation, so we hand out connected user
- * indices in ascending order, skipping ones already claimed by another slot.
- * Returns -1 if none free/connected. */
-static int td5_xinput_assign_user(int device_slot)
+/* Correlate an XInput-class DI device (at DInput enumeration index `di`) to its
+ * XInput user index (0..3) for player slot `device_slot`.
+ *
+ * [SPLIT-SCREEN FF FIX 2026-06-24] The OLD code handed out connected user
+ * indices in ascending order in PLAYER-INIT ORDER (the first player to ff-init
+ * got user 0, the next got user 1, ...). XInput exposes no DI-instance link, so
+ * that init-order scheme is correct ONLY when every player happens to pick the
+ * pad whose physical XInput user index matches their init order. In local
+ * split-screen each player CYCLES to any free device (ctrl_opts_cycle_device),
+ * so picks are routinely NON-identity (P1 takes pad #2, P2 takes pad #1). The
+ * init-order user then pointed at the OTHER player's pad → "vibrations on the
+ * wrong joystick", and a player whose real pad sat at a higher/unmatched user
+ * felt nothing at all.
+ *
+ * Faithful intent (RE: original device = g_ffControllerAssignment[player]-1, the
+ * player's CHOSEN device, @0x004288E0 / 0x00428A10) is "each player's FF drives
+ * the pad that player chose." We achieve it with the industry-standard DI↔XInput
+ * correlation: the N-th XInput-class DI device, in DInput ENUMERATION order, maps
+ * to the N-th CONNECTED XInput user (ascending). This is keyed to the physical
+ * device (`di`), so it is independent of which player opened it first and of the
+ * pick order — each player rumbles their OWN stick.
+ *
+ * Env override TD5RE_FF_XINPUT_USER<slot> (0..3) forces a user for a player slot
+ * as a safety net for the rare host whose DI-enumeration order does not track its
+ * XInput-user order. Returns -1 if no matching connected user. */
+static int td5_xinput_user_for_device(int di, int device_slot)
 {
-    int u, s;
+    int k, u, seen, rank;
     if (!s_xi_get) return -1;
+
+    /* Per-slot manual override (env): TD5RE_FF_XINPUT_USER0..3 -> forced user. */
+    if (device_slot >= 0 && device_slot <= 9) {
+        char key[28];
+        const char *e;
+        snprintf(key, sizeof(key), "TD5RE_FF_XINPUT_USER%d", device_slot);
+        e = getenv(key);
+        if (e && e[0] >= '0' && e[0] <= '3' && e[1] == '\0') {
+            int forced = e[0] - '0';
+            TD5_LOG_I(LOG_TAG, "FF XInput: slot=%d user FORCED to %d via %s",
+                      device_slot, forced, key);
+            return forced;
+        }
+    }
+
+    /* Rank of this device among XInput-class DI devices, by enumeration order
+     * (device 0 is the keyboard; joysticks start at 1). */
+    rank = 0;
+    for (k = 1; k < di && k < s_device_count && k < 16; k++)
+        if (td5_device_is_xinput(k)) rank++;
+
+    /* Map rank -> the rank-th CONNECTED XInput user (ascending). Distinct DI
+     * devices have distinct ranks, so distinct players never collide on a user. */
+    seen = 0;
     for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
         TD5_XINPUT_STATE st;
-        int claimed = 0;
-        for (s = 0; s < TD5_PLAT_MAX_JS_SLOTS; s++)
-            if (s != device_slot && s_xi_user[s] == u) { claimed = 1; break; }
-        if (claimed) continue;
         ZeroMemory(&st, sizeof(st));
-        if (s_xi_get((DWORD)u, &st) == TD5_ERROR_SUCCESS)
-            return u;   /* connected and free */
+        if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;  /* not connected */
+        if (seen == rank) return u;
+        seen++;
     }
     return -1;
 }
@@ -3256,13 +3298,17 @@ int td5_plat_ff_init(int device_slot)
             }
         }
         if (di > 0 && td5_device_is_xinput(di)) {
-            int u = td5_xinput_assign_user(device_slot);
+            int u = td5_xinput_user_for_device(di, device_slot);
             if (u >= 0) {
                 s_xi_user[device_slot] = u;
                 xinput_ready = 1;
                 td5_xinput_push(device_slot);   /* ensure motors start at rest */
+                /* [SPLIT-SCREEN FF FIX] Log the full per-player rumble route so a
+                 * manual two-pad test can confirm each player drives their OWN
+                 * stick (slot=player, device=DI enum idx, user=correlated XInput
+                 * user). A swap here is the "wrong joystick" symptom. */
                 TD5_LOG_I(LOG_TAG,
-                          "FF: slot=%d device=%d (%s) using XInput rumble user=%d",
+                          "FF route: player_slot=%d -> DI device=%d (%s) -> XInput user=%d",
                           device_slot, di, s_device_names[di], u);
             } else {
                 TD5_LOG_W(LOG_TAG,
