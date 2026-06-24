@@ -29,7 +29,7 @@
 #include "td5_physics.h" /* FF SIGNALS #1: drift/gear/redline/crash getters for rumble */
 
 /* Defined in td5_game.c */
-extern int    g_actorSlotForView[2];
+extern int    g_actorSlotForView[TD5_MAX_VIEWPORTS];
 extern uint8_t *g_actor_table_base;
 
 /* Defined in td5_render.c (AngleFromVector12 LUT at 0x0040A720) */
@@ -261,6 +261,10 @@ static uint32_t s_ff_land_seen [TD5_MAX_RACER_SLOTS];
  * now feed these instead of a persistent motor write that was never cleared. */
 static int      s_ff_side_mag   [TD5_MAX_RACER_SLOTS];
 static int      s_ff_side_ticks [TD5_MAX_RACER_SLOTS];
+/* [MP FF FIX 2026-06-23] One-shot diagnostic guard: log once per local
+ * player/device when its FF actor-slot map is non-identity (netplay client or
+ * MP position-select), so a log read can confirm which car the wheel follows. */
+static int      s_ff_slot_map_logged[TD5_MAX_HUMAN_PLAYERS];
 
 /* TD5RE_FORCE_FEEDBACK (cached): master gate for the physics-driven vibration.
  * Default ON; "0" reverts to the prior behaviour (steering + terrain FF only,
@@ -443,6 +447,7 @@ int td5_input_init(void)
     memset(s_ff_pulse_ticks, 0, sizeof(s_ff_pulse_ticks));
     memset(s_ff_side_mag, 0, sizeof(s_ff_side_mag));
     memset(s_ff_side_ticks, 0, sizeof(s_ff_side_ticks));
+    memset(s_ff_slot_map_logged, 0, sizeof(s_ff_slot_map_logged));
     memset(s_fe_cam_held, 0, sizeof(s_fe_cam_held));
     memset(s_fe_front_held, 0, sizeof(s_fe_front_held));
     memset(s_replay_log_path, 0, sizeof(s_replay_log_path));
@@ -2453,13 +2458,41 @@ void td5_input_ff_shutdown(void)
  * point slot 1 is stopped so it doesn't sit asserted. A crash outranks a gear
  * bump if they coincide. No-op when TD5RE_FORCE_FEEDBACK is off or this player
  * has no FF device. */
-static void td5_input_ff_update_jolt(int slot)
+/* [MP FF FIX 2026-06-23] Map a LOCAL player/device index to the ACTOR slot whose
+ * car that device should respond to. In single-player and split-screen the local
+ * humans occupy actor slots 0..N-1 (g_actorSlotForView is the identity map); in
+ * NETPLAY the single local human drives actor slot td5_net_local_slot() — 1+ on a
+ * client — surfaced as g_actorSlotForView[0] (td5_game InitRace step 17). The FF
+ * consumers previously assumed actor-slot == device-index, so a client's wheel
+ * replayed actor-slot-0's pulses (the HOST's collisions/steering): "I feel the
+ * vibrations off my opponents in MP". Reading the right actor slot here restores
+ * the original's netplay-local-slot FF [CONFIRMED @ 0x0042C470] and also fixes the
+ * MP position-select pane permutation. Device-side indices (controller_assignment,
+ * td5_plat_ff_*, steer/terrain_effect_started) stay keyed by the device index. */
+static int ff_local_actor_slot(int player)
 {
-    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
-    if (s_ff.controller_assignment[slot] == 0) return;
-    if (slot >= TD5_MAX_HUMAN_PLAYERS) return;   /* device slots are per human player */
+    int aslot = player;
+    if (player >= 0 && player < TD5_MAX_VIEWPORTS)
+        aslot = g_actorSlotForView[player];
+    if (aslot < 0 || aslot >= TD5_MAX_RACER_SLOTS)
+        aslot = player;   /* defensive: fall back to identity */
+    if (aslot != player && player >= 0 && player < TD5_MAX_HUMAN_PLAYERS &&
+        !s_ff_slot_map_logged[player]) {
+        s_ff_slot_map_logged[player] = 1;
+        TD5_LOG_I(LOG_TAG, "FF: local player/device %d follows actor slot %d (non-identity map)",
+                  player, aslot);
+    }
+    return aslot;
+}
+
+static void td5_input_ff_update_jolt(int player)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
+    if (s_ff.controller_assignment[player] == 0) return;
     if (!td5_ff_vibration_enabled()) return;
-    int dev = slot;
+    int dev = player;                          /* physical FF device index */
+    int slot = ff_local_actor_slot(player);    /* [MP FF FIX] actor slot this device follows */
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
 
     /* ---- GEAR SWITCH edge: brief LOW-force bump ---- */
     {
@@ -2648,15 +2681,19 @@ void td5_input_ff_configure(const int *assignments, int count)
  *                 [CONFIRMED @ 0x4288E0]: cast to uint then used as LUT index
  * ======================================================================== */
 
-void td5_input_ff_update_player(int slot)
+void td5_input_ff_update_player(int player)
 {
-    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
-    if (s_ff.controller_assignment[slot] == 0) return;
     /* The player's FF device lives at device slot == player slot (created by
      * td5_plat_input_set_device(player, ...)). Only human players (0..8) own a
-     * device slot. [PORT ENHANCEMENT 2026-06] no longer capped at js_idx<=1. */
-    if (slot >= TD5_MAX_HUMAN_PLAYERS) return;
-    int dev = slot;
+     * device slot. [PORT ENHANCEMENT 2026-06] no longer capped at js_idx<=1.
+     * [MP FF FIX 2026-06-23] dev = device index (per local human); slot = the
+     * ACTOR slot that device follows (== device index except on a netplay client
+     * or MP position-select, where the local car is a non-zero actor slot). */
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
+    if (s_ff.controller_assignment[player] == 0) return;
+    int dev = player;
+    int slot = ff_local_actor_slot(player);
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
 
     /* ---- Steering resistance (slot 0) ---- */
 

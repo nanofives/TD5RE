@@ -265,7 +265,13 @@ extern int g_actorSlotForView[TD5_MAX_VIEWPORTS];
  *   TD5RE_RECOVERY_SPANS_BACK default 3  — spans to move back on reset.
  * ======================================================================== */
 
-#define TD5_RECOVERY_STUCK_TICKS    90   /* 3 s at fixed 30 Hz */
+/* [STUCK-RECOVERY FALSE-TRIGGER FIX 2026-06-23] Default window before AUTOMATIC
+ * recovery fires. Was 90 (3 s): too eager — a player who deliberately slowed,
+ * stopped to reorient, or crawled a technical section got yanked into a recovery
+ * teleport ("recover triggered out of nowhere"). 150 (5 s) is far less likely to
+ * trip on intentional slow driving while still rescuing a genuinely abandoned car.
+ * Runtime-overridable via TD5RE_RECOVERY_STUCK_TICKS. */
+#define TD5_RECOVERY_STUCK_TICKS    150  /* 5 s at fixed 30 Hz */
 /* Planar speed (24.8 longitudinal+lateral magnitude proxy) below which the car
  * counts as "not moving". longitudinal/lateral speed are body-frame 8.8; a value
  * of 100 (~0.4 units/tick) matches the vehicle_stopped<100 gate the input layer
@@ -283,6 +289,7 @@ static int     s_stuck_last_hw[TD5_MAX_RACER_SLOTS];
 static int     s_recovery_init = 0;
 static int     s_recovery_enabled = 1;     /* TD5RE_STUCK_RECOVERY */
 static int     s_recovery_spans_back = TD5_RECOVERY_DEFAULT_BACK;
+static int     s_recovery_stuck_ticks = TD5_RECOVERY_STUCK_TICKS;  /* TD5RE_RECOVERY_STUCK_TICKS */
 
 /* [GENTLE FLIP-RECOVERY 2026-06-21] Forward decls (definitions live just after
  * the stuck-recovery block). For a LOCAL HUMAN, the byte-faithful scripted-
@@ -13518,10 +13525,21 @@ static void recovery_init_knobs(void)
             s_recovery_spans_back = v;
         }
     }
+    {
+        /* [FALSE-TRIGGER FIX] Tune the auto-recovery dwell without a rebuild. */
+        const char *e = getenv("TD5RE_RECOVERY_STUCK_TICKS");
+        if (e && e[0]) {
+            int v = atoi(e);
+            if (v < 30)   v = 30;          /* >= 1 s — below this auto-recovery is too eager */
+            if (v > 1800) v = 1800;        /* <= 60 s sanity clamp */
+            s_recovery_stuck_ticks = v;
+        }
+    }
     s_recovery_init = 1;
-    TD5_LOG_I(LOG_TAG, "Stuck recovery: %s spans_back=%d",
+    TD5_LOG_I(LOG_TAG, "Stuck recovery: %s spans_back=%d stuck_ticks=%d (%.1fs)",
               s_recovery_enabled ? "enabled" : "disabled",
-              s_recovery_spans_back);
+              s_recovery_spans_back, s_recovery_stuck_ticks,
+              s_recovery_stuck_ticks / 30.0);
 }
 
 /* Reposition `slot`'s actor a few spans back, centred, upright, heading aligned
@@ -13674,6 +13692,17 @@ void td5_physics_update_stuck_recovery(void)
          * the input bit). Treat any throttle as "driver is trying" -> not stuck. */
         int throttle_on = (actor->throttle_input_active != 0);
 
+        /* [FALSE-TRIGGER FIX 2026-06-23] Active brake/handbrake means the driver is
+         * deliberately slowing/stopped (lining up, waiting, easing through a tech
+         * section) — that is "engaged", not "stuck", so reset the dwell just like
+         * throttle does. Throttle already gates the wall-struggle case (a player
+         * mashing gas against a wall never auto-recovers), so adding brake here only
+         * removes false positives on intentional slow driving; a genuinely abandoned
+         * car (no input at all) still recovers after the dwell. vp is the local
+         * input-layer player index (same one td5_input_recovery_requested uses). */
+        int braking = (td5_input_get_brake(vp) != 0) ||
+                      (td5_input_get_handbrake(vp) != 0);
+
         /* Forward progress: track_span_high_water advancing (monotonic race-order
          * counter) is the robust progress probe — it survives lane jitter and the
          * span_normalized wrap at the start/finish line. */
@@ -13689,13 +13718,13 @@ void td5_physics_update_stuck_recovery(void)
         int32_t planar = (fwd < 0 ? -fwd : fwd) + (lat < 0 ? -lat : lat);
         int near_zero = (planar < TD5_RECOVERY_SPEED_EPS);
 
-        if (throttle_on || progressed || !near_zero) {
-            /* Driver accelerating OR making progress OR still moving -> reset. */
+        if (throttle_on || braking || progressed || !near_zero) {
+            /* Driver accelerating/braking OR making progress OR still moving -> reset. */
             s_stuck_ticks[slot] = 0;
             continue;
         }
 
-        if (++s_stuck_ticks[slot] >= TD5_RECOVERY_STUCK_TICKS) {
+        if (++s_stuck_ticks[slot] >= s_recovery_stuck_ticks) {
             TD5_LOG_I(LOG_TAG,
                       "auto recovery: slot=%d stuck %d ticks (hw=%d planar=%d)",
                       slot, s_stuck_ticks[slot], hw, planar);
