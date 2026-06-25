@@ -6953,10 +6953,11 @@ static void frontend_render_mp_post_race_description(float sx, float sy) {
     if (!s_anim_complete) return;
     if (btn < 0 || btn >= count) btn = 0;
 
-    /* Screen header centred over the panel column. */
-    fe_draw_text_centered(panel_x + panel_w * 0.5f, 90.0f * sy,
-                          (s_mp_postrace_menu_mode == 1) ? "CUP - WHAT NEXT?" : "WHAT NEXT?",
-                          0xFFFFD000, sx, sy);
+    /* [LAYOUT 2026-06-25] The "CUP - WHAT NEXT?" / "WHAT NEXT?" header now renders
+     * at the TOP of the screen via frontend_draw_screen_title (the standard
+     * left-aligned gold title every other frontend screen uses), drawn from the
+     * TD5_SCREEN_MP_POST_RACE dispatch case below — no longer centred over this
+     * right-hand panel. */
 
     /* Line 0: option NAME (big font, centred at panel top). */
     fe_draw_text(panel_x + (panel_w - fe_measure_text(tbl[btn][0], sx, sy)) * 0.5f,
@@ -10096,6 +10097,13 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_race_type_description(sx, sy);
         break;
     case TD5_SCREEN_MP_POST_RACE:
+        /* [LAYOUT 2026-06-25] Top-of-screen header in the standard Lunatica title
+         * face, left-aligned at FE_TITLE_LEFT_X like every other frontend screen.
+         * The split-screen s_mp_simul gate suppresses the normal title dispatch
+         * for this screen, so it is drawn here. The right-side option description
+         * (with the buttons in the left column) follows. */
+        frontend_draw_screen_title((s_mp_postrace_menu_mode == 1) ? "CUP - WHAT NEXT?" : "WHAT NEXT?",
+                                   FE_TITLE_LEFT_X * sx, 17.0f * sy, 0xFFE3D708u, sx, sy);
         frontend_render_mp_post_race_description(sx, sy);
         break;
     case TD5_SCREEN_QUICK_RACE:

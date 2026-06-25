@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "CUP - WHAT NEXT? title at top, buttons realigned/narrower",
     "Dev: ADD AI PLAYER bots in the MP lobby (A key)",
     "CHANGELOG screen: bullets, spacing, top button",
     "MP split-screen post-race menu",
