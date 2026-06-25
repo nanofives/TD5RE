@@ -10088,6 +10088,15 @@ extern void td5_physics_reset_actor_state(TD5_Actor *actor);
  * The "force the target to a stop" is signalled via g_encounter_active[target]
  * (consumed by the human input path + the AI racer path).
  * ======================================================================== */
+/* [DEBUG 2026-06-24] Cops normally chase HUMAN players only (state 1). This
+ * default-OFF knob also lets a chase trigger on AI-driven racers (state 0) so
+ * the chase/dodge/durability behaviour can be exercised headlessly (PlayerIsAI
+ * runs, where slot 0 is AI). Never enabled in normal play. */
+static int cop_chase_ai_debug(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_COP_CHASE_AI"); s = (e && e[0] == '1') ? 1 : 0; }
+    return s;
+}
 void td5_ai_update_special_encounter(void) {
     int span_count, ring_len, t_base, t_end, racer_n;
 
@@ -10156,8 +10165,10 @@ void td5_ai_update_special_encounter(void) {
                     s_cop_rebust_target[k] == (int8_t)c)
                     continue;
                 st = g_slot_state[c];
-                /* Cops chase HUMAN players only (state 1), never AI opponents. */
-                if (st != 1) continue;
+                /* Cops chase HUMAN players only (state 1), never AI opponents.
+                 * TD5RE_COP_CHASE_AI (debug, default off) also allows AI racers
+                 * (state 0) so the chase is observable headlessly. */
+                if (st != 1 && !(cop_chase_ai_debug() && st == 0)) continue;
                 if (g_actor_broken_down[c]) continue;
                 cand = actor_ptr(c);
                 /* Line of sight: a cop can't START a chase across a fork. If the
@@ -11336,6 +11347,22 @@ static void cop_drive(int slot) {
     /* Not an MP cop chase cop (or ram disabled) -> legacy catch-up driver. */
     if (ACTOR_U8(cop, ACTOR_BRAKE_FLAG))
         return;
+    /* [DODGE 2026-06-24] If the road-following brain (traffic_drive_normal above)
+     * is actively steering around a car ahead this tick — i.e. it set a lane
+     * bias to change lanes for a close peer — DON'T slam the catch-up throttle
+     * into the obstacle. Leave the route plan's eased throttle so the cop bleeds
+     * speed and completes the lane change instead of rear-ending the peer at
+     * 1.5x catch-up speed. This is the core of "the police crashes 80% of the
+     * time and never makes it to overtake": the catch-up sprint used to override
+     * the dodge and ram the traffic car ahead. Catch-up resumes the instant the
+     * lane is clear (bias back to 0). The brake-flag return just above already
+     * covers the no-clear-lane case (route plan braked). */
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && s_traffic_lane_bias[slot] != 0) {
+        if ((g_ai_frame_counter % 30u) == 0u)
+            TD5_LOG_I(LOG_TAG, "cop_dodge: slot=%d easing around peer (lane_bias=%d) — no catch-up floor",
+                      slot, (int)s_traffic_lane_bias[slot]);
+        return;
+    }
     if (tgt >= 0 && tgt < TD5_MAX_TOTAL_ACTORS) {
         int32_t tspd = ACTOR_I32(actor_ptr(tgt), ACTOR_LONGITUDINAL_SPEED);
         int32_t cspd = ACTOR_I32(cop, ACTOR_LONGITUDINAL_SPEED);
