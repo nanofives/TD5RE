@@ -17,16 +17,20 @@
 
         powershell -ExecutionPolicy Bypass -File td5re_update.ps1
 
-    If the .local name does not resolve on this machine, pass the Pi's LAN IP:
+    The updater auto-falls-back to the Pi's static IP when the '.local' name does
+    not resolve. This is what makes it work across a cascaded network (a second
+    router hung off the main one): mDNS / '.local' multicast cannot cross a router
+    boundary, but the Pi's IP is still reachable. To force a specific server, pass
+    it explicitly (also accepts several, tried in order):
 
-        powershell -ExecutionPolicy Bypass -File td5re_update.ps1 -BaseUrl http://192.168.0.50:8088
+        powershell -ExecutionPolicy Bypass -File td5re_update.ps1 -BaseUrl http://192.168.68.112:8088
 
     Add -Prune to also delete local files under re\assets that no longer exist
     on the server (keeps the install an exact mirror).
 #>
 [CmdletBinding()]
 param(
-    [string]$BaseUrl     = "http://mariano-server.local:8088",
+    [string[]]$BaseUrl,
     [string]$InstallRoot = $PSScriptRoot,
     [switch]$Prune
 )
@@ -35,43 +39,69 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'   # makes Invoke-WebRequest much faster
 
 if (-not $InstallRoot) { $InstallRoot = (Get-Location).Path }
-$BaseUrl = $BaseUrl.TrimEnd('/')
+
+# Candidate servers, tried in order until one serves a valid manifest.
+#   * the '.local' name works on a flat LAN (single subnet, mDNS resolves)
+#   * the static IP is the fallback for a CASCADED network (a 2nd router hung off
+#     the main one): mDNS multicast can't cross a router boundary, so '.local'
+#     fails there, but the Pi's IP is still routable.
+# An explicit -BaseUrl (one or more) overrides this list entirely.
+if (-not $BaseUrl -or $BaseUrl.Count -eq 0) {
+    $BaseUrl = @(
+        'http://mariano-server.local:8088',
+        'http://192.168.68.112:8088'
+    )
+}
+$BaseUrl = @($BaseUrl | ForEach-Object { $_.TrimEnd('/') })
 
 function Url-For([string]$rel) {
     # URL-encode each path segment (handles spaces / odd chars) but keep the slashes.
     $enc = ($rel -split '/' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
-    return "$BaseUrl/$enc"
+    return "$script:ResolvedBase/$enc"
 }
 
 Write-Host ""
 Write-Host "TD5RE updater" -ForegroundColor Cyan
-Write-Host "  server : $BaseUrl"
+Write-Host ("  servers: {0}" -f ($BaseUrl -join ', '))
 Write-Host "  target : $InstallRoot"
 
 # --- 1. fetch manifest --------------------------------------------------------
-# Download to a file and parse with explicit UTF-8 decoding: robust against a
-# BOM or a missing charset on the server (Invoke-RestMethod silently returns the
-# raw string in those cases, which would look like a 1-entry manifest).
-$manifestUrl = "$BaseUrl/manifest.json"
+# Try each candidate base URL until one serves a valid manifest. Download to a
+# file and parse with explicit UTF-8 decoding: robust against a BOM or a missing
+# charset on the server (Invoke-RestMethod silently returns the raw string in
+# those cases, which would look like a 1-entry manifest). The first base that
+# works becomes $script:ResolvedBase, so the file downloads below hit the same
+# server we found the manifest on.
+$script:ResolvedBase = $null
+$manifest    = $null
 $tmpManifest = Join-Path ([System.IO.Path]::GetTempPath()) ("td5re_manifest_" + [guid]::NewGuid().ToString("N") + ".json")
-try {
-    Invoke-WebRequest -Uri $manifestUrl -OutFile $tmpManifest -UseBasicParsing -TimeoutSec 30
-    $manifest = (Get-Content -LiteralPath $tmpManifest -Raw -Encoding UTF8) | ConvertFrom-Json
-} catch {
-    Write-Host "ERROR: cannot fetch/parse $manifestUrl" -ForegroundColor Red
-    Write-Host "       $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "Tip: if '.local' does not resolve here, re-run with the Pi's IP, e.g." -ForegroundColor Yellow
-    Write-Host "     powershell -ExecutionPolicy Bypass -File td5re_update.ps1 -BaseUrl http://192.168.0.50:8088" -ForegroundColor Yellow
+foreach ($base in $BaseUrl) {
+    $manifestUrl = "$base/manifest.json"
+    try {
+        Invoke-WebRequest -Uri $manifestUrl -OutFile $tmpManifest -UseBasicParsing -TimeoutSec 30
+        $candidate = (Get-Content -LiteralPath $tmpManifest -Raw -Encoding UTF8) | ConvertFrom-Json
+        if (@($candidate.files).Count -ge 1 -and $candidate.files[0].path) {
+            $script:ResolvedBase = $base
+            $manifest = $candidate
+            Write-Host ("  server : {0}" -f $base) -ForegroundColor Green
+            break
+        }
+        Write-Host ("  ! {0} returned an invalid manifest, trying next ..." -f $manifestUrl) -ForegroundColor DarkYellow
+    } catch {
+        Write-Host ("  ! {0} unreachable ({1}), trying next ..." -f $manifestUrl, $_.Exception.Message) -ForegroundColor DarkYellow
+    }
+}
+if (Test-Path -LiteralPath $tmpManifest) { Remove-Item -LiteralPath $tmpManifest -Force -ErrorAction SilentlyContinue }
+
+if (-not $manifest) {
+    Write-Host "ERROR: no server served a valid manifest. Tried:" -ForegroundColor Red
+    foreach ($base in $BaseUrl) { Write-Host "       $base/manifest.json" -ForegroundColor Red }
+    Write-Host "Tip: pass the Pi's current IP explicitly, e.g." -ForegroundColor Yellow
+    Write-Host "     powershell -ExecutionPolicy Bypass -File td5re_update.ps1 -BaseUrl http://192.168.68.112:8088" -ForegroundColor Yellow
     exit 1
-} finally {
-    if (Test-Path -LiteralPath $tmpManifest) { Remove-Item -LiteralPath $tmpManifest -Force -ErrorAction SilentlyContinue }
 }
 
 $files = @($manifest.files)
-if ($files.Count -lt 1 -or -not $files[0].path) {
-    Write-Host "ERROR: manifest at $manifestUrl looks invalid (parsed $($files.Count) entries)." -ForegroundColor Red
-    exit 1
-}
 Write-Host ("  manifest: {0} files (generated {1})" -f $files.Count, $manifest.generated)
 
 # --- 2. decide what to download ----------------------------------------------
