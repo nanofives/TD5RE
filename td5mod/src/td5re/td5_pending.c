@@ -32,6 +32,7 @@ static int s_overlay_on = 0;
 static const char *const k_seed[] = {
     "Split-screen overview map: no diagonal on P2P tracks",
     "CUP - WHAT NEXT? title at top, buttons realigned/narrower",
+    "7th+ split-screen car sits flat (no roll/wobble)",
     "Dev: ADD AI PLAYER bots in the MP lobby (A key)",
     "CHANGELOG screen: bullets, spacing, top button",
     "MP split-screen post-race menu",
