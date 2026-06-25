@@ -273,6 +273,22 @@ static int hud_grid_filler_net_suppress_on(void)
     return s;
 }
 
+/* [#dedup 2026-06-25] Never show the same filler content in two empty cells. With
+ * 7 players the grid is 3x3 -> TWO empty cells; if both content selectors happen to
+ * be the same kind (e.g. both MAP) the screen would show the same thing twice. When
+ * de-dup is on (default) the second empty cell flips to the unused kind so two empty
+ * cells always read as one MAP + one STANDINGS. Set TD5RE_GRID_FILLER_DEDUP=0 to
+ * honour the raw per-cell selectors even when they collide. */
+static int hud_grid_filler_dedup_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_GRID_FILLER_DEDUP");
+        TD5_LOG_I(LOG_TAG, "empty-cell filler de-dup (MAP+STANDINGS): %s", s ? "on" : "off");
+    }
+    return s;
+}
+
 /* [#5 2026-06-15] Tighten the inter-digit spacing of the speedometer readout.
  * The left-most digit stays put; the per-digit advance (pitch) shrinks so the
  * other digits move toward it, closing the gaps a little. Default on; set
@@ -3765,8 +3781,10 @@ static void hud_filler_arrow(float cx, float cy, float half,
 }
 
 /* MAP widget for one empty cell. Projects the whole track route + all racer dots
- * + decluttered labels into [cl,ct,cr,cb] (already clipped by the caller). */
-static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
+ * + decluttered labels into [cl,ct,cr,cb] (already clipped by the caller).
+ * state_slot (0..1) keys this cell's persistent zoom/rotation smoothing state so
+ * the map eases between frames instead of snapping (see the [#stable] block). */
+static void hud_filler_draw_map(float cl, float ct, float cr, float cb, int state_slot)
 {
     uint8_t *span_base = (uint8_t *)g_strip_span_base;
     uint8_t *vert_base = (uint8_t *)g_strip_vertex_base;
@@ -3849,22 +3867,57 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     #undef MAP_FOLD_SPAN_RAILS
     if (maxx <= minx || maxz <= minz) return;
 
-    /* [#zoom 2026-06-24] Interactive zoom-to-field: the fit below works off
-     * [minx..maxx]x[minz..maxz]. By default that's the whole-track AABB just
-     * computed (the fallback used when nobody is on the track). When there ARE
-     * live racers, replace it with a window around just the active field so the
-     * map ZOOMS to where everyone is — from the rear car to the leader — making
-     * positions legible in the cramped split-screen cell instead of always
-     * showing the full route at minimum scale.
+    /* [#zoom 2026-06-24 / #stable 2026-06-25] Interactive zoom-to-field with
+     * temporal smoothing. The fit below works off [minx..maxx]x[minz..maxz]. By
+     * default that's the whole-track AABB just computed (the fallback when nobody
+     * is on the track). When there ARE live racers, the TARGET window is a box
+     * around just the active field so the map ZOOMS to where everyone is — from
+     * the rear car to the leader — making positions legible in the cramped cell.
      *
-     * The window is the active-player world AABB, with two safeguards:
+     * Two safeguards on the target window:
      *   - floored to MIN_EXT (a fraction of the track's longer axis) so a tight
-     *     pack — or a lone surviving car — doesn't zoom to a featureless pinhole
-     *     with no surrounding road for context, and
-     *   - grown by a MARGIN on every side so the rear/front arrows + their name
-     *     plates sit inside the cell instead of right on the clipped edge ("so it
-     *     doesn't cut off at the end of the screen"). The caller's 10% inner pad
-     *     in the fit stacks on top of this. */
+     *     pack — or a lone surviving car — doesn't zoom to a featureless pinhole, and
+     *   - grown by a MARGIN on every side so the rear/front arrows + name plates
+     *     sit inside the cell instead of right on the clipped edge.
+     *
+     * [#stable] The RAW per-frame target jitters as cars move, and the cell's
+     * preferred orientation flips the instant the window aspect crosses square —
+     * which made the map snap-rotate and flicker. To stabilise it, the window
+     * centre + half-extents and the rotation are now carried in PER-CELL state and
+     * eased toward the target every frame:
+     *   - the window is low-pass filtered (smooth, progressive zoom), and
+     *   - the orientation is picked with HYSTERESIS (only flips when the other
+     *     orientation is clearly better) and the rotation ANGLE is interpolated
+     *     continuously between 0deg and 90deg instead of snapping. */
+    #define MAP_FILLER_SLOTS 2
+    static int   s_win_init[MAP_FILLER_SLOTS] = {0, 0};
+    static float s_win_cx[MAP_FILLER_SLOTS],  s_win_cz[MAP_FILLER_SLOTS]; /* smoothed window centre (world) */
+    static float s_win_hx[MAP_FILLER_SLOTS],  s_win_hz[MAP_FILLER_SLOTS]; /* smoothed window half-extents   */
+    static float s_rot_cur[MAP_FILLER_SLOTS];                              /* current rotation amount 0..1   */
+    static int   s_rot_tgt[MAP_FILLER_SLOTS];                              /* chosen orientation 0/1         */
+    int slot = state_slot;
+    if (slot < 0) slot = 0;
+    if (slot >= MAP_FILLER_SLOTS) slot = MAP_FILLER_SLOTS - 1;
+    #undef MAP_FILLER_SLOTS
+
+    /* Frame-rate-independent easing. normalized_frame_dt is in 30Hz-tick units
+     * (1.0 == one sim tick == 1/30 s), so these per-frame factors give the SAME
+     * real-time smoothing whether the HUD runs at 30 or 200+ fps — a fixed
+     * per-frame lerp would converge in <0.1 s (i.e. still snap) on a fast
+     * machine. Clamp so a single long stall frame can't jump the whole way. */
+    float ndt = g_td5.normalized_frame_dt;
+    if (ndt < 0.0f) ndt = 0.0f;
+    if (ndt > 3.0f) ndt = 3.0f;
+    float win_a    = 1.0f - powf(1.0f - 0.18f, ndt);  /* window low-pass, ~0.18s time-constant */
+    float rot_step = 0.07f * ndt;                      /* full 0deg->90deg turn in ~0.5 s      */
+
+    /* Whole-track footprint (always available): drives MIN_EXT and the far-jump
+     * reset threshold. */
+    float full_w = maxx - minx, full_h = maxz - minz;
+    float full_max = (full_w > full_h) ? full_w : full_h;
+
+    /* TARGET window centre + half-extents (world space). */
+    float tgt_cx, tgt_cz, tgt_hx, tgt_hz;
     if (n > 0) {
         float pminx = 1e30f, pmaxx = -1e30f, pminz = 1e30f, pmaxz = -1e30f;
         for (int i = 0; i < n; i++) {
@@ -3873,38 +3926,46 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
             if (lab[i].wz < pminz) pminz = lab[i].wz;
             if (lab[i].wz > pmaxz) pmaxz = lab[i].wz;
         }
-        float full_w   = maxx - minx, full_h = maxz - minz;
-        float full_max = (full_w > full_h) ? full_w : full_h;
-        float min_ext  = full_max * 0.18f;       /* don't zoom past ~18% of track */
-        float pcx = (pminx + pmaxx) * 0.5f, pcz = (pminz + pmaxz) * 0.5f;
-        float pw  = pmaxx - pminx,           ph  = pmaxz - pminz;
+        float min_ext = full_max * 0.18f;        /* don't zoom past ~18% of track */
+        float pw = pmaxx - pminx, ph = pmaxz - pminz;
         if (pw < min_ext) pw = min_ext;
         if (ph < min_ext) ph = min_ext;
         float mx = pw * 0.30f, mz = ph * 0.30f;  /* edge offset so nothing clips */
-        minx = pcx - pw * 0.5f - mx;  maxx = pcx + pw * 0.5f + mx;
-        minz = pcz - ph * 0.5f - mz;  maxz = pcz + ph * 0.5f + mz;
-        static int s_map_zoom_log = 0;
-        if ((s_map_zoom_log++ % 240) == 0)
-            TD5_LOG_I(LOG_TAG,
-                      "grid-filler map zoom: active=%d field_bbox=%.0fx%.0f min_ext=%.0f margin=%.0f,%.0f -> window=%.0fx%.0f (full=%.0fx%.0f)",
-                      n, pmaxx - pminx, pmaxz - pminz, min_ext, mx, mz,
-                      maxx - minx, maxz - minz, full_w, full_h);
+        tgt_cx = (pminx + pmaxx) * 0.5f;  tgt_cz = (pminz + pmaxz) * 0.5f;
+        tgt_hx = pw * 0.5f + mx;          tgt_hz = ph * 0.5f + mz;
+    } else {
+        tgt_cx = (minx + maxx) * 0.5f;  tgt_cz = (minz + maxz) * 0.5f;
+        tgt_hx = full_w * 0.5f;         tgt_hz = full_h * 0.5f;
     }
 
-    /* [#8 2026-06-15] Fit the whole-track world AABB into the cell, choosing the
-     * orientation in {0deg, 90deg-left} that BEST FILLS the cell, then zooming to
-     * fit. The track footprint has a long axis; if the cell's long axis differs
-     * from the footprint's, rotating the drawing 90deg lets it grow bigger before
-     * hitting a cell edge — maximising the use of the (often very non-square)
-     * split-screen cell.
-     *
-     * Uniform scale keeps the track's real shape. With no rotation world X->screen
-     * X and world Z->screen Y. A 90deg LEFT (CCW, screen Y-down) rotation maps the
-     * relative point (dx,dz) -> (dz,-dx), so the drawing's screen-X span becomes
-     * the world Z extent and its screen-Y span becomes the world X extent. We
-     * compute the fit scale for both and keep whichever is LARGER (fills more of
-     * the cell). The arrows/labels below reuse the same MAPPX/MAPPY, so they
-     * rotate and zoom with the road. */
+    /* Ease the smoothed window toward the target. SNAP (no glide) on first use or
+     * when the target jumps farther than the whole-track span — that means a new
+     * race / track / a content flip into this cell, where a slow pan across the
+     * whole map would look worse than an instant cut. */
+    int snapped;
+    {
+        float dxj = tgt_cx - s_win_cx[slot], dzj = tgt_cz - s_win_cz[slot];
+        int far_jump = (dxj * dxj + dzj * dzj) > (full_max * full_max);
+        snapped = (!s_win_init[slot] || far_jump);
+        if (snapped) {
+            s_win_cx[slot] = tgt_cx;  s_win_cz[slot] = tgt_cz;
+            s_win_hx[slot] = tgt_hx;  s_win_hz[slot] = tgt_hz;
+            s_win_init[slot] = 1;
+        } else {
+            s_win_cx[slot] += (tgt_cx - s_win_cx[slot]) * win_a;
+            s_win_cz[slot] += (tgt_cz - s_win_cz[slot]) * win_a;
+            s_win_hx[slot] += (tgt_hx - s_win_hx[slot]) * win_a;
+            s_win_hz[slot] += (tgt_hz - s_win_hz[slot]) * win_a;
+        }
+    }
+
+    /* Working AABB is the SMOOTHED window from here on. */
+    minx = s_win_cx[slot] - s_win_hx[slot];  maxx = s_win_cx[slot] + s_win_hx[slot];
+    minz = s_win_cz[slot] - s_win_hz[slot];  maxz = s_win_cz[slot] + s_win_hz[slot];
+
+    /* [#8 2026-06-15] Fit the (smoothed) world AABB into the cell, choosing the
+     * orientation in {0deg, 90deg-left} that best fills the (often non-square)
+     * cell. Uniform scale keeps the track's real shape. */
     float pad = (cr - cl) * 0.10f;
     float in_w = (cr - cl) - 2.0f * pad, in_h = (cb - ct) - 2.0f * pad;
     if (in_w < 8.0f || in_h < 8.0f) return;
@@ -3912,46 +3973,71 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     if (wx_w < 1.0f) wx_w = 1.0f;
     if (wz_h < 1.0f) wz_h = 1.0f;
 
-    /* fit_0: no rotation (X->W, Z->H). fit_90: 90deg (Z->W, X->H). Each takes the
-     * MIN of the width-fit and height-fit ratios, so the chosen scale guarantees
-     * BOTH the horizontal AND the vertical bbox extent land inside the inner rect
-     * (a height-limited track can no longer overflow top/bottom). */
+    /* fit_0: no rotation (X->W, Z->H). fit_90: 90deg (Z->W, X->H). MIN of the
+     * width-fit and height-fit ratios so BOTH bbox extents land inside the inner
+     * rect. These choose the TARGET orientation only; the rendered angle is
+     * interpolated (below) so the actual fit is recomputed for the live angle. */
     float fit_0  = (in_w / wx_w < in_h / wz_h) ? (in_w / wx_w) : (in_h / wz_h);
     float fit_90 = (in_w / wz_h < in_h / wx_w) ? (in_w / wz_h) : (in_h / wx_w);
-    int   rot90  = (fit_90 > fit_0);
-    float fit    = rot90 ? fit_90 : fit_0;
 
-    /* On-screen extent of the bbox under the SAME fit + rotation actually used.
-     * rot90 swaps which world axis drives screen width vs. height. These are <=
-     * in_w / in_h by construction (the fit is the limiting min), which is what lets
-     * the centred map sit fully inside the cell with no top/bottom (or side) crop. */
-    float scr_w = (rot90 ? wz_h : wx_w) * fit;
-    float scr_h = (rot90 ? wx_w : wz_h) * fit;
+    /* Orientation target with HYSTERESIS: only switch when the OTHER orientation
+     * is clearly (>12%) better, so a near-square window can't oscillate the map
+     * between portrait/landscape every few frames. Snap target + angle on the
+     * first frame for this cell (no spurious spin-up from 0deg at race start). */
+    int want_rot = (fit_90 > fit_0) ? 1 : 0;
+    if (snapped) {
+        s_rot_tgt[slot] = want_rot;
+        s_rot_cur[slot] = (float)want_rot;
+    } else {
+        int cur_t = s_rot_tgt[slot];
+        float fit_cur   = cur_t ? fit_90 : fit_0;
+        float fit_other = cur_t ? fit_0  : fit_90;
+        if (fit_other > fit_cur * 1.12f) cur_t = !cur_t;   /* flip only if clearly better */
+        s_rot_tgt[slot] = cur_t;
+        /* Ease the rotation amount toward the (0 or 1) target for a continuous,
+         * progressive turn rather than an instant 90deg snap (rate is per-frame
+         * dt-scaled above, so the turn takes ~0.5 s at any frame rate). */
+        float rt = (float)cur_t;
+        if      (s_rot_cur[slot] < rt) { s_rot_cur[slot] += rot_step; if (s_rot_cur[slot] > rt) s_rot_cur[slot] = rt; }
+        else if (s_rot_cur[slot] > rt) { s_rot_cur[slot] -= rot_step; if (s_rot_cur[slot] < rt) s_rot_cur[slot] = rt; }
+    }
+
+    /* Continuous rotation by s_rot_cur*90deg. cos_a,sin_a >= 0 over [0,90deg]. */
+    float angle = s_rot_cur[slot] * 1.5707963f;             /* 0 .. pi/2 (90deg LEFT) */
+    float cos_a = cosf(angle), sin_a = sinf(angle);
+
+    /* On-screen bbox extent under the LIVE angle: screen width = wx_w*cos + wz_h*sin,
+     * height = wz_h*cos + wx_w*sin. The fit is the limiting min of the width/height
+     * ratios, so the map never overflows the cell at ANY angle during the turn — at
+     * the 0deg / 90deg endpoints this reduces exactly to fit_0 / fit_90. */
+    float scr_full_w = wx_w * cos_a + wz_h * sin_a;
+    float scr_full_h = wz_h * cos_a + wx_w * sin_a;
+    if (scr_full_w < 1.0f) scr_full_w = 1.0f;
+    if (scr_full_h < 1.0f) scr_full_h = 1.0f;
+    float fit = (in_w / scr_full_w < in_h / scr_full_h) ? (in_w / scr_full_w) : (in_h / scr_full_h);
 
     {
         static int s_map_rot_log = 0;
         if ((s_map_rot_log++ % 240) == 0)
             TD5_LOG_I(LOG_TAG,
-                      "grid-filler map: bbox=%.0fx%.0f cell=%.0fx%.0f fit0=%.4f fit90=%.4f -> %s (zoom=%.4f) scaled=%.0fx%.0f centred",
-                      wx_w, wz_h, in_w, in_h, fit_0, fit_90,
-                      rot90 ? "rot90-left" : "no-rot", fit, scr_w, scr_h);
+                      "grid-filler map[%d]: bbox=%.0fx%.0f cell=%.0fx%.0f fit0=%.4f fit90=%.4f tgt=%s rot=%.2f zoom=%.4f win=%.0fx%.0f",
+                      slot, wx_w, wz_h, in_w, in_h, fit_0, fit_90,
+                      s_rot_tgt[slot] ? "rot90-left" : "no-rot", s_rot_cur[slot], fit,
+                      s_win_hx[slot] * 2.0f, s_win_hz[slot] * 2.0f);
     }
 
     /* Centre the (scaled) bbox in the cell on BOTH axes: map the bbox centre
-     * (wcx,wcz) -> cell centre (ccx,ccy). Since scr_w<=in_w and scr_h<=in_h, the
-     * scaled map is inset from every edge by >=pad, so nothing is clipped. */
+     * (wcx,wcz) -> cell centre (ccx,ccy). The fit guarantees the scaled map is
+     * inset from every edge by >=pad, so nothing is clipped. */
     float wcx = (minx + maxx) * 0.5f, wcz = (minz + maxz) * 0.5f;
     float ccx = (cl + cr) * 0.5f,     ccy = (ct + cb) * 0.5f;
-    /* Two-argument map: takes BOTH world coords so the optional 90deg rotation can
-     * mix the axes. Centre the relative coords, (optionally) rotate, scale by the
-     * chosen fit, then re-centre into the cell. rot90 = 90deg LEFT (CCW, screen
-     * Y-down): screen (X,Y) <- (dz, -dx). Every projected point below goes through
-     * these so the road, branches, dots, arrows and labels all rotate + zoom
-     * together. */
-    #define MAPPX(WX, WZ) ( rot90 ? (ccx + ((WZ) - wcz) * fit) \
-                                  : (ccx + ((WX) - wcx) * fit) )
-    #define MAPPY(WX, WZ) ( rot90 ? (ccy - ((WX) - wcx) * fit) \
-                                  : (ccy + ((WZ) - wcz) * fit) )
+    /* Continuous-rotation projection. relative (dx,dz)=(WX-wcx, WZ-wcz):
+     *   screenX = ( dx*cos + dz*sin) * fit,  screenY = ( dz*cos - dx*sin) * fit.
+     * At angle 0 this is (dx,dz); at 90deg LEFT (CCW, screen Y-down) it is
+     * (dz,-dx), matching the old discrete rot90 path. Road, branches, dots,
+     * arrows and labels all go through these so they rotate + zoom together. */
+    #define MAPPX(WX, WZ) ( ccx + ( ((WX) - wcx) * cos_a + ((WZ) - wcz) * sin_a ) * fit )
+    #define MAPPY(WX, WZ) ( ccy + ( ((WZ) - wcz) * cos_a - ((WX) - wcx) * sin_a ) * fit )
 
     /* Faint panel so the cell reads as a deliberate map, not a render glitch. */
     td5_vui_quad(cl, ct, cr - cl, cb - ct, 0x66101820u, -1, 0, 0, 0, 0);
@@ -4080,20 +4166,22 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     }
 
     /* Project the active racers gathered up top (finished cars already dropped)
-     * into MAP screen space, now that the fit + optional 90deg rotation are known.
+     * into MAP screen space, now that the fit + live rotation angle are known.
      * fx/fy is the car's forward heading in MAP screen space: the body-longitudinal
      * world direction is (sin h, cos h) over (X,Z) [see the speedo body-frame
-     * projection]; with no rotation the map sends world X->screen X, world
-     * Z->screen Y, so the on-screen forward is (sin h, cos h) too. [#8] When the
-     * map is turned 90deg left the heading is rotated the SAME way as the
-     * positions so each arrow keeps pointing the way the car actually drives. */
+     * projection]; at angle 0 the map sends world X->screen X, world Z->screen Y,
+     * so the on-screen forward is (sin h, cos h) too. [#stable] The heading is then
+     * rotated by the SAME interpolated angle as the positions so each arrow keeps
+     * pointing the way the car actually drives, all the way through the turn. */
     for (int i = 0; i < n; i++) {
         lab[i].dx = MAPPX(lab[i].wx, lab[i].wz);
         lab[i].dy = MAPPY(lab[i].wx, lab[i].wz);
         float fwd_x = td5_sin_12bit(lab[i].h12);
         float fwd_y = td5_cos_12bit(lab[i].h12);
-        lab[i].fx = rot90 ? fwd_y  : fwd_x;
-        lab[i].fy = rot90 ? -fwd_x : fwd_y;
+        /* Rotate the heading by the SAME live angle as the positions so each
+         * arrow keeps pointing the way the car actually drives through the turn. */
+        lab[i].fx = fwd_x * cos_a + fwd_y * sin_a;
+        lab[i].fy = fwd_y * cos_a - fwd_x * sin_a;
     }
 
     /* Label text size tracks the cell, trimmed by the HUD size multiplier. */
@@ -4263,6 +4351,8 @@ static void hud_draw_empty_cells(void)
     }
 
     int empties_seen = 0;
+    int dedup = hud_grid_filler_dedup_on();
+    int used_kind_mask = 0;   /* bit0 (1) = MAP drawn, bit1 (2) = STANDINGS drawn */
     for (int cell = 0; cell < total; cell++) {
         /* Authoritative occupancy: skip any cell a player viewport renders into. */
         if (td5_game_split_cell_is_viewport(views, cell)) continue;
@@ -4294,8 +4384,20 @@ static void hud_draw_empty_cells(void)
          * assignment is stable under the position screen's cell permutation. */
         int k = empties_seen++; if (k < 0) k = 0; if (k > 1) k = 1;
         int content = g_td5.split_missing_content[k];
-        if (content == 2) hud_filler_draw_standings(cl, ct, cr, cb);
-        else              hud_filler_draw_map(cl, ct, cr, cb);
+        int want_standings = (content == 2);   /* configured kind: STANDINGS vs MAP */
+        /* [#dedup 2026-06-25] Never show the same thing twice. If this cell's
+         * configured kind was already drawn in another empty cell AND the other
+         * kind is still free, flip to it — so with 7 players (two empty cells) the
+         * screen always shows one MAP + one STANDINGS rather than two of a kind. */
+        if (dedup) {
+            int kind_bit  = want_standings ? 2 : 1;
+            int other_bit = want_standings ? 1 : 2;
+            if ((used_kind_mask & kind_bit) && !(used_kind_mask & other_bit))
+                want_standings = !want_standings;
+            used_kind_mask |= (want_standings ? 2 : 1);
+        }
+        if (want_standings) hud_filler_draw_standings(cl, ct, cr, cb);
+        else                hud_filler_draw_map(cl, ct, cr, cb, k);
     }
 }
 
