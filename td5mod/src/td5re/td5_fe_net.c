@@ -121,6 +121,7 @@ char s_create_session_name[64];
 static int  s_lobby_pads_valid;                       /* 1 once START snapshotted a map */
 static int  s_lobby_pads_count;                       /* snapshotted joined-player count */
 static int  s_lobby_pads_device[TD5_MAX_HUMAN_PLAYERS];/* snapshotted per-player device idx */
+static int  s_lobby_pads_is_ai[TD5_MAX_HUMAN_PLAYERS]; /* [MP AI TEST PLAYERS] AI flag per slot */
 
 static int lobby_keep_pads_enabled(void) {
     static int s_cached = -1;   /* -1=unread, 0=legacy wipe, 1=keep */
@@ -143,8 +144,10 @@ static void lobby_pads_save(void) {
     if (s_lobby_pads_count < 0) s_lobby_pads_count = 0;
     if (s_lobby_pads_count > TD5_MAX_HUMAN_PLAYERS)
         s_lobby_pads_count = TD5_MAX_HUMAN_PLAYERS;
-    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
         s_lobby_pads_device[p] = s_mp_join_device[p];
+        s_lobby_pads_is_ai[p]  = s_mp_slot_is_ai[p];   /* [MP AI TEST PLAYERS] keep AI slots */
+    }
     s_lobby_pads_valid = 1;
 }
 
@@ -160,10 +163,12 @@ static int lobby_pads_restore(void) {
      * stale snapshot must NOT leak back in. */
     if (!s_mp_flow) return 0;
     s_mp_joined_count = s_lobby_pads_count;
-    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
         s_mp_join_device[p] = s_lobby_pads_device[p];
-    TD5_LOG_I(LOG_TAG, "MP Lobby: restored %d controller(s) on back-to-lobby",
-              s_mp_joined_count);
+        s_mp_slot_is_ai[p]  = s_lobby_pads_is_ai[p];   /* [MP AI TEST PLAYERS] restore AI slots */
+    }
+    TD5_LOG_I(LOG_TAG, "MP Lobby: restored %d slot(s) on back-to-lobby (%d AI)",
+              s_mp_joined_count, frontend_mp_ai_player_count());
     return 1;
 }
 
@@ -351,6 +356,7 @@ void Screen_MultiplayerLobby(void) {
         if (!lobby_pads_restore()) {
             s_mp_joined_count = 0;
             memset(s_mp_join_device, 0, sizeof(s_mp_join_device));
+            frontend_mp_ai_players_reset();   /* [MP AI TEST PLAYERS] fresh lobby = no AI */
         }
         s_mp_join_prev = td5_plat_input_scan_join();/* ignore inputs already held on entry */
         frontend_reset_buttons();
@@ -406,6 +412,26 @@ void Screen_MultiplayerLobby(void) {
             TD5_LOG_I(LOG_TAG, "MP Lobby: player %d join keyboard", s_mp_joined_count);
         }
 
+#ifndef TD5RE_RELEASE
+        /* [MP AI TEST PLAYERS 2026-06-25] Dev-only keys to populate the lobby with
+         * simulated AI players — no extra controllers needed. A = add an AI player,
+         * R = remove the last one, [ / ] = fewer/more AI cops (cop chase). Each is
+         * edge-detected so a held key fires once. ADD requires a real human (slot 0)
+         * already joined, so the person at the keyboard always keeps slot 0. */
+        {
+            static int s_dev_a = 0, s_dev_r = 0, s_dev_lb = 0, s_dev_rb = 0;
+            int a_now  = td5_plat_input_key_pressed(0x1E);   /* A */
+            int r_now  = td5_plat_input_key_pressed(0x13);   /* R */
+            int lb_now = td5_plat_input_key_pressed(0x1A);   /* [ */
+            int rb_now = td5_plat_input_key_pressed(0x1B);   /* ] */
+            if (a_now  && !s_dev_a)  frontend_play_sfx(frontend_mp_add_ai_player() ? 3 : 10);
+            if (r_now  && !s_dev_r)  { if (frontend_mp_remove_ai_player()) frontend_play_sfx(5); }
+            if (lb_now && !s_dev_lb) { frontend_mp_ai_cop_count_step(-1); frontend_play_sfx(2); }
+            if (rb_now && !s_dev_rb) { frontend_mp_ai_cop_count_step(+1); frontend_play_sfx(2); }
+            s_dev_a = a_now; s_dev_r = r_now; s_dev_lb = lb_now; s_dev_rb = rb_now;
+        }
+#endif
+
         if (!joined_now) {
             if (s_input_ready && s_button_index == 0) do_start = 1;  /* START button */
             if (s_input_ready && s_button_index == 1) do_back  = 1;  /* BACK button  */
@@ -427,6 +453,16 @@ void Screen_MultiplayerLobby(void) {
             s_mp_simul          = (s_mp_joined_count >= 2);
             s_mp_phase          = 0;       /* start at the name + colour setup window */
             for (p = 0; p < s_mp_joined_count; p++) {
+                /* [MP AI TEST PLAYERS 2026-06-25] Simulated AI slots keep the random
+                 * identity assigned when they were added — never restore a saved
+                 * profile (their device is the -1 sentinel) and never bind a device
+                 * (they read no input). Only the per-grid runtime state is reset. */
+                if (s_mp_slot_is_ai[p]) {
+                    if (s_mp_player_car[p] < 0) s_mp_player_car[p] = s_selected_car;
+                    s_mp_player_ready[p]  = 0;
+                    s_mp_pane_nav_prev[p] = 0;
+                    continue;
+                }
                 /* [MP SESSION PERSISTENCE 2026-06] Re-entering the MP menu in the
                  * same process run restores each player's saved identity + car
                  * (name/accent/car/paint/color/trans) from the persistent store;

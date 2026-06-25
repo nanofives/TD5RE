@@ -1344,6 +1344,10 @@ void Screen_QuickRaceMenu(void) {
 static uint32_t mp_simul_player_nav(int player) {
     int dev = s_mp_join_device[player];
     uint32_t b = 0;
+    /* [MP AI TEST PLAYERS 2026-06-25] Simulated AI slots have no device (sentinel
+     * -1) — return no input. Without this guard their dev<0 falls through to the
+     * keyboard reads below, so the human's keyboard would drive EVERY AI pane. */
+    if (s_mp_slot_is_ai[player]) return 0;
     if (dev > 0) return td5_plat_input_device_nav(dev);
     if (td5_plat_input_key_pressed(0xCB)) b |= 1;     /* Left          */
     if (td5_plat_input_key_pressed(0xCD)) b |= 2;     /* Right         */
@@ -1485,6 +1489,25 @@ static void mp_simul_set_pane_roster(int p) {
     }
 }
 
+/* [MP AI TEST PLAYERS 2026-06-25] Auto-resolve every simulated AI slot so the
+ * shared per-player setup screens (name/colour setup, position picker, car grid)
+ * advance on the lone human's input. AI take no nav (mp_simul_player_nav returns 0
+ * for them), so without this their READY latch would never set and all_ready would
+ * stall forever. Idempotent — call once per frame at the top of each such screen.
+ * The car grid additionally seeds a random role-valid car at init; here we only
+ * keep the ready latch / sub-panels / viewport cells coherent. */
+static void mp_ai_autoresolve(int n) {
+    int p;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    for (p = 0; p < n; p++) {
+        if (!s_mp_slot_is_ai[p]) continue;
+        s_mp_player_ready[p]  = 1;     /* always locked in */
+        s_mp_setup_sub[p]     = 0;     /* never trapped in a name/colour sub-panel */
+        s_mp_pane_substate[p] = 0;     /* never trapped in the stats sheet */
+        s_mp_player_cell[p]   = p;     /* distinct viewport cell (human=slot0=cell0) */
+    }
+}
+
 static void frontend_mp_simul_carsel_init(void) {
     int p, n = s_num_human_players;
     if (n < 2) n = 2;
@@ -1514,6 +1537,30 @@ static void frontend_mp_simul_carsel_init(void) {
 
     for (p = 0; p < n; p++) {
         mp_simul_set_pane_roster(p);
+        /* [MP AI TEST PLAYERS 2026-06-25] Simulated AI pane: pick a RANDOM car valid
+         * for this pane's role roster (cop pane -> police car, suspect -> civilian),
+         * a random body colour, and lock it in immediately so the grid waits only on
+         * the human. Auto-picks "any other option that needs input" at random. */
+        if (s_mp_slot_is_ai[p]) {
+            int lo = s_mp_player_roster_min[p], hi = s_mp_player_roster_max[p];
+            int span = (hi >= lo) ? (hi - lo + 1) : 1;
+            int car  = lo + (int)((unsigned)rand() % (unsigned)span);
+            if (!mp_simul_carsel_valid(p, car)) car = mp_simul_carsel_step(p, car, +1);
+            s_mp_player_car[p]       = car;
+            s_mp_player_color_idx[p] = (int)((unsigned)rand() % (unsigned)TD6_PALETTE_N);
+            s_mp_player_color[p]     = (int)s_td6_palette[s_mp_player_color_idx[p]];
+            s_mp_player_paint[p]     = 0;
+            s_mp_player_ready[p]     = 1;     /* locked in */
+            s_mp_pane_btn[p]         = MP_BTN_CAR;
+            s_mp_pane_substate[p]    = 0;
+            s_mp_pane_spec_car[p]    = -1;
+            s_mp_pane_preview[p]     = 0;
+            s_mp_pane_overlay[p]     = 0;
+            s_mp_rep_ms[p]           = 0;
+            s_mp_pane_nav_prev[p]    = 0;
+            mp_simul_refresh_pane(p);
+            continue;
+        }
         /* [MP SESSION PERSISTENCE 2026-06] Phase-1 grid: prefer the session-saved
          * car/paint/color/trans (already mirrored into the live arrays by the
          * lobby START restore) over the per-entry defaults, so a returning player
@@ -1650,6 +1697,8 @@ static void frontend_mp_simul_carsel_update(void) {
      * reconnect modal until it returns (ESC aborts to the lobby). */
     if (frontend_mp_setup_disconnect_check(n)) return;
 
+    mp_ai_autoresolve(n);   /* [MP AI TEST PLAYERS] simulated panes stay locked-in */
+
     /* [persist-on-edit 2026-06-21] Keep the session store in sync with the live
      * car picks so they survive backing out (even to the main menu) pre-race. */
     mp_session_save_live_roster(n);
@@ -1756,6 +1805,9 @@ static void frontend_mp_simul_carsel_update(void) {
         if (now - s_mp_simul_ready_ms >= 500u) {
             int q;
             for (q = 0; q < n; q++) {
+                /* [MP AI TEST PLAYERS] Simulated slots have no device (sentinel -1)
+                 * and read no input in-race — never bind one for them. */
+                if (s_mp_slot_is_ai[q]) continue;
                 /* Bind each player's own device for the race (exclusive). */
                 td5_input_set_input_source(q, s_mp_join_device[q]);
                 td5_save_set_player_device_index(q, (uint32_t)s_mp_join_device[q]);
@@ -1902,7 +1954,8 @@ static void frontend_mp_setup_init(void) {
          * colour come up pre-filled (the lobby START restore already mirrors them
          * into the live arrays; this keeps it correct regardless of entry order).
          * Gated by TD5RE_MP_SESSION. */
-        mp_session_restore_player_for_device(p);   /* [per-device 2026-06-21] */
+        if (!s_mp_slot_is_ai[p])   /* [MP AI TEST PLAYERS] AI keep their random identity */
+            mp_session_restore_player_for_device(p);   /* [per-device 2026-06-21] */
         if (s_mp_player_accent[p] == 0)
             s_mp_player_accent[p] = (int)(k_mp_player_colors[p % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
         s_mp_player_ready[p]  = 0;
@@ -2169,6 +2222,8 @@ static void frontend_mp_setup_update(void) {
 
     /* [disconnect-modal] freeze + reconnect modal if a pad dropped mid-setup. */
     if (frontend_mp_setup_disconnect_check(n)) return;
+
+    mp_ai_autoresolve(n);   /* [MP AI TEST PLAYERS] AI keep their random name/colour, stay ready */
 
     /* [persist-on-edit 2026-06-21] Keep the session store in sync with the live
      * name/colour so they survive backing out (even to the main menu) pre-race. */
@@ -2594,6 +2649,7 @@ void Screen_MpPosition(void) {
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
     /* [disconnect-modal] freeze + reconnect modal if a pad dropped mid-pick. */
     if (frontend_mp_setup_disconnect_check(n)) return;
+    mp_ai_autoresolve(n);   /* [MP AI TEST PLAYERS] AI pick a viewport cell + stay ready */
     mp_resolve_layout(n, s_mp_layout_sel, &cols, &rows, &missing);
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
@@ -3112,8 +3168,12 @@ static int mp_cfg_build(MpCfgOpt *o) {
         break;
     case TD5_MP_MODE_COP_CHASE:
         /* No "cop slot" option — when AI cop is OFF, players pick cop/suspect on a
-         * dedicated role screen; when ON, the AI is the cop (skip the role screen). */
-        o[n].label="AI COP";           o[n].val=&c->cop_is_ai;           o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
+         * dedicated role screen; when ON, the AI is the cop (skip the role screen).
+         * [MP AI TEST PLAYERS 2026-06-25] Hidden when simulated AI players are in the
+         * lobby: cop roles are then auto-assigned from the lobby's AI-cop count (see
+         * the OK handler), so this toggle would be a confusing no-op. */
+        if (frontend_mp_ai_player_count() == 0)
+        { o[n].label="AI COP";          o[n].val=&c->cop_is_ai;           o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++; }
         o[n].label="WIN CONDITION";    o[n].val=&c->cop_win_condition;   o[n].min=0;  o[n].max=2;  o[n].step=1; o[n].enum_labels=k_cfg_wincon; o[n].enum_count=3; n++;
         o[n].label="HEAD START";       o[n].val=&c->suspect_head_start;  o[n].min=0;  o[n].max=40; o[n].step=2; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
         o[n].label="SUSPECT SPEED %";  o[n].val=&c->suspect_debuff_pct;  o[n].min=40; o[n].max=100;o[n].step=5; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
@@ -3242,7 +3302,35 @@ void Screen_MpModeConfig(void) {
      * everything else (incl. AI cop) goes straight to car selection. */
     if (s_input_ready && s_button_index == count) {
         td5_plat_input_flush_nav();
-        if (c->mode == TD5_MP_MODE_COP_CHASE && !c->cop_is_ai) {
+        if (c->mode == TD5_MP_MODE_COP_CHASE && frontend_mp_ai_player_count() > 0) {
+            /* [MP AI TEST PLAYERS 2026-06-25] Auto-assign cop roles instead of the
+             * human role-pick screen: the first s_mp_ai_cop_count AI players become
+             * cops, the human (slot 0) + remaining AI are suspects. Build the per-
+             * slot mask the car-grid role roster (mp_simul_pane_is_cop) and the in-
+             * race cop logic (td5_game_cop_chase_is_cop) both read; keep cop_is_ai=0
+             * so the masked slots take cop cars + cop behaviour. Cop chase needs at
+             * least one cop, so a 0 count falls back to the first AI player. */
+            int slot, want = s_mp_ai_cop_count, mask = 0, primary = -1;
+            int nh = s_num_human_players;
+            if (nh > TD5_MAX_HUMAN_PLAYERS) nh = TD5_MAX_HUMAN_PLAYERS;
+            for (slot = 0; slot < nh && want > 0; slot++) {
+                if (!frontend_mp_slot_is_ai(slot)) continue;
+                mask |= (1 << slot);
+                if (primary < 0) primary = slot;
+                want--;
+            }
+            if (mask == 0) {                          /* no cops requested -> first AI is cop */
+                for (slot = 0; slot < nh; slot++)
+                    if (frontend_mp_slot_is_ai(slot)) { mask = (1 << slot); primary = slot; break; }
+            }
+            c->cop_is_ai     = 0;
+            c->cop_slot_mask = mask;
+            c->cop_slot      = (primary >= 0) ? primary : 0;
+            TD5_LOG_I(LOG_TAG,
+                      "MP mode config: AI cop-chase mask=0x%X primary=%d (req %d cops) -> car select",
+                      mask, c->cop_slot, s_mp_ai_cop_count);
+            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        } else if (c->mode == TD5_MP_MODE_COP_CHASE && !c->cop_is_ai) {
             TD5_LOG_I(LOG_TAG, "MP mode config: cop chase (human cop) -> role select");
             td5_frontend_set_screen(TD5_SCREEN_MP_COP_ROLES);
         } else if (c->mode == TD5_MP_MODE_CUP && c->cup_team_mode) {

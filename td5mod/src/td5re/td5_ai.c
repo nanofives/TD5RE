@@ -2231,6 +2231,22 @@ void td5_ai_init_race_actor_runtime(void) {
                       "others_ai=1 -> AI g_slot_state[1..%d]=0 (slot 0 = human)",
                       (humans < g_traffic_slot_base ? humans : g_traffic_slot_base) - 1);
     }
+    /* [MP AI TEST PLAYERS 2026-06-25] Simulated AI players occupy human-pool slots
+     * but are AI-driven. This g_slot_state[] table is SEPARATE from td5_game.c's
+     * s_slot_state[] (see the split-screen + network notes), so the InitRace
+     * mp_ai_player_mask flip does NOT reach here — without this the masked slots
+     * stay g_slot_state==1 (human) and ai_update_single_racer skips them, leaving
+     * the cars parked. Mirror the InitRace per-slot flip so the AI drives them. */
+    if (g_td5.mp_ai_player_mask) {
+        int humans = g_td5.num_human_players;
+        if (humans > g_traffic_slot_base) humans = g_traffic_slot_base;
+        for (int k = 1; k < humans; k++)
+            if (((g_td5.mp_ai_player_mask >> k) & 1u) && g_slot_state[k] == 1)
+                g_slot_state[k] = 0;   /* AI test-player drives itself */
+        TD5_LOG_I(LOG_TAG,
+                  "mp_ai_player_mask=0x%X -> AI g_slot_state simulated slots = 0",
+                  g_td5.mp_ai_player_mask);
+    }
     /* [ITEM 2 2026-06-19] Network race: the AI's g_slot_state MUST agree with
      * td5_game.c's s_slot_state (see the split-screen note above) or the AI
      * drives a human's car. Mark every roster-occupied slot human -- the roster
@@ -11456,6 +11472,7 @@ static void mp_cop_pick_target(int cop_slot) {
     for (s = 0; s < nsusp; s++) {
         char *a; int d;
         if (s == cop_slot) continue;                   /* the (human) cop is not a suspect */
+        if (td5_game_cop_chase_is_cop(s)) continue;    /* [MP AI TEST PLAYERS] don't chase fellow cops */
         if (g_wanted_damage_state[s] <= 0) continue;   /* already arrested */
         a = actor_ptr(s);
         if (!a) continue;

@@ -293,6 +293,99 @@ int  s_mp_kbd_row[TD5_MAX_HUMAN_PLAYERS];
 int  s_mp_col_col[TD5_MAX_HUMAN_PLAYERS];              /* colour-grid cursor */
 int  s_mp_col_row[TD5_MAX_HUMAN_PLAYERS];
 
+/* [MP AI TEST PLAYERS 2026-06-25] Dev-only "ADD AI PLAYER" lobby tool — simulate
+ * extra split-screen players (each gets its own pane / HUD / results row, but is
+ * AI-driven) so ONE person can exercise every multiplayer path without N humans +
+ * N controllers. The human stays slot 0; AI fill the slots after it. Each AI
+ * auto-picks a random name + identity colour here, a random role-valid car at the
+ * car grid, and auto-readies through every setup screen. Cleared on a fresh lobby
+ * entry; carried across back-to-lobby round-trips by lobby_pads_save/restore. */
+int  s_mp_slot_is_ai[TD5_MAX_HUMAN_PLAYERS];   /* 1 = this joined slot is a simulated AI player */
+int  s_mp_ai_cop_count = 1;                    /* cop chase: how many AI players are cops */
+static const char *const k_ai_player_names[] = {
+    "VIPER", "BLAZE", "NOVA",  "ROGUE", "ACE",   "BOLT",  "FURY",  "DASH",
+    "ECHO",  "ZERO",  "RIVAL", "TURBO", "SHADE", "JET",   "ONYX",  "RAZOR",
+};
+#define K_AI_NAME_COUNT ((int)(sizeof k_ai_player_names / sizeof k_ai_player_names[0]))
+
+/* True when joined slot p is a simulated AI test-player. */
+int frontend_mp_slot_is_ai(int p) {
+    return (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) ? s_mp_slot_is_ai[p] : 0;
+}
+/* Count of simulated AI players currently in the lobby roster. */
+int frontend_mp_ai_player_count(void) {
+    int p, c = 0;
+    for (p = 0; p < s_mp_joined_count && p < TD5_MAX_HUMAN_PLAYERS; p++)
+        if (s_mp_slot_is_ai[p]) c++;
+    return c;
+}
+/* Count of REAL (human-controlled) players in the lobby roster. */
+int frontend_mp_human_count(void) {
+    int c = s_mp_joined_count - frontend_mp_ai_player_count();
+    return c < 0 ? 0 : c;
+}
+int frontend_mp_ai_cop_count(void) { return s_mp_ai_cop_count; }
+
+/* Append a simulated AI player. Returns 1 on success. Requires a real human already
+ * joined (slot 0 = the person at the wheel) and a free viewport slot. Auto-assigns
+ * a random non-duplicate name + an identity colour; the role-valid car is chosen
+ * later at the car grid (mp_simul_carsel_init). */
+int frontend_mp_add_ai_player(void) {
+    int slot = s_mp_joined_count, tries, idx;
+    if (slot >= TD5_MAX_HUMAN_PLAYERS || slot >= TD5_MAX_VIEWPORTS) return 0;
+    if (frontend_mp_human_count() < 1) return 0;   /* keep slot 0 a human driver */
+    s_mp_join_device[slot] = -1;                   /* AI sentinel: no real device */
+    s_mp_slot_is_ai[slot]  = 1;
+    /* Random name, avoiding a duplicate of any name already in the roster. */
+    idx = (int)((unsigned)rand() % (unsigned)K_AI_NAME_COUNT);
+    for (tries = 0; tries < K_AI_NAME_COUNT; tries++) {
+        int p, dup = 0;
+        for (p = 0; p < slot; p++)
+            if (s_mp_player_name[p][0] &&
+                strcmp(s_mp_player_name[p], k_ai_player_names[idx]) == 0) { dup = 1; break; }
+        if (!dup) break;
+        idx = (idx + 1) % K_AI_NAME_COUNT;
+    }
+    snprintf(s_mp_player_name[slot], sizeof s_mp_player_name[slot], "%s", k_ai_player_names[idx]);
+    s_mp_player_accent[slot] = (int)(k_mp_player_colors[slot % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
+    s_mp_player_car[slot]    = s_selected_car;   /* placeholder; randomised at the car grid */
+    s_mp_player_paint[slot]  = 0;
+    s_mp_player_color[slot]  = -1;
+    s_mp_player_ready[slot]  = 0;
+    s_mp_player_trans[slot]  = (int)((unsigned)rand() & 1u);   /* random gearbox */
+    s_mp_joined_count        = slot + 1;
+    TD5_LOG_I(LOG_TAG, "MP Lobby: added AI player slot %d \"%s\" (%d AI, %d human)",
+              slot, s_mp_player_name[slot],
+              frontend_mp_ai_player_count(), frontend_mp_human_count());
+    return 1;
+}
+/* Remove the most-recently-added AI player (no-op if the last slot is human). */
+int frontend_mp_remove_ai_player(void) {
+    int slot = s_mp_joined_count - 1;
+    if (slot < 0 || !s_mp_slot_is_ai[slot]) return 0;
+    s_mp_slot_is_ai[slot]     = 0;
+    s_mp_join_device[slot]    = 0;
+    s_mp_player_name[slot][0] = '\0';
+    s_mp_player_ready[slot]   = 0;
+    s_mp_joined_count         = slot;
+    if (s_mp_ai_cop_count > frontend_mp_ai_player_count())
+        s_mp_ai_cop_count = frontend_mp_ai_player_count();
+    TD5_LOG_I(LOG_TAG, "MP Lobby: removed AI player slot %d", slot);
+    return 1;
+}
+/* Step the cop-chase AI-cop count, clamped to [0, AI player count]. */
+void frontend_mp_ai_cop_count_step(int d) {
+    int maxc = frontend_mp_ai_player_count();
+    s_mp_ai_cop_count += d;
+    if (s_mp_ai_cop_count < 0)    s_mp_ai_cop_count = 0;
+    if (s_mp_ai_cop_count > maxc) s_mp_ai_cop_count = maxc;
+}
+/* Clear all AI test-player state (fresh lobby entry). */
+void frontend_mp_ai_players_reset(void) {
+    memset(s_mp_slot_is_ai, 0, sizeof s_mp_slot_is_ai);
+    s_mp_ai_cop_count = 1;
+}
+
 /* [MP SESSION PERSISTENCE 2026-06] Process-lifetime store of the last committed
  * multiplayer roster (name/accent/car/paint/color/trans per player). This is a
  * SEPARATE static from the s_mp_* working arrays, so the Main-Menu cleanup
@@ -2980,6 +3073,19 @@ void frontend_init_race_schedule(void) {
             g_td5.mp_mode_config.cop_is_ai && ai < 1)
             ai = 1;
         if (ai > TD5_MAX_RACER_SLOTS - humans) ai = TD5_MAX_RACER_SLOTS - humans;
+
+        /* [MP AI TEST PLAYERS 2026-06-25] Build the simulated-player mask from the
+         * lobby's per-slot AI flags (only meaningful on the local split-screen MP
+         * flow). When any AI test players exist they ARE the field — suppress the
+         * legacy AI-opponent fill so the race is exactly the lobby roster
+         * (1 human at the wheel + N AI-driven players, each in its own pane). */
+        g_td5.mp_ai_player_mask = 0;
+        if (s_mp_flow && s_two_player_mode != 0) {
+            int p;
+            for (p = 0; p < humans && p < TD5_MAX_HUMAN_PLAYERS; p++)
+                if (s_mp_slot_is_ai[p]) g_td5.mp_ai_player_mask |= (1u << p);
+        }
+        if (g_td5.mp_ai_player_mask) ai = 0;
 
         g_td5.num_human_players = humans;
         g_td5.num_ai_opponents  = ai;
@@ -7855,7 +7961,12 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
          * dropped the index yet (more robust than the bare NULL-name check). A
          * lost joystick reads "(DISCONNECTED)" with a red row highlight; an
          * unnamed-but-present pad reads "CONTROLLER"; device 0 is the keyboard. */
-        if (s_mp_join_device[p] > 0 && td5_plat_input_device_is_lost(s_mp_join_device[p])) {
+        if (s_mp_slot_is_ai[p]) {
+            /* [MP AI TEST PLAYERS 2026-06-25] Simulated player row: gold, no device,
+             * always ready. Cop chase shows the auto-assigned COP/SUSPECT role. */
+            dev = "AI";
+            row_color = 0xFFFFC040u;   /* gold = simulated AI */
+        } else if (s_mp_join_device[p] > 0 && td5_plat_input_device_is_lost(s_mp_join_device[p])) {
             dev = "(DISCONNECTED)";
             row_color = 0xFFFF4040u;   /* red highlight for a lost controller */
         } else if (!dev || !dev[0]) {
@@ -7894,6 +8005,22 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
     }
     if (s_mp_joined_count == 0)
         fe_draw_text_centered(320.0f * sx, 150.0f * sy, "( no players yet )", 0xFF888888, sx*0.8f, sy*0.8f);
+
+#ifndef TD5RE_RELEASE
+    /* [MP AI TEST PLAYERS 2026-06-25] Dev panel: populate the lobby with simulated
+     * AI players (no extra controllers). Shows the current AI/cop counts + the keys.
+     * Stripped from the RELEASE build. */
+    {
+        char dl[96];
+        int aic = frontend_mp_ai_player_count();
+        snprintf(dl, sizeof dl, "[DEV]  AI PLAYERS: %d     AI COPS (cop chase): %d",
+                 aic, s_mp_ai_cop_count);
+        fe_draw_text_centered(320.0f * sx, 316.0f * sy, dl, 0xFFFFC040u, sx*0.66f, sy*0.66f);
+        fe_draw_text_centered(320.0f * sx, 332.0f * sy,
+                              "A = ADD AI    R = REMOVE AI    [ / ] = AI COPS",
+                              0xFFB0B0B0u, sx*0.60f, sy*0.60f);
+    }
+#endif
 
     /* [#8] The single join/start/back help legend is dropped under the default
      * (side-by-side button) layout; TD5RE_LOBBY_BUTTONS=0 keeps the old line. */
@@ -9510,8 +9637,9 @@ static void frontend_render_lobby_kick_icons(float sx, float sy) {
 /* Body viewport + layout in design (640x480) coordinates. */
 #define CL_VIEW_TOP    70.0f
 #define CL_VIEW_BOTTOM 404.0f
-#define CL_LINE_H      14.0f
+#define CL_LINE_H      16.0f             /* row pitch (a touch more air between lines) */
 #define CL_LEFT_X      FE_TITLE_LEFT_X   /* 126: line text up with the CHANGELOG title */
+#define CL_ITEM_INDENT 11.0f             /* hanging indent for bullet items (dot sits left) */
 #define CL_FONT        0.82f             /* body text scale (smaller than menu text) */
 #define CL_SCROLLBAR_X 614.0f
 
@@ -9572,6 +9700,20 @@ static void frontend_changelog_render(float sx, float sy) {
         uint32_t col;
         if (ln->style == CL_BLANK) continue;
         if (y < top - 0.5f || y > bot - CL_LINE_H) continue;
+        if (ln->style == CL_ITEM) {
+            /* Bullet list: the first line of an item gets a gold dot at the
+             * margin; continuation lines (authored with a leading indent) drop
+             * the indent and hang under the item text, aligned past the dot. */
+            const char *t = ln->text;
+            int cont = (t[0] == ' ');
+            while (*t == ' ') t++;
+            if (!cont)
+                fe_draw_quad((CL_LEFT_X + 1.0f) * sx, (y + 13.5f) * sy,
+                             3.5f * sx, 3.5f * sy, 0xFFE3D708u, -1, 0, 0, 0, 0);
+            fe_draw_text((CL_LEFT_X + CL_ITEM_INDENT) * sx, y * sy, t,
+                         0xFFD8DCE0u, fsx, fsy);
+            continue;
+        }
         switch (ln->style) {
         case CL_SECTION: col = 0xFFE3D708u; break;  /* gold  */
         case CL_DATE:    col = 0xFF66CCFFu; break;  /* cyan  */
@@ -9608,8 +9750,11 @@ void Screen_Changelog(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_reset_buttons();
         frontend_init_return_screen(TD5_SCREEN_CHANGELOG);   /* parent = MAIN_MENU */
-        s_cl_pending_btn = frontend_create_button("PENDING TO TEST", 130, 440, 220, 26);
-        s_cl_back_btn    = frontend_create_button("BACK",            370, 440, 120, 26);
+        /* PENDING TO TEST sits up top against the right margin (clear of the
+         * CHANGELOG title) and vertically centred on it; BACK stays at the
+         * bottom, now centred. */
+        s_cl_pending_btn = frontend_create_button("PENDING TO TEST", 420,  15, 200, 26);
+        s_cl_back_btn    = frontend_create_button("BACK",            260, 440, 120, 26);
         s_selected_button   = s_cl_back_btn;
         s_changelog_scroll  = 0.0f;
         s_changelog_last_ms = 0;
@@ -9677,12 +9822,13 @@ void Screen_Changelog(void) {
  * ======================================================================== */
 
 #define PL_ROWS_PER_PAGE 10
-#define PL_ROW_X     64
-#define PL_ROW_W     472
+#define PL_ROW_X     126                 /* line the rows up under the title (FE_TITLE_LEFT_X) */
+#define PL_ROW_W     410                 /* a touch narrower than before (right edge ~536) */
 #define PL_ROW_H     24
-#define PL_ROW_Y0    68
+#define PL_ROW_Y0    88                  /* pushed down for breathing room below the header */
 #define PL_ROW_STEP  27
-#define PL_CTL_Y     (PL_ROW_Y0 + PL_ROWS_PER_PAGE * PL_ROW_STEP + 8)   /* 346 */
+#define PL_CTL_Y     (PL_ROW_Y0 + PL_ROWS_PER_PAGE * PL_ROW_STEP + 8)   /* 366 */
+#define PENDING_TEXT_MAX_LOCAL 128       /* >= td5_pending.c PENDING_TEXT_MAX (120) + "..." */
 
 static int s_pl_page        = 0;
 static int s_pl_pages       = 1;
@@ -9714,16 +9860,54 @@ static void frontend_pending_build_buttons(void) {
     for (r = 0; r < s_pl_row_count; r++)
         frontend_create_button("", PL_ROW_X, PL_ROW_Y0 + r * PL_ROW_STEP, PL_ROW_W, PL_ROW_H);
 
-    s_pl_overlay_btn = frontend_create_button("", PL_ROW_X, PL_CTL_Y, 230, 26);
-    s_pl_back_btn    = frontend_create_button("BACK", PL_ROW_X + 246, PL_CTL_Y, 110, 26);
+    /* Control row, left-aligned with the rows/title. All four carry an empty
+     * label so their text is drawn in the POST-button pass (frontend_pending_render)
+     * in the SAME smaller body font as the IN-GAME OVERLAY toggle, at the same
+     * button-top y, so every control label lines up vertically. */
+    s_pl_overlay_btn = frontend_create_button("", PL_ROW_X,       PL_CTL_Y, 216, 26);
+    s_pl_back_btn    = frontend_create_button("", PL_ROW_X + 226, PL_CTL_Y,  98, 26);
     if (s_pl_pages > 1) {
-        s_pl_prev_btn = frontend_create_button("< PREV", PL_ROW_X + 366, PL_CTL_Y, 70, 26);
-        s_pl_next_btn = frontend_create_button("NEXT >", PL_ROW_X + 442, PL_CTL_Y, 70, 26);
+        s_pl_prev_btn = frontend_create_button("", PL_ROW_X + 332, PL_CTL_Y, 64, 26);
+        s_pl_next_btn = frontend_create_button("", PL_ROW_X + 404, PL_CTL_Y, 64, 26);
     } else {
         s_pl_prev_btn = -1;
         s_pl_next_btn = -1;
     }
     s_selected_button = (s_pl_row_count > 0) ? 0 : s_pl_back_btn;
+}
+
+/* Fit `src` into `max_w` screen-px at (pfx,pfy); if it's wider, truncate on a
+ * whole-character boundary and append an ellipsis so the row never overruns its
+ * button. Writes the result into out[out_sz] and returns its measured width (so
+ * the strikethrough can match). Measurement honours s_fe_preserve_case, so call
+ * it inside the same case-preserving region used to draw the rows. */
+static float frontend_pending_fit_ellipsis(const char *src, float max_w,
+                                           float pfx, float pfy,
+                                           char *out, size_t out_sz) {
+    if (fe_measure_text(src, pfx, pfy) <= max_w) {
+        snprintf(out, out_sz, "%s", src);
+        return fe_measure_text(out, pfx, pfy);
+    }
+    {
+        float ell_w = fe_measure_text("...", pfx, pfy);
+        char  tmp[PENDING_TEXT_MAX_LOCAL];
+        int   cap = (int)out_sz - 4;          /* room for "..." + NUL in `out` */
+        int   len = (int)strlen(src), n;
+        if (cap > (int)sizeof tmp - 1) cap = (int)sizeof tmp - 1;
+        if (len > cap) len = cap;
+        for (n = len; n > 0; n--) {
+            memcpy(tmp, src, (size_t)n);
+            tmp[n] = '\0';
+            if (fe_measure_text(tmp, pfx, pfy) + ell_w <= max_w) {
+                memcpy(out, src, (size_t)n);   /* n <= out_sz-4, so "..." + NUL fit */
+                out[n] = out[n + 1] = out[n + 2] = '.';
+                out[n + 3] = '\0';
+                return fe_measure_text(out, pfx, pfy);
+            }
+        }
+        snprintf(out, out_sz, "...");
+        return ell_w;
+    }
 }
 
 static void frontend_pending_render(float sx, float sy) {
@@ -9745,16 +9929,17 @@ static void frontend_pending_render(float sx, float sy) {
     for (r = 0; r < s_pl_row_count; r++) {
         int   item = start + r;
         int   done = td5_pending_is_done(item);
-        float bx, by, bw, bh, tx, tw;
+        float bx, by, bw, bh, tx, tw, avail;
+        char  rowbuf[PENDING_TEXT_MAX_LOCAL];
         const char *box = done ? "[x]" : "[ ]";
-        (void)bw;
         frontend_get_button_render_rect(r, sx, sy, &bx, &by, &bw, &bh);
         fe_draw_text(bx + 10.0f * sx, by, box, done ? 0xFF66E066u : 0xFFB0B8C0u, pfx, pfy);
-        tx = bx + 42.0f * sx;
+        tx    = bx + 30.0f * sx;             /* tighter gap between the checkbox and the item text */
+        avail = (bx + bw) - tx - 8.0f * sx;  /* text room left in the row (small right-rim padding) */
         s_fe_preserve_case = 1;
-        fe_draw_text(tx, by, td5_pending_text(item),
-                     done ? 0xFF707880u : 0xFFE6EAF0u, pfx, pfy);
-        tw = fe_measure_text(td5_pending_text(item), pfx, pfy);
+        tw = frontend_pending_fit_ellipsis(td5_pending_text(item), avail, pfx, pfy,
+                                           rowbuf, sizeof rowbuf);
+        fe_draw_text(tx, by, rowbuf, done ? 0xFF707880u : 0xFFE6EAF0u, pfx, pfy);
         s_fe_preserve_case = prev_case;
         if (done)
             fe_draw_quad(tx, by + 13.0f * sy, tw, 1.5f * sy, 0xFFA0A4A8u, -1, 0, 0, 0, 0);
@@ -9771,11 +9956,29 @@ static void frontend_pending_render(float sx, float sy) {
                      on ? 0xFF66E066u : 0xFFD8DCE0u, pfx, pfy);
     }
 
+    /* BACK / < PREV / NEXT > labels — same smaller body font as the overlay
+     * toggle, centred on their buttons and drawn at the button-top y so all the
+     * control-row labels sit on the same line. */
+    {
+        const struct { int btn; const char *txt; } ctl[3] = {
+            { s_pl_back_btn, "BACK"   },
+            { s_pl_prev_btn, "< PREV" },
+            { s_pl_next_btn, "NEXT >" },
+        };
+        for (int c = 0; c < 3; c++) {
+            float bx, by, bw, bh, tw;
+            if (ctl[c].btn < 0) continue;
+            frontend_get_button_render_rect(ctl[c].btn, sx, sy, &bx, &by, &bw, &bh);
+            tw = fe_measure_text(ctl[c].txt, pfx, pfy);
+            fe_draw_text(bx + (bw - tw) * 0.5f, by, ctl[c].txt, 0xFFE6EAF0u, pfx, pfy);
+        }
+    }
+
     if (s_pl_pages > 1) {
         snprintf(buf, sizeof buf, "PAGE %d / %d", s_pl_page + 1, s_pl_pages);
-        td5_vui_text_centered(320.0f * sx, 376.0f * sy, buf, 0xFF8890A0u, sx, sy);
+        td5_vui_text_centered(320.0f * sx, (float)(PL_CTL_Y + 30) * sy, buf, 0xFF8890A0u, sx, sy);
     }
-    td5_vui_text_centered(320.0f * sx, 402.0f * sy,
+    td5_vui_text_centered(320.0f * sx, (float)(PL_CTL_Y + 56) * sy,
                           "ENTER = MARK TESTED      -      B / BACK = RETURN",
                           0xFF8890A0u, sx, sy);
 }
