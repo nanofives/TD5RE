@@ -25,6 +25,7 @@
 #include "td5_camera.h"
 #include "td5_ai.h"
 #include "td5_save.h"
+#include "td5_pending.h"  /* F11 toggles the pending-test overlay */
 #include "td5_sound.h"   /* td5_sound_toggle_siren — cop-chase siren toggle */
 #include "td5_physics.h" /* FF SIGNALS #1: drift/gear/redline/crash getters for rumble */
 
@@ -942,6 +943,20 @@ post_poll:
         s_prev_f9 = f9_now;
     }
 #endif
+
+    /* F11 — toggle the PENDING TO TEST in-game overlay (DIK_F11 = 0x57). Rising
+     * edge only. Mirrors the IN-GAME OVERLAY button on the PENDING TO TEST menu.
+     * Present in dev AND release (the feature ships in both builds). */
+    {
+        static int s_prev_f11 = 0;
+        int f11_now = td5_plat_input_key_pressed(0x57);
+        if (f11_now && !s_prev_f11) {
+            td5_pending_toggle_overlay();
+            TD5_LOG_I(LOG_TAG, "F11: pending-test overlay %s",
+                      td5_pending_overlay_on() ? "ON" : "OFF");
+        }
+        s_prev_f11 = f11_now;
+    }
 
     /* Escape handling: trigger race exit fade */
     if ((s_control_bits[0] & 0x40000000u) != 0 &&

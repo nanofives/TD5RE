@@ -191,6 +191,10 @@ const uint8_t *td5_plat_input_get_keyboard(void);
 /** Check if a specific key is pressed (scancode). */
 int td5_plat_input_key_pressed(int scancode);
 
+/** Accumulated mouse-wheel delta since the last call (cleared on read). One notch
+ *  is ±120 (WHEEL_DELTA); positive = wheel-up/away from the user. */
+int td5_plat_input_get_mouse_wheel(void);
+
 /** Pop the next queued typed character (WM_CHAR); 0 if none. Frame-rate
  *  independent so text input is never dropped by slow frames / poll contention. */
 int  td5_plat_input_get_char(void);

@@ -221,6 +221,11 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
                          const char *fmt, ...);
 void td5_hud_flush_text(void);
 
+/* [PENDING TO TEST 2026-06-25] In-race overlay: right-justified list of features
+ * still awaiting manual testing, drawn in the SAME font/size as the debug-stats
+ * overlay (no background). Self-skips unless toggled on (F11 / the menu). */
+void td5_hud_draw_pending_overlay(void);
+
 /* --- HUD-owned globals (defined in td5_hud.c) --- */
 /* Pause-menu font glyph widths — extracted from original binary at 0x4660C8 */
 extern const int8_t g_pause_glyph_widths[256];

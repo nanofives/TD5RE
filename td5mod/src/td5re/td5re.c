@@ -16,6 +16,7 @@
 #include "td5_input.h"
 #include "td5_asset.h"
 #include "td5_save.h"
+#include "td5_pending.h"
 #include "td5_net.h"
 #include "td5_camera.h"
 #include "td5_vfx.h"
@@ -37,6 +38,7 @@ TD5_GlobalState g_td5;
 const TD5_Module g_td5re_modules[] = {
     { "asset",    td5_asset_init,    td5_asset_shutdown    },
     { "save",     td5_save_init,     td5_save_shutdown     },
+    { "pending",  td5_pending_init,  td5_pending_shutdown  }, /* dev/QA pending-test list: after save */
     { "input",    td5_input_init,    td5_input_shutdown    },
     { "sound",    td5_sound_init,    td5_sound_shutdown    },
     { "render",   td5_render_init,   td5_render_shutdown   },

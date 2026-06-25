@@ -495,6 +495,32 @@ A non-zero result here **never** undoes the ship — `/end` already merged and p
 
 ---
 
+## Step 7f: Prune tested items from the pending-test checklist (non-blocking)
+
+The **PENDING TO TEST** menu (dev/QA feature) writes `td5re_pending.txt` at the
+project root — untracked runtime state, one item per line: `[x] ...` = tested/done,
+`[ ] ...` = still to test, `# ...` = comment. `/end` drops the done items so the
+list shrinks to what still needs testing. Non-blocking: a missing file or any error
+never undoes the ship.
+
+```bash
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+PF="td5re_pending.txt"
+if [ -f "${PF}" ]; then
+    DONE="$(grep -c '^\[[xX]\]' "${PF}" 2>/dev/null)"; [ -z "${DONE}" ] && DONE=0
+    if [ "${DONE}" -gt 0 ]; then
+        grep -v '^\[[xX]\]' "${PF}" > "${PF}.tmp" && mv "${PF}.tmp" "${PF}"
+        echo "pending-test: pruned ${DONE} tested item(s) from ${PF}"
+    else
+        echo "pending-test: nothing marked tested — list unchanged"
+    fi
+else
+    echo "pending-test: no ${PF} yet (game hasn't written one) — skipped"
+fi
+```
+
+---
+
 ## Step 8: Session close report
 
 ```

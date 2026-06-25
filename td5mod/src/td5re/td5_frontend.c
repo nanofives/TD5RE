@@ -27,6 +27,9 @@
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
 #include "td5_vectorui.h"      /* public VectorUI surface (HUD reuses these primitives) */
 #include "td5_font.h"          /* [S13] runtime TTF glyph cache (native menu text) */
+#include "td5_version.h"       /* build identity (version / channel / date / git rev) */
+#include "td5_changelog.h"     /* CHANGELOG screen content table (file-static here) */
+#include "td5_pending.h"       /* PENDING TO TEST checklist (list/state/overlay) */
 #include "deps/cjson/cJSON.h"  /* track-marker JSON (retired trak_markers*.dat) */
 #include "../../ddraw_wrapper/src/wrapper.h"
 #include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes.h"       /* g_ps_msdf bytecode */
@@ -121,6 +124,8 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [38] */ Screen_MpCopRoles,         /* cop/suspect role pick (2026-06-22)      */
     /* [39] */ Screen_MpTeamSelect,       /* cup team pick (2026-06-22)              */
     /* [40] */ Screen_MpPostRace,         /* MP split-screen post-race menu (2026-06-25) */
+    /* [41] */ Screen_Changelog,          /* version + changelog viewer (2026-06-25)     */
+    /* [42] */ Screen_PendingTest,        /* dev/QA pending-test checklist (2026-06-25)  */
 };
 
 /* ========================================================================
@@ -5458,7 +5463,9 @@ int td5_frontend_display_loop(void) {
             if (s_inner_state == 4) {
                 s_inner_state = 5;
             } else if (s_inner_state == 6) {
-                if (s_button_count > 7) s_button_count = 7;
+                /* ESC during exit-confirm: drop YES/NO, keep the 8 menu buttons
+                 * (0..6 + CHANGELOG 7). [2026-06-25] */
+                if (s_button_count > 8) s_button_count = 8;
                 s_selected_button = 6;
                 s_inner_state = 4;
             }
@@ -9487,6 +9494,333 @@ static void frontend_render_lobby_kick_icons(float sx, float sy) {
     }
 }
 
+/* ========================================================================
+ * CHANGELOG screen (2026-06-25) -- version banner + scrollable change list,
+ * plus the entry into the PENDING TO TEST checklist.
+ *
+ * Reached from a button beside EXIT on the main menu (present in dev AND
+ * release). Body text is left-aligned with the CHANGELOG title and drawn a
+ * notch smaller than menu text. Scroll with the MOUSE WHEEL or PAGE UP/DOWN
+ * (HOME/END snap to the ends); UP/DOWN navigate the two buttons. Two buttons at
+ * the bottom: PENDING TO TEST (opens the dev/QA checklist) and BACK; B/ESC also
+ * returns to the main menu. Content lives in td5_changelog.h; build identity in
+ * td5_version.h.
+ * ======================================================================== */
+
+/* Body viewport + layout in design (640x480) coordinates. */
+#define CL_VIEW_TOP    70.0f
+#define CL_VIEW_BOTTOM 404.0f
+#define CL_LINE_H      14.0f
+#define CL_LEFT_X      FE_TITLE_LEFT_X   /* 126: line text up with the CHANGELOG title */
+#define CL_FONT        0.82f             /* body text scale (smaller than menu text) */
+#define CL_SCROLLBAR_X 614.0f
+
+static float    s_changelog_scroll     = 0.0f;  /* top visible line (fractional)        */
+static float    s_changelog_max_scroll = 0.0f;  /* set by the render pass each frame    */
+static uint32_t s_changelog_last_ms    = 0;     /* for frame-rate-independent scrolling */
+static int      s_cl_pending_btn       = -1;
+static int      s_cl_back_btn          = -1;
+
+static int frontend_changelog_visible_lines(void) {
+    return (int)((CL_VIEW_BOTTOM - CL_VIEW_TOP) / CL_LINE_H);
+}
+
+static void frontend_changelog_render(float sx, float sy) {
+    char  ver[160];
+    int   i;
+    int   prev_case = s_fe_preserve_case;
+    float top    = CL_VIEW_TOP;
+    float bot    = CL_VIEW_BOTTOM;
+    float fsx    = sx * CL_FONT;        /* smaller body-text scale */
+    float fsy    = sy * CL_FONT;
+    float scroll;
+
+    /* Title (gold, top-left like every standard screen). */
+    frontend_draw_screen_title("CHANGELOG", FE_TITLE_LEFT_X * sx, 17.0f * sy,
+                               0xFFE3D708u, sx, sy);
+
+    /* Build identity banner, left-aligned under the title. */
+    if (TD5RE_GIT_REV[0])
+        snprintf(ver, sizeof ver, "TD5RE v%s  %s  -  %s  -  built %s",
+                 TD5RE_VERSION_STR, TD5RE_BUILD_CHANNEL, TD5RE_GIT_REV, TD5RE_BUILD_DATE);
+    else
+        snprintf(ver, sizeof ver, "TD5RE v%s  %s  -  built %s",
+                 TD5RE_VERSION_STR, TD5RE_BUILD_CHANNEL, TD5RE_BUILD_DATE);
+
+    /* Banner + body use mixed case for readability (the title path is always caps). */
+    s_fe_preserve_case = 1;
+    fe_draw_text(CL_LEFT_X * sx, 44.0f * sy, ver, 0xFF9098A0u, fsx, fsy);
+
+    /* Clamp the live scroll to the current content and publish the max so the
+     * handler can clamp against it next frame. */
+    {
+        int   vis  = frontend_changelog_visible_lines();
+        float maxs = (float)(TD5_CHANGELOG_LINE_COUNT - vis);
+        if (maxs < 0.0f) maxs = 0.0f;
+        s_changelog_max_scroll = maxs;
+        if (s_changelog_scroll < 0.0f) s_changelog_scroll = 0.0f;
+        if (s_changelog_scroll > maxs) s_changelog_scroll = maxs;
+    }
+    scroll = s_changelog_scroll;
+
+    /* Draw the visible window of lines, all left-aligned at the title x. A line is
+     * skipped unless it sits inside [top, bot] so nothing bleeds over the banner
+     * or the buttons. */
+    for (i = 0; i < TD5_CHANGELOG_LINE_COUNT; i++) {
+        const TD5_ChangelogLine *ln = &k_changelog_lines[i];
+        float    y = top + ((float)i - scroll) * CL_LINE_H;
+        uint32_t col;
+        if (ln->style == CL_BLANK) continue;
+        if (y < top - 0.5f || y > bot - CL_LINE_H) continue;
+        switch (ln->style) {
+        case CL_SECTION: col = 0xFFE3D708u; break;  /* gold  */
+        case CL_DATE:    col = 0xFF66CCFFu; break;  /* cyan  */
+        default:         col = 0xFFD8DCE0u; break;  /* white */
+        }
+        fe_draw_text(CL_LEFT_X * sx, y * sy, ln->text, col, fsx, fsy);
+    }
+    s_fe_preserve_case = prev_case;
+
+    /* Scrollbar (only when the content overflows the viewport). */
+    if (s_changelog_max_scroll > 0.0f) {
+        float track_h = bot - top;
+        float vis     = (float)frontend_changelog_visible_lines();
+        float total   = (float)TD5_CHANGELOG_LINE_COUNT;
+        float thumb_h = track_h * (vis / total);
+        float frac    = scroll / s_changelog_max_scroll;
+        float thumb_y;
+        if (thumb_h < 16.0f) thumb_h = 16.0f;
+        thumb_y = top + frac * (track_h - thumb_h);
+        fe_draw_quad(CL_SCROLLBAR_X * sx, top * sy, 4.0f * sx, track_h * sy,
+                     0x40FFFFFFu, -1, 0, 0, 0, 0);              /* track */
+        fe_draw_quad(CL_SCROLLBAR_X * sx, thumb_y * sy, 4.0f * sx, thumb_h * sy,
+                     0xFFE3D708u, -1, 0, 0, 0, 0);              /* thumb */
+    }
+
+    /* Footer hint, left-aligned + small. */
+    fe_draw_text(CL_LEFT_X * sx, 420.0f * sy,
+                 "MOUSE WHEEL / PAGE UP-DOWN: SCROLL", 0xFF8890A0u, fsx, fsy);
+}
+
+void Screen_Changelog(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_reset_buttons();
+        frontend_init_return_screen(TD5_SCREEN_CHANGELOG);   /* parent = MAIN_MENU */
+        s_cl_pending_btn = frontend_create_button("PENDING TO TEST", 130, 440, 220, 26);
+        s_cl_back_btn    = frontend_create_button("BACK",            370, 440, 120, 26);
+        s_selected_button   = s_cl_back_btn;
+        s_changelog_scroll  = 0.0f;
+        s_changelog_last_ms = 0;
+        (void)td5_plat_input_get_mouse_wheel();  /* drop any wheel queued in the menu */
+        s_anim_complete     = 1;  /* instant screen: enables B/ESC + fade-in chime */
+        s_inner_state       = 1;
+        TD5_LOG_I(LOG_TAG, "Screen_Changelog: enter (%d lines)", TD5_CHANGELOG_LINE_COUNT);
+        break;
+
+    case 1: {
+        /* Frame-rate-independent page-key scroll. */
+        uint32_t now = td5_plat_time_ms();
+        uint32_t dt  = (s_changelog_last_ms && now > s_changelog_last_ms)
+                           ? (now - s_changelog_last_ms) : 16u;
+        if (dt > 100u) dt = 100u;   /* clamp after a stall so a tab-away can't fling */
+        s_changelog_last_ms = now;
+
+        const uint8_t *kb = td5_plat_input_get_keyboard();
+        float step = (float)dt * 0.05f;
+
+        /* Mouse wheel: 3 lines per notch (one notch = 120). Wheel-up scrolls up. */
+        int wheel = td5_plat_input_get_mouse_wheel();
+        if (wheel != 0) s_changelog_scroll -= (float)wheel / 120.0f * 3.0f;
+
+        if (kb) {
+            if (kb[0xC9] & 0x80) s_changelog_scroll -= step;            /* PAGE UP   */
+            if (kb[0xD1] & 0x80) s_changelog_scroll += step;            /* PAGE DOWN */
+            if (kb[0xC7] & 0x80) s_changelog_scroll  = 0.0f;            /* HOME      */
+            if (kb[0xCF] & 0x80) s_changelog_scroll  = s_changelog_max_scroll; /* END */
+        }
+
+        if (s_changelog_scroll < 0.0f) s_changelog_scroll = 0.0f;
+        if (s_changelog_scroll > s_changelog_max_scroll)
+            s_changelog_scroll = s_changelog_max_scroll;
+
+        /* Buttons (Enter / click / pad A). UP/DOWN move between them. B/ESC is the
+         * shared display-loop back path (parent screen = MAIN_MENU). */
+        if (s_input_ready && s_button_index >= 0) {
+            if (s_button_index == s_cl_pending_btn) {
+                frontend_play_sfx(3);
+                td5_frontend_set_screen(TD5_SCREEN_PENDING_TEST);
+            } else if (s_button_index == s_cl_back_btn) {
+                frontend_play_sfx(5);
+                td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+            }
+        }
+        break;
+    }
+    }
+}
+
+/* ========================================================================
+ * PENDING TO TEST screen (2026-06-25) -- dev/QA checklist.
+ *
+ * Reached from a button at the top of the main menu. Lists the features in
+ * td5_pending.c; each row toggles "done" (checkbox + strikethrough) on confirm.
+ * An IN-GAME OVERLAY button (mirrored by F11) toggles the right-edge overlay
+ * that lists everything still untested. Items are paged so a long list stays
+ * within FE_MAX_BUTTONS; the /end routine prunes done items from the backing
+ * file. Present in dev AND release.
+ *
+ * Each list row is a standard EMPTY-LABEL button, so it gets keyboard / pad /
+ * mouse selection + the gold highlight for free; the checkbox + item text +
+ * strikethrough are drawn over the row in the POST-button render pass.
+ * ======================================================================== */
+
+#define PL_ROWS_PER_PAGE 10
+#define PL_ROW_X     64
+#define PL_ROW_W     472
+#define PL_ROW_H     24
+#define PL_ROW_Y0    68
+#define PL_ROW_STEP  27
+#define PL_CTL_Y     (PL_ROW_Y0 + PL_ROWS_PER_PAGE * PL_ROW_STEP + 8)   /* 346 */
+
+static int s_pl_page        = 0;
+static int s_pl_pages       = 1;
+static int s_pl_row_count   = 0;
+static int s_pl_overlay_btn = -1;
+static int s_pl_back_btn    = -1;
+static int s_pl_prev_btn    = -1;
+static int s_pl_next_btn    = -1;
+
+/* (Re)create the button set for the current page. Called on entry and on every
+ * page change. Row buttons are indices 0..row_count-1; the control buttons land
+ * in whatever slots follow. */
+static void frontend_pending_build_buttons(void) {
+    int total = td5_pending_count();
+    int start, end, r;
+
+    s_pl_pages = (total + PL_ROWS_PER_PAGE - 1) / PL_ROWS_PER_PAGE;
+    if (s_pl_pages < 1) s_pl_pages = 1;
+    if (s_pl_page >= s_pl_pages) s_pl_page = s_pl_pages - 1;
+    if (s_pl_page < 0) s_pl_page = 0;
+
+    frontend_reset_buttons();
+
+    start = s_pl_page * PL_ROWS_PER_PAGE;
+    end   = start + PL_ROWS_PER_PAGE;
+    if (end > total) end = total;
+    s_pl_row_count = end - start;
+
+    for (r = 0; r < s_pl_row_count; r++)
+        frontend_create_button("", PL_ROW_X, PL_ROW_Y0 + r * PL_ROW_STEP, PL_ROW_W, PL_ROW_H);
+
+    s_pl_overlay_btn = frontend_create_button("", PL_ROW_X, PL_CTL_Y, 230, 26);
+    s_pl_back_btn    = frontend_create_button("BACK", PL_ROW_X + 246, PL_CTL_Y, 110, 26);
+    if (s_pl_pages > 1) {
+        s_pl_prev_btn = frontend_create_button("< PREV", PL_ROW_X + 366, PL_CTL_Y, 70, 26);
+        s_pl_next_btn = frontend_create_button("NEXT >", PL_ROW_X + 442, PL_CTL_Y, 70, 26);
+    } else {
+        s_pl_prev_btn = -1;
+        s_pl_next_btn = -1;
+    }
+    s_selected_button = (s_pl_row_count > 0) ? 0 : s_pl_back_btn;
+}
+
+static void frontend_pending_render(float sx, float sy) {
+    char buf[96];
+    int  total     = td5_pending_count();
+    int  remaining = td5_pending_remaining();
+    int  start     = s_pl_page * PL_ROWS_PER_PAGE;
+    int  prev_case = s_fe_preserve_case;
+    float pfx = sx * 0.82f;       /* smaller body-text scale (matches CHANGELOG) */
+    float pfy = sy * 0.82f;
+    int  r;
+
+    frontend_draw_screen_title("PENDING TO TEST", FE_TITLE_LEFT_X * sx, 17.0f * sy,
+                               0xFFE3D708u, sx, sy);
+    snprintf(buf, sizeof buf, "%d ITEMS   -   %d STILL TO TEST", total, remaining);
+    td5_vui_text_centered(320.0f * sx, 48.0f * sy, buf, 0xFFB0B8C0u, sx, sy);
+
+    /* Per-row checkbox + item text (left-aligned) + strikethrough when done. */
+    for (r = 0; r < s_pl_row_count; r++) {
+        int   item = start + r;
+        int   done = td5_pending_is_done(item);
+        float bx, by, bw, bh, tx, tw;
+        const char *box = done ? "[x]" : "[ ]";
+        (void)bw;
+        frontend_get_button_render_rect(r, sx, sy, &bx, &by, &bw, &bh);
+        fe_draw_text(bx + 10.0f * sx, by, box, done ? 0xFF66E066u : 0xFFB0B8C0u, pfx, pfy);
+        tx = bx + 42.0f * sx;
+        s_fe_preserve_case = 1;
+        fe_draw_text(tx, by, td5_pending_text(item),
+                     done ? 0xFF707880u : 0xFFE6EAF0u, pfx, pfy);
+        tw = fe_measure_text(td5_pending_text(item), pfx, pfy);
+        s_fe_preserve_case = prev_case;
+        if (done)
+            fe_draw_quad(tx, by + 13.0f * sy, tw, 1.5f * sy, 0xFFA0A4A8u, -1, 0, 0, 0, 0);
+    }
+
+    /* IN-GAME OVERLAY toggle label (centred on its button). */
+    if (s_pl_overlay_btn >= 0) {
+        float bx, by, bw, bh, tw;
+        int   on = td5_pending_overlay_on();
+        frontend_get_button_render_rect(s_pl_overlay_btn, sx, sy, &bx, &by, &bw, &bh);
+        snprintf(buf, sizeof buf, "IN-GAME OVERLAY: %s", on ? "ON" : "OFF");
+        tw = fe_measure_text(buf, pfx, pfy);
+        fe_draw_text(bx + (bw - tw) * 0.5f, by, buf,
+                     on ? 0xFF66E066u : 0xFFD8DCE0u, pfx, pfy);
+    }
+
+    if (s_pl_pages > 1) {
+        snprintf(buf, sizeof buf, "PAGE %d / %d", s_pl_page + 1, s_pl_pages);
+        td5_vui_text_centered(320.0f * sx, 376.0f * sy, buf, 0xFF8890A0u, sx, sy);
+    }
+    td5_vui_text_centered(320.0f * sx, 402.0f * sy,
+                          "ENTER = MARK TESTED      -      B / BACK = RETURN",
+                          0xFF8890A0u, sx, sy);
+}
+
+void Screen_PendingTest(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_init_return_screen(TD5_SCREEN_PENDING_TEST);
+        s_return_screen = TD5_SCREEN_CHANGELOG;   /* reached FROM the changelog screen */
+        s_pl_page = 0;
+        frontend_pending_build_buttons();
+        s_anim_complete = 1;   /* instant screen: enables B/ESC + fade-in chime */
+        s_inner_state   = 1;
+        TD5_LOG_I(LOG_TAG, "Screen_PendingTest: enter (%d items, %d remaining)",
+                  td5_pending_count(), td5_pending_remaining());
+        break;
+
+    case 1:
+        if (s_input_ready && s_button_index >= 0) {
+            int b = s_button_index;
+            if (b < s_pl_row_count) {                 /* toggle a checklist row */
+                int item = s_pl_page * PL_ROWS_PER_PAGE + b;
+                td5_pending_toggle(item);
+                frontend_play_sfx(3);
+            } else if (b == s_pl_overlay_btn) {
+                td5_pending_toggle_overlay();
+                frontend_play_sfx(2);
+            } else if (b == s_pl_back_btn) {
+                frontend_play_sfx(5);
+                td5_frontend_set_screen(TD5_SCREEN_CHANGELOG);   /* back to the changelog menu */
+            } else if (s_pl_prev_btn >= 0 && b == s_pl_prev_btn) {
+                if (s_pl_page > 0) s_pl_page--;
+                frontend_pending_build_buttons();
+                frontend_play_sfx(2);
+            } else if (s_pl_next_btn >= 0 && b == s_pl_next_btn) {
+                if (s_pl_page < s_pl_pages - 1) s_pl_page++;
+                frontend_pending_build_buttons();
+                frontend_play_sfx(2);
+            }
+        }
+        break;
+    }
+}
+
 void td5_frontend_render_ui_rects(void) {
     int screen_w = 0, screen_h = 0;
     uint32_t now = td5_plat_time_ms();
@@ -9547,6 +9881,11 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_bg_gallery(sx, sy);
 
     switch (s_current_screen) {
+    case TD5_SCREEN_CHANGELOG:
+        /* Draw title + scrollable body UNDER the buttons so the BACK button
+         * always composites on top. [CHANGELOG 2026-06-25] */
+        frontend_changelog_render(sx, sy);
+        break;
     case TD5_SCREEN_LANGUAGE_SELECT:
         frontend_render_language_select_overlay(sx, sy);
         break;
@@ -9848,6 +10187,9 @@ void td5_frontend_render_ui_rects(void) {
         case TD5_SCREEN_CUP_WINNERS:
             { extern void frontend_cup_winners_render(float sx, float sy);
               frontend_cup_winners_render(sx, sy); }
+            break;
+        case TD5_SCREEN_PENDING_TEST:   /* [PENDING TO TEST 2026-06-25] rows + checkboxes on top of frames */
+            frontend_pending_render(sx, sy);
             break;
         case TD5_SCREEN_MP_COP_ROLES:
             { extern void frontend_mp_cop_roles_render(float sx, float sy);

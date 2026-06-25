@@ -398,7 +398,14 @@ typedef enum TD5_ScreenIndex {
      * VIEW RESULTS / VIEW REPLAY / LEAVE CUP). Shown after MP results in place of the
      * SP high-score flow. Port-only feature. */
     TD5_SCREEN_MP_POST_RACE       = 40,  /* Screen_MpPostRace */
-    TD5_SCREEN_COUNT               = 41
+    /* [CHANGELOG 2026-06-25] Scrollable version + changelog screen, reached from
+     * a button beside EXIT on the main menu. Port-only; present in dev + release. */
+    TD5_SCREEN_CHANGELOG          = 41,  /* Screen_Changelog */
+    /* [PENDING TO TEST 2026-06-25] Dev/QA checklist of features awaiting manual
+     * testing. Items toggle done (checkmark + strikethrough); an in-game overlay
+     * lists everything still untested; the /end routine prunes done items. */
+    TD5_SCREEN_PENDING_TEST       = 42,  /* Screen_PendingTest */
+    TD5_SCREEN_COUNT               = 43
 } TD5_ScreenIndex;
 
 /* ========================================================================

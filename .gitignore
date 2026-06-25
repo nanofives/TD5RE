@@ -32,6 +32,10 @@ tmp_ar_check*/
 /td5re_progress.ini
 /td5re_cup.ini
 
+# Dev/QA pending-test checklist (written by td5_pending.c, pruned by /end). Local
+# runtime state, seeded from the compiled-in default list — never source.
+/td5re_pending.txt
+
 # Original game files (copyrighted — do not distribute)
 original/
 

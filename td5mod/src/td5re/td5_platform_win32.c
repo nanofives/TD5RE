@@ -102,6 +102,7 @@ static uint8_t s_kb_bindings[2][TD5_KB_BIND_COUNT] = {
 };
 
 static int      s_mouse_dx, s_mouse_dy;
+static int      s_mouse_wheel;   /* accumulated DI wheel (lZ) delta; read+cleared by getter */
 static uint32_t s_mouse_buttons;
 static LPDIRECTINPUT8A       s_dinput        = NULL;
 static LPDIRECTINPUTDEVICE8A s_di_keyboard   = NULL;
@@ -1808,6 +1809,7 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             if (ms.rgbButtons[0] & 0x80) s_mouse_buttons |= 1;
             if (ms.rgbButtons[1] & 0x80) s_mouse_buttons |= 2;
             if (ms.rgbButtons[2] & 0x80) s_mouse_buttons |= 4;
+            s_mouse_wheel += ms.lZ;   /* DI mouse Z-axis = scroll wheel (±120/notch) */
         }
     } else {
         POINT pt;
@@ -2015,6 +2017,16 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
 const uint8_t *td5_plat_input_get_keyboard(void)
 {
     return s_keyboard;
+}
+
+/* Accumulated mouse-wheel delta since the last call (then cleared). One notch is
+ * ±120 (WHEEL_DELTA); positive = wheel-up/away. Sourced from the DirectInput
+ * mouse Z-axis. [CHANGELOG scroll 2026-06-25] */
+int td5_plat_input_get_mouse_wheel(void)
+{
+    int w = s_mouse_wheel;
+    s_mouse_wheel = 0;
+    return w;
 }
 
 int td5_plat_input_key_pressed(int scancode)

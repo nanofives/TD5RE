@@ -991,6 +991,17 @@ void Screen_MainMenu(void) {
         frontend_create_button(SNK_HiScoreButTxt, -0xE0, 0, 0xE0, 0x20);
         frontend_create_button(SNK_ExitButTxt,        -0xE0, 0, 0xE0, 0x20);
 
+        /* [CHANGELOG 2026-06-25] One extra button placed with EXPLICIT positive
+         * coordinates so it does NOT consume an auto-layout slot (the auto-layout
+         * branch only fires for x<0). Present in dev AND release.
+         *   index 7: CHANGELOG — beside EXIT, to its right. EXIT renders at
+         *            x=FE_CENTER_X-0xC2 (126), width 0xE0 (224); sit just past it.
+         * (The PENDING TO TEST screen is reached from within the CHANGELOG screen.) */
+        {
+            int exit_right = (FE_CENTER_X - 0xC2) + s_buttons[6].w;   /* 126 + 224 = 350 */
+            frontend_create_button("CHANGELOG", exit_right + 12, s_buttons[6].y, 160, s_buttons[6].h);
+        }
+
         /* [2026-06-16] The per-button CPU surface cache (Phase 6) is retired:
          * under VectorUI every button frame is drawn procedurally per frame via
          * the ps_roundrect path, so no per-screen bake is needed. */
@@ -1110,6 +1121,11 @@ void Screen_MainMenu(void) {
                 TD5_LOG_I(LOG_TAG, "MainMenu: Exit pressed, showing confirm dialog");
                 s_inner_state = 5;
                 break;
+
+            case 7: /* Changelog (button beside EXIT; PENDING TO TEST lives inside it) */
+                s_return_screen = TD5_SCREEN_CHANGELOG;
+                s_inner_state = 8;
+                break;
             }
         }
         break;
@@ -1156,7 +1172,9 @@ void Screen_MainMenu(void) {
                 frontend_release_button(s_exit_confirm_no_idx);
                 s_exit_confirm_yes_idx = -1;
                 s_exit_confirm_no_idx  = -1;
-                if (s_button_count > 7) s_button_count = 7;
+                /* Drop the YES/NO dialog buttons but KEEP the 8 menu buttons
+                 * (0..6 column + 7 CHANGELOG). [2026-06-25] */
+                if (s_button_count > 8) s_button_count = 8;
                 s_selected_button = 6; /* re-focus on Exit */
                 TD5_LOG_I(LOG_TAG, "MainMenu: exit NO selected, returning to menu");
                 s_inner_state = 4;

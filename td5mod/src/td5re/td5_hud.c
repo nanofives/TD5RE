@@ -34,6 +34,7 @@
 #include "td5re.h"
 #include "td5_vectorui.h"   /* resolution-independent VectorUI primitives (SDF gauge, text) */
 #include "td5_font.h"       /* shared native menu TTF glyph cache (pause-menu text) */
+#include "td5_pending.h"    /* dev/QA pending-test list for the in-race overlay */
 
 #include <stdlib.h>
 #include <string.h>
@@ -4285,6 +4286,62 @@ static void hud_draw_empty_cells(void)
     }
 }
 
+/* [PENDING TO TEST 2026-06-25] In-race overlay -- a right-justified list of the
+ * features still awaiting manual testing, drawn in the SAME HUD font/size as the
+ * debug-stats overlay (no background panel). Mirrors that overlay's mechanism:
+ * absolute (anchor=0) HUD font-0 text, glyph cap = HUD_TTF_CAP * the screen text
+ * scale, 14-unit line pitch. queue_text multiplies left-anchored coords by the
+ * scale, so we pre-divide x by it to land the text's RIGHT edge at the margin. */
+static float hud_pending_line_width(const char *s, float cap) {
+    float w = 0.0f; int k;
+    for (k = 0; s[k]; k++) w += td5_hudfont_advance((unsigned char)s[k], cap);
+    return w;
+}
+
+void td5_hud_draw_pending_overlay(void) {
+    int   n, i, shown = 0, remaining;
+    float scale, cap, dy, y_des, w, xd;
+    const float MARGIN_PX = 10.0f;
+    const char *hdr = "PENDING TO TEST";
+
+    if (!td5_pending_overlay_on()) return;
+    if (!td5_hudfont_ready())      return;   /* the right-justify width needs TTF advances */
+    n = td5_pending_count();
+    if (n <= 0) return;
+
+    s_hud_text_anchor_to_view = 0;           /* absolute render-target coords (like debug) */
+    scale = hud_active_text_scale();
+    if (scale < 0.05f) scale = 1.0f;
+    cap   = HUD_TTF_CAP * scale;
+    dy    = 14.0f;                            /* design units (scaled at draw), like debug */
+    y_des = 10.0f;
+    remaining = td5_pending_remaining();
+
+    w  = hud_pending_line_width(hdr, cap);
+    xd = (g_render_width_f - MARGIN_PX - w) / scale;
+    td5_hud_queue_text(0, (int)xd, (int)y_des, 0, "%s", hdr);
+    y_des += dy * 1.3f;
+
+    for (i = 0; i < n; i++) {
+        const char *t;
+        if (td5_pending_is_done(i)) continue;
+        t  = td5_pending_text(i);
+        w  = hud_pending_line_width(t, cap);
+        xd = (g_render_width_f - MARGIN_PX - w) / scale;
+        td5_hud_queue_text(0, (int)xd, (int)y_des, 0, "%s", t);
+        y_des += dy;
+        if (++shown >= 20 || (y_des * scale) > (g_render_height_f - dy * scale)) break;
+    }
+    if (shown < remaining) {
+        char more[40];
+        snprintf(more, sizeof more, "+%d MORE...", remaining - shown);
+        w  = hud_pending_line_width(more, cap);
+        xd = (g_render_width_f - MARGIN_PX - w) / scale;
+        td5_hud_queue_text(0, (int)xd, (int)y_des, 0, "%s", more);
+    }
+    td5_hud_flush_text();
+}
+
 void td5_hud_render_overlays(float dt)
 {
     /* dt is normalized 30 Hz frame time from td5_game.c. */
@@ -5166,6 +5223,11 @@ void td5_hud_render_overlays(float dt)
 
         td5_hud_flush_text();
     }
+
+    /* [PENDING TO TEST 2026-06-25] Right-justified "still to test" overlay, in the
+     * same font/size as the debug stats above. anchor==0 + full-screen viewport are
+     * already in effect here; the call self-skips unless the overlay is toggled on. */
+    td5_hud_draw_pending_overlay();
 
     /* Radial pulse effect — only active in single-player free race.
      * Original RunRaceFrame @ 0x42B67F gates on:

@@ -86,6 +86,17 @@ void Screen_CupWinners(void);    /* final cup standings / podium                
 void Screen_MpCopRoles(void);    /* cop chase: each player picks cop / suspect    */
 void Screen_MpTeamSelect(void);  /* cup teams: each player picks their team       */
 
+/* ---- CHANGELOG (2026-06-25) ----
+ * Scrollable version + changelog screen reached from the main menu (button beside
+ * EXIT). Handler + render fn both live in td5_frontend.c. */
+void Screen_Changelog(void);
+
+/* ---- PENDING TO TEST (2026-06-25) ----
+ * Dev/QA checklist screen reached from a button at the top of the main menu.
+ * Handler + render fn live in td5_frontend.c; the list/state/overlay live in
+ * td5_pending.c. */
+void Screen_PendingTest(void);
+
 /* ---- shared texture-page allocations ---- */
 #define SHARED_PAGE_WHITE     899
 #define SHARED_PAGE_FONT_MSDF 970   /* free page (frontend uses 888-955) */
