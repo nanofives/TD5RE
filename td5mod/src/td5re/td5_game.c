@@ -1672,6 +1672,28 @@ int td5_game_init_race_session(void) {
     }
 #endif
 
+    /* [FIX 2026-06-24] Clear stale wanted mode when a LOCAL split-screen MP
+     * session runs any non-cop-chase mode (Race / Time Trial / Cup). wanted_mode_
+     * enabled is owned by the chosen MP game mode for local split-screen, but the
+     * ONLY local writer below just turns it ON for cop chase — nothing turned it
+     * back OFF. So Cop Chase -> lobby -> Cup kept the flag at 1, and the Cup race
+     * re-ran the cop/suspect layout: player 1 stuck as the cop and the field
+     * collapsed to 2 cars (td5_game_mp_cop_chase_field() returns 0 for a non-cop-
+     * chase mode -> keep=2 -> slots 2..5 disabled at the wanted-mode block below),
+     * leaving the other viewports with no car. Mirror the network reset at line
+     * ~1611. Single-player Cop Chase (game_type 8) sets the flag via
+     * ConfigureGameTypeFlags and runs with split_screen_mode==0, so it is
+     * deliberately excluded here and unaffected. */
+    if (g_td5.split_screen_mode > 0 && !g_td5.network_active &&
+        g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE) {
+        if (g_td5.wanted_mode_enabled) {
+            TD5_LOG_I(LOG_TAG,
+                      "InitRace: local MP mode=%d (not cop chase) — clearing stale "
+                      "wanted_mode_enabled (was 1)", g_td5.mp_mode_config.mode);
+        }
+        g_td5.wanted_mode_enabled = 0;
+    }
+
     /* [MP GAME MODES: COP CHASE 2026-06-22] The MP cop-chase mode reuses the
      * wanted-mode machinery (a player-cop rams the other racers — the suspects —
      * to deplete their damage bar). Turn wanted mode on; the effective cop slot
