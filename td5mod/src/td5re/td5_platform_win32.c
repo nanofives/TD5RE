@@ -151,7 +151,7 @@ static const uint32_t k_default_js_action_bind[TD5_JSBIND_ACTIONS] = {
     TD5_JSBIND_BUTTON | 3u,              /*  5 HORN/SIREN  Y                         */
     TD5_JSBIND_BUTTON | 5u,              /*  6 GEAR UP     R1 / RB                    */
     TD5_JSBIND_BUTTON | 4u,              /*  7 GEAR DOWN   L1 / LB                    */
-    TD5_JSBIND_BUTTON | 6u,              /*  8 CHANGE VIEW Back / View (Select)       */
+    TD5_JSBIND_BUTTON | 8u,              /*  8 CHANGE VIEW L3 / left stick click       */
     TD5_JSBIND_BUTTON | 9u,              /*  9 REAR VIEW   right stick click (R3)      */
     TD5_JSBIND_BUTTON | 7u,              /* 10 PAUSE       Start / Menu               */
 };

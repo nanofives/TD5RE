@@ -247,7 +247,7 @@ extern int g_actorSlotForView[TD5_MAX_VIEWPORTS];
  * Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15)
  *
  * MANUAL ONLY. A LOCAL HUMAN player recovers a pinned/stuck car by pressing the
- * recovery control (keyboard R / joystick L3 — an edge from the td5_input
+ * recovery control (keyboard R / joystick SELECT — an edge from the td5_input
  * layer). There is NO automatic trigger: a car is repositioned only when the
  * driver explicitly asks for it.
  *
@@ -2354,9 +2354,9 @@ void td5_physics_tick(void)
 
     /* [STUCK RECOVERY 2026-06-15] After this tick's integration + contact
      * resolution have settled, run the per-local-human stuck-recovery driver:
-     * manual (R / L3) reposition and the 90-tick auto-recover. Deterministic
-     * (sim-tick cadence, replicated/local state); restricted to non-network play
-     * for v1. Inert when TD5RE_STUCK_RECOVERY=0. */
+     * manual (R / SELECT) reposition. Deterministic (sim-tick cadence,
+     * replicated/local state); restricted to non-network play for v1. Inert
+     * when TD5RE_STUCK_RECOVERY=0. */
     td5_physics_update_stuck_recovery();
 }
 
@@ -13620,7 +13620,7 @@ int td5_physics_recover_player(int slot)
     return 1;
 }
 
-/* Per-tick driver: run MANUAL (R / L3) stuck-recovery for every LOCAL HUMAN
+/* Per-tick driver: run MANUAL (R / SELECT) stuck-recovery for every LOCAL HUMAN
  * player. Called from td5_physics_tick (deterministic sim tick).
  *
  * Local human players occupy viewports 0..viewport_count-1, each mapped to an
