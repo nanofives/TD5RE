@@ -3956,9 +3956,14 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     /* Faint panel so the cell reads as a deliberate map, not a render glitch. */
     td5_vui_quad(cl, ct, cr - cl, cb - ct, 0x66101820u, -1, 0, 0, 0, 0);
 
-    /* Road: thin centreline polyline around the ring (whole-track overview). The
+    /* Road: thin centreline polyline along the route (whole-track overview). The
      * centre of each span is (left_rail + right_rail)/2; connect consecutive
-     * centres, closing the loop. Robust + cheap vs. per-type quad geometry. */
+     * centres. The polyline is closed back to span 0 ONLY on circuit tracks
+     * (g_track_is_circuit) — point-to-point routes (e.g. Sydney/Australia,
+     * levelinf track_type=0) are left OPEN so the start and finish spans don't
+     * get a spurious diagonal chord drawn between them. Matches the per-view
+     * minimap, which gates loop-closure the same way. Robust + cheap vs.
+     * per-type quad geometry. */
     /* [#fix] Stroke half-thickness: the old 0.006*width gave a ~11px-thick road
      * on a half-screen quadrant cell ("geometry too wide"). Scale down and clamp
      * to an absolute ceiling so the overview reads as crisp thin roads on cells
@@ -3972,15 +3977,23 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     /* Finer tessellation (was ~240) so curves on long tracks are less faceted. */
     int   step = (ring > 360) ? (ring / 360) : 1;   /* cap to ~360 segments */
     if (step < 1) step = 1;
+    /* Circuit tracks form a closed ring and wrap the polyline back to span 0;
+     * point-to-point routes do not. This mirrors the original's in-race minimap
+     * road-walk, which breaks out (no wrap, no close) when gTrackIsCircuit == 0
+     * and wraps the span index to 0 only on circuits (TD5_d3d.exe @ 0x0043a220).
+     * Without this gate every track got a spurious finish->start diagonal chord
+     * (the Sydney/Australia "circuit" artifact). */
+    int circuit = (g_track_is_circuit != 0);
     {
         static int s_map_stroke_log = 0;
         if ((s_map_stroke_log++ % 240) == 0)
             TD5_LOG_I(LOG_TAG,
-                      "grid-filler map stroke: road_half=%.2f step=%d ring=%d (thin+capped, branch connectors on)",
-                      road_half, step, ring);
+                      "grid-filler map stroke: road_half=%.2f step=%d ring=%d circuit=%d loop=%s (thin+capped, branch connectors on)",
+                      road_half, step, ring, circuit, circuit ? "closed" : "open");
     }
     for (int si = 0; si <= ring; si += step) {
-        int idx = (si >= ring) ? 0 : si;            /* close the loop */
+        if (si >= ring && !circuit) break;          /* P2P: leave the route open */
+        int idx = (si >= ring) ? 0 : si;            /* circuit: wrap back to span 0 */
         float cxw, czw;
         if (!hud_filler_span_centre_world(span_base, vert_base, g_strip_span_count,
                                           idx, &cxw, &czw)) { have_prev = 0; continue; }
@@ -3993,7 +4006,7 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
             hud_filler_dot(sxp, syp, road_half, ROAD_COL);   /* round the start cap */
         }
         prev_x = sxp; prev_y = syp; have_prev = 1;
-        if (si >= ring) hud_filler_line(prev_x, prev_y, first_x, first_y, road_half, ROAD_COL);
+        if (si >= ring && circuit) hud_filler_line(prev_x, prev_y, first_x, first_y, road_half, ROAD_COL);
     }
 
     /* [#1 2026-06-15] BRANCH CORRIDORS: the loop above walks the main ring only,
