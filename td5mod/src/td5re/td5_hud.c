@@ -3771,6 +3771,33 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     uint8_t *vert_base = (uint8_t *)g_strip_vertex_base;
     if (!span_base || !vert_base || g_strip_span_count <= 1) return;
 
+    /* Gather the racers that are STILL in the race, up front. Two reasons it has
+     * to happen before the fit:
+     *   1. A player who has already crossed the line is dropped here (the overlay
+     *      should only show who's still driving — not finished cars frozen on the
+     *      map), and
+     *   2. the LIVE field's world positions drive the zoom window below, so the
+     *      map fits to the stretch of track from the rear car to the leader rather
+     *      than always showing the whole route at minimum scale.
+     * Only the raw world coords + heading + identity are captured now; the screen
+     * projection (dx/dy/fx/fy) is filled in once the fit + optional rotation are
+     * known. `td5_game_slot_is_finished` is the same per-slot finish query the
+     * per-viewport end-of-race HUD uses (post_finish_metric_base != 0). */
+    struct { float wx, wz, dx, dy, ly, fx, fy; uint32_t h12, col; char nm[20]; }
+        lab[TD5_MAX_RACER_SLOTS];
+    int n = 0;
+    for (int r = 0; r < g_racer_count && r < TD5_MAX_RACER_SLOTS; r++) {
+        if (td5_game_get_slot_state(r) == 3) continue;       /* decoration slot   */
+        if (td5_game_slot_is_finished(r))    continue;       /* already finished  */
+        lab[n].wx  = (float)actor_world_x(r) * (1.0f / 256.0f);
+        lab[n].wz  = (float)actor_world_z(r) * (1.0f / 256.0f);
+        lab[n].h12 = (uint32_t)((actor_heading(r) >> 8) & 0xFFF);
+        lab[n].col = s_hud_id_accent[r] ? s_hud_id_accent[r] : hud_filler_slot_color(r);
+        if (s_hud_id_name[r][0]) snprintf(lab[n].nm, sizeof lab[n].nm, "%s", s_hud_id_name[r]);
+        else                     snprintf(lab[n].nm, sizeof lab[n].nm, "CAR %d", r + 1);
+        n++;
+    }
+
     /* Walk just the main ring (branch spans live past it and would blow up the
      * extent); fall back to the full strip when no ring length is known. */
     int ring = g_td5.track_span_ring_length;
@@ -3820,6 +3847,48 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     }
     #undef MAP_FOLD_SPAN_RAILS
     if (maxx <= minx || maxz <= minz) return;
+
+    /* [#zoom 2026-06-24] Interactive zoom-to-field: the fit below works off
+     * [minx..maxx]x[minz..maxz]. By default that's the whole-track AABB just
+     * computed (the fallback used when nobody is on the track). When there ARE
+     * live racers, replace it with a window around just the active field so the
+     * map ZOOMS to where everyone is — from the rear car to the leader — making
+     * positions legible in the cramped split-screen cell instead of always
+     * showing the full route at minimum scale.
+     *
+     * The window is the active-player world AABB, with two safeguards:
+     *   - floored to MIN_EXT (a fraction of the track's longer axis) so a tight
+     *     pack — or a lone surviving car — doesn't zoom to a featureless pinhole
+     *     with no surrounding road for context, and
+     *   - grown by a MARGIN on every side so the rear/front arrows + their name
+     *     plates sit inside the cell instead of right on the clipped edge ("so it
+     *     doesn't cut off at the end of the screen"). The caller's 10% inner pad
+     *     in the fit stacks on top of this. */
+    if (n > 0) {
+        float pminx = 1e30f, pmaxx = -1e30f, pminz = 1e30f, pmaxz = -1e30f;
+        for (int i = 0; i < n; i++) {
+            if (lab[i].wx < pminx) pminx = lab[i].wx;
+            if (lab[i].wx > pmaxx) pmaxx = lab[i].wx;
+            if (lab[i].wz < pminz) pminz = lab[i].wz;
+            if (lab[i].wz > pmaxz) pmaxz = lab[i].wz;
+        }
+        float full_w   = maxx - minx, full_h = maxz - minz;
+        float full_max = (full_w > full_h) ? full_w : full_h;
+        float min_ext  = full_max * 0.18f;       /* don't zoom past ~18% of track */
+        float pcx = (pminx + pmaxx) * 0.5f, pcz = (pminz + pmaxz) * 0.5f;
+        float pw  = pmaxx - pminx,           ph  = pmaxz - pminz;
+        if (pw < min_ext) pw = min_ext;
+        if (ph < min_ext) ph = min_ext;
+        float mx = pw * 0.30f, mz = ph * 0.30f;  /* edge offset so nothing clips */
+        minx = pcx - pw * 0.5f - mx;  maxx = pcx + pw * 0.5f + mx;
+        minz = pcz - ph * 0.5f - mz;  maxz = pcz + ph * 0.5f + mz;
+        static int s_map_zoom_log = 0;
+        if ((s_map_zoom_log++ % 240) == 0)
+            TD5_LOG_I(LOG_TAG,
+                      "grid-filler map zoom: active=%d field_bbox=%.0fx%.0f min_ext=%.0f margin=%.0f,%.0f -> window=%.0fx%.0f (full=%.0fx%.0f)",
+                      n, pmaxx - pminx, pmaxz - pminz, min_ext, mx, mz,
+                      maxx - minx, maxz - minz, full_w, full_h);
+    }
 
     /* [#8 2026-06-15] Fit the whole-track world AABB into the cell, choosing the
      * orientation in {0deg, 90deg-left} that BEST FILLS the cell, then zooming to
@@ -3996,32 +4065,21 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
         #undef MAP_MAX_CORRIDORS
     }
 
-    /* Gather active racers -> projected dot + name + colour + facing direction.
-     * fx/fy is the car's forward heading expressed in MAP screen space (the map
-     * uses no rotation, so heading maps straight through): the body-longitudinal
+    /* Project the active racers gathered up top (finished cars already dropped)
+     * into MAP screen space, now that the fit + optional 90deg rotation are known.
+     * fx/fy is the car's forward heading in MAP screen space: the body-longitudinal
      * world direction is (sin h, cos h) over (X,Z) [see the speedo body-frame
-     * projection], and the map sends world X->screen X, world Z->screen Y, so the
-     * on-screen forward is (sin h, cos h) too. h is the 12-bit yaw at actor+0x1F4
-     * (euler_accum.yaw >> 8), 0x1000 = full circle. */
-    struct { float dx, dy, ly, fx, fy; uint32_t col; char nm[20]; } lab[TD5_MAX_RACER_SLOTS];
-    int n = 0;
-    for (int r = 0; r < g_racer_count && r < TD5_MAX_RACER_SLOTS; r++) {
-        if (td5_game_get_slot_state(r) == 3) continue;       /* decoration slot */
-        float wx = (float)actor_world_x(r) * (1.0f / 256.0f);
-        float wz = (float)actor_world_z(r) * (1.0f / 256.0f);
-        lab[n].dx = MAPPX(wx, wz); lab[n].dy = MAPPY(wx, wz);
-        uint32_t h12 = (uint32_t)((actor_heading(r) >> 8) & 0xFFF);
-        /* Forward in unrotated map space is (sin h, cos h) over (screenX,screenY).
-         * [#8] Rotate it the SAME way as the positions when the map is turned 90deg
-         * left so the arrow keeps pointing the way the car actually drives. */
-        float fwd_x = td5_sin_12bit(h12);
-        float fwd_y = td5_cos_12bit(h12);
-        lab[n].fx = rot90 ? fwd_y  : fwd_x;
-        lab[n].fy = rot90 ? -fwd_x : fwd_y;
-        lab[n].col = s_hud_id_accent[r] ? s_hud_id_accent[r] : hud_filler_slot_color(r);
-        if (s_hud_id_name[r][0]) snprintf(lab[n].nm, sizeof lab[n].nm, "%s", s_hud_id_name[r]);
-        else                     snprintf(lab[n].nm, sizeof lab[n].nm, "CAR %d", r + 1);
-        n++;
+     * projection]; with no rotation the map sends world X->screen X, world
+     * Z->screen Y, so the on-screen forward is (sin h, cos h) too. [#8] When the
+     * map is turned 90deg left the heading is rotated the SAME way as the
+     * positions so each arrow keeps pointing the way the car actually drives. */
+    for (int i = 0; i < n; i++) {
+        lab[i].dx = MAPPX(lab[i].wx, lab[i].wz);
+        lab[i].dy = MAPPY(lab[i].wx, lab[i].wz);
+        float fwd_x = td5_sin_12bit(lab[i].h12);
+        float fwd_y = td5_cos_12bit(lab[i].h12);
+        lab[i].fx = rot90 ? fwd_y  : fwd_x;
+        lab[i].fy = rot90 ? -fwd_x : fwd_y;
     }
 
     /* Label text size tracks the cell, trimmed by the HUD size multiplier. */
