@@ -197,6 +197,41 @@ static int  s_device_types[16];  /* 0=keyboard, 1=gamepad, 2=wheel/joystick */
 static GUID s_device_guids[16];  /* DirectInput instance GUID per enumerated device (index 0 = keyboard, unused) */
 static GUID s_device_product_guids[16]; /* DirectInput PRODUCT GUID (same model -> same product GUID) */
 static int  s_device_count = 0;
+/* [split-screen disconnect slot-restore 2026-06-24] GUID-STABLE enumeration index.
+ * The original mapped player->device by a STABLE persisted source index (0-7) into a
+ * FIXED device table [CONFIRMED @ ScreenControlOptions 0x0041DF20 reads
+ * (&g_player1DeviceDesc)[g_player1InputSource]; per-frame device = inputSource-1 @
+ * 0x0042C470], so a device's slot never moved when ANOTHER device dropped (the 1999
+ * binary had no hot-plug at all — M2DX owned the devices). The port re-enumerated
+ * attached-only (DIEDFL_ATTACHEDONLY) and rebuilt the list from scratch, so a
+ * disconnect COMPACTED the array and shifted every later device DOWN one index ->
+ * every binding keyed by that 1-based index (s_mp_join_device[p], persisted [Devices]
+ * PlayerN, the FF controller_assignment, the mp_session device->profile/slot map)
+ * silently re-pointed at a DIFFERENT physical pad, swapping split-screen players'
+ * slots. We now PIN each index to its DirectInput INSTANCE GUID: a slot, once
+ * assigned, keeps its index for the whole session; a disconnected device's slot is
+ * RESERVED (present=0) rather than compacted away or reused, so its owner keeps the
+ * slot and reclaims the same index when the pad reconnects. */
+static int  s_device_present[16]  = { 0 };  /* 1 = attached this enumeration; 0 = reserved/absent */
+static int  s_device_assigned[16] = { 0 };  /* 1 = slot owns a known instance GUID (reserved across hot-plug) */
+
+/* GUID byte-compare (GUID is 16 contiguous bytes, no padding) — avoids depending
+ * on the IsEqualGUID macro/ole32 linkage. */
+static int td5_guid_equal(const GUID *a, const GUID *b)
+{
+    return memcmp(a, b, sizeof(GUID)) == 0;
+}
+
+/* The stable index that already owns this physical device's instance GUID, or -1.
+ * A returning (reconnected) pad reclaims its original slot through this lookup. */
+static int td5_plat_input_slot_for_instance_guid(const GUID *g)
+{
+    int i;
+    for (i = 1; i < 16; i++)
+        if (s_device_assigned[i] && td5_guid_equal(&s_device_guids[i], g))
+            return i;
+    return -1;
+}
 
 /* Multi-file logging — messages routed by module tag to separate log files.
  * Session rotation keeps up to 5 previous logs per category. */
@@ -2073,6 +2108,7 @@ static int td5_plat_input_device_name_is_blocked(const char *name)
 static BOOL CALLBACK EnumJoysticksCallback(
     const DIDEVICEINSTANCEA *inst, void *ctx)
 {
+    int idx, free_idx = -1, evict_idx = -1, i;
     (void)ctx;
     /* Override: blocked devices are skipped outright — never detected or usable. */
     if (td5_plat_input_device_name_is_blocked(inst->tszInstanceName)) {
@@ -2080,29 +2116,52 @@ static BOOL CALLBACK EnumJoysticksCallback(
                   inst->tszInstanceName);
         return DIENUM_CONTINUE;
     }
-    if (s_device_count < 16) {
-        strncpy(s_device_names[s_device_count],
-                inst->tszInstanceName,
-                sizeof(s_device_names[0]) - 1);
-        s_device_names[s_device_count][255] = '\0';
-        /* Store the instance GUID so td5_plat_input_set_device can (re)create
-         * this exact device later — without it, switching to any joystick is
-         * impossible (s_di_joystick was never created). */
-        s_device_guids[s_device_count] = inst->guidInstance;
-        s_device_product_guids[s_device_count] = inst->guidProduct;
-        /* Classify device type: wheel/driving=2, gamepad=1 */
-        {
-            BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
-            if (dev_type == DI8DEVTYPE_DRIVING ||
-                dev_type == DI8DEVTYPE_FLIGHT  ||
-                dev_type == DI8DEVTYPE_1STPERSON) {
-                s_device_types[s_device_count] = 2; /* joystick/wheel */
-            } else {
-                s_device_types[s_device_count] = 1; /* gamepad */
-            }
+    /* [GUID-stable index 2026-06-24] Place this physical device at a STABLE slot so
+     * a disconnect of some OTHER pad can't shift it (which would swap split-screen
+     * players' slots — see the s_device_present/assigned note above):
+     *   1. reuse the index this exact instance GUID already owns (a returning pad
+     *      reclaims its original slot), else
+     *   2. the lowest never-assigned slot, else
+     *   3. evict the lowest currently-absent reserved slot (only when all 16 are
+     *      assigned — a session would need >15 distinct pads to hit this). */
+    idx = td5_plat_input_slot_for_instance_guid(&inst->guidInstance);
+    if (idx < 0) {
+        for (i = 1; i < 16; i++) {
+            if (!s_device_assigned[i]) { free_idx = i; break; }
+            if (evict_idx < 0 && !s_device_present[i]) evict_idx = i;
         }
-        s_device_count++;
+        idx = (free_idx >= 0) ? free_idx : evict_idx;
+        if (idx < 0) return DIENUM_CONTINUE;   /* all 16 slots hold present devices */
+        /* Evicting a reserved slot reuses its index for a different physical device:
+         * drop any cached lobby-scan handle so it recreates against the new GUID. */
+        if (free_idx < 0 && s_di_scan[idx]) {
+            IDirectInputDevice8_Unacquire(s_di_scan[idx]);
+            IDirectInputDevice8_Release(s_di_scan[idx]);
+            s_di_scan[idx] = NULL;
+        }
+        /* Store the instance GUID so td5_plat_input_set_device can (re)create this
+         * exact device later — without it, switching to any joystick is impossible
+         * (s_di_joystick was never created). */
+        s_device_guids[idx]         = inst->guidInstance;
+        s_device_product_guids[idx] = inst->guidProduct;
+        s_device_assigned[idx]      = 1;
     }
+    /* Refresh display name + type each pass (the name is re-read so the
+     * disambiguation pass can re-suffix duplicates among present devices). */
+    strncpy(s_device_names[idx], inst->tszInstanceName, sizeof(s_device_names[0]) - 1);
+    s_device_names[idx][255] = '\0';
+    {
+        BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
+        if (dev_type == DI8DEVTYPE_DRIVING ||
+            dev_type == DI8DEVTYPE_FLIGHT  ||
+            dev_type == DI8DEVTYPE_1STPERSON) {
+            s_device_types[idx] = 2; /* joystick/wheel */
+        } else {
+            s_device_types[idx] = 1; /* gamepad */
+        }
+    }
+    s_device_present[idx] = 1;
+    if (idx >= s_device_count) s_device_count = idx + 1;
     return DIENUM_CONTINUE;
 }
 
@@ -2126,6 +2185,12 @@ static void td5_plat_input_disambiguate_device_names(void)
 {
     int numbered[16] = {0};   /* device already given a suffix this pass */
     int i, j;
+    /* Reserved-but-absent slots keep their preserved (possibly already-suffixed)
+     * name across a disconnect and must not count toward the duplicate tally of
+     * currently-attached devices — mark them done so they're neither re-suffixed
+     * nor matched. */
+    for (i = 1; i < s_device_count && i < 16; i++)
+        if (!s_device_present[i]) numbered[i] = 1;
     for (i = 1; i < s_device_count && i < 16; i++) {
         char key[256];    /* untrimmed comparison key (matches raw names) */
         char disp[256];   /* trimmed base used to build the displayed name */
@@ -2164,11 +2229,23 @@ static void td5_plat_input_disambiguate_device_names(void)
 
 int td5_plat_input_enumerate_devices(void)
 {
-    s_device_count = 0;
-    /* Keyboard is always device 0 */
-    strncpy(s_device_names[0], "Keyboard", sizeof(s_device_names[0]));
-    s_device_types[0] = 0; /* keyboard */
-    s_device_count = 1;
+    int i;
+    /* Keyboard is always device 0 and always present (reserved once). */
+    if (!s_device_assigned[0]) {
+        strncpy(s_device_names[0], "Keyboard", sizeof(s_device_names[0]) - 1);
+        s_device_names[0][sizeof(s_device_names[0]) - 1] = '\0';
+        s_device_types[0]    = 0; /* keyboard */
+        s_device_assigned[0] = 1;
+    }
+    s_device_present[0] = 1;
+    if (s_device_count < 1) s_device_count = 1;
+
+    /* [GUID-stable index 2026-06-24] Do NOT rebuild the table from scratch. Mark
+     * every joystick slot absent; the EnumDevices pass re-marks the attached ones
+     * present at their GUID-pinned index. Reserved-but-absent slots KEEP their
+     * GUID/name/type so a disconnected pad's index never moves and its owner keeps
+     * the slot until it reconnects. */
+    for (i = 1; i < 16; i++) s_device_present[i] = 0;
 
     if (s_dinput) {
         IDirectInput8_EnumDevices(s_dinput,
@@ -2177,24 +2254,36 @@ int td5_plat_input_enumerate_devices(void)
             NULL,
             DIEDFL_ATTACHEDONLY);
     }
+
+    /* Drop the cached lobby-scan handle for any slot that just went absent so a
+     * later reconnect recreates a fresh, acquirable handle (a dead DI device
+     * object never recovers via re-Acquire on the stale handle). */
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        if (!s_device_present[i] && s_di_scan[i]) {
+            IDirectInputDevice8_Unacquire(s_di_scan[i]);
+            IDirectInputDevice8_Release(s_di_scan[i]);
+            s_di_scan[i] = NULL;
+        }
+    }
+
     /* Append " #1"/" #2"/... to any controllers that share an identical name
      * so two of the same model can be told apart in the config UI. */
     td5_plat_input_disambiguate_device_names();
     TD5_LOG_I(LOG_TAG, "Input devices enumerated: count=%d primary=%s",
               s_device_count,
               (s_device_count > 0) ? s_device_names[0] : "<none>");
-    for (int di = 1; di < s_device_count && di < 16; di++) {
+    for (i = 1; i < s_device_count && i < 16; i++) {
         /* Log the full DirectInput instance + product GUID per joystick. Two
          * physically-distinct controllers normally get distinct INSTANCE GUIDs;
          * some pads (notably 8BitDo) report a fixed/identical instance GUID for
          * every unit, which the binding layer (CreateDevice-by-GUID) cannot tell
          * apart — so two such pads collapse onto one bindable device. The log
-         * makes that collision visible. */
-        const GUID *ig = &s_device_guids[di];
-        const GUID *pg = &s_device_product_guids[di];
+         * makes that collision visible. present=0 = reserved across a disconnect. */
+        const GUID *ig = &s_device_guids[i];
+        const GUID *pg = &s_device_product_guids[i];
         TD5_LOG_I(LOG_TAG,
-                  "  device[%d] type=%d name=\"%s\"",
-                  di, s_device_types[di], s_device_names[di]);
+                  "  device[%d] type=%d present=%d name=\"%s\"",
+                  i, s_device_types[i], s_device_present[i], s_device_names[i]);
         TD5_LOG_I(LOG_TAG,
                   "    inst=%08lX-%04X-%04X-%02X%02X%02X%02X%02X%02X%02X%02X "
                   "prod=%08lX",
@@ -2569,9 +2658,16 @@ int td5_plat_input_devices_changed(void)
 
 int td5_plat_input_rescan_devices(void)
 {
-    int prev = s_device_count;
+    /* [GUID-stable index 2026-06-24] s_device_count no longer shrinks on a
+     * disconnect (the slot is reserved), so a count comparison would MISS an
+     * unplug. Compare the set of PRESENT devices instead — this flags a connect
+     * (new bit) AND a disconnect (cleared bit). */
+    unsigned prev_mask = 0, new_mask = 0;
+    int i;
+    for (i = 0; i < 16; i++) if (s_device_present[i]) prev_mask |= (1u << i);
     td5_plat_input_enumerate_devices();
-    if (s_device_count != prev) {
+    for (i = 0; i < 16; i++) if (s_device_present[i]) new_mask |= (1u << i);
+    if (new_mask != prev_mask) {
         td5_plat_input_scan_join_release();
         s_fe_js_suppress = 0;
         return 1;
