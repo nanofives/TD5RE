@@ -144,6 +144,12 @@ static uint8_t s_nos_latch[TD5_MAX_RACER_SLOTS];
  * rather than every frame the horn is held. */
 static uint8_t s_siren_horn_latch[TD5_MAX_RACER_SLOTS];
 
+/** Regular-car horn-honk edge latch per-player (PORT ENHANCEMENT).
+ * One honk per press of the horn key — the horn one-shot would otherwise
+ * re-trigger every frame the key is held. Separate from the siren latch so a
+ * cop in wanted mode toggles the siren while everyone else honks. */
+static uint8_t s_horn_honk_latch[TD5_MAX_RACER_SLOTS];
+
 /** NOS cooldown per actor (actor+0x37C). */
 static uint8_t s_nos_cooldown[TD5_MAX_RACER_SLOTS];
 
@@ -433,6 +439,7 @@ int td5_input_init(void)
     memset(s_gear_debounce, 0, sizeof(s_gear_debounce));
     memset(s_nos_latch, 0, sizeof(s_nos_latch));
     memset(s_siren_horn_latch, 0, sizeof(s_siren_horn_latch));
+    memset(s_horn_honk_latch, 0, sizeof(s_horn_honk_latch));
     memset(s_nos_cooldown, 0, sizeof(s_nos_cooldown));
     memset(s_camera_cooldown, 0, sizeof(s_camera_cooldown));
     memset(s_rear_view, 0, sizeof(s_rear_view));
@@ -1490,8 +1497,26 @@ void td5_input_update_player_control(int slot)
             s_siren_horn_latch[slot] = 1;
             td5_sound_toggle_siren();
         }
+        /* The cop's horn IS the siren toggle — never also honk. */
+        s_horn_honk_latch[slot] = 0;
     } else {
         s_siren_horn_latch[slot] = 0;
+
+        /* ---- Regular-car horn honk (PORT ENHANCEMENT) ----
+         * The original never played a per-car horn: bit 0x200000 only drove the
+         * cop siren + a remote-brake cheat, and Horn.wav (loaded to slot i*3+2)
+         * was never played (RE-confirmed @ 0x00440a30 / 0x00441a80). Wire the
+         * port's existing (dead) horn-playback block: honk once per horn-key
+         * press edge. Skipped for the cop-in-wanted-mode above (siren instead);
+         * fires for every other human car, including suspects in a cop chase
+         * and any car in a normal race. The honk is local cosmetic audio
+         * (s_horn_state), so it carries no sim/netplay desync risk. */
+        if ((bits & 0x200000u) == 0) {
+            s_horn_honk_latch[slot] = 0;
+        } else if (s_horn_honk_latch[slot] == 0) {
+            s_horn_honk_latch[slot] = 1;
+            td5_sound_play_horn(slot);
+        }
     }
 
     /* Cop mode: horn zeroes other actors' velocities.

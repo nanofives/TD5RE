@@ -936,6 +936,35 @@ int td5_sound_siren_is_enabled(void)
     return s_siren_user_enabled;
 }
 
+/**
+ * td5_sound_play_horn (REGULAR-CAR HORN — PORT ENHANCEMENT).
+ *
+ * Trigger the one-shot horn honk for a race vehicle. The original TD5 binary
+ * loaded each car's Horn.wav into audio slot i*3+2 but NEVER played it — the
+ * horn control bit 0x200000 only drove the cop siren + a remote-brake cheat
+ * (RE-confirmed @ 0x00440a30 / 0x00441a80). The port already has the full
+ * horn-playback block in td5_sound_update_audio_mix (gated on
+ * s_horn_state[pass + veh*2] == 1) but nothing ever set the state, so the
+ * block was dead. This sets it.
+ *
+ * s_horn_state is indexed [pass + veh*2] (6 vehicles x 2 viewport passes), so
+ * arm BOTH passes for the vehicle — the mix renders each pass with its own
+ * listener pan/volume, so a split-screen pane only hears the honk if its pass
+ * is armed. Setting state=1 mid-play is harmless: the mix won't restart an
+ * already-playing one-shot (it only slot_plays when the slot is idle), so a
+ * second call while honking is a no-op rather than a stutter.
+ */
+void td5_sound_play_horn(int actor_index)
+{
+    if (actor_index < 0 || actor_index >= TD5_SOUND_MAX_RACE_VEHICLES) {
+        return;
+    }
+    s_horn_state[actor_index * 2]     = 1;  /* viewport pass 0 */
+    s_horn_state[actor_index * 2 + 1] = 1;  /* viewport pass 1 */
+    TD5_LOG_I(LOG_TAG, "horn honk: vehicle slot=%d (Horn.wav slot=%d)",
+              actor_index, actor_index * 3 + 2);
+}
+
 /* ========================================================================
  * [ITEM #12] Crash impact SFX trigger
  * ======================================================================== */
