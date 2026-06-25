@@ -6601,17 +6601,26 @@ static int check_race_completion(uint32_t sim_delta) {
         if (humans < 1) humans = 1;
         if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
 
+        /* [CUP TRACK SELECT 2026-06-25] AI-driven "players" (the ADD AI PLAYER dev
+         * tool fills human-pool slots with bots; bit set in mp_ai_player_mask)
+         * are NOT real humans, so they must not hold up the finish — the race ends
+         * the moment every REAL human has crossed the line. mp_ai_player_mask is 0
+         * in real human sessions, so this leaves normal split-screen/net MP and
+         * single-player unchanged. */
         int all_humans_done = 1;
         for (i = 0; i < humans; i++) {
-            if (s_slot_state[i].state == 3) continue;  /* disabled */
+            if (s_slot_state[i].state == 3) continue;             /* disabled */
+            if (g_td5.mp_ai_player_mask & (1u << i)) continue;    /* AI-driven, not a real human */
             if (s_slot_state[i].companion_1 == 0) { all_humans_done = 0; break; }
         }
 
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
             if (s_slot_state[i].state == 3) continue;  /* disabled */
             if (s_slot_state[i].companion_1 == 0) {     /* not finished */
-                int is_human = (i < humans);
-                /* Unfinished AI don't hold up the results once humans are done. */
+                int is_human = (i < humans) &&
+                               !(g_td5.mp_ai_player_mask & (1u << i));
+                /* Unfinished AI (incl. AI-driven players) don't hold up the
+                 * results once all real humans are done. */
                 if (!is_human && all_humans_done) continue;
                 all_finished = 0;
                 break;
@@ -8452,11 +8461,15 @@ static void mpcup_build_track_list(void) {
         if (g_td5.mp_mode_config.cup_track_indices[i] > 0) { have_cfg = 1; break; }
     for (i = 0; i < n; i++) {
         /* Host-configured list when present, else a rotation from the picked
-         * track. Keep on the racing-track range (0..18); skip the drag strip. */
+         * track. The configured list (now set by the cup track-picker) is
+         * honored as-is across the full unlocked range incl. migrated TD6 tracks
+         * (0..36); the rotation fallback stays on the native racing range
+         * (0..18, skipping the drag strip). */
         int t = have_cfg ? g_td5.mp_mode_config.cup_track_indices[i]
                          : (g_td5.track_index + i);
         if (t < 0) t = 0;
-        t %= 19;
+        if (have_cfg) { if (t > 36) t = 0; }   /* explicit pick: keep as chosen */
+        else          { t %= 19; }             /* rotation: native range only   */
         s_mpcup_tracks[i] = t;
     }
 }

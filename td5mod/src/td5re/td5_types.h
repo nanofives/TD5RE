@@ -484,6 +484,11 @@ typedef struct TD5_MpModeConfig {
      * Only consulted on the human-cop path (cop_is_ai == 0); the AI cop keeps the
      * single-slot model. cop_slot stays the lowest set bit (primary). */
     int32_t cop_slot_mask;
+    /* [CUP TRACK SELECT 2026-06-25] Number of AI opponents in a cup race. The AI
+     * cars earn championship points alongside the humans (td5_game_mp_cup_award
+     * tallies every active slot). Appended at the end for a stable wire layout.
+     * 0 => humans only. */
+    int32_t cup_ai_opponents;
 } TD5_MpModeConfig;
 
 /* ========================================================================

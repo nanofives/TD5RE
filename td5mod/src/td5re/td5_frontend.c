@@ -804,11 +804,15 @@ const int s_cup_schedules[][13] = {
  * track for each race in the cup; the chosen list lives here and overrides the
  * fixed schedule in frontend_init_race_schedule. s_cup_user_active gates that
  * override so the faithful schedule path is untouched when the picker is off. */
-int s_cup_user_tracks[TD5_CUP_MAX_RACES + 1];  /* picked track index per race    */
-int s_cup_user_dirs[TD5_CUP_MAX_RACES + 1];    /* picked direction per race (0/1) */
+int s_cup_user_tracks[TD5_CUP_MAX_RACES + 1];  /* picked track index per race      */
+int s_cup_user_dirs[TD5_CUP_MAX_RACES + 1];    /* picked direction per race (0/1)   */
+int s_cup_user_traffic[TD5_CUP_MAX_RACES + 1]; /* picked traffic volume per race    */
+int s_cup_user_cops[TD5_CUP_MAX_RACES + 1];    /* picked police on/off per race     */
 int s_cup_user_count  = 0;   /* number of races to pick (= cup schedule length)  */
 int s_cup_pick_index  = 0;   /* race currently being picked (0-based)            */
 int s_cup_user_active = 0;   /* 1 once committed: per-race init uses the arrays  */
+int s_cup_pick_is_mp  = 0;   /* 1 = multiplayer cup pick (write cup_track_indices,
+                              *     launch via the MP cup path); 0 = SP cup pick  */
 
 /* Number of races in a single-player cup = count of non-sentinel (99) entries in
  * the cup's fixed schedule row. This is the "amount of races" the cup track
@@ -3145,6 +3149,18 @@ void frontend_init_race_schedule(void) {
         }
         if (g_td5.mp_ai_player_mask) ai = 0;
 
+        /* [CUP TRACK SELECT 2026-06-25] MP cup: the AI opponent count comes from
+         * the cup options (OPPONENTS), overriding the legacy fill / AI-test-player
+         * suppression. These AI cars earn championship points alongside the humans
+         * (td5_game_mp_cup_award tallies every active slot). */
+        if (s_cup_user_active && g_td5.mp_mode_config.mode == TD5_MP_MODE_CUP) {
+            int opp = g_td5.mp_mode_config.cup_ai_opponents;
+            if (opp < 0) opp = 0;
+            if (opp > TD5_MAX_RACER_SLOTS - humans) opp = TD5_MAX_RACER_SLOTS - humans;
+            ai = opp;
+            TD5_LOG_I(LOG_TAG, "MP cup: AI opponents=%d (humans=%d)", ai, humans);
+        }
+
         g_td5.num_human_players = humans;
         g_td5.num_ai_opponents  = ai;
     }
@@ -3199,6 +3215,26 @@ void frontend_init_race_schedule(void) {
     if (g_td5.wanted_mode_enabled && g_td5.special_encounter_enabled) {
         g_td5.special_encounter_enabled = 0;
         TD5_LOG_I(LOG_TAG, "InitRaceSchedule: cop chase -> special-encounter (traffic police) forced OFF");
+    }
+
+    /* [CUP TRACK SELECT 2026-06-25] Per-race cup traffic + police: the picker
+     * chose a traffic level and a police on/off for THIS race. Apply them now
+     * (overriding the generic commit above) using the current cup race index
+     * (MP cup: td5_game_mp_cup_current; SP cup: s_race_within_series). */
+    if (s_cup_user_active) {
+        int is_mpcup = (g_td5.mp_mode_config.mode == TD5_MP_MODE_CUP);
+        int idx = is_mpcup ? td5_game_mp_cup_current() : s_race_within_series;
+        if (idx < 0) idx = 0;
+        if (idx < s_cup_user_count && idx <= TD5_CUP_MAX_RACES) {
+            int tv = s_cup_user_traffic[idx];
+            if (tv < 0) tv = 0;
+            if (tv > TD5_TRAFFIC_VOLUME_COUNT - 1) tv = TD5_TRAFFIC_VOLUME_COUNT - 1;
+            g_td5.traffic_volume            = tv;
+            g_td5.traffic_enabled           = (tv != 0);
+            g_td5.special_encounter_enabled = s_cup_user_cops[idx] ? 1 : 0;
+            TD5_LOG_I(LOG_TAG, "Cup race %d: per-race traffic=%d police=%d",
+                      idx + 1, tv, s_cup_user_cops[idx]);
+        }
     }
 
     TD5_LOG_I(LOG_TAG,

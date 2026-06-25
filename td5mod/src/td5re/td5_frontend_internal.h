@@ -346,9 +346,12 @@ extern const int s_cup_schedules[][13];
 /* [CUP TRACK SELECT 2026-06-25] player-chosen per-race cup tracks (port enhancement) */
 extern int s_cup_user_tracks[TD5_CUP_MAX_RACES + 1];
 extern int s_cup_user_dirs[TD5_CUP_MAX_RACES + 1];
+extern int s_cup_user_traffic[TD5_CUP_MAX_RACES + 1];
+extern int s_cup_user_cops[TD5_CUP_MAX_RACES + 1];
 extern int s_cup_user_count;
 extern int s_cup_pick_index;
 extern int s_cup_user_active;
+extern int s_cup_pick_is_mp;
 int frontend_cup_race_count(int game_type);
 extern const uint32_t s_td6_palette[TD6_PALETTE_N];
 extern const uint8_t s_track_schedule_to_tga_index[37];
