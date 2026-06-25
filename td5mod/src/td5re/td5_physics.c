@@ -1361,6 +1361,34 @@ static int32_t npc_fatal_mag(void) {
     }
     return v;
 }
+/* [POLICE 2026-06-24] A police cop is more DURABLE than plain traffic: it
+ * survives the impacts that total an ordinary traffic car, and only wrecks on a
+ * genuinely heavy hit (the player deliberately ramming it). Expressed as a
+ * percentage of the traffic break threshold (npc_fatal_mag for V2V,
+ * COP_WALL_BREAK_VPERP for walls); default 250 = 2.5x (user: "police should be
+ * 2.5x more durable than traffic ... breakable by us but shouldn't break down so
+ * easily"). Clamped [100,1000]. TD5RE_COP_DURABILITY_PCT overrides. Port-only —
+ * the original has NO cop-vs-traffic durability concept (the whole cop-chase-as-
+ * traffic system is port-only). */
+#define COP_DURABILITY_PCT_DEFAULT  250
+static int cop_durability_pct(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_COP_DURABILITY_PCT");
+        long p = (e && e[0]) ? strtol(e, NULL, 10) : COP_DURABILITY_PCT_DEFAULT;
+        if (p < 100)  p = 100;
+        if (p > 1000) p = 1000;
+        v = (int)p;
+        TD5_LOG_I(LOG_TAG, "cop_durability_pct: TD5RE_COP_DURABILITY_PCT=%d", v);
+    }
+    return v;
+}
+/* The V2V impact magnitude that wrecks a COP — 2.5x the traffic floor by
+ * default. A cop hit BELOW this shrugs the collision off entirely (no scatter,
+ * no air-launch, no break-down) so a chase isn't ended by a fender-bender. */
+static int32_t cop_break_mag(void) {
+    return (int32_t)((int64_t)npc_fatal_mag() * cop_durability_pct() / 100);
+}
 /* Forward-speed scrub on an acute player hit, Q8 (0x100 = 1.0 = keep all speed).
  * 0x100 - 0x50 = 0xB0/256 ≈ 0.6875, i.e. shed ~31% of planar speed. Vertical
  * lift (linear_velocity_y) is intentionally left untouched. */
@@ -1772,15 +1800,24 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          * a CHASED racer (ending the pursuit) or a CHASING cop. iVar11 is the
          * approach speed into the wall; the threshold is high so only a genuine
          * crash counts. Ordinary traffic is left alone. */
-        if (iVar11 > COP_WALL_BREAK_VPERP) {
+        {
             int wslot = actor->slot_index;
-            /* Any TRAFFIC car / cop that slams a wall hard breaks down (halt +
-             * smoke); so does a chased racer (ends the pursuit). Un-chased racers
-             * keep control. */
-            if (wslot >= g_traffic_slot_base || td5_ai_actor_is_pursued(wslot)) {
-                td5_ai_mark_actor_broken_down(wslot);
-                TD5_LOG_I(LOG_TAG, "wall_break: slot=%d vperp=%d (broke down)",
-                          wslot, iVar11);
+            /* [POLICE 2026-06-24] A cop withstands 2.5x the wall approach speed
+             * that breaks plain traffic, so a fast chase scraping a wall doesn't
+             * instantly end the pursuit. Plain traffic / chased racers keep the
+             * stock 20000 floor. */
+            int32_t wall_gate = COP_WALL_BREAK_VPERP;
+            if (wslot >= 0 && td5_ai_actor_is_cop(wslot))
+                wall_gate = (int32_t)((int64_t)COP_WALL_BREAK_VPERP * cop_durability_pct() / 100);
+            if (iVar11 > wall_gate) {
+                /* Any TRAFFIC car / cop that slams a wall hard breaks down (halt +
+                 * smoke); so does a chased racer (ends the pursuit). Un-chased racers
+                 * keep control. */
+                if (wslot >= g_traffic_slot_base || td5_ai_actor_is_pursued(wslot)) {
+                    td5_ai_mark_actor_broken_down(wslot);
+                    TD5_LOG_I(LOG_TAG, "wall_break: slot=%d vperp=%d gate=%d (broke down)",
+                              wslot, iVar11, wall_gate);
+                }
             }
         }
         /* Impulse numerator = ((K>>8) * -0x1100) >> 12 with Borland round-
@@ -5968,6 +6005,12 @@ static void td5_physics_apply_traffic_crash_spin(TD5_Actor *t, int32_t impact_ma
         const int32_t TRAFFIC_LIFT_CAP = 24000;   /* ~93 world-u/tick (was up to 200000) */
         if (lift > TRAFFIC_LIFT_CAP) lift = TRAFFIC_LIFT_CAP;
     }
+    /* [POLICE 2026-06-24] A cop must NEVER launch into the air on a collision
+     * (user: "they shouldn't go up in the air after a collision"). Kill the
+     * vertical pop entirely for a cop — the in-place spin animation still plays,
+     * but the wreck stays glued to the road instead of flying off it. */
+    if (t->slot_index >= 0 && td5_ai_actor_is_cop((int)t->slot_index))
+        lift = 0;
     t->linear_velocity_y = lift;
 
     t->vehicle_mode = 1;     /* route to scripted-recovery dispatch next tick */
@@ -6484,6 +6527,18 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int a_is_npc = (A->slot_index >= g_traffic_slot_base);
     int b_is_npc = (B->slot_index >= g_traffic_slot_base);
     int32_t heavy_gate = (a_is_npc || b_is_npc) ? npc_fatal_mag() : 90000;
+    /* [POLICE 2026-06-24] Cop durability: a cop only takes the dramatic crash
+     * reaction (scatter + break-down) above 2.5x the traffic floor. A cop hit
+     * between heavy_gate and cop_gate is "tough" — it shrugs the collision off
+     * entirely (no scatter, no air-launch, no wreck) and keeps chasing. This is
+     * the core of "they shouldn't break down so easily" / "80% crash" fix:
+     * routine bumps with traffic no longer end the pursuit. The player can still
+     * total a cop by ramming it past cop_gate ("breakable by us"). */
+    int a_is_cop = (A->slot_index >= 0) && td5_ai_actor_is_cop((int)A->slot_index);
+    int b_is_cop = (B->slot_index >= 0) && td5_ai_actor_is_cop((int)B->slot_index);
+    int32_t cop_gate = cop_break_mag();
+    int a_tough_cop = a_is_cop && impact_mag <= cop_gate;
+    int b_tough_cop = b_is_cop && impact_mag <= cop_gate;
     if (impact_mag > heavy_gate && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
@@ -6495,7 +6550,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * traffic scripted crash-spin (vehicle_mode=1 takeover). Use the live
          * racer/traffic boundary g_traffic_slot_base — byte-identical to `< 6`
          * in a legacy 6-racer race, correct for the expanded field. */
-        if (A->slot_index < g_traffic_slot_base) {
+        if (a_tough_cop) {
+            /* [POLICE] Durable cop below cop_gate: no scatter / no lift / no
+             * spin-out — it absorbs the hit and stays on the chase. */
+        } else if (A->slot_index < g_traffic_slot_base) {
             /* [S08] Soften the rear-ended player's launch/spin (rear_retain is
              * 100 for everyone else, so this is a no-op for AI/front/side). */
             int32_t a_kick_ry = v2v_scale_pct(kick_ry, rear_retain);
@@ -6503,22 +6561,28 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             int32_t lift_a = impact_mag / 6;
             if (lift_a > 200000) lift_a = 200000; /* port-only clamp (orig: none) */
             lift_a = v2v_scale_pct(lift_a, rear_retain);
+            /* [POLICE] A racer-slot cop (MP cop chase) never goes airborne. */
+            if (a_is_cop) lift_a = 0;
             A->angular_velocity_roll  -= a_kick_ry;
             A->angular_velocity_yaw   -= a_kick_ry;
             A->angular_velocity_pitch -= a_kick_p;
             A->linear_velocity_y  = lift_a;
         } else {
-            /* Traffic: scripted crash-spin recovery, orig 0x00408289+. */
+            /* Traffic: scripted crash-spin recovery, orig 0x00408289+.
+             * (A cop here gets lift suppressed inside the helper.) */
             td5_physics_apply_traffic_crash_spin(A, impact_mag);
         }
-        if (B->slot_index < g_traffic_slot_base) {
+        if (b_tough_cop) {
+            /* [POLICE] Durable cop below cop_gate: absorb and keep chasing. */
+        } else if (B->slot_index < g_traffic_slot_base) {
             /* B is the penetrator (never the rear-contacted victim here), so it
              * always takes the byte-faithful kick — the attacker is unchanged. */
+            int32_t lift_b = impact_mag / 6;
+            if (lift_b > 200000) lift_b = 200000; /* port-only clamp (orig: none) */
+            if (b_is_cop) lift_b = 0;             /* [POLICE] no airborne for a cop */
             B->angular_velocity_roll  -= kick_ry;
             B->angular_velocity_yaw   -= kick_ry;
             B->angular_velocity_pitch -= kick_p;
-            int32_t lift_b = impact_mag / 6;
-            if (lift_b > 200000) lift_b = 200000; /* port-only clamp (orig: none) */
             B->linear_velocity_y  = lift_b;
         } else {
             /* Traffic: scripted crash-spin recovery, orig 0x00408289+. */
@@ -6554,13 +6618,17 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                           !td5_ai_actor_is_pursued(sa) && !td5_ai_cop_is_chasing(sa);
             int plain_b = (sb >= g_traffic_slot_base) &&
                           !td5_ai_actor_is_pursued(sb) && !td5_ai_cop_is_chasing(sb);
-            if ((a_is_npc || td5_ai_actor_is_pursued(sa)) && !(fair && plain_a))
+            /* [POLICE 2026-06-24] A tough cop (hit below cop_gate) is NOT totalled
+             * — only a deliberate hard ram past 2.5x the traffic floor wrecks it. */
+            if ((a_is_npc || td5_ai_actor_is_pursued(sa)) && !(fair && plain_a) && !a_tough_cop)
                 td5_ai_mark_actor_broken_down(sa);
-            if ((b_is_npc || td5_ai_actor_is_pursued(sb)) && !(fair && plain_b))
+            if ((b_is_npc || td5_ai_actor_is_pursued(sb)) && !(fair && plain_b) && !b_tough_cop)
                 td5_ai_mark_actor_broken_down(sb);
         }
-        TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d",
-                  A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain);
+        TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d "
+                  "copA=%d copB=%d cop_gate=%d toughA=%d toughB=%d",
+                  A->slot_index, B->slot_index, impact_mag, scatter, kick_ry, kick_p, rear_retain,
+                  a_is_cop, b_is_cop, cop_gate, a_tough_cop, b_tough_cop);
     }
 
     /* [task #9] After the full impulse + (optional) heavy scatter, keep any
