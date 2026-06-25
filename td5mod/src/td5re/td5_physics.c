@@ -2886,7 +2886,14 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         td5_physics_clamp_attitude(actor);
 
     /* 6. Dynamics dispatch */
-    if (actor->vehicle_mode == 0 && actor->slot_index >= 6) {
+    /* [BIG-FIELD FIX 2026-06-25] Use the runtime racer/traffic boundary
+     * g_traffic_slot_base, NOT a hardcoded 6. For a legacy <=6-racer field this
+     * is byte-identical (g_traffic_slot_base == 6). For a >6-racer split-screen
+     * field g_traffic_slot_base becomes 16, so slots 6..15 are RACERS — routing
+     * them through the simplified traffic dynamics + surface-normal traffic pose
+     * banked/rolled "player 7"-style cars onto their side (they never got the
+     * per-wheel racer suspension/ground-snap). */
+    if (actor->vehicle_mode == 0 && actor->slot_index >= g_traffic_slot_base) {
         /* Traffic friction (XZ + yaw + speed integration) runs EVERY sub-tick,
          * INCLUDING the countdown (g_game_paused==1). [FIX 2026-05-26 traffic-
          * countdown-stall] Orig dispatches traffic via UpdateRaceActors ->
@@ -3118,7 +3125,10 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * function, which achieves equivalent semantics as long as the sub-path
      * mirrors UpdateTrafficActorMotion's tick order (route-plan → friction →
      * traffic pose, no wall resolvers). */
-    if (actor->slot_index >= 6 && actor->vehicle_mode != 1) {
+    /* [BIG-FIELD FIX 2026-06-25] g_traffic_slot_base, not literal 6 — see the
+     * dispatch note at step 6. Slots 6..15 in a >6-racer field are racers and
+     * must get the faithful pose integrator below, not integrate_traffic_pose. */
+    if (actor->slot_index >= g_traffic_slot_base && actor->vehicle_mode != 1) {
         /* [FIX 2026-05-28] vehicle_mode != 1 guard: a traffic vehicle in scripted
          * crash-spin recovery (vehicle_mode==1) has its motion owned by
          * td5_physics_integrate_scripted_motion in the dispatch above. Skipping
@@ -3137,11 +3147,26 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         process_traffic_route_advance(actor, _ts);
         process_traffic_forward_checkpoint_pass(actor, _ts);  /* [CONFIRMED @ 0x443ED0] */
         process_traffic_segment_edge(actor, _ts);
-    } else if (actor->slot_index < 6) {
-        /* Racer path: full gravity + per-wheel ground snap.
+    } else if (actor->slot_index < g_traffic_slot_base) {
+        /* Racer path: full gravity + per-wheel ground snap. [BIG-FIELD FIX
+         * 2026-06-25] g_traffic_slot_base (not literal 6) so slots 6..15 in a
+         * >6-racer field get the faithful settle-to-flat pose integrator —
+         * this is what stops "player 7" sitting rolled on its side.
          * Run even during countdown (paused) so ground-snap keeps the car
          * at the correct height above the road surface.
          */
+        if (actor->slot_index >= TD5_LEGACY_RACE_SLOTS) {
+            /* One-shot confirmation that a >6-racer-field slot (e.g. player 7 =
+             * slot 6) now runs the faithful racer pose integrator instead of
+             * the traffic surface-normal pose. Fires once per session. */
+            static int s_bigfield_pose_logged = 0;
+            if (!s_bigfield_pose_logged) {
+                s_bigfield_pose_logged = 1;
+                TD5_LOG_I(LOG_TAG,
+                    "bigfield racer pose: slot=%d base=%d racer-path (settle-to-flat)",
+                    (int)actor->slot_index, g_traffic_slot_base);
+            }
+        }
         td5_physics_integrate_pose(actor);
     }
 
@@ -3178,7 +3203,11 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * wheel probes, so recovery here gets wheel-probe lateral containment (stops
      * the slide) but not full body-corner containment — a deeper follow-up if
      * body-first clip-through is observed. */
-    if (actor->slot_index < 6) {
+    /* [BIG-FIELD FIX 2026-06-25] g_traffic_slot_base, not literal 6 — slots
+     * 6..15 in a >6-racer field are racers and need wall containment too
+     * (without it "player 7" would also clip through the rails). Byte-identical
+     * for legacy <=6-racer fields where g_traffic_slot_base == 6. */
+    if (actor->slot_index < g_traffic_slot_base) {
         td5_track_resolve_reverse_contacts(actor);
         td5_track_resolve_forward_contacts(actor);
         td5_track_resolve_wall_contacts(actor);
