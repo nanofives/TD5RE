@@ -1519,10 +1519,13 @@ static void hud_draw_mp_car_labels(void)
 
     const float FP = 1.0f / 256.0f;          /* 24.8 fixed -> world units */
 
-    /* Above-roof anchor. World is Y-DOWN (td5_render.c: +Y world pushes a car
-     * DOWN toward the ground), so SUBTRACTING from world-Y lifts the anchor
-     * above the roof. ~600 world units sits comfortably over a car body. */
-    const float ROOF_LIFT_WS = 600.0f;
+    /* [#MP LABEL BELOW WHEELS 2026-06-24] Anchor the label BELOW the wheels
+     * instead of over the roof, so it never blocks the driver's view of the road
+     * ahead. World is Y-DOWN (td5_render.c: +Y world pushes a car DOWN toward the
+     * ground), so ADDING to world-Y drops the anchor below the car body. The drop
+     * (DROP_WS, world units) is cached below alongside NEAR_D/FAR_D/CUT_D and is
+     * env-tunable (TD5RE_MP_LABEL_DROP) so it can be dialled to "just below the
+     * wheels" without a rebuild. */
 
     /* Distance shrink / cutoff, expressed in view-space depth (= 1/rhw, the
      * camera->point distance along the view axis, world units). NEAR_D and far
@@ -1530,11 +1533,12 @@ static void hud_draw_mp_car_labels(void)
      * the floor scale by FAR_D, and skipped entirely past CUT_D. */
     /* [#23 2026-06-19] Widened from 2500/22000/30000 so other players' labels
      * appear from further away and stay full size sooner (env-overridable). */
-    static float NEAR_D = -1.0f, FAR_D = -1.0f, CUT_D = -1.0f;
+    static float NEAR_D = -1.0f, FAR_D = -1.0f, CUT_D = -1.0f, DROP_WS = -1.0f;
     if (NEAR_D < 0.0f) {
         NEAR_D = hud_mp_label_dist("TD5RE_MP_LABEL_NEAR",  6000.0f);  /* full-size plateau */
         FAR_D  = hud_mp_label_dist("TD5RE_MP_LABEL_FAR",  22000.0f);  /* shrink-floor distance */
         CUT_D  = hud_mp_label_dist("TD5RE_MP_LABEL_CUT",  30000.0f);  /* hard cutoff (now true XZ dist) */
+        DROP_WS = hud_mp_label_dist("TD5RE_MP_LABEL_DROP", 250.0f);   /* below-wheels anchor drop */
     }
     const float SCALE_NEAR = 1.0f;           /* multiplier on the base text scale */
     const float SCALE_FAR  = 0.35f;
@@ -1582,7 +1586,7 @@ static void hud_draw_mp_car_labels(void)
             int32_t vx = *(int32_t *)(a + 0x1CC);   /* linear_velocity_x */
             int32_t vz = *(int32_t *)(a + 0x1D4);   /* linear_velocity_z */
             float wx = ((float)actor_world_x(slot) + (float)vx * frac) * FP;
-            float wy = ((float)(*(int32_t *)(a + 0x200)) - ROOF_LIFT_WS) * FP; /* roof, Y up = -Y */
+            float wy = ((float)(*(int32_t *)(a + 0x200)) + DROP_WS) * FP; /* below wheels, Y down = +Y */
             float wz = ((float)actor_world_z(slot) + (float)vz * frac) * FP;
 
             float sx, sy, sz, rhw;
@@ -1655,27 +1659,37 @@ static void hud_draw_mp_car_labels(void)
             float pad_y   = 4.0f  * ts;
             float plate_h = cap_h + 2.0f * pad_y;
             float plate_w = tw + 10.0f * ts;
-            /* Centre the plate horizontally on the projected anchor and sit its
-             * BOTTOM just above the anchor point (so it floats over the roof). */
+            /* Centre the plate horizontally on the projected anchor and hang it
+             * BELOW the anchor (top at the anchor, growing downward) so the text
+             * sits just under the wheels and never covers the car or the road. */
             float plate_l = fx - plate_w * 0.5f;
-            float plate_b = fy;
-            float plate_t = plate_b - plate_h;
+            float plate_t = fy;
+            float plate_b = plate_t + plate_h;
 
             /* Clamp horizontally inside the pane so an off-centre car's label
              * stays readable instead of bleeding into the neighbouring pane. */
             if (plate_l < L + 1.0f)              plate_l = L + 1.0f;
             if (plate_l + plate_w > R - 1.0f)    plate_l = R - 1.0f - plate_w;
-            /* If the anchor is above the pane top, skip (car is off the top of
-             * this view); a tiny sliver is fine, fully above is not. */
+            /* Skip if the plate would fall entirely outside this pane (car off the
+             * bottom or top of the view). Then clamp the bottom edge inside the
+             * pane so a low car's downward label can't bleed into the pane beneath it. */
+            if (plate_t > B - 2.0f) continue;
             if (plate_b < T + 2.0f) continue;
+            if (plate_b > B - 1.0f) { plate_b = B - 1.0f; plate_t = plate_b - plate_h; }
 
-            /* Accent background, black text (light accents) / white (dark). */
-            td5_vui_quad(plate_l, plate_t, plate_w, plate_h, accent, -1, 0, 0, 0, 0);
+            /* [#MP LABEL 50% OPACITY 2026-06-24] Accent box + black/white text,
+             * both at HALF opacity so the marker never fully occludes the car or
+             * the road behind it. The VectorUI quad (TRANSLUCENT_LINEAR_HUD) and
+             * text (translucent MSDF) paths both blend the 0xAARRGGBB alpha, so
+             * forcing the alpha byte to 0x80 (~50%) is all that's needed. Text
+             * colour is picked from the OPAQUE accent luminance (alpha-independent). */
             int r8 = (accent >> 16) & 0xFF, g8 = (accent >> 8) & 0xFF, b8 = accent & 0xFF;
             int lum = (r8 * 30 + g8 * 59 + b8 * 11) / 100;
-            uint32_t tcol = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
+            uint32_t box_col  = (accent & 0x00FFFFFFu) | 0x80000000u;                    /* 50% box  */
+            uint32_t text_col = ((lum > 150) ? 0x00101010u : 0x00FFFFFFu) | 0x80000000u; /* 50% text */
+            td5_vui_quad(plate_l, plate_t, plate_w, plate_h, box_col, -1, 0, 0, 0, 0);
             float ny = (plate_t + plate_b) * 0.5f - 15.5f * ts;  /* caps centred in plate */
-            td5_vui_text_centered(plate_l + plate_w * 0.5f, ny, nm, tcol, ts, ts);
+            td5_vui_text_centered(plate_l + plate_w * 0.5f, ny, nm, text_col, ts, ts);
         }
 
         td5_render_pop_transform();
