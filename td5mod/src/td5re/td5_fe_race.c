@@ -43,10 +43,15 @@
  *
  * Cross-file CONSUMERS (declared extern here; NOT defined in this file):
  *   - td5_input.c  : per-player rising-edge getters for the CHANGE CAMERA and
- *                    FRONT VIEW action buttons (keyboard + joystick), used by
- *                    Screen_MpPosition to (a) cycle the split-screen layout
- *                    [CHANGE CAMERA] and (b) cycle the empty-cell content
- *                    selector g_td5.split_missing_content[] [FRONT VIEW].
+ *                    FRONT VIEW action buttons (keyboard + joystick). [select-vs-x
+ *                    2026-06-24] Screen_MpPosition now reads the LAYOUT (X) and
+ *                    empty-cell CONTENT (SELECT/START) pad buttons straight from
+ *                    each player's per-player scan (td5_plat_input_device_nav), so
+ *                    the two controls are distinct. The FRONT-VIEW getter is still
+ *                    consumed for the keyboard REAR-VIEW / R3 content path; the
+ *                    CHANGE-CAMERA getter is retained for other callers but is no
+ *                    longer the layout driver here (it re-ORs the aggregated 0x40,
+ *                    which would re-merge SELECT/START onto the layout).
  *                    Both return 1 exactly once per physical press for `player`.
  *   - td5_save.h   : the TD5_Profile store API (already in the header).
  *   - td5_frontend.c shared frontend state (s_mp_* / s_mp_missing_content /
@@ -2534,11 +2539,14 @@ int frontend_mp_player_pane_cell(int p) {
  *                  (a ready player cannot be displaced by anyone else).
  *   A              ready latch (toggles back off when already ready)
  *   B / ESC        back to the name/colour setup
- *   CHANGE CAMERA  cycle the split-screen LAYOUT/grid mode (was LEFT/RIGHT —
- *                  now its own button, keyboard + joystick, any player)
- *   FRONT VIEW     cycle WHAT fills the empty grid cells (EMPTY / MAP /
+ *   X              cycle the split-screen LAYOUT/grid mode (was LEFT/RIGHT —
+ *                  now its own pad button, any player)
+ *   SELECT/START   cycle WHAT fills the empty grid cells (EMPTY / MAP /
  *                  STANDINGS, s_mp_missing_content[]) — only when the current
- *                  layout actually HAS empty cells (missing > 0)
+ *                  layout actually HAS empty cells (missing > 0). [select-vs-x
+ *                  2026-06-24] was on FRONT VIEW (R3, dead pre-bind) AND shared
+ *                  the layout button with X; now SELECT/START is its own control.
+ *                  Keyboard REAR-VIEW / R3 still reach it via the FRONT-VIEW getter.
  *
  * All ready -> commit cells to the session and advance to the car grid. */
 void Screen_MpPosition(void) {
@@ -2559,31 +2567,44 @@ void Screen_MpPosition(void) {
 
     s_anim_complete = 1;   /* no slide-in; allow normal flow (and our own ESC) */
 
-    /* [#6] CHANGE CAMERA cycles the split LAYOUT (replaces the removed LEFT/RIGHT
-     * grid-mode change). Any player's CHANGE CAMERA press advances the layout;
-     * shrinking the grid re-packs every cell so the permutation stays a valid
-     * bijection.
+    int sel_content = 0;   /* [select-vs-x] pad SELECT/START edge -> cycle empty-cell content (consumed below) */
+
+    /* [#6] Split the two grid controls onto TWO DISTINCT pad buttons:
+     *   X            (scan 0x80) -> cycle the split LAYOUT/grid mode
+     *   SELECT/START (scan 0x40) -> cycle the empty-cell CONTENT (MAP <-> STANDINGS)
+     * Any player's button acts for everyone; shrinking the grid re-packs every cell
+     * so the permutation stays a valid bijection.
      *
-     * [R3 2026-06-19] The prior pad path went through the AGGREGATED scan reader
-     * (td5_plat_input_frontend_nav, via td5_input_frontend_change_camera_pressed),
-     * which DECODES buttons 0/1/2 (A/B/X) but NOT button 7 (START/0x40) — so the
-     * pad's START never produced a 0x40 bit and the layout never cycled. The
-     * per-player device reader td5_plat_input_device_nav DOES decode START (0x40),
-     * so detect the camera/layout button straight from each player's OWN pad here
-     * with a per-player edge latch. Also accept X (0x80) — that IS in the scan set
-     * and is free on this screen — so either a START or an X press cycles the grid.
-     * Keyboard CHANGE-VIEW still flows via the getter. */
+     * [select-vs-x 2026-06-24] PREVIOUSLY the layout cycler fired on START (0x40)
+     * OR X (0x80) together, so SELECT/START and X did the SAME thing (the footer
+     * even read "START/X: LAYOUT"), while the empty-cell content toggle was
+     * stranded on REAR VIEW (R3) — exclusive-only, hence DEAD on this pre-bind
+     * couch screen. Now each action keys off its OWN per-player scan bit from
+     * td5_plat_input_device_nav (the aggregated frontend scan can't attribute a
+     * press to a slot): X -> layout, SELECT/START -> content. The change-camera
+     * getter is intentionally DROPPED from the layout cycle here because it re-ORs
+     * the aggregated 0x40 (which would put SELECT/START straight back onto the
+     * layout, re-creating the bug); keyboard CHANGE-VIEW therefore no longer cycles
+     * the layout on THIS screen (couch input here is pads), while keyboard
+     * REAR-VIEW / R3 still reach the content toggle via the FRONT-VIEW getter below.
+     *
+     * [R3 2026-06-19] td5_plat_input_device_nav decodes BOTH START (0x40, btn 7)
+     * and X (0x80, btn 2); the prior aggregated reader could not attribute START to
+     * a slot — that history is why the per-player device reader is used here. */
     {
         int lcnt = 1, cam = 0;
-        static uint8_t s_pos_cam_held[TD5_MAX_HUMAN_PLAYERS];
+        static uint8_t s_pos_cam_held[TD5_MAX_HUMAN_PLAYERS];   /* X            -> layout  */
+        static uint8_t s_pos_sel_held[TD5_MAX_HUMAN_PLAYERS];   /* SELECT/START -> content */
         mp_split_layouts(n, &lcnt);
         for (p = 0; p < n; p++) {
             int dev = s_mp_join_device[p];
             uint32_t db = (dev > 0) ? td5_plat_input_device_nav(dev) : 0u;
-            int pad_now = (db & (0x40u | 0x80u)) ? 1 : 0;       /* START or X */
-            int pad_edge = (pad_now && !s_pos_cam_held[p]) ? 1 : 0;
-            s_pos_cam_held[p] = (uint8_t)pad_now;
-            if (pad_edge || td5_input_frontend_change_camera_pressed(p)) { cam = 1; }
+            int x_now   = (db & 0x80u) ? 1 : 0;    /* X            -> cycle LAYOUT  */
+            int sel_now = (db & 0x40u) ? 1 : 0;    /* SELECT/START -> cycle CONTENT */
+            if (x_now   && !s_pos_cam_held[p]) cam = 1;
+            if (sel_now && !s_pos_sel_held[p]) sel_content = 1;
+            s_pos_cam_held[p] = (uint8_t)x_now;
+            s_pos_sel_held[p] = (uint8_t)sel_now;
         }
         if (cam && lcnt > 1) {
             int q, nc, sel = (s_mp_layout_sel + 1) % lcnt;
@@ -2615,12 +2636,14 @@ void Screen_MpPosition(void) {
         }
     }
 
-    /* [#6] FRONT VIEW cycles the empty-cell content selector, but only when the
-     * current layout has empty cells. s_mp_missing_content[] is the SAME array the
-     * Multiplayer Options screen edits and the HUD reads (g_td5.split_missing_content).
-     * We advance both empty-cell slots together (one button, simple couch UX). */
+    /* [#6] SELECT/START (per-player scan, above) — or the FRONT-VIEW getter
+     * (keyboard REAR VIEW / R3 once a device is bound) — cycles the empty-cell
+     * content selector, but only when the current layout HAS empty cells.
+     * s_mp_missing_content[] is the SAME array the Multiplayer Options screen edits
+     * and the HUD reads (g_td5.split_missing_content). We advance both empty-cell
+     * slots together (one button, simple couch UX). */
     if (missing > 0) {
-        int fv = 0;
+        int fv = sel_content;   /* pad SELECT/START edge from the loop above */
         for (p = 0; p < n; p++)
             if (td5_input_frontend_front_view_pressed(p)) { fv = 1; break; }
         if (fv) {
@@ -3638,13 +3661,13 @@ void frontend_mp_position_render2(float sx, float sy) {
                                         ready ? "READY (LOCKED)" : "MOVE: D-PAD",
                                         ready ? 0xFF40FF40u : 0xFFB0B0B0u, sx, sy);
             } else {
-                /* [#6] empty cell shows the SELECTED content (FRONT VIEW cycles it). */
+                /* [#6] empty cell shows the SELECTED content (SELECT cycles it). */
                 int cidx = s_mp_missing_content[0];
                 if (cidx < 0 || cidx >= MP_MISSING_CONTENT_COUNT) cidx = 0;
                 mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 26.0f) * sy,
                                         k_mp_missing_content[cidx], 0xFF8088A0u, sx, sy);
                 mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 40.0f) * sy,
-                                        "FRONT VIEW: CHANGE", 0xFF707080u, sx, sy);
+                                        "SELECT: CHANGE", 0xFF707080u, sx, sy);
             }
         }
     }
@@ -3657,13 +3680,14 @@ void frontend_mp_position_render2(float sx, float sy) {
         char lbuf[80];
         const char *lname = (opts && s_mp_layout_sel >= 0 && s_mp_layout_sel < lcnt)
                             ? opts[s_mp_layout_sel].label : "SINGLE";
-        /* [R4b 2026-06-19] ONE clean WHITE instructions line — the change-camera
-         * (layout) hint is folded into it and the separate YELLOWISH "LAYOUT [..]"
-         * line that overlapped it is removed. START or X on the pad (kbd CHANGE
-         * VIEW) cycles the split LAYOUT; the current layout name is shown inline. */
+        /* [R4b 2026-06-19] ONE clean WHITE instructions line — the layout hint is
+         * folded into it and the separate YELLOWISH "LAYOUT [..]" line that
+         * overlapped it is removed. [select-vs-x 2026-06-24] X alone now cycles the
+         * split LAYOUT (SELECT moved to the empty-cell content line below); the
+         * current layout name is shown inline. */
         if (lcnt > 1)
             snprintf(lbuf, sizeof lbuf,
-                     "D-PAD: MOVE   A: READY   B: BACK   START/X: LAYOUT [%s]", lname);
+                     "D-PAD: MOVE   A: READY   B: BACK   X: LAYOUT [%s]", lname);
         else
             snprintf(lbuf, sizeof lbuf,
                      "D-PAD: MOVE   A: READY   B: BACK   LAYOUT: %s", lname);
@@ -3671,7 +3695,7 @@ void frontend_mp_position_render2(float sx, float sy) {
         if (missing > 0) {
             int cidx = s_mp_missing_content[0];
             if (cidx < 0 || cidx >= MP_MISSING_CONTENT_COUNT) cidx = 0;
-            snprintf(lbuf, sizeof lbuf, "FRONT VIEW: EMPTY-CELL CONTENT [%s]",
+            snprintf(lbuf, sizeof lbuf, "SELECT: EMPTY-CELL CONTENT [%s]",
                      k_mp_missing_content[cidx]);
             mp_pos_small_centered(320.0f * sx, 454.0f * sy, lbuf, 0xFF90C0FFu, sx, sy);
         } else if (all_ready) {
