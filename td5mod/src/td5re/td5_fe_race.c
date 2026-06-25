@@ -3421,8 +3421,17 @@ void Screen_MpPostRace(void) {
     case 0: {   /* Init: pick the layout, build the left button column */
         const int cup_between = (td5_game_mp_cup_active() && td5_game_mp_cup_has_next());
         const int count = cup_between ? 4 : 6;
-        const int BX = 32, BW = 0x130, BH = 0x20;          /* 304x32 left column */
-        const int y0 = (480 - ((count - 1) * 48 + BH)) / 2; /* vertically centred */
+        const int BH = 0x20, step = 48;                      /* 32px tall, 48px pitch */
+        /* [LAYOUT 2026-06-25] Align the button column under the new top-of-screen
+         * "CUP - WHAT NEXT?" / "WHAT NEXT?" title (drawn left-aligned at
+         * FE_TITLE_LEFT_X=126 in td5_frontend.c) and start it just below the title
+         * instead of vertically centring it. The cup menu (4 short-label buttons)
+         * adopts the narrower race-menu width (0xE0=224 at x=120, matching
+         * Screen_RaceTypeCategory which this screen was copied from); the standard
+         * menu keeps the wider 0x130 column its long labels need, and its centred y. */
+        const int BX = cup_between ? 120  : 32;
+        const int BW = cup_between ? 0xE0 : 0x130;
+        const int y0 = cup_between ? 104  : (480 - ((count - 1) * step + BH)) / 2;
 
         s_mp_postrace_menu_mode = cup_between ? 1 : 0;
         s_mp_postrace_choice = -1;
@@ -3432,17 +3441,17 @@ void Screen_MpPostRace(void) {
         s_anim_complete = 0;
 
         if (cup_between) {
-            frontend_create_button("NEXT RACE",    BX, y0 + 0 * 48, BW, BH);
-            frontend_create_button("VIEW RESULTS", BX, y0 + 1 * 48, BW, BH);
-            frontend_create_button("VIEW REPLAY",  BX, y0 + 2 * 48, BW, BH);
-            frontend_create_button("LEAVE CUP",    BX, y0 + 3 * 48, BW, BH);
+            frontend_create_button("NEXT RACE",    BX, y0 + 0 * step, BW, BH);
+            frontend_create_button("VIEW RESULTS", BX, y0 + 1 * step, BW, BH);
+            frontend_create_button("VIEW REPLAY",  BX, y0 + 2 * step, BW, BH);
+            frontend_create_button("LEAVE CUP",    BX, y0 + 3 * step, BW, BH);
         } else {
-            frontend_create_button("RACE AGAIN",                 BX, y0 + 0 * 48, BW, BH);
-            frontend_create_button("VIEW REPLAY",                BX, y0 + 1 * 48, BW, BH);
-            frontend_create_button("BACK TO LOBBY",              BX, y0 + 2 * 48, BW, BH);
-            frontend_create_button("BACK TO CAR SELECTION",      BX, y0 + 3 * 48, BW, BH);
-            frontend_create_button("BACK TO GAMEMODE SELECTION", BX, y0 + 4 * 48, BW, BH);
-            frontend_create_button("BACK TO MAIN MENU",          BX, y0 + 5 * 48, BW, BH);
+            frontend_create_button("RACE AGAIN",                 BX, y0 + 0 * step, BW, BH);
+            frontend_create_button("VIEW REPLAY",                BX, y0 + 1 * step, BW, BH);
+            frontend_create_button("BACK TO LOBBY",              BX, y0 + 2 * step, BW, BH);
+            frontend_create_button("BACK TO CAR SELECTION",      BX, y0 + 3 * step, BW, BH);
+            frontend_create_button("BACK TO GAMEMODE SELECTION", BX, y0 + 4 * step, BW, BH);
+            frontend_create_button("BACK TO MAIN MENU",          BX, y0 + 5 * step, BW, BH);
         }
         s_selected_button = 0;
         frontend_begin_timed_animation();
