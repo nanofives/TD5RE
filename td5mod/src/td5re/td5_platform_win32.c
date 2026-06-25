@@ -2910,10 +2910,9 @@ void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap)
 static int s_plat_active_js = -1;
 int td5_plat_input_active_joystick(void) { return s_plat_active_js; }
 
-/* Defined in the XInput rumble block below; called from the menu/lobby input
- * scans to learn each pad's XInput user index from real button-press
- * coincidences. No-op when the XInput rumble path is unavailable.
- * [SPLIT-SCREEN FF FIX 2026-06-24 v2] */
+/* Defined in the gamepad-rumble block below; called from the menu/lobby input
+ * scans to learn each pad's WGI gamepad from real button-press coincidences.
+ * No-op when the WGI rumble path is unavailable. */
 static void td5_xinput_correlate_tick(void);
 
 /* Ensure a non-exclusive scan handle for enumerated joystick i (1..). */
@@ -2953,7 +2952,7 @@ uint32_t td5_plat_input_scan_join(void)
 {
     uint32_t mask = 0;
     int i;
-    /* Learn each joining pad's XInput user from its A/Start press this frame —
+    /* Learn each joining pad's WGI gamepad from its A/Start press this frame —
      * the lobby join is where each player presses A on their OWN physical pad. */
     td5_xinput_correlate_tick();
     if (s_keyboard[0x1C] & 0x80) mask |= 1u;     /* keyboard Enter = device 0 */
@@ -3004,7 +3003,7 @@ uint32_t td5_plat_input_frontend_nav(void)
     uint32_t bits = 0;
     int i;
     const long T = 130;  /* [#R3-5 reverted] 90 caused hover auto-scroll on biased pads; navdiag pending */
-    td5_xinput_correlate_tick();   /* observe DI<->XInput from menu A/Start presses */
+    td5_xinput_correlate_tick();   /* observe DI<->WGI from menu A/Start presses */
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
         uint32_t db = 0;
@@ -3103,7 +3102,7 @@ uint32_t td5_plat_input_device_nav(int enum_index)
     long cx, cy;
     const long T = 130;  /* [#R3-5 reverted] 90 caused hover auto-scroll on biased pads; navdiag pending */
     LPDIRECTINPUTDEVICE8A dev;
-    td5_xinput_correlate_tick();   /* observe DI<->XInput from car-select grid A/Start presses */
+    td5_xinput_correlate_tick();   /* observe DI<->WGI from car-select grid A/Start presses */
     if (enum_index <= 0 || enum_index >= s_device_count || enum_index >= 16) return 0;
     dev = scan_dev(enum_index);
     if (!dev) return 0;
@@ -3132,98 +3131,31 @@ uint32_t td5_plat_input_device_nav(int enum_index)
 }
 
 /* ========================================================================
- * XInput rumble (force-feedback for gamepads) [#1 2026-06-15]
+ * Gamepad rumble — motor-magnitude model
  *
- * 8BitDo pads (and most modern XInput gamepads) expose rumble via XInput
- * (XInputSetState + XINPUT_VIBRATION), NOT DirectInput force-feedback EFFECTS.
- * On such a device IDirectInputDevice8::GetCapabilities reports no
- * DIDC_FORCEFEEDBACK and the DI-effect path (below) silently no-ops, so FF
- * "does nothing". This block adds an XInput rumble output and the FF entry
- * points (td5_plat_ff_constant / td5_plat_ff_stop) prefer it for any device
- * that turns out to be XInput-capable; DI effects remain the path for wheels.
+ * 8BitDo pads (and most modern XInput gamepads) report NO DIDC_FORCEFEEDBACK to
+ * DirectInput, so the DI-effect path (below) no-ops on them. Rumble is driven
+ * through Windows.Gaming.Input (the WGI block further down) — there is NO XInput
+ * output path: XInput capped at 4 controllers, while WGI has no such cap and
+ * reaches every pad (Win10+; all our machines qualify). This block holds only the
+ * backend-neutral motor state the FF entry points (td5_plat_ff_constant /
+ * td5_plat_ff_stop / td5_plat_ff_xinput_rumble) drive; td5_wgi_push() forwards it
+ * to the pad. DI effects remain the path for wheels.
  *
- * Knob TD5RE_FF_XINPUT (cached): default ON; "0" reverts to DI-effects only.
- *
- * Linkage: XInput is loaded DYNAMICALLY (LoadLibraryA + GetProcAddress, like
- * the dwmapi block in td5_plat_init) so a missing xinput DLL can never break
- * startup and the build needs NO -lxinput. We declare the tiny ABI we use here
- * rather than #include <xinput.h> (mirrors the inline-typedef dwmapi precedent).
+ * The low (heavy) motor has two independent contributors so a stop on one doesn't
+ * silence the other: [0]=side-collision pulse (effect slot 2), [1]=continuous buzz
+ * (redline-in-manual OR drift — the input layer passes the louder of the two to
+ * td5_plat_ff_xinput_rumble). Resolved s_xi_low = max(contrib[0],contrib[1]).
+ * Continuous wheel forces — steering (slot 0) and terrain (slot 3) — are NOT routed
+ * here, so a gamepad is silent during steady normal driving. (The s_xi_ and
+ * _xinput_ names below are historical; the model is backend-neutral now.)
  * ======================================================================== */
 
-typedef struct TD5_XINPUT_VIBRATION { WORD wLeftMotorSpeed; WORD wRightMotorSpeed; } TD5_XINPUT_VIBRATION;
-/* XInputGetState wants an XINPUT_STATE; we only read dwPacketNumber + need the
- * right byte size, so use a fixed 16-byte blob (dwPacketNumber + XINPUT_GAMEPAD). */
-typedef struct TD5_XINPUT_STATE { DWORD dwPacketNumber; BYTE pad[12]; } TD5_XINPUT_STATE;
-typedef DWORD (WINAPI *PFN_XInputSetState)(DWORD, TD5_XINPUT_VIBRATION *);
-typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD, TD5_XINPUT_STATE *);
-
-#define TD5_XINPUT_MAX_USERS 4   /* XUSER_MAX_COUNT */
-#define TD5_ERROR_SUCCESS    0L
-
-static PFN_XInputSetState s_xi_set = NULL;
-static PFN_XInputGetState s_xi_get = NULL;
-static int  s_xi_loaded = 0;     /* DLL probed (1 even if not found) */
-static int  s_xi_avail  = 0;     /* both procs resolved */
-/* Per-player-slot XInput routing: the XInput user index (0..3) the slot's pad
- * was assigned, or -1 = not an XInput device (use DI effects). Cached low/high
- * motor magnitudes (0..65535) so we only XInputSetState on change, and so the
- * four DI effect-slots can each own one motor without stomping the other. */
-static int  s_xi_user[TD5_PLAT_MAX_JS_SLOTS];
 static WORD s_xi_low [TD5_PLAT_MAX_JS_SLOTS];   /* low-freq (heavy) motor (resolved) */
 static WORD s_xi_high[TD5_PLAT_MAX_JS_SLOTS];   /* high-freq (light) motor */
-/* The low (heavy) motor is driven by two independent contributors so a stop on
- * one doesn't silence the other: [0]=side-collision pulse (effect slot 2),
- * [1]=continuous buzz (redline-in-manual OR drift — the input layer passes the
- * louder of the two to td5_plat_ff_xinput_rumble; #5(3) 2026-06-16). The resolved
- * s_xi_low is max(contrib[0],contrib[1]). [gamepad-rumble fix 2026-06-15]
- * Continuous wheel forces — steering (slot 0) and terrain (slot 3) — are NOT
- * routed here, so a gamepad is silent during steady normal driving; the buzz
- * contributor is 0 whenever the car is neither at the limiter nor sliding. */
 #define TD5_XI_LOW_COLLISION 0   /* contributor index: side-collision pulse */
 #define TD5_XI_LOW_REDLINE   1   /* contributor index: continuous buzz (redline-in-manual / drift) */
 static WORD s_xi_low_contrib[TD5_PLAT_MAX_JS_SLOTS][2];
-
-/* TD5RE_FF_XINPUT (cached): master gate for the XInput rumble path. Default ON. */
-static int td5_ff_xinput_enabled(void)
-{
-    static int s_init = 0;
-    static int s_on = 1;
-    if (!s_init) {
-        const char *e = getenv("TD5RE_FF_XINPUT");
-        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
-        s_init = 1;
-        TD5_LOG_I(LOG_TAG, "FF XInput rumble path: %s",
-                  s_on ? "enabled (default)" : "disabled (DI effects only)");
-    }
-    return s_on;
-}
-
-/* Lazily resolve XInput once. Tries the modern DLLs first, then the legacy ones.
- * Idempotent; safe to call before any device exists. */
-static int td5_xinput_load(void)
-{
-    static const char *names[] = {
-        "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll", "xinput1_2.dll", "xinput1_1.dll"
-    };
-    HMODULE h = NULL;
-    int i;
-    if (s_xi_loaded) return s_xi_avail;
-    s_xi_loaded = 1;
-    for (i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
-        h = LoadLibraryA(names[i]);
-        if (h) break;
-    }
-    if (h) {
-        s_xi_set = (PFN_XInputSetState)(void *)GetProcAddress(h, "XInputSetState");
-        s_xi_get = (PFN_XInputGetState)(void *)GetProcAddress(h, "XInputGetState");
-        s_xi_avail = (s_xi_set != NULL && s_xi_get != NULL);
-        /* Keep the DLL loaded for the lifetime of the app (matches dwmapi). */
-    }
-    TD5_LOG_I(LOG_TAG, "XInput load: %s (dll=%s)",
-              s_xi_avail ? "available" : "unavailable",
-              (i < (int)(sizeof(names)/sizeof(names[0])) && h) ? names[i] : "<none>");
-    return s_xi_avail;
-}
 
 /* Is the DirectInput device at enumeration index `device_index` an XInput pad?
  *
@@ -3275,51 +3207,19 @@ static int td5_device_is_xinput(int device_index)
 }
 
 /* ------------------------------------------------------------------------
- * Observed DI<->XInput correlation [SPLIT-SCREEN FF FIX 2026-06-24 v2]
+ * Observed DI<->WGI correlation [SPLIT-SCREEN FF, WGI-only 2026-06-25]
  *
- * XInput exposes no link from an XInput user index (0..3) to a DirectInput
- * device instance, so the prior fix GUESSED the mapping from DInput enumeration
- * order (Nth XInput-class DI device -> Nth connected XInput user). That guess is
- * wrong whenever DInput enum order does not track the XInput slot order — which
- * is exactly the case with several identical 8BitDo pads — and the rumble lands
- * on the wrong physical pad (a cyclic permutation: P1 felt on P2, P3 on P1).
- *
- * Instead we OBSERVE the mapping: when a player presses a button on their pad in
- * the menu/lobby, that press appears on both their DI device AND their XInput
- * user in the same frame. When exactly one (still-unbound) DI device and exactly
- * one (still-unclaimed) XInput user show the same button, they are provably the
- * same physical pad — bind them. Keyed to the physical device, so it is correct
- * regardless of pick order, identical VID/PID, or enumeration order. The binding
- * is captured at lobby-join (each player presses A on their OWN pad to join) and
- * persists for the process lifetime (the USB mapping is constant).
- *
- * NOTE: Windows XInput is hard-capped at 4 users (XUSER_MAX_COUNT). With 5+
- * XInput-mode pads only the first 4 are addressable for rumble at all; the
- * overflow pad(s) never bind here and get no rumble (an OS/API limit, not this
- * routing — would require Windows.Gaming.Input to lift).
+ * Rumble output goes through Windows.Gaming.Input (no 4-controller cap). WGI
+ * exposes no link from a WGI Gamepad to a DirectInput device instance, so we
+ * OBSERVE the mapping: when a player presses a button on their pad in the
+ * menu/lobby, that press appears on both their DI device AND their WGI gamepad in
+ * the same frame. When exactly one (still-unbound) DI device and exactly one
+ * (still-unclaimed) WGI gamepad show the same button, they are provably the same
+ * physical pad — bind them. Keyed to the physical device, so it is correct
+ * regardless of pick order, identical VID/PID, or enumeration order. Captured at
+ * lobby-join (each player presses A on their OWN pad) and persists for the
+ * process lifetime (the USB mapping is constant).
  * ------------------------------------------------------------------------ */
-
-/* DI enumeration index (1..15) -> observed XInput user (0..3); -1 = unobserved. */
-static int s_di_xinput_user[16];
-static int s_di_xinput_user_inited = 0;
-
-static void td5_xinput_corr_init(void)
-{
-    if (!s_di_xinput_user_inited) {
-        int i;
-        for (i = 0; i < 16; i++) s_di_xinput_user[i] = -1;
-        s_di_xinput_user_inited = 1;
-    }
-}
-
-/* Has any DI device already claimed XInput user u? (enforces a 1:1 binding). */
-static int td5_xinput_user_is_claimed(int u)
-{
-    int i;
-    if (!s_di_xinput_user_inited) return 0;
-    for (i = 0; i < 16; i++) if (s_di_xinput_user[i] == u) return 1;
-    return 0;
-}
 
 /* Cached td5_device_is_xinput(): the raw-input scan is too costly to repeat
  * every menu frame, and the device set is fixed for the process lifetime. */
@@ -3338,68 +3238,29 @@ static int td5_device_is_xinput_cached(int i)
     return s_dev_xinput_cache[i];
 }
 
-/* Bind DI<->XInput when exactly ONE unbound XInput-class DI device and exactly
- * ONE unclaimed connected XInput user are holding the same physical button this
- * frame. di_mask: bit i set if DI device i holds the button. xi_mask: bit u set
- * if XInput user u holds it. Ambiguity (>1 on either side) is skipped — so this
- * can never MIS-route; an ambiguous frame just resolves on a later one. */
-static void td5_xinput_correlate_button(uint32_t di_mask, uint32_t xi_mask)
-{
-    int i, u, di_count = 0, xi_count = 0, the_di = -1, the_user = -1;
-    for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
-        if (!(xi_mask & (1u << u))) continue;
-        if (td5_xinput_user_is_claimed(u)) continue;
-        xi_count++; the_user = u;
-    }
-    if (xi_count != 1) return;
-    for (i = 1; i < s_device_count && i < 16; i++) {
-        if (!(di_mask & (1u << i))) continue;
-        if (s_di_xinput_user[i] >= 0) continue;            /* already bound */
-        if (!td5_device_is_xinput_cached(i)) continue;
-        di_count++; the_di = i;
-    }
-    if (di_count != 1) return;
-    s_di_xinput_user[the_di] = the_user;
-    TD5_LOG_I(LOG_TAG,
-        "FF XInput correlate: DI device %d (%s) <-> XInput user %d (button coincidence)",
-        the_di, (the_di < s_device_count ? s_device_names[the_di] : "?"), the_user);
-}
-
-/* WGI rumble backend (defined below, before td5_xinput_push). Forward-declared
- * here so the shared menu correlation can also learn each pad's WGI gamepad.
- * [>4-PAD FF 2026-06-24] */
+/* WGI rumble backend (defined below). Forward-declared here so the menu
+ * correlation can learn each pad's WGI gamepad. */
 static int  td5_ff_wgi_enabled(void);
 static int  td5_wgi_init(void);
-static int  td5_wgi_needed(void);
 static int  td5_wgi_di_bound(int di);
 static void td5_wgi_correlate_step(uint32_t di_a_mask, uint32_t di_start_mask);
 
-/* Per-menu-frame correlation: read every still-unbound XInput-class pad's
- * A/Start through the shared scan handles, then bind it to the matching XInput
- * user AND/OR the matching WGI gamepad (whichever backends are active) by
+/* Per-menu-frame correlation: read every still-unbound XInput-class pad's A/Start
+ * through the shared scan handles and bind it to the matching WGI gamepad by
  * button-press coincidence. Called from the lobby join scan, the frontend nav
  * scan and the car-select grid scan. Cheap once everything is bound (the
  * unbound-skip leaves di_a/di_start zero and it returns before reading anything).
- * A = DI button 0 / XINPUT_GAMEPAD_A (0x1000) / GamepadButtons_A; Start = DI
- * button 7 / XINPUT_GAMEPAD_START (0x0010) / GamepadButtons_Menu. */
+ * A = DI button 0 / GamepadButtons_A; Start = DI button 7 / GamepadButtons_Menu. */
 static void td5_xinput_correlate_tick(void)
 {
-    uint32_t di_a = 0, di_start = 0, xi_a = 0, xi_start = 0;
-    int i, u;
-    int xi_ok  = (td5_ff_xinput_enabled() && td5_xinput_load() && s_xi_get != NULL);
-    /* WGI is engaged ONLY when there are more XInput-class pads than XInput's
-     * 4-user cap can serve, so 1-4-pad setups never touch the WGI code at all
-     * (zero blast radius) and only the overflow pads use it. */
-    int wgi_ok = (td5_ff_wgi_enabled() && td5_wgi_needed() && td5_wgi_init());
-    if (!xi_ok && !wgi_ok) return;
-    td5_xinput_corr_init();
+    uint32_t di_a = 0, di_start = 0;
+    int i;
+    if (!td5_ff_wgi_enabled() || !td5_wgi_init()) return;
 
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
         LPDIRECTINPUTDEVICE8A dev;
-        int need_xi  = (xi_ok  && s_di_xinput_user[i] < 0);
-        int need_wgi = (wgi_ok && !td5_wgi_di_bound(i));
-        if (!need_xi && !need_wgi) continue;               /* fully bound on every active backend */
+        if (td5_wgi_di_bound(i)) continue;                 /* already bound */
         if (!td5_device_is_xinput_cached(i)) continue;     /* only XInput-class pads */
         dev = scan_dev(i);
         if (!dev) continue;
@@ -3414,122 +3275,24 @@ static void td5_xinput_correlate_tick(void)
     }
     if (!di_a && !di_start) return;                        /* nothing pressed to learn from */
 
-    /* XInput-user correlation (first 4 pads). wButtons is the first WORD of
-     * XINPUT_GAMEPAD, right after dwPacketNumber. */
-    if (xi_ok) {
-        for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
-            TD5_XINPUT_STATE st;
-            unsigned btn;
-            ZeroMemory(&st, sizeof(st));
-            if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;
-            btn = (unsigned)st.pad[0] | ((unsigned)st.pad[1] << 8);
-            if (btn & 0x1000u) xi_a     |= (1u << u);
-            if (btn & 0x0010u) xi_start |= (1u << u);
-        }
-        if (di_a)     td5_xinput_correlate_button(di_a, xi_a);
-        if (di_start) td5_xinput_correlate_button(di_start, xi_start);
-    }
-
-    /* WGI-gamepad correlation (lifts the 4-pad cap). */
-    if (wgi_ok) td5_wgi_correlate_step(di_a, di_start);
+    td5_wgi_correlate_step(di_a, di_start);
 }
 
-/* Correlate an XInput-class DI device (at DInput enumeration index `di`) to its
- * XInput user index (0..3) for player slot `device_slot`.
- *
- * [SPLIT-SCREEN FF FIX 2026-06-24] The OLD code handed out connected user
- * indices in ascending order in PLAYER-INIT ORDER (the first player to ff-init
- * got user 0, the next got user 1, ...). XInput exposes no DI-instance link, so
- * that init-order scheme is correct ONLY when every player happens to pick the
- * pad whose physical XInput user index matches their init order. In local
- * split-screen each player CYCLES to any free device (ctrl_opts_cycle_device),
- * so picks are routinely NON-identity (P1 takes pad #2, P2 takes pad #1). The
- * init-order user then pointed at the OTHER player's pad → "vibrations on the
- * wrong joystick", and a player whose real pad sat at a higher/unmatched user
- * felt nothing at all.
- *
- * Faithful intent (RE: original device = g_ffControllerAssignment[player]-1, the
- * player's CHOSEN device, @0x004288E0 / 0x00428A10) is "each player's FF drives
- * the pad that player chose." We achieve it with the industry-standard DI↔XInput
- * correlation: the N-th XInput-class DI device, in DInput ENUMERATION order, maps
- * to the N-th CONNECTED XInput user (ascending). This is keyed to the physical
- * device (`di`), so it is independent of which player opened it first and of the
- * pick order — each player rumbles their OWN stick.
- *
- * Env override TD5RE_FF_XINPUT_USER<slot> (0..3) forces a user for a player slot
- * as a safety net for the rare host whose DI-enumeration order does not track its
- * XInput-user order. Returns -1 if no matching connected user. */
-static int td5_xinput_user_for_device(int di, int device_slot)
-{
-    int k, u, seen, rank;
-    if (!s_xi_get) return -1;
-
-    /* Per-slot manual override (env): TD5RE_FF_XINPUT_USER0..3 -> forced user. */
-    if (device_slot >= 0 && device_slot <= 9) {
-        char key[28];
-        const char *e;
-        snprintf(key, sizeof(key), "TD5RE_FF_XINPUT_USER%d", device_slot);
-        e = getenv(key);
-        if (e && e[0] >= '0' && e[0] <= '3' && e[1] == '\0') {
-            int forced = e[0] - '0';
-            TD5_LOG_I(LOG_TAG, "FF XInput: slot=%d user FORCED to %d via %s",
-                      device_slot, forced, key);
-            return forced;
-        }
-    }
-
-    /* OBSERVED correlation wins over the enumeration-rank heuristic below: it was
-     * learned from a real button-press coincidence in the menus, so it is keyed
-     * to the physical pad and is correct even for identical 8BitDo pads and a
-     * DInput enumeration order that does not track the XInput slot order.
-     * [SPLIT-SCREEN FF FIX 2026-06-24 v2] */
-    if (di >= 0 && di < 16) {
-        td5_xinput_corr_init();
-        if (s_di_xinput_user[di] >= 0) {
-            TD5_LOG_I(LOG_TAG, "FF XInput: slot=%d DI device=%d -> user=%d (observed)",
-                      device_slot, di, s_di_xinput_user[di]);
-            return s_di_xinput_user[di];
-        }
-    }
-
-    /* Rank of this device among XInput-class DI devices, by enumeration order
-     * (device 0 is the keyboard; joysticks start at 1). */
-    rank = 0;
-    for (k = 1; k < di && k < s_device_count && k < 16; k++)
-        if (td5_device_is_xinput(k)) rank++;
-
-    /* Map rank -> the rank-th CONNECTED XInput user (ascending). Distinct DI
-     * devices have distinct ranks, so distinct players never collide on a user. */
-    seen = 0;
-    for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
-        TD5_XINPUT_STATE st;
-        ZeroMemory(&st, sizeof(st));
-        if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;  /* not connected */
-        if (td5_xinput_user_is_claimed(u)) continue;   /* already taken by an observed binding */
-        if (seen == rank) return u;
-        seen++;
-    }
-    return -1;
-}
-
-/* Push the slot's cached low/high motor magnitudes to its XInput pad. */
 /* ========================================================================
- * Windows.Gaming.Input (WGI) rumble backend  [>4-PAD FF 2026-06-24]
+ * Windows.Gaming.Input (WGI) rumble backend  [WGI-only 2026-06-25]
  *
- * XInput is hard-capped at 4 users (XUSER_MAX_COUNT), so 5+ identical XInput
- * pads cannot all be rumbled through it. WGI's Gamepad API has no such cap (8+
- * Xbox-compatible pads vibrate fine). We drive rumble through WGI when it is
- * available and fall back to XInput (first 4 pads) otherwise. INPUT still comes
- * from DirectInput; WGI is used only for OUTPUT, correlating each player's DI
- * device to its WGI Gamepad with the SAME button-press coincidence as XInput.
+ * The single gamepad-rumble output backend. WGI's Gamepad API has no controller
+ * cap (XInput capped at 4; this is why XInput rumble was removed). INPUT still
+ * comes from DirectInput; WGI is used only for OUTPUT, correlating each player's
+ * DI device to its WGI Gamepad by the menu button-press coincidence above.
  *
  * WGI is WinRT, called through the documented WinRT COM ABI from C with the
  * interfaces/structs/IID transcribed verbatim from mingw windows.gaming.input.h.
- * combase.dll is loaded DYNAMICALLY (LoadLibrary+GetProcAddress, like the XInput
- * and dwmapi paths) so a pre-Win8 host without WinRT simply falls back to XInput
- * and the build needs no extra link lib.
+ * combase.dll is loaded DYNAMICALLY (LoadLibrary+GetProcAddress, like the dwmapi
+ * path) so a pre-Win8 host without WinRT just gets no rumble (the build needs no
+ * extra link lib). All our target machines are Win10+.
  *
- * Knob TD5RE_FF_WGI (cached): default ON; "0" -> XInput-only (4-pad cap).
+ * Knob TD5RE_FF_WGI (cached): default ON; "0" -> no gamepad rumble.
  * ======================================================================== */
 
 #ifndef CO_E_NOTINITIALIZED
@@ -3601,8 +3364,8 @@ static PFN_WindowsDeleteString    s_WindowsDeleteString    = NULL;
 static PFN_RoInitialize           s_RoInitialize           = NULL;
 static TD5_WgiStatics *s_wgi_statics = NULL;
 
-/* Observed binding: DI enumeration index -> WGI Gamepad (AddRef'd), NULL=unbound
- * (parallels s_di_xinput_user). Per-player resolved pointer set at ff_init. */
+/* Observed binding: DI enumeration index -> WGI Gamepad (AddRef'd), NULL=unbound.
+ * Per-player resolved pointer set at ff_init. */
 static TD5_WgiGamepad *s_wgi_pad_for_di[16];
 static TD5_WgiGamepad *s_wgi_pad[TD5_PLAT_MAX_JS_SLOTS];
 static WORD s_wgi_last_lo[TD5_PLAT_MAX_JS_SLOTS];   /* last motor magnitudes pushed (de-dup) */
@@ -3634,13 +3397,13 @@ static int td5_wgi_init(void)
     s_wgi_loaded = 1;
     if (!td5_ff_wgi_enabled()) return 0;
     h = LoadLibraryA("combase.dll");
-    if (!h) { TD5_LOG_I(LOG_TAG, "FF WGI: combase.dll absent -> XInput only"); return 0; }
+    if (!h) { TD5_LOG_I(LOG_TAG, "FF WGI: combase.dll absent -> no gamepad rumble"); return 0; }
     s_RoGetActivationFactory = (PFN_RoGetActivationFactory)(void *)GetProcAddress(h, "RoGetActivationFactory");
     s_WindowsCreateString    = (PFN_WindowsCreateString)(void *)GetProcAddress(h, "WindowsCreateString");
     s_WindowsDeleteString    = (PFN_WindowsDeleteString)(void *)GetProcAddress(h, "WindowsDeleteString");
     s_RoInitialize           = (PFN_RoInitialize)(void *)GetProcAddress(h, "RoInitialize");
     if (!s_RoGetActivationFactory || !s_WindowsCreateString || !s_WindowsDeleteString) {
-        TD5_LOG_W(LOG_TAG, "FF WGI: combase exports missing -> XInput only");
+        TD5_LOG_W(LOG_TAG, "FF WGI: combase exports missing -> no gamepad rumble");
         return 0;
     }
     hr = s_WindowsCreateString(k_cls, 28u, &cls);
@@ -3652,7 +3415,7 @@ static int td5_wgi_init(void)
     }
     s_WindowsDeleteString(cls);
     if (FAILED(hr) || !s_wgi_statics) {
-        TD5_LOG_W(LOG_TAG, "FF WGI: RoGetActivationFactory(Gamepad) failed hr=0x%08lX -> XInput only",
+        TD5_LOG_W(LOG_TAG, "FF WGI: RoGetActivationFactory(Gamepad) failed hr=0x%08lX -> no gamepad rumble",
                   (unsigned long)hr);
         s_wgi_statics = NULL;
         return 0;
@@ -3665,19 +3428,6 @@ static int td5_wgi_init(void)
 static int td5_wgi_di_bound(int di)
 {
     return (di >= 0 && di < 16 && s_wgi_pad_for_di[di] != NULL);
-}
-
-/* True only when there are MORE XInput-class DI pads than XInput's 4-user cap,
- * i.e. the situation WGI exists to solve. Keeps WGI dormant for 1-4-pad setups. */
-static int td5_wgi_needed(void)
-{
-    int i, n = 0;
-    for (i = 1; i < s_device_count && i < 16; i++) {
-        if (td5_device_is_xinput_cached(i)) {
-            if (++n > TD5_XINPUT_MAX_USERS) return 1;
-        }
-    }
-    return 0;
 }
 
 /* Push the slot's cached low/high motor magnitudes to its WGI gamepad. */
@@ -3729,7 +3479,7 @@ static int td5_wgi_pad_is_claimed(TD5_WgiGamepad *g)
 /* Bind a DI device to a WGI gamepad when exactly ONE unbound XInput-class DI
  * device and exactly ONE unclaimed WGI gamepad hold the same menu button this
  * frame. Conservative (never binds on >1-either-side ambiguity) so it can never
- * mis-route. Same shape as td5_xinput_correlate_button, for WGI gamepads. */
+ * mis-route; an ambiguous frame just resolves on a later one. */
 static void td5_wgi_correlate_step(uint32_t di_a_mask, uint32_t di_start_mask)
 {
     TD5_WgiGamepad *pads[16];
@@ -3796,22 +3546,6 @@ static void td5_wgi_shutdown(void)
     s_wgi_avail = 0;
 }
 
-static void td5_xinput_push(int device_slot)
-{
-    TD5_XINPUT_VIBRATION vib;
-    int u;
-    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return;
-    if (s_wgi_pad[device_slot]) {   /* WGI backend (no 4-cap) takes priority */
-        td5_wgi_push(device_slot);
-        return;
-    }
-    u = s_xi_user[device_slot];
-    if (u < 0 || !s_xi_set) return;
-    vib.wLeftMotorSpeed  = s_xi_low [device_slot];
-    vib.wRightMotorSpeed = s_xi_high[device_slot];
-    s_xi_set((DWORD)u, &vib);
-}
-
 /* Map a DI effect magnitude (0..DI_FFNOMINALMAX) to a motor word (0..65535). */
 static WORD td5_xinput_scale(int magnitude)
 {
@@ -3837,20 +3571,19 @@ static int td5_xinput_route_effect(int device_slot, int slot, int magnitude)
 {
     WORD w;
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return 0;
-    /* Route here if either rumble backend is bound for this slot. WGI-only slots
-     * (5th+ pad: no XInput user but a bound WGI gamepad) must NOT fall through to
-     * the DI-effect path. */
-    if (s_xi_user[device_slot] < 0 && s_wgi_pad[device_slot] == NULL) return 0;
+    /* Route here only if a WGI gamepad is bound for this slot (so a gamepad's
+     * events don't fall through to the DI-effect path it cannot use). */
+    if (s_wgi_pad[device_slot] == NULL) return 0;
     w = td5_xinput_scale(magnitude);
     if (slot == 1) {
         s_xi_high[device_slot] = w;                       /* sharp crash/gear jolt motor */
-        td5_xinput_push(device_slot);
+        td5_wgi_push(device_slot);
     } else if (slot == 2) {
         /* side-collision pulse -> low motor collision contributor */
         s_xi_low_contrib[device_slot][TD5_XI_LOW_COLLISION] = w;
         s_xi_low[device_slot] = s_xi_low_contrib[device_slot][0] > s_xi_low_contrib[device_slot][1]
                               ? s_xi_low_contrib[device_slot][0] : s_xi_low_contrib[device_slot][1];
-        td5_xinput_push(device_slot);
+        td5_wgi_push(device_slot);
     }
     /* slot 0 (steering) and slot 3 (terrain/drift): consumed but NOT routed to a
      * motor — these are continuous wheel forces that would buzz a gamepad. */
@@ -3862,15 +3595,15 @@ static int td5_xinput_route_effect(int device_slot, int slot, int magnitude)
 static int td5_xinput_route_stop(int device_slot, int slot)
 {
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return 0;
-    if (s_xi_user[device_slot] < 0 && s_wgi_pad[device_slot] == NULL) return 0;  /* no rumble backend bound */
+    if (s_wgi_pad[device_slot] == NULL) return 0;  /* no WGI gamepad bound */
     if (slot == 1) {
         s_xi_high[device_slot] = 0;
-        td5_xinput_push(device_slot);
+        td5_wgi_push(device_slot);
     } else if (slot == 2) {
         s_xi_low_contrib[device_slot][TD5_XI_LOW_COLLISION] = 0;
         s_xi_low[device_slot] = s_xi_low_contrib[device_slot][0] > s_xi_low_contrib[device_slot][1]
                               ? s_xi_low_contrib[device_slot][0] : s_xi_low_contrib[device_slot][1];
-        td5_xinput_push(device_slot);
+        td5_wgi_push(device_slot);
     }
     /* slot 0 / slot 3 own no motor contribution -> nothing to clear. */
     return 1;
@@ -3969,17 +3702,6 @@ int td5_plat_ff_init(int device_slot)
     DIDEVCAPS caps;
     int xinput_ready = 0;
 
-    /* s_xi_user[] is zero-initialized by the C runtime, but 0 is a VALID XInput
-     * user index, so on first entry mark every slot "not XInput" (-1). */
-    {
-        static int s_xi_user_inited = 0;
-        if (!s_xi_user_inited) {
-            int s;
-            for (s = 0; s < TD5_PLAT_MAX_JS_SLOTS; s++) s_xi_user[s] = -1;
-            s_xi_user_inited = 1;
-        }
-    }
-
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) {
         return 0;
     }
@@ -3989,14 +3711,11 @@ int td5_plat_ff_init(int device_slot)
         return 0;
     }
 
-    /* [#1 2026-06-15] Prefer XInput rumble for XInput-capable pads (8BitDo &
-     * most modern gamepads), which expose rumble via XInputSetState and report
-     * NO DIDC_FORCEFEEDBACK to DirectInput (so the DI-effect path below would
-     * silently no-op on them). Wheels keep the DI-effect path. We resolve which
-     * enumerated device this slot is bound to via its instance GUID, test it for
-     * XInput, and claim a user index. DI-effect init still runs afterwards so a
-     * device that happens to support both keeps the richer effect path too. */
-    s_xi_user[device_slot] = -1;
+    /* Gamepads (8BitDo & most modern pads) report NO DIDC_FORCEFEEDBACK to
+     * DirectInput, so the DI-effect path below no-ops on them; their rumble goes
+     * through WGI instead. Wheels keep the DI-effect path. Resolve which enumerated
+     * device this slot is bound to (by instance GUID); if it is an XInput-class
+     * gamepad, route it to the WGI gamepad observed for it in the menus. */
     s_wgi_pad[device_slot] = NULL;
     s_wgi_last_lo[device_slot] = s_wgi_last_hi[device_slot] = 0xFFFF; /* force the rest-push below */
     s_xi_low[device_slot] = s_xi_high[device_slot] = 0;
@@ -4010,34 +3729,19 @@ int td5_plat_ff_init(int device_slot)
             }
         }
         if (di > 0 && td5_device_is_xinput(di)) {
-            /* First 4 pads: keep the (observed) XInput path — unchanged, proven. */
-            int u = -1;
-            if (td5_ff_xinput_enabled() && td5_xinput_load())
-                u = td5_xinput_user_for_device(di, device_slot);
-            if (u >= 0) {
-                s_xi_user[device_slot] = u;
-                xinput_ready = 1;
-                td5_xinput_push(device_slot);   /* ensure motors start at rest */
-                /* [SPLIT-SCREEN FF FIX] Log the full per-player rumble route so a
-                 * manual test can confirm each player drives their OWN stick.
-                 * A swap here is the "wrong joystick" symptom. */
-                TD5_LOG_I(LOG_TAG,
-                          "FF route: player_slot=%d -> DI device=%d (%s) -> XInput user=%d",
-                          device_slot, di, s_device_names[di], u);
-            } else if (td5_ff_wgi_enabled() && td5_wgi_needed() && td5_wgi_init() &&
-                       s_wgi_pad_for_di[di]) {
-                /* 5th+ pad (beyond XInput's 4 users): WGI lifts the cap. Only ever
-                 * reached when >4 XInput pads are present, so the working 1-4-pad
-                 * path above is never disturbed. */
+            if (td5_ff_wgi_enabled() && td5_wgi_init() && s_wgi_pad_for_di[di]) {
                 s_wgi_pad[device_slot] = s_wgi_pad_for_di[di];
                 xinput_ready = 1;
-                td5_xinput_push(device_slot);   /* motors at rest via WGI */
+                td5_wgi_push(device_slot);   /* motors at rest */
+                /* Log the per-player rumble route so a manual test can confirm
+                 * each player drives their OWN pad. A swap here is the "wrong
+                 * joystick" symptom. */
                 TD5_LOG_I(LOG_TAG,
-                          "FF route: player_slot=%d -> DI device=%d (%s) -> WGI gamepad (beyond XInput 4-cap)",
+                          "FF route: player_slot=%d -> DI device=%d (%s) -> WGI gamepad",
                           device_slot, di, s_device_names[di]);
-            } else if (td5_wgi_needed()) {
+            } else if (td5_ff_wgi_enabled()) {
                 TD5_LOG_W(LOG_TAG,
-                          "FF: slot=%d device=%d is the 5th+ XInput pad but no WGI gamepad observed yet "
+                          "FF: slot=%d device=%d is an XInput pad but no WGI gamepad observed yet "
                           "(press A on it in the menu) -- or TD5RE_FF_WGI=0",
                           device_slot, di);
             }
@@ -4060,12 +3764,12 @@ int td5_plat_ff_init(int device_slot)
     if (FAILED(IDirectInputDevice8_GetCapabilities(s_ff[device_slot].device, &caps)) ||
         !(caps.dwFlags & DIDC_FORCEFEEDBACK)) {
         /* No DI force-feedback (the 8BitDo / typical-gamepad case). If we routed
-         * this slot to XInput rumble above, FF is still functional — report
-         * success so the input layer drives effects (which we forward to the
-         * motors). Otherwise this device truly has no FF. */
+         * this slot to WGI rumble above, FF is still functional — report success
+         * so the input layer drives effects (which we forward to the motor).
+         * Otherwise this device truly has no FF. */
         ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
         if (xinput_ready) {
-            TD5_LOG_I(LOG_TAG, "FF init ok (XInput rumble only): dev=%d", device_slot);
+            TD5_LOG_I(LOG_TAG, "FF init ok (WGI rumble only): dev=%d", device_slot);
         }
         return xinput_ready;
     }
@@ -4079,7 +3783,7 @@ int td5_plat_ff_init(int device_slot)
             EnumConstantForceEffectsCallback, &s_ff[device_slot].effectGuid, DIEFT_ALL)) ||
         !IsEqualGUID(&s_ff[device_slot].effectGuid, &GUID_ConstantForce)) {
         ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
-        return xinput_ready;   /* XInput rumble still usable if it was assigned */
+        return xinput_ready;   /* WGI rumble still usable if it was assigned */
     }
 
     if (!td5_ff_create_constant_effect(device_slot, 0, s_ff[device_slot].axes[0], 0) ||
@@ -4088,11 +3792,11 @@ int td5_plat_ff_init(int device_slot)
         !td5_ff_create_periodic_effect(device_slot, 3)) {
         td5_ff_release_effects(device_slot);
         ZeroMemory(&s_ff[device_slot], sizeof(s_ff[device_slot]));
-        return xinput_ready;   /* XInput rumble still usable if it was assigned */
+        return xinput_ready;   /* WGI rumble still usable if it was assigned */
     }
 
-    TD5_LOG_I(LOG_TAG, "FF init ok: dev=%d is_wheel=%d xinput_user=%d",
-              device_slot, s_ff[device_slot].is_wheel, s_xi_user[device_slot]);
+    TD5_LOG_I(LOG_TAG, "FF init ok: dev=%d is_wheel=%d wgi=%d",
+              device_slot, s_ff[device_slot].is_wheel, s_wgi_pad[device_slot] != NULL);
     return 1;
 }
 
@@ -4104,13 +3808,12 @@ void td5_plat_ff_shutdown(void)
             td5_ff_release_effects(dev);
         }
         ZeroMemory(&s_ff[dev], sizeof(s_ff[dev]));
-        /* Stop the motors on whichever backend (XInput or WGI) this slot used. */
-        if (s_xi_user[dev] >= 0 || s_wgi_pad[dev]) {
+        /* Stop the motor on this slot's WGI gamepad (if any). */
+        if (s_wgi_pad[dev]) {
             s_xi_low[dev] = s_xi_high[dev] = 0;
             s_xi_low_contrib[dev][0] = s_xi_low_contrib[dev][1] = 0;
-            td5_xinput_push(dev);
+            td5_wgi_push(dev);
         }
-        s_xi_user[dev] = -1;
         s_wgi_pad[dev] = NULL;
     }
     td5_wgi_shutdown();   /* release the WGI gamepad objects + activation factory */
@@ -4196,7 +3899,7 @@ void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
 
 /* [#1 2026-06-15; #5(3) 2026-06-16] GAMEPAD continuous-buzz motor. Drives the low
  * (heavy) motor's dedicated buzz contributor with `magnitude` (0..DI_FFNOMINALMAX);
- * 0 silences it. No-op on a DI FF wheel (s_xi_user < 0) — there the same buzz
+ * 0 silences it. No-op on a DI FF wheel (no WGI gamepad bound) — there the same buzz
  * already rides on effect slot 3, so the wheel path is untouched. The input layer
  * passes the louder of redline-in-manual and drift here (0 when neither applies),
  * so the gamepad motor sees ONLY that buzz (never terrain/steering) and returns to
@@ -4204,16 +3907,15 @@ void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
 void td5_plat_ff_xinput_rumble(int device_slot, int magnitude)
 {
     WORD w;
-    if (!s_xi_loaded) return;                    /* ff_init never ran -> not armed */
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return;
-    if (s_xi_user[device_slot] < 0) return;      /* not an XInput device (DI wheel) */
+    if (s_wgi_pad[device_slot] == NULL) return;  /* not a WGI gamepad (DI wheel / unbound) */
     w = td5_xinput_scale(magnitude);
     if (w == s_xi_low_contrib[device_slot][TD5_XI_LOW_REDLINE])
-        return;                                  /* unchanged -> skip the SetState */
+        return;                                  /* unchanged -> skip the push */
     s_xi_low_contrib[device_slot][TD5_XI_LOW_REDLINE] = w;
     s_xi_low[device_slot] = s_xi_low_contrib[device_slot][0] > s_xi_low_contrib[device_slot][1]
                           ? s_xi_low_contrib[device_slot][0] : s_xi_low_contrib[device_slot][1];
-    td5_xinput_push(device_slot);
+    td5_wgi_push(device_slot);
 }
 
 void td5_plat_ff_stop(int device_slot, int slot)
