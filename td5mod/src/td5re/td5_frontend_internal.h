@@ -248,6 +248,19 @@ extern uint32_t s_mp_pane_nav_prev[TD5_MAX_HUMAN_PLAYERS];
 extern uint32_t s_mp_simul_ready_ms;
 float frontend_update_timed_animation(int max_tick, uint32_t duration_ms);
 int frontend_check_escape(void);
+/* [splitscreen back-confirm 2026-06-24] Universal "confirm before going back"
+ * guard for LOCAL split-screen multiplayer. Any screen's back/cancel routes its
+ * back action through frontend_back_confirm_request(action): in split-screen it
+ * raises a dimmed "GO BACK?" yes/no prompt (the whole frontend is frozen while it
+ * is up so nothing beneath can act on the pad) and returns 1 (caller defers); the
+ * stored action runs on confirm. Outside split-screen / when disabled it returns
+ * 0 and the caller performs the back immediately, exactly as before. Knob
+ * TD5RE_MP_BACK_CONFIRM=0 restores the legacy instant back. Defined in
+ * td5_frontend.c; the prompt reuses mp_confirm_modal_render (td5_fe_race.c). */
+int  frontend_back_confirm_request(void (*action)(void));
+int  frontend_back_confirm_active(void);
+void frontend_back_confirm_tick(void);
+void mp_confirm_modal_render(float sx, float sy, const char *prompt);
 int frontend_create_button(const char *label, int x, int y, int w, int h);
 int frontend_load_tga(const char *name, const char *archive);
 int frontend_option_delta(void);

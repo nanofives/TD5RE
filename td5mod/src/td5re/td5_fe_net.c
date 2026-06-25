@@ -319,6 +319,15 @@ float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h) {
  * in order (join order = player number) and shows as READY. START (the button,
  * SPACE, or a joined player's confirm) proceeds to the per-player car select.
  * ======================================================================== */
+/* [splitscreen back-confirm] Deferred back action for the LOCAL split-screen
+ * lobby: drop the whole MP flow back to the main menu. */
+static void mp_lobby_back_cb(void) {
+    s_mp_flow = 0;
+    s_mp_simul = 0;
+    td5_plat_input_scan_join_release();
+    td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+}
+
 void Screen_MultiplayerLobby(void) {
     switch (s_inner_state) {
     case 0:
@@ -456,10 +465,10 @@ void Screen_MultiplayerLobby(void) {
             return;
         }
         if (do_back) {
-            s_mp_flow = 0;
-            s_mp_simul = 0;
-            td5_plat_input_scan_join_release();
-            td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+            /* [splitscreen back-confirm] confirm before dropping the joined
+             * roster back to the main menu in split-screen. */
+            if (frontend_back_confirm_request(mp_lobby_back_cb)) return;
+            mp_lobby_back_cb();
             return;
         }
         break;
