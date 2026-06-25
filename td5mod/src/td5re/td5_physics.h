@@ -105,18 +105,20 @@ void td5_physics_update_suspension_response(TD5_Actor *actor);
 void td5_physics_clamp_attitude(TD5_Actor *actor);
 void td5_physics_reset_actor_state(TD5_Actor *actor);
 
-/* --- Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15) ---
+/* --- Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15, MANUAL-ONLY) ---
  * Reposition a stuck player's car a few spans back, centred on the track,
  * upright, with linear+angular velocity zeroed and heading aligned to the
  * track's forward direction at that span. `slot` is the actor slot. Safe to call
- * from the deterministic sim tick; clears the slot's auto-stuck timer. Gated by
- * TD5RE_STUCK_RECOVERY (default ON); the number of spans back is
- * TD5RE_RECOVERY_SPANS_BACK (default 3). Returns 1 if the car was repositioned,
- * 0 if it could not be (no track / non-racer slot / knob off).
+ * from the deterministic sim tick. Gated by TD5RE_STUCK_RECOVERY (default ON);
+ * the number of spans back is TD5RE_RECOVERY_SPANS_BACK (default 3). Returns 1
+ * if the car was repositioned, 0 if it could not be (no track / non-racer slot /
+ * knob off).
  *
- * The per-tick driver below runs both the AUTOMATIC stuck-detection and the
- * MANUAL (R / L3) recovery for every local human player; it is called from
- * td5_physics_tick. Restricted to non-network play for v1. */
+ * The per-tick driver below runs ONLY the MANUAL (R / SELECT) recovery for every
+ * local human player (the AUTOMATIC stuck-detection was removed 2026-06-24).
+ * Each manual recovery arms a per-player cooldown (TD5RE_RECOVERY_COOLDOWN_TICKS,
+ * default 150 = 5 s) before another is honoured. Called from td5_physics_tick;
+ * restricted to non-network play for v1. */
 int  td5_physics_recover_player(int slot);
 void td5_physics_update_stuck_recovery(void);
 void td5_physics_missing_wheel_correction(TD5_Actor *actor);

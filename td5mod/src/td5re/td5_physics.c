@@ -119,6 +119,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
 /* [tasks #9/#14] V2V traffic-taming knob accessors + ground clamp, defined
  * lower in the file but referenced from obb_corner_test / collision_detect_*. */
 static int   traffic_hit_tame_enabled(void);
+static int   traffic_mass_pct(void);
 static int   wreck_immobile_enabled(void);
 static int   wreck_mass_pct(void);
 static float traffic_hitbox_scale(void);
@@ -246,56 +247,53 @@ extern int g_actorSlotForView[TD5_MAX_VIEWPORTS];
 /* ========================================================================
  * Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15)
  *
- * Two triggers recover a LOCAL HUMAN player's car that is pinned/stuck:
- *   1. MANUAL  — keyboard R / joystick L3 (edge from td5_input layer).
- *   2. AUTOMATIC — pinned for the dwell (TD5_RECOVERY_STUCK_TICKS): no forward
- *      progress AND near-zero planar speed AND no throttle/brake AND in actual
- *      lateral WALL CONTACT (track_contact_flag != 0), for that many ticks.
- *      The wall-contact requirement is what distinguishes a car genuinely
- *      pinned against a wall from one merely parked in the open — the latter is
- *      never auto-recovered (see the FALSE-TRIGGER FIX note at the AUTOMATIC
- *      trigger below).
+ * MANUAL ONLY. A LOCAL HUMAN player recovers a pinned/stuck car by pressing the
+ * recovery control (keyboard R / joystick SELECT — an edge from the td5_input
+ * layer). There is NO automatic trigger: a car is repositioned only when the
+ * driver explicitly asks for it.
+ *
+ * [AUTO-RECOVERY REMOVED 2026-06-24] An earlier port revision also ran an
+ * AUTOMATIC "stuck for N seconds -> recover" dwell. It was removed at the user's
+ * request: even after the wall-contact and throttle/brake gates it still yanked
+ * idle/slow cars into a recovery teleport ("recover out of nowhere"). Only the
+ * manual trigger remains, now with a cooldown (below).
+ *
  * The reset repositions the actor a few spans back, centred on the track,
  * upright, velocities zeroed, heading aligned to the track forward direction.
  *
+ * COOLDOWN: after a manual recovery fires, further manual requests for that
+ * player are ignored for TD5_MANUAL_RECOVERY_COOLDOWN_TICKS sim ticks (5 s @
+ * 30 Hz). The input edge is still drained every tick so a press during the
+ * cooldown can't queue up and fire the instant it expires.
+ *
  * All of this runs from the deterministic 30 Hz sim tick (td5_physics_tick),
- * so it is replay-deterministic. DETERMINISM/NETPLAY: the AUTO path keys off
- * planar speed + track high-water (both replicated state), but the MANUAL path
- * reads LOCAL input only — it is NOT exchanged over the lockstep protocol, so
- * for v1 the whole recovery driver is restricted to non-network play (gated on
+ * so it is replay-deterministic. DETERMINISM/NETPLAY: the manual edge reads
+ * LOCAL input only — it is NOT exchanged over the lockstep protocol, so for v1
+ * the whole recovery driver is restricted to non-network play (gated on
  * !g_td5.network_active). See the report for the lockstep follow-up.
  *
  * Knobs (cached on first use):
- *   TD5RE_STUCK_RECOVERY     default ON  — master gate (manual + auto).
- *   TD5RE_RECOVERY_SPANS_BACK default 3  — spans to move back on reset.
+ *   TD5RE_STUCK_RECOVERY          default ON  — master gate for manual recovery.
+ *   TD5RE_RECOVERY_SPANS_BACK     default 3   — spans to move back on reset.
+ *   TD5RE_RECOVERY_COOLDOWN_TICKS default 150 — manual cooldown window (ticks).
  * ======================================================================== */
 
-/* [STUCK-RECOVERY FALSE-TRIGGER FIX 2026-06-23] Default window before AUTOMATIC
- * recovery fires. Was 90 (3 s): too eager — a player who deliberately slowed,
- * stopped to reorient, or crawled a technical section got yanked into a recovery
- * teleport ("recover triggered out of nowhere"). 150 (5 s) is far less likely to
- * trip on intentional slow driving while still rescuing a genuinely abandoned car.
- * Runtime-overridable via TD5RE_RECOVERY_STUCK_TICKS. */
-#define TD5_RECOVERY_STUCK_TICKS    150  /* 5 s at fixed 30 Hz */
-/* Planar speed (24.8 longitudinal+lateral magnitude proxy) below which the car
- * counts as "not moving". longitudinal/lateral speed are body-frame 8.8; a value
- * of 100 (~0.4 units/tick) matches the vehicle_stopped<100 gate the input layer
- * already uses for steering. */
-#define TD5_RECOVERY_SPEED_EPS      100
 #define TD5_RECOVERY_DEFAULT_BACK   3
+/* Manual-recovery cooldown: number of sim ticks after a manual recovery during
+ * which further manual requests for the same player are ignored. 150 = 5 s at
+ * the fixed 30 Hz tick. Runtime-overridable via TD5RE_RECOVERY_COOLDOWN_TICKS. */
+#define TD5_MANUAL_RECOVERY_COOLDOWN_TICKS  150  /* 5 s at fixed 30 Hz */
 
-/* Per-slot stuck-detection accumulators (racer slots only; humans are racers).
- * s_stuck_ticks counts consecutive "stuck" sim ticks; s_stuck_last_hw is the
- * track_span_high_water observed last tick (forward-progress probe). Reset on
- * any throttle/brake input, forward progress, non-zero planar speed, or while
- * the car is NOT in lateral wall contact, and after a recovery fires. */
-static int     s_stuck_ticks[TD5_MAX_RACER_SLOTS];
-static int     s_stuck_last_hw[TD5_MAX_RACER_SLOTS];
+/* Per-slot manual-recovery cooldown counter (racer slots only; humans are
+ * racers). Counts DOWN each live sim tick from the cooldown window to 0; while
+ * > 0 a manual recovery request is ignored. Cleared at race init and re-armed to
+ * the cooldown window each time a manual recovery fires. */
+static int     s_manual_recovery_cooldown[TD5_MAX_RACER_SLOTS];
 
 static int     s_recovery_init = 0;
 static int     s_recovery_enabled = 1;     /* TD5RE_STUCK_RECOVERY */
 static int     s_recovery_spans_back = TD5_RECOVERY_DEFAULT_BACK;
-static int     s_recovery_stuck_ticks = TD5_RECOVERY_STUCK_TICKS;  /* TD5RE_RECOVERY_STUCK_TICKS */
+static int     s_recovery_cooldown_ticks = TD5_MANUAL_RECOVERY_COOLDOWN_TICKS;  /* TD5RE_RECOVERY_COOLDOWN_TICKS */
 
 /* [GENTLE FLIP-RECOVERY 2026-06-21] Forward decls (definitions live just after
  * the stuck-recovery block). For a LOCAL HUMAN, the byte-faithful scripted-
@@ -2473,9 +2471,9 @@ void td5_physics_tick(void)
 
     /* [STUCK RECOVERY 2026-06-15] After this tick's integration + contact
      * resolution have settled, run the per-local-human stuck-recovery driver:
-     * manual (R / L3) reposition and the 90-tick auto-recover. Deterministic
-     * (sim-tick cadence, replicated/local state); restricted to non-network play
-     * for v1. Inert when TD5RE_STUCK_RECOVERY=0. */
+     * manual (R / SELECT) reposition. Deterministic (sim-tick cadence,
+     * replicated/local state); restricted to non-network play for v1. Inert
+     * when TD5RE_STUCK_RECOVERY=0. */
     td5_physics_update_stuck_recovery();
 }
 
@@ -5783,6 +5781,31 @@ static int wreck_mass_pct(void)
     return v;
 }
 
+/* [traffic-lighter 2026-06-24] Make ORDINARY (non-wrecked) traffic easier to shove
+ * out of the way when the player crashes into it. Same mechanism as wreck_mass_pct
+ * (above), applied to live traffic instead of broken-down cars: cardef+0x88 behaves
+ * as an INVERSE mass in the V2V impulse math [CONFIRMED @ 0x004079C0], so scaling a
+ * traffic car's mass term UP gives it MORE velocity from a hit and bleeds LESS speed
+ * off the car that hits it — the player plows through and the traffic flies aside.
+ * Stock traffic mass is 32 (0x20) [CONFIRMED @ 0x0042F235]; the default 250 (= 2.5x
+ * lighter) is noticeable but well short of the 4x wreck boost. Percentage of stock;
+ * TD5RE_TRAFFIC_MASS_PCT=100 disables. Clamped [100,2000] so traffic is never made
+ * HEAVIER than stock. Only applies to a traffic slot that is NOT broken down (a wreck
+ * already gets wreck_mass_pct, which takes precedence so the two never compound). */
+static int traffic_mass_pct(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_MASS_PCT");
+        long p = (e && e[0]) ? strtol(e, NULL, 10) : 250;
+        if (p < 100)  p = 100;
+        if (p > 2000) p = 2000;
+        v = (int)p;
+        TD5_LOG_I(LOG_TAG, "traffic_mass_pct: TD5RE_TRAFFIC_MASS_PCT=%d", v);
+    }
+    return v;
+}
+
 /* [task #14 / #16] TD5RE_TRAFFIC_HITBOX_SCALE (default 0.70) — multiplier applied
  * to a TRAFFIC car's OBB half-extents (half-width / front-Z / rear-Z) in the V2V
  * corner test so the collision box matches the visible model instead of being
@@ -6048,11 +6071,23 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * flag is replicated, so this stays netplay-deterministic. */
     {
         int wp = wreck_mass_pct();
-        if (wp != 100) {
-            if (A->slot_index >= 0 && td5_ai_actor_is_broken_down((int)A->slot_index))
+        int tp = traffic_mass_pct();
+        /* Wreck boost takes precedence over the ordinary-traffic boost so a
+         * broken-down traffic car keeps its (heavier) 4x shove and the two
+         * multipliers never compound. A live traffic slot (>= traffic base, not
+         * broken) gets the lighter-traffic boost instead. Racers (slot <
+         * g_traffic_slot_base) are never scaled — byte-faithful. */
+        if (A->slot_index >= 0) {
+            if (wp != 100 && td5_ai_actor_is_broken_down((int)A->slot_index))
                 mass_A = (mass_A * wp) / 100;
-            if (B->slot_index >= 0 && td5_ai_actor_is_broken_down((int)B->slot_index))
+            else if (tp != 100 && (int)A->slot_index >= g_traffic_slot_base)
+                mass_A = (mass_A * tp) / 100;
+        }
+        if (B->slot_index >= 0) {
+            if (wp != 100 && td5_ai_actor_is_broken_down((int)B->slot_index))
                 mass_B = (mass_B * wp) / 100;
+            else if (tp != 100 && (int)B->slot_index >= g_traffic_slot_base)
+                mass_B = (mass_B * tp) / 100;
         }
     }
 
@@ -12837,12 +12872,10 @@ void td5_physics_init_vehicle_runtime(void)
      * differ from in-race transforms and cause huge gap_270 transients. */
     memset(s_prev_wheel_valid, 0, sizeof(s_prev_wheel_valid));
 
-    /* [STUCK RECOVERY 2026-06-15] Clear the per-slot auto-stuck accumulators at
-     * race init so values from a previous race in the same session can't carry
-     * over. (The progress probe self-heals on the first live tick anyway, but a
-     * clean reset keeps the auto-timer honest from tick 0.) */
-    memset(s_stuck_ticks,   0, sizeof(s_stuck_ticks));
-    memset(s_stuck_last_hw, 0, sizeof(s_stuck_last_hw));
+    /* [STUCK RECOVERY 2026-06-15] Clear the per-slot manual-recovery cooldown at
+     * race init so a cooldown left over from a previous race in the same session
+     * can't carry over and block the first manual recovery. */
+    memset(s_manual_recovery_cooldown, 0, sizeof(s_manual_recovery_cooldown));
 
     /* Populate per-slot handicap tables from gRaceResultPointsTable indexed
      * by each slot's prior championship position. See declaration above. */
@@ -13626,9 +13659,10 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
  * Player stuck-car recovery (PORT ENHANCEMENT 2026-06-15)
  * ======================================================================== */
 
-/* Cache the recovery knobs once. TD5RE_STUCK_RECOVERY (default ON) gates the
- * whole feature; TD5RE_RECOVERY_SPANS_BACK (default 3) is how far back to drop
- * the car. Logged once like the other [PORT ENHANCEMENT] knobs. */
+/* Cache the recovery knobs once. TD5RE_STUCK_RECOVERY (default ON) gates manual
+ * recovery; TD5RE_RECOVERY_SPANS_BACK (default 3) is how far back to drop the
+ * car; TD5RE_RECOVERY_COOLDOWN_TICKS (default 150 = 5 s) is the manual cooldown.
+ * Logged once like the other [PORT ENHANCEMENT] knobs. */
 static void recovery_init_knobs(void)
 {
     if (s_recovery_init) return;
@@ -13646,20 +13680,20 @@ static void recovery_init_knobs(void)
         }
     }
     {
-        /* [FALSE-TRIGGER FIX] Tune the auto-recovery dwell without a rebuild. */
-        const char *e = getenv("TD5RE_RECOVERY_STUCK_TICKS");
+        /* Tune the manual-recovery cooldown without a rebuild. 0 = no cooldown. */
+        const char *e = getenv("TD5RE_RECOVERY_COOLDOWN_TICKS");
         if (e && e[0]) {
             int v = atoi(e);
-            if (v < 30)   v = 30;          /* >= 1 s — below this auto-recovery is too eager */
+            if (v < 0)    v = 0;           /* 0 = no cooldown */
             if (v > 1800) v = 1800;        /* <= 60 s sanity clamp */
-            s_recovery_stuck_ticks = v;
+            s_recovery_cooldown_ticks = v;
         }
     }
     s_recovery_init = 1;
-    TD5_LOG_I(LOG_TAG, "Stuck recovery: %s spans_back=%d stuck_ticks=%d (%.1fs)",
+    TD5_LOG_I(LOG_TAG, "Manual recovery: %s spans_back=%d cooldown=%d ticks (%.1fs)",
               s_recovery_enabled ? "enabled" : "disabled",
-              s_recovery_spans_back, s_recovery_stuck_ticks,
-              s_recovery_stuck_ticks / 30.0);
+              s_recovery_spans_back, s_recovery_cooldown_ticks,
+              s_recovery_cooldown_ticks / 30.0);
 }
 
 /* Reposition `slot`'s actor a few spans back, centred, upright, heading aligned
@@ -13733,10 +13767,6 @@ int td5_physics_recover_player(int slot)
     actor->throttle_state = 1;      /* +0x36F: forward */
     actor->track_contact_flag = 0;  /* +0x37B: V2W contact */
 
-    /* Reset this slot's auto-stuck timer + progress probe. */
-    s_stuck_ticks[slot]   = 0;
-    s_stuck_last_hw[slot] = (int)actor->track_span_high_water;
-
     TD5_LOG_I(LOG_TAG,
               "recover_player: slot=%d cur_span=%d -> span=%d lane=%d pos=(%d,%d,%d)",
               slot, cur_span, tgt_span, sub_lane,
@@ -13744,12 +13774,17 @@ int td5_physics_recover_player(int slot)
     return 1;
 }
 
-/* Per-tick driver: run MANUAL (R / L3) + AUTOMATIC stuck-recovery for every
- * LOCAL HUMAN player. Called from td5_physics_tick (deterministic sim tick).
+/* Per-tick driver: run MANUAL (R / SELECT) stuck-recovery for every LOCAL HUMAN
+ * player. Called from td5_physics_tick (deterministic sim tick).
  *
  * Local human players occupy viewports 0..viewport_count-1, each mapped to an
  * actor slot via g_actorSlotForView[vp]; that vp index is also the input-layer
  * player index. We only act on slots flagged human (g_race_slot_state==1).
+ *
+ * [AUTO-RECOVERY REMOVED 2026-06-24] There is no automatic stuck detection any
+ * more — a car is only ever repositioned when the driver presses recovery, and
+ * each manual recovery arms a per-player cooldown (s_recovery_cooldown_ticks,
+ * default 150 = 5 s) before another will be honoured.
  *
  * v1 NETPLAY SCOPE: the manual edge is local-only input (not exchanged over the
  * lockstep protocol), so to keep remote peers in sync the whole driver is
@@ -13782,102 +13817,39 @@ void td5_physics_update_stuck_recovery(void)
         if (!actor) continue;
 
         /* ---- MANUAL trigger (edge from input layer, keyed by player index) ----
-         * Always consume the edge so it never leaks across a pause; only act on
-         * it while the sim is live and the car is still racing. */
+         * Always consume the edge so it never leaks across a pause OR a cooldown;
+         * only act on it while the sim is live and the car is still racing. */
         int manual = td5_input_recovery_requested(vp);
 
         /* Don't recover a car that has already finished the race. */
         if (actor->finish_time != 0) {
-            s_stuck_ticks[slot]   = 0;
-            s_stuck_last_hw[slot] = (int)actor->track_span_high_water;
+            s_manual_recovery_cooldown[slot] = 0;
             continue;
         }
 
         if (!act) {
-            /* Paused/countdown: keep the progress probe fresh, defer recovery. */
-            s_stuck_last_hw[slot] = (int)actor->track_span_high_water;
-            s_stuck_ticks[slot]   = 0;
+            /* Paused/countdown: defer recovery (edge already drained above);
+             * the cooldown does not tick down while the sim is frozen. */
             continue;
         }
+
+        /* Count the per-player cooldown down toward 0 on each live sim tick. */
+        if (s_manual_recovery_cooldown[slot] > 0)
+            s_manual_recovery_cooldown[slot]--;
 
         if (manual) {
-            TD5_LOG_I(LOG_TAG, "manual recovery: player=%d slot=%d", vp, slot);
-            td5_physics_recover_player(slot);
-            continue;   /* timer already cleared inside */
-        }
-
-        /* ---- AUTOMATIC trigger ---- */
-        /* [ROOT FALSE-TRIGGER FIX 2026-06-24] "Is the driver feeding throttle?" MUST
-         * read the real per-player throttle command, NOT actor +0x378. Despite the
-         * struct label "throttle_input_active", +0x378 is the AUTO/MANUAL GEARBOX flag
-         * (==0 manual, !=0 auto; see the gearbox note ~line 548). Reading it here
-         * meant: AUTOMATIC cars always looked "engaged" (recovery never fired), but
-         * MANUAL cars always looked "not pressing" — so a manual-gearbox car (e.g. a
-         * split-screen player 2 who picked Manual in car-select) got auto-recovered
-         * while slow EVEN WHILE FLOORING THE THROTTLE ("recover out of nowhere").
-         * td5_input_get_throttle(vp) is the actual command: >0 forward, <0
-         * brake/reverse, 0 idle — any non-zero means the driver is on the pedals, so
-         * not stuck. vp is the local input-layer player index. */
-        int16_t thr_cmd = td5_input_get_throttle(vp);
-        int throttle_on = (thr_cmd != 0);
-
-        /* [FALSE-TRIGGER FIX 2026-06-23] Active brake/handbrake means the driver is
-         * deliberately slowing/stopped (lining up, waiting, easing through a tech
-         * section) — that is "engaged", not "stuck", so reset the dwell just like
-         * throttle does. Throttle already gates the wall-struggle case (a player
-         * mashing gas against a wall never auto-recovers), so adding brake here only
-         * removes false positives on intentional slow driving; a genuinely abandoned
-         * car (no input at all) still recovers after the dwell. vp is the local
-         * input-layer player index (same one td5_input_recovery_requested uses). */
-        int braking = (td5_input_get_brake(vp) != 0) ||
-                      (td5_input_get_handbrake(vp) != 0);
-
-        /* Forward progress: track_span_high_water advancing (monotonic race-order
-         * counter) is the robust progress probe — it survives lane jitter and the
-         * span_normalized wrap at the start/finish line. */
-        int hw = (int)actor->track_span_high_water;
-        int progressed = (hw != s_stuck_last_hw[slot]);
-        s_stuck_last_hw[slot] = hw;
-
-        /* Planar speed near zero: body-frame longitudinal + lateral magnitude
-         * (both 8.8). abs-sum is a cheap deterministic proxy (no sqrt needed for
-         * a near-zero test). */
-        int32_t fwd = actor->longitudinal_speed;
-        int32_t lat = actor->lateral_speed;
-        int32_t planar = (fwd < 0 ? -fwd : fwd) + (lat < 0 ? -lat : lat);
-        int near_zero = (planar < TD5_RECOVERY_SPEED_EPS);
-
-        /* [FALSE-TRIGGER FIX 2026-06-24 "parked-in-the-open recovery"] A car that
-         * is simply standing still on open road (idle, no input, NOT against a
-         * wall) is NOT "stuck" — nothing is pinning it; the player can drive off
-         * the instant they touch the throttle. The auto-recovery exists only as a
-         * safety net for a car PINNED against a wall it cannot escape, so the
-         * stuck dwell may only accumulate while the car is in actual lateral wall
-         * contact. track_contact_flag (+0x37B) is the port's V2W lateral-contact
-         * marker (0 = none, 1/2 = wall side); it is cleared at (re)spawn and on
-         * every recovery, and is set ONLY when td5_track_resolve_wall_contacts
-         * fires a real lateral penetration — so a car that has not touched a wall
-         * since spawn/recovery reads 0 here and can never be auto-recovered.
-         *
-         * Without this gate, several stationary split-screen players (idle from
-         * the grid, all on open road) tripped the 5 s dwell in lockstep and were
-         * all teleported back together every 5 s ("everyone recovers out of
-         * nowhere"), even though not one of them was stuck on anything. */
-        int wall_contact = (actor->track_contact_flag != 0);
-
-        if (throttle_on || braking || progressed || !near_zero || !wall_contact) {
-            /* Driver accelerating/braking OR making progress OR still moving OR
-             * not pinned against a wall -> not stuck, reset the dwell. */
-            s_stuck_ticks[slot] = 0;
-            continue;
-        }
-
-        if (++s_stuck_ticks[slot] >= s_recovery_stuck_ticks) {
-            TD5_LOG_I(LOG_TAG,
-                      "auto recovery: slot=%d stuck %d ticks (hw=%d planar=%d wall=%u)",
-                      slot, s_stuck_ticks[slot], hw, planar,
-                      (unsigned)actor->track_contact_flag);
-            td5_physics_recover_player(slot);   /* clears the timer */
+            if (s_manual_recovery_cooldown[slot] > 0) {
+                /* On cooldown — ignore this press. */
+                TD5_LOG_I(LOG_TAG,
+                          "manual recovery ignored (cooldown): player=%d slot=%d "
+                          "remaining=%d ticks (%.1fs)",
+                          vp, slot, s_manual_recovery_cooldown[slot],
+                          s_manual_recovery_cooldown[slot] / 30.0);
+            } else {
+                TD5_LOG_I(LOG_TAG, "manual recovery: player=%d slot=%d", vp, slot);
+                if (td5_physics_recover_player(slot))
+                    s_manual_recovery_cooldown[slot] = s_recovery_cooldown_ticks;
+            }
         }
     }
 }

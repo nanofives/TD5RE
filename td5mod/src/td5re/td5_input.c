@@ -156,7 +156,7 @@ static int32_t s_rear_view[TD5_MAX_RACER_SLOTS];
 /* [STUCK RECOVERY 2026-06-15] Per-local-player manual car-recovery edge.
  * Indexed by local human player index (0..s_active_players-1), keyed the same
  * way as s_rear_view / s_camera_cooldown above. The poll arms s_recovery_request
- * on the RISING edge of the recovery button (keyboard R / joystick L3) and
+ * on the RISING edge of the recovery button (keyboard R / joystick SELECT) and
  * s_recovery_held debounces so a held button fires once per press. The physics
  * sim drains the request via td5_input_recovery_requested(). PORT ENHANCEMENT —
  * no original analog (the 1999 game had no player car-reset). */
@@ -817,9 +817,9 @@ void td5_input_poll_race_session(void)
         }
 
         /* [STUCK RECOVERY 2026-06-15] Manual car-recovery edge for this local
-         * human player. Triggers: keyboard R (DIK_R = 0x13) and joystick L3
-         * (left-stick click = physical button 8 in the standard Xbox-via-
-         * DirectInput layout; A0 B1 X2 Y3 LB4 RB5 Back6 Start7 L3=8 R3=9).
+         * human player. Triggers: keyboard R (DIK_R = 0x13) and joystick SELECT
+         * (Back / View = physical button 6 in the standard Xbox-via-DirectInput
+         * layout; A0 B1 X2 Y3 LB4 RB5 Back6 Start7 L3=8 R3=9).
          *
          * This sits in the NORMAL (non-playback) poll branch, so it is inert
          * during replay watching — no collision with the replay-exit-on-R path
@@ -829,9 +829,14 @@ void td5_input_poll_race_session(void)
          * Keyboard R is honoured only for player 0: the slot-0 keyboard default
          * binds CHANGE VIEW to DIK_T (0x14), so R is free; the split-screen P2
          * keyboard default binds CHANGE VIEW to DIK_R (0x13), so claiming R for
-         * recovery there would double-purpose that player's view key. L3 is free
-         * on every layout (R3 is REAR VIEW, L3 is unused) so it works for any
-         * local joystick player.
+         * recovery there would double-purpose that player's view key.
+         *
+         * [RECOVERY KEY -> SELECT 2026-06-24] SELECT (button 6) was the default
+         * CHANGE VIEW joystick bind. To dedicate it to recovery without also
+         * flipping the camera on every reset, CHANGE VIEW was moved onto L3
+         * (button 8, which recovery used to occupy) — see k_default_js_action_bind
+         * in td5_platform_win32.c. Net per-pad layout: SELECT recovers, L3 changes
+         * view, R3 is REAR VIEW, Start is PAUSE.
          *
          * Edge-triggered via s_recovery_held so a held button recovers once per
          * press. Gated by TD5RE_STUCK_RECOVERY (cached): "0" never arms the
@@ -843,7 +848,7 @@ void td5_input_poll_race_session(void)
                 const char *e = getenv("TD5RE_STUCK_RECOVERY");
                 s_recovery_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
                 s_recovery_init = 1;
-                TD5_LOG_I(LOG_TAG, "Stuck recovery (manual R / L3): %s",
+                TD5_LOG_I(LOG_TAG, "Stuck recovery (manual R / SELECT): %s",
                           s_recovery_enabled ? "enabled" : "disabled");
             }
 
@@ -854,9 +859,14 @@ void td5_input_poll_race_session(void)
                     if (i == 0 && td5_plat_input_key_pressed(0x13))  /* DIK_R */
                         recover_now = 1;
                 } else {
-                    /* Joystick player — L3 (physical button 8). The device slot
-                     * index equals the player index for the in-race poll. */
-                    if (td5_plat_input_joystick_buttons(i) & (1u << 8))
+                    /* Joystick player — SELECT / Back (physical button 6). The
+                     * device slot index equals the player index for the in-race
+                     * poll. CHANGE VIEW's default joystick bind was moved off
+                     * button 6 onto L3 (button 8, which recovery used to occupy)
+                     * so SELECT is dedicated to recovery and never also flips the
+                     * camera — see k_default_js_action_bind in
+                     * td5_platform_win32.c. */
+                    if (td5_plat_input_joystick_buttons(i) & (1u << 6))
                         recover_now = 1;
                 }
             }

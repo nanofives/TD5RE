@@ -8356,6 +8356,33 @@ static int trf_dyn_spawn_dist_x16(void)
     return x16;
 }
 
+/* [traffic-front-despawn 2026-06-24] Minimum forward-keep distance, in spans. A
+ * traffic car must NEVER fade out while it could still be on-screen AHEAD of a
+ * human — that is the "traffic disappears right in front of me instead of far
+ * away after I passed them" report. The forward despawn bounds (ahead-of-leader
+ * and far-from-all) are normally despawn + eff_hi (default 65 + 100 = 165 spans,
+ * comfortably past the ~88-128-span actor render cull). But on SHORT tracks
+ * eff_hi is capped at ring/3 (see trf_dyn_effective_spawn_window), which can pull
+ * that bound BELOW the render distance so a car fades while still visible ahead —
+ * worst in split-screen, where the players spread apart and the far-from-all test
+ * (min distance to ANY human) becomes the active despawn condition. This floor
+ * keeps the forward-keep distance past the render cull on every track. The
+ * rear/"behind" despawn is left untouched (a car retiring far behind after you've
+ * passed it is the intended, wanted behaviour). Default 150 spans (render cull +
+ * margin); TD5RE_TRAFFIC_FRONT_KEEP overrides (>=0; 0 disables the floor). */
+static int trf_dyn_front_keep_floor(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_FRONT_KEEP");
+        s = (e && e[0]) ? atoi(e) : 150;
+        if (s < 0) s = 0;
+        TD5_LOG_I(LOG_TAG, "traffic_front_keep floor: TD5RE_TRAFFIC_FRONT_KEEP=%d "
+                  "spans (cars stay until this far ahead of every human)", s);
+    }
+    return s;
+}
+
 /* Effective per-tick spawn window after the distance scale, clamped so it never
  * grows past a safe fraction of the ring (a window wider than ~1/3 of the loop
  * would wrap onto the player from behind and could starve placement). Returns the
@@ -8746,7 +8773,26 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
             }
         } else
             ps = trf_dyn_race_span_lead();     /* legacy: live race leader */
-        int dist = win_lo + (int)(trf_dyn_rand() % (uint32_t)(win_hi - win_lo + 1));
+        /* [traffic-density-patch 2026-06-24] On later attempts the nominal
+         * [win_lo, win_hi] window is failing to place a car — typically the
+         * stretch directly ahead is a junction, a branch / no-road region, or an
+         * all-slow surface where every candidate span is rejected, leaving a
+         * visible empty PATCH for the whole time the player approaches it (the
+         * "patches of track where the frequency of traffic decreased
+         * significantly" report). Progressively push the FAR edge of the search
+         * band outward so the spawner can reach PAST the bad stretch to placeable
+         * road and fill the gap beyond it, instead of hammering the same dead
+         * window 8 times and giving up. The NEAR edge stays at win_lo so a car is
+         * never popped in close to the player, and the min-player-dist gate below
+         * still uses win_lo. The first two attempts use the nominal window so the
+         * common (already-placeable) case is byte-unchanged; the span<3 /
+         * span>=limit-8 and circuit-wrap clamps below bound the widened far edge.
+         * TD5RE_TRAFFIC_SPAWN_DIST / window math are untouched — this only affects
+         * the RETRY band when the nominal window has no room. */
+        int a_win_hi = win_hi;
+        if (attempt >= 2 && win_hi > win_lo)
+            a_win_hi = win_hi + (attempt - 1) * (win_hi - win_lo);
+        int dist = win_lo + (int)(trf_dyn_rand() % (uint32_t)(a_win_hi - win_lo + 1));
         int span = ps + dist;
         int main_span;
         int lane_count, lane, polarity;
@@ -9112,7 +9158,19 @@ void td5_ai_traffic_dynamic_tick(void)
             {
             int eff_lo, eff_hi;
             int far_from_all;
+            int front_keep;
             trf_dyn_effective_spawn_window(&eff_lo, &eff_hi);
+            /* [traffic-front-despawn 2026-06-24] Forward-keep distance: cars
+             * stay alive until this far ahead of every human, floored at the
+             * render-visible distance so none ever fades while on-screen ahead.
+             * Only ever WIDENS the keep-zone (never below despawn+eff_hi), so a
+             * freshly spawned car at eff_hi ahead is never inside it -> no
+             * spawn/despawn thrash. The rear "behind" bound is unchanged. */
+            front_keep = g_td5.ini.traffic_dyn_despawn + eff_hi;
+            {
+                int fk_floor = trf_dyn_front_keep_floor();
+                if (front_keep < fk_floor) front_keep = fk_floor;
+            }
             /* [task#12 2026-06-15] PROXIMITY RECYCLE — the dwindle fix.
              * The corridor test above is anchored on the TRAILING HUMAN (behind)
              * and the RACE LEADER (ahead, who may be an AI). When the field
@@ -9131,15 +9189,14 @@ void td5_ai_traffic_dynamic_tick(void)
              * TD5RE_TRAFFIC_DENSITY. */
             far_from_all = trf_dyn_density_enabled() &&
                            !td5_ai_cop_is_chasing(slot) &&
-                           trf_dyn_min_player_dist(sp) >
-                               g_td5.ini.traffic_dyn_despawn + eff_hi;
+                           trf_dyn_min_player_dist(sp) > front_keep;
             /* [#20] (Removed) The branch idle-fade + blacklist self-heal that used to
              * sit here coped with traffic stranded on "displaced/off-road" forks.
              * Branches are connected drivable roads, so branch traffic is ordinary
              * traffic handled by the general despawn (behind/ahead/far) below. */
             if (!td5_ai_cop_is_chasing(slot) &&
                 (behind < -g_td5.ini.traffic_dyn_despawn ||
-                ahead  >  g_td5.ini.traffic_dyn_despawn + eff_hi ||
+                ahead  >  front_keep ||
                 far_from_all ||
                 (g_traffic_recovery_stage[slot] != 0 &&
                  s_traffic_stuck_frames[slot] >= 45 &&
@@ -9149,9 +9206,9 @@ void td5_ai_traffic_dynamic_tick(void)
                 s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
                 TD5_LOG_I(LOG_TAG,
                           "traffic_dyn_despawn: slot=%d behind_trail=%d ahead_lead=%d "
-                          "min_player=%d far_from_all=%d recovery=%d stuck=%d (fading out)",
+                          "min_player=%d front_keep=%d far_from_all=%d recovery=%d stuck=%d (fading out)",
                           slot, behind, ahead, trf_dyn_min_player_dist(sp),
-                          far_from_all, g_traffic_recovery_stage[slot],
+                          front_keep, far_from_all, g_traffic_recovery_stage[slot],
                           s_traffic_stuck_frames[slot]);
             }
             }   /* eff spawn-window scope */

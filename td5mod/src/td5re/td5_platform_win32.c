@@ -151,7 +151,7 @@ static const uint32_t k_default_js_action_bind[TD5_JSBIND_ACTIONS] = {
     TD5_JSBIND_BUTTON | 3u,              /*  5 HORN/SIREN  Y                         */
     TD5_JSBIND_BUTTON | 5u,              /*  6 GEAR UP     R1 / RB                    */
     TD5_JSBIND_BUTTON | 4u,              /*  7 GEAR DOWN   L1 / LB                    */
-    TD5_JSBIND_BUTTON | 6u,              /*  8 CHANGE VIEW Back / View (Select)       */
+    TD5_JSBIND_BUTTON | 8u,              /*  8 CHANGE VIEW L3 / left stick click       */
     TD5_JSBIND_BUTTON | 9u,              /*  9 REAR VIEW   right stick click (R3)      */
     TD5_JSBIND_BUTTON | 7u,              /* 10 PAUSE       Start / Menu               */
 };
@@ -197,6 +197,41 @@ static int  s_device_types[16];  /* 0=keyboard, 1=gamepad, 2=wheel/joystick */
 static GUID s_device_guids[16];  /* DirectInput instance GUID per enumerated device (index 0 = keyboard, unused) */
 static GUID s_device_product_guids[16]; /* DirectInput PRODUCT GUID (same model -> same product GUID) */
 static int  s_device_count = 0;
+/* [split-screen disconnect slot-restore 2026-06-24] GUID-STABLE enumeration index.
+ * The original mapped player->device by a STABLE persisted source index (0-7) into a
+ * FIXED device table [CONFIRMED @ ScreenControlOptions 0x0041DF20 reads
+ * (&g_player1DeviceDesc)[g_player1InputSource]; per-frame device = inputSource-1 @
+ * 0x0042C470], so a device's slot never moved when ANOTHER device dropped (the 1999
+ * binary had no hot-plug at all — M2DX owned the devices). The port re-enumerated
+ * attached-only (DIEDFL_ATTACHEDONLY) and rebuilt the list from scratch, so a
+ * disconnect COMPACTED the array and shifted every later device DOWN one index ->
+ * every binding keyed by that 1-based index (s_mp_join_device[p], persisted [Devices]
+ * PlayerN, the FF controller_assignment, the mp_session device->profile/slot map)
+ * silently re-pointed at a DIFFERENT physical pad, swapping split-screen players'
+ * slots. We now PIN each index to its DirectInput INSTANCE GUID: a slot, once
+ * assigned, keeps its index for the whole session; a disconnected device's slot is
+ * RESERVED (present=0) rather than compacted away or reused, so its owner keeps the
+ * slot and reclaims the same index when the pad reconnects. */
+static int  s_device_present[16]  = { 0 };  /* 1 = attached this enumeration; 0 = reserved/absent */
+static int  s_device_assigned[16] = { 0 };  /* 1 = slot owns a known instance GUID (reserved across hot-plug) */
+
+/* GUID byte-compare (GUID is 16 contiguous bytes, no padding) — avoids depending
+ * on the IsEqualGUID macro/ole32 linkage. */
+static int td5_guid_equal(const GUID *a, const GUID *b)
+{
+    return memcmp(a, b, sizeof(GUID)) == 0;
+}
+
+/* The stable index that already owns this physical device's instance GUID, or -1.
+ * A returning (reconnected) pad reclaims its original slot through this lookup. */
+static int td5_plat_input_slot_for_instance_guid(const GUID *g)
+{
+    int i;
+    for (i = 1; i < 16; i++)
+        if (s_device_assigned[i] && td5_guid_equal(&s_device_guids[i], g))
+            return i;
+    return -1;
+}
 
 /* Multi-file logging — messages routed by module tag to separate log files.
  * Session rotation keeps up to 5 previous logs per category. */
@@ -2073,6 +2108,7 @@ static int td5_plat_input_device_name_is_blocked(const char *name)
 static BOOL CALLBACK EnumJoysticksCallback(
     const DIDEVICEINSTANCEA *inst, void *ctx)
 {
+    int idx, free_idx = -1, evict_idx = -1, i;
     (void)ctx;
     /* Override: blocked devices are skipped outright — never detected or usable. */
     if (td5_plat_input_device_name_is_blocked(inst->tszInstanceName)) {
@@ -2080,29 +2116,52 @@ static BOOL CALLBACK EnumJoysticksCallback(
                   inst->tszInstanceName);
         return DIENUM_CONTINUE;
     }
-    if (s_device_count < 16) {
-        strncpy(s_device_names[s_device_count],
-                inst->tszInstanceName,
-                sizeof(s_device_names[0]) - 1);
-        s_device_names[s_device_count][255] = '\0';
-        /* Store the instance GUID so td5_plat_input_set_device can (re)create
-         * this exact device later — without it, switching to any joystick is
-         * impossible (s_di_joystick was never created). */
-        s_device_guids[s_device_count] = inst->guidInstance;
-        s_device_product_guids[s_device_count] = inst->guidProduct;
-        /* Classify device type: wheel/driving=2, gamepad=1 */
-        {
-            BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
-            if (dev_type == DI8DEVTYPE_DRIVING ||
-                dev_type == DI8DEVTYPE_FLIGHT  ||
-                dev_type == DI8DEVTYPE_1STPERSON) {
-                s_device_types[s_device_count] = 2; /* joystick/wheel */
-            } else {
-                s_device_types[s_device_count] = 1; /* gamepad */
-            }
+    /* [GUID-stable index 2026-06-24] Place this physical device at a STABLE slot so
+     * a disconnect of some OTHER pad can't shift it (which would swap split-screen
+     * players' slots — see the s_device_present/assigned note above):
+     *   1. reuse the index this exact instance GUID already owns (a returning pad
+     *      reclaims its original slot), else
+     *   2. the lowest never-assigned slot, else
+     *   3. evict the lowest currently-absent reserved slot (only when all 16 are
+     *      assigned — a session would need >15 distinct pads to hit this). */
+    idx = td5_plat_input_slot_for_instance_guid(&inst->guidInstance);
+    if (idx < 0) {
+        for (i = 1; i < 16; i++) {
+            if (!s_device_assigned[i]) { free_idx = i; break; }
+            if (evict_idx < 0 && !s_device_present[i]) evict_idx = i;
         }
-        s_device_count++;
+        idx = (free_idx >= 0) ? free_idx : evict_idx;
+        if (idx < 0) return DIENUM_CONTINUE;   /* all 16 slots hold present devices */
+        /* Evicting a reserved slot reuses its index for a different physical device:
+         * drop any cached lobby-scan handle so it recreates against the new GUID. */
+        if (free_idx < 0 && s_di_scan[idx]) {
+            IDirectInputDevice8_Unacquire(s_di_scan[idx]);
+            IDirectInputDevice8_Release(s_di_scan[idx]);
+            s_di_scan[idx] = NULL;
+        }
+        /* Store the instance GUID so td5_plat_input_set_device can (re)create this
+         * exact device later — without it, switching to any joystick is impossible
+         * (s_di_joystick was never created). */
+        s_device_guids[idx]         = inst->guidInstance;
+        s_device_product_guids[idx] = inst->guidProduct;
+        s_device_assigned[idx]      = 1;
     }
+    /* Refresh display name + type each pass (the name is re-read so the
+     * disambiguation pass can re-suffix duplicates among present devices). */
+    strncpy(s_device_names[idx], inst->tszInstanceName, sizeof(s_device_names[0]) - 1);
+    s_device_names[idx][255] = '\0';
+    {
+        BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
+        if (dev_type == DI8DEVTYPE_DRIVING ||
+            dev_type == DI8DEVTYPE_FLIGHT  ||
+            dev_type == DI8DEVTYPE_1STPERSON) {
+            s_device_types[idx] = 2; /* joystick/wheel */
+        } else {
+            s_device_types[idx] = 1; /* gamepad */
+        }
+    }
+    s_device_present[idx] = 1;
+    if (idx >= s_device_count) s_device_count = idx + 1;
     return DIENUM_CONTINUE;
 }
 
@@ -2126,6 +2185,12 @@ static void td5_plat_input_disambiguate_device_names(void)
 {
     int numbered[16] = {0};   /* device already given a suffix this pass */
     int i, j;
+    /* Reserved-but-absent slots keep their preserved (possibly already-suffixed)
+     * name across a disconnect and must not count toward the duplicate tally of
+     * currently-attached devices — mark them done so they're neither re-suffixed
+     * nor matched. */
+    for (i = 1; i < s_device_count && i < 16; i++)
+        if (!s_device_present[i]) numbered[i] = 1;
     for (i = 1; i < s_device_count && i < 16; i++) {
         char key[256];    /* untrimmed comparison key (matches raw names) */
         char disp[256];   /* trimmed base used to build the displayed name */
@@ -2164,11 +2229,23 @@ static void td5_plat_input_disambiguate_device_names(void)
 
 int td5_plat_input_enumerate_devices(void)
 {
-    s_device_count = 0;
-    /* Keyboard is always device 0 */
-    strncpy(s_device_names[0], "Keyboard", sizeof(s_device_names[0]));
-    s_device_types[0] = 0; /* keyboard */
-    s_device_count = 1;
+    int i;
+    /* Keyboard is always device 0 and always present (reserved once). */
+    if (!s_device_assigned[0]) {
+        strncpy(s_device_names[0], "Keyboard", sizeof(s_device_names[0]) - 1);
+        s_device_names[0][sizeof(s_device_names[0]) - 1] = '\0';
+        s_device_types[0]    = 0; /* keyboard */
+        s_device_assigned[0] = 1;
+    }
+    s_device_present[0] = 1;
+    if (s_device_count < 1) s_device_count = 1;
+
+    /* [GUID-stable index 2026-06-24] Do NOT rebuild the table from scratch. Mark
+     * every joystick slot absent; the EnumDevices pass re-marks the attached ones
+     * present at their GUID-pinned index. Reserved-but-absent slots KEEP their
+     * GUID/name/type so a disconnected pad's index never moves and its owner keeps
+     * the slot until it reconnects. */
+    for (i = 1; i < 16; i++) s_device_present[i] = 0;
 
     if (s_dinput) {
         IDirectInput8_EnumDevices(s_dinput,
@@ -2177,24 +2254,36 @@ int td5_plat_input_enumerate_devices(void)
             NULL,
             DIEDFL_ATTACHEDONLY);
     }
+
+    /* Drop the cached lobby-scan handle for any slot that just went absent so a
+     * later reconnect recreates a fresh, acquirable handle (a dead DI device
+     * object never recovers via re-Acquire on the stale handle). */
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        if (!s_device_present[i] && s_di_scan[i]) {
+            IDirectInputDevice8_Unacquire(s_di_scan[i]);
+            IDirectInputDevice8_Release(s_di_scan[i]);
+            s_di_scan[i] = NULL;
+        }
+    }
+
     /* Append " #1"/" #2"/... to any controllers that share an identical name
      * so two of the same model can be told apart in the config UI. */
     td5_plat_input_disambiguate_device_names();
     TD5_LOG_I(LOG_TAG, "Input devices enumerated: count=%d primary=%s",
               s_device_count,
               (s_device_count > 0) ? s_device_names[0] : "<none>");
-    for (int di = 1; di < s_device_count && di < 16; di++) {
+    for (i = 1; i < s_device_count && i < 16; i++) {
         /* Log the full DirectInput instance + product GUID per joystick. Two
          * physically-distinct controllers normally get distinct INSTANCE GUIDs;
          * some pads (notably 8BitDo) report a fixed/identical instance GUID for
          * every unit, which the binding layer (CreateDevice-by-GUID) cannot tell
          * apart — so two such pads collapse onto one bindable device. The log
-         * makes that collision visible. */
-        const GUID *ig = &s_device_guids[di];
-        const GUID *pg = &s_device_product_guids[di];
+         * makes that collision visible. present=0 = reserved across a disconnect. */
+        const GUID *ig = &s_device_guids[i];
+        const GUID *pg = &s_device_product_guids[i];
         TD5_LOG_I(LOG_TAG,
-                  "  device[%d] type=%d name=\"%s\"",
-                  di, s_device_types[di], s_device_names[di]);
+                  "  device[%d] type=%d present=%d name=\"%s\"",
+                  i, s_device_types[i], s_device_present[i], s_device_names[i]);
         TD5_LOG_I(LOG_TAG,
                   "    inst=%08lX-%04X-%04X-%02X%02X%02X%02X%02X%02X%02X%02X "
                   "prod=%08lX",
@@ -2569,9 +2658,16 @@ int td5_plat_input_devices_changed(void)
 
 int td5_plat_input_rescan_devices(void)
 {
-    int prev = s_device_count;
+    /* [GUID-stable index 2026-06-24] s_device_count no longer shrinks on a
+     * disconnect (the slot is reserved), so a count comparison would MISS an
+     * unplug. Compare the set of PRESENT devices instead — this flags a connect
+     * (new bit) AND a disconnect (cleared bit). */
+    unsigned prev_mask = 0, new_mask = 0;
+    int i;
+    for (i = 0; i < 16; i++) if (s_device_present[i]) prev_mask |= (1u << i);
     td5_plat_input_enumerate_devices();
-    if (s_device_count != prev) {
+    for (i = 0; i < 16; i++) if (s_device_present[i]) new_mask |= (1u << i);
+    if (new_mask != prev_mask) {
         td5_plat_input_scan_join_release();
         s_fe_js_suppress = 0;
         return 1;
@@ -2674,6 +2770,12 @@ void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap)
 static int s_plat_active_js = -1;
 int td5_plat_input_active_joystick(void) { return s_plat_active_js; }
 
+/* Defined in the XInput rumble block below; called from the menu/lobby input
+ * scans to learn each pad's XInput user index from real button-press
+ * coincidences. No-op when the XInput rumble path is unavailable.
+ * [SPLIT-SCREEN FF FIX 2026-06-24 v2] */
+static void td5_xinput_correlate_tick(void);
+
 /* Ensure a non-exclusive scan handle for enumerated joystick i (1..). */
 static LPDIRECTINPUTDEVICE8A scan_dev(int i)
 {
@@ -2711,6 +2813,9 @@ uint32_t td5_plat_input_scan_join(void)
 {
     uint32_t mask = 0;
     int i;
+    /* Learn each joining pad's XInput user from its A/Start press this frame —
+     * the lobby join is where each player presses A on their OWN physical pad. */
+    td5_xinput_correlate_tick();
     if (s_keyboard[0x1C] & 0x80) mask |= 1u;     /* keyboard Enter = device 0 */
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
@@ -2759,6 +2864,7 @@ uint32_t td5_plat_input_frontend_nav(void)
     uint32_t bits = 0;
     int i;
     const long T = 130;  /* [#R3-5 reverted] 90 caused hover auto-scroll on biased pads; navdiag pending */
+    td5_xinput_correlate_tick();   /* observe DI<->XInput from menu A/Start presses */
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
         uint32_t db = 0;
@@ -2857,6 +2963,7 @@ uint32_t td5_plat_input_device_nav(int enum_index)
     long cx, cy;
     const long T = 130;  /* [#R3-5 reverted] 90 caused hover auto-scroll on biased pads; navdiag pending */
     LPDIRECTINPUTDEVICE8A dev;
+    td5_xinput_correlate_tick();   /* observe DI<->XInput from car-select grid A/Start presses */
     if (enum_index <= 0 || enum_index >= s_device_count || enum_index >= 16) return 0;
     dev = scan_dev(enum_index);
     if (!dev) return 0;
@@ -3027,6 +3134,144 @@ static int td5_device_is_xinput(int device_index)
     return is_xi;
 }
 
+/* ------------------------------------------------------------------------
+ * Observed DI<->XInput correlation [SPLIT-SCREEN FF FIX 2026-06-24 v2]
+ *
+ * XInput exposes no link from an XInput user index (0..3) to a DirectInput
+ * device instance, so the prior fix GUESSED the mapping from DInput enumeration
+ * order (Nth XInput-class DI device -> Nth connected XInput user). That guess is
+ * wrong whenever DInput enum order does not track the XInput slot order — which
+ * is exactly the case with several identical 8BitDo pads — and the rumble lands
+ * on the wrong physical pad (a cyclic permutation: P1 felt on P2, P3 on P1).
+ *
+ * Instead we OBSERVE the mapping: when a player presses a button on their pad in
+ * the menu/lobby, that press appears on both their DI device AND their XInput
+ * user in the same frame. When exactly one (still-unbound) DI device and exactly
+ * one (still-unclaimed) XInput user show the same button, they are provably the
+ * same physical pad — bind them. Keyed to the physical device, so it is correct
+ * regardless of pick order, identical VID/PID, or enumeration order. The binding
+ * is captured at lobby-join (each player presses A on their OWN pad to join) and
+ * persists for the process lifetime (the USB mapping is constant).
+ *
+ * NOTE: Windows XInput is hard-capped at 4 users (XUSER_MAX_COUNT). With 5+
+ * XInput-mode pads only the first 4 are addressable for rumble at all; the
+ * overflow pad(s) never bind here and get no rumble (an OS/API limit, not this
+ * routing — would require Windows.Gaming.Input to lift).
+ * ------------------------------------------------------------------------ */
+
+/* DI enumeration index (1..15) -> observed XInput user (0..3); -1 = unobserved. */
+static int s_di_xinput_user[16];
+static int s_di_xinput_user_inited = 0;
+
+static void td5_xinput_corr_init(void)
+{
+    if (!s_di_xinput_user_inited) {
+        int i;
+        for (i = 0; i < 16; i++) s_di_xinput_user[i] = -1;
+        s_di_xinput_user_inited = 1;
+    }
+}
+
+/* Has any DI device already claimed XInput user u? (enforces a 1:1 binding). */
+static int td5_xinput_user_is_claimed(int u)
+{
+    int i;
+    if (!s_di_xinput_user_inited) return 0;
+    for (i = 0; i < 16; i++) if (s_di_xinput_user[i] == u) return 1;
+    return 0;
+}
+
+/* Cached td5_device_is_xinput(): the raw-input scan is too costly to repeat
+ * every menu frame, and the device set is fixed for the process lifetime. */
+static signed char s_dev_xinput_cache[16];
+static int s_dev_xinput_cache_inited = 0;
+static int td5_device_is_xinput_cached(int i)
+{
+    if (i < 0 || i >= 16) return 0;
+    if (!s_dev_xinput_cache_inited) {
+        int k;
+        for (k = 0; k < 16; k++) s_dev_xinput_cache[k] = -1;
+        s_dev_xinput_cache_inited = 1;
+    }
+    if (s_dev_xinput_cache[i] < 0)
+        s_dev_xinput_cache[i] = (signed char)(td5_device_is_xinput(i) ? 1 : 0);
+    return s_dev_xinput_cache[i];
+}
+
+/* Bind DI<->XInput when exactly ONE unbound XInput-class DI device and exactly
+ * ONE unclaimed connected XInput user are holding the same physical button this
+ * frame. di_mask: bit i set if DI device i holds the button. xi_mask: bit u set
+ * if XInput user u holds it. Ambiguity (>1 on either side) is skipped — so this
+ * can never MIS-route; an ambiguous frame just resolves on a later one. */
+static void td5_xinput_correlate_button(uint32_t di_mask, uint32_t xi_mask)
+{
+    int i, u, di_count = 0, xi_count = 0, the_di = -1, the_user = -1;
+    for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
+        if (!(xi_mask & (1u << u))) continue;
+        if (td5_xinput_user_is_claimed(u)) continue;
+        xi_count++; the_user = u;
+    }
+    if (xi_count != 1) return;
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        if (!(di_mask & (1u << i))) continue;
+        if (s_di_xinput_user[i] >= 0) continue;            /* already bound */
+        if (!td5_device_is_xinput_cached(i)) continue;
+        di_count++; the_di = i;
+    }
+    if (di_count != 1) return;
+    s_di_xinput_user[the_di] = the_user;
+    TD5_LOG_I(LOG_TAG,
+        "FF XInput correlate: DI device %d (%s) <-> XInput user %d (button coincidence)",
+        the_di, (the_di < s_device_count ? s_device_names[the_di] : "?"), the_user);
+}
+
+/* Per-menu-frame correlation: read every still-unbound XInput-class pad's
+ * A/Start through the shared scan handles and every XInput user's A/Start, then
+ * bind any pad that uniquely coincides. Called from the lobby join scan, the
+ * frontend nav scan and the car-select grid scan. Cheap once everything is bound
+ * (the unbound-skip leaves di_a/di_start zero and it returns before reading
+ * XInput). A = DI button 0 / XINPUT_GAMEPAD_A (0x1000); Start = DI button 7 /
+ * XINPUT_GAMEPAD_START (0x0010) — both match the menu-nav button decode. */
+static void td5_xinput_correlate_tick(void)
+{
+    uint32_t di_a = 0, di_start = 0, xi_a = 0, xi_start = 0;
+    int i, u;
+    if (!td5_ff_xinput_enabled() || !td5_xinput_load() || !s_xi_get) return;
+    td5_xinput_corr_init();
+
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        DIJOYSTATE2 js;
+        LPDIRECTINPUTDEVICE8A dev;
+        if (s_di_xinput_user[i] >= 0) continue;            /* already bound */
+        if (!td5_device_is_xinput_cached(i)) continue;     /* only XInput-class pads */
+        dev = scan_dev(i);
+        if (!dev) continue;
+        memset(&js, 0, sizeof(js));
+        if (FAILED(IDirectInputDevice8_Poll(dev))) {
+            IDirectInputDevice8_Acquire(dev);
+            IDirectInputDevice8_Poll(dev);
+        }
+        if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) continue;
+        if (js.rgbButtons[0] & 0x80) di_a     |= (1u << i);
+        if (js.rgbButtons[7] & 0x80) di_start |= (1u << i);
+    }
+    if (!di_a && !di_start) return;                        /* nothing pressed to learn from */
+
+    /* wButtons is the first WORD of XINPUT_GAMEPAD, right after dwPacketNumber. */
+    for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
+        TD5_XINPUT_STATE st;
+        unsigned btn;
+        ZeroMemory(&st, sizeof(st));
+        if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;
+        btn = (unsigned)st.pad[0] | ((unsigned)st.pad[1] << 8);
+        if (btn & 0x1000u) xi_a     |= (1u << u);
+        if (btn & 0x0010u) xi_start |= (1u << u);
+    }
+
+    if (di_a)     td5_xinput_correlate_button(di_a, xi_a);
+    if (di_start) td5_xinput_correlate_button(di_start, xi_start);
+}
+
 /* Correlate an XInput-class DI device (at DInput enumeration index `di`) to its
  * XInput user index (0..3) for player slot `device_slot`.
  *
@@ -3071,6 +3316,20 @@ static int td5_xinput_user_for_device(int di, int device_slot)
         }
     }
 
+    /* OBSERVED correlation wins over the enumeration-rank heuristic below: it was
+     * learned from a real button-press coincidence in the menus, so it is keyed
+     * to the physical pad and is correct even for identical 8BitDo pads and a
+     * DInput enumeration order that does not track the XInput slot order.
+     * [SPLIT-SCREEN FF FIX 2026-06-24 v2] */
+    if (di >= 0 && di < 16) {
+        td5_xinput_corr_init();
+        if (s_di_xinput_user[di] >= 0) {
+            TD5_LOG_I(LOG_TAG, "FF XInput: slot=%d DI device=%d -> user=%d (observed)",
+                      device_slot, di, s_di_xinput_user[di]);
+            return s_di_xinput_user[di];
+        }
+    }
+
     /* Rank of this device among XInput-class DI devices, by enumeration order
      * (device 0 is the keyboard; joysticks start at 1). */
     rank = 0;
@@ -3084,6 +3343,7 @@ static int td5_xinput_user_for_device(int di, int device_slot)
         TD5_XINPUT_STATE st;
         ZeroMemory(&st, sizeof(st));
         if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;  /* not connected */
+        if (td5_xinput_user_is_claimed(u)) continue;   /* already taken by an observed binding */
         if (seen == rank) return u;
         seen++;
     }
