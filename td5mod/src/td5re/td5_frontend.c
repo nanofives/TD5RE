@@ -2596,22 +2596,32 @@ static float s_cstat_acc_min, s_cstat_acc_max;   /* 0-60 time: min == quickest *
 static float s_cstat_hnd_min, s_cstat_hnd_max;
 static int   s_cstat_ranges_built = 0;
 
-/* Parse three raw config.nfo strings to numeric stats. Returns 1 only if all
- * three are present and positive (so missing/garbage cars are skipped). */
+/* Parse three raw config.nfo strings to numeric stats. Returns a PER-FIELD bitmask
+ * of which stats parsed positive: bit0 = speed (field 7), bit1 = accel (field 8),
+ * bit2 = grip (field 14). 0 means none are usable. Each out-param holds its parsed
+ * value when that bit is set, else -1.0f.
+ *
+ * Per-field (not all-or-nothing) so a car that publishes SOME stats but lists others
+ * as "UNKNOWN" still shows the stats it has. The Aston Martin V8 Vantage (ext 6) and
+ * Project Vantage (ext 16) publish top speed + 0-60 but "UNKNOWN" lateral acc; the
+ * old all-three gate (atof("UNKNOWN")==0 -> return 0) made them show NO bars at all. */
 static int frontend_glance_from_fields(const char *f7, const char *f8, const char *f14,
                                        float *spd, float *acc, float *hnd) {
     float s = (float)atof(f7);
     float a = (float)atof(f8);
     float h = (float)atof(f14);
-    if (s <= 0.0f || a <= 0.0f || h <= 0.0f) return 0;
-    *spd = s; *acc = a; *hnd = h;
-    return 1;
+    int mask = 0;
+    if (s > 0.0f) { *spd = s; mask |= 1; } else *spd = -1.0f;
+    if (a > 0.0f) { *acc = a; mask |= 2; } else *acc = -1.0f;
+    if (h > 0.0f) { *hnd = h; mask |= 4; } else *hnd = -1.0f;
+    return mask;
 }
 
 /* Read a car's three glance stats straight from its config.nfo, WITHOUT
  * touching the shared s_car_spec cache (this is used only by the range builder,
  * which scans every car and would otherwise clobber the displayed car). The
- * line-split mirrors frontend_load_car_spec_fields. Returns 1 on success. */
+ * line-split mirrors frontend_load_car_spec_fields. Returns the per-field bitmask
+ * from frontend_glance_from_fields (0 = nothing usable). */
 static int frontend_read_car_glance_stats(int ext_id, float *spd, float *acc, float *hnd) {
     const char *zip = td5_asset_get_car_zip_path(ext_id);
     char fields[17][48];
@@ -2640,21 +2650,29 @@ static int frontend_read_car_glance_stats(int ext_id, float *spd, float *acc, fl
 /* Build the roster-wide min/max for each stat (idempotent / cached). Excludes
  * cop-chase cars like the speed pool, and any car whose config.nfo won't parse. */
 static void frontend_build_carstat_ranges(void) {
-    int id, n = 0;
+    int id, n = 0, partial = 0;
     if (s_cstat_ranges_built) return;
     s_cstat_ranges_built = 1;
     s_cstat_spd_min = s_cstat_acc_min = s_cstat_hnd_min =  1e30f;
     s_cstat_spd_max = s_cstat_acc_max = s_cstat_hnd_max = -1e30f;
     for (id = 0; id < TD5_CAR_COUNT; id++) {
         float spd, acc, hnd;
+        int mask;
         if (frontend_car_is_cop(id)) continue;
-        if (!frontend_read_car_glance_stats(id, &spd, &acc, &hnd)) continue;
-        if (spd < s_cstat_spd_min) s_cstat_spd_min = spd;
-        if (spd > s_cstat_spd_max) s_cstat_spd_max = spd;
-        if (acc < s_cstat_acc_min) s_cstat_acc_min = acc;
-        if (acc > s_cstat_acc_max) s_cstat_acc_max = acc;
-        if (hnd < s_cstat_hnd_min) s_cstat_hnd_min = hnd;
-        if (hnd > s_cstat_hnd_max) s_cstat_hnd_max = hnd;
+        mask = frontend_read_car_glance_stats(id, &spd, &acc, &hnd);
+        if (!mask) continue;
+        /* Per-field: only fold a stat into its range when THIS car actually
+         * publishes it, so a car with "UNKNOWN" grip (Aston Martin Vantages)
+         * still contributes its valid top-speed/0-60 to those ranges without
+         * dragging the grip range to a bogus -1.0 sentinel. */
+        if (mask & 1) { if (spd < s_cstat_spd_min) s_cstat_spd_min = spd; if (spd > s_cstat_spd_max) s_cstat_spd_max = spd; }
+        if (mask & 2) { if (acc < s_cstat_acc_min) s_cstat_acc_min = acc; if (acc > s_cstat_acc_max) s_cstat_acc_max = acc; }
+        if (mask & 4) { if (hnd < s_cstat_hnd_min) s_cstat_hnd_min = hnd; if (hnd > s_cstat_hnd_max) s_cstat_hnd_max = hnd; }
+        if (mask != 7) {            /* publishes some-but-not-all glance stats */
+            partial++;
+            TD5_LOG_I(LOG_TAG, "carstat: ext%d partial mask=%d spd=%.0f acc=%.1f grip=%.2f",
+                      id, mask, spd, acc, hnd);
+        }
         n++;
     }
     if (n == 0) {   /* nothing readable — neutral ranges so bars render half-full */
@@ -2664,8 +2682,8 @@ static void frontend_build_carstat_ranges(void) {
         return;
     }
     TD5_LOG_I(LOG_TAG,
-              "carstat_ranges: n=%d spd[%.0f..%.0f] 0-60[%.2f..%.2f] grip[%.2f..%.2f]",
-              n, s_cstat_spd_min, s_cstat_spd_max,
+              "carstat_ranges: n=%d partial=%d spd[%.0f..%.0f] 0-60[%.2f..%.2f] grip[%.2f..%.2f]",
+              n, partial, s_cstat_spd_min, s_cstat_spd_max,
               s_cstat_acc_min, s_cstat_acc_max, s_cstat_hnd_min, s_cstat_hnd_max);
 }
 
@@ -6882,6 +6900,7 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
                                         uint32_t accent, int compact, float sx, float sy) {
     static const char *lbl[3] = { "SPEED", "ACCEL", "GRIP" };
     float spd = 0, acc = 0, hnd = 0, fr[3] = { 0, 0, 0 };
+    int valid_mask;   /* bit0=speed, bit1=accel, bit2=grip — gates per-bar fill */
     float padx = compact ? 4.0f : 7.0f;
     float pady = compact ? 2.0f : 6.0f;
     /* In the MP panes, line the labels up with the CAR/PAINT button text (drawn at
@@ -6906,7 +6925,8 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     }
     capd = SMALLFONT_TTF_CAP * (lsy / sy);
 
-    if (frontend_glance_from_fields(f7, f8, f14, &spd, &acc, &hnd))
+    valid_mask = frontend_glance_from_fields(f7, f8, f14, &spd, &acc, &hnd);
+    if (valid_mask)
         frontend_normalize_glance(spd, acc, hnd, &fr[0], &fr[1], &fr[2]);
 
     /* Frame: the regular blue/unselected button look (non-interactive). In the
@@ -6933,7 +6953,11 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     for (i = 0; i < 3; i++) {
         float ry   = top + (float)i * rowh;
         float bary = ry + (rowh - barh) * 0.5f;
-        float fillw = fr[i] * barw;
+        /* Fill only the bars this car actually publishes; an "UNKNOWN" stat
+         * (e.g. Aston Martin Vantage lateral acc) leaves just the empty track.
+         * The gate also stops the INVERTED accel fraction from painting a full
+         * bar when 0-60 is missing (frac(-1)=0 -> 1-0 = full). */
+        float fillw = ((valid_mask >> i) & 1) ? fr[i] * barw : 0.0f;
         if (lblw > 0.0f) {
             float ty = (ry + (rowh - capd) * 0.5f) * sy;
             fe_draw_small_text((bx + content_l) * sx, ty, lbl[i], 0xFFC8C8C8u, lsx, lsy);
