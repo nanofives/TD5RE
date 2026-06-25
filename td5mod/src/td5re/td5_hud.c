@@ -3663,6 +3663,50 @@ static void hud_filler_line(float ax, float ay, float bx, float by,
     hud_submit_quad(&q);
 }
 
+/* World-space centre (midpoint of the two rails) of strip span `idx`. Returns 1
+ * on success, 0 if the span index or its right-rail vertex index is invalid.
+ * Shared by the empty-cell MAP road polyline, the branch corridor polylines, and
+ * the branch->main-road connector stubs so all three read identical geometry. */
+static int hud_filler_span_centre_world(const uint8_t *span_base,
+                                        const uint8_t *vert_base,
+                                        int span_count, int idx,
+                                        float *out_cx, float *out_cz)
+{
+    if (idx < 0 || idx >= span_count) return 0;
+    const uint8_t *s = span_base + (size_t)idx * 24;
+    int32_t  ox   = *(const int32_t *)(s + 0x0C);
+    int32_t  oz   = *(const int32_t *)(s + 0x14);
+    uint16_t vi_l = *(const uint16_t *)(s + 0x04);
+    uint8_t  type = s[0];
+    uint8_t  nib  = s[3] & 0x0F;
+    int32_t  col0 = s_minimap_vtx_delta_col0[type & 0x07];
+    int32_t  vi_r = (int32_t)vi_l + (int32_t)nib + col0;
+    if (vi_r < 0) return 0;
+    const int16_t *vl = (const int16_t *)(vert_base + (uint32_t)vi_l * 6);
+    const int16_t *vr = (const int16_t *)(vert_base + (uint32_t)vi_r * 6);
+    *out_cx = ((float)((int)vl[0] + ox) + (float)((int)vr[0] + ox)) * 0.5f;
+    *out_cz = ((float)((int)vl[2] + oz) + (float)((int)vr[2] + oz)) * 0.5f;
+    return 1;
+}
+
+/* Filled square cap, `half` px half-size, centred at (cx,cy) (screen px). Drawn
+ * at each polyline vertex to fill the V-notch that two consecutive thick line
+ * segments leave at their shared joint — without it the road/branch outline reads
+ * as a chain of disjoint rectangles (the "jagged edges" the map showed at every
+ * turn). Clipped by the active scissor like hud_filler_line. */
+static void hud_filler_dot(float cx, float cy, float half, uint32_t col)
+{
+    if (half < 0.5f) return;
+    TD5_SpriteQuad q;
+    hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+        cx - half, cy - half,    /* TL */
+        cx - half, cy + half,    /* BL */
+        cx + half, cy + half,    /* BR */
+        cx + half, cy - half,    /* TR */
+        0.0f, 0.0f, 0.0f, 0.0f, col, HUD_DEPTH);
+    hud_submit_quad(&q);
+}
+
 /* [#1 2026-06-15] Draw a triangular ARROW marker centred at (cx,cy) pointing in
  * the car's facing direction, `half` px from centre to tip. `dirx`/`diry` is the
  * unit forward direction in MAP screen space (screen Y grows down). Built as a
@@ -3829,30 +3873,39 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     /* Road: thin centreline polyline around the ring (whole-track overview). The
      * centre of each span is (left_rail + right_rail)/2; connect consecutive
      * centres, closing the loop. Robust + cheap vs. per-type quad geometry. */
-    float road_half = (cr - cl) * 0.006f; if (road_half < 1.0f) road_half = 1.0f;
+    /* [#fix] Stroke half-thickness: the old 0.006*width gave a ~11px-thick road
+     * on a half-screen quadrant cell ("geometry too wide"). Scale down and clamp
+     * to an absolute ceiling so the overview reads as crisp thin roads on cells
+     * of any size, and so the joint caps below stay subtle. */
+    float road_half = (cr - cl) * 0.0035f;
+    if (road_half < 1.0f) road_half = 1.0f;
+    if (road_half > 3.5f) road_half = 3.5f;
     const uint32_t ROAD_COL = 0xFFB4B4B4u;
     float prev_x = 0.0f, prev_y = 0.0f; int have_prev = 0;
     float first_x = 0.0f, first_y = 0.0f;
-    int   step = (ring > 240) ? (ring / 240) : 1;   /* cap to ~240 segments */
+    /* Finer tessellation (was ~240) so curves on long tracks are less faceted. */
+    int   step = (ring > 360) ? (ring / 360) : 1;   /* cap to ~360 segments */
     if (step < 1) step = 1;
+    {
+        static int s_map_stroke_log = 0;
+        if ((s_map_stroke_log++ % 240) == 0)
+            TD5_LOG_I(LOG_TAG,
+                      "grid-filler map stroke: road_half=%.2f step=%d ring=%d (thin+capped, branch connectors on)",
+                      road_half, step, ring);
+    }
     for (int si = 0; si <= ring; si += step) {
         int idx = (si >= ring) ? 0 : si;            /* close the loop */
-        uint8_t *s = span_base + idx * 24;
-        int32_t ox = *(int32_t *)(s + 0x0C);
-        int32_t oz = *(int32_t *)(s + 0x14);
-        uint16_t vi_l = *(uint16_t *)(s + 0x04);
-        uint8_t  type = s[0];
-        uint8_t  nib  = s[3] & 0x0F;
-        int32_t  col0 = s_minimap_vtx_delta_col0[type & 0x07];
-        int32_t  vi_r = (int32_t)vi_l + (int32_t)nib + col0;
-        if (vi_r < 0) { have_prev = 0; continue; }
-        int16_t *vl = (int16_t *)(vert_base + (uint32_t)vi_l * 6);
-        int16_t *vr = (int16_t *)(vert_base + (uint32_t)vi_r * 6);
-        float cxw = ((float)((int)vl[0] + ox) + (float)((int)vr[0] + ox)) * 0.5f;
-        float czw = ((float)((int)vl[2] + oz) + (float)((int)vr[2] + oz)) * 0.5f;
+        float cxw, czw;
+        if (!hud_filler_span_centre_world(span_base, vert_base, g_strip_span_count,
+                                          idx, &cxw, &czw)) { have_prev = 0; continue; }
         float sxp = MAPPX(cxw, czw), syp = MAPPY(cxw, czw);
-        if (have_prev) hud_filler_line(prev_x, prev_y, sxp, syp, road_half, ROAD_COL);
-        else { first_x = sxp; first_y = syp; }
+        if (have_prev) {
+            hud_filler_line(prev_x, prev_y, sxp, syp, road_half, ROAD_COL);
+            hud_filler_dot(sxp, syp, road_half, ROAD_COL);   /* fill the joint notch */
+        } else {
+            first_x = sxp; first_y = syp;
+            hud_filler_dot(sxp, syp, road_half, ROAD_COL);   /* round the start cap */
+        }
         prev_x = sxp; prev_y = syp; have_prev = 1;
         if (si >= ring) hud_filler_line(prev_x, prev_y, first_x, first_y, road_half, ROAD_COL);
     }
@@ -3874,32 +3927,55 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
         int   bhave[MAP_MAX_CORRIDORS];
         for (int w = 0; w < MAP_MAX_CORRIDORS; w++) bhave[w] = 0;
         for (int si = 0; si < ring; si += step) {
+            /* [#fix] Main-road centre at THIS span, in screen space. A branch that
+             * starts (diverges) or ends (merges) at si is stitched to this point so
+             * the fork reads as a connected Y instead of a free-floating parallel
+             * line ("branches look disconnected from main road"). */
+            float mcxw, mczw, msx = 0.0f, msy = 0.0f; int have_main = 0;
+            if (hud_filler_span_centre_world(span_base, vert_base, g_strip_span_count,
+                                             si, &mcxw, &mczw)) {
+                msx = MAPPX(mcxw, mczw); msy = MAPPY(mcxw, mczw); have_main = 1;
+            }
             int nc = td5_track_count_branch_corridors(si);
             if (nc > MAP_MAX_CORRIDORS) nc = MAP_MAX_CORRIDORS;
             for (int w = 0; w < nc; w++) {
                 int bsp = td5_track_branch_corridor_span(si, w);
-                if (bsp < 0 || bsp >= g_strip_span_count) { bhave[w] = 0; continue; }
-                uint8_t *bs = span_base + bsp * 24;
-                int32_t  box = *(int32_t *)(bs + 0x0C);
-                int32_t  boz = *(int32_t *)(bs + 0x14);
-                uint16_t bvi_l = *(uint16_t *)(bs + 0x04);
-                uint8_t  btype = bs[0];
-                uint8_t  bnib  = bs[3] & 0x0F;
-                int32_t  bcol0 = s_minimap_vtx_delta_col0[btype & 0x07];
-                int32_t  bvi_r = (int32_t)bvi_l + (int32_t)bnib + bcol0;
-                if (bvi_r < 0) { bhave[w] = 0; continue; }
-                int16_t *bvl = (int16_t *)(vert_base + (uint32_t)bvi_l * 6);
-                int16_t *bvr = (int16_t *)(vert_base + (uint32_t)bvi_r * 6);
-                float bcxw = ((float)((int)bvl[0] + box) + (float)((int)bvr[0] + box)) * 0.5f;
-                float bczw = ((float)((int)bvl[2] + boz) + (float)((int)bvr[2] + boz)) * 0.5f;
+                float bcxw, bczw;
+                if (bsp < 0 || bsp >= g_strip_span_count ||
+                    !hud_filler_span_centre_world(span_base, vert_base,
+                                                  g_strip_span_count, bsp, &bcxw, &bczw)) {
+                    /* Corridor drops out here -> stitch its tail back to the road. */
+                    if (bhave[w] && have_main) {
+                        hud_filler_line(bprev_x[w], bprev_y[w], msx, msy, road_half, BRANCH_COL);
+                        hud_filler_dot(msx, msy, road_half, BRANCH_COL);
+                    }
+                    bhave[w] = 0;
+                    continue;
+                }
                 float bsxp = MAPPX(bcxw, bczw), bsyp = MAPPY(bcxw, bczw);
-                if (bhave[w]) hud_filler_line(bprev_x[w], bprev_y[w], bsxp, bsyp,
-                                              road_half, BRANCH_COL);
+                if (bhave[w]) {
+                    hud_filler_line(bprev_x[w], bprev_y[w], bsxp, bsyp, road_half, BRANCH_COL);
+                    hud_filler_dot(bsxp, bsyp, road_half, BRANCH_COL);   /* joint cap */
+                } else {
+                    /* Divergence: connect the main road to the branch's first span. */
+                    if (have_main) {
+                        hud_filler_line(msx, msy, bsxp, bsyp, road_half, BRANCH_COL);
+                        hud_filler_dot(msx, msy, road_half, BRANCH_COL);
+                    }
+                    hud_filler_dot(bsxp, bsyp, road_half, BRANCH_COL);
+                }
                 bprev_x[w] = bsxp; bprev_y[w] = bsyp; bhave[w] = 1;
             }
-            /* Drop the polyline state for corridor slots this span doesn't feed so
-             * a gap in the table doesn't bridge two unrelated corridors. */
-            for (int w = nc; w < MAP_MAX_CORRIDORS; w++) bhave[w] = 0;
+            /* Corridor slots this span no longer feeds: stitch their tail back to
+             * the main road (merge) so the fork doesn't just stop in mid-air, then
+             * drop the polyline state so a gap can't bridge two unrelated corridors. */
+            for (int w = nc; w < MAP_MAX_CORRIDORS; w++) {
+                if (bhave[w] && have_main) {
+                    hud_filler_line(bprev_x[w], bprev_y[w], msx, msy, road_half, BRANCH_COL);
+                    hud_filler_dot(msx, msy, road_half, BRANCH_COL);
+                }
+                bhave[w] = 0;
+            }
         }
         #undef MAP_MAX_CORRIDORS
     }
