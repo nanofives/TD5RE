@@ -119,6 +119,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
 /* [tasks #9/#14] V2V traffic-taming knob accessors + ground clamp, defined
  * lower in the file but referenced from obb_corner_test / collision_detect_*. */
 static int   traffic_hit_tame_enabled(void);
+static int   traffic_mass_pct(void);
 static int   wreck_immobile_enabled(void);
 static int   wreck_mass_pct(void);
 static float traffic_hitbox_scale(void);
@@ -5664,6 +5665,31 @@ static int wreck_mass_pct(void)
     return v;
 }
 
+/* [traffic-lighter 2026-06-24] Make ORDINARY (non-wrecked) traffic easier to shove
+ * out of the way when the player crashes into it. Same mechanism as wreck_mass_pct
+ * (above), applied to live traffic instead of broken-down cars: cardef+0x88 behaves
+ * as an INVERSE mass in the V2V impulse math [CONFIRMED @ 0x004079C0], so scaling a
+ * traffic car's mass term UP gives it MORE velocity from a hit and bleeds LESS speed
+ * off the car that hits it — the player plows through and the traffic flies aside.
+ * Stock traffic mass is 32 (0x20) [CONFIRMED @ 0x0042F235]; the default 250 (= 2.5x
+ * lighter) is noticeable but well short of the 4x wreck boost. Percentage of stock;
+ * TD5RE_TRAFFIC_MASS_PCT=100 disables. Clamped [100,2000] so traffic is never made
+ * HEAVIER than stock. Only applies to a traffic slot that is NOT broken down (a wreck
+ * already gets wreck_mass_pct, which takes precedence so the two never compound). */
+static int traffic_mass_pct(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_TRAFFIC_MASS_PCT");
+        long p = (e && e[0]) ? strtol(e, NULL, 10) : 250;
+        if (p < 100)  p = 100;
+        if (p > 2000) p = 2000;
+        v = (int)p;
+        TD5_LOG_I(LOG_TAG, "traffic_mass_pct: TD5RE_TRAFFIC_MASS_PCT=%d", v);
+    }
+    return v;
+}
+
 /* [task #14 / #16] TD5RE_TRAFFIC_HITBOX_SCALE (default 0.70) — multiplier applied
  * to a TRAFFIC car's OBB half-extents (half-width / front-Z / rear-Z) in the V2V
  * corner test so the collision box matches the visible model instead of being
@@ -5929,11 +5955,23 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * flag is replicated, so this stays netplay-deterministic. */
     {
         int wp = wreck_mass_pct();
-        if (wp != 100) {
-            if (A->slot_index >= 0 && td5_ai_actor_is_broken_down((int)A->slot_index))
+        int tp = traffic_mass_pct();
+        /* Wreck boost takes precedence over the ordinary-traffic boost so a
+         * broken-down traffic car keeps its (heavier) 4x shove and the two
+         * multipliers never compound. A live traffic slot (>= traffic base, not
+         * broken) gets the lighter-traffic boost instead. Racers (slot <
+         * g_traffic_slot_base) are never scaled — byte-faithful. */
+        if (A->slot_index >= 0) {
+            if (wp != 100 && td5_ai_actor_is_broken_down((int)A->slot_index))
                 mass_A = (mass_A * wp) / 100;
-            if (B->slot_index >= 0 && td5_ai_actor_is_broken_down((int)B->slot_index))
+            else if (tp != 100 && (int)A->slot_index >= g_traffic_slot_base)
+                mass_A = (mass_A * tp) / 100;
+        }
+        if (B->slot_index >= 0) {
+            if (wp != 100 && td5_ai_actor_is_broken_down((int)B->slot_index))
                 mass_B = (mass_B * wp) / 100;
+            else if (tp != 100 && (int)B->slot_index >= g_traffic_slot_base)
+                mass_B = (mass_B * tp) / 100;
         }
     }
 
