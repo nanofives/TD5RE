@@ -96,6 +96,12 @@ void td5_sound_stop_tracked_vehicle_audio(void);
 void td5_sound_update_police_siren(void);
 int  td5_sound_toggle_siren(void);      /* cop-chase siren on/off toggle (port enh.) */
 int  td5_sound_siren_is_enabled(void);  /* query siren toggle state */
+/* [REGULAR-CAR HORN — PORT ENHANCEMENT] Honk a regular car's Horn.wav (slot
+ * i*3+2). The original never played a per-car horn (bit 0x200000 was siren +
+ * cheat only — RE @ 0x00440a30/0x00441a80); this triggers the port's existing
+ * (previously dead) horn-playback block. Call on a horn-key press edge from a
+ * non-cop car. actor_index is the race-vehicle slot 0..5. */
+void td5_sound_play_horn(int actor_index);
 void td5_sound_update_audio_mix(void);
 int  td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index, int is_reverb_vehicle);
 
