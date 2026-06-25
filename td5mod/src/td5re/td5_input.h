@@ -313,7 +313,7 @@ int  td5_input_is_playback_active(void);
 int  td5_input_replay_exit_requested(void);  /* [item 18] one-shot: controller Back/Start pressed during replay */
 /* [STUCK RECOVERY 2026-06-15] One-shot per-player edge: returns 1 exactly once
  * when this LOCAL human player just pressed the manual car-recovery button
- * (keyboard R / joystick L3, left-stick click). `player` is the local human
+ * (keyboard R / joystick SELECT / Back button). `player` is the local human
  * player index (0..s_active_players-1), NOT the actor slot. Reading CONSUMES the
  * edge so a held button fires recovery only once per press. Always 0 during
  * replay playback (the manual-recovery latch is only updated on the live poll's

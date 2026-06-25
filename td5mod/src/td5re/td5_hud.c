@@ -1519,10 +1519,13 @@ static void hud_draw_mp_car_labels(void)
 
     const float FP = 1.0f / 256.0f;          /* 24.8 fixed -> world units */
 
-    /* Above-roof anchor. World is Y-DOWN (td5_render.c: +Y world pushes a car
-     * DOWN toward the ground), so SUBTRACTING from world-Y lifts the anchor
-     * above the roof. ~600 world units sits comfortably over a car body. */
-    const float ROOF_LIFT_WS = 600.0f;
+    /* [#MP LABEL BELOW WHEELS 2026-06-24] Anchor the label BELOW the wheels
+     * instead of over the roof, so it never blocks the driver's view of the road
+     * ahead. World is Y-DOWN (td5_render.c: +Y world pushes a car DOWN toward the
+     * ground), so ADDING to world-Y drops the anchor below the car body. The drop
+     * (DROP_WS, world units) is cached below alongside NEAR_D/FAR_D/CUT_D and is
+     * env-tunable (TD5RE_MP_LABEL_DROP) so it can be dialled to "just below the
+     * wheels" without a rebuild. */
 
     /* Distance shrink / cutoff, expressed in view-space depth (= 1/rhw, the
      * camera->point distance along the view axis, world units). NEAR_D and far
@@ -1530,11 +1533,12 @@ static void hud_draw_mp_car_labels(void)
      * the floor scale by FAR_D, and skipped entirely past CUT_D. */
     /* [#23 2026-06-19] Widened from 2500/22000/30000 so other players' labels
      * appear from further away and stay full size sooner (env-overridable). */
-    static float NEAR_D = -1.0f, FAR_D = -1.0f, CUT_D = -1.0f;
+    static float NEAR_D = -1.0f, FAR_D = -1.0f, CUT_D = -1.0f, DROP_WS = -1.0f;
     if (NEAR_D < 0.0f) {
         NEAR_D = hud_mp_label_dist("TD5RE_MP_LABEL_NEAR",  6000.0f);  /* full-size plateau */
         FAR_D  = hud_mp_label_dist("TD5RE_MP_LABEL_FAR",  22000.0f);  /* shrink-floor distance */
         CUT_D  = hud_mp_label_dist("TD5RE_MP_LABEL_CUT",  30000.0f);  /* hard cutoff (now true XZ dist) */
+        DROP_WS = hud_mp_label_dist("TD5RE_MP_LABEL_DROP", 250.0f);   /* below-wheels anchor drop */
     }
     const float SCALE_NEAR = 1.0f;           /* multiplier on the base text scale */
     const float SCALE_FAR  = 0.35f;
@@ -1582,7 +1586,7 @@ static void hud_draw_mp_car_labels(void)
             int32_t vx = *(int32_t *)(a + 0x1CC);   /* linear_velocity_x */
             int32_t vz = *(int32_t *)(a + 0x1D4);   /* linear_velocity_z */
             float wx = ((float)actor_world_x(slot) + (float)vx * frac) * FP;
-            float wy = ((float)(*(int32_t *)(a + 0x200)) - ROOF_LIFT_WS) * FP; /* roof, Y up = -Y */
+            float wy = ((float)(*(int32_t *)(a + 0x200)) + DROP_WS) * FP; /* below wheels, Y down = +Y */
             float wz = ((float)actor_world_z(slot) + (float)vz * frac) * FP;
 
             float sx, sy, sz, rhw;
@@ -1655,27 +1659,37 @@ static void hud_draw_mp_car_labels(void)
             float pad_y   = 4.0f  * ts;
             float plate_h = cap_h + 2.0f * pad_y;
             float plate_w = tw + 10.0f * ts;
-            /* Centre the plate horizontally on the projected anchor and sit its
-             * BOTTOM just above the anchor point (so it floats over the roof). */
+            /* Centre the plate horizontally on the projected anchor and hang it
+             * BELOW the anchor (top at the anchor, growing downward) so the text
+             * sits just under the wheels and never covers the car or the road. */
             float plate_l = fx - plate_w * 0.5f;
-            float plate_b = fy;
-            float plate_t = plate_b - plate_h;
+            float plate_t = fy;
+            float plate_b = plate_t + plate_h;
 
             /* Clamp horizontally inside the pane so an off-centre car's label
              * stays readable instead of bleeding into the neighbouring pane. */
             if (plate_l < L + 1.0f)              plate_l = L + 1.0f;
             if (plate_l + plate_w > R - 1.0f)    plate_l = R - 1.0f - plate_w;
-            /* If the anchor is above the pane top, skip (car is off the top of
-             * this view); a tiny sliver is fine, fully above is not. */
+            /* Skip if the plate would fall entirely outside this pane (car off the
+             * bottom or top of the view). Then clamp the bottom edge inside the
+             * pane so a low car's downward label can't bleed into the pane beneath it. */
+            if (plate_t > B - 2.0f) continue;
             if (plate_b < T + 2.0f) continue;
+            if (plate_b > B - 1.0f) { plate_b = B - 1.0f; plate_t = plate_b - plate_h; }
 
-            /* Accent background, black text (light accents) / white (dark). */
-            td5_vui_quad(plate_l, plate_t, plate_w, plate_h, accent, -1, 0, 0, 0, 0);
+            /* [#MP LABEL 50% OPACITY 2026-06-24] Accent box + black/white text,
+             * both at HALF opacity so the marker never fully occludes the car or
+             * the road behind it. The VectorUI quad (TRANSLUCENT_LINEAR_HUD) and
+             * text (translucent MSDF) paths both blend the 0xAARRGGBB alpha, so
+             * forcing the alpha byte to 0x80 (~50%) is all that's needed. Text
+             * colour is picked from the OPAQUE accent luminance (alpha-independent). */
             int r8 = (accent >> 16) & 0xFF, g8 = (accent >> 8) & 0xFF, b8 = accent & 0xFF;
             int lum = (r8 * 30 + g8 * 59 + b8 * 11) / 100;
-            uint32_t tcol = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
+            uint32_t box_col  = (accent & 0x00FFFFFFu) | 0x80000000u;                    /* 50% box  */
+            uint32_t text_col = ((lum > 150) ? 0x00101010u : 0x00FFFFFFu) | 0x80000000u; /* 50% text */
+            td5_vui_quad(plate_l, plate_t, plate_w, plate_h, box_col, -1, 0, 0, 0, 0);
             float ny = (plate_t + plate_b) * 0.5f - 15.5f * ts;  /* caps centred in plate */
-            td5_vui_text_centered(plate_l + plate_w * 0.5f, ny, nm, tcol, ts, ts);
+            td5_vui_text_centered(plate_l + plate_w * 0.5f, ny, nm, text_col, ts, ts);
         }
 
         td5_render_pop_transform();
@@ -3757,6 +3771,33 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     uint8_t *vert_base = (uint8_t *)g_strip_vertex_base;
     if (!span_base || !vert_base || g_strip_span_count <= 1) return;
 
+    /* Gather the racers that are STILL in the race, up front. Two reasons it has
+     * to happen before the fit:
+     *   1. A player who has already crossed the line is dropped here (the overlay
+     *      should only show who's still driving — not finished cars frozen on the
+     *      map), and
+     *   2. the LIVE field's world positions drive the zoom window below, so the
+     *      map fits to the stretch of track from the rear car to the leader rather
+     *      than always showing the whole route at minimum scale.
+     * Only the raw world coords + heading + identity are captured now; the screen
+     * projection (dx/dy/fx/fy) is filled in once the fit + optional rotation are
+     * known. `td5_game_slot_is_finished` is the same per-slot finish query the
+     * per-viewport end-of-race HUD uses (post_finish_metric_base != 0). */
+    struct { float wx, wz, dx, dy, ly, fx, fy; uint32_t h12, col; char nm[20]; }
+        lab[TD5_MAX_RACER_SLOTS];
+    int n = 0;
+    for (int r = 0; r < g_racer_count && r < TD5_MAX_RACER_SLOTS; r++) {
+        if (td5_game_get_slot_state(r) == 3) continue;       /* decoration slot   */
+        if (td5_game_slot_is_finished(r))    continue;       /* already finished  */
+        lab[n].wx  = (float)actor_world_x(r) * (1.0f / 256.0f);
+        lab[n].wz  = (float)actor_world_z(r) * (1.0f / 256.0f);
+        lab[n].h12 = (uint32_t)((actor_heading(r) >> 8) & 0xFFF);
+        lab[n].col = s_hud_id_accent[r] ? s_hud_id_accent[r] : hud_filler_slot_color(r);
+        if (s_hud_id_name[r][0]) snprintf(lab[n].nm, sizeof lab[n].nm, "%s", s_hud_id_name[r]);
+        else                     snprintf(lab[n].nm, sizeof lab[n].nm, "CAR %d", r + 1);
+        n++;
+    }
+
     /* Walk just the main ring (branch spans live past it and would blow up the
      * extent); fall back to the full strip when no ring length is known. */
     int ring = g_td5.track_span_ring_length;
@@ -3806,6 +3847,48 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
     }
     #undef MAP_FOLD_SPAN_RAILS
     if (maxx <= minx || maxz <= minz) return;
+
+    /* [#zoom 2026-06-24] Interactive zoom-to-field: the fit below works off
+     * [minx..maxx]x[minz..maxz]. By default that's the whole-track AABB just
+     * computed (the fallback used when nobody is on the track). When there ARE
+     * live racers, replace it with a window around just the active field so the
+     * map ZOOMS to where everyone is — from the rear car to the leader — making
+     * positions legible in the cramped split-screen cell instead of always
+     * showing the full route at minimum scale.
+     *
+     * The window is the active-player world AABB, with two safeguards:
+     *   - floored to MIN_EXT (a fraction of the track's longer axis) so a tight
+     *     pack — or a lone surviving car — doesn't zoom to a featureless pinhole
+     *     with no surrounding road for context, and
+     *   - grown by a MARGIN on every side so the rear/front arrows + their name
+     *     plates sit inside the cell instead of right on the clipped edge ("so it
+     *     doesn't cut off at the end of the screen"). The caller's 10% inner pad
+     *     in the fit stacks on top of this. */
+    if (n > 0) {
+        float pminx = 1e30f, pmaxx = -1e30f, pminz = 1e30f, pmaxz = -1e30f;
+        for (int i = 0; i < n; i++) {
+            if (lab[i].wx < pminx) pminx = lab[i].wx;
+            if (lab[i].wx > pmaxx) pmaxx = lab[i].wx;
+            if (lab[i].wz < pminz) pminz = lab[i].wz;
+            if (lab[i].wz > pmaxz) pmaxz = lab[i].wz;
+        }
+        float full_w   = maxx - minx, full_h = maxz - minz;
+        float full_max = (full_w > full_h) ? full_w : full_h;
+        float min_ext  = full_max * 0.18f;       /* don't zoom past ~18% of track */
+        float pcx = (pminx + pmaxx) * 0.5f, pcz = (pminz + pmaxz) * 0.5f;
+        float pw  = pmaxx - pminx,           ph  = pmaxz - pminz;
+        if (pw < min_ext) pw = min_ext;
+        if (ph < min_ext) ph = min_ext;
+        float mx = pw * 0.30f, mz = ph * 0.30f;  /* edge offset so nothing clips */
+        minx = pcx - pw * 0.5f - mx;  maxx = pcx + pw * 0.5f + mx;
+        minz = pcz - ph * 0.5f - mz;  maxz = pcz + ph * 0.5f + mz;
+        static int s_map_zoom_log = 0;
+        if ((s_map_zoom_log++ % 240) == 0)
+            TD5_LOG_I(LOG_TAG,
+                      "grid-filler map zoom: active=%d field_bbox=%.0fx%.0f min_ext=%.0f margin=%.0f,%.0f -> window=%.0fx%.0f (full=%.0fx%.0f)",
+                      n, pmaxx - pminx, pmaxz - pminz, min_ext, mx, mz,
+                      maxx - minx, maxz - minz, full_w, full_h);
+    }
 
     /* [#8 2026-06-15] Fit the whole-track world AABB into the cell, choosing the
      * orientation in {0deg, 90deg-left} that BEST FILLS the cell, then zooming to
@@ -3982,32 +4065,21 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb)
         #undef MAP_MAX_CORRIDORS
     }
 
-    /* Gather active racers -> projected dot + name + colour + facing direction.
-     * fx/fy is the car's forward heading expressed in MAP screen space (the map
-     * uses no rotation, so heading maps straight through): the body-longitudinal
+    /* Project the active racers gathered up top (finished cars already dropped)
+     * into MAP screen space, now that the fit + optional 90deg rotation are known.
+     * fx/fy is the car's forward heading in MAP screen space: the body-longitudinal
      * world direction is (sin h, cos h) over (X,Z) [see the speedo body-frame
-     * projection], and the map sends world X->screen X, world Z->screen Y, so the
-     * on-screen forward is (sin h, cos h) too. h is the 12-bit yaw at actor+0x1F4
-     * (euler_accum.yaw >> 8), 0x1000 = full circle. */
-    struct { float dx, dy, ly, fx, fy; uint32_t col; char nm[20]; } lab[TD5_MAX_RACER_SLOTS];
-    int n = 0;
-    for (int r = 0; r < g_racer_count && r < TD5_MAX_RACER_SLOTS; r++) {
-        if (td5_game_get_slot_state(r) == 3) continue;       /* decoration slot */
-        float wx = (float)actor_world_x(r) * (1.0f / 256.0f);
-        float wz = (float)actor_world_z(r) * (1.0f / 256.0f);
-        lab[n].dx = MAPPX(wx, wz); lab[n].dy = MAPPY(wx, wz);
-        uint32_t h12 = (uint32_t)((actor_heading(r) >> 8) & 0xFFF);
-        /* Forward in unrotated map space is (sin h, cos h) over (screenX,screenY).
-         * [#8] Rotate it the SAME way as the positions when the map is turned 90deg
-         * left so the arrow keeps pointing the way the car actually drives. */
-        float fwd_x = td5_sin_12bit(h12);
-        float fwd_y = td5_cos_12bit(h12);
-        lab[n].fx = rot90 ? fwd_y  : fwd_x;
-        lab[n].fy = rot90 ? -fwd_x : fwd_y;
-        lab[n].col = s_hud_id_accent[r] ? s_hud_id_accent[r] : hud_filler_slot_color(r);
-        if (s_hud_id_name[r][0]) snprintf(lab[n].nm, sizeof lab[n].nm, "%s", s_hud_id_name[r]);
-        else                     snprintf(lab[n].nm, sizeof lab[n].nm, "CAR %d", r + 1);
-        n++;
+     * projection]; with no rotation the map sends world X->screen X, world
+     * Z->screen Y, so the on-screen forward is (sin h, cos h) too. [#8] When the
+     * map is turned 90deg left the heading is rotated the SAME way as the
+     * positions so each arrow keeps pointing the way the car actually drives. */
+    for (int i = 0; i < n; i++) {
+        lab[i].dx = MAPPX(lab[i].wx, lab[i].wz);
+        lab[i].dy = MAPPY(lab[i].wx, lab[i].wz);
+        float fwd_x = td5_sin_12bit(lab[i].h12);
+        float fwd_y = td5_cos_12bit(lab[i].h12);
+        lab[i].fx = rot90 ? fwd_y  : fwd_x;
+        lab[i].fy = rot90 ? -fwd_x : fwd_y;
     }
 
     /* Label text size tracks the cell, trimmed by the HUD size multiplier. */
