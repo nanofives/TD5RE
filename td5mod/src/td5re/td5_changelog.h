@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Split-screen overview map no longer draws a stray" },
+    { CL_ITEM,    "  diagonal line across point-to-point tracks (Sydney)" },
     { CL_ITEM,    "CUP - WHAT NEXT? menu tidied: title moved to the top" },
     { CL_ITEM,    "  and the buttons realigned under it, a bit narrower" },
     { CL_ITEM,    "Dev: ADD AI PLAYER in the multiplayer lobby fills" },
