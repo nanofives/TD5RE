@@ -2104,6 +2104,126 @@ static int td5_plat_input_device_name_is_blocked(const char *name)
     return 0;
 }
 
+/* Friendly controller-name override.
+ *
+ * Modern pads/wheels report long DirectInput instance names — e.g.
+ * "Controller (8BitDo Ultimate 2C Wireless Controller)" — that overflow the
+ * port's controller-config / multiplayer-join rows (the MP-join lobby draws the
+ * name on a single un-wrapped line, so it spills off-screen). This pass maps a
+ * recognised controller to a short canonical label and hard-caps anything
+ * unrecognised so a name can never run past the row. Substring matching is
+ * case-insensitive; the table is ordered most-specific-first so e.g. the
+ * "xbox 360" entry wins over the generic "xbox" one.
+ *
+ * Port-only: the original delegated input to M2DX and never displayed these
+ * strings, so there is no RE basis — this is a display-side enhancement that
+ * sits alongside the device blocklist above. Edit the table to add models. */
+#define TD5_FRIENDLY_NAME_MAX 20   /* visible chars before "..." truncation */
+
+struct td5_friendly_name { const char *needle; const char *label; };
+
+static const struct td5_friendly_name s_friendly_names[] = {
+    /* 8BitDo (the user's primary pad). Identical units report the same name, so
+     * the disambiguation pass appends " #1"/" #2" AFTER this shortening. */
+    { "ultimate 2c",         "8BitDo Ultimate 2C" },
+    { "8bitdo ultimate",     "8BitDo Ultimate"    },
+    { "8bitdo pro 2",        "8BitDo Pro 2"       },
+    { "8bitdo sn30",         "8BitDo SN30"        },
+    { "8bitdo",              "8BitDo Pad"         },
+    /* PlayStation. Name alone can't tell a raw-HID DS4 from a DS5 (both report
+     * "Wireless Controller"); the user's PS pads are DS4 via DS4Windows, so that
+     * generic string maps to DS4. "dualsense"/"ds5" still win when present. */
+    { "dualsense edge",      "DualSense Edge"     },
+    { "dualsense",           "DualSense"          },  /* DS5 */
+    { "playstation(r)5",     "DualSense"          },
+    { "dualshock 4",         "DualShock 4"        },  /* DS4 */
+    { "playstation(r)4",     "DualShock 4"        },
+    { "wireless controller", "DualShock 4"        },  /* DS4Windows DS4 / raw HID */
+    { "dualshock 3",         "DualShock 3"        },  /* DS3 */
+    { "playstation(r)3",     "DualShock 3"        },
+    { "sixaxis",             "DualShock 3"        },
+    /* Xbox (a wired 360 pad, plus DS4Windows' default X360 output, lands here). */
+    { "xbox 360",            "Xbox 360"           },
+    { "x360",                "Xbox 360"           },
+    { "360 for windows",     "Xbox 360"           },
+    { "xbox elite",          "Xbox Elite"         },
+    { "xbox series",         "Xbox Series"        },
+    { "xbox one",            "Xbox One"           },
+    { "xbox",                "Xbox Pad"           },
+    /* Nintendo */
+    { "switch pro",          "Switch Pro"         },
+    { "nintendo switch",     "Switch Pro"         },
+    { "joy-con",             "Joy-Con"            },
+    /* Wheels */
+    { "g923",                "Logitech G923"      },
+    { "g920",                "Logitech G920"      },
+    { "g29",                 "Logitech G29"       },
+    { "g27",                 "Logitech G27"       },
+    { "g25",                 "Logitech G25"       },
+    { "driving force",       "Logitech DF"        },
+    { "momo",                "Logitech MOMO"      },
+    { "logitech",            "Logitech"           },
+    { "t300",                "Thrustmaster T300"  },
+    { "t248",                "Thrustmaster T248"  },
+    { "t150",                "Thrustmaster T150"  },
+    { "tmx",                 "Thrustmaster TMX"   },
+    { "thrustmaster",        "Thrustmaster"       },
+    { "fanatec",             "Fanatec"            },
+};
+
+static void td5_plat_input_friendly_device_name(const char *raw,
+                                                char *out, size_t out_sz)
+{
+    char low[256];
+    size_t i, n;
+    if (!out || out_sz == 0) return;
+    if (!raw) { out[0] = '\0'; return; }
+
+    /* Lower-case a bounded copy for case-insensitive substring matching. */
+    for (i = 0; i + 1 < sizeof(low) && raw[i]; i++) {
+        char c = raw[i];
+        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    low[i] = '\0';
+
+    /* 1) Known controller -> short canonical label (most-specific first). */
+    for (i = 0; i < sizeof(s_friendly_names) / sizeof(s_friendly_names[0]); i++) {
+        if (strstr(low, s_friendly_names[i].needle)) {
+            strncpy(out, s_friendly_names[i].label, out_sz - 1);
+            out[out_sz - 1] = '\0';
+            return;
+        }
+    }
+
+    /* 2) Unknown: prefer the parenthesised model from a "Controller (Name)"
+     *    wrapper (a common DirectInput shape) over the generic outer text. */
+    {
+        const char *open  = strchr(raw, '(');
+        const char *close = open ? strrchr(raw, ')') : NULL;
+        if (open && close && close > open + 1) {
+            size_t inner = (size_t)(close - open - 1);
+            if (inner > out_sz - 1) inner = out_sz - 1;
+            memcpy(out, open + 1, inner);
+            out[inner] = '\0';
+        } else {
+            strncpy(out, raw, out_sz - 1);
+            out[out_sz - 1] = '\0';
+        }
+    }
+
+    /* Trim trailing whitespace left by an unwrap or a sloppy instance name. */
+    n = strlen(out);
+    while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t')) out[--n] = '\0';
+
+    /* 3) Hard length cap so an unrecognised name can never spill off-screen.
+     *    Keep MAX-3 chars and append "..."; out_sz (256) always has room. */
+    if (n > TD5_FRIENDLY_NAME_MAX && out_sz > (size_t)TD5_FRIENDLY_NAME_MAX) {
+        size_t keep = TD5_FRIENDLY_NAME_MAX - 3;
+        out[keep] = '.'; out[keep + 1] = '.'; out[keep + 2] = '.';
+        out[keep + 3] = '\0';
+    }
+}
+
 /* Joystick enumeration callback */
 static BOOL CALLBACK EnumJoysticksCallback(
     const DIDEVICEINSTANCEA *inst, void *ctx)
@@ -2147,9 +2267,17 @@ static BOOL CALLBACK EnumJoysticksCallback(
         s_device_assigned[idx]      = 1;
     }
     /* Refresh display name + type each pass (the name is re-read so the
-     * disambiguation pass can re-suffix duplicates among present devices). */
-    strncpy(s_device_names[idx], inst->tszInstanceName, sizeof(s_device_names[0]) - 1);
-    s_device_names[idx][255] = '\0';
+     * disambiguation pass can re-suffix duplicates among present devices).
+     * Apply the friendly-name override here so a long raw instance name is
+     * shortened/capped before it reaches the controller UI. Runs every pass on
+     * the STABLE slot, and before the disambiguation pass so its " #1"/" #2"
+     * suffix lands on the SHORT label (two 8BitDo pads -> "8BitDo Ultimate 2C
+     * #1"/"#2"). Binding is by GUID, not name, so this is display-only. */
+    td5_plat_input_friendly_device_name(inst->tszInstanceName,
+            s_device_names[idx], sizeof(s_device_names[0]));
+    if (strcmp(inst->tszInstanceName, s_device_names[idx]) != 0)
+        TD5_LOG_I(LOG_TAG, "Device name override: \"%s\" -> \"%s\"",
+                  inst->tszInstanceName, s_device_names[idx]);
     {
         BYTE dev_type = GET_DIDEVICE_TYPE(inst->dwDevType);
         if (dev_type == DI8DEVTYPE_DRIVING ||
