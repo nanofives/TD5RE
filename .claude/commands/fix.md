@@ -210,15 +210,29 @@ If the bug was surfaced by a `/diff-race` run that flagged a tick-N divergence i
 Using the research summary from Step 1, make the code changes **in the worktree you created in Step 0** — never in the main tree.
 
 1. Edit the relevant source files under `${WORKTREE_DIR}/td5mod/src/td5re/` (Edit tool with absolute paths under the worktree).
-2. Run the build inside the worktree. The build script already handles its own output; because we're in a worktree, `td5re.exe` lands at `${WORKTREE_DIR}/td5re.exe` and can't stomp on another session's exe in the main tree:
+2. **Record the change in the in-game CHANGELOG + PENDING TO TEST seed** — see [Logging the change](#logging-the-change-changelog--pending-to-test) below. Do this **before** the build so the shipped exe reflects it. Mandatory for every user-visible fix/feature; skip only for pure build-tooling / RE-doc churn with no runtime effect.
+3. Run the build inside the worktree. The build script already handles its own output; because we're in a worktree, `td5re.exe` lands at `${WORKTREE_DIR}/td5re.exe` and can't stomp on another session's exe in the main tree:
    ```bash
    cd "${WORKTREE_DIR}/td5mod/src/td5re" && ./build_standalone.bat $$
    ```
    (`$$` expands to the shell PID, giving a unique `build_<pid>/` intermediate dir inside this worktree)
-3. Fix any compile errors (up to 2 attempts).
-4. Run the **single-track runtime probe** (see [Testing the build](#testing-the-build-ini--log-loop)) — fast sanity check on Moscow before the multi-track sweep.
-5. **Run the multi-track CSV bundle sweep** (see [Multi-track CSV bundle sweep](#multi-track-csv-bundle-sweep-mandatory)) — this is **mandatory** for any fix touching race / AI / physics / camera / track / HUD code. Skip only when the fix is pure frontend/asset/build-tooling.
-6. Report the result to the user: what was found, what was changed, build status, the worktree path so they can inspect or manually launch, AND the bundle path at `tools/frida_csv/${SESSION_TAG}/`. **If the fix can only be confirmed by the user driving/playing** (handling feel, brakes, analog throttle, AI/catchup feel, multiplayer with real controllers, subjective audio/visual quality), do NOT present it as confirmed — explicitly say a manual test is needed and follow the ask-first flow in [When the fix needs the user to test](#when-the-fix-needs-the-user-to-test-ask-first): finish all self-verification, prep `manual_drive.exe`, then ask and wait until they're ready.
+4. Fix any compile errors (up to 2 attempts).
+5. Run the **single-track runtime probe** (see [Testing the build](#testing-the-build-ini--log-loop)) — fast sanity check on Moscow before the multi-track sweep.
+6. **Run the multi-track CSV bundle sweep** (see [Multi-track CSV bundle sweep](#multi-track-csv-bundle-sweep-mandatory)) — this is **mandatory** for any fix touching race / AI / physics / camera / track / HUD code. Skip only when the fix is pure frontend/asset/build-tooling.
+7. Report the result to the user: what was found, what was changed, build status, the worktree path so they can inspect or manually launch, AND the bundle path at `tools/frida_csv/${SESSION_TAG}/`. **If the fix can only be confirmed by the user driving/playing** (handling feel, brakes, analog throttle, AI/catchup feel, multiplayer with real controllers, subjective audio/visual quality), do NOT present it as confirmed — explicitly say a manual test is needed and follow the ask-first flow in [When the fix needs the user to test](#when-the-fix-needs-the-user-to-test-ask-first): finish all self-verification, prep `manual_drive.exe`, then ask and wait until they're ready.
+
+#### Logging the change (CHANGELOG + PENDING TO TEST)
+
+Every user-visible fix/feature must be reflected in the two in-game lists so players see what's new and the QA backlog tracks what still needs testing. Both files are tracked source under `${WORKTREE_DIR}/td5mod/src/td5re/` and are already staged by Step 3's commit. Edit them **before** the build (Step 2 item 3) so the shipped exe contains them.
+
+1. **CHANGELOG** — `td5_changelog.h`. Add a player-facing, present-tense bullet at the **top** of the most recent date block under `LAST 7 DAYS`:
+   - If a `{ CL_DATE, "Month DD" }` block for **today** already exists, insert your `{ CL_ITEM, "..." }` line(s) directly under it.
+   - If today has no block yet, add a `{ CL_BLANK, "" }` then `{ CL_DATE, "Month DD" }` (today's date) at the very top of `LAST 7 DAYS`, then your item(s).
+   - Keep each line ≤ ~62 chars (it must clear the scrollbar). Wrap a long item onto a continuation `{ CL_ITEM, "  ..." }` line with a **leading two-space indent** — the renderer hangs continuations under the bullet text automatically.
+   - Describe the player-visible effect, not the RE detail (e.g. "Police cars are now tougher and never launch airborne", not "cop_break_mag 150000").
+2. **PENDING TO TEST** — `td5_pending.c`, the `k_seed[]` array. Add one concise item string (≤ ~50 chars; it doubles as the right-justified overlay line) near the **top** of the array (most recent first). This seeds fresh checkouts and the in-game checklist; the runtime `td5re_pending.txt` is untracked, so `k_seed[]` is the durable home. **De-dup:** don't add a line that already says the same thing.
+
+If a single `/fix` makes several distinct user-visible changes, add a bullet + a pending item for each.
 
 #### MANDATORY: Verbose Uncertainty Disclosure
 

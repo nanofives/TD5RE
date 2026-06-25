@@ -87,7 +87,18 @@ fi
 
 Collect these for the Step 8 report and for memory (Step 3). They do **not** stop the merge.
 
-### 2c. Build BOTH binaries (the one hard gate)
+### 2c. Record the session in the CHANGELOG + PENDING TO TEST seed (before the build)
+
+Every shipped session must be reflected in the two in-game lists so players see what's new and the QA backlog tracks what still needs testing. `/fix` Step 2 normally does this per change, but `/end` is the backstop — it **guarantees** the session's user-visible work is logged before the deliverable exe is built. Idempotent: only add what's missing; never duplicate.
+
+For each user-visible change in this session (derive from `${CHANGED_C}`, the commit messages, and the original `$ARGUMENTS`):
+
+1. **CHANGELOG** — `${WORKTREE_DIR}/td5mod/src/td5re/td5_changelog.h`. If the change isn't already listed, add a player-facing, present-tense `{ CL_ITEM, "..." }` bullet at the **top** of today's date block under `LAST 7 DAYS` (create a `{ CL_BLANK, "" }` + `{ CL_DATE, "Month DD" }` block for today if none exists). Keep each line ≤ ~62 chars; wrap long items onto a continuation `{ CL_ITEM, "  ..." }` line with a leading two-space indent. Describe the player-visible effect, not the RE detail.
+2. **PENDING TO TEST** — `${WORKTREE_DIR}/td5mod/src/td5re/td5_pending.c`, the `k_seed[]` array. If not already present, add one concise item string (≤ ~50 chars) near the **top** of the array. This seeds fresh checkouts (the runtime `td5re_pending.txt` is untracked, so `k_seed[]` is the durable home).
+
+Both files are tracked and get committed in Step 4 and built into the exe in 2d. On the **main-tree-only path** (Step 0), make the same edits in the main tree instead — they'll be staged by Step 7c (`td5mod/src/td5re/*.c`/`*.h`) and shipped on the next build.
+
+### 2d. Build BOTH binaries (the one hard gate)
 
 ```bash
 cd "${WORKTREE_DIR}/td5mod/src/td5re"
@@ -557,3 +568,4 @@ Next: <run /fix for deferred stubs | resume a leftover | nothing pending>
 - **`/end` ends with `origin/master..master` empty.** The final push (Step 7c) is the last git action. Never report shipped while commits are unpushed.
 - **Every `/end` auto-publishes the release to the LAN server (Step 7e).** After the push, `deploy_release.sh` mirrors `td5re_release.exe` + `re/assets/` to the Pi (`mariano-server.local:8088`, incremental upload). Non-blocking: a Pi-offline/SSH failure (clean exit 2) or any other error is reported, never undoes the ship. Skip with `TD5RE_SKIP_PUBLISH=1`. This is what keeps the downstairs game machines from going stale — they pull the new build via `update.bat`.
 - **Never commit `td5re.ini`, `log/`, build artifacts, or `*.td5` saves.** Stage by explicit allowlist only — never `git add -A`/`.`. `td5re_release.ini` IS tracked; `td5re.ini` is NOT.
+- **Every session updates the in-game CHANGELOG + PENDING TO TEST seed (Step 2c), before the build.** Each user-visible change gets a present-tense bullet in `td5_changelog.h` (top of today's `LAST 7 DAYS` block) and a concise test item in `k_seed[]` in `td5_pending.c`. `/fix` adds these per change; `/end` is the idempotent backstop (and the only path on a main-tree-only `/end`). The runtime `td5re_pending.txt` is untracked — `k_seed[]` is the durable home.
