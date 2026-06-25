@@ -2674,6 +2674,12 @@ void td5_plat_input_describe_binding(uint32_t code, char *buf, int cap)
 static int s_plat_active_js = -1;
 int td5_plat_input_active_joystick(void) { return s_plat_active_js; }
 
+/* Defined in the XInput rumble block below; called from the menu/lobby input
+ * scans to learn each pad's XInput user index from real button-press
+ * coincidences. No-op when the XInput rumble path is unavailable.
+ * [SPLIT-SCREEN FF FIX 2026-06-24 v2] */
+static void td5_xinput_correlate_tick(void);
+
 /* Ensure a non-exclusive scan handle for enumerated joystick i (1..). */
 static LPDIRECTINPUTDEVICE8A scan_dev(int i)
 {
@@ -2711,6 +2717,9 @@ uint32_t td5_plat_input_scan_join(void)
 {
     uint32_t mask = 0;
     int i;
+    /* Learn each joining pad's XInput user from its A/Start press this frame —
+     * the lobby join is where each player presses A on their OWN physical pad. */
+    td5_xinput_correlate_tick();
     if (s_keyboard[0x1C] & 0x80) mask |= 1u;     /* keyboard Enter = device 0 */
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
@@ -2759,6 +2768,7 @@ uint32_t td5_plat_input_frontend_nav(void)
     uint32_t bits = 0;
     int i;
     const long T = 130;  /* [#R3-5 reverted] 90 caused hover auto-scroll on biased pads; navdiag pending */
+    td5_xinput_correlate_tick();   /* observe DI<->XInput from menu A/Start presses */
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
         uint32_t db = 0;
@@ -2857,6 +2867,7 @@ uint32_t td5_plat_input_device_nav(int enum_index)
     long cx, cy;
     const long T = 130;  /* [#R3-5 reverted] 90 caused hover auto-scroll on biased pads; navdiag pending */
     LPDIRECTINPUTDEVICE8A dev;
+    td5_xinput_correlate_tick();   /* observe DI<->XInput from car-select grid A/Start presses */
     if (enum_index <= 0 || enum_index >= s_device_count || enum_index >= 16) return 0;
     dev = scan_dev(enum_index);
     if (!dev) return 0;
@@ -3027,6 +3038,144 @@ static int td5_device_is_xinput(int device_index)
     return is_xi;
 }
 
+/* ------------------------------------------------------------------------
+ * Observed DI<->XInput correlation [SPLIT-SCREEN FF FIX 2026-06-24 v2]
+ *
+ * XInput exposes no link from an XInput user index (0..3) to a DirectInput
+ * device instance, so the prior fix GUESSED the mapping from DInput enumeration
+ * order (Nth XInput-class DI device -> Nth connected XInput user). That guess is
+ * wrong whenever DInput enum order does not track the XInput slot order — which
+ * is exactly the case with several identical 8BitDo pads — and the rumble lands
+ * on the wrong physical pad (a cyclic permutation: P1 felt on P2, P3 on P1).
+ *
+ * Instead we OBSERVE the mapping: when a player presses a button on their pad in
+ * the menu/lobby, that press appears on both their DI device AND their XInput
+ * user in the same frame. When exactly one (still-unbound) DI device and exactly
+ * one (still-unclaimed) XInput user show the same button, they are provably the
+ * same physical pad — bind them. Keyed to the physical device, so it is correct
+ * regardless of pick order, identical VID/PID, or enumeration order. The binding
+ * is captured at lobby-join (each player presses A on their OWN pad to join) and
+ * persists for the process lifetime (the USB mapping is constant).
+ *
+ * NOTE: Windows XInput is hard-capped at 4 users (XUSER_MAX_COUNT). With 5+
+ * XInput-mode pads only the first 4 are addressable for rumble at all; the
+ * overflow pad(s) never bind here and get no rumble (an OS/API limit, not this
+ * routing — would require Windows.Gaming.Input to lift).
+ * ------------------------------------------------------------------------ */
+
+/* DI enumeration index (1..15) -> observed XInput user (0..3); -1 = unobserved. */
+static int s_di_xinput_user[16];
+static int s_di_xinput_user_inited = 0;
+
+static void td5_xinput_corr_init(void)
+{
+    if (!s_di_xinput_user_inited) {
+        int i;
+        for (i = 0; i < 16; i++) s_di_xinput_user[i] = -1;
+        s_di_xinput_user_inited = 1;
+    }
+}
+
+/* Has any DI device already claimed XInput user u? (enforces a 1:1 binding). */
+static int td5_xinput_user_is_claimed(int u)
+{
+    int i;
+    if (!s_di_xinput_user_inited) return 0;
+    for (i = 0; i < 16; i++) if (s_di_xinput_user[i] == u) return 1;
+    return 0;
+}
+
+/* Cached td5_device_is_xinput(): the raw-input scan is too costly to repeat
+ * every menu frame, and the device set is fixed for the process lifetime. */
+static signed char s_dev_xinput_cache[16];
+static int s_dev_xinput_cache_inited = 0;
+static int td5_device_is_xinput_cached(int i)
+{
+    if (i < 0 || i >= 16) return 0;
+    if (!s_dev_xinput_cache_inited) {
+        int k;
+        for (k = 0; k < 16; k++) s_dev_xinput_cache[k] = -1;
+        s_dev_xinput_cache_inited = 1;
+    }
+    if (s_dev_xinput_cache[i] < 0)
+        s_dev_xinput_cache[i] = (signed char)(td5_device_is_xinput(i) ? 1 : 0);
+    return s_dev_xinput_cache[i];
+}
+
+/* Bind DI<->XInput when exactly ONE unbound XInput-class DI device and exactly
+ * ONE unclaimed connected XInput user are holding the same physical button this
+ * frame. di_mask: bit i set if DI device i holds the button. xi_mask: bit u set
+ * if XInput user u holds it. Ambiguity (>1 on either side) is skipped — so this
+ * can never MIS-route; an ambiguous frame just resolves on a later one. */
+static void td5_xinput_correlate_button(uint32_t di_mask, uint32_t xi_mask)
+{
+    int i, u, di_count = 0, xi_count = 0, the_di = -1, the_user = -1;
+    for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
+        if (!(xi_mask & (1u << u))) continue;
+        if (td5_xinput_user_is_claimed(u)) continue;
+        xi_count++; the_user = u;
+    }
+    if (xi_count != 1) return;
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        if (!(di_mask & (1u << i))) continue;
+        if (s_di_xinput_user[i] >= 0) continue;            /* already bound */
+        if (!td5_device_is_xinput_cached(i)) continue;
+        di_count++; the_di = i;
+    }
+    if (di_count != 1) return;
+    s_di_xinput_user[the_di] = the_user;
+    TD5_LOG_I(LOG_TAG,
+        "FF XInput correlate: DI device %d (%s) <-> XInput user %d (button coincidence)",
+        the_di, (the_di < s_device_count ? s_device_names[the_di] : "?"), the_user);
+}
+
+/* Per-menu-frame correlation: read every still-unbound XInput-class pad's
+ * A/Start through the shared scan handles and every XInput user's A/Start, then
+ * bind any pad that uniquely coincides. Called from the lobby join scan, the
+ * frontend nav scan and the car-select grid scan. Cheap once everything is bound
+ * (the unbound-skip leaves di_a/di_start zero and it returns before reading
+ * XInput). A = DI button 0 / XINPUT_GAMEPAD_A (0x1000); Start = DI button 7 /
+ * XINPUT_GAMEPAD_START (0x0010) — both match the menu-nav button decode. */
+static void td5_xinput_correlate_tick(void)
+{
+    uint32_t di_a = 0, di_start = 0, xi_a = 0, xi_start = 0;
+    int i, u;
+    if (!td5_ff_xinput_enabled() || !td5_xinput_load() || !s_xi_get) return;
+    td5_xinput_corr_init();
+
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        DIJOYSTATE2 js;
+        LPDIRECTINPUTDEVICE8A dev;
+        if (s_di_xinput_user[i] >= 0) continue;            /* already bound */
+        if (!td5_device_is_xinput_cached(i)) continue;     /* only XInput-class pads */
+        dev = scan_dev(i);
+        if (!dev) continue;
+        memset(&js, 0, sizeof(js));
+        if (FAILED(IDirectInputDevice8_Poll(dev))) {
+            IDirectInputDevice8_Acquire(dev);
+            IDirectInputDevice8_Poll(dev);
+        }
+        if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) continue;
+        if (js.rgbButtons[0] & 0x80) di_a     |= (1u << i);
+        if (js.rgbButtons[7] & 0x80) di_start |= (1u << i);
+    }
+    if (!di_a && !di_start) return;                        /* nothing pressed to learn from */
+
+    /* wButtons is the first WORD of XINPUT_GAMEPAD, right after dwPacketNumber. */
+    for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
+        TD5_XINPUT_STATE st;
+        unsigned btn;
+        ZeroMemory(&st, sizeof(st));
+        if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;
+        btn = (unsigned)st.pad[0] | ((unsigned)st.pad[1] << 8);
+        if (btn & 0x1000u) xi_a     |= (1u << u);
+        if (btn & 0x0010u) xi_start |= (1u << u);
+    }
+
+    if (di_a)     td5_xinput_correlate_button(di_a, xi_a);
+    if (di_start) td5_xinput_correlate_button(di_start, xi_start);
+}
+
 /* Correlate an XInput-class DI device (at DInput enumeration index `di`) to its
  * XInput user index (0..3) for player slot `device_slot`.
  *
@@ -3071,6 +3220,20 @@ static int td5_xinput_user_for_device(int di, int device_slot)
         }
     }
 
+    /* OBSERVED correlation wins over the enumeration-rank heuristic below: it was
+     * learned from a real button-press coincidence in the menus, so it is keyed
+     * to the physical pad and is correct even for identical 8BitDo pads and a
+     * DInput enumeration order that does not track the XInput slot order.
+     * [SPLIT-SCREEN FF FIX 2026-06-24 v2] */
+    if (di >= 0 && di < 16) {
+        td5_xinput_corr_init();
+        if (s_di_xinput_user[di] >= 0) {
+            TD5_LOG_I(LOG_TAG, "FF XInput: slot=%d DI device=%d -> user=%d (observed)",
+                      device_slot, di, s_di_xinput_user[di]);
+            return s_di_xinput_user[di];
+        }
+    }
+
     /* Rank of this device among XInput-class DI devices, by enumeration order
      * (device 0 is the keyboard; joysticks start at 1). */
     rank = 0;
@@ -3084,6 +3247,7 @@ static int td5_xinput_user_for_device(int di, int device_slot)
         TD5_XINPUT_STATE st;
         ZeroMemory(&st, sizeof(st));
         if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;  /* not connected */
+        if (td5_xinput_user_is_claimed(u)) continue;   /* already taken by an observed binding */
         if (seen == rank) return u;
         seen++;
     }
