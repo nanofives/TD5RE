@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Empty split-screen cells never repeat: with 7" },
+    { CL_ITEM,    "  players one shows the MAP, the other the STANDINGS" },
+    { CL_ITEM,    "Split-screen map now zooms and turns smoothly" },
+    { CL_ITEM,    "  instead of flickering and snapping around" },
     { CL_ITEM,    "Split-screen overview map no longer draws a stray" },
     { CL_ITEM,    "  diagonal line across point-to-point tracks (Sydney)" },
     { CL_ITEM,    "CUP - WHAT NEXT? menu tidied: title moved to the top" },
