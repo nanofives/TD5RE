@@ -403,6 +403,7 @@ void Screen_PostRaceHighScore(void);
 void Screen_PostRaceNameEntry(void);
 void Screen_QuickRaceMenu(void);
 void Screen_RaceResults(void);
+void Screen_MpPostRace(void);    /* [2026-06-25] MP split-screen post-race menu   */
 void Screen_TrackSelection(void);
 void frontend_load_car_spec_fields(int car_index);
 void frontend_release_surface(int handle);
