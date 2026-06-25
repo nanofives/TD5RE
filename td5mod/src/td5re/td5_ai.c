@@ -11456,6 +11456,7 @@ static void mp_cop_pick_target(int cop_slot) {
     for (s = 0; s < nsusp; s++) {
         char *a; int d;
         if (s == cop_slot) continue;                   /* the (human) cop is not a suspect */
+        if (td5_game_cop_chase_is_cop(s)) continue;    /* [MP AI TEST PLAYERS] don't chase fellow cops */
         if (g_wanted_damage_state[s] <= 0) continue;   /* already arrested */
         a = actor_ptr(s);
         if (!a) continue;

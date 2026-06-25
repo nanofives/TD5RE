@@ -185,6 +185,15 @@ typedef struct TD5_GlobalState {
     int  num_human_players;   /* 1..TD5_MAX_HUMAN_PLAYERS (9) */
     int  num_ai_opponents;    /* 0..TD5_MAX_RACER_SLOTS-1 (15) */
 
+    /* [MP AI TEST PLAYERS 2026-06-25] Dev-only "add AI player" lobby tool: bit s
+     * set => local split-screen player slot s is a SIMULATED player — it occupies
+     * a human-pool slot (so it gets its own viewport/HUD/results row) but is driven
+     * by the race AI, not a controller. Lets one person stress every multiplayer
+     * code path (split-screen, cop roles, results table) without N humans/pads.
+     * Computed in frontend_init_race_schedule from s_mp_slot_is_ai[]; consumed in
+     * InitRace to flip those slots to AI (state=0). 0 = no AI test players. */
+    uint32_t mp_ai_player_mask;
+
     /* Viewport */
     int  render_width;
     int  render_height;

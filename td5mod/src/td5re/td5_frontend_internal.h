@@ -245,6 +245,17 @@ extern int  s_lobby_action;
 extern int  s_lobby_max_players;
 extern int  s_mp_phase;
 extern int  s_mp_player_accent[TD5_MAX_HUMAN_PLAYERS];
+/* [MP AI TEST PLAYERS 2026-06-25] Dev "add AI player" lobby tool. */
+extern int  s_mp_slot_is_ai[TD5_MAX_HUMAN_PLAYERS];   /* 1 = simulated AI player */
+extern int  s_mp_ai_cop_count;                        /* cop chase: # AI players that are cops */
+int  frontend_mp_slot_is_ai(int p);
+int  frontend_mp_ai_player_count(void);
+int  frontend_mp_human_count(void);
+int  frontend_mp_ai_cop_count(void);
+int  frontend_mp_add_ai_player(void);
+int  frontend_mp_remove_ai_player(void);
+void frontend_mp_ai_cop_count_step(int d);
+void frontend_mp_ai_players_reset(void);
 extern int  s_net_cfg_game_port;
 extern int  s_net_session_sel;
 extern int  s_network_active;

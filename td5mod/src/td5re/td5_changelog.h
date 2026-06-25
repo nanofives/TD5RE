@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Dev: ADD AI PLAYER in the multiplayer lobby fills" },
+    { CL_ITEM,    "  seats with auto-driving bots (random name/colour/" },
+    { CL_ITEM,    "  car) so you can test split-screen MP on your own" },
+    { CL_ITEM,    "CHANGELOG screen: bulleted items, more spacing, and" },
+    { CL_ITEM,    "  the PENDING TO TEST button moved up by the title" },
     { CL_ITEM,    "New split-screen post-race menu (race again / view" },
     { CL_ITEM,    "  replay / back to lobby / car / mode / main menu)" },
     { CL_ITEM,    "Police chase: cops 2.5x tougher than traffic, never" },

@@ -1999,6 +1999,26 @@ int td5_game_init_race_session(void) {
                   "(slot 0 = human)",
                   humans - 1);
     }
+    /* [MP AI TEST PLAYERS 2026-06-25] The dev "add AI player" lobby tool fills
+     * human-pool slots with simulated players. Each such slot occupies a real
+     * split-screen viewport but is AI-driven, so flip exactly the masked slots to
+     * state=0 (AI autopilot) — same mechanism as others_ai, but per-slot from the
+     * frontend mask instead of a global INI knob. Slot 0 (the human at the wheel)
+     * is never in the mask. Runs after player_is_ai/others_ai so it composes with
+     * them; before the network override (which re-marks net slots human). */
+    if (g_td5.mp_ai_player_mask) {
+        int humans = g_td5.num_human_players, did = 0;
+        if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+        for (int i = 0; i < humans; i++) {
+            if (((g_td5.mp_ai_player_mask >> i) & 1u) && s_slot_state[i].state == 1) {
+                s_slot_state[i].state = 0;  /* AI test-player */
+                did++;
+            }
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace: mp_ai_player_mask=0x%X -> %d simulated AI player slot(s)",
+                  g_td5.mp_ai_player_mask, did);
+    }
     /* [DEMO FIX #3 2026-06-15] Attract demo: the PLAYER car (slot 0) must be
      * AI-driven, exactly like the opponents — it's an attract demo, nobody is
      * holding the wheel. Mirrors the original InitializeRaceSession @0x0042ACCF
@@ -3442,9 +3462,19 @@ int td5_game_init_race_session(void) {
      * cop_state_reset() and would wipe an earlier arming. Without this the AI cop
      * slot (= num_human_players) reverted to a regular AI racer, so the cop role
      * visibly fell back onto a human and the AI just drove as another player. */
-    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active &&
-        g_td5.mp_mode_config.cop_is_ai) {
-        td5_ai_cop_chase_setup(td5_game_cop_chase_cop_slot(), 1);
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
+        if (g_td5.mp_mode_config.cop_is_ai)
+            td5_ai_cop_chase_setup(td5_game_cop_chase_cop_slot(), 1);
+        /* [MP AI TEST PLAYERS 2026-06-25] Simulated AI players assigned the COP role
+         * drive as cops too. Arm EVERY AI-driven slot whose cop_slot_mask bit is
+         * set (not just the primary), so a multi-cop AI field all runs cop_drive. */
+        if (g_td5.mp_ai_player_mask) {
+            int humans = g_td5.num_human_players;
+            if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+            for (int i = 0; i < humans; i++)
+                if (((g_td5.mp_ai_player_mask >> i) & 1u) && td5_game_cop_chase_is_cop(i))
+                    td5_ai_cop_chase_setup(i, 1);
+        }
     }
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
