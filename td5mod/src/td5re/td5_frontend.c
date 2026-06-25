@@ -2581,39 +2581,53 @@ static void frontend_build_speed_pool(void) {
 }
 
 /* ========================================================================
- * Car "at a glance" stat bars (Speed / Accel / Grip).
+ * Car "at a glance" stat bars (Speed / Accel / Handling).
  *
- * Three indicator bars normalised ACROSS THE WHOLE ROSTER: the slowest car maps
- * to an empty bar and the fastest to a full one, everything else linearly
- * between. Acceleration is the published 0-60 TIME (lower = better), so its
- * fraction is inverted. The source numbers are the SAME published config.nfo
- * fields the MORE STATS spec sheet shows (field 7 = top speed mph, field 8 =
- * 0-60 sec, field 14 = lateral acc g -> "grip"), so the bars and the sheet
- * always agree. Cached one-time scan, mirroring frontend_build_speed_pool
- * above; cop-chase cars are excluded the same way. No numbers are ever drawn —
+ * Three indicator bars normalised ACROSS THE WHOLE ROSTER: the weakest car maps
+ * to an empty bar and the strongest to a full one, everything else linearly
+ * between.
+ *
+ *   SPEED, ACCEL : published config.nfo spec-sheet fields (field 7 = top speed
+ *                  mph, field 8 = 0-60 sec). ACCEL is a TIME (lower = better) so
+ *                  its fraction is inverted. These match the MORE STATS sheet.
+ *   HANDLING     : derived from the REAL physics file, carparam.dat
+ *                  vehicle_inertia (file 0xAC, int32 = yaw moment of inertia).
+ *                  Lower inertia = quicker yaw rotation = more agile, so the bar
+ *                  shows INVERTED inertia. Sourced from carparam (not the spec
+ *                  sheet) because (a) it directly affects how the car drives and
+ *                  (b) it is present for EVERY car — the spec sheet's lateral-acc
+ *                  field (14) is the literal text "UNKNOWN" for both Aston Martin
+ *                  Vantages (ext 6, ext 16), which used to blank the whole panel.
+ *                  The game keeps true lateral grip (lateral_slip_stiffness)
+ *                  nearly constant across cars, so inertia/agility is the only
+ *                  handling axis that actually varies and ranks the roster.
+ *
+ * Cached one-time scan, mirroring frontend_build_speed_pool above; cop-chase
+ * cars are excluded from the ranges the same way. No numbers are ever drawn —
  * bars only (user request). ======================================================== */
 static float s_cstat_spd_min, s_cstat_spd_max;
 static float s_cstat_acc_min, s_cstat_acc_max;   /* 0-60 time: min == quickest */
-static float s_cstat_hnd_min, s_cstat_hnd_max;
 static int   s_cstat_ranges_built = 0;
 
-/* Parse three raw config.nfo strings to numeric stats. Returns 1 only if all
- * three are present and positive (so missing/garbage cars are skipped). */
-static int frontend_glance_from_fields(const char *f7, const char *f8, const char *f14,
-                                       float *spd, float *acc, float *hnd) {
+/* Parse the two spec-sheet glance strings to numeric stats. Returns a PER-FIELD
+ * bitmask: bit0 = speed (field 7), bit1 = accel (field 8); 0 = neither usable.
+ * Each out-param holds its value when its bit is set, else -1.0f. Per-field (not
+ * all-or-nothing) so a car missing one figure still shows the other. */
+static int frontend_glance_from_fields(const char *f7, const char *f8,
+                                       float *spd, float *acc) {
     float s = (float)atof(f7);
     float a = (float)atof(f8);
-    float h = (float)atof(f14);
-    if (s <= 0.0f || a <= 0.0f || h <= 0.0f) return 0;
-    *spd = s; *acc = a; *hnd = h;
-    return 1;
+    int mask = 0;
+    if (s > 0.0f) { *spd = s; mask |= 1; } else *spd = -1.0f;
+    if (a > 0.0f) { *acc = a; mask |= 2; } else *acc = -1.0f;
+    return mask;
 }
 
-/* Read a car's three glance stats straight from its config.nfo, WITHOUT
- * touching the shared s_car_spec cache (this is used only by the range builder,
- * which scans every car and would otherwise clobber the displayed car). The
- * line-split mirrors frontend_load_car_spec_fields. Returns 1 on success. */
-static int frontend_read_car_glance_stats(int ext_id, float *spd, float *acc, float *hnd) {
+/* Read a car's two spec-sheet glance stats straight from its config.nfo, WITHOUT
+ * touching the shared s_car_spec cache (used only by the range builder, which
+ * scans every car and would otherwise clobber the displayed car). The line-split
+ * mirrors frontend_load_car_spec_fields. Returns the per-field bitmask. */
+static int frontend_read_car_glance_stats(int ext_id, float *spd, float *acc) {
     const char *zip = td5_asset_get_car_zip_path(ext_id);
     char fields[17][48];
     char *data;
@@ -2635,39 +2649,35 @@ static int frontend_read_car_glance_stats(int ext_id, float *spd, float *acc, fl
         field++;
     }
     free(data);
-    return frontend_glance_from_fields(fields[7], fields[8], fields[14], spd, acc, hnd);
+    return frontend_glance_from_fields(fields[7], fields[8], spd, acc);
 }
 
-/* Build the roster-wide min/max for each stat (idempotent / cached). Excludes
+/* Build the roster-wide min/max for SPEED + ACCEL (idempotent / cached). Excludes
  * cop-chase cars like the speed pool, and any car whose config.nfo won't parse. */
 static void frontend_build_carstat_ranges(void) {
     int id, n = 0;
     if (s_cstat_ranges_built) return;
     s_cstat_ranges_built = 1;
-    s_cstat_spd_min = s_cstat_acc_min = s_cstat_hnd_min =  1e30f;
-    s_cstat_spd_max = s_cstat_acc_max = s_cstat_hnd_max = -1e30f;
+    s_cstat_spd_min = s_cstat_acc_min =  1e30f;
+    s_cstat_spd_max = s_cstat_acc_max = -1e30f;
     for (id = 0; id < TD5_CAR_COUNT; id++) {
-        float spd, acc, hnd;
+        float spd, acc;
+        int mask;
         if (frontend_car_is_cop(id)) continue;
-        if (!frontend_read_car_glance_stats(id, &spd, &acc, &hnd)) continue;
-        if (spd < s_cstat_spd_min) s_cstat_spd_min = spd;
-        if (spd > s_cstat_spd_max) s_cstat_spd_max = spd;
-        if (acc < s_cstat_acc_min) s_cstat_acc_min = acc;
-        if (acc > s_cstat_acc_max) s_cstat_acc_max = acc;
-        if (hnd < s_cstat_hnd_min) s_cstat_hnd_min = hnd;
-        if (hnd > s_cstat_hnd_max) s_cstat_hnd_max = hnd;
+        mask = frontend_read_car_glance_stats(id, &spd, &acc);
+        if (!mask) continue;
+        if (mask & 1) { if (spd < s_cstat_spd_min) s_cstat_spd_min = spd; if (spd > s_cstat_spd_max) s_cstat_spd_max = spd; }
+        if (mask & 2) { if (acc < s_cstat_acc_min) s_cstat_acc_min = acc; if (acc > s_cstat_acc_max) s_cstat_acc_max = acc; }
         n++;
     }
     if (n == 0) {   /* nothing readable — neutral ranges so bars render half-full */
-        s_cstat_spd_min = s_cstat_acc_min = s_cstat_hnd_min = 0.0f;
-        s_cstat_spd_max = s_cstat_acc_max = s_cstat_hnd_max = 1.0f;
+        s_cstat_spd_min = s_cstat_acc_min = 0.0f;
+        s_cstat_spd_max = s_cstat_acc_max = 1.0f;
         TD5_LOG_W(LOG_TAG, "carstat_ranges: no config.nfo readable — bars neutral");
         return;
     }
-    TD5_LOG_I(LOG_TAG,
-              "carstat_ranges: n=%d spd[%.0f..%.0f] 0-60[%.2f..%.2f] grip[%.2f..%.2f]",
-              n, s_cstat_spd_min, s_cstat_spd_max,
-              s_cstat_acc_min, s_cstat_acc_max, s_cstat_hnd_min, s_cstat_hnd_max);
+    TD5_LOG_I(LOG_TAG, "carstat_ranges: n=%d spd[%.0f..%.0f] 0-60[%.2f..%.2f]",
+              n, s_cstat_spd_min, s_cstat_spd_max, s_cstat_acc_min, s_cstat_acc_max);
 }
 
 static float frontend_glance_frac(float v, float lo, float hi) {
@@ -2679,14 +2689,76 @@ static float frontend_glance_frac(float v, float lo, float hi) {
     return f;
 }
 
-/* Map a car's raw stats to three [0,1] bar fractions. Accel is inverted (a
- * lower 0-60 time -> a fuller bar). */
-static void frontend_normalize_glance(float spd, float acc, float hnd,
-                                      float *fs, float *fa, float *fg) {
+/* Map SPEED + ACCEL to [0,1] bar fractions. ACCEL is inverted (a lower 0-60 time
+ * -> a fuller bar). */
+static void frontend_normalize_glance(float spd, float acc, float *fs, float *fa) {
     frontend_build_carstat_ranges();
     *fs = frontend_glance_frac(spd, s_cstat_spd_min, s_cstat_spd_max);
     *fa = 1.0f - frontend_glance_frac(acc, s_cstat_acc_min, s_cstat_acc_max);  /* inverted */
-    *fg = frontend_glance_frac(hnd, s_cstat_hnd_min, s_cstat_hnd_max);
+}
+
+/* ---- HANDLING bar: real-physics agility from carparam.dat vehicle_inertia ----
+ * vehicle_inertia (file 0xAC, int32 yaw moment) is the divisor in the yaw-torque
+ * integration, so LOWER inertia = quicker rotation = more agile. The bar shows
+ * inverted, roster-normalised inertia. Every drivable car carries a carparam.dat
+ * so the bar is never blank. Per-car values are cached at the one-time roster
+ * scan; cop cars are cached too (so their bar still draws) but excluded from the
+ * min/max so they don't skew the scale (matches the SPEED/ACCEL ranges). */
+static int   s_cstat_inertia[TD5_CAR_COUNT];   /* raw vehicle_inertia per ext_id, -1 = unread */
+static int   s_cstat_inertia_min, s_cstat_inertia_max;
+static int   s_cstat_handling_built = 0;
+
+/* Read a car's vehicle_inertia (carparam.dat file offset 0xAC, int32), or -1. */
+static int frontend_read_car_inertia(int ext_id) {
+    const char *zip = td5_asset_get_car_zip_path(ext_id);
+    int sz = 0, inertia = -1;
+    void *data;
+    if (!zip) return -1;
+    data = td5_asset_open_and_read("carparam.dat", zip, &sz);
+    if (data) {
+        if (sz >= 0xB0)   /* need offset 0xAC + 4 bytes */
+            inertia = (int)*(const int32_t *)((const uint8_t *)data + 0xAC);
+        free(data);
+    }
+    return inertia;
+}
+
+/* Build the roster-wide inertia min/max + per-car cache (idempotent / cached). */
+static void frontend_build_handling_range(void) {
+    int id, n = 0, id_min = -1, id_max = -1;
+    if (s_cstat_handling_built) return;
+    s_cstat_handling_built = 1;
+    s_cstat_inertia_min = 0x7fffffff;
+    s_cstat_inertia_max = 0;
+    for (id = 0; id < TD5_CAR_COUNT; id++) {
+        int inertia = frontend_read_car_inertia(id);
+        s_cstat_inertia[id] = (inertia > 0) ? inertia : -1;
+        if (frontend_car_is_cop(id)) continue;     /* cached, but don't set the range */
+        if (inertia <= 0) continue;
+        if (inertia < s_cstat_inertia_min) { s_cstat_inertia_min = inertia; id_min = id; }
+        if (inertia > s_cstat_inertia_max) { s_cstat_inertia_max = inertia; id_max = id; }
+        n++;
+    }
+    if (n == 0) {   /* no carparam readable — neutral so the bar renders half-full */
+        s_cstat_inertia_min = 0; s_cstat_inertia_max = 1;
+        TD5_LOG_W(LOG_TAG, "handling_range: no carparam.dat readable — bar neutral");
+        return;
+    }
+    TD5_LOG_I(LOG_TAG,
+              "handling_range: n=%d inertia[%d..%d] mostAgile=ext%d leastAgile=ext%d (lower=more agile)",
+              n, s_cstat_inertia_min, s_cstat_inertia_max, id_min, id_max);
+}
+
+/* HANDLING fraction for a car: inverted, roster-normalised inertia. Returns 1 and
+ * fills *out on success; 0 if this car has no readable inertia (bar left empty). */
+static int frontend_handling_frac(int ext_id, float *out) {
+    frontend_build_handling_range();
+    if (ext_id < 0 || ext_id >= TD5_CAR_COUNT) return 0;
+    if (s_cstat_inertia[ext_id] <= 0) return 0;
+    *out = 1.0f - frontend_glance_frac((float)s_cstat_inertia[ext_id],
+                                       (float)s_cstat_inertia_min,
+                                       (float)s_cstat_inertia_max);
+    return 1;
 }
 
 /* Resolve the [lo,hi) car-pool slice for a difficulty tier (0/1/2). Degenerate
@@ -6933,17 +7005,19 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
  *   0x4A8 offscreen offset). DDraw color-key + per-frame surface tracking
  *   replaced by tex-page + alpha blending. */
 /* Non-interactive "at a glance" stat panel: a button-framed box with three
- * relative bars (Speed / Accel / Grip), drawn between PAINT and MORE STATS on
- * every car-select screen. Raw config.nfo fields are passed in (SP reads them
- * from the shared s_car_spec cache, MP from its per-pane spec cache), so this
- * draws no files. `accent` fills the bars (player colour in MP); `compact`
- * shrinks the rows + scales the labels down so the full names still fit in the
- * small split panes. */
+ * relative bars (Speed / Accel / Handling), drawn between PAINT and MORE STATS on
+ * every car-select screen. SPEED/ACCEL come from raw config.nfo spec strings (SP
+ * from the shared s_car_spec cache, MP from its per-pane spec cache); HANDLING is
+ * derived from the car's carparam.dat (by `car_ext_id`) via a one-time cached
+ * scan, so per-frame this still touches no files. `accent` fills the bars (player
+ * colour in MP); `compact` shrinks the rows + scales the labels down so the full
+ * names still fit in the small split panes. */
 static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
-                                        const char *f7, const char *f8, const char *f14,
+                                        const char *f7, const char *f8, int car_ext_id,
                                         uint32_t accent, int compact, float sx, float sy) {
-    static const char *lbl[3] = { "SPEED", "ACCEL", "GRIP" };
-    float spd = 0, acc = 0, hnd = 0, fr[3] = { 0, 0, 0 };
+    static const char *lbl[3] = { "SPEED", "ACCEL", "HANDLING" };
+    float spd = 0, acc = 0, fr[3] = { 0, 0, 0 };
+    int valid_mask;   /* bit0=speed, bit1=accel, bit2=handling — gates per-bar fill */
     float padx = compact ? 4.0f : 7.0f;
     float pady = compact ? 2.0f : 6.0f;
     /* In the MP panes, line the labels up with the CAR/PAINT button text (drawn at
@@ -6968,8 +7042,13 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     }
     capd = SMALLFONT_TTF_CAP * (lsy / sy);
 
-    if (frontend_glance_from_fields(f7, f8, f14, &spd, &acc, &hnd))
-        frontend_normalize_glance(spd, acc, hnd, &fr[0], &fr[1], &fr[2]);
+    /* SPEED + ACCEL from the config.nfo spec sheet; HANDLING from the car's real
+     * carparam inertia (never blank). Combine into one 3-bit per-bar fill mask. */
+    valid_mask = frontend_glance_from_fields(f7, f8, &spd, &acc);
+    if (valid_mask)
+        frontend_normalize_glance(spd, acc, &fr[0], &fr[1]);
+    if (frontend_handling_frac(car_ext_id, &fr[2]))
+        valid_mask |= 4;
 
     /* Frame: the regular blue/unselected button look (non-interactive). In the
      * compact (small-split) panes, thin the rim proportionally to the panel
@@ -6983,9 +7062,16 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
                                          0xFF392152u, compact ? fscale : 1.0f, sx, sy);
     }
 
-    /* Full-name label column ("SPEED"/"ACCEL"/"GRIP"); dropped only if the box is
-     * far too narrow to fit a label plus a usable bar. */
-    lblw = fe_measure_small_text("SPEED") * fe_glyph_sx(lsx, lsy) / sx;
+    /* Full-name label column, sized to the WIDEST label ("HANDLING"); dropped only
+     * if the box is far too narrow to fit a label plus a usable bar. */
+    {
+        float wmax = fe_measure_small_text(lbl[0]);
+        float w1 = fe_measure_small_text(lbl[1]);
+        float w2 = fe_measure_small_text(lbl[2]);
+        if (w1 > wmax) wmax = w1;
+        if (w2 > wmax) wmax = w2;
+        lblw = wmax * fe_glyph_sx(lsx, lsy) / sx;
+    }
     if (bw < content_l + content_r + lblw + 8.0f) lblw = 0.0f;
     barx = bx + content_l + (lblw > 0.0f ? lblw + 4.0f : 0.0f);
     barw = (bx + bw - content_r) - barx;
@@ -6995,7 +7081,12 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     for (i = 0; i < 3; i++) {
         float ry   = top + (float)i * rowh;
         float bary = ry + (rowh - barh) * 0.5f;
-        float fillw = fr[i] * barw;
+        /* Fill only the bars with a valid value. HANDLING is always present
+         * (every car has carparam inertia); a spec-sheet SPEED/ACCEL that failed
+         * to parse leaves just the empty track. The gate also stops the INVERTED
+         * accel fraction from painting a full bar when 0-60 is missing
+         * (frac(-1)=0 -> 1-0 = full). */
+        float fillw = ((valid_mask >> i) & 1) ? fr[i] * barw : 0.0f;
         if (lblw > 0.0f) {
             float ty = (ry + (rowh - capd) * 0.5f) * sy;
             fe_draw_small_text((bx + content_l) * sx, ty, lbl[i], 0xFFC8C8C8u, lsx, lsy);
@@ -7119,7 +7210,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         frontend_load_car_spec_fields(actual_car);
         frontend_draw_car_stat_bars(panel_x, FE_CARSTAT_PANEL_Y,
                                     FE_CARSTAT_PANEL_W, FE_CARSTAT_PANEL_H,
-                                    s_car_spec[7], s_car_spec[8], s_car_spec[14],
+                                    s_car_spec[7], s_car_spec[8], actual_car,
                                     FE_CARSTAT_ACCENT, 0, sx, sy);
     }
 
@@ -11000,7 +11091,7 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             if (bars_h > 8.0f)
                 frontend_draw_car_stat_bars(lx, bars_y, lcw, bars_h,
                                             s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                            s_mp_pane_spec[p][14], pcol, 1, sx, sy);
+                                            s_mp_pane_spec_car[p], pcol, 1, sx, sy);
             /* RIGHT: the 5 buttons spread evenly down the WHOLE column (one row each
              * = col_h / MP_BTN_COUNT) so they always fill the height instead of
              * clumping at a fixed size — capped so they don't get comically tall in
@@ -11048,7 +11139,7 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             mp_simul_draw_pane_button(p, MP_BTN_PAINT, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
             frontend_draw_car_stat_bars(bx, yy, bw, panel_h,
                                         s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                        s_mp_pane_spec[p][14], pcol, 1, sx, sy);
+                                        s_mp_pane_spec_car[p], pcol, 1, sx, sy);
             yy += panel_h + 2.0f;
             mp_simul_draw_pane_button(p, MP_BTN_STATS, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
             mp_simul_draw_pane_button(p, MP_BTN_TRANS, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
