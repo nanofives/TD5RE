@@ -4203,6 +4203,120 @@ int frontend_check_escape(void) {
     return (esc_edge || esc_queued) ? 1 : 0;
 }
 
+/* ============================================================================
+ * Split-screen "confirm before going back" guard   [PORT ENHANCEMENT 2026-06-24]
+ *
+ * In LOCAL split-screen multiplayer every frontend setup screen holds shared
+ * progress (joined pads, names, colours, positions, game mode, cars). A stray
+ * B / ESC from any one of several players used to drop the whole table back a
+ * screen. This guard makes EVERY back/cancel first raise a "GO BACK?" yes/no
+ * prompt: while it is up the entire frontend is FROZEN (input poll + screen FSM
+ * skipped, see td5_frontend_update) so nothing beneath can act on or bleed the
+ * pad, and dimmed. A/ENTER (any pad) confirms, B/ESC cancels, and it auto-cancels
+ * after a timeout so nobody gets stuck. Single-player is completely unaffected.
+ *
+ * A back site calls frontend_back_confirm_request(<back action>): when the guard
+ * is active it arms the prompt and returns 1 (caller defers and returns); else it
+ * returns 0 and the caller performs the back immediately, exactly as before. The
+ * stored action runs on confirm. The existing per-screen MP confirms (name/colour
+ * setup, mode vote, mode config) keep their own prompts and do NOT route here.
+ * Knob TD5RE_MP_BACK_CONFIRM=0 restores the legacy instant back everywhere.
+ * NO RE BASIS — a port-only quality-of-life guard (the original had no such UX).
+ * ========================================================================== */
+static int       s_bc_active   = 0;            /* 1 = "GO BACK?" prompt is up    */
+static uint32_t  s_bc_arm_ms   = 0;            /* arm time (auto-cancel timeout)  */
+static void    (*s_bc_action)(void) = NULL;    /* back action to run on confirm   */
+static int       s_bc_a_prev = 0, s_bc_b_prev = 0;     /* aggregate A/B edge state */
+static int       s_bc_enter_prev = 0, s_bc_esc_prev = 0;/* keyboard Enter/ESC edge */
+#define TD5_BACK_CONFIRM_TIMEOUT_MS 6000u
+
+/* True while a local split-screen session is being set up / played (2+ humans
+ * sharing the box, or the live split mode once a race is configured). */
+static int frontend_splitscreen_active(void) {
+    return (s_num_human_players >= 2) || (g_td5.split_screen_mode > 0);
+}
+static int frontend_back_confirm_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_BACK_CONFIRM");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "Split-screen back-confirm %s (TD5RE_MP_BACK_CONFIRM=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+int frontend_back_confirm_active(void) { return s_bc_active; }
+
+int frontend_back_confirm_request(void (*action)(void)) {
+    if (s_bc_active) return 1;                  /* already prompting -> caller defers */
+    if (!frontend_splitscreen_active() || !frontend_back_confirm_on())
+        return 0;                               /* not split-screen / disabled -> back now */
+    s_bc_active = 1;
+    s_bc_action = action;
+    s_bc_arm_ms = td5_plat_time_ms();
+    /* Seed the edge state to the CURRENT input so the very press that asked to go
+     * back is not re-read next frame as an immediate confirm/cancel. */
+    {
+        uint32_t nav = td5_plat_input_frontend_nav();
+        s_bc_a_prev     = (nav & 0x10) != 0;
+        s_bc_b_prev     = (nav & 0x20) != 0;
+        s_bc_enter_prev = td5_plat_input_key_pressed(0x1C) ? 1 : 0;
+        s_bc_esc_prev   = td5_plat_input_key_pressed(0x01) ? 1 : 0;
+    }
+    td5_plat_input_flush_nav();
+    (void)td5_plat_input_esc_taken();           /* drop the queued ESC that armed us */
+    frontend_play_sfx(2);
+    TD5_LOG_I(LOG_TAG, "Back-confirm armed (screen %d, humans=%d)",
+              s_current_screen, s_num_human_players);
+    return 1;
+}
+
+/* Processed once per frame from td5_frontend_update while the prompt is up
+ * (the rest of the frontend is frozen). Resolves A/B/timeout and, on YES, runs
+ * the stored back action (which navigates). */
+void frontend_back_confirm_tick(void) {
+    uint32_t now = td5_plat_time_ms();
+    uint32_t nav = td5_plat_input_frontend_nav();      /* aggregate of every pad */
+    int a_now     = (nav & 0x10) != 0;                 /* any pad A = YES         */
+    int b_now     = (nav & 0x20) != 0;                 /* any pad B = NO          */
+    int enter_now = td5_plat_input_key_pressed(0x1C) ? 1 : 0;
+    int esc_now   = td5_plat_input_key_pressed(0x01) ? 1 : 0;
+    int confirm   = (a_now && !s_bc_a_prev) || (enter_now && !s_bc_enter_prev);
+    int cancel    = (b_now && !s_bc_b_prev) || (esc_now && !s_bc_esc_prev);
+    s_bc_a_prev = a_now; s_bc_b_prev = b_now;
+    s_bc_enter_prev = enter_now; s_bc_esc_prev = esc_now;
+    (void)td5_plat_input_esc_taken();                  /* keep WM ESC queue drained while frozen */
+    if (!confirm && (now - s_bc_arm_ms) >= TD5_BACK_CONFIRM_TIMEOUT_MS) cancel = 1;
+    if (confirm) {
+        void (*act)(void) = s_bc_action;
+        s_bc_active = 0; s_bc_action = NULL;
+        td5_plat_input_flush_nav();
+        frontend_play_sfx(3);
+        TD5_LOG_I(LOG_TAG, "Back-confirm: YES -> performing back action");
+        if (act) act();
+        return;
+    }
+    if (cancel) {
+        s_bc_active = 0; s_bc_action = NULL;
+        td5_plat_input_flush_nav();
+        frontend_play_sfx(5);
+        TD5_LOG_I(LOG_TAG, "Back-confirm: NO/timeout -> staying on screen");
+    }
+}
+
+/* Central-block back action (the existing escape-handler "return to the parent
+ * screen" branch, factored so it can run immediately OR deferred via the guard). */
+static void frontend_central_return_back(void) {
+    if (s_return_screen >= 0 &&
+        s_return_screen < TD5_SCREEN_COUNT &&
+        s_return_screen != s_current_screen) {
+        td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+    } else {
+        frontend_play_sfx(10);
+    }
+}
+
 /* Forward declaration for text rendering (defined later in file) */
 static void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 static void fe_draw_text_centered(float center_x, float y, const char *text,
@@ -5192,12 +5306,21 @@ int td5_frontend_display_loop(void) {
         }
     }
 
+    /* [splitscreen back-confirm 2026-06-24] While a "GO BACK?" prompt is up the
+     * whole frontend is FROZEN behind it: tick the modal (reads A/B/timeout and
+     * runs the back action on YES) and SKIP input-poll + screen-FSM so the menu
+     * beneath can't act on — or bleed — the pad. It still renders (stateless
+     * redraw from persistent state) with the prompt composited on top in
+     * td5_frontend_render_ui_rects. */
+    int bc_frozen = frontend_back_confirm_active();
+    if (bc_frozen) frontend_back_confirm_tick();
+
     /* 2. Input polling (keyboard, mouse, joystick).
      * The simultaneous-MP car-select grid reads every pad directly and creates no
      * s_buttons[]; running the shared poll here would treat each player's confirm
      * press as "Enter on a screen with no focused button" and play the locked /
      * rejection sfx (10). Skip it — the grid owns its own input + ESC handling. */
-    {
+    if (!bc_frozen) {
         int simul_grid = (s_current_screen == TD5_SCREEN_CAR_SELECTION) &&
                          (s_mp_simul || (s_mp_flow && s_num_human_players >= 2));
         /* The MP position picker (#8) likewise reads each pad directly and creates
@@ -5209,7 +5332,7 @@ int td5_frontend_display_loop(void) {
     td5_profile_mark("fe_input");   /* steps 0-2: input + surface recovery */
 
     /* 3. Screen dispatch -- call the active screen's state machine */
-    if (s_current_screen >= 0 && s_current_screen < TD5_SCREEN_COUNT) {
+    if (!bc_frozen && s_current_screen >= 0 && s_current_screen < TD5_SCREEN_COUNT) {
         ScreenFn fn = s_screen_table[s_current_screen];
         if (fn) fn();
     }
@@ -5252,8 +5375,9 @@ int td5_frontend_display_loop(void) {
     td5_profile_end_frame();
 
     /* 7. Escape key handling -- only when intro animation is complete (original
-     *    behavior: ESC is ignored during slide-in animations) */
-    if (s_anim_complete &&
+     *    behavior: ESC is ignored during slide-in animations). Skipped while the
+     *    split-screen back-confirm prompt owns the frame (bc_frozen). */
+    if (!bc_frozen && s_anim_complete &&
         !(s_mp_simul && s_current_screen == TD5_SCREEN_CAR_SELECTION) &&
         s_current_screen != TD5_SCREEN_MP_POSITION &&   /* picker owns its own B/ESC */
         frontend_check_escape()) {
@@ -5274,9 +5398,13 @@ int td5_frontend_display_loop(void) {
             if (s_return_screen >= 0 &&
                 s_return_screen < TD5_SCREEN_COUNT &&
                 s_return_screen != s_current_screen) {
-                td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+                /* [splitscreen back-confirm] In split-screen, returning to the
+                 * parent screen first raises the "GO BACK?" prompt; otherwise
+                 * (single-player / disabled) it navigates immediately, as before. */
+                if (!frontend_back_confirm_request(frontend_central_return_back))
+                    frontend_central_return_back();
             } else {
-                frontend_play_sfx(10);
+                frontend_play_sfx(10);   /* nothing to go back to -> reject, no prompt */
             }
         }
     }
@@ -9790,6 +9918,14 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_text_centered(320.0f * sx, 462.0f * sy, wb, 0xFFFF5050u, sx * 0.8f, sy * 0.8f);
         }
     }
+
+    /* [splitscreen back-confirm 2026-06-24] Universal "GO BACK?" yes/no prompt,
+     * drawn here (after the screen + the disconnect banner, before the queued fade
+     * rects) so it dims and sits on top of whatever menu is frozen beneath it.
+     * Input + freeze are handled in td5_frontend_update; this reuses the shared MP
+     * confirm renderer for a consistent look with the other back-confirm prompts. */
+    if (frontend_back_confirm_active())
+        mp_confirm_modal_render(sx, sy, "GO BACK?");
 
     /* Draw queued colored rects (with alpha blending for fade overlays) */
     for (int i = 0; i < s_draw_queue_count; i++) {

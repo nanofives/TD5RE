@@ -1631,6 +1631,14 @@ static void mp_simul_carsel_back(int n) {
 
 static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now); /* fwd: defined with the setup window below */
 
+/* [splitscreen back-confirm] Deferred back action for the car-select GRID. */
+static void mp_simul_carsel_back_cb(void) {
+    int n = s_num_human_players;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    mp_simul_carsel_back(n);
+}
+
 static void frontend_mp_simul_carsel_update(void) {
     int p, n = s_num_human_players;
     int all_ready = 1, want_back = 0;
@@ -1734,7 +1742,11 @@ static void frontend_mp_simul_carsel_update(void) {
     }
 
     if (frontend_check_escape()) want_back = 1;  /* keyboard ESC / aggregated gamepad B */
-    if (want_back) { mp_simul_carsel_back(n); return; }   /* [2026-06-20] -> position picker, keep profiles */
+    if (want_back) {                              /* [2026-06-20] -> position picker, keep profiles */
+        /* [splitscreen back-confirm] confirm before dropping the grid in split-screen. */
+        if (frontend_back_confirm_request(mp_simul_carsel_back_cb)) return;
+        mp_simul_carsel_back(n); return;
+    }
 
     for (p = 0; p < n; p++)
         if (!s_mp_player_ready[p]) { all_ready = 0; break; }
@@ -2559,6 +2571,19 @@ int frontend_mp_player_pane_cell(int p) {
  *                  Keyboard REAR-VIEW / R3 still reach it via the FRONT-VIEW getter.
  *
  * All ready -> commit cells to the session and advance to the car grid. */
+/* [splitscreen back-confirm] Deferred back action for the CHOOSE YOUR SCREEN
+ * position picker (the function-local s_pos_ready_ms timer is reset at the call
+ * site since it isn't reachable here). */
+static void mp_position_back_cb(void) {
+    int q;
+    for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) s_mp_player_ready[q] = 0;
+    s_mp_phase = 0;
+    s_inner_state = 0;
+    td5_plat_input_flush_nav();
+    TD5_LOG_I(LOG_TAG, "MP position: back -> name/colour setup");
+    td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+}
+
 void Screen_MpPosition(void) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0, ncells;
@@ -2727,15 +2752,12 @@ void Screen_MpPosition(void) {
 
     if (want_back) {
         /* Back to the name/colour setup (phase 0). Keep s_mp_simul set so
-         * CarSelection re-enters phase 0 cleanly; clear ready latches. */
-        int q;
-        for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) s_mp_player_ready[q] = 0;
+         * CarSelection re-enters phase 0 cleanly; clear ready latches.
+         * [splitscreen back-confirm] confirm first in split-screen; reset the
+         * (function-local) ready timer here, the rest of the back is the cb. */
         s_pos_ready_ms = 0;
-        s_mp_phase = 0;
-        s_inner_state = 0;
-        td5_plat_input_flush_nav();
-        TD5_LOG_I(LOG_TAG, "MP position: back -> name/colour setup");
-        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        if (frontend_back_confirm_request(mp_position_back_cb)) return;
+        mp_position_back_cb();
         return;
     }
 
@@ -2852,7 +2874,10 @@ static uint32_t mp_slot_color(int slot) {
 }
 
 /* Shared yes/no confirm modal render (drawn on top in the post-button pass). */
-static void mp_confirm_modal_render(float sx, float sy, const char *prompt) {
+/* [splitscreen back-confirm 2026-06-24] Exposed (was static) so the universal
+ * "GO BACK?" prompt in td5_frontend.c reuses the same dim + gold-title + footer
+ * look as the per-screen MP confirms. */
+void mp_confirm_modal_render(float sx, float sy, const char *prompt) {
     td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xC0000000u, -1, 0, 0, 1, 1);
     td5_vui_text_centered(320.0f * sx, 208.0f * sy, prompt, MP_TITLE_GOLD, sx, sy);
     mp_pos_small_centered(320.0f * sx, 244.0f * sy,
@@ -3377,6 +3402,13 @@ static void mp_roleselect_row(float sx, float sy, int p, float y, const char *va
     td5_vui_arrow((MP_ROW_VAL_CX + 44.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 1, 0xFF7995FFu);
 }
 
+/* [splitscreen back-confirm] Deferred back action shared by the cop-roles and
+ * team-select screens (both step back to the per-mode config screen). */
+static void mp_back_to_mode_config_cb(void) {
+    td5_plat_input_flush_nav();
+    td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+}
+
 void Screen_MpCopRoles(void) {
     int p, n = s_num_human_players;
     if (n < 2) n = 2;
@@ -3424,8 +3456,9 @@ void Screen_MpCopRoles(void) {
         return;
     }
     if (frontend_check_escape()) {
-        td5_plat_input_flush_nav();
-        td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+        /* [splitscreen back-confirm] confirm before stepping back in split-screen. */
+        if (!frontend_back_confirm_request(mp_back_to_mode_config_cb))
+            mp_back_to_mode_config_cb();
     }
 }
 
@@ -3487,8 +3520,9 @@ void Screen_MpTeamSelect(void) {
         return;
     }
     if (frontend_check_escape()) {
-        td5_plat_input_flush_nav();
-        td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+        /* [splitscreen back-confirm] confirm before stepping back in split-screen. */
+        if (!frontend_back_confirm_request(mp_back_to_mode_config_cb))
+            mp_back_to_mode_config_cb();
     }
 }
 
