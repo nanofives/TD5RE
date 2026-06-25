@@ -3353,24 +3353,41 @@ static void td5_xinput_correlate_button(uint32_t di_mask, uint32_t xi_mask)
         the_di, (the_di < s_device_count ? s_device_names[the_di] : "?"), the_user);
 }
 
+/* WGI rumble backend (defined below, before td5_xinput_push). Forward-declared
+ * here so the shared menu correlation can also learn each pad's WGI gamepad.
+ * [>4-PAD FF 2026-06-24] */
+static int  td5_ff_wgi_enabled(void);
+static int  td5_wgi_init(void);
+static int  td5_wgi_needed(void);
+static int  td5_wgi_di_bound(int di);
+static void td5_wgi_correlate_step(uint32_t di_a_mask, uint32_t di_start_mask);
+
 /* Per-menu-frame correlation: read every still-unbound XInput-class pad's
- * A/Start through the shared scan handles and every XInput user's A/Start, then
- * bind any pad that uniquely coincides. Called from the lobby join scan, the
- * frontend nav scan and the car-select grid scan. Cheap once everything is bound
- * (the unbound-skip leaves di_a/di_start zero and it returns before reading
- * XInput). A = DI button 0 / XINPUT_GAMEPAD_A (0x1000); Start = DI button 7 /
- * XINPUT_GAMEPAD_START (0x0010) — both match the menu-nav button decode. */
+ * A/Start through the shared scan handles, then bind it to the matching XInput
+ * user AND/OR the matching WGI gamepad (whichever backends are active) by
+ * button-press coincidence. Called from the lobby join scan, the frontend nav
+ * scan and the car-select grid scan. Cheap once everything is bound (the
+ * unbound-skip leaves di_a/di_start zero and it returns before reading anything).
+ * A = DI button 0 / XINPUT_GAMEPAD_A (0x1000) / GamepadButtons_A; Start = DI
+ * button 7 / XINPUT_GAMEPAD_START (0x0010) / GamepadButtons_Menu. */
 static void td5_xinput_correlate_tick(void)
 {
     uint32_t di_a = 0, di_start = 0, xi_a = 0, xi_start = 0;
     int i, u;
-    if (!td5_ff_xinput_enabled() || !td5_xinput_load() || !s_xi_get) return;
+    int xi_ok  = (td5_ff_xinput_enabled() && td5_xinput_load() && s_xi_get != NULL);
+    /* WGI is engaged ONLY when there are more XInput-class pads than XInput's
+     * 4-user cap can serve, so 1-4-pad setups never touch the WGI code at all
+     * (zero blast radius) and only the overflow pads use it. */
+    int wgi_ok = (td5_ff_wgi_enabled() && td5_wgi_needed() && td5_wgi_init());
+    if (!xi_ok && !wgi_ok) return;
     td5_xinput_corr_init();
 
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
         LPDIRECTINPUTDEVICE8A dev;
-        if (s_di_xinput_user[i] >= 0) continue;            /* already bound */
+        int need_xi  = (xi_ok  && s_di_xinput_user[i] < 0);
+        int need_wgi = (wgi_ok && !td5_wgi_di_bound(i));
+        if (!need_xi && !need_wgi) continue;               /* fully bound on every active backend */
         if (!td5_device_is_xinput_cached(i)) continue;     /* only XInput-class pads */
         dev = scan_dev(i);
         if (!dev) continue;
@@ -3385,19 +3402,24 @@ static void td5_xinput_correlate_tick(void)
     }
     if (!di_a && !di_start) return;                        /* nothing pressed to learn from */
 
-    /* wButtons is the first WORD of XINPUT_GAMEPAD, right after dwPacketNumber. */
-    for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
-        TD5_XINPUT_STATE st;
-        unsigned btn;
-        ZeroMemory(&st, sizeof(st));
-        if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;
-        btn = (unsigned)st.pad[0] | ((unsigned)st.pad[1] << 8);
-        if (btn & 0x1000u) xi_a     |= (1u << u);
-        if (btn & 0x0010u) xi_start |= (1u << u);
+    /* XInput-user correlation (first 4 pads). wButtons is the first WORD of
+     * XINPUT_GAMEPAD, right after dwPacketNumber. */
+    if (xi_ok) {
+        for (u = 0; u < TD5_XINPUT_MAX_USERS; u++) {
+            TD5_XINPUT_STATE st;
+            unsigned btn;
+            ZeroMemory(&st, sizeof(st));
+            if (s_xi_get((DWORD)u, &st) != TD5_ERROR_SUCCESS) continue;
+            btn = (unsigned)st.pad[0] | ((unsigned)st.pad[1] << 8);
+            if (btn & 0x1000u) xi_a     |= (1u << u);
+            if (btn & 0x0010u) xi_start |= (1u << u);
+        }
+        if (di_a)     td5_xinput_correlate_button(di_a, xi_a);
+        if (di_start) td5_xinput_correlate_button(di_start, xi_start);
     }
 
-    if (di_a)     td5_xinput_correlate_button(di_a, xi_a);
-    if (di_start) td5_xinput_correlate_button(di_start, xi_start);
+    /* WGI-gamepad correlation (lifts the 4-pad cap). */
+    if (wgi_ok) td5_wgi_correlate_step(di_a, di_start);
 }
 
 /* Correlate an XInput-class DI device (at DInput enumeration index `di`) to its
@@ -3479,11 +3501,298 @@ static int td5_xinput_user_for_device(int di, int device_slot)
 }
 
 /* Push the slot's cached low/high motor magnitudes to its XInput pad. */
+/* ========================================================================
+ * Windows.Gaming.Input (WGI) rumble backend  [>4-PAD FF 2026-06-24]
+ *
+ * XInput is hard-capped at 4 users (XUSER_MAX_COUNT), so 5+ identical XInput
+ * pads cannot all be rumbled through it. WGI's Gamepad API has no such cap (8+
+ * Xbox-compatible pads vibrate fine). We drive rumble through WGI when it is
+ * available and fall back to XInput (first 4 pads) otherwise. INPUT still comes
+ * from DirectInput; WGI is used only for OUTPUT, correlating each player's DI
+ * device to its WGI Gamepad with the SAME button-press coincidence as XInput.
+ *
+ * WGI is WinRT, called through the documented WinRT COM ABI from C with the
+ * interfaces/structs/IID transcribed verbatim from mingw windows.gaming.input.h.
+ * combase.dll is loaded DYNAMICALLY (LoadLibrary+GetProcAddress, like the XInput
+ * and dwmapi paths) so a pre-Win8 host without WinRT simply falls back to XInput
+ * and the build needs no extra link lib.
+ *
+ * Knob TD5RE_FF_WGI (cached): default ON; "0" -> XInput-only (4-pad cap).
+ * ======================================================================== */
+
+#ifndef CO_E_NOTINITIALIZED
+#define CO_E_NOTINITIALIZED 0x800401F0L
+#endif
+
+/* C-ABI subset of Windows.Gaming.Input (layout verbatim from the WinRT header). */
+typedef struct TD5_WgiVibration {
+    double LeftMotor, RightMotor, LeftTrigger, RightTrigger;   /* 0.0..1.0 */
+} TD5_WgiVibration;
+/* GamepadReading: only Buttons (offset 8) is read; the rest is sized to match the
+ * 64-byte ABI struct. Every member sits at an 8-byte-multiple offset by explicit
+ * padding, so the layout is identical under MSVC and MinGW regardless of GCC's
+ * 32-bit double-alignment default. */
+typedef struct TD5_WgiReading {
+    unsigned long long Timestamp;   /* @0  */
+    unsigned int       Buttons;     /* @8  GamepadButtons: A=0x4, Menu=0x1 */
+    unsigned int       _pad;        /* @12 */
+    double             _rest[6];    /* @16..63 triggers + thumbsticks (unused) */
+} TD5_WgiReading;
+
+typedef struct TD5_WgiGamepadVtbl {
+    void          *QueryInterface_;
+    unsigned long (__stdcall *AddRef)(void *This);
+    unsigned long (__stdcall *Release)(void *This);
+    void          *GetIids_, *GetRuntimeClassName_, *GetTrustLevel_;
+    long          (__stdcall *get_Vibration)(void *This, TD5_WgiVibration *value);
+    long          (__stdcall *put_Vibration)(void *This, TD5_WgiVibration value);
+    long          (__stdcall *GetCurrentReading)(void *This, TD5_WgiReading *value);
+} TD5_WgiGamepadVtbl;
+typedef struct TD5_WgiGamepad { const TD5_WgiGamepadVtbl *lpVtbl; } TD5_WgiGamepad;
+
+typedef struct TD5_WgiVectorViewVtbl {
+    void          *QueryInterface_;
+    unsigned long (__stdcall *AddRef)(void *This);
+    unsigned long (__stdcall *Release)(void *This);
+    void          *GetIids_, *GetRuntimeClassName_, *GetTrustLevel_;
+    long          (__stdcall *GetAt)(void *This, unsigned int index, TD5_WgiGamepad **value);
+    long          (__stdcall *get_Size)(void *This, unsigned int *value);
+    void          *IndexOf_, *GetMany_;
+} TD5_WgiVectorViewVtbl;
+typedef struct TD5_WgiVectorView { const TD5_WgiVectorViewVtbl *lpVtbl; } TD5_WgiVectorView;
+
+typedef struct TD5_WgiStaticsVtbl {
+    void          *QueryInterface_;
+    unsigned long (__stdcall *AddRef)(void *This);
+    unsigned long (__stdcall *Release)(void *This);
+    void          *GetIids_, *GetRuntimeClassName_, *GetTrustLevel_;
+    void          *add_GamepadAdded_, *remove_GamepadAdded_;
+    void          *add_GamepadRemoved_, *remove_GamepadRemoved_;
+    long          (__stdcall *get_Gamepads)(void *This, TD5_WgiVectorView **value);
+} TD5_WgiStaticsVtbl;
+typedef struct TD5_WgiStatics { const TD5_WgiStaticsVtbl *lpVtbl; } TD5_WgiStatics;
+
+/* IID_IGamepadStatics {8BBCE529-D49C-39E9-9560-E47DDE96B7C8} (from the header). */
+static const GUID TD5_IID_IGamepadStatics =
+    { 0x8bbce529, 0xd49c, 0x39e9, { 0x95, 0x60, 0xe4, 0x7d, 0xde, 0x96, 0xb7, 0xc8 } };
+
+typedef long (WINAPI *PFN_RoGetActivationFactory)(void *hstr, const GUID *iid, void **factory);
+typedef long (WINAPI *PFN_WindowsCreateString)(const WCHAR *src, UINT len, void **hstr);
+typedef long (WINAPI *PFN_WindowsDeleteString)(void *hstr);
+typedef long (WINAPI *PFN_RoInitialize)(int init_type);
+
+static int s_wgi_loaded = 0;     /* combase probed (1 even if not found) */
+static int s_wgi_avail  = 0;     /* factory resolved */
+static PFN_RoGetActivationFactory s_RoGetActivationFactory = NULL;
+static PFN_WindowsCreateString    s_WindowsCreateString    = NULL;
+static PFN_WindowsDeleteString    s_WindowsDeleteString    = NULL;
+static PFN_RoInitialize           s_RoInitialize           = NULL;
+static TD5_WgiStatics *s_wgi_statics = NULL;
+
+/* Observed binding: DI enumeration index -> WGI Gamepad (AddRef'd), NULL=unbound
+ * (parallels s_di_xinput_user). Per-player resolved pointer set at ff_init. */
+static TD5_WgiGamepad *s_wgi_pad_for_di[16];
+static TD5_WgiGamepad *s_wgi_pad[TD5_PLAT_MAX_JS_SLOTS];
+static WORD s_wgi_last_lo[TD5_PLAT_MAX_JS_SLOTS];   /* last motor magnitudes pushed (de-dup) */
+static WORD s_wgi_last_hi[TD5_PLAT_MAX_JS_SLOTS];
+
+/* TD5RE_FF_WGI (cached): master gate for the WGI rumble path. Default ON. */
+static int td5_ff_wgi_enabled(void)
+{
+    static int s_init = 0, s_on = 1;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_FF_WGI");
+        s_on = (e && e[0] == '0') ? 0 : 1;
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "FF WGI rumble path: %s",
+                  s_on ? "enabled (default — lifts 4-pad cap)" : "disabled (TD5RE_FF_WGI=0)");
+    }
+    return s_on;
+}
+
+/* Resolve WGI once: load combase.dll, get the IGamepadStatics activation factory.
+ * Idempotent; returns 1 if the WGI rumble path is usable. */
+static int td5_wgi_init(void)
+{
+    static const WCHAR k_cls[] = L"Windows.Gaming.Input.Gamepad";  /* 28 chars */
+    HMODULE h;
+    void *cls = NULL;
+    long hr;
+    if (s_wgi_loaded) return s_wgi_avail;
+    s_wgi_loaded = 1;
+    if (!td5_ff_wgi_enabled()) return 0;
+    h = LoadLibraryA("combase.dll");
+    if (!h) { TD5_LOG_I(LOG_TAG, "FF WGI: combase.dll absent -> XInput only"); return 0; }
+    s_RoGetActivationFactory = (PFN_RoGetActivationFactory)(void *)GetProcAddress(h, "RoGetActivationFactory");
+    s_WindowsCreateString    = (PFN_WindowsCreateString)(void *)GetProcAddress(h, "WindowsCreateString");
+    s_WindowsDeleteString    = (PFN_WindowsDeleteString)(void *)GetProcAddress(h, "WindowsDeleteString");
+    s_RoInitialize           = (PFN_RoInitialize)(void *)GetProcAddress(h, "RoInitialize");
+    if (!s_RoGetActivationFactory || !s_WindowsCreateString || !s_WindowsDeleteString) {
+        TD5_LOG_W(LOG_TAG, "FF WGI: combase exports missing -> XInput only");
+        return 0;
+    }
+    hr = s_WindowsCreateString(k_cls, 28u, &cls);
+    if (FAILED(hr) || !cls) { TD5_LOG_W(LOG_TAG, "FF WGI: WindowsCreateString failed hr=0x%08lX", (unsigned long)hr); return 0; }
+    hr = s_RoGetActivationFactory(cls, &TD5_IID_IGamepadStatics, (void **)&s_wgi_statics);
+    if (hr == CO_E_NOTINITIALIZED && s_RoInitialize) {
+        s_RoInitialize(1 /* RO_INIT_MULTITHREADED */);
+        hr = s_RoGetActivationFactory(cls, &TD5_IID_IGamepadStatics, (void **)&s_wgi_statics);
+    }
+    s_WindowsDeleteString(cls);
+    if (FAILED(hr) || !s_wgi_statics) {
+        TD5_LOG_W(LOG_TAG, "FF WGI: RoGetActivationFactory(Gamepad) failed hr=0x%08lX -> XInput only",
+                  (unsigned long)hr);
+        s_wgi_statics = NULL;
+        return 0;
+    }
+    s_wgi_avail = 1;
+    TD5_LOG_I(LOG_TAG, "FF WGI: available (rumble lifts the 4-pad XInput cap)");
+    return 1;
+}
+
+static int td5_wgi_di_bound(int di)
+{
+    return (di >= 0 && di < 16 && s_wgi_pad_for_di[di] != NULL);
+}
+
+/* True only when there are MORE XInput-class DI pads than XInput's 4-user cap,
+ * i.e. the situation WGI exists to solve. Keeps WGI dormant for 1-4-pad setups. */
+static int td5_wgi_needed(void)
+{
+    int i, n = 0;
+    for (i = 1; i < s_device_count && i < 16; i++) {
+        if (td5_device_is_xinput_cached(i)) {
+            if (++n > TD5_XINPUT_MAX_USERS) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Push the slot's cached low/high motor magnitudes to its WGI gamepad. */
+static void td5_wgi_push(int device_slot)
+{
+    TD5_WgiGamepad *g;
+    TD5_WgiVibration vib;
+    WORD lo, hi;
+    if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return;
+    g = s_wgi_pad[device_slot];
+    if (!g) return;
+    lo = s_xi_low[device_slot];
+    hi = s_xi_high[device_slot];
+    if (lo == s_wgi_last_lo[device_slot] && hi == s_wgi_last_hi[device_slot]) return;
+    s_wgi_last_lo[device_slot] = lo;
+    s_wgi_last_hi[device_slot] = hi;
+    vib.LeftMotor    = (double)lo / 65535.0;   /* heavy/low-freq motor */
+    vib.RightMotor   = (double)hi / 65535.0;   /* light/high-freq motor */
+    vib.LeftTrigger  = 0.0;
+    vib.RightTrigger = 0.0;
+    g->lpVtbl->put_Vibration((void *)g, vib);
+}
+
+/* Snapshot the currently-connected WGI gamepads into out[] (each AddRef'd). The
+ * caller Releases every returned pointer. Returns the count. */
+static int td5_wgi_snapshot(TD5_WgiGamepad **out, int max)
+{
+    TD5_WgiVectorView *view = NULL;
+    unsigned int n = 0, i;
+    int c = 0;
+    if (!s_wgi_avail || !s_wgi_statics) return 0;
+    if (FAILED(s_wgi_statics->lpVtbl->get_Gamepads((void *)s_wgi_statics, &view)) || !view) return 0;
+    if (FAILED(view->lpVtbl->get_Size((void *)view, &n))) n = 0;
+    for (i = 0; i < n && c < max; i++) {
+        TD5_WgiGamepad *g = NULL;
+        if (SUCCEEDED(view->lpVtbl->GetAt((void *)view, i, &g)) && g) out[c++] = g;  /* GetAt AddRefs */
+    }
+    view->lpVtbl->Release((void *)view);
+    return c;
+}
+
+static int td5_wgi_pad_is_claimed(TD5_WgiGamepad *g)
+{
+    int i;
+    for (i = 0; i < 16; i++) if (s_wgi_pad_for_di[i] == g) return 1;
+    return 0;
+}
+
+/* Bind a DI device to a WGI gamepad when exactly ONE unbound XInput-class DI
+ * device and exactly ONE unclaimed WGI gamepad hold the same menu button this
+ * frame. Conservative (never binds on >1-either-side ambiguity) so it can never
+ * mis-route. Same shape as td5_xinput_correlate_button, for WGI gamepads. */
+static void td5_wgi_correlate_step(uint32_t di_a_mask, uint32_t di_start_mask)
+{
+    TD5_WgiGamepad *pads[16];
+    uint32_t wgi_a = 0, wgi_start = 0;
+    uint32_t di_masks[2], wgi_masks[2];
+    int np, k, pass;
+    if (!s_wgi_avail) return;
+    if (!di_a_mask && !di_start_mask) return;
+    np = td5_wgi_snapshot(pads, 16);
+    if (np <= 0) return;
+
+    for (k = 0; k < np; k++) {
+        TD5_WgiReading rd;
+        memset(&rd, 0, sizeof(rd));
+        if (SUCCEEDED(pads[k]->lpVtbl->GetCurrentReading((void *)pads[k], &rd))) {
+            if (rd.Buttons & 0x4u) wgi_a     |= (1u << k);   /* GamepadButtons_A */
+            if (rd.Buttons & 0x1u) wgi_start |= (1u << k);   /* GamepadButtons_Menu (Start) */
+        }
+    }
+
+    di_masks[0] = di_a_mask;     wgi_masks[0] = wgi_a;
+    di_masks[1] = di_start_mask; wgi_masks[1] = wgi_start;
+    for (pass = 0; pass < 2; pass++) {
+        int di_count = 0, wgi_count = 0, the_di = -1, the_k = -1, i;
+        if (!di_masks[pass]) continue;
+        for (k = 0; k < np; k++) {
+            if (!(wgi_masks[pass] & (1u << k))) continue;
+            if (td5_wgi_pad_is_claimed(pads[k])) continue;
+            wgi_count++; the_k = k;
+        }
+        if (wgi_count != 1) continue;
+        for (i = 1; i < s_device_count && i < 16; i++) {
+            if (!(di_masks[pass] & (1u << i))) continue;
+            if (s_wgi_pad_for_di[i] != NULL) continue;        /* already bound */
+            if (!td5_device_is_xinput_cached(i)) continue;
+            di_count++; the_di = i;
+        }
+        if (di_count != 1) continue;
+        pads[the_k]->lpVtbl->AddRef((void *)pads[the_k]);     /* retain past the snapshot release */
+        s_wgi_pad_for_di[the_di] = pads[the_k];
+        TD5_LOG_I(LOG_TAG,
+            "FF WGI correlate: DI device %d (%s) <-> WGI gamepad (button coincidence)",
+            the_di, (the_di < s_device_count ? s_device_names[the_di] : "?"));
+    }
+
+    for (k = 0; k < np; k++) if (pads[k]) pads[k]->lpVtbl->Release((void *)pads[k]);
+}
+
+/* Release all WGI gamepad objects + the factory (called at FF shutdown). */
+static void td5_wgi_shutdown(void)
+{
+    int i;
+    for (i = 0; i < 16; i++) {
+        if (s_wgi_pad_for_di[i]) {
+            s_wgi_pad_for_di[i]->lpVtbl->Release((void *)s_wgi_pad_for_di[i]);
+            s_wgi_pad_for_di[i] = NULL;
+        }
+    }
+    for (i = 0; i < TD5_PLAT_MAX_JS_SLOTS; i++) s_wgi_pad[i] = NULL;
+    if (s_wgi_statics) {
+        s_wgi_statics->lpVtbl->Release((void *)s_wgi_statics);
+        s_wgi_statics = NULL;
+    }
+    s_wgi_avail = 0;
+}
+
 static void td5_xinput_push(int device_slot)
 {
     TD5_XINPUT_VIBRATION vib;
     int u;
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return;
+    if (s_wgi_pad[device_slot]) {   /* WGI backend (no 4-cap) takes priority */
+        td5_wgi_push(device_slot);
+        return;
+    }
     u = s_xi_user[device_slot];
     if (u < 0 || !s_xi_set) return;
     vib.wLeftMotorSpeed  = s_xi_low [device_slot];
@@ -3515,9 +3824,11 @@ static WORD td5_xinput_scale(int magnitude)
 static int td5_xinput_route_effect(int device_slot, int slot, int magnitude)
 {
     WORD w;
-    if (!s_xi_loaded) return 0;                  /* ff_init never ran -> s_xi_user not armed */
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return 0;
-    if (s_xi_user[device_slot] < 0) return 0;   /* not an XInput device */
+    /* Route here if either rumble backend is bound for this slot. WGI-only slots
+     * (5th+ pad: no XInput user but a bound WGI gamepad) must NOT fall through to
+     * the DI-effect path. */
+    if (s_xi_user[device_slot] < 0 && s_wgi_pad[device_slot] == NULL) return 0;
     w = td5_xinput_scale(magnitude);
     if (slot == 1) {
         s_xi_high[device_slot] = w;                       /* sharp crash/gear jolt motor */
@@ -3538,9 +3849,8 @@ static int td5_xinput_route_effect(int device_slot, int slot, int magnitude)
  * Only slots 1/2 own a motor contribution; slots 0/3 are silent no-ops. */
 static int td5_xinput_route_stop(int device_slot, int slot)
 {
-    if (!s_xi_loaded) return 0;                  /* ff_init never ran -> s_xi_user not armed */
     if (device_slot < 0 || device_slot >= TD5_PLAT_MAX_JS_SLOTS) return 0;
-    if (s_xi_user[device_slot] < 0) return 0;
+    if (s_xi_user[device_slot] < 0 && s_wgi_pad[device_slot] == NULL) return 0;  /* no rumble backend bound */
     if (slot == 1) {
         s_xi_high[device_slot] = 0;
         td5_xinput_push(device_slot);
@@ -3675,9 +3985,11 @@ int td5_plat_ff_init(int device_slot)
      * XInput, and claim a user index. DI-effect init still runs afterwards so a
      * device that happens to support both keeps the richer effect path too. */
     s_xi_user[device_slot] = -1;
+    s_wgi_pad[device_slot] = NULL;
+    s_wgi_last_lo[device_slot] = s_wgi_last_hi[device_slot] = 0xFFFF; /* force the rest-push below */
     s_xi_low[device_slot] = s_xi_high[device_slot] = 0;
     s_xi_low_contrib[device_slot][0] = s_xi_low_contrib[device_slot][1] = 0;
-    if (td5_ff_xinput_enabled() && td5_xinput_load()) {
+    {
         int di = -1, k;
         for (k = 1; k < s_device_count && k < 16; k++) {
             if (IsEqualGUID(&s_device_guids[k], &s_di_joystick_guid[device_slot])) {
@@ -3686,21 +3998,35 @@ int td5_plat_ff_init(int device_slot)
             }
         }
         if (di > 0 && td5_device_is_xinput(di)) {
-            int u = td5_xinput_user_for_device(di, device_slot);
+            /* First 4 pads: keep the (observed) XInput path — unchanged, proven. */
+            int u = -1;
+            if (td5_ff_xinput_enabled() && td5_xinput_load())
+                u = td5_xinput_user_for_device(di, device_slot);
             if (u >= 0) {
                 s_xi_user[device_slot] = u;
                 xinput_ready = 1;
                 td5_xinput_push(device_slot);   /* ensure motors start at rest */
                 /* [SPLIT-SCREEN FF FIX] Log the full per-player rumble route so a
-                 * manual two-pad test can confirm each player drives their OWN
-                 * stick (slot=player, device=DI enum idx, user=correlated XInput
-                 * user). A swap here is the "wrong joystick" symptom. */
+                 * manual test can confirm each player drives their OWN stick.
+                 * A swap here is the "wrong joystick" symptom. */
                 TD5_LOG_I(LOG_TAG,
                           "FF route: player_slot=%d -> DI device=%d (%s) -> XInput user=%d",
                           device_slot, di, s_device_names[di], u);
-            } else {
+            } else if (td5_ff_wgi_enabled() && td5_wgi_needed() && td5_wgi_init() &&
+                       s_wgi_pad_for_di[di]) {
+                /* 5th+ pad (beyond XInput's 4 users): WGI lifts the cap. Only ever
+                 * reached when >4 XInput pads are present, so the working 1-4-pad
+                 * path above is never disturbed. */
+                s_wgi_pad[device_slot] = s_wgi_pad_for_di[di];
+                xinput_ready = 1;
+                td5_xinput_push(device_slot);   /* motors at rest via WGI */
+                TD5_LOG_I(LOG_TAG,
+                          "FF route: player_slot=%d -> DI device=%d (%s) -> WGI gamepad (beyond XInput 4-cap)",
+                          device_slot, di, s_device_names[di]);
+            } else if (td5_wgi_needed()) {
                 TD5_LOG_W(LOG_TAG,
-                          "FF: slot=%d device=%d is XInput but no free user index",
+                          "FF: slot=%d device=%d is the 5th+ XInput pad but no WGI gamepad observed yet "
+                          "(press A on it in the menu) -- or TD5RE_FF_WGI=0",
                           device_slot, di);
             }
         }
@@ -3766,14 +4092,16 @@ void td5_plat_ff_shutdown(void)
             td5_ff_release_effects(dev);
         }
         ZeroMemory(&s_ff[dev], sizeof(s_ff[dev]));
-        /* Stop the motors and release the XInput routing for this slot. */
-        if (s_xi_user[dev] >= 0) {
+        /* Stop the motors on whichever backend (XInput or WGI) this slot used. */
+        if (s_xi_user[dev] >= 0 || s_wgi_pad[dev]) {
             s_xi_low[dev] = s_xi_high[dev] = 0;
             s_xi_low_contrib[dev][0] = s_xi_low_contrib[dev][1] = 0;
             td5_xinput_push(dev);
         }
         s_xi_user[dev] = -1;
+        s_wgi_pad[dev] = NULL;
     }
+    td5_wgi_shutdown();   /* release the WGI gamepad objects + activation factory */
 }
 
 void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
