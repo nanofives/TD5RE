@@ -6268,22 +6268,51 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
      * the original 6-column layout below untouched. Port-only feature. */
     if (s_num_human_players >= 2) {
         #define MP_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
-        /* Column CENTRES (640x480 canvas px). NAME + CAR take the wide left
-         * columns; the four stat columns are compressed to the right. */
-        const float m_name = 100.0f;
-        const float m_car  = 205.0f;
-        const float m_time = 305.0f;
-        const float m_top  = 375.0f;
-        const float m_avg  = 442.0f;
-        const float m_col  = 506.0f;   /* header "HITS" (COLLISIONS abbreviated to fit 7 cols) */
-        const float m_air  = 568.0f;
+        /* [MP RESULTS LAYOUT 2026-06-25] Per user request:
+         *   (1) NAME column LEFT-aligned at the RESULTS title's left edge
+         *       (FE_TITLE_LEFT_X = 126; the title font draws there in td5_frontend.c)
+         *       so the name column lines up under the screen title;
+         *   (2) the stat columns moved CLOSER TOGETHER (tighter group on the right);
+         *   (3) the header/results separator starts at the END of the decorative
+         *       title strip (x~=110, measured from MainMenu.tga: the blue/white
+         *       textured segment spans x37..109) instead of x=50;
+         *   (4) the separator sits a few px LOWER (y 112->116) and the rows start
+         *       lower (y 121->125) so the headers clear the line.
+         *
+         * The CUP game mode (td5_game_mp_cup_active) gets a dedicated layout with an
+         * extra POINTS column showing "<this race> (<running cup total>)" and the
+         * stat group squeezed to make room. NAME is left-aligned at m_name (drawn
+         * directly, NOT via MP_CTR which centres). All other columns stay centred. */
+        const int   mp_cup = td5_game_mp_cup_active();
+        const float m_name = 126.0f;   /* NAME left edge = RESULTS title left edge */
+        float m_car, m_time, m_top, m_avg, m_col, m_air, m_pts = 0.0f;
+        if (mp_cup) {                  /* 8 columns: squeeze to fit POINTS */
+            m_car  = 220.0f;
+            m_time = 310.0f;
+            m_top  = 370.0f;
+            m_avg  = 424.0f;
+            m_col  = 470.0f;           /* HITS  */
+            m_air  = 514.0f;           /* AIR TIME */
+            m_pts  = 566.0f;           /* POINTS (this race + running total) */
+        } else {                       /* 7 columns: stat group tightened, right-shifted left */
+            m_car  = 226.0f;
+            m_time = 320.0f;
+            m_top  = 384.0f;
+            m_avg  = 442.0f;
+            m_col  = 494.0f;           /* HITS  */
+            m_air  = 544.0f;           /* AIR TIME */
+        }
         const float mh_top = 88.0f, mh_mid = 95.0f, mh_bot = 102.0f;
-        const float mrow0  = 121.0f, mrow_h = 22.0f;
+        const float msep_y = 116.0f;            /* separator a few px below the headers */
+        const float msep_x0 = 110.0f;           /* line starts at the end of the title strip */
+        const float msep_x1 = 596.0f;           /* line right edge (spans all columns) */
+        const float mrow0  = 125.0f, mrow_h = 22.0f;
         const uint32_t MHDR   = 0xFFFFFFFFu;  /* white headers                       */
         const uint32_t MSELF  = 0xFFD9C50Cu;  /* gold = the local player row (P1)    */
         const uint32_t MAICOL = 0xFFE0E0E0u;  /* light grey = AI (non-highlight)     */
 
-        fe_draw_small_text(MP_CTR(m_name, "NAME"),  mh_mid * sy, "NAME",  MHDR, sx, sy);
+        /* NAME header — LEFT-aligned at the title edge (not centred). */
+        fe_draw_small_text((m_name + sum_slide) * sx, mh_mid * sy, "NAME", MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_car,  "CAR"),   mh_mid * sy, "CAR",   MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_time, "TIME"),  mh_mid * sy, "TIME",  MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_top,  "TOP"),   mh_top * sy, "TOP",   MHDR, sx, sy);
@@ -6293,10 +6322,13 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
         fe_draw_small_text(MP_CTR(m_col,  "HITS"),  mh_mid * sy, "HITS",  MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_air,  "AIR"),   mh_top * sy, "AIR",   MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_air,  "TIME"),  mh_bot * sy, "TIME",  MHDR, sx, sy);
+        if (mp_cup)
+            fe_draw_small_text(MP_CTR(m_pts, "POINTS"), mh_mid * sy, "POINTS", MHDR, sx, sy);
 
-        /* Separator between the column headers and the result rows (slides in
-         * with the table). */
-        td5_vui_quad((50.0f + sum_slide) * sx, 112.0f * sy, 546.0f * sx, 2.0f * sy,
+        /* Separator between the column headers and the result rows — starts at the
+         * end of the decorative title strip, slides in with the table. */
+        td5_vui_quad((msep_x0 + sum_slide) * sx, msep_y * sy,
+                     (msep_x1 - msep_x0) * sx, 2.0f * sy,
                      0xFFB0B8C0u, -1, 0.0f, 0.0f, 1.0f, 1.0f);
 
         int32_t mwinner = 0;
@@ -6316,7 +6348,8 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
                                : MAICOL;
 
             /* NAME — humans show their PROFILE NAME (fallback "P%d" if unset);
-             * AI rows show "CPU" (the car moves to its own column below). */
+             * AI rows show "CPU" (the car moves to its own column below).
+             * LEFT-aligned at the title edge (drawn directly, not via MP_CTR). */
             if (is_human) {
                 const char *pn = (slot < TD5_MAX_HUMAN_PLAYERS) ? s_mp_player_name[slot] : "";
                 if (pn && pn[0]) snprintf(buf, sizeof(buf), "%s", pn);
@@ -6324,7 +6357,7 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
             } else {
                 snprintf(buf, sizeof(buf), "CPU");
             }
-            fe_draw_small_text(MP_CTR(m_name, buf), y, buf, row_color, sx, sy);
+            fe_draw_small_text((m_name + sum_slide) * sx, y, buf, row_color, sx, sy);
 
             /* CAR — short car name for EVERYONE (reads g_td5.ai_car_indices). */
             {
@@ -6380,6 +6413,15 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
             fe_draw_small_text(MP_CTR(m_col, buf), y, buf, row_color, sx, sy);
             snprintf(buf, sizeof(buf), "%d.%ds", air_tenths / 10, air_tenths % 10);
             fe_draw_small_text(MP_CTR(m_air, buf), y, buf, row_color, sx, sy);
+
+            /* POINTS (cup only): "<points earned this race> (<running cup total>)".
+             * Authentic per-position ladder {15,12,10,5,4,3} (RE @0x00463a18). */
+            if (mp_cup) {
+                int rp = td5_game_mp_cup_race_points(slot);
+                int tp = td5_game_mp_cup_points(slot);
+                snprintf(buf, sizeof(buf), "%d (%d)", rp, tp);
+                fe_draw_small_text(MP_CTR(m_pts, buf), y, buf, row_color, sx, sy);
+            }
         }
         #undef MP_CTR
         return;

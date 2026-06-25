@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Multiplayer results table tidied: name column lines" },
+    { CL_ITEM,    "  up under the title, columns closer, cleaner divider" },
+    { CL_ITEM,    "Cup races now show a CUP RESULTS screen with a POINTS" },
+    { CL_ITEM,    "  column (points this race + running cup total)" },
     { CL_ITEM,    "Split-screen overview map no longer draws a stray" },
     { CL_ITEM,    "  diagonal line across point-to-point tracks (Sydney)" },
     { CL_ITEM,    "CUP - WHAT NEXT? menu tidied: title moved to the top" },

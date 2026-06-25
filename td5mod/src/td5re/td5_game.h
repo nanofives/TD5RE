@@ -248,7 +248,8 @@ int  td5_game_mp_cup_active(void);
 int  td5_game_mp_cup_has_next(void);
 int  td5_game_mp_cup_current(void);
 int  td5_game_mp_cup_race_count(void);
-int  td5_game_mp_cup_points(int slot);
+int  td5_game_mp_cup_points(int slot);       /* cumulative cup total for slot     */
+int  td5_game_mp_cup_race_points(int slot);  /* points earned in the race just run */
 int  td5_game_mp_cup_team(int slot);
 int  td5_game_mp_cup_team_mode(void);
 int  td5_game_mp_cup_track(void);

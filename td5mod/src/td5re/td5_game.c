@@ -8488,6 +8488,20 @@ int  td5_game_mp_cup_has_next(void) {
 int  td5_game_mp_cup_points(int slot) {
     return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_mpcup_points[slot] : 0;
 }
+/* [MP CUP RESULTS 2026-06-25] Points EARNED for the race that just finished (this
+ * race only), computed the SAME way td5_game_mp_cup_award() tallies them (finish
+ * position into k_mpcup_points, DNF -> last). The cumulative cup total is
+ * td5_game_mp_cup_points(); the cup results table's POINTS column shows
+ * "<this race> (<running total>)". */
+int  td5_game_mp_cup_race_points(int slot) {
+    int pos;
+    if (!s_mpcup_active) return 0;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (s_slot_state[slot].state == 3) return 0;   /* inactive slot */
+    pos = td5_game_get_finish_position(slot);       /* 0-based; -1 if DNF */
+    if (pos < 0 || pos >= 6) pos = 5;               /* DNF -> last place */
+    return k_mpcup_points[pos];
+}
 int  td5_game_mp_cup_team(int slot) {
     return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_mpcup_team[slot] : 0;
 }
@@ -8507,6 +8521,11 @@ void td5_game_mp_cup_award(void) {
         pos = td5_game_get_finish_position(slot);       /* 0-based; -1 if DNF */
         if (pos < 0 || pos >= 6) pos = 5;               /* DNF -> last place */
         s_mpcup_points[slot] += k_mpcup_points[pos];
+        /* [MP CUP RESULTS 2026-06-25] Log per-slot award so the cup results
+         * POINTS column ("<this race> (<total>)") can be verified from race.log
+         * without a screenshot. */
+        TD5_LOG_I(LOG_TAG, "MP CUP slot %d pos=%d +%d pts -> total %d",
+                  slot, pos, k_mpcup_points[pos], s_mpcup_points[slot]);
     }
     s_mpcup_awarded = 1;
     TD5_LOG_I(LOG_TAG, "MP CUP race %d/%d points tallied",

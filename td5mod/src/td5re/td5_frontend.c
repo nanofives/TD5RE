@@ -1364,7 +1364,13 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
     case TD5_SCREEN_HIGH_SCORE:
     case TD5_SCREEN_NAME_ENTRY:         return "HIGH SCORES";
-    case TD5_SCREEN_RACE_RESULTS:       return "RESULTS";
+    /* [MP CUP RESULTS 2026-06-25] In split-screen multiplayer CUP mode the results
+     * table renders a dedicated cup layout (POINTS column); the header reads
+     * "CUP RESULTS" so it reads as its own results screen. Plain races keep
+     * "RESULTS". */
+    case TD5_SCREEN_RACE_RESULTS:
+        return (td5_game_mp_cup_active() && g_td5.num_human_players >= 2)
+               ? "CUP RESULTS" : "RESULTS";
     case TD5_SCREEN_MP_LOBBY:           return "MULTIPLAYER";
     /* All net-play frontends share one header: NET PLAY. */
     case TD5_SCREEN_CONNECTION_BROWSER:
