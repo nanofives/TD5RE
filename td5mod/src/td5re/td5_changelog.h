@@ -47,6 +47,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  and the buttons realigned under it, a bit narrower" },
     { CL_ITEM,    "Fixed 7th+ split-screen car driving rolled onto its" },
     { CL_ITEM,    "  side / wobbling — big fields now sit flat on the road" },
+    { CL_ITEM,    "Cups now let you pick the track for every race in" },
+    { CL_ITEM,    "  the series, one at a time, before it starts" },
     { CL_ITEM,    "Dev: ADD AI PLAYER in the multiplayer lobby fills" },
     { CL_ITEM,    "  seats with auto-driving bots (random name/colour/" },
     { CL_ITEM,    "  car) so you can test split-screen MP on your own" },

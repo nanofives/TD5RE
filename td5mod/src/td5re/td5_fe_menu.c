@@ -1430,6 +1430,10 @@ void Screen_RaceTypeCategory(void) {
             if (cup_type >= 0) {
                 s_selected_game_type = cup_type;
                 s_race_within_series = 0;
+                /* [CUP TRACK SELECT 2026-06-25] New cup → discard any prior
+                 * player-chosen track list so the forked picker re-triggers at
+                 * car-select (and the faithful schedule path stays the fallback). */
+                s_cup_user_active = 0;
                 /* [DA-T4 D.3 fix 2026-05-22] orig 0x004171F0 region:
                  *   g_selectedScheduleIndex = g_attractModeTrackIndex;
                  * Seeds the race's schedule index from the attract-mode

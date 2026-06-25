@@ -126,6 +126,8 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [40] */ Screen_MpPostRace,         /* MP split-screen post-race menu (2026-06-25) */
     /* [41] */ Screen_Changelog,          /* version + changelog viewer (2026-06-25)     */
     /* [42] */ Screen_PendingTest,        /* dev/QA pending-test checklist (2026-06-25)  */
+    /* [43] */ Screen_TrackSelection,     /* CUP TRACK SELECT: shares the track-select body,
+                                           * runs in multi-pick mode (2026-06-25)        */
 };
 
 /* ========================================================================
@@ -795,6 +797,34 @@ const int s_cup_schedules[][13] = {
     {  0,  1,  2,  3, 15,  8, 11, 13, 10, 12,  9, 14, 99 },
 };
 
+/* [CUP TRACK SELECT 2026-06-25] Player-chosen per-race cup tracks (port
+ * enhancement). The original always auto-assigned s_cup_schedules above
+ * (RE-confirmed @0x00410e8e — never player-picked). When the forked cup
+ * track-selector is used (TD5_SCREEN_CUP_TRACK_SELECT), the player picks one
+ * track for each race in the cup; the chosen list lives here and overrides the
+ * fixed schedule in frontend_init_race_schedule. s_cup_user_active gates that
+ * override so the faithful schedule path is untouched when the picker is off. */
+int s_cup_user_tracks[TD5_CUP_MAX_RACES + 1];  /* picked track index per race    */
+int s_cup_user_dirs[TD5_CUP_MAX_RACES + 1];    /* picked direction per race (0/1) */
+int s_cup_user_count  = 0;   /* number of races to pick (= cup schedule length)  */
+int s_cup_pick_index  = 0;   /* race currently being picked (0-based)            */
+int s_cup_user_active = 0;   /* 1 once committed: per-race init uses the arrays  */
+
+/* Number of races in a single-player cup = count of non-sentinel (99) entries in
+ * the cup's fixed schedule row. This is the "amount of races" the cup track
+ * picker walks the player through; keeping it equal to the faithful schedule
+ * length means the cup-complete sentinel logic stays consistent. */
+int frontend_cup_race_count(int game_type) {
+    if (game_type < 1 || game_type > 6) return 0;
+    {
+        const int *row = s_cup_schedules[game_type - 1];
+        int n = 0;
+        while (n < 13 && row[n] >= 0 && row[n] != 99) n++;
+        if (n > TD5_CUP_MAX_RACES) n = TD5_CUP_MAX_RACES;
+        return n;
+    }
+}
+
 /* Bar-fade transition lookup table (slot -> {r,g,b} bar color + type) */
 typedef struct {
     uint8_t r, g, b;
@@ -1362,6 +1392,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_CONTROLLER_BINDING: return "OPTIONS";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
+    case TD5_SCREEN_CUP_TRACK_SELECT:   return "CUP TRACKS";   /* forked cup multi-pick */
     case TD5_SCREEN_HIGH_SCORE:
     case TD5_SCREEN_NAME_ENTRY:         return "HIGH SCORES";
     /* [MP CUP RESULTS 2026-06-25] In split-screen multiplayer CUP mode the results
@@ -3013,6 +3044,27 @@ void frontend_init_race_schedule(void) {
         }
     }
 
+    /* [CUP TRACK SELECT 2026-06-25] Single-player cup with player-chosen tracks:
+     * force the current race's chosen track + direction. Gated on s_cup_user_active
+     * so the faithful auto-schedule cup path (picker off) is byte-unchanged. Covers
+     * race 1 (from the picker commit) AND races 2..N (from the Next-Cup-Race advance,
+     * which only bumps s_race_within_series and re-enters this function). */
+    if (s_cup_user_active &&
+        s_selected_game_type >= 1 && s_selected_game_type <= 6 &&
+        g_td5.mp_mode_config.mode != TD5_MP_MODE_CUP) {
+        int r = s_race_within_series;
+        if (r >= 0 && r < s_cup_user_count) {
+            int t = s_cup_user_tracks[r];
+            if (t >= 0 && t != 99) {
+                s_selected_track        = t;
+                g_td5.track_index       = t;
+                g_td5.reverse_direction = s_cup_user_dirs[r];
+                TD5_LOG_I(LOG_TAG, "Cup race %d/%d -> chosen track=%d dir=%d",
+                          r + 1, s_cup_user_count, t, s_cup_user_dirs[r]);
+            }
+        }
+    }
+
     /* --- Local human count + split-screen layout (PORT ENHANCEMENT 2026-06) ---
      * s_num_human_players is the single source of truth, set by EITHER the Quick
      * Race "Players" selector OR the rebuilt Multiplayer Options "PLAYERS" button
@@ -3731,6 +3783,7 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
         return TD5_SCREEN_RACE_TYPE_MENU;
 
     case TD5_SCREEN_TRACK_SELECTION:
+    case TD5_SCREEN_CUP_TRACK_SELECT:   /* cup picker backs out to car-select */
         if (s_flow_context == 2) {
             return TD5_SCREEN_QUICK_RACE;
         }
@@ -5863,6 +5916,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
         else if (s_inner_state == 0x18) { mode = FE_BUTTON_ANIM_OUT; max_tick = 0x18; }
         break;
     case TD5_SCREEN_TRACK_SELECTION:
+    case TD5_SCREEN_CUP_TRACK_SELECT:   /* shares the track-select button slide */
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 7) { mode = FE_BUTTON_ANIM_OUT; max_tick = 0x27; }
         break;
@@ -5918,6 +5972,7 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_MUSIC_TEST:
     case TD5_SCREEN_CAR_SELECTION:
     case TD5_SCREEN_TRACK_SELECTION:
+    case TD5_SCREEN_CUP_TRACK_SELECT:   /* shares the track-select button anim */
     case TD5_SCREEN_HIGH_SCORE:
         /* TD5_SCREEN_RACE_RESULTS deliberately NOT listed: only its post-race
          * MENU buttons (states 0xE / 0x10) animate, while the click-catcher /
@@ -7602,6 +7657,18 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
 
     if (!s_anim_complete) return;
 
+    /* [CUP TRACK SELECT 2026-06-25] On the forked cup picker, show which race of
+     * the cup this pick is for ("RACE n / N"), centered above the track preview
+     * panel. Only drawn on the cup screen; the regular track-select is unchanged. */
+    if (s_current_screen == TD5_SCREEN_CUP_TRACK_SELECT && s_cup_user_count > 0) {
+        char hdr[48];
+        int shown = s_cup_pick_index + 1;
+        if (shown < 1) shown = 1;
+        if (shown > s_cup_user_count) shown = s_cup_user_count;
+        snprintf(hdr, sizeof hdr, "RACE %d / %d", shown, s_cup_user_count);
+        fe_draw_text_centered(492.0f * sx, 50.0f * sy, hdr, 0xFFE0C000, sx, sy);
+    }
+
     /* [PORT ENHANCEMENT 2026-06] race-option row values (AI/laps/traffic/police),
      * drawn in the gap between the 224-wide option buttons (end x=344) and the
      * track preview (x=412). */
@@ -7617,7 +7684,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
             fe_draw_text(vx, (float)(s_buttons[2].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
         if (s_buttons[3].active && !s_buttons[3].hidden) { snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
             fe_draw_text(vx, (float)(s_buttons[3].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
-        if (s_buttons[4].active) {
+        if (s_buttons[4].active && !s_buttons[4].hidden) {
             int tvi = s_game_option_traffic;
             if (tvi < 0) tvi = 0;
             if (tvi > TD5_TRAFFIC_VOLUME_COUNT - 1) tvi = TD5_TRAFFIC_VOLUME_COUNT - 1;
@@ -10087,7 +10154,8 @@ void td5_frontend_render_ui_rects(void) {
     if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY &&
         s_current_screen != TD5_SCREEN_CAR_SELECTION &&
         s_current_screen != TD5_SCREEN_MP_POSITION &&
-        s_current_screen != TD5_SCREEN_TRACK_SELECTION)
+        s_current_screen != TD5_SCREEN_TRACK_SELECTION &&
+        s_current_screen != TD5_SCREEN_CUP_TRACK_SELECT)
         frontend_render_bg_gallery(sx, sy);
 
     switch (s_current_screen) {
@@ -10147,6 +10215,7 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_car_selection_preview(sx, sy);
         break;
     case TD5_SCREEN_TRACK_SELECTION:
+    case TD5_SCREEN_CUP_TRACK_SELECT:   /* cup picker reuses the track preview */
         frontend_render_track_selection_preview(sx, sy);
         break;
     case TD5_SCREEN_CONTROL_OPTIONS:
@@ -10451,9 +10520,12 @@ void td5_frontend_render_ui_rects(void) {
             frontend_render_carsel_randomize_icon(sx, sy);
             break;
         case TD5_SCREEN_TRACK_SELECTION:
+        case TD5_SCREEN_CUP_TRACK_SELECT:
             /* Track(0) selector + the race-option rows (AI/laps/traffic/police/
              * difficulty = buttons 2..6; difficulty self-skips when hidden in
-             * Quick Race context). [PORT ENHANCEMENT 2026-06] */
+             * Quick Race context). [PORT ENHANCEMENT 2026-06]
+             * Cup picker hides rows 2..6 (cup-overridden), so fe_draw_option_arrows
+             * self-skips them — only the Track(0) arrows + randomize chip draw. */
             fe_draw_option_arrows(0, sx, sy);
             fe_draw_option_arrows(2, sx, sy);
             fe_draw_option_arrows(3, sx, sy);

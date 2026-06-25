@@ -405,7 +405,14 @@ typedef enum TD5_ScreenIndex {
      * testing. Items toggle done (checkmark + strikethrough); an in-game overlay
      * lists everything still untested; the /end routine prunes done items. */
     TD5_SCREEN_PENDING_TEST       = 42,  /* Screen_PendingTest */
-    TD5_SCREEN_COUNT               = 43
+    /* [CUP TRACK SELECT 2026-06-25] A fork of the track-select screen (21) for
+     * single-player cups: walks the player through choosing one track per race
+     * in the cup, one at a time. Shares the Screen_TrackSelection body (also
+     * registered at this slot) and runs in multi-pick mode when active. Port-only
+     * enhancement — the original always auto-assigned the fixed cup schedule
+     * (RE: g_cupDataXorKey @0x00464084, indexed by g_raceWithinSeriesIndex). */
+    TD5_SCREEN_CUP_TRACK_SELECT   = 43,  /* Screen_TrackSelection (cup multi-pick) */
+    TD5_SCREEN_COUNT               = 44
 } TD5_ScreenIndex;
 
 /* ========================================================================
