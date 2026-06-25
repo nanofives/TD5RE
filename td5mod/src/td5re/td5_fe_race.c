@@ -38,6 +38,10 @@
 #include "td5_color.h"
 #include "td5_frontend_internal.h"
 
+/* [CUP TRACK SELECT 2026-06-25] knob helper — defined just before
+ * Screen_TrackSelection but used earlier in Screen_CarSelection. */
+static int frontend_cup_track_select_on(void);
+
 /* ====================================================================== *
  * [#6 / #11 2026-06-15] MP position-screen rework + profile management.
  *
@@ -2976,6 +2980,7 @@ static void mp_mode_config_apply_defaults(int mode) {
         c->cup_team_mode     = 0;
         c->cup_team_count    = 2;
         c->cup_points_scheme = 0;               /* classic {15,12,10,5,4,3} */
+        c->cup_ai_opponents  = 3;               /* AI cars that also score points */
         break;
     case TD5_MP_MODE_COP_CHASE:
         c->cop_slot           = 0;              /* host is the cop by default */
@@ -3162,6 +3167,7 @@ static int mp_cfg_build(MpCfgOpt *o) {
         break;
     case TD5_MP_MODE_CUP:
         o[n].label="RACES";            o[n].val=&c->cup_race_count;       o[n].min=1;  o[n].max=TD5_CUP_MAX_RACES; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
+        o[n].label="OPPONENTS";        o[n].val=&c->cup_ai_opponents;     o[n].min=0;  o[n].max=TD5_MAX_RACER_SLOTS-1; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
         o[n].label="TEAMS";            o[n].val=&c->cup_team_mode;        o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
         if (c->cup_team_mode)   /* number-of-teams only when teams are on */
         { o[n].label="NUMBER OF TEAMS"; o[n].val=&c->cup_team_count; o[n].min=2; o[n].max=4; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++; }
@@ -3225,6 +3231,10 @@ void Screen_MpModeConfig(void) {
             if (m > 0 && m < TD5_MP_MODE_COUNT) mp_mode_config_apply_defaults(m);
         }
 #endif
+        /* [CUP TRACK SELECT] Entering cup options starts a fresh cup setup, so
+         * discard any prior player-chosen track list; the upcoming track-select
+         * then redirects to the multi-picker (when races >= 2). */
+        s_cup_user_active = 0;
         count = mp_cfg_build(opts);
         /* Regular race has no options -> skip the config screen entirely. */
         if (count == 0) {
@@ -5270,13 +5280,35 @@ void Screen_CarSelection(void) {
             !s_two_player_mode &&
             s_return_screen == TD5_SCREEN_TRACK_SELECTION) {
             int sched_idx = s_selected_game_type - 1;
+            s_selected_car = actual_car;
+
+            /* [CUP TRACK SELECT 2026-06-25] When the picker is enabled, the player
+             * chooses one track per race in the cup (one at a time) on the forked
+             * TD5_SCREEN_CUP_TRACK_SELECT screen instead of the game auto-assigning
+             * the fixed schedule. Only at the START of the cup (race 0); races 2..N
+             * advance straight from the results menu and read the chosen list in
+             * frontend_init_race_schedule. Knob off → faithful auto-schedule below. */
+            if (frontend_cup_track_select_on() && s_race_within_series == 0) {
+                int n = frontend_cup_race_count(s_selected_game_type);
+                if (n < 1) n = 1;
+                s_cup_user_count  = n;
+                s_cup_pick_index  = 0;
+                s_cup_user_active = 0;   /* set on commit, after all races picked */
+                s_cup_pick_is_mp  = 0;   /* single-player cup */
+                TD5_LOG_I(LOG_TAG,
+                          "CarSelect: cup game_type=%d -> track picker (%d races to choose)",
+                          s_selected_game_type, n);
+                td5_frontend_set_screen(TD5_SCREEN_CUP_TRACK_SELECT);
+                return;
+            }
+
+            /* Faithful: predefined cup schedule, skip track select. */
             if (s_race_within_series >= 0 && s_race_within_series < 13) {
                 int sched_track = s_cup_schedules[sched_idx][s_race_within_series];
                 if (sched_track >= 0 && sched_track != 99) {
                     s_selected_track = sched_track;
                 }
             }
-            s_selected_car = actual_car;
             TD5_LOG_I(LOG_TAG,
                       "CarSelect: cup game_type=%d race=%d track=%d -> skip track select, init schedule",
                       s_selected_game_type, s_race_within_series, s_selected_track);
@@ -5452,9 +5484,95 @@ static void frontend_update_direction_button_visibility(int dir_btn_idx, int man
     }
 }
 
+/* [CUP TRACK SELECT 2026-06-25] Knob: route single-player cups through the forked
+ * multi-track picker (choose one track per race) instead of the faithful fixed
+ * schedule. Default ON; TD5RE_CUP_TRACK_SELECT=0 restores the byte-faithful
+ * auto-schedule + skip-track-select behaviour. Cached so the per-OK check is cheap. */
+static int frontend_cup_track_select_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_CUP_TRACK_SELECT");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "Cup track-select picker %s (TD5RE_CUP_TRACK_SELECT=%s)",
+                  v ? "ENABLED" : "disabled (faithful auto-schedule)", e ? e : "default");
+    }
+    return v;
+}
+
+/* [CUP TRACK SELECT] The per-race cup picker chooses TRACK (0), DIRECTION (1),
+ * LAPS (3), TRAFFIC (4) and POLICE (5) for each race. Only OPPONENTS (2) and
+ * DIFFICULTY (6) are hidden — those come from the cup options, not per race.
+ * Direction/laps keep their own track-dependent visibility (the helpers hide
+ * them on forward-only / point-to-point tracks). No-op unless on the cup screen. */
+static void frontend_cup_picker_hide_rows(void) {
+    static const int k_cup_hide[] = { 2, 6 };
+    int i;
+    if (td5_frontend_get_screen() != TD5_SCREEN_CUP_TRACK_SELECT) return;
+    for (i = 0; i < (int)(sizeof(k_cup_hide)/sizeof(k_cup_hide[0])); i++) {
+        int b = k_cup_hide[i];
+        if (b < s_button_count) {
+            s_buttons[b].hidden   = 1;
+            s_buttons[b].disabled = 1;
+            if (s_selected_button == b) s_selected_button = 0;
+        }
+    }
+}
+
 void Screen_TrackSelection(void) {
+    /* [CUP TRACK SELECT] The same body is registered at TD5_SCREEN_TRACK_SELECTION
+     * (21) and the forked TD5_SCREEN_CUP_TRACK_SELECT (43). On the cup slot it runs
+     * in multi-pick mode: rows 2..6 hidden, OK stores the pick and advances to the
+     * next race, the last OK commits + launches, Back steps back a pick. */
+    const int cup_mp = (td5_frontend_get_screen() == TD5_SCREEN_CUP_TRACK_SELECT);
     switch (s_inner_state) {
     case 0: /* Init: validate track for cup modes, create buttons, load TrackSelect.tga */
+        /* [CUP TRACK SELECT 2026-06-25] Multiplayer cup with >=2 races: the host
+         * picks a track for EACH race via the forked multi-picker instead of the
+         * single regular track-select. Redirect from the regular track-select
+         * (screen 21) to the picker (screen 43). One hook catches every MP-flow
+         * entry into track-select (local split-screen AND the network-host SELECT
+         * TRACK), regardless of which navigation site sent us here. */
+        if (!cup_mp) {
+            TD5_LOG_I(LOG_TAG,
+                      "TrackSel entry: mp_mode=%d cup_races=%d mp_simul=%d net=%d "
+                      "cup_active=%d knob=%d (redirect needs MP cup + races>=2)",
+                      g_td5.mp_mode_config.mode, g_td5.mp_mode_config.cup_race_count,
+                      s_mp_simul, s_network_active, s_cup_user_active,
+                      frontend_cup_track_select_on());
+        }
+        if (!cup_mp && frontend_cup_track_select_on() && !s_cup_user_active &&
+            (s_mp_simul || s_network_active) &&   /* real MP session, not a stale mode flag */
+            g_td5.mp_mode_config.mode == TD5_MP_MODE_CUP &&
+            g_td5.mp_mode_config.cup_race_count >= 2) {
+            int n = g_td5.mp_mode_config.cup_race_count;
+            if (n > TD5_CUP_MAX_RACES) n = TD5_CUP_MAX_RACES;
+            s_cup_user_count  = n;
+            s_cup_pick_index  = 0;
+            s_cup_user_active = 0;
+            s_cup_pick_is_mp  = 1;
+            TD5_LOG_I(LOG_TAG, "MP cup (%d races) -> multi-track picker", n);
+            td5_frontend_set_screen(TD5_SCREEN_CUP_TRACK_SELECT);
+            return;
+        }
+#ifndef TD5RE_RELEASE
+        /* [CUP TRACK SELECT] Dev harness: a direct StartScreen=43 jump lands here
+         * with no cup session (count<=0). Seed a test cup (defaulting to
+         * Championship) so the picker + its RACE n/N header are exercisable
+         * standalone. The real flow sets s_cup_user_count at the car-select
+         * trigger before navigating here, so this never fires in normal play. */
+        if (cup_mp && s_cup_user_count <= 0) {
+            int gt = (s_selected_game_type >= 1 && s_selected_game_type <= 6)
+                     ? s_selected_game_type : 1;
+            s_selected_game_type = gt;
+            s_cup_user_count = frontend_cup_race_count(gt);
+            if (s_cup_user_count < 1) s_cup_user_count = 4;
+            s_cup_pick_index = 0;
+            s_cup_user_active = 0;
+            s_cup_pick_is_mp = 0;
+            TD5_LOG_I(LOG_TAG, "Cup track-select DEV jump: seeded gt=%d races=%d",
+                      gt, s_cup_user_count);
+        }
+#endif
         frontend_init_return_screen(TD5_SCREEN_TRACK_SELECTION);
         TD5_LOG_D(LOG_TAG, "TrackSelection: init");
         s_anim_complete = 0;
@@ -5569,6 +5687,9 @@ void Screen_TrackSelection(void) {
         frontend_update_direction_button_visibility(1, 1);
         /* Hide the Laps row (button 3) on point-to-point tracks (no laps). */
         frontend_update_laps_button_visibility(3);
+        /* [CUP TRACK SELECT] Keep only TRACK/TRAFFIC/POLICE on the cup picker —
+         * done LAST so it overrides the direction/laps visibility helpers above. */
+        frontend_cup_picker_hide_rows();
         frontend_begin_timed_animation();
         s_inner_state = 1;
         break;
@@ -5665,6 +5786,7 @@ void Screen_TrackSelection(void) {
                  * (hide on forward-only/circuit tracks, restore on reverse-capable). */
                 frontend_update_direction_button_visibility(1, 1);
                 frontend_update_laps_button_visibility(3);
+                frontend_cup_picker_hide_rows();   /* [CUP] keep rows 1/3 hidden after recycle */
                 s_inner_state = 5;
             }
 
@@ -5794,6 +5916,7 @@ void Screen_TrackSelection(void) {
                         s_track_switch_tick = 0;
                         frontend_update_direction_button_visibility(1, 1);
                         frontend_update_laps_button_visibility(3);
+                        frontend_cup_picker_hide_rows();   /* [CUP] keep rows 1/3 hidden after randomize */
                         s_inner_state = 5;
                     } else {
                         frontend_play_sfx(10); /* nothing else to pick */
@@ -5826,6 +5949,88 @@ void Screen_TrackSelection(void) {
         break;
 
     case 8: /* Exit dispatch */
+        /* [CUP TRACK SELECT] On the forked cup picker, OK (s_return_screen==-1)
+         * stores this race's chosen track and either advances to the next race's
+         * pick or, on the last race, commits the list and launches race 1. Back
+         * (s_return_screen!=-1) steps back a pick, or cancels to car-select from
+         * the first pick. Intercept BEFORE the normal launch/nav dispatch. */
+        if (cup_mp) {
+            if (s_return_screen == -1) {            /* OK: record this race's pick */
+                if (s_cup_pick_index >= 0 && s_cup_pick_index <= TD5_CUP_MAX_RACES) {
+                    s_cup_user_tracks[s_cup_pick_index]  = s_selected_track;
+                    s_cup_user_dirs[s_cup_pick_index]    = s_track_direction;
+                    s_cup_user_traffic[s_cup_pick_index] = s_game_option_traffic;
+                    s_cup_user_cops[s_cup_pick_index]    = s_game_option_cops & 1;
+                    s_cup_user_laps[s_cup_pick_index]    = s_game_option_laps;
+                }
+                TD5_LOG_I(LOG_TAG, "Cup pick %d/%d: track=%d dir=%d laps=%d traffic=%d police=%d",
+                          s_cup_pick_index + 1, s_cup_user_count,
+                          s_selected_track, s_track_direction, s_game_option_laps,
+                          s_game_option_traffic, s_game_option_cops & 1);
+                s_cup_pick_index++;
+                if (s_cup_pick_index < s_cup_user_count) {
+                    /* More races to pick — re-enter the picker for the next one.
+                     * Keep the cursor on the just-picked track as a starting point. */
+                    td5_frontend_set_screen(TD5_SCREEN_CUP_TRACK_SELECT);
+                    break;
+                }
+                /* All races chosen — commit. */
+                s_cup_user_active    = 1;
+                s_selected_track     = s_cup_user_tracks[0];
+                s_track_direction    = s_cup_user_dirs[0];
+                g_td5.reverse_direction = s_cup_user_dirs[0];
+                if (s_cup_pick_is_mp) {
+                    /* Multiplayer cup: feed the chosen list into the cup machinery
+                     * (mpcup_build_track_list reads cup_track_indices). End any prior
+                     * series so td5_game_mp_cup_begin rebuilds from the new list. */
+                    int i;
+                    for (i = 0; i < s_cup_user_count && i < TD5_CUP_MAX_RACES; i++)
+                        g_td5.mp_mode_config.cup_track_indices[i] = s_cup_user_tracks[i];
+                    td5_game_mp_cup_end();
+                    TD5_LOG_I(LOG_TAG,
+                              "MP cup track-select: committed %d tracks (track[0]=%d)",
+                              s_cup_user_count, s_selected_track);
+                    if (s_flow_context == 4) {
+                        /* Network host pre-selected the cup tracks from the lobby —
+                         * return there; the host starts the race separately. */
+                        td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
+                        break;
+                    }
+                    frontend_init_race_schedule();
+                    frontend_init_display_mode_state();
+                    break;
+                }
+                /* Single-player cup: launch race 1; per-race override in
+                 * frontend_init_race_schedule applies s_cup_user_tracks[r]. */
+                s_race_within_series = 0;
+                TD5_LOG_I(LOG_TAG,
+                          "SP cup track-select: committed %d tracks, launching race 1 (track=%d)",
+                          s_cup_user_count, s_selected_track);
+                frontend_init_race_schedule();
+                frontend_init_display_mode_state();
+                break;
+            } else {                                /* Back */
+                if (s_cup_pick_index > 0) {
+                    /* Step back to the previous race's pick and re-show it. */
+                    s_cup_pick_index--;
+                    s_selected_track  = s_cup_user_tracks[s_cup_pick_index];
+                    s_track_direction = s_cup_user_dirs[s_cup_pick_index];
+                    TD5_LOG_I(LOG_TAG, "Cup track-select: back to pick %d/%d",
+                              s_cup_pick_index + 1, s_cup_user_count);
+                    td5_frontend_set_screen(TD5_SCREEN_CUP_TRACK_SELECT);
+                    break;
+                }
+                /* Cancel cup track-select from the first pick — back to the parent
+                 * (network host: lobby; otherwise car-select). */
+                s_cup_user_active = 0;
+                TD5_LOG_I(LOG_TAG, "Cup track-select: cancelled at race 1 -> %s",
+                          (s_flow_context == 4) ? "lobby" : "car select");
+                td5_frontend_set_screen((s_flow_context == 4)
+                                        ? TD5_SCREEN_NETWORK_LOBBY
+                                        : TD5_SCREEN_CAR_SELECTION);
+                break;
+            }
+        }
         /* Quick Race (context 2): go to screen 7 */
         /* Network (context 4): CreateFrontendNetworkSession() */
         /* Normal (return == -1): launch race */

@@ -405,7 +405,14 @@ typedef enum TD5_ScreenIndex {
      * testing. Items toggle done (checkmark + strikethrough); an in-game overlay
      * lists everything still untested; the /end routine prunes done items. */
     TD5_SCREEN_PENDING_TEST       = 42,  /* Screen_PendingTest */
-    TD5_SCREEN_COUNT               = 43
+    /* [CUP TRACK SELECT 2026-06-25] A fork of the track-select screen (21) for
+     * single-player cups: walks the player through choosing one track per race
+     * in the cup, one at a time. Shares the Screen_TrackSelection body (also
+     * registered at this slot) and runs in multi-pick mode when active. Port-only
+     * enhancement — the original always auto-assigned the fixed cup schedule
+     * (RE: g_cupDataXorKey @0x00464084, indexed by g_raceWithinSeriesIndex). */
+    TD5_SCREEN_CUP_TRACK_SELECT   = 43,  /* Screen_TrackSelection (cup multi-pick) */
+    TD5_SCREEN_COUNT               = 44
 } TD5_ScreenIndex;
 
 /* ========================================================================
@@ -477,6 +484,11 @@ typedef struct TD5_MpModeConfig {
      * Only consulted on the human-cop path (cop_is_ai == 0); the AI cop keeps the
      * single-slot model. cop_slot stays the lowest set bit (primary). */
     int32_t cop_slot_mask;
+    /* [CUP TRACK SELECT 2026-06-25] Number of AI opponents in a cup race. The AI
+     * cars earn championship points alongside the humans (td5_game_mp_cup_award
+     * tallies every active slot). Appended at the end for a stable wire layout.
+     * 0 => humans only. */
+    int32_t cup_ai_opponents;
 } TD5_MpModeConfig;
 
 /* ========================================================================
