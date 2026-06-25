@@ -10018,7 +10018,13 @@ void td5_frontend_render_ui_rects(void) {
     if (s_mp_simul &&
         s_current_screen != TD5_SCREEN_NETWORK_LOBBY &&
         s_current_screen != TD5_SCREEN_MP_LOBBY &&
-        s_current_screen != TD5_SCREEN_TRACK_SELECTION)
+        s_current_screen != TD5_SCREEN_TRACK_SELECTION &&
+        /* [MP HIGH SCORES 2026-06-25] The split-screen post-race RESULTS screen
+         * keeps s_mp_simul set, which blanked its "RESULTS" header so the MP
+         * results table had no top title like the rest of the frontend. Exempt
+         * it (the RACE_RESULTS state gate above still limits the title to the
+         * table sub-flow, states 3..0xB). */
+        s_current_screen != TD5_SCREEN_RACE_RESULTS)
         title_visible = 0;
 
     if (title_visible) {

@@ -6161,6 +6161,133 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
      * whole table glides in/out with the panel instead of popping. The offset is
      * a CANVAS-px delta applied to every column centre. */
     const float sum_slide = results_anim_on() ? (float)s_results_panel_slide_x : 0.0f;
+
+    /* [MP HIGH SCORES 2026-06-25] Split-screen multiplayer (2+ humans) gets a
+     * reworked results table: the standard screen title is re-enabled (see the
+     * s_mp_simul exemption in td5_frontend.c), a header/results separator is
+     * drawn, "P1".."P6" become each player's PROFILE NAME, and a dedicated CAR
+     * column shows the short car name everyone drove. The per-player row colour
+     * is kept exactly as the single-player table uses it. Single-player keeps
+     * the original 6-column layout below untouched. Port-only feature. */
+    if (s_num_human_players >= 2) {
+        #define MP_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
+        /* Column CENTRES (640x480 canvas px). NAME + CAR take the wide left
+         * columns; the four stat columns are compressed to the right. */
+        const float m_name = 100.0f;
+        const float m_car  = 205.0f;
+        const float m_time = 305.0f;
+        const float m_top  = 375.0f;
+        const float m_avg  = 442.0f;
+        const float m_col  = 506.0f;   /* header "HITS" (COLLISIONS abbreviated to fit 7 cols) */
+        const float m_air  = 568.0f;
+        const float mh_top = 88.0f, mh_mid = 95.0f, mh_bot = 102.0f;
+        const float mrow0  = 121.0f, mrow_h = 22.0f;
+        const uint32_t MHDR   = 0xFFFFFFFFu;  /* white headers                       */
+        const uint32_t MSELF  = 0xFFD9C50Cu;  /* gold = the local player row (P1)    */
+        const uint32_t MAICOL = 0xFFE0E0E0u;  /* light grey = AI (non-highlight)     */
+
+        fe_draw_small_text(MP_CTR(m_name, "NAME"),  mh_mid * sy, "NAME",  MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_car,  "CAR"),   mh_mid * sy, "CAR",   MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_time, "TIME"),  mh_mid * sy, "TIME",  MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_top,  "TOP"),   mh_top * sy, "TOP",   MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_top,  "SPEED"), mh_bot * sy, "SPEED", MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_avg,  "AVG"),   mh_top * sy, "AVG",   MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_avg,  "SPEED"), mh_bot * sy, "SPEED", MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_col,  "HITS"),  mh_mid * sy, "HITS",  MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_air,  "AIR"),   mh_top * sy, "AIR",   MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_air,  "TIME"),  mh_bot * sy, "TIME",  MHDR, sx, sy);
+
+        /* Separator between the column headers and the result rows (slides in
+         * with the table). */
+        td5_vui_quad((50.0f + sum_slide) * sx, 112.0f * sy, 546.0f * sx, 2.0f * sy,
+                     0xFFB0B8C0u, -1, 0.0f, 0.0f, 1.0f, 1.0f);
+
+        int32_t mwinner = 0;
+        if (n > 0 && td5_game_slot_is_finished(order[0]))
+            mwinner = td5_game_get_result_primary(order[0]);
+        int mspan = td5_track_get_span_count(); if (mspan <= 0) mspan = 1;
+        int mlaps = (g_track_is_circuit && g_td5.circuit_lap_count > 0)
+                    ? g_td5.circuit_lap_count : 1;
+
+        for (int r = 0; r < n && r < TD5_MAX_RACER_SLOTS; r++) {
+            int slot = order[r];
+            float y = (mrow0 + (float)r * mrow_h) * sy;
+            char buf[40];
+            int is_human = (slot < humans);
+            uint32_t row_color = (slot == my_slot) ? MSELF
+                               : is_human ? k_mp_player_colors[slot < TD5_MAX_HUMAN_PLAYERS ? slot : 0]
+                               : MAICOL;
+
+            /* NAME — humans show their PROFILE NAME (fallback "P%d" if unset);
+             * AI rows show "CPU" (the car moves to its own column below). */
+            if (is_human) {
+                const char *pn = (slot < TD5_MAX_HUMAN_PLAYERS) ? s_mp_player_name[slot] : "";
+                if (pn && pn[0]) snprintf(buf, sizeof(buf), "%s", pn);
+                else             snprintf(buf, sizeof(buf), "P%d", slot + 1);
+            } else {
+                snprintf(buf, sizeof(buf), "CPU");
+            }
+            fe_draw_small_text(MP_CTR(m_name, buf), y, buf, row_color, sx, sy);
+
+            /* CAR — short car name for EVERYONE (reads g_td5.ai_car_indices). */
+            {
+                char cb[24];
+                snprintf(cb, sizeof(cb), "%s", frontend_summary_car_name(slot));
+                fe_draw_small_text(MP_CTR(m_car, cb), y, cb, row_color, sx, sy);
+            }
+
+            /* TIME — finishers show their finish time; cars still out show the
+             * same "~" pace-estimate the single-player table uses. */
+            {
+                char tb[28];
+                if (td5_game_slot_is_finished(slot)) {
+                    int32_t ft = td5_game_get_result_primary(slot);
+                    if (ft <= 0) ft = td5_game_get_race_timer(slot, 0);
+                    frontend_format_score_time(tb, sizeof(tb), ft, 0);
+                } else {
+                    int cur_lap = td5_game_get_player_lap(slot);
+                    if (cur_lap < 0) cur_lap = 0;
+                    if (cur_lap >= mlaps) cur_lap = mlaps - 1;
+                    int cur_span = td5_game_get_slot_span(slot);
+                    if (cur_span < 0) cur_span = 0;
+                    if (cur_span > mspan) cur_span = mspan;
+                    long long done  = (long long)cur_lap * mspan + cur_span;
+                    long long total = (long long)mlaps * mspan;
+                    if (done  < 1)    done  = 1;
+                    if (total < done) total = done;
+                    int32_t elapsed = td5_game_get_race_timer(slot, 0);
+                    if (elapsed <= 0) elapsed = mwinner;
+                    int32_t est = (int32_t)((long long)elapsed * total / done);
+                    char inner[24];
+                    frontend_format_score_time(inner, sizeof(inner), est, 0);
+                    snprintf(tb, sizeof(tb), "~%s", inner);
+                }
+                fe_draw_small_text(MP_CTR(m_time, tb), y, tb, row_color, sx, sy);
+            }
+
+            const TD5_RaceMetrics *m = td5_game_get_metrics(slot);
+            int top_raw = (int)td5_game_get_result_top_speed(slot);
+            if (top_raw == 0 && m) top_raw = m->top_speed;
+            int avg_raw = (int)td5_game_get_result_avg_speed(slot);
+            if (avg_raw == 0 && m && m->sample_ticks > 0)
+                avg_raw = (int)(m->speed_sum / m->sample_ticks);
+
+            snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(top_raw, kph), unit);
+            fe_draw_small_text(MP_CTR(m_top, buf), y, buf, row_color, sx, sy);
+            snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(avg_raw, kph), unit);
+            fe_draw_small_text(MP_CTR(m_avg, buf), y, buf, row_color, sx, sy);
+
+            int collisions = m ? m->collisions : 0;
+            int air_tenths = m ? (m->air_ticks * 10 + 15) / 30 : 0;
+            snprintf(buf, sizeof(buf), "%d", collisions);
+            fe_draw_small_text(MP_CTR(m_col, buf), y, buf, row_color, sx, sy);
+            snprintf(buf, sizeof(buf), "%d.%ds", air_tenths / 10, air_tenths % 10);
+            fe_draw_small_text(MP_CTR(m_air, buf), y, buf, row_color, sx, sy);
+        }
+        #undef MP_CTR
+        return;
+    }
+
     #define SUM_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
 
     /* Column CENTRES (640x480 canvas px). */
@@ -6398,8 +6525,19 @@ void Screen_RaceResults(void) {
                     s_buttons[bi].is_selector = 1;
                 }
             }
-            frontend_create_button(SNK_OkButTxt, 115, 377, 0x60, 0x20);
-            if (hide_selector_bar) s_selected_button = 1;   /* focus the visible OK */
+            /* [MP HIGH SCORES 2026-06-25] In split-screen MP the OK button is
+             * centred near the bottom so it reads unmistakably as the confirm,
+             * clear of the wider 7-column results table. Single-player keeps the
+             * faithful bottom-LEFT rest position. */
+            int ok_x = 115, ok_y = 377;
+            if (s_num_human_players >= 2) { ok_x = 320 - 0x60 / 2; ok_y = 400; }
+            frontend_create_button(SNK_OkButTxt, ok_x, ok_y, 0x60, 0x20);
+            if (hide_selector_bar || s_num_human_players >= 2)
+                s_selected_button = 1;   /* focus the visible OK */
+            if (s_num_human_players >= 2)
+                TD5_LOG_I(LOG_TAG, "RaceResults: MP results layout (humans=%d) "
+                          "profile+car columns, OK button centred at (%d,%d)",
+                          s_num_human_players, ok_x, ok_y);
         }
         s_inner_state = 1;
         break;
