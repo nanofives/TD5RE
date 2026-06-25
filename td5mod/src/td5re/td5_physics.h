@@ -114,7 +114,7 @@ void td5_physics_reset_actor_state(TD5_Actor *actor);
  * if the car was repositioned, 0 if it could not be (no track / non-racer slot /
  * knob off).
  *
- * The per-tick driver below runs ONLY the MANUAL (R / L3) recovery for every
+ * The per-tick driver below runs ONLY the MANUAL (R / SELECT) recovery for every
  * local human player (the AUTOMATIC stuck-detection was removed 2026-06-24).
  * Each manual recovery arms a per-player cooldown (TD5RE_RECOVERY_COOLDOWN_TICKS,
  * default 150 = 5 s) before another is honoured. Called from td5_physics_tick;
