@@ -808,6 +808,7 @@ int s_cup_user_tracks[TD5_CUP_MAX_RACES + 1];  /* picked track index per race   
 int s_cup_user_dirs[TD5_CUP_MAX_RACES + 1];    /* picked direction per race (0/1)   */
 int s_cup_user_traffic[TD5_CUP_MAX_RACES + 1]; /* picked traffic volume per race    */
 int s_cup_user_cops[TD5_CUP_MAX_RACES + 1];    /* picked police on/off per race     */
+int s_cup_user_laps[TD5_CUP_MAX_RACES + 1];    /* picked lap count per race (circuit)*/
 int s_cup_user_count  = 0;   /* number of races to pick (= cup schedule length)  */
 int s_cup_pick_index  = 0;   /* race currently being picked (0-based)            */
 int s_cup_user_active = 0;   /* 1 once committed: per-race init uses the arrays  */
@@ -3232,8 +3233,12 @@ void frontend_init_race_schedule(void) {
             g_td5.traffic_volume            = tv;
             g_td5.traffic_enabled           = (tv != 0);
             g_td5.special_encounter_enabled = s_cup_user_cops[idx] ? 1 : 0;
-            TD5_LOG_I(LOG_TAG, "Cup race %d: per-race traffic=%d police=%d",
-                      idx + 1, tv, s_cup_user_cops[idx]);
+            /* Per-race direction (forwards/backwards) and lap count (circuit). */
+            g_td5.reverse_direction         = s_cup_user_dirs[idx] ? 1 : 0;
+            g_td5.ini.laps                  = s_cup_user_laps[idx];
+            TD5_LOG_I(LOG_TAG, "Cup race %d: per-race dir=%d laps=%d traffic=%d police=%d",
+                      idx + 1, s_cup_user_dirs[idx], s_cup_user_laps[idx],
+                      tv, s_cup_user_cops[idx]);
         }
     }
 

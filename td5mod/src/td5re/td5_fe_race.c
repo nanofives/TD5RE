@@ -5499,13 +5499,13 @@ static int frontend_cup_track_select_on(void) {
     return v;
 }
 
-/* [CUP TRACK SELECT] Keep the per-race cup picker a TRACK + TRAFFIC + POLICE
- * chooser: re-hide the Direction (1), OPPONENTS (2), LAPS (3) and DIFFICULTY (6)
- * rows. Called after the direction/laps visibility helpers (case 0 init AND each
- * case-4 track cycle), which would otherwise re-show rows 1/3. No-op unless on the
- * cup screen. */
+/* [CUP TRACK SELECT] The per-race cup picker chooses TRACK (0), DIRECTION (1),
+ * LAPS (3), TRAFFIC (4) and POLICE (5) for each race. Only OPPONENTS (2) and
+ * DIFFICULTY (6) are hidden — those come from the cup options, not per race.
+ * Direction/laps keep their own track-dependent visibility (the helpers hide
+ * them on forward-only / point-to-point tracks). No-op unless on the cup screen. */
 static void frontend_cup_picker_hide_rows(void) {
-    static const int k_cup_hide[] = { 1, 2, 3, 6 };
+    static const int k_cup_hide[] = { 2, 6 };
     int i;
     if (td5_frontend_get_screen() != TD5_SCREEN_CUP_TRACK_SELECT) return;
     for (i = 0; i < (int)(sizeof(k_cup_hide)/sizeof(k_cup_hide[0])); i++) {
@@ -5961,10 +5961,11 @@ void Screen_TrackSelection(void) {
                     s_cup_user_dirs[s_cup_pick_index]    = s_track_direction;
                     s_cup_user_traffic[s_cup_pick_index] = s_game_option_traffic;
                     s_cup_user_cops[s_cup_pick_index]    = s_game_option_cops & 1;
+                    s_cup_user_laps[s_cup_pick_index]    = s_game_option_laps;
                 }
-                TD5_LOG_I(LOG_TAG, "Cup pick %d/%d: track=%d dir=%d traffic=%d police=%d",
+                TD5_LOG_I(LOG_TAG, "Cup pick %d/%d: track=%d dir=%d laps=%d traffic=%d police=%d",
                           s_cup_pick_index + 1, s_cup_user_count,
-                          s_selected_track, s_track_direction,
+                          s_selected_track, s_track_direction, s_game_option_laps,
                           s_game_option_traffic, s_game_option_cops & 1);
                 s_cup_pick_index++;
                 if (s_cup_pick_index < s_cup_user_count) {
