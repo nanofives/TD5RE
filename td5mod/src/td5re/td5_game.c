@@ -2214,11 +2214,13 @@ int td5_game_init_race_session(void) {
      * stay varied via the normal opponent roster — only the player is police
      * (CONFIRMED: orig opponent loop @ 0x0040DD5B uses the difficulty roster,
      * not the police set). */
-    if (g_td5.wanted_mode_enabled && td5_game_cop_chase_cop_slot() == 0) {
-        /* Force the police car ONLY when SLOT 0 is the cop — SP wanted mode, or MP
-         * cop chase where the host (slot 0) is the human cop. When the cop is an AI
-         * or another player, slot 0 is a SUSPECT and KEEPS its chosen car (the cop
-         * gets its police car via the schedule + the cop render path). This fixes
+    if (g_td5.wanted_mode_enabled && td5_game_cop_chase_is_cop(0)) {
+        /* Force the police car ONLY when SLOT 0 is A cop — SP wanted mode, or MP
+         * cop chase where the host (slot 0) chose the cop role. When the cop is an AI
+         * or slot 0 is a suspect, slot 0 KEEPS its chosen car (other human cops get
+         * their police car from the per-pane cop roster via the schedule + the cop
+         * render path). [multi-cop 2026-06-24] is_cop is mask-aware so slot 0 being a
+         * cop is detected even when it isn't the primary. This fixes
          * "player 1 is a cop despite choosing another car" in AI-cop chase.
          * Valid cop cars = TD5 police 33..36 OR ported TD6 cops cp1..cp4 (46..49). */
         int is_cop = (g_td5.car_index >= 33 && g_td5.car_index <= 36) ||
@@ -3013,9 +3015,11 @@ int td5_game_init_race_session(void) {
                     raw = tt_spawn_span + effective_start_span_offset;
                 } else if (mp_cop_mode) {
                     raw = start_span + effective_start_span_offset;
-                    /* The cop starts a few spans BEHIND the suspects (it has a gap
-                     * to close); suspects line up together at start_span. */
-                    if (slot == td5_game_cop_chase_cop_slot())
+                    /* The cop(s) start a few spans BEHIND the suspects (a gap to
+                     * close); suspects line up together at start_span. [multi-cop
+                     * 2026-06-24] is_cop is mask-aware so EVERY cop gets the head-start
+                     * setback, not just the primary. */
+                    if (td5_game_cop_chase_is_cop(slot))
                         raw -= g_td5.mp_mode_config.suspect_head_start;
                 } else {
                     raw = start_span + span_offsets[effective_slot] + effective_start_span_offset;
@@ -8552,11 +8556,29 @@ int td5_game_mp_cop_chase_field(void) {
     return f;
 }
 
+/* [MP COP CHASE multi-cop 2026-06-24] True when `slot` is a COP in the active cop
+ * chase. SP wanted + AI cop keep the single-cop slot; MP human cop chase reads
+ * cop_slot_mask so 2+ split-screen players can all be cops. Returns 0 outside an
+ * active cop chase (wanted mode off) — matches cop_chase_cop_slot()'s -1 gate. */
+int td5_game_cop_chase_is_cop(int slot) {
+    int primary = td5_game_cop_chase_cop_slot();
+    if (primary < 0) return 0;                       /* no active cop chase */
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
+        !g_td5.network_active && !g_td5.mp_mode_config.cop_is_ai) {
+        /* Human cop chase: any slot whose mask bit is set is a cop. A 0 mask
+         * (e.g. role screen skipped) falls back to the single primary slot. */
+        int mask = g_td5.mp_mode_config.cop_slot_mask;
+        if (mask != 0) return (mask >> slot) & 1;
+    }
+    return slot == primary;                          /* SP / AI cop / no mask */
+}
+
 /* True when `slot` is a racer SUSPECT (a non-cop racer) in a cop chase. */
 int td5_game_cop_chase_is_suspect(int slot) {
-    int cop = td5_game_cop_chase_cop_slot();
-    if (cop < 0) return 0;
-    return slot >= 0 && slot < TD5_MAX_RACER_SLOTS && slot != cop;
+    if (td5_game_cop_chase_cop_slot() < 0) return 0;  /* no active cop chase */
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return !td5_game_cop_chase_is_cop(slot);          /* every non-cop racer */
 }
 
 int td5_game_get_cop_actor_index(void) {

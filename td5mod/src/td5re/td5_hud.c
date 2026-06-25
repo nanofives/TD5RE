@@ -3103,8 +3103,10 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
         /* Flash out over the last 30 frames (odd frames hidden). */
         if (g_wanted_msg_timer < 330 || (g_wanted_msg_timer & 1) == 0) {
             /* Objective depends on THIS pane's role: a suspect evades, the cop
-             * hunts. (SP wanted / the human-cop pane -> "CHASE THE SUSPECTS".) */
-            int wb_is_cop = !(wb_mp_cop && wb_pane_slot != td5_game_cop_chase_cop_slot());
+             * hunts. (SP wanted / the human-cop pane -> "CHASE THE SUSPECTS".)
+             * [multi-cop 2026-06-24] is_cop is mask-aware, so every cop pane (not
+             * just the primary) shows the cop objective + "YOU ARE THE COP". */
+            int wb_is_cop = wb_mp_cop ? td5_game_cop_chase_is_cop(wb_pane_slot) : 1;
             const char *msg = wb_is_cop ? "CHASE THE SUSPECTS" : "EVADE THE COP";
             /* [MP COP CHASE ROLE 2026-06-24] Explicit per-pane role label so each
              * split-screen player instantly knows whether THEY are the cop or a
@@ -4343,8 +4345,10 @@ void td5_hud_render_overlays(float dt)
                  * [AI COP 2026-06-23] Show the cop score (POINTS/ARRESTS) only on
                  * the COP's own pane — keyed off the effective cop slot, NOT a
                  * hardcoded slot 0. With an AI cop no human pane is the cop, so the
-                 * suspects no longer see (and read as) the cop. */
-                if (actor_slot == td5_game_cop_chase_cop_slot()) {
+                 * suspects no longer see (and read as) the cop.
+                 * [multi-cop 2026-06-24] is_cop is mask-aware: each cop pane shows
+                 * its OWN score (per-actor), not just the primary cop. */
+                if (td5_game_cop_chase_is_cop(actor_slot)) {
                     s_hud_next_text_scale = copchase_hud_text_scale();
                     td5_hud_queue_text(0,
                         (int)vl->center_x,
@@ -4382,8 +4386,10 @@ void td5_hud_render_overlays(float dt)
                  * [FIX 2026-05-31 — was the guessed "BUSTS".] */
                 /* [COP-CHASE 2026-06-21] Top-CENTRE, larger HUD face, stacked ABOVE
                  * the POINTS line. [AI COP 2026-06-23] cop's own pane only (see
-                 * the POINTS block) — keyed off the effective cop slot. */
-                if (actor_slot == td5_game_cop_chase_cop_slot()) {
+                 * the POINTS block) — keyed off the effective cop slot.
+                 * [multi-cop 2026-06-24] is_cop is mask-aware: each cop pane shows
+                 * its OWN arrest tally. */
+                if (td5_game_cop_chase_is_cop(actor_slot)) {
                     s_hud_next_text_scale = copchase_hud_text_scale();
                     td5_hud_queue_text(0,
                         (int)vl->center_x,

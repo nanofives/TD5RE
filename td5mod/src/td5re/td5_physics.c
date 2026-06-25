@@ -6270,17 +6270,15 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * on the cop slot with impact magnitude. */
     if (td5_game_is_wanted_mode()) {
         /* [MP COP CHASE] Generalized from the SP "slot 0 is the cop" gate: a ram
-         * between the COP slot and any SUSPECT (non-cop racer) decrements that
-         * suspect's damage bar. SP (cop=0) reproduces the old slot-0-vs-1..5
-         * behaviour exactly. */
-        int cop = td5_game_cop_chase_cop_slot();
+         * between ANY cop and any SUSPECT (non-cop racer) decrements that suspect's
+         * damage bar. SP (cop=0) reproduces the old slot-0-vs-1..5 behaviour exactly.
+         * [multi-cop 2026-06-24] Uses is_cop (mask-aware) so a SECOND human cop's rams
+         * also count — previously only the single primary cop_slot dealt damage. */
         int sa = (int)A->slot_index, sb = (int)B->slot_index;
-        if (cop >= 0) {
-            if (sa == cop && td5_game_cop_chase_is_suspect(sb))
-                td5_ai_wanted_cop_hit(sb, impact_mag);
-            else if (sb == cop && td5_game_cop_chase_is_suspect(sa))
-                td5_ai_wanted_cop_hit(sa, impact_mag);
-        }
+        if (td5_game_cop_chase_is_cop(sa) && td5_game_cop_chase_is_suspect(sb))
+            td5_ai_wanted_cop_hit(sb, impact_mag);
+        else if (td5_game_cop_chase_is_cop(sb) && td5_game_cop_chase_is_suspect(sa))
+            td5_ai_wanted_cop_hit(sa, impact_mag);
     }
 
     /* Traffic recovery escalation (> 50000 and traffic slot). [N-way 2026-06-04]

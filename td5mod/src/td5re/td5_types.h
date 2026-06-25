@@ -447,13 +447,22 @@ typedef struct TD5_MpModeConfig {
     int32_t cup_points_scheme;                    /* 0 = classic {15,12,10,5,4,3}     */
 
     /* --- Cop chase --- */
-    int32_t cop_slot;             /* which slot is the cop                          */
+    int32_t cop_slot;             /* PRIMARY cop slot (lowest set bit of cop_slot_mask
+                                   * for human cops; the AI-cop slot when cop_is_ai).
+                                   * Kept for single-value readers (marker target,
+                                   * head-start reference).                          */
     int32_t cop_pick_mode;        /* TD5_CopPickMode                                */
     int32_t cop_is_ai;            /* 1 = AI drives the cop car                      */
     int32_t cop_ai_difficulty;    /* 0..2 speed/aggression tier for the AI cop      */
     int32_t cop_win_condition;    /* TD5_CopWinCondition                            */
     int32_t suspect_head_start;   /* spans the suspects spawn ahead of the cop      */
     int32_t suspect_debuff_pct;   /* top-speed % applied to suspects (e.g. 70)      */
+    /* [MP COP CHASE multi-cop 2026-06-24] Appended at the end (stable wire layout):
+     * bit s set = racer slot s is a (human) cop, so 2+ split-screen players can all
+     * be cops vs the remaining suspects. 0 => fall back to the single cop_slot.
+     * Only consulted on the human-cop path (cop_is_ai == 0); the AI cop keeps the
+     * single-slot model. cop_slot stays the lowest set bit (primary). */
+    int32_t cop_slot_mask;
 } TD5_MpModeConfig;
 
 /* ========================================================================

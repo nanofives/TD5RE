@@ -219,10 +219,15 @@ int  td5_game_is_cinematic_race(void);
 int  td5_game_get_traffic_variant(int traffic_index);
 int  td5_game_get_cop_actor_index(void);
 int  td5_game_is_wanted_mode(void);
-/* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot (-1 if not a cop
- * chase) + suspect test. SP wanted -> cop slot 0; MP cop chase -> configured
- * cop_slot with every other racer a suspect. */
+/* [MP GAME MODES: COP CHASE 2026-06-22] Effective PRIMARY cop slot (-1 if not a
+ * cop chase). SP wanted -> cop slot 0; MP cop chase -> the lowest configured cop
+ * slot. For "is THIS slot a cop?" use td5_game_cop_chase_is_cop (multi-cop aware);
+ * cop_chase_cop_slot is only the single representative cop. */
 int  td5_game_cop_chase_cop_slot(void);
+/* [MP COP CHASE multi-cop 2026-06-24] 1 when `slot` is a cop in the active cop
+ * chase: SP/AI = the single cop slot; MP human = any bit set in cop_slot_mask.
+ * Returns 0 outside an active cop chase (wanted mode off). */
+int  td5_game_cop_chase_is_cop(int slot);
 int  td5_game_cop_chase_is_suspect(int slot);
 /* Active racer count for an MP cop chase (human suspects + an AI-cop slot when
  * the cop is an AI). 0 = not an MP cop chase -> callers keep the faithful SP

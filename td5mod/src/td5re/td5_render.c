@@ -3714,8 +3714,10 @@ void td5_render_actors_for_view(int view_index)
              * CAR (Police Cerbera), so render its OWN mesh — not the generic
              * traffic-encounter cop mesh. Only traffic cops keep s_cop_mesh. */
             int draw_cop_mesh = (s_cop_mesh && td5_ai_actor_is_cop(slot));
+            /* [multi-cop 2026-06-24] is_cop is mask-aware: suppress the generic
+             * traffic-cop mesh over ANY human cop (each drives a real police car). */
             if (draw_cop_mesh && g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
-                !g_td5.network_active && slot == td5_game_cop_chase_cop_slot())
+                !g_td5.network_active && td5_game_cop_chase_is_cop(slot))
                 draw_cop_mesh = 0;
             TD5_MeshHeader *mesh = draw_cop_mesh
                                    ? s_cop_mesh : td5_render_get_vehicle_mesh(slot);
