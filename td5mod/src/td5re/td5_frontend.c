@@ -120,6 +120,7 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [37] */ Screen_CupWinners,         /* cup final standings/podium (2026-06-22) */
     /* [38] */ Screen_MpCopRoles,         /* cop/suspect role pick (2026-06-22)      */
     /* [39] */ Screen_MpTeamSelect,       /* cup team pick (2026-06-22)              */
+    /* [40] */ Screen_MpPostRace,         /* MP split-screen post-race menu (2026-06-25) */
 };
 
 /* ========================================================================
@@ -6724,6 +6725,67 @@ static void frontend_render_race_type_description(float sx, float sy) {
     }
 }
 
+/* [MP POST-RACE MENU 2026-06-25] Right-side description panel for the local
+ * split-screen post-race menu (Screen_MpPostRace, td5_fe_race.c). Copies the
+ * buttons-left / text-right layout of frontend_render_race_type_description above:
+ * line 0 = the highlighted option's NAME (big font, centred), lines 1.. = its
+ * multi-line description (small font, centred). Keyed off s_selected_button (the
+ * live hover index) — the index->entry order MUST stay in sync with the
+ * button-create order in Screen_MpPostRace. s_mp_postrace_menu_mode selects the
+ * table (0 = standard 6-button menu, 1 = cup-between-races 4-button menu).
+ * Port-only feature — no original-binary basis. */
+extern int s_mp_postrace_menu_mode;
+static void frontend_render_mp_post_race_description(float sx, float sy) {
+    /* Standard menu (mode 0). Order matches Screen_MpPostRace's 6 buttons:
+     * RACE AGAIN / VIEW REPLAY / BACK TO LOBBY / BACK TO CAR SELECTION /
+     * BACK TO GAMEMODE SELECTION / BACK TO MAIN MENU. Panel titles are the SHORT
+     * form (a full-length big-font label would overflow the 276 px panel; the
+     * left-column button carries the user's full wording). */
+    static const char *k_std_desc[6][11] = {
+        {"RACE AGAIN"," ","RESTART THE RACE USING THE","CURRENT GAME MODE, CAR","SETTINGS, SCREEN PLACEMENTS","AND TRACK.",0,0,0,0,0},
+        {"VIEW REPLAY"," ","LAUNCH THE REPLAY OF THE","LAST RACE.",0,0,0,0,0,0,0},
+        {"BACK TO LOBBY"," ","RETURN TO THE PROFILE","SELECTION SCREEN, KEEPING","THE PREVIOUS PLAYER","CONFIGURATIONS.",0,0,0,0,0},
+        {"CAR SELECTION"," ","GO BACK TO PICK NEW CARS","FOR EACH PLAYER, KEEPING","THE CURRENT GAME MODE","AND TRACK.",0,0,0,0,0},
+        {"GAME MODE"," ","GO BACK TO CHOOSE A","DIFFERENT GAME MODE FOR","THE NEXT RACE.",0,0,0,0,0,0},
+        {"MAIN MENU"," ","LEAVE MULTIPLAYER AND","RETURN TO THE MAIN MENU.",0,0,0,0,0,0,0},
+    };
+    /* Cup-between-races menu (mode 1). Order matches the 4 buttons:
+     * NEXT RACE / VIEW RESULTS / VIEW REPLAY / LEAVE CUP. */
+    static const char *k_cup_desc[4][11] = {
+        {"NEXT RACE"," ","START THE NEXT RACE OF","THE CUP SERIES WITH THE","CURRENT CARS AND","SETTINGS.",0,0,0,0,0},
+        {"VIEW RESULTS"," ","SHOW THE RESULTS TABLE","FOR THE RACE THAT JUST","FINISHED.",0,0,0,0,0,0},
+        {"VIEW REPLAY"," ","LAUNCH THE REPLAY OF THE","LAST RACE.",0,0,0,0,0,0,0},
+        {"LEAVE CUP"," ","ABANDON THE CUP SERIES","AND RETURN TO THE LOBBY.",0,0,0,0,0,0,0},
+    };
+    const char *(*tbl)[11] = (s_mp_postrace_menu_mode == 1) ? k_cup_desc : k_std_desc;
+    int count = (s_mp_postrace_menu_mode == 1) ? 4 : 6;
+    int btn = s_selected_button;
+    float panel_x = 348.0f * sx;   /* clears the 304-wide button column (right edge 336) */
+    float panel_y = 150.0f * sy;
+    float panel_w = 276.0f * sx;
+    int line;
+
+    if (!s_anim_complete) return;
+    if (btn < 0 || btn >= count) btn = 0;
+
+    /* Screen header centred over the panel column. */
+    fe_draw_text_centered(panel_x + panel_w * 0.5f, 90.0f * sy,
+                          (s_mp_postrace_menu_mode == 1) ? "CUP - WHAT NEXT?" : "WHAT NEXT?",
+                          0xFFFFD000, sx, sy);
+
+    /* Line 0: option NAME (big font, centred at panel top). */
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(tbl[btn][0], sx, sy)) * 0.5f,
+                 panel_y + 2.0f * sy, tbl[btn][0], 0xFFFFFFFF, sx, sy);
+    /* Lines 1..: description body (small font, centred; Y=32 step +12, stop at 176). */
+    for (line = 1; line < 11 && tbl[btn][line]; line++) {
+        float ly = 32.0f + (float)(line - 1) * 12.0f;
+        const char *s = tbl[btn][line];
+        if (ly >= 176.0f) break;
+        fe_draw_small_text(panel_x + (panel_w - fe_measure_small_text(s) * fe_glyph_sx(sx, sy)) * 0.5f,
+                           panel_y + ly * sy, s, 0xFFFFFFFF, sx, sy);
+    }
+}
+
 /* --- Car stats sub-screen (0x40DFC0 state 0xF) ------------------------------------ */
 
 /* SNK_Layout_Types (Language.dll 0x10006ED0): char - 'A' = index */
@@ -9399,6 +9461,9 @@ void td5_frontend_render_ui_rects(void) {
         break;
     case TD5_SCREEN_RACE_TYPE_MENU:
         frontend_render_race_type_description(sx, sy);
+        break;
+    case TD5_SCREEN_MP_POST_RACE:
+        frontend_render_mp_post_race_description(sx, sy);
         break;
     case TD5_SCREEN_QUICK_RACE:
         frontend_render_quick_race_overlay(sx, sy);

@@ -3308,6 +3308,178 @@ void frontend_mp_mode_config_render(float sx, float sy) {
 
 /* ---- Cup winners / podium (standard frontend look; moved here from
  *      td5_fe_net.c so it shares fe_race_draw_screen_title + the MP helpers). */
+/* ========================================================================
+ * [MP POST-RACE MENU 2026-06-25] Local split-screen post-race menu.
+ *
+ * Buttons-left / description-right layout copied from Screen_RaceTypeCategory
+ * (the "race menu"): the highlighted button's description renders on the right
+ * via frontend_render_mp_post_race_description (td5_frontend.c), keyed off
+ * s_selected_button. Two layouts, auto-picked at entry from the cup state:
+ *   mode 0 (standard, 6 buttons): RACE AGAIN / VIEW REPLAY / BACK TO LOBBY /
+ *     BACK TO CAR SELECTION / BACK TO GAMEMODE SELECTION / BACK TO MAIN MENU.
+ *   mode 1 (cup between races, 4 buttons): NEXT RACE / VIEW RESULTS /
+ *     VIEW REPLAY / LEAVE CUP.
+ * Reached from Screen_RaceResults state 0x0D for local MP (>=2 humans) and from
+ * Screen_CupWinners after the final cup race. The button dispatches reuse the
+ * exact paths from Screen_RaceResults case 0x10 (race-again / replay / etc).
+ * Port-only feature — no original-binary basis. The index->button order MUST
+ * match the description tables in frontend_render_mp_post_race_description.
+ * ======================================================================== */
+int s_mp_postrace_menu_mode = 0;          /* 0 = standard menu, 1 = cup-between menu */
+static int s_mp_postrace_choice = -1;     /* button index latched in state 3        */
+
+void Screen_MpPostRace(void) {
+    switch (s_inner_state) {
+    case 0: {   /* Init: pick the layout, build the left button column */
+        const int cup_between = (td5_game_mp_cup_active() && td5_game_mp_cup_has_next());
+        const int count = cup_between ? 4 : 6;
+        const int BX = 32, BW = 0x130, BH = 0x20;          /* 304x32 left column */
+        const int y0 = (480 - ((count - 1) * 48 + BH)) / 2; /* vertically centred */
+
+        s_mp_postrace_menu_mode = cup_between ? 1 : 0;
+        s_mp_postrace_choice = -1;
+        frontend_init_return_screen(TD5_SCREEN_MP_POST_RACE);
+        frontend_reset_buttons();
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        s_anim_complete = 0;
+
+        if (cup_between) {
+            frontend_create_button("NEXT RACE",    BX, y0 + 0 * 48, BW, BH);
+            frontend_create_button("VIEW RESULTS", BX, y0 + 1 * 48, BW, BH);
+            frontend_create_button("VIEW REPLAY",  BX, y0 + 2 * 48, BW, BH);
+            frontend_create_button("LEAVE CUP",    BX, y0 + 3 * 48, BW, BH);
+        } else {
+            frontend_create_button("RACE AGAIN",                 BX, y0 + 0 * 48, BW, BH);
+            frontend_create_button("VIEW REPLAY",                BX, y0 + 1 * 48, BW, BH);
+            frontend_create_button("BACK TO LOBBY",              BX, y0 + 2 * 48, BW, BH);
+            frontend_create_button("BACK TO CAR SELECTION",      BX, y0 + 3 * 48, BW, BH);
+            frontend_create_button("BACK TO GAMEMODE SELECTION", BX, y0 + 4 * 48, BW, BH);
+            frontend_create_button("BACK TO MAIN MENU",          BX, y0 + 5 * 48, BW, BH);
+        }
+        s_selected_button = 0;
+        frontend_begin_timed_animation();
+        TD5_LOG_I(LOG_TAG, "MP post-race menu: enter (mode=%s, %d buttons, game_type=%d)",
+                  cup_between ? "cup-between" : "standard", count, s_selected_game_type);
+        s_inner_state = 1;
+        break;
+    }
+
+    case 1: /* Slide-in (~533 ms) */
+        if (frontend_update_timed_animation(0x20, 533) >= 1.0f)
+            s_inner_state = 2;
+        break;
+
+    case 2: /* Settle once the frontend tick reports ready */
+        if (frontend_advance_tick()) {
+            s_anim_complete = 1;
+            frontend_play_sfx(4);   /* settle chime (matches every other menu) */
+            s_inner_state = 3;
+        }
+        break;
+
+    case 3: /* Interaction: any local player can pick (shared aggregated nav) */
+        if (s_input_ready && s_button_index >= 0) {
+            s_mp_postrace_choice = s_button_index;
+            frontend_play_sfx(5);   /* slide-out whoosh */
+            frontend_begin_timed_animation();
+            s_inner_state = 4;
+        }
+        break;
+
+    case 4: /* Slide-out (~267 ms), then dispatch the latched choice */
+        if (frontend_update_timed_animation(16, 267) < 1.0f)
+            break;
+        TD5_LOG_I(LOG_TAG, "MP post-race menu: dispatch (mode=%d choice=%d)",
+                  s_mp_postrace_menu_mode, s_mp_postrace_choice);
+
+        if (s_mp_postrace_menu_mode == 1) {
+            /* --- Cup, between races --- */
+            switch (s_mp_postrace_choice) {
+            case 0: /* NEXT RACE — advance the series (mirrors RaceResults case 0) */
+                if (s_results_rerace_flag) {
+                    s_selected_car          = s_snap_car;
+                    s_selected_paint        = s_snap_paint;
+                    s_selected_transmission = s_snap_trans;
+                    s_selected_config       = s_snap_config;
+                    if (s_snap_num_ai_opponents >= 0)
+                        s_num_ai_opponents = s_snap_num_ai_opponents;
+                }
+                if (s_selected_game_type >= 1 && s_selected_game_type <= 6)
+                    s_race_within_series++;
+                td5_game_mp_cup_advance();
+                frontend_init_race_schedule();
+                break;
+            case 1: /* VIEW RESULTS — re-show the results table for this race */
+                s_results_view_data_request = 1;
+                td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
+                break;
+            case 2: /* VIEW REPLAY — reuse RaceResults case 1 replay path */
+                td5_game_set_demo_mode(0);
+                td5_input_set_replay_mode(1);
+                td5_input_set_playback_active(1);
+                td5_game_set_replay_mode(1);
+                g_td5.race_requested = 1;
+                break;
+            default: /* LEAVE CUP — abandon the series, back to the lobby */
+                td5_game_mp_cup_end();
+                td5_frontend_return_to_lobby();
+                break;
+            }
+        } else {
+            /* --- Standard MP race --- */
+            switch (s_mp_postrace_choice) {
+            case 0: /* RACE AGAIN — rematch with the same settings */
+                if (s_results_rerace_flag) {
+                    s_selected_car          = s_snap_car;
+                    s_selected_paint        = s_snap_paint;
+                    s_selected_transmission = s_snap_trans;
+                    s_selected_config       = s_snap_config;
+                    if (s_snap_num_ai_opponents >= 0)
+                        s_num_ai_opponents = s_snap_num_ai_opponents;
+                }
+                if (s_selected_game_type >= 1 && s_selected_game_type <= 6)
+                    s_race_within_series++;
+                /* A finished cup that fell through to the standard menu (after the
+                 * winners podium) is cleared so the rematch starts clean. */
+                if (td5_game_mp_cup_active()) {
+                    if (td5_game_mp_cup_has_next()) td5_game_mp_cup_advance();
+                    else                            td5_game_mp_cup_end();
+                }
+                frontend_init_race_schedule();
+                break;
+            case 1: /* VIEW REPLAY — reuse RaceResults case 1 replay path */
+                td5_game_set_demo_mode(0);
+                td5_input_set_replay_mode(1);
+                td5_input_set_playback_active(1);
+                td5_game_set_replay_mode(1);
+                g_td5.race_requested = 1;
+                break;
+            case 2: /* BACK TO LOBBY — profile selection, keeps configs (MP-aware) */
+                td5_frontend_return_to_lobby();
+                break;
+            case 3: /* BACK TO CAR SELECTION — reset the simul flow so the picker +
+                     * car grid re-run (mirrors RaceResults Select-New-Car case 3) */
+                if (mp_pos_reask_enabled() && s_mp_flow && s_num_human_players >= 2) {
+                    s_mp_simul = 0;
+                    s_mp_phase = 0;
+                }
+                td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+                break;
+            case 4: /* BACK TO GAMEMODE SELECTION — the MP game-mode vote */
+                td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE);
+                break;
+            default: /* BACK TO MAIN MENU */
+                td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                break;
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
 void Screen_CupWinners(void) {
     int move, hdelta, confirm, back;
     if (s_inner_state == 0) {
@@ -3326,9 +3498,19 @@ void Screen_CupWinners(void) {
         frontend_play_sfx(3);
         td5_plat_input_flush_nav();
         td5_game_mp_cup_end();
-        /* [MP 2026-06-23] Cup series done -> back to the lobby (return_to_lobby
-         * picks MP/net lobby when a session is active, else MAIN_MENU). */
-        td5_frontend_return_to_lobby();
+        /* [MP POST-RACE MENU 2026-06-25] After the final cup race the winners podium
+         * now leads into the standard MP post-race menu (RACE AGAIN / VIEW REPLAY /
+         * BACK TO ...), per the user flow, instead of straight back to the lobby. The
+         * cup has just been ended, so Screen_MpPostRace shows the standard 6-button
+         * menu. Non-MP entries (shouldn't occur — this screen is MP-only) keep the
+         * old return-to-lobby behaviour. */
+        if (s_mp_flow && s_num_human_players >= 2) {
+            td5_frontend_set_screen(TD5_SCREEN_MP_POST_RACE);
+        } else {
+            /* [MP 2026-06-23] Cup series done -> back to the lobby (return_to_lobby
+             * picks MP/net lobby when a session is active, else MAIN_MENU). */
+            td5_frontend_return_to_lobby();
+        }
     }
 }
 
@@ -6506,6 +6688,29 @@ void Screen_RaceResults(void) {
         if (s_network_active) {
             /* Network: skip to lobby or main menu */
             td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
+            return;
+        }
+
+        /* [MP POST-RACE MENU 2026-06-25] Local split-screen multiplayer gets a
+         * dedicated post-race menu (Screen_MpPostRace) with the race-type-menu's
+         * buttons-left / description-right layout, replacing the SP results action
+         * menu and bypassing the high-score flow entirely. Detect a local MP flow
+         * with >=2 humans (same gate the Select-New-Car MP reset uses in case 3).
+         *   - Active cup, more races remain -> the cup-between-races menu (NEXT
+         *     RACE / VIEW RESULTS / VIEW REPLAY / LEAVE CUP), auto-picked at entry.
+         *   - Active cup, final race done   -> the winners podium FIRST, which then
+         *     leads into the standard menu (Screen_CupWinners routes onward).
+         *   - Any standard MP race           -> the standard 6-button menu.
+         * Port-only feature. */
+        if (s_mp_flow && s_num_human_players >= 2) {
+            if (td5_game_mp_cup_active() && !td5_game_mp_cup_has_next()) {
+                TD5_LOG_I(LOG_TAG, "RaceResults: local MP cup final race -> CUP_WINNERS -> MP post-race menu");
+                td5_frontend_set_screen(TD5_SCREEN_CUP_WINNERS);
+            } else {
+                TD5_LOG_I(LOG_TAG, "RaceResults: local split-screen MP -> MP post-race menu (cup_between=%d)",
+                          (td5_game_mp_cup_active() && td5_game_mp_cup_has_next()) ? 1 : 0);
+                td5_frontend_set_screen(TD5_SCREEN_MP_POST_RACE);
+            }
             return;
         }
 

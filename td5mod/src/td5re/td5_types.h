@@ -391,7 +391,14 @@ typedef enum TD5_ScreenIndex {
     TD5_SCREEN_CUP_WINNERS        = 37,  /* Screen_CupWinners   — final cup standings */
     TD5_SCREEN_MP_COP_ROLES       = 38,  /* Screen_MpCopRoles   — pick cop / suspect  */
     TD5_SCREEN_MP_TEAM_SELECT     = 39,  /* Screen_MpTeamSelect — pick cup team        */
-    TD5_SCREEN_COUNT               = 40
+    /* [MP POST-RACE MENU 2026-06-25] Local split-screen post-race menu, buttons-left
+     * + description-right (copies the race-type menu format). Two layouts auto-picked
+     * at entry: a standard 6-button menu (RACE AGAIN / VIEW REPLAY / BACK TO LOBBY /
+     * CAR / GAMEMODE / MAIN MENU) and a cup-between-races 4-button menu (NEXT RACE /
+     * VIEW RESULTS / VIEW REPLAY / LEAVE CUP). Shown after MP results in place of the
+     * SP high-score flow. Port-only feature. */
+    TD5_SCREEN_MP_POST_RACE       = 40,  /* Screen_MpPostRace */
+    TD5_SCREEN_COUNT               = 41
 } TD5_ScreenIndex;
 
 /* ========================================================================
