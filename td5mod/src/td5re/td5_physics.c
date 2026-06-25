@@ -334,70 +334,112 @@ static uint8_t s_prev_grounded_mask[16];     /* per-slot previous-frame grounded
 
 /* ========================================================================
  * Multiplayer catch-up assist (rubber-banding for HUMAN players) — PORT-ONLY,
- * NON-FAITHFUL, opt-in. [MP CATCHUP 2026-06-14]
+ * NON-FAITHFUL, opt-in. [MP CATCHUP 2026-06-14; reworked 2026-06-24]
  *
- * In a multiplayer race (2+ HUMAN players, split-screen OR net) a human who is
- * FALLING BEHIND the race leader gets a small, smooth boost to longitudinal
- * drive force so the pack stays together; the leader (and anyone ahead) is
- * optionally throttled a touch. This is the classic arcade "catch-up" — it is
- * NOT the netcode/lag resync (that lives in td5_net.c).
+ * In a multiplayer race (2+ HUMAN players, split-screen OR net) each human paces
+ * off the NEXT OPPONENT IMMEDIATELY AHEAD of it on track (the racer with the
+ * smallest POSITIVE track-progress gap, human or AI). The effect is a smooth,
+ * INCREMENTAL function of that gap:
+ *   - FAR behind the car ahead  -> raise BOTH the top-speed cap AND drive torque
+ *                                  (acceleration) so the trailing human rejoins
+ *                                  the pack (classic catch-up). Boost ramps in
+ *                                  with the gap and clamps at FULL_GAP.
+ *   - CLOSING IN on the car ahead (gap below the NEUTRAL window) -> lower the
+ *                                  TOP-SPEED CAP ONLY, ramping down to a floor at
+ *                                  gap 0. Acceleration is NOT cut. Because the
+ *                                  speed-limit gate in the drive paths zeroes
+ *                                  drive force WITHOUT braking when over the cap
+ *                                  (td5_physics_update_player / _ai), the car
+ *                                  simply COASTS down to the lower cap and keeps
+ *                                  its existing speed — it never decelerates
+ *                                  under power. So a closing human settles in
+ *                                  behind the car ahead instead of ramming it.
+ *   - LEADER (nobody ahead)      -> neutral (1.0), runs at its normal pace.
+ * This is the classic arcade "catch-up" — NOT the netcode/lag resync (td5_net.c).
  *
  * DETERMINISM (critical — this game runs LOCKSTEP UDP netplay):
- *   - The per-slot multiplier is a PURE FUNCTION of replicated simulation state:
- *     each racer's track_span_high_water (+0x086, the same monotonic forward
- *     span counter UpdateRaceOrder @0x0042F5B0 sorts standings by) and the
- *     replicated per-slot human/AI table g_race_slot_state[]. Both are identical
- *     on every client every tick, so every client computes the same multiplier.
- *   - It is recomputed once per DETERMINISTIC fixed-30Hz sim tick (top of
- *     td5_physics_tick) and applied inside the integer drive-torque pipeline
- *     (td5_physics_compute_drive_torque). No rand()/wall-clock/per-viewport or
- *     other local-only input is read here.
+ *   - Both per-slot multipliers are a PURE FUNCTION of replicated simulation
+ *     state: every racer's track_span_high_water (+0x086, the same monotonic
+ *     forward span counter UpdateRaceOrder @0x0042F5B0 sorts standings by) and
+ *     the replicated per-slot human/AI table g_race_slot_state[]. Both are
+ *     identical on every client every tick, so every client computes the same
+ *     multipliers.
+ *   - Recomputed once per DETERMINISTIC fixed-30Hz sim tick (top of
+ *     td5_physics_tick). The acceleration half is applied in the integer
+ *     drive-torque pipeline (td5_physics_compute_drive_torque); the top-speed
+ *     half is applied in phys_top_speed_rating() (the single cap chokepoint feeding
+ *     all player + AI speed-limit gates). No rand()/wall-clock/per-viewport input.
  *
  * SCOPE GUARD: applies ONLY when >=2 human racer slots are present (split-screen
  * or net). Single-player (1 human) leaves every multiplier at 1.0, so the SP
- * experience is byte-unchanged. AI/traffic slots are never affected.
+ * experience is byte-unchanged. AI/traffic slots are never given an effect (they
+ * are only consulted as the "car ahead" a human paces off).
  *
  * KNOBS (env, cached once; CLI/INI not plumbed — env is the source here):
- *   TD5RE_MP_CATCHUP           master gate, DEFAULT 0 (OFF). "1" = enable.
- *   TD5RE_MP_CATCHUP_STRENGTH  strength 0..100, DEFAULT 35 (conservative).
- *                              Scales BOTH the max behind-boost and the leader
- *                              throttle. 0 behaves like OFF.
- *   TD5RE_MP_CATCHUP_LEADER    DEFAULT 1: also throttle cars AHEAD (down to a
- *                              small floor). "0" = boost trailers only, no
- *                              leader slow-down.
+ *   TD5RE_MP_CATCHUP           master gate, DEFAULT 1 (ON). "0"/"n"/"f" = off.
+ *   TD5RE_MP_CATCHUP_STRENGTH  strength 0..100, DEFAULT 50. Scales ALL of the
+ *                              top-speed boost, accel boost, and top-speed ease.
+ *                              0 behaves like OFF.
+ *   TD5RE_MP_CATCHUP_EASE      DEFAULT 1: enable the approach-side top-speed
+ *                              reduction (coast in behind the car ahead). "0" =
+ *                              boost-when-behind only, never lower the cap.
+ *                              (Legacy alias: TD5RE_MP_CATCHUP_LEADER.)
+ *   TD5RE_MP_CATCHUP_FORCE     DEFAULT 0 (TEST ONLY): drop the >=2-human scope
+ *                              guard to >=1 so a SINGLE player paces off the AI
+ *                              field — lets the mechanic be observed in a
+ *                              single-player trace. NOT for shipping play.
  * ======================================================================== */
 
-/* Drive-force multiplier is Q8 fixed-point (0x100 = 1.0). */
+/* Drive-force / top-speed multiplier is Q8 fixed-point (0x100 = 1.0). */
 #define MP_CATCHUP_Q8_ONE        0x100
 
-/* Gap (in track spans, via track_span_high_water) at which a trailing human
- * reaches the FULL configured boost. Below this the boost ramps linearly with
- * the gap; at/above it the boost is clamped. ~30 spans ≈ a few car lengths of
- * separation on a typical TD5 strip, so the assist eases in smoothly and never
- * pops. Deterministic constant (same on every client). */
+/* Gap (in track spans, via track_span_high_water) to the next opponent AHEAD at
+ * which a trailing human reaches the FULL catch-up boost. Between NEUTRAL_GAP and
+ * this the boost ramps in linearly; at/above it the boost is clamped. Deterministic
+ * constant (same on every client). */
 #define MP_CATCHUP_FULL_GAP_SPANS  30
 
-/* Maximum behind-boost at 100% strength, Q8. 0x100 + 0x60 = 1.375x drive force
- * at full strength + full gap. At the conservative default strength (35%) the
- * realised cap is 0x100 + (0x60*35/100) ≈ 1.13x — a gentle nudge, not a warp. */
-#define MP_CATCHUP_MAX_BOOST_Q8    0x60
+/* Crossover gap. At/below this the human is "closing in" on the car ahead and the
+ * TOP-SPEED cap eases DOWN (coast in). Above it a catch-up boost ramps in. ~12
+ * spans ≈ a comfortable following distance of a few car lengths on a TD5 strip. */
+#define MP_CATCHUP_NEUTRAL_GAP_SPANS  12
 
-/* Maximum leader throttle at 100% strength, Q8 (subtracted from 1.0 for cars
- * AT/AHEAD of the gap window). 0x100 - 0x30 = 0.8125x at full strength; floored
- * so the leader is never crippled. Scaled by strength like the boost. */
-#define MP_CATCHUP_MAX_LEADER_CUT_Q8  0x30
+/* Maximum ACCELERATION (drive-torque) boost at full gap + 100% strength, Q8.
+ * 0x100 + 0x60 = 1.375x drive force at the extreme; at the default 50% strength
+ * + full gap the realised cap is 0x100 + (0x60*50/100) ≈ 1.19x — a firm pull,
+ * not a warp. Accel is boosted ONLY when behind (never cut). */
+#define MP_CATCHUP_MAX_ACCEL_BOOST_Q8  0x60
+
+/* Maximum TOP-SPEED cap boost at full gap + 100% strength, Q8. Gentler than the
+ * accel boost (a small top-end lift to rejoin the pack, not a warp): 0x100 + 0x30
+ * = 1.1875x at the extreme; ≈ 1.09x at the 50% default + full gap. */
+#define MP_CATCHUP_MAX_TS_BOOST_Q8     0x30
+
+/* Maximum TOP-SPEED cap CUT at gap 0 + 100% strength, Q8 (subtracted from 1.0 as
+ * the human bears down on the car ahead so it settles in behind and coasts).
+ * 0x100 - 0x30 = 0.8125x at the extreme; ≈ 0.91x at the 50% default. Acceleration
+ * is never cut here — only the cap — so the car coasts, it does not decelerate. */
+#define MP_CATCHUP_MAX_TS_CUT_Q8       0x30
 
 /* Resolved config (lazy, cached). s_mp_catchup_cfg: -1 = unresolved, 0 = off,
- * 1 = on. s_mp_catchup_strength: 0..100. s_mp_catchup_leader: 0/1. */
+ * 1 = on. s_mp_catchup_strength: 0..100. s_mp_catchup_ease: 0/1. s_mp_catchup_force:
+ * 0/1 (TEST: drop the 2-human guard). */
 static int      s_mp_catchup_cfg      = -1;
 static int      s_mp_catchup_strength = 0;
-static int      s_mp_catchup_leader   = 1;
+static int      s_mp_catchup_ease     = 1;
+static int      s_mp_catchup_force    = 0;
 
-/* Per-racer-slot drive-force multiplier, Q8 (0x100 = 1.0 = no change).
- * Written once per sim tick by td5_physics_update_mp_catchup(); read in
+/* Per-racer-slot ACCELERATION (drive-torque) multiplier, Q8 (0x100 = 1.0 = no
+ * change). Written once per sim tick by td5_physics_update_mp_catchup(); read in
  * td5_physics_compute_drive_torque(). Default 1.0 so it is inert until the
  * feature is enabled AND >=2 humans are racing. */
 static int32_t  s_mp_catchup_mult[TD5_MAX_RACER_SLOTS];
+
+/* Per-racer-slot TOP-SPEED cap multiplier, Q8 (0x100 = 1.0 = no change). Written
+ * alongside s_mp_catchup_mult; read in phys_top_speed_rating(). >1.0 when a human
+ * is far behind the car ahead (rejoin), <1.0 when closing in (coast). 1.0 for
+ * AI/traffic, single-player, and disabled feature. */
+static int32_t  s_mp_catchup_ts_mult[TD5_MAX_RACER_SLOTS];
 
 /* Resolve TD5RE_MP_CATCHUP* env knobs once and log the result. Safe to call
  * every tick (no-op after the first). getenv result is process config, not sim
@@ -419,8 +461,9 @@ static void td5_physics_mp_catchup_config(void)
     if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'))
         s_mp_catchup_cfg = 0;
 
-    /* Strength 0..100, conservative default 35. */
-    s_mp_catchup_strength = 35;
+    /* Strength 0..100, default 50 (scales the top-speed boost, accel boost and
+     * top-speed ease together). */
+    s_mp_catchup_strength = 50;
     e = getenv("TD5RE_MP_CATCHUP_STRENGTH");
     if (e && e[0]) {
         int v = atoi(e);
@@ -429,57 +472,77 @@ static void td5_physics_mp_catchup_config(void)
         s_mp_catchup_strength = v;
     }
 
-    /* Leader throttle on by default. */
-    s_mp_catchup_leader = 1;
-    e = getenv("TD5RE_MP_CATCHUP_LEADER");
+    /* Approach-side top-speed ease on by default. Accept the legacy LEADER alias
+     * (its old "throttle cars ahead" meaning is the closest analog). */
+    s_mp_catchup_ease = 1;
+    e = getenv("TD5RE_MP_CATCHUP_EASE");
+    if (!e || !e[0])
+        e = getenv("TD5RE_MP_CATCHUP_LEADER");   /* legacy alias */
     if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'))
-        s_mp_catchup_leader = 0;
+        s_mp_catchup_ease = 0;
 
-    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
-        s_mp_catchup_mult[i] = MP_CATCHUP_Q8_ONE;
+    /* TEST-ONLY: drop the >=2-human scope guard to >=1 so a single player paces
+     * off the AI field (lets the mechanic be traced in single-player). OFF by
+     * default — shipping play always requires 2+ humans. */
+    s_mp_catchup_force = 0;
+    e = getenv("TD5RE_MP_CATCHUP_FORCE");
+    if (e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' || e[0] == 'T'))
+        s_mp_catchup_force = 1;
+
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        s_mp_catchup_mult[i]    = MP_CATCHUP_Q8_ONE;
+        s_mp_catchup_ts_mult[i] = MP_CATCHUP_Q8_ONE;
+    }
 
     TD5_LOG_I(LOG_TAG,
-              "MP catchup: %s strength=%d%% leader_throttle=%s "
-              "(env TD5RE_MP_CATCHUP / _STRENGTH / _LEADER; full_gap=%d spans, "
-              "max_boost=%d/256, max_leader_cut=%d/256)",
+              "MP catchup: %s strength=%d%% ease=%s force=%s "
+              "(env TD5RE_MP_CATCHUP / _STRENGTH / _EASE / _FORCE; ref=next-opp-ahead, "
+              "neutral_gap=%d full_gap=%d spans, ts_boost=%d ts_cut=%d accel_boost=%d /256)",
               s_mp_catchup_cfg ? "ON" : "OFF (default)",
               s_mp_catchup_strength,
-              s_mp_catchup_leader ? "on" : "off",
-              MP_CATCHUP_FULL_GAP_SPANS, MP_CATCHUP_MAX_BOOST_Q8,
-              MP_CATCHUP_MAX_LEADER_CUT_Q8);
+              s_mp_catchup_ease ? "on" : "off",
+              s_mp_catchup_force ? "ON(test)" : "off",
+              MP_CATCHUP_NEUTRAL_GAP_SPANS, MP_CATCHUP_FULL_GAP_SPANS,
+              MP_CATCHUP_MAX_TS_BOOST_Q8, MP_CATCHUP_MAX_TS_CUT_Q8,
+              MP_CATCHUP_MAX_ACCEL_BOOST_Q8);
 }
 
-/* Recompute the per-slot catch-up drive-force multiplier for THIS sim tick.
+/* Recompute the per-slot catch-up multipliers (ACCEL + TOP-SPEED) for THIS sim
+ * tick.
  *
  * Pure function of replicated sim state (track_span_high_water + g_race_slot_state),
  * so it is lockstep-deterministic. Called once at the top of td5_physics_tick().
  *
- * Algorithm:
- *   - Count human racer slots (g_race_slot_state==1, slot < g_traffic_slot_base).
- *     <2 humans (single-player) => every multiplier reset to 1.0, return (the
- *     SP/MP scope guard — SP is never touched).
- *   - leader_progress = max(track_span_high_water) over ACTIVE racer slots
- *     (humans and AI both count toward "who is in front").
- *   - For each HUMAN slot: gap = leader_progress - my_progress (>=0).
- *       boost = (MAX_BOOST * strength/100) * min(gap,FULL_GAP)/FULL_GAP
- *       mult  = 1.0 + boost                       (trailing: speed up)
- *     For a human AT/ahead of the gap window (gap==0, i.e. the leader, or any
- *     car within ~0 gap) and TD5RE_MP_CATCHUP_LEADER on:
- *       cut   = (MAX_LEADER_CUT * strength/100)   (scaled toward the window)
- *       mult  = 1.0 - cut                         (leader: ease off)
- *     AI slots are left at 1.0 (never boosted/cut).
+ * Algorithm (reference = the NEXT OPPONENT IMMEDIATELY AHEAD, not the leader):
+ *   - Need >=2 human racer slots (or TD5RE_MP_CATCHUP_FORCE for a 1-human trace);
+ *     otherwise every multiplier stays 1.0 and we return (SP byte-unchanged).
+ *   - For each HUMAN slot find gap_ahead = min over racers strictly ahead
+ *     (their high_water > mine) of (their_progress - my_progress). Humans AND AI
+ *     are candidates for "the car ahead"; the EFFECT is applied to humans only.
+ *   - No car ahead (leader) => neutral (1.0 / 1.0).
+ *   - gap_ahead >= NEUTRAL_GAP (behind, room to close):
+ *       t      = min(gap_ahead, FULL_GAP) - NEUTRAL_GAP   in [0, FULL_GAP-NEUTRAL]
+ *       accel  = 1.0 + MAX_ACCEL_BOOST * strength/100 * t/(FULL_GAP-NEUTRAL)
+ *       ts     = 1.0 + MAX_TS_BOOST    * strength/100 * t/(FULL_GAP-NEUTRAL)
+ *   - gap_ahead < NEUTRAL_GAP (closing in):
+ *       u      = NEUTRAL_GAP - gap_ahead                  in (0, NEUTRAL_GAP)
+ *       accel  = 1.0                                      (NEVER cut — no decel)
+ *       ts     = 1.0 - MAX_TS_CUT * strength/100 * u/NEUTRAL_GAP   (ease/coast)
+ *     The ts cut needs TD5RE_MP_CATCHUP_EASE on; off => ts stays 1.0.
  *
- * Everything is integer 24.8/Q8; no float, no rounding surprises across clients. */
+ * Everything is integer Q8; no float, no rounding surprises across clients. */
 static void td5_physics_update_mp_catchup(void)
 {
-    int slot, total, racer_cap, human_count;
-    int32_t leader_progress;
+    static int s_mp_catchup_log_tick = 0;   /* ~1 Hz log gate (rate-limit) */
+    int slot, total, racer_cap, human_count, min_humans, do_log;
 
     td5_physics_mp_catchup_config();
 
     /* Reset to neutral up front so disabled/early-return paths are inert. */
-    for (slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++)
-        s_mp_catchup_mult[slot] = MP_CATCHUP_Q8_ONE;
+    for (slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
+        s_mp_catchup_mult[slot]    = MP_CATCHUP_Q8_ONE;
+        s_mp_catchup_ts_mult[slot] = MP_CATCHUP_Q8_ONE;
+    }
 
     if (!s_mp_catchup_cfg || s_mp_catchup_strength <= 0)
         return;
@@ -493,59 +556,101 @@ static void td5_physics_update_mp_catchup(void)
     if (racer_cap > TD5_MAX_RACER_SLOTS)
         racer_cap = TD5_MAX_RACER_SLOTS;
 
-    /* Pass 1: count humans + find the leader's progress among active racers. */
+    /* Pass 1: count humans. */
     human_count = 0;
-    leader_progress = INT32_MIN;
     for (slot = 0; slot < racer_cap; slot++) {
-        TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
-        int32_t prog = (int32_t)a->track_span_high_water;
         if (g_race_slot_state[slot] == 1)
             human_count++;
-        if (prog > leader_progress)
-            leader_progress = prog;
     }
 
-    /* SCOPE GUARD: only engage with 2+ humans (split-screen or net MP). */
-    if (human_count < 2)
+    /* SCOPE GUARD: only engage with 2+ humans (split-screen or net MP). The TEST
+     * force knob lowers the bar to 1 so the mechanic can be traced single-player. */
+    min_humans = s_mp_catchup_force ? 1 : 2;
+    if (human_count < min_humans)
         return;
 
-    /* Pass 2: per-human multiplier from the gap to the leader. */
+    do_log = ((s_mp_catchup_log_tick % 30) == 0);
+    s_mp_catchup_log_tick++;
+
+    /* Pass 2: per-human multipliers from the gap to the NEXT opponent ahead. */
     for (slot = 0; slot < racer_cap; slot++) {
         TD5_Actor *a;
-        int32_t my_prog, gap;
+        int32_t my_prog, gap_ahead;
+        int j;
 
         if (g_race_slot_state[slot] != 1)
-            continue;  /* humans only */
+            continue;  /* effect applied to humans only */
 
         a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
         my_prog = (int32_t)a->track_span_high_water;
-        gap = leader_progress - my_prog;          /* spans behind the leader */
-        if (gap < 0) gap = 0;                     /* defensive (this IS leader) */
 
-        if (gap > 0) {
-            /* Behind: ramp a boost in with the gap, clamp at FULL_GAP. */
-            int32_t g = (gap < MP_CATCHUP_FULL_GAP_SPANS) ? gap
-                                                          : MP_CATCHUP_FULL_GAP_SPANS;
-            /* boost_q8 = MAX_BOOST * strength/100 * g/FULL_GAP, all integer. */
-            int32_t boost = (MP_CATCHUP_MAX_BOOST_Q8 * s_mp_catchup_strength) / 100;
-            boost = (boost * g) / MP_CATCHUP_FULL_GAP_SPANS;
-            s_mp_catchup_mult[slot] = MP_CATCHUP_Q8_ONE + boost;
-        } else if (s_mp_catchup_leader) {
-            /* Leader (gap 0): ease off by the strength-scaled leader cut. */
-            int32_t cut = (MP_CATCHUP_MAX_LEADER_CUT_Q8 * s_mp_catchup_strength) / 100;
-            s_mp_catchup_mult[slot] = MP_CATCHUP_Q8_ONE - cut;
+        /* Car immediately ahead = smallest POSITIVE progress gap over ALL racer
+         * slots (humans + AI), excluding self. */
+        gap_ahead = INT32_MAX;
+        for (j = 0; j < racer_cap; j++) {
+            TD5_Actor *o;
+            int32_t g;
+            if (j == slot)
+                continue;
+            o = (TD5_Actor *)(g_actor_table_base + (size_t)j * TD5_ACTOR_STRIDE);
+            g = (int32_t)o->track_span_high_water - my_prog;
+            if (g > 0 && g < gap_ahead)
+                gap_ahead = g;
         }
-        /* else: leader throttle disabled -> stays 1.0 */
+
+        if (gap_ahead == INT32_MAX)
+            continue;  /* nobody ahead (leader) -> neutral */
+
+        if (gap_ahead >= MP_CATCHUP_NEUTRAL_GAP_SPANS) {
+            /* Behind with room to close: ramp BOTH boosts in with the gap,
+             * clamped at FULL_GAP. */
+            int32_t span = MP_CATCHUP_FULL_GAP_SPANS - MP_CATCHUP_NEUTRAL_GAP_SPANS;
+            int32_t cap  = (gap_ahead < MP_CATCHUP_FULL_GAP_SPANS) ? gap_ahead
+                                                                   : MP_CATCHUP_FULL_GAP_SPANS;
+            int32_t t    = cap - MP_CATCHUP_NEUTRAL_GAP_SPANS;             /* [0, span] */
+            int32_t accel = (MP_CATCHUP_MAX_ACCEL_BOOST_Q8 * s_mp_catchup_strength * t)
+                            / (100 * span);
+            int32_t ts    = (MP_CATCHUP_MAX_TS_BOOST_Q8 * s_mp_catchup_strength * t)
+                            / (100 * span);
+            s_mp_catchup_mult[slot]    = MP_CATCHUP_Q8_ONE + accel;
+            s_mp_catchup_ts_mult[slot] = MP_CATCHUP_Q8_ONE + ts;
+        } else if (s_mp_catchup_ease) {
+            /* Closing in: lower the TOP-SPEED cap only (coast in behind). Accel
+             * is NEVER cut, so the car keeps its speed and coasts — no decel. */
+            int32_t u   = MP_CATCHUP_NEUTRAL_GAP_SPANS - gap_ahead;        /* (0, NEUTRAL) */
+            int32_t cut = (MP_CATCHUP_MAX_TS_CUT_Q8 * s_mp_catchup_strength * u)
+                          / (100 * MP_CATCHUP_NEUTRAL_GAP_SPANS);
+            s_mp_catchup_ts_mult[slot] = MP_CATCHUP_Q8_ONE - cut;
+            /* s_mp_catchup_mult[slot] stays 1.0 (no accel cut). */
+        }
+
+        if (do_log) {
+            TD5_LOG_I(LOG_TAG,
+                      "mp_catchup: slot=%d gap_ahead=%d accel=%d/256 topspeed=%d/256",
+                      slot, gap_ahead,
+                      (int)s_mp_catchup_mult[slot], (int)s_mp_catchup_ts_mult[slot]);
+        }
     }
 }
 
-/* Q8 catch-up multiplier for `slot` (0x100 = 1.0). Returns 1.0 for non-racer
- * slots / out of range so callers can apply it unconditionally. */
+/* Q8 catch-up ACCELERATION multiplier for `slot` (0x100 = 1.0). Returns 1.0 for
+ * non-racer slots / out of range so callers can apply it unconditionally. */
 static inline int32_t td5_physics_mp_catchup_mult(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
         return MP_CATCHUP_Q8_ONE;
     return s_mp_catchup_mult[slot];
+}
+
+/* Q8 catch-up TOP-SPEED cap multiplier for `slot` (0x100 = 1.0). >1.0 = cap
+ * raised (far behind the car ahead, rejoining); <1.0 = cap lowered (closing in,
+ * coast). 1.0 for non-racer / out-of-range / inert feature so phys_top_speed_rating
+ * can apply it unconditionally. */
+static inline int32_t td5_physics_mp_catchup_ts_mult(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return MP_CATCHUP_Q8_ONE;
+    return s_mp_catchup_ts_mult[slot];
 }
 
 /* ========================================================================
@@ -1972,6 +2077,17 @@ static inline int32_t phys_top_speed_rating(TD5_Actor *actor) {
      * Non-cop-chase races are byte-faithful (is_suspect returns 0). */
     if (td5_game_cop_chase_is_suspect(slot))
         rating = (rating * copchase_ai_speed_pct()) / 100;
+    /* [MP CATCHUP top-speed 2026-06-24] Human MP catch-up paces the cap off the
+     * next opponent ahead: raised when far behind (rejoin), lowered when closing
+     * in (so the human coasts in behind instead of ramming — the speed-limit gate
+     * zeroes drive WITHOUT braking). Inert (1.0) for AI/traffic, single-player and
+     * a disabled feature, so non-MP play is byte-identical. Applied here so all
+     * three speed-limit gates (player on-ground / airborne, AI) inherit it. */
+    {
+        int32_t ts_q8 = td5_physics_mp_catchup_ts_mult(slot);
+        if (ts_q8 != MP_CATCHUP_Q8_ONE)
+            rating = (int32_t)(((int64_t)rating * (int64_t)ts_q8) >> 8);
+    }
     return rating;
 }
 
