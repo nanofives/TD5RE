@@ -1423,13 +1423,19 @@ static void mp_simul_cycle_paint(int p, int step, int sfx) {
     }
 }
 
-/* [MP COP CHASE 2026-06-24] Is pane `p` the COP? True only for a cop-chase race
- * with a HUMAN cop on this player's slot. When the cop is AI, every human evades,
- * so all panes are suspects. Robust against the role screen being skipped on a
- * back/re-entry: reads the resolved cop_slot (Screen_MpCopRoles wrote it). */
+/* [MP COP CHASE 2026-06-24] Is pane `p` a COP? True for a cop-chase race with a
+ * HUMAN cop on this player's slot. When the cop is AI, every human evades, so all
+ * panes are suspects. [multi-cop] Reads cop_slot_mask so EVERY player who chose COP
+ * (not just the first) gets the police roster; falls back to the single cop_slot
+ * when the mask is 0 (role screen skipped on a back/re-entry). Reads the raw config
+ * directly — this runs in the frontend, before wanted_mode_enabled is set, so it
+ * cannot route through td5_game_cop_chase_is_cop (which gates on a live race). */
 static int mp_simul_pane_is_cop(int p) {
     if (g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE) return 0;
     if (g_td5.mp_mode_config.cop_is_ai) return 0;
+    if (p < 0 || p >= 32) return 0;
+    int mask = g_td5.mp_mode_config.cop_slot_mask;
+    if (mask != 0) return (mask >> p) & 1;
     return p == g_td5.mp_mode_config.cop_slot;
 }
 
@@ -1468,6 +1474,10 @@ static void mp_simul_set_pane_roster(int p) {
         s_mp_player_roster_cop[p] = is_cop;
         s_mp_player_roster_min[p] = is_cop ? 33 : 0;
         s_mp_player_roster_max[p] = is_cop ? TD6_COP_LAST : 32;
+        TD5_LOG_I(LOG_TAG, "MP carsel roster: pane=%d role=%s cars=[%d..%d] mask=0x%X",
+                  p, is_cop ? "COP(police)" : "SUSPECT(civilian)",
+                  s_mp_player_roster_min[p], s_mp_player_roster_max[p],
+                  g_td5.mp_mode_config.cop_slot_mask);
     } else {
         s_mp_player_roster_cop[p] = 0;
         s_mp_player_roster_min[p] = 0;
@@ -2888,6 +2898,7 @@ static void mp_mode_config_apply_defaults(int mode) {
         break;
     case TD5_MP_MODE_COP_CHASE:
         c->cop_slot           = 0;              /* host is the cop by default */
+        c->cop_slot_mask      = 1;              /* [multi-cop] slot 0 cop until role pick */
         c->cop_pick_mode      = TD5_COP_PICK_HOST_ASSIGN;
         c->cop_is_ai          = 0;
         c->cop_ai_difficulty  = 1;
@@ -3394,13 +3405,21 @@ void Screen_MpCopRoles(void) {
         if (edge & 3) { s_cop_role[p] = !s_cop_role[p]; frontend_play_sfx(2); }
     }
 
-    if (s_input_ready && s_button_index >= 0) {   /* host OK -> resolve cop + race */
-        int cop = -1;
-        for (p = 0; p < n; p++) if (s_cop_role[p]) { cop = p; break; }
-        if (cop < 0) cop = 0;                       /* always at least one cop */
-        g_td5.mp_mode_config.cop_slot = cop;
+    if (s_input_ready && s_button_index >= 0) {   /* host OK -> resolve cops + race */
+        /* [MP COP CHASE multi-cop 2026-06-24] Each player's own COP/SUSPECT pick is
+         * honoured: build the per-slot cop mask from s_cop_role[] so EVERY player who
+         * chose COP is a cop (and gets cop cars + the cop role in-race), not just the
+         * first one. cop_slot stays the PRIMARY (lowest) cop for single-value readers. */
+        int mask = 0, cop = -1;
+        for (p = 0; p < n; p++) if (s_cop_role[p]) {
+            mask |= (1 << p);
+            if (cop < 0) cop = p;
+        }
+        if (cop < 0) { cop = 0; mask = 1; }         /* always at least one cop (slot 0) */
+        g_td5.mp_mode_config.cop_slot      = cop;
+        g_td5.mp_mode_config.cop_slot_mask = mask;
         td5_plat_input_flush_nav();
-        TD5_LOG_I(LOG_TAG, "MP cop roles: cop slot=%d -> car select", cop);
+        TD5_LOG_I(LOG_TAG, "MP cop roles: cops mask=0x%X primary=%d -> car select", mask, cop);
         td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
         return;
     }
@@ -5058,13 +5077,19 @@ static void frontend_update_laps_button_visibility(int laps_btn_idx) {
 static void frontend_update_difficulty_button_visibility(int diff_btn_idx) {
     if (diff_btn_idx < 0 || diff_btn_idx >= s_button_count) return;
     /* Difficulty is opponent-dependent, so hide it when there are 0 opponents,
-     * in Quick Race (flow 2), or in Time Trial (which has no AI opponents). */
+     * in Quick Race (flow 2), or in Time Trial (which has no AI opponents).
+     * [MP COP CHASE 2026-06-24] Also hide it in Cop Chase: the mode is a
+     * human-vs-human pursuit with no AI-difficulty selection on this screen
+     * (mirrors the POLICE row hide). Checks mode directly — wanted_mode_enabled
+     * is only set at race init, so the MP track selector wouldn't see it yet. */
     int hide = (s_num_ai_opponents <= 0) || (s_flow_context == 2) ||
-               (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL);
+               (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL) ||
+               (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE);
     s_buttons[diff_btn_idx].hidden   = hide;
     s_buttons[diff_btn_idx].disabled = hide;
-    TD5_LOG_I(LOG_TAG, "Difficulty row: opponents=%d flow=%d -> %s",
-              s_num_ai_opponents, s_flow_context, hide ? "hidden" : "SHOWN");
+    TD5_LOG_I(LOG_TAG, "Difficulty row: opponents=%d flow=%d mode=%d -> %s",
+              s_num_ai_opponents, s_flow_context, g_td5.mp_mode_config.mode,
+              hide ? "hidden" : "SHOWN");
     if (hide && s_selected_button == diff_btn_idx) s_selected_button = 0;
 }
 
