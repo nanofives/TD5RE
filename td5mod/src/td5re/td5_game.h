@@ -239,6 +239,16 @@ int  td5_game_mp_cop_chase_field(void);
  * is active — gates the dedicated COPS/SUSPECTS results layout and the "CHASE
  * RESULTS" title. SP wanted mode and net play keep the normal results table. */
 int  td5_game_mp_cop_chase_active(void);
+/* [MP COP CHASE INFECT 2026-06-25] INFECT mode: an arrested suspect is converted
+ * into a cop (random police car) instead of being parked. infect_enabled() gates
+ * the whole feature; infect_request() (called from the arrest path) queues a
+ * busted suspect; process_pending_infections() performs the deferred per-slot
+ * car-swap once per frame at a safe point; reset_infect_state() clears the
+ * converted/pending sets per race. */
+int  td5_game_cop_chase_infect_enabled(void);
+void td5_game_infect_request(int suspect_slot);
+void td5_game_process_pending_infections(void);
+void td5_game_reset_infect_state(void);
 /* [MP COP CHASE results 2026-06-25] Per-suspect "time of arrest" (race-timer
  * ticks). set() stamps the elapsed time once at the bust transition; get()
  * returns 0 for a suspect that was never arrested (results screen shows '-').

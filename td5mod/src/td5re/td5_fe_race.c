@@ -3001,6 +3001,7 @@ static void mp_mode_config_apply_defaults(int mode) {
         c->cop_win_condition  = TD5_COP_WIN_BUST_ALL;
         c->suspect_head_start = 12;
         c->suspect_debuff_pct = 70;
+        c->cop_infect_enabled = 0;              /* [INFECT] off by default */
         break;
     default:                                    /* TD5_MP_MODE_RACE: no extra opts */
         break;
@@ -3193,6 +3194,9 @@ static int mp_cfg_build(MpCfgOpt *o) {
         o[n].label="WIN CONDITION";    o[n].val=&c->cop_win_condition;   o[n].min=0;  o[n].max=2;  o[n].step=1; o[n].enum_labels=k_cfg_wincon; o[n].enum_count=3; n++;
         o[n].label="HEAD START";       o[n].val=&c->suspect_head_start;  o[n].min=0;  o[n].max=40; o[n].step=2; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
         o[n].label="SUSPECT SPEED %";  o[n].val=&c->suspect_debuff_pct;  o[n].min=40; o[n].max=100;o[n].step=5; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
+        /* [INFECT 2026-06-25] Arrested suspects become cops (random police car)
+         * instead of parking — keeps eliminated players in the chase. */
+        o[n].label="INFECT";           o[n].val=&c->cop_infect_enabled;  o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
         break;
     default: /* TD5_MP_MODE_RACE — no extra options */
         break;

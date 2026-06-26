@@ -1731,6 +1731,7 @@ int td5_game_init_race_session(void) {
      * split-screen only for now — the net path above leaves wanted mode off. */
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
         g_td5.wanted_mode_enabled = 1;
+        td5_game_reset_infect_state();   /* [INFECT] clear converted/pending sets per race */
         /* NOTE: the AI cop is armed LATER (after td5_ai_init_traffic_actors, whose
          * cop_state_reset() in the dynamic-traffic seeding would otherwise WIPE the
          * arming — that bug made the AI cop revert to a regular racer and the cop
@@ -4719,6 +4720,12 @@ int td5_game_run_race_frame(void) {
     if (g_td5.race_end_fade_state == 0) {
         int pf;
         uint32_t frame_accum = td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt);
+        /* [INFECT 2026-06-25] Convert suspects arrested during last frame's sim
+         * loop into cops (random police car). Deferred here so the heavy per-slot
+         * car-swap runs OUTSIDE the sim loop, and BEFORE check_race_completion so
+         * the "all suspects infected -> cops win" end condition sees the new state
+         * (and a final arrest converts rather than triggering a premature end). */
+        td5_game_process_pending_infections();
         for (pf = 0; pf < TD5_MAX_RACER_SLOTS; pf++) {
             if (s_slot_state[pf].state == 3) continue;  /* disabled */
             advance_pending_finish_state(pf, frame_accum);
@@ -6557,6 +6564,91 @@ static int mp_cop_chase_count_suspects(int *busted_out) {
     return active;
 }
 
+/* ========================================================================
+ * [MP COP CHASE INFECT 2026-06-25] Arrested-suspect -> cop conversion.
+ *
+ * When the INFECT toggle is on, a suspect that gets arrested is converted into
+ * a COP instead of being permanently parked: its car is swapped to a randomly
+ * chosen police car (mesh + carparam reloaded for that slot via the per-slot
+ * loader td5_asset_load_vehicle, RE-grounded by LoadRaceVehicleAssets @
+ * 0x00443280) and the slot is flagged a cop. Eliminated players thus keep
+ * playing as cops; the round ends once every suspect has been infected.
+ *
+ * s_infected_mask  - racer slots already converted; consulted by
+ *                    td5_game_cop_chase_is_cop so a converted suspect counts as
+ *                    a cop in BOTH the human-cop (mask) and AI-cop (single-slot)
+ *                    paths, regardless of cop_is_ai.
+ * s_infect_pending - work queue: the arrest path sets a bit; the heavy car-swap
+ *                    runs once per frame in td5_game_process_pending_infections
+ *                    at a point where asset I/O is safe (never in the collision
+ *                    handler). Both reset per race in the cop-chase init block.
+ * ======================================================================== */
+static uint32_t s_infected_mask  = 0;
+static uint32_t s_infect_pending = 0;
+
+/* Random police-car roster indices into s_car_zip_paths: 33=cop.zip (Police
+ * Cerbera), 34=sp5 (Mustang), 35=sp6 (Charger), 36=sp7 (Camaro) — the 4
+ * canonical TD5 police cars, all present as extracted assets. */
+static const int k_infect_cop_cars[4] = { 33, 34, 35, 36 };
+
+void td5_game_reset_infect_state(void) { s_infected_mask = 0; s_infect_pending = 0; }
+
+/* 1 when INFECT mode is active for this (local) cop chase. */
+int td5_game_cop_chase_infect_enabled(void) {
+    return g_td5.wanted_mode_enabled
+        && g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE
+        && !g_td5.network_active
+        && g_td5.mp_mode_config.cop_infect_enabled != 0;
+}
+
+/* Queue an arrested suspect for conversion into a cop. Called from the arrest
+ * path (td5_ai_wanted_cop_hit); a no-op when INFECT is off or the slot is
+ * already a cop. The heavy car-swap is deferred to the per-frame processor. */
+void td5_game_infect_request(int suspect_slot) {
+    if (suspect_slot < 0 || suspect_slot >= TD5_MAX_RACER_SLOTS) return;
+    if (!td5_game_cop_chase_infect_enabled()) return;
+    if ((s_infected_mask >> suspect_slot) & 1u) return;   /* already a cop */
+    s_infect_pending |= (1u << suspect_slot);
+    TD5_LOG_I(LOG_TAG, "INFECT: slot=%d queued for cop conversion", suspect_slot);
+}
+
+/* Process queued infections once per frame at a safe point (outside the sim
+ * loop). For each pending slot: swap its car to a random police car (mesh +
+ * carparam reloaded), flag it a cop (s_infected_mask -> is_cop true), restore
+ * full health, and — for AI-driven slots — arm the cop AI driver. Human-driven
+ * infected cops keep manual control; they're cops via the mask + their freshly
+ * loaded police car (the render path draws the loaded vehicle, not the generic
+ * cop overlay, for any cop_chase_is_cop slot). */
+void td5_game_process_pending_infections(void) {
+    if (!s_infect_pending) return;
+    if (!td5_game_cop_chase_infect_enabled()) { s_infect_pending = 0; return; }
+    int humans = g_td5.num_human_players;
+    if (humans < 0) humans = 0;
+    if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+    for (int s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
+        if (!((s_infect_pending >> s) & 1u)) continue;
+        s_infect_pending &= ~(1u << s);
+        if ((s_infected_mask >> s) & 1u) continue;        /* already converted */
+
+        /* Swap this slot's vehicle to a random police car (mesh + physics). */
+        int pick = k_infect_cop_cars[(unsigned)rand() % 4u];
+        td5_asset_load_vehicle(pick, s, 0);
+
+        /* Flag as a cop and give it a fresh, healthy car. */
+        s_infected_mask |= (1u << s);
+        g_wanted_damage_state[s] = 0x1000;
+
+        /* AI-driven slot -> arm the cop driver; a human slot keeps manual control
+         * (its cop identity comes from s_infected_mask, not the AI cop driver). */
+        int is_human = (s < humans) && !(g_td5.mp_ai_player_mask & (1u << s));
+        if (!is_human)
+            td5_ai_cop_chase_setup(s, 1);
+
+        TD5_LOG_I(LOG_TAG, "INFECT: slot=%d converted to cop (car=%d, driver=%s)",
+                  s, pick, is_human ? "human" : "AI");
+    }
+}
+
 /* Returns 1 when the cop-chase win condition ends the race early. BUST_ALL: cop
  * wins once every suspect is arrested. SUDDEN_DEATH: cop wins on the first
  * arrest. MOST_BUSTS: no early end — the race runs to its natural finish and the
@@ -6566,6 +6658,15 @@ static int mp_cop_chase_resolved(void) {
     if (g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE) return 0;
     if (!g_td5.wanted_mode_enabled) return 0;
     active = mp_cop_chase_count_suspects(&busted);
+    /* [INFECT 2026-06-25] When INFECT mode has converted every suspect into a cop,
+     * no suspects remain — the cops win. Checked BEFORE the active<=0 guard below
+     * (which otherwise treats "no suspects" as "not a cop chase" and never ends
+     * the round, since cops don't cross the finish line). Gated on at least one
+     * conversion so a mis-configured 0-suspect setup can't false-trigger. */
+    if (td5_game_cop_chase_infect_enabled() && active == 0 && s_infected_mask != 0) {
+        TD5_LOG_I(LOG_TAG, "Cop chase INFECT: all suspects converted to cops -> race end");
+        return 1;
+    }
     if (active <= 0) return 0;
     /* [MP COP CHASE results 2026-06-25] Every suspect arrested -> nobody left to
      * chase, so end the race NOW regardless of win condition (user request: "when
@@ -8691,6 +8792,9 @@ int td5_game_cop_chase_is_cop(int slot) {
     int primary = td5_game_cop_chase_cop_slot();
     if (primary < 0) return 0;                       /* no active cop chase */
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    /* [INFECT 2026-06-25] A converted (arrested-then-infected) suspect is a cop in
+     * EVERY cop-chase variant, regardless of the AI-cop / human-cop branch below. */
+    if ((s_infected_mask >> slot) & 1u) return 1;
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
         !g_td5.network_active && !g_td5.mp_mode_config.cop_is_ai) {
         /* Human cop chase: any slot whose mask bit is set is a cop. A 0 mask

@@ -1054,6 +1054,12 @@ int td5_ai_wanted_cop_hit(int cop_slot, int suspect_slot, int32_t impact_mag) {
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
         }
         TD5_LOG_I(LOG_TAG, "wanted_arrest: suspect slot=%d arrested by cop=%d", suspect_slot, cop_slot);
+        /* [MP COP CHASE INFECT 2026-06-25] In INFECT mode the bust still scores
+         * above, but the suspect is then CONVERTED into a cop (random police car)
+         * rather than staying parked. Queue it; the heavy car-swap runs at a safe
+         * point next frame (td5_game_process_pending_infections). No-op when the
+         * INFECT toggle is off, so the classic park-on-arrest path is unchanged. */
+        td5_game_infect_request(suspect_slot);
     }
     return killed;
 }

@@ -504,6 +504,14 @@ typedef struct TD5_MpModeConfig {
      * in-race SmartAI per-car skill (td5_ai_smart_race_init). Appended for a
      * stable wire layout. */
     int32_t cup_ai_difficulty[TD5_MAX_RACER_SLOTS];
+    /* [MP COP CHASE INFECT 2026-06-25] 1 = INFECT mode: when a suspect is
+     * ARRESTED it is converted into a COP — its car swapped to a randomly chosen
+     * police car (mesh + physics reloaded for that slot) — instead of being
+     * permanently parked, so eliminated players keep playing as cops. The round
+     * ends once every suspect has been infected. 0 = classic arrest (park). Only
+     * consulted for the LOCAL cop-chase path (mode==COP_CHASE && !network).
+     * Appended for a stable wire layout. */
+    int32_t cop_infect_enabled;
 } TD5_MpModeConfig;
 
 /* ========================================================================

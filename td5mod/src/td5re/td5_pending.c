@@ -30,6 +30,9 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Cop Chase INFECT: arrested car becomes a random-car cop",
+    "INFECT: human keeps driving as cop; AI cop gives chase",
+    "INFECT: round ends once every suspect is infected",
     "Cop Chase results: COPS (arrests) + SUSPECTS (bust time)",
     "Cop Chase ends: all suspects busted or all finish",
     "Italy (Courmayeur) starts a race without crashing",
