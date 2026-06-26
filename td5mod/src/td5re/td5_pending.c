@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Italy (Courmayeur) starts a race without crashing",
     "Cop roles: OK rejected if all-cop or all-suspect",
     "Arrested car stops dead, can't be driven/pushed",
     "ARRESTED splash centred; its floating bar hidden",

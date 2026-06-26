@@ -722,7 +722,26 @@ static int ai_route_byte(const uint8_t *table, int span, int k) {
     size_t sz  = (table == g_route_tables[1]) ? g_route_table_sizes[1]
                                               : g_route_table_sizes[0];
     size_t off = (size_t)(unsigned)span * 3u + (unsigned)k;
-    return (off < sz) ? (int)table[off] : 0;
+    if (off >= sz) {
+        /* Out-of-range span: return the safe default (0) instead of reading
+         * past the route table. One-shot WARN so a field occurrence is visible
+         * without per-tick spam. This is the central guard for the
+         * Courmayeur/Italy (level027) route-table OOB crash: that track's
+         * LEFT/RIGHT.TRK are 1800 bytes (600 rows) while a branch-remapped
+         * span_normalized can transiently exceed the table, and the original
+         * tolerated the OOB read only because its route tables sit inside one
+         * big game heap (no guard page). */
+        static int s_route_oob_warned = 0;
+        if (!s_route_oob_warned) {
+            s_route_oob_warned = 1;
+            TD5_LOG_W(LOG_TAG,
+                "ai_route_byte: span=%d k=%d off=%lu past route table sz=%lu "
+                "-> returning 0 (route-table OOB guard)",
+                span, k, (unsigned long)off, (unsigned long)sz);
+        }
+        return 0;
+    }
+    return (int)table[off];
 }
 
 static int32_t ai_route_heading_for_actor(const int32_t *rs, const char *actor) {
@@ -1783,16 +1802,16 @@ static void td5_ai_refresh_route_state_slot(int slot) {
                 if (racer_or_encounter) {
                     rs[RS_LEFT_BOUNDARY_A] = rs[RS_TRACK_OFFSET_BIAS];
                 } else if (g_route_tables[0] && span_norm_i >= 0) {
-                    int route_byte_left = (int)g_route_tables[0][
-                        (size_t)(unsigned)span_norm_i * 3u];
+                    int route_byte_left =
+                        ai_route_byte(g_route_tables[0], span_norm_i, 0);
                     int32_t offL = td5_track_compute_signed_offset(
                         span_raw_i, rs[RS_TRACK_PROGRESS], route_byte_left);
                     rs[RS_TRACK_OFFSET_BIAS] = offL;
                     rs[RS_LEFT_BOUNDARY_A]   = offL;
                 }
                 if (g_route_tables[1] && span_norm_i >= 0) {
-                    int route_byte_right = (int)g_route_tables[1][
-                        (size_t)(unsigned)span_norm_i * 3u];
+                    int route_byte_right =
+                        ai_route_byte(g_route_tables[1], span_norm_i, 0);
                     rs[RS_LEFT_BOUNDARY_B] = td5_track_compute_signed_offset(
                         span_raw_i, rs[RS_TRACK_PROGRESS], route_byte_right);
                 }
@@ -1810,16 +1829,16 @@ static void td5_ai_refresh_route_state_slot(int slot) {
                 if (racer_or_encounter) {
                     rs[RS_LEFT_BOUNDARY_B] = rs[RS_TRACK_OFFSET_BIAS];
                 } else if (g_route_tables[1] && span_norm_i >= 0) {
-                    int route_byte_right = (int)g_route_tables[1][
-                        (size_t)(unsigned)span_norm_i * 3u];
+                    int route_byte_right =
+                        ai_route_byte(g_route_tables[1], span_norm_i, 0);
                     int32_t offR = td5_track_compute_signed_offset(
                         span_raw_i, rs[RS_TRACK_PROGRESS], route_byte_right);
                     rs[RS_TRACK_OFFSET_BIAS] = offR;
                     rs[RS_LEFT_BOUNDARY_B]   = offR;
                 }
                 if (g_route_tables[0] && span_norm_i >= 0) {
-                    int route_byte_left = (int)g_route_tables[0][
-                        (size_t)(unsigned)span_norm_i * 3u];
+                    int route_byte_left =
+                        ai_route_byte(g_route_tables[0], span_norm_i, 0);
                     rs[RS_LEFT_BOUNDARY_A] = td5_track_compute_signed_offset(
                         span_raw_i, rs[RS_TRACK_PROGRESS], route_byte_left);
                 }
@@ -2954,10 +2973,18 @@ int td5_ai_update_route_threshold(int slot) {
     int32_t threshold;
     {
         const uint8_t *route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
-        if (route_table) {
-            threshold = (int32_t)route_table[span * 3 + 2];
+        size_t rt_sz = (route_table == g_route_tables[1]) ? g_route_table_sizes[1]
+                                                          : g_route_table_sizes[0];
+        if (route_table && span >= 0 &&
+            ((size_t)(unsigned)span * 3u + 2u) < rt_sz) {
+            threshold = (int32_t)route_table[(size_t)(unsigned)span * 3u + 2u];
         } else {
-            threshold = 0xFF; /* port-only fallback; see KEEP comment above */
+            /* NULL table OR span past the route table -> no-limit fallback
+             * (0xFF), matching the original's bias-fallback exit. The added
+             * bound prevents the Courmayeur-class OOB read at
+             * route_table[span*3+2] when a branch-remapped span exceeds the
+             * 600-row LEFT/RIGHT.TRK table. */
+            threshold = 0xFF;
         }
     }
 
@@ -5574,7 +5601,7 @@ void td5_ai_update_track_behavior(int slot) {
                 const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
                 int route_byte = 0;
                 if (route_bytes && span_norm >= 0) {
-                    route_byte = (int)route_bytes[(size_t)(unsigned)span_norm * 3u];
+                    route_byte = ai_route_byte(route_bytes, span_norm, 0);
                 }
                 rs[RS_TRACK_OFFSET_BIAS] =
                     td5_track_compute_signed_offset(span_raw, progress, route_byte);
