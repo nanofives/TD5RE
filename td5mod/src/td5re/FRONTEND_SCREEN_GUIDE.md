@@ -29,6 +29,29 @@ input, sounds). Established 2026-06-22; the MP game-mode screens
    - Selector (slider) rows: after creating, set `s_buttons[idx].is_selector =
      1`; read `frontend_option_delta()` for LEFT/RIGHT value changes.
 
+### Button column alignment — THE routine (don't re-derive X every time)
+
+This is the recurring miss: a new screen invents its own button X and the column
+ends up not lining up under the title. The values are **fixed**, so just use them:
+
+| Element | Design X | Constant |
+|---|---|---|
+| Screen **title** text (first letter) | `126` | `FE_TITLE_LEFT_X` (`td5_frontend.c`) |
+| Left-column menu **button frame** left edge | `120` | `FE_MENU_BTN_X` (`td5_frontend_internal.h`) |
+| Left-column menu **button width** | `0xE0` (224) | `FE_MENU_BTN_W` |
+| Left-column menu **button height** | `0x20` (32) | `FE_MENU_BTN_H` |
+
+**How to get it right, mechanically:**
+1. Draw the title at `frontend_draw_screen_title(text, FE_TITLE_LEFT_X*sx, 17*sy, 0xFFE3D708u, sx, sy)`.
+2. Create every button in the left column with **`x = FE_MENU_BTN_X`, `w = FE_MENU_BTN_W`** (pick your own `y` start + row pitch). RE basis: the original race menu (`@0x004168B0`) rests its buttons at `g_frontendCanvasW/2 − 200 = 120` and the shared title creator (`@0x00412E30`) blits the title at the *same* `120`, so in the original the title and column align exactly. The port draws its title at `126` (a value eyeballed from `MainMenu.png`; a 126 constant scan over the frontend region returned zero hits), so the `~6 px` gap is a port-title artefact. Match `120` (`FE_MENU_BTN_X`) — do **not** try to hit `126`, and do **not** invent another X.
+3. **Labels are CENTRED inside the frame**, not left-aligned — the button loop draws `fe_draw_text(bx + (bw - text_w)*0.5f, ...)`. So a label does **not** start at `120`; the *frame* does. If a label is too long for the 224px frame, **shorten the label** (a right-side description panel can carry the full wording) — never widen the column past `~228` (panels start at `x=348`) and never move the column left to fit text.
+4. Reference implementation to copy: **`Screen_RaceTypeCategory`** (`td5_fe_menu.c`); `Screen_MpPostRace` (`td5_fe_race.c`) is a second example. Both use `FE_MENU_BTN_X` / `FE_MENU_BTN_W`.
+5. Verify with a screenshot: the button column's left edge should sit just under the title's first letter. If it's visibly off (more than a few px), you used the wrong X — go back to `FE_MENU_BTN_X`.
+
+> Historical note: `FE_LOBBY_X` is `116` and the title is `126`; these small
+> per-screen eyeballed offsets are why this kept getting flagged. For any **new**
+> left-column menu, ignore those and use `FE_MENU_BTN_X` (120).
+
 3. **Two-line buttons:** make the button **taller** (e.g. `h = 54`) and draw
    BOTH lines **block-centred vertically** on the button with a small gap
    between them (reference: name at `y+11`, description at `y+37` on a 54-tall
@@ -89,6 +112,8 @@ centred on their row.
 - [ ] Title at top, `FE_TITLE_LEFT_X`/`17`, colour `0xFFE3D708`.
 - [ ] `frontend_load_tga(MainMenu.tga)` in init; NO full-screen dim overlay.
 - [ ] Buttons via `frontend_create_button` (taller if two lines).
+- [ ] Left-column buttons at `x = FE_MENU_BTN_X` (120), `w = FE_MENU_BTN_W`
+      (0xE0) so they align under the title; shorten labels rather than widen.
 - [ ] On-button text/values/arrows drawn in the **post-button** render switch.
 - [ ] Two lines block-centred with a gap.
 - [ ] `frontend_play_sfx(3)` on select/lock; `(2)` on nav; `(5)` on back.

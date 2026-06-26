@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Cup final standings now show each player's profile" },
+    { CL_ITEM,    "  name instead of PLAYER 1 / PLAYER 2" },
+    { CL_ITEM,    "WHAT NEXT? menu: CAR SELECTION goes straight to the" },
+    { CL_ITEM,    "  car grid (was sending you back to profile select)" },
+    { CL_ITEM,    "WHAT NEXT? buttons now line up under the title like" },
+    { CL_ITEM,    "  every other menu screen" },
     { CL_ITEM,    "Game is now crisp on high-DPI / scaled displays:" },
     { CL_ITEM,    "  no more blur on 4K screens at 150%/300% scaling" },
     { CL_ITEM,    "Multiplayer results table tidied: name column lines" },
