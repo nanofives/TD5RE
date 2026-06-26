@@ -2196,33 +2196,15 @@ static int frontend_rows_overlap(int a, int b) {
            s_buttons[b].y < s_buttons[a].y + s_buttons[a].h;
 }
 
-/* A navigable HIDDEN chip sharing the current button's row, or -1. The Track/Car
- * randomize icon is created `hidden` (painted as a chip only when focused) and
- * sits just to the RIGHT of its selector on the same row — geometric vertical
- * can't reach a far-right button (the column off-axis penalty rejects it) and
- * horizontal L/R must stay value-cycle on the selector, so it would be stranded.
- * frontend_nav_vertical reaches it as the column-end fallback, preserving the
- * old "press UP from the selector row to reach the icon" behaviour generically. */
-static int frontend_same_row_hidden_chip(int current) {
-    int i;
-    if (current < 0) return -1;
-    for (i = 0; i < FE_MAX_BUTTONS; i++) {
-        if (i == current || !s_buttons[i].active || s_buttons[i].disabled) continue;
-        if (s_buttons[i].hidden && frontend_rows_overlap(current, i)) return i;
-    }
-    return -1;
-}
-
 /* [PORT 2026-06-26] VERTICAL menu nav for every shared-nav screen. Picks the
  * nearest active button in the travel direction by true (x,y) GEOMETRY, so a
  * button with a high array index but a low visual row (an appended option row,
  * the Track-select DYNAMICS row, the Quick-Race span-offset field, ...) is
  * reached IN VISUAL ORDER instead of being skipped by the old index-order
- * cycler. If nothing lies that way (we're at a column end) it first reaches a
- * same-row hidden chip (the randomize icon), then WRAPS to the far end so the
- * column still cycles, matching the old nav's convenience. This replaces the
- * per-screen geometric-vs-index whack-a-mole: screens used to be added to a
- * `vnav` allow-list one at a time whenever a new high-index/low-row button broke
+ * cycler. If nothing lies that way (we're at a column end) it WRAPS to the far
+ * end so the column still cycles, matching the old nav's convenience. This
+ * replaces the per-screen geometric-vs-index whack-a-mole: screens used to be
+ * added to a `vnav` allow-list one at a time whenever a new high-index/low-row button broke
  * their nav. Returns 1 iff the selection actually moved. */
 static int frontend_nav_vertical(int direction) {
     int current, target;
@@ -2252,7 +2234,10 @@ static int frontend_nav_vertical(int direction) {
         }
         if (spanned >= 2) target = leftmost;
     }
-    if (target < 0) target = frontend_same_row_hidden_chip(current);
+    /* No in-column neighbour -> WRAP to the far end (UP from the top row lands on
+     * the bottom OK button, DOWN from the bottom lands on the top). A hidden chip
+     * (the randomize icon) is intentionally NOT reached here — it is accessed with
+     * SHIFT+RIGHT (geometric move), so plain UP/DOWN stays on the real rows. */
     if (target < 0) target = frontend_extreme_button_vertical(-direction);
     if (target < 0 || target == s_selected_button) return 0;
     s_selected_button = target;
@@ -2346,16 +2331,20 @@ static void frontend_nav_selftest_maybe(void) {
     while (qh < qt) {
         int node = queue[qh++];
         int d;
-        for (d = 0; d < 4; d++) {
+        for (d = 0; d < 6; d++) {
             int moved, n;
             s_selected_button = node;
             switch (d) {
             case 0: moved = frontend_nav_vertical(-1); break;   /* UP    */
             case 1: moved = frontend_nav_vertical(1);  break;   /* DOWN  */
-            /* LEFT/RIGHT only move focus off a NON-selector — exactly what the
-             * real dispatch does (a selector's L/R cycles its value instead). */
+            /* plain LEFT/RIGHT only move focus off a NON-selector — exactly what
+             * the real dispatch does (a selector's L/R cycles its value instead). */
             case 2: moved = !frontend_button_is_selector(node) && frontend_nav_horizontal(-1); break;
-            default: moved = !frontend_button_is_selector(node) && frontend_nav_horizontal(1); break;
+            case 3: moved = !frontend_button_is_selector(node) && frontend_nav_horizontal(1); break;
+            /* SHIFT+LEFT/RIGHT geometric focus move (keyboard) — reaches the hidden
+             * randomize chip that plain UP/DOWN/L/R intentionally skips. */
+            case 4: moved = frontend_move_selected_button_spatial(-1, 0); break;
+            default: moved = frontend_move_selected_button_spatial(1, 0); break;
             }
             n = s_selected_button;
             if (moved && n >= 0 && n < FE_MAX_BUTTONS && !reach[n]) {
@@ -2378,6 +2367,13 @@ static void frontend_nav_selftest_maybe(void) {
             if (!frontend_nav_vertical(1)) break;
         }
     }
+    /* UP from the top row must WRAP to the bottom action button (OK), not jump to
+     * the hidden randomize chip (which is Shift+Right only). */
+    s_selected_button = start;
+    frontend_nav_vertical(-1);
+    TD5_LOG_I(LOG_TAG, "  UP-from-top(%d '%s') -> %d '%s'",
+              start, start >= 0 ? s_buttons[start].label : "",
+              s_selected_button, s_selected_button >= 0 ? s_buttons[s_selected_button].label : "");
     s_selected_button = saved;
 
     TD5_LOG_I(LOG_TAG, "NAV SELFTEST screen=%d reached %d/%d navigable",
