@@ -7254,6 +7254,25 @@ static const char *k_cps_labels[CPS_COUNT] = {
     "GRIP", "HANDLING", "DOWNFORCE", "DRIVETRAIN", "BALANCE"
 };
 
+/* [2026-06-26 PORT ADDITION] Short plain-language captions for the less-obvious
+ * stats, drawn as a small dim second line under the label in the SINGLE-PLAYER
+ * MORE STATS panel only (gated on !compact — the tiny split-screen MP panes have
+ * no vertical room). NULL = the label already reads clearly on its own
+ * (WEIGHT/TOP SPEED/POWER/BRAKING). Keep each caption short so it stays inside
+ * the ~40%-of-panel label column and never runs under the bar. */
+static const char *k_cps_explain[CPS_COUNT] = {
+    NULL,                /* WEIGHT     */
+    NULL,                /* TOP SPEED  */
+    "power-to-weight",   /* ACCEL      */
+    NULL,                /* POWER      */
+    NULL,                /* BRAKING    */
+    "cornering grip",    /* GRIP       */
+    "agility",           /* HANDLING   */
+    "grip at speed",     /* DOWNFORCE  */
+    "driven wheels",     /* DRIVETRAIN */
+    "weight bias F/R"    /* BALANCE    */
+};
+
 typedef struct {
     int     valid;
     int32_t mass;        /* 0x88  i16 inverse-mass (higher = lighter) */
@@ -7403,7 +7422,19 @@ static void frontend_render_physics_stats(int ext_id, float px, float py, float 
     for (i = 0; i < CPS_COUNT; i++) {
         float ry  = py + (float)i * rh;
         float tyc = (ry + (rh - capd) * 0.5f) * sy;
-        fe_draw_small_text(px * sx, tyc, k_cps_labels[i], 0xFFC8C8C8u, lsx, lsy);
+        const char *expl = compact ? NULL : k_cps_explain[i];
+        if (expl) {
+            /* [2026-06-26] Two-line label: stat name on top, dim caption beneath.
+             * Both sit in the label column (left of barx), so the bar / text value
+             * to the right is untouched. Offsets in design px (SP rh=22.4): label
+             * cell-top ry+2 (baseline ry+12), caption cell-top ry+12 at 0.62x so
+             * its descenders end ~ry+20, inside the row. */
+            float exsx = lsx * 0.62f, exsy = lsy * 0.62f;
+            fe_draw_small_text(px * sx, (ry + 2.0f)  * sy, k_cps_labels[i], 0xFFC8C8C8u, lsx,  lsy);
+            fe_draw_small_text(px * sx, (ry + 12.0f) * sy, expl,           0xFF8FA0B4u, exsx, exsy);
+        } else {
+            fe_draw_small_text(px * sx, tyc, k_cps_labels[i], 0xFFC8C8C8u, lsx, lsy);
+        }
         if (i < CPS_BAR_COUNT) {
             float barh = rh - (compact ? 3.0f : 6.0f);
             float bary, f;
@@ -7431,7 +7462,13 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
      * the live selected car (set by frontend_load_car_spec_fields each frame). */
     int ext = s_car_spec_car;
     TD5_LOG_I(LOG_TAG, "car_stats_overlay(physics): car=%d", ext);
-    frontend_render_physics_stats(ext, 232.0f, 126.0f, 384.0f, 224.0f,
+    /* [2026-06-26] Shifted the panel RIGHT (x 232->252) so its labels clear the
+     * port-added RANDOMIZE chip (canvas 218..246, y171..199). The original drew
+     * this header column at canvasW-0x198 = 232 [CONFIRMED @0x0040dff1] but it had
+     * NO randomize button there; the chip is a port enhancement, so this small
+     * shift is a deliberate port-only divergence. The right edge stays at 616
+     * (pw 384->364), preserving the original's clean right margin. */
+    frontend_render_physics_stats(ext, 252.0f, 126.0f, 364.0f, 224.0f,
                                   0xFFE8C040u /* amber == FE_CARSTAT_ACCENT */, 0, sx, sy);
 }
 

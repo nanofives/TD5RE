@@ -5465,11 +5465,32 @@ void Screen_CarSelection(void) {
         }
         break;
 
-    case 15: /* Stats sub-screen (0x40DFC0 state 0xF): SNK_Config_Hdrs + config.nfo values */
+    case 15: /* Stats sub-screen (0x40DFC0 state 0xF): real carparam physics stats.
+              * [2026-06-26 PORT ENHANCEMENT] The original state 0xF read NO input and
+              * auto-returned 0xF->0x10->7 within a few frames [CONFIRMED @0x0040ed3a];
+              * the port already diverged by waiting for a keypress to dismiss. Extend
+              * that: LEFT/RIGHT now cycle the selected car WITHOUT leaving MORE STATS
+              * (the dimmed preview + at-a-glance bars + stat panel all refresh in
+              * place), so cars can be compared on the stats sheet. A confirm button
+              * still exits back to the main car-select interaction (state 7). */
         frontend_load_car_spec_fields(frontend_current_car_index());
-        if (s_input_ready && s_button_index >= 0) {
-            s_car_preview_overlay = 2;
-            s_inner_state = 7;
+        if (s_input_ready) {
+            int delta = frontend_option_delta();
+            if (delta != 0) {
+                /* Cycle the car in place (carsel_apply_cycle(0,..) respects the
+                 * roster bounds + resets paint/config like a normal cycle). */
+                if (carsel_apply_cycle(0, delta)) {
+                    if (s_color_panel_visible) frontend_set_color_panel(0);
+                    frontend_load_selected_car_preview();
+                    frontend_load_car_spec_fields(frontend_current_car_index());
+                    frontend_play_sfx(5);  /* car-change whoosh, matches the state-10 cycle */
+                    TD5_LOG_I(LOG_TAG, "MORE STATS car cycle: delta=%d -> car=%d",
+                              delta, frontend_current_car_index());
+                }
+            } else if (s_button_index >= 0) {
+                s_car_preview_overlay = 2;
+                s_inner_state = 7;
+            }
         }
         break;
 
