@@ -3839,8 +3839,9 @@ void td5_render_actors_for_view(int view_index)
                     case TD5_PU_HAZARD: kc = 0xFFB000u; break;   /* amber */
                     default:            kc = 0xFFFFFFu; break;
                     }
-                    float pu = 0.5f + 0.5f * sinf((float)td5_plat_time_ms() * 0.006f + (float)slot);
-                    uint32_t inten = (uint32_t)(80.0f + 100.0f * pu);   /* 80..180 */
+                    float pu = 0.5f + 0.5f * sinf((float)td5_plat_time_ms() * 0.008f + (float)slot);
+                    uint32_t inten = (uint32_t)(165.0f + 90.0f * pu);   /* 165..255 — strong */
+                    if (inten > 255u) inten = 255u;
                     arc_tint = (inten << 24) | kc;
                 }
             }
@@ -7884,11 +7885,25 @@ void td5_render_arcade_pads(void)
     }
 
     /* Dropped hazards: dark-oily glow + a flat amber ring on the road. */
-    for (int i = 0; i < nh; i++) {
-        float wx, wy, wz; int owner = 0;
-        if (!td5_arcade_hazard_get(i, &wx, &wy, &wz, &owner)) continue;
-        arcade_emit_glow_at(wx, wy, wz, box_half * 0.8f, 0xFF301808u);  /* dark amber/oil */
-        arcade_draw_flat_ring(wx, wy + box_half * 0.05f, wz, box_half * 0.6f, 0xFFFFB000u);
+    {
+        float hp     = 0.5f + 0.5f * sinf(t * 5.0f);           /* fast danger pulse */
+        float haz_r  = box_half * 1.7f;                        /* clearly bigger than a box */
+        uint32_t ha  = (uint32_t)(150.0f + 90.0f * hp);
+        uint32_t ring = (ha << 24) | 0x00FFB000u;              /* amber */
+        for (int i = 0; i < nh; i++) {
+            float wx, wy, wz; int owner = 0;
+            if (!td5_arcade_hazard_get(i, &wx, &wy, &wz, &owner)) continue;
+            float ry = wy + box_half * 0.05f;                  /* just above the road */
+            arcade_emit_glow_at(wx, wy, wz, haz_r * 1.3f,
+                                (ha << 24) | 0x00803000u);      /* dark-oil glow */
+            arcade_draw_flat_ring(wx, ry, wz, haz_r,        ring);
+            arcade_draw_flat_ring(wx, ry, wz, haz_r * 0.6f, ring);
+            /* danger X across the slick (flat on the road) */
+            td5_render_debug_line_world(wx - haz_r*0.6f, ry, wz - haz_r*0.6f,
+                                        wx + haz_r*0.6f, ry, wz + haz_r*0.6f, ring);
+            td5_render_debug_line_world(wx - haz_r*0.6f, ry, wz + haz_r*0.6f,
+                                        wx + haz_r*0.6f, ry, wz - haz_r*0.6f, ring);
+        }
     }
 
     /* Flush the accumulated cube + icon + ring lines for this view. */

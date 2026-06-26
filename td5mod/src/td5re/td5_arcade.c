@@ -40,7 +40,7 @@ static int knob(const char *name, int dflt, int lo, int hi) {
     return v;
 }
 
-#define ARC_MAX_PADS      64
+#define ARC_MAX_PADS      128
 #define ARC_MAX_HAZARDS   32
 #define ARC_MAX_SLOTS     TD5_ACTOR_MAX_TOTAL_SLOTS   /* 32 */
 
@@ -221,7 +221,7 @@ void td5_arcade_init_race(void) {
     int usable = s_ring - start_span;
     if (usable < 1) usable = s_ring;
 
-    int spacing = knob("TD5RE_ARCADE_PAD_SPACING", 40, 8, 400);
+    int spacing = knob("TD5RE_ARCADE_PAD_SPACING", 18, 6, 400);   /* denser = more boxes */
     int count = usable / spacing;
     if (count < 6)  count = 6;
     if (count > ARC_MAX_PADS) count = ARC_MAX_PADS;
@@ -234,6 +234,13 @@ void td5_arcade_init_race(void) {
     /* Place the boxes on the SIDE LINES (shoulders), alternating left/right edge
      * lane, instead of dead centre. side=0 forces centre (legacy). */
     int side = knob("TD5RE_ARCADE_SIDE", 1, 0, 1);
+
+    /* Random power-up kind per box, but netplay-deterministic: a private
+     * xorshift stream seeded off the REPLICATED per-race seed, so every peer and
+     * replay lays out identical kinds (no shared CRT rand on the sim path). */
+    uint32_t rng = td5_game_get_race_seed() ^ 0x1B0CA9E5u;
+    if (rng == 0) rng = 0x9E3779B9u;
+
     int placed = 0;
     for (int i = 0; i < count; i++) {
         int span = start_span + (int)(((int64_t)i * usable) / count);
@@ -264,7 +271,8 @@ void td5_arcade_init_race(void) {
         p->x = x; p->y = y + lift; p->z = z;
         p->span = (int16_t)span;
         p->sub_lane = (int8_t)sub;
-        p->kind = (uint8_t)(TD5_PU_NITRO + (i % TD5_PU_KINDS));  /* 1..4 cycling */
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;     /* xorshift32 */
+        p->kind = (uint8_t)(TD5_PU_NITRO + (rng % (uint32_t)TD5_PU_KINDS));  /* random kind */
         p->active = 1;
         p->respawn = 0;
         placed++;
@@ -349,9 +357,9 @@ void td5_arcade_tick(void) {
             {
                 apply_pickup(s, p->kind, a);
                 p->active = 0;
-                /* Mario-Kart respawn: the box vanishes on pickup and stays gone
-                 * for 30 s. At the fixed 30 Hz sim tick that's 900 ticks. */
-                p->respawn = (int16_t)knob("TD5RE_ARCADE_PAD_RESPAWN", 900, 30, 1800);
+                /* Respawn the box 5 s after pickup. At the fixed 30 Hz sim tick
+                 * that's 150 ticks. */
+                p->respawn = (int16_t)knob("TD5RE_ARCADE_PAD_RESPAWN", 150, 15, 1800);
             }
         }
     }
