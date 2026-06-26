@@ -6438,6 +6438,41 @@ void  fe_draw_small_text(float x, float y, const char *text, uint32_t color, flo
 float fe_measure_small_text(const char *text);
 void  frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type);
 
+/* [MP COP CHASE RESULTS 2026-06-25] Draw the shared right-hand columns
+ * (CAR / TOP SPEED / AVG SPEED / HITS / AIR TIME) for one cop-chase results row.
+ * The mode-specific third column (ARRESTS for cops, ARREST TIME for suspects) is
+ * drawn by the caller; this keeps "all the other values" identical between the
+ * COPS and SUSPECTS sections. Columns are centred on their canvas-x like the
+ * standard MP table. */
+static void fe_cop_chase_draw_common(int slot, float y, uint32_t color,
+                                     float sx, float sy, float gsx, float sum_slide,
+                                     int kph, const char *unit,
+                                     float cx_car, float cx_top, float cx_avg,
+                                     float cx_hits, float cx_air) {
+    char buf[40];
+    #define CC_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
+    snprintf(buf, sizeof(buf), "%s", frontend_summary_car_name(slot));
+    fe_draw_small_text(CC_CTR(cx_car, buf), y, buf, color, sx, sy);
+
+    const TD5_RaceMetrics *m = td5_game_get_metrics(slot);
+    int top_raw = (int)td5_game_get_result_top_speed(slot);
+    if (top_raw == 0 && m) top_raw = m->top_speed;
+    int avg_raw = (int)td5_game_get_result_avg_speed(slot);
+    if (avg_raw == 0 && m && m->sample_ticks > 0) avg_raw = (int)(m->speed_sum / m->sample_ticks);
+    snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(top_raw, kph), unit);
+    fe_draw_small_text(CC_CTR(cx_top, buf), y, buf, color, sx, sy);
+    snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(avg_raw, kph), unit);
+    fe_draw_small_text(CC_CTR(cx_avg, buf), y, buf, color, sx, sy);
+
+    int collisions = m ? m->collisions : 0;
+    int air_tenths = m ? (m->air_ticks * 10 + 15) / 30 : 0;
+    snprintf(buf, sizeof(buf), "%d", collisions);
+    fe_draw_small_text(CC_CTR(cx_hits, buf), y, buf, color, sx, sy);
+    snprintf(buf, sizeof(buf), "%d.%ds", air_tenths / 10, air_tenths % 10);
+    fe_draw_small_text(CC_CTR(cx_air, buf), y, buf, color, sx, sy);
+    #undef CC_CTR
+}
+
 /* [r3 2026-06-15] Race-results table, reworked to the HIGH-SCORES format
  * (frontend_render_high_score_overlay): centred columns in the small
  * proportional font, two-line headers, the local player highlighted, speeds
@@ -6463,6 +6498,114 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
      * whole table glides in/out with the panel instead of popping. The offset is
      * a CANVAS-px delta applied to every column centre. */
     const float sum_slide = results_anim_on() ? (float)s_results_panel_slide_x : 0.0f;
+
+    /* [MP COP CHASE RESULTS 2026-06-25] A local (split-screen) COP CHASE gets its
+     * own results table per the user request: all COPS in a row/rows under a
+     * "COPS" title (each showing their ARREST count, NO finish time), then all
+     * SUSPECTS under a "SUSPECTS" title (each showing their TIME OF ARREST, or
+     * '-' if they escaped to the finish un-arrested). Every other column —
+     * CAR / TOP SPEED / AVG SPEED / HITS / AIR TIME — is kept. The original has
+     * no MP cop-chase results screen, so this is a port-only layout. */
+    if (td5_game_mp_cop_chase_active()) {
+        extern const uint32_t k_mp_player_colors[];
+        #define CHASE_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
+        /* Column anchors (640x480 canvas px): NAME left-aligned at the title
+         * edge; the rest centred. The 3rd column carries the mode value. */
+        const float cc_name = 126.0f;
+        const float cc_car  = 222.0f;
+        const float cc_stat = 312.0f;   /* ARRESTS (cops) / ARREST TIME (suspects) */
+        const float cc_top  = 378.0f;
+        const float cc_avg  = 436.0f;
+        const float cc_hits = 492.0f;
+        const float cc_air  = 552.0f;
+        const uint32_t CC_HDR   = 0xFFFFFFFFu;   /* white headers        */
+        const uint32_t CC_TITLE = 0xFFFFC23Au;   /* amber section titles  */
+        const uint32_t CC_SELF  = 0xFFD9C50Cu;   /* gold = local player   */
+        const uint32_t CC_AI    = 0xFFE0E0E0u;   /* light grey = AI cop   */
+
+        /* Partition the finishing order into cops + suspects, preserving the
+         * race-order sort within each group. */
+        int cc_cop[TD5_MAX_RACER_SLOTS], cc_sus[TD5_MAX_RACER_SLOTS];
+        int n_cop = 0, n_sus = 0;
+        for (int r = 0; r < n && r < TD5_MAX_RACER_SLOTS; r++) {
+            int slot = order[r];
+            if (td5_game_cop_chase_is_cop(slot))          cc_cop[n_cop++] = slot;
+            else if (td5_game_cop_chase_is_suspect(slot)) cc_sus[n_sus++] = slot;
+        }
+
+        const float row_h = 20.0f;
+        float yc = 70.0f;   /* canvas-y cursor, below the CHASE RESULTS title */
+
+        for (int section = 0; section < 2; section++) {
+            int  cnt   = section == 0 ? n_cop : n_sus;
+            int *slots = section == 0 ? cc_cop : cc_sus;
+            const char *title    = section == 0 ? "COPS" : "SUSPECTS";
+            const char *stat_hdr = section == 0 ? "ARRESTS" : "ARREST TIME";
+
+            /* Section title (left-aligned at the title edge). */
+            fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy, title, CC_TITLE, sx, sy);
+            yc += 16.0f;
+
+            /* Column headers. */
+            fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy, "NAME", CC_HDR, sx, sy);
+            fe_draw_small_text(CHASE_CTR(cc_car,  "CAR"),     yc * sy, "CAR",     CC_HDR, sx, sy);
+            fe_draw_small_text(CHASE_CTR(cc_stat, stat_hdr),  yc * sy, stat_hdr,  CC_HDR, sx, sy);
+            fe_draw_small_text(CHASE_CTR(cc_top,  "TOP SPD"), yc * sy, "TOP SPD", CC_HDR, sx, sy);
+            fe_draw_small_text(CHASE_CTR(cc_avg,  "AVG SPD"), yc * sy, "AVG SPD", CC_HDR, sx, sy);
+            fe_draw_small_text(CHASE_CTR(cc_hits, "HITS"),    yc * sy, "HITS",    CC_HDR, sx, sy);
+            fe_draw_small_text(CHASE_CTR(cc_air,  "AIR"),     yc * sy, "AIR",     CC_HDR, sx, sy);
+            /* Header/rows separator. */
+            td5_vui_quad((cc_name + sum_slide) * sx, (yc + 9.0f) * sy,
+                         (cc_air + 24.0f - cc_name) * sx, 2.0f * sy,
+                         0xFFB0B8C0u, -1, 0.0f, 0.0f, 1.0f, 1.0f);
+            yc += 18.0f;
+
+            if (cnt == 0) {
+                fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy,
+                                   section == 0 ? "(none)" : "(none)", CC_AI, sx, sy);
+                yc += row_h;
+            }
+            for (int k = 0; k < cnt; k++) {
+                int slot = slots[k];
+                float y = yc * sy;
+                int is_human = (slot < humans);
+                uint32_t rc = (slot == my_slot) ? CC_SELF
+                            : is_human ? k_mp_player_colors[slot < TD5_MAX_HUMAN_PLAYERS ? slot : 0]
+                            : CC_AI;
+                /* NAME — humans show their profile name (fallback P%d); the AI
+                 * cop shows "CPU". Left-aligned at the title edge. */
+                char nb[40];
+                if (is_human) {
+                    const char *pn = (slot < TD5_MAX_HUMAN_PLAYERS) ? s_mp_player_name[slot] : "";
+                    if (pn && pn[0]) snprintf(nb, sizeof(nb), "%s", pn);
+                    else             snprintf(nb, sizeof(nb), "P%d", slot + 1);
+                } else {
+                    snprintf(nb, sizeof(nb), "CPU");
+                }
+                fe_draw_small_text((cc_name + sum_slide) * sx, y, nb, rc, sx, sy);
+
+                /* Mode-specific 3rd column: cops show ARREST count, suspects show
+                 * TIME OF ARREST ('-' when never arrested / finished the race). */
+                char vb[28];
+                if (section == 0) {
+                    snprintf(vb, sizeof(vb), "%d", td5_game_get_wanted_kills(slot));
+                } else {
+                    int32_t at = td5_game_get_arrest_time(slot);
+                    if (at > 0) frontend_format_score_time(vb, sizeof(vb), at, 0);
+                    else        snprintf(vb, sizeof(vb), "-");
+                }
+                fe_draw_small_text(CHASE_CTR(cc_stat, vb), y, vb, rc, sx, sy);
+
+                /* Shared CAR / speeds / HITS / AIR columns ("all the other values"). */
+                fe_cop_chase_draw_common(slot, y, rc, sx, sy, gsx, sum_slide,
+                                         kph, unit, cc_car, cc_top, cc_avg, cc_hits, cc_air);
+                yc += row_h;
+            }
+            yc += 14.0f;   /* gap before the next section */
+        }
+        #undef CHASE_CTR
+        return;
+    }
 
     /* [MP HIGH SCORES 2026-06-25] Split-screen multiplayer (2+ humans) gets a
      * reworked results table: the standard screen title is re-enabled (see the

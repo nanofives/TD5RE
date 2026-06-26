@@ -6498,10 +6498,12 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * [multi-cop 2026-06-24] Uses is_cop (mask-aware) so a SECOND human cop's rams
          * also count — previously only the single primary cop_slot dealt damage. */
         int sa = (int)A->slot_index, sb = (int)B->slot_index;
+        /* Pass BOTH the ramming cop and the rammed suspect so the bust is
+         * credited to the actual cop (per-cop arrest tally in multi-cop). */
         if (td5_game_cop_chase_is_cop(sa) && td5_game_cop_chase_is_suspect(sb))
-            td5_ai_wanted_cop_hit(sb, impact_mag);
+            td5_ai_wanted_cop_hit(sa, sb, impact_mag);
         else if (td5_game_cop_chase_is_cop(sb) && td5_game_cop_chase_is_suspect(sa))
-            td5_ai_wanted_cop_hit(sa, impact_mag);
+            td5_ai_wanted_cop_hit(sb, sa, impact_mag);
     }
 
     /* Traffic recovery escalation (> 50000 and traffic slot). [N-way 2026-06-04]
