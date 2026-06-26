@@ -2798,6 +2798,47 @@ static int pov_centered(DWORD pov)
 static unsigned char s_js_x_live[16];
 static unsigned char s_js_y_live[16];
 
+/* [stuck-axis nav fix v2 2026-06-25] Last time (ms) each axis was seen AT REST.
+ * The s_js_*_live gate above is sticky-ON: it only rejects a pad whose axis
+ * NEVER passes through rest. A pad that centres once (so it gets marked live)
+ * and THEN settles to an off-centre resting position (drift / worn or
+ * uncalibrated stick) holds its direction FOREVER. Because the frontend menu
+ * reader OR-aggregates every connected pad (td5_plat_input_frontend_nav), that
+ * single pinned bit kills the consumer's RISING EDGE for that direction across
+ * ALL pads — so with several joysticks connected, "UP and LEFT stop working" the
+ * moment one biased pad rests toward up-left (DOWN/RIGHT keep working because no
+ * pad happens to rest down-right). Tracking the last-at-rest time lets a held
+ * axis drop back out of the nav OR after TD5_PLAT_JS_NAV_IDLE_MS, re-armed the
+ * instant the axis returns to rest. Same [16] scan_dev() index space as
+ * s_js_*_live (shared by the frontend menus and the car-select grid). */
+static uint32_t s_js_x_rest_ms[16];
+static uint32_t s_js_y_rest_ms[16];
+
+/* Idle window (ms): an axis held off-centre this long without returning to rest
+ * is treated as drift/bias and stops asserting its menu direction. Long enough
+ * for a genuine press to register the consumer's rising edge across a slow frame
+ * (the gamepad path is edge-only — no auto-repeat — so a real held stick already
+ * moves the cursor exactly once); short enough that a stalled stick frees the
+ * direction almost immediately. */
+#define TD5_PLAT_JS_NAV_IDLE_MS 350u
+
+/* Decode ONE analog axis into its menu nav bits with stuck/bias rejection.
+ * `seen` is the sticky live gate (axis must have been at rest at least once);
+ * `rest_ms` is the last-at-rest timestamp. Returns 0 (no direction) when the
+ * axis is at rest, never been at rest, or has been held off-centre past the idle
+ * window. neg_bit/pos_bit map an axis to its two directions (X -> LEFT/RIGHT,
+ * Y -> UP/DOWN). Shared by every joystick menu-nav reader so the fix is uniform. */
+static uint32_t td5_js_axis_nav_bits(long c, long T, uint32_t tnow,
+                                     unsigned char *seen, uint32_t *rest_ms,
+                                     uint32_t neg_bit, uint32_t pos_bit)
+{
+    if (c >= -T && c <= T) { *seen = 1; *rest_ms = tnow; return 0; }  /* at rest: trust + re-arm */
+    if (!*seen) return 0;                                             /* pegged from power-on    */
+    if ((uint32_t)(tnow - *rest_ms) >= TD5_PLAT_JS_NAV_IDLE_MS)
+        return 0;                                                     /* held too long: drift    */
+    return (c < 0) ? neg_bit : pos_bit;                              /* fresh, in-window press  */
+}
+
 /* 1 once the joystick has fully RETURNED TO REST: no buttons / dpad, sticks near
  * centre, every axis (incl. off-centre-resting triggers/sliders) back within a
  * band of its learned rest, and motionless for a few frames. Gates per-action
@@ -3017,6 +3058,17 @@ static LPDIRECTINPUTDEVICE8A scan_dev(int i)
              * on hover for some pads — removed. The proper UP/LEFT fix waits on the
              * navdiag log. */
             IDirectInputDevice8_Acquire(s_di_scan[i]);
+            /* [stuck-axis nav fix v2 2026-06-25] A freshly (re)created handle must
+             * re-prove it is at rest before its axes can assert a menu direction.
+             * The s_js_*_live flags persist across device Release (they are NOT
+             * cleared there), so without this reset a handle recreated AFTER a
+             * race / after entering a game mode — when the device can briefly
+             * report a zeroed or off-centre state — would be trusted immediately
+             * and could pin UP/LEFT. This is the stateful "works on a clean boot
+             * but breaks after one race/mode" trigger. Clearing forces the
+             * standard "seen at rest once" gate to re-arm for the new handle. */
+            s_js_x_live[i] = 0;
+            s_js_y_live[i] = 0;
         } else {
             s_di_scan[i] = NULL;
         }
@@ -3038,23 +3090,21 @@ uint32_t td5_plat_input_scan_join(void)
     if (s_keyboard[0x1C] & 0x80) mask |= 1u;     /* keyboard Enter = device 0 */
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
-        if (!s_di_scan[i]) {
-            if (!s_dinput) continue;
-            if (SUCCEEDED(IDirectInput8_CreateDevice(s_dinput, &s_device_guids[i],
-                                                     &s_di_scan[i], NULL))) {
-                IDirectInputDevice8_SetDataFormat(s_di_scan[i], &c_dfDIJoystick2);
-                if (s_hwnd)
-                    IDirectInputDevice8_SetCooperativeLevel(s_di_scan[i], s_hwnd,
-                        DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
-                IDirectInputDevice8_Acquire(s_di_scan[i]);
-            } else { s_di_scan[i] = NULL; continue; }
-        }
+        /* [stuck-axis nav fix v2 2026-06-25] Create/fetch the handle through the
+         * shared scan_dev() helper so it gets the SAME axis range (DIPROP_RANGE
+         * 0..0x1F4, centre TD5_PLAT_JS_AXIS_CENTER) as every other reader.
+         * Previously this lobby path created s_di_scan[i] WITHOUT the range; that
+         * handle is then cached, so a later scan_dev() returned it un-ranged and
+         * the menu read the device's raw 0..65535 axes — a centred stick decoded
+         * to a pinned direction once the lobby had been visited. */
+        LPDIRECTINPUTDEVICE8A dev = scan_dev(i);
+        if (!dev) continue;
         memset(&js, 0, sizeof(js));
-        if (FAILED(IDirectInputDevice8_Poll(s_di_scan[i]))) {
-            IDirectInputDevice8_Acquire(s_di_scan[i]);
-            IDirectInputDevice8_Poll(s_di_scan[i]);
+        if (FAILED(IDirectInputDevice8_Poll(dev))) {
+            IDirectInputDevice8_Acquire(dev);
+            IDirectInputDevice8_Poll(dev);
         }
-        if (SUCCEEDED(IDirectInputDevice8_GetDeviceState(s_di_scan[i], sizeof(js), &js)))
+        if (SUCCEEDED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js)))
             if (js.rgbButtons[0] & 0x80) mask |= (1u << i);
     }
     return mask;
@@ -3097,15 +3147,17 @@ uint32_t td5_plat_input_frontend_nav(void)
         }
         if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) continue;
 
+        uint32_t tnow = (uint32_t)td5_plat_time_ms();
         cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
         cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
-        /* Trust a stick axis only after it has been seen at rest (see s_js_*_live):
-         * an axis pegged from power-on never centers, so it can never jam a
-         * direction. The dpad (POV) and buttons below are always honoured. */
-        if (cx >= -T && cx <= T) s_js_x_live[i] = 1;
-        if (cy >= -T && cy <= T) s_js_y_live[i] = 1;
-        if (s_js_x_live[i]) { if (cx < -T) db |= 1; if (cx > T) db |= 2; }
-        if (s_js_y_live[i]) { if (cy < -T) db |= 4; if (cy > T) db |= 8; }  /* stick up = lY low = UP */
+        /* Trust a stick axis only while it has been at rest recently (see
+         * s_js_*_rest_ms / TD5_PLAT_JS_NAV_IDLE_MS): an axis pegged from power-on
+         * OR drifted to an off-centre rest can no longer jam a direction and
+         * (OR-aggregated below) starve UP/LEFT for every other pad. The dpad
+         * (POV) and buttons below are always honoured. (X -> LEFT/RIGHT bits
+         * 1/2, Y -> UP/DOWN bits 4/8; stick up = lY low = UP.) */
+        db |= td5_js_axis_nav_bits(cx, T, tnow, &s_js_x_live[i], &s_js_x_rest_ms[i], 1u, 2u);
+        db |= td5_js_axis_nav_bits(cy, T, tnow, &s_js_y_live[i], &s_js_y_rest_ms[i], 4u, 8u);
         if (!pov_centered(js.rgdwPOV[0])) {
             DWORD deg = js.rgdwPOV[0] / 100;
             if (deg > 270 || deg <  90) db |= 4;
@@ -3117,19 +3169,24 @@ uint32_t td5_plat_input_frontend_nav(void)
         if (js.rgbButtons[1] & 0x80) db |= 0x20;     /* B = back/cancel    */
         if (js.rgbButtons[2] & 0x80) db |= 0x80;     /* [#15] X = delete (name entry) */
         if (js.rgbButtons[7] & 0x80) db |= 0x40;     /* [#R3] Start = layout/confirm (was only on device_nav) */
-        /* [#R3-5 DIAG 2026-06-19] The deadzone+threshold fix didn't resolve the
-         * "can't go UP/LEFT" report, so log exactly what the pad produces — raw
-         * axes, POV, decoded cx/cy, the live-gate flags, and the nav bits — on
-         * every direction-bit change (plus a periodic rest sample). -> engine.log.
-         * Remove once the controller behaviour is understood. */
+        /* [#R3-5 DIAG 2026-06-19; rest-age added 2026-06-25] The deadzone+
+         * threshold fix didn't resolve the "can't go UP/LEFT" report, so log what
+         * the pad produces — raw axes, POV, decoded cx/cy, the live-gate flags,
+         * the ms-since-each-axis-was-at-rest (rest=x/y: >= TD5_PLAT_JS_NAV_IDLE_MS
+         * means that axis is being dropped as drift/bias, the v2 fix), and the nav
+         * bits — on every direction-bit change (plus a periodic rest sample).
+         * -> engine.log. Remove once the controller behaviour is understood. */
         {
             static uint32_t s_navdiag_prev[16];
             static uint32_t s_navdiag_div = 0;
             if ((db & 0x0Fu) != (s_navdiag_prev[i] & 0x0Fu) || ((++s_navdiag_div % 150u) == 0u)) {
                 TD5_LOG_I(LOG_TAG,
-                    "navdiag dev%d: lX=%ld lY=%ld POV=0x%lX cx=%ld cy=%ld live=%d/%d db=0x%02X",
+                    "navdiag dev%d: lX=%ld lY=%ld POV=0x%lX cx=%ld cy=%ld live=%d/%d "
+                    "rest=%u/%u db=0x%02X",
                     i, (long)js.lX, (long)js.lY, (unsigned long)js.rgdwPOV[0],
-                    (long)cx, (long)cy, s_js_x_live[i], s_js_y_live[i], (unsigned)db);
+                    (long)cx, (long)cy, s_js_x_live[i], s_js_y_live[i],
+                    (unsigned)(tnow - s_js_x_rest_ms[i]), (unsigned)(tnow - s_js_y_rest_ms[i]),
+                    (unsigned)db);
             }
             s_navdiag_prev[i] = db;
         }
@@ -3194,8 +3251,13 @@ uint32_t td5_plat_input_device_nav(int enum_index)
     if (FAILED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js))) return 0;
     cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
     cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
-    if (cx < -T) db |= 1; if (cx > T) db |= 2;
-    if (cy < -T) db |= 4; if (cy > T) db |= 8;       /* stick up = lY low = UP */
+    /* Same stuck/bias rejection as td5_plat_input_frontend_nav, keyed by the same
+     * scan_dev() index so a drifted stick can't pin this player's grid UP/LEFT. */
+    {
+        uint32_t tnow = (uint32_t)td5_plat_time_ms();
+        db |= td5_js_axis_nav_bits(cx, T, tnow, &s_js_x_live[enum_index], &s_js_x_rest_ms[enum_index], 1u, 2u);
+        db |= td5_js_axis_nav_bits(cy, T, tnow, &s_js_y_live[enum_index], &s_js_y_rest_ms[enum_index], 4u, 8u);
+    }
     if (!pov_centered(js.rgdwPOV[0])) {
         DWORD deg = js.rgdwPOV[0] / 100;
         if (deg > 270 || deg <  90) db |= 4;
