@@ -6881,11 +6881,32 @@ void td5_hud_init_minimap_layout(void)
      * matching the original TD6 minimap which draws the branch pieces. */
     /* Also run for CUSTOM branched tracks (td5_trackgen.py): they are not TD6
      * (g_active_td6_level == 0) but use the same explicit type-9..type-10
-     * branch-corridor layout in [ring, total). Gate on "has branch spans"
-     * (total > ring) so the mirror rows above are replaced by the real
-     * corridor runs and the fork shows on the minimap. */
+     * branch-corridor layout in [ring, total), with NO type-0x0B connector — so
+     * the TD5 mirror append above produced NOTHING for them either.
+     *
+     * [regression fix 2026-06-26] The previous gate `total > ring` ALSO matched
+     * shipped TD5 fork tracks: their branch spans live past the ring too, but
+     * they encode forks as type-0x08/0x0B mirror pairs (type-9/10 are ordinary
+     * branch GEOMETRY span codes here, NOT sentinels — Ghidra: the original
+     * build @0x43b6af tests ONLY 0x08/0x0B, has no 0x09/0x0A logic, and never
+     * collapses the appended mirror rows). Entering this block for them scanned
+     * [ring,total) for type-9, rebuilt the SAME branches as corridor rows with
+     * seg_branch=-1, and reset s_minimap_seg_primary_end — destroying the
+     * back-links the branch-remap (RenderTrackMinimapOverlay @0x43a30c) needs.
+     * On a branch the remap then computed `span += -1 - seg_start` = garbage,
+     * start_span jumped far from the player, and NO road geometry drew while the
+     * world-positioned racer/traffic dots still showed (user-reported).
+     *
+     * Correct discriminator: run only when the faithful TD5 mirror append
+     * produced NO rows (s_minimap_seg_branch_start == s_minimap_seg_primary_end
+     * — true for TD6 type-08 forks and bare-corridor trackgen tracks), or for
+     * TD6 levels (whose type-08 mirror rows, if any, are garbage). Shipped TD5
+     * fork tracks emit type-0x0B -> real mirror rows -> this block is skipped
+     * and their faithful rows survive. */
     if ((g_active_td6_level > 0 ||
-         g_strip_span_count > g_td5.track_span_ring_length) && g_strip_span_base) {
+         s_minimap_seg_branch_start == s_minimap_seg_primary_end) &&
+        g_strip_span_base &&
+        g_strip_span_count > g_td5.track_span_ring_length) {
         uint8_t *sb2 = (uint8_t *)g_strip_span_base;
         int total = g_strip_span_count;
         int ring  = g_td5.track_span_ring_length;
@@ -6908,6 +6929,12 @@ void td5_hud_init_minimap_layout(void)
         s_minimap_seg_primary_end = bw;
         TD5_LOG_I(LOG_TAG, "minimap_init: TD6 corridors appended=%d (ring=%d total=%d)",
                   bw - (int)s_minimap_seg_branch_start, ring, total);
+    } else if (s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
+        /* Faithful TD5 fork track: type-0x0B mirror rows kept (corridor block
+         * skipped) so the branch-remap back-links survive. [regression fix] */
+        TD5_LOG_I(LOG_TAG, "minimap_init: TD5 mirror rows kept=%d (ring=%d total=%d)",
+                  (int)(s_minimap_seg_primary_end - s_minimap_seg_branch_start),
+                  g_td5.track_span_ring_length, g_strip_span_count);
     }
 
     TD5_LOG_I(LOG_TAG, "minimap_init: seg_table primaries=%d branches_appended=%d total_spans=%d",

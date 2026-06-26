@@ -17,8 +17,10 @@
 #
 # Performance: TTD records at ~10-20x slowdown. A full 3-lap race may take
 # 30-60 minutes wall time. Tag the trace tightly to the scenario you need.
-# Stop the target window with ALT-F4 or "taskkill /F /IM <name>" when the
-# bug-reproducing moment has passed -- TTD writes the trace file on process exit.
+# Stop the target window with ALT-F4 or "taskkill /F /PID <pid>" (the PID this
+# script prints on launch) when the bug-reproducing moment has passed -- TTD
+# writes the trace file on process exit. Do NOT "taskkill /F /IM <name>": it
+# kills every concurrent session's instance of that exe, not just yours.
 #
 # Trace size: typically 100-500 MB per minute of recorded execution. Plan disk.
 

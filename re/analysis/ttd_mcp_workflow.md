@@ -35,7 +35,9 @@ first replay). Plan disk: 100-500 MB per minute of recorded execution.
 
 **Performance note**: TTD adds ~10-20x slowdown. Don't record full races
 unless necessary — record the minimum scenario that reproduces the bug, then
-stop the target (ALT-F4 or `taskkill /F /IM <name>`).
+stop the target (ALT-F4 or `taskkill /F /PID <pid>` for the exact instance you
+recorded). Avoid `taskkill /F /IM <name>` — it kills every concurrent session's
+instance of that exe, not just yours.
 
 ## Replaying via the MCP
 

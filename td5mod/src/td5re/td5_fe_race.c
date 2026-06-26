@@ -16,6 +16,7 @@
 #include "td5_net.h"
 #include "td5_platform.h"
 #include "td5_render.h"
+#include "td5_physics.h"   /* [PHYSICS 2026-06-26] td5_physics_set_dynamics — Quick Race ARCADE/SIM commit */
 #include "td5_save.h"
 #include "td5_sound.h"
 #include "td5_hud.h"
@@ -1061,16 +1062,21 @@ void Screen_QuickRaceMenu(void) {
           /* [2026-06-08] AI Screens (dev/profiling): render the first N AI cars
            * each in their own split-screen pane. Dev-only — the row is created
            * for index stability but hidden+disabled in release builds (the
-           * SpectateScreens knob is also clamped to 0 there). */
-          bi = frontend_create_button("AI Screens",        QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_SPLITSCREENS */
+           * SpectateScreens knob is also clamped to 0 there).
+           * [PHYSICS 2026-06-26] Moved row 5 -> 6: the new Physics (ARCADE/SIM)
+           * row took row 5 (right under Laps). */
+          bi = frontend_create_button("AI Screens",        QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32); /* QR_BTN_SPLITSCREENS */
 #ifdef TD5RE_RELEASE
           if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
 #else
           (void)bi;
 #endif
         }
-        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(7),  96, 32); /* QR_BTN_OK */
-        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(7), 112, 32); /* QR_BTN_BACK */
+        /* [PHYSICS 2026-06-26] OK/Back moved row 7 -> 8 ("a little lower") so the
+         * new Physics row (row 5) + the dev rows (AI Screens 6, Span Offset 7) all
+         * fit above them. With QR_ROW_DY=40, row 8 = y=416 (bottom 448). */
+        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(8),  96, 32); /* QR_BTN_OK */
+        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(8), 112, 32); /* QR_BTN_BACK */
         /* [2026-06-12] Dev-only toggles to the RIGHT of the Opponents row (y=row3):
          * PlayerIsAI (slot 0 = AI) and AutoThrottle (trace auto-throttle). They sit
          * past the Opponents value column; A/Enter flips them, the label shows state.
@@ -1087,13 +1093,14 @@ void Screen_QuickRaceMenu(void) {
 #endif
         }
         /* [2026-06-15 TASK A1] Dev-only "Span Offset" click-to-type button on its
-         * OWN row below the "AI Screens" row (QR_BTN_SPLITSCREENS @ row5); OK/Back
-         * moved down to row7 above. Created LAST so QR_BTN_OK/BACK/PLAYERAI/AUTOTHR
-         * indices stay 7/8/9/10. Activating it toggles the span input-active state
-         * (frontend_qr_span_toggle_active in td5_frontend.c, which owns the editable
-         * buffer + the value/caret render). Hidden+disabled in release; also gated
-         * by the existing TD5RE_DEV_SPAN_FIELD knob via the widget render path. */
-        { int bs = frontend_create_button("Span Offset", QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32); /* QR_BTN_SPAN */
+         * OWN row below the "AI Screens" row. Created LAST so QR_BTN_OK/BACK/
+         * PLAYERAI/AUTOTHR indices stay 7/8/9/10. Activating it toggles the span
+         * input-active state (frontend_qr_span_toggle_active in td5_frontend.c,
+         * which owns the editable buffer + the value/caret render). Hidden+disabled
+         * in release; also gated by the existing TD5RE_DEV_SPAN_FIELD knob via the
+         * widget render path.
+         * [PHYSICS 2026-06-26] Moved row 6 -> 7 (Physics took row 5, AI Screens 6). */
+        { int bs = frontend_create_button("Span Offset", QR_COL_X, QR_ROW_Y(7), QR_BTN_W, 32); /* QR_BTN_SPAN */
 #ifdef TD5RE_RELEASE
           if (bs >= 0) { s_buttons[bs].hidden = 1; s_buttons[bs].disabled = 1; }
 #else
@@ -1126,6 +1133,18 @@ void Screen_QuickRaceMenu(void) {
                 if (rt >= 0) { s_buttons[rt].hidden = 1; s_buttons[rt].disabled = 1; }
             }
         }
+
+        /* [PHYSICS 2026-06-26] ARCADE / SIMULATION (dynamics) selector row, placed
+         * directly under Laps at row 5. Created LAST (index QR_BTN_PHYSICS=14, after
+         * the RANDOMIZE buttons at 12/13) so every hard-coded index above stays put.
+         * A normal selectable caption row like Car/Track/Direction: L/R (or A/Enter)
+         * flips the shared s_game_option_dynamics, the value column shows ARCADE /
+         * SIMULATION, and the OK handler commits it to physics + the INI. Visible in
+         * BOTH dev and release — it's a real player option, not a dev affordance.
+         * Sync the live value from the persisted INI first so the row shows the
+         * choice that's actually in effect. */
+        s_game_option_dynamics = g_td5.ini.dynamics ? 1 : 0;
+        frontend_create_button("Physics", QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_PHYSICS */
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
@@ -1237,6 +1256,20 @@ void Screen_QuickRaceMenu(void) {
                 frontend_play_sfx(2);
             }
 
+            /* [PHYSICS 2026-06-26] Physics (ARCADE/SIMULATION) row: a 2-state toggle
+             * like Direction. L/R OR A/Enter while focused flips the shared
+             * s_game_option_dynamics (0=ARCADE, 1=SIMULATION). The OK handler commits
+             * it to physics + the INI. Mirrors the Track Selection DYNAMICS row. */
+            if (selected_button == QR_BTN_PHYSICS && s_button_count > QR_BTN_PHYSICS &&
+                !s_buttons[QR_BTN_PHYSICS].hidden &&
+                (delta != 0 || s_button_index == QR_BTN_PHYSICS)) {
+                s_game_option_dynamics ^= 1;
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "QuickRace PHYSICS -> %s (%d)",
+                          s_game_option_dynamics ? "SIMULATION" : "ARCADE",
+                          s_game_option_dynamics);
+            }
+
             /* [2026-06-08] AI Screens (dev/profiling): 0..min(opponents,
              * TD5_MAX_VIEWPORTS-1). Each step adds an AI car to its own pane.
              * Hidden+disabled in release (see case-0 creation). */
@@ -1310,11 +1343,20 @@ void Screen_QuickRaceMenu(void) {
                     /* [S02 (c) 2026-06-04] Persist the lap choice (re-homed from
                      * Game Options' OK, which no longer owns this setting). */
                     g_td5.ini.laps = s_game_option_laps;
+                    /* [PHYSICS 2026-06-26] Commit the ARCADE/SIMULATION choice picked
+                     * on the new Physics row. Persist to the INI (survives relaunch)
+                     * AND push it into the physics race-init flag NOW, before the
+                     * race launches — ConfigureGameTypeFlags already ran at screen
+                     * init with the pre-toggle value, so set it here deterministically
+                     * (mirrors the AutoRace commit at td5_frontend.c). */
+                    g_td5.ini.dynamics = s_game_option_dynamics;
+                    td5_physics_set_dynamics(s_game_option_dynamics);
                     td5_ini_persist_options();
                     TD5_LOG_I(LOG_TAG,
-                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d",
+                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d physics=%s",
                               s_selected_track, s_track_direction ? "Backwards" : "Forwards",
-                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1);
+                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1,
+                              s_game_option_dynamics ? "SIMULATION" : "ARCADE");
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 5;
                 }
@@ -5423,11 +5465,32 @@ void Screen_CarSelection(void) {
         }
         break;
 
-    case 15: /* Stats sub-screen (0x40DFC0 state 0xF): SNK_Config_Hdrs + config.nfo values */
+    case 15: /* Stats sub-screen (0x40DFC0 state 0xF): real carparam physics stats.
+              * [2026-06-26 PORT ENHANCEMENT] The original state 0xF read NO input and
+              * auto-returned 0xF->0x10->7 within a few frames [CONFIRMED @0x0040ed3a];
+              * the port already diverged by waiting for a keypress to dismiss. Extend
+              * that: LEFT/RIGHT now cycle the selected car WITHOUT leaving MORE STATS
+              * (the dimmed preview + at-a-glance bars + stat panel all refresh in
+              * place), so cars can be compared on the stats sheet. A confirm button
+              * still exits back to the main car-select interaction (state 7). */
         frontend_load_car_spec_fields(frontend_current_car_index());
-        if (s_input_ready && s_button_index >= 0) {
-            s_car_preview_overlay = 2;
-            s_inner_state = 7;
+        if (s_input_ready) {
+            int delta = frontend_option_delta();
+            if (delta != 0) {
+                /* Cycle the car in place (carsel_apply_cycle(0,..) respects the
+                 * roster bounds + resets paint/config like a normal cycle). */
+                if (carsel_apply_cycle(0, delta)) {
+                    if (s_color_panel_visible) frontend_set_color_panel(0);
+                    frontend_load_selected_car_preview();
+                    frontend_load_car_spec_fields(frontend_current_car_index());
+                    frontend_play_sfx(5);  /* car-change whoosh, matches the state-10 cycle */
+                    TD5_LOG_I(LOG_TAG, "MORE STATS car cycle: delta=%d -> car=%d",
+                              delta, frontend_current_car_index());
+                }
+            } else if (s_button_index >= 0) {
+                s_car_preview_overlay = 2;
+                s_inner_state = 7;
+            }
         }
         break;
 
@@ -5902,23 +5965,23 @@ void Screen_TrackSelection(void) {
         /* Create buttons. Ghidra settles these at x=120 for Track/Forwards/OK
          * and x=232 for Back, with OK/Back sharing the bottom row. */
         frontend_create_button(SNK_TrackButTxt,     120,  97, 224, 32); /* 0: with L/R arrows */
-        frontend_create_button(SNK_ForwardsButTxt,  120, 137, 224, 32); /* 1: direction toggle */
+        frontend_create_button(SNK_ForwardsButTxt,  120, 132, 224, 32); /* 1: direction toggle */
         /* [PORT ENHANCEMENT 2026-06] race-option rows: AI opponents, laps, traffic,
          * police. They drive s_num_ai_opponents + s_game_option_* which apply to
          * single/multiplayer races via ConfigureGameTypeFlags (cup game-types
          * override them, so they're inert there). Present on every track-select
          * entry (regular single race, quick race, multiplayer). */
-        frontend_create_button(SNK_OpponentsButTxt, 120, 177, 224, 32); /* 2: AI count */
-        frontend_create_button(SNK_LapsButTxt,      120, 217, 224, 32); /* 3: laps */
-        frontend_create_button(SNK_TrafficButTxt,   120, 257, 224, 32); /* 4: traffic */
-        frontend_create_button(SNK_CopsButTxt,      120, 297, 224, 32); /* 5: police */
+        frontend_create_button(SNK_OpponentsButTxt, 120, 167, 224, 32); /* 2: AI count */
+        frontend_create_button(SNK_LapsButTxt,      120, 202, 224, 32); /* 3: laps */
+        frontend_create_button(SNK_TrafficButTxt,   120, 237, 224, 32); /* 4: traffic */
+        frontend_create_button(SNK_CopsButTxt,      120, 272, 224, 32); /* 5: police */
         /* [PORT ENHANCEMENT 2026-06-12] Per-race AI difficulty. Seeded from the
          * tier ConfigureGameTypeFlags derived at mode selection (= the Game
          * Options global for game-type 0), applied to g_td5.difficulty_tier on
          * OK. Quick Race (flow context 2) keeps the Game Options global — the
          * row is still CREATED there (index stability: OK=6→7, Back=7→8) but
          * hidden+disabled, exactly like the Quick Race Players row. */
-        frontend_create_button(SNK_DifficultyButTxt, 120, 337, 224, 32); /* 6: AI difficulty */
+        frontend_create_button(SNK_DifficultyButTxt, 120, 307, 224, 32); /* 6: AI difficulty */
         /* [R5] Hide the difficulty row when there are 0 opponents (and still in
          * Quick Race flow). frontend_update_difficulty_button_visibility folds in
          * the old flow_context==2 hide; refreshed in case 4 when opponents change. */
@@ -5934,10 +5997,10 @@ void Screen_TrackSelection(void) {
         s_race_difficulty = g_td5.difficulty_tier;
         if (s_race_difficulty < 0) s_race_difficulty = 0;
         if (s_race_difficulty > 2) s_race_difficulty = 2;
-        frontend_create_button(SNK_OkButTxt,        120, 377,  96, 32); /* 7: OK */
+        frontend_create_button(SNK_OkButTxt,        120, 386,  96, 32); /* 7: OK  (moved a little lower) */
         /* Quick Race mode: no Back button */
         if (s_flow_context != 2) {
-            frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);  /* 8: Back */
+            frontend_create_button(SNK_BackButTxt, 232, 386, 112, 32);  /* 8: Back (moved a little lower) */
         }
         /* The MP simultaneous car grid (pad-driven) hides the mouse cursor and
          * its all-ready path lands directly here — restore it so this screen's
@@ -5972,11 +6035,13 @@ void Screen_TrackSelection(void) {
 
         /* [ARCADE 2026-06-26] DYNAMICS (ARCADE / SIMULATION) selector. Appended
          * AFTER every load-bearing row (0..8) + the randomize button so none of
-         * their indices move. Placed on the top row (y=57); a normal selectable
-         * value-row (L/R flips s_game_option_dynamics). When the RANDOMIZE full-
-         * button variant also occupies y=57 (non-default TD5RE_RANDOM_ICON=0) the
-         * two share the row — the default icon-randomize leaves y=57 free. */
-        s_trksel_dyn_btn = frontend_create_button(SNK_DynamicsButTxt, 120, 57, 224, 32);
+         * their indices move. A normal selectable value-row (L/R flips
+         * s_game_option_dynamics); its ◄► arrows + value text follow this .y.
+         * [LAYOUT 2026-06-26] Sits just above the OK/BACK action row (y=342, with
+         * OK/BACK at y=386): the option rows above were compressed to a 35px step
+         * (TRACK 97 -> DIFFICULTY 307) to make room. The non-default RANDOMIZE
+         * full-button (TD5RE_RANDOM_ICON=0) keeps the freed top row y=57. */
+        s_trksel_dyn_btn = frontend_create_button(SNK_DynamicsButTxt, 120, 342, 224, 32);
 
         /* Network track-pick (entered from the lobby's SELECT TRACK, flow
          * context 4): the global ESC/back handler navigates to s_return_screen,
@@ -5999,6 +6064,21 @@ void Screen_TrackSelection(void) {
         /* [CUP TRACK SELECT] Keep only TRACK/TRAFFIC/POLICE on the cup picker —
          * done LAST so it overrides the direction/laps visibility helpers above. */
         frontend_cup_picker_hide_rows();
+        /* [LAYOUT 2026-06-26 /fix] One-shot button-rect dump — verifies the
+         * compressed option-row spacing + DYNAMICS-just-above-OK/BACK placement
+         * and that the DYNAMICS row is active (so its new ◄► arrows render).
+         * Screenshots come back black in headless sessions, so this is the
+         * runtime check. Logged at state-0 init only (not per frame). */
+        {
+            int bi;
+            TD5_LOG_I(LOG_TAG, "TrackSel layout: count=%d dyn_btn=%d rand_btn=%d cup=%d flow=%d",
+                      s_button_count, s_trksel_dyn_btn, s_trksel_rand_btn, cup_mp, s_flow_context);
+            for (bi = 0; bi < s_button_count; bi++)
+                TD5_LOG_I(LOG_TAG, "  btn[%d] '%s' x=%d y=%d w=%d h=%d hidden=%d active=%d",
+                          bi, s_buttons[bi].label, s_buttons[bi].x, s_buttons[bi].y,
+                          s_buttons[bi].w, s_buttons[bi].h, s_buttons[bi].hidden,
+                          s_buttons[bi].active);
+        }
         frontend_begin_timed_animation();
         s_inner_state = 1;
         break;

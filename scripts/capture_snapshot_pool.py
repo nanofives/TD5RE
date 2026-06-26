@@ -284,12 +284,39 @@ def _capture_via_quickrace(s, out_path, max_frames, t0):
         ]
         if s.opponent_car:
             cmd += ["--opponent-car", str(s.opponent_car)]
+        # Parallel-safety: snapshot existing TD5_d3d.exe PIDs BEFORE we spawn
+        # so we can identify -- and later kill -- ONLY the instance THIS capture
+        # launches. The game is a grandchild (td5_quickrace.py spawns it), so
+        # proc.terminate() can't reach it; the early-kill below targets it by
+        # PID. NEVER taskkill /IM TD5_d3d.exe -- that nukes every concurrent
+        # session's original-binary capture (mirrors _capture_one_inner's
+        # set-difference spawn-claim).
+        try:
+            _device = frida.get_local_device()
+            pre_pids = {p.pid for p in _device.enumerate_processes()
+                        if p.name.lower() == "td5_d3d.exe"}
+        except Exception:
+            _device, pre_pids = None, set()
+        our_game_pid = None  # locked to the FIRST new TD5_d3d.exe we observe
+
         # Run quickrace as a Popen so we can early-kill when the snapshot
         # file stops growing (= snapshot script finished writing). Without
-        # this we always wait the full --max-runtime cap.
-        proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True)
+        # this we always wait the full --max-runtime cap. Snapshot+spawn are
+        # serialized so a parallel claimer can't race us for the new PID.
+        with _spawn_lock:
+            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True)
+
+        def _kill_our_game():
+            # Kill ONLY the PID we launched, by PID. If it was never identified,
+            # terminate the quickrace wrapper instead -- never taskkill /IM,
+            # which would stop other sessions' captures mid-run.
+            if our_game_pid:
+                subprocess.run(["taskkill", "/F", "/PID", str(our_game_pid)],
+                               capture_output=True)
+            try: proc.terminate()
+            except Exception: pass
         EXPECTED_BYTES = 32 + max_frames * 7272   # full file size at cap
         STABLE_S = 3.0                            # require N s of no growth
         last_size = -1
@@ -297,6 +324,16 @@ def _capture_via_quickrace(s, out_path, max_frames, t0):
         deadline = time.monotonic() + CAPTURE_HARD_TIMEOUT_S + 30
         while proc.poll() is None and time.monotonic() < deadline:
             time.sleep(0.5)
+            # Lock in OUR game's PID as soon as it appears (first new
+            # TD5_d3d.exe since the pre-spawn snapshot); stop polling once known.
+            if our_game_pid is None and _device is not None:
+                try:
+                    fresh = {p.pid for p in _device.enumerate_processes()
+                             if p.name.lower() == "td5_d3d.exe"} - pre_pids
+                    if fresh:
+                        our_game_pid = sorted(fresh)[0]
+                except Exception:
+                    pass
             try:
                 cur = out_path.stat().st_size if out_path.exists() else 0
             except Exception:
@@ -306,24 +343,19 @@ def _capture_via_quickrace(s, out_path, max_frames, t0):
                 last_growth_t = time.monotonic()
             # Early exit when we're at full capacity AND stable for STABLE_S
             if cur >= EXPECTED_BYTES and (time.monotonic() - last_growth_t) > 0.5:
-                # kill TD5_d3d.exe + the quickrace subprocess
-                subprocess.run(["cmd", "/c", "taskkill", "/F", "/IM",
-                                "TD5_d3d.exe"], capture_output=True)
-                try: proc.terminate()
-                except: pass
+                _kill_our_game()   # PID-scoped; never taskkill /IM
                 break
             # Also early-exit if file has been stable for STABLE_S (capture
             # finished but file is below expected because game ended early).
             if cur > 1024 and (time.monotonic() - last_growth_t) > STABLE_S:
-                subprocess.run(["cmd", "/c", "taskkill", "/F", "/IM",
-                                "TD5_d3d.exe"], capture_output=True)
-                try: proc.terminate()
-                except: pass
+                _kill_our_game()   # PID-scoped; never taskkill /IM
                 break
         try:
             proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _kill_our_game()   # reap our game grandchild by PID, then the wrapper
+            try: proc.kill()
+            except Exception: pass
         elapsed = time.monotonic() - t0
         if proc.returncode and proc.returncode != 0 and proc.returncode is not None:
             # Don't fail just on non-zero rc -- our early-kill produces non-zero

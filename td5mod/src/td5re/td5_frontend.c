@@ -2118,61 +2118,11 @@ static int frontend_resolve_selected_button(void) {
     return -1;
 }
 
-static int frontend_cycle_selected_button(int direction) {
-    int prev = s_selected_button;
-    int attempts = FE_MAX_BUTTONS;
-
-    if (direction == 0) return 0;
-
-    while (attempts-- > 0) {
-        s_selected_button += direction;
-        if (s_selected_button < 0) s_selected_button = FE_MAX_BUTTONS - 1;
-        if (s_selected_button >= FE_MAX_BUTTONS) s_selected_button = 0;
-        if (s_buttons[s_selected_button].active && !s_buttons[s_selected_button].disabled) {
-            return s_selected_button != prev;
-        }
-    }
-
-    s_selected_button = prev;
-    return 0;
-}
-
-static int frontend_cycle_selected_button_by_row(int direction, int same_row) {
-    int current = frontend_resolve_selected_button();
-    int current_y;
-    int idx;
-    int attempts;
-
-    if (direction == 0) return 0;
-    if (current < 0) return frontend_cycle_selected_button(direction);
-
-    current_y = s_buttons[current].y;
-    idx = current;
-    attempts = FE_MAX_BUTTONS;
-    while (attempts-- > 0) {
-        idx += direction;
-        if (idx < 0) idx = FE_MAX_BUTTONS - 1;
-        if (idx >= FE_MAX_BUTTONS) idx = 0;
-        if (!s_buttons[idx].active || s_buttons[idx].disabled) continue;
-        if (same_row) {
-            if (s_buttons[idx].y != current_y) continue;
-        } else {
-            if (s_buttons[idx].y == current_y) continue;
-        }
-        s_selected_button = idx;
-        return idx != current;
-    }
-
-    return 0;
-}
-
-static int frontend_cycle_selected_button_horizontal(int direction) {
-    return frontend_cycle_selected_button_by_row(direction, 1);
-}
-
-static int frontend_cycle_selected_button_vertical(int direction) {
-    return frontend_cycle_selected_button_by_row(direction, 0);
-}
+/* [PORT 2026-06-26] The old index-order cyclers (frontend_cycle_selected_button,
+ * _by_row, _horizontal, _vertical) were removed: every shared-nav screen now
+ * navigates by true (x,y) GEOMETRY (frontend_nav_vertical / _horizontal +
+ * frontend_spatial_pick), so a button's array index no longer has to match its
+ * visual row for it to be reachable in order. */
 
 /* [PORT ENHANCEMENT 2026-06] True 2D spatial navigation by button geometry.
  * Given a unit direction (dx,dy in {-1,0,1}: left/right or up/down), pick the
@@ -2227,6 +2177,215 @@ static int frontend_move_selected_button_spatial(int dx, int dy) {
     return 1;
 }
 
+/* Topmost (dir<0) or bottommost (dir>0) navigable button by visual Y. Used to
+ * WRAP geometric vertical nav so a single column still cycles end-to-end. */
+static int frontend_extreme_button_vertical(int dir) {
+    int best = -1, best_y = 0, i;
+    for (i = 0; i < FE_MAX_BUTTONS; i++) {
+        if (!s_buttons[i].active || s_buttons[i].disabled) continue;
+        if (best < 0 || (dir > 0 ? s_buttons[i].y > best_y
+                                 : s_buttons[i].y < best_y)) {
+            best = i; best_y = s_buttons[i].y;
+        }
+    }
+    return best;
+}
+
+/* True iff buttons a and b share a visual ROW (their y-spans overlap). */
+static int frontend_rows_overlap(int a, int b) {
+    return s_buttons[a].y < s_buttons[b].y + s_buttons[b].h &&
+           s_buttons[b].y < s_buttons[a].y + s_buttons[a].h;
+}
+
+/* [PORT 2026-06-26] VERTICAL menu nav for every shared-nav screen. Picks the
+ * nearest active button in the travel direction by true (x,y) GEOMETRY, so a
+ * button with a high array index but a low visual row (an appended option row,
+ * the Track-select DYNAMICS row, the Quick-Race span-offset field, ...) is
+ * reached IN VISUAL ORDER instead of being skipped by the old index-order
+ * cycler. If nothing lies that way (we're at a column end) it WRAPS to the far
+ * end so the column still cycles, matching the old nav's convenience. This
+ * replaces the per-screen geometric-vs-index whack-a-mole: screens used to be
+ * added to a `vnav` allow-list one at a time whenever a new high-index/low-row button broke
+ * their nav. Returns 1 iff the selection actually moved. */
+static int frontend_nav_vertical(int direction) {
+    int current, target;
+    if (direction == 0) return 0;
+    current = frontend_resolve_selected_button();
+    if (current < 0) return 0;
+    target = frontend_spatial_pick(0, direction);
+    if (target >= 0) {
+        /* If the SOURCE row spans MULTIPLE buttons of the target's row (a full-
+         * width option row above a narrow OK/BACK pair), land on the LEFTMOST of
+         * the spanned buttons — so DOWN from DYNAMICS lands on OK (then RIGHT
+         * reaches BACK, UP returns to DYNAMICS), not the geometrically-nearest
+         * BACK. A narrow source in a real 2-column grid (the language flags) spans
+         * only its own column's target, so column-preserving nav is untouched. */
+        int sl = s_buttons[current].x;
+        int sr = s_buttons[current].x + s_buttons[current].w;
+        int i, spanned = 0, leftmost = target, leftmost_x = s_buttons[target].x;
+        for (i = 0; i < FE_MAX_BUTTONS; i++) {
+            int cx;
+            if (!s_buttons[i].active || s_buttons[i].disabled || s_buttons[i].hidden) continue;
+            if (!frontend_rows_overlap(target, i)) continue;
+            cx = s_buttons[i].x + s_buttons[i].w / 2;
+            if (cx >= sl && cx <= sr) {
+                spanned++;
+                if (s_buttons[i].x < leftmost_x) { leftmost = i; leftmost_x = s_buttons[i].x; }
+            }
+        }
+        if (spanned >= 2) target = leftmost;
+    }
+    /* No in-column neighbour -> WRAP to the far end (UP from the top row lands on
+     * the bottom OK button, DOWN from the bottom lands on the top). A hidden chip
+     * (the randomize icon) is intentionally NOT reached here — it is accessed with
+     * SHIFT+RIGHT (geometric move), so plain UP/DOWN stays on the real rows. */
+    if (target < 0) target = frontend_extreme_button_vertical(-direction);
+    if (target < 0 || target == s_selected_button) return 0;
+    s_selected_button = target;
+    return 1;
+}
+
+/* [PORT 2026-06-26] HORIZONTAL focus move to the nearest VISIBLE same-row
+ * neighbour in dir (-1 left / +1 right), or 0 if none. Restores the original's
+ * (@0x00426580) device-agnostic behaviour: a plain LEFT/RIGHT moves focus
+ * between same-row buttons (OK<->BACK, YES<->NO, tabs, flag grids) on ANY device
+ * including a GAMEPAD (which has no SHIFT to drive the old shift-only move).
+ * Value-selector rows are full-width single-column, so they have no visible
+ * same-row neighbour and keep cycling their value instead (the LEFT/RIGHT
+ * dispatch still sets the value-cycle bit). HIDDEN buttons (the randomize chip)
+ * are intentionally NOT focus targets here — that would hijack the Track/Car
+ * selector's value key; the chip is reached vertically instead. No wrap. */
+static int frontend_nav_horizontal(int dir) {
+    int current, i, best = -1, best_dx = 0;
+    int ccx, cur_hidden;
+    if (dir == 0) return 0;
+    current = frontend_resolve_selected_button();
+    if (current < 0) return 0;
+    ccx = s_buttons[current].x + s_buttons[current].w / 2;
+    cur_hidden = s_buttons[current].hidden;
+    for (i = 0; i < FE_MAX_BUTTONS; i++) {
+        int bcx, dx;
+        if (i == current || !s_buttons[i].active || s_buttons[i].disabled) continue;
+        /* Skip a HIDDEN target unless we're already on a hidden button. This lets a
+         * grid of hidden hit-rects (the language flags) move L/R between its tiles,
+         * while a visible value-selector never jumps onto its hidden randomize chip
+         * (which would hijack the selector's value key). */
+        if (s_buttons[i].hidden && !cur_hidden) continue;
+        if (!frontend_rows_overlap(current, i)) continue;
+        bcx = s_buttons[i].x + s_buttons[i].w / 2;
+        dx = bcx - ccx;
+        if (dir > 0 ? dx <= 0 : dx >= 0) continue;   /* must be on the dir side */
+        if (dx < 0) dx = -dx;
+        if (best < 0 || dx < best_dx) { best_dx = dx; best = i; }
+    }
+    if (best < 0) return 0;
+    s_selected_button = best;
+    return 1;
+}
+
+/* A button is a value SELECTOR (LEFT/RIGHT cycles its value rather than moving
+ * focus) if it carries the ◄► arrows (nav_selector, set live by
+ * fe_draw_option_arrows) or was explicitly tagged is_selector at creation. */
+static int frontend_button_is_selector(int btn) {
+    if (btn < 0 || btn >= FE_MAX_BUTTONS) return 0;
+    return s_buttons[btn].nav_selector || s_buttons[btn].is_selector;
+}
+
+#ifndef TD5RE_RELEASE
+/* [NAV SELFTEST 2026-06-26] Dev-only reachability check. Once per screen (after
+ * it settles), flood the nav graph from the topmost button using the player's
+ * REAL directional moves — UP/DOWN via frontend_nav_vertical (geometric+wrap),
+ * LEFT/RIGHT via the geometric same-row focus move — and log whether every
+ * active+enabled button was reached, naming any that weren't. Screenshots come
+ * back black in this env, so this is how we prove nav order across screens.
+ * Gated by TD5RE_NAV_SELFTEST=1; compiled out of the release build. */
+static void frontend_nav_selftest_maybe(void) {
+    static int s_last_tested = -2;
+    static int s_enabled = -1;
+    static int s_stable_screen = -2;
+    static int s_stable_frames = 0;
+    int i, navigable = 0, saved, start, reached = 0;
+    char reach[FE_MAX_BUTTONS];
+    int queue[FE_MAX_BUTTONS], qh = 0, qt = 0;
+
+    if (s_enabled < 0) {
+        const char *e = getenv("TD5RE_NAV_SELFTEST");
+        s_enabled = (e && e[0] == '1') ? 1 : 0;
+    }
+    if (!s_enabled || s_current_screen == s_last_tested) return;
+    /* Fire once the screen has settled: s_anim_complete, OR ~2s of being current
+     * for screens (e.g. Language Select) that never raise s_anim_complete. */
+    if (s_current_screen != s_stable_screen) { s_stable_screen = s_current_screen; s_stable_frames = 0; }
+    if (++s_stable_frames < 60 && !s_anim_complete) return;
+
+    for (i = 0; i < FE_MAX_BUTTONS; i++) {
+        reach[i] = 0;
+        if (s_buttons[i].active && !s_buttons[i].disabled) navigable++;
+    }
+    if (navigable <= 0) return;
+    s_last_tested = s_current_screen;
+    saved = s_selected_button;
+
+    start = frontend_extreme_button_vertical(-1);
+    if (start < 0) { s_selected_button = saved; return; }
+    reach[start] = 1; queue[qt++] = start; reached = 1;
+    while (qh < qt) {
+        int node = queue[qh++];
+        int d;
+        for (d = 0; d < 6; d++) {
+            int moved, n;
+            s_selected_button = node;
+            switch (d) {
+            case 0: moved = frontend_nav_vertical(-1); break;   /* UP    */
+            case 1: moved = frontend_nav_vertical(1);  break;   /* DOWN  */
+            /* plain LEFT/RIGHT only move focus off a NON-selector — exactly what
+             * the real dispatch does (a selector's L/R cycles its value instead). */
+            case 2: moved = !frontend_button_is_selector(node) && frontend_nav_horizontal(-1); break;
+            case 3: moved = !frontend_button_is_selector(node) && frontend_nav_horizontal(1); break;
+            /* SHIFT+LEFT/RIGHT geometric focus move (keyboard) — reaches the hidden
+             * randomize chip that plain UP/DOWN/L/R intentionally skips. */
+            case 4: moved = frontend_move_selected_button_spatial(-1, 0); break;
+            default: moved = frontend_move_selected_button_spatial(1, 0); break;
+            }
+            n = s_selected_button;
+            if (moved && n >= 0 && n < FE_MAX_BUTTONS && !reach[n]) {
+                reach[n] = 1; queue[qt++] = n; reached++;
+            }
+        }
+    }
+    /* DOWN-walk from the top: shows the vertical landing ORDER (e.g. that DOWN
+     * from a full-width row lands on OK, not BACK). */
+    {
+        int steps, prev = -1;
+        s_selected_button = start;
+        for (steps = 0; steps <= navigable; steps++) {
+            int cur = s_selected_button;
+            TD5_LOG_I(LOG_TAG, "  DOWN-walk[%d] -> %d y=%d '%s'", steps, cur,
+                      cur >= 0 ? s_buttons[cur].y : -1,
+                      cur >= 0 ? s_buttons[cur].label : "");
+            if (cur == prev) break;   /* settled (no further movement) */
+            prev = cur;
+            if (!frontend_nav_vertical(1)) break;
+        }
+    }
+    /* UP from the top row must WRAP to the bottom action button (OK), not jump to
+     * the hidden randomize chip (which is Shift+Right only). */
+    s_selected_button = start;
+    frontend_nav_vertical(-1);
+    TD5_LOG_I(LOG_TAG, "  UP-from-top(%d '%s') -> %d '%s'",
+              start, start >= 0 ? s_buttons[start].label : "",
+              s_selected_button, s_selected_button >= 0 ? s_buttons[s_selected_button].label : "");
+    s_selected_button = saved;
+
+    TD5_LOG_I(LOG_TAG, "NAV SELFTEST screen=%d reached %d/%d navigable",
+              s_current_screen, reached, navigable);
+    for (i = 0; i < FE_MAX_BUTTONS; i++)
+        if (s_buttons[i].active && !s_buttons[i].disabled && !reach[i])
+            TD5_LOG_W(LOG_TAG, "NAV SELFTEST UNREACHABLE screen=%d btn=%d y=%d '%s'",
+                      s_current_screen, i, s_buttons[i].y, s_buttons[i].label);
+}
+#endif
+
 /**
  * Create a frontend button using the original's coordinate conventions:
  *
@@ -2246,6 +2405,7 @@ int frontend_create_button(const char *label, int x, int y, int w, int h) {
             s_buttons[i].hidden = 0;
             s_buttons[i].highlight_ramp = 0;
             s_buttons[i].is_selector = 0;
+            s_buttons[i].nav_selector = 0;
 
             /* Width = the explicit w (the original's CreateFrontendDisplayModeButton
              * takes x and w independently; negative x is ONLY the auto-layout flag).
@@ -4085,49 +4245,41 @@ static int frontend_cursor_on_move_on(void) {
  * color-panel modal (the modal reads those bits in the tick); only the button
  * move itself is suppressed while the panel is open. */
 static void frontend_apply_nav_event(unsigned code) {
+    /* [PORT 2026-06-26] The Controller-Binding screen keeps its bespoke 2D
+     * spatial nav (a 2-column grid that must NOT wrap column-to-column). EVERY
+     * other shared-nav screen now uses frontend_nav_vertical (geometric + wrap)
+     * for UP/DOWN, so any button is reached in VISUAL order regardless of its
+     * array index. This retires the old per-screen `vnav` allow-list (Quick Race
+     * span-offset, Create-Session UPnP/PORT, Track-select DYNAMICS were each
+     * special-cased for the same index!=visual-row skip bug). */
     int spatial_nav = (s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
-    /* [fix 2026-06-15] Quick Race uses GEOMETRIC up/down nav so the dev "Span
-     * Offset" button (high button index but a low visual row) is reachable by
-     * pressing DOWN from "AI Screens" — index-order nav skipped it. LEFT/RIGHT in
-     * QR still cycle the focused selector's value (handled in the QR FSM). */
-    /* [2026-06-16] CREATE_SESSION also needs GEOMETRIC up/down: the direct-host
-     * UPnP toggle + GAME PORT field are high button indices (5/6) sitting at low
-     * visual rows (between PASSWORD and HOST), so index-order nav skipped them --
-     * same class as the Quick Race span-offset field. LEFT/RIGHT stay value-cycle
-     * (spatial_nav unchanged), so the UPnP/MAX selectors still adjust. */
-    int vnav = spatial_nav
-            || (s_current_screen == TD5_SCREEN_QUICK_RACE)
-            || (s_current_screen == TD5_SCREEN_CREATE_SESSION);
     switch (code) {
     case TD5_NAVKEY_LEFT:
-        /* [TASK B] SHIFT+LEFT = horizontal focus move (geometric same-row pick),
-         * NOT a value cycle: skip the arrow bit so frontend_option_delta stays 0.
-         * Suppressed while the colour panel is open (that modal reads the arrow
-         * bits to move its swatch cursor), so it falls through to plain behavior. */
+        /* SHIFT+LEFT = explicit geometric focus move (keyboard shortcut to reach a
+         * far-right value-column button that a plain LEFT would otherwise cycle
+         * past). Suppressed while the colour panel is open (that modal reads the
+         * arrow bits to move its swatch cursor), so it falls through to plain. */
         if (frontend_shift_nav_active() && !s_color_panel_visible) {
             if (frontend_move_selected_button_spatial(-1, 0)) {
                 frontend_play_sfx(2); s_selection_from_mouse = 0;
             }
             break;
         }
-        s_arrow_input |= 1;
-        /* [2026-06-15 BUG #13] Plain LEFT (no SHIFT) ONLY cycles the focused
-         * selector's value (via the s_arrow_input bit, consumed in the tick). It
-         * must NOT also move focus horizontally — that displaced focus onto the
-         * value-column button to the right while cycling. Horizontal focus move now
-         * requires SHIFT (handled above). The spatial_nav (Controller-Binding)
-         * screen has NO value selectors, so plain LEFT there still legitimately
-         * moves focus geometrically. Gated by TD5RE_SHIFT_NAV: "0" restores the old
-         * cycle-and-move behavior. */
-        if (!s_color_panel_visible && (spatial_nav || !frontend_shift_nav_on())) {
+        s_arrow_input |= 1;   /* value-cycle bit (a selector row consumes it in the FSM tick) */
+        /* [PORT 2026-06-26] Device-agnostic focus move (restores orig
+         * @0x00426580): on a NON-selector, a plain LEFT moves focus to the nearest
+         * VISIBLE same-row neighbour (OK<->BACK, YES<->NO, tabs, flag grids) — this
+         * is what makes same-row buttons reachable on a GAMEPAD, which has no SHIFT.
+         * A selector keeps the key for its value (and has no visible same-row
+         * neighbour to move to). Controller-Binding keeps its bespoke 2D move. */
+        if (!s_color_panel_visible) {
             int moved = spatial_nav ? frontend_move_selected_button_spatial(-1, 0)
-                                    : frontend_cycle_selected_button_horizontal(-1);
+                       : (!frontend_button_is_selector(s_selected_button) &&
+                          frontend_nav_horizontal(-1));
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
         }
         break;
     case TD5_NAVKEY_RIGHT:
-        /* [TASK B] SHIFT+RIGHT = horizontal focus move (geometric same-row pick).
-         * Suppressed while the colour panel is open (see LEFT above). */
         if (frontend_shift_nav_active() && !s_color_panel_visible) {
             if (frontend_move_selected_button_spatial(1, 0)) {
                 frontend_play_sfx(2); s_selection_from_mouse = 0;
@@ -4135,19 +4287,20 @@ static void frontend_apply_nav_event(unsigned code) {
             break;
         }
         s_arrow_input |= 2;
-        /* [2026-06-15 BUG #13] Plain RIGHT only cycles the value; horizontal focus
-         * move requires SHIFT (see LEFT above). */
-        if (!s_color_panel_visible && (spatial_nav || !frontend_shift_nav_on())) {
+        /* [PORT 2026-06-26] See LEFT: non-selector RIGHT moves focus to the visible
+         * same-row neighbour; a selector RIGHT cycles its value. */
+        if (!s_color_panel_visible) {
             int moved = spatial_nav ? frontend_move_selected_button_spatial(1, 0)
-                                    : frontend_cycle_selected_button_horizontal(1);
+                       : (!frontend_button_is_selector(s_selected_button) &&
+                          frontend_nav_horizontal(1));
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
         }
         break;
     case TD5_NAVKEY_UP:
         s_arrow_input |= 4;
         if (!s_color_panel_visible) {
-            int moved = vnav ? frontend_move_selected_button_spatial(0, -1)
-                             : frontend_cycle_selected_button_vertical(-1);
+            int moved = spatial_nav ? frontend_move_selected_button_spatial(0, -1)
+                                    : frontend_nav_vertical(-1);
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
             /* No sound on a no-target edge move — faithful to the original shared
              * nav handler @0x00426580, which is SILENT when no neighbour exists. */
@@ -4156,8 +4309,8 @@ static void frontend_apply_nav_event(unsigned code) {
     case TD5_NAVKEY_DOWN:
         s_arrow_input |= 8;
         if (!s_color_panel_visible) {
-            int moved = vnav ? frontend_move_selected_button_spatial(0, 1)
-                             : frontend_cycle_selected_button_vertical(1);
+            int moved = spatial_nav ? frontend_move_selected_button_spatial(0, 1)
+                                    : frontend_nav_vertical(1);
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
         }
         break;
@@ -5737,6 +5890,9 @@ int td5_frontend_display_loop(void) {
         ScreenFn fn = s_screen_table[s_current_screen];
         if (fn) fn();
     }
+#ifndef TD5RE_RELEASE
+    frontend_nav_selftest_maybe();   /* dev: TD5RE_NAV_SELFTEST=1 nav reachability log */
+#endif
     td5_profile_mark("fe_fsm");
 
     /* 3b. Universal slide-IN chime (S03). fn() above has already run this frame,
@@ -6688,6 +6844,14 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
         snprintf(count, sizeof(count), "%d", s_game_option_laps + 1);
         frontend_draw_qr_value(sx, sy, QR_BTN_LAPS, count, 0xFFFFFFFF, 0);
     }
+    /* [PHYSICS 2026-06-26] Physics row value: ARCADE / SIMULATION, drawn in the
+     * value column like every other QR row (caption "Physics", flips the shared
+     * s_game_option_dynamics). Always shown — it's a real player option. */
+    if (s_button_count > QR_BTN_PHYSICS && !s_buttons[QR_BTN_PHYSICS].hidden) {
+        frontend_draw_qr_value(sx, sy, QR_BTN_PHYSICS,
+                               s_game_option_dynamics ? "SIMULATION" : "ARCADE",
+                               0xFFFFFFFF, 0);
+    }
     /* [2026-06-08] AI Screens value (dev-only; row hidden in release). */
     if (s_button_count > QR_BTN_SPLITSCREENS &&
         !s_buttons[QR_BTN_SPLITSCREENS].hidden) {
@@ -6772,6 +6936,10 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
      * tracks) — the selector arrows must vanish with the button frame+label,
      * not leave an empty ◄ ► row floating where the button used to be. */
     if (!s_buttons[btn_idx].active || s_buttons[btn_idx].hidden) return;
+    /* [2026-06-26] Mark this row as a value selector for the shared LEFT/RIGHT nav
+     * (drawing arrows == "L/R cycles my value, don't move focus off me"). Set
+     * before the shader bail so the nav meaning holds even if ps_arrow is absent. */
+    s_buttons[btn_idx].nav_selector = 1;
     if (!s_ps_arrow) return;
     frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
 
@@ -7237,16 +7405,41 @@ void frontend_load_car_spec_fields(int car_index) {
  *   BALANCE    front/(front+rear) weight 0xB4/0xB6     (text "F.. R..")
  * Bars are roster-normalised (cop cars cached but excluded from the ranges,
  * like the glance bars). One-time cached scan; per-frame touches no files. */
+/* Display order (top -> bottom). Each constant's numeric value IS its row index,
+ * so the labels/captions arrays below and the loop in frontend_render_physics_stats
+ * follow this order; cps_bar_value() and frontend_carphys_frac() switch on the
+ * NAMES, so reordering here only moves rows, never the data each maps to.
+ * [2026-06-26] WEIGHT moved down to sit under GRIP (user request). */
 enum {
-    CPS_WEIGHT = 0, CPS_TOPSPEED, CPS_ACCEL, CPS_POWER, CPS_BRAKING,
-    CPS_GRIP, CPS_HANDLING, CPS_DOWNFORCE, CPS_DRIVETRAIN, CPS_BALANCE,
+    CPS_TOPSPEED = 0, CPS_ACCEL, CPS_POWER, CPS_BRAKING, CPS_GRIP,
+    CPS_WEIGHT, CPS_HANDLING, CPS_DOWNFORCE, CPS_DRIVETRAIN, CPS_BALANCE,
     CPS_COUNT
 };
 #define CPS_BAR_COUNT 8   /* first 8 stats are bars; last 2 are text */
 
 static const char *k_cps_labels[CPS_COUNT] = {
-    "WEIGHT", "TOP SPEED", "ACCEL", "POWER", "BRAKING",
-    "GRIP", "HANDLING", "DOWNFORCE", "DRIVETRAIN", "BALANCE"
+    "TOP SPEED", "ACCEL", "POWER", "BRAKING", "GRIP",
+    "WEIGHT", "HANDLING", "DOWNFORCE", "DRIVETRAIN", "BALANCE"
+};
+
+/* [2026-06-26 PORT ADDITION] Short plain-language captions for the less-obvious
+ * stats, drawn as a small dim second line under the label in the SINGLE-PLAYER
+ * MORE STATS panel only (gated on !compact — the tiny split-screen MP panes have
+ * no vertical room). NULL = the label already reads clearly on its own
+ * (TOP SPEED/BRAKING/WEIGHT). Keep each caption short so it stays inside the
+ * ~40%-of-panel label column and never runs under the bar. Order matches
+ * k_cps_labels above. */
+static const char *k_cps_explain[CPS_COUNT] = {
+    NULL,                  /* TOP SPEED  */
+    "power-to-weight",     /* ACCEL      */
+    "engine output",       /* POWER  (raw engine pull, before weight) */
+    NULL,                  /* BRAKING    */
+    "cornering grip",      /* GRIP       */
+    NULL,                  /* WEIGHT     */
+    "agility",             /* HANDLING   */
+    "grip at speed",       /* DOWNFORCE  */
+    "driven wheels",       /* DRIVETRAIN */
+    "weight: front / rear" /* BALANCE    */
 };
 
 typedef struct {
@@ -7361,15 +7554,19 @@ static const char *frontend_carphys_drivetrain_text(int ext_id) {
     dt = (int)s_cps[ext_id].drivetrain;
     return (dt == 1) ? "RWD" : (dt == 2) ? "FWD" : (dt == 3) ? "AWD" : "-";
 }
-static void frontend_carphys_balance_text(int ext_id, char *out, size_t cap) {
-    int f = 0;
+/* Front-axle weight share as a 0..100 int (rear = 100 - front); 0 if invalid. */
+static int frontend_carphys_front_pct(int ext_id) {
     if (ext_id >= 0 && ext_id < TD5_CAR_COUNT && s_cps[ext_id].valid) {
         int fw = (int)s_cps[ext_id].fwt, rw = (int)s_cps[ext_id].rwt;
         int tot = fw + rw;
-        if (tot > 0) f = (fw * 100 + tot / 2) / tot;
+        if (tot > 0) return (fw * 100 + tot / 2) / tot;
     }
+    return 0;
+}
+static void frontend_carphys_balance_text(int ext_id, char *out, size_t cap) {
+    int f = frontend_carphys_front_pct(ext_id);
     if (f <= 0) snprintf(out, cap, "-");
-    else        snprintf(out, cap, "F%d R%d", f, 100 - f);
+    else        snprintf(out, cap, "%d%% / %d%%", f, 100 - f);  /* front% / rear% */
 }
 
 /* Unified physics-stats panel renderer (SP overlay + MP pane). Draws CPS_COUNT
@@ -7398,7 +7595,19 @@ static void frontend_render_physics_stats(int ext_id, float px, float py, float 
     for (i = 0; i < CPS_COUNT; i++) {
         float ry  = py + (float)i * rh;
         float tyc = (ry + (rh - capd) * 0.5f) * sy;
-        fe_draw_small_text(px * sx, tyc, k_cps_labels[i], 0xFFC8C8C8u, lsx, lsy);
+        const char *expl = compact ? NULL : k_cps_explain[i];
+        if (expl) {
+            /* [2026-06-26] Two-line label: stat name on top, dim caption beneath.
+             * Both sit in the label column (left of barx), so the bar / text value
+             * to the right is untouched. Offsets in design px (SP rh=22.4): label
+             * cell-top ry+2 (baseline ry+12), caption cell-top ry+12 at 0.62x so
+             * its descenders end ~ry+20, inside the row. */
+            float exsx = lsx * 0.62f, exsy = lsy * 0.62f;
+            fe_draw_small_text(px * sx, (ry + 2.0f)  * sy, k_cps_labels[i], 0xFFC8C8C8u, lsx,  lsy);
+            fe_draw_small_text(px * sx, (ry + 12.0f) * sy, expl,           0xFF8FA0B4u, exsx, exsy);
+        } else {
+            fe_draw_small_text(px * sx, tyc, k_cps_labels[i], 0xFFC8C8C8u, lsx, lsy);
+        }
         if (i < CPS_BAR_COUNT) {
             float barh = rh - (compact ? 3.0f : 6.0f);
             float bary, f;
@@ -7409,6 +7618,42 @@ static void frontend_render_physics_stats(int ext_id, float px, float py, float 
             f = frontend_carphys_frac(ext_id, i);
             if (f > 0.0f)
                 fe_draw_quad(barx * sx, bary * sy, f * barw * sx, barh * sy, accent, -1, 0, 0, 1, 1);
+        } else if (i == CPS_BALANCE && !compact) {
+            /* [2026-06-26] BALANCE as a visual front/rear weight-split graph (SP):
+             * the bar is split into a FRONT segment (left, amber accent) and a REAR
+             * segment (right, blue). A bright tick at the centre marks the 50/50
+             * neutral point, so a nose- or tail-heavy car reads at a glance. The
+             * exact percentages are printed inside their own segments. */
+            int   fpct = frontend_carphys_front_pct(ext_id);
+            float barh = rh - 6.0f;
+            float bary, ff;
+            if (barh < 2.0f) barh = 2.0f;
+            bary = ry + (rh - barh) * 0.5f;
+            ff   = (fpct > 0) ? (float)fpct / 100.0f : 0.5f;
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_quad(barx * sx, bary * sy, barw * sx, barh * sy, 0xFF101828u, -1, 0, 0, 1, 1);
+            if (fpct > 0) {
+                fe_draw_quad(barx * sx, bary * sy, ff * barw * sx, barh * sy,
+                             accent, -1, 0, 0, 1, 1);                       /* front (left)  */
+                fe_draw_quad((barx + ff * barw) * sx, bary * sy,
+                             (1.0f - ff) * barw * sx, barh * sy,
+                             0xFF4890D0u, -1, 0, 0, 1, 1);                  /* rear (right)  */
+            }
+            /* centre 50/50 reference tick (drawn over the fills) */
+            fe_draw_quad((barx + 0.5f * barw - 0.75f) * sx, (bary - 1.0f) * sy,
+                         1.5f * sx, (barh + 2.0f) * sy, 0xFFFFFFFFu, -1, 0, 0, 1, 1);
+            if (fpct > 0) {
+                char  fp[8], rp[8];
+                float pls_x = lsx * 0.7f, pls_y = lsy * 0.7f;
+                float pcapd = SMALLFONT_TTF_CAP * (pls_y / sy);
+                float pty   = (ry + (rh - pcapd) * 0.5f) * sy;
+                float rw_txt;
+                snprintf(fp, sizeof fp, "%d%%", fpct);
+                snprintf(rp, sizeof rp, "%d%%", 100 - fpct);
+                rw_txt = fe_measure_small_text(rp) * fe_glyph_sx(pls_x, pls_y);
+                fe_draw_small_text((barx + 3.0f) * sx, pty, fp, 0xFF202830u, pls_x, pls_y);       /* dark on amber */
+                fe_draw_small_text((barx + barw - 3.0f) * sx - rw_txt, pty, rp, 0xFFFFFFFFu, pls_x, pls_y); /* white on blue */
+            }
         } else {
             const char *t;
             if (i == CPS_DRIVETRAIN) t = frontend_carphys_drivetrain_text(ext_id);
@@ -7426,7 +7671,13 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
      * the live selected car (set by frontend_load_car_spec_fields each frame). */
     int ext = s_car_spec_car;
     TD5_LOG_I(LOG_TAG, "car_stats_overlay(physics): car=%d", ext);
-    frontend_render_physics_stats(ext, 232.0f, 126.0f, 384.0f, 224.0f,
+    /* [2026-06-26] Shifted the panel RIGHT (x 232->252) so its labels clear the
+     * port-added RANDOMIZE chip (canvas 218..246, y171..199). The original drew
+     * this header column at canvasW-0x198 = 232 [CONFIRMED @0x0040dff1] but it had
+     * NO randomize button there; the chip is a port enhancement, so this small
+     * shift is a deliberate port-only divergence. The right edge stays at 616
+     * (pw 384->364), preserving the original's clean right margin. */
+    frontend_render_physics_stats(ext, 252.0f, 126.0f, 364.0f, 224.0f,
                                   0xFFE8C040u /* amber == FE_CARSTAT_ACCENT */, 0, sx, sy);
 }
 
@@ -7483,13 +7734,33 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     }
     capd = SMALLFONT_TTF_CAP * (lsy / sy);
 
-    /* SPEED + ACCEL from the config.nfo spec sheet; HANDLING from the car's real
-     * carparam inertia (never blank). Combine into one 3-bit per-bar fill mask. */
-    valid_mask = frontend_glance_from_fields(f7, f8, &spd, &acc);
-    if (valid_mask)
-        frontend_normalize_glance(spd, acc, &fr[0], &fr[1]);
-    if (frontend_handling_frac(car_ext_id, &fr[2]))
-        valid_mask |= 4;
+    /* [2026-06-26] Source all three quick bars from the SAME roster-normalised
+     * carparam physics (frontend_carphys_frac) the MORE STATS panel uses, so
+     * SPEED/ACCEL/HANDLING read on an IDENTICAL scale across both displays. Was:
+     * SPEED/ACCEL from the cosmetic config.nfo spec glance + HANDLING from a
+     * separate inertia frac — a visibly different scale than MORE STATS. The spec
+     * glance / inertia frac are kept only as a fallback for a car whose
+     * carparam.dat failed to load (carphys frac returns -1). */
+    {
+        float sf = frontend_carphys_frac(car_ext_id, CPS_TOPSPEED);  /* SPEED <-> TOP SPEED */
+        float af = frontend_carphys_frac(car_ext_id, CPS_ACCEL);
+        float hf = frontend_carphys_frac(car_ext_id, CPS_HANDLING);
+        valid_mask = 0;
+        if (sf >= 0.0f) { fr[0] = sf; valid_mask |= 1; }
+        if (af >= 0.0f) { fr[1] = af; valid_mask |= 2; }
+        if (hf >= 0.0f) { fr[2] = hf; valid_mask |= 4; }
+        if ((valid_mask & 3) != 3) {           /* carparam missing -> spec glance */
+            int gm = frontend_glance_from_fields(f7, f8, &spd, &acc);
+            if (gm) {
+                float gs = 0.0f, ga = 0.0f;
+                frontend_normalize_glance(spd, acc, &gs, &ga);
+                if (!(valid_mask & 1) && (gm & 1)) { fr[0] = gs; valid_mask |= 1; }
+                if (!(valid_mask & 2) && (gm & 2)) { fr[1] = ga; valid_mask |= 2; }
+            }
+        }
+        if (!(valid_mask & 4) && frontend_handling_frac(car_ext_id, &fr[2]))
+            valid_mask |= 4;                    /* carparam missing -> inertia frac */
+    }
 
     /* Frame: the regular blue/unselected button look (non-interactive). In the
      * compact (small-split) panes, thin the rim proportionally to the panel
@@ -7961,7 +8232,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         if (s_buttons[6].active && !s_buttons[6].hidden)  /* per-race AI difficulty (hidden in Quick Race) */
             fe_draw_text(vx, (float)(s_buttons[6].y + 6) * sy, difficulty[s_race_difficulty % 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) value — appended row,
-         * indexed via s_trksel_dyn_btn (sits on the top row, y=57). */
+         * indexed via s_trksel_dyn_btn (sits just above OK/BACK; value follows .y). */
         if (s_trksel_dyn_btn >= 0 && s_buttons[s_trksel_dyn_btn].active &&
             !s_buttons[s_trksel_dyn_btn].hidden) {
             const char *dyn[2] = { "ARCADE", "SIMULATION" };
@@ -10735,6 +11006,10 @@ void td5_frontend_render_ui_rects(void) {
              * fe_draw_option_arrows self-skips hidden buttons so the Direction
              * and Players ◄► vanish with their rows. */
             for (int i = 0; i <= QR_BTN_LAPS; i++) fe_draw_option_arrows(i, sx, sy);
+            /* [PHYSICS 2026-06-26] The Physics (ARCADE/SIM) row is a value-cycle
+             * selector too, but at the appended index QR_BTN_PHYSICS (outside the
+             * 0..LAPS block) — draw its ◄► arrows explicitly. self-skips if hidden. */
+            if (QR_BTN_PHYSICS < s_button_count) fe_draw_option_arrows(QR_BTN_PHYSICS, sx, sy);
             break;
         case TD5_SCREEN_GAME_OPTIONS:
             /* [S02 (c)] Six option rows remain (0..5) after Circuit Laps was
@@ -10826,6 +11101,11 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_option_arrows(4, sx, sy);
             fe_draw_option_arrows(5, sx, sy);
             fe_draw_option_arrows(6, sx, sy);   /* per-race difficulty (master) */
+            /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) row — same ◄►
+             * selector glyphs as the quick-race option rows above. The button
+             * is appended last, so dispatch it by its stored index (self-skips
+             * when hidden/inactive). [LAYOUT 2026-06-26] now sits just above OK/BACK. */
+            if (s_trksel_dyn_btn >= 0) fe_draw_option_arrows(s_trksel_dyn_btn, sx, sy);
             /* [item #7] Randomize chip to the right of the Track selector. */
             frontend_render_trksel_randomize_icon(sx, sy);
             break;

@@ -333,6 +333,11 @@ typedef struct {
                              * so nav/mouse also skip it. */
     int highlight_ramp;     /* 0-6: smooth highlight fade (original uses 6-step ramp) */
     int is_selector;        /* 1 = left/right selector widget; always uses blue 9-slice */
+    int nav_selector;       /* [2026-06-26] 1 = row draws ◄► value arrows (set by
+                             * fe_draw_option_arrows). Tells the shared LEFT/RIGHT nav
+                             * to CYCLE this row's value instead of moving focus, so a
+                             * plain L/R on a gamepad still adjusts the selector while
+                             * non-selectors move focus to a same-row neighbour. */
     char label[64];
 } FE_Button;
 
@@ -488,6 +493,11 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
  * "AI Screens" row (QR_BTN_SPLITSCREENS). Created LAST so the OK/Back/PlayerAI/
  * AutoThr indices above are unchanged; hidden+disabled in release. */
 #define QR_BTN_SPAN       11
+/* [PHYSICS 2026-06-26] ARCADE/SIMULATION (dynamics) row on Quick Race, between
+ * Laps (row 4) and the dev rows. Created LAST (after the dev toggles + the two
+ * RANDOMIZE buttons at indices 12/13) so every hard-coded index above stays put.
+ * Visible in BOTH dev and release; flips the shared s_game_option_dynamics. */
+#define QR_BTN_PHYSICS    14
 
 /* Quick Race layout: caption buttons in a left column, the selected value in a
  * right column, all rows uniformly spaced.
@@ -501,10 +511,13 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 #define QR_BTN_W       208    /* button width (right edge = 328)          */
 #define QR_ROW_Y0       96    /* first row y                              */
 /* [2026-06-15 TASK A2] Row pitch tightened 56 -> 44 so the added dev "Span
- * Offset" row (8 rows total, 0..7) fits the 480px canvas with OK/Back at row 7
- * (y = 96 + 7*44 = 404, 32px tall -> bottom 436). 32px buttons leave a 12px gap
- * between rows; the title rests at ~17 so the first row at 96 stays clear. */
-#define QR_ROW_DY       44    /* uniform vertical gap between rows         */
+ * Offset" row fit the 480px canvas.
+ * [PHYSICS 2026-06-26] Tightened again 44 -> 40 ("put the option buttons
+ * together a little more") so the NEW Physics (ARCADE/SIMULATION) row makes 9
+ * rows total (0..8) and still fits: OK/Back move down to row 8
+ * (y = 96 + 8*40 = 416, 32px tall -> bottom 448, clear of the 480 canvas). 32px
+ * buttons leave an 8px gap; the title rests at ~17 so the first row at 96 stays clear. */
+#define QR_ROW_DY       40    /* uniform vertical gap between rows         */
 #define QR_ROW_Y(n)     (QR_ROW_Y0 + (n) * QR_ROW_DY)
 #define FE_QR_VALUE_X  336    /* value column left edge (clear of button @328)  */
 #define FE_QR_VALUE_SCALE 0.9f /* value glyph scale — matches the button-caption size */
