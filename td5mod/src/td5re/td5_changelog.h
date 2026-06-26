@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Cop Chase has a new INFECT option: an arrested car" },
+    { CL_ITEM,    "  turns into a cop (a random police car) instead of" },
+    { CL_ITEM,    "  stopping, so players who get caught keep playing" },
+    { CL_ITEM,    "  as cops; the round ends when everyone's infected" },
     { CL_ITEM,    "Split-screen Cop Chase has its own results screen:" },
     { CL_ITEM,    "  COPS listed with their arrest counts, SUSPECTS" },
     { CL_ITEM,    "  below with the time they were busted (- if they" },
