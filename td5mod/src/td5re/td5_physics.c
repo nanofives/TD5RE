@@ -43,6 +43,7 @@
 #include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
 #include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
+#include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 /* V2V trace headers are included unconditionally: their obb_corner_test /
@@ -6130,6 +6131,13 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     if (!penetrator->car_definition_ptr || !target->car_definition_ptr) return;
     (void)corner_idx;
 
+    /* [ARCADE] A GHOSTing racer is intangible — skip the whole V2V interaction so
+     * either party passes cleanly through the other. No-op outside arcade mode. */
+    if (td5_arcade_slot_is_ghost((int)penetrator->slot_index) ||
+        td5_arcade_slot_is_ghost((int)target->slot_index)) {
+        return;
+    }
+
     /* [#10 telemetry] A dispatched OBB corner contact = a real car-to-car
      * collision; flag both actors for this tick's edge-detector (idempotent —
      * multiple corners in one tick still count as a single collision). */
@@ -6152,6 +6160,25 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     /* --- 1. Prologue: save angular velocities for delta application --- */
     int32_t saved_omega_A = A->angular_velocity_yaw;
     int32_t saved_omega_B = B->angular_velocity_yaw;
+
+    /* [ARCADE wrecking ball] If a party is a WRECKING BALL it is immune: it plows
+     * through unaffected while the OTHER car takes the (3x, low-gate) launch. We
+     * snapshot its full pre-collision motion+pose here and restore it at function
+     * exit, so the symmetric solver below stays byte-faithful for the victim. */
+    const int A_wreck = td5_arcade_slot_is_wrecking((int)A->slot_index);
+    const int B_wreck = td5_arcade_slot_is_wrecking((int)B->slot_index);
+    const int32_t Awx = A->world_pos.x, Awz = A->world_pos.z;
+    const int32_t Avx = A->linear_velocity_x, Avy = A->linear_velocity_y, Avz = A->linear_velocity_z;
+    const int32_t Aroll = A->angular_velocity_roll, Apitch = A->angular_velocity_pitch;
+    const int32_t Aeyaw = A->euler_accum.yaw;
+    const int32_t Bwx = B->world_pos.x, Bwz = B->world_pos.z;
+    const int32_t Bvx = B->linear_velocity_x, Bvy = B->linear_velocity_y, Bvz = B->linear_velocity_z;
+    const int32_t Broll = B->angular_velocity_roll, Bpitch = B->angular_velocity_pitch;
+    const int32_t Beyaw = B->euler_accum.yaw;
+
+    /* Arcade collision multiplier in 24.8 (0x100 == 1.0 outside arcade, so the
+     * impulse math below is byte-identical to the faithful path when off). */
+    const int arc_coll_q8 = td5_arcade_collision_mult_q8();
 
     /* Mass from cardef+0x88 (int16). [CONFIRMED @ 0x00407BE7, 0x00407BFE,
      * 0x00407DA0, 0x00407DB4]: original ApplyVehicleCollisionImpulse loads
@@ -6340,6 +6367,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * signed round-to-zero divide by 0x1000. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = v2v_sar12_rz_64(impulse_raw);
+        /* [ARCADE] hit 3x as hard. Positive multiply preserves sign, so the XOR
+         * rejection below is unchanged; impact_mag (derived from impulse) scales
+         * too, which trips the airborne-launch branch far more readily. */
+        impulse = (int32_t)(((int64_t)impulse * arc_coll_q8) >> 8);
 
         /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
         if (((cx_B - cx_A) ^ impulse) < 0) {
@@ -6396,6 +6427,8 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         /* [CONFIRMED @ 0x00407E68-7A]: same round-to-zero idiom as SIDE branch. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = v2v_sar12_rz_64(impulse_raw);
+        /* [ARCADE] hit 3x as hard (see SIDE branch note). */
+        impulse = (int32_t)(((int64_t)impulse * arc_coll_q8) >> 8);
 
         if (((cz_B - cz_A) ^ impulse) < 0) {
             rejected = 1;
@@ -6610,6 +6643,16 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t cop_gate = cop_break_mag();
     int a_tough_cop = a_is_cop && impact_mag <= cop_gate;
     int b_tough_cop = b_is_cop && impact_mag <= cop_gate;
+    /* [ARCADE] Lower the heavy-impact gate so ordinary crashes launch cars into
+     * the air (faithful gate is 90000 racer / npc_fatal_mag for NPC pairs). */
+    if (td5_arcade_launch_active()) {
+        int ag = td5_arcade_launch_gate();
+        if (ag < heavy_gate) heavy_gate = ag;
+    }
+    /* [ARCADE] Boosted vertical launch: smaller divisor + higher clamp than the
+     * faithful impact_mag/6 (200000-clamped). 1.0/no-change values outside arcade. */
+    const int     arc_launch_div   = td5_arcade_launch_active() ? td5_arcade_launch_div() : 6;
+    const int32_t arc_launch_clamp = td5_arcade_launch_active() ? 800000 : 200000;
     if (impact_mag > heavy_gate && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
@@ -6629,8 +6672,8 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
              * 100 for everyone else, so this is a no-op for AI/front/side). */
             int32_t a_kick_ry = v2v_scale_pct(kick_ry, rear_retain);
             int32_t a_kick_p  = v2v_scale_pct(kick_p,  rear_retain);
-            int32_t lift_a = impact_mag / 6;
-            if (lift_a > 200000) lift_a = 200000; /* port-only clamp (orig: none) */
+            int32_t lift_a = impact_mag / arc_launch_div;
+            if (lift_a > arc_launch_clamp) lift_a = arc_launch_clamp;
             lift_a = v2v_scale_pct(lift_a, rear_retain);
             /* [POLICE] A racer-slot cop (MP cop chase) never goes airborne. */
             if (a_is_cop) lift_a = 0;
@@ -6648,8 +6691,8 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         } else if (B->slot_index < g_traffic_slot_base) {
             /* B is the penetrator (never the rear-contacted victim here), so it
              * always takes the byte-faithful kick — the attacker is unchanged. */
-            int32_t lift_b = impact_mag / 6;
-            if (lift_b > 200000) lift_b = 200000; /* port-only clamp (orig: none) */
+            int32_t lift_b = impact_mag / arc_launch_div;
+            if (lift_b > arc_launch_clamp) lift_b = arc_launch_clamp;
             if (b_is_cop) lift_b = 0;             /* [POLICE] no airborne for a cop */
             B->angular_velocity_roll  -= kick_ry;
             B->angular_velocity_yaw   -= kick_ry;
@@ -6709,6 +6752,27 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     if (traffic_hit_tame_enabled()) {
         if (A->slot_index >= g_traffic_slot_base) traffic_clamp_above_ground(A);
         if (B->slot_index >= g_traffic_slot_base) traffic_clamp_above_ground(B);
+    }
+
+    /* [ARCADE wrecking ball] Restore the immune wrecker(s) to their pre-collision
+     * motion+pose so they plow straight through, while the victim keeps the full
+     * (3x, low-gate) launch computed above. If BOTH are wrecking they both pass
+     * through each other untouched. */
+    if (A_wreck) {
+        A->world_pos.x = Awx; A->world_pos.z = Awz;
+        A->linear_velocity_x = Avx; A->linear_velocity_y = Avy; A->linear_velocity_z = Avz;
+        A->angular_velocity_roll = Aroll; A->angular_velocity_yaw = saved_omega_A;
+        A->angular_velocity_pitch = Apitch; A->euler_accum.yaw = Aeyaw;
+        update_vehicle_pose_from_physics(A);
+        td5_arcade_note_ram((int)A->slot_index, (int)B->slot_index, impact_mag);
+    }
+    if (B_wreck) {
+        B->world_pos.x = Bwx; B->world_pos.z = Bwz;
+        B->linear_velocity_x = Bvx; B->linear_velocity_y = Bvy; B->linear_velocity_z = Bvz;
+        B->angular_velocity_roll = Broll; B->angular_velocity_yaw = saved_omega_B;
+        B->angular_velocity_pitch = Bpitch; B->euler_accum.yaw = Beyaw;
+        update_vehicle_pose_from_physics(B);
+        td5_arcade_note_ram((int)B->slot_index, (int)A->slot_index, impact_mag);
     }
 
     /* pool14_v2v pilot trace: capture post-state at function exit.
@@ -13091,9 +13155,19 @@ void td5_physics_init_vehicle_runtime(void)
                     /* 0x78: speed_scale <<= 2 */
                     int32_t ss = (int32_t)PHYS_S(actor, PHYS_SPEED_SCALE);
                     write_i16((uint8_t *)phys, PHYS_SPEED_SCALE, (int16_t)(ss << 2));
-                } else if (!g_difficulty_easy) {
-                    /* Normal difficulty */
-                    /* 0x68: drive_torque_mult *= 0x168/256 (0.5625x) */
+                } else {
+                    /* [ARCADE/SIM CONSOLIDATION 2026-06-26] BOTH dynamics modes
+                     * now apply this arcade stat scaling (torque/grip/speed). The
+                     * only base difference between the modes is GRAVITY (selected
+                     * above: SIMULATION=easy=1500, ARCADE=normal=1900). This makes
+                     * SIMULATION the requested "sim gravity + arcade grip/torque/
+                     * speed-scale" mix; ARCADE is the same base plus the extra
+                     * exaggeration below + 3x collisions + power-ups. Previously
+                     * this branch was gated `!g_difficulty_easy` (arcade only) so
+                     * SIMULATION got raw carparam values — that path is retired. */
+                    /* 0x68: drive_torque_mult *= 0x168/256. NOTE: 0x168 = 360, so
+                     * this is ×1.40625 (a BOOST). The prior inline comment said
+                     * "(0.5625x)" — that was wrong; the value/behaviour is a boost. */
                     int32_t tm = (int32_t)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT);
                     write_i16((uint8_t *)phys, PHYS_DRIVE_TORQUE_MULT, (int16_t)((tm * 0x168) >> 8));
                     /* 0x2C: tire_grip_coeff *= 300/256 (1.17x) */
@@ -13102,8 +13176,26 @@ void td5_physics_init_vehicle_runtime(void)
                     /* 0x78: speed_scale <<= 1 */
                     int32_t ss = (int32_t)PHYS_S(actor, PHYS_SPEED_SCALE);
                     write_i16((uint8_t *)phys, PHYS_SPEED_SCALE, (int16_t)(ss << 1));
+
+                    /* [ARCADE wild] Extra exaggeration on RACER slots only (skip
+                     * traffic) when in ARCADE mode: a further grip/torque bump so
+                     * arcade handling feels punchier. Modest defaults keep the car
+                     * drivable — the headline arcade chaos is the 3x collisions +
+                     * power-ups, not raw stat inflation. Knob-tunable; reads the
+                     * already-scaled value so the percentages compound on top. */
+                    if (!g_difficulty_easy && slot < g_traffic_slot_base) {
+                        const char *te = getenv("TD5RE_ARCADE_TORQUE_PCT");
+                        const char *ge = getenv("TD5RE_ARCADE_GRIP_PCT");
+                        int tpct = te ? atoi(te) : 125;
+                        int gpct = ge ? atoi(ge) : 112;
+                        if (tpct < 100) tpct = 100; if (tpct > 250) tpct = 250;
+                        if (gpct < 100) gpct = 100; if (gpct > 200) gpct = 200;
+                        int32_t tm2 = (int32_t)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT);
+                        write_i16((uint8_t *)phys, PHYS_DRIVE_TORQUE_MULT, (int16_t)((tm2 * tpct) / 100));
+                        int32_t dc2 = (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF);
+                        write_i16((uint8_t *)phys, PHYS_TIRE_GRIP_COEFF, (int16_t)((dc2 * gpct) / 100));
+                    }
                 }
-                /* Easy: no scaling (raw carparam values used as-is) */
             }
         }
 

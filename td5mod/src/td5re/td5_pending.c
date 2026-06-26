@@ -30,6 +30,13 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "ARCADE mode: crashes 3x harder, cars launch airborne",
+    "ARCADE pads grant NITRO/GHOST/WRECK/HAZARD power-ups",
+    "Power-up chip + timer shows in each player's pane",
+    "GHOST cars pass through others (white shimmer aura)",
+    "HAZARD drop spins out the next car that touches it",
+    "SIMULATION = arcade grip/power + realistic gravity",
+    "ARCADE/SIM picked on track + multiplayer screens",
     "Demo fires after 1 min idle on main menu",
     "Demo: random track/car/opponents/traffic, no cops",
     "Demo returns to main menu on finish (no results)",

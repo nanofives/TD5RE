@@ -25,6 +25,7 @@
 #include "td5_platform.h"
 #include "td5_asset.h"
 #include "td5_render.h"
+#include "td5_arcade.h"   /* ARCADE per-viewport power-up chip */
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_net.h"      /* [S31] td5_net_get_slot_name for the PAUSED BY overlay */
@@ -1805,6 +1806,83 @@ void td5_hud_draw_player_id_overlays(void)
      * exactly like the frames/plates above — and the projection state is
      * restored to full-screen inside, so call count does not leak state.) */
     hud_draw_mp_car_labels();
+}
+
+/* ========================================================================
+ * [ARCADE 2026-06-26] Per-viewport power-up chip: when the player driving a
+ * pane has an active power-up effect, draw a small labelled chip (top-left of
+ * the pane) with a shrinking timer bar. Works in single-view and split-screen.
+ * No-op outside ARCADE mode. SOURCE-PORT FEATURE.
+ * ======================================================================== */
+static int arcade_effect_nominal_frames(int effect)
+{
+    switch (effect) {
+    case TD5_PU_NITRO:  return 30;
+    case TD5_PU_GHOST:  return 120;
+    case TD5_PU_WRECK:  return 150;
+    case TD5_PU_HAZARD: return 20;
+    default:            return 60;
+    }
+}
+
+void td5_hud_draw_arcade_chips(void)
+{
+    if (!td5_arcade_mode_active()) return;
+    int views = s_view_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    for (int v = 0; v < views; v++) {
+        int slot = g_actor_slot_map[v];
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+        int effect = td5_arcade_active_effect(slot);
+        if (effect == TD5_PU_NONE) continue;
+
+        const TD5_HudViewLayout *vl = &s_view_layout[v];
+        float L = vl->vp_int_left,  T = vl->vp_int_top;
+        float R = vl->vp_int_right, Bb = vl->vp_int_bottom;
+        float w = R - L, h = Bb - T;
+        if (w < 2.0f || h < 2.0f) continue;
+
+        const char *label; uint32_t col;
+        switch (effect) {
+        case TD5_PU_NITRO:  label = "NITRO";  col = 0xFF20E0FFu; break;
+        case TD5_PU_GHOST:  label = "GHOST";  col = 0xFFFFFFFFu; break;
+        case TD5_PU_WRECK:  label = "WRECK";  col = 0xFFFF3020u; break;
+        case TD5_PU_HAZARD: label = "HAZARD"; col = 0xFFFFB000u; break;
+        default: continue;
+        }
+
+        float ts = (w / 640.0f) * 0.9f;
+        if (hud_dpi_scale_on()) ts *= hud_size_mul();
+        if (ts > 1.4f)  ts = 1.4f;
+        if (ts < 0.40f) ts = 0.40f;
+
+        float tw      = td5_vui_text_width(label, ts);
+        float pad     = 6.0f * ts;
+        float chip_w  = tw + 2.0f * pad;
+        float bar_h   = 4.0f * ts;
+        float chip_h  = 15.0f * ts + 2.0f * (5.0f * ts) + bar_h;
+        float margin  = 8.0f * (w / 640.0f);
+        float cx      = L + margin;
+        float cy      = T + margin;
+
+        /* chip background (dark, semi-transparent) */
+        td5_vui_quad(cx, cy, chip_w, chip_h, 0xC0101010u, -1, 0, 0, 0, 0);
+        /* coloured accent strip along the top */
+        td5_vui_quad(cx, cy, chip_w, 3.0f * ts, col, -1, 0, 0, 0, 0);
+        /* label, vertically centred above the timer bar */
+        float text_area_h = chip_h - bar_h;
+        float ny = cy + text_area_h * 0.5f - 15.5f * ts;
+        td5_vui_text_centered(cx + chip_w * 0.5f, ny, label, col, ts, ts);
+        /* shrinking timer bar along the bottom */
+        int frames = td5_arcade_active_frames(slot);
+        int maxf   = arcade_effect_nominal_frames(effect);
+        float frac = (maxf > 0) ? (float)frames / (float)maxf : 0.0f;
+        if (frac < 0.0f) frac = 0.0f;
+        if (frac > 1.0f) frac = 1.0f;
+        td5_vui_quad(cx, cy + chip_h - bar_h, chip_w * frac, bar_h, col, -1, 0, 0, 0, 0);
+    }
 }
 
 void td5_hud_draw_disconnect_overlays(void)

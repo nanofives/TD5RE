@@ -45,6 +45,7 @@
 #include "td5_asset.h"
 #include "td5_save.h"
 #include "td5_vfx.h"
+#include "td5_arcade.h"   /* ARCADE power-up pad / hazard world billboards */
 #include "td5_ai.h"
 #include "td5re.h"
 
@@ -7605,6 +7606,95 @@ static void render_tracked_actor_marker(const TD5_Actor *actor,
 
     /* Restore opaque preset so it doesn't leak into next pass (mirrors
      * brake_lights tail). */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* ========================================================================
+ * [ARCADE 2026-06-26] Power-up pads + dropped hazards — world-space glow
+ * billboards. Drawn once per viewport from the per-view world-FX pass in
+ * td5_game.c (right after the particles), so the camera basis/pos for THIS
+ * view is already loaded. Reuses tracked_marker_emit_quad_world (additive
+ * glow when proc-FX is on; color carries the per-kind tint). No-op outside
+ * ARCADE mode. Pure render — reads replicated arcade state only.
+ * ======================================================================== */
+
+/* ARGB (0xAARRGGBB) glow tint per power-up kind. */
+static uint32_t arcade_pad_color(int kind)
+{
+    switch (kind) {
+    case TD5_PU_NITRO:  return 0xFF20E0FFu;  /* cyan   — speed   */
+    case TD5_PU_GHOST:  return 0xFFFFFFFFu;  /* white  — ghost   */
+    case TD5_PU_WRECK:  return 0xFFFF3020u;  /* red    — wreck   */
+    case TD5_PU_HAZARD: return 0xFFFFB000u;  /* amber  — hazard  */
+    default:            return 0xFFFFFFFFu;
+    }
+}
+
+static void arcade_emit_glow_at(float wx, float wy, float wz,
+                                float half, uint32_t color)
+{
+    static const TD5_Mat3x3 ident = { { 1.0f,0.0f,0.0f, 0.0f,1.0f,0.0f, 0.0f,0.0f,1.0f } };
+    TD5_Vec3f p; p.x = wx; p.y = wy; p.z = wz;
+    /* Identity model rotation + world translation -> m[9..11] is the world
+     * point in view space (camera basis/pos already set for this view). */
+    td5_render_load_rotation(&ident);
+    td5_render_load_translation(&p);
+    float vx = s_render_transform.m[9];
+    float vy = s_render_transform.m[10];
+    float vz = s_render_transform.m[11];
+    if (vz <= s_near_clip) return;
+    float corners[4][2] = {
+        { vx - half, vy + half }, { vx - half, vy - half },
+        { vx + half, vy + half }, { vx + half, vy - half }
+    };
+    tracked_marker_emit_quad_world(corners, vz, 0.0f, 0.0f, 1.0f, 1.0f, color, -1);
+}
+
+void td5_render_arcade_pads(void)
+{
+    if (!td5_arcade_mode_active()) return;
+    int np = td5_arcade_pad_count();
+    int nh = td5_arcade_hazard_count();
+    if (np <= 0 && nh <= 0) return;
+
+    int sizei = 220;
+    const char *e = getenv("TD5RE_ARCADE_PAD_VIS");
+    if (e) { int v = atoi(e); if (v >= 20 && v <= 4000) sizei = v; }
+    float pad_half = (float)sizei;
+    /* Lift the glow centre off the road a touch so it reads as a floating box. */
+    float pad_lift = pad_half * 0.5f;
+
+    for (int i = 0; i < np; i++) {
+        float wx, wy, wz; int active = 0, kind = 0;
+        if (!td5_arcade_pad_get(i, &wx, &wy, &wz, &active, &kind)) continue;
+        if (!active) continue;
+        arcade_emit_glow_at(wx, wy + pad_lift, wz, pad_half, arcade_pad_color(kind));
+    }
+
+    /* Dropped hazards: smaller, dark-oily glow flat on the road. */
+    float haz_half = pad_half * 0.6f;
+    for (int i = 0; i < nh; i++) {
+        float wx, wy, wz; int owner = 0;
+        if (!td5_arcade_hazard_get(i, &wx, &wy, &wz, &owner)) continue;
+        arcade_emit_glow_at(wx, wy, wz, haz_half, 0xFF301808u);  /* dark amber/oil */
+    }
+
+    /* GHOST visual: a shimmering white aura over any racer currently ghosting.
+     * (A cheap, clear stand-in for true mesh translucency — the additive glow
+     * washes the car bright/ghostly. td5_arcade_slot_render_alpha is reserved for
+     * a future true-alpha mesh pass.) */
+    {
+        int racers = g_traffic_slot_base;
+        if (racers < 1) racers = TD5_MAX_RACER_SLOTS;
+        for (int s = 0; s < racers; s++) {
+            if (!td5_arcade_slot_is_ghost(s)) continue;
+            TD5_Actor *ga = td5_game_get_actor(s);
+            if (!ga) continue;
+            arcade_emit_glow_at(ga->render_pos.x, ga->render_pos.y, ga->render_pos.z,
+                                pad_half * 0.8f, 0xC0FFFFFFu);
+        }
+    }
+
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 

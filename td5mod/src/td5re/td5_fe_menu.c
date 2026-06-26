@@ -1576,12 +1576,15 @@ void Screen_GameOptions(void) {
         /* [FIXED 2026-06-01, runtime button-table @0x499c78] explicit rests: rows at x=120,
          * y=97 step 40; OK bottom-center (216,377). (Port auto-layout gave 110/93 + OK stacked
          * in-column — 10px left / 4px high / OK mis-placed.) Slide-in still animates X to rest. */
+        /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) row removed from Game
+         * Options — it is now chosen on the Track Selection + Multiplayer screens
+         * since it drives major gameplay (3x crashes, power-ups). Remaining rows
+         * shifted up: 3D Collisions 5->4, OK 6->5. */
         frontend_create_button(SNK_CheckpointTimersButTxt, 120,  97, 0x128, 0x20);
         frontend_create_button(SNK_TrafficButTxt,          120, 137, 0x128, 0x20);
         frontend_create_button(SNK_CopsButTxt,             120, 177, 0x128, 0x20); /* orig label: POLICE */
         frontend_create_button(SNK_DifficultyButTxt,       120, 217, 0x128, 0x20);
-        frontend_create_button(SNK_DynamicsButTxt,         120, 257, 0x128, 0x20);
-        frontend_create_button(SNK_3dCollisionsButTxt,     120, 297, 0x128, 0x20);
+        frontend_create_button(SNK_3dCollisionsButTxt,     120, 257, 0x128, 0x20);
         frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -1612,12 +1615,13 @@ void Screen_GameOptions(void) {
             /* Each row cycles its respective global on arrow input.
              * OK button triggers exit. [S02 (c) 2026-06-04] Circuit Laps (old
              * idx 0) was removed; the remaining six rows shifted up one index. */
-            if (delta != 0 && active_button >= 0 && active_button <= 5) {
+            if (delta != 0 && active_button >= 0 && active_button <= 4) {
                 /* Nav beep on any selector-row change, matching the original's
                  * central arrow handler (DXSound::Play(2) @ 0x0042687c) and the
-                 * other Options screens (Control/Sound). Rows 0..5 are all
-                 * arrow-capable selectors; OK (row 6) is handled separately below
-                 * and is not arrow-capable, so it stays silent on L/R. */
+                 * other Options screens (Control/Sound). Rows 0..4 are all
+                 * arrow-capable selectors; OK (row 5) is handled separately below
+                 * and is not arrow-capable, so it stays silent on L/R.
+                 * [ARCADE 2026-06-26] DYNAMICS row removed; Collisions is now 4. */
                 frontend_play_sfx(2);
                 if (active_button == 0) {
                     s_game_option_checkpoint_timers ^= 1;
@@ -1639,14 +1643,11 @@ void Screen_GameOptions(void) {
                     if (s_game_option_difficulty > 2) s_game_option_difficulty = 0;
                     s_inner_state = 4;
                 } else if (active_button == 4) {
-                    s_game_option_dynamics ^= 1;
-                    s_inner_state = 4;
-                } else if (active_button == 5) {
                     s_game_option_collisions ^= 1;
                     s_inner_state = 4;
                 }
             }
-            if (s_button_index == 6) { /* OK */
+            if (s_button_index == 5) { /* OK */
                 /* Sync the committed game options into g_td5.ini (the global the
                  * boot-override at frontend init reads) and write them back to
                  * td5re.ini so the selection survives a relaunch. The original

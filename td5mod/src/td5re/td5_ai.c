@@ -2370,12 +2370,18 @@ void td5_ai_init_race_actor_runtime(void) {
         int16_t *steer = (int16_t *)(g_ai_physics_template + 0x68);
         int16_t *grip  = (int16_t *)(g_ai_physics_template + 0x2C);
 
-        if (td5_physics_get_dynamics() == 0) {
-            /* ARCADE [@ 0x00432FBC..0x00432FEC]: steer*0x168/256, grip*300/256. */
+        /* [ARCADE/SIM CONSOLIDATION 2026-06-26] Apply the arcade template
+         * scaling (steer*0x168/256, grip*300/256) in BOTH dynamics modes so AI
+         * cars get the same grip/steer values the player cars now get in both
+         * modes (player path: td5_physics_init_vehicle_runtime). Previously this
+         * was gated `get_dynamics()==0` (arcade only); SIMULATION skipped it,
+         * leaving AI on raw template values. The user's consolidation makes
+         * SIMULATION use arcade stats too, so the AI must match. */
+        {
+            /* [@ 0x00432FBC..0x00432FEC]: steer*0x168/256, grip*300/256. */
             *steer = (int16_t)(((int32_t)*steer * 0x168) >> 8);
             *grip  = (int16_t)(((int32_t)*grip  * 0x12C) >> 8); /* 0x12C = 300 */
         }
-        /* SIMULATION [@ 0x00432FBA JNZ skip]: no template scaling. */
     }
 
     /* --- Second layer: mode/circuit/traffic/tier decision tree ---

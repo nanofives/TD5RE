@@ -310,6 +310,12 @@ static int  s_track_max;               /* max track index for current mode */
  * selector is still reached by pressing UP. -1 = not created this entry. */
 static int  s_carsel_rand_btn = -1;
 static int  s_trksel_rand_btn = -1;
+/* [ARCADE 2026-06-26] ARCADE/SIMULATION selector on Track Selection — APPENDED
+ * as the highest button index so the load-bearing 0..8 rows stay put. -1 = not
+ * created this entry. Non-static: the value render lives in td5_frontend.c
+ * (frontend_render_track_selection_preview), which reads this via the extern in
+ * td5_frontend_internal.h. */
+int  s_trksel_dyn_btn  = -1;
 /* [R3-3 2026-06-19] Previously-focused button on the Track-select screen, so case
  * 4 can tell a focus-CHANGE onto the Track selector (button 0) apart from an
  * explicit LEFT/RIGHT pressed while already on it. -2 = "fresh, treat the next
@@ -3167,6 +3173,7 @@ typedef struct {
 
 static const char *const k_cfg_offon[2]  = { "OFF", "ON" };
 static const char *const k_cfg_wincon[3] = { "BUST ALL", "MOST BUSTS", "SUDDEN DEATH" };
+static const char *const k_cfg_arcsim[2] = { "ARCADE", "SIMULATION" };  /* [ARCADE] */
 
 static int mp_cfg_build(MpCfgOpt *o) {
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
@@ -3201,6 +3208,11 @@ static int mp_cfg_build(MpCfgOpt *o) {
     default: /* TD5_MP_MODE_RACE — no extra options */
         break;
     }
+    /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) on EVERY multiplayer mode.
+     * Binds directly to the shared s_game_option_dynamics (int == int32 on this
+     * 32-bit build); ConfigureGameTypeFlags commits it to physics at race launch.
+     * Max rows after this: cop-chase 5, cup 5 — both within MP_CFG_MAX_OPTS (6). */
+    o[n].label="DYNAMICS"; o[n].val=(int32_t*)&s_game_option_dynamics; o[n].min=0; o[n].max=1; o[n].step=1; o[n].enum_labels=k_cfg_arcsim; o[n].enum_count=2; n++;
     return n;
 }
 
@@ -5834,6 +5846,7 @@ void Screen_TrackSelection(void) {
         TD5_LOG_D(LOG_TAG, "TrackSelection: init");
         s_anim_complete = 0;
         s_trksel_rand_btn = -1;   /* [#14] (re)assigned with the buttons below */
+        s_trksel_dyn_btn  = -1;   /* [ARCADE] (re)assigned with the buttons below */
         s_trksel_prev_focus = -2; /* [R3-3] treat the first interactive frame as a focus-entry (no cycle) */
 
         /* Validate track index for cup modes: skip locked/invalid NPC groups */
@@ -5925,6 +5938,14 @@ void Screen_TrackSelection(void) {
                 s_trksel_rand_btn = frontend_create_button("Randomize", 120, 57, 224, 32);
             }
         }
+
+        /* [ARCADE 2026-06-26] DYNAMICS (ARCADE / SIMULATION) selector. Appended
+         * AFTER every load-bearing row (0..8) + the randomize button so none of
+         * their indices move. Placed on the top row (y=57); a normal selectable
+         * value-row (L/R flips s_game_option_dynamics). When the RANDOMIZE full-
+         * button variant also occupies y=57 (non-default TD5RE_RANDOM_ICON=0) the
+         * two share the row — the default icon-randomize leaves y=57 free. */
+        s_trksel_dyn_btn = frontend_create_button(SNK_DynamicsButTxt, 120, 57, 224, 32);
 
         /* Network track-pick (entered from the lobby's SELECT TRACK, flow
          * context 4): the global ESC/back handler navigates to s_return_screen,
@@ -6092,6 +6113,19 @@ void Screen_TrackSelection(void) {
                 frontend_play_sfx(2);
             }
 
+            /* [ARCADE 2026-06-26] DYNAMICS row (ARCADE/SIMULATION). Appended at
+             * the highest button index (s_trksel_dyn_btn), so it is handled here
+             * by an explicit index check rather than the 2..6 value-row range.
+             * L/R flips s_game_option_dynamics; ConfigureGameTypeFlags commits it
+             * to physics (td5_physics_set_dynamics) at race launch. */
+            if (s_trksel_dyn_btn >= 0 && selected_button == s_trksel_dyn_btn && delta != 0) {
+                s_game_option_dynamics ^= 1;
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "TrackSel DYNAMICS -> %s (%d)",
+                          s_game_option_dynamics ? "SIMULATION" : "ARCADE",
+                          s_game_option_dynamics);
+            }
+
             if (s_button_index == 7) { /* OK */
                 /* Lock enforcement */
                 int locked = (s_selected_track >= 0 && s_selected_track < 37 &&
@@ -6112,6 +6146,9 @@ void Screen_TrackSelection(void) {
                     if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
                     if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
                         g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
+                    /* [ARCADE 2026-06-26] Persist the ARCADE/SIMULATION choice
+                     * picked on this screen so it survives a relaunch. */
+                    g_td5.ini.dynamics = s_game_option_dynamics;
                     td5_ini_persist_options();
                     /* [2026-06-12] Per-race AI difficulty: commit the row into
                      * the live tier read by InitializeRaceActorRuntime

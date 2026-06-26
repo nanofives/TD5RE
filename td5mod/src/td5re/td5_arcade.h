@@ -1,0 +1,120 @@
+/**
+ * td5_arcade.h -- ARCADE mode: 3x-collision launch + collectible road power-ups
+ *
+ * PORT-ONLY feature (no original-binary analog). Active only when the race is
+ * launched in ARCADE dynamics mode (td5_physics_get_dynamics() == 0). In
+ * SIMULATION mode every query here is inert (mode_active() == 0), so the faithful
+ * physics path is untouched.
+ *
+ * Power-up model: pads are placed along the track ring at race start; each pad's
+ * kind is deterministic (pad_index % TD5_PU_KINDS) so netplay/replay stay in
+ * lockstep with NO RNG in the sim path. Driving a car over an active pad triggers
+ * that kind's effect INSTANTLY (no inventory / no activation button), then the pad
+ * goes dormant for a respawn cooldown.
+ *
+ *   NITRO  -- short forward-speed burst
+ *   GHOST  -- phase through cars + traffic (collision skipped), car renders translucent
+ *   WRECK  -- "wrecking ball": immune to hits, everything you ram launches 3x harder
+ *   HAZARD -- drops an oil-slick hazard at your rear; the next car to touch it spins out
+ *
+ * Determinism: pad layout, pad kinds, pickup detection, and every effect run off
+ * REPLICATED actor state only. The only entropy is td5_msvc_rand (seeded
+ * identically across peers), and it is NOT used on the sim path.
+ */
+
+#ifndef TD5_ARCADE_H
+#define TD5_ARCADE_H
+
+struct TD5_Actor;   /* forward decl — full struct in re/include/td5_actor_struct.h */
+
+/* ======================================================================
+ * Power-up kinds (also the active-effect id reported to the HUD)
+ * ====================================================================== */
+enum {
+    TD5_PU_NONE   = 0,
+    TD5_PU_NITRO  = 1,   /* forward-speed burst                                   */
+    TD5_PU_GHOST  = 2,   /* phase through cars/traffic + translucent              */
+    TD5_PU_WRECK  = 3,   /* immune; rammed cars get a boosted launch              */
+    TD5_PU_HAZARD = 4,   /* drop an oil slick behind you (spins out the next car) */
+    TD5_PU_KINDS  = 4    /* number of distinct pickup kinds                       */
+};
+
+/* ======================================================================
+ * Lifecycle (driven from td5_game.c)
+ * ====================================================================== */
+
+/* Place pads + clear all per-slot/hazard state. Call once at race start, AFTER
+ * the track + actor table are ready. No-op (and clears state) outside arcade mode. */
+void td5_arcade_init_race(void);
+
+/* Per sim-tick update: pickup detection, effect-timer decay, per-tick effect
+ * application (nitro thrust), hazard TTL + hazard-vs-car spinout. Call once per
+ * genuine race tick AFTER td5_physics_tick() (td5_game.c). No-op outside arcade. */
+void td5_arcade_tick(void);
+
+/* Drop all arcade state (race teardown). Safe to call unconditionally. */
+void td5_arcade_shutdown_race(void);
+
+/* ======================================================================
+ * Mode gate
+ * ====================================================================== */
+
+/* 1 = wild ARCADE mode is active for the current race, 0 = SIMULATION (or no
+ * race). Cheap; reads the committed dynamics flag. Every other query below is
+ * forced inert when this returns 0. */
+int td5_arcade_mode_active(void);
+
+/* ======================================================================
+ * Physics-side queries (collision response in td5_physics.c consults these)
+ * ====================================================================== */
+
+/* Impulse multiplier in 24.8 fixed-point applied to the V2V collision response.
+ * Returns (mult<<8) in arcade (default 3<<8 == 0x300, knob TD5RE_ARCADE_COLLISION_MULT),
+ * or 1<<8 (0x100) in simulation so the response is byte-identical to the faithful path. */
+int td5_arcade_collision_mult_q8(void);
+
+/* 1 = this racer slot is currently GHOSTing — the collision solver should skip
+ * ALL contact for it (V2V both directions). 0 otherwise / outside arcade. */
+int td5_arcade_slot_is_ghost(int slot);
+
+/* 1 = this racer slot is currently a WRECKING BALL — the collision solver should
+ * leave THIS slot's velocity unchanged and give the OTHER car the boosted launch. */
+int td5_arcade_slot_is_wrecking(int slot);
+
+/* Airborne-launch tuning for the arcade V2V heavy-impact branch. The faithful
+ * gate launches vel_y = impact_mag/6 only when impact_mag > 90000. In arcade we
+ * lower the gate and raise the launch so ordinary crashes send cars flying. */
+int td5_arcade_launch_active(void);     /* 1 = apply arcade launch on V2V hits */
+int td5_arcade_launch_gate(void);       /* impact_mag threshold (lower than 90000) */
+int td5_arcade_launch_div(void);        /* vel_y = impact_mag / div (smaller = higher) */
+
+/* Notify the arcade layer that racer `aggressor` rammed `victim` with the given
+ * impact magnitude (called from the V2V heavy-impact branch). Lets HAZARD/WRECK
+ * bookkeeping react to ram events. Safe no-op outside arcade. */
+void td5_arcade_note_ram(int aggressor, int victim, int impact_mag);
+
+/* ======================================================================
+ * Render-side queries (td5_render.c draws pads/hazards; translucency for ghost)
+ * ====================================================================== */
+
+int  td5_arcade_pad_count(void);
+/* Fill world position (float units = 24.8 >> 8) + active flag + kind for pad i.
+ * Returns 1 if i is valid, 0 otherwise. */
+int  td5_arcade_pad_get(int i, float *wx, float *wy, float *wz,
+                        int *active, int *kind);
+
+int  td5_arcade_hazard_count(void);
+int  td5_arcade_hazard_get(int i, float *wx, float *wy, float *wz, int *owner);
+
+/* Render alpha 0..1 for a racer slot: < 1.0 while GHOSTing (translucent), 1.0
+ * otherwise. Render reads this to fade ghosting cars. */
+float td5_arcade_slot_render_alpha(int slot);
+
+/* ======================================================================
+ * HUD-side queries (td5_hud.c draws the active-effect chip per viewport)
+ * ====================================================================== */
+
+int td5_arcade_active_effect(int slot);   /* TD5_PU_* currently active, or NONE */
+int td5_arcade_active_frames(int slot);   /* frames remaining on the active effect */
+
+#endif /* TD5_ARCADE_H */
