@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 26" },
+    { CL_ITEM,    "ARCADE power-ups are now Mario-Kart item BOXES that" },
+    { CL_ITEM,    "  hang over the road - drive through one to grab it" },
+    { CL_ITEM,    "Each box is a glowing, spinning, pulsing cube with a" },
+    { CL_ITEM,    "  distinctive icon (NITRO/GHOST/WRECK/HAZARD)" },
+    { CL_ITEM,    "A grabbed box vanishes, respawning after 30 seconds" },
     { CL_ITEM,    "MORE STATS rebuilt: the car-select stats are now" },
     { CL_ITEM,    "  the car's REAL physics - weight, power, grip," },
     { CL_ITEM,    "  braking, handling, downforce, drivetrain - instead" },

@@ -7610,24 +7610,44 @@ static void render_tracked_actor_marker(const TD5_Actor *actor,
 }
 
 /* ========================================================================
- * [ARCADE 2026-06-26] Power-up pads + dropped hazards — world-space glow
- * billboards. Drawn once per viewport from the per-view world-FX pass in
- * td5_game.c (right after the particles), so the camera basis/pos for THIS
- * view is already loaded. Reuses tracked_marker_emit_quad_world (additive
- * glow when proc-FX is on; color carries the per-kind tint). No-op outside
- * ARCADE mode. Pure render — reads replicated arcade state only.
+ * [ARCADE 2026-06-26 / item-box rework 2026-06-26] Mario-Kart-style floating
+ * collectible power-up BOXES + dropped hazards. Drawn once per viewport from
+ * the per-view world-FX pass in td5_game.c (right after the particles), so the
+ * camera basis/pos for THIS view is already loaded.
+ *
+ * Each active pad renders as:
+ *   - an additive radial GLOW HALO behind it (proc-FX path; per-kind tint),
+ *   - a rotating, pulsating WIREFRAME CUBE (12 thick depth-correct edges via the
+ *     debug-line path — opaque, depth-tested vs the scene, depth-write off), and
+ *   - a distinctive per-kind ICON floating inside, camera-facing.
+ * Animation (spin / pulse / bob) is wall-clock (td5_plat_time_ms) — purely
+ * cosmetic, never feeds the deterministic sim, so it's netplay-safe.
+ *
+ * No-op outside ARCADE mode. Reads replicated arcade state only.
  * ======================================================================== */
 
-/* ARGB (0xAARRGGBB) glow tint per power-up kind. */
+/* ARGB (0xAARRGGBB) tint per power-up kind (matches the HUD effect chip). */
 static uint32_t arcade_pad_color(int kind)
 {
     switch (kind) {
     case TD5_PU_NITRO:  return 0xFF20E0FFu;  /* cyan   — speed   */
-    case TD5_PU_GHOST:  return 0xFFFFFFFFu;  /* white  — ghost   */
+    case TD5_PU_GHOST:  return 0xFFE6E6FFu;  /* white  — ghost   */
     case TD5_PU_WRECK:  return 0xFFFF3020u;  /* red    — wreck   */
     case TD5_PU_HAZARD: return 0xFFFFB000u;  /* amber  — hazard  */
     default:            return 0xFFFFFFFFu;
     }
+}
+
+/* Scale an ARGB's RGB channels by f in [0,1] (keeps alpha) — drives the glow
+ * "pulse" without changing the hue. */
+static uint32_t arcade_scale_rgb(uint32_t c, float f)
+{
+    if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
+    uint32_t a = (c >> 24) & 0xFFu;
+    uint32_t r = (uint32_t)(((c >> 16) & 0xFFu) * f);
+    uint32_t g = (uint32_t)(((c >>  8) & 0xFFu) * f);
+    uint32_t b = (uint32_t)(( c        & 0xFFu) * f);
+    return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
 static void arcade_emit_glow_at(float wx, float wy, float wz,
@@ -7650,6 +7670,105 @@ static void arcade_emit_glow_at(float wx, float wy, float wz,
     tracked_marker_emit_quad_world(corners, vz, 0.0f, 0.0f, 1.0f, 1.0f, color, -1);
 }
 
+/* One camera-facing icon stroke: a line from icon-local (ax,ay) to (bx,by)
+ * (units of `scale`, +y up) laid in the billboard plane at world centre
+ * (cx,cy,cz). Uses the camera right/up world axes (camera_basis rows 0 and 1)
+ * so the symbol always faces the viewer. */
+static void arcade_icon_stroke(float cx, float cy, float cz, float scale,
+                               float ax, float ay, float bx, float by,
+                               uint32_t col)
+{
+    float rx = s_camera_basis[0], ry = s_camera_basis[1], rz = s_camera_basis[2];
+    float ux = s_camera_basis[3], uy = s_camera_basis[4], uz = s_camera_basis[5];
+    float wax = cx + (ax * rx + ay * ux) * scale;
+    float way = cy + (ax * ry + ay * uy) * scale;
+    float waz = cz + (ax * rz + ay * uz) * scale;
+    float wbx = cx + (bx * rx + by * ux) * scale;
+    float wby = cy + (bx * ry + by * uy) * scale;
+    float wbz = cz + (bx * rz + by * uz) * scale;
+    td5_render_debug_line_world(wax, way, waz, wbx, wby, wbz, col);
+}
+
+/* Distinctive per-kind emblem, camera-facing, centred at (cx,cy,cz), radius
+ * `scale` (render units). Line-art so it shows through the wireframe cube. */
+static void arcade_draw_icon(int kind, float cx, float cy, float cz,
+                             float scale, uint32_t col)
+{
+    switch (kind) {
+    case TD5_PU_NITRO:                              /* up-arrow = speed boost */
+        arcade_icon_stroke(cx, cy, cz, scale,  0.0f, -0.9f,  0.0f,  0.95f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.55f, 0.35f, 0.0f,  0.95f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.55f, 0.35f, 0.0f,  0.95f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.55f,-0.2f,  0.0f,  0.4f,  col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.55f,-0.2f,  0.0f,  0.4f,  col);
+        break;
+    case TD5_PU_GHOST: {                            /* hollow ring = phase-through */
+        const float R = 0.85f;
+        for (int k = 0; k < 8; k++) {
+            float a0 = (float)k * 0.78539816f;       /* 45 deg steps */
+            float a1 = (float)(k + 1) * 0.78539816f;
+            arcade_icon_stroke(cx, cy, cz, scale,
+                               cosf(a0) * R, sinf(a0) * R,
+                               cosf(a1) * R, sinf(a1) * R, col);
+        }
+        break;
+    }
+    case TD5_PU_WRECK:                              /* X = smash / wrecking ball */
+        arcade_icon_stroke(cx, cy, cz, scale, -0.8f, -0.8f,  0.8f,  0.8f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.8f,  0.8f,  0.8f, -0.8f, col);
+        break;
+    case TD5_PU_HAZARD:                             /* exclamation mark = trap */
+        arcade_icon_stroke(cx, cy, cz, scale,  0.0f,  0.9f,  0.0f, -0.1f, col);   /* bar */
+        arcade_icon_stroke(cx, cy, cz, scale, -0.14f,-0.55f, 0.0f, -0.42f, col);  /* dot */
+        arcade_icon_stroke(cx, cy, cz, scale,  0.0f, -0.42f, 0.14f,-0.55f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.14f,-0.55f, 0.0f, -0.68f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.0f, -0.68f,-0.14f,-0.55f, col);
+        break;
+    default: break;
+    }
+}
+
+/* Rotating wireframe cube: 8 corners rotated about the WORLD-vertical axis by
+ * `yaw` then tilted about the world-X axis by `tilt` (so the tumble reads as 3D),
+ * 12 edges emitted as thick depth-correct lines. h = half-size (render units). */
+static void arcade_draw_cube(float cx, float cy, float cz, float h,
+                             float yaw, float tilt, uint32_t col)
+{
+    static const signed char cc[8][3] = {
+        {-1,-1,-1},{ 1,-1,-1},{ 1,-1, 1},{-1,-1, 1},   /* bottom */
+        {-1, 1,-1},{ 1, 1,-1},{ 1, 1, 1},{-1, 1, 1},   /* top    */
+    };
+    static const unsigned char ed[12][2] = {
+        {0,1},{1,2},{2,3},{3,0},   /* bottom loop */
+        {4,5},{5,6},{6,7},{7,4},   /* top loop    */
+        {0,4},{1,5},{2,6},{3,7},   /* verticals   */
+    };
+    float ca = cosf(yaw), sa = sinf(yaw);
+    float cb = cosf(tilt), sb = sinf(tilt);
+    float wc[8][3];
+    for (int i = 0; i < 8; i++) {
+        float lx = (float)cc[i][0] * h, ly = (float)cc[i][1] * h, lz = (float)cc[i][2] * h;
+        float rx = lx * ca + lz * sa, rz = -lx * sa + lz * ca, ry = ly;  /* yaw (Y) */
+        float ry2 = ry * cb - rz * sb, rz2 = ry * sb + rz * cb;          /* tilt (X) */
+        wc[i][0] = cx + rx; wc[i][1] = cy + ry2; wc[i][2] = cz + rz2;
+    }
+    for (int e = 0; e < 12; e++) {
+        int a = ed[e][0], b = ed[e][1];
+        td5_render_debug_line_world(wc[a][0], wc[a][1], wc[a][2],
+                                    wc[b][0], wc[b][1], wc[b][2], col);
+    }
+}
+
+/* Flat ring laid in the world XZ plane (an oil-slick footprint) at (cx,cy,cz). */
+static void arcade_draw_flat_ring(float cx, float cy, float cz, float r, uint32_t col)
+{
+    for (int k = 0; k < 8; k++) {
+        float a0 = (float)k * 0.78539816f, a1 = (float)(k + 1) * 0.78539816f;
+        td5_render_debug_line_world(cx + cosf(a0) * r, cy, cz + sinf(a0) * r,
+                                    cx + cosf(a1) * r, cy, cz + sinf(a1) * r, col);
+    }
+}
+
 void td5_render_arcade_pads(void)
 {
     if (!td5_arcade_mode_active()) return;
@@ -7657,27 +7776,62 @@ void td5_render_arcade_pads(void)
     int nh = td5_arcade_hazard_count();
     if (np <= 0 && nh <= 0) return;
 
-    int sizei = 220;
-    const char *e = getenv("TD5RE_ARCADE_PAD_VIS");
-    if (e) { int v = atoi(e); if (v >= 20 && v <= 4000) sizei = v; }
-    float pad_half = (float)sizei;
-    /* Lift the glow centre off the road a touch so it reads as a floating box. */
-    float pad_lift = pad_half * 0.5f;
+    /* Box half-size: auto-scaled at race init from the span length; env override. */
+    float box_half = td5_arcade_box_half_world();
+    if (box_half < 1.0f) box_half = 120.0f;            /* defensive fallback */
+    {
+        const char *e = getenv("TD5RE_ARCADE_PAD_VIS");  /* legacy override knob */
+        if (e) { int v = atoi(e); if (v >= 8 && v <= 40000) box_half = (float)v; }
+    }
+
+    /* Cull boxes too far to matter so a 50-pad ring stays cheap. */
+    float cull = box_half * 160.0f;
+    float cull2 = cull * cull;
+
+    float t = (float)td5_plat_time_ms() * 0.001f;       /* wall-clock seconds */
+    const float tilt = 0.42f;                           /* ~24 deg fixed tumble tilt */
 
     for (int i = 0; i < np; i++) {
         float wx, wy, wz; int active = 0, kind = 0;
         if (!td5_arcade_pad_get(i, &wx, &wy, &wz, &active, &kind)) continue;
         if (!active) continue;
-        arcade_emit_glow_at(wx, wy + pad_lift, wz, pad_half, arcade_pad_color(kind));
+
+        float dcx = wx - s_camera_pos[0];
+        float dcy = wy - s_camera_pos[1];
+        float dcz = wz - s_camera_pos[2];
+        if (dcx*dcx + dcy*dcy + dcz*dcz > cull2) continue;
+
+        float ph    = (float)i * 0.7f;                  /* per-box phase offset */
+        float pulse = 0.5f + 0.5f * sinf(t * 3.0f + ph);
+        float spin  = t * 1.6f + ph;
+        float bob   = sinf(t * 2.0f + ph) * box_half * 0.18f;
+        float cy    = wy + bob;
+        float scl   = box_half * (1.0f + 0.08f * sinf(t * 4.0f + ph));
+        uint32_t kc = arcade_pad_color(kind);
+
+        /* additive glow halo behind the box (pulses in alpha) */
+        uint32_t glow = ((uint32_t)(110.0f + 110.0f * pulse) << 24) | (kc & 0x00FFFFFFu);
+        arcade_emit_glow_at(wx, cy, wz, box_half * 1.9f, glow);
+
+        /* rotating wireframe cube (brightness pulses) */
+        arcade_draw_cube(wx, cy, wz, scl, spin, tilt,
+                         arcade_scale_rgb(kc, 0.65f + 0.35f * pulse));
+
+        /* distinctive per-kind icon, camera-facing, inside the cube */
+        arcade_draw_icon(kind, wx, cy, wz, box_half * 0.55f,
+                         arcade_scale_rgb(kc, 0.85f + 0.15f * pulse));
     }
 
-    /* Dropped hazards: smaller, dark-oily glow flat on the road. */
-    float haz_half = pad_half * 0.6f;
+    /* Dropped hazards: dark-oily glow + a flat amber ring on the road. */
     for (int i = 0; i < nh; i++) {
         float wx, wy, wz; int owner = 0;
         if (!td5_arcade_hazard_get(i, &wx, &wy, &wz, &owner)) continue;
-        arcade_emit_glow_at(wx, wy, wz, haz_half, 0xFF301808u);  /* dark amber/oil */
+        arcade_emit_glow_at(wx, wy, wz, box_half * 0.8f, 0xFF301808u);  /* dark amber/oil */
+        arcade_draw_flat_ring(wx, wy + box_half * 0.05f, wz, box_half * 0.6f, 0xFFFFB000u);
     }
+
+    /* Flush the accumulated cube + icon + ring lines for this view. */
+    td5_render_debug_lines_flush();
 
     /* GHOST visual: a shimmering white aura over any racer currently ghosting.
      * (A cheap, clear stand-in for true mesh translucency — the additive glow
@@ -7691,7 +7845,7 @@ void td5_render_arcade_pads(void)
             TD5_Actor *ga = td5_game_get_actor(s);
             if (!ga) continue;
             arcade_emit_glow_at(ga->render_pos.x, ga->render_pos.y, ga->render_pos.z,
-                                pad_half * 0.8f, 0xC0FFFFFFu);
+                                box_half * 1.4f, 0xC0FFFFFFu);
         }
     }
 

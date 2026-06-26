@@ -25,6 +25,7 @@
 
 #include <stdlib.h>   /* getenv, atoi */
 #include <string.h>   /* memset */
+#include <math.h>     /* sqrt — auto-scale the item-box from the road span length */
 
 #define LOG_TAG "arcade"
 
@@ -67,6 +68,11 @@ static ArcPad    s_pads[ARC_MAX_PADS];
 static int       s_pad_count;
 static ArcHazard s_haz[ARC_MAX_HAZARDS];
 static int       s_ring;                   /* cached span count */
+static int32_t   s_box_half;               /* item-box visual half-size, RENDER units
+                                            * (= world_pos/256 scale, like render_pos).
+                                            * Auto-derived from the track span length so
+                                            * the floating box reads ~1 lane wide on any
+                                            * track regardless of absolute world scale. */
 
 /* per-racer-slot effect state */
 static uint8_t   s_effect[ARC_MAX_SLOTS];        /* TD5_PU_* active, or NONE */
@@ -178,12 +184,44 @@ void td5_arcade_init_race(void) {
         return;
     }
 
+    /* --- Derive the floating-box size from the road's longitudinal scale.
+     * td5_track_get_span_center_world returns RENDER units (= world_pos/256, the
+     * same large-magnitude space as actor render_pos — verified at
+     * td5_render.c:1469, NOT integer-coord/256). Sizing the box to a fraction of
+     * the mean span length makes it read ~1 lane wide on every track without
+     * hardcoding an absolute world scale. */
+    {
+        double acc = 0.0; int samples = 0, prev_ok = 0, px = 0, pz = 0;
+        for (int s = 0; s < s_ring && samples < 12; s++) {
+            int cx = 0, cy = 0, cz = 0;
+            if (!td5_track_get_span_center_world(s, &cx, &cy, &cz)) { prev_ok = 0; continue; }
+            if (prev_ok) {
+                double dx = (double)(cx - px), dz = (double)(cz - pz);
+                double d = sqrt(dx * dx + dz * dz);
+                if (d > 1.0) { acc += d; samples++; }
+            }
+            px = cx; pz = cz; prev_ok = 1;
+        }
+        int span_len = samples ? (int)(acc / samples) : 256;
+        int box_pct  = knob("TD5RE_ARCADE_BOX_PCT", 55, 5, 400);   /* % of span length */
+        int box_half = (int)(((int64_t)span_len * box_pct) / 100);
+        if (box_half < 16)   box_half = 16;
+        if (box_half > 8000) box_half = 8000;
+        s_box_half = knob("TD5RE_ARCADE_BOX_SIZE", box_half, 8, 40000);
+        TD5_LOG_I(LOG_TAG, "init: scale — mean span_len=%d (n=%d) box_half=%d [render units]",
+                  span_len, samples, s_box_half);
+    }
+
     int spacing = knob("TD5RE_ARCADE_PAD_SPACING", 40, 8, 400);
     int count = s_ring / spacing;
     if (count < 6)  count = 6;
     if (count > ARC_MAX_PADS) count = ARC_MAX_PADS;
 
-    int lift = knob("TD5RE_ARCADE_PAD_LIFT", 384, 0, 4096);  /* ~1.5 world units */
+    /* Hang the box above the road: lift its centre ~1.4x the box half-size so it
+     * floats just over the asphalt and the car drives squarely through it (the
+     * box spans ~0.4x..2.4x box_half above the road). Lift is in RENDER units. */
+    int auto_lift = (int)(((int64_t)s_box_half * 7) / 5);
+    int lift = knob("TD5RE_ARCADE_PAD_LIFT", auto_lift, 0, 200000);
     int placed = 0;
     for (int i = 0; i < count; i++) {
         int span = (int)(((int64_t)i * s_ring) / count);
@@ -191,6 +229,10 @@ void td5_arcade_init_race(void) {
         if (!td5_track_get_span_center_world(span, &x, &y, &z))
             continue;
         ArcPad *p = &s_pads[placed];
+        /* x/y/z are RENDER units straight from the track ring — stored verbatim;
+         * pad_get returns them as-is (no further /256). The previous pad_get
+         * divided by 256 a SECOND time, placing every pad 256x too close to the
+         * origin (off the track) — the reason the pads were never visible. */
         p->x = x; p->y = y + lift; p->z = z;
         p->span = (int16_t)span;
         p->kind = (uint8_t)(TD5_PU_NITRO + (i % TD5_PU_KINDS));  /* 1..4 cycling */
@@ -199,8 +241,22 @@ void td5_arcade_init_race(void) {
         placed++;
     }
     s_pad_count = placed;
-    TD5_LOG_I(LOG_TAG, "init: ARCADE on — ring=%d pads=%d (spacing=%d)",
-              s_ring, s_pad_count, spacing);
+
+    /* One-shot scale sanity: pad[0] and the player's spawn (world_pos/256) are
+     * BOTH render units, so they must share magnitude. If pad[0] is ~256x smaller
+     * the position bug regressed. */
+    {
+        TD5_Actor *p0 = td5_game_get_actor(0);
+        TD5_LOG_I(LOG_TAG,
+                  "init: ARCADE on — ring=%d pads=%d (spacing=%d) pad0=(%d,%d,%d) player/256=(%d,%d,%d)",
+                  s_ring, s_pad_count, spacing,
+                  s_pad_count ? s_pads[0].x : 0,
+                  s_pad_count ? s_pads[0].y : 0,
+                  s_pad_count ? s_pads[0].z : 0,
+                  p0 ? (int)(p0->world_pos.x / 256) : 0,
+                  p0 ? (int)(p0->world_pos.y / 256) : 0,
+                  p0 ? (int)(p0->world_pos.z / 256) : 0);
+    }
 }
 
 void td5_arcade_shutdown_race(void) {
@@ -254,7 +310,9 @@ void td5_arcade_tick(void) {
             if (fdiff <= 2) {                          /* at or just past the pad */
                 apply_pickup(s, p->kind, a);
                 p->active = 0;
-                p->respawn = (int16_t)knob("TD5RE_ARCADE_PAD_RESPAWN", 150, 30, 1200);
+                /* Mario-Kart respawn: the box vanishes on pickup and stays gone
+                 * for 30 s. At the fixed 30 Hz sim tick that's 900 ticks. */
+                p->respawn = (int16_t)knob("TD5RE_ARCADE_PAD_RESPAWN", 900, 30, 1800);
             }
         }
     }
@@ -333,12 +391,24 @@ int td5_arcade_pad_get(int i, float *wx, float *wy, float *wz,
                        int *active, int *kind) {
     if (!s_active || i < 0 || i >= s_pad_count) return 0;
     ArcPad *p = &s_pads[i];
-    if (wx) *wx = (float)p->x * (1.0f / 256.0f);
-    if (wy) *wy = (float)p->y * (1.0f / 256.0f);
-    if (wz) *wz = (float)p->z * (1.0f / 256.0f);
+    /* p->x/y/z are already RENDER units (the scale td5_render_load_translation /
+     * actor render_pos use) — return verbatim. NO /256 here: that extra divide is
+     * the old bug that shrank every pad's coords 256x (placing them at the origin,
+     * off the track). Hazards differ: they store actor world_pos (24.8 fixed), so
+     * td5_arcade_hazard_get DOES /256 below. */
+    if (wx) *wx = (float)p->x;
+    if (wy) *wy = (float)p->y;
+    if (wz) *wz = (float)p->z;
     if (active) *active = p->active;
     if (kind)   *kind   = p->kind;
     return 1;
+}
+
+/* Item-box visual half-size in RENDER units (auto-scaled from the span length at
+ * race init). The renderer sizes the rotating cube / icon / glow off this. 0 when
+ * arcade mode is inactive. */
+float td5_arcade_box_half_world(void) {
+    return s_active ? (float)s_box_half : 0.0f;
 }
 
 int td5_arcade_hazard_count(void) { return s_active ? ARC_MAX_HAZARDS : 0; }

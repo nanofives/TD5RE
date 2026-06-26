@@ -30,6 +30,9 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "ARCADE power-ups now floating boxes you drive through",
+    "Item box: glowing spinning pulsing cube w/ kind icon",
+    "Grabbed item box vanishes, respawns after 30 seconds",
     "Cop Chase RANDOM COP: cop drawn at race start, pick car normally",
     "MORE STATS shows real carparam physics (1P + split)",
     "Heavy cars hit harder/shove; light cars get flung",
