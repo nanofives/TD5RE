@@ -6686,6 +6686,14 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
         snprintf(count, sizeof(count), "%d", s_game_option_laps + 1);
         frontend_draw_qr_value(sx, sy, QR_BTN_LAPS, count, 0xFFFFFFFF, 0);
     }
+    /* [PHYSICS 2026-06-26] Physics row value: ARCADE / SIMULATION, drawn in the
+     * value column like every other QR row (caption "Physics", flips the shared
+     * s_game_option_dynamics). Always shown — it's a real player option. */
+    if (s_button_count > QR_BTN_PHYSICS && !s_buttons[QR_BTN_PHYSICS].hidden) {
+        frontend_draw_qr_value(sx, sy, QR_BTN_PHYSICS,
+                               s_game_option_dynamics ? "SIMULATION" : "ARCADE",
+                               0xFFFFFFFF, 0);
+    }
     /* [2026-06-08] AI Screens value (dev-only; row hidden in release). */
     if (s_button_count > QR_BTN_SPLITSCREENS &&
         !s_buttons[QR_BTN_SPLITSCREENS].hidden) {
@@ -10732,6 +10740,10 @@ void td5_frontend_render_ui_rects(void) {
              * fe_draw_option_arrows self-skips hidden buttons so the Direction
              * and Players ◄► vanish with their rows. */
             for (int i = 0; i <= QR_BTN_LAPS; i++) fe_draw_option_arrows(i, sx, sy);
+            /* [PHYSICS 2026-06-26] The Physics (ARCADE/SIM) row is a value-cycle
+             * selector too, but at the appended index QR_BTN_PHYSICS (outside the
+             * 0..LAPS block) — draw its ◄► arrows explicitly. self-skips if hidden. */
+            if (QR_BTN_PHYSICS < s_button_count) fe_draw_option_arrows(QR_BTN_PHYSICS, sx, sy);
             break;
         case TD5_SCREEN_GAME_OPTIONS:
             /* [S02 (c)] Six option rows remain (0..5) after Circuit Laps was

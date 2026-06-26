@@ -16,6 +16,7 @@
 #include "td5_net.h"
 #include "td5_platform.h"
 #include "td5_render.h"
+#include "td5_physics.h"   /* [PHYSICS 2026-06-26] td5_physics_set_dynamics — Quick Race ARCADE/SIM commit */
 #include "td5_save.h"
 #include "td5_sound.h"
 #include "td5_hud.h"
@@ -1061,16 +1062,21 @@ void Screen_QuickRaceMenu(void) {
           /* [2026-06-08] AI Screens (dev/profiling): render the first N AI cars
            * each in their own split-screen pane. Dev-only — the row is created
            * for index stability but hidden+disabled in release builds (the
-           * SpectateScreens knob is also clamped to 0 there). */
-          bi = frontend_create_button("AI Screens",        QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_SPLITSCREENS */
+           * SpectateScreens knob is also clamped to 0 there).
+           * [PHYSICS 2026-06-26] Moved row 5 -> 6: the new Physics (ARCADE/SIM)
+           * row took row 5 (right under Laps). */
+          bi = frontend_create_button("AI Screens",        QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32); /* QR_BTN_SPLITSCREENS */
 #ifdef TD5RE_RELEASE
           if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
 #else
           (void)bi;
 #endif
         }
-        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(7),  96, 32); /* QR_BTN_OK */
-        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(7), 112, 32); /* QR_BTN_BACK */
+        /* [PHYSICS 2026-06-26] OK/Back moved row 7 -> 8 ("a little lower") so the
+         * new Physics row (row 5) + the dev rows (AI Screens 6, Span Offset 7) all
+         * fit above them. With QR_ROW_DY=40, row 8 = y=416 (bottom 448). */
+        frontend_create_button(SNK_OkButTxt,           QR_COL_X,       QR_ROW_Y(8),  96, 32); /* QR_BTN_OK */
+        frontend_create_button(SNK_BackButTxt,         QR_COL_X + 108, QR_ROW_Y(8), 112, 32); /* QR_BTN_BACK */
         /* [2026-06-12] Dev-only toggles to the RIGHT of the Opponents row (y=row3):
          * PlayerIsAI (slot 0 = AI) and AutoThrottle (trace auto-throttle). They sit
          * past the Opponents value column; A/Enter flips them, the label shows state.
@@ -1087,13 +1093,14 @@ void Screen_QuickRaceMenu(void) {
 #endif
         }
         /* [2026-06-15 TASK A1] Dev-only "Span Offset" click-to-type button on its
-         * OWN row below the "AI Screens" row (QR_BTN_SPLITSCREENS @ row5); OK/Back
-         * moved down to row7 above. Created LAST so QR_BTN_OK/BACK/PLAYERAI/AUTOTHR
-         * indices stay 7/8/9/10. Activating it toggles the span input-active state
-         * (frontend_qr_span_toggle_active in td5_frontend.c, which owns the editable
-         * buffer + the value/caret render). Hidden+disabled in release; also gated
-         * by the existing TD5RE_DEV_SPAN_FIELD knob via the widget render path. */
-        { int bs = frontend_create_button("Span Offset", QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32); /* QR_BTN_SPAN */
+         * OWN row below the "AI Screens" row. Created LAST so QR_BTN_OK/BACK/
+         * PLAYERAI/AUTOTHR indices stay 7/8/9/10. Activating it toggles the span
+         * input-active state (frontend_qr_span_toggle_active in td5_frontend.c,
+         * which owns the editable buffer + the value/caret render). Hidden+disabled
+         * in release; also gated by the existing TD5RE_DEV_SPAN_FIELD knob via the
+         * widget render path.
+         * [PHYSICS 2026-06-26] Moved row 6 -> 7 (Physics took row 5, AI Screens 6). */
+        { int bs = frontend_create_button("Span Offset", QR_COL_X, QR_ROW_Y(7), QR_BTN_W, 32); /* QR_BTN_SPAN */
 #ifdef TD5RE_RELEASE
           if (bs >= 0) { s_buttons[bs].hidden = 1; s_buttons[bs].disabled = 1; }
 #else
@@ -1126,6 +1133,18 @@ void Screen_QuickRaceMenu(void) {
                 if (rt >= 0) { s_buttons[rt].hidden = 1; s_buttons[rt].disabled = 1; }
             }
         }
+
+        /* [PHYSICS 2026-06-26] ARCADE / SIMULATION (dynamics) selector row, placed
+         * directly under Laps at row 5. Created LAST (index QR_BTN_PHYSICS=14, after
+         * the RANDOMIZE buttons at 12/13) so every hard-coded index above stays put.
+         * A normal selectable caption row like Car/Track/Direction: L/R (or A/Enter)
+         * flips the shared s_game_option_dynamics, the value column shows ARCADE /
+         * SIMULATION, and the OK handler commits it to physics + the INI. Visible in
+         * BOTH dev and release — it's a real player option, not a dev affordance.
+         * Sync the live value from the persisted INI first so the row shows the
+         * choice that's actually in effect. */
+        s_game_option_dynamics = g_td5.ini.dynamics ? 1 : 0;
+        frontend_create_button("Physics", QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_PHYSICS */
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
@@ -1237,6 +1256,20 @@ void Screen_QuickRaceMenu(void) {
                 frontend_play_sfx(2);
             }
 
+            /* [PHYSICS 2026-06-26] Physics (ARCADE/SIMULATION) row: a 2-state toggle
+             * like Direction. L/R OR A/Enter while focused flips the shared
+             * s_game_option_dynamics (0=ARCADE, 1=SIMULATION). The OK handler commits
+             * it to physics + the INI. Mirrors the Track Selection DYNAMICS row. */
+            if (selected_button == QR_BTN_PHYSICS && s_button_count > QR_BTN_PHYSICS &&
+                !s_buttons[QR_BTN_PHYSICS].hidden &&
+                (delta != 0 || s_button_index == QR_BTN_PHYSICS)) {
+                s_game_option_dynamics ^= 1;
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "QuickRace PHYSICS -> %s (%d)",
+                          s_game_option_dynamics ? "SIMULATION" : "ARCADE",
+                          s_game_option_dynamics);
+            }
+
             /* [2026-06-08] AI Screens (dev/profiling): 0..min(opponents,
              * TD5_MAX_VIEWPORTS-1). Each step adds an AI car to its own pane.
              * Hidden+disabled in release (see case-0 creation). */
@@ -1310,11 +1343,20 @@ void Screen_QuickRaceMenu(void) {
                     /* [S02 (c) 2026-06-04] Persist the lap choice (re-homed from
                      * Game Options' OK, which no longer owns this setting). */
                     g_td5.ini.laps = s_game_option_laps;
+                    /* [PHYSICS 2026-06-26] Commit the ARCADE/SIMULATION choice picked
+                     * on the new Physics row. Persist to the INI (survives relaunch)
+                     * AND push it into the physics race-init flag NOW, before the
+                     * race launches — ConfigureGameTypeFlags already ran at screen
+                     * init with the pre-toggle value, so set it here deterministically
+                     * (mirrors the AutoRace commit at td5_frontend.c). */
+                    g_td5.ini.dynamics = s_game_option_dynamics;
+                    td5_physics_set_dynamics(s_game_option_dynamics);
                     td5_ini_persist_options();
                     TD5_LOG_I(LOG_TAG,
-                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d",
+                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d physics=%s",
                               s_selected_track, s_track_direction ? "Backwards" : "Forwards",
-                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1);
+                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1,
+                              s_game_option_dynamics ? "SIMULATION" : "ARCADE");
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 5;
                 }
