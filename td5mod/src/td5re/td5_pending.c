@@ -32,6 +32,8 @@ static int s_overlay_on = 0;
 static const char *const k_seed[] = {
     "Quick Race PHYSICS row toggles ARCADE/SIMULATION + fits OK/Back",
     "Minimap: on a branch both fork tracks render (not just dots)",
+    "MORE STATS BALANCE shows a visual front/rear weight split bar",
+    "Quick stat bars (under PAINT) match the MORE STATS scale",
     "MORE STATS: Left/Right switches car in place (1P stats screen)",
     "MORE STATS: captions under less-obvious bars; text clears RANDOM",
     "Cop Chase RANDOM COP: cop drawn at race start, pick car normally",

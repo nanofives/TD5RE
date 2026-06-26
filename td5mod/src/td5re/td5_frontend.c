@@ -7385,13 +7385,17 @@ static const char *frontend_carphys_drivetrain_text(int ext_id) {
     dt = (int)s_cps[ext_id].drivetrain;
     return (dt == 1) ? "RWD" : (dt == 2) ? "FWD" : (dt == 3) ? "AWD" : "-";
 }
-static void frontend_carphys_balance_text(int ext_id, char *out, size_t cap) {
-    int f = 0;
+/* Front-axle weight share as a 0..100 int (rear = 100 - front); 0 if invalid. */
+static int frontend_carphys_front_pct(int ext_id) {
     if (ext_id >= 0 && ext_id < TD5_CAR_COUNT && s_cps[ext_id].valid) {
         int fw = (int)s_cps[ext_id].fwt, rw = (int)s_cps[ext_id].rwt;
         int tot = fw + rw;
-        if (tot > 0) f = (fw * 100 + tot / 2) / tot;
+        if (tot > 0) return (fw * 100 + tot / 2) / tot;
     }
+    return 0;
+}
+static void frontend_carphys_balance_text(int ext_id, char *out, size_t cap) {
+    int f = frontend_carphys_front_pct(ext_id);
     if (f <= 0) snprintf(out, cap, "-");
     else        snprintf(out, cap, "%d%% / %d%%", f, 100 - f);  /* front% / rear% */
 }
@@ -7445,6 +7449,42 @@ static void frontend_render_physics_stats(int ext_id, float px, float py, float 
             f = frontend_carphys_frac(ext_id, i);
             if (f > 0.0f)
                 fe_draw_quad(barx * sx, bary * sy, f * barw * sx, barh * sy, accent, -1, 0, 0, 1, 1);
+        } else if (i == CPS_BALANCE && !compact) {
+            /* [2026-06-26] BALANCE as a visual front/rear weight-split graph (SP):
+             * the bar is split into a FRONT segment (left, amber accent) and a REAR
+             * segment (right, blue). A bright tick at the centre marks the 50/50
+             * neutral point, so a nose- or tail-heavy car reads at a glance. The
+             * exact percentages are printed inside their own segments. */
+            int   fpct = frontend_carphys_front_pct(ext_id);
+            float barh = rh - 6.0f;
+            float bary, ff;
+            if (barh < 2.0f) barh = 2.0f;
+            bary = ry + (rh - barh) * 0.5f;
+            ff   = (fpct > 0) ? (float)fpct / 100.0f : 0.5f;
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_quad(barx * sx, bary * sy, barw * sx, barh * sy, 0xFF101828u, -1, 0, 0, 1, 1);
+            if (fpct > 0) {
+                fe_draw_quad(barx * sx, bary * sy, ff * barw * sx, barh * sy,
+                             accent, -1, 0, 0, 1, 1);                       /* front (left)  */
+                fe_draw_quad((barx + ff * barw) * sx, bary * sy,
+                             (1.0f - ff) * barw * sx, barh * sy,
+                             0xFF4890D0u, -1, 0, 0, 1, 1);                  /* rear (right)  */
+            }
+            /* centre 50/50 reference tick (drawn over the fills) */
+            fe_draw_quad((barx + 0.5f * barw - 0.75f) * sx, (bary - 1.0f) * sy,
+                         1.5f * sx, (barh + 2.0f) * sy, 0xFFFFFFFFu, -1, 0, 0, 1, 1);
+            if (fpct > 0) {
+                char  fp[8], rp[8];
+                float pls_x = lsx * 0.7f, pls_y = lsy * 0.7f;
+                float pcapd = SMALLFONT_TTF_CAP * (pls_y / sy);
+                float pty   = (ry + (rh - pcapd) * 0.5f) * sy;
+                float rw_txt;
+                snprintf(fp, sizeof fp, "%d%%", fpct);
+                snprintf(rp, sizeof rp, "%d%%", 100 - fpct);
+                rw_txt = fe_measure_small_text(rp) * fe_glyph_sx(pls_x, pls_y);
+                fe_draw_small_text((barx + 3.0f) * sx, pty, fp, 0xFF202830u, pls_x, pls_y);       /* dark on amber */
+                fe_draw_small_text((barx + barw - 3.0f) * sx - rw_txt, pty, rp, 0xFFFFFFFFu, pls_x, pls_y); /* white on blue */
+            }
         } else {
             const char *t;
             if (i == CPS_DRIVETRAIN) t = frontend_carphys_drivetrain_text(ext_id);
@@ -7525,13 +7565,33 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     }
     capd = SMALLFONT_TTF_CAP * (lsy / sy);
 
-    /* SPEED + ACCEL from the config.nfo spec sheet; HANDLING from the car's real
-     * carparam inertia (never blank). Combine into one 3-bit per-bar fill mask. */
-    valid_mask = frontend_glance_from_fields(f7, f8, &spd, &acc);
-    if (valid_mask)
-        frontend_normalize_glance(spd, acc, &fr[0], &fr[1]);
-    if (frontend_handling_frac(car_ext_id, &fr[2]))
-        valid_mask |= 4;
+    /* [2026-06-26] Source all three quick bars from the SAME roster-normalised
+     * carparam physics (frontend_carphys_frac) the MORE STATS panel uses, so
+     * SPEED/ACCEL/HANDLING read on an IDENTICAL scale across both displays. Was:
+     * SPEED/ACCEL from the cosmetic config.nfo spec glance + HANDLING from a
+     * separate inertia frac — a visibly different scale than MORE STATS. The spec
+     * glance / inertia frac are kept only as a fallback for a car whose
+     * carparam.dat failed to load (carphys frac returns -1). */
+    {
+        float sf = frontend_carphys_frac(car_ext_id, CPS_TOPSPEED);  /* SPEED <-> TOP SPEED */
+        float af = frontend_carphys_frac(car_ext_id, CPS_ACCEL);
+        float hf = frontend_carphys_frac(car_ext_id, CPS_HANDLING);
+        valid_mask = 0;
+        if (sf >= 0.0f) { fr[0] = sf; valid_mask |= 1; }
+        if (af >= 0.0f) { fr[1] = af; valid_mask |= 2; }
+        if (hf >= 0.0f) { fr[2] = hf; valid_mask |= 4; }
+        if ((valid_mask & 3) != 3) {           /* carparam missing -> spec glance */
+            int gm = frontend_glance_from_fields(f7, f8, &spd, &acc);
+            if (gm) {
+                float gs = 0.0f, ga = 0.0f;
+                frontend_normalize_glance(spd, acc, &gs, &ga);
+                if (!(valid_mask & 1) && (gm & 1)) { fr[0] = gs; valid_mask |= 1; }
+                if (!(valid_mask & 2) && (gm & 2)) { fr[1] = ga; valid_mask |= 2; }
+            }
+        }
+        if (!(valid_mask & 4) && frontend_handling_frac(car_ext_id, &fr[2]))
+            valid_mask |= 4;                    /* carparam missing -> inertia frac */
+    }
 
     /* Frame: the regular blue/unselected button look (non-interactive). In the
      * compact (small-split) panes, thin the rim proportionally to the panel
