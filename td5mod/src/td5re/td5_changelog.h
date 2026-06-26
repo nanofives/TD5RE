@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Game is now crisp on high-DPI / scaled displays:" },
+    { CL_ITEM,    "  no more blur on 4K screens at 150%/300% scaling" },
     { CL_ITEM,    "Multiplayer results table tidied: name column lines" },
     { CL_ITEM,    "  up under the title, columns closer, cleaner divider" },
     { CL_ITEM,    "Cup races now show a CUP RESULTS screen with a POINTS" },
