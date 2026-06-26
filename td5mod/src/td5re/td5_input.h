@@ -85,6 +85,10 @@
 /** FF collision max magnitude. */
 #define TD5_INPUT_FF_COLLISION_MAX      10000
 
+/** [COP CHASE ARREST 2026-06-25] Magnitude of the strong short jolt fired for both
+ *  the arresting cop and the busted suspect when an arrest completes (90% of max). */
+#define TD5_FF_ARREST_JOLT_MAG          9000
+
 /** Recording strip mask (removes camera/escape bits). */
 #define TD5_INPUT_RECORD_STRIP_MASK     0xBBFFFFFFu
 
@@ -367,6 +371,11 @@ void td5_input_ff_play_effect(int slot, int effect_slot, int magnitude,
 /** Dispatch collision FF to both vehicles. (0x428A60) */
 void td5_input_ff_collision(int contact_side, int actor_a_slot,
                             int actor_b_slot, int raw_magnitude);
+
+/** [COP CHASE ARREST 2026-06-25] Fire a one-shot, strong, SHORT decaying jolt on a
+ *  single player's wheel/pad. Reuses the collision-pulse manager so it auto-releases
+ *  (no never-stopped constant force). Used for the cop-chase arrest event. */
+void td5_input_ff_jolt(int slot, int magnitude);
 
 /* ========================================================================
  * Public API -- Device Enumeration & Configuration

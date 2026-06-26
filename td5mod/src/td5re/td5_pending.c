@@ -30,6 +30,12 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Cop roles: OK rejected if all-cop or all-suspect",
+    "Arrested car stops dead, can't be driven/pushed",
+    "ARRESTED splash centred; its floating bar hidden",
+    "Arrested cars drop off the split-screen overview map",
+    "Strong short rumble for BOTH cop+suspect on arrest",
+    "All suspects show a bust bar; shrinks w/ distance, 2x range",
     "CHOOSE YOUR TEAM / COP ROLES show profile names",
     "Cup team mode: host assigns AI opponents' teams",
     "Cup team mode: per-opponent skill slider drives AI",

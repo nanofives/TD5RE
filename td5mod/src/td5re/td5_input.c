@@ -3063,6 +3063,19 @@ void td5_input_ff_collision(int contact_side, int actor_a_slot,
     ff_arm_collision_pulse(actor_b_slot, slot_b_effect, mag_b);
 }
 
+/* [COP CHASE ARREST 2026-06-25] One-shot strong+short jolt on one slot's wheel/pad.
+ * Reuses the decaying collision-pulse path (TD5_FF_COLLISION_PULSE_TICKS ~= 12
+ * render frames) so it self-releases — never the never-stopped constant-force path.
+ * Fired for BOTH the arresting cop and the busted suspect when an arrest lands. */
+void td5_input_ff_jolt(int slot, int magnitude)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    if (magnitude <= 0) return;
+    if (magnitude > TD5_INPUT_FF_COLLISION_MAX) magnitude = TD5_INPUT_FF_COLLISION_MAX;
+    ff_arm_collision_pulse(slot, TD5_FF_SLOT_FRONTAL, magnitude);
+    TD5_LOG_I(LOG_TAG, "FF arrest jolt: slot=%d mag=%d", slot, magnitude);
+}
+
 /* ========================================================================
  * Device Enumeration & Configuration
  * ======================================================================== */
