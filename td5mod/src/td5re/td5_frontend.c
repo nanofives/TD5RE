@@ -7242,33 +7242,39 @@ void frontend_load_car_spec_fields(int car_index) {
  *   BALANCE    front/(front+rear) weight 0xB4/0xB6     (text "F.. R..")
  * Bars are roster-normalised (cop cars cached but excluded from the ranges,
  * like the glance bars). One-time cached scan; per-frame touches no files. */
+/* Display order (top -> bottom). Each constant's numeric value IS its row index,
+ * so the labels/captions arrays below and the loop in frontend_render_physics_stats
+ * follow this order; cps_bar_value() and frontend_carphys_frac() switch on the
+ * NAMES, so reordering here only moves rows, never the data each maps to.
+ * [2026-06-26] WEIGHT moved down to sit under GRIP (user request). */
 enum {
-    CPS_WEIGHT = 0, CPS_TOPSPEED, CPS_ACCEL, CPS_POWER, CPS_BRAKING,
-    CPS_GRIP, CPS_HANDLING, CPS_DOWNFORCE, CPS_DRIVETRAIN, CPS_BALANCE,
+    CPS_TOPSPEED = 0, CPS_ACCEL, CPS_POWER, CPS_BRAKING, CPS_GRIP,
+    CPS_WEIGHT, CPS_HANDLING, CPS_DOWNFORCE, CPS_DRIVETRAIN, CPS_BALANCE,
     CPS_COUNT
 };
 #define CPS_BAR_COUNT 8   /* first 8 stats are bars; last 2 are text */
 
 static const char *k_cps_labels[CPS_COUNT] = {
-    "WEIGHT", "TOP SPEED", "ACCEL", "POWER", "BRAKING",
-    "GRIP", "HANDLING", "DOWNFORCE", "DRIVETRAIN", "BALANCE"
+    "TOP SPEED", "ACCEL", "POWER", "BRAKING", "GRIP",
+    "WEIGHT", "HANDLING", "DOWNFORCE", "DRIVETRAIN", "BALANCE"
 };
 
 /* [2026-06-26 PORT ADDITION] Short plain-language captions for the less-obvious
  * stats, drawn as a small dim second line under the label in the SINGLE-PLAYER
  * MORE STATS panel only (gated on !compact — the tiny split-screen MP panes have
  * no vertical room). NULL = the label already reads clearly on its own
- * (WEIGHT/TOP SPEED/POWER/BRAKING). Keep each caption short so it stays inside
- * the ~40%-of-panel label column and never runs under the bar. */
+ * (TOP SPEED/BRAKING/WEIGHT). Keep each caption short so it stays inside the
+ * ~40%-of-panel label column and never runs under the bar. Order matches
+ * k_cps_labels above. */
 static const char *k_cps_explain[CPS_COUNT] = {
-    NULL,                /* WEIGHT     */
-    NULL,                /* TOP SPEED  */
-    "power-to-weight",   /* ACCEL      */
-    NULL,                /* POWER      */
-    NULL,                /* BRAKING    */
-    "cornering grip",    /* GRIP       */
-    "agility",           /* HANDLING   */
-    "grip at speed",     /* DOWNFORCE  */
+    NULL,                  /* TOP SPEED  */
+    "power-to-weight",     /* ACCEL      */
+    "engine output",       /* POWER  (raw engine pull, before weight) */
+    NULL,                  /* BRAKING    */
+    "cornering grip",      /* GRIP       */
+    NULL,                  /* WEIGHT     */
+    "agility",             /* HANDLING   */
+    "grip at speed",       /* DOWNFORCE  */
     "driven wheels",       /* DRIVETRAIN */
     "weight: front / rear" /* BALANCE    */
 };

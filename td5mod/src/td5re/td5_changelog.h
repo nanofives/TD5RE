@@ -37,6 +37,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  (ARCADE / SIMULATION) right on the screen" },
     { CL_ITEM,    "Minimap fix: driving onto a fork no longer blanks" },
     { CL_ITEM,    "  the road - both tracks of a branch show again" },
+    { CL_ITEM,    "MORE STATS: POWER now explained (engine output) and" },
+    { CL_ITEM,    "  WEIGHT moved down to sit under GRIP" },
     { CL_ITEM,    "MORE STATS BALANCE is now a visual front/rear weight" },
     { CL_ITEM,    "  bar (amber front, blue rear, centre = 50/50)" },
     { CL_ITEM,    "Quick stat bars (under PAINT) now use the same scale" },
