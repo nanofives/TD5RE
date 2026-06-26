@@ -58,6 +58,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "New Cop Chase option RANDOM COP: turn it on and the" },
+    { CL_ITEM,    "  cop is picked at random when the race starts - you" },
+    { CL_ITEM,    "  pick any car normally and find out if you're the" },
+    { CL_ITEM,    "  cop only once you're on the track" },
     { CL_ITEM,    "PENDING TO TEST menu: press SUPR / DELETE to remove" },
     { CL_ITEM,    "  the highlighted item (vs ENTER, which marks tested)" },
     { CL_ITEM,    "Idle the main menu for a minute and a random demo" },

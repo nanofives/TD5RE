@@ -1594,6 +1594,63 @@ static void td5_game_assign_wheel_styles(uint32_t race_seed) {
     }
 }
 
+/* [MP COP CHASE: RANDOM COP 2026-06-25] When the cop-chase config has RANDOM COP on,
+ * the manual cop/suspect role screen was skipped: players chose any car, and the
+ * cop(s) are drawn HERE, at race start, so nobody knows their role until the race
+ * begins (the HUD "YOU ARE THE COP / SUSPECT" banner reveals it on the countdown).
+ *
+ * Determinism: seed a PRIVATE xorshift stream off the replicated session_seed (the
+ * same trick as td5_game_assign_wheel_styles). This (a) does NOT consume the shared
+ * CRT rand() sequence, so the faithful AI/traffic RNG is untouched, and (b) yields
+ * the identical pick on every netplay peer and across a replay (which restores the
+ * recorded seed). In local split-screen the seed is GetTickCount(), so the cop
+ * genuinely varies race to race. Picks TD5RE_COPCHASE_RANDOM_COPS distinct human
+ * slots (default 1, clamped to [1, humans-1] so there is always >=1 suspect) and
+ * writes cop_slot_mask + cop_slot; cop behaviour, the car the cop drives (whatever
+ * they picked), the per-pane reveal, and the minimap all read these. No-op unless
+ * the human-cop random path is active. */
+static void td5_game_assign_random_cop(uint32_t race_seed) {
+    TD5_MpModeConfig *c = &g_td5.mp_mode_config;
+    if (c->mode != TD5_MP_MODE_COP_CHASE || g_td5.network_active ||
+        c->cop_is_ai || !c->cop_random)
+        return;
+
+    int nh = g_td5.num_human_players;
+    if (nh < 2) nh = 2;
+    if (nh > TD5_MAX_HUMAN_PLAYERS) nh = TD5_MAX_HUMAN_PLAYERS;
+
+    int want = 1;                                  /* one random cop by default */
+    {
+        const char *e = getenv("TD5RE_COPCHASE_RANDOM_COPS");
+        if (e && e[0]) want = atoi(e);
+    }
+    if (want < 1)        want = 1;
+    if (want > nh - 1)   want = nh - 1;            /* always leave >=1 suspect */
+
+    uint32_t s = race_seed ^ 0xC0FFEE5Du;          /* decorrelate from gameplay + wheel streams */
+    if (s == 0) s = 0xB7E15163u;                   /* xorshift fixed-point guard */
+
+    /* Partial Fisher-Yates over the human slot list: shuffle the first `want`
+     * positions and take them as the cops — distinct, ~uniform, deterministic. */
+    int order[TD5_MAX_HUMAN_PLAYERS];
+    for (int i = 0; i < nh; i++) order[i] = i;
+    for (int i = 0; i < want; i++) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;   /* xorshift32 */
+        int j = i + (int)((s >> 1) % (uint32_t)(nh - i));
+        int t = order[i]; order[i] = order[j]; order[j] = t;
+    }
+    int mask = 0, primary = -1;
+    for (int i = 0; i < want; i++) {
+        mask |= (1 << order[i]);
+        if (primary < 0 || order[i] < primary) primary = order[i];  /* lowest set bit */
+    }
+    c->cop_slot_mask = mask;
+    c->cop_slot      = (primary >= 0) ? primary : 0;
+    TD5_LOG_I(LOG_TAG,
+              "InitRace: RANDOM COP assigned mask=0x%X primary=%d (%d cop(s) of %d humans, seed=0x%08X)",
+              mask, c->cop_slot, want, nh, race_seed);
+}
+
 /* Public getter for the active per-race RNG seed (s_saved_race_seed). This is the
  * REPLICATED seed: set from the host-broadcast session_seed at race start (and
  * restored from the recorded value for replays), so it is bit-identical on every
@@ -1858,6 +1915,12 @@ int td5_game_init_race_session(void) {
          * stream off the same seed (does NOT touch the CRT rand() drained
          * above, so faithful AI/traffic RNG is unchanged). */
         td5_game_assign_wheel_styles(session_seed);
+
+        /* [RANDOM COP 2026-06-25] Draw the cop-chase cop(s) from the SAME replicated
+         * seed (private stream — does NOT touch the CRT rand() drained above), so the
+         * pick is identical on every netplay peer / across a replay yet varies race to
+         * race in local split-screen. No-op unless RANDOM COP is on. */
+        td5_game_assign_random_cop(session_seed);
     }
 
     /* ---- Step 1: Display random loading screen TGA (rand()%20) ---- */
