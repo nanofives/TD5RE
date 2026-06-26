@@ -81,6 +81,13 @@ static int32_t   s_lane_w;                 /* one lane width, RENDER units (oil-
 static uint8_t   s_effect[ARC_MAX_SLOTS];        /* TD5_PU_* active, or NONE */
 static int16_t   s_effect_frames[ARC_MAX_SLOTS]; /* frames remaining          */
 
+/* per-racer-slot OIL-SLICK drift state (HAZARD victim): the car drifts
+ * uncontrollably in a random direction for a few seconds while still rolling. */
+static int16_t   s_oiled_frames[ARC_MAX_SLOTS];  /* ticks left drifting on oil */
+static int8_t    s_oiled_dir[ARC_MAX_SLOTS];     /* random drift direction (-1/+1) */
+static uint32_t  s_oiled_rng[ARC_MAX_SLOTS];     /* per-slot wobble stream     */
+static uint32_t  s_oil_event_ctr;                /* decorrelates successive oilings */
+
 /* ======================================================================
  * Helpers
  * ====================================================================== */
@@ -153,14 +160,52 @@ static void apply_pickup(int slot, int kind, TD5_Actor *a) {
     }
 }
 
-/* Spin a car out (hazard hit): big yaw kick + halve horizontal speed, once. */
-static void spin_out(TD5_Actor *a) {
-    int spin = knob("TD5RE_ARCADE_HAZARD_SPIN", 0x6000, 0x1000, 0x7FFF);
-    /* alternate spin sign by current lateral-speed sign so it feels like a slide */
-    int sign = (a->lateral_speed >= 0) ? 1 : -1;
-    a->angular_velocity_yaw += sign * spin;
-    a->linear_velocity_x /= 2;
-    a->linear_velocity_z /= 2;
+/* Hazard hit: put a car into an uncontrollable OIL DRIFT for a few seconds. The
+ * car keeps rolling forward but slews toward a RANDOM direction (deterministic
+ * across peers via the replicated race seed); the per-tick drift is applied in
+ * td5_arcade_tick. */
+static void start_oil_drift(int slot, TD5_Actor *a) {
+    if (slot < 0 || slot >= ARC_MAX_SLOTS || !a) return;
+    int frames = knob("TD5RE_ARCADE_OIL_FRAMES", 75, 15, 300);   /* ~2.5 s @30Hz */
+    s_oiled_frames[slot] = (int16_t)frames;
+    uint32_t seed = td5_game_get_race_seed()
+                    ^ (0x9E3779B9u * (uint32_t)(slot + 1))
+                    ^ (s_oil_event_ctr++ * 2654435761u);
+    if (seed == 0) seed = 0xD1B54A35u;
+    s_oiled_rng[slot] = seed;
+    s_oiled_dir[slot] = (seed & 1u) ? 1 : -1;                    /* random left / right */
+    /* small momentum bleed at entry so the slick visibly grabs the car */
+    a->linear_velocity_x -= a->linear_velocity_x / 8;
+    a->linear_velocity_z -= a->linear_velocity_z / 8;
+}
+
+/* Append one box to s_pads at (span, sub_lane) with a RANDOM kind. sub<0 uses the
+ * span-centre lane. Coords come back in RENDER units. Advances *rng for the kind.
+ * Returns 1 if a box was placed. */
+static int arc_emit_box(int span, int sub, int lanes, int lift, uint32_t *rng) {
+    if (s_pad_count >= ARC_MAX_PADS) return 0;
+    int x = 0, y = 0, z = 0;
+    if (sub >= 0 && lanes > 1) {
+        int lx, ly, lz;
+        if (td5_track_get_span_lane_world(span, sub, &lx, &ly, &lz)) {
+            x = lx / 256; y = ly / 256; z = lz / 256;   /* 24.8 fixed -> render units */
+        } else if (!td5_track_get_span_center_world(span, &x, &y, &z)) {
+            return 0;
+        }
+    } else {
+        if (!td5_track_get_span_center_world(span, &x, &y, &z)) return 0;
+        sub = lanes / 2;
+    }
+    ArcPad *p = &s_pads[s_pad_count];
+    p->x = x; p->y = y + lift; p->z = z;
+    p->span = (int16_t)span;
+    p->sub_lane = (int8_t)sub;
+    *rng ^= *rng << 13; *rng ^= *rng >> 17; *rng ^= *rng << 5;
+    p->kind = (uint8_t)(TD5_PU_NITRO + (*rng % (uint32_t)TD5_PU_KINDS));
+    p->active = 1;
+    p->respawn = 0;
+    s_pad_count++;
+    return 1;
 }
 
 /* ======================================================================
@@ -173,6 +218,10 @@ void td5_arcade_init_race(void) {
     memset(s_haz,  0, sizeof(s_haz));
     memset(s_effect, 0, sizeof(s_effect));
     memset(s_effect_frames, 0, sizeof(s_effect_frames));
+    memset(s_oiled_frames, 0, sizeof(s_oiled_frames));
+    memset(s_oiled_dir, 0, sizeof(s_oiled_dir));
+    memset(s_oiled_rng, 0, sizeof(s_oiled_rng));
+    s_oil_event_ctr = 0;
     s_pad_count = 0;
     s_active = (td5_physics_get_dynamics() == 0);   /* mode 0 = ARCADE (wild) */
 
@@ -241,72 +290,67 @@ void td5_arcade_init_race(void) {
     int usable = s_ring - start_span;
     if (usable < 1) usable = s_ring;
 
-    int spacing = knob("TD5RE_ARCADE_PAD_SPACING", 18, 6, 400);   /* denser = more boxes */
+    /* Frequency scales with the number of HUMAN players: 1 human -> ~SPACING_MAX
+     * (300) spans between boxes, falling toward SPACING_MIN (100) as humans are
+     * added, so a fuller race has more power-ups to go round. PAD_SPACING overrides. */
+    int num_h = g_td5.num_human_players; if (num_h < 1) num_h = 1;
+    int sp_max = knob("TD5RE_ARCADE_SPACING_MAX", 300, 20, 4000);
+    int sp_min = knob("TD5RE_ARCADE_SPACING_MIN", 100, 10, 4000);
+    if (sp_min > sp_max) sp_min = sp_max;
+    int spacing = sp_max - (num_h - 1) * ((sp_max - sp_min) / 5);
+    if (spacing < sp_min) spacing = sp_min;
+    if (spacing > sp_max) spacing = sp_max;
+    { const char *e = getenv("TD5RE_ARCADE_PAD_SPACING"); if (e) { int v = atoi(e); if (v >= 6) spacing = v; } }
+
     int count = usable / spacing;
-    if (count < 6)  count = 6;
+    if (count < 4)  count = 4;
     if (count > ARC_MAX_PADS) count = ARC_MAX_PADS;
 
     /* Hang the box just over the road: lift its centre ~1.1x the box half-size so
-     * it floats close to the asphalt (box bottom ~0.1x box_half above the road)
-     * and the car drives through it. Lift is in RENDER units, like the box size. */
+     * it floats close to the asphalt and the car drives through it (RENDER units). */
     int auto_lift = (int)(((int64_t)s_box_half * 11) / 10);
     int lift = knob("TD5RE_ARCADE_PAD_LIFT", auto_lift, 0, 200000);
-    /* Place the boxes on the SIDE LINES (shoulders), alternating left/right edge
-     * lane, instead of dead centre. side=0 forces centre (legacy). */
+
+    /* Single boxes alternate left/right shoulder; side=0 forces centre (legacy). */
     int side = knob("TD5RE_ARCADE_SIDE", 1, 0, 1);
 
-    /* Random power-up kind per box, but netplay-deterministic: a private
-     * xorshift stream seeded off the REPLICATED per-race seed, so every peer and
-     * replay lays out identical kinds (no shared CRT rand on the sim path). */
+    /* With >4 HUMAN players, each spawn point has a growing chance to hold TWO
+     * boxes — one on the left-most lane, one on the right-most — so a crowded
+     * field still has enough to grab. 25% at 5 humans, +15% per extra human. */
+    int dbl_pct = (num_h > 4) ? (25 + (num_h - 5) * 15) : 0;
+    if (dbl_pct > 90) dbl_pct = 90;
+
+    /* Random kind per box, netplay-deterministic (private xorshift off the
+     * REPLICATED per-race seed; no shared CRT rand on the sim path). */
     uint32_t rng = td5_game_get_race_seed() ^ 0x1B0CA9E5u;
     if (rng == 0) rng = 0x9E3779B9u;
 
-    int placed = 0;
-    for (int i = 0; i < count; i++) {
+    s_pad_count = 0;
+    for (int i = 0; i < count && s_pad_count < ARC_MAX_PADS; i++) {
         int span = start_span + (int)(((int64_t)i * usable) / count);
         int lanes = td5_track_get_span_lane_count(span);
         if (lanes < 1) lanes = 1;
-        int x = 0, y = 0, z = 0, sub = lanes / 2;   /* default = centre lane */
 
-        if (side && lanes > 1) {
-            /* alternate the outer-most left (0) / right (lanes-1) lane */
-            sub = (i & 1) ? (lanes - 1) : 0;
-            int lx = 0, ly = 0, lz = 0;
-            if (td5_track_get_span_lane_world(span, sub, &lx, &ly, &lz)) {
-                /* lane_world is 24.8 fixed (=render*256); /256 -> render units,
-                 * the same scale td5_track_get_span_center_world returns. */
-                x = lx / 256; y = ly / 256; z = lz / 256;
-            } else if (!td5_track_get_span_center_world(span, &x, &y, &z)) {
-                continue;
-            }
-        } else if (!td5_track_get_span_center_world(span, &x, &y, &z)) {
-            continue;
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;       /* roll for double */
+        int make_dbl = (dbl_pct > 0) && (lanes > 1) && ((int)(rng % 100u) < dbl_pct);
+
+        if (make_dbl && s_pad_count + 2 <= ARC_MAX_PADS) {
+            arc_emit_box(span, 0,         lanes, lift, &rng);      /* left  edge */
+            arc_emit_box(span, lanes - 1, lanes, lift, &rng);      /* right edge */
+        } else if (side && lanes > 1) {
+            arc_emit_box(span, (i & 1) ? (lanes - 1) : 0, lanes, lift, &rng);
+        } else {
+            arc_emit_box(span, -1, lanes, lift, &rng);            /* centre */
         }
-
-        ArcPad *p = &s_pads[placed];
-        /* x/y/z are RENDER units (=world_pos/256) — stored verbatim; pad_get
-         * returns them as-is (no further /256). The previous pad_get divided by
-         * 256 a SECOND time, placing every pad 256x too close to the origin (off
-         * the track) — the reason the pads were never visible. */
-        p->x = x; p->y = y + lift; p->z = z;
-        p->span = (int16_t)span;
-        p->sub_lane = (int8_t)sub;
-        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;     /* xorshift32 */
-        p->kind = (uint8_t)(TD5_PU_NITRO + (rng % (uint32_t)TD5_PU_KINDS));  /* random kind */
-        p->active = 1;
-        p->respawn = 0;
-        placed++;
     }
-    s_pad_count = placed;
 
-    /* One-shot scale sanity: pad[0] and the player's spawn (world_pos/256) are
-     * BOTH render units, so they must share magnitude. If pad[0] is ~256x smaller
-     * the position bug regressed. */
+    /* One-shot scale sanity + layout summary. pad[0] and the player's spawn
+     * (world_pos/256) are BOTH render units, so they must share magnitude. */
     {
         TD5_Actor *p0 = td5_game_get_actor(0);
         TD5_LOG_I(LOG_TAG,
-                  "init: ARCADE on — ring=%d pads=%d (spacing=%d) pad0=(%d,%d,%d) player/256=(%d,%d,%d)",
-                  s_ring, s_pad_count, spacing,
+                  "init: ARCADE on — ring=%d pads=%d humans=%d spacing=%d dbl%%=%d pad0=(%d,%d,%d) player/256=(%d,%d,%d)",
+                  s_ring, s_pad_count, num_h, spacing, dbl_pct,
                   s_pad_count ? s_pads[0].x : 0,
                   s_pad_count ? s_pads[0].y : 0,
                   s_pad_count ? s_pads[0].z : 0,
@@ -322,6 +366,9 @@ void td5_arcade_shutdown_race(void) {
     memset(s_haz, 0, sizeof(s_haz));
     memset(s_effect, 0, sizeof(s_effect));
     memset(s_effect_frames, 0, sizeof(s_effect_frames));
+    memset(s_oiled_frames, 0, sizeof(s_oiled_frames));
+    memset(s_oiled_dir, 0, sizeof(s_oiled_dir));
+    memset(s_oiled_rng, 0, sizeof(s_oiled_rng));
 }
 
 /* ======================================================================
@@ -346,6 +393,26 @@ void td5_arcade_tick(void) {
         }
     }
 
+    /* --- OIL-SLICK drift: while a car is "oiled" it slews uncontrollably toward
+     * its random direction (with wobble) but keeps rolling forward. Runs AFTER
+     * physics (tick is post-physics), so the yaw perturbation integrates next
+     * tick. Deterministic: the per-slot wobble stream + direction come from the
+     * replicated race seed, so every peer/replay drifts identically. --- */
+    {
+        int yaw_base = knob("TD5RE_ARCADE_OIL_YAW", 0x300, 0x40, 0x4000);
+        for (int s = 0; s < racers; s++) {
+            if (s_oiled_frames[s] <= 0) continue;
+            TD5_Actor *a = slot_actor(s);
+            if (!a || a->finish_time != 0) { s_oiled_frames[s] = 0; continue; }
+            s_oiled_rng[s] ^= s_oiled_rng[s] << 13;
+            s_oiled_rng[s] ^= s_oiled_rng[s] >> 17;
+            s_oiled_rng[s] ^= s_oiled_rng[s] << 5;
+            int wob = (int)(s_oiled_rng[s] % 1201u) - 600;        /* -600..600 wobble */
+            a->angular_velocity_yaw += s_oiled_dir[s] * yaw_base + wob;
+            s_oiled_frames[s]--;
+        }
+    }
+
     /* --- pad respawn cooldowns --- */
     for (int i = 0; i < s_pad_count; i++) {
         if (!s_pads[i].active && s_pads[i].respawn > 0) {
@@ -358,6 +425,9 @@ void td5_arcade_tick(void) {
         TD5_Actor *a = slot_actor(s);
         if (!a) continue;
         if (a->finish_time != 0) continue;             /* finished — no pickups */
+        /* One power-up at a time: while an effect is active you can't grab another
+         * box (the box stays for someone else). */
+        if (s_effect[s] != TD5_PU_NONE) continue;
         if (!allow_ai) {
             /* humans only: in split-screen the human players occupy the lowest
              * slots [0, num_human_players); everything above is AI-driven. */
@@ -405,8 +475,8 @@ void td5_arcade_tick(void) {
             int64_t dx = ((int64_t)a->world_pos.x - s_haz[h].x) >> 8;
             int64_t dz = ((int64_t)a->world_pos.z - s_haz[h].z) >> 8;
             if (dx*dx + dz*dz <= r2) {
-                spin_out(a);
-                TD5_LOG_I(LOG_TAG, "slot=%d hit HAZARD (owner=%d)", s, s_haz[h].owner);
+                start_oil_drift(s, a);
+                TD5_LOG_I(LOG_TAG, "slot=%d hit OIL — drifting (owner=%d)", s, s_haz[h].owner);
                 s_haz[h].ttl = 0;   /* one-shot trap */
                 break;
             }
