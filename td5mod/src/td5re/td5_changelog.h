@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "PENDING TO TEST menu: press SUPR / DELETE to remove" },
+    { CL_ITEM,    "  the highlighted item (vs ENTER, which marks tested)" },
     { CL_ITEM,    "Cop Chase has a new INFECT option: an arrested car" },
     { CL_ITEM,    "  turns into a cop (a random police car) instead of" },
     { CL_ITEM,    "  stopping, so players who get caught keep playing" },

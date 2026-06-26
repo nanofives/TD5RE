@@ -10105,7 +10105,7 @@ static void frontend_pending_render(float sx, float sy) {
         td5_vui_text_centered(320.0f * sx, (float)(PL_CTL_Y + 30) * sy, buf, 0xFF8890A0u, sx, sy);
     }
     td5_vui_text_centered(320.0f * sx, (float)(PL_CTL_Y + 56) * sy,
-                          "ENTER = MARK TESTED      -      B / BACK = RETURN",
+                          "ENTER = MARK TESTED   -   SUPR = DELETE   -   B / BACK = RETURN",
                           0xFF8890A0u, sx, sy);
 }
 
@@ -10123,7 +10123,26 @@ void Screen_PendingTest(void) {
                   td5_pending_count(), td5_pending_remaining());
         break;
 
-    case 1:
+    case 1: {
+        /* SUPR / DELETE drops the currently-highlighted checklist row outright
+         * (vs ENTER, which only marks it tested). td5_plat_input_key_pressed is
+         * level-triggered, so debounce on the rising edge: one delete per press. */
+        static int s_pl_supr_down = 0;
+        int supr = td5_plat_input_key_pressed(0xD3);   /* DIK_DELETE ("SUPR") */
+        if (supr && !s_pl_supr_down &&
+            s_selected_button >= 0 && s_selected_button < s_pl_row_count) {
+            int sel  = s_selected_button;
+            int item = s_pl_page * PL_ROWS_PER_PAGE + sel;
+            td5_pending_delete(item);
+            frontend_pending_build_buttons();          /* page/row counts shifted */
+            if (s_pl_row_count > 0) {                  /* keep the cursor in place */
+                if (sel >= s_pl_row_count) sel = s_pl_row_count - 1;
+                s_selected_button = sel;
+            }
+            frontend_play_sfx(5);
+        }
+        s_pl_supr_down = supr;
+
         if (s_input_ready && s_button_index >= 0) {
             int b = s_button_index;
             if (b < s_pl_row_count) {                 /* toggle a checklist row */
@@ -10147,6 +10166,7 @@ void Screen_PendingTest(void) {
             }
         }
         break;
+    }
     }
 }
 

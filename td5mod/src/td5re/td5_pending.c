@@ -84,6 +84,7 @@ static const char *const k_seed[] = {
     "Per-viewport engine audio pan for 3+ players",
     "CHANGELOG + version screen (this build)",
     "PENDING TO TEST menu + overlay (this build)",
+    "PENDING TO TEST: SUPR/DELETE removes the highlighted item",
 };
 #define K_SEED_COUNT ((int)(sizeof(k_seed) / sizeof(k_seed[0])))
 
@@ -188,6 +189,20 @@ int td5_pending_remaining(void) {
 void td5_pending_toggle(int i) {
     if (i < 0 || i >= s_count) return;
     s_items[i].done = !s_items[i].done;
+    td5_pending_save();
+}
+
+/* Remove item i from the list (shift the tail down) and persist. Used by the
+ * SUPR/Delete key on the PENDING TO TEST menu to drop a row outright instead of
+ * just marking it tested. The seed list is only consulted on a first run, so a
+ * deleted item stays gone in the backing file. */
+void td5_pending_delete(int i) {
+    int k;
+    if (i < 0 || i >= s_count) return;
+    for (k = i; k < s_count - 1; k++) s_items[k] = s_items[k + 1];
+    s_count--;
+    s_items[s_count].text[0] = '\0';
+    s_items[s_count].done    = 0;
     td5_pending_save();
 }
 

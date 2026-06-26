@@ -24,6 +24,7 @@ const char *td5_pending_text(int i);
 int         td5_pending_is_done(int i);
 int         td5_pending_remaining(void);   /* number of NOT-done items */
 void        td5_pending_toggle(int i);     /* flip done + persist immediately */
+void        td5_pending_delete(int i);     /* drop item i + persist (SUPR on the menu) */
 void        td5_pending_save(void);        /* rewrite the backing file now */
 
 /* In-game overlay state (the actual right-justified draw lives in td5_hud.c,
