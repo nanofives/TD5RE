@@ -1863,9 +1863,11 @@ void td5_hud_draw_arcade_chips(void)
         float chip_w  = tw + 2.0f * pad;
         float bar_h   = 4.0f * ts;
         float chip_h  = 15.0f * ts + 2.0f * (5.0f * ts) + bar_h;
-        float margin  = 8.0f * (w / 640.0f);
-        float cx      = L + margin;
-        float cy      = T + margin;
+        /* [2026-06-26] Centre the effect chip horizontally and sit it just below
+         * the top-centre checkpoint countdown (per user) instead of the pane's
+         * top-left corner. */
+        float cx      = vl->center_x - chip_w * 0.5f;
+        float cy      = T + h * 0.14f;
 
         /* chip background (dark, semi-transparent) */
         td5_vui_quad(cx, cy, chip_w, chip_h, 0xC0101010u, -1, 0, 0, 0, 0);

@@ -203,7 +203,7 @@ void td5_arcade_init_race(void) {
             px = cx; pz = cz; prev_ok = 1;
         }
         int span_len = samples ? (int)(acc / samples) : 256;
-        int box_pct  = knob("TD5RE_ARCADE_BOX_PCT", 55, 5, 400);   /* % of span length */
+        int box_pct  = knob("TD5RE_ARCADE_BOX_PCT", 22, 5, 400);   /* % of span length */
         int box_half = (int)(((int64_t)span_len * box_pct) / 100);
         if (box_half < 16)   box_half = 16;
         if (box_half > 8000) box_half = 8000;
@@ -212,19 +212,27 @@ void td5_arcade_init_race(void) {
                   span_len, samples, s_box_half);
     }
 
+    /* Don't place boxes right on top of the start line — give the player room.
+     * First box lands at START_SPAN (default 100; ~190 m in on a typical strip);
+     * the rest spread over the remaining ring. */
+    int start_span = knob("TD5RE_ARCADE_START_SPAN", 100, 0, 100000);
+    if (start_span >= s_ring) start_span = 0;     /* track shorter than offset */
+    int usable = s_ring - start_span;
+    if (usable < 1) usable = s_ring;
+
     int spacing = knob("TD5RE_ARCADE_PAD_SPACING", 40, 8, 400);
-    int count = s_ring / spacing;
+    int count = usable / spacing;
     if (count < 6)  count = 6;
     if (count > ARC_MAX_PADS) count = ARC_MAX_PADS;
 
-    /* Hang the box above the road: lift its centre ~1.4x the box half-size so it
-     * floats just over the asphalt and the car drives squarely through it (the
-     * box spans ~0.4x..2.4x box_half above the road). Lift is in RENDER units. */
-    int auto_lift = (int)(((int64_t)s_box_half * 7) / 5);
+    /* Hang the box just over the road: lift its centre ~1.1x the box half-size so
+     * it floats close to the asphalt (box bottom ~0.1x box_half above the road)
+     * and the car drives through it. Lift is in RENDER units, like the box size. */
+    int auto_lift = (int)(((int64_t)s_box_half * 11) / 10);
     int lift = knob("TD5RE_ARCADE_PAD_LIFT", auto_lift, 0, 200000);
     int placed = 0;
     for (int i = 0; i < count; i++) {
-        int span = (int)(((int64_t)i * s_ring) / count);
+        int span = start_span + (int)(((int64_t)i * usable) / count);
         int x = 0, y = 0, z = 0;
         if (!td5_track_get_span_center_world(span, &x, &y, &z))
             continue;
@@ -276,6 +284,9 @@ void td5_arcade_tick(void) {
 
     int racers = racer_count();
     int allow_ai = knob("TD5RE_ARCADE_AI_PICKUPS", 1, 0, 1);
+    /* Pickup "hitbox": collect when within this many spans of the box (longitudinal
+     * tolerance). Bigger = more forgiving — a small box still grabs reliably. */
+    int pick_win = knob("TD5RE_ARCADE_PICKUP_SPANS", 4, 1, 30);
 
     /* --- decay per-slot effect timers --- */
     for (int s = 0; s < racers; s++) {
@@ -307,7 +318,7 @@ void td5_arcade_tick(void) {
             ArcPad *p = &s_pads[i];
             if (!p->active) continue;
             int fdiff = ((aspan - p->span) % s_ring + s_ring) % s_ring;
-            if (fdiff <= 2) {                          /* at or just past the pad */
+            if (fdiff <= pick_win) {                   /* at or just past the box */
                 apply_pickup(s, p->kind, a);
                 p->active = 0;
                 /* Mario-Kart respawn: the box vanishes on pickup and stays gone

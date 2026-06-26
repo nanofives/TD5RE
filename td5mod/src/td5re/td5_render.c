@@ -7833,19 +7833,29 @@ void td5_render_arcade_pads(void)
     /* Flush the accumulated cube + icon + ring lines for this view. */
     td5_render_debug_lines_flush();
 
-    /* GHOST visual: a shimmering white aura over any racer currently ghosting.
-     * (A cheap, clear stand-in for true mesh translucency — the additive glow
-     * washes the car bright/ghostly. td5_arcade_slot_render_alpha is reserved for
-     * a future true-alpha mesh pass.) */
+    /* Per-car EFFECT AURA: an additive glow in the active power-up's colour
+     * washed over the car silhouette, so the effect reads on the car itself —
+     * NITRO cyan, GHOST white, WRECK red, HAZARD amber. Sized to the CAR (a
+     * fixed render-unit size — the car is the same size on every track), not the
+     * box (which scales with the track). Pulses so it's clearly "active". */
     {
+        float car_glow = 1100.0f;                       /* ~car bounding radius */
+        { const char *e = getenv("TD5RE_ARCADE_CAR_GLOW");
+          if (e) { int v = atoi(e); if (v >= 50 && v <= 20000) car_glow = (float)v; } }
         int racers = g_traffic_slot_base;
         if (racers < 1) racers = TD5_MAX_RACER_SLOTS;
         for (int s = 0; s < racers; s++) {
-            if (!td5_arcade_slot_is_ghost(s)) continue;
+            int eff = td5_arcade_active_effect(s);
+            if (eff == TD5_PU_NONE) continue;
             TD5_Actor *ga = td5_game_get_actor(s);
             if (!ga) continue;
-            arcade_emit_glow_at(ga->render_pos.x, ga->render_pos.y, ga->render_pos.z,
-                                box_half * 1.4f, 0xC0FFFFFFu);
+            float ap = 0.5f + 0.5f * sinf(t * 6.0f + (float)s);   /* fast pulse */
+            uint32_t a    = (uint32_t)(120.0f + 90.0f * ap);      /* 120..210 */
+            uint32_t col  = (a << 24) | (arcade_pad_color(eff) & 0x00FFFFFFu);
+            arcade_emit_glow_at(ga->render_pos.x,
+                                ga->render_pos.y + car_glow * 0.25f,
+                                ga->render_pos.z,
+                                car_glow, col);
         }
     }
 
