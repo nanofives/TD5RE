@@ -8447,6 +8447,10 @@ static int s_mpcup_team_mode  = 0;
 static int s_mpcup_tracks[TD5_CUP_MAX_RACES];
 static int s_mpcup_points[TD5_MAX_RACER_SLOTS];
 static int s_mpcup_team[TD5_MAX_RACER_SLOTS];
+/* [CUP TEAM SELECT 2026-06-25] Per-AI-opponent difficulty (0..2) the host set on
+ * CHOOSE YOUR TEAM, snapshot at cup_begin so it stays constant across the series.
+ * -1 => inherit the global difficulty (human slots, or AI never overridden). */
+static int s_mpcup_ai_difficulty[TD5_MAX_RACER_SLOTS];
 
 /* Points by finishing position (0-based). Matches the original cup ladder
  * {15,12,10,5,4,3} @ 0x00463a18. */
@@ -8483,8 +8487,13 @@ void td5_game_mp_cup_begin(void) {
     s_mpcup_team_mode = g_td5.mp_mode_config.cup_team_mode;
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_mpcup_points[i] = 0;
-        s_mpcup_team[i] = (i < TD5_NET_MAX_PLAYERS)
-                          ? g_td5.mp_mode_config.team_of_slot[i] : 0;
+        /* [CUP TEAM SELECT 2026-06-25] Teams + per-opponent difficulty come from
+         * the CHOOSE YOUR TEAM screen via the authoritative per-racer-slot arrays.
+         * (The legacy team_of_slot[6] only covered net-player slots, and cup_begin
+         * runs before the human/AI split is committed, so it cannot resolve AI
+         * slots itself.) */
+        s_mpcup_team[i]          = g_td5.mp_mode_config.cup_team_of_slot[i];
+        s_mpcup_ai_difficulty[i] = g_td5.mp_mode_config.cup_ai_difficulty[i];
     }
     s_mpcup_active = 1;
     TD5_LOG_I(LOG_TAG, "MP CUP begin: races=%d team_mode=%d track[0]=%d",
@@ -8517,6 +8526,14 @@ int  td5_game_mp_cup_race_points(int slot) {
 }
 int  td5_game_mp_cup_team(int slot) {
     return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_mpcup_team[slot] : 0;
+}
+/* [CUP TEAM SELECT 2026-06-25] Per-AI-opponent difficulty tier (0..2) the host
+ * set on CHOOSE YOUR TEAM, or -1 to inherit the global difficulty. Consumed by
+ * the in-race SmartAI per-car skill derivation (td5_ai_smart_race_init). */
+int  td5_game_mp_cup_ai_difficulty(int slot) {
+    if (!s_mpcup_active) return -1;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return -1;
+    return s_mpcup_ai_difficulty[slot];
 }
 int  td5_game_mp_cup_track(void) {
     if (!s_mpcup_active) return -1;

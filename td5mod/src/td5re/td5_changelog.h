@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "CHOOSE YOUR TEAM and COP CHASE - ROLES now show" },
+    { CL_ITEM,    "  each player's profile name instead of PLAYER 1/2" },
+    { CL_ITEM,    "Cup team mode: the host can scroll to the AI" },
+    { CL_ITEM,    "  opponents and set each one's team and skill" },
+    { CL_ITEM,    "  (per-opponent slider) — they really drive at it" },
+    { CL_ITEM,    "Dev: host can also assign teams to ADD AI PLAYER bots" },
     { CL_ITEM,    "Cup final standings now show each player's profile" },
     { CL_ITEM,    "  name instead of PLAYER 1 / PLAYER 2" },
     { CL_ITEM,    "WHAT NEXT? menu: CAR SELECTION goes straight to the" },

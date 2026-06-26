@@ -30,6 +30,10 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "CHOOSE YOUR TEAM / COP ROLES show profile names",
+    "Cup team mode: host assigns AI opponents' teams",
+    "Cup team mode: per-opponent skill slider drives AI",
+    "Dev: host assigns teams to ADD AI PLAYER bots",
     "Cup final standings show profile names (not PLAYER N)",
     "WHAT NEXT? CAR SELECTION -> car grid (not profile select)",
     "WHAT NEXT? buttons aligned under the title (both layouts)",

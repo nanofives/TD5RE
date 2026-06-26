@@ -2981,6 +2981,16 @@ static void mp_mode_config_apply_defaults(int mode) {
         c->cup_team_count    = 2;
         c->cup_points_scheme = 0;               /* classic {15,12,10,5,4,3} */
         c->cup_ai_opponents  = 3;               /* AI cars that also score points */
+        /* [CUP TEAM SELECT 2026-06-25] Reset per-racer-slot team + per-opponent
+         * difficulty. Teams are (re)seeded on the CHOOSE YOUR TEAM screen; -1
+         * difficulty means "inherit the global setting" until the host overrides. */
+        {
+            int s;
+            for (s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
+                c->cup_team_of_slot[s]  = 0;
+                c->cup_ai_difficulty[s] = -1;
+            }
+        }
         break;
     case TD5_MP_MODE_COP_CHASE:
         c->cop_slot           = 0;              /* host is the cop by default */
@@ -3712,7 +3722,16 @@ static int s_cop_role[TD5_MAX_HUMAN_PLAYERS];   /* 1 = cop, 0 = suspect */
 
 static void mp_roleselect_row(float sx, float sy, int p, float y, const char *val) {
     char nb[24];
-    snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
+    /* [CUP/COP NAMES 2026-06-25] Show the player's LOADED profile name (set on
+     * profile load or name entry) instead of a hardcoded "PLAYER N". Both the
+     * COP CHASE - ROLES and CHOOSE YOUR TEAM rows route through here, so this
+     * single change fixes the blank/generic names the user reported on BOTH
+     * screens. Empty name falls back to "PLAYER N" (mirrors the original's
+     * empty-name -> default fallback at ScreenPostRaceNameEntry 0x00413BC0). */
+    if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS && s_mp_player_name[p][0])
+        snprintf(nb, sizeof nb, "%s", s_mp_player_name[p]);
+    else
+        snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
     td5_vui_text(150.0f * sx, y * sy, nb, mp_slot_color(p), sx, sy);
     td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, val, 0xFFFFFFFFu, sx, sy);
     td5_vui_arrow((MP_ROW_VAL_CX - 52.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
@@ -3794,40 +3813,186 @@ void frontend_mp_cop_roles_render(float sx, float sy) {
     }
 }
 
+/* ========================================================================
+ * CHOOSE YOUR TEAM — host-assignable AI opponents (cup team mode)
+ * [CUP TEAM SELECT 2026-06-25] Humans pick their own team simultaneously with
+ * their own device (unchanged). The HOST can additionally scroll past the human
+ * rows to the AI opponents — the cup OPPONENTS count plus, in DEV builds, any
+ * "ADD AI PLAYER" bot occupying a human slot — and force-set each one's TEAM and
+ * per-opponent SKILL (difficulty). AI slots have no device (mp_simul_player_nav
+ * returns 0 for them), so the host cursor is their only controller. The chosen
+ * teams are written to the authoritative cup_team_of_slot[] (consumed by
+ * td5_game_mp_cup_begin), and the per-opponent difficulty drives the in-race
+ * SmartAI per-car skill (td5_ai_smart_race_init reads td5_game_mp_cup_ai_difficulty).
+ * ======================================================================== */
+#define TEAM_FIELD_TEAM 0
+#define TEAM_FIELD_DIFF 1
+typedef struct { int slot; int kind; } TeamAiField;
+static int s_team_host_cursor = -1;   /* -1 = host on own row; >=0 = AI field index */
+
+/* AI opponent count for this cup race, clamped to the free racer slots. */
+static int team_select_ai_count(int humans) {
+    int ai = g_td5.mp_mode_config.cup_ai_opponents;
+    if (ai < 0) ai = 0;
+    if (ai > TD5_MAX_RACER_SLOTS - humans) ai = TD5_MAX_RACER_SLOTS - humans;
+    return ai;
+}
+
+/* 1 when racer `slot` is host-assignable AI on the team screen. */
+static int team_select_slot_is_ai(int slot, int humans, int ai_count) {
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (slot >= humans && slot < humans + ai_count) return 1;   /* cup AI opponent */
+#ifndef TD5RE_RELEASE
+    if (slot > 0 && slot < humans && slot < TD5_MAX_HUMAN_PLAYERS &&
+        frontend_mp_slot_is_ai(slot))
+        return 1;   /* dev "ADD AI PLAYER" bot in a human slot (host stays slot 0) */
+#endif
+    return 0;
+}
+
+/* Authoritative per-racer-slot team. Mirrors the legacy team_of_slot[6] for
+ * net-player slots so existing readers stay valid. */
+static int team_select_get_team(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return g_td5.mp_mode_config.cup_team_of_slot[slot];
+}
+static void team_select_set_team(int slot, int t) {
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    g_td5.mp_mode_config.cup_team_of_slot[slot] = t;
+    if (slot < TD5_NET_MAX_PLAYERS) g_td5.mp_mode_config.team_of_slot[slot] = t;
+}
+
+/* Build the ordered host-cursor field list (TEAM then SKILL per AI slot). */
+static int team_select_build_fields(TeamAiField *out, int humans, int ai_count) {
+    int slot, nf = 0;
+    for (slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
+        if (!team_select_slot_is_ai(slot, humans, ai_count)) continue;
+        out[nf].slot = slot; out[nf].kind = TEAM_FIELD_TEAM; nf++;
+        out[nf].slot = slot; out[nf].kind = TEAM_FIELD_DIFF; nf++;
+    }
+    return nf;
+}
+
+/* Seed teams (round-robin) + per-opponent difficulty (inherit global) for every
+ * racer slot on screen entry. Human slots carry no per-opponent difficulty. */
+static void team_select_seed(int humans, int ai_count, int teams) {
+    int slot;
+    for (slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
+        int is_ai = team_select_slot_is_ai(slot, humans, ai_count);
+        int t = team_select_get_team(slot);
+        if (t < 0 || t >= teams) team_select_set_team(slot, slot % teams);
+        if (is_ai) {
+            int d = g_td5.mp_mode_config.cup_ai_difficulty[slot];
+            if (d < 0 || d > 2)
+                g_td5.mp_mode_config.cup_ai_difficulty[slot] = g_td5.ini.difficulty;
+        } else {
+            g_td5.mp_mode_config.cup_ai_difficulty[slot] = -1;
+        }
+    }
+}
+
+/* Apply a +/-1 step to the field under the host cursor. */
+static void team_select_field_adjust(const TeamAiField *f, int dir, int teams) {
+    if (f->kind == TEAM_FIELD_TEAM) {
+        int t = ((team_select_get_team(f->slot) + dir) % teams + teams) % teams;
+        team_select_set_team(f->slot, t);
+    } else {
+        int d = g_td5.mp_mode_config.cup_ai_difficulty[f->slot] + dir;
+        if (d < 0) d = 0;
+        if (d > 2) d = 2;
+        g_td5.mp_mode_config.cup_ai_difficulty[f->slot] = d;
+    }
+}
+
+static const char *team_select_diff_label(int d) {
+    return (d <= 0) ? "EASY" : (d == 1) ? "NORMAL" : "HARD";
+}
+
+/* One AI-opponent row: name + TEAM + per-opponent SKILL slider (3 segments).
+ * Highlights the field under the host cursor. */
+static void mp_team_ai_row(float sx, float sy, int slot, float y, const char *name,
+                           int team, int diff, int hl_team, int hl_diff) {
+    char tb[16];
+    int i;
+    const float bx = 452.0f, bw = 15.0f, bgap = 4.0f, bh = 11.0f;
+    td5_vui_text(150.0f * sx, y * sy, name, mp_slot_color(slot), sx, sy);
+    snprintf(tb, sizeof tb, "TEAM %d", team + 1);
+    td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, tb,
+                          hl_team ? 0xFFFFE060u : 0xFFFFFFFFu, sx, sy);
+    if (hl_team) {
+        td5_vui_arrow((MP_ROW_VAL_CX - 52.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 0, 0xFFFFE060u);
+        td5_vui_arrow((MP_ROW_VAL_CX + 44.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 1, 0xFFFFE060u);
+    }
+    /* SKILL slider: filled segments = diff+1. */
+    for (i = 0; i < 3; i++) {
+        uint32_t c = (i <= diff) ? (hl_diff ? 0xFF60FF60u : 0xFF8090A0u)
+                                 : 0xFF303840u;
+        td5_vui_quad((bx + i * (bw + bgap)) * sx, (y - bh) * sy, bw * sx, bh * sy,
+                     c, -1, 0, 0, 1, 1);
+    }
+    td5_vui_text((bx + 3.0f * (bw + bgap) + 8.0f) * sx, y * sy, team_select_diff_label(diff),
+                 hl_diff ? 0xFFFFE060u : 0xFFC0C8D0u, sx, sy);
+    if (hl_diff) {
+        td5_vui_arrow((bx - 15.0f) * sx, (y - 1.0f) * sy, 10.0f * sx, 12.0f * sy, 0, 0xFFFFE060u);
+        td5_vui_arrow((bx + 3.0f * (bw + bgap) + 60.0f) * sx, (y - 1.0f) * sy, 10.0f * sx, 12.0f * sy, 1, 0xFFFFE060u);
+    }
+}
+
 void Screen_MpTeamSelect(void) {
     int p, n = s_num_human_players;
     int teams = g_td5.mp_mode_config.cup_team_count;
+    int humans, ai_count, nfields;
+    TeamAiField fields[TD5_MAX_RACER_SLOTS * 2];
     if (teams < 2) teams = 2;
     if (teams > 4) teams = 4;
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    humans   = n;
+    ai_count = team_select_ai_count(humans);
 
     if (s_inner_state == 0) {
-        for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
-            if (p < TD5_NET_MAX_PLAYERS) {
-                int t = g_td5.mp_mode_config.team_of_slot[p];
-                if (t < 0 || t >= teams) g_td5.mp_mode_config.team_of_slot[p] = p % teams;
-            }
+        team_select_seed(humans, ai_count, teams);
+        s_team_host_cursor = -1;
+        for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++)
             s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
-        }
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_reset_buttons();
         frontend_create_button(SNK_OkButTxt, 320 - 60, 388, 120, 28);
         s_selected_button = 0;
         s_anim_complete   = 1;
         s_inner_state     = 1;
-        TD5_LOG_I(LOG_TAG, "MP team select: enter (%d players, %d teams)", n, teams);
+        TD5_LOG_I(LOG_TAG, "MP team select: enter (%d players, %d teams, %d AI)", n, teams, ai_count);
         return;
     }
     if (frontend_mp_setup_disconnect_check(n)) return;
 
-    for (p = 0; p < n && p < TD5_NET_MAX_PLAYERS; p++) {
+    nfields = team_select_build_fields(fields, humans, ai_count);
+    if (s_team_host_cursor >= nfields) s_team_host_cursor = nfields - 1;  /* clamp if roster shrank */
+
+    for (p = 0; p < n && p < TD5_MAX_HUMAN_PLAYERS; p++) {
         uint32_t bits = mp_simul_player_nav(p);
         uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
-        int t = g_td5.mp_mode_config.team_of_slot[p];
         s_mp_pane_nav_prev[p] = bits;
-        if (edge & 1) { t = (t + teams - 1) % teams; g_td5.mp_mode_config.team_of_slot[p] = t; frontend_play_sfx(2); }
-        if (edge & 2) { t = (t + 1) % teams;         g_td5.mp_mode_config.team_of_slot[p] = t; frontend_play_sfx(2); }
+
+        if (p == 0 && nfields > 0) {
+            /* Host cursor: UP/DOWN scroll between the host's own row (-1) and the
+             * AI fields; when parked on an AI field, LEFT/RIGHT edit it. */
+            if (edge & 4) { if (s_team_host_cursor > -1)          { s_team_host_cursor--; frontend_play_sfx(2); } }
+            if (edge & 8) { if (s_team_host_cursor < nfields - 1) { s_team_host_cursor++; frontend_play_sfx(2); } }
+            if (s_team_host_cursor >= 0) {
+                if (edge & 1) { team_select_field_adjust(&fields[s_team_host_cursor], -1, teams); frontend_play_sfx(2); }
+                if (edge & 2) { team_select_field_adjust(&fields[s_team_host_cursor], +1, teams); frontend_play_sfx(2); }
+                continue;   /* host editing AI -> skip own-team self-pick this frame */
+            }
+        }
+
+        /* Own-team self-pick (host on its own row + every real human). AI-occupied
+         * slots return bits==0 here, so the host cursor is their sole controller. */
+        if (p < TD5_NET_MAX_PLAYERS) {
+            int t = team_select_get_team(p);
+            if (edge & 1) { t = ((t - 1) % teams + teams) % teams; team_select_set_team(p, t); frontend_play_sfx(2); }
+            if (edge & 2) { t = (t + 1) % teams;                   team_select_set_team(p, t); frontend_play_sfx(2); }
+        }
     }
 
     if (s_input_ready && s_button_index >= 0) {     /* host OK -> race */
@@ -3844,20 +4009,55 @@ void Screen_MpTeamSelect(void) {
 }
 
 void frontend_mp_team_select_render(float sx, float sy) {
-    int p, n = s_num_human_players;
-    float y = 112.0f;
+    int slot, n = s_num_human_players;
+    int humans, ai_count, total, teams = g_td5.mp_mode_config.cup_team_count;
+    int nfields;
+    float y = 112.0f, pitch;
+    TeamAiField fields[TD5_MAX_RACER_SLOTS * 2];
+    if (teams < 2) teams = 2;
+    if (teams > 4) teams = 4;
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    humans   = n;
+    ai_count = team_select_ai_count(humans);
+    total    = humans + ai_count;
+    if (total > TD5_MAX_RACER_SLOTS) total = TD5_MAX_RACER_SLOTS;
+    pitch    = 34.0f;
+    if (total > 0 && pitch * total > 264.0f) pitch = 264.0f / total;
+    if (pitch < 18.0f) pitch = 18.0f;
+
+    nfields = team_select_build_fields(fields, humans, ai_count);
+
     fe_race_draw_screen_title("CHOOSE YOUR TEAM", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
-    mp_pos_small_centered(320.0f * sx, 82.0f * sy,
+    mp_pos_small_centered(320.0f * sx, 78.0f * sy,
                           "Each player: LEFT/RIGHT to pick a team", 0xFFC0C8D0u, sx, sy);
-    for (p = 0; p < n; p++) {
-        char tb[16];
-        int t = (p < TD5_NET_MAX_PLAYERS) ? g_td5.mp_mode_config.team_of_slot[p] : 0;
-        snprintf(tb, sizeof tb, "TEAM %d", t + 1);
-        mp_roleselect_row(sx, sy, p, y, tb);
-        y += 34.0f;
+    if (nfields > 0)
+        mp_pos_small_centered(320.0f * sx, 94.0f * sy,
+                              "Host: UP/DOWN select an opponent, LEFT/RIGHT set team & skill",
+                              0xFFC0C8D0u, sx, sy);
+
+    for (slot = 0; slot < total; slot++) {
+        if (team_select_slot_is_ai(slot, humans, ai_count)) {
+            const char *name = (slot < TD5_MAX_HUMAN_PLAYERS && s_mp_player_name[slot][0])
+                               ? s_mp_player_name[slot]
+                               : frontend_mp_ai_pool_name(slot);
+            int team = team_select_get_team(slot);
+            int diff = g_td5.mp_mode_config.cup_ai_difficulty[slot];
+            int hl_team = (s_team_host_cursor >= 0 &&
+                           fields[s_team_host_cursor].slot == slot &&
+                           fields[s_team_host_cursor].kind == TEAM_FIELD_TEAM);
+            int hl_diff = (s_team_host_cursor >= 0 &&
+                           fields[s_team_host_cursor].slot == slot &&
+                           fields[s_team_host_cursor].kind == TEAM_FIELD_DIFF);
+            if (diff < 0) diff = g_td5.ini.difficulty;
+            mp_team_ai_row(sx, sy, slot, y, name, team, diff, hl_team, hl_diff);
+        } else {
+            char tb[16];
+            snprintf(tb, sizeof tb, "TEAM %d", team_select_get_team(slot) + 1);
+            mp_roleselect_row(sx, sy, slot, y, tb);
+        }
+        y += pitch;
     }
 }
 

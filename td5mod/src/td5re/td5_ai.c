@@ -4304,10 +4304,19 @@ static void td5_ai_smart_race_init(void) {
      * because td5_game_get_race_seed() returns the host-broadcast session seed. */
     uint32_t branch_seed_base = td5_game_get_race_seed() ^ 0x9E3779B9u;
     for (int s = 0; s < TD5_MAX_TOTAL_ACTORS; s++) {
+        /* [CUP TEAM SELECT 2026-06-25] Per-opponent difficulty: when an MP cup
+         * host set this AI slot's skill on CHOOSE YOUR TEAM, derive THIS car's
+         * base competence from its own tier instead of the global one, so a
+         * mixed-skill field actually drives at the assigned levels. -1 (the
+         * default / human slots) keeps the global tier. */
+        int car_tier = tier;
+        int per_slot = td5_game_mp_cup_ai_difficulty(s);
+        if (per_slot >= 0 && per_slot <= 2) car_tier = per_slot;
+        float car_base = (car_tier <= 0) ? 0.42f : (car_tier == 1 ? 0.63f : 0.86f);
         uint32_t h = smart_hash_u32((uint32_t)s * 2654435761u
-                                    + (uint32_t)(tier + 1) * 40503u);
+                                    + (uint32_t)(car_tier + 1) * 40503u);
         float spread = ((float)(h & 0xFFFF) / 65535.0f - 0.5f) * 0.24f; /* +-0.12 */
-        float sk = base + spread;
+        float sk = car_base + spread;
         if (sk < 0.12f) sk = 0.12f;
         if (sk > 0.97f) sk = 0.97f;
         g_smart_skill[s] = sk;
