@@ -480,6 +480,86 @@ void td5_platform_win32_set_app_id(void)
     }
 }
 
+/* Declare this process DPI-AWARE before any window, HMONITOR, or HDC exists.
+ *
+ * Symptom this fixes: on a machine whose display scaling is set above 100%
+ * (e.g. a 4K laptop panel defaulting to 300%), a DPI-UNAWARE process is
+ * silently virtualized by Windows -- it renders into a logical-resolution
+ * back buffer (physical / scale) and the desktop compositor then BITMAP-
+ * STRETCHES that buffer up to the physical pixels. The result is a blurry /
+ * "pixelated" image that resizing the window cannot fix, because the stretch
+ * happens after the app has already drawn. On a fresh PC the game looked
+ * crisp on the dev box (100% scaling) but pixelated on the user's 4K/300%
+ * panel -- the classic DPI-virtualization tell.
+ *
+ * Declaring awareness makes GetSystemMetrics / the swap-chain size report
+ * TRUE physical pixels, so our D3D11 back buffer (sized from td5re.ini
+ * Display Width/Height) maps 1:1 to the screen with no compositor stretch.
+ *
+ * Tried newest-first via LoadLibrary+GetProcAddress (mirrors the
+ * SetCurrentProcessExplicitAppUserModelID / DwmSetWindowAttribute / XInput
+ * precedent) so we neither hard-import shcore.dll nor need a newer SDK
+ * header than the bundled MinGW provides:
+ *   1. SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)  -- Win10 1703+
+ *   2. SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) -- Win8.1+
+ *   3. SetProcessDPIAware()                                  -- Vista+
+ * Best-effort: if none resolve (pre-Vista) the process stays unaware, which
+ * is the pre-fix behaviour. MUST run at the very top of WinMain, before
+ * td5_platform_win32_set_app_id() / Backend_CreateDevice() create the window.
+ * Idempotent (guarded) so any later call is a harmless no-op. */
+void td5_platform_win32_enable_dpi_awareness(void)
+{
+    static int s_dpi_set = 0;
+    /* DPI_AWARENESS_CONTEXT is an opaque HANDLE; PER_MONITOR_AWARE_V2 == -4. */
+    typedef BOOL (WINAPI *PFN_SetProcessDpiAwarenessContext)(HANDLE);
+    typedef HRESULT (WINAPI *PFN_SetProcessDpiAwareness)(int);
+    typedef BOOL (WINAPI *PFN_SetProcessDPIAware)(void);
+    HMODULE hUser32, hShcore;
+
+    if (s_dpi_set)
+        return;
+    s_dpi_set = 1;
+
+    /* 1. Per-Monitor-V2 (best: crisp + correct non-client scaling), Win10 1703+ */
+    hUser32 = GetModuleHandleA("user32.dll");
+    if (hUser32) {
+        PFN_SetProcessDpiAwarenessContext pCtx =
+            (PFN_SetProcessDpiAwarenessContext)(void *)
+            GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+        if (pCtx && pCtx((HANDLE)(INT_PTR)-4)) {   /* PER_MONITOR_AWARE_V2 */
+            TD5_LOG_I(LOG_TAG, "DPI: per-monitor-v2 awareness enabled");
+            return;
+        }
+    }
+
+    /* 2. Per-Monitor (Win8.1+) via shcore.dll */
+    hShcore = LoadLibraryA("shcore.dll");
+    if (hShcore) {
+        PFN_SetProcessDpiAwareness pAwr =
+            (PFN_SetProcessDpiAwareness)(void *)
+            GetProcAddress(hShcore, "SetProcessDpiAwareness");
+        if (pAwr && pAwr(2) == 0) {   /* PROCESS_PER_MONITOR_DPI_AWARE, S_OK */
+            TD5_LOG_I(LOG_TAG, "DPI: per-monitor awareness enabled (shcore)");
+            /* keep shcore loaded for the process lifetime; do not FreeLibrary */
+            return;
+        }
+        FreeLibrary(hShcore);
+    }
+
+    /* 3. System-DPI aware (Vista+) -- last resort, still kills the stretch */
+    if (hUser32) {
+        PFN_SetProcessDPIAware pSys =
+            (PFN_SetProcessDPIAware)(void *)
+            GetProcAddress(hUser32, "SetProcessDPIAware");
+        if (pSys && pSys()) {
+            TD5_LOG_I(LOG_TAG, "DPI: system awareness enabled (legacy)");
+            return;
+        }
+    }
+
+    TD5_LOG_W(LOG_TAG, "DPI: no awareness API available -- staying DPI-unaware");
+}
+
 /* ========================================================================
  * Initialization -- called by the wrapper/loader after device creation
  * ======================================================================== */

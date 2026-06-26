@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Crisp on 4K/high-DPI scaled displays (no blur)",
     "MP results table: name aligned, columns, divider",
     "Cup results screen + POINTS column (race + total)",
     "7-player empty cells: one MAP + one STANDINGS (no dup)",

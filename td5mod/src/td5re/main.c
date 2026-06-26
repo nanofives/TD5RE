@@ -73,6 +73,11 @@ extern void td5_platform_win32_init(void *ddraw4, void *d3ddevice3,
  * process-default identity and shows the generic icon on fresh machines. */
 extern void td5_platform_win32_set_app_id(void);
 
+/* Declares the process DPI-aware so Windows stops bitmap-stretching (and thus
+ * blurring/"pixelating") the game on displays scaled above 100%. MUST run at
+ * the very top of WinMain, before any window/HMONITOR/HDC exists. */
+extern void td5_platform_win32_enable_dpi_awareness(void);
+
 /* ========================================================================
  * Default display configuration
  * ======================================================================== */
@@ -627,6 +632,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hInstance;
     (void)hPrevInstance;
     (void)nCmdShow;
+
+    /* Declare DPI awareness FIRST -- before any window, monitor, or DC query
+     * (including the GetSystemMetrics screen probe inside Backend_CreateDevice).
+     * On a display scaled above 100% (e.g. a 4K panel at 300%) a DPI-unaware
+     * process is virtualized and the desktop compositor bitmap-stretches the
+     * rendered frame to physical pixels -> blurry/"pixelated" output that no
+     * window resize can fix. With awareness on, the swap chain maps 1:1 to the
+     * screen and the image is crisp. Harmless no-op on pre-Vista / 100% setups. */
+    td5_platform_win32_enable_dpi_awareness();
 
     /* Editable-source byte-exact self-test: pack every registered source and
      * compare against the original .DAT, then exit without booting the game.
