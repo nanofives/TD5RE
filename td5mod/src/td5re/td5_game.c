@@ -368,6 +368,14 @@ typedef struct RaceResultEntry {
 
 static RaceResultEntry s_results[TD5_MAX_RACER_SLOTS];
 
+/* [MP COP CHASE results 2026-06-25] Per-slot race-timer value (ticks) at the
+ * moment a suspect was arrested (busted) in a cop chase. 0 = never arrested.
+ * Stamped once at the bust transition (td5_ai_wanted_cop_hit); the cop-chase
+ * results screen shows it as the suspect's TIME OF ARREST ('-' when 0). The
+ * original binary stores no arrest time — AwardWantedDamageScore @ 0x0043d690
+ * writes only the bust count + ram score — so this is a port-added field. */
+static int32_t s_arrest_time[TD5_MAX_RACER_SLOTS];
+
 /* Checkpoint timing record (24 bytes = 12 x uint16, from binary at 0x46CBB0)
  * Loaded per-track via pointer table at 0x46CF6C (1-based index). */
 typedef struct CheckpointRecord {
@@ -1389,6 +1397,28 @@ void td5_game_add_wanted_kill(int slot)
      * encounter system is disabled (gSpecialEncounterEnabled=0). */
     TD5_Actor *a = td5_game_get_actor(slot);
     if (a) a->special_encounter_state++;
+}
+
+/* [MP COP CHASE results 2026-06-25] Stamp the time (race-timer ticks) at which a
+ * suspect was arrested. Called once at the bust transition. Idempotent: only the
+ * FIRST arrest stamps (a re-call keeps the original time). Stores a non-zero
+ * value so the results screen distinguishes "arrested" (>0, formatted MM:SS.cc)
+ * from "finished un-arrested" (0, shown as '-'). */
+void td5_game_set_arrest_time(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    if (s_arrest_time[slot] != 0) return;                 /* already stamped */
+    int32_t t = s_metrics[slot].cumulative_timer;         /* elapsed race time */
+    s_arrest_time[slot] = (t > 0) ? t : 1;                /* keep it non-zero  */
+    TD5_LOG_I(LOG_TAG, "arrest_time: suspect slot=%d stamped t=%d", slot, s_arrest_time[slot]);
+}
+
+/* Returns the arrest time (ticks) for a slot, or 0 if it was never arrested.
+ * The cop-chase results screen formats >0 as MM:SS.cc and 0 as '-'. */
+int32_t td5_game_get_arrest_time(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_arrest_time[slot];
 }
 
 /* Returns the race order slot index at position 'pos' (0=1st, ...).
@@ -2527,6 +2557,7 @@ int td5_game_init_race_session(void) {
      * (that's the original's g_raceOrderTable, which IS initialized to
      * 0..5 before first UpdateRaceOrder). */
     memset(s_metrics, 0, sizeof(s_metrics));
+    memset(s_arrest_time, 0, sizeof(s_arrest_time));   /* [MP COP CHASE results] clear arrest times */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_race_order[i] = (uint8_t)i;
     }
@@ -6536,13 +6567,17 @@ static int mp_cop_chase_resolved(void) {
     if (!g_td5.wanted_mode_enabled) return 0;
     active = mp_cop_chase_count_suspects(&busted);
     if (active <= 0) return 0;
+    /* [MP COP CHASE results 2026-06-25] Every suspect arrested -> nobody left to
+     * chase, so end the race NOW regardless of win condition (user request: "when
+     * police arrest all suspects it should go right to the results"). This also
+     * subsumes the old BUST_ALL `busted >= active` check below. */
+    if (busted >= active) {
+        TD5_LOG_I(LOG_TAG, "Cop chase: all %d suspects arrested -> race end", active);
+        return 1;
+    }
     wc = g_td5.mp_mode_config.cop_win_condition;
     if (wc == TD5_COP_WIN_SUDDEN_DEATH && busted >= 1) {
         TD5_LOG_I(LOG_TAG, "Cop chase: SUDDEN DEATH — first arrest, cop wins");
-        return 1;
-    }
-    if (wc == TD5_COP_WIN_BUST_ALL && busted >= active) {
-        TD5_LOG_I(LOG_TAG, "Cop chase: BUST ALL — all %d suspects arrested, cop wins", active);
         return 1;
     }
     return 0;
@@ -6607,15 +6642,28 @@ static int check_race_completion(uint32_t sim_delta) {
          * the moment every REAL human has crossed the line. mp_ai_player_mask is 0
          * in real human sessions, so this leaves normal split-screen/net MP and
          * single-player unchanged. */
+        /* [MP COP CHASE results 2026-06-25] An ARRESTED suspect (damage bar
+         * drained to 0) can never cross the finish line, so it must not hold up
+         * the "all alive players reached the end" completion. Treat it as done in
+         * both scans below. The race then ends once every cop + every un-arrested
+         * suspect has finished (the all-suspects-arrested case ends even sooner
+         * via mp_cop_chase_resolved above). */
+        const int cop_chase = (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE)
+                              && g_td5.wanted_mode_enabled;
+
         int all_humans_done = 1;
         for (i = 0; i < humans; i++) {
             if (s_slot_state[i].state == 3) continue;             /* disabled */
             if (g_td5.mp_ai_player_mask & (1u << i)) continue;    /* AI-driven, not a real human */
+            if (cop_chase && td5_game_cop_chase_is_suspect(i) &&
+                g_wanted_damage_state[i] <= 0) continue;          /* arrested -> done */
             if (s_slot_state[i].companion_1 == 0) { all_humans_done = 0; break; }
         }
 
         for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
             if (s_slot_state[i].state == 3) continue;  /* disabled */
+            if (cop_chase && td5_game_cop_chase_is_suspect(i) &&
+                g_wanted_damage_state[i] <= 0) continue;          /* arrested -> done */
             if (s_slot_state[i].companion_1 == 0) {     /* not finished */
                 int is_human = (i < humans) &&
                                !(g_td5.mp_ai_player_mask & (1u << i));
@@ -8658,6 +8706,15 @@ int td5_game_cop_chase_is_suspect(int slot) {
     if (td5_game_cop_chase_cop_slot() < 0) return 0;  /* no active cop chase */
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
     return !td5_game_cop_chase_is_cop(slot);          /* every non-cop racer */
+}
+
+/* [MP COP CHASE results 2026-06-25] True when a LOCAL split-screen cop chase is
+ * running — the gate for the dedicated COPS/SUSPECTS results layout and the
+ * "CHASE RESULTS" title. Net play and SP wanted mode keep the normal table. */
+int td5_game_mp_cop_chase_active(void) {
+    return g_td5.wanted_mode_enabled
+        && g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE
+        && !g_td5.network_active;
 }
 
 int td5_game_get_cop_actor_index(void) {

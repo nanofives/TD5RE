@@ -965,16 +965,22 @@ void td5_ai_reset_wanted_state(void) { s_wanted_hud_overlay_slot = -1; }
  * Called from td5_physics.c when player (slot 0) collides with a cop. */
 /* [COP CHASE ARREST 2026-06-25] Returns 1 when THIS hit completed the arrest (the
  * suspect's wanted damage just reached 0), else 0. The physics caller uses it to
- * fire the strong short arrest jolt on both the cop and the busted suspect. */
-int td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
+ * fire the strong short arrest jolt on both the cop and the busted suspect.
+ * `suspect_slot` is the rammed SUSPECT; `cop_slot` the COP that rammed it — the
+ * arrest is credited to the actual ramming cop (per-cop tally in multi-cop) and
+ * the suspect's arrest time stamped. [MP COP CHASE results 2026-06-25] */
+int td5_ai_wanted_cop_hit(int cop_slot, int suspect_slot, int32_t impact_mag) {
     int16_t dec, cur;
     char *actor;
     extern int g_wanted_msg_timer;   /* td5_hud.c */
     extern int g_wanted_msg_index;
 
-    /* `cop_slot` here is actually the SUSPECT being rammed (legacy name). Any
-     * racer slot can be a suspect now (MP cop chase may make slot 0 a suspect);
-     * the COP itself is excluded by Gate 3 below (target-slot == cop). */
+    /* `suspect_slot` is the rammed SUSPECT; `cop_slot` is the COP that rammed it
+     * (the caller in td5_physics.c resolves which is which). Crediting the actual
+     * ramming cop — rather than the single representative cop — is what makes a
+     * MULTI-cop chase award each cop their OWN arrest tally (the cop-chase
+     * results screen lists per-cop arrests). [MP COP CHASE results 2026-06-25] */
+    if (suspect_slot < 0 || suspect_slot >= TD5_MAX_RACER_SLOTS) return 0;
     if (cop_slot < 0 || cop_slot >= TD5_MAX_RACER_SLOTS) return 0;
 
     /* Gate 1 [orig 0x0043D690 entry]: impact must be material (> 9999). */
@@ -983,26 +989,23 @@ int td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
     /* Gate 2 [orig 0x0043D6A0 test on DAT_004bf518]: scoring-enabled flag. */
     if (s_wanted_scoring_enabled == 0) return 0;
 
-    /* Gate 3 [orig 0x0043D6B4]: ignore unless this cop is the active tracker
-     * target. td5_game_get_wanted_target_slot() returns 0 (player) in port;
-     * orig checks `cop_slot != g_wantedTargetSlotIndex && g_wantedTargetTrackerActive != 0`
-     * which inverts during cop-vs-cop accidental collisions. Mirror with the
-     * available port globals; tracker_active!=0 modelled by wanted_mode flag. */
-    if (cop_slot == td5_game_get_wanted_target_slot()) return 0;
+    /* Gate 3 [orig 0x0043D6B4]: never damage a cop. The caller already passes a
+     * non-cop suspect, but guard against a cop-vs-cop accidental collision. */
+    if (td5_game_cop_chase_is_cop(suspect_slot)) return 0;
 
     /* First-hit-vs-rehit branch [orig 0x0043D6D8]: if the HUD overlay was
-     * NOT pointing at this cop last frame, this is a "first hit" — reset
+     * NOT pointing at this suspect last frame, this is a "first hit" — reset
      * the wanted-message banner, choose a random message, and return
      * WITHOUT applying any damage decrement. */
-    if (s_wanted_hud_overlay_slot != cop_slot) {
-        s_wanted_hud_overlay_slot = cop_slot;
+    if (s_wanted_hud_overlay_slot != suspect_slot) {
+        s_wanted_hud_overlay_slot = suspect_slot;
         g_wanted_msg_timer        = 0;
         /* Orig picks rand() & 7 over the 8 wanted-message pairs (table
          * @ 0x474038) [CONFIRMED @ 0x0043D6F? — DAT_004bf508 = rand() & 7]. */
         g_wanted_msg_index = rand() & 7;
         TD5_LOG_I(LOG_TAG,
-                  "wanted_first_hit: cop_slot=%d msg_idx=%d impact=%d",
-                  cop_slot, g_wanted_msg_index, (int)impact_mag);
+                  "wanted_first_hit: suspect=%d cop=%d msg_idx=%d impact=%d",
+                  suspect_slot, cop_slot, g_wanted_msg_index, (int)impact_mag);
         return 0;
     }
 
@@ -1010,14 +1013,14 @@ int td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
      * can take damage. Light hit (force 10k..20k) = -0x200 + 10 pts; heavy
      * hit (>20k) = -0x400 + 20 pts; the hit that depletes health adds the
      * +50 kill bonus and bumps the bust counter. Score accrues to the
-     * player/cop (slot 0 = the wanted-scoring actor, orig gap_01f8+0xD0). */
-    if (g_wanted_damage_state[cop_slot] <= 0) {
+     * ramming cop. */
+    if (g_wanted_damage_state[suspect_slot] <= 0) {
         /* Already busted — no further damage/score (orig gate `health > 0`). */
         return 0;
     }
     dec = (impact_mag > 20000) ? (int16_t)0x400 : (int16_t)0x200;
     int points = (dec == (int16_t)0x200) ? 10 : 20;
-    cur = g_wanted_damage_state[cop_slot] - dec;
+    cur = g_wanted_damage_state[suspect_slot] - dec;
     int killed = 0;
     if (cur <= 0) {
         cur = 0;
@@ -1025,28 +1028,32 @@ int td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
         killed = 1;
     }
     if (cur > 0x1000) cur = 0x1000;   /* upper clamp [orig] */
-    g_wanted_damage_state[cop_slot] = cur;
+    g_wanted_damage_state[suspect_slot] = cur;
 
-    /* Award ram points + (on bust) the kill to the player/cop so the HUD
-     * score and the results "PUNKTE"/arrests column populate. The player is
-     * the wanted-scoring actor (slot 0). */
-    td5_game_add_wanted_score(td5_game_get_wanted_target_slot(), points);
-    if (killed) td5_game_add_wanted_kill(td5_game_get_wanted_target_slot());
+    /* Award ram points + (on bust) the kill to the COP that did the ramming so
+     * the HUD score and the per-cop arrests column populate. */
+    td5_game_add_wanted_score(cop_slot, points);
+    if (killed) {
+        td5_game_add_wanted_kill(cop_slot);
+        /* Stamp this suspect's time of arrest for the cop-chase results screen
+         * (shown there as '-' if a suspect never gets stamped). */
+        td5_game_set_arrest_time(suspect_slot);
+    }
 
     TD5_LOG_I(LOG_TAG,
-              "wanted_damage: cop_slot=%d new_state=%d dec=%d impact=%d "
+              "wanted_damage: suspect=%d cop=%d new_state=%d dec=%d impact=%d "
               "pts=%d killed=%d",
-              cop_slot, (int)cur, (int)dec, (int)impact_mag, points, killed);
+              suspect_slot, cop_slot, (int)cur, (int)dec, (int)impact_mag, points, killed);
 
     if (killed) {
-        /* Cop busted: freeze AI — matches original gate at 0x436E1D */
-        actor = actor_ptr(cop_slot);
+        /* Suspect busted: freeze AI — matches original gate at 0x436E1D */
+        actor = actor_ptr(suspect_slot);
         if (actor) {
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
             ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
         }
-        TD5_LOG_I(LOG_TAG, "wanted_arrest: cop slot=%d arrested", cop_slot);
+        TD5_LOG_I(LOG_TAG, "wanted_arrest: suspect slot=%d arrested by cop=%d", suspect_slot, cop_slot);
     }
     return killed;
 }

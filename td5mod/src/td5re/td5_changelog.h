@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Split-screen Cop Chase has its own results screen:" },
+    { CL_ITEM,    "  COPS listed with their arrest counts, SUSPECTS" },
+    { CL_ITEM,    "  below with the time they were busted (- if they" },
+    { CL_ITEM,    "  got away); the race ends as soon as every suspect" },
+    { CL_ITEM,    "  is caught or all the survivors reach the finish" },
     { CL_ITEM,    "Italy (Courmayeur) no longer crashes when you start" },
     { CL_ITEM,    "  the race" },
     { CL_ITEM,    "Cop Chase: you can no longer start a race with no" },

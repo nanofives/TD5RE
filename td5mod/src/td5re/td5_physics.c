@@ -6528,11 +6528,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * [multi-cop 2026-06-24] Uses is_cop (mask-aware) so a SECOND human cop's rams
          * also count — previously only the single primary cop_slot dealt damage. */
         int sa = (int)A->slot_index, sb = (int)B->slot_index;
+        /* Pass BOTH the ramming cop and the rammed suspect so the bust is
+         * credited to the actual cop (per-cop arrest tally in multi-cop), and
+         * capture whether THIS ram completed the arrest. */
         int arrested = 0, cop_s = -1, susp_s = -1;
         if (td5_game_cop_chase_is_cop(sa) && td5_game_cop_chase_is_suspect(sb)) {
-            arrested = td5_ai_wanted_cop_hit(sb, impact_mag); cop_s = sa; susp_s = sb;
+            arrested = td5_ai_wanted_cop_hit(sa, sb, impact_mag); cop_s = sa; susp_s = sb;
         } else if (td5_game_cop_chase_is_cop(sb) && td5_game_cop_chase_is_suspect(sa)) {
-            arrested = td5_ai_wanted_cop_hit(sa, impact_mag); cop_s = sb; susp_s = sa;
+            arrested = td5_ai_wanted_cop_hit(sb, sa, impact_mag); cop_s = sb; susp_s = sa;
         }
         /* [COP CHASE ARREST FF 2026-06-25] When this ram completed the arrest, fire a
          * strong short jolt on BOTH the arresting cop and the busted suspect so each

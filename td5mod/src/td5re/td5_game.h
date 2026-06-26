@@ -235,6 +235,17 @@ int  td5_game_cop_chase_is_suspect(int slot);
  * s_slot_state, the AI's g_slot_state) consistent so the AI cop slot stays
  * active instead of being disabled with slots 2..5. */
 int  td5_game_mp_cop_chase_field(void);
+/* [MP COP CHASE results 2026-06-25] True when a LOCAL (split-screen) MP cop chase
+ * is active — gates the dedicated COPS/SUSPECTS results layout and the "CHASE
+ * RESULTS" title. SP wanted mode and net play keep the normal results table. */
+int  td5_game_mp_cop_chase_active(void);
+/* [MP COP CHASE results 2026-06-25] Per-suspect "time of arrest" (race-timer
+ * ticks). set() stamps the elapsed time once at the bust transition; get()
+ * returns 0 for a suspect that was never arrested (results screen shows '-').
+ * Port-added: the original stores no arrest time (AwardWantedDamageScore @
+ * 0x0043d690 writes only the bust count + ram score). */
+void    td5_game_set_arrest_time(int slot);
+int32_t td5_game_get_arrest_time(int slot);
 
 /* [MP GAME MODES: CUP 2026-06-22] Self-contained best-of-X series orchestrator
  * for the "Cup" mode. begin() arms the series (track list, zeroed standings,
