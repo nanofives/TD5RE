@@ -7242,16 +7242,41 @@ void frontend_load_car_spec_fields(int car_index) {
  *   BALANCE    front/(front+rear) weight 0xB4/0xB6     (text "F.. R..")
  * Bars are roster-normalised (cop cars cached but excluded from the ranges,
  * like the glance bars). One-time cached scan; per-frame touches no files. */
+/* Display order (top -> bottom). Each constant's numeric value IS its row index,
+ * so the labels/captions arrays below and the loop in frontend_render_physics_stats
+ * follow this order; cps_bar_value() and frontend_carphys_frac() switch on the
+ * NAMES, so reordering here only moves rows, never the data each maps to.
+ * [2026-06-26] WEIGHT moved down to sit under GRIP (user request). */
 enum {
-    CPS_WEIGHT = 0, CPS_TOPSPEED, CPS_ACCEL, CPS_POWER, CPS_BRAKING,
-    CPS_GRIP, CPS_HANDLING, CPS_DOWNFORCE, CPS_DRIVETRAIN, CPS_BALANCE,
+    CPS_TOPSPEED = 0, CPS_ACCEL, CPS_POWER, CPS_BRAKING, CPS_GRIP,
+    CPS_WEIGHT, CPS_HANDLING, CPS_DOWNFORCE, CPS_DRIVETRAIN, CPS_BALANCE,
     CPS_COUNT
 };
 #define CPS_BAR_COUNT 8   /* first 8 stats are bars; last 2 are text */
 
 static const char *k_cps_labels[CPS_COUNT] = {
-    "WEIGHT", "TOP SPEED", "ACCEL", "POWER", "BRAKING",
-    "GRIP", "HANDLING", "DOWNFORCE", "DRIVETRAIN", "BALANCE"
+    "TOP SPEED", "ACCEL", "POWER", "BRAKING", "GRIP",
+    "WEIGHT", "HANDLING", "DOWNFORCE", "DRIVETRAIN", "BALANCE"
+};
+
+/* [2026-06-26 PORT ADDITION] Short plain-language captions for the less-obvious
+ * stats, drawn as a small dim second line under the label in the SINGLE-PLAYER
+ * MORE STATS panel only (gated on !compact — the tiny split-screen MP panes have
+ * no vertical room). NULL = the label already reads clearly on its own
+ * (TOP SPEED/BRAKING/WEIGHT). Keep each caption short so it stays inside the
+ * ~40%-of-panel label column and never runs under the bar. Order matches
+ * k_cps_labels above. */
+static const char *k_cps_explain[CPS_COUNT] = {
+    NULL,                  /* TOP SPEED  */
+    "power-to-weight",     /* ACCEL      */
+    "engine output",       /* POWER  (raw engine pull, before weight) */
+    NULL,                  /* BRAKING    */
+    "cornering grip",      /* GRIP       */
+    NULL,                  /* WEIGHT     */
+    "agility",             /* HANDLING   */
+    "grip at speed",       /* DOWNFORCE  */
+    "driven wheels",       /* DRIVETRAIN */
+    "weight: front / rear" /* BALANCE    */
 };
 
 typedef struct {
@@ -7366,15 +7391,19 @@ static const char *frontend_carphys_drivetrain_text(int ext_id) {
     dt = (int)s_cps[ext_id].drivetrain;
     return (dt == 1) ? "RWD" : (dt == 2) ? "FWD" : (dt == 3) ? "AWD" : "-";
 }
-static void frontend_carphys_balance_text(int ext_id, char *out, size_t cap) {
-    int f = 0;
+/* Front-axle weight share as a 0..100 int (rear = 100 - front); 0 if invalid. */
+static int frontend_carphys_front_pct(int ext_id) {
     if (ext_id >= 0 && ext_id < TD5_CAR_COUNT && s_cps[ext_id].valid) {
         int fw = (int)s_cps[ext_id].fwt, rw = (int)s_cps[ext_id].rwt;
         int tot = fw + rw;
-        if (tot > 0) f = (fw * 100 + tot / 2) / tot;
+        if (tot > 0) return (fw * 100 + tot / 2) / tot;
     }
+    return 0;
+}
+static void frontend_carphys_balance_text(int ext_id, char *out, size_t cap) {
+    int f = frontend_carphys_front_pct(ext_id);
     if (f <= 0) snprintf(out, cap, "-");
-    else        snprintf(out, cap, "F%d R%d", f, 100 - f);
+    else        snprintf(out, cap, "%d%% / %d%%", f, 100 - f);  /* front% / rear% */
 }
 
 /* Unified physics-stats panel renderer (SP overlay + MP pane). Draws CPS_COUNT
@@ -7403,7 +7432,19 @@ static void frontend_render_physics_stats(int ext_id, float px, float py, float 
     for (i = 0; i < CPS_COUNT; i++) {
         float ry  = py + (float)i * rh;
         float tyc = (ry + (rh - capd) * 0.5f) * sy;
-        fe_draw_small_text(px * sx, tyc, k_cps_labels[i], 0xFFC8C8C8u, lsx, lsy);
+        const char *expl = compact ? NULL : k_cps_explain[i];
+        if (expl) {
+            /* [2026-06-26] Two-line label: stat name on top, dim caption beneath.
+             * Both sit in the label column (left of barx), so the bar / text value
+             * to the right is untouched. Offsets in design px (SP rh=22.4): label
+             * cell-top ry+2 (baseline ry+12), caption cell-top ry+12 at 0.62x so
+             * its descenders end ~ry+20, inside the row. */
+            float exsx = lsx * 0.62f, exsy = lsy * 0.62f;
+            fe_draw_small_text(px * sx, (ry + 2.0f)  * sy, k_cps_labels[i], 0xFFC8C8C8u, lsx,  lsy);
+            fe_draw_small_text(px * sx, (ry + 12.0f) * sy, expl,           0xFF8FA0B4u, exsx, exsy);
+        } else {
+            fe_draw_small_text(px * sx, tyc, k_cps_labels[i], 0xFFC8C8C8u, lsx, lsy);
+        }
         if (i < CPS_BAR_COUNT) {
             float barh = rh - (compact ? 3.0f : 6.0f);
             float bary, f;
@@ -7414,6 +7455,42 @@ static void frontend_render_physics_stats(int ext_id, float px, float py, float 
             f = frontend_carphys_frac(ext_id, i);
             if (f > 0.0f)
                 fe_draw_quad(barx * sx, bary * sy, f * barw * sx, barh * sy, accent, -1, 0, 0, 1, 1);
+        } else if (i == CPS_BALANCE && !compact) {
+            /* [2026-06-26] BALANCE as a visual front/rear weight-split graph (SP):
+             * the bar is split into a FRONT segment (left, amber accent) and a REAR
+             * segment (right, blue). A bright tick at the centre marks the 50/50
+             * neutral point, so a nose- or tail-heavy car reads at a glance. The
+             * exact percentages are printed inside their own segments. */
+            int   fpct = frontend_carphys_front_pct(ext_id);
+            float barh = rh - 6.0f;
+            float bary, ff;
+            if (barh < 2.0f) barh = 2.0f;
+            bary = ry + (rh - barh) * 0.5f;
+            ff   = (fpct > 0) ? (float)fpct / 100.0f : 0.5f;
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_quad(barx * sx, bary * sy, barw * sx, barh * sy, 0xFF101828u, -1, 0, 0, 1, 1);
+            if (fpct > 0) {
+                fe_draw_quad(barx * sx, bary * sy, ff * barw * sx, barh * sy,
+                             accent, -1, 0, 0, 1, 1);                       /* front (left)  */
+                fe_draw_quad((barx + ff * barw) * sx, bary * sy,
+                             (1.0f - ff) * barw * sx, barh * sy,
+                             0xFF4890D0u, -1, 0, 0, 1, 1);                  /* rear (right)  */
+            }
+            /* centre 50/50 reference tick (drawn over the fills) */
+            fe_draw_quad((barx + 0.5f * barw - 0.75f) * sx, (bary - 1.0f) * sy,
+                         1.5f * sx, (barh + 2.0f) * sy, 0xFFFFFFFFu, -1, 0, 0, 1, 1);
+            if (fpct > 0) {
+                char  fp[8], rp[8];
+                float pls_x = lsx * 0.7f, pls_y = lsy * 0.7f;
+                float pcapd = SMALLFONT_TTF_CAP * (pls_y / sy);
+                float pty   = (ry + (rh - pcapd) * 0.5f) * sy;
+                float rw_txt;
+                snprintf(fp, sizeof fp, "%d%%", fpct);
+                snprintf(rp, sizeof rp, "%d%%", 100 - fpct);
+                rw_txt = fe_measure_small_text(rp) * fe_glyph_sx(pls_x, pls_y);
+                fe_draw_small_text((barx + 3.0f) * sx, pty, fp, 0xFF202830u, pls_x, pls_y);       /* dark on amber */
+                fe_draw_small_text((barx + barw - 3.0f) * sx - rw_txt, pty, rp, 0xFFFFFFFFu, pls_x, pls_y); /* white on blue */
+            }
         } else {
             const char *t;
             if (i == CPS_DRIVETRAIN) t = frontend_carphys_drivetrain_text(ext_id);
@@ -7431,7 +7508,13 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
      * the live selected car (set by frontend_load_car_spec_fields each frame). */
     int ext = s_car_spec_car;
     TD5_LOG_I(LOG_TAG, "car_stats_overlay(physics): car=%d", ext);
-    frontend_render_physics_stats(ext, 232.0f, 126.0f, 384.0f, 224.0f,
+    /* [2026-06-26] Shifted the panel RIGHT (x 232->252) so its labels clear the
+     * port-added RANDOMIZE chip (canvas 218..246, y171..199). The original drew
+     * this header column at canvasW-0x198 = 232 [CONFIRMED @0x0040dff1] but it had
+     * NO randomize button there; the chip is a port enhancement, so this small
+     * shift is a deliberate port-only divergence. The right edge stays at 616
+     * (pw 384->364), preserving the original's clean right margin. */
+    frontend_render_physics_stats(ext, 252.0f, 126.0f, 364.0f, 224.0f,
                                   0xFFE8C040u /* amber == FE_CARSTAT_ACCENT */, 0, sx, sy);
 }
 
@@ -7488,13 +7571,33 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     }
     capd = SMALLFONT_TTF_CAP * (lsy / sy);
 
-    /* SPEED + ACCEL from the config.nfo spec sheet; HANDLING from the car's real
-     * carparam inertia (never blank). Combine into one 3-bit per-bar fill mask. */
-    valid_mask = frontend_glance_from_fields(f7, f8, &spd, &acc);
-    if (valid_mask)
-        frontend_normalize_glance(spd, acc, &fr[0], &fr[1]);
-    if (frontend_handling_frac(car_ext_id, &fr[2]))
-        valid_mask |= 4;
+    /* [2026-06-26] Source all three quick bars from the SAME roster-normalised
+     * carparam physics (frontend_carphys_frac) the MORE STATS panel uses, so
+     * SPEED/ACCEL/HANDLING read on an IDENTICAL scale across both displays. Was:
+     * SPEED/ACCEL from the cosmetic config.nfo spec glance + HANDLING from a
+     * separate inertia frac — a visibly different scale than MORE STATS. The spec
+     * glance / inertia frac are kept only as a fallback for a car whose
+     * carparam.dat failed to load (carphys frac returns -1). */
+    {
+        float sf = frontend_carphys_frac(car_ext_id, CPS_TOPSPEED);  /* SPEED <-> TOP SPEED */
+        float af = frontend_carphys_frac(car_ext_id, CPS_ACCEL);
+        float hf = frontend_carphys_frac(car_ext_id, CPS_HANDLING);
+        valid_mask = 0;
+        if (sf >= 0.0f) { fr[0] = sf; valid_mask |= 1; }
+        if (af >= 0.0f) { fr[1] = af; valid_mask |= 2; }
+        if (hf >= 0.0f) { fr[2] = hf; valid_mask |= 4; }
+        if ((valid_mask & 3) != 3) {           /* carparam missing -> spec glance */
+            int gm = frontend_glance_from_fields(f7, f8, &spd, &acc);
+            if (gm) {
+                float gs = 0.0f, ga = 0.0f;
+                frontend_normalize_glance(spd, acc, &gs, &ga);
+                if (!(valid_mask & 1) && (gm & 1)) { fr[0] = gs; valid_mask |= 1; }
+                if (!(valid_mask & 2) && (gm & 2)) { fr[1] = ga; valid_mask |= 2; }
+            }
+        }
+        if (!(valid_mask & 4) && frontend_handling_frac(car_ext_id, &fr[2]))
+            valid_mask |= 4;                    /* carparam missing -> inertia frac */
+    }
 
     /* Frame: the regular blue/unselected button look (non-interactive). In the
      * compact (small-split) panes, thin the rim proportionally to the panel
