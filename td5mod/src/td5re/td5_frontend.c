@@ -687,6 +687,15 @@ int  s_drag_carselect_pass;
 /* Track selection state */
 int  s_selected_track;           /* DAT_004a2c90            */
 int  s_attract_track;            /* random track for attract demo; never overwrites s_selected_track */
+/* [ATTRACT DEMO 2026-06-25] The attract demo is randomised on every launch and
+ * must NOT corrupt the player's own menu selections. These statics are picked
+ * once when the idle timer fires (frontend_pick_attract_demo_config) and applied
+ * in frontend_init_race_schedule's ATTRACT_MODE branch. Police is always forced
+ * OFF for the demo (no s_attract_* needed). [PORT-ONLY: the original demo only
+ * randomised the track + AI cars; car/opponents/traffic/no-police are new.] */
+int  s_attract_car       = 0;    /* random player car for the demo            */
+int  s_attract_opponents = 5;    /* random AI-opponent count for the demo     */
+int  s_attract_traffic   = 0;    /* random traffic volume (0..4) for the demo */
 int  s_track_direction;          /* DAT_004a2c98: 0=fwd, 1=bwd */
 /* Quick Race player setup (infra to later replace the Two-Player menu).
  * Only the Quick Race screen writes these; all other launch flows leave the
@@ -3036,6 +3045,23 @@ void frontend_init_race_schedule(void) {
     td5_game_set_replay_mode(0);
     td5_game_set_demo_mode(0);
 
+    /* [ATTRACT DEMO 2026-06-25] Force a clean single-player single-race context
+     * for the attract demo BEFORE the cup / cop-chase / MP branches below read it.
+     * The demo fires from the main menu, but a stale MP mode (e.g. backing out of a
+     * cop-chase lobby and idling) would otherwise drag the demo into that mode. The
+     * per-race randomisation (car/opponents/traffic) + forced no-police are applied
+     * once the slot table is built (search "ATTRACT demo" below). */
+    if (s_current_screen == TD5_SCREEN_ATTRACT_MODE) {
+        g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;  /* regular single race            */
+        g_td5.wanted_mode_enabled = 0;                 /* never a cop chase              */
+        g_td5.reverse_direction   = 0;                 /* forwards                       */
+        s_cup_user_active         = 0;                 /* not a user-cup series          */
+        s_selected_game_type      = 0;                 /* single race -> default AI fill  */
+        s_mp_flow                 = 0;
+        s_two_player_mode         = 0;
+        s_launching_net_race      = 0;
+    }
+
 #ifndef TD5RE_RELEASE
     /* [item #4] When launching from Quick Race, log the (dev) span-offset field's
      * committed value once. td5_game.c InitRace applies g_td5.ini.start_span_offset
@@ -3395,6 +3421,37 @@ void frontend_init_race_schedule(void) {
             slot_variant[i] = 0;
             if (i + 1 > start_slot) start_slot = i + 1;
         }
+    }
+
+    /* [ATTRACT DEMO 2026-06-25] Apply the random demo card for an attract-mode
+     * launch. Gated on ATTRACT_MODE so EVERY other race path is byte-identical.
+     * The track was already applied from s_attract_track above; here we override the
+     * player car (slot 0), opponent count, traffic and force police OFF WITHOUT
+     * touching the player's saved menu selections. The context was forced to a clean
+     * single race at the top of this function, so the AI car-fill below takes the
+     * default speed-pool path and InitRace sizes the field to 1 human + N AI.
+     * [PORT-ONLY — the original demo randomised only track + AI cars.] */
+    if (s_current_screen == TD5_SCREEN_ATTRACT_MODE) {
+        int dcar = (s_attract_car >= 0 && s_attract_car < TD5_CAR_COUNT) ? s_attract_car : 0;
+        int dopp = s_attract_opponents;
+        int dtv  = s_attract_traffic;
+        if (dopp < 1) dopp = 1;
+        if (dopp > TD5_LEGACY_RACE_SLOTS - 1) dopp = TD5_LEGACY_RACE_SLOTS - 1;
+        if (dtv < 0) dtv = 0;
+        if (dtv > TD5_TRAFFIC_VOLUME_COUNT - 1) dtv = TD5_TRAFFIC_VOLUME_COUNT - 1;
+
+        slot_ext_id[0]  = dcar;            /* random player car (deduped by the AI fill) */
+        slot_variant[0] = 0;
+        g_td5.car_index = dcar;
+
+        g_td5.num_ai_opponents          = dopp;
+        g_td5.traffic_volume            = dtv;
+        g_td5.traffic_enabled           = (dtv != 0);
+        g_td5.special_encounter_enabled = 0;   /* NO POLICE EVER */
+
+        TD5_LOG_I(LOG_TAG,
+                  "InitRaceSchedule: ATTRACT demo -> car=%d opponents=%d traffic=%d(en=%d) police=OFF",
+                  dcar, dopp, dtv, g_td5.traffic_enabled);
     }
 
     /* RNG state for AI ext_id picks.
@@ -5574,6 +5631,43 @@ static void frontend_update_anim_pacing(void) {
     s_fe_logic_ticks = ticks;
 }
 
+/* [ATTRACT DEMO 2026-06-25] Roll the random parameters for one attract-demo race
+ * and stash them in the s_attract_* statics (applied in frontend_init_race_schedule's
+ * ATTRACT_MODE branch). Random: track (the playable base set), player car, opponent
+ * count, traffic volume. Police is forced OFF unconditionally at apply time. Picked
+ * here (not at apply) so the values are visible in the log the moment the demo fires.
+ * PORT-ONLY: the original demo randomised only the track + AI cars [Ghidra @0x0040dac0,
+ * 0x00414f10]; random car/opponents/traffic + no-police are new behaviour. */
+static void frontend_pick_attract_demo_config(void) {
+    s_attract_track     = rand() % 8;                        /* base TD5 quickrace tracks (crash-safe set) */
+    s_attract_car       = rand() % 16;                       /* well-tested car range 0..15 (AI fill set) */
+    s_attract_opponents = 1 + (rand() % 5);                  /* 1..5 -> classic 6-car field */
+    s_attract_traffic   = rand() % TD5_TRAFFIC_VOLUME_COUNT; /* 0..4 (0 = no traffic) */
+    TD5_LOG_I(LOG_TAG,
+              "Attract demo config: track=%d car=%d opponents=%d traffic=%d police=OFF",
+              s_attract_track, s_attract_car, s_attract_opponents, s_attract_traffic);
+}
+
+/* Idle window (ms) on the main menu before the attract demo auto-launches.
+ * Default 60000 (one minute — the user-facing spec). TD5RE_DEMO_IDLE_MS overrides
+ * it for QA/testing (a smaller value triggers the demo quickly). Cached on first
+ * read; clamped to [1000, 600000]. */
+static uint32_t frontend_attract_idle_window_ms(void) {
+    static uint32_t s_win = 0;
+    static int      s_init = 0;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_DEMO_IDLE_MS");
+        s_win = 60000u;
+        if (e && e[0]) {
+            long v = atol(e);
+            if (v >= 1000 && v <= 600000) s_win = (uint32_t)v;
+        }
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "Attract idle window = %u ms", s_win);
+    }
+    return s_win;
+}
+
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     td5_profile_begin_frame();
@@ -5723,12 +5817,13 @@ int td5_frontend_display_loop(void) {
         s_anim_complete && s_inner_state == 4) {
         uint32_t now = td5_plat_time_ms();
         uint32_t idle_ms = now - s_attract_idle_timestamp;
-        if (idle_ms >= 60000u) {
-            /* Pick a random track for the demo without corrupting the player's selection */
-            s_attract_track = rand() % 8;
+        if (idle_ms >= frontend_attract_idle_window_ms()) {
+            /* Roll the full demo card (track/car/opponents/traffic) without
+             * corrupting the player's own menu selections, then jump to the
+             * attract screen which fades out and launches the race. */
+            frontend_pick_attract_demo_config();
             TD5_LOG_I(LOG_TAG,
-                      "Attract timer fired: idle_ms=%u -> ATTRACT_MODE (demo track=%d)",
-                      idle_ms, s_attract_track);
+                      "Attract timer fired: idle_ms=%u -> ATTRACT_MODE", idle_ms);
             td5_frontend_set_screen(TD5_SCREEN_ATTRACT_MODE);
         }
     }
