@@ -39,6 +39,7 @@
 #include "td5_save.h"
 
 #include "td5_vfx.h"
+#include "td5_arcade.h"   /* ARCADE mode: pickup pads + power-ups */
 #include "td5_trace.h"
 #include "td5_profile.h"
 #include "td5_benchmark.h"
@@ -2630,6 +2631,11 @@ int td5_game_init_race_session(void) {
             TD5_Actor *a = (TD5_Actor *)(s_actor_memory + (size_t)s * TD5_ACTOR_STRIDE);
             td5_physics_compute_suspension_envelope(a, s);
         }
+
+        /* [ARCADE 2026-06-26] Place power-up pads along the track ring + clear
+         * per-slot/hazard state for this race. No-op (and clears) in SIMULATION
+         * mode; the track ring is already loaded by this point. */
+        td5_arcade_init_race();
 
         /* [DEMO FIX #3 2026-06-15] The AI module keeps its OWN slot-state table
          * (td5_ai.c g_slot_state[], separate from this file's s_slot_state[]) and
@@ -5719,6 +5725,11 @@ int td5_game_run_race_frame(void) {
          * summary-screen knob so the data is always available for A/B. */
         td5_physics_accumulate_metrics();
 
+        /* [ARCADE 2026-06-26] Power-up pickups + effect timers + hazard spinouts.
+         * Runs once per genuine race tick AFTER physics (so positions are settled),
+         * inside the deterministic sub-tick loop. No-op in SIMULATION mode. */
+        td5_arcade_tick();
+
         td5_game_trace_stage("post_physics", ticks_this_frame);
         td5_game_trace_stage("post_ai", ticks_this_frame);
 
@@ -6054,6 +6065,7 @@ int td5_game_run_race_frame(void) {
                     if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
                 }
                 td5_vfx_draw_particles(vp);
+                td5_render_arcade_pads();   /* [ARCADE] glowing power-up pads + hazards */
             }
             td5_render_flush_translucent();
             td5_render_flush_projected_buckets();
@@ -6176,6 +6188,7 @@ int td5_game_run_race_frame(void) {
                 if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
             }
             td5_vfx_draw_particles(vp);
+            td5_render_arcade_pads();   /* [ARCADE] glowing power-up pads + hazards */
         }
         td5_profile_mark("v_vfx");     /* [perf probe] per-view tire/streak/particle draws */
         td5_render_flush_translucent();
@@ -6229,6 +6242,10 @@ int td5_game_run_race_frame(void) {
      * player's accent colour + a name plate under the car. Self-gated (only when
      * the MP frontend set identities and the race is split). */
     td5_hud_draw_player_id_overlays();
+
+    /* [ARCADE 2026-06-26] Per-viewport active power-up chip (label + timer bar).
+     * Self-gated: no-op unless the race is in ARCADE mode with an active effect. */
+    td5_hud_draw_arcade_chips();
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op

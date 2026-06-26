@@ -196,6 +196,11 @@ void td5_render_queue_translucent_batch(void *record);
 void td5_render_flush_translucent(void);
 void td5_render_flush_immediate_batch(void);
 
+/* [ARCADE] Draw the glowing power-up pads + dropped hazards for the current
+ * viewport. Call from the per-view world-FX pass (after particles). No-op
+ * outside ARCADE mode. */
+void td5_render_arcade_pads(void);
+
 /* --- Depth-sorted pipeline (4096 buckets) --- */
 void td5_render_queue_projected_entry(void *entry, int bucket, uint32_t flags, int texture_page);
 void td5_render_flush_projected_buckets(void);

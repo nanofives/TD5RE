@@ -5056,6 +5056,15 @@ int ConfigureGameTypeFlags(void) {
     TD5_LOG_I(LOG_TAG, "ConfigureGameTypeFlags: game_type=%d tier=%d",
               s_selected_game_type, g_td5.difficulty_tier);
 
+    /* [ARCADE 2026-06-26] Commit the ARCADE/SIMULATION dynamics choice for EVERY
+     * game type (single race, championship, multiplayer race/cup/cop-chase). It
+     * drives gravity + grip/torque scaling at physics init AND the arcade power-up
+     * system, so it must be set before td5_physics_init_vehicle_runtime regardless
+     * of mode. Previously only Single Race (case 0) committed it, so the new
+     * track-select / MP-config selectors had no effect in the other modes. The
+     * per-case commit in case 0 below is now redundant but harmless. */
+    td5_physics_set_dynamics(s_game_option_dynamics);
+
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
         /* [CONFIRMED @ 0x004155DE] live circuit lap count = gCircuitLapsConfigShadow + 1,
@@ -6683,17 +6692,12 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     /* [dynamic-traffic] 5-state traffic volume row. */
     const char *traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] = { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
     const char *difficulty[] = { "EASY", "NORMAL", "HARD" };  /* orig middle label: NORMAL */
-    /* [CONFIRMED @ Language.dll SNK_DynamicsTxt, indexed directly by
-     * gDynamicsConfigShadow @0x00466014 at ScreenGameOptions 0x0041FECF]:
-     * value 0 -> "ARCADE", value 1 -> "SIMULATION". The previous order was
-     * inverted. Physics: 0=ARCADE (gravity 1900 + car-stat boosts),
-     * 1=SIMULATION (gravity 1500 + stock stats). */
-    const char *dynamics[] = { "ARCADE", "SIMULATION" };
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    /* [S02 (c) 2026-06-04] Circuit Laps row removed from this screen; the six
-     * remaining option values shifted up one button index. Laps is now shown and
-     * edited in the Quick Race menu and the Track Selection screen. */
+    /* [S02 (c) 2026-06-04] Circuit Laps row removed from this screen; values
+     * shifted up one button index. [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIM)
+     * row also removed — it now lives on Track Selection + the MP screens — so
+     * 3D Collisions moved up from button index 5 to 4. */
     frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
     {
         int tvi = s_game_option_traffic;
@@ -6703,8 +6707,7 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     }
     frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, dynamics[s_game_option_dynamics & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -7746,6 +7749,14 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
             fe_draw_text(vx, (float)(s_buttons[5].y + 6) * sy, on_off[s_game_option_cops & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         if (s_buttons[6].active && !s_buttons[6].hidden)  /* per-race AI difficulty (hidden in Quick Race) */
             fe_draw_text(vx, (float)(s_buttons[6].y + 6) * sy, difficulty[s_race_difficulty % 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
+        /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) value — appended row,
+         * indexed via s_trksel_dyn_btn (sits on the top row, y=57). */
+        if (s_trksel_dyn_btn >= 0 && s_buttons[s_trksel_dyn_btn].active &&
+            !s_buttons[s_trksel_dyn_btn].hidden) {
+            const char *dyn[2] = { "ARCADE", "SIMULATION" };
+            fe_draw_text(vx, (float)(s_buttons[s_trksel_dyn_btn].y + 6) * sy,
+                         dyn[s_game_option_dynamics & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
+        }
     }
 
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
@@ -10105,7 +10116,7 @@ static void frontend_pending_render(float sx, float sy) {
         td5_vui_text_centered(320.0f * sx, (float)(PL_CTL_Y + 30) * sy, buf, 0xFF8890A0u, sx, sy);
     }
     td5_vui_text_centered(320.0f * sx, (float)(PL_CTL_Y + 56) * sy,
-                          "ENTER = MARK TESTED      -      B / BACK = RETURN",
+                          "ENTER = MARK TESTED   -   SUPR = DELETE   -   B / BACK = RETURN",
                           0xFF8890A0u, sx, sy);
 }
 
@@ -10123,7 +10134,26 @@ void Screen_PendingTest(void) {
                   td5_pending_count(), td5_pending_remaining());
         break;
 
-    case 1:
+    case 1: {
+        /* SUPR / DELETE drops the currently-highlighted checklist row outright
+         * (vs ENTER, which only marks it tested). td5_plat_input_key_pressed is
+         * level-triggered, so debounce on the rising edge: one delete per press. */
+        static int s_pl_supr_down = 0;
+        int supr = td5_plat_input_key_pressed(0xD3);   /* DIK_DELETE ("SUPR") */
+        if (supr && !s_pl_supr_down &&
+            s_selected_button >= 0 && s_selected_button < s_pl_row_count) {
+            int sel  = s_selected_button;
+            int item = s_pl_page * PL_ROWS_PER_PAGE + sel;
+            td5_pending_delete(item);
+            frontend_pending_build_buttons();          /* page/row counts shifted */
+            if (s_pl_row_count > 0) {                  /* keep the cursor in place */
+                if (sel >= s_pl_row_count) sel = s_pl_row_count - 1;
+                s_selected_button = sel;
+            }
+            frontend_play_sfx(5);
+        }
+        s_pl_supr_down = supr;
+
         if (s_input_ready && s_button_index >= 0) {
             int b = s_button_index;
             if (b < s_pl_row_count) {                 /* toggle a checklist row */
@@ -10147,6 +10177,7 @@ void Screen_PendingTest(void) {
             }
         }
         break;
+    }
     }
 }
 

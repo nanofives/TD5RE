@@ -188,6 +188,10 @@ void td5_hud_draw_net_pause_overlay(void);
  * under the car. Set by the multiplayer frontend at race start. */
 void td5_hud_draw_player_id_overlays(void);
 void td5_hud_set_player_identity(int slot, const char *name, uint32_t rgb);
+
+/* [ARCADE] Per-viewport active power-up chip (label + shrinking timer bar).
+ * No-op outside ARCADE mode. */
+void td5_hud_draw_arcade_chips(void);
 void td5_hud_clear_player_identities(void);
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac);
 void td5_hud_draw_race_fade(float progress, int direction);
