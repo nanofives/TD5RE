@@ -121,8 +121,10 @@ void td5_ai_traffic_dynamic_race_init(void);
 /* Award damage to a cop slot on player<->cop V2V collision.
  * Mirrors AwardWantedDamageScore @ 0x43D690. Decrements gWantedDamageStateTable
  * by 0x200 (impact<=20000) or 0x400 (impact>20000). When state reaches 0,
- * the cop is arrested and its AI frozen. Called from td5_physics.c. */
-void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag);
+ * the cop is arrested and its AI frozen. Called from td5_physics.c.
+ * [2026-06-25] Returns 1 when THIS hit completed the arrest, else 0 (lets the
+ * caller fire the arrest force-feedback jolt for both cop and suspect). */
+int td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag);
 
 /* Slot whose DAMAGE bar the HUD shows (last-rammed suspect 1..5, or -1).
  * Mirrors g_wantedDamageHudOverlayCount @ 0x004bf504. Read by td5_hud.c. */

@@ -3720,6 +3720,11 @@ void frontend_cup_winners_render(float sx, float sy) {
 
 static int s_cop_role[TD5_MAX_HUMAN_PLAYERS];   /* 1 = cop, 0 = suspect */
 
+/* [COP CHASE ROLES VALIDATION 2026-06-25] Frames left to flash the "need at least
+ * one COP and one SUSPECT" warning after an invalid (all-cop / all-suspect) OK
+ * press. Decremented each tick in Screen_MpCopRoles, read by the render below. */
+static int s_cop_roles_warn_frames = 0;
+
 static void mp_roleselect_row(float sx, float sy, int p, float y, const char *val) {
     char nb[24];
     /* [CUP/COP NAMES 2026-06-25] Show the player's LOADED profile name (set on
@@ -3766,6 +3771,8 @@ void Screen_MpCopRoles(void) {
     }
     if (frontend_mp_setup_disconnect_check(n)) return;
 
+    if (s_cop_roles_warn_frames > 0) s_cop_roles_warn_frames--;
+
     for (p = 0; p < n; p++) {              /* each player toggles their own role */
         uint32_t bits = mp_simul_player_nav(p);
         uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
@@ -3778,16 +3785,28 @@ void Screen_MpCopRoles(void) {
          * honoured: build the per-slot cop mask from s_cop_role[] so EVERY player who
          * chose COP is a cop (and gets cop cars + the cop role in-race), not just the
          * first one. cop_slot stays the PRIMARY (lowest) cop for single-value readers. */
-        int mask = 0, cop = -1;
-        for (p = 0; p < n; p++) if (s_cop_role[p]) {
-            mask |= (1 << p);
-            if (cop < 0) cop = p;
+        int mask = 0, cop = -1, num_cops = 0, num_suspects = 0;
+        for (p = 0; p < n; p++) {
+            if (s_cop_role[p]) { mask |= (1 << p); if (cop < 0) cop = p; num_cops++; }
+            else               { num_suspects++; }
         }
-        if (cop < 0) { cop = 0; mask = 1; }         /* always at least one cop (slot 0) */
+        /* [COP CHASE ROLES VALIDATION 2026-06-25] A cop chase needs BOTH sides on the
+         * grid — refuse to start an all-cop or all-suspect race (which produces a
+         * no-op pursuit). Flash a warning + play the reject sfx and STAY on the screen
+         * so the players fix their picks, instead of silently forcing slot 0 to cop. */
+        if (num_cops == 0 || num_suspects == 0) {
+            s_cop_roles_warn_frames = 150;          /* ~2.5s flash */
+            frontend_play_sfx(10);                  /* error / disabled tone */
+            td5_plat_input_flush_nav();             /* consume the OK press */
+            TD5_LOG_W(LOG_TAG, "MP cop roles: rejected cops=%d suspects=%d (need >=1 each)",
+                      num_cops, num_suspects);
+            return;
+        }
         g_td5.mp_mode_config.cop_slot      = cop;
         g_td5.mp_mode_config.cop_slot_mask = mask;
         td5_plat_input_flush_nav();
-        TD5_LOG_I(LOG_TAG, "MP cop roles: cops mask=0x%X primary=%d -> car select", mask, cop);
+        TD5_LOG_I(LOG_TAG, "MP cop roles: cops mask=0x%X primary=%d (cops=%d suspects=%d) -> car select",
+                  mask, cop, num_cops, num_suspects);
         td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
         return;
     }
@@ -3810,6 +3829,12 @@ void frontend_mp_cop_roles_render(float sx, float sy) {
     for (p = 0; p < n; p++) {
         mp_roleselect_row(sx, sy, p, y, s_cop_role[p] ? "COP" : "SUSPECT");
         y += 34.0f;
+    }
+    /* [COP CHASE ROLES VALIDATION 2026-06-25] Flash the requirement after a rejected
+     * (all-cop / all-suspect) OK so the players know why the race didn't start. */
+    if (s_cop_roles_warn_frames > 0) {
+        mp_pos_small_centered(320.0f * sx, 360.0f * sy,
+                              "NEED AT LEAST ONE COP AND ONE SUSPECT", 0xFFFF5050u, sx, sy);
     }
 }
 

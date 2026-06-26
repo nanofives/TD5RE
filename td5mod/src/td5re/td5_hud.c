@@ -2085,6 +2085,19 @@ static int td5_hud_copchase_vector_enabled(void) {
     }
     return cached;
 }
+/* [COP CHASE STATUS BARS 2026-06-25] When ON (default), the bust-progress indicator
+ * is drawn over EVERY live suspect at once (not just the single last-rammed slot),
+ * shrinks with camera distance like the MP name labels, and is HIDDEN once that
+ * suspect is arrested. TD5RE_COPCHASE_MULTI_BAR=0 reverts to the faithful single
+ * fixed-size indicator on the last-rammed suspect. */
+static int td5_copchase_multi_bar_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_COPCHASE_MULTI_BAR");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
 
 /* [HUD TTF SWAP 2026-06-05] The in-race HUD overlay text renders in the menu's
  * SECONDARY native face (Rajdhani, td5_hudfont_*) when loaded, instead of the
@@ -3182,7 +3195,7 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
             float pane_h = vp_bottom - vp_top;
             if (pane_h < 1.0f) pane_h = 480.0f;
             float cx = s_view_layout[view_index].center_x;
-            float cy = vp_top + pane_h * 0.46f;
+            float cy = vp_top + pane_h * 0.5f;   /* [2026-06-25] true centre of the pane */
             if (td5_hudfont_ready()) {
                 float sy = s_view_layout[view_index].scale_y;
                 hud_draw_wanted_banner_line(cx, cy, sy * 30.0f, "ARRESTED", 0xFFFF2A2Au);
@@ -3808,6 +3821,10 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb, int stat
     for (int r = 0; r < g_racer_count && r < TD5_MAX_RACER_SLOTS; r++) {
         if (td5_game_get_slot_state(r) == 3) continue;       /* decoration slot   */
         if (td5_game_slot_is_finished(r))    continue;       /* already finished  */
+        /* [COP CHASE 2026-06-25] Drop arrested suspects from the empty-cell minimap —
+         * a busted, immobilized car shouldn't clutter the live-field overlay. */
+        if (g_td5.wanted_mode_enabled && td5_game_cop_chase_is_suspect(r) &&
+            g_wanted_damage_state[r] <= 0) continue;          /* arrested          */
         lab[n].wx  = (float)actor_world_x(r) * (1.0f / 256.0f);
         lab[n].wz  = (float)actor_world_z(r) * (1.0f / 256.0f);
         lab[n].h12 = (uint32_t)((actor_heading(r) >> 8) & 0xFFF);
@@ -7344,8 +7361,17 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
     /* Gate matches orig 0x0043d4f5:
      *   if (wanted_mode_enabled != 0 && slot == g_wantedDamageHudOverlayCount) */
     if (!g_td5.wanted_mode_enabled) return;
-    if (actor_slot != hud_wanted_active_slot()) return;
     if ((unsigned)actor_slot >= (unsigned)TD5_MAX_RACER_SLOTS) return;
+    if (td5_copchase_multi_bar_enabled()) {
+        /* [COP CHASE STATUS BARS 2026-06-25] Draw the bust-progress indicator over
+         * EVERY live suspect at once (not just the last-rammed slot), and HIDE it the
+         * moment that suspect is arrested — the big centre "ARRESTED" splash and the
+         * frozen car convey the bust from then on. */
+        if (!td5_game_cop_chase_is_suspect(actor_slot)) return;
+        if (g_wanted_damage_state[actor_slot] <= 0) return;   /* arrested -> gone */
+    } else {
+        if (actor_slot != hud_wanted_active_slot()) return;   /* faithful single bar */
+    }
 
     /* Project model anchor (0, 120, 0) through the current render
      * transform — same hook the orig uses (WritePointToCurrent
@@ -7390,7 +7416,20 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
      * 640px fVar2=16, at 1280px fVar2=32, etc. The previous port hardcoded 16
      * (640 only), so the bar read too small at higher resolutions. */
     extern float g_render_width_f;
-    const float FV1 = g_render_width_f * (1.0f / 640.0f);  /* orig fVar1 = S/640  */
+    /* [COP CHASE STATUS BARS 2026-06-25] Shrink the indicator with camera distance,
+     * matched to the MP name labels (NEAR_D/FAR_D), but readable to 2x the label
+     * cutoff. `depth` is the view-space distance (1/rhw, world units) from the anchor
+     * projected above. Faithful single-bar mode keeps the original FIXED size. */
+    float dscale = 1.0f;
+    if (td5_copchase_multi_bar_enabled()) {
+        const float NEAR_D = 6000.0f, FAR_D = 22000.0f, CUT_D = 30000.0f;
+        float depth = (rhw > 1e-6f) ? (1.0f / rhw) : (CUT_D * 2.0f + 1.0f);
+        if (depth > CUT_D * 2.0f) return;            /* visible 2x as far as labels */
+        float t = (depth - NEAR_D) / (FAR_D - NEAR_D);
+        if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+        dscale = 1.0f - 0.65f * t;                   /* 1.0 near -> 0.35 floor far */
+    }
+    const float FV1 = g_render_width_f * (1.0f / 640.0f) * dscale;  /* orig fVar1 = S/640 */
     /* Original sizes: fVar2 = fVar1*16 (frame side); DAMAGEB1 needle = fVar1*4.
      * [USER DIVERGENCE 2026-06-01: 3x upscale per user — bigger damage indicator
      * over the suspect cars. fVar2 -> fVar1*48, needle -> fVar1*12 (keeps 4:1).] */

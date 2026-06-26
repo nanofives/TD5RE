@@ -944,7 +944,10 @@ void td5_ai_reset_wanted_state(void) { s_wanted_hud_overlay_slot = -1; }
  *   - Clamp to [0, 0x1000].
  *   - When state reaches 0, cop AI is frozen (arrested).
  * Called from td5_physics.c when player (slot 0) collides with a cop. */
-void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
+/* [COP CHASE ARREST 2026-06-25] Returns 1 when THIS hit completed the arrest (the
+ * suspect's wanted damage just reached 0), else 0. The physics caller uses it to
+ * fire the strong short arrest jolt on both the cop and the busted suspect. */
+int td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
     int16_t dec, cur;
     char *actor;
     extern int g_wanted_msg_timer;   /* td5_hud.c */
@@ -953,20 +956,20 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
     /* `cop_slot` here is actually the SUSPECT being rammed (legacy name). Any
      * racer slot can be a suspect now (MP cop chase may make slot 0 a suspect);
      * the COP itself is excluded by Gate 3 below (target-slot == cop). */
-    if (cop_slot < 0 || cop_slot >= TD5_MAX_RACER_SLOTS) return;
+    if (cop_slot < 0 || cop_slot >= TD5_MAX_RACER_SLOTS) return 0;
 
     /* Gate 1 [orig 0x0043D690 entry]: impact must be material (> 9999). */
-    if (impact_mag <= 9999) return;
+    if (impact_mag <= 9999) return 0;
 
     /* Gate 2 [orig 0x0043D6A0 test on DAT_004bf518]: scoring-enabled flag. */
-    if (s_wanted_scoring_enabled == 0) return;
+    if (s_wanted_scoring_enabled == 0) return 0;
 
     /* Gate 3 [orig 0x0043D6B4]: ignore unless this cop is the active tracker
      * target. td5_game_get_wanted_target_slot() returns 0 (player) in port;
      * orig checks `cop_slot != g_wantedTargetSlotIndex && g_wantedTargetTrackerActive != 0`
      * which inverts during cop-vs-cop accidental collisions. Mirror with the
      * available port globals; tracker_active!=0 modelled by wanted_mode flag. */
-    if (cop_slot == td5_game_get_wanted_target_slot()) return;
+    if (cop_slot == td5_game_get_wanted_target_slot()) return 0;
 
     /* First-hit-vs-rehit branch [orig 0x0043D6D8]: if the HUD overlay was
      * NOT pointing at this cop last frame, this is a "first hit" — reset
@@ -981,7 +984,7 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
         TD5_LOG_I(LOG_TAG,
                   "wanted_first_hit: cop_slot=%d msg_idx=%d impact=%d",
                   cop_slot, g_wanted_msg_index, (int)impact_mag);
-        return;
+        return 0;
     }
 
     /* Re-hit path [orig 0x0043D6F8 onward]: only a suspect with health left
@@ -991,7 +994,7 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
      * player/cop (slot 0 = the wanted-scoring actor, orig gap_01f8+0xD0). */
     if (g_wanted_damage_state[cop_slot] <= 0) {
         /* Already busted — no further damage/score (orig gate `health > 0`). */
-        return;
+        return 0;
     }
     dec = (impact_mag > 20000) ? (int16_t)0x400 : (int16_t)0x200;
     int points = (dec == (int16_t)0x200) ? 10 : 20;
@@ -1026,6 +1029,7 @@ void td5_ai_wanted_cop_hit(int cop_slot, int32_t impact_mag) {
         }
         TD5_LOG_I(LOG_TAG, "wanted_arrest: cop slot=%d arrested", cop_slot);
     }
+    return killed;
 }
 
 void td5_ai_bind_actor_table(void *actor_base) {

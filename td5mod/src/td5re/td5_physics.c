@@ -233,6 +233,19 @@ static int32_t g_collisions_enabled = 0;     /* DAT_00463188 (== orig's `g_camer
                                                 * preserves that inversion. */
 static int32_t g_game_paused = 0;            /* DAT_004AAD60 */
 static int32_t g_xz_freeze = 0;             /* DAT_00483030: 1=freeze XZ during countdown */
+
+/* [COP CHASE ARREST FREEZE 2026-06-25] An arrested suspect is fully immobilized
+ * (its drive integrator is skipped and its velocity is zeroed every tick). Knob
+ * TD5RE_COPCHASE_ARREST_FREEZE=0 reverts to the pre-arrest behaviour (AI brakes to
+ * a stop, human suspects can still roll). Default ON. */
+static int td5_copchase_arrest_freeze_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_COPCHASE_ARREST_FREEZE");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
 static int32_t s_dynamics_mode = 0;          /* 0=arcade, 1=simulation (0x42F7B0) */
 static int32_t g_difficulty_easy = 0;
 static int32_t g_difficulty_hard = 0;
@@ -2912,6 +2925,22 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * skipped middle sub-ticks so traffic integrates every countdown tick. */
         td5_physics_update_traffic(actor);
     } else if (actor->vehicle_mode == 0 && !g_game_paused) {
+        if (g_td5.wanted_mode_enabled &&
+            td5_copchase_arrest_freeze_enabled() &&
+            td5_game_cop_chase_is_suspect(actor->slot_index) &&
+            g_wanted_damage_state[actor->slot_index] <= 0) {
+            /* [COP CHASE ARREST FREEZE 2026-06-25] Busted suspect: zero ALL motion and
+             * skip the drive integrator so it can't move OR be driven (human suspects
+             * included). Re-zeroed every tick so a later ram can't nudge it back into
+             * motion. The td6-prop / pushable passes below still run (harmless when
+             * parked). Knob TD5RE_COPCHASE_ARREST_FREEZE=0 disables this. */
+            actor->linear_velocity_x = 0;
+            actor->linear_velocity_y = 0;
+            actor->linear_velocity_z = 0;
+            actor->angular_velocity_roll  = 0;
+            actor->angular_velocity_pitch = 0;
+            actor->angular_velocity_yaw   = 0;
+        } else {
         /* Select effective grip: min of grip_reduction and race_position.
          * Listing 0x00406823-683D: AL=[+0x380]; CL=[+0x383]; if (CL < AL) AL=CL;
          * MOV [+0x380], AL.  Original WRITES the clamped result back to
@@ -2935,6 +2964,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         } else {
             /* AI racer (slot < 6). Traffic handled by the slot>=6 branch above. */
             td5_physics_update_ai(actor);
+        }
         }
         /* [task#14] TD6 breakable-prop collision (player + AI racers), after the
          * per-tick position/velocity update so wheel contacts are current. */
@@ -6498,10 +6528,19 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * [multi-cop 2026-06-24] Uses is_cop (mask-aware) so a SECOND human cop's rams
          * also count — previously only the single primary cop_slot dealt damage. */
         int sa = (int)A->slot_index, sb = (int)B->slot_index;
-        if (td5_game_cop_chase_is_cop(sa) && td5_game_cop_chase_is_suspect(sb))
-            td5_ai_wanted_cop_hit(sb, impact_mag);
-        else if (td5_game_cop_chase_is_cop(sb) && td5_game_cop_chase_is_suspect(sa))
-            td5_ai_wanted_cop_hit(sa, impact_mag);
+        int arrested = 0, cop_s = -1, susp_s = -1;
+        if (td5_game_cop_chase_is_cop(sa) && td5_game_cop_chase_is_suspect(sb)) {
+            arrested = td5_ai_wanted_cop_hit(sb, impact_mag); cop_s = sa; susp_s = sb;
+        } else if (td5_game_cop_chase_is_cop(sb) && td5_game_cop_chase_is_suspect(sa)) {
+            arrested = td5_ai_wanted_cop_hit(sa, impact_mag); cop_s = sb; susp_s = sa;
+        }
+        /* [COP CHASE ARREST FF 2026-06-25] When this ram completed the arrest, fire a
+         * strong short jolt on BOTH the arresting cop and the busted suspect so each
+         * player feels the bust (slots out of human/device range are no-ops). */
+        if (arrested) {
+            td5_input_ff_jolt(cop_s,  TD5_FF_ARREST_JOLT_MAG);
+            td5_input_ff_jolt(susp_s, TD5_FF_ARREST_JOLT_MAG);
+        }
     }
 
     /* Traffic recovery escalation (> 50000 and traffic slot). [N-way 2026-06-04]
