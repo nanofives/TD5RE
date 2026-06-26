@@ -1542,8 +1542,17 @@ static void frontend_mp_simul_carsel_init(void) {
     s_car_roster_max = TD5_CAR_COUNT - 1;
 
     /* [MP COP CHASE 2026-06-24] When this grid is a cop-chase race, each pane gets
-     * a role-specific roster (cop -> police cars, suspect -> civilian cars). */
-    s_mp_simul_copchase = (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE);
+     * a role-specific roster (cop -> police cars, suspect -> civilian cars).
+     * [RANDOM COP 2026-06-25] EXCEPT in HUMAN random-cop mode: nobody knows their
+     * role yet, so every pane uses the FULL roster (no cop-only police restriction) —
+     * the car you pick becomes your cop car if you're drawn as a cop at race start.
+     * Require !cop_is_ai so a stale cop_random left on under an AI cop (the menu row
+     * hides but keeps its value) still gives the humans their suspect roster. */
+    {
+        int human_random = g_td5.mp_mode_config.cop_random && !g_td5.mp_mode_config.cop_is_ai;
+        s_mp_simul_copchase = (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) &&
+                              !human_random;
+    }
 
     for (p = 0; p < n; p++) {
         mp_simul_set_pane_roster(p);
@@ -3003,6 +3012,10 @@ static void mp_mode_config_apply_defaults(int mode) {
         c->cop_slot_mask      = 1;              /* [multi-cop] slot 0 cop until role pick */
         c->cop_pick_mode      = TD5_COP_PICK_HOST_ASSIGN;
         c->cop_is_ai          = 0;
+        /* [RANDOM COP 2026-06-25] Manual role pick by default; a dev can force the
+         * mode on with TD5RE_COPCHASE_RANDOM=1 so --StartScreen jumps land in it. */
+        { const char *e = getenv("TD5RE_COPCHASE_RANDOM");
+          c->cop_random = (e && e[0] == '1') ? 1 : 0; }
         c->cop_ai_difficulty  = 1;
         c->cop_win_condition  = TD5_COP_WIN_BUST_ALL;
         c->suspect_head_start = 12;
@@ -3169,7 +3182,9 @@ typedef struct {
     int                enum_count;
 } MpCfgOpt;
 
-#define MP_CFG_MAX_OPTS 6
+#define MP_CFG_MAX_OPTS 8   /* cop chase now reaches 6 rows (AI COP, RANDOM COP, WIN
+                             * CONDITION, HEAD START, SUSPECT SPEED %, INFECT) — keep
+                             * headroom so the opts[] stack array can't overflow. */
 
 static const char *const k_cfg_offon[2]  = { "OFF", "ON" };
 static const char *const k_cfg_wincon[3] = { "BUST ALL", "MOST BUSTS", "SUDDEN DEATH" };
@@ -3198,6 +3213,13 @@ static int mp_cfg_build(MpCfgOpt *o) {
          * the OK handler), so this toggle would be a confusing no-op. */
         if (frontend_mp_ai_player_count() == 0)
         { o[n].label="AI COP";          o[n].val=&c->cop_is_ai;           o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++; }
+        /* [RANDOM COP 2026-06-25] Only meaningful for a HUMAN cop chase with no AI
+         * test players (the AI-cop and AI-test-player paths assign roles without the
+         * human role screen). ON => the role screen is skipped and the cop(s) are
+         * drawn at random at race start. The row appears/disappears as AI COP toggles
+         * — the config screen's dynamic button rebuild handles the count change. */
+        if (frontend_mp_ai_player_count() == 0 && !c->cop_is_ai)
+        { o[n].label="RANDOM COP";      o[n].val=&c->cop_random;          o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++; }
         o[n].label="WIN CONDITION";    o[n].val=&c->cop_win_condition;   o[n].min=0;  o[n].max=2;  o[n].step=1; o[n].enum_labels=k_cfg_wincon; o[n].enum_count=3; n++;
         o[n].label="HEAD START";       o[n].val=&c->suspect_head_start;  o[n].min=0;  o[n].max=40; o[n].step=2; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
         o[n].label="SUSPECT SPEED %";  o[n].val=&c->suspect_debuff_pct;  o[n].min=40; o[n].max=100;o[n].step=5; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
@@ -3365,6 +3387,15 @@ void Screen_MpModeConfig(void) {
             TD5_LOG_I(LOG_TAG,
                       "MP mode config: AI cop-chase mask=0x%X primary=%d (req %d cops) -> car select",
                       mask, c->cop_slot, s_mp_ai_cop_count);
+            td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        } else if (c->mode == TD5_MP_MODE_COP_CHASE && !c->cop_is_ai && c->cop_random) {
+            /* [RANDOM COP 2026-06-25] Skip the manual role-pick screen: the cop(s)
+             * are drawn at race start (td5_game_assign_random_cop). Clear any stale
+             * mask from a prior manual pick so nothing leaks the role into car-select
+             * (the full-roster grid below also stops keying off it). */
+            c->cop_slot_mask = 0;
+            c->cop_slot      = 0;
+            TD5_LOG_I(LOG_TAG, "MP mode config: cop chase RANDOM COP -> car select (roles at race start)");
             td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
         } else if (c->mode == TD5_MP_MODE_COP_CHASE && !c->cop_is_ai) {
             TD5_LOG_I(LOG_TAG, "MP mode config: cop chase (human cop) -> role select");

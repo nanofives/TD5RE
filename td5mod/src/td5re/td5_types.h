@@ -512,6 +512,13 @@ typedef struct TD5_MpModeConfig {
      * consulted for the LOCAL cop-chase path (mode==COP_CHASE && !network).
      * Appended for a stable wire layout. */
     int32_t cop_infect_enabled;
+    /* [MP COP CHASE: RANDOM COP 2026-06-25] 1 => skip the manual cop/suspect role
+     * screen entirely; the cop(s) are drawn at RANDOM at race start (see
+     * td5_game_assign_random_cop). Players pick any car normally and only discover
+     * their role when the race begins (the HUD "YOU ARE THE COP / SUSPECT" banner).
+     * Only consulted on the human-cop path (cop_is_ai==0, local split-screen).
+     * Appended for a stable wire layout. */
+    int32_t cop_random;
 } TD5_MpModeConfig;
 
 /* ========================================================================
