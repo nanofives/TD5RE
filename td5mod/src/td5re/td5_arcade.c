@@ -48,8 +48,9 @@ static int knob(const char *name, int dflt, int lo, int hi) {
  * State
  * ====================================================================== */
 typedef struct ArcPad {
-    int32_t x, y, z;     /* world pos (24.8 fixed); y already lifted for render */
-    int16_t span;        /* track ring span this pad sits on (pickup trigger)   */
+    int32_t x, y, z;     /* world pos in RENDER units (=world_pos/256); y lifted */
+    int16_t span;        /* track ring span this box sits on (pickup trigger)    */
+    int8_t  sub_lane;    /* lane the box sits in (sideline); pickup is lane-gated */
     uint8_t kind;        /* TD5_PU_*                                            */
     uint8_t active;      /* 1 = collectable, 0 = dormant (respawning)           */
     int16_t respawn;     /* ticks until re-activation when dormant              */
@@ -230,19 +231,39 @@ void td5_arcade_init_race(void) {
      * and the car drives through it. Lift is in RENDER units, like the box size. */
     int auto_lift = (int)(((int64_t)s_box_half * 11) / 10);
     int lift = knob("TD5RE_ARCADE_PAD_LIFT", auto_lift, 0, 200000);
+    /* Place the boxes on the SIDE LINES (shoulders), alternating left/right edge
+     * lane, instead of dead centre. side=0 forces centre (legacy). */
+    int side = knob("TD5RE_ARCADE_SIDE", 1, 0, 1);
     int placed = 0;
     for (int i = 0; i < count; i++) {
         int span = start_span + (int)(((int64_t)i * usable) / count);
-        int x = 0, y = 0, z = 0;
-        if (!td5_track_get_span_center_world(span, &x, &y, &z))
+        int lanes = td5_track_get_span_lane_count(span);
+        if (lanes < 1) lanes = 1;
+        int x = 0, y = 0, z = 0, sub = lanes / 2;   /* default = centre lane */
+
+        if (side && lanes > 1) {
+            /* alternate the outer-most left (0) / right (lanes-1) lane */
+            sub = (i & 1) ? (lanes - 1) : 0;
+            int lx = 0, ly = 0, lz = 0;
+            if (td5_track_get_span_lane_world(span, sub, &lx, &ly, &lz)) {
+                /* lane_world is 24.8 fixed (=render*256); /256 -> render units,
+                 * the same scale td5_track_get_span_center_world returns. */
+                x = lx / 256; y = ly / 256; z = lz / 256;
+            } else if (!td5_track_get_span_center_world(span, &x, &y, &z)) {
+                continue;
+            }
+        } else if (!td5_track_get_span_center_world(span, &x, &y, &z)) {
             continue;
+        }
+
         ArcPad *p = &s_pads[placed];
-        /* x/y/z are RENDER units straight from the track ring — stored verbatim;
-         * pad_get returns them as-is (no further /256). The previous pad_get
-         * divided by 256 a SECOND time, placing every pad 256x too close to the
-         * origin (off the track) — the reason the pads were never visible. */
+        /* x/y/z are RENDER units (=world_pos/256) — stored verbatim; pad_get
+         * returns them as-is (no further /256). The previous pad_get divided by
+         * 256 a SECOND time, placing every pad 256x too close to the origin (off
+         * the track) — the reason the pads were never visible. */
         p->x = x; p->y = y + lift; p->z = z;
         p->span = (int16_t)span;
+        p->sub_lane = (int8_t)sub;
         p->kind = (uint8_t)(TD5_PU_NITRO + (i % TD5_PU_KINDS));  /* 1..4 cycling */
         p->active = 1;
         p->respawn = 0;
@@ -284,9 +305,11 @@ void td5_arcade_tick(void) {
 
     int racers = racer_count();
     int allow_ai = knob("TD5RE_ARCADE_AI_PICKUPS", 1, 0, 1);
-    /* Pickup "hitbox": collect when within this many spans of the box (longitudinal
-     * tolerance). Bigger = more forgiving — a small box still grabs reliably. */
+    /* Pickup "hitbox": collect when within this many spans of the box
+     * (longitudinal) AND within this many lanes of the box's side lane (lateral).
+     * Bigger = more forgiving; the side placement means you steer over to grab it. */
     int pick_win = knob("TD5RE_ARCADE_PICKUP_SPANS", 4, 1, 30);
+    int lane_tol = knob("TD5RE_ARCADE_PICKUP_LANES", 1, 0, 8);
 
     /* --- decay per-slot effect timers --- */
     for (int s = 0; s < racers; s++) {
@@ -314,11 +337,16 @@ void td5_arcade_tick(void) {
         }
         int aspan = a->track_span_normalized;
         if (aspan < 0) continue;
+        int alane = (int)a->track_sub_lane_index;       /* the car's lane this tick */
         for (int i = 0; i < s_pad_count; i++) {
             ArcPad *p = &s_pads[i];
             if (!p->active) continue;
             int fdiff = ((aspan - p->span) % s_ring + s_ring) % s_ring;
-            if (fdiff <= pick_win) {                   /* at or just past the box */
+            if (fdiff > pick_win) continue;             /* not at the box longitudinally */
+            int ldiff = alane - (int)p->sub_lane;
+            if (ldiff < 0) ldiff = -ldiff;
+            if (ldiff > lane_tol) continue;             /* not on the box's side — steer over */
+            {
                 apply_pickup(s, p->kind, a);
                 p->active = 0;
                 /* Mario-Kart respawn: the box vanishes on pickup and stays gone

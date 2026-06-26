@@ -628,6 +628,20 @@ void td5_render_set_actor_draw_alpha(int alpha)
     s_actor_draw_alpha = alpha;
 }
 
+/* [ARCADE 2026-06-26] Per-actor effect-glow tint (0 = none). When set, the
+ * actor's body vertices are ADDITIVELY brightened toward this ARGB colour in
+ * flush_immediate_internal, so the car SILHOUETTE glows in the power-up colour
+ * (the alpha byte is the glow intensity 0..255). Bracket the body draw with it
+ * like s_actor_draw_alpha; MUST flush on change so the tint can't bleed into the
+ * next actor's triangles. */
+static uint32_t s_actor_effect_tint = 0;
+static void td5_render_set_actor_effect_tint(uint32_t argb)
+{
+    if (argb == s_actor_effect_tint) return;
+    flush_immediate_internal();
+    s_actor_effect_tint = argb;
+}
+
 /* [MP GAME MODES: TIME TRIAL 2026-06-22] Non-owner players render translucent
  * ("ghost") so the player pass-through reads visually. Knob TD5RE_TT_GHOST=0
  * keeps opponents fully opaque. */
@@ -1044,6 +1058,26 @@ static void flush_immediate_internal(void)
                 uint32_t a = (((d >> 24) & 0xFFu) * fade) >> 8;
                 s_imm_verts[i].diffuse = (d & 0x00FFFFFFu) | (a << 24);
             }
+        }
+    }
+
+    /* [ARCADE] effect-glow tint: additively brighten the actor's body toward the
+     * power-up colour so the car SILHOUETTE glows (the tint's alpha is the glow
+     * strength). Runs after fade so it operates on the final RGB; only set around
+     * a car's body draw, so other geometry is untouched. */
+    if (s_actor_effect_tint & 0xFF000000u) {
+        uint32_t inten = (s_actor_effect_tint >> 24) & 0xFFu;
+        uint32_t tr = (s_actor_effect_tint >> 16) & 0xFFu;
+        uint32_t tg = (s_actor_effect_tint >>  8) & 0xFFu;
+        uint32_t tb =  s_actor_effect_tint        & 0xFFu;
+        for (int i = 0; i < s_imm_vert_count; i++) {
+            uint32_t d = s_imm_verts[i].diffuse;
+            uint32_t a = (d >> 24) & 0xFFu;
+            uint32_t r = (d >> 16) & 0xFFu, g = (d >> 8) & 0xFFu, b = d & 0xFFu;
+            r += (tr * inten) / 255u; if (r > 255u) r = 255u;
+            g += (tg * inten) / 255u; if (g > 255u) g = 255u;
+            b += (tb * inten) / 255u; if (b > 255u) b = 255u;
+            s_imm_verts[i].diffuse = (a << 24) | (r << 16) | (g << 8) | b;
         }
     }
 
@@ -3786,6 +3820,31 @@ void td5_render_actors_for_view(int view_index)
                 if (actor_fade < 1) actor_fade = 1;
             }
 
+            /* [ARCADE] An active power-up makes the CAR itself read the effect:
+             * GHOST renders the car translucent (the same look as a time-trial
+             * ghost opponent — you pass through it); NITRO/WRECK/HAZARD make the
+             * car SILHOUETTE glow in the effect colour (applied via the effect
+             * tint around the body draw below). Racer slots only. */
+            uint32_t arc_tint = 0;
+            if (td5_arcade_mode_active() && slot >= 0 && slot < g_traffic_slot_base) {
+                int eff = td5_arcade_active_effect(slot);
+                if (eff == TD5_PU_GHOST) {
+                    actor_fade = (actor_fade * TT_GHOST_ALPHA) / 255;
+                    if (actor_fade < 1) actor_fade = 1;
+                } else if (eff != TD5_PU_NONE) {
+                    uint32_t kc;
+                    switch (eff) {
+                    case TD5_PU_NITRO:  kc = 0x20E0FFu; break;   /* cyan  */
+                    case TD5_PU_WRECK:  kc = 0xFF3020u; break;   /* red   */
+                    case TD5_PU_HAZARD: kc = 0xFFB000u; break;   /* amber */
+                    default:            kc = 0xFFFFFFu; break;
+                    }
+                    float pu = 0.5f + 0.5f * sinf((float)td5_plat_time_ms() * 0.006f + (float)slot);
+                    uint32_t inten = (uint32_t)(80.0f + 100.0f * pu);   /* 80..180 */
+                    arc_tint = (inten << 24) | kc;
+                }
+            }
+
             /* [#R13 ghostdiag 2026-06-19] Pin which slots actually render (the
              * "traffic ghosts" the user still sees with few opponents). The
              * state==3 gate above already drops inactive racers, so anything that
@@ -3977,6 +4036,7 @@ void td5_render_actors_for_view(int view_index)
              * immediate batch on every change, so faded triangles can never be
              * batched with another actor's. The trailing reset also flushes
              * this car's tail vertices while the fade is still active. */
+            td5_render_set_actor_effect_tint(arc_tint);   /* [ARCADE] silhouette glow */
             td5_render_set_actor_draw_alpha(actor_fade);
             /* [task#21] TD6 car body z-fight fix: depth snap + toward-camera pull
              * for the duration of THIS body's draw, so coplanar interior/shell
@@ -3990,6 +4050,7 @@ void td5_render_actors_for_view(int view_index)
             td5_render_prepared_mesh(mesh);
             if (td6_zfix) s_td6_car_zbias = 0.0f;
             td5_render_set_actor_draw_alpha(255);
+            td5_render_set_actor_effect_tint(0);          /* [ARCADE] clear silhouette glow */
 
             /* [S23 2026-06-05] UNIFIED vehicle reflection — TD5 cars now match
              * TD6 cars. The chrome/env-map "mode 2" overlay was a PORT-ONLY
@@ -7833,31 +7894,11 @@ void td5_render_arcade_pads(void)
     /* Flush the accumulated cube + icon + ring lines for this view. */
     td5_render_debug_lines_flush();
 
-    /* Per-car EFFECT AURA: an additive glow in the active power-up's colour
-     * washed over the car silhouette, so the effect reads on the car itself —
-     * NITRO cyan, GHOST white, WRECK red, HAZARD amber. Sized to the CAR (a
-     * fixed render-unit size — the car is the same size on every track), not the
-     * box (which scales with the track). Pulses so it's clearly "active". */
-    {
-        float car_glow = 1100.0f;                       /* ~car bounding radius */
-        { const char *e = getenv("TD5RE_ARCADE_CAR_GLOW");
-          if (e) { int v = atoi(e); if (v >= 50 && v <= 20000) car_glow = (float)v; } }
-        int racers = g_traffic_slot_base;
-        if (racers < 1) racers = TD5_MAX_RACER_SLOTS;
-        for (int s = 0; s < racers; s++) {
-            int eff = td5_arcade_active_effect(s);
-            if (eff == TD5_PU_NONE) continue;
-            TD5_Actor *ga = td5_game_get_actor(s);
-            if (!ga) continue;
-            float ap = 0.5f + 0.5f * sinf(t * 6.0f + (float)s);   /* fast pulse */
-            uint32_t a    = (uint32_t)(120.0f + 90.0f * ap);      /* 120..210 */
-            uint32_t col  = (a << 24) | (arcade_pad_color(eff) & 0x00FFFFFFu);
-            arcade_emit_glow_at(ga->render_pos.x,
-                                ga->render_pos.y + car_glow * 0.25f,
-                                ga->render_pos.z,
-                                car_glow, col);
-        }
-    }
+    /* NOTE: the per-car EFFECT visual (a glowing car SILHOUETTE for NITRO/WRECK/
+     * HAZARD, and a translucent "ghost" body for GHOST) is drawn in the ACTOR
+     * pass (td5_render_actors_for_view), not here — it tints/fades the car's own
+     * mesh so it follows the silhouette, instead of a flat glow billboard over
+     * the car. See s_actor_effect_tint / the arcade block in that loop. */
 
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }

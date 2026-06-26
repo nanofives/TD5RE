@@ -7198,6 +7198,12 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
 
+    /* [ARCADE] A GHOSTing racer passes through everything — this sphere path is
+     * the player-vs-TRAFFIC resolver (and the scripted-pair path) and has no
+     * other ghost gate, so a ghost would still bump traffic without this. */
+    if (td5_arcade_slot_is_ghost((int)a->slot_index) ||
+        td5_arcade_slot_is_ghost((int)b->slot_index)) return;
+
     int32_t radius_a = (int32_t)CDEF_S(a, CDEF_COLLISION_RADIUS);
     int32_t radius_b = (int32_t)CDEF_S(b, CDEF_COLLISION_RADIUS);
     int32_t combined = ((radius_a + radius_b) * 3) >> 2;
@@ -7555,6 +7561,11 @@ static int32_t v2v_depenetrate_pair(TD5_Actor *a, TD5_Actor *b)
 {
     OBB_CornerData corners[8];
     memset(corners, 0, sizeof(corners));
+
+    /* [ARCADE] GHOSTing racer is intangible — don't depenetrate it out of a car
+     * or traffic vehicle it's passing through. */
+    if (a && b && (td5_arcade_slot_is_ghost((int)a->slot_index) ||
+                   td5_arcade_slot_is_ghost((int)b->slot_index))) return 0;
 
     /* Detect overlap at the cars' CURRENT positions (the faithful impulse and
      * earlier relaxation rounds may already have moved them). Raw 24.8 fp in;
