@@ -5850,6 +5850,54 @@ static void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int
  * them: `side_extent = cardef[0x08] - |cx_A|` requires 0x08 = half-width.
  * ======================================================================== */
 
+/* [SILHOUETTE HITBOX 2026-06-26] Per-car 2D convex hull of the model's top-down
+ * (X,Z) silhouette, in the car's LOCAL frame, model units (same units as the
+ * mesh box). Built once per race from every mesh vertex (gift-wrapping, integer
+ * cross products -> fully deterministic for netplay/replay). The V2V collision
+ * tests hull-vs-hull so a contact registers when the actual outlines touch, not
+ * when the looser bounding boxes do. Falls back to the mesh box when a car's
+ * hull can't be built (mesh missing, too many points, degenerate). */
+#define HULL_MAX_PTS 32
+static int16_t s_hull[TD5_MAX_TOTAL_ACTORS][HULL_MAX_PTS][2];     /* [i] = {x, z} local */
+static int16_t s_hull_nrm[TD5_MAX_TOTAL_ACTORS][HULL_MAX_PTS][2]; /* edge i inward unit normal, Q12 */
+static uint8_t s_hull_n[TD5_MAX_TOTAL_ACTORS];                    /* vertex count (>=3) */
+static uint8_t s_hull_valid[TD5_MAX_TOTAL_ACTORS];
+
+/* Silhouette (convex-hull) V2V collision — default ON; TD5RE_SILHOUETTE_HITBOX=0
+ * reverts to the looser mesh-AABB box test. */
+static int silhouette_hitbox_enabled(void)
+{
+    static int s_init = 0, s_on = 1;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_SILHOUETTE_HITBOX");
+        if (e && e[0] == '0') s_on = 0;
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "silhouette_hitbox: %s (TD5RE_SILHOUETTE_HITBOX)",
+                  s_on ? "ON (hull-vs-hull)" : "OFF (box)");
+    }
+    return s_on;
+}
+
+/* Penetration of point (px,pz) [target local frame, model units] into target
+ * slot's convex hull. Returns 1 + depth (>=0 = distance to the nearest hull
+ * edge) when inside; 0 when outside. Pure integer (edge normals Q12) -> det. */
+static int hull_point_penetration(int slot, int32_t px, int32_t pz, int32_t *pen_out)
+{
+    int n, i;
+    int32_t minpen = 0x7FFFFFFF;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || !s_hull_valid[slot]) return 0;
+    n = (int)s_hull_n[slot];
+    for (i = 0; i < n; i++) {
+        int32_t vx = s_hull[slot][i][0], vz = s_hull[slot][i][1];
+        int32_t nx = s_hull_nrm[slot][i][0], nz = s_hull_nrm[slot][i][1];
+        int32_t d  = (int32_t)((((int64_t)(px - vx) * nx) + ((int64_t)(pz - vz) * nz)) >> 12);
+        if (d < 0) return 0;             /* beyond this edge -> outside the hull */
+        if (d < minpen) minpen = d;
+    }
+    *pen_out = (minpen == 0x7FFFFFFF) ? 0 : minpen;
+    return 1;
+}
+
 static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
                            int32_t pos_a_x_fp, int32_t pos_a_z_fp,
                            int32_t pos_b_x_fp, int32_t pos_b_z_fp,
@@ -5969,6 +6017,71 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
      * position in slot 0's frame. */
     int32_t local_dx = (delta_x * cos_a - delta_z * sin_a) >> 12;
     int32_t local_dz = (delta_x * sin_a + delta_z * cos_a) >> 12;
+
+    /* [SILHOUETTE HITBOX 2026-06-26] Hull-vs-hull path. Test each car's convex
+     * silhouette vertices against the OTHER car's outline (instead of the looser
+     * box corners) so a contact registers when the models actually touch. The
+     * deepest penetrating vertex per direction collapses into corners[0]/[4]
+     * (bits 0/4) carrying the TRUE hull penetration depth, so the unchanged
+     * downstream bisection / depenetration / impulse response runs as before
+     * (apply_collision_response reads proj/own for the contact; v2v_depenetrate
+     * reads min(|pen_x|,|pen_z|) for the push depth). Both directions use the
+     * SAME rotations the box test uses below. Falls through to the faithful box
+     * test when disabled or either hull is unavailable. */
+    if (silhouette_hitbox_enabled() &&
+        a->slot_index >= 0 && a->slot_index < TD5_MAX_TOTAL_ACTORS &&
+        b->slot_index >= 0 && b->slot_index < TD5_MAX_TOTAL_ACTORS &&
+        s_hull_valid[a->slot_index] && s_hull_valid[b->slot_index]) {
+        int a_slot = (int)a->slot_index, b_slot = (int)b->slot_index;
+        /* A-to-B delta in B's frame for the second direction (matches the
+         * local2_dx/local2_dz the box loop computes further below). */
+        int32_t l2dx = ((-delta_world_x) * cos_b - (-delta_world_z) * sin_b) >> 12;
+        int32_t l2dz = ((-delta_world_x) * sin_b + (-delta_world_z) * cos_b) >> 12;
+        int32_t best_pen, bcx, bcz, pen = 0;
+        int cnt, k;
+        /* The depenetration subtracts anti_tunnel_slop to compensate the BOX-vs-
+         * mesh margin. Our penetration is already mesh-exact (hull), so add the
+         * slop back here; (depth - slop) then nets the true hull depth and cars
+         * settle at real outline contact with no gap and no overlap. */
+        int32_t slop = g_td5.ini.anti_tunnel_slop;
+
+        /* Direction 1: B's silhouette vertices into A's hull -> bit 0. */
+        best_pen = -1; bcx = 0; bcz = 0; cnt = (int)s_hull_n[b_slot];
+        for (k = 0; k < cnt; k++) {
+            int32_t hx = s_hull[b_slot][k][0], hz = s_hull[b_slot][k][1];
+            int32_t cx = (hx * cos_d - hz * sin_d) >> 12;
+            int32_t cz = (hx * sin_d + hz * cos_d) >> 12;
+            cx += local_dx; cz += local_dz;
+            if (hull_point_penetration(a_slot, cx, cz, &pen) && pen > best_pen) {
+                best_pen = pen; bcx = cx; bcz = cz;
+            }
+        }
+        if (best_pen >= 0) {
+            result |= 1;
+            corners[0].proj_x = (int16_t)bcx;          corners[0].proj_z = (int16_t)bcz;
+            corners[0].own_x  = (int16_t)(bcx - local_dx); corners[0].own_z = (int16_t)(bcz - local_dz);
+            corners[0].pen_x  = (int16_t)(best_pen + slop); corners[0].pen_z = (int16_t)(best_pen + slop);
+        }
+
+        /* Direction 2: A's silhouette vertices into B's hull -> bit 4. */
+        best_pen = -1; bcx = 0; bcz = 0; cnt = (int)s_hull_n[a_slot];
+        for (k = 0; k < cnt; k++) {
+            int32_t hx = s_hull[a_slot][k][0], hz = s_hull[a_slot][k][1];
+            int32_t cx = (hx * cos_di - hz * sin_di) >> 12;
+            int32_t cz = (hx * sin_di + hz * cos_di) >> 12;
+            cx += l2dx; cz += l2dz;
+            if (hull_point_penetration(b_slot, cx, cz, &pen) && pen > best_pen) {
+                best_pen = pen; bcx = cx; bcz = cz;
+            }
+        }
+        if (best_pen >= 0) {
+            result |= (1 << 4);
+            corners[4].proj_x = (int16_t)bcx;          corners[4].proj_z = (int16_t)bcz;
+            corners[4].own_x  = (int16_t)(bcx - l2dx);  corners[4].own_z  = (int16_t)(bcz - l2dz);
+            corners[4].pen_x  = (int16_t)(best_pen + slop); corners[4].pen_z = (int16_t)(best_pen + slop);
+        }
+        return result;
+    }
 
     for (int i = 0; i < 4; i++) {
         /* Rotate B's corner from B's local frame into A's local frame */
@@ -6353,6 +6466,87 @@ static void mesh_box_store(int slot, int32_t half_w, int32_t front_z)
     s_mesh_box[slot][1] = (int16_t)front_z;
     s_mesh_box[slot][2] = (int16_t)(-front_z);
     s_mesh_box_valid[slot] = 1;
+}
+
+/* [SILHOUETTE HITBOX] Build the 2D (X,Z) convex hull of a car's mesh vertices in
+ * its local frame and cache it for slot. Gift-wrapping (Jarvis march): start at
+ * the leftmost-lowest point and repeatedly take the most-clockwise next vertex.
+ * All math is integer (float verts truncated to model units, the same units the
+ * mesh box uses) with int64 cross products, so it is bit-identical across peers.
+ * Leaves s_hull_valid[slot]=0 (box fallback) if the mesh is degenerate or the
+ * hull exceeds HULL_MAX_PTS. */
+static void hull_build_store(int slot, const TD5_MeshVertex *verts, int n)
+{
+    int start, hcount, cur_safe;
+    int32_t sx, sz, cx, cz;
+
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    s_hull_valid[slot] = 0;
+    if (!verts || n < 3) return;
+
+    /* Leftmost, then lowest, vertex — guaranteed on the hull. */
+    start = 0;
+    sx = (int32_t)verts[0].pos_x; sz = (int32_t)verts[0].pos_z;
+    for (int i = 1; i < n; i++) {
+        int32_t x = (int32_t)verts[i].pos_x, z = (int32_t)verts[i].pos_z;
+        if (x < sx || (x == sx && z < sz)) { sx = x; sz = z; start = i; }
+    }
+    (void)start;
+
+    hcount = 0;
+    cx = sx; cz = sz;
+    /* Walk the hull. cur_safe caps iterations against any degeneracy. */
+    for (cur_safe = 0; cur_safe <= HULL_MAX_PTS + 1; cur_safe++) {
+        int nxt = -1;
+        int32_t nx = 0, nz = 0;
+        if (hcount >= HULL_MAX_PTS) return;          /* too complex -> box fallback */
+        s_hull[slot][hcount][0] = (int16_t)cx;
+        s_hull[slot][hcount][1] = (int16_t)cz;
+        hcount++;
+        for (int i = 0; i < n; i++) {
+            int32_t x = (int32_t)verts[i].pos_x, z = (int32_t)verts[i].pos_z;
+            if (x == cx && z == cz) continue;        /* skip the current vertex/dups */
+            if (nxt < 0) { nxt = i; nx = x; nz = z; continue; }
+            {
+                /* cross of (cand-cur) x (p-cur); <0 => p is more clockwise. */
+                int64_t cr = (int64_t)(nx - cx) * (z - cz) -
+                             (int64_t)(nz - cz) * (x - cx);
+                if (cr < 0) { nxt = i; nx = x; nz = z; }
+                else if (cr == 0) {
+                    /* collinear: keep the farther point (extreme endpoint). */
+                    int64_t dn = (int64_t)(x - cx) * (x - cx) + (int64_t)(z - cz) * (z - cz);
+                    int64_t doo = (int64_t)(nx - cx) * (nx - cx) + (int64_t)(nz - cz) * (nz - cz);
+                    if (dn > doo) { nxt = i; nx = x; nz = z; }
+                }
+            }
+        }
+        if (nxt < 0) return;                          /* degenerate -> box fallback */
+        cx = nx; cz = nz;
+        if (cx == sx && cz == sz) break;              /* wrapped back to start */
+    }
+
+    if (hcount >= 3) {
+        /* Precompute each edge's INWARD unit normal (Q12) for point-in-hull /
+         * penetration. Orient toward the centroid so winding doesn't matter. */
+        int32_t csx = 0, csz = 0, cenx, cenz;
+        s_hull_n[slot] = (uint8_t)hcount;
+        for (int i = 0; i < hcount; i++) { csx += s_hull[slot][i][0]; csz += s_hull[slot][i][1]; }
+        cenx = csx / hcount; cenz = csz / hcount;
+        for (int i = 0; i < hcount; i++) {
+            int j = (i + 1) % hcount;
+            int32_t ex  = (int32_t)s_hull[slot][j][0] - s_hull[slot][i][0];
+            int32_t ez  = (int32_t)s_hull[slot][j][1] - s_hull[slot][i][1];
+            int32_t nrx = ez, nrz = -ex;           /* perpendicular to the edge */
+            int32_t len;
+            if ((int64_t)nrx * (cenx - s_hull[slot][i][0]) +
+                (int64_t)nrz * (cenz - s_hull[slot][i][1]) < 0) { nrx = -nrx; nrz = -nrz; }
+            len = td5_isqrt(nrx * nrx + nrz * nrz);
+            if (len < 1) len = 1;
+            s_hull_nrm[slot][i][0] = (int16_t)((nrx << 12) / len);
+            s_hull_nrm[slot][i][1] = (int16_t)((nrz << 12) / len);
+        }
+        s_hull_valid[slot] = 1;
+    }
 }
 
 /* Effective V2V collision half-extents for one actor. With the model-derived
@@ -6765,9 +6959,11 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * signed round-to-zero divide by 0x1000. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = v2v_sar12_rz_64(impulse_raw);
-        /* [ARCADE] hit 3x as hard. Positive multiply preserves sign, so the XOR
-         * rejection below is unchanged; impact_mag (derived from impulse) scales
-         * too, which trips the airborne-launch branch far more readily. */
+        /* [ARCADE] Boosted horizontal knockback (default 1.4x, was 3x). Positive
+         * multiply preserves sign, so the XOR rejection below is unchanged.
+         * NOTE: impact_mag is derived from this impulse, so the multiplier also
+         * scales the heavy-crash scatter/lift and how readily the heavy gate
+         * trips — kept modest now so routine rams don't go airborne. */
         impulse = (int32_t)(((int64_t)impulse * arc_coll_q8) >> 8);
 
         /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
@@ -6825,7 +7021,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         /* [CONFIRMED @ 0x00407E68-7A]: same round-to-zero idiom as SIDE branch. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = v2v_sar12_rz_64(impulse_raw);
-        /* [ARCADE] hit 3x as hard (see SIDE branch note). */
+        /* [ARCADE] Boosted horizontal knockback (default 1.4x; see SIDE note). */
         impulse = (int32_t)(((int64_t)impulse * arc_coll_q8) >> 8);
 
         if (((cz_B - cz_A) ^ impulse) < 0) {
@@ -6854,6 +7050,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     A->world_pos.z -= push_z;
     B->world_pos.x += push_x;
     B->world_pos.z += push_z;
+
+    /* [AI UNSTICK] Tell the AI both cars are touching this tick (grind detect). */
+    td5_ai_note_v2v_contact((int)A->slot_index, (int)B->slot_index);
+    td5_ai_note_v2v_contact((int)B->slot_index, (int)A->slot_index);
 
     if (rejected) {
         /* Separating contact — push applied above, but no velocity impulse.
@@ -7048,14 +7248,30 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         if (ag < heavy_gate) heavy_gate = ag;
     }
     /* [ARCADE] Boosted vertical launch: smaller divisor + higher clamp than the
-     * faithful impact_mag/6 (200000-clamped). 1.0/no-change values outside arcade. */
+     * faithful impact_mag/6 (200000-clamped). 1.0/no-change values outside arcade.
+     * [2026-06-26] Arcade clamp lowered 800000 -> 160000 across two tuning
+     * passes (each halving the mega-launch ceiling on huge hits); pairs with
+     * the launch-divisor bump (3 -> 16) in td5_arcade_launch_div(). Net
+     * airborne launch is ~5x lower than the original arcade feel. */
     const int     arc_launch_div   = td5_arcade_launch_active() ? td5_arcade_launch_div() : 6;
-    const int32_t arc_launch_clamp = td5_arcade_launch_active() ? 800000 : 200000;
+    const int32_t arc_launch_clamp = td5_arcade_launch_active() ? 160000 : 200000;
     if (impact_mag > heavy_gate && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
         int32_t kick_ry = scatter / 2;            /* roll & yaw delta magnitude */
         int32_t kick_p  = scatter;                /* pitch delta magnitude      */
+        /* [ARCADE 2026-06-26] Tame the angular crash-scatter so a hard hit
+         * shoves/spins a car instead of flipping it nose-over into the air.
+         * The faithful pitch kick (up to 0x7FFF) is what launches rammed cars;
+         * scaling it down keeps crashes dramatic but playable. Vertical lift
+         * (div/clamp) and horizontal impulse are separate levers. Applied at
+         * the source so BOTH A and B scale, and A's rear_retain composes on
+         * top. Knob TD5RE_ARCADE_SCATTER_PCT (default 35). */
+        if (td5_arcade_launch_active()) {
+            int sp = td5_arcade_scatter_pct();
+            kick_ry = v2v_scale_pct(kick_ry, sp);
+            kick_p  = v2v_scale_pct(kick_p,  sp);
+        }
         /* [N-way coverage 2026-06-04] The racer/traffic split was hardcoded
          * `< 6`, the ORIGINAL racer count. With the N-way expansion a human
          * racer can sit in slots 6..15, so `< 6` wrongly routed it into the
@@ -14221,7 +14437,10 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
      * a previous race up front, so a slot that fails to get a mesh this race
      * cleanly falls back to its (freshly seeded) cardef box instead of reusing a
      * different car's bounds. Re-validated below once the vertex scan succeeds. */
-    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) s_mesh_box_valid[slot] = 0;
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        s_mesh_box_valid[slot] = 0;
+        s_hull_valid[slot] = 0;     /* [SILHOUETTE] rebuilt below once verts scan */
+    }
 
     if (!actor || !actor->car_definition_ptr) return;
 
@@ -14283,6 +14502,13 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
      * padded 8-corner box keeps being written below for the suspension / AI lane
      * / separation consumers, so they stay byte-faithful. */
     mesh_box_store(slot, (int32_t)(int)max_x, (int32_t)(int)max_z);
+
+    /* [SILHOUETTE HITBOX] Build the precise convex-hull silhouette for V2V. */
+    hull_build_store(slot, verts, vert_count);
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+        TD5_LOG_I(LOG_TAG, "silhouette: slot=%d hull_pts=%d (valid=%d) box[hw=%d fz=%d]",
+                  slot, s_hull_valid[slot] ? (int)s_hull_n[slot] : 0,
+                  (int)s_hull_valid[slot], (int)(int)max_x, (int)(int)max_z);
 
     /* --- Add/subtract 20.0f padding [CONFIRMED @ 0x0042F7FA, 0x0042F808].
      * No safety clamp in the original -- FTOL truncates toward zero. --- */

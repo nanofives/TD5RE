@@ -504,7 +504,26 @@ int td5_arcade_mode_active(void) { return s_active; }
  * ====================================================================== */
 int td5_arcade_collision_mult_q8(void) {
     if (!s_active) return 0x100;   /* 1.0 — faithful path */
-    return knob("TD5RE_ARCADE_COLLISION_MULT", 3, 1, 8) << 8;
+    /* Horizontal knockback as a PERCENT of the faithful impulse, returned in
+     * 24.8. [2026-06-26] Was an integer 3x — but the impulse feeds impact_mag,
+     * so 3x ALSO tripled the angular crash-scatter + lift and tripped the
+     * heavy-crash gate on routine rams ("ramming from behind too strong").
+     * Default dropped to 140 (1.4x): a noticeable, "slightly more than sim"
+     * shove that no longer over-drives the launch branch. The tumble/launch is
+     * tamed separately (td5_arcade_scatter_pct + the gate/div below).
+     * Knob TD5RE_ARCADE_COLLISION_MULT_PCT (50..400). */
+    int pct = knob("TD5RE_ARCADE_COLLISION_MULT_PCT", 140, 50, 400);
+    return (pct * 0x100) / 100;
+}
+
+int td5_arcade_scatter_pct(void) {
+    /* Percent of the faithful angular crash-scatter (roll/yaw/pitch kicks)
+     * applied on a heavy arcade hit. The faithful kicks (pitch up to 0x7FFF)
+     * flip a rammed car nose-over so it takes off into the air — the real
+     * cause of "launching opponents up". Default 35 keeps a hard hit dramatic
+     * (shove + spin) without flipping it airborne. 100 = faithful, 0 = none.
+     * Knob TD5RE_ARCADE_SCATTER_PCT (0..100). */
+    return knob("TD5RE_ARCADE_SCATTER_PCT", 35, 0, 100);
 }
 
 int td5_arcade_slot_is_ghost(int slot) {
@@ -520,13 +539,23 @@ int td5_arcade_slot_is_wrecking(int slot) {
 int td5_arcade_launch_active(void) { return s_active; }
 
 int td5_arcade_launch_gate(void) {
-    /* Faithful gate is 90000; lower it so ordinary arcade crashes go airborne. */
-    return knob("TD5RE_ARCADE_LAUNCH_GATE", 20000, 1000, 90000);
+    /* Heavy-crash gate: only hits above this trip the dramatic scatter+lift.
+     * [2026-06-26] Default raised 20000 -> 90000 (== faithful). The old 20000
+     * meant routine rear-ends triggered the full crash reaction; at 90000 only
+     * genuine hard crashes do, so ordinary rams are just a (boosted) shove.
+     * Lower it toward 1000 for more drama; raise it for less.
+     * Knob TD5RE_ARCADE_LAUNCH_GATE (1000..400000). */
+    return knob("TD5RE_ARCADE_LAUNCH_GATE", 90000, 1000, 400000);
 }
 
 int td5_arcade_launch_div(void) {
-    /* Faithful divisor is 6 (vel_y = impact_mag/6); smaller = higher launch. */
-    return knob("TD5RE_ARCADE_LAUNCH_DIV", 3, 1, 12);
+    /* Faithful divisor is 6 (vel_y = impact_mag/6); smaller = higher launch.
+     * [2026-06-26] Default raised 3 -> 16 in two tuning passes so airborne
+     * launches are ~5x lower than the original arcade feel (impact_mag/3 sent
+     * cars flying off the map, borderline unplayable). 16 = 2x the first pass
+     * (8), i.e. exactly half the launch again. Knob TD5RE_ARCADE_LAUNCH_DIV
+     * (1..32) restores any prior feel at runtime. */
+    return knob("TD5RE_ARCADE_LAUNCH_DIV", 16, 1, 32);
 }
 
 void td5_arcade_note_ram(int aggressor, int victim, int impact_mag) {

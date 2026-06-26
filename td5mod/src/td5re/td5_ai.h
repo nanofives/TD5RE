@@ -51,6 +51,12 @@ uint8_t *td5_ai_get_physics_template(void);
 
 /* --- Per-actor AI update --- */
 void td5_ai_update_track_behavior(int slot);
+
+/* [AI UNSTICK] Physics calls this from the V2V collision response to tell the
+ * AI that `slot` is touching `peer` this tick. The racer unstick uses a leaky
+ * accumulator of these to detect a persistent car-vs-car grind. Safe no-op for
+ * out-of-range slots; cheap (two field writes). */
+void td5_ai_note_v2v_contact(int slot, int peer);
 void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight);
 int  td5_ai_update_route_threshold(int slot);
 void td5_ai_update_track_offset_bias(int slot);
