@@ -7269,8 +7269,8 @@ static const char *k_cps_explain[CPS_COUNT] = {
     "cornering grip",    /* GRIP       */
     "agility",           /* HANDLING   */
     "grip at speed",     /* DOWNFORCE  */
-    "driven wheels",     /* DRIVETRAIN */
-    "weight bias F/R"    /* BALANCE    */
+    "driven wheels",       /* DRIVETRAIN */
+    "weight: front / rear" /* BALANCE    */
 };
 
 typedef struct {
@@ -7393,7 +7393,7 @@ static void frontend_carphys_balance_text(int ext_id, char *out, size_t cap) {
         if (tot > 0) f = (fw * 100 + tot / 2) / tot;
     }
     if (f <= 0) snprintf(out, cap, "-");
-    else        snprintf(out, cap, "F%d R%d", f, 100 - f);
+    else        snprintf(out, cap, "%d%% / %d%%", f, 100 - f);  /* front% / rear% */
 }
 
 /* Unified physics-stats panel renderer (SP overlay + MP pane). Draws CPS_COUNT
