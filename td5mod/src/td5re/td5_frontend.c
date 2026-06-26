@@ -2117,61 +2117,11 @@ static int frontend_resolve_selected_button(void) {
     return -1;
 }
 
-static int frontend_cycle_selected_button(int direction) {
-    int prev = s_selected_button;
-    int attempts = FE_MAX_BUTTONS;
-
-    if (direction == 0) return 0;
-
-    while (attempts-- > 0) {
-        s_selected_button += direction;
-        if (s_selected_button < 0) s_selected_button = FE_MAX_BUTTONS - 1;
-        if (s_selected_button >= FE_MAX_BUTTONS) s_selected_button = 0;
-        if (s_buttons[s_selected_button].active && !s_buttons[s_selected_button].disabled) {
-            return s_selected_button != prev;
-        }
-    }
-
-    s_selected_button = prev;
-    return 0;
-}
-
-static int frontend_cycle_selected_button_by_row(int direction, int same_row) {
-    int current = frontend_resolve_selected_button();
-    int current_y;
-    int idx;
-    int attempts;
-
-    if (direction == 0) return 0;
-    if (current < 0) return frontend_cycle_selected_button(direction);
-
-    current_y = s_buttons[current].y;
-    idx = current;
-    attempts = FE_MAX_BUTTONS;
-    while (attempts-- > 0) {
-        idx += direction;
-        if (idx < 0) idx = FE_MAX_BUTTONS - 1;
-        if (idx >= FE_MAX_BUTTONS) idx = 0;
-        if (!s_buttons[idx].active || s_buttons[idx].disabled) continue;
-        if (same_row) {
-            if (s_buttons[idx].y != current_y) continue;
-        } else {
-            if (s_buttons[idx].y == current_y) continue;
-        }
-        s_selected_button = idx;
-        return idx != current;
-    }
-
-    return 0;
-}
-
-static int frontend_cycle_selected_button_horizontal(int direction) {
-    return frontend_cycle_selected_button_by_row(direction, 1);
-}
-
-static int frontend_cycle_selected_button_vertical(int direction) {
-    return frontend_cycle_selected_button_by_row(direction, 0);
-}
+/* [PORT 2026-06-26] The old index-order cyclers (frontend_cycle_selected_button,
+ * _by_row, _horizontal, _vertical) were removed: every shared-nav screen now
+ * navigates by true (x,y) GEOMETRY (frontend_nav_vertical / _horizontal +
+ * frontend_spatial_pick), so a button's array index no longer has to match its
+ * visual row for it to be reachable in order. */
 
 /* [PORT ENHANCEMENT 2026-06] True 2D spatial navigation by button geometry.
  * Given a unit direction (dx,dy in {-1,0,1}: left/right or up/down), pick the
@@ -2226,6 +2176,182 @@ static int frontend_move_selected_button_spatial(int dx, int dy) {
     return 1;
 }
 
+/* Topmost (dir<0) or bottommost (dir>0) navigable button by visual Y. Used to
+ * WRAP geometric vertical nav so a single column still cycles end-to-end. */
+static int frontend_extreme_button_vertical(int dir) {
+    int best = -1, best_y = 0, i;
+    for (i = 0; i < FE_MAX_BUTTONS; i++) {
+        if (!s_buttons[i].active || s_buttons[i].disabled) continue;
+        if (best < 0 || (dir > 0 ? s_buttons[i].y > best_y
+                                 : s_buttons[i].y < best_y)) {
+            best = i; best_y = s_buttons[i].y;
+        }
+    }
+    return best;
+}
+
+/* True iff buttons a and b share a visual ROW (their y-spans overlap). */
+static int frontend_rows_overlap(int a, int b) {
+    return s_buttons[a].y < s_buttons[b].y + s_buttons[b].h &&
+           s_buttons[b].y < s_buttons[a].y + s_buttons[a].h;
+}
+
+/* A navigable HIDDEN chip sharing the current button's row, or -1. The Track/Car
+ * randomize icon is created `hidden` (painted as a chip only when focused) and
+ * sits just to the RIGHT of its selector on the same row — geometric vertical
+ * can't reach a far-right button (the column off-axis penalty rejects it) and
+ * horizontal L/R must stay value-cycle on the selector, so it would be stranded.
+ * frontend_nav_vertical reaches it as the column-end fallback, preserving the
+ * old "press UP from the selector row to reach the icon" behaviour generically. */
+static int frontend_same_row_hidden_chip(int current) {
+    int i;
+    if (current < 0) return -1;
+    for (i = 0; i < FE_MAX_BUTTONS; i++) {
+        if (i == current || !s_buttons[i].active || s_buttons[i].disabled) continue;
+        if (s_buttons[i].hidden && frontend_rows_overlap(current, i)) return i;
+    }
+    return -1;
+}
+
+/* [PORT 2026-06-26] VERTICAL menu nav for every shared-nav screen. Picks the
+ * nearest active button in the travel direction by true (x,y) GEOMETRY, so a
+ * button with a high array index but a low visual row (an appended option row,
+ * the Track-select DYNAMICS row, the Quick-Race span-offset field, ...) is
+ * reached IN VISUAL ORDER instead of being skipped by the old index-order
+ * cycler. If nothing lies that way (we're at a column end) it first reaches a
+ * same-row hidden chip (the randomize icon), then WRAPS to the far end so the
+ * column still cycles, matching the old nav's convenience. This replaces the
+ * per-screen geometric-vs-index whack-a-mole: screens used to be added to a
+ * `vnav` allow-list one at a time whenever a new high-index/low-row button broke
+ * their nav. Returns 1 iff the selection actually moved. */
+static int frontend_nav_vertical(int direction) {
+    int current, target;
+    if (direction == 0) return 0;
+    current = frontend_resolve_selected_button();
+    if (current < 0) return 0;
+    target = frontend_spatial_pick(0, direction);
+    if (target < 0) target = frontend_same_row_hidden_chip(current);
+    if (target < 0) target = frontend_extreme_button_vertical(-direction);
+    if (target < 0 || target == s_selected_button) return 0;
+    s_selected_button = target;
+    return 1;
+}
+
+/* [PORT 2026-06-26] HORIZONTAL focus move to the nearest VISIBLE same-row
+ * neighbour in dir (-1 left / +1 right), or 0 if none. Restores the original's
+ * (@0x00426580) device-agnostic behaviour: a plain LEFT/RIGHT moves focus
+ * between same-row buttons (OK<->BACK, YES<->NO, tabs, flag grids) on ANY device
+ * including a GAMEPAD (which has no SHIFT to drive the old shift-only move).
+ * Value-selector rows are full-width single-column, so they have no visible
+ * same-row neighbour and keep cycling their value instead (the LEFT/RIGHT
+ * dispatch still sets the value-cycle bit). HIDDEN buttons (the randomize chip)
+ * are intentionally NOT focus targets here — that would hijack the Track/Car
+ * selector's value key; the chip is reached vertically instead. No wrap. */
+static int frontend_nav_horizontal(int dir) {
+    int current, i, best = -1, best_dx = 0;
+    int ccx, cur_hidden;
+    if (dir == 0) return 0;
+    current = frontend_resolve_selected_button();
+    if (current < 0) return 0;
+    ccx = s_buttons[current].x + s_buttons[current].w / 2;
+    cur_hidden = s_buttons[current].hidden;
+    for (i = 0; i < FE_MAX_BUTTONS; i++) {
+        int bcx, dx;
+        if (i == current || !s_buttons[i].active || s_buttons[i].disabled) continue;
+        /* Skip a HIDDEN target unless we're already on a hidden button. This lets a
+         * grid of hidden hit-rects (the language flags) move L/R between its tiles,
+         * while a visible value-selector never jumps onto its hidden randomize chip
+         * (which would hijack the selector's value key). */
+        if (s_buttons[i].hidden && !cur_hidden) continue;
+        if (!frontend_rows_overlap(current, i)) continue;
+        bcx = s_buttons[i].x + s_buttons[i].w / 2;
+        dx = bcx - ccx;
+        if (dir > 0 ? dx <= 0 : dx >= 0) continue;   /* must be on the dir side */
+        if (dx < 0) dx = -dx;
+        if (best < 0 || dx < best_dx) { best_dx = dx; best = i; }
+    }
+    if (best < 0) return 0;
+    s_selected_button = best;
+    return 1;
+}
+
+/* A button is a value SELECTOR (LEFT/RIGHT cycles its value rather than moving
+ * focus) if it carries the ◄► arrows (nav_selector, set live by
+ * fe_draw_option_arrows) or was explicitly tagged is_selector at creation. */
+static int frontend_button_is_selector(int btn) {
+    if (btn < 0 || btn >= FE_MAX_BUTTONS) return 0;
+    return s_buttons[btn].nav_selector || s_buttons[btn].is_selector;
+}
+
+#ifndef TD5RE_RELEASE
+/* [NAV SELFTEST 2026-06-26] Dev-only reachability check. Once per screen (after
+ * it settles), flood the nav graph from the topmost button using the player's
+ * REAL directional moves — UP/DOWN via frontend_nav_vertical (geometric+wrap),
+ * LEFT/RIGHT via the geometric same-row focus move — and log whether every
+ * active+enabled button was reached, naming any that weren't. Screenshots come
+ * back black in this env, so this is how we prove nav order across screens.
+ * Gated by TD5RE_NAV_SELFTEST=1; compiled out of the release build. */
+static void frontend_nav_selftest_maybe(void) {
+    static int s_last_tested = -2;
+    static int s_enabled = -1;
+    static int s_stable_screen = -2;
+    static int s_stable_frames = 0;
+    int i, navigable = 0, saved, start, reached = 0;
+    char reach[FE_MAX_BUTTONS];
+    int queue[FE_MAX_BUTTONS], qh = 0, qt = 0;
+
+    if (s_enabled < 0) {
+        const char *e = getenv("TD5RE_NAV_SELFTEST");
+        s_enabled = (e && e[0] == '1') ? 1 : 0;
+    }
+    if (!s_enabled || s_current_screen == s_last_tested) return;
+    /* Fire once the screen has settled: s_anim_complete, OR ~2s of being current
+     * for screens (e.g. Language Select) that never raise s_anim_complete. */
+    if (s_current_screen != s_stable_screen) { s_stable_screen = s_current_screen; s_stable_frames = 0; }
+    if (++s_stable_frames < 60 && !s_anim_complete) return;
+
+    for (i = 0; i < FE_MAX_BUTTONS; i++) {
+        reach[i] = 0;
+        if (s_buttons[i].active && !s_buttons[i].disabled) navigable++;
+    }
+    if (navigable <= 0) return;
+    s_last_tested = s_current_screen;
+    saved = s_selected_button;
+
+    start = frontend_extreme_button_vertical(-1);
+    if (start < 0) { s_selected_button = saved; return; }
+    reach[start] = 1; queue[qt++] = start; reached = 1;
+    while (qh < qt) {
+        int node = queue[qh++];
+        int d;
+        for (d = 0; d < 4; d++) {
+            int moved, n;
+            s_selected_button = node;
+            switch (d) {
+            case 0: moved = frontend_nav_vertical(-1); break;   /* UP    */
+            case 1: moved = frontend_nav_vertical(1);  break;   /* DOWN  */
+            /* LEFT/RIGHT only move focus off a NON-selector — exactly what the
+             * real dispatch does (a selector's L/R cycles its value instead). */
+            case 2: moved = !frontend_button_is_selector(node) && frontend_nav_horizontal(-1); break;
+            default: moved = !frontend_button_is_selector(node) && frontend_nav_horizontal(1); break;
+            }
+            n = s_selected_button;
+            if (moved && n >= 0 && n < FE_MAX_BUTTONS && !reach[n]) {
+                reach[n] = 1; queue[qt++] = n; reached++;
+            }
+        }
+    }
+    s_selected_button = saved;
+
+    TD5_LOG_I(LOG_TAG, "NAV SELFTEST screen=%d reached %d/%d navigable",
+              s_current_screen, reached, navigable);
+    for (i = 0; i < FE_MAX_BUTTONS; i++)
+        if (s_buttons[i].active && !s_buttons[i].disabled && !reach[i])
+            TD5_LOG_W(LOG_TAG, "NAV SELFTEST UNREACHABLE screen=%d btn=%d y=%d '%s'",
+                      s_current_screen, i, s_buttons[i].y, s_buttons[i].label);
+}
+#endif
+
 /**
  * Create a frontend button using the original's coordinate conventions:
  *
@@ -2245,6 +2371,7 @@ int frontend_create_button(const char *label, int x, int y, int w, int h) {
             s_buttons[i].hidden = 0;
             s_buttons[i].highlight_ramp = 0;
             s_buttons[i].is_selector = 0;
+            s_buttons[i].nav_selector = 0;
 
             /* Width = the explicit w (the original's CreateFrontendDisplayModeButton
              * takes x and w independently; negative x is ONLY the auto-layout flag).
@@ -4083,49 +4210,41 @@ static int frontend_cursor_on_move_on(void) {
  * color-panel modal (the modal reads those bits in the tick); only the button
  * move itself is suppressed while the panel is open. */
 static void frontend_apply_nav_event(unsigned code) {
+    /* [PORT 2026-06-26] The Controller-Binding screen keeps its bespoke 2D
+     * spatial nav (a 2-column grid that must NOT wrap column-to-column). EVERY
+     * other shared-nav screen now uses frontend_nav_vertical (geometric + wrap)
+     * for UP/DOWN, so any button is reached in VISUAL order regardless of its
+     * array index. This retires the old per-screen `vnav` allow-list (Quick Race
+     * span-offset, Create-Session UPnP/PORT, Track-select DYNAMICS were each
+     * special-cased for the same index!=visual-row skip bug). */
     int spatial_nav = (s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
-    /* [fix 2026-06-15] Quick Race uses GEOMETRIC up/down nav so the dev "Span
-     * Offset" button (high button index but a low visual row) is reachable by
-     * pressing DOWN from "AI Screens" — index-order nav skipped it. LEFT/RIGHT in
-     * QR still cycle the focused selector's value (handled in the QR FSM). */
-    /* [2026-06-16] CREATE_SESSION also needs GEOMETRIC up/down: the direct-host
-     * UPnP toggle + GAME PORT field are high button indices (5/6) sitting at low
-     * visual rows (between PASSWORD and HOST), so index-order nav skipped them --
-     * same class as the Quick Race span-offset field. LEFT/RIGHT stay value-cycle
-     * (spatial_nav unchanged), so the UPnP/MAX selectors still adjust. */
-    int vnav = spatial_nav
-            || (s_current_screen == TD5_SCREEN_QUICK_RACE)
-            || (s_current_screen == TD5_SCREEN_CREATE_SESSION);
     switch (code) {
     case TD5_NAVKEY_LEFT:
-        /* [TASK B] SHIFT+LEFT = horizontal focus move (geometric same-row pick),
-         * NOT a value cycle: skip the arrow bit so frontend_option_delta stays 0.
-         * Suppressed while the colour panel is open (that modal reads the arrow
-         * bits to move its swatch cursor), so it falls through to plain behavior. */
+        /* SHIFT+LEFT = explicit geometric focus move (keyboard shortcut to reach a
+         * far-right value-column button that a plain LEFT would otherwise cycle
+         * past). Suppressed while the colour panel is open (that modal reads the
+         * arrow bits to move its swatch cursor), so it falls through to plain. */
         if (frontend_shift_nav_active() && !s_color_panel_visible) {
             if (frontend_move_selected_button_spatial(-1, 0)) {
                 frontend_play_sfx(2); s_selection_from_mouse = 0;
             }
             break;
         }
-        s_arrow_input |= 1;
-        /* [2026-06-15 BUG #13] Plain LEFT (no SHIFT) ONLY cycles the focused
-         * selector's value (via the s_arrow_input bit, consumed in the tick). It
-         * must NOT also move focus horizontally — that displaced focus onto the
-         * value-column button to the right while cycling. Horizontal focus move now
-         * requires SHIFT (handled above). The spatial_nav (Controller-Binding)
-         * screen has NO value selectors, so plain LEFT there still legitimately
-         * moves focus geometrically. Gated by TD5RE_SHIFT_NAV: "0" restores the old
-         * cycle-and-move behavior. */
-        if (!s_color_panel_visible && (spatial_nav || !frontend_shift_nav_on())) {
+        s_arrow_input |= 1;   /* value-cycle bit (a selector row consumes it in the FSM tick) */
+        /* [PORT 2026-06-26] Device-agnostic focus move (restores orig
+         * @0x00426580): on a NON-selector, a plain LEFT moves focus to the nearest
+         * VISIBLE same-row neighbour (OK<->BACK, YES<->NO, tabs, flag grids) — this
+         * is what makes same-row buttons reachable on a GAMEPAD, which has no SHIFT.
+         * A selector keeps the key for its value (and has no visible same-row
+         * neighbour to move to). Controller-Binding keeps its bespoke 2D move. */
+        if (!s_color_panel_visible) {
             int moved = spatial_nav ? frontend_move_selected_button_spatial(-1, 0)
-                                    : frontend_cycle_selected_button_horizontal(-1);
+                       : (!frontend_button_is_selector(s_selected_button) &&
+                          frontend_nav_horizontal(-1));
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
         }
         break;
     case TD5_NAVKEY_RIGHT:
-        /* [TASK B] SHIFT+RIGHT = horizontal focus move (geometric same-row pick).
-         * Suppressed while the colour panel is open (see LEFT above). */
         if (frontend_shift_nav_active() && !s_color_panel_visible) {
             if (frontend_move_selected_button_spatial(1, 0)) {
                 frontend_play_sfx(2); s_selection_from_mouse = 0;
@@ -4133,19 +4252,20 @@ static void frontend_apply_nav_event(unsigned code) {
             break;
         }
         s_arrow_input |= 2;
-        /* [2026-06-15 BUG #13] Plain RIGHT only cycles the value; horizontal focus
-         * move requires SHIFT (see LEFT above). */
-        if (!s_color_panel_visible && (spatial_nav || !frontend_shift_nav_on())) {
+        /* [PORT 2026-06-26] See LEFT: non-selector RIGHT moves focus to the visible
+         * same-row neighbour; a selector RIGHT cycles its value. */
+        if (!s_color_panel_visible) {
             int moved = spatial_nav ? frontend_move_selected_button_spatial(1, 0)
-                                    : frontend_cycle_selected_button_horizontal(1);
+                       : (!frontend_button_is_selector(s_selected_button) &&
+                          frontend_nav_horizontal(1));
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
         }
         break;
     case TD5_NAVKEY_UP:
         s_arrow_input |= 4;
         if (!s_color_panel_visible) {
-            int moved = vnav ? frontend_move_selected_button_spatial(0, -1)
-                             : frontend_cycle_selected_button_vertical(-1);
+            int moved = spatial_nav ? frontend_move_selected_button_spatial(0, -1)
+                                    : frontend_nav_vertical(-1);
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
             /* No sound on a no-target edge move — faithful to the original shared
              * nav handler @0x00426580, which is SILENT when no neighbour exists. */
@@ -4154,8 +4274,8 @@ static void frontend_apply_nav_event(unsigned code) {
     case TD5_NAVKEY_DOWN:
         s_arrow_input |= 8;
         if (!s_color_panel_visible) {
-            int moved = vnav ? frontend_move_selected_button_spatial(0, 1)
-                             : frontend_cycle_selected_button_vertical(1);
+            int moved = spatial_nav ? frontend_move_selected_button_spatial(0, 1)
+                                    : frontend_nav_vertical(1);
             if (moved) { frontend_play_sfx(2); s_selection_from_mouse = 0; }
         }
         break;
@@ -5735,6 +5855,9 @@ int td5_frontend_display_loop(void) {
         ScreenFn fn = s_screen_table[s_current_screen];
         if (fn) fn();
     }
+#ifndef TD5RE_RELEASE
+    frontend_nav_selftest_maybe();   /* dev: TD5RE_NAV_SELFTEST=1 nav reachability log */
+#endif
     td5_profile_mark("fe_fsm");
 
     /* 3b. Universal slide-IN chime (S03). fn() above has already run this frame,
@@ -6778,6 +6901,10 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
      * tracks) — the selector arrows must vanish with the button frame+label,
      * not leave an empty ◄ ► row floating where the button used to be. */
     if (!s_buttons[btn_idx].active || s_buttons[btn_idx].hidden) return;
+    /* [2026-06-26] Mark this row as a value selector for the shared LEFT/RIGHT nav
+     * (drawing arrows == "L/R cycles my value, don't move focus off me"). Set
+     * before the shader bail so the nav meaning holds even if ps_arrow is absent. */
+    s_buttons[btn_idx].nav_selector = 1;
     if (!s_ps_arrow) return;
     frontend_get_button_render_rect(btn_idx, sx, sy, &bx, &by, &bw, &bh);
 

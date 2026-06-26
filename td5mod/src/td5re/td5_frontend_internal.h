@@ -333,6 +333,11 @@ typedef struct {
                              * so nav/mouse also skip it. */
     int highlight_ramp;     /* 0-6: smooth highlight fade (original uses 6-step ramp) */
     int is_selector;        /* 1 = left/right selector widget; always uses blue 9-slice */
+    int nav_selector;       /* [2026-06-26] 1 = row draws ◄► value arrows (set by
+                             * fe_draw_option_arrows). Tells the shared LEFT/RIGHT nav
+                             * to CYCLE this row's value instead of moving focus, so a
+                             * plain L/R on a gamepad still adjusts the selector while
+                             * non-selectors move focus to a same-row neighbour. */
     char label[64];
 } FE_Button;
 
