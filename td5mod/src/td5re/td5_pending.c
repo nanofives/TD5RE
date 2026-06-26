@@ -30,6 +30,9 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Cup final standings show profile names (not PLAYER N)",
+    "WHAT NEXT? CAR SELECTION -> car grid (not profile select)",
+    "WHAT NEXT? buttons aligned under the title (both layouts)",
     "Crisp on 4K/high-DPI scaled displays (no blur)",
     "MP results table: name aligned, columns, divider",
     "Cup results screen + POINTS column (race + total)",

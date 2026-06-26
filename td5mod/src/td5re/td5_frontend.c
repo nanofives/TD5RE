@@ -7047,7 +7047,7 @@ static void frontend_render_mp_post_race_description(float sx, float sy) {
     const char *(*tbl)[11] = (s_mp_postrace_menu_mode == 1) ? k_cup_desc : k_std_desc;
     int count = (s_mp_postrace_menu_mode == 1) ? 4 : 6;
     int btn = s_selected_button;
-    float panel_x = 348.0f * sx;   /* clears the 304-wide button column (right edge 336) */
+    float panel_x = 348.0f * sx;   /* clears the FE_MENU_BTN column (x=120 + 0xE0 = right edge 344) */
     float panel_y = 150.0f * sy;
     float panel_w = 276.0f * sx;
     int line;

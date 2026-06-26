@@ -631,6 +631,31 @@ void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing);
 #define FE_LOBBY_ROW0_Y   140
 #define FE_LOBBY_ROW_H     24
 
+/* ---- Left-column menu button geometry (design px) — THE alignment routine ----
+ * Canonical "buttons sit under the screen title" layout, used by every standard
+ * left-column menu. Screen_RaceTypeCategory (the race menu, td5_fe_menu.c) is the
+ * reference implementation.
+ *   RE basis: RaceTypeCategoryMenuStateMachine @0x004168B0 creates each option
+ *   button via CreateFrontendDisplayModeButton with width 0xE0 (224) [CONFIRMED];
+ *   the resting on-screen X is g_frontendCanvasW/2 - 200 = 120 at the 640px canvas
+ *   [CONFIRMED]. The shared title-label creator (CreateMenuStringLabelSurface
+ *   @0x00412E30) blits the screen title at the SAME g_frontendCanvasW/2 - 200 = 120,
+ *   so in the original the title and the menu column align exactly at 120.
+ * The button FRAME's left edge sits at FE_MENU_BTN_X; the LABEL is CENTRED inside
+ * the frame (see the button loop in td5_frontend.c,
+ * `fe_draw_text(bx + (bw - tw)*0.5f, ...)`), NOT left-aligned.
+ * The port draws its title at FE_TITLE_LEFT_X = 126 (a port layout value eyeballed
+ * from MainMenu.png — no binary literal; a 126 constant scan over the frontend
+ * region returned zero hits), so menu buttons at FE_MENU_BTN_X (120) match the
+ * original's button geometry and sit ~6 px left of the port title — that IS the
+ * "like every other screen" position. Width 0xE0 (224) keeps the column clear of a
+ * right-side description panel (panels start at x=348). New left-column menus MUST
+ * use these constants instead of re-deriving an ad-hoc X.
+ * See FRONTEND_SCREEN_GUIDE.md §Button column alignment. */
+#define FE_MENU_BTN_X   120     /* button frame left edge (= orig canvasW/2-200; aligns under the title) */
+#define FE_MENU_BTN_W   0xE0    /* 224: standard left-column button width (orig 0x004168B0 [CONFIRMED]) */
+#define FE_MENU_BTN_H   0x20    /* 32:  standard button height                                          */
+
 extern char s_create_session_name[64];
 extern char s_cs_port_buf[8];     /* GAME PORT inline field buffer (direct host) */
 extern int  s_cs_edit;

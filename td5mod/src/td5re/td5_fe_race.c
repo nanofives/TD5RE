@@ -3431,17 +3431,21 @@ void Screen_MpPostRace(void) {
     case 0: {   /* Init: pick the layout, build the left button column */
         const int cup_between = (td5_game_mp_cup_active() && td5_game_mp_cup_has_next());
         const int count = cup_between ? 4 : 6;
-        const int BH = 0x20, step = 48;                      /* 32px tall, 48px pitch */
-        /* [LAYOUT 2026-06-25] Align the button column under the new top-of-screen
-         * "CUP - WHAT NEXT?" / "WHAT NEXT?" title (drawn left-aligned at
-         * FE_TITLE_LEFT_X=126 in td5_frontend.c) and start it just below the title
-         * instead of vertically centring it. The cup menu (4 short-label buttons)
-         * adopts the narrower race-menu width (0xE0=224 at x=120, matching
-         * Screen_RaceTypeCategory which this screen was copied from); the standard
-         * menu keeps the wider 0x130 column its long labels need, and its centred y. */
-        const int BX = cup_between ? 120  : 32;
-        const int BW = cup_between ? 0xE0 : 0x130;
-        const int y0 = cup_between ? 104  : (480 - ((count - 1) * step + BH)) / 2;
+        const int BH = FE_MENU_BTN_H, step = 48;             /* 32px tall, 48px pitch */
+        /* [LAYOUT 2026-06-25] Align the button column under the top-of-screen
+         * "CUP - WHAT NEXT?" / "WHAT NEXT?" title using the SHARED left-column menu
+         * geometry (FE_MENU_BTN_X / FE_MENU_BTN_W) — the same x=120 / width 0xE0
+         * the race menu (Screen_RaceTypeCategory) uses, so this lines up "like every
+         * other frontend screen". [ALIGN FIX 2026-06-25] The standard 6-button menu
+         * previously used a wide x=32 / 0x130 column that ignored the title edge; it
+         * now shares the canonical column and its long "BACK TO ..." labels are
+         * shortened to their panel-title forms (the right-side description panel
+         * carries the full wording) so they fit the 224px frame. y0=104 starts the
+         * column just below the title for both layouts (the old 6-button centred
+         * formula also evaluated to 104). */
+        const int BX = FE_MENU_BTN_X;
+        const int BW = FE_MENU_BTN_W;
+        const int y0 = 104;
 
         s_mp_postrace_menu_mode = cup_between ? 1 : 0;
         s_mp_postrace_choice = -1;
@@ -3456,12 +3460,14 @@ void Screen_MpPostRace(void) {
             frontend_create_button("VIEW REPLAY",  BX, y0 + 2 * step, BW, BH);
             frontend_create_button("LEAVE CUP",    BX, y0 + 3 * step, BW, BH);
         } else {
-            frontend_create_button("RACE AGAIN",                 BX, y0 + 0 * step, BW, BH);
-            frontend_create_button("VIEW REPLAY",                BX, y0 + 1 * step, BW, BH);
-            frontend_create_button("BACK TO LOBBY",              BX, y0 + 2 * step, BW, BH);
-            frontend_create_button("BACK TO CAR SELECTION",      BX, y0 + 3 * step, BW, BH);
-            frontend_create_button("BACK TO GAMEMODE SELECTION", BX, y0 + 4 * step, BW, BH);
-            frontend_create_button("BACK TO MAIN MENU",          BX, y0 + 5 * step, BW, BH);
+            /* Labels match the description-panel titles (k_std_desc[i][0] in
+             * frontend_render_mp_post_race_description) and fit the 224px column. */
+            frontend_create_button("RACE AGAIN",    BX, y0 + 0 * step, BW, BH);
+            frontend_create_button("VIEW REPLAY",   BX, y0 + 1 * step, BW, BH);
+            frontend_create_button("BACK TO LOBBY", BX, y0 + 2 * step, BW, BH);
+            frontend_create_button("CAR SELECTION", BX, y0 + 3 * step, BW, BH);
+            frontend_create_button("GAME MODE",     BX, y0 + 4 * step, BW, BH);
+            frontend_create_button("MAIN MENU",     BX, y0 + 5 * step, BW, BH);
         }
         s_selected_button = 0;
         frontend_begin_timed_animation();
@@ -3564,12 +3570,22 @@ void Screen_MpPostRace(void) {
             case 2: /* BACK TO LOBBY — profile selection, keeps configs (MP-aware) */
                 td5_frontend_return_to_lobby();
                 break;
-            case 3: /* BACK TO CAR SELECTION — reset the simul flow so the picker +
-                     * car grid re-run (mirrors RaceResults Select-New-Car case 3) */
-                if (mp_pos_reask_enabled() && s_mp_flow && s_num_human_players >= 2) {
-                    s_mp_simul = 0;
-                    s_mp_phase = 0;
+            case 3: /* CAR SELECTION — jump STRAIGHT to the car-select grid so players
+                     * re-pick cars, keeping their existing screen positions + profiles.
+                     * [WIRING FIX 2026-06-25] This used to reset s_mp_simul/s_mp_phase to
+                     * 0 (mirroring RaceResults "Select New Car"), which re-ran the CHOOSE
+                     * YOUR SCREEN + name/colour picker first — so the user landed on the
+                     * position/"profile select" screen instead of car select. The post-race
+                     * menu already has a separate BACK TO LOBBY button for re-doing
+                     * profiles, so this stays on the grid: with s_mp_simul=1 + s_mp_phase=1
+                     * Screen_CarSelection skips the phase-0 setup and inits the grid
+                     * directly (same default mid-setup state RaceResults documents). */
+                if (s_mp_flow && s_num_human_players >= 2) {
+                    s_mp_simul = 1;
+                    s_mp_phase = 1;
                 }
+                TD5_LOG_I(LOG_TAG, "MP post-race: CAR SELECTION -> car grid (simul=%d phase=%d)",
+                          s_mp_simul, s_mp_phase);
                 td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
                 break;
             case 4: /* BACK TO GAMEMODE SELECTION — the MP game-mode vote */
@@ -3642,12 +3658,24 @@ void frontend_cup_winners_render(float sx, float sy) {
     y = 120.0f;
     for (i = 0; i < n && i < 6; i++) {
         int slot = order[i];
+        char nm[24];
+        /* [CUP STANDINGS NAMES 2026-06-25] Show each racer's PROFILE NAME instead of
+         * the bare "PLAYER N" — same source the per-race results table uses
+         * (s_mp_player_name[slot]). Human slots with no stored name fall back to
+         * "PLAYER N"; AI cup opponents (slots past the human count) show "CPU". */
+        if (slot < s_num_human_players) {
+            const char *pn = (slot < TD5_MAX_HUMAN_PLAYERS) ? s_mp_player_name[slot] : "";
+            if (pn && pn[0]) snprintf(nm, sizeof nm, "%s", pn);
+            else             snprintf(nm, sizeof nm, "PLAYER %d", slot + 1);
+        } else {
+            snprintf(nm, sizeof nm, "CPU");
+        }
         if (td5_game_mp_cup_team_mode())
-            snprintf(buf, sizeof buf, "%d.  PLAYER %d  (TEAM %d)  -  %d PTS",
-                     i + 1, slot + 1, td5_game_mp_cup_team(slot) + 1, td5_game_mp_cup_points(slot));
+            snprintf(buf, sizeof buf, "%d.  %s  (TEAM %d)  -  %d PTS",
+                     i + 1, nm, td5_game_mp_cup_team(slot) + 1, td5_game_mp_cup_points(slot));
         else
-            snprintf(buf, sizeof buf, "%d.  PLAYER %d  -  %d PTS",
-                     i + 1, slot + 1, td5_game_mp_cup_points(slot));
+            snprintf(buf, sizeof buf, "%d.  %s  -  %d PTS",
+                     i + 1, nm, td5_game_mp_cup_points(slot));
         td5_vui_text_centered(320.0f * sx, y * sy, buf,
                               (i == 0) ? 0xFFFFFFFFu : mp_slot_color(slot), sx, sy);
         y += 30.0f;
