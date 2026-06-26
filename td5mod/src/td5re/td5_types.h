@@ -489,6 +489,21 @@ typedef struct TD5_MpModeConfig {
      * tallies every active slot). Appended at the end for a stable wire layout.
      * 0 => humans only. */
     int32_t cup_ai_opponents;
+    /* [CUP TEAM SELECT 2026-06-25] Per-racer-slot team for cup team mode, the
+     * AUTHORITATIVE source consumed by td5_game_mp_cup_begin (the legacy
+     * team_of_slot[6] only covers net-player slots, and cup_begin runs before the
+     * human/AI count is committed so it cannot tell humans from AI). Populated on
+     * the CHOOSE YOUR TEAM screen for EVERY racer slot: humans mirror their own
+     * pick here, the host force-assigns the AI opponents. Appended for a stable
+     * wire layout. */
+    int32_t cup_team_of_slot[TD5_MAX_RACER_SLOTS];
+    /* [CUP TEAM SELECT 2026-06-25] Per-AI-opponent difficulty tier (0=easy,
+     * 1=normal, 2=hard) the host sets with the per-opponent skill slider on the
+     * CHOOSE YOUR TEAM screen. -1 => inherit the global difficulty. Indexed by
+     * racer slot; only AI slots carry a value (human slots stay -1). Drives the
+     * in-race SmartAI per-car skill (td5_ai_smart_race_init). Appended for a
+     * stable wire layout. */
+    int32_t cup_ai_difficulty[TD5_MAX_RACER_SLOTS];
 } TD5_MpModeConfig;
 
 /* ========================================================================

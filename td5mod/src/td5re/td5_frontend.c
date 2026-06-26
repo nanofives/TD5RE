@@ -328,6 +328,15 @@ int frontend_mp_human_count(void) {
 }
 int frontend_mp_ai_cop_count(void) { return s_mp_ai_cop_count; }
 
+/* [CUP TEAM SELECT 2026-06-25] Display name for a cup AI opponent (racer slots
+ * beyond the human roster, which have no s_mp_player_name entry). Deterministic
+ * per index so the CHOOSE YOUR TEAM rows are stable. Reuses the dev AI-player
+ * name pool; compiled in all builds (the pool is not dev-gated). */
+const char *frontend_mp_ai_pool_name(int idx) {
+    if (idx < 0) idx = 0;
+    return k_ai_player_names[idx % K_AI_NAME_COUNT];
+}
+
 /* Append a simulated AI player. Returns 1 on success. Requires a real human already
  * joined (slot 0 = the person at the wheel) and a free viewport slot. Auto-assigns
  * a random non-duplicate name + an identity colour; the role-valid car is chosen

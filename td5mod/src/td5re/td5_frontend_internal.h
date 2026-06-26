@@ -252,6 +252,7 @@ int  frontend_mp_slot_is_ai(int p);
 int  frontend_mp_ai_player_count(void);
 int  frontend_mp_human_count(void);
 int  frontend_mp_ai_cop_count(void);
+const char *frontend_mp_ai_pool_name(int idx);   /* [CUP TEAM SELECT] display name for a cup AI opponent */
 int  frontend_mp_add_ai_player(void);
 int  frontend_mp_remove_ai_player(void);
 void frontend_mp_ai_cop_count_step(int d);
