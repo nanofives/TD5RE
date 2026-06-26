@@ -2230,6 +2230,28 @@ static int frontend_nav_vertical(int direction) {
     current = frontend_resolve_selected_button();
     if (current < 0) return 0;
     target = frontend_spatial_pick(0, direction);
+    if (target >= 0) {
+        /* If the SOURCE row spans MULTIPLE buttons of the target's row (a full-
+         * width option row above a narrow OK/BACK pair), land on the LEFTMOST of
+         * the spanned buttons — so DOWN from DYNAMICS lands on OK (then RIGHT
+         * reaches BACK, UP returns to DYNAMICS), not the geometrically-nearest
+         * BACK. A narrow source in a real 2-column grid (the language flags) spans
+         * only its own column's target, so column-preserving nav is untouched. */
+        int sl = s_buttons[current].x;
+        int sr = s_buttons[current].x + s_buttons[current].w;
+        int i, spanned = 0, leftmost = target, leftmost_x = s_buttons[target].x;
+        for (i = 0; i < FE_MAX_BUTTONS; i++) {
+            int cx;
+            if (!s_buttons[i].active || s_buttons[i].disabled || s_buttons[i].hidden) continue;
+            if (!frontend_rows_overlap(target, i)) continue;
+            cx = s_buttons[i].x + s_buttons[i].w / 2;
+            if (cx >= sl && cx <= sr) {
+                spanned++;
+                if (s_buttons[i].x < leftmost_x) { leftmost = i; leftmost_x = s_buttons[i].x; }
+            }
+        }
+        if (spanned >= 2) target = leftmost;
+    }
     if (target < 0) target = frontend_same_row_hidden_chip(current);
     if (target < 0) target = frontend_extreme_button_vertical(-direction);
     if (target < 0 || target == s_selected_button) return 0;
@@ -2339,6 +2361,21 @@ static void frontend_nav_selftest_maybe(void) {
             if (moved && n >= 0 && n < FE_MAX_BUTTONS && !reach[n]) {
                 reach[n] = 1; queue[qt++] = n; reached++;
             }
+        }
+    }
+    /* DOWN-walk from the top: shows the vertical landing ORDER (e.g. that DOWN
+     * from a full-width row lands on OK, not BACK). */
+    {
+        int steps, prev = -1;
+        s_selected_button = start;
+        for (steps = 0; steps <= navigable; steps++) {
+            int cur = s_selected_button;
+            TD5_LOG_I(LOG_TAG, "  DOWN-walk[%d] -> %d y=%d '%s'", steps, cur,
+                      cur >= 0 ? s_buttons[cur].y : -1,
+                      cur >= 0 ? s_buttons[cur].label : "");
+            if (cur == prev) break;   /* settled (no further movement) */
+            prev = cur;
+            if (!frontend_nav_vertical(1)) break;
         }
     }
     s_selected_button = saved;
