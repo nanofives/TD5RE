@@ -1585,6 +1585,9 @@ void Screen_GameOptions(void) {
         frontend_create_button(SNK_CopsButTxt,             120, 177, 0x128, 0x20); /* orig label: POLICE */
         frontend_create_button(SNK_DifficultyButTxt,       120, 217, 0x128, 0x20);
         frontend_create_button(SNK_3dCollisionsButTxt,     120, 257, 0x128, 0x20);
+        /* [ARCADE 2026-06-26] POWER-UPS on/off row (item boxes). New row 5; OK
+         * moves to index 6. Same x/w as the other option rows for alignment. */
+        frontend_create_button("POWER-UPS",               120, 297, 0x128, 0x20);
         frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -1615,7 +1618,7 @@ void Screen_GameOptions(void) {
             /* Each row cycles its respective global on arrow input.
              * OK button triggers exit. [S02 (c) 2026-06-04] Circuit Laps (old
              * idx 0) was removed; the remaining six rows shifted up one index. */
-            if (delta != 0 && active_button >= 0 && active_button <= 4) {
+            if (delta != 0 && active_button >= 0 && active_button <= 5) {
                 /* Nav beep on any selector-row change, matching the original's
                  * central arrow handler (DXSound::Play(2) @ 0x0042687c) and the
                  * other Options screens (Control/Sound). Rows 0..4 are all
@@ -1645,9 +1648,12 @@ void Screen_GameOptions(void) {
                 } else if (active_button == 4) {
                     s_game_option_collisions ^= 1;
                     s_inner_state = 4;
+                } else if (active_button == 5) {
+                    s_game_option_powerups ^= 1;
+                    s_inner_state = 4;
                 }
             }
-            if (s_button_index == 5) { /* OK */
+            if (s_button_index == 6) { /* OK (moved 5->6 for the POWER-UPS row) */
                 /* Sync the committed game options into g_td5.ini (the global the
                  * boot-override at frontend init reads) and write them back to
                  * td5re.ini so the selection survives a relaunch. The original
@@ -1668,6 +1674,7 @@ void Screen_GameOptions(void) {
                 g_td5.ini.difficulty        = s_game_option_difficulty;
                 g_td5.ini.dynamics          = s_game_option_dynamics;
                 g_td5.ini.collisions        = s_game_option_collisions;
+                g_td5.ini.powerups          = s_game_option_powerups;
                 td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;

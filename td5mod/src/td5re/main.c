@@ -272,6 +272,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("GameOptions", "Difficulty",       g_td5.ini.difficulty);
     td5_ini_write_int("GameOptions", "Dynamics",         g_td5.ini.dynamics);
     td5_ini_write_int("GameOptions", "Collisions",       g_td5.ini.collisions);
+    td5_ini_write_int("GameOptions", "Powerups",         g_td5.ini.powerups);
     td5_ini_write_int("GameOptions", "AutoGearbox",      g_td5.ini.auto_gearbox);
 
     /* TD6 paint color (last selected in the car-select color panel). */
@@ -333,6 +334,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Difficulty",           &g_td5.ini.difficulty },
         { "Dynamics",             &g_td5.ini.dynamics },
         { "Collisions",           &g_td5.ini.collisions },
+        { "Powerups",             &g_td5.ini.powerups },
         { "AutoGearbox",          &g_td5.ini.auto_gearbox },
         { "RearImpactResponse",   &g_td5.ini.rear_impact_response },
         { "AntiTunnel",           &g_td5.ini.anti_tunnel },
@@ -731,6 +733,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.difficulty         = td5_ini_int("GameOptions", "Difficulty", 1);
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
+    g_td5.ini.powerups           = td5_ini_int("GameOptions", "Powerups", 1);
     g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
     /* Rear-impact softening (S08): % of the rear-end angular response to keep
      * for a human player. 100 = faithful, default 45 = recoverable nudge. */

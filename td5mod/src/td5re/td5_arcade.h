@@ -98,10 +98,19 @@ void td5_arcade_note_ram(int aggressor, int victim, int impact_mag);
  * ====================================================================== */
 
 int  td5_arcade_pad_count(void);
-/* Fill world position (float units = 24.8 >> 8) + active flag + kind for pad i.
- * Returns 1 if i is valid, 0 otherwise. */
+/* Fill world position (RENDER units = world_pos/256, the scale render_pos uses) +
+ * active flag + kind for pad i. Returns 1 if i is valid, 0 otherwise. */
 int  td5_arcade_pad_get(int i, float *wx, float *wy, float *wz,
                         int *active, int *kind);
+
+/* Floating item-box visual half-size in RENDER units (auto-scaled from the track
+ * span length at race init). Renderer sizes the rotating cube / icon / glow off
+ * this. 0 outside arcade mode. */
+float td5_arcade_box_half_world(void);
+
+/* Oil-slick (HAZARD) radius in RENDER units = 1.5 lanes, so the slick is 3 lanes
+ * wide and matches the spin-out trigger area. 0 outside arcade mode. */
+float td5_arcade_hazard_radius_world(void);
 
 int  td5_arcade_hazard_count(void);
 int  td5_arcade_hazard_get(int i, float *wx, float *wy, float *wz, int *owner);

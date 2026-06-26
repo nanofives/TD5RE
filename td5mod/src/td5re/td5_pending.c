@@ -30,6 +30,19 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "ARCADE power-ups now floating boxes you drive through",
+    "Item box: glowing spinning pulsing cube w/ kind icon",
+    "Grabbed item box vanishes, respawns after 5 seconds",
+    "One power-up at a time; can't grab another until it ends",
+    "Box frequency scales with human player count (100-300)",
+    "5+ players: chance of paired boxes (left + right shoulder)",
+    "HAZARD oil (3 lanes): hit it = drift uncontrollably ~2.5s",
+    "Game Options: POWER-UPS on/off toggle (persists)",
+    "Item boxes start after span 100, sit low near the road",
+    "Item boxes sit on road edges; steer over to grab one",
+    "Car SILHOUETTE glows the effect colour (not a blob)",
+    "GHOST: car turns translucent, passes through traffic",
+    "Effect name shows centred below the checkpoint timer",
     "Quick Race PHYSICS row toggles ARCADE/SIMULATION + fits OK/Back",
     "Minimap: on a branch both fork tracks render (not just dots)",
     "MORE STATS: POWER captioned (engine output); WEIGHT under GRIP",
