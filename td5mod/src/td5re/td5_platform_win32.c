@@ -3058,6 +3058,17 @@ static LPDIRECTINPUTDEVICE8A scan_dev(int i)
              * on hover for some pads — removed. The proper UP/LEFT fix waits on the
              * navdiag log. */
             IDirectInputDevice8_Acquire(s_di_scan[i]);
+            /* [stuck-axis nav fix v2 2026-06-25] A freshly (re)created handle must
+             * re-prove it is at rest before its axes can assert a menu direction.
+             * The s_js_*_live flags persist across device Release (they are NOT
+             * cleared there), so without this reset a handle recreated AFTER a
+             * race / after entering a game mode — when the device can briefly
+             * report a zeroed or off-centre state — would be trusted immediately
+             * and could pin UP/LEFT. This is the stateful "works on a clean boot
+             * but breaks after one race/mode" trigger. Clearing forces the
+             * standard "seen at rest once" gate to re-arm for the new handle. */
+            s_js_x_live[i] = 0;
+            s_js_y_live[i] = 0;
         } else {
             s_di_scan[i] = NULL;
         }
@@ -3079,23 +3090,21 @@ uint32_t td5_plat_input_scan_join(void)
     if (s_keyboard[0x1C] & 0x80) mask |= 1u;     /* keyboard Enter = device 0 */
     for (i = 1; i < s_device_count && i < 16; i++) {
         DIJOYSTATE2 js;
-        if (!s_di_scan[i]) {
-            if (!s_dinput) continue;
-            if (SUCCEEDED(IDirectInput8_CreateDevice(s_dinput, &s_device_guids[i],
-                                                     &s_di_scan[i], NULL))) {
-                IDirectInputDevice8_SetDataFormat(s_di_scan[i], &c_dfDIJoystick2);
-                if (s_hwnd)
-                    IDirectInputDevice8_SetCooperativeLevel(s_di_scan[i], s_hwnd,
-                        DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
-                IDirectInputDevice8_Acquire(s_di_scan[i]);
-            } else { s_di_scan[i] = NULL; continue; }
-        }
+        /* [stuck-axis nav fix v2 2026-06-25] Create/fetch the handle through the
+         * shared scan_dev() helper so it gets the SAME axis range (DIPROP_RANGE
+         * 0..0x1F4, centre TD5_PLAT_JS_AXIS_CENTER) as every other reader.
+         * Previously this lobby path created s_di_scan[i] WITHOUT the range; that
+         * handle is then cached, so a later scan_dev() returned it un-ranged and
+         * the menu read the device's raw 0..65535 axes — a centred stick decoded
+         * to a pinned direction once the lobby had been visited. */
+        LPDIRECTINPUTDEVICE8A dev = scan_dev(i);
+        if (!dev) continue;
         memset(&js, 0, sizeof(js));
-        if (FAILED(IDirectInputDevice8_Poll(s_di_scan[i]))) {
-            IDirectInputDevice8_Acquire(s_di_scan[i]);
-            IDirectInputDevice8_Poll(s_di_scan[i]);
+        if (FAILED(IDirectInputDevice8_Poll(dev))) {
+            IDirectInputDevice8_Acquire(dev);
+            IDirectInputDevice8_Poll(dev);
         }
-        if (SUCCEEDED(IDirectInputDevice8_GetDeviceState(s_di_scan[i], sizeof(js), &js)))
+        if (SUCCEEDED(IDirectInputDevice8_GetDeviceState(dev, sizeof(js), &js)))
             if (js.rgbButtons[0] & 0x80) mask |= (1u << i);
     }
     return mask;
