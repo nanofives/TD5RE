@@ -16,6 +16,7 @@
 #include "td5_profile.h"
 #include "td5_input.h"
 #include "td5_physics.h"
+#include "td5_carparam.h"      /* shared carparam field map (rebuilt MORE STATS panel) */
 #include "td5_net.h"
 #include "td5_platform.h"
 #include "td5_render.h"
@@ -7185,21 +7186,6 @@ static void frontend_render_mp_post_race_description(float sx, float sy) {
 
 /* --- Car stats sub-screen (0x40DFC0 state 0xF) ------------------------------------ */
 
-/* SNK_Layout_Types (Language.dll 0x10006ED0): char - 'A' = index */
-static const char *k_stat_layout_types[] = {
-    "FRONT/REAR", "FRONT/4-WHEEL", "FRONT/FRONT",
-    "MID/4-WHEEL", "MID/REAR", "UNKNOWN"
-};
-/* SNK_Engine_Types (Language.dll 0x10006EE8): char - 'A' = index */
-static const char *k_stat_engine_types[] = {
-    "V10 ALUMINIUM", "V8 ALUMINIUM BLOCK", "V8 SUPERCHARGED",
-    "V8 ALUMINIUM", "DOHC TWIN TURBO", "V8",
-    "FORD IRON BLOCK", "PONTIAC IRON BLOCK", "V8 IRON BLOCK",
-    "V8 IRON BLOCK HEMI", "V12", "ALUMINIUM BLOCK",
-    "4 CYLINDER", "V6 SUPERCHARGED", "V10 SUPERCHARGED",
-    "V8 DOHC", "V8 TWIN TURBO", "V12 IRON BLOCK", "UNKNOWN"
-};
-
 void frontend_load_car_spec_fields(int car_index) {
     int sz = 0, field;
     size_t i;
@@ -7225,93 +7211,220 @@ void frontend_load_car_spec_fields(int car_index) {
     free(data);
 }
 
-static void frontend_fmt_spec(char *out, size_t cap, const char *raw) {
-    size_t i;
-    for (i = 0; raw[i] && i + 1 < cap; i++)
-        out[i] = (raw[i] == '_') ? ' ' : raw[i];
-    out[i] = '\0';
+/* ========================================================================
+ * Rebuilt "MORE STATS" — physics-derived car stats from carparam.dat.
+ * PORT ADDITION [2026-06-25]. The original spec sheet (config.nfo: PRICE,
+ * ENGINE, DISPLACEMENT, ...) is purely cosmetic — physics never reads it. This
+ * panel instead shows the REAL per-car parameters the simulation uses, so every
+ * bar reflects how the car actually drives. The field offsets + heaviness math
+ * live in td5_carparam.h, also consumed by the physics weight mechanics, so the
+ * WEIGHT/ACCEL bars on this screen match the on-track feel.
+ *
+ * Sources (carparam.dat file offsets):
+ *   WEIGHT     invert(collision_mass 0x88)   heavy = full bar
+ *   TOP SPEED  top_speed_limit 0x100
+ *   ACCEL      power-to-weight = torque(0xF4) * inv_mass(0x88)
+ *   POWER      drive_torque_mult 0xF4
+ *   BRAKING    brake_force 0xFA
+ *   GRIP       aero / lateral coeff 0xB8
+ *   HANDLING   invert(vehicle_inertia 0xAC)  agile = full bar
+ *   DOWNFORCE  lateral_slip_stiffness 0x108
+ *   DRIVETRAIN drivetrain_type 0x102 -> RWD/FWD/AWD   (text; 1=RWD 2=FWD 3=AWD,
+ *              [CONFIRMED td5_physics.c:3867])
+ *   BALANCE    front/(front+rear) weight 0xB4/0xB6     (text "F.. R..")
+ * Bars are roster-normalised (cop cars cached but excluded from the ranges,
+ * like the glance bars). One-time cached scan; per-frame touches no files. */
+enum {
+    CPS_WEIGHT = 0, CPS_TOPSPEED, CPS_ACCEL, CPS_POWER, CPS_BRAKING,
+    CPS_GRIP, CPS_HANDLING, CPS_DOWNFORCE, CPS_DRIVETRAIN, CPS_BALANCE,
+    CPS_COUNT
+};
+#define CPS_BAR_COUNT 8   /* first 8 stats are bars; last 2 are text */
+
+static const char *k_cps_labels[CPS_COUNT] = {
+    "WEIGHT", "TOP SPEED", "ACCEL", "POWER", "BRAKING",
+    "GRIP", "HANDLING", "DOWNFORCE", "DRIVETRAIN", "BALANCE"
+};
+
+typedef struct {
+    int     valid;
+    int32_t mass;        /* 0x88  i16 inverse-mass (higher = lighter) */
+    int32_t inertia;     /* 0xAC  i32 */
+    int32_t fwt, rwt;    /* 0xB4/0xB6 i16 */
+    int32_t grip;        /* 0xB8  i16 */
+    int32_t torque;      /* 0xF4  i16 */
+    int32_t brake;       /* 0xFA  i16 */
+    int32_t topspd;      /* 0x100 i16 */
+    int32_t drivetrain;  /* 0x102 i16 */
+    int32_t downforce;   /* 0x108 i16 */
+    int64_t accel_score; /* derived torque * inv_mass (power-to-weight) */
+} CarPhysStats;
+
+static CarPhysStats s_cps[TD5_CAR_COUNT];
+static float        s_cps_min[CPS_BAR_COUNT], s_cps_max[CPS_BAR_COUNT];
+static int          s_cps_built = 0;
+
+static int32_t cps_rd_i16(const uint8_t *d, int sz, int off) {
+    if (off < 0 || off + 2 > sz) return 0;
+    return (int32_t)(int16_t)((uint16_t)d[off] | ((uint16_t)d[off + 1] << 8));
+}
+static int32_t cps_rd_i32(const uint8_t *d, int sz, int off) {
+    if (off < 0 || off + 4 > sz) return 0;
+    return (int32_t)((uint32_t)d[off] | ((uint32_t)d[off + 1] << 8) |
+                     ((uint32_t)d[off + 2] << 16) | ((uint32_t)d[off + 3] << 24));
+}
+
+/* Per-bar raw value, with the inversion-direction baked in so that a HIGHER
+ * return = a FULLER bar (WEIGHT/HANDLING are negated because lower mass-term /
+ * lower inertia mean heavier / more agile). */
+static float cps_bar_value(const CarPhysStats *c, int stat) {
+    switch (stat) {
+    case CPS_WEIGHT:    return -(float)c->mass;          /* heavier (lower invmass) -> higher */
+    case CPS_TOPSPEED:  return  (float)c->topspd;
+    case CPS_ACCEL:     return  (float)c->accel_score;
+    case CPS_POWER:     return  (float)c->torque;
+    case CPS_BRAKING:   return  (float)c->brake;
+    case CPS_GRIP:      return  (float)c->grip;
+    case CPS_HANDLING:  return -(float)c->inertia;       /* lower inertia -> higher (agile) */
+    case CPS_DOWNFORCE: return  (float)c->downforce;
+    default:            return  0.0f;
+    }
+}
+
+static void frontend_build_carphys_stats(void) {
+    int id, s;
+    if (s_cps_built) return;
+    s_cps_built = 1;
+    for (s = 0; s < CPS_BAR_COUNT; s++) { s_cps_min[s] = 1e30f; s_cps_max[s] = -1e30f; }
+    for (id = 0; id < TD5_CAR_COUNT; id++) {
+        const char *zip = td5_asset_get_car_zip_path(id);
+        int sz = 0;
+        uint8_t *d;
+        CarPhysStats *c = &s_cps[id];
+        memset(c, 0, sizeof(*c));
+        if (!zip) continue;
+        d = (uint8_t *)td5_asset_open_and_read("carparam.dat", zip, &sz);
+        if (!d) continue;
+        if (sz >= TD5CP_OFF_LATERAL_SLIP + 2) {
+            c->mass       = cps_rd_i16(d, sz, TD5CP_OFF_COLLISION_MASS);
+            c->inertia    = cps_rd_i32(d, sz, TD5CP_OFF_VEHICLE_INERTIA);
+            c->fwt        = cps_rd_i16(d, sz, TD5CP_OFF_FRONT_WEIGHT);
+            c->rwt        = cps_rd_i16(d, sz, TD5CP_OFF_REAR_WEIGHT);
+            c->grip       = cps_rd_i16(d, sz, TD5CP_OFF_AERO);
+            c->torque     = cps_rd_i16(d, sz, TD5CP_OFF_DRIVE_TORQUE);
+            c->brake      = cps_rd_i16(d, sz, TD5CP_OFF_BRAKE_FORCE);
+            c->topspd     = cps_rd_i16(d, sz, TD5CP_OFF_TOP_SPEED);
+            c->drivetrain = cps_rd_i16(d, sz, TD5CP_OFF_DRIVETRAIN);
+            c->downforce  = cps_rd_i16(d, sz, TD5CP_OFF_LATERAL_SLIP);
+            c->accel_score = (int64_t)c->torque * (int64_t)(c->mass > 0 ? c->mass : 1);
+            c->valid = (c->mass > 0 && c->topspd > 0);
+        }
+        free(d);
+        if (!c->valid) continue;
+        if (frontend_car_is_cop(id)) continue;   /* cached, excluded from the ranges */
+        for (s = 0; s < CPS_BAR_COUNT; s++) {
+            float v = cps_bar_value(c, s);
+            if (v < s_cps_min[s]) s_cps_min[s] = v;
+            if (v > s_cps_max[s]) s_cps_max[s] = v;
+        }
+    }
+    for (s = 0; s < CPS_BAR_COUNT; s++)
+        if (s_cps_max[s] < s_cps_min[s]) { s_cps_min[s] = 0.0f; s_cps_max[s] = 1.0f; }
+    TD5_LOG_I(LOG_TAG, "carphys_stats: built physics MORE STATS (mass term [%.0f..%.0f] top[%.0f..%.0f])",
+              -s_cps_max[CPS_WEIGHT], -s_cps_min[CPS_WEIGHT],
+              s_cps_min[CPS_TOPSPEED], s_cps_max[CPS_TOPSPEED]);
+}
+
+/* Normalised [0,1] bar fraction for (ext_id, bar stat); -1 if invalid. */
+static float frontend_carphys_frac(int ext_id, int stat) {
+    CarPhysStats *c;
+    float v, lo, hi;
+    frontend_build_carphys_stats();
+    if (ext_id < 0 || ext_id >= TD5_CAR_COUNT || stat < 0 || stat >= CPS_BAR_COUNT) return -1.0f;
+    c = &s_cps[ext_id];
+    if (!c->valid) return -1.0f;
+    v  = cps_bar_value(c, stat);
+    lo = s_cps_min[stat]; hi = s_cps_max[stat];
+    if (hi - lo < 1e-6f) return 0.5f;
+    v = (v - lo) / (hi - lo);
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    return v;
+}
+
+static const char *frontend_carphys_drivetrain_text(int ext_id) {
+    int dt;
+    if (ext_id < 0 || ext_id >= TD5_CAR_COUNT || !s_cps[ext_id].valid) return "-";
+    dt = (int)s_cps[ext_id].drivetrain;
+    return (dt == 1) ? "RWD" : (dt == 2) ? "FWD" : (dt == 3) ? "AWD" : "-";
+}
+static void frontend_carphys_balance_text(int ext_id, char *out, size_t cap) {
+    int f = 0;
+    if (ext_id >= 0 && ext_id < TD5_CAR_COUNT && s_cps[ext_id].valid) {
+        int fw = (int)s_cps[ext_id].fwt, rw = (int)s_cps[ext_id].rwt;
+        int tot = fw + rw;
+        if (tot > 0) f = (fw * 100 + tot / 2) / tot;
+    }
+    if (f <= 0) snprintf(out, cap, "-");
+    else        snprintf(out, cap, "F%d R%d", f, 100 - f);
+}
+
+/* Unified physics-stats panel renderer (SP overlay + MP pane). Draws CPS_COUNT
+ * rows of label + bar (first 8) or text value (last 2). `compact` shrinks the
+ * label font for the small MP panes. */
+static void frontend_render_physics_stats(int ext_id, float px, float py, float pw, float ph,
+                                          uint32_t accent, int compact, float sx, float sy) {
+    int i;
+    float rh   = ph / (float)CPS_COUNT;
+    float lblw = pw * (compact ? 0.46f : 0.40f);
+    float barx = px + lblw + 4.0f;
+    float barw = (px + pw) - barx - 2.0f;
+    float lsx = sx, lsy = sy, capd;
+    char  val[32];
+
+    frontend_build_carphys_stats();
+    if (barw < 6.0f) barw = 6.0f;
+    if (compact) {
+        float s = rh / 11.0f;
+        if (s > 1.0f) s = 1.0f;
+        if (s < 0.42f) s = 0.42f;
+        lsx = sx * s; lsy = sy * s;
+    }
+    capd = SMALLFONT_TTF_CAP * (lsy / sy);
+
+    for (i = 0; i < CPS_COUNT; i++) {
+        float ry  = py + (float)i * rh;
+        float tyc = (ry + (rh - capd) * 0.5f) * sy;
+        fe_draw_small_text(px * sx, tyc, k_cps_labels[i], 0xFFC8C8C8u, lsx, lsy);
+        if (i < CPS_BAR_COUNT) {
+            float barh = rh - (compact ? 3.0f : 6.0f);
+            float bary, f;
+            if (barh < 2.0f) barh = 2.0f;
+            bary = ry + (rh - barh) * 0.5f;
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_quad(barx * sx, bary * sy, barw * sx, barh * sy, 0xFF101828u, -1, 0, 0, 1, 1);
+            f = frontend_carphys_frac(ext_id, i);
+            if (f > 0.0f)
+                fe_draw_quad(barx * sx, bary * sy, f * barw * sx, barh * sy, accent, -1, 0, 0, 1, 1);
+        } else {
+            const char *t;
+            if (i == CPS_DRIVETRAIN) t = frontend_carphys_drivetrain_text(ext_id);
+            else { frontend_carphys_balance_text(ext_id, val, sizeof val); t = val; }
+            fe_draw_small_text(barx * sx, tyc, t, 0xFFFFFFFFu, lsx, lsy);
+        }
+    }
 }
 
 static void frontend_render_car_stats_overlay(float sx, float sy) {
-    /* 14 rows: SNK_Config_Hdrs (Language.dll 0x10006e80) + config.nfo fields 2-16.
-     * Rendered in the car preview area (x=232, y=124, 408x280).
-     * Four visual groups match the original binary's loop structure (0x40DFC0 case 0xF):
-     *   Group A (y=124): LAYOUT, GEARS, PRICE, TIRES      (canvasH-0x164, step 0xC)
-     *   Group B (y=196): TOP SPEED, 0 TO 60, 60 TO 0, 1/4 (canvasH-0x11C, step 0xC)
-     *   ENGINE  (y=256): alone                             (canvasH-0xE0)
-     *   Group C (y=280): COMPRESSION, DISPLACEMENT, LAT.  (canvasH-0xC8, step 0xC)
-     *   Group D (y=328): TORQUE, HP                        (canvasH-0x98, step 0xC)
-     * exp: 0=raw value, 1=layout type, 2=engine type, 3=tire pair (fi + fi+1)
-     * sfx: unit suffix appended to raw values (English equivalents of SNK_ConfSpeed/Mph/Sec/Ft) */
-    static const struct { const char *hdr; int fi; int exp; float y; const char *sfx; } k_rows[] = {
-        { "LAYOUT:",       2,  1, 124.0f, NULL   },
-        { "GEARS:",        3,  0, 136.0f, NULL   },
-        { "PRICE:",        4,  0, 148.0f, NULL   },
-        { "TIRES:",        5,  3, 160.0f, NULL   },
-        { "TOP SPEED:",    7,  0, 196.0f, " MPH" },
-        { "0 to 60 MPH:",  8,  0, 208.0f, " sec" },  /* [FIXED] lowercase "to" — SNK_Config_Hdrs */
-        { "60 to 0 MPH:",  9,  0, 220.0f, " ft"  },  /* [FIXED] lowercase "to" — SNK_Config_Hdrs */
-        { "1/4 MILE:",    10,  0, 232.0f, " sec" },
-        { "ENGINE:",      11,  2, 256.0f, NULL   },
-        { "COMPRESSION:", 12,  0, 280.0f, NULL   },
-        { "DISPLACEMENT:",13,  0, 292.0f, NULL   },
-        { "LATERAL ACC:", 14,  0, 304.0f, NULL   },
-        { "TORQUE:",      15,  0, 328.0f, NULL   },
-        { "HP:",          16,  0, 340.0f, NULL   },
-    };
-    int n_layout = (int)(sizeof(k_stat_layout_types)/sizeof(k_stat_layout_types[0]));
-    int n_engine = (int)(sizeof(k_stat_engine_types)/sizeof(k_stat_engine_types[0]));
-    float hx = 232.0f * sx;   /* label column x = canvasW - 0x198 */
-    /* Value column: label_x + max_label_width + 16px gap. [FIXED 2026-06-01] These spec
-     * rows are drawn in the SMALL font in the original (CarSelectionScreenStateMachine
-     * @0x40dfc0, 10+ DrawFrontendSmallFontStringToSurface calls @0x40ee82..0x40f11b), not
-     * the scaled button font — measure with the small font. */
-    float vx = hx + fe_measure_small_text("COMPRESSION:") * fe_glyph_sx(sx, sy) + 16.0f * sx;
-    char val[64];
-    int i;
-
-    TD5_LOG_I(LOG_TAG, "car_stats_overlay: car=%d", s_car_spec_car);
-
-    for (i = 0; i < 14; i++) {
-        float y = k_rows[i].y * sy;
-        const char *raw = (k_rows[i].fi < 17) ? s_car_spec[k_rows[i].fi] : "";
-        int idx;
-
-        fe_draw_small_text(hx, y, k_rows[i].hdr, 0xFFBBBBBB, sx, sy);
-
-        switch (k_rows[i].exp) {
-        case 1: /* layout type: char - 'A' */
-            idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
-            fe_draw_small_text(vx, y,
-                         (idx >= 0 && idx < n_layout) ? k_stat_layout_types[idx] : raw,
-                         0xFFFFFFFF, sx, sy);
-            break;
-        case 2: /* engine type: char - 'A' */
-            idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
-            fe_draw_small_text(vx, y,
-                         (idx >= 0 && idx < n_engine) ? k_stat_engine_types[idx] : raw,
-                         0xFFFFFFFF, sx, sy);
-            break;
-        case 3: /* front/rear tire combined */
-        {
-            char f[24], r[24];
-            frontend_fmt_spec(f, sizeof(f), raw);
-            frontend_fmt_spec(r, sizeof(r), (k_rows[i].fi+1 < 17) ? s_car_spec[k_rows[i].fi+1] : "");
-            snprintf(val, sizeof(val), "%s/%s", f, r);
-            fe_draw_small_text(vx, y, val, 0xFFFFFFFF, sx, sy);
-            break;
-        }
-        default:
-            frontend_fmt_spec(val, sizeof(val), raw);
-            if (k_rows[i].sfx && val[0] != '\0' && val[0] != '-') {
-                size_t vl = strlen(val), sl = strlen(k_rows[i].sfx);
-                if (vl + sl + 1 < sizeof(val))
-                    memcpy(val + vl, k_rows[i].sfx, sl + 1);
-            }
-            fe_draw_small_text(vx, y, val, 0xFFFFFFFF, sx, sy);
-            break;
-        }
-    }
+    /* [2026-06-25] Rebuilt MORE STATS: real per-car physics parameters from
+     * carparam.dat (frontend_render_physics_stats), replacing the cosmetic
+     * config.nfo spec sheet (PRICE/ENGINE/HP — never read by the simulation).
+     * Drawn in the car preview area (x=232, y=126, ~384x224). s_car_spec_car is
+     * the live selected car (set by frontend_load_car_spec_fields each frame). */
+    int ext = s_car_spec_car;
+    TD5_LOG_I(LOG_TAG, "car_stats_overlay(physics): car=%d", ext);
+    frontend_render_physics_stats(ext, 232.0f, 126.0f, 384.0f, 224.0f,
+                                  0xFFE8C040u /* amber == FE_CARSTAT_ACCENT */, 0, sx, sy);
 }
 
 /* Car-select ENTRY sidebar slide-in duration (bar/curve/topbar sweeping in +
@@ -11538,66 +11651,24 @@ static void mp_simul_draw_btn(float x, float y, float w, float h, const char *la
  * "processing" the original uses (dimmed content, spec rows over it). Text is
  * scaled to fit the pane. */
 static void mp_simul_render_stats(int p, float px, float py, float pw, float ph, float sx, float sy) {
-    static const struct { const char *hdr; int fi; int exp; const char *sfx; } k_rows[] = {
-        { "LAYOUT:",       2, 1, NULL   }, { "GEARS:",        3, 0, NULL   },
-        { "PRICE:",        4, 0, NULL   }, { "TIRES:",        5, 3, NULL   },
-        { "TOP SPEED:",    7, 0, " MPH" }, { "0-60 MPH:",     8, 0, " sec" },
-        { "60-0 MPH:",     9, 0, " ft"  }, { "1/4 MILE:",    10, 0, " sec" },
-        { "ENGINE:",      11, 2, NULL   }, { "COMPRESSION:", 12, 0, NULL   },
-        { "DISPLACEMENT:",13, 0, NULL   }, { "LATERAL ACC:", 14, 0, NULL   },
-        { "TORQUE:",      15, 0, NULL   }, { "HP:",          16, 0, NULL   },
-    };
-    int n_layout = (int)(sizeof(k_stat_layout_types) / sizeof(k_stat_layout_types[0]));
-    int n_engine = (int)(sizeof(k_stat_engine_types) / sizeof(k_stat_engine_types[0]));
+    /* [2026-06-25] Rebuilt physics MORE STATS (frontend_render_physics_stats):
+     * real carparam.dat parameters drawn in the player's accent colour,
+     * replacing the cosmetic config.nfo spec sheet. A translucent scrim keeps
+     * the car + menu semi-visible underneath; a back-hint sits at the bottom. */
     float ax = px + 6.0f, ay = py + 28.0f, aw = pw - 12.0f, ah = ph - 34.0f;
-    float rh, lsx, lsy, vx;
-    int i;
-    char val[64];
+    uint32_t pcol = ((uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu) | 0xFF000000u;
+    float rh  = ah / 11.0f;                        /* 10 stat rows + a back-hint line */
+    float lsy = sy * mp_simul_clamp01(rh / 11.0f), lsx;
+    if (lsy < sy * 0.42f) lsy = sy * 0.42f;
+    lsx = sx * (lsy / sy);
 
     /* Translucent dark scrim — dims the car + menu underneath so they stay
      * SEMI-VISIBLE behind the spec text (no opaque takeover). */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad(ax * sx, ay * sy, aw * sx, ah * sy, 0xC2000810u, -1, 0, 0, 1, 1);
 
-    rh  = ah / 15.0f;                         /* 14 rows + a back-hint line */
-    lsy = sy * mp_simul_clamp01(rh / 11.0f);  /* shrink the small font to fit a row */
-    if (lsy < sy * 0.42f) lsy = sy * 0.42f;
-    lsx = sx * (lsy / sy);
-    vx  = ax + aw * 0.46f;
-    for (i = 0; i < 14; i++) {
-        float ry = (ay + 2.0f + (float)i * rh) * sy;
-        const char *raw = s_mp_pane_spec[p][k_rows[i].fi];
-        int idx;
-        fe_draw_small_text(ax * sx + 2.0f * sx, ry, k_rows[i].hdr, 0xFFC8C8C8u, lsx, lsy);
-        switch (k_rows[i].exp) {
-        case 1:
-            idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
-            fe_draw_small_text(vx * sx, ry, (idx >= 0 && idx < n_layout) ? k_stat_layout_types[idx] : raw,
-                               0xFFFFFFFFu, lsx, lsy);
-            break;
-        case 2:
-            idx = (raw[0] >= 'A' && raw[0] <= 'Z') ? raw[0] - 'A' : -1;
-            fe_draw_small_text(vx * sx, ry, (idx >= 0 && idx < n_engine) ? k_stat_engine_types[idx] : raw,
-                               0xFFFFFFFFu, lsx, lsy);
-            break;
-        case 3: {
-            char f[24], r[24];
-            frontend_fmt_spec(f, sizeof f, raw);
-            frontend_fmt_spec(r, sizeof r, (k_rows[i].fi + 1 < 17) ? s_mp_pane_spec[p][k_rows[i].fi + 1] : "");
-            snprintf(val, sizeof val, "%s/%s", f, r);
-            fe_draw_small_text(vx * sx, ry, val, 0xFFFFFFFFu, lsx, lsy);
-            break;
-        }
-        default:
-            frontend_fmt_spec(val, sizeof val, raw);
-            if (k_rows[i].sfx && val[0] && val[0] != '-') {
-                size_t vl = strlen(val), sl = strlen(k_rows[i].sfx);
-                if (vl + sl + 1 < sizeof val) memcpy(val + vl, k_rows[i].sfx, sl + 1);
-            }
-            fe_draw_small_text(vx * sx, ry, val, 0xFFFFFFFFu, lsx, lsy);
-            break;
-        }
-    }
+    frontend_render_physics_stats(s_mp_pane_spec_car[p], ax + 2.0f, ay + 2.0f,
+                                  aw - 4.0f, ah - rh - 2.0f, pcol, 1, sx, sy);
     mp_simul_small_centered((px + pw * 0.5f) * sx, (ay + ah - rh) * sy, "A / B = BACK",
                             0xFFFFE060u, lsx, lsy);
 }
