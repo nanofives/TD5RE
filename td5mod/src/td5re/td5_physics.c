@@ -135,6 +135,15 @@ static void  traffic_clamp_above_ground(TD5_Actor *t);
 static float racer_hitbox_scale(void);
 static float actor_hitbox_scale(const TD5_Actor *act);
 
+/* [MESH HITBOX 2026-06-25] Model-derived V2V collision box. actor_collision_box
+ * returns each actor's collision half-extents from the PURE mesh AABB (no fixed
+ * scale, no padding) the suspension envelope already computed; mesh_box_store is
+ * how the envelope feeds it. Defined lower; referenced from obb_corner_test /
+ * apply_collision_response / compute_suspension_envelope. */
+static void  mesh_box_store(int slot, int32_t half_w, int32_t front_z);
+static void  actor_collision_box(const TD5_Actor *act,
+                                 int32_t *half_w, int32_t *front_z, int32_t *rear_z);
+
 /* ========================================================================
  * Per-racer race telemetry (#10 race-end summary)
  * ========================================================================
@@ -5849,36 +5858,17 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
 {
     int result = 0;
 
-    /* Car box extents (correct mapping — see header comment) */
-    int32_t half_w_a  = (int32_t)CDEF_S(a, CDEF_HALF_WIDTH);  /* half-width (positive) */
-    int32_t front_z_a = (int32_t)CDEF_S(a, CDEF_FRONT_Z_EXTENT);  /* front-Z extent (positive) */
-    int32_t rear_z_a  = (int32_t)CDEF_S(a, CDEF_REAR_Z_EXTENT);  /* rear-Z extent (negative) */
-    int32_t half_w_b  = (int32_t)CDEF_S(b, CDEF_HALF_WIDTH);
-    int32_t front_z_b = (int32_t)CDEF_S(b, CDEF_FRONT_Z_EXTENT);
-    int32_t rear_z_b  = (int32_t)CDEF_S(b, CDEF_REAR_Z_EXTENT);
-
-    /* [task #14 / item #4] Shrink each car's collision box to match its visible
-     * mesh. The cardef OBB extents are authored noticeably larger than the model,
-     * so a car "crashes" onto another before visibly touching it ("invisible
-     * crash"). Each actor is scaled by its own factor: TRAFFIC keeps the
-     * TD5RE_TRAFFIC_HITBOX_SCALE shrink (0.8); RACERS (player + AI opponents) now
-     * use TD5RE_HITBOX_SCALE (0.85, item #4) instead of the byte-faithful full box.
-     * Self-consistent: every corner / penetration value below derives from these
-     * scaled extents. Each scale returns 1.0 when its knob is off. */
-    {
-        float hbs_a = actor_hitbox_scale(a);
-        float hbs_b = actor_hitbox_scale(b);
-        if (hbs_a < 1.0f) {
-            half_w_a  = (int32_t)((float)half_w_a  * hbs_a);
-            front_z_a = (int32_t)((float)front_z_a * hbs_a);
-            rear_z_a  = (int32_t)((float)rear_z_a  * hbs_a);
-        }
-        if (hbs_b < 1.0f) {
-            half_w_b  = (int32_t)((float)half_w_b  * hbs_b);
-            front_z_b = (int32_t)((float)front_z_b * hbs_b);
-            rear_z_b  = (int32_t)((float)rear_z_b  * hbs_b);
-        }
-    }
+    /* [MESH HITBOX 2026-06-25] Collision half-extents from each car's OWN model
+     * (pure mesh AABB, no fixed scale — see actor_collision_box). Replaces the
+     * old cardef*0.85/0.70 fudge so a contact registers precisely when the
+     * meshes touch. Falls back to the legacy cardef*scale box when no mesh box
+     * exists for the slot / the knob is off. Both cars draw from the same source
+     * so every corner / penetration value below stays self-consistent.
+     * (Mapping per the header comment: front_z +, half_w +, rear_z stored -.) */
+    int32_t half_w_a, front_z_a, rear_z_a;
+    int32_t half_w_b, front_z_b, rear_z_b;
+    actor_collision_box(a, &half_w_a, &front_z_a, &rear_z_a);
+    actor_collision_box(b, &half_w_b, &front_z_b, &rear_z_b);
 
     /* [LISTING ALIGNMENT 0x00408570]: the original's
      *   CollectVehicleCollisionContacts(int param_1, int param_2,
@@ -6303,6 +6293,99 @@ static float actor_hitbox_scale(const TD5_Actor *act)
     return racer_hitbox_scale();
 }
 
+/* ========================================================================
+ * [MESH HITBOX 2026-06-25] Model-derived V2V collision box.
+ *
+ * The original derives each car's collision box from its 3D model: at race
+ * init ComputeVehicleSuspensionEnvelope (0x0042F6D0) scans EVERY mesh vertex
+ * for the axis-aligned extents, then stores the box into the cardef — half_w =
+ * max|x|+20 at 0x08, front/rear_z = ±(max|z|-20) at 0x04/0x14 — overwriting the
+ * authored carparam bytes before any collision reader fires [CONFIRMED @0x42F6D0,
+ * readers @0x408570/0x4079C0]. The port runs that envelope, but obb_corner_test
+ * and apply_collision_response then ALSO multiplied those extents by a fixed
+ * shrink (TD5RE_HITBOX_SCALE 0.85 / traffic 0.70) — a one-size-fits-all fudge
+ * layered on an already-padded box, so the effective collision box matched
+ * neither the model nor any single car (e.g. a car whose mesh is 343 wide ended
+ * up with a 309 box, so it visibly overlapped before a contact registered).
+ *
+ * This replaces that fudge with the PURE mesh axis-aligned bounds: the V2V
+ * collision box is EXACTLY the model's |x|/|z| silhouette (no +20/-20 padding,
+ * no scale), so cars AND traffic register a crash precisely when their meshes
+ * touch. The box is recomputed from each actor's own mesh, so it tracks the
+ * model with no fixed tuning parameter. The padded 8-corner box, sphere radius
+ * (0x80) and height (0x86) the envelope also writes are LEFT INTACT, so the
+ * other consumers (AI lane bounds, suspension Y, wheel placement, the airborne
+ * sphere-separation path) stay byte-faithful.
+ *
+ * Populated by compute_suspension_envelope (which already has the per-vertex
+ * max) via mesh_box_store; read by actor_collision_box, which falls back to the
+ * legacy cardef*scale box when no mesh box exists for the slot (mesh failed to
+ * load) or TD5RE_MESH_HITBOX=0. Indexed by actor slot_index. */
+static int16_t s_mesh_box[TD5_MAX_TOTAL_ACTORS][3];    /* {half_w, front_z, rear_z(neg)} */
+static uint8_t s_mesh_box_valid[TD5_MAX_TOTAL_ACTORS];
+
+static int mesh_hitbox_enabled(void)
+{
+    static int s_init = 0, s_on = 1;   /* default ON */
+    if (!s_init) {
+        const char *e = getenv("TD5RE_MESH_HITBOX");
+        if (e && e[0] == '0') s_on = 0;
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "mesh_hitbox: %s (TD5RE_MESH_HITBOX)",
+                  s_on ? "ON (model-derived collision box)"
+                       : "OFF (legacy cardef*scale box)");
+    }
+    return s_on;
+}
+
+/* Record the PURE mesh AABB extents for a slot. Called from the suspension
+ * envelope with the same max|x| / max|z| it already scanned (before the +20/-20
+ * padding). half_w / front_z are positive magnitudes; rear_z is stored negative
+ * to mirror the cardef layout obb_corner_test expects. */
+static void mesh_box_store(int slot, int32_t half_w, int32_t front_z)
+{
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (half_w  < 1) half_w  = 1;          /* never degenerate */
+    if (front_z < 1) front_z = 1;
+    if (half_w  > 0x7FFF) half_w  = 0x7FFF;
+    if (front_z > 0x7FFF) front_z = 0x7FFF;
+    s_mesh_box[slot][0] = (int16_t)half_w;
+    s_mesh_box[slot][1] = (int16_t)front_z;
+    s_mesh_box[slot][2] = (int16_t)(-front_z);
+    s_mesh_box_valid[slot] = 1;
+}
+
+/* Effective V2V collision half-extents for one actor. With the model-derived
+ * box available (default) it is returned verbatim — precise to the mesh, no
+ * fixed scale. Otherwise falls back to the cardef extents * actor_hitbox_scale
+ * (legacy behaviour) so a car whose mesh never loaded still collides. */
+static void actor_collision_box(const TD5_Actor *act,
+                                int32_t *half_w, int32_t *front_z, int32_t *rear_z)
+{
+    int slot = act ? (int)act->slot_index : -1;
+    if (mesh_hitbox_enabled() && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+        s_mesh_box_valid[slot]) {
+        *half_w  = (int32_t)s_mesh_box[slot][0];
+        *front_z = (int32_t)s_mesh_box[slot][1];
+        *rear_z  = (int32_t)s_mesh_box[slot][2];
+        return;
+    }
+    /* Legacy fallback: cardef extents * fixed scale (pre-mesh-hitbox path). */
+    {
+        TD5_Actor *m = (TD5_Actor *)act;   /* get_cardef/CDEF_S take non-const */
+        float s = actor_hitbox_scale(m);
+        int32_t hw = (int32_t)CDEF_S(m, CDEF_HALF_WIDTH);
+        int32_t fz = (int32_t)CDEF_S(m, CDEF_FRONT_Z_EXTENT);
+        int32_t rz = (int32_t)CDEF_S(m, CDEF_REAR_Z_EXTENT);
+        if (s < 1.0f) {
+            hw = (int32_t)((float)hw * s);
+            fz = (int32_t)((float)fz * s);
+            rz = (int32_t)((float)rz * s);
+        }
+        *half_w = hw; *front_z = fz; *rear_z = rz;
+    }
+}
+
 /* Clamp a (presumed traffic) actor's world_pos.y so it never sits below the
  * track surface at its current span — the "traffic clips through the ground"
  * recovery for task #9. Uses the same barycentric ground query the traffic pose
@@ -6582,24 +6665,14 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     /* [CONFIRMED @ 0x407ADB]: cardef+0x04 = front-Z extent (positive),
      *                         cardef+0x08 = half-width,
      *                         cardef+0x14 = rear-Z extent (stored negative). */
-    int32_t half_w_A   = (int32_t)CDEF_S(A, CDEF_HALF_WIDTH);
-    int32_t front_z_A  = (int32_t)CDEF_S(A, CDEF_FRONT_Z_EXTENT);
-    int32_t rear_z_A   = (int32_t)CDEF_S(A, CDEF_REAR_Z_EXTENT);
-
-    /* [item #4] Use the SAME scaled box obb_corner_test used to generate the
-     * corner data below. The side-vs-front/rear split compares |side_extent| =
-     * half_w_A - |cx_A| against the front/rear depth; cx_A/cz_A were already
-     * computed from the shrunk extents, so half_w_A/front_z_A/rear_z_A must match
-     * or the branch decision (and its push direction) would reference a different
-     * box than the overlap. No-op when the knob is off (scale == 1.0). */
-    {
-        float hbs_A = actor_hitbox_scale(A);
-        if (hbs_A < 1.0f) {
-            half_w_A  = (int32_t)((float)half_w_A  * hbs_A);
-            front_z_A = (int32_t)((float)front_z_A * hbs_A);
-            rear_z_A  = (int32_t)((float)rear_z_A  * hbs_A);
-        }
-    }
+    /* [MESH HITBOX 2026-06-25] Use the SAME model-derived box obb_corner_test
+     * used to generate this contact (actor_collision_box). The side-vs-front/rear
+     * split below compares |side_extent| = half_w_A - |cx_A| against the
+     * front/rear depth; cx_A/cz_A were computed from these extents, so the box
+     * here must match the overlap that produced the contact or the branch
+     * decision (and its push direction) would reference a different box. */
+    int32_t half_w_A, front_z_A, rear_z_A;
+    actor_collision_box(A, &half_w_A, &front_z_A, &rear_z_A);
 
     int32_t abs_cx_A   = cx_A < 0 ? -cx_A : cx_A;
     int32_t side_extent = half_w_A - abs_cx_A;
@@ -14133,6 +14206,12 @@ static void bind_default_vehicle_tuning(TD5_Actor *actor, int slot)
 
 void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
 {
+    /* [MESH HITBOX 2026-06-25] Invalidate any stale model box for this slot from
+     * a previous race up front, so a slot that fails to get a mesh this race
+     * cleanly falls back to its (freshly seeded) cardef box instead of reusing a
+     * different car's bounds. Re-validated below once the vertex scan succeeds. */
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) s_mesh_box_valid[slot] = 0;
+
     if (!actor || !actor->car_definition_ptr) return;
 
     TD5_MeshHeader *mesh = td5_render_get_vehicle_mesh(slot);
@@ -14184,6 +14263,15 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
         /* Traffic: original leaves max_y on FPU stack; we mirror that. */
         y_val_x = max_y;
     }
+
+    /* [MESH HITBOX 2026-06-25] Cache the PURE mesh AABB extents (max|x|, max|z|)
+     * for the V2V collision box BEFORE the original's +20/-20 padding is applied
+     * below. max_x already includes the racer axle-width clamp; max_z is the raw
+     * |z| extent. This precise model silhouette is what the collision functions
+     * use (via actor_collision_box) in place of the padded+scaled cardef box. The
+     * padded 8-corner box keeps being written below for the suspension / AI lane
+     * / separation consumers, so they stay byte-faithful. */
+    mesh_box_store(slot, (int32_t)(int)max_x, (int32_t)(int)max_z);
 
     /* --- Add/subtract 20.0f padding [CONFIRMED @ 0x0042F7FA, 0x0042F808].
      * No safety clamp in the original -- FTOL truncates toward zero. --- */

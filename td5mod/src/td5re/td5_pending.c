@@ -50,6 +50,7 @@ static const char *const k_seed[] = {
     "Cop Chase INFECT: arrested car becomes a random-car cop",
     "INFECT: human keeps driving as cop; AI cop gives chase",
     "INFECT: round ends once every suspect is infected",
+    "Collisions fire on real model contact (mesh hitbox)",
     "Cop Chase results: COPS (arrests) + SUSPECTS (bust time)",
     "Cop Chase ends: all suspects busted or all finish",
     "Italy (Courmayeur) starts a race without crashing",
