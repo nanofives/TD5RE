@@ -1131,6 +1131,17 @@ int td5_game_tick(void) {
                         td5_frontend_show_net_disconnect("Lost connection to the host");
                     else
                         td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                } else if (s_demo_mode) {
+                    /* [ATTRACT DEMO 2026-06-25] A demo race that runs to a natural
+                     * finish goes straight back to the main menu — NO results screen
+                     * (an attract demo never shows standings). ESC during the demo
+                     * already returns via the result==2 path above; this handles the
+                     * AI-driven race actually reaching the finish. Clear the demo flag
+                     * so the menu is in a normal state (the next race launch re-clears
+                     * it via frontend_init_race_schedule anyway). */
+                    TD5_LOG_I(LOG_TAG, "Demo race finished -> main menu (no results)");
+                    td5_game_set_demo_mode(0);
+                    td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
                 } else {
                     /* Normal race finish — go to race results screen */
                     TD5_LOG_I(LOG_TAG, "Race finished -> results screen");
@@ -4883,7 +4894,11 @@ int td5_game_run_race_frame(void) {
         }
         int esc_frame_now = td5_plat_input_key_pressed(0x01);
         if (s_replay_esc_enabled && esc_frame_now && !s_prev_esc_frame &&
-            td5_game_is_cinematic_race()) {
+            td5_game_is_cinematic_race() && td5_plat_window_is_focused()) {
+            /* [ATTRACT DEMO 2026-06-25] Only arm the cinematic ESC abort when the
+             * window is focused: an attract demo must keep playing in the background
+             * (and a stale/global ESC must not cut a self-running demo short). The
+             * user can only intend to abort while looking at the window. */
             s_replay_esc_exit = 1;
             TD5_LOG_I(LOG_TAG, "Replay: per-frame ESC edge -> exit requested");
         }
@@ -4981,6 +4996,7 @@ int td5_game_run_race_frame(void) {
         s_replay_esc_exit = 0;
         if ((esc_edge || replay_esc_edge || td5_input_replay_exit_requested()) &&
             td5_game_is_cinematic_race() &&
+            td5_plat_window_is_focused() &&   /* [ATTRACT DEMO] only abort when focused */
             !s_replay_abort_pending &&
             g_td5.race_end_fade_state == 0) {
             s_replay_abort_pending = 1;

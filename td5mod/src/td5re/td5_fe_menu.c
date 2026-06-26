@@ -934,6 +934,13 @@ void Screen_MainMenu(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         s_anim_complete = 0;
 
+        /* [ATTRACT DEMO 2026-06-25] Re-arm the attract idle timer on every main-menu
+         * (re-)entry. Without this, returning from a demo (or any race) leaves a stale
+         * timestamp from minutes ago, so the idle check would fire again immediately and
+         * the menu would bounce straight back into another demo. A fresh entry = a fresh
+         * full idle window. (Input also re-arms it in case 4 below.) */
+        s_attract_idle_timestamp = td5_plat_time_ms();
+
         /* [CONFIRMED @ 0x004155DE ScreenMainMenuAnd1PRaceFlow case 0] Original
          * copies the GameOptions shadow (DAT_00466000, range 0..3) into the
          * live runtime lap count: gCircuitLapCount = DAT_00466000 + 1.

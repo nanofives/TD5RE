@@ -4992,6 +4992,17 @@ void td5_plat_audio_set_muted(int muted)
     }
 }
 
+/* True when the game window currently holds the OS foreground (keyboard) focus.
+ * Used to gate "press ESC to abort" in cinematic races (attract demo / view
+ * replay): an attract demo must keep playing when the window is in the
+ * background, and a stale/global ESC read while unfocused must not cut it short.
+ * Returns 1 (focused) when there is no window handle so headless/standalone
+ * behaviour is unchanged. [ATTRACT DEMO 2026-06-25] */
+int td5_plat_window_is_focused(void)
+{
+    return (!s_hwnd) || (GetForegroundWindow() == s_hwnd);
+}
+
 /* Mute all DirectSound output while the game window is not the foreground
  * window; restore on refocus. Edge-triggered so it only acts on a focus
  * change. Per-voice SFX pick up s_audio_focus_muted via audio_effective_cb on

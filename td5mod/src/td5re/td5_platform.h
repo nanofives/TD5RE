@@ -47,6 +47,11 @@ void td5_plat_present_texture_page(int page_index, int vsync);
 /** Get current window dimensions. */
 void td5_plat_get_window_size(int *width, int *height);
 
+/** True when the game window holds OS foreground (keyboard) focus. Used to gate
+ *  the cinematic-race (attract demo / view replay) ESC-to-abort so a background
+ *  window's stale key state can't cut a self-running demo short. */
+int  td5_plat_window_is_focused(void);
+
 /** Set fullscreen/windowed mode. */
 void td5_plat_set_fullscreen(int fullscreen);
 
