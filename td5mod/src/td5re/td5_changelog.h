@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 26" },
+    { CL_ITEM,    "Quick Race setup now has a PHYSICS option" },
+    { CL_ITEM,    "  (ARCADE / SIMULATION) right on the screen" },
     { CL_ITEM,    "MORE STATS rebuilt: the car-select stats are now" },
     { CL_ITEM,    "  the car's REAL physics - weight, power, grip," },
     { CL_ITEM,    "  braking, handling, downforce, drivetrain - instead" },
