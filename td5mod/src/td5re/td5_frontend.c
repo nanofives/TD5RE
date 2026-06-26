@@ -8069,7 +8069,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         if (s_buttons[6].active && !s_buttons[6].hidden)  /* per-race AI difficulty (hidden in Quick Race) */
             fe_draw_text(vx, (float)(s_buttons[6].y + 6) * sy, difficulty[s_race_difficulty % 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
         /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) value — appended row,
-         * indexed via s_trksel_dyn_btn (sits on the top row, y=57). */
+         * indexed via s_trksel_dyn_btn (sits just above OK/BACK; value follows .y). */
         if (s_trksel_dyn_btn >= 0 && s_buttons[s_trksel_dyn_btn].active &&
             !s_buttons[s_trksel_dyn_btn].hidden) {
             const char *dyn[2] = { "ARCADE", "SIMULATION" };
@@ -10938,6 +10938,11 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_option_arrows(4, sx, sy);
             fe_draw_option_arrows(5, sx, sy);
             fe_draw_option_arrows(6, sx, sy);   /* per-race difficulty (master) */
+            /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) row — same ◄►
+             * selector glyphs as the quick-race option rows above. The button
+             * is appended last, so dispatch it by its stored index (self-skips
+             * when hidden/inactive). [LAYOUT 2026-06-26] now sits just above OK/BACK. */
+            if (s_trksel_dyn_btn >= 0) fe_draw_option_arrows(s_trksel_dyn_btn, sx, sy);
             /* [item #7] Randomize chip to the right of the Track selector. */
             frontend_render_trksel_randomize_icon(sx, sy);
             break;

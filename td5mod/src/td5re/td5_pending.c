@@ -37,6 +37,8 @@ static const char *const k_seed[] = {
     "Quick stat bars (under PAINT) match the MORE STATS scale",
     "MORE STATS: Left/Right switches car in place (1P stats screen)",
     "MORE STATS: captions under less-obvious bars; text clears RANDOM",
+    "Track Select: DYNAMICS has arrows, sits above OK/BACK",
+    "Track Select: option rows fit without overlap (cup too)",
     "Cop Chase RANDOM COP: cop drawn at race start, pick car normally",
     "MORE STATS shows real carparam physics (1P + split)",
     "Heavy cars hit harder/shove; light cars get flung",

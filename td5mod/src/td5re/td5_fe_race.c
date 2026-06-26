@@ -5965,23 +5965,23 @@ void Screen_TrackSelection(void) {
         /* Create buttons. Ghidra settles these at x=120 for Track/Forwards/OK
          * and x=232 for Back, with OK/Back sharing the bottom row. */
         frontend_create_button(SNK_TrackButTxt,     120,  97, 224, 32); /* 0: with L/R arrows */
-        frontend_create_button(SNK_ForwardsButTxt,  120, 137, 224, 32); /* 1: direction toggle */
+        frontend_create_button(SNK_ForwardsButTxt,  120, 132, 224, 32); /* 1: direction toggle */
         /* [PORT ENHANCEMENT 2026-06] race-option rows: AI opponents, laps, traffic,
          * police. They drive s_num_ai_opponents + s_game_option_* which apply to
          * single/multiplayer races via ConfigureGameTypeFlags (cup game-types
          * override them, so they're inert there). Present on every track-select
          * entry (regular single race, quick race, multiplayer). */
-        frontend_create_button(SNK_OpponentsButTxt, 120, 177, 224, 32); /* 2: AI count */
-        frontend_create_button(SNK_LapsButTxt,      120, 217, 224, 32); /* 3: laps */
-        frontend_create_button(SNK_TrafficButTxt,   120, 257, 224, 32); /* 4: traffic */
-        frontend_create_button(SNK_CopsButTxt,      120, 297, 224, 32); /* 5: police */
+        frontend_create_button(SNK_OpponentsButTxt, 120, 167, 224, 32); /* 2: AI count */
+        frontend_create_button(SNK_LapsButTxt,      120, 202, 224, 32); /* 3: laps */
+        frontend_create_button(SNK_TrafficButTxt,   120, 237, 224, 32); /* 4: traffic */
+        frontend_create_button(SNK_CopsButTxt,      120, 272, 224, 32); /* 5: police */
         /* [PORT ENHANCEMENT 2026-06-12] Per-race AI difficulty. Seeded from the
          * tier ConfigureGameTypeFlags derived at mode selection (= the Game
          * Options global for game-type 0), applied to g_td5.difficulty_tier on
          * OK. Quick Race (flow context 2) keeps the Game Options global — the
          * row is still CREATED there (index stability: OK=6→7, Back=7→8) but
          * hidden+disabled, exactly like the Quick Race Players row. */
-        frontend_create_button(SNK_DifficultyButTxt, 120, 337, 224, 32); /* 6: AI difficulty */
+        frontend_create_button(SNK_DifficultyButTxt, 120, 307, 224, 32); /* 6: AI difficulty */
         /* [R5] Hide the difficulty row when there are 0 opponents (and still in
          * Quick Race flow). frontend_update_difficulty_button_visibility folds in
          * the old flow_context==2 hide; refreshed in case 4 when opponents change. */
@@ -5997,10 +5997,10 @@ void Screen_TrackSelection(void) {
         s_race_difficulty = g_td5.difficulty_tier;
         if (s_race_difficulty < 0) s_race_difficulty = 0;
         if (s_race_difficulty > 2) s_race_difficulty = 2;
-        frontend_create_button(SNK_OkButTxt,        120, 377,  96, 32); /* 7: OK */
+        frontend_create_button(SNK_OkButTxt,        120, 386,  96, 32); /* 7: OK  (moved a little lower) */
         /* Quick Race mode: no Back button */
         if (s_flow_context != 2) {
-            frontend_create_button(SNK_BackButTxt, 232, 377, 112, 32);  /* 8: Back */
+            frontend_create_button(SNK_BackButTxt, 232, 386, 112, 32);  /* 8: Back (moved a little lower) */
         }
         /* The MP simultaneous car grid (pad-driven) hides the mouse cursor and
          * its all-ready path lands directly here — restore it so this screen's
@@ -6035,11 +6035,13 @@ void Screen_TrackSelection(void) {
 
         /* [ARCADE 2026-06-26] DYNAMICS (ARCADE / SIMULATION) selector. Appended
          * AFTER every load-bearing row (0..8) + the randomize button so none of
-         * their indices move. Placed on the top row (y=57); a normal selectable
-         * value-row (L/R flips s_game_option_dynamics). When the RANDOMIZE full-
-         * button variant also occupies y=57 (non-default TD5RE_RANDOM_ICON=0) the
-         * two share the row — the default icon-randomize leaves y=57 free. */
-        s_trksel_dyn_btn = frontend_create_button(SNK_DynamicsButTxt, 120, 57, 224, 32);
+         * their indices move. A normal selectable value-row (L/R flips
+         * s_game_option_dynamics); its ◄► arrows + value text follow this .y.
+         * [LAYOUT 2026-06-26] Sits just above the OK/BACK action row (y=342, with
+         * OK/BACK at y=386): the option rows above were compressed to a 35px step
+         * (TRACK 97 -> DIFFICULTY 307) to make room. The non-default RANDOMIZE
+         * full-button (TD5RE_RANDOM_ICON=0) keeps the freed top row y=57. */
+        s_trksel_dyn_btn = frontend_create_button(SNK_DynamicsButTxt, 120, 342, 224, 32);
 
         /* Network track-pick (entered from the lobby's SELECT TRACK, flow
          * context 4): the global ESC/back handler navigates to s_return_screen,
@@ -6062,6 +6064,21 @@ void Screen_TrackSelection(void) {
         /* [CUP TRACK SELECT] Keep only TRACK/TRAFFIC/POLICE on the cup picker —
          * done LAST so it overrides the direction/laps visibility helpers above. */
         frontend_cup_picker_hide_rows();
+        /* [LAYOUT 2026-06-26 /fix] One-shot button-rect dump — verifies the
+         * compressed option-row spacing + DYNAMICS-just-above-OK/BACK placement
+         * and that the DYNAMICS row is active (so its new ◄► arrows render).
+         * Screenshots come back black in headless sessions, so this is the
+         * runtime check. Logged at state-0 init only (not per frame). */
+        {
+            int bi;
+            TD5_LOG_I(LOG_TAG, "TrackSel layout: count=%d dyn_btn=%d rand_btn=%d cup=%d flow=%d",
+                      s_button_count, s_trksel_dyn_btn, s_trksel_rand_btn, cup_mp, s_flow_context);
+            for (bi = 0; bi < s_button_count; bi++)
+                TD5_LOG_I(LOG_TAG, "  btn[%d] '%s' x=%d y=%d w=%d h=%d hidden=%d active=%d",
+                          bi, s_buttons[bi].label, s_buttons[bi].x, s_buttons[bi].y,
+                          s_buttons[bi].w, s_buttons[bi].h, s_buttons[bi].hidden,
+                          s_buttons[bi].active);
+        }
         frontend_begin_timed_animation();
         s_inner_state = 1;
         break;
