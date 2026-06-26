@@ -1061,10 +1061,12 @@ static void flush_immediate_internal(void)
         }
     }
 
-    /* [ARCADE] effect-glow tint: additively brighten the actor's body toward the
-     * power-up colour so the car SILHOUETTE glows (the tint's alpha is the glow
-     * strength). Runs after fade so it operates on the final RGB; only set around
-     * a car's body draw, so other geometry is untouched. */
+    /* [ARCADE] effect-glow tint: make the car SILHOUETTE clearly glow in the
+     * power-up colour. Two steps per body vertex: (1) COLORIZE — replace the body
+     * colour with the effect hue, scaled by the vertex's own brightness (so the
+     * car's shape/shading is kept) with a floor so dark panels still read the
+     * colour; (2) add a pulsing GLOW on top (the tint's alpha is the strength).
+     * Runs after fade, only set around a car's body draw, so nothing else tints. */
     if (s_actor_effect_tint & 0xFF000000u) {
         uint32_t inten = (s_actor_effect_tint >> 24) & 0xFFu;
         uint32_t tr = (s_actor_effect_tint >> 16) & 0xFFu;
@@ -1074,10 +1076,15 @@ static void flush_immediate_internal(void)
             uint32_t d = s_imm_verts[i].diffuse;
             uint32_t a = (d >> 24) & 0xFFu;
             uint32_t r = (d >> 16) & 0xFFu, g = (d >> 8) & 0xFFu, b = d & 0xFFu;
-            r += (tr * inten) / 255u; if (r > 255u) r = 255u;
-            g += (tg * inten) / 255u; if (g > 255u) g = 255u;
-            b += (tb * inten) / 255u; if (b > 255u) b = 255u;
-            s_imm_verts[i].diffuse = (a << 24) | (r << 16) | (g << 8) | b;
+            uint32_t luma = (r * 77u + g * 150u + b * 29u) >> 8;   /* 0..255 */
+            uint32_t base = 96u + (luma * 159u) / 255u;            /* 96..255 */
+            uint32_t cr = (tr * base) / 255u + (tr * inten) / 255u;
+            uint32_t cg = (tg * base) / 255u + (tg * inten) / 255u;
+            uint32_t cb = (tb * base) / 255u + (tb * inten) / 255u;
+            if (cr > 255u) cr = 255u;
+            if (cg > 255u) cg = 255u;
+            if (cb > 255u) cb = 255u;
+            s_imm_verts[i].diffuse = (a << 24) | (cr << 16) | (cg << 8) | cb;
         }
     }
 
@@ -7831,6 +7838,38 @@ static void arcade_draw_flat_ring(float cx, float cy, float cz, float r, uint32_
     }
 }
 
+/* world->screen projector for the flat oil disc (defined far below; static fwd). */
+static int debug_line_project(float wx, float wy, float wz, uint32_t argb,
+                              TD5_D3DVertex *out);
+
+/* Filled OPAQUE disc lying flat in the world XZ plane — the dark oil puddle.
+ * Triangle fan (centre + `seg` rim points), both windings emitted so it shows
+ * regardless of cull mode. Drawn via the textureless flat path (depth-tested vs
+ * the scene, depth-write off) — a dark disc on the asphalt reads as an oil slick. */
+static void arcade_draw_oil_disc(float cx, float cy, float cz, float r,
+                                 uint32_t color, int seg)
+{
+    if (seg < 6)  seg = 6;
+    if (seg > 24) seg = 24;
+    TD5_D3DVertex vb[1 + 24];
+    uint16_t      ib[24 * 6];
+    if (!debug_line_project(cx, cy, cz, color, &vb[0])) return;   /* centre */
+    for (int k = 0; k < seg; k++) {
+        float ang = (float)k * (6.2831853f / (float)seg);
+        if (!debug_line_project(cx + cosf(ang) * r, cy, cz + sinf(ang) * r,
+                                color, &vb[1 + k]))
+            return;                                               /* clipped — drop disc */
+    }
+    int ni = 0;
+    for (int k = 0; k < seg; k++) {
+        uint16_t a = (uint16_t)(1 + k);
+        uint16_t b = (uint16_t)(1 + ((k + 1) % seg));
+        ib[ni++] = 0; ib[ni++] = a; ib[ni++] = b;   /* front  */
+        ib[ni++] = 0; ib[ni++] = b; ib[ni++] = a;   /* back   */
+    }
+    td5_plat_render_draw_tris_flat(vb, 1 + seg, ib, ni);
+}
+
 void td5_render_arcade_pads(void)
 {
     if (!td5_arcade_mode_active()) return;
@@ -7885,24 +7924,28 @@ void td5_render_arcade_pads(void)
     }
 
     /* Dropped hazards: dark-oily glow + a flat amber ring on the road. */
+    /* Dropped HAZARD: a dark OIL SLICK (filled near-black disc) on the road, 3
+     * lanes wide (matches the spin-out radius), with bright amber hazard markings
+     * (rings + an X) so it's a distinctive danger zone — not a yellow glow. The
+     * next car within range spins out. */
     {
-        float hp     = 0.5f + 0.5f * sinf(t * 5.0f);           /* fast danger pulse */
-        float haz_r  = box_half * 1.7f;                        /* clearly bigger than a box */
-        uint32_t ha  = (uint32_t)(150.0f + 90.0f * hp);
-        uint32_t ring = (ha << 24) | 0x00FFB000u;              /* amber */
+        float haz_r = td5_arcade_hazard_radius_world();
+        if (haz_r < 1.0f) haz_r = box_half * 3.0f;             /* fallback */
+        float hp    = 0.5f + 0.5f * sinf(t * 5.0f);            /* danger pulse (markings) */
+        uint32_t ma = (uint32_t)(170.0f + 85.0f * hp); if (ma > 255u) ma = 255u;
+        uint32_t mark = (ma << 24) | 0x00FFC000u;              /* bright amber markings */
+        const uint32_t oil = 0xFF0B0A08u;                      /* near-black oil */
         for (int i = 0; i < nh; i++) {
             float wx, wy, wz; int owner = 0;
             if (!td5_arcade_hazard_get(i, &wx, &wy, &wz, &owner)) continue;
-            float ry = wy + box_half * 0.05f;                  /* just above the road */
-            arcade_emit_glow_at(wx, wy, wz, haz_r * 1.3f,
-                                (ha << 24) | 0x00803000u);      /* dark-oil glow */
-            arcade_draw_flat_ring(wx, ry, wz, haz_r,        ring);
-            arcade_draw_flat_ring(wx, ry, wz, haz_r * 0.6f, ring);
-            /* danger X across the slick (flat on the road) */
-            td5_render_debug_line_world(wx - haz_r*0.6f, ry, wz - haz_r*0.6f,
-                                        wx + haz_r*0.6f, ry, wz + haz_r*0.6f, ring);
-            td5_render_debug_line_world(wx - haz_r*0.6f, ry, wz + haz_r*0.6f,
-                                        wx + haz_r*0.6f, ry, wz - haz_r*0.6f, ring);
+            float ry = wy + 6.0f;                              /* a hair above the asphalt */
+            arcade_draw_oil_disc(wx, ry, wz, haz_r, oil, 18);  /* the dark oil puddle */
+            arcade_draw_flat_ring(wx, ry + 1.0f, wz, haz_r,         mark);  /* outer ring */
+            arcade_draw_flat_ring(wx, ry + 1.0f, wz, haz_r * 0.55f, mark);  /* inner ring */
+            td5_render_debug_line_world(wx - haz_r*0.62f, ry+1.0f, wz - haz_r*0.62f,
+                                        wx + haz_r*0.62f, ry+1.0f, wz + haz_r*0.62f, mark);
+            td5_render_debug_line_world(wx - haz_r*0.62f, ry+1.0f, wz + haz_r*0.62f,
+                                        wx + haz_r*0.62f, ry+1.0f, wz - haz_r*0.62f, mark);
         }
     }
 

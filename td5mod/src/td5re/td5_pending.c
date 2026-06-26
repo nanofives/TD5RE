@@ -34,6 +34,7 @@ static const char *const k_seed[] = {
     "Item box: glowing spinning pulsing cube w/ kind icon",
     "Grabbed item box vanishes, respawns after 5 seconds",
     "Denser item boxes, each a random power-up kind",
+    "HAZARD = dark oil slick, 3 lanes wide, spins cars out",
     "Item boxes start after span 100, sit low near the road",
     "Item boxes sit on road edges; steer over to grab one",
     "Car SILHOUETTE glows the effect colour (not a blob)",

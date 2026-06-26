@@ -108,6 +108,10 @@ int  td5_arcade_pad_get(int i, float *wx, float *wy, float *wz,
  * this. 0 outside arcade mode. */
 float td5_arcade_box_half_world(void);
 
+/* Oil-slick (HAZARD) radius in RENDER units = 1.5 lanes, so the slick is 3 lanes
+ * wide and matches the spin-out trigger area. 0 outside arcade mode. */
+float td5_arcade_hazard_radius_world(void);
+
 int  td5_arcade_hazard_count(void);
 int  td5_arcade_hazard_get(int i, float *wx, float *wy, float *wz, int *owner);
 

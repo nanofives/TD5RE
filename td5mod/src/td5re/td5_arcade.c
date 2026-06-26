@@ -74,6 +74,8 @@ static int32_t   s_box_half;               /* item-box visual half-size, RENDER 
                                             * Auto-derived from the track span length so
                                             * the floating box reads ~1 lane wide on any
                                             * track regardless of absolute world scale. */
+static int32_t   s_lane_w;                 /* one lane width, RENDER units (oil-slick /
+                                            * hazard trigger + visual are sized off this). */
 
 /* per-racer-slot effect state */
 static uint8_t   s_effect[ARC_MAX_SLOTS];        /* TD5_PU_* active, or NONE */
@@ -209,8 +211,26 @@ void td5_arcade_init_race(void) {
         if (box_half < 16)   box_half = 16;
         if (box_half > 8000) box_half = 8000;
         s_box_half = knob("TD5RE_ARCADE_BOX_SIZE", box_half, 8, 40000);
-        TD5_LOG_I(LOG_TAG, "init: scale — mean span_len=%d (n=%d) box_half=%d [render units]",
-                  span_len, samples, s_box_half);
+
+        /* Lane width (RENDER units) = distance between two adjacent lane centres.
+         * get_span_lane_world returns 24.8 fixed, so /256 -> render units. Sample
+         * the first span that actually has >= 2 lanes. Drives the oil-slick size
+         * + spin-out radius so the hazard is "3 lanes wide" on any track. */
+        s_lane_w = 0;
+        for (int s = 0; s < s_ring && s < 400; s++) {
+            int lc = td5_track_get_span_lane_count(s);
+            if (lc < 2) continue;
+            int ax, ay, az, bx, by, bz;
+            if (td5_track_get_span_lane_world(s, 0, &ax, &ay, &az) &&
+                td5_track_get_span_lane_world(s, 1, &bx, &by, &bz)) {
+                double ddx = (double)(ax - bx), ddz = (double)(az - bz);
+                int w = (int)(sqrt(ddx * ddx + ddz * ddz) / 256.0);  /* fixed -> render */
+                if (w > 0) { s_lane_w = w; break; }
+            }
+        }
+        if (s_lane_w <= 0) s_lane_w = s_box_half * 3;   /* fallback */
+        TD5_LOG_I(LOG_TAG, "init: scale — mean span_len=%d (n=%d) box_half=%d lane_w=%d [render units]",
+                  span_len, samples, s_box_half, s_lane_w);
     }
 
     /* Don't place boxes right on top of the start line — give the player room.
@@ -314,9 +334,9 @@ void td5_arcade_tick(void) {
     int racers = racer_count();
     int allow_ai = knob("TD5RE_ARCADE_AI_PICKUPS", 1, 0, 1);
     /* Pickup "hitbox": collect when within this many spans of the box
-     * (longitudinal) AND within this many lanes of the box's side lane (lateral).
-     * Bigger = more forgiving; the side placement means you steer over to grab it. */
-    int pick_win = knob("TD5RE_ARCADE_PICKUP_SPANS", 4, 1, 30);
+     * (longitudinal, back to the original tight 2) AND within this many lanes of
+     * the box's side lane (lateral) — the side placement needs the lane gate. */
+    int pick_win = knob("TD5RE_ARCADE_PICKUP_SPANS", 2, 1, 30);
     int lane_tol = knob("TD5RE_ARCADE_PICKUP_LANES", 1, 0, 8);
 
     /* --- decay per-slot effect timers --- */
@@ -364,8 +384,12 @@ void td5_arcade_tick(void) {
         }
     }
 
-    /* --- hazards: TTL + spin-out the next car to touch one --- */
-    int radius = knob("TD5RE_ARCADE_HAZARD_RADIUS", 1024, 256, 8192);  /* fixed */
+    /* --- hazards: TTL + spin-out any car within ~3 lanes of the slick ---
+     * Radius is 1.5 lanes (so the slick is "3 lanes wide"), in RENDER units. The
+     * old default (1024) was treated as 24.8 fixed = ~4 render units, far smaller
+     * than a car, so the slick almost never triggered. */
+    int radius = (s_lane_w * 3) / 2;
+    { const char *e = getenv("TD5RE_ARCADE_HAZARD_RADIUS"); if (e) { int v = atoi(e); if (v > 0) radius = v; } }
     int64_t r2 = (int64_t)radius * radius;
     for (int h = 0; h < ARC_MAX_HAZARDS; h++) {
         if (s_haz[h].ttl <= 0) continue;
@@ -377,8 +401,9 @@ void td5_arcade_tick(void) {
             if (!a) continue;
             if (a->finish_time != 0) continue;
             if (td5_arcade_slot_is_ghost(s)) continue;  /* ghosts pass hazards */
-            int64_t dx = (int64_t)a->world_pos.x - s_haz[h].x;
-            int64_t dz = (int64_t)a->world_pos.z - s_haz[h].z;
+            /* >>8 converts the 24.8-fixed world delta to RENDER units (radius scale) */
+            int64_t dx = ((int64_t)a->world_pos.x - s_haz[h].x) >> 8;
+            int64_t dz = ((int64_t)a->world_pos.z - s_haz[h].z) >> 8;
             if (dx*dx + dz*dz <= r2) {
                 spin_out(a);
                 TD5_LOG_I(LOG_TAG, "slot=%d hit HAZARD (owner=%d)", s, s_haz[h].owner);
@@ -456,6 +481,13 @@ int td5_arcade_pad_get(int i, float *wx, float *wy, float *wz,
  * arcade mode is inactive. */
 float td5_arcade_box_half_world(void) {
     return s_active ? (float)s_box_half : 0.0f;
+}
+
+/* Oil-slick / hazard radius in RENDER units (1.5 lanes -> the slick is 3 lanes
+ * wide). The renderer sizes the oil puddle off this so the visual matches the
+ * spin-out trigger area. 0 outside arcade mode. */
+float td5_arcade_hazard_radius_world(void) {
+    return s_active ? (float)((s_lane_w * 3) / 2) : 0.0f;
 }
 
 int td5_arcade_hazard_count(void) { return s_active ? ARC_MAX_HAZARDS : 0; }

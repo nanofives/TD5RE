@@ -39,6 +39,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  distinctive icon (NITRO/GHOST/WRECK/HAZARD)" },
     { CL_ITEM,    "A grabbed box vanishes, respawning after 5 seconds" },
     { CL_ITEM,    "Boxes are denser now and each holds a RANDOM power-up" },
+    { CL_ITEM,    "HAZARD drops a wide dark OIL SLICK with danger marks;" },
+    { CL_ITEM,    "  any car that drives into it spins out" },
     { CL_ITEM,    "Your CAR ITSELF glows in the power-up's colour while" },
     { CL_ITEM,    "  active; the effect name shows centred below the" },
     { CL_ITEM,    "  checkpoint timer" },
