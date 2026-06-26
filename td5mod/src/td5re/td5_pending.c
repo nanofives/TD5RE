@@ -30,6 +30,10 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Collisions hug car silhouette (hull) - tight contact, no gap",
+    "AI un-wedges without driving off-track (steers to interior)",
+    "AI steers away when wedged vs car/player (no infinite grind)",
+    "ARCADE airborne launch dialled way down (was too high/unplayable)",
     "ARCADE power-ups now floating boxes you drive through",
     "Item box: glowing spinning pulsing cube w/ kind icon",
     "Grabbed item box vanishes, respawns after 5 seconds",
@@ -62,7 +66,7 @@ static const char *const k_seed[] = {
     "Power-to-weight: lighter cars out-accelerate heavy",
     "Slipstream boost when tucked behind another car",
     "Downforce: grippy cars stay planted in fast corners",
-    "ARCADE mode: crashes 3x harder, cars launch airborne",
+    "ARCADE mode: collisions punchier than SIM but controlled",
     "ARCADE pads grant NITRO/GHOST/WRECK/HAZARD power-ups",
     "Power-up chip + timer shows in each player's pane",
     "GHOST cars pass through others (white shimmer aura)",

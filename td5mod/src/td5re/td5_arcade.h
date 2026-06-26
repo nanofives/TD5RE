@@ -68,10 +68,17 @@ int td5_arcade_mode_active(void);
  * Physics-side queries (collision response in td5_physics.c consults these)
  * ====================================================================== */
 
-/* Impulse multiplier in 24.8 fixed-point applied to the V2V collision response.
- * Returns (mult<<8) in arcade (default 3<<8 == 0x300, knob TD5RE_ARCADE_COLLISION_MULT),
- * or 1<<8 (0x100) in simulation so the response is byte-identical to the faithful path. */
+/* Horizontal knockback multiplier in 24.8 fixed-point applied to the V2V
+ * collision impulse. Arcade returns a PERCENT of faithful (default 140 -> 0x166,
+ * knob TD5RE_ARCADE_COLLISION_MULT_PCT); simulation returns 0x100 (1.0) so the
+ * response is byte-identical to the faithful path. */
 int td5_arcade_collision_mult_q8(void);
+
+/* Percent (0..100) of the faithful angular crash-scatter (roll/yaw/pitch
+ * kicks) applied on a heavy arcade hit. <100 tames the nose-over flip that
+ * launches rammed cars into the air; 100 = faithful, 0 = no spin kick.
+ * The collision solver scales kick_ry/kick_p by this in arcade mode. */
+int td5_arcade_scatter_pct(void);
 
 /* 1 = this racer slot is currently GHOSTing — the collision solver should skip
  * ALL contact for it (V2V both directions). 0 otherwise / outside arcade. */

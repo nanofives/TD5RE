@@ -7338,6 +7338,26 @@ static int16_t  s_traffic_escape_cooldown[TD5_MAX_TOTAL_ACTORS];/* post-escape r
 /* s_traffic_escape_lane / s_traffic_escape_lane_ttl are declared near the top
  * globals (td5_ai_smart_traffic_lane, defined earlier, reads them). */
 
+/* [AI UNSTICK 2026-06-26] Per-RACER collision-escape state. Racer slots
+ * (0..g_traffic_slot_base) never had the jam-escape that traffic and cops do,
+ * so two wedged racers — or a racer vs the player — pushed at full throttle
+ * forever until an external force broke them apart. These mirror the traffic
+ * escape exactly (no-progress detection -> short steer-away burst) and are
+ * fully deterministic (span-accum + tick counters + slot parity, no rand) so
+ * MP lockstep is preserved. */
+static int16_t  s_racer_escape_ticks[TD5_MAX_TOTAL_ACTORS];    /* remaining brake-yield burst ticks */
+static int8_t   s_racer_escape_side[TD5_MAX_TOTAL_ACTORS];     /* committed steer-around side (-1/+1) */
+static int16_t  s_racer_escape_cooldown[TD5_MAX_TOTAL_ACTORS]; /* post-burst re-arm suppression */
+static uint8_t  s_racer_has_moved[TD5_MAX_TOTAL_ACTORS];       /* gate: don't act at the start line */
+static uint8_t  s_racer_stall_active[TD5_MAX_TOTAL_ACTORS];    /* 1 = sustained low-speed steer-around running */
+static int16_t  s_racer_recover_ticks[TD5_MAX_TOTAL_ACTORS];   /* ticks back up to speed (release the steer) */
+/* V2V grind detection: physics sets the flag each tick this racer touches a car;
+ * the leaky load climbs while grinding and decays when clear (catches an
+ * intermittent side-by-side rub that a speed/progress test misses). */
+static uint8_t  s_racer_contact_flag[TD5_MAX_TOTAL_ACTORS];    /* set by physics, consumed by AI */
+static int8_t   s_racer_contact_peer[TD5_MAX_TOTAL_ACTORS];    /* slot most recently collided with */
+static int16_t  s_racer_contact_load[TD5_MAX_TOTAL_ACTORS];    /* leaky accumulator of recent contacts */
+
 /* Per-race diagnostic counters — observe which behaviours actually trigger
  * (the rate-limited per-event logs can miss firings). Dumped periodically. */
 static struct {
@@ -7366,6 +7386,16 @@ static void td5_traffic_smart_reset(void) {
         s_traffic_escape_cooldown[i] = 0;
         s_traffic_escape_lane[i]  = 0;
         s_traffic_escape_lane_ttl[i] = 0;
+        /* [AI UNSTICK] racer collision-escape state (per race). */
+        s_racer_escape_ticks[i]    = 0;
+        s_racer_escape_side[i]     = 0;
+        s_racer_escape_cooldown[i] = 0;
+        s_racer_has_moved[i]       = 0;
+        s_racer_stall_active[i]    = 0;
+        s_racer_recover_ticks[i]   = 0;
+        s_racer_contact_flag[i]    = 0;
+        s_racer_contact_peer[i]    = -1;
+        s_racer_contact_load[i]    = 0;
     }
     memset(&s_smart_stat, 0, sizeof(s_smart_stat));
 }
@@ -7590,6 +7620,210 @@ static int traffic_lane_is_clear(int self_slot, int self_span,
         if (diff >= -2 && diff <= 6) return 0;   /* occupied */
     }
     return 1;
+}
+
+/* ===================================================================
+ * [AI UNSTICK 2026-06-26] Racer collision-escape
+ *
+ * Racers have the faithful LATERAL dodge (find_offset_peer -> steering offset)
+ * but NO throttle/brake reaction to a blocking car — confirmed in the original
+ * @0x00432D60, where AI throttle is field-position rubber-band only, with no
+ * other-actor proximity read. So when the lateral dodge can't separate two
+ * cars they wedge and grind at full throttle indefinitely until physics shoves
+ * them apart. This gives racers the same jam-escape that traffic
+ * (traffic_collision_escape) and cops (cop_ram_stuck) already have: detect no
+ * forward progress, then a short steer-away burst that physically peels the car
+ * off the obstacle (the codebase deliberately avoids AI reverse — see the cop
+ * driver note at the ram path — so we steer-away like traffic instead).
+ * Port-only, AI-racer-only, default ON (TD5RE_AI_UNSTICK=0 to disable).
+ * =================================================================== */
+#define RACER_ESCAPE_BURST     14    /* ~0.5s brake-yield burst (fast grind)      */
+#define RACER_ESCAPE_COOLDOWN  30    /* ~1s after a brake burst before re-arming  */
+#define RACER_STUCK_SPEED   0x1800   /* |speed| below this == slow / blocked       */
+#define RACER_RECOVER_SPEED 0x3000   /* |speed| above this (held) == moving again  */
+#define RACER_RECOVER_HOLD     8     /* ticks at speed before releasing the steer  */
+#define RACER_STALL_STEER   0x12000  /* full-lock steer-around for a LOW-SPEED block
+                                      * (safe at low speed; no high-speed yank)    */
+#define RACER_ESCAPE_THROTTLE 0x50   /* throttle once a gap opens (not touching)    */
+#define RACER_NUDGE_THROTTLE  0x18   /* barely-feathered throttle WHILE touching the
+                                      * obstacle, so we redirect around it instead of
+                                      * powering in and burying into the other car  */
+#define RACER_CONTACT_GAIN     6     /* load added per tick a V2V contact happened */
+#define RACER_CONTACT_DECAY    1     /* load shed per clear tick                   */
+#define RACER_CONTACT_CAP     60     /* load ceiling (hysteresis)                  */
+#define RACER_GRIND_LOAD      30     /* fast same-speed grind -> brake-yield        */
+#define RACER_BLOCK_LOAD      12     /* slow + this much contact -> blocked, steer around */
+
+/* Default ON; TD5RE_AI_UNSTICK=0 disables (restores the faithful no-escape AI). */
+static int racer_unstick_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TD5RE_AI_UNSTICK"); v = (e && e[0] == '0') ? 0 : 1; }
+    return v;
+}
+
+/* Pick the side (-1 left / +1 right) with a clear adjacent lane to peel into.
+ * Reuses the traffic lane-occupancy scan. When only one side is clear, take it.
+ * On a tie (both clear / both blocked) COMMIT to the side already chosen for
+ * this episode so the car decisively goes one way around instead of wiggling
+ * back and forth; first time, pick a stable side by slot parity. */
+static int8_t racer_escape_pick_side(int slot, char *actor) {
+    int span_raw = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+    int lane     = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+    int lc       = td5_track_get_span_lane_count((int)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED));
+    int can_lo, can_hi, lo_clear, hi_clear, center, interior;
+    if (lc < 1) lc = 1;
+    /* Only consider sides that stay ON the track: -1 steers toward the lower
+     * lane index, +1 toward the higher (matches the traffic escape's sign). */
+    can_lo = (lane - 1) >= 0;
+    can_hi = (lane + 1) <= (lc - 1);
+    if (!can_lo && !can_hi) return 0;                 /* single lane -> nowhere safe to go */
+    lo_clear = can_lo && traffic_lane_is_clear(slot, span_raw, lane - 1, 0);
+    hi_clear = can_hi && traffic_lane_is_clear(slot, span_raw, lane + 1, 0);
+    if (lo_clear && !hi_clear) return (int8_t)-1;
+    if (hi_clear && !lo_clear) return (int8_t)+1;
+    /* Tie (both clear, or both blocked but on-track): steer toward the track
+     * INTERIOR (toward the centre lane), never toward an off-track edge. This is
+     * what keeps a blocked car from steering itself out of bounds. */
+    center   = (lc - 1) / 2;
+    interior = (lane > center) ? -1 : +1;
+    if (interior < 0 && !can_lo) interior = +1;
+    if (interior > 0 && !can_hi) interior = -1;
+    return (int8_t)interior;
+}
+
+/* [AI UNSTICK] Physics V2V hook — records that `slot` touched `peer` this tick.
+ * Cheap (two writes); range-guarded so physics can call it unconditionally. */
+void td5_ai_note_v2v_contact(int slot, int peer) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    s_racer_contact_flag[slot] = 1;
+    s_racer_contact_peer[slot] = (int8_t)peer;
+}
+
+/* Per-tick racer unstick. Runs AFTER td5_ai_update_track_behavior so it can
+ * override the throttle/steer the normal racing-line driver just set. Split by
+ * SPEED: SLOW + touching a car -> sustained steer-around until moving again
+ * (handles being blocked behind a stopped/slow car, or a dead wedge); FAST +
+ * grinding a same-speed car -> the car behind brakes briefly to drop back. */
+static void racer_collision_escape(int slot) {
+    char   *actor;
+    int32_t spd, aspd;
+    int     contacted, peer;
+
+    if (!racer_unstick_enabled()) return;
+    if (slot < 0 || slot >= g_traffic_slot_base) return;   /* AI RACER slots only */
+    if (td5_ai_actor_is_cop(slot)) return;                 /* cops run their own driver */
+    if (g_actor_broken_down[slot]) return;
+
+    actor = actor_ptr(slot);
+    if (!actor) return;
+
+    /* Consume this tick's contact flag (set by physics last tick) into a leaky
+     * load accumulator: climbs while repeatedly colliding, bleeds off when clear. */
+    contacted = s_racer_contact_flag[slot];
+    peer      = s_racer_contact_peer[slot];
+    s_racer_contact_flag[slot] = 0;
+    if (contacted) {
+        s_racer_contact_load[slot] += RACER_CONTACT_GAIN;
+        if (s_racer_contact_load[slot] > RACER_CONTACT_CAP)
+            s_racer_contact_load[slot] = RACER_CONTACT_CAP;
+    } else if (s_racer_contact_load[slot] > 0) {
+        s_racer_contact_load[slot] -= RACER_CONTACT_DECAY;
+        if (s_racer_contact_load[slot] < 0) s_racer_contact_load[slot] = 0;
+    }
+
+    spd  = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+    aspd = (spd < 0) ? -spd : spd;
+    if (aspd > RACER_STUCK_SPEED) s_racer_has_moved[slot] = 1;
+
+    if (s_racer_escape_cooldown[slot] > 0) s_racer_escape_cooldown[slot]--;
+
+    /* ---- 1. SUSTAINED low-speed steer-around (blocked behind a car / wedge). ----
+     * Blocked = has moved this race, is now slow, and is touching a car. At low
+     * speed a firm steer is safe (no high-speed yank), and SUSTAINING it (rather
+     * than a burst+cooldown that lets the car drift back into the obstacle) is
+     * what actually gets it past a stopped/slow car instead of sitting there. */
+    if (s_racer_has_moved[slot] && aspd < RACER_STUCK_SPEED &&
+        s_racer_contact_load[slot] >= RACER_BLOCK_LOAD) {
+        if (!s_racer_stall_active[slot]) {
+            int8_t side = racer_escape_pick_side(slot, actor);
+            if (side != 0) {              /* only escape if there's a safe on-track way around */
+                s_racer_stall_active[slot] = 1;
+                s_racer_escape_side[slot]  = side;
+                TD5_LOG_I(LOG_TAG,
+                    "racer_unstick: slot=%d BLOCKED peer=%d spd=%d -> steer-around side=%d",
+                    slot, peer, (int)aspd, (int)side);
+            }
+        }
+        s_racer_recover_ticks[slot] = 0;
+    }
+    if (s_racer_stall_active[slot]) {
+        /* Re-pick the side EVERY tick so it tracks the (edge-aware, interior-
+         * biased) safe direction as the car moves — never letting a committed
+         * side walk it off the track. side==0 means we've reached an edge / run
+         * out of safe room, so abandon the maneuver. */
+        int8_t side = racer_escape_pick_side(slot, actor);
+        if (side != 0) s_racer_escape_side[slot] = side;
+        /* Release when back up to speed for a few ticks (got around), OR as soon
+         * as we're no longer touching anything (pulled clear) — the latter stops
+         * the car steering in a circle out in open space. */
+        if (aspd > RACER_RECOVER_SPEED) s_racer_recover_ticks[slot]++;
+        else                            s_racer_recover_ticks[slot] = 0;
+        if (side == 0 ||
+            s_racer_recover_ticks[slot] >= RACER_RECOVER_HOLD ||
+            s_racer_contact_load[slot] == 0) {
+            s_racer_stall_active[slot]  = 0;
+            s_racer_recover_ticks[slot] = 0;
+            s_racer_escape_side[slot]   = 0;
+        } else {
+            /* Steer toward the open side. While still TOUCHING the obstacle,
+             * barely feather the throttle so we redirect AROUND it instead of
+             * powering INTO it — driving hard into a stopped car built up deep
+             * penetration that snapped the other car away ("teleport"). Once a
+             * gap opens (not touching this tick) give it a bit more to slot in. */
+            ACTOR_I32(actor, ACTOR_STEERING_CMD)    =
+                (int32_t)s_racer_escape_side[slot] * RACER_STALL_STEER;
+            ACTOR_U8(actor,  ACTOR_BRAKE_FLAG)      = 0;
+            ACTOR_U8(actor,  ACTOR_THROTTLE_STATE)  = 1;
+            ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) =
+                (int16_t)(contacted ? RACER_NUDGE_THROTTLE : RACER_ESCAPE_THROTTLE);
+            return;
+        }
+    }
+
+    /* ---- 2. FAST same-speed grind: the car behind brakes briefly to drop back. ----
+     * Longitudinal only (no steering at racing speed -> no weird turns). */
+    if (s_racer_escape_ticks[slot] > 0) {
+        s_racer_escape_ticks[slot]--;
+        ACTOR_U8(actor,  ACTOR_BRAKE_FLAG)      = 1;
+        ACTOR_U8(actor,  ACTOR_THROTTLE_STATE)  = 1;
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;   /* brake — drop back */
+        return;
+    }
+    if (s_racer_escape_cooldown[slot] > 0) return;   /* settle before re-arming */
+
+    /* Arm a brake-yield only for a fast, sustained grind against a car keeping
+     * pace, and only for the car that's behind (lower span-accum; higher slot on
+     * a tie). A slower/stopped peer is handled by section 1 (steer-around), never
+     * by braking — so a car never sits and waits behind a stopped car. */
+    if (aspd >= RACER_STUCK_SPEED &&
+        s_racer_contact_load[slot] >= RACER_GRIND_LOAD &&
+        peer >= 0 && peer < TD5_MAX_TOTAL_ACTORS) {
+        char *pa = actor_ptr(peer);
+        int32_t peer_spd = pa ? ACTOR_I32(pa, ACTOR_LONGITUDINAL_SPEED) : 0;
+        int my_acc   = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_ACCUM);
+        int peer_acc = pa ? (int)(int16_t)ACTOR_I16(pa, ACTOR_SPAN_ACCUM) : my_acc;
+        int gap      = my_acc - peer_acc;
+        int behind   = (gap < -1) ? 1 : (gap > 1) ? 0 : (slot > peer);
+        if (peer_spd < 0) peer_spd = -peer_spd;
+        if (peer_spd >= (aspd >> 1) && behind) {
+            s_racer_escape_ticks[slot]    = RACER_ESCAPE_BURST;
+            s_racer_escape_cooldown[slot] = RACER_ESCAPE_BURST + RACER_ESCAPE_COOLDOWN;
+            TD5_LOG_I(LOG_TAG,
+                "racer_unstick: slot=%d GRIND peer=%d load=%d spd=%d -> brake-yield",
+                slot, peer, (int)s_racer_contact_load[slot], (int)aspd);
+        }
+        s_racer_contact_load[slot] = 0;
+    }
 }
 
 /* (4) Lookahead: when a peer sits in our lane just ahead, pick a clear adjacent
@@ -11143,6 +11377,11 @@ static void ai_update_single_racer(int slot) {
         }
 
         td5_ai_update_track_behavior(slot);
+        /* [AI UNSTICK] If this AI racer is wedged against another car, override
+         * the racing-line throttle/steer with a short steer-away burst so it
+         * peels off instead of grinding forever. Port-only; no-op when disabled
+         * or when the car is making normal forward progress. */
+        racer_collision_escape(slot);
         /* UpdateVehicleActor would follow here in the physics module */
         break;
 
