@@ -3627,6 +3627,28 @@ static int td5_wgi_pad_is_claimed(TD5_WgiGamepad *g)
     return 0;
 }
 
+/* Is the stored gamepad object `g` still in WGI's live connected set?
+ * [FF WGI hot-plug 2026-06-25] A wireless pad that sleeps or is unplugged is
+ * removed from Gamepads, and WGI mints a NEW object on reconnect — so a
+ * persisted binding to the old object goes stale (rumble would push into a dead
+ * object forever). Pointer identity is the same liveness test the correlation
+ * already relies on (td5_wgi_pad_is_claimed compares the stored pointers the
+ * same way; WGI returns a stable IGamepad* per connected pad). Note: a pad that
+ * is merely idle-but-connected stays in the list, so this only trips on a real
+ * disconnect, not on inactivity. */
+static int td5_wgi_pad_is_live(TD5_WgiGamepad *g)
+{
+    TD5_WgiGamepad *pads[16];
+    int np, k, live = 0;
+    if (!g) return 0;
+    np = td5_wgi_snapshot(pads, 16);
+    for (k = 0; k < np; k++) {
+        if (pads[k] == g) live = 1;
+        pads[k]->lpVtbl->Release((void *)pads[k]);   /* snapshot AddRef'd each */
+    }
+    return live;
+}
+
 /* Bind a DI device to a WGI gamepad when exactly ONE unbound XInput-class DI
  * device and exactly ONE unclaimed WGI gamepad hold the same menu button this
  * frame. Conservative (never binds on >1-either-side ambiguity) so it can never
@@ -3886,22 +3908,42 @@ int td5_plat_ff_init(int device_slot)
             }
         }
         if (di > 0 && td5_device_is_xinput(di)) {
-            if (td5_ff_wgi_enabled() && td5_wgi_init() && s_wgi_pad_for_di[di]) {
-                s_wgi_pad[device_slot] = s_wgi_pad_for_di[di];
-                xinput_ready = 1;
-                td5_wgi_push(device_slot);   /* motors at rest */
-                /* Log the per-player rumble route so a manual test can confirm
-                 * each player drives their OWN pad. A swap here is the "wrong
-                 * joystick" symptom. */
-                TD5_LOG_I(LOG_TAG,
-                          "FF route: player_slot=%d -> DI device=%d (%s) -> WGI gamepad",
-                          device_slot, di, s_device_names[di]);
+            if (td5_ff_wgi_enabled() && td5_wgi_init()) {
+                /* [FF WGI hot-plug 2026-06-25] Drop a STALE binding before using
+                 * it. Because bindings now persist across races, a pad that slept
+                 * or was unplugged since it was learned points at a WGI object
+                 * that's been removed; clear it so the menu correlation relearns
+                 * the reconnected pad's new object instead of pushing rumble into
+                 * a dead one. (A merely-idle connected pad stays in the live set,
+                 * so this only trips on a real disconnect.) */
+                if (s_wgi_pad_for_di[di] && !td5_wgi_pad_is_live(s_wgi_pad_for_di[di])) {
+                    TD5_LOG_W(LOG_TAG,
+                              "FF WGI: bound gamepad for DI device %d is gone "
+                              "(sleep/disconnect) -> clearing binding to relearn", di);
+                    s_wgi_pad_for_di[di]->lpVtbl->Release((void *)s_wgi_pad_for_di[di]);
+                    s_wgi_pad_for_di[di] = NULL;
+                }
+                if (s_wgi_pad_for_di[di]) {
+                    s_wgi_pad[device_slot] = s_wgi_pad_for_di[di];
+                    xinput_ready = 1;
+                    td5_wgi_push(device_slot);   /* motors at rest */
+                    /* Log the per-player rumble route so a manual test can confirm
+                     * each player drives their OWN pad. A swap here is the "wrong
+                     * joystick" symptom. */
+                    TD5_LOG_I(LOG_TAG,
+                              "FF route: player_slot=%d -> DI device=%d (%s) -> WGI gamepad",
+                              device_slot, di, s_device_names[di]);
+                } else {
+                    TD5_LOG_W(LOG_TAG,
+                              "FF: slot=%d device=%d is an XInput pad but no WGI gamepad observed yet "
+                              "(press A on it in the menu)", device_slot, di);
+                }
             } else if (td5_ff_wgi_enabled()) {
                 TD5_LOG_W(LOG_TAG,
-                          "FF: slot=%d device=%d is an XInput pad but no WGI gamepad observed yet "
-                          "(press A on it in the menu) -- or TD5RE_FF_WGI=0",
-                          device_slot, di);
+                          "FF: slot=%d device=%d is an XInput pad but WGI is unavailable "
+                          "(combase/WinRT missing)", device_slot, di);
             }
+            /* TD5RE_FF_WGI=0 -> gamepad rumble intentionally off (silent). */
         }
     }
 

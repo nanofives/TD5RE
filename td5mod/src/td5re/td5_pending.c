@@ -40,6 +40,7 @@ static const char *const k_seed[] = {
     "Crisp on 4K/high-DPI scaled displays (no blur)",
     "Menu UP/LEFT work with 5+ pads (no stuck-stick block)",
     "Rumble survives many races (no FF death after first race)",
+    "Pad that sleeps/reconnects mid-session re-rumbles next race",
     "MP results table: name aligned, columns, divider",
     "Cup results screen + POINTS column (race + total)",
     "7-player empty cells: one MAP + one STANDINGS (no dup)",
