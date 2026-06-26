@@ -31,6 +31,7 @@ static int s_overlay_on = 0;
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
     "Quick Race PHYSICS row toggles ARCADE/SIMULATION + fits OK/Back",
+    "Minimap: on a branch both fork tracks render (not just dots)",
     "Cop Chase RANDOM COP: cop drawn at race start, pick car normally",
     "MORE STATS shows real carparam physics (1P + split)",
     "Heavy cars hit harder/shove; light cars get flung",
