@@ -37,6 +37,7 @@ static const char *const k_seed[] = {
     "Box frequency scales with human player count (100-300)",
     "5+ players: chance of paired boxes (left + right shoulder)",
     "HAZARD oil (3 lanes): hit it = drift uncontrollably ~2.5s",
+    "Game Options: POWER-UPS on/off toggle (persists)",
     "Item boxes start after span 100, sit low near the road",
     "Item boxes sit on road edges; steer over to grab one",
     "Car SILHOUETTE glows the effect colour (not a blob)",

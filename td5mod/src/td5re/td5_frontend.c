@@ -742,6 +742,7 @@ int             s_game_option_difficulty = 1;
 int             s_race_difficulty = 1;
 int             s_game_option_dynamics = 0;
 int             s_game_option_collisions = 1;
+int             s_game_option_powerups = 1;   /* ARCADE item-box power-ups on/off */
 int             s_sound_option_sfx_mode;
 int             s_sound_option_sfx_volume = 80;
 int             s_sound_option_music_volume = 80;
@@ -3735,6 +3736,7 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_difficulty        = g_td5.ini.difficulty;
     s_game_option_dynamics          = g_td5.ini.dynamics;
     s_game_option_collisions        = g_td5.ini.collisions;
+    s_game_option_powerups          = g_td5.ini.powerups;
 
     /* Commit the dynamics (arcade/sim) selection into the physics race-init
      * flag deterministically for the AutoRace path, mirroring the options-screen
@@ -6804,6 +6806,7 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, on_off[s_game_option_powerups & 1], 0xFFFFFFFF);
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -11210,6 +11213,7 @@ int td5_frontend_init(void) {
         s_game_option_dynamics          = g_td5.ini.dynamics;
         td5_physics_set_dynamics(g_td5.ini.dynamics);
         s_game_option_collisions        = g_td5.ini.collisions;
+        s_game_option_powerups          = g_td5.ini.powerups;
         s_selected_game_type = g_td5.ini.default_game_type;
     }
 

@@ -281,6 +281,7 @@ typedef struct TD5_GlobalState {
         int  difficulty;
         int  dynamics;
         int  collisions;
+        int  powerups;   /* 1 = ARCADE power-up item boxes enabled (default), 0 = off */
         /* AutoGearbox: 1 = automatic transmission (default; gear up/down keys
          * ignored), 0 = manual. Drives input bit 28 → actor+0x378 which orig
          * UpdatePlayerVehicleControlState @ 0x00402E60 gates the gear-shift

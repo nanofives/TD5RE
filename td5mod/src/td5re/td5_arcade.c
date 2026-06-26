@@ -230,6 +230,16 @@ void td5_arcade_init_race(void) {
         return;
     }
 
+    /* Game Options "POWER-UPS" toggle: when off, the wild ARCADE collision/launch
+     * still applies (that's the DYNAMICS choice) but NO item boxes / pickups /
+     * hazards are placed. s_active stays 1; s_pad_count just stays 0. */
+    if (g_td5.ini.powerups == 0) {
+        s_box_half = 0;
+        s_lane_w = 0;
+        TD5_LOG_I(LOG_TAG, "init: ARCADE on but POWER-UPS disabled (Game Options) — no item boxes");
+        return;
+    }
+
     s_ring = td5_track_get_span_count();
     if (s_ring <= 0) {
         TD5_LOG_W(LOG_TAG, "init: no track ring (%d) — no pads placed", s_ring);
