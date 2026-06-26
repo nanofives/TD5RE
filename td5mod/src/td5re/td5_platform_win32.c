@@ -1723,6 +1723,12 @@ int td5_plat_input_init(void)
     return 1;
 }
 
+/* Process-exit WGI rumble teardown. Defined far below near the WGI backend;
+ * forward-declared here so the process-level input shutdown can release the WGI
+ * activation factory + gamepad objects. The per-race FF shutdown must NOT —
+ * doing so killed rumble after the first race (see td5_plat_ff_shutdown). */
+static void td5_wgi_shutdown(void);
+
 void td5_plat_input_shutdown(void)
 {
     td5_plat_input_scan_join_release();
@@ -1752,6 +1758,9 @@ void td5_plat_input_shutdown(void)
         IDirectInput8_Release(s_dinput);
         s_dinput = NULL;
     }
+    /* [FF WGI 2026-06-25] Release the WGI rumble subsystem here (process exit),
+     * NOT in the per-race td5_plat_ff_shutdown(). */
+    td5_wgi_shutdown();
 }
 
 /* Apply rebound keyboard scancodes (from the control-config screen / Config.td5)
@@ -3686,6 +3695,12 @@ static void td5_wgi_shutdown(void)
         s_wgi_statics = NULL;
     }
     s_wgi_avail = 0;
+    /* Symmetric teardown: clear the one-shot guard too so a later td5_wgi_init()
+     * re-resolves the factory instead of returning the stale s_wgi_avail=0. With
+     * the fix this runs only at process exit, but keeping init/shutdown symmetric
+     * prevents the "permanently dead after teardown" footgun from ever recurring. */
+    s_wgi_loaded = 0;
+    TD5_LOG_I(LOG_TAG, "FF WGI: subsystem released (process exit)");
 }
 
 /* Map a DI effect magnitude (0..DI_FFNOMINALMAX) to a motor word (0..65535). */
@@ -3950,7 +3965,10 @@ void td5_plat_ff_shutdown(void)
             td5_ff_release_effects(dev);
         }
         ZeroMemory(&s_ff[dev], sizeof(s_ff[dev]));
-        /* Stop the motor on this slot's WGI gamepad (if any). */
+        /* Stop the motor on this slot's WGI gamepad (if any), then drop the
+         * per-slot routing pointer. The gamepad OBJECT stays alive in
+         * s_wgi_pad_for_di[] — see the note below — so the next race re-resolves
+         * s_wgi_pad[dev] from it in td5_plat_ff_init(). */
         if (s_wgi_pad[dev]) {
             s_xi_low[dev] = s_xi_high[dev] = 0;
             s_xi_low_contrib[dev][0] = s_xi_low_contrib[dev][1] = 0;
@@ -3958,7 +3976,17 @@ void td5_plat_ff_shutdown(void)
         }
         s_wgi_pad[dev] = NULL;
     }
-    td5_wgi_shutdown();   /* release the WGI gamepad objects + activation factory */
+    /* [FF WGI per-race-teardown regression 2026-06-25] Do NOT call
+     * td5_wgi_shutdown() here. td5_input_ff_shutdown() -> td5_plat_ff_shutdown()
+     * runs at the END OF EVERY RACE (td5_game.c:6473), but the WGI activation
+     * factory (s_wgi_statics) and the observed DI<->WGI correlation bindings
+     * (s_wgi_pad_for_di[]) are PROCESS-LIFETIME state: the USB mapping is constant
+     * and each binding is learned ONCE from a menu/lobby A-press. Releasing them
+     * per race — together with the one-shot s_wgi_loaded guard in td5_wgi_init()
+     * that then keeps returning the now-zeroed s_wgi_avail — left WGI permanently
+     * unavailable after the first race, so gamepad rumble died on EVERY pad
+     * ("force feedback works for the first races, then nothing"). The real WGI
+     * teardown lives in td5_plat_input_shutdown() (process exit only). */
 }
 
 void td5_plat_ff_constant(int device_slot, int slot, int magnitude)

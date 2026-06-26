@@ -51,6 +51,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  connected (often after a race or entering a game" },
     { CL_ITEM,    "  mode): a stuck/off-centre stick no longer jams those" },
     { CL_ITEM,    "  directions for everyone" },
+    { CL_ITEM,    "Fixed controller rumble dying after a few races: force" },
+    { CL_ITEM,    "  feedback now keeps working on every pad race after race" },
     { CL_ITEM,    "Multiplayer results table tidied: name column lines" },
     { CL_ITEM,    "  up under the title, columns closer, cleaner divider" },
     { CL_ITEM,    "Cup races now show a CUP RESULTS screen with a POINTS" },
