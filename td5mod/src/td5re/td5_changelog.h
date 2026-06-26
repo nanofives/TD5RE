@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 25" },
+    { CL_ITEM,    "Italy (Courmayeur) no longer crashes when you start" },
+    { CL_ITEM,    "  the race" },
     { CL_ITEM,    "Cop Chase: you can no longer start a race with no" },
     { CL_ITEM,    "  cops or no suspects (pick at least one of each)" },
     { CL_ITEM,    "Arrested cars now stop dead and can't be driven" },
