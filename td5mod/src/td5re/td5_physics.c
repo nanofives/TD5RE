@@ -46,6 +46,7 @@
 #include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
+#include "td5_carparam.h" /* shared carparam field map + heaviness math (weight mechanics) */
 /* V2V trace headers are included unconditionally: their obb_corner_test /
  * collision_detect_full call sites below are ungated, so the snapshot types
  * must always be declared. The emitters self-stub to no-ops under
@@ -949,6 +950,307 @@ static int32_t td5_physics_hill_assist_q12(int32_t up_mag)
     boost = 4096 + (int32_t)(((int64_t)extra * r2) >> 12);
     if (boost > s_hill_assist_max_q12) boost = s_hill_assist_max_q12;
     return boost;
+}
+
+/* ========================================================================
+ * Car-WEIGHT physics mechanics — PORT ADDITION [2026-06-25, car-param stats].
+ *
+ * The original game's per-car MASS (carparam.dat collision_mass @0x88, an
+ * INVERSE-mass term: HIGHER value = LIGHTER car) is consumed ONLY by the V2V
+ * collision impulse, so weight has zero effect on acceleration or hill-climbing
+ * — every car climbs and accelerates identically. These additions wire mass
+ * into three more places so heavier cars actually feel heavy:
+ *
+ *   (1) UPHILL    — heavier cars lose more speed on a climb (extra slope decel);
+ *                   lighter cars climb easily (less slope decel).
+ *   (2) ACCEL     — power-to-weight: lighter cars accelerate harder everywhere,
+ *                   heavier cars build speed more slowly (drive-torque scale).
+ *   (3) FLY-AWAY  — lighter cars get a bigger vertical pop in a crash, heavier
+ *                   cars stay planted (collision-lift scale). The HORIZONTAL
+ *                   knockback is already mass-driven by the faithful impulse.
+ *
+ * All three derive from the SHARED td5cp_heaviness_q8() (td5_carparam.h) so the
+ * WEIGHT bar on the car-select screen and these behaviours agree by
+ * construction. Each is knob-gated (default ON, "grounded" strength) and is a
+ * pure function of replicated sim state + once-cached launch knobs, so it stays
+ * lockstep- and replay-deterministic (same discipline as the slope/hill/
+ * catch-up helpers above).
+ *
+ * Knobs (env, cached once):
+ *   TD5RE_WEIGHT_MECH        master gate, default ON ("0"/"n"/"f" -> all off)
+ *   TD5RE_WEIGHT_SLOPE_PCT   uphill strength %, default 55, 0..200
+ *   TD5RE_WEIGHT_ACCEL_PCT   power-to-weight strength %, default 40, 0..200
+ *   TD5RE_WEIGHT_LIFT_PCT    crash-lift strength %, default 60, 0..200
+ * ======================================================================== */
+/* This block sits ABOVE the get_phys/PHYS_S/CDEF_S macros and the trig table so
+ * the whole mechanic lives in one place; it therefore reads carparam fields via
+ * the two tiny local accessors below and forward-declared trig (both defined
+ * further down). cp_cdef16 reads the cardef table (actor+0x1B8), cp_phys16 the
+ * tuning table (actor+0x1BC) — identical to CDEF_S()/PHYS_S(). */
+static int32_t sin_fixed12(int32_t angle);
+static int32_t cos_fixed12(int32_t angle);
+static inline int16_t cp_cdef16(const TD5_Actor *a, int off) {
+    return a->car_definition_ptr ? *(const int16_t *)((const uint8_t *)a->car_definition_ptr + off) : 0;
+}
+static inline int16_t cp_phys16(const TD5_Actor *a, int off) {
+    return a->tuning_data_ptr ? *(const int16_t *)((const uint8_t *)a->tuning_data_ptr + off) : 0;
+}
+
+static int s_weight_init       = 0;
+static int s_weight_on         = 1;
+static int s_weight_slope_pct  = 55;
+static int s_weight_accel_pct  = 40;
+static int s_weight_lift_pct   = 60;
+
+static void td5_physics_weight_resolve(void)
+{
+    if (s_weight_init) return;
+    s_weight_init = 1;
+    {
+        const char *e = getenv("TD5RE_WEIGHT_MECH");
+        if (e && (e[0]=='0'||e[0]=='n'||e[0]=='N'||e[0]=='f'||e[0]=='F')) s_weight_on = 0;
+        e = getenv("TD5RE_WEIGHT_SLOPE_PCT"); if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>200)p=200; s_weight_slope_pct=p; }
+        e = getenv("TD5RE_WEIGHT_ACCEL_PCT"); if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>200)p=200; s_weight_accel_pct=p; }
+        e = getenv("TD5RE_WEIGHT_LIFT_PCT");  if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>200)p=200; s_weight_lift_pct=p; }
+    }
+    TD5_LOG_I(LOG_TAG, "weight_mech: on=%d slope=%d%% accel=%d%% lift=%d%% (mass->hills/accel/fly-away)",
+              s_weight_on, s_weight_slope_pct, s_weight_accel_pct, s_weight_lift_pct);
+}
+
+/* This actor's inverse-mass (cardef file 0x88). 0 if no cardef loaded. */
+static inline int32_t td5_physics_actor_inv_mass(const TD5_Actor *a)
+{
+    if (!a || !a->car_definition_ptr) return 0;
+    return (int32_t)cp_cdef16(a, 0x88);   /* collision_mass (file 0x88) */
+}
+
+/* 1/heaviness as a Q8 factor (lighter -> >0x100). Shared by accel + lift. */
+static inline int32_t td5_physics_lightness_q8(int32_t inv_mass)
+{
+    int32_t h = td5cp_heaviness_q8(inv_mass);
+    if (h <= 0) return 0x100;
+    return (int32_t)(((int64_t)0x100 * 0x100) / h);   /* 1 / heaviness, Q8 */
+}
+
+/* Q12 uphill-decel multiplier — heavy (>1.0) loses more, light (<1.0) less.
+ * 1.0 (Q12 0x1000) when off / no mass. Grounded clamp [0.70, 1.60]. */
+static int32_t td5_physics_weight_slope_q12(const TD5_Actor *a)
+{
+    int32_t inv;
+    td5_physics_weight_resolve();
+    if (!s_weight_on || s_weight_slope_pct == 0) return 0x1000;
+    inv = td5_physics_actor_inv_mass(a);
+    if (inv <= 0) return 0x1000;
+    return td5cp_blend_clamp_q8(td5cp_heaviness_q8(inv), s_weight_slope_pct,
+                                0xB3 /*0.70*/, 0x19A /*1.60*/) << 4;   /* Q8 -> Q12 */
+}
+
+/* Q8 power-to-weight drive-torque multiplier — light (>1.0) accelerates harder.
+ * 1.0 (0x100) when off / no mass. Grounded clamp [0.70, 1.25]. */
+static int32_t td5_physics_weight_accel_q8(const TD5_Actor *a)
+{
+    int32_t inv;
+    td5_physics_weight_resolve();
+    if (!s_weight_on || s_weight_accel_pct == 0) return 0x100;
+    inv = td5_physics_actor_inv_mass(a);
+    if (inv <= 0) return 0x100;
+    return td5cp_blend_clamp_q8(td5_physics_lightness_q8(inv), s_weight_accel_pct,
+                                0xB3 /*0.70*/, 0x140 /*1.25*/);
+}
+
+/* Q8 crash-lift multiplier — light (>1.0) flies up more, heavy (<1.0) stays
+ * planted. 1.0 (0x100) when off / no mass. Grounded clamp [0.60, 1.70]. */
+static int32_t td5_physics_weight_lift_q8(const TD5_Actor *a)
+{
+    int32_t inv;
+    td5_physics_weight_resolve();
+    if (!s_weight_on || s_weight_lift_pct == 0) return 0x100;
+    inv = td5_physics_actor_inv_mass(a);
+    if (inv <= 0) return 0x100;
+    return td5cp_blend_clamp_q8(td5_physics_lightness_q8(inv), s_weight_lift_pct,
+                                0x9A /*0.60*/, 0x1B3 /*1.70*/);
+}
+
+/* Apply a Q8 multiplier to a non-negative lift with round-to-zero. */
+static inline int32_t td5_physics_scale_lift_q8(int32_t lift, int32_t q8)
+{
+    if (q8 == 0x100 || lift <= 0) return lift;
+    return (int32_t)(((int64_t)lift * (int64_t)q8) >> 8);
+}
+
+/* ========================================================================
+ * Slipstream / draft — PORT ADDITION [2026-06-25].
+ *
+ * A racer running closely in another car's wake gets a forward drive-torque
+ * boost (modelling reduced aero drag), rewarding pack racing and setting up
+ * slingshot passes. Per-slot Q8 boost recomputed once per sim tick
+ * (td5_physics_update_draft, before the integration loop) and consumed in the
+ * drive-torque chokepoint — same plumbing as MP/Hard catch-up. Pure function of
+ * replicated actor positions/headings -> lockstep-deterministic.
+ *
+ * Detection: project the vector to every OTHER actor onto this car's forward
+ * heading. A candidate is "ahead in the wake" when the forward distance is in
+ * (DRAFT_MIN, DRAFT_RANGE) and the |lateral offset| <= DRAFT_HALF_WIDTH. The
+ * closest qualifying candidate sets the boost, ramping linearly from +peak at
+ * DRAFT_MIN to 0 at DRAFT_RANGE. Distances are raw units (world_pos >> 8), the
+ * same convention as collision_detect_simple; a car is ~850 raw units long.
+ *
+ * Knobs: TD5RE_DRAFT (default ON), TD5RE_DRAFT_PCT (peak boost %, default 18).
+ * ======================================================================== */
+#define DRAFT_MIN_U         500     /* ignore point-blank (that is a crash, not a draft) */
+#define DRAFT_RANGE_U       2600    /* ~3 car lengths of forward reach */
+#define DRAFT_HALF_WIDTH_U  520     /* must be roughly behind, not alongside */
+
+static int s_draft_init = 0;
+static int s_draft_on   = 1;
+static int s_draft_pct  = 18;
+static int32_t s_draft_boost_q8[TD5_MAX_RACER_SLOTS];
+
+static void td5_physics_draft_resolve(void)
+{
+    if (s_draft_init) return;
+    s_draft_init = 1;
+    {
+        const char *e = getenv("TD5RE_DRAFT");
+        if (e && (e[0]=='0'||e[0]=='n'||e[0]=='N'||e[0]=='f'||e[0]=='F')) s_draft_on = 0;
+        e = getenv("TD5RE_DRAFT_PCT");
+        if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>100)p=100; s_draft_pct=p; }
+    }
+    TD5_LOG_I(LOG_TAG, "draft: on=%d peak=%d%% (slipstream forward boost behind a car)", s_draft_on, s_draft_pct);
+}
+
+/* Recompute every racer's draft boost for this tick. Called from
+ * td5_physics_tick BEFORE the per-actor integration loop. */
+static void td5_physics_update_draft(void)
+{
+    int total, s, o;
+    td5_physics_draft_resolve();
+    for (s = 0; s < TD5_MAX_RACER_SLOTS; ++s) s_draft_boost_q8[s] = 0x100;
+    if (!s_draft_on || s_draft_pct == 0 || !g_actor_table_base) return;
+    total = td5_game_get_total_actor_count();
+    if (total <= 0) return;
+    if (total > TD5_MAX_TOTAL_ACTORS) total = TD5_MAX_TOTAL_ACTORS;
+
+    {
+        int racers = g_traffic_slot_base;
+        if (racers > TD5_MAX_RACER_SLOTS) racers = TD5_MAX_RACER_SLOTS;
+        int32_t peak_extra = (s_draft_pct * 0x100) / 100;   /* Q8 extra at point-blank */
+        for (s = 0; s < racers; ++s) {
+            TD5_Actor *me = (TD5_Actor *)(g_actor_table_base + (size_t)s * TD5_ACTOR_STRIDE);
+            int32_t heading = (me->euler_accum.yaw >> 8) & 0xFFF;
+            int32_t fx = sin_fixed12(heading);   /* forward (sin_h, cos_h) */
+            int32_t fz = cos_fixed12(heading);
+            int32_t best_prox = 0;
+            for (o = 0; o < total; ++o) {
+                if (o == s) continue;
+                TD5_Actor *ot = (TD5_Actor *)(g_actor_table_base + (size_t)o * TD5_ACTOR_STRIDE);
+                int32_t dx = (ot->world_pos.x - me->world_pos.x) >> 8;   /* raw units */
+                int32_t dz = (ot->world_pos.z - me->world_pos.z) >> 8;
+                int32_t fwd = (dx * fx + dz * fz) >> 12;                 /* forward dist */
+                int32_t lat;
+                if (fwd <= DRAFT_MIN_U || fwd >= DRAFT_RANGE_U) continue;
+                lat = (dx * fz - dz * fx) >> 12;                         /* lateral offset */
+                if (lat < 0) lat = -lat;
+                if (lat > DRAFT_HALF_WIDTH_U) continue;
+                {
+                    int32_t prox = DRAFT_RANGE_U - fwd;                  /* closer -> bigger */
+                    if (prox > best_prox) best_prox = prox;
+                }
+            }
+            if (best_prox > 0)
+                s_draft_boost_q8[s] = 0x100 +
+                    (int32_t)(((int64_t)peak_extra * best_prox) / (DRAFT_RANGE_U - DRAFT_MIN_U));
+        }
+    }
+}
+
+static inline int32_t td5_physics_draft_mult(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0x100;
+    return s_draft_boost_q8[slot];
+}
+
+/* ========================================================================
+ * Downforce — PORT ADDITION [2026-06-25].
+ *
+ * Aerodynamic high-speed cornering grip: at speed, a slice of the car's LATERAL
+ * (sideways-slide) velocity is damped out, scaled by the car's downforce rating
+ * and the SQUARE of its forward speed (downforce ~ v^2). High-downforce cars
+ * stay planted through fast corners; low-downforce cars keep sliding. A gentle,
+ * speed-gated effect (≤~6% of lateral velocity per tick at top speed for the
+ * highest-downforce car) so it improves stability without fighting the slip
+ * physics. Applied in the player drive update where the heading basis is in
+ * scope.
+ *
+ * Rating source: lateral_slip_stiffness (file 0x108 = tuning+0x7C, roster span
+ * 32..360). [UNCERTAIN] the field's exact high/low semantics conflict between
+ * sources, so this is purely ADDITIVE and off-by-knob — a wrong reading only
+ * changes which cars feel planted, never breaks faithful handling.
+ *
+ * Knobs: TD5RE_DOWNFORCE (default ON), TD5RE_DOWNFORCE_PCT (peak lateral-damp %
+ * at top speed for max-rating car, default 6, 0..40).
+ * ======================================================================== */
+#define DOWNFORCE_SLIP_MIN  32
+#define DOWNFORCE_SLIP_MAX  360
+
+static int s_downforce_init = 0;
+static int s_downforce_on   = 1;
+static int s_downforce_pct  = 6;
+
+static void td5_physics_downforce_resolve(void)
+{
+    if (s_downforce_init) return;
+    s_downforce_init = 1;
+    {
+        const char *e = getenv("TD5RE_DOWNFORCE");
+        if (e && (e[0]=='0'||e[0]=='n'||e[0]=='N'||e[0]=='f'||e[0]=='F')) s_downforce_on = 0;
+        e = getenv("TD5RE_DOWNFORCE_PCT");
+        if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>40)p=40; s_downforce_pct=p; }
+    }
+    TD5_LOG_I(LOG_TAG, "downforce: on=%d peak=%d%% (high-speed lateral grip from slip-stiffness)",
+              s_downforce_on, s_downforce_pct);
+}
+
+/* Damp lateral velocity by the aero downforce term. sin_h/cos_h = heading. */
+static void td5_physics_apply_downforce(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
+{
+    int32_t slip, df_norm_q12, top, fwd_v, speed_q12, lat_v, damp_frac_q12, damp;
+    td5_physics_downforce_resolve();
+    if (!s_downforce_on || s_downforce_pct == 0) return;
+    if (!actor->tuning_data_ptr) return;
+
+    slip = (int32_t)cp_phys16(actor, 0x7C);              /* lateral_slip_stiffness (file 0x108) */
+    if (slip <= DOWNFORCE_SLIP_MIN) return;              /* lowest-aero car: no effect */
+    df_norm_q12 = ((slip - DOWNFORCE_SLIP_MIN) * 0x1000) / (DOWNFORCE_SLIP_MAX - DOWNFORCE_SLIP_MIN);
+    if (df_norm_q12 > 0x1000) df_norm_q12 = 0x1000;
+
+    /* forward / lateral split of world velocity. forward = (sin_h, cos_h);
+     * lateral axis L = (cos_h, -sin_h). */
+    fwd_v = (actor->linear_velocity_x * sin_h + actor->linear_velocity_z * cos_h) >> 12;
+    lat_v = (actor->linear_velocity_x * cos_h - actor->linear_velocity_z * sin_h) >> 12;
+    if (fwd_v < 0) fwd_v = 0;
+
+    /* speed fraction of this car's top speed, squared (downforce ~ v^2). */
+    top = (int32_t)cp_phys16(actor, 0x74);   /* top_speed_limit (file 0x100) */
+    if (top <= 0) return;
+    {
+        int64_t s = ((int64_t)fwd_v << 12) / ((int64_t)top << 8);   /* fwd_v / (top<<8), Q12 */
+        if (s > 0x1000) s = 0x1000;
+        speed_q12 = (int32_t)((s * s) >> 12);                       /* squared, Q12 */
+    }
+
+    /* peak per-tick lateral-damp fraction (Q12) * df_norm * speed^2. */
+    {
+        int32_t peak_q12 = (s_downforce_pct * 0x1000) / 100;
+        int64_t f = ((int64_t)peak_q12 * df_norm_q12) >> 12;
+        damp_frac_q12 = (int32_t)((f * speed_q12) >> 12);
+    }
+    if (damp_frac_q12 <= 0) return;
+
+    damp = (int32_t)(((int64_t)lat_v * damp_frac_q12) >> 12);       /* lateral velocity to remove */
+    /* v_new = v - damp * L  (L = cos_h, -sin_h) */
+    actor->linear_velocity_x -= (damp * cos_h) >> 12;
+    actor->linear_velocity_z += (damp * sin_h) >> 12;
 }
 
 /* ========================================================================
@@ -2487,6 +2789,12 @@ void td5_physics_tick(void)
      * tick before integration. Pure replicated-state function; inert (all 1.0)
      * unless TD5RE_HARD_CATCHUP=1 AND g_difficulty_hard. */
     td5_physics_update_hard_catchup();
+
+    /* [SLIPSTREAM 2026-06-25] Recompute every racer's draft boost (car closely
+     * ahead in its wake) once per tick BEFORE integration, so the drive-torque
+     * pass reads a consistent value. Pure function of replicated actor
+     * positions/headings -> lockstep-deterministic. Inert (all 1.0) when off. */
+    td5_physics_update_draft();
 
     s_physics_tick_counter++;
     if ((s_physics_tick_counter % 60u) == 0u) {
@@ -4545,6 +4853,16 @@ void td5_physics_update_player(TD5_Actor *actor)
                                     (int32_t)PHYS_S(actor, PHYS_TOP_SPEED));
                     if (light_q12 != SLOPE_LIGHT_Q12_ONE)
                         g_long = (int32_t)(((int64_t)g_long * light_q12) >> 12);
+                    /* [WEIGHT 2026-06-25] Mass-relative uphill decel: a HEAVIER
+                     * car loses MORE speed on the climb (factor >1.0), a LIGHTER
+                     * car climbs easily (<1.0). Derived from collision_mass
+                     * (0x88) via the shared heaviness math, composes with the
+                     * top-speed light scale above. Knob TD5RE_WEIGHT_SLOPE_PCT. */
+                    {
+                        int32_t w_q12 = td5_physics_weight_slope_q12(actor);
+                        if (w_q12 != 0x1000)
+                            g_long = (int32_t)(((int64_t)g_long * w_q12) >> 12);
+                    }
                 }
             }
             /* Rotate the longitudinal slope force back to world XZ along heading. */
@@ -4560,6 +4878,13 @@ void td5_physics_update_player(TD5_Actor *actor)
             }
         }
     }
+
+    /* [DOWNFORCE 2026-06-25] Aerodynamic high-speed cornering grip: damp a slice
+     * of lateral (slide) velocity scaled by the car's downforce rating and the
+     * square of forward speed. High-downforce cars stay planted in fast corners;
+     * low-downforce cars keep sliding. Gentle + speed-gated; knob TD5RE_DOWNFORCE.
+     * Heading basis (sin_h/cos_h) computed at section 6 is still in scope here. */
+    td5_physics_apply_downforce(actor, sin_h, cos_h);
 
     /* [moved 2026-05-25 — scf-wheelspin-ordering fix]: the section 14a
      * `actor->longitudinal_speed` / `lateral_speed` writeback block formerly
@@ -6675,6 +7000,11 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             int32_t lift_a = impact_mag / arc_launch_div;
             if (lift_a > arc_launch_clamp) lift_a = arc_launch_clamp;
             lift_a = v2v_scale_pct(lift_a, rear_retain);
+            /* [WEIGHT fly-away 2026-06-25] Lighter cars get a bigger vertical pop,
+             * heavier cars stay planted. Per-car Q8 from collision_mass; the
+             * horizontal knockback is already mass-driven by the faithful impulse.
+             * Knob TD5RE_WEIGHT_LIFT_PCT (master TD5RE_WEIGHT_MECH). */
+            lift_a = td5_physics_scale_lift_q8(lift_a, td5_physics_weight_lift_q8(A));
             /* [POLICE] A racer-slot cop (MP cop chase) never goes airborne. */
             if (a_is_cop) lift_a = 0;
             A->angular_velocity_roll  -= a_kick_ry;
@@ -6693,6 +7023,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
              * always takes the byte-faithful kick — the attacker is unchanged. */
             int32_t lift_b = impact_mag / arc_launch_div;
             if (lift_b > arc_launch_clamp) lift_b = arc_launch_clamp;
+            /* [WEIGHT fly-away 2026-06-25] Lighter cars pop up more, heavier stay
+             * planted. Per-car Q8 from collision_mass, composed on top of the
+             * arcade/sim launch scaling above. Knob TD5RE_WEIGHT_LIFT_PCT. */
+            lift_b = td5_physics_scale_lift_q8(lift_b, td5_physics_weight_lift_q8(B));
             if (b_is_cop) lift_b = 0;             /* [POLICE] no airborne for a cop */
             B->angular_velocity_roll  -= kick_ry;
             B->angular_velocity_yaw   -= kick_ry;
@@ -12667,6 +13001,31 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
         int32_t g1 = td5_physics_gear1_accel_q8(actor);
         if (g1 != 0x100) {
             int64_t scaled = (int64_t)torque * (int64_t)g1;
+            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
+
+    /* [WEIGHT power-to-weight 2026-06-25] Lighter cars accelerate harder, heavier
+     * cars build speed more slowly — RACER slots only (player + AI); traffic keeps
+     * its own dynamics. Q8 from collision_mass via the shared heaviness math, so
+     * the ACCEL bar on the car-select screen matches the feel. Composes after the
+     * catch-up/manual/gear-1 multipliers; same biased-toward-zero >>8 idiom.
+     * Knob TD5RE_WEIGHT_ACCEL_PCT (master TD5RE_WEIGHT_MECH). */
+    if (actor->slot_index >= 0 && actor->slot_index < g_traffic_slot_base) {
+        int32_t pw = td5_physics_weight_accel_q8(actor);
+        if (pw != 0x100) {
+            int64_t scaled = (int64_t)torque * (int64_t)pw;
+            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
+
+    /* [SLIPSTREAM 2026-06-25] Forward drive boost when running in another car's
+     * wake (per-slot Q8 computed by td5_physics_update_draft once this tick).
+     * Racer slots only; 1.0 when no car is ahead. Knob TD5RE_DRAFT / _PCT. */
+    if (actor->slot_index >= 0 && actor->slot_index < g_traffic_slot_base) {
+        int32_t df = td5_physics_draft_mult((int)actor->slot_index);
+        if (df != 0x100) {
+            int64_t scaled = (int64_t)torque * (int64_t)df;
             torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
         }
     }

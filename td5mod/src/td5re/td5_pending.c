@@ -30,6 +30,12 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "MORE STATS shows real carparam physics (1P + split)",
+    "Heavy cars hit harder/shove; light cars get flung",
+    "Heavy cars climb hills slower; light cars climb easy",
+    "Power-to-weight: lighter cars out-accelerate heavy",
+    "Slipstream boost when tucked behind another car",
+    "Downforce: grippy cars stay planted in fast corners",
     "ARCADE mode: crashes 3x harder, cars launch airborne",
     "ARCADE pads grant NITRO/GHOST/WRECK/HAZARD power-ups",
     "Power-up chip + timer shows in each player's pane",
