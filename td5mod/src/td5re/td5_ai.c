@@ -618,6 +618,26 @@ static uint32_t g_ai_frame_counter;
  * and its AI is frozen [CONFIRMED @ UpdateRaceActors 0x436E1D gate]. */
 int16_t g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
 
+/* [COP CHASE HUD 2026-06-27] Per-suspect "last material collision" sim-tick.
+ * Written by td5_ai_wanted_cop_hit on every qualifying cop<->suspect crash;
+ * read by td5_hud_update_wanted_damage_indicator so the bust ARROW only shows
+ * over a suspect for a short window right after you crash into it (user: the
+ * arrow used to show over EVERY suspect at once). Sentinel TD5_AI_NO_HIT_TICK
+ * means "never hit this race". */
+#define TD5_AI_NO_HIT_TICK (-1000000)
+int32_t g_wanted_hit_tick[TD5_MAX_RACER_SLOTS] = {
+    TD5_AI_NO_HIT_TICK, TD5_AI_NO_HIT_TICK, TD5_AI_NO_HIT_TICK,
+    TD5_AI_NO_HIT_TICK, TD5_AI_NO_HIT_TICK, TD5_AI_NO_HIT_TICK,
+};
+/* [COP CHASE SIREN GATE 2026-06-27] Per-cop "rammed a suspect with the siren
+ * OFF" sim-tick. Set by td5_ai_wanted_cop_hit when a cop crashes a suspect
+ * without its siren on (no arrest credited); read by td5_hud_draw_status_text
+ * to flash a "TURN ON YOUR SIREN" reminder on that cop's pane. */
+int32_t g_cop_siren_warn_tick[TD5_MAX_RACER_SLOTS] = {
+    TD5_AI_NO_HIT_TICK, TD5_AI_NO_HIT_TICK, TD5_AI_NO_HIT_TICK,
+    TD5_AI_NO_HIT_TICK, TD5_AI_NO_HIT_TICK, TD5_AI_NO_HIT_TICK,
+};
+
 /* [R3-10] Anti-pileup persistent escape-lane state. Declared here (not in the
  * smart-traffic block below) because td5_ai_smart_traffic_lane — defined earlier
  * in the file — reads it to bias the jam-escape car toward its cleared lane.
@@ -974,7 +994,16 @@ int td5_ai_get_wanted_overlay_slot(void) { return s_wanted_hud_overlay_slot; }
 
 /* Reset per-race cop-chase transient state (mirrors the -1 reset in
  * InitializeWantedHudOverlays @ 0x0043D2D0). */
-void td5_ai_reset_wanted_state(void) { s_wanted_hud_overlay_slot = -1; }
+void td5_ai_reset_wanted_state(void) {
+    s_wanted_hud_overlay_slot = -1;
+    /* [COP CHASE HUD 2026-06-27] Clear the per-suspect collision-arrow and the
+     * per-cop siren-warning timestamps so a stale tick from a previous race
+     * can't flash an arrow / reminder at the next race's start. */
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        g_wanted_hit_tick[i]       = TD5_AI_NO_HIT_TICK;
+        g_cop_siren_warn_tick[i]   = TD5_AI_NO_HIT_TICK;
+    }
+}
 
 /* Award damage to a cop slot on player<->cop collision.
  * Mirrors AwardWantedDamageScore @ 0x43D690 [CONFIRMED]:
@@ -1015,6 +1044,33 @@ int td5_ai_wanted_cop_hit(int cop_slot, int suspect_slot, int32_t impact_mag) {
     /* Gate 3 [orig 0x0043D6B4]: never damage a cop. The caller already passes a
      * non-cop suspect, but guard against a cop-vs-cop accidental collision. */
     if (td5_game_cop_chase_is_cop(suspect_slot)) return 0;
+
+    /* [COP CHASE HUD 2026-06-27] Record this material crash so the bust ARROW
+     * shows over THIS suspect for a short window. The indicator is otherwise
+     * hidden (user: the arrow should only appear when you crash into a car, not
+     * persistently over every suspect). Set on first-hit AND re-hit, and BEFORE
+     * the siren gate below so the arrow appears on a crash even when the siren
+     * is off (it just won't make arrest progress). */
+    g_wanted_hit_tick[suspect_slot] = g_td5.simulation_tick_counter;
+
+    /* [COP CHASE SIREN GATE 2026-06-27, PORT-ONLY] In LOCAL MP cop chase a cop
+     * can only ARREST a suspect while its SIREN is ON. If the ramming cop's
+     * siren is off, credit no damage/arrest and flash a "TURN ON YOUR SIREN"
+     * reminder on that cop's pane instead. The original arrest path has NO siren
+     * check [CONFIRMED @ 0x0043D690]; this is a requested gameplay rule scoped to
+     * MP cop chase so SP wanted mode + netplay keep faithful behaviour. */
+    {
+        int mp_cop_chase = (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
+                            !g_td5.network_active);
+        extern int td5_sound_cop_siren_is_on(int slot);
+        if (mp_cop_chase && !td5_sound_cop_siren_is_on(cop_slot)) {
+            g_cop_siren_warn_tick[cop_slot] = g_td5.simulation_tick_counter;
+            TD5_LOG_I(LOG_TAG,
+                      "wanted_no_siren: cop=%d rammed suspect=%d siren OFF — no "
+                      "arrest, siren reminder shown", cop_slot, suspect_slot);
+            return 0;
+        }
+    }
 
     /* First-hit-vs-rehit branch [orig 0x0043D6D8]: if the HUD overlay was
      * NOT pointing at this suspect last frame, this is a "first hit" — reset

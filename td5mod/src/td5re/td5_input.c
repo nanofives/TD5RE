@@ -1556,13 +1556,17 @@ void td5_input_update_player_control(int slot)
      * user prefers a press-to-toggle. Edge-detect the horn key here and flip the
      * siren on/off via td5_sound_toggle_siren(). The toggle couples siren audio
      * + the flashing-light marker (both live in the same horn-gated branch in
-     * the original). Only the cop slot toggles; AI suspects never press horn. */
-    if (td5_game_is_wanted_mode() && slot == td5_game_get_cop_actor_index()) {
+     * the original). Only the cop slot toggles; AI suspects never press horn.
+     * [COP CHASE SIREN PER-COP 2026-06-27] Gate on td5_game_cop_chase_is_cop(slot)
+     * (mask-aware) instead of the single representative cop slot so EVERY human
+     * cop in a local MP cop chase toggles ITS OWN siren (td5_sound_toggle_cop_
+     * siren) — the per-cop arrest rule reads the same per-cop state. */
+    if (td5_game_is_wanted_mode() && td5_game_cop_chase_is_cop(slot)) {
         if ((bits & 0x200000u) == 0) {
             s_siren_horn_latch[slot] = 0;
         } else if (s_siren_horn_latch[slot] == 0) {
             s_siren_horn_latch[slot] = 1;
-            td5_sound_toggle_siren();
+            td5_sound_toggle_cop_siren(slot);
         }
         /* The cop's horn IS the siren toggle — never also honk. */
         s_horn_honk_latch[slot] = 0;
