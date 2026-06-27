@@ -2976,8 +2976,11 @@ void Screen_MpPosition(void) {
  * Local split-screen MP only (the network case picks the mode host-only in the
  * lobby — separate follow-up). Inserted between the screen picker
  * (Screen_MpPosition) and the car grid. Player 0 is the HOST: their highlight
- * is the binding pick (votes are advisory). Every local player casts a vote
- * shown as a colour-coded arrow (left) + a live tally (right).
+ * is the binding pick (votes are advisory). Every NON-host local player browses
+ * with a colour-coded arrow and presses A to CAST a vote, which replaces the
+ * arrow with a profile-coloured border ring around the chosen button; several
+ * voters on the same mode nest extra rings. The host has the last word — the
+ * host A advances to the per-mode config screen with the host's highlighted pick.
  * ======================================================================== */
 
 /* Knob: TD5RE_MP_GAME_MODES=0 restores the direct MpPosition->car-select flow. */
@@ -3004,18 +3007,37 @@ static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
  * is the host highlight and the value that gets locked in. */
 static int s_mode_vote[TD5_MAX_HUMAN_PLAYERS];
 
+/* [MP MODE VOTE BORDERS 2026-06-27] Per-player "vote cast" flag:
+ *   0 = still choosing  -> a live, profile-coloured nav ARROW marks the hovered
+ *                          button for that player.
+ *   1 = vote cast       -> the arrow is gone and a profile-coloured BORDER RING is
+ *                          drawn around the chosen button (rings nest outward so
+ *                          several players who pick the same mode each add a ring).
+ * Non-host players press A to cast (B to retract); MOVING the cursor re-opens the
+ * choice (arrow back, ring cleared). The HOST (slot 0) never sets this — the host
+ * A advances the screen, so the host always keeps a live arrow and has the last
+ * word on the binding pick. */
+static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
+
 /* ---- Shared MP setup-screen layout + helpers (standard frontend look) ----
  * The mode-vote / mode-config / cup-winners screens use REAL frontend buttons
  * (frontend_create_button) so the shared render draws the standard frame +
  * highlight and the standard nav handles keyboard + mouse + the confirm "lock"
- * sound; the MP-specific content (two-line labels, per-player arrows, square
- * vote markers, host indicator, option values) is drawn in the POST-button
- * render pass so it composites on top of the frames. */
+ * sound; the MP-specific content (two-line labels, per-player choosing arrows,
+ * per-voter profile-coloured border rings, host indicator, option values) is
+ * drawn in the POST-button render pass so it composites on top of the frames. */
 #define MV_BX   170      /* mode-button x      */
 #define MV_BW   300      /* mode-button width  */
 #define MV_BH   54       /* mode-button height (two lines) */
 #define MV_Y0   104      /* first mode button  */
-#define MV_GAP  66       /* row pitch          */
+#define MV_GAP  78       /* row pitch (widened so stacked vote borders clear the
+                          * neighbouring buttons) */
+/* [MP MODE VOTE BORDERS 2026-06-27] Concentric per-voter border-ring geometry,
+ * in 640x480 canvas px (scaled by sx/sy at draw time). Each cast vote adds one
+ * ring just OUTSIDE the button frame, expanding outward. */
+#define MV_RING_MARGIN 2.0f   /* gap from the button frame to the first ring     */
+#define MV_RING_TH     2.0f   /* ring thickness                                  */
+#define MV_RING_GAP    1.0f   /* gap between successive rings                     */
 #define MP_TITLE_LEFT_X 126.0f
 #define MP_TITLE_TOP_Y  17.0f
 /* Canonical frontend title/accent gold — MUST match the standard screens
@@ -3143,6 +3165,7 @@ void Screen_MpModeVote(void) {
             frontend_create_button("", MV_BX, MV_Y0 + m * MV_GAP, MV_BW, MV_BH);
         for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
             s_mode_vote[p]        = TD5_MP_MODE_RACE;
+            s_mode_vote_locked[p] = 0;          /* everyone starts in "choosing" */
             s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
         }
         s_selected_button   = 0;
@@ -3182,13 +3205,25 @@ void Screen_MpModeVote(void) {
             uint32_t bits = mp_simul_player_nav(p);
             uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
             s_mp_pane_nav_prev[p] = bits;
-            /* No per-player sfx here — the shared standard nav already plays the
-             * UP/DOWN cue once per input, so adding ours doubled it. */
-            if (edge & 4) { if (s_mode_vote[p] > 0)                  s_mode_vote[p]--; }
-            if (edge & 8) { if (s_mode_vote[p] < TD5_MP_MODE_COUNT-1) s_mode_vote[p]++; }
-            if (p == 0) {                       /* host: A=lock, B=back */
+            /* No per-player UP/DOWN sfx here — the shared standard nav already
+             * plays that cue once per input. MOVING the cursor re-opens this
+             * player's choice (arrow back, any cast ring cleared) so they can
+             * change their vote freely. */
+            if (edge & 4) { if (s_mode_vote[p] > 0)                  { s_mode_vote[p]--; s_mode_vote_locked[p] = 0; } }
+            if (edge & 8) { if (s_mode_vote[p] < TD5_MP_MODE_COUNT-1) { s_mode_vote[p]++; s_mode_vote_locked[p] = 0; } }
+            if (p == 0) {                       /* host: A=lock-in (advance), B=back */
                 if (edge & 0x10) host_lock = 1;
                 if (edge & 0x20) host_back = 1;
+            } else {                            /* others: A=cast vote, B=retract */
+                if ((edge & 0x10) && !s_mode_vote_locked[p]) {
+                    s_mode_vote_locked[p] = 1;  /* arrow -> border ring */
+                    frontend_play_sfx(3);       /* per-player "vote cast" cue */
+                    TD5_LOG_I(LOG_TAG, "MP mode vote: player %d cast vote mode=%d", p, s_mode_vote[p]);
+                }
+                if ((edge & 0x20) && s_mode_vote_locked[p]) {
+                    s_mode_vote_locked[p] = 0;  /* ring -> arrow (retract) */
+                    frontend_play_sfx(5);
+                }
             }
         }
         if (s_mode_vote[0] < 0) s_mode_vote[0] = 0;
@@ -3226,6 +3261,21 @@ void Screen_MpModeVote(void) {
     }
 }
 
+/* [MP MODE VOTE BORDERS 2026-06-27] Draw one rectangular border ring `out` px
+ * outside the given button rect, `th` px thick, following the button's
+ * rectangular shape (four thin quads: top / bottom / left / right). All inputs
+ * are 640x480 canvas px; sx/sy scale to the backbuffer. */
+static void mp_mode_draw_border_ring(float bx, float by, float bw, float bh,
+                                     float out, float th, uint32_t color,
+                                     float sx, float sy) {
+    float x0 = bx - out, y0 = by - out;
+    float w  = bw + 2.0f * out, h = bh + 2.0f * out;
+    td5_vui_quad(x0 * sx,                y0 * sy,                w  * sx, th * sy, color, -1, 0, 0, 1, 1); /* top    */
+    td5_vui_quad(x0 * sx,                (y0 + h - th) * sy,     w  * sx, th * sy, color, -1, 0, 0, 1, 1); /* bottom */
+    td5_vui_quad(x0 * sx,                y0 * sy,                th * sx, h  * sy, color, -1, 0, 0, 1, 1); /* left   */
+    td5_vui_quad((x0 + w - th) * sx,     y0 * sy,                th * sx, h  * sy, color, -1, 0, 0, 1, 1); /* right  */
+}
+
 void frontend_mp_mode_vote_render(float sx, float sy) {
     int p, m, n = s_num_human_players;
     if (n < 2) n = 2;
@@ -3239,33 +3289,39 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
     /* Host indicator: P1 colour swatch + short label. */
     td5_vui_quad((float)MV_BX * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
     td5_vui_text(((float)MV_BX + 18.0f) * sx, 72.0f * sy,
-                 "P1 = HOST  -  others vote", 0xFFC0C8D0u, sx, sy);
+                 "OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES", 0xFFC0C8D0u, sx, sy);
 
     for (m = 0; m < TD5_MP_MODE_COUNT; m++) {
         float byp = (float)(MV_Y0 + m * MV_GAP);
         float cx  = (float)MV_BX + MV_BW * 0.5f;
-        int   stack;
+        int   ring, stack;
         /* Two-line label, block-centred on the button (on top of the frame). */
         td5_vui_text_centered(cx * sx, (byp + 5.0f) * sy,
                               k_mp_mode_names[m], 0xFFFFFFFFu, sx, sy);
         mp_pos_small_centered(cx * sx, (byp + 29.0f) * sy,
                               k_mp_mode_desc[m], 0xFFB8C0CCu, sx, sy);
-        /* Per-player vote arrows on the LEFT, vertically centred. */
+
+        /* CAST votes: one profile-coloured border ring per player who has locked
+         * a vote for this mode. Rings nest outward in player order so several
+         * voters on the same mode each add a clearly-coloured frame around it. */
+        ring = 0;
+        for (p = 0; p < n; p++) {
+            if (!s_mode_vote_locked[p] || s_mode_vote[p] != m) continue;
+            mp_mode_draw_border_ring((float)MV_BX, byp, (float)MV_BW, (float)MV_BH,
+                                     MV_RING_MARGIN + (float)ring * (MV_RING_TH + MV_RING_GAP),
+                                     MV_RING_TH, mp_slot_color(p), sx, sy);
+            ring++;
+        }
+
+        /* CHOOSING cursors: a live arrow on the LEFT for each player still
+         * picking this mode (gone once they cast — the host never locks, so the
+         * host arrow always shows the host's current pick). */
         stack = 0;
         for (p = 0; p < n; p++) {
-            if (s_mode_vote[p] != m) continue;
+            if (s_mode_vote_locked[p] || s_mode_vote[p] != m) continue;
             td5_vui_arrow(((float)MV_BX - 18.0f - (float)stack * 15.0f) * sx,
                           (byp + MV_BH * 0.5f - 8.0f) * sy,
                           14.0f * sx, 16.0f * sy, 1, mp_slot_color(p));
-            stack++;
-        }
-        /* SQUARE vote markers on the RIGHT, vertically centred (no "xN"). */
-        stack = 0;
-        for (p = 0; p < n; p++) {
-            if (s_mode_vote[p] != m) continue;
-            td5_vui_quad(((float)(MV_BX + MV_BW) + 10.0f + (float)stack * 14.0f) * sx,
-                         (byp + MV_BH * 0.5f - 5.0f) * sy,
-                         10.0f * sx, 10.0f * sy, mp_slot_color(p), -1, 0, 0, 1, 1);
             stack++;
         }
     }
