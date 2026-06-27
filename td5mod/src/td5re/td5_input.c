@@ -893,10 +893,12 @@ void td5_input_poll_race_session(void)
          *
          * [RECOVERY KEY -> SELECT 2026-06-24] SELECT (button 6) was the default
          * CHANGE VIEW joystick bind. To dedicate it to recovery without also
-         * flipping the camera on every reset, CHANGE VIEW was moved onto L3
-         * (button 8, which recovery used to occupy) — see k_default_js_action_bind
-         * in td5_platform_win32.c. Net per-pad layout: SELECT recovers, L3 changes
-         * view, R3 is REAR VIEW, Start is PAUSE.
+         * flipping the camera on every reset, CHANGE VIEW was moved off SELECT.
+         * [CAMERA -> Y 2026-06-27] CHANGE VIEW now defaults to Y (button 3) — the
+         * natural, discoverable camera button — and HORN/SIREN takes the L3 /
+         * left-stick-click slot (button 8). See k_default_js_action_bind in
+         * td5_platform_win32.c. Net per-pad layout: SELECT recovers, Y changes
+         * view, L3 honks, R3 is REAR VIEW, Start is PAUSE.
          *
          * Edge-triggered via s_recovery_held so a held button recovers once per
          * press. Gated by TD5RE_STUCK_RECOVERY (cached): "0" never arms the
@@ -922,10 +924,9 @@ void td5_input_poll_race_session(void)
                     /* Joystick player — SELECT / Back (physical button 6). The
                      * device slot index equals the player index for the in-race
                      * poll. CHANGE VIEW's default joystick bind was moved off
-                     * button 6 onto L3 (button 8, which recovery used to occupy)
-                     * so SELECT is dedicated to recovery and never also flips the
-                     * camera — see k_default_js_action_bind in
-                     * td5_platform_win32.c. */
+                     * button 6 (now on Y / button 3) so SELECT is dedicated to
+                     * recovery and never also flips the camera — see
+                     * k_default_js_action_bind in td5_platform_win32.c. */
                     if (td5_plat_input_joystick_buttons(i) & (1u << 6))
                         recover_now = 1;
                 }

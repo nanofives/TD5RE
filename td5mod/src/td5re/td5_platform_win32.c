@@ -142,17 +142,25 @@ static int      s_js_action_set[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
  * order 0=A 1=B 2=X 3=Y 4=LB 5=RB 6=Back/View 7=Start/Menu 8=LS 9=RS. Entry
  * order matches k_ctrl_action_labels / the k_action_bits decode below. If a
  * given pad reports the triggers reversed or on a different axis, the
- * Control-Options remap overrides this. */
+ * Control-Options remap overrides this.
+ *
+ * [CAMERA -> Y 2026-06-27] CHANGE VIEW defaults to Y (button 3) — the natural,
+ * discoverable camera button — and HORN/SIREN takes the L3 / left-stick-click
+ * slot (button 8) that CHANGE VIEW vacated. SELECT / Back (button 6) stays
+ * dedicated to reset-car / stuck-recovery (td5_input.c). Net per-pad in-race
+ * layout: Y changes view, L3 honks, R3 is rear view, SELECT resets the car,
+ * Start pauses. (Prior layout had CHANGE VIEW on L3 and HORN on Y, which players
+ * found unintuitive — see the recovery note in td5_input.c.) */
 static const uint32_t k_default_js_action_bind[TD5_JSBIND_ACTIONS] = {
     TD5_JSBIND_AXIS   | (0u << 1) | 1u,  /*  0 LEFT        left stick X (-)          */
     TD5_JSBIND_AXIS   | (0u << 1) | 0u,  /*  1 RIGHT       left stick X (+)          */
     TD5_JSBIND_AXIS   | (2u << 1) | 1u,  /*  2 ACCELERATE  R2 / RT  (Z below centre) */
     TD5_JSBIND_AXIS   | (2u << 1) | 0u,  /*  3 BRAKE       L2 / LT  (Z above centre) */
     TD5_JSBIND_BUTTON | 2u,              /*  4 HANDBRAKE   X                         */
-    TD5_JSBIND_BUTTON | 3u,              /*  5 HORN/SIREN  Y                         */
+    TD5_JSBIND_BUTTON | 8u,              /*  5 HORN/SIREN  L3 / left stick click      */
     TD5_JSBIND_BUTTON | 5u,              /*  6 GEAR UP     R1 / RB                    */
     TD5_JSBIND_BUTTON | 4u,              /*  7 GEAR DOWN   L1 / LB                    */
-    TD5_JSBIND_BUTTON | 8u,              /*  8 CHANGE VIEW L3 / left stick click       */
+    TD5_JSBIND_BUTTON | 3u,              /*  8 CHANGE VIEW Y                          */
     TD5_JSBIND_BUTTON | 9u,              /*  9 REAR VIEW   right stick click (R3)      */
     TD5_JSBIND_BUTTON | 7u,              /* 10 PAUSE       Start / Menu               */
 };
