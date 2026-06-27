@@ -38,6 +38,7 @@ static const char *const k_seed[] = {
     "MP mode vote: A=vote -> profile-colour border ring on mode",
     "MP mode vote: more voters = more nested rings; host decides",
     "MP mode vote: arrow disappears once a player casts their vote",
+    "Time Trial after a cup: no instant end / right car on Race Again / no rivals on your lane",
     "MP CUP podium: humans show profile colour, CPU shown in grey",
     "Cops re-chase after you crash (was: 1 chase then never, esp. MP)",
     "Split MP: reset car resets YOUR car, not the other player",

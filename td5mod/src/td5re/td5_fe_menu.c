@@ -1230,6 +1230,54 @@ void Screen_MainMenu(void) {
     }
 }
 
+/* [stale-race-state fix 2026-06-27] Clear cross-race carryover when the player
+ * STARTS a fresh single-player race (Single Race / Time Trial) from the race-type
+ * menu. The original re-establishes all race parameters per launch and has NO
+ * cross-race latches; the port accumulates frontend state that, left over from a
+ * prior CUP or local-multiplayer session, contaminated the next single-player
+ * race (the user's report: a Time Trial played right after a cup ended right after
+ * the countdown, restarted with the prior race's car, and spawned opponents onto
+ * the player's lane). The mechanisms, all confirmed in code + runtime logs:
+ *   - leftover s_mp_flow / s_two_player_mode / split_screen_mode / num_human_players
+ *     defeat solo_mode_synth (its slot-disable is gated on split==0, td5_ai.c:2326)
+ *     and skew the all-humans-finished completion scan (check_race_completion,
+ *     td5_game.c:6822) -> AI opponents spawn LIVE and the race can end instantly;
+ *   - the leftover mp-cup latch (s_mpcup_active) makes the post-race menu behave
+ *     like a cup (NEXT-CUP-RACE / cup advance) for a plain time trial;
+ *   - the once-only Race-Again snapshot gate (s_results_rerace_flag) is never
+ *     re-armed after the first race, so "Race Again" restores the PRIOR race's
+ *     car (td5_fe_race.c:7360 capture / 7833 restore).
+ * Resetting to a clean single-player baseline here makes each fresh SP race start
+ * from the same state as a cold boot, matching the original's per-race re-read.
+ * Gated to non-network so an active netplay session's state machine is untouched
+ * (these RaceTypeCategory entries are the single-player flow; MP uses MP_LOBBY). */
+static void frontend_reset_sp_race_carryover(const char *mode_name) {
+    if (s_network_active) return;
+
+    /* Re-arm the Race-Again snapshot so the next results screen captures THIS
+     * race's car/opponents instead of restoring a prior race's snapshot. */
+    s_results_rerace_flag = 0;
+
+    /* Cup / series progression latches (SP championship + port MP cup). */
+    s_cup_user_active    = 0;
+    s_race_within_series = 0;
+    td5_game_mp_cup_end();              /* clears the mp-cup latch (s_mpcup_active) */
+
+    /* Multiplayer / split-screen flow -> single-player baseline. */
+    s_mp_flow                 = 0;
+    s_two_player_mode         = 0;
+    s_mp_simul                = 0;
+    s_num_human_players       = 1;
+    g_td5.num_human_players   = 1;
+    g_td5.split_screen_mode   = 0;
+    g_td5.mp_ai_player_mask   = 0;
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
+
+    TD5_LOG_I(LOG_TAG, "%s entry: cleared cross-race carryover "
+              "(rerace/cup/mp-cup/mp-flow/split/humans=1) -> clean SP baseline",
+              mode_name);
+}
+
 void Screen_RaceTypeCategory(void) {
     switch (s_inner_state) {
     case 0: /* Init: load MainMenu.tga, create 7 race-type buttons */
@@ -1297,6 +1345,7 @@ void Screen_RaceTypeCategory(void) {
         if (s_input_ready && s_button_index >= 0) {
             switch (s_button_index) {
             case 0: /* Single Race */
+                frontend_reset_sp_race_carryover("Single Race");
                 s_selected_game_type = 0;
                 ConfigureGameTypeFlags();
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
@@ -1318,6 +1367,7 @@ void Screen_RaceTypeCategory(void) {
                 break;
 
             case 3: /* Time Trials */
+                frontend_reset_sp_race_carryover("Time Trial");
                 s_selected_game_type = 7;
                 ConfigureGameTypeFlags();
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
