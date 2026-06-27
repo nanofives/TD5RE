@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Split-screen fix: the reset-car and change-camera" },
+    { CL_ITEM,    "  buttons now affect YOUR car, not the other" },
+    { CL_ITEM,    "  player's, when you've picked your own screen" },
     { CL_ITEM,    "Deleting a saved player profile now asks you to" },
     { CL_ITEM,    "  confirm first, and names the exact profile it will" },
     { CL_ITEM,    "  remove - only that one selected profile is deleted" },
