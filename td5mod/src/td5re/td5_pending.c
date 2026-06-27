@@ -32,6 +32,7 @@ static int s_overlay_on = 0;
 static const char *const k_seed[] = {
     "MP profile DELETE asks 'DELETE <name>? A=YES B=NO' first",
     "Profile delete removes ONLY the named/selected profile",
+    "MP setup: ARCADE/SIM selector only on track select (not mode opts)",
     "ARCADE: ~2x as many item boxes spawn along the track",
     "ARCADE: power-up effects last 2x longer (GHOST/WRECK/oil)",
     "ARCADE NITRO: sustained 2.5x acceleration boost (~5s), not instant",
