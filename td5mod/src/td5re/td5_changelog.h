@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Time-trial fix: on the city tracks (Hong Kong," },
+    { CL_ITEM,    "  London, Paris...) a time trial that starts from a" },
+    { CL_ITEM,    "  checkpoint partway along the track no longer ends" },
+    { CL_ITEM,    "  the instant it begins" },
     { CL_ITEM,    "Watching a replay no longer counts as a new race:" },
     { CL_ITEM,    "  the results / cup standings keep the REAL race" },
     { CL_ITEM,    "  outcome instead of the replay's partial result" },
