@@ -3958,6 +3958,34 @@ int td5_game_init_race_session(void) {
             g_active_td6_level, n, cp_secs, bonus_secs);
     }
 
+    /* [MP TIME TRIAL — no beat-the-clock fail-timer] A time trial is a timed
+     * segment run, NOT a survival challenge: the P2P/TD6 checkpoint FAIL-timer
+     * (g_special_encounter -> tick_pending_finish_timer) must never end a TT
+     * race. It is correctly disabled for split-screen at the InitRace gate
+     * above (g_td5.split_screen_mode > 0 -> g_special_encounter = 0), but the
+     * TD6 checkpoint-timer synthesis just above unconditionally re-enables it
+     * for every migrated TD6 point-to-point city (Hong Kong / London / Paris /
+     * New York / Rome). On a TT SEGMENT the grid spawns at the chosen start
+     * checkpoint (mp_tt_checkpoint_span), which for start cp >= 2 lands the car
+     * PAST one or more of that track's synthesized checkpoint banners. Their
+     * +Ns time bonuses are then all granted on the first ticks at once, and the
+     * int16 packed timer_ticks (hi-byte = whole seconds) overflows NEGATIVE
+     * (e.g. Hong Kong: 90s base + 30 + 30 = 150s -> 0x963B < 0 as int16), which
+     * tick_pending_finish_timer reads as "time expired" -> instant p2p-timeout
+     * = the reported "TT cp2->cp3 on Hong Kong ends after a few spans". Force
+     * the gate off for any time trial so the race is governed solely by the TT
+     * finish checkpoint (s_tt_finish_span) / the track's normal finish. */
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL &&
+        !g_td5.network_active) {
+        if (g_special_encounter != 0 || td6_cp_active) {
+            g_special_encounter = 0;
+            td6_cp_active = 0;   /* Step 21 below then seeds timer_ticks = 0x7FFF */
+            TD5_LOG_I(LOG_TAG,
+                "MP TT: P2P/TD6 checkpoint fail-timer disabled "
+                "(time trial has no beat-the-clock timeout)");
+        }
+    }
+
     /* ---- Step 21: Adjust checkpoint timers by difficulty ---- */
     /* Original AdjustCheckpointTimersByDifficulty @ 0x0040A530 is called
      * per-slot from InitializeRaceVehicleRuntime @ 0x0042F140. The scaling
