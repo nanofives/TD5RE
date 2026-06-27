@@ -14738,8 +14738,18 @@ void td5_physics_update_stuck_recovery(void)
     if (views < 1) views = 1;
     if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
 
+    int route_to_driven = td5_input_split_btn_route_on();
     for (int vp = 0; vp < views; vp++) {
-        int slot = g_actorSlotForView[vp];
+        /* [SPLIT-SCREEN BUTTON ROUTING 2026-06-27] `vp` is the local-player index
+         * (the same index the input layer armed s_recovery_request[] with). Reset the
+         * actor that player DRIVES — actor slot == vp (identity, matching the per-slot
+         * steering loop and the original's gPrimarySelectedSlot/{0,1} map) — NOT
+         * g_actorSlotForView[vp] (the car SHOWN in pane vp). When the MP position
+         * picker permutes panes these differ, and the old code reset the wrong
+         * player's car (sending it to wherever that player was — often the start).
+         * Byte-identical when the pane map is identity (g_actorSlotForView[vp]==vp).
+         * Knob "0" reverts to the legacy pane-index routing. */
+        int slot = route_to_driven ? vp : g_actorSlotForView[vp];
         if (slot < 0 || slot >= g_traffic_slot_base || slot >= TD5_MAX_RACER_SLOTS)
             continue;
         if (g_race_slot_state[slot] != 1)   /* local human racers only */

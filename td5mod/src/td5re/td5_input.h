@@ -324,6 +324,14 @@ int  td5_input_replay_exit_requested(void);  /* [item 18] one-shot: controller B
  * normal-input branch). Gated by TD5RE_STUCK_RECOVERY (default ON); when the
  * knob is "0" the latch is never armed and this always returns 0. */
 int  td5_input_recovery_requested(int player);
+
+/* [SPLIT-SCREEN BUTTON ROUTING 2026-06-27] 1 when per-player VIEW/RESET button
+ * actions should target the actor the player DRIVES (slot == player index) and the
+ * pane that SHOWS it, instead of the legacy pane-index routing through
+ * g_actorSlotForView. Default ON; TD5RE_SPLIT_BTN_ROUTE="0" reverts. Read by the
+ * physics manual-recovery drain so it resets the right car in split-screen. */
+int  td5_input_split_btn_route_on(void);
+
 void td5_input_set_replay_mode(int v);
 void td5_input_set_nos_enabled(int v);
 void td5_input_set_cop_mode(int v);
