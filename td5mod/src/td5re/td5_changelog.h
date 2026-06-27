@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Deleting a saved player profile now asks you to" },
+    { CL_ITEM,    "  confirm first, and names the exact profile it will" },
+    { CL_ITEM,    "  remove - only that one selected profile is deleted" },
     { CL_ITEM,    "ARCADE now scatters about twice as many item boxes" },
     { CL_ITEM,    "  along the track so power-ups come round more often" },
     { CL_ITEM,    "Power-up effects last twice as long (GHOST, WRECK," },
