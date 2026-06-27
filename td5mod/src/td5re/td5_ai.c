@@ -885,6 +885,29 @@ static int wreck_permanent_enabled(void) {
 void td5_ai_mark_actor_broken_down(int slot) {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
     g_actor_broken_down[slot] = 1;
+    /* [COP RE-CHASE FIX 2026-06-27] A RACER/PLAYER slot must NEVER be flagged a
+     * PERMANENT wreck. For a racer this flag's only job is to END an in-progress
+     * cop chase (the scheduler ends the pursuit when g_actor_broken_down[tgt]
+     * is set); racers are never parked/smoked/immobilised by it (see
+     * cop_tick_broken_down). But racer slots are never recycled by distance
+     * (only traffic >= g_traffic_slot_base is), and cop_tick_broken_down never
+     * decrements a negative (permanent) timer — so a permanent flag here would
+     * stay set for the WHOLE race, and the acquire loop's
+     * `if (g_actor_broken_down[c]) continue;` would then make EVERY future cop
+     * skip that car. Result: a player who crashes hard while being chased gets
+     * pursued exactly once, then no cop ever chases them again (the reported
+     * MP-splitscreen "first cop chase then no more" bug; the cop's own ramming
+     * makes a crash-during-chase the common case). Give racers a short
+     * self-clearing timer (cop_smoke_ticks) so the chase ends, then the car is
+     * chaseable again. Traffic/cops keep the permanent-until-recycled wreck. */
+    if (slot < g_traffic_slot_base) {
+        g_actor_broken_ticks[slot] = (int16_t)g_td5.ini.cop_smoke_ticks;
+        TD5_LOG_I(LOG_TAG,
+                  "mark_broken_down: RACER slot=%d -> transient %d ticks "
+                  "(chase ends, re-chaseable after timer; never a permanent wreck)",
+                  slot, g_td5.ini.cop_smoke_ticks);
+        return;
+    }
     g_actor_broken_ticks[slot] = wreck_permanent_enabled()
         ? (int16_t)-1
         : (int16_t)g_td5.ini.cop_smoke_ticks;

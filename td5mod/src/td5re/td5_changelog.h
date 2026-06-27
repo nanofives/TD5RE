@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Police now keep chasing all race long: crashing while" },
+    { CL_ITEM,    "  being chased no longer makes the cops ignore you for" },
+    { CL_ITEM,    "  the rest of the race (was: one chase, then never)" },
     { CL_ITEM,    "Split-screen fix: the reset-car and change-camera" },
     { CL_ITEM,    "  buttons now affect YOUR car, not the other" },
     { CL_ITEM,    "  player's, when you've picked your own screen" },
