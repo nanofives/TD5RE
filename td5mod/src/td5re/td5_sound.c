@@ -318,6 +318,14 @@ static int sound_police_audio_fix_enabled(void)
  * cop lights+siren on, matching the original's "press horn → siren on". */
 static int s_siren_user_enabled;
 
+/* [COP CHASE SIREN PER-COP 2026-06-27] Per-cop siren on/off state. Local MP cop
+ * chase can have several human cops, each with its OWN siren — and the arrest
+ * rule ("a cop can only arrest with its siren on", td5_ai_wanted_cop_hit) is
+ * per-cop. The single global s_siren_user_enabled above stays as the OR of all
+ * per-cop flags so the (single-channel) siren audio + the strobe-light marker
+ * keep working unchanged; td5_sound_toggle_cop_siren maintains both. */
+static uint8_t s_cop_siren_on[TD5_MAX_RACER_SLOTS];
+
 /** Per-viewport skid playing state. Original: DAT_004c3768. */
 static int s_skid_playing[2];
 
@@ -475,6 +483,7 @@ int td5_sound_init_race_resources(void)
     s_siren_active_flag     = 0;
     s_siren_refreshed       = 0;
     s_siren_user_enabled    = 0;   /* siren starts off; press horn to enable */
+    memset(s_cop_siren_on, 0, sizeof(s_cop_siren_on));   /* per-cop sirens off */
     s_skid_playing[0]       = 0;
     s_skid_playing[1]       = 0;
     s_rain_playing[0]       = 0;
@@ -624,6 +633,7 @@ int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
     s_siren_refreshed   = 0;
     s_siren_active_flag = 0;
     s_siren_user_enabled = 0;   /* siren off until the player presses the horn */
+    memset(s_cop_siren_on, 0, sizeof(s_cop_siren_on));   /* per-cop sirens off */
 
     return 1;
 }
@@ -934,6 +944,43 @@ int td5_sound_toggle_siren(void)
 int td5_sound_siren_is_enabled(void)
 {
     return s_siren_user_enabled;
+}
+
+/* [COP CHASE SIREN PER-COP 2026-06-27] Toggle ONE cop's siren (local MP cop
+ * chase — each human cop drives its own). Recomputes the global
+ * s_siren_user_enabled as the OR of every per-cop flag so the shared siren
+ * audio + strobe-light marker still light whenever any cop has its siren on.
+ * Returns the new per-cop state. Mirrors td5_sound_toggle_siren's responsive
+ * fade-out when the global drops to off. */
+int td5_sound_toggle_cop_siren(int slot)
+{
+    if ((unsigned)slot >= (unsigned)TD5_MAX_RACER_SLOTS)
+        return 0;
+    s_cop_siren_on[slot] = !s_cop_siren_on[slot];
+
+    int any = 0;
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++)
+        if (s_cop_siren_on[i]) { any = 1; break; }
+
+    int was = s_siren_user_enabled;
+    s_siren_user_enabled = any;
+    if (was && !any) {
+        /* Last siren just went off — fade out immediately like the single
+         * toggle so it feels responsive. */
+        td5_sound_stop_tracked_vehicle_audio();
+    }
+    TD5_LOG_I(LOG_TAG, "cop siren toggle slot=%d -> %s (global=%s)",
+              slot, s_cop_siren_on[slot] ? "ON" : "OFF", any ? "ON" : "OFF");
+    return s_cop_siren_on[slot];
+}
+
+/** Query ONE cop's per-cop siren state (1 = on). Drives the per-cop arrest gate
+ * in td5_ai_wanted_cop_hit. */
+int td5_sound_cop_siren_is_on(int slot)
+{
+    if ((unsigned)slot >= (unsigned)TD5_MAX_RACER_SLOTS)
+        return 0;
+    return s_cop_siren_on[slot];
 }
 
 /**

@@ -610,9 +610,11 @@ int  td5_input_replay_exit_requested(void)
 
 /* [STUCK RECOVERY 2026-06-15] One-shot per-local-player manual-recovery edge.
  * Drained by the deterministic physics tick. `player` is the LOCAL human player
- * index (0..s_active_players-1), not the actor slot — the caller maps slot ->
- * player via g_actorSlotForView. Reading consumes the edge. Returns 0 for any
- * out-of-range index or when the latch was never armed (knob off / no press). */
+ * index (0..s_active_players-1), which EQUALS the actor slot that player drives
+ * (identity binding, see td5_input_split_btn_route_on). The physics drain resets
+ * actor slot == player, NOT g_actorSlotForView[player] (the pane permutation).
+ * Reading consumes the edge. Returns 0 for any out-of-range index or when the latch
+ * was never armed (knob off / no press). */
 int  td5_input_recovery_requested(int player)
 {
     if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
@@ -624,6 +626,46 @@ int  td5_input_recovery_requested(int player)
 void td5_input_set_nos_enabled(int v)           { s_nos_enabled = v; }
 void td5_input_set_cop_mode(int v)              { s_cop_mode = v; }
 void td5_input_set_nitro_pending(int p, int v)  { if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS) s_nitro_pending[p] = v; }
+
+/* [SPLIT-SCREEN BUTTON ROUTING 2026-06-27] In local split-screen MP each player p
+ * DRIVES actor slot p (identity — the same binding the per-slot steering loop uses,
+ * and the original's gPrimarySelectedSlot/{0,1} map, RE-confirmed @0x0042AB33). The
+ * MP "CHOOSE YOUR SCREEN" position picker only permutes which PANE shows which car
+ * (g_actorSlotForView), NOT who drives what. So a per-player VIEW action
+ * (change-camera, rear-view) and the manual car-reset must act on the player's OWN
+ * car (slot p) / the pane that SHOWS it (view v where g_actorSlotForView[v]==p) —
+ * not on pane p. Before this fix, when players picked non-default panes the camera /
+ * reset buttons hit the OTHER player's car. When the pane map is identity (AutoRace,
+ * the harness, non-positioned MP) view_for_player(p)==p, so those flows stay
+ * byte-identical. Gated by TD5RE_SPLIT_BTN_ROUTE (default ON; exactly "0" reverts to
+ * the legacy pane==player routing). */
+int td5_input_split_btn_route_on(void)
+{
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("TD5RE_SPLIT_BTN_ROUTE");
+        s_cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "split-screen button routing %s (TD5RE_SPLIT_BTN_ROUTE=%s)",
+                  s_cached ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return s_cached;
+}
+
+/* Return the viewport/pane index that DISPLAYS the car driven by local player p
+ * (= actor slot p): the pane v where g_actorSlotForView[v]==p. Falls back to identity
+ * (p) when the fix is off, when p's car isn't shown in any pane, or when p is out of
+ * range — so the non-positioned / single-view paths are unchanged. */
+static int view_for_player(int p)
+{
+    if (td5_input_split_btn_route_on()) {
+        int views = g_td5.viewport_count;
+        if (views < 1) views = 1;
+        if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
+        for (int v = 0; v < views; v++)
+            if (g_actorSlotForView[v] == p) return v;
+    }
+    return (p >= 0 && p < TD5_MAX_VIEWPORTS) ? p : 0;
+}
 
 /* ========================================================================
  * PollRaceSessionInput  (0x42C470)
@@ -789,9 +831,13 @@ void td5_input_poll_race_session(void)
              * preset arrays stay paired with CycleRaceCameraPreset(i). Identical
              * to the original in single-player (loop var is always 0 there);
              * only relevant to split-screen, which is out of scope here. */
-            CycleRaceCameraPreset(i, 1);
+            /* [SPLIT-SCREEN BUTTON ROUTING 2026-06-27] Cycle the camera of the pane
+             * that SHOWS this player's car (view_for_player(i)), not pane i. When the
+             * MP position picker permutes panes these differ; identity otherwise. */
+            int cam_view = view_for_player(i);
+            CycleRaceCameraPreset(cam_view, 1);
             {
-                int slot = g_actorSlotForView[i];
+                int slot = g_actorSlotForView[cam_view];
                 TD5_Actor *actor = td5_game_get_actor(slot);
                 if (!actor && g_actor_table_base && slot >= 0 &&
                     slot < td5_game_get_total_actor_count()) {
@@ -800,28 +846,34 @@ void td5_input_poll_race_session(void)
                 }
                 if (actor) {
                     LoadCameraPresetForView(
-                        (int)((uint8_t *)actor + 0x208), 0, i, 1);
+                        (int)((uint8_t *)actor + 0x208), 0, cam_view, 1);
                 }
             }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
-            TD5_LOG_I(LOG_TAG, "camera change: player=%d", i);
+            TD5_LOG_I(LOG_TAG, "camera change: player=%d view=%d slot=%d",
+                      i, cam_view, g_actorSlotForView[cam_view]);
         }
 
-        /* Rear view flag */
-        if (((s_control_bits[i] & 0x2000000u) == 0) ||
-            s_replay_mode_flag || s_escape_fade_active)
+        /* Rear view flag. [SPLIT-SCREEN BUTTON ROUTING 2026-06-27] Apply to the pane
+         * that SHOWS this player's car (view_for_player(i)), not pane i — same reason
+         * as the camera-change block above. The latch stays keyed by player i. */
         {
-            if (s_rear_view[i]) {
-                td5_camera_set_rear_view(i, 0);
-                TD5_LOG_I(LOG_TAG, "rear view OFF: player=%d", i);
+            int rv_view = view_for_player(i);
+            if (((s_control_bits[i] & 0x2000000u) == 0) ||
+                s_replay_mode_flag || s_escape_fade_active)
+            {
+                if (s_rear_view[i]) {
+                    td5_camera_set_rear_view(rv_view, 0);
+                    TD5_LOG_I(LOG_TAG, "rear view OFF: player=%d view=%d", i, rv_view);
+                }
+                s_rear_view[i] = 0;
+            } else {
+                if (!s_rear_view[i]) {
+                    td5_camera_set_rear_view(rv_view, 1);
+                    TD5_LOG_I(LOG_TAG, "rear view ON: player=%d view=%d", i, rv_view);
+                }
+                s_rear_view[i] = 1;
             }
-            s_rear_view[i] = 0;
-        } else {
-            if (!s_rear_view[i]) {
-                td5_camera_set_rear_view(i, 1);
-                TD5_LOG_I(LOG_TAG, "rear view ON: player=%d", i);
-            }
-            s_rear_view[i] = 1;
         }
 
         /* [STUCK RECOVERY 2026-06-15] Manual car-recovery edge for this local
@@ -1504,13 +1556,17 @@ void td5_input_update_player_control(int slot)
      * user prefers a press-to-toggle. Edge-detect the horn key here and flip the
      * siren on/off via td5_sound_toggle_siren(). The toggle couples siren audio
      * + the flashing-light marker (both live in the same horn-gated branch in
-     * the original). Only the cop slot toggles; AI suspects never press horn. */
-    if (td5_game_is_wanted_mode() && slot == td5_game_get_cop_actor_index()) {
+     * the original). Only the cop slot toggles; AI suspects never press horn.
+     * [COP CHASE SIREN PER-COP 2026-06-27] Gate on td5_game_cop_chase_is_cop(slot)
+     * (mask-aware) instead of the single representative cop slot so EVERY human
+     * cop in a local MP cop chase toggles ITS OWN siren (td5_sound_toggle_cop_
+     * siren) — the per-cop arrest rule reads the same per-cop state. */
+    if (td5_game_is_wanted_mode() && td5_game_cop_chase_is_cop(slot)) {
         if ((bits & 0x200000u) == 0) {
             s_siren_horn_latch[slot] = 0;
         } else if (s_siren_horn_latch[slot] == 0) {
             s_siren_horn_latch[slot] = 1;
-            td5_sound_toggle_siren();
+            td5_sound_toggle_cop_siren(slot);
         }
         /* The cop's horn IS the siren toggle — never also honk. */
         s_horn_honk_latch[slot] = 0;

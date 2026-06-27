@@ -95,7 +95,9 @@ void td5_sound_stop_tracked_vehicle_audio(void);
  * nearest actively-chasing traffic cop (gated by the POLICE option). */
 void td5_sound_update_police_siren(void);
 int  td5_sound_toggle_siren(void);      /* cop-chase siren on/off toggle (port enh.) */
-int  td5_sound_siren_is_enabled(void);  /* query siren toggle state */
+int  td5_sound_siren_is_enabled(void);  /* query siren toggle state (any cop on) */
+int  td5_sound_toggle_cop_siren(int slot); /* per-cop siren toggle (local MP cop chase) */
+int  td5_sound_cop_siren_is_on(int slot);  /* query ONE cop's siren state (arrest gate) */
 /* [REGULAR-CAR HORN — PORT ENHANCEMENT] Honk a regular car's Horn.wav (slot
  * i*3+2). The original never played a per-car horn (bit 0x200000 was siren +
  * cheat only — RE @ 0x00440a30/0x00441a80); this triggers the port's existing

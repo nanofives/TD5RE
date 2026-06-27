@@ -1521,6 +1521,12 @@ static void hud_draw_mp_car_labels(void)
 {
     int views = s_view_count;
     if (!hud_mp_car_labels_on()) return;
+    /* [COP CHASE 2026-06-27] No floating player-name labels in cop chase — user:
+     * "the labels of other players should not be visible in this gamemode". The
+     * mode is about hunting suspects, not coordinating with named teammates, so
+     * the name plates over other cars are suppressed here (port-only feature;
+     * see hud_draw_mp_car_labels history). */
+    if (g_td5.wanted_mode_enabled) return;
     if (!s_hud_id_active) return;            /* MP identities not set -> off */
     if (views < 2) return;                   /* only meaningful when split */
     /* Multiple humans share the screen (split). network_active single-pane
@@ -2179,6 +2185,21 @@ static int td5_copchase_multi_bar_enabled(void) {
     return cached;
 }
 
+/* [COP CHASE ARROW-ON-HIT 2026-06-27] The bust ARROW/indicator only shows over a
+ * suspect for this many sim-ticks (30Hz) after you crash into it — user: the
+ * arrow should appear when you ram a car, not persist over every suspect. Returns
+ * the window in ticks (default 45 ≈ 1.5s). TD5RE_COPCHASE_ARROW_TICKS overrides;
+ * set it to 0 to disable the gate entirely (revert to the persistent indicator). */
+static int td5_copchase_arrow_window_ticks(void) {
+    static int cached = -2;
+    if (cached == -2) {
+        const char *e = getenv("TD5RE_COPCHASE_ARROW_TICKS");
+        cached = (e && e[0]) ? atoi(e) : 45;
+        if (cached < 0) cached = 0;
+    }
+    return cached;
+}
+
 /* [HUD TTF SWAP 2026-06-05] The in-race HUD overlay text renders in the menu's
  * SECONDARY native face (Rajdhani, td5_hudfont_*) when loaded, instead of the
  * HUD-font SDF / tpage5 bitmap. Like the pause menu, the HUD text path is
@@ -2479,8 +2500,23 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
                        | TD5_HUD_RESERVED_5
                        | TD5_HUD_RESERVED_3;
 
-        /* Position label and lap timers for most modes */
-        if (g_game_type == 7) {
+        /* Position label and lap timers for most modes.
+         * [COP CHASE 2026-06-27] Cop chase is checked FIRST so it wins over the
+         * generic game_type 0/1/2 branch. SP cop chase is game_type==8; LOCAL MP
+         * cop chase reuses the wanted-mode machinery WITHOUT setting game_type==8
+         * (td5_game.c:1802) — so key off g_td5.wanted_mode_enabled, which both
+         * paths set. This is why MP cop chase used to fall into the generic branch
+         * and wrongly show "1ST/2ND" position with no arrest counter. The orig
+         * preset-4 bitmask OMITS the race POSITION label (0x01) + per-racer LAP
+         * TIMERS (0x02) and adds the total timer (0x80) + bust/arrest counter
+         * (0x100) [CONFIRMED InitializeRaceOverlayResources @ 0x004378a9]. */
+        if (g_game_type == 8 || g_td5.wanted_mode_enabled) {
+            flags |= TD5_HUD_TOTAL_TIMER | TD5_HUD_LAP_COUNTER;
+            TD5_LOG_I(LOG_TAG,
+                      "overlay flags: cop chase (game_type=%d wanted=%d) — no "
+                      "position/lap-timers, arrest counter on",
+                      g_game_type, g_td5.wanted_mode_enabled);
+        } else if (g_game_type == 7) {
             /* Time Trial (preset 3 @ 0x004377B0): no flag-driven timers.
              * The main TIME readout is emitted from td5_hud_draw_status_text
              * (DrawRaceStatusText @ 0x00439B70), not from the overlay bitmask. */
@@ -2491,15 +2527,6 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
             if (g_special_encounter == 0) {
                 flags |= TD5_HUD_POSITION_LABEL | TD5_HUD_LAP_TIMERS;
             }
-        } else if (g_game_type == 8) {
-            /* Cop Chase (preset 4 / DAT_004aaf74==4): the orig overlay bitmask
-             * is 0x04|0x08|0x10|0x20|0x40|0x80|0x100 — it OMITS the race
-             * POSITION label (0x01) and the per-racer LAP TIMERS (0x02), and
-             * adds the total timer (0x80) + the bust/arrest counter (0x100).
-             * [FIX 2026-05-31, orig InitializeRaceOverlayResources @ 0x004378a9
-             *  preset-4 path]. The previous port fell into the generic else and
-             *  wrongly showed "1ST/2ND" position in cop chase. */
-            flags |= TD5_HUD_TOTAL_TIMER | TD5_HUD_LAP_COUNTER;
         } else {
             flags |= TD5_HUD_POSITION_LABEL | TD5_HUD_LAP_TIMERS;
         }
@@ -3165,6 +3192,76 @@ static void hud_draw_wanted_banner_line(float cx, float caps_cy, float cap,
     }
 }
 
+/* [COP CHASE SCOREBOARD 2026-06-27] Top-of-pane indicator listing EVERY cop and
+ * how many suspects it has arrested — user: "an indicator for each cop at the top
+ * highlighting how many suspects it arrested". This replaces the per-pane race
+ * POSITION label in cop chase (there is no 1st/2nd in a hunt). Drawn on every
+ * pane so cops and suspects alike see the standings; the pane's OWN cop (if it is
+ * a cop) is underlined in its accent colour to highlight its tally. Per-cop
+ * accent colours need the vector/MSDF font path; falls back to a plain queued
+ * line per cop when the HUD font isn't ready. Multi-cop / infect aware via
+ * td5_game_cop_chase_is_cop. */
+static void hud_draw_copchase_arrest_strip(int view_index)
+{
+    if (view_index < 0 || view_index >= MAX_HUD_VIEWS) return;
+
+    int cops[TD5_MAX_RACER_SLOTS], ncop = 0;
+    for (int s = 0; s < TD5_MAX_RACER_SLOTS; s++)
+        if (td5_game_cop_chase_is_cop(s)) cops[ncop++] = s;
+    if (ncop == 0) return;
+
+    const TD5_HudViewLayout *vl = &s_view_layout[view_index];
+    int own = g_actor_slot_map[view_index];
+
+    if (!td5_hudfont_ready()) {
+        /* Bitmap fallback: one plain queued line per cop, stacked top-centre. */
+        for (int i = 0; i < ncop; i++) {
+            char nm[12];
+            if (s_hud_id_name[cops[i]][0]) snprintf(nm, sizeof nm, "%s", s_hud_id_name[cops[i]]);
+            else                           snprintf(nm, sizeof nm, "COP%d", cops[i] + 1);
+            s_hud_next_text_scale = copchase_hud_text_scale();
+            td5_hud_queue_text(0, (int)vl->center_x,
+                               (int)(vl->vp_int_top + 6.0f + (float)i * 16.0f), 1,
+                               "%s %d", nm, td5_game_get_wanted_kills(cops[i]));
+        }
+        return;
+    }
+
+    /* Vector path: one centred horizontal row of accent-coloured tokens. */
+    float pane_w = vl->vp_int_right - vl->vp_int_left;
+    if (pane_w < 2.0f) pane_w = g_render_width_f;
+    float ts = (pane_w / 640.0f) * 0.75f * copchase_hud_text_scale();
+    if (ts < 0.40f) ts = 0.40f;
+    if (ts > 1.40f) ts = 1.40f;
+
+    char  tok[TD5_MAX_RACER_SLOTS][32];
+    float tw[TD5_MAX_RACER_SLOTS];
+    float gap   = td5_vui_text_width("  ", ts);
+    float total = 0.0f;
+    for (int i = 0; i < ncop; i++) {
+        char nm[12];
+        if (s_hud_id_name[cops[i]][0]) snprintf(nm, sizeof nm, "%s", s_hud_id_name[cops[i]]);
+        else                           snprintf(nm, sizeof nm, "COP%d", cops[i] + 1);
+        snprintf(tok[i], sizeof tok[i], "%s %d", nm, td5_game_get_wanted_kills(cops[i]));
+        tw[i]  = td5_vui_text_width(tok[i], ts);
+        total += tw[i] + (i ? gap : 0.0f);
+    }
+
+    float x  = vl->center_x - total * 0.5f;
+    float ny = vl->vp_int_top + 6.0f;          /* glyph cell top */
+    for (int i = 0; i < ncop; i++) {
+        uint32_t accent = s_hud_id_accent[cops[i]] ? s_hud_id_accent[cops[i]] : 0xFFD0D0D0u;
+        float tcx = x + tw[i] * 0.5f;
+        if (cops[i] == own) {
+            /* Underline the pane owner's own tally in its accent colour. */
+            float uy = ny + 17.0f * ts;
+            td5_vui_quad(x, uy, tw[i], 2.0f * ts + 1.0f, accent, -1, 0, 0, 0, 0);
+        }
+        td5_vui_text_centered(tcx, ny, tok[i], accent, ts, ts);
+        x += tw[i] + gap;
+    }
+}
+
 void td5_hud_draw_status_text(int player_slot, int view_index)
 {
     /* Skip during special render mode */
@@ -3282,6 +3379,36 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
             } else {
                 s_hud_next_text_scale = 2.6f;
                 td5_hud_queue_text(0, (int)cx, (int)cy, 1, "ARRESTED");
+            }
+        }
+    }
+
+    /* [COP CHASE SIREN REMINDER 2026-06-27] If the cop driving THIS pane rammed a
+     * suspect with its siren OFF (no arrest credited — see td5_ai_wanted_cop_hit),
+     * flash a reminder for a short window so the player learns to switch the siren
+     * on (HORN key) before chasing. Per-cop: g_cop_siren_warn_tick is stamped for
+     * the ramming cop only, and this draws on that cop's own pane. */
+    if (g_td5.wanted_mode_enabled != 0 &&
+        g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
+        extern int32_t g_cop_siren_warn_tick[TD5_MAX_RACER_SLOTS];   /* td5_ai.c */
+        int cop = g_actor_slot_map[view_index];
+        if (cop >= 0 && cop < TD5_MAX_RACER_SLOTS && td5_game_cop_chase_is_cop(cop)) {
+            int dt = g_td5.simulation_tick_counter - g_cop_siren_warn_tick[cop];
+            if (dt >= 0 && dt < 75 && ((dt / 6) & 1) == 0) {   /* ~2.5s window, blink */
+                float pane_h = vp_bottom - vp_top;
+                if (pane_h < 1.0f) pane_h = 480.0f;
+                float cx = s_view_layout[view_index].center_x;
+                float cy = vp_top + pane_h * 0.40f;
+                if (td5_hudfont_ready()) {
+                    float sy = s_view_layout[view_index].scale_y;
+                    hud_draw_wanted_banner_line(cx, cy, sy * 16.0f,
+                                                "TURN ON YOUR SIREN!", 0xFFFF3030u);
+                    hud_draw_wanted_banner_line(cx, cy + sy * 16.0f * 1.35f, sy * 10.0f,
+                                                "(PRESS HORN TO ARREST)", 0xFFFFC050u);
+                } else {
+                    s_hud_next_text_scale = 1.6f;
+                    td5_hud_queue_text(0, (int)cx, (int)cy, 1, "TURN ON YOUR SIREN!");
+                }
             }
         }
     }
@@ -4720,24 +4847,15 @@ void td5_hud_render_overlays(float dt)
         /* --- Bit 8: Lap/checkpoint counter --- */
         if (flags & TD5_HUD_LAP_COUNTER) {
             if (g_td5.wanted_mode_enabled) {
-                /* Cop chase: bit 0x100 is the "ARRESTS" line (the bust count =
-                 * g_wantedArrestCounter @ 0x004bead0, incremented each time a
-                 * suspect's damage bar is fully depleted). Label confirmed
-                 * against the original's on-screen HUD ("ARRESTS N", top line).
-                 * [FIX 2026-05-31 — was the guessed "BUSTS".] */
-                /* [COP-CHASE 2026-06-21] Top-CENTRE, larger HUD face, stacked ABOVE
-                 * the POINTS line. [AI COP 2026-06-23] cop's own pane only (see
-                 * the POINTS block) — keyed off the effective cop slot.
-                 * [multi-cop 2026-06-24] is_cop is mask-aware: each cop pane shows
-                 * its OWN arrest tally. */
-                if (td5_game_cop_chase_is_cop(actor_slot)) {
-                    s_hud_next_text_scale = copchase_hud_text_scale();
-                    td5_hud_queue_text(0,
-                        (int)vl->center_x,
-                        (int)(vl->vp_int_top + 8.0f),
-                        1,
-                        "ARRESTS %d", td5_game_get_wanted_kills(actor_slot));
-                }
+                /* Cop chase: bit 0x100 is the arrest indicator. Original showed
+                 * the single g_wantedArrestCounter @ 0x004bead0 ("ARRESTS N").
+                 * [COP CHASE SCOREBOARD 2026-06-27] User wants "an indicator for
+                 * each cop at the top" — so instead of only the pane-owner cop's
+                 * own count, draw a top-of-pane scoreboard listing EVERY cop's
+                 * arrest tally (accent-coloured, own cop underlined), shown on all
+                 * panes. This replaces the race position label removed from cop
+                 * chase. See hud_draw_copchase_arrest_strip. */
+                hud_draw_copchase_arrest_strip(v);
             } else {
                 td5_hud_queue_text(0,
                     (int)(vl->vp_int_left + 8.0f),
@@ -7469,6 +7587,21 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
      *   if (wanted_mode_enabled != 0 && slot == g_wantedDamageHudOverlayCount) */
     if (!g_td5.wanted_mode_enabled) return;
     if ((unsigned)actor_slot >= (unsigned)TD5_MAX_RACER_SLOTS) return;
+
+    /* [COP CHASE ARROW-ON-HIT 2026-06-27] Only show the indicator for a short
+     * window after a crash into THIS suspect. g_wanted_hit_tick[slot] is stamped
+     * by td5_ai_wanted_cop_hit on every material cop<->suspect collision; outside
+     * the window the arrow is hidden so it no longer hovers over every suspect at
+     * once. Window 0 (TD5RE_COPCHASE_ARROW_TICKS=0) disables the gate. */
+    {
+        extern int32_t g_wanted_hit_tick[TD5_MAX_RACER_SLOTS];  /* td5_ai.c */
+        int win = td5_copchase_arrow_window_ticks();
+        if (win > 0) {
+            int dt = g_td5.simulation_tick_counter - g_wanted_hit_tick[actor_slot];
+            if (dt < 0 || dt > win) return;     /* not freshly rammed -> hidden */
+        }
+    }
+
     if (td5_copchase_multi_bar_enabled()) {
         /* [COP CHASE STATUS BARS 2026-06-25] Draw the bust-progress indicator over
          * EVERY live suspect at once (not just the last-rammed slot), and HIDE it the

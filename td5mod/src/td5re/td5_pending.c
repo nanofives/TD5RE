@@ -30,6 +30,16 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "MP cop chase: bust arrow shows only when you crash a suspect",
+    "MP cop chase: other players' name labels hidden",
+    "MP cop chase: no 1st/2nd; top shows per-cop ARRESTS scoreboard",
+    "MP cop chase: arrest needs SIREN ON; else 'turn on siren' msg",
+    "MP cop chase: HORN toggles each cop's own siren",
+    "MP CUP podium: humans show profile colour, CPU shown in grey",
+    "Cops re-chase after you crash (was: 1 chase then never, esp. MP)",
+    "Split MP: reset car resets YOUR car, not the other player",
+    "Split MP: change-camera affects YOUR pane, not the other",
+    "Split MP: rear-view affects YOUR pane (positioned panes)",
     "MP profile DELETE asks 'DELETE <name>? A=YES B=NO' first",
     "Profile delete removes ONLY the named/selected profile",
     "MP setup: ARCADE/SIM selector only on track select (not mode opts)",
