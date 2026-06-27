@@ -3823,6 +3823,18 @@ void frontend_cup_winners_render(float sx, float sy) {
                 int t = order[i]; order[i] = order[j]; order[j] = t;
             }
 
+    {
+        /* One-shot (not per-frame): record that the podium path ran and how the
+         * human/CPU split is being applied to row colours, for fix verification. */
+        static int s_logged_podium_colours = 0;
+        if (!s_logged_podium_colours) {
+            s_logged_podium_colours = 1;
+            TD5_LOG_I(LOG_TAG,
+                      "cup podium: %d racers, %d human -> rows coloured by profile "
+                      "colour (human) / light grey (CPU)", n, s_num_human_players);
+        }
+    }
+
     y = 120.0f;
     for (i = 0; i < n && i < 6; i++) {
         int slot = order[i];
@@ -3844,8 +3856,20 @@ void frontend_cup_winners_render(float sx, float sy) {
         else
             snprintf(buf, sizeof buf, "%d.  %s  -  %d PTS",
                      i + 1, nm, td5_game_mp_cup_points(slot));
-        td5_vui_text_centered(320.0f * sx, y * sy, buf,
-                              (i == 0) ? 0xFFFFFFFFu : mp_slot_color(slot), sx, sy);
+        /* [CUP PODIUM COLOURS 2026-06-27] Draw every standings row in the
+         * racer's OWN colour: a human shows the colour they picked on their
+         * multiplayer profile (mp_slot_color -> s_mp_player_accent, with the
+         * built-in palette as fallback); an AI/CPU opponent (slot past the
+         * human count) is drawn light grey. Previously 1st place was forced
+         * white and CPU slots reused a vivid player-palette colour, so the
+         * podium ignored the chosen profile colours. Same human/AI split the
+         * per-race results table uses (slot < s_num_human_players). */
+        {
+            uint32_t row_color = (slot < s_num_human_players)
+                                 ? mp_slot_color(slot)   /* human: chosen profile colour */
+                                 : 0xFFE0E0E0u;          /* CPU/AI: light grey           */
+            td5_vui_text_centered(320.0f * sx, y * sy, buf, row_color, sx, sy);
+        }
         y += 30.0f;
     }
 
