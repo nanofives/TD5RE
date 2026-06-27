@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Controller: Y changes camera; horn moved to L3 (stick click)",
     "Time trial on city tracks (HK/London): mid-track start no insta-end",
     "Replay no longer counts as a race (MP cup keeps real results)",
     "MP cop chase: bust arrow shows only when you crash a suspect",
@@ -147,7 +148,7 @@ static const char *const k_seed[] = {
     "Traffic: lighter, no despawn-in-front, fills gaps",
     "Controller slots stable across a pad disconnect",
     "MP opponent labels below the wheels, 50% opacity",
-    "Reset-car on SELECT, CHANGE VIEW on L3",
+    "Reset-car on SELECT; CHANGE VIEW on Y; horn on L3",
     "Split-screen force feedback on the correct pad",
     "Manual-only stuck recovery + 5s cooldown",
     "MP cop-chase multi-cop + cop-only car select",

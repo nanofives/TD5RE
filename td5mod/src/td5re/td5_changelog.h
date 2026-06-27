@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Controller: the Y button now changes the camera view" },
+    { CL_ITEM,    "  (was an awkward stick-click); the horn moves to the" },
+    { CL_ITEM,    "  left-stick click. SELECT still resets your car" },
     { CL_ITEM,    "Time-trial fix: on the city tracks (Hong Kong," },
     { CL_ITEM,    "  London, Paris...) a time trial that starts from a" },
     { CL_ITEM,    "  checkpoint partway along the track no longer ends" },
