@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Multiplayer game-mode vote redesigned: each player now" },
+    { CL_ITEM,    "  presses A to vote and a border in their own profile" },
+    { CL_ITEM,    "  colour wraps the chosen mode (more voters = more" },
+    { CL_ITEM,    "  rings); the arrow goes once they vote, and the host" },
+    { CL_ITEM,    "  still makes the final pick" },
     { CL_ITEM,    "Multiplayer CUP podium colours each racer correctly:" },
     { CL_ITEM,    "  humans in their chosen profile colour, CPU in grey" },
     { CL_ITEM,    "Police now keep chasing all race long: crashing while" },
