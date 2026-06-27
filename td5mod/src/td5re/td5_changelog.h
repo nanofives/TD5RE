@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "June 27" },
+    { CL_ITEM,    "ARCADE now scatters about twice as many item boxes" },
+    { CL_ITEM,    "  along the track so power-ups come round more often" },
+    { CL_ITEM,    "Power-up effects last twice as long (GHOST, WRECK," },
+    { CL_ITEM,    "  and the oil-slick spin-out)" },
+    { CL_ITEM,    "NITRO is now a sustained 2.5x ACCELERATION boost for" },
+    { CL_ITEM,    "  several seconds (was a single instant speed kick)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "June 26" },
     { CL_ITEM,    "Car collisions now follow the actual car shape:" },
     { CL_ITEM,    "  crashes register when the models really touch," },

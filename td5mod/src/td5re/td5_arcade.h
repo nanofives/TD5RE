@@ -88,6 +88,12 @@ int td5_arcade_slot_is_ghost(int slot);
  * leave THIS slot's velocity unchanged and give the OTHER car the boosted launch. */
 int td5_arcade_slot_is_wrecking(int slot);
 
+/* Q8 (0x100 = 1.0) drive-torque (ACCELERATION) multiplier for this racer slot:
+ * the NITRO boost (default 2.5x = 0x280) while NITRO is active, else 1.0. 1.0
+ * outside arcade mode. Read at the physics drive-torque chokepoint so a boosting
+ * car accelerates harder for the NITRO duration (top-speed gate untouched). */
+int td5_arcade_slot_accel_q8(int slot);
+
 /* Airborne-launch tuning for the arcade V2V heavy-impact branch. The faithful
  * gate launches vel_y = impact_mag/6 only when impact_mag > 90000. In arcade we
  * lower the gate and raise the launch so ordinary crashes send cars flying. */

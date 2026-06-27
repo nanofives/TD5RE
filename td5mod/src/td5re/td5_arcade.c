@@ -109,24 +109,35 @@ static TD5_Actor *slot_actor(int slot) {
 static void apply_pickup(int slot, int kind, TD5_Actor *a) {
     switch (kind) {
     case TD5_PU_NITRO: {
-        /* One-shot horizontal-speed burst along the current travel direction. */
-        int pct = knob("TD5RE_ARCADE_NITRO_PCT", 60, 10, 300);
-        int32_t vx = a->linear_velocity_x, vz = a->linear_velocity_z;
-        a->linear_velocity_x = vx + (int32_t)(( (int64_t)vx * pct) / 100);
-        a->linear_velocity_z = vz + (int32_t)(( (int64_t)vz * pct) / 100);
+        /* [2026-06-27] Sustained ACCELERATION boost (was a one-shot velocity
+         * bump). While NITRO is active the racer's drive torque is scaled by
+         * TD5RE_ARCADE_NITRO_ACCEL_PCT (default 250 = 2.5x) — applied at the
+         * physics drive-torque chokepoint via td5_arcade_slot_accel_q8(). The
+         * boost lasts a real, longer window (TD5RE_ARCADE_NITRO_FRAMES, default
+         * 150 = ~5 s @30Hz) instead of the old single-tick speed kick. Pure
+         * acceleration: the per-car top-speed gate in the physics callers is
+         * untouched, so the car builds speed harder but is not warped past its
+         * cap. The (void)a keeps the unused-param warning away now the burst is
+         * gone. */
+        (void)a;
         s_effect[slot] = TD5_PU_NITRO;
-        s_effect_frames[slot] = 30;   /* HUD/FX flash only */
-        TD5_LOG_I(LOG_TAG, "slot=%d NITRO +%d%%", slot, pct);
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_NITRO_FRAMES", 150, 30, 600);
+        TD5_LOG_I(LOG_TAG, "slot=%d NITRO %d frames (accel x%d%%)",
+                  slot, s_effect_frames[slot],
+                  knob("TD5RE_ARCADE_NITRO_ACCEL_PCT", 250, 100, 800));
         break;
     }
     case TD5_PU_GHOST:
         s_effect[slot] = TD5_PU_GHOST;
-        s_effect_frames[slot] = knob("TD5RE_ARCADE_GHOST_FRAMES", 120, 30, 600);
+        /* [2026-06-27] Duration doubled 120 -> 240 (~8 s @30Hz) per "last twice
+         * as long". Knob TD5RE_ARCADE_GHOST_FRAMES still overrides. */
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_GHOST_FRAMES", 240, 30, 1200);
         TD5_LOG_I(LOG_TAG, "slot=%d GHOST %d frames", slot, s_effect_frames[slot]);
         break;
     case TD5_PU_WRECK:
         s_effect[slot] = TD5_PU_WRECK;
-        s_effect_frames[slot] = knob("TD5RE_ARCADE_WRECK_FRAMES", 150, 30, 600);
+        /* [2026-06-27] Duration doubled 150 -> 300 (~10 s @30Hz). */
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_WRECK_FRAMES", 300, 30, 1200);
         TD5_LOG_I(LOG_TAG, "slot=%d WRECKING BALL %d frames", slot, s_effect_frames[slot]);
         break;
     case TD5_PU_HAZARD: {
@@ -166,7 +177,9 @@ static void apply_pickup(int slot, int kind, TD5_Actor *a) {
  * td5_arcade_tick. */
 static void start_oil_drift(int slot, TD5_Actor *a) {
     if (slot < 0 || slot >= ARC_MAX_SLOTS || !a) return;
-    int frames = knob("TD5RE_ARCADE_OIL_FRAMES", 75, 15, 300);   /* ~2.5 s @30Hz */
+    /* [2026-06-27] Oil-drift duration doubled 75 -> 150 (~5 s @30Hz) per "last
+     * twice as long". This is the HAZARD power-up's effect on its victim. */
+    int frames = knob("TD5RE_ARCADE_OIL_FRAMES", 150, 15, 600);   /* ~5 s @30Hz */
     s_oiled_frames[slot] = (int16_t)frames;
     uint32_t seed = td5_game_get_race_seed()
                     ^ (0x9E3779B9u * (uint32_t)(slot + 1))
@@ -304,8 +317,12 @@ void td5_arcade_init_race(void) {
      * (300) spans between boxes, falling toward SPACING_MIN (100) as humans are
      * added, so a fuller race has more power-ups to go round. PAD_SPACING overrides. */
     int num_h = g_td5.num_human_players; if (num_h < 1) num_h = 1;
-    int sp_max = knob("TD5RE_ARCADE_SPACING_MAX", 300, 20, 4000);
-    int sp_min = knob("TD5RE_ARCADE_SPACING_MIN", 100, 10, 4000);
+    /* [2026-06-27] Spacing defaults halved (300/100 -> 150/50) so the ring holds
+     * ~2x as many item boxes — "too few power-ups" feedback. Smaller spacing =
+     * more boxes (count = usable / spacing). Knobs TD5RE_ARCADE_SPACING_MAX /
+     * _MIN / TD5RE_ARCADE_PAD_SPACING still override. */
+    int sp_max = knob("TD5RE_ARCADE_SPACING_MAX", 150, 20, 4000);
+    int sp_min = knob("TD5RE_ARCADE_SPACING_MIN", 50, 10, 4000);
     if (sp_min > sp_max) sp_min = sp_max;
     int spacing = sp_max - (num_h - 1) * ((sp_max - sp_min) / 5);
     if (spacing < sp_min) spacing = sp_min;
@@ -313,7 +330,9 @@ void td5_arcade_init_race(void) {
     { const char *e = getenv("TD5RE_ARCADE_PAD_SPACING"); if (e) { int v = atoi(e); if (v >= 6) spacing = v; } }
 
     int count = usable / spacing;
-    if (count < 4)  count = 4;
+    /* [2026-06-27] Minimum box count raised 4 -> 8 so even short tracks get a
+     * healthy scatter of power-ups. */
+    if (count < 8)  count = 8;
     if (count > ARC_MAX_PADS) count = ARC_MAX_PADS;
 
     /* Hang the box just over the road: lift its centre ~1.1x the box half-size so
@@ -534,6 +553,23 @@ int td5_arcade_slot_is_ghost(int slot) {
 int td5_arcade_slot_is_wrecking(int slot) {
     if (!s_active || slot < 0 || slot >= ARC_MAX_SLOTS) return 0;
     return s_effect[slot] == TD5_PU_WRECK;
+}
+
+int td5_arcade_slot_accel_q8(int slot) {
+    /* NITRO acceleration boost as a Q8 drive-torque multiplier (0x100 = 1.0).
+     * While NITRO is active for this racer, return TD5RE_ARCADE_NITRO_ACCEL_PCT
+     * (default 250 = 2.5x); otherwise 1.0. Consumed at the physics drive-torque
+     * chokepoint (td5_physics_compute_drive_torque). Inert (1.0) outside arcade
+     * mode or when NITRO is not active.
+     *
+     * DETERMINISM: reads getenv (process config, identical across lockstep peers)
+     * and s_effect[] (replicated sim state), so the multiplier is bit-identical
+     * on every client — same guarantee as the MP-catchup / manual / weight
+     * multipliers it sits beside in the torque pipeline. */
+    if (!s_active || slot < 0 || slot >= ARC_MAX_SLOTS) return 0x100;
+    if (s_effect[slot] != TD5_PU_NITRO) return 0x100;
+    int pct = knob("TD5RE_ARCADE_NITRO_ACCEL_PCT", 250, 100, 800);  /* 250 = 2.5x */
+    return (pct * 0x100) / 100;
 }
 
 int td5_arcade_launch_active(void) { return s_active; }
