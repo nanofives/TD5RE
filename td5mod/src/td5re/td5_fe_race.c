@@ -1924,6 +1924,13 @@ enum { MP_PROF_ACT_SAVE = 0, MP_PROF_ACT_LOAD, MP_PROF_ACT_DELETE };
 static int s_mp_prof_focus[TD5_MAX_HUMAN_PLAYERS];   /* 0 = action row, 1 = list */
 static int s_mp_prof_act[TD5_MAX_HUMAN_PLAYERS];     /* MP_PROF_ACT_* */
 static int s_mp_prof_sel[TD5_MAX_HUMAN_PLAYERS];     /* selected list index */
+/* [#delete-confirm 2026-06-27] DELETE no longer wipes a profile outright — it
+ * arms a per-player "DELETE '<name>'? Y/N" prompt that names the SELECTED
+ * profile (only that one is removed). The name is captured when the prompt is
+ * armed so it can be re-found by name at confirm time (robust even if another
+ * player's DELETE reindexes the store meanwhile). [0]=='\0' / 0 = disarmed. */
+static int  s_mp_prof_confirm_del[TD5_MAX_HUMAN_PLAYERS];
+static char s_mp_prof_confirm_name[TD5_MAX_HUMAN_PLAYERS][16];
 
 /* [#3 2026-06-15] PROFILE sits BETWEEN COLOUR and OK (order NAME, COLOUR, PROFILE,
  * OK) — both in the up/down NAV sequence and in the on-screen button stack. The
@@ -2001,6 +2008,8 @@ static void frontend_mp_setup_init(void) {
      * their selection and needn't reload). A fresh flow cleared the snapshot in
      * frontend_mp_flow_reset, so this restores empty there (legacy behavior). */
     for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
+        s_mp_prof_confirm_del[p]     = 0;   /* [#delete-confirm] no stale prompt into a fresh setup */
+        s_mp_prof_confirm_name[p][0] = '\0';
         if (mp_profile_persist_on()) {
             strncpy(s_mp_prof_held[p], s_mp_prof_held_saved[p], sizeof(s_mp_prof_held[p]) - 1);
             s_mp_prof_held[p][sizeof(s_mp_prof_held[p]) - 1] = '\0';
@@ -2120,6 +2129,20 @@ static void mp_prof_clamp_sel(int p) {
     if (s_mp_prof_sel[p] >= cnt) s_mp_prof_sel[p] = cnt - 1;
 }
 
+/* [#delete-confirm 2026-06-27] Store index of the profile whose name matches
+ * `name` (case-insensitive), or -1 if none. A confirmed DELETE re-finds its
+ * target this way so it removes the exact named profile the prompt showed —
+ * never a neighbour shifted into that slot by another player's delete. */
+static int mp_prof_index_of_name(const char *name) {
+    int i, cnt = td5_save_profile_count();
+    if (!name || !name[0]) return -1;
+    for (i = 0; i < cnt; i++) {
+        TD5_Profile pr;
+        if (td5_save_profile_get(i, &pr) && _stricmp(pr.name, name) == 0) return i;
+    }
+    return -1;
+}
+
 /* [#3 2026-06-15] Profile-LIST nav fix. The old handler jumped focus list->actions
  * on ANY up press (BEFORE the list-scroll block), so UP never decremented the
  * selection and index 0 was unreachable/unselectable. Knob TD5RE_MP_PROFILE_LIST_NAV
@@ -2140,6 +2163,41 @@ static int mp_profile_list_nav_enabled(void) {
 static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t now) {
     int cnt = td5_save_profile_count();
     mp_prof_clamp_sel(p);
+
+    /* [#delete-confirm 2026-06-27] A "DELETE '<name>'? Y/N" prompt is armed for
+     * this player: modal. A confirms (delete ONLY the named profile), B/X cancel.
+     * Swallow every other nav this frame so the keypress can't also drive the
+     * panel underneath, and so the same A that armed the prompt (still held, no
+     * fresh rising edge) cannot self-confirm. */
+    if (s_mp_prof_confirm_del[p]) {
+        if (edge & 0x10) {                          /* A = YES, delete */
+            int didx = mp_prof_index_of_name(s_mp_prof_confirm_name[p]);
+            TD5_Profile pr;
+            if (didx >= 0 && td5_save_profile_get(didx, &pr) &&
+                td5_save_profile_delete(didx)) {
+                int q;
+                /* A deleted profile can't be in use by anyone — release every
+                 * holder of that name (the store reindexes; holders are by name). */
+                for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++)
+                    if (_stricmp(s_mp_prof_held[q], pr.name) == 0) mp_prof_release(q);
+                frontend_play_sfx(3);
+                mp_prof_clamp_sel(p);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE CONFIRMED '%s'", p, pr.name);
+            } else {
+                frontend_play_sfx(10);              /* gone already (a concurrent delete) */
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE confirm — '%s' no longer present",
+                          p, s_mp_prof_confirm_name[p]);
+            }
+            s_mp_prof_confirm_del[p]     = 0;
+            s_mp_prof_confirm_name[p][0] = '\0';
+        } else if (edge & (0x20u | 0x80u)) {        /* B or X = NO, cancel */
+            s_mp_prof_confirm_del[p]     = 0;
+            s_mp_prof_confirm_name[p][0] = '\0';
+            frontend_play_sfx(5);
+            TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE cancelled", p);
+        }
+        return;   /* modal — eat the rest of this frame's panel input */
+    }
 
     if (mp_profile_list_nav_enabled()) {
         /* [#3] LEFT/RIGHT pick the action (SAVE/LOAD/DELETE) on the action row.
@@ -2231,19 +2289,21 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
                 frontend_play_sfx(10);
             }
         } else { /* DELETE */
+            /* [#delete-confirm 2026-06-27] Don't wipe the profile here — arm a
+             * per-player "DELETE '<name>'? Y/N" prompt naming the SELECTED
+             * profile. The modal block at the top of this handler performs the
+             * actual delete (of only that named profile) once the player
+             * confirms with A; B/X cancels and nothing is removed. */
             TD5_Profile pr;
-            if (cnt > 0 && td5_save_profile_get(s_mp_prof_sel[p], &pr) &&
-                td5_save_profile_delete(s_mp_prof_sel[p])) {
-                int q;
-                /* [#11] A deleted profile can't be in use by anyone — release every
-                 * holder of that name (the store reindexes; holders are by name). */
-                for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++)
-                    if (_stricmp(s_mp_prof_held[q], pr.name) == 0) mp_prof_release(q);
-                frontend_play_sfx(3);
-                mp_prof_clamp_sel(p);
-                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE '%s'", p, pr.name);
+            if (cnt > 0 && td5_save_profile_get(s_mp_prof_sel[p], &pr)) {
+                s_mp_prof_confirm_del[p] = 1;
+                strncpy(s_mp_prof_confirm_name[p], pr.name,
+                        sizeof(s_mp_prof_confirm_name[p]) - 1);
+                s_mp_prof_confirm_name[p][sizeof(s_mp_prof_confirm_name[p]) - 1] = '\0';
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE '%s' -> confirm prompt", p, pr.name);
             } else {
-                frontend_play_sfx(10);
+                frontend_play_sfx(10);   /* nothing selected to delete */
             }
         }
     }
@@ -2413,10 +2473,11 @@ static void frontend_mp_setup_update(void) {
             if (s_mp_setup_btn[p] == MP_SET_NAME)   { s_mp_setup_sub[p] = 1; if (isk) td5_plat_input_flush_chars(); frontend_play_sfx(3); }
             else if (s_mp_setup_btn[p] == MP_SET_COLOUR) { s_mp_setup_sub[p] = 2; frontend_play_sfx(3); }
             else if (s_mp_setup_btn[p] == MP_SET_PROFILE && mp_profiles_enabled()) {
-                s_mp_setup_sub[p]   = 3;            /* open profile panel */
-                s_mp_prof_focus[p]  = 0;
-                s_mp_prof_act[p]    = MP_PROF_ACT_SAVE;
-                s_mp_rep_ms[p]      = 0;
+                s_mp_setup_sub[p]        = 3;       /* open profile panel */
+                s_mp_prof_focus[p]       = 0;
+                s_mp_prof_act[p]         = MP_PROF_ACT_SAVE;
+                s_mp_rep_ms[p]           = 0;
+                s_mp_prof_confirm_del[p] = 0;       /* [#delete-confirm] never open with a stale prompt */
                 mp_prof_clamp_sel(p);
                 frontend_play_sfx(3);
             }
@@ -4797,6 +4858,32 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
 
                 mp_pos_small_centered(cx * sx, (pany + panh - 9.0f) * sy,
                                       "A: DO   UP/DN: PICK   B: BACK", 0xFFB0B0B0u, sx, sy);
+
+                /* [#delete-confirm 2026-06-27] "DELETE PROFILE? <name>" overlay
+                 * over THIS pane while the prompt is armed: names the exact
+                 * (selected) profile so it is unmistakable only that one goes,
+                 * with a red frame marking the destructive action. A = YES,
+                 * B = NO. (The input modal lives in mp_prof_panel_input.) */
+                if (s_mp_prof_confirm_del[p]) {
+                    float cbw = panw - 8.0f, cbh = 56.0f;
+                    float cbx = panx + 4.0f;
+                    float cby = pany + (panh - cbh) * 0.5f;
+                    float t = 2.0f; uint32_t bc = 0xFFFF5050u;   /* red = destructive */
+                    td5_vui_quad(panx * sx, pany * sy, panw * sx, panh * sy,
+                                 0xCC000008u, -1, 0, 0, 1, 1);    /* dim the pane behind */
+                    td5_vui_quad(cbx * sx, cby * sy, cbw * sx, cbh * sy,
+                                 0xF0180C10u, -1, 0, 0, 1, 1);
+                    td5_vui_quad(cbx * sx, cby * sy, cbw * sx, t * sy, bc, -1, 0, 0, 1, 1);
+                    td5_vui_quad(cbx * sx, (cby + cbh - t) * sy, cbw * sx, t * sy, bc, -1, 0, 0, 1, 1);
+                    td5_vui_quad(cbx * sx, cby * sy, t * sx, cbh * sy, bc, -1, 0, 0, 1, 1);
+                    td5_vui_quad((cbx + cbw - t) * sx, cby * sy, t * sx, cbh * sy, bc, -1, 0, 0, 1, 1);
+                    mp_pos_small_centered(cx * sx, (cby + 8.0f) * sy, "DELETE PROFILE?",
+                                          0xFFFF8080u, sx, sy);
+                    snprintf(buf, sizeof buf, "\"%s\"", s_mp_prof_confirm_name[p]);
+                    mp_pos_small_centered(cx * sx, (cby + 22.0f) * sy, buf, 0xFFFFFFFFu, sx, sy);
+                    mp_pos_small_centered(cx * sx, (cby + 38.0f) * sy, "A = YES    B = NO",
+                                          0xFFE0E0E0u, sx, sy);
+                }
             }
         }
     }
