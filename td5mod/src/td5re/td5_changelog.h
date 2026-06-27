@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Multiplayer CUP podium colours each racer correctly:" },
+    { CL_ITEM,    "  humans in their chosen profile colour, CPU in grey" },
     { CL_ITEM,    "Police now keep chasing all race long: crashing while" },
     { CL_ITEM,    "  being chased no longer makes the cops ignore you for" },
     { CL_ITEM,    "  the rest of the race (was: one chase, then never)" },

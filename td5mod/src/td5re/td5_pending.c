@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "MP CUP podium: humans show profile colour, CPU shown in grey",
     "Cops re-chase after you crash (was: 1 chase then never, esp. MP)",
     "Split MP: reset car resets YOUR car, not the other player",
     "Split MP: change-camera affects YOUR pane, not the other",
