@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Multiplayer setup no longer shows the ARCADE/SIM" },
+    { CL_ITEM,    "  physics selector twice: it was removed from the" },
+    { CL_ITEM,    "  mode-options screen and now lives only on track" },
+    { CL_ITEM,    "  selection (where you already set it)" },
     { CL_ITEM,    "ARCADE now scatters about twice as many item boxes" },
     { CL_ITEM,    "  along the track so power-ups come round more often" },
     { CL_ITEM,    "Power-up effects last twice as long (GHOST, WRECK," },

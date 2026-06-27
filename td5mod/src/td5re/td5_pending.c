@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "MP setup: ARCADE/SIM selector only on track select (not mode opts)",
     "ARCADE: ~2x as many item boxes spawn along the track",
     "ARCADE: power-up effects last 2x longer (GHOST/WRECK/oil)",
     "ARCADE NITRO: sustained 2.5x acceleration boost (~5s), not instant",

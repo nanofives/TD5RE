@@ -3230,7 +3230,9 @@ typedef struct {
 
 static const char *const k_cfg_offon[2]  = { "OFF", "ON" };
 static const char *const k_cfg_wincon[3] = { "BUST ALL", "MOST BUSTS", "SUDDEN DEATH" };
-static const char *const k_cfg_arcsim[2] = { "ARCADE", "SIMULATION" };  /* [ARCADE] */
+/* [PHYSICS SELECTOR DEDUP 2026-06-27] k_cfg_arcsim ("ARCADE"/"SIMULATION") was
+ * dropped together with the DYNAMICS row below — the ARCADE/SIM selector now
+ * lives only on the track-selection screen (see mp_cfg_build). */
 
 static int mp_cfg_build(MpCfgOpt *o) {
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
@@ -3272,11 +3274,17 @@ static int mp_cfg_build(MpCfgOpt *o) {
     default: /* TD5_MP_MODE_RACE — no extra options */
         break;
     }
-    /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) on EVERY multiplayer mode.
-     * Binds directly to the shared s_game_option_dynamics (int == int32 on this
-     * 32-bit build); ConfigureGameTypeFlags commits it to physics at race launch.
-     * Max rows after this: cop-chase 5, cup 5 — both within MP_CFG_MAX_OPTS (6). */
-    o[n].label="DYNAMICS"; o[n].val=(int32_t*)&s_game_option_dynamics; o[n].min=0; o[n].max=1; o[n].step=1; o[n].enum_labels=k_cfg_arcsim; o[n].enum_count=2; n++;
+    /* [PHYSICS SELECTOR DEDUP 2026-06-27] The DYNAMICS (ARCADE/SIMULATION) row used
+     * to be appended here on EVERY multiplayer mode. It was removed because every
+     * MP mode flows into the track-selection screen, which already carries the same
+     * ARCADE/SIM selector (s_trksel_dyn_btn on both the regular track-select and the
+     * cup track-picker) — so the control showed up twice (most obviously on the cup
+     * setup). Track selection is now the single place to set physics for all MP
+     * flows. The choice still lives in the shared s_game_option_dynamics (seeded
+     * from g_td5.ini.dynamics, committed to physics by ConfigureGameTypeFlags at
+     * race launch). Side effect (intended): MP RACE has no other options, so this
+     * now returns 0 for it and Screen_MpModeConfig skips the config screen entirely
+     * (the original count==0 fast-path). */
     return n;
 }
 
