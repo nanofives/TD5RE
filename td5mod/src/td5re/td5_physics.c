@@ -13256,6 +13256,24 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
         }
     }
 
+    /* [ARCADE NITRO 2026-06-27] While a racer is boosting (NITRO power-up active)
+     * scale its drive force by the arcade acceleration multiplier (default 2.5x).
+     * Applies to ANY racer slot that grabbed a NITRO box (human OR AI), so it is
+     * NOT gated on g_race_slot_state==1 like the MP block above — just on being a
+     * racer slot. ACCELERATION only: the per-car top-speed gate in the callers is
+     * untouched, so a boosting car builds speed harder but is not warped past its
+     * cap. 1.0 (no-op) outside arcade mode / when NITRO is inactive. Same
+     * biased-toward-zero signed >>8 idiom; same lockstep-deterministic basis. */
+    if (actor->slot_index >= 0 &&
+        actor->slot_index < g_traffic_slot_base &&
+        actor->slot_index < TD5_MAX_RACER_SLOTS) {
+        int32_t nmult = td5_arcade_slot_accel_q8((int)actor->slot_index);
+        if (nmult != 0x100) {
+            int64_t scaled = (int64_t)torque * (int64_t)nmult;
+            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
+
     /* [HARD CATCHUP item #13] Hard-difficulty AI catch-up: the complement of the
      * MP block above — scale an AI OPPONENT's drive force up when it is behind
      * the human player on Hard, so the field presses harder. Applies ONLY to AI
