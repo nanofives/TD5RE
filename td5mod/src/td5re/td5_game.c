@@ -595,6 +595,42 @@ static int      s_finish_position_display; /* 1-based place captured at finish (
  * player finishing no longer ends the race for the others. */
 static int      s_slot_finish_place[TD5_MAX_RACER_SLOTS];
 
+/* [REPLAY RESULTS PRESERVE 2026-06-27] A "View Replay" re-enters the race via
+ * g_td5.race_requested -> init_race_session, which WIPES the live race-results
+ * display state (s_results / s_metrics / s_slot_state / ...) so the recorded run
+ * can play back from the start. The port's playback is NOT a faithful re-run (the
+ * recorded input buffer runs out, cars coast and only partly re-cross the line),
+ * so letting the replay's completion rebuild the results would show the player the
+ * replay's PARTIAL outcome instead of the real race — most visibly in MP cup,
+ * where the polluted table also fed the cup standings ("replay counts as a new
+ * race"). The original avoided this with a per-race table reset + faithful
+ * playback (RE: completion runs during replay @0x42B5ED-0x42B626; table reset
+ * @0x40A880, rebuild @0x40A8C0); the port instead snapshots the real results when
+ * a replay starts and restores them when it ends. Knob TD5RE_REPLAY_KEEP_RESULTS=0
+ * reverts to the old (polluting) behaviour. */
+static int             s_replay_results_saved = 0;
+static RaceResultEntry s_saved_results[TD5_MAX_RACER_SLOTS];
+static ActorRaceMetric s_saved_metrics[TD5_MAX_RACER_SLOTS];
+static RaceSlotState   s_saved_slot_state[TD5_MAX_RACER_SLOTS];
+static uint8_t         s_saved_race_order[TD5_MAX_RACER_SLOTS];
+static int             s_saved_slot_finish_place[TD5_MAX_RACER_SLOTS];
+static int32_t         s_saved_arrest_time[TD5_MAX_RACER_SLOTS];
+static int             s_saved_finish_position_display;
+
+/* TD5RE_REPLAY_KEEP_RESULTS gate (default ON). Cached + logged once. "0" reverts
+ * to the legacy behaviour where a View Replay rebuilds (and pollutes) the
+ * race-results table / MP cup standings. */
+static int replay_keep_results_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_REPLAY_KEEP_RESULTS");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "replay keep-results %s (TD5RE_REPLAY_KEEP_RESULTS=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
 static int      s_replay_mode;       /* 1 = input-playback "View Replay" race */
 static int      s_demo_mode;         /* 1 = attract-mode demo race */
 /* Per-race RNG seed captured at the start of a recorded (non-replay) race and
@@ -689,6 +725,8 @@ static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flu
 static int  check_race_completion(uint32_t sim_delta);
 static void build_results_table(void);
 static void reset_results_table(void);
+static void capture_replay_results_snapshot(void);   /* [REPLAY RESULTS PRESERVE] */
+static void restore_replay_results_snapshot(void);   /* [REPLAY RESULTS PRESERVE] */
 static void sort_results_by_time_asc(void);
 static void sort_results_by_score_desc(void);
 static void update_race_order(void);
@@ -1102,6 +1140,20 @@ int td5_game_tick(void) {
             /* Race is over. Determine next state.
              * result=1: normal race completion (fade finished) -> results screen
              * result=2: ESC/pause menu exit -> main menu */
+
+            /* [REPLAY RESULTS PRESERVE 2026-06-27] If the race that just ended was
+             * a View Replay, restore the real race results captured at replay-init
+             * so the results / cup-standings screen shows the genuine outcome (not
+             * the replay's partial result), and clear the replay flags so the next
+             * race is treated as a normal race. */
+            if (s_replay_results_saved) {
+                restore_replay_results_snapshot();
+                td5_game_set_replay_mode(0);
+                td5_input_set_replay_mode(0);
+                td5_input_set_playback_active(0);
+                TD5_LOG_I(LOG_TAG, "Replay ended (result=%d) -> real results restored, replay flags cleared", result);
+            }
+
             if (g_td5.benchmark_active) {
                 /* [CONFIRMED @ 0x00428D80 WriteBenchmarkResultsTgaReport]:
                  * orig RunRaceFrame calls this on race-end when benchmark
@@ -1679,6 +1731,17 @@ int td5_game_init_race_session(void) {
         TD5_LOG_W(LOG_TAG, "TD5RE_FORCE_REPLAY: forcing replay mode for this race");
     }
 #endif
+
+    /* [REPLAY RESULTS PRESERVE 2026-06-27] If this race-init is a View Replay
+     * (s_replay_mode was set before race_requested), the real race results are
+     * still live in s_results / s_metrics / s_slot_state right now — snapshot
+     * them BEFORE the resets below wipe them, so the post-race / cup results
+     * show the genuine outcome after the replay ends instead of the replay
+     * playback's partial result. Skipped for normal race starts (s_replay_mode
+     * is 0) and pause-RESTART (also a real race), so those stay byte-identical. */
+    if (s_replay_mode && replay_keep_results_on()) {
+        capture_replay_results_snapshot();
+    }
 
     /* ---- Mode overrides from InitializeRaceSession @ 0x42AA10 ----
      *
@@ -6788,10 +6851,21 @@ static int check_race_completion(uint32_t sim_delta) {
         s_post_finish_cooldown += sim_delta;
         if (s_post_finish_cooldown > TD5_RACE_END_DWELL) {
             /* Dwell expired: build results and signal completion */
-            TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", TD5_RACE_END_DWELL);
             s_post_finish_cooldown = 0;
-            build_results_table();
-            td5_game_mp_cup_award();   /* [MP CUP] tally this race's points */
+            /* [REPLAY RESULTS PRESERVE 2026-06-27] A View Replay reaches this
+             * completion path too (just like the original @0x42B5ED-0x42B626),
+             * but it is NOT a real race — it must not rebuild the results table
+             * or award cup points. Doing so overwrote the real standings with the
+             * replay's partial outcome and made the replay "count as a new race".
+             * The genuine results were snapshotted at replay-init and are restored
+             * when the replay ends; here we only drive the fade/finish. */
+            if (!s_replay_mode || !replay_keep_results_on()) {
+                TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", TD5_RACE_END_DWELL);
+                build_results_table();
+                td5_game_mp_cup_award();   /* [MP CUP] tally this race's points */
+            } else {
+                TD5_LOG_I(LOG_TAG, "Replay completion: skip results rebuild + cup award (real results preserved)");
+            }
             return 1;
         }
         return 0;
@@ -7743,6 +7817,58 @@ static void build_results_table(void) {
 static void reset_results_table(void) {
     memset(s_results, 0, sizeof(s_results));
     s_results[0].slot_flags = 1;  /* mark entry 0 as active */
+}
+
+/* ========================================================================
+ * [REPLAY RESULTS PRESERVE 2026-06-27] Snapshot / restore the full
+ * race-results display state across a View Replay.
+ *
+ * capture: called at the top of init_race_session when a replay is starting,
+ *   while the real race's results are still live (before the per-race resets
+ *   wipe them).
+ * restore: called from the race FSM when a replay ends, so whichever screen
+ *   shows the results (SP race results, MP post-race / cup standings) reads the
+ *   genuine race outcome rather than the replay playback's partial result.
+ *
+ * The captured set covers everything the results/standings accessors read:
+ *   s_results[]            -> get_result_primary/secondary/top/finish_position
+ *   s_metrics[]            -> slot_is_finished (post_finish_metric_base) +
+ *                             primary/secondary/avg/top fallbacks
+ *   s_slot_state[]         -> get_slot_companion_2 (eliminated-mid-cup)
+ *   s_race_order[]         -> get_race_order (finishing order)
+ *   s_slot_finish_place[]  -> slot_finish_place (per-viewport indicator)
+ *   s_arrest_time[]        -> cop-chase arrest times
+ *   s_finish_position_display -> centered victory digit
+ * ======================================================================== */
+static void capture_replay_results_snapshot(void) {
+    memcpy(s_saved_results,           s_results,           sizeof(s_results));
+    memcpy(s_saved_metrics,           s_metrics,           sizeof(s_metrics));
+    memcpy(s_saved_slot_state,        s_slot_state,        sizeof(s_slot_state));
+    memcpy(s_saved_race_order,        s_race_order,        sizeof(s_race_order));
+    memcpy(s_saved_slot_finish_place, s_slot_finish_place, sizeof(s_slot_finish_place));
+    memcpy(s_saved_arrest_time,       s_arrest_time,       sizeof(s_arrest_time));
+    s_saved_finish_position_display = s_finish_position_display;
+    s_replay_results_saved = 1;
+    TD5_LOG_I(LOG_TAG, "Replay start: captured real race results "
+              "(slot0 finished=%d primary=%d, order0=%d)",
+              td5_game_slot_is_finished(0), (int)td5_game_get_result_primary(0),
+              (int)s_race_order[0]);
+}
+
+static void restore_replay_results_snapshot(void) {
+    if (!s_replay_results_saved) return;
+    memcpy(s_results,           s_saved_results,           sizeof(s_results));
+    memcpy(s_metrics,           s_saved_metrics,           sizeof(s_metrics));
+    memcpy(s_slot_state,        s_saved_slot_state,        sizeof(s_slot_state));
+    memcpy(s_race_order,        s_saved_race_order,        sizeof(s_race_order));
+    memcpy(s_slot_finish_place, s_saved_slot_finish_place, sizeof(s_slot_finish_place));
+    memcpy(s_arrest_time,       s_saved_arrest_time,       sizeof(s_arrest_time));
+    s_finish_position_display = s_saved_finish_position_display;
+    s_replay_results_saved = 0;
+    TD5_LOG_I(LOG_TAG, "Replay end: restored real race results "
+              "(slot0 finished=%d primary=%d, order0=%d)",
+              td5_game_slot_is_finished(0), (int)td5_game_get_result_primary(0),
+              (int)s_race_order[0]);
 }
 
 /* Number of actual race participants = the contiguous prefix of racer slots

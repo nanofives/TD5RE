@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
+    { CL_ITEM,    "Watching a replay no longer counts as a new race:" },
+    { CL_ITEM,    "  the results / cup standings keep the REAL race" },
+    { CL_ITEM,    "  outcome instead of the replay's partial result" },
     { CL_ITEM,    "Cop Chase HUD overhaul (multiplayer):" },
     { CL_ITEM,    "  the bust ARROW now only pops up over a suspect when" },
     { CL_ITEM,    "  you crash into it, not over every car at once" },

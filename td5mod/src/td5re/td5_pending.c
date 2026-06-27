@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Replay no longer counts as a race (MP cup keeps real results)",
     "MP cop chase: bust arrow shows only when you crash a suspect",
     "MP cop chase: other players' name labels hidden",
     "MP cop chase: no 1st/2nd; top shows per-cop ARRESTS scoreboard",
