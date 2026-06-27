@@ -196,10 +196,43 @@ static int16_t s_gear_torque[16];       /* DAT_00467394: per-gear torque multipl
  * ported TD6 grip/drag tables (td5_track @0x0049d7b8/0x0049d7f8) instead of the
  * TD5 surface tables. These helpers keep every physics call site one-liner-clean
  * and leave native TD5 (no 0x80 bit) byte-identical. */
+/* [SNOW GRIP 2026-06-27] Snowy tracks (Bern etc.) feel slippery because their
+ * track spans use the "ice" surface (index 6, grip 0xB4 = 180 = 0.70 q8 — the
+ * lowest entry in gSurfaceGripCoefficientTable @ 0x004748C0). The original couples
+ * NO weather term to grip; the slip is purely those low ice/mud/off-track
+ * coefficients. To make snowy tracks easier to drive WITHOUT changing dry-track
+ * handling, lift every sub-full-grip surface coefficient toward full grip (0x100)
+ * by TD5RE_SNOW_GRIP percent of its deficit — but ONLY while the active track's
+ * weather is SNOW. Full-grip surfaces (tarmac/default = 0x100) have zero deficit
+ * so they are mathematically untouched. We lift ALL slippery entries (not just
+ * idx 6) because whether a given snow track's racing line writes the primary ice
+ * index (6) or the lane-alternate ice index (25 = 0xC0) lives in STRIP.DAT, not
+ * the exe — boosting the whole sub-1.0 set is correct either way. Default 65;
+ * =0 reverts to byte-faithful original grip. Raising grip increases both the
+ * load-weighted grip limit (line ~3721) and the raw lateral/longitudinal force
+ * (line ~4292), so the car slides less and is easier to control. */
+static inline int32_t phys_snow_grip_boost(int32_t grip)
+{
+    static int s_pct = -1;
+    if (s_pct < 0) {
+        const char *e = getenv("TD5RE_SNOW_GRIP");
+        s_pct = (e && e[0]) ? atoi(e) : 65;   /* % of the grip deficit to recover */
+        if (s_pct < 0)   s_pct = 0;
+        if (s_pct > 100) s_pct = 100;
+        TD5_LOG_I(LOG_TAG, "phys_snow_grip_boost: TD5RE_SNOW_GRIP=%d%% "
+                  "(lift slippery surfaces toward full grip on SNOW weather)", s_pct);
+    }
+    if (s_pct == 0 || g_td5.weather != TD5_WEATHER_SNOW) return grip;
+    if (grip >= 0x100) return grip;            /* full-grip surface: unchanged */
+    return grip + (int32_t)(((int64_t)(0x100 - grip) * s_pct) / 100);
+}
+
 static inline int32_t phys_surface_grip(int surface)
 {
-    if (td5_track_td6_surface_grid_loaded()) return td5_track_td6_surface_grip_q8(surface & 0x1F);
-    return (int32_t)s_surface_friction[surface & 0x1F];
+    int32_t g;
+    if (td5_track_td6_surface_grid_loaded()) g = td5_track_td6_surface_grip_q8(surface & 0x1F);
+    else g = (int32_t)s_surface_friction[surface & 0x1F];
+    return phys_snow_grip_boost(g);   /* [SNOW GRIP] no-op off SNOW weather */
 }
 static inline int32_t phys_surface_drag(int surface)
 {
