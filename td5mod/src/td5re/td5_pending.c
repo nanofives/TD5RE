@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "MP cop chase: suspects can now pick TD6 cars, not just TD5",
     "Controller: Y changes camera; horn moved to L3 (stick click)",
     "Time trial on city tracks (HK/London): mid-track start no insta-end",
     "Replay no longer counts as a race (MP cup keeps real results)",

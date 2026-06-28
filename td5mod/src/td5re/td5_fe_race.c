@@ -277,8 +277,8 @@ static int  s_car_roster_min;           /* min car index for current mode */
 
 /* [MP COP CHASE 2026-06-24] Per-pane car roster for the simultaneous MP grid. In
  * cop chase each player's selectable cars depend on their chosen role: the COP
- * picks a POLICE car only (TD5 33-36 + TD6 cp1-4 46-49), suspects pick the TD5
- * civilian set (0-32, no police). Every other MP mode keeps the full shared
+ * picks a POLICE car only (TD5 33-36 + TD6 cp1-4 46-49), suspects pick the full
+ * civilian set (TD5 0-32 + TD6 37-75 + custom, no police). Every other MP mode keeps the full shared
  * roster, so these are only consulted when s_mp_simul_copchase is set. */
 static int  s_mp_player_roster_min[TD5_MAX_HUMAN_PLAYERS];
 static int  s_mp_player_roster_max[TD5_MAX_HUMAN_PLAYERS];
@@ -1497,14 +1497,21 @@ static int mp_simul_pane_is_cop(int p) {
 
 /* Does car index `car` belong in pane `p`'s role roster?  Independent of
  * s_selected_game_type (the MP flow does not reliably stamp game_type==8), so
- * cop panes test frontend_car_is_cop() directly. Suspect panes (0-32) accept any
- * non-police index in range; full-roster panes fall back to frontend_car_selectable. */
+ * cop panes test frontend_car_is_cop() directly. Suspect panes accept any
+ * non-police civilian index (TD5 0-32 + TD6 37-75 + custom), skipping the
+ * locked-TD5/police gap; full-roster panes fall back to frontend_car_selectable. */
 static int mp_simul_carsel_valid(int p, int car) {
     int lo = s_mp_player_roster_min[p], hi = s_mp_player_roster_max[p];
     if (car < lo || car > hi) return 0;
     if (s_mp_player_roster_cop[p]) return frontend_car_is_cop(car);     /* police only */
-    if (hi < TD5_BASE_CAR_COUNT)   return 1;                            /* 0-32 civilian */
-    return frontend_car_selectable(car);                               /* full roster */
+    /* Suspect: any non-police CIVILIAN car — unlocked TD5 (0..cap) PLUS all TD6
+     * (37-75) and custom (76+). Skips the locked-TD5/police gap (33-36) and the
+     * TD6 cop cars. Mirrors frontend_car_selectable's non-cop-chase branch but is
+     * INDEPENDENT of s_selected_game_type: the MP flow doesn't reliably stamp
+     * game_type==8, and that branch would otherwise wrongly force cops-only here. */
+    if (frontend_car_is_cop(car)) return 0;                            /* no police */
+    if (car >= TD5_BASE_CAR_COUNT) return 1;                           /* TD6 + custom */
+    return car <= frontend_td5_car_cap_inclusive();                    /* unlocked TD5 */
 }
 
 /* Step pane `p`'s selected car by `delta`, wrapping inside its role roster and
@@ -1529,7 +1536,11 @@ static void mp_simul_set_pane_roster(int p) {
         int is_cop = mp_simul_pane_is_cop(p);
         s_mp_player_roster_cop[p] = is_cop;
         s_mp_player_roster_min[p] = is_cop ? 33 : 0;
-        s_mp_player_roster_max[p] = is_cop ? TD6_COP_LAST : 32;
+        /* Suspects get the FULL civilian roster (TD5 0-32 + TD6 37-75 + custom 76+),
+         * not just TD5 0-32 — mp_simul_carsel_valid skips police + the locked gap so
+         * TD6 cars become reachable. Cops stay police-only (33-36 + TD6 cops 46-49).
+         * [2026-06-28 user: cop-chase suspects could only pick TD5 cars, no TD6] */
+        s_mp_player_roster_max[p] = is_cop ? TD6_COP_LAST : (td5_car_total_count() - 1);
         TD5_LOG_I(LOG_TAG, "MP carsel roster: pane=%d role=%s cars=[%d..%d] mask=0x%X",
                   p, is_cop ? "COP(police)" : "SUSPECT(civilian)",
                   s_mp_player_roster_min[p], s_mp_player_roster_max[p],

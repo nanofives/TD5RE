@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "June 28" },
+    { CL_ITEM,    "Cop Chase: suspects can now pick TD6 cars too, not" },
+    { CL_ITEM,    "  just the TD5 line-up (cops still drive police cars)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "June 27" },
     { CL_ITEM,    "Controller: the Y button now changes the camera view" },
     { CL_ITEM,    "  (was an awkward stick-click); the horn moves to the" },
