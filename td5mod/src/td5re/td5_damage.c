@@ -27,7 +27,7 @@
 
 /* ------------------------------------------------------------------ knobs */
 /* Parsed once in td5_damage_init(). All have safe defaults. */
-static int32_t s_max_hp        = 1000000;  /* full health, in impact_mag units */
+static int32_t s_max_hp        = 400000;   /* full health, in impact_mag units (a heavy ~155k crash ~= 39%) */
 static int     s_impact_pct    = 100;      /* % of impact_mag subtracted from health per hit */
 static int32_t s_min_impact    = 4000;     /* impacts below this don't chip health/deform */
 static int32_t s_knockout      = 0;        /* health <= this -> wrecked */
@@ -75,7 +75,7 @@ static float env_float(const char *name, float def, float lo, float hi) {
 int td5_damage_init(void) {
     if (s_inited) return 1;        /* module loader treats non-zero as success */
     s_inited = 1;
-    s_max_hp      = env_int  ("TD5RE_DAMAGE_MAX_HP",        1000000, 1000, 100000000);
+    s_max_hp      = env_int  ("TD5RE_DAMAGE_MAX_HP",        400000,  1000, 100000000);
     s_impact_pct  = env_int  ("TD5RE_DAMAGE_IMPACT_SCALE",  100,     1,    2000);
     s_min_impact  = env_int  ("TD5RE_DAMAGE_MIN_IMPACT",    4000,    0,    1000000);
     s_knockout    = env_int  ("TD5RE_DAMAGE_KNOCKOUT",      0,       0,    100000000);
