@@ -20,6 +20,7 @@
 #include "td5_net.h"
 #include "td5_camera.h"
 #include "td5_vfx.h"
+#include "td5_damage.h"
 #include "td5_fmv.h"
 #include "td5_trace.h"
 
@@ -45,6 +46,7 @@ const TD5_Module g_td5re_modules[] = {
     { "track",    td5_track_init,    td5_track_shutdown    },
     { "trackreg", td5_track_registry_init, td5_track_registry_shutdown }, /* custom-track manifest: after track, before frontend */
     { "physics",  td5_physics_init,  td5_physics_shutdown  },
+    { "damage",   td5_damage_init,   td5_damage_shutdown   }, /* [CAR DAMAGE] port-only; inert unless [Game] CarDamage=1 */
     { "ai",       td5_ai_init,       td5_ai_shutdown       },
     { "camera",   td5_camera_init,   td5_camera_shutdown   },
     { "vfx",      td5_vfx_init,      td5_vfx_shutdown      },

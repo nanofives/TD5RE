@@ -547,6 +547,12 @@ typedef struct TD5_GlobalState {
          * td5_frontend_auto_race_setup; the manual frontend Direction toggle
          * is unaffected. Test override only — no equivalent in the original. */
         int  default_reverse;
+        /* [CAR DAMAGE 2026-06-28] Global GTA4-style car-damage toggle. 0 = OFF
+         * (default) so the faithful Sim is byte-unchanged; 1 = ON applies to ALL
+         * modes (per-vertex deformation, health from impacts, knockout, handling
+         * penalty, tiered smoke, player damage bar). [Game] CarDamage, overridable
+         * via --CarDamage=N. Fine-tuned by the TD5RE_DAMAGE_* env knobs. */
+        int  car_damage;
         /* Enable benchmark mode: redirects main-menu button 2 to TD5_GAMESTATE_BENCHMARK.
          * Matches the dead-code path in TD5_d3d.exe gated by app+0x170 (always 0 in
          * the shipped binary). Default 0 = button 2 is 2-player, matching the

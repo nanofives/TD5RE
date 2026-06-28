@@ -227,6 +227,13 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
  * Exhaust smoke (0x429CF0) = 0x2000. Set before spawn, auto-resets after. */
 static int32_t s_smoke_vel_y = 0x600;
 
+/* [CAR DAMAGE 2026-06-28] Per-spawn diffuse tint for the next smoke quad. The
+ * smoke sprite is greyscale art; a non-white tint MULTIPLIES it, so a grey tint
+ * darkens the puff (black smoke) and an orange tint paints flame/sparks. Default
+ * 0xFFFFFFFF (texture passthrough = the faithful light-grey smoke). Set before a
+ * spawn, auto-resets to white after use (same one-shot pattern as s_smoke_vel_y). */
+static uint32_t s_smoke_tint = 0xFFFFFFFFu;
+
 /* [task#14] TD6 prop-break debris: sim->render hand-off. Physics (sim-time)
  * queues a break burst at a world point via td5_vfx_queue_prop_break(); the
  * per-view particle update (render-time) drains it into each view's bank
@@ -2497,6 +2504,12 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
     int vi = view_index & 1;
     uint8_t *bank = s_particle_banks[vi];
 
+    /* [CAR DAMAGE] Latch + clear the one-shot smoke tint up front so it resets on
+     * EVERY path (incl. the frustum-cull early return below) and can't leak into
+     * the next, untinted spawn. 0xFFFFFFFF = the faithful light-grey smoke. */
+    uint32_t smoke_tint = s_smoke_tint;
+    s_smoke_tint = 0xFFFFFFFFu;
+
     /* Frustum-cull gate. The original gates ALL smoke spawns through
      * RenderRaceActorForView (0x0040C120) — only firing for actors that pass
      * TestMeshAgainstViewFrustum. The port routes the tire/slip smoke chain
@@ -2595,7 +2608,7 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
                 vfx_build_sprite_quad(sq, 0.0f, 0.0f, 128.0f,
                                        sw * 0.5f, sh * 0.5f,
                                        su0, sv0, su0 + sw, sv0 + sh,
-                                       sp, 0xFFFFFFFF);
+                                       sp, smoke_tint);   /* [CAR DAMAGE] tint (white = faithful) */
                 break;
             }
         }
@@ -3188,6 +3201,57 @@ void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor) {
     }
     s_smoke_vel_y = wreck_rise;   /* brisk upward billow (vs exhaust's lazy 0x600) */
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
+}
+
+/* [CAR DAMAGE 2026-06-28] Tiered damage smoke (PORT-ONLY). Emitted per visible
+ * damaged car per frame from the render loop; the tier comes from
+ * td5_damage_smoke_tier():
+ *   1 = light grey wisp        (engine starting to labour)
+ *   2 = dense black column     (badly damaged)
+ *   3 = black smoke + flame/spark embers (critical)
+ * Each puff goes through vfx_spawn_smoke_at_position, which already respects the
+ * 100-slot/view particle budget (it no-ops when the bank is full), so a heavy
+ * pile-up can never exceed the budget. Tint MULTIPLIES the greyscale smoke art:
+ * grey darkens it, orange paints embers. Lift to the roofline so the column sits
+ * on top of the body. No-op for tier <= 0. */
+void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier) {
+    if (!actor || tier <= 0) return;
+
+    uint8_t *ap = (uint8_t *)actor;
+    int32_t pos_x, pos_y, pos_z;
+    memcpy(&pos_x, ap + 0x1FC, 4);
+    memcpy(&pos_y, ap + 0x200, 4);
+    memcpy(&pos_z, ap + 0x204, 4);
+    float mid_x = (float)pos_x * FP_TO_FLOAT;
+    float mid_y = (float)pos_y * FP_TO_FLOAT + 18.0f;   /* near the roofline */
+    float mid_z = (float)pos_z * FP_TO_FLOAT;
+
+    if (tier == 1) {
+        /* Light grey wisp, gentle rise, single puff. */
+        s_smoke_tint  = 0xFFB4B4B4u;
+        s_smoke_vel_y = 0x1000;
+        vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
+        return;
+    }
+
+    /* Tiers 2 & 3: dense dark column (two puffs for density). */
+    s_smoke_tint  = (tier >= 3) ? 0xFF242424u : 0xFF383838u;
+    s_smoke_vel_y = 0x1C00;
+    vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
+    s_smoke_tint  = (tier >= 3) ? 0xFF242424u : 0xFF383838u;
+    s_smoke_vel_y = 0x1600;
+    vfx_spawn_smoke_at_position(actor, mid_x, mid_y + 8.0f, mid_z, 0, s_current_view_index);
+
+    if (tier >= 3) {
+        /* Flame/spark embers: bright orange, fast upward, jittered around the
+         * bonnet so they read as fire flicker rather than smoke. */
+        s_smoke_tint  = 0xFFFF7A1Eu;
+        s_smoke_vel_y = 0x2A00;
+        float jx = (float)((rand() % 17) - 8);
+        float jz = (float)((rand() % 17) - 8);
+        vfx_spawn_smoke_at_position(actor, mid_x + jx, mid_y - 4.0f, mid_z + jz,
+                                    0, s_current_view_index);
+    }
 }
 
 /**

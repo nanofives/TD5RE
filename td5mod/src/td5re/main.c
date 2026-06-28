@@ -399,6 +399,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "StartScreen",          &g_td5.ini.start_screen },
         { "StartSpanOffset",      &g_td5.ini.start_span_offset },
         { "DefaultReverse",       &g_td5.ini.default_reverse },
+        { "CarDamage",            &g_td5.ini.car_damage },
         /* Trace */
         { "RaceTrace",            &g_td5.ini.race_trace_enabled },
         { "RaceTraceSlot",        &g_td5.ini.race_trace_slot },
@@ -893,6 +894,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * InitializeActorTrackPose (0x00434350). 0 = vanilla grid. */
     g_td5.ini.start_span_offset     = td5_ini_int("Game", "StartSpanOffset", 0);
     g_td5.ini.default_reverse       = td5_ini_int("Game", "DefaultReverse", 0);
+    /* [CAR DAMAGE 2026-06-28] Global GTA4-style damage toggle (default OFF). */
+    g_td5.ini.car_damage            = td5_ini_int("Game", "CarDamage", 0);
 
     /* TD6-car player override: [Game] PlayerCarArchive = <3-letter code> forces
      * the player (slot 0) into a ported Test Drive 6 car (re/assets/cars/<code>/)

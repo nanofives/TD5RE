@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "June 28" },
+    { CL_ITEM,    "New: optional GTA-style car damage (off by" },
+    { CL_ITEM,    "  default). Cars dent where they're hit, smoke" },
+    { CL_ITEM,    "  as they take damage, handle worse, and can be" },
+    { CL_ITEM,    "  wrecked out of the race. Turn it on with" },
+    { CL_ITEM,    "  [Game] CarDamage=1 (applies to every mode)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "June 27" },
     { CL_ITEM,    "Controller: the Y button now changes the camera view" },
     { CL_ITEM,    "  (was an awkward stick-click); the horn moves to the" },

@@ -40,6 +40,7 @@
 
 #include "td5_vfx.h"
 #include "td5_arcade.h"   /* ARCADE mode: pickup pads + power-ups */
+#include "td5_damage.h"   /* [CAR DAMAGE] health reset + knockout completion gate */
 #include "td5_trace.h"
 #include "td5_profile.h"
 #include "td5_benchmark.h"
@@ -4054,6 +4055,12 @@ int td5_game_init_race_session(void) {
     /* Reset results table */
     reset_results_table();
 
+    /* [CAR DAMAGE 2026-06-28] Initialize per-actor health + clear deformation for
+     * this race (ResetVehicleActorState does NOT touch the damage padding, so this
+     * is the only initializer). Inert when [Game] CarDamage=0. Runs after actors
+     * are spawned so td5_game_get_actor() returns valid pointers. */
+    td5_damage_reset_race();
+
     /* Notify sound that race is starting */
     td5_sound_set_race_end(0);
 
@@ -6956,6 +6963,7 @@ static int check_race_completion(uint32_t sim_delta) {
             if (g_td5.mp_ai_player_mask & (1u << i)) continue;    /* AI-driven, not a real human */
             if (cop_chase && td5_game_cop_chase_is_suspect(i) &&
                 g_wanted_damage_state[i] <= 0) continue;          /* arrested -> done */
+            if (td5_damage_slot_knocked_out(i)) continue;         /* [CAR DAMAGE] wrecked -> done */
             if (s_slot_state[i].companion_1 == 0) { all_humans_done = 0; break; }
         }
 
@@ -6963,6 +6971,7 @@ static int check_race_completion(uint32_t sim_delta) {
             if (s_slot_state[i].state == 3) continue;  /* disabled */
             if (cop_chase && td5_game_cop_chase_is_suspect(i) &&
                 g_wanted_damage_state[i] <= 0) continue;          /* arrested -> done */
+            if (td5_damage_slot_knocked_out(i)) continue;         /* [CAR DAMAGE] wrecked -> done */
             if (s_slot_state[i].companion_1 == 0) {     /* not finished */
                 int is_human = (i < humans) &&
                                !(g_td5.mp_ai_player_mask & (1u << i));
