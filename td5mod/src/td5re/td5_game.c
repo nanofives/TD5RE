@@ -3185,34 +3185,42 @@ int td5_game_init_race_session(void) {
             if (td6_ss > 0)
                 start_span = td6_ss;
 
-            /* [TD6 REVERSE START] In reverse the loaded geometry is STRIPB.DAT,
+            /* [REVERSE CIRCUIT START] In reverse the loaded geometry is STRIPB.DAT,
              * which is reverse-numbered (STRIPB span i ~= forward span
              * span_count - i; confirmed against both native TD5 and TD6 stripb).
-             * The registry start span is a FORWARD-strip span, so:
+             * At this point start_span holds a FORWARD-strip span: the TD6
+             * registry value (td6_ss) for migrated TD6 circuits, or
+             * s_circuit_start_span[level_num] for native TD5 circuits. So:
              *  - POINT-TO-POINT: using it directly already lands the grid at
              *    STRIPB[fwd_start] ~= the forward FINISH = the reverse start (the
              *    same proven mapping native TD5 P2P reverse relies on), and the
              *    P2P finish (s_td6_finish_span = fwd_finish) lands at the forward
-             *    START = the reverse finish. Leave it unchanged.
-             *  - CIRCUIT: map the forward start span into STRIPB numbering
-             *    (span_count - fwd_start) so the lap/start line and the grid sit
-             *    on the start BANNER. Without this the reverse circuit still laps
-             *    correctly but its start/finish line sits a different physical
-             *    span away from the visible banner.
+             *    START = the reverse finish. Leave it unchanged (not a circuit).
+             *  - CIRCUIT (TD6 *or* native TD5): map the forward start span into
+             *    STRIPB numbering (ring - fwd_start) so the lap/start line and the
+             *    grid sit on the start BANNER. Without this the reverse circuit
+             *    still laps correctly but its start/finish line sits a different
+             *    physical span away from the visible banner — and for native
+             *    circuits (whose s_circuit_start_span is large, e.g. 106) the grid
+             *    would spawn well into the track instead of on the start straight.
+             *  Native TD5 circuits only reach here once gen_reverse_track.py has
+             *  emitted their stripb.json reverse data: load_level clears
+             *  g_td5.reverse_direction for any circuit still lacking reverse data,
+             *  so this mirror never fires on a forward-only track. [2026-06-28]
              *  Use the MAIN-ROAD ring length (g_td5.track_span_ring_length =
              *  STRIP hdr[1]), NOT td5_track_get_span_count() which includes
              *  appended branch spans — the reverse-numbering relation
              *  (STRIPB span i ~= forward span ring-i) is defined over the main
              *  ring only, so mixing in branch spans skews the mapped span. */
             int rev_ring = g_td5.track_span_ring_length;
-            if (td6_ss > 0 && g_td5.reverse_direction && g_track_is_circuit &&
-                rev_ring > 1) {
-                int rev_ss = rev_ring - td6_ss;
+            if (g_td5.reverse_direction && g_track_is_circuit && rev_ring > 1) {
+                int fwd_ss = start_span;
+                int rev_ss = rev_ring - fwd_ss;
                 if (rev_ss < 1) rev_ss = 1;
                 if (rev_ss >= rev_ring) rev_ss = rev_ring - 1;
                 TD5_LOG_I(LOG_TAG,
-                          "TD6 reverse circuit start span: fwd=%d -> rev=%d (ring=%d total=%d)",
-                          td6_ss, rev_ss, rev_ring, track_span_count);
+                          "reverse circuit start span: fwd=%d -> rev=%d (ring=%d total=%d td6=%d)",
+                          fwd_ss, rev_ss, rev_ring, track_span_count, td6_ss);
                 start_span = rev_ss;
             }
         }
@@ -7788,8 +7796,22 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
          * dispatch is skipped for override below). The lap ticks exactly at the
          * visual start/finish straight where the grid spawns; faithful tracks
          * keep the byte-faithful sector-gated path unchanged. */
+        /* [NATIVE REVERSE CIRCUIT 2026-06-28] A native TD5 circuit driven in
+         * reverse loads STRIPB and mirrors its start span to (ring - fwd_start)
+         * (see "reverse circuit start span" above). For tracks whose forward
+         * start sits in the first half (e.g. Cheddar fwd=106), the mirrored
+         * reverse start lands PAST the ring midpoint (577 of 683) — the exact
+         * condition under which the 4-sector bitmask gate below never latches
+         * (the sector boundary formula assumes track_start < ring/2), so no lap
+         * ever counts and the race never finishes. Use the same position-
+         * independent circuit lap logic as the TD6 path (arm opposite, complete
+         * at start). Forward faithful circuits (start < ring/2) keep the
+         * byte-faithful sector-gated path unchanged. */
+        int use_simple_circuit_lap =
+            (g_active_td6_level > 0) ||
+            (g_td5.reverse_direction && g_track_is_circuit);
         int lap_crossed;
-        if (g_active_td6_level > 0) {
+        if (use_simple_circuit_lap) {
             int32_t opp = (track_start + total_spans / 2) % total_spans;
             int32_t d_start = (int32_t)actor_span - track_start;
             if (d_start < 0) d_start = -d_start;

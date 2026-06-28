@@ -94,6 +94,7 @@ static const char *const k_seed[] = {
     "Tutorial overlay: Xbox pad diagram (gamepad only); ALL players press to start; every race",
     "Tutorial overlay: TutorialOverlay=2 forces (bypass gamepad gate); =0 off; never in MP/replay/trace",
     "MP cop chase: suspects can now pick TD6 cars, not just TD5",
+    "Reverse direction now works on the 7 lap circuits (Newcastle etc)",
     "Controller: Y changes camera; horn moved to L3 (stick click)",
     "Time trial on city tracks (HK/London): mid-track start no insta-end",
     "Replay no longer counts as a race (MP cup keeps real results)",
