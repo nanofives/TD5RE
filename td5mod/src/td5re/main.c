@@ -838,7 +838,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* [Police] cop-chase rewrite tuning. Master on/off is [GameOptions] Cops. */
     g_td5.ini.cop_ratio       = td5_ini_int("Police", "CopRatio", 7);
     if (g_td5.ini.cop_ratio < 1) g_td5.ini.cop_ratio = 1;
-    g_td5.ini.cop_catchup_pct = td5_ini_int("Police", "CopCatchup", 150);
+    /* [COP CATCH-UP 2026-06-29] 200% (was 150%): the cop floors its throttle until
+     * it reaches this fraction of the target's speed, so a higher cap lets it
+     * sprint harder to close the gap whenever its car can manage it (the player's
+     * slow sections, corners). Pair with the longer chase leash (cop_chase_max_gap)
+     * so it no longer gives up the instant the player opens a straight-line lead.
+     * Tunable via [Police] CopCatchup (clamped 100..300). */
+    g_td5.ini.cop_catchup_pct = td5_ini_int("Police", "CopCatchup", 200);
     if (g_td5.ini.cop_catchup_pct < 100) g_td5.ini.cop_catchup_pct = 100;
     if (g_td5.ini.cop_catchup_pct > 300) g_td5.ini.cop_catchup_pct = 300;
     g_td5.ini.cop_min_speed   = td5_ini_int("Police", "CopMinSpeed", 0x15638);

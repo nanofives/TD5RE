@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Police are harder to shake: they chase much further" },
+    { CL_ITEM,    "  before giving up and accelerate harder to catch" },
+    { CL_ITEM,    "  you. Speed past a group of cops and they ALL give" },
+    { CL_ITEM,    "  chase now, not just the first one." },
+    { CL_ITEM,    "Fixed traffic vanishing right in front of you when" },
+    { CL_ITEM,    "  a car briefly snags on a bend." },
     { CL_ITEM,    "New: optional LANE ASSIST steering aid. It eases you" },
     { CL_ITEM,    "  toward the centre of the drivable road, pulling" },
     { CL_ITEM,    "  gently near the middle and firmer the further off" },
