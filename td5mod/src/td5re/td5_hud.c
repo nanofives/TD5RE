@@ -27,6 +27,7 @@
 #include "td5_render.h"
 #include "td5_arcade.h"   /* ARCADE per-viewport power-up chip */
 #include "td5_damage.h"   /* [CAR DAMAGE] player HUD health bar */
+#include "td5_laneassist.h" /* lane-assist per-viewport indicator */
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_net.h"      /* [S31] td5_net_get_slot_name for the PAUSED BY overlay */
@@ -1964,6 +1965,64 @@ void td5_hud_draw_battle_wrecks(void)
             td5_hud_queue_text(0, (int)vl->center_x, (int)(vl->vp_int_top + 8.0f), 1,
                                "WRECKS %d", wrecks);
         }
+    }
+}
+
+/* [LANE ASSIST 2026-06-28] Per-viewport "LANE ASSIST" indicator. Visible whenever
+ * the optional steering aid is enabled for the player driving that pane, so the L
+ * toggle has an obvious on-screen on/off difference; the trailing arrow shows
+ * which way the aid is currently steering (<< left, >> right, -- centred). Drawn
+ * top-centre, just under where the countdown sits, on top of the HUD. */
+void td5_hud_draw_laneassist_indicator(void)
+{
+    int views = s_view_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    for (int v = 0; v < views; v++) {
+        int slot = g_actor_slot_map[v];
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+        if (!td5_laneassist_enabled(slot)) continue;
+
+        const TD5_HudViewLayout *vl = &s_view_layout[v];
+        float L = vl->vp_int_left,  T = vl->vp_int_top;
+        float R = vl->vp_int_right, Bb = vl->vp_int_bottom;
+        float w = R - L, h = Bb - T;
+        if (w < 2.0f || h < 2.0f) continue;
+
+        int active = td5_laneassist_hud_active(slot);
+        int dir    = td5_laneassist_hud_dir(slot);
+        const char *label;
+        uint32_t col;
+        if (!active) {
+            /* Enabled but not steering right now (car airborne/crashed/too slow,
+             * or you're steering hard yourself): amber "paused" so a temporary
+             * pause never reads as the aid having broken. */
+            label = "LANE ASSIST (paused)";
+            col   = 0xFFFFB000u;          /* amber */
+        } else {
+            label = (dir < 0) ? "LANE ASSIST <<"
+                  : (dir > 0) ? "LANE ASSIST >>"
+                              : "LANE ASSIST --";
+            col   = 0xFF40FF80u;          /* green = actively steering */
+        }
+
+        float ts = (w / 640.0f) * 0.7f;
+        if (hud_dpi_scale_on()) ts *= hud_size_mul();
+        if (ts > 1.2f)  ts = 1.2f;
+        if (ts < 0.35f) ts = 0.35f;
+
+        float tw     = td5_vui_text_width(label, ts);
+        float pad    = 5.0f * ts;
+        float chip_w = tw + 2.0f * pad;
+        float chip_h = 15.0f * ts + 2.0f * pad;
+        float cx     = vl->center_x - chip_w * 0.5f;
+        float cy     = T + h * 0.065f;
+
+        td5_vui_quad(cx, cy, chip_w, chip_h, 0xC0102818u, -1, 0, 0, 0, 0);
+        td5_vui_quad(cx, cy, chip_w, 3.0f * ts, col, -1, 0, 0, 0, 0);
+        td5_vui_text_centered(cx + chip_w * 0.5f, cy + chip_h * 0.5f - 7.5f * ts,
+                              label, col, ts, ts);
     }
 }
 

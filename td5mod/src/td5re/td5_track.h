@@ -320,6 +320,29 @@ void td5_track_init_actor_segment_placement(int16_t *actor_at_0x80, int32_t *out
 
 int  td5_track_span_lane_count_at(int span_index);
 
+/* [LANE ASSIST 2026-06-28] Continuous look-ahead lane-centre target line for the
+ * optional steering aid (td5_laneassist.c). Walks up to `lookahead` spans forward
+ * from (from_span, from_sub_lane) following the SAME fork rule the original walker
+ * uses (UpdateActorTrackPosition @ 0x004440F0): at a type-8 forward junction
+ * sub_lane < next_lanes stays on the main road (span+1), else commits to the
+ * branch via link_next and carries the lane with the confirmed remap
+ * sub_lane += branch_lanes - cur_lanes (fork_commit=0 ignores branches and stays
+ * on the main line). Each look-ahead span is sampled as the centre of a
+ * `lane_band`-wide group of adjacent lanes (1 = single lane; 2 = centre of two
+ * lanes, more forgiving for narrow lane changes). Blends the sampled centres
+ * (near-weighted) into one aim point in 24.8 fixed-point world XZ. Returns 1 on
+ * success, 0 if no track is loaded or no drivable look-ahead span resolved. */
+int  td5_track_laneassist_target(int from_span, int from_sub_lane,
+                                 int lookahead, int fork_commit, int lane_band,
+                                 int *out_x, int *out_z);
+/* [LANE ASSIST 2026-06-28] Diagnostic: walk ONE continuous lane forward from
+ * `start` for up to `count` spans (carrying the lane across junctions, as the aid
+ * does) and log the look-ahead lane-centre target + inter-step delta, flagging
+ * fork/merge rows (types 8/9/10/11). Confirms target-line continuity across
+ * junctions in a trace run. Env-gated by the caller. */
+void td5_track_laneassist_sweep_diag(int start, int count, int lookahead,
+                                     int fork_commit, int lane_band);
+
 /* --- Lighting ---
  * Per-vehicle zone-driven lighting now lives in td5_render.c as
  * td5_render_apply_track_lighting(); td5_track no longer exposes any

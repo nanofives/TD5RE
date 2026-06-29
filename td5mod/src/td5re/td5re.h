@@ -288,6 +288,13 @@ typedef struct TD5_GlobalState {
          * block on. The orig defaults to auto; in port the menu toggle is
          * not wired, so this INI key is the only way to switch to manual. */
         int  auto_gearbox;
+        /* LaneAssist (port-only accessibility aid, 2026-06-28): per-session
+         * default enable (0 = off, the default; 1 = on) for the optional
+         * lane-assist steering aid — a gentle, capped nudge toward the nearest
+         * lane-centre line, smooth across forks/merges. Per-player at runtime
+         * (keyboard 'L' toggles player 0). Strength/look-ahead/cap/fork-commit
+         * are env knobs (TD5RE_LANEASSIST_*). See td5_laneassist.c. */
+        int  lane_assist;
         /* RearImpactResponse (port-only playability knob, S08 2026-06-04):
          * percentage of the original car-vs-car ANGULAR response (yaw spin +
          * heavy-impact scatter/lift) to retain when a HUMAN player is struck on

@@ -271,6 +271,7 @@ int      s_mp_pane_preview[TD5_MAX_HUMAN_PLAYERS];  /* cached carpic surface han
 int      s_mp_pane_overlay[TD5_MAX_HUMAN_PLAYERS];  /* cached TD6 body-paint overlay handle per pane (0 = none) */
 int      s_mp_pane_btn[TD5_MAX_HUMAN_PLAYERS];      /* focused button per pane (MP_BTN_*) */
 int      s_mp_player_trans[TD5_MAX_HUMAN_PLAYERS];  /* 0 = Automatic, 1 = Manual */
+int      s_mp_player_laneassist[TD5_MAX_HUMAN_PLAYERS]; /* 0 = off, 1 = lane assist on */
 int      s_mp_pane_substate[TD5_MAX_HUMAN_PLAYERS]; /* 0 = car select, 1 = stats spec sheet */
 int      s_mp_host_menu_open = 0;   /* [HOST CAR OPTIONS] host-only set-all-cars modal up */
 int      s_mp_host_menu_sel  = 0;   /* [HOST CAR OPTIONS] highlighted MP_HOST_OPT_* */
@@ -367,6 +368,7 @@ int frontend_mp_add_ai_player(void) {
     s_mp_player_color[slot]  = -1;
     s_mp_player_ready[slot]  = 0;
     s_mp_player_trans[slot]  = (int)((unsigned)rand() & 1u);   /* random gearbox */
+    s_mp_player_laneassist[slot] = g_td5.ini.lane_assist ? 1 : 0; /* default from [Input] LaneAssist */
     s_mp_joined_count        = slot + 1;
     TD5_LOG_I(LOG_TAG, "MP Lobby: added AI player slot %d \"%s\" (%d AI, %d human)",
               slot, s_mp_player_name[slot],
@@ -466,6 +468,7 @@ void mp_session_save_player(int p) {
     s_mp_session.paint[p]  = s_mp_player_paint[p];
     s_mp_session.color[p]  = s_mp_player_color[p];
     s_mp_session.trans[p]  = s_mp_player_trans[p];
+    s_mp_session.laneassist[p] = s_mp_player_laneassist[p];
     s_mp_session.device[p] = s_mp_join_device[p];   /* [per-device] key for restore */
 }
 
@@ -495,6 +498,7 @@ void mp_session_restore_player(int p) {
     s_mp_player_paint[p]  = s_mp_session.paint[p];
     s_mp_player_color[p]  = s_mp_session.color[p];
     s_mp_player_trans[p]  = s_mp_session.trans[p];
+    s_mp_player_laneassist[p] = s_mp_session.laneassist[p];
 }
 
 /* [per-device 2026-06-21] Restore the stored profile for whatever device player
@@ -520,6 +524,7 @@ int mp_session_restore_player_for_device(int p) {
     s_mp_player_paint[p]  = s_mp_session.paint[k];
     s_mp_player_color[p]  = s_mp_session.color[k];
     s_mp_player_trans[p]  = s_mp_session.trans[k];
+    s_mp_player_laneassist[p] = s_mp_session.laneassist[k];
     return 1;
 }
 
@@ -624,6 +629,17 @@ int td5_frontend_get_player_manual(int player) {
     if (s_num_human_players > 1)
         return s_mp_player_trans[player] ? 1 : 0;
     return (player == 0 && s_selected_transmission) ? 1 : 0;
+}
+
+/* Local player p's LANE ASSIST choice: 1 = on, 0 = off. In split-screen each
+ * player toggles their own on the car-select grid (s_mp_player_laneassist[p]);
+ * single-player uses the [Input] LaneAssist value set on the Game Options screen.
+ * Read at race start (td5_game InitRace) to seed each human's enable. */
+int td5_frontend_get_player_laneassist(int player) {
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return 0;
+    if (s_num_human_players > 1)
+        return s_mp_player_laneassist[player] ? 1 : 0;
+    return g_td5.ini.lane_assist ? 1 : 0;
 }
 
 /* On-screen QWERTY (pad name entry): 4 letter rows + a special row (SPACE/DEL/DONE). */
@@ -747,6 +763,7 @@ int             s_game_option_collisions = 1;
 int             s_game_option_powerups = 1;   /* ARCADE item-box power-ups on/off */
 int             s_game_option_car_toughness = 1; /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 int             s_game_option_car_deform = 1;    /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
+int             s_game_option_laneassist = 0; /* lane-assist steering aid on/off */
 int             s_sound_option_sfx_mode;
 int             s_sound_option_sfx_volume = 80;
 int             s_sound_option_music_volume = 80;
@@ -3925,6 +3942,7 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_powerups          = g_td5.ini.powerups;
     s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
     s_game_option_car_deform        = g_td5.ini.car_damage_deform;
+    s_game_option_laneassist        = g_td5.ini.lane_assist;
 
     /* Commit the dynamics (arcade/sim) selection into the physics race-init
      * flag deterministically for the AutoRace path, mirroring the options-screen
@@ -7010,6 +7028,7 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
         frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, level3[ti], 0xFFFFFFFF);
         frontend_draw_value_centered(sx, sy, s_buttons[7].y + 6, level3[di], 0xFFFFFFFF);
     }
+    frontend_draw_value_centered(sx, sy, s_buttons[8].y + 6, on_off[s_game_option_laneassist & 1], 0xFFFFFFFF);
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -11200,10 +11219,10 @@ void td5_frontend_render_ui_rects(void) {
             if (QR_BTN_PHYSICS < s_button_count) fe_draw_option_arrows(QR_BTN_PHYSICS, sx, sy);
             break;
         case TD5_SCREEN_GAME_OPTIONS:
-            /* Eight option rows (0..7): Checkpoint Timers, Traffic, Cops,
+            /* Nine option rows (0..8): Checkpoint Timers, Traffic, Cops,
              * Difficulty, 3D Collisions, Power-ups, [CAR DAMAGE] Car Toughness,
-             * Deformation. OK is index 8 and gets no arrows. */
-            for (int i = 0; i <= 7; i++) fe_draw_option_arrows(i, sx, sy);
+             * Deformation, [LANE ASSIST] Lane Assist. OK is index 9, no arrows. */
+            for (int i = 0; i <= 8; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_CONTROLLER_BINDING:
             /* Draw the action labels+values on top of the (opaque-when-selected)
@@ -11685,6 +11704,7 @@ int td5_frontend_init(void) {
         s_game_option_powerups          = g_td5.ini.powerups;
         s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
         s_game_option_car_deform        = g_td5.ini.car_damage_deform;
+        s_game_option_laneassist        = g_td5.ini.lane_assist;
         s_selected_game_type = g_td5.ini.default_game_type;
     }
 
@@ -12064,9 +12084,9 @@ static void mp_simul_draw_arrows(float bx, float by, float bw, float bh, float s
  * player's accent colour as the INTERIOR fill in place of the default purple.
  * Selector buttons draw the original ◄/► arrow sprites at the edges; `val`/
  * `swatch_rgb` (right, kept clear of the right arrow) are optional. */
-static void mp_simul_draw_btn(float x, float y, float w, float h, const char *label,
-                              int focused, uint32_t pcol, int arrows,
-                              const char *val, int swatch_rgb, float sx, float sy) {
+void mp_simul_draw_btn(float x, float y, float w, float h, const char *label,
+                       int focused, uint32_t pcol, int arrows,
+                       const char *val, int swatch_rgb, float sx, float sy) {
     uint32_t rgb = pcol & 0x00FFFFFFu;
     uint32_t tc  = 0xFFFFFFFFu;
     float ty = (y + (h - SMALLFONT_TTF_CAP) * 0.5f) * sy;   /* vertically centred */
@@ -12114,6 +12134,9 @@ static void mp_simul_draw_btn(float x, float y, float w, float h, const char *la
         float h_cap = (h - 2.0f) / SMALLFONT_TTF_CAP;
         if (h_cap < 0.34f) h_cap = 0.34f;
         if (ls > h_cap) ls = h_cap;
+        /* [7+ players 2026-06-28] Crowded grids (7-9 split panes) get a touch
+         * smaller button font so the labels stay comfortable in the tiny rows. */
+        if (s_num_human_players >= 7) ls *= 0.85f;
         lsx2 = sx * ls; lsy2 = sy * ls;
         lty  = (y + (h - SMALLFONT_TTF_CAP * ls) * 0.5f) * sy;
         lw   = fe_measure_small_text(label) * fe_glyph_sx(lsx2, lsy2);
@@ -12296,10 +12319,6 @@ static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
             mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, NULL, -1, sx, sy);
         else
             mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 0, "-", -1, sx, sy);
-        break;
-    case MP_BTN_TRANS:
-        mp_simul_draw_btn(bx, by, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTO",
-                          focus, pcol, 0, NULL, -1, sx, sy);
         break;
     case MP_BTN_OK:
         mp_simul_draw_btn(bx, by, bw, bh, "OK", focus, pcol, 0, NULL, -1, sx, sy);
@@ -12587,20 +12606,20 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             float top0   = pyr + 32.0f;                  /* below the car-name banner */
             float bottom = pyr + pane_h - 18.0f;
             const float CAR_GAP = 4.0f, ROW_GAP = 2.0f;
-            /* 4 buttons (CAR/PAINT/AUTO/OK) + 1 stat panel = 5 stacked rows below the car. */
-            float avail  = (bottom - top0) - (CAR_GAP + 5.0f * ROW_GAP);
+            /* 3 buttons (CAR/PAINT/OK) + 1 stat panel = 4 stacked rows below the car. */
+            float avail  = (bottom - top0) - (CAR_GAP + 4.0f * ROW_GAP);
             const float PANEL_WANT = 31.0f, PANEL_FLOOR = 12.0f;
             const float BTN_MIN = 11.0f, CAR_MIN = 16.0f;
             float car_h  = pane_h * (big_car ? 0.44f : 0.32f);
             float bh     = btn_cap;
             float panel_h = PANEL_WANT;
-            float over   = (car_h + 4.0f * bh + panel_h) - avail;
+            float over   = (car_h + 3.0f * bh + panel_h) - avail;
             float frame_scale, yy;
             if (over > 0.0f) { float g = car_h - CAR_MIN; if (g > over) { car_h -= over; over = 0.0f; } else { car_h = CAR_MIN; over -= g; } }
-            if (over > 0.0f) { float g = 4.0f * (bh - BTN_MIN); if (g > over) { bh -= over / 4.0f; over = 0.0f; } else { bh = BTN_MIN; over -= g; } }
+            if (over > 0.0f) { float g = 3.0f * (bh - BTN_MIN); if (g > over) { bh -= over / 3.0f; over = 0.0f; } else { bh = BTN_MIN; over -= g; } }
             if (over > 0.0f) { panel_h -= over; if (panel_h < PANEL_FLOOR) panel_h = PANEL_FLOOR; }
-            { float total = car_h + 4.0f * bh + panel_h; if (total > avail && total > 0.0f) { float k = avail / total; car_h *= k; bh *= k; panel_h *= k; } }
-            { float slack = avail - (car_h + 4.0f * bh + panel_h); if (slack > 0.0f) car_h += slack; }
+            { float total = car_h + 3.0f * bh + panel_h; if (total > avail && total > 0.0f) { float k = avail / total; car_h *= k; bh *= k; panel_h *= k; } }
+            { float slack = avail - (car_h + 3.0f * bh + panel_h); if (slack > 0.0f) car_h += slack; }
             frame_scale = bh / 32.0f;
             if (frame_scale > 1.0f) frame_scale = 1.0f;
             if (frame_scale < 0.34f) frame_scale = 0.34f;
@@ -12613,7 +12632,6 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
                                         s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
                                         s_mp_pane_spec_car[p], pcol, 1, frame_scale, sx, sy);
             yy += panel_h + ROW_GAP;
-            mp_simul_draw_pane_button(p, MP_BTN_TRANS, bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
             mp_simul_draw_pane_button(p, MP_BTN_OK,    bx, yy, bw, bh, sx, sy);
         }
 
@@ -13046,7 +13064,13 @@ static void frontend_mp_setup_render(float sx, float sy) {
          * the LAST slot so the nav band lines up with the profile overlay. */
         {
             extern int mp_profiles_enabled(void);   /* defined in td5_fe_race.c */
-            int slots = mp_profiles_enabled() ? 4 : MP_SET_COUNT;
+            int pon = mp_profiles_enabled();
+            /* [LANE ASSIST 2026-06-28] Band now carries 6 rows with profiles on
+             * (NAME, COLOUR, PROFILE, AUTO/MANUAL, ASSIST, OK) or 5 without (PROFILE
+             * absent). PROFILE (slot 2) is drawn by frontend_mp_setup_profile_render;
+             * its slot math (room/6) must match this band. */
+            int slots = pon ? 6 : 5;
+            int trans_slot = pon ? 3 : 2;           /* TRANS row index in the band */
             float bx = px + 8.0f, bw = pane_w - 16.0f;
             float bsy = ay + 4.0f;
             float room = (pyr + pane_h - 12.0f) - bsy;
@@ -13060,7 +13084,13 @@ static void frontend_mp_setup_render(float sx, float sy) {
             yy += bh + 3.0f;
             mp_simul_draw_btn(bx, yy, bw, bh, "COLOUR", focus == MP_SET_COLOUR, pcol, 0,
                               NULL, s_mp_player_accent[p], sx, sy);
-            /* PROFILE (slot 2) is drawn by frontend_mp_setup_profile_render. */
+            /* PROFILE (slot 2, profiles-on only) is drawn by frontend_mp_setup_profile_render. */
+            yy = bsy + (float)trans_slot * (bh + 3.0f);
+            mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTOMATIC",
+                              focus == MP_SET_TRANS, pcol, 0, NULL, -1, sx, sy);
+            yy += bh + 3.0f;
+            mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_laneassist[p] ? "ASSIST ON" : "ASSIST OFF",
+                              focus == MP_SET_LANEASSIST, pcol, 0, NULL, -1, sx, sy);
             yy = bsy + (float)(slots - 1) * (bh + 3.0f);
             mp_simul_draw_btn(bx, yy, bw, bh, "OK", focus == MP_SET_OK, pcol, 0, NULL, -1, sx, sy);
         }

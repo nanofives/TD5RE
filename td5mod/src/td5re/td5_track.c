@@ -1438,6 +1438,305 @@ int td5_track_span_lane_count_at(int span_index)
     return span_lane_count(&s_span_array[span_index]);
 }
 
+/* [LANE ASSIST 2026-06-28] Pure forward (span,sub_lane) step. Mirrors the
+ * crossing-bit 0x01 (Forward) branch of resolve_neighbor() — itself a port of
+ * UpdateActorTrackPosition @ 0x004440F0 — but does NOT mutate any actor state:
+ *   - type 8  (forward junction): sub_lane < next_lanes -> main road (span+1),
+ *     else commit to branch via link_next with sub_lane += branch_lanes -
+ *     cur_lanes [CONFIRMED @ 0x004440F0]. fork_commit=0 always stays on span+1.
+ *   - type 10 (sentinel end): always follow link_next, same lane remap.
+ *   - default: span+1 with the cross-span lane-base adjust sub_lane += h_off -
+ *     dest_h [CONFIRMED @ 0x00444414]; never bridges the main<->branch array
+ *     split (same ring-boundary guard the debug neighbour walk uses), wrapping
+ *     within the ring on a closed circuit and stopping on a point-to-point.
+ * Returns 1 and fills out_span/out_sub on success; 0 if it would leave the
+ * span array (end of a point-to-point route, or a dangling junction link). */
+static int laneassist_step_forward(int span_idx, int sub_lane, int fork_commit,
+                                   int *out_span, int *out_sub)
+{
+    const TD5_StripSpan *sp;
+    int new_span, cur_lanes, h_off, ring, is_circuit;
+
+    if (span_idx < 0 || span_idx >= s_span_count) return 0;
+    sp = &s_span_array[span_idx];
+    cur_lanes = span_lane_count(sp);
+    h_off     = span_height_offset(sp);
+    ring      = g_td5.track_span_ring_length;
+    is_circuit = g_track_is_circuit;
+    new_span  = span_idx + 1;
+
+    switch (sp->span_type) {
+    case 8: {  /* JUNCTION_FWD */
+        int next_idx = span_idx + 1;
+        if (next_idx >= 0 && next_idx < s_span_count) {
+            int next_lanes = span_lane_count(&s_span_array[next_idx]);
+            if (!fork_commit || sub_lane < next_lanes) {
+                new_span = next_idx;                 /* main road, no lane delta */
+            } else {
+                int b = (int)sp->link_next;          /* branch corridor */
+                if (b >= 0 && b < s_span_count) {
+                    int bl = span_lane_count(&s_span_array[b]);
+                    sub_lane += bl - cur_lanes;       /* carry lane across fork */
+                    new_span = b;
+                } else {
+                    new_span = next_idx;              /* fallback to main */
+                }
+            }
+        }
+        break;
+    }
+    case 10: {  /* SENTINEL_END: always follow forward link */
+        int b = (int)sp->link_next;
+        if (b >= 0 && b < s_span_count) {
+            int bl = span_lane_count(&s_span_array[b]);
+            sub_lane += bl - cur_lanes;
+            new_span = b;
+        }
+        break;
+    }
+    default: {
+        int next_idx = span_idx + 1;
+        /* Don't silently cross the main<->branch array split (spans >= ring are
+         * displaced branch corridors). On a closed circuit wrap to the start of
+         * the ring; on a point-to-point route stop. */
+        if (ring > 1 && span_idx < ring && next_idx >= ring) {
+            if (is_circuit) next_idx -= ring;        /* -> 0 */
+            else return 0;
+        }
+        if (next_idx >= 0 && next_idx < s_span_count) {
+            int dest_h = span_height_offset(&s_span_array[next_idx]);
+            sub_lane += h_off - dest_h;
+        }
+        new_span = next_idx;
+        break;
+    }
+    }
+
+    if (new_span < 0 || new_span >= s_span_count) return 0;
+    *out_span = new_span;
+    *out_sub  = sub_lane;
+    return 1;
+}
+
+/* TD5RE_LANEASSIST_AVOID_SLOW (cached, default ON): never aim the steering aid at
+ * a slow/off-road lane (grass / dirt / gravel / sidewalk-verge). */
+static int laneassist_avoid_slow(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_LANEASSIST_AVOID_SLOW");
+        v = (e && e[0] == '0') ? 0 : 1;
+    }
+    return v;
+}
+
+/* [LANE ASSIST 2026-06-28] Target lane-centre for one span.
+ *   band == 0 (default): centre of ALL DRIVABLE lanes — the middle of the whole
+ *     paved road width (slow/off-road lanes excluded), so the aid aligns the car
+ *     to the road centre regardless of which lane it is in.
+ *   band >= 1: centre of a `band`-wide group of adjacent lanes around `sub`
+ *     (1 = single lane; 2 = centre of two), leaning toward the road interior.
+ * With avoid-slow on (default) the aim NEVER includes a slow/off-road lane (grass/
+ * dirt/gravel/verge): for the windowed mode `sub` is snapped to the nearest paved
+ * lane first, and in both modes slow lanes are dropped from the average. Returns
+ * 1 + fills ox/oz (24.8 FP world XZ), 0 if no lane sampled (e.g. a junction span). */
+static int laneassist_band_center(int span, int sub, int band, int *ox, int *oz)
+{
+    int lc = td5_track_span_lane_count_at(span);
+    int lo, hi, l, n = 0;
+    int avoid = laneassist_avoid_slow();
+    int64_t sx = 0, sz = 0;
+    if (lc < 1) lc = 1;
+    if (sub < 0) sub = 0;
+    if (sub > lc - 1) sub = lc - 1;
+
+    if (band <= 0) {
+        /* Centre of ALL drivable lanes (whole paved road). */
+        lo = 0;
+        hi = lc - 1;
+    } else {
+        if (band > lc) band = lc;
+        if (avoid) sub = td5_track_nearest_road_lane(span, sub);  /* never centre on grass */
+        if (band <= 1)             lo = sub;
+        else if (sub * 2 < lc - 1) lo = sub;                 /* left half  -> [sub..] */
+        else                       lo = sub - (band - 1);    /* right half -> [..sub] */
+        if (lo < 0)          lo = 0;
+        if (lo > lc - band)  lo = lc - band;
+        hi = lo + band - 1;
+    }
+
+    for (l = lo; l <= hi; l++) {
+        int x = 0, y = 0, z = 0;
+        /* Exclude slow/off-road lanes from the averaged target. */
+        if (avoid && td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, l)))
+            continue;
+        if (td5_track_get_span_lane_world(span, l, &x, &y, &z)) { sx += x; sz += z; n++; }
+    }
+    if (n == 0) {
+        /* Everything was slow/excluded — fall back to the geometric centre lane. */
+        int x = 0, y = 0, z = 0;
+        int fb = (band <= 0) ? (lc / 2) : sub;
+        if (td5_track_get_span_lane_world(span, fb, &x, &y, &z)) {
+            if (ox) *ox = x;
+            if (oz) *oz = z;
+            return 1;
+        }
+        return 0;
+    }
+    if (ox) *ox = (int)(sx / n);
+    if (oz) *oz = (int)(sz / n);
+    return 1;
+}
+
+int td5_track_laneassist_target(int from_span, int from_sub_lane,
+                                int lookahead, int fork_commit, int lane_band,
+                                int *out_x, int *out_z)
+{
+    /* A single forward span step never moves the lane centre more than ~1M world
+     * units; a look-ahead that suddenly jumps far has crossed a route terminus
+     * where the END sentinel links back to the start (the finish->start wrap on a
+     * point-to-point route). Stop the look-ahead there rather than aim the target
+     * back at the start line. 0x800000 (~8.4M) clears the largest legitimate
+     * cumulative look-ahead (8 spans) with margin. */
+    const int64_t LA_MAX_STEP = 0x800000;
+    int64_t acc_x = 0, acc_z = 0, acc_w = 0;
+    int span = from_span;
+    int sub  = from_sub_lane;
+    int32_t seed_x = 0, seed_z = 0;
+    int have_seed;
+    int i;
+
+    if (out_x) *out_x = 0;
+    if (out_z) *out_z = 0;
+    if (!s_span_array || !s_vertex_table || s_span_count <= 0)
+        return 0;
+    if (lookahead < 1) lookahead = 1;
+    if (lookahead > 8) lookahead = 8;
+    if (from_span < 0 || from_span >= s_span_count)
+        return 0;
+
+    if (lane_band < 0) lane_band = 0;   /* 0 = centre of all drivable lanes */
+    if (lane_band > 4) lane_band = 4;
+
+    have_seed = laneassist_band_center(from_span, from_sub_lane, lane_band,
+                                       &seed_x, &seed_z);
+
+    for (i = 1; i <= lookahead; i++) {
+        int nx_span = span, nx_sub = sub;
+        int lx = 0, lz = 0;
+        int w;
+        if (!laneassist_step_forward(span, sub, fork_commit, &nx_span, &nx_sub))
+            break;
+        span = nx_span;
+        sub  = nx_sub;
+        /* Junction pieces (type 9/10) have no centre quad; skip the sample but
+         * keep walking so the look-ahead spans the junction. Target is the centre
+         * of a `lane_band`-wide group of lanes (more forgiving than one lane). */
+        if (!laneassist_band_center(span, sub, lane_band, &lx, &lz))
+            continue;
+        /* Terminus / bad-link guard: if a sample is implausibly far from the seed
+         * span, the look-ahead has wrapped past the finish — stop here. */
+        if (have_seed) {
+            int64_t ddx = (int64_t)lx - seed_x, ddz = (int64_t)lz - seed_z;
+            if (ddx < 0) ddx = -ddx;
+            if (ddz < 0) ddz = -ddz;
+            if (ddx > LA_MAX_STEP || ddz > LA_MAX_STEP)
+                break;
+        }
+        /* Near-weighted blend: nearer look-ahead spans dominate so the aim point
+         * sits a couple spans ahead and eases smoothly as the car advances. */
+        w = lookahead - i + 1;
+        acc_x += (int64_t)lx * w;
+        acc_z += (int64_t)lz * w;
+        acc_w += w;
+    }
+
+    if (acc_w == 0)
+        return 0;
+    if (out_x) *out_x = (int)(acc_x / acc_w);
+    if (out_z) *out_z = (int)(acc_z / acc_w);
+    return 1;
+}
+
+/* [LANE ASSIST 2026-06-28] Diagnostic sweep: walks ONE continuous lane forward
+ * from `start` for up to `count` spans — exactly the path the steering aid
+ * follows for a car — and logs the look-ahead lane-centre target (and the
+ * inter-step delta) at each span. The lane is CARRIED across junctions with
+ * laneassist_step_forward (the confirmed remap sub_lane += branch_lanes -
+ * cur_lanes at forks), so a trace run can CONFIRM the target line is continuous
+ * across fork/merge spans (types 8/9/10/11): the d=() between consecutive steps
+ * stays in the same band at the <FORK/MERGE> rows as on straight spans, with no
+ * jump. (Seeding each span from its own centre lane instead would introduce a
+ * re-centring jump at every lane-count change that the feature never produces —
+ * which is why this carries the lane.) Inert unless explicitly invoked (env-gated
+ * by the caller in td5_laneassist.c). Logs to race.log via the "track" tag. */
+void td5_track_laneassist_sweep_diag(int start, int count, int lookahead,
+                                     int fork_commit, int lane_band)
+{
+    int prev_ok = 0;
+    int32_t prev_x = 0, prev_z = 0;
+    int span, sub, i;
+
+    if (!s_span_array || s_span_count <= 0) {
+        TD5_LOG_I(LOG_TAG, "laneassist_sweep: no track loaded");
+        return;
+    }
+    if (start < 0) start = 0;
+    if (start >= s_span_count) return;
+    if (count <= 0) count = 64;
+
+    span = start;
+    {
+        int lc0 = span_lane_count(&s_span_array[span]);
+        sub = (lc0 < 1 ? 1 : lc0) / 2;   /* seed from centre lane, then CARRY it */
+    }
+
+    TD5_LOG_I(LOG_TAG, "laneassist_sweep BEGIN start=%d count=%d seed_lane=%d "
+              "lookahead=%d fork_commit=%d (span_count=%d ring=%d circuit=%d) "
+              "[continuous-lane walk]",
+              start, count, sub, lookahead, fork_commit, s_span_count,
+              g_td5.track_span_ring_length, g_track_is_circuit);
+
+    for (i = 0; i < count; i++) {
+        const TD5_StripSpan *sp;
+        int type, lc, nsp = span, nsub = sub;
+        int32_t tx = 0, tz = 0;
+
+        if (span < 0 || span >= s_span_count)
+            break;
+        sp = &s_span_array[span];
+        type = (int)sp->span_type;
+        lc   = span_lane_count(sp);
+
+        if (td5_track_laneassist_target(span, sub, lookahead, fork_commit, lane_band, &tx, &tz)) {
+            if (prev_ok) {
+                int32_t dx = tx - prev_x, dz = tz - prev_z;
+                TD5_LOG_I(LOG_TAG,
+                    "laneassist_sweep span=%d sub=%d type=%d lc=%d tgt=(%d,%d) d=(%d,%d)%s",
+                    span, sub, type, lc, tx, tz, dx, dz,
+                    (type == 8 || type == 9 || type == 10 || type == 11)
+                        ? " <FORK/MERGE>" : "");
+            } else {
+                TD5_LOG_I(LOG_TAG,
+                    "laneassist_sweep span=%d sub=%d type=%d lc=%d tgt=(%d,%d) d=(start)",
+                    span, sub, type, lc, tx, tz);
+            }
+            prev_x = tx; prev_z = tz; prev_ok = 1;
+        } else {
+            TD5_LOG_I(LOG_TAG,
+                "laneassist_sweep span=%d sub=%d type=%d lc=%d -> NO TARGET",
+                span, sub, type, lc);
+            prev_ok = 0;
+        }
+
+        /* Advance one span CARRYING the lane (the feature's own walk). */
+        if (!laneassist_step_forward(span, sub, fork_commit, &nsp, &nsub))
+            break;
+        span = nsp; sub = nsub;
+    }
+    TD5_LOG_I(LOG_TAG, "laneassist_sweep END");
+}
+
 static void rebuild_span_display_list_mapping(void)
 {
     int *mapping;
