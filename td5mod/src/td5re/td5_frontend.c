@@ -272,6 +272,8 @@ int      s_mp_pane_overlay[TD5_MAX_HUMAN_PLAYERS];  /* cached TD6 body-paint ove
 int      s_mp_pane_btn[TD5_MAX_HUMAN_PLAYERS];      /* focused button per pane (MP_BTN_*) */
 int      s_mp_player_trans[TD5_MAX_HUMAN_PLAYERS];  /* 0 = Automatic, 1 = Manual */
 int      s_mp_pane_substate[TD5_MAX_HUMAN_PLAYERS]; /* 0 = car select, 1 = stats spec sheet */
+int      s_mp_host_menu_open = 0;   /* [HOST CAR OPTIONS] host-only set-all-cars modal up */
+int      s_mp_host_menu_sel  = 0;   /* [HOST CAR OPTIONS] highlighted MP_HOST_OPT_* */
 int      s_mp_pane_spec_car[TD5_MAX_HUMAN_PLAYERS]; /* which car's spec is cached per pane (-1 = none) */
 static char     s_mp_pane_spec[TD5_MAX_HUMAN_PLAYERS][17][48]; /* per-pane config.nfo fields */
 /* Per-pane car-select button set (compact, navigated by that player's own pad). */
@@ -7570,6 +7572,108 @@ static float frontend_carphys_frac(int ext_id, int stat) {
     return v;
 }
 
+/* [HOST CAR OPTIONS 2026-06-28] Speed classes by acceleration + top-speed ONLY.
+ * Each built-in, non-cop car with a valid carparam has a combined score = mean of
+ * its normalized TOP-SPEED and ACCEL fractions (both roster-normalised + cop-
+ * excluded by frontend_carphys_frac). Cars are sorted by that score and assigned to
+ * classes by RANK so every class is guaranteed to hold SEVERAL DISTINCT cars:
+ *   - the single slowest and single fastest car are dropped (the extremes),
+ *   - SLOW = the next K slowest, FAST = the next K fastest, AVG = K around the
+ *     median. The three windows never overlap, so each car is in at most ONE class
+ *     and no car is ever shared between classes.
+ * K = TD5RE_HOST_TIER_CARS, default max(9, ~15% of the scored roster), clamped so
+ * the three windows + the two dropped extremes all fit. [user 2026-06-29: a fixed
+ * ~10% band collapsed 'fast' to a single car (Pitbull 2); each class must hold AT
+ * LEAST 9 distinct cars and no car may sit in more than one class.] Cached once. */
+static int   s_speed_built = 0;
+static float s_speed_min   = 0.0f, s_speed_max = 1.0f;   /* combined-score range */
+static int   s_car_tier[TD5_CAR_COUNT];                  /* per-car class: -1/0/1/2 */
+
+static float frontend_car_speed_score(int car) {
+    float ft = frontend_carphys_frac(car, CPS_TOPSPEED);
+    float fa = frontend_carphys_frac(car, CPS_ACCEL);
+    if (ft < 0.0f || fa < 0.0f) return -1.0f;   /* invalid / cop */
+    return 0.5f * (ft + fa);
+}
+
+/* Target cars per class for a scored roster of `n`. Default = max(9, ~15% of n) so
+ * each class holds at least 9 distinct cars [user 2026-06-29]; TD5RE_HOST_TIER_CARS
+ * overrides with an explicit count. Caller still clamps to the no-overlap maximum. */
+static int frontend_host_tier_cars(int n) {
+    const char *e = getenv("TD5RE_HOST_TIER_CARS");
+    int k;
+    if (e && e[0]) {
+        k = atoi(e);
+    } else {
+        k = (n * 15 + 50) / 100;   /* ~15% of the pool, rounded */
+        if (k < 9) k = 9;          /* floor: at least 9 cars per class */
+    }
+    if (k < 2)  k = 2;
+    if (k > 40) k = 40;
+    return k;
+}
+
+static void frontend_build_speed_tiers(void) {
+    int   ids[TD5_CAR_COUNT];
+    float sc[TD5_CAR_COUNT];
+    int   i, j, n = 0;
+    if (s_speed_built) return;
+    s_speed_built = 1;
+    for (i = 0; i < TD5_CAR_COUNT; i++) s_car_tier[i] = -1;
+    for (i = 0; i < TD5_CAR_COUNT; i++) {
+        float s = frontend_car_speed_score(i);
+        if (s < 0.0f) continue;
+        ids[n] = i; sc[n] = s; n++;
+    }
+    /* Insertion sort (ids parallel to sc) ascending by score (n <= 76, runs once). */
+    for (i = 1; i < n; i++) {
+        float sv = sc[i]; int iv = ids[i];
+        for (j = i - 1; j >= 0 && sc[j] > sv; j--) { sc[j + 1] = sc[j]; ids[j + 1] = ids[j]; }
+        sc[j + 1] = sv; ids[j + 1] = iv;
+    }
+    s_speed_min = (n > 0) ? sc[0]     : 0.0f;
+    s_speed_max = (n > 0) ? sc[n - 1] : 1.0f;
+    if (n >= 5) {
+        int k    = frontend_host_tier_cars(n);
+        int kmax = (n - 2) / 3;                  /* room for 3 windows + 2 dropped extremes */
+        int slo, shi, alo, ahi, flo, fhi;
+        if (kmax < 1) kmax = 1;
+        if (k > kmax) k = kmax;
+        slo = 1;             shi = 1 + k;                  /* SLOW: next-slowest K (rank 0 dropped)    */
+        alo = (n - k) / 2;   ahi = (n - k) / 2 + k;        /* AVG : K around the median                */
+        flo = n - 1 - k;     fhi = n - 1;                  /* FAST: next-fastest K (rank n-1 dropped)   */
+        for (j = slo; j < shi; j++) s_car_tier[ids[j]] = 0;
+        for (j = alo; j < ahi; j++) s_car_tier[ids[j]] = 1;
+        for (j = flo; j < fhi; j++) s_car_tier[ids[j]] = 2;
+        TD5_LOG_I(LOG_TAG, "host car speed tiers: %d cars, %d/class, slow[%d,%d) avg[%d,%d) fast[%d,%d)",
+                  n, k, slo, shi, alo, ahi, flo, fhi);
+    } else {
+        TD5_LOG_W(LOG_TAG, "host car speed tiers: only %d scored cars - classes disabled", n);
+    }
+}
+
+float frontend_car_speed_norm(int car) {
+    float s = frontend_car_speed_score(car);
+    float nrm;
+    if (s < 0.0f) return -1.0f;
+    frontend_build_speed_tiers();
+    if (s_speed_max - s_speed_min < 1e-6f) return 0.5f;
+    nrm = (s - s_speed_min) / (s_speed_max - s_speed_min);
+    if (nrm < 0.0f) nrm = 0.0f;
+    if (nrm > 1.0f) nrm = 1.0f;
+    return nrm;
+}
+
+float frontend_speed_tier_center(int tier) {
+    return (tier <= 0) ? 0.15f : (tier == 1) ? 0.50f : 0.85f;
+}
+
+int frontend_carphys_speed_tier(int car) {
+    if (car < 0 || car >= TD5_CAR_COUNT) return -1;
+    frontend_build_speed_tiers();
+    return s_car_tier[car];
+}
+
 static const char *frontend_carphys_drivetrain_text(int ext_id) {
     int dt;
     if (ext_id < 0 || ext_id >= TD5_CAR_COUNT || !s_cps[ext_id].valid) return "-";
@@ -12400,6 +12504,62 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
         fe_draw_quad(0.0f, 227.0f * sy, 640.0f * sx, 26.0f * sy, 0xC0103018u, -1, 0, 0, 1, 1);
         fe_draw_text_centered(320.0f * sx, 232.0f * sy, "ALL READY - STARTING...", 0xFFFFFF80u, sx, sy);
     }
+
+    /* [HOST CAR OPTIONS 2026-06-28] Bottom hint telling the host (slot 0) how to
+     * raise the set-all-cars menu — only while no modal is up and the grid isn't
+     * already counting down to the race. */
+    if (!s_mp_host_menu_open && s_mp_simul_ready_ms == 0) {
+        mp_simul_small_centered_fit(320.0f * sx, 470.0f * sy,
+                                    "HOST: press X / TAB to set everyone's car",
+                                    0xFFFFE060u, sx, sy, 560.0f * sx);
+    }
+
+    /* [HOST CAR OPTIONS 2026-06-28] Host-only modal: a full-screen scrim + centred
+     * panel listing the four set-all-cars actions, the highlighted one drawn in a
+     * translucent bar of the host's accent colour. Only the host drives it (input
+     * is gated in frontend_mp_simul_carsel_update); everyone else is frozen. */
+    if (s_mp_host_menu_open) {
+        static const char *const k_host_opt[MP_HOST_OPT_COUNT] = {
+            "GIVE EVERYONE MY CAR",
+            "EVERYONE: RANDOM SLOW CAR",
+            "EVERYONE: RANDOM AVERAGE CAR",
+            "EVERYONE: RANDOM FAST CAR",
+        };
+        const float px0 = 130.0f, py0 = 135.0f, pw = 380.0f, ph = 210.0f;
+        uint32_t argb = (uint32_t)s_mp_player_accent[0] & 0x00FFFFFFu;
+        uint32_t acc  = argb | 0xFF000000u;
+        int r;
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        /* Full-screen darken. */
+        fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xD8000810u, -1, 0, 0, 1, 1);
+        /* Panel body + accent border (top/bottom/left/right, 3px). */
+        fe_draw_quad(px0 * sx, py0 * sy, pw * sx, ph * sy, 0xF00A1018u, -1, 0, 0, 1, 1);
+        fe_draw_quad(px0 * sx, py0 * sy, pw * sx, 3.0f * sy, acc, -1, 0, 0, 1, 1);
+        fe_draw_quad(px0 * sx, (py0 + ph - 3.0f) * sy, pw * sx, 3.0f * sy, acc, -1, 0, 0, 1, 1);
+        fe_draw_quad(px0 * sx, py0 * sy, 3.0f * sx, ph * sy, acc, -1, 0, 0, 1, 1);
+        fe_draw_quad((px0 + pw - 3.0f) * sx, py0 * sy, 3.0f * sx, ph * sy, acc, -1, 0, 0, 1, 1);
+        /* Title. */
+        mp_simul_small_centered_fit(320.0f * sx, (py0 + 8.0f) * sy, "SET EVERYONE'S CAR",
+                                    acc, sx, sy, (pw - 24.0f) * sx);
+        /* Option rows. */
+        for (r = 0; r < MP_HOST_OPT_COUNT; r++) {
+            float ry = py0 + 31.0f + (float)r * 32.0f;
+            if (r == s_mp_host_menu_sel) {
+                td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                fe_draw_quad((px0 + 8.0f) * sx, ry * sy, (pw - 16.0f) * sx, 24.0f * sy,
+                             argb | 0xC0000000u, -1, 0, 0, 1, 1);
+            }
+            mp_simul_small_centered_fit(320.0f * sx, (ry + 5.0f) * sy, k_host_opt[r],
+                                        r == s_mp_host_menu_sel ? 0xFFFFFFFFu : 0xFFB8C2D0u,
+                                        sx, sy, (pw - 28.0f) * sx);
+        }
+        /* Footer hints. */
+        mp_simul_small_centered_fit(320.0f * sx, (py0 + ph - 38.0f) * sy, "UP / DOWN = CHOOSE",
+                                    0xFF90A0B0u, sx, sy, (pw - 24.0f) * sx);
+        mp_simul_small_centered_fit(320.0f * sx, (py0 + ph - 22.0f) * sy, "A = APPLY     B / X = CANCEL",
+                                    0xFFFFE060u, sx, sy, (pw - 24.0f) * sx);
+    }
+
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
