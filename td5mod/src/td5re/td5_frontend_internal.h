@@ -282,10 +282,10 @@ enum {
 extern int s_mp_host_menu_open;   /* 1 = host car-options modal up (panes frozen) */
 extern int s_mp_host_menu_sel;    /* highlighted MP_HOST_OPT_*                    */
 /* Speed class of a car by acceleration + top-speed ONLY. Returns 0/1/2 if the car
- * sits in the LOW / MID / HIGH band (each a tight ~10% window centred at 20/50/80%
- * of the roster's combined-score range, so the very slowest and very fastest cars
- * are excluded), else -1 (invalid/cop, or a car between bands). Knob
- * TD5RE_HOST_TIER_BAND (full band width %, default 10) widens/narrows the bands.
+ * is in the LOW / MID / HIGH class, else -1 (invalid/cop, a dropped extreme, or a
+ * car between classes). Cars are ranked by score; the single slowest and fastest
+ * are dropped, then each class is K distinct cars (next-slowest / median / next-
+ * fastest) with no overlap. Knob TD5RE_HOST_TIER_CARS (cars per class, default 6).
  * Defined in td5_frontend.c (reuses the cached frontend_carphys_frac stats). */
 int   frontend_carphys_speed_tier(int car);
 /* Normalised position [0,1] of a car in the roster's combined accel+top-speed range

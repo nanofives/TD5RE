@@ -1556,42 +1556,48 @@ static void mp_simul_set_pane_roster(int p) {
     }
 }
 
-/* [HOST CAR OPTIONS 2026-06-28] Pick a random car in speed `tier` (0=slow, 1=avg,
- * 2=fast — by acceleration + top-speed only) that is ALSO valid for pane `p`'s role
- * roster. The tier is a TIGHT band centred at a low/mid/high point (see
- * frontend_carphys_speed_tier), so the very slowest/fastest cars are excluded and a
- * class only spans ~10% of the speed range. Three fallback levels keep the pick
- * sensible for restricted rosters:
- *   1) random among role-valid cars inside the tight band (the normal case),
- *   2) if the band is empty for this roster, the role-valid car whose speed is
- *      CLOSEST to the band centre (still avoids the extremes by aiming at 20/50/80%),
- *   3) if no scored car fits the roster at all (e.g. a cop pane in cop-chase whose
- *      police cars have no civilian speed score), the next role-valid car. */
-static int mp_simul_pick_tier_car(int p, int tier) {
-    int cand[TD5_CAR_COUNT];
-    int c, ncand = 0;
-    float center, bestd;
-    int best;
-    /* 1) Tight-band cars valid for this pane's roster. */
-    for (c = 0; c < TD5_CAR_COUNT && ncand < (int)(sizeof(cand) / sizeof(cand[0])); c++) {
+static int mp_int_in(const int *set, int ns, int v) {
+    int i;
+    for (i = 0; i < ns; i++) if (set[i] == v) return 1;
+    return 0;
+}
+
+/* [HOST CAR OPTIONS 2026-06-28] Pick a random car in speed class `tier` (0=slow,
+ * 1=avg, 2=fast — by acceleration + top-speed only) that is valid for pane `p`'s
+ * role roster AND, where possible, NOT already dealt to another pane this apply
+ * (`used`/`nused`) — so the host's "random slow/avg/fast" gives each player a
+ * DIFFERENT car. Fallback levels for restricted rosters / exhausted classes:
+ *   1) random among role-valid class cars not yet dealt (the normal case),
+ *   2) if the class is exhausted for this roster, allow a repeat from the class,
+ *   3) nearest role-valid scored car to the class centre (prefer un-dealt),
+ *   4) no scored car fits (e.g. a cop pane in cop-chase) -> next role-valid car. */
+static int mp_simul_pick_tier_car(int p, int tier, const int *used, int nused) {
+    int fresh[TD5_CAR_COUNT], any[TD5_CAR_COUNT];
+    int c, nf = 0, na = 0, best_u = -1, best_a = -1;
+    float center, bd_u = 1e30f, bd_a = 1e30f;
+    /* 1/2) Class cars valid for this roster, split into not-yet-dealt vs any. */
+    for (c = 0; c < TD5_CAR_COUNT; c++) {
         if (frontend_carphys_speed_tier(c) != tier) continue;
         if (!mp_simul_carsel_valid(p, c)) continue;
-        cand[ncand++] = c;
+        any[na++] = c;
+        if (!mp_int_in(used, nused, c)) fresh[nf++] = c;
     }
-    if (ncand > 0) return cand[rand() % ncand];
-    /* 2) Nearest role-valid scored car to the band centre. */
+    if (nf > 0) return fresh[rand() % nf];     /* a fresh car of this class      */
+    if (na > 0) return any[rand() % na];       /* class exhausted -> allow repeat */
+    /* 3) Nearest role-valid scored car to the class centre (prefer un-dealt). */
     center = frontend_speed_tier_center(tier);
-    best = -1; bestd = 1e30f;
     for (c = 0; c < TD5_CAR_COUNT; c++) {
-        float n = frontend_car_speed_norm(c);
+        float nrm = frontend_car_speed_norm(c);
         float d;
-        if (n < 0.0f) continue;
+        if (nrm < 0.0f) continue;
         if (!mp_simul_carsel_valid(p, c)) continue;
-        d = n - center; if (d < 0.0f) d = -d;
-        if (d < bestd) { bestd = d; best = c; }
+        d = nrm - center; if (d < 0.0f) d = -d;
+        if (!mp_int_in(used, nused, c)) { if (d < bd_u) { bd_u = d; best_u = c; } }
+        if (d < bd_a) { bd_a = d; best_a = c; }
     }
-    if (best >= 0) return best;
-    /* 3) No scored car for this roster (cop pane) — next role-valid car. */
+    if (best_u >= 0) return best_u;
+    if (best_a >= 0) return best_a;
+    /* 4) No scored car for this roster (cop pane) — next role-valid car. */
     return mp_simul_carsel_step(p, s_mp_player_car[p], +1);
 }
 
@@ -1604,18 +1610,25 @@ static int mp_simul_pick_tier_car(int p, int tier) {
  * (ready) panes are overridden too — the host is the authority here. */
 static void mp_simul_host_apply(int opt, int n) {
     int p, host_car = s_mp_player_car[0];
+    int used[TD5_MAX_HUMAN_PLAYERS], nused = 0;   /* cars dealt so far (random tiers) */
     for (p = 0; p < n; p++) {
-        int car = (opt == MP_HOST_OPT_SAME) ? host_car
-                                            : mp_simul_pick_tier_car(p, opt - MP_HOST_OPT_SLOW);
+        int car = (opt == MP_HOST_OPT_SAME)
+                    ? host_car
+                    : mp_simul_pick_tier_car(p, opt - MP_HOST_OPT_SLOW, used, nused);
         if (!mp_simul_carsel_valid(p, car)) car = mp_simul_carsel_step(p, car, +1);
         if (!mp_simul_carsel_valid(p, car)) continue;   /* empty roster -> leave pane as-is */
+        /* Track the dealt car so the next pane avoids it (random tiers only — SAME
+         * intentionally gives every player the host's identical car). */
+        if (opt != MP_HOST_OPT_SAME && nused < (int)(sizeof(used) / sizeof(used[0])))
+            used[nused++] = car;
         if (s_mp_player_car[p] != car) {
             s_mp_player_car[p]   = car;
             s_mp_player_paint[p] = 0;     /* reset paint on car change (matches manual cycle) */
             mp_simul_refresh_pane(p);
         }
     }
-    TD5_LOG_I(LOG_TAG, "MP host car-apply: opt=%d host_car=%d players=%d", opt, host_car, n);
+    TD5_LOG_I(LOG_TAG, "MP host car-apply: opt=%d host_car=%d players=%d distinct=%d",
+              opt, host_car, n, nused);
 }
 
 /* [HOST CAR OPTIONS 2026-06-28] Drive the host-only modal while it is up: ONLY slot

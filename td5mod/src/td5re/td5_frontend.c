@@ -7574,17 +7574,20 @@ static float frontend_carphys_frac(int ext_id, int stat) {
 
 /* [HOST CAR OPTIONS 2026-06-28] Speed classes by acceleration + top-speed ONLY.
  * Each built-in, non-cop car with a valid carparam has a combined score = mean of
- * its normalized TOP-SPEED and ACCEL fractions (both already roster-normalised +
- * cop-excluded by frontend_carphys_frac). We re-normalise that score to [0,1] over
- * the actual [min,max] of the roster (0 = slowest car, 1 = fastest), then define
- * THREE TIGHT BANDS centred at 20% / 50% / 80% of that range, each BAND wide
- * (default 10% => half-width 5%). A car is "slow/avg/fast" only if it lands inside
- * the low/mid/high band — so the very slowest (norm 0) and very fastest (norm 1)
- * cars fall OUTSIDE the low/high bands and are never the forced pick, and the cars
- * within one class differ by at most BAND. [user 2026-06-29: don't pick the single
- * slowest/fastest; keep each class to a small ~10% speed window.] Cached once. */
+ * its normalized TOP-SPEED and ACCEL fractions (both roster-normalised + cop-
+ * excluded by frontend_carphys_frac). Cars are sorted by that score and assigned to
+ * classes by RANK so every class is guaranteed to hold SEVERAL DISTINCT cars:
+ *   - the single slowest and single fastest car are dropped (the extremes),
+ *   - SLOW = the next K slowest, FAST = the next K fastest, AVG = K around the
+ *     median. The three windows never overlap, so each car is in at most ONE class
+ *     and no car is ever shared between classes.
+ * K = TD5RE_HOST_TIER_CARS (default 6), clamped so the three windows + the two
+ * dropped extremes all fit. [user 2026-06-29: a fixed ~10% band collapsed 'fast' to
+ * a single car (Pitbull 2); each class must hold multiple cars and no car may sit in
+ * more than one class.] Built + cached once. */
 static int   s_speed_built = 0;
-static float s_speed_min    = 0.0f, s_speed_max = 1.0f;   /* combined-score range */
+static float s_speed_min   = 0.0f, s_speed_max = 1.0f;   /* combined-score range */
+static int   s_car_tier[TD5_CAR_COUNT];                  /* per-car class: -1/0/1/2 */
 
 static float frontend_car_speed_score(int car) {
     float ft = frontend_carphys_frac(car, CPS_TOPSPEED);
@@ -7593,66 +7596,79 @@ static float frontend_car_speed_score(int car) {
     return 0.5f * (ft + fa);
 }
 
+/* Target cars per class (knob TD5RE_HOST_TIER_CARS, default 6). */
+static int frontend_host_tier_cars(void) {
+    static int k = -1;
+    if (k < 0) {
+        const char *e = getenv("TD5RE_HOST_TIER_CARS");
+        k = e ? atoi(e) : 6;
+        if (k < 2)  k = 2;
+        if (k > 25) k = 25;
+        TD5_LOG_I(LOG_TAG, "host car-tier size %d cars/class (TD5RE_HOST_TIER_CARS=%s)",
+                  k, e ? e : "default");
+    }
+    return k;
+}
+
 static void frontend_build_speed_tiers(void) {
-    float lo = 1e30f, hi = -1e30f;
-    int i;
+    int   ids[TD5_CAR_COUNT];
+    float sc[TD5_CAR_COUNT];
+    int   i, j, n = 0;
     if (s_speed_built) return;
     s_speed_built = 1;
+    for (i = 0; i < TD5_CAR_COUNT; i++) s_car_tier[i] = -1;
     for (i = 0; i < TD5_CAR_COUNT; i++) {
         float s = frontend_car_speed_score(i);
         if (s < 0.0f) continue;
-        if (s < lo) lo = s;
-        if (s > hi) hi = s;
+        ids[n] = i; sc[n] = s; n++;
     }
-    if (hi > lo) { s_speed_min = lo; s_speed_max = hi; }
-    else         { s_speed_min = 0.0f; s_speed_max = 1.0f; }
-    TD5_LOG_I(LOG_TAG, "host car speed bands: combined-score range [%.3f..%.3f]",
-              s_speed_min, s_speed_max);
+    /* Insertion sort (ids parallel to sc) ascending by score (n <= 76, runs once). */
+    for (i = 1; i < n; i++) {
+        float sv = sc[i]; int iv = ids[i];
+        for (j = i - 1; j >= 0 && sc[j] > sv; j--) { sc[j + 1] = sc[j]; ids[j + 1] = ids[j]; }
+        sc[j + 1] = sv; ids[j + 1] = iv;
+    }
+    s_speed_min = (n > 0) ? sc[0]     : 0.0f;
+    s_speed_max = (n > 0) ? sc[n - 1] : 1.0f;
+    if (n >= 5) {
+        int k    = frontend_host_tier_cars();
+        int kmax = (n - 2) / 3;                  /* room for 3 windows + 2 dropped extremes */
+        int slo, shi, alo, ahi, flo, fhi;
+        if (kmax < 1) kmax = 1;
+        if (k > kmax) k = kmax;
+        slo = 1;             shi = 1 + k;                  /* SLOW: next-slowest K (rank 0 dropped)    */
+        alo = (n - k) / 2;   ahi = (n - k) / 2 + k;        /* AVG : K around the median                */
+        flo = n - 1 - k;     fhi = n - 1;                  /* FAST: next-fastest K (rank n-1 dropped)   */
+        for (j = slo; j < shi; j++) s_car_tier[ids[j]] = 0;
+        for (j = alo; j < ahi; j++) s_car_tier[ids[j]] = 1;
+        for (j = flo; j < fhi; j++) s_car_tier[ids[j]] = 2;
+        TD5_LOG_I(LOG_TAG, "host car speed tiers: %d cars, %d/class, slow[%d,%d) avg[%d,%d) fast[%d,%d)",
+                  n, k, slo, shi, alo, ahi, flo, fhi);
+    } else {
+        TD5_LOG_W(LOG_TAG, "host car speed tiers: only %d scored cars - classes disabled", n);
+    }
 }
 
 float frontend_car_speed_norm(int car) {
     float s = frontend_car_speed_score(car);
-    float n;
+    float nrm;
     if (s < 0.0f) return -1.0f;
     frontend_build_speed_tiers();
     if (s_speed_max - s_speed_min < 1e-6f) return 0.5f;
-    n = (s - s_speed_min) / (s_speed_max - s_speed_min);
-    if (n < 0.0f) n = 0.0f;
-    if (n > 1.0f) n = 1.0f;
-    return n;
+    nrm = (s - s_speed_min) / (s_speed_max - s_speed_min);
+    if (nrm < 0.0f) nrm = 0.0f;
+    if (nrm > 1.0f) nrm = 1.0f;
+    return nrm;
 }
 
 float frontend_speed_tier_center(int tier) {
-    return (tier <= 0) ? 0.20f : (tier == 1) ? 0.50f : 0.80f;
-}
-
-/* Half-width of each tier band as a fraction of the score range. Knob
- * TD5RE_HOST_TIER_BAND = full band width in percent (default 10 => half 0.05). */
-static float frontend_speed_band_halfwidth(void) {
-    static float hw = -1.0f;
-    if (hw < 0.0f) {
-        const char *e = getenv("TD5RE_HOST_TIER_BAND");
-        int pct = e ? atoi(e) : 10;
-        if (pct < 2)  pct = 2;
-        if (pct > 60) pct = 60;
-        hw = (float)pct / 200.0f;
-        TD5_LOG_I(LOG_TAG, "host car-tier band width %d%% (half=%.3f, TD5RE_HOST_TIER_BAND=%s)",
-                  pct, hw, e ? e : "default");
-    }
-    return hw;
+    return (tier <= 0) ? 0.15f : (tier == 1) ? 0.50f : 0.85f;
 }
 
 int frontend_carphys_speed_tier(int car) {
-    float n = frontend_car_speed_norm(car);
-    float hw;
-    int tier;
-    if (n < 0.0f) return -1;
-    hw = frontend_speed_band_halfwidth();
-    for (tier = 0; tier < 3; tier++) {
-        float c = frontend_speed_tier_center(tier);
-        if (n >= c - hw && n <= c + hw) return tier;
-    }
-    return -1;   /* between bands -> not a tight-class pick */
+    if (car < 0 || car >= TD5_CAR_COUNT) return -1;
+    frontend_build_speed_tiers();
+    return s_car_tier[car];
 }
 
 static const char *frontend_carphys_drivetrain_text(int ext_id) {
