@@ -42,6 +42,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  the HAZARD (oil-slick) power-up has been removed" },
     { CL_ITEM,    "  item boxes sit one lane closer to the centre" },
     { CL_ITEM,    "  every power-up effect now lasts 20% longer" },
+    { CL_ITEM,    "Power-ups are now ARCADE-only: picking SIMULATION no" },
+    { CL_ITEM,    "  longer leaves item-box power-ups on the track" },
     { CL_ITEM,    "Cop Chase: suspects can now pick TD6 cars too, not" },
     { CL_ITEM,    "  just the TD5 line-up (cops still drive police cars)" },
     { CL_BLANK,   "" },

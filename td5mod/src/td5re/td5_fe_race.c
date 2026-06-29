@@ -6446,6 +6446,16 @@ void Screen_TrackSelection(void) {
                     /* [ARCADE 2026-06-26] Persist the ARCADE/SIMULATION choice
                      * picked on this screen so it survives a relaunch. */
                     g_td5.ini.dynamics = s_game_option_dynamics;
+                    /* [DYNAMICS COMMIT FIX 2026-06-28] Push the choice into the
+                     * physics race-init flag NOW (mirrors the Quick Race OK handler
+                     * @ ~L1353). ConfigureGameTypeFlags ran at this screen's init
+                     * with the PRE-toggle value, so without this an ARCADE->SIM flip
+                     * on this screen launched with the stale mode and the arcade
+                     * item-box power-ups stayed ON in SIMULATION. A race-init backstop
+                     * in td5_game.c also re-commits g_td5.ini.dynamics, but commit
+                     * here too so get_dynamics() is correct the instant the race is
+                     * requested. */
+                    td5_physics_set_dynamics(s_game_option_dynamics);
                     td5_ini_persist_options();
                     /* [2026-06-12] Per-race AI difficulty: commit the row into
                      * the live tier read by InitializeRaceActorRuntime
