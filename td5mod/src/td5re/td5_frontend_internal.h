@@ -269,6 +269,22 @@ extern int  s_two_player_mode;
 extern int s_selected_button;
 extern uint32_t s_mp_pane_nav_prev[TD5_MAX_HUMAN_PLAYERS];
 extern uint32_t s_mp_simul_ready_ms;
+/* [HOST CAR OPTIONS 2026-06-28] Host-only modal on the simultaneous MP car-select
+ * grid: the host (slot 0) presses X (pad) / TAB (keyboard) to raise a menu that
+ * only the host drives (every other pane freezes) to force every player's car. */
+enum {
+    MP_HOST_OPT_SAME = 0,   /* everyone copies the host's chosen car            */
+    MP_HOST_OPT_SLOW,       /* everyone -> a random SLOW car  (accel+top speed) */
+    MP_HOST_OPT_AVG,        /* everyone -> a random AVERAGE car                 */
+    MP_HOST_OPT_FAST,       /* everyone -> a random FAST car                    */
+    MP_HOST_OPT_COUNT
+};
+extern int s_mp_host_menu_open;   /* 1 = host car-options modal up (panes frozen) */
+extern int s_mp_host_menu_sel;    /* highlighted MP_HOST_OPT_*                    */
+/* Speed class of a car by acceleration + top-speed ONLY: 0=slow,1=avg,2=fast,
+ * -1=invalid (cop / no carparam). Count-terciles over the built-in roster.
+ * Defined in td5_frontend.c (reuses the cached frontend_carphys_frac stats). */
+int frontend_carphys_speed_tier(int car);
 float frontend_update_timed_animation(int max_tick, uint32_t duration_ms);
 int frontend_check_escape(void);
 /* [splitscreen back-confirm 2026-06-24] Universal "confirm before going back"

@@ -1407,6 +1407,10 @@ static uint32_t mp_simul_player_nav(int player) {
     if (td5_plat_input_key_pressed(0xD0)) b |= 8;     /* Down          */
     if (td5_plat_input_key_pressed(0x1C) || td5_plat_input_key_pressed(0x39)) b |= 0x10; /* Enter/Space */
     if (td5_plat_input_key_pressed(0x0E)) b |= 0x20;  /* Backspace = back (ESC handled globally) */
+    /* [HOST CAR OPTIONS 2026-06-28] TAB raises the host-only set-all-cars menu on
+     * the keyboard, mirroring the pad's X (0x80). Acted on only for slot 0 (host)
+     * at the use-site, so mapping it for any keyboard pane here is harmless. */
+    if (td5_plat_input_key_pressed(0x0F)) b |= 0x80;  /* Tab = host options (keyboard) */
     return b;
 }
 
@@ -1552,6 +1556,70 @@ static void mp_simul_set_pane_roster(int p) {
     }
 }
 
+/* [HOST CAR OPTIONS 2026-06-28] Pick a random car in speed `tier` (0=slow, 1=avg,
+ * 2=fast — by acceleration + top-speed only) that is ALSO valid for pane `p`'s role
+ * roster. Mirrors frontend_pick_random_car's collect-then-rand() shape. Falls back
+ * to the next role-valid car when this tier has nothing for the roster (e.g. a cop
+ * pane in cop-chase, whose police roster overlaps no civilian speed tier). */
+static int mp_simul_pick_tier_car(int p, int tier) {
+    int cand[TD5_CAR_COUNT];
+    int c, ncand = 0;
+    for (c = 0; c < TD5_CAR_COUNT && ncand < (int)(sizeof(cand) / sizeof(cand[0])); c++) {
+        if (frontend_carphys_speed_tier(c) != tier) continue;
+        if (!mp_simul_carsel_valid(p, c)) continue;
+        cand[ncand++] = c;
+    }
+    if (ncand == 0) return mp_simul_carsel_step(p, s_mp_player_car[p], +1);
+    return cand[rand() % ncand];
+}
+
+/* [HOST CAR OPTIONS 2026-06-28] Apply a host-menu action to EVERY player pane.
+ * SAME copies the host's (slot 0) chosen car to all; SLOW/AVG/FAST roll each player
+ * an INDEPENDENT random car of that speed class. Every result is clamped to the
+ * player's own role roster (mp_simul_carsel_valid/step) so cop-chase cop/suspect
+ * rosters stay valid, and the pane preview surface is refreshed on a change. The
+ * host is included (a no-op for SAME; a fresh roll for the random tiers). Locked-in
+ * (ready) panes are overridden too — the host is the authority here. */
+static void mp_simul_host_apply(int opt, int n) {
+    int p, host_car = s_mp_player_car[0];
+    for (p = 0; p < n; p++) {
+        int car = (opt == MP_HOST_OPT_SAME) ? host_car
+                                            : mp_simul_pick_tier_car(p, opt - MP_HOST_OPT_SLOW);
+        if (!mp_simul_carsel_valid(p, car)) car = mp_simul_carsel_step(p, car, +1);
+        if (!mp_simul_carsel_valid(p, car)) continue;   /* empty roster -> leave pane as-is */
+        if (s_mp_player_car[p] != car) {
+            s_mp_player_car[p]   = car;
+            s_mp_player_paint[p] = 0;     /* reset paint on car change (matches manual cycle) */
+            mp_simul_refresh_pane(p);
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "MP host car-apply: opt=%d host_car=%d players=%d", opt, host_car, n);
+}
+
+/* [HOST CAR OPTIONS 2026-06-28] Drive the host-only modal while it is up: ONLY slot
+ * 0 (the host) navigates it, every other pane stays frozen. Up/Down move the
+ * highlight, A applies the chosen action to all players, B or X cancels. Every
+ * pane's nav latch is refreshed each frame so a button held during the modal can't
+ * edge-fire when it closes. */
+static void mp_simul_host_menu_input(int n, uint32_t now) {
+    uint32_t bits = mp_simul_player_nav(0);
+    uint32_t edge = bits & ~s_mp_pane_nav_prev[0];
+    int p;
+    (void)now;
+    if (edge & 4) { s_mp_host_menu_sel = (s_mp_host_menu_sel + MP_HOST_OPT_COUNT - 1) % MP_HOST_OPT_COUNT; frontend_play_sfx(2); }
+    if (edge & 8) { s_mp_host_menu_sel = (s_mp_host_menu_sel + 1) % MP_HOST_OPT_COUNT;                     frontend_play_sfx(2); }
+    if (edge & 0x10) {                          /* A = apply + close */
+        mp_simul_host_apply(s_mp_host_menu_sel, n);
+        s_mp_host_menu_open = 0;
+        frontend_play_sfx(3);
+    } else if (edge & (0x20u | 0x80u)) {        /* B or X = cancel */
+        s_mp_host_menu_open = 0;
+        frontend_play_sfx(5);
+    }
+    s_mp_pane_nav_prev[0] = bits;
+    for (p = 1; p < n; p++) s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+}
+
 /* [MP AI TEST PLAYERS 2026-06-25] Auto-resolve every simulated AI slot so the
  * shared per-player setup screens (name/colour setup, position picker, car grid)
  * advance on the lone human's input. AI take no nav (mp_simul_player_nav returns 0
@@ -1581,6 +1649,11 @@ static void frontend_mp_simul_carsel_init(void) {
     frontend_reset_buttons();
     frontend_set_color_panel(0);
     frontend_set_cursor_visible(0);
+
+    /* [HOST CAR OPTIONS 2026-06-28] Never carry a stale host modal into a fresh
+     * (or re-entered) grid. */
+    s_mp_host_menu_open = 0;
+    s_mp_host_menu_sel  = 0;
 
     /* Drop any per-player EXCLUSIVE devices so the shared non-exclusive scan
      * handles can poll each pad again. On first entry these aren't bound (the
@@ -1784,11 +1857,30 @@ static void frontend_mp_simul_carsel_update(void) {
         return;
     }
 
+    /* [HOST CAR OPTIONS 2026-06-28] While the host-only modal is up, ONLY the host
+     * (slot 0) drives it and every other pane is frozen (no car cycling, no ready
+     * toggles, no back-out). */
+    if (s_mp_host_menu_open) {
+        mp_simul_host_menu_input(n, now);
+        return;
+    }
+
     for (p = 0; p < n; p++) {
         uint32_t bits = mp_simul_player_nav(p);
         uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
         int car;
         s_mp_pane_nav_prev[p] = bits;
+
+        /* [HOST CAR OPTIONS 2026-06-28] Host (slot 0) raises the set-all-cars modal
+         * with X (pad) / TAB (keyboard) — both map to bit 0x80. Not while this pane
+         * is in its stats sheet. Return at once so no other pane acts on the opening
+         * frame; the modal branch above freezes them from next frame on. */
+        if (p == 0 && (edge & 0x80) && s_mp_pane_substate[0] == 0) {
+            s_mp_host_menu_open = 1;
+            s_mp_host_menu_sel  = 0;
+            frontend_play_sfx(3);
+            return;
+        }
 
         if (edge & 0x20) want_back = 1;          /* any pad's B -> back to lobby */
 

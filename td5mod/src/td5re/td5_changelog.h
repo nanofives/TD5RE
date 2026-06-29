@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 28" },
+    { CL_ITEM,    "Multiplayer car select: the host can now press X / TAB" },
+    { CL_ITEM,    "  to open a host-only menu that sets EVERYONE's car -" },
+    { CL_ITEM,    "  give all your car, or roll all a random slow / average" },
+    { CL_ITEM,    "  / fast car (ranked by acceleration + top speed)" },
     { CL_ITEM,    "Multiplayer cup fix: player 1 no longer reverts to the" },
     { CL_ITEM,    "  car used in a race BEFORE the cup on the 2nd race -" },
     { CL_ITEM,    "  every cup race now keeps your chosen car" },

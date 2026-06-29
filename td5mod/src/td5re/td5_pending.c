@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "MP car select: host X/TAB menu sets everyone's car (same/slow/avg/fast)",
     "MP cup: player 1 keeps chosen car on race 2+ (no pre-cup car revert)",
     "ARCADE: power-up timer bar shows the full duration (not last secs)",
     "ARCADE: HAZARD (oil-slick) power-up removed from the spawn pool",
