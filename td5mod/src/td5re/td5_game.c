@@ -2757,6 +2757,23 @@ int td5_game_init_race_session(void) {
         g_td5.total_actor_count = spawn_count;
         td5_ai_bind_actor_table(s_actor_memory);
 
+        /* [DYNAMICS COMMIT FIX 2026-06-28] Re-commit the ARCADE/SIMULATION choice
+         * from the authoritative persisted value (g_td5.ini.dynamics — written by
+         * EVERY dynamics selector: Quick Race, Track Select, Game Options) right
+         * before vehicle + arcade init. ConfigureGameTypeFlags also commits it, but
+         * it runs at screen-INIT with the PRE-toggle value; only the Quick Race OK
+         * handler re-committed late. So launching from Track Select (or any path)
+         * after flipping the toggle left the dynamics flag STALE — keying the arcade
+         * power-up gate (and gravity / stat scaling) to the WRONG mode. The visible
+         * symptom: item-box power-ups still appearing in SIMULATION. Committing here
+         * makes the live mode match the user's pick on every launch path, so the
+         * arcade power-ups are truly ARCADE-exclusive (td5_arcade_init_race sets
+         * s_active = td5_physics_get_dynamics()==0). */
+        td5_physics_set_dynamics(g_td5.ini.dynamics);
+        TD5_LOG_I(LOG_TAG, "InitRace: dynamics=%s -> arcade power-ups %s",
+                  g_td5.ini.dynamics ? "SIMULATION" : "ARCADE",
+                  g_td5.ini.dynamics ? "OFF (sim-exclusive disabled)" : "available");
+
         /* Original order (0x42AFE2-0x42AFE7): vehicle + AI runtime init
          * BEFORE actor placement (step 22). */
         td5_physics_init_vehicle_runtime();
