@@ -1558,19 +1558,41 @@ static void mp_simul_set_pane_roster(int p) {
 
 /* [HOST CAR OPTIONS 2026-06-28] Pick a random car in speed `tier` (0=slow, 1=avg,
  * 2=fast — by acceleration + top-speed only) that is ALSO valid for pane `p`'s role
- * roster. Mirrors frontend_pick_random_car's collect-then-rand() shape. Falls back
- * to the next role-valid car when this tier has nothing for the roster (e.g. a cop
- * pane in cop-chase, whose police roster overlaps no civilian speed tier). */
+ * roster. The tier is a TIGHT band centred at a low/mid/high point (see
+ * frontend_carphys_speed_tier), so the very slowest/fastest cars are excluded and a
+ * class only spans ~10% of the speed range. Three fallback levels keep the pick
+ * sensible for restricted rosters:
+ *   1) random among role-valid cars inside the tight band (the normal case),
+ *   2) if the band is empty for this roster, the role-valid car whose speed is
+ *      CLOSEST to the band centre (still avoids the extremes by aiming at 20/50/80%),
+ *   3) if no scored car fits the roster at all (e.g. a cop pane in cop-chase whose
+ *      police cars have no civilian speed score), the next role-valid car. */
 static int mp_simul_pick_tier_car(int p, int tier) {
     int cand[TD5_CAR_COUNT];
     int c, ncand = 0;
+    float center, bestd;
+    int best;
+    /* 1) Tight-band cars valid for this pane's roster. */
     for (c = 0; c < TD5_CAR_COUNT && ncand < (int)(sizeof(cand) / sizeof(cand[0])); c++) {
         if (frontend_carphys_speed_tier(c) != tier) continue;
         if (!mp_simul_carsel_valid(p, c)) continue;
         cand[ncand++] = c;
     }
-    if (ncand == 0) return mp_simul_carsel_step(p, s_mp_player_car[p], +1);
-    return cand[rand() % ncand];
+    if (ncand > 0) return cand[rand() % ncand];
+    /* 2) Nearest role-valid scored car to the band centre. */
+    center = frontend_speed_tier_center(tier);
+    best = -1; bestd = 1e30f;
+    for (c = 0; c < TD5_CAR_COUNT; c++) {
+        float n = frontend_car_speed_norm(c);
+        float d;
+        if (n < 0.0f) continue;
+        if (!mp_simul_carsel_valid(p, c)) continue;
+        d = n - center; if (d < 0.0f) d = -d;
+        if (d < bestd) { bestd = d; best = c; }
+    }
+    if (best >= 0) return best;
+    /* 3) No scored car for this roster (cop pane) — next role-valid car. */
+    return mp_simul_carsel_step(p, s_mp_player_car[p], +1);
 }
 
 /* [HOST CAR OPTIONS 2026-06-28] Apply a host-menu action to EVERY player pane.

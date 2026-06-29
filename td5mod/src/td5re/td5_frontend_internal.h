@@ -281,10 +281,18 @@ enum {
 };
 extern int s_mp_host_menu_open;   /* 1 = host car-options modal up (panes frozen) */
 extern int s_mp_host_menu_sel;    /* highlighted MP_HOST_OPT_*                    */
-/* Speed class of a car by acceleration + top-speed ONLY: 0=slow,1=avg,2=fast,
- * -1=invalid (cop / no carparam). Count-terciles over the built-in roster.
+/* Speed class of a car by acceleration + top-speed ONLY. Returns 0/1/2 if the car
+ * sits in the LOW / MID / HIGH band (each a tight ~10% window centred at 20/50/80%
+ * of the roster's combined-score range, so the very slowest and very fastest cars
+ * are excluded), else -1 (invalid/cop, or a car between bands). Knob
+ * TD5RE_HOST_TIER_BAND (full band width %, default 10) widens/narrows the bands.
  * Defined in td5_frontend.c (reuses the cached frontend_carphys_frac stats). */
-int frontend_carphys_speed_tier(int car);
+int   frontend_carphys_speed_tier(int car);
+/* Normalised position [0,1] of a car in the roster's combined accel+top-speed range
+ * (0 = slowest, 1 = fastest); -1 if invalid/cop. For the nearest-centre fallback. */
+float frontend_car_speed_norm(int car);
+/* Band centre (0.20/0.50/0.80) for tier 0/1/2. */
+float frontend_speed_tier_center(int tier);
 float frontend_update_timed_animation(int max_tick, uint32_t duration_ms);
 int frontend_check_escape(void);
 /* [splitscreen back-confirm 2026-06-24] Universal "confirm before going back"
