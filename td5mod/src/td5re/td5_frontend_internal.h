@@ -42,6 +42,7 @@ typedef struct {
     int  paint[TD5_MAX_HUMAN_PLAYERS];
     int  color[TD5_MAX_HUMAN_PLAYERS];       /* TD6 body colour (0xRRGGBB, -1 = none) */
     int  trans[TD5_MAX_HUMAN_PLAYERS];       /* 0 = Automatic, 1 = Manual */
+    int  laneassist[TD5_MAX_HUMAN_PLAYERS];  /* 0 = off, 1 = lane assist on */
     int  device[TD5_MAX_HUMAN_PLAYERS];      /* [per-device 2026-06-21] enumerated input
                                               * device (s_mp_join_device) that occupied this
                                               * slot, so a profile is restored to whatever
@@ -395,6 +396,7 @@ extern int      s_mp_pane_preview[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_pane_spec_car[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_pane_substate[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_player_trans[TD5_MAX_HUMAN_PLAYERS];
+extern int      s_mp_player_laneassist[TD5_MAX_HUMAN_PLAYERS];
 extern int     s_score_insert_pos;
 extern int  s_car_preview_next_surface;
 extern int  s_car_preview_prev_surface;
@@ -485,12 +487,24 @@ extern int  s_buttonlights_h;
 /* ---- car selection / simultaneous-MP grid ---- */
 #define FE_CARSEL_SLIDE_IN_MS 1250
 #define TD6_COP_LAST  49
-/* [2026-06-29] MORE STATS button removed from the simultaneous-MP car-select grid
- * (the at-a-glance SPEED/ACCEL/HANDLING bars are always shown in each pane, so the
- * full spec overlay was redundant in this mode). Buttons: CAR / PAINT / AUTO-MANUAL
- * / OK. */
-enum { MP_BTN_CAR = 0, MP_BTN_PAINT, MP_BTN_TRANS, MP_BTN_OK, MP_BTN_COUNT };
+/* [2026-06-29] The simultaneous-MP car-select grid pane now carries only CAR /
+ * PAINT / OK: MORE STATS was dropped (the at-a-glance SPEED/ACCEL/HANDLING bars
+ * are always shown in each pane, so the spec overlay was redundant) and the
+ * AUTO/MANUAL transmission toggle moved to the MP Profile-Selection screen
+ * (alongside the new LANE ASSIST toggle — see MP_SET_TRANS/MP_SET_LANEASSIST). */
+enum { MP_BTN_CAR = 0, MP_BTN_PAINT, MP_BTN_OK, MP_BTN_COUNT };
 enum { MP_SET_NAME = 0, MP_SET_COLOUR, MP_SET_OK, MP_SET_COUNT };
+/* Extra MP profile-setup button ids past the header enum (PROFILE=3 is #defined in
+ * td5_fe_race.c). AUTO/MANUAL + LANE ASSIST live on the profile-setup screen between
+ * PROFILE and OK; defined here so both td5_fe_race.c and td5_frontend.c (render) see them. */
+#define MP_SET_TRANS      4
+#define MP_SET_LANEASSIST 5
+/* Shared per-player pane-button drawer (defined in td5_frontend.c). Exposed so the
+ * PROFILE button drawn from td5_fe_race.c uses the IDENTICAL frame/label rendering
+ * as its NAME/COLOUR/AUTO-MANUAL/ASSIST/OK siblings (was a drifting replica). */
+void mp_simul_draw_btn(float x, float y, float w, float h, const char *label,
+                       int focused, uint32_t pcol, int arrows,
+                       const char *val, int swatch_rgb, float sx, float sy);
 #define MP_SIMUL_ANIM_MS 480u   /* lobby -> car-select pane slide-in duration */
 #define MP_KBD_LETTER_ROWS 4
 #define MP_KBD_ROWS        (MP_KBD_LETTER_ROWS + 1)   /* + special row */
@@ -578,6 +592,7 @@ extern int             s_display_window_mode;
 extern int             s_game_option_checkpoint_timers;
 extern int             s_game_option_collisions;
 extern int             s_game_option_powerups;
+extern int             s_game_option_laneassist;
 extern int             s_game_option_difficulty;
 extern int             s_game_option_dynamics;
 extern int             s_game_option_car_toughness;   /* [CAR DAMAGE] 0=Low 1=Normal 2=High */

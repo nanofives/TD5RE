@@ -28,6 +28,7 @@
 #include "td5_pending.h"  /* F11 toggles the pending-test overlay */
 #include "td5_sound.h"   /* td5_sound_toggle_siren — cop-chase siren toggle */
 #include "td5_physics.h" /* FF SIGNALS #1: drift/gear/redline/crash getters for rumble */
+#include "td5_laneassist.h" /* keyboard 'L' toggles the optional lane-assist aid */
 
 /* Defined in td5_game.c */
 extern int    g_actorSlotForView[TD5_MAX_VIEWPORTS];
@@ -940,6 +941,23 @@ void td5_input_poll_race_session(void)
                 s_recovery_held[i] = (uint8_t)recover_now;
             }
         }
+    }
+
+    /* [LANE ASSIST 2026-06-28] Keyboard 'L' (DIK_L = 0x26) toggles the optional
+     * lane-assist steering aid for player 0 at runtime (rising edge so a held key
+     * doesn't strobe). The aid is a DRIVING aid keyed per-driver (player 0 ==
+     * actor slot 0); [Input] LaneAssist sets the per-session default for every
+     * human player. Kept out of the dev-only #ifdef block so it works in release
+     * too (accessibility). L is unbound for player 0 (P0 keyboard drives with
+     * arrows + R recover / T change-view). */
+    {
+        static int s_la_held = 0;
+        int la_now = td5_plat_input_key_pressed(0x26);  /* DIK_L */
+        if (la_now && !s_la_held) {
+            TD5_LOG_I(LOG_TAG, "L key edge -> lane-assist toggle(0)");
+            td5_laneassist_toggle(0);
+        }
+        s_la_held = la_now;
     }
 
     /* Force feedback update for local players.

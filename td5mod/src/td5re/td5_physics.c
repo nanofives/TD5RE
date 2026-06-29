@@ -45,6 +45,7 @@
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
 #include "td5_damage.h"   /* [CAR DAMAGE] health from impacts, knockout freeze, handling penalty */
+#include "td5_laneassist.h" /* optional lane-assist steering aid (port-only, default OFF) */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_carparam.h" /* shared carparam field map + heaviness math (weight mechanics) */
@@ -3410,6 +3411,9 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
             TD5_LOG_I(LOG_TAG, "state0f_enter: slot=%d afc=%d av_roll=%d av_pitch=%d",
                       actor->slot_index, actor->airborne_frame_counter,
                       actor->angular_velocity_roll, actor->angular_velocity_pitch);
+            /* [LANE ASSIST] apply() never runs on this path — flag the aid paused
+             * so its HUD badge doesn't stay stuck "active" during a crash/launch. */
+            td5_laneassist_note_inactive((int)actor->slot_index);
             td5_physics_state0f_damping(actor);
         } else if (actor->slot_index < g_traffic_slot_base && g_race_slot_state[actor->slot_index] == 1) {
             /* Human player — listing 0x0040685C tests `state == 1` strictly,
@@ -4929,6 +4933,13 @@ void td5_physics_update_player(TD5_Actor *actor)
     }
     actor->linear_velocity_x += player_fx;
     actor->linear_velocity_z += player_fz;
+
+    /* [LANE ASSIST 2026-06-28] Optional steering aid (port-only, default OFF):
+     * a gentle, capped lateral nudge toward the nearest lane-centre line,
+     * applied at this same lateral choke point so it composes with — never
+     * overrides — the handling forces above. No-op unless enabled for this
+     * player's slot. See td5_laneassist.c. */
+    td5_laneassist_apply(actor, sin_h, cos_h);
 
     /* --- 14a-slope. Gravity-along-slope longitudinal force [task #6] ---------
      * PORT ADDITION (gated). The faithful model applies gravity only to
@@ -15200,6 +15211,7 @@ void td5_physics_update_stuck_recovery(void)
                     s_manual_recovery_cooldown[slot] = s_recovery_cooldown_ticks;
             }
         }
+
     }
 }
 

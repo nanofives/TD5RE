@@ -2010,9 +2010,6 @@ static void frontend_mp_simul_carsel_update(void) {
             case MP_BTN_PAINT:
                 if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1, lr_edge);
                 break;
-            case MP_BTN_TRANS:
-                if (act || left || right) { s_mp_player_trans[p] = !s_mp_player_trans[p]; frontend_play_sfx(3); }
-                break;
             case MP_BTN_OK:
                 if (act) { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }
                 break;
@@ -2113,11 +2110,16 @@ static char s_mp_prof_confirm_name[TD5_MAX_HUMAN_PLAYERS][16];
  * visible sequence; mp_set_nav_step() advances s_mp_setup_btn within it. The same
  * order index also fixes the render slot (see frontend_mp_setup_profile_render and
  * the companion td5_frontend.c band change documented in the REPORT). */
-static const int k_mp_set_order_prof[4] = { MP_SET_NAME, MP_SET_COLOUR, MP_SET_PROFILE, MP_SET_OK };
-static const int k_mp_set_order_noprof[3] = { MP_SET_NAME, MP_SET_COLOUR, MP_SET_OK };
+/* [LANE ASSIST 2026-06-28] AUTO/MANUAL (TRANS) + LANE ASSIST sit between PROFILE
+ * and OK, so the profile-setup screen owns the per-player transmission + steering-
+ * aid choices (they used to live on the car-select pane). */
+static const int k_mp_set_order_prof[6] = { MP_SET_NAME, MP_SET_COLOUR, MP_SET_PROFILE,
+                                            MP_SET_TRANS, MP_SET_LANEASSIST, MP_SET_OK };
+static const int k_mp_set_order_noprof[5] = { MP_SET_NAME, MP_SET_COLOUR,
+                                              MP_SET_TRANS, MP_SET_LANEASSIST, MP_SET_OK };
 static const int *mp_set_nav_order(int profiles_on, int *count) {
-    if (profiles_on) { *count = 4; return k_mp_set_order_prof; }
-    *count = 3; return k_mp_set_order_noprof;
+    if (profiles_on) { *count = 6; return k_mp_set_order_prof; }
+    *count = 5; return k_mp_set_order_noprof;
 }
 /* Visible-slot index (0-based, top-to-bottom) of a button id in the current order;
  * -1 if not present. Used by the render to place PROFILE between COLOUR and OK. */
@@ -2641,6 +2643,14 @@ static void frontend_mp_setup_update(void) {
             if (mp_set_slot_of(s_mp_setup_btn[p], pon) < 0) s_mp_setup_btn[p] = MP_SET_NAME; /* knob toggled / stale id */
             if (edge & 4) { mp_set_nav_step(p, -1, pon); frontend_play_sfx(2); }
             if (edge & 8) { mp_set_nav_step(p, +1, pon); frontend_play_sfx(2); }
+            /* [LANE ASSIST 2026-06-28] LEFT/RIGHT flips the AUTO/MANUAL + LANE ASSIST
+             * on/off rows (act also flips them, below). Other rows ignore L/R here. */
+            if (edge & 3) {
+                if (s_mp_setup_btn[p] == MP_SET_TRANS)
+                    { s_mp_player_trans[p] = !s_mp_player_trans[p]; frontend_play_sfx(3); }
+                else if (s_mp_setup_btn[p] == MP_SET_LANEASSIST)
+                    { s_mp_player_laneassist[p] = !s_mp_player_laneassist[p]; frontend_play_sfx(3); }
+            }
         }
         if (edge & 0x10) {
             if (s_mp_setup_btn[p] == MP_SET_NAME)   { s_mp_setup_sub[p] = 1; if (isk) td5_plat_input_flush_chars(); frontend_play_sfx(3); }
@@ -2654,6 +2664,10 @@ static void frontend_mp_setup_update(void) {
                 mp_prof_clamp_sel(p);
                 frontend_play_sfx(3);
             }
+            else if (s_mp_setup_btn[p] == MP_SET_TRANS)
+                { s_mp_player_trans[p] = !s_mp_player_trans[p]; frontend_play_sfx(3); }
+            else if (s_mp_setup_btn[p] == MP_SET_LANEASSIST)
+                { s_mp_player_laneassist[p] = !s_mp_player_laneassist[p]; frontend_play_sfx(3); }
             else { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }   /* OK */
         }
         if (edge & 0x20) want_back = 1;
@@ -4917,68 +4931,6 @@ static int leave_modal_center_on(void) {
     return v;
 }
 
-/* [#6 2026-06-16] Draw ONE name/colour-pane chip pixel-identically to its
- * NAME/COLOUR/OK siblings. The siblings render through td5_frontend.c's static
- * mp_simul_draw_btn() -> static fe_draw_button_frame_fill(), neither of which is
- * linkable from this translation unit. fe_draw_button_frame_fill's live path
- * (VectorUI, g_td5.ini.vector_ui defaults to 1) is a single fe_draw_roundrect
- * call whose PUBLIC mirror is td5_vui_roundrect (identical args) — so this
- * replicates mp_simul_draw_btn EXACTLY: the same frame constants, the same
- * focused accent-fill / unfocused border-only treatment, the same readable-label
- * luminance pick, and the same SMALLFONT-cap-centred label. (No arrows / value /
- * swatch — PROFILE is a plain button like OK.) Geometry is supplied by the caller
- * so it lands in the shared 4-slot band. */
-static void mp_profile_chip_draw(float x, float y, float w, float h,
-                                 const char *label, int focused, uint32_t pcol,
-                                 float sx, float sy) {
-    /* SMALLFONT_TTF_CAP (9.0f) and fe_glyph_sx (min(sx,sy)) are file-static in
-     * td5_frontend.c; mirror the exact same values here. */
-    const float smallcap = 9.0f;
-    const float gsx = (sx < sy) ? sx : sy;
-    uint32_t rgb = pcol & 0x00FFFFFFu;
-    uint32_t tc  = 0xFFFFFFFFu;
-    float ty = (y + (h - smallcap) * 0.5f) * sy;   /* vertically centred (= mp_simul_draw_btn) */
-
-    /* fe_draw_button_frame_fill(.., bb_state = focused?0:1, interior = rgb|FF, ..)
-     * VectorUI path -> fe_draw_roundrect with these EXACT constants (td5_frontend.c
-     * lines 8350-8358). bb_state 0 (focused/selected) fills with the accent; the
-     * unfocused state draws the blue rim with a transparent interior. */
-    if (g_td5.ini.vector_ui && td5_vui_shapes_available()) {
-        uint32_t mid_c, inner_c, outer_c;
-        float fillA;
-        if (focused) { mid_c = 0xFFD9CA00u; inner_c = 0xFFA08C00u; outer_c = 0xFF3C2F00u; fillA = 1.0f; }
-        else         { mid_c = 0xFF7995FFu; inner_c = 0xFF496BDCu; outer_c = 0xFF001675u; fillA = 0.0f; }
-        td5_vui_roundrect(x * sx, y * sy, w * sx, h * sy,
-                          20.0f * sy /*r_large TL/BR*/, 5.0f * sy /*r_small TR/BL*/,
-                          6.0f * sy  /*border side*/,  2.0f * sy /*border top/bot*/,
-                          mid_c, inner_c, outer_c, rgb | 0xFF000000u, fillA);
-    } else {
-        /* VectorUI off: fe_draw_button_frame_fill's 9-slice path (static, not
-         * linkable). Fall back to a flat accent frame so the chip still reads as
-         * a sibling button; gated identically to the proc path above. */
-        uint32_t bc = rgb | 0xFF000000u;
-        float t = 2.0f;
-        if (focused)
-            td5_vui_quad(x * sx, y * sy, w * sx, h * sy, rgb | 0xC0000000u, -1, 0, 0, 1, 1);
-        td5_vui_quad(x * sx, y * sy, w * sx, t * sy, bc, -1, 0, 0, 1, 1);
-        td5_vui_quad(x * sx, (y + h - t) * sy, w * sx, t * sy, bc, -1, 0, 0, 1, 1);
-        td5_vui_quad(x * sx, y * sy, t * sx, h * sy, bc, -1, 0, 0, 1, 1);
-        td5_vui_quad((x + w - t) * sx, y * sy, t * sx, h * sy, bc, -1, 0, 0, 1, 1);
-    }
-
-    /* Focused label colour = readable over the accent fill (mp_simul_draw_btn's
-     * luminance test); unfocused stays white. */
-    if (focused) {
-        int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
-        int lum = (r * 30 + g * 59 + b * 11) / 100;
-        tc = (lum > 150) ? 0xFF101010u : 0xFFFFFFFFu;
-    }
-    {
-        float lw = fe_measure_small_text(label) * gsx;
-        fe_draw_small_text((x + w * 0.5f) * sx - lw * 0.5f, ty, label, tc, sx, sy);
-    }
-}
-
 void frontend_mp_setup_profile_render(float sx, float sy) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0;
@@ -5065,18 +5017,19 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
             uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
             int sub = s_mp_setup_sub[p];
 
-            /* (a) [#3] idle PROFILE button — placed in the SAME 4-slot band the
-             * companion td5_frontend.c band draws (NAME=0, COLOUR=1, PROFILE=2,
-             * OK=3), so PROFILE sits visually between COLOUR and OK. Geometry MUST
-             * match frontend_mp_setup_render's idle band (see the REPORT for the
-             * required 3->4 slot change there): with the slide-in done (rise=0)
-             *   ay=py+22, bsy=ay+4, room=(py+pane_h-12)-bsy, bh=room/4-3 (clamp
-             *   12..26); slot i top = bsy + i*(bh+3). We draw slot 2. */
+            /* (a) [#3] idle PROFILE button — placed in the SAME band the companion
+             * td5_frontend.c band draws (NAME=0, COLOUR=1, PROFILE=2, AUTO/MANUAL=3,
+             * ASSIST=4, OK=5), so PROFILE sits visually between COLOUR and the
+             * transmission row. Geometry MUST match frontend_mp_setup_render's idle
+             * band: with the slide-in done (rise=0) ay=py+22, bsy=ay+4,
+             * room=(py+pane_h-12)-bsy, bh=room/6-3 (clamp 12..26); slot i top =
+             * bsy + i*(bh+3). We draw slot 2. (Overlay only runs with profiles on,
+             * where the band is 6 slots — see frontend_mp_setup_render.) */
             if (!s_mp_player_ready[p] && sub == 0) {
                 float ay  = py + 22.0f;
                 float bsy = ay + 4.0f;
                 float room = (py + pane_h - 12.0f) - bsy;
-                float bh = room / 4.0f - 3.0f;       /* 4 slots: NAME/COLOUR/PROFILE/OK */
+                float bh = room / 6.0f - 3.0f;       /* 6 slots: NAME/COLOUR/PROFILE/TRANS/ASSIST/OK */
                 float bx = px + 8.0f, bw = pane_w - 16.0f;
                 float yy;
                 int focus = (s_mp_setup_btn[p] == MP_SET_PROFILE);
@@ -5084,14 +5037,13 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 if (bh > 26.0f) bh = 26.0f;
                 yy = bsy + 2.0f * (bh + 3.0f);       /* slot index 2 (between COLOUR and OK) */
                 if (mp_profile_btn_style_enabled()) {
-                    /* [#6] Route through the SAME drawing the NAME/COLOUR/OK
-                     * siblings use (mp_simul_draw_btn -> fe_draw_button_frame_fill),
-                     * replicated exactly in mp_profile_chip_draw (the siblings'
-                     * helper is file-static in td5_frontend.c and not linkable
-                     * here). This includes the label centring, so the explicit
-                     * mp_pos_small_centered "PROFILE" below is no longer needed. */
-                    mp_profile_chip_draw(bx, yy, bw, bh, "PROFILE", focus,
-                                         rgb | 0xFF000000u, sx, sy);
+                    /* [2026-06-28] Draw PROFILE with the EXACT siblings' drawer
+                     * (mp_simul_draw_btn, now exposed via td5_frontend_internal.h)
+                     * so it matches NAME/COLOUR/AUTO-MANUAL/ASSIST/OK pixel-for-
+                     * pixel — the old mp_profile_chip_draw replica had drifted
+                     * (missing the height-scaled frame + fit-scaled label). */
+                    mp_simul_draw_btn(bx, yy, bw, bh, "PROFILE", focus,
+                                      rgb | 0xFF000000u, 0, NULL, -1, sx, sy);
                 } else {
                     /* [#6 disabled] legacy steel/amber inline look. */
                     td5_vui_quad(bx * sx, yy * sy, bw * sx, bh * sy,

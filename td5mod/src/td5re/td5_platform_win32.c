@@ -6393,7 +6393,8 @@ static int td5_log_classify_module(const char *module)
         strcmp(module, "ai")       == 0 ||
         strcmp(module, "track")    == 0 ||
         strcmp(module, "camera")   == 0 ||
-        strcmp(module, "vfx")      == 0)
+        strcmp(module, "vfx")      == 0 ||
+        strcmp(module, "laneassist") == 0)
         return TD5_LOG_CAT_RACE;
 
     /* Everything else: render, asset, platform, sound, net, fmv, main, ... */

@@ -274,6 +274,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("GameOptions", "Collisions",       g_td5.ini.collisions);
     td5_ini_write_int("GameOptions", "Powerups",         g_td5.ini.powerups);
     td5_ini_write_int("GameOptions", "AutoGearbox",      g_td5.ini.auto_gearbox);
+    td5_ini_write_int("Input",       "LaneAssist",       g_td5.ini.lane_assist);
 
     /* [CAR DAMAGE 2026-06-29] Global damage levels (Game Options rows). */
     td5_ini_write_int("Game", "CarToughness", g_td5.ini.car_damage_toughness);
@@ -340,6 +341,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Collisions",           &g_td5.ini.collisions },
         { "Powerups",             &g_td5.ini.powerups },
         { "AutoGearbox",          &g_td5.ini.auto_gearbox },
+        { "LaneAssist",           &g_td5.ini.lane_assist },
         { "RearImpactResponse",   &g_td5.ini.rear_impact_response },
         { "AntiTunnel",           &g_td5.ini.anti_tunnel },
         { "AntiTunnelSlop",       &g_td5.ini.anti_tunnel_slop },
@@ -743,6 +745,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
     g_td5.ini.powerups           = td5_ini_int("GameOptions", "Powerups", 1);
     g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
+    /* LaneAssist (port-only accessibility aid, 2026-06-28): per-session default
+     * enable for the optional lane-assist steering aid. Off by default (not
+     * faithful). Runtime per-player toggle via keyboard 'L'; strength/look-ahead/
+     * cap/fork-commit via TD5RE_LANEASSIST_* env knobs. */
+    g_td5.ini.lane_assist        = td5_ini_int("Input", "LaneAssist", 0);
+    if (g_td5.ini.lane_assist < 0) g_td5.ini.lane_assist = 0;
+    if (g_td5.ini.lane_assist > 1) g_td5.ini.lane_assist = 1;
     /* Rear-impact softening (S08): % of the rear-end angular response to keep
      * for a human player. 100 = faithful, default 45 = recoverable nudge. */
     g_td5.ini.rear_impact_response = td5_ini_int("GameOptions", "RearImpactResponse", 45);

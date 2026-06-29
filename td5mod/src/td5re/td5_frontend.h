@@ -77,6 +77,11 @@ int  td5_frontend_mp_view_actor_slot(int cell);
  * (MP uses s_mp_player_trans[player]; single-player uses s_selected_transmission). --- */
 int  td5_frontend_get_player_manual(int player);
 
+/* --- Per-local-player LANE ASSIST choice: 1 = on, 0 = off. MP: car-select grid
+ * per-player; single-player: [Input] LaneAssist (Game Options). Read at race
+ * start to seed td5_laneassist's per-player enable. --- */
+int  td5_frontend_get_player_laneassist(int player);
+
 /* --- UI rendering helpers --- */
 void td5_frontend_render_ui_rects(void);
 void td5_frontend_flush_sprite_blits(void);

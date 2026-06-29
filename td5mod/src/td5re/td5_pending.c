@@ -30,6 +30,8 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Lane Assist: road-centre aid, firmer further off; avoids grass",
+    "Lane Assist toggle: SP Game Options / MP Profile screen / L key",
     "Traffic Battle: MP split-screen mode (below CUP) + solo (TD5RE_BATTLE=1)",
     "Traffic Battle: WIN option MOST WRECKS or CHECKPOINTS (catch-up deadline)",
     "Traffic Battle: oncoming traffic, no rivals/cops, spawn mid-track",

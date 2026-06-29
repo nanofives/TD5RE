@@ -32,6 +32,7 @@
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5_camera.h"
 #include "td5_frontend.h"
+#include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
 #include "td5_hud.h"
 #include "td5re.h"
 #include "td5_platform.h"
@@ -1751,6 +1752,18 @@ int td5_game_init_race_session(void) {
     s_battle_chase_active = 0;
     s_battle_chase_span   = INT32_MIN;
     memset(s_battle_chase_caught, 0, sizeof(s_battle_chase_caught));
+
+    /* [LANE ASSIST 2026-06-28] Seed each local human's lane-assist enable from
+     * their menu choice (SP: Game Options [Input] LaneAssist; MP: the per-player
+     * Profile-screen toggle). Keyboard 'L' can still flip it per player in-race. */
+    {
+        int nh_la = g_td5.num_human_players;
+        int pi;
+        if (nh_la < 1) nh_la = 1;
+        if (nh_la > TD5_MAX_HUMAN_PLAYERS) nh_la = TD5_MAX_HUMAN_PLAYERS;
+        for (pi = 0; pi < nh_la; pi++)
+            td5_laneassist_set_player(pi, td5_frontend_get_player_laneassist(pi));
+    }
 
 #ifndef TD5RE_RELEASE
     /* Dev smoke-test: TD5RE_FORCE_REPLAY=1 boots straight into View-Replay mode
@@ -6587,6 +6600,10 @@ int td5_game_run_race_frame(void) {
     /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" tally. Self-gated:
      * no-op unless the Traffic Destruction battle mode is active. */
     td5_hud_draw_battle_wrecks();
+    /* [LANE ASSIST 2026-06-28] Per-viewport "LANE ASSIST" indicator (on/off +
+     * steering-direction arrow). Self-gated: no-op unless the optional aid is
+     * enabled for the pane's player. */
+    td5_hud_draw_laneassist_indicator();
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op

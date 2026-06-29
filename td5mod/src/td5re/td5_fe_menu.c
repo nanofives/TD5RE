@@ -1638,10 +1638,14 @@ void Screen_GameOptions(void) {
         /* [ARCADE 2026-06-26] POWER-UPS on/off row (item boxes). New row 5; OK
          * moves to index 6. Same x/w as the other option rows for alignment. */
         frontend_create_button("POWER-UPS",               120, 297, 0x128, 0x20);
-        /* [CAR DAMAGE 2026-06-29] Two global damage-level rows (idx 6,7); OK -> idx 8. */
-        frontend_create_button("CAR TOUGHNESS",           120, 337, 0x128, 0x20);
-        frontend_create_button("DEFORMATION",             120, 377, 0x128, 0x20);
-        frontend_create_button(SNK_OkButTxt,               216, 417, 0x60,  0x20);
+        /* [CAR DAMAGE 2026-06-29] Two global damage-level rows (idx 6,7).
+         * [LANE ASSIST 2026-06-28] steering-aid on/off row (idx 8); OK -> idx 9.
+         * Rows 6-9 use a slightly tighter 35px pitch so all nine option rows +
+         * OK clear the 480px canvas. */
+        frontend_create_button("CAR TOUGHNESS",           120, 332, 0x128, 0x20);
+        frontend_create_button("DEFORMATION",             120, 367, 0x128, 0x20);
+        frontend_create_button("LANE ASSIST",             120, 402, 0x128, 0x20);
+        frontend_create_button(SNK_OkButTxt,               216, 437, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -1671,7 +1675,7 @@ void Screen_GameOptions(void) {
             /* Each row cycles its respective global on arrow input.
              * OK button triggers exit. [S02 (c) 2026-06-04] Circuit Laps (old
              * idx 0) was removed; the remaining six rows shifted up one index. */
-            if (delta != 0 && active_button >= 0 && active_button <= 7) {
+            if (delta != 0 && active_button >= 0 && active_button <= 8) {
                 /* Nav beep on any selector-row change, matching the original's
                  * central arrow handler (DXSound::Play(2) @ 0x0042687c) and the
                  * other Options screens (Control/Sound). Rows 0..4 are all
@@ -1716,9 +1720,13 @@ void Screen_GameOptions(void) {
                     if (s_game_option_car_deform < 0) s_game_option_car_deform = 2;
                     if (s_game_option_car_deform > 2) s_game_option_car_deform = 0;
                     s_inner_state = 4;
+                } else if (active_button == 8) {
+                    /* [LANE ASSIST] steering-aid on/off. */
+                    s_game_option_laneassist ^= 1;
+                    s_inner_state = 4;
                 }
             }
-            if (s_button_index == 8) { /* OK (moved 6->8 for the two CAR DAMAGE rows) */
+            if (s_button_index == 9) { /* OK (after 2 CAR DAMAGE rows + LANE ASSIST) */
                 /* Sync the committed game options into g_td5.ini (the global the
                  * boot-override at frontend init reads) and write them back to
                  * td5re.ini so the selection survives a relaunch. The original
@@ -1743,6 +1751,7 @@ void Screen_GameOptions(void) {
                 /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels. */
                 g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
                 g_td5.ini.car_damage_deform    = s_game_option_car_deform;
+                g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
                 td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
