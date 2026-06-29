@@ -68,6 +68,14 @@ typedef struct {
 static DamageSlot s_slot[TD5_MAX_TOTAL_ACTORS];
 static uint8_t    s_ko_notified[TD5_MAX_TOTAL_ACTORS];  /* mark_broken_down fired once per knockout */
 
+/* Per-impact-EVENT tracking so a SUSTAINED contact (grinding a wall, resting
+ * against a car — especially slow/stopped) doesn't drain the bar every tick.
+ * A new collision event (first contact after a gap) deals full damage; while
+ * contact persists, only a hit HARDER than the event's peak deals the extra. */
+static int32_t s_last_contact_tick[TD5_MAX_TOTAL_ACTORS];
+static int32_t s_event_peak_mag[TD5_MAX_TOTAL_ACTORS];
+static int     s_contact_gap = 8;   /* ticks of no-contact that end a collision event */
+
 /* ----------------------------------------------------------------- utils */
 static int env_int(const char *name, int def, int lo, int hi) {
     const char *e = getenv(name);
@@ -135,6 +143,7 @@ int td5_damage_init(void) {
     s_smoke_black = env_int  ("TD5RE_DAMAGE_SMOKE_BLACK",   65,      0,    100);
     s_smoke_fire  = env_int  ("TD5RE_DAMAGE_SMOKE_FIRE",    88,      0,    100);
     s_scuff_pct   = env_int  ("TD5RE_DAMAGE_SCUFF",         55,      0,    100);
+    s_contact_gap = env_int  ("TD5RE_DAMAGE_CONTACT_GAP",   8,       1,    300);
     apply_levels();   /* seed HP/dent/disp from the saved levels (or env override) */
     TD5_LOG_I(LOG_TAG, "car_damage: init max_hp=%d impact_pct=%d min_imp=%d ko=%d "
               "K=%d dent_ref=%d dent_frac=%d disp_frac=%d radius=%.2f penalty=%d smoke=%d/%d/%d",
@@ -190,6 +199,8 @@ void td5_damage_reset_race(void) {
         }
         ds->mesh = NULL; ds->vcount = 0; ds->dirty = 0;
         s_ko_notified[i] = 0;
+        s_last_contact_tick[i] = -1000000;   /* first contact is always a fresh event */
+        s_event_peak_mag[i] = 0;
 
         /* Init health ONLY when enabled — when off we never touch the actor
          * padding, so the faithful sim is byte-identical to the original. */
@@ -422,8 +433,29 @@ void td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
 
     ensure_health_init(actor);
 
-    /* Drive health down (port-only formula). */
-    int64_t dmg64 = (int64_t)mag * (int64_t)s_impact_pct / 100;
+    /* --- Per-EVENT gate: don't keep draining the bar while contact PERSISTS ---
+     * A real crash is the moment of impact, not every tick the cars stay touching.
+     * If contact lapsed for > s_contact_gap ticks, this is a NEW event -> full
+     * damage. While contact continues, only a hit HARDER than the event's running
+     * peak deals the difference; a steady grind (mag flat or falling — typical
+     * when slow/stopped) deals nothing further. */
+    int32_t tick = (int32_t)g_td5.simulation_tick_counter;
+    int32_t dt   = tick - s_last_contact_tick[slot];
+    int32_t eff;
+    if (dt < 0 || dt > s_contact_gap) {
+        eff = mag;                              /* fresh collision event */
+        s_event_peak_mag[slot] = mag;
+    } else if (mag > s_event_peak_mag[slot]) {
+        eff = mag - s_event_peak_mag[slot];     /* harder hit mid-contact -> only the extra */
+        s_event_peak_mag[slot] = mag;
+    } else {
+        s_last_contact_tick[slot] = tick;       /* sustained contact: no new damage */
+        return;
+    }
+    s_last_contact_tick[slot] = tick;
+
+    /* Drive health down (port-only formula) using the EVENT-effective magnitude. */
+    int64_t dmg64 = (int64_t)eff * (int64_t)s_impact_pct / 100;
     int32_t dmg = (dmg64 > 0x7FFFFFFF) ? 0x7FFFFFFF : (int32_t)dmg64;
     int32_t before = actor->damage_health;
     actor->damage_health -= dmg;
@@ -432,8 +464,9 @@ void td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
     if (actor->damage_accum < 0x7FFFFFFF - dmg) actor->damage_accum += dmg;
     else actor->damage_accum = 0x7FFFFFFF;
 
-    /* Deform the body mesh at the hit region. */
-    if (hit) apply_deform(slot, mag, hit);
+    /* Deform the body mesh at the hit region (event-effective magnitude, so a
+     * sustained grind doesn't keep crumpling the panel). */
+    if (hit) apply_deform(slot, eff, hit);
 
     /* Knockout transition: fire the broken-down hook once. The health-based
      * knocked-out test (used by the freeze + completion gate) is inherently
@@ -444,12 +477,12 @@ void td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
         !s_ko_notified[slot]) {
         s_ko_notified[slot] = 1;
         td5_ai_mark_actor_broken_down(slot);
-        TD5_LOG_I(LOG_TAG, "car_damage: KNOCKOUT slot=%d (mag=%d dmg=%d hp %d->0)",
-                  slot, mag, dmg, before);
+        TD5_LOG_I(LOG_TAG, "car_damage: KNOCKOUT slot=%d (mag=%d eff=%d dmg=%d hp %d->0)",
+                  slot, mag, eff, dmg, before);
     } else {
-        TD5_LOG_I(LOG_TAG, "car_damage: hit slot=%d mag=%d dmg=%d hp=%d/%d "
+        TD5_LOG_I(LOG_TAG, "car_damage: hit slot=%d mag=%d eff=%d dmg=%d hp=%d/%d "
                   "lat=%d fwd=%d side=%d tier=%d",
-                  slot, mag, dmg, actor->damage_health, s_max_hp,
+                  slot, mag, eff, dmg, actor->damage_health, s_max_hp,
                   hit ? hit->lat : 0, hit ? hit->fwd : 0, hit ? hit->is_side : 0,
                   td5_damage_smoke_tier(slot));
     }
