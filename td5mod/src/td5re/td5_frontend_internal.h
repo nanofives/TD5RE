@@ -285,8 +285,8 @@ extern int s_mp_host_menu_sel;    /* highlighted MP_HOST_OPT_*                  
  * is in the LOW / MID / HIGH class, else -1 (invalid/cop, a dropped extreme, or a
  * car between classes). Cars are ranked by score; the single slowest and fastest
  * are dropped, then each class is K distinct cars (next-slowest / median / next-
- * fastest) with no overlap. Knob TD5RE_HOST_TIER_CARS (cars per class, default 6).
- * Defined in td5_frontend.c (reuses the cached frontend_carphys_frac stats). */
+ * fastest) with no overlap. K = TD5RE_HOST_TIER_CARS, default max(9, ~15% of the
+ * roster). Defined in td5_frontend.c (reuses the cached frontend_carphys_frac stats). */
 int   frontend_carphys_speed_tier(int car);
 /* Normalised position [0,1] of a car in the roster's combined accel+top-speed range
  * (0 = slowest, 1 = fastest); -1 if invalid/cop. For the nearest-centre fallback. */

@@ -7581,10 +7581,10 @@ static float frontend_carphys_frac(int ext_id, int stat) {
  *   - SLOW = the next K slowest, FAST = the next K fastest, AVG = K around the
  *     median. The three windows never overlap, so each car is in at most ONE class
  *     and no car is ever shared between classes.
- * K = TD5RE_HOST_TIER_CARS (default 6), clamped so the three windows + the two
- * dropped extremes all fit. [user 2026-06-29: a fixed ~10% band collapsed 'fast' to
- * a single car (Pitbull 2); each class must hold multiple cars and no car may sit in
- * more than one class.] Built + cached once. */
+ * K = TD5RE_HOST_TIER_CARS, default max(9, ~15% of the scored roster), clamped so
+ * the three windows + the two dropped extremes all fit. [user 2026-06-29: a fixed
+ * ~10% band collapsed 'fast' to a single car (Pitbull 2); each class must hold AT
+ * LEAST 9 distinct cars and no car may sit in more than one class.] Cached once. */
 static int   s_speed_built = 0;
 static float s_speed_min   = 0.0f, s_speed_max = 1.0f;   /* combined-score range */
 static int   s_car_tier[TD5_CAR_COUNT];                  /* per-car class: -1/0/1/2 */
@@ -7596,17 +7596,20 @@ static float frontend_car_speed_score(int car) {
     return 0.5f * (ft + fa);
 }
 
-/* Target cars per class (knob TD5RE_HOST_TIER_CARS, default 6). */
-static int frontend_host_tier_cars(void) {
-    static int k = -1;
-    if (k < 0) {
-        const char *e = getenv("TD5RE_HOST_TIER_CARS");
-        k = e ? atoi(e) : 6;
-        if (k < 2)  k = 2;
-        if (k > 25) k = 25;
-        TD5_LOG_I(LOG_TAG, "host car-tier size %d cars/class (TD5RE_HOST_TIER_CARS=%s)",
-                  k, e ? e : "default");
+/* Target cars per class for a scored roster of `n`. Default = max(9, ~15% of n) so
+ * each class holds at least 9 distinct cars [user 2026-06-29]; TD5RE_HOST_TIER_CARS
+ * overrides with an explicit count. Caller still clamps to the no-overlap maximum. */
+static int frontend_host_tier_cars(int n) {
+    const char *e = getenv("TD5RE_HOST_TIER_CARS");
+    int k;
+    if (e && e[0]) {
+        k = atoi(e);
+    } else {
+        k = (n * 15 + 50) / 100;   /* ~15% of the pool, rounded */
+        if (k < 9) k = 9;          /* floor: at least 9 cars per class */
     }
+    if (k < 2)  k = 2;
+    if (k > 40) k = 40;
     return k;
 }
 
@@ -7631,7 +7634,7 @@ static void frontend_build_speed_tiers(void) {
     s_speed_min = (n > 0) ? sc[0]     : 0.0f;
     s_speed_max = (n > 0) ? sc[n - 1] : 1.0f;
     if (n >= 5) {
-        int k    = frontend_host_tier_cars();
+        int k    = frontend_host_tier_cars(n);
         int kmax = (n - 2) / 3;                  /* room for 3 windows + 2 dropped extremes */
         int slo, shi, alo, ahi, flo, fhi;
         if (kmax < 1) kmax = 1;
