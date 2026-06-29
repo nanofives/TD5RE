@@ -3297,14 +3297,17 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
     fe_race_draw_screen_title("SELECT GAME MODE", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
 
-    /* Host indicator: the gold HOST crown + P1 colour swatch + short label, so the
-     * host marker on the game-mode selector matches the crown used on the profile,
-     * screen-disposition and car selectors. Crown left, swatch and label shifted
-     * right to make room. */
-    td5_vui_crown((float)MV_BX, 73.0f, 13.0f, 10.0f, 0xFFFFD21Eu, sx, sy);
-    td5_vui_quad(((float)MV_BX + 17.0f) * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
-    td5_vui_text(((float)MV_BX + 34.0f) * sx, 72.0f * sy,
-                 "OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES", 0xFFC0C8D0u, sx, sy);
+    /* Host indicator: the gold HOST pill badge + P1 colour swatch + short label, so
+     * the host marker on the game-mode selector matches the badge used on the
+     * profile, screen-disposition and car selectors. Badge left; swatch and label
+     * shift right by the badge's measured width. */
+    {
+        float bw = td5_vui_host_badge((float)MV_BX, 72.0f, 13.0f, sx, sy);
+        float sw_x = (float)MV_BX + bw + 6.0f;
+        td5_vui_quad(sw_x * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
+        td5_vui_text((sw_x + 17.0f) * sx, 72.0f * sy,
+                     "OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES", 0xFFC0C8D0u, sx, sy);
+    }
 
     for (m = 0; m < TD5_MP_MODE_COUNT; m++) {
         float byp = (float)(MV_Y0 + m * MV_GAP);
@@ -3991,10 +3994,11 @@ static void mp_roleselect_row(float sx, float sy, int p, float y, const char *va
     else
         snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
     /* [MP HOST INDICATOR 2026-06-28] Slot 0 is the host (it confirms with OK).
-     * Tag its row with the same gold crown the splitscreen car-select panes use,
-     * just left of the name, so the host is obvious on these lobby screens too. */
+     * Tag its row with the same gold HOST pill badge the splitscreen selectors
+     * use, in the left margin ahead of the name column, so the host is obvious on
+     * these lobby screens too. */
     if (p == 0)
-        td5_vui_crown(133.0f, y + 1.0f, 12.0f, 9.0f, 0xFFFFD21Eu, sx, sy);
+        td5_vui_host_badge(108.0f, y - 1.0f, 13.0f, sx, sy);
     td5_vui_text(150.0f * sx, y * sy, nb, mp_slot_color(p), sx, sy);
     td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, val, 0xFFFFFFFFu, sx, sy);
     td5_vui_arrow((MP_ROW_VAL_CX - 52.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
@@ -4507,11 +4511,11 @@ void frontend_mp_position_render2(float sx, float sy) {
 
             if (occ >= 0) {
                 /* [MP HOST INDICATOR 2026-06-28] Slot 0 is the host — drop the
-                 * gold crown into the top-left corner of its cell (clear of the
-                 * centred cell number + name) so the host's chosen screen is
+                 * gold HOST pill badge into the top-left corner of its cell (clear
+                 * of the centred cell number + name) so the host's chosen screen is
                  * obvious on the CHOOSE YOUR SCREEN picker too. */
                 if (occ == 0)
-                    td5_vui_crown(px + 6.0f, py + 6.0f, 14.0f, 10.0f, 0xFFFFD21Eu, sx, sy);
+                    td5_vui_host_badge(px + 6.0f, py + 6.0f, 13.0f, sx, sy);
                 if (s_mp_player_name[occ][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[occ]);
                 else                          snprintf(buf, sizeof buf, "PLAYER %d", occ + 1);
                 mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 26.0f) * sy, buf,

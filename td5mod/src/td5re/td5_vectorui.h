@@ -39,12 +39,12 @@ float td5_vui_text_width(const char *s, float sx);
 void td5_vui_quad(float x, float y, float w, float h, uint32_t color, int tex_page,
                   float u0, float v0, float u1, float v1);
 
-/* --- Small heraldic crown badge (the multiplayer HOST indicator) ---
- * Drawn entirely from solid quads (headband + 3 spikes + 3 ball finials) so it
- * needs no font glyph and stays crisp at any resolution. (x,y,w,h) are VIRTUAL
- * 640x480 px; the function scales by sx/sy internally. A 1px dark outline keeps
- * the gold crown legible over any player-accent banner colour. */
-void td5_vui_crown(float x, float y, float w, float h, uint32_t color, float sx, float sy);
+/* --- Gold "HOST" pill badge (the multiplayer HOST indicator) ---
+ * A neon rounded-rect chip (same procedural panel as the menu buttons) with
+ * crisp 'HOST' text. (x,y) and the chip height h are VIRTUAL 640x480 px; the
+ * chip width auto-fits the text. Returns the badge WIDTH in virtual px so callers
+ * can reserve / clear the space next to it. Crisp at any resolution. */
+float td5_vui_host_badge(float x, float y, float h, float sx, float sy);
 
 /* --- In-race HUD font SDF (original typeface, crisp at any resolution) ---
  * td5_vui_hudfont_page() returns the SDF atlas page (-1 if unavailable).
