@@ -7832,17 +7832,22 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
  * names still fit in the small split panes. */
 static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
                                         const char *f7, const char *f8, int car_ext_id,
-                                        uint32_t accent, int compact, float sx, float sy) {
-    static const char *lbl[3] = { "SPEED", "ACCEL", "HANDLING" };
+                                        uint32_t accent, int compact, float frame_scale,
+                                        float sx, float sy) {
+    static const char *lbl[3]  = { "SPEED", "ACCEL", "HANDLING" };
+    static const char *lblS[3] = { "S", "A", "H" };   /* narrow-column fallback */
+    const char **labels = lbl;
     float spd = 0, acc = 0, fr[3] = { 0, 0, 0 };
     int valid_mask;   /* bit0=speed, bit1=accel, bit2=handling — gates per-bar fill */
     float padx = compact ? 4.0f : 7.0f;
     float pady = compact ? 2.0f : 6.0f;
-    /* In the MP panes, line the labels up with the CAR/PAINT button text (drawn at
-     * x+17) and stop the bars before the ◄► arrows on those buttons (their right
-     * arrow's left edge is x+w-15; the value redge is x+w-18). SP keeps padx. */
-    float content_l = compact ? 17.0f : padx;
-    float content_r = compact ? 18.0f : padx;
+    /* In the single-column MP layout (compact==1) the panel sits UNDER the CAR/PAINT
+     * buttons, so line the labels up with their text (x+17) and stop the bars before
+     * the ◄► arrows (x+w-18). In the two-column card (compact==2) the panel is its OWN
+     * column with no buttons to align to, so use tight padding and let the bar track
+     * fill the whole column. SP (compact==0) keeps padx. */
+    float content_l = (compact == 2) ? 5.0f : (compact ? 17.0f : padx);
+    float content_r = (compact == 2) ? 5.0f : (compact ? 18.0f : padx);
     float top  = by + pady;
     float rowh = (bh - 2.0f * pady) / 3.0f;
     float barh = compact ? (rowh - 2.0f) : (rowh - 5.0f);
@@ -7851,11 +7856,22 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
 
     if (barh < 2.0f) barh = 2.0f;
     /* Shrink the label font to the row in compact (small split) panes so the
-     * full names still fit; SP keeps the full small-font size. */
+     * full names still fit; SP keeps the full small-font size.
+     * [rebalance 2026-06-28] Reach full label size sooner (rowh/9 vs /11) and lift
+     * the floor 0.42 -> 0.60 so SPEED/ACCEL/HANDLING stay legible in the cramped
+     * 5+ player panes. The single-column flex below now reserves this panel its
+     * readable height FIRST (stealing from the car/buttons), so the floor rarely
+     * binds; when it does (the over-subscribed 7-9p 3x3 grid) 0.60 is the smallest
+     * size that still reads. */
     if (compact) {
-        float s = rowh / 11.0f;
-        if (s > 1.0f) s = 1.0f;
-        if (s < 0.42f) s = 0.42f;
+        /* [2026-06-29] In the two-column card (compact==2) the stat panel is its own
+         * narrow column, so cap the label font a touch below full size: a slightly
+         * smaller "HANDLING" frees horizontal room for a LONGER bar while the full
+         * word stays legible. The single-column panel (compact==1) keeps full size. */
+        float s = rowh / 9.0f;
+        float smax = (compact == 2) ? 0.78f : 1.0f;
+        if (s > smax) s = smax;
+        if (s < 0.60f) s = 0.60f;
         lsx = sx * s; lsy = sy * s;
     }
     capd = SMALLFONT_TTF_CAP * (lsy / sy);
@@ -7889,19 +7905,25 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     }
 
     /* Frame: the regular blue/unselected button look (non-interactive). In the
-     * compact (small-split) panes, thin the rim proportionally to the panel
-     * height so it matches the height-scaled rim of the pane buttons around it
-     * (see mp_simul_draw_btn); the SP panel keeps the full menu-button rim. */
+     * compact (small-split) panes the rim is thinned to match the pane buttons.
+     * [2026-06-29] When the caller passes a frame_scale > 0 (the MP grid passes
+     * the BUTTON height's scale), use it so the panel's border is IDENTICAL to the
+     * buttons beside it regardless of the panel's own height — fixes the "stat
+     * panel border looks fatter than the buttons" mismatch. frame_scale <= 0 keeps
+     * the legacy self-sized rim (bh/32). The SP panel keeps the full menu rim. */
     {
-        float fscale = bh / 32.0f;
+        float fscale = (frame_scale > 0.0f) ? frame_scale : bh / 32.0f;
         if (fscale > 1.0f) fscale = 1.0f;
         if (fscale < 0.34f) fscale = 0.34f;
         fe_draw_button_frame_fill_scaled(bx * sx, by * sy, bw * sx, bh * sy, 1,
                                          0xFF392152u, compact ? fscale : 1.0f, sx, sy);
     }
 
-    /* Full-name label column, sized to the WIDEST label ("HANDLING"); dropped only
-     * if the box is far too narrow to fit a label plus a usable bar. */
+    /* Full-name label column, sized to the WIDEST label ("HANDLING"). If the box is
+     * too narrow for the full word + a usable bar (a narrow two-column stats panel),
+     * fall back to single-letter labels (S/A/H) so each bar still says WHICH stat it
+     * is, instead of three anonymous bars. Only drop the label entirely when even a
+     * single letter won't fit. */
     {
         float wmax = fe_measure_small_text(lbl[0]);
         float w1 = fe_measure_small_text(lbl[1]);
@@ -7909,8 +7931,12 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
         if (w1 > wmax) wmax = w1;
         if (w2 > wmax) wmax = w2;
         lblw = wmax * fe_glyph_sx(lsx, lsy) / sx;
+        if (bw < content_l + content_r + lblw + 8.0f) {
+            float sw = fe_measure_small_text("H") * fe_glyph_sx(lsx, lsy) / sx;
+            if (bw >= content_l + content_r + sw + 8.0f) { labels = lblS; lblw = sw; }
+            else lblw = 0.0f;
+        }
     }
-    if (bw < content_l + content_r + lblw + 8.0f) lblw = 0.0f;
     barx = bx + content_l + (lblw > 0.0f ? lblw + 4.0f : 0.0f);
     barw = (bx + bw - content_r) - barx;
     if (barw < 4.0f) barw = 4.0f;
@@ -7927,7 +7953,7 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
         float fillw = ((valid_mask >> i) & 1) ? fr[i] * barw : 0.0f;
         if (lblw > 0.0f) {
             float ty = (ry + (rowh - capd) * 0.5f) * sy;
-            fe_draw_small_text((bx + content_l) * sx, ty, lbl[i], 0xFFC8C8C8u, lsx, lsy);
+            fe_draw_small_text((bx + content_l) * sx, ty, labels[i], 0xFFC8C8C8u, lsx, lsy);
         }
         fe_draw_quad(barx * sx, bary * sy, barw * sx, barh * sy, 0xFF101828u, -1, 0, 0, 1, 1);
         if (fillw > 0.0f)
@@ -8049,7 +8075,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         frontend_draw_car_stat_bars(panel_x, FE_CARSTAT_PANEL_Y,
                                     FE_CARSTAT_PANEL_W, FE_CARSTAT_PANEL_H,
                                     s_car_spec[7], s_car_spec[8], actual_car,
-                                    FE_CARSTAT_ACCENT, 0, sx, sy);
+                                    FE_CARSTAT_ACCENT, 0, 0.0f, sx, sy);
     }
 
     if (s_inner_state == 15) {
@@ -12053,7 +12079,7 @@ static void mp_simul_draw_btn(float x, float y, float w, float h, const char *la
 
     /* [responsive 2026-06-21] Fit the label between the left arrow and the
      * value/swatch on the right, shrinking it for narrow panes so long labels
-     * (AUTOMATIC / MORE STATS) never overflow the button. */
+     * (AUTO / MANUAL) never overflow the button. */
     float val_w  = (val && swatch_rgb < 0) ? fe_measure_small_text(val) * fe_glyph_sx(sx, sy) : 0.0f;
     float l_left = (arrows ? (x + 17.0f) : (x + 4.0f)) * sx;
     float l_right;
@@ -12061,15 +12087,23 @@ static void mp_simul_draw_btn(float x, float y, float w, float h, const char *la
     else if (val)          l_right = redge * sx - val_w - 4.0f * sx;
     else                   l_right = (arrows ? (x + w - 18.0f) : (x + w - 4.0f)) * sx;
     {
+        /* [2026-06-29] CENTRE the (fit-scaled) label within the available span
+         * [l_left, l_right] for EVERY button — arrowed CAR/PAINT now read centred
+         * between the ◄► instead of jammed against the left arrow. mp_fit_scale has
+         * already shrunk the text to fit that span, so a centred label never spills
+         * past the arrows / outside the button. */
         float ls   = mp_fit_scale(label, l_right - l_left, sx, sy);
-        float lsx2 = sx * ls, lsy2 = sy * ls;
-        float lty  = (y + (h - SMALLFONT_TTF_CAP * ls) * 0.5f) * sy;
-        if (arrows) {
-            fe_draw_small_text(l_left, lty, label, tc, lsx2, lsy2);
-        } else {
-            float lw = fe_measure_small_text(label) * fe_glyph_sx(lsx2, lsy2);
-            fe_draw_small_text((x + w * 0.5f) * sx - lw * 0.5f, lty, label, tc, lsx2, lsy2);
-        }
+        float lsx2, lsy2, lty, lw;
+        /* [2026-06-29] Also cap the label to the button HEIGHT so a very short pane
+         * button (the 7-9p 3x3 grid shrinks these well below the 9px font) shrinks
+         * its text vertically instead of overflowing into the neighbouring row. */
+        float h_cap = (h - 2.0f) / SMALLFONT_TTF_CAP;
+        if (h_cap < 0.34f) h_cap = 0.34f;
+        if (ls > h_cap) ls = h_cap;
+        lsx2 = sx * ls; lsy2 = sy * ls;
+        lty  = (y + (h - SMALLFONT_TTF_CAP * ls) * 0.5f) * sy;
+        lw   = fe_measure_small_text(label) * fe_glyph_sx(lsx2, lsy2);
+        fe_draw_small_text((l_left + l_right) * 0.5f - lw * 0.5f, lty, label, tc, lsx2, lsy2);
     }
 
     if (swatch_rgb >= 0) {
@@ -12224,16 +12258,18 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
 }
 
 /* Draw one car-select pane button by MP_BTN_* index — keeps the PAINT variants
- * (TD6 swatch / TD5 "n/4" / paintless "-"), the ◄► arrows on the selector rows,
- * and the focus styling in ONE place so the single- and two-column layouts stay
- * in sync. */
+ * (TD6 swatch / paintless "-"), the ◄► arrows on the selector rows, and the focus
+ * styling in ONE place so the single- and two-column layouts stay in sync.
+ * [2026-06-29] Labels shortened for the narrow split panes: MORE STATS -> STATS,
+ * AUTOMATIC -> AUTO (MANUAL unchanged), and the TD5 paint "n/4" value dropped — so
+ * the button column can be narrower without the text spilling, leaving more width
+ * for the stat bars + a bigger car. */
 static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
                                       float bw, float bh, float sx, float sy) {
     int car = s_mp_player_car[p];
     int td6 = frontend_car_is_td6(car);
     int focus = (s_mp_pane_btn[p] == which);
     uint32_t pcol = ((uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu) | 0xFF000000u;
-    char vbuf[24];
     switch (which) {
     case MP_BTN_CAR:
         mp_simul_draw_btn(bx, by, bw, bh, "CAR", focus, pcol, 1, NULL, -1, sx, sy);
@@ -12242,17 +12278,13 @@ static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
         if (td6 && frontend_car_paintable(car))
             mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, NULL,
                               s_mp_player_color[p], sx, sy);
-        else if (!td6 && frontend_car_has_paint(car)) {
-            snprintf(vbuf, sizeof vbuf, "%d/4", s_mp_player_paint[p] + 1);
-            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, vbuf, -1, sx, sy);
-        } else
+        else if (!td6 && frontend_car_has_paint(car))
+            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, NULL, -1, sx, sy);
+        else
             mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 0, "-", -1, sx, sy);
         break;
-    case MP_BTN_STATS:
-        mp_simul_draw_btn(bx, by, bw, bh, "MORE STATS", focus, pcol, 0, NULL, -1, sx, sy);
-        break;
     case MP_BTN_TRANS:
-        mp_simul_draw_btn(bx, by, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTOMATIC",
+        mp_simul_draw_btn(bx, by, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTO",
                           focus, pcol, 0, NULL, -1, sx, sy);
         break;
     case MP_BTN_OK:
@@ -12439,7 +12471,7 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             if (bars_h > 8.0f)
                 frontend_draw_car_stat_bars(lx, bars_y, lcw, bars_h,
                                             s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                            s_mp_pane_spec_car[p], pcol, 1, sx, sy);
+                                            s_mp_pane_spec_car[p], pcol, 1, 0.0f, sx, sy);
             /* RIGHT: the 5 buttons spread evenly down the WHOLE column (one row each
              * = col_h / MP_BTN_COUNT) so they always fill the height instead of
              * clumping at a fixed size — capped so they don't get comically tall in
@@ -12455,42 +12487,119 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
                     mp_simul_draw_pane_button(p, b, rx, yy, rcw, bh, sx, sy);
                 }
             }
-        } else {
-            /* SINGLE-COLUMN stack (classic): car image, then CAR / PAINT /
-             * [stat bars] / MORE STATS / AUTO-MANUAL / OK. The at-a-glance stat
-             * panel between PAINT and MORE STATS is the flex element — it shrinks
-             * (down to thin label-less bars) when a small split runs out of room
-             * while the 5 buttons keep their [10,28]px size.
-             * [big-car 2026-06-23] For the big-car case (tall 2-player 2-up pane)
-             * the car band is enlarged (0.44 vs 0.38) so the preview grows to the
-             * FULL pane width, and the button height cap is lowered (26 vs 28px),
-             * trading the stat-bar/button height the user found "too tall" for a
-             * much bigger car picture. The flex stat panel below absorbs the rest. */
-            float car_frac = big_car ? 0.44f : 0.38f;
-            float btn_cap  = big_car ? 26.0f : 28.0f;
-            float avail_h = pane_h * car_frac;
+        } else if (pane_h < 250.0f) {
+            /* SHORT narrow pane: the default 5-6p 3x2 grid (172x190) and the 7-9p 3x3
+             * grid (172x127). [layout 2026-06-29] Lay the CAR full-width across the TOP
+             * (as big as the pane allows) and split the space BELOW it into TWO columns
+             * — the 5 buttons (CAR / PAINT / STATS / AUTO / OK) on the LEFT, the SPEED /
+             * ACCEL / HANDLING stat bars on the RIGHT. Side by side, neither is starved
+             * vertically, so the car gets the full pane width instead of the ~16px
+             * sliver the old single-column stack left it. Short button labels keep the
+             * button column narrow, freeing width for a wide stat column (full words +
+             * a usable bar); the stat panel falls back to single letters only if a
+             * label still won't fit. One shared button height -> one border scale,
+             * passed to the stat panel too, so every frame has the SAME border. */
             float bx = px + 8.0f, bw = pane_w - 16.0f;
-            float bsy = pyr + 32.0f + avail_h + 4.0f;
-            float room = (pyr + pane_h - 18.0f) - bsy;
-            float bh = (room - 10.0f) / 6.2f;   /* 5 buttons + ~1.2-button stat panel + gaps */
-            float yy = bsy, panel_h;
-            mp_simul_draw_pane_car(p, cx - (pane_w - 20.0f) * 0.5f, pyr + 32.0f,
-                                   pane_w - 20.0f, avail_h, sx, sy);
-            if (bh < 10.0f) bh = 10.0f;
-            if (bh > btn_cap) bh = btn_cap;   /* taller buttons where the pane has room */
-            panel_h = bh * 1.2f;
-            if (5.0f * bh + panel_h + 10.0f > room) {   /* buttons hit their floor — shrink the panel */
-                panel_h = room - 5.0f * bh - 10.0f;
-                if (panel_h < 8.0f) panel_h = 8.0f;
+            float top0   = pyr + 32.0f;                  /* below the car-name banner */
+            float bottom = pyr + pane_h - 8.0f;
+            const float GAP = 6.0f;
+            float content_h = bottom - top0;
+            float car_natural = bw / (408.0f / 280.0f);
+            float zone_y, zone_h, zusable, lcw, rcw, rx, bh, frame_scale, slot;
+            float car_h;
+            int b;
+            /* Prioritise the CAR. The two-column ZONE (buttons + stats) scales with the
+             * pane HEIGHT — shorter panes get a SMALLER zone so the car grows — then the
+             * full-width car takes the rest (capped to its natural landscape height so
+             * there's no letterbox). On the 5-6p 3x2 pane (190) the zone is ~52px
+             * (comfortable buttons/stats); on the cramped 7-9p 3x3 pane (127) it drops to
+             * ~30px, giving a much BIGGER car with tighter buttons + stats (their text
+             * auto-shrinks to the row height, so smaller stays legible, never overlaps). */
+            zone_h = content_h * 0.35f;
+            if (zone_h < 28.0f) zone_h = 28.0f;
+            car_h  = content_h - zone_h - GAP;
+            if (car_h > car_natural) {                    /* car would letterbox: cap, grow zone */
+                car_h = car_natural;
+                zone_h = content_h - car_h - GAP;
             }
-            mp_simul_draw_pane_button(p, MP_BTN_CAR,   bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
-            mp_simul_draw_pane_button(p, MP_BTN_PAINT, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
+            if (car_h < 18.0f) {                          /* pane too short: clamp car, shrink zone to fit */
+                car_h = 18.0f;
+                zone_h = content_h - car_h - GAP;
+                if (zone_h < 24.0f) zone_h = 24.0f;
+            }
+            zone_y  = top0 + car_h + GAP;
+            zusable = bw - GAP;
+            /* Short button labels (CAR/PAINT/STATS/AUTO/OK) let the button column be
+             * narrow; the stat column takes the wider share for full words + a longer
+             * bar. CAR/PAINT still carry ◄► arrows, so the button column keeps enough
+             * width that those labels don't shrink to nothing. */
+            lcw     = zusable * 0.44f;                    /* narrow buttons column */
+            rcw     = zusable - lcw;                      /* WIDE stats column */
+            rx      = bx + lcw + GAP;
+            slot    = zone_h / (float)MP_BTN_COUNT;
+            bh      = slot - 1.5f;
+            if (bh < 6.0f)  bh = 6.0f;
+            if (bh > 28.0f) bh = 28.0f;
+            frame_scale = bh / 32.0f;
+            if (frame_scale > 1.0f) frame_scale = 1.0f;
+            if (frame_scale < 0.34f) frame_scale = 0.34f;
+            {   /* one-shot: confirm the two-column split without per-frame spam */
+                static int s_logged_2col = 0;
+                if (!s_logged_2col) {
+                    s_logged_2col = 1;
+                    TD5_LOG_I(LOG_TAG, "MP carsel short-narrow 2col: pane=%.0fx%.0f car=%.0f "
+                              "zone=%.0f btn=%.1f stats_w=%.0f", pane_w, pane_h, car_h,
+                              zone_h, bh, rcw);
+                }
+            }
+            mp_simul_draw_pane_car(p, bx, top0, bw, car_h, sx, sy);    /* full-width car */
+            for (b = 0; b < MP_BTN_COUNT; b++) {
+                float yy = zone_y + (float)b * slot + (slot - bh) * 0.5f;
+                mp_simul_draw_pane_button(p, b, bx, yy, lcw, bh, sx, sy);
+            }
+            frontend_draw_car_stat_bars(rx, zone_y, rcw, zone_h,
+                                        s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
+                                        s_mp_pane_spec_car[p], pcol, 2, frame_scale, sx, sy);
+        } else {
+            /* TALL single-column stack: the 3p LEFT/RIGHT narrow pane (172x381) AND the
+             * 2-player big-car pane (258x381, which bypasses the two-column card). Both
+             * have ample height, so reserve the readable stat panel first, then buttons,
+             * and let the car take the (large) remainder. [big-car 2026-06-23] the 2-up
+             * pane keeps an enlarged car (0.44 of pane_h) and a lower button cap (26px).
+             * [rebalance 2026-06-28] Priority squeeze car -> buttons -> panel with a
+             * proportional fit so nothing clips; here there is slack, so the car grows. */
+            float btn_cap  = big_car ? 26.0f : 28.0f;
+            float bx = px + 8.0f, bw = pane_w - 16.0f;
+            float top0   = pyr + 32.0f;                  /* below the car-name banner */
+            float bottom = pyr + pane_h - 18.0f;
+            const float CAR_GAP = 4.0f, ROW_GAP = 2.0f;
+            /* 4 buttons (CAR/PAINT/AUTO/OK) + 1 stat panel = 5 stacked rows below the car. */
+            float avail  = (bottom - top0) - (CAR_GAP + 5.0f * ROW_GAP);
+            const float PANEL_WANT = 31.0f, PANEL_FLOOR = 12.0f;
+            const float BTN_MIN = 11.0f, CAR_MIN = 16.0f;
+            float car_h  = pane_h * (big_car ? 0.44f : 0.32f);
+            float bh     = btn_cap;
+            float panel_h = PANEL_WANT;
+            float over   = (car_h + 4.0f * bh + panel_h) - avail;
+            float frame_scale, yy;
+            if (over > 0.0f) { float g = car_h - CAR_MIN; if (g > over) { car_h -= over; over = 0.0f; } else { car_h = CAR_MIN; over -= g; } }
+            if (over > 0.0f) { float g = 4.0f * (bh - BTN_MIN); if (g > over) { bh -= over / 4.0f; over = 0.0f; } else { bh = BTN_MIN; over -= g; } }
+            if (over > 0.0f) { panel_h -= over; if (panel_h < PANEL_FLOOR) panel_h = PANEL_FLOOR; }
+            { float total = car_h + 4.0f * bh + panel_h; if (total > avail && total > 0.0f) { float k = avail / total; car_h *= k; bh *= k; panel_h *= k; } }
+            { float slack = avail - (car_h + 4.0f * bh + panel_h); if (slack > 0.0f) car_h += slack; }
+            frame_scale = bh / 32.0f;
+            if (frame_scale > 1.0f) frame_scale = 1.0f;
+            if (frame_scale < 0.34f) frame_scale = 0.34f;
+            yy = top0 + car_h + CAR_GAP;
+            mp_simul_draw_pane_car(p, cx - (pane_w - 20.0f) * 0.5f, top0,
+                                   pane_w - 20.0f, car_h, sx, sy);
+            mp_simul_draw_pane_button(p, MP_BTN_CAR,   bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
+            mp_simul_draw_pane_button(p, MP_BTN_PAINT, bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
             frontend_draw_car_stat_bars(bx, yy, bw, panel_h,
                                         s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                        s_mp_pane_spec_car[p], pcol, 1, sx, sy);
-            yy += panel_h + 2.0f;
-            mp_simul_draw_pane_button(p, MP_BTN_STATS, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
-            mp_simul_draw_pane_button(p, MP_BTN_TRANS, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
+                                        s_mp_pane_spec_car[p], pcol, 1, frame_scale, sx, sy);
+            yy += panel_h + ROW_GAP;
+            mp_simul_draw_pane_button(p, MP_BTN_TRANS, bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
             mp_simul_draw_pane_button(p, MP_BTN_OK,    bx, yy, bw, bh, sx, sy);
         }
 

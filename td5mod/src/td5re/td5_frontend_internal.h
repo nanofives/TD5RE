@@ -485,7 +485,11 @@ extern int  s_buttonlights_h;
 /* ---- car selection / simultaneous-MP grid ---- */
 #define FE_CARSEL_SLIDE_IN_MS 1250
 #define TD6_COP_LAST  49
-enum { MP_BTN_CAR = 0, MP_BTN_PAINT, MP_BTN_STATS, MP_BTN_TRANS, MP_BTN_OK, MP_BTN_COUNT };
+/* [2026-06-29] MORE STATS button removed from the simultaneous-MP car-select grid
+ * (the at-a-glance SPEED/ACCEL/HANDLING bars are always shown in each pane, so the
+ * full spec overlay was redundant in this mode). Buttons: CAR / PAINT / AUTO-MANUAL
+ * / OK. */
+enum { MP_BTN_CAR = 0, MP_BTN_PAINT, MP_BTN_TRANS, MP_BTN_OK, MP_BTN_COUNT };
 enum { MP_SET_NAME = 0, MP_SET_COLOUR, MP_SET_OK, MP_SET_COUNT };
 #define MP_SIMUL_ANIM_MS 480u   /* lobby -> car-select pane slide-in duration */
 #define MP_KBD_LETTER_ROWS 4

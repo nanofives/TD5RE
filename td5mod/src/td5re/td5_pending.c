@@ -38,6 +38,7 @@ static const char *const k_seed[] = {
     "ARCADE: power-up effects last 20% longer (NITRO/GHOST/WRECK)",
     "Power-ups now ARCADE-only: SIMULATION shows no item boxes",
     "MP splitscreen: gold HOST tag on profile/screen/mode/car selectors",
+    "Split car-select 5+ players: big car + buttons|stats two columns; 7-9p car stays big",
     "MP cop chase: suspects can now pick TD6 cars, not just TD5",
     "Controller: Y changes camera; horn moved to L3 (stick click)",
     "Time trial on city tracks (HK/London): mid-track start no insta-end",

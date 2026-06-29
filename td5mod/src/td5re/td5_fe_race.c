@@ -1674,6 +1674,44 @@ static void mp_ai_autoresolve(int n) {
     }
 }
 
+#ifndef TD5RE_RELEASE
+/* [layout preview harness 2026-06-29] Dev-only: jump straight to the N-player
+ * simultaneous car-select GRID (phase 1) for screenshot / layout work, without
+ * needing N physical controllers. Slot 0 is a keyboard "human"; slots 1..N-1 are
+ * simulated AI (the same machinery the lobby "add AI player" tool uses). The
+ * StartScreen path calls this when TD5RE_MP_SIMUL_PREVIEW=N and StartScreen=20;
+ * Screen_CarSelection then sees s_mp_flow + s_mp_simul + phase 1 and runs the
+ * normal grid init/render. Compiled out of the release build. */
+void frontend_mp_simul_preview_setup(int n) {
+    int p;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    frontend_mp_ai_players_reset();
+    /* Slot 0: a real (keyboard) human so add_ai_player's human-count guard passes. */
+    s_mp_joined_count    = 1;
+    s_mp_slot_is_ai[0]   = 0;
+    s_mp_join_device[0]  = 0;
+    snprintf(s_mp_player_name[0], sizeof s_mp_player_name[0], "YOU");
+    s_mp_player_accent[0] = 0x00E0C040;
+    s_mp_player_car[0]   = (s_selected_car >= 0) ? s_selected_car : 0;
+    s_mp_player_paint[0] = 0;
+    s_mp_player_color[0] = -1;
+    s_mp_player_ready[0] = 0;
+    while (s_mp_joined_count < n && frontend_mp_add_ai_player()) { /* fills slots 1..n-1 */ }
+    s_num_human_players     = s_mp_joined_count;
+    g_td5.num_human_players  = s_mp_joined_count;
+    s_two_player_mode        = 1;
+    s_mp_flow                = 1;
+    s_mp_simul               = 1;
+    s_mp_phase               = 1;   /* car-select grid (skip name/colour + position picker) */
+    s_mp_car_player          = 0;
+    s_inner_state            = 0;   /* force carsel_init on the first screen tick */
+    for (p = 0; p < s_mp_joined_count; p++) s_mp_player_cell[p] = p;
+    TD5_LOG_I(LOG_TAG, "MP simul PREVIEW: %d players -> car-select grid (dev harness)",
+              s_mp_joined_count);
+}
+#endif
+
 static void frontend_mp_simul_carsel_init(void) {
     int p, n = s_num_human_players;
     if (n < 2) n = 2;
@@ -1943,7 +1981,7 @@ static void frontend_mp_simul_carsel_update(void) {
              * edge-only (one step per press, the previous behaviour). Direction bits
              * are pre-masked to LEFT|RIGHT so vertical row nav stays strictly
              * edge-driven; on the (rare) both-held frame RIGHT wins. Only CAR/PAINT
-             * repeat — STATS/TRANS/OK stay edge-only (act). */
+             * repeat — TRANS/OK stay edge-only (act). */
             int on_lr  = (s_mp_pane_btn[p] == MP_BTN_CAR || s_mp_pane_btn[p] == MP_BTN_PAINT);
             int lr_fire = !on_lr ? 0
                         : frontend_carsel_hold_enabled()
@@ -1971,9 +2009,6 @@ static void frontend_mp_simul_carsel_update(void) {
                 break;
             case MP_BTN_PAINT:
                 if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1, lr_edge);
-                break;
-            case MP_BTN_STATS:
-                if (act) { mp_simul_load_pane_spec(p, car); s_mp_pane_substate[p] = 1; frontend_play_sfx(3); }
                 break;
             case MP_BTN_TRANS:
                 if (act || left || right) { s_mp_player_trans[p] = !s_mp_player_trans[p]; frontend_play_sfx(3); }
