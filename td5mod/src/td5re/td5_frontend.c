@@ -743,6 +743,8 @@ int             s_race_difficulty = 1;
 int             s_game_option_dynamics = 0;
 int             s_game_option_collisions = 1;
 int             s_game_option_powerups = 1;   /* ARCADE item-box power-ups on/off */
+int             s_game_option_car_toughness = 1; /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
+int             s_game_option_car_deform = 1;    /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 int             s_sound_option_sfx_mode;
 int             s_sound_option_sfx_volume = 80;
 int             s_sound_option_music_volume = 80;
@@ -3897,6 +3899,8 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_dynamics          = g_td5.ini.dynamics;
     s_game_option_collisions        = g_td5.ini.collisions;
     s_game_option_powerups          = g_td5.ini.powerups;
+    s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
+    s_game_option_car_deform        = g_td5.ini.car_damage_deform;
 
     /* Commit the dynamics (arcade/sim) selection into the physics race-init
      * flag deterministically for the AutoRace path, mirroring the options-screen
@@ -6958,6 +6962,7 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     /* [dynamic-traffic] 5-state traffic volume row. */
     const char *traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] = { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
     const char *difficulty[] = { "EASY", "NORMAL", "HARD" };  /* orig middle label: NORMAL */
+    const char *level3[]     = { "LOW", "NORMAL", "HIGH" };    /* [CAR DAMAGE] toughness/deform */
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
     /* [S02 (c) 2026-06-04] Circuit Laps row removed from this screen; values
@@ -6975,6 +6980,12 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
     frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, on_off[s_game_option_powerups & 1], 0xFFFFFFFF);
+    {
+        int ti = s_game_option_car_toughness; if (ti < 0) ti = 0; if (ti > 2) ti = 2;
+        int di = s_game_option_car_deform;    if (di < 0) di = 0; if (di > 2) di = 2;
+        frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, level3[ti], 0xFFFFFFFF);
+        frontend_draw_value_centered(sx, sy, s_buttons[7].y + 6, level3[di], 0xFFFFFFFF);
+    }
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -11012,9 +11023,10 @@ void td5_frontend_render_ui_rects(void) {
             if (QR_BTN_PHYSICS < s_button_count) fe_draw_option_arrows(QR_BTN_PHYSICS, sx, sy);
             break;
         case TD5_SCREEN_GAME_OPTIONS:
-            /* [S02 (c)] Six option rows remain (0..5) after Circuit Laps was
-             * removed; OK is index 6 and gets no arrows. */
-            for (int i = 0; i <= 5; i++) fe_draw_option_arrows(i, sx, sy);
+            /* Eight option rows (0..7): Checkpoint Timers, Traffic, Cops,
+             * Difficulty, 3D Collisions, Power-ups, [CAR DAMAGE] Car Toughness,
+             * Deformation. OK is index 8 and gets no arrows. */
+            for (int i = 0; i <= 7; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_CONTROLLER_BINDING:
             /* Draw the action labels+values on top of the (opaque-when-selected)
@@ -11494,6 +11506,8 @@ int td5_frontend_init(void) {
         td5_physics_set_dynamics(g_td5.ini.dynamics);
         s_game_option_collisions        = g_td5.ini.collisions;
         s_game_option_powerups          = g_td5.ini.powerups;
+        s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
+        s_game_option_car_deform        = g_td5.ini.car_damage_deform;
         s_selected_game_type = g_td5.ini.default_game_type;
     }
 

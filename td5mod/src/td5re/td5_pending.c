@@ -30,7 +30,8 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
-    "Car damage [Game]CarDamage=1: dents, smoke, wreck, handling drop",
+    "Game Options: CAR TOUGHNESS + DEFORMATION levels (Low/Norm/High)",
+    "Car damage ON all races: dents+scuff, smoke, wreck, finish orbit cam",
     "Controller: Y changes camera; horn moved to L3 (stick click)",
     "Time trial on city tracks (HK/London): mid-track start no insta-end",
     "Replay no longer counts as a race (MP cup keeps real results)",

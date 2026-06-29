@@ -552,6 +552,8 @@ extern int             s_game_option_collisions;
 extern int             s_game_option_powerups;
 extern int             s_game_option_difficulty;
 extern int             s_game_option_dynamics;
+extern int             s_game_option_car_toughness;   /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
+extern int             s_game_option_car_deform;      /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 extern int             s_race_difficulty;   /* per-race AI difficulty row on Track Selection (0..2) */
 extern int             s_trksel_dyn_btn;    /* [ARCADE] ARCADE/SIM row index on Track Selection (-1=none) */
 extern int             s_sound_option_music_volume;

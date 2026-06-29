@@ -27,7 +27,7 @@
 
 /* ------------------------------------------------------------------ knobs */
 /* Parsed once in td5_damage_init(). All have safe defaults. */
-static int32_t s_max_hp        = 800000;   /* full health, in impact_mag units (bar drains gradually) */
+static int32_t s_max_hp        = 2400000;  /* full health, in impact_mag units (3x durability) */
 static int     s_impact_pct    = 100;      /* % of impact_mag subtracted from health per hit */
 static int32_t s_min_impact    = 4000;     /* impacts below this don't chip health/deform */
 static int32_t s_knockout      = 0;        /* health <= this -> wrecked */
@@ -35,8 +35,8 @@ static int     s_deform_k      = 40;       /* # nearest verts pushed per hit */
 /* Deformation is sized RELATIVE to the car's own model extent so dents are
  * always clearly visible regardless of a car's modelling scale. */
 static int32_t s_dent_ref_mag  = 90000;    /* impact_mag that yields a full single-hit dent */
-static int     s_dent_frac     = 60;       /* full single-hit dent as % of the car's half-extent */
-static int     s_disp_frac     = 120;      /* clamp on accumulated dent as % of the car's half-extent */
+static int     s_dent_frac     = 45;       /* full single-hit dent as % of the car's half-extent (0.75x) */
+static int     s_disp_frac     = 90;       /* clamp on accumulated dent as % of the car's half-extent (0.75x) */
 static float   s_radius_frac   = 0.55f;    /* deform influence radius as a fraction of max model extent */
 static int     s_penalty_pct   = 45;       /* max % steering-authority reduction at zero health */
 static int     s_wall_scale    = 400;      /* wall approach-speed -> impact_mag scale (%) */
@@ -47,6 +47,12 @@ static int     s_smoke_light   = 40;       /* % health lost to start light smoke
 static int     s_smoke_black   = 65;       /* % health lost to switch to black smoke */
 static int     s_smoke_fire    = 88;       /* % health lost to add fire/sparks */
 static int     s_scuff_pct     = 55;       /* max diffuse darkening (%) on a fully-scuffed vertex */
+/* Env overrides for the three LEVEL-driven knobs (-1 = not set -> use the Game
+ * Options toughness/deform level instead). Captured once in init; applied (with
+ * the current levels) at every race start via apply_levels(). */
+static int     s_hp_env        = -1;
+static int     s_dent_env      = -1;
+static int     s_disp_env      = -1;
 static int     s_inited        = 0;
 
 /* ------------------------------------------------------- per-slot deform */
@@ -79,18 +85,46 @@ static float env_float(const char *name, float def, float lo, float hi) {
     if (v > hi) v = hi;
     return v;
 }
+/* Like env_int but returns `notset` (a sentinel < lo) when the var is absent,
+ * so a caller can tell "overridden" from "use the default/level". */
+static int env_int_opt(const char *name, int lo, int hi, int notset) {
+    const char *e = getenv(name);
+    if (!e || !e[0]) return notset;
+    long v = strtol(e, NULL, 0);
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return (int)v;
+}
+
+/* Map the global Game Options toughness/deform LEVELS (0=Low,1=Normal,2=High)
+ * to the active health + deformation magnitudes. Env knobs, when set, win over
+ * the level. Called at init and at every race start so a menu change takes
+ * effect on the next race. Normal == the user's tuned 3x durability / 0.75x
+ * deform baseline. */
+static void apply_levels(void) {
+    int t = g_td5.ini.car_damage_toughness; if (t < 0) t = 0; if (t > 2) t = 2;
+    int d = g_td5.ini.car_damage_deform;    if (d < 0) d = 0; if (d > 2) d = 2;
+    static const int32_t HP[3]   = { 1200000, 2400000, 4800000 };  /* Low/Normal/High */
+    static const int     DENT[3] = { 23, 45, 68 };
+    static const int     DISP[3] = { 45, 90, 135 };
+    s_max_hp    = (s_hp_env   >= 0) ? (int32_t)s_hp_env : HP[t];
+    s_dent_frac = (s_dent_env >= 0) ? s_dent_env        : DENT[d];
+    s_disp_frac = (s_disp_env >= 0) ? s_disp_env        : DISP[d];
+}
 
 int td5_damage_init(void) {
     if (s_inited) return 1;        /* module loader treats non-zero as success */
     s_inited = 1;
-    s_max_hp      = env_int  ("TD5RE_DAMAGE_MAX_HP",        800000,  1000, 100000000);
     s_impact_pct  = env_int  ("TD5RE_DAMAGE_IMPACT_SCALE",  100,     1,    2000);
     s_min_impact  = env_int  ("TD5RE_DAMAGE_MIN_IMPACT",    4000,    0,    1000000);
     s_knockout    = env_int  ("TD5RE_DAMAGE_KNOCKOUT",      0,       0,    100000000);
     s_deform_k    = env_int  ("TD5RE_DAMAGE_DEFORM_K",      40,      1,    4096);
     s_dent_ref_mag= env_int  ("TD5RE_DAMAGE_DENT_REF_MAG",  90000,   1000, 100000000);
-    s_dent_frac   = env_int  ("TD5RE_DAMAGE_DENT_FRAC",     60,      1,    200);
-    s_disp_frac   = env_int  ("TD5RE_DAMAGE_DISP_FRAC",     120,     1,    300);
+    /* HP / dent / disp come from the Game Options LEVELS (apply_levels); an env
+     * override, when present, wins. -1 = no override. */
+    s_hp_env      = env_int_opt("TD5RE_DAMAGE_MAX_HP",      1000, 100000000, -1);
+    s_dent_env    = env_int_opt("TD5RE_DAMAGE_DENT_FRAC",   1,    200,       -1);
+    s_disp_env    = env_int_opt("TD5RE_DAMAGE_DISP_FRAC",   1,    300,       -1);
     s_radius_frac = env_float("TD5RE_DAMAGE_RADIUS_FRAC",   0.55f,   0.02f, 4.0f);
     s_penalty_pct = env_int  ("TD5RE_DAMAGE_PENALTY",       45,      0,    95);
     s_wall_scale  = env_int  ("TD5RE_DAMAGE_WALL_SCALE",    400,     0,    5000);
@@ -101,6 +135,7 @@ int td5_damage_init(void) {
     s_smoke_black = env_int  ("TD5RE_DAMAGE_SMOKE_BLACK",   65,      0,    100);
     s_smoke_fire  = env_int  ("TD5RE_DAMAGE_SMOKE_FIRE",    88,      0,    100);
     s_scuff_pct   = env_int  ("TD5RE_DAMAGE_SCUFF",         55,      0,    100);
+    apply_levels();   /* seed HP/dent/disp from the saved levels (or env override) */
     TD5_LOG_I(LOG_TAG, "car_damage: init max_hp=%d impact_pct=%d min_imp=%d ko=%d "
               "K=%d dent_ref=%d dent_frac=%d disp_frac=%d radius=%.2f penalty=%d smoke=%d/%d/%d",
               s_max_hp, s_impact_pct, s_min_impact, s_knockout, s_deform_k,
@@ -139,6 +174,7 @@ static void ensure_health_init(TD5_Actor *a) {
 
 void td5_damage_reset_race(void) {
     if (!s_inited) td5_damage_init();
+    apply_levels();   /* pick up any Game Options toughness/deform change for this race */
     int enabled = td5_damage_enabled();
     for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
         /* Zero the deltas (keep the allocation for reuse) and detach the mesh so
