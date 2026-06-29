@@ -8251,8 +8251,24 @@ static int      s_trf_dyn_oncoming_left;                  /* 1 = oncoming on lef
 /* Direction a freshly spawned car should drive in `lane` of a
  * `lane_count`-lane span: authored data first, side-half heuristic second.
  * Single-lane spans always drive forward. */
+/* [TRAFFIC BATTLE 2026-06-28] Force ALL traffic to drive ONCOMING (toward the
+ * players) — head-on demolition fodder. Default ON in battle mode; the
+ * TD5RE_TRAFFIC_ONCOMING knob overrides either way (1 = on, 0 = off) so it can be
+ * forced on/off in any mode for testing. Reads process config + replicated mode,
+ * so it is lockstep-deterministic. */
+static int trf_force_oncoming(void)
+{
+    const char *e = getenv("TD5RE_TRAFFIC_ONCOMING");
+    if (e && e[0]) return atoi(e) != 0;
+    return td5_game_battle_mode_active();
+}
+
 static int trf_dyn_lane_direction(int lane_count, int lane)
 {
+    /* [TRAFFIC BATTLE] Every lane heads oncoming — takes precedence over the
+     * one-way (all-forward) default so battle traffic comes at the players. */
+    if (trf_force_oncoming())
+        return 1;
     /* [traffic one-way] Every lane heads down-track — no oncoming lanes. This is
      * the single chokepoint for the dynamic spawner: it sets both the spawn
      * polarity and trf_dyn_lane_change_blocked()'s direction test. */

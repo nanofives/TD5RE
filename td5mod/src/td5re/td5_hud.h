@@ -192,6 +192,9 @@ void td5_hud_set_player_identity(int slot, const char *name, uint32_t rgb);
 /* [ARCADE] Per-viewport active power-up chip (label + shrinking timer bar).
  * No-op outside ARCADE mode. */
 void td5_hud_draw_arcade_chips(void);
+/* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" indicator. No-op outside
+ * the Traffic Destruction battle mode. */
+void td5_hud_draw_battle_wrecks(void);
 void td5_hud_clear_player_identities(void);
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac);
 void td5_hud_draw_race_fade(float progress, int direction);

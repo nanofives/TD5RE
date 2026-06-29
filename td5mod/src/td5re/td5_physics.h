@@ -213,6 +213,10 @@ void td5_physics_rebuild_pose(TD5_Actor *actor);
 /* --- Dynamics mode --- */
 void td5_physics_set_dynamics(int mode);  /* 0=arcade, 1=simulation */
 int  td5_physics_get_dynamics(void);      /* returns current mode */
+/* [TRAFFIC BATTLE 2026-06-28] V2V impact magnitude at/above which a hit on a
+ * traffic car is "fatal" (TD5RE_NPC_FATAL_MAG). Shared with the battle-mode
+ * scoring hook td5_arcade_note_ram so both use one threshold. */
+int32_t td5_physics_npc_fatal_mag(void);
 void td5_physics_set_paused(int paused); /* 1=countdown (RPM only), 0=full sim */
 void td5_physics_set_xz_freeze(int freeze); /* 1=freeze XZ pos (countdown), 0=normal */
 void td5_physics_set_race_slot_state(int slot, int is_human); /* 1=player, 0=AI */

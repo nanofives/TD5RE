@@ -279,6 +279,14 @@ int  td5_game_mp_cup_track(void);
 /* [MP GAME MODES: TRAFFIC FAIRNESS 2026-06-22] 1 when local split-screen MP
  * should keep shared traffic deterministic (no permanent player-caused wrecks). */
 int  td5_game_mp_traffic_fair(void);
+/* [TRAFFIC BATTLE 2026-06-28] 1 when the current race is the Traffic Destruction
+ * battle mode (mp_mode_config.mode == TD5_MP_MODE_TRAFFIC_BATTLE). Consulted by
+ * the scoring hook, the dynamic-spawner force, the results sort, and the HUD. */
+int  td5_game_battle_mode_active(void);
+/* [TRAFFIC BATTLE checkpoints] 1 while the CHECKPOINTS deadline chaser is armed. */
+int  td5_game_battle_chase_active(void);
+/* Spans a racer slot is ahead of the creeping deadline (negative = caught). */
+int  td5_game_battle_chase_gap(int slot);
 /* 1 while the in-race pause menu is open (audio layer reads this to suspend the
  * cop-chase siren refresh during pause so it re-arms on resume). */
 int  td5_game_is_pause_menu_active(void);

@@ -19,6 +19,7 @@
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_physics.h"
+#include "td5_ai.h"     /* td5_ai_actor_is_broken_down (battle dedup) */
 #include "td5re.h"      /* g_td5 (num_human_players, g_traffic_slot_base) */
 #include "td5_platform.h"
 #include "../../../re/include/td5_actor_struct.h"
@@ -92,6 +93,12 @@ static int8_t    s_oiled_dir[ARC_MAX_SLOTS];     /* random drift direction (-1/+
 static uint32_t  s_oiled_rng[ARC_MAX_SLOTS];     /* per-slot wobble stream     */
 static uint32_t  s_oil_event_ctr;                /* decorrelates successive oilings */
 
+/* [ARCADE EXPANSION 2026-06-28] per-slot EMP/FREEZE victim state: a frozen car
+ * has its drive torque zeroed (td5_arcade_slot_accel_q8) and its velocity bled
+ * to a near-stop each tick. Covers traffic slots too, so FREEZE turns nearby
+ * traffic into sitting ducks. */
+static int16_t   s_frozen_frames[ARC_MAX_SLOTS];
+
 /* ======================================================================
  * Helpers
  * ====================================================================== */
@@ -105,8 +112,49 @@ static int racer_count(void) {
     return n;
 }
 
+/* [ARCADE EXPANSION 2026-06-28] Racers + traffic slot span — effects that reach
+ * traffic (FREEZE, MAGNET) iterate over this so they can grab/freeze background
+ * cars, not just rival racers. */
+static int total_slots(void) {
+    int n = g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS;
+    if (n < 1) n = TD5_MAX_RACER_SLOTS;
+    if (n > ARC_MAX_SLOTS) n = ARC_MAX_SLOTS;
+    return n;
+}
+
 static TD5_Actor *slot_actor(int slot) {
     return td5_game_get_actor(slot);
+}
+
+/* [ARCADE EXPANSION 2026-06-28] Weighted random power-up kind from a private
+ * xorshift stream seeded off td5_game_get_race_seed() (NO shared CRT rand on the
+ * sim path -> netplay/replay-deterministic). Common movement boosts are weighted
+ * higher than the rare game-changers (ROCKET / WRECK) so a box scatter feels
+ * varied without flooding the field with the strongest effects. Advances *rng. */
+static int arc_pick_kind(uint32_t *rng) {
+    /* weight per kind, indexed [TD5_PU_NITRO .. TD5_PU_REPAIR] */
+    static const uint8_t w[TD5_PU_KINDS + 1] = {
+        0,  /* TD5_PU_NONE   (unused) */
+        5,  /* TD5_PU_NITRO  — common */
+        3,  /* TD5_PU_GHOST          */
+        2,  /* TD5_PU_WRECK  — rare  */
+        0,  /* TD5_PU_HAZARD — REMOVED 2026-06-28 (no longer spawned)            */
+        3,  /* TD5_PU_SHIELD         */
+        3,  /* TD5_PU_FREEZE         */
+        3,  /* TD5_PU_MAGNET         */
+        2,  /* TD5_PU_ROCKET — rare  */
+        3,  /* TD5_PU_REPAIR         */
+    };
+    int total = 0;
+    for (int k = TD5_PU_NITRO; k <= TD5_PU_KINDS; k++) total += w[k];
+    if (total <= 0) total = 1;
+    *rng ^= *rng << 13; *rng ^= *rng >> 17; *rng ^= *rng << 5;
+    int r = (int)(*rng % (uint32_t)total);
+    for (int k = TD5_PU_NITRO; k <= TD5_PU_KINDS; k++) {
+        r -= w[k];
+        if (r < 0) return k;
+    }
+    return TD5_PU_NITRO;
 }
 
 /* Trigger power-up `kind` on racer `slot` immediately. */
@@ -178,6 +226,75 @@ static void apply_pickup(int slot, int kind, TD5_Actor *a) {
         TD5_LOG_I(LOG_TAG, "slot=%d HAZARD dropped", slot);
         break;
     }
+    /* [ARCADE EXPANSION 2026-06-28] ---- new kinds ---- */
+    case TD5_PU_SHIELD:
+        /* Defensive bubble: no knockback / no airborne launch / immune to oil,
+         * but you can still ram (collision solver leaves YOUR motion intact, the
+         * other car still takes the hit — see td5_arcade_slot_is_shielded). */
+        (void)a;
+        s_effect[slot] = TD5_PU_SHIELD;
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_SHIELD_FRAMES", 300, 30, 1200);
+        s_effect_max[slot]    = s_effect_frames[slot];
+        TD5_LOG_I(LOG_TAG, "slot=%d SHIELD %d frames", slot, s_effect_frames[slot]);
+        break;
+    case TD5_PU_FREEZE: {
+        /* EMP burst: freeze every OTHER car (rivals + traffic) within a span
+         * window. Frozen cars get zero drive torque + a hard velocity bleed for
+         * a moment (see the tick + td5_arcade_slot_accel_q8). Deterministic:
+         * iterates REPLICATED span positions only. */
+        int win   = knob("TD5RE_ARCADE_FREEZE_SPANS",  18, 2, 200);
+        int frz   = knob("TD5RE_ARCADE_FREEZE_FRAMES", 60, 15, 600);
+        int aspan = a->track_span_normalized;
+        int ring  = (s_ring > 0) ? s_ring : 1;
+        int hit   = 0;
+        if (aspan >= 0) {
+            for (int t = 0; t < total_slots(); t++) {
+                if (t == slot) continue;
+                TD5_Actor *o = slot_actor(t);
+                if (!o || o->finish_time != 0) continue;
+                int ospan = o->track_span_normalized;
+                if (ospan < 0) continue;
+                int d = ((ospan - aspan) % ring + ring) % ring;
+                if (d > ring - d) d = ring - d;     /* nearest circular distance */
+                if (d <= win) { s_frozen_frames[t] = (int16_t)frz; hit++; }
+            }
+        }
+        s_effect[slot] = TD5_PU_FREEZE;
+        s_effect_frames[slot] = 30;   /* HUD flash "EMP" */
+        s_effect_max[slot]    = s_effect_frames[slot];
+        TD5_LOG_I(LOG_TAG, "slot=%d FREEZE/EMP froze %d cars (%d frames each)", slot, hit, frz);
+        break;
+    }
+    case TD5_PU_MAGNET:
+        /* Tractor beam: while active, nearby TRAFFIC is dragged toward you each
+         * tick (ram fuel for the battle) — applied in td5_arcade_tick. */
+        (void)a;
+        s_effect[slot] = TD5_PU_MAGNET;
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_MAGNET_FRAMES", 240, 30, 1200);
+        s_effect_max[slot]    = s_effect_frames[slot];
+        TD5_LOG_I(LOG_TAG, "slot=%d MAGNET %d frames", slot, s_effect_frames[slot]);
+        break;
+    case TD5_PU_ROCKET:
+        /* Big forward dash that also plows straight through traffic (counts as a
+         * wrecking ball for the collision solver). Short, punchy. The dash accel
+         * is applied at the drive-torque chokepoint (td5_arcade_slot_accel_q8). */
+        (void)a;
+        s_effect[slot] = TD5_PU_ROCKET;
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_ROCKET_FRAMES", 75, 15, 600);
+        s_effect_max[slot]    = s_effect_frames[slot];
+        TD5_LOG_I(LOG_TAG, "slot=%d ROCKET %d frames (accel x%d%%, plows traffic)",
+                  slot, s_effect_frames[slot], knob("TD5RE_ARCADE_ROCKET_ACCEL_PCT", 400, 100, 900));
+        break;
+    case TD5_PU_REPAIR:
+        /* "Get out of trouble": instantly clear your own oil-drift + freeze. */
+        (void)a;
+        s_oiled_frames[slot]  = 0;
+        s_frozen_frames[slot] = 0;
+        s_effect[slot] = TD5_PU_REPAIR;
+        s_effect_frames[slot] = 30;   /* HUD flash "REPAIR" */
+        s_effect_max[slot]    = s_effect_frames[slot];
+        TD5_LOG_I(LOG_TAG, "slot=%d REPAIR (cleared oil/freeze)", slot);
+        break;
     default: break;
     }
 }
@@ -224,8 +341,9 @@ static int arc_emit_box(int span, int sub, int lanes, int lift, uint32_t *rng) {
     p->x = x; p->y = y + lift; p->z = z;
     p->span = (int16_t)span;
     p->sub_lane = (int8_t)sub;
-    *rng ^= *rng << 13; *rng ^= *rng >> 17; *rng ^= *rng << 5;
-    p->kind = (uint8_t)(TD5_PU_NITRO + (*rng % (uint32_t)TD5_PU_KINDS));
+    /* [ARCADE EXPANSION 2026-06-28] Weighted kind (was uniform pad_index%KINDS) —
+     * keeps the deterministic per-race seed stream but favours common boosts. */
+    p->kind = (uint8_t)arc_pick_kind(rng);
     p->active = 1;
     p->respawn = 0;
     s_pad_count++;
@@ -246,6 +364,7 @@ void td5_arcade_init_race(void) {
     memset(s_oiled_frames, 0, sizeof(s_oiled_frames));
     memset(s_oiled_dir, 0, sizeof(s_oiled_dir));
     memset(s_oiled_rng, 0, sizeof(s_oiled_rng));
+    memset(s_frozen_frames, 0, sizeof(s_frozen_frames));
     s_oil_event_ctr = 0;
     s_pad_count = 0;
     s_active = (td5_physics_get_dynamics() == 0);   /* mode 0 = ARCADE (wild) */
@@ -329,16 +448,34 @@ void td5_arcade_init_race(void) {
      * (300) spans between boxes, falling toward SPACING_MIN (100) as humans are
      * added, so a fuller race has more power-ups to go round. PAD_SPACING overrides. */
     int num_h = g_td5.num_human_players; if (num_h < 1) num_h = 1;
-    /* [2026-06-27] Spacing defaults halved (300/100 -> 150/50) so the ring holds
-     * ~2x as many item boxes — "too few power-ups" feedback. Smaller spacing =
-     * more boxes (count = usable / spacing). Knobs TD5RE_ARCADE_SPACING_MAX /
-     * _MIN / TD5RE_ARCADE_PAD_SPACING still override. */
-    int sp_max = knob("TD5RE_ARCADE_SPACING_MAX", 150, 20, 4000);
-    int sp_min = knob("TD5RE_ARCADE_SPACING_MIN", 50, 10, 4000);
+    /* [2026-06-28] Spacing defaults lowered again (150/50 -> 100/40) so the ring
+     * holds yet more item boxes ("more / more-frequent power-ups"). Smaller
+     * spacing = more boxes (count = usable / spacing). Knobs
+     * TD5RE_ARCADE_SPACING_MAX / _MIN / TD5RE_ARCADE_PAD_SPACING still override. */
+    int sp_max = knob("TD5RE_ARCADE_SPACING_MAX", 100, 20, 4000);
+    int sp_min = knob("TD5RE_ARCADE_SPACING_MIN", 40, 10, 4000);
     if (sp_min > sp_max) sp_min = sp_max;
     int spacing = sp_max - (num_h - 1) * ((sp_max - sp_min) / 5);
     if (spacing < sp_min) spacing = sp_min;
     if (spacing > sp_max) spacing = sp_max;
+    /* [ARCADE EXPANSION 2026-06-28] Optional DENSITY tier (0=sparse, 1=normal,
+     * 2=dense, 3=mega) scales the spacing so a player (or a TRAFFIC BATTLE) can
+     * dial the power-up flood up or down. Source priority:
+     *   TD5RE_ARCADE_DENSITY knob  >  battle_powerup_density (MP-replicated)  >  1.
+     * Denser tier => smaller spacing => more boxes. Deterministic (config only). */
+    {
+        int dens = -1;
+        const char *de = getenv("TD5RE_ARCADE_DENSITY");
+        if (de && de[0]) dens = atoi(de);
+        else if (td5_game_battle_mode_active())
+            dens = g_td5.mp_mode_config.battle_powerup_density;
+        if (dens >= 0) {
+            if (dens > 3) dens = 3;
+            static const int k_dens_pct[4] = { 150, 100, 65, 40 };  /* % of spacing */
+            spacing = (spacing * k_dens_pct[dens]) / 100;
+            if (spacing < 6) spacing = 6;
+        }
+    }
     { const char *e = getenv("TD5RE_ARCADE_PAD_SPACING"); if (e) { int v = atoi(e); if (v >= 6) spacing = v; } }
 
     int count = usable / spacing;
@@ -425,6 +562,7 @@ void td5_arcade_shutdown_race(void) {
     memset(s_oiled_frames, 0, sizeof(s_oiled_frames));
     memset(s_oiled_dir, 0, sizeof(s_oiled_dir));
     memset(s_oiled_rng, 0, sizeof(s_oiled_rng));
+    memset(s_frozen_frames, 0, sizeof(s_frozen_frames));
 }
 
 /* ======================================================================
@@ -466,6 +604,49 @@ void td5_arcade_tick(void) {
             int wob = (int)(s_oiled_rng[s] % 1201u) - 600;        /* -600..600 wobble */
             a->angular_velocity_yaw += s_oiled_dir[s] * yaw_base + wob;
             s_oiled_frames[s]--;
+        }
+    }
+
+    /* [ARCADE EXPANSION 2026-06-28] EMP/FREEZE: a frozen car (rival OR traffic)
+     * is held nearly still — bleed its planar velocity hard each tick (zero
+     * drive torque is enforced separately in td5_arcade_slot_accel_q8). Covers
+     * traffic slots, so a FREEZE turns nearby traffic into stationary ram
+     * targets. Deterministic (replicated velocity + config only). */
+    {
+        int keep = knob("TD5RE_ARCADE_FREEZE_KEEP_Q8", 0x40, 0, 0x100);  /* vel kept, Q8 */
+        for (int s = 0; s < total_slots(); s++) {
+            if (s_frozen_frames[s] <= 0) continue;
+            TD5_Actor *a = slot_actor(s);
+            if (!a || a->finish_time != 0) { s_frozen_frames[s] = 0; continue; }
+            a->linear_velocity_x = (int32_t)(((int64_t)a->linear_velocity_x * keep) >> 8);
+            a->linear_velocity_z = (int32_t)(((int64_t)a->linear_velocity_z * keep) >> 8);
+            s_frozen_frames[s]--;
+        }
+    }
+
+    /* [ARCADE EXPANSION 2026-06-28] MAGNET: each magnet holder drags nearby
+     * TRAFFIC toward it (ram fuel for the battle). Position lerp toward the
+     * holder (same 24.8 world units, bounded fraction), gated by a lane-scaled
+     * radius. Deterministic: replicated world positions + config only. */
+    {
+        int pull_div = knob("TD5RE_ARCADE_MAGNET_PULL_DIV", 24, 4, 256);   /* smaller=stronger */
+        int mag_lanes = knob("TD5RE_ARCADE_MAGNET_LANES",   6,  1, 40);
+        int64_t mag_r  = (int64_t)s_lane_w * mag_lanes;      /* render units */
+        int64_t mag_r2 = mag_r * mag_r;
+        for (int s = 0; s < racers; s++) {
+            if (s_effect[s] != TD5_PU_MAGNET) continue;
+            TD5_Actor *m = slot_actor(s);
+            if (!m) continue;
+            for (int t = g_traffic_slot_base; t < total_slots(); t++) {
+                TD5_Actor *o = slot_actor(t);
+                if (!o || td5_ai_actor_is_broken_down(t)) continue;
+                int64_t dx = ((int64_t)m->world_pos.x - o->world_pos.x) >> 8;  /* render units */
+                int64_t dz = ((int64_t)m->world_pos.z - o->world_pos.z) >> 8;
+                int64_t d2 = dx*dx + dz*dz;
+                if (d2 == 0 || d2 > mag_r2) continue;
+                o->world_pos.x += (int32_t)((m->world_pos.x - o->world_pos.x) / pull_div);
+                o->world_pos.z += (int32_t)((m->world_pos.z - o->world_pos.z) / pull_div);
+            }
         }
     }
 
@@ -526,7 +707,8 @@ void td5_arcade_tick(void) {
             TD5_Actor *a = slot_actor(s);
             if (!a) continue;
             if (a->finish_time != 0) continue;
-            if (td5_arcade_slot_is_ghost(s)) continue;  /* ghosts pass hazards */
+            if (td5_arcade_slot_is_ghost(s)) continue;     /* ghosts pass hazards   */
+            if (td5_arcade_slot_is_shielded(s)) continue;  /* shields shrug off oil */
             /* >>8 converts the 24.8-fixed world delta to RENDER units (radius scale) */
             int64_t dx = ((int64_t)a->world_pos.x - s_haz[h].x) >> 8;
             int64_t dz = ((int64_t)a->world_pos.z - s_haz[h].z) >> 8;
@@ -579,7 +761,15 @@ int td5_arcade_slot_is_ghost(int slot) {
 
 int td5_arcade_slot_is_wrecking(int slot) {
     if (!s_active || slot < 0 || slot >= ARC_MAX_SLOTS) return 0;
-    return s_effect[slot] == TD5_PU_WRECK;
+    /* [ARCADE EXPANSION 2026-06-28] ROCKET plows straight through traffic like a
+     * wrecking ball for its short duration. */
+    return s_effect[slot] == TD5_PU_WRECK || s_effect[slot] == TD5_PU_ROCKET;
+}
+
+int td5_arcade_slot_is_shielded(int slot) {
+    /* [ARCADE EXPANSION 2026-06-28] SHIELD = no knockback/launch + oil-immune. */
+    if (!s_active || slot < 0 || slot >= ARC_MAX_SLOTS) return 0;
+    return s_effect[slot] == TD5_PU_SHIELD;
 }
 
 int td5_arcade_slot_accel_q8(int slot) {
@@ -594,6 +784,13 @@ int td5_arcade_slot_accel_q8(int slot) {
      * on every client — same guarantee as the MP-catchup / manual / weight
      * multipliers it sits beside in the torque pipeline. */
     if (!s_active || slot < 0 || slot >= ARC_MAX_SLOTS) return 0x100;
+    /* [ARCADE EXPANSION 2026-06-28] FREEZE/EMP zeroes drive torque (stalled), and
+     * ROCKET applies a bigger dash than NITRO. */
+    if (s_frozen_frames[slot] > 0) return 0;
+    if (s_effect[slot] == TD5_PU_ROCKET) {
+        int rp = knob("TD5RE_ARCADE_ROCKET_ACCEL_PCT", 400, 100, 900);
+        return (rp * 0x100) / 100;
+    }
     if (s_effect[slot] != TD5_PU_NITRO) return 0x100;
     int pct = knob("TD5RE_ARCADE_NITRO_ACCEL_PCT", 250, 100, 800);  /* 250 = 2.5x */
     return (pct * 0x100) / 100;
@@ -622,8 +819,27 @@ int td5_arcade_launch_div(void) {
 }
 
 void td5_arcade_note_ram(int aggressor, int victim, int impact_mag) {
-    (void)aggressor; (void)victim; (void)impact_mag;
-    /* reserved hook (scoring / FF could attach here) */
+    /* [TRAFFIC BATTLE 2026-06-28] Score traffic destruction. A racer (humans +
+     * AI, slot < g_traffic_slot_base) that rams a TRAFFIC car (slot >= base) hard
+     * enough to cross the NPC-fatal threshold scores one WRECK. Deduped on the
+     * victim's broken-down state so each destroyed traffic car counts exactly
+     * once: the collision resolver marks the victim broken-down right after this
+     * call, so subsequent overlaps see it already broken and don't re-score; a
+     * recycled traffic slot clears the flag and can be scored afresh.
+     *
+     * Independent of arcade DYNAMICS — battle scoring works in SIMULATION mode
+     * too (it gates on td5_game_battle_mode_active(), not on s_active). The whole
+     * test is a pure function of replicated state (slot indices, impact_mag,
+     * broken-down flag) + the process-wide npc_fatal_mag knob, so wreck counts
+     * stay bit-identical across lockstep peers. */
+    if (!td5_game_battle_mode_active()) return;
+    if (aggressor < 0 || aggressor >= g_traffic_slot_base) return;  /* aggressor = racer */
+    if (victim   <  g_traffic_slot_base) return;                    /* victim = traffic  */
+    if (impact_mag < td5_physics_npc_fatal_mag()) return;           /* fatal hit only    */
+    if (td5_ai_actor_is_broken_down(victim)) return;                /* already scored    */
+    td5_game_add_wanted_kill(aggressor);
+    TD5_LOG_I(LOG_TAG, "battle: slot=%d WRECKED traffic slot=%d (impact=%d) -> wrecks=%d",
+              aggressor, victim, impact_mag, td5_game_get_wanted_kills(aggressor));
 }
 
 /* ======================================================================

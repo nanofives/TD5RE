@@ -3167,12 +3167,13 @@ static int mp_game_modes_enabled(void) {
 }
 
 static const char *const k_mp_mode_names[TD5_MP_MODE_COUNT] = {
-    "REGULAR RACE", "TIME TRIAL", "CUP", "COP CHASE"
+    "REGULAR RACE", "TIME TRIAL", "CUP", "TRAFFIC BATTLE", "COP CHASE"
 };
 static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
     "Classic race to the finish",
     "Race the clock - players pass through each other",
     "Best-of-X series, points by position",
+    "Wreck the most ONCOMING traffic - placement ignored",
     "One cop hunts the rest before time runs out",
 };
 
@@ -3201,10 +3202,12 @@ static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
  * drawn in the POST-button render pass so it composites on top of the frames. */
 #define MV_BX   170      /* mode-button x      */
 #define MV_BW   300      /* mode-button width  */
-#define MV_BH   54       /* mode-button height (two lines) */
-#define MV_Y0   104      /* first mode button  */
-#define MV_GAP  78       /* row pitch (widened so stacked vote borders clear the
-                          * neighbouring buttons) */
+#define MV_BH   50       /* mode-button height (two lines) */
+#define MV_Y0   96       /* first mode button  */
+#define MV_GAP  64       /* [2026-06-29] row pitch tightened (was 78) now that the
+                          * list has 5 modes — keeps Cop Chase (the 5th) from
+                          * sitting too low. Still clears the per-voter border
+                          * rings (14px gap between 50px buttons). */
 /* [MP MODE VOTE BORDERS 2026-06-27] Concentric per-voter border-ring geometry,
  * in 640x480 canvas px (scaled by sx/sy at draw time). Each cast vote adds one
  * ring just OUTSIDE the button frame, expanding outward. */
@@ -3319,6 +3322,26 @@ static void mp_mode_config_apply_defaults(int mode) {
         c->suspect_head_start = 12;
         c->suspect_debuff_pct = 70;
         c->cop_infect_enabled = 0;              /* [INFECT] off by default */
+        break;
+    case TD5_MP_MODE_TRAFFIC_BATTLE:
+        /* [TRAFFIC BATTLE 2026-06-28] Seed the spawn cadence + power-up density
+         * from the knobs (the in-race setup re-reads battle_spawn_period if it is
+         * still 0). 30 ticks @30Hz = a fresh traffic car ~every second. */
+        {
+            const char *sp = getenv("TD5RE_BATTLE_SPAWN_PERIOD");
+            int p = (sp && sp[0]) ? atoi(sp) : 30;
+            if (p < 5)   p = 5;
+            if (p > 240) p = 240;
+            c->battle_spawn_period = p;
+        }
+        {
+            const char *de = getenv("TD5RE_ARCADE_DENSITY");
+            int d = (de && de[0]) ? atoi(de) : 2;   /* default DENSE for a battle */
+            if (d < 0) d = 0;
+            if (d > 3) d = 3;
+            c->battle_powerup_density = d;
+        }
+        c->battle_win_condition = TD5_BATTLE_WIN_MOST_WRECKS;   /* default */
         break;
     default:                                    /* TD5_MP_MODE_RACE: no extra opts */
         break;
@@ -3527,6 +3550,10 @@ typedef struct {
 
 static const char *const k_cfg_offon[2]  = { "OFF", "ON" };
 static const char *const k_cfg_wincon[3] = { "BUST ALL", "MOST BUSTS", "SUDDEN DEATH" };
+/* [TRAFFIC BATTLE 2026-06-28] power-up density tiers (battle_powerup_density). */
+static const char *const k_cfg_density[4] = { "SPARSE", "NORMAL", "DENSE", "MEGA" };
+/* [TRAFFIC BATTLE 2026-06-28] win-condition labels (battle_win_condition). */
+static const char *const k_cfg_battlewin[2] = { "MOST WRECKS", "CHECKPOINTS" };
 /* [PHYSICS SELECTOR DEDUP 2026-06-27] k_cfg_arcsim ("ARCADE"/"SIMULATION") was
  * dropped together with the DYNAMICS row below — the ARCADE/SIM selector now
  * lives only on the track-selection screen (see mp_cfg_build). */
@@ -3567,6 +3594,15 @@ static int mp_cfg_build(MpCfgOpt *o) {
         /* [INFECT 2026-06-25] Arrested suspects become cops (random police car)
          * instead of parking — keeps eliminated players in the chase. */
         o[n].label="INFECT";           o[n].val=&c->cop_infect_enabled;  o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
+        break;
+    case TD5_MP_MODE_TRAFFIC_BATTLE:
+        /* [TRAFFIC BATTLE 2026-06-28] Win condition + spawn cadence (ticks @30Hz;
+         * lower = denser target stream) + item-box density. MOST WRECKS runs to
+         * the track end; CHECKPOINTS adds a deadline that creeps up the track and
+         * knocks out anyone it passes, so you must keep crashing AND keep moving. */
+        o[n].label="WIN";              o[n].val=&c->battle_win_condition;   o[n].min=0; o[n].max=1;   o[n].step=1; o[n].enum_labels=k_cfg_battlewin; o[n].enum_count=2; n++;
+        o[n].label="SPAWN PERIOD";     o[n].val=&c->battle_spawn_period;    o[n].min=5; o[n].max=120; o[n].step=5; o[n].enum_labels=NULL;            o[n].enum_count=0; n++;
+        o[n].label="POWER-UPS";        o[n].val=&c->battle_powerup_density; o[n].min=0; o[n].max=3;   o[n].step=1; o[n].enum_labels=k_cfg_density;   o[n].enum_count=4; n++;
         break;
     default: /* TD5_MP_MODE_RACE — no extra options */
         break;
@@ -7271,6 +7307,10 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
     const char *unit = kph ? "KPH" : "MPH";
     int humans = s_num_human_players; if (humans < 1) humans = 1;
     const int my_slot = 0;          /* the local player (P1); in SP the sole human */
+    /* [TRAFFIC BATTLE 2026-06-28] In battle mode the HITS column becomes WRECKS
+     * (the destroyed-traffic score the sort + win are based on). */
+    const int battle = td5_game_battle_mode_active();
+    const char *col_hdr = battle ? "WRECKS" : "HITS";
 
     /* 4:3-locked glyph scale, exactly like frontend_render_high_score_overlay,
      * so centred columns stay centred at any window aspect. */
@@ -7449,7 +7489,7 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
         fe_draw_small_text(MP_CTR(m_top,  "SPEED"), mh_bot * sy, "SPEED", MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_avg,  "AVG"),   mh_top * sy, "AVG",   MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_avg,  "SPEED"), mh_bot * sy, "SPEED", MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_col,  "HITS"),  mh_mid * sy, "HITS",  MHDR, sx, sy);
+        fe_draw_small_text(MP_CTR(m_col,  col_hdr), mh_mid * sy, col_hdr, MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_air,  "AIR"),   mh_top * sy, "AIR",   MHDR, sx, sy);
         fe_draw_small_text(MP_CTR(m_air,  "TIME"),  mh_bot * sy, "TIME",  MHDR, sx, sy);
         if (mp_cup)
@@ -7537,7 +7577,8 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
             snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(avg_raw, kph), unit);
             fe_draw_small_text(MP_CTR(m_avg, buf), y, buf, row_color, sx, sy);
 
-            int collisions = m ? m->collisions : 0;
+            int collisions = battle ? td5_game_get_wanted_kills(slot)
+                                    : (m ? m->collisions : 0);
             int air_tenths = m ? (m->air_ticks * 10 + 15) / 30 : 0;
             snprintf(buf, sizeof(buf), "%d", collisions);
             fe_draw_small_text(MP_CTR(m_col, buf), y, buf, row_color, sx, sy);
@@ -7582,7 +7623,10 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
     fe_draw_small_text(SUM_CTR(c_top,  "SPEED"),      h_bot * sy, "SPEED",      HDR, sx, sy);
     fe_draw_small_text(SUM_CTR(c_avg,  "AVG"),        h_top * sy, "AVG",        HDR, sx, sy);
     fe_draw_small_text(SUM_CTR(c_avg,  "SPEED"),      h_bot * sy, "SPEED",      HDR, sx, sy);
-    fe_draw_small_text(SUM_CTR(c_col,  "COLLISIONS"), h_mid * sy, "COLLISIONS", HDR, sx, sy);
+    {
+        const char *sp_col_hdr = battle ? "WRECKS" : "COLLISIONS";
+        fe_draw_small_text(SUM_CTR(c_col, sp_col_hdr), h_mid * sy, sp_col_hdr, HDR, sx, sy);
+    }
     fe_draw_small_text(SUM_CTR(c_air,  "AIR"),        h_top * sy, "AIR",        HDR, sx, sy);
     fe_draw_small_text(SUM_CTR(c_air,  "TIME"),       h_bot * sy, "TIME",       HDR, sx, sy);
 
@@ -7653,7 +7697,8 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
         snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(avg_raw, kph), unit);
         fe_draw_small_text(SUM_CTR(c_avg, buf), y, buf, row_color, sx, sy);
 
-        int collisions = m ? m->collisions : 0;
+        int collisions = battle ? td5_game_get_wanted_kills(slot)
+                                : (m ? m->collisions : 0);
         int air_tenths = m ? (m->air_ticks * 10 + 15) / 30 : 0;
         snprintf(buf, sizeof(buf), "%d", collisions);
         fe_draw_small_text(SUM_CTR(c_col, buf), y, buf, row_color, sx, sy);

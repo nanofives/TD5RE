@@ -3831,6 +3831,15 @@ void td5_render_actors_for_view(int view_index)
             int actor_fade = td5_ai_traffic_get_draw_alpha(slot);
             if (actor_fade == 0)
                 continue;
+            /* [TRAFFIC BATTLE 2026-06-28] A wrecked traffic car renders
+             * translucent (≈35%, like ghost mode) so it reads as destroyed +
+             * intangible — the collision solver also lets the player drive clean
+             * through it. Battle only; clamps DOWN so an in-progress fade-out is
+             * never brightened. */
+            if (slot >= g_traffic_slot_base && td5_game_battle_mode_active() &&
+                td5_ai_actor_is_broken_down(slot)) {
+                if (actor_fade > 90) actor_fade = 90;
+            }
 
             /* Bumper / interior camera own-car skip (orig RenderRaceActorForView
              * @ 0x0040c120, gate @ 0x0040c2a0-0x0040c2af): when this actor IS the
@@ -7773,10 +7782,16 @@ static void render_tracked_actor_marker(const TD5_Actor *actor,
 static uint32_t arcade_pad_color(int kind)
 {
     switch (kind) {
-    case TD5_PU_NITRO:  return 0xFF20E0FFu;  /* cyan   — speed   */
-    case TD5_PU_GHOST:  return 0xFFE6E6FFu;  /* white  — ghost   */
-    case TD5_PU_WRECK:  return 0xFFFF3020u;  /* red    — wreck   */
-    case TD5_PU_HAZARD: return 0xFFFFB000u;  /* amber  — hazard  */
+    case TD5_PU_NITRO:  return 0xFF20E0FFu;  /* cyan    — speed   */
+    case TD5_PU_GHOST:  return 0xFFE6E6FFu;  /* white   — ghost   */
+    case TD5_PU_WRECK:  return 0xFFFF3020u;  /* red     — wreck   */
+    case TD5_PU_HAZARD: return 0xFFFFB000u;  /* amber   — hazard  */
+    /* [ARCADE EXPANSION 2026-06-28] new kinds */
+    case TD5_PU_SHIELD: return 0xFF40C0FFu;  /* sky blue — shield */
+    case TD5_PU_FREEZE: return 0xFF80FFF0u;  /* ice cyan — EMP    */
+    case TD5_PU_MAGNET: return 0xFFFF40C0u;  /* magenta  — magnet */
+    case TD5_PU_ROCKET: return 0xFFFF8020u;  /* orange   — rocket */
+    case TD5_PU_REPAIR: return 0xFF40FF60u;  /* green    — repair */
     default:            return 0xFFFFFFFFu;
     }
 }
@@ -7866,6 +7881,37 @@ static void arcade_draw_icon(int kind, float cx, float cy, float cz,
         arcade_icon_stroke(cx, cy, cz, scale,  0.0f, -0.42f, 0.14f,-0.55f, col);
         arcade_icon_stroke(cx, cy, cz, scale,  0.14f,-0.55f, 0.0f, -0.68f, col);
         arcade_icon_stroke(cx, cy, cz, scale,  0.0f, -0.68f,-0.14f,-0.55f, col);
+        break;
+    /* [ARCADE EXPANSION 2026-06-28] new-kind emblems (simple line-art) */
+    case TD5_PU_SHIELD:                            /* shield = chevron crest */
+        arcade_icon_stroke(cx, cy, cz, scale, -0.7f, 0.7f,  0.7f, 0.7f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.7f, 0.7f, -0.7f,-0.1f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.7f, 0.7f,  0.7f,-0.1f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.7f,-0.1f,  0.0f,-0.85f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.7f,-0.1f,  0.0f,-0.85f, col);
+        break;
+    case TD5_PU_FREEZE:                            /* snowflake / asterisk = EMP */
+        arcade_icon_stroke(cx, cy, cz, scale,  0.0f, 0.9f,  0.0f,-0.9f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.78f,0.45f, 0.78f,-0.45f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.78f,-0.45f,0.78f, 0.45f, col);
+        break;
+    case TD5_PU_MAGNET:                            /* horseshoe magnet */
+        arcade_icon_stroke(cx, cy, cz, scale, -0.5f, 0.85f,-0.5f,-0.2f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.5f, 0.85f, 0.5f,-0.2f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.5f,-0.2f, -0.2f,-0.6f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.5f,-0.2f,  0.2f,-0.6f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.2f,-0.6f,  0.2f,-0.6f, col);
+        break;
+    case TD5_PU_ROCKET:                            /* up-arrow w/ tail = rocket */
+        arcade_icon_stroke(cx, cy, cz, scale,  0.0f,-0.9f,  0.0f, 0.95f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.5f, 0.4f,  0.0f, 0.95f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.5f, 0.4f,  0.0f, 0.95f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.3f,-0.9f, -0.3f,-0.5f, col);
+        arcade_icon_stroke(cx, cy, cz, scale,  0.3f,-0.9f,  0.3f,-0.5f, col);
+        break;
+    case TD5_PU_REPAIR:                            /* plus / cross = repair */
+        arcade_icon_stroke(cx, cy, cz, scale,  0.0f, 0.8f,  0.0f,-0.8f, col);
+        arcade_icon_stroke(cx, cy, cz, scale, -0.8f, 0.0f,  0.8f, 0.0f, col);
         break;
     default: break;
     }
