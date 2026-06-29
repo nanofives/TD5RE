@@ -292,7 +292,9 @@ enum {
 static uint8_t g_cop_is_cop[TD5_MAX_TOTAL_ACTORS];        /* 1 = this traffic slot is a cop car */
 static uint8_t g_cop_phase[TD5_MAX_TOTAL_ACTORS];         /* COP_IDLE / COP_CHASING / COP_PULLOVER */
 static int8_t  g_cop_target[TD5_MAX_TOTAL_ACTORS];        /* racer slot being chased, or -1 */
-static int8_t  g_actor_pursued_by[TD5_MAX_TOTAL_ACTORS];  /* which cop slot chases this actor, or -1 */
+/* [MULTI-COP 2026-06-29] g_actor_pursued_by[] (a single pursuer slot per target)
+ * was REMOVED. A car may now be chased by several cops at once, so a one-cop
+ * field can't represent it. td5_ai_actor_is_pursued() scans the cops instead. */
 static uint8_t g_actor_broken_down[TD5_MAX_TOTAL_ACTORS]; /* 1 = crashed/disabled: parked + smoking */
 static int16_t g_actor_broken_ticks[TD5_MAX_TOTAL_ACTORS];/* remaining broken-down ticks */
 static int16_t g_cop_glow_phase[TD5_MAX_TOTAL_ACTORS];    /* steady strobe intensity ramp per cop */
@@ -421,7 +423,6 @@ static void cop_state_reset(void) {
     memset(s_cop_rebust_target, -1, sizeof(s_cop_rebust_target));
     for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
         g_cop_target[i]       = -1;
-        g_actor_pursued_by[i] = -1;
         s_cop_best_gap[i]     = 0x7FFFFFFF;   /* [R3-12] no progress baseline yet */
     }
     s_cop_spawn_counter = 0;
@@ -431,11 +432,9 @@ static void cop_state_reset(void) {
  * return the cop to COP_IDLE — but it STAYS a cop (g_cop_is_cop kept) so it can
  * acquire the next car that passes it. */
 static void cop_end_chase(int slot) {
-    int t;
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
-    t = g_cop_target[slot];
-    if (t >= 0 && t < TD5_MAX_TOTAL_ACTORS && g_actor_pursued_by[t] == slot)
-        g_actor_pursued_by[t] = -1;
+    /* [MULTI-COP 2026-06-29] No per-target pursuer lock to clear anymore — a car
+     * can be chased by several cops at once; td5_ai_actor_is_pursued() scans cops. */
     g_cop_target[slot] = -1;
     g_cop_phase[slot]  = COP_IDLE;
     g_cop_glow_phase[slot] = 0;
@@ -449,6 +448,24 @@ static void cop_end_chase(int slot) {
     /* Cruise normally for a while before this cop may re-acquire — stops the
      * "same cop chases me again the instant the last chase ends" loop. */
     g_cop_cooldown[slot] = COP_RECHASE_COOLDOWN;
+}
+
+/* [COP CATCH-UP 2026-06-29] How far (spans) a cop trails its target before giving
+ * up. Was tied to traffic_dyn_despawn (65) — the cop abandoned the chase the
+ * instant the player opened a straight-line lead ("the police can't catch up").
+ * A longer leash keeps the cop on the player so it can close the gap when they
+ * slow for the next corner / crash / traffic. The no-progress stall watchdog
+ * (COP_STALL_TICKS) still ends a chase a cop genuinely can't close, so this never
+ * strands a hopeless cop forever. TD5RE_COP_CHASE_GAP overrides (spans). */
+static int cop_chase_max_gap(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_COP_CHASE_GAP");
+        v = (e && e[0]) ? atoi(e) : 110;
+        if (v < 20)  v = 20;
+        if (v > 400) v = 400;
+    }
+    return v;
 }
 
 /* [R3-12] A/B knob: end a chase when the cop makes no net progress toward the
@@ -872,7 +889,22 @@ int td5_ai_actor_is_broken_down(int slot) {
  * pursuit) without flagging ordinary racers who merely bumped something. */
 int td5_ai_actor_is_pursued(int slot) {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
-    return g_actor_pursued_by[slot] != -1;
+    /* [MULTI-COP 2026-06-29] A target may be pursued by MORE THAN ONE cop at once
+     * now (the single g_actor_pursued_by[] slot was removed). Scan the cops so this
+     * stays correct regardless of how many are chasing: pursued == ANY cop is
+     * actively chasing / pulling over this slot.
+     *
+     * Scoped to TRAFFIC-slot cops (>= g_traffic_slot_base) — exactly the set the
+     * removed g_actor_pursued_by[] tracked. The MP cop-chase mode uses player-slot
+     * cops that never set that field, so they were never reported pursued here;
+     * keeping the lower bound preserves that (no change to the MP cop path). */
+    for (int k = g_traffic_slot_base; k < TD5_MAX_TOTAL_ACTORS; k++) {
+        if (g_cop_is_cop[k] &&
+            (g_cop_phase[k] == COP_CHASING || g_cop_phase[k] == COP_PULLOVER) &&
+            g_cop_target[k] == slot)
+            return 1;
+    }
+    return 0;
 }
 
 /* 1 when `slot` is a cop car (any phase, incl. idle-cruising). td5_render.c
@@ -9604,9 +9636,16 @@ void td5_ai_traffic_dynamic_tick(void)
                 far_from_all ||
                 (g_traffic_recovery_stage[slot] != 0 &&
                  s_traffic_stuck_frames[slot] >= 45 &&
-                 /* far enough that the fade is unobtrusive; nearer stuck cars
-                  * are realigned in place by AntiFreeze instead */
-                 trf_dyn_min_player_dist(sp) > g_td5.ini.traffic_dyn_despawn))) {
+                 /* [traffic-front-despawn 2026-06-29] far enough that the fade is
+                  * unobtrusive — gate on the SAME forward-keep distance as the
+                  * ahead/far paths (front_keep, which is >= the ~128-span actor
+                  * render cull at ViewDistance=100), NOT the bare 65-span despawn.
+                  * A stuck car 66..128 spans away is still ON-SCREEN, so fading it
+                  * at the old 65-span gate vanished it in plain sight ("traffic
+                  * disappears in front of me"). A nearer stuck car is realigned by
+                  * AntiFreeze / just brakes until the player passes it (then the
+                  * rear despawn retires it out of view). */
+                 trf_dyn_min_player_dist(sp) > front_keep))) {
                 s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
                 TD5_LOG_I(LOG_TAG,
                           "traffic_dyn_despawn: slot=%d behind_trail=%d ahead_lead=%d "
@@ -10561,7 +10600,11 @@ void td5_ai_update_special_encounter(void) {
             for (int c = 0; c < racer_n; c++) {
                 char *cand;
                 int   st, cgap;
-                if (g_actor_pursued_by[c] != -1) continue;     /* no double-chase */
+                /* [MULTI-COP 2026-06-29] (removed) The old
+                 *   `if (g_actor_pursued_by[c] != -1) continue;  // no double-chase`
+                 * guard let only ONE cop chase a given car. It is gone now: pass
+                 * a cluster of cops and they ALL acquire you. A target carries as
+                 * many pursuers as there are cops in range. */
                 /* [#3] This cop busted this car recently -> leave it alone until
                  * its re-chase cooldown lapses (a DIFFERENT cop can still acquire
                  * it immediately, and this cop resumes after the cooldown). */
@@ -10596,7 +10639,8 @@ void td5_ai_update_special_encounter(void) {
             }
             if (chosen >= 0) {
                 g_cop_target[k]            = (int8_t)chosen;
-                g_actor_pursued_by[chosen] = (int8_t)k;
+                /* [MULTI-COP 2026-06-29] No pursuer lock written — multiple cops
+                 * may target the same car; td5_ai_actor_is_pursued() scans cops. */
                 g_cop_phase[k]             = COP_CHASING;
                 /* [R3-12] Arm the no-progress watchdog for this fresh chase. */
                 s_cop_best_gap[k]          = 0x7FFFFFFF;
@@ -10641,8 +10685,13 @@ void td5_ai_update_special_encounter(void) {
             int   tgt_main = td5_track_branch_to_main_span((int)ACTOR_I16(tactor, ACTOR_SPAN_RAW));
             gap = smart_span_gap(cop_main, tgt_main, ring_len);  /* >0 = target ahead of cop */
 
-            /* End: target escaped — same distance metric as traffic despawn. */
-            if (smart_iabs(gap) > g_td5.ini.traffic_dyn_despawn) {
+            /* End: target escaped. [COP CATCH-UP 2026-06-29] Was the 65-span
+             * traffic-despawn metric, which made a cop quit the moment the player
+             * opened a straight-line lead. cop_chase_max_gap() (default 110 spans)
+             * gives the cop room to stay on the player and close on the next
+             * corner. The no-progress stall watchdog below still ends a chase the
+             * cop truly can't close. */
+            if (smart_iabs(gap) > cop_chase_max_gap()) {
                 if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
                 TD5_LOG_I(LOG_TAG, "cop_chase END (too far): cop=%d target=%d gap=%d", k, tgt, gap);
                 cop_end_chase(k);
