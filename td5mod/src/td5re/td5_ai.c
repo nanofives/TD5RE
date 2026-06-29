@@ -11664,6 +11664,127 @@ static void cop_ram_steer(int slot, int32_t dev) {
     ACTOR_I32(cop, ACTOR_STEERING_CMD) = out;
 }
 
+/* ====================================================================
+ * [COP OVERHAUL 2026-06-29] Catch-up acceleration rubber-band + predictive
+ * corner easing.
+ *
+ * The original binary has NO pursuit AI at all (RE-confirmed: 0 hits for
+ * cop/police/pursuit; the racer rubber-band @0x00432D60 touches only racer
+ * slots 0..5, never traffic; no wall look-ahead exists @0x00434FE0). So the
+ * whole cop-in-races system — and these tweaks — are PORT heuristics, not a
+ * faithful port of original behaviour.
+ *
+ * ROOT CAUSE of "police can't catch up on straights": a chasing cop is a
+ * TRAFFIC slot, so it integrates through td5_physics_update_traffic(), whose
+ * propulsion is a FIXED throttle force (encounter_steering_cmd*4) with NO
+ * engine-power / top-speed term. phys_top_speed_rating()->0x7FFF uncaps only
+ * the RACER physics path (MP cop chase), not the traffic cop — so a fast player
+ * car out-tops the cop's fixed traffic speed and pulls away. The fix below is a
+ * true deterministic acceleration rubber-band: scale the cop's traffic
+ * propulsion by a Q8 boost that grows with its speed deficit vs the catch-up
+ * cap, then tapers to 1.0 as it reaches the cap (self-limiting, no runaway).
+ * Pure function of replicated speeds/spans -> lockstep-safe. ============== */
+
+/* Max propulsion boost (% , 100 = no boost) applied when a chasing cop is far
+ * below its catch-up cap. TD5RE_COP_CHASE_ACCEL overrides; clamped [100,500]. */
+static int cop_chase_accel_max_pct(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_COP_CHASE_ACCEL");
+        v = (e && e[0]) ? atoi(e) : 280;
+        if (v < 100) v = 100;
+        if (v > 500) v = 500;
+        TD5_LOG_I(LOG_TAG, "cop_chase_accel: max boost = %d%% (TD5RE_COP_CHASE_ACCEL)", v);
+    }
+    return v;
+}
+
+/* A/B knob: predictive corner easing for a chasing cop. Default ON;
+ * TD5RE_COP_CORNER_EASE=0 disables (cop floors the catch-up throttle even into
+ * bends — the old crash-prone behaviour). */
+static int cop_corner_ease_enabled(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("TD5RE_COP_CORNER_EASE");
+                 s = (e && e[0] == '0') ? 0 : 1; }
+    return s;
+}
+
+/* Corner-scan tuning (spans / heading units; same scale as the SmartAI scan). */
+#define COP_CORNER_WIN          3       /* heading-delta window (spans) */
+#define COP_CORNER_LOOK_MIN     3       /* min spans of look-ahead */
+#define COP_CORNER_LOOK_MAX     12      /* max spans of look-ahead */
+#define COP_CORNER_LOOK_SPD  0x8000     /* speed / this = extra look-ahead spans */
+#define COP_CORNER_SHARP_THRESH 0x180   /* |heading delta| over the window that
+                                         * counts as a bend worth easing for
+                                         * (~0.59 of SmartAI's ==1.0 value 0x2A0) */
+
+/* 1 when a corner sharp enough to ease for sits within the cop's speed-scaled
+ * braking horizon ahead. Used to (a) suppress the catch-up throttle floor in
+ * cop_drive and (b) zero the accel-boost, so the cop slows for the bend and
+ * lets its route plan steer through instead of flooring into the outside wall.
+ * Pure function of replicated span/heading state -> lockstep-safe. */
+static int cop_corner_imminent(int slot) {
+    char *cop;
+    int ring, span, main_span, look, worst, d;
+    int32_t spd;
+    if (!cop_corner_ease_enabled()) return 0;
+    cop = actor_ptr(slot);
+    if (!cop) return 0;
+    ring = td5_track_get_ring_length();
+    if (ring <= 0) return 0;
+    span = (int)ACTOR_I16(cop, ACTOR_SPAN_RAW);
+    main_span = td5_track_branch_to_main_span(span);
+    spd = ACTOR_I32(cop, ACTOR_LONGITUDINAL_SPEED);
+    if (spd < 0) spd = -spd;
+    look = COP_CORNER_LOOK_MIN + (int)(spd / COP_CORNER_LOOK_SPD);
+    if (look > COP_CORNER_LOOK_MAX) look = COP_CORNER_LOOK_MAX;
+    worst = 0;
+    for (d = 0; d <= look; d++) {
+        int s0 = (((main_span + d) % ring) + ring) % ring;
+        int s1 = (((main_span + d + COP_CORNER_WIN) % ring) + ring) % ring;
+        int turn = smart_ang_signed(td5_track_get_primary_route_heading(s1)
+                                    - td5_track_get_primary_route_heading(s0));
+        int at = turn < 0 ? -turn : turn;
+        if (at > worst) worst = at;
+    }
+    return worst >= COP_CORNER_SHARP_THRESH;
+}
+
+/* [COP OVERHAUL 2026-06-29] Q8 (0x100 = 1.0) propulsion multiplier for a chasing
+ * cop, applied to the traffic-integrator throttle in td5_physics_update_traffic.
+ * 1.0 (no boost) for non-cops, idle cops, an imminent corner (so the cop eases
+ * for the bend), or once the cop has reached its catch-up cap. Below the cap it
+ * scales up with the speed deficit so the cop out-accelerates a faster suspect
+ * on straights, then tapers back to 1.0 near the cap (self-limiting). Same cap
+ * (target_speed * cop_catchup_pct/100, floored at cop_min_speed) the cop_drive
+ * catch-up gate uses. Deterministic: replicated speeds/spans + env knob only. */
+int td5_ai_cop_chase_throttle_boost_q8(int slot) {
+    char *cop, *t;
+    int tgt, maxb;
+    int32_t cabs, tabs, cap, deficit, boost;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0x100;
+    if (!td5_ai_cop_is_chasing(slot)) return 0x100;
+    tgt = g_cop_target[slot];
+    if (tgt < 0 || tgt >= TD5_MAX_TOTAL_ACTORS) return 0x100;
+    if (cop_corner_imminent(slot)) return 0x100;        /* ease for the bend */
+    cop = actor_ptr(slot); t = actor_ptr(tgt);
+    if (!cop || !t) return 0x100;
+    cabs = ACTOR_I32(cop, ACTOR_LONGITUDINAL_SPEED); if (cabs < 0) cabs = -cabs;
+    tabs = ACTOR_I32(t,   ACTOR_LONGITUDINAL_SPEED); if (tabs < 0) tabs = -tabs;
+    cap = (int32_t)((int64_t)tabs * g_td5.ini.cop_catchup_pct / 100);
+    if (cap < g_td5.ini.cop_min_speed) cap = g_td5.ini.cop_min_speed;
+    if (cap <= 0 || cabs >= cap) return 0x100;          /* at/above cap -> coast */
+    /* deficit fraction (Q8): (cap - cabs)/cap, in [0,0x100]. */
+    deficit = (int32_t)((((int64_t)(cap - cabs)) << 8) / cap);
+    if (deficit < 0)     deficit = 0;
+    if (deficit > 0x100) deficit = 0x100;
+    maxb = cop_chase_accel_max_pct();                   /* e.g. 280 */
+    /* boost = 1.0 + (maxb/100 - 1.0) * deficit  (all Q8). */
+    boost = 0x100 + (int32_t)((((int64_t)((maxb - 100) * 0x100 / 100)) * deficit) >> 8);
+    if (boost < 0x100) boost = 0x100;
+    return boost;
+}
+
 static void cop_drive(int slot) {
     char *cop = actor_ptr(slot);
     int   tgt = g_cop_target[slot];
@@ -11819,6 +11940,19 @@ static void cop_drive(int slot) {
         if ((g_ai_frame_counter % 30u) == 0u)
             TD5_LOG_I(LOG_TAG, "cop_dodge: slot=%d easing around peer (lane_bias=%d) — no catch-up floor",
                       slot, (int)s_traffic_lane_bias[slot]);
+        return;
+    }
+    /* [COP OVERHAUL 2026-06-29] Predictive corner easing: if a sharp bend sits
+     * within the cop's speed-scaled braking horizon, DON'T floor the catch-up
+     * throttle — leave the route plan's eased throttle so the cop slows and
+     * steers through the corner instead of flooring into the outside wall. The
+     * accel rubber-band in td5_physics_update_traffic is likewise zeroed for an
+     * imminent corner (cop_corner_imminent), so the eased throttle is not
+     * re-amplified. The accel-boost then resumes the instant the road straightens
+     * out (this is the wall-avoidance half of the overhaul). */
+    if (cop_corner_imminent(slot)) {
+        if ((g_ai_frame_counter % 30u) == 0u)
+            TD5_LOG_I(LOG_TAG, "cop_corner_ease: slot=%d bend ahead — no catch-up floor", slot);
         return;
     }
     if (tgt >= 0 && tgt < TD5_MAX_TOTAL_ACTORS) {

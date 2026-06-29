@@ -30,6 +30,9 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Cops: accel rubber-band out-drags a faster car on straights (catch up)",
+    "Cops: tougher (300%); chasing cop shrugs off wall scrapes (no chase-end)",
+    "Cops: ease off for corners instead of flooring into the outside wall",
     "Cops: pass a cluster and ALL of them chase you (no 1-cop limit)",
     "Cops: longer chase leash (110 spans) + 200% catch-up; harder to shake",
     "Traffic: stuck car no longer fades in front of you (gates on render dist)",

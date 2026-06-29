@@ -156,6 +156,13 @@ int  td5_ai_is_encounter_active(int slot);
  * td5_ai.c. */
 /* 1 when `slot` is a cop currently chasing (or pulling over) a racer. */
 int  td5_ai_cop_is_chasing(int slot);
+/* [COP OVERHAUL 2026-06-29] Q8 (0x100 = 1.0) propulsion multiplier for a chasing
+ * traffic-slot cop, applied to the throttle force in td5_physics_update_traffic
+ * so the cop out-accelerates a faster suspect on straights (acceleration
+ * rubber-band; the simplified traffic model has no engine/top-speed term). 1.0
+ * for non-cops / idle cops / at the catch-up cap / an imminent corner.
+ * Deterministic (replicated cop+target speeds) -> lockstep-safe. */
+int  td5_ai_cop_chase_throttle_boost_q8(int slot);
 /* [MP COP CHASE 2026-06-22] Arm a racer slot as an AI-driven cop (is_ai=0 =
  * human cop, no-op). The chase driver takes the slot over each tick. */
 void td5_ai_cop_chase_setup(int cop_slot, int is_ai);
