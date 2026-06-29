@@ -26,6 +26,7 @@
 #include "td5_asset.h"
 #include "td5_render.h"
 #include "td5_arcade.h"   /* ARCADE per-viewport power-up chip */
+#include "td5_damage.h"   /* [CAR DAMAGE] player HUD health bar */
 #include "td5_track.h"
 #include "td5_game.h"
 #include "td5_net.h"      /* [S31] td5_net_get_slot_name for the PAUSED BY overlay */
@@ -3272,6 +3273,10 @@ static void hud_draw_copchase_arrest_strip(int view_index)
     }
 }
 
+/* [CAR DAMAGE 2026-06-28] Player HUD health bar (defined near the hud_*_quad
+ * helpers below). Forward-declared so td5_hud_draw_status_text can call it. */
+static void hud_draw_player_damage_bar(int player_slot, int view_index);
+
 void td5_hud_draw_status_text(int player_slot, int view_index)
 {
     /* Skip during special render mode */
@@ -3311,6 +3316,12 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
         }
         return;
     }
+
+    /* [CAR DAMAGE 2026-06-28] This pane's car-health bar (green->yellow->red),
+     * anchored top-left of the pane. No-op when [Game] CarDamage=0 or the slot
+     * is uninitialized. Drawn for real races only (after the replay/demo
+     * early-returns above). */
+    hud_draw_player_damage_bar(player_slot, view_index);
 
     /* Wanted mode messages — the suspect's "SUSPECT IS WANTED FOR <crime>" objective.
      * [COP-CHASE 2026-06-21] Moved to the UPPER-THIRD and drawn MUCH larger so it
@@ -7589,6 +7600,49 @@ static void hud_solid_tri(float x0,float y0,float x1,float y1,float x2,float y2,
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
     td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
     td5_plat_render_draw_tris(q,3,idx,3);
+}
+
+/* [CAR DAMAGE 2026-06-28] Player HUD car-health bar. A fixed screen-space bar
+ * anchored top-left of the pane: dark background + border, with a fill whose
+ * WIDTH is the remaining health and whose COLOUR runs green (full) -> yellow
+ * (half) -> red (wrecked). Modelled on td5_hud_update_wanted_damage_indicator
+ * but screen-space (no world projection). Inert when CarDamage is off / the slot
+ * is uninitialized. Drawn with the same hud_solid_quad helper (sz=0, rhw=1 =
+ * flat 2D HUD quad on the white page). */
+static void hud_draw_player_damage_bar(int player_slot, int view_index)
+{
+    if (!td5_damage_enabled()) return;
+    if (view_index < 0 || view_index >= MAX_HUD_VIEWS) return;
+    float h = td5_damage_health01(player_slot);
+    if (h < 0.0f) return;                      /* uninitialized this race */
+    if (h > 1.0f) h = 1.0f;
+
+    const TD5_HudViewLayout *vl = &s_view_layout[view_index];
+    float pane_w = vl->vp_int_right - vl->vp_int_left;
+    if (pane_w < 2.0f) pane_w = g_render_width_f;
+    float sc = pane_w / 640.0f;
+    if (sc < 0.5f) sc = 0.5f; else if (sc > 2.0f) sc = 2.0f;
+
+    float bw = pane_w * 0.20f;
+    float bh = 9.0f * sc;
+    float bl = vl->vp_int_left + 12.0f * sc;
+    float bt = vl->vp_int_top  + 12.0f * sc;
+    const float sz = 0.0f, rhw = 1.0f;
+    float ob = 2.0f * sc; if (ob < 1.5f) ob = 1.5f;
+
+    /* health -> colour (green @1.0, yellow @0.5, red @0.0); ARGB (0xAARRGGBB). */
+    int r, g; const int b = 0x22;
+    if (h > 0.5f) { float t = (1.0f - h) * 2.0f; r = (int)(0x20 + t * (0xE0 - 0x20)); g = 0xD0; }
+    else          { float t = (0.5f - h) * 2.0f; r = 0xE0; g = (int)(0xD0 - t * (0xD0 - 0x20)); }
+    if (r < 0) r = 0; if (r > 255) r = 255;
+    if (g < 0) g = 0; if (g > 255) g = 255;
+    uint32_t fill = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+
+    hud_solid_quad(bl - ob, bt - ob, bl + bw + ob, bt + bh + ob, sz, rhw, 0xFF000000u); /* border */
+    hud_solid_quad(bl, bt, bl + bw, bt + bh, sz, rhw, 0xC0202020u);                      /* track  */
+    float fw = bw * h;
+    if (fw > 0.5f)
+        hud_solid_quad(bl, bt, bl + fw, bt + bh, sz, rhw, fill);                         /* fill   */
 }
 
 void td5_hud_update_wanted_damage_indicator(int actor_slot)

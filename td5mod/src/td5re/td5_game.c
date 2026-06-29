@@ -40,6 +40,7 @@
 
 #include "td5_vfx.h"
 #include "td5_arcade.h"   /* ARCADE mode: pickup pads + power-ups */
+#include "td5_damage.h"   /* [CAR DAMAGE] health reset + knockout completion gate */
 #include "td5_trace.h"
 #include "td5_profile.h"
 #include "td5_benchmark.h"
@@ -4082,6 +4083,12 @@ int td5_game_init_race_session(void) {
     /* Reset results table */
     reset_results_table();
 
+    /* [CAR DAMAGE 2026-06-28] Initialize per-actor health + clear deformation for
+     * this race (ResetVehicleActorState does NOT touch the damage padding, so this
+     * is the only initializer). Inert when [Game] CarDamage=0. Runs after actors
+     * are spawned so td5_game_get_actor() returns valid pointers. */
+    td5_damage_reset_race();
+
     /* Notify sound that race is starting */
     td5_sound_set_race_end(0);
 
@@ -6902,10 +6909,18 @@ static int mp_cop_chase_resolved(void) {
 static int check_race_completion(uint32_t sim_delta) {
     int i;
 
-    /* Phase 2: Post-finish cooldown (near-instant per TD5_RACE_END_DWELL) */
+    /* Phase 2: Post-finish cooldown (near-instant per TD5_RACE_END_DWELL).
+     * [CAR DAMAGE 2026-06-28] When the finish-orbit is enabled, hold here for a
+     * few seconds instead of ending instantly, so the chase camera can orbit the
+     * player's (stationary, finished) car to show off the accumulated damage
+     * before results. NOT during a replay (which reuses this path). Faithful
+     * near-instant dwell when CarDamage is off. */
     if (s_post_finish_cooldown != 0) {
+        uint32_t dwell = TD5_RACE_END_DWELL;
+        if (td5_damage_finish_orbit_enabled() && (!s_replay_mode || !replay_keep_results_on()))
+            dwell = (uint32_t)td5_damage_finish_orbit_hold_ms();
         s_post_finish_cooldown += sim_delta;
-        if (s_post_finish_cooldown > TD5_RACE_END_DWELL) {
+        if (s_post_finish_cooldown > dwell) {
             /* Dwell expired: build results and signal completion */
             s_post_finish_cooldown = 0;
             /* [REPLAY RESULTS PRESERVE 2026-06-27] A View Replay reaches this
@@ -6916,7 +6931,7 @@ static int check_race_completion(uint32_t sim_delta) {
              * The genuine results were snapshotted at replay-init and are restored
              * when the replay ends; here we only drive the fade/finish. */
             if (!s_replay_mode || !replay_keep_results_on()) {
-                TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", TD5_RACE_END_DWELL);
+                TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", dwell);
                 build_results_table();
                 td5_game_mp_cup_award();   /* [MP CUP] tally this race's points */
             } else {
@@ -6984,6 +6999,7 @@ static int check_race_completion(uint32_t sim_delta) {
             if (g_td5.mp_ai_player_mask & (1u << i)) continue;    /* AI-driven, not a real human */
             if (cop_chase && td5_game_cop_chase_is_suspect(i) &&
                 g_wanted_damage_state[i] <= 0) continue;          /* arrested -> done */
+            if (td5_damage_slot_knocked_out(i)) continue;         /* [CAR DAMAGE] wrecked -> done */
             if (s_slot_state[i].companion_1 == 0) { all_humans_done = 0; break; }
         }
 
@@ -6991,6 +7007,7 @@ static int check_race_completion(uint32_t sim_delta) {
             if (s_slot_state[i].state == 3) continue;  /* disabled */
             if (cop_chase && td5_game_cop_chase_is_suspect(i) &&
                 g_wanted_damage_state[i] <= 0) continue;          /* arrested -> done */
+            if (td5_damage_slot_knocked_out(i)) continue;         /* [CAR DAMAGE] wrecked -> done */
             if (s_slot_state[i].companion_1 == 0) {     /* not finished */
                 int is_human = (i < humans) &&
                                !(g_td5.mp_ai_player_mask & (1u << i));

@@ -547,6 +547,19 @@ typedef struct TD5_GlobalState {
          * td5_frontend_auto_race_setup; the manual frontend Direction toggle
          * is unaffected. Test override only — no equivalent in the original. */
         int  default_reverse;
+        /* [CAR DAMAGE 2026-06-28] Global GTA4-style car-damage master. Now ON by
+         * default (the player controls it via the Game Options CAR TOUGHNESS +
+         * DEFORMATION level rows; there is no in-menu off). [Game] CarDamage=0 in
+         * td5re.ini (or --CarDamage=0) is the faithful-sim kill-switch that
+         * disables the whole system. Fine-tuned by the TD5RE_DAMAGE_* env knobs. */
+        int  car_damage;
+        /* [CAR DAMAGE 2026-06-29] Global, persistent damage LEVELS, edited on the
+         * Game Options screen and applied to EVERY race. 0=Low, 1=Normal, 2=High.
+         * Toughness scales car health (durability); Deform scales the per-vertex
+         * dent + scuff magnitude. Persisted to td5re.ini [Game] via
+         * td5_ini_persist_options(); --CarToughness/--CarDeform override. */
+        int  car_damage_toughness;   /* 0=Low 1=Normal 2=High */
+        int  car_damage_deform;      /* 0=Low 1=Normal 2=High */
         /* Enable benchmark mode: redirects main-menu button 2 to TD5_GAMESTATE_BENCHMARK.
          * Matches the dead-code path in TD5_d3d.exe gated by app+0x170 (always 0 in
          * the shipped binary). Default 0 = button 2 is 2-player, matching the

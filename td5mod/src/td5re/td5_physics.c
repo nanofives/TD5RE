@@ -44,6 +44,7 @@
 #include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
 #include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
+#include "td5_damage.h"   /* [CAR DAMAGE] health from impacts, knockout freeze, handling penalty */
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_carparam.h" /* shared carparam field map + heaviness math (weight mechanics) */
@@ -2178,6 +2179,27 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                 }
             }
         }
+
+        /* [CAR DAMAGE 2026-06-28] Wall/barrier hit damages + dents the car on the
+         * face that struck the wall. iVar11 is the approach speed into the wall;
+         * the hit region comes from the inward wall normal (-sin_w, cos_w) rotated
+         * into the car's model frame by its heading (signs only, so the 12-bit
+         * fixed scale cancels). No-op when [Game] CarDamage=0. */
+        if (td5_damage_enabled() && actor->slot_index >= 0) {
+            int32_t h     = actor->display_angles.yaw & 0xFFF;
+            int32_t cos_h = cos_fixed12(h);
+            int32_t sin_h = sin_fixed12(h);
+            int32_t Dx = -sin_w, Dz = cos_w;                         /* world dir into wall */
+            int64_t lf = (int64_t)Dx * sin_h + (int64_t)Dz * cos_h;  /* local forward comp */
+            int64_t ll = (int64_t)Dx * cos_h - (int64_t)Dz * sin_h;  /* local lateral comp */
+            int64_t alf = lf < 0 ? -lf : lf, all_ = ll < 0 ? -ll : ll;
+            TD5_DamageHit whit;
+            whit.fwd     = (lf > 0) - (lf < 0);
+            whit.lat     = (ll > 0) - (ll < 0);
+            whit.is_side = (all_ > alf);
+            td5_damage_on_wall_impact(actor, iVar11, &whit);
+        }
+
         /* Impulse numerator = ((K>>8) * -0x1100) >> 12 with Borland round-
          * toward-zero on the negative >>12. D2 audit. The compiler-time
          * constant evaluation here yields a different result from the
@@ -3276,15 +3298,21 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * skipped middle sub-ticks so traffic integrates every countdown tick. */
         td5_physics_update_traffic(actor);
     } else if (actor->vehicle_mode == 0 && !g_game_paused) {
-        if (g_td5.wanted_mode_enabled &&
+        /* [CAR DAMAGE 2026-06-28] A knocked-out (health<=0) racer is immobilized
+         * with the SAME freeze an arrested suspect gets — it can't move or be
+         * driven, so the wreck stays put. Inert unless [Game] CarDamage=1. */
+        int dmg_knocked_out = td5_damage_actor_knocked_out(actor);
+        if (dmg_knocked_out ||
+            (g_td5.wanted_mode_enabled &&
             td5_copchase_arrest_freeze_enabled() &&
             td5_game_cop_chase_is_suspect(actor->slot_index) &&
-            g_wanted_damage_state[actor->slot_index] <= 0) {
-            /* [COP CHASE ARREST FREEZE 2026-06-25] Busted suspect: zero ALL motion and
-             * skip the drive integrator so it can't move OR be driven (human suspects
-             * included). Re-zeroed every tick so a later ram can't nudge it back into
-             * motion. The td6-prop / pushable passes below still run (harmless when
-             * parked). Knob TD5RE_COPCHASE_ARREST_FREEZE=0 disables this. */
+            g_wanted_damage_state[actor->slot_index] <= 0)) {
+            /* [COP CHASE ARREST FREEZE 2026-06-25] Busted suspect (or [CAR DAMAGE]
+             * wreck): zero ALL motion and skip the drive integrator so it can't
+             * move OR be driven (human suspects included). Re-zeroed every tick so
+             * a later ram can't nudge it back into motion. The td6-prop / pushable
+             * passes below still run (harmless when parked). Knob
+             * TD5RE_COPCHASE_ARREST_FREEZE=0 disables the arrest case. */
             actor->linear_velocity_x = 0;
             actor->linear_velocity_y = 0;
             actor->linear_velocity_z = 0;
@@ -3849,6 +3877,16 @@ void td5_physics_update_player(TD5_Actor *actor)
      *
      * Original (0x40415B): steer_angle = steering_command >> 8, no scaling.
      * Constant 294 does NOT exist in the binary. [CONFIRMED @ 0x404142-0x40415E] */
+    /* [CAR DAMAGE 2026-06-28] A damaged car steers sluggishly: scale steering
+     * authority down with health (racer slots only; never traffic). 1.0 = no
+     * change (off / pristine), floor at 1 - TD5RE_DAMAGE_PENALTY%. Reducing
+     * authority is sim-stable (it can only understeer, never induce a spin). */
+    if (td5_damage_enabled() && actor->slot_index >= 0 &&
+        actor->slot_index < g_traffic_slot_base) {
+        float hs = td5_damage_handling_scale((int)actor->slot_index);
+        if (hs < 0.999f)
+            steer_angle = (int32_t)((float)steer_angle * hs);
+    }
     int32_t steer_heading = (heading + steer_angle) & 0xFFF;
     int32_t cos_s = cos_fixed12(steer_heading);   /* cos(h+s) — iVar16 */
     int32_t sin_s = sin_fixed12(steer_heading);   /* sin(h+s) — iVar17 */
@@ -7142,6 +7180,23 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     /* --- 10. Impact magnitude and damage effects --- */
     int64_t impact_signed = (int64_t)(mass_A + mass_B) * impulse;
     int32_t impact_mag = (int32_t)(impact_signed < 0 ? -impact_signed : impact_signed);
+
+    /* [CAR DAMAGE 2026-06-28] Drive each car's health down + deform its body at
+     * the struck region. No-op when [Game] CarDamage=0 (faithful sim unchanged).
+     * Hit region is taken from the contact corner the solver already computed:
+     * A's corner is (cx_A,cz_A) in A's frame; B's is (cx_B,cz_B) in B's frame
+     * (model axes: x=lateral +right, z=forward +front). */
+    if (td5_damage_enabled()) {
+        TD5_DamageHit hitA, hitB;
+        hitA.lat = (cx_A > 0) - (cx_A < 0);
+        hitA.fwd = (cz_A > 0) - (cz_A < 0);
+        hitA.is_side = is_side_branch;
+        hitB.lat = (cx_B > 0) - (cx_B < 0);
+        hitB.fwd = (cz_B > 0) - (cz_B < 0);
+        hitB.is_side = (cx_B < 0 ? -cx_B : cx_B) > (cz_B < 0 ? -cz_B : cz_B);
+        td5_damage_on_impact(A, impact_mag, &hitA);
+        td5_damage_on_impact(B, impact_mag, &hitB);
+    }
 
     /* [#1 WRECK PUSH WINDOW 2026-06-21] A real ram on a broken-down (anchored)
      * wreck opens its free-slide window so it can be shoved aside — otherwise the

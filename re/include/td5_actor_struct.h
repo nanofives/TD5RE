@@ -395,13 +395,22 @@ typedef struct TD5_Actor {
     int32_t  linear_velocity_z;         /* +0x1D4: world-space linear velocity Z [CONFIRMED]
                                          *         Ghidra names this "path_vec_y" */
 
-    /* === UNUSED PADDING (0x1D8-0x1EF) ================================
+    /* === CAR DAMAGE (PORT-ONLY, 0x1D8-0x1EF) ========================
      *
-     * Not zeroed by ResetVehicleActorState. Not accessed by any
-     * identified dynamics function. Unused padding between velocity
-     * and angle accumulator blocks.
+     * Overlays the original's unused padding (0x1D8-0x1EF, 24 bytes).
+     * [CONFIRMED 2026-06-28 binary-wide displacement scan] NO original
+     * code reads or writes any byte in 0x1D8-0x1EF, and
+     * ResetVehicleActorState @0x00405D70 does NOT zero this gap, so it is
+     * free for the GTA4-style car-damage system. Because reset leaves it
+     * untouched, td5_damage_reset_race() must initialize these fields at
+     * race start (NOT ResetVehicleActorState). Entirely inert when [Game]
+     * CarDamage = 0 (written but never read; never affects the faithful
+     * sim). See td5_damage.c. Block stays 24 bytes so the struct is 0x388.
      */
-    uint8_t  _pad_1D8[24];              /* +0x1D8: unused padding [CONFIRMED wave3 + 2026-05-20 re-audit] */
+    int32_t  damage_health;            /* +0x1D8: remaining health (hit points); full = TD5RE_DAMAGE_MAX_HP, <= knockout = wrecked */
+    int32_t  damage_accum;             /* +0x1DC: cumulative absorbed impact magnitude (drives the smoke tier) */
+    uint32_t damage_magic;             /* +0x1E0: == TD5_DAMAGE_ACTOR_MAGIC once initialized this race (guards uninitialized padding) */
+    uint8_t  _pad_1E4[12];             /* +0x1E4: reserved damage padding */
 
     /* === EULER ANGLE ACCUMULATORS (0x1F0-0x1FB) ======================
      *
@@ -690,6 +699,8 @@ _Static_assert(offsetof(TD5_Actor, collision_spin_matrix) == 0x180, "TD5_Actor.c
 _Static_assert(offsetof(TD5_Actor, collision_spin_translation) == 0x1A4, "TD5_Actor.collision_spin_translation offset drifted");
 _Static_assert(offsetof(TD5_Actor, actor_aux_ptr_1B4) == 0x1B4, "TD5_Actor.actor_aux_ptr_1B4 offset drifted");
 _Static_assert(offsetof(TD5_Actor, light_zone_index) == 0x377, "TD5_Actor.light_zone_index offset drifted");
+_Static_assert(offsetof(TD5_Actor, damage_health) == 0x1D8, "TD5_Actor.damage_health offset drifted");
+_Static_assert(offsetof(TD5_Actor, euler_accum) == 0x1F0, "TD5_Actor.euler_accum offset drifted (damage block must stay 24 bytes)");
 _Static_assert(offsetof(TD5_Actor, world_pos) == 0x1FC, "TD5_Actor.world_pos offset drifted");
 _Static_assert(offsetof(TD5_Actor, display_angles) == 0x208, "TD5_Actor.display_angles offset drifted");
 _Static_assert(offsetof(TD5_Actor, steering_command) == 0x30C, "TD5_Actor.steering_command offset drifted");

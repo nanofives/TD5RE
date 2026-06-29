@@ -46,6 +46,7 @@
 #include "td5_save.h"
 #include "td5_vfx.h"
 #include "td5_arcade.h"   /* ARCADE power-up pad / hazard world billboards */
+#include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_ai.h"
 #include "td5re.h"
 
@@ -2337,6 +2338,20 @@ void td5_render_transform_vec3(const float *in, float *out)
 
 /* --- Vertex Transform & Lighting --- */
 
+/* [CAR DAMAGE 2026-06-28] Active per-slot model-space deformation deltas for the
+ * vehicle currently being transformed. Set by the per-vehicle draw block (where
+ * the slot + mesh are in scope) right before td5_render_transform_mesh_vertices,
+ * and cleared immediately after, so ONLY the vehicle body picks up the dents
+ * (track/sky/etc. transform with these NULL). The deltas are added to the LOCAL
+ * model pos used for the world->view multiply only — the shared mesh blob AND the
+ * per-pane workspace model pos are left untouched, so no GPU re-upload is needed
+ * and the fallback (in-place) transform path can never permanently dent the
+ * shared mesh. Indexed by mesh vertex; valid for s_deform_count verts. */
+static const float *s_deform_dx = NULL;
+static const float *s_deform_dy = NULL;
+static const float *s_deform_dz = NULL;
+static int          s_deform_count = 0;
+
 void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
 {
     if (!mesh) return;
@@ -2374,6 +2389,8 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
      * gantry's ground start-plaza (pos_y~0) stays put so it isn't dragged off the
      * road. Zero for every non-banner mesh (no per-vertex branch cost there). */
     float bvx = s_banner_vshift_x;
+    const float *ddx = s_deform_dx, *ddy = s_deform_dy, *ddz = s_deform_dz;
+    int dcount = (ddx && ddy && ddz) ? s_deform_count : 0;
     for (int i = 0; i < count; i++) {
         float px = verts[i].pos_x;
         float py = verts[i].pos_y;
@@ -2381,6 +2398,13 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
 
         if (bvx != 0.0f && py >= TD6_BANNER_OVERHEAD_Y)
             px += bvx;
+
+        /* [CAR DAMAGE] add this slot's accumulated model-space dent (local only). */
+        if (i < dcount) {
+            px += ddx[i];
+            py += ddy[i];
+            pz += ddz[i];
+        }
 
         verts[i].view_x = px * m[0] + py * m[1] + pz * m[2] + m[9];
         verts[i].view_y = px * m[3] + py * m[4] + pz * m[5] + m[10];
@@ -2449,13 +2473,33 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     }
     int prelit = (s_td6_vlight && slot < 0);
 
+    /* [CAR DAMAGE 2026-06-28] Per-vertex damage "scuff": darken the diffuse on
+     * struck panels so dents read as scuffed/scorched (a cheap texture-damage
+     * look in the software lighting pass). NULL / 0 when no damage or off. */
+    const float *dmg_scuff = NULL; int dmg_sc = 0; float scuff_str = 0.0f;
+    if (td5_damage_get_scuff(slot, mesh, &dmg_scuff, &dmg_sc))
+        scuff_str = td5_damage_scuff_strength();
+
     for (int i = 0; i < count; i++) {
+        /* damage darkening factor for this vertex (1.0 = undamaged) */
+        float df = 1.0f;
+        if (dmg_scuff && i < dmg_sc && dmg_scuff[i] > 0.0f) {
+            df = 1.0f - dmg_scuff[i] * scuff_str;
+            if (df < 0.0f) df = 0.0f;
+        }
         float nx = norms[i].nx;
         float ny = norms[i].ny;
         float nz = norms[i].nz;
 
         if (prelit && (vb[i].lighting & 0xFF000000u) != 0u) {
-            verts[i].lighting = vb[i].lighting;   /* keep the #13 baked TD6 grey as-is */
+            uint32_t c = vb[i].lighting;          /* keep the #13 baked TD6 grey... */
+            if (df < 0.999f) {                    /* ...but darken where damaged */
+                int r = (int)(((c >> 16) & 0xFF) * df);
+                int g = (int)(((c >> 8)  & 0xFF) * df);
+                int b = (int)(( c        & 0xFF) * df);
+                c = (c & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            }
+            verts[i].lighting = c;
             continue;
         }
 
@@ -2472,11 +2516,16 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 
         if (use_tint) {
             /* Full ARGB = lit-luminance * tint; alpha 0xFF bypasses the color LUT. */
-            int lr = (lum * tr) / 255, lg = (lum * tg) / 255, lb = (lum * tb) / 255;
+            int lr = (int)((lum * tr) / 255 * df);
+            int lg = (int)((lum * tg) / 255 * df);
+            int lb = (int)((lum * tb) / 255 * df);
             verts[i].lighting = 0xFF000000u | ((uint32_t)lr << 16) |
                                 ((uint32_t)lg << 8) | (uint32_t)lb;
         } else {
-            verts[i].lighting = (uint32_t)lum;   /* luminance index -> color LUT */
+            /* luminance index -> color LUT; darken the index where scuffed. */
+            int dl = (df < 0.999f) ? (int)(lum * df) : lum;
+            if (dl < 0x18) dl = 0x18;            /* keep above the LUT's dark floor */
+            verts[i].lighting = (uint32_t)dl;
         }
     }
 }
@@ -4024,7 +4073,21 @@ void td5_render_actors_for_view(int view_index)
                 continue;
             (void)depth;
 
+            /* [CAR DAMAGE 2026-06-28] Feed this slot's accumulated per-vertex
+             * model-space deformation to the transform, then clear it right
+             * after so ONLY this body deforms (wheels/overlay/track stay clean).
+             * Returns 0 / leaves NULL when CarDamage is off or this car is
+             * undamaged. */
+            {
+                const float *ddx = NULL, *ddy = NULL, *ddz = NULL; int dvc = 0;
+                if (td5_damage_get_deform(slot, mesh, &ddx, &ddy, &ddz, &dvc)) {
+                    s_deform_dx = ddx; s_deform_dy = ddy;
+                    s_deform_dz = ddz; s_deform_count = dvc;
+                }
+            }
             td5_render_transform_mesh_vertices(mesh);
+            s_deform_dx = s_deform_dy = s_deform_dz = NULL;
+            s_deform_count = 0;
             /* Per-actor track-zone driven 3-light + ambient basis (mirrors
              * ApplyTrackLightingForVehicleSegment @ 0x00430150). Must run
              * BEFORE compute_vertex_lighting since that's the consumer of
@@ -4239,6 +4302,17 @@ void td5_render_actors_for_view(int view_index)
                     td5_vfx_spawn_wreck_smoke(actor);
                 } else if (wanted_smoke_ok) {
                     td5_vfx_spawn_smoke(actor);
+                }
+
+                /* [CAR DAMAGE 2026-06-28] Tiered damage smoke (light grey ->
+                 * black -> black+fire/sparks) for a damaged car, independent of
+                 * the cop-chase plumes above. No-op when CarDamage is off or the
+                 * car is undamaged; vfx_spawn_damage_smoke respects the 100-slot
+                 * per-view particle budget. */
+                if (td5_damage_enabled()) {
+                    int dtier = td5_damage_smoke_tier(slot);
+                    if (dtier > 0)
+                        td5_vfx_spawn_damage_smoke(actor, dtier);
                 }
             }
 

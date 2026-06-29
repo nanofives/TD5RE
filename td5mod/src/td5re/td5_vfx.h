@@ -107,6 +107,9 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor);
 /* Roof-column smoke for a wrecked (broken-down) traffic/cop car — denser and
  * lifted to the roofline vs the chassis-centre exhaust above. [#5 2026-06-20] */
 void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor);
+/* [CAR DAMAGE] Tiered damage smoke: 1=light grey, 2=black, 3=black+fire/sparks.
+ * Per-view budget-respecting; no-op for tier<=0. See td5_damage_smoke_tier(). */
+void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier);
 void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index);
 
 /* Engine-rev gated random smoke puff (orig 0x00401370 SpawnRandomVehicleSmokePuff).
