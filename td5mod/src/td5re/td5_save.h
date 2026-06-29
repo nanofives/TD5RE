@@ -304,4 +304,10 @@ int td5_save_profile_save(const TD5_Profile *p);
  *  Returns 1 on success, 0 if idx out of range. */
 int td5_save_profile_delete(int idx);
 
+/* ---- First-race tutorial overlay "seen" flag (PORT ENHANCEMENT 2026-06) ----
+ * Persisted in td5re_progress.ini under [Tutorial] Seen. 1 once the player has
+ * dismissed the controller-tutorial overlay, so it never shows again. */
+int  td5_save_get_tutorial_seen(void);
+void td5_save_set_tutorial_seen(int seen);
+
 #endif /* TD5_SAVE_H */

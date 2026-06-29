@@ -468,6 +468,10 @@ typedef struct TD5_GlobalState {
          * (widest, straightest section). 0 = auto-clamp to the opening straight. */
         int  override_start_span;
         int  skip_intro;
+        /* [GameOptions] TutorialOverlay: first-race controller-tutorial overlay.
+         * 0 = off, 1 = first-race-only (default), 2 = force every race (dev/test,
+         * does not set the persistent seen flag). See td5_tutorial.c. */
+        int  tutorial_overlay;
         int  debug_overlay;
         int  debug_collisions;   /* 1 = draw wireframe of track wall/span geometry */
         /* [S27 2026-06-05] DEV-ONLY headless test hook for the controller-

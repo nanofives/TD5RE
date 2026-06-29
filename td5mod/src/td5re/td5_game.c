@@ -41,6 +41,7 @@
 #include "td5_vfx.h"
 #include "td5_arcade.h"   /* ARCADE mode: pickup pads + power-ups */
 #include "td5_damage.h"   /* [CAR DAMAGE] health reset + knockout completion gate */
+#include "td5_tutorial.h" /* first-race controller-tutorial overlay */
 #include "td5_trace.h"
 #include "td5_profile.h"
 #include "td5_benchmark.h"
@@ -4233,6 +4234,13 @@ int td5_game_init_race_session(void) {
 
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: complete (%d actors)",
               g_td5.total_actor_count);
+
+    /* [PORT 2026-06] Arm the first-race controller-tutorial overlay. Self-gated:
+     * no-op unless enabled by config and the race is a normal local human race
+     * (never network — would desync lockstep — nor cinematic/AI). While active it
+     * holds the countdown (see the tick_race_countdown gates below). */
+    td5_tutorial_begin_race();
+
     return 1;
 }
 
@@ -5868,8 +5876,13 @@ int td5_game_run_race_frame(void) {
             /* Countdown decrement runs LATE in the sub-tick, matching
              * UpdateRaceCameraTransitionTimer at 0x42BA3A. On the sub-tick
              * where the timer reaches 0, this flips g_td5.paused 1→0; the
-             * counter gate below then sees paused=0 and increments. */
-            tick_race_countdown();
+             * counter gate below then sees paused=0 and increments.
+             *
+             * [PORT 2026-06] While the first-race tutorial overlay is up, DO NOT
+             * tick the countdown — freezing g_td5.paused at 1 holds the grid
+             * until the player dismisses the overlay (td5_tutorial.c). */
+            if (!td5_tutorial_is_active())
+                tick_race_countdown();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
             /* Trace BEFORE counter++: Frida emits post_progress on
@@ -5944,7 +5957,7 @@ int td5_game_run_race_frame(void) {
          * then hides cleanly at timer==0. Mirrors orig's per-frame call to
          * UpdateRaceCameraTransitionTimer @ 0x0040A490 which is invoked
          * regardless of paused state. */
-        if (g_cameraTransitionActive > 0) {
+        if (g_cameraTransitionActive > 0 && !td5_tutorial_is_active()) {
             tick_race_countdown();
         }
 
@@ -6580,6 +6593,13 @@ int td5_game_run_race_frame(void) {
      * unless a controller is currently missing). Drawn on top of the HUD. */
     td5_hud_draw_disconnect_overlays();
     td5_hud_draw_net_pause_overlay();
+
+    /* [PORT 2026-06] First-race controller-tutorial overlay. update() polls for
+     * a dismiss press (releasing the countdown next tick); draw() renders the
+     * dim + controller diagram. Both self-gate to no-ops unless the overlay was
+     * armed at race init. Drawn over the HUD but under the pause menu. */
+    td5_tutorial_update();
+    td5_tutorial_draw();
 
     /* Pause overlay drawn LAST among the in-race overlays so the menu (BLACKBOX
      * panel + selbox + sliders + text) sits on top of everything else — the HUD,

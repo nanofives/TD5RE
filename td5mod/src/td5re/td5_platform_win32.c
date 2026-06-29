@@ -2971,6 +2971,17 @@ const uint32_t *td5_plat_input_default_action_bindings(void)
     return k_default_js_action_bind;
 }
 
+const uint32_t *td5_plat_input_player_action_bindings(int slot)
+{
+    /* Mirror the in-race source selection in td5_plat_input_poll: an explicit
+     * Control-Options remap (s_js_action_set) wins, else the built-in default
+     * Xbox map. The rare legacy-Config.td5 raw-axis path falls through to the
+     * default here — the tutorial only needs the per-action button/axis map. */
+    if (slot < 0 || slot >= TD5_PLAT_MAX_JS_SLOTS) return k_default_js_action_bind;
+    if (s_js_action_set[slot]) return s_js_action_bind[slot];
+    return k_default_js_action_bind;
+}
+
 static int td5_plat_js_read(int device_slot, DIJOYSTATE2 *js)
 {
     HRESULT hr;

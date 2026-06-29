@@ -297,6 +297,13 @@ void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int cou
  *  active defaults so per-action remaps keep the rest of the map. */
 const uint32_t *td5_plat_input_default_action_bindings(void);
 
+/** The LIVE per-action binding table actually used by the in-race poll for a
+ *  player slot: the Control-Options per-action remap when one is set, otherwise
+ *  the built-in default table. TD5_JSBIND_ACTIONS entries, read-only. Lets the
+ *  tutorial overlay label each control with what it is currently bound to.
+ *  [PORT ENHANCEMENT 2026-06] */
+const uint32_t *td5_plat_input_player_action_bindings(int slot);
+
 /** Snapshot the device's rest state for capture (call when a remap begins). */
 void td5_plat_input_joystick_capture_begin(int device_slot);
 
