@@ -3297,9 +3297,13 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
     fe_race_draw_screen_title("SELECT GAME MODE", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
 
-    /* Host indicator: P1 colour swatch + short label. */
-    td5_vui_quad((float)MV_BX * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
-    td5_vui_text(((float)MV_BX + 18.0f) * sx, 72.0f * sy,
+    /* Host indicator: the gold HOST crown + P1 colour swatch + short label, so the
+     * host marker on the game-mode selector matches the crown used on the profile,
+     * screen-disposition and car selectors. Crown left, swatch and label shifted
+     * right to make room. */
+    td5_vui_crown((float)MV_BX, 73.0f, 13.0f, 10.0f, 0xFFFFD21Eu, sx, sy);
+    td5_vui_quad(((float)MV_BX + 17.0f) * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
+    td5_vui_text(((float)MV_BX + 34.0f) * sx, 72.0f * sy,
                  "OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES", 0xFFC0C8D0u, sx, sy);
 
     for (m = 0; m < TD5_MP_MODE_COUNT; m++) {
@@ -4502,6 +4506,12 @@ void frontend_mp_position_render2(float sx, float sy) {
                                   (occ >= 0) ? 0xFFFFFFFFu : 0xFF707080u, sx, sy);
 
             if (occ >= 0) {
+                /* [MP HOST INDICATOR 2026-06-28] Slot 0 is the host — drop the
+                 * gold crown into the top-left corner of its cell (clear of the
+                 * centred cell number + name) so the host's chosen screen is
+                 * obvious on the CHOOSE YOUR SCREEN picker too. */
+                if (occ == 0)
+                    td5_vui_crown(px + 6.0f, py + 6.0f, 14.0f, 10.0f, 0xFFFFD21Eu, sx, sy);
                 if (s_mp_player_name[occ][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[occ]);
                 else                          snprintf(buf, sizeof buf, "PLAYER %d", occ + 1);
                 mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 26.0f) * sy, buf,

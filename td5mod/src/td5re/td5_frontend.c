@@ -12169,6 +12169,39 @@ static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
     }
 }
 
+/* [MP HOST INDICATOR 2026-06-28] Draw an MP pane's coloured name banner: the
+ * chosen profile name (or "PLAYER N"), and — for slot 0, the HOST — a gold crown
+ * at the banner's LEFT with the name re-centred to its right so crown + name
+ * never overlap. Player slot 0 is always the host (slot-based; slot 0's pick is
+ * the binding one — see the comments at Screen_MpPosition / the mode vote). This
+ * single helper is shared by the PROFILE SELECTION and SELECT CAR split-screen
+ * panes so the host marker is pixel-identical on both. (px,pyr,pane_w,cx) are
+ * the pane's virtual-px layout already computed by the caller. */
+static void mp_draw_pane_name_banner(int p, float px, float pyr, float pane_w,
+                                     float cx, float sx, float sy) {
+    char buf[64];
+    uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
+    if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
+    else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
+                 rgb | 0xD0000000u, -1, 0, 0, 1, 1);
+    if (p == 0) {
+        const float crown_w = 13.0f;
+        td5_vui_crown(px + 6.0f, pyr + 7.0f, crown_w, 8.0f, 0xFFFFD21Eu, sx, sy);
+        float name_l = px + 3.0f + crown_w + 6.0f;   /* reserve the crown column */
+        float name_r = px + pane_w - 3.0f;
+        mp_simul_small_centered_fit((name_l + name_r) * 0.5f * sx, (pyr + 6) * sy, buf,
+                                    0xFF000000u, sx, sy, (name_r - name_l) * sx);
+        { static int s_logged_host_crown = 0;
+          if (!s_logged_host_crown) { s_logged_host_crown = 1;
+              TD5_LOG_I(LOG_TAG, "MP setup/carsel: drew HOST crown on slot 0 (name='%s')", buf); } }
+    } else {
+        mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy,
+                                    (pane_w - 8.0f) * sx);
+    }
+}
+
 static void frontend_mp_simul_carsel_render(float sx, float sy) {
     int p, n = s_num_human_players;
     int cols = 1, rows = 1, missing = 0;
@@ -12248,32 +12281,8 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             fe_draw_quad((px + pane_w - 3 - bt) * sx, (pyr + 3) * sy, bt * sx, (pane_h - 6) * sy, bc, -1, 0, 0, 1, 1);
         }
 
-        /* Header banner: the player's chosen NAME (falls back to PLAYER N). */
-        if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
-        else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
-                     rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-        /* [MP HOST INDICATOR 2026-06-28] Player slot 0 is ALWAYS the host (the
-         * host concept is slot-based — slot 0's pick is the binding one; see the
-         * comments at the position-picker / mode-vote screens). Draw a small gold
-         * crown at the LEFT of the host's name banner and centre the name in the
-         * remaining space to its right so crown + name never overlap. Every other
-         * pane keeps the plain full-width centred name. This is the marker that
-         * tells you which profile is the host after everyone has picked. */
-        if (p == 0) {
-            const float crown_w = 13.0f;
-            td5_vui_crown(px + 6.0f, pyr + 7.0f, crown_w, 8.0f, 0xFFFFD21Eu, sx, sy);
-            float name_l = px + 3.0f + crown_w + 6.0f;   /* reserve the crown column */
-            float name_r = px + pane_w - 3.0f;
-            mp_simul_small_centered_fit((name_l + name_r) * 0.5f * sx, (pyr + 6) * sy, buf,
-                                        0xFF000000u, sx, sy, (name_r - name_l) * sx);
-            { static int s_logged_host_crown = 0;
-              if (!s_logged_host_crown) { s_logged_host_crown = 1;
-                  TD5_LOG_I(LOG_TAG, "MP carsel: drew HOST crown on slot 0 (name='%s')", buf); } }
-        } else {
-            mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy, (pane_w - 8.0f) * sx);
-        }
+        /* Header banner: the player's chosen NAME (host slot 0 gets the crown). */
+        mp_draw_pane_name_banner(p, px, pyr, pane_w, cx, sx, sy);
 
         /* Car NAME above the image (request). */
         snprintf(buf, sizeof buf, "%s", frontend_get_car_display_name(car));
@@ -12717,13 +12726,8 @@ static void frontend_mp_setup_render(float sx, float sy) {
             fe_draw_quad((px + pane_w - 3 - bt) * sx, (pyr + 3) * sy, bt * sx, (pane_h - 6) * sy, bc, -1, 0, 0, 1, 1);
         }
 
-        /* Header banner: chosen name or PLAYER N. */
-        if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
-        else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
-                     rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-        mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy, (pane_w - 8.0f) * sx);
+        /* Header banner: chosen name or PLAYER N (host slot 0 gets the crown). */
+        mp_draw_pane_name_banner(p, px, pyr, pane_w, cx, sx, sy);
 
         ax = px + 6.0f; ay = pyr + 22.0f; aw = pane_w - 12.0f; ah = pane_h - 28.0f;
 
