@@ -195,10 +195,15 @@ static void td5_camera_snap_smoothing_view(int view);
  *
  * td5_camera_apply_view() then, once per render frame per viewport, interpolates
  * prev->cur by g_subTickFraction and RE-PINS the car-locked components to the
- * exact body-mesh extrapolation (world_pos + linear_velocity*subtick for X/Z,
- * sub-tick interpolated world_pos.y, matching td5_render.c:2838-2840 + the
- * inspect-cam recipe at td5_render.c:805-877). Result: identical motion at any
- * FPS, and the followed car is pixel-locked in frame (no wobble).
+ * exact body-mesh extrapolation (world_pos + linear_velocity*subtick for X, Y
+ * AND Z, matching RenderRaceActorForView @ 0x40C164 / td5_render.c:3955-3957).
+ * [WOBBLE FIX 2026-06-29] Y was previously sub-tick INTERPOLATED (lerp prev->cur)
+ * while the body EXTRAPOLATED, so the car was pinned horizontally but bobbed
+ * vertically against its own mesh once per 30 Hz tick — a beat that reads as a
+ * fast vertical jitter on high-refresh monitors. Now all three axes extrapolate
+ * to match the body. Result: identical motion at any FPS, and the followed car
+ * is pixel-locked in frame (no wobble). TD5RE_CAM_PIN_Y=0 reverts Y to the old
+ * interpolation for A/B testing.
  *
  * Legacy per-frame path (td5_camera_finalize_all + td5_camera_update_transition_state)
  * is preserved and selected when TD5RE_CAM_NEW=0 for A/B testing.
@@ -238,6 +243,24 @@ static int td5_camera_use_new_pipeline(void)
 /* Integrator step for the orbit/height/angle accumulators that the port had
  * scaled by g_subTickFraction (per-frame smear). New pipeline: advance a full
  * step per tick (1.0). Legacy path: keep the per-frame sub-tick smear. */
+/* [WOBBLE FIX 2026-06-29] Pin the chase-camera follow anchor's Y to the body
+ * mesh's velocity extrapolation (world_pos.y + vel_y*subtick) instead of sub-tick
+ * interpolating prev->cur. Eliminates the high-refresh vertical jitter at race
+ * start (see td5_camera_apply_view). Default ON; TD5RE_CAM_PIN_Y=0 reverts to the
+ * old interpolation so the cause can be A/B confirmed in a single build. */
+static int td5_camera_pin_anchor_y(void)
+{
+    static int s_pin = -1;
+    if (s_pin < 0) {
+        const char *e = getenv("TD5RE_CAM_PIN_Y");
+        s_pin = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        TD5_LOG_I(LOG_TAG, "camera anchor-Y pin: %s (TD5RE_CAM_PIN_Y)",
+                  s_pin ? "ON (extrapolate Y like body mesh)"
+                        : "off (legacy prev->cur interpolation)");
+    }
+    return s_pin;
+}
+
 static float cam_integ_step(void)
 {
     return td5_camera_use_new_pipeline() ? 1.0f : g_subTickFraction;
@@ -2106,17 +2129,30 @@ void td5_camera_apply_view(int view)
     float f = g_subTickFraction;
     if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
 
-    /* Body-matching anchor: X/Z velocity-extrapolate, Y sub-tick interpolate
-     * (matches td5_render.c body mesh 2838-2840 + inspect-cam 805-877). */
+    /* Body-matching anchor: velocity-extrapolate ALL THREE axes so the followed
+     * car is pixel-pinned in frame, matching the body-mesh render position
+     * world_pos + linear_velocity*g_subTickFraction (RenderRaceActorForView @
+     * 0x40C164 / td5_render.c:3955-3957).
+     * [WOBBLE FIX 2026-06-29] Y previously sub-tick INTERPOLATED prev->cur while
+     * X/Z (and the body mesh) EXTRAPOLATED — the car was pinned horizontally but
+     * bobbed vertically against its own mesh once per 30 Hz tick. On high-refresh
+     * monitors (render >> 30 Hz) that beat reads as a fast vertical jitter at
+     * race start (suspension settling moves Y) that scales with motion and stops
+     * when the car is stationary (handbrake). Extrapolating Y like the body pins
+     * all three axes. TD5RE_CAM_PIN_Y=0 reverts to the old interpolation. */
     int ax = C->anchor[0], ay = C->anchor[1], az = C->anchor[2];
     if (C->anchor_valid) {
         TD5_Actor *a = camera_actor_for_view(v);
         if (a) {
             ax = a->world_pos.x + (int)((float)a->linear_velocity_x * f);
             az = a->world_pos.z + (int)((float)a->linear_velocity_z * f);
-            int dy = C->anchor[1] - P->anchor[1];
-            if (dy > 0x40000 || dy < -0x40000) ay = C->anchor[1];
-            else ay = P->anchor[1] + (int)((float)dy * f + (dy >= 0 ? 0.5f : -0.5f));
+            if (td5_camera_pin_anchor_y()) {
+                ay = a->world_pos.y + (int)((float)a->linear_velocity_y * f);
+            } else {
+                int dy = C->anchor[1] - P->anchor[1];
+                if (dy > 0x40000 || dy < -0x40000) ay = C->anchor[1];
+                else ay = P->anchor[1] + (int)((float)dy * f + (dy >= 0 ? 0.5f : -0.5f));
+            }
         }
     }
 
