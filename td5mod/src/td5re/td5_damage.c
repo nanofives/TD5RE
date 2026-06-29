@@ -165,6 +165,16 @@ int td5_damage_enabled(void) {
     return g_td5.ini.car_damage != 0;
 }
 
+/* The HUD health bar + the wreck/knockout mechanic (and its health-driven
+ * handling penalty + damage smoke). Requires the master CarDamage on AND the
+ * [Game] CarDamageBar sub-toggle. When this is off, accumulated damage never
+ * wrecks a car or ends the race; only the impact-driven mesh deformation (dents)
+ * and the collision physics remain — those are gated by td5_damage_enabled()
+ * alone, not by this. Default on. */
+int td5_damage_bar_enabled(void) {
+    return td5_damage_enabled() && g_td5.ini.car_damage_bar != 0;
+}
+
 /* Resolve a slot to its actor (NULL if out of range / unspawned). */
 static TD5_Actor *dmg_actor(int slot) {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return NULL;
@@ -244,7 +254,10 @@ int td5_damage_finish_orbit_hold_ms(void) {
 }
 
 int td5_damage_actor_knocked_out(const TD5_Actor *a) {
-    if (!td5_damage_enabled() || !a) return 0;
+    /* Gate on the bar/wreck sub-toggle: with the damage bar off, a car is never
+     * "knocked out" by accumulated damage, so the physics freeze, the race-
+     * completion gate, and the finish-orbit cam all treat it as never-wrecked. */
+    if (!td5_damage_bar_enabled() || !a) return 0;
     if (a->damage_magic != TD5_DAMAGE_ACTOR_MAGIC) return 0;
     return a->damage_health <= s_knockout;
 }
@@ -254,7 +267,10 @@ int td5_damage_slot_knocked_out(int slot) {
 }
 
 int td5_damage_smoke_tier(int slot) {
-    if (!td5_damage_enabled()) return 0;
+    /* Damage smoke escalates with the (hidden) health meter — suppress it when
+     * the bar/wreck mechanic is off so there's no health-driven smoke without a
+     * visible bar. Impact dents are unaffected (handled in apply_deform). */
+    if (!td5_damage_bar_enabled()) return 0;
     float h = td5_damage_health01(slot);
     if (h < 0.0f) return 0;
     int lost = (int)((1.0f - h) * 100.0f + 0.5f);
@@ -265,7 +281,10 @@ int td5_damage_smoke_tier(int slot) {
 }
 
 float td5_damage_handling_scale(int slot) {
-    if (!td5_damage_enabled()) return 1.0f;
+    /* The steering-authority penalty is driven by the (hidden) health meter — so
+     * it follows the bar/wreck toggle, not the master. With the bar off there is
+     * no invisible handling nerf; dents and collisions still apply normally. */
+    if (!td5_damage_bar_enabled()) return 1.0f;
     float h = td5_damage_health01(slot);
     if (h < 0.0f) return 1.0f;
     float lost = 1.0f - h;
@@ -474,7 +493,7 @@ void td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
      * any in-progress cop chase and parks knocked-out TRAFFIC permanently;
      * knocked-out RACERS are immobilized by the physics arrest-style freeze. */
     if (actor->damage_health <= s_knockout && before > s_knockout &&
-        !s_ko_notified[slot]) {
+        !s_ko_notified[slot] && td5_damage_bar_enabled()) {
         s_ko_notified[slot] = 1;
         td5_ai_mark_actor_broken_down(slot);
         TD5_LOG_I(LOG_TAG, "car_damage: KNOCKOUT slot=%d (mag=%d eff=%d dmg=%d hp %d->0)",

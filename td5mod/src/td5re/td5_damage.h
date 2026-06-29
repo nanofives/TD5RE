@@ -49,6 +49,14 @@ void  td5_damage_shutdown(void);
 /* Master toggle — mirrors [Game] CarDamage. When 0, every call below is inert. */
 int   td5_damage_enabled(void);
 
+/* HUD damage bar + wreck/knockout sub-toggle — mirrors [Game] CarDamageBar AND
+ * requires the master to be on. When this returns 0 the top-of-pane health bar
+ * is hidden, a car can no longer be wrecked/eliminated by accumulated damage
+ * (no race-ending knockout), and the health-driven handling penalty + damage
+ * smoke are suppressed. Impact-driven mesh DEFORMATION (dents) and collision
+ * physics are unaffected by this toggle — they live below the health meter. */
+int   td5_damage_bar_enabled(void);
+
 /* Initialize per-slot health + clear all deformation at race start. MUST be
  * called once the race actors exist (ResetVehicleActorState does NOT touch the
  * damage padding, so this is the only initializer). */

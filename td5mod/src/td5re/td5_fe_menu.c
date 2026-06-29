@@ -1630,22 +1630,22 @@ void Screen_GameOptions(void) {
          * Options — it is now chosen on the Track Selection + Multiplayer screens
          * since it drives major gameplay (3x crashes, power-ups). Remaining rows
          * shifted up: 3D Collisions 5->4, OK 6->5. */
-        frontend_create_button(SNK_CheckpointTimersButTxt, 120,  97, 0x128, 0x20);
-        frontend_create_button(SNK_TrafficButTxt,          120, 137, 0x128, 0x20);
-        frontend_create_button(SNK_CopsButTxt,             120, 177, 0x128, 0x20); /* orig label: POLICE */
-        frontend_create_button(SNK_DifficultyButTxt,       120, 217, 0x128, 0x20);
-        frontend_create_button(SNK_3dCollisionsButTxt,     120, 257, 0x128, 0x20);
-        /* [ARCADE 2026-06-26] POWER-UPS on/off row (item boxes). New row 5; OK
-         * moves to index 6. Same x/w as the other option rows for alignment. */
-        frontend_create_button("POWER-UPS",               120, 297, 0x128, 0x20);
-        /* [CAR DAMAGE 2026-06-29] Two global damage-level rows (idx 6,7).
-         * [LANE ASSIST 2026-06-28] steering-aid on/off row (idx 8); OK -> idx 9.
-         * Rows 6-9 use a slightly tighter 35px pitch so all nine option rows +
-         * OK clear the 480px canvas. */
-        frontend_create_button("CAR TOUGHNESS",           120, 332, 0x128, 0x20);
-        frontend_create_button("DEFORMATION",             120, 367, 0x128, 0x20);
-        frontend_create_button("LANE ASSIST",             120, 402, 0x128, 0x20);
-        frontend_create_button(SNK_OkButTxt,               216, 437, 0x60,  0x20);
+        /* [CAR DAMAGE 2026-06-29] DAMAGE BAR on/off added (idx 8) next to the
+         * other car-damage rows; LANE ASSIST -> idx 9, OK -> idx 10. Ten option
+         * rows + OK no longer fit the old 40/35px pitch, so the whole column is
+         * re-pitched to a uniform 34px starting at y=80 (OK at y=420). The value
+         * + arrow renderers read each button's live .y, so they follow this. */
+        frontend_create_button(SNK_CheckpointTimersButTxt, 120,  80, 0x128, 0x20);
+        frontend_create_button(SNK_TrafficButTxt,          120, 114, 0x128, 0x20);
+        frontend_create_button(SNK_CopsButTxt,             120, 148, 0x128, 0x20); /* orig label: POLICE */
+        frontend_create_button(SNK_DifficultyButTxt,       120, 182, 0x128, 0x20);
+        frontend_create_button(SNK_3dCollisionsButTxt,     120, 216, 0x128, 0x20);
+        frontend_create_button("POWER-UPS",               120, 250, 0x128, 0x20);
+        frontend_create_button("CAR TOUGHNESS",           120, 284, 0x128, 0x20);
+        frontend_create_button("DEFORMATION",             120, 318, 0x128, 0x20);
+        frontend_create_button("DAMAGE BAR",              120, 352, 0x128, 0x20);
+        frontend_create_button("LANE ASSIST",             120, 386, 0x128, 0x20);
+        frontend_create_button(SNK_OkButTxt,               216, 420, 0x60,  0x20);
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -1675,7 +1675,7 @@ void Screen_GameOptions(void) {
             /* Each row cycles its respective global on arrow input.
              * OK button triggers exit. [S02 (c) 2026-06-04] Circuit Laps (old
              * idx 0) was removed; the remaining six rows shifted up one index. */
-            if (delta != 0 && active_button >= 0 && active_button <= 8) {
+            if (delta != 0 && active_button >= 0 && active_button <= 9) {
                 /* Nav beep on any selector-row change, matching the original's
                  * central arrow handler (DXSound::Play(2) @ 0x0042687c) and the
                  * other Options screens (Control/Sound). Rows 0..4 are all
@@ -1721,12 +1721,19 @@ void Screen_GameOptions(void) {
                     if (s_game_option_car_deform > 2) s_game_option_car_deform = 0;
                     s_inner_state = 4;
                 } else if (active_button == 8) {
+                    /* [CAR DAMAGE 2026-06-29] Damage Bar on/off: the HUD health
+                     * bar + the wreck/knockout mechanic (and its health-driven
+                     * handling penalty + smoke). Off = no bar, no race-ending
+                     * wreck; dents + collisions are unaffected. */
+                    s_game_option_car_damage_bar ^= 1;
+                    s_inner_state = 4;
+                } else if (active_button == 9) {
                     /* [LANE ASSIST] steering-aid on/off. */
                     s_game_option_laneassist ^= 1;
                     s_inner_state = 4;
                 }
             }
-            if (s_button_index == 9) { /* OK (after 2 CAR DAMAGE rows + LANE ASSIST) */
+            if (s_button_index == 10) { /* OK (after CAR DAMAGE rows + LANE ASSIST) */
                 /* Sync the committed game options into g_td5.ini (the global the
                  * boot-override at frontend init reads) and write them back to
                  * td5re.ini so the selection survives a relaunch. The original
@@ -1748,9 +1755,11 @@ void Screen_GameOptions(void) {
                 g_td5.ini.dynamics          = s_game_option_dynamics;
                 g_td5.ini.collisions        = s_game_option_collisions;
                 g_td5.ini.powerups          = s_game_option_powerups;
-                /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels. */
+                /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels +
+                 * the HUD damage-bar / wreck toggle. */
                 g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
                 g_td5.ini.car_damage_deform    = s_game_option_car_deform;
+                g_td5.ini.car_damage_bar       = s_game_option_car_damage_bar ? 1 : 0;
                 g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
                 td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;

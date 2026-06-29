@@ -279,6 +279,7 @@ void td5_ini_persist_options(void)
     /* [CAR DAMAGE 2026-06-29] Global damage levels (Game Options rows). */
     td5_ini_write_int("Game", "CarToughness", g_td5.ini.car_damage_toughness);
     td5_ini_write_int("Game", "CarDeform",    g_td5.ini.car_damage_deform);
+    td5_ini_write_int("Game", "CarDamageBar", g_td5.ini.car_damage_bar);
 
     /* TD6 paint color (last selected in the car-select color panel). */
     td5_ini_write_int("CarSelection", "TD6PaintColor",   g_td5.ini.td6_paint_color);
@@ -409,6 +410,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "CarDamage",            &g_td5.ini.car_damage },
         { "CarToughness",         &g_td5.ini.car_damage_toughness },
         { "CarDeform",            &g_td5.ini.car_damage_deform },
+        { "CarDamageBar",         &g_td5.ini.car_damage_bar },
         /* Trace */
         { "RaceTrace",            &g_td5.ini.race_trace_enabled },
         { "RaceTraceSlot",        &g_td5.ini.race_trace_slot },
@@ -925,6 +927,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.car_damage            = td5_ini_int("Game", "CarDamage", 1);
     g_td5.ini.car_damage_toughness  = td5_ini_int("Game", "CarToughness", 1);  /* 0=Low 1=Normal 2=High */
     g_td5.ini.car_damage_deform     = td5_ini_int("Game", "CarDeform",    1);  /* 0=Low 1=Normal 2=High */
+    g_td5.ini.car_damage_bar        = td5_ini_int("Game", "CarDamageBar", 1);  /* HUD bar + wreck on/off */
 
     /* TD6-car player override: [Game] PlayerCarArchive = <3-letter code> forces
      * the player (slot 0) into a ported Test Drive 6 car (re/assets/cars/<code>/)
