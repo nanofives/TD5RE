@@ -2,322 +2,331 @@
  * td5_tutorial.c -- First-race controller-tutorial overlay (PORT ENHANCEMENT).
  * See td5_tutorial.h for the behavioural contract.
  *
- * Everything draws through the resolution-independent VectorUI primitives
- * (td5_vectorui.h), in the HUD's 640x480 virtual layout scaled to the render
- * target. Colours are 0xAARRGGBB. No external asset: the controller is drawn
- * procedurally from rounded-rects, discs and thin quads.
+ * The controller is the real Xbox pad (Wikipedia Xbox_Controller.svg), baked to
+ * a raw-DEFLATE BGRA blob in td5_tutorial_pad_art.h, inflated once and blitted
+ * as a single textured quad. Everything is laid out in a 640x480 virtual space
+ * drawn with a UNIFORM scale, centred on screen, so the pad keeps its real
+ * aspect on widescreen (the HUD's non-uniform 640x480 mapping would stretch it).
+ * Labels sit around the pad with short white leader lines (subtle black halo)
+ * routed in nested channels. Text is TTF-first (NOT gated on
+ * td5_vui_text_available()).
  */
 #include "td5_tutorial.h"
 
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
-#include "td5re.h"          /* g_td5 (render size, ini, race flags) */
-#include "td5_platform.h"   /* input polling, JSBIND codes, TD5_LOG_* */
-#include "td5_vectorui.h"   /* td5_vui_* drawing primitives */
-#include "td5_save.h"       /* tutorial-seen persistence */
-#include "td5_game.h"       /* td5_game_is_cinematic_race */
+#include "td5re.h"
+#include "td5_platform.h"
+#include "td5_vectorui.h"
+#include "td5_save.h"
+#include "td5_game.h"
+#include "td5_input.h"     /* td5_input_get_input_source (joystick vs keyboard) */
+#include "td5_inflate.h"
+#include "td5_tutorial_pad_art.h"
 
 #define LOG_TAG "hud"
+#define PAD_TEX_PAGE 990
 
 /* ------------------------------------------------------------------ state -- */
+static int      s_active     = 0;
+static int      s_force_mode = 0;
+static int      s_humans     = 1;
+static uint32_t s_ready_mask = 0;
+static uint32_t s_prev_in[TD5_MAX_HUMAN_PLAYERS];
+static unsigned s_anim       = 0;
+static int      s_pad_ready  = 0;
+static int      s_pad_warned = 0;
 
-static int      s_active      = 0;   /* overlay up + holding the countdown */
-static int      s_force_mode  = 0;   /* TutorialOverlay==2: never set seen */
-static uint32_t s_prev_input  = 0;   /* latched dismiss-input mask (rising edge) */
-static unsigned s_anim        = 0;   /* per-frame counter for the pulse */
+/* Uniform scale + screen origin (set each draw). */
+static float U = 1.0f, OX = 0.0f, OY = 0.0f;
+static float ART_X, ART_Y, ART_W, ART_H;
 
-/* Canvas scale for the current draw call (render_px / virtual). */
-static float SX = 1.0f, SY = 1.0f;
+static float PXc(float vx) { return OX + (vx - 320.0f) * U; }
+static float PYc(float vy) { return OY + (vy - 240.0f) * U; }
 
-/* ----------------------------------------------------- controller geometry --
- * Virtual (640x480) coordinates of each physical pad element. The face-button
- * cluster uses real Xbox colours so the diagram is instantly recognisable. */
+/* ----------------------------------------------------- controller geometry -- */
 enum {
     E_A = 0, E_B, E_X, E_Y, E_LB, E_RB, E_BACK, E_START,
-    E_LSTICK, E_RSTICK, E_RT, E_LT, E_DPAD, E_NONE
+    E_LSTICK, E_RSTICK, E_RT, E_LT, E_DPAD, E_L3, E_R3, E_NONE
 };
-
 typedef struct { float x, y; } Vec2;
-static const Vec2 k_elem_pos[E_NONE] = {
-    [E_A]      = { 396, 264 },
-    [E_B]      = { 416, 242 },
-    [E_X]      = { 376, 242 },
-    [E_Y]      = { 396, 220 },
-    [E_LB]     = { 252, 190 },
-    [E_RB]     = { 392, 190 },
-    [E_BACK]   = { 304, 246 },
-    [E_START]  = { 342, 246 },
-    [E_LSTICK] = { 262, 238 },
-    [E_RSTICK] = { 352, 288 },
-    [E_RT]     = { 392, 168 },
-    [E_LT]     = { 252, 168 },
-    [E_DPAD]   = { 290, 288 },
+static const Vec2 k_anchor[E_NONE] = {
+    [E_A]={PAD_AX_A,PAD_AY_A}, [E_B]={PAD_AX_B,PAD_AY_B}, [E_X]={PAD_AX_X,PAD_AY_X},
+    [E_Y]={PAD_AX_Y,PAD_AY_Y}, [E_LB]={PAD_AX_LB,PAD_AY_LB}, [E_RB]={PAD_AX_RB,PAD_AY_RB},
+    [E_BACK]={PAD_AX_BACK,PAD_AY_BACK}, [E_START]={PAD_AX_START,PAD_AY_START},
+    [E_LSTICK]={PAD_AX_LSTICK,PAD_AY_LSTICK}, [E_RSTICK]={PAD_AX_RSTICK,PAD_AY_RSTICK},
+    [E_RT]={PAD_AX_RT,PAD_AY_RT}, [E_LT]={PAD_AX_LT,PAD_AY_LT}, [E_DPAD]={PAD_AX_DPAD,PAD_AY_DPAD},
+    [E_L3]={PAD_AX_L3,PAD_AY_L3}, [E_R3]={PAD_AX_R3,PAD_AY_R3},
 };
+static Vec2 elem_pos(int e)
+{ Vec2 v = { ART_X + k_anchor[e].x * ART_W, ART_Y + k_anchor[e].y * ART_H }; return v; }
+static int elem_is_left(int e) { return k_anchor[e].x < 0.5f; }
 
-/* Map a button index (XInput-via-DInput order) to a pad element. L3/R3 (the
- * stick-click buttons 8/9) resolve to the stick they live on. */
 static int button_to_elem(int btn)
 {
     switch (btn) {
-        case 0: return E_A;     case 1: return E_B;
-        case 2: return E_X;     case 3: return E_Y;
-        case 4: return E_LB;    case 5: return E_RB;
-        case 6: return E_BACK;  case 7: return E_START;
-        case 8: return E_LSTICK; /* L3 = left-stick click */
-        case 9: return E_RSTICK; /* R3 = right-stick click */
-        default: return E_NONE;
+        case 0: return E_A;    case 1: return E_B;   case 2: return E_X;   case 3: return E_Y;
+        case 4: return E_LB;   case 5: return E_RB;  case 6: return E_BACK; case 7: return E_START;
+        case 8: return E_L3;   case 9: return E_R3;  default: return E_NONE;
     }
 }
-
-/* Decode a per-action binding code (td5_platform.h TD5_JSBIND_*) into the pad
- * element it points at. Axis 0 = left stick (steering); axis 2 = the shared
- * trigger axis (dir 1 = RT below centre = accelerate, dir 0 = LT = brake). */
 static int code_to_elem(uint32_t code)
 {
     if (code & TD5_JSBIND_AXIS) {
-        unsigned v = code & 0xFFu;
-        unsigned axis = v >> 1, dir = v & 1u;
+        unsigned v = code & 0xFFu, axis = v >> 1, dir = v & 1u;
         if (axis == 0) return E_LSTICK;
         if (axis == 2) return dir ? E_RT : E_LT;
         return E_NONE;
     }
-    if (code & TD5_JSBIND_BUTTON)
-        return button_to_elem((int)(code & 0xFFu));
+    if (code & TD5_JSBIND_BUTTON) return button_to_elem((int)(code & 0xFFu));
     return E_NONE;
 }
 
 /* ------------------------------------------------------------ draw helpers -- */
-
 static void q(float x, float y, float w, float h, uint32_t c)
-{
-    td5_vui_quad(x * SX, y * SY, w * SX, h * SY, c, -1, 0, 0, 0, 0);
-}
-
+{ td5_vui_quad(PXc(x), PYc(y), w * U, h * U, c, -1, 0, 0, 0, 0); }
 static void line_h(float x0, float x1, float y, float th, uint32_t c)
-{
-    float a = x0 < x1 ? x0 : x1, b = x0 < x1 ? x1 : x0;
-    q(a, y - th * 0.5f, b - a, th, c);
-}
+{ float a = x0<x1?x0:x1, b = x0<x1?x1:x0; q(a, y - th*0.5f, b - a, th, c); }
 static void line_v(float x, float y0, float y1, float th, uint32_t c)
-{
-    float a = y0 < y1 ? y0 : y1, b = y0 < y1 ? y1 : y0;
-    q(x - th * 0.5f, a, th, b - a, c);
-}
-
-/* Filled disc (button / stick) with a rim, via the rounded-rect SDF (radius =
- * half the box). Falls back to a square quad when shapes are unavailable. */
-static void disc(float cx, float cy, float r, uint32_t fill, uint32_t rim)
-{
-    if (td5_vui_shapes_available()) {
-        td5_vui_roundrect((cx - r) * SX, (cy - r) * SY, 2 * r * SX, 2 * r * SY,
-                          r * SX, r * SX, 1.4f * SX, 1.4f * SY,
-                          rim, rim, rim, fill, 1.0f);
-    } else {
-        q(cx - r, cy - r, 2 * r, 2 * r, fill);
-    }
-}
-
-static void panel(float x, float y, float w, float h, float r,
-                  uint32_t fill, float fa, uint32_t rim)
-{
-    if (td5_vui_shapes_available()) {
-        td5_vui_roundrect(x * SX, y * SY, w * SX, h * SY, r * SX, r * SX,
-                          2.0f * SX, 2.0f * SY, rim, rim, rim, fill, fa);
-    } else {
-        q(x, y, w, h, fill);
-    }
-}
-
-static int text_ok(void) { return td5_vui_text_available(); }
-
-static void text_center(float cx, float y, const char *s, uint32_t c, float sc)
-{
-    if (text_ok()) td5_vui_text_centered(cx * SX, y * SY, s, c, SX * sc, SY * sc);
-}
-static void text_left(float x, float y, const char *s, uint32_t c, float sc)
-{
-    if (text_ok()) td5_vui_text(x * SX, y * SY, s, c, SX * sc, SY * sc);
-}
-static void text_right(float xr, float y, const char *s, uint32_t c, float sc)
-{
-    if (!text_ok()) return;
-    float w = td5_vui_text_width(s, SX * sc);
-    td5_vui_text(xr * SX - w, y * SY, s, c, SX * sc, SY * sc);
-}
-
-/* Small left/right arrowhead at the label end of a leader line. */
-static void arrowhead(float x, float y, int dir_right, uint32_t c)
+{ float a = y0<y1?y0:y1, b = y0<y1?y1:y0; q(x - th*0.5f, a, th, b - a, c); }
+static void rrect(float x, float y, float w, float h, float r, uint32_t fill, uint32_t rim)
 {
     if (td5_vui_shapes_available())
-        td5_vui_arrow(x * SX, (y - 4.0f) * SY, 7.0f * SX, 8.0f * SY, dir_right, c);
-    else
-        q(x, y - 3.0f, 6.0f, 6.0f, c);   /* crude fallback */
+        td5_vui_roundrect(PXc(x), PYc(y), w*U, h*U, r*U, r*U, 1.3f*U, 1.3f*U, rim, rim, rim, fill, 1.0f);
+    else q(x, y, w, h, fill);
+}
+static void text_center(float cx, float y, const char *s, uint32_t c, float sc)
+{ td5_vui_text_centered(PXc(cx), PYc(y), s, c, U*sc, U*sc); }
+static void text_left(float x, float y, const char *s, uint32_t c, float sc)
+{ td5_vui_text(PXc(x), PYc(y), s, c, U*sc, U*sc); }
+static void text_right(float xr, float y, const char *s, uint32_t c, float sc)
+{ float w = td5_vui_text_width(s, U*sc); td5_vui_text(PXc(xr) - w, PYc(y), s, c, U*sc, U*sc); }
+
+/* --- Leader lines: thin white core + subtle black halo, continuous joins. --- */
+#define LEAD_CORE  1.4f
+#define LEAD_HALO  2.6f
+#define LEAD_WHITE 0xFFFFFFFFu
+#define LEAD_BLACK 0x80000000u
+
+static void seg(Vec2 a, Vec2 b, float th, uint32_t c)
+{ if (a.y == b.y) line_h(a.x, b.x, a.y, th, c); else line_v(a.x, a.y, b.y, th, c); }
+static void cap(Vec2 p, float th, uint32_t c) { q(p.x - th*0.5f, p.y - th*0.5f, th, th, c); }
+static void leader(const Vec2 *pts, int n)
+{
+    for (int i=0;i<n-1;i++) seg(pts[i],pts[i+1],LEAD_HALO,LEAD_BLACK);
+    for (int i=1;i<n-1;i++) cap(pts[i],LEAD_HALO,LEAD_BLACK);
+    for (int i=0;i<n-1;i++) seg(pts[i],pts[i+1],LEAD_CORE,LEAD_WHITE);
+    for (int i=1;i<n-1;i++) cap(pts[i],LEAD_CORE,LEAD_WHITE);
 }
 
-/* ------------------------------------------------------------- pad drawing -- */
-
-static void draw_pad(void)
+#define DIR_R 1   /* td5_vui_arrow dir_right=1 -> points RIGHT */
+#define DIR_L 0   /* dir_right=0 -> points LEFT */
+#define DIR_UP 2
+/* Horizontal arrowhead via the smooth SDF arrow primitive. (lx,ly) is the line
+ * end; the arrow base overlaps it slightly so they read as one shape. */
+static void arrow_h(float lx, float ly, int dir_right)
 {
-    const uint32_t body_fill = 0xFF23272Eu;
-    const uint32_t body_rim  = 0xFF566070u;
-    const uint32_t stick_fill = 0xFF14171Cu;
-    const uint32_t stick_rim  = 0xFF707A88u;
-    const uint32_t shoulder   = 0xFF2C313Au;
-    const uint32_t glyph_lt   = 0xFFC8D0DAu;
+    const float w = 9.0f, h = 10.0f;
+    float ex = PXc(lx), ey = PYc(ly);
+    float bx = dir_right ? (ex - 1.5f*U) : (ex + 1.5f*U - w*U);
+    td5_vui_arrow(bx - 1.0f*U, ey - (h*0.5f + 1.0f)*U, (w+2.0f)*U, (h+2.0f)*U, dir_right, LEAD_BLACK);
+    td5_vui_arrow(bx,          ey -  h*0.5f*U,          w*U,        h*U,        dir_right, LEAD_WHITE);
+}
+/* Up arrowhead (only the two top labels need this) — stacked quads, white core
+ * + thin black rim. (lx,ly) = line end (= base); tip points up just below the
+ * label. */
+static void tri_up(float lx, float baseY, float len, float hw, uint32_t c)
+{
+    const int N = 14; float s = len / N;
+    for (int i=0;i<N;i++) {                       /* wide at base (bottom) -> tip at top */
+        float wv = 2.0f*hw*(1.0f - (i+0.5f)*s/len);
+        q(lx - wv*0.5f, baseY - (i+1)*s, wv, s + 0.5f, c);
+    }
+}
+static void arrow_up(float lx, float ly)
+{ tri_up(lx, ly, 8.8f, 4.6f, LEAD_BLACK); tri_up(lx, ly, 7.6f, 3.8f, LEAD_WHITE); }
 
-    /* Grips + body. */
-    panel(228, 286, 46, 78, 18, 0xFF1C2026u, 1.0f, body_rim);
-    panel(396, 286, 46, 78, 18, 0xFF1C2026u, 1.0f, body_rim);
-    panel(236, 204, 198, 96, 26, body_fill, 1.0f, body_rim);
+/* Small white start-circle (subtle dark rim) marking a leader's origin on its
+ * button. */
+static void start_dot(Vec2 p)
+{
+    const float r = 3.4f;
+    if (td5_vui_shapes_available()) {
+        td5_vui_roundrect(PXc(p.x - r - 0.7f), PYc(p.y - r - 0.7f),
+                          (2*r + 1.4f)*U, (2*r + 1.4f)*U, (r + 0.7f)*U, (r + 0.7f)*U,
+                          0, 0, 0, 0, 0, LEAD_BLACK, 1.0f);
+        td5_vui_roundrect(PXc(p.x - r), PYc(p.y - r), 2*r*U, 2*r*U, r*U, r*U,
+                          0, 0, 0, 0, 0, LEAD_WHITE, 1.0f);
+    } else {
+        q(p.x - r, p.y - r, 2*r, 2*r, LEAD_WHITE);
+    }
+}
 
-    /* Triggers + bumpers. */
-    panel(238, 158, 30, 16, 6, shoulder, 1.0f, body_rim);   /* LT */
-    panel(376, 158, 30, 16, 6, shoulder, 1.0f, body_rim);   /* RT */
-    panel(236, 182, 34, 14, 7, shoulder, 1.0f, body_rim);   /* LB */
-    panel(374, 182, 34, 14, 7, shoulder, 1.0f, body_rim);   /* RB */
-    text_center(253, 163, "LT", glyph_lt, 0.42f);
-    text_center(391, 163, "RT", glyph_lt, 0.42f);
-    text_center(253, 185, "LB", glyph_lt, 0.42f);
-    text_center(391, 185, "RB", glyph_lt, 0.42f);
-
-    /* Sticks. */
-    disc(k_elem_pos[E_LSTICK].x, k_elem_pos[E_LSTICK].y, 15, stick_fill, stick_rim);
-    disc(k_elem_pos[E_LSTICK].x, k_elem_pos[E_LSTICK].y, 6,  0xFF2A2F37u, stick_rim);
-    disc(k_elem_pos[E_RSTICK].x, k_elem_pos[E_RSTICK].y, 15, stick_fill, stick_rim);
-    disc(k_elem_pos[E_RSTICK].x, k_elem_pos[E_RSTICK].y, 6,  0xFF2A2F37u, stick_rim);
-
-    /* D-pad (plus of two quads). */
-    q(k_elem_pos[E_DPAD].x - 6,  k_elem_pos[E_DPAD].y - 18, 12, 36, 0xFF12151Au);
-    q(k_elem_pos[E_DPAD].x - 18, k_elem_pos[E_DPAD].y - 6,  36, 12, 0xFF12151Au);
-
-    /* Back / Start pills. */
-    disc(k_elem_pos[E_BACK].x,  k_elem_pos[E_BACK].y,  5, 0xFF3A4049u, body_rim);
-    disc(k_elem_pos[E_START].x, k_elem_pos[E_START].y, 5, 0xFF3A4049u, body_rim);
-
-    /* Face buttons in Xbox colours, with their letters. */
-    disc(k_elem_pos[E_A].x, k_elem_pos[E_A].y, 9, 0xFF5FAE48u, 0xFF8FE07Au); /* A green */
-    disc(k_elem_pos[E_B].x, k_elem_pos[E_B].y, 9, 0xFFC2362Fu, 0xFFE86A60u); /* B red   */
-    disc(k_elem_pos[E_X].x, k_elem_pos[E_X].y, 9, 0xFF2F66B8u, 0xFF6A98DEu); /* X blue  */
-    disc(k_elem_pos[E_Y].x, k_elem_pos[E_Y].y, 9, 0xFFD0A828u, 0xFFF0D060u); /* Y yellow*/
-    text_center(k_elem_pos[E_A].x, k_elem_pos[E_A].y - 6, "A", 0xFF0E1A0Cu, 0.5f);
-    text_center(k_elem_pos[E_B].x, k_elem_pos[E_B].y - 6, "B", 0xFF1E0606u, 0.5f);
-    text_center(k_elem_pos[E_X].x, k_elem_pos[E_X].y - 6, "X", 0xFF081222u, 0.5f);
-    text_center(k_elem_pos[E_Y].x, k_elem_pos[E_Y].y - 6, "Y", 0xFF201A06u, 0.5f);
+static void ensure_pad_texture(void)
+{
+    if (s_pad_ready) return;
+    unsigned char *bgra = (unsigned char *)malloc(PAD_ART_RAW_LEN);
+    if (!bgra) return;
+    size_t n = td5_inflate_mem_to_mem(bgra, PAD_ART_RAW_LEN, k_pad_art_deflate, k_pad_art_deflate_len);
+    if (n == (size_t)PAD_ART_RAW_LEN &&
+        td5_plat_render_upload_texture(PAD_TEX_PAGE, bgra, PAD_ART_W, PAD_ART_H, 2)) {
+        s_pad_ready = 1;
+        TD5_LOG_I(LOG_TAG, "Tutorial pad art uploaded: page=%d %dx%d", PAD_TEX_PAGE, PAD_ART_W, PAD_ART_H);
+    } else if (!s_pad_warned) {
+        s_pad_warned = 1;
+        TD5_LOG_W(LOG_TAG, "Tutorial pad art not ready (inflate=%u/%d)", (unsigned)n, PAD_ART_RAW_LEN);
+    }
+    free(bgra);
 }
 
 /* ------------------------------------------------------------- callouts ----- */
+enum { REG_T, REG_B, REG_L, REG_R };
+/* action: driving-action index, OR -1 for a fixed (non-rebindable) control whose
+ * element is given by `elem` (e.g. RESET CAR is hardwired to Select/Back). */
+typedef struct { int action; int elem; const char *label; int region; float p0, p1, p2, p3; } CalloutDef;
 
-typedef struct { const char *label; int elem; } Callout;
+#define LBL_VC 6.0f         /* nudge side/bottom labels up to centre on the row */
+#define LBL_TOP_Y 100.0f    /* top-label text Y */
+#define LBL_SCALE 0.66f
+#define TXT_H 18.0f         /* approx label height (virtual) for top-arrow spacing */
 
-/* Action -> display name (index-aligned to the 11 driving actions). LEFT/RIGHT
- * are merged into one "STEER" callout below. */
-static const char *k_act_name[TD5_JSBIND_ACTIONS] = {
-    "STEER", "STEER", "ACCELERATE", "BRAKE", "HANDBRAKE", "HORN / SIREN",
-    "GEAR UP", "GEAR DOWN", "CHANGE VIEW", "REAR VIEW", "PAUSE"
+static const CalloutDef k_callouts[] = {
+    { 3,  E_NONE, "BRAKE",        REG_T, 0,   0,   0, 0  },
+    { 2,  E_NONE, "ACCELERATE",   REG_T, 0,   0,   0, 0  },
+    { 7,  E_NONE, "GEAR DOWN",    REG_L, 176, 212, 0, 0  },  /* straight (at bumper) */
+    { 0,  E_NONE, "STEER",        REG_L, 176, 258, 0, 0  },  /* straight (at stick)  */
+    { 5,  E_NONE, "HORN/SIREN",   REG_L, 176, 300, 0, 42 }, /* down then out (L3)   */
+    { 8,  E_NONE, "CHANGE VIEW",  REG_R, 448, 238, 0, 0  },  /* straight (at Y)      */
+    { 6,  E_NONE, "GEAR UP",      REG_R, 448, 212, 0, 0  },  /* straight (at bumper) */
+    { 4,  E_NONE, "HANDBRAKE",    REG_R, 448, 272, 0, 20 }, /* down then out (no up) */
+    { -1, E_BACK, "RESET CAR",    REG_B, 206, 372, 0, 0  },  /* Select/Back, not rebindable */
+    { 10, E_NONE, "PAUSE",        REG_B, 316, 394, 0, 0  },
+    { 9,  E_NONE, "REAR VIEW",    REG_B, 424, 372, 0, 0  },
 };
 
-/* Draw one column of callouts (count items) tied to their pad elements with an
- * L-rail leader: element -> side rail -> label, arrowhead at the label. */
-static void draw_callout_column(const Callout *items, int count, int left_side)
+static void draw_callout(const CalloutDef *c, const uint32_t *bind)
 {
-    if (count <= 0) return;
-    const float ytop = 138.0f, ybot = 372.0f;
-    const float rail   = left_side ? 214.0f : 456.0f;
-    const float lbl_x  = left_side ? 150.0f : 492.0f;   /* anchored text edge */
-    const float head_x = left_side ? 156.0f : 484.0f;   /* arrowhead x */
-    const uint32_t line_c = 0xFF7F8A99u;
-    const uint32_t lbl_c  = 0xFFEDEDEDu;
-
-    for (int i = 0; i < count; i++) {
-        if (items[i].elem >= E_NONE) continue;
-        float ex = k_elem_pos[items[i].elem].x;
-        float ey = k_elem_pos[items[i].elem].y;
-        float ly = ytop + (i + 0.5f) * (ybot - ytop) / (float)count;
-
-        line_h(ex, rail, ey, 1.6f, line_c);   /* element -> rail */
-        line_v(rail, ey, ly, 1.6f, line_c);    /* rail vertical   */
-        line_h(rail, head_x, ly, 1.6f, line_c);/* rail -> label   */
-        arrowhead(head_x, ly, left_side ? 0 : 1, line_c);
-
-        if (left_side) text_right(lbl_x, ly - 5.0f, items[i].label, lbl_c, 0.5f);
-        else           text_left (lbl_x, ly - 5.0f, items[i].label, lbl_c, 0.5f);
+    int e;
+    if (c->action < 0) {
+        e = c->elem;                              /* fixed control (RESET CAR) */
+    } else {
+        e = code_to_elem(bind[c->action]);
+        if (c->action == 0 && e >= E_NONE) e = code_to_elem(bind[1]);
     }
+    if (e >= E_NONE) return;
+    Vec2 b = elem_pos(e);
+    Vec2 pts[6];
+    const float AL = 8.0f;
+
+    if (c->region == REG_T) {
+        float tip = LBL_TOP_Y + TXT_H + 3.0f;     /* arrow tip just below text */
+        float base_y = tip + AL;                   /* line end / arrow base     */
+        pts[0] = b; pts[1] = (Vec2){ b.x, base_y };
+        leader(pts, 2);
+        arrow_up(b.x, base_y);
+        text_center(b.x, LBL_TOP_Y, c->label, LEAD_WHITE, LBL_SCALE);
+    } else if (c->region == REG_B) {
+        float lx = c->p0, lane = c->p1;
+        int right = (lx >= b.x);
+        float basex = right ? (lx - AL - 4.0f) : (lx + AL + 4.0f);
+        pts[0]=b; pts[1]=(Vec2){b.x,lane}; pts[2]=(Vec2){basex,lane};
+        leader(pts, 3);
+        arrow_h(basex, lane, right ? DIR_R : DIR_L);
+        if (right) text_left (lx, lane - LBL_VC, c->label, LEAD_WHITE, LBL_SCALE);
+        else       text_right(lx, lane - LBL_VC, c->label, LEAD_WHITE, LBL_SCALE);
+    } else {
+        /* L/R: at most one bend. Optional vertical 'dip' off the button first
+         * (used to drop below the face cluster / split steer & horn), then a
+         * horizontal out to the label edge; the trailing vertical collapses when
+         * the label sits at the button's row, so most leaders are dead straight. */
+        int left = (c->region == REG_L);
+        float lx = c->p0, ly = c->p1, dip = c->p3;
+        float basex = left ? (lx + AL + 4.0f) : (lx - AL - 4.0f);
+        float y0 = b.y + dip;
+        int k = 0; pts[k++] = b;
+        if (dip > 0.0f) pts[k++] = (Vec2){ b.x, y0 };
+        pts[k++] = (Vec2){ basex, y0 };
+        if (ly != y0) pts[k++] = (Vec2){ basex, ly };
+        leader(pts, k);
+        arrow_h(basex, ly, left ? DIR_L : DIR_R);
+        if (left) text_right(lx, ly - LBL_VC, c->label, LEAD_WHITE, LBL_SCALE);
+        else      text_left (lx, ly - LBL_VC, c->label, LEAD_WHITE, LBL_SCALE);
+    }
+    start_dot(b);
 }
 
 static void draw_callouts(void)
 {
     const uint32_t *bind = td5_plat_input_player_action_bindings(0);
+    for (size_t i = 0; i < sizeof k_callouts / sizeof k_callouts[0]; i++)
+        draw_callout(&k_callouts[i], bind);
+}
 
-    Callout left[TD5_JSBIND_ACTIONS], right[TD5_JSBIND_ACTIONS];
-    int nl = 0, nr = 0;
+/* ----------------------------------------------------------- dismiss row ---- */
+static void draw_dismiss_row(void)
+{
+    unsigned t = s_anim % 64u;
+    unsigned tw = (t < 32u) ? t : (64u - t);
+    uint32_t a = 0xB0u + (uint32_t)(tw * 48u / 32u);
+    uint32_t amber = (a << 24) | 0x00FFD24Au;
 
-    for (int a = 0; a < TD5_JSBIND_ACTIONS; a++) {
-        if (a == 1) continue;                 /* RIGHT merged into STEER (a==0) */
-
-        int elem = code_to_elem(bind[a]);
-        if (a == 0 && elem >= E_NONE)         /* LEFT unbound: try RIGHT */
-            elem = code_to_elem(bind[1]);
-        if (elem >= E_NONE) continue;         /* nothing to point at */
-
-        Callout c = { k_act_name[a], elem };
-        if (k_elem_pos[elem].x < 320.0f) { if (nl < TD5_JSBIND_ACTIONS) left[nl++]  = c; }
-        else                             { if (nr < TD5_JSBIND_ACTIONS) right[nr++] = c; }
+    if (s_humans <= 1) {
+        text_center(320, 432, "PRESS ANY BUTTON TO START THE RACE", amber, 0.85f);
+        return;
     }
-
-    draw_callout_column(left,  nl, 1);
-    draw_callout_column(right, nr, 0);
+    int ready = 0;
+    for (int i=0;i<s_humans;i++) if (s_ready_mask & (1u<<i)) ready++;
+    char line[64];
+    snprintf(line, sizeof line, "ALL PLAYERS PRESS A BUTTON TO START  (%d/%d)", ready, s_humans);
+    text_center(320, 420, line, amber, 0.78f);
+    const float chip_w = 56.0f;
+    float x0 = 320.0f - s_humans * chip_w * 0.5f;
+    for (int i=0;i<s_humans;i++) {
+        int rdy = (s_ready_mask & (1u<<i)) != 0;
+        char p[16]; snprintf(p, sizeof p, "P%d", i + 1);
+        text_center(x0 + i*chip_w + chip_w*0.5f, 444, p, rdy ? 0xFF59C24Au : 0xFF8C94A0u, 0.62f);
+    }
 }
 
 /* ---------------------------------------------------------------- public ---- */
-
 void td5_tutorial_draw(void)
 {
     if (!s_active) return;
-
     int rw = g_td5.render_width, rh = g_td5.render_height;
     if (rw <= 0 || rh <= 0) return;
-    SX = (float)rw / 640.0f;
-    SY = (float)rh / 480.0f;
+    float ux = (float)rw / 640.0f, uy = (float)rh / 480.0f;
+    U = ux < uy ? ux : uy;                 /* uniform: no stretch */
+    OX = rw * 0.5f; OY = rh * 0.5f;
 
-    /* 30%-opacity dark background over the whole frame. */
-    q(0, 0, 640, 480, 0x4C000000u);
+    ART_W = 224.0f;
+    ART_H = ART_W * (float)PAD_ART_H / (float)PAD_ART_W;
+    ART_X = 320.0f - ART_W * 0.5f;
+    ART_Y = 252.0f - ART_H * 0.5f;
 
-    /* The overlay rectangle (subtle frame so it reads as a panel). */
-    panel(40, 44, 560, 392, 14, 0x66101418u, 1.0f, 0xC0A8B4C4u);
+    /* 50%-opacity sharp rectangle covering most of the screen (no border). */
+    td5_vui_quad(rw * 0.035f, rh * 0.03f, rw * 0.93f, rh * 0.94f, 0x80000000u, -1, 0, 0, 0, 0);
+    text_center(320, 48, "Controls", 0xFFFFFFFFu, 1.7f);
 
-    text_center(320, 70, "CONTROLS", 0xFFFFFFFFu, 0.95f);
-    line_h(120, 520, 96, 1.5f, 0x40FFFFFFu);
+    ensure_pad_texture();
+    if (s_pad_ready)
+        td5_vui_quad(PXc(ART_X), PYc(ART_Y), ART_W * U, ART_H * U,
+                     0xFFFFFFFFu, PAD_TEX_PAGE, 0.0f, 0.0f, 1.0f, 1.0f);
+    else
+        rrect(ART_X, ART_Y, ART_W, ART_H, 24, 0xFF2C3038u, 0xFF7A8290u);
 
-    draw_pad();
     draw_callouts();
-
-    /* Pulsing dismiss hint (triangle-wave brightness, no libm). */
-    {
-        unsigned t = s_anim % 64u;
-        unsigned tri = (t < 32u) ? t : (64u - t);     /* 0..32 */
-        uint32_t a = 0xB0u + (uint32_t)(tri * 48u / 32u); /* 0xB0..0xE0 */
-        uint32_t hint = (a << 24) | 0x00FFD24Au;       /* amber */
-        text_center(320, 408, "PRESS ANY BUTTON TO START THE RACE", hint, 0.55f);
-    }
+    draw_dismiss_row();
 }
 
-/* Combined dismiss-input mask: any gamepad button on any human slot (low bits)
- * plus a synthetic high bit for the keyboard "go" keys (NOT Esc — that is the
- * pause menu). */
-static uint32_t dismiss_input_mask(void)
+static uint32_t player_dismiss_input(int slot)
 {
-    uint32_t m = 0;
-    int hp = g_td5.num_human_players;
-    if (hp < 1) hp = 1;
-    if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
-    for (int i = 0; i < hp; i++)
-        m |= td5_plat_input_joystick_buttons(i) & 0x3FFFFFFFu; /* mask off our bit */
-
-    if (td5_plat_input_key_pressed(0x39) ||  /* Space */
-        td5_plat_input_key_pressed(0x1C) ||  /* Enter */
-        td5_plat_input_key_pressed(0xC8) ||  /* Up arrow (accelerate) */
-        td5_plat_input_key_pressed(0x11))    /* W */
+    uint32_t m = td5_plat_input_joystick_buttons(slot) & 0x3FFFFFFFu;
+    if (slot == 0 &&
+        (td5_plat_input_key_pressed(0x39) || td5_plat_input_key_pressed(0x1C) ||
+         td5_plat_input_key_pressed(0xC8) || td5_plat_input_key_pressed(0x11)))
         m |= 0x80000000u;
     return m;
 }
@@ -326,15 +335,21 @@ void td5_tutorial_update(void)
 {
     if (!s_active) return;
     s_anim++;
-
-    uint32_t now = dismiss_input_mask();
-    uint32_t rising = now & ~s_prev_input;
-    s_prev_input = now;
-
-    if (rising) {
+    for (int i=0;i<s_humans;i++) {
+        uint32_t now = player_dismiss_input(i);
+        uint32_t rising = now & ~s_prev_in[i];
+        s_prev_in[i] = now;
+        if (rising && !(s_ready_mask & (1u<<i))) {
+            s_ready_mask |= (1u<<i);
+            TD5_LOG_I(LOG_TAG, "Tutorial: player %d ready (%u/%d)",
+                      i, (unsigned)__builtin_popcount(s_ready_mask), s_humans);
+        }
+    }
+    uint32_t all = (s_humans >= 32) ? 0xFFFFFFFFu : ((1u << s_humans) - 1u);
+    if ((s_ready_mask & all) == all) {
         s_active = 0;
         if (!s_force_mode) td5_save_set_tutorial_seen(1);
-        TD5_LOG_I(LOG_TAG, "Tutorial overlay dismissed (rising=0x%08X) — countdown released", rising);
+        TD5_LOG_I(LOG_TAG, "Tutorial overlay dismissed by all %d player(s) — countdown released", s_humans);
     }
 }
 
@@ -342,43 +357,47 @@ int td5_tutorial_is_active(void) { return s_active; }
 
 void td5_tutorial_begin_race(void)
 {
-    s_active = 0;
-    s_force_mode = 0;
-    s_anim = 0;
-
+    s_active = 0; s_force_mode = 0; s_anim = 0; s_ready_mask = 0;
     int mode = g_td5.ini.tutorial_overlay;
-    if (mode <= 0) return;                       /* disabled */
-    if (g_td5.network_active) return;            /* never pause a lockstep race */
-    if (td5_game_is_cinematic_race()) return;    /* replay / attract demo */
-    if (g_td5.ini.player_is_ai) return;          /* slot 0 is AI — no human to teach */
+    if (mode <= 0) return;
+    if (g_td5.network_active) return;
+    if (td5_game_is_cinematic_race()) return;
+    if (g_td5.ini.player_is_ai) return;
     if (g_td5.num_human_players < 1) return;
-    /* Non-interactive harness (CSV trace / auto-throttle sweep / diff-race) has
-     * no human to press a button — arming here would hold the countdown forever
-     * and freeze the trace at tick 0. Stay inert so race captures are unaffected. */
     if (g_td5.ini.race_trace_enabled || g_td5.ini.auto_throttle) return;
 
     s_force_mode = (mode >= 2);
-    if (!s_force_mode && td5_save_get_tutorial_seen()) return; /* already shown once */
+    if (!s_force_mode && td5_save_get_tutorial_seen()) return;
+
+    s_humans = g_td5.num_human_players;
+    if (s_humans < 1) s_humans = 1;
+    if (s_humans > TD5_MAX_HUMAN_PLAYERS) s_humans = TD5_MAX_HUMAN_PLAYERS;
+
+    /* This is a CONTROLLER diagram — only show it when at least one player is
+     * actually on a joystick (skip keyboard-only play). Force mode (=2) bypasses
+     * this so the overlay can still be exercised for dev/testing. */
+    if (!s_force_mode) {
+        int any_pad = 0;
+        for (int p = 0; p < s_humans; p++)
+            if (td5_input_get_input_source(p) > 0) { any_pad = 1; break; }
+        if (!any_pad) {
+            TD5_LOG_I(LOG_TAG, "Tutorial overlay suppressed: no player on a joystick");
+            return;
+        }
+    }
 
     s_active = 1;
-    /* Latch whatever is held right now (e.g. a button still down from the menu
-     * confirm) so the overlay waits for a FRESH press before dismissing. */
-    s_prev_input = dismiss_input_mask();
-    TD5_LOG_I(LOG_TAG, "Tutorial overlay armed (mode=%d force=%d humans=%d)",
-              mode, s_force_mode, g_td5.num_human_players);
+    for (int i = 0; i < TD5_MAX_HUMAN_PLAYERS; i++)
+        s_prev_in[i] = (i < s_humans) ? player_dismiss_input(i) : 0;
 
-    /* Numeric proof of the "read from config" mapping (screenshots are black in
-     * the headless test env, so the per-key resolution is verified via the log).
-     * Each driving action -> its live-bound code -> the pad element it points at
-     * -> which label column it lands in. */
+    TD5_LOG_I(LOG_TAG, "Tutorial overlay armed (mode=%d force=%d humans=%d)", mode, s_force_mode, s_humans);
     {
         const uint32_t *b = td5_plat_input_player_action_bindings(0);
         for (int a = 0; a < TD5_JSBIND_ACTIONS; a++) {
             int e = code_to_elem(b[a]);
-            const char *side = (e >= E_NONE) ? "-" :
-                               (k_elem_pos[e].x < 320.0f ? "L" : "R");
-            TD5_LOG_I(LOG_TAG, "  tut map: action=%d %-12s code=0x%03X elem=%d side=%s",
-                      a, k_act_name[a], (unsigned)b[a], e, side);
+            const char *side = (e >= E_NONE) ? "-" : (elem_is_left(e) ? "L" : "R");
+            TD5_LOG_I(LOG_TAG, "  tut map: action=%d code=0x%03X elem=%d side=%s",
+                      a, (unsigned)b[a], e, side);
         }
     }
 }
