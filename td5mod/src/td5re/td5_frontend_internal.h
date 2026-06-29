@@ -269,6 +269,30 @@ extern int  s_two_player_mode;
 extern int s_selected_button;
 extern uint32_t s_mp_pane_nav_prev[TD5_MAX_HUMAN_PLAYERS];
 extern uint32_t s_mp_simul_ready_ms;
+/* [HOST CAR OPTIONS 2026-06-28] Host-only modal on the simultaneous MP car-select
+ * grid: the host (slot 0) presses X (pad) / TAB (keyboard) to raise a menu that
+ * only the host drives (every other pane freezes) to force every player's car. */
+enum {
+    MP_HOST_OPT_SAME = 0,   /* everyone copies the host's chosen car            */
+    MP_HOST_OPT_SLOW,       /* everyone -> a random SLOW car  (accel+top speed) */
+    MP_HOST_OPT_AVG,        /* everyone -> a random AVERAGE car                 */
+    MP_HOST_OPT_FAST,       /* everyone -> a random FAST car                    */
+    MP_HOST_OPT_COUNT
+};
+extern int s_mp_host_menu_open;   /* 1 = host car-options modal up (panes frozen) */
+extern int s_mp_host_menu_sel;    /* highlighted MP_HOST_OPT_*                    */
+/* Speed class of a car by acceleration + top-speed ONLY. Returns 0/1/2 if the car
+ * is in the LOW / MID / HIGH class, else -1 (invalid/cop, a dropped extreme, or a
+ * car between classes). Cars are ranked by score; the single slowest and fastest
+ * are dropped, then each class is K distinct cars (next-slowest / median / next-
+ * fastest) with no overlap. K = TD5RE_HOST_TIER_CARS, default max(9, ~15% of the
+ * roster). Defined in td5_frontend.c (reuses the cached frontend_carphys_frac stats). */
+int   frontend_carphys_speed_tier(int car);
+/* Normalised position [0,1] of a car in the roster's combined accel+top-speed range
+ * (0 = slowest, 1 = fastest); -1 if invalid/cop. For the nearest-centre fallback. */
+float frontend_car_speed_norm(int car);
+/* Band centre (0.20/0.50/0.80) for tier 0/1/2. */
+float frontend_speed_tier_center(int tier);
 float frontend_update_timed_animation(int max_tick, uint32_t duration_ms);
 int frontend_check_escape(void);
 /* [splitscreen back-confirm 2026-06-24] Universal "confirm before going back"
@@ -461,7 +485,11 @@ extern int  s_buttonlights_h;
 /* ---- car selection / simultaneous-MP grid ---- */
 #define FE_CARSEL_SLIDE_IN_MS 1250
 #define TD6_COP_LAST  49
-enum { MP_BTN_CAR = 0, MP_BTN_PAINT, MP_BTN_STATS, MP_BTN_TRANS, MP_BTN_OK, MP_BTN_COUNT };
+/* [2026-06-29] MORE STATS button removed from the simultaneous-MP car-select grid
+ * (the at-a-glance SPEED/ACCEL/HANDLING bars are always shown in each pane, so the
+ * full spec overlay was redundant in this mode). Buttons: CAR / PAINT / AUTO-MANUAL
+ * / OK. */
+enum { MP_BTN_CAR = 0, MP_BTN_PAINT, MP_BTN_TRANS, MP_BTN_OK, MP_BTN_COUNT };
 enum { MP_SET_NAME = 0, MP_SET_COLOUR, MP_SET_OK, MP_SET_COUNT };
 #define MP_SIMUL_ANIM_MS 480u   /* lobby -> car-select pane slide-in duration */
 #define MP_KBD_LETTER_ROWS 4

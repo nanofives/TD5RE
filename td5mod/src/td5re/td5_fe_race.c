@@ -277,8 +277,8 @@ static int  s_car_roster_min;           /* min car index for current mode */
 
 /* [MP COP CHASE 2026-06-24] Per-pane car roster for the simultaneous MP grid. In
  * cop chase each player's selectable cars depend on their chosen role: the COP
- * picks a POLICE car only (TD5 33-36 + TD6 cp1-4 46-49), suspects pick the TD5
- * civilian set (0-32, no police). Every other MP mode keeps the full shared
+ * picks a POLICE car only (TD5 33-36 + TD6 cp1-4 46-49), suspects pick the full
+ * civilian set (TD5 0-32 + TD6 37-75 + custom, no police). Every other MP mode keeps the full shared
  * roster, so these are only consulted when s_mp_simul_copchase is set. */
 static int  s_mp_player_roster_min[TD5_MAX_HUMAN_PLAYERS];
 static int  s_mp_player_roster_max[TD5_MAX_HUMAN_PLAYERS];
@@ -1407,6 +1407,10 @@ static uint32_t mp_simul_player_nav(int player) {
     if (td5_plat_input_key_pressed(0xD0)) b |= 8;     /* Down          */
     if (td5_plat_input_key_pressed(0x1C) || td5_plat_input_key_pressed(0x39)) b |= 0x10; /* Enter/Space */
     if (td5_plat_input_key_pressed(0x0E)) b |= 0x20;  /* Backspace = back (ESC handled globally) */
+    /* [HOST CAR OPTIONS 2026-06-28] TAB raises the host-only set-all-cars menu on
+     * the keyboard, mirroring the pad's X (0x80). Acted on only for slot 0 (host)
+     * at the use-site, so mapping it for any keyboard pane here is harmless. */
+    if (td5_plat_input_key_pressed(0x0F)) b |= 0x80;  /* Tab = host options (keyboard) */
     return b;
 }
 
@@ -1497,14 +1501,21 @@ static int mp_simul_pane_is_cop(int p) {
 
 /* Does car index `car` belong in pane `p`'s role roster?  Independent of
  * s_selected_game_type (the MP flow does not reliably stamp game_type==8), so
- * cop panes test frontend_car_is_cop() directly. Suspect panes (0-32) accept any
- * non-police index in range; full-roster panes fall back to frontend_car_selectable. */
+ * cop panes test frontend_car_is_cop() directly. Suspect panes accept any
+ * non-police civilian index (TD5 0-32 + TD6 37-75 + custom), skipping the
+ * locked-TD5/police gap; full-roster panes fall back to frontend_car_selectable. */
 static int mp_simul_carsel_valid(int p, int car) {
     int lo = s_mp_player_roster_min[p], hi = s_mp_player_roster_max[p];
     if (car < lo || car > hi) return 0;
     if (s_mp_player_roster_cop[p]) return frontend_car_is_cop(car);     /* police only */
-    if (hi < TD5_BASE_CAR_COUNT)   return 1;                            /* 0-32 civilian */
-    return frontend_car_selectable(car);                               /* full roster */
+    /* Suspect: any non-police CIVILIAN car — unlocked TD5 (0..cap) PLUS all TD6
+     * (37-75) and custom (76+). Skips the locked-TD5/police gap (33-36) and the
+     * TD6 cop cars. Mirrors frontend_car_selectable's non-cop-chase branch but is
+     * INDEPENDENT of s_selected_game_type: the MP flow doesn't reliably stamp
+     * game_type==8, and that branch would otherwise wrongly force cops-only here. */
+    if (frontend_car_is_cop(car)) return 0;                            /* no police */
+    if (car >= TD5_BASE_CAR_COUNT) return 1;                           /* TD6 + custom */
+    return car <= frontend_td5_car_cap_inclusive();                    /* unlocked TD5 */
 }
 
 /* Step pane `p`'s selected car by `delta`, wrapping inside its role roster and
@@ -1529,7 +1540,11 @@ static void mp_simul_set_pane_roster(int p) {
         int is_cop = mp_simul_pane_is_cop(p);
         s_mp_player_roster_cop[p] = is_cop;
         s_mp_player_roster_min[p] = is_cop ? 33 : 0;
-        s_mp_player_roster_max[p] = is_cop ? TD6_COP_LAST : 32;
+        /* Suspects get the FULL civilian roster (TD5 0-32 + TD6 37-75 + custom 76+),
+         * not just TD5 0-32 — mp_simul_carsel_valid skips police + the locked gap so
+         * TD6 cars become reachable. Cops stay police-only (33-36 + TD6 cops 46-49).
+         * [2026-06-28 user: cop-chase suspects could only pick TD5 cars, no TD6] */
+        s_mp_player_roster_max[p] = is_cop ? TD6_COP_LAST : (td5_car_total_count() - 1);
         TD5_LOG_I(LOG_TAG, "MP carsel roster: pane=%d role=%s cars=[%d..%d] mask=0x%X",
                   p, is_cop ? "COP(police)" : "SUSPECT(civilian)",
                   s_mp_player_roster_min[p], s_mp_player_roster_max[p],
@@ -1539,6 +1554,105 @@ static void mp_simul_set_pane_roster(int p) {
         s_mp_player_roster_min[p] = 0;
         s_mp_player_roster_max[p] = TD5_CAR_COUNT - 1;
     }
+}
+
+static int mp_int_in(const int *set, int ns, int v) {
+    int i;
+    for (i = 0; i < ns; i++) if (set[i] == v) return 1;
+    return 0;
+}
+
+/* [HOST CAR OPTIONS 2026-06-28] Pick a random car in speed class `tier` (0=slow,
+ * 1=avg, 2=fast — by acceleration + top-speed only) that is valid for pane `p`'s
+ * role roster AND, where possible, NOT already dealt to another pane this apply
+ * (`used`/`nused`) — so the host's "random slow/avg/fast" gives each player a
+ * DIFFERENT car. Fallback levels for restricted rosters / exhausted classes:
+ *   1) random among role-valid class cars not yet dealt (the normal case),
+ *   2) if the class is exhausted for this roster, allow a repeat from the class,
+ *   3) nearest role-valid scored car to the class centre (prefer un-dealt),
+ *   4) no scored car fits (e.g. a cop pane in cop-chase) -> next role-valid car. */
+static int mp_simul_pick_tier_car(int p, int tier, const int *used, int nused) {
+    int fresh[TD5_CAR_COUNT], any[TD5_CAR_COUNT];
+    int c, nf = 0, na = 0, best_u = -1, best_a = -1;
+    float center, bd_u = 1e30f, bd_a = 1e30f;
+    /* 1/2) Class cars valid for this roster, split into not-yet-dealt vs any. */
+    for (c = 0; c < TD5_CAR_COUNT; c++) {
+        if (frontend_carphys_speed_tier(c) != tier) continue;
+        if (!mp_simul_carsel_valid(p, c)) continue;
+        any[na++] = c;
+        if (!mp_int_in(used, nused, c)) fresh[nf++] = c;
+    }
+    if (nf > 0) return fresh[rand() % nf];     /* a fresh car of this class      */
+    if (na > 0) return any[rand() % na];       /* class exhausted -> allow repeat */
+    /* 3) Nearest role-valid scored car to the class centre (prefer un-dealt). */
+    center = frontend_speed_tier_center(tier);
+    for (c = 0; c < TD5_CAR_COUNT; c++) {
+        float nrm = frontend_car_speed_norm(c);
+        float d;
+        if (nrm < 0.0f) continue;
+        if (!mp_simul_carsel_valid(p, c)) continue;
+        d = nrm - center; if (d < 0.0f) d = -d;
+        if (!mp_int_in(used, nused, c)) { if (d < bd_u) { bd_u = d; best_u = c; } }
+        if (d < bd_a) { bd_a = d; best_a = c; }
+    }
+    if (best_u >= 0) return best_u;
+    if (best_a >= 0) return best_a;
+    /* 4) No scored car for this roster (cop pane) — next role-valid car. */
+    return mp_simul_carsel_step(p, s_mp_player_car[p], +1);
+}
+
+/* [HOST CAR OPTIONS 2026-06-28] Apply a host-menu action to EVERY player pane.
+ * SAME copies the host's (slot 0) chosen car to all; SLOW/AVG/FAST roll each player
+ * an INDEPENDENT random car of that speed class. Every result is clamped to the
+ * player's own role roster (mp_simul_carsel_valid/step) so cop-chase cop/suspect
+ * rosters stay valid, and the pane preview surface is refreshed on a change. The
+ * host is included (a no-op for SAME; a fresh roll for the random tiers). Locked-in
+ * (ready) panes are overridden too — the host is the authority here. */
+static void mp_simul_host_apply(int opt, int n) {
+    int p, host_car = s_mp_player_car[0];
+    int used[TD5_MAX_HUMAN_PLAYERS], nused = 0;   /* cars dealt so far (random tiers) */
+    for (p = 0; p < n; p++) {
+        int car = (opt == MP_HOST_OPT_SAME)
+                    ? host_car
+                    : mp_simul_pick_tier_car(p, opt - MP_HOST_OPT_SLOW, used, nused);
+        if (!mp_simul_carsel_valid(p, car)) car = mp_simul_carsel_step(p, car, +1);
+        if (!mp_simul_carsel_valid(p, car)) continue;   /* empty roster -> leave pane as-is */
+        /* Track the dealt car so the next pane avoids it (random tiers only — SAME
+         * intentionally gives every player the host's identical car). */
+        if (opt != MP_HOST_OPT_SAME && nused < (int)(sizeof(used) / sizeof(used[0])))
+            used[nused++] = car;
+        if (s_mp_player_car[p] != car) {
+            s_mp_player_car[p]   = car;
+            s_mp_player_paint[p] = 0;     /* reset paint on car change (matches manual cycle) */
+            mp_simul_refresh_pane(p);
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "MP host car-apply: opt=%d host_car=%d players=%d distinct=%d",
+              opt, host_car, n, nused);
+}
+
+/* [HOST CAR OPTIONS 2026-06-28] Drive the host-only modal while it is up: ONLY slot
+ * 0 (the host) navigates it, every other pane stays frozen. Up/Down move the
+ * highlight, A applies the chosen action to all players, B or X cancels. Every
+ * pane's nav latch is refreshed each frame so a button held during the modal can't
+ * edge-fire when it closes. */
+static void mp_simul_host_menu_input(int n, uint32_t now) {
+    uint32_t bits = mp_simul_player_nav(0);
+    uint32_t edge = bits & ~s_mp_pane_nav_prev[0];
+    int p;
+    (void)now;
+    if (edge & 4) { s_mp_host_menu_sel = (s_mp_host_menu_sel + MP_HOST_OPT_COUNT - 1) % MP_HOST_OPT_COUNT; frontend_play_sfx(2); }
+    if (edge & 8) { s_mp_host_menu_sel = (s_mp_host_menu_sel + 1) % MP_HOST_OPT_COUNT;                     frontend_play_sfx(2); }
+    if (edge & 0x10) {                          /* A = apply + close */
+        mp_simul_host_apply(s_mp_host_menu_sel, n);
+        s_mp_host_menu_open = 0;
+        frontend_play_sfx(3);
+    } else if (edge & (0x20u | 0x80u)) {        /* B or X = cancel */
+        s_mp_host_menu_open = 0;
+        frontend_play_sfx(5);
+    }
+    s_mp_pane_nav_prev[0] = bits;
+    for (p = 1; p < n; p++) s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
 }
 
 /* [MP AI TEST PLAYERS 2026-06-25] Auto-resolve every simulated AI slot so the
@@ -1560,6 +1674,44 @@ static void mp_ai_autoresolve(int n) {
     }
 }
 
+#ifndef TD5RE_RELEASE
+/* [layout preview harness 2026-06-29] Dev-only: jump straight to the N-player
+ * simultaneous car-select GRID (phase 1) for screenshot / layout work, without
+ * needing N physical controllers. Slot 0 is a keyboard "human"; slots 1..N-1 are
+ * simulated AI (the same machinery the lobby "add AI player" tool uses). The
+ * StartScreen path calls this when TD5RE_MP_SIMUL_PREVIEW=N and StartScreen=20;
+ * Screen_CarSelection then sees s_mp_flow + s_mp_simul + phase 1 and runs the
+ * normal grid init/render. Compiled out of the release build. */
+void frontend_mp_simul_preview_setup(int n) {
+    int p;
+    if (n < 2) n = 2;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    frontend_mp_ai_players_reset();
+    /* Slot 0: a real (keyboard) human so add_ai_player's human-count guard passes. */
+    s_mp_joined_count    = 1;
+    s_mp_slot_is_ai[0]   = 0;
+    s_mp_join_device[0]  = 0;
+    snprintf(s_mp_player_name[0], sizeof s_mp_player_name[0], "YOU");
+    s_mp_player_accent[0] = 0x00E0C040;
+    s_mp_player_car[0]   = (s_selected_car >= 0) ? s_selected_car : 0;
+    s_mp_player_paint[0] = 0;
+    s_mp_player_color[0] = -1;
+    s_mp_player_ready[0] = 0;
+    while (s_mp_joined_count < n && frontend_mp_add_ai_player()) { /* fills slots 1..n-1 */ }
+    s_num_human_players     = s_mp_joined_count;
+    g_td5.num_human_players  = s_mp_joined_count;
+    s_two_player_mode        = 1;
+    s_mp_flow                = 1;
+    s_mp_simul               = 1;
+    s_mp_phase               = 1;   /* car-select grid (skip name/colour + position picker) */
+    s_mp_car_player          = 0;
+    s_inner_state            = 0;   /* force carsel_init on the first screen tick */
+    for (p = 0; p < s_mp_joined_count; p++) s_mp_player_cell[p] = p;
+    TD5_LOG_I(LOG_TAG, "MP simul PREVIEW: %d players -> car-select grid (dev harness)",
+              s_mp_joined_count);
+}
+#endif
+
 static void frontend_mp_simul_carsel_init(void) {
     int p, n = s_num_human_players;
     if (n < 2) n = 2;
@@ -1570,6 +1722,11 @@ static void frontend_mp_simul_carsel_init(void) {
     frontend_reset_buttons();
     frontend_set_color_panel(0);
     frontend_set_cursor_visible(0);
+
+    /* [HOST CAR OPTIONS 2026-06-28] Never carry a stale host modal into a fresh
+     * (or re-entered) grid. */
+    s_mp_host_menu_open = 0;
+    s_mp_host_menu_sel  = 0;
 
     /* Drop any per-player EXCLUSIVE devices so the shared non-exclusive scan
      * handles can poll each pad again. On first entry these aren't bound (the
@@ -1773,11 +1930,30 @@ static void frontend_mp_simul_carsel_update(void) {
         return;
     }
 
+    /* [HOST CAR OPTIONS 2026-06-28] While the host-only modal is up, ONLY the host
+     * (slot 0) drives it and every other pane is frozen (no car cycling, no ready
+     * toggles, no back-out). */
+    if (s_mp_host_menu_open) {
+        mp_simul_host_menu_input(n, now);
+        return;
+    }
+
     for (p = 0; p < n; p++) {
         uint32_t bits = mp_simul_player_nav(p);
         uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
         int car;
         s_mp_pane_nav_prev[p] = bits;
+
+        /* [HOST CAR OPTIONS 2026-06-28] Host (slot 0) raises the set-all-cars modal
+         * with X (pad) / TAB (keyboard) — both map to bit 0x80. Not while this pane
+         * is in its stats sheet. Return at once so no other pane acts on the opening
+         * frame; the modal branch above freezes them from next frame on. */
+        if (p == 0 && (edge & 0x80) && s_mp_pane_substate[0] == 0) {
+            s_mp_host_menu_open = 1;
+            s_mp_host_menu_sel  = 0;
+            frontend_play_sfx(3);
+            return;
+        }
 
         if (edge & 0x20) want_back = 1;          /* any pad's B -> back to lobby */
 
@@ -1805,7 +1981,7 @@ static void frontend_mp_simul_carsel_update(void) {
              * edge-only (one step per press, the previous behaviour). Direction bits
              * are pre-masked to LEFT|RIGHT so vertical row nav stays strictly
              * edge-driven; on the (rare) both-held frame RIGHT wins. Only CAR/PAINT
-             * repeat — STATS/TRANS/OK stay edge-only (act). */
+             * repeat — TRANS/OK stay edge-only (act). */
             int on_lr  = (s_mp_pane_btn[p] == MP_BTN_CAR || s_mp_pane_btn[p] == MP_BTN_PAINT);
             int lr_fire = !on_lr ? 0
                         : frontend_carsel_hold_enabled()
@@ -1833,9 +2009,6 @@ static void frontend_mp_simul_carsel_update(void) {
                 break;
             case MP_BTN_PAINT:
                 if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1, lr_edge);
-                break;
-            case MP_BTN_STATS:
-                if (act) { mp_simul_load_pane_spec(p, car); s_mp_pane_substate[p] = 1; frontend_play_sfx(3); }
                 break;
             case MP_BTN_TRANS:
                 if (act || left || right) { s_mp_player_trans[p] = !s_mp_player_trans[p]; frontend_play_sfx(3); }
@@ -3286,10 +3459,17 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
     fe_race_draw_screen_title("SELECT GAME MODE", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
 
-    /* Host indicator: P1 colour swatch + short label. */
-    td5_vui_quad((float)MV_BX * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
-    td5_vui_text(((float)MV_BX + 18.0f) * sx, 72.0f * sy,
-                 "OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES", 0xFFC0C8D0u, sx, sy);
+    /* Host indicator: the gold HOST pill badge + P1 colour swatch + short label, so
+     * the host marker on the game-mode selector matches the badge used on the
+     * profile, screen-disposition and car selectors. Badge left; swatch and label
+     * shift right by the badge's measured width. */
+    {
+        float bw = td5_vui_host_badge((float)MV_BX, 72.0f, 13.0f, sx, sy);
+        float sw_x = (float)MV_BX + bw + 6.0f;
+        td5_vui_quad(sw_x * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
+        td5_vui_text((sw_x + 17.0f) * sx, 72.0f * sy,
+                     "OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES", 0xFFC0C8D0u, sx, sy);
+    }
 
     for (m = 0; m < TD5_MP_MODE_COUNT; m++) {
         float byp = (float)(MV_Y0 + m * MV_GAP);
@@ -3975,6 +4155,12 @@ static void mp_roleselect_row(float sx, float sy, int p, float y, const char *va
         snprintf(nb, sizeof nb, "%s", s_mp_player_name[p]);
     else
         snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
+    /* [MP HOST INDICATOR 2026-06-28] Slot 0 is the host (it confirms with OK).
+     * Tag its row with the same gold HOST pill badge the splitscreen selectors
+     * use, in the left margin ahead of the name column, so the host is obvious on
+     * these lobby screens too. */
+    if (p == 0)
+        td5_vui_host_badge(108.0f, y - 1.0f, 13.0f, sx, sy);
     td5_vui_text(150.0f * sx, y * sy, nb, mp_slot_color(p), sx, sy);
     td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, val, 0xFFFFFFFFu, sx, sy);
     td5_vui_arrow((MP_ROW_VAL_CX - 52.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
@@ -4486,6 +4672,12 @@ void frontend_mp_position_render2(float sx, float sy) {
                                   (occ >= 0) ? 0xFFFFFFFFu : 0xFF707080u, sx, sy);
 
             if (occ >= 0) {
+                /* [MP HOST INDICATOR 2026-06-28] Slot 0 is the host — drop the
+                 * gold HOST pill badge into the top-left corner of its cell (clear
+                 * of the centred cell number + name) so the host's chosen screen is
+                 * obvious on the CHOOSE YOUR SCREEN picker too. */
+                if (occ == 0)
+                    td5_vui_host_badge(px + 6.0f, py + 6.0f, 13.0f, sx, sy);
                 if (s_mp_player_name[occ][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[occ]);
                 else                          snprintf(buf, sizeof buf, "PLAYER %d", occ + 1);
                 mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 26.0f) * sy, buf,
@@ -6435,6 +6627,16 @@ void Screen_TrackSelection(void) {
                     /* [ARCADE 2026-06-26] Persist the ARCADE/SIMULATION choice
                      * picked on this screen so it survives a relaunch. */
                     g_td5.ini.dynamics = s_game_option_dynamics;
+                    /* [DYNAMICS COMMIT FIX 2026-06-28] Push the choice into the
+                     * physics race-init flag NOW (mirrors the Quick Race OK handler
+                     * @ ~L1353). ConfigureGameTypeFlags ran at this screen's init
+                     * with the PRE-toggle value, so without this an ARCADE->SIM flip
+                     * on this screen launched with the stale mode and the arcade
+                     * item-box power-ups stayed ON in SIMULATION. A race-init backstop
+                     * in td5_game.c also re-commits g_td5.ini.dynamics, but commit
+                     * here too so get_dynamics() is correct the instant the race is
+                     * requested. */
+                    td5_physics_set_dynamics(s_game_option_dynamics);
                     td5_ini_persist_options();
                     /* [2026-06-12] Per-race AI difficulty: commit the row into
                      * the live tier read by InitializeRaceActorRuntime

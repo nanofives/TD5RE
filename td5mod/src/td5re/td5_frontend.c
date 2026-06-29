@@ -272,6 +272,8 @@ int      s_mp_pane_overlay[TD5_MAX_HUMAN_PLAYERS];  /* cached TD6 body-paint ove
 int      s_mp_pane_btn[TD5_MAX_HUMAN_PLAYERS];      /* focused button per pane (MP_BTN_*) */
 int      s_mp_player_trans[TD5_MAX_HUMAN_PLAYERS];  /* 0 = Automatic, 1 = Manual */
 int      s_mp_pane_substate[TD5_MAX_HUMAN_PLAYERS]; /* 0 = car select, 1 = stats spec sheet */
+int      s_mp_host_menu_open = 0;   /* [HOST CAR OPTIONS] host-only set-all-cars modal up */
+int      s_mp_host_menu_sel  = 0;   /* [HOST CAR OPTIONS] highlighted MP_HOST_OPT_* */
 int      s_mp_pane_spec_car[TD5_MAX_HUMAN_PLAYERS]; /* which car's spec is cached per pane (-1 = none) */
 static char     s_mp_pane_spec[TD5_MAX_HUMAN_PLAYERS][17][48]; /* per-pane config.nfo fields */
 /* Per-pane car-select button set (compact, navigated by that player's own pad). */
@@ -3524,6 +3526,28 @@ void frontend_init_race_schedule(void) {
     if (s_mp_flow && !g_td5.network_active) {
         slot_ext_id[0]  = s_mp_player_car[0];
         slot_variant[0] = s_mp_player_paint[0];
+        /* [MP CUP CAR CARRYOVER FIX 2026-06-28] Re-anchor slot 0's ACTUAL driven
+         * car to player 1's MP pick. For a non-network race td5_game InitRace
+         * (td5_game.c:2440) loads slot 0 from g_td5.car_index, NOT from
+         * ai_car_indices[0]/slot_ext_id[0]. g_td5.car_index was set above (~3236)
+         * from s_selected_car, but the MP-cup post-race "NEXT RACE" path restores
+         * s_selected_car from the once-only SP Race-Again snapshot (s_snap_car,
+         * td5_fe_race.c). If that snapshot was captured on a race BEFORE the cup
+         * (s_results_rerace_flag is never re-armed on MP-cup entry — only
+         * frontend_reset_sp_race_carryover does that, for SP), player 1 reverts to
+         * the pre-cup car on cup race 2+ while slots 1+ (read from ai_car_indices)
+         * stay correct. Pin both back to the live MP selection so the SP snapshot
+         * can never leak into the local MP slot 0. Inert for the normal flow where
+         * s_selected_car already equals s_mp_player_car[0]. */
+        if (s_mp_player_car[0] >= 0 && s_mp_player_car[0] < TD5_CAR_COUNT) {
+            if (g_td5.car_index != s_mp_player_car[0])
+                TD5_LOG_I(LOG_TAG,
+                          "MP slot0 car re-anchored to player1 pick %d (was car_index=%d) "
+                          "[pre-cup snapshot leak guard]",
+                          s_mp_player_car[0], g_td5.car_index);
+            s_selected_car  = s_mp_player_car[0];
+            g_td5.car_index = s_mp_player_car[0];
+        }
         /* Each human slot is painted with that player's chosen TD6 colour (no-op
          * for TD5 cars, which have no carmask). -1 = leave the default. */
         td5_asset_set_human_td6_color(0, s_mp_player_color[0]);
@@ -7559,6 +7583,108 @@ static float frontend_carphys_frac(int ext_id, int stat) {
     return v;
 }
 
+/* [HOST CAR OPTIONS 2026-06-28] Speed classes by acceleration + top-speed ONLY.
+ * Each built-in, non-cop car with a valid carparam has a combined score = mean of
+ * its normalized TOP-SPEED and ACCEL fractions (both roster-normalised + cop-
+ * excluded by frontend_carphys_frac). Cars are sorted by that score and assigned to
+ * classes by RANK so every class is guaranteed to hold SEVERAL DISTINCT cars:
+ *   - the single slowest and single fastest car are dropped (the extremes),
+ *   - SLOW = the next K slowest, FAST = the next K fastest, AVG = K around the
+ *     median. The three windows never overlap, so each car is in at most ONE class
+ *     and no car is ever shared between classes.
+ * K = TD5RE_HOST_TIER_CARS, default max(9, ~15% of the scored roster), clamped so
+ * the three windows + the two dropped extremes all fit. [user 2026-06-29: a fixed
+ * ~10% band collapsed 'fast' to a single car (Pitbull 2); each class must hold AT
+ * LEAST 9 distinct cars and no car may sit in more than one class.] Cached once. */
+static int   s_speed_built = 0;
+static float s_speed_min   = 0.0f, s_speed_max = 1.0f;   /* combined-score range */
+static int   s_car_tier[TD5_CAR_COUNT];                  /* per-car class: -1/0/1/2 */
+
+static float frontend_car_speed_score(int car) {
+    float ft = frontend_carphys_frac(car, CPS_TOPSPEED);
+    float fa = frontend_carphys_frac(car, CPS_ACCEL);
+    if (ft < 0.0f || fa < 0.0f) return -1.0f;   /* invalid / cop */
+    return 0.5f * (ft + fa);
+}
+
+/* Target cars per class for a scored roster of `n`. Default = max(9, ~15% of n) so
+ * each class holds at least 9 distinct cars [user 2026-06-29]; TD5RE_HOST_TIER_CARS
+ * overrides with an explicit count. Caller still clamps to the no-overlap maximum. */
+static int frontend_host_tier_cars(int n) {
+    const char *e = getenv("TD5RE_HOST_TIER_CARS");
+    int k;
+    if (e && e[0]) {
+        k = atoi(e);
+    } else {
+        k = (n * 15 + 50) / 100;   /* ~15% of the pool, rounded */
+        if (k < 9) k = 9;          /* floor: at least 9 cars per class */
+    }
+    if (k < 2)  k = 2;
+    if (k > 40) k = 40;
+    return k;
+}
+
+static void frontend_build_speed_tiers(void) {
+    int   ids[TD5_CAR_COUNT];
+    float sc[TD5_CAR_COUNT];
+    int   i, j, n = 0;
+    if (s_speed_built) return;
+    s_speed_built = 1;
+    for (i = 0; i < TD5_CAR_COUNT; i++) s_car_tier[i] = -1;
+    for (i = 0; i < TD5_CAR_COUNT; i++) {
+        float s = frontend_car_speed_score(i);
+        if (s < 0.0f) continue;
+        ids[n] = i; sc[n] = s; n++;
+    }
+    /* Insertion sort (ids parallel to sc) ascending by score (n <= 76, runs once). */
+    for (i = 1; i < n; i++) {
+        float sv = sc[i]; int iv = ids[i];
+        for (j = i - 1; j >= 0 && sc[j] > sv; j--) { sc[j + 1] = sc[j]; ids[j + 1] = ids[j]; }
+        sc[j + 1] = sv; ids[j + 1] = iv;
+    }
+    s_speed_min = (n > 0) ? sc[0]     : 0.0f;
+    s_speed_max = (n > 0) ? sc[n - 1] : 1.0f;
+    if (n >= 5) {
+        int k    = frontend_host_tier_cars(n);
+        int kmax = (n - 2) / 3;                  /* room for 3 windows + 2 dropped extremes */
+        int slo, shi, alo, ahi, flo, fhi;
+        if (kmax < 1) kmax = 1;
+        if (k > kmax) k = kmax;
+        slo = 1;             shi = 1 + k;                  /* SLOW: next-slowest K (rank 0 dropped)    */
+        alo = (n - k) / 2;   ahi = (n - k) / 2 + k;        /* AVG : K around the median                */
+        flo = n - 1 - k;     fhi = n - 1;                  /* FAST: next-fastest K (rank n-1 dropped)   */
+        for (j = slo; j < shi; j++) s_car_tier[ids[j]] = 0;
+        for (j = alo; j < ahi; j++) s_car_tier[ids[j]] = 1;
+        for (j = flo; j < fhi; j++) s_car_tier[ids[j]] = 2;
+        TD5_LOG_I(LOG_TAG, "host car speed tiers: %d cars, %d/class, slow[%d,%d) avg[%d,%d) fast[%d,%d)",
+                  n, k, slo, shi, alo, ahi, flo, fhi);
+    } else {
+        TD5_LOG_W(LOG_TAG, "host car speed tiers: only %d scored cars - classes disabled", n);
+    }
+}
+
+float frontend_car_speed_norm(int car) {
+    float s = frontend_car_speed_score(car);
+    float nrm;
+    if (s < 0.0f) return -1.0f;
+    frontend_build_speed_tiers();
+    if (s_speed_max - s_speed_min < 1e-6f) return 0.5f;
+    nrm = (s - s_speed_min) / (s_speed_max - s_speed_min);
+    if (nrm < 0.0f) nrm = 0.0f;
+    if (nrm > 1.0f) nrm = 1.0f;
+    return nrm;
+}
+
+float frontend_speed_tier_center(int tier) {
+    return (tier <= 0) ? 0.15f : (tier == 1) ? 0.50f : 0.85f;
+}
+
+int frontend_carphys_speed_tier(int car) {
+    if (car < 0 || car >= TD5_CAR_COUNT) return -1;
+    frontend_build_speed_tiers();
+    return s_car_tier[car];
+}
+
 static const char *frontend_carphys_drivetrain_text(int ext_id) {
     int dt;
     if (ext_id < 0 || ext_id >= TD5_CAR_COUNT || !s_cps[ext_id].valid) return "-";
@@ -7717,17 +7843,22 @@ static void frontend_render_car_stats_overlay(float sx, float sy) {
  * names still fit in the small split panes. */
 static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
                                         const char *f7, const char *f8, int car_ext_id,
-                                        uint32_t accent, int compact, float sx, float sy) {
-    static const char *lbl[3] = { "SPEED", "ACCEL", "HANDLING" };
+                                        uint32_t accent, int compact, float frame_scale,
+                                        float sx, float sy) {
+    static const char *lbl[3]  = { "SPEED", "ACCEL", "HANDLING" };
+    static const char *lblS[3] = { "S", "A", "H" };   /* narrow-column fallback */
+    const char **labels = lbl;
     float spd = 0, acc = 0, fr[3] = { 0, 0, 0 };
     int valid_mask;   /* bit0=speed, bit1=accel, bit2=handling — gates per-bar fill */
     float padx = compact ? 4.0f : 7.0f;
     float pady = compact ? 2.0f : 6.0f;
-    /* In the MP panes, line the labels up with the CAR/PAINT button text (drawn at
-     * x+17) and stop the bars before the ◄► arrows on those buttons (their right
-     * arrow's left edge is x+w-15; the value redge is x+w-18). SP keeps padx. */
-    float content_l = compact ? 17.0f : padx;
-    float content_r = compact ? 18.0f : padx;
+    /* In the single-column MP layout (compact==1) the panel sits UNDER the CAR/PAINT
+     * buttons, so line the labels up with their text (x+17) and stop the bars before
+     * the ◄► arrows (x+w-18). In the two-column card (compact==2) the panel is its OWN
+     * column with no buttons to align to, so use tight padding and let the bar track
+     * fill the whole column. SP (compact==0) keeps padx. */
+    float content_l = (compact == 2) ? 5.0f : (compact ? 17.0f : padx);
+    float content_r = (compact == 2) ? 5.0f : (compact ? 18.0f : padx);
     float top  = by + pady;
     float rowh = (bh - 2.0f * pady) / 3.0f;
     float barh = compact ? (rowh - 2.0f) : (rowh - 5.0f);
@@ -7736,11 +7867,22 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
 
     if (barh < 2.0f) barh = 2.0f;
     /* Shrink the label font to the row in compact (small split) panes so the
-     * full names still fit; SP keeps the full small-font size. */
+     * full names still fit; SP keeps the full small-font size.
+     * [rebalance 2026-06-28] Reach full label size sooner (rowh/9 vs /11) and lift
+     * the floor 0.42 -> 0.60 so SPEED/ACCEL/HANDLING stay legible in the cramped
+     * 5+ player panes. The single-column flex below now reserves this panel its
+     * readable height FIRST (stealing from the car/buttons), so the floor rarely
+     * binds; when it does (the over-subscribed 7-9p 3x3 grid) 0.60 is the smallest
+     * size that still reads. */
     if (compact) {
-        float s = rowh / 11.0f;
-        if (s > 1.0f) s = 1.0f;
-        if (s < 0.42f) s = 0.42f;
+        /* [2026-06-29] In the two-column card (compact==2) the stat panel is its own
+         * narrow column, so cap the label font a touch below full size: a slightly
+         * smaller "HANDLING" frees horizontal room for a LONGER bar while the full
+         * word stays legible. The single-column panel (compact==1) keeps full size. */
+        float s = rowh / 9.0f;
+        float smax = (compact == 2) ? 0.78f : 1.0f;
+        if (s > smax) s = smax;
+        if (s < 0.60f) s = 0.60f;
         lsx = sx * s; lsy = sy * s;
     }
     capd = SMALLFONT_TTF_CAP * (lsy / sy);
@@ -7774,19 +7916,25 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
     }
 
     /* Frame: the regular blue/unselected button look (non-interactive). In the
-     * compact (small-split) panes, thin the rim proportionally to the panel
-     * height so it matches the height-scaled rim of the pane buttons around it
-     * (see mp_simul_draw_btn); the SP panel keeps the full menu-button rim. */
+     * compact (small-split) panes the rim is thinned to match the pane buttons.
+     * [2026-06-29] When the caller passes a frame_scale > 0 (the MP grid passes
+     * the BUTTON height's scale), use it so the panel's border is IDENTICAL to the
+     * buttons beside it regardless of the panel's own height — fixes the "stat
+     * panel border looks fatter than the buttons" mismatch. frame_scale <= 0 keeps
+     * the legacy self-sized rim (bh/32). The SP panel keeps the full menu rim. */
     {
-        float fscale = bh / 32.0f;
+        float fscale = (frame_scale > 0.0f) ? frame_scale : bh / 32.0f;
         if (fscale > 1.0f) fscale = 1.0f;
         if (fscale < 0.34f) fscale = 0.34f;
         fe_draw_button_frame_fill_scaled(bx * sx, by * sy, bw * sx, bh * sy, 1,
                                          0xFF392152u, compact ? fscale : 1.0f, sx, sy);
     }
 
-    /* Full-name label column, sized to the WIDEST label ("HANDLING"); dropped only
-     * if the box is far too narrow to fit a label plus a usable bar. */
+    /* Full-name label column, sized to the WIDEST label ("HANDLING"). If the box is
+     * too narrow for the full word + a usable bar (a narrow two-column stats panel),
+     * fall back to single-letter labels (S/A/H) so each bar still says WHICH stat it
+     * is, instead of three anonymous bars. Only drop the label entirely when even a
+     * single letter won't fit. */
     {
         float wmax = fe_measure_small_text(lbl[0]);
         float w1 = fe_measure_small_text(lbl[1]);
@@ -7794,8 +7942,12 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
         if (w1 > wmax) wmax = w1;
         if (w2 > wmax) wmax = w2;
         lblw = wmax * fe_glyph_sx(lsx, lsy) / sx;
+        if (bw < content_l + content_r + lblw + 8.0f) {
+            float sw = fe_measure_small_text("H") * fe_glyph_sx(lsx, lsy) / sx;
+            if (bw >= content_l + content_r + sw + 8.0f) { labels = lblS; lblw = sw; }
+            else lblw = 0.0f;
+        }
     }
-    if (bw < content_l + content_r + lblw + 8.0f) lblw = 0.0f;
     barx = bx + content_l + (lblw > 0.0f ? lblw + 4.0f : 0.0f);
     barw = (bx + bw - content_r) - barx;
     if (barw < 4.0f) barw = 4.0f;
@@ -7812,7 +7964,7 @@ static void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
         float fillw = ((valid_mask >> i) & 1) ? fr[i] * barw : 0.0f;
         if (lblw > 0.0f) {
             float ty = (ry + (rowh - capd) * 0.5f) * sy;
-            fe_draw_small_text((bx + content_l) * sx, ty, lbl[i], 0xFFC8C8C8u, lsx, lsy);
+            fe_draw_small_text((bx + content_l) * sx, ty, labels[i], 0xFFC8C8C8u, lsx, lsy);
         }
         fe_draw_quad(barx * sx, bary * sy, barw * sx, barh * sy, 0xFF101828u, -1, 0, 0, 1, 1);
         if (fillw > 0.0f)
@@ -7934,7 +8086,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         frontend_draw_car_stat_bars(panel_x, FE_CARSTAT_PANEL_Y,
                                     FE_CARSTAT_PANEL_W, FE_CARSTAT_PANEL_H,
                                     s_car_spec[7], s_car_spec[8], actual_car,
-                                    FE_CARSTAT_ACCENT, 0, sx, sy);
+                                    FE_CARSTAT_ACCENT, 0, 0.0f, sx, sy);
     }
 
     if (s_inner_state == 15) {
@@ -9828,6 +9980,31 @@ void td5_vui_quad(float x, float y, float w, float h, uint32_t color, int tex_pa
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
     fe_draw_quad(x, y, w, h, color, tex_page, u0, v0, u1, v1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* [MP HOST INDICATOR 2026-06-28, badge 2026-06-29] Gold "HOST" pill badge — the
+ * multiplayer host marker. A neon rounded-rect chip (the SAME procedural panel
+ * the menu buttons use) with crisp 'HOST' small-font text stamped on it, so it
+ * looks like part of the frontend chrome instead of a hand-drawn icon. (x,y) and
+ * the chip height h are VIRTUAL 640x480 px; the chip width auto-fits the text.
+ * Returns the badge WIDTH in virtual px so callers can reserve/clear space next
+ * to it. Crisp at any resolution (rounded-rect + text are both SDF). */
+float td5_vui_host_badge(float x, float y, float h, float sx, float sy) {
+    const char *label = "HOST";
+    float gsx = fe_glyph_sx(sx, sy);
+    float tw  = fe_measure_small_text(label) * gsx;   /* text width, screen px   */
+    float pad = 5.0f * sx;                             /* side padding, screen px */
+    float wpx = tw + pad * 2.0f;                       /* chip width,  screen px  */
+    float xs = x * sx, ys = y * sy, hs = h * sy;
+    float r  = hs * 0.5f;                              /* pill: fully-round ends  */
+    /* Gold metallic chip: bright inner highlight rim, gold mid, dark outer edge,
+     * solid gold face. */
+    fe_draw_roundrect(xs, ys, wpx, hs, r, r, 1.6f * sx, 1.6f * sy,
+                      0xFFE8B82Eu, 0xFFFFE9A0u, 0xFF7A5200u, 0xFFD89A14u, 1.0f);
+    /* 'HOST' centred, dark-on-gold for punch. */
+    float ty = ys + (hs - SMALLFONT_TTF_CAP * sy) * 0.5f;
+    fe_draw_small_text(xs + (wpx - tw) * 0.5f, ty, label, 0xFF1A1000u, sx, sy);
+    return wpx / sx;   /* virtual-px width */
 }
 
 /* HUD-font / pause-font SDF pages (-1 if unavailable). */
@@ -11916,7 +12093,7 @@ static void mp_simul_draw_btn(float x, float y, float w, float h, const char *la
 
     /* [responsive 2026-06-21] Fit the label between the left arrow and the
      * value/swatch on the right, shrinking it for narrow panes so long labels
-     * (AUTOMATIC / MORE STATS) never overflow the button. */
+     * (AUTO / MANUAL) never overflow the button. */
     float val_w  = (val && swatch_rgb < 0) ? fe_measure_small_text(val) * fe_glyph_sx(sx, sy) : 0.0f;
     float l_left = (arrows ? (x + 17.0f) : (x + 4.0f)) * sx;
     float l_right;
@@ -11924,15 +12101,23 @@ static void mp_simul_draw_btn(float x, float y, float w, float h, const char *la
     else if (val)          l_right = redge * sx - val_w - 4.0f * sx;
     else                   l_right = (arrows ? (x + w - 18.0f) : (x + w - 4.0f)) * sx;
     {
+        /* [2026-06-29] CENTRE the (fit-scaled) label within the available span
+         * [l_left, l_right] for EVERY button — arrowed CAR/PAINT now read centred
+         * between the ◄► instead of jammed against the left arrow. mp_fit_scale has
+         * already shrunk the text to fit that span, so a centred label never spills
+         * past the arrows / outside the button. */
         float ls   = mp_fit_scale(label, l_right - l_left, sx, sy);
-        float lsx2 = sx * ls, lsy2 = sy * ls;
-        float lty  = (y + (h - SMALLFONT_TTF_CAP * ls) * 0.5f) * sy;
-        if (arrows) {
-            fe_draw_small_text(l_left, lty, label, tc, lsx2, lsy2);
-        } else {
-            float lw = fe_measure_small_text(label) * fe_glyph_sx(lsx2, lsy2);
-            fe_draw_small_text((x + w * 0.5f) * sx - lw * 0.5f, lty, label, tc, lsx2, lsy2);
-        }
+        float lsx2, lsy2, lty, lw;
+        /* [2026-06-29] Also cap the label to the button HEIGHT so a very short pane
+         * button (the 7-9p 3x3 grid shrinks these well below the 9px font) shrinks
+         * its text vertically instead of overflowing into the neighbouring row. */
+        float h_cap = (h - 2.0f) / SMALLFONT_TTF_CAP;
+        if (h_cap < 0.34f) h_cap = 0.34f;
+        if (ls > h_cap) ls = h_cap;
+        lsx2 = sx * ls; lsy2 = sy * ls;
+        lty  = (y + (h - SMALLFONT_TTF_CAP * ls) * 0.5f) * sy;
+        lw   = fe_measure_small_text(label) * fe_glyph_sx(lsx2, lsy2);
+        fe_draw_small_text((l_left + l_right) * 0.5f - lw * 0.5f, lty, label, tc, lsx2, lsy2);
     }
 
     if (swatch_rgb >= 0) {
@@ -12087,16 +12272,18 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
 }
 
 /* Draw one car-select pane button by MP_BTN_* index — keeps the PAINT variants
- * (TD6 swatch / TD5 "n/4" / paintless "-"), the ◄► arrows on the selector rows,
- * and the focus styling in ONE place so the single- and two-column layouts stay
- * in sync. */
+ * (TD6 swatch / paintless "-"), the ◄► arrows on the selector rows, and the focus
+ * styling in ONE place so the single- and two-column layouts stay in sync.
+ * [2026-06-29] Labels shortened for the narrow split panes: MORE STATS -> STATS,
+ * AUTOMATIC -> AUTO (MANUAL unchanged), and the TD5 paint "n/4" value dropped — so
+ * the button column can be narrower without the text spilling, leaving more width
+ * for the stat bars + a bigger car. */
 static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
                                       float bw, float bh, float sx, float sy) {
     int car = s_mp_player_car[p];
     int td6 = frontend_car_is_td6(car);
     int focus = (s_mp_pane_btn[p] == which);
     uint32_t pcol = ((uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu) | 0xFF000000u;
-    char vbuf[24];
     switch (which) {
     case MP_BTN_CAR:
         mp_simul_draw_btn(bx, by, bw, bh, "CAR", focus, pcol, 1, NULL, -1, sx, sy);
@@ -12105,22 +12292,50 @@ static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
         if (td6 && frontend_car_paintable(car))
             mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, NULL,
                               s_mp_player_color[p], sx, sy);
-        else if (!td6 && frontend_car_has_paint(car)) {
-            snprintf(vbuf, sizeof vbuf, "%d/4", s_mp_player_paint[p] + 1);
-            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, vbuf, -1, sx, sy);
-        } else
+        else if (!td6 && frontend_car_has_paint(car))
+            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, NULL, -1, sx, sy);
+        else
             mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 0, "-", -1, sx, sy);
         break;
-    case MP_BTN_STATS:
-        mp_simul_draw_btn(bx, by, bw, bh, "MORE STATS", focus, pcol, 0, NULL, -1, sx, sy);
-        break;
     case MP_BTN_TRANS:
-        mp_simul_draw_btn(bx, by, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTOMATIC",
+        mp_simul_draw_btn(bx, by, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTO",
                           focus, pcol, 0, NULL, -1, sx, sy);
         break;
     case MP_BTN_OK:
         mp_simul_draw_btn(bx, by, bw, bh, "OK", focus, pcol, 0, NULL, -1, sx, sy);
         break;
+    }
+}
+
+/* [MP HOST INDICATOR 2026-06-28] Draw an MP pane's coloured name banner: the
+ * chosen profile name (or "PLAYER N"), and — for slot 0, the HOST — a gold "HOST"
+ * pill badge at the banner's LEFT with the name re-centred to its right so badge
+ * + name never overlap. Player slot 0 is always the host (slot-based; slot 0's
+ * pick is the binding one — see the comments at Screen_MpPosition / the mode
+ * vote). This single helper is shared by the PROFILE SELECTION and SELECT CAR
+ * split-screen panes so the host marker is pixel-identical on both. (px,pyr,
+ * pane_w,cx) are the pane's virtual-px layout already computed by the caller. */
+static void mp_draw_pane_name_banner(int p, float px, float pyr, float pane_w,
+                                     float cx, float sx, float sy) {
+    char buf[64];
+    uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
+    if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
+    else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
+                 rgb | 0xD0000000u, -1, 0, 0, 1, 1);
+    if (p == 0) {
+        float badge_w = td5_vui_host_badge(px + 6.0f, pyr + 4.5f, 13.0f, sx, sy);
+        float name_l = px + 6.0f + badge_w + 5.0f;   /* reserve the badge column */
+        float name_r = px + pane_w - 3.0f;
+        mp_simul_small_centered_fit((name_l + name_r) * 0.5f * sx, (pyr + 6) * sy, buf,
+                                    0xFF000000u, sx, sy, (name_r - name_l) * sx);
+        { static int s_logged_host_badge = 0;
+          if (!s_logged_host_badge) { s_logged_host_badge = 1;
+              TD5_LOG_I(LOG_TAG, "MP setup/carsel: drew HOST badge on slot 0 (name='%s')", buf); } }
+    } else {
+        mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy,
+                                    (pane_w - 8.0f) * sx);
     }
 }
 
@@ -12203,13 +12418,8 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             fe_draw_quad((px + pane_w - 3 - bt) * sx, (pyr + 3) * sy, bt * sx, (pane_h - 6) * sy, bc, -1, 0, 0, 1, 1);
         }
 
-        /* Header banner: the player's chosen NAME (falls back to PLAYER N). */
-        if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
-        else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
-                     rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-        mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy, (pane_w - 8.0f) * sx);
+        /* Header banner: the player's chosen NAME (host slot 0 gets the crown). */
+        mp_draw_pane_name_banner(p, px, pyr, pane_w, cx, sx, sy);
 
         /* Car NAME above the image (request). */
         snprintf(buf, sizeof buf, "%s", frontend_get_car_display_name(car));
@@ -12275,7 +12485,7 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
             if (bars_h > 8.0f)
                 frontend_draw_car_stat_bars(lx, bars_y, lcw, bars_h,
                                             s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                            s_mp_pane_spec_car[p], pcol, 1, sx, sy);
+                                            s_mp_pane_spec_car[p], pcol, 1, 0.0f, sx, sy);
             /* RIGHT: the 5 buttons spread evenly down the WHOLE column (one row each
              * = col_h / MP_BTN_COUNT) so they always fill the height instead of
              * clumping at a fixed size — capped so they don't get comically tall in
@@ -12291,42 +12501,119 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
                     mp_simul_draw_pane_button(p, b, rx, yy, rcw, bh, sx, sy);
                 }
             }
-        } else {
-            /* SINGLE-COLUMN stack (classic): car image, then CAR / PAINT /
-             * [stat bars] / MORE STATS / AUTO-MANUAL / OK. The at-a-glance stat
-             * panel between PAINT and MORE STATS is the flex element — it shrinks
-             * (down to thin label-less bars) when a small split runs out of room
-             * while the 5 buttons keep their [10,28]px size.
-             * [big-car 2026-06-23] For the big-car case (tall 2-player 2-up pane)
-             * the car band is enlarged (0.44 vs 0.38) so the preview grows to the
-             * FULL pane width, and the button height cap is lowered (26 vs 28px),
-             * trading the stat-bar/button height the user found "too tall" for a
-             * much bigger car picture. The flex stat panel below absorbs the rest. */
-            float car_frac = big_car ? 0.44f : 0.38f;
-            float btn_cap  = big_car ? 26.0f : 28.0f;
-            float avail_h = pane_h * car_frac;
+        } else if (pane_h < 250.0f) {
+            /* SHORT narrow pane: the default 5-6p 3x2 grid (172x190) and the 7-9p 3x3
+             * grid (172x127). [layout 2026-06-29] Lay the CAR full-width across the TOP
+             * (as big as the pane allows) and split the space BELOW it into TWO columns
+             * — the 5 buttons (CAR / PAINT / STATS / AUTO / OK) on the LEFT, the SPEED /
+             * ACCEL / HANDLING stat bars on the RIGHT. Side by side, neither is starved
+             * vertically, so the car gets the full pane width instead of the ~16px
+             * sliver the old single-column stack left it. Short button labels keep the
+             * button column narrow, freeing width for a wide stat column (full words +
+             * a usable bar); the stat panel falls back to single letters only if a
+             * label still won't fit. One shared button height -> one border scale,
+             * passed to the stat panel too, so every frame has the SAME border. */
             float bx = px + 8.0f, bw = pane_w - 16.0f;
-            float bsy = pyr + 32.0f + avail_h + 4.0f;
-            float room = (pyr + pane_h - 18.0f) - bsy;
-            float bh = (room - 10.0f) / 6.2f;   /* 5 buttons + ~1.2-button stat panel + gaps */
-            float yy = bsy, panel_h;
-            mp_simul_draw_pane_car(p, cx - (pane_w - 20.0f) * 0.5f, pyr + 32.0f,
-                                   pane_w - 20.0f, avail_h, sx, sy);
-            if (bh < 10.0f) bh = 10.0f;
-            if (bh > btn_cap) bh = btn_cap;   /* taller buttons where the pane has room */
-            panel_h = bh * 1.2f;
-            if (5.0f * bh + panel_h + 10.0f > room) {   /* buttons hit their floor — shrink the panel */
-                panel_h = room - 5.0f * bh - 10.0f;
-                if (panel_h < 8.0f) panel_h = 8.0f;
+            float top0   = pyr + 32.0f;                  /* below the car-name banner */
+            float bottom = pyr + pane_h - 8.0f;
+            const float GAP = 6.0f;
+            float content_h = bottom - top0;
+            float car_natural = bw / (408.0f / 280.0f);
+            float zone_y, zone_h, zusable, lcw, rcw, rx, bh, frame_scale, slot;
+            float car_h;
+            int b;
+            /* Prioritise the CAR. The two-column ZONE (buttons + stats) scales with the
+             * pane HEIGHT — shorter panes get a SMALLER zone so the car grows — then the
+             * full-width car takes the rest (capped to its natural landscape height so
+             * there's no letterbox). On the 5-6p 3x2 pane (190) the zone is ~52px
+             * (comfortable buttons/stats); on the cramped 7-9p 3x3 pane (127) it drops to
+             * ~30px, giving a much BIGGER car with tighter buttons + stats (their text
+             * auto-shrinks to the row height, so smaller stays legible, never overlaps). */
+            zone_h = content_h * 0.35f;
+            if (zone_h < 28.0f) zone_h = 28.0f;
+            car_h  = content_h - zone_h - GAP;
+            if (car_h > car_natural) {                    /* car would letterbox: cap, grow zone */
+                car_h = car_natural;
+                zone_h = content_h - car_h - GAP;
             }
-            mp_simul_draw_pane_button(p, MP_BTN_CAR,   bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
-            mp_simul_draw_pane_button(p, MP_BTN_PAINT, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
+            if (car_h < 18.0f) {                          /* pane too short: clamp car, shrink zone to fit */
+                car_h = 18.0f;
+                zone_h = content_h - car_h - GAP;
+                if (zone_h < 24.0f) zone_h = 24.0f;
+            }
+            zone_y  = top0 + car_h + GAP;
+            zusable = bw - GAP;
+            /* Short button labels (CAR/PAINT/STATS/AUTO/OK) let the button column be
+             * narrow; the stat column takes the wider share for full words + a longer
+             * bar. CAR/PAINT still carry ◄► arrows, so the button column keeps enough
+             * width that those labels don't shrink to nothing. */
+            lcw     = zusable * 0.44f;                    /* narrow buttons column */
+            rcw     = zusable - lcw;                      /* WIDE stats column */
+            rx      = bx + lcw + GAP;
+            slot    = zone_h / (float)MP_BTN_COUNT;
+            bh      = slot - 1.5f;
+            if (bh < 6.0f)  bh = 6.0f;
+            if (bh > 28.0f) bh = 28.0f;
+            frame_scale = bh / 32.0f;
+            if (frame_scale > 1.0f) frame_scale = 1.0f;
+            if (frame_scale < 0.34f) frame_scale = 0.34f;
+            {   /* one-shot: confirm the two-column split without per-frame spam */
+                static int s_logged_2col = 0;
+                if (!s_logged_2col) {
+                    s_logged_2col = 1;
+                    TD5_LOG_I(LOG_TAG, "MP carsel short-narrow 2col: pane=%.0fx%.0f car=%.0f "
+                              "zone=%.0f btn=%.1f stats_w=%.0f", pane_w, pane_h, car_h,
+                              zone_h, bh, rcw);
+                }
+            }
+            mp_simul_draw_pane_car(p, bx, top0, bw, car_h, sx, sy);    /* full-width car */
+            for (b = 0; b < MP_BTN_COUNT; b++) {
+                float yy = zone_y + (float)b * slot + (slot - bh) * 0.5f;
+                mp_simul_draw_pane_button(p, b, bx, yy, lcw, bh, sx, sy);
+            }
+            frontend_draw_car_stat_bars(rx, zone_y, rcw, zone_h,
+                                        s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
+                                        s_mp_pane_spec_car[p], pcol, 2, frame_scale, sx, sy);
+        } else {
+            /* TALL single-column stack: the 3p LEFT/RIGHT narrow pane (172x381) AND the
+             * 2-player big-car pane (258x381, which bypasses the two-column card). Both
+             * have ample height, so reserve the readable stat panel first, then buttons,
+             * and let the car take the (large) remainder. [big-car 2026-06-23] the 2-up
+             * pane keeps an enlarged car (0.44 of pane_h) and a lower button cap (26px).
+             * [rebalance 2026-06-28] Priority squeeze car -> buttons -> panel with a
+             * proportional fit so nothing clips; here there is slack, so the car grows. */
+            float btn_cap  = big_car ? 26.0f : 28.0f;
+            float bx = px + 8.0f, bw = pane_w - 16.0f;
+            float top0   = pyr + 32.0f;                  /* below the car-name banner */
+            float bottom = pyr + pane_h - 18.0f;
+            const float CAR_GAP = 4.0f, ROW_GAP = 2.0f;
+            /* 4 buttons (CAR/PAINT/AUTO/OK) + 1 stat panel = 5 stacked rows below the car. */
+            float avail  = (bottom - top0) - (CAR_GAP + 5.0f * ROW_GAP);
+            const float PANEL_WANT = 31.0f, PANEL_FLOOR = 12.0f;
+            const float BTN_MIN = 11.0f, CAR_MIN = 16.0f;
+            float car_h  = pane_h * (big_car ? 0.44f : 0.32f);
+            float bh     = btn_cap;
+            float panel_h = PANEL_WANT;
+            float over   = (car_h + 4.0f * bh + panel_h) - avail;
+            float frame_scale, yy;
+            if (over > 0.0f) { float g = car_h - CAR_MIN; if (g > over) { car_h -= over; over = 0.0f; } else { car_h = CAR_MIN; over -= g; } }
+            if (over > 0.0f) { float g = 4.0f * (bh - BTN_MIN); if (g > over) { bh -= over / 4.0f; over = 0.0f; } else { bh = BTN_MIN; over -= g; } }
+            if (over > 0.0f) { panel_h -= over; if (panel_h < PANEL_FLOOR) panel_h = PANEL_FLOOR; }
+            { float total = car_h + 4.0f * bh + panel_h; if (total > avail && total > 0.0f) { float k = avail / total; car_h *= k; bh *= k; panel_h *= k; } }
+            { float slack = avail - (car_h + 4.0f * bh + panel_h); if (slack > 0.0f) car_h += slack; }
+            frame_scale = bh / 32.0f;
+            if (frame_scale > 1.0f) frame_scale = 1.0f;
+            if (frame_scale < 0.34f) frame_scale = 0.34f;
+            yy = top0 + car_h + CAR_GAP;
+            mp_simul_draw_pane_car(p, cx - (pane_w - 20.0f) * 0.5f, top0,
+                                   pane_w - 20.0f, car_h, sx, sy);
+            mp_simul_draw_pane_button(p, MP_BTN_CAR,   bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
+            mp_simul_draw_pane_button(p, MP_BTN_PAINT, bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
             frontend_draw_car_stat_bars(bx, yy, bw, panel_h,
                                         s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                        s_mp_pane_spec_car[p], pcol, 1, sx, sy);
-            yy += panel_h + 2.0f;
-            mp_simul_draw_pane_button(p, MP_BTN_STATS, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
-            mp_simul_draw_pane_button(p, MP_BTN_TRANS, bx, yy, bw, bh, sx, sy); yy += bh + 2.0f;
+                                        s_mp_pane_spec_car[p], pcol, 1, frame_scale, sx, sy);
+            yy += panel_h + ROW_GAP;
+            mp_simul_draw_pane_button(p, MP_BTN_TRANS, bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
             mp_simul_draw_pane_button(p, MP_BTN_OK,    bx, yy, bw, bh, sx, sy);
         }
 
@@ -12340,6 +12627,62 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
         fe_draw_quad(0.0f, 227.0f * sy, 640.0f * sx, 26.0f * sy, 0xC0103018u, -1, 0, 0, 1, 1);
         fe_draw_text_centered(320.0f * sx, 232.0f * sy, "ALL READY - STARTING...", 0xFFFFFF80u, sx, sy);
     }
+
+    /* [HOST CAR OPTIONS 2026-06-28] Bottom hint telling the host (slot 0) how to
+     * raise the set-all-cars menu — only while no modal is up and the grid isn't
+     * already counting down to the race. */
+    if (!s_mp_host_menu_open && s_mp_simul_ready_ms == 0) {
+        mp_simul_small_centered_fit(320.0f * sx, 470.0f * sy,
+                                    "HOST: press X / TAB to set everyone's car",
+                                    0xFFFFE060u, sx, sy, 560.0f * sx);
+    }
+
+    /* [HOST CAR OPTIONS 2026-06-28] Host-only modal: a full-screen scrim + centred
+     * panel listing the four set-all-cars actions, the highlighted one drawn in a
+     * translucent bar of the host's accent colour. Only the host drives it (input
+     * is gated in frontend_mp_simul_carsel_update); everyone else is frozen. */
+    if (s_mp_host_menu_open) {
+        static const char *const k_host_opt[MP_HOST_OPT_COUNT] = {
+            "GIVE EVERYONE MY CAR",
+            "EVERYONE: RANDOM SLOW CAR",
+            "EVERYONE: RANDOM AVERAGE CAR",
+            "EVERYONE: RANDOM FAST CAR",
+        };
+        const float px0 = 130.0f, py0 = 135.0f, pw = 380.0f, ph = 210.0f;
+        uint32_t argb = (uint32_t)s_mp_player_accent[0] & 0x00FFFFFFu;
+        uint32_t acc  = argb | 0xFF000000u;
+        int r;
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        /* Full-screen darken. */
+        fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xD8000810u, -1, 0, 0, 1, 1);
+        /* Panel body + accent border (top/bottom/left/right, 3px). */
+        fe_draw_quad(px0 * sx, py0 * sy, pw * sx, ph * sy, 0xF00A1018u, -1, 0, 0, 1, 1);
+        fe_draw_quad(px0 * sx, py0 * sy, pw * sx, 3.0f * sy, acc, -1, 0, 0, 1, 1);
+        fe_draw_quad(px0 * sx, (py0 + ph - 3.0f) * sy, pw * sx, 3.0f * sy, acc, -1, 0, 0, 1, 1);
+        fe_draw_quad(px0 * sx, py0 * sy, 3.0f * sx, ph * sy, acc, -1, 0, 0, 1, 1);
+        fe_draw_quad((px0 + pw - 3.0f) * sx, py0 * sy, 3.0f * sx, ph * sy, acc, -1, 0, 0, 1, 1);
+        /* Title. */
+        mp_simul_small_centered_fit(320.0f * sx, (py0 + 8.0f) * sy, "SET EVERYONE'S CAR",
+                                    acc, sx, sy, (pw - 24.0f) * sx);
+        /* Option rows. */
+        for (r = 0; r < MP_HOST_OPT_COUNT; r++) {
+            float ry = py0 + 31.0f + (float)r * 32.0f;
+            if (r == s_mp_host_menu_sel) {
+                td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                fe_draw_quad((px0 + 8.0f) * sx, ry * sy, (pw - 16.0f) * sx, 24.0f * sy,
+                             argb | 0xC0000000u, -1, 0, 0, 1, 1);
+            }
+            mp_simul_small_centered_fit(320.0f * sx, (ry + 5.0f) * sy, k_host_opt[r],
+                                        r == s_mp_host_menu_sel ? 0xFFFFFFFFu : 0xFFB8C2D0u,
+                                        sx, sy, (pw - 28.0f) * sx);
+        }
+        /* Footer hints. */
+        mp_simul_small_centered_fit(320.0f * sx, (py0 + ph - 38.0f) * sy, "UP / DOWN = CHOOSE",
+                                    0xFF90A0B0u, sx, sy, (pw - 24.0f) * sx);
+        mp_simul_small_centered_fit(320.0f * sx, (py0 + ph - 22.0f) * sy, "A = APPLY     B / X = CANCEL",
+                                    0xFFFFE060u, sx, sy, (pw - 24.0f) * sx);
+    }
+
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
@@ -12653,13 +12996,8 @@ static void frontend_mp_setup_render(float sx, float sy) {
             fe_draw_quad((px + pane_w - 3 - bt) * sx, (pyr + 3) * sy, bt * sx, (pane_h - 6) * sy, bc, -1, 0, 0, 1, 1);
         }
 
-        /* Header banner: chosen name or PLAYER N. */
-        if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
-        else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
-                     rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-        mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy, (pane_w - 8.0f) * sx);
+        /* Header banner: chosen name or PLAYER N (host slot 0 gets the crown). */
+        mp_draw_pane_name_banner(p, px, pyr, pane_w, cx, sx, sy);
 
         ax = px + 6.0f; ay = pyr + 22.0f; aw = pane_w - 12.0f; ah = pane_h - 28.0f;
 

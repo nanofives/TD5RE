@@ -15,7 +15,7 @@
  *   NITRO  -- short forward-speed burst
  *   GHOST  -- phase through cars + traffic (collision skipped), car renders translucent
  *   WRECK  -- "wrecking ball": immune to hits, everything you ram launches 3x harder
- *   HAZARD -- drops an oil-slick hazard at your rear; the next car to touch it spins out
+ *   HAZARD -- [REMOVED 2026-06-28] formerly dropped a rear oil-slick; no longer spawned
  *
  * Determinism: pad layout, pad kinds, pickup detection, and every effect run off
  * REPLICATED actor state only. The only entropy is td5_msvc_rand (seeded
@@ -35,8 +35,10 @@ enum {
     TD5_PU_NITRO  = 1,   /* forward-speed burst                                   */
     TD5_PU_GHOST  = 2,   /* phase through cars/traffic + translucent              */
     TD5_PU_WRECK  = 3,   /* immune; rammed cars get a boosted launch              */
-    TD5_PU_HAZARD = 4,   /* drop an oil slick behind you (spins out the next car) */
-    TD5_PU_KINDS  = 4    /* number of distinct pickup kinds                       */
+    TD5_PU_HAZARD = 4,   /* [REMOVED 2026-06-28] oil-slick trap — kept as a valid
+                          * effect id for the dormant render/HUD branches, but it
+                          * is NO LONGER spawned (TD5_PU_KINDS dropped to 3 below).*/
+    TD5_PU_KINDS  = 3    /* number of distinct SPAWNABLE kinds: NITRO/GHOST/WRECK  */
 };
 
 /* ======================================================================
@@ -136,7 +138,12 @@ float td5_arcade_slot_render_alpha(int slot);
  * HUD-side queries (td5_hud.c draws the active-effect chip per viewport)
  * ====================================================================== */
 
-int td5_arcade_active_effect(int slot);   /* TD5_PU_* currently active, or NONE */
-int td5_arcade_active_frames(int slot);   /* frames remaining on the active effect */
+int td5_arcade_active_effect(int slot);     /* TD5_PU_* currently active, or NONE */
+int td5_arcade_active_frames(int slot);     /* frames remaining on the active effect */
+/* Frames the CURRENTLY-active effect started with (its full duration). The HUD
+ * timer bar uses this as the "100%" reference so it depicts the WHOLE duration —
+ * not a stale hardcoded nominal. Tracks the live duration knobs automatically.
+ * 0 when no effect is active / outside arcade mode. */
+int td5_arcade_active_max_frames(int slot);
 
 #endif /* TD5_ARCADE_H */
