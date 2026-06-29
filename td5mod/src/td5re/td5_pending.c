@@ -36,6 +36,7 @@ static const char *const k_seed[] = {
     "ARCADE: item boxes spawn one lane closer to track centre",
     "ARCADE: power-up effects last 20% longer (NITRO/GHOST/WRECK)",
     "Power-ups now ARCADE-only: SIMULATION shows no item boxes",
+    "MP splitscreen: gold HOST tag on profile/screen/mode/car selectors",
     "MP cop chase: suspects can now pick TD6 cars, not just TD5",
     "Controller: Y changes camera; horn moved to L3 (stick click)",
     "Time trial on city tracks (HK/London): mid-track start no insta-end",
