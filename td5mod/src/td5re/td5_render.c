@@ -2473,13 +2473,33 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     }
     int prelit = (s_td6_vlight && slot < 0);
 
+    /* [CAR DAMAGE 2026-06-28] Per-vertex damage "scuff": darken the diffuse on
+     * struck panels so dents read as scuffed/scorched (a cheap texture-damage
+     * look in the software lighting pass). NULL / 0 when no damage or off. */
+    const float *dmg_scuff = NULL; int dmg_sc = 0; float scuff_str = 0.0f;
+    if (td5_damage_get_scuff(slot, mesh, &dmg_scuff, &dmg_sc))
+        scuff_str = td5_damage_scuff_strength();
+
     for (int i = 0; i < count; i++) {
+        /* damage darkening factor for this vertex (1.0 = undamaged) */
+        float df = 1.0f;
+        if (dmg_scuff && i < dmg_sc && dmg_scuff[i] > 0.0f) {
+            df = 1.0f - dmg_scuff[i] * scuff_str;
+            if (df < 0.0f) df = 0.0f;
+        }
         float nx = norms[i].nx;
         float ny = norms[i].ny;
         float nz = norms[i].nz;
 
         if (prelit && (vb[i].lighting & 0xFF000000u) != 0u) {
-            verts[i].lighting = vb[i].lighting;   /* keep the #13 baked TD6 grey as-is */
+            uint32_t c = vb[i].lighting;          /* keep the #13 baked TD6 grey... */
+            if (df < 0.999f) {                    /* ...but darken where damaged */
+                int r = (int)(((c >> 16) & 0xFF) * df);
+                int g = (int)(((c >> 8)  & 0xFF) * df);
+                int b = (int)(( c        & 0xFF) * df);
+                c = (c & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            }
+            verts[i].lighting = c;
             continue;
         }
 
@@ -2496,11 +2516,16 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 
         if (use_tint) {
             /* Full ARGB = lit-luminance * tint; alpha 0xFF bypasses the color LUT. */
-            int lr = (lum * tr) / 255, lg = (lum * tg) / 255, lb = (lum * tb) / 255;
+            int lr = (int)((lum * tr) / 255 * df);
+            int lg = (int)((lum * tg) / 255 * df);
+            int lb = (int)((lum * tb) / 255 * df);
             verts[i].lighting = 0xFF000000u | ((uint32_t)lr << 16) |
                                 ((uint32_t)lg << 8) | (uint32_t)lb;
         } else {
-            verts[i].lighting = (uint32_t)lum;   /* luminance index -> color LUT */
+            /* luminance index -> color LUT; darken the index where scuffed. */
+            int dl = (df < 0.999f) ? (int)(lum * df) : lum;
+            if (dl < 0x18) dl = 0x18;            /* keep above the LUT's dark floor */
+            verts[i].lighting = (uint32_t)dl;
         }
     }
 }

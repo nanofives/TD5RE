@@ -46,6 +46,7 @@ static int     s_orbit_hold_ms  = 6000;    /* post-finish hold (ms) so the SP or
 static int     s_smoke_light   = 40;       /* % health lost to start light smoke */
 static int     s_smoke_black   = 65;       /* % health lost to switch to black smoke */
 static int     s_smoke_fire    = 88;       /* % health lost to add fire/sparks */
+static int     s_scuff_pct     = 55;       /* max diffuse darkening (%) on a fully-scuffed vertex */
 static int     s_inited        = 0;
 
 /* ------------------------------------------------------- per-slot deform */
@@ -54,6 +55,7 @@ typedef struct {
     int     vcount;               /* vertices the deltas cover */
     int     cap;                  /* allocated capacity (>= vcount) */
     float  *dx, *dy, *dz;         /* per-vertex model-space deltas (cap each) */
+    float  *scuff;                /* per-vertex damage darkening 0..1 (cap each) */
     int     dirty;                /* any nonzero delta this race? */
 } DamageSlot;
 
@@ -98,6 +100,7 @@ int td5_damage_init(void) {
     s_smoke_light = env_int  ("TD5RE_DAMAGE_SMOKE_LIGHT",   40,      0,    100);
     s_smoke_black = env_int  ("TD5RE_DAMAGE_SMOKE_BLACK",   65,      0,    100);
     s_smoke_fire  = env_int  ("TD5RE_DAMAGE_SMOKE_FIRE",    88,      0,    100);
+    s_scuff_pct   = env_int  ("TD5RE_DAMAGE_SCUFF",         55,      0,    100);
     TD5_LOG_I(LOG_TAG, "car_damage: init max_hp=%d impact_pct=%d min_imp=%d ko=%d "
               "K=%d dent_ref=%d dent_frac=%d disp_frac=%d radius=%.2f penalty=%d smoke=%d/%d/%d",
               s_max_hp, s_impact_pct, s_min_impact, s_knockout, s_deform_k,
@@ -108,7 +111,7 @@ int td5_damage_init(void) {
 
 void td5_damage_shutdown(void) {
     for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
-        free(s_slot[i].dx); free(s_slot[i].dy); free(s_slot[i].dz);
+        free(s_slot[i].dx); free(s_slot[i].dy); free(s_slot[i].dz); free(s_slot[i].scuff);
         memset(&s_slot[i], 0, sizeof(s_slot[i]));
     }
     s_inited = 0;
@@ -147,6 +150,7 @@ void td5_damage_reset_race(void) {
             memset(ds->dx, 0, (size_t)ds->cap * sizeof(float));
             memset(ds->dy, 0, (size_t)ds->cap * sizeof(float));
             memset(ds->dz, 0, (size_t)ds->cap * sizeof(float));
+            if (ds->scuff) memset(ds->scuff, 0, (size_t)ds->cap * sizeof(float));
         }
         ds->mesh = NULL; ds->vcount = 0; ds->dirty = 0;
         s_ko_notified[i] = 0;
@@ -233,12 +237,14 @@ static int ensure_slot_buffers(DamageSlot *ds, const TD5_MeshHeader *mesh, int v
         float *nx = (float *)realloc(ds->dx, (size_t)vcount * sizeof(float));
         float *ny = (float *)realloc(ds->dy, (size_t)vcount * sizeof(float));
         float *nz = (float *)realloc(ds->dz, (size_t)vcount * sizeof(float));
-        if (!nx || !ny || !nz) { free(nx); free(ny); free(nz); return 0; }
-        ds->dx = nx; ds->dy = ny; ds->dz = nz; ds->cap = vcount;
+        float *ns = (float *)realloc(ds->scuff, (size_t)vcount * sizeof(float));
+        if (!nx || !ny || !nz || !ns) { free(nx); free(ny); free(nz); free(ns); return 0; }
+        ds->dx = nx; ds->dy = ny; ds->dz = nz; ds->scuff = ns; ds->cap = vcount;
     }
     memset(ds->dx, 0, (size_t)vcount * sizeof(float));
     memset(ds->dy, 0, (size_t)vcount * sizeof(float));
     memset(ds->dz, 0, (size_t)vcount * sizeof(float));
+    memset(ds->scuff, 0, (size_t)vcount * sizeof(float));
     ds->mesh = mesh; ds->vcount = vcount; ds->dirty = 0;
     return 1;
 }
@@ -360,6 +366,11 @@ static void apply_deform(int slot, int32_t impact_mag, const TD5_DamageHit *hit)
             nxv *= k; nyv *= k; nzv *= k;
         }
         ds->dx[i] = nxv; ds->dy[i] = nyv; ds->dz[i] = nzv;
+
+        /* Accumulate per-vertex "scuff" (damage darkening), proportional to the
+         * hit severity + falloff, so the struck panels visibly scuff/scorch. */
+        float sc = ds->scuff[i] + sev * w;
+        ds->scuff[i] = (sc > 1.0f) ? 1.0f : sc;
     }
     ds->dirty = 1;
 }
@@ -406,6 +417,22 @@ void td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
                   hit ? hit->lat : 0, hit ? hit->fwd : 0, hit ? hit->is_side : 0,
                   td5_damage_smoke_tier(slot));
     }
+}
+
+int td5_damage_get_scuff(int slot, const TD5_MeshHeader *mesh,
+                         const float **scuff, int *vcount) {
+    if (!td5_damage_enabled() || s_scuff_pct <= 0) return 0;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || !mesh) return 0;
+    DamageSlot *ds = &s_slot[slot];
+    if (!ds->dirty || ds->mesh != mesh || !ds->scuff) return 0;
+    if (ds->vcount != mesh->total_vertex_count) return 0;
+    if (scuff)  *scuff  = ds->scuff;
+    if (vcount) *vcount = ds->vcount;
+    return 1;
+}
+
+float td5_damage_scuff_strength(void) {
+    return (float)s_scuff_pct / 100.0f;   /* max darkening fraction at full scuff */
 }
 
 void td5_damage_on_wall_impact(TD5_Actor *actor, int32_t approach_speed,

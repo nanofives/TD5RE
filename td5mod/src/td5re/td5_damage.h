@@ -98,6 +98,13 @@ int   td5_damage_get_deform(int slot, const TD5_MeshHeader *mesh,
                             const float **dx, const float **dy,
                             const float **dz, int *vcount);
 
+/* Per-vertex damage "scuff" (0..1) for the slot's body mesh — drives a diffuse
+ * darkening on the struck panels (a cheap "texture damage" look in the software
+ * lighting pass). Returns 1 + fills the array when active for mesh, else 0. */
+int   td5_damage_get_scuff(int slot, const TD5_MeshHeader *mesh,
+                           const float **scuff, int *vcount);
+float td5_damage_scuff_strength(void);   /* max diffuse darkening fraction at scuff=1 */
+
 #ifdef __cplusplus
 }
 #endif
