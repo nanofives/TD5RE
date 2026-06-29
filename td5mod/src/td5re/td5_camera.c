@@ -10,6 +10,7 @@
 #include "td5_render.h"
 #include "td5_track.h"
 #include "td5_game.h"
+#include "td5_damage.h"   /* [CAR DAMAGE] end-of-race orbit around a finished/wrecked car */
 #include "td5_platform.h"
 #include "td5_hud.h"
 #include "td5_ai.h"     /* td5_compute_heading_delta */
@@ -1947,6 +1948,30 @@ void td5_camera_snap_poses(void)
         s_cam_pose_init[v] = 0;
 }
 
+/* [CAR DAMAGE 2026-06-28] When this view's car is done for the race (finished or
+ * wrecked) but the race is still running (the post-finish hold), spin the chase
+ * camera's yaw offset so it ORBITS the stationary car — letting the player see
+ * the accumulated damage before results. Chase-cam paths call this just before
+ * UpdateChaseCamera (which reads g_camYawOffset[v]). No-op unless CarDamage +
+ * the finish-orbit knob are on. */
+static void cam_finish_orbit_step(int v, TD5_Actor *actor)
+{
+    if (!td5_damage_finish_orbit_enabled() || !actor) return;
+    if (v < 0 || v >= TD5_MAX_VIEWPORTS) return;
+    int slot = (int)actor->slot_index;
+    if (slot < 0) return;
+    if (!td5_game_slot_is_finished(slot) && !td5_damage_slot_knocked_out(slot)) return;
+
+    static int s_orbit_logged[TD5_MAX_VIEWPORTS] = {0};
+    if (!s_orbit_logged[v]) {
+        s_orbit_logged[v] = 1;
+        TD5_LOG_I(LOG_TAG, "car_damage finish-orbit ENGAGED view=%d slot=%d "
+                  "(finished=%d wrecked=%d)", v, slot,
+                  td5_game_slot_is_finished(slot), td5_damage_slot_knocked_out(slot));
+    }
+    g_camYawOffset[v] = (g_camYawOffset[v] + td5_damage_finish_orbit_speed()) & 0xFFF;
+}
+
 /* Solve one view's desired tick pose by running its existing mode updater with
  * g_subTickFraction == 0 and capturing the eye/target/angles it emits. */
 static void cam_solve_view(int v)
@@ -1998,6 +2023,7 @@ static void cam_solve_view(int v)
         UpdateVehicleRelativeCamera((int)actor, v);   /* bumper / in-car (euler basis) */
         eye_lock = 1; tgt_lock = 1;
     } else {
+        cam_finish_orbit_step(v, actor);   /* [CAR DAMAGE] end-of-race damage orbit */
         UpdateChaseCamera((int)actor, 1, v);
         td5_camera_finalize_chase_pos(actor, v);
         eye_lock = 1; tgt_lock = 1;
@@ -3526,6 +3552,8 @@ void td5_camera_update_chase_all(void)
          * for the in-car cam once the race is actually running. */
         if (!g_td5.paused && g_raceCameraPresetMode[v] != 0)
             continue;
+
+        cam_finish_orbit_step(v, actor);   /* [CAR DAMAGE] end-of-race damage orbit (legacy path) */
         UpdateChaseCamera((int)actor, 1, v);
     }
 }

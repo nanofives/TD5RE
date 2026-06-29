@@ -6881,10 +6881,18 @@ static int mp_cop_chase_resolved(void) {
 static int check_race_completion(uint32_t sim_delta) {
     int i;
 
-    /* Phase 2: Post-finish cooldown (near-instant per TD5_RACE_END_DWELL) */
+    /* Phase 2: Post-finish cooldown (near-instant per TD5_RACE_END_DWELL).
+     * [CAR DAMAGE 2026-06-28] When the finish-orbit is enabled, hold here for a
+     * few seconds instead of ending instantly, so the chase camera can orbit the
+     * player's (stationary, finished) car to show off the accumulated damage
+     * before results. NOT during a replay (which reuses this path). Faithful
+     * near-instant dwell when CarDamage is off. */
     if (s_post_finish_cooldown != 0) {
+        uint32_t dwell = TD5_RACE_END_DWELL;
+        if (td5_damage_finish_orbit_enabled() && (!s_replay_mode || !replay_keep_results_on()))
+            dwell = (uint32_t)td5_damage_finish_orbit_hold_ms();
         s_post_finish_cooldown += sim_delta;
-        if (s_post_finish_cooldown > TD5_RACE_END_DWELL) {
+        if (s_post_finish_cooldown > dwell) {
             /* Dwell expired: build results and signal completion */
             s_post_finish_cooldown = 0;
             /* [REPLAY RESULTS PRESERVE 2026-06-27] A View Replay reaches this
@@ -6895,7 +6903,7 @@ static int check_race_completion(uint32_t sim_delta) {
              * The genuine results were snapshotted at replay-init and are restored
              * when the replay ends; here we only drive the fade/finish. */
             if (!s_replay_mode || !replay_keep_results_on()) {
-                TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", TD5_RACE_END_DWELL);
+                TD5_LOG_I(LOG_TAG, "Race completion: building results (dwell=%u)", dwell);
                 build_results_table();
                 td5_game_mp_cup_award();   /* [MP CUP] tally this race's points */
             } else {

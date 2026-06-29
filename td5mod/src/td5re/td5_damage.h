@@ -60,12 +60,24 @@ void  td5_damage_reset_race(void);
 void  td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
                            const TD5_DamageHit *hit);
 
+/* Wall/barrier impact: `approach_speed` is the car's normal velocity into the
+ * wall (the physics wall solver's iVar11). Scaled into the impact_mag domain and
+ * routed through td5_damage_on_impact. No-op when disabled / below the floor. */
+void  td5_damage_on_wall_impact(TD5_Actor *actor, int32_t approach_speed,
+                                const TD5_DamageHit *hit);
+
 /* Remaining health as 0..1 (1 = pristine). Returns -1 when the slot has no
  * actor or has not been initialized this race. */
 float td5_damage_health01(int slot);
 
 /* 1 if the slot is knocked out (enabled && health <= knockout threshold). */
 int   td5_damage_slot_knocked_out(int slot);
+
+/* End-of-race orbit camera (around a finished/wrecked car so the player can see
+ * the damage while waiting for the others). Enabled only when CarDamage is on. */
+int   td5_damage_finish_orbit_enabled(void);
+int   td5_damage_finish_orbit_speed(void);   /* 12-bit angle increment per sim-tick */
+int   td5_damage_finish_orbit_hold_ms(void); /* post-finish hold so the SP orbit can play */
 
 /* Same test against an already-resolved actor (cheap path for the physics tick). */
 int   td5_damage_actor_knocked_out(const TD5_Actor *actor);

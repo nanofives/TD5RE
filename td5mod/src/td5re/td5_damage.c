@@ -27,16 +27,22 @@
 
 /* ------------------------------------------------------------------ knobs */
 /* Parsed once in td5_damage_init(). All have safe defaults. */
-static int32_t s_max_hp        = 400000;   /* full health, in impact_mag units (a heavy ~155k crash ~= 39%) */
+static int32_t s_max_hp        = 800000;   /* full health, in impact_mag units (bar drains gradually) */
 static int     s_impact_pct    = 100;      /* % of impact_mag subtracted from health per hit */
 static int32_t s_min_impact    = 4000;     /* impacts below this don't chip health/deform */
 static int32_t s_knockout      = 0;        /* health <= this -> wrecked */
-static int     s_deform_k      = 24;       /* # nearest verts pushed per hit */
-static float   s_max_disp      = 18.0f;    /* clamp on accumulated per-vertex displacement (model units) */
-static float   s_dent_div      = 30000.0f; /* impact_mag / this = base dent (model units), before falloff */
-static float   s_dent_max      = 12.0f;    /* clamp on a single hit's base dent (model units) */
-static float   s_radius_frac   = 0.45f;    /* deform influence radius as a fraction of max model extent */
+static int     s_deform_k      = 40;       /* # nearest verts pushed per hit */
+/* Deformation is sized RELATIVE to the car's own model extent so dents are
+ * always clearly visible regardless of a car's modelling scale. */
+static int32_t s_dent_ref_mag  = 90000;    /* impact_mag that yields a full single-hit dent */
+static int     s_dent_frac     = 60;       /* full single-hit dent as % of the car's half-extent */
+static int     s_disp_frac     = 120;      /* clamp on accumulated dent as % of the car's half-extent */
+static float   s_radius_frac   = 0.55f;    /* deform influence radius as a fraction of max model extent */
 static int     s_penalty_pct   = 45;       /* max % steering-authority reduction at zero health */
+static int     s_wall_scale    = 400;      /* wall approach-speed -> impact_mag scale (%) */
+static int     s_finish_orbit   = 1;       /* orbit the chase cam around a finished/wrecked car */
+static int     s_orbit_speed    = 24;      /* 12-bit angle increment per sim-tick (4096 = full circle) */
+static int     s_orbit_hold_ms  = 6000;    /* post-finish hold (ms) so the SP orbit has time to play */
 static int     s_smoke_light   = 40;       /* % health lost to start light smoke */
 static int     s_smoke_black   = 65;       /* % health lost to switch to black smoke */
 static int     s_smoke_fire    = 88;       /* % health lost to add fire/sparks */
@@ -75,24 +81,28 @@ static float env_float(const char *name, float def, float lo, float hi) {
 int td5_damage_init(void) {
     if (s_inited) return 1;        /* module loader treats non-zero as success */
     s_inited = 1;
-    s_max_hp      = env_int  ("TD5RE_DAMAGE_MAX_HP",        400000,  1000, 100000000);
+    s_max_hp      = env_int  ("TD5RE_DAMAGE_MAX_HP",        800000,  1000, 100000000);
     s_impact_pct  = env_int  ("TD5RE_DAMAGE_IMPACT_SCALE",  100,     1,    2000);
     s_min_impact  = env_int  ("TD5RE_DAMAGE_MIN_IMPACT",    4000,    0,    1000000);
     s_knockout    = env_int  ("TD5RE_DAMAGE_KNOCKOUT",      0,       0,    100000000);
-    s_deform_k    = env_int  ("TD5RE_DAMAGE_DEFORM_K",      24,      1,    4096);
-    s_max_disp    = env_float("TD5RE_DAMAGE_MAX_DISP",      18.0f,   0.0f, 1000.0f);
-    s_dent_div    = env_float("TD5RE_DAMAGE_DENT_DIV",      30000.0f,1.0f, 1.0e9f);
-    s_dent_max    = env_float("TD5RE_DAMAGE_DENT_MAX",      12.0f,   0.0f, 1000.0f);
-    s_radius_frac = env_float("TD5RE_DAMAGE_RADIUS_FRAC",   0.45f,   0.02f, 4.0f);
+    s_deform_k    = env_int  ("TD5RE_DAMAGE_DEFORM_K",      40,      1,    4096);
+    s_dent_ref_mag= env_int  ("TD5RE_DAMAGE_DENT_REF_MAG",  90000,   1000, 100000000);
+    s_dent_frac   = env_int  ("TD5RE_DAMAGE_DENT_FRAC",     60,      1,    200);
+    s_disp_frac   = env_int  ("TD5RE_DAMAGE_DISP_FRAC",     120,     1,    300);
+    s_radius_frac = env_float("TD5RE_DAMAGE_RADIUS_FRAC",   0.55f,   0.02f, 4.0f);
     s_penalty_pct = env_int  ("TD5RE_DAMAGE_PENALTY",       45,      0,    95);
+    s_wall_scale  = env_int  ("TD5RE_DAMAGE_WALL_SCALE",    400,     0,    5000);
+    s_finish_orbit= env_int  ("TD5RE_DAMAGE_FINISH_ORBIT",  1,       0,    1);
+    s_orbit_speed = env_int  ("TD5RE_DAMAGE_ORBIT_SPEED",   24,      1,    512);
+    s_orbit_hold_ms = env_int("TD5RE_DAMAGE_ORBIT_HOLD_MS", 6000,    0,    60000);
     s_smoke_light = env_int  ("TD5RE_DAMAGE_SMOKE_LIGHT",   40,      0,    100);
     s_smoke_black = env_int  ("TD5RE_DAMAGE_SMOKE_BLACK",   65,      0,    100);
     s_smoke_fire  = env_int  ("TD5RE_DAMAGE_SMOKE_FIRE",    88,      0,    100);
     TD5_LOG_I(LOG_TAG, "car_damage: init max_hp=%d impact_pct=%d min_imp=%d ko=%d "
-              "K=%d max_disp=%.1f dent_div=%.0f penalty=%d smoke=%d/%d/%d",
+              "K=%d dent_ref=%d dent_frac=%d disp_frac=%d radius=%.2f penalty=%d smoke=%d/%d/%d",
               s_max_hp, s_impact_pct, s_min_impact, s_knockout, s_deform_k,
-              (double)s_max_disp, (double)s_dent_div, s_penalty_pct,
-              s_smoke_light, s_smoke_black, s_smoke_fire);
+              s_dent_ref_mag, s_dent_frac, s_disp_frac, (double)s_radius_frac,
+              s_penalty_pct, s_smoke_light, s_smoke_black, s_smoke_fire);
     return 1;        /* success (module loader: !init() == failure) */
 }
 
@@ -168,6 +178,18 @@ static float actor_health01(const TD5_Actor *a) {
 
 float td5_damage_health01(int slot) {
     return actor_health01(dmg_actor(slot));
+}
+
+int td5_damage_finish_orbit_enabled(void) {
+    return td5_damage_enabled() && s_finish_orbit;
+}
+
+int td5_damage_finish_orbit_speed(void) {
+    return s_orbit_speed;
+}
+
+int td5_damage_finish_orbit_hold_ms(void) {
+    return s_orbit_hold_ms;
 }
 
 int td5_damage_actor_knocked_out(const TD5_Actor *a) {
@@ -267,9 +289,15 @@ static void apply_deform(int slot, int32_t impact_mag, const TD5_DamageHit *hit)
     if (inlen < 1e-4f) { inx = 0.0f; iny = -1.0f; inz = 0.0f; inlen = 1.0f; }
     inx /= inlen; iny /= inlen; inz /= inlen;
 
-    /* Base dent magnitude for this hit. */
-    float dent = (float)impact_mag / s_dent_div;
-    if (dent > s_dent_max) dent = s_dent_max;
+    /* Base dent magnitude for this hit, sized RELATIVE to the car's own extent so
+     * it's always visible: a hit of s_dent_ref_mag dents s_dent_frac% of the
+     * half-extent in one go; smaller hits scale down linearly. */
+    float ref       = max_ext;                                   /* half the largest model dimension */
+    float dent_full = ref * ((float)s_dent_frac / 100.0f);       /* full single-hit dent */
+    float sev       = (float)impact_mag / (float)s_dent_ref_mag; /* 1.0 at a reference crash */
+    if (sev > 1.0f) sev = 1.0f;
+    float dent = dent_full * sev;
+    float max_disp = ref * ((float)s_disp_frac / 100.0f);        /* accumulated clamp */
     if (dent <= 0.0f) return;
 
     float radius = s_radius_frac * max_ext;
@@ -325,10 +353,10 @@ static void apply_deform(int slot, int32_t impact_mag, const TD5_DamageHit *hit)
         float nxv = ds->dx[i] + inx * amt;
         float nyv = ds->dy[i] + iny * amt;
         float nzv = ds->dz[i] + inz * amt;
-        /* clamp accumulated per-vertex displacement */
+        /* clamp accumulated per-vertex displacement (extent-relative) */
         float mag = sqrtf(nxv*nxv + nyv*nyv + nzv*nzv);
-        if (mag > s_max_disp && mag > 1e-4f) {
-            float k = s_max_disp / mag;
+        if (mag > max_disp && mag > 1e-4f) {
+            float k = max_disp / mag;
             nxv *= k; nyv *= k; nzv *= k;
         }
         ds->dx[i] = nxv; ds->dy[i] = nyv; ds->dz[i] = nzv;
@@ -378,6 +406,16 @@ void td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
                   hit ? hit->lat : 0, hit ? hit->fwd : 0, hit ? hit->is_side : 0,
                   td5_damage_smoke_tier(slot));
     }
+}
+
+void td5_damage_on_wall_impact(TD5_Actor *actor, int32_t approach_speed,
+                               const TD5_DamageHit *hit) {
+    if (!td5_damage_enabled() || !actor) return;
+    int32_t spd = approach_speed < 0 ? -approach_speed : approach_speed;
+    /* Convert the wall approach speed into the same impact_mag domain as a V2V
+     * hit, then route through the shared damage path (health + deform + smoke). */
+    int32_t mag = (int32_t)((int64_t)spd * s_wall_scale / 100);
+    td5_damage_on_impact(actor, mag, hit);
 }
 
 int td5_damage_get_deform(int slot, const TD5_MeshHeader *mesh,
