@@ -2179,6 +2179,27 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                 }
             }
         }
+
+        /* [CAR DAMAGE 2026-06-28] Wall/barrier hit damages + dents the car on the
+         * face that struck the wall. iVar11 is the approach speed into the wall;
+         * the hit region comes from the inward wall normal (-sin_w, cos_w) rotated
+         * into the car's model frame by its heading (signs only, so the 12-bit
+         * fixed scale cancels). No-op when [Game] CarDamage=0. */
+        if (td5_damage_enabled() && actor->slot_index >= 0) {
+            int32_t h     = actor->display_angles.yaw & 0xFFF;
+            int32_t cos_h = cos_fixed12(h);
+            int32_t sin_h = sin_fixed12(h);
+            int32_t Dx = -sin_w, Dz = cos_w;                         /* world dir into wall */
+            int64_t lf = (int64_t)Dx * sin_h + (int64_t)Dz * cos_h;  /* local forward comp */
+            int64_t ll = (int64_t)Dx * cos_h - (int64_t)Dz * sin_h;  /* local lateral comp */
+            int64_t alf = lf < 0 ? -lf : lf, all_ = ll < 0 ? -ll : ll;
+            TD5_DamageHit whit;
+            whit.fwd     = (lf > 0) - (lf < 0);
+            whit.lat     = (ll > 0) - (ll < 0);
+            whit.is_side = (all_ > alf);
+            td5_damage_on_wall_impact(actor, iVar11, &whit);
+        }
+
         /* Impulse numerator = ((K>>8) * -0x1100) >> 12 with Borland round-
          * toward-zero on the negative >>12. D2 audit. The compiler-time
          * constant evaluation here yields a different result from the
