@@ -37,8 +37,18 @@ enum {
     TD5_PU_WRECK  = 3,   /* immune; rammed cars get a boosted launch              */
     TD5_PU_HAZARD = 4,   /* [REMOVED 2026-06-28] oil-slick trap — kept as a valid
                           * effect id for the dormant render/HUD branches, but it
-                          * is NO LONGER spawned (TD5_PU_KINDS dropped to 3 below).*/
-    TD5_PU_KINDS  = 3    /* number of distinct SPAWNABLE kinds: NITRO/GHOST/WRECK  */
+                          * is NO LONGER spawned (weight 0 in arc_pick_kind).      */
+    /* [ARCADE EXPANSION 2026-06-28] Five new kinds — each is one apply_pickup()
+     * branch + one effect gate. All run off REPLICATED actor state (deterministic
+     * for netplay/replay; the only entropy is the per-race seed, never on the
+     * per-tick sim path). */
+    TD5_PU_SHIELD = 5,   /* immune to knockback/launch + oil for the duration     */
+    TD5_PU_FREEZE = 6,   /* EMP: nearby rivals/traffic freeze for a moment        */
+    TD5_PU_MAGNET = 7,   /* drags nearby traffic toward you (ram fuel)            */
+    TD5_PU_ROCKET = 8,   /* big forward dash + plow straight through traffic      */
+    TD5_PU_REPAIR = 9,   /* clears your own oil-drift / freeze (a "get out" card) */
+    TD5_PU_KINDS  = 9    /* highest effect id; per-kind SPAWN weighting (incl.
+                          * HAZARD=0, master's removal) lives in arc_pick_kind     */
 };
 
 /* ======================================================================
@@ -87,8 +97,15 @@ int td5_arcade_scatter_pct(void);
 int td5_arcade_slot_is_ghost(int slot);
 
 /* 1 = this racer slot is currently a WRECKING BALL — the collision solver should
- * leave THIS slot's velocity unchanged and give the OTHER car the boosted launch. */
+ * leave THIS slot's velocity unchanged and give the OTHER car the boosted launch.
+ * [ARCADE EXPANSION 2026-06-28] Also true while ROCKET is active (the dash plows
+ * straight through traffic just like a wrecking ball). */
 int td5_arcade_slot_is_wrecking(int slot);
+
+/* [ARCADE EXPANSION 2026-06-28] 1 = this racer slot is SHIELDED — the collision
+ * solver should leave its motion unchanged (no scatter / no airborne launch) and
+ * it ignores oil slicks, but it can still ram others. 0 outside arcade. */
+int td5_arcade_slot_is_shielded(int slot);
 
 /* Q8 (0x100 = 1.0) drive-torque (ACCELERATION) multiplier for this racer slot:
  * the NITRO boost (default 2.5x = 0x280) while NITRO is active, else 1.0. 1.0

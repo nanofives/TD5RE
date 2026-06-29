@@ -596,6 +596,14 @@ static int      s_finish_position_display; /* 1-based place captured at finish (
  * player finishing no longer ends the race for the others. */
 static int      s_slot_finish_place[TD5_MAX_RACER_SLOTS];
 
+/* [TRAFFIC BATTLE 2026-06-28] CHECKPOINTS win-condition "chaser": a deadline that
+ * creeps up the track. s_battle_chase_span is its track position in 24.8 fixed
+ * spans; any racer whose progress falls behind it is caught (eliminated). Inert
+ * unless the battle win condition is CHECKPOINTS. */
+static int      s_battle_chase_active;
+static int32_t  s_battle_chase_span;          /* 24.8 fixed track span of the deadline */
+static int      s_battle_chase_caught[TD5_MAX_RACER_SLOTS];
+
 /* [REPLAY RESULTS PRESERVE 2026-06-27] A "View Replay" re-enters the race via
  * g_td5.race_requested -> init_race_session, which WIPES the live race-results
  * display state (s_results / s_metrics / s_slot_state / ...) so the recorded run
@@ -724,6 +732,7 @@ static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flu
  * ======================================================================== */
 
 static int  check_race_completion(uint32_t sim_delta);
+static void battle_chase_tick(void);                  /* [TRAFFIC BATTLE checkpoints] */
 static void build_results_table(void);
 static void reset_results_table(void);
 static void capture_replay_results_snapshot(void);   /* [REPLAY RESULTS PRESERVE] */
@@ -1563,6 +1572,10 @@ int32_t td5_game_get_best_lap_time(int slot)
  * [CONFIRMED @ 0x00422480 case 0]: calls SortRaceResults{By,Desc} by game type */
 void td5_game_sort_results(void)
 {
+    if (td5_game_battle_mode_active()) {   /* [TRAFFIC BATTLE 2026-06-28] by WRECKS */
+        sort_results_by_score_desc();
+        return;
+    }
     switch (g_td5.game_type) {
     case TD5_GAMETYPE_CHAMPIONSHIP:
     case TD5_GAMETYPE_ULTIMATE:
@@ -1730,6 +1743,14 @@ int td5_game_init_race_session(void) {
     CK("ck0_start");
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: begin");
 
+    /* [TRAFFIC BATTLE checkpoints] Clear the deadline-chaser before any mode
+     * setup; the battle block below re-arms it when the CHECKPOINTS win
+     * condition is selected. (Done here, before the per-race resets, so the
+     * battle block's arming isn't wiped.) */
+    s_battle_chase_active = 0;
+    s_battle_chase_span   = INT32_MIN;
+    memset(s_battle_chase_caught, 0, sizeof(s_battle_chase_caught));
+
 #ifndef TD5RE_RELEASE
     /* Dev smoke-test: TD5RE_FORCE_REPLAY=1 boots straight into View-Replay mode
      * (the in-memory record buffer is empty on a fresh boot, so the played-back
@@ -1893,6 +1914,100 @@ int td5_game_init_race_session(void) {
      * 2-slot limit doesn't apply (we keep all the human slots, not just 2). */
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL && !g_td5.network_active)
         g_td5.time_trial_enabled = 0;
+
+    /* [TRAFFIC BATTLE 2026-06-28] Single-player entry: a release-safe knob lets a
+     * solo race (humans + AI, no split-screen / net) launch the Traffic
+     * Destruction mode without the MP lobby — the SP analogue of how the MP vote
+     * screen selects it. (The dev-only TD5RE_MP_MODE_FORCE=4 above also reaches
+     * this; this knob works in release too.) The AI opponents stay enabled (set
+     * by the frontend's num_ai_opponents) so it is genuinely player-vs-AI. */
+    if (!g_td5.network_active && g_td5.split_screen_mode == 0) {
+        const char *be = getenv("TD5RE_BATTLE");
+        if (be && (be[0] == '1' || be[0] == 'y' || be[0] == 'Y' ||
+                   be[0] == 't' || be[0] == 'T')) {
+            g_td5.mp_mode_config.mode = TD5_MP_MODE_TRAFFIC_BATTLE;
+            /* No MP config screen on the SP knob path, so seed the power-up
+             * density here (the MP vote path seeds it in
+             * mp_mode_config_apply_defaults). Default DENSE; TD5RE_ARCADE_DENSITY
+             * overrides at the spacing site anyway. */
+            const char *de = getenv("TD5RE_ARCADE_DENSITY");
+            int d = (de && de[0]) ? atoi(de) : 2;
+            if (d < 0) d = 0;
+            if (d > 3) d = 3;
+            g_td5.mp_mode_config.battle_powerup_density = d;
+            /* SP win-condition override (no MP config screen on this path):
+             * TD5RE_BATTLE_WIN=1 -> CHECKPOINTS deadline chaser, 0 -> MOST WRECKS. */
+            const char *we = getenv("TD5RE_BATTLE_WIN");
+            g_td5.mp_mode_config.battle_win_condition =
+                (we && (we[0] == '1' || we[0] == 'c' || we[0] == 'C'))
+                ? TD5_BATTLE_WIN_CHECKPOINTS : TD5_BATTLE_WIN_MOST_WRECKS;
+        }
+    }
+
+    /* [TRAFFIC BATTLE 2026-06-28] Battle setup (MP-selected OR synthesised SP).
+     * Force a fixed-pace dynamic-traffic stream ON, cops/wanted OFF, collisions
+     * ON, and a fixed traffic volume so the field is a steady supply of ram
+     * targets. The match runs to the track END (laps / finish line) — no timer
+     * (locked design decision). Works for both ARCADE and SIMULATION dynamics;
+     * the power-up boxes only appear in arcade dynamics. */
+    if (td5_game_battle_mode_active()) {
+        if (g_td5.mp_mode_config.battle_spawn_period <= 0) {
+            const char *sp = getenv("TD5RE_BATTLE_SPAWN_PERIOD");
+            int p = (sp && sp[0]) ? atoi(sp) : 30;   /* ticks @30Hz between spawns */
+            if (p < 5)   p = 5;
+            if (p > 240) p = 240;
+            g_td5.mp_mode_config.battle_spawn_period = p;
+        }
+        g_td5.wanted_mode_enabled       = 0;     /* not cop chase            */
+        g_td5.special_encounter_enabled = 0;     /* cops OFF                 */
+        g_td5.drag_race_enabled         = 0;
+        g_td5.time_trial_enabled        = 0;
+        g_td5.traffic_enabled           = 1;     /* traffic ON              */
+        /* [TRAFFIC BATTLE 2026-06-28] NO rival racers — it is you (and any other
+         * humans in split-screen) vs the traffic stream only (user: "there should
+         * be no opponents in this mode"). Drop the AI opponents and, for a solo
+         * race, synthesise the same single-racer field as Time Trial so slots
+         * 1..5 are disabled. Network keeps the host's replicated field. */
+        if (!g_td5.network_active) {
+            g_td5.num_ai_opponents = 0;
+            if (g_td5.split_screen_mode == 0)
+                g_td5.solo_mode_synth = 1;
+        }
+        g_td5.ini.traffic_dynamic       = 1;     /* dynamic spawner ON      */
+        g_td5.ini.traffic_dyn_period    = g_td5.mp_mode_config.battle_spawn_period;
+        {
+            const char *tv = getenv("TD5RE_BATTLE_TRAFFIC_VOLUME");
+            int v = (tv && tv[0]) ? atoi(tv) : 4;   /* 4 = VERY HIGH (full stream) */
+            if (v < 1) v = 1;
+            if (v > 4) v = 4;
+            g_td5.traffic_volume = v;
+        }
+        td5_physics_set_collisions(1);           /* ramming needs collisions ON */
+        /* [TRAFFIC BATTLE 2026-06-28] Spawn the racers part-way down the track
+         * (default span 150) so the action starts right in the traffic instead of
+         * on an empty start line. Respects an explicit dev StartSpanOffset (only
+         * applied when it is 0). Consumed per-slot later in this function. */
+        if (g_td5.ini.start_span_offset == 0) {
+            const char *ss = getenv("TD5RE_BATTLE_START_SPAN");
+            int s0 = (ss && ss[0]) ? atoi(ss) : 150;
+            if (s0 < 0)     s0 = 0;
+            if (s0 > 30000) s0 = 30000;
+            g_td5.ini.start_span_offset = s0;
+        }
+        /* [TRAFFIC BATTLE checkpoints] CHECKPOINTS win condition arms the
+         * deadline chaser (anchored on the first race tick once spawn spans are
+         * known). MOST WRECKS leaves it off and the race runs to the track end. */
+        if (g_td5.mp_mode_config.battle_win_condition == TD5_BATTLE_WIN_CHECKPOINTS) {
+            s_battle_chase_active = 1;
+            s_battle_chase_span   = INT32_MIN;   /* anchored on first battle_chase_tick */
+        }
+        TD5_LOG_I(LOG_TAG, "InitRace: TRAFFIC BATTLE active — dynamic traffic ON "
+                  "(period=%d vol=%d), cops OFF, oncoming traffic, spawn span=%d, win=%s; "
+                  "winner = most WRECKS",
+                  g_td5.ini.traffic_dyn_period, g_td5.traffic_volume,
+                  g_td5.ini.start_span_offset,
+                  s_battle_chase_active ? "CHECKPOINTS" : "MOST-WRECKS");
+    }
 
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
      * @ 0x004B0FA8). This is the runtime gate read by both the HUD timer
@@ -6052,6 +6167,10 @@ int td5_game_run_race_frame(void) {
             td5_render_advance_billboard_anims();
             td5_vfx_advance_tracked_marker_phases();
             td5_render_per_tick_fog_fade();
+            /* [TRAFFIC BATTLE checkpoints] Advance the deadline chaser once per
+             * fixed sim tick (frame-rate-independent + lockstep-safe). No-op
+             * unless the CHECKPOINTS win condition armed it. */
+            battle_chase_tick();
         }
 
         /* --- Consume one tick --- */
@@ -6451,6 +6570,10 @@ int td5_game_run_race_frame(void) {
     /* [ARCADE 2026-06-26] Per-viewport active power-up chip (label + timer bar).
      * Self-gated: no-op unless the race is in ARCADE mode with an active effect. */
     td5_hud_draw_arcade_chips();
+
+    /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" tally. Self-gated:
+     * no-op unless the Traffic Destruction battle mode is active. */
+    td5_hud_draw_battle_wrecks();
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op
@@ -7812,6 +7935,7 @@ static void adjust_checkpoint_timers(int slot) {
 
 static void build_results_table(void) {
     int i;
+    int battle = td5_game_battle_mode_active();   /* [TRAFFIC BATTLE 2026-06-28] */
 
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         ActorRaceMetric *m = &s_metrics[i];
@@ -7848,7 +7972,14 @@ static void build_results_table(void) {
 
         /* Award position points based on game type */
         int pos = s_race_order[i];
-        if (g_td5.race_rule_variant == 0 && pos < TD5_MAX_RACER_SLOTS) {
+        if (battle) {
+            /* [TRAFFIC BATTLE 2026-06-28] Placement is ignored — the ONLY metric
+             * that matters is WRECKS (wanted_kills). Drive the descending sort
+             * off secondary_metric (which sort_results_by_score_desc ranks) so we
+             * can reuse that routine: override it to the wreck count and skip the
+             * championship / ultimate position points entirely. */
+            r->secondary_metric = (int32_t)r->wanted_kills;
+        } else if (g_td5.race_rule_variant == 0 && pos < TD5_MAX_RACER_SLOTS) {
             /* Championship: {15, 12, 10, 5, 4, 3} */
             r->secondary_metric += s_championship_points[pos];
         } else if (g_td5.race_rule_variant == 4 && pos < TD5_MAX_RACER_SLOTS) {
@@ -7858,6 +7989,12 @@ static void build_results_table(void) {
     }
 
     /* Sort results by the appropriate metric for the game type */
+    if (battle) {
+        /* [TRAFFIC BATTLE 2026-06-28] Winner = most WRECKS (secondary_metric was
+         * set to the wreck count above). Reuse the descending-score sort. */
+        sort_results_by_score_desc();
+        return;
+    }
     switch (g_td5.game_type) {
     case TD5_GAMETYPE_CHAMPIONSHIP:
     case TD5_GAMETYPE_ULTIMATE:
@@ -9033,6 +9170,111 @@ int td5_game_mp_traffic_fair(void) {
         knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
     }
     return knob && g_td5.split_screen_mode > 0 && g_td5.num_human_players >= 2;
+}
+
+/* [TRAFFIC BATTLE 2026-06-28] 1 when the active race is the Traffic Destruction
+ * battle mode. The mode is selected on the MP mode-vote screen (split-screen /
+ * net) or synthesised for single-player vs AI in td5_game_init_race_session. */
+int td5_game_battle_mode_active(void) {
+    return g_td5.mp_mode_config.mode == TD5_MP_MODE_TRAFFIC_BATTLE;
+}
+
+/* ========================================================================
+ * [TRAFFIC BATTLE 2026-06-28] CHECKPOINTS win-condition "chaser"
+ *
+ * A deadline that creeps forward up the track at a fixed pace. Any racer whose
+ * forward progress falls behind it is "caught" — eliminated (marked finished
+ * where it stands so it stops scoring and the race-completion latch counts it).
+ * This makes the mode a balance of crashing for points vs. keeping moving: stop
+ * to farm wrecks too long and the deadline runs you down. Self-contained (does
+ * NOT use the SP-only P2P checkpoint timer, which split-screen forces off), so
+ * it works identically in solo and split-screen. The winner is still whoever
+ * wrecked the most (results sort by WRECKS).
+ * ======================================================================== */
+static int chase_lead_spans(void) {
+    const char *e = getenv("TD5RE_BATTLE_CHASE_LEAD");
+    int v = (e && e[0]) ? atoi(e) : 120;   /* spans the deadline starts behind */
+    if (v < 0)     v = 0;
+    if (v > 100000) v = 100000;
+    return v;
+}
+static int32_t chase_pace_q8(void) {
+    const char *e = getenv("TD5RE_BATTLE_CHASE_SPS");
+    int sps = (e && e[0]) ? atoi(e) : 12;  /* deadline speed, spans per second */
+    if (sps < 1)   sps = 1;
+    if (sps > 200) sps = 200;
+    return (int32_t)(((int64_t)sps * 256) / 30);   /* 24.8 spans per 30Hz tick */
+}
+/* Cumulative forward progress (spans) of a racer slot — laps folded in so it is
+ * monotonic on both point-to-point and circuit tracks. */
+static int32_t battle_racer_progress(int slot, int ring) {
+    TD5_Actor *a = td5_game_get_actor(slot);
+    if (!a) return 0;
+    int lap = td5_game_get_player_lap(slot);
+    if (lap < 0) lap = 0;
+    int span = a->track_span_normalized;
+    if (span < 0) span = 0;
+    return (int32_t)((int64_t)lap * ring + span);
+}
+
+static void battle_chase_tick(void) {
+    if (!s_battle_chase_active) return;
+    int ring = td5_track_get_span_count();
+    if (ring < 1) ring = 1;
+    int base = g_traffic_slot_base;
+    if (base < 1) base = 1;
+    if (base > TD5_MAX_RACER_SLOTS) base = TD5_MAX_RACER_SLOTS;
+
+    /* Anchor the deadline behind the field on the first tick (spawn spans are
+     * now committed). */
+    if (s_battle_chase_span == INT32_MIN) {
+        int32_t minprog = INT32_MAX;
+        for (int i = 0; i < base; i++) {
+            if (s_slot_state[i].state == 3) continue;
+            int32_t p = battle_racer_progress(i, ring);
+            if (p < minprog) minprog = p;
+        }
+        if (minprog == INT32_MAX) minprog = 0;
+        s_battle_chase_span = (int32_t)(((int64_t)(minprog - chase_lead_spans())) << 8);
+    }
+
+    s_battle_chase_span += chase_pace_q8();
+    int32_t deadline = s_battle_chase_span >> 8;
+
+    for (int i = 0; i < base; i++) {
+        if (s_slot_state[i].state == 3) continue;            /* inactive slot   */
+        if (s_battle_chase_caught[i]) continue;              /* already caught  */
+        if (s_metrics[i].post_finish_metric_base != 0) continue; /* already done */
+        if (battle_racer_progress(i, ring) >= deadline) continue;
+        /* Caught: eliminate where it stands so the completion latch counts it
+         * and it stops being scored (the wreck sweep skips finished racers). */
+        s_battle_chase_caught[i] = 1;
+        int32_t t = s_metrics[i].cumulative_timer;
+        s_metrics[i].post_finish_metric_base = (t > 0) ? t : 1;
+        if (s_slot_finish_place[i] == 0) {
+            int placed = 0;
+            for (int j = 0; j < base; j++)
+                if (s_metrics[j].post_finish_metric_base != 0) placed++;
+            s_slot_finish_place[i] = placed;   /* includes self -> 1-based */
+        }
+        TD5_Actor *a = td5_game_get_actor(i);
+        if (a) a->finish_time = s_metrics[i].post_finish_metric_base;
+        TD5_LOG_I(LOG_TAG, "battle_chase: slot=%d caught by deadline (deadline_span=%d)", i, deadline);
+    }
+}
+
+/* 1 while the CHECKPOINTS deadline chaser is active (HUD reads this). */
+int td5_game_battle_chase_active(void) { return s_battle_chase_active; }
+
+/* Spans a racer is currently AHEAD of the deadline (negative once caught). Large
+ * sentinel when the chaser is inactive / not yet anchored. The HUD shows this so
+ * each player can see the deadline creeping up. */
+int td5_game_battle_chase_gap(int slot) {
+    if (!s_battle_chase_active || s_battle_chase_span == INT32_MIN) return 99999;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 99999;
+    int ring = td5_track_get_span_count();
+    if (ring < 1) ring = 1;
+    return battle_racer_progress(slot, ring) - (s_battle_chase_span >> 8);
 }
 
 /* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot for cop-chase /

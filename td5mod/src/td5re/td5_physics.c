@@ -1720,6 +1720,81 @@ static int32_t npc_fatal_mag(void) {
     }
     return v;
 }
+/* [TRAFFIC BATTLE 2026-06-28] Public accessor so the battle scoring hook
+ * (td5_arcade_note_ram) shares the single npc-fatal-impact threshold with the
+ * V2V heavy-hit gate (no constant duplication / drift). */
+int32_t td5_physics_npc_fatal_mag(void) { return npc_fatal_mag(); }
+/* [TRAFFIC BATTLE 2026-06-28] Sensitivity of the SPEED-based wreck trigger
+ * (percent applied to the closing-speed impact estimate). The default
+ * impact_mag is the NORMAL-projected impulse, so a fast glancing / corner crash
+ * barely registers and never totals the traffic car. The battle path recomputes
+ * the impact from the full closing speed so a hard crash wrecks at ANY angle;
+ * this percent dials how eager that is (>100 = wreck on more hits). Clamp
+ * [10,1000]. TD5RE_BATTLE_RAM_PCT overrides. */
+#define BATTLE_RAM_PCT_DEFAULT 150
+static int battle_ram_pct(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_BATTLE_RAM_PCT");
+        long p = (e && e[0]) ? strtol(e, NULL, 10) : BATTLE_RAM_PCT_DEFAULT;
+        if (p < 10)   p = 10;
+        if (p > 1000) p = 1000;
+        v = (int)p;
+        TD5_LOG_I(LOG_TAG, "battle_ram_pct: TD5RE_BATTLE_RAM_PCT=%d", v);
+    }
+    return v;
+}
+/* [TRAFFIC BATTLE 2026-06-28] Ceiling for the speed-based wreck impact. The raw
+ * closing-speed*mass product can be 10-20x a normal head-on (a fast near-tangent
+ * pass has a huge relative velocity but a tiny normal impulse), which would
+ * launch/spin both cars absurdly. Cap it at a strong-but-already-tuned head-on
+ * level (~the upper end the logged v2v_heavy_scatter hits reach) so the crash
+ * reliably TOTALS the traffic car (well past npc_fatal_mag) with a firm but
+ * survivable reaction. TD5RE_BATTLE_RAM_CAP overrides. */
+#define BATTLE_RAM_CAP_DEFAULT 200000
+static int32_t battle_ram_cap(void) {
+    static int32_t v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_BATTLE_RAM_CAP");
+        long m = (e && e[0]) ? strtol(e, NULL, 10) : BATTLE_RAM_CAP_DEFAULT;
+        if (m < 60000)   m = 60000;     /* must clear npc_fatal_mag to wreck */
+        if (m > 1000000) m = 1000000;
+        v = (int32_t)m;
+    }
+    return v;
+}
+/* [TRAFFIC BATTLE 2026-06-28] Minimum racer planar speed (24.8 units) for the
+ * swept wreck pass to total a traffic car on contact — keeps a stationary car
+ * from "wrecking" something it's resting against. Low by default so any real
+ * driving counts (the mode is about plowing through traffic). TD5RE_BATTLE_RAM_MIN_SPEED. */
+#define BATTLE_RAM_MIN_SPEED_DEFAULT 3000
+static int32_t battle_ram_min_speed(void) {
+    static int32_t v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_BATTLE_RAM_MIN_SPEED");
+        long m = (e && e[0]) ? strtol(e, NULL, 10) : BATTLE_RAM_MIN_SPEED_DEFAULT;
+        if (m < 0)      m = 0;
+        if (m > 200000) m = 200000;
+        v = (int32_t)m;
+    }
+    return v;
+}
+/* [TRAFFIC BATTLE 2026-06-28] Vertical-speed threshold above which a traffic car
+ * is "thrown in the air" and counts as wrecked (user: "trigger wreck when cars
+ * get thrown out in the air"). A car resting/rolling on the road has a small vy;
+ * a launched one has a large one. TD5RE_BATTLE_AIRBORNE_VY. */
+#define BATTLE_AIRBORNE_VY_DEFAULT 6000
+static int32_t battle_airborne_vy(void) {
+    static int32_t v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_BATTLE_AIRBORNE_VY");
+        long m = (e && e[0]) ? strtol(e, NULL, 10) : BATTLE_AIRBORNE_VY_DEFAULT;
+        if (m < 500)    m = 500;
+        if (m > 200000) m = 200000;
+        v = (int32_t)m;
+    }
+    return v;
+}
 /* [POLICE 2026-06-24] A police cop is more DURABLE than plain traffic: it
  * survives the impacts that total an ordinary traffic car, and only wrecks on a
  * genuinely heavy hit (the player deliberately ramming it). Expressed as a
@@ -6796,6 +6871,45 @@ static int tt_pair_passthrough(int slot_a, int slot_b)
            slot_b >= 0 && slot_b < g_td5.num_human_players;
 }
 
+/* [TRAFFIC BATTLE 2026-06-28] In battle mode a WRECKED traffic car is intangible
+ * — both the V2V impulse and the depenetration push skip any pair that includes
+ * a broken-down traffic actor, so the player drives clean through wrecks (which
+ * also render translucent, like ghost mode). No-op outside battle. */
+static int battle_wreck_intangible(const TD5_Actor *a, const TD5_Actor *b)
+{
+    if (!td5_game_battle_mode_active()) return 0;
+    int sa = a ? (int)a->slot_index : -1;
+    int sb = b ? (int)b->slot_index : -1;
+    if (sa >= g_traffic_slot_base && td5_ai_actor_is_broken_down(sa)) return 1;
+    if (sb >= g_traffic_slot_base && td5_ai_actor_is_broken_down(sb)) return 1;
+    return 0;
+}
+
+/* [TRAFFIC BATTLE 2026-06-28] Capped CLOSING-speed impact for a battle
+ * racer-vs-traffic pair — the speed-based wreck magnitude that replaces the
+ * normal-projected impulse so a fast crash totals the car at ANY angle. Returns
+ * 0 when it is not a battle racer-vs-traffic pair. avx..bvz are the
+ * PRE-collision velocities; mass_sum = mass_A + mass_B. */
+static int32_t battle_speed_impact(const TD5_Actor *A, const TD5_Actor *B,
+                                   int32_t avx, int32_t avz,
+                                   int32_t bvx, int32_t bvz, int64_t mass_sum)
+{
+    if (!A || !B || !td5_game_battle_mode_active()) return 0;
+    int sa = (int)A->slot_index, sb = (int)B->slot_index;
+    int rvt = (sa >= 0 && sa < g_traffic_slot_base && sb >= g_traffic_slot_base) ||
+              (sb >= 0 && sb < g_traffic_slot_base && sa >= g_traffic_slot_base);
+    if (!rvt) return 0;
+    int64_t rvx = (int64_t)avx - bvx;
+    int64_t rvz = (int64_t)avz - bvz;
+    uint64_t s2 = (uint64_t)(rvx * rvx + rvz * rvz);
+    if (s2 > 0xFFFFFFFFull) s2 = 0xFFFFFFFFull;       /* isqrt takes u32 */
+    int32_t closing = (int32_t)td5_isqrt((uint32_t)s2);
+    int64_t si64 = mass_sum * closing * battle_ram_pct() / 100;
+    int32_t cap = battle_ram_cap();
+    if (si64 > cap) si64 = cap;
+    return (int32_t)si64;
+}
+
 static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
                                      int corner_idx, OBB_CornerData *corner,
                                      int32_t heading_target, int32_t impactForce)
@@ -6810,6 +6924,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         td5_arcade_slot_is_ghost((int)target->slot_index)) {
         return;
     }
+
+    /* [TRAFFIC BATTLE] Drive straight through wrecked traffic. */
+    if (battle_wreck_intangible(penetrator, target)) return;
 
     /* [#10 telemetry] A dispatched OBB corner contact = a real car-to-car
      * collision; flag both actors for this tick's edge-detector (idempotent —
@@ -7127,6 +7244,34 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     td5_ai_note_v2v_contact((int)B->slot_index, (int)A->slot_index);
 
     if (rejected) {
+        /* [TRAFFIC BATTLE 2026-06-28] A fast ANGLED / glancing crash into traffic
+         * registers as "separating" by the normal-impulse sign test and would
+         * bail here with no wreck — this is the user's "I hit cars at speed but
+         * it doesn't wreck because I'm not hitting them the right way". If a racer
+         * is closing on the traffic car FAST, total it anyway (score + break it
+         * down + a small pop so the wreck reads), then fall through to the normal
+         * separating return. The broken-down car then goes translucent +
+         * intangible (pass-through) like every other battle wreck. Deduped: once
+         * the victim is broken-down, td5_arcade_note_ram skips it and the pair is
+         * intangible next tick. */
+        int32_t si = battle_speed_impact(A, B, Avx, Avz, Bvx, Bvz,
+                                         (int64_t)mass_A + mass_B);
+        if (si >= td5_physics_npc_fatal_mag()) {
+            int sa = (int)A->slot_index, sb = (int)B->slot_index;
+            int a_is_racer = (sa >= 0 && sa < g_traffic_slot_base);
+            int aggressor  = a_is_racer ? sa : sb;
+            int victim     = a_is_racer ? sb : sa;
+            TD5_Actor *vic = a_is_racer ? B : A;
+            if (!td5_ai_actor_is_broken_down(victim)) {
+                td5_arcade_note_ram(aggressor, victim, si);   /* score (before break) */
+                td5_ai_mark_actor_broken_down(victim);        /* total it */
+                int32_t lift = si / 20;                       /* modest pop */
+                if (lift > 120000) lift = 120000;
+                if (vic->linear_velocity_y < lift) vic->linear_velocity_y = lift;
+                TD5_LOG_I(LOG_TAG, "battle_ram(reject): aggr=%d victim=%d impact=%d -> WRECK",
+                          aggressor, victim, si);
+            }
+        }
         /* Separating contact — push applied above, but no velocity impulse.
          * Original returns 0 (XOR EAX,EAX at 0x00407CCD / 0x00407E86). */
         TD5_LOG_I(LOG_TAG, "v2v_reject: slot_A=%d slot_B=%d side=%d cxA=%d czA=%d cxB=%d czB=%d imp=%d push=(%d,%d)",
@@ -7185,7 +7330,8 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * the struck region. No-op when [Game] CarDamage=0 (faithful sim unchanged).
      * Hit region is taken from the contact corner the solver already computed:
      * A's corner is (cx_A,cz_A) in A's frame; B's is (cx_B,cz_B) in B's frame
-     * (model axes: x=lateral +right, z=forward +front). */
+     * (model axes: x=lateral +right, z=forward +front). Uses the REAL impact (the
+     * actual contact force), BEFORE the battle boost below. */
     if (td5_damage_enabled()) {
         TD5_DamageHit hitA, hitB;
         hitA.lat = (cx_A > 0) - (cx_A < 0);
@@ -7196,6 +7342,26 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         hitB.is_side = (cx_B < 0 ? -cx_B : cx_B) > (cz_B < 0 ? -cz_B : cz_B);
         td5_damage_on_impact(A, impact_mag, &hitA);
         td5_damage_on_impact(B, impact_mag, &hitB);
+    }
+
+    /* [TRAFFIC BATTLE 2026-06-28] SPEED-based wreck trigger. impact_mag above is
+     * the NORMAL-projected impulse, so a fast GLANCING / corner crash into traffic
+     * barely registers and never crosses the wreck gate — the user's "I hit cars
+     * at speed but it won't wreck unless I hit them just right". For a
+     * racer-vs-traffic pair in battle, recompute the impact from the full
+     * pre-collision CLOSING speed (relative-velocity magnitude). Same
+     * (mass_A+mass_B)*velocity units as impact_mag, so it drops straight into the
+     * existing npc_fatal_mag gate + the scatter/lift below; take the larger so a
+     * hard crash at ANY angle totals the car. (Applied AFTER car-damage so the
+     * visual dents stay tied to the real contact force.) */
+    {
+        int32_t si = battle_speed_impact(A, B, Avx, Avz, Bvx, Bvz,
+                                         (int64_t)mass_A + mass_B);
+        if (si > impact_mag) {
+            TD5_LOG_I(LOG_TAG, "battle_ram: A=%d B=%d impact %d -> %d (speed wreck)",
+                      A->slot_index, B->slot_index, impact_mag, si);
+            impact_mag = si;
+        }
     }
 
     /* [#1 WRECK PUSH WINDOW 2026-06-21] A real ram on a broken-down (anchored)
@@ -7437,17 +7603,31 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * deterministic so every viewport sees the same cars — it free-slides
          * then recovers). Cops and pursued racers still wreck normally. */
         {
-            int fair = td5_game_mp_traffic_fair();
+            int fair   = td5_game_mp_traffic_fair();
+            int battle = td5_game_battle_mode_active();
             int sa = (int)A->slot_index, sb = (int)B->slot_index;
             int plain_a = (sa >= g_traffic_slot_base) &&
                           !td5_ai_actor_is_pursued(sa) && !td5_ai_cop_is_chasing(sa);
             int plain_b = (sb >= g_traffic_slot_base) &&
                           !td5_ai_actor_is_pursued(sb) && !td5_ai_cop_is_chasing(sb);
+            /* [TRAFFIC BATTLE 2026-06-28] Score the wreck BEFORE marking the
+             * victim broken-down, so td5_arcade_note_ram can dedup on the
+             * not-yet-broken victim (each destroyed traffic car counts once).
+             * Both directions; note_ram self-gates which side is a racer-vs-
+             * traffic fatal hit. No-op outside battle mode. */
+            td5_arcade_note_ram(sa, sb, impact_mag);   /* A rammed B */
+            td5_arcade_note_ram(sb, sa, impact_mag);   /* B rammed A */
             /* [POLICE 2026-06-24] A tough cop (hit below cop_gate) is NOT totalled
-             * — only a deliberate hard ram past 2.5x the traffic floor wrecks it. */
-            if ((a_is_npc || td5_ai_actor_is_pursued(sa)) && !(fair && plain_a) && !a_tough_cop)
+             * — only a deliberate hard ram past 2.5x the traffic floor wrecks it.
+             * [TRAFFIC BATTLE 2026-06-28] In battle mode plain traffic is always
+             * wreckable (the MP traffic-fair recover rule is ignored) so a
+             * destroyed car is marked broken-down — that flag is note_ram's dedup
+             * key, and a fresh kill stream is the whole point of the mode. */
+            int fair_a = fair && plain_a && !battle;
+            int fair_b = fair && plain_b && !battle;
+            if ((a_is_npc || td5_ai_actor_is_pursued(sa)) && !fair_a && !a_tough_cop)
                 td5_ai_mark_actor_broken_down(sa);
-            if ((b_is_npc || td5_ai_actor_is_pursued(sb)) && !(fair && plain_b) && !b_tough_cop)
+            if ((b_is_npc || td5_ai_actor_is_pursued(sb)) && !fair_b && !b_tough_cop)
                 td5_ai_mark_actor_broken_down(sb);
         }
         TD5_LOG_I(LOG_TAG, "v2v_heavy_scatter: A=%d B=%d mag=%d scatter=%d kick_ry=%d kick_p=%d rear_retain=%d "
@@ -7507,6 +7687,11 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
      * other ghost gate, so a ghost would still bump traffic without this. */
     if (td5_arcade_slot_is_ghost((int)a->slot_index) ||
         td5_arcade_slot_is_ghost((int)b->slot_index)) return;
+
+    /* [TRAFFIC BATTLE] Wrecked traffic is intangible here too — this crashed-car
+     * sphere resolver was a second path that still bumped wrecks (the user's
+     * "ghost/wrecked cars should not have collision"). */
+    if (battle_wreck_intangible(a, b)) return;
 
     int32_t radius_a = (int32_t)CDEF_S(a, CDEF_COLLISION_RADIUS);
     int32_t radius_b = (int32_t)CDEF_S(b, CDEF_COLLISION_RADIUS);
@@ -7871,6 +8056,10 @@ static int32_t v2v_depenetrate_pair(TD5_Actor *a, TD5_Actor *b)
     if (a && b && (td5_arcade_slot_is_ghost((int)a->slot_index) ||
                    td5_arcade_slot_is_ghost((int)b->slot_index))) return 0;
 
+    /* [TRAFFIC BATTLE] Don't push the player back out of a wrecked traffic car —
+     * wrecks are intangible in battle so you slide clean through them. */
+    if (battle_wreck_intangible(a, b)) return 0;
+
     /* Detect overlap at the cars' CURRENT positions (the faithful impulse and
      * earlier relaxation rounds may already have moved them). Raw 24.8 fp in;
      * the callee shifts internally. The pilot-trace emits inside obb_corner_test
@@ -7991,6 +8180,135 @@ void td5_physics_resolve_vehicle_contacts(void)
                       s_v2v_slot0_pair_count, s_v2v_slot0_obb_enter);
             s_v2v_slot0_pair_count = 0;
             s_v2v_slot0_obb_enter = 0;
+        }
+    }
+
+    /* [TRAFFIC BATTLE 2026-06-28] Reliable SWEPT wreck pass — runs FIRST, BEFORE
+     * the broadphase/impulse touches anything, so it reads each car's true
+     * PRE-collision velocity. (Running it last read the post-bounce velocity: a
+     * light car bounced off the traffic, the reconstructed path no longer crossed
+     * the car, and the sweep missed — which is exactly why heavier cars seemed to
+     * wreck more.) For each racer moving above a floor speed we run the REAL
+     * oriented-box test at NSUB+1 points along BOTH cars' paths this tick; a hit
+     * at ANY sub-step means the bodies actually touched, so we total the traffic
+     * car — independent of contact angle, frame-rate tunneling, AND car mass. The
+     * car then goes broken-down => intangible (battle_wreck_intangible) so the
+     * normal collision below passes the player straight through the husk. */
+    if (td5_game_battle_mode_active()) {
+        int base      = g_traffic_slot_base;
+        int tmax2     = (total < TD5_MAX_TOTAL_ACTORS) ? total : TD5_MAX_TOTAL_ACTORS;
+        int32_t mins  = battle_ram_min_speed();
+        int32_t cap   = battle_ram_cap();
+        int32_t lift0 = cap / 20; if (lift0 > 120000) lift0 = 120000;
+        int32_t air_vy = battle_airborne_vy();
+        /* Finer sub-sampling (12) so a fast HEAD-ON — where the cars cross in a
+         * fraction of a tick — isn't stepped over between samples (the user's
+         * "front-to-front aligned is harder to trigger"). */
+        const int NSUB = 12;
+        OBB_CornerData corners[8];
+        for (int rsl = 0; rsl < base; rsl++) {
+            TD5_Actor *rc = (TD5_Actor *)(g_actor_table_base + (size_t)rsl * TD5_ACTOR_STRIDE);
+            if (!rc->car_definition_ptr || rc->finish_time != 0) continue;
+            int32_t rvx = rc->linear_velocity_x, rvz = rc->linear_velocity_z;
+            uint64_t rs2 = (uint64_t)((int64_t)rvx * rvx + (int64_t)rvz * rvz);
+            if (rs2 > 0xFFFFFFFFull) rs2 = 0xFFFFFFFFull;
+            if ((int32_t)td5_isqrt((uint32_t)rs2) < mins) continue;   /* not moving */
+            int32_t rcx = rc->world_pos.x, rcz = rc->world_pos.z;     /* 24.8 */
+            int32_t ryaw = rc->euler_accum.yaw;
+            int32_t prad = (int32_t)CDEF_S(rc, CDEF_COLLISION_RADIUS);
+            int32_t hw_a, fz_a, rz_a;
+            actor_collision_box(rc, &hw_a, &fz_a, &rz_a);
+            for (int t = base; t < tmax2; t++) {
+                TD5_Actor *tr = (TD5_Actor *)(g_actor_table_base + (size_t)t * TD5_ACTOR_STRIDE);
+                if (!tr->car_definition_ptr) continue;
+                if (td5_ai_actor_is_broken_down(t)) continue;        /* already wrecked */
+                if (td5_ai_traffic_dynamic_parked(t)) continue;      /* despawned */
+                if (td5_ai_traffic_get_draw_alpha(t) == 0) continue; /* invisible */
+                int32_t tcx = tr->world_pos.x, tcz = tr->world_pos.z;
+                int32_t tvx = tr->linear_velocity_x, tvz = tr->linear_velocity_z;
+                int32_t tyaw = tr->euler_accum.yaw;
+                /* Coarse cull: skip far pairs (render-unit centres vs a generous
+                 * bound = bounding radii + one tick of both cars' travel). */
+                int32_t trad = (int32_t)CDEF_S(tr, CDEF_COLLISION_RADIUS);
+                int64_t cdx = (int64_t)(rcx >> 8) - (tcx >> 8);
+                int64_t cdz = (int64_t)(rcz >> 8) - (tcz >> 8);
+                int64_t coarse = (int64_t)prad + trad
+                               + (llabs((int64_t)rvx >> 8) + llabs((int64_t)tvx >> 8))
+                               + (llabs((int64_t)rvz >> 8) + llabs((int64_t)tvz >> 8));
+                if (cdx * cdx + cdz * cdz > coarse * coarse) continue;
+                /* Precise: REAL oriented-box test at NSUB+1 points along BOTH
+                 * cars' paths this tick. A hit at ANY sub-step = the bodies
+                 * actually touched. */
+                int hit = 0;
+                for (int k = 0; k <= NSUB && !hit; k++) {
+                    int32_t bk = NSUB - k;   /* back-offset weight: k=NSUB -> current pos */
+                    int32_t rax = rcx - (int32_t)(((int64_t)rvx * bk) / NSUB);
+                    int32_t raz = rcz - (int32_t)(((int64_t)rvz * bk) / NSUB);
+                    int32_t tax = tcx - (int32_t)(((int64_t)tvx * bk) / NSUB);
+                    int32_t taz = tcz - (int32_t)(((int64_t)tvz * bk) / NSUB);
+                    if (obb_corner_test(rc, tr, rax, raz, tax, taz, ryaw, tyaw, corners))
+                        hit = 1;
+                }
+                /* [aligned head-on fallback] The corner-in-box test can miss a
+                 * perfectly aligned edge-to-edge contact (no corner penetrates).
+                 * Catch it by the closest approach of the two centres over the
+                 * tick: if they come within the summed half-WIDTHS they are in the
+                 * same lateral line and crossing — a real head-on — without
+                 * wrecking a car a full lane over (whose centre stays >1 width). */
+                if (!hit) {
+                    int32_t hw_b, fz_b, rz_b;
+                    actor_collision_box(tr, &hw_b, &fz_b, &rz_b);
+                    int64_t p1x = (int64_t)(tcx >> 8) - (rcx >> 8);
+                    int64_t p1z = (int64_t)(tcz >> 8) - (rcz >> 8);
+                    int64_t relvx = (int64_t)(tvx >> 8) - (rvx >> 8);
+                    int64_t relvz = (int64_t)(tvz >> 8) - (rvz >> 8);
+                    int64_t p0x = p1x - relvx, p0z = p1z - relvz;
+                    int64_t sx = relvx, sz = relvz, cxx, czz;
+                    int64_t seg2 = sx * sx + sz * sz;
+                    if (seg2 <= 0) { cxx = p0x; czz = p0z; }
+                    else {
+                        int64_t tn = -(p0x * sx + p0z * sz);
+                        if (tn <= 0)         { cxx = p0x; czz = p0z; }
+                        else if (tn >= seg2) { cxx = p1x; czz = p1z; }
+                        else                 { cxx = p0x + (sx * tn) / seg2; czz = p0z + (sz * tn) / seg2; }
+                    }
+                    int64_t lat = (int64_t)((hw_a + hw_b) >> 8);
+                    if (cxx * cxx + czz * czz <= lat * lat) hit = 1;
+                }
+                if (!hit) continue;
+                td5_arcade_note_ram(rsl, t, cap);                    /* score (before break) */
+                td5_ai_mark_actor_broken_down(t);                    /* total it */
+                if (tr->linear_velocity_y < lift0) tr->linear_velocity_y = lift0;
+                TD5_LOG_I(LOG_TAG, "battle_wreck_sweep: racer=%d traffic=%d -> WRECK (swept OBB)", rsl, t);
+            }
+        }
+
+        /* [TRAFFIC BATTLE 2026-06-28] Airborne traffic = wrecked. A car launched
+         * into the air (vy above the threshold) counts as a kill (user: "trigger
+         * wreck when cars get thrown out in the air"). Attribute it to the nearest
+         * racer (the one that almost certainly knocked it up). */
+        for (int t = base; t < tmax2; t++) {
+            TD5_Actor *tr = (TD5_Actor *)(g_actor_table_base + (size_t)t * TD5_ACTOR_STRIDE);
+            if (!tr->car_definition_ptr) continue;
+            if (td5_ai_actor_is_broken_down(t)) continue;
+            if (td5_ai_traffic_dynamic_parked(t)) continue;
+            if (td5_ai_traffic_get_draw_alpha(t) == 0) continue;
+            int32_t vy = tr->linear_velocity_y; if (vy < 0) vy = -vy;
+            if (vy < air_vy) continue;
+            int near_r = -1; int64_t nbest = 0;
+            for (int rsl = 0; rsl < base; rsl++) {
+                TD5_Actor *rc = (TD5_Actor *)(g_actor_table_base + (size_t)rsl * TD5_ACTOR_STRIDE);
+                if (!rc->car_definition_ptr || rc->finish_time != 0) continue;
+                int64_t dx = (int64_t)(rc->world_pos.x >> 8) - (tr->world_pos.x >> 8);
+                int64_t dz = (int64_t)(rc->world_pos.z >> 8) - (tr->world_pos.z >> 8);
+                int64_t d2 = dx * dx + dz * dz;
+                if (near_r < 0 || d2 < nbest) { near_r = rsl; nbest = d2; }
+            }
+            if (near_r < 0) continue;
+            td5_arcade_note_ram(near_r, t, cap);
+            td5_ai_mark_actor_broken_down(t);
+            TD5_LOG_I(LOG_TAG, "battle_wreck_air: traffic=%d vy=%d -> WRECK (airborne, credit racer=%d)",
+                      t, tr->linear_velocity_y, near_r);
         }
     }
 

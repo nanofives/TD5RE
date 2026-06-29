@@ -426,12 +426,27 @@ typedef enum TD5_ScreenIndex {
  *  existing game_type / ConfigureGameTypeFlags flags at race init rather than
  *  overloading the 0..9 game-type enum. */
 typedef enum TD5_MpGameMode {
-    TD5_MP_MODE_RACE        = 0,  /* regular race (existing behaviour)            */
-    TD5_MP_MODE_TIME_TRIAL  = 1,  /* live simultaneous, no player-vs-player crash */
-    TD5_MP_MODE_CUP         = 2,  /* best-of-X series, points, optional teams     */
-    TD5_MP_MODE_COP_CHASE   = 3,  /* one designated cop chases the suspects       */
-    TD5_MP_MODE_COUNT       = 4
+    TD5_MP_MODE_RACE           = 0,  /* regular race (existing behaviour)            */
+    TD5_MP_MODE_TIME_TRIAL     = 1,  /* live simultaneous, no player-vs-player crash */
+    TD5_MP_MODE_CUP            = 2,  /* best-of-X series, points, optional teams     */
+    /* [TRAFFIC BATTLE 2026-06-28] Demolition-derby mode: a fixed-pace dynamic
+     * ONCOMING traffic stream pours onto the track and every racer scores by
+     * DESTROYING traffic cars (no rival racers, no cops). Placement is ignored —
+     * the winner is whoever wrecked the most (results sort by WRECKS). Two win
+     * conditions (battle_win_condition): MOST WRECKS (run to the track end) or
+     * CHECKPOINTS (a deadline that catches up, so you must keep crashing AND keep
+     * moving). Listed below CUP. Works in MP split-screen and solo-vs-traffic.
+     * PORT-ONLY. */
+    TD5_MP_MODE_TRAFFIC_BATTLE = 3,
+    TD5_MP_MODE_COP_CHASE      = 4,  /* one designated cop chases the suspects       */
+    TD5_MP_MODE_COUNT          = 5
 } TD5_MpGameMode;
+
+/** Traffic-battle win condition (battle_win_condition). */
+typedef enum TD5_BattleWinCondition {
+    TD5_BATTLE_WIN_MOST_WRECKS = 0, /* run to track end; most wrecks wins          */
+    TD5_BATTLE_WIN_CHECKPOINTS = 1  /* a catch-up deadline eliminates stoppers      */
+} TD5_BattleWinCondition;
 
 /** Cop-chase win/lose rule (mode-config screen). */
 typedef enum TD5_CopWinCondition {
@@ -519,6 +534,23 @@ typedef struct TD5_MpModeConfig {
      * Only consulted on the human-cop path (cop_is_ai==0, local split-screen).
      * Appended for a stable wire layout. */
     int32_t cop_random;
+    /* [TRAFFIC BATTLE 2026-06-28] Dynamic-traffic spawn cadence (ticks @30Hz)
+     * forced on for the battle stream. Lower = a denser, faster-refilling target
+     * stream. Seeded from TD5RE_BATTLE_SPAWN_PERIOD; replicated host->clients so
+     * every peer pours traffic at the identical pace (lockstep). Appended for a
+     * stable wire layout. */
+    int32_t battle_spawn_period;
+    /* [TRAFFIC BATTLE 2026-06-28] Item-box density tier for the battle (0=sparse,
+     * 1=normal, 2=dense, 3=mega) — feeds the arcade power-up spacing so a battle
+     * is awash with pickups. Replicated for lockstep. Appended for a stable wire
+     * layout. */
+    int32_t battle_powerup_density;
+    /* [TRAFFIC BATTLE 2026-06-28] Win condition: TD5_BattleWinCondition. 0 = MOST
+     * WRECKS (run to the track end), 1 = CHECKPOINTS (a deadline that creeps up
+     * the track and eliminates any racer it passes — you have to keep crashing
+     * but also keep moving). Replicated for lockstep. Appended for a stable wire
+     * layout. */
+    int32_t battle_win_condition;
 } TD5_MpModeConfig;
 
 /* ========================================================================

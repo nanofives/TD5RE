@@ -1828,10 +1828,16 @@ void td5_hud_draw_player_id_overlays(void)
 static int arcade_effect_nominal_frames(int effect)
 {
     switch (effect) {
-    case TD5_PU_NITRO:  return 180;
+    case TD5_PU_NITRO:  return 180;   /* master's +20% duration values */
     case TD5_PU_GHOST:  return 288;
     case TD5_PU_WRECK:  return 360;
     case TD5_PU_HAZARD: return 20;
+    /* [ARCADE EXPANSION 2026-06-28] new kinds (nominal = their apply_pickup default) */
+    case TD5_PU_SHIELD: return 300;
+    case TD5_PU_FREEZE: return 30;
+    case TD5_PU_MAGNET: return 240;
+    case TD5_PU_ROCKET: return 75;
+    case TD5_PU_REPAIR: return 30;
     default:            return 60;
     }
 }
@@ -1861,6 +1867,12 @@ void td5_hud_draw_arcade_chips(void)
         case TD5_PU_GHOST:  label = "GHOST";  col = 0xFFFFFFFFu; break;
         case TD5_PU_WRECK:  label = "WRECK";  col = 0xFFFF3020u; break;
         case TD5_PU_HAZARD: label = "HAZARD"; col = 0xFFFFB000u; break;
+        /* [ARCADE EXPANSION 2026-06-28] new kinds */
+        case TD5_PU_SHIELD: label = "SHIELD"; col = 0xFF40C0FFu; break;
+        case TD5_PU_FREEZE: label = "EMP";    col = 0xFF80FFF0u; break;
+        case TD5_PU_MAGNET: label = "MAGNET"; col = 0xFFFF40C0u; break;
+        case TD5_PU_ROCKET: label = "ROCKET"; col = 0xFFFF8020u; break;
+        case TD5_PU_REPAIR: label = "REPAIR"; col = 0xFF40FF60u; break;
         default: continue;
         }
 
@@ -1901,6 +1913,57 @@ void td5_hud_draw_arcade_chips(void)
         if (frac < 0.0f) frac = 0.0f;
         if (frac > 1.0f) frac = 1.0f;
         td5_vui_quad(cx, cy + chip_h - bar_h, chip_w * frac, bar_h, col, -1, 0, 0, 0, 0);
+    }
+}
+
+/* ========================================================================
+ * [TRAFFIC BATTLE 2026-06-28] Live "WRECKS N" indicator per viewport. Battle
+ * mode ignores placement — the only number that matters is how many traffic
+ * cars you have destroyed (td5_game_get_wanted_kills). Drawn top-centre of each
+ * pane (same place cop chase puts its ARRESTS scoreboard). No-op outside battle.
+ * SOURCE-PORT FEATURE.
+ * ======================================================================== */
+void td5_hud_draw_battle_wrecks(void)
+{
+    if (!td5_game_battle_mode_active()) return;
+    int views = s_view_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    for (int v = 0; v < views; v++) {
+        int slot = g_actor_slot_map[v];
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+
+        const TD5_HudViewLayout *vl = &s_view_layout[v];
+        float w = vl->vp_int_right - vl->vp_int_left;
+        if (w < 2.0f) continue;
+
+        int wrecks = td5_game_get_wanted_kills(slot);
+
+        if (td5_hudfont_ready()) {
+            float ts = (w / 640.0f) * 0.95f;
+            if (hud_dpi_scale_on()) ts *= hud_size_mul();
+            if (ts < 0.45f) ts = 0.45f;
+            if (ts > 1.50f) ts = 1.50f;
+            char buf[24];
+            snprintf(buf, sizeof buf, "WRECKS %d", wrecks);
+            td5_vui_text_centered(vl->center_x, vl->vp_int_top + 8.0f, buf,
+                                  0xFFFFC040u, ts, ts);   /* amber-gold */
+            /* [CHECKPOINTS] Deadline gap — how many spans ahead of the chaser
+             * (turns red as it closes in; "CAUGHT" once passed). */
+            if (td5_game_battle_chase_active()) {
+                int gap = td5_game_battle_chase_gap(slot);
+                char gb[24]; uint32_t gc;
+                if (gap <= 0)        { snprintf(gb, sizeof gb, "CAUGHT");        gc = 0xFFFF3030u; }
+                else if (gap < 40)   { snprintf(gb, sizeof gb, "DEADLINE %d", gap); gc = 0xFFFF6030u; }
+                else                 { snprintf(gb, sizeof gb, "DEADLINE %d", gap); gc = 0xFF60FF80u; }
+                td5_vui_text_centered(vl->center_x, vl->vp_int_top + 8.0f + 18.0f * ts,
+                                      gb, gc, ts * 0.85f, ts * 0.85f);
+            }
+        } else {
+            td5_hud_queue_text(0, (int)vl->center_x, (int)(vl->vp_int_top + 8.0f), 1,
+                               "WRECKS %d", wrecks);
+        }
     }
 }
 

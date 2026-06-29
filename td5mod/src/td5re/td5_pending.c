@@ -30,12 +30,18 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Traffic Battle: MP split-screen mode (below CUP) + solo (TD5RE_BATTLE=1)",
+    "Traffic Battle: WIN option MOST WRECKS or CHECKPOINTS (catch-up deadline)",
+    "Traffic Battle: oncoming traffic, no rivals/cops, spawn mid-track",
+    "Traffic Battle: crashes wreck at ANY angle/speed; airborne cars wreck too",
+    "Traffic Battle: wrecked cars go translucent + pass-through (drive thru)",
+    "Traffic Battle: live WRECKS HUD; results sort/label by WRECKS",
+    "Arcade: new power-ups SHIELD/EMP-FREEZE/MAGNET/ROCKET/REPAIR (HAZARD off)",
     "Game Options: CAR TOUGHNESS + DEFORMATION levels (Low/Norm/High)",
     "Car damage ON all races: dents+scuff, smoke, wreck, finish orbit cam",
     "MP car select: host X/TAB menu sets everyone's car (same/slow/avg/fast)",
     "MP cup: player 1 keeps chosen car on race 2+ (no pre-cup car revert)",
     "ARCADE: power-up timer bar shows the full duration (not last secs)",
-    "ARCADE: HAZARD (oil-slick) power-up removed from the spawn pool",
     "ARCADE: item boxes spawn one lane closer to track centre",
     "ARCADE: power-up effects last 20% longer (NITRO/GHOST/WRECK)",
     "Power-ups now ARCADE-only: SIMULATION shows no item boxes",
