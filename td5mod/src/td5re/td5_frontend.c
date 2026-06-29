@@ -3522,6 +3522,28 @@ void frontend_init_race_schedule(void) {
     if (s_mp_flow && !g_td5.network_active) {
         slot_ext_id[0]  = s_mp_player_car[0];
         slot_variant[0] = s_mp_player_paint[0];
+        /* [MP CUP CAR CARRYOVER FIX 2026-06-28] Re-anchor slot 0's ACTUAL driven
+         * car to player 1's MP pick. For a non-network race td5_game InitRace
+         * (td5_game.c:2440) loads slot 0 from g_td5.car_index, NOT from
+         * ai_car_indices[0]/slot_ext_id[0]. g_td5.car_index was set above (~3236)
+         * from s_selected_car, but the MP-cup post-race "NEXT RACE" path restores
+         * s_selected_car from the once-only SP Race-Again snapshot (s_snap_car,
+         * td5_fe_race.c). If that snapshot was captured on a race BEFORE the cup
+         * (s_results_rerace_flag is never re-armed on MP-cup entry — only
+         * frontend_reset_sp_race_carryover does that, for SP), player 1 reverts to
+         * the pre-cup car on cup race 2+ while slots 1+ (read from ai_car_indices)
+         * stay correct. Pin both back to the live MP selection so the SP snapshot
+         * can never leak into the local MP slot 0. Inert for the normal flow where
+         * s_selected_car already equals s_mp_player_car[0]. */
+        if (s_mp_player_car[0] >= 0 && s_mp_player_car[0] < TD5_CAR_COUNT) {
+            if (g_td5.car_index != s_mp_player_car[0])
+                TD5_LOG_I(LOG_TAG,
+                          "MP slot0 car re-anchored to player1 pick %d (was car_index=%d) "
+                          "[pre-cup snapshot leak guard]",
+                          s_mp_player_car[0], g_td5.car_index);
+            s_selected_car  = s_mp_player_car[0];
+            g_td5.car_index = s_mp_player_car[0];
+        }
         /* Each human slot is painted with that player's chosen TD6 colour (no-op
          * for TD5 cars, which have no carmask). -1 = leave the default. */
         td5_asset_set_human_td6_color(0, s_mp_player_color[0]);
