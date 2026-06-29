@@ -1093,6 +1093,17 @@ int td5_game_tick(void) {
                               "results (TD5RE_INJECT_POSTRACE)", g_td5.ini.start_screen);
                 }
             }
+            /* [layout preview harness 2026-06-29] TD5RE_MP_SIMUL_PREVIEW=N with
+             * StartScreen=20 (CAR_SELECTION) jumps straight to the N-player
+             * simultaneous car-select grid so the split-screen pane layout can be
+             * screenshotted without N controllers. See frontend_mp_simul_preview_setup. */
+            if (g_td5.ini.start_screen == TD5_SCREEN_CAR_SELECTION) {
+                const char *mpv = getenv("TD5RE_MP_SIMUL_PREVIEW");
+                if (mpv && mpv[0]) {
+                    extern void frontend_mp_simul_preview_setup(int);
+                    frontend_mp_simul_preview_setup(atoi(mpv));
+                }
+            }
 #endif
             td5_frontend_set_screen((TD5_ScreenIndex)g_td5.ini.start_screen);
             g_td5.ini.start_screen = -1;  /* one-shot */

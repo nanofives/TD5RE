@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Split-screen car select redesigned for 5+ players: a" },
+    { CL_ITEM,    "  big car preview on top, then the buttons and the" },
+    { CL_ITEM,    "  SPEED / ACCEL / HANDLING bars side by side so both" },
+    { CL_ITEM,    "  stay readable. Buttons shrink with the pane (7-9" },
+    { CL_ITEM,    "  players) to keep the car big. Labels tidied" },
+    { CL_ITEM,    "  (AUTO, no MORE STATS button in this mode)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "June 28" },
     { CL_ITEM,    "Multiplayer car select: the host can now press X / TAB" },
     { CL_ITEM,    "  to open a host-only menu that sets EVERYONE's car -" },
