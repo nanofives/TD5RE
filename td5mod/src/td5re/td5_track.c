@@ -19,6 +19,7 @@
 #include "td5_asset.h"
 #include "td5_physics.h"
 #include "td5_ai.h"
+#include "td5_game.h"   /* td5_game_drag_field_size() for drag dynamic widening */
 #include "td5_platform.h"
 #include "td5_render.h"
 #include "td5_camera.h"
@@ -136,6 +137,11 @@ static size_t       s_strip_blob_size = 0;
 /** Resolved runtime pointers from STRIP.DAT header */
 static TD5_StripSpan   *s_span_array = NULL;
 static TD5_StripVertex *s_vertex_table = NULL;
+
+/** [DRAG DYNAMIC WIDEN 2026-06-27] Synthesised wider lane geometry for the
+ * dynamic drag race. When non-NULL, s_vertex_table points HERE (a malloc'd
+ * table) instead of into s_strip_blob; freed on every track (re)load. */
+static TD5_StripVertex *s_drag_synth_vertices = NULL;
 static int              s_span_count = 0;
 static int              s_aux_count = 0;
 static int              s_secondary_count = 0;
@@ -2290,6 +2296,124 @@ static int build_strip_display_lists(void)
 }
 
 /* ========================================================================
+ * Drag race dynamic widening (Phase 1)
+ * ======================================================================== */
+
+static int16_t drag_clamp_i16(int v)
+{
+    if (v >  32767) return  (int16_t) 32767;
+    if (v < -32768) return  (int16_t)-32768;
+    return (int16_t)v;
+}
+
+/**
+ * [DRAG DYNAMIC WIDEN 2026-06-27] Re-spread every span's lane geometry to
+ * `target_lanes` lanes so the drag strip visibly widens with the field size.
+ *
+ * The drag strip (level030) is a perfectly UNIFORM straight: every span is
+ * type 1 with 4 lanes; the left_vertex_index / right_vertex_index runs are the
+ * span's ENTRY / EXIT cross-sections (5 points across the width, ~1500u apart in
+ * X; Y and Z are constant within a run). We rebuild every span's two runs as
+ * (target_lanes+1) points re-spread in X, CENTERED on the original centerline,
+ * keeping each run's Y/Z byte-exact. That preserves the forward layout exactly
+ * (zero risk) and the procedural road mesh (build_span_strip_display_list loops
+ * over lane_count) widens the visible road for free. Collision rails, the lane
+ * walker, and spawn placement all address vertices via left/right_vertex_index +
+ * sub_lane, so repointing them keeps every consumer consistent.
+ *
+ * Safety: only applied when EVERY span is type 1 (true for the drag strip); a
+ * normal/branched track bails and stays faithful. Called from the strip load
+ * path before camera-bind / display-list build. Returns 1 if widened.
+ */
+static int td5_track_drag_apply_geometry(int target_lanes)
+{
+    int i;
+    size_t w, total_verts;
+    TD5_StripVertex *nv;
+
+    if (!s_span_array || !s_vertex_table || s_span_count <= 0)
+        return 0;
+    if (target_lanes < 2) target_lanes = 2;
+    if (target_lanes > 8) target_lanes = 8;
+
+    /* Only re-spread a uniform type-1 strip. */
+    for (i = 0; i < s_span_count; i++) {
+        if (s_span_array[i].span_type != 1) {
+            TD5_LOG_W(LOG_TAG,
+                      "drag widen: span %d type=%d (non-uniform) -> leaving track faithful",
+                      i, s_span_array[i].span_type);
+            return 0;
+        }
+    }
+
+    total_verts = (size_t)s_span_count * (size_t)(target_lanes + 1) * 2u;
+    nv = (TD5_StripVertex *)malloc(total_verts * sizeof(TD5_StripVertex));
+    if (!nv) {
+        TD5_LOG_E(LOG_TAG, "drag widen: OOM for %zu vertices", total_verts);
+        return 0;
+    }
+
+    w = 0;
+    for (i = 0; i < s_span_count; i++) {
+        TD5_StripSpan *sp = &s_span_array[i];
+        int L0 = span_lane_count(sp);
+        const TD5_StripVertex *e, *x;
+        int step, k;
+        double center_e, center_x;
+        int ey, ez, xy, xz;
+        size_t entry_base, exit_base;
+        uint8_t *b3;
+
+        if (L0 < 1) L0 = 1;
+        e = &s_vertex_table[sp->left_vertex_index];   /* entry cross-section */
+        x = &s_vertex_table[sp->right_vertex_index];  /* exit  cross-section */
+
+        /* Lane width (X step) + centerline X from the original runs. */
+        step = (int)e[1].x - (int)e[0].x;
+        if (step == 0) step = 1500;
+        center_e = ((double)e[0].x + (double)e[L0].x) * 0.5;
+        center_x = ((double)x[0].x + (double)x[L0].x) * 0.5;
+        ey = (int)e[0].y; ez = (int)e[0].z;   /* constant within the entry run */
+        xy = (int)x[0].y; xz = (int)x[0].z;   /* constant within the exit  run */
+
+        entry_base = w;
+        for (k = 0; k <= target_lanes; k++) {
+            double off = ((double)k - (double)target_lanes * 0.5) * (double)step;
+            nv[w].x = drag_clamp_i16((int)lround(center_e + off));
+            nv[w].y = drag_clamp_i16(ey);
+            nv[w].z = drag_clamp_i16(ez);
+            w++;
+        }
+        exit_base = w;
+        for (k = 0; k <= target_lanes; k++) {
+            double off = ((double)k - (double)target_lanes * 0.5) * (double)step;
+            nv[w].x = drag_clamp_i16((int)lround(center_x + off));
+            nv[w].y = drag_clamp_i16(xy);
+            nv[w].z = drag_clamp_i16(xz);
+            w++;
+        }
+
+        sp->left_vertex_index  = (uint16_t)entry_base;
+        sp->right_vertex_index = (uint16_t)exit_base;
+        /* byte +0x03: low nibble = lane count, keep high nibble (elevation step). */
+        b3 = &((uint8_t *)sp)[3];
+        *b3 = (uint8_t)((*b3 & 0xF0) | (target_lanes & 0x0F));
+    }
+
+    /* Repoint to the synthesised table; the ORIGINAL run lives inside
+     * s_strip_blob and is not freed here. A prior synth table (track reload)
+     * was already freed at the top of load_strip. */
+    s_drag_synth_vertices = nv;
+    s_vertex_table        = nv;
+    g_strip_vertex_base   = nv;
+
+    TD5_LOG_I(LOG_TAG,
+              "drag widen: %d spans re-spread to %d lanes (%zu synth verts)",
+              s_span_count, target_lanes, total_verts);
+    return 1;
+}
+
+/* ========================================================================
  * STRIP.DAT Loading (0x444070 BindTrackStripRuntimePointers)
  * ======================================================================== */
 
@@ -2301,6 +2425,12 @@ int td5_track_load_strip(const void *data, size_t size)
     if (s_strip_blob) {
         free(s_strip_blob);
         s_strip_blob = NULL;
+    }
+    /* [DRAG DYNAMIC WIDEN] drop any synthesised wide-lane table from the
+     * previous track so the next load starts from the real blob vertices. */
+    if (s_drag_synth_vertices) {
+        free(s_drag_synth_vertices);
+        s_drag_synth_vertices = NULL;
     }
     s_strip_blob_size = 0;
     s_span_array = NULL;
@@ -2427,6 +2557,17 @@ int td5_track_load_strip(const void *data, size_t size)
      * to make a single loop, on the premise that branches were undrivable displaced
      * corridors. Branches are connected and drivable (faithful path), so the links
      * are kept and the engine walks them like native TD5. */
+
+    /* [DRAG DYNAMIC WIDEN 2026-06-27] In drag race, re-spread the uniform drag
+     * strip to one lane per car (field size). Done BEFORE bind/camera/display
+     * so every downstream consumer sees the widened geometry. No-op (faithful)
+     * on any non-uniform track even if the flag is set. */
+    if (g_td5.drag_race_enabled) {
+        int lanes = td5_game_drag_field_size();
+        TD5_LOG_I(LOG_TAG, "drag widen: requesting %d lanes (humans=%d ai=%d)",
+                  lanes, g_td5.num_human_players, g_td5.num_ai_opponents);
+        td5_track_drag_apply_geometry(lanes);
+    }
 
     /* Bind runtime pointers (patch sentinels) */
     td5_track_bind_runtime_pointers();
@@ -7450,6 +7591,7 @@ int td5_track_init(void)
 
     s_span_array = NULL;
     s_vertex_table = NULL;
+    s_drag_synth_vertices = NULL;   /* freed by shutdown/load; init starts fresh */
     s_span_count = 0;
     s_strip_blob = NULL;
     s_strip_blob_size = 0;
@@ -7486,6 +7628,10 @@ void td5_track_shutdown(void)
     if (s_strip_blob) {
         free(s_strip_blob);
         s_strip_blob = NULL;
+    }
+    if (s_drag_synth_vertices) {
+        free(s_drag_synth_vertices);
+        s_drag_synth_vertices = NULL;
     }
     s_strip_blob_size = 0;
     s_span_array = NULL;

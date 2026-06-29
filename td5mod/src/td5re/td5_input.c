@@ -22,6 +22,7 @@
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_game.h"
+#include "td5_track.h"   /* td5_track_get_span_lane_world() for drag lane-change steer */
 #include "td5_camera.h"
 #include "td5_ai.h"
 #include "td5_save.h"
@@ -116,6 +117,31 @@ static int16_t s_analog_y[TD5_MAX_RACER_SLOTS];
 
 /** Per-player steering command (maps to actor+0x30C). */
 static int32_t s_steering_cmd[TD5_MAX_RACER_SLOTS];
+
+/* [DRAG LANE-CHANGE STEER — Phase 2 2026-06-27] Per-human-slot target lane and
+ * previous L/R state for edge detection. target_lane = -1 means "uninitialised"
+ * (lazily set to the car's spawn lane on the first drag tick). Reset between
+ * races by td5_input_drag_reset(). */
+static int     s_drag_target_lane[TD5_MAX_RACER_SLOTS];
+static uint8_t s_drag_prev_left[TD5_MAX_RACER_SLOTS];
+static uint8_t s_drag_prev_right[TD5_MAX_RACER_SLOTS];
+
+/* [DRAG + LANE ASSIST] The lane the player has chosen via L/R taps (the lane the
+ * aggressive lane-assist should steer toward). -1 = not yet set. */
+int td5_input_drag_target_lane(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return -1;
+    return s_drag_target_lane[slot];
+}
+
+void td5_input_drag_reset(void)
+{
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        s_drag_target_lane[i] = -1;
+        s_drag_prev_left[i]   = 0;
+        s_drag_prev_right[i]  = 0;
+    }
+}
 
 /** Per-player steering ramp accumulator (actor+0x33A). */
 static int16_t s_steer_ramp[TD5_MAX_RACER_SLOTS];
@@ -1814,6 +1840,39 @@ void td5_input_update_player_control(int slot)
              * lock-up. Other input fields (throttle, brake, gearbox) are
              * unaffected because AI writes them as absolute values after
              * input runs, so the input pre-write is overwritten. */
+            /* [DRAG LANE-CHANGE 2026-06-29 — lane-assist] In drag race a human's
+             * LEFT/RIGHT taps pick a TARGET LANE; the aggressive lane-assist
+             * (td5_laneassist_apply, run from physics) steers the car into it with
+             * a capped, damped pure-pursuit yaw (no spin, no shake). The raw wheels
+             * carry NO steering input — the aid does all the steering. Tap anytime;
+             * each edge moves the target one lane and the aid re-aims smoothly.
+             * Knob: TD5RE_DRAG_AUTOSTEER=0 -> free-steer on the wide track instead. */
+            if (g_td5.drag_race_enabled && slot < g_td5.num_human_players) {
+                const char *as = getenv("TD5RE_DRAG_AUTOSTEER");
+                if (!as || as[0] != '0') {
+                    int field    = td5_game_drag_field_size();
+                    int cur_lane = (int)*(int8_t *)(a + 0x8C);    /* derived sub_lane */
+                    int l_now    = (bits & TD5_INPUT_STEER_LEFT)  ? 1 : 0;
+                    int r_now    = (bits & TD5_INPUT_STEER_RIGHT) ? 1 : 0;
+                    int l_edge   = (l_now && !s_drag_prev_left[slot])  ? 1 : 0;
+                    int r_edge   = (r_now && !s_drag_prev_right[slot]) ? 1 : 0;
+                    s_drag_prev_left[slot]  = (uint8_t)l_now;
+                    s_drag_prev_right[slot] = (uint8_t)r_now;
+
+                    if (s_drag_target_lane[slot] < 0)
+                        s_drag_target_lane[slot] = cur_lane;     /* lazy init = spawn lane */
+
+                    if (l_edge ^ r_edge) {                       /* one lane per tap */
+                        int nt = s_drag_target_lane[slot] + (r_edge ? 1 : -1);
+                        if (nt < 0) nt = 0;
+                        if (nt > field - 1) nt = field - 1;
+                        s_drag_target_lane[slot] = nt;
+                    }
+
+                    s_steering_cmd[slot] = 0;                    /* lane-assist steers */
+                }
+            }
+
             if (!(slot == 0 && g_td5.ini.player_is_ai)) {
                 *(int32_t *)(a + 0x30C) = s_steering_cmd[slot];
             }

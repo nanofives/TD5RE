@@ -307,4 +307,10 @@ int     td5_game_get_wanted_target_slot(void);
  * stream from this instead of the shared CRT rand(). */
 uint32_t td5_game_get_race_seed(void);
 
+/* [DRAG DYNAMIC FIELD] Number of cars / track lanes for a dynamic drag race,
+ * = clamp(num_human + num_ai, 2, 8). Read by both the drag slot/spawn logic
+ * (td5_game.c) and the track lane-widener (td5_track.c). See knobs in the
+ * definition. */
+int td5_game_drag_field_size(void);
+
 #endif /* TD5_GAME_H */

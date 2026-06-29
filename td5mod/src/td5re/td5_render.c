@@ -1475,6 +1475,17 @@ static int s_banner_align_log     = 0;  /* throttle the per-mesh align log */
 static float s_banner_vshift_x    = 0.0f;
 #define TD6_BANNER_OVERHEAD_Y 1250.0f   /* banner panels sit at Y~2500-4000; ground plaza at Y~0 */
 
+/* [DRAG WIDE ROAD 2026-06-28] Lateral (X) scale applied to LEVEL geometry verts
+ * during the drag race, so the visible asphalt / borders / start+finish banner
+ * physically widen with the field. The drag strip's road meshes are centred at
+ * model X=0 (origin (0,0,0), bounding-centre X~0), so scaling pos_x about 0
+ * widens the road about its centreline. Scale = field/4 makes the asphalt width
+ * match the N-lane navigation strip exactly, so cars sit one-per-lane on real
+ * road. 1.0 = no scaling (every non-drag track, and the reset state). Set at the
+ * top of the level pass, applied in td5_render_transform_mesh_vertices, reset to
+ * 1.0 after the pass so it never leaks into car / sky / HUD transforms. */
+static float s_drag_road_scale    = 1.0f;
+
 static int td6_is_banner_page(int page)
 {
     int lvl = g_active_td6_level;
@@ -2404,6 +2415,7 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
     float bvx = s_banner_vshift_x;
     const float *ddx = s_deform_dx, *ddy = s_deform_dy, *ddz = s_deform_dz;
     int dcount = (ddx && ddy && ddz) ? s_deform_count : 0;
+    float dsx = s_drag_road_scale;   /* [DRAG WIDE ROAD] lateral widen of level geom */
     for (int i = 0; i < count; i++) {
         float px = verts[i].pos_x;
         float py = verts[i].pos_y;
@@ -2411,6 +2423,9 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
 
         if (bvx != 0.0f && py >= TD6_BANNER_OVERHEAD_Y)
             px += bvx;
+        /* [DRAG WIDE ROAD] widen the road about its centreline (model X=0). */
+        if (dsx != 1.0f)
+            px *= dsx;
 
         /* [CAR DAMAGE] add this slot's accumulated model-space dent (local only). */
         if (i < dcount) {
@@ -3093,6 +3108,31 @@ void td5_render_span_display_list(void *display_list_block)
     }
     s_level_pass_active = 1;
 
+    /* [DRAG WIDE ROAD 2026-06-28] During a drag race, widen the visible level
+     * geometry (asphalt, borders, start/finish banner) laterally so the road
+     * physically scales with the field. Road meshes are centred at model X=0, so
+     * a pos_x scale about 0 widens about the centreline. Scale = field/4 keeps
+     * the asphalt width equal to the N-lane navigation strip (cars stay one per
+     * lane on real road). Knobs: TD5RE_DRAG_WIDEN_ROAD=0 disables; TD5RE_DRAG_
+     * ROAD_SCALE=f forces an exact factor (else auto = field/4, clamped). */
+    s_drag_road_scale = 1.0f;
+    if (g_td5.drag_race_enabled) {
+        const char *wr = getenv("TD5RE_DRAG_WIDEN_ROAD");
+        if (!wr || wr[0] != '0') {
+            const char *rs = getenv("TD5RE_DRAG_ROAD_SCALE");
+            float scale;
+            if (rs && rs[0]) {
+                scale = (float)atof(rs);
+            } else {
+                int field = td5_game_drag_field_size();
+                scale = (float)field / 4.0f;   /* original drag strip = 4 lanes */
+            }
+            if (scale < 1.0f) scale = 1.0f;
+            if (scale > 4.0f) scale = 4.0f;
+            s_drag_road_scale = scale;
+        }
+    }
+
     for (int i = 0; i < count; i++) {
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
         if (!mesh || (uintptr_t)mesh < 0x100000u || !td5_track_is_valid_mesh_ptr(mesh)) {
@@ -3323,6 +3363,7 @@ void td5_render_span_display_list(void *display_list_block)
     s_td6_banner_remap_active = 0;  /* [reverse banners] level-geometry pass only */
     s_level_pass_active = 0;        /* [banners] one-sided cull off outside level geometry */
     s_banner_vshift_x = 0.0f;       /* [START-banner align] never leak into sky/car/other mesh transforms */
+    s_drag_road_scale = 1.0f;       /* [DRAG WIDE ROAD] never leak the lateral widen into car/sky/HUD */
 
     if ((s_debug_dl_calls % 500) == 1) {
         TD5_LOG_I(LOG_TAG,

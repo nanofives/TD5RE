@@ -377,10 +377,15 @@ void td5_arcade_init_race(void) {
     /* Game Options "POWER-UPS" toggle: when off, the wild ARCADE collision/launch
      * still applies (that's the DYNAMICS choice) but NO item boxes / pickups /
      * hazards are placed. s_active stays 1; s_pad_count just stays 0. */
-    if (g_td5.ini.powerups == 0) {
+    /* [DRAG 2026-06-28] Drag race force-overrides power-ups OFF regardless of the
+     * Game Options toggle — a clean lane-change sprint, no item boxes / pickups /
+     * hazards. (The dynamics choice still decides arcade-vs-sim collisions.) */
+    if (g_td5.ini.powerups == 0 || g_td5.drag_race_enabled) {
         s_box_half = 0;
         s_lane_w = 0;
-        TD5_LOG_I(LOG_TAG, "init: ARCADE on but POWER-UPS disabled (Game Options) — no item boxes");
+        TD5_LOG_I(LOG_TAG, "init: %s — no item boxes/hazards",
+                  g_td5.drag_race_enabled ? "DRAG RACE (power-ups force-off override)"
+                                          : "ARCADE on but POWER-UPS disabled (Game Options)");
         return;
     }
 

@@ -2243,13 +2243,25 @@ int td5_game_init_race_session(void) {
      * slot 1 stays state=0 (AI in SP) or state=1 (P2 in 2P split) — making
      * the 2-pass CarSelect actually produce a 2-car race. */
     if (g_td5.drag_race_enabled) {
-        int decoration_start = 2;
+        /* [DRAG DYNAMIC FIELD 2026-06-27] One active car per lane: the field
+         * scales with humans+AI (td5_game_drag_field_size), and the track is
+         * widened to the same count in td5_track_drag_apply_geometry. Slots
+         * 0..field-1 keep their base-init state (slot 0 human, the rest AI, and
+         * split-screen humans 1..N), slots field..MAX become decoration. The
+         * per-slot asset loop below preps a car for every active slot. */
+        int decoration_start = td5_game_drag_field_size();
+        if (decoration_start < 2) decoration_start = 2;
+        if (decoration_start > TD5_MAX_RACER_SLOTS) decoration_start = TD5_MAX_RACER_SLOTS;
         for (int i = decoration_start; i < TD5_MAX_RACER_SLOTS; i++) {
             s_slot_state[i].state = 3;
         }
+        /* [DRAG Phase 2] Fresh lane-change state so each car aims at its spawn
+         * lane (lazy-init picks up the derived sub_lane on the first drag tick). */
+        td5_input_drag_reset();
         TD5_LOG_I(LOG_TAG,
-                  "Drag race: slot 1 active (slot1.state=%d), slots %d..5 decoration (split=%d)",
-                  s_slot_state[1].state, decoration_start, g_td5.split_screen_mode);
+                  "Drag race: %d active racers (one per lane), slots %d..%d decoration (split=%d)",
+                  decoration_start, decoration_start, TD5_MAX_RACER_SLOTS - 1,
+                  g_td5.split_screen_mode);
     }
     /* Cop Chase (game_type 8): original sets g_racerCount=2 for all non-zero
      * game types [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60:
@@ -3456,20 +3468,24 @@ int td5_game_init_race_session(void) {
              * to the right of slot 0's lane=1; level030.zip provides 3+
              * lanes, so lane=2 is a valid drag-strip lane. */
             if (drag_mode_spawn) {
-                if (slot == 0) {
+                /* [DRAG DYNAMIC FIELD 2026-06-27] Line every active car up at the
+                 * start line (span 115), one per lane, spread left-to-right across
+                 * the widened road. The track was widened to `field` lanes, so
+                 * lane = slot maps each racer to its own lane (NFS-Underground
+                 * grid). Decoration slots park back at the strip head. */
+                int field = td5_game_drag_field_size();
+                if (field < 2) field = 2;
+                if (slot < field) {
                     span_index = 115;
-                    sub_lane = 1;
-                } else if (slot == 1) {
-                    span_index = 115;
-                    sub_lane = 2;
+                    sub_lane = slot;                      /* lanes 0..field-1 */
                 } else {
                     span_index = 1;
-                    sub_lane = slot - 1;
+                    sub_lane = (slot - field) % field;    /* parked, spread */
                 }
                 actor_span = span_index;  /* drag hardcodes span; actor gets that value */
                 TD5_LOG_I(LOG_TAG,
-                          "Drag spawn override: slot=%d span=%d lane=%d",
-                          slot, span_index, sub_lane);
+                          "Drag spawn override: slot=%d span=%d lane=%d (field=%d)",
+                          slot, span_index, sub_lane, field);
             }
 
             /* [CUSTOM CIRCUIT GRID WRAP] A circuit with a low start_span (e.g. a
@@ -4053,6 +4069,40 @@ int td5_game_init_race_session(void) {
                           ci,
                           (unsigned)s_active_checkpoint.checkpoints[ci].span_threshold,
                           (unsigned)s_active_checkpoint.checkpoints[ci].time_bonus);
+            }
+
+            /* [DRAG DYNAMIC LENGTH 2026-06-28 — Phase 3] Make the drag race
+             * longer by pushing the finish line down the EXISTING road. The
+             * drag strip (level030) is physically far longer than the race uses:
+             * the finish checkpoint sits at span ~204 but the same straight,
+             * uniform type-1 road (already widened by Phase 1) continues to
+             * ~span 299. So we just raise the finish threshold — literally
+             * reusing the same repeated spans/textures, no geometry duplication.
+             * TD5RE_DRAG_LENGTH multiplies the race distance (1.0 = vanilla;
+             * 2.0 ~= double), clamped to the road before the end sentinel. */
+            if (g_td5.drag_race_enabled && s_active_checkpoint.checkpoint_count > 0) {
+                const char *ls = getenv("TD5RE_DRAG_LENGTH");
+                double mult = (ls && ls[0]) ? atof(ls) : 1.0;
+                if (mult < 1.0) mult = 1.0;
+                if (mult > 4.0) mult = 4.0;
+                if (mult > 1.0) {
+                    int last        = (int)s_active_checkpoint.checkpoint_count - 1;
+                    int base_finish = (int)s_active_checkpoint.checkpoints[last].span_threshold;
+                    int start       = 115;   /* drag spawn span (see drag spawn override) */
+                    int base_len    = base_finish - start;
+                    if (base_len < 1) base_len = base_finish;
+                    int new_finish  = start + (int)(mult * base_len + 0.5);
+                    /* Clamp to the last forward span before the wrap/end sentinel. */
+                    int ring = g_td5.track_span_ring_length;
+                    int cap  = (ring > 4) ? (ring - 2) : base_finish;
+                    if (new_finish > cap) new_finish = cap;
+                    if (new_finish > base_finish) {
+                        s_active_checkpoint.checkpoints[last].span_threshold = (uint16_t)new_finish;
+                        TD5_LOG_I(LOG_TAG,
+                                  "Drag length: x%.2f finish span %d -> %d (start=%d cap=%d ring=%d)",
+                                  mult, base_finish, new_finish, start, cap, ring);
+                    }
+                }
             }
         } else {
             TD5_LOG_W(LOG_TAG, "Track index %d out of range, no checkpoint data", tidx);
@@ -8326,6 +8376,40 @@ static int active_racer_count(void) {
     }
     if (n < 1) n = 1;                           /* slot 0 always participates */
     if (n > TD5_MAX_RACER_SLOTS) n = TD5_MAX_RACER_SLOTS;
+    return n;
+}
+
+/* [DRAG DYNAMIC FIELD 2026-06-27] How many cars — and therefore how many track
+ * lanes — a dynamic drag race uses. Scales with the configured field
+ * (humans + AI opponents), clamped to [2, max]. This is the SINGLE source of
+ * truth: the track lane-widener (td5_track_drag_apply_geometry) and the drag
+ * slot/decoration + spawn logic all read THIS, so the road width and the number
+ * of racers can never disagree. NFS-Underground-style: a lane per car.
+ * Knobs:
+ *   TD5RE_DRAG_DYNAMIC=0   disable widening -> faithful 2-car drag
+ *   TD5RE_DRAG_LANES=N     force the field to exactly N (clamped [2,8])
+ *   TD5RE_DRAG_LANE_MAX=N  cap the auto field (default 8) */
+int td5_game_drag_field_size(void)
+{
+    const char *dyn = getenv("TD5RE_DRAG_DYNAMIC");
+    if (dyn && dyn[0] == '0')
+        return 2;                          /* faithful 2-car field */
+
+    int maxlanes = 8;                      /* ceiling: int8 sub_lane + int16 vtx headroom */
+    const char *mx = getenv("TD5RE_DRAG_LANE_MAX");
+    if (mx && mx[0]) maxlanes = atoi(mx);
+    if (maxlanes < 2) maxlanes = 2;
+    if (maxlanes > 8) maxlanes = 8;
+
+    int n;
+    const char *force = getenv("TD5RE_DRAG_LANES");
+    if (force && force[0])
+        n = atoi(force);
+    else
+        n = g_td5.num_human_players + g_td5.num_ai_opponents;
+
+    if (n < 2) n = 2;                      /* always at least you + 1 rival */
+    if (n > maxlanes) n = maxlanes;
     return n;
 }
 

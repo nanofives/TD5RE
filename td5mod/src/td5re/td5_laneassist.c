@@ -44,8 +44,9 @@
 
 #include "td5_types.h"
 #include "td5_track.h"
-#include "td5re.h"          /* g_td5 (ini.lane_assist) */
+#include "td5re.h"          /* g_td5 (ini.lane_assist, drag_race_enabled) */
 #include "td5_platform.h"   /* TD5_LOG_* */
+#include "td5_input.h"      /* td5_input_drag_target_lane (drag chosen lane) */
 #include "../../../re/include/td5_actor_struct.h"
 
 #include <stdlib.h>         /* getenv, atoi */
@@ -69,6 +70,28 @@ static int s_lane_band     = 0;    /* TD5RE_LANEASSIST_LANE_BAND: 0 = centre of 
                                     * drivable lanes (whole paved road, default);
                                     * 1 = single lane; 2 = centre of two; etc.     */
 
+/* [DRAG] Aggressive auto-lane-change variant. In a drag race the aid is FORCE-ON
+ * for every human and steers toward the player's CHOSEN lane (L/R taps, via
+ * td5_input_drag_target_lane) instead of the current one — band 1 (that single
+ * lane), stronger gain and a higher yaw cap so each lane change is decisive,
+ * shorter look-ahead so it commits rather than drifting. Same robust PD/no-spin
+ * machinery as the accessibility aid. */
+static int s_drag_strength  = 1200; /* TD5RE_DRAG_LA_STRENGTH (cross-track pull gain) */
+static int s_drag_maxyaw    = 1500; /* TD5RE_DRAG_LA_MAXYAW (drag-only yaw cap/tick;
+                                     * higher = faster lane change. Not bound by the
+                                     * normal aid's LA_FAR_MAX ceiling.)            */
+static int s_drag_lookahead = 6;    /* TD5RE_DRAG_LA_LOOKAHEAD (farther = gentler)  */
+static int s_drag_band      = 1;    /* aim at the single chosen lane              */
+static int s_drag_rate_damp = 70;   /* TD5RE_DRAG_RATE_DAMP (q8: yaw-loop damping —
+                                     * lighter now that perp-velocity does the arrest) */
+static int s_drag_vlat_damp = 28;   /* TD5RE_DRAG_VLAT_DAMP: LANE-RELATIVE lateral-
+                                     * velocity damping (×/LA_VLAT_DIV). The car has ~no
+                                     * body slip, so its approach speed onto the lane is
+                                     * the velocity component PERPENDICULAR to the lane
+                                     * (= v_long·sin(heading−lane_dir)); damping it lets a
+                                     * strong pull arrive with ~0 lane-lateral speed
+                                     * instead of overshooting. Higher = brakes earlier. */
+
 /* Derivative damping (on the heading-ERROR rate, not the absolute yaw rate — so
  * it damps the weave WITHOUT fighting your steering) + steering fade band. Fixed
  * (not env); STRENGTH (proportional) and MAX_YAW (cap) cover tuning. d_herr is
@@ -86,6 +109,18 @@ static int s_lane_band     = 0;    /* TD5RE_LANEASSIST_LANE_BAND: 0 = centre of 
 #define LA_HEAD_DIV     500        /* herr * strength% -> yaw (small vs cross-track)*/
 #define LA_FAR_DIV      220        /* cap += |lat_err| / LA_FAR_DIV                 */
 #define LA_FAR_MAX      1100       /* absolute yaw-cap ceiling (< handling ±1400)   */
+/* [DRAG settle] At drag's extreme speed the aggressive cross-track pull forms a
+ * 1-tick limit cycle once the car is on the lane (physics over-responds to each
+ * nudge -> shake). When within LA_DRAG_DEAD_CT of the chosen lane AND nearly
+ * aligned, switch to a critically-damped hold: cancel the current yaw RATE and
+ * add only a gentle heading-straighten term, so the heading eases straight and
+ * STOPS instead of oscillating. (~13% of a ~371540-unit lane.) */
+#define LA_DRAG_DEAD_CT    50000   /* |lat_err|(24.8) below this -> settle hold     */
+#define LA_DRAG_DEAD_HERR  60      /* AND |heading err| below this (12-bit) -> hold */
+#define LA_DRAG_DEAD_VEL   2500    /* AND lane-perp approach speed below this -> hold
+                                    * (else stay in the braking PD; don't coast past) */
+#define LA_DRAG_SETTLE_CAP 2000    /* settle-yaw clamp (must cover the limit cycle)  */
+#define LA_VLAT_DIV        1000     /* v_lat * VLAT_DAMP / this -> deceleration yaw   */
 #define LA_EASE_SHIFT   3          /* target ease: target += (raw-target)>>3     */
 #define LA_SNAP         0x40000    /* >1024 world-units jump -> snap, not ease   */
 #define LA_MIN_VLONG    0x80       /* no nudge below this forward speed / reverse */
@@ -156,6 +191,11 @@ static void laneassist_init_once(void)
     s_fork_commit   = env_int("TD5RE_LANEASSIST_FORK_COMMIT",      1, 0, 1);
     s_fork_diverge  = env_int("TD5RE_LANEASSIST_FORK_DIVERGE",     1, 0, 1);
     s_lane_band     = env_int("TD5RE_LANEASSIST_LANE_BAND",        0, 0, 4);
+    s_drag_strength  = env_int("TD5RE_DRAG_LA_STRENGTH",  1200, 0, 8000);
+    s_drag_maxyaw    = env_int("TD5RE_DRAG_LA_MAXYAW",    1500, 0, 4000);
+    s_drag_lookahead = env_int("TD5RE_DRAG_LA_LOOKAHEAD",    6, 1, 8);
+    s_drag_rate_damp = env_int("TD5RE_DRAG_RATE_DAMP",      70, 0, 256);
+    s_drag_vlat_damp = env_int("TD5RE_DRAG_VLAT_DAMP",      80, -2000, 2000);
 
     for (i = 0; i < TD5_MAX_HUMAN_PLAYERS; i++) {
         s_enable[i]    = (uint8_t)s_master_enable;   /* per-session default */
@@ -243,16 +283,41 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
 {
     int     player;
     int     fresh = 0;                            /* target just (re)seeded?      */
-    int32_t vx, vz, v_long;
+    int32_t vx, vz, v_long, v_lat;
     int32_t raw_x, raw_z, tx, tz;
     int32_t cx, cz, dx, dz, lat_err;
+    int32_t perp_vel = 0;                        /* lane-perpendicular approach speed */
+    int     la_lane, la_band, la_lookahead, la_strength, la_maxyaw; /* drag overrides */
+    int     la_is_drag;                          /* aggressive drag lane-change mode */
 
     if (!actor) return;
     laneassist_init_once();
 
     player = (int)actor->slot_index;             /* driving identity: player==slot */
     if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
-    if (!s_enable[player]) return;
+
+    /* [DRAG] Aggressive auto-lane-change: in a drag race the aid is FORCE-ON for
+     * every human and aims at the player's CHOSEN lane (L/R taps) with stronger
+     * gain / yaw cap / single-lane band and a shorter look-ahead, reusing all the
+     * robust PD / no-spin machinery below. Outside drag these stay the normal
+     * accessibility-aid values. */
+    {
+        la_is_drag = (g_td5.drag_race_enabled && player < g_td5.num_human_players);
+        la_lane      = (int)actor->track_sub_lane_index;
+        la_band      = s_lane_band;
+        la_lookahead = s_lookahead;
+        la_strength  = s_strength_pct;
+        la_maxyaw    = s_max_yaw;
+        if (la_is_drag) {
+            int chosen = td5_input_drag_target_lane(player);
+            if (chosen >= 0) la_lane = chosen;
+            la_band      = s_drag_band;
+            la_lookahead = s_drag_lookahead;
+            la_strength  = s_drag_strength;
+            la_maxyaw    = s_drag_maxyaw;
+        }
+        if (!s_enable[player] && !la_is_drag) return;
+    }
     s_dir[player]    = 0;                         /* cleared unless we nudge below */
     s_active[player] = 0;                         /* "paused" until we apply below */
 
@@ -277,6 +342,9 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
     vx = actor->linear_velocity_x;
     vz = actor->linear_velocity_z;
     v_long = (vx * sin_h + vz * cos_h) >> 12;     /* forward speed (24.8/tick) */
+    v_lat  = (vx * cos_h - vz * sin_h) >> 12;     /* lateral speed (body frame, same
+                                                   * frame as lat_err) — drag uses it
+                                                   * to decelerate onto the lane     */
 
     /* CURRENT airborne state: wheel_contact_bitmask == 0x0F means all four wheels
      * are OFF the ground (the engine's "fully airborne" flag — see the FF landing
@@ -305,17 +373,25 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
         if (gate) {
             s_have[player] = 0;
             s_active[player] = 0;
+            if (player == 0 && (actor->frame_counter % 30u) == 0u)
+                TD5_LOG_I(LOG_TAG, "GATED: %s (air=%d wcm=0x%X v_long=%d finish=%d span=%d)",
+                          gate, (int)s_air[player], (unsigned)actor->wheel_contact_bitmask,
+                          v_long, (int)actor->finish_time, (int)actor->track_span_raw);
             return;
         }
     }
 
     /* Build the continuous look-ahead lane-centre target (the real work). */
     if (!td5_track_laneassist_target((int)actor->track_span_raw,
-                                     (int)actor->track_sub_lane_index,
-                                     s_lookahead, s_fork_commit, s_fork_diverge,
-                                     s_lane_band, &raw_x, &raw_z)) {
+                                     la_lane,
+                                     la_lookahead, s_fork_commit, s_fork_diverge,
+                                     la_band, &raw_x, &raw_z)) {
         s_have[player] = 0;
         s_active[player] = 0;
+        if (player == 0 && (actor->frame_counter % 30u) == 0u)
+            TD5_LOG_I(LOG_TAG, "GATED: no_target (span=%d sub=%d v_long=%d)",
+                      (int)actor->track_span_raw,
+                      (int)actor->track_sub_lane_index, v_long);
         return;
     }
 
@@ -355,6 +431,23 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
     dz = tz - cz;
     lat_err = (int32_t)(((int64_t)dx * cos_h - (int64_t)dz * sin_h) >> 12);
 
+    /* [DRAG] Lane-PERPENDICULAR approach speed. The car barely slips in its own body
+     * frame (v_lat≈0); its motion toward/away from the lane is the velocity component
+     * perpendicular to the LANE direction. Lane direction = from the car's chosen-lane
+     * centre at this span to the look-ahead aim point; perp velocity = the 2D cross of
+     * the world velocity with that (unit) lane vector. Same rightward sign as lat_err,
+     * so a simple PD (pull − perp_vel damp) decelerates onto the lane. */
+    if (la_is_drag) {
+        int lx0 = 0, ly0 = 0, lz0 = 0;
+        if (td5_track_get_span_lane_world((int)actor->track_span_raw, la_lane,
+                                          &lx0, &ly0, &lz0)) {
+            double lvx = (double)tx - lx0, lvz = (double)tz - lz0;
+            double llen = sqrt(lvx * lvx + lvz * lvz);
+            if (llen > 1.0)
+                perp_vel = (int32_t)(((double)vx * lvz - (double)vz * lvx) / llen);
+        }
+    }
+
     {
         int32_t steer = actor->steering_command;
         int32_t s_abs = steer < 0 ? -steer : steer;
@@ -365,6 +458,8 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
          * (linear fade between LA_STEER_DEAD and LA_STEER_FULL). */
         if (s_abs >= LA_STEER_FULL) {
             s_active[player] = 0;
+            if (player == 0 && (actor->frame_counter % 30u) == 0u)
+                TD5_LOG_I(LOG_TAG, "GATED: steering (steer=%d)", (int)steer);
             return;
         }
         if (s_abs > LA_STEER_DEAD) {
@@ -403,24 +498,68 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
         ae = lat_err < 0 ? -lat_err : lat_err;
         /* LINEAR cross-track pull — the correction climbs CONTINUOUSLY the further
          * off the road centre you are (this is the main steering force). */
-        yaw_ct = (int32_t)(((int64_t)lat_err * s_strength_pct) / LA_CT_DIV);
+        yaw_ct = (int32_t)(((int64_t)lat_err * la_strength) / LA_CT_DIV);
         /* Modest heading anticipation so corners are taken a touch early (kept
          * small so it doesn't dominate / saturate the smooth distance ramp). */
-        yaw_p  = (herr * s_strength_pct) / LA_HEAD_DIV;
+        yaw_p  = (herr * la_strength) / LA_HEAD_DIV;
         /* Light derivative damping so it settles instead of weaving. */
         yaw_d  = d_herr * LA_YAW_DKD;
         /* Yaw cap RISES with distance so the far end of the ramp isn't clipped. */
-        cap = s_max_yaw + (int32_t)((int64_t)ae / LA_FAR_DIV);
+        cap = la_maxyaw + (int32_t)((int64_t)ae / LA_FAR_DIV);
         if (cap > LA_FAR_MAX) cap = LA_FAR_MAX;
 
-        yaw   = yaw_ct + yaw_p + yaw_d;
-        yaw   = (yaw * fade_q8) >> 8;
-        if (yaw >  cap) yaw =  cap;
-        if (yaw < -cap) yaw = -cap;
+        if (la_is_drag && ae < LA_DRAG_DEAD_CT &&
+            herr < LA_DRAG_DEAD_HERR && herr > -LA_DRAG_DEAD_HERR &&
+            perp_vel < LA_DRAG_DEAD_VEL && perp_vel > -LA_DRAG_DEAD_VEL) {
+            /* SETTLED on the chosen lane -> critically-damped centring hold. Pull to
+             * the lane CENTRE with the cross-track term (yaw_ct), NOT the heading
+             * error: herr -> 0 as soon as the car points straight even if it is
+             * parked off-centre, so a herr-only hold settled ~11% off the lane and
+             * crept. The FULL yaw-rate cancel (-angular_velocity_yaw) leaves no
+             * rotational momentum, so it centres without the limit-cycle shake.
+             * NOTE the perp_vel gate above: don't enter the hold while still moving
+             * across the lane, or it would coast past (the hold doesn't brake drift).*/
+            yaw = yaw_ct - actor->angular_velocity_yaw;
+            if (yaw >  LA_DRAG_SETTLE_CAP) yaw =  LA_DRAG_SETTLE_CAP;
+            if (yaw < -LA_DRAG_SETTLE_CAP) yaw = -LA_DRAG_SETTLE_CAP;
+        } else if (la_is_drag) {
+            /* Drag lane change — PD on the LANE-RELATIVE lateral state:
+             *   + yaw_ct  : strong cross-track pull toward the lane (the restoring
+             *               force — without it the car ran away across all lanes).
+             *   - perp_vel: decelerate as the car closes on the lane (perpendicular
+             *               approach speed), so a strong pull ARRIVES with ~0 lane-
+             *               lateral speed instead of over-rotating past it. This is
+             *               the real "how fast am I approaching" signal (body v_lat
+             *               is ~0). It lets the pull be fast AND not overshoot.
+             *   - ang_vel : light yaw-loop damping for a clean (non-weaving) turn. */
+            yaw  = yaw_ct + yaw_p;
+            yaw  = (yaw * fade_q8) >> 8;
+            yaw -= (perp_vel * s_drag_vlat_damp) / LA_VLAT_DIV;
+            yaw -= (int32_t)(((int64_t)actor->angular_velocity_yaw * s_drag_rate_damp) >> 8);
+            /* Drag uses its OWN higher cap (not LA_FAR_MAX): the car must point hard
+             * enough to cross a lane briskly. The perp-velocity brake above still
+             * arrests the (now faster) approach, so it stays overshoot-free. */
+            if (yaw >  s_drag_maxyaw) yaw =  s_drag_maxyaw;
+            if (yaw < -s_drag_maxyaw) yaw = -s_drag_maxyaw;
+        } else {
+            yaw   = yaw_ct + yaw_p + yaw_d;
+            yaw   = (yaw * fade_q8) >> 8;
+            if (yaw >  cap) yaw =  cap;
+            if (yaw < -cap) yaw = -cap;
+        }
         actor->angular_velocity_yaw += yaw;
 
         /* HUD: actively assisting this tick, and which way it is steering. */
         s_active[player] = 1;
         s_dir[player] = (yaw > 4) ? 1 : (yaw < -4 ? -1 : 0);
+
+        if (player == 0 && (actor->frame_counter % 15u) == 0u) {
+            TD5_LOG_I(LOG_TAG,
+                "p0 span=%d sub=%d lat_err=%d perp_vel=%d herr=%d yaw_ct=%d "
+                "cap=%d yaw=%d ang_vel=%d",
+                (int)actor->track_span_raw, (int)actor->track_sub_lane_index,
+                lat_err, perp_vel, herr, yaw_ct, cap, yaw,
+                (int)actor->angular_velocity_yaw);
+        }
     }
 }
