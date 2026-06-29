@@ -303,6 +303,7 @@ static uint32_t s_catchup_assist = 1;                         /* 0x465FF8 */
 static uint8_t  s_camera_byte_a;                              /* 0x482F48 */
 static uint8_t  s_camera_byte_b;                              /* 0x482F49 */
 static uint32_t s_music_track;                                /* 0x466840 */
+static int      s_tutorial_seen;   /* [PORT 2026-06] first-race controller tutorial dismissed */
 
 /* CATCHUP / rubber-band assist accessors. Persisted via the config buffer
  * (catchup_assist byte). The frontend (S05 Multiplayer Options toggle) sets it;
@@ -1898,6 +1899,9 @@ static int cfgini_write_progress(void)
 
     cfgini_add(&w, "[Audio]\r\nMusicTrack = %u\r\n\r\n", (unsigned)s_music_track);
 
+    cfgini_add(&w, "[Tutorial]\r\n; 1 once the first-race controller-tutorial overlay was dismissed.\r\nSeen = %u\r\n\r\n",
+               (unsigned)(s_tutorial_seen ? 1 : 0));
+
     cfgini_add(&w, "; High scores: 26 tracks x 5 entries. Header selects the score column:\r\n");
     cfgini_add(&w, ";   0=TIME(MM:SS.cc) 1=LAP 2=PTS(points) 4=TIME(MM:SS.mmm)\r\n");
     cfgini_add(&w, "; Score = raw stored value (ticks @30fps for time types, points for PTS).\r\n\r\n");
@@ -2001,6 +2005,7 @@ static int cfgini_read_progress(void)
         cfgini_parse_u8_list(val, s_cheat_flags, TD5_CONFIG_NUM_CHEATS);
 
     s_music_track = (uint32_t)td5_plat_ini_get_int(f, "Audio", "MusicTrack", (int)s_music_track);
+    s_tutorial_seen = td5_plat_ini_get_int(f, "Tutorial", "Seen", s_tutorial_seen);
 
     TD5_NpcGroup *groups = (TD5_NpcGroup *)s_npc_group_table;
     for (int g = 0; g < TD5_CONFIG_NPC_GROUPS; g++) {
@@ -2161,6 +2166,22 @@ int td5_save_profile_delete(int idx)
     if (profiles_enabled())
         cfgini_write_progress();
     return 1;
+}
+
+/* ---- First-race tutorial overlay "seen" flag (PORT ENHANCEMENT 2026-06) ---- */
+
+int td5_save_get_tutorial_seen(void)
+{
+    return s_tutorial_seen ? 1 : 0;
+}
+
+void td5_save_set_tutorial_seen(int seen)
+{
+    int v = seen ? 1 : 0;
+    if (s_tutorial_seen == v) return;     /* no change → no disk write */
+    s_tutorial_seen = v;
+    cfgini_write_progress();              /* persist immediately */
+    TD5_LOG_I(LOG_TAG, "Tutorial seen flag persisted: %d", v);
 }
 
 /* ---------------------------- TD6 high-score records ----------------------- */
