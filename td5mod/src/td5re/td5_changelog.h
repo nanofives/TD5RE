@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 28" },
+    { CL_ITEM,    "Multiplayer cup fix: player 1 no longer reverts to the" },
+    { CL_ITEM,    "  car used in a race BEFORE the cup on the 2nd race -" },
+    { CL_ITEM,    "  every cup race now keeps your chosen car" },
     { CL_ITEM,    "Cop Chase: suspects can now pick TD6 cars too, not" },
     { CL_ITEM,    "  just the TD5 line-up (cops still drive police cars)" },
     { CL_BLANK,   "" },
