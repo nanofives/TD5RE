@@ -1820,12 +1820,16 @@ void td5_hud_draw_player_id_overlays(void)
  * the pane) with a shrinking timer bar. Works in single-view and split-screen.
  * No-op outside ARCADE mode. SOURCE-PORT FEATURE.
  * ======================================================================== */
+/* Fallback "full duration" for the timer bar, used only if the live per-slot
+ * max from td5_arcade_active_max_frames() is unavailable. Kept in step with the
+ * actual durations in td5_arcade.c apply_pickup so the bar never depicts just
+ * the last few seconds (the old bug: these were stale at 30/120/150). */
 static int arcade_effect_nominal_frames(int effect)
 {
     switch (effect) {
-    case TD5_PU_NITRO:  return 30;
-    case TD5_PU_GHOST:  return 120;
-    case TD5_PU_WRECK:  return 150;
+    case TD5_PU_NITRO:  return 180;
+    case TD5_PU_GHOST:  return 288;
+    case TD5_PU_WRECK:  return 360;
     case TD5_PU_HAZARD: return 20;
     default:            return 60;
     }
@@ -1885,7 +1889,13 @@ void td5_hud_draw_arcade_chips(void)
         td5_vui_text_centered(cx + chip_w * 0.5f, ny, label, col, ts, ts);
         /* shrinking timer bar along the bottom */
         int frames = td5_arcade_active_frames(slot);
-        int maxf   = arcade_effect_nominal_frames(effect);
+        /* Use the effect's REAL starting duration as the 100% reference so the
+         * bar shows the whole timer. Falls back to the nominal table only if the
+         * live value is unavailable. (Old bug: the bar divided by a stale
+         * hardcoded nominal that was far smaller than the real duration, so it
+         * sat pinned at full and only shrank over the last second or so.) */
+        int maxf   = td5_arcade_active_max_frames(slot);
+        if (maxf <= 0) maxf = arcade_effect_nominal_frames(effect);
         float frac = (maxf > 0) ? (float)frames / (float)maxf : 0.0f;
         if (frac < 0.0f) frac = 0.0f;
         if (frac > 1.0f) frac = 1.0f;

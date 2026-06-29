@@ -80,6 +80,10 @@ static int32_t   s_lane_w;                 /* one lane width, RENDER units (oil-
 /* per-racer-slot effect state */
 static uint8_t   s_effect[ARC_MAX_SLOTS];        /* TD5_PU_* active, or NONE */
 static int16_t   s_effect_frames[ARC_MAX_SLOTS]; /* frames remaining          */
+static int16_t   s_effect_max[ARC_MAX_SLOTS];    /* frames the active effect STARTED with
+                                                  * (full duration) — the HUD bar's 100%
+                                                  * reference, so it shows the whole timer
+                                                  * and not just the last seconds. */
 
 /* per-racer-slot OIL-SLICK drift state (HAZARD victim): the car drifts
  * uncontrollably in a random direction for a few seconds while still rolling. */
@@ -121,7 +125,9 @@ static void apply_pickup(int slot, int kind, TD5_Actor *a) {
          * gone. */
         (void)a;
         s_effect[slot] = TD5_PU_NITRO;
-        s_effect_frames[slot] = knob("TD5RE_ARCADE_NITRO_FRAMES", 150, 30, 600);
+        /* [2026-06-28] Duration +20% (150 -> 180, ~6 s @30Hz) per "last 20% more". */
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_NITRO_FRAMES", 180, 30, 600);
+        s_effect_max[slot]    = s_effect_frames[slot];
         TD5_LOG_I(LOG_TAG, "slot=%d NITRO %d frames (accel x%d%%)",
                   slot, s_effect_frames[slot],
                   knob("TD5RE_ARCADE_NITRO_ACCEL_PCT", 250, 100, 800));
@@ -130,14 +136,18 @@ static void apply_pickup(int slot, int kind, TD5_Actor *a) {
     case TD5_PU_GHOST:
         s_effect[slot] = TD5_PU_GHOST;
         /* [2026-06-27] Duration doubled 120 -> 240 (~8 s @30Hz) per "last twice
-         * as long". Knob TD5RE_ARCADE_GHOST_FRAMES still overrides. */
-        s_effect_frames[slot] = knob("TD5RE_ARCADE_GHOST_FRAMES", 240, 30, 1200);
+         * as long". [2026-06-28] +20% on top (240 -> 288, ~9.6 s) per "last 20%
+         * more". Knob TD5RE_ARCADE_GHOST_FRAMES still overrides. */
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_GHOST_FRAMES", 288, 30, 1200);
+        s_effect_max[slot]    = s_effect_frames[slot];
         TD5_LOG_I(LOG_TAG, "slot=%d GHOST %d frames", slot, s_effect_frames[slot]);
         break;
     case TD5_PU_WRECK:
         s_effect[slot] = TD5_PU_WRECK;
-        /* [2026-06-27] Duration doubled 150 -> 300 (~10 s @30Hz). */
-        s_effect_frames[slot] = knob("TD5RE_ARCADE_WRECK_FRAMES", 300, 30, 1200);
+        /* [2026-06-27] Duration doubled 150 -> 300 (~10 s @30Hz). [2026-06-28]
+         * +20% on top (300 -> 360, ~12 s) per "last 20% more". */
+        s_effect_frames[slot] = knob("TD5RE_ARCADE_WRECK_FRAMES", 360, 30, 1200);
+        s_effect_max[slot]    = s_effect_frames[slot];
         TD5_LOG_I(LOG_TAG, "slot=%d WRECKING BALL %d frames", slot, s_effect_frames[slot]);
         break;
     case TD5_PU_HAZARD: {
@@ -164,6 +174,7 @@ static void apply_pickup(int slot, int kind, TD5_Actor *a) {
         }
         s_effect[slot] = TD5_PU_HAZARD;
         s_effect_frames[slot] = 20;   /* HUD flash "dropped" */
+        s_effect_max[slot]    = s_effect_frames[slot];
         TD5_LOG_I(LOG_TAG, "slot=%d HAZARD dropped", slot);
         break;
     }
@@ -231,6 +242,7 @@ void td5_arcade_init_race(void) {
     memset(s_haz,  0, sizeof(s_haz));
     memset(s_effect, 0, sizeof(s_effect));
     memset(s_effect_frames, 0, sizeof(s_effect_frames));
+    memset(s_effect_max, 0, sizeof(s_effect_max));
     memset(s_oiled_frames, 0, sizeof(s_oiled_frames));
     memset(s_oiled_dir, 0, sizeof(s_oiled_dir));
     memset(s_oiled_rng, 0, sizeof(s_oiled_rng));
@@ -343,6 +355,12 @@ void td5_arcade_init_race(void) {
     /* Single boxes alternate left/right shoulder; side=0 forces centre (legacy). */
     int side = knob("TD5RE_ARCADE_SIDE", 1, 0, 1);
 
+    /* [2026-06-28] Pull the shoulder boxes one lane in toward the centreline (per
+     * "one lane closer to the center"). 0 restores the original outer-edge
+     * placement. The chosen lanes are clamped per-span below so the two sides
+     * never cross on a narrow road. */
+    int lane_inset = knob("TD5RE_ARCADE_LANE_INSET", 1, 0, 8);
+
     /* With >4 HUMAN players, each spawn point has a growing chance to hold TWO
      * boxes — one on the left-most lane, one on the right-most — so a crowded
      * field still has enough to grab. 25% at 5 humans, +15% per extra human. */
@@ -363,11 +381,19 @@ void td5_arcade_init_race(void) {
         rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;       /* roll for double */
         int make_dbl = (dbl_pct > 0) && (lanes > 1) && ((int)(rng % 100u) < dbl_pct);
 
+        /* Shoulder lanes, inset one lane toward centre. Clamp into [0,lanes-1]
+         * and collapse to the centre lane if the inset would make them cross. */
+        int left_lane  = lane_inset;
+        int right_lane = lanes - 1 - lane_inset;
+        if (left_lane  > lanes - 1) left_lane  = lanes - 1;
+        if (right_lane < 0)         right_lane = 0;
+        if (left_lane  > right_lane) left_lane = right_lane = lanes / 2;
+
         if (make_dbl && s_pad_count + 2 <= ARC_MAX_PADS) {
-            arc_emit_box(span, 0,         lanes, lift, &rng);      /* left  edge */
-            arc_emit_box(span, lanes - 1, lanes, lift, &rng);      /* right edge */
+            arc_emit_box(span, left_lane,  lanes, lift, &rng);     /* left  shoulder */
+            arc_emit_box(span, right_lane, lanes, lift, &rng);     /* right shoulder */
         } else if (side && lanes > 1) {
-            arc_emit_box(span, (i & 1) ? (lanes - 1) : 0, lanes, lift, &rng);
+            arc_emit_box(span, (i & 1) ? right_lane : left_lane, lanes, lift, &rng);
         } else {
             arc_emit_box(span, -1, lanes, lift, &rng);            /* centre */
         }
@@ -395,6 +421,7 @@ void td5_arcade_shutdown_race(void) {
     memset(s_haz, 0, sizeof(s_haz));
     memset(s_effect, 0, sizeof(s_effect));
     memset(s_effect_frames, 0, sizeof(s_effect_frames));
+    memset(s_effect_max, 0, sizeof(s_effect_max));
     memset(s_oiled_frames, 0, sizeof(s_oiled_frames));
     memset(s_oiled_dir, 0, sizeof(s_oiled_dir));
     memset(s_oiled_rng, 0, sizeof(s_oiled_rng));
@@ -665,4 +692,13 @@ int td5_arcade_active_effect(int slot) {
 int td5_arcade_active_frames(int slot) {
     if (!s_active || slot < 0 || slot >= ARC_MAX_SLOTS) return 0;
     return s_effect_frames[slot];
+}
+
+int td5_arcade_active_max_frames(int slot) {
+    /* Full duration of the CURRENTLY-active effect (the value it started with).
+     * The HUD bar divides frames-remaining by this so it depicts the WHOLE
+     * timer. 0 when nothing is active so the HUD can fall back safely. */
+    if (!s_active || slot < 0 || slot >= ARC_MAX_SLOTS) return 0;
+    if (s_effect[slot] == TD5_PU_NONE) return 0;
+    return s_effect_max[slot];
 }

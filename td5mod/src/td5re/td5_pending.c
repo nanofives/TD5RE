@@ -31,6 +31,10 @@ static int s_overlay_on = 0;
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
     "MP cup: player 1 keeps chosen car on race 2+ (no pre-cup car revert)",
+    "ARCADE: power-up timer bar shows the full duration (not last secs)",
+    "ARCADE: HAZARD (oil-slick) power-up removed from the spawn pool",
+    "ARCADE: item boxes spawn one lane closer to track centre",
+    "ARCADE: power-up effects last 20% longer (NITRO/GHOST/WRECK)",
     "MP cop chase: suspects can now pick TD6 cars, not just TD5",
     "Controller: Y changes camera; horn moved to L3 (stick click)",
     "Time trial on city tracks (HK/London): mid-track start no insta-end",
