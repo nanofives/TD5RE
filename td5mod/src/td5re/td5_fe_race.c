@@ -3986,6 +3986,11 @@ static void mp_roleselect_row(float sx, float sy, int p, float y, const char *va
         snprintf(nb, sizeof nb, "%s", s_mp_player_name[p]);
     else
         snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
+    /* [MP HOST INDICATOR 2026-06-28] Slot 0 is the host (it confirms with OK).
+     * Tag its row with the same gold crown the splitscreen car-select panes use,
+     * just left of the name, so the host is obvious on these lobby screens too. */
+    if (p == 0)
+        td5_vui_crown(133.0f, y + 1.0f, 12.0f, 9.0f, 0xFFFFD21Eu, sx, sy);
     td5_vui_text(150.0f * sx, y * sy, nb, mp_slot_color(p), sx, sy);
     td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, val, 0xFFFFFFFFu, sx, sy);
     td5_vui_arrow((MP_ROW_VAL_CX - 52.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);

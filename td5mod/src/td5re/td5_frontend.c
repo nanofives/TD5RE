@@ -9841,6 +9841,43 @@ void td5_vui_quad(float x, float y, float w, float h, uint32_t color, int tex_pa
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
+/* [MP HOST INDICATOR 2026-06-28] Small heraldic crown badge — the multiplayer
+ * HOST marker. Built from solid quads (a headband + 3 spikes, each capped with a
+ * little ball finial) so it needs no font glyph and is crisp at any resolution.
+ * (x,y,w,h) are VIRTUAL 640x480 px; scaled by sx/sy here. Each gold element gets
+ * a 1px dark backing first so the crown stays legible over any accent colour
+ * (including a yellow/gold player banner). */
+void td5_vui_crown(float x, float y, float w, float h, uint32_t color, float sx, float sy) {
+    const uint32_t outline = 0xD0000000u;          /* dark backing for contrast */
+    float base_h   = h * 0.40f;                    /* headband thickness        */
+    float base_y   = y + h - base_h;               /* headband top edge         */
+    float sw       = w * 0.24f;                    /* spike width               */
+    float lx       = x;                            /* left spike  x             */
+    float mx       = x + (w - sw) * 0.5f;          /* centre spike x            */
+    float rx       = x + w - sw;                   /* right spike x             */
+    float side_top = y + h * 0.30f;                /* outer spikes start lower  */
+    float mid_top  = y;                            /* centre spike is tallest   */
+    float dot      = sw * 1.35f;                   /* ball finial size          */
+    /* 7 solid elements: headband, L/C/R spikes, L/C/R finials. */
+    float el[7][4] = {
+        { x,                          base_y,                w,                 base_h            },
+        { lx,                         side_top,              sw,                base_y - side_top },
+        { mx,                         mid_top,               sw,                base_y - mid_top  },
+        { rx,                         side_top,              sw,                base_y - side_top },
+        { lx + sw * 0.5f - dot * 0.5f, side_top - dot * 0.5f, dot,              dot               },
+        { mx + sw * 0.5f - dot * 0.5f, mid_top  - dot * 0.5f, dot,              dot               },
+        { rx + sw * 0.5f - dot * 0.5f, side_top - dot * 0.5f, dot,              dot               },
+    };
+    int i;
+    for (i = 0; i < 7; i++)   /* dark outline pass (each element grown ~0.8px) */
+        td5_vui_quad((el[i][0] - 0.8f) * sx, (el[i][1] - 0.8f) * sy,
+                     (el[i][2] + 1.6f) * sx, (el[i][3] + 1.6f) * sy,
+                     outline, -1, 0, 0, 1, 1);
+    for (i = 0; i < 7; i++)   /* gold crown on top */
+        td5_vui_quad(el[i][0] * sx, el[i][1] * sy, el[i][2] * sx, el[i][3] * sy,
+                     color, -1, 0, 0, 1, 1);
+}
+
 /* HUD-font / pause-font SDF pages (-1 if unavailable). */
 int td5_vui_hudfont_page(void)   { return s_hudfont_sdf_page; }
 int td5_vui_pausefont_page(void) { return s_pausefont_sdf_page; }
@@ -12217,7 +12254,26 @@ static void frontend_mp_simul_carsel_render(float sx, float sy) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
                      rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-        mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy, (pane_w - 8.0f) * sx);
+        /* [MP HOST INDICATOR 2026-06-28] Player slot 0 is ALWAYS the host (the
+         * host concept is slot-based — slot 0's pick is the binding one; see the
+         * comments at the position-picker / mode-vote screens). Draw a small gold
+         * crown at the LEFT of the host's name banner and centre the name in the
+         * remaining space to its right so crown + name never overlap. Every other
+         * pane keeps the plain full-width centred name. This is the marker that
+         * tells you which profile is the host after everyone has picked. */
+        if (p == 0) {
+            const float crown_w = 13.0f;
+            td5_vui_crown(px + 6.0f, pyr + 7.0f, crown_w, 8.0f, 0xFFFFD21Eu, sx, sy);
+            float name_l = px + 3.0f + crown_w + 6.0f;   /* reserve the crown column */
+            float name_r = px + pane_w - 3.0f;
+            mp_simul_small_centered_fit((name_l + name_r) * 0.5f * sx, (pyr + 6) * sy, buf,
+                                        0xFF000000u, sx, sy, (name_r - name_l) * sx);
+            { static int s_logged_host_crown = 0;
+              if (!s_logged_host_crown) { s_logged_host_crown = 1;
+                  TD5_LOG_I(LOG_TAG, "MP carsel: drew HOST crown on slot 0 (name='%s')", buf); } }
+        } else {
+            mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy, (pane_w - 8.0f) * sx);
+        }
 
         /* Car NAME above the image (request). */
         snprintf(buf, sizeof buf, "%s", frontend_get_car_display_name(car));
