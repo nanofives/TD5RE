@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Police overhaul: chasing cops now ACCELERATE hard" },
+    { CL_ITEM,    "  enough to out-drag a faster car on a straight (not" },
+    { CL_ITEM,    "  just match top speed), are much tougher so a wall" },
+    { CL_ITEM,    "  scrape no longer ends the chase, and ease off for" },
+    { CL_ITEM,    "  corners instead of flooring into the outside wall." },
     { CL_ITEM,    "Police are harder to shake: they chase much further" },
     { CL_ITEM,    "  before giving up and accelerate harder to catch" },
     { CL_ITEM,    "  you. Speed past a group of cops and they ALL give" },

@@ -1805,7 +1805,11 @@ static int32_t battle_airborne_vy(void) {
  * easily"). Clamped [100,1000]. TD5RE_COP_DURABILITY_PCT overrides. Port-only —
  * the original has NO cop-vs-traffic durability concept (the whole cop-chase-as-
  * traffic system is port-only). */
-#define COP_DURABILITY_PCT_DEFAULT  250
+/* [COP OVERHAUL 2026-06-29] Raised 250 -> 300: cops shrug off harder hits so they
+ * "don't break down so easily" (user). Still breakable by a deliberate player ram
+ * (V2V threshold is only 1.2x higher than before). TD5RE_COP_DURABILITY_PCT
+ * overrides. */
+#define COP_DURABILITY_PCT_DEFAULT  300
 static int cop_durability_pct(void) {
     static int v = -1;
     if (v < 0) {
@@ -1815,6 +1819,24 @@ static int cop_durability_pct(void) {
         if (p > 1000) p = 1000;
         v = (int)p;
         TD5_LOG_I(LOG_TAG, "cop_durability_pct: TD5RE_COP_DURABILITY_PCT=%d", v);
+    }
+    return v;
+}
+/* [COP OVERHAUL 2026-06-29] Extra wall-break leniency (%) for an ACTIVELY CHASING
+ * cop, applied ON TOP of cop_durability_pct at the wall gate only. A fast chase
+ * scrapes walls; those self-inflicted scrapes must not wreck the cop and end the
+ * pursuit (a core "cops break down too easily / never catch up" cause). Player
+ * V2V rams are NOT affected — only the wall gate is relaxed, so the cop is still
+ * breakable by a deliberate ram. Default 200 (2x); a catastrophic head-on still
+ * exceeds the raised gate and wrecks it. TD5RE_COP_CHASE_WALL_FACTOR overrides. */
+static int cop_chase_wall_factor_pct(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_COP_CHASE_WALL_FACTOR");
+        long p = (e && e[0]) ? strtol(e, NULL, 10) : 200;
+        if (p < 100) p = 100;
+        if (p > 600) p = 600;
+        v = (int)p;
     }
     return v;
 }
@@ -2242,8 +2264,16 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
              * instantly end the pursuit. Plain traffic / chased racers keep the
              * stock 20000 floor. */
             int32_t wall_gate = COP_WALL_BREAK_VPERP;
-            if (wslot >= 0 && td5_ai_actor_is_cop(wslot))
+            if (wslot >= 0 && td5_ai_actor_is_cop(wslot)) {
                 wall_gate = (int32_t)((int64_t)COP_WALL_BREAK_VPERP * cop_durability_pct() / 100);
+                /* [COP OVERHAUL 2026-06-29] An actively CHASING cop is driving fast
+                 * and WILL scrape walls; those self-inflicted scrapes must not end
+                 * the pursuit, so raise its wall gate much higher. Player V2V rams
+                 * are unaffected (only this wall gate is relaxed); a catastrophic
+                 * head-on still exceeds the gate and wrecks the cop. */
+                if (td5_ai_cop_is_chasing(wslot))
+                    wall_gate = (int32_t)((int64_t)wall_gate * cop_chase_wall_factor_pct() / 100);
+            }
             if (iVar11 > wall_gate) {
                 /* Any TRAFFIC car / cop that slams a wall hard breaks down (halt +
                  * smoke); so does a chased racer (ends the pursuit). Un-chased racers
@@ -5826,6 +5856,25 @@ void td5_physics_update_traffic(TD5_Actor *actor)
 
     int32_t throttle = (int32_t)actor->encounter_steering_cmd * 4;  /* iVar9 */
     if (wreck_no_throttle) throttle = 0;   /* [#1] a wreck never drives itself */
+
+    /* [COP OVERHAUL 2026-06-29] Chasing-cop acceleration rubber-band: scale the
+     * FORWARD propulsion by the catch-up boost (Q8) so a traffic-slot cop can
+     * out-drag a faster suspect on a straight. The simplified traffic model has
+     * no engine-power / top-speed term, so a fixed throttle force otherwise caps
+     * the cop below a fast player car (the "police can't catch up" symptom).
+     * Forward only (never amplifies a brake/reverse); the boost is 1.0 for
+     * non-cops, idle cops, at the catch-up cap, or an imminent corner, so this is
+     * inert for everything but an actively-sprinting cop. Same biased-toward-zero
+     * signed >>8 idiom as the racer torque chokepoint. Deterministic: replicated
+     * cop+target speeds -> lockstep-safe. */
+    if (throttle > 0 && actor->slot_index >= 0 &&
+        td5_ai_cop_is_chasing((int)actor->slot_index)) {
+        int32_t cb = td5_ai_cop_chase_throttle_boost_q8((int)actor->slot_index);
+        if (cb != 0x100) {
+            int64_t scaled = (int64_t)throttle * (int64_t)cb;
+            throttle = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
+        }
+    }
 
     /* 3. Body-frame velocity [@ 0x004439BB-0x004439EC] */
     int32_t lat_body  = SAR12(cos_h * vx - sin_h * vz);  /* iVar14 */
