@@ -3439,11 +3439,17 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
         return;
     }
 
-    /* [CAR DAMAGE 2026-06-28] This pane's car-health bar (green->yellow->red),
-     * anchored top-left of the pane. No-op when [Game] CarDamage=0 or the slot
-     * is uninitialized. Drawn for real races only (after the replay/demo
-     * early-returns above). */
-    hud_draw_player_damage_bar(player_slot, view_index);
+    /* [CAR DAMAGE 2026-06-29 split-screen fix] The per-player car-health bar is
+     * NO LONGER drawn here. td5_hud_draw_status_text runs INSIDE the per-pane 3D
+     * viewport loop (td5_game.c), where the D3D11 viewport is offset/sized to the
+     * pane (RSSetViewports + per-pane viewport CB @ td5_platform_win32.c). A
+     * screen-space HUD quad drawn there is remapped/clipped to that pane and lands
+     * off-screen for every pane with a nonzero offset -> the bar was invisible in
+     * split-screen (and only worked in single-player, whose sole viewport is
+     * full-screen). It now draws from td5_hud_draw_damage_bars() in the full-screen
+     * HUD overlay pass, alongside the speedo / wrecks tally / lane-assist chip --
+     * which is where the original draws its general per-pane HUD (RenderRaceHud-
+     * Overlays under the full-screen clip rect, RunRaceFrame @ 0x0042B580). */
 
     /* Wanted mode messages — the suspect's "SUSPECT IS WANTED FOR <crime>" objective.
      * [COP-CHASE 2026-06-21] Moved to the UPPER-THIRD and drawn MUCH larger so it
@@ -7756,6 +7762,24 @@ static void hud_draw_player_damage_bar(int player_slot, int view_index)
     const float sz = 0.0f, rhw = 1.0f;
     float ob = 2.0f * sc; if (ob < 1.5f) ob = 1.5f;
 
+    /* [CAR DAMAGE 2026-06-29] One-shot per-pane diagnostic: log the first
+     * MAX_HUD_VIEWS draws (one frame of panes) so the bar rect can be confirmed
+     * to lie INSIDE each pane's rect. The split-screen bug was this bar being
+     * clipped to one offset per-pane viewport; logging the computed rect vs the
+     * pane bounds documents the per-pane placement. One-shot -> no per-frame spam. */
+    {
+        static int s_dbg_n = 0;
+        if (s_dbg_n < MAX_HUD_VIEWS) {
+            s_dbg_n++;
+            TD5_LOG_I(LOG_TAG, "damage_bar v=%d slot=%d hp=%.2f rect=[%.0f,%.0f %.0fx%.0f] "
+                      "pane=[%.0f,%.0f -> %.0f,%.0f]",
+                      view_index, player_slot, (double)h,
+                      (double)bl, (double)bt, (double)bw, (double)bh,
+                      (double)vl->vp_int_left, (double)vl->vp_int_top,
+                      (double)vl->vp_int_right, (double)vl->vp_int_bottom);
+        }
+    }
+
     /* health -> colour (green @1.0, yellow @0.5, red @0.0); ARGB (0xAARRGGBB). */
     int r, g; const int b = 0x22;
     if (h > 0.5f) { float t = (1.0f - h) * 2.0f; r = (int)(0x20 + t * (0xE0 - 0x20)); g = 0xD0; }
@@ -7769,6 +7793,29 @@ static void hud_draw_player_damage_bar(int player_slot, int view_index)
     float fw = bw * h;
     if (fw > 0.5f)
         hud_solid_quad(bl, bt, bl + fw, bt + bh, sz, rhw, fill);                         /* fill   */
+}
+
+/* [CAR DAMAGE 2026-06-29 split-screen fix] Draw every pane's car-health bar from
+ * the FULL-SCREEN HUD overlay pass. Mirrors td5_hud_draw_battle_wrecks /
+ * td5_hud_draw_laneassist_indicator: loop the live views, resolve each pane's
+ * OWN actor via g_actor_slot_map[v] (NOT the raw viewport index, which is why the
+ * old per-pane call mis-targeted health), and position from s_view_layout[v].
+ * MUST run after the per-viewport 3D loop has reset the D3D viewport+clip to
+ * full-screen, so the screen-space bar quads map correctly into every pane
+ * instead of being clipped to one offset viewport. A single full-screen race is
+ * one iteration (v=0) -> byte-identical to the old single-player draw. */
+void td5_hud_draw_damage_bars(void)
+{
+    if (!td5_damage_bar_enabled()) return;
+    int views = s_view_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    for (int v = 0; v < views; v++) {
+        int slot = g_actor_slot_map[v];
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+        hud_draw_player_damage_bar(slot, v);   /* slot -> health, v -> pane layout */
+    }
 }
 
 void td5_hud_update_wanted_damage_indicator(int actor_slot)
