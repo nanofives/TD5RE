@@ -129,7 +129,10 @@ static void frontend_release_button(int handle) {
 }
 
 static void frontend_cd_play(int track) {
-    td5_plat_cd_play(track + 2);
+    /* Music Test jukebox. Route through the music seam (td5_sound_cd_play ->
+     * td5_music_play) so a registered third-party backend also drives the
+     * jukebox; default backend keeps the legacy CDPlay(idx + 2) behavior. */
+    td5_sound_cd_play(track + 2);
 }
 
 static void frontend_init_fade(int color) {
@@ -567,8 +570,8 @@ int td5_frontend_init_resources(void) {
     /* Load frontend fonts (from Language.dll string table) */
     /* (Real implementation loads SNK_* string exports) */
 
-    /* Initialize CD audio volume from saved settings */
-    td5_plat_cd_set_volume(80);
+    /* Initialize music volume from saved settings (routed through the music seam). */
+    td5_sound_set_music_volume(80);
     td5_sound_load_frontend_sfx();
 
     /* Car lock table: DAT_00463e4c (original binary).

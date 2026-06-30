@@ -273,6 +273,9 @@ typedef struct TD5_GlobalState {
         int  sfx_volume;
         int  music_volume;
         int  sfx_mode;
+        int  radio_enabled;     /* 1 = use the internet-radio music backend */
+        int  radio_volume;      /* radio output volume 0..100 (own knob, low default) */
+        char radio_url[512];    /* radio stream URL (Icecast/SHOUTcast MP3/AAC) */
         /* Game options */
         int  laps;
         int  checkpoint_timers;

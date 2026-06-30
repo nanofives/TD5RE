@@ -40,7 +40,7 @@ REM Module list (shared by DEV and RELEASE). td5_trace.c (the CSV race-trace
 REM harness) is inert at runtime unless [Trace] knobs enable it; the release
 REM build additionally hard-disables every trace knob in main.c.
 REM ---------------------------------------------------------------------------
-set TD5RE_SRCS_COMMON=td5re.c td5_game.c td5_physics.c td5_track.c td5_track_registry.c td5_ai.c td5_render.c td5_frontend.c td5_fe_net.c td5_fe_race.c td5_fe_menu.c td5_frontend_button_cache.c td5_font.c td5_hud.c td5_sound.c td5_input.c td5_asset.c td5_assetsrc.c td5_customcar.c deps\cjson\cJSON.c td5_inflate.c td5_save.c td5_pending.c td5_net.c td5_upnp.c td5_camera.c td5_vfx.c td5_arcade.c td5_damage.c td5_tutorial.c td5_laneassist.c td5_fmv.c td5_benchmark.c td5_trace.c td5_trig_lut_data.c td5_profile.c td5_jobs.c td5_rcmd.c td5_platform_win32.c td5_msvc_rand.c main.c
+set TD5RE_SRCS_COMMON=td5re.c td5_game.c td5_physics.c td5_track.c td5_track_registry.c td5_ai.c td5_render.c td5_frontend.c td5_fe_net.c td5_fe_race.c td5_fe_menu.c td5_frontend_button_cache.c td5_font.c td5_hud.c td5_sound.c td5_music.c td5_radio.c td5_input.c td5_asset.c td5_assetsrc.c td5_customcar.c deps\cjson\cJSON.c td5_inflate.c td5_save.c td5_pending.c td5_net.c td5_upnp.c td5_camera.c td5_vfx.c td5_arcade.c td5_damage.c td5_tutorial.c td5_laneassist.c td5_fmv.c td5_benchmark.c td5_trace.c td5_trig_lut_data.c td5_profile.c td5_jobs.c td5_rcmd.c td5_platform_win32.c td5_msvc_rand.c main.c
 
 REM Shared compiler flags for every variant.
 set CFLAGS_BASE=-c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC% -DTD5_INFLATE_USE_ZLIB
