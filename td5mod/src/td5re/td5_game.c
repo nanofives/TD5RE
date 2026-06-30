@@ -653,8 +653,10 @@ static int      s_replay_abort_pending; /* 1 = ESC pressed during replay → exi
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
 static int      s_pause_menu_active;
-static int      s_pause_menu_cursor;   /* [S31] 0=VIEW 1=SOUND 2=CONTINUE 3=RESTART
-                                        * 4=BACK TO LOBBY 5=QUIT TO MENU 6=EXIT GAME */
+static int      s_pause_menu_cursor;   /* [S31][END RACE NOW 2026-06-30]
+                                        * 0=VIEW 1=SOUND 2=CONTINUE 3=RESTART
+                                        * 4=END RACE NOW 5=BACK TO LOBBY(MP only)
+                                        * 6/5=QUIT TO MENU 7/6=EXIT GAME (MP/SP) */
 static int      s_pause_lobby_pending; /* [S31] BACK TO LOBBY fade in progress;
                                         * run-race-frame returns 4 when done */
 
@@ -728,6 +730,7 @@ static int      s_prev_jb;             /* edge detector: pause-menu pad B = back
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
 static int      s_pause_restart_pending; /* [REWORK 2026-06-05/S15] 1 = pause-menu RESTART RACE fade in progress, return 3 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
+static int      s_pause_endrace_confirm; /* [END RACE NOW 2026-06-30] 1 = force-finish confirm prompt up in the pause menu */
 
 /* ========================================================================
  * Forward declarations (internal helpers)
@@ -742,6 +745,7 @@ static void restore_replay_results_snapshot(void);   /* [REPLAY RESULTS PRESERVE
 static void sort_results_by_time_asc(void);
 static void sort_results_by_score_desc(void);
 static void update_race_order(void);
+static void td5_game_force_finish_race(void); /* [END RACE NOW 2026-06-30] pause-menu force-finish */
 static int  active_racer_count(void);   /* # of participating racers (state != 3) */
 static void advance_pending_finish_state(int slot, uint32_t sim_delta);
 static void tick_pending_finish_timer(int slot);
@@ -4185,6 +4189,7 @@ int td5_game_init_race_session(void) {
     s_race_end_radial_pulse_enabled = 0;  /* orig writes [0x4aaefc] @ 0x0042aaff */
     s_pause_exit_pending = 0;
     s_pause_restart_pending = 0;   /* [REWORK 2026-06-05/S15] clear stale RESTART latch */
+    s_pause_endrace_confirm = 0;   /* [END RACE NOW 2026-06-30] clear stale force-finish confirm */
     g_td5.paused = 1;              /* start paused for countdown */
     /* DAT_00483030 (xz_freeze) has 1 read / 0 writes in the original binary.
      * The port previously set a software flag here to gate XZ integration,
@@ -4720,6 +4725,16 @@ static int td5_game_net_sync_frame(int apply_dt_correction) {
                 s_pause_lobby_pending = 1;   /* session stays alive */
                 s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
                 td5_game_begin_fade_out(0);
+            } else if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
+                ((const uint8_t *)mdata)[0] == 0x1A) {
+                /* [END RACE NOW 2026-06-30] A peer force-finished the race. End
+                 * ours the same way so all machines reach results together;
+                 * lockstep keeps running until check_race_completion() builds the
+                 * results (no leave-pending flag — this is a finish, not a quit). */
+                TD5_LOG_I(LOG_TAG, "net: peer force-finished the race -> ending here too");
+                s_pause_menu_active = 0;
+                s_pause_endrace_confirm = 0;
+                td5_game_force_finish_race();
             }
         }
     }
@@ -4842,6 +4857,13 @@ static int td5_game_net_try_sync(void) {
                 s_pause_lobby_pending = 1;
                 s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
                 td5_game_begin_fade_out(0);
+            } else if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
+                ((const uint8_t *)mdata)[0] == 0x1A) {
+                /* [END RACE NOW 2026-06-30] Peer force-finished -> end ours too
+                 * (results, not leave); lockstep continues to build results. */
+                s_pause_menu_active = 0;
+                s_pause_endrace_confirm = 0;
+                td5_game_force_finish_race();
             }
         }
     }
@@ -5351,8 +5373,10 @@ int td5_game_run_race_frame(void) {
             s_pause_menu_cursor = 2;  /* [REWORK 2026-06-05/S15] default to
                                        * CONTINUE. After removing the MUSIC row
                                        * CONTINUE moved from row 3 to row 2.
-                                       * Rows: 0=VIEW 1=SOUND 2=CONTINUE
-                                       * 3=RESTART RACE 4=QUIT TO MENU 5=EXIT GAME.
+                                       * [END RACE NOW 2026-06-30] Rows: 0=VIEW
+                                       * 1=SOUND 2=CONTINUE 3=RESTART RACE
+                                       * 4=END RACE NOW [5=BACK TO LOBBY MP-only]
+                                       * QUIT TO MENU / EXIT GAME.
                                        * ENTER then dismisses in one keypress. */
             /* [BUGFIX #15 2026-06-15] Consume the currently-held direction keys so
              * the menu's nav edge-detection treats them as ALREADY pressed. UP is
@@ -5425,9 +5449,16 @@ int td5_game_run_race_frame(void) {
                  * player pause menu (see td5_hud_init_pause_menu), which then has
                  * 6 rows instead of 7. Wrap navigation over the live row count so
                  * QUIT TO MENU / EXIT GAME stay reachable and there's no gap. */
-                int pause_rows = (g_td5.network_active || g_td5.num_human_players > 1) ? 7 : 6;
-                if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % pause_rows;
-                if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + pause_rows - 1) % pause_rows;
+                /* [END RACE NOW 2026-06-30] +1 row (END RACE NOW) in both modes:
+                 * MP = 8 selectable rows, single-player = 7 (BACK TO LOBBY still
+                 * MP-only). */
+                int pause_rows = (g_td5.network_active || g_td5.num_human_players > 1) ? 8 : 7;
+                /* Freeze cursor movement while the END RACE NOW confirmation is up
+                 * so the highlight can't drift off the row mid-confirm. */
+                if (!s_pause_endrace_confirm) {
+                    if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % pause_rows;
+                    if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + pause_rows - 1) % pause_rows;
+                }
 
                 /* Left/right adjusts sliders for rows 0-2.
                  * [CONFIRMED @ 0x0043C211] CONTINUOUS while held — (&DAT_004B135C)[cursor] ± 0.02f, clamp [0,1].
@@ -5465,11 +5496,37 @@ int td5_game_run_race_frame(void) {
                 }
 
                 /* Confirm (Enter). [REWORK 2026-06-05/S15] Rows:
-                 *   2=CONTINUE 3=RESTART RACE 4=QUIT TO MENU 5=EXIT GAME. */
+                 *   2=CONTINUE 3=RESTART RACE [END RACE NOW] 4=END RACE NOW
+                 *   5=BACK TO LOBBY(MP) QUIT TO MENU EXIT GAME. */
                 if (key_enter && !s_prev_enter) {
-                    if (s_pause_menu_cursor == 2) {
+                    if (s_pause_endrace_confirm) {
+                        /* [END RACE NOW 2026-06-30] Second ENTER on the
+                         * confirmation = YES. Force-finish the race for everyone,
+                         * ranked by current track progress (no DNFs). In a net
+                         * race, broadcast RACE_FORCE_FINISH (0x1A) so every machine
+                         * ends + builds results together. Any player may trigger
+                         * this (unlike host-only RESTART) — it just ends the race
+                         * like QUIT/LOBBY do, so there is no one-sided re-init to
+                         * reconcile. */
+                        s_pause_endrace_confirm = 0;
+                        s_pause_menu_active = 0;
+                        if (g_td5.network_active && td5_net_is_active()) {
+                            uint8_t ff_msg[8] = {0x1A, 0, 0, 0, 0, 0, 0, 0};
+                            td5_net_send(TD5_DXPDATA, ff_msg, 8);
+                        }
+                        td5_game_force_finish_race();
+                        TD5_LOG_I(LOG_TAG, "Pause menu: END RACE NOW confirmed -> force-finishing race");
+                    } else if (s_pause_menu_cursor == 2) {
                         /* CONTINUE — close the menu, resume the race. */
                         s_pause_menu_active = 0;
+                    } else if (s_pause_menu_cursor == 4) {
+                        /* [END RACE NOW 2026-06-30] Arm the confirmation prompt
+                         * (don't end yet). A second ENTER confirms; B/ESC cancels.
+                         * Shown in single-player and MP alike. Checked before the
+                         * dynamic LOBBY/QUIT/EXIT indices below because its row is
+                         * fixed at 4 in both modes. */
+                        s_pause_endrace_confirm = 1;
+                        TD5_LOG_I(LOG_TAG, "Pause menu: END RACE NOW selected -> confirm prompt");
                     } else if (s_pause_menu_cursor == 3) {
                         /* RESTART RACE — re-run the SAME race (track/car/opponents/
                          * laps/direction unchanged). Fade out, then the fade-complete
@@ -5502,7 +5559,7 @@ int td5_game_run_race_frame(void) {
                         TD5_LOG_I(LOG_TAG, "Pause menu: RESTART RACE selected, starting fade-out");
                         td5_game_begin_fade_out(0);
                         }
-                    } else if (s_pause_menu_cursor == 4 &&
+                    } else if (s_pause_menu_cursor == 5 &&
                                (g_td5.network_active || g_td5.num_human_players > 1)) {
                         /* BACK TO LOBBY [S31] -- end the race and return to the
                          * lobby it came from: network lobby (LAN/direct-IP),
@@ -5532,11 +5589,12 @@ int td5_game_run_race_frame(void) {
                         TD5_LOG_I(LOG_TAG, "Pause menu: BACK TO LOBBY, starting fade-out");
                         td5_game_begin_fade_out(0);
                     } else if (s_pause_menu_cursor ==
-                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 5 : 4)) {
+                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 6 : 5)) {
                         /* QUIT TO MENU — leave the race, return to the frontend
                          * (was "EXIT"; behaviour unchanged, only relabelled).
-                         * Row 5 in MP, row 4 in single-player (BACK TO LOBBY
-                         * removed there). [MP 2026-06-13] */
+                         * [END RACE NOW 2026-06-30] Row 6 in MP, row 5 in
+                         * single-player (was 5/4 before END RACE NOW was inserted
+                         * at row 4; BACK TO LOBBY remains MP-only). */
                         s_pause_menu_active = 0;
                         s_pause_exit_pending = 1;
                         /* PART A (user 2026-06-02): capture the player's CURRENT
@@ -5574,9 +5632,10 @@ int td5_game_run_race_frame(void) {
                          * Original (0x43C317): calls BeginRaceFadeOutTransition(0). */
                         td5_game_begin_fade_out(0);
                     } else if (s_pause_menu_cursor ==
-                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 6 : 5)) {
+                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 7 : 6)) {
                         /* EXIT GAME — clean application shutdown (distinct from
-                         * QUIT TO MENU). Row 6 in MP, row 5 in single-player.
+                         * QUIT TO MENU). [END RACE NOW 2026-06-30] Row 7 in MP,
+                         * row 6 in single-player (was 6/5 before END RACE NOW).
                          * Sets the same quit latch the frontend
                          * Quit button uses (g_td5.quit_requested); the main loop
                          * tears the app down on its next iteration. Persist any
@@ -5594,10 +5653,16 @@ int td5_game_run_race_frame(void) {
                 }
 
                 /* Joystick B = back = continue (close the menu), mirroring the
-                 * frontend B=back convention. [PORT ENHANCEMENT 2026-06] */
+                 * frontend B=back convention. [PORT ENHANCEMENT 2026-06]
+                 * [END RACE NOW 2026-06-30] When the force-finish confirmation is
+                 * up, B cancels the prompt (returns to the menu) instead of
+                 * closing the menu — matching the "B = NO" footer. */
                 {
                     int jb = (jnav & 0x20) ? 1 : 0;
-                    if (jb && !s_prev_jb) s_pause_menu_active = 0;
+                    if (jb && !s_prev_jb) {
+                        if (s_pause_endrace_confirm) s_pause_endrace_confirm = 0;
+                        else                         s_pause_menu_active = 0;
+                    }
                     s_prev_jb = jb;
                 }
 
@@ -5606,9 +5671,13 @@ int td5_game_run_race_frame(void) {
                 s_prev_enter = key_enter;
             }
 
-            /* ESC again = continue; the PAUSE action also toggles the menu shut. */
+            /* ESC again = continue; the PAUSE action also toggles the menu shut.
+             * [END RACE NOW 2026-06-30] When the force-finish confirmation is up,
+             * ESC cancels the prompt (keeps the menu open) instead of closing the
+             * menu — matching the "ESC = NO" footer. */
             if ((esc_edge || pause_act_edge) && pause_menu_was_active) {
-                s_pause_menu_active = 0;
+                if (s_pause_endrace_confirm) s_pause_endrace_confirm = 0;
+                else                         s_pause_menu_active = 0;
             }
 
             /* Update graphical overlay (SELBOX + sliders).
@@ -6636,6 +6705,9 @@ int td5_game_run_race_frame(void) {
      * fade below is the leaving-transition wipe and intentionally stays on top.) */
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
+        /* [END RACE NOW 2026-06-30] Force-finish YES/NO confirmation, drawn on
+         * top of the pause panel. Self-gated: no-op unless the prompt is armed. */
+        td5_hud_draw_endrace_confirm();
     }
 
     /* Race end fade: directional wipe overlay (black bars closing in).
@@ -8342,6 +8414,73 @@ static void update_race_order(void) {
         actor->prev_race_position = actor->race_position;
         actor->race_position = (uint8_t)s_metrics[i].display_position;
     }
+}
+
+/* ========================================================================
+ * [END RACE NOW 2026-06-30] Pause-menu force-finish
+ *
+ * Ends the race immediately, classifying every still-racing car by its CURRENT
+ * track-progress rank (no DNFs). For split-screen / MP situations where one
+ * player is stuck and can never reach the finish, blocking the
+ * all-humans-finished completion latch in check_race_completion().
+ *
+ * It reuses the normal finish path rather than inventing a new results route:
+ *   1. Pre-seed each unfinished active car's synthesized finish metric
+ *      (post_finish_metric_base) from its live display_position — the HUD
+ *      position rank update_race_order() writes by track progress every tick.
+ *      build_results_table() only synthesizes a time when this is 0 and the
+ *      results sort (sort_results_by_time_asc) ranks by primary_metric, which
+ *      derives from this field; so seeding it by progress makes the results
+ *      reproduce the current on-track order regardless of game type. The seed is
+ *      offset past the largest REAL finish metric so cars that already crossed
+ *      the line keep their true times and stay ahead. Setting it non-zero also
+ *      makes update_race_order() freeze their order from here on (it skips
+ *      already-"finished" actors), so a resumed tick can't reshuffle them.
+ *   2. Latch the post-finish cooldown exactly as the all-finished /
+ *      cop-chase-resolved paths do, so check_race_completion() builds results +
+ *      awards cup points and the FSM fades to the results screen next tick.
+ *
+ * Port-only feature — the original had no force-finish. The net-synced trigger
+ * (RACE_FORCE_FINISH 0x1A) is sent by the pause dispatch so every machine ends
+ * together; each machine seeds from its own last-synced lockstep state. If the
+ * 0x1A arrives a round or two apart the standings can differ by a hair on close
+ * calls — acceptable for an "abort the race" action, and the same fire-and-handle
+ * shape the shipped RACE_LEFT (0x17) / RACE_RESTART (0x19) paths already use.
+ * ======================================================================== */
+static void td5_game_force_finish_race(void)
+{
+    int i;
+
+    if (s_post_finish_cooldown != 0) return;   /* race already ending — ignore re-trigger */
+
+    int32_t max_real = 0;
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        if (s_slot_state[i].state == 3) continue;                 /* disabled/decoration */
+        if (s_metrics[i].post_finish_metric_base > max_real)
+            max_real = s_metrics[i].post_finish_metric_base;
+    }
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        if (s_slot_state[i].state == 3) continue;
+        if (s_metrics[i].post_finish_metric_base == 0) {          /* hasn't crossed the line */
+            /* Worse (larger) than any real finish time, ordered by live progress
+             * rank so the still-racing cars rank by current track position. */
+            s_metrics[i].post_finish_metric_base =
+                max_real + 1 + (int32_t)s_metrics[i].display_position;
+        }
+    }
+
+    s_post_finish_cooldown = 1;
+    s_race_end_timer_start = td5_plat_time_ms();
+    TD5_LOG_I(LOG_TAG,
+              "Force-finish (END RACE NOW): ending race; %d active car(s) ranked by current progress",
+              active_racer_count());
+}
+
+/* [END RACE NOW 2026-06-30] Whether the force-finish confirmation prompt is up
+ * (read by the HUD overlay to draw the YES/NO modal). */
+int td5_game_pause_endrace_confirm_active(void)
+{
+    return s_pause_endrace_confirm;
 }
 
 /* ========================================================================

@@ -30,6 +30,9 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Pause menu: END RACE NOW force-finishes (YES/NO confirm; any player)",
+    "END RACE NOW: places ranked by current track progress, no DNFs",
+    "END RACE NOW: net race ends + shows results on all machines together",
     "Alt+Enter fullscreen uses the display's native refresh, not 60Hz",
     "Paint: SELECT CAR PAINT panel - secondary colour + pattern + 32 presets",
     "Paint: Two-Tone/Stripes/Split show in BOTH menu preview and in-race body",
