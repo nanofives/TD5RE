@@ -198,6 +198,11 @@ void td5_hud_draw_battle_wrecks(void);
 /* [LANE ASSIST] Per-viewport "LANE ASSIST" on/off indicator (+ steering arrow).
  * No-op unless the optional aid is enabled for the pane's player. */
 void td5_hud_draw_laneassist_indicator(void);
+/* [CAR DAMAGE 2026-06-29] Per-viewport car-health bar, drawn in the FULL-SCREEN
+ * HUD overlay pass (must run after the per-viewport viewport+clip reset). No-op
+ * when the DAMAGE BAR toggle is off. Replaces the old per-pane status-text draw
+ * that was clipped to one viewport and invisible in split-screen. */
+void td5_hud_draw_damage_bars(void);
 void td5_hud_clear_player_identities(void);
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac);
 void td5_hud_draw_race_fade(float progress, int direction);

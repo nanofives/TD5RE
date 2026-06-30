@@ -6600,6 +6600,12 @@ int td5_game_run_race_frame(void) {
     /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" tally. Self-gated:
      * no-op unless the Traffic Destruction battle mode is active. */
     td5_hud_draw_battle_wrecks();
+    /* [CAR DAMAGE 2026-06-29 split-screen fix] Per-viewport car-health bar
+     * (top-left of each pane). Drawn HERE in the full-screen overlay pass -- NOT
+     * in the per-pane status-text loop above -- so the screen-space bar quads map
+     * into every split-screen pane instead of being clipped to one offset
+     * viewport. Self-gated (no-op when the DAMAGE BAR toggle is off). */
+    td5_hud_draw_damage_bars();
     /* [LANE ASSIST 2026-06-28] Per-viewport "LANE ASSIST" indicator (on/off +
      * steering-direction arrow). Self-gated: no-op unless the optional aid is
      * enabled for the pane's player. */
