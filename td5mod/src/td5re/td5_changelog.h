@@ -41,6 +41,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Fixed Alt+Enter fullscreen dropping to 60Hz on a" },
+    { CL_ITEM,    "  high-refresh display - it now uses the screen's" },
+    { CL_ITEM,    "  native refresh rate (e.g. 120Hz or 144Hz)." },
     { CL_ITEM,    "Car paint: paintable cars now take a SECOND colour" },
     { CL_ITEM,    "  and a PATTERN (Solid / Two-Tone / Stripes / Split)." },
     { CL_ITEM,    "  Open PAINT in Select Car: the panel now has a" },
