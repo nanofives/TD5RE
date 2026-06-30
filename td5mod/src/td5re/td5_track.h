@@ -330,18 +330,22 @@ int  td5_track_span_lane_count_at(int span_index);
  * on the main line). Each look-ahead span is sampled as the centre of a
  * `lane_band`-wide group of adjacent lanes (1 = single lane; 2 = centre of two
  * lanes, more forgiving for narrow lane changes). Blends the sampled centres
- * (near-weighted) into one aim point in 24.8 fixed-point world XZ. Returns 1 on
- * success, 0 if no track is loaded or no drivable look-ahead span resolved. */
+ * (near-weighted) into one aim point in 24.8 fixed-point world XZ.
+ * When `fork_diverge` is set (and fork_commit on), an upcoming forward junction is
+ * scouted and the approach/fork spans aim at only the committed branch's lanes
+ * (the side the walker takes: [0,next_lanes) main / [next_lanes,lc) branch), so the
+ * car diverges toward one fork a few spans early instead of aiming at the divider.
+ * Returns 1 on success, 0 if no track is loaded or no drivable look-ahead span. */
 int  td5_track_laneassist_target(int from_span, int from_sub_lane,
-                                 int lookahead, int fork_commit, int lane_band,
-                                 int *out_x, int *out_z);
+                                 int lookahead, int fork_commit, int fork_diverge,
+                                 int lane_band, int *out_x, int *out_z);
 /* [LANE ASSIST 2026-06-28] Diagnostic: walk ONE continuous lane forward from
  * `start` for up to `count` spans (carrying the lane across junctions, as the aid
  * does) and log the look-ahead lane-centre target + inter-step delta, flagging
  * fork/merge rows (types 8/9/10/11). Confirms target-line continuity across
  * junctions in a trace run. Env-gated by the caller. */
 void td5_track_laneassist_sweep_diag(int start, int count, int lookahead,
-                                     int fork_commit, int lane_band);
+                                     int fork_commit, int fork_diverge, int lane_band);
 
 /* --- Lighting ---
  * Per-vehicle zone-driven lighting now lives in td5_render.c as

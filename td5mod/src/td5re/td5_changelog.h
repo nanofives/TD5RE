@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Lane Assist now picks a side at a fork: it steers" },
+    { CL_ITEM,    "  toward one branch a few spans early instead of" },
+    { CL_ITEM,    "  aiming at the barrier between the two roads." },
     { CL_ITEM,    "Controller tutorial now shows at the START of EVERY" },
     { CL_ITEM,    "  race (it used to appear only once, ever). Turn it" },
     { CL_ITEM,    "  off with the new TUTORIAL row in Game Options." },
