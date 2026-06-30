@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Split cup: later-race player can always accelerate (was camera-only)",
     "Pause menu: END RACE NOW force-finishes (YES/NO confirm; any player)",
     "END RACE NOW: places ranked by current track progress, no DNFs",
     "END RACE NOW: net race ends + shows results on all machines together",
