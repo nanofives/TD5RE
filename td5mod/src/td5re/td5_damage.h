@@ -62,6 +62,13 @@ int   td5_damage_bar_enabled(void);
  * damage padding, so this is the only initializer). */
 void  td5_damage_reset_race(void);
 
+/* [RESET-CAR REPAIR] Fully repair ONE slot mid-race: restore health, clear the
+ * knockout/event state, and erase dents + scuff. Called by the manual stuck-
+ * recovery (reset-car) path so a damaged / knocked-out car is actually recovered
+ * (the byte-faithful in-place reset can't touch the port-only health field).
+ * Inert when CarDamage is off. */
+void  td5_damage_repair_actor(int slot);
+
 /* Apply a collision of magnitude impact_mag (same units as the physics solver's
  * impact_mag) to actor. Drives health down and, when enabled, deforms the slot's
  * body mesh at the hit region. No-op when disabled or impact below the floor. */

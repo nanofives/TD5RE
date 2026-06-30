@@ -965,6 +965,19 @@ void td5_ai_mark_actor_broken_down(int slot) {
         : (int16_t)g_td5.ini.cop_smoke_ticks;
 }
 
+/* [RESET-CAR REPAIR 2026-06-29] Clear the broken-down/parked state for `slot`.
+ * Called by the manual stuck-recovery (reset-car) path so a knocked-out racer is
+ * no longer treated as wrecked by the cop-chase scheduler / render smoke. Health
+ * itself is restored separately in td5_damage_repair_actor — both are needed to
+ * fully un-stick a knocked-out car. */
+void td5_ai_clear_actor_broken_down(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (!g_actor_broken_down[slot] && g_actor_broken_ticks[slot] == 0) return;
+    g_actor_broken_down[slot]  = 0;
+    g_actor_broken_ticks[slot] = 0;
+    TD5_LOG_I(LOG_TAG, "clear_broken_down: slot=%d (manual reset recovery)", slot);
+}
+
 /* Nearest chasing cop to the given listener world position (24.8 fixed), or
  * -1 if none. td5_sound.c uses this to drive the (single) siren channel from
  * the closest active chase, then attenuates by that cop's distance. */

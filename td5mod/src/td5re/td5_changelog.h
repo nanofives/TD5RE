@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Fixed RESET CAR in split-screen: it no longer sends" },
+    { CL_ITEM,    "  you back to the start or drops you into a wall. The" },
+    { CL_ITEM,    "  car now resets where it stands, and a reset fully" },
+    { CL_ITEM,    "  repairs it (health + dents) so it can't be wrecked." },
     { CL_ITEM,    "Controller tutorial now shows at the START of EVERY" },
     { CL_ITEM,    "  race (it used to appear only once, ever). Turn it" },
     { CL_ITEM,    "  off with the new TUTORIAL row in Game Options." },

@@ -177,6 +177,9 @@ int  td5_ai_actor_is_cop(int slot);
 /* Flag `slot` broken down for cop_smoke_ticks (called from td5_physics.c on a
  * hard traffic/cop collision). */
 void td5_ai_mark_actor_broken_down(int slot);
+/* Clear the broken-down/parked flag for `slot` (called by the manual reset-car
+ * recovery so a knocked-out racer is no longer treated as wrecked). */
+void td5_ai_clear_actor_broken_down(int slot);
 /* Nearest chasing cop to a listener world pos (24.8), or -1 — drives the siren. */
 int  td5_ai_nearest_chasing_cop(int32_t listener_x, int32_t listener_z);
 

@@ -333,11 +333,26 @@ extern int g_actorSlotForView[TD5_MAX_VIEWPORTS];
  *
  * Knobs (cached on first use):
  *   TD5RE_STUCK_RECOVERY          default ON  — master gate for manual recovery.
- *   TD5RE_RECOVERY_SPANS_BACK     default 3   — spans to move back on reset.
+ *   TD5RE_RECOVERY_SPANS_BACK     default 0   — 0 = reset IN PLACE (faithful to the
+ *                                               original ResetVehicleActorState
+ *                                               @0x00405D70, which never moves
+ *                                               world XZ); >0 = legacy step-back
+ *                                               (opt-in; can teleport to the start
+ *                                               or drop the car into wall geometry
+ *                                               on branch tracks — see fix note on
+ *                                               td5_physics_recover_player).
  *   TD5RE_RECOVERY_COOLDOWN_TICKS default 150 — manual cooldown window (ticks).
  * ======================================================================== */
 
-#define TD5_RECOVERY_DEFAULT_BACK   3
+/* [RESET-CAR IN-PLACE FIX 2026-06-29] Default 0 = reset the car where it stands
+ * (upright + ground-snap + zero velocity), matching the original. The earlier
+ * default of 3 (step back 3 spans and re-derive world XZ from track geometry) was
+ * the root cause of the reported split-screen bugs: it could resolve to span 0
+ * ("teleported to the beginning of the race") and could land the car inside wall
+ * geometry on branch/junction spans, where the new damage-bar feature then wrecked
+ * it ("complete break of car"). The original game has no step-back respawn at all
+ * (RE-confirmed: no manual reset / span-step-back / checkpoint respawn). */
+#define TD5_RECOVERY_DEFAULT_BACK   0
 /* Manual-recovery cooldown: number of sim ticks after a manual recovery during
  * which further manual requests for the same player are ignored. 150 = 5 s at
  * the fixed 30 Hz tick. Runtime-overridable via TD5RE_RECOVERY_COOLDOWN_TICKS. */
@@ -15059,9 +15074,10 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
  * ======================================================================== */
 
 /* Cache the recovery knobs once. TD5RE_STUCK_RECOVERY (default ON) gates manual
- * recovery; TD5RE_RECOVERY_SPANS_BACK (default 3) is how far back to drop the
- * car; TD5RE_RECOVERY_COOLDOWN_TICKS (default 150 = 5 s) is the manual cooldown.
- * Logged once like the other [PORT ENHANCEMENT] knobs. */
+ * recovery; TD5RE_RECOVERY_SPANS_BACK (default 0 = reset IN PLACE; >0 = legacy
+ * step-back, opt-in) controls placement; TD5RE_RECOVERY_COOLDOWN_TICKS
+ * (default 150 = 5 s) is the manual cooldown. Logged once like the other
+ * [PORT ENHANCEMENT] knobs. */
 static void recovery_init_knobs(void)
 {
     if (s_recovery_init) return;
@@ -15095,13 +15111,29 @@ static void recovery_init_knobs(void)
               s_recovery_cooldown_ticks / 30.0);
 }
 
-/* Reposition `slot`'s actor a few spans back, centred, upright, heading aligned
- * to track forward. Reuses the SPAWN-pose approach: write the span fields +
- * center-lane world XZ, set yaw via td5_track_compute_heading (geometry forward
- * heading at that span), then run td5_physics_reset_actor_state which zeroes the
- * linear+angular velocities and the roll/pitch euler accumulators, ground-snaps
- * world_pos.y, and rebuilds the rotation matrix from the (now-corrected) yaw via
- * integrate_pose — exactly the sequence td5_game.c InitRace uses per racer. */
+/* Recover `slot`'s actor: upright it, kill its motion, re-face it track-forward,
+ * ground-snap it, and (port damage feature) fully repair it.
+ *
+ * [RESET-CAR IN-PLACE FIX 2026-06-29] DEFAULT (s_recovery_spans_back == 0) is an
+ * IN-PLACE reset, faithful to the original ResetVehicleActorState @0x00405D70:
+ * world_pos.x/z are NOT moved, only Y is ground-snapped and roll/pitch + velocity
+ * are zeroed. This is what the original's automatic flip-recovery does, and it
+ * structurally CANNOT teleport the car to the start or drop it into wall geometry
+ * — because the car's XZ never changes. The only port addition over the faithful
+ * reset is re-facing the car track-forward (compute_heading), so a spun/flipped
+ * car points the right way after the press.
+ *
+ * The LEGACY step-back path (s_recovery_spans_back > 0, opt-in) re-derives a
+ * span-stepped-back center-lane world XZ. That path is the documented root cause
+ * of the split-screen "reset teleported me to the beginning" and "reset spawned
+ * the car somewhere it broke" bugs (the recomputed span could resolve to ~span 0,
+ * and a branch/junction span's center lane can sit in wall geometry that the new
+ * damage-bar then wrecks). Kept only behind the explicit knob.
+ *
+ * Either way, on success the car is fully repaired (health restored, dents +
+ * knockout cleared) so a damaged or knocked-out car is actually recovered — the
+ * byte-faithful reset can't touch the port-only damage fields, and a knocked-out
+ * car (health 0) would otherwise stay physics-frozen forever. */
 int td5_physics_recover_player(int slot)
 {
     recovery_init_knobs();
@@ -15114,36 +15146,38 @@ int td5_physics_recover_player(int slot)
     if (!actor) return 0;
 
     int cur_span = (int)actor->track_span_raw;
-    int tgt_span, sub_lane, wx, wy, wz;
-    if (!td5_track_get_recovery_pose(cur_span, s_recovery_spans_back,
-                                     &tgt_span, &sub_lane, &wx, &wy, &wz)) {
-        TD5_LOG_W(LOG_TAG, "recover_player slot=%d: no recovery pose (cur_span=%d)",
-                  slot, cur_span);
-        return 0;
+    int tgt_span = cur_span;
+
+    if (s_recovery_spans_back > 0) {
+        /* ---- LEGACY OPT-IN: step back N spans + re-derive world XZ from track
+         * geometry. Off by default (see fix note above). ---- */
+        int sub_lane, wx, wy, wz;
+        if (!td5_track_get_recovery_pose(cur_span, s_recovery_spans_back,
+                                         &tgt_span, &sub_lane, &wx, &wy, &wz)) {
+            TD5_LOG_W(LOG_TAG, "recover_player slot=%d: no recovery pose (cur_span=%d)",
+                      slot, cur_span);
+            return 0;
+        }
+        actor->track_span_raw         = (int16_t)tgt_span;   /* +0x80 */
+        actor->track_span_accumulated = (int16_t)tgt_span;   /* +0x84 */
+        actor->track_span_high_water  = (int16_t)tgt_span;   /* +0x86 */
+        actor->track_sub_lane_index   = (uint8_t)sub_lane;   /* +0x8C */
+        actor->world_pos.x = wx;                             /* +0x1FC */
+        actor->world_pos.y = (int32_t)0xC0000000;            /* +0x200 (ground-snap sentinel) */
+        actor->world_pos.z = wz;                             /* +0x204 */
+    } else {
+        /* ---- DEFAULT: IN-PLACE reset (faithful to ResetVehicleActorState). Keep
+         * world_pos.x/z exactly; only mark Y for the ground-snap. The current span
+         * + sub-lane are already correct (the per-tick track walker maintains
+         * them), so leave them untouched for compute_heading to read. ---- */
+        actor->world_pos.y = (int32_t)0xC0000000;            /* +0x200 (ground-snap sentinel) */
     }
 
-    /* Seed the track-position block to the target span (mirrors the spawn-time
-     * InitActorTrackSegmentPlacement seed: +0x80/+0x84/+0x86 = span, and the
-     * clamped center sub-lane at +0x8C). +0x82 (normalized) is left to the wrap-
-     * normalizer / per-tick walker, same as spawn. */
-    actor->track_span_raw         = (int16_t)tgt_span;   /* +0x80 */
-    actor->track_span_accumulated = (int16_t)tgt_span;   /* +0x84 */
-    actor->track_span_high_water  = (int16_t)tgt_span;   /* +0x86 */
-    actor->track_sub_lane_index   = (uint8_t)sub_lane;   /* +0x8C */
-
-    /* Center-lane world XZ in 24.8 FP; Y set to the reset sentinel so
-     * reset_actor_state's integrate_pose ground-snaps the car onto the surface
-     * (it overwrites world_pos.y with 0xC0000000 itself, but set it here too so
-     * compute_heading / any pre-reset read sees a sane chassis position). */
-    actor->world_pos.x = wx;                             /* +0x1FC */
-    actor->world_pos.y = (int32_t)0xC0000000;            /* +0x200 (ground-snap sentinel) */
-    actor->world_pos.z = wz;                             /* +0x204 */
-
-    /* Heading aligned to track forward at the target span. compute_heading reads
-     * track_span_raw (+0x80) + sub_lane (+0x8C) just written, and writes
-     * euler_accum.yaw (+0x1F4) + heading_normal (+0x290). On TD6 tracks the
-     * geometry yaw lands ~90 deg off, so re-seed from the route heading exactly
-     * like the spawn path does (td5_game.c). */
+    /* Heading aligned to track forward at the (current or stepped-back) span.
+     * compute_heading reads track_span_raw (+0x80) + sub_lane (+0x8C) and writes
+     * euler_accum.yaw (+0x1F4) + heading_normal (+0x290); it does NOT move world
+     * XZ, so the in-place path stays in place. On TD6 tracks the geometry yaw
+     * lands ~90 deg off, so re-seed from the route heading like the spawn path. */
     td5_track_compute_heading(actor);
     if (g_active_td6_level > 0)
         td5_ai_correct_spawn_heading(slot);
@@ -15151,12 +15185,11 @@ int td5_physics_recover_player(int slot)
     /* Zero linear+angular velocity, roll/pitch euler, settle suspension, rebuild
      * the rotation matrix + render pose, and ground-snap Y. reset_actor_state
      * preserves euler_accum.yaw (only roll/pitch are zeroed), so the corrected
-     * heading above survives. */
+     * heading above survives, and it never touches world_pos.x/z. */
     td5_physics_reset_actor_state(actor);
 
     /* reset_actor_state -> integrate_pose -> update_actor_position may have
-     * walked track_span_raw across a boundary; restore it to the recovery span
-     * (same fix-up the spawn loop applies after reset). */
+     * walked track_span_raw across a boundary; restore it to the recovery span. */
     actor->track_span_raw = (int16_t)tgt_span;
 
     /* Clear control-flag residue so the car doesn't immediately re-trip a stuck
@@ -15166,9 +15199,18 @@ int td5_physics_recover_player(int slot)
     actor->throttle_state = 1;      /* +0x36F: forward */
     actor->track_contact_flag = 0;  /* +0x37B: V2W contact */
 
+    /* [RESET-CAR REPAIR 2026-06-29] Fully recover the car: restore health, clear
+     * dents + the knockout state (port-only damage feature — inert when CarDamage
+     * is off), and clear the broken-down flag so a knocked-out racer is no longer
+     * treated as wrecked (it would otherwise stay physics-frozen, since health
+     * never regenerates). */
+    td5_damage_repair_actor(slot);
+    td5_ai_clear_actor_broken_down(slot);
+
     TD5_LOG_I(LOG_TAG,
-              "recover_player: slot=%d cur_span=%d -> span=%d lane=%d pos=(%d,%d,%d)",
-              slot, cur_span, tgt_span, sub_lane,
+              "recover_player: slot=%d cur_span=%d -> span=%d%s pos=(%d,%d,%d) [repaired]",
+              slot, cur_span, tgt_span,
+              (s_recovery_spans_back > 0) ? " (step-back)" : " (in-place)",
               actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
     return 1;
 }
