@@ -458,6 +458,8 @@ typedef struct TD5_GlobalState {
         int  default_track;
         int  default_game_type;
         int  td6_paint_color;    /* last-selected TD6 paint color (0xRRGGBB); persisted */
+        int  td6_paint_color2;   /* secondary TD6 paint color (0xRRGGBB); used by non-SOLID patterns; persisted */
+        int  td6_paint_pattern;  /* TD6 paint pattern (TD6_PAT_*); 0 = SOLID; persisted */
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
         int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
         int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */

@@ -541,28 +541,37 @@ static int frontend_car_cycle_step(int cur, int delta, int lo, int hi) {
     return cur;
 }
 
-/* Color at grid cell (col,row): rows 0-1 = predefined swatches; rows 2.. = map. */
+/* Color at grid cell (col,row): swatch rows = presets; map rows below = HSV map.
+ * Only valid on colour rows (row >= TD6_SWATCH_ROW0); control rows pick no colour. */
 static uint32_t td6_cursor_color(int col, int row) {
-    if (row < 2) {
-        int idx = row * TD6_CP_COLS + col;
+    if (row >= TD6_SWATCH_ROW0 && row < TD6_MAP_ROW0) {
+        int idx = (row - TD6_SWATCH_ROW0) * TD6_CP_COLS + col;
         if (idx < 0) idx = 0;
         if (idx >= TD6_PALETTE_N) idx = TD6_PALETTE_N - 1;
         return s_td6_palette[idx];
     }
     float u = (float)col / (float)(TD6_CP_COLS - 1);
-    float v = (float)(row - 2) / (float)(TD6_CP_MAP_ROWS - 1);
+    float v = (float)(row - TD6_MAP_ROW0) / (float)(TD6_CP_MAP_ROWS - 1);
     return td6_map_color(u, v);
 }
 
-/* Move the cursor to the predefined swatch matching the current color (if any),
- * so reopening the panel highlights the active color. */
+/* The colour currently being edited (MAIN vs SECONDARY). */
+static int *td6_active_color_slot(void) {
+    return s_paint_target ? &g_td5.ini.td6_paint_color2 : &g_td5.ini.td6_paint_color;
+}
+
+/* Move the cursor to the predefined swatch matching the ACTIVE target's colour
+ * (if any), so reopening the panel highlights it; else land on the first swatch. */
 static void frontend_color_panel_sync_index(void) {
+    uint32_t active = (uint32_t)*td6_active_color_slot();
     for (int k = 0; k < TD6_PALETTE_N; k++)
-        if (s_td6_palette[k] == (uint32_t)g_td5.ini.td6_paint_color) {
-            s_color_cur_row = k / TD6_CP_COLS;
+        if (s_td6_palette[k] == active) {
+            s_color_cur_row = TD6_SWATCH_ROW0 + k / TD6_CP_COLS;
             s_color_cur_col = k % TD6_CP_COLS;
             return;
         }
+    s_color_cur_row = TD6_SWATCH_ROW0;
+    s_color_cur_col = 0;
 }
 
 /* Check whether level data for a given track index is present on disk.
@@ -906,7 +915,10 @@ static void frontend_apply_color_panel_layout(void) {
      * the y<408 blue-fill area. Open layout (TD6 colour picker) is unchanged — the
      * stat panel is hidden while the picker fills that band. */
     static const int closed_y[6] = { 169, 205, 297, 333, 369, 369 };
-    static const int open_y[6]   = { 150, 190, 336, 372, 408, 408 };
+    /* [SECONDARY PAINT 2026-06-29] The open panel grew by two selector rows
+     * (PATTERN + COLOR target) at the top, so CAR/PAINT shift up a touch to keep
+     * the backdrop (now starting at y=216) clear of the PAINT button. */
+    static const int open_y[6]   = { 142, 178, 336, 372, 408, 408 };
     const int *y = s_color_panel_visible ? open_y : closed_y;
     for (int i = 0; i < 6 && i < FE_MAX_BUTTONS; i++)
         if (s_buttons[i].active) s_buttons[i].y = y[i];
@@ -914,7 +926,10 @@ static void frontend_apply_color_panel_layout(void) {
 
 static void frontend_set_color_panel(int open) {
     s_color_panel_visible = open ? 1 : 0;
-    if (s_color_panel_visible) frontend_color_panel_sync_index();
+    if (s_color_panel_visible) {
+        s_paint_target = 0;   /* always (re)open editing the MAIN colour */
+        frontend_color_panel_sync_index();
+    }
     frontend_apply_color_panel_layout();
 }
 
@@ -924,12 +939,27 @@ static void frontend_set_color_panel(int open) {
 static int frontend_color_panel_mouse(void) {
     if (!s_mouse_clicked) return 0;
     int mx = s_mouse_x, my = s_mouse_y;
+    /* Control rows (full panel width): PATTERN click cycles, COLOR click toggles
+     * the edit target. They set no colour cell (the caller skips colour writes on
+     * control rows). */
+    if (mx >= TD6_CP_LIST_X && mx < TD6_CP_LIST_X + TD6_CP_MAP_W) {
+        if (my >= TD6_CP_PATTERN_Y - 1 && my < TD6_CP_PATTERN_Y + 11) {
+            g_td5.ini.td6_paint_pattern = (g_td5.ini.td6_paint_pattern + 1) % TD6_PAT_COUNT;
+            s_color_cur_row = TD6_ROW_PATTERN;
+            return 1;
+        }
+        if (my >= TD6_CP_TARGET_Y - 1 && my < TD6_CP_TARGET_Y + 11) {
+            s_paint_target ^= 1;
+            s_color_cur_row = TD6_ROW_TARGET;
+            return 1;
+        }
+    }
     for (int i = 0; i < TD6_PALETTE_N; i++) {
         int c = i % TD6_CP_COLS, r = i / TD6_CP_COLS;
         int x = TD6_CP_LIST_X + c * (TD6_CP_SW + TD6_CP_GAP);
         int y = TD6_CP_LIST_Y + r * (TD6_CP_SW + TD6_CP_GAP);
         if (mx >= x && mx < x + TD6_CP_SW && my >= y && my < y + TD6_CP_SW) {
-            s_color_cur_col = c; s_color_cur_row = r;
+            s_color_cur_col = c; s_color_cur_row = TD6_SWATCH_ROW0 + r;
             return 1;
         }
     }
@@ -939,7 +969,7 @@ static int frontend_color_panel_mouse(void) {
         int row = (my - TD6_CP_MAP_Y) * TD6_CP_MAP_ROWS / TD6_CP_MAP_H;
         if (col >= TD6_CP_COLS)     col = TD6_CP_COLS - 1;
         if (row >= TD6_CP_MAP_ROWS) row = TD6_CP_MAP_ROWS - 1;
-        s_color_cur_col = col; s_color_cur_row = 2 + row;
+        s_color_cur_col = col; s_color_cur_row = TD6_MAP_ROW0 + row;
         return 1;
     }
     return 0;
@@ -5567,16 +5597,32 @@ void Screen_CarSelection(void) {
              * frame (idempotent; survives button recreation on car change). */
             frontend_apply_color_panel_layout();
 
-            /* TD6 color panel is MODAL while open: all 4 arrows move a 2D cursor
-             * over the picker (rows 0-1 = predefined swatches, rows 2+ = the color
-             * map) and the color under it is applied live; the mouse sets the
-             * cursor by clicking a swatch / map cell. A button PRESS exits the
+            /* TD6 color panel is MODAL while open: all 4 arrows move a 2D cursor.
+             * Row 0 = PATTERN (L/R cycles), row 1 = COLOR target (L=MAIN/R=2ND),
+             * rows 2+ = the swatch grid then the HSV map (the colour under the
+             * cursor is applied live to the ACTIVE target). The mouse sets the
+             * cursor by clicking a row/swatch/map cell. A button PRESS exits the
              * picker: PAINT just closes; any other button closes AND acts. There's
              * no OK/close inside the panel — re-press PAINT (or click it) to hide. */
             if (s_color_panel_visible) {
                 int moved = 0, confirm = 0;
-                if (s_arrow_input & 1) { s_color_cur_col = (s_color_cur_col + TD6_CP_COLS - 1) % TD6_CP_COLS; moved = 1; }
-                if (s_arrow_input & 2) { s_color_cur_col = (s_color_cur_col + 1) % TD6_CP_COLS; moved = 1; }
+                int row = s_color_cur_row;
+                if (s_arrow_input & 1) {        /* LEFT */
+                    if (row == TD6_ROW_PATTERN)
+                        g_td5.ini.td6_paint_pattern =
+                            (g_td5.ini.td6_paint_pattern + TD6_PAT_COUNT - 1) % TD6_PAT_COUNT;
+                    else if (row == TD6_ROW_TARGET) s_paint_target = 0;
+                    else s_color_cur_col = (s_color_cur_col + TD6_CP_COLS - 1) % TD6_CP_COLS;
+                    moved = 1;
+                }
+                if (s_arrow_input & 2) {        /* RIGHT */
+                    if (row == TD6_ROW_PATTERN)
+                        g_td5.ini.td6_paint_pattern =
+                            (g_td5.ini.td6_paint_pattern + 1) % TD6_PAT_COUNT;
+                    else if (row == TD6_ROW_TARGET) s_paint_target = 1;
+                    else s_color_cur_col = (s_color_cur_col + 1) % TD6_CP_COLS;
+                    moved = 1;
+                }
                 if (s_arrow_input & 4) {         /* UP: move up, or exit the picker from the top row */
                     if (s_color_cur_row > 0) { s_color_cur_row--; moved = 1; }
                     else confirm = 1;
@@ -5584,9 +5630,12 @@ void Screen_CarSelection(void) {
                 if (s_arrow_input & 8) { if (s_color_cur_row < TD6_CP_GRID_ROWS - 1) { s_color_cur_row++; moved = 1; } }
                 if (frontend_color_panel_mouse()) moved = 1;
                 if (moved) {
-                    /* Live preview only: no animation while navigating — the
-                     * body-only overlay shows the colour instantly (modulate). */
-                    g_td5.ini.td6_paint_color = (int)td6_cursor_color(s_color_cur_col, s_color_cur_row);
+                    /* Live preview only. Apply the colour under the cursor to the
+                     * ACTIVE target, but only on a colour row (control rows just
+                     * changed the pattern / target). */
+                    if (s_color_cur_row >= TD6_SWATCH_ROW0)
+                        *td6_active_color_slot() =
+                            (int)td6_cursor_color(s_color_cur_col, s_color_cur_row);
                     frontend_play_sfx(2);
                 }
                 if (s_button_index == 1) confirm = 1;   /* PAINT re-pressed -> confirm */

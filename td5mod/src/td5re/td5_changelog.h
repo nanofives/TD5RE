@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Car paint: paintable cars now take a SECOND colour" },
+    { CL_ITEM,    "  and a PATTERN (Solid / Two-Tone / Stripes / Split)." },
+    { CL_ITEM,    "  Open PAINT in Select Car: the panel now has a" },
+    { CL_ITEM,    "  PATTERN row and a COLOR row (MAIN / 2ND) above the" },
+    { CL_ITEM,    "  swatches, and the quick-pick palette grew to 32." },
     { CL_ITEM,    "Lane Assist now picks a side at a fork: it steers" },
     { CL_ITEM,    "  toward one branch a few spans early instead of" },
     { CL_ITEM,    "  aiming at the barrier between the two roads." },
