@@ -393,9 +393,11 @@ const int8_t g_pause_glyph_widths[256] = {
  * pause-enter), and two action rows are added: RESTART RACE (re-run the same
  * race) and EXIT GAME (clean app shutdown). The old "EXIT" (return to menu)
  * is relabelled "QUIT TO MENU" to disambiguate it from EXIT GAME.
- * New layout — title + 6 selectable rows (cursor indices in parentheses):
- *   PAUSED(title) / VIEW(0) SOUND(1) [sliders] /
- *   CONTINUE(2) RESTART RACE(3) QUIT TO MENU(4) EXIT GAME(5).
+ * Layout — title + selectable rows (cursor indices in parentheses):
+ *   PAUSED(title) / VIEW(0) SOUND(1) [sliders] / CONTINUE(2) RESTART RACE(3)
+ *   END RACE NOW(4) [BACK TO LOBBY(5) — MP only] QUIT TO MENU EXIT GAME.
+ * [END RACE NOW 2026-06-30] Force-finish row shown in BOTH single-player and MP;
+ * BACK TO LOBBY remains MP-only (skipped without advancing y in single-player).
  * This is source-port-only UI (no original pause-restart/exit-game equiv). */
 static const char *s_eng_pause_strings[] = {
     "PAUSED",         (const char *)(intptr_t)2,
@@ -403,6 +405,7 @@ static const char *s_eng_pause_strings[] = {
     "SOUND",          (const char *)(intptr_t)0,
     "CONTINUE",       (const char *)(intptr_t)2,
     "RESTART RACE",   (const char *)(intptr_t)2,
+    "END RACE NOW",   (const char *)(intptr_t)2,   /* [END RACE NOW 2026-06-30] force-finish */
     "BACK TO LOBBY",  (const char *)(intptr_t)2,
     "QUIT TO MENU",   (const char *)(intptr_t)2,
     "EXIT GAME",      (const char *)(intptr_t)2,
@@ -2120,6 +2123,41 @@ void td5_hud_draw_net_pause_overlay(void)
     td5_vui_text_centered(cx, cy - line_h * 0.5f, l1, 0xFFFFFFFFu, ts, ts);
     td5_vui_text_centered(cx, cy + line_h * 0.6f, "WAITING FOR THEM TO CONTINUE",
                           0xFFFFC050u, ts * 0.7f, ts * 0.7f);
+}
+
+/* [END RACE NOW 2026-06-30] Confirmation modal for the pause-menu force-finish.
+ * Self-gated: draws nothing unless td5_game has armed the prompt (the player
+ * highlighted END RACE NOW and pressed confirm once). Mirrors the frontend
+ * mp_confirm_modal_render look (full-screen dim + gold question + white footer)
+ * but in the in-race HUD pixel space. Drawn on TOP of the pause panel so it reads
+ * as a sub-prompt of the menu. Port-only feature (no original equivalent). */
+void td5_hud_draw_endrace_confirm(void)
+{
+    extern int td5_game_pause_endrace_confirm_active(void);
+    if (!td5_game_pause_endrace_confirm_active()) return;
+
+    float sw = g_render_width_f;
+    float sh = g_render_height_f;
+    if (sw < 2.0f || sh < 2.0f) return;
+
+    /* Dim the whole screen so the question stands out over the (already-drawn)
+     * pause panel and the frozen race behind it. */
+    td5_vui_quad(0.0f, 0.0f, sw, sh, 0xC0000000u, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+
+    float cx = sw * 0.5f;
+    float cy = sh * 0.5f;
+    /* Scale the prompt with screen width (mirrors the net-pause overlay), clamped
+     * so it stays readable on small windows and not gigantic on 4K. */
+    float ts = sw / 640.0f;
+    if (ts > 1.6f)  ts = 1.6f;
+    if (ts < 0.40f) ts = 0.40f;
+    float line_h = 30.0f * ts;
+    /* Gold matches the frontend confirm-title accent (MP_TITLE_GOLD 0xFFE3D708). */
+    td5_vui_text_centered(cx, cy - line_h * 0.6f, "END RACE NOW?",
+                          0xFFE3D708u, ts, ts);
+    td5_vui_text_centered(cx, cy + line_h * 0.6f,
+                          "A / ENTER = YES        B / ESC = NO",
+                          0xFFFFFFFFu, ts * 0.65f, ts * 0.65f);
 }
 
 /* Called each frame while paused to update SELBOX position and slider thumb positions.
@@ -7322,10 +7360,12 @@ void td5_hud_init_pause_menu(int page_index)
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
-        /* MP = 7 selectable rows (bottom selbox ~+79 -> panel +84); single-player
-         * = 6 rows (BACK TO LOBBY removed) -> panel +68. */
+        /* [END RACE NOW 2026-06-30] +1 selectable row (END RACE NOW) in both
+         * modes, so each panel grows one row (16px) taller:
+         * MP = 8 rows (bottom selbox ~+95 -> panel +100); single-player
+         * = 7 rows (BACK TO LOBBY removed) -> panel +84. */
         PAUSE_ADD(-s_pause_half_width, -56.0f,
-                   s_pause_half_width,  pause_mp ? 84.0f : 68.0f,
+                   s_pause_half_width,  pause_mp ? 100.0f : 84.0f,
                    bu, bv, bu, bv,
                    blackbox_e->texture_page, 0xFFFFFFFF);
     }

@@ -184,6 +184,9 @@ void td5_hud_draw_pause_overlay(void);
  * required player's controller is currently missing. */
 void td5_hud_draw_disconnect_overlays(void);
 void td5_hud_draw_net_pause_overlay(void);
+/* [END RACE NOW 2026-06-30] Pause-menu force-finish confirmation modal. No-op
+ * unless td5_game has armed the prompt (any player selecting END RACE NOW). */
+void td5_hud_draw_endrace_confirm(void);
 /* [PORT 2026-06-08] Per-viewport player identity: coloured frame + name plate
  * under the car. Set by the multiplayer frontend at race start. */
 void td5_hud_draw_player_id_overlays(void);

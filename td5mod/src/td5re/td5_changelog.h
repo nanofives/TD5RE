@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 30" },
+    { CL_ITEM,    "New: END RACE NOW in the pause menu. If a player is" },
+    { CL_ITEM,    "  stuck and can't reach the finish, pause and choose" },
+    { CL_ITEM,    "  END RACE NOW to end the race for everyone. A YES/NO" },
+    { CL_ITEM,    "  prompt confirms first; any player can trigger it." },
+    { CL_ITEM,    "  Final places are ranked by how far along the track" },
+    { CL_ITEM,    "  each car has got (no DNFs)." },
     { CL_ITEM,    "Fixed split-screen: a controller that the system saw" },
     { CL_ITEM,    "  as more than one gamepad could join as several" },
     { CL_ITEM,    "  players and then flip those players' camera views" },
