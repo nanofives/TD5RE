@@ -38,6 +38,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  players and then flip those players' camera views" },
     { CL_ITEM,    "  from its one change-camera button. One physical pad" },
     { CL_ITEM,    "  now joins as exactly one player." },
+    { CL_ITEM,    "New: your car now starts in your PROFILE colour." },
+    { CL_ITEM,    "  Paintable cars default to your player colour -" },
+    { CL_ITEM,    "  exact for newer cars, nearest match for the" },
+    { CL_ITEM,    "  classic 4-paint cars. Cycle PAINT to override." },
+    { CL_ITEM,    "Profiles: type a new player name but forget to" },
+    { CL_ITEM,    "  SAVE it? It's now saved automatically when the" },
+    { CL_ITEM,    "  race starts, so the new name isn't lost." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },

@@ -40,6 +40,8 @@ static const char *const k_seed[] = {
     "Tutorial overlay now shows at the START of every race (was once-ever)",
     "Game Options: new TUTORIAL on/off row turns the overlay off",
     "Game Options paginated (2 pages, < PREV / NEXT >); all rows fit, values/arrows OK",
+    "Car defaults to your PROFILE colour (TD6 exact / TD5 nearest); PAINT overrides",
+    "MP profile: typed-but-unsaved NEW name auto-saves when the race starts",
     "Traffic: visible ~60% further on open tracks (no short-range pop-out)",
     "Damage Bar VISIBLE for every split-screen player (was invisible before)",
     "Damage Bar OFF (Game Options): no top bar, no wreck-out; dents stay",

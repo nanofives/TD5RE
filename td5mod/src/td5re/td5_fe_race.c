@@ -1458,6 +1458,143 @@ static void mp_simul_drop_handle(int *cache, int player, int n) {
     cache[player] = 0;
 }
 
+/* ====================================================================== *
+ * [PROFILE CAR COLOUR 2026-06-30] Auto-default a paintable car to the player's
+ * PROFILE colour (their MP identity accent). TD6 cars take the EXACT accent RGB
+ * as their body tint; TD5 cars SNAP to whichever of their 4 baked paint schemes
+ * is closest to the accent. Applied as a DEFAULT only — once the player manually
+ * cycles PAINT the per-player override flag latches and the auto-default no
+ * longer touches that player's car for the rest of the flow.
+ * Knob TD5RE_PROFILE_CAR_COLOUR (default on). No original-binary basis: the
+ * profile system is a port enhancement.
+ * ====================================================================== */
+/* 1 = player hand-picked paint/colour this flow (suppresses the auto-default).
+ * Reset per fresh race in frontend_mp_flow_reset; persists across a BACK/forward
+ * within a flow so a manual pick survives re-entering the grid. */
+static int s_mp_car_color_user_set[TD5_MAX_HUMAN_PLAYERS];
+
+static int profile_car_color_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_PROFILE_CAR_COLOUR");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "Profile car-colour default %s (TD5RE_PROFILE_CAR_COLOUR=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+/* Squared RGB distance between two 0xRRGGBB colours. */
+static long fe_rgb_dist2(uint32_t a, uint32_t b) {
+    long dr = (long)((a >> 16) & 0xFF) - (long)((b >> 16) & 0xFF);
+    long dg = (long)((a >>  8) & 0xFF) - (long)((b >>  8) & 0xFF);
+    long db = (long)( a        & 0xFF) - (long)( b        & 0xFF);
+    return dr*dr + dg*dg + db*db;
+}
+
+/* Nearest swatch index in the 16-entry TD6 body palette to `rgb` (so the paint
+ * cycler resumes from a sensible cursor after an exact accent tint is applied). */
+static int mp_nearest_td6_palette_idx(uint32_t rgb) {
+    int k, best = 0; long bd = -1;
+    for (k = 0; k < TD6_PALETTE_N; k++) {
+        long d = fe_rgb_dist2((uint32_t)s_td6_palette[k] & 0x00FFFFFFu, rgb & 0x00FFFFFFu);
+        if (bd < 0 || d < bd) { bd = d; best = k; }
+    }
+    return best;
+}
+
+/* Representative body colour of a TD5 car's paint scheme `paint` (0..3), cached.
+ * Computed once by decoding CarPic<paint>.tga (blue preview background keyed to
+ * alpha 0) and averaging the opaque body texels, skipping near-black shadows /
+ * near-white glass+highlights so the result tracks the body livery rather than
+ * trim. Returns 0xRRGGBB, or TD5_PAINT_REP_NONE if the preview couldn't decode. */
+#define TD5_PAINT_REP_NONE   0xFFFFFFFFu
+#define TD5_PAINT_REP_UNCOMP 0xFFFFFFFEu
+static uint32_t s_td5_paint_rep[TD5_BASE_CAR_COUNT][4];
+static int      s_td5_paint_rep_ready;
+static uint32_t td5_paint_rep_color(int car, int paint) {
+    char png_path[256], entry[32];
+    void *pixels = NULL;
+    int w = 0, h = 0, i, n;
+    uint64_t sr = 0, sg = 0, sb = 0; long cnt = 0;
+    if (!s_td5_paint_rep_ready) {
+        int c, q;
+        for (c = 0; c < TD5_BASE_CAR_COUNT; c++)
+            for (q = 0; q < 4; q++) s_td5_paint_rep[c][q] = TD5_PAINT_REP_UNCOMP;
+        s_td5_paint_rep_ready = 1;
+    }
+    if (car < 0 || car >= TD5_BASE_CAR_COUNT) return TD5_PAINT_REP_NONE;
+    paint &= 3;
+    if (s_td5_paint_rep[car][paint] != TD5_PAINT_REP_UNCOMP)
+        return s_td5_paint_rep[car][paint];            /* cached (real or NONE) */
+    s_td5_paint_rep[car][paint] = TD5_PAINT_REP_NONE;  /* cache failure unless we overwrite */
+    if (!s_car_zip_paths[car]) return TD5_PAINT_REP_NONE;
+    snprintf(entry, sizeof(entry), "CarPic%d.tga", paint);
+    if (!td5_asset_resolve_png_path(entry, s_car_zip_paths[car], png_path, sizeof(png_path)))
+        return TD5_PAINT_REP_NONE;
+    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_BLUE88, &pixels, &w, &h) || !pixels)
+        return TD5_PAINT_REP_NONE;
+    n = w * h;
+    {
+        const uint8_t *px = (const uint8_t *)pixels;   /* BGRA32 */
+        for (i = 0; i < n; i++) {
+            uint8_t b = px[i*4+0], g = px[i*4+1], r = px[i*4+2], a = px[i*4+3];
+            int sum;
+            if (a == 0) continue;                        /* keyed-out background */
+            sum = (int)r + g + b;
+            if (sum < 48) continue;                      /* shadow / tyre */
+            if (r > 240 && g > 240 && b > 240) continue; /* glass / highlight */
+            sr += r; sg += g; sb += b; cnt++;
+        }
+    }
+    free(pixels);
+    if (cnt <= 0) return TD5_PAINT_REP_NONE;
+    s_td5_paint_rep[car][paint] = ((uint32_t)(sr / (uint64_t)cnt) << 16) |
+                                  ((uint32_t)(sg / (uint64_t)cnt) <<  8) |
+                                   (uint32_t)(sb / (uint64_t)cnt);
+    return s_td5_paint_rep[car][paint];
+}
+
+/* Index (0..3) of the TD5 paint whose representative body colour is closest to
+ * `target` (0xRRGGBB); falls back to paint 0 if none decode. */
+static int td5_nearest_paint(int car, uint32_t target) {
+    int paint, best = -1; long bd = -1;
+    for (paint = 0; paint < 4; paint++) {
+        uint32_t rep = td5_paint_rep_color(car, paint);
+        long d;
+        if (rep == TD5_PAINT_REP_NONE) continue;
+        d = fe_rgb_dist2(rep, target & 0x00FFFFFFu);
+        if (bd < 0 || d < bd) { bd = d; best = paint; }
+    }
+    return (best >= 0) ? best : 0;
+}
+
+/* Default player p's paintable car to its PROFILE colour (accent). No-op if the
+ * player manually picked a colour/paint this flow, has no profile colour, is an
+ * AI pane, or the current car isn't paintable. */
+static void mp_apply_profile_car_color(int p) {
+    int car;
+    uint32_t accent;
+    if (!profile_car_color_enabled()) return;
+    if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return;
+    if (s_mp_slot_is_ai[p]) return;
+    if (s_mp_car_color_user_set[p]) return;            /* respect a manual pick */
+    accent = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
+    if (accent == 0) return;                           /* no profile colour set */
+    car = s_mp_player_car[p];
+    if (frontend_car_is_td6(car)) {
+        if (!frontend_car_paintable(car)) return;      /* TD6 cop / non-paintable */
+        s_mp_player_color[p]     = (int)accent;        /* exact body tint */
+        s_mp_player_color_idx[p] = mp_nearest_td6_palette_idx(accent);
+        TD5_LOG_I(LOG_TAG, "Profile car-colour: P%d car=%d TD6 exact 0x%06X", p, car, accent);
+    } else {
+        if (!frontend_car_has_paint(car)) return;      /* TD5 special / police */
+        s_mp_player_paint[p] = td5_nearest_paint(car, accent);
+        TD5_LOG_I(LOG_TAG, "Profile car-colour: P%d car=%d TD5 nearest paint=%d (accent 0x%06X)",
+                  p, car, s_mp_player_paint[p], accent);
+    }
+}
+
 /* (Re)load a pane's carpic preview + (TD6) body-paint overlay for its current
  * car/paint. Loads the new handle BEFORE dropping the old one so the loader
  * can't reuse the old slot mid-swap. */
@@ -1502,12 +1639,14 @@ static void mp_simul_cycle_paint(int p, int step, int sfx) {
         if (idx >= TD6_PALETTE_N) idx = 0;
         s_mp_player_color_idx[p] = idx;
         s_mp_player_color[p]     = (int)s_td6_palette[idx];
+        s_mp_car_color_user_set[p] = 1;   /* [PROFILE CAR COLOUR] manual pick latches */
         if (sfx) frontend_play_sfx(2);
     } else if (!frontend_car_is_td6(car) && frontend_car_has_paint(car)) {
         int pa = s_mp_player_paint[p] + step;
         if (pa < 0) pa = 3;
         if (pa > 3) pa = 0;
         s_mp_player_paint[p] = pa;
+        s_mp_car_color_user_set[p] = 1;   /* [PROFILE CAR COLOUR] manual pick latches */
         mp_simul_refresh_pane(p);
         if (sfx) frontend_play_sfx(2);
     }
@@ -1654,6 +1793,7 @@ static void mp_simul_host_apply(int opt, int n) {
         if (s_mp_player_car[p] != car) {
             s_mp_player_car[p]   = car;
             s_mp_player_paint[p] = 0;     /* reset paint on car change (matches manual cycle) */
+            mp_apply_profile_car_color(p);/* re-default the new car to the profile colour */
             mp_simul_refresh_pane(p);
         }
     }
@@ -1845,6 +1985,7 @@ static void frontend_mp_simul_carsel_init(void) {
         /* Seed the edge tracker with whatever's held now (the START press is
          * probably still down) so it isn't read as an instant action. */
         s_mp_pane_nav_prev[p]    = mp_simul_player_nav(p);
+        mp_apply_profile_car_color(p);  /* [PROFILE CAR COLOUR] default paintable car to profile accent */
         mp_simul_refresh_pane(p);
     }
     s_mp_simul_ready_ms = 0;
@@ -2033,6 +2174,7 @@ static void frontend_mp_simul_carsel_update(void) {
                                                   s_car_roster_min, s_car_roster_max);
                     s_mp_player_car[p]   = car;
                     s_mp_player_paint[p] = 0;   /* reset paint on car change (matches single-player) */
+                    mp_apply_profile_car_color(p);/* re-default the new car to the profile colour */
                     mp_simul_refresh_pane(p);
                     if (lr_edge) frontend_play_sfx(5);
                 }
@@ -2324,6 +2466,11 @@ static void mp_prof_apply_to_player(int p, const TD5_Profile *pr) {
     s_mp_player_paint[p]  = pr->paint;
     s_mp_player_trans[p]  = pr->trans;
     if (pr->car >= 0 && pr->car < TD5_CAR_COUNT) s_mp_player_car[p] = pr->car;
+    /* [PROFILE CAR COLOUR 2026-06-30] A loaded profile's saved body colour/paint
+     * is an explicit pick — keep it (suppress the accent auto-default). A profile
+     * with no saved car colour (color==-1, paint==0) clears the flag so the
+     * accent default applies when the car grid opens. */
+    s_mp_car_color_user_set[p] = (pr->color >= 0 || pr->paint != 0) ? 1 : 0;
 }
 
 /* Clamp the per-player list cursor into [0, count). */
@@ -2539,6 +2686,47 @@ static int      s_mp_setup_confirm_back = 0;   /* 1 = "LEAVE? Y/N" prompt is up 
 static uint32_t s_mp_setup_confirm_ms   = 0;   /* arm time (for the auto-disarm timeout) */
 #define MP_BACK_CONFIRM_TIMEOUT_MS 5000u
 
+/* [PROFILE AUTOSAVE 2026-06-30] When players leave the NAME/COLOUR setup going
+ * FORWARD (everyone OK'd -> position/car grid), persist any human whose typed
+ * name is NOT yet a stored profile. This rescues a player who typed a NEW name
+ * but forgot to open PROFILE -> SAVE: the identity (name + accent + car + paint
+ * + colour + trans) is created as a reusable TD5_Profile. Names that already
+ * match a stored profile are left untouched — no silent overwrite of an existing
+ * profile's settings. Gated by mp_profiles_enabled() + TD5RE_MP_PROFILE_AUTOSAVE
+ * (default on). No original-binary basis: the profile store is a port feature. */
+static int mp_profile_autosave_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_PROFILE_AUTOSAVE");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP profile autosave-on-advance %s (TD5RE_MP_PROFILE_AUTOSAVE=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+static void mp_autosave_unsaved_profiles(int n) {
+    int p;
+    if (!mp_profiles_enabled() || !mp_profile_autosave_enabled()) return;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    for (p = 0; p < n; p++) {
+        TD5_Profile pr;
+        int slot;
+        if (s_mp_slot_is_ai[p]) continue;              /* AI keep their throwaway identity */
+        if (!s_mp_player_name[p][0]) continue;         /* nothing typed */
+        if (mp_prof_index_of_name(s_mp_player_name[p]) >= 0) continue; /* already a saved profile */
+        mp_prof_fill_from_player(p, &pr);
+        slot = td5_save_profile_save(&pr);
+        if (slot >= 0) {
+            mp_prof_set_held(p, pr.name);              /* mirror the manual-SAVE bookkeeping */
+            TD5_LOG_I(LOG_TAG, "MP profile: P%d AUTO-SAVED new '%s' -> slot %d (forgot to save)",
+                      p, pr.name, slot);
+        } else {
+            TD5_LOG_W(LOG_TAG, "MP profile: P%d auto-save '%s' FAILED (store full?)",
+                      p, s_mp_player_name[p]);
+        }
+    }
+}
+
 static void frontend_mp_setup_update(void) {
     int p, n = s_num_human_players;
     int all_ready = 1, want_back = 0;
@@ -2742,6 +2930,7 @@ static void frontend_mp_setup_update(void) {
              * active and not already settled for this roster; otherwise jump
              * straight to the car grid (phase 1). */
             s_mp_simul_ready_ms = 0;
+            mp_autosave_unsaved_profiles(n);   /* [PROFILE AUTOSAVE] rescue typed-but-unsaved names */
             frontend_mp_position_enter();
             return;
         }
@@ -2873,6 +3062,10 @@ void frontend_mp_flow_reset(void) {
      * so clear the cross-phase snapshot (frontend_mp_setup_init restores from it on
      * a BACK from car-select, but a fresh flow must begin clean). */
     for (int rp = 0; rp < TD5_MAX_HUMAN_PLAYERS; rp++) s_mp_prof_held_saved[rp][0] = '\0';
+    /* [PROFILE CAR COLOUR 2026-06-30] Fresh race -> nobody has hand-picked a car
+     * colour yet, so every paintable car re-defaults to its player's profile
+     * accent until they cycle PAINT. (Persists across a BACK within a flow.) */
+    for (int rp = 0; rp < TD5_MAX_HUMAN_PLAYERS; rp++) s_mp_car_color_user_set[rp] = 0;
 }
 
 /* [#8] Decide what happens after name/colour setup completes: show the position
