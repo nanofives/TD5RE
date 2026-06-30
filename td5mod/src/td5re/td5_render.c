@@ -48,6 +48,7 @@
 #include "td5_arcade.h"   /* ARCADE power-up pad / hazard world billboards */
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_ai.h"
+#include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
 #include "td5re.h"
 
 #include "../../../re/include/td5_actor_struct.h"
@@ -348,6 +349,14 @@ typedef struct RenderScratch {
     float ambient_intensity;
     TL_Contribution tl_contrib[3];
     int   tl_ambient;
+    /* [DYNAMIC LIGHTS] model->world basis for the mesh whose vertex lighting is
+     * about to be computed: origin (world units) + body->world rotation (9
+     * floats, row-major). has_rot=0 means identity rotation (track geometry,
+     * vertices already in world-offset space). Set per-mesh right before
+     * td5_render_compute_vertex_lighting; per-pane so threaded panes can't race. */
+    float light_basis_origin[3];
+    float light_basis_rot[9];
+    int   light_basis_has_rot;
     /* "currently/previously bound page" — per-pane render state (the LRU cache
      * array itself stays shared; see note at its declaration). */
     int current_texture_page;
@@ -434,6 +443,9 @@ static __thread RenderScratch *g_rs = &g_rs_default;
 #define s_ambient_intensity         (g_rs->ambient_intensity)
 #define s_tl_contrib                (g_rs->tl_contrib)
 #define s_tl_ambient                (g_rs->tl_ambient)
+#define s_light_basis_origin        (g_rs->light_basis_origin)
+#define s_light_basis_rot           (g_rs->light_basis_rot)
+#define s_light_basis_has_rot       (g_rs->light_basis_has_rot)
 /* s_texture_cache / _active_count are SHARED statics (declared at their original
  * site), NOT g_rs fields. s_current/_previous_texture_page ARE per-pane g_rs. */
 #define s_current_texture_page      (g_rs->current_texture_page)
@@ -2424,6 +2436,144 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
  * re/tools/extract_td6_lightzones.py (-> LIGHTZONES.BIN). To bring the runtime
  * back, re-add a loader + a per-view selector + the prelit-path modulation. */
 
+/* ====================== DYNAMIC POINT LIGHTS (port extension) =============
+ * The original engine lit vertices with only 3 DIRECTIONAL contributions + a
+ * scalar ambient (ComputeMeshVertexLighting @ 0x0043DDF0). The helpers below
+ * add an attenuated POSITIONAL N.L term per registered dynamic light (see
+ * td5_light.c) into the same per-vertex luminance, before the original's
+ * [0x40,0xFF] clamp — the minimum addition that lets a moving light (a
+ * headlight) illuminate an area. When no lights are registered, or none reach
+ * the mesh, every loop below is fully skipped and lighting is byte-identical to
+ * the original. */
+
+/* A dynamic light transformed into the MODEL space of the mesh being lit. */
+typedef struct LightModelPt {
+    float x, y, z;     /* light position in mesh model space (== vertex space) */
+    float inv_range;   /* 1/range, for the linear distance falloff */
+    float intensity;   /* peak luminance bump at the surface */
+} LightModelPt;
+
+/* Dark-mode config. When on, the ambient + directional luminance is scaled down
+ * and the clamp floor is lowered so "very dark areas" read as dark and the
+ * additive headlight pool stands out. Headlight bumps are NOT dimmed. Default
+ * OFF (set from [Lighting] DarkMode / --DarkMode), so daylight tracks render
+ * exactly as before. The scale/floor are env-tunable. */
+static int   s_light_dark_mode  = 0;
+static int   s_dark_knobs_read  = 0;
+static float s_dark_scale       = 0.35f;
+static int   s_dark_floor       = 0x12;
+
+static void light_read_dark_knobs(void)
+{
+    if (s_dark_knobs_read) return;
+    s_dark_knobs_read = 1;
+    const char *es = getenv("TD5RE_LIGHT_DARK_SCALE");
+    if (es && es[0]) { float v = (float)atof(es); if (v > 0.0f && v <= 1.0f) s_dark_scale = v; }
+    const char *ef = getenv("TD5RE_LIGHT_DARK_FLOOR");
+    if (ef && ef[0]) { int v = atoi(ef); if (v >= 0 && v <= 0xFF) s_dark_floor = v; }
+    const char *em = getenv("TD5RE_LIGHT_DARK_MODE");   /* env override of the INI toggle */
+    if (em && em[0]) s_light_dark_mode = (em[0] != '0');
+    TD5_LOG_I(LOG_TAG, "lighting dark-mode: %s (scale=%.2f floor=0x%02X)",
+              s_light_dark_mode ? "ON" : "off", (double)s_dark_scale, s_dark_floor);
+}
+
+void td5_render_set_dark_mode(int on)
+{
+    s_light_dark_mode = on ? 1 : 0;
+}
+
+/* Install the model->world basis for the next compute_vertex_lighting call.
+ * origin = mesh world origin (world units); rot9 = body->world rotation (9
+ * floats row-major) or NULL for identity (track geometry already in world-offset
+ * space). Per-pane (g_rs) so concurrent threaded panes don't race. */
+void td5_render_set_light_basis(const float origin[3], const float *rot9)
+{
+    s_light_basis_origin[0] = origin[0];
+    s_light_basis_origin[1] = origin[1];
+    s_light_basis_origin[2] = origin[2];
+    if (rot9) {
+        for (int i = 0; i < 9; i++) s_light_basis_rot[i] = rot9[i];
+        s_light_basis_has_rot = 1;
+    } else {
+        s_light_basis_has_rot = 0;
+    }
+}
+
+/* Transform every registered dynamic light into `mesh` model space, keeping
+ * only those whose range sphere intersects the mesh bounding sphere. Returns
+ * the kept count (0 = no dynamic lighting work for this mesh). */
+static int light_build_model_list(const TD5_MeshHeader *mesh,
+                                   LightModelPt *out, int max_out)
+{
+    int n = 0;
+    const TD5_DynLight *lights = td5_light_list(&n);
+    if (!lights || n <= 0) return 0;
+
+    float ox = s_light_basis_origin[0];
+    float oy = s_light_basis_origin[1];
+    float oz = s_light_basis_origin[2];
+    const float *R = s_light_basis_has_rot ? &s_light_basis_rot[0] : NULL;
+
+    float bcx = mesh->bounding_center_x;
+    float bcy = mesh->bounding_center_y;
+    float bcz = mesh->bounding_center_z;
+    float br  = mesh->bounding_radius;
+
+    int kept = 0;
+    for (int i = 0; i < n && kept < max_out; i++) {
+        const TD5_DynLight *L = &lights[i];
+        float dx = L->x - ox, dy = L->y - oy, dz = L->z - oz;
+        float mx, my, mz;
+        if (R) {
+            /* world->model = R^T * dpos (R is body->world, row-major): the same
+             * column-sum tl_commit_to_render_globals uses for light dirs. */
+            mx = dx * R[0] + dy * R[3] + dz * R[6];
+            my = dx * R[1] + dy * R[4] + dz * R[7];
+            mz = dx * R[2] + dy * R[5] + dz * R[8];
+        } else {
+            mx = dx; my = dy; mz = dz;
+        }
+        /* Light-sphere vs mesh bounding-sphere reject (model space). */
+        float sdx = mx - bcx, sdy = my - bcy, sdz = mz - bcz;
+        float reach = L->range + br;
+        if (sdx * sdx + sdy * sdy + sdz * sdz > reach * reach) continue;
+        out[kept].x = mx; out[kept].y = my; out[kept].z = mz;
+        out[kept].inv_range = (L->range > 0.0f) ? (1.0f / L->range) : 0.0f;
+        out[kept].intensity = L->intensity;
+        kept++;
+    }
+    return kept;
+}
+
+/* Per-vertex additive luminance from the model-space light list. nx/ny/nz is the
+ * (unit) vertex normal; px/py/pz the model-space vertex position. */
+static float light_vertex_bump(const LightModelPt *lm, int nlights,
+                               float px, float py, float pz,
+                               float nx, float ny, float nz)
+{
+    float bump = 0.0f;
+    for (int k = 0; k < nlights; k++) {
+        float dx = lm[k].x - px, dy = lm[k].y - py, dz = lm[k].z - pz;
+        float d2 = dx * dx + dy * dy + dz * dz;
+        float d  = sqrtf(d2);
+        float t  = 1.0f - d * lm[k].inv_range;   /* linear falloff [0..1] */
+        if (t <= 0.0f) continue;
+        float ndotl;
+        if (d > 1e-3f) {
+            float inv = 1.0f / d;
+            ndotl = (dx * nx + dy * ny + dz * nz) * inv;
+        } else {
+            ndotl = 1.0f;
+        }
+        if (ndotl < 0.0f) ndotl = 0.0f;
+        /* Soft wrap: a little fill so surfaces angled away from the lamp still
+         * catch the pool (the road and side faces don't all face the light). */
+        float lit = ndotl * 0.85f + 0.15f;
+        bump += lm[k].intensity * t * lit;
+    }
+    return bump;
+}
+
 void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 {
     if (!mesh) return;
@@ -2480,6 +2630,16 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     if (td5_damage_get_scuff(slot, mesh, &dmg_scuff, &dmg_sc))
         scuff_str = td5_damage_scuff_strength();
 
+    /* [DYNAMIC LIGHTS] Build the model-space light list for this mesh once.
+     * nlights==0 (and dark off) leaves every branch below byte-identical to the
+     * original. The light basis was installed by td5_render_set_light_basis()
+     * right before this call (actor pos+rotation, or track origin / identity). */
+    light_read_dark_knobs();
+    LightModelPt lm[TD5_LIGHT_MAX];
+    int nlights = light_build_model_list(mesh, lm, TD5_LIGHT_MAX);
+    int dark = s_light_dark_mode;
+    int floor_lum = dark ? s_dark_floor : TD5_LIGHTING_MIN;
+
     for (int i = 0; i < count; i++) {
         /* damage darkening factor for this vertex (1.0 = undamaged) */
         float df = 1.0f;
@@ -2499,6 +2659,26 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
                 int b = (int)(( c        & 0xFF) * df);
                 c = (c & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
             }
+            /* [DYNAMIC LIGHTS] dark-mode dim + additive headlight bump on the
+             * baked ARGB (zero-cost / byte-identical when both are off). */
+            if (dark || nlights) {
+                int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+                if (dark) { r = (int)(r * s_dark_scale); g = (int)(g * s_dark_scale); b = (int)(b * s_dark_scale); }
+                if (nlights) {
+                    int ib = (int)light_vertex_bump(lm, nlights,
+                                 vb[i].pos_x, vb[i].pos_y, vb[i].pos_z, nx, ny, nz);
+                    r += ib; g += ib; b += ib;
+                }
+                if (dark) {
+                    if (r < floor_lum) r = floor_lum;
+                    if (g < floor_lum) g = floor_lum;
+                    if (b < floor_lum) b = floor_lum;
+                }
+                if (r > 255) r = 255;
+                if (g > 255) g = 255;
+                if (b > 255) b = 255;
+                c = (c & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            }
             verts[i].lighting = c;
             continue;
         }
@@ -2511,8 +2691,15 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 
         /* Add ambient, clamp to [0x40, 0xFF] */
         intensity += s_ambient_intensity;
+        /* [DYNAMIC LIGHTS] dark-mode dims the ambient+directional base; the
+         * additive headlight bump is applied ON TOP (undimmed) so the lit pool
+         * stands out in dark areas. Both no-ops when off => byte-identical. */
+        if (dark) intensity *= s_dark_scale;
+        if (nlights)
+            intensity += light_vertex_bump(lm, nlights,
+                             verts[i].pos_x, verts[i].pos_y, verts[i].pos_z, nx, ny, nz);
         int lum = (int)intensity;
-        lum = clampi(lum, TD5_LIGHTING_MIN, TD5_LIGHTING_MAX);
+        lum = clampi(lum, floor_lum, TD5_LIGHTING_MAX);
 
         if (use_tint) {
             /* Full ARGB = lit-luminance * tint; alpha 0xFF bypasses the color LUT. */
@@ -3041,6 +3228,10 @@ void td5_render_span_display_list(void *display_list_block)
              * tracks (override 0) keep the per-span zone lighting untouched. */
             if (g_active_td6_level > 0)
                 td5_render_set_override_daylight();
+            /* [DYNAMIC LIGHTS] track verts are world-space offset by `origin`
+             * (model rotation identity), so the light basis is origin + no rot. */
+            { float lbo[3] = { origin.x, origin.y, origin.z };
+              td5_render_set_light_basis(lbo, NULL); }
             td5_render_compute_vertex_lighting(mesh, -1);   /* track mesh: no tint */
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
@@ -4147,6 +4338,11 @@ void td5_render_actors_for_view(int view_index)
              * BEFORE compute_vertex_lighting since that's the consumer of
              * s_light_dirs[]/s_ambient_intensity. */
             td5_render_apply_track_lighting(slot, actor);
+            /* [DYNAMIC LIGHTS] actor verts are in body space; the model->world
+             * basis is the interpolated world pos + the actor's body->world
+             * rotation, so dynamic lights are transformed into body space. */
+            { float lbo[3] = { render_pos.x, render_pos.y, render_pos.z };
+              td5_render_set_light_basis(lbo, actor->rotation_matrix.m); }
             td5_render_compute_vertex_lighting(mesh, slot);
 
             /* Vehicle shadow is now drawn in the shadow PRE-PASS above (before

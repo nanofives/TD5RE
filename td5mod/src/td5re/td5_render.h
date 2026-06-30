@@ -86,6 +86,19 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh);
 /* slot >= 0 applies that slot's paint tint (s_vehicle_tint); slot < 0 = no tint. */
 void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot);
 
+/* [DYNAMIC LIGHTS] Install the model->world basis used to transform registered
+ * dynamic point lights (td5_light.c) into the mesh's model space for the NEXT
+ * td5_render_compute_vertex_lighting call. origin = mesh world position (world
+ * units); rot9 = body->world rotation (9 floats, row-major) or NULL for identity
+ * (track geometry already in world-offset space). Per-pane state. */
+void td5_render_set_light_basis(const float origin[3], const float *rot9);
+
+/* [DYNAMIC LIGHTS] Enable/disable dark-mode lighting: dims the ambient +
+ * directional base and lowers the clamp floor so dark areas read as dark and
+ * dynamic lights (headlights) illuminate them. Default off ([Lighting] DarkMode
+ * / --DarkMode / TD5RE_LIGHT_DARK_MODE). */
+void td5_render_set_dark_mode(int on);
+
 /* [task#21 TD6 per-area lighting zones — REMOVED/DEFERRED 2026-06-19 at user
  * request; see the note in td5_render.c. The RE + LIGHTZONES.BIN extractor
  * (re/tools/extract_td6_lightzones.py) are kept for a future revisit.] */

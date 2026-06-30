@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 30" },
+    { CL_ITEM,    "New: dynamic lighting foundation. Cars now cast" },
+    { CL_ITEM,    "  headlights that illuminate the road and nearby" },
+    { CL_ITEM,    "  cars as they move. Optional Dark Mode dims the" },
+    { CL_ITEM,    "  scene so headlights light up very dark areas." },
+    { CL_ITEM,    "  Toggle via [Lighting] in the INI (Enabled," },
+    { CL_ITEM,    "  Headlights, DarkMode) or --Lighting/--Headlights." },
     { CL_ITEM,    "Fixed: in split-screen Cup, a player could end up" },
     { CL_ITEM,    "  unable to accelerate on a later race (but still" },
     { CL_ITEM,    "  able to change camera). Their car now always" },

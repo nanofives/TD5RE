@@ -40,6 +40,7 @@
 #include "td5_save.h"
 
 #include "td5_vfx.h"
+#include "td5_light.h"    /* [DYNAMIC LIGHTS] per-frame headlight registry */
 #include "td5_arcade.h"   /* ARCADE mode: pickup pads + power-ups */
 #include "td5_damage.h"   /* [CAR DAMAGE] health reset + knockout completion gate */
 #include "td5_tutorial.h" /* first-race controller-tutorial overlay */
@@ -6422,6 +6423,14 @@ int td5_game_run_race_frame(void) {
     /* Photo booth clears to chroma BLUE88 (0,0,88) so the menu can color-key the
      * car out of the captured preview; normal race uses the sky-blue clear. */
     td5_plat_render_clear(td5_render_photobooth_active() ? 0xFF000058u : 0xFF4080C0u);
+
+    /* [DYNAMIC LIGHTS] Rebuild the world-space dynamic-light registry once per
+     * frame (before any viewport's lighting pass; lights are shared across all
+     * split-screen panes). Headlights move with each car. No-op when the
+     * lighting system or the headlight emitter is disabled. */
+    td5_light_begin_frame();
+    if (!td5_render_photobooth_active())
+        td5_light_emit_vehicle_headlights();
 
     /* [S01 2026-06-04] Live window resize: if the render dimensions changed
      * (drag-resize / maximize, applied in the platform layer's WM_SIZE handler),
