@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "June 30" },
+    { CL_ITEM,    "Fixed split-screen: a controller that the system saw" },
+    { CL_ITEM,    "  as more than one gamepad could join as several" },
+    { CL_ITEM,    "  players and then flip those players' camera views" },
+    { CL_ITEM,    "  from its one change-camera button. One physical pad" },
+    { CL_ITEM,    "  now joins as exactly one player." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "June 29" },
     { CL_ITEM,    "Car paint: paintable cars now take a SECOND colour" },
     { CL_ITEM,    "  and a PATTERN (Solid / Two-Tone / Stripes / Split)." },

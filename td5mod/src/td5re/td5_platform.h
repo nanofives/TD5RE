@@ -255,6 +255,17 @@ void td5_plat_input_set_joystick_bindings(int slot, const int32_t *bindings, int
  *  Used by the control-config per-button capture. [PORT ENHANCEMENT 2026-06] */
 uint32_t td5_plat_input_joystick_buttons(int device_slot);
 
+/** [SPLIT-SCREEN DEVICE BLEED 2026-06-30] Physical-device key (HID instance
+ *  path, collection token stripped) for an ENUMERATED joystick index. Two DI
+ *  interfaces of the same physical pad share this key; two distinct pads (even
+ *  identical models) do not. Returns 1 + fills `out` on success, 0 on failure
+ *  (caller then treats the device as distinct — the de-dup safely no-ops). */
+int td5_plat_input_device_phys_key(int enum_index, char *out, int outsz);
+
+/** Same physical-device key but for the device BOUND to a player input slot
+ *  (in-race), for diagnostics. Returns 0 for a keyboard / unbound slot. */
+int td5_plat_input_slot_phys_key(int slot, char *out, int outsz);
+
 /** [S27 2026-06-05] 1 if the joystick bound to this player slot has been
  *  persistently lost (physically disconnected); 0 for a keyboard slot or a
  *  live device. Drives the in-race controller-disconnect pause + reconnect

@@ -3884,6 +3884,11 @@ int td5_game_init_race_session(void) {
     }
     TD5_LOG_I(LOG_TAG, "InitRace step 17/19: render state and viewport layout initialized views=%d",
               g_td5.viewport_count);
+    /* [SPLIT-SCREEN DEVICE BLEED 2026-06-30] Now that devices (step 15) AND the
+     * viewport->actor map (above) are set, dump the per-slot local input map and
+     * warn if two human slots read the same physical controller — the signature
+     * of one pad driving several panes' cameras. */
+    td5_input_log_race_input_map();
     CK("ck17_after_viewport");
 
     /* ---- Step 18: Upload race texture pages to GPU ---- */

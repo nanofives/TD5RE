@@ -33,6 +33,7 @@ static const char *const k_seed[] = {
     "Paint: SELECT CAR PAINT panel - secondary colour + pattern + 32 presets",
     "Paint: Two-Tone/Stripes/Split show in BOTH menu preview and in-race body",
     "Lane Assist at a fork: picks one branch a few spans early, not the divider",
+    "Split: one pad seen as 2 gamepads no longer joins as 2 players (cam bleed)",
     "Reset car (split-screen): resets in place, no teleport-to-start/wall",
     "Reset car: fully repairs (health+dents); un-sticks a knocked-out car",
     "Tutorial overlay now shows at the START of every race (was once-ever)",
