@@ -571,6 +571,16 @@ typedef struct TD5_GlobalState {
          * td5_ini_persist_options(); --CarToughness/--CarDeform override. */
         int  car_damage_toughness;   /* 0=Low 1=Normal 2=High */
         int  car_damage_deform;      /* 0=Low 1=Normal 2=High */
+        /* [CAR DAMAGE 2026-06-29] HUD damage bar + wreck/knockout master. ON by
+         * default. When 0, the top-of-pane health bar is hidden AND a car can no
+         * longer be wrecked / eliminated by accumulated damage (no race-ending
+         * knockout, no health-based handling penalty, no damage smoke). Visual
+         * deformation (dents) and collision physics are UNAFFECTED — they are
+         * impact-driven, not health-driven. Global, so in split-screen it applies
+         * to every player at once (all panes or none). Persisted to td5re.ini
+         * [Game] CarDamageBar; --CarDamageBar=N overrides. Edited on the Game
+         * Options screen. */
+        int  car_damage_bar;
         /* Enable benchmark mode: redirects main-menu button 2 to TD5_GAMESTATE_BENCHMARK.
          * Matches the dead-code path in TD5_d3d.exe gated by app+0x170 (always 0 in
          * the shipped binary). Default 0 = button 2 is 2-player, matching the

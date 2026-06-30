@@ -7733,7 +7733,11 @@ static void hud_solid_tri(float x0,float y0,float x1,float y1,float x2,float y2,
  * flat 2D HUD quad on the white page). */
 static void hud_draw_player_damage_bar(int player_slot, int view_index)
 {
-    if (!td5_damage_enabled()) return;
+    /* [CAR DAMAGE 2026-06-29] Gate on the DAMAGE BAR sub-toggle (Game Options),
+     * not just the master CarDamage: with the bar off the wreck mechanic is also
+     * disabled (see td5_damage_actor_knocked_out), so no bar should show. Global
+     * toggle, drawn per pane -> every split-screen player gets the bar or none. */
+    if (!td5_damage_bar_enabled()) return;
     if (view_index < 0 || view_index >= MAX_HUD_VIEWS) return;
     float h = td5_damage_health01(player_slot);
     if (h < 0.0f) return;                      /* uninitialized this race */

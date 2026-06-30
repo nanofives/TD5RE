@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "New: DAMAGE BAR on/off in Game Options. Turn it OFF" },
+    { CL_ITEM,    "  to hide the top-of-screen damage bar and stop your" },
+    { CL_ITEM,    "  car being wrecked out of the race when it fills." },
+    { CL_ITEM,    "  Dents and collisions still work. In split-screen" },
+    { CL_ITEM,    "  it applies to every player at once." },
     { CL_ITEM,    "Police overhaul: chasing cops now ACCELERATE hard" },
     { CL_ITEM,    "  enough to out-drag a faster car on a straight (not" },
     { CL_ITEM,    "  just match top speed), are much tougher so a wall" },

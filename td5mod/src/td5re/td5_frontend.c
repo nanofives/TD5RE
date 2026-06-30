@@ -763,6 +763,7 @@ int             s_game_option_collisions = 1;
 int             s_game_option_powerups = 1;   /* ARCADE item-box power-ups on/off */
 int             s_game_option_car_toughness = 1; /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 int             s_game_option_car_deform = 1;    /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
+int             s_game_option_car_damage_bar = 1; /* [CAR DAMAGE] HUD bar + wreck on/off */
 int             s_game_option_laneassist = 0; /* lane-assist steering aid on/off */
 int             s_sound_option_sfx_mode;
 int             s_sound_option_sfx_volume = 80;
@@ -3942,6 +3943,7 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_powerups          = g_td5.ini.powerups;
     s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
     s_game_option_car_deform        = g_td5.ini.car_damage_deform;
+    s_game_option_car_damage_bar    = g_td5.ini.car_damage_bar;
     s_game_option_laneassist        = g_td5.ini.lane_assist;
 
     /* Commit the dynamics (arcade/sim) selection into the physics race-init
@@ -7028,7 +7030,10 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
         frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, level3[ti], 0xFFFFFFFF);
         frontend_draw_value_centered(sx, sy, s_buttons[7].y + 6, level3[di], 0xFFFFFFFF);
     }
-    frontend_draw_value_centered(sx, sy, s_buttons[8].y + 6, on_off[s_game_option_laneassist & 1], 0xFFFFFFFF);
+    /* [CAR DAMAGE 2026-06-29] DAMAGE BAR on/off (row 8) — the HUD health bar +
+     * wreck/knockout mechanic. Lane Assist shifted to row 9. */
+    frontend_draw_value_centered(sx, sy, s_buttons[8].y + 6, on_off[s_game_option_car_damage_bar & 1], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[9].y + 6, on_off[s_game_option_laneassist & 1], 0xFFFFFFFF);
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -11219,10 +11224,11 @@ void td5_frontend_render_ui_rects(void) {
             if (QR_BTN_PHYSICS < s_button_count) fe_draw_option_arrows(QR_BTN_PHYSICS, sx, sy);
             break;
         case TD5_SCREEN_GAME_OPTIONS:
-            /* Nine option rows (0..8): Checkpoint Timers, Traffic, Cops,
+            /* Ten option rows (0..9): Checkpoint Timers, Traffic, Cops,
              * Difficulty, 3D Collisions, Power-ups, [CAR DAMAGE] Car Toughness,
-             * Deformation, [LANE ASSIST] Lane Assist. OK is index 9, no arrows. */
-            for (int i = 0; i <= 8; i++) fe_draw_option_arrows(i, sx, sy);
+             * Deformation, Damage Bar, [LANE ASSIST] Lane Assist. OK is index 10,
+             * no arrows. */
+            for (int i = 0; i <= 9; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_CONTROLLER_BINDING:
             /* Draw the action labels+values on top of the (opaque-when-selected)
@@ -11704,6 +11710,7 @@ int td5_frontend_init(void) {
         s_game_option_powerups          = g_td5.ini.powerups;
         s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
         s_game_option_car_deform        = g_td5.ini.car_damage_deform;
+        s_game_option_car_damage_bar    = g_td5.ini.car_damage_bar;
         s_game_option_laneassist        = g_td5.ini.lane_assist;
         s_selected_game_type = g_td5.ini.default_game_type;
     }
