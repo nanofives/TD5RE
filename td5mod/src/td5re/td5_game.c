@@ -5419,13 +5419,12 @@ int td5_game_run_race_frame(void) {
         }
         if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
-            s_pause_menu_cursor = 2;  /* [REWORK 2026-06-05/S15] default to
-                                       * CONTINUE. After removing the MUSIC row
-                                       * CONTINUE moved from row 3 to row 2.
-                                       * [END RACE NOW 2026-06-30] Rows: 0=VIEW
-                                       * 1=SOUND 2=CONTINUE 3=RESTART RACE
-                                       * 4=END RACE NOW [5=BACK TO LOBBY MP-only]
-                                       * QUIT TO MENU / EXIT GAME.
+            s_pause_menu_cursor = 3;  /* default to CONTINUE. [RADIO + END RACE
+                                       * NOW 2026-06-30] A RADIO slider sits at
+                                       * row 2 and END RACE NOW is an action row:
+                                       * 0=VIEW 1=SOUND 2=RADIO 3=CONTINUE
+                                       * 4=RESTART RACE 5=END RACE NOW
+                                       * [6=BACK TO LOBBY MP-only] QUIT / EXIT.
                                        * ENTER then dismisses in one keypress. */
             /* [BUGFIX #15 2026-06-15] Consume the currently-held direction keys so
              * the menu's nav edge-detection treats them as ALREADY pressed. UP is
@@ -5461,7 +5460,7 @@ int td5_game_run_race_frame(void) {
              * doesn't stop on the pause menu". Zero all motors now; the per-frame FF
              * update naturally resumes them on CONTINUE. */
             td5_input_ff_stop();
-            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 2, SFX muted, music stopped, FF stopped)");
+            TD5_LOG_I(LOG_TAG, "Pause menu opened (cursor=CONTINUE row 3, SFX muted, music stopped, FF stopped)");
         }
         if (s_pause_menu_active) {
             /* Process pause menu input ONCE per frame (not per tick) to avoid
@@ -5498,10 +5497,10 @@ int td5_game_run_race_frame(void) {
                  * player pause menu (see td5_hud_init_pause_menu), which then has
                  * 6 rows instead of 7. Wrap navigation over the live row count so
                  * QUIT TO MENU / EXIT GAME stay reachable and there's no gap. */
-                /* [END RACE NOW 2026-06-30] +1 row (END RACE NOW) in both modes:
-                 * MP = 8 selectable rows, single-player = 7 (BACK TO LOBBY still
-                 * MP-only). */
-                int pause_rows = (g_td5.network_active || g_td5.num_human_players > 1) ? 8 : 7;
+                /* [RADIO + END RACE NOW 2026-06-30] +2 rows over the original
+                 * (RADIO slider at row 2, END RACE NOW action): MP = 9 selectable
+                 * rows, single-player = 8 (BACK TO LOBBY still MP-only). */
+                int pause_rows = (g_td5.network_active || g_td5.num_human_players > 1) ? 9 : 8;
                 /* Freeze cursor movement while the END RACE NOW confirmation is up
                  * so the highlight can't drift off the row mid-confirm. */
                 if (!s_pause_endrace_confirm) {
@@ -5525,28 +5524,36 @@ int td5_game_run_race_frame(void) {
                                   s_pause_menu_cursor < 2 ? "PASS" : "BLOCKED");
                     }
                 }
-                /* [REWORK 2026-06-05/S15] Two slider rows now: 0=VIEW, 1=SOUND.
-                 * The MUSIC slider was removed (music is silenced while paused). */
-                if (s_pause_menu_cursor < 2) {
+                /* [RADIO 2026-06-30] Three slider rows now: 0=VIEW, 1=SOUND,
+                 * 2=RADIO (internet-radio volume). */
+                if (s_pause_menu_cursor < 3) {
                     int delta = key_right ? +1 : (key_left ? -1 : 0);
                     if (delta) {
                         if (s_pause_menu_cursor == 0) {
                             float v = td5_save_get_view_distance() + (float)delta * 0.02f;
                             td5_save_set_view_distance(v);
                             TD5_LOG_I(LOG_TAG, "Pause slider VIEW: %.2f", td5_save_get_view_distance());
-                        } else {  /* cursor 1 = SOUND (SFX master volume) */
+                        } else if (s_pause_menu_cursor == 1) {  /* SOUND (SFX master volume) */
                             int v = td5_save_get_sfx_volume() + delta * 2;
                             td5_save_set_sfx_volume(v);
                             td5_sound_set_sfx_volume(td5_save_get_sfx_volume());
                             s_pause_options_dirty = 1;  /* persist to td5re.ini on close [PART B] */
                             TD5_LOG_I(LOG_TAG, "Pause slider SOUND: %d", td5_save_get_sfx_volume());
+                        } else {  /* cursor 2 = RADIO (internet-radio volume) */
+                            int v = g_td5.ini.radio_volume + delta * 2;
+                            if (v < 0)   v = 0;
+                            if (v > 100) v = 100;
+                            g_td5.ini.radio_volume = v;
+                            td5_sound_set_radio_volume(v);  /* live-apply to the radio */
+                            s_pause_options_dirty = 1;      /* persist to td5re.ini on close */
+                            TD5_LOG_I(LOG_TAG, "Pause slider RADIO: %d", v);
                         }
                     }
                 }
 
-                /* Confirm (Enter). [REWORK 2026-06-05/S15] Rows:
-                 *   2=CONTINUE 3=RESTART RACE [END RACE NOW] 4=END RACE NOW
-                 *   5=BACK TO LOBBY(MP) QUIT TO MENU EXIT GAME. */
+                /* Confirm (Enter). [RADIO + END RACE NOW 2026-06-30] Rows:
+                 *   3=CONTINUE 4=RESTART RACE 5=END RACE NOW
+                 *   [6=BACK TO LOBBY MP] QUIT TO MENU / EXIT GAME. */
                 if (key_enter && !s_prev_enter) {
                     if (s_pause_endrace_confirm) {
                         /* [END RACE NOW 2026-06-30] Second ENTER on the
@@ -5565,18 +5572,17 @@ int td5_game_run_race_frame(void) {
                         }
                         td5_game_force_finish_race();
                         TD5_LOG_I(LOG_TAG, "Pause menu: END RACE NOW confirmed -> force-finishing race");
-                    } else if (s_pause_menu_cursor == 2) {
+                    } else if (s_pause_menu_cursor == 3) {
                         /* CONTINUE — close the menu, resume the race. */
                         s_pause_menu_active = 0;
-                    } else if (s_pause_menu_cursor == 4) {
+                    } else if (s_pause_menu_cursor == 5) {
                         /* [END RACE NOW 2026-06-30] Arm the confirmation prompt
                          * (don't end yet). A second ENTER confirms; B/ESC cancels.
-                         * Shown in single-player and MP alike. Checked before the
-                         * dynamic LOBBY/QUIT/EXIT indices below because its row is
-                         * fixed at 4 in both modes. */
+                         * Shown in single-player and MP alike. Row 5 in both modes
+                         * (after the RADIO slider pushed actions down one). */
                         s_pause_endrace_confirm = 1;
                         TD5_LOG_I(LOG_TAG, "Pause menu: END RACE NOW selected -> confirm prompt");
-                    } else if (s_pause_menu_cursor == 3) {
+                    } else if (s_pause_menu_cursor == 4) {
                         /* RESTART RACE — re-run the SAME race (track/car/opponents/
                          * laps/direction unchanged). Fade out, then the fade-complete
                          * handler returns 3 and the FSM re-inits the race session.
@@ -5608,7 +5614,7 @@ int td5_game_run_race_frame(void) {
                         TD5_LOG_I(LOG_TAG, "Pause menu: RESTART RACE selected, starting fade-out");
                         td5_game_begin_fade_out(0);
                         }
-                    } else if (s_pause_menu_cursor == 5 &&
+                    } else if (s_pause_menu_cursor == 6 &&
                                (g_td5.network_active || g_td5.num_human_players > 1)) {
                         /* BACK TO LOBBY [S31] -- end the race and return to the
                          * lobby it came from: network lobby (LAN/direct-IP),
@@ -5638,12 +5644,12 @@ int td5_game_run_race_frame(void) {
                         TD5_LOG_I(LOG_TAG, "Pause menu: BACK TO LOBBY, starting fade-out");
                         td5_game_begin_fade_out(0);
                     } else if (s_pause_menu_cursor ==
-                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 6 : 5)) {
+                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 7 : 6)) {
                         /* QUIT TO MENU — leave the race, return to the frontend
                          * (was "EXIT"; behaviour unchanged, only relabelled).
-                         * [END RACE NOW 2026-06-30] Row 6 in MP, row 5 in
-                         * single-player (was 5/4 before END RACE NOW was inserted
-                         * at row 4; BACK TO LOBBY remains MP-only). */
+                         * [RADIO + END RACE NOW 2026-06-30] Row 7 in MP, row 6 in
+                         * single-player (RADIO slider + END RACE NOW each pushed
+                         * the action rows down; BACK TO LOBBY remains MP-only). */
                         s_pause_menu_active = 0;
                         s_pause_exit_pending = 1;
                         /* PART A (user 2026-06-02): capture the player's CURRENT
@@ -5681,10 +5687,10 @@ int td5_game_run_race_frame(void) {
                          * Original (0x43C317): calls BeginRaceFadeOutTransition(0). */
                         td5_game_begin_fade_out(0);
                     } else if (s_pause_menu_cursor ==
-                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 7 : 6)) {
+                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 8 : 7)) {
                         /* EXIT GAME — clean application shutdown (distinct from
-                         * QUIT TO MENU). [END RACE NOW 2026-06-30] Row 7 in MP,
-                         * row 6 in single-player (was 6/5 before END RACE NOW).
+                         * QUIT TO MENU). [RADIO + END RACE NOW 2026-06-30] Row 8 in
+                         * MP, row 7 in single-player (RADIO slider + END RACE NOW).
                          * Sets the same quit latch the frontend
                          * Quit button uses (g_td5.quit_requested); the main loop
                          * tears the app down on its next iteration. Persist any
@@ -5729,13 +5735,13 @@ int td5_game_run_race_frame(void) {
                 else                         s_pause_menu_active = 0;
             }
 
-            /* Update graphical overlay (SELBOX + sliders).
-             * [CONFIRMED @ 0x0043C0E5] Row 0=VIEW (DAT_004B135C → 0x00466EA8),
-             * Row 1=MUSIC (DAT_004B1360), Row 2=SOUND (DAT_004B1364). */
+            /* Update graphical overlay (SELBOX + sliders). Rows: 0=VIEW,
+             * 1=SOUND, 2=RADIO. The 3rd overlay arg carries the radio fraction
+             * (it was the legacy MUSIC slot, repurposed). */
             float view_frac  = td5_save_get_view_distance();
-            float music_frac = (float)td5_save_get_music_volume() / 100.0f;
+            float radio_frac = (float)g_td5.ini.radio_volume / 100.0f;
             float sfx_frac   = (float)td5_save_get_sfx_volume()   / 100.0f;
-            td5_hud_update_pause_overlay(s_pause_menu_cursor, view_frac, music_frac, sfx_frac);
+            td5_hud_update_pause_overlay(s_pause_menu_cursor, view_frac, radio_frac, sfx_frac);
 
             /* SFX audio gating while paused (mirrors the original's MuteAll on
              * entry + per-row preview + UnMuteAll on exit):
@@ -5750,6 +5756,11 @@ int td5_game_run_race_frame(void) {
              *     leave it stopped so it doesn't bleed past the race. */
             if (s_pause_menu_active) {
                 td5_sound_set_sfx_muted(s_pause_menu_cursor == 1 ? 0 : 1);
+                /* [RADIO 2026-06-30] Preview the radio while the cursor sits on
+                 * the RADIO row (2) so the volume slider is audible; otherwise the
+                 * radio stays muted on the pause menu (mirrors the SFX preview on
+                 * the SOUND row). */
+                td5_plat_radio_set_playing(s_pause_menu_cursor == 2 ? 1 : 0);
             } else if (pause_menu_was_active) {
                 td5_sound_set_sfx_muted(0);
                 td5_sound_set_paused(0);  /* [item 24] resume audio + restore music volume */

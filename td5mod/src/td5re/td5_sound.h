@@ -127,6 +127,7 @@ void td5_sound_cd_set_volume(int volume);
 /* --- Master volume --- */
 void td5_sound_set_sfx_volume(int volume);
 void td5_sound_set_music_volume(int volume);
+void td5_sound_set_radio_volume(int volume);   /* internet-radio output volume 0-100 */
 
 /* --- State accessors (fed by camera / physics / game modules) --- */
 void td5_sound_set_listener_pos(int viewport, int32_t x, int32_t y, int32_t z);

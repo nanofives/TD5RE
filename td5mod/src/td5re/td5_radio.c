@@ -47,10 +47,10 @@
  * ======================================================================== */
 
 static volatile LONG s_stop;        /* worker should exit                  */
-static volatile LONG s_playing;     /* output desired (worker submits PCM)  */
 static HANDLE        s_thread;      /* decode worker                        */
 static int           s_inited;
 static int           s_mf_started;
+static int           s_volume = 10; /* fixed radio output volume 0..100      */
 static char          s_url[512];
 static wchar_t       s_wurl[512];
 static char          s_label[128];  /* station label for now-playing        */
@@ -83,7 +83,6 @@ static void radio_make_label(const char *url, char *out, int cap)
 
 static unsigned __stdcall radio_worker(void *arg)
 {
-    int begun   = 0;
     int backoff = 1000;     /* ms between reconnect attempts, capped at 5s */
     (void)arg;
 
@@ -143,10 +142,8 @@ static unsigned __stdcall radio_worker(void *arg)
             continue;
         }
 
-        /* (Re)publish the format to the sink. begun stays set across reconnects;
-         * a format change re-sizes the ring. */
-        if (td5_plat_radio_begin((int)rate, (int)ch, (int)bits))
-            begun = 1;
+        /* (Re)publish the format to the sink; a format change re-sizes the ring. */
+        td5_plat_radio_begin((int)rate, (int)ch, (int)bits);
         TD5_LOG_I(LOG_TAG, "radio: connected '%s' (%u Hz %u ch %u-bit)",
                   s_label, (unsigned)rate, (unsigned)ch, (unsigned)bits);
         backoff = 1000;     /* successful connect resets the backoff */
@@ -175,11 +172,12 @@ static unsigned __stdcall radio_worker(void *arg)
             if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(sample, &buf)) && buf) {
                 BYTE *p = NULL; DWORD len = 0;
                 if (SUCCEEDED(IMFMediaBuffer_Lock(buf, &p, NULL, &len)) && p) {
-                    /* Only enqueue while output is on. While stopped we still
-                     * drain the live stream (discard) so resuming is current. */
-                    if (s_playing) {
+                    /* Only enqueue while the output is actually on (in race +
+                     * focused + playing). Otherwise drain the live stream and
+                     * discard, so resuming jumps to the current live edge. */
+                    if (td5_plat_radio_wants_data()) {
                         DWORD off = 0;
-                        while (off < len && !s_stop && s_playing) {
+                        while (off < len && !s_stop && td5_plat_radio_wants_data()) {
                             int k = td5_plat_radio_submit(p + off, (int)(len - off));
                             if (k <= 0) td5_plat_sleep(8);   /* ring full: let pump drain */
                             else        off += (DWORD)k;
@@ -211,7 +209,6 @@ static void radio_play(void *user, int track)
 {
     (void)user; (void)track;
     if (!s_inited) return;
-    InterlockedExchange(&s_playing, 1);
     td5_plat_radio_set_playing(1);
     if (!s_thread) {
         InterlockedExchange(&s_stop, 0);
@@ -224,14 +221,16 @@ static void radio_play(void *user, int track)
 static void radio_stop(void *user)
 {
     (void)user;
-    InterlockedExchange(&s_playing, 0);
     td5_plat_radio_set_playing(0);
 }
 
 static void radio_set_volume(void *user, int volume)
 {
-    (void)user;
-    td5_plat_radio_set_volume(volume);
+    /* The radio runs at its own fixed RadioVolume, independent of the music
+     * slider -- so the seam's set_volume (called with the music volume at race
+     * init) does not blast it. Re-assert RadioVolume. */
+    (void)user; (void)volume;
+    td5_plat_radio_set_volume(s_volume);
 }
 
 static void radio_tick(void *user)
@@ -259,7 +258,7 @@ static int radio_now_playing(void *user, char *title, int title_cap,
  * Public API
  * ======================================================================== */
 
-void td5_radio_init(const char *stream_url)
+void td5_radio_init(const char *stream_url, int volume)
 {
     HRESULT hr;
     if (s_inited) return;
@@ -271,12 +270,15 @@ void td5_radio_init(const char *stream_url)
                         (int)(sizeof(s_wurl) / sizeof(s_wurl[0])));
     radio_make_label(s_url, s_label, (int)sizeof(s_label));
 
+    s_volume = (volume < 0) ? 0 : (volume > 100 ? 100 : volume);
+
     hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
     s_mf_started = SUCCEEDED(hr);
     if (!s_mf_started)
         TD5_LOG_E(LOG_TAG, "radio: MFStartup failed hr=0x%08X (radio disabled)", (unsigned)hr);
 
     td5_plat_radio_open();
+    td5_plat_radio_set_volume(s_volume);
 
     s_backend.name        = "internet-radio";
     s_backend.user        = NULL;
@@ -289,8 +291,8 @@ void td5_radio_init(const char *stream_url)
     s_backend.tick        = radio_tick;
 
     s_inited = 1;
-    TD5_LOG_I(LOG_TAG, "radio: initialized url=%s label=%s mf=%d",
-              s_url, s_label, s_mf_started);
+    TD5_LOG_I(LOG_TAG, "radio: initialized url=%s label=%s vol=%d mf=%d",
+              s_url, s_label, s_volume, s_mf_started);
 }
 
 void td5_radio_shutdown(void)
@@ -299,7 +301,6 @@ void td5_radio_shutdown(void)
     if (!s_inited) return;
 
     InterlockedExchange(&s_stop, 1);
-    InterlockedExchange(&s_playing, 0);
 
     if (s_thread) {
         /* The worker may be blocked inside MF (connect / ReadSample). Wait a
@@ -329,10 +330,17 @@ const td5_music_backend *td5_radio_get_backend(void)
     return (s_inited && s_mf_started) ? &s_backend : NULL;
 }
 
+void td5_radio_set_volume_pct(int volume)
+{
+    s_volume = (volume < 0) ? 0 : (volume > 100 ? 100 : volume);
+    td5_plat_radio_set_volume(s_volume);
+}
+
 #else  /* !_WIN32 -- radio backend is Win32/Media-Foundation only */
 
-void td5_radio_init(const char *stream_url) { (void)stream_url; }
+void td5_radio_init(const char *stream_url, int volume) { (void)stream_url; (void)volume; }
 void td5_radio_shutdown(void) {}
+void td5_radio_set_volume_pct(int volume) { (void)volume; }
 const td5_music_backend *td5_radio_get_backend(void) { return 0; }
 
 #endif /* _WIN32 */

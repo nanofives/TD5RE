@@ -393,16 +393,20 @@ const int8_t g_pause_glyph_widths[256] = {
  * pause-enter), and two action rows are added: RESTART RACE (re-run the same
  * race) and EXIT GAME (clean app shutdown). The old "EXIT" (return to menu)
  * is relabelled "QUIT TO MENU" to disambiguate it from EXIT GAME.
+ * [RADIO + END RACE NOW 2026-06-30] A RADIO volume slider sits at row 2 and an
+ * END RACE NOW action row was added; the action rows shifted down accordingly.
  * Layout — title + selectable rows (cursor indices in parentheses):
- *   PAUSED(title) / VIEW(0) SOUND(1) [sliders] / CONTINUE(2) RESTART RACE(3)
- *   END RACE NOW(4) [BACK TO LOBBY(5) — MP only] QUIT TO MENU EXIT GAME.
- * [END RACE NOW 2026-06-30] Force-finish row shown in BOTH single-player and MP;
- * BACK TO LOBBY remains MP-only (skipped without advancing y in single-player).
+ *   PAUSED(title) / VIEW(0) SOUND(1) RADIO(2) [sliders] /
+ *   CONTINUE(3) RESTART RACE(4) END RACE NOW(5)
+ *   [BACK TO LOBBY(6) — MP only] QUIT TO MENU EXIT GAME.
+ * Force-finish (END RACE NOW) shown in BOTH single-player and MP; BACK TO LOBBY
+ * remains MP-only (skipped without advancing y in single-player).
  * This is source-port-only UI (no original pause-restart/exit-game equiv). */
 static const char *s_eng_pause_strings[] = {
     "PAUSED",         (const char *)(intptr_t)2,
     "VIEW",           (const char *)(intptr_t)0,
     "SOUND",          (const char *)(intptr_t)0,
+    "RADIO",          (const char *)(intptr_t)0,
     "CONTINUE",       (const char *)(intptr_t)2,
     "RESTART RACE",   (const char *)(intptr_t)2,
     "END RACE NOW",   (const char *)(intptr_t)2,   /* [END RACE NOW 2026-06-30] force-finish */
@@ -2161,14 +2165,12 @@ void td5_hud_draw_endrace_confirm(void)
 }
 
 /* Called each frame while paused to update SELBOX position and slider thumb positions.
- * cursor: 0-5 (rows: VIEW / SOUND / CONTINUE / RESTART RACE / QUIT TO MENU / EXIT GAME)
- * [PORT REWORK 2026-06-05 / S15] The MUSIC slider was removed, so only two
- * sliders remain: row 0 = VIEW (view distance), row 1 = SOUND (SFX master).
- * music_frac is retained in the signature (caller still computes it) but is no
- * longer used. */
-void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac)
+ * cursor: rows VIEW(0) / SOUND(1) / RADIO(2) / CONTINUE(3) / ... .
+ * [RADIO 2026-06-30] Three sliders now: row 0 = VIEW (view distance), row 1 =
+ * SOUND (SFX master), row 2 = RADIO (internet-radio volume). The 3rd float arg
+ * (historically MUSIC) carries the radio fraction. */
+void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float radio_frac, float sfx_frac)
 {
-    (void)music_frac;
 
     /* Rebuild the panel/selbox/slider quads from the LIVE screen centre every
      * frame (compute-at-draw). There is no baked-centre state left to drift
@@ -2183,14 +2185,15 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
      * frame (td5_hud_init_pause_menu above), so the selbox + sliders stay aligned
      * with the scaled panel/text. */
     float ps = hud_pause_scale();
-    float fracs[2] = { view_dist_frac, sfx_frac };  /* row 0 = VIEW, row 1 = SOUND */
+    /* row 0 = VIEW, row 1 = SOUND, row 2 = RADIO */
+    float fracs[3] = { view_dist_frac, sfx_frac, radio_frac };
 
     {
         static float s_last_view_frac = -1.0f;
         static int s_last_cursor = -1;
         if (view_dist_frac != s_last_view_frac || cursor != s_last_cursor) {
-            TD5_LOG_I("hud", "PAUSE OVERLAY: cursor=%d view_dist_frac=%.3f music=%.2f sfx=%.2f",
-                      cursor, view_dist_frac, music_frac, sfx_frac);
+            TD5_LOG_I("hud", "PAUSE OVERLAY: cursor=%d view_dist_frac=%.3f radio=%.2f sfx=%.2f",
+                      cursor, view_dist_frac, radio_frac, sfx_frac);
             s_last_view_frac = view_dist_frac;
             s_last_cursor    = cursor;
         }
@@ -2210,8 +2213,8 @@ void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_
 
     /* Update slider fill bar using atlas texture.
      * Fill scale = 128.0f (0x0045D600), UV scale = frac*255.0 (0x0045D684).
-     * [PORT REWORK 2026-06-05 / S15] Two sliders (VIEW, SOUND). */
-    for (int row = 0; row < 2; row++) {
+     * [RADIO 2026-06-30] Three sliders (VIEW, SOUND, RADIO). */
+    for (int row = 0; row < 3; row++) {
         if (!s_pause_slider_ptrs[row]) continue;
         float frac = fracs[row];
         if (frac < 0.0f) frac = 0.0f;
@@ -7360,12 +7363,12 @@ void td5_hud_init_pause_menu(int page_index)
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
-        /* [END RACE NOW 2026-06-30] +1 selectable row (END RACE NOW) in both
-         * modes, so each panel grows one row (16px) taller:
-         * MP = 8 rows (bottom selbox ~+95 -> panel +100); single-player
-         * = 7 rows (BACK TO LOBBY removed) -> panel +84. */
+        /* [RADIO + END RACE NOW 2026-06-30] +2 selectable rows over the original
+         * (RADIO slider at row 2, END RACE NOW action), each +16px taller:
+         * MP = 9 rows -> panel +116; single-player = 8 rows (BACK TO LOBBY
+         * removed) -> panel +100. */
         PAUSE_ADD(-s_pause_half_width, -56.0f,
-                   s_pause_half_width,  pause_mp ? 100.0f : 84.0f,
+                   s_pause_half_width,  pause_mp ? 116.0f : 100.0f,
                    bu, bv, bu, bv,
                    blackbox_e->texture_page, 0xFFFFFFFF);
     }
@@ -7389,7 +7392,7 @@ void td5_hud_init_pause_menu(int page_index)
         float sv0 = (float)selbox_e->atlas_y + 0.5f;
         float su1 = su0 + 255.0f;
         float sv1 = sv0 + 15.0f;
-        float init_y = s_pause_selbox_base_y + 2.0f * 16.0f;  /* default = CONTINUE (row 2) */
+        float init_y = s_pause_selbox_base_y + 3.0f * 16.0f;  /* default = CONTINUE (row 3) */
         PAUSE_ADD(sel_x0, init_y, sel_x1, init_y + 16.0f,
                   su0, sv0, su1, sv1,
                   selbox_e->texture_page, 0xFFFFFFFF);
@@ -7401,11 +7404,9 @@ void td5_hud_init_pause_menu(int page_index)
     s_pause_bar_x0 = s_pause_half_width - 130.0f;  /* 0x0045D73C */
     s_pause_bar_x1 = s_pause_half_width - 1.0f;
 
-    /* [PORT REWORK 2026-06-05 / S15] Two sliders now: VIEW (row 0) + SOUND
-     * (row 1). The MUSIC slider (old row 1) was removed. Clear the stale 3rd
-     * pointer so a previous init's quad can't draw a phantom slider. */
-    s_pause_slider_ptrs[2] = NULL;
-    for (int row = 0; row < 2; row++) {
+    /* [RADIO 2026-06-30] Three sliders: VIEW (row 0), SOUND (row 1),
+     * RADIO (row 2, internet-radio volume). */
+    for (int row = 0; row < 3; row++) {
         float row_y = (float)row * 16.0f;
         /* Dark background trough — single-texel BLACKBAR */
         float bbu = (float)blackbar_e->atlas_x + 0.5f;

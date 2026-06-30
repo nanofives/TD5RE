@@ -550,9 +550,21 @@ int  td5_plat_radio_submit(const void *pcm, int count);
  *  known, then refill the half just played from the ring (silence on underrun). */
 void td5_plat_radio_pump(void);
 
-/** Start (1) / stop (0) DSound output (main thread). Starting flushes the ring
- *  so playback resumes at the live edge. */
+/** Race-level play (1) / stop (0) (main thread). One of three gates; the radio
+ *  is audible only when playing AND in-race AND focused. */
 void td5_plat_radio_set_playing(int on);
+
+/** In-race gate (main thread): set per-frame from the game state so the radio
+ *  is silent in menus / results / benchmark. */
+void td5_plat_radio_set_active(int active);
+
+/** Focus gate (main thread): mute while the window is minimized / not the
+ *  foreground window. Driven from td5_plat_audio_update_focus_mute(). */
+void td5_plat_radio_set_focus_muted(int muted);
+
+/** True while the radio output is actually on (worker uses this to decide
+ *  whether to enqueue PCM or discard the live stream). */
+int  td5_plat_radio_wants_data(void);
 
 /** Set radio output volume 0-100 (main thread). */
 void td5_plat_radio_set_volume(int volume);

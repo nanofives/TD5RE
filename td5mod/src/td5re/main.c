@@ -260,9 +260,11 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Display", "Height",        g_td5.ini.disp_height);
 
     /* Audio */
-    td5_ini_write_int("Audio", "SFXVolume",   g_td5.ini.sfx_volume);
-    td5_ini_write_int("Audio", "MusicVolume", g_td5.ini.music_volume);
-    td5_ini_write_int("Audio", "SFXMode",     g_td5.ini.sfx_mode);
+    td5_ini_write_int("Audio", "SFXVolume",    g_td5.ini.sfx_volume);
+    td5_ini_write_int("Audio", "MusicVolume",  g_td5.ini.music_volume);
+    td5_ini_write_int("Audio", "SFXMode",      g_td5.ini.sfx_mode);
+    td5_ini_write_int("Audio", "RadioEnabled", g_td5.ini.radio_enabled);
+    td5_ini_write_int("Audio", "RadioVolume",  g_td5.ini.radio_volume);
 
     /* Game options */
     td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
@@ -338,6 +340,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "MusicVolume",          &g_td5.ini.music_volume },
         { "SFXMode",              &g_td5.ini.sfx_mode },
         { "RadioEnabled",         &g_td5.ini.radio_enabled },
+        { "RadioVolume",          &g_td5.ini.radio_volume },
         /* GameOptions */
         { "Laps",                 &g_td5.ini.laps },
         { "CheckpointTimers",     &g_td5.ini.checkpoint_timers },
@@ -738,6 +741,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.music_volume  = td5_ini_int("Audio", "MusicVolume", 80);
     g_td5.ini.sfx_mode      = td5_ini_int("Audio", "SFXMode", 0);
     g_td5.ini.radio_enabled = td5_ini_int("Audio", "RadioEnabled", 1);
+    g_td5.ini.radio_volume  = td5_ini_int("Audio", "RadioVolume", 10);
     td5_ini_str("Audio", "RadioURL", "http://ice1.somafm.com/beatblender-128-mp3",
                 g_td5.ini.radio_url, sizeof(g_td5.ini.radio_url));
 
@@ -1150,9 +1154,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     dbglog("  [Display] Width=%d Height=%d Windowed=%d", width, height, windowed);
     dbglog("  [Display] Fogging=%d SpeedUnits=%d CameraDamping=%d",
            g_td5.ini.fog_enabled, g_td5.ini.speed_units, g_td5.ini.camera_damping);
-    dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d Radio=%d url=%s",
+    dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d Radio=%d RadioVol=%d url=%s",
            g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode,
-           g_td5.ini.radio_enabled, g_td5.ini.radio_url);
+           g_td5.ini.radio_enabled, g_td5.ini.radio_volume, g_td5.ini.radio_url);
     dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d AutoGB=%d PlayerIsAI=%d",
            g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
            g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions,
@@ -1472,6 +1476,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             /* Mute all audio while the window isn't focused (alt-tabbed away),
              * restore on refocus. Runs in every game state. */
             td5_plat_audio_update_focus_mute();
+            /* Radio in-race gate: audible only while actually racing, so it is
+             * silent in the menus / results / benchmark (every game state). */
+            td5_plat_radio_set_active(g_td5.game_state == 2 /* RACE */);
             uint32_t t0 = td5_plat_time_ms();
             td5re_frame();
             uint32_t t1 = td5_plat_time_ms();

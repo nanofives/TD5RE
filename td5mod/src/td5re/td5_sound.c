@@ -432,7 +432,7 @@ int td5_sound_init(void)
      * Foundation is unavailable, td5_radio_get_backend() returns NULL and the
      * seam keeps the default CD backend. */
     if (g_td5.ini.radio_enabled) {
-        td5_radio_init(g_td5.ini.radio_url);
+        td5_radio_init(g_td5.ini.radio_url, g_td5.ini.radio_volume);
         td5_music_set_backend(td5_radio_get_backend());
     }
     TD5_LOG_I(LOG_TAG, "audio subsystem initialized (sfx master=%d, radio=%d)",
@@ -2060,6 +2060,7 @@ void td5_sound_cd_set_volume(int v) { td5_music_set_volume(v); }
 
 void td5_sound_set_sfx_volume(int v) { td5_plat_audio_set_master_volume(v); }
 void td5_sound_set_music_volume(int v) { td5_music_set_volume(v); }
+void td5_sound_set_radio_volume(int v) { td5_radio_set_volume_pct(v); }
 
 /* ========================================================================
  * Internal Helpers

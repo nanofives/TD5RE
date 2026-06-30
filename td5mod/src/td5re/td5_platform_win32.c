@@ -5110,6 +5110,7 @@ void td5_plat_audio_update_focus_mute(void)
     if (s_audio_stream.buffer)
         IDirectSoundBuffer_SetVolume(s_audio_stream.buffer,
                                      want ? DSBVOLUME_MIN : DSBVOLUME_MAX);
+    td5_plat_radio_set_focus_muted(want);   /* mute the radio while minimized/alt-tabbed */
     TD5_LOG_I(LOG_TAG, "audio focus-mute: window %s -> %s",
               focused ? "focused" : "unfocused", want ? "MUTED" : "unmuted");
 }
@@ -5296,8 +5297,11 @@ typedef struct TD5_RadioSink {
     DWORD               half_bytes;
     DWORD               last_play_cursor;
     int                 created;
-    int                 playing;
-    int                 want_volume;        /* 0..100 */
+    int                 playing;            /* race-level play/stop (radio backend)   */
+    int                 active;             /* in-race gate (per-frame from main.c)    */
+    int                 focus_muted;        /* window minimized / not foreground       */
+    int                 output_on;          /* DSound buffer currently playing         */
+    int                 want_volume;        /* 0..100 (RadioVolume)                    */
 
     unsigned char      *ring;
     DWORD               ring_cap;
@@ -5332,7 +5336,11 @@ void td5_plat_radio_open(void)
         InitializeCriticalSection(&s_radio.cs);
         s_radio.cs_init = 1;
     }
-    s_radio.want_volume = 80;
+    s_radio.want_volume = 10;     /* low default; overridden by RadioVolume at init */
+    s_radio.playing     = 0;
+    s_radio.active      = 0;      /* not in a race until main.c says so */
+    s_radio.focus_muted = 0;
+    s_radio.output_on   = 0;
     TD5_LOG_I(LOG_TAG, "radio sink opened");
 }
 
@@ -5423,6 +5431,31 @@ static void radio_fill_half(int half)
     IDirectSoundBuffer_Unlock(s_radio.buffer, p1, s1, p2, s2);
 }
 
+/* Recompute audibility and Play/Stop the buffer to match. The radio is audible
+ * only while playing (race-level) AND active (in a race) AND focused. On the
+ * rising edge it flushes the ring and resumes at the live edge. */
+static void radio_apply_output(void)
+{
+    int want;
+    if (!s_radio.created || !s_radio.buffer) return;
+    want = s_radio.playing && s_radio.active && !s_radio.focus_muted;
+    if (want && !s_radio.output_on) {
+        EnterCriticalSection(&s_radio.cs);
+        s_radio.ring_head = s_radio.ring_tail = s_radio.ring_count = 0;
+        LeaveCriticalSection(&s_radio.cs);
+        radio_fill_half(0);
+        radio_fill_half(1);
+        IDirectSoundBuffer_SetCurrentPosition(s_radio.buffer, 0);
+        s_radio.last_play_cursor = 0;
+        IDirectSoundBuffer_SetVolume(s_radio.buffer, radio_vol_to_dsound(s_radio.want_volume));
+        IDirectSoundBuffer_Play(s_radio.buffer, 0, 0, DSBPLAY_LOOPING);
+        s_radio.output_on = 1;
+    } else if (!want && s_radio.output_on) {
+        IDirectSoundBuffer_Stop(s_radio.buffer);
+        s_radio.output_on = 0;
+    }
+}
+
 static void radio_create_buffer(void)
 {
     DSBUFFERDESC desc;
@@ -5458,14 +5491,11 @@ static void radio_create_buffer(void)
         return;
     }
     s_radio.created = 1;
+    s_radio.output_on = 0;
     s_radio.last_play_cursor = 0;
-    radio_fill_half(0);
-    radio_fill_half(1);
-    IDirectSoundBuffer_SetCurrentPosition(s_radio.buffer, 0);
     IDirectSoundBuffer_SetVolume(s_radio.buffer, radio_vol_to_dsound(s_radio.want_volume));
     TD5_LOG_I(LOG_TAG, "radio: DSound buffer created (%u bytes)", (unsigned)s_radio.buffer_bytes);
-    if (s_radio.playing)
-        IDirectSoundBuffer_Play(s_radio.buffer, 0, 0, DSBPLAY_LOOPING);
+    radio_apply_output();   /* start now if all gates are open */
 }
 
 void td5_plat_radio_pump(void)
@@ -5476,7 +5506,7 @@ void td5_plat_radio_pump(void)
         if (s_radio.fmt_ready) radio_create_buffer();
         if (!s_radio.created) return;
     }
-    if (!s_radio.playing) return;
+    if (!s_radio.output_on) return;
     IDirectSoundBuffer_GetStatus(s_radio.buffer, &status);
     if (!(status & DSBSTATUS_PLAYING)) {
         IDirectSoundBuffer_Play(s_radio.buffer, 0, 0, DSBPLAY_LOOPING);
@@ -5494,20 +5524,24 @@ void td5_plat_radio_pump(void)
 void td5_plat_radio_set_playing(int on)
 {
     s_radio.playing = on ? 1 : 0;
-    if (!s_radio.created || !s_radio.buffer) return;
-    if (on) {
-        /* flush the ring so playback resumes at the live edge */
-        EnterCriticalSection(&s_radio.cs);
-        s_radio.ring_head = s_radio.ring_tail = s_radio.ring_count = 0;
-        LeaveCriticalSection(&s_radio.cs);
-        radio_fill_half(0);
-        radio_fill_half(1);
-        IDirectSoundBuffer_SetCurrentPosition(s_radio.buffer, 0);
-        s_radio.last_play_cursor = 0;
-        IDirectSoundBuffer_Play(s_radio.buffer, 0, 0, DSBPLAY_LOOPING);
-    } else {
-        IDirectSoundBuffer_Stop(s_radio.buffer);
-    }
+    radio_apply_output();
+}
+
+void td5_plat_radio_set_active(int active)
+{
+    s_radio.active = active ? 1 : 0;
+    radio_apply_output();
+}
+
+void td5_plat_radio_set_focus_muted(int muted)
+{
+    s_radio.focus_muted = muted ? 1 : 0;
+    radio_apply_output();
+}
+
+int td5_plat_radio_wants_data(void)
+{
+    return s_radio.output_on;
 }
 
 void td5_plat_radio_set_volume(int volume)
@@ -5515,7 +5549,9 @@ void td5_plat_radio_set_volume(int volume)
     if (volume < 0)   volume = 0;
     if (volume > 100) volume = 100;
     s_radio.want_volume = volume;
-    if (s_radio.buffer)
+    /* Only push to the device while audible; the rising-edge in radio_apply_output
+     * sets the volume on resume, so this never un-mutes a gated radio. */
+    if (s_radio.buffer && s_radio.output_on)
         IDirectSoundBuffer_SetVolume(s_radio.buffer, radio_vol_to_dsound(volume));
 }
 
@@ -5538,6 +5574,9 @@ void td5_plat_radio_close(void)
     }
     s_radio.created = 0;
     s_radio.playing = 0;
+    s_radio.active = 0;
+    s_radio.focus_muted = 0;
+    s_radio.output_on = 0;
     InterlockedExchange(&s_radio.fmt_ready, 0);
     if (s_radio.cs_init) {
         EnterCriticalSection(&s_radio.cs);
