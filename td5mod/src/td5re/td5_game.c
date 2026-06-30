@@ -2383,6 +2383,55 @@ int td5_game_init_race_session(void) {
             if (td5_net_is_slot_active(i))
                 s_slot_state[i].state = 1;
     }
+    /* [FIX 2026-06-30 throttle/camera desync] Restore the original's SINGLE
+     * human-control invariant for LOCAL split-screen. The original
+     * (UpdateVehicleActor @0x00406650) gates both the throttle path
+     * (player input -> actor+0x33E) and the human-vs-AI dynamics dispatch on ONE
+     * per-actor control-source flag, re-established every race. The port split
+     * that into TWO gates that can DESYNC across a cup/series: the per-slot input
+     * update keys on s_slot_state[i].state==1 (td5_game.c:5717 countdown / 5985
+     * racing), while the camera-change/poll path keys on the local human count
+     * s_active_players (td5_input.c:747) — set from this same num_human_players at
+     * step 15. The reported bug — a split-screen player on a SUBSEQUENT cup race
+     * who can change the camera but cannot accelerate — is exactly this desync:
+     * the slot is still a live local human (camera works) yet its state was left
+     * != 1 by some stale input across the series, so td5_input_update_player_control
+     * is skipped and throttle never reaches actor+0x33E.
+     *
+     * The network pass above already guarantees robustness by force-marking every
+     * active roster slot human LAST; local split-screen had no equivalent. Mirror
+     * it: re-assert state=1 for every live LOCAL HUMAN POSITION (i <
+     * num_human_players — the SAME membership that drives the camera the player
+     * just used), UNLESS the user explicitly put that slot on AI autopilot
+     * (player_is_ai / others_ai co-op / the AI-test-player mask / attract demo).
+     * Running LAST overrides any earlier mis-derivation; at race start no slot has
+     * finished yet, so clearing a stale state==2 (finished in the previous series
+     * race) is correct. By construction camera-works => slot in num_human_players
+     * => state forced to 1 => throttle works, so the two gates can no longer
+     * disagree for a genuine human. A WARN fires only when a slot is actually
+     * repaired, capturing the exact stale trigger in race.log. */
+    if (g_td5.split_screen_mode > 0 && !g_td5.network_active) {
+        int rep_humans = g_td5.num_human_players;
+        if (rep_humans > TD5_MAX_VIEWPORTS)   rep_humans = TD5_MAX_VIEWPORTS;
+        if (rep_humans > TD5_MAX_RACER_SLOTS) rep_humans = TD5_MAX_RACER_SLOTS;
+        for (int i = 0; i < rep_humans; i++) {
+            if (g_td5.ini.player_is_ai)               continue; /* every human on AI autopilot */
+            if (g_td5.ini.others_ai && i > 0)         continue; /* co-op AI (slot 0 stays human) */
+            if ((g_td5.mp_ai_player_mask >> i) & 1u)  continue; /* simulated AI test player */
+            if (s_demo_mode && i == 0)                continue; /* attract demo drives slot 0 */
+            if (s_slot_state[i].state == 3)           continue; /* legitimately disabled (TT/drag decoration) */
+            if (s_slot_state[i].state != 1) {
+                TD5_LOG_W(LOG_TAG,
+                          "InitRace: REPAIR live human slot %d state %d->1 "
+                          "(split=%d humans=%d mask=0x%X others_ai=%d demo=%d) "
+                          "-- throttle/camera gate desync guard",
+                          i, s_slot_state[i].state, g_td5.split_screen_mode,
+                          g_td5.num_human_players, g_td5.mp_ai_player_mask,
+                          g_td5.ini.others_ai, s_demo_mode);
+                s_slot_state[i].state = 1;
+            }
+        }
+    }
     /* Propagate player/AI state to physics module for dynamics dispatch */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         td5_physics_set_race_slot_state(i, s_slot_state[i].state == 1 ? 1 : 0);
