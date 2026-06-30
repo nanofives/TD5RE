@@ -208,18 +208,51 @@ typedef struct {
 } FE_Surface;
 
 /* ---- TD6 colour-panel layout (640x480 canvas coords) ---- */
-#define TD6_PALETTE_N    16     /* keep in sync with s_td6_palette[] */
+/* [SECONDARY PAINT 2026-06-29] The panel now also picks a SECONDARY colour and a
+ * PATTERN that blends the two. Two compact selector rows sit ABOVE the swatch
+ * grid (PATTERN, then COLOR target = MAIN/2ND); the swatch grid was widened to
+ * 32 quick-pick presets in 2 rows (smaller swatches) so the panel still fits the
+ * left button column. The HSV map below is unchanged (any colour). */
+#define TD6_PALETTE_N    32     /* keep in sync with s_td6_palette[] */
 #define TD6_CP_LIST_X    46
-#define TD6_CP_LIST_Y    226
-#define TD6_CP_SW        19     /* predefined swatch size */
-#define TD6_CP_GAP        2
-#define TD6_CP_COLS       8
+#define TD6_CP_PATTERN_Y 220    /* row 0: PATTERN ◄ name ► */
+#define TD6_CP_TARGET_Y  233    /* row 1: COLOR   ◄ MAIN/2ND ► */
+#define TD6_CP_LIST_Y    248    /* first swatch row */
+#define TD6_CP_SW         9      /* predefined swatch size */
+#define TD6_CP_GAP        1
+#define TD6_CP_COLS      16
 #define TD6_CP_MAP_X     46
 #define TD6_CP_MAP_Y     272
 #define TD6_CP_MAP_W    168
-#define TD6_CP_MAP_H     46
+#define TD6_CP_MAP_H     44
 #define TD6_CP_MAP_ROWS   6     /* keyboard grid rows over the color map */
-#define TD6_CP_GRID_ROWS (2 + TD6_CP_MAP_ROWS)  /* 2 swatch rows + map rows */
+/* Unified cursor row model: 0 = PATTERN selector, 1 = COLOR-target selector,
+ * 2.. = swatch grid rows, then the HSV-map rows. */
+#define TD6_ROW_PATTERN   0
+#define TD6_ROW_TARGET    1
+#define TD6_SWATCH_ROW0   2
+#define TD6_SWATCH_ROWS  ((TD6_PALETTE_N + TD6_CP_COLS - 1) / TD6_CP_COLS) /* =2 */
+#define TD6_MAP_ROW0     (TD6_SWATCH_ROW0 + TD6_SWATCH_ROWS)               /* =4 */
+#define TD6_CP_GRID_ROWS (TD6_MAP_ROW0 + TD6_CP_MAP_ROWS)
+
+/* Paint patterns: how the primary + secondary colours combine on the body. */
+enum {
+    TD6_PAT_SOLID = 0,   /* whole body = primary */
+    TD6_PAT_TWOTONE,     /* upper = primary / lower = secondary */
+    TD6_PAT_STRIPES,     /* centre band = secondary */
+    TD6_PAT_SPLIT,       /* front-ish = primary / rear-ish = secondary */
+    TD6_PAT_COUNT
+};
+/* Pattern split thresholds (normalised body-bbox / overlay coords). Shared in
+ * spirit by the in-race texel bake (td5_asset.c) and the menu preview region
+ * draw (td5_frontend.c) so both read as the same livery. */
+#define TD6_PAT_TWOTONE_V   0.50f
+#define TD6_PAT_STRIPE_LO   0.42f
+#define TD6_PAT_STRIPE_HI   0.58f
+#define TD6_PAT_SPLIT_U     0.50f
+
+extern int s_paint_target;          /* 0 = editing MAIN colour, 1 = SECONDARY */
+const char *td6_pattern_name(int pat);
 
 extern char s_lobby_password[32];
 extern char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][16];

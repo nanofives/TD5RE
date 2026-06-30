@@ -276,6 +276,9 @@ const char *td5_asset_get_player_override_zip(void);
  * The simultaneous-multiplayer car select sets one per human slot so each
  * player's ported-TD6 car is painted their chosen colour. [PORT 2026-06-07] */
 void        td5_asset_set_human_td6_color(int slot, int rgb);
+/* [SECONDARY PAINT 2026-06-29] As above but with a secondary colour + pattern
+ * (TD6_PAT_*). rgb2<0 or pattern==0 (SOLID) renders a single solid colour. */
+void        td5_asset_set_human_td6_paint(int slot, int rgb, int rgb2, int pattern);
 
 /**
  * Load a traffic vehicle model (model%d.prr + skin%d.png) from traffic.zip into

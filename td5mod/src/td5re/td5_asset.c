@@ -3415,17 +3415,45 @@ static char s_player_car_override[16] = {0};
  * td5_asset_load_vehicle when baking the carmask paint. -1 leaves the default
  * behaviour intact for single-player / AI. [PORT ENHANCEMENT 2026-06-07] */
 static int32_t s_human_td6_color[TD5_MAX_RACER_SLOTS];
+/* [SECONDARY PAINT 2026-06-29] Companion per-slot secondary colour + pattern.
+ * -1 secondary / 0 pattern (SOLID) = "single solid colour" (the legacy
+ * behaviour), so MP/net slots set only via td5_asset_set_human_td6_color stay
+ * solid. The full picker (single-player) drives these through the INI path in
+ * td5_asset_load_vehicle instead. */
+static int32_t s_human_td6_color2[TD5_MAX_RACER_SLOTS];
+static int32_t s_human_td6_pattern[TD5_MAX_RACER_SLOTS];
 static int     s_human_td6_color_init;
+
+static void td5_asset_human_td6_init(void)
+{
+    int i;
+    if (s_human_td6_color_init) return;
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+        s_human_td6_color[i]   = -1;
+        s_human_td6_color2[i]  = -1;
+        s_human_td6_pattern[i] = 0;
+    }
+    s_human_td6_color_init = 1;
+}
 
 void td5_asset_set_human_td6_color(int slot, int rgb)
 {
-    int i;
-    if (!s_human_td6_color_init) {
-        for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) s_human_td6_color[i] = -1;
-        s_human_td6_color_init = 1;
-    }
+    td5_asset_human_td6_init();
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
-    s_human_td6_color[slot] = rgb;
+    s_human_td6_color[slot]   = rgb;
+    s_human_td6_color2[slot]  = -1;   /* solid unless td5_asset_set_human_td6_paint follows */
+    s_human_td6_pattern[slot] = 0;
+}
+
+/* Richer per-slot paint setter: primary + secondary + pattern. rgb2<0 or
+ * pattern==SOLID leaves the slot rendering a single solid colour. */
+void td5_asset_set_human_td6_paint(int slot, int rgb, int rgb2, int pattern)
+{
+    td5_asset_human_td6_init();
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    s_human_td6_color[slot]   = rgb;
+    s_human_td6_color2[slot]  = rgb2;
+    s_human_td6_pattern[slot] = (pattern >= 0 && pattern <= 3) ? pattern : 0;
 }
 
 void td5_asset_set_player_car_override(const char *code)
@@ -3449,13 +3477,39 @@ const char *td5_asset_get_player_override_zip(void)
     return buf;
 }
 
+/* [SECONDARY PAINT 2026-06-29] Pattern blend: given a body texel's position
+ * NORMALISED to the body's bounding box (fx,fy in 0..1) return the blend weight
+ * toward the SECONDARY colour (0 = primary, 1 = secondary). The carskin is a
+ * per-car UV atlas, so these texture-space splits read as approximate two-tones
+ * (front->rear maps L->R, upper->lower maps top->bottom on most cars). The menu
+ * preview applies the same rule in the cleaner carpicpaint photo space. Keep
+ * thresholds in sync with TD6_PAT_* in td5_frontend_internal.h. */
+static float td5_asset_paint_pattern_t(int pattern, float fx, float fy)
+{
+    switch (pattern) {
+        case 1: /* TWO-TONE: upper body = primary, lower = secondary */
+            return (fy >= 0.50f) ? 1.0f : 0.0f;
+        case 2: /* STRIPES: centre band = secondary */
+            return (fx >= 0.42f && fx <= 0.58f) ? 1.0f : 0.0f;
+        case 3: /* SPLIT: front-ish = primary, rear-ish = secondary */
+            return (fx >= 0.50f) ? 1.0f : 0.0f;
+        default: /* SOLID */
+            return 0.0f;
+    }
+}
+
 /* TD6 player paint: load the (body-grayscale + fixed-colour) carskin and the
  * carmask, multiply ONLY the masked body texels by the paint colour, and upload.
  * Glass/lights/chrome/tyres (mask=0) keep their original colour. Returns 0 on
  * any failure so the caller falls back to a plain skin load. The mesh is then
- * drawn with NO per-vertex tint, so the body colour comes solely from here. */
+ * drawn with NO per-vertex tint, so the body colour comes solely from here.
+ *
+ * [SECONDARY PAINT 2026-06-29] When pattern != SOLID the masked body is split
+ * between `paint` (primary) and `paint2` (secondary) by td5_asset_paint_pattern_t
+ * over the body's bounding box. pattern==SOLID ignores paint2 (legacy path). */
 static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
-                                               const char *mask_path, uint32_t paint)
+                                               const char *mask_path, uint32_t paint,
+                                               uint32_t paint2, int pattern)
 {
     void *spix = NULL, *mpix = NULL;
     int sw = 0, sh = 0, mw = 0, mh = 0;
@@ -3471,18 +3525,46 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
     }
     unsigned char *s = (unsigned char *)spix;
     unsigned char *m = (unsigned char *)mpix;
-    int tr = (paint >> 16) & 0xFF, tg = (paint >> 8) & 0xFF, tb = paint & 0xFF;
+    int tr  = (paint  >> 16) & 0xFF, tg  = (paint  >> 8) & 0xFF, tb  = paint  & 0xFF;
+    int tr2 = (paint2 >> 16) & 0xFF, tg2 = (paint2 >> 8) & 0xFF, tb2 = paint2 & 0xFF;
+    if (pattern < 0 || pattern > 3) pattern = 0;
+
+    /* Body bounding box (mask>127) for normalised pattern coords. Only needed
+     * for non-SOLID patterns. */
+    int x0 = sw, y0 = sh, x1 = -1, y1 = -1;
+    if (pattern != 0) {
+        for (int y = 0; y < sh; y++)
+            for (int x = 0; x < sw; x++)
+                if (m[(y * sw + x) * 4] > 127) {
+                    if (x < x0) x0 = x;  if (x > x1) x1 = x;
+                    if (y < y0) y0 = y;  if (y > y1) y1 = y;
+                }
+        if (x1 < x0 || y1 < y0) pattern = 0;   /* no body texels -> solid */
+    }
+    float inv_w = (pattern != 0 && x1 > x0) ? 1.0f / (float)(x1 - x0) : 0.0f;
+    float inv_h = (pattern != 0 && y1 > y0) ? 1.0f / (float)(y1 - y0) : 0.0f;
+
     /* td5_asset_decode_png_rgba32 returns BGRA buffers (byte0=B, byte1=G,
      * byte2=R) to match the engine's B8G8R8A8 textures, so write tb->byte0 and
      * tr->byte2 (NOT the other way) or blue paint comes out red/orange. */
-    for (int i = 0; i < sw * sh; i++) {
-        if (m[i * 4] > 127) {              /* body texel (grayscale) -> lum * tint */
-            int g = s[i * 4];              /* body is R==G==B, so any byte is the luminance */
-            s[i * 4 + 0] = (unsigned char)((g * tb) / 255);   /* B */
-            s[i * 4 + 1] = (unsigned char)((g * tg) / 255);   /* G */
-            s[i * 4 + 2] = (unsigned char)((g * tr) / 255);   /* R */
+    for (int y = 0; y < sh; y++) {
+        for (int x = 0; x < sw; x++) {
+            int i = y * sw + x;
+            if (m[i * 4] > 127) {          /* body texel (grayscale) -> lum * tint */
+                int g = s[i * 4];          /* body is R==G==B, so any byte is the luminance */
+                int cr = tr, cg = tg, cb = tb;
+                if (pattern != 0) {
+                    float fx = (float)(x - x0) * inv_w;
+                    float fy = (float)(y - y0) * inv_h;
+                    float t  = td5_asset_paint_pattern_t(pattern, fx, fy);
+                    if (t > 0.5f) { cr = tr2; cg = tg2; cb = tb2; }
+                }
+                s[i * 4 + 0] = (unsigned char)((g * cb) / 255);   /* B */
+                s[i * 4 + 1] = (unsigned char)((g * cg) / 255);   /* G */
+                s[i * 4 + 2] = (unsigned char)((g * cr) / 255);   /* R */
+            }
+            s[i * 4 + 3] = 255;            /* keep opaque (mask alpha unused on GPU) */
         }
-        s[i * 4 + 3] = 255;                /* keep opaque (mask alpha unused on GPU) */
     }
     int ok = td5_plat_render_upload_texture(page, spix, sw, sh, 2);
     stbi_image_free(spix); stbi_image_free(mpix);
@@ -3647,21 +3729,38 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                 if (!td5_render_photobooth_active() &&
                     td5_asset_resolve_png_path("carmask.png", zip_path, png_mask, sizeof(png_mask))) {
                     uint32_t paint_rgb;
+                    /* [SECONDARY PAINT 2026-06-29] secondary colour + pattern.
+                     * Default = solid (paint2 unused, pattern SOLID). The full
+                     * picker only drives slot 0 via the INI; per-slot MP overrides
+                     * stay solid unless set via td5_asset_set_human_td6_paint. */
+                    uint32_t paint_rgb2 = 0x00FFFFFFu;
+                    int      paint_pat  = 0;
                     if (s_human_td6_color_init && slot >= 0 &&
                         slot < TD5_MAX_RACER_SLOTS && s_human_td6_color[slot] >= 0) {
                         /* Per-player chosen colour (simultaneous-MP car select). */
                         paint_rgb = (uint32_t)s_human_td6_color[slot] & 0x00FFFFFFu;
+                        if (s_human_td6_color2[slot] >= 0) {
+                            paint_rgb2 = (uint32_t)s_human_td6_color2[slot] & 0x00FFFFFFu;
+                            paint_pat  = s_human_td6_pattern[slot];
+                        }
                     } else if (slot == 0) {
-                        paint_rgb = (uint32_t)g_td5.ini.td6_paint_color & 0x00FFFFFFu;
+                        paint_rgb  = (uint32_t)g_td5.ini.td6_paint_color  & 0x00FFFFFFu;
+                        paint_rgb2 = (uint32_t)g_td5.ini.td6_paint_color2 & 0x00FFFFFFu;
+                        paint_pat  = g_td5.ini.td6_paint_pattern;
                     } else {
                         paint_rgb = td5_asset_pick_ai_td6_color(car_index, slot, paint);
                     }
-                    if (paint_rgb != 0x00FFFFFFu) {
+                    /* Bake when the body actually changes: a non-white primary,
+                     * OR a non-SOLID pattern with a distinct secondary. */
+                    if (paint_rgb != 0x00FFFFFFu ||
+                        (paint_pat != 0 && paint_rgb2 != paint_rgb)) {
                         skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin,
-                                                                     png_mask, paint_rgb);
+                                                                     png_mask, paint_rgb,
+                                                                     paint_rgb2, paint_pat);
                         if (skin_ok)
-                            TD5_LOG_I(LOG_TAG, "vehicle slot=%d: TD6 body painted %06X (mask)",
-                                      slot, paint_rgb);
+                            TD5_LOG_I(LOG_TAG,
+                                      "vehicle slot=%d: TD6 body painted %06X/%06X pat=%d (mask)",
+                                      slot, paint_rgb, paint_rgb2, paint_pat);
                     }
                 }
                 if (!skin_ok)

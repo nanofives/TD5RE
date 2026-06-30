@@ -1935,11 +1935,28 @@ int frontend_car_has_paint(int car_index) {
  * menu preview live (carpic modulate). Persists in td5re.ini [CarSelection]
  * TD6PaintColor (g_td5.ini.td6_paint_color). The button-shift + mouse-pick
  * helpers that need s_buttons / s_mouse live just after those declarations. */
-const uint32_t s_td6_palette[] = {   /* 0xRRGGBB predefined quick picks */
-    0xFF0000, 0xFF6000, 0xFFC000, 0xC8FF00, 0x10C010, 0x00C0C0,
-    0x1078FF, 0x1010FF, 0x8000FF, 0xFF20C0, 0xFFFFFF, 0xC8C8C8,
-    0x686868, 0x101010, 0x884400, 0xFFD040,
+const uint32_t s_td6_palette[] = {   /* 0xRRGGBB predefined quick picks (TD6_PALETTE_N) */
+    /* row 0 — vivid hues */
+    0xFF0000, 0xFF4000, 0xFF8000, 0xFFB000, 0xFFE000, 0xC0FF00, 0x30D030, 0x00D080,
+    0x00C0C0, 0x00D0FF, 0x2090FF, 0x1030FF, 0x6020FF, 0xA040FF, 0xE040D0, 0xFF60A0,
+    /* row 1 — neutrals, darks, metals & pastels */
+    0xFFFFFF, 0xD0D0D0, 0x909090, 0x505050, 0x101010, 0x7A4A20, 0xC8A878, 0xE0B020,
+    0x8C1A1A, 0x18306C, 0x1C5A28, 0x5A2080, 0x607080, 0x303840, 0xA06828, 0xF0E0C0,
 };
+
+/* [SECONDARY PAINT 2026-06-29] Which colour the picker is editing: 0 = MAIN
+ * (g_td5.ini.td6_paint_color), 1 = SECONDARY (g_td5.ini.td6_paint_color2). */
+int s_paint_target = 0;
+
+/* Short display names for the paint patterns (TD6_PAT_*). */
+const char *td6_pattern_name(int pat) {
+    switch (pat) {
+        case TD6_PAT_TWOTONE: return "TWO-TONE";
+        case TD6_PAT_STRIPES: return "STRIPES";
+        case TD6_PAT_SPLIT:   return "SPLIT";
+        default:              return "SOLID";
+    }
+}
 
 /* Layout in 640x480 canvas coords. When the panel is open the whole button
  * column is compressed (CAR/PAINT shift up, Stats/Auto/OK/Back move below the
@@ -1984,14 +2001,50 @@ uint32_t td6_map_color(float u, float v) {
 }
 
 static void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
+void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
+float fe_measure_small_text(const char *text);
+
+/* Draw a 1.5px yellow cursor frame around a screen-space rect. */
+static void td6_panel_frame(float ox, float oy, float ow, float oh, float t) {
+    uint32_t mk = 0xFF00FFFFu;  /* BGRA yellow */
+    fe_draw_quad(ox, oy, ow, t, mk, -1,0,0,1,1);
+    fe_draw_quad(ox, oy+oh-t, ow, t, mk, -1,0,0,1,1);
+    fe_draw_quad(ox, oy, t, oh, mk, -1,0,0,1,1);
+    fe_draw_quad(ox+ow-t, oy, t, oh, mk, -1,0,0,1,1);
+}
+
+/* [SECONDARY PAINT 2026-06-29] One selector row in the panel: left label +
+ * "< value >" on the right; `framed` draws the cursor frame around the row. */
+static void td6_panel_selector_row(float cy, const char *label, const char *value,
+                                   int framed, float sx, float sy) {
+    float gsx = fe_glyph_sx(sx, sy);
+    char buf[48];
+    fe_draw_small_text((float)TD6_CP_LIST_X * sx, cy * sy, label, 0xFFFFFFFFu, sx, sy);
+    snprintf(buf, sizeof buf, "< %s >", value);
+    float w  = fe_measure_small_text(buf) * gsx;   /* screen px */
+    float rx = (float)(TD6_CP_LIST_X + TD6_CP_MAP_W) * sx - w;
+    fe_draw_small_text(rx, cy * sy, buf, 0xFF40FFFFu, sx, sy);
+    if (framed)
+        td6_panel_frame((float)(TD6_CP_LIST_X - 2) * sx, (cy - 1.0f) * sy,
+                        (float)(TD6_CP_MAP_W + 2) * sx, 11.0f * sy, 1.5f);
+}
+
 static void frontend_render_td6_color_panel(float sx, float sy) {
     if (!s_color_panel_visible) return;   /* hidden until the PAINT button opens it */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    /* backdrop behind the list + map */
-    fe_draw_quad((TD6_CP_LIST_X - 3) * sx, (TD6_CP_LIST_Y - 5) * sy,
-                 (TD6_CP_MAP_W + 6) * sx,
-                 (TD6_CP_MAP_Y + TD6_CP_MAP_H + 16 - (TD6_CP_LIST_Y - 5)) * sy,
+    /* backdrop behind the selector rows + swatches + map + colour bars */
+    float bd_top = (float)(TD6_CP_PATTERN_Y - 4);
+    float bd_bot = (float)(TD6_CP_MAP_Y + TD6_CP_MAP_H + 16);
+    fe_draw_quad((TD6_CP_LIST_X - 3) * sx, bd_top * sy,
+                 (TD6_CP_MAP_W + 6) * sx, (bd_bot - bd_top) * sy,
                  0xD8141420u, -1, 0, 0, 1, 1);
+    /* PATTERN + COLOR-target selector rows */
+    td6_panel_selector_row((float)TD6_CP_PATTERN_Y, "PATTERN",
+                           td6_pattern_name(g_td5.ini.td6_paint_pattern),
+                           s_color_cur_row == TD6_ROW_PATTERN, sx, sy);
+    td6_panel_selector_row((float)TD6_CP_TARGET_Y, "COLOR",
+                           s_paint_target ? "2ND" : "MAIN",
+                           s_color_cur_row == TD6_ROW_TARGET, sx, sy);
     /* predefined quick-pick swatches */
     for (int i = 0; i < TD6_PALETTE_N; i++) {
         int c = i % TD6_CP_COLS, r = i / TD6_CP_COLS;
@@ -2012,38 +2065,40 @@ static void frontend_render_td6_color_panel(float sx, float sy) {
                          frontend_rgb_to_bgra(td6_map_color(u, v)), -1, 0,0,1,1);
         }
     }
-    /* BOLD cursor marker over the current grid cell (a yellow frame just outside
-     * it). On a swatch (rows 0-1) it frames the swatch; on the map (rows 2+) it
-     * frames the corresponding map cell. Drawn last so it sits on top. */
-    {
+    /* BOLD cursor marker — only for the swatch/map rows (the control rows above
+     * are framed by td6_panel_selector_row). */
+    if (s_color_cur_row >= TD6_SWATCH_ROW0) {
         float mx0, my0, mw, mh;
-        if (s_color_cur_row < 2) {
+        if (s_color_cur_row < TD6_MAP_ROW0) {
+            int sr = s_color_cur_row - TD6_SWATCH_ROW0;
             mx0 = (float)(TD6_CP_LIST_X + s_color_cur_col * (TD6_CP_SW + TD6_CP_GAP));
-            my0 = (float)(TD6_CP_LIST_Y + s_color_cur_row * (TD6_CP_SW + TD6_CP_GAP));
+            my0 = (float)(TD6_CP_LIST_Y + sr * (TD6_CP_SW + TD6_CP_GAP));
             mw = mh = (float)TD6_CP_SW;
         } else {
             float cw = (float)TD6_CP_MAP_W / (float)TD6_CP_COLS;
             float ch = (float)TD6_CP_MAP_H / (float)TD6_CP_MAP_ROWS;
             mx0 = (float)TD6_CP_MAP_X + (float)s_color_cur_col * cw;
-            my0 = (float)TD6_CP_MAP_Y + (float)(s_color_cur_row - 2) * ch;
+            my0 = (float)TD6_CP_MAP_Y + (float)(s_color_cur_row - TD6_MAP_ROW0) * ch;
             mw = cw; mh = ch;
         }
-        float e = 2.0f, t = 2.0f, ox = mx0 - e, oy = my0 - e, ow = mw + 2.0f*e, oh = mh + 2.0f*e;
-        uint32_t mk = 0xFF00FFFFu;  /* BGRA yellow */
-        fe_draw_quad(ox*sx, oy*sy, ow*sx, t*sy, mk, -1,0,0,1,1);
-        fe_draw_quad(ox*sx, (oy+oh-t)*sy, ow*sx, t*sy, mk, -1,0,0,1,1);
-        fe_draw_quad(ox*sx, oy*sy, t*sx, oh*sy, mk, -1,0,0,1,1);
-        fe_draw_quad((ox+ow-t)*sx, oy*sy, t*sx, oh*sy, mk, -1,0,0,1,1);
+        float e = 2.0f;
+        td6_panel_frame((mx0 - e)*sx, (my0 - e)*sy, (mw + 2.0f*e)*sx, (mh + 2.0f*e)*sy, 2.0f);
     }
-    /* CURRENT-COLOR bar (full panel width) below the map — always shows the active
-     * color, including map-picked colors that aren't in the predefined list. */
+    /* Two CURRENT-COLOR bars below the map: MAIN (left) + 2ND (right). The active
+     * target's bar is framed. Both shown so the chosen pair is always visible. */
     {
         float by = (float)(TD6_CP_MAP_Y + TD6_CP_MAP_H + 3);
-        fe_draw_quad((float)(TD6_CP_LIST_X - 1) * sx, (by - 1) * sy,
+        float halfw = (float)(TD6_CP_MAP_W - 4) / 2.0f;
+        float x1 = (float)TD6_CP_LIST_X;
+        float x2 = x1 + halfw + 4.0f;
+        fe_draw_quad((x1 - 1) * sx, (by - 1) * sy,
                      (float)(TD6_CP_MAP_W + 2) * sx, 13 * sy, 0xFF000000u, -1, 0,0,1,1);
-        fe_draw_quad((float)TD6_CP_LIST_X * sx, by * sy,
-                     (float)TD6_CP_MAP_W * sx, 11 * sy,
-                     frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color), -1, 0,0,1,1);
+        fe_draw_quad(x1 * sx, by * sy, halfw * sx, 11 * sy,
+                     frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color),  -1, 0,0,1,1);
+        fe_draw_quad(x2 * sx, by * sy, halfw * sx, 11 * sy,
+                     frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color2), -1, 0,0,1,1);
+        float fx = s_paint_target ? x2 : x1;
+        td6_panel_frame(fx * sx, by * sy, halfw * sx, 11 * sy, 1.5f);
     }
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
@@ -2064,9 +2119,61 @@ int s_button_count;
 
 
 
+/* [SECONDARY PAINT 2026-06-29] Draw a (sub-UV) region of a surface into a dest
+ * rect (screen px). Same blend setup as fe_draw_surface_rect, but exposes UVs so
+ * the paint overlay can be region-split for the pattern preview. */
+static void fe_draw_surface_rect_uv(int handle, float x, float y, float w, float h,
+                                    uint32_t color, float u0, float v0, float u1, float v1) {
+    int slot = handle - 1;
+    if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    if (g_backend.context && g_backend.blend_states[BLEND_SRCALPHA_INVSRC]) {
+        ID3D11DeviceContext_OMSetBlendState(g_backend.context,
+            g_backend.blend_states[BLEND_SRCALPHA_INVSRC], NULL, 0xFFFFFFFF);
+        g_backend.state.current_blend_idx = BLEND_SRCALPHA_INVSRC;
+    }
+    Backend_UpdateFogCB();
+    fe_draw_quad(x, y, w, h, color, s_surfaces[slot].tex_page, u0, v0, u1, v1);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* [SECONDARY PAINT 2026-06-29] Draw the TD6 body overlay surface into [dx,dy,dw,dh]
+ * (screen px) split by the current PATTERN between the MAIN and SECONDARY colours.
+ * The split is in the overlay's own image space (the carpicpaint 3/4 photo, where
+ * top=roof, centre=stripe, left=front read cleanly). Mirrors the in-race texel
+ * bake in td5_asset_load_vehicle_skin_painted so menu and race agree. */
+static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float dw, float dh) {
+    uint32_t c1 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color);
+    uint32_t c2 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color2);
+    switch (g_td5.ini.td6_paint_pattern) {
+        case TD6_PAT_TWOTONE: {
+            float vs = TD6_PAT_TWOTONE_V;
+            fe_draw_surface_rect_uv(handle, dx, dy,        dw, dh*vs,     c1, 0,0,  1,vs);
+            fe_draw_surface_rect_uv(handle, dx, dy+dh*vs,  dw, dh*(1-vs), c2, 0,vs, 1,1);
+            break;
+        }
+        case TD6_PAT_STRIPES: {
+            float a = TD6_PAT_STRIPE_LO, b = TD6_PAT_STRIPE_HI;
+            fe_draw_surface_rect_uv(handle, dx,        dy, dw*a,     dh, c1, 0,0, a,1);
+            fe_draw_surface_rect_uv(handle, dx+dw*a,   dy, dw*(b-a), dh, c2, a,0, b,1);
+            fe_draw_surface_rect_uv(handle, dx+dw*b,   dy, dw*(1-b), dh, c1, b,0, 1,1);
+            break;
+        }
+        case TD6_PAT_SPLIT: {
+            float us = TD6_PAT_SPLIT_U;
+            fe_draw_surface_rect_uv(handle, dx,        dy, dw*us,     dh, c1, 0,0,  us,1);
+            fe_draw_surface_rect_uv(handle, dx+dw*us,  dy, dw*(1-us), dh, c2, us,0, 1,1);
+            break;
+        }
+        default: /* SOLID */
+            fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c1, 0,0,1,1);
+            break;
+    }
+}
+
 /* Draw the TD6 body-only paint overlay for actual_car at preview x (canvas px),
- * MODULATEd by the selected paint colour. Lazily (re)loads the overlay surface
- * per car. No-op for TD5 cars or if there's no overlay surface. */
+ * split between the MAIN + SECONDARY colours per the chosen pattern. Lazily
+ * (re)loads the overlay surface per car. No-op for TD5 cars / no overlay. */
 static void frontend_draw_car_paint_overlay(int actual_car, float x, float sx, float sy) {
     if (!frontend_car_paintable(actual_car)) return;
     if (s_paint_overlay_car != actual_car) {
@@ -2075,9 +2182,8 @@ static void frontend_draw_car_paint_overlay(int actual_car, float x, float sx, f
         s_paint_overlay_car = actual_car;
     }
     if (s_paint_overlay_surface > 0)
-        fe_draw_surface_rect(s_paint_overlay_surface, x * sx, 124.0f * sy,
-                             408.0f * sx, 280.0f * sy,
-                             frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color));
+        fe_draw_paint_overlay_regions(s_paint_overlay_surface, x * sx, 124.0f * sy,
+                                      408.0f * sx, 280.0f * sy);
 }
 
 static int s_cursor_visible;
@@ -8354,9 +8460,8 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
             if (show_paint && slide_surf > 0 &&
                 s_paint_overlay_surface > 0 &&
                 frontend_car_paintable(s_paint_overlay_car))
-                fe_draw_surface_rect(s_paint_overlay_surface, x * sx, 124.0f * sy,
-                                     408.0f * sx, 280.0f * sy,
-                                     frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color));
+                fe_draw_paint_overlay_regions(s_paint_overlay_surface, x * sx, 124.0f * sy,
+                                              408.0f * sx, 280.0f * sy);
         } else if (s_inner_state == 14 && s_car_preview_surface > 0) {
             /* New car slides in from right (state 14, ~833ms @30fps):
              * formula @ 0x0040DF4A: x = canvasW + counter*(-0x40) + 0x4A8
@@ -8382,9 +8487,8 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
                      * animation"). The new car's overlay is loaded on the slide-IN
                      * (state 14, the "second animation"). */
                     if (s_paint_overlay_surface > 0 && frontend_car_paintable(s_paint_overlay_car))
-                        fe_draw_surface_rect(s_paint_overlay_surface, 232.0f * sx, 124.0f * sy,
-                                             408.0f * sx, 280.0f * sy,
-                                             frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color));
+                        fe_draw_paint_overlay_regions(s_paint_overlay_surface, 232.0f * sx, 124.0f * sy,
+                                                      408.0f * sx, 280.0f * sy);
                 } else {
                     frontend_draw_car_paint_overlay(actual_car, 232.0f, sx, sy);
                 }
