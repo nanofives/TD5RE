@@ -21,6 +21,7 @@
  */
 
 #include "td5_sound.h"
+#include "td5_music.h"   /* pluggable music-backend seam (replaces direct td5_plat_cd_*) */
 #include "td5_platform.h"
 #include "td5_asset.h"
 #include "td5_game.h"  /* td5_game_get_player_slot, is_replay_active, etc. */
@@ -421,18 +422,23 @@ int td5_sound_init(void)
      * or just driving straight in) mixed every SFX at 40% through the wrong part
      * of the volume curve, which made the whole mix sound weak/flat. */
     td5_plat_audio_set_master_volume(g_td5.ini.sfx_volume);
+    /* Install the pluggable music seam (default backend = legacy CD path, so
+     * no behavior change until a third-party backend is registered). */
+    td5_music_init();
     TD5_LOG_I(LOG_TAG, "audio subsystem initialized (sfx master=%d)", g_td5.ini.sfx_volume);
     return 1;
 }
 
 void td5_sound_shutdown(void)
 {
+    td5_music_shutdown();
     td5_plat_audio_shutdown();
 }
 
 void td5_sound_tick(void)
 {
     td5_plat_audio_stream_refresh();
+    td5_music_tick();   /* pump the active music backend (no-op for the default) */
 
     /* Per-frame audio update is driven by td5_sound_update_audio_mix(),
      * called explicitly by the race frame loop after rendering. */
@@ -461,7 +467,7 @@ int td5_sound_init_race_resources(void)
      * next pause correctly re-applies the mute. */
     s_sound_paused = 0;
     td5_plat_audio_set_muted(0);
-    td5_plat_cd_set_volume(g_td5.ini.music_volume);
+    td5_music_set_volume(g_td5.ini.music_volume);
 
     memset(s_engine_state, 0, sizeof(s_engine_state));
     memset(s_traffic_engine_state, 0, sizeof(s_traffic_engine_state));
@@ -2017,26 +2023,31 @@ void td5_sound_play_frontend_sfx(int sfx_id)
 }
 
 /* ========================================================================
- * CD Audio Passthrough
+ * Music (CD-audio compatible) -- routed through the pluggable music seam.
+ *
+ * These keep their historic td5_sound_cd_* / td5_sound_set_music_volume names
+ * and signatures so every existing caller (race start/stop in td5_game.c, the
+ * frontend jukebox + Options screen) is unchanged, but they now forward to
+ * td5_music_*, which dispatches to the active backend. With no third-party
+ * backend registered the default backend forwards 1:1 to td5_plat_cd_*, so
+ * behavior is identical to before this seam existed.
  * ======================================================================== */
 
 void td5_sound_cd_play(int track) {
-    TD5_LOG_I(LOG_TAG, "CD play track=%d", track);
-    td5_plat_cd_play(track);
+    td5_music_play(track);
 }
 
 void td5_sound_cd_stop(void) {
-    TD5_LOG_I(LOG_TAG, "CD stop");
-    td5_plat_cd_stop();
+    td5_music_stop();
 }
-void td5_sound_cd_set_volume(int v) { td5_plat_cd_set_volume(v); }
+void td5_sound_cd_set_volume(int v) { td5_music_set_volume(v); }
 
 /* ========================================================================
  * Master Volume
  * ======================================================================== */
 
 void td5_sound_set_sfx_volume(int v) { td5_plat_audio_set_master_volume(v); }
-void td5_sound_set_music_volume(int v) { td5_plat_cd_set_volume(v); }
+void td5_sound_set_music_volume(int v) { td5_music_set_volume(v); }
 
 /* ========================================================================
  * Internal Helpers
@@ -2324,12 +2335,12 @@ void td5_sound_set_paused(int paused)
 
     if (paused) {
         td5_plat_audio_set_muted(1);         /* all per-voice SFX -> silent */
-        td5_plat_cd_set_volume(0);           /* CD/MCI music -> silent (kept) */
-        TD5_LOG_I(LOG_TAG, "pause: all audio SUSPENDED (SFX muted, music vol 0)");
+        td5_music_set_paused(1);             /* music -> ducked (backend pauses or vol 0) */
+        TD5_LOG_I(LOG_TAG, "pause: all audio SUSPENDED (SFX muted, music ducked)");
     } else {
         td5_plat_audio_set_muted(0);         /* restore SFX */
-        td5_plat_cd_set_volume(g_td5.ini.music_volume);  /* restore music vol */
-        TD5_LOG_I(LOG_TAG, "pause: audio RESUMED (SFX unmuted, music vol=%d)",
+        td5_music_set_paused(0);             /* music -> resumed (restores last volume) */
+        TD5_LOG_I(LOG_TAG, "pause: audio RESUMED (SFX unmuted, music restored vol=%d)",
                   g_td5.ini.music_volume);
     }
 }

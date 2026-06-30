@@ -59,6 +59,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  generic placeholders on tracks you haven't raced yet." },
     { CL_ITEM,    "  Enable CelebrityNamesAPI=1 in td5re.ini to fetch fresh" },
     { CL_ITEM,    "  names from the internet each launch." },
+    { CL_ITEM,    "Music system: groundwork to plug in custom or" },
+    { CL_ITEM,    "  third-party song sources. All in-game music now" },
+    { CL_ITEM,    "  flows through one swappable backend (no songs yet;" },
+    { CL_ITEM,    "  the default keeps the original CD behavior)." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },

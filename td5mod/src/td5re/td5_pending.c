@@ -48,6 +48,7 @@ static const char *const k_seed[] = {
     "MP profile: typed-but-unsaved NEW name auto-saves when the race starts",
     "Celebrity leaderboard: unraced tracks show celeb names (not Frank/Ben)",
     "Celebrity leaderboard: CelebrityNamesAPI=1 → fetches from randomuser.me",
+    "Music seam wired: no audio regression (jukebox/race/pause)",
     "Traffic: visible ~60% further on open tracks (no short-range pop-out)",
     "Damage Bar VISIBLE for every split-screen player (was invisible before)",
     "Damage Bar OFF (Game Options): no top bar, no wreck-out; dents stay",
