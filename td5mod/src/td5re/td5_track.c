@@ -1540,17 +1540,35 @@ static int laneassist_avoid_slow(void)
  * dirt/gravel/verge): for the windowed mode `sub` is snapped to the nearest paved
  * lane first, and in both modes slow lanes are dropped from the average. Returns
  * 1 + fills ox/oz (24.8 FP world XZ), 0 if no lane sampled (e.g. a junction span). */
-static int laneassist_band_center(int span, int sub, int band, int *ox, int *oz)
+static int laneassist_band_center(int span, int sub, int band,
+                                  int fork_thresh, int fork_side, int *ox, int *oz)
 {
     int lc = td5_track_span_lane_count_at(span);
     int lo, hi, l, n = 0;
     int avoid = laneassist_avoid_slow();
+    int forked = 0;
     int64_t sx = 0, sz = 0;
     if (lc < 1) lc = 1;
     if (sub < 0) sub = 0;
     if (sub > lc - 1) sub = lc - 1;
 
-    if (band <= 0) {
+    /* [FORK DIVERGENCE 2026-06-29] When a fork lies ahead in the look-ahead AND
+     * this span is already WIDENED for it (more lanes than the post-fork main road,
+     * lc > fork_thresh = next_lanes), aim ONLY at the lanes of the branch the car is
+     * committed to — the SAME partition the track walker uses: lanes [0,next_lanes)
+     * feed the main road, [next_lanes,lc) feed the branch [CONFIRMED @ 0x004443e1 /
+     * 0x004443f6]. Without this, band<=0 averages the FULL widened road and the aim
+     * point lands on the central divider between the two branches (the bug). A
+     * non-widened span (lc <= fork_thresh) has no divider, so it is left untouched
+     * and behaves exactly as before. fork_thresh < 0 disables this entirely. */
+    if (fork_thresh >= 0 && lc > fork_thresh) {
+        if (fork_side != 0) { lo = fork_thresh; hi = lc - 1; }       /* branch side */
+        else                { lo = 0;           hi = fork_thresh - 1; } /* main side */
+        if (lo < 0)        lo = 0;
+        if (hi > lc - 1)   hi = lc - 1;
+        if (hi < lo)       hi = lo;
+        forked = 1;
+    } else if (band <= 0) {
         /* Centre of ALL drivable lanes (whole paved road). */
         lo = 0;
         hi = lc - 1;
@@ -1573,9 +1591,10 @@ static int laneassist_band_center(int span, int sub, int band, int *ox, int *oz)
         if (td5_track_get_span_lane_world(span, l, &x, &y, &z)) { sx += x; sz += z; n++; }
     }
     if (n == 0) {
-        /* Everything was slow/excluded — fall back to the geometric centre lane. */
+        /* Everything was slow/excluded — fall back to the geometric centre lane
+         * (centre of the committed-fork window when diverging at a fork). */
         int x = 0, y = 0, z = 0;
-        int fb = (band <= 0) ? (lc / 2) : sub;
+        int fb = forked ? ((lo + hi) / 2) : ((band <= 0) ? (lc / 2) : sub);
         if (td5_track_get_span_lane_world(span, fb, &x, &y, &z)) {
             if (ox) *ox = x;
             if (oz) *oz = z;
@@ -1589,8 +1608,8 @@ static int laneassist_band_center(int span, int sub, int band, int *ox, int *oz)
 }
 
 int td5_track_laneassist_target(int from_span, int from_sub_lane,
-                                int lookahead, int fork_commit, int lane_band,
-                                int *out_x, int *out_z)
+                                int lookahead, int fork_commit, int fork_diverge,
+                                int lane_band, int *out_x, int *out_z)
 {
     /* A single forward span step never moves the lane centre more than ~1M world
      * units; a look-ahead that suddenly jumps far has crossed a route terminus
@@ -1605,6 +1624,11 @@ int td5_track_laneassist_target(int from_span, int from_sub_lane,
     int32_t seed_x = 0, seed_z = 0;
     int have_seed;
     int i;
+    /* Nearest upcoming forward-junction (fork) within the look-ahead, and the side
+     * the car commits to. fork_step = the blend step that samples the fork span
+     * (-1 = no fork ahead). fork_thresh = next_lanes (the lane index that divides
+     * the two branches); fork_side 0 = main road [0,thresh), 1 = branch [thresh,lc). */
+    int fork_step = -1, fork_thresh = -1, fork_side = 0;
 
     if (out_x) *out_x = 0;
     if (out_z) *out_z = 0;
@@ -1619,12 +1643,53 @@ int td5_track_laneassist_target(int from_span, int from_sub_lane,
     if (lane_band > 4) lane_band = 4;
 
     have_seed = laneassist_band_center(from_span, from_sub_lane, lane_band,
-                                       &seed_x, &seed_z);
+                                       -1, 0, &seed_x, &seed_z);
+
+    /* [FORK DIVERGENCE 2026-06-29] Scout the look-ahead for the nearest forward
+     * junction (span_type 8). Decide which branch the car takes with the SAME rule
+     * the track walker uses — sub_lane < next_lanes -> main road, else branch
+     * [CONFIRMED @ 0x004443e1] — using the lane CARRIED forward by the identical
+     * laneassist_step_forward walk, so the aim and the actual track resolution
+     * agree. The approach spans (up to and including the fork) then aim at that
+     * committed side, so the car diverges toward one branch a few spans before the
+     * split instead of holding the central divider. */
+    if (fork_commit && fork_diverge) {
+        int ssp = from_span, ssub = from_sub_lane, k;
+        for (k = 0; k <= lookahead; k++) {
+            if (ssp >= 0 && ssp < s_span_count &&
+                s_span_array[ssp].span_type == 8) {
+                int nidx = ssp + 1;
+                if (nidx >= 0 && nidx < s_span_count) {
+                    int nlanes = span_lane_count(&s_span_array[nidx]);
+                    fork_thresh = nlanes;
+                    fork_side   = (ssub < nlanes) ? 0 : 1;   /* main : branch */
+                    fork_step   = k;
+                    TD5_LOG_I(LOG_TAG,
+                        "laneassist_fork: from=%d ahead_step=%d fork_span=%d "
+                        "next_lanes=%d carried_sub=%d -> side=%s",
+                        from_span, k, ssp, nlanes, ssub,
+                        fork_side ? "BRANCH" : "MAIN");
+                }
+                break;   /* first fork only */
+            }
+            if (k == lookahead) break;
+            {
+                int nsp = ssp, nsub = ssub;
+                if (!laneassist_step_forward(ssp, ssub, fork_commit, &nsp, &nsub))
+                    break;
+                ssp = nsp; ssub = nsub;
+            }
+        }
+    }
 
     for (i = 1; i <= lookahead; i++) {
         int nx_span = span, nx_sub = sub;
         int lx = 0, lz = 0;
         int w;
+        /* Bias the band to the committed fork side on the approach spans and the
+         * fork span itself (step i <= fork_step); the post-fork corridor spans are
+         * already on the chosen branch, so leave them at the whole-road centre. */
+        int ft = (fork_step >= 0 && i <= fork_step) ? fork_thresh : -1;
         if (!laneassist_step_forward(span, sub, fork_commit, &nx_span, &nx_sub))
             break;
         span = nx_span;
@@ -1632,7 +1697,7 @@ int td5_track_laneassist_target(int from_span, int from_sub_lane,
         /* Junction pieces (type 9/10) have no centre quad; skip the sample but
          * keep walking so the look-ahead spans the junction. Target is the centre
          * of a `lane_band`-wide group of lanes (more forgiving than one lane). */
-        if (!laneassist_band_center(span, sub, lane_band, &lx, &lz))
+        if (!laneassist_band_center(span, sub, lane_band, ft, fork_side, &lx, &lz))
             continue;
         /* Terminus / bad-link guard: if a sample is implausibly far from the seed
          * span, the look-ahead has wrapped past the finish — stop here. */
@@ -1671,7 +1736,7 @@ int td5_track_laneassist_target(int from_span, int from_sub_lane,
  * which is why this carries the lane.) Inert unless explicitly invoked (env-gated
  * by the caller in td5_laneassist.c). Logs to race.log via the "track" tag. */
 void td5_track_laneassist_sweep_diag(int start, int count, int lookahead,
-                                     int fork_commit, int lane_band)
+                                     int fork_commit, int fork_diverge, int lane_band)
 {
     int prev_ok = 0;
     int32_t prev_x = 0, prev_z = 0;
@@ -1708,7 +1773,7 @@ void td5_track_laneassist_sweep_diag(int start, int count, int lookahead,
         type = (int)sp->span_type;
         lc   = span_lane_count(sp);
 
-        if (td5_track_laneassist_target(span, sub, lookahead, fork_commit, lane_band, &tx, &tz)) {
+        if (td5_track_laneassist_target(span, sub, lookahead, fork_commit, fork_diverge, lane_band, &tx, &tz)) {
             if (prev_ok) {
                 int32_t dx = tx - prev_x, dz = tz - prev_z;
                 TD5_LOG_I(LOG_TAG,

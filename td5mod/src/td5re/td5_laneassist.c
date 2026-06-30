@@ -62,6 +62,9 @@ static int s_lookahead     = 6;    /* TD5RE_LANEASSIST_LOOKAHEAD_SPANS (1..8)   
 static int s_max_yaw       = 400;  /* TD5RE_LANEASSIST_MAX_YAW (near-centre cap;
                                     * rises to LA_FAR_MAX with distance)         */
 static int s_fork_commit   = 1;    /* TD5RE_LANEASSIST_FORK_COMMIT (0/1)         */
+static int s_fork_diverge  = 1;    /* TD5RE_LANEASSIST_FORK_DIVERGE (0/1): aim at
+                                    * the committed branch's lanes on the approach
+                                    * to a fork (diverge early, not at the divider) */
 static int s_lane_band     = 0;    /* TD5RE_LANEASSIST_LANE_BAND: 0 = centre of ALL
                                     * drivable lanes (whole paved road, default);
                                     * 1 = single lane; 2 = centre of two; etc.     */
@@ -151,6 +154,7 @@ static void laneassist_init_once(void)
     s_lookahead     = env_int("TD5RE_LANEASSIST_LOOKAHEAD_SPANS",  6, 1, 8);
     s_max_yaw       = env_int("TD5RE_LANEASSIST_MAX_YAW",        400, 0, 800);
     s_fork_commit   = env_int("TD5RE_LANEASSIST_FORK_COMMIT",      1, 0, 1);
+    s_fork_diverge  = env_int("TD5RE_LANEASSIST_FORK_DIVERGE",     1, 0, 1);
     s_lane_band     = env_int("TD5RE_LANEASSIST_LANE_BAND",        0, 0, 4);
 
     for (i = 0; i < TD5_MAX_HUMAN_PLAYERS; i++) {
@@ -162,8 +166,9 @@ static void laneassist_init_once(void)
         s_air[i]       = 0;
     }
     TD5_LOG_I(LOG_TAG,
-        "init: master=%d strength=%d%% lookahead=%d max_yaw=%d fork_commit=%d lane_band=%d",
-        s_master_enable, s_strength_pct, s_lookahead, s_max_yaw, s_fork_commit, s_lane_band);
+        "init: master=%d strength=%d%% lookahead=%d max_yaw=%d fork_commit=%d fork_diverge=%d lane_band=%d",
+        s_master_enable, s_strength_pct, s_lookahead, s_max_yaw, s_fork_commit,
+        s_fork_diverge, s_lane_band);
 }
 
 void td5_laneassist_reset(void)
@@ -263,8 +268,8 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
                 const char *comma = strchr(e, ',');
                 int start = atoi(e);
                 int count = comma ? atoi(comma + 1) : 64;
-                td5_track_laneassist_sweep_diag(start, count,
-                                                s_lookahead, s_fork_commit, s_lane_band);
+                td5_track_laneassist_sweep_diag(start, count, s_lookahead,
+                                                s_fork_commit, s_fork_diverge, s_lane_band);
             }
         }
     }
@@ -307,8 +312,8 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
     /* Build the continuous look-ahead lane-centre target (the real work). */
     if (!td5_track_laneassist_target((int)actor->track_span_raw,
                                      (int)actor->track_sub_lane_index,
-                                     s_lookahead, s_fork_commit, s_lane_band,
-                                     &raw_x, &raw_z)) {
+                                     s_lookahead, s_fork_commit, s_fork_diverge,
+                                     s_lane_band, &raw_x, &raw_z)) {
         s_have[player] = 0;
         s_active[player] = 0;
         return;

@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Lane Assist at a fork: picks one branch a few spans early, not the divider",
     "Reset car (split-screen): resets in place, no teleport-to-start/wall",
     "Reset car: fully repairs (health+dents); un-sticks a knocked-out car",
     "Tutorial overlay now shows at the START of every race (was once-ever)",
