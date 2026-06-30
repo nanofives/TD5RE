@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Traffic now stays visible much further down the road" },
+    { CL_ITEM,    "  instead of popping out of view at short range. Cars" },
+    { CL_ITEM,    "  (and rivals) are drawn ~60% further on open tracks." },
     { CL_ITEM,    "New: DAMAGE BAR on/off in Game Options. Turn it OFF" },
     { CL_ITEM,    "  to hide the top-of-screen damage bar and stop your" },
     { CL_ITEM,    "  car being wrecked out of the race when it fills." },

@@ -3231,6 +3231,32 @@ static void td5_render_fallback_strip_ribbon(int center_span, int window,
                                              int ring, int total_spans,
                                              int is_circuit);
 
+/* [traffic-view-dist 2026-06-29] Multiplier on how far traffic + AI cars (and the
+ * road geometry under them) stay drawn. The faithful actor render-cull window is
+ * ~88 spans at the default view distance (0.65) / 128 at max — much SHORTER than
+ * the terrain horizon (frustum far-cull), so cars visibly pop in/out far closer
+ * than the visible road ("traffic disappears too often / pops out at short range",
+ * reported in EVERY race, single-player included). This widens the actor cull AND
+ * the track display-list forward/back walk by the SAME factor so traffic can never
+ * float on unrendered road. Applied to faithful TD5 tracks only — the dense TD6
+ * city tracks keep their perf-capped distance (td5_render.c view-distance cap).
+ * Default 1.6x; TD5RE_TRAFFIC_VIEW_DIST overrides (clamped [1.0, 2.5]). The
+ * matching despawn keep-distance (trf_dyn_front_keep_floor in td5_ai.c) reads the
+ * SAME env var so cars always fade out beyond the render window, never on-screen. */
+static float td5_render_traffic_view_mult(void)
+{
+    static float m = -1.0f;
+    if (m < 0.0f) {
+        const char *e = getenv("TD5RE_TRAFFIC_VIEW_DIST");
+        m = (e && e[0]) ? (float)atof(e) : 1.6f;
+        if (m < 1.0f) m = 1.0f;     /* never shrink below the faithful window */
+        if (m > 2.5f) m = 2.5f;
+        TD5_LOG_I(LOG_TAG, "traffic_view_dist knob: TD5RE_TRAFFIC_VIEW_DIST x%.2f "
+                  "(traffic/car render distance scaled %d%%)", m, (int)(m * 100.0f + 0.5f));
+    }
+    return m;
+}
+
 void td5_render_actors_for_view(int view_index)
 {
     /*
@@ -3368,6 +3394,14 @@ void td5_render_actors_for_view(int view_index)
     int actor_cull_window = (int)(frac_scaled * (float)cull_max);
     if (actor_cull_window > cull_max) actor_cull_window = cull_max;
     actor_cull_window *= 2;
+    /* [traffic-view-dist 2026-06-29] Widen the traffic/car visibility window on
+     * faithful TD5 tracks so cars stop popping out at short range. The track walk
+     * below is extended by the same factor (kept coupled => no floating). TD6
+     * city tracks keep their perf-capped window unchanged. */
+    if (g_active_td6_level <= 0) {
+        float vmult = td5_render_traffic_view_mult();
+        actor_cull_window = (int)((float)actor_cull_window * vmult + 0.5f);
+    }
     if (actor_cull_window < 1) actor_cull_window = 1;
 
     /* far_cull is now slider-driven inside td5_render_configure_projection
@@ -3481,11 +3515,20 @@ void td5_render_actors_for_view(int view_index)
          * for the TRACK display-list walk, which that fix did not touch. */
         int cull_window = eff_spans * 2;
 
+        /* [traffic-view-dist 2026-06-29] Faithful TD5 tracks extend the road walk
+         * by the SAME factor as the actor cull above, so traffic stays drawn over
+         * real road instead of floating on bare terrain. `cull_window` itself is
+         * left unscaled — the TD6 proportional map below reads it, so TD6 city
+         * tracks keep their perf-capped walk (and unchanged actor cull). */
+        int walk_window = cull_window;
+        if (g_active_td6_level <= 0)
+            walk_window = (int)((float)cull_window * td5_render_traffic_view_mult() + 0.5f);
+
         /* start_entry = (center - cullWindow) >> 2  [CONFIRMED @ 0x42BBC9-0x42BBD8:
          * SUB EAX,EDX; CDQ; AND EDX,3; ADD; SAR EDI,2 — the standard signed
          * divide-by-4 idiom `(x + (x>>31 & 3)) >> 2`]. C's `>>` on signed
          * negatives is arithmetic on all targets we ship (gcc/i686, MSVC/x86). */
-        int start_entry = (eff_player - cull_window) >> 2;
+        int start_entry = (eff_player - walk_window) >> 2;
 
         /* Drag pulls the cull-start back 0x19 entries (= 100 spans) so the
          * start/staging geometry behind the line stays visible at spawn
@@ -3497,7 +3540,9 @@ void td5_render_actors_for_view(int view_index)
          * `((back+fwd)>>2)+1` ≈ 33 entries rendered only ~half the original's
          * depth [CONFIRMED count = effectiveSpans @ 0x42BBE9 `MOV EBP,[0x4aae44]`,
          * loop 0x42BC11-0x42BC3C]. */
-        int n_entries   = eff_spans;
+        int n_entries   = (g_active_td6_level <= 0)
+                          ? (int)((float)eff_spans * td5_render_traffic_view_mult() + 0.5f)
+                          : eff_spans;
 
         /* TD6 track migration: the windowed `entry = span>>2` walk assumes TD5's
          * ~4-spans-per-entry MODELS.DAT layout. TD6 levels have a DIFFERENT and

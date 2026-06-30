@@ -8811,10 +8811,25 @@ static int trf_dyn_front_keep_floor(void)
     static int s = -1;
     if (s < 0) {
         const char *e = getenv("TD5RE_TRAFFIC_FRONT_KEEP");
-        s = (e && e[0]) ? atoi(e) : 150;
+        if (e && e[0]) {
+            s = atoi(e);            /* explicit override always wins */
+        } else {
+            /* [traffic-view-dist 2026-06-29] Default tracks the extended actor
+             * render cull (td5_render reads TD5RE_TRAFFIC_VIEW_DIST, default 1.6x)
+             * so a car always fades out BEYOND the visible window, never on-screen.
+             * Faithful single-screen max render = 128 spans * view-dist mult; keep
+             * +24 spans of margin above that. Was a fixed 150. Reading the same env
+             * var here (not a cross-module call) keeps the two in lockstep. */
+            const char *ev = getenv("TD5RE_TRAFFIC_VIEW_DIST");
+            float vm = (ev && ev[0]) ? (float)atof(ev) : 1.6f;
+            if (vm < 1.0f) vm = 1.0f;
+            if (vm > 2.5f) vm = 2.5f;
+            s = (int)(128.0f * vm + 0.5f) + 24;
+            if (s < 150) s = 150;   /* never below the prior faithful floor */
+        }
         if (s < 0) s = 0;
-        TD5_LOG_I(LOG_TAG, "traffic_front_keep floor: TD5RE_TRAFFIC_FRONT_KEEP=%d "
-                  "spans (cars stay until this far ahead of every human)", s);
+        TD5_LOG_I(LOG_TAG, "traffic_front_keep floor: %d spans "
+                  "(cars stay until this far ahead of every human)", s);
     }
     return s;
 }

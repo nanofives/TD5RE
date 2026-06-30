@@ -30,6 +30,7 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Traffic: visible ~60% further on open tracks (no short-range pop-out)",
     "Damage Bar OFF (Game Options): no top bar, no wreck-out; dents stay",
     "Damage Bar toggle is global: every split-screen player gets it or none",
     "Cops: accel rubber-band out-drags a faster car on straights (catch up)",
