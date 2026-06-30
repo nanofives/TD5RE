@@ -1075,6 +1075,47 @@ static void Backend_ReleaseRenderTargets(void)
 }
 
 /* ========================================================================
+ * Backend_GetDesktopRefreshHz
+ *
+ * Returns the current desktop refresh rate (whole Hz) of the monitor that
+ * `hwnd` lives on. The original game specified NO refresh rate — display mode
+ * came from M2DX enumerating the driver's mode list and selecting by index
+ * (BuildEnumeratedDisplayModeList @ 0x0040b100, DXD3D::FullScreen @ 0x0042aa10),
+ * so it took whatever refresh the driver advertised for 640x480 — i.e. the
+ * panel's native rate. Hardcoding 60 in the swap-chain desc is what pinned
+ * exclusive fullscreen (Alt+Enter / display-options toggle) to 60 Hz on a
+ * 120 Hz display. Falls back to the primary monitor, then to 60 if GDI can't
+ * report a usable value. dmDisplayFrequency of 0 or 1 is the documented
+ * "hardware default" sentinel and is treated as unknown.
+ * ======================================================================== */
+static int Backend_GetDesktopRefreshHz(HWND hwnd)
+{
+    DEVMODEA dm;
+    int hz = 0;
+
+    if (hwnd) {
+        HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFOEXA mi;
+        ZeroMemory(&mi, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        ZeroMemory(&dm, sizeof(dm));
+        dm.dmSize = sizeof(dm);
+        if (mon && GetMonitorInfoA(mon, (LPMONITORINFO)&mi) &&
+            EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) {
+            hz = (int)dm.dmDisplayFrequency;
+        }
+    }
+    if (hz <= 1) {
+        ZeroMemory(&dm, sizeof(dm));
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm))
+            hz = (int)dm.dmDisplayFrequency;
+    }
+    if (hz <= 1) hz = 60;
+    return hz;
+}
+
+/* ========================================================================
  * Backend_CreateDevice
  * ======================================================================== */
 
@@ -1153,8 +1194,19 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
         scd.BufferDesc.Width  = (UINT)rt_width;
         scd.BufferDesc.Height = (UINT)rt_height;
         scd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        scd.BufferDesc.RefreshRate.Numerator   = 60;
-        scd.BufferDesc.RefreshRate.Denominator = 1;
+        /* Advertise the panel's native refresh, not a hardcoded 60. DXGI's
+         * automatic Alt+Enter handling (active — we never set
+         * DXGI_MWA_NO_ALT_ENTER) drives the exclusive-fullscreen transition off
+         * this stored BufferDesc, so on a 120 Hz display 60/1 here is exactly
+         * what made Alt+Enter drop to 60 Hz. Windowed mode ignores RefreshRate. */
+        {
+            int refresh_hz = Backend_GetDesktopRefreshHz(device_hwnd);
+            scd.BufferDesc.RefreshRate.Numerator   = (UINT)refresh_hz;
+            scd.BufferDesc.RefreshRate.Denominator = 1;
+            WRAPPER_LOG("Backend_CreateDevice: desktop refresh = %d Hz "
+                        "(swap-chain BufferDesc.RefreshRate=%d/1)",
+                        refresh_hz, refresh_hz);
+        }
         scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         scd.OutputWindow = device_hwnd;
         scd.SampleDesc.Count = 1;
@@ -1397,6 +1449,30 @@ int Backend_SetExclusiveFullscreen(int enable)
     IDXGISwapChain_GetFullscreenState(g_backend.swap_chain, &cur, NULL);
     if ((enable != 0) == (cur != FALSE)) {
         return 1; /* already in requested state */
+    }
+
+    /* Going exclusive fullscreen (display-options toggle path): pre-set the
+     * target mode to the panel's native refresh so DXGI's FindClosestMatchingMode
+     * doesn't default the transition to 60 Hz on a high-refresh display. The
+     * automatic Alt+Enter path uses the creation-time BufferDesc instead (set in
+     * Backend_CreateDevice); this covers the menu toggle. */
+    if (enable) {
+        HWND mon_hwnd = s_display_hwnd ? s_display_hwnd : g_backend.hwnd;
+        int refresh_hz = Backend_GetDesktopRefreshHz(mon_hwnd);
+        DXGI_MODE_DESC target;
+        ZeroMemory(&target, sizeof(target));
+        target.Width  = (UINT)(g_backend.target_width  > 0 ? g_backend.target_width  : g_backend.width);
+        target.Height = (UINT)(g_backend.target_height > 0 ? g_backend.target_height : g_backend.height);
+        target.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        target.RefreshRate.Numerator   = (UINT)refresh_hz;
+        target.RefreshRate.Denominator = 1;
+        hr = IDXGISwapChain_ResizeTarget(g_backend.swap_chain, &target);
+        if (FAILED(hr))
+            WRAPPER_LOG("Backend_SetExclusiveFullscreen: ResizeTarget(%ux%u@%dHz) FAILED hr=0x%08lX",
+                        target.Width, target.Height, refresh_hz, hr);
+        else
+            WRAPPER_LOG("Backend_SetExclusiveFullscreen: target mode %ux%u@%dHz",
+                        target.Width, target.Height, refresh_hz);
     }
 
     hr = IDXGISwapChain_SetFullscreenState(g_backend.swap_chain,
