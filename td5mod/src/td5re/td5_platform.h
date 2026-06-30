@@ -523,6 +523,46 @@ void td5_plat_cd_stop(void);
 /** Set CD audio volume (0-100). */
 void td5_plat_cd_set_volume(int volume);
 
+/* ========================================================================
+ * Radio PCM streaming sink (push-based)
+ *
+ * Backs the internet-radio music backend (td5_radio.c). A worker thread decodes
+ * a network stream and PUSHES PCM via td5_plat_radio_submit(); the per-frame
+ * pump (main thread) feeds a looping DirectSound buffer from a thread-safe ring
+ * buffer. All DirectSound calls stay on the main thread; the worker only
+ * touches the ring (under a critical section). Format is published once by the
+ * worker via td5_plat_radio_begin(); the DSound buffer is created lazily in the
+ * pump. Safe no-ops if DirectSound is unavailable.
+ * ======================================================================== */
+
+/** Open the sink (main thread): init the lock + zero state. */
+void td5_plat_radio_open(void);
+
+/** Publish the decoded stream format (worker thread). Allocates the ring buffer
+ *  and resets it. Returns 1 on success, 0 if params are invalid. */
+int  td5_plat_radio_begin(int sample_rate, int channels, int bits_per_sample);
+
+/** Enqueue decoded PCM (worker thread). Returns the number of bytes accepted
+ *  (may be < count when the ring is full -- caller should retry the remainder). */
+int  td5_plat_radio_submit(const void *pcm, int count);
+
+/** Per-frame pump (main thread): create the DSound buffer once the format is
+ *  known, then refill the half just played from the ring (silence on underrun). */
+void td5_plat_radio_pump(void);
+
+/** Start (1) / stop (0) DSound output (main thread). Starting flushes the ring
+ *  so playback resumes at the live edge. */
+void td5_plat_radio_set_playing(int on);
+
+/** Set radio output volume 0-100 (main thread). */
+void td5_plat_radio_set_volume(int volume);
+
+/** Bytes currently buffered in the ring (worker throttle helper). */
+int  td5_plat_radio_pending_bytes(void);
+
+/** Close the sink (main thread): stop + release the buffer, free the ring. */
+void td5_plat_radio_close(void);
+
 /** Enumerate available fullscreen display modes. */
 int td5_plat_enum_display_modes(TD5_DisplayMode *modes, int max_count);
 

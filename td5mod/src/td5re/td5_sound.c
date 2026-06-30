@@ -22,6 +22,7 @@
 
 #include "td5_sound.h"
 #include "td5_music.h"   /* pluggable music-backend seam (replaces direct td5_plat_cd_*) */
+#include "td5_radio.h"   /* internet-radio music backend */
 #include "td5_platform.h"
 #include "td5_asset.h"
 #include "td5_game.h"  /* td5_game_get_player_slot, is_replay_active, etc. */
@@ -423,14 +424,25 @@ int td5_sound_init(void)
      * of the volume curve, which made the whole mix sound weak/flat. */
     td5_plat_audio_set_master_volume(g_td5.ini.sfx_volume);
     /* Install the pluggable music seam (default backend = legacy CD path, so
-     * no behavior change until a third-party backend is registered). */
+     * no behavior change until a backend is registered). */
     td5_music_init();
-    TD5_LOG_I(LOG_TAG, "audio subsystem initialized (sfx master=%d)", g_td5.ini.sfx_volume);
+    /* When enabled, the internet-radio backend becomes the active music source.
+     * It connects lazily on the first play(); a failed/absent network just
+     * leaves music silent (same as the CD path on a disc-less PC). If Media
+     * Foundation is unavailable, td5_radio_get_backend() returns NULL and the
+     * seam keeps the default CD backend. */
+    if (g_td5.ini.radio_enabled) {
+        td5_radio_init(g_td5.ini.radio_url);
+        td5_music_set_backend(td5_radio_get_backend());
+    }
+    TD5_LOG_I(LOG_TAG, "audio subsystem initialized (sfx master=%d, radio=%d)",
+              g_td5.ini.sfx_volume, g_td5.ini.radio_enabled);
     return 1;
 }
 
 void td5_sound_shutdown(void)
 {
+    td5_radio_shutdown();   /* stop the worker before the seam/sink go away */
     td5_music_shutdown();
     td5_plat_audio_shutdown();
 }

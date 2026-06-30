@@ -5281,6 +5281,276 @@ void td5_plat_cd_set_volume(int volume)
 }
 
 /* ========================================================================
+ * Radio PCM streaming sink (push-based) -- see td5_platform.h
+ *
+ * Worker thread (td5_radio.c) decodes a network stream and pushes PCM via
+ * td5_plat_radio_submit() into a thread-safe ring buffer; the main-thread pump
+ * feeds a looping DirectSound buffer from that ring. All DSound calls live on
+ * the main thread; the worker only touches the ring under s_radio.cs.
+ * ======================================================================== */
+
+typedef struct TD5_RadioSink {
+    LPDIRECTSOUNDBUFFER buffer;
+    WAVEFORMATEX        wfx;
+    DWORD               buffer_bytes;
+    DWORD               half_bytes;
+    DWORD               last_play_cursor;
+    int                 created;
+    int                 playing;
+    int                 want_volume;        /* 0..100 */
+
+    unsigned char      *ring;
+    DWORD               ring_cap;
+    DWORD               ring_head;           /* write offset (worker) */
+    DWORD               ring_tail;           /* read offset (main)    */
+    DWORD               ring_count;          /* bytes stored          */
+
+    CRITICAL_SECTION    cs;
+    int                 cs_init;
+    volatile LONG       fmt_ready;
+    int                 want_rate, want_ch, want_bits;
+} TD5_RadioSink;
+
+static TD5_RadioSink s_radio;
+
+/* Map 0..100 to a DirectSound hundredths-of-a-dB attenuation (perceptual). */
+static int radio_vol_to_dsound(int v)
+{
+    double db; long h;
+    if (v <= 0)   return DSBVOLUME_MIN;
+    if (v >= 100) return 0;                  /* DSBVOLUME_MAX == 0 */
+    db = 20.0 * log10((double)v / 100.0);
+    h  = (long)(db * 100.0);
+    if (h < DSBVOLUME_MIN) h = DSBVOLUME_MIN;
+    if (h > 0) h = 0;
+    return (int)h;
+}
+
+void td5_plat_radio_open(void)
+{
+    if (!s_radio.cs_init) {
+        InitializeCriticalSection(&s_radio.cs);
+        s_radio.cs_init = 1;
+    }
+    s_radio.want_volume = 80;
+    TD5_LOG_I(LOG_TAG, "radio sink opened");
+}
+
+int td5_plat_radio_begin(int sample_rate, int channels, int bits_per_sample)
+{
+    DWORD cap;
+    if (sample_rate <= 0 || channels <= 0 || bits_per_sample <= 0)
+        return 0;
+    if (!s_radio.cs_init) {                  /* defensive: open() should precede */
+        InitializeCriticalSection(&s_radio.cs);
+        s_radio.cs_init = 1;
+    }
+    cap = (DWORD)(sample_rate * channels * (bits_per_sample / 8)) * 4u; /* ~4 seconds */
+    EnterCriticalSection(&s_radio.cs);
+    s_radio.want_rate = sample_rate;
+    s_radio.want_ch   = channels;
+    s_radio.want_bits = bits_per_sample;
+    if (s_radio.ring && s_radio.ring_cap != cap) {
+        free(s_radio.ring); s_radio.ring = NULL;
+    }
+    if (!s_radio.ring) {
+        s_radio.ring = (unsigned char *)malloc(cap);
+        s_radio.ring_cap = s_radio.ring ? cap : 0;
+    }
+    s_radio.ring_head = s_radio.ring_tail = s_radio.ring_count = 0;
+    LeaveCriticalSection(&s_radio.cs);
+    if (!s_radio.ring) {
+        TD5_LOG_E(LOG_TAG, "radio: ring alloc failed (%u bytes)", (unsigned)cap);
+        return 0;
+    }
+    InterlockedExchange(&s_radio.fmt_ready, 1);
+    TD5_LOG_I(LOG_TAG, "radio format: %d Hz %d ch %d-bit (ring %u bytes)",
+              sample_rate, channels, bits_per_sample, (unsigned)cap);
+    return 1;
+}
+
+int td5_plat_radio_submit(const void *pcm, int count)
+{
+    DWORD space, take, first;
+    if (!pcm || count <= 0 || !s_radio.cs_init || !s_radio.ring)
+        return 0;
+    EnterCriticalSection(&s_radio.cs);
+    if (!s_radio.ring) { LeaveCriticalSection(&s_radio.cs); return 0; }
+    space = s_radio.ring_cap - s_radio.ring_count;
+    take  = ((DWORD)count < space) ? (DWORD)count : space;
+    first = s_radio.ring_cap - s_radio.ring_head;
+    if (first > take) first = take;
+    if (first)        memcpy(s_radio.ring + s_radio.ring_head, pcm, first);
+    if (take > first) memcpy(s_radio.ring, (const unsigned char *)pcm + first, take - first);
+    s_radio.ring_head  = (s_radio.ring_head + take) % s_radio.ring_cap;
+    s_radio.ring_count += take;
+    LeaveCriticalSection(&s_radio.cs);
+    return (int)take;
+}
+
+/* Copy `bytes` from the ring into dst, padding the tail with silence on
+ * underrun (PCM zero). Locks internally. */
+static void radio_ring_read(unsigned char *dst, DWORD bytes)
+{
+    DWORD avail, take, first;
+    EnterCriticalSection(&s_radio.cs);
+    avail = s_radio.ring_count;
+    take  = (avail < bytes) ? avail : bytes;
+    first = s_radio.ring_cap - s_radio.ring_tail;
+    if (first > take) first = take;
+    if (take) {
+        if (first)        memcpy(dst, s_radio.ring + s_radio.ring_tail, first);
+        if (take > first) memcpy(dst + first, s_radio.ring, take - first);
+        s_radio.ring_tail   = (s_radio.ring_tail + take) % s_radio.ring_cap;
+        s_radio.ring_count -= take;
+    }
+    LeaveCriticalSection(&s_radio.cs);
+    if (take < bytes)
+        memset(dst + take, 0, bytes - take);
+}
+
+static void radio_fill_half(int half)
+{
+    void *p1 = NULL, *p2 = NULL; DWORD s1 = 0, s2 = 0;
+    DWORD offset = (DWORD)half * s_radio.half_bytes;
+    HRESULT hr;
+    if (!s_radio.buffer) return;
+    hr = IDirectSoundBuffer_Lock(s_radio.buffer, offset, s_radio.half_bytes,
+                                 &p1, &s1, &p2, &s2, 0);
+    if (FAILED(hr)) return;
+    if (p1 && s1) radio_ring_read((unsigned char *)p1, s1);
+    if (p2 && s2) radio_ring_read((unsigned char *)p2, s2);
+    IDirectSoundBuffer_Unlock(s_radio.buffer, p1, s1, p2, s2);
+}
+
+static void radio_create_buffer(void)
+{
+    DSBUFFERDESC desc;
+    DWORD bps, align;
+    HRESULT hr;
+    if (s_radio.created || !s_dsound) return;
+
+    ZeroMemory(&s_radio.wfx, sizeof(s_radio.wfx));
+    s_radio.wfx.wFormatTag      = WAVE_FORMAT_PCM;
+    s_radio.wfx.nChannels       = (WORD)s_radio.want_ch;
+    s_radio.wfx.nSamplesPerSec  = (DWORD)s_radio.want_rate;
+    s_radio.wfx.wBitsPerSample  = (WORD)s_radio.want_bits;
+    s_radio.wfx.nBlockAlign     = (WORD)(s_radio.want_ch * (s_radio.want_bits / 8));
+    s_radio.wfx.nAvgBytesPerSec = s_radio.wfx.nSamplesPerSec * s_radio.wfx.nBlockAlign;
+
+    bps   = s_radio.wfx.nAvgBytesPerSec;     /* ~1 second */
+    align = s_radio.wfx.nBlockAlign ? s_radio.wfx.nBlockAlign : 4;
+    bps  -= (bps % (align * 2u));            /* keep both halves block-aligned */
+    if (bps < align * 2u) bps = align * 2u;
+    s_radio.buffer_bytes = bps;
+    s_radio.half_bytes   = bps / 2u;
+
+    ZeroMemory(&desc, sizeof(desc));
+    desc.dwSize        = sizeof(desc);
+    desc.dwFlags       = DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME;
+    desc.dwBufferBytes = s_radio.buffer_bytes;
+    desc.lpwfxFormat   = &s_radio.wfx;
+
+    hr = IDirectSound8_CreateSoundBuffer(s_dsound, &desc, &s_radio.buffer, NULL);
+    if (FAILED(hr) || !s_radio.buffer) {
+        TD5_LOG_E(LOG_TAG, "radio: CreateSoundBuffer failed hr=0x%08lX", (unsigned long)hr);
+        s_radio.buffer = NULL;
+        return;
+    }
+    s_radio.created = 1;
+    s_radio.last_play_cursor = 0;
+    radio_fill_half(0);
+    radio_fill_half(1);
+    IDirectSoundBuffer_SetCurrentPosition(s_radio.buffer, 0);
+    IDirectSoundBuffer_SetVolume(s_radio.buffer, radio_vol_to_dsound(s_radio.want_volume));
+    TD5_LOG_I(LOG_TAG, "radio: DSound buffer created (%u bytes)", (unsigned)s_radio.buffer_bytes);
+    if (s_radio.playing)
+        IDirectSoundBuffer_Play(s_radio.buffer, 0, 0, DSBPLAY_LOOPING);
+}
+
+void td5_plat_radio_pump(void)
+{
+    DWORD status = 0, play_cursor = 0;
+    int prev_half, cur_half;
+    if (!s_radio.created) {
+        if (s_radio.fmt_ready) radio_create_buffer();
+        if (!s_radio.created) return;
+    }
+    if (!s_radio.playing) return;
+    IDirectSoundBuffer_GetStatus(s_radio.buffer, &status);
+    if (!(status & DSBSTATUS_PLAYING)) {
+        IDirectSoundBuffer_Play(s_radio.buffer, 0, 0, DSBPLAY_LOOPING);
+        return;
+    }
+    if (FAILED(IDirectSoundBuffer_GetCurrentPosition(s_radio.buffer, &play_cursor, NULL)))
+        return;
+    prev_half = (s_radio.last_play_cursor < s_radio.half_bytes) ? 0 : 1;
+    cur_half  = (play_cursor < s_radio.half_bytes) ? 0 : 1;
+    if (cur_half != prev_half)
+        radio_fill_half(prev_half);
+    s_radio.last_play_cursor = play_cursor;
+}
+
+void td5_plat_radio_set_playing(int on)
+{
+    s_radio.playing = on ? 1 : 0;
+    if (!s_radio.created || !s_radio.buffer) return;
+    if (on) {
+        /* flush the ring so playback resumes at the live edge */
+        EnterCriticalSection(&s_radio.cs);
+        s_radio.ring_head = s_radio.ring_tail = s_radio.ring_count = 0;
+        LeaveCriticalSection(&s_radio.cs);
+        radio_fill_half(0);
+        radio_fill_half(1);
+        IDirectSoundBuffer_SetCurrentPosition(s_radio.buffer, 0);
+        s_radio.last_play_cursor = 0;
+        IDirectSoundBuffer_Play(s_radio.buffer, 0, 0, DSBPLAY_LOOPING);
+    } else {
+        IDirectSoundBuffer_Stop(s_radio.buffer);
+    }
+}
+
+void td5_plat_radio_set_volume(int volume)
+{
+    if (volume < 0)   volume = 0;
+    if (volume > 100) volume = 100;
+    s_radio.want_volume = volume;
+    if (s_radio.buffer)
+        IDirectSoundBuffer_SetVolume(s_radio.buffer, radio_vol_to_dsound(volume));
+}
+
+int td5_plat_radio_pending_bytes(void)
+{
+    int n;
+    if (!s_radio.cs_init) return 0;
+    EnterCriticalSection(&s_radio.cs);
+    n = (int)s_radio.ring_count;
+    LeaveCriticalSection(&s_radio.cs);
+    return n;
+}
+
+void td5_plat_radio_close(void)
+{
+    if (s_radio.buffer) {
+        IDirectSoundBuffer_Stop(s_radio.buffer);
+        IDirectSoundBuffer_Release(s_radio.buffer);
+        s_radio.buffer = NULL;
+    }
+    s_radio.created = 0;
+    s_radio.playing = 0;
+    InterlockedExchange(&s_radio.fmt_ready, 0);
+    if (s_radio.cs_init) {
+        EnterCriticalSection(&s_radio.cs);
+        if (s_radio.ring) { free(s_radio.ring); s_radio.ring = NULL; }
+        s_radio.ring_cap = s_radio.ring_head = s_radio.ring_tail = s_radio.ring_count = 0;
+        LeaveCriticalSection(&s_radio.cs);
+        DeleteCriticalSection(&s_radio.cs);
+        s_radio.cs_init = 0;
+    }
+    TD5_LOG_I(LOG_TAG, "radio sink closed");
+}
+
+/* ========================================================================
  * Rendering Backend -- Bridge to D3D11 wrapper
  *
  * These call directly into the wrapper's D3D11 backend via the global

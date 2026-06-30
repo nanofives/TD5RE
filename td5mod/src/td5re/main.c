@@ -337,6 +337,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SFXVolume",            &g_td5.ini.sfx_volume },
         { "MusicVolume",          &g_td5.ini.music_volume },
         { "SFXMode",              &g_td5.ini.sfx_mode },
+        { "RadioEnabled",         &g_td5.ini.radio_enabled },
         /* GameOptions */
         { "Laps",                 &g_td5.ini.laps },
         { "CheckpointTimers",     &g_td5.ini.checkpoint_timers },
@@ -736,6 +737,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.sfx_volume    = td5_ini_int("Audio", "SFXVolume", 80);
     g_td5.ini.music_volume  = td5_ini_int("Audio", "MusicVolume", 80);
     g_td5.ini.sfx_mode      = td5_ini_int("Audio", "SFXMode", 0);
+    g_td5.ini.radio_enabled = td5_ini_int("Audio", "RadioEnabled", 1);
+    td5_ini_str("Audio", "RadioURL", "http://ice1.somafm.com/beatblender-128-mp3",
+                g_td5.ini.radio_url, sizeof(g_td5.ini.radio_url));
 
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
@@ -1146,8 +1150,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     dbglog("  [Display] Width=%d Height=%d Windowed=%d", width, height, windowed);
     dbglog("  [Display] Fogging=%d SpeedUnits=%d CameraDamping=%d",
            g_td5.ini.fog_enabled, g_td5.ini.speed_units, g_td5.ini.camera_damping);
-    dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d",
-           g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode);
+    dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d Radio=%d url=%s",
+           g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode,
+           g_td5.ini.radio_enabled, g_td5.ini.radio_url);
     dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d AutoGB=%d PlayerIsAI=%d",
            g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
            g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions,
