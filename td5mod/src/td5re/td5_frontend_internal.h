@@ -12,6 +12,7 @@
 #define TD5_FRONTEND_INTERNAL_H
 
 #include <stdint.h>
+#include <stddef.h>   /* size_t (td5_gameopts_value) */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -598,8 +599,28 @@ extern int             s_game_option_dynamics;
 extern int             s_game_option_car_toughness;   /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 extern int             s_game_option_car_deform;      /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 extern int             s_game_option_car_damage_bar;  /* [CAR DAMAGE] HUD bar + wreck on/off */
+extern int             s_game_option_tutorial;        /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
 extern int             s_race_difficulty;   /* per-race AI difficulty row on Track Selection (0..2) */
 extern int             s_trksel_dyn_btn;    /* [ARCADE] ARCADE/SIM row index on Track Selection (-1=none) */
+
+/* --- Paginated Game Options model (impl in td5_frontend.c, driven by the
+ * Screen_GameOptions FSM in td5_fe_menu.c). Same pagination scheme as the
+ * PENDING TO TEST checklist: rows-per-page + < PREV / NEXT > + a page footer.
+ * [TUTORIAL 2026-06-29] ------------------------------------------------------*/
+int  td5_gameopts_count(void);                 /* total selectable option rows */
+int  td5_gameopts_page(void);                  /* current 0-based page */
+int  td5_gameopts_pages(void);                 /* page count */
+int  td5_gameopts_row_count(void);             /* visible option rows on this page */
+int  td5_gameopts_row_option(int row);         /* option index for a page row, or -1 */
+int  td5_gameopts_ok_btn(void);                /* button index of OK on this page */
+int  td5_gameopts_prev_btn(void);              /* < PREV button index, or -1 */
+int  td5_gameopts_next_btn(void);              /* NEXT > button index, or -1 */
+void td5_gameopts_value(int option, char *out, size_t out_sz); /* value string */
+void td5_gameopts_cycle(int option, int delta);/* LEFT/RIGHT cycle an option */
+void td5_gameopts_build_page(void);            /* (re)create buttons for current page */
+void td5_gameopts_reset_page(void);            /* jump back to page 0 (on screen entry) */
+int  td5_gameopts_page_prev(void);             /* page--; rebuild; 1 if it moved */
+int  td5_gameopts_page_next(void);             /* page++; rebuild; 1 if it moved */
 extern int             s_sound_option_music_volume;
 extern int             s_sound_option_sfx_mode;
 extern int             s_sound_option_sfx_volume;

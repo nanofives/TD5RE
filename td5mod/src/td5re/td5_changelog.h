@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
+    { CL_ITEM,    "Controller tutorial now shows at the START of EVERY" },
+    { CL_ITEM,    "  race (it used to appear only once, ever). Turn it" },
+    { CL_ITEM,    "  off with the new TUTORIAL row in Game Options." },
+    { CL_ITEM,    "Game Options now has TWO pages (< PREV / NEXT >) so" },
+    { CL_ITEM,    "  all the rows fit comfortably." },
     { CL_ITEM,    "Traffic now stays visible much further down the road" },
     { CL_ITEM,    "  instead of popping out of view at short range. Cars" },
     { CL_ITEM,    "  (and rivals) are drawn ~60% further on open tracks." },

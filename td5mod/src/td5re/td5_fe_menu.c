@@ -1616,36 +1616,16 @@ void Screen_GameOptions(void) {
         frontend_init_return_screen(TD5_SCREEN_GAME_OPTIONS);
         TD5_LOG_D(LOG_TAG, "GameOptions: init");
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* 6 option rows with left/right arrows:
-         * Checkpoint Timers, Traffic, Cops, Difficulty, Dynamics, 3D Collisions.
-         * [S02 (c) 2026-06-04] CIRCUIT LAPS was removed from this screen — the lap
-         * count is now set in the Quick Race menu + the Track Selection screen
-         * (both edit s_game_option_laps). The value still feeds race setup via
-         * g_td5.circuit_lap_count = s_game_option_laps + 1; this screen no longer
-         * owns it. Remaining rows shifted up one slot to close the gap. */
-        /* [FIXED 2026-06-01, runtime button-table @0x499c78] explicit rests: rows at x=120,
-         * y=97 step 40; OK bottom-center (216,377). (Port auto-layout gave 110/93 + OK stacked
-         * in-column — 10px left / 4px high / OK mis-placed.) Slide-in still animates X to rest. */
-        /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) row removed from Game
-         * Options — it is now chosen on the Track Selection + Multiplayer screens
-         * since it drives major gameplay (3x crashes, power-ups). Remaining rows
-         * shifted up: 3D Collisions 5->4, OK 6->5. */
-        /* [CAR DAMAGE 2026-06-29] DAMAGE BAR on/off added (idx 8) next to the
-         * other car-damage rows; LANE ASSIST -> idx 9, OK -> idx 10. Ten option
-         * rows + OK no longer fit the old 40/35px pitch, so the whole column is
-         * re-pitched to a uniform 34px starting at y=80 (OK at y=420). The value
-         * + arrow renderers read each button's live .y, so they follow this. */
-        frontend_create_button(SNK_CheckpointTimersButTxt, 120,  80, 0x128, 0x20);
-        frontend_create_button(SNK_TrafficButTxt,          120, 114, 0x128, 0x20);
-        frontend_create_button(SNK_CopsButTxt,             120, 148, 0x128, 0x20); /* orig label: POLICE */
-        frontend_create_button(SNK_DifficultyButTxt,       120, 182, 0x128, 0x20);
-        frontend_create_button(SNK_3dCollisionsButTxt,     120, 216, 0x128, 0x20);
-        frontend_create_button("POWER-UPS",               120, 250, 0x128, 0x20);
-        frontend_create_button("CAR TOUGHNESS",           120, 284, 0x128, 0x20);
-        frontend_create_button("DEFORMATION",             120, 318, 0x128, 0x20);
-        frontend_create_button("DAMAGE BAR",              120, 352, 0x128, 0x20);
-        frontend_create_button("LANE ASSIST",             120, 386, 0x128, 0x20);
-        frontend_create_button(SNK_OkButTxt,               216, 420, 0x60,  0x20);
+        /* [TUTORIAL 2026-06-29] The Game Options list now PAGINATES (same scheme
+         * as the PENDING TO TEST checklist) because it outgrew a single column:
+         * Checkpoint Timers, Traffic, Cops, Difficulty, 3D Collisions, Power-ups,
+         * Car Toughness, Deformation, Damage Bar, Lane Assist, and the new
+         * TUTORIAL on/off (11 selector rows + OK). The option list, per-page
+         * layout, value/arrow rendering and cycle logic live in the model in
+         * td5_frontend.c (td5_gameopts_*); this screen is just the FSM glue.
+         * Start on page 1 on each entry. */
+        td5_gameopts_reset_page();
+        td5_gameopts_build_page();
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -1668,104 +1648,73 @@ void Screen_GameOptions(void) {
         s_inner_state = 6;
         break;
 
-    case 6: /* Interactive: arrow handlers per row */
+    case 6: /* Interactive: cycle the focused option / OK / page navigation */
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            /* Each row cycles its respective global on arrow input.
-             * OK button triggers exit. [S02 (c) 2026-06-04] Circuit Laps (old
-             * idx 0) was removed; the remaining six rows shifted up one index. */
-            if (delta != 0 && active_button >= 0 && active_button <= 9) {
-                /* Nav beep on any selector-row change, matching the original's
-                 * central arrow handler (DXSound::Play(2) @ 0x0042687c) and the
-                 * other Options screens (Control/Sound). Rows 0..4 are all
-                 * arrow-capable selectors; OK (row 5) is handled separately below
-                 * and is not arrow-capable, so it stays silent on L/R.
-                 * [ARCADE 2026-06-26] DYNAMICS row removed; Collisions is now 4. */
-                frontend_play_sfx(2);
-                if (active_button == 0) {
-                    s_game_option_checkpoint_timers ^= 1;
+            int row_count = td5_gameopts_row_count();
+            /* [TUTORIAL 2026-06-29] Paginated model: the current page's option
+             * rows are button indices 0..row_count-1 (all ◄► selectors); OK /
+             * < PREV / NEXT > follow. LEFT/RIGHT on an option row cycles that
+             * option's value via the shared model; the per-option cycle logic
+             * (on/off, 0..2 levels, 5-state traffic) lives in td5_gameopts_cycle. */
+            if (delta != 0 && active_button >= 0 && active_button < row_count) {
+                int opt = td5_gameopts_row_option(active_button);
+                if (opt >= 0) {
+                    /* Nav beep on any selector-row change, matching the original's
+                     * central arrow handler (DXSound::Play(2) @ 0x0042687c). */
+                    frontend_play_sfx(2);
+                    td5_gameopts_cycle(opt, delta);
+                    s_inner_state = 4;   /* redraw values */
+                }
+            }
+            /* A/Enter activations: OK commits + exits; PREV/NEXT flip the page.
+             * (prev/next btn ids are -1 on a single page, so they never match a
+             * real s_button_index >= 0.) */
+            if (s_button_index >= 0) {
+                if (s_button_index == td5_gameopts_ok_btn()) {
+                    /* Sync the committed game options into g_td5.ini (the global the
+                     * boot-override at frontend init reads) and write them back to
+                     * td5re.ini so the selection survives a relaunch. The original
+                     * persisted these to Config.td5 only, but the port's td5re.ini
+                     * boot-override masks Config.td5, so the ini is the live config
+                     * layer that must be kept in sync. [PART B 2026-06-02]
+                     * NB: laps is intentionally NOT written here — re-homed to
+                     * Quick Race + Track Selection. [S02 (c) 2026-06-04] */
+                    g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
+                    /* [dynamic-traffic] Persist the full 0..4 volume (5-state row). */
+                    g_td5.ini.traffic           = s_game_option_traffic;
+                    if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
+                    if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
+                        g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
+                    g_td5.ini.cops              = s_game_option_cops;
+                    g_td5.ini.difficulty        = s_game_option_difficulty;
+                    g_td5.ini.dynamics          = s_game_option_dynamics;
+                    g_td5.ini.collisions        = s_game_option_collisions;
+                    g_td5.ini.powerups          = s_game_option_powerups;
+                    /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels +
+                     * the HUD damage-bar / wreck toggle. */
+                    g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
+                    g_td5.ini.car_damage_deform    = s_game_option_car_deform;
+                    g_td5.ini.car_damage_bar       = s_game_option_car_damage_bar ? 1 : 0;
+                    g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
+                    /* [TUTORIAL 2026-06-29] Commit the controller-overlay on/off.
+                     * Preserve a dev "force every race" (2) if it was set;
+                     * otherwise plain on=1 / off=0. */
+                    g_td5.ini.tutorial_overlay = s_game_option_tutorial
+                        ? (g_td5.ini.tutorial_overlay >= 2 ? 2 : 1) : 0;
+                    td5_ini_persist_options();
+                    s_return_screen = TD5_SCREEN_OPTIONS_HUB;
+                    s_inner_state = 7;
+                } else if (s_button_index == td5_gameopts_prev_btn()) {
+                    if (td5_gameopts_page_prev()) frontend_play_sfx(2);
                     s_inner_state = 4;
-                } else if (active_button == 1) {
-                    /* [dynamic-traffic] 5-state volume: Off/Light/Normal/Heavy/
-                     * Very-High, direction-aware so LEFT steps back through the
-                     * cycle (delta may be negative). */
-                    s_game_option_traffic =
-                        ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
-                         + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
-                    s_inner_state = 4;
-                } else if (active_button == 2) {
-                    s_game_option_cops ^= 1;
-                    s_inner_state = 4;
-                } else if (active_button == 3) {
-                    s_game_option_difficulty += delta;
-                    if (s_game_option_difficulty < 0) s_game_option_difficulty = 2;
-                    if (s_game_option_difficulty > 2) s_game_option_difficulty = 0;
-                    s_inner_state = 4;
-                } else if (active_button == 4) {
-                    s_game_option_collisions ^= 1;
-                    s_inner_state = 4;
-                } else if (active_button == 5) {
-                    s_game_option_powerups ^= 1;
-                    s_inner_state = 4;
-                } else if (active_button == 6) {
-                    /* [CAR DAMAGE] Car Toughness level: Low/Normal/High, wraps. */
-                    s_game_option_car_toughness += delta;
-                    if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 2;
-                    if (s_game_option_car_toughness > 2) s_game_option_car_toughness = 0;
-                    s_inner_state = 4;
-                } else if (active_button == 7) {
-                    /* [CAR DAMAGE] Deformation level: Low/Normal/High, wraps. */
-                    s_game_option_car_deform += delta;
-                    if (s_game_option_car_deform < 0) s_game_option_car_deform = 2;
-                    if (s_game_option_car_deform > 2) s_game_option_car_deform = 0;
-                    s_inner_state = 4;
-                } else if (active_button == 8) {
-                    /* [CAR DAMAGE 2026-06-29] Damage Bar on/off: the HUD health
-                     * bar + the wreck/knockout mechanic (and its health-driven
-                     * handling penalty + smoke). Off = no bar, no race-ending
-                     * wreck; dents + collisions are unaffected. */
-                    s_game_option_car_damage_bar ^= 1;
-                    s_inner_state = 4;
-                } else if (active_button == 9) {
-                    /* [LANE ASSIST] steering-aid on/off. */
-                    s_game_option_laneassist ^= 1;
+                } else if (s_button_index == td5_gameopts_next_btn()) {
+                    if (td5_gameopts_page_next()) frontend_play_sfx(2);
                     s_inner_state = 4;
                 }
             }
-            if (s_button_index == 10) { /* OK (after CAR DAMAGE rows + LANE ASSIST) */
-                /* Sync the committed game options into g_td5.ini (the global the
-                 * boot-override at frontend init reads) and write them back to
-                 * td5re.ini so the selection survives a relaunch. The original
-                 * persisted these to Config.td5 only, but the port's td5re.ini
-                 * boot-override masks Config.td5, so the ini is the live config
-                 * layer that must be kept in sync. [PART B 2026-06-02]
-                 * NB: laps is intentionally NOT written here anymore — this
-                 * screen no longer owns it (re-homed to Quick Race + Track
-                 * Selection, which persist g_td5.ini.laps themselves).
-                 * [S02 (c) 2026-06-04] */
-                g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
-                /* [dynamic-traffic] Persist the full 0..4 volume (5-state row). */
-                g_td5.ini.traffic           = s_game_option_traffic;
-                if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
-                if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
-                    g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
-                g_td5.ini.cops              = s_game_option_cops;
-                g_td5.ini.difficulty        = s_game_option_difficulty;
-                g_td5.ini.dynamics          = s_game_option_dynamics;
-                g_td5.ini.collisions        = s_game_option_collisions;
-                g_td5.ini.powerups          = s_game_option_powerups;
-                /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels +
-                 * the HUD damage-bar / wreck toggle. */
-                g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
-                g_td5.ini.car_damage_deform    = s_game_option_car_deform;
-                g_td5.ini.car_damage_bar       = s_game_option_car_damage_bar ? 1 : 0;
-                g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
-                td5_ini_persist_options();
-                s_return_screen = TD5_SCREEN_OPTIONS_HUB;
-                s_inner_state = 7;
-            }
-            /* Arrow changes reset to state 4 for redraw */
+            /* Arrow / page changes reset to state 4 for redraw */
         }
         break;
 
