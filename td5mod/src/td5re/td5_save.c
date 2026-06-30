@@ -19,6 +19,8 @@
 #include <stdio.h>  /* remove() in td5_save_test_cup_roundtrip */
 #include <stdarg.h> /* vsnprintf in the INI text builder */
 #include <stdlib.h> /* strtol when parsing comma-separated INI lists */
+#include <windows.h>
+#include <winhttp.h>
 
 #define LOG_TAG "save"
 
@@ -583,6 +585,156 @@ static const uint8_t k_npc_default_table[TD5_CONFIG_NPC_TABLE_SIZE] = {
     /* 0x1090 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xAD, 0xE5, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
     /* 0x10A0 */ 0x82, 0x01, 0x00, 0x00, 0x16, 0x02, 0x00, 0x00
 };
+/* ========================================================================
+ * Celebrity high-score names (port enhancement)
+ *
+ * Replaces the original generic first names (Frank, Raymond, Ben…) from
+ * k_npc_default_table with well-known celebrity names.  Applied once at
+ * startup for every NPC slot whose saved name still matches the original
+ * binary default — genuine player-set names are never touched.
+ *
+ * 130 entries = TD5_CONFIG_NPC_GROUPS(26) × 5 entries per group.
+ * Groups 0-19 = race tracks; 20-25 = cup tracks.
+ * ======================================================================== */
+static const char * const k_celebrity_names[TD5_CONFIG_NPC_GROUPS * 5] = {
+    /* 0 Moscow */      "Michael",  "Lewis",     "Ayrton",    "Damon",     "Mika",
+    /* 1 Edinburgh */   "Fernando", "Sebastian", "David",     "Rubens",    "Nigel",
+    /* 2 Sydney */      "Alain",    "Jackie",    "James",     "Niki",      "Emerson",
+    /* 3 Blue Ridge */  "Tom",      "Brad",      "Leonardo",  "Julia",     "Denzel",
+    /* 4 Jarash */      "Arnold",   "Sylvester", "Bruce",     "Harrison",  "Will",
+    /* 5 Newcastle */   "Robert",   "Jack",      "Meryl",     "Halle",     "Keanu",
+    /* 6 Maui */        "Madonna",  "Beyonce",   "Eminem",    "Britney",   "Whitney",
+    /* 7 Courmayeur */  "Celine",   "Elton",     "Bono",      "Sting",     "Tina",
+    /* 8 Honolulu */    "Diana",    "Aretha",    "Elvis",     "Prince",    "Mick",
+    /* 9 Tokyo */       "Tiger",    "Muhammad",  "Carl",      "Jesse",     "Andre",
+    /* 10 Keswick */    "Steffi",   "Martina",   "Kobe",      "Shaq",      "Magic",
+    /* 11 San Fran */   "Wayne",    "Mario",     "Pele",      "Diego",     "Zinedine",
+    /* 12 Bern */       "Oprah",    "Angelina",  "Jennifer",  "Gwyneth",   "Reese",
+    /* 13 Kyoto */      "Charlize", "Hilary",    "Cameron",   "Drew",      "Winona",
+    /* 14 Washington */ "Salma",    "Penelope",  "Monica",    "Jodie",     "Jessica",
+    /* 15 Munich */     "Natalie",  "Scarlett",  "Keira",     "Cate",      "Nicole",
+    /* 16 Cheddar */    "Colin",    "Sebastien", "Tommi",     "Carlos",    "Petter",
+    /* 17 Montego */    "Usain",    "Florence",  "Venus",     "Serena",    "Roger",
+    /* 18 Bez */        "Pete",     "Lleyton",   "Marat",     "Andy",      "Rafael",
+    /* 19 Drag Strip */ "Freddie",  "Keith",     "Paul",      "George",    "Ringo",
+    /* 20 Cup 1 */      "Ronaldo",  "Thierry",   "Patrick",   "Oliver",    "Raul",
+    /* 21 Cup 2 */      "Naomi",    "Claudia",   "Cindy",     "Elle",      "Karlie",
+    /* 22 Cup 3 */      "Russell",  "Hugh",      "Geoffrey",  "Rachel",    "Sarah",
+    /* 23 Cup 4 */      "Orlando",  "Viggo",     "Elijah",    "Ian",       "Sean",
+    /* 24 Cup 5 */      "Uma",      "Julianne",  "Helen",     "Judi",      "Lily",
+    /* 25 Cup 6 */      "Morgan",   "Samuel",    "Laurence",  "Chiwetel",  "Idris",
+};
+
+/* Extract the original default name for slot (group g, entry e).
+ * The k_npc_default_table is a flat byte array; each group is
+ * TD5_CONFIG_NPC_GROUP_SIZE bytes; within a group the header is 4 bytes
+ * and each TD5_NpcEntry is 32 bytes with name[16] at offset 0. */
+static void npc_default_name(int g, int e, char *out)
+{
+    int offset = g * TD5_CONFIG_NPC_GROUP_SIZE + 4 /* header */ + e * 32;
+    const char *src = (const char *)(k_npc_default_table + offset);
+    int i;
+    for (i = 0; i < 15 && src[i]; i++) out[i] = src[i];
+    out[i] = '\0';
+}
+
+/* -----------------------------------------------------------------------
+ * WinHTTP helper: fetch first names from randomuser.me and fill names[][].
+ * Returns the number of names successfully parsed (0 on any failure).
+ * Only called when g_td5.ini.celebrity_names_api == 1.
+ * Timeout: 4 s per phase so startup stall is bounded.
+ * ----------------------------------------------------------------------- */
+#define API_BUF_CAP (48 * 1024)
+
+static int npc_fetch_api_names(char names[][16], int max_names)
+{
+    HINTERNET hSess = NULL, hConn = NULL, hReq = NULL;
+    char *body = NULL;
+    DWORD body_len = 0, avail = 0, read_n = 0;
+    int count = 0;
+
+    hSess = WinHttpOpen(L"TD5RE/1.0",
+                        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                        WINHTTP_NO_PROXY_NAME,
+                        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSess) {
+        TD5_LOG_W(LOG_TAG, "celebrity API: WinHttpOpen failed %lu", GetLastError());
+        goto done;
+    }
+    /* 4-second timeouts per phase */
+    {
+        DWORD t = 4000;
+        WinHttpSetOption(hSess, WINHTTP_OPTION_CONNECT_TIMEOUT,  &t, sizeof t);
+        WinHttpSetOption(hSess, WINHTTP_OPTION_SEND_TIMEOUT,     &t, sizeof t);
+        WinHttpSetOption(hSess, WINHTTP_OPTION_RECEIVE_TIMEOUT,  &t, sizeof t);
+    }
+
+    hConn = WinHttpConnect(hSess, L"randomuser.me",
+                           INTERNET_DEFAULT_HTTP_PORT, 0);
+    if (!hConn) {
+        TD5_LOG_W(LOG_TAG, "celebrity API: WinHttpConnect failed %lu", GetLastError());
+        goto done;
+    }
+
+    hReq = WinHttpOpenRequest(hConn, L"GET",
+                              L"/api/?results=130&nat=us,gb&inc=name",
+                              NULL, WINHTTP_NO_REFERER,
+                              WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hReq) {
+        TD5_LOG_W(LOG_TAG, "celebrity API: WinHttpOpenRequest failed %lu", GetLastError());
+        goto done;
+    }
+
+    if (!WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(hReq, NULL)) {
+        TD5_LOG_W(LOG_TAG, "celebrity API: request/response failed %lu", GetLastError());
+        goto done;
+    }
+
+    body = (char *)malloc(API_BUF_CAP + 1);
+    if (!body) goto done;
+
+    while (body_len < API_BUF_CAP) {
+        avail = 0;
+        if (!WinHttpQueryDataAvailable(hReq, &avail) || avail == 0) break;
+        if (body_len + avail > API_BUF_CAP) avail = API_BUF_CAP - body_len;
+        read_n = 0;
+        if (!WinHttpReadData(hReq, body + body_len, avail, &read_n)) break;
+        body_len += read_n;
+    }
+    body[body_len] = '\0';
+
+    /* Parse: scan for "first":"<value>" tokens */
+    {
+        const char *key = "\"first\":\"";
+        int klen = (int)strlen(key);
+        const char *p = body;
+        while (count < max_names) {
+            const char *found = strstr(p, key);
+            if (!found) break;
+            found += klen;
+            int n = 0;
+            while (n < 15 && found[n] && found[n] != '"') n++;
+            if (n > 0) {
+                memset(names[count], 0, 16);
+                memcpy(names[count], found, (size_t)n);
+                count++;
+            }
+            p = found + n + 1;
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "celebrity API: fetched %d names from randomuser.me", count);
+
+done:
+    if (body)  free(body);
+    if (hReq)  WinHttpCloseHandle(hReq);
+    if (hConn) WinHttpCloseHandle(hConn);
+    if (hSess) WinHttpCloseHandle(hSess);
+    return count;
+}
+
 static uint8_t  s_npc_group_table[TD5_CONFIG_NPC_TABLE_SIZE]; /* 0x4643B8 */
 static uint32_t s_cup_tier;                                   /* 0x4962A8 */
 static uint32_t s_max_unlocked_car;                           /* 0x463E0C */
@@ -643,6 +795,42 @@ static int         s_profiles_loaded;
 #define TD5_MAX_TD6_RECORD_LEVELS 48
 static TD5_NpcGroup s_td6_records[TD5_MAX_TD6_RECORD_LEVELS];
 static int          s_td6_records_loaded;
+
+/* Apply celebrity (or API-fetched) names to NPC slots that still hold the
+ * original binary defaults.  Called once at the end of td5_save_init() after
+ * all save data has been loaded so player-set names are already in place. */
+static void npc_apply_celebrity_names(char api_names[][16], int api_count)
+{
+    int g, e, idx;
+    TD5_NpcGroup *groups = (TD5_NpcGroup *)s_npc_group_table;
+    int applied = 0;
+
+    for (g = 0; g < TD5_CONFIG_NPC_GROUPS; g++) {
+        TD5_NpcGroup *grp = &groups[g];
+        for (e = 0; e < 5; e++) {
+            char orig[16];
+            npc_default_name(g, e, orig);
+            if (orig[0] == '\0') continue;
+
+            if (strncmp(grp->entries[e].name, orig, 15) != 0) continue;
+
+            idx = g * 5 + e;
+            const char *celebrity;
+            if (api_names && idx < api_count && api_names[idx][0]) {
+                celebrity = api_names[idx];
+            } else {
+                celebrity = k_celebrity_names[idx];
+            }
+
+            memset(grp->entries[e].name, 0, 16);
+            strncpy(grp->entries[e].name, celebrity, 15);
+            applied++;
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "celebrity names: applied to %d/%d NPC slots",
+              applied, TD5_CONFIG_NPC_GROUPS * 5);
+}
 
 /* ========================================================================
  * Initialization / Shutdown
@@ -724,6 +912,37 @@ int td5_save_init(void)
     memset(s_car_locks, 0, sizeof(s_car_locks));
     for (i = 0; i < 20; i++)
         s_track_locks[i] = 1;  /* 1 = unlocked */
+
+    /* Replace original default NPC names (Frank, Raymond…) with celebrities
+     * for leaderboard slots that have no genuine player score yet.
+     * If CelebrityNamesAPI=1, first try to fetch fresh names from
+     * randomuser.me; fall back to the hardcoded list on failure. */
+    {
+        char (*api_names)[16] = NULL;
+        int api_count = 0;
+
+        if (g_td5.ini.celebrity_names_api) {
+            api_names = (char (*)[16])malloc(130 * 16);
+            if (api_names) {
+                memset(api_names, 0, 130 * 16);
+                api_count = npc_fetch_api_names(api_names, 130);
+                if (api_count == 0) {
+                    TD5_LOG_W(LOG_TAG,
+                              "celebrity API unavailable, using hardcoded list");
+                    free(api_names);
+                    api_names = NULL;
+                }
+            }
+        }
+
+        npc_apply_celebrity_names(api_names, api_count);
+
+        if (api_names) free(api_names);
+    }
+
+    /* Flush progress so the file reflects celebrity names immediately (not
+     * just the next time the player saves).  Cheap — one sequential write. */
+    cfgini_write_progress();
 
     return 1;
 }

@@ -45,6 +45,8 @@ static const char *const k_seed[] = {
     "Game Options paginated (2 pages, < PREV / NEXT >); all rows fit, values/arrows OK",
     "Car defaults to your PROFILE colour (TD6 exact / TD5 nearest); PAINT overrides",
     "MP profile: typed-but-unsaved NEW name auto-saves when the race starts",
+    "Celebrity leaderboard: unraced tracks show celeb names (not Frank/Ben)",
+    "Celebrity leaderboard: CelebrityNamesAPI=1 → fetches from randomuser.me",
     "Traffic: visible ~60% further on open tracks (no short-range pop-out)",
     "Damage Bar VISIBLE for every split-screen player (was invisible before)",
     "Damage Bar OFF (Game Options): no top bar, no wreck-out; dents stay",

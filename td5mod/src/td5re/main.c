@@ -416,6 +416,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "CarToughness",         &g_td5.ini.car_damage_toughness },
         { "CarDeform",            &g_td5.ini.car_damage_deform },
         { "CarDamageBar",         &g_td5.ini.car_damage_bar },
+        { "CelebrityNamesAPI",    &g_td5.ini.celebrity_names_api },
         /* Trace */
         { "RaceTrace",            &g_td5.ini.race_trace_enabled },
         { "RaceTraceSlot",        &g_td5.ini.race_trace_slot },
@@ -933,6 +934,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.car_damage_toughness  = td5_ini_int("Game", "CarToughness", 1);  /* 0=Low 1=Normal 2=High */
     g_td5.ini.car_damage_deform     = td5_ini_int("Game", "CarDeform",    1);  /* 0=Low 1=Normal 2=High */
     g_td5.ini.car_damage_bar        = td5_ini_int("Game", "CarDamageBar", 1);  /* HUD bar + wreck on/off */
+    g_td5.ini.celebrity_names_api   = td5_ini_int("Game", "CelebrityNamesAPI", 0); /* 1=fetch names from randomuser.me at startup */
 
     /* TD6-car player override: [Game] PlayerCarArchive = <3-letter code> forces
      * the player (slot 0) into a ported Test Drive 6 car (re/assets/cars/<code>/)

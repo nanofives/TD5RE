@@ -663,6 +663,11 @@ typedef struct TD5_GlobalState {
         int  net_game_port;     /* host UDP game port (default 37050) */
         int  net_enable_upnp;   /* Direct host: open the port via UPnP (default 1) */
         char net_nickname[32];  /* player nickname shown in the lobby roster */
+        /* [Game] CelebrityNamesAPI: when 1, fetches first names from
+         * randomuser.me at startup and applies them to NPC leaderboard slots
+         * that still hold original default names (no player score set yet).
+         * 0 = use the hardcoded celebrity list (default). */
+        int  celebrity_names_api;
     } ini;
 
 } TD5_GlobalState;

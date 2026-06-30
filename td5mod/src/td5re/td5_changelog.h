@@ -51,6 +51,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Profiles: type a new player name but forget to" },
     { CL_ITEM,    "  SAVE it? It's now saved automatically when the" },
     { CL_ITEM,    "  race starts, so the new name isn't lost." },
+    { CL_ITEM,    "High-score boards now show celebrity names instead of" },
+    { CL_ITEM,    "  generic placeholders on tracks you haven't raced yet." },
+    { CL_ITEM,    "  Enable CelebrityNamesAPI=1 in td5re.ini to fetch fresh" },
+    { CL_ITEM,    "  names from the internet each launch." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 29" },
