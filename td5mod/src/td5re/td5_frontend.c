@@ -765,6 +765,7 @@ int             s_game_option_car_toughness = 1; /* [CAR DAMAGE] 0=Low 1=Normal 
 int             s_game_option_car_deform = 1;    /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 int             s_game_option_car_damage_bar = 1; /* [CAR DAMAGE] HUD bar + wreck on/off */
 int             s_game_option_laneassist = 0; /* lane-assist steering aid on/off */
+int             s_game_option_tutorial = 1;   /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
 int             s_sound_option_sfx_mode;
 int             s_sound_option_sfx_volume = 80;
 int             s_sound_option_music_volume = 80;
@@ -3945,6 +3946,7 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_car_deform        = g_td5.ini.car_damage_deform;
     s_game_option_car_damage_bar    = g_td5.ini.car_damage_bar;
     s_game_option_laneassist        = g_td5.ini.lane_assist;
+    s_game_option_tutorial          = (g_td5.ini.tutorial_overlay > 0) ? 1 : 0;
 
     /* Commit the dynamics (arcade/sim) selection into the physics race-init
      * flag deterministically for the AutoRace path, mirroring the options-screen
@@ -7001,39 +7003,216 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
     }
 }
 
+/* ===== Paginated Game Options model (PORT ENHANCEMENT 2026-06-29) ===========
+ * The Game Options screen outgrew a single comfortable column (now 11 selector
+ * rows + OK). It is paginated with the SAME mechanism as the PENDING TO TEST
+ * checklist: a fixed rows-per-page, "< PREV" / "NEXT >" controls, and a
+ * "PAGE x / y" footer. Each option row stays a baked-label selector button
+ * (gold highlight + ◄► arrows + a value drawn in this overlay pass). The page
+ * state, layout, value formatting and cycle logic live here next to the
+ * s_game_option_* statics and the value/arrow renderers; td5_fe_menu.c's
+ * Screen_GameOptions is a thin FSM that drives this model via the API declared
+ * in td5_frontend_internal.h. ===============================================*/
+enum {
+    GO_CHECKPOINTS = 0, GO_TRAFFIC, GO_COPS, GO_DIFFICULTY, GO_COLLISIONS,
+    GO_POWERUPS, GO_TOUGHNESS, GO_DEFORM, GO_DAMAGE_BAR, GO_LANEASSIST,
+    GO_TUTORIAL, GO_OPTION_COUNT
+};
+
+#define GO_ROWS_PER_PAGE 7
+#define GO_ROW_X    120
+#define GO_ROW_W    0x128
+#define GO_ROW_H    0x20
+#define GO_ROW_Y0   96
+#define GO_ROW_STEP 40
+#define GO_CTL_Y    (GO_ROW_Y0 + GO_ROWS_PER_PAGE * GO_ROW_STEP + 12)   /* 388 */
+
+static int s_go_page      = 0;
+static int s_go_pages     = 1;
+static int s_go_row_count = 0;
+static int s_go_ok_btn    = -1;
+static int s_go_prev_btn  = -1;
+static int s_go_next_btn  = -1;
+
+int td5_gameopts_count(void)     { return GO_OPTION_COUNT; }
+int td5_gameopts_page(void)      { return s_go_page; }
+int td5_gameopts_pages(void)     { return s_go_pages; }
+int td5_gameopts_row_count(void) { return s_go_row_count; }
+int td5_gameopts_ok_btn(void)    { return s_go_ok_btn; }
+int td5_gameopts_prev_btn(void)  { return s_go_prev_btn; }
+int td5_gameopts_next_btn(void)  { return s_go_next_btn; }
+void td5_gameopts_reset_page(void) { s_go_page = 0; }
+
+/* Option index for a page row (0..row_count-1), or -1 if out of range. */
+int td5_gameopts_row_option(int row) {
+    int opt;
+    if (row < 0 || row >= s_go_row_count) return -1;
+    opt = s_go_page * GO_ROWS_PER_PAGE + row;
+    return (opt < GO_OPTION_COUNT) ? opt : -1;
+}
+
+static const char *go_label(int opt) {
+    switch (opt) {
+        case GO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
+        case GO_TRAFFIC:     return SNK_TrafficButTxt;
+        case GO_COPS:        return SNK_CopsButTxt;       /* orig label: POLICE */
+        case GO_DIFFICULTY:  return SNK_DifficultyButTxt;
+        case GO_COLLISIONS:  return SNK_3dCollisionsButTxt;
+        case GO_POWERUPS:    return "POWER-UPS";
+        case GO_TOUGHNESS:   return "CAR TOUGHNESS";
+        case GO_DEFORM:      return "DEFORMATION";
+        case GO_DAMAGE_BAR:  return "DAMAGE BAR";
+        case GO_LANEASSIST:  return "LANE ASSIST";
+        case GO_TUTORIAL:    return "TUTORIAL";
+    }
+    return "";
+}
+
+/* Current value string for an option row, written into out[n]. */
+void td5_gameopts_value(int opt, char *out, size_t n) {
+    static const char *const on_off[]      = { "OFF", "ON" };
+    static const char *const traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] =
+        { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
+    static const char *const difficulty[]  = { "EASY", "NORMAL", "HARD" };
+    static const char *const level3[]      = { "LOW", "NORMAL", "HIGH" };
+    const char *v = "";
+    int t;
+    switch (opt) {
+        case GO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
+        case GO_TRAFFIC:
+            t = s_game_option_traffic;
+            if (t < 0) t = 0;
+            if (t > TD5_TRAFFIC_VOLUME_COUNT - 1) t = TD5_TRAFFIC_VOLUME_COUNT - 1;
+            v = traffic_vol[t];
+            break;
+        case GO_COPS:        v = on_off[s_game_option_cops & 1]; break;
+        case GO_DIFFICULTY:  v = difficulty[((s_game_option_difficulty % 3) + 3) % 3]; break;
+        case GO_COLLISIONS:  v = on_off[s_game_option_collisions & 1]; break;
+        case GO_POWERUPS:    v = on_off[s_game_option_powerups & 1]; break;
+        case GO_TOUGHNESS:
+            t = s_game_option_car_toughness;
+            if (t < 0) t = 0;
+            if (t > 2) t = 2;
+            v = level3[t];
+            break;
+        case GO_DEFORM:
+            t = s_game_option_car_deform;
+            if (t < 0) t = 0;
+            if (t > 2) t = 2;
+            v = level3[t];
+            break;
+        case GO_DAMAGE_BAR:  v = on_off[s_game_option_car_damage_bar & 1]; break;
+        case GO_LANEASSIST:  v = on_off[s_game_option_laneassist & 1]; break;
+        case GO_TUTORIAL:    v = on_off[s_game_option_tutorial & 1]; break;
+    }
+    snprintf(out, n, "%s", v);
+}
+
+/* Cycle one option's state by +/-1 (LEFT/RIGHT). On/off rows flip; level rows
+ * wrap 0..2; traffic wraps the 5-state volume. (Mirrors the old hardcoded
+ * if/else chain that used to live in Screen_GameOptions.) */
+void td5_gameopts_cycle(int opt, int delta) {
+    if (delta == 0) return;
+    switch (opt) {
+        case GO_CHECKPOINTS: s_game_option_checkpoint_timers ^= 1; break;
+        case GO_TRAFFIC:
+            s_game_option_traffic =
+                ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
+                 + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
+            break;
+        case GO_COPS: s_game_option_cops ^= 1; break;
+        case GO_DIFFICULTY:
+            s_game_option_difficulty += delta;
+            if (s_game_option_difficulty < 0) s_game_option_difficulty = 2;
+            if (s_game_option_difficulty > 2) s_game_option_difficulty = 0;
+            break;
+        case GO_COLLISIONS: s_game_option_collisions ^= 1; break;
+        case GO_POWERUPS:   s_game_option_powerups ^= 1; break;
+        case GO_TOUGHNESS:
+            s_game_option_car_toughness += delta;
+            if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 2;
+            if (s_game_option_car_toughness > 2) s_game_option_car_toughness = 0;
+            break;
+        case GO_DEFORM:
+            s_game_option_car_deform += delta;
+            if (s_game_option_car_deform < 0) s_game_option_car_deform = 2;
+            if (s_game_option_car_deform > 2) s_game_option_car_deform = 0;
+            break;
+        case GO_DAMAGE_BAR: s_game_option_car_damage_bar ^= 1; break;
+        case GO_LANEASSIST: s_game_option_laneassist ^= 1; break;
+        case GO_TUTORIAL:   s_game_option_tutorial ^= 1; break;
+    }
+}
+
+/* (Re)create the button set for the current page: the page's option rows
+ * (baked labels, indices 0..row_count-1) followed by OK, then < PREV / NEXT >
+ * when there is more than one page. Called on screen entry and every page
+ * change. Mirrors frontend_pending_build_buttons. */
+void td5_gameopts_build_page(void) {
+    int total = GO_OPTION_COUNT;
+    int start, end, r;
+
+    s_go_pages = (total + GO_ROWS_PER_PAGE - 1) / GO_ROWS_PER_PAGE;
+    if (s_go_pages < 1) s_go_pages = 1;
+    if (s_go_page >= s_go_pages) s_go_page = s_go_pages - 1;
+    if (s_go_page < 0) s_go_page = 0;
+
+    frontend_reset_buttons();
+
+    start = s_go_page * GO_ROWS_PER_PAGE;
+    end   = start + GO_ROWS_PER_PAGE;
+    if (end > total) end = total;
+    s_go_row_count = end - start;
+
+    for (r = 0; r < s_go_row_count; r++)
+        frontend_create_button(go_label(start + r), GO_ROW_X,
+                               GO_ROW_Y0 + r * GO_ROW_STEP, GO_ROW_W, GO_ROW_H);
+
+    /* OK centred; PREV/NEXT only appear when paging is possible. */
+    s_go_ok_btn = frontend_create_button(SNK_OkButTxt, 272, GO_CTL_Y, 0x60, GO_ROW_H);
+    if (s_go_pages > 1) {
+        s_go_prev_btn = frontend_create_button("< PREV", 88,  GO_CTL_Y, 0x60, GO_ROW_H);
+        s_go_next_btn = frontend_create_button("NEXT >", 456, GO_CTL_Y, 0x60, GO_ROW_H);
+    } else {
+        s_go_prev_btn = -1;
+        s_go_next_btn = -1;
+    }
+    s_selected_button = 0;
+    TD5_LOG_I(LOG_TAG, "GameOptions: page %d/%d (%d rows; ok=%d prev=%d next=%d)",
+              s_go_page + 1, s_go_pages, s_go_row_count,
+              s_go_ok_btn, s_go_prev_btn, s_go_next_btn);
+}
+
+int td5_gameopts_page_prev(void) {
+    if (s_go_page > 0) { s_go_page--; td5_gameopts_build_page(); return 1; }
+    return 0;
+}
+int td5_gameopts_page_next(void) {
+    if (s_go_page < s_go_pages - 1) { s_go_page++; td5_gameopts_build_page(); return 1; }
+    return 0;
+}
+
 static void frontend_render_game_options_overlay(float sx, float sy) {
-    const char *on_off[] = { "OFF", "ON" };
-    /* [dynamic-traffic] 5-state traffic volume row. */
-    const char *traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] = { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
-    const char *difficulty[] = { "EASY", "NORMAL", "HARD" };  /* orig middle label: NORMAL */
-    const char *level3[]     = { "LOW", "NORMAL", "HIGH" };    /* [CAR DAMAGE] toughness/deform */
+    int start = s_go_page * GO_ROWS_PER_PAGE;
+    int r;
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
-    /* [S02 (c) 2026-06-04] Circuit Laps row removed from this screen; values
-     * shifted up one button index. [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIM)
-     * row also removed — it now lives on Track Selection + the MP screens — so
-     * 3D Collisions moved up from button index 5 to 4. */
-    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, on_off[s_game_option_checkpoint_timers & 1], 0xFFFFFFFF);
-    {
-        int tvi = s_game_option_traffic;
-        if (tvi < 0) tvi = 0;
-        if (tvi > TD5_TRAFFIC_VOLUME_COUNT - 1) tvi = TD5_TRAFFIC_VOLUME_COUNT - 1;
-        frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, traffic_vol[tvi], 0xFFFFFFFF);
+    /* Per-page: draw each visible option row's value centred on its button. The
+     * row buttons are indices 0..row_count-1 for the current page. */
+    for (r = 0; r < s_go_row_count; r++) {
+        char val[24];
+        int  opt = start + r;
+        if (opt >= GO_OPTION_COUNT) break;
+        td5_gameopts_value(opt, val, sizeof val);
+        frontend_draw_value_centered(sx, sy, s_buttons[r].y + 6, val, 0xFFFFFFFF);
     }
-    frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_game_option_cops & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, difficulty[s_game_option_difficulty % 3], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, on_off[s_game_option_collisions & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, on_off[s_game_option_powerups & 1], 0xFFFFFFFF);
-    {
-        int ti = s_game_option_car_toughness; if (ti < 0) ti = 0; if (ti > 2) ti = 2;
-        int di = s_game_option_car_deform;    if (di < 0) di = 0; if (di > 2) di = 2;
-        frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, level3[ti], 0xFFFFFFFF);
-        frontend_draw_value_centered(sx, sy, s_buttons[7].y + 6, level3[di], 0xFFFFFFFF);
+    /* "PAGE x / y" footer (only when there is more than one page). */
+    if (s_go_pages > 1) {
+        char buf[24];
+        snprintf(buf, sizeof buf, "PAGE %d / %d", s_go_page + 1, s_go_pages);
+        td5_vui_text_centered(320.0f * sx, (float)(GO_CTL_Y + 28) * sy, buf,
+                              0xFF8890A0u, sx, sy);
     }
-    /* [CAR DAMAGE 2026-06-29] DAMAGE BAR on/off (row 8) — the HUD health bar +
-     * wreck/knockout mechanic. Lane Assist shifted to row 9. */
-    frontend_draw_value_centered(sx, sy, s_buttons[8].y + 6, on_off[s_game_option_car_damage_bar & 1], 0xFFFFFFFF);
-    frontend_draw_value_centered(sx, sy, s_buttons[9].y + 6, on_off[s_game_option_laneassist & 1], 0xFFFFFFFF);
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -11224,11 +11403,10 @@ void td5_frontend_render_ui_rects(void) {
             if (QR_BTN_PHYSICS < s_button_count) fe_draw_option_arrows(QR_BTN_PHYSICS, sx, sy);
             break;
         case TD5_SCREEN_GAME_OPTIONS:
-            /* Ten option rows (0..9): Checkpoint Timers, Traffic, Cops,
-             * Difficulty, 3D Collisions, Power-ups, [CAR DAMAGE] Car Toughness,
-             * Deformation, Damage Bar, [LANE ASSIST] Lane Assist. OK is index 10,
-             * no arrows. */
-            for (int i = 0; i <= 9; i++) fe_draw_option_arrows(i, sx, sy);
+            /* [TUTORIAL 2026-06-29] Paginated: the option rows on the current
+             * page are button indices 0..row_count-1 (all selectors with ◄►);
+             * OK / PREV / NEXT follow and get no arrows. */
+            for (int i = 0; i < td5_gameopts_row_count(); i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_CONTROLLER_BINDING:
             /* Draw the action labels+values on top of the (opaque-when-selected)
@@ -11712,6 +11890,7 @@ int td5_frontend_init(void) {
         s_game_option_car_deform        = g_td5.ini.car_damage_deform;
         s_game_option_car_damage_bar    = g_td5.ini.car_damage_bar;
         s_game_option_laneassist        = g_td5.ini.lane_assist;
+        s_game_option_tutorial          = (g_td5.ini.tutorial_overlay > 0) ? 1 : 0;
         s_selected_game_type = g_td5.ini.default_game_type;
     }
 

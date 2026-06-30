@@ -30,6 +30,9 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Tutorial overlay now shows at the START of every race (was once-ever)",
+    "Game Options: new TUTORIAL on/off row turns the overlay off",
+    "Game Options paginated (2 pages, < PREV / NEXT >); all rows fit, values/arrows OK",
     "Traffic: visible ~60% further on open tracks (no short-range pop-out)",
     "Damage Bar VISIBLE for every split-screen player (was invisible before)",
     "Damage Bar OFF (Game Options): no top bar, no wreck-out; dents stay",
@@ -60,8 +63,8 @@ static const char *const k_seed[] = {
     "Power-ups now ARCADE-only: SIMULATION shows no item boxes",
     "MP splitscreen: gold HOST tag on profile/screen/mode/car selectors",
     "Split car-select 5+ players: big car + buttons|stats two columns; 7-9p car stays big",
-    "Tutorial overlay: 1st-race Xbox pad diagram (gamepad only); ALL players press to start; shows once",
-    "Tutorial overlay: TutorialOverlay=2 forces every race; =0 off; never in MP/replay/trace/keyboard-only",
+    "Tutorial overlay: Xbox pad diagram (gamepad only); ALL players press to start; every race",
+    "Tutorial overlay: TutorialOverlay=2 forces (bypass gamepad gate); =0 off; never in MP/replay/trace",
     "MP cop chase: suspects can now pick TD6 cars, not just TD5",
     "Controller: Y changes camera; horn moved to L3 (stick click)",
     "Time trial on city tracks (HK/London): mid-track start no insta-end",

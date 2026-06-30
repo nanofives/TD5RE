@@ -274,6 +274,9 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("GameOptions", "Collisions",       g_td5.ini.collisions);
     td5_ini_write_int("GameOptions", "Powerups",         g_td5.ini.powerups);
     td5_ini_write_int("GameOptions", "AutoGearbox",      g_td5.ini.auto_gearbox);
+    /* [TUTORIAL 2026-06-29] Controller-overlay on/off (0=off, 1=on every race,
+     * 2=dev force) — set by the Game Options TUTORIAL row. */
+    td5_ini_write_int("GameOptions", "TutorialOverlay",  g_td5.ini.tutorial_overlay);
     td5_ini_write_int("Input",       "LaneAssist",       g_td5.ini.lane_assist);
 
     /* [CAR DAMAGE 2026-06-29] Global damage levels (Game Options rows). */

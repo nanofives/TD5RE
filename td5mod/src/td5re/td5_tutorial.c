@@ -348,7 +348,10 @@ void td5_tutorial_update(void)
     uint32_t all = (s_humans >= 32) ? 0xFFFFFFFFu : ((1u << s_humans) - 1u);
     if ((s_ready_mask & all) == all) {
         s_active = 0;
-        if (!s_force_mode) td5_save_set_tutorial_seen(1);
+        /* [2026-06-29] No persistent "seen" flag any more — the overlay is
+         * armed afresh at the start of every race (gated only by the Game
+         * Options TUTORIAL on/off below), so dismissing it just releases THIS
+         * race's countdown. */
         TD5_LOG_I(LOG_TAG, "Tutorial overlay dismissed by all %d player(s) — countdown released", s_humans);
     }
 }
@@ -366,8 +369,12 @@ void td5_tutorial_begin_race(void)
     if (g_td5.num_human_players < 1) return;
     if (g_td5.ini.race_trace_enabled || g_td5.ini.auto_throttle) return;
 
+    /* [2026-06-29] Show at the start of EVERY race (the first thing you see on
+     * each race), not just once-ever. The old td5re_progress.ini [Tutorial] Seen
+     * gate is gone: the player turns the overlay off via the Game Options
+     * TUTORIAL row (mode 0). mode 2 ("force") still additionally bypasses the
+     * gamepad-only gate below, for dev/testing on keyboard. */
     s_force_mode = (mode >= 2);
-    if (!s_force_mode && td5_save_get_tutorial_seen()) return;
 
     s_humans = g_td5.num_human_players;
     if (s_humans < 1) s_humans = 1;

@@ -7,14 +7,16 @@
  * labels are resolved from the LIVE per-player input binding, so a remap in the
  * Control-Options screen moves the label to the key it was bound to.
  *
- * Behaviour (see /fix design 2026-06-28):
+ * Behaviour (see /fix design 2026-06-28; 2026-06-29 per-race rework):
  *   - Pauses the pre-race countdown until the player presses any button.
- *   - "First race only": once dismissed, a persistent flag in
- *     td5re_progress.ini ([Tutorial] Seen) stops it ever showing again.
- *   - Config: [GameOptions] TutorialOverlay (also --TutorialOverlay=N):
+ *   - Shown at the start of EVERY race (the first thing on each race), unless
+ *     turned off in the Game Options TUTORIAL row. There is no longer a
+ *     persistent "seen" flag — every race re-arms it.
+ *   - Config: [GameOptions] TutorialOverlay (also --TutorialOverlay=N), edited
+ *     by the Game Options TUTORIAL on/off row:
  *        0 = off
- *        1 = first-race-only (default)
- *        2 = force every race (dev/testing; does NOT set the seen flag)
+ *        1 = on, every race (default; gamepad players only)
+ *        2 = force every race (dev/testing; bypasses the gamepad-only gate)
  *   - Never armed for network (would desync lockstep), cinematic/replay/attract
  *     demo races, or when slot 0 is AI-driven.
  *
