@@ -332,6 +332,11 @@ int  td5_input_recovery_requested(int player);
  * physics manual-recovery drain so it resets the right car in split-screen. */
 int  td5_input_split_btn_route_on(void);
 
+/* [SPLIT-SCREEN DEVICE BLEED 2026-06-30] Log the per-slot local input map at race
+ * start (device + physical-device key + driven actor + pane), warning when two
+ * human slots read the same physical controller. Diagnostic only. */
+void td5_input_log_race_input_map(void);
+
 void td5_input_set_replay_mode(int v);
 void td5_input_set_nos_enabled(int v);
 void td5_input_set_cop_mode(int v);

@@ -668,6 +668,47 @@ static int view_for_player(int p)
     return (p >= 0 && p < TD5_MAX_VIEWPORTS) ? p : 0;
 }
 
+/* [SPLIT-SCREEN DEVICE BLEED 2026-06-30] One-shot race-start dump of the local
+ * input map: per active local player slot — the bound device + its physical-
+ * device key, the actor slot it drives (identity), and the pane that shows that
+ * car (view_for_player). If two HUMAN slots resolve to the SAME physical pad it
+ * logs a loud WARNING: that is the signature of one controller bleeding onto
+ * multiple split-screen panes (e.g. the change-camera button flipping several
+ * players' views — the bug this diagnostic was added for). Pure logging; called
+ * from InitRace after device + viewport setup. Routed to frontend.log (input). */
+void td5_input_log_race_input_map(void)
+{
+    int n = s_active_players;
+    char keys[TD5_MAX_HUMAN_PLAYERS][300];
+    if (n < 1) n = 1;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    for (int p = 0; p < n; p++) {
+        int src   = s_input_source[p];
+        int is_ai = (g_td5.mp_ai_player_mask & (1u << p)) ? 1 : 0;
+        int pane  = view_for_player(p);
+        int shows = (pane >= 0 && pane < TD5_MAX_VIEWPORTS) ? g_actorSlotForView[pane] : -1;
+        const char *name = (src == 0) ? "keyboard" : td5_input_get_device_name(src);
+        keys[p][0] = '\0';
+        if (src > 0) td5_plat_input_slot_phys_key(p, keys[p], sizeof keys[p]);
+        TD5_LOG_I(LOG_TAG,
+            "race input-map: player=%d source=%d ai=%d device=\"%s\" drives-actor=%d "
+            "pane=%d pane-shows-actor=%d phys=\"%s\"",
+            p, src, is_ai, name ? name : "?", p, pane, shows,
+            keys[p][0] ? keys[p] : "-");
+    }
+    for (int a = 0; a < n; a++) {
+        if (!keys[a][0] || (g_td5.mp_ai_player_mask & (1u << a))) continue;
+        for (int b = a + 1; b < n; b++) {
+            if (!keys[b][0] || (g_td5.mp_ai_player_mask & (1u << b))) continue;
+            if (strcmp(keys[a], keys[b]) == 0)
+                TD5_LOG_W(LOG_TAG,
+                    "race input-map: players %d and %d read the SAME physical controller "
+                    "(key=%s) — one pad will drive BOTH panes' inputs/camera (device bleed)",
+                    a, b, keys[a]);
+        }
+    }
+}
+
 /* ========================================================================
  * PollRaceSessionInput  (0x42C470)
  *

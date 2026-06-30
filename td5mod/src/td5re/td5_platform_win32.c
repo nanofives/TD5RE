@@ -3104,6 +3104,77 @@ static LPDIRECTINPUTDEVICE8A scan_dev(int i)
     return s_di_scan[i];
 }
 
+/* [SPLIT-SCREEN DEVICE BLEED 2026-06-30] Build a "physical device key" for a
+ * DirectInput handle: the HID instance path (DIPROP_GUIDANDPATH) with the
+ * trailing 4-hex-digit HID-collection token stripped. Two DirectInput
+ * interfaces of the SAME physical controller (a pad that exposes more than one
+ * game-controller HID top-level collection) get DISTINCT instance GUIDs but
+ * share this key; two genuinely-distinct controllers — even identical models —
+ * do NOT (their instance segments differ). This is the reliable physical-device
+ * discriminator the instance GUID is not (some pads reuse a fixed instance GUID
+ * across units — see the enumeration log note). Used to stop one physical pad
+ * from claiming multiple split-screen player slots, which made one controller
+ * drive several panes' cameras (the change-camera button flipped every slot the
+ * pad was bound to). Returns 1 and fills `out` (lowercased) on success. On any
+ * failure (no handle / property unsupported / empty path) returns 0 so callers
+ * treat the device as distinct — i.e. the de-dup safely no-ops, never merges. */
+static int dev_phys_key_from_handle(LPDIRECTINPUTDEVICE8A dev, char *out, int outsz)
+{
+    DIPROPGUIDANDPATH gp;
+    int n = 0, i, last_amp = -1, hashbrace = -1, end;
+    if (!dev || !out || outsz < 2) return 0;
+    memset(&gp, 0, sizeof(gp));
+    gp.diph.dwSize       = sizeof(gp);
+    gp.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    gp.diph.dwHow        = DIPH_DEVICE;
+    gp.diph.dwObj        = 0;
+    if (FAILED(IDirectInputDevice8_GetProperty(dev, DIPROP_GUIDANDPATH, &gp.diph)))
+        return 0;
+    /* HID paths are ASCII-safe; narrow + lowercase so the compare is canonical. */
+    for (i = 0; gp.wszPath[i] && n < outsz - 1; i++) {
+        char c = (char)gp.wszPath[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        out[n++] = c;
+    }
+    out[n] = '\0';
+    if (n == 0) return 0;
+    /* The class-GUID marker "#{...}" ends the meaningful part of the path. */
+    for (i = 0; i + 1 < n; i++)
+        if (out[i] == '#' && out[i + 1] == '{') { hashbrace = i; break; }
+    end = (hashbrace >= 0) ? hashbrace : n;
+    for (i = 0; i < end; i++) if (out[i] == '&') last_amp = i;
+    /* Strip a trailing "&XXXX" ONLY when it is exactly 4 hex digits (the HID
+     * top-level-collection index). Anything else is left intact so two distinct
+     * devices can never be over-merged. */
+    if (last_amp >= 0 && (end - last_amp - 1) == 4) {
+        int ok = 1, k;
+        for (k = last_amp + 1; k < end; k++) {
+            char c = out[k];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { ok = 0; break; }
+        }
+        if (ok) { out[last_amp] = '\0'; return 1; }
+    }
+    if (hashbrace >= 0) out[hashbrace] = '\0';   /* drop the class-GUID suffix */
+    return 1;
+}
+
+/* Physical-device key for an ENUMERATED joystick index (lazily (re)creating its
+ * non-exclusive scan handle). Lobby press-to-join uses this to refuse a second
+ * interface of a pad already represented by a joined slot. */
+int td5_plat_input_device_phys_key(int enum_index, char *out, int outsz)
+{
+    return dev_phys_key_from_handle(scan_dev(enum_index), out, outsz);
+}
+
+/* Physical-device key for the in-race device BOUND to a player input slot
+ * (s_di_joystick[slot]) — no new handle is created. Used by the race-start
+ * input-map diagnostic to surface two slots reading the same physical pad. */
+int td5_plat_input_slot_phys_key(int slot, char *out, int outsz)
+{
+    if (slot < 0 || slot >= TD5_PLAT_MAX_JS_SLOTS || !s_di_joystick[slot]) return 0;
+    return dev_phys_key_from_handle(s_di_joystick[slot], out, outsz);
+}
+
 /* Multiplayer lobby "press to join" scan: bit i set if device i's join control
  * is held this frame — device 0 = keyboard (Enter), devices 1.. = joystick
  * button 0 (A). Lazily creates a non-exclusive handle per joystick.

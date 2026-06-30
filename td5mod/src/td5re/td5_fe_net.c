@@ -36,6 +36,23 @@
 
 static uint32_t s_mp_join_prev    = 0;     /* lobby join-scan mask last frame (edge) */
 
+/* [SPLIT-SCREEN DEVICE BLEED 2026-06-30] Knob for the press-to-join physical-
+ * device de-dup (default ON). When on, a controller that exposes more than one
+ * DirectInput interface can only occupy ONE local player slot, so one physical
+ * pad can never end up driving several split-screen panes' cameras. "0" reverts
+ * to the legacy per-enumerated-index join. */
+static int mp_device_dedup_on(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_MP_DEVICE_DEDUP");
+        cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP join physical-device de-dup %s (TD5RE_MP_DEVICE_DEDUP=%s)",
+                  cached ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return cached;
+}
+
 /* --- S10 net-play: explicit connection modes (LAN / Direct-IP) --- */
 static char s_net_direct_ip[64];        /* "ip" or "ip:port" entry buffer (Direct join) */
 
@@ -396,6 +413,35 @@ void Screen_MultiplayerLobby(void) {
             if (!(newly & (1u << d))) continue;
             for (j = 0; j < s_mp_joined_count; j++)
                 if (s_mp_join_device[j] == d) already = 1;
+            /* [SPLIT-SCREEN DEVICE BLEED 2026-06-30] Refuse a SECOND DirectInput
+             * interface of a controller already joined on a different enumerated
+             * index. Some pads expose multiple game-controller HID collections,
+             * each with its own instance GUID -> its own enum index; one physical
+             * A-press lights them all in THIS same scan frame, so without this
+             * guard the single pad joins as several players and then drives every
+             * one of those panes' cameras from its one change-camera button. The
+             * physical-device key (HID instance path) matches across a pad's own
+             * interfaces but differs for two genuinely distinct pads — even
+             * identical models — so a real extra player is never blocked. */
+            if (!already && mp_device_dedup_on()) {
+                char keyd[300];
+                if (td5_plat_input_device_phys_key(d, keyd, sizeof keyd)) {
+                    for (j = 0; j < s_mp_joined_count; j++) {
+                        int jd = s_mp_join_device[j];
+                        char keyj[300];
+                        if (jd > 0 &&
+                            td5_plat_input_device_phys_key(jd, keyj, sizeof keyj) &&
+                            strcmp(keyd, keyj) == 0) {
+                            already = 1;
+                            TD5_LOG_W(LOG_TAG,
+                                "MP Lobby: device %d is the SAME physical controller as "
+                                "joined device %d (slot %d) — ignoring duplicate DirectInput "
+                                "interface (key=%s)", d, jd, j, keyd);
+                            break;
+                        }
+                    }
+                }
+            }
             if (!already && s_mp_joined_count < TD5_MAX_HUMAN_PLAYERS) {
                 s_mp_join_device[s_mp_joined_count++] = d;
                 joined_now = 1;
