@@ -5,7 +5,16 @@
  * gitignored). Line format:
  *     # comment
  *     [ ] item still to test
- *     [x] item already tested   <- pruned by the /end routine
+ *     [x] item already tested   <- /end retires these (see below)
+ *     #- retired item           <- tested-and-cleared or user-deleted; never
+ *                                  shown again and never re-seeded from k_seed[]
+ *
+ * On launch td5_pending_init() MERGES any k_seed[] entry not already present
+ * (and not retired) into the loaded file, newest-first — so a freshly-shipped
+ * feature surfaces in the checklist even on a machine whose td5re_pending.txt
+ * already exists. Before this the file was frozen after its first run, so every
+ * item shipped later stayed invisible in the in-game list. Tested/deleted items
+ * are tombstoned (#- ) so the merge doesn't bring them back.
  */
 #include "td5_pending.h"
 #include "td5_platform.h"
@@ -16,7 +25,7 @@
 
 #define LOG_TAG "pending"
 
-#define PENDING_MAX       128
+#define PENDING_MAX       256   /* > K_SEED_COUNT so no shipped item is dropped */
 #define PENDING_TEXT_MAX  120
 
 typedef struct { char text[PENDING_TEXT_MAX]; int done; } PendingItem;
@@ -24,6 +33,29 @@ typedef struct { char text[PENDING_TEXT_MAX]; int done; } PendingItem;
 static PendingItem s_items[PENDING_MAX];
 static int s_count      = 0;
 static int s_overlay_on = 0;
+
+/* Tombstones: items the user tested-and-cleared (/end retires [x] rows) or
+ * deleted (SUPR). Persisted as "#- text" lines so the launch-time seed merge
+ * never resurrects them. */
+static char s_retired[PENDING_MAX][PENDING_TEXT_MAX];
+static int  s_retired_count = 0;
+
+static int retired_contains(const char *text) {
+    int i;
+    if (!text) return 0;
+    for (i = 0; i < s_retired_count; i++)
+        if (strcmp(s_retired[i], text) == 0) return 1;
+    return 0;
+}
+
+static void retired_add(const char *text) {
+    if (s_retired_count >= PENDING_MAX || !text) return;
+    while (*text == ' ' || *text == '\t') text++;
+    if (!*text || retired_contains(text)) return;
+    strncpy(s_retired[s_retired_count], text, PENDING_TEXT_MAX - 1);
+    s_retired[s_retired_count][PENDING_TEXT_MAX - 1] = '\0';
+    s_retired_count++;
+}
 
 /* Compiled-in seed list — used ONLY when no file exists yet (first run on a
  * machine). Keep each concise: these double as the right-justified overlay
@@ -247,7 +279,7 @@ static void pending_add(const char *text, int done) {
 static void pending_load_file(void) {
     const char *path = pending_path();
     TD5_File   *f    = td5_plat_file_open(path, "rb");
-    static char buf[16384];
+    static char buf[65536];   /* must match td5_pending_save's buffer */
     size_t      n;
     char       *line;
     if (!f) return;
@@ -262,7 +294,14 @@ static void pending_load_file(void) {
         if (nl) *nl = '\0';
         s = line;
         while (*s == ' ' || *s == '\t') s++;
-        if (*s && *s != '#') {
+        if (*s == '#') {
+            if (s[1] == '-') {                      /* "#- text" = retired tombstone */
+                const char *t = s + 2;
+                while (*t == ' ' || *t == '\t') t++;
+                retired_add(t);
+            }
+            /* any other "# ..." line is an ordinary comment — ignore */
+        } else if (*s) {
             int         done = 0;
             const char *txt  = s;
             if (s[0] == '[' && s[2] == ']') {       /* "[ ] text" / "[x] text" */
@@ -280,15 +319,17 @@ static void pending_load_file(void) {
 void td5_pending_save(void) {
     const char *path = pending_path();
     TD5_File   *f    = td5_plat_file_open(path, "wb");
-    static char buf[16384];
+    static char buf[65536];
     int         len  = 0, i;
     if (!f) { TD5_LOG_W(LOG_TAG, "save: cannot open %s", path); return; }
     len += snprintf(buf + len, sizeof buf - (size_t)len,
-        "# TD5RE pending-test checklist.  [x] = tested/done (pruned by /end),  [ ] = still to test.\r\n"
-        "# The game rewrites this when you toggle items on the PENDING TO TEST menu; edit freely too.\r\n");
+        "# TD5RE pending-test checklist.  [ ] = still to test,  [x] = tested,  #- = retired.\r\n"
+        "# The game merges newly-shipped items on launch; edit freely.  /end retires [x] items.\r\n");
     for (i = 0; i < s_count && len < (int)sizeof buf - (PENDING_TEXT_MAX + 16); i++)
         len += snprintf(buf + len, sizeof buf - (size_t)len, "[%c] %s\r\n",
                         s_items[i].done ? 'x' : ' ', s_items[i].text);
+    for (i = 0; i < s_retired_count && len < (int)sizeof buf - (PENDING_TEXT_MAX + 16); i++)
+        len += snprintf(buf + len, sizeof buf - (size_t)len, "#- %s\r\n", s_retired[i]);
     if (len < 0) len = 0;
     if (len > (int)sizeof buf) len = (int)sizeof buf;
     td5_plat_file_write(f, buf, (size_t)len);
@@ -296,17 +337,39 @@ void td5_pending_save(void) {
 }
 
 int td5_pending_init(void) {
+    static PendingItem prior[PENDING_MAX];   /* snapshot of the file's live items */
+    int prior_count, i, j;
+
+    s_count         = 0;
+    s_retired_count = 0;
+    pending_load_file();                 /* live items + retired (#- ) tombstones */
+
+    /* Rebuild the list so freshly-shipped k_seed[] entries surface. New work is
+     * added at the TOP of k_seed[], so iterating it in order lands newest-first.
+     * We carry over each item's prior tested-state and never resurrect a retired
+     * one. THIS is what makes new work show up in the in-game checklist on a
+     * machine that already has a td5re_pending.txt — the file used to be frozen
+     * after the first run, so nothing shipped later ever appeared. */
+    prior_count = s_count;
+    for (i = 0; i < prior_count; i++) prior[i] = s_items[i];
     s_count = 0;
-    pending_load_file();                 /* an existing file is authoritative */
-    if (s_count == 0) {                  /* first run / empty → seed + persist */
-        int i;
-        for (i = 0; i < K_SEED_COUNT; i++) pending_add(k_seed[i], 0);
-        td5_pending_save();
-        TD5_LOG_I(LOG_TAG, "seeded %d pending-test items at %s", s_count, pending_path());
-    } else {
-        TD5_LOG_I(LOG_TAG, "loaded %d pending-test items (%d remaining)",
-                  s_count, td5_pending_remaining());
+
+    for (i = 0; i < K_SEED_COUNT; i++) {           /* 1) seeds, newest-first */
+        const char *t    = k_seed[i];
+        int         done = 0;
+        while (*t == ' ' || *t == '\t') t++;
+        if (!*t || retired_contains(t)) continue;
+        for (j = 0; j < prior_count; j++)          /* preserve prior tested-state */
+            if (strcmp(prior[j].text, t) == 0) { done = prior[j].done; break; }
+        pending_add(t, done);
     }
+    for (j = 0; j < prior_count; j++)              /* 2) keep hand-added, non-seed */
+        if (!retired_contains(prior[j].text))
+            pending_add(prior[j].text, prior[j].done);   /* de-dups against seeds */
+
+    td5_pending_save();                            /* persist merged list + tombstones */
+    TD5_LOG_I(LOG_TAG, "pending-test: %d item(s), %d remaining, %d retired (%s)",
+              s_count, td5_pending_remaining(), s_retired_count, pending_path());
     return 1;
 }
 
@@ -328,13 +391,14 @@ void td5_pending_toggle(int i) {
     td5_pending_save();
 }
 
-/* Remove item i from the list (shift the tail down) and persist. Used by the
- * SUPR/Delete key on the PENDING TO TEST menu to drop a row outright instead of
- * just marking it tested. The seed list is only consulted on a first run, so a
- * deleted item stays gone in the backing file. */
+/* Remove item i from the list (shift the tail down), tombstone it, and persist.
+ * Used by the SUPR/Delete key on the PENDING TO TEST menu to drop a row outright
+ * instead of just marking it tested. The tombstone (#- ) is what keeps the
+ * launch-time seed merge from re-adding the deleted item. */
 void td5_pending_delete(int i) {
     int k;
     if (i < 0 || i >= s_count) return;
+    retired_add(s_items[i].text);        /* tombstone so the seed merge won't re-add it */
     for (k = i; k < s_count - 1; k++) s_items[k] = s_items[k + 1];
     s_count--;
     s_items[s_count].text[0] = '\0';

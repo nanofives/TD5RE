@@ -230,7 +230,7 @@ Every user-visible fix/feature must be reflected in the two in-game lists so pla
    - If today has no block yet, add a `{ CL_BLANK, "" }` then `{ CL_DATE, "Month DD" }` (today's date) at the very top of `LAST 7 DAYS`, then your item(s).
    - Keep each line ≤ ~62 chars (it must clear the scrollbar). Wrap a long item onto a continuation `{ CL_ITEM, "  ..." }` line with a **leading two-space indent** — the renderer hangs continuations under the bullet text automatically.
    - Describe the player-visible effect, not the RE detail (e.g. "Police cars are now tougher and never launch airborne", not "cop_break_mag 150000").
-2. **PENDING TO TEST** — `td5_pending.c`, the `k_seed[]` array. Add one concise item string (≤ ~50 chars; it doubles as the right-justified overlay line) near the **top** of the array (most recent first). This seeds fresh checkouts and the in-game checklist; the runtime `td5re_pending.txt` is untracked, so `k_seed[]` is the durable home. **De-dup:** don't add a line that already says the same thing.
+2. **PENDING TO TEST** — `td5_pending.c`, the `k_seed[]` array. Add one concise item string (≤ ~50 chars; it doubles as the right-justified overlay line) near the **top** of the array (most recent first). The game merges new `k_seed[]` items into an existing `td5re_pending.txt` on launch (`td5_pending_init`), so the item surfaces in the in-game checklist even on a machine that already has the file — no need to delete it. The runtime file is untracked, so `k_seed[]` is the durable home. **De-dup:** don't add a line that already says the same thing.
 
 If a single `/fix` makes several distinct user-visible changes, add a bullet + a pending item for each.
 
