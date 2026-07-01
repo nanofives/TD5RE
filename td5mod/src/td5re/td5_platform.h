@@ -690,6 +690,30 @@ void td5_plat_render_bind_texture(int page_index);
 /** Configure fog parameters. */
 void td5_plat_render_set_fog(int enable, uint32_t color, float start, float end, float density);
 
+/* [DYNAMIC LIGHTS] Deferred screen-space light. One entry per dynamic light. */
+typedef struct TD5_LightGPU {
+    float x, y, z, range;      /* world position (float world units) + range     */
+    float r, g, b, intensity;  /* colour (0..1) + peak intensity (0..1)           */
+    float dx, dy, dz, cone;    /* beam dir (unit) + cos(outer half-angle);
+                                * cone <= -1 => omni point light (no cone)         */
+} TD5_LightGPU;
+
+/* [DYNAMIC LIGHTS] Run the deferred light pass over the CURRENT viewport: the
+ * backend samples scene depth, reconstructs each pixel's world position from the
+ * camera params, and adds every light additively onto the scene. Call once per
+ * viewport AFTER the opaque world geometry, BEFORE translucent VFX/HUD.
+ *   cam_pos  : camera world position (3 floats)
+ *   basis9   : camera basis, row-major {right[3], up[3], forward[3]}
+ *   focal    : focal length; center_x/y : viewport projection centre (pane-relative)
+ *   vp_x/vp_y: viewport origin in render-target pixels (for pane-relative recon)
+ *   depth_scale/depth_bias : depth_z = (view_z - bias)/scale encoding
+ * No-op if lighting is unsupported (shader/cbuffer/depth-SRV missing) or count<=0. */
+void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
+                                  float focal, float center_x, float center_y,
+                                  float vp_x, float vp_y,
+                                  float depth_scale, float depth_bias,
+                                  const TD5_LightGPU *lights, int light_count);
+
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);
 

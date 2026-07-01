@@ -217,6 +217,19 @@ typedef struct {
     float   _pad2;
 } FogCB;
 
+/* Deferred dynamic-light pass constant buffer (mirrors ps_light.hlsl LightCB).
+ * Must stay 16-byte aligned; each light is 3 float4 (pos+range, color+intensity,
+ * dir+coneCos). LIGHT_MAX_GPU must match LIGHT_MAX in ps_light.hlsl. */
+#define LIGHT_MAX_GPU 32
+typedef struct {
+    float camPosFocal[4];    /* xyz = camera world pos, w = focal            */
+    float rightCx[4];        /* xyz = camera right,   w = viewport center X  */
+    float upCy[4];           /* xyz = camera up,      w = viewport center Y  */
+    float fwdDepthScale[4];  /* xyz = camera forward, w = depth scale        */
+    float misc[4];           /* x = depth bias, y = count, z = vpX, w = vpY  */
+    float lights[LIGHT_MAX_GPU * 3][4];
+} LightCB;
+
 /* ========================================================================
  * Global D3D11 backend state (single-instance, game is single-threaded)
  * ======================================================================== */
@@ -276,6 +289,7 @@ typedef struct {
     ID3D11VertexShader      *vs_fullscreen;
     ID3D11PixelShader       *ps_shaders[PS_COUNT];  /* Indexed by PS_* constants */
     ID3D11PixelShader       *ps_composite;           /* Fullscreen blit shader */
+    ID3D11PixelShader       *ps_light;                /* Deferred dynamic-light pass */
     ID3D11InputLayout       *input_layout;           /* TD5_FVF vertex layout */
 
     /* Immutable state objects (pre-created at init) */
@@ -294,6 +308,7 @@ typedef struct {
     /* Constant buffers */
     ID3D11Buffer            *cb_viewport;   /* ViewportCB */
     ID3D11Buffer            *cb_fog;        /* FogCB */
+    ID3D11Buffer            *cb_light;      /* LightCB (deferred light pass) */
 
     /* Render state cache */
     RenderStateCache        state;
@@ -873,6 +888,13 @@ void Backend_ApplyStateCache(void);  /* Bind D3D11 state objects from cache */
 void Backend_SelectPixelShader(void); /* Choose PS based on texblend + alpha + tex format */
 void Backend_UpdateFogCB(void);      /* Upload fog constant buffer */
 void Backend_UpdateViewportCB(float w, float h); /* Upload viewport constant buffer */
+
+/* Deferred dynamic-light pass: upload `cb` (camera + light array), then draw a
+ * fullscreen additive pass that samples scene depth (depth_srv), reconstructs
+ * world position, and accumulates the lights onto the scene render target. Runs
+ * over the CURRENT D3D viewport/scissor (call after the opaque world geometry of
+ * a viewport, before translucent VFX/HUD). No-op if depth_srv/ps_light are NULL. */
+void Backend_ApplyLightPass(const LightCB *cb);
 
 /* [2026-06-08 streaming-ring] Append vertices (+ optional 16-bit indices) to the
  * dynamic VB/IB ring with WRITE_NO_OVERWRITE (DISCARD only on wrap). On success

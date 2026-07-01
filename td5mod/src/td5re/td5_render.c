@@ -48,6 +48,7 @@
 #include "td5_arcade.h"   /* ARCADE power-up pad / hazard world billboards */
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_ai.h"
+#include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
 #include "td5re.h"
 
 #include "../../../re/include/td5_actor_struct.h"
@@ -348,6 +349,14 @@ typedef struct RenderScratch {
     float ambient_intensity;
     TL_Contribution tl_contrib[3];
     int   tl_ambient;
+    /* [DYNAMIC LIGHTS] model->world basis for the mesh whose vertex lighting is
+     * about to be computed: origin (world units) + body->world rotation (9
+     * floats, row-major). has_rot=0 means identity rotation (track geometry,
+     * vertices already in world-offset space). Set per-mesh right before
+     * td5_render_compute_vertex_lighting; per-pane so threaded panes can't race. */
+    float light_basis_origin[3];
+    float light_basis_rot[9];
+    int   light_basis_has_rot;
     /* "currently/previously bound page" — per-pane render state (the LRU cache
      * array itself stays shared; see note at its declaration). */
     int current_texture_page;
@@ -434,6 +443,9 @@ static __thread RenderScratch *g_rs = &g_rs_default;
 #define s_ambient_intensity         (g_rs->ambient_intensity)
 #define s_tl_contrib                (g_rs->tl_contrib)
 #define s_tl_ambient                (g_rs->tl_ambient)
+#define s_light_basis_origin        (g_rs->light_basis_origin)
+#define s_light_basis_rot           (g_rs->light_basis_rot)
+#define s_light_basis_has_rot       (g_rs->light_basis_has_rot)
 /* s_texture_cache / _active_count are SHARED statics (declared at their original
  * site), NOT g_rs fields. s_current/_previous_texture_page ARE per-pane g_rs. */
 #define s_current_texture_page      (g_rs->current_texture_page)
@@ -833,6 +845,7 @@ static void render_vehicle_wheels_unified(TD5_Actor *actor, int slot);  /* wheel
 static int  wheel_overhaul_enabled(void);
 static int  wheel_traffic_enabled(void);
 static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
+static void render_vehicle_headlights(const TD5_Actor *actor, int slot);
 static void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
 static void render_tracked_actor_marker(const TD5_Actor *actor,
                                         const TD5_Mat3x3 *body_rot,
@@ -2424,6 +2437,225 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
  * re/tools/extract_td6_lightzones.py (-> LIGHTZONES.BIN). To bring the runtime
  * back, re-add a loader + a per-view selector + the prelit-path modulation. */
 
+/* ====================== DYNAMIC POINT LIGHTS (port extension) =============
+ * The original engine lit vertices with only 3 DIRECTIONAL contributions + a
+ * scalar ambient (ComputeMeshVertexLighting @ 0x0043DDF0). The helpers below
+ * add an attenuated POSITIONAL N.L term per registered dynamic light (see
+ * td5_light.c) into the same per-vertex luminance, before the original's
+ * [0x40,0xFF] clamp — the minimum addition that lets a moving light (a
+ * headlight) illuminate an area. When no lights are registered, or none reach
+ * the mesh, every loop below is fully skipped and lighting is byte-identical to
+ * the original. */
+
+/* A dynamic light transformed into the MODEL space of the mesh being lit. */
+typedef struct LightModelPt {
+    float x, y, z;     /* light position in mesh model space (== vertex space) */
+    float inv_range;   /* 1/range, for the linear distance falloff */
+    float intensity;   /* peak luminance bump at the surface */
+} LightModelPt;
+
+/* Dark-mode config. When on, the ambient + directional luminance is scaled down
+ * and the clamp floor is lowered so "very dark areas" read as dark and the
+ * additive headlight pool stands out. Headlight bumps are NOT dimmed. Default
+ * OFF (set from [Lighting] DarkMode / --DarkMode), so daylight tracks render
+ * exactly as before. The scale/floor are env-tunable. */
+static int   s_light_dark_mode  = 0;
+static int   s_dark_knobs_read  = 0;
+static float s_dark_scale       = 0.50f;   /* ambient/directional dim under dark mode */
+static int   s_dark_floor       = 0x2A;     /* clamp floor: distant geometry stays dim, not black */
+
+/* [AUTO LIGHTS] Environment-brightness probe: the player's current track-zone
+ * ambient (set each frame in the actor lighting pass). Auto mode enables the
+ * headlights when this is below s_auto_ambient_thresh (or when the weather is
+ * non-clear). Both env-tunable. */
+static float s_env_ambient       = 255.0f;
+static int   s_auto_knobs_read   = 0;
+/* The per-zone ambient scalar turned out NOT to discriminate bright vs dark
+ * tracks (it sits at the 0x40 floor even on sunny tracks), so the ambient term
+ * is OFF by default (threshold 0 = never). Weather is the reliable "poorly lit"
+ * signal (non-clear = rain/storm/overcast/dusk). Raise via TD5RE_LIGHT_AUTO_AMBIENT
+ * only if a specific track needs the extra trigger. */
+static int   s_auto_ambient_thr  = 0;
+
+static void light_read_dark_knobs(void)
+{
+    if (s_dark_knobs_read) return;
+    s_dark_knobs_read = 1;
+    const char *es = getenv("TD5RE_LIGHT_DARK_SCALE");
+    if (es && es[0]) { float v = (float)atof(es); if (v > 0.0f && v <= 1.0f) s_dark_scale = v; }
+    const char *ef = getenv("TD5RE_LIGHT_DARK_FLOOR");
+    if (ef && ef[0]) { int v = atoi(ef); if (v >= 0 && v <= 0xFF) s_dark_floor = v; }
+    const char *em = getenv("TD5RE_LIGHT_DARK_MODE");   /* env override of the INI toggle */
+    if (em && em[0]) s_light_dark_mode = (em[0] != '0');
+    TD5_LOG_I(LOG_TAG, "lighting dark-mode: %s (scale=%.2f floor=0x%02X)",
+              s_light_dark_mode ? "ON" : "off", (double)s_dark_scale, s_dark_floor);
+}
+
+void td5_render_set_dark_mode(int on)
+{
+    s_light_dark_mode = on ? 1 : 0;
+}
+
+/* [DEFERRED LIGHTS] Run the screen-space light pass for the CURRENT viewport.
+ * Copies the world-space dynamic-light registry into the GPU light array and
+ * hands it to the backend with this pane's camera params; the backend samples
+ * scene depth, reconstructs each pixel's world position, and adds the lights.
+ * Call once per viewport AFTER the opaque world (track + actors), BEFORE the
+ * translucent VFX / HUD. vp_x/vp_y = this pane's origin in render-target pixels
+ * (0,0 for a single full-screen viewport). */
+void td5_render_apply_light_pass(int vp_x, int vp_y)
+{
+    if (!td5_light_enabled()) return;
+
+    int n = 0;
+    const TD5_DynLight *L = td5_light_list(&n);
+    if (!L || n <= 0) return;
+    if (n > TD5_LIGHT_MAX) n = TD5_LIGHT_MAX;
+
+    TD5_LightGPU gpu[TD5_LIGHT_MAX];
+    for (int i = 0; i < n; i++) {
+        gpu[i].x = L[i].x; gpu[i].y = L[i].y; gpu[i].z = L[i].z; gpu[i].range = L[i].range;
+        gpu[i].r = L[i].r; gpu[i].g = L[i].g; gpu[i].b = L[i].b; gpu[i].intensity = L[i].intensity;
+        gpu[i].dx = L[i].dx; gpu[i].dy = L[i].dy; gpu[i].dz = L[i].dz; gpu[i].cone = L[i].cone;
+    }
+
+    /* camera basis rows are {right, up, forward}; depth_z = (view_z-bias)/scale. */
+    float basis9[9];
+    for (int i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
+    float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
+    float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
+
+    td5_plat_render_apply_lights(cam, basis9,
+                                 s_focal_length, s_center_x, s_center_y,
+                                 (float)vp_x, (float)vp_y,
+                                 depth_scale, NEAR_DEPTH_OFFSET,
+                                 gpu, n);
+}
+
+/* [AUTO LIGHTS] Verdict: is the current environment poorly lit (so headlights
+ * should auto-enable)? True when the weather is non-clear (rain/storm/night) OR
+ * the player's track-zone ambient is below the threshold (tunnels, dark tracks).
+ * The manual [Lighting] DarkMode also forces it (the game folds that in). Env
+ * knobs: TD5RE_LIGHT_AUTO_AMBIENT (0..255 threshold), TD5RE_LIGHT_AUTO_LOG. */
+int td5_render_env_is_dark(void)
+{
+    if (!s_auto_knobs_read) {
+        s_auto_knobs_read = 1;
+        const char *e = getenv("TD5RE_LIGHT_AUTO_AMBIENT");
+        if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= 255) s_auto_ambient_thr = v; }
+    }
+    int weather_dark = (g_td5.weather != TD5_WEATHER_CLEAR);
+    int ambient_dark = (s_env_ambient < (float)s_auto_ambient_thr);
+    int dark = weather_dark || ambient_dark;
+
+    static int s_log = 0;
+    if (getenv("TD5RE_LIGHT_AUTO_LOG") && (s_log++ % 120) == 0) {
+        TD5_LOG_I(LOG_TAG, "auto-lights: env_ambient=%.0f thr=%d weather_dark=%d -> dark=%d",
+                  (double)s_env_ambient, s_auto_ambient_thr, weather_dark, dark);
+    }
+    return dark;
+}
+
+/* Install the model->world basis for the next compute_vertex_lighting call.
+ * origin = mesh world origin (world units); rot9 = body->world rotation (9
+ * floats row-major) or NULL for identity (track geometry already in world-offset
+ * space). Per-pane (g_rs) so concurrent threaded panes don't race. */
+void td5_render_set_light_basis(const float origin[3], const float *rot9)
+{
+    s_light_basis_origin[0] = origin[0];
+    s_light_basis_origin[1] = origin[1];
+    s_light_basis_origin[2] = origin[2];
+    if (rot9) {
+        for (int i = 0; i < 9; i++) s_light_basis_rot[i] = rot9[i];
+        s_light_basis_has_rot = 1;
+    } else {
+        s_light_basis_has_rot = 0;
+    }
+}
+
+/* Transform every registered dynamic light into `mesh` model space, keeping
+ * only those whose range sphere intersects the mesh bounding sphere. Returns
+ * the kept count (0 = no dynamic lighting work for this mesh). */
+static int light_build_model_list(const TD5_MeshHeader *mesh,
+                                   LightModelPt *out, int max_out)
+{
+    /* [DEFERRED LIGHTS] The per-vertex point-light bump is superseded by the
+     * screen-space deferred light pass (td5_render_apply_light_pass) and is
+     * disabled by default. TD5RE_LIGHT_PERVERTEX=1 re-enables the legacy path
+     * (note: registry intensity is now 0..1, so it would need rescaling). */
+    static int s_pv = -1;
+    if (s_pv < 0) { const char *e = getenv("TD5RE_LIGHT_PERVERTEX"); s_pv = (e && e[0] == '1') ? 1 : 0; }
+    if (!s_pv) return 0;
+
+    int n = 0;
+    const TD5_DynLight *lights = td5_light_list(&n);
+    if (!lights || n <= 0) return 0;
+
+    float ox = s_light_basis_origin[0];
+    float oy = s_light_basis_origin[1];
+    float oz = s_light_basis_origin[2];
+    const float *R = s_light_basis_has_rot ? &s_light_basis_rot[0] : NULL;
+
+    float bcx = mesh->bounding_center_x;
+    float bcy = mesh->bounding_center_y;
+    float bcz = mesh->bounding_center_z;
+    float br  = mesh->bounding_radius;
+
+    int kept = 0;
+    for (int i = 0; i < n && kept < max_out; i++) {
+        const TD5_DynLight *L = &lights[i];
+        float dx = L->x - ox, dy = L->y - oy, dz = L->z - oz;
+        float mx, my, mz;
+        if (R) {
+            /* world->model = R^T * dpos (R is body->world, row-major): the same
+             * column-sum tl_commit_to_render_globals uses for light dirs. */
+            mx = dx * R[0] + dy * R[3] + dz * R[6];
+            my = dx * R[1] + dy * R[4] + dz * R[7];
+            mz = dx * R[2] + dy * R[5] + dz * R[8];
+        } else {
+            mx = dx; my = dy; mz = dz;
+        }
+        /* Light-sphere vs mesh bounding-sphere reject (model space). */
+        float sdx = mx - bcx, sdy = my - bcy, sdz = mz - bcz;
+        float reach = L->range + br;
+        if (sdx * sdx + sdy * sdy + sdz * sdz > reach * reach) continue;
+        out[kept].x = mx; out[kept].y = my; out[kept].z = mz;
+        out[kept].inv_range = (L->range > 0.0f) ? (1.0f / L->range) : 0.0f;
+        out[kept].intensity = L->intensity;
+        kept++;
+    }
+    return kept;
+}
+
+/* Per-vertex additive luminance from the model-space light list. nx/ny/nz is the
+ * (unit) vertex normal; px/py/pz the model-space vertex position. */
+static float light_vertex_bump(const LightModelPt *lm, int nlights,
+                               float px, float py, float pz,
+                               float nx, float ny, float nz)
+{
+    float bump = 0.0f;
+    for (int k = 0; k < nlights; k++) {
+        float dx = lm[k].x - px, dy = lm[k].y - py, dz = lm[k].z - pz;
+        float d2 = dx * dx + dy * dy + dz * dz;
+        float d  = sqrtf(d2);
+        float t  = 1.0f - d * lm[k].inv_range;   /* linear falloff [0..1] */
+        if (t <= 0.0f) continue;
+        float ndotl;
+        if (d > 1e-3f) {
+            float inv = 1.0f / d;
+            ndotl = (dx * nx + dy * ny + dz * nz) * inv;
+        } else {
+            ndotl = 1.0f;
+        }
+        if (ndotl < 0.0f) ndotl = 0.0f;
+        /* Soft wrap: a little fill so surfaces angled away from the lamp still
+         * catch the pool (the road and side faces don't all face the light). */
+        float lit = ndotl * 0.85f + 0.15f;
+        bump += lm[k].intensity * t * lit;
+    }
+    return bump;
+}
+
 void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 {
     if (!mesh) return;
@@ -2480,6 +2712,16 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     if (td5_damage_get_scuff(slot, mesh, &dmg_scuff, &dmg_sc))
         scuff_str = td5_damage_scuff_strength();
 
+    /* [DYNAMIC LIGHTS] Build the model-space light list for this mesh once.
+     * nlights==0 (and dark off) leaves every branch below byte-identical to the
+     * original. The light basis was installed by td5_render_set_light_basis()
+     * right before this call (actor pos+rotation, or track origin / identity). */
+    light_read_dark_knobs();
+    LightModelPt lm[TD5_LIGHT_MAX];
+    int nlights = light_build_model_list(mesh, lm, TD5_LIGHT_MAX);
+    int dark = s_light_dark_mode;
+    int floor_lum = dark ? s_dark_floor : TD5_LIGHTING_MIN;
+
     for (int i = 0; i < count; i++) {
         /* damage darkening factor for this vertex (1.0 = undamaged) */
         float df = 1.0f;
@@ -2499,6 +2741,26 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
                 int b = (int)(( c        & 0xFF) * df);
                 c = (c & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
             }
+            /* [DYNAMIC LIGHTS] dark-mode dim + additive headlight bump on the
+             * baked ARGB (zero-cost / byte-identical when both are off). */
+            if (dark || nlights) {
+                int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+                if (dark) { r = (int)(r * s_dark_scale); g = (int)(g * s_dark_scale); b = (int)(b * s_dark_scale); }
+                if (nlights) {
+                    int ib = (int)light_vertex_bump(lm, nlights,
+                                 vb[i].pos_x, vb[i].pos_y, vb[i].pos_z, nx, ny, nz);
+                    r += ib; g += ib; b += ib;
+                }
+                if (dark) {
+                    if (r < floor_lum) r = floor_lum;
+                    if (g < floor_lum) g = floor_lum;
+                    if (b < floor_lum) b = floor_lum;
+                }
+                if (r > 255) r = 255;
+                if (g > 255) g = 255;
+                if (b > 255) b = 255;
+                c = (c & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            }
             verts[i].lighting = c;
             continue;
         }
@@ -2511,8 +2773,15 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 
         /* Add ambient, clamp to [0x40, 0xFF] */
         intensity += s_ambient_intensity;
+        /* [DYNAMIC LIGHTS] dark-mode dims the ambient+directional base; the
+         * additive headlight bump is applied ON TOP (undimmed) so the lit pool
+         * stands out in dark areas. Both no-ops when off => byte-identical. */
+        if (dark) intensity *= s_dark_scale;
+        if (nlights)
+            intensity += light_vertex_bump(lm, nlights,
+                             verts[i].pos_x, verts[i].pos_y, verts[i].pos_z, nx, ny, nz);
         int lum = (int)intensity;
-        lum = clampi(lum, TD5_LIGHTING_MIN, TD5_LIGHTING_MAX);
+        lum = clampi(lum, floor_lum, TD5_LIGHTING_MAX);
 
         if (use_tint) {
             /* Full ARGB = lit-luminance * tint; alpha 0xFF bypasses the color LUT. */
@@ -3041,6 +3310,10 @@ void td5_render_span_display_list(void *display_list_block)
              * tracks (override 0) keep the per-span zone lighting untouched. */
             if (g_active_td6_level > 0)
                 td5_render_set_override_daylight();
+            /* [DYNAMIC LIGHTS] track verts are world-space offset by `origin`
+             * (model rotation identity), so the light basis is origin + no rot. */
+            { float lbo[3] = { origin.x, origin.y, origin.z };
+              td5_render_set_light_basis(lbo, NULL); }
             td5_render_compute_vertex_lighting(mesh, -1);   /* track mesh: no tint */
             td5_render_prepared_mesh(mesh);
             s_debug_span_meshes_submitted++;
@@ -4147,6 +4420,16 @@ void td5_render_actors_for_view(int view_index)
              * BEFORE compute_vertex_lighting since that's the consumer of
              * s_light_dirs[]/s_ambient_intensity. */
             td5_render_apply_track_lighting(slot, actor);
+            /* [AUTO LIGHTS] Capture the player's current track-zone ambient as the
+             * environment-brightness probe (low in tunnels / dark tracks). Read
+             * one frame later by td5_render_env_is_dark() to auto-toggle headlights. */
+            if (slot == 0)
+                s_env_ambient = s_ambient_intensity;
+            /* [DYNAMIC LIGHTS] actor verts are in body space; the model->world
+             * basis is the interpolated world pos + the actor's body->world
+             * rotation, so dynamic lights are transformed into body space. */
+            { float lbo[3] = { render_pos.x, render_pos.y, render_pos.z };
+              td5_render_set_light_basis(lbo, actor->rotation_matrix.m); }
             td5_render_compute_vertex_lighting(mesh, slot);
 
             /* Vehicle shadow is now drawn in the shadow PRE-PASS above (before
@@ -4242,6 +4525,9 @@ void td5_render_actors_for_view(int view_index)
             }
             if (is_racer)
                 render_vehicle_brake_lights(actor, slot);
+            /* [DYNAMIC LIGHTS] visible front headlamp glow (racers). */
+            if (is_racer)
+                render_vehicle_headlights(actor, slot);
 
             /* (Vehicle shadow drawn in the per-view shadow pre-pass above.) */
 
@@ -7457,6 +7743,230 @@ static void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
     if (glow_fx) td5_plat_fx_end();
 
     /* Restore opaque so it doesn't leak into next mesh */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* --- Vehicle Headlight FLOOD (port extension — ground light pool) ---
+ * Draws a soft ADDITIVE light quad on the ROAD, extending forward from the car's
+ * front axle, bright at the car and fading forward — the visible "flood zone"
+ * that per-vertex lighting alone can't paint on the coarse track geometry. Built
+ * from the four wheel probes (world-space ground contacts): front-axle midpoint
+ * as the near edge, forward = front->rear axle direction, half-width from the
+ * front-track vector. Rendered like the vehicle shadow (world corners projected
+ * through the camera basis, z-tested, tiny toward-camera bias vs the road).
+ * Env: TD5RE_HEADLIGHT_FLOOD (0/1), _FLOOD_LEN (forward reach), _FLOOD_BRIGHT. */
+static void render_vehicle_headlight_flood(const TD5_Actor *actor)
+{
+    static int   rd = 0;
+    static int   s_flood_on      = 0;   /* superseded by the deferred light pass; TD5RE_HEADLIGHT_FLOOD=1 re-enables the legacy mesh flood */
+    static float s_flood_len      = 14000.0f; /* forward reach on the road (world units; track scale ~100k) */
+    static float s_flood_ahead    = 300.0f;   /* start this far ahead of the front axle */
+    static float s_flood_bright   = 225.0f;   /* additive brightness at the lamps (0..255) */
+    static float s_flood_nearw    = 750.0f;   /* fan half-width near the car */
+    static float s_flood_farw     = 4200.0f;  /* fan half-width far ahead */
+    static float s_flood_lift     = 22.0f;    /* raise the mesh off the road; world +Y is DOWN */
+    static float s_flood_falloff  = 1.05f;    /* forward fade exponent (higher = shorter throw) */
+    static float s_flood_zbias    = 45.0f;    /* toward-camera depth bias (view-z): big enough to beat the coplanar road z-fight (no flicker), far below the car gap so the car still occludes it */
+    if (!rd) {
+        rd = 1;
+        const char *e;
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD"))         && e[0]) s_flood_on      = (e[0] != '0');
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD_LEN"))     && e[0]) s_flood_len     = (float)atof(e);
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD_AHEAD"))   && e[0]) s_flood_ahead   = (float)atof(e);
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD_BRIGHT"))  && e[0]) s_flood_bright  = (float)atof(e);
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD_NEARW"))   && e[0]) s_flood_nearw   = (float)atof(e);
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD_FARW"))    && e[0]) s_flood_farw    = (float)atof(e);
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD_LIFT"))    && e[0]) s_flood_lift    = (float)atof(e);
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD_FALLOFF")) && e[0]) s_flood_falloff = (float)atof(e);
+        if ((e = getenv("TD5RE_HEADLIGHT_FLOOD_ZBIAS"))   && e[0]) s_flood_zbias   = (float)atof(e);
+    }
+    if (!s_flood_on || !actor) return;
+
+    const float inv256 = 1.0f / 256.0f;
+    extern float g_subTickFraction;
+    float frac = g_subTickFraction;
+    float idx = (float)actor->linear_velocity_x * frac * inv256;
+    float idy = (float)actor->linear_velocity_y * frac * inv256;
+    float idz = (float)actor->linear_velocity_z * frac * inv256;
+
+    float FLx = (float)actor->probe_FL.x*inv256+idx, FLy = (float)actor->probe_FL.y*inv256+idy, FLz = (float)actor->probe_FL.z*inv256+idz;
+    float FRx = (float)actor->probe_FR.x*inv256+idx, FRy = (float)actor->probe_FR.y*inv256+idy, FRz = (float)actor->probe_FR.z*inv256+idz;
+    float RLx = (float)actor->probe_RL.x*inv256+idx, RLy = (float)actor->probe_RL.y*inv256+idy, RLz = (float)actor->probe_RL.z*inv256+idz;
+    float RRx = (float)actor->probe_RR.x*inv256+idx, RRy = (float)actor->probe_RR.y*inv256+idy, RRz = (float)actor->probe_RR.z*inv256+idz;
+
+    float fmx = (FLx+FRx)*0.5f, fmz = (FLz+FRz)*0.5f;   /* front-axle mid (ground) */
+    float rmx = (RLx+RRx)*0.5f, rmz = (RLz+RRz)*0.5f;   /* rear-axle mid  */
+    float fdx = fmx-rmx, fdz = fmz-rmz;                 /* ground forward (XZ) */
+    float flen = sqrtf(fdx*fdx + fdz*fdz);
+    if (flen < 1e-3f) return;
+    fdx /= flen; fdz /= flen;
+    float rgx = -fdz, rgz = fdx;                        /* ground right (lateral) unit */
+
+    /* Fit the road plane y = pa*x + pb*z + pc from the four wheel contacts, so
+     * every grid node's Y hugs the road surface (conforming). This is why the
+     * shadow is visible from this low camera where a flat quad goes edge-on. */
+    float xz[4][2] = { {FLx,FLz}, {FRx,FRz}, {RLx,RLz}, {RRx,RRz} };
+    float wy[4]    = { FLy, FRy, RLy, RRy };
+    float pa, pb, pc;
+    if (!shadow_fit_wheel_plane(xz, wy, &pa, &pb, &pc)) {
+        pa = pb = 0.0f;
+        pc = 0.25f*(FLy+FRy+RLy+RRy);
+    }
+
+    /* Headlight lateral separation (each lamp inboard of its front wheel) + the
+     * per-beam gaussian half-width near the car. */
+    float track    = sqrtf((FRx-FLx)*(FRx-FLx) + (FRz-FLz)*(FRz-FLz));
+    float lamp_sep = track * 0.42f;
+    float bw_near  = lamp_sep * 1.25f + 550.0f;   /* broad lobes -> cones merge into a full flood */
+
+    /* Conforming fan grid on the road ahead. Per-node additive brightness = TWO
+     * headlight cones: a soft gaussian lobe around each lamp's forward beam axis
+     * (+/- lamp_sep) that widens with distance, times a forward fade. Drawn as an
+     * additive road-conforming mesh (same tech as the shadow -> visible on any
+     * slope). Env: _LEN reach, _AHEAD start, _NEARW/_FARW fan width, _BRIGHT,
+     * _FALLOFF forward-fade exponent, _LIFT. */
+    #define HLF_COLS 11
+    #define HLF_ROWS 14
+    TD5_D3DVertex verts[HLF_COLS*HLF_ROWS];
+    for (int r = 0; r < HLF_ROWS; r++) {
+        float tF = (float)r / (float)(HLF_ROWS - 1);              /* 0 near .. 1 far */
+        float d  = s_flood_ahead + (s_flood_len - s_flood_ahead) * tF;
+        float hw = s_flood_nearw + (s_flood_farw - s_flood_nearw) * tF;
+        float bw = bw_near + (s_flood_farw*0.85f - bw_near) * tF; /* beam widens with distance */
+        float ff = powf(1.0f - tF, s_flood_falloff);             /* forward fade */
+        float ccx = fmx + fdx*d, ccz = fmz + fdz*d;
+        for (int c = 0; c < HLF_COLS; c++) {
+            float tR  = (HLF_COLS>1) ? ((float)c/(float)(HLF_COLS-1))*2.0f - 1.0f : 0.0f;
+            float lat = tR * hw;                                 /* lateral offset from centreline */
+            float nx  = ccx + rgx*lat;
+            float nz  = ccz + rgz*lat;
+            float ny  = pa*nx + pb*nz + pc - s_flood_lift;
+            /* two-cone brightness: gaussian lobes centred on +/- lamp_sep */
+            float dl  = (lat + lamp_sep) / bw;
+            float dr  = (lat - lamp_sep) / bw;
+            float lobe = expf(-dl*dl) + expf(-dr*dr);
+            if (lobe > 1.0f) lobe = 1.0f;
+            int bri = (int)(s_flood_bright * ff * lobe);
+            if (bri < 0)   bri = 0;
+            if (bri > 255) bri = 255;
+            uint32_t col = 0xFF000000u | ((uint32_t)bri<<16) | ((uint32_t)bri<<8) | (uint32_t)bri;
+
+            int n = r*HLF_COLS + c;
+            float dx = nx - s_camera_pos[0], dy = ny - s_camera_pos[1], dz = nz - s_camera_pos[2];
+            float vx = dx*s_camera_basis[0] + dy*s_camera_basis[1] + dz*s_camera_basis[2];
+            float vy = dx*s_camera_basis[3] + dy*s_camera_basis[4] + dz*s_camera_basis[5];
+            float vz = dx*s_camera_basis[6] + dy*s_camera_basis[7] + dz*s_camera_basis[8];
+            if (vz < s_near_clip) vz = s_near_clip;   /* clamp near-gap nodes, keep the patch */
+            float inv_z = 1.0f/vz;
+            verts[n].screen_x = -vx*s_focal_length*inv_z + s_center_x;
+            verts[n].screen_y = -vy*s_focal_length*inv_z + s_center_y;
+            verts[n].depth_z  = (vz-NEAR_DEPTH_OFFSET)*DEPTH_NORMALIZE_INV - s_flood_zbias*DEPTH_NORMALIZE_INV;
+            verts[n].rhw = inv_z; verts[n].diffuse = col; verts[n].specular = 0;
+            verts[n].tex_u = 0.0f; verts[n].tex_v = 0.0f;
+        }
+    }
+
+    uint16_t idxb[(HLF_COLS-1)*(HLF_ROWS-1)*6];
+    int ii = 0;
+    for (int r = 0; r < HLF_ROWS-1; r++) {
+        for (int c = 0; c < HLF_COLS-1; c++) {
+            uint16_t a  = (uint16_t)(r*HLF_COLS + c);
+            uint16_t b2 = (uint16_t)(a + 1);
+            uint16_t d2 = (uint16_t)(a + HLF_COLS);
+            uint16_t e2 = (uint16_t)(d2 + 1);
+            idxb[ii++]=a; idxb[ii++]=b2; idxb[ii++]=e2;
+            idxb[ii++]=a; idxb[ii++]=e2; idxb[ii++]=d2;
+        }
+    }
+
+    flush_immediate_internal();
+    /* z-tested additive (ONE/ONE, z_write off): the CAR (hundreds of view-z
+     * closer) occludes the flood, but the strong toward-camera s_flood_zbias
+     * beats the coplanar-road z-fight so it doesn't flicker. Far nodes fade to ~0
+     * brightness, so any residual z-fight far out adds nothing visible. */
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE);
+    td5_plat_render_bind_texture(899);   /* 1x1 white -> additive brightness = per-node value */
+    td5_plat_render_draw_tris(verts, HLF_COLS*HLF_ROWS, idxb, ii);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    #undef HLF_COLS
+    #undef HLF_ROWS
+}
+
+/* --- Vehicle Headlights (port extension — visible front lamps + road flood) ---
+ * The original TD5 has no headlights (only the rear taillight quads above). This
+ * draws two ADDITIVE white glow sprites at each car's FRONT lamp positions — the
+ * rear taillight hardpoints (car_def+0x60/+0x68) mirrored in Z — so headlights
+ * read as visibly "on", plus the ground flood pool above. The per-vertex point
+ * lights in td5_light.c still tint nearby geometry. Called from the actor pass
+ * with the render transform already loaded, like render_vehicle_brake_lights.
+ * Gated by the lighting/headlight enables. */
+static void render_vehicle_headlights(const TD5_Actor *actor, int slot)
+{
+    if (!actor) return;
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
+    if (!td5_light_enabled() || !td5_light_headlights_enabled()) return;
+
+    /* Legacy mesh flood (default off; deferred light pass replaces it). */
+    render_vehicle_headlight_flood(actor);
+
+    /* Visible front headlamp GLOW sprite — the little circle on the car. Removed
+     * by default (user request 2026-07-01): the deferred road flood is the whole
+     * effect now. TD5RE_HEADLAMP_SPRITE=1 restores the lamp glow. */
+    static int s_headlamp_sprite = -1;
+    if (s_headlamp_sprite < 0) {
+        const char *e = getenv("TD5RE_HEADLAMP_SPRITE");
+        s_headlamp_sprite = (e && e[0] == '1') ? 1 : 0;
+    }
+    if (!s_headlamp_sprite) return;
+
+    const uint8_t *ap = (const uint8_t *)actor;
+    void *car_def = NULL;
+    memcpy(&car_def, ap + 0x1B8, sizeof(void *));
+    if (!car_def) return;
+
+    /* Rear lamp hardpoints (int16[3] model space); front = mirror of Z. */
+    int16_t hp0[3], hp1[3];
+    memcpy(hp0, (const uint8_t *)car_def + 0x60, 6);
+    memcpy(hp1, (const uint8_t *)car_def + 0x68, 6);
+    const int16_t *hp[2] = { hp0, hp1 };
+
+    const float *m = s_render_transform.m;
+    const float half_size = 60.0f;   /* lamp billboard half-extent (model units) */
+
+    /* Texture-free additive white lamp via the glow FX (canonical UVs); falls
+     * back to the 1x1 white page as an additive square when the proc FX is off. */
+    int glow_fx = (td5_vfx_proc_enabled() && td5_plat_fx_begin(TD5_FX_GLOW, 0.0f, 1.0f));
+    uint32_t lamp_col = 0xFFFFFFFFu;   /* opaque white (additive) */
+
+    for (int lamp = 0; lamp < 2; lamp++) {
+        float px =  (float)hp[lamp][0];
+        float py =  (float)hp[lamp][1];
+        float pz = -(float)hp[lamp][2];   /* front = mirror of the rear lamp in Z */
+
+        float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
+        float vy = px*m[3] + py*m[4] + pz*m[5] + m[10];
+        float vz = px*m[6] + py*m[7] + pz*m[8] + m[11];
+        if (vz <= s_near_clip) continue;
+
+        float inv_z = 1.0f / vz;
+        float cx = -vx * s_focal_length * inv_z + s_center_x;
+        float cy = -vy * s_focal_length * inv_z + s_center_y;
+        float depth = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - BRAKE_DEPTH_BIAS;
+        float h = half_size * s_focal_length * inv_z;
+
+        TD5_D3DVertex v[4];
+        v[0].screen_x=cx-h; v[0].screen_y=cy-h; v[0].depth_z=depth; v[0].rhw=inv_z; v[0].diffuse=lamp_col; v[0].specular=0; v[0].tex_u=0.0f; v[0].tex_v=0.0f;
+        v[1].screen_x=cx-h; v[1].screen_y=cy+h; v[1].depth_z=depth; v[1].rhw=inv_z; v[1].diffuse=lamp_col; v[1].specular=0; v[1].tex_u=0.0f; v[1].tex_v=1.0f;
+        v[2].screen_x=cx+h; v[2].screen_y=cy-h; v[2].depth_z=depth; v[2].rhw=inv_z; v[2].diffuse=lamp_col; v[2].specular=0; v[2].tex_u=1.0f; v[2].tex_v=0.0f;
+        v[3].screen_x=cx+h; v[3].screen_y=cy+h; v[3].depth_z=depth; v[3].rhw=inv_z; v[3].diffuse=lamp_col; v[3].specular=0; v[3].tex_u=1.0f; v[3].tex_v=1.0f;
+        uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
+        flush_immediate_internal();
+        td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_GLOW);
+        if (!glow_fx) td5_plat_render_bind_texture(899);   /* 1x1 white fallback */
+        td5_plat_render_draw_tris(v, 4, idx, 6);
+    }
+
+    if (glow_fx) td5_plat_fx_end();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 

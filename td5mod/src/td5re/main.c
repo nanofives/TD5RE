@@ -39,6 +39,7 @@
 #include "td5_asset.h"
 #include "td5_assetsrc.h"
 #include "td5_render.h"
+#include "td5_light.h"    /* [DYNAMIC LIGHTS] master enable / headlights / dark-mode push */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -266,6 +267,12 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Audio", "RadioEnabled", g_td5.ini.radio_enabled);
     td5_ini_write_int("Audio", "RadioVolume",  g_td5.ini.radio_volume);
 
+    /* Lighting (dynamic light system) */
+    td5_ini_write_int("Lighting", "Enabled",    g_td5.ini.lighting_enabled);
+    td5_ini_write_int("Lighting", "Headlights", g_td5.ini.headlights);
+    td5_ini_write_int("Lighting", "DarkMode",   g_td5.ini.light_dark_mode);
+    td5_ini_write_int("Lighting", "Auto",       g_td5.ini.lighting_auto);
+
     /* Game options */
     td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
     td5_ini_write_int("GameOptions", "CheckpointTimers", g_td5.ini.checkpoint_timers);
@@ -341,6 +348,11 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SFXMode",              &g_td5.ini.sfx_mode },
         { "RadioEnabled",         &g_td5.ini.radio_enabled },
         { "RadioVolume",          &g_td5.ini.radio_volume },
+        /* Lighting */
+        { "Lighting",             &g_td5.ini.lighting_enabled },
+        { "Headlights",           &g_td5.ini.headlights },
+        { "DarkMode",             &g_td5.ini.light_dark_mode },
+        { "LightAuto",            &g_td5.ini.lighting_auto },
         /* GameOptions */
         { "Laps",                 &g_td5.ini.laps },
         { "CheckpointTimers",     &g_td5.ini.checkpoint_timers },
@@ -745,6 +757,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     td5_ini_str("Audio", "RadioURL", "http://ice1.somafm.com/beatblender-128-mp3",
                 g_td5.ini.radio_url, sizeof(g_td5.ini.radio_url));
 
+    /* Lighting (dynamic light system foundation) */
+    g_td5.ini.lighting_enabled = td5_ini_int("Lighting", "Enabled", 1);
+    g_td5.ini.headlights       = td5_ini_int("Lighting", "Headlights", 1);
+    g_td5.ini.light_dark_mode  = td5_ini_int("Lighting", "DarkMode", 0);
+    g_td5.ini.lighting_auto    = td5_ini_int("Lighting", "Auto", 1);
+
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
     g_td5.ini.checkpoint_timers  = td5_ini_int("GameOptions", "CheckpointTimers", 1);
@@ -1055,6 +1073,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         if (n_cli > 0)
             dbglog("=== %d CLI override(s) applied ===", n_cli);
     }
+
+    /* [DYNAMIC LIGHTS] Push the finalized (INI + CLI) lighting config into the
+     * light registry + renderer. These setters just latch static flags, so
+     * calling them before module init is safe. */
+    td5_light_set_enabled(g_td5.ini.lighting_enabled);
+    td5_light_set_headlights(g_td5.ini.headlights);
+    td5_light_set_auto(g_td5.ini.lighting_auto);
+    td5_render_set_dark_mode(g_td5.ini.light_dark_mode);
+    dbglog("Lighting: enabled=%d headlights=%d dark_mode=%d auto=%d",
+           g_td5.ini.lighting_enabled, g_td5.ini.headlights,
+           g_td5.ini.light_dark_mode, g_td5.ini.lighting_auto);
 
     /* String CLI knob (the int-only override table above can't carry it):
      * --PlayerCarArchive=<code> overrides [Game] PlayerCarArchive so parallel

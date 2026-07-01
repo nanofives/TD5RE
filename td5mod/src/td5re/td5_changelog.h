@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 1" },
+    { CL_ITEM,    "New: dynamic headlights. Cars cast real headlight" },
+    { CL_ITEM,    "  beams that flood the road ahead per-pixel, lighting" },
+    { CL_ITEM,    "  whatever they fall on. They switch ON automatically" },
+    { CL_ITEM,    "  in poorly-lit conditions (rain / storm / overcast /" },
+    { CL_ITEM,    "  dusk) and stay off in bright daylight. Tune via" },
+    { CL_ITEM,    "  [Lighting] (Enabled, Auto, Headlights, DarkMode)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "June 30" },
     { CL_ITEM,    "Fixed: in split-screen Cup, a player could end up" },
     { CL_ITEM,    "  unable to accelerate on a later race (but still" },
