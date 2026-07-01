@@ -919,6 +919,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * matching the original attract-mode autopilot (InitializeRaceSession
      * 0x0042ACCF writes slot[0].state = 1 - g_attractModeDemoActive). */
     g_td5.ini.player_is_ai      = td5_ini_int("GameOptions", "PlayerIsAI", 0);
+    /* [DRAG RACE OPTIONS] LENGTH 0=SHORT..3=EPIC, TRAFFIC 0/1 (oncoming). */
+    g_td5.ini.drag_length       = td5_ini_int("GameOptions", "DragLength", 1);
+    if (g_td5.ini.drag_length < 0) g_td5.ini.drag_length = 0;
+    if (g_td5.ini.drag_length > 3) g_td5.ini.drag_length = 3;
+    g_td5.ini.drag_traffic      = td5_ini_int("GameOptions", "DragTraffic", 0) ? 1 : 0;
     /* OtherPlayersAI: AI-drive every local human slot except slot 0 (drive P1). */
     g_td5.ini.others_ai         = td5_ini_int("GameOptions", "OtherPlayersAI", 0);
     g_td5.ini.solo_ai_slot      = td5_ini_int("GameOptions", "SoloAISlot", 0);

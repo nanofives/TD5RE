@@ -439,7 +439,12 @@ typedef enum TD5_MpGameMode {
      * PORT-ONLY. */
     TD5_MP_MODE_TRAFFIC_BATTLE = 3,
     TD5_MP_MODE_COP_CHASE      = 4,  /* one designated cop chases the suspects       */
-    TD5_MP_MODE_COUNT          = 5
+    /* [DRAG RACE 2026-06-30] Lane-change drag strip (level030 stadium), no AI
+     * opponents, no track selector (always the drag strip). Options: oncoming
+     * TRAFFIC on/off, DISTANCE preset (SHORT/MEDIUM/LONG/EPIC), EXTRA LANES on top
+     * of the per-player lanes. Win = race to the finish (standard placement). */
+    TD5_MP_MODE_DRAG_RACE      = 5,
+    TD5_MP_MODE_COUNT          = 6
 } TD5_MpGameMode;
 
 /** Traffic-battle win condition (battle_win_condition). */
@@ -551,6 +556,16 @@ typedef struct TD5_MpModeConfig {
      * but also keep moving). Replicated for lockstep. Appended for a stable wire
      * layout. */
     int32_t battle_win_condition;
+    /* [DRAG RACE 2026-06-30] Drag-mode options (mode == TD5_MP_MODE_DRAG_RACE).
+     * drag_traffic:     0 = none, 1 = oncoming traffic stream.
+     * drag_length:      distance preset 0=SHORT 1=MEDIUM 2=LONG 3=EPIC (feeds
+     *                   drag_length_level / td5_game_drag_length_finish_span).
+     * drag_extra_lanes: extra road lanes ON TOP of the per-player lanes (the drag
+     *                   field is num_human_players + drag_extra_lanes, clamped).
+     * Appended at the END for a stable wire layout (lockstep replication). */
+    int32_t drag_traffic;
+    int32_t drag_length;
+    int32_t drag_extra_lanes;
 } TD5_MpModeConfig;
 
 /* ========================================================================

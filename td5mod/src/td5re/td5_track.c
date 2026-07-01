@@ -142,6 +142,14 @@ static TD5_StripVertex *s_vertex_table = NULL;
  * dynamic drag race. When non-NULL, s_vertex_table points HERE (a malloc'd
  * table) instead of into s_strip_blob; freed on every track (re)load. */
 static TD5_StripVertex *s_drag_synth_vertices = NULL;
+/* [DRAG DYNAMIC LENGTHEN] When non-NULL, s_span_array points HERE (a malloc'd
+ * array of the original strip's spans REPEATED down-track) instead of into
+ * s_strip_blob; freed on every track (re)load. */
+static TD5_StripSpan   *s_drag_synth_spans = NULL;
+static int              s_drag_applied_repeats = 0;  /* 1 if the strip was lengthened */
+static int              s_drag_insert_span = -1;     /* index where clean spans were inserted */
+static int              s_drag_extra_spans = 0;      /* count of clean spans inserted */
+static int              s_drag_finish_span = -1;     /* finish span on the inserted clean road */
 static int              s_span_count = 0;
 static int              s_aux_count = 0;
 static int              s_secondary_count = 0;
@@ -948,6 +956,38 @@ void td5_track_bind_boundary_sentinels(int level_number)
     }
     s_boundary_fwd_sentinel = s_level_boundary_sentinels[level_number - 1][0];
     s_boundary_rev_sentinel = s_level_boundary_sentinels[level_number - 1][1];
+    /* [DRAG LENGTHEN] The drag strip was lengthened by inserting clean spans at
+     * s_drag_insert_span; a boundary that sat AFTER the insertion point has shifted
+     * down-track by s_drag_extra_spans. Move it so the end-of-corridor wall stays
+     * at the real (shifted) end instead of capping mid-strip on an inserted span
+     * (which is what blocked the car at the OLD position). */
+    if (s_drag_applied_repeats && s_drag_extra_spans > 0) {
+        if (s_boundary_fwd_sentinel >= s_drag_insert_span)
+            s_boundary_fwd_sentinel += s_drag_extra_spans;
+        if (s_boundary_rev_sentinel >= s_drag_insert_span)
+            s_boundary_rev_sentinel += s_drag_extra_spans;
+        TD5_LOG_I(LOG_TAG,
+                  "boundary sentinels: drag-shifted (ins=%d extra=%d) -> fwd=%d rev=%d",
+                  s_drag_insert_span, s_drag_extra_spans,
+                  s_boundary_fwd_sentinel, s_boundary_rev_sentinel);
+    }
+    /* [DRAG LENGTH] Vanilla walls the drag straight off at span 240, but the strip
+     * has straight road WITH scenery to ~span 299. Push the forward end-cap (the
+     * higher of the two sentinels) out to the strip end so a LONGER drag can use
+     * that existing road. */
+    if (g_td5.drag_race_enabled) {
+        int ring2 = g_td5.track_span_ring_length;
+        int cap2  = (ring2 > 8) ? (ring2 - 2) : -1;
+        if (cap2 > 0) {
+            if (s_boundary_fwd_sentinel >= s_boundary_rev_sentinel) {
+                if (s_boundary_fwd_sentinel < cap2) s_boundary_fwd_sentinel = cap2;
+            } else {
+                if (s_boundary_rev_sentinel < cap2) s_boundary_rev_sentinel = cap2;
+            }
+            TD5_LOG_I(LOG_TAG, "boundary sentinels: drag forward-cap -> %d (fwd=%d rev=%d)",
+                      cap2, s_boundary_fwd_sentinel, s_boundary_rev_sentinel);
+        }
+    }
     TD5_LOG_I(LOG_TAG,
               "boundary sentinels: level=%d fwd=%d rev=%d",
               level_number, s_boundary_fwd_sentinel, s_boundary_rev_sentinel);
@@ -2325,6 +2365,122 @@ static int16_t drag_clamp_i16(int v)
  * normal/branched track bails and stays faithful. Called from the strip load
  * path before camera-bind / display-list build. Returns 1 if widened.
  */
+/* [DRAG DYNAMIC LENGTHEN 2026-06-29] Make the drag strip LONGER by INSERTING
+ * `extra` copies of a clean mid-strip 4-span block into the MIDDLE of the straight
+ * (NOT at the start gantry or the walled stadium end). The drag strip is a fixed
+ * stadium straight: the spawn is ~span 115 and the corridor walls off ~span 239,
+ * so we insert just before that wall, copying the 4 clean spans right before the
+ * insertion point so the join is seamless. Spans after the insertion shift
+ * down-track (origin_z), so the finish lands on the inserted CLEAN road well
+ * before the (shifted) wall — the car never reaches the wall. The inserted/shifted
+ * region renders via the procedural ribbon (MODELS.DAT scenery is baked at fixed
+ * positions and can't follow). Must run BEFORE the widener so every inserted span
+ * is re-spread too. No-op on any non-uniform track. */
+static int td5_track_drag_apply_length(int extra)
+{
+    int i, j, k, ring, ins, new_count;
+    TD5_StripSpan *ns;
+
+    if (extra < 4) return 0;
+    extra = (extra / 4) * 4;                        /* keep the 4-span block whole */
+    if (!s_span_array || s_span_count <= 16) return 0;
+    ring = g_td5.track_span_ring_length;
+    if (ring < 16 || ring > s_span_count) ring = s_span_count;
+
+    for (i = 0; i < s_span_count; i++) {
+        if (s_span_array[i].span_type != 1) {
+            TD5_LOG_W(LOG_TAG,
+                      "drag lengthen: span %d type=%d (non-uniform) -> leaving track faithful",
+                      i, s_span_array[i].span_type);
+            return 0;
+        }
+    }
+    /* The strip's origin_z is a COARSE per-~20-span grid (step -32768; origin_x/y are
+     * CONSTANT) with the fine per-span down-track position baked into the VERTICES.
+     * So we REPLICATE clean straight ORIGIN-BLOCKS verbatim (copy real spans, vertices
+     * intact) rather than synthesising a linear origin_z (which desynced the per-span
+     * world spacing and stalled the span-contact walker). Crucially the insertion point
+     * and the replicated segment must fall on origin-block BOUNDARIES (spans whose
+     * origin_z differs from the previous) and the run must be a whole number of blocks,
+     * else the tiling seam kinks the road every repeat and the car drifts. */
+    ins = 150;
+    if (ins >= ring - 40) ins = ring / 3;
+    if (ins < 20)         ins = 20;
+    { int b = ins;                                   /* snap ins to the next block start */
+      while (b < s_span_count - 40 && s_span_array[b].origin_z == s_span_array[b - 1].origin_z) b++;
+      ins = b; }
+
+    {
+        int seg_b = ins, seg_a = ins, blocks = 0, scan;
+        int L;
+        int32_t oz;
+        for (scan = ins - 1; scan > 20 && blocks < 4; scan--)   /* up to 4 whole blocks back */
+            if (s_span_array[scan].origin_z != s_span_array[scan - 1].origin_z) { seg_a = scan; blocks++; }
+        L = seg_b - seg_a;
+        if (L < 4 || blocks < 1) {
+            TD5_LOG_W(LOG_TAG, "drag lengthen: no clean block segment before ins=%d -> faithful", ins);
+            return 0;
+        }
+        extra = (extra / L) * L;                     /* whole segments so the tail phase-aligns */
+        if (extra < L) extra = L;
+
+        new_count = s_span_count + extra;
+        ns = (TD5_StripSpan *)malloc((size_t)new_count * sizeof(TD5_StripSpan));
+        if (!ns) { TD5_LOG_E(LOG_TAG, "drag lengthen: OOM for %d spans", new_count); return 0; }
+        memcpy(ns, s_span_array, (size_t)ins * sizeof(TD5_StripSpan));   /* [0, ins) unchanged */
+
+        oz = s_span_array[ins - 1].origin_z;         /* running origin, continues from ins-1 */
+        for (j = 0; j < extra; j++) {
+            int idx = seg_a + (j % L);
+            int32_t step = ((j % L) == 0)
+                ? (s_span_array[seg_b].origin_z - s_span_array[seg_b - 1].origin_z)  /* wrap = block boundary */
+                : (s_span_array[idx].origin_z - s_span_array[idx - 1].origin_z);     /* segment's own (quantized) delta */
+            oz += step;
+            ns[ins + j] = s_span_array[idx];         /* copy vertices + cross-section verbatim */
+            ns[ins + j].origin_z = oz;
+        }
+        {
+            int32_t tail_shift = oz - s_span_array[ins - 1].origin_z;  /* total inserted drop */
+            for (k = 0; k < s_span_count - ins; k++) {                 /* tail continues below the inserts */
+                ns[ins + extra + k] = s_span_array[ins + k];
+                ns[ins + extra + k].origin_z += tail_shift;
+            }
+        }
+    }
+
+    if (s_drag_synth_spans) free(s_drag_synth_spans);
+    s_drag_synth_spans = ns;
+    s_span_array       = ns;
+    g_strip_span_base  = ns;
+    s_span_count       = new_count;
+    s_drag_applied_repeats = 1;
+    s_drag_insert_span = ins;
+    s_drag_extra_spans = extra;
+    s_drag_finish_span = ins + extra - 24;          /* leave ~24 spans of clean inserted
+                                                     * run-off after the finish for braking
+                                                     * (before the shifted tail begins) */
+    g_td5.track_span_ring_length = ring + extra;
+
+    TD5_LOG_I(LOG_TAG,
+              "drag lengthen: inserted %d clean spans at %d (segment-replicated); %d->%d spans, "
+              "finish~%d, ring %d->%d",
+              extra, ins, new_count - extra, new_count,
+              s_drag_finish_span, ring, ring + extra);
+    return 1;
+}
+
+/* 1 if the strip was lengthened this load (else 0). */
+int td5_track_drag_applied_repeats(void) { return s_drag_applied_repeats; }
+/* Span index where the clean spans were inserted (the ribbon paints from here on,
+ * and MODELS.DAT scenery is suppressed past here); -1 if no lengthening. */
+int td5_track_drag_insert_span(void)     { return s_drag_insert_span; }
+/* Finish-line span on the inserted clean road; -1 if no lengthening. */
+int td5_track_drag_finish_span(void)     { return s_drag_finish_span; }
+/* Last span the inserted clean road covers (= insert + extra); past here is the
+ * shifted original tail (the old wall/curve) which must NOT render. -1 if none. */
+int td5_track_drag_tail_end(void)        { return (s_drag_insert_span >= 0)
+                                                  ? s_drag_insert_span + s_drag_extra_spans : -1; }
+
 static int td5_track_drag_apply_geometry(int target_lanes)
 {
     int i;
@@ -2432,6 +2588,15 @@ int td5_track_load_strip(const void *data, size_t size)
         free(s_drag_synth_vertices);
         s_drag_synth_vertices = NULL;
     }
+    /* [DRAG DYNAMIC LENGTHEN] drop any repeated-span array from the previous track. */
+    if (s_drag_synth_spans) {
+        free(s_drag_synth_spans);
+        s_drag_synth_spans = NULL;
+    }
+    s_drag_applied_repeats = 0;
+    s_drag_insert_span = -1;
+    s_drag_extra_spans = 0;
+    s_drag_finish_span = -1;
     s_strip_blob_size = 0;
     s_span_array = NULL;
     s_vertex_table = NULL;
@@ -2563,6 +2728,18 @@ int td5_track_load_strip(const void *data, size_t size)
      * so every downstream consumer sees the widened geometry. No-op (faithful)
      * on any non-uniform track even if the flag is set. */
     if (g_td5.drag_race_enabled) {
+        /* [DRAG LENGTHEN] Insert clean mid-strip spans BEFORE widening so every
+         * inserted span also gets re-spread. The count of spans to insert comes
+         * from the drag LENGTH option (td5_game_drag_length_repeats); env
+         * TD5RE_DRAG_EXTRA overrides for testing. */
+        int extra = td5_game_drag_length_repeats();
+        const char *re = getenv("TD5RE_DRAG_EXTRA");
+        if (re && re[0]) extra = atoi(re);
+        if (extra >= 4) {
+            if (extra > 2000) extra = 2000;
+            td5_track_drag_apply_length(extra);
+        }
+
         int lanes = td5_game_drag_field_size();
         TD5_LOG_I(LOG_TAG, "drag widen: requesting %d lanes (humans=%d ai=%d)",
                   lanes, g_td5.num_human_players, g_td5.num_ai_opponents);
@@ -5395,7 +5572,15 @@ int td5_track_normalize_actor_wrap(TD5_Actor *actor)
 
     /* Source the divisor from hdr[1] (main-road span count, == original
      * g_trackTotalSpanCount), NOT the inflated s_span_count. */
-    if (s_strip_header) {
+    if (g_td5.drag_race_enabled && td5_track_drag_applied_repeats()) {
+        /* [DRAG DISTANCE 2026-06-30] The LENGTHENED drag strip's spans run past the
+         * original main-road count (hdr[1] ~300), so dividing by hdr[1] wrapped the
+         * player's span back to ~0 before it ever reached the relocated finish (~438)
+         * — the race never ended. apply_length updates track_span_ring_length (not
+         * hdr[1]), so use the extended ring here. Drag is point-to-point, so there is
+         * no real lap wrap to preserve. */
+        ring_length = (int32_t)g_td5.track_span_ring_length;
+    } else if (s_strip_header) {
         ring_length = (int32_t)s_strip_header[1];
     } else {
         ring_length = (int32_t)g_td5.track_span_ring_length;
@@ -6093,6 +6278,43 @@ int td5_track_load_routes(const void *left_data, size_t left_size,
         }
         memcpy(s_route_right, right_data, right_size);
         s_route_right_size = right_size;
+    }
+
+    /* [DRAG LENGTHEN 2026-06-29] The drag route (LEFT/RIGHT.TRK) is SHORTER than
+     * the strip (~239 spans vs 301+), so the walker reaches the route end and the
+     * car physically can't drive to a finish placed beyond it (the LONG/EPIC
+     * options, and EPIC's repeated spans). Extend BOTH route tables to cover the
+     * whole (possibly lengthened) strip by repeating a steady mid-strip straight
+     * entry — the drag strip is uniform, so every route entry is the same
+     * centred/straight value. Runs after load_strip (which set s_span_count), so
+     * the strip length is already final here. */
+    if (g_td5.drag_race_enabled && s_span_count > 0) {
+        int want = s_span_count;
+        int sidx;
+        uint8_t **tbl[2]   = { &s_route_left, &s_route_right };
+        size_t  *tsz[2]    = { &s_route_left_size, &s_route_right_size };
+        for (sidx = 0; sidx < 2; sidx++) {
+            uint8_t *old = *tbl[sidx];
+            int have = (int)(*tsz[sidx] / 3);
+            if (!old || have >= want) continue;
+            {
+                int tmpl = (have > 8) ? (have / 2) : 0;   /* mid-strip steady entry */
+                uint8_t *nw = (uint8_t *)malloc((size_t)want * 3);
+                int s;
+                if (!nw) continue;
+                memcpy(nw, old, *tsz[sidx]);
+                for (s = have; s < want; s++) {
+                    nw[s * 3 + 0] = old[tmpl * 3 + 0];
+                    nw[s * 3 + 1] = old[tmpl * 3 + 1];
+                    nw[s * 3 + 2] = old[tmpl * 3 + 2];
+                }
+                free(old);
+                *tbl[sidx] = nw;
+                *tsz[sidx] = (size_t)want * 3;
+            }
+        }
+        TD5_LOG_I(LOG_TAG, "drag route extend: -> %d spans (left=%u right=%u bytes)",
+                  want, (unsigned)s_route_left_size, (unsigned)s_route_right_size);
     }
 
     td5_ai_set_route_tables(s_route_left, s_route_left_size,
@@ -7592,6 +7814,7 @@ int td5_track_init(void)
     s_span_array = NULL;
     s_vertex_table = NULL;
     s_drag_synth_vertices = NULL;   /* freed by shutdown/load; init starts fresh */
+    s_drag_synth_spans = NULL;
     s_span_count = 0;
     s_strip_blob = NULL;
     s_strip_blob_size = 0;
@@ -7632,6 +7855,10 @@ void td5_track_shutdown(void)
     if (s_drag_synth_vertices) {
         free(s_drag_synth_vertices);
         s_drag_synth_vertices = NULL;
+    }
+    if (s_drag_synth_spans) {
+        free(s_drag_synth_spans);
+        s_drag_synth_spans = NULL;
     }
     s_strip_blob_size = 0;
     s_span_array = NULL;

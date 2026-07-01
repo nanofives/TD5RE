@@ -320,6 +320,15 @@ void td5_track_init_actor_segment_placement(int16_t *actor_at_0x80, int32_t *out
 
 int  td5_track_span_lane_count_at(int span_index);
 
+/* [DRAG LENGTHEN] 1 if the drag strip was lengthened this load (clean spans
+ * inserted mid-strip); insert-span = where they were inserted (ribbon paints +
+ * MODELS.DAT scenery is suppressed from here on); finish-span = finish on the
+ * inserted clean road. The latter two are -1 when no lengthening occurred. */
+int  td5_track_drag_applied_repeats(void);
+int  td5_track_drag_insert_span(void);
+int  td5_track_drag_finish_span(void);
+int  td5_track_drag_tail_end(void);
+
 /* [LANE ASSIST 2026-06-28] Continuous look-ahead lane-centre target line for the
  * optional steering aid (td5_laneassist.c). Walks up to `lookahead` spans forward
  * from (from_span, from_sub_lane) following the SAME fork rule the original walker

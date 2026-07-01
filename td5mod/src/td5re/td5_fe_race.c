@@ -3404,7 +3404,7 @@ static int mp_game_modes_enabled(void) {
 }
 
 static const char *const k_mp_mode_names[TD5_MP_MODE_COUNT] = {
-    "REGULAR RACE", "TIME TRIAL", "CUP", "TRAFFIC BATTLE", "COP CHASE"
+    "REGULAR RACE", "TIME TRIAL", "CUP", "TRAFFIC BATTLE", "COP CHASE", "DRAG RACE"
 };
 static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
     "Classic race to the finish",
@@ -3412,6 +3412,7 @@ static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
     "Best-of-X series, points by position",
     "Wreck the most ONCOMING traffic - placement ignored",
     "One cop hunts the rest before time runs out",
+    "Lane-change drag - no AI, optional oncoming traffic",
 };
 
 /* Each local player's current pick (index into TD5_MpGameMode). Player 0's pick
@@ -3440,11 +3441,12 @@ static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
 #define MV_BX   170      /* mode-button x      */
 #define MV_BW   300      /* mode-button width  */
 #define MV_BH   50       /* mode-button height (two lines) */
-#define MV_Y0   96       /* first mode button  */
-#define MV_GAP  64       /* [2026-06-29] row pitch tightened (was 78) now that the
-                          * list has 5 modes — keeps Cop Chase (the 5th) from
-                          * sitting too low. Still clears the per-voter border
-                          * rings (14px gap between 50px buttons). */
+#define MV_Y0   70       /* [DRAG RACE 2026-06-30] first mode button raised from 96
+                          * so the list now has SIX modes (DRAG RACE is the 6th):
+                          * bottom button reaches 70 + 5*64 + 50 = 440 (was 466 at
+                          * Y0=96), leaving room below for the outward voter rings. */
+#define MV_GAP  64       /* [2026-06-29] row pitch (was 78). Keeps the per-voter
+                          * border rings clear (14px gap between 50px buttons). */
 /* [MP MODE VOTE BORDERS 2026-06-27] Concentric per-voter border-ring geometry,
  * in 640x480 canvas px (scaled by sx/sy at draw time). Each cast vote adds one
  * ring just OUTSIDE the button frame, expanding outward. */
@@ -3579,6 +3581,15 @@ static void mp_mode_config_apply_defaults(int mode) {
             c->battle_powerup_density = d;
         }
         c->battle_win_condition = TD5_BATTLE_WIN_MOST_WRECKS;   /* default */
+        break;
+    case TD5_MP_MODE_DRAG_RACE:
+        /* [DRAG RACE 2026-06-30] Default no traffic, MEDIUM distance, no extra
+         * lanes (one lane per player). Seed DISTANCE from the SP drag-length INI so
+         * it inherits the player's saved preference. */
+        c->drag_traffic     = 0;
+        c->drag_length      = (g_td5.ini.drag_length >= 0 && g_td5.ini.drag_length <= 3)
+                              ? g_td5.ini.drag_length : 1;
+        c->drag_extra_lanes = 0;
         break;
     default:                                    /* TD5_MP_MODE_RACE: no extra opts */
         break;
@@ -3791,6 +3802,8 @@ static const char *const k_cfg_wincon[3] = { "BUST ALL", "MOST BUSTS", "SUDDEN D
 static const char *const k_cfg_density[4] = { "SPARSE", "NORMAL", "DENSE", "MEGA" };
 /* [TRAFFIC BATTLE 2026-06-28] win-condition labels (battle_win_condition). */
 static const char *const k_cfg_battlewin[2] = { "MOST WRECKS", "CHECKPOINTS" };
+/* [DRAG RACE 2026-06-30] distance preset labels (drag_length). */
+static const char *const k_cfg_draglen[4] = { "SHORT", "MEDIUM", "LONG", "EPIC" };
 /* [PHYSICS SELECTOR DEDUP 2026-06-27] k_cfg_arcsim ("ARCADE"/"SIMULATION") was
  * dropped together with the DYNAMICS row below — the ARCADE/SIM selector now
  * lives only on the track-selection screen (see mp_cfg_build). */
@@ -3840,6 +3853,14 @@ static int mp_cfg_build(MpCfgOpt *o) {
         o[n].label="WIN";              o[n].val=&c->battle_win_condition;   o[n].min=0; o[n].max=1;   o[n].step=1; o[n].enum_labels=k_cfg_battlewin; o[n].enum_count=2; n++;
         o[n].label="SPAWN PERIOD";     o[n].val=&c->battle_spawn_period;    o[n].min=5; o[n].max=120; o[n].step=5; o[n].enum_labels=NULL;            o[n].enum_count=0; n++;
         o[n].label="POWER-UPS";        o[n].val=&c->battle_powerup_density; o[n].min=0; o[n].max=3;   o[n].step=1; o[n].enum_labels=k_cfg_density;   o[n].enum_count=4; n++;
+        break;
+    case TD5_MP_MODE_DRAG_RACE:
+        /* [DRAG RACE 2026-06-30] oncoming TRAFFIC on/off, DISTANCE preset, and
+         * EXTRA LANES added on top of the per-player lanes (total lanes =
+         * num_human_players + extra, clamped to [2,8] by td5_game_drag_field_size). */
+        o[n].label="TRAFFIC";          o[n].val=&c->drag_traffic;     o[n].min=0; o[n].max=1; o[n].step=1; o[n].enum_labels=k_cfg_offon;  o[n].enum_count=2; n++;
+        o[n].label="DISTANCE";         o[n].val=&c->drag_length;      o[n].min=0; o[n].max=3; o[n].step=1; o[n].enum_labels=k_cfg_draglen; o[n].enum_count=4; n++;
+        o[n].label="EXTRA LANES";      o[n].val=&c->drag_extra_lanes; o[n].min=0; o[n].max=6; o[n].step=1; o[n].enum_labels=NULL;         o[n].enum_count=0; n++;
         break;
     default: /* TD5_MP_MODE_RACE — no extra options */
         break;
@@ -6159,6 +6180,17 @@ void Screen_CarSelection(void) {
                 }
                 s_selected_car   = s_mp_player_car[0];   /* slot 0 = player 1's car */
                 s_selected_paint = s_mp_player_paint[0];
+                /* [DRAG RACE 2026-06-30] No track selector — the drag strip is fixed
+                 * (track 19). Pin it and launch the race directly, mirroring the SP
+                 * drag-race path below (which also skips TrackSelection). */
+                if (g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE) {
+                    s_selected_track = FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX;
+                    TD5_LOG_I(LOG_TAG, "CarSelect MP: DRAG RACE -> skip track select, track=%d, launch",
+                              s_selected_track);
+                    frontend_init_race_schedule();
+                    frontend_init_display_mode_state();
+                    return;
+                }
                 td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
                 return;
             } else {   /* Back */
@@ -6486,6 +6518,23 @@ void Screen_TrackSelection(void) {
     const int cup_mp = (td5_frontend_get_screen() == TD5_SCREEN_CUP_TRACK_SELECT);
     switch (s_inner_state) {
     case 0: /* Init: validate track for cup modes, create buttons, load TrackSelect.tga */
+        /* [DRAG RACE 2026-06-30] The MP drag mode uses a FIXED track (the drag strip,
+         * schedule index 19) — there is NO track choice. This is the single chokepoint
+         * that intercepts EVERY split-screen sub-flow's entry into track-select (the
+         * sequential s_mp_flow car-select AND the simultaneous s_mp_simul one — the
+         * latter is what actually routed us here, mp_simul=1 in the log). Pin track 19
+         * and launch directly, mirroring the SP drag path. Gated on a live MP session
+         * so a stale DRAG_RACE mode flag can't hijack a later single-player track-
+         * select. */
+        if (!cup_mp && g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE &&
+            (s_mp_simul || s_network_active || s_mp_flow)) {
+            s_selected_track = FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX;
+            TD5_LOG_I(LOG_TAG, "TrackSel: MP DRAG RACE -> skip selector, track=%d, launch",
+                      s_selected_track);
+            frontend_init_race_schedule();
+            frontend_init_display_mode_state();
+            return;
+        }
         /* [CUP TRACK SELECT 2026-06-25] Multiplayer cup with >=2 races: the host
          * picks a track for EACH race via the forked multi-picker instead of the
          * single regular track-select. Redirect from the regular track-select

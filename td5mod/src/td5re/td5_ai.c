@@ -5557,6 +5557,15 @@ static int td5_ai_smart_traffic_lane(int slot, int target_span, int lane_count,
     if (lane_count <= 1) return base_sub_lane;
     if (lane_count > SMART_MAX_LANES) lane_count = SMART_MAX_LANES;
 
+    /* [DRAG RACE 2026-06-30] Drag oncoming traffic never changes lanes — it holds
+     * the lane it spawned in (user rule). Clamp + return the spawn lane. */
+    if (td5_game_drag_mp_active()) {
+        int b = base_sub_lane;
+        if (b < 0) b = 0;
+        if (b >= lane_count) b = lane_count - 1;
+        return b;
+    }
+
     char *actor = actor_ptr(slot);
     int self_span  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
     int span_count = td5_track_get_span_count();
@@ -8305,7 +8314,10 @@ static int trf_force_oncoming(void)
 {
     const char *e = getenv("TD5RE_TRAFFIC_ONCOMING");
     if (e && e[0]) return atoi(e) != 0;
-    return td5_game_battle_mode_active();
+    if (td5_game_battle_mode_active()) return 1;
+    /* [DRAG RACE 2026-06-30] Oncoming traffic when the drag TRAFFIC option is on. */
+    if (td5_game_drag_mp_active() && g_td5.mp_mode_config.drag_traffic) return 1;
+    return 0;
 }
 
 static int trf_dyn_lane_direction(int lane_count, int lane)
@@ -8367,6 +8379,9 @@ static int trf_dyn_lane_change_blocked(int slot, int lane_count, int cand_lane)
 {
     int32_t *rs;
     if (!td5_ai_traffic_dynamic_active()) return 0;
+    /* [DRAG RACE 2026-06-30] Drag traffic stays in its spawn lane — block every
+     * candidate lane change (covers the choose-lane + react-to-peer paths). */
+    if (td5_game_drag_mp_active()) return 1;
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
     rs = route_state(slot);
     if (!rs) return 0;

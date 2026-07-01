@@ -283,6 +283,8 @@ int  td5_game_mp_traffic_fair(void);
  * battle mode (mp_mode_config.mode == TD5_MP_MODE_TRAFFIC_BATTLE). Consulted by
  * the scoring hook, the dynamic-spawner force, the results sort, and the HUD. */
 int  td5_game_battle_mode_active(void);
+/* [DRAG RACE 2026-06-30] 1 when the MP lobby selected DRAG RACE mode. */
+int  td5_game_drag_mp_active(void);
 /* [TRAFFIC BATTLE checkpoints] 1 while the CHECKPOINTS deadline chaser is armed. */
 int  td5_game_battle_chase_active(void);
 /* Spans a racer slot is ahead of the creeping deadline (negative = caught). */
@@ -312,5 +314,14 @@ uint32_t td5_game_get_race_seed(void);
  * (td5_game.c) and the track lane-widener (td5_track.c). See knobs in the
  * definition. */
 int td5_game_drag_field_size(void);
+/* [DRAG RACE MP 2026-06-30] Cars that actually race (humans-only in MP drag), vs the
+ * wider lane count above — extra lanes carry no car. */
+int td5_game_drag_active_racers(void);
+
+/* [DRAG LENGTH] Extra strip copies to append for the drag LENGTH option (0 for
+ * SHORT/MEDIUM/LONG, 1 for EPIC), and the finish-line span on the resulting
+ * strip (base_ring = the original pre-repeat ring length). */
+int td5_game_drag_length_repeats(void);
+int td5_game_drag_length_finish_span(int start, int base_ring);
 
 #endif /* TD5_GAME_H */

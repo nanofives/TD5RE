@@ -2028,6 +2028,46 @@ int td5_game_init_race_session(void) {
                   s_battle_chase_active ? "CHECKPOINTS" : "MOST-WRECKS");
     }
 
+    /* [DRAG RACE 2026-06-30] MP drag-race mode setup. Mirrors the battle block but
+     * keeps standard race placement (race to the finish): drag strip on, NO AI
+     * opponents, NO cops, and OPTIONAL oncoming traffic (drag_traffic). Unlike a
+     * solo drag, split-screen keeps every human slot (no solo_mode_synth). The
+     * distance preset (drag_length) + lane count (num_human_players +
+     * drag_extra_lanes) are read straight from mp_mode_config by drag_length_level()
+     * and td5_game_drag_field_size(); nothing extra to wire here. */
+    if (td5_game_drag_mp_active() && !g_td5.network_active) {
+        g_td5.drag_race_enabled         = 1;
+        g_td5.wanted_mode_enabled       = 0;     /* not cop chase            */
+        g_td5.special_encounter_enabled = 0;     /* cops OFF                 */
+        g_td5.time_trial_enabled        = 0;
+        g_td5.num_ai_opponents          = 0;     /* NO rival AI (user rule)  */
+        if (g_td5.mp_mode_config.drag_traffic) {
+            /* Oncoming-only traffic stream (no lane changes; spawns ~50 spans
+             * ahead — see trf_force_oncoming + the drag spawn-ahead in td5_ai.c). */
+            g_td5.traffic_enabled        = 1;
+            g_td5.ini.traffic_dynamic    = 1;
+            /* [DRAG TRAFFIC 2026-06-30] Denser stream (~30% faster cadence: a fresh
+             * car every ~0.67s @30Hz vs the old 1s) so the 16-car field refills
+             * quickly as oncoming cars blow past — "increase the volume of traffic". */
+            g_td5.ini.traffic_dyn_period = 20;
+            g_td5.traffic_volume         = 4;     /* full oncoming stream (engine max) */
+            /* [DRAG TRAFFIC 2026-06-30] Spawn CLOSER — the window is scaled by
+             * TD5RE_TRAFFIC_SPAWN_DIST (default 2x), so 8..18 -> ~16..36 spans ahead
+             * of the lead (was 25..50 -> 50..100, which popped in much too far out). */
+            g_td5.ini.traffic_dyn_spawn_min = 8;
+            g_td5.ini.traffic_dyn_spawn_max = 18;
+            td5_physics_set_collisions(1);
+        } else {
+            g_td5.traffic_enabled        = 0;
+            g_td5.ini.traffic_dynamic    = 0;
+        }
+        TD5_LOG_I(LOG_TAG, "InitRace: MP DRAG RACE active — no AI, traffic=%s, distance=%d, "
+                  "extra_lanes=%d, field=%d lanes",
+                  g_td5.mp_mode_config.drag_traffic ? "ONCOMING" : "off",
+                  g_td5.mp_mode_config.drag_length, g_td5.mp_mode_config.drag_extra_lanes,
+                  td5_game_drag_field_size());
+    }
+
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
      * @ 0x004B0FA8). This is the runtime gate read by both the HUD timer
      * widget (RenderRaceHudOverlays @ 0x004391CC) and the per-actor timer
@@ -2249,8 +2289,8 @@ int td5_game_init_race_session(void) {
          * 0..field-1 keep their base-init state (slot 0 human, the rest AI, and
          * split-screen humans 1..N), slots field..MAX become decoration. The
          * per-slot asset loop below preps a car for every active slot. */
-        int decoration_start = td5_game_drag_field_size();
-        if (decoration_start < 2) decoration_start = 2;
+        int decoration_start = td5_game_drag_active_racers();
+        if (decoration_start < 1) decoration_start = 1;
         if (decoration_start > TD5_MAX_RACER_SLOTS) decoration_start = TD5_MAX_RACER_SLOTS;
         for (int i = decoration_start; i < TD5_MAX_RACER_SLOTS; i++) {
             s_slot_state[i].state = 3;
@@ -2730,9 +2770,14 @@ int td5_game_init_race_session(void) {
      * Reverse-direction flag (TRAFFIC.BUS entry flags bit 0) is applied in
      * td5_ai_init_traffic_actors / td5_ai_recycle_traffic_actor via +0x80000
      * heading offset [CONFIRMED @ 0x00435786, 0x00435C00]. */
+    /* [DRAG RACE TRAFFIC 2026-06-30] SP drag never has traffic, but the MP DRAG mode
+     * with its TRAFFIC option DOES (the AI dynamic spawner already seeds + collides
+     * the actors — they were just meshless/invisible because this loader excluded all
+     * drag). Allow the mesh load for MP drag; traffic_enabled is the master gate (only
+     * set when the drag TRAFFIC option is on), so SP drag still skips it. */
     if (g_td5.traffic_enabled
         && !g_td5.time_trial_enabled
-        && !g_td5.drag_race_enabled) {
+        && (!g_td5.drag_race_enabled || td5_game_drag_mp_active())) {
         /* [POLICE rewrite 2026-06-19] Traffic now runs in net races, so load its
          * meshes here too (was gated !network_active when net had no traffic) —
          * otherwise net traffic/cops would be invisible.
@@ -3473,14 +3518,19 @@ int td5_game_init_race_session(void) {
                  * the widened road. The track was widened to `field` lanes, so
                  * lane = slot maps each racer to its own lane (NFS-Underground
                  * grid). Decoration slots park back at the strip head. */
-                int field = td5_game_drag_field_size();
+                int field  = td5_game_drag_field_size();   /* widened road width  */
+                int active = td5_game_drag_active_racers(); /* cars that actually race */
                 if (field < 2) field = 2;
-                if (slot < field) {
+                if (active < 1) active = 1;
+                if (active > field) active = field;
+                if (slot < active) {
                     span_index = 115;
-                    sub_lane = slot;                      /* lanes 0..field-1 */
+                    /* Centre the racing cars in the widened road so the EXTRA LANES
+                     * (field-active of them) split evenly to either side. */
+                    sub_lane = slot + (field - active) / 2;
                 } else {
                     span_index = 1;
-                    sub_lane = (slot - field) % field;    /* parked, spread */
+                    sub_lane = (slot - active) % field;   /* parked decoration, spread */
                 }
                 actor_span = span_index;  /* drag hardcodes span; actor gets that value */
                 TD5_LOG_I(LOG_TAG,
@@ -4071,38 +4121,34 @@ int td5_game_init_race_session(void) {
                           (unsigned)s_active_checkpoint.checkpoints[ci].time_bonus);
             }
 
-            /* [DRAG DYNAMIC LENGTH 2026-06-28 — Phase 3] Make the drag race
-             * longer by pushing the finish line down the EXISTING road. The
-             * drag strip (level030) is physically far longer than the race uses:
-             * the finish checkpoint sits at span ~204 but the same straight,
-             * uniform type-1 road (already widened by Phase 1) continues to
-             * ~span 299. So we just raise the finish threshold — literally
-             * reusing the same repeated spans/textures, no geometry duplication.
-             * TD5RE_DRAG_LENGTH multiplies the race distance (1.0 = vanilla;
-             * 2.0 ~= double), clamped to the road before the end sentinel. */
+            /* [DRAG DYNAMIC LENGTH 2026-06-29] Place the finish for the chosen
+             * LENGTH option. The drag strip is uniform; SHORT/MEDIUM/LONG move the
+             * finish within the base strip, while EPIC has already PHYSICALLY
+             * repeated the strip (td5_track_drag_apply_length) so the ring is now
+             * ~2x — the finish lands deep in the second copy. base_ring backs out
+             * the original (pre-repeat) length so the fractions stay stable. */
             if (g_td5.drag_race_enabled && s_active_checkpoint.checkpoint_count > 0) {
-                const char *ls = getenv("TD5RE_DRAG_LENGTH");
-                double mult = (ls && ls[0]) ? atof(ls) : 1.0;
-                if (mult < 1.0) mult = 1.0;
-                if (mult > 4.0) mult = 4.0;
-                if (mult > 1.0) {
-                    int last        = (int)s_active_checkpoint.checkpoint_count - 1;
-                    int base_finish = (int)s_active_checkpoint.checkpoints[last].span_threshold;
-                    int start       = 115;   /* drag spawn span (see drag spawn override) */
-                    int base_len    = base_finish - start;
-                    if (base_len < 1) base_len = base_finish;
-                    int new_finish  = start + (int)(mult * base_len + 0.5);
-                    /* Clamp to the last forward span before the wrap/end sentinel. */
-                    int ring = g_td5.track_span_ring_length;
-                    int cap  = (ring > 4) ? (ring - 2) : base_finish;
-                    if (new_finish > cap) new_finish = cap;
-                    if (new_finish > base_finish) {
-                        s_active_checkpoint.checkpoints[last].span_threshold = (uint16_t)new_finish;
-                        TD5_LOG_I(LOG_TAG,
-                                  "Drag length: x%.2f finish span %d -> %d (start=%d cap=%d ring=%d)",
-                                  mult, base_finish, new_finish, start, cap, ring);
-                    }
+                int last        = (int)s_active_checkpoint.checkpoint_count - 1;
+                int base_finish = (int)s_active_checkpoint.checkpoints[last].span_threshold;
+                int start       = 115;   /* drag spawn span (see drag spawn override) */
+                int ring        = g_td5.track_span_ring_length;
+                int inserted    = td5_track_drag_finish_span();   /* >=0 if clean spans inserted */
+                int new_finish;
+                int cap         = (ring > 4) ? (ring - 2) : base_finish;
+                if (inserted >= 0) {
+                    /* EPIC: finish on the inserted clean road (the lengthener
+                     * already placed it before the shifted wall). */
+                    new_finish = inserted;
+                } else {
+                    /* SHORT/MEDIUM/LONG: move the finish within the existing strip. */
+                    new_finish = td5_game_drag_length_finish_span(start, ring);
                 }
+                if (new_finish > cap) new_finish = cap;
+                if (new_finish < start + 8) new_finish = start + 8;
+                s_active_checkpoint.checkpoints[last].span_threshold = (uint16_t)new_finish;
+                TD5_LOG_I(LOG_TAG,
+                          "Drag length: finish span %d -> %d (start=%d ring=%d inserted=%d cap=%d)",
+                          base_finish, new_finish, start, ring, inserted, cap);
             }
         } else {
             TD5_LOG_W(LOG_TAG, "Track index %d out of range, no checkpoint data", tidx);
@@ -8404,13 +8450,101 @@ int td5_game_drag_field_size(void)
     int n;
     const char *force = getenv("TD5RE_DRAG_LANES");
     if (force && force[0])
-        n = atoi(force);
+        n = atoi(force);                   /* dev override first */
+    else if (td5_game_drag_mp_active())
+        /* MP DRAG: one lane per human player PLUS the EXTRA LANES option. */
+        n = g_td5.num_human_players + g_td5.mp_mode_config.drag_extra_lanes;
     else
         n = g_td5.num_human_players + g_td5.num_ai_opponents;
 
     if (n < 2) n = 2;                      /* always at least you + 1 rival */
     if (n > maxlanes) n = maxlanes;
     return n;
+}
+
+/* [DRAG RACE MP 2026-06-30] How many drag cars actually RACE — decoupled from how
+ * many LANES the road is widened to (td5_game_drag_field_size). SP drag = one car
+ * per lane (player + AI). MP drag has NO AI opponents — only the human players race
+ * and the EXTRA LANES are empty extra road — so the active car count is the human
+ * count, NOT the (wider) lane count. Using the lane count here is exactly what put
+ * CPU cars in the extra lanes. */
+int td5_game_drag_active_racers(void)
+{
+    int n;
+    if (td5_game_drag_mp_active())
+        n = g_td5.num_human_players;       /* humans only; extra lanes stay empty */
+    else
+        n = td5_game_drag_field_size();    /* SP: a car (player/AI) per lane */
+    if (n < 1) n = 1;
+    if (n > TD5_MAX_RACER_SLOTS) n = TD5_MAX_RACER_SLOTS;
+    return n;
+}
+
+/* [DRAG LENGTH 2026-06-29] The chosen drag LENGTH level: 0=SHORT 1=MEDIUM
+ * 2=LONG 3=EPIC. From the menu option (g_td5.ini.drag_length); env
+ * TD5RE_DRAG_LENGTH_LEVEL overrides for testing. */
+static int drag_length_level(void)
+{
+    const char *e = getenv("TD5RE_DRAG_LENGTH_LEVEL");
+    int v;
+    if (e && e[0])
+        v = atoi(e);                                     /* dev override first */
+    else if (td5_game_drag_mp_active())
+        v = g_td5.mp_mode_config.drag_length;            /* MP DISTANCE option */
+    else
+        v = g_td5.ini.drag_length;                       /* SP menu / INI      */
+    if (v < 0) v = 0;
+    if (v > 3) v = 3;
+    return v;
+}
+
+/* [DRAG DISTANCE 2x 2026-06-30] Clean straight spans to INSERT mid-strip so the
+ * drivable strip physically extends beyond its ~300-span data. SHORT is unchanged;
+ * MEDIUM/LONG/EPIC are 100% LONGER than their original race distance, which overruns
+ * the strip, so we insert clean straight spans at ins (~150, mid racing-straight)
+ * to reach the doubled finish. The inserted road is painted by the procedural strip
+ * ribbon and enclosed by the stadium tiling (td5_render.c); the route/boundary shift
+ * to follow (td5_track.c). The finish lands at ins+extra-4 == start + doubled_dist. */
+int td5_game_drag_length_repeats(void)
+{
+    int ring  = g_td5.track_span_ring_length;
+    int start = 115;                         /* drag spawn span (see spawn override) */
+    int avail, ins, base_dist, want_dist, extra;
+    if (ring < 16) ring = 300;
+    avail = ring - start;
+    if (avail < 8) avail = 8;
+    ins = 150;                               /* MUST match td5_track_drag_apply_length */
+    if (ins >= ring - 8) ins = ring / 3;
+    if (ins < 8)         ins = 8;
+    switch (drag_length_level()) {
+        case 1: base_dist = (avail * 48) / 100;  break;    /* MEDIUM */
+        case 2: base_dist = (avail * 85) / 100;  break;    /* LONG */
+        case 3: base_dist = (ring - 22) - start; break;    /* EPIC */
+        default: return 0;                                  /* SHORT — unchanged */
+    }
+    want_dist = base_dist * 2;                              /* 100% longer */
+    extra = want_dist - (ins - start - 4);                 /* finish = ins+extra-4 = start+want_dist */
+    if (extra < 4) return 0;
+    extra = (extra / 4) * 4;                                /* whole 4-span blocks */
+    return extra;
+}
+
+/* The finish-line span for the chosen LENGTH option. With NO insertion (SHORT, or if
+ * the insertion bailed) it returns the ORIGINAL preset finish; MEDIUM/LONG/EPIC
+ * normally finish on the inserted road (td5_track_drag_finish_span, doubled). These
+ * are the un-doubled fallbacks. base_ring = the strip ring length; caller clamps to
+ * ring-2. */
+int td5_game_drag_length_finish_span(int start, int base_ring)
+{
+    int avail = base_ring - start;                  /* drivable straight ahead of spawn */
+    if (avail < 8) avail = 8;
+    switch (drag_length_level()) {
+        case 0:  return start + (avail * 30) / 100;          /* SHORT  ~170 */
+        case 1:  return start + (avail * 48) / 100;          /* MEDIUM (fallback) */
+        case 2:  return start + (avail * 85) / 100;          /* LONG   (fallback) */
+        case 3:  return base_ring - 22;                      /* EPIC   (fallback) */
+        default: return start + (avail * 48) / 100;
+    }
 }
 
 /* ========================================================================
@@ -9540,6 +9674,14 @@ int td5_game_mp_traffic_fair(void) {
  * net) or synthesised for single-player vs AI in td5_game_init_race_session. */
 int td5_game_battle_mode_active(void) {
     return g_td5.mp_mode_config.mode == TD5_MP_MODE_TRAFFIC_BATTLE;
+}
+
+/* [DRAG RACE 2026-06-30] Active when the MP lobby selected the DRAG RACE mode.
+ * Mutually exclusive with battle (distinct mode value). Gates the drag-mode
+ * gameplay setup (drag_race_enabled on, no AI, optional oncoming traffic) and the
+ * option reads in drag_length_level / td5_game_drag_field_size / trf_force_oncoming. */
+int td5_game_drag_mp_active(void) {
+    return g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE;
 }
 
 /* ========================================================================
