@@ -3274,9 +3274,9 @@ void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing)
     if (missing) *missing = m;
 }
 
-/* What to display in an empty split-screen cell. STUB options for now — the
- * actual rendering of map/standings into the empty pane is a deferred follow-up
- * (the user explicitly asked to wire only the selector at this stage). */
+/* What to display in an empty split-screen cell. MAP and STANDINGS are rendered
+ * into the empty pane by td5_fe_race.c (the split-screen filler-map / standings
+ * paths); "EMPTY" leaves the pane blank. */
 const char *const k_mp_missing_content[3] = { "EMPTY", "MAP", "STANDINGS" };
 
 /* Commit the AI-spectate pane count + split grid for a race launch: clamps

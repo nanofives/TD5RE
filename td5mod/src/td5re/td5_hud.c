@@ -7062,9 +7062,9 @@ void td5_hud_init_minimap_layout(void)
     TD5_LOG_I(LOG_TAG, "minimap_init: scanback tex_page=%d u0=%.1f v0=%.1f u1=%.1f v1=%.1f",
               scanback->texture_page, bg_u0, bg_v0, bg_u1, bg_v1);
 
-    /* Build 4x4 grid of background tiles.
-     * td5_render_set_projection_center is a stub, so we bake the minimap
-     * screen center into each tile quad directly (absolute screen coords). */
+    /* Build 4x4 grid of background tiles. The minimap draws in absolute screen
+     * coords (it does not use the render projection center), so we bake the
+     * minimap screen center into each tile quad directly. */
     float tile_w = s_minimap_tile_width * 0.25f;
     float tile_h = s_minimap_tile_height * 0.25f;
     float mm_cx = s_minimap_width * 0.5f + s_minimap_x;

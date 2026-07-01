@@ -13,9 +13,9 @@
 # Invoke from td5mod/ via mingw32-make. Windows-native make is required —
 # the bundled toolchain ships td5mod/deps/mingw/mingw32/bin/mingw32-make.exe.
 #
-# This Makefile does not replace the .bat scripts; they remain authoritative
-# for the legacy PowerShell + cmd.exe invocation path. The Makefile is for
-# direct shell use and CI.
+# This Makefile does not replace the .bat scripts; they remain authoritative.
+# It shares the module list with them via src/td5re/srcs.txt. Builds the DEV
+# variant only (no -DTD5RE_RELEASE); use build_standalone.bat for RELEASE.
 
 # ---------------------------------------------------------------------------
 # Toolchain
@@ -40,20 +40,17 @@ ZLIB_INC      := deps/mingw/mingw32/i686-w64-mingw32/include
 PROJECT_ROOT  := ..
 
 # ---------------------------------------------------------------------------
-# td5re sources (mirrors build_standalone.bat TD5RE_SRCS list, in same order)
+# td5re sources -- SINGLE SOURCE OF TRUTH: src/td5re/srcs.txt (one module per
+# line), shared with build_standalone.bat + the CI workflows so the list cannot
+# drift. Requires GNU Make >= 4.0 for $(file). $(filter %.c,...) drops any blank
+# or comment tokens.
 # ---------------------------------------------------------------------------
 
-TD5RE_SRCS := \
-    td5re.c td5_game.c td5_physics.c td5_track.c td5_ai.c td5_render.c \
-    td5_frontend.c td5_hud.c td5_sound.c td5_input.c td5_asset.c td5_assetsrc.c \
-    td5_inflate.c td5_save.c td5_net.c td5_camera.c td5_vfx.c td5_fmv.c \
-    td5_benchmark.c \
-    td5_trace.c td5_trace_whole_state.c td5_platform_win32.c main.c
+TD5RE_SRCS := $(filter %.c,$(file < $(TD5RE_SRC)/srcs.txt))
 
-TD5RE_OBJS := $(addprefix $(TD5RE_BUILD)/,$(TD5RE_SRCS:.c=.o))
-# Vendored single-file libs that live in a subdir (compiled by explicit rules).
-TD5RE_VENDOR_OBJS := $(TD5RE_BUILD)/cJSON.o
-TD5RE_OBJS += $(TD5RE_VENDOR_OBJS)
+# Objects live flat in build/ (basename), matching the .bat / CI layout;
+# deps/cjson/cJSON.c -> build/cJSON.o via the explicit rule below.
+TD5RE_OBJS := $(addprefix $(TD5RE_BUILD)/,$(notdir $(TD5RE_SRCS:.c=.o)))
 # libtd5re.a contains every td5re object except main.o (linked separately)
 TD5RE_LIB_OBJS := $(filter-out $(TD5RE_BUILD)/main.o,$(TD5RE_OBJS))
 
@@ -75,15 +72,15 @@ TD5RE_CFLAGS   := -c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 \
                   -I$(TD5RE_SRC) -I$(WRAPPER_SRC) -I$(ZLIB_INC) \
                   -DTD5_INFLATE_USE_ZLIB
 
-WRAPPER_CFLAGS := -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG
+WRAPPER_CFLAGS := -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG -m32
 
 # png_loader.c additionally needs -Wno-unused-function per build.bat.
 $(WRAPPER_BUILD)/png_loader.o: WRAPPER_CFLAGS += -Wno-unused-function
 
 # Link command (mirrors build_standalone.bat link line)
 LINK_LIBS := -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
-             -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
-             -lmfplat -lmfreadwrite -lmfuuid -lole32
+             -lshell32 -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
+             -lmfplat -lmfreadwrite -lmfuuid -lole32 -lwinhttp
 
 LINK_FLAGS := -m32 -mwindows -static \
               -Wl,--enable-stdcall-fixup \

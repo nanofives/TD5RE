@@ -1,3 +1,8 @@
 # Shell scripts must use LF, or bash chokes on the CRLF in the shebang line.
 # (core.autocrlf=true would otherwise rewrite them to CRLF on checkout.)
 *.sh text eol=lf
+
+# srcs.txt (the single-source module list) is read by the Makefile via
+# $(file <...); on a CRLF checkout each token would carry a trailing CR and the
+# build would break. Pin it to LF. (The .bat and CI strip CR defensively too.)
+td5mod/src/td5re/srcs.txt text eol=lf
