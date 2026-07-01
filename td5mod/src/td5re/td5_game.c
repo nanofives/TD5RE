@@ -7820,7 +7820,21 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             if (d_opp < 0) d_opp = -d_opp;
             if (d_opp > total_spans - d_opp) d_opp = total_spans - d_opp;
             if (d_opp <= 10) m->checkpoint_bitmask = 1;   /* arm at far side */
-            lap_crossed = (m->checkpoint_bitmask == 1 && d_start <= 10);
+            /* [NATIVE REVERSE CIRCUIT 2026-06-29] Align the lap/finish with the
+             * actual start/finish line (the banner sits at track_start). The
+             * symmetric ±10 window latches when the car merely ENTERS the window
+             * — up to 10 spans BEFORE the line — so the lap ticked early and out
+             * of step with the banner. For reverse native circuits, complete only
+             * once the car has REACHED/crossed track_start going forward (small
+             * "spans past start"), keeping a 10-span catch window for fast cars
+             * that skip the exact span. TD6 keeps the symmetric window. */
+            if (g_td5.reverse_direction && g_active_td6_level == 0) {
+                int32_t past = ((int32_t)actor_span - track_start) % total_spans;
+                if (past < 0) past += total_spans;
+                lap_crossed = (m->checkpoint_bitmask == 1 && past <= 10);
+            } else {
+                lap_crossed = (m->checkpoint_bitmask == 1 && d_start <= 10);
+            }
         } else {
             lap_crossed = ((int32_t)actor_span >= (track_start - 1) &&
                            (int32_t)actor_span <= (track_start + 1) &&

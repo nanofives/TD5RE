@@ -159,6 +159,11 @@ static uint32_t        *s_strip_header = NULL;
 static int              s_jump_entry_count = 0;
 static uint8_t         *s_jump_entries = NULL; /* 6-byte entries */
 
+/** Per-span median-divider lateral index (reverse-native forks): 0 = none, else
+ *  the branch lane count = the lateral boundary that wall_contact walls off so a
+ *  car cannot straddle the main/branch divide. Sized s_span_count, NULL otherwise. */
+static int8_t          *s_fork_divider = NULL;
+
 /** [task#15] TD6 per-lane SURFACE GRID (strip header[6]): 8 cells/row; a span's
  * surf byte (+0x01) selects the row, the wheel's lateral fraction>>5 the column,
  * giving a surface CLASS -> grip/drag (TD6.exe FUN_004465b0). NULL on native TD5. */
@@ -627,6 +632,407 @@ void td5_track_get_span_edges(int span_index,
  * re/tools/connect_branches.py: entry gap 0). TD6 now drives branches via the native
  * faithful walker + standard wall response, exactly like native TD5. */
 
+/* ========================================================================
+ * GEOMETRIC LANE-QUAD LOCATE  [REVERSE / JUNCTION REWRITE 2026-06-29]
+ *
+ * A robust, topology-free replacement for the span-walker's collision path.
+ * The entire track (every lane of every span, BOTH branches of every fork) is
+ * baked at load into a flat soup of world-space lane quads with a uniform
+ * spatial grid. Collision becomes one rule: "snap the car to the nearest
+ * drivable lane." A car on a lane is located inside its quad; a car in a
+ * fork gore / off-road is pushed to the nearest road edge. Outer lateral
+ * edges (incl. the fork divider) are walls *by construction* — no special
+ * fork code, no rail LUTs, no penetration reject-limit. Works identically
+ * for forward, reverse, and TD6 geometry because it is purely geometric.
+ *
+ * Gated by TD5RE_GEO_COLLISION (default ON). "0" falls back to the legacy
+ * span-walker collision path for A/B comparison.
+ * ======================================================================== */
+
+typedef struct {
+    int32_t x[4], z[4];     /* world XZ (origin + span-relative vtx); polygon
+                             * loop: 0=nearL 1=nearR 2=farR 3=farL */
+    int32_t cx, cz;         /* centroid */
+    int32_t minx, maxx, minz, maxz;  /* AABB (XZ) */
+    int16_t span;
+    int16_t lane;
+} GeoQuad;
+
+static GeoQuad *s_geo_quads      = NULL;
+static int      s_geo_quad_count = 0;
+static int     *s_span_quad0     = NULL;  /* per-span: index of its lane-0 quad, or -1 */
+static float   *s_ring_pos       = NULL;  /* per-span lap position in [0,ring) */
+/* Uniform spatial grid (CSR): cell -> list of quad indices whose AABB overlaps it. */
+static int      s_geo_gnx = 0, s_geo_gnz = 0;
+static int32_t  s_geo_gx0 = 0, s_geo_gz0 = 0, s_geo_gcell = 1;
+static int     *s_geo_cell_start = NULL;  /* size gnx*gnz + 1 */
+static int     *s_geo_cell_items = NULL;
+static int      s_geo_enabled = -1;       /* -1 unknown, 0 off, 1 on */
+
+/* Per-tick eject cap (world units): the divider/wall is solid but a deep
+ * penetration (tunnel/glitch) climbs out over a few ticks instead of snapping. */
+#define GEO_PUSH_CAP 600
+
+static int geo_is_enabled(void)
+{
+    if (s_geo_enabled < 0) {
+        const char *e = getenv("TD5RE_GEO_COLLISION");
+        s_geo_enabled = (!e || e[0] != '0') ? 1 : 0;
+    }
+    return s_geo_enabled;
+}
+
+static void geo_free(void)
+{
+    free(s_geo_quads);      s_geo_quads = NULL;      s_geo_quad_count = 0;
+    free(s_span_quad0);     s_span_quad0 = NULL;
+    free(s_ring_pos);       s_ring_pos = NULL;
+    free(s_geo_cell_start); s_geo_cell_start = NULL;
+    free(s_geo_cell_items); s_geo_cell_items = NULL;
+    s_geo_gnx = s_geo_gnz = 0;
+}
+
+/* Convex point-in-quad (inclusive of edges): inside iff all 4 edge cross
+ * products share one sign. */
+static int geo_point_in_quad(const GeoQuad *q, int32_t px, int32_t pz)
+{
+    int pos = 0, neg = 0, i;
+    for (i = 0; i < 4; i++) {
+        int j = (i + 1) & 3;
+        int64_t ex = (int64_t)q->x[j] - q->x[i];
+        int64_t ez = (int64_t)q->z[j] - q->z[i];
+        int64_t cr = ex * ((int64_t)pz - q->z[i]) - ez * ((int64_t)px - q->x[i]);
+        if (cr > 0) pos = 1; else if (cr < 0) neg = 1;
+    }
+    return !(pos && neg);
+}
+
+/* Nearest point on segment AB to P; returns squared distance. */
+static int64_t geo_seg_nearest(int32_t px, int32_t pz, int32_t ax, int32_t az,
+                               int32_t bx, int32_t bz, int32_t *ox, int32_t *oz)
+{
+    int64_t dx = (int64_t)bx - ax, dz = (int64_t)bz - az;
+    int64_t l2 = dx * dx + dz * dz, t, qx, qz;
+    if (l2 <= 0) { *ox = ax; *oz = az; }
+    else {
+        t = ((int64_t)(px - ax) * dx + (int64_t)(pz - az) * dz);
+        if (t <= 0)        { *ox = ax; *oz = az; }
+        else if (t >= l2)  { *ox = bx; *oz = bz; }
+        else { *ox = (int32_t)(ax + dx * t / l2); *oz = (int32_t)(az + dz * t / l2); }
+    }
+    qx = (int64_t)px - *ox; qz = (int64_t)pz - *oz;
+    return qx * qx + qz * qz;
+}
+
+/* Nearest point on the quad's boundary to P; returns squared distance. */
+static int64_t geo_quad_nearest(const GeoQuad *q, int32_t px, int32_t pz,
+                                int32_t *nx, int32_t *nz)
+{
+    int64_t best = -1; int i;
+    int32_t bx = q->cx, bz = q->cz;
+    for (i = 0; i < 4; i++) {
+        int j = (i + 1) & 3; int32_t ox, oz;
+        int64_t d = geo_seg_nearest(px, pz, q->x[i], q->z[i], q->x[j], q->z[j], &ox, &oz);
+        if (best < 0 || d < best) { best = d; bx = ox; bz = oz; }
+    }
+    *nx = bx; *nz = bz; return best;
+}
+
+static void geo_cell_of(int32_t px, int32_t pz, int *cx, int *cz)
+{
+    int gx = (int)((int64_t)(px - s_geo_gx0) / s_geo_gcell);
+    int gz = (int)((int64_t)(pz - s_geo_gz0) / s_geo_gcell);
+    if (gx < 0) gx = 0;
+    if (gx >= s_geo_gnx) gx = s_geo_gnx - 1;
+    if (gz < 0) gz = 0;
+    if (gz >= s_geo_gnz) gz = s_geo_gnz - 1;
+    *cx = gx; *cz = gz;
+}
+
+/* Per-span lap position. Main-ring spans map to their index; branch-corridor
+ * spans (type-9 entry .. type-10 exit) interpolate between the fork's and the
+ * rejoin's main-ring position so progress stays smooth across an alternate
+ * route without depending on the jump table. */
+static void geo_compute_ring_pos(int ring)
+{
+    int i;
+    for (i = 0; i < s_span_count; i++)
+        s_ring_pos[i] = (float)((ring > 0) ? (i % ring) : i);
+    if (ring <= 0) return;
+    for (i = 0; i < s_span_count; i++) {
+        int entry, fork, exitspan, rejoin, n, k;
+        float p0, p1;
+        if (s_span_array[i].span_type != 9) continue;  /* branch entry sentinel */
+        entry = i;
+        fork  = (int)s_span_array[i].link_prev;          /* type-8 fork (main span) */
+        exitspan = entry;
+        while (exitspan < s_span_count && exitspan < entry + 4096 &&
+               s_span_array[exitspan].span_type != 10)
+            exitspan++;
+        if (exitspan >= s_span_count) continue;
+        rejoin = (int)s_span_array[exitspan].link_next;  /* type-11 merge (main span) */
+        p0 = (fork   >= 0 && fork   < s_span_count) ? (float)(fork   % ring) : 0.0f;
+        p1 = (rejoin >= 0 && rejoin < s_span_count) ? (float)(rejoin % ring) : p0;
+        if (p1 < p0) p1 += (float)ring;                  /* forward wrap */
+        n = exitspan - entry + 1; if (n < 1) n = 1;
+        for (k = 0; k < n; k++) {
+            float t  = (n > 1) ? (float)k / (float)(n - 1) : 0.0f;
+            float pp = p0 + (p1 - p0) * t;
+            while (pp >= (float)ring) pp -= (float)ring;
+            if (entry + k < s_span_count) s_ring_pos[entry + k] = pp;
+        }
+    }
+}
+
+static void geo_build(void)
+{
+    int i, lane, qi, ring, ncell, items;
+    int32_t wx0, wx1, wz0, wz1, cell, rangex, rangez;
+    int gnx, gnz, total;
+    int64_t edge_sum; int edge_n;
+    int *cursor;
+
+    geo_free();
+    if (!s_span_array || !s_vertex_table || s_span_count <= 0) return;
+    ring = s_strip_header ? (int)s_strip_header[1] : s_span_count;
+
+    total = 0;
+    for (i = 0; i < s_span_count; i++) {
+        int lc = span_lane_count(&s_span_array[i]); if (lc < 1) lc = 1; total += lc;
+    }
+    s_geo_quads  = (GeoQuad *)calloc((size_t)total, sizeof(GeoQuad));
+    s_span_quad0 = (int *)malloc(sizeof(int) * (size_t)s_span_count);
+    s_ring_pos   = (float *)malloc(sizeof(float) * (size_t)s_span_count);
+    if (!s_geo_quads || !s_span_quad0 || !s_ring_pos) { geo_free(); return; }
+    for (i = 0; i < s_span_count; i++) s_span_quad0[i] = -1;
+
+    qi = 0;
+    wx0 = wz0 = 0x7FFFFFFF; wx1 = wz1 = (int32_t)0x80000000;
+    edge_sum = 0; edge_n = 0;
+    for (i = 0; i < s_span_count; i++) {
+        const TD5_StripSpan *sp = &s_span_array[i];
+        int lc = span_lane_count(sp); if (lc < 1) lc = 1;
+        s_span_quad0[i] = qi;
+        for (lane = 0; lane < lc; lane++) {
+            int vl0, vl1, vr0, vr1, k;
+            TD5_StripVertex *a, *b, *c, *d;
+            GeoQuad *q = &s_geo_quads[qi];
+            q->span = (int16_t)i; q->lane = (int16_t)lane;
+            get_quad_vertices(sp, lane, &vl0, &vl1, &vr0, &vr1);
+            a = vertex_at(vl0); b = vertex_at(vl1); c = vertex_at(vr1); d = vertex_at(vr0);
+            if (!a || !b || !c || !d) {
+                /* degenerate slot: zero-extent quad never matches a query */
+                q->minx = q->maxx = q->minz = q->maxz = q->cx = q->cz = 0;
+                qi++; continue;
+            }
+            q->x[0] = sp->origin_x + a->x; q->z[0] = sp->origin_z + a->z;  /* nearL */
+            q->x[1] = sp->origin_x + b->x; q->z[1] = sp->origin_z + b->z;  /* nearR */
+            q->x[2] = sp->origin_x + c->x; q->z[2] = sp->origin_z + c->z;  /* farR  */
+            q->x[3] = sp->origin_x + d->x; q->z[3] = sp->origin_z + d->z;  /* farL  */
+            q->minx = q->maxx = q->x[0]; q->minz = q->maxz = q->z[0];
+            { int64_t sx = 0, sz = 0;
+              for (k = 0; k < 4; k++) {
+                  if (q->x[k] < q->minx) q->minx = q->x[k];
+                  if (q->x[k] > q->maxx) q->maxx = q->x[k];
+                  if (q->z[k] < q->minz) q->minz = q->z[k];
+                  if (q->z[k] > q->maxz) q->maxz = q->z[k];
+                  sx += q->x[k]; sz += q->z[k];
+              }
+              q->cx = (int32_t)(sx / 4); q->cz = (int32_t)(sz / 4); }
+            if (q->minx < wx0) wx0 = q->minx; if (q->maxx > wx1) wx1 = q->maxx;
+            if (q->minz < wz0) wz0 = q->minz; if (q->maxz > wz1) wz1 = q->maxz;
+            edge_sum += (q->maxx - q->minx) + (q->maxz - q->minz); edge_n++;
+            qi++;
+        }
+    }
+    s_geo_quad_count = qi;
+    geo_compute_ring_pos(ring);
+
+    if (wx1 < wx0) { wx0 = wz0 = 0; wx1 = wz1 = 1; }
+    cell = edge_n ? (int32_t)(edge_sum / edge_n) : 2048;
+    if (cell < 64) cell = 64;
+    rangex = wx1 - wx0; if (rangex < 1) rangex = 1;
+    rangez = wz1 - wz0; if (rangez < 1) rangez = 1;
+    gnx = (int)(rangex / cell) + 1; gnz = (int)(rangez / cell) + 1;
+    while ((int64_t)gnx * gnz > 500000) { cell *= 2; gnx = (int)(rangex / cell) + 1; gnz = (int)(rangez / cell) + 1; }
+    if (gnx < 1) gnx = 1; if (gnz < 1) gnz = 1;
+    s_geo_gnx = gnx; s_geo_gnz = gnz; s_geo_gx0 = wx0; s_geo_gz0 = wz0; s_geo_gcell = cell;
+    ncell = gnx * gnz;
+    s_geo_cell_start = (int *)calloc((size_t)ncell + 1, sizeof(int));
+    if (!s_geo_cell_start) { geo_free(); return; }
+
+    for (i = 0; i < s_geo_quad_count; i++) {
+        GeoQuad *Q = &s_geo_quads[i];
+        int gx0, gx1, gz0, gz1, gx, gz;
+        if (Q->minx == Q->maxx && Q->minz == Q->maxz) continue;  /* degenerate */
+        gx0 = (int)((Q->minx - wx0) / cell); gx1 = (int)((Q->maxx - wx0) / cell);
+        gz0 = (int)((Q->minz - wz0) / cell); gz1 = (int)((Q->maxz - wz0) / cell);
+        if (gx0 < 0) gx0 = 0; if (gx1 >= gnx) gx1 = gnx - 1;
+        if (gz0 < 0) gz0 = 0; if (gz1 >= gnz) gz1 = gnz - 1;
+        for (gz = gz0; gz <= gz1; gz++)
+            for (gx = gx0; gx <= gx1; gx++)
+                s_geo_cell_start[gz * gnx + gx + 1]++;
+    }
+    for (i = 0; i < ncell; i++) s_geo_cell_start[i + 1] += s_geo_cell_start[i];
+    items = s_geo_cell_start[ncell];
+    s_geo_cell_items = (int *)malloc(sizeof(int) * (size_t)(items > 0 ? items : 1));
+    cursor = (int *)malloc(sizeof(int) * (size_t)(ncell > 0 ? ncell : 1));
+    if (!s_geo_cell_items || !cursor) { free(cursor); geo_free(); return; }
+    for (i = 0; i < ncell; i++) cursor[i] = s_geo_cell_start[i];
+    for (i = 0; i < s_geo_quad_count; i++) {
+        GeoQuad *Q = &s_geo_quads[i];
+        int gx0, gx1, gz0, gz1, gx, gz;
+        if (Q->minx == Q->maxx && Q->minz == Q->maxz) continue;
+        gx0 = (int)((Q->minx - wx0) / cell); gx1 = (int)((Q->maxx - wx0) / cell);
+        gz0 = (int)((Q->minz - wz0) / cell); gz1 = (int)((Q->maxz - wz0) / cell);
+        if (gx0 < 0) gx0 = 0; if (gx1 >= gnx) gx1 = gnx - 1;
+        if (gz0 < 0) gz0 = 0; if (gz1 >= gnz) gz1 = gnz - 1;
+        for (gz = gz0; gz <= gz1; gz++)
+            for (gx = gx0; gx <= gx1; gx++) {
+                int c = gz * gnx + gx; s_geo_cell_items[cursor[c]++] = i;
+            }
+    }
+    free(cursor);
+    TD5_LOG_I(LOG_TAG, "geo locate built: quads=%d grid=%dx%d cell=%d items=%d ring=%d",
+              s_geo_quad_count, gnx, gnz, (int)cell, items, ring);
+}
+
+typedef struct {
+    int     span, lane, inside;
+    int32_t pushx, pushz, pushdist;   /* toward-road vector + distance (when !inside) */
+} GeoHit;
+
+/* Locate the nearest drivable lane quad to (px,pz) [integer world units].
+ * hint_span biases ties toward continuity (so a fork's two branches, far apart
+ * in span index but adjacent in lap position, resolve to the one the car is on).
+ * Returns 1 with a filled GeoHit, 0 if the model is unbuilt. */
+static int geo_locate(int32_t px, int32_t pz, int hint_span, GeoHit *out)
+{
+    int cx, cz, ring, radius;
+    int best_idx = -1; float best_score = 1e30f, hint_pos;
+    int64_t near_best = -1; int32_t near_x = 0, near_z = 0; int near_idx = -1;
+
+    if (!s_geo_quads || s_geo_quad_count <= 0 || !s_geo_cell_start) return 0;
+    geo_cell_of(px, pz, &cx, &cz);
+    ring = s_strip_header ? (int)s_strip_header[1] : s_span_count;
+    hint_pos = (s_ring_pos && hint_span >= 0 && hint_span < s_span_count)
+               ? s_ring_pos[hint_span] : -1.0f;
+
+    for (radius = 1; radius <= 8 && best_idx < 0; radius++) {
+        int gx, gz, k;
+        for (gz = cz - radius; gz <= cz + radius; gz++) {
+            if (gz < 0 || gz >= s_geo_gnz) continue;
+            for (gx = cx - radius; gx <= cx + radius; gx++) {
+                int cell;
+                if (gx < 0 || gx >= s_geo_gnx) continue;
+                cell = gz * s_geo_gnx + gx;
+                for (k = s_geo_cell_start[cell]; k < s_geo_cell_start[cell + 1]; k++) {
+                    int qi = s_geo_cell_items[k];
+                    GeoQuad *q = &s_geo_quads[qi];
+                    int32_t nx, nz; int64_t dd;
+                    if (px >= q->minx && px <= q->maxx && pz >= q->minz && pz <= q->maxz &&
+                        geo_point_in_quad(q, px, pz)) {
+                        float score = 0.0f;
+                        if (hint_pos >= 0.0f && s_ring_pos) {
+                            float dpos = s_ring_pos[q->span] - hint_pos;
+                            if (ring > 0) {
+                                while (dpos >  ring * 0.5f) dpos -= ring;
+                                while (dpos < -ring * 0.5f) dpos += ring;
+                            }
+                            score = dpos < 0 ? -dpos : dpos;
+                        }
+                        if (best_idx < 0 || score < best_score) { best_score = score; best_idx = qi; }
+                        continue;
+                    }
+                    dd = geo_quad_nearest(q, px, pz, &nx, &nz);
+                    if (near_best < 0 || dd < near_best) { near_best = dd; near_x = nx; near_z = nz; near_idx = qi; }
+                }
+            }
+        }
+        if (best_idx >= 0) break;
+        if (near_idx >= 0 && radius >= 2) break;   /* off-road: nearest edge is enough */
+    }
+
+    if (best_idx >= 0) {
+        out->span = s_geo_quads[best_idx].span; out->lane = s_geo_quads[best_idx].lane;
+        out->inside = 1; out->pushx = out->pushz = out->pushdist = 0;
+        return 1;
+    }
+    if (near_idx >= 0) {
+        out->span = s_geo_quads[near_idx].span; out->lane = s_geo_quads[near_idx].lane;
+        out->inside = 0;
+        out->pushx = near_x - px; out->pushz = near_z - pz;
+        out->pushdist = (int32_t)sqrt((double)near_best);
+        return 1;
+    }
+    return 0;
+}
+
+/* If (px,pz) [integer world units] lies inside a lane quad of `span`, return
+ * that lane index; else -1. Used for geometric fork branch selection so the
+ * walker assigns the span the car is physically over (not a sub_lane guess). */
+static int geo_span_contains(int span, int32_t px, int32_t pz)
+{
+    int q0, lc, k;
+    if (!s_geo_quads || !s_span_quad0 || span < 0 || span >= s_span_count) return -1;
+    q0 = s_span_quad0[span];
+    if (q0 < 0) return -1;
+    lc = span_lane_count(&s_span_array[span]); if (lc < 1) lc = 1;
+    for (k = 0; k < lc && q0 + k < s_geo_quad_count; k++) {
+        GeoQuad *q = &s_geo_quads[q0 + k];
+        if (q->span != span) break;
+        if (px >= q->minx && px <= q->maxx && pz >= q->minz && pz <= q->maxz &&
+            geo_point_in_quad(q, px, pz))
+            return (int)q->lane;
+    }
+    return -1;
+}
+
+/* Decide a type-8 fork's branch-vs-main by geometric containment. Sets
+ * *take_branch and returns 1 only when the car is decisively in exactly one of
+ * the two corridors; returns 0 (ambiguous: both/neither — e.g. mid-gore) so the
+ * caller keeps its sub_lane heuristic. Chooses the SPAN only; the caller owns
+ * the sub_lane arithmetic (the walker's per-crossing post-steps differ). */
+static int geo_fork_decide(int next_idx, int br_idx, int32_t pos_x, int32_t pos_z,
+                           int *take_branch)
+{
+    int g_br, g_mn;
+    if (!geo_is_enabled()) return 0;
+    g_br = geo_span_contains(br_idx,  pos_x >> 8, pos_z >> 8);
+    g_mn = geo_span_contains(next_idx, pos_x >> 8, pos_z >> 8);
+    if (g_br >= 0 && g_mn < 0) { *take_branch = 1; return 1; }
+    if (g_mn >= 0 && g_br < 0) { *take_branch = 0; return 1; }
+    return 0;
+}
+
+/* Geometric wall clamp: any wheel probe that has left the drivable surface
+ * (gore, off-road, or past an outer edge) is pushed back to the nearest road
+ * edge. The fork divider is an outer edge of both the main and branch lanes,
+ * so it walls automatically. Replaces the rail-LUT + reject-limit path. */
+static void geo_resolve_walls(TD5_Actor *actor)
+{
+    TD5_Vec3_Fixed *probe_block = &actor->probe_FL;
+    int hint = (int)actor->track_span_raw;
+    int pi;
+    for (pi = 0; pi < 4; pi++) {
+        int32_t px = probe_block[pi].x >> 8;
+        int32_t pz = probe_block[pi].z >> 8;
+        GeoHit h; double dx, dz, mag, rad; int32_t wall_angle, pen;
+        if (!geo_locate(px, pz, hint, &h)) continue;
+        if (h.inside || h.pushdist <= 0) continue;     /* on the road -> no wall */
+        dx = (double)h.pushx; dz = (double)h.pushz;
+        mag = sqrt(dx * dx + dz * dz);
+        if (mag < 0.5) continue;
+        /* inward normal = push direction (toward road); same angle convention
+         * as the legacy rail walls: atan2(nnx, -nnz). */
+        rad = atan2(dx, -dz);
+        wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+        pen = -(h.pushdist > GEO_PUSH_CAP ? GEO_PUSH_CAP : h.pushdist);
+        td5_physics_wall_response(actor, wall_angle, pen, 1, probe_block[pi].x, probe_block[pi].z);
+        td5_physics_rebuild_pose(actor);
+    }
+}
+
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
     static uint32_t s_wall_tick = 0;
@@ -640,6 +1046,11 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 
     /* Pre-spawn guard: skip while the actor is still at the origin. */
     if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
+
+    /* [GEO 2026-06-29] Geometric nearest-road wall clamp replaces the rail-LUT
+     * + penetration-reject path (and the reverse-fork median band-aid below).
+     * The legacy code remains as a TD5RE_GEO_COLLISION=0 fallback. */
+    if (geo_is_enabled()) { geo_resolve_walls(actor); return; }
 
     if (actor->slot_index == 0) {
         s_wall_tick++;
@@ -725,6 +1136,39 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
      * tracks never hit this (their |pen| stays small). */
     const int32_t WALL_PEN_REJECT_LIMIT = 2000;
 
+    /* [NATIVE REVERSE CIRCUIT 2026-06-29] MEDIAN DIVIDER WALL. On a reverse fork
+     * the road is one wide (4-lane) surface that splits into main (RIGHT lanes) +
+     * branch (LEFT lanes). The engine only walls the OUTER edges, so a car can sit
+     * on the main/branch divide and oscillate/penetrate. Build a divider rail at
+     * the boundary (lateral index = branch lane count) and, in the probe loop,
+     * push any car straddling it onto the side it is already on (dead-centre ->
+     * main, the through road). This is the "solid dividing wall" -- position
+     * based, so no stale-sub_lane teleport. Reverse-native fork spans only. */
+    struct { int32_t nnx, nnz, ref_x, ref_z, ok; } divider = {0};
+    {
+        int rev_native = g_td5.reverse_direction && (g_active_td6_level == 0);
+        int dlat = s_fork_divider ? (int)s_fork_divider[span_idx] : 0;
+        if (rev_native && dlat > 0 && dlat < lane_count) {
+            TD5_StripVertex *d_nw = vertex_at(li_base + dlat);
+            TD5_StripVertex *d_sw = vertex_at(ri_base + dlat);
+            if (d_nw && d_sw) {
+                /* Same normal formula as the LEFT rail -> points INTO the road from
+                 * the divider, i.e. toward the MAIN (right) side. */
+                float fnx = (float)((int32_t)d_nw->z - (int32_t)d_sw->z);
+                float fnz = (float)((int32_t)d_sw->x - (int32_t)d_nw->x);
+                float fmag = sqrtf(fnx * fnx + fnz * fnz);
+                if (fmag >= 0.5f) {
+                    divider.nnx = (int32_t)(fnx / fmag * 4096.0f);
+                    divider.nnz = (int32_t)(fnz / fmag * 4096.0f);
+                    divider.ref_x = (int32_t)d_nw->x;
+                    divider.ref_z = (int32_t)d_nw->z;
+                    divider.ok = 1;
+                }
+            }
+        }
+    }
+    const int32_t MEDIAN_HALF = 0;     /* physics median off; geometry ridge handles it */
+
     for (int pi = 0; pi < 4; pi++) {
         int32_t px = probe_block[pi].x >> 8;
         int32_t pz = probe_block[pi].z >> 8;
@@ -781,6 +1225,31 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             if (diag_slot0 || pen_r < -100)
                 TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d RIGHT span=%d type=%d sub=%d pen=%d angle=%d",
                           actor->slot_index, pi, span_idx, type, sub_lane, pen_r, wall_angle);
+        }
+
+        /* MEDIAN DIVIDER: push a car straddling the main/branch boundary onto the
+         * side it is already on (dead-centre -> main). d = signed distance from the
+         * divider line; +d = MAIN (right) side, -d = BRANCH (left). Only acts within
+         * +/-MEDIAN_HALF of the divider, so a car committed to either road is free. */
+        if (divider.ok) {
+            int64_t dp = (int64_t)((pz - sp->origin_z) - divider.ref_z) * divider.nnz
+                       + (int64_t)((px - divider.ref_x) - sp->origin_x) * divider.nnx;
+            int32_t d = (int32_t)((dp + ((dp >> 63) & 0xFFF)) >> 12);
+            if (d >= 0 && d < MEDIAN_HALF) {
+                /* main side, in the median -> shove toward main (+normal) */
+                double rad = atan2((double)divider.nnx, (double)(-divider.nnz));
+                int32_t wa = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                td5_physics_wall_response(actor, wa, d - MEDIAN_HALF, 2,
+                                          probe_block[pi].x, probe_block[pi].z);
+                td5_physics_rebuild_pose(actor);
+            } else if (d < 0 && d > -MEDIAN_HALF) {
+                /* branch side, in the median -> shove toward branch (-normal) */
+                double rad = atan2((double)(-divider.nnx), (double)(divider.nnz));
+                int32_t wa = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                td5_physics_wall_response(actor, wa, -MEDIAN_HALF - d, 1,
+                                          probe_block[pi].x, probe_block[pi].z);
+                td5_physics_rebuild_pose(actor);
+            }
         }
     }
 }
@@ -2698,6 +3167,66 @@ int td5_track_load_strip(const void *data, size_t size)
                   e0[0], e0[1], e0[2], e1[0], e1[1], e1[2]);
     }
 
+    /* [NATIVE REVERSE CIRCUIT 2026-06-29] Precompute the median-divider lateral
+     * index per span. For each reverse fork (type-8 departure / type-11 rejoin)
+     * mark that junction AND the contiguous same-width run leading into it (the
+     * approach) / out of it (the exit) with the branch lane count. wall_contact
+     * then walls off the main/branch divide across the whole wide fork region so a
+     * car can't straddle it. Reverse-native circuits only (forks the generator
+     * makes; forward + TD6 leave s_fork_divider NULL). */
+    free(s_fork_divider);
+    s_fork_divider = NULL;
+    if (g_td5.reverse_direction && g_active_td6_level == 0 && s_span_count > 0) {
+        s_fork_divider = (int8_t *)calloc((size_t)s_span_count, 1);
+        if (s_fork_divider) {
+            int ring = g_td5.track_span_ring_length;
+            if (ring <= 0 || ring > s_span_count) ring = s_span_count;
+            for (int i = 0; i < ring; i++) {
+                int t  = s_span_array[i].span_type;
+                int lc = span_lane_count(&s_span_array[i]);
+                /* Mark the junction span + a SHORT lead-in/out (not the whole wide
+                 * run) so the car commits at the split without the median fighting
+                 * it down the open approach. */
+                const int LEAD = 4;
+                if (t == 8) {                       /* departure: branch = link_next */
+                    int bi  = (int)s_span_array[i].link_next;
+                    int brl = (bi >= 0 && bi < s_span_count)
+                              ? span_lane_count(&s_span_array[bi]) : 0;
+                    if (brl > 0 && brl < lc) {
+                        s_fork_divider[i] = (int8_t)brl;
+                        for (int k = i - 1; k >= 0 && k >= i - LEAD &&
+                             span_lane_count(&s_span_array[k]) == lc; k--)
+                            s_fork_divider[k] = (int8_t)brl;
+                        for (int k = i + 1; k < ring && k <= i + LEAD; k++)
+                            if (!s_fork_divider[k]) s_fork_divider[k] = (int8_t)brl;
+                        /* flag the branch corridor (entry .. type-10 exit) */
+                        for (int b = bi, n = 0; b >= 0 && b < s_span_count && n < 128; b++, n++) {
+                            s_fork_divider[b] = (int8_t)brl;
+                            if (s_span_array[b].span_type == 10) break;
+                        }
+                    }
+                } else if (t == 11) {               /* rejoin: branch = link_prev */
+                    int bi  = (int)s_span_array[i].link_prev;
+                    int brl = (bi >= 0 && bi < s_span_count)
+                              ? span_lane_count(&s_span_array[bi]) : 0;
+                    if (brl > 0 && brl < lc) {
+                        s_fork_divider[i] = (int8_t)brl;
+                        for (int k = i + 1; k < ring && k <= i + LEAD &&
+                             span_lane_count(&s_span_array[k]) == lc; k++)
+                            s_fork_divider[k] = (int8_t)brl;
+                        for (int k = i - 1; k >= 0 && k >= i - LEAD; k--)
+                            if (!s_fork_divider[k]) s_fork_divider[k] = (int8_t)brl;
+                        /* flag the branch corridor (exit .. type-9 entry, backward) */
+                        for (int b = bi, n = 0; b >= 0 && b < s_span_count && n < 128; b--, n++) {
+                            s_fork_divider[b] = (int8_t)brl;
+                            if (s_span_array[b].span_type == 9) break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /* [task#15 2026-06-13] TD6 per-lane SURFACE GRID at header[6]. 8-byte rows;
      * a span's surf byte (+0x01) is the ROW index, the wheel lateral fraction>>5
      * the COLUMN -> a surface CLASS -> grip/drag (TD6.exe FUN_004465b0/0x004465b0;
@@ -2764,6 +3293,10 @@ int td5_track_load_strip(const void *data, size_t size)
 
     if (!build_strip_display_lists() && !build_placeholder_display_lists())
         return 0;
+
+    /* [GEO 2026-06-29] Bake the geometric lane-quad locate model for this track
+     * (forward or reverse — whichever strip the asset layer selected). */
+    geo_build();
 
     TD5_LOG_I(LOG_TAG,
               "Strip loaded: spans=%d vertices=%d jumps=%d attr_overrides=%d",
@@ -3091,7 +3624,8 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
 static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                             int32_t pos_x, int32_t pos_z)
 {
-    (void)pos_x; (void)pos_z; /* formerly used by compute_effective_sublane workaround */
+    /* pos_x/pos_z (24.8 world) are used by the geometric fork branch decision
+     * in the type-8 reverse-native case below. */
     TD5_StripSpan *sp = &s_span_array[span_idx];
     int new_span = span_idx;
     int h_offset = span_height_offset(sp);
@@ -3122,10 +3656,41 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                /* [#20] Faithful fork decision (TD6 branches are connected, not
-                 * displaced): sub_lane < next_lanes stays on the main road (span+1),
-                 * otherwise follow the branch via link_next. Same path native TD5 uses. */
-                if (sl < next_lanes) {
+                /* [NATIVE REVERSE CIRCUIT 2026-06-29] gen_reverse_track.py mirrors
+                 * the forward strip with a LATERAL FLIP (needed for surface
+                 * winding), moving the branch from the high-sub_lane (right) side
+                 * to the LOW-sub_lane (left) side. The original test
+                 * "sub_lane >= next_lanes -> branch" assumes the branch is on the
+                 * right, so on a reverse native circuit it sends the MAIN-road car
+                 * down the branch and vice versa -> the car can't traverse either
+                 * fork. Invert the test (branch when sub_lane < branch_lanes) for
+                 * reverse native circuits; forward + TD6 keep the original path. */
+                int rev_native = g_td5.reverse_direction && (g_active_td6_level == 0);
+                int br_idx = (int)sp->link_next;
+                int br_lanes = (br_idx >= 0 && br_idx < s_span_count)
+                               ? span_lane_count(&s_span_array[br_idx]) : 0;
+                if (rev_native && br_lanes > 0) {
+                    /* [GEO 2026-06-29] Reverse fork: decide branch-vs-main by which
+                     * corridor the car is PHYSICALLY in. The lateral mirror put the
+                     * branch on the LOW-sub_lane (left) side, but a car straddling the
+                     * divider has an unreliable sub_lane; geometry is authoritative.
+                     * Falls back to the sub_lane test mid-gore. Span choice only —
+                     * the existing sub_lane arithmetic (and the caller's -1 post-step)
+                     * is preserved. */
+                    int take_branch;
+                    if (!geo_fork_decide(next_idx, br_idx, pos_x, pos_z, &take_branch))
+                        take_branch = (sl < br_lanes);
+                    if (take_branch) {
+                        new_span = br_idx;
+                        TD5_LOG_I(LOG_TAG, "jfwd_branch[rev]: span=%d sl=%d br_lanes=%d -> span=%d",
+                                  span_idx, sl, br_lanes, new_span);
+                    } else {
+                        new_span = next_idx;
+                        *sub_lane = sl - br_lanes;
+                        TD5_LOG_I(LOG_TAG, "jfwd_main[rev]: span=%d sl=%d br_lanes=%d -> span=%d sl_new=%d",
+                                  span_idx, sl, br_lanes, new_span, *sub_lane);
+                    }
+                } else if (sl < next_lanes) {
                     /* Main road — no sub_lane delta; walker applies -1 */
                     new_span = next_idx;
                     TD5_LOG_I(LOG_TAG, "jfwd_main: span=%d sl=%d next_lanes=%d -> span=%d",
@@ -3171,7 +3736,27 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
             int sl = *sub_lane;
             if (next_idx >= 0 && next_idx < s_span_count) {
                 int next_lanes = span_lane_count(&s_span_array[next_idx]);
-                if (sl < next_lanes) {
+                /* [GEO 2026-06-29] Reverse circuits: case 0x02 historically used the
+                 * forward sub_lane test (branch on the high side), which is wrong for
+                 * the laterally-mirrored reverse fork — a fork crossed via a forward-
+                 * right step then routed the car down the wrong corridor. Use the same
+                 * geometric (branch-vs-main) decision as case 0x01, sub_lane heuristic
+                 * inverted for reverse as a fallback. */
+                int rev_native = g_td5.reverse_direction && (g_active_td6_level == 0);
+                int br_idx = (int)sp->link_next;
+                int br_lanes = (br_idx >= 0 && br_idx < s_span_count)
+                               ? span_lane_count(&s_span_array[br_idx]) : 0;
+                if (rev_native && br_lanes > 0) {
+                    int take_branch;
+                    if (!geo_fork_decide(next_idx, br_idx, pos_x, pos_z, &take_branch))
+                        take_branch = (sl < br_lanes);
+                    if (take_branch) {
+                        new_span = br_idx;
+                    } else {
+                        new_span = next_idx;
+                        *sub_lane = sl - br_lanes;
+                    }
+                } else if (sl < next_lanes) {
                     new_span = next_idx;
                 } else {
                     new_span = (int)sp->link_next;
@@ -7872,6 +8457,7 @@ void td5_track_shutdown(void)
     g_strip_span_base = NULL;
     g_strip_vertex_base = NULL;
 
+    geo_free();
     free_display_lists();
     free_models_dat_runtime();
 
