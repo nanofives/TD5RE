@@ -12798,6 +12798,31 @@ void td5_physics_reset_actor_state(TD5_Actor *actor)
     actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);  /* +0x148 */
     actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);  /* +0x14C */
 
+    /* [NATIVE REVERSE CIRCUIT 2026-06-29] Seed the wheel + body contact probes
+     * with the chassis span/lane (+0x80/+0x8C, set by every spawn/recycle caller
+     * before this reset) so the integrate's ground-snap below reads the surface
+     * at the actor's ACTUAL span. Without it the probes start at the memset-0
+     * default and the per-probe walker steps them to the ring-end sentinel
+     * (span ~ring-1); on a reverse grid (which sits far from span 0) that reads
+     * bogus ground -> the +vy launch that makes cars clip/blink on the FIRST race
+     * (warm, hence fine, on a restart). The original (forward only) copies the
+     * chassis span into the probes before each contact frame; the port only
+     * re-walks them, and a forward grid next to span 0 hid the gap. Covers racers
+     * AND traffic (both set +0x80 before reset). Reverse-scoped to keep forward
+     * spawning byte-identical. */
+    if (g_td5.reverse_direction) {
+        uint8_t *abase = (uint8_t *)actor;
+        int16_t cspan = *(int16_t *)(abase + 0x80);
+        int8_t  clane = *(int8_t  *)(abase + 0x8C);
+        int pi;
+        for (pi = 0; pi < 4; pi++) {
+            int16_t *bp = (int16_t *)(abase + 0x00 + pi * 0x10);  /* body_probes[pi]  */
+            int16_t *wp = (int16_t *)(abase + 0x40 + pi * 0x10);  /* wheel_probes[pi] */
+            bp[0] = cspan;  ((int8_t *)bp)[12] = clane;
+            wp[0] = cspan;  ((int8_t *)wp)[12] = clane;
+        }
+    }
+
     /* 0x405E47 — CALL IntegrateVehiclePoseAndContacts (settles suspension
      * + ground-snaps world_pos.y from the sentinel). */
     td5_physics_integrate_pose(actor);

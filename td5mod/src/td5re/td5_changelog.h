@@ -207,6 +207,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  start; it won't show again (TutorialOverlay option)" },
     { CL_ITEM,    "Cop Chase: suspects can now pick TD6 cars too, not" },
     { CL_ITEM,    "  just the TD5 line-up (cops still drive police cars)" },
+    { CL_ITEM,    "You can now race the 7 lap circuits in REVERSE" },
+    { CL_ITEM,    "  (Newcastle, Maui, Cheddar, Jarash, Courmayeur," },
+    { CL_ITEM,    "  Montego Bay, House of Bez): the Direction toggle" },
+    { CL_ITEM,    "  appears for them and the grid lines up on the" },
+    { CL_ITEM,    "  start/finish straight" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "June 27" },
