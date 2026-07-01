@@ -682,6 +682,15 @@ static int geo_is_enabled(void)
     return s_geo_enabled;
 }
 
+/* [GEO SCOPE 2026-07-01] The geometric collision path only replaces the legacy
+ * span-walker on the REVERSE NATIVE circuits, where the mirrored-fork geometry
+ * defeats the topology walker. Forward + TD6 keep the proven byte-faithful
+ * collision. TD5RE_GEO_COLLISION=0 still forces it fully off. */
+static int geo_active(void)
+{
+    return geo_is_enabled() && g_td5.reverse_direction && (g_active_td6_level == 0);
+}
+
 static void geo_free(void)
 {
     free(s_geo_quads);      s_geo_quads = NULL;      s_geo_quad_count = 0;
@@ -791,6 +800,7 @@ static void geo_build(void)
     int gnx, gnz, total;
     int64_t edge_sum; int edge_n;
     int *cursor;
+    int deg_count = 0, bad_count = 0;   /* [GEO-DIAG] degenerate + malformed quads */
 
     geo_free();
     if (!s_span_array || !s_vertex_table || s_span_count <= 0) return;
@@ -823,6 +833,9 @@ static void geo_build(void)
             if (!a || !b || !c || !d) {
                 /* degenerate slot: zero-extent quad never matches a query */
                 q->minx = q->maxx = q->minz = q->maxz = q->cx = q->cz = 0;
+                deg_count++;
+                TD5_LOG_I(LOG_TAG, "geo_build: DEGENERATE quad span=%d lane=%d type=%d (null verts)",
+                          i, lane, sp->span_type);
                 qi++; continue;
             }
             q->x[0] = sp->origin_x + a->x; q->z[0] = sp->origin_z + a->z;  /* nearL */
@@ -839,6 +852,37 @@ static void geo_build(void)
                   sx += q->x[k]; sz += q->z[k];
               }
               q->cx = (int32_t)(sx / 4); q->cz = (int32_t)(sz / 4); }
+            /* [GEO REPAIR 2026-07-01] A convex quad always contains its own
+             * centroid; if it doesn't, the strip's per-type / mirrored-reverse
+             * vertex order traced a self-intersecting (bowtie) loop, and the
+             * convex point-in-quad test would then reject interior probes ->
+             * phantom wall (the "invisible wall" bug at fork/merge spans). Re-sort
+             * the 4 corners CCW around their centroid (which, as the average of
+             * the 4 points, always lies inside their hull) to recover a simple
+             * convex quad over the same footprint. AABB/centroid are order-free
+             * so they need no update. */
+            if (!geo_point_in_quad(q, q->cx, q->cz)) {
+                int s0, s1; int32_t tx, tz; double ta;
+                double ang[4];
+                for (s0 = 0; s0 < 4; s0++)
+                    ang[s0] = atan2((double)(q->z[s0] - q->cz),
+                                    (double)(q->x[s0] - q->cx));
+                for (s0 = 0; s0 < 3; s0++)
+                    for (s1 = 0; s1 < 3 - s0; s1++)
+                        if (ang[s1] > ang[s1 + 1]) {
+                            ta = ang[s1]; ang[s1] = ang[s1+1]; ang[s1+1] = ta;
+                            tx = q->x[s1]; q->x[s1] = q->x[s1+1]; q->x[s1+1] = tx;
+                            tz = q->z[s1]; q->z[s1] = q->z[s1+1]; q->z[s1+1] = tz;
+                        }
+                if (!geo_point_in_quad(q, q->cx, q->cz)) {
+                    /* still bad after reorder: a corner is genuinely wrong
+                     * (e.g. type 4/7 far-vertex-at+2). Rare; count for the log. */
+                    bad_count++;
+                    TD5_LOG_I(LOG_TAG,
+                        "geo_build: UNREPAIRABLE quad span=%d lane=%d type=%d",
+                        i, lane, sp->span_type);
+                }
+            }
             if (q->minx < wx0) wx0 = q->minx; if (q->maxx > wx1) wx1 = q->maxx;
             if (q->minz < wz0) wz0 = q->minz; if (q->maxz > wz1) wz1 = q->maxz;
             edge_sum += (q->maxx - q->minx) + (q->maxz - q->minz); edge_n++;
@@ -893,8 +937,9 @@ static void geo_build(void)
             }
     }
     free(cursor);
-    TD5_LOG_I(LOG_TAG, "geo locate built: quads=%d grid=%dx%d cell=%d items=%d ring=%d",
-              s_geo_quad_count, gnx, gnz, (int)cell, items, ring);
+    TD5_LOG_I(LOG_TAG, "geo locate built: quads=%d grid=%dx%d cell=%d items=%d ring=%d "
+              "degenerate=%d unrepairable=%d",
+              s_geo_quad_count, gnx, gnz, (int)cell, items, ring, deg_count, bad_count);
 }
 
 typedef struct {
@@ -997,7 +1042,7 @@ static int geo_fork_decide(int next_idx, int br_idx, int32_t pos_x, int32_t pos_
                            int *take_branch)
 {
     int g_br, g_mn;
-    if (!geo_is_enabled()) return 0;
+    if (!geo_active()) return 0;
     g_br = geo_span_contains(br_idx,  pos_x >> 8, pos_z >> 8);
     g_mn = geo_span_contains(next_idx, pos_x >> 8, pos_z >> 8);
     if (g_br >= 0 && g_mn < 0) { *take_branch = 1; return 1; }
@@ -1023,11 +1068,31 @@ static void geo_resolve_walls(TD5_Actor *actor)
         dx = (double)h.pushx; dz = (double)h.pushz;
         mag = sqrt(dx * dx + dz * dz);
         if (mag < 0.5) continue;
+        /* [GEO LATERAL 2026-07-01] Project the push onto the axis perpendicular
+         * to the car's heading and keep only that lateral part. A nearest-edge
+         * that is actually a span's transverse (near/far) boundary yields a
+         * longitudinal push that would BRAKE the car head-on (the fork "hits a
+         * front wall" bug); its lateral component is ~0 so it cancels here. A
+         * genuine side rail is already lateral and survives unchanged. */
+        {
+            int32_t yaw12 = ((*(int32_t *)((uint8_t *)actor + 0x1F4)) >> 8) & 0xFFF;
+            double th = (double)yaw12 * (2.0 * 3.14159265358979323846 / 4096.0);
+            double fx = sin(th), fz = cos(th);        /* car forward (x,z) */
+            double along = dx * fx + dz * fz;          /* longitudinal component */
+            double lx = dx - along * fx;               /* lateral push x */
+            double lz = dz - along * fz;               /* lateral push z */
+            double lmag = sqrt(lx * lx + lz * lz);
+            if (lmag < 0.5) continue;                  /* purely longitudinal -> no wall */
+            dx = lx; dz = lz; mag = lmag;
+        }
         /* inward normal = push direction (toward road); same angle convention
          * as the legacy rail walls: atan2(nnx, -nnz). */
         rad = atan2(dx, -dz);
         wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
-        pen = -(h.pushdist > GEO_PUSH_CAP ? GEO_PUSH_CAP : h.pushdist);
+        {
+            int32_t ipen = (int32_t)(mag + 0.5);
+            pen = -(ipen > GEO_PUSH_CAP ? GEO_PUSH_CAP : ipen);
+        }
         td5_physics_wall_response(actor, wall_angle, pen, 1, probe_block[pi].x, probe_block[pi].z);
         td5_physics_rebuild_pose(actor);
     }
@@ -1050,7 +1115,7 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     /* [GEO 2026-06-29] Geometric nearest-road wall clamp replaces the rail-LUT
      * + penetration-reject path (and the reverse-fork median band-aid below).
      * The legacy code remains as a TD5RE_GEO_COLLISION=0 fallback. */
-    if (geo_is_enabled()) { geo_resolve_walls(actor); return; }
+    if (geo_active()) { geo_resolve_walls(actor); return; }
 
     if (actor->slot_index == 0) {
         s_wall_tick++;
@@ -3294,9 +3359,10 @@ int td5_track_load_strip(const void *data, size_t size)
     if (!build_strip_display_lists() && !build_placeholder_display_lists())
         return 0;
 
-    /* [GEO 2026-06-29] Bake the geometric lane-quad locate model for this track
-     * (forward or reverse — whichever strip the asset layer selected). */
-    geo_build();
+    /* [GEO 2026-06-29] Bake the geometric lane-quad locate model — only when the
+     * geo collision path is active for this track (reverse native circuits);
+     * forward + TD6 keep the legacy walker so we skip the bake there. */
+    if (geo_active()) geo_build();
 
     TD5_LOG_I(LOG_TAG,
               "Strip loaded: spans=%d vertices=%d jumps=%d attr_overrides=%d",
@@ -5767,6 +5833,12 @@ void td5_track_compute_heading(TD5_Actor *actor)
         break;
     }
     }
+
+    /* [NATIVE REVERSE CIRCUIT 2026-07-01] Reverse-native circuits post-process
+     * this geometry yaw via td5_ai_correct_spawn_heading() (route-byte heading,
+     * centreline-tangent fallback) — the same proven path TD6 tracks use — so no
+     * reverse handling is needed here; the geometry pose is a harmless seed. See
+     * the correct_spawn_heading call in td5_game.c InitRace. */
 
     /* Original: 4-quadrant dispatch → full-circle angle, then at LAB_00434501:
      *   stored = (full_angle + 0x800) * 0x100  [CONFIRMED @ 0x00434501]

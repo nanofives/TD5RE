@@ -3714,8 +3714,16 @@ int td5_game_init_race_session(void) {
              * reset_actor_state below builds the rotation matrix — so the matrix
              * (hence render + initial motion) reflects the corrected heading.
              * Faithful TD5 tracks keep the geometry yaw byte-identically (the
-             * "DO NOT post-process" note below still governs them). */
-            if (g_active_td6_level > 0)
+             * "DO NOT post-process" note below still governs them).
+             *
+             * [NATIVE REVERSE CIRCUIT 2026-07-01] Reverse native circuits get the
+             * SAME correction: the generated reverse strip's per-span vertex
+             * layout yields a sheared/diagonal geometry yaw (verified: Newcastle
+             * rev slot 0 span 512 geom 855 vs true travel ~772), so re-seed from
+             * the reverse route-byte heading (LEFTB/RIGHTB.TRK), with the
+             * centreline-tangent fallback. Forward faithful TD5 tracks are still
+             * excluded and keep the byte-faithful geometry yaw. */
+            if (g_active_td6_level > 0 || g_td5.reverse_direction)
                 td5_ai_correct_spawn_heading(slot);
 
             /* DO NOT post-process the geometry-derived yaw.
