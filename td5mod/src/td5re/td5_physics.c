@@ -4818,9 +4818,10 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t term3 = rear_lat_force * rear_weight;
 
         int32_t yaw_torque = (term1 + term2 - term3) / inertia_div;
+        int32_t yaw_max = TD5_YAW_TORQUE_MAX;
 
-        if (yaw_torque > TD5_YAW_TORQUE_MAX) yaw_torque = TD5_YAW_TORQUE_MAX;
-        if (yaw_torque < -TD5_YAW_TORQUE_MAX) yaw_torque = -TD5_YAW_TORQUE_MAX;
+        if (yaw_torque > yaw_max)  yaw_torque = yaw_max;
+        if (yaw_torque < -yaw_max) yaw_torque = -yaw_max;
 
         actor->angular_velocity_yaw += yaw_torque;
 
@@ -5296,7 +5297,6 @@ void td5_physics_update_player(TD5_Actor *actor)
      * 0x004049BA/0x00404A80. Do NOT write it again here — the earlier
      * `abs(lateral_speed)>>8` tail-write used the wrong values (post-update)
      * and collapsed slip to near-zero in normal driving. */
-
 }
 
 /* ========================================================================

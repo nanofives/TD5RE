@@ -1475,6 +1475,32 @@ static int s_banner_align_log     = 0;  /* throttle the per-mesh align log */
 static float s_banner_vshift_x    = 0.0f;
 #define TD6_BANNER_OVERHEAD_Y 1250.0f   /* banner panels sit at Y~2500-4000; ground plaza at Y~0 */
 
+/* [DRAG WIDE ROAD 2026-06-28] Lateral (X) scale applied to LEVEL geometry verts
+ * during the drag race, so the visible asphalt / borders / start+finish banner
+ * physically widen with the field. The drag strip's road meshes are centred at
+ * model X=0 (origin (0,0,0), bounding-centre X~0), so scaling pos_x about 0
+ * widens the road about its centreline. Scale = field/4 makes the asphalt width
+ * match the N-lane navigation strip exactly, so cars sit one-per-lane on real
+ * road. 1.0 = no scaling (every non-drag track, and the reset state). Set at the
+ * top of the level pass, applied in td5_render_transform_mesh_vertices, reset to
+ * 1.0 after the pass so it never leaks into car / sky / HUD transforms. */
+static float s_drag_road_scale    = 1.0f;
+
+/* [DRAG STADIUM EXTEND] When non-zero, td5_render_span_display_list draws the
+ * block shifted by this much render-float Z (added to BOTH the frustum-cull
+ * centre and the origin translation). Used by td5_render_drag_stadium_extension()
+ * to TILE a clean mid-stadium block (road+stands) down the extended drag straight,
+ * since the baked stadium scenery ends at ~span 240. Set→render→reset synchronously
+ * around each copy; single-screen drag only (a concurrent split-screen pane could
+ * race it — acceptable for now). */
+static float s_dl_z_offset        = 0.0f;
+/* [DRAG FINISH GANTRY] level030's finish gantry mesh (MODELS.DAT dl 26 / sub 0) and
+ * its rendered-Z centroid, resolved once per level. Suppressed at its original
+ * position and re-drawn at the relocated finish. Defined near the finish helpers. */
+static TD5_MeshHeader *s_drag_gantry_mesh = NULL;
+static float           s_drag_gantry_z    = 0.0f;
+static TD5_MeshHeader *td5_render_drag_gantry(void);
+
 static int td6_is_banner_page(int page)
 {
     int lvl = g_active_td6_level;
@@ -2404,6 +2430,7 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
     float bvx = s_banner_vshift_x;
     const float *ddx = s_deform_dx, *ddy = s_deform_dy, *ddz = s_deform_dz;
     int dcount = (ddx && ddy && ddz) ? s_deform_count : 0;
+    float dsx = s_drag_road_scale;   /* [DRAG WIDE ROAD] lateral widen of level geom */
     for (int i = 0; i < count; i++) {
         float px = verts[i].pos_x;
         float py = verts[i].pos_y;
@@ -2411,6 +2438,9 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
 
         if (bvx != 0.0f && py >= TD6_BANNER_OVERHEAD_Y)
             px += bvx;
+        /* [DRAG WIDE ROAD] widen the road about its centreline (model X=0). */
+        if (dsx != 1.0f)
+            px *= dsx;
 
         /* [CAR DAMAGE] add this slot's accumulated model-space dent (local only). */
         if (i < dcount) {
@@ -3093,6 +3123,31 @@ void td5_render_span_display_list(void *display_list_block)
     }
     s_level_pass_active = 1;
 
+    /* [DRAG WIDE ROAD 2026-06-28] During a drag race, widen the visible level
+     * geometry (asphalt, borders, start/finish banner) laterally so the road
+     * physically scales with the field. Road meshes are centred at model X=0, so
+     * a pos_x scale about 0 widens about the centreline. Scale = field/4 keeps
+     * the asphalt width equal to the N-lane navigation strip (cars stay one per
+     * lane on real road). Knobs: TD5RE_DRAG_WIDEN_ROAD=0 disables; TD5RE_DRAG_
+     * ROAD_SCALE=f forces an exact factor (else auto = field/4, clamped). */
+    s_drag_road_scale = 1.0f;
+    if (g_td5.drag_race_enabled) {
+        const char *wr = getenv("TD5RE_DRAG_WIDEN_ROAD");
+        if (!wr || wr[0] != '0') {
+            const char *rs = getenv("TD5RE_DRAG_ROAD_SCALE");
+            float scale;
+            if (rs && rs[0]) {
+                scale = (float)atof(rs);
+            } else {
+                int field = td5_game_drag_field_size();
+                scale = (float)field / 4.0f;   /* original drag strip = 4 lanes */
+            }
+            if (scale < 1.0f) scale = 1.0f;
+            if (scale > 4.0f) scale = 4.0f;
+            s_drag_road_scale = scale;
+        }
+    }
+
     for (int i = 0; i < count; i++) {
         TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
         if (!mesh || (uintptr_t)mesh < 0x100000u || !td5_track_is_valid_mesh_ptr(mesh)) {
@@ -3146,6 +3201,26 @@ void td5_render_span_display_list(void *display_list_block)
         if (r != r || r < 0.0f) continue;
         if (cx != cx || cy != cy || cz != cz) continue;
 
+        /* [DRAG STADIUM EXTEND] In a drag race the baked stadium scenery is a
+         * STRAIGHT (dl 0..34, bc_z down to ~-193265) capped by a CURVED oval end
+         * (dl 35, bc_z ~-198054) then bare ground tiles (bc_z <-204000). Once the
+         * drag is lengthened the straight runs past dl 34, so the curved cap + back
+         * stands + tiles would sit mid-track. Drop everything past the straight
+         * (bc_z < -195000) during the NORMAL walk (s_dl_z_offset==0); the tiled
+         * stadium-block copies carry s_dl_z_offset!=0 so they bypass this and
+         * re-enclose the extension cleanly. */
+        if (g_td5.drag_race_enabled && s_dl_z_offset == 0.0f && cz < -195000.0f)
+            continue;
+
+        /* [DRAG FINISH GANTRY] Suppress the finish-line gantry at its ORIGINAL
+         * position (~span 204) during the normal walk — it's the FINISH BANNER, which
+         * shouldn't sit mid-strip. That leaves a hole (the gantry bundles the road
+         * there), so td5_render_drag_stadium_extension re-fills that exact spot with a
+         * plain stadium block (no banner); the banner itself is re-drawn only at the
+         * relocated finish by td5_render_drag_finish_line (s_dl_z_offset!=0). */
+        if (g_td5.drag_race_enabled && s_dl_z_offset == 0.0f && mesh == s_drag_gantry_mesh)
+            continue;
+
         /* [#20 HK reverse] DELIBERATE DEVIATION (user-requested): remove the building
          * standing in the Hong Kong REVERSE racing line (models entry 509 sub 8/10/11,
          * matched by EXACT bounding centre). Each of those submeshes spans from road
@@ -3195,7 +3270,7 @@ void td5_render_span_display_list(void *display_list_block)
             }
         }
 
-        if (!td5_render_is_sphere_visible(cx, cy, cz, r)) {
+        if (!td5_render_is_sphere_visible(cx, cy, cz + s_dl_z_offset, r)) {
             if (dbg_is_bb) s_dbg_bb_culled++;   /* [task#7] */
             continue;
         }
@@ -3206,7 +3281,7 @@ void td5_render_span_display_list(void *display_list_block)
         TD5_Vec3f origin;
         origin.x = mesh->origin_x * (1.0f / 256.0f);
         origin.y = mesh->origin_y * (1.0f / 256.0f);
-        origin.z = mesh->origin_z * (1.0f / 256.0f);
+        origin.z = mesh->origin_z * (1.0f / 256.0f) + s_dl_z_offset;  /* [DRAG STADIUM EXTEND] */
 
         /* [LONDON START BANNER 2026-06-23] Re-centre a TD6 banner gantry's OVERHEAD
          * panels over the road. The gantry mesh bundles the overhead banner (Y~2500-
@@ -3323,6 +3398,7 @@ void td5_render_span_display_list(void *display_list_block)
     s_td6_banner_remap_active = 0;  /* [reverse banners] level-geometry pass only */
     s_level_pass_active = 0;        /* [banners] one-sided cull off outside level geometry */
     s_banner_vshift_x = 0.0f;       /* [START-banner align] never leak into sky/car/other mesh transforms */
+    s_drag_road_scale = 1.0f;       /* [DRAG WIDE ROAD] never leak the lateral widen into car/sky/HUD */
 
     if ((s_debug_dl_calls % 500) == 1) {
         TD5_LOG_I(LOG_TAG,
@@ -3502,7 +3578,173 @@ void td5_render_set_cop_mesh(TD5_MeshHeader *mesh) { s_cop_mesh = mesh; }
  * has no MODELS.DAT mesh table. */
 static void td5_render_fallback_strip_ribbon(int center_span, int window,
                                              int ring, int total_spans,
-                                             int is_circuit);
+                                             int is_circuit, int min_span, int max_span);
+/* [DRAG STADIUM EXTEND] Re-render the real finish gantry (MODELS.DAT dl 26 sub 0) at
+ * the relocated drag finish span (defined later, near the finish helpers). */
+static void td5_render_drag_finish_line(void);
+
+/* Read display-list entry N's first sub-mesh bounding-centre Z (render-float =
+ * the 24.8 world coord / 256). Returns 1 on success. */
+static int td5_render_dl_first_bcz(int idx, float *out_z)
+{
+    void *e = td5_track_get_display_list_entry(idx);
+    uint32_t *b;
+    TD5_MeshHeader *m;
+    if (!e) return 0;
+    b = (uint32_t *)e;
+    if ((int)b[0] < 1) return 0;
+    m = (TD5_MeshHeader *)(uintptr_t)b[1];
+    if (!m || !td5_track_is_valid_mesh_ptr(m)) return 0;
+    *out_z = m->bounding_center_z;
+    return 1;
+}
+
+/* [DRAG STADIUM EXTEND 2026-06-29] The drag strip is a straight inside an oval
+ * stadium whose baked scenery (road + grandstands, MODELS.DAT dl 0..35) ends at
+ * world-Z ~-198000 (~span 240); past it only bare ground tiles exist. When the
+ * drag is lengthened to use the road beyond that, the extension looks orphaned.
+ * Here we TILE a clean mid-stadium block (dl 18 = road+stands together) down the
+ * extension by repeatedly drawing it shifted in Z (s_dl_z_offset), so the longer
+ * straight stays enclosed. The per-block frustum cull (which now also honours
+ * s_dl_z_offset) draws only the 2-3 copies near the camera. Drag-only. */
+static void td5_render_drag_stadium_extension(void)
+{
+    void *tmpl, *cap;
+    uint32_t *b;
+    TD5_MeshHeader *m;
+    float tz, step, stride, T, seam_z, last_T, cap_z = 0.0f;
+    /* [DRAG DISTANCE 2026-06-30] End the stadium near the CHOSEN finish, not always
+     * at the strip end — otherwise a SHORT/MEDIUM race had stadium running far past
+     * the finish (to the EPIC extent). Tile only to the finish span (+ ~30 spans of
+     * stadium run-off), clamped so it never overshoots the strip end. For SHORT/
+     * MEDIUM the finish sits inside the original stadium, so this lands shallower
+     * than the seam and the loop below does not run (the vanilla ~span-240 stadium
+     * + its back-cap stands; the original cap is still replaced near span 243). */
+    float EXTEND_END_Z = -286000.0f;           /* fallback = base strip end (~span 298) */
+    {
+        int cpc = td5_game_get_minimap_checkpoint_count();
+        int lx, ly, lz;
+        int last_span = g_td5.track_span_ring_length - 2;  /* true strip end (moves with the lengthened strip) */
+        int lln = (last_span > 1) ? td5_track_span_lane_count_at(last_span) : 1;
+        float strip_end_z = -286000.0f;
+        if (lln < 1) lln = 1;
+        if (last_span > 1 && td5_track_get_span_lane_world(last_span, lln / 2, &lx, &ly, &lz))
+            strip_end_z = (float)lz / 256.0f;
+        if (cpc > 0) {
+            int fspan = td5_game_get_minimap_checkpoint_span(cpc - 1);
+            int fx, fy, fz, lanes = td5_track_span_lane_count_at(fspan);
+            if (lanes < 1) lanes = 1;
+            if (fspan >= 1 && td5_track_get_span_lane_world(fspan, lanes / 2, &fx, &fy, &fz))
+                EXTEND_END_Z = (float)fz / 256.0f - 47000.0f;   /* ~30 spans past finish */
+        }
+        /* Never tile past the strip's REAL end — but that end now MOVES with the
+         * lengthened LONG/EPIC strip. The old hardcoded -286000 floor capped the
+         * stands at the original span-298 end, leaving the inserted road bare. */
+        if (EXTEND_END_Z < strip_end_z) EXTEND_END_Z = strip_end_z;
+        { static int sl = 0; if ((sl++ % 120) == 0)
+            TD5_LOG_I(LOG_TAG, "drag extend bounds: finish_cp=%d strip_last=%d strip_end_z=%.0f end_z=%.0f",
+                      (cpc > 0) ? td5_game_get_minimap_checkpoint_span(cpc - 1) : -1,
+                      last_span, strip_end_z, EXTEND_END_Z); }
+    }
+    int copies = 0;
+    static int s_frame = 0;
+    int do_log = ((s_frame++ % 120) == 0);
+
+    if (!g_td5.drag_race_enabled) return;
+
+    tmpl = td5_track_get_display_list_entry(18);  /* clean mid-stadium block */
+    if (!tmpl) return;
+    b = (uint32_t *)tmpl;
+    if ((int)b[0] < 1) return;
+    m = (TD5_MeshHeader *)(uintptr_t)b[1];
+    if (!m || !td5_track_is_valid_mesh_ptr(m)) return;
+    tz = m->bounding_center_z;
+
+    /* Per-block Z length. Measure over a WIDE span of straight blocks so per-block
+     * jitter averages out — (bc_z[10] - bc_z[30]) / 20 — which is more reliable than
+     * a single adjacent pair. Fall back to dl18/19, then the measured ~6029. */
+    step = 6029.0f;
+    {
+        float z10, z30, za, zb;
+        if (td5_render_dl_first_bcz(10, &z10) && td5_render_dl_first_bcz(30, &z30)) {
+            float d = (z10 - z30) / 20.0f;       /* bc_z decreases down-track */
+            if (d > 1500.0f && d < 20000.0f) step = d;
+        } else if (td5_render_dl_first_bcz(18, &za) && td5_render_dl_first_bcz(19, &zb)) {
+            float d = za - zb; if (d < 0.0f) d = -d;
+            if (d > 1500.0f && d < 20000.0f) step = d;
+        }
+    }
+
+    /* Inter-tile stride: a hair SHORTER than the true block length so consecutive
+     * tiles overlap ~8% and can never accumulate a hairline gap down the row. */
+    stride = step * 0.92f;
+
+    /* Seam: dl 34 is the LAST original straight block (curved cap dl 35 suppressed).
+     * START THE FIRST TILE ON TOP of dl 34 — half a block UP-track of its centre
+     * (seam_z + step*0.5) — so the first tiled block double-covers the seam region
+     * instead of butting it. The tiles are identical grandstand geometry, so the
+     * overlap is visually invisible while a gap is not; bias hard toward overlap. */
+    seam_z = -193265.0f;
+    td5_render_dl_first_bcz(34, &seam_z);
+
+    last_T = seam_z;
+    for (T = seam_z + step * 0.5f; T > EXTEND_END_Z; T -= stride) {
+        s_dl_z_offset = T - tz;                 /* shift template to T */
+        td5_render_span_display_list(tmpl);
+        last_T = T;
+        if (do_log && copies < 8)
+            TD5_LOG_I(LOG_TAG, "drag tile[%d] z=%.0f (off=%.0f)", copies, T, T - tz);
+        if (++copies > 240) break;              /* safety bound — high for the lengthened
+                                                 * LONG/EPIC strip; off-screen copies are
+                                                 * frustum-culled inside the dispatch */
+    }
+
+    /* [DRAG FINISH GANTRY] The gantry block (dl 26) is suppressed at span ~204 in the
+     * normal walk (it crosses the road as an overhead banner — unwanted mid-strip),
+     * leaving a NOTCH in the otherwise-continuous tall banner walls. The gantry
+     * footprint is ~1.5 blocks wide and is NOT centred between dl 25 and dl 27 (the
+     * dl 26->dl 27 gap is ~9k units, far more than dl 25->dl 26), so a single fill
+     * block left a sliver. TILE the adjacent original block (dl 27) across the WHOLE
+     * dl 25 .. dl 27 span with the same overlapping stride the main extension uses, so
+     * the banner walls are continuous with no gap and match the surrounding stadium
+     * EXACTLY. Gated on s_drag_gantry_mesh (gantry identified => being suppressed) so
+     * there is no 1-frame double-draw before the suppress kicks in. */
+    if (s_drag_gantry_mesh) {
+        void *adj = td5_track_get_display_list_entry(27);
+        float z25 = 0.0f, z27 = 0.0f;
+        if (adj && td5_render_dl_first_bcz(25, &z25) && td5_render_dl_first_bcz(27, &z27)) {
+            float f; int nf = 0;
+            for (f = z25; f >= z27 && nf < 6; f -= stride, nf++) {
+                s_dl_z_offset = f - z27;
+                td5_render_span_display_list(adj);
+            }
+            { static int sfl = 0; if ((sfl++ % 120) == 0)
+                TD5_LOG_I(LOG_TAG, "drag gantry FILL(dl27 x%d): z25=%.0f z27=%.0f stride=%.0f",
+                          nf, z25, z27, stride); }
+        }
+    }
+
+    /* Back end-cap (dl 35, the curved oval end) butting onto the LAST tile — one
+     * block past it — so the enclosure closes with no gap regardless of step. */
+    cap = td5_track_get_display_list_entry(35);
+    if (cap) {
+        uint32_t *cb = (uint32_t *)cap;
+        if ((int)cb[0] >= 1) {
+            TD5_MeshHeader *cm = (TD5_MeshHeader *)(uintptr_t)cb[1];
+            if (cm && td5_track_is_valid_mesh_ptr(cm)) {
+                cap_z = last_T - stride;
+                s_dl_z_offset = cap_z - cm->bounding_center_z;
+                td5_render_span_display_list(cap);
+            }
+        }
+    }
+    s_dl_z_offset = 0.0f;                        /* never leak into other passes */
+
+    if (do_log)
+        TD5_LOG_I(LOG_TAG,
+            "drag stadium extend: tmpl_dl18 tz=%.0f step=%.0f stride=%.0f copies=%d seam=%.0f start=%.0f last=%.0f cap=%.0f",
+            tz, step, stride, copies, seam_z, seam_z + step * 0.5f, last_T, cap_z);
+}
 
 /* [traffic-view-dist 2026-06-29] Multiplier on how far traffic + AI cars (and the
  * road geometry under them) stay drawn. The faithful actor render-cull window is
@@ -3676,6 +3918,13 @@ void td5_render_actors_for_view(int view_index)
         actor_cull_window = (int)((float)actor_cull_window * vmult + 0.5f);
     }
     if (actor_cull_window < 1) actor_cull_window = 1;
+    /* [DRAG RACE TRAFFIC 2026-06-30] The drag strip is a short, cheap, dead-straight
+     * stadium where ONCOMING traffic must be visible approaching from well ahead —
+     * the default ~64-span (32-span split) actor cull pops it in far too late (the
+     * dynamic spawner seeds it 50-175 spans out, so it rendered as an invisible
+     * collision box). Open the actor cull to cover the whole strip ahead. */
+    if (g_td5.drag_race_enabled && actor_cull_window < 260)
+        actor_cull_window = 260;
 
     /* far_cull is now slider-driven inside td5_render_configure_projection
      * so it applies to track render too, not just actor cull. */
@@ -3909,8 +4158,21 @@ void td5_render_actors_for_view(int view_index)
         const void *s_submitted[TD5_RENDER_SUBMITTED_CAP];
         int submitted_count = 0;
 
+        /* [DRAG LENGTHEN] MODELS.DAT entries past the insertion point are baked at
+         * the original (now-stale) positions; the procedural ribbon paints there
+         * instead. Suppress those entries so the two don't overlap/double. */
+        int drag_ins_entry = (g_td5.drag_race_enabled && td5_track_drag_insert_span() >= 0)
+                             ? (td5_track_drag_insert_span() >> 2) : -1;
+
+        /* [DRAG FINISH GANTRY] Resolve dl26/sub0 BEFORE the walk so the suppression
+         * below (mesh == s_drag_gantry_mesh) has the pointer from the first frame. */
+        if (g_td5.drag_race_enabled) td5_render_drag_gantry();
+
         for (int i = 0; i < n_entries; i++) {
             int entry_idx = start_entry + i;
+
+            if (drag_ins_entry >= 0 && entry_idx >= drag_ins_entry)
+                continue;
 
             if (ring_entries > 0) {
                 if (is_circuit) {
@@ -3995,7 +4257,37 @@ void td5_render_actors_for_view(int view_index)
             if (is_circuit && ring > 0 && (ring / 2 + 1) < ribbon_win)
                 ribbon_win = ring / 2 + 1;
             td5_render_fallback_strip_ribbon(eff_player, ribbon_win, ring,
-                                             total_spans, is_circuit);
+                                             total_spans, is_circuit, 0, 0);
+        }
+        /* [DRAG LENGTHEN] The inserted/shifted spans (>= insert point) have NO
+         * matching MODELS.DAT road (those chunks are baked at the ORIGINAL
+         * positions, which no longer line up). Paint the procedural strip ribbon
+         * from the insertion point on so the road physically continues to the
+         * finish; the section before the insertion keeps its textured MODELS.DAT
+         * road + scenery. The ribbon uses the (already-widened) strip vertices. */
+        if (!s_photobooth_active && g_td5.drag_race_enabled) {
+            int ins = td5_track_drag_insert_span();
+            if (ins >= 0) {
+                /* Start the ribbon PAST the original straight (~span 240, where
+                 * level030's strip curves away). The inserted straight spans ~154..240
+                 * reproduce the original road's world positions, so painting the ribbon
+                 * there Z-FIGHTS the baked road (alternating light/dark bands). Let the
+                 * original textured road show for 154..240; the ribbon covers only the
+                 * genuinely-new straight beyond where the original strip curved off. */
+                int ribbon_start = 240;
+                if (ribbon_start < ins) ribbon_start = ins;
+                td5_render_fallback_strip_ribbon(eff_player, 256, ring,
+                                                 total_spans, is_circuit, ribbon_start,
+                                                 td5_track_drag_tail_end());
+            }
+        }
+        /* [DRAG STADIUM EXTEND] Tile a clean stadium block down the extended
+         * straight so it stays enclosed (road+stands) past where the baked
+         * scenery ends, then re-render the real finish gantry (dl 26 sub 0),
+         * relocated to the real finish span. Drag-only; tiling/gantry no-op when short. */
+        if (!s_photobooth_active) {
+            td5_render_drag_stadium_extension();
+            td5_render_drag_finish_line();
         }
         #undef TD5_RENDER_SUBMITTED_CAP
     }
@@ -11260,7 +11552,7 @@ void td5_render_debug_line_world(float x0, float y0, float z0,
  * the car floats over a void with only the far curve drawn). These helpers
  * clip each road triangle to the near plane instead, so the partial span still
  * draws. Use the same file-static camera state as debug_line_project. ------- */
-typedef struct { float vx, vy, vz; } TD5_RibbonCamV;
+typedef struct { float vx, vy, vz, u, v; } TD5_RibbonCamV;  /* u,v carry the road UV through near-clip */
 
 static TD5_RibbonCamV ribbon_world_to_cam(float wx, float wy, float wz)
 {
@@ -11271,6 +11563,7 @@ static TD5_RibbonCamV ribbon_world_to_cam(float wx, float wy, float wz)
     v.vx = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
     v.vy = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
     v.vz = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
+    v.u = 0.0f; v.v = 0.0f;   /* caller sets per-corner UV after this */
     return v;
 }
 
@@ -11283,8 +11576,8 @@ static void ribbon_cam_to_vertex(TD5_RibbonCamV v, uint32_t argb, TD5_D3DVertex 
     out->rhw      = inv_z;
     out->diffuse  = argb;
     out->specular = 0;
-    out->tex_u    = 0.0f;
-    out->tex_v    = 0.0f;
+    out->tex_u    = v.u;
+    out->tex_v    = v.v;
 }
 
 /* Clip a 3-vertex camera-space triangle to vz >= nearz (Sutherland-Hodgman,
@@ -11305,10 +11598,155 @@ static int ribbon_clip_near(const TD5_RibbonCamV *tri, float nearz, TD5_RibbonCa
             c.vx = a.vx + (b.vx - a.vx) * t;
             c.vy = a.vy + (b.vy - a.vy) * t;
             c.vz = nearz;
+            c.u  = a.u + (b.u - a.u) * t;   /* interpolate UV at the near-plane cut */
+            c.v  = a.v + (b.v - a.v) * t;
             out[n++] = c;
         }
     }
     return n;
+}
+
+/* Emit one world-space triangle (3 integer-coord points) into the caller's vb/ib
+ * as a near-clipped, optionally two-sided primitive, reusing the ribbon helpers.
+ * Each surviving clipped sub-tri writes 3 verts + (two_sided?6:3) indices. */
+/* [DRAG FINISH GANTRY 2026-06-29] Resolve level030's real FINISH gantry mesh.
+ * Per-primitive dump (drag dev) showed it is MODELS.DAT display-list entry 26,
+ * sub-mesh 0: a road-spanning overhead arch at world-Z ~-141000 (the original
+ * finish, ~span 204), x±3300, up to y≈2664, built from 46 richly-textured
+ * primitives — and crucially it carries NO road slab (every primitive is overhead),
+ * so it can be relocated cleanly. Its header bounding_center_z (~-144449) is
+ * UNRELIABLE (the base vertex array differs from the drawn command geometry), so we
+ * derive the true rendered-Z centroid from the command vertex blocks. Caches the
+ * mesh pointer + centroid; recomputes if MODELS.DAT reloads (pointer changes). */
+static TD5_MeshHeader *td5_render_drag_gantry(void)
+{
+    void *e = td5_track_get_display_list_entry(26);
+    uint32_t *b;
+    TD5_MeshHeader *m;
+    if (!e) return NULL;
+    b = (uint32_t *)e;
+    if ((int)b[0] < 1) return NULL;
+    m = (TD5_MeshHeader *)(uintptr_t)b[1];
+    if (!m || !td5_track_is_valid_mesh_ptr(m)) return NULL;
+    /* Sanity: only level030's gantry sits in the original-finish Z band. Anything
+     * else means this isn't the drag strip — don't grab it. */
+    if (m->bounding_center_z < -150000.0f || m->bounding_center_z > -134000.0f) return NULL;
+    if (m != s_drag_gantry_mesh) {
+        const TD5_PrimitiveCmd *cmds = (const TD5_PrimitiveCmd *)(uintptr_t)m->commands_offset;
+        int nc = m->command_count, c;
+        float minz = 1e30f, maxz = -1e30f;
+        if (cmds && td5_track_is_valid_mesh_ptr((void *)cmds) && nc > 0 && nc <= 4096) {
+            for (c = 0; c < nc; c++) {
+                int nv = cmds[c].triangle_count * 3 + cmds[c].quad_count * 4, v;
+                TD5_MeshVertex *vp = (TD5_MeshVertex *)(uintptr_t)cmds[c].vertex_data_ptr;
+                if (!vp) vp = (TD5_MeshVertex *)(uintptr_t)m->vertices_offset;
+                if (!vp || !td5_track_is_valid_mesh_ptr(vp) || nv < 1 || nv > 8192) continue;
+                for (v = 0; v < nv; v++) {
+                    float z = vp[v].pos_z;
+                    if (z < minz) minz = z; if (z > maxz) maxz = z;
+                }
+            }
+        }
+        s_drag_gantry_z   = (minz <= maxz) ? (minz + maxz) * 0.5f : m->bounding_center_z;
+        s_drag_gantry_mesh = m;
+    }
+    return m;
+}
+
+/* [DRAG FINISH GANTRY 2026-06-29] Re-render the REAL finish gantry (dl 26 sub 0) at
+ * the relocated finish span. The original at ~span 204 is suppressed in the normal
+ * walk (see td5_render_span_display_list, mesh == s_drag_gantry_mesh), and here we
+ * draw that same mesh translated in Z (s_dl_z_offset) to the real finish (the last
+ * checkpoint span, ~278 for EPIC) via a 1-entry display block. Drag-only. */
+static void td5_render_drag_finish_line(void)
+{
+    TD5_MeshHeader *g;
+    int fspan, lanes, fx, fy, fz;
+    float finish_z;
+    uint32_t fake[2];
+
+    if (!g_td5.drag_race_enabled) return;
+    g = td5_render_drag_gantry();
+    if (!g) return;
+    {
+        int cpc = td5_game_get_minimap_checkpoint_count();
+        if (cpc <= 0) return;
+        fspan = td5_game_get_minimap_checkpoint_span(cpc - 1);
+    }
+    if (fspan < 1) return;
+    lanes = td5_track_span_lane_count_at(fspan);
+    if (lanes < 1) lanes = 1;
+    if (!td5_track_get_span_lane_world(fspan, lanes / 2, &fx, &fy, &fz)) return;
+    finish_z = (float)fz / 256.0f;
+
+    fake[0] = 1;
+    fake[1] = (uint32_t)(uintptr_t)g;            /* 1-entry block: just the gantry */
+    s_dl_z_offset = finish_z - s_drag_gantry_z;  /* slide it to the real finish */
+    td5_render_span_display_list((void *)fake);
+    s_dl_z_offset = 0.0f;
+
+    {
+        static int s_log = 0;
+        if ((s_log++ % 120) == 0)
+            TD5_LOG_I(LOG_TAG,
+                "drag finish gantry: dl26/sub0 gantry_z=%.0f finish_span=%d finish_z=%.0f off=%.0f",
+                s_drag_gantry_z, fspan, finish_z, finish_z - s_drag_gantry_z);
+    }
+}
+
+/* [DRAG RIBBON TEXTURE 2026-07-01] Find the asphalt texture page the original drag
+ * road uses, so the procedural ribbon (which paints the inserted spans) can texture
+ * them to match instead of flat grey. Heuristic: scan the stadium display-list blocks
+ * for the FLATTEST + WIDEST primitive (large x-range, small y-range = the horizontal
+ * road slab vs the tall vertical walls) and take its texture page. Cached; -1 = none
+ * found (fall back to flat grey). */
+static int s_drag_road_tex_page = -2;   /* -2 unresolved, -1 none, >=0 page */
+static int td5_render_drag_road_texture_page(void)
+{
+    int dl;
+    float best_x = 0.0f;
+    if (s_drag_road_tex_page != -2) return s_drag_road_tex_page;
+    s_drag_road_tex_page = -1;
+    for (dl = 0; dl <= 35; dl++) {
+        void *e = td5_track_get_display_list_entry(dl);
+        uint32_t *b;
+        TD5_MeshHeader *m;
+        const TD5_PrimitiveCmd *cmds;
+        int nc, c;
+        if (!e) continue;
+        b = (uint32_t *)e;
+        if ((int)b[0] < 1) continue;
+        m = (TD5_MeshHeader *)(uintptr_t)b[1];
+        if (!m || !td5_track_is_valid_mesh_ptr(m)) continue;
+        cmds = (const TD5_PrimitiveCmd *)(uintptr_t)m->commands_offset;
+        nc = m->command_count;
+        if (!cmds || !td5_track_is_valid_mesh_ptr((void *)cmds) || nc < 1 || nc > 4096) continue;
+        for (c = 0; c < nc; c++) {
+            int nv = cmds[c].triangle_count * 3 + cmds[c].quad_count * 4, v;
+            TD5_MeshVertex *vp = (TD5_MeshVertex *)(uintptr_t)cmds[c].vertex_data_ptr;
+            float minx = 1e30f, maxx = -1e30f, miny = 1e30f, maxy = -1e30f, xr, yr;
+            if (!vp) vp = (TD5_MeshVertex *)(uintptr_t)m->vertices_offset;
+            if (!vp || !td5_track_is_valid_mesh_ptr(vp) || nv < 3 || nv > 8192) continue;
+            for (v = 0; v < nv; v++) {
+                float x = (float)vp[v].pos_x, y = (float)vp[v].pos_y;
+                if (x < minx) minx = x; if (x > maxx) maxx = x;
+                if (y < miny) miny = y; if (y > maxy) maxy = y;
+            }
+            xr = maxx - minx; yr = maxy - miny;
+            /* road = FLAT (small y span) at the DRIVABLE-ROAD WIDTH (~6438). Ruled out
+             * in-game: page 4=concrete streaks, 5=start stripes, 7=crowd, 28=concrete,
+             * 80=infield. The remaining road-width layer is 75/76 — trying 75 (the
+             * asphalt surface). NOTE: render page IDs are REMAPPED, so they do NOT match
+             * the extracted page_NNN.png filenames — identify visually only. */
+            if (yr < 900.0f && xr > 5000.0f && xr < 9000.0f && cmds[c].texture_page_id == 75) {
+                best_x = xr;
+                s_drag_road_tex_page = 75;
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "drag road texture page = %d (widest flat prim x-range=%.0f)",
+              s_drag_road_tex_page, best_x);
+    return s_drag_road_tex_page;
 }
 
 /* Custom-track STRIP-ribbon render fallback.
@@ -11326,17 +11764,31 @@ static int ribbon_clip_near(const TD5_RibbonCamV *tri, float nearz, TD5_RibbonCa
  */
 static void td5_render_fallback_strip_ribbon(int center_span, int window,
                                              int ring, int total_spans,
-                                             int is_circuit)
+                                             int is_circuit, int min_span, int max_span)
 {
     enum { RIBBON_TRI_CAP = 128 };            /* triangles per flat-tri flush */
     TD5_D3DVertex vb[RIBBON_TRI_CAP * 3];
     uint16_t      ib[RIBBON_TRI_CAP * 6];     /* front + reversed winding */
     int tri_n = 0;
-    const uint32_t road_col = 0xFF44464Cu;    /* asphalt grey (ARGB) */
+    const uint32_t road_col = 0xFF808488u;    /* plain tarmac grey (ARGB), matched to the
+                                               * original road — the drag road is a BLEND of
+                                               * layered textures (concrete/stripes/crowd/
+                                               * fence/infield), no single asphalt page, so
+                                               * a flat matched grey is the clean match. */
     const uint32_t edge_col = 0xFFB0B0B8u;    /* rail edge cue */
     const float nearz = s_near_clip + 1.0f;
     static const int tri_idx[2][3] = { {0, 1, 2}, {1, 3, 2} };
     int span, ring_iters, branch_base, total_iters;
+    int drawn = 0;
+    /* [DRAG RIBBON TEXTURE 2026-07-01] The drag road is a BLEND of several layered
+     * textures (no single asphalt page — every road-width layer is concrete/stripes/
+     * crowd/fence/infield), which one ribbon texture can't reproduce, so the inserted
+     * road uses the flat matched tarmac grey (road_col) rather than a wrong single page.
+     * (td5_render_drag_road_texture_page + the UV code are kept for a future real
+     * road-mesh tiling pass.) */
+    int      road_page = -1;
+    int      textured  = (road_page >= 0);
+    uint32_t fill_col  = textured ? 0xFFFFFFFFu : road_col;
 
     if (window < 1) window = 1;
     if (window > 256) window = 256;           /* bound the per-frame work */
@@ -11367,6 +11819,8 @@ static void td5_render_fallback_strip_ribbon(int center_span, int window,
             si = branch_base + (span - ring_iters); /* branch corridor spans */
             if (si < 0 || si >= total_spans) continue;
         }
+        if (si < min_span) continue;            /* drag: only from the insertion point */
+        if (max_span > 0 && si >= max_span) continue;  /* drag: not the shifted junk tail */
         sp = td5_track_get_span(si);
         if (!sp) continue;
 
@@ -11386,10 +11840,25 @@ static void td5_render_fallback_strip_ribbon(int center_span, int window,
         corner[2] = ribbon_world_to_cam((float)(sp->origin_x + fl->x), (float)(sp->origin_y + fl->y), (float)(sp->origin_z + fl->z));
         corner[3] = ribbon_world_to_cam((float)(sp->origin_x + fr->x), (float)(sp->origin_y + fr->y), (float)(sp->origin_z + fr->z));
 
+        /* Asphalt UV. v must be CONTINUOUS down-track (v = span index, so far-of-span-N
+         * == near-of-span-N+1) — a per-span 0->1 reset put a texture SEAM at every span
+         * boundary, which showed as the perpendicular bands across the road. u tiles a
+         * few times across the ~6.4k-wide road so the tarmac grain stays square rather
+         * than stretched. Corner order: 0=near-left 1=near-right 2=far-left 3=far-right. */
+        {
+            float uw = 4.0f;                        /* ~4 tarmac tiles across the road width */
+            float v0 = (float)si, v1 = (float)(si + 1);
+            corner[0].u = 0.0f; corner[0].v = v0;
+            corner[1].u = uw;   corner[1].v = v0;
+            corner[2].u = 0.0f; corner[2].v = v1;
+            corner[3].u = uw;   corner[3].v = v1;
+        }
+
         /* whole span behind the near plane -> nothing to draw */
         if (corner[0].vz < nearz && corner[1].vz < nearz &&
             corner[2].vz < nearz && corner[3].vz < nearz)
             continue;
+        drawn++;
 
         for (ti = 0; ti < 2; ti++) {
             TD5_RibbonCamV in[3], poly[4];
@@ -11401,13 +11870,15 @@ static void td5_render_fallback_strip_ribbon(int center_span, int window,
             for (f = 1; f + 1 < m; f++) {              /* fan into (m-2) tris */
                 int base;
                 if (tri_n >= RIBBON_TRI_CAP) {
-                    td5_plat_render_draw_tris_flat(vb, tri_n * 3, ib, tri_n * 6);
+                    if (textured) { td5_plat_render_bind_texture(road_page);
+                                    td5_plat_render_draw_tris(vb, tri_n * 3, ib, tri_n * 6); }
+                    else            td5_plat_render_draw_tris_flat(vb, tri_n * 3, ib, tri_n * 6);
                     tri_n = 0;
                 }
                 base = tri_n * 3;
-                ribbon_cam_to_vertex(poly[0],     road_col, &vb[base + 0]);
-                ribbon_cam_to_vertex(poly[f],     road_col, &vb[base + 1]);
-                ribbon_cam_to_vertex(poly[f + 1], road_col, &vb[base + 2]);
+                ribbon_cam_to_vertex(poly[0],     fill_col, &vb[base + 0]);
+                ribbon_cam_to_vertex(poly[f],     fill_col, &vb[base + 1]);
+                ribbon_cam_to_vertex(poly[f + 1], fill_col, &vb[base + 2]);
                 ib[tri_n * 6 + 0] = (uint16_t)(base + 0);
                 ib[tri_n * 6 + 1] = (uint16_t)(base + 1);
                 ib[tri_n * 6 + 2] = (uint16_t)(base + 2);
@@ -11424,9 +11895,19 @@ static void td5_render_fallback_strip_ribbon(int center_span, int window,
         td5_render_debug_line_world((float)(sp->origin_x + nr->x), (float)(sp->origin_y + nr->y), (float)(sp->origin_z + nr->z),
                                     (float)(sp->origin_x + fr->x), (float)(sp->origin_y + fr->y), (float)(sp->origin_z + fr->z), edge_col);
     }
-    if (tri_n > 0)
-        td5_plat_render_draw_tris_flat(vb, tri_n * 3, ib, tri_n * 6);
+    if (tri_n > 0) {
+        if (textured) { td5_plat_render_bind_texture(road_page);
+                        td5_plat_render_draw_tris(vb, tri_n * 3, ib, tri_n * 6); }
+        else            td5_plat_render_draw_tris_flat(vb, tri_n * 3, ib, tri_n * 6);
+    }
     td5_render_debug_lines_flush();
+
+    if (min_span > 0) {                        /* [DRAG TAIL diag] */
+        static int s_t = 0;
+        if ((s_t++ % 30) == 0)
+            TD5_LOG_I(LOG_TAG, "drag tail ribbon: center=%d min_span=%d total_spans=%d drew=%d",
+                      center_span, min_span, total_spans, drawn);
+    }
 }
 
 /* ============================================================

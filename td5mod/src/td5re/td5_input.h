@@ -231,6 +231,14 @@ void td5_input_reset_accumulators(void);
 /** Zero the gear-change debounce buffers for all players. (0x402E40) */
 void td5_input_reset_buffers(void);
 
+/** [DRAG Phase 2] Reset per-slot drag lane-change target/edge state at race
+ * start so a new drag race begins with each car aiming at its spawn lane. */
+void td5_input_drag_reset(void);
+
+/** [DRAG + LANE ASSIST] The lane the player chose via L/R taps (the target the
+ * aggressive drag lane-assist steers toward). -1 if unset. */
+int  td5_input_drag_target_lane(int slot);
+
 /* ========================================================================
  * Public API -- 2P Split-Screen Steering Weight Balance
  *

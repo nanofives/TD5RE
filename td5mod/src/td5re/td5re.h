@@ -305,6 +305,11 @@ typedef struct TD5_GlobalState {
          * (keyboard 'L' toggles player 0). Strength/look-ahead/cap/fork-commit
          * are env knobs (TD5RE_LANEASSIST_*). See td5_laneassist.c. */
         int  lane_assist;
+        /* [DRAG RACE OPTIONS 2026-06-29] Drag-race mode menu options.
+         * drag_length: 0=SHORT 1=MEDIUM 2=LONG 3=EPIC (EPIC repeats the strip).
+         * drag_traffic: 0=off, 1=oncoming traffic. */
+        int  drag_length;
+        int  drag_traffic;
         /* RearImpactResponse (port-only playability knob, S08 2026-06-04):
          * percentage of the original car-vs-car ANGULAR response (yaw spin +
          * heavy-impact scatter/lift) to retain when a HUMAN player is struck on

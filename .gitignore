@@ -154,3 +154,4 @@ Test Drive 6/
 
 # Car Studio vendors three.js here on first run (downloaded, not version-controlled)
 re/tools/car_studio/vendor/
+*.manual_drive_pid
