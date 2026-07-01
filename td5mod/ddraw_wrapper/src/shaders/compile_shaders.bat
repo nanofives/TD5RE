@@ -34,6 +34,10 @@ echo   ps_luminance_alpha OK
 if errorlevel 1 (echo FAILED: ps_composite && exit /b 1)
 echo   ps_composite OK
 
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_light_bytes.h /Vn g_ps_light ps_light.hlsl
+if errorlevel 1 (echo FAILED: ps_light && exit /b 1)
+echo   ps_light OK
+
 %FXC% %OPTS% /T ps_4_0 /E main /Fh ps_msdf_bytes.h /Vn g_ps_msdf ps_msdf.hlsl
 if errorlevel 1 (echo FAILED: ps_msdf && exit /b 1)
 echo   ps_msdf OK

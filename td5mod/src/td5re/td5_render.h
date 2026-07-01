@@ -99,6 +99,15 @@ void td5_render_set_light_basis(const float origin[3], const float *rot9);
  * / --DarkMode / TD5RE_LIGHT_DARK_MODE). */
 void td5_render_set_dark_mode(int on);
 
+/* [DEFERRED LIGHTS] Screen-space light pass for the current viewport. Call once
+ * per viewport after the opaque world (track + actors), before translucent/HUD.
+ * vp_x/vp_y = the pane's origin in render-target pixels (0,0 single-view). */
+void td5_render_apply_light_pass(int vp_x, int vp_y);
+
+/* [AUTO LIGHTS] 1 when the current environment is poorly lit (dark track zone or
+ * non-clear weather) and headlights should auto-enable; 0 in bright daylight. */
+int  td5_render_env_is_dark(void);
+
 /* [task#21 TD6 per-area lighting zones — REMOVED/DEFERRED 2026-06-19 at user
  * request; see the note in td5_render.c. The RE + LIGHTZONES.BIN extractor
  * (re/tools/extract_td6_lightzones.py) are kept for a future revisit.] */

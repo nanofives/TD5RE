@@ -6429,6 +6429,22 @@ int td5_game_run_race_frame(void) {
      * split-screen panes). Headlights move with each car. No-op when the
      * lighting system or the headlight emitter is disabled. */
     td5_light_begin_frame();
+    /* [AUTO LIGHTS] Decide whether the environment is poorly lit. In AUTO mode
+     * (default), non-clear weather / dark tracks get the full headlight treatment:
+     * the beams turn on AND the scene is dimmed so they read strongly — the look
+     * approved manually, applied automatically. Bright daylight stays untouched.
+     * The manual [Lighting] DarkMode always forces it on. */
+    {
+        int manual_dark = g_td5.ini.light_dark_mode;
+        int env_dark;
+        if (td5_light_auto()) {
+            env_dark = td5_render_env_is_dark() || manual_dark;
+            td5_render_set_dark_mode(env_dark);
+        } else {
+            env_dark = manual_dark;   /* dimming stays as configured at startup */
+        }
+        td5_light_set_env_dark(env_dark);
+    }
     if (!td5_render_photobooth_active())
         td5_light_emit_vehicle_headlights();
 
@@ -6664,6 +6680,13 @@ int td5_game_run_race_frame(void) {
          * after track + actors, before translucent VFX (single-view path). */
         if (!td5_render_photobooth_active())
             render_td6_props(td5_game_get_actor(g_actorSlotForView[vp]));
+
+        /* [DEFERRED LIGHTS] Screen-space dynamic-light pass: now that the opaque
+         * world (track + actors + props) has filled the depth buffer for this
+         * pane, add the headlight/light contribution per pixel before the
+         * translucent VFX + HUD. */
+        if (!td5_render_photobooth_active())
+            td5_render_apply_light_pass(s_viewports[vp].x, s_viewports[vp].y);
 
         /* VFX: tire tracks, particles */
         if (!td5_render_photobooth_active()) {

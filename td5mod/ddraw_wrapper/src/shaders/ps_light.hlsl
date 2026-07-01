@@ -1,0 +1,103 @@
+/**
+ * ps_light.hlsl - Deferred dynamic-light pass (screen-space)
+ *
+ * Fullscreen additive pass run after the opaque world geometry. For each pixel
+ * it samples the scene depth buffer, reconstructs the pixel's WORLD position,
+ * and accumulates the contribution of every dynamic light (headlights, etc.),
+ * writing the summed light additively (ONE/ONE) onto the scene colour target.
+ *
+ * This is the real "intermediate lighting layer": because it lights the actual
+ * visible surface per pixel, the light conforms to the road, cars and walls,
+ * occludes correctly (a pixel is at its true surface), and scales to many lights
+ * with no geometry hacks.
+ *
+ * Reconstruction (inverse of the port's software transform + the pre-transformed
+ * VS, which stores NDC.z = depth_z = (view_z - depthBias)/depthScale):
+ *   view_z = D * depthScale + depthBias
+ *   view_x = -(sx - centerX) * view_z / focal      (sx = pane-relative pixel X)
+ *   view_y = -(sy - centerY) * view_z / focal
+ *   world  = camPos + view_x*right + view_y*up + view_z*forward   (basis orthonormal)
+ */
+
+#define LIGHT_MAX 32
+
+cbuffer LightCB : register(b0)
+{
+    float4 camPosFocal;    /* xyz = camera world pos, w = focal length         */
+    float4 rightCx;        /* xyz = camera right,   w = viewport center X       */
+    float4 upCy;           /* xyz = camera up,      w = viewport center Y       */
+    float4 fwdDepthScale;  /* xyz = camera forward, w = depth scale (195000)    */
+    float4 misc;           /* x = depth bias(64), y = light count, z = vpX, w = vpY */
+    /* per light, 3 float4: [0]=pos.xyz,range  [1]=color.rgb,intensity  [2]=dir.xyz,coneCos */
+    float4 lights[LIGHT_MAX * 3];
+};
+
+Texture2D    depthTex : register(t0);
+SamplerState samp     : register(s0);   /* unused (Load), kept for signature parity */
+
+struct PS_INPUT
+{
+    float4 pos : SV_POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+float4 main(PS_INPUT input) : SV_TARGET
+{
+    int2 px = int2(input.pos.xy);
+    float D = depthTex.Load(int3(px, 0)).r;      /* scene depth, [0,1] */
+
+    /* Cleared/sky pixels sit at the far plane — nothing to light. */
+    if (D >= 0.99999)
+        discard;
+
+    float focal      = camPosFocal.w;
+    float depthScale = fwdDepthScale.w;
+    float depthBias  = misc.x;
+    int   count      = (int)misc.y;
+
+    float vz = D * depthScale + depthBias;
+    float sx = input.pos.x - misc.z;             /* pane-relative pixel coords */
+    float sy = input.pos.y - misc.w;
+    float vx = -(sx - rightCx.w) * vz / focal;
+    float vy = -(sy - upCy.w)    * vz / focal;
+
+    float3 world = camPosFocal.xyz
+                 + vx * rightCx.xyz
+                 + vy * upCy.xyz
+                 + vz * fwdDepthScale.xyz;
+
+    float3 accum = float3(0.0, 0.0, 0.0);
+
+    [loop]
+    for (int k = 0; k < count; k++)
+    {
+        float4 pr = lights[k * 3 + 0];   /* pos.xyz, range          */
+        float4 ci = lights[k * 3 + 1];   /* color.rgb, intensity    */
+        float4 dc = lights[k * 3 + 2];   /* dir.xyz, coneCos        */
+
+        float3 toL  = pr.xyz - world;    /* surface -> light */
+        float  dist = length(toL);
+        float  range = pr.w;
+        if (dist >= range)
+            continue;
+
+        /* Smooth distance attenuation (bright near, 0 at range). */
+        float atten = 1.0 - dist / range;
+        atten = atten * atten;
+
+        /* Spotlight cone (dc.w = cos(outer half-angle); w <= -1 => omni point). */
+        float cone = 1.0;
+        if (dc.w > -0.5)
+        {
+            float3 Ldir = toL / max(dist, 0.001);   /* surface -> light  */
+            float  cd   = dot(-Ldir, dc.xyz);        /* light -> surface . beam dir */
+            /* soft edge from the outer cone cos to 1.0 (beam centre). */
+            cone = saturate((cd - dc.w) / (1.0 - dc.w));
+            cone = cone * cone;
+        }
+
+        accum += ci.rgb * (ci.w * atten * cone);
+    }
+
+    return float4(accum, 1.0);
+}

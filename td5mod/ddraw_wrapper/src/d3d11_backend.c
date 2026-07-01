@@ -91,6 +91,7 @@ void Backend_CaptureIfRequested(void)
 #include "shaders/ps_decal_bytes.h"
 #include "shaders/ps_luminance_alpha_bytes.h"
 #include "shaders/ps_composite_bytes.h"
+#include "shaders/ps_light_bytes.h"
 
 /* Dynamic buffer sizes.
  *
@@ -465,6 +466,12 @@ static int Backend_CreateShaders(void)
         &g_backend.ps_composite);
     if (FAILED(hr)) { WRAPPER_LOG("CreateShaders: ps_composite FAILED"); return 0; }
 
+    /* Deferred dynamic-light pass (non-fatal: NULL => light pass is skipped). */
+    hr = ID3D11Device_CreatePixelShader(dev,
+        g_ps_light, sizeof(g_ps_light), NULL,
+        &g_backend.ps_light);
+    if (FAILED(hr)) { WRAPPER_LOG("CreateShaders: ps_light FAILED (light pass disabled)"); g_backend.ps_light = NULL; }
+
     WRAPPER_LOG("CreateShaders: all shaders created OK");
     return 1;
 }
@@ -687,6 +694,11 @@ static int Backend_CreateDynamicBuffers(void)
     bd.ByteWidth = sizeof(FogCB);
     hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &g_backend.cb_fog);
     if (FAILED(hr)) return 0;
+
+    /* Deferred light-pass constant buffer (non-fatal). */
+    bd.ByteWidth = sizeof(LightCB);
+    hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &g_backend.cb_light);
+    if (FAILED(hr)) { WRAPPER_LOG("CreateDynamicBuffers: cb_light FAILED (light pass disabled)"); g_backend.cb_light = NULL; }
 
     WRAPPER_LOG("CreateDynamicBuffers: VB=%uKB IB=%uKB, CBs created",
         DYNAMIC_VB_SIZE/1024, DYNAMIC_IB_SIZE/1024);
@@ -1751,6 +1763,65 @@ void Backend_DrawFullscreenQuad(ID3D11ShaderResourceView *srv)
         ID3D11ShaderResourceView *null_srv = NULL;
         ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &null_srv);
     }
+}
+
+/* Deferred dynamic-light pass — see Backend_ApplyLightPass in wrapper.h.
+ * Samples scene depth (depth_srv) to reconstruct world position per pixel and
+ * accumulates the dynamic lights additively onto the scene colour target. Runs
+ * over the CURRENT D3D viewport + scissor (so it respects the active split-screen
+ * pane). Depth must be UNBOUND as a DSV while sampled as an SRV, so we swap the
+ * render target to colour-only for the draw, then restore colour+depth. */
+void Backend_ApplyLightPass(const LightCB *cb)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    ID3D11RenderTargetView *rtv;
+    ID3D11ShaderResourceView *null_srv = NULL;
+
+    if (!ctx || !cb) return;
+    if (!g_backend.ps_light || !g_backend.cb_light || !g_backend.depth_srv) return;
+    if (!g_backend.backbuffer || !g_backend.backbuffer->d3d11_rtv) return;
+    rtv = g_backend.backbuffer->d3d11_rtv;
+
+    /* Upload camera + light array. */
+    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource*)g_backend.cb_light,
+                                          0, NULL, cb, 0, 0);
+
+    /* Colour-only RT so depth_tex is free to be sampled as an SRV. */
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, NULL);
+
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_fullscreen, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_light, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.depth_srv);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_light);
+
+    /* Additive ONE/ONE, depth test OFF (we light the reconstructed surface). */
+    ID3D11DeviceContext_OMSetBlendState(ctx, g_backend.blend_states[BLEND_ONE_ONE], NULL, 0xFFFFFFFF);
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_backend.ds_states[DS_Z_OFF_WRITE_OFF], 0);
+
+    /* Fullscreen triangle, clipped to the current viewport/scissor (the pane). */
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+
+    /* Unbind the depth SRV BEFORE re-binding it as a DSV. */
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &null_srv);
+
+    /* Restore colour + depth RT and the game's shader/state so the following
+     * translucent/HUD draws continue normally. */
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, g_backend.depth_dsv);
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    Backend_SelectPixelShader();
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx,
+        g_backend.ds_states[g_backend.state.current_ds_idx], 0);
+    ID3D11DeviceContext_OMSetBlendState(ctx,
+        g_backend.blend_states[g_backend.state.current_blend_idx], NULL, 0xFFFFFFFF);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1,
+        &g_backend.sampler_states[g_backend.state.current_samp_idx]);
+    /* Re-bind the game's fog cbuffer to PS b0 (we overwrote it with cb_light). */
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_fog);
 }
 
 /* ========================================================================

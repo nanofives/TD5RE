@@ -6434,6 +6434,44 @@ void td5_plat_render_set_fog(int enable, uint32_t color,
     Backend_UpdateFogCB();
 }
 
+void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
+                                  float focal, float center_x, float center_y,
+                                  float vp_x, float vp_y,
+                                  float depth_scale, float depth_bias,
+                                  const TD5_LightGPU *lights, int light_count)
+{
+    /* Serial/immediate path only — the deferred light pass composites the whole
+     * pane at once, so it must run on the main context (not a pane-recording
+     * deferred context). */
+    if (td5_rcmd_recording()) return;
+    if (!lights || light_count <= 0) return;
+
+    LightCB cb;
+    memset(&cb, 0, sizeof(cb));
+    cb.camPosFocal[0] = cam_pos[0]; cb.camPosFocal[1] = cam_pos[1]; cb.camPosFocal[2] = cam_pos[2];
+    cb.camPosFocal[3] = focal;
+    cb.rightCx[0] = basis9[0]; cb.rightCx[1] = basis9[1]; cb.rightCx[2] = basis9[2]; cb.rightCx[3] = center_x;
+    cb.upCy[0]    = basis9[3]; cb.upCy[1]    = basis9[4]; cb.upCy[2]    = basis9[5]; cb.upCy[3]    = center_y;
+    cb.fwdDepthScale[0] = basis9[6]; cb.fwdDepthScale[1] = basis9[7]; cb.fwdDepthScale[2] = basis9[8];
+    cb.fwdDepthScale[3] = depth_scale;
+
+    int n = light_count;
+    if (n > LIGHT_MAX_GPU) n = LIGHT_MAX_GPU;
+    cb.misc[0] = depth_bias;
+    cb.misc[1] = (float)n;
+    cb.misc[2] = vp_x;
+    cb.misc[3] = vp_y;
+
+    for (int i = 0; i < n; i++) {
+        const TD5_LightGPU *L = &lights[i];
+        cb.lights[i*3+0][0] = L->x; cb.lights[i*3+0][1] = L->y; cb.lights[i*3+0][2] = L->z; cb.lights[i*3+0][3] = L->range;
+        cb.lights[i*3+1][0] = L->r; cb.lights[i*3+1][1] = L->g; cb.lights[i*3+1][2] = L->b; cb.lights[i*3+1][3] = L->intensity;
+        cb.lights[i*3+2][0] = L->dx; cb.lights[i*3+2][1] = L->dy; cb.lights[i*3+2][2] = L->dz; cb.lights[i*3+2][3] = L->cone;
+    }
+
+    Backend_ApplyLightPass(&cb);
+}
+
 int td5_plat_render_upload_texture(int page_index, const void *pixels,
                                     int width, int height, int format)
 {

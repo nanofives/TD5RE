@@ -30,8 +30,9 @@ static int s_overlay_on = 0;
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
-    "Headlights: cars illuminate road + nearby cars as they move",
-    "Lighting DarkMode: scene dims so headlights light up dark areas",
+    "Headlights: per-pixel beams flood the road (deferred light pass)",
+    "Headlights auto-on in rain/overcast/dusk, off in bright daylight",
+    "Headlights: verify on a sunny track they stay OFF (Maui/Sydney)",
     "Split cup: later-race player can always accelerate (was camera-only)",
     "Pause menu: END RACE NOW force-finishes (YES/NO confirm; any player)",
     "END RACE NOW: places ranked by current track progress, no DNFs",

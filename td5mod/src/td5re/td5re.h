@@ -279,9 +279,10 @@ typedef struct TD5_GlobalState {
         /* Lighting (dynamic light system foundation, 2026-06-30). See
          * td5_light.c / td5_render.c. The original engine has no point lights or
          * headlights — this is a port extension on the per-vertex lighting seam. */
-        int  lighting_enabled;  /* 1 = dynamic point-light system on (default) */
-        int  headlights;        /* 1 = vehicle headlights emit point lights (default) */
+        int  lighting_enabled;  /* 1 = dynamic light system on (default) */
+        int  headlights;        /* 1 = vehicle headlights (manual toggle, used when Auto=0) */
         int  light_dark_mode;   /* 1 = dim scene so headlights illuminate dark areas (default 0) */
+        int  lighting_auto;     /* 1 = auto-enable headlights in poorly-lit environments (default) */
         /* Game options */
         int  laps;
         int  checkpoint_timers;

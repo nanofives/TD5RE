@@ -40,11 +40,13 @@
  * lights (street lamps, flares). */
 #define TD5_LIGHT_MAX 32
 
+/* Field order matches TD5_LightGPU (td5_platform.h) so the render pass copies
+ * straight across. Consumed by the deferred screen-space light pass. */
 typedef struct TD5_DynLight {
-    float x, y, z;       /* world position (/256 world units, == render_pos space) */
-    float range;         /* world units; contribution is zero at/beyond this radius */
-    float intensity;     /* peak luminance bump at the lit surface (~0..255 scale)  */
-    float r, g, b;       /* normalised colour 0..1 (reserved; v1 applies luminance) */
+    float x, y, z, range;      /* world position (/256 units) + falloff radius */
+    float r, g, b, intensity;  /* colour 0..1 + peak intensity 0..1            */
+    float dx, dy, dz, cone;    /* beam dir (unit) + cos(outer half-angle);
+                                * cone <= -1 => omni point light                */
 } TD5_DynLight;
 
 /* ---- Master enable ----------------------------------------------------- */
@@ -60,6 +62,16 @@ int  td5_light_enabled(void);
 void td5_light_set_headlights(int on);
 int  td5_light_headlights_enabled(void);
 
+/* Auto mode ([Lighting] Auto): when on, headlights turn on automatically in
+ * poorly-lit environments (dark track zones / night weather) and stay off in
+ * bright ones, ignoring the manual Headlights toggle. */
+void td5_light_set_auto(int on);
+int  td5_light_auto(void);
+
+/* Per-frame environment-darkness verdict, set by the renderer's brightness probe
+ * (td5_render_env_is_dark). Consumed by the emitter when Auto is on. */
+void td5_light_set_env_dark(int dark);
+
 /* ---- Per-frame lifecycle ----------------------------------------------- */
 /* Clear the registry at the top of each rendered frame. Re-populate via the
  * emitters below BEFORE any viewport's lighting pass runs (lights are
@@ -67,11 +79,18 @@ int  td5_light_headlights_enabled(void);
  * enable is off. */
 void td5_light_begin_frame(void);
 
-/* Register one world-space point light. Silently ignored when the registry is
- * full or the master enable is off. range<=0 or intensity<=0 is ignored. */
+/* Register one world-space omni point light (intensity 0..1). Silently ignored
+ * when the registry is full/disabled or range<=0 or intensity<=0. */
 void td5_light_add_point(float x, float y, float z,
                          float range, float intensity,
                          float r, float g, float b);
+
+/* Register one world-space SPOT light: dir = beam direction (need not be unit;
+ * normalised internally), cone_cos = cos(outer half-angle). Used for headlights. */
+void td5_light_add_spot(float x, float y, float z,
+                        float dx, float dy, float dz,
+                        float range, float intensity, float cone_cos,
+                        float r, float g, float b);
 
 /* ---- Query (consumed by the renderer) ---------------------------------- */
 int                 td5_light_count(void);
