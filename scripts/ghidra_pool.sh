@@ -46,6 +46,12 @@ cmd_init() {
         echo "ERROR: Master project $MASTER_GPR not found"
         exit 1
     fi
+    # The .gpr is only an empty marker — the data actually cloned is the .rep
+    # directory. Checking just the marker let a missing master destroy slots.
+    if [[ ! -d "$MASTER_REP" ]]; then
+        echo "ERROR: Master project data $MASTER_REP not found (refusing to clone)" >&2
+        exit 1
+    fi
 
     echo "Creating $n pool slots from master TD5 project..."
     for i in $(seq 0 $((n - 1))); do
@@ -111,6 +117,16 @@ cmd_sync() {
         exit 1
     fi
 
+    # Guard BEFORE touching any slot: a missing master used to be discovered
+    # only after `rm -rf` had already destroyed a slot's .rep (2026-07-02
+    # incident — slot 0 had to be restored from a sibling clone).
+    if [[ ! -d "$MASTER_REP" ]]; then
+        echo "ERROR: Master project data $MASTER_REP not found — nothing to sync from." >&2
+        echo "       Slots left untouched. Restore the master (e.g. copy the newest" >&2
+        echo "       ghidra_pool/TD5_poolN.rep to $MASTER_REP) and re-run." >&2
+        exit 1
+    fi
+
     echo "Syncing unlocked pool slots from master..."
     local synced=0
     local skipped=0
@@ -125,8 +141,11 @@ cmd_sync() {
             skipped=$((skipped + 1))   # avoid ((x++)) returning 1 under set -e when x==0
         else
             echo "  Slot $slot: syncing..."
+            # Copy-then-swap so a failed copy can never leave the slot empty.
+            rm -rf "${rep}.new"
+            cp -r "$MASTER_REP" "${rep}.new"
             rm -rf "$rep"
-            cp -r "$MASTER_REP" "$rep"
+            mv "${rep}.new" "$rep"
             synced=$((synced + 1))   # avoid ((x++)) returning 1 under set -e when x==0
         fi
     done
