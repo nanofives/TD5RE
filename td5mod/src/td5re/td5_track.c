@@ -4094,6 +4094,12 @@ static void walker_lateral_secondary_retest(int new_span, int *sub_lane,
     /* else: leave sub_lane unchanged (orig LAB_0044501a). */
 }
 
+/* [DA-T2 Fix 5 histogram] Occurrence counters for degenerate boundary-bit
+ * patterns hitting the walker's default: case (orig no-ops them — see the
+ * default: comment). Indexed by the raw 4-bit pattern; feeds the rate-limited
+ * TD5_LOG_W that serves as the D10 occurrence histogram the audit asked for. */
+static uint32_t s_degenerate_bits_hits[16];
+
 /**
  * Iterative boundary traversal matching original FUN_004440f0 switch logic.
  * Handles compound crossings (diagonal movement) in a single step.
@@ -4132,30 +4138,18 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
     int16_t saved_state[8];
     memcpy(saved_state, track_state, 16);
 
-    /* [DA-T2 audit 2026-05-22 — pending application]
+    /* [DA-T2 audit 2026-05-22 — ALL 5 FIXES APPLIED]
      * Deep audit of orig 0x004440F0 vs port found 5 cascade-relevant divergences
-     * (re/analysis/wave4_deep_audits/da_t2_update_actor_track_pos.md). Each is
-     * a candidate fix for the residual ~210u slot 0 bias and the Edinburgh
-     * 6-racer cascade pattern documented in pool13. NOT YET APPLIED — fixes
-     * are HIGH-risk cascade changes that need runtime pool13 dynamic-diff
-     * measurement to validate. Apply order per audit Section E:
-     *
-     *   Fix 1 (D2, case 1=FWD ~line 2544): orig has 3-outcome FWD with two
-     *     secondary cross tests on the new span. Port advances unconditionally.
-     *     Orig at 0x0044436d-0x004445ad. Est. lift: 10-30 fields @ sub_tick=1.
-     *   Fix 2 (D3, case 4=BACK ~line 2626): symmetric to D2 for backward step.
-     *     Orig 0x004449c1-0x00444c4b. Unblocks `todo-reverse-not-triggered`.
-     *   Fix 3 (D8, case 2=RIGHT ~line 2567): missing FWD/BACK post-step retests.
-     *     Orig 0x004445ae-0x004449c0. Edinburgh right-hand bends.
-     *   Fix 4 (D9, case 8=LEFT, search below): symmetric to D8. Sydney/BlueRidge
-     *     left-hand wall hug. Orig 0x00444e10-0x00445031.
-     *   Fix 5 (D10, default ~line 2848-2872): bits 5/7/10/11 should be RET no-op
-     *     per orig switch table 0x00445420 → 0x00445411. Port's cascade-resolve
-     *     warps span ±1/tick on degenerate quads. Needs Frida bits histogram
-     *     to confirm patterns occur before applying.
-     *
-     * Sequencing: apply Fix 1+3 first → measure pool13 lift → Fix 2+4 → Fix 5
-     * after Frida histogram. */
+     * (re/analysis/wave4_deep_audits/da_t2_update_actor_track_pos.md), candidate
+     * fixes for the residual ~210u slot 0 bias and the Edinburgh 6-racer cascade
+     * pattern documented in pool13. Status:
+     *   Fix 1 (D2, case 1=FWD 3-way decision)        — applied 2026-05-27, case 1
+     *   Fix 2 (D3, case 4=BACK 3-way decision)       — applied 2026-05-27, case 4
+     *   Fix 3 (D8, case 2=RIGHT post-step retests)   — applied 2026-05-27, case 2
+     *   Fix 4 (D9, case 8=LEFT post-step retests)    — applied 2026-05-27, case 8
+     *   Fix 5 (D10, default: bits 5/7/10/11 no-op)   — applied 2026-07-02, default:
+     *     (per orig switch table 0x00445420 → 0x00445411; carries the occurrence
+     *     histogram the audit required before applying) */
     for (iter = 0; iter < TRACK_MAX_RECURSION; iter++) {
         uint8_t bits = compute_boundary_bits(span_idx, sub_lane, pos_x, pos_z);
 
@@ -4539,31 +4533,26 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             break;
         }
 
-        default:
-            /* Unhandled compound case — resolve forward/backward first, then lateral */
-            if (bits & 0x01) {
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x01, pos_x, pos_z);
-                span_idx = new_span;
-                track_state[0] = (int16_t)new_span;
-                track_state[2]++;
-                if (track_state[2] > track_state[3])
-                    track_state[3] = track_state[2];
-            } else if (bits & 0x04) {
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x04, pos_x, pos_z);
-                span_idx = new_span;
-                track_state[0] = (int16_t)new_span;
-                track_state[2]--;
-            }
-            if (bits & 0x02) {
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x02, pos_x, pos_z);
-                span_idx = new_span;
-                track_state[0] = (int16_t)new_span;
-            } else if (bits & 0x08) {
-                new_span = resolve_neighbor(span_idx, &sub_lane, 0x08, pos_x, pos_z);
-                span_idx = new_span;
-                track_state[0] = (int16_t)new_span;
-            }
+        default: {
+            /* [DA-T2 Fix 5 (D10) — applied 2026-07-02] Degenerate bit patterns
+             * (5/7/10/11, and 0/>12 via the JA guard) are RET no-ops in the
+             * original: the dispatch at 0x00444337-0x00444345 routes them
+             * through the switch table @ 0x00445420 to 0x00445411, a pure
+             * epilogue with ZERO memory writes [CONFIRMED by raw disasm
+             * 2026-07-02; also audit Section A Stage 3]. The port previously
+             * cascade-resolved here (FWD/BACK then lateral — up to two
+             * resolve_neighbor steps), warping span ±1 per tick while an
+             * actor sat on a degenerate quad. Match the original: change no
+             * state and end this walk call; next tick's fresh cross products
+             * disambiguate. The post-switch sub-lane writeback below rewrites
+             * the unchanged value, so state stays byte-identical to orig. */
+            uint32_t hits = ++s_degenerate_bits_hits[bits & 0x0F];
+            if (hits <= 8u || (hits & 0x3FFu) == 0u)
+                TD5_LOG_W(LOG_TAG, "walker degenerate bits=%u span=%d sub=%d hit#%u (no-op per orig 0x00445411)",
+                          (unsigned)bits, span_idx, sub_lane, (unsigned)hits);
+            compound_done = 1;
             break;
+        }
         }
 
         /* Write back sub-lane after each transition */
@@ -5395,12 +5384,15 @@ int32_t td5_track_compute_contact_height_bestlane(int span_index,
  *
  * [FIX 2026-06-01 residual sub-lane-shift bounce] Using the walker's carried
  * sub_lane directly (the faithful 0x00445450 input) removed the big bounce, but
- * the port walker's sub_lane carry across a lane-COUNT change is not byte-exact:
- * the case-8 LEFT and case-4 BACK lateral re-tests are still unapplied (DA-T2
- * D9/D3, see update_position_recursive). So on a left/back lateral crossing the
- * carried lane can land ONE lane off the geometrically-containing lane, and the
- * wheel then samples an adjacent lane's plane (slightly extrapolated) -> a small
- * residual height step (the user-reported "smaller jumps when lanes shift").
+ * the port walker's sub_lane carry across a lane-COUNT change is not byte-exact.
+ * (When this fix landed the DA-T2 D9/D3 lateral re-tests were believed
+ * unapplied; they had in fact landed 2026-05-27 — see update_position_recursive.
+ * The bounded search is kept regardless: junction/lane-count-change carries are
+ * still not byte-exact, and the +/-1 bound is a no-op when the carry is right.)
+ * On a left/back lateral crossing the carried lane can land ONE lane off the
+ * geometrically-containing lane, and the wheel then samples an adjacent lane's
+ * plane (slightly extrapolated) -> a small residual height step (the
+ * user-reported "smaller jumps when lanes shift").
  *
  * This searches only {carried, carried-1, carried+1}, prefers the carried lane,
  * and lands on the lane that geometrically CONTAINS the wheel (boundary bits==0).
