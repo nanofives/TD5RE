@@ -1263,10 +1263,18 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
          * (walker-lag glitch) -> skip rather than fight it. */
         if (hit_l && hit_r) continue;
 
+        /* Bogus-penetration rejects can fire every sub-step for a car parked
+         * against broken geometry (a drag-strip full-grid session logged 470k
+         * of them, gigabytes at DEBUG). Sample: first 20, then every 4096th. */
+        static unsigned s_wall_reject_n = 0;
+#define WALL_REJECT_SAMPLED() \
+        (++s_wall_reject_n <= 20 || (s_wall_reject_n & 0xFFF) == 0)
+
         if (hit_l && pen_l <= -WALL_PEN_REJECT_LIMIT) {
-            TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d LEFT span=%d type=%d pen=%d "
-                      "REJECTED (bogus -> would teleport)", actor->slot_index,
-                      span_idx, type, pen_l);
+            if (WALL_REJECT_SAMPLED())
+                TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d LEFT span=%d type=%d pen=%d "
+                          "REJECTED (bogus -> would teleport) [n=%u]", actor->slot_index,
+                          span_idx, type, pen_l, s_wall_reject_n);
         } else if (hit_l) {
             double rad = atan2((double)left.nnx, (double)(-left.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
@@ -1278,9 +1286,10 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
                           actor->slot_index, pi, span_idx, type, sub_lane, pen_l, wall_angle);
         }
         if (hit_r && pen_r <= -WALL_PEN_REJECT_LIMIT) {
-            TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d RIGHT span=%d type=%d pen=%d "
-                      "REJECTED (bogus -> would teleport)", actor->slot_index,
-                      span_idx, type, pen_r);
+            if (WALL_REJECT_SAMPLED())
+                TD5_LOG_W(LOG_TAG, "wall_contact: slot=%d RIGHT span=%d type=%d pen=%d "
+                          "REJECTED (bogus -> would teleport) [n=%u]", actor->slot_index,
+                          span_idx, type, pen_r, s_wall_reject_n);
         } else if (hit_r) {
             double rad = atan2((double)right.nnx, (double)(-right.nnz));
             int32_t wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
@@ -1584,8 +1593,14 @@ static void fwd_rev_resolve_contact(TD5_Actor *actor,
      * end-cap hit is small (the car decelerates against it each tick). Mirrors
      * the lateral wall's WALL_PEN_REJECT_LIMIT guard. */
     if (pen <= -2000) {
-        TD5_LOG_W(LOG_TAG, "%s_contact: slot=%d boundary=%d pen=%d REJECTED (bogus)",
-                  reverse_mode ? "reverse" : "forward", actor->slot_index, boundary, pen);
+        /* Sampled like the lateral wall's reject warn: a car parked against
+         * broken boundary geometry re-triggers this every sub-step (a drag
+         * session logged ~90k of them). First 20, then every 4096th. */
+        static unsigned s_fwd_reject_n = 0;
+        if (++s_fwd_reject_n <= 20 || (s_fwd_reject_n & 0xFFF) == 0)
+            TD5_LOG_W(LOG_TAG, "%s_contact: slot=%d boundary=%d pen=%d REJECTED (bogus) [n=%u]",
+                      reverse_mode ? "reverse" : "forward", actor->slot_index,
+                      boundary, pen, s_fwd_reject_n);
         return;
     }
 

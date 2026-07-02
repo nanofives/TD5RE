@@ -36,6 +36,7 @@
 #include "td5_save.h"
 #include "td5_profile.h"
 #include "td5_trace.h"
+#include "td5_selftest.h"  /* in-session automated test suite (dev builds) */
 #include "td5_asset.h"
 #include "td5_assetsrc.h"
 #include "td5_render.h"
@@ -441,6 +442,10 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "AutoThrottleValue",    &g_td5.ini.auto_throttle_value },
         { "RaceTraceMaxSimTicks", &g_td5.ini.race_trace_max_sim_ticks },
         { "ExperimentalBiasClamp", &g_td5.ini.experimental_bias_clamp },
+        /* SelfTest (dev builds; td5_selftest.c) */
+        { "SelfTest",             &g_td5.ini.selftest_enabled },
+        { "SelfTestSuite",        &g_td5.ini.selftest_suite },
+        { "SelfTestRaceTicks",    &g_td5.ini.selftest_race_ticks },
         /* Network (S10) */
         { "NetMode",              &g_td5.ini.net_mode },
         { "GamePort",             &g_td5.ini.net_game_port },
@@ -1021,6 +1026,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.trace_fast_forward    = td5_ini_float("Trace", "TraceFastForward", 1.0f);
     g_td5.ini.race_trace_max_sim_ticks =
         td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);
+    /* [SelfTest] in-session automated test suite (dev builds; td5_selftest.c) */
+    g_td5.ini.selftest_enabled    = td5_ini_int("SelfTest", "Enabled", 0);
+    g_td5.ini.selftest_suite      = td5_ini_int("SelfTest", "Suite", 0);
+    g_td5.ini.selftest_race_ticks = td5_ini_int("SelfTest", "RaceTicks", 450);
     /* Feature flag: experimental ClassifyTrackOffsetClamp pre-loop port.
      * See td5_ai.c:td5_ai_refresh_route_state_slot — closes the lateral_bias
      * cascade that produces the slot-0 steering 2x divergence at sim_tick=1. */
@@ -1155,6 +1164,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.trace_traffic_edge_pen = 0;   /* no traffic edge-pen probe CSV    */
     g_td5.ini.trace_terrain_cam_probe = 0;  /* no terrain camera probe CSV      */
     g_td5.ini.test_cup_roundtrip     = 0;   /* no CupData self-test path         */
+    g_td5.ini.selftest_enabled       = 0;   /* no in-session self-test suite    */
 #endif
 
     /* TD5RE divergent CupData self-test. Runs before any backend or
@@ -1168,6 +1178,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         dbglog("=== TestCupRoundtrip: %s ===", ok ? "PASS" : "FAIL");
         return ok ? 0 : 2;
     }
+
+    /* Self-test suite boot (dev builds; inert unless [SelfTest] Enabled=1 /
+     * --SelfTest=1). Must run BEFORE the log-filter application below because
+     * it forces the harness baseline knobs (logging on, SFX muted, SkipIntro,
+     * debug overlay) onto the final INI+CLI state. */
+    td5_selftest_boot();
 
     /* Apply log filters now — Backend_Init runs after this and is the heaviest
      * wrapper-log emitter, so silencing here lets the perf A/B reflect startup
@@ -1570,7 +1586,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     timeEndPeriod(1);
     td5_plat_log_flush();
 
-    return 0;
+    /* Self-test suite verdict: 0 = passed or never ran, 1 = failures.
+     * Scripts/CI gate on this (scripts/selftest.ps1). */
+    return td5_selftest_exit_code();
 }
 
 /* ============================================================

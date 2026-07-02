@@ -46,6 +46,7 @@ td5_laneassist.c
 td5_fmv.c
 td5_benchmark.c
 td5_trace.c
+td5_selftest.c
 td5_trig_lut_data.c
 td5_profile.c
 td5_jobs.c

@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 2" },
+    { CL_ITEM,    "FIX: game sounds no longer vanish after playing" },
+    { CL_ITEM,    "  several races in one session (audio buffer pool" },
+    { CL_ITEM,    "  now recycles freed slots instead of filling up)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 1" },
     { CL_ITEM,    "NEW Drag Race multiplayer split-screen game mode" },
     { CL_ITEM,    "  (SELECT GAME MODE -> DRAG RACE): no track picker," },

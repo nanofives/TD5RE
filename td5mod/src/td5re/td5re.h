@@ -548,6 +548,12 @@ typedef struct TD5_GlobalState {
                                      * cap the port's workload at the same simulated
                                      * window the Frida side captures, instead of
                                      * burning time on sim ticks we'll never diff. */
+        /* [SelfTest] — in-session automated test suite (dev builds only).
+         * See td5_selftest.c: frontend screen walk + multi-race matrix +
+         * degradation monitor, one report + exit code per session. */
+        int  selftest_enabled;    /* 1 = run the suite on boot (--SelfTest=1) */
+        int  selftest_suite;      /* 0 = smoke (fast subset), 1 = full matrix */
+        int  selftest_race_ticks; /* sim ticks per scripted race (default 450 = 15s @30Hz) */
         int  loaded;  /* 1 once INI has been read */
         /* AutoRace: skip frontend, launch race immediately with INI settings */
         int  auto_race;             /* 1 = auto-start race on launch */
