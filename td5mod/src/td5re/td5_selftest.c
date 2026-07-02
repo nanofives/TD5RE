@@ -603,7 +603,12 @@ void td5_selftest_boot(void)
     s_base.fast_forward  = 1.0f;
 
     /* Knobs. */
-    s_ff              = td5_env_float("TD5RE_SELFTEST_FF", 4.0f, 1.0f, 16.0f);
+    /* Races run at 8x by default: physics is fixed-timestep, so higher FF
+     * just drains more sim ticks per render frame (the trace fast-forward
+     * path bypasses the 4-tick spiral-of-death cap); the ticks themselves
+     * are identical. Frame-time metrics stay comparable because every
+     * scenario in a session runs at the same FF. Override: TD5RE_SELFTEST_FF. */
+    s_ff              = td5_env_float("TD5RE_SELFTEST_FF", 8.0f, 1.0f, 16.0f);
     s_ws_mb_per_rep   = td5_env_int("TD5RE_SELFTEST_LEAK_MB", 24, 1, 1024);
     s_frame_drift_pct = td5_env_int("TD5RE_SELFTEST_FRAME_DRIFT_PCT", 15, 1, 500);
     s_gdi_growth      = td5_env_int("TD5RE_SELFTEST_GDI_GROWTH", 100, 1, 100000);
