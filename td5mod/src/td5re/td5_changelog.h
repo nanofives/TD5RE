@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 2" },
+    { CL_ITEM,    "Car track position no longer warps sideways on rare" },
+    { CL_ITEM,    "  degenerate road quads (now matches the original)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 1" },
     { CL_ITEM,    "NEW Drag Race multiplayer split-screen game mode" },
     { CL_ITEM,    "  (SELECT GAME MODE -> DRAG RACE): no track picker," },
