@@ -4600,8 +4600,19 @@ int td5_plat_audio_load_wav(const void *data, size_t size)
                   (unsigned int)size);
         return -1;
     }
-    if (s_audio_buf_count >= MAX_AUDIO_BUFFERS) {
-        TD5_LOG_E(LOG_TAG, "Audio load rejected: buffer pool full (%d)",
+    /* Slot allocation: reuse a freed slot before bumping the high-water mark.
+     * [SELFTEST FINDING 2026-07-02] The pool was a pure bump allocator —
+     * td5_plat_audio_free() NULLed the slot but nothing ever reused it, so
+     * ~40 WAVs per race exhausted the 256-slot pool after ~6 races in one
+     * session and every later race lost its engine/collision audio. Freed
+     * ids are safe to recycle: the sound layer scrubs its slot->buffer
+     * tables (s_slot_to_buffer = -1) whenever it frees. */
+    idx = -1;
+    for (int scan = 0; scan < s_audio_buf_count; scan++) {
+        if (!s_ds_buffers[scan]) { idx = scan; break; }
+    }
+    if (idx < 0 && s_audio_buf_count >= MAX_AUDIO_BUFFERS) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: buffer pool full (%d live)",
                   s_audio_buf_count);
         return -1;
     }
@@ -4684,7 +4695,7 @@ int td5_plat_audio_load_wav(const void *data, size_t size)
     if (ptr2 && sz2 && data_size > sz1) memcpy(ptr2, data_chunk + sz1, sz2);
     IDirectSoundBuffer_Unlock(buf, ptr1, sz1, ptr2, sz2);
 
-    idx = s_audio_buf_count++;
+    if (idx < 0) idx = s_audio_buf_count++;   /* no freed slot -> extend */
     s_ds_buffers[idx] = buf;
     s_ds_buffer_rates[idx] = wfx.nSamplesPerSec;
     TD5_LOG_I(LOG_TAG,
