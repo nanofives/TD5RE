@@ -1,7 +1,7 @@
 """
 frida_main_menu_capture.py
 ==========================
-Launches the original TD5_d3d.exe windowed (via asi_patcher recipe),
+Launches the original TD5_d3d.exe windowed (RunAsInvoker recipe, formerly asi_patcher/),
 attaches Frida, injects frida_main_menu_hook.js, and records every
 frontend rendering primitive that fires while the Main Menu screen
 is on display. After ~CAPTURE_SECONDS it kills the game.
@@ -34,7 +34,7 @@ SUMM_PATH = os.path.join(HERE, "frida_main_menu_capture.txt")
 
 
 def launch_game():
-    """Mirror asi_patcher/run_no_shims.ps1: __COMPAT_LAYER=RunAsInvoker,
+    """RunAsInvoker launch (recipe from the retired asi_patcher/): __COMPAT_LAYER=RunAsInvoker,
     Start-Process from original/. Returns subprocess.Popen handle."""
     env = os.environ.copy()
     env["__COMPAT_LAYER"] = "RunAsInvoker"

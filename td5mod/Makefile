@@ -120,7 +120,7 @@ $(WRAPPER_BUILD)/%.o: $(WRAPPER_SRC)/%.c | dirs
 $(WRAPPER_BUILD)/libddraw_wrapper.a: $(WRAPPER_OBJS)
 	"$(AR)" rcs $@ $^
 
-# --- wrapper DLL (legacy artifact for original/td5_ddraw setup) ---
+# --- wrapper DLL (legacy artifact from the retired DLL-proxy setup) ---
 $(WRAPPER_BUILD)/ddraw.dll: $(WRAPPER_OBJS)
 	"$(GCC)" -shared -static -o $@ $^ ddraw_wrapper/ddraw.def \
 	    -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -ldxguid \
