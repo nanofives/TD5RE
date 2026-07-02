@@ -140,6 +140,7 @@ extern int32_t  g_game_paused;                          /* DAT_004AAD60 */
  * resolver (collision TU), counted down by td5_physics_update_traffic (core).
  * Defined in td5_physics.c. */
 extern int16_t  g_wreck_push_ticks[TD5_MAX_TOTAL_ACTORS];
+extern int32_t  g_gravity_constant;                     /* per-difficulty gravity (core + drivetrain) */
 extern int32_t  g_collisions_enabled;                   /* 0=on, 1=off (inverted) */
 extern uint8_t *g_actor_table_base;                     /* td5_game.c */
 extern int      g_actorSlotForView[TD5_MAX_VIEWPORTS];  /* td5_game.c */
@@ -152,6 +153,11 @@ int32_t cos_fixed12(int32_t angle);
 /* Core-provided helpers the collision TU calls. */
 void    td5_physics_mark_collision(int slot);            /* per-tick collision metric marker */
 void    update_vehicle_pose_from_physics(TD5_Actor *actor); /* pose re-snap after depenetration/impulse */
+
+/* Drivetrain-TU internals the core dynamics call (td5_physics_drivetrain.c).
+ * The rest of the drivetrain surface is already public in td5_physics.h. */
+void    update_engine_speed_smoothed(TD5_Actor *actor);            /* 0x0042ED50 */
+int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in); /* 0x403C80 */
 
 /* ------------------------------------------------------------------------
  * Assists-provided API consumed by the faithful core (td5_physics_assists.c).
