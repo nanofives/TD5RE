@@ -11,6 +11,7 @@ td5_ai.c
 td5_render.c
 td5_render_effects.c
 td5_render_mesh.c
+td5_render_pipeline.c
 td5_frontend.c
 td5_fe_net.c
 td5_fe_race.c
