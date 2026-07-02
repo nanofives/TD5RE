@@ -174,7 +174,7 @@ echo Linking !EXE!...
     -L!BUILDDIR! -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive ^
     -L%WRAPPER_BUILDDIR% -lddraw_wrapper ^
     -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 -lshell32 ^
-    -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 -lmfplat -lmfreadwrite -lmfuuid -lole32 -lwinhttp ^
+    -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 -lmfplat -lmfreadwrite -lmfuuid -lole32 -lwinhttp -lpsapi ^
     -Wl,-Map=!BUILDDIR!\!MAPFILE! ^
     -Wl,--enable-stdcall-fixup ^
     -Wl,--allow-multiple-definition ^

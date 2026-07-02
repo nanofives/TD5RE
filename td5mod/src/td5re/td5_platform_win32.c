@@ -1642,17 +1642,36 @@ void td5_plat_free_aligned(void *ptr)
     if (ptr) _aligned_free(ptr);
 }
 
+/* Heap traffic counters for the self-test degradation monitor (see
+ * td5_plat_heap_stats). Interlocked: worker-pool jobs may allocate. */
+static volatile LONG s_heap_alloc_count = 0;
+static volatile LONG s_heap_free_count  = 0;
+
 void *td5_plat_heap_alloc(size_t size)
 {
     if (!s_game_heap)
         s_game_heap = HeapCreate(0, 1024 * 1024, 0);
+    InterlockedIncrement(&s_heap_alloc_count);
     return HeapAlloc(s_game_heap, HEAP_ZERO_MEMORY, size);
 }
 
 void td5_plat_heap_free(void *ptr)
 {
-    if (ptr && s_game_heap)
+    if (ptr && s_game_heap) {
+        InterlockedIncrement(&s_heap_free_count);
         HeapFree(s_game_heap, 0, ptr);
+    }
+}
+
+void td5_plat_heap_stats(unsigned *allocs, unsigned *frees)
+{
+    if (allocs) *allocs = (unsigned)s_heap_alloc_count;
+    if (frees)  *frees  = (unsigned)s_heap_free_count;
+}
+
+void td5_plat_set_window_title(const char *title)
+{
+    if (s_hwnd && title) SetWindowTextA(s_hwnd, title);
 }
 
 /* [CONFIRMED @ 0x00430cb0 ResetGameHeap; L5 promotion sweep audit 2026-05-18]
@@ -6929,6 +6948,18 @@ void td5_plat_log_set_filters(int enabled, int min_level, unsigned int cat_mask)
     s_log_cat_mask  = cat_mask;
 }
 
+/* WARN/ERROR call totals — counted at the call site regardless of sink
+ * filters, so the self-test suite sees warnings even with logging gated.
+ * Interlocked: worker-pool jobs log too. */
+static volatile LONG s_log_warn_total = 0;
+static volatile LONG s_log_err_total  = 0;
+
+void td5_plat_log_counts(unsigned *warns, unsigned *errors)
+{
+    if (warns)  *warns  = (unsigned)s_log_warn_total;
+    if (errors) *errors = (unsigned)s_log_err_total;
+}
+
 void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
 {
     char buf[2048];
@@ -6938,6 +6969,9 @@ void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
     TD5_LogFile *lf;
 
     if (!fmt) return;
+
+    if (level == TD5_LOG_WARN)       InterlockedIncrement(&s_log_warn_total);
+    else if (level == TD5_LOG_ERROR) InterlockedIncrement(&s_log_err_total);
 
     /* Fast-path gating — bail before any formatting cost.
      *  - Errors are NEVER suppressed (still go to stdout below); they're rare

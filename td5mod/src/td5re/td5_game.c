@@ -48,6 +48,7 @@
 #include "td5_trace.h"
 #include "td5_profile.h"
 #include "td5_benchmark.h"
+#include "td5_selftest.h"  /* in-session automated test suite (dev builds) */
 
 int td5_trace_current_sim_tick(void) {
     return g_td5.simulation_tick_counter;
@@ -1036,6 +1037,11 @@ void td5_game_shutdown(void) {
  * ======================================================================== */
 
 int td5_game_tick(void) {
+    /* Self-test director (dev builds; inert unless [SelfTest] Enabled=1).
+     * Runs before the state switch so it can observe MENU/RACE transitions
+     * and re-arm auto_race between scripted scenarios. */
+    td5_selftest_tick();
+
     /* Poll network subsystem (discovery, connection management) */
     td5_net_tick();
 
@@ -1303,6 +1309,26 @@ void td5_game_set_state(TD5_GameState state) {
 TD5_GameState td5_game_get_state(void) {
     return g_td5.game_state;
 }
+
+#ifndef TD5RE_RELEASE
+static TD5_Actor *td5_game_local_player_actor(void);  /* defined below */
+
+/* [SELFTEST 2026-07-02] Programmatic race exit for the self-test director:
+ * the pause-menu QUIT TO MENU sequence without the menu (same recipe the
+ * net-lockstep-failure path uses) — fade out, release resources when the
+ * fade completes, run_race_frame returns 2, FSM goes back to MENU. */
+void td5_game_selftest_end_race(void)
+{
+    if (g_td5.game_state != TD5_GAMESTATE_RACE) return;
+    if (s_pause_exit_pending) return;   /* exit already in flight */
+    TD5_Actor *pl = td5_game_local_player_actor();
+    s_pause_menu_active = 0;
+    s_pause_exit_pending = 1;
+    s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+    td5_game_begin_fade_out(0);
+    TD5_LOG_I(LOG_TAG, "selftest: forced race exit (fade-out started)");
+}
+#endif
 
 int td5_game_get_player_lap(int slot)
 {

@@ -197,6 +197,10 @@ void td5_game_sort_results(void);
  * previewed via a StartScreen jump. Gated by TD5RE_INJECT_POSTRACE in the
  * StartScreen path; compiled out of the release build. */
 void td5_game_inject_demo_results(void);
+
+/* Self-test director: force the current race to exit cleanly to the menu
+ * (pause-menu QUIT TO MENU sequence, no menu). No-op outside GAMESTATE_RACE. */
+void td5_game_selftest_end_race(void);
 #endif
 
 /* --- Split-Screen Steering Balance (0x4036B0) --- */

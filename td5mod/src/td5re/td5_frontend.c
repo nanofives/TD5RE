@@ -2391,6 +2391,12 @@ static int frontend_button_is_selector(int btn) {
  * active+enabled button was reached, naming any that weren't. Screenshots come
  * back black in this env, so this is how we prove nav order across screens.
  * Gated by TD5RE_NAV_SELFTEST=1; compiled out of the release build. */
+/* Last nav-selftest outcome, exposed to the self-test director via
+ * td5_frontend_selftest_nav_result (below). */
+static int s_navtest_last_screen    = -1;
+static int s_navtest_last_reached   = 0;
+static int s_navtest_last_navigable = 0;
+
 static void frontend_nav_selftest_maybe(void) {
     static int s_last_tested = -2;
     static int s_enabled = -1;
@@ -2474,6 +2480,28 @@ static void frontend_nav_selftest_maybe(void) {
         if (s_buttons[i].active && !s_buttons[i].disabled && !reach[i])
             TD5_LOG_W(LOG_TAG, "NAV SELFTEST UNREACHABLE screen=%d btn=%d y=%d '%s'",
                       s_current_screen, i, s_buttons[i].y, s_buttons[i].label);
+
+    s_navtest_last_screen    = s_current_screen;
+    s_navtest_last_reached   = reached;
+    s_navtest_last_navigable = navigable;
+}
+
+/* --- Self-test director queries (see td5_frontend.h) --- */
+int td5_frontend_selftest_settled(void) {
+    return s_anim_complete ? 1 : 0;
+}
+
+int td5_frontend_selftest_button_count(void) {
+    int i, n = 0;
+    for (i = 0; i < FE_MAX_BUTTONS; i++)
+        if (s_buttons[i].active && !s_buttons[i].disabled) n++;
+    return n;
+}
+
+void td5_frontend_selftest_nav_result(int *screen, int *reached, int *navigable) {
+    if (screen)    *screen    = s_navtest_last_screen;
+    if (reached)   *reached   = s_navtest_last_reached;
+    if (navigable) *navigable = s_navtest_last_navigable;
 }
 #endif
 
