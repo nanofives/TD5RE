@@ -15,7 +15,9 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="C:/Users/maria/Desktop/Proyectos/TD5RE"
+# Derive the repo root from this script's location (works on any checkout);
+# override with TD5RE_ROOT if needed.
+PROJECT_ROOT="${TD5RE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 MASTER_GPR="$PROJECT_ROOT/TD5.gpr"
 MASTER_REP="$PROJECT_ROOT/TD5.rep"
 POOL_DIR="$PROJECT_ROOT/ghidra_pool"

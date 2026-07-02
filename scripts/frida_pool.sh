@@ -16,7 +16,9 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="C:/Users/maria/Desktop/Proyectos/TD5RE"
+# Derive the repo root from this script's location (works on any checkout);
+# override with TD5RE_ROOT if needed.
+PROJECT_ROOT="${TD5RE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 ORIGINAL_DIR="$PROJECT_ROOT/original"
 POOL_DIR="$PROJECT_ROOT/frida_pool"
 DEFAULT_SLOTS=16

@@ -56,7 +56,9 @@ pyghidra_projects/
 /frida_pool/
 /traces/
 
-# Exceptions: divergence sweep tooling is tracked
+# Exceptions: divergence sweep + race-diff tooling is tracked. Keep this list
+# in sync with `git ls-files tools/` — a tracked file missing here would be
+# silently dropped by any rm --cached / re-add cycle.
 !/tools/diff_replay_frames.py
 !/tools/td5_actor_offsets.py
 !/tools/run_state_replay.py
@@ -64,6 +66,13 @@ pyghidra_projects/
 !/tools/frida_cascade_probe.js
 !/tools/frida_traffic_compare.js
 !/tools/diff_traffic_compare.py
+!/tools/diff_profiles.py
+!/tools/diff_race.py
+!/tools/frida_ai_probe.js
+!/tools/frida_pool14_00434350.js
+!/tools/frida_pool5_00405D70.js
+!/tools/frida_race_trace.js
+!/tools/run_ai_probe.py
 
 # MinGW toolchain (753 MB — install via MSYS2 or deps/mingw-i686.7z)
 td5mod/deps/mingw/
