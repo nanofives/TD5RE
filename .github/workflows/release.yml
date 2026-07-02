@@ -80,7 +80,7 @@ jobs:
             -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
             -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
             -lshell32 -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
-            -lmfplat -lmfreadwrite -lmfuuid -lwinhttp \
+            -lmfplat -lmfreadwrite -lmfuuid -lwinhttp -lpsapi \
             -Wl,--enable-stdcall-fixup \
             -Wl,--allow-multiple-definition
 

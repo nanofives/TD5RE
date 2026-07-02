@@ -80,7 +80,7 @@ $(WRAPPER_BUILD)/png_loader.o: WRAPPER_CFLAGS += -Wno-unused-function
 # Link command (mirrors build_standalone.bat link line)
 LINK_LIBS := -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
              -lshell32 -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
-             -lmfplat -lmfreadwrite -lmfuuid -lole32 -lwinhttp
+             -lmfplat -lmfreadwrite -lmfuuid -lole32 -lwinhttp -lpsapi
 
 LINK_FLAGS := -m32 -mwindows -static \
               -Wl,--enable-stdcall-fixup \
