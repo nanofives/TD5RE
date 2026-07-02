@@ -449,10 +449,117 @@ extern TD5_MeshHeader *s_vehicle_meshes[TD5_ACTOR_MAX_TOTAL_SLOTS];
  * (Defined next to the debug line overlay in td5_render.c.) */
 int debug_line_project(float wx, float wy, float wz, uint32_t argb,
                        TD5_D3DVertex *out);
+/* Clip + submit a polygon through the projection pipeline (core). */
+void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
+                             int tex_page);
+/* TD6 banner sibling-group screen-center X (banner align helper, core). */
+float td6_banner_group_center_x(uint32_t *block, int count,
+                                float my_z, float my_x);
+/* Daylight lighting override (mesh TU; track-lighting fallback calls it). */
+void td5_render_set_override_daylight(void);
 /* Flush the pending immediate batch (per-actor alpha changes need it). */
 void flush_immediate_internal(void);
+/* Fallback collision-ribbon road + relocated drag finish gantry: defined in
+ * td5_render.c, called from the span display-list walk (mesh TU). */
+void td5_render_fallback_strip_ribbon(int center_span, int window,
+                                      int ring, int total_spans,
+                                      int is_circuit, int min_span, int max_span);
+void td5_render_drag_finish_line(void);
+
+/* Mesh-TU API consumed by the core / effects TUs (td5_render_mesh.c). */
+void td5_render_drag_stadium_extension(void);
+void td5_render_apply_page_blend_preset(int page_id);
 /* Per-actor draw alpha applied by the immediate emitters. */
 extern int s_actor_draw_alpha;
+
+/* ------------------------------------------------------------------------
+ * Mesh-TU seam (P1-C step 2): scene/texture-cache/banner/deform/projection-
+ * effect state + helpers shared between td5_render.c and td5_render_mesh.c.
+ * All defined in td5_render.c.
+ * ------------------------------------------------------------------------ */
+#define TT_GHOST_ALPHA 130
+#define TD6_CAR_ZFIX_PULL_VIEWZ   (3.0f)   /* toward-camera, view-z units        */
+#define ENVMAP_TEXTURE_PAGE_BASE 990
+#define ENVMAP_MAX_PAGES         4
+typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
+extern const PrimDispatchFn s_dispatch_table[7];
+
+typedef struct {
+    /* Mirrors the per-slot 0x20-byte struct at DAT_004bf520 written by
+     * SetProjectionEffectState @ 0x0043E210. */
+    float cos_heading;   /* mode 2: cos(-yaw); mode 1: 1.0 */
+    float sin_heading;   /* mode 2: sin(-yaw); mode 1: 0.0 */
+    float scroll_offset; /* mode 1: running accumulator += (sin(yaw)*vX + cos(yaw)*vZ) / 8192 */
+    int   sub_mode;      /* 1=planar/velocity, 2=yaw-UV rotation, 3=world-anchor */
+    int   texture_page;  /* environs page index for this slot */
+    float anchor_x, anchor_y, anchor_z; /* mode 3: actor world position (FP float) */
+} ProjectionEffectState;
+
+extern TextureCacheSlot s_texture_cache[TEXTURE_CACHE_SLOTS];
+extern int              s_texture_cache_active_count;
+extern int s_camera_prebaked;
+extern int s_debug_fallback_log_count;
+extern int s_debug_clip_near_rejects;
+extern int s_debug_clip_backface_rejects;
+extern int s_debug_clip_screen_rejects;
+extern int s_debug_clip_emitted_tris;
+extern int s_debug_prepared_mesh_calls;
+extern int s_debug_texture_bind_calls;
+extern int s_debug_texture_cache_hits;
+extern int s_debug_texture_cache_misses;
+extern int s_debug_texture_cache_evictions;
+extern int s_debug_span_meshes_submitted;
+extern uint32_t s_vehicle_tint[TD5_ACTOR_MAX_TOTAL_SLOTS];
+extern int s_vehicle_is_td6[TD5_ACTOR_MAX_TOTAL_SLOTS];
+extern int s_photobooth_active;
+extern ProjectionEffectState s_proj_effect[TD5_ACTOR_MAX_TOTAL_SLOTS];
+extern int  s_proj_effect_mode;
+extern int  s_envmap_page_count;
+extern int  s_envmap_pages[ENVMAP_MAX_PAGES];
+extern int  s_environs_level;
+extern const int s_vehicle_reflection_overlay_enabled;
+extern float s_hk_clip_y;
+extern int s_level_pass_active;
+extern int s_banner_cull;
+extern int s_banner_cull_keep_pos;
+extern int s_banner_cull_revflip;
+extern int s_banner_align;
+extern int s_banner_align_log;
+extern float s_banner_vshift_x;
+extern float s_drag_road_scale;
+extern float s_dl_z_offset;
+extern TD5_MeshHeader *s_drag_gantry_mesh;
+extern const float *s_deform_dx;
+extern const float *s_deform_dy;
+extern const float *s_deform_dz;
+extern int          s_deform_count;
+
+int tt_ghost_enabled(void);
+int td6_car_zfix_enabled(void);
+int traffic_recover_smoke_enabled(void);
+void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);
+void mat3x3_mul(const float *a, const float *b, float *out);
+int td6_mesh_uses_banner_page(const TD5_MeshHeader *mesh);
+int td6_banner_roadcenter_x(float ref_x, float ref_z, float *out_rx);
+TD5_MeshHeader *td5_render_drag_gantry(void);
+void update_render_camera_from_game(void);
+void td5_render_set_actor_effect_tint(uint32_t argb);
+
+static inline TD5_MeshVertex *rs_vtx_rebase(void *p)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    if (b >= g_rs->vtx_src_base && b < g_rs->vtx_src_end)
+        return (TD5_MeshVertex *)((uint8_t *)g_rs->vtx_work + (b - g_rs->vtx_src_base));
+    return (TD5_MeshVertex *)p;
+}
+
+static inline int clampi(int x, int lo, int hi)
+{
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+
 
 /* ------------------------------------------------------------------------
  * Effects-TU API consumed by the core dispatch (td5_render_effects.c). The
