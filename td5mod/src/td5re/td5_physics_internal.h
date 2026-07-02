@@ -122,8 +122,12 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 /* [POLICE rewrite 2026-06-19] Approach-speed (iVar11) into a wall above which a
  * traffic car / cop / chased racer "breaks down" (halt + smoke; ends a pursuit).
  * Deliberately high so only a genuine head-on crash counts, not a scrape.
- * Read by the core wall response AND scaled by the assists' cop durability. */
+ * Read by the collision TU's wall response AND scaled by the assists' cop
+ * durability. */
 #define COP_WALL_BREAK_VPERP  20000
+/* Angular-velocity divisor shared by the wall response (collision TU) and the
+ * player-dynamics yaw-correction path (core). From the original listing. */
+#define ANGULAR_DIVISOR_W   0x28C
 
 /* ------------------------------------------------------------------------
  * Core state shared with the assists TU (defined in td5_physics.c unless
@@ -132,6 +136,10 @@ static inline int16_t *get_cardef(TD5_Actor *a)
 extern int32_t  g_race_slot_state[TD5_MAX_RACER_SLOTS]; /* 1=human, 0=AI per slot */
 extern int32_t  g_difficulty_hard;
 extern int32_t  g_game_paused;                          /* DAT_004AAD60 */
+/* [#1 WRECK STAND-STILL] free-slide window per slot: armed by the V2V impulse
+ * resolver (collision TU), counted down by td5_physics_update_traffic (core).
+ * Defined in td5_physics.c. */
+extern int16_t  g_wreck_push_ticks[TD5_MAX_TOTAL_ACTORS];
 extern int32_t  g_collisions_enabled;                   /* 0=on, 1=off (inverted) */
 extern uint8_t *g_actor_table_base;                     /* td5_game.c */
 extern int      g_actorSlotForView[TD5_MAX_VIEWPORTS];  /* td5_game.c */
@@ -140,6 +148,10 @@ extern int      g_actorSlotForView[TD5_MAX_VIEWPORTS];  /* td5_game.c */
 int32_t phys_top_speed_rating(TD5_Actor *actor);   /* effective top-speed rating (+cop/suspect/MP-cap rules) */
 int32_t sin_fixed12(int32_t angle);                /* fixed-point trig (12-bit angle, 12-bit result) */
 int32_t cos_fixed12(int32_t angle);
+
+/* Core-provided helpers the collision TU calls. */
+void    td5_physics_mark_collision(int slot);            /* per-tick collision metric marker */
+void    update_vehicle_pose_from_physics(TD5_Actor *actor); /* pose re-snap after depenetration/impulse */
 
 /* ------------------------------------------------------------------------
  * Assists-provided API consumed by the faithful core (td5_physics_assists.c).
@@ -193,5 +205,15 @@ int32_t cop_break_mag(void);
 /* Gentle flip-recovery (core recovery-animation path defers to these) */
 int     recovery_gentle_for_actor(const TD5_Actor *actor);
 void    td5_physics_gentle_recovery_coast(TD5_Actor *actor);
+
+/* ------------------------------------------------------------------------
+ * Collision-TU API consumed by the core (td5_physics_collision.c).
+ * hull_build_store(slot, verts, n) is declared at its core call site instead
+ * (its TD5_MeshVertex parameter type is not visible from this header).
+ * ------------------------------------------------------------------------ */
+int     wreck_immobile_enabled(void);                       /* traffic wreck anchoring knob */
+void    mesh_box_store(int slot, int32_t half_w, int32_t front_z);
+void    td5_physics_hitbox_invalidate(int slot);            /* clear model box + hull for slot */
+int     td5_physics_hull_points(int slot);                  /* 0 when no valid silhouette */
 
 #endif /* TD5_PHYSICS_INTERNAL_H */
