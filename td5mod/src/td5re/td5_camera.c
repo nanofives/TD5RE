@@ -16,6 +16,7 @@
 #include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-shake driver (Item #12) */
 #include "td5re.h"
+#include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
 /* Per-track trackside (replay) camera profile data, extracted from
  * TD5_d3d.exe @0x473780 (re/tools/extract_trackside_cam_profiles.py).
  * Defines s_per_track_camera_profiles[] + TD5_PER_TRACK_CAMERA_PROFILE_COUNT.
@@ -234,8 +235,7 @@ static int td5_camera_use_new_pipeline(void)
 {
     static int s_mode = -1;
     if (s_mode < 0) {
-        const char *e = getenv("TD5RE_CAM_NEW");
-        s_mode = (e && e[0] == '0') ? 0 : 1;
+        s_mode = td5_env_flag_on("TD5RE_CAM_NEW");
     }
     return s_mode;
 }
@@ -252,8 +252,7 @@ static int td5_camera_pin_anchor_y(void)
 {
     static int s_pin = -1;
     if (s_pin < 0) {
-        const char *e = getenv("TD5RE_CAM_PIN_Y");
-        s_pin = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_pin = td5_env_flag_on("TD5RE_CAM_PIN_Y");   /* default ON */
         TD5_LOG_I(LOG_TAG, "camera anchor-Y pin: %s (TD5RE_CAM_PIN_Y)",
                   s_pin ? "ON (extrapolate Y like body mesh)"
                         : "off (legacy prev->cur interpolation)");
@@ -290,8 +289,7 @@ static int td5_camera_ground_cam_fix(void)
 {
     static int s_mode = -1;
     if (s_mode < 0) {
-        const char *e = getenv("TD5RE_GROUND_CAM_FIX");
-        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_mode = td5_env_flag_on("TD5RE_GROUND_CAM_FIX");   /* default ON */
     }
     return s_mode;
 }
@@ -303,9 +301,7 @@ static int td5_camera_ground_cam_lift(void)
 {
     static int s_lift = -1;
     if (s_lift < 0) {
-        const char *e = getenv("TD5RE_GROUND_CAM_LIFT");
-        int wu = (e && e[0]) ? atoi(e) : 150;   /* default ~150 world units */
-        if (wu < 0) wu = 0;
+        int wu = td5_env_int("TD5RE_GROUND_CAM_LIFT", 150, 0, 100000);  /* ~150 world units */
         s_lift = wu << 8;                        /* world units -> 24.8 FP */
     }
     return s_lift;
@@ -339,8 +335,7 @@ static int td5_camera_wall_avoid(void)
 {
     static int s_mode = -1;
     if (s_mode < 0) {
-        const char *e = getenv("TD5RE_CAM_WALL_AVOID");
-        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_mode = td5_env_flag_on("TD5RE_CAM_WALL_AVOID");   /* default ON */
     }
     return s_mode;
 }
@@ -364,8 +359,7 @@ static int td5_camera_crash_shake(void)
 {
     static int s_mode = -1;
     if (s_mode < 0) {
-        const char *e = getenv("TD5RE_CRASH_SHAKE");
-        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_mode = td5_env_flag_on("TD5RE_CRASH_SHAKE");   /* default ON */
     }
     return s_mode;
 }
@@ -1195,8 +1189,7 @@ static int td5_camera_replay_cam_fix(void)
 {
     static int s_mode = -1;
     if (s_mode < 0) {
-        const char *e = getenv("TD5RE_REPLAY_CAM_FIX");
-        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_mode = td5_env_flag_on("TD5RE_REPLAY_CAM_FIX");   /* default ON */
     }
     return s_mode;
 }
@@ -1811,8 +1804,7 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
      * Toggle off with TD5RE_SMOOTH_CAM=0 to A/B against the faithful path. */
     static int s_smoothCam = -1;
     if (s_smoothCam < 0) {
-        const char *e = getenv("TD5RE_SMOOTH_CAM");
-        s_smoothCam = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_smoothCam = td5_env_flag_on("TD5RE_SMOOTH_CAM");   /* default ON */
     }
 
     int off0, off1, off2, smoothed_h, base_y;
@@ -2074,7 +2066,7 @@ static void cam_solve_view(int v)
      * stream must be byte-identical at 30/60/180 fps to prove tick-locked dynamics. */
     {
         static int s_cam_log = -1;
-        if (s_cam_log < 0) { const char *e = getenv("TD5RE_CAM_LOG"); s_cam_log = (e && e[0] == '1') ? 1 : 0; }
+        if (s_cam_log < 0) s_cam_log = td5_env_flag_off("TD5RE_CAM_LOG");
         if (s_cam_log) {
             TD5_LOG_I(LOG_TAG,
                 "campose tick=%d v=%d eye=(%d,%d,%d) tgt=(%d,%d,%d) ang=(%d,%d,%d) mode=%d eyelock=%d fov=%d transA=0x%X",
@@ -2569,8 +2561,7 @@ void UpdateRaceCameraTransitionState(int actor, int view)
      * Gate: TD5RE_FIX_FLYIN_BOUND=0 restores the (buggy) `* 4` for A/B. */
     static int s_flyin_bound_fix = -1;
     if (s_flyin_bound_fix < 0) {
-        const char *e = getenv("TD5RE_FIX_FLYIN_BOUND");
-        s_flyin_bound_fix = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_flyin_bound_fix = td5_env_flag_on("TD5RE_FIX_FLYIN_BOUND");   /* default ON */
     }
     int alive_idx = s_flyin_bound_fix ? actor_idx : (actor_idx * 4);
 

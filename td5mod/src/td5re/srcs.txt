@@ -22,6 +22,7 @@ td5_customcar.c
 deps/cjson/cJSON.c
 td5_inflate.c
 td5_save.c
+td5_config.c
 td5_pending.c
 td5_net.c
 td5_upnp.c

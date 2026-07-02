@@ -22,6 +22,7 @@
 #include "td5_render.h"
 #include "td5_ai.h"
 #include "td5_platform.h"
+#include "td5_config.h"       /* shared TD5RE_* env-knob helpers */
 
 #define LOG_TAG "physics"   /* routes to race.log; lines are prefixed "car_damage:" */
 
@@ -76,33 +77,7 @@ static int32_t s_last_contact_tick[TD5_MAX_TOTAL_ACTORS];
 static int32_t s_event_peak_mag[TD5_MAX_TOTAL_ACTORS];
 static int     s_contact_gap = 8;   /* ticks of no-contact that end a collision event */
 
-/* ----------------------------------------------------------------- utils */
-static int env_int(const char *name, int def, int lo, int hi) {
-    const char *e = getenv(name);
-    if (!e || !e[0]) return def;
-    long v = strtol(e, NULL, 0);
-    if (v < lo) v = lo;
-    if (v > hi) v = hi;
-    return (int)v;
-}
-static float env_float(const char *name, float def, float lo, float hi) {
-    const char *e = getenv(name);
-    if (!e || !e[0]) return def;
-    float v = (float)atof(e);
-    if (v < lo) v = lo;
-    if (v > hi) v = hi;
-    return v;
-}
-/* Like env_int but returns `notset` (a sentinel < lo) when the var is absent,
- * so a caller can tell "overridden" from "use the default/level". */
-static int env_int_opt(const char *name, int lo, int hi, int notset) {
-    const char *e = getenv(name);
-    if (!e || !e[0]) return notset;
-    long v = strtol(e, NULL, 0);
-    if (v < lo) v = lo;
-    if (v > hi) v = hi;
-    return (int)v;
-}
+/* Env-knob parse/clamp helpers now live in td5_config.c (shared across modules). */
 
 /* Map the global Game Options toughness/deform LEVELS (0=Low,1=Normal,2=High)
  * to the active health + deformation magnitudes. Env knobs, when set, win over
@@ -123,27 +98,27 @@ static void apply_levels(void) {
 int td5_damage_init(void) {
     if (s_inited) return 1;        /* module loader treats non-zero as success */
     s_inited = 1;
-    s_impact_pct  = env_int  ("TD5RE_DAMAGE_IMPACT_SCALE",  100,     1,    2000);
-    s_min_impact  = env_int  ("TD5RE_DAMAGE_MIN_IMPACT",    4000,    0,    1000000);
-    s_knockout    = env_int  ("TD5RE_DAMAGE_KNOCKOUT",      0,       0,    100000000);
-    s_deform_k    = env_int  ("TD5RE_DAMAGE_DEFORM_K",      40,      1,    4096);
-    s_dent_ref_mag= env_int  ("TD5RE_DAMAGE_DENT_REF_MAG",  90000,   1000, 100000000);
+    s_impact_pct  = td5_env_int  ("TD5RE_DAMAGE_IMPACT_SCALE",  100,     1,    2000);
+    s_min_impact  = td5_env_int  ("TD5RE_DAMAGE_MIN_IMPACT",    4000,    0,    1000000);
+    s_knockout    = td5_env_int  ("TD5RE_DAMAGE_KNOCKOUT",      0,       0,    100000000);
+    s_deform_k    = td5_env_int  ("TD5RE_DAMAGE_DEFORM_K",      40,      1,    4096);
+    s_dent_ref_mag= td5_env_int  ("TD5RE_DAMAGE_DENT_REF_MAG",  90000,   1000, 100000000);
     /* HP / dent / disp come from the Game Options LEVELS (apply_levels); an env
      * override, when present, wins. -1 = no override. */
-    s_hp_env      = env_int_opt("TD5RE_DAMAGE_MAX_HP",      1000, 100000000, -1);
-    s_dent_env    = env_int_opt("TD5RE_DAMAGE_DENT_FRAC",   1,    200,       -1);
-    s_disp_env    = env_int_opt("TD5RE_DAMAGE_DISP_FRAC",   1,    300,       -1);
-    s_radius_frac = env_float("TD5RE_DAMAGE_RADIUS_FRAC",   0.55f,   0.02f, 4.0f);
-    s_penalty_pct = env_int  ("TD5RE_DAMAGE_PENALTY",       45,      0,    95);
-    s_wall_scale  = env_int  ("TD5RE_DAMAGE_WALL_SCALE",    400,     0,    5000);
-    s_finish_orbit= env_int  ("TD5RE_DAMAGE_FINISH_ORBIT",  1,       0,    1);
-    s_orbit_speed = env_int  ("TD5RE_DAMAGE_ORBIT_SPEED",   24,      1,    512);
-    s_orbit_hold_ms = env_int("TD5RE_DAMAGE_ORBIT_HOLD_MS", 6000,    0,    60000);
-    s_smoke_light = env_int  ("TD5RE_DAMAGE_SMOKE_LIGHT",   40,      0,    100);
-    s_smoke_black = env_int  ("TD5RE_DAMAGE_SMOKE_BLACK",   65,      0,    100);
-    s_smoke_fire  = env_int  ("TD5RE_DAMAGE_SMOKE_FIRE",    88,      0,    100);
-    s_scuff_pct   = env_int  ("TD5RE_DAMAGE_SCUFF",         55,      0,    100);
-    s_contact_gap = env_int  ("TD5RE_DAMAGE_CONTACT_GAP",   8,       1,    300);
+    s_hp_env      = td5_env_int_opt("TD5RE_DAMAGE_MAX_HP",      1000, 100000000, -1);
+    s_dent_env    = td5_env_int_opt("TD5RE_DAMAGE_DENT_FRAC",   1,    200,       -1);
+    s_disp_env    = td5_env_int_opt("TD5RE_DAMAGE_DISP_FRAC",   1,    300,       -1);
+    s_radius_frac = td5_env_float("TD5RE_DAMAGE_RADIUS_FRAC",   0.55f,   0.02f, 4.0f);
+    s_penalty_pct = td5_env_int  ("TD5RE_DAMAGE_PENALTY",       45,      0,    95);
+    s_wall_scale  = td5_env_int  ("TD5RE_DAMAGE_WALL_SCALE",    400,     0,    5000);
+    s_finish_orbit= td5_env_int  ("TD5RE_DAMAGE_FINISH_ORBIT",  1,       0,    1);
+    s_orbit_speed = td5_env_int  ("TD5RE_DAMAGE_ORBIT_SPEED",   24,      1,    512);
+    s_orbit_hold_ms = td5_env_int("TD5RE_DAMAGE_ORBIT_HOLD_MS", 6000,    0,    60000);
+    s_smoke_light = td5_env_int  ("TD5RE_DAMAGE_SMOKE_LIGHT",   40,      0,    100);
+    s_smoke_black = td5_env_int  ("TD5RE_DAMAGE_SMOKE_BLACK",   65,      0,    100);
+    s_smoke_fire  = td5_env_int  ("TD5RE_DAMAGE_SMOKE_FIRE",    88,      0,    100);
+    s_scuff_pct   = td5_env_int  ("TD5RE_DAMAGE_SCUFF",         55,      0,    100);
+    s_contact_gap = td5_env_int  ("TD5RE_DAMAGE_CONTACT_GAP",   8,       1,    300);
     apply_levels();   /* seed HP/dent/disp from the saved levels (or env override) */
     TD5_LOG_I(LOG_TAG, "car_damage: init max_hp=%d impact_pct=%d min_imp=%d ko=%d "
               "K=%d dent_ref=%d dent_frac=%d disp_frac=%d radius=%.2f penalty=%d smoke=%d/%d/%d",
