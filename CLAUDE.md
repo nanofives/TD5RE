@@ -69,8 +69,8 @@ DEV vs RELEASE: same module list; `TD5RE_RELEASE` compiles out dev affordances
 - `[Trace] RaceTrace=1` — per-sim-tick CSV trace to `log/race_trace_*.csv`
   (modular via `Modules`/`Stages`; fixes the RNG seed for deterministic A/B runs).
 - `TD5RE_WINDOW_TITLE` env var — overrides the window caption (test harnesses).
-- **Self-test suite** (dev builds): `td5re.exe --SelfTest=1` (smoke, ~40 s) or
-  `--SelfTest=1 --SelfTestSuite=1` (full, ~5-10 min) runs an in-session
+- **Self-test suite** (dev builds): `td5re.exe --SelfTest=1` (smoke, ~30 s) or
+  `--SelfTest=1 --SelfTestSuite=1` (full, ~1 min; races at 8x) runs an in-session
   automated suite — frontend screen walk with nav-reachability checks + a
   multi-race matrix (repeats, circuit, reverse, TD6, drag, arcade/traffic/cops,
   spectate panes) with degradation monitoring (private bytes, GDI/handles,
