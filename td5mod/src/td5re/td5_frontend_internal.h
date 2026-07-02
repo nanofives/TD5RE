@@ -439,6 +439,20 @@ void frontend_mp_panel_capped(int cols, float *pane_w, float *row_x0);
 void frontend_mp_setup_render(float sx, float sy);
 void frontend_mp_simul_carsel_render(float sx, float sy);
 
+/* --- carstats seam (td5_fe_carstats.c) --- */
+extern char s_car_spec[17][48];       /* config.nfo field cache (stats sub-screen) */
+extern int  s_car_spec_car;           /* which car index is cached (-1 = none) */
+void frontend_render_car_stats_overlay(float sx, float sy);
+
+/* --- devscreens seam (td5_fe_devscreens.c) --- */
+extern int s_fe_preserve_case;        /* mixed-case text flag for fe_draw_text */
+void  fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
+float fe_measure_text(const char *text, float sx, float sy);
+void  frontend_get_button_render_rect(int button_index, float sx, float sy,
+                                      float *out_x, float *out_y, float *out_w, float *out_h);
+void  frontend_changelog_render(float sx, float sy);
+void  frontend_pending_render(float sx, float sy);
+
 /* --- mp_setup seam: shared frontend state + helpers (defined in td5_frontend.c) --- */
 #define FE_TITLE_LEFT_X  126.0f  /* design x where the first letter starts (every screen);
                                   * = main-menu button left edge (FE_CENTER_X - 0xC2 = 320-194) */
