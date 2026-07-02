@@ -406,6 +406,73 @@ extern char s_text_input_prompt[40];
 const char *frontend_get_track_name(int track_index);
 extern FE_Surface s_surfaces[FE_MAX_SURFACES];
 extern const char *const k_mp_kbd_rows[];
+
+/* [R4 2026-06-19] Shared MULTIPLAYER simultaneous-pane layout bands (design space,
+ * 640x480). Every MP setup screen reserves FE_MP_TOP_BAND at the top so the
+ * panes/boxes (including their coloured header bars) start clearly BELOW the
+ * screen title AND the MainMenu background art's upper decorative line (~y85);
+ * the prior 40/50px band was too small and the boxes overlapped both. A matching
+ * FE_MP_BOTTOM_BAND keeps the boxes off the art's lower text lines.
+ * CROSS-FILE COUPLING: td5_fe_race.c's frontend_mp_setup_profile_render (the
+ * PROFILE chip overlay) and frontend_mp_position_render2 (CHOOSE YOUR SCREEN grid)
+ * define the SAME literals — keep all three in sync. */
+#define FE_MP_TOP_BAND     85.0f
+/* [layout 2026-06-19] Shrunk the bottom band (was 44) so the cards extend toward
+ * the bottom screen edge — the art's lower text lines sit above y~466, so ~14px is
+ * plenty of clearance. Cards now occupy y[85..466] instead of stopping at y436. */
+#define FE_MP_BOTTOM_BAND  14.0f
+/* [layout 2026-06-19] Shared horizontal grid band for the MP simultaneous-pane
+ * screens. The MainMenu background art has a black bar down the LEFT (~110px), so
+ * the cards must start RIGHT of it; they extend out to near the right screen edge.
+ * The grid spans x[FE_MP_LEFT_MARGIN .. FE_MP_RIGHT_EDGE] (usable width ~516) so
+ * with more players the cards stay as large as the available area allows, instead
+ * of being capped to a narrow centred 640/3 column with a wide right gap.
+ * CROSS-FILE COUPLING: td5_fe_race.c defines the SAME literals — keep in sync. */
+#define FE_MP_LEFT_MARGIN  112.0f
+#define FE_MP_RIGHT_EDGE   628.0f
+#define FE_MP_USABLE_W     (FE_MP_RIGHT_EDGE - FE_MP_LEFT_MARGIN)
+
+/* MP-setup TU API (td5_fe_mp_setup.c). init/update counterparts are
+ * td5_fe_race.c statics; only the renders + layout helpers cross TUs. */
+void frontend_commit_pane_layout(int eff_humans, int requested_spectate);
+void frontend_mp_panel_capped(int cols, float *pane_w, float *row_x0);
+void frontend_mp_setup_render(float sx, float sy);
+void frontend_mp_simul_carsel_render(float sx, float sy);
+
+/* --- mp_setup seam: shared frontend state + helpers (defined in td5_frontend.c) --- */
+#define FE_TITLE_LEFT_X  126.0f  /* design x where the first letter starts (every screen);
+                                  * = main-menu button left edge (FE_CENTER_X - 0xC2 = 320-194) */
+#define SMALLFONT_TTF_CAP       9.0f
+
+
+extern int s_active_menu_device;
+extern TD5_ScreenIndex s_current_screen;
+extern char     s_mp_pane_spec[TD5_MAX_HUMAN_PLAYERS][17][48];
+extern MpSession s_mp_session;
+extern const int8_t s_difficulty_tier_cars[3][6];
+extern int s_speed_pool_ids[TD5_CAR_COUNT];
+extern int s_speed_pool_count;
+extern int  s_attract_car;
+extern int  s_attract_opponents;
+extern int  s_attract_traffic;
+
+int fe_draw_arrow_proc(float x, float y, float w, float h, int dir_right, uint32_t color);
+void fe_draw_button_frame_fill_scaled(float bx, float by, float bw, float bh, int bb_state, uint32_t interior, float border_scale, float sx, float sy);
+void fe_draw_quad(float x, float y, float w, float h, uint32_t color, int tex_page, float u0, float v0, float u1, float v1);
+void fe_draw_surface_rect(int handle, float x, float y, float w, float h, uint32_t color);
+void fe_draw_text_centered(float center_x, float y, const char *text, uint32_t color, float sx, float sy);
+float fe_glyph_sx(float sx, float sy);
+int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids, const int *slot_active, int count);
+void frontend_build_speed_pool(void);
+void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh, const char *f7, const char *f8, int car_ext_id, uint32_t accent, int compact, float frame_scale, float sx, float sy);
+void frontend_draw_screen_title(const char *text, float left_x, float top_y, uint32_t color, float sx, float sy);
+const char *frontend_get_car_display_name(int car_index);
+void frontend_render_physics_stats(int ext_id, float px, float py, float pw, float ph, uint32_t accent, int compact, float sx, float sy);
+uint32_t frontend_rgb_to_bgra(uint32_t c);
+void frontend_speed_band_for_tier(int tier, int *lo, int *hi);
+uint32_t td6_hsv_to_rgb(float h, float s, float v);
+void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
+float fe_measure_small_text(const char *text);
 extern const char *s_car_zip_paths[TD5_CAR_SLOT_MAX];
 extern const int s_cup_schedules[][13];
 /* [CUP TRACK SELECT 2026-06-25] player-chosen per-race cup tracks (port enhancement) */

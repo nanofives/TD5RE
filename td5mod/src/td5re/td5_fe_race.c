@@ -4810,19 +4810,8 @@ static float mp_pos_pulse(uint32_t now, float lo, float hi) {
  * PUBLIC title-font API + the public td5_vui_quad textured-glyph primitive; the
  * only cosmetic difference is no faux-italic shear (td5_vui_quad is axis-aligned).
  * Left-aligned with the first letter at left_x, cap tops landing near top_y. */
-/* [R4 2026-06-19] Shared MP simultaneous-pane layout bands — MUST equal the
- * FE_MP_TOP_BAND/FE_MP_BOTTOM_BAND literals in td5_frontend.c. Used by the
- * PROFILE-chip overlay (frontend_mp_setup_profile_render) so the chip stays glued
- * to the pushed-down setup panes, and by the CHOOSE YOUR SCREEN grid below. */
-#define FE_MP_TOP_BAND     85.0f
-/* [layout 2026-06-19] MUST equal td5_frontend.c — bottom band shrunk so cards reach
- * the bottom edge; horizontal band clears the art's left black bar and reaches the
- * right edge. The PROFILE-chip overlay below uses these so it stays glued to the
- * widened setup panes. */
-#define FE_MP_BOTTOM_BAND  14.0f
-#define FE_MP_LEFT_MARGIN  112.0f
-#define FE_MP_RIGHT_EDGE   628.0f
-#define FE_MP_USABLE_W     (FE_MP_RIGHT_EDGE - FE_MP_LEFT_MARGIN)
+/* FE_MP_* layout literals: single copy now lives in td5_frontend_internal.h
+ * (was a kept-in-sync duplicate of td5_frontend.c's block). */
 #define FE_RACE_TITLE_CAP_PX 24.0f    /* design cap height (px at 480-tall reference) */
 #define FE_RACE_TITLE_LEFT_X 126.0f   /* design x where the first letter starts (= td5_frontend FE_TITLE_LEFT_X) */
 #define FE_RACE_TITLE_TRACK  (-1.5f)  /* extra letter tracking (design px; negative = tighter) */
