@@ -48,6 +48,24 @@
 #define SAR_RZ_12(x)  (((int32_t)(x) + (((int32_t)(x) >> 31) & 0xFFF))  >> 12)
 #define SAR_RZ_15(x)  (((int32_t)(x) + (((int32_t)(x) >> 31) & 0x7FFF)) >> 15)
 
+/* Force a float expression to round to float32 precision via an x87 FSTP-to-
+ * memory + reload. Mirrors orig 0x0042E1E0's intermediate-product spill
+ * pattern: each `FMUL ...; FSTP [esp+N]; FLD [esp+N]; FMUL ...` truncates
+ * the 80-bit FPU register to a 32-bit memory slot before the next operand
+ * arrives. Plain `volatile float` is NOT enough on i686 + MinGW x87 (GCC
+ * PR323) — GCC keeps the intermediate at 80 bit on the FPU stack. The
+ * explicit inline asm forces the spill exactly where orig does. */
+#define TD5_F32_SPILL(expr) ({                          \
+    float _td5_spill_v = (expr);                         \
+    float _td5_spill_t;                                  \
+    __asm__ volatile (                                   \
+        "fstps %0"                                       \
+        : "=m" (_td5_spill_t)                            \
+        : "t"  (_td5_spill_v)                            \
+        : "st");                                         \
+    _td5_spill_t;                                        \
+})
+
 /* ------------------------------------------------------------------------
  * Tuning data access helpers
  *
@@ -149,6 +167,7 @@ extern int      g_actorSlotForView[TD5_MAX_VIEWPORTS];  /* td5_game.c */
 int32_t phys_top_speed_rating(TD5_Actor *actor);   /* effective top-speed rating (+cop/suspect/MP-cap rules) */
 int32_t sin_fixed12(int32_t angle);                /* fixed-point trig (12-bit angle, 12-bit result) */
 int32_t cos_fixed12(int32_t angle);
+int32_t atan2_fixed12(int32_t dx, int32_t dz);     /* 12-bit result: 0-4095 = 0-360 deg */
 
 /* Core-provided helpers the collision TU calls. */
 void    td5_physics_mark_collision(int slot);            /* per-tick collision metric marker */
@@ -158,6 +177,24 @@ void    update_vehicle_pose_from_physics(TD5_Actor *actor); /* pose re-snap afte
  * The rest of the drivetrain surface is already public in td5_physics.h. */
 void    update_engine_speed_smoothed(TD5_Actor *actor);            /* 0x0042ED50 */
 int32_t compute_reverse_gear_torque(TD5_Actor *actor, int32_t speed_in); /* 0x403C80 */
+
+/* ------------------------------------------------------------------------
+ * Suspension-TU API consumed by the core (td5_physics_suspension.c). The
+ * td5_physics_integrate_suspension/_pose/_refresh_wheel_contacts/_clamp_attitude
+ * entry points are already public in td5_physics.h;
+ * update_vehicle_pose_from_physics moved there too (decl above).
+ * ------------------------------------------------------------------------ */
+void    apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int32_t longitudinal); /* 0x4437C0 */
+void    integrate_traffic_pose(TD5_Actor *actor);                        /* 0x443CF0 */
+void    process_traffic_segment_edge(TD5_Actor *actor, int slot);
+void    process_traffic_route_advance(TD5_Actor *actor, int slot);
+void    process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot);
+void    td5_transform_short_vec3_by_render_matrix_rounded(
+            const int16_t param_1[3], int32_t param_2[3], const float matrix[12]); /* 0x0042EB10 */
+void    td5_physics_attitude_from_wheels(const TD5_Actor *actor,
+                                         int16_t *out_roll, int16_t *out_pitch);
+/* Race-init hook: invalidates the pre-snap wheel-transform snapshots. */
+void    td5_physics_suspension_race_reset(void);
 
 /* ------------------------------------------------------------------------
  * Assists-provided API consumed by the faithful core (td5_physics_assists.c).

@@ -4,6 +4,7 @@ td5_physics.c
 td5_physics_assists.c
 td5_physics_collision.c
 td5_physics_drivetrain.c
+td5_physics_suspension.c
 td5_track.c
 td5_track_registry.c
 td5_ai.c
