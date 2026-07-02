@@ -794,4 +794,19 @@ void td5_plat_log_set_filters(int enabled, int min_level, unsigned int cat_mask)
 #define TD5_LOG_W(mod, ...) td5_plat_log(TD5_LOG_WARN,  mod, __VA_ARGS__)
 #define TD5_LOG_E(mod, ...) td5_plat_log(TD5_LOG_ERROR, mod, __VA_ARGS__)
 
+/** Running totals of WARN / ERROR log calls this session (counted at the call,
+ *  independent of sink filters). The self-test suite diffs these around each
+ *  step to assert "no new errors during scenario X". Either out-param may be
+ *  NULL. */
+void td5_plat_log_counts(unsigned *warns, unsigned *errors);
+
+/** Game-heap traffic counters (td5_plat_heap_alloc / td5_plat_heap_free call
+ *  totals) — an alloc/free imbalance across identical repeated races is a
+ *  leak signal for the self-test suite. Either out-param may be NULL. */
+void td5_plat_heap_stats(unsigned *allocs, unsigned *frees);
+
+/** Set the OS window caption (self-test progress display; same window the
+ *  TD5RE_WINDOW_TITLE env override names at boot). Safe no-op pre-window. */
+void td5_plat_set_window_title(const char *title);
+
 #endif /* TD5_PLATFORM_H */

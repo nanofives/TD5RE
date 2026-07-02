@@ -27,6 +27,7 @@
 #include <math.h>
 
 #include "td5_platform.h"
+#include "td5_config.h"  /* shared TD5RE_* env-knob helpers */
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
 
 /* Pull in the wrapper types and backend access */
@@ -1641,17 +1642,36 @@ void td5_plat_free_aligned(void *ptr)
     if (ptr) _aligned_free(ptr);
 }
 
+/* Heap traffic counters for the self-test degradation monitor (see
+ * td5_plat_heap_stats). Interlocked: worker-pool jobs may allocate. */
+static volatile LONG s_heap_alloc_count = 0;
+static volatile LONG s_heap_free_count  = 0;
+
 void *td5_plat_heap_alloc(size_t size)
 {
     if (!s_game_heap)
         s_game_heap = HeapCreate(0, 1024 * 1024, 0);
+    InterlockedIncrement(&s_heap_alloc_count);
     return HeapAlloc(s_game_heap, HEAP_ZERO_MEMORY, size);
 }
 
 void td5_plat_heap_free(void *ptr)
 {
-    if (ptr && s_game_heap)
+    if (ptr && s_game_heap) {
+        InterlockedIncrement(&s_heap_free_count);
         HeapFree(s_game_heap, 0, ptr);
+    }
+}
+
+void td5_plat_heap_stats(unsigned *allocs, unsigned *frees)
+{
+    if (allocs) *allocs = (unsigned)s_heap_alloc_count;
+    if (frees)  *frees  = (unsigned)s_heap_free_count;
+}
+
+void td5_plat_set_window_title(const char *title)
+{
+    if (s_hwnd && title) SetWindowTextA(s_hwnd, title);
 }
 
 /* [CONFIRMED @ 0x00430cb0 ResetGameHeap; L5 promotion sweep audit 2026-05-18]
@@ -3617,8 +3637,7 @@ static int td5_ff_wgi_enabled(void)
 {
     static int s_init = 0, s_on = 1;
     if (!s_init) {
-        const char *e = getenv("TD5RE_FF_WGI");
-        s_on = (e && e[0] == '0') ? 0 : 1;
+        s_on = td5_env_flag_on("TD5RE_FF_WGI");
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "FF WGI rumble path: %s",
                   s_on ? "enabled (default — lifts 4-pad cap)" : "disabled (TD5RE_FF_WGI=0)");
@@ -4581,8 +4600,19 @@ int td5_plat_audio_load_wav(const void *data, size_t size)
                   (unsigned int)size);
         return -1;
     }
-    if (s_audio_buf_count >= MAX_AUDIO_BUFFERS) {
-        TD5_LOG_E(LOG_TAG, "Audio load rejected: buffer pool full (%d)",
+    /* Slot allocation: reuse a freed slot before bumping the high-water mark.
+     * [SELFTEST FINDING 2026-07-02] The pool was a pure bump allocator —
+     * td5_plat_audio_free() NULLed the slot but nothing ever reused it, so
+     * ~40 WAVs per race exhausted the 256-slot pool after ~6 races in one
+     * session and every later race lost its engine/collision audio. Freed
+     * ids are safe to recycle: the sound layer scrubs its slot->buffer
+     * tables (s_slot_to_buffer = -1) whenever it frees. */
+    idx = -1;
+    for (int scan = 0; scan < s_audio_buf_count; scan++) {
+        if (!s_ds_buffers[scan]) { idx = scan; break; }
+    }
+    if (idx < 0 && s_audio_buf_count >= MAX_AUDIO_BUFFERS) {
+        TD5_LOG_E(LOG_TAG, "Audio load rejected: buffer pool full (%d live)",
                   s_audio_buf_count);
         return -1;
     }
@@ -4665,7 +4695,7 @@ int td5_plat_audio_load_wav(const void *data, size_t size)
     if (ptr2 && sz2 && data_size > sz1) memcpy(ptr2, data_chunk + sz1, sz2);
     IDirectSoundBuffer_Unlock(buf, ptr1, sz1, ptr2, sz2);
 
-    idx = s_audio_buf_count++;
+    if (idx < 0) idx = s_audio_buf_count++;   /* no freed slot -> extend */
     s_ds_buffers[idx] = buf;
     s_ds_buffer_rates[idx] = wfx.nSamplesPerSec;
     TD5_LOG_I(LOG_TAG,
@@ -6929,6 +6959,18 @@ void td5_plat_log_set_filters(int enabled, int min_level, unsigned int cat_mask)
     s_log_cat_mask  = cat_mask;
 }
 
+/* WARN/ERROR call totals — counted at the call site regardless of sink
+ * filters, so the self-test suite sees warnings even with logging gated.
+ * Interlocked: worker-pool jobs log too. */
+static volatile LONG s_log_warn_total = 0;
+static volatile LONG s_log_err_total  = 0;
+
+void td5_plat_log_counts(unsigned *warns, unsigned *errors)
+{
+    if (warns)  *warns  = (unsigned)s_log_warn_total;
+    if (errors) *errors = (unsigned)s_log_err_total;
+}
+
 void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
 {
     char buf[2048];
@@ -6938,6 +6980,9 @@ void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
     TD5_LogFile *lf;
 
     if (!fmt) return;
+
+    if (level == TD5_LOG_WARN)       InterlockedIncrement(&s_log_warn_total);
+    else if (level == TD5_LOG_ERROR) InterlockedIncrement(&s_log_err_total);
 
     /* Fast-path gating — bail before any formatting cost.
      *  - Errors are NEVER suppressed (still go to stdout below); they're rare

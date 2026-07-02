@@ -29,6 +29,7 @@
 #include "td5_save.h"   /* td5_save_get_catchup_assist — CATCHUP level (S06) */
 #include "td5_input.h"  /* g_td5_steering_bias_max_swing — CATCHUP steering swing (S06) */
 #include "td5re.h"
+#include "td5_config.h"  /* td5_env_int/float/flag_* — TD5RE_* knob helpers */
 #include <string.h>
 #include <math.h>
 #include <limits.h>
@@ -460,10 +461,7 @@ static void cop_end_chase(int slot) {
 static int cop_chase_max_gap(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_CHASE_GAP");
-        v = (e && e[0]) ? atoi(e) : 110;
-        if (v < 20)  v = 20;
-        if (v > 400) v = 400;
+        v = td5_env_int("TD5RE_COP_CHASE_GAP", 110, 20, 400);
     }
     return v;
 }
@@ -474,8 +472,7 @@ static int cop_chase_max_gap(void) {
 static int cop_stall_end_enabled(void) {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_COP_STALL_END");
-        s = (!e || e[0] != '0') ? 1 : 0;
+        s = td5_env_flag_on("TD5RE_COP_STALL_END");
     }
     return s;
 }
@@ -486,11 +483,7 @@ static int cop_stall_end_enabled(void) {
 static int cop_overtake_hold_ticks(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_OVERTAKE_HOLD");
-        long t = (e && e[0]) ? strtol(e, NULL, 10) : COP_OVERTAKE_HOLD_TICKS;
-        if (t < 0)   t = 0;
-        if (t > 300) t = 300;
-        v = (int)t;
+        v = td5_env_int("TD5RE_COP_OVERTAKE_HOLD", COP_OVERTAKE_HOLD_TICKS, 0, 300);
     }
     return v;
 }
@@ -505,11 +498,7 @@ static int cop_overtake_hold_ticks(void) {
 static int cop_chase_spinup_ticks(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_CHASE_SPINUP");
-        long t = (e && e[0]) ? strtol(e, NULL, 10) : COP_CHASE_SPINUP_TICKS;
-        if (t < 0)   t = 0;
-        if (t > 300) t = 300;
-        v = (int)t;
+        v = td5_env_int("TD5RE_COP_CHASE_SPINUP", COP_CHASE_SPINUP_TICKS, 0, 300);
     }
     return v;
 }
@@ -518,7 +507,7 @@ static int cop_chase_spinup_ticks(void) {
  * (cop reverts to the road-safe pursuit). Default ON. */
 static int cop_ram_enabled(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("TD5RE_COP_RAM"); v = (e && e[0] == '0') ? 0 : 1; }
+    if (v < 0) { v = td5_env_flag_on("TD5RE_COP_RAM"); }
     return v;
 }
 
@@ -528,8 +517,7 @@ static int cop_ram_enabled(void) {
  * cooldown lapses). */
 static int cop_no_rechase_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_COP_NO_RECHASE");
-                 s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_COP_NO_RECHASE"); }
     return s;
 }
 
@@ -541,11 +529,7 @@ static int cop_no_rechase_enabled(void) {
 static int cop_rebust_cooldown(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_REBUST_COOLDOWN");
-        long t = (e && e[0]) ? strtol(e, NULL, 10) : COP_REBUST_COOLDOWN;
-        if (t < 0)     t = 0;
-        if (t > 32000) t = 32000;
-        v = (int)t;
+        v = td5_env_int("TD5RE_COP_REBUST_COOLDOWN", COP_REBUST_COOLDOWN, 0, 32000);
     }
     return v;
 }
@@ -923,8 +907,7 @@ int td5_ai_actor_is_cop(int slot) {
 static int wreck_permanent_enabled(void) {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_WRECK_PERMANENT");
-        s = (!e || e[0] != '0') ? 1 : 0;
+        s = td5_env_flag_on("TD5RE_WRECK_PERMANENT");
     }
     return s;
 }
@@ -2786,7 +2769,7 @@ void td5_ai_init_race_actor_runtime(void) {
  * (TD5RE_TD6_AI_BAND=0 disables; default on). */
 static int td6_ai_band_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_AI_BAND"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TD6_AI_BAND"); }
     return s;
 }
 
@@ -2800,7 +2783,7 @@ static int td6_ai_band_enabled(void) {
  * (back to the faithful banded cascade). */
 static int td6_prop_steer_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_AI_PROP"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TD6_AI_PROP"); }
     return s;
 }
 
@@ -2810,10 +2793,7 @@ static int td6_prop_steer_enabled(void) {
 static int32_t td6_steer_gain(void) {
     static int g = -1;
     if (g < 0) {
-        const char *e = getenv("TD5RE_TD6_AI_GAIN");
-        g = (e && e[0]) ? atoi(e) : 0x80;
-        if (g < 0x10)  g = 0x10;
-        if (g > 0x100) g = 0x100;
+        g = td5_env_int("TD5RE_TD6_AI_GAIN", 0x80, 0x10, 0x100);
     }
     return g;
 }
@@ -2821,10 +2801,7 @@ static int32_t td6_steer_gain(void) {
 static int32_t td5_ai_td6_steer_weight(int32_t w) {
     static int s_pct = -1;
     if (s_pct < 0) {
-        const char *e = getenv("TD5RE_TD6_AI_STEER");
-        s_pct = (e && e[0]) ? atoi(e) : 100;   /* default OFF: weight-damping alone didn't help */
-        if (s_pct < 5)   s_pct = 5;
-        if (s_pct > 100) s_pct = 100;
+        s_pct = td5_env_int("TD5RE_TD6_AI_STEER", 100, 5, 100);   /* default OFF: weight-damping alone didn't help */
     }
     if (g_active_td6_level <= 0 || s_pct >= 100) return w;
     return (int32_t)(((int64_t)w * (int64_t)s_pct) / 100);
@@ -4904,8 +4881,7 @@ static void smart_sense(int slot, int span_raw, int span_count,
 static int td5_ai_branch_random_enabled(void) {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_AI_BRANCH_RANDOM");
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_AI_BRANCH_RANDOM");
         TD5_LOG_I(LOG_TAG, "ai_branch_random knob: TD5RE_AI_BRANCH_RANDOM=%d "
                   "(AI pre-picks forks at random %s)", s, s ? "ON" : "OFF");
     }
@@ -7591,8 +7567,7 @@ static void traffic_smart_antifreeze(int slot, char *actor, int32_t *rs) {
 static int traffic_escape_enabled(void) {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TRAFFIC_ESCAPE");
-        s = (!e || e[0] != '0') ? 1 : 0;
+        s = td5_env_flag_on("TD5RE_TRAFFIC_ESCAPE");
     }
     return s;
 }
@@ -7790,7 +7765,7 @@ static int traffic_lane_is_clear(int self_slot, int self_span,
 /* Default ON; TD5RE_AI_UNSTICK=0 disables (restores the faithful no-escape AI). */
 static int racer_unstick_enabled(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("TD5RE_AI_UNSTICK"); v = (e && e[0] == '0') ? 0 : 1; }
+    if (v < 0) { v = td5_env_flag_on("TD5RE_AI_UNSTICK"); }
     return v;
 }
 
@@ -8209,8 +8184,7 @@ static int trf_per_viewport_knob(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TT_PER_VIEWPORT_TRAFFIC");
-        s = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s = td5_env_flag_on("TD5RE_TT_PER_VIEWPORT_TRAFFIC");   /* default ON */
     }
     return s;
 }
@@ -8428,8 +8402,7 @@ static int trf_dyn_density_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TRAFFIC_DENSITY");
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_TRAFFIC_DENSITY");
         TD5_LOG_I(LOG_TAG, "traffic_density knob: TD5RE_TRAFFIC_DENSITY=%d "
                   "(proximity recycle + retune + VERY HIGH %s)",
                   s, s ? "ON" : "OFF");
@@ -8667,11 +8640,10 @@ static int trf_dyn_branches_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TRAFFIC_BRANCHES");
         /* Default ON: branches are connected drivable roads with route tables, so
          * traffic spawns on and drives them like the main ring. =0 forces all
          * traffic onto the main ring only. */
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_TRAFFIC_BRANCHES");
         TD5_LOG_I(LOG_TAG, "traffic_branches knob: TD5RE_TRAFFIC_BRANCHES=%d "
                   "(spawn on branch corridors %s)", s, s ? "ON" : "OFF");
     }
@@ -8984,8 +8956,7 @@ static void trf_dyn_place(int slot, int span, int lane, int polarity)
  * Default ON; TD5RE_BRANCH_TRAFFIC_FIX=0 restores the old behaviour for A/B. */
 static int branch_traffic_fix_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_BRANCH_TRAFFIC_FIX");
-                 s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_BRANCH_TRAFFIC_FIX"); }
     return s;
 }
 
@@ -10580,7 +10551,7 @@ extern void td5_physics_reset_actor_state(TD5_Actor *actor);
  * runs, where slot 0 is AI). Never enabled in normal play. */
 static int cop_chase_ai_debug(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_COP_CHASE_AI"); s = (e && e[0] == '1') ? 1 : 0; }
+    if (s < 0) { s = td5_env_flag_off("TD5RE_COP_CHASE_AI"); }
     return s;
 }
 void td5_ai_update_special_encounter(void) {
@@ -10810,300 +10781,6 @@ void td5_ai_update_special_encounter(void) {
     }
 }
 
-#if 0  /* Legacy single-cop encounter (slot 9) — superseded by the multi-cop
-        * scheduler above. Kept disabled for reference during bring-up. */
-void td5_ai_update_special_encounter_legacy(void) {
-    int32_t handle;
-    char *cop;        /* actor[9] */
-    int32_t cop_span_norm;     /* actor[9] +0x82 (cop is always traffic slot 9) */
-
-    /* Port-only master gate (see header comment). */
-    if (!g_encounter_enabled) return;
-
-    /* Bind frequently-used addresses once. */
-    if (!g_actor_base) return;
-    cop = actor_ptr(9);
-
-    cop_span_norm = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_NORMALIZED);
-
-    handle = g_encounter_tracked_handle;
-
-    /* ---- Prologue (0x00434da0–0x00434e11) ----------------------------
-     * if (handle != -1 && cached_route_table_ptr !=
-     *     route_state[handle][RS_ROUTE_TABLE_PTR]) {
-     *     // route changed — refresh cached pointer + recompute
-     *     // span progress + signed track offset.
-     * }
-     * ----------------------------------------------------------------- */
-    if (handle != -1) {
-        const uint8_t *cur_rb;
-        const int32_t *handle_rs = route_state(handle);
-        cur_rb = (const uint8_t *)(intptr_t)handle_rs[RS_ROUTE_TABLE_PTR];
-        if (s_enc_route_table_ptr != cur_rb) {
-            int32_t cop_span_raw = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_RAW);
-            int32_t *cop_xyz     = (int32_t *)(cop + ACTOR_WORLD_POS_X);
-            uint8_t lane_byte;
-
-            s_enc_route_table_ptr = cur_rb;
-
-            /* longlong ComputeTrackSpanProgress(int span, int *xyz_at_+0x1fc) */
-            s_enc_track_progress = (int32_t)td5_track_compute_span_progress(
-                cop_span_raw, cop_xyz);
-
-            /* The original passes the per-span lane byte at
-             *   route_table[ span_norm * 3 ]
-             * i.e. the BL = byte ptr [ECX + EDX*1] where ECX=span_norm,
-             * EDX = base + span_norm*2 ⇒ effective addr = base + span_norm*3. */
-            lane_byte = (cur_rb && cop_span_norm >= 0)
-                ? cur_rb[(size_t)cop_span_norm * 3u]
-                : 0;
-
-            /* ulonglong ComputeSignedTrackOffset(int span_raw, int progress, uint lane) */
-            s_enc_signed_track_offset = (int32_t)td5_track_compute_signed_offset(
-                cop_span_raw, s_enc_track_progress, (int)lane_byte);
-        }
-    }
-
-    /* ---- Phase-flag dispatch (0x00434e13–0x00434e26) -----------------
-     * if (phase_flag != 0) {
-     *     if (handle == -1) return;
-     *     goto active_monitor;            // 0x00434f1b
-     * }
-     * if (handle != -1) goto active_monitor;
-     * // else: try to spawn the encounter
-     * ----------------------------------------------------------------- */
-    if (g_encounter_phase_flag != 0) {
-        if (handle == -1) return;
-        /* fall through to active_monitor */
-    } else if (handle == -1) {
-        /* ---- Spawn attempt (0x00434e2c–0x00434f11) ------------------
-         * PORT DEVIATION (multiplayer): the original latches the encounter
-         * onto slot 0 (the only human). Here we scan EVERY human slot
-         * [0 .. num_human_players) and latch the FIRST one that passes the
-         * full gate, so the cop chases whichever player drives past it
-         * first — and only that car (the active monitor + per-slot
-         * g_encounter_active gating below confine the effect to that slot).
-         * With a single player this loops once over slot 0, reproducing the
-         * original byte-for-byte. The cop is always traffic slot 9 (special-
-         * encounter is only enabled for fields of <=6 racers, where slot 9
-         * is free). */
-        int n_players;
-        int spawn_slot = -1;
-        int16_t spawn_span_norm = 0;
-        int32_t spawn_speed = 0, spawn_fwd = 0, spawn_selector = 0;
-
-        /* Cooldown is a single shared timer — check once. */
-        if (g_encounter_cooldown != 0) {
-            if ((g_ai_frame_counter % 90u) == 0u) {
-                TD5_LOG_I(LOG_TAG, "cop_spawn_gate: BLOCK=cooldown!=0 (%d)",
-                          g_encounter_cooldown);
-            }
-            return;
-        }
-
-        n_players = g_td5.num_human_players;
-        if (n_players < 1) n_players = 1;
-        if (n_players > g_traffic_slot_base) n_players = g_traffic_slot_base;
-
-        for (int ps = 0; ps < n_players; ps++) {
-            char   *pl       = actor_ptr(ps);
-            int16_t ps_span  = ACTOR_I16(pl, ACTOR_SPAN_NORMALIZED);
-            int32_t ps_speed = ACTOR_I32(pl, ACTOR_LONGITUDINAL_SPEED);
-            int32_t ps_fwd   = g_actor_forward_track_component[ps];
-            int32_t ps_sel   = route_state(ps)[RS_ROUTE_TABLE_SELECTOR];
-            /* (int16)player.span_norm - (int16)cop.span_norm == 2 */
-            int32_t sd       = (int32_t)ps_span - cop_span_norm;
-
-            /* [DIAG] near-miss log — cop (slot 9) within 1..3 spans of this
-             * player (the window in which span_delta crosses the required ==2),
-             * plus a periodic slot-0 heartbeat. Zero behavioral effect. */
-            if ((sd >= 1 && sd <= 3) || (ps == 0 && (g_ai_frame_counter % 90u) == 0u)) {
-                const char *blocker =
-                    (sd != 2)                                     ? "span_delta!=2" :
-                    (ps_speed <= 0x15638)                         ? "speed<=0x15638" :
-                    (ps_fwd <= 0)                                 ? "fwd<=0" :
-                    (ps_sel != g_encounter_route_table_selector)  ? "selector!=0" :
-                                                                    "PASSES(will spawn)";
-                TD5_LOG_I(LOG_TAG,
-                          "cop_spawn_gate[p%d]: BLOCK=%s span_delta=%d "
-                          "(player_norm=%d cop9_norm=%d) speed=%d(>0x15638?%d) "
-                          "fwd=%d(>0?%d) selector=%d(==%d?%d)",
-                          ps, blocker, sd, (int)ps_span, cop_span_norm,
-                          ps_speed, ps_speed > 0x15638, ps_fwd, ps_fwd > 0,
-                          ps_sel, g_encounter_route_table_selector,
-                          ps_sel == g_encounter_route_table_selector);
-            }
-
-            /* actor[ps].span_norm - actor[9].span_norm == 2 */
-            if (sd != 2) continue;
-            /* actor[ps].long_speed > 0x15638 (JLE → fail at 0x15638) */
-            if (ps_speed <= 0x15638) continue;
-            /* RS[ps].forward_track_component > 0 (JLE → fail at 0) */
-            if (ps_fwd <= 0) continue;
-            /* RS[ps].route_table_selector == DAT_004b0568 (JNZ → fail) */
-            if (ps_sel != g_encounter_route_table_selector) continue;
-
-            /* The original's final abs(player_span - player_span) > 0x10 check
-             * is vacuously true (always 0); dropped — no behavioral effect. */
-
-            /* First qualifying player wins the chase. */
-            spawn_slot      = ps;
-            spawn_span_norm = ps_span;
-            spawn_speed     = ps_speed;
-            spawn_fwd       = ps_fwd;
-            spawn_selector  = ps_sel;
-            break;
-        }
-
-        if (spawn_slot < 0) return;
-
-        /* ===== SPAWN =====
-         * Original (0x00434e97–0x00434f11) latches handle=0 (slot 0 = player)
-         * and caches route_state[0][RS_ROUTE_TABLE_PTR]. We use spawn_slot so
-         * the chase tracks the winning player; the active monitor below is
-         * already handle-generic, so it follows the right car automatically. */
-        {
-            int32_t cop_span_raw = (int32_t)(int16_t)ACTOR_I16(cop, ACTOR_SPAN_RAW);
-            int32_t *cop_xyz     = (int32_t *)(cop + ACTOR_WORLD_POS_X);
-            const uint8_t *rb0;
-            uint8_t lane_byte;
-
-            g_encounter_tracked_handle = spawn_slot;
-
-            s_enc_track_progress = (int32_t)td5_track_compute_span_progress(
-                cop_span_raw, cop_xyz);
-
-            /* IMPORTANT: the original reads the lane byte from the *previous*
-             * gSpecialEncounterRouteTable, then immediately overwrites it.
-             * (0x434eb8 reads MOV EDX,[0x4b055c] BEFORE 0x434eea writes.) */
-            rb0 = s_enc_route_table_ptr;
-            lane_byte = (rb0 && cop_span_norm >= 0)
-                ? rb0[(size_t)cop_span_norm * 3u]
-                : 0;
-
-            s_enc_signed_track_offset = (int32_t)td5_track_compute_signed_offset(
-                cop_span_raw, s_enc_track_progress, (int)lane_byte);
-
-            /* Cache the tracked player's route_table_ptr. Since the tracked
-             * actor IS spawn_slot after this, the prologue "ptr changed" check
-             * will be false on the very next tick. */
-            s_enc_route_table_ptr = (const uint8_t *)(intptr_t)
-                                    route_state(spawn_slot)[RS_ROUTE_TABLE_PTR];
-
-            td5_physics_reset_actor_state((TD5_Actor *)cop);
-        }
-
-        TD5_LOG_I(LOG_TAG,
-                  "Encounter spawn: handle=%d player_span_norm=%d cop_span_norm=%d "
-                  "speed=%d fwd=%d sel=%d",
-                  spawn_slot, (int)spawn_span_norm, cop_span_norm, spawn_speed,
-                  spawn_fwd, spawn_selector);
-
-        if (ENC_WANTED_MODE != 0) return;
-        td5_enc_start_tracked_audio(9);
-        return;
-    }
-
-    /* ---- Active monitor (0x00434f1b–0x00434fd3) -----------------------
-     * Reached when (handle != -1). Either phase == 0 fall-through or
-     * phase != 0 explicit JNZ.
-     *
-     * if (cooldown != 0) return;
-     * cop_span = (int16)actor[handle].span_norm  // +0x82 with stride 0x388
-     * delta = cop_span - DAT_004ad152            // DAT_004ad152 = actor[9].span_norm
-     *
-     * Note: handle is set to 0 at spawn (slot 0 = player), so
-     * "actor[handle].span_norm" reads the player's span_norm and
-     * delta = player_span_norm - cop_span_norm.
-     *
-     * if (delta > 0x40 && actor[9].vehicle_mode == 0) {
-     *     teardown:
-     *       teardown_flag = 0
-     *       tracked_handle = -1
-     *       phase_flag = 0
-     *       cooldown = 300
-     *       if (ENC_WANTED_MODE == 0) StopTrackedVehicleAudio();
-     *       ResetVehicleActorState(&actor[9]);
-     *       return;
-     * }
-     *
-     * // delta <= 0x40 path:
-     * ecx = DAT_004ad152 - cop_span (= cop_span_norm - player_span_norm)
-     * if (ecx < 2) return;
-     * if (route_state[handle][RS_ROUTE_TABLE_SELECTOR] != [0x4b0568]) return;
-     * if (actor[9].vehicle_mode != 0) return;
-     * route_state[handle][0x20] = 1;             // per-slot encounter active
-     * if (ENC_WANTED_MODE == 0) StopTrackedVehicleAudio();
-     * ----------------------------------------------------------------- */
-    {
-        char *tracked_actor;
-        int32_t tracked_span_norm;
-        int32_t delta;
-        uint8_t cop_mode;
-
-        if (g_encounter_cooldown != 0) return;
-
-        tracked_actor     = actor_ptr(handle);
-        tracked_span_norm = (int32_t)(int16_t)ACTOR_I16(tracked_actor, ACTOR_SPAN_NORMALIZED);
-        delta             = tracked_span_norm - cop_span_norm;
-        cop_mode          = ACTOR_U8(cop, ACTOR_VEHICLE_MODE);
-
-        if (delta > 0x40 && cop_mode == 0) {
-            /* Teardown — cop is far ahead of player AND cop mode == 0. */
-            s_enc_teardown_flag        = 0;
-            g_encounter_tracked_handle = -1;
-            g_encounter_phase_flag     = 0;
-            g_encounter_cooldown       = 0x12c;   /* 300 */
-
-            if (ENC_WANTED_MODE == 0) {
-                td5_enc_stop_tracked_audio();
-            }
-
-            td5_physics_reset_actor_state((TD5_Actor *)cop);
-
-            TD5_LOG_I(LOG_TAG,
-                      "Encounter despawn (delta>0x40): tracked_span=%d cop_span=%d "
-                      "delta=%d cooldown=300",
-                      tracked_span_norm, cop_span_norm, delta);
-
-            /* The original does NOT clear per-slot g_encounter_active
-             * flags or zero the control latches here — UpdateSpecial
-             * EncounterControl (0x00434BA0) handles deactivation when
-             * it next runs and finds the conditions invalid. */
-            return;
-        }
-
-        /* delta <= 0x40 path — encounter activation check. */
-        {
-            int32_t ecx;
-            const int32_t *tracked_rs;
-
-            ecx = cop_span_norm - tracked_span_norm;
-            if (ecx < 2) return;
-
-            tracked_rs = route_state(handle);
-            if (tracked_rs[RS_ROUTE_TABLE_SELECTOR] !=
-                g_encounter_route_table_selector) return;
-
-            if (cop_mode != 0) return;
-
-            /* route_state[handle][0x20] = 1.
-             * Mirror to the parallel g_encounter_active[] used by the
-             * rest of the port. handle is guaranteed in [0, TD5_MAX_TOTAL_ACTORS). */
-            g_encounter_active[handle] = 1;
-
-            if (ENC_WANTED_MODE == 0) {
-                td5_enc_stop_tracked_audio();
-            }
-
-            TD5_LOG_I(LOG_TAG,
-                      "Encounter activate: handle=%d ecx=%d tracked_span=%d cop_span=%d",
-                      (int)handle, ecx, tracked_span_norm, cop_span_norm);
-        }
-    }
-}
-#endif  /* legacy single-cop encounter */
-
 /**
  * UpdateSpecialEncounterControl  (0x00434BA0)
  *
@@ -11133,7 +10810,7 @@ void td5_ai_update_special_encounter_legacy(void) {
  * a cop overtakes it), force that car to brake to a full stop. Called for
  * HUMAN players from the input path (td5_input.c); AI-racer targets get the
  * same stop applied in ai_update_single_racer. No-op otherwise. Replaces the
- * faithful single-cop heading/brake control (kept below under #if 0). */
+ * faithful single-cop heading/brake control (the legacy path was removed 2026-07-01). */
 void td5_ai_update_encounter_control(int slot) {
     char *actor_self;
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
@@ -11147,175 +10824,6 @@ void td5_ai_update_encounter_control(int slot) {
     ACTOR_U8(actor_self,  ACTOR_THROTTLE_STATE)  = 0;
     ACTOR_I32(actor_self, ACTOR_STEERING_CMD)    = 0;
 }
-
-#if 0  /* Legacy single-cop encounter control — superseded by the pull-over
-        * control above. Kept disabled for reference during bring-up. */
-void td5_ai_update_encounter_control_legacy(int slot) {
-    char    *actor_self   = actor_ptr(slot);
-    int32_t *rs_self      = route_state(slot);
-    int      tracked      = g_encounter_tracked_handle;
-    /* DAT_004ad152 in orig = player's SPAN_NORMALIZED snapshot; UpdateSpecialTrafficEncounter
-     * keeps it equal to the current player's field_0x82 each tick. Port reads it live.
-     * PORT DEVIATION (multiplayer): read the span of the TRACKED (chased) player, not a
-     * hardcoded slot 0, so the brake gate matches single-player when the chased car is
-     * not slot 0. For a single player tracked==0, so this is byte-identical. */
-    int      span_ref_slot = (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS) ? tracked : 0;
-    int32_t  player_span_ref = (int32_t)(int16_t)ACTOR_I16(actor_ptr(span_ref_slot), ACTOR_SPAN_NORMALIZED);
-    /* gSpecialEncounterRouteTable in orig = cached route-table pointer of the tracked actor.
-     * Port reads the live equivalent from the tracked actor's rs[RS_ROUTE_TABLE_PTR]. */
-    const uint8_t *tracked_route_tbl = (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS)
-        ? (const uint8_t *)(intptr_t)route_state(tracked)[RS_ROUTE_TABLE_PTR]
-        : NULL;
-    const uint8_t *self_route_tbl = (const uint8_t *)(intptr_t)rs_self[RS_ROUTE_TABLE_PTR];
-
-    int32_t fwd_comp;
-    uint32_t uVar3, uVar1;
-
-    /* --- Block 1: yaw delta of slot's own actor vs slot's route-table heading --- */
-    {
-        int32_t yaw_self = ACTOR_I32(actor_self, ACTOR_YAW_ACCUM) >> 8;  /* SAR EAX,8 (signed) */
-        int16_t span_self = ACTOR_I16(actor_self, ACTOR_SPAN_NORMALIZED); /* MOVSX [+0x82] */
-        uint32_t byte_val = 0;
-        int32_t heading_off, diff;
-
-        if (self_route_tbl && span_self >= 0) {
-            /* byte at route_tbl + span*3 + 1 (XOR EBX,EBX; MOV BL,[...] = unsigned byte). */
-            byte_val = (uint32_t)self_route_tbl[(size_t)(uint16_t)span_self * 3u + 1u];
-        }
-        /* heading_offset = (byte_val * 0x102C) >>s 8.  byte_val is unsigned [0,255], so
-         * the CDQ/AND/ADD/SAR idiom in the orig reduces to a plain >>8 (product is
-         * always non-negative). */
-        heading_off = (int32_t)(byte_val * 0x102Cu) >> 8;
-        diff = yaw_self - heading_off;
-        diff = (diff - 0x800) & 0xFFF;
-        diff = (diff - 0x800) & 0xFFF;
-        uVar3 = ((uint32_t)(-diff)) & 0xFFF;
-    }
-
-    /* --- Block 2: yaw delta of tracked actor vs cached gSpecialEncounterRouteTable --- */
-    {
-        int32_t yaw_tr = 0;
-        int16_t span_tr = 0;
-        uint32_t byte_val = 0;
-        int32_t heading_off, diff;
-
-        if (tracked >= 0 && tracked < TD5_MAX_TOTAL_ACTORS) {
-            char *actor_tr = actor_ptr(tracked);
-            yaw_tr  = ACTOR_I32(actor_tr, ACTOR_YAW_ACCUM) >> 8;
-            span_tr = ACTOR_I16(actor_tr, ACTOR_SPAN_NORMALIZED);
-        }
-        if (tracked_route_tbl && span_tr >= 0) {
-            byte_val = (uint32_t)tracked_route_tbl[(size_t)(uint16_t)span_tr * 3u + 1u];
-        }
-        heading_off = (int32_t)(byte_val * 0x102Cu) >> 8;
-        diff = yaw_tr - heading_off;
-        diff = (diff - 0x800) & 0xFFF;
-        diff = (diff - 0x800) & 0xFFF;
-        uVar1 = ((uint32_t)(-diff)) & 0xFFF;
-    }
-
-    fwd_comp = g_actor_forward_track_component[slot];
-
-    /* Set latches (orig writes these unconditionally before the conditional teardown). */
-    g_encounter_control_active_latch = 1;
-    g_encounter_steer_bias_latch     = 0xFF00; /* word write (MOV [...], DX where DX=0xFF00) */
-
-    /* Teardown if any of:
-     *   - fwd_comp <= 8
-     *   - 0x400 <= uVar3 <= 0xC00   (range [JL→0x434ccd] ; [JLE→teardown])
-     *   - 0x400 <= uVar1 <= 0xC00
-     */
-    if (fwd_comp <= 8) goto teardown;
-    if (!((int32_t)uVar3 < 0x400 || (int32_t)uVar3 > 0xC00)) goto teardown;
-    if (!((int32_t)uVar1 < 0x400 || (int32_t)uVar1 > 0xC00)) goto teardown;
-
-    /* Active branch:
-     *   if fwd_comp >= gSpecialEncounterMinForwardTrackComponentThreshold (orig DAT_004b05bc)
-     *      and  (DAT_004ad152 - actor[slot].SPAN_NORMALIZED) < 3
-     *      → BRAKE_FLAG = 1; ENCOUNTER_STEER = 0xFF00
-     *   else → ENCOUNTER_STEER = 0  (BRAKE_FLAG untouched)
-     */
-    {
-        int32_t span_self = (int32_t)(int16_t)ACTOR_I16(actor_self, ACTOR_SPAN_NORMALIZED);
-        int32_t span_delta = player_span_ref - span_self;
-        if (fwd_comp >= g_special_encounter_min_fwd_track_threshold && span_delta < 3) {
-            ACTOR_U8(actor_self,  ACTOR_BRAKE_FLAG)      = 1;
-            ACTOR_I16(actor_self, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
-            return;
-        }
-        ACTOR_I16(actor_self, ACTOR_ENCOUNTER_STEER) = 0;
-    }
-    return;
-
-teardown:
-    /* Orig: XOR EAX,EAX
-     *       MOV [ESI+0x4afbe0],EAX   (gActorSpecialEncounterActive[slot] = 0)
-     *       MOV [ESI+0x4afc5c],EAX   (gActorRouteDirectionPolarity[slot] = 0)
-     *       MOV [0x4ad40e],AX        (steer_bias_latch = 0, word)
-     *       MOV [0x4ad43d],AL        (control_active_latch = 0, byte)
-     *       MOV [0x4b05c4],EAX       (DAT_004b05c4 = 0)
-     *       MOV [0x4b05e4],EAX       (DAT_004b05e4 = 0)
-     *       MOV [0x4b05d8],-1        (tracked-handle alias; port writes g_encounter_tracked_handle)
-     *       MOV [0x4b064c],300       (g_specialEncounterCooldown)
-     *       MOV CL,[actor[slot].+0x384]; INC CL; MOV [actor[slot].+0x384],CL  (byte increment)
-     *
-     * AUDIT(audit-encounter-dats, 2026-05-14): the three unlabeled DATs are
-     * fully accounted for by the existing port state:
-     *
-     *   DAT_004b05d8 = gSpecialEncounterTrackedActorHandle
-     *     → port's g_encounter_tracked_handle. Cleared to -1 on the next line
-     *       below; verified label exists in Ghidra (symbol_by_name match).
-     *
-     *   DAT_004b05e4 = g_encounter_phase_flag (port mirror exists already).
-     *     The original has only two writers, both to 0 (this teardown +
-     *     UpdateSpecialTrafficEncounter teardown at 0x00434f6d), and a single
-     *     reader at 0x00434e13 testing == 0. The variable is always 0 in
-     *     steady-state, so this redundant zero-write here is observationally
-     *     identical to omitting it. Port matches.
-     *
-     *   DAT_004b05c4 — write-only DEAD variable in the original. reference_to
-     *     finds exactly 1 reference, this MOV [0x4b05c4],EAX (always 0). No
-     *     reader anywhere in TD5_d3d.exe. Likely a vestigial latch whose
-     *     consumer was optimized out at build time. Omitting from the port
-     *     has zero behavioral effect.
-     */
-    g_encounter_active[slot] = 0;
-    /* gActorRouteDirectionPolarity = rs[0xFC/4 = 0x3F] per UpdateSpecialEncounter-
-     * Control teardown @ 0x00434d40 `MOV [ESI + 0x4afc5c], EAX`. Only dword 0x3F
-     * is written by the original; the prior defensive write to dword 0x25
-     * (RS_DIRECTION_POLARITY_LEGACY) targeted a field with no references in the
-     * original listing and is removed. */
-    rs_self[RS_ROUTE_DIRECTION_POLARITY] = 0;
-    g_encounter_steer_bias_latch = 0;
-    g_encounter_control_active_latch = 0;
-    g_encounter_tracked_handle = -1;
-    g_encounter_cooldown = 300;
-    /* [DELIBERATE DIVERGENCE fix-1780404735 — close stuck-siren gap]
-     * The original UpdateSpecialEncounterControl teardown (0x434BA0) does NOT
-     * stop the tracked-vehicle (siren) audio — RE-confirmed. The siren is
-     * normally killed earlier by the ACTIVATE transition in
-     * UpdateSpecialTrafficEncounter (0x434DA0). But if an encounter ends via
-     * THIS teardown (player slowed -> fwd_comp<=8, or the heading-misalignment
-     * band) WITHOUT having activated first, the siren is never stopped and keeps
-     * playing while the cop drives away — matching the user report "siren stuck
-     * despite the cop being far away". The gap exists in the original too;
-     * stopping here closes it. SAFE: td5_sound_stop_tracked_vehicle_audio is a
-     * no-op when the siren is already stopped (s_tracked_veh_active==0), so the
-     * common already-activated path is unaffected (just begins a fade that's
-     * already at zero). Gated to the special encounter (ENC_WANTED_MODE==0); the
-     * Cop-Chase-mode siren is the separate user horn-toggle path. */
-    if (ENC_WANTED_MODE == 0) {
-        td5_enc_stop_tracked_audio();
-        TD5_LOG_I(LOG_TAG,
-                  "encounter_control teardown: siren stop (close stuck-siren gap, slot=%d)",
-                  slot);
-    }
-    /* Byte-wide increment (orig uses CL via INC). Field at +0x384 is the encounter
-     * completion counter on the slot's own actor (NOT on the player). */
-    ACTOR_U8(actor_self, ACTOR_ENCOUNTER_STATE) =
-        (uint8_t)(ACTOR_U8(actor_self, ACTOR_ENCOUNTER_STATE) + 1);
-}
-#endif  /* legacy single-cop encounter control */
 
 /* ========================================================================
  * Master Dispatcher  (0x436A70  UpdateRaceActors)
@@ -11446,8 +10954,7 @@ static int ai_finish_stop_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_AI_FINISH_STOP");
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_AI_FINISH_STOP");
         TD5_LOG_I(LOG_TAG, "ai_finish_stop knob: TD5RE_AI_FINISH_STOP=%d "
                   "(stop AI on circuit race finish %s)", s, s ? "ON" : "OFF");
     }
@@ -11621,7 +11128,7 @@ static int td6_traffic_road_clamp_enabled(void) {
     /* Default OFF: the per-tick lane nudge oscillated traffic near forks and
      * tripped the recovery brake ("most don't move"). Master's lane chooser
      * already avoids slow lanes; =1 re-enables the nudge. */
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_TRAFFIC_ROAD"); s = (e && e[0] == '1') ? 1 : 0; }
+    if (s < 0) { s = td5_env_flag_off("TD5RE_TD6_TRAFFIC_ROAD"); }
     return s;
 }
 
@@ -11653,7 +11160,7 @@ static void traffic_drive_normal(int slot) {
  * fast. */
 static int cop_racer_drive_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_COP_RACER_DRIVE"); s = (e && e[0] == '1') ? 1 : 0; }
+    if (s < 0) { s = td5_env_flag_off("TD5RE_COP_RACER_DRIVE"); }
     return s;
 }
 
@@ -11733,10 +11240,7 @@ static void cop_ram_steer(int slot, int32_t dev) {
 static int cop_chase_accel_max_pct(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_CHASE_ACCEL");
-        v = (e && e[0]) ? atoi(e) : 280;
-        if (v < 100) v = 100;
-        if (v > 500) v = 500;
+        v = td5_env_int("TD5RE_COP_CHASE_ACCEL", 280, 100, 500);
         TD5_LOG_I(LOG_TAG, "cop_chase_accel: max boost = %d%% (TD5RE_COP_CHASE_ACCEL)", v);
     }
     return v;
@@ -11747,8 +11251,7 @@ static int cop_chase_accel_max_pct(void) {
  * bends — the old crash-prone behaviour). */
 static int cop_corner_ease_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_COP_CORNER_EASE");
-                 s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_COP_CORNER_EASE"); }
     return s;
 }
 

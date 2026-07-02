@@ -22,6 +22,7 @@
 #include "td5_snk_strings.h"
 #include "td5_vectorui.h"
 #include "td5_font.h"
+#include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -323,8 +324,7 @@ static int frontend_net_local_slot(void) {
 float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h) {
     static int s_lobby_align = -1;   /* -1=unread, 0=legacy, 1=aligned */
     if (s_lobby_align < 0) {
-        const char *e = getenv("TD5RE_LOBBY_ALIGN");
-        s_lobby_align = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_lobby_align = td5_env_flag_on("TD5RE_LOBBY_ALIGN");   /* default ON */
         TD5_LOG_I(LOG_TAG, "lobby swatch align: %s",
                   s_lobby_align ? "on (centre swatch on text cap-band)"
                                 : "off (legacy cell-top)");

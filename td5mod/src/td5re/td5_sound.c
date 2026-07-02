@@ -27,6 +27,7 @@
 #include "td5_asset.h"
 #include "td5_game.h"  /* td5_game_get_player_slot, is_replay_active, etc. */
 #include "td5re.h"
+#include "td5_config.h" /* shared TD5RE_* env-knob helpers */
 #include "td5_vfx.h"
 #include "td5_ai.h"    /* td5_ai_traffic_get_draw_alpha (dynamic-traffic fade) */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-SFX trigger (Item #12) */
@@ -1039,8 +1040,7 @@ static int td5_sound_crash_sfx_enabled(void)
 {
     static int s_mode = -1;
     if (s_mode < 0) {
-        const char *e = getenv("TD5RE_CRASH_SFX");
-        s_mode = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_mode = td5_env_flag_on("TD5RE_CRASH_SFX");   /* default ON */
     }
     return s_mode;
 }

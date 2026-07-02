@@ -45,7 +45,7 @@ jobs:
             build/d3d3.o build/device3.o build/viewport3.o \
             build/texture2.o build/d3d11_backend.o build/png_loader.o
 
-      # Module list mirrors build_standalone.bat (TD5RE_SRCS_COMMON) — keep in sync.
+      # Module list comes from td5mod/src/td5re/srcs.txt (shared with build_standalone.bat + Makefile).
       - name: Build td5re.exe (source port)
         run: |
           cd td5mod/src/td5re
@@ -53,15 +53,12 @@ jobs:
 
           WRAPPER_SRCDIR=../../ddraw_wrapper/src
           WRAPPER_BUILDDIR=../../ddraw_wrapper/build
-          CFLAGS="-c -O2 -Wall -Wextra -m32 -std=c11 -I. -I$WRAPPER_SRCDIR -DTD5_INFLATE_USE_ZLIB"
+          # RELEASE configuration — mirrors build_standalone.bat's release path:
+          # -DTD5RE_RELEASE -DNDEBUG compile out dev affordances, -s (link) strips.
+          CFLAGS="-c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 -I. -I$WRAPPER_SRCDIR -DTD5_INFLATE_USE_ZLIB -DTD5RE_RELEASE -DNDEBUG"
 
-          SRCS="td5re.c td5_game.c td5_physics.c td5_track.c td5_track_registry.c td5_ai.c \
-                td5_render.c td5_frontend.c td5_fe_net.c td5_fe_race.c td5_fe_menu.c \
-                td5_frontend_button_cache.c td5_font.c td5_hud.c td5_sound.c td5_input.c \
-                td5_asset.c td5_assetsrc.c td5_customcar.c deps/cjson/cJSON.c td5_inflate.c td5_save.c \
-                td5_net.c td5_upnp.c td5_camera.c td5_vfx.c td5_fmv.c td5_benchmark.c \
-                td5_trace.c td5_trig_lut_data.c td5_profile.c td5_jobs.c td5_rcmd.c \
-                td5_platform_win32.c td5_msvc_rand.c main.c"
+          # Module list: single source of truth (shared with the .bat + Makefile).
+          SRCS=$(tr -d '\r' < srcs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
 
           for src in $SRCS; do
             name=$(basename "${src%.c}")
@@ -77,13 +74,13 @@ jobs:
           ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
           ar rcs build/libtd5re.a $ARCHIVE_OBJS
 
-          gcc -m32 -mwindows -static -o build/td5re.exe \
+          gcc -m32 -mwindows -static -s -o build/td5re.exe \
             build/main.o $RES_OBJ \
             -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
             -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
             -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
-            -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
-            -lmfplat -lmfreadwrite -lmfuuid \
+            -lshell32 -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
+            -lmfplat -lmfreadwrite -lmfuuid -lwinhttp \
             -Wl,--enable-stdcall-fixup \
             -Wl,--allow-multiple-definition
 

@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 2" },
+    { CL_ITEM,    "FIX: game sounds no longer vanish after playing" },
+    { CL_ITEM,    "  several races in one session (audio buffer pool" },
+    { CL_ITEM,    "  now recycles freed slots instead of filling up)" },
     { CL_ITEM,    "Car track position no longer warps sideways on rare" },
     { CL_ITEM,    "  degenerate road quads (now matches the original)" },
     { CL_BLANK,   "" },

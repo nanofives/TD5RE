@@ -38,6 +38,7 @@
 #include "td5_vectorui.h"   /* resolution-independent VectorUI primitives (SDF gauge, text) */
 #include "td5_font.h"       /* shared native menu TTF glyph cache (pause-menu text) */
 #include "td5_pending.h"    /* dev/QA pending-test list for the in-race overlay */
+#include "td5_config.h"     /* shared TD5RE_* env-knob accessors */
 
 #include <stdlib.h>
 #include <string.h>
@@ -62,8 +63,7 @@ static inline void hud_screen_center(float *cx, float *cy)
 static int hud_knob_on(const char *name)
 {
     /* default on (return 1) unless the var is explicitly "0" */
-    const char *e = getenv(name);
-    return (e && e[0] == '0') ? 0 : 1;
+    return td5_env_flag_on(name);
 }
 
 /* (1) Scale in-race race text + the whole pause overlay with the window size,
@@ -2340,8 +2340,7 @@ static float copchase_hud_text_scale(void) {
 static int td5_hud_copchase_vector_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char *e = getenv("TD5RE_COPCHASE_VECTOR");
-        cached = (e && e[0] == '0') ? 0 : 1;
+        cached = td5_env_flag_on("TD5RE_COPCHASE_VECTOR");
     }
     return cached;
 }
@@ -2353,8 +2352,7 @@ static int td5_hud_copchase_vector_enabled(void) {
 static int td5_copchase_multi_bar_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char *e = getenv("TD5RE_COPCHASE_MULTI_BAR");
-        cached = (e && e[0] == '0') ? 0 : 1;
+        cached = td5_env_flag_on("TD5RE_COPCHASE_MULTI_BAR");
     }
     return cached;
 }
@@ -2367,9 +2365,7 @@ static int td5_copchase_multi_bar_enabled(void) {
 static int td5_copchase_arrow_window_ticks(void) {
     static int cached = -2;
     if (cached == -2) {
-        const char *e = getenv("TD5RE_COPCHASE_ARROW_TICKS");
-        cached = (e && e[0]) ? atoi(e) : 45;
-        if (cached < 0) cached = 0;
+        cached = td5_env_int("TD5RE_COPCHASE_ARROW_TICKS", 45, 0, 1000000000);
     }
     return cached;
 }
@@ -4939,8 +4935,7 @@ void td5_hud_render_overlays(float dt)
         {
             static int s_mp_screen_scale = -1;
             if (s_mp_screen_scale < 0) {
-                const char *e = getenv("TD5RE_MP_HUD_SCREEN_SCALE");
-                s_mp_screen_scale = (!e || e[0] != '0') ? 1 : 0;
+                s_mp_screen_scale = td5_env_flag_on("TD5RE_MP_HUD_SCREEN_SCALE");
             }
             if (s_view_count > 1 && s_mp_screen_scale) {
                 static TD5_HudViewLayout s_status_layout;
@@ -7062,9 +7057,9 @@ void td5_hud_init_minimap_layout(void)
     TD5_LOG_I(LOG_TAG, "minimap_init: scanback tex_page=%d u0=%.1f v0=%.1f u1=%.1f v1=%.1f",
               scanback->texture_page, bg_u0, bg_v0, bg_u1, bg_v1);
 
-    /* Build 4x4 grid of background tiles.
-     * td5_render_set_projection_center is a stub, so we bake the minimap
-     * screen center into each tile quad directly (absolute screen coords). */
+    /* Build 4x4 grid of background tiles. The minimap draws in absolute screen
+     * coords (it does not use the render projection center), so we bake the
+     * minimap screen center into each tile quad directly. */
     float tile_w = s_minimap_tile_width * 0.25f;
     float tile_h = s_minimap_tile_height * 0.25f;
     float mm_cx = s_minimap_width * 0.5f + s_minimap_x;

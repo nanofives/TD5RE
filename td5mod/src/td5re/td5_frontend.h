@@ -86,4 +86,16 @@ int  td5_frontend_get_player_laneassist(int player);
 void td5_frontend_render_ui_rects(void);
 void td5_frontend_flush_sprite_blits(void);
 
+#ifndef TD5RE_RELEASE
+/* --- Self-test director queries (td5_selftest.c; dev builds only) --- */
+/* 1 once the current screen's slide-in animation has completed. */
+int  td5_frontend_selftest_settled(void);
+/* Number of active+enabled (navigable) buttons on the current screen. */
+int  td5_frontend_selftest_button_count(void);
+/* Result of the last nav-reachability selftest run (TD5RE_NAV_SELFTEST):
+ * which screen it ran on, how many navigable buttons it reached vs total.
+ * *screen = -1 if it has not run yet. Any out-param may be NULL. */
+void td5_frontend_selftest_nav_result(int *screen, int *reached, int *navigable);
+#endif
+
 #endif /* TD5_FRONTEND_H */

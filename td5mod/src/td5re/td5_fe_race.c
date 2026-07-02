@@ -27,6 +27,7 @@
 #include "td5_snk_strings.h"
 #include "td5_vectorui.h"
 #include "td5_font.h"
+#include "td5_config.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -387,10 +388,9 @@ static int32_t s_pr_snap_avg      = 0;
 static int replay_quit_flow_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_REPLAY_QUIT_FLOW");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "post-race replay->quit flow (#2a) %s (TD5RE_REPLAY_QUIT_FLOW=%s)",
-                  v ? "ENABLED" : "disabled", e ? e : "default");
+        v = td5_env_flag_on("TD5RE_REPLAY_QUIT_FLOW");
+        TD5_LOG_I(LOG_TAG, "post-race replay->quit flow (#2a) %s (TD5RE_REPLAY_QUIT_FLOW)",
+                  v ? "ENABLED" : "disabled");
     }
     return v;
 }
@@ -709,10 +709,9 @@ static int frontend_pick_random_track(int track_max) {
 static int frontend_random_button_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_RANDOM_BUTTON");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "RANDOMIZE button (#14) %s (TD5RE_RANDOM_BUTTON=%s)",
-                  v ? "ENABLED" : "disabled", e ? e : "default");
+        v = td5_env_flag_on("TD5RE_RANDOM_BUTTON");
+        TD5_LOG_I(LOG_TAG, "RANDOMIZE button (#14) %s (TD5RE_RANDOM_BUTTON)",
+                  v ? "ENABLED" : "disabled");
     }
     return v;
 }
@@ -726,10 +725,9 @@ static int frontend_random_button_on(void) {
 static int frontend_random_icon_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_RANDOM_ICON");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "RANDOMIZE control form: %s (TD5RE_RANDOM_ICON=%s)",
-                  v ? "small ICON" : "full button", e ? e : "default");
+        v = td5_env_flag_on("TD5RE_RANDOM_ICON");
+        TD5_LOG_I(LOG_TAG, "RANDOMIZE control form: %s (TD5RE_RANDOM_ICON)",
+                  v ? "small ICON" : "full button");
     }
     return v;
 }
@@ -742,12 +740,10 @@ static int frontend_random_icon_on(void) {
 static int td6_no_placeholder_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_TD6_NO_PLACEHOLDER_SCORES");
-        v = (e && e[0] == '0') ? 0 : 1;
+        v = td5_env_flag_on("TD5RE_TD6_NO_PLACEHOLDER_SCORES");
         TD5_LOG_I(LOG_TAG, "TD6 high-score placeholder suppression (#2b) %s "
-                  "(TD5RE_TD6_NO_PLACEHOLDER_SCORES=%s)",
-                  v ? "ENABLED (real records only)" : "disabled (legacy clamp)",
-                  e ? e : "default");
+                  "(TD5RE_TD6_NO_PLACEHOLDER_SCORES)",
+                  v ? "ENABLED (real records only)" : "disabled (legacy clamp)");
     }
     return v;
 }
@@ -1139,8 +1135,7 @@ void Screen_QuickRaceMenu(void) {
            * (the canonical one-time log lives in frontend_qr_span_field_on). */
           static int s_qr_span_btn_on = -1;
           if (s_qr_span_btn_on < 0) {
-              const char *e = getenv("TD5RE_DEV_SPAN_FIELD");
-              s_qr_span_btn_on = (e && e[0] == '0') ? 0 : 1;
+              s_qr_span_btn_on = td5_env_flag_on("TD5RE_DEV_SPAN_FIELD");
           }
           if (bs >= 0 && !s_qr_span_btn_on) { s_buttons[bs].hidden = 1; s_buttons[bs].disabled = 1; }
 #endif
@@ -2326,10 +2321,9 @@ static char s_mp_prof_held_saved[TD5_MAX_HUMAN_PLAYERS][16];
 static int mp_profile_persist_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_MP_PROFILE_PERSIST");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "MP profile persist across car-select back %s (TD5RE_MP_PROFILE_PERSIST=%s)",
-                  v ? "ENABLED" : "disabled", e ? e : "default");
+        v = td5_env_flag_on("TD5RE_MP_PROFILE_PERSIST");
+        TD5_LOG_I(LOG_TAG, "MP profile persist across car-select back %s (TD5RE_MP_PROFILE_PERSIST)",
+                  v ? "ENABLED" : "disabled");
     }
     return v;
 }
@@ -3397,8 +3391,7 @@ void Screen_MpPosition(void) {
 static int mp_game_modes_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char *e = getenv("TD5RE_MP_GAME_MODES");
-        cached = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        cached = td5_env_flag_on("TD5RE_MP_GAME_MODES");   /* default ON */
     }
     return cached;
 }
@@ -3554,8 +3547,7 @@ static void mp_mode_config_apply_defaults(int mode) {
         c->cop_is_ai          = 0;
         /* [RANDOM COP 2026-06-25] Manual role pick by default; a dev can force the
          * mode on with TD5RE_COPCHASE_RANDOM=1 so --StartScreen jumps land in it. */
-        { const char *e = getenv("TD5RE_COPCHASE_RANDOM");
-          c->cop_random = (e && e[0] == '1') ? 1 : 0; }
+        c->cop_random = td5_env_flag_off("TD5RE_COPCHASE_RANDOM");
         c->cop_ai_difficulty  = 1;
         c->cop_win_condition  = TD5_COP_WIN_BUST_ALL;
         c->suspect_head_start = 12;
@@ -3566,20 +3558,9 @@ static void mp_mode_config_apply_defaults(int mode) {
         /* [TRAFFIC BATTLE 2026-06-28] Seed the spawn cadence + power-up density
          * from the knobs (the in-race setup re-reads battle_spawn_period if it is
          * still 0). 30 ticks @30Hz = a fresh traffic car ~every second. */
-        {
-            const char *sp = getenv("TD5RE_BATTLE_SPAWN_PERIOD");
-            int p = (sp && sp[0]) ? atoi(sp) : 30;
-            if (p < 5)   p = 5;
-            if (p > 240) p = 240;
-            c->battle_spawn_period = p;
-        }
-        {
-            const char *de = getenv("TD5RE_ARCADE_DENSITY");
-            int d = (de && de[0]) ? atoi(de) : 2;   /* default DENSE for a battle */
-            if (d < 0) d = 0;
-            if (d > 3) d = 3;
-            c->battle_powerup_density = d;
-        }
+        c->battle_spawn_period = td5_env_int("TD5RE_BATTLE_SPAWN_PERIOD", 30, 5, 240);
+        /* default DENSE for a battle */
+        c->battle_powerup_density = td5_env_int("TD5RE_ARCADE_DENSITY", 2, 0, 3);
         c->battle_win_condition = TD5_BATTLE_WIN_MOST_WRECKS;   /* default */
         break;
     case TD5_MP_MODE_DRAG_RACE:
@@ -4829,19 +4810,8 @@ static float mp_pos_pulse(uint32_t now, float lo, float hi) {
  * PUBLIC title-font API + the public td5_vui_quad textured-glyph primitive; the
  * only cosmetic difference is no faux-italic shear (td5_vui_quad is axis-aligned).
  * Left-aligned with the first letter at left_x, cap tops landing near top_y. */
-/* [R4 2026-06-19] Shared MP simultaneous-pane layout bands — MUST equal the
- * FE_MP_TOP_BAND/FE_MP_BOTTOM_BAND literals in td5_frontend.c. Used by the
- * PROFILE-chip overlay (frontend_mp_setup_profile_render) so the chip stays glued
- * to the pushed-down setup panes, and by the CHOOSE YOUR SCREEN grid below. */
-#define FE_MP_TOP_BAND     85.0f
-/* [layout 2026-06-19] MUST equal td5_frontend.c — bottom band shrunk so cards reach
- * the bottom edge; horizontal band clears the art's left black bar and reaches the
- * right edge. The PROFILE-chip overlay below uses these so it stays glued to the
- * widened setup panes. */
-#define FE_MP_BOTTOM_BAND  14.0f
-#define FE_MP_LEFT_MARGIN  112.0f
-#define FE_MP_RIGHT_EDGE   628.0f
-#define FE_MP_USABLE_W     (FE_MP_RIGHT_EDGE - FE_MP_LEFT_MARGIN)
+/* FE_MP_* layout literals: single copy now lives in td5_frontend_internal.h
+ * (was a kept-in-sync duplicate of td5_frontend.c's block). */
 #define FE_RACE_TITLE_CAP_PX 24.0f    /* design cap height (px at 480-tall reference) */
 #define FE_RACE_TITLE_LEFT_X 126.0f   /* design x where the first letter starts (= td5_frontend FE_TITLE_LEFT_X) */
 #define FE_RACE_TITLE_TRACK  (-1.5f)  /* extra letter tracking (design px; negative = tighter) */
@@ -5408,10 +5378,9 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
 static int frontend_carsel_hold_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        const char *e = getenv("TD5RE_CARSEL_HOLD");
-        enabled = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "car-select hold-to-cycle (#2/#7) %s (TD5RE_CARSEL_HOLD=%s)",
-                  enabled ? "ENABLED" : "disabled", e ? e : "default");
+        enabled = td5_env_flag_on("TD5RE_CARSEL_HOLD");
+        TD5_LOG_I(LOG_TAG, "car-select hold-to-cycle (#2/#7) %s (TD5RE_CARSEL_HOLD)",
+                  enabled ? "ENABLED" : "disabled");
     }
     return enabled;
 }
@@ -7245,10 +7214,9 @@ void Screen_PostRaceHighScore(void) {
 static int results_fix_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_RESULTS_FIX");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "results-screen fix %s (TD5RE_RESULTS_FIX=%s)",
-                  v ? "ENABLED" : "disabled", e ? e : "default");
+        v = td5_env_flag_on("TD5RE_RESULTS_FIX");
+        TD5_LOG_I(LOG_TAG, "results-screen fix %s (TD5RE_RESULTS_FIX)",
+                  v ? "ENABLED" : "disabled");
     }
     return v;
 }
@@ -7265,10 +7233,9 @@ static int results_fix_on(void) {
 static int results_anim_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_RESULTS_ANIM");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "results-screen entry slide-in (#1) %s (TD5RE_RESULTS_ANIM=%s)",
-                  v ? "ENABLED" : "disabled", e ? e : "default");
+        v = td5_env_flag_on("TD5RE_RESULTS_ANIM");
+        TD5_LOG_I(LOG_TAG, "results-screen entry slide-in (#1) %s (TD5RE_RESULTS_ANIM)",
+                  v ? "ENABLED" : "disabled");
     }
     return v;
 }
@@ -7297,10 +7264,9 @@ static int results_anim_on(void) {
 int frontend_race_summary_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_RACE_SUMMARY");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "race-end all-players summary %s (TD5RE_RACE_SUMMARY=%s)",
-                  v ? "ENABLED" : "disabled", e ? e : "default");
+        v = td5_env_flag_on("TD5RE_RACE_SUMMARY");
+        TD5_LOG_I(LOG_TAG, "race-end all-players summary %s (TD5RE_RACE_SUMMARY)",
+                  v ? "ENABLED" : "disabled");
     }
     return v;
 }
@@ -7321,10 +7287,9 @@ static int frontend_summary_speed_disp(int raw, int kph) {
 static int frontend_summary_carname_pretty(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_SUMMARY_CARNAME");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "race-results AI car names (#17) %s (TD5RE_SUMMARY_CARNAME=%s)",
-                  v ? "PRETTY display name" : "legacy raw", e ? e : "default");
+        v = td5_env_flag_on("TD5RE_SUMMARY_CARNAME");
+        TD5_LOG_I(LOG_TAG, "race-results AI car names (#17) %s (TD5RE_SUMMARY_CARNAME)",
+                  v ? "PRETTY display name" : "legacy raw");
     }
     return v;
 }

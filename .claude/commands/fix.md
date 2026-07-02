@@ -856,7 +856,17 @@ There are two kinds of validation, and they're handled differently:
 
 Because every `/fix` session runs in its own worktree, your INI tweaks and log output are guaranteed not to collide with other sessions.
 
-### When the fix needs the user to test (ask first)
+**Self-test suite (new self-verifiable gate).** Dev builds ship an in-session
+automated suite: `<worktree>\td5re.exe --SelfTest=1` (smoke, ~40 s: 3 screens +
+5 races incl. repeats/circuit/reverse with degradation monitoring) or
+`--SelfTest=1 --SelfTestSuite=1` (full matrix incl. TD6/drag/arcade/spectate +
+24-screen frontend walk, ~5-10 min). It self-drives, self-terminates, writes
+`log/selftest_report.{csv,md}` in the worktree, and exits nonzero on failure —
+run the smoke tier after the build for any fix touching game/race/frontend
+code, BEFORE the single-track scenario launch. It does NOT replace the
+scenario-specific INI launch below (the suite exercises breadth, not your
+fix's focus), nor the multi-track Frida sweep (port-vs-original parity).
+PID rules apply unchanged — the suite exe is still this session's td5re.exe.
 
 If confirming the fix genuinely requires the user to drive/play/use-their-controllers, do this **instead of** silently moving on:
 
