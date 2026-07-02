@@ -29,6 +29,7 @@
 #include "td5_save.h"   /* td5_save_get_catchup_assist — CATCHUP level (S06) */
 #include "td5_input.h"  /* g_td5_steering_bias_max_swing — CATCHUP steering swing (S06) */
 #include "td5re.h"
+#include "td5_config.h"  /* td5_env_int/float/flag_* — TD5RE_* knob helpers */
 #include <string.h>
 #include <math.h>
 #include <limits.h>
@@ -460,10 +461,7 @@ static void cop_end_chase(int slot) {
 static int cop_chase_max_gap(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_CHASE_GAP");
-        v = (e && e[0]) ? atoi(e) : 110;
-        if (v < 20)  v = 20;
-        if (v > 400) v = 400;
+        v = td5_env_int("TD5RE_COP_CHASE_GAP", 110, 20, 400);
     }
     return v;
 }
@@ -474,8 +472,7 @@ static int cop_chase_max_gap(void) {
 static int cop_stall_end_enabled(void) {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_COP_STALL_END");
-        s = (!e || e[0] != '0') ? 1 : 0;
+        s = td5_env_flag_on("TD5RE_COP_STALL_END");
     }
     return s;
 }
@@ -486,11 +483,7 @@ static int cop_stall_end_enabled(void) {
 static int cop_overtake_hold_ticks(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_OVERTAKE_HOLD");
-        long t = (e && e[0]) ? strtol(e, NULL, 10) : COP_OVERTAKE_HOLD_TICKS;
-        if (t < 0)   t = 0;
-        if (t > 300) t = 300;
-        v = (int)t;
+        v = td5_env_int("TD5RE_COP_OVERTAKE_HOLD", COP_OVERTAKE_HOLD_TICKS, 0, 300);
     }
     return v;
 }
@@ -505,11 +498,7 @@ static int cop_overtake_hold_ticks(void) {
 static int cop_chase_spinup_ticks(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_CHASE_SPINUP");
-        long t = (e && e[0]) ? strtol(e, NULL, 10) : COP_CHASE_SPINUP_TICKS;
-        if (t < 0)   t = 0;
-        if (t > 300) t = 300;
-        v = (int)t;
+        v = td5_env_int("TD5RE_COP_CHASE_SPINUP", COP_CHASE_SPINUP_TICKS, 0, 300);
     }
     return v;
 }
@@ -518,7 +507,7 @@ static int cop_chase_spinup_ticks(void) {
  * (cop reverts to the road-safe pursuit). Default ON. */
 static int cop_ram_enabled(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("TD5RE_COP_RAM"); v = (e && e[0] == '0') ? 0 : 1; }
+    if (v < 0) { v = td5_env_flag_on("TD5RE_COP_RAM"); }
     return v;
 }
 
@@ -528,8 +517,7 @@ static int cop_ram_enabled(void) {
  * cooldown lapses). */
 static int cop_no_rechase_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_COP_NO_RECHASE");
-                 s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_COP_NO_RECHASE"); }
     return s;
 }
 
@@ -541,11 +529,7 @@ static int cop_no_rechase_enabled(void) {
 static int cop_rebust_cooldown(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_REBUST_COOLDOWN");
-        long t = (e && e[0]) ? strtol(e, NULL, 10) : COP_REBUST_COOLDOWN;
-        if (t < 0)     t = 0;
-        if (t > 32000) t = 32000;
-        v = (int)t;
+        v = td5_env_int("TD5RE_COP_REBUST_COOLDOWN", COP_REBUST_COOLDOWN, 0, 32000);
     }
     return v;
 }
@@ -923,8 +907,7 @@ int td5_ai_actor_is_cop(int slot) {
 static int wreck_permanent_enabled(void) {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_WRECK_PERMANENT");
-        s = (!e || e[0] != '0') ? 1 : 0;
+        s = td5_env_flag_on("TD5RE_WRECK_PERMANENT");
     }
     return s;
 }
@@ -2786,7 +2769,7 @@ void td5_ai_init_race_actor_runtime(void) {
  * (TD5RE_TD6_AI_BAND=0 disables; default on). */
 static int td6_ai_band_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_AI_BAND"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TD6_AI_BAND"); }
     return s;
 }
 
@@ -2800,7 +2783,7 @@ static int td6_ai_band_enabled(void) {
  * (back to the faithful banded cascade). */
 static int td6_prop_steer_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_AI_PROP"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TD6_AI_PROP"); }
     return s;
 }
 
@@ -2810,10 +2793,7 @@ static int td6_prop_steer_enabled(void) {
 static int32_t td6_steer_gain(void) {
     static int g = -1;
     if (g < 0) {
-        const char *e = getenv("TD5RE_TD6_AI_GAIN");
-        g = (e && e[0]) ? atoi(e) : 0x80;
-        if (g < 0x10)  g = 0x10;
-        if (g > 0x100) g = 0x100;
+        g = td5_env_int("TD5RE_TD6_AI_GAIN", 0x80, 0x10, 0x100);
     }
     return g;
 }
@@ -2821,10 +2801,7 @@ static int32_t td6_steer_gain(void) {
 static int32_t td5_ai_td6_steer_weight(int32_t w) {
     static int s_pct = -1;
     if (s_pct < 0) {
-        const char *e = getenv("TD5RE_TD6_AI_STEER");
-        s_pct = (e && e[0]) ? atoi(e) : 100;   /* default OFF: weight-damping alone didn't help */
-        if (s_pct < 5)   s_pct = 5;
-        if (s_pct > 100) s_pct = 100;
+        s_pct = td5_env_int("TD5RE_TD6_AI_STEER", 100, 5, 100);   /* default OFF: weight-damping alone didn't help */
     }
     if (g_active_td6_level <= 0 || s_pct >= 100) return w;
     return (int32_t)(((int64_t)w * (int64_t)s_pct) / 100);
@@ -4904,8 +4881,7 @@ static void smart_sense(int slot, int span_raw, int span_count,
 static int td5_ai_branch_random_enabled(void) {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_AI_BRANCH_RANDOM");
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_AI_BRANCH_RANDOM");
         TD5_LOG_I(LOG_TAG, "ai_branch_random knob: TD5RE_AI_BRANCH_RANDOM=%d "
                   "(AI pre-picks forks at random %s)", s, s ? "ON" : "OFF");
     }
@@ -7591,8 +7567,7 @@ static void traffic_smart_antifreeze(int slot, char *actor, int32_t *rs) {
 static int traffic_escape_enabled(void) {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TRAFFIC_ESCAPE");
-        s = (!e || e[0] != '0') ? 1 : 0;
+        s = td5_env_flag_on("TD5RE_TRAFFIC_ESCAPE");
     }
     return s;
 }
@@ -7790,7 +7765,7 @@ static int traffic_lane_is_clear(int self_slot, int self_span,
 /* Default ON; TD5RE_AI_UNSTICK=0 disables (restores the faithful no-escape AI). */
 static int racer_unstick_enabled(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("TD5RE_AI_UNSTICK"); v = (e && e[0] == '0') ? 0 : 1; }
+    if (v < 0) { v = td5_env_flag_on("TD5RE_AI_UNSTICK"); }
     return v;
 }
 
@@ -8209,8 +8184,7 @@ static int trf_per_viewport_knob(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TT_PER_VIEWPORT_TRAFFIC");
-        s = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s = td5_env_flag_on("TD5RE_TT_PER_VIEWPORT_TRAFFIC");   /* default ON */
     }
     return s;
 }
@@ -8428,8 +8402,7 @@ static int trf_dyn_density_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TRAFFIC_DENSITY");
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_TRAFFIC_DENSITY");
         TD5_LOG_I(LOG_TAG, "traffic_density knob: TD5RE_TRAFFIC_DENSITY=%d "
                   "(proximity recycle + retune + VERY HIGH %s)",
                   s, s ? "ON" : "OFF");
@@ -8667,11 +8640,10 @@ static int trf_dyn_branches_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TRAFFIC_BRANCHES");
         /* Default ON: branches are connected drivable roads with route tables, so
          * traffic spawns on and drives them like the main ring. =0 forces all
          * traffic onto the main ring only. */
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_TRAFFIC_BRANCHES");
         TD5_LOG_I(LOG_TAG, "traffic_branches knob: TD5RE_TRAFFIC_BRANCHES=%d "
                   "(spawn on branch corridors %s)", s, s ? "ON" : "OFF");
     }
@@ -8984,8 +8956,7 @@ static void trf_dyn_place(int slot, int span, int lane, int polarity)
  * Default ON; TD5RE_BRANCH_TRAFFIC_FIX=0 restores the old behaviour for A/B. */
 static int branch_traffic_fix_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_BRANCH_TRAFFIC_FIX");
-                 s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_BRANCH_TRAFFIC_FIX"); }
     return s;
 }
 
@@ -10580,7 +10551,7 @@ extern void td5_physics_reset_actor_state(TD5_Actor *actor);
  * runs, where slot 0 is AI). Never enabled in normal play. */
 static int cop_chase_ai_debug(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_COP_CHASE_AI"); s = (e && e[0] == '1') ? 1 : 0; }
+    if (s < 0) { s = td5_env_flag_off("TD5RE_COP_CHASE_AI"); }
     return s;
 }
 void td5_ai_update_special_encounter(void) {
@@ -10983,8 +10954,7 @@ static int ai_finish_stop_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_AI_FINISH_STOP");
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_AI_FINISH_STOP");
         TD5_LOG_I(LOG_TAG, "ai_finish_stop knob: TD5RE_AI_FINISH_STOP=%d "
                   "(stop AI on circuit race finish %s)", s, s ? "ON" : "OFF");
     }
@@ -11158,7 +11128,7 @@ static int td6_traffic_road_clamp_enabled(void) {
     /* Default OFF: the per-tick lane nudge oscillated traffic near forks and
      * tripped the recovery brake ("most don't move"). Master's lane chooser
      * already avoids slow lanes; =1 re-enables the nudge. */
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_TRAFFIC_ROAD"); s = (e && e[0] == '1') ? 1 : 0; }
+    if (s < 0) { s = td5_env_flag_off("TD5RE_TD6_TRAFFIC_ROAD"); }
     return s;
 }
 
@@ -11190,7 +11160,7 @@ static void traffic_drive_normal(int slot) {
  * fast. */
 static int cop_racer_drive_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_COP_RACER_DRIVE"); s = (e && e[0] == '1') ? 1 : 0; }
+    if (s < 0) { s = td5_env_flag_off("TD5RE_COP_RACER_DRIVE"); }
     return s;
 }
 
@@ -11270,10 +11240,7 @@ static void cop_ram_steer(int slot, int32_t dev) {
 static int cop_chase_accel_max_pct(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_CHASE_ACCEL");
-        v = (e && e[0]) ? atoi(e) : 280;
-        if (v < 100) v = 100;
-        if (v > 500) v = 500;
+        v = td5_env_int("TD5RE_COP_CHASE_ACCEL", 280, 100, 500);
         TD5_LOG_I(LOG_TAG, "cop_chase_accel: max boost = %d%% (TD5RE_COP_CHASE_ACCEL)", v);
     }
     return v;
@@ -11284,8 +11251,7 @@ static int cop_chase_accel_max_pct(void) {
  * bends — the old crash-prone behaviour). */
 static int cop_corner_ease_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_COP_CORNER_EASE");
-                 s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_COP_CORNER_EASE"); }
     return s;
 }
 

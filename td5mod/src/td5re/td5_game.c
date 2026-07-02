@@ -38,6 +38,7 @@
 #include "td5_platform.h"
 #include "td5_net.h"
 #include "td5_save.h"
+#include "td5_config.h" /* shared TD5RE_* env-knob accessors */
 
 #include "td5_vfx.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] per-frame headlight registry */
@@ -440,7 +441,7 @@ static uint8_t s_td6_cp_index[TD5_MAX_RACER_SLOTS];
  * original values — these are tunable invented defaults (packed hi-byte = seconds). */
 static int td6_cp_timer_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_CP_TIMER"); s = (!e || e[0] != '0') ? 1 : 0; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TD6_CP_TIMER"); }
     return s;
 }
 static int td6_cp_time_secs(void) {
@@ -1949,10 +1950,7 @@ int td5_game_init_race_session(void) {
              * density here (the MP vote path seeds it in
              * mp_mode_config_apply_defaults). Default DENSE; TD5RE_ARCADE_DENSITY
              * overrides at the spacing site anyway. */
-            const char *de = getenv("TD5RE_ARCADE_DENSITY");
-            int d = (de && de[0]) ? atoi(de) : 2;
-            if (d < 0) d = 0;
-            if (d > 3) d = 3;
+            int d = td5_env_int("TD5RE_ARCADE_DENSITY", 2, 0, 3);
             g_td5.mp_mode_config.battle_powerup_density = d;
             /* SP win-condition override (no MP config screen on this path):
              * TD5RE_BATTLE_WIN=1 -> CHECKPOINTS deadline chaser, 0 -> MOST WRECKS. */
@@ -1971,10 +1969,7 @@ int td5_game_init_race_session(void) {
      * the power-up boxes only appear in arcade dynamics. */
     if (td5_game_battle_mode_active()) {
         if (g_td5.mp_mode_config.battle_spawn_period <= 0) {
-            const char *sp = getenv("TD5RE_BATTLE_SPAWN_PERIOD");
-            int p = (sp && sp[0]) ? atoi(sp) : 30;   /* ticks @30Hz between spawns */
-            if (p < 5)   p = 5;
-            if (p > 240) p = 240;
+            int p = td5_env_int("TD5RE_BATTLE_SPAWN_PERIOD", 30, 5, 240);   /* ticks @30Hz between spawns */
             g_td5.mp_mode_config.battle_spawn_period = p;
         }
         g_td5.wanted_mode_enabled       = 0;     /* not cop chase            */
@@ -1995,10 +1990,7 @@ int td5_game_init_race_session(void) {
         g_td5.ini.traffic_dynamic       = 1;     /* dynamic spawner ON      */
         g_td5.ini.traffic_dyn_period    = g_td5.mp_mode_config.battle_spawn_period;
         {
-            const char *tv = getenv("TD5RE_BATTLE_TRAFFIC_VOLUME");
-            int v = (tv && tv[0]) ? atoi(tv) : 4;   /* 4 = VERY HIGH (full stream) */
-            if (v < 1) v = 1;
-            if (v > 4) v = 4;
+            int v = td5_env_int("TD5RE_BATTLE_TRAFFIC_VOLUME", 4, 1, 4);   /* 4 = VERY HIGH (full stream) */
             g_td5.traffic_volume = v;
         }
         td5_physics_set_collisions(1);           /* ramming needs collisions ON */
@@ -2007,10 +1999,7 @@ int td5_game_init_race_session(void) {
          * on an empty start line. Respects an explicit dev StartSpanOffset (only
          * applied when it is 0). Consumed per-slot later in this function. */
         if (g_td5.ini.start_span_offset == 0) {
-            const char *ss = getenv("TD5RE_BATTLE_START_SPAN");
-            int s0 = (ss && ss[0]) ? atoi(ss) : 150;
-            if (s0 < 0)     s0 = 0;
-            if (s0 > 30000) s0 = 30000;
+            int s0 = td5_env_int("TD5RE_BATTLE_START_SPAN", 150, 0, 30000);
             g_td5.ini.start_span_offset = s0;
         }
         /* [TRAFFIC BATTLE checkpoints] CHECKPOINTS win condition arms the
@@ -2410,8 +2399,7 @@ int td5_game_init_race_session(void) {
         static int s_demo_fix_init = 0;
         static int s_demo_fix_enabled = 1;
         if (!s_demo_fix_init) {
-            const char *e = getenv("TD5RE_DEMO_FIX");
-            s_demo_fix_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_demo_fix_enabled = td5_env_flag_on("TD5RE_DEMO_FIX");  /* default ON */
             s_demo_fix_init = 1;
             TD5_LOG_I(LOG_TAG, "Demo AI-drive (slot 0): %s",
                       s_demo_fix_enabled ? "enabled" : "disabled (slot 0 stays human)");
@@ -3298,8 +3286,7 @@ int td5_game_init_race_session(void) {
             static int s_replay_off_init = 0;
             static int s_replay_off_enabled = 1;
             if (!s_replay_off_init) {
-                const char *e = getenv("TD5RE_REPLAY_OFFSET_FIX");
-                s_replay_off_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+                s_replay_off_enabled = td5_env_flag_on("TD5RE_REPLAY_OFFSET_FIX");  /* default ON */
                 s_replay_off_init = 1;
                 TD5_LOG_I(LOG_TAG, "Replay StartSpanOffset restore: %s",
                           s_replay_off_enabled ? "enabled" : "disabled (live offset)");
@@ -3843,8 +3830,7 @@ int td5_game_init_race_session(void) {
         static int s_replay_fix_init = 0;
         static int s_replay_fix_enabled = 1;
         if (!s_replay_fix_init) {
-            const char *e = getenv("TD5RE_REPLAY_FIX");
-            s_replay_fix_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_replay_fix_enabled = td5_env_flag_on("TD5RE_REPLAY_FIX");  /* default ON */
             s_replay_fix_init = 1;
             TD5_LOG_I(LOG_TAG, "Replay correctness guard: %s",
                       s_replay_fix_enabled ? "enabled" : "disabled");
@@ -4814,7 +4800,6 @@ static TD5_Actor *td5_game_local_player_actor(void)
 static int net_render_decouple_enabled(void) {
     static int init = 0, on = 1;
     if (!init) {
-        const char *e = getenv("TD5RE_NET_RENDER_DECOUPLE");
         /* [2026-06-19] Render-decouple via NON-BLOCKING per-tick lockstep
          * (td5_game_net_try_sync + td5_net_*_frame_nb): render free-runs at the
          * monitor rate and interpolates while the 30 Hz sim advances one tick per
@@ -4825,7 +4810,7 @@ static int net_render_decouple_enabled(void) {
          * blocking per-frame exchange (caps the client at the host's refresh) if a
          * desync ever turns up -- the two paths use different round cadences, so
          * both machines must run the same setting. */
-        on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        on = td5_env_flag_on("TD5RE_NET_RENDER_DECOUPLE");   /* default ON */
         init = 1;
         TD5_LOG_I(LOG_TAG, "Netplay render decouple: %s",
                   on ? "ON (exchange per sim tick, render free-runs)"
@@ -5389,8 +5374,7 @@ int td5_game_run_race_frame(void) {
         static int s_replay_esc_init = 0;
         static int s_replay_esc_enabled = 1;
         if (!s_replay_esc_init) {
-            const char *e = getenv("TD5RE_REPLAY_EXIT");
-            s_replay_esc_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+            s_replay_esc_enabled = td5_env_flag_on("TD5RE_REPLAY_EXIT");  /* default ON */
             s_replay_esc_init = 1;
             TD5_LOG_I(LOG_TAG, "Replay per-frame ESC-exit: %s",
                       s_replay_esc_enabled ? "enabled" : "disabled (in-loop ESC only)");
@@ -8485,11 +8469,7 @@ int td5_game_drag_field_size(void)
     if (dyn && dyn[0] == '0')
         return 2;                          /* faithful 2-car field */
 
-    int maxlanes = 8;                      /* ceiling: int8 sub_lane + int16 vtx headroom */
-    const char *mx = getenv("TD5RE_DRAG_LANE_MAX");
-    if (mx && mx[0]) maxlanes = atoi(mx);
-    if (maxlanes < 2) maxlanes = 2;
-    if (maxlanes > 8) maxlanes = 8;
+    int maxlanes = td5_env_int("TD5RE_DRAG_LANE_MAX", 8, 2, 8);  /* ceiling: int8 sub_lane + int16 vtx headroom */
 
     int n;
     const char *force = getenv("TD5RE_DRAG_LANES");
@@ -9707,8 +9687,7 @@ void td5_game_mp_cup_end(void) { s_mpcup_active = 0; }
 int td5_game_mp_traffic_fair(void) {
     static int knob = -1;
     if (knob < 0) {
-        const char *e = getenv("TD5RE_MP_TRAFFIC_FAIR");
-        knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        knob = td5_env_flag_on("TD5RE_MP_TRAFFIC_FAIR");   /* default ON */
     }
     return knob && g_td5.split_screen_mode > 0 && g_td5.num_human_players >= 2;
 }
@@ -9741,17 +9720,11 @@ int td5_game_drag_mp_active(void) {
  * wrecked the most (results sort by WRECKS).
  * ======================================================================== */
 static int chase_lead_spans(void) {
-    const char *e = getenv("TD5RE_BATTLE_CHASE_LEAD");
-    int v = (e && e[0]) ? atoi(e) : 120;   /* spans the deadline starts behind */
-    if (v < 0)     v = 0;
-    if (v > 100000) v = 100000;
+    int v = td5_env_int("TD5RE_BATTLE_CHASE_LEAD", 120, 0, 100000);   /* spans the deadline starts behind */
     return v;
 }
 static int32_t chase_pace_q8(void) {
-    const char *e = getenv("TD5RE_BATTLE_CHASE_SPS");
-    int sps = (e && e[0]) ? atoi(e) : 12;  /* deadline speed, spans per second */
-    if (sps < 1)   sps = 1;
-    if (sps > 200) sps = 200;
+    int sps = td5_env_int("TD5RE_BATTLE_CHASE_SPS", 12, 1, 200);  /* deadline speed, spans per second */
     return (int32_t)(((int64_t)sps * 256) / 30);   /* 24.8 spans per 30Hz tick */
 }
 /* Cumulative forward progress (spans) of a racer slot — laps folded in so it is

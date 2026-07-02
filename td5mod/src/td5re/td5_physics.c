@@ -49,6 +49,7 @@
 #include "td5_platform.h"
 #include "td5_trace.h"    /* inner-tick physics_trace stages */
 #include "td5_carparam.h" /* shared carparam field map + heaviness math (weight mechanics) */
+#include "td5_config.h"   /* shared TD5RE_* env-knob accessors (td5_env_int/float/flag_*) */
 /* V2V trace headers are included unconditionally: their obb_corner_test /
  * collision_detect_full call sites below are ungated, so the snapshot types
  * must always be declared. The emitters self-stub to no-ops under
@@ -217,10 +218,7 @@ static inline int32_t phys_snow_grip_boost(int32_t grip)
 {
     static int s_pct = -1;
     if (s_pct < 0) {
-        const char *e = getenv("TD5RE_SNOW_GRIP");
-        s_pct = (e && e[0]) ? atoi(e) : 65;   /* % of the grip deficit to recover */
-        if (s_pct < 0)   s_pct = 0;
-        if (s_pct > 100) s_pct = 100;
+        s_pct = td5_env_int("TD5RE_SNOW_GRIP", 65, 0, 100);   /* % of the grip deficit to recover */
         TD5_LOG_I(LOG_TAG, "phys_snow_grip_boost: TD5RE_SNOW_GRIP=%d%% "
                   "(lift slippery surfaces toward full grip on SNOW weather)", s_pct);
     }
@@ -253,8 +251,7 @@ static inline int32_t phys_td6_grass_slide(int32_t grip, int surface)
 {
     static int s_en = -1;
     if (s_en < 0) {
-        const char *e = getenv("TD5RE_TD6_GRASS_SLIDE");
-        s_en = (e && e[0] == '0') ? 0 : 1;
+        s_en = td5_env_flag_on("TD5RE_TD6_GRASS_SLIDE");
     }
     if (!s_en || !td5_track_td6_surface_grid_loaded()) return grip;
     int q8 = td5_track_td6_surface_grip_q8(surface & 0x1F);   /* 0x100 = full grip */
@@ -287,8 +284,7 @@ static int32_t g_xz_freeze = 0;             /* DAT_00483030: 1=freeze XZ during 
 static int td5_copchase_arrest_freeze_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char *e = getenv("TD5RE_COPCHASE_ARREST_FREEZE");
-        cached = (e && e[0] == '0') ? 0 : 1;
+        cached = td5_env_flag_on("TD5RE_COPCHASE_ARREST_FREEZE");
     }
     return cached;
 }
@@ -535,14 +531,7 @@ static void td5_physics_mp_catchup_config(void)
 
     /* Strength 0..100, default 50 (scales the top-speed boost, accel boost and
      * top-speed ease together). */
-    s_mp_catchup_strength = 50;
-    e = getenv("TD5RE_MP_CATCHUP_STRENGTH");
-    if (e && e[0]) {
-        int v = atoi(e);
-        if (v < 0)   v = 0;
-        if (v > 100) v = 100;
-        s_mp_catchup_strength = v;
-    }
+    s_mp_catchup_strength = td5_env_int("TD5RE_MP_CATCHUP_STRENGTH", 50, 0, 100);
 
     /* Approach-side top-speed ease on by default. Accept the legacy LEADER alias
      * (its old "throttle cars ahead" meaning is the closest analog). */
@@ -831,12 +820,7 @@ static int32_t td5_physics_manual_boost_q8(void)
         int pct = 20;
         if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'))
             on = 0;
-        e = getenv("TD5RE_MANUAL_BOOST_PCT");
-        if (e && e[0]) {
-            pct = atoi(e);
-            if (pct < 0)   pct = 0;
-            if (pct > 100) pct = 100;
-        }
+        pct = td5_env_int("TD5RE_MANUAL_BOOST_PCT", 20, 0, 100);
         s_manual_boost_q8 = on ? (MP_CATCHUP_Q8_ONE + (MP_CATCHUP_Q8_ONE * pct) / 100)
                                : MP_CATCHUP_Q8_ONE;
         TD5_LOG_I(LOG_TAG,
@@ -918,11 +902,8 @@ static void td5_physics_slope_light_resolve(void)
             int r = atoi(e);
             if (r > 0) s_slope_light_ref = r;
         }
-        e = getenv("TD5RE_SLOPE_DECEL_FLOOR_PCT");
-        if (e && e[0]) {
-            int p = atoi(e);
-            if (p < 5)   p = 5;
-            if (p > 100) p = 100;
+        {
+            int p = td5_env_int("TD5RE_SLOPE_DECEL_FLOOR_PCT", 45, 5, 100);
             s_slope_light_floor_q12 = (SLOPE_LIGHT_Q12_ONE * p) / 100;
         }
     }
@@ -977,15 +958,12 @@ static int s_hill_assist_max_q12  = (4096 * 260) / 100;   /* 2.6x default */
 
 static void td5_physics_hill_assist_resolve(void)
 {
-    const char *e, *m;
+    const char *e;
     if (s_hill_assist_init) return;
     e = getenv("TD5RE_HILL_ASSIST");
     if (e && e[0] == '0' && e[1] == '\0') s_hill_assist_on = 0;
-    m = getenv("TD5RE_HILL_ASSIST_MAX");
-    if (m && m[0]) {
-        int p = atoi(m);
-        if (p < 100) p = 100;
-        else if (p > 600) p = 600;
+    {
+        int p = td5_env_int("TD5RE_HILL_ASSIST_MAX", 260, 100, 600);
         s_hill_assist_max_q12 = (4096 * p) / 100;
     }
     s_hill_assist_init = 1;
@@ -1068,9 +1046,9 @@ static void td5_physics_weight_resolve(void)
     {
         const char *e = getenv("TD5RE_WEIGHT_MECH");
         if (e && (e[0]=='0'||e[0]=='n'||e[0]=='N'||e[0]=='f'||e[0]=='F')) s_weight_on = 0;
-        e = getenv("TD5RE_WEIGHT_SLOPE_PCT"); if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>200)p=200; s_weight_slope_pct=p; }
-        e = getenv("TD5RE_WEIGHT_ACCEL_PCT"); if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>200)p=200; s_weight_accel_pct=p; }
-        e = getenv("TD5RE_WEIGHT_LIFT_PCT");  if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>200)p=200; s_weight_lift_pct=p; }
+        s_weight_slope_pct = td5_env_int("TD5RE_WEIGHT_SLOPE_PCT", 55, 0, 200);
+        s_weight_accel_pct = td5_env_int("TD5RE_WEIGHT_ACCEL_PCT", 40, 0, 200);
+        s_weight_lift_pct  = td5_env_int("TD5RE_WEIGHT_LIFT_PCT",  60, 0, 200);
     }
     TD5_LOG_I(LOG_TAG, "weight_mech: on=%d slope=%d%% accel=%d%% lift=%d%% (mass->hills/accel/fly-away)",
               s_weight_on, s_weight_slope_pct, s_weight_accel_pct, s_weight_lift_pct);
@@ -1172,8 +1150,7 @@ static void td5_physics_draft_resolve(void)
     {
         const char *e = getenv("TD5RE_DRAFT");
         if (e && (e[0]=='0'||e[0]=='n'||e[0]=='N'||e[0]=='f'||e[0]=='F')) s_draft_on = 0;
-        e = getenv("TD5RE_DRAFT_PCT");
-        if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>100)p=100; s_draft_pct=p; }
+        s_draft_pct = td5_env_int("TD5RE_DRAFT_PCT", 18, 0, 100);
     }
     TD5_LOG_I(LOG_TAG, "draft: on=%d peak=%d%% (slipstream forward boost behind a car)", s_draft_on, s_draft_pct);
 }
@@ -1263,8 +1240,7 @@ static void td5_physics_downforce_resolve(void)
     {
         const char *e = getenv("TD5RE_DOWNFORCE");
         if (e && (e[0]=='0'||e[0]=='n'||e[0]=='N'||e[0]=='f'||e[0]=='F')) s_downforce_on = 0;
-        e = getenv("TD5RE_DOWNFORCE_PCT");
-        if (e && e[0]) { int p=atoi(e); if(p<0)p=0; if(p>40)p=40; s_downforce_pct=p; }
+        s_downforce_pct = td5_env_int("TD5RE_DOWNFORCE_PCT", 6, 0, 40);
     }
     TD5_LOG_I(LOG_TAG, "downforce: on=%d peak=%d%% (high-speed lateral grip from slip-stiffness)",
               s_downforce_on, s_downforce_pct);
@@ -1728,11 +1704,7 @@ static inline int32_t td5_physics_hard_catchup_mult(int slot)
 static int32_t npc_fatal_mag(void) {
     static int32_t v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_NPC_FATAL_MAG");
-        long m = (e && e[0]) ? strtol(e, NULL, 10) : NPC_FATAL_MAG_DEFAULT;
-        if (m < 1000)    m = 1000;
-        if (m > 1000000) m = 1000000;
-        v = (int32_t)m;
+        v = td5_env_int("TD5RE_NPC_FATAL_MAG", NPC_FATAL_MAG_DEFAULT, 1000, 1000000);
     }
     return v;
 }
@@ -1751,11 +1723,7 @@ int32_t td5_physics_npc_fatal_mag(void) { return npc_fatal_mag(); }
 static int battle_ram_pct(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_BATTLE_RAM_PCT");
-        long p = (e && e[0]) ? strtol(e, NULL, 10) : BATTLE_RAM_PCT_DEFAULT;
-        if (p < 10)   p = 10;
-        if (p > 1000) p = 1000;
-        v = (int)p;
+        v = td5_env_int("TD5RE_BATTLE_RAM_PCT", BATTLE_RAM_PCT_DEFAULT, 10, 1000);
         TD5_LOG_I(LOG_TAG, "battle_ram_pct: TD5RE_BATTLE_RAM_PCT=%d", v);
     }
     return v;
@@ -1771,11 +1739,8 @@ static int battle_ram_pct(void) {
 static int32_t battle_ram_cap(void) {
     static int32_t v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_BATTLE_RAM_CAP");
-        long m = (e && e[0]) ? strtol(e, NULL, 10) : BATTLE_RAM_CAP_DEFAULT;
-        if (m < 60000)   m = 60000;     /* must clear npc_fatal_mag to wreck */
-        if (m > 1000000) m = 1000000;
-        v = (int32_t)m;
+        /* lo 60000: must clear npc_fatal_mag to wreck */
+        v = td5_env_int("TD5RE_BATTLE_RAM_CAP", BATTLE_RAM_CAP_DEFAULT, 60000, 1000000);
     }
     return v;
 }
@@ -1787,11 +1752,7 @@ static int32_t battle_ram_cap(void) {
 static int32_t battle_ram_min_speed(void) {
     static int32_t v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_BATTLE_RAM_MIN_SPEED");
-        long m = (e && e[0]) ? strtol(e, NULL, 10) : BATTLE_RAM_MIN_SPEED_DEFAULT;
-        if (m < 0)      m = 0;
-        if (m > 200000) m = 200000;
-        v = (int32_t)m;
+        v = td5_env_int("TD5RE_BATTLE_RAM_MIN_SPEED", BATTLE_RAM_MIN_SPEED_DEFAULT, 0, 200000);
     }
     return v;
 }
@@ -1803,11 +1764,7 @@ static int32_t battle_ram_min_speed(void) {
 static int32_t battle_airborne_vy(void) {
     static int32_t v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_BATTLE_AIRBORNE_VY");
-        long m = (e && e[0]) ? strtol(e, NULL, 10) : BATTLE_AIRBORNE_VY_DEFAULT;
-        if (m < 500)    m = 500;
-        if (m > 200000) m = 200000;
-        v = (int32_t)m;
+        v = td5_env_int("TD5RE_BATTLE_AIRBORNE_VY", BATTLE_AIRBORNE_VY_DEFAULT, 500, 200000);
     }
     return v;
 }
@@ -1828,11 +1785,7 @@ static int32_t battle_airborne_vy(void) {
 static int cop_durability_pct(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_DURABILITY_PCT");
-        long p = (e && e[0]) ? strtol(e, NULL, 10) : COP_DURABILITY_PCT_DEFAULT;
-        if (p < 100)  p = 100;
-        if (p > 1000) p = 1000;
-        v = (int)p;
+        v = td5_env_int("TD5RE_COP_DURABILITY_PCT", COP_DURABILITY_PCT_DEFAULT, 100, 1000);
         TD5_LOG_I(LOG_TAG, "cop_durability_pct: TD5RE_COP_DURABILITY_PCT=%d", v);
     }
     return v;
@@ -1847,11 +1800,7 @@ static int cop_durability_pct(void) {
 static int cop_chase_wall_factor_pct(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_COP_CHASE_WALL_FACTOR");
-        long p = (e && e[0]) ? strtol(e, NULL, 10) : 200;
-        if (p < 100) p = 100;
-        if (p > 600) p = 600;
-        v = (int)p;
+        v = td5_env_int("TD5RE_COP_CHASE_WALL_FACTOR", 200, 100, 600);
     }
     return v;
 }
@@ -2185,14 +2134,12 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
         static int s_wall_cam = -1;
         static int s_wall_cam_pen = 0;
         if (s_wall_cam < 0) {
-            const char *e = getenv("TD5RE_WALL_CAM_ZOOM");
-            s_wall_cam = (!e || e[0] != '0') ? 1 : 0;
-            const char *p = getenv("TD5RE_WALL_CAM_PEN");
+            s_wall_cam = td5_env_flag_on("TD5RE_WALL_CAM_ZOOM");
             /* [#R3-4 2026-06-19] Lowered 100 -> 40: the zoom only fired sometimes
              * (esp. reversing into a wall, where contact is gentler -> shallower
-             * penetration). 40 arms on almost any real wall contact. */
-            s_wall_cam_pen = (p && p[0]) ? atoi(p) : 40;   /* min penetration to arm */
-            if (s_wall_cam_pen < 10) s_wall_cam_pen = 10;
+             * penetration). 40 arms on almost any real wall contact. Original had
+             * only a lower clamp (>=10); generous hi cannot change realistic arming. */
+            s_wall_cam_pen = td5_env_int("TD5RE_WALL_CAM_PEN", 40, 10, 100000);   /* min penetration to arm */
         }
         /* [#R11 2026-06-19] Lowered the arm threshold (was -250, rarely hit) and
          * lengthened the hold (was 8 ticks — too short for the radius spring to
@@ -2781,7 +2728,7 @@ void td5_physics_apply_render_interpolation(float subtick_fraction)
 static int td6_props_enabled(void)
 {
     static int s = -1;   /* A/B knob: TD5RE_TD6_PROPS=0 disables prop collision */
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_PROPS"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TD6_PROPS"); }
     return s;
 }
 
@@ -2792,7 +2739,7 @@ static int td6_props_enabled(void)
 static int td6_push_enabled(void)
 {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_PUSH"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TD6_PUSH"); }
     return s;
 }
 
@@ -3187,7 +3134,7 @@ void td5_physics_run_paused_engine_step(void)
     int rev_all = 1;
     {
         static int v = -1;
-        if (v < 0) { const char *e = getenv("TD5RE_COUNTDOWN_REV_ALL"); v = (e && e[0] == '0') ? 0 : 1; }
+        if (v < 0) { v = td5_env_flag_on("TD5RE_COUNTDOWN_REV_ALL"); }
         rev_all = v;
     }
     int racers = total;
@@ -4872,8 +4819,7 @@ void td5_physics_update_player(TD5_Actor *actor)
         {
             static int s_gdf = -1;
             if (s_gdf < 0) {
-                const char *e = getenv("TD5RE_GRIP_DRIFT_FIX");
-                s_gdf = (e && e[0] == '0') ? 0 : 1;
+                s_gdf = td5_env_flag_on("TD5RE_GRIP_DRIFT_FIX");
                 TD5_LOG_I(LOG_TAG, "grip_drift_fix: TD5RE_GRIP_DRIFT_FIX=%d", s_gdf);
             }
             /* Only damp when grip is above 1.0x baseline AND the rear is on
@@ -5050,8 +4996,7 @@ void td5_physics_update_player(TD5_Actor *actor)
                  * (default on). */
                 static int s_gear1_free = -1;
                 if (s_gear1_free < 0) {
-                    const char *eg = getenv("TD5RE_SLOPE_GEAR1_FREE");
-                    s_gear1_free = (!eg || eg[0] != '0') ? 1 : 0;
+                    s_gear1_free = td5_env_flag_on("TD5RE_SLOPE_GEAR1_FREE");
                 }
                 if (s_gear1_free && actor->current_gear <= TD5_GEAR_FIRST) {
                     g_long = 0;   /* gear 1 (or lower): no uphill slope drag */
@@ -6090,8 +6035,7 @@ static int silhouette_hitbox_enabled(void)
 {
     static int s_init = 0, s_on = 1;
     if (!s_init) {
-        const char *e = getenv("TD5RE_SILHOUETTE_HITBOX");
-        if (e && e[0] == '0') s_on = 0;
+        s_on = td5_env_flag_on("TD5RE_SILHOUETTE_HITBOX");
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "silhouette_hitbox: %s (TD5RE_SILHOUETTE_HITBOX)",
                   s_on ? "ON (hull-vs-hull)" : "OFF (box)");
@@ -6480,8 +6424,7 @@ static int traffic_hit_tame_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_TRAFFIC_HIT_TAME");
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_TRAFFIC_HIT_TAME");
         TD5_LOG_I(LOG_TAG, "traffic_hit_tame: TD5RE_TRAFFIC_HIT_TAME=%d", s);
     }
     return s;
@@ -6498,8 +6441,7 @@ static int wreck_immobile_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        const char *e = getenv("TD5RE_WRECK_IMMOBILE");
-        s = (e && e[0] == '0') ? 0 : 1;
+        s = td5_env_flag_on("TD5RE_WRECK_IMMOBILE");
         TD5_LOG_I(LOG_TAG, "wreck_immobile: TD5RE_WRECK_IMMOBILE=%d", s);
     }
     return s;
@@ -6517,11 +6459,7 @@ static int wreck_mass_pct(void)
 {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_WRECK_MASS_PCT");
-        long p = (e && e[0]) ? strtol(e, NULL, 10) : 400;
-        if (p < 100)  p = 100;
-        if (p > 2000) p = 2000;
-        v = (int)p;
+        v = td5_env_int("TD5RE_WRECK_MASS_PCT", 400, 100, 2000);
         TD5_LOG_I(LOG_TAG, "wreck_mass_pct: TD5RE_WRECK_MASS_PCT=%d", v);
     }
     return v;
@@ -6542,11 +6480,7 @@ static int traffic_mass_pct(void)
 {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_TRAFFIC_MASS_PCT");
-        long p = (e && e[0]) ? strtol(e, NULL, 10) : 250;
-        if (p < 100)  p = 100;
-        if (p > 2000) p = 2000;
-        v = (int)p;
+        v = td5_env_int("TD5RE_TRAFFIC_MASS_PCT", 250, 100, 2000);
         TD5_LOG_I(LOG_TAG, "traffic_mass_pct: TD5RE_TRAFFIC_MASS_PCT=%d", v);
     }
     return v;
@@ -6564,12 +6498,7 @@ static float traffic_hitbox_scale(void)
     static int   s_init = 0;
     static float s_scale = 0.70f;
     if (!s_init) {
-        const char *e = getenv("TD5RE_TRAFFIC_HITBOX_SCALE");
-        if (e && e[0]) {
-            s_scale = (float)atof(e);
-            if (s_scale < 0.1f) s_scale = 0.1f;   /* sane floor */
-            if (s_scale > 1.0f) s_scale = 1.0f;   /* never inflate */
-        }
+        s_scale = td5_env_float("TD5RE_TRAFFIC_HITBOX_SCALE", 0.70f, 0.1f, 1.0f);   /* floor 0.1; never inflate past 1.0 */
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "traffic_hitbox_scale: TD5RE_TRAFFIC_HITBOX_SCALE=%.3f", s_scale);
     }
@@ -6601,12 +6530,8 @@ static float racer_hitbox_scale(void)
         if (fit && fit[0] == '0') {
             s_scale = 1.0f;   /* knob OFF -> faithful (no shrink) */
         } else {
-            const char *e = getenv("TD5RE_HITBOX_SCALE");
-            if (e && e[0]) {
-                s_scale = (float)atof(e);
-                if (s_scale < 0.5f) s_scale = 0.5f;   /* sane floor — still collides */
-                if (s_scale > 1.0f) s_scale = 1.0f;   /* never inflate */
-            }
+            /* floor 0.5 (still collides); never inflate past 1.0 */
+            s_scale = td5_env_float("TD5RE_HITBOX_SCALE", 0.85f, 0.5f, 1.0f);
         }
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "racer_hitbox_scale: TD5RE_HITBOX_FIT/SCALE -> %.3f", s_scale);
@@ -6662,8 +6587,7 @@ static int mesh_hitbox_enabled(void)
 {
     static int s_init = 0, s_on = 1;   /* default ON */
     if (!s_init) {
-        const char *e = getenv("TD5RE_MESH_HITBOX");
-        if (e && e[0] == '0') s_on = 0;
+        s_on = td5_env_flag_on("TD5RE_MESH_HITBOX");
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "mesh_hitbox: %s (TD5RE_MESH_HITBOX)",
                   s_on ? "ON (model-derived collision box)"
@@ -6933,8 +6857,7 @@ static int tt_pair_passthrough(int slot_a, int slot_b)
 {
     static int knob = -1;
     if (knob < 0) {
-        const char *e = getenv("TD5RE_TT_NO_COLLISION");
-        knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        knob = td5_env_flag_on("TD5RE_TT_NO_COLLISION");   /* default ON */
     }
     if (!knob) return 0;
     if (g_td5.mp_mode_config.mode != TD5_MP_MODE_TIME_TRIAL) return 0;
@@ -9207,8 +9130,7 @@ static int descent_damp_enabled(void)
 {
     static int s_en = -1;
     if (s_en < 0) {
-        const char *e = getenv("TD5RE_DESCENT_DAMP");
-        s_en = (e && e[0] == '0') ? 0 : 1;
+        s_en = td5_env_flag_on("TD5RE_DESCENT_DAMP");
     }
     return s_en;
 }
@@ -9235,8 +9157,7 @@ static int roll_damp_enabled(void)
 {
     static int s_en = -1;
     if (s_en < 0) {
-        const char *e = getenv("TD5RE_ROLL_DAMP");
-        s_en = (e && e[0] == '0') ? 0 : 1;
+        s_en = td5_env_flag_on("TD5RE_ROLL_DAMP");
     }
     return s_en;
 }
@@ -11163,11 +11084,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             {
                 static int s_clamp_on = -1, s_travel = -1;
                 if (s_clamp_on < 0) {
-                    const char *e = getenv("TD5RE_WHEEL_SUSP_CLAMP");
-                    s_clamp_on = (e && e[0] == '0') ? 0 : 1;
-                    const char *t = getenv("TD5RE_WHEEL_VIS_TRAVEL");
-                    s_travel = (t && t[0]) ? atoi(t) : 40;   /* body-units */
-                    if (s_travel < 1) s_travel = 1;
+                    s_clamp_on = td5_env_flag_on("TD5RE_WHEEL_SUSP_CLAMP");
+                    /* render-only travel limit; original had only a lower clamp (>=1) */
+                    s_travel = td5_env_int("TD5RE_WHEEL_VIS_TRAVEL", 40, 1, 100000);   /* body-units */
                 }
                 if (s_clamp_on) {
                     int32_t lo = (int32_t)cwy - s_travel;
@@ -12673,12 +12592,7 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
             static int   s_rrd_init = 0;
             static float s_rrd_keep = 0.15f;
             if (!s_rrd_init) {
-                const char *e = getenv("TD5RE_ROLL_RECOVER_DAMP");
-                if (e && e[0]) {
-                    s_rrd_keep = (float)atof(e);
-                    if (s_rrd_keep < 0.0f) s_rrd_keep = 0.0f;
-                    if (s_rrd_keep > 1.0f) s_rrd_keep = 1.0f;
-                }
+                s_rrd_keep = td5_env_float("TD5RE_ROLL_RECOVER_DAMP", 0.15f, 0.0f, 1.0f);
                 s_rrd_init = 1;
                 TD5_LOG_I(LOG_TAG, "roll_recover_damp: TD5RE_ROLL_RECOVER_DAMP=%.3f (retained linvel fraction)",
                           s_rrd_keep);
@@ -13648,7 +13562,7 @@ static int32_t td5_physics_gear1_accel_q8(TD5_Actor *actor)
     if (!inited) {
         const char *e;
         inited = 1;
-        e = getenv("TD5RE_GEAR1_ACCEL");     if (e && e[0] == '0') on = 0;
+        on = td5_env_flag_on("TD5RE_GEAR1_ACCEL");
         e = getenv("TD5RE_GEAR1_BOOST_PCT"); if (e && e[0]) boost = atoi(e);
         e = getenv("TD5RE_GEAR1_CUT_PCT");   if (e && e[0]) cut   = atoi(e);
         e = getenv("TD5RE_GEAR1_LOW_PCT");   if (e && e[0]) lowp  = atoi(e);
@@ -14629,12 +14543,7 @@ void td5_physics_init_vehicle_runtime(void)
                     static int   s_twt_init = 0;
                     static float s_twt = 1.0f;
                     if (!s_twt_init) {
-                        const char *e = getenv("TD5RE_TRAFFIC_WHEEL_TRACK");
-                        if (e && e[0]) {
-                            s_twt = (float)atof(e);
-                            if (s_twt < 0.1f) s_twt = 0.1f;
-                            if (s_twt > 2.0f) s_twt = 2.0f;
-                        }
+                        s_twt = td5_env_float("TD5RE_TRAFFIC_WHEEL_TRACK", 1.0f, 0.1f, 2.0f);
                         s_twt_init = 1;
                         TD5_LOG_I(LOG_TAG, "traffic_wheel_track: TD5RE_TRAFFIC_WHEEL_TRACK=%.3f", s_twt);
                     }
@@ -15106,29 +15015,14 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
 static void recovery_init_knobs(void)
 {
     if (s_recovery_init) return;
-    {
-        const char *e = getenv("TD5RE_STUCK_RECOVERY");
-        s_recovery_enabled = (e && e[0] == '0') ? 0 : 1;   /* default ON */
-    }
-    {
-        const char *e = getenv("TD5RE_RECOVERY_SPANS_BACK");
-        if (e && e[0]) {
-            int v = atoi(e);
-            if (v < 0) v = 0;
-            if (v > 64) v = 64;            /* sanity clamp */
-            s_recovery_spans_back = v;
-        }
-    }
-    {
-        /* Tune the manual-recovery cooldown without a rebuild. 0 = no cooldown. */
-        const char *e = getenv("TD5RE_RECOVERY_COOLDOWN_TICKS");
-        if (e && e[0]) {
-            int v = atoi(e);
-            if (v < 0)    v = 0;           /* 0 = no cooldown */
-            if (v > 1800) v = 1800;        /* <= 60 s sanity clamp */
-            s_recovery_cooldown_ticks = v;
-        }
-    }
+    s_recovery_enabled = td5_env_flag_on("TD5RE_STUCK_RECOVERY");   /* default ON */
+    /* sanity clamp [0,64] */
+    s_recovery_spans_back = td5_env_int("TD5RE_RECOVERY_SPANS_BACK",
+                                        TD5_RECOVERY_DEFAULT_BACK, 0, 64);
+    /* Tune the manual-recovery cooldown without a rebuild. 0 = no cooldown;
+     * <= 60 s (1800 ticks) sanity clamp. */
+    s_recovery_cooldown_ticks = td5_env_int("TD5RE_RECOVERY_COOLDOWN_TICKS",
+                                            TD5_MANUAL_RECOVERY_COOLDOWN_TICKS, 0, 1800);
     s_recovery_init = 1;
     TD5_LOG_I(LOG_TAG, "Manual recovery: %s spans_back=%d cooldown=%d ticks (%.1fs)",
               s_recovery_enabled ? "enabled" : "disabled",
@@ -15368,29 +15262,10 @@ static void recovery_gentle_init(void)
 {
     if (s_rgentle_init) return;
     s_rgentle_init = 1;
-    {
-        const char *e;
-        if ((e = getenv("TD5RE_RECOVERY_GENTLE")) && e[0] == '0')
-            s_rgentle_enabled = 0;
-        if ((e = getenv("TD5RE_RECOVERY_COAST_TICKS")) && e[0]) {
-            int v = atoi(e);
-            if (v < 1)   v = 1;
-            if (v > 240) v = 240;          /* sanity clamp (~8s max) */
-            s_rgentle_coast_ticks = v;
-        }
-        if ((e = getenv("TD5RE_RECOVERY_COAST_DECAY")) && e[0]) {
-            float f = (float)atof(e);
-            if (f < 0.0f) f = 0.0f;
-            if (f > 1.0f) f = 1.0f;
-            s_rgentle_coast_decay = f;
-        }
-        if ((e = getenv("TD5RE_RECOVERY_LEVEL_DECAY")) && e[0]) {
-            float f = (float)atof(e);
-            if (f < 0.0f) f = 0.0f;
-            if (f > 1.0f) f = 1.0f;
-            s_rgentle_level_decay = f;
-        }
-    }
+    s_rgentle_enabled     = td5_env_flag_on("TD5RE_RECOVERY_GENTLE");
+    s_rgentle_coast_ticks = td5_env_int("TD5RE_RECOVERY_COAST_TICKS", 30, 1, 240);   /* sanity clamp (~8s max) */
+    s_rgentle_coast_decay = td5_env_float("TD5RE_RECOVERY_COAST_DECAY", 0.92f, 0.0f, 1.0f);
+    s_rgentle_level_decay = td5_env_float("TD5RE_RECOVERY_LEVEL_DECAY", 0.80f, 0.0f, 1.0f);
     TD5_LOG_I(LOG_TAG,
               "Gentle flip-recovery: %s coast_ticks=%d coast_decay=%.3f level_decay=%.3f",
               s_rgentle_enabled ? "enabled" : "disabled",

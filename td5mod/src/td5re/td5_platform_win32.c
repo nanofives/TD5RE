@@ -27,6 +27,7 @@
 #include <math.h>
 
 #include "td5_platform.h"
+#include "td5_config.h"  /* shared TD5RE_* env-knob helpers */
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
 
 /* Pull in the wrapper types and backend access */
@@ -3617,8 +3618,7 @@ static int td5_ff_wgi_enabled(void)
 {
     static int s_init = 0, s_on = 1;
     if (!s_init) {
-        const char *e = getenv("TD5RE_FF_WGI");
-        s_on = (e && e[0] == '0') ? 0 : 1;
+        s_on = td5_env_flag_on("TD5RE_FF_WGI");
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "FF WGI rumble path: %s",
                   s_on ? "enabled (default — lifts 4-pad cap)" : "disabled (TD5RE_FF_WGI=0)");

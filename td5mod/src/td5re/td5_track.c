@@ -26,6 +26,7 @@
 #include "td5_trace.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
+#include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -676,8 +677,7 @@ static int      s_geo_enabled = -1;       /* -1 unknown, 0 off, 1 on */
 static int geo_is_enabled(void)
 {
     if (s_geo_enabled < 0) {
-        const char *e = getenv("TD5RE_GEO_COLLISION");
-        s_geo_enabled = (!e || e[0] != '0') ? 1 : 0;
+        s_geo_enabled = td5_env_flag_on("TD5RE_GEO_COLLISION");
     }
     return s_geo_enabled;
 }
@@ -1460,8 +1460,7 @@ void td5_track_bind_boundary_sentinels(int level_number)
         int ring = td5_track_get_ring_length();
         if (ring <= 16) ring = s_span_count;   /* fallback if ring not yet resolved */
         if (s_endwall < 0) {
-            const char *e = getenv("TD5RE_TD6_ENDWALL");
-            s_endwall = (e && e[0] == '0') ? 0 : 1;
+            s_endwall = td5_env_flag_on("TD5RE_TD6_ENDWALL");
         }
         if (s_endwall && is_p2p && ring > 16) {
             s_boundary_fwd_sentinel = 2;
@@ -2104,8 +2103,7 @@ static int laneassist_avoid_slow(void)
 {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TD5RE_LANEASSIST_AVOID_SLOW");
-        v = (e && e[0] == '0') ? 0 : 1;
+        v = td5_env_flag_on("TD5RE_LANEASSIST_AVOID_SLOW");
     }
     return v;
 }
@@ -5557,8 +5555,7 @@ int32_t td5_track_shadow_probe_height(int slot, int node,
     {
         static int s_shadow_stable = -1;
         if (s_shadow_stable < 0) {
-            const char *e = getenv("TD5RE_SHADOW_STABLE");
-            s_shadow_stable = (!e || e[0] != '0') ? 1 : 0;
+            s_shadow_stable = td5_env_flag_on("TD5RE_SHADOW_STABLE");
         }
         if (s_shadow_stable)
             return td5_track_compute_contact_height_with_normal(

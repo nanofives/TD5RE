@@ -49,6 +49,7 @@
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
+#include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 #include "td5re.h"
 
 #include "../../../re/include/td5_actor_struct.h"
@@ -663,8 +664,7 @@ static int tt_ghost_enabled(void)
 {
     static int knob = -1;
     if (knob < 0) {
-        const char *e = getenv("TD5RE_TT_GHOST");
-        knob = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        knob = td5_env_flag_on("TD5RE_TT_GHOST");   /* default ON */
     }
     return knob;
 }
@@ -1324,8 +1324,7 @@ static void update_render_camera_from_game(void)
         extern float g_cameraSecondaryUnscaled[9];   /* td5_camera.c (billboard basis) */
         static int s_bb_fix = -1;      /* -1 unread, 0 off, 1 on */
         if (s_bb_fix < 0) {
-            const char *e = getenv("TD5RE_BILLBOARD_TREE_FIX");
-            s_bb_fix = (e && e[0] == '0') ? 0 : 1;
+            s_bb_fix = td5_env_flag_on("TD5RE_BILLBOARD_TREE_FIX");
             TD5_LOG_I(LOG_TAG,
                       "billboard-tree fix: %s (TD5RE_BILLBOARD_TREE_FIX; serial-path "
                       "camera_secondary bake — fixes invisible in-scene trees)",
@@ -2614,7 +2613,7 @@ static int light_build_model_list(const TD5_MeshHeader *mesh,
      * disabled by default. TD5RE_LIGHT_PERVERTEX=1 re-enables the legacy path
      * (note: registry intensity is now 0..1, so it would need rescaling). */
     static int s_pv = -1;
-    if (s_pv < 0) { const char *e = getenv("TD5RE_LIGHT_PERVERTEX"); s_pv = (e && e[0] == '1') ? 1 : 0; }
+    if (s_pv < 0) { s_pv = td5_env_flag_off("TD5RE_LIGHT_PERVERTEX"); }
     if (!s_pv) return 0;
 
     int n = 0;
@@ -2730,8 +2729,7 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
      * tint. A/B via TD5RE_TD6_VLIGHT (default on); =0 falls back to synthetic. */
     static int s_td6_vlight = -1;
     if (s_td6_vlight < 0) {
-        const char *e = getenv("TD5RE_TD6_VLIGHT");
-        s_td6_vlight = (e && e[0] == '0') ? 0 : 1;
+        s_td6_vlight = td5_env_flag_on("TD5RE_TD6_VLIGHT");
     }
     int prelit = (s_td6_vlight && slot < 0);
 
@@ -3099,9 +3097,8 @@ void td5_render_span_display_list(void *display_list_block)
     /* [banners] mark the level-geometry pass so the one-sided banner cull in
      * clip_and_submit_polygon applies (and never touches cars/HUD). */
     if (s_banner_cull < 0) {
-        const char *e = getenv("TD5RE_BANNER_CULL");
         const char *f = getenv("TD5RE_BANNER_CULL_FLIP");
-        s_banner_cull = (e && e[0] == '0') ? 0 : 1;
+        s_banner_cull = td5_env_flag_on("TD5RE_BANNER_CULL");
         /* Default keeps the front (text-readable) face; verified on London —
          * the other sign showed the mirrored back. FLIP swaps back if needed. */
         s_banner_cull_keep_pos = (f && f[0] && f[0] != '0') ? 0 : 1;
@@ -3109,15 +3106,13 @@ void td5_render_span_display_list(void *display_list_block)
          * the forward-tuned kept side discards the camera-facing face and the
          * banners vanish (Paris-backwards report). Auto-flip the kept side in
          * reverse; "0" disables (then use _FLIP manually). */
-        const char *rf = getenv("TD5RE_TD6_BANNER_REVFLIP");
-        s_banner_cull_revflip = (rf && rf[0] == '0') ? 0 : 1;
+        s_banner_cull_revflip = td5_env_flag_on("TD5RE_TD6_BANNER_REVFLIP");
         TD5_LOG_I(LOG_TAG, "banner cull: %s (keep_sign=%s revflip=%d; TD5RE_BANNER_CULL/_FLIP/_TD6_BANNER_REVFLIP)",
                   s_banner_cull ? "ON" : "OFF", s_banner_cull_keep_pos ? "pos" : "neg",
                   s_banner_cull_revflip);
         /* [START-banner align] road-centre re-alignment of TD6 banner gantries.
          * Default ON; TD5RE_BANNER_ALIGN=0 restores the raw authored position. */
-        const char *ba = getenv("TD5RE_BANNER_ALIGN");
-        s_banner_align = (ba && ba[0] == '0') ? 0 : 1;
+        s_banner_align = td5_env_flag_on("TD5RE_BANNER_ALIGN");
         TD5_LOG_I(LOG_TAG, "banner align: %s (TD5RE_BANNER_ALIGN)",
                   s_banner_align ? "ON" : "OFF");
     }
@@ -3762,10 +3757,7 @@ static float td5_render_traffic_view_mult(void)
 {
     static float m = -1.0f;
     if (m < 0.0f) {
-        const char *e = getenv("TD5RE_TRAFFIC_VIEW_DIST");
-        m = (e && e[0]) ? (float)atof(e) : 1.6f;
-        if (m < 1.0f) m = 1.0f;     /* never shrink below the faithful window */
-        if (m > 2.5f) m = 2.5f;
+        m = td5_env_float("TD5RE_TRAFFIC_VIEW_DIST", 1.6f, 1.0f, 2.5f);
         TD5_LOG_I(LOG_TAG, "traffic_view_dist knob: TD5RE_TRAFFIC_VIEW_DIST x%.2f "
                   "(traffic/car render distance scaled %d%%)", m, (int)(m * 100.0f + 0.5f));
     }
@@ -6925,8 +6917,7 @@ static int shadow_raycast_enabled(void)
 {
     static int cached = -1;
     if (cached < 0) {
-        const char *e = getenv("TD5RE_SHADOW_RAYCAST");
-        cached = (e && e[0] == '0') ? 0 : 1;
+        cached = td5_env_flag_on("TD5RE_SHADOW_RAYCAST");
     }
     return cached;
 }
@@ -7215,7 +7206,7 @@ static float shadow_smoothstep(float a, float b, float x)
 static int shadow_wheelplane_enabled(void)
 {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_SHADOW_WHEELPLANE"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_SHADOW_WHEELPLANE"); }
     return s;
 }
 
@@ -7234,7 +7225,6 @@ static float shadow_lift_frac(void)
 {
     static float f = -1.0f;
     if (f < 0.0f) {
-        const char *e = getenv("TD5RE_SHADOW_LIFT");
         /* [#7c 2026-06-21] Kept at 6. The lift is REQUIRED for visibility: with the
          * port's separate shadow projection the toward-camera depth bias alone does
          * NOT reliably win the coplanar tie, so the road occludes the whole shadow
@@ -7242,9 +7232,7 @@ static float shadow_lift_frac(void)
          * opponent "desync on slopes" was NOT this float (it persisted at 2%); its
          * real cause was the #4 low-pass LAG on the smooth wheel-plane Y, now gated
          * to the raycast path only (see smooth_y below). 0 = no lift (debug). */
-        long pct = (e && e[0]) ? strtol(e, NULL, 10) : 6;
-        if (pct < 0)   pct = 0;
-        if (pct > 100) pct = 100;
+        int pct = td5_env_int("TD5RE_SHADOW_LIFT", 6, 0, 100);
         f = (float)pct / 100.0f;
     }
     return f;
@@ -7263,10 +7251,7 @@ static float shadow_lift_slope_gain(void)
 {
     static float f = -1.0f;
     if (f < 0.0f) {
-        const char *e = getenv("TD5RE_SHADOW_LIFT_SLOPE");
-        long pct = (e && e[0]) ? strtol(e, NULL, 10) : 0;
-        if (pct < 0)   pct = 0;
-        if (pct > 400) pct = 400;
+        int pct = td5_env_int("TD5RE_SHADOW_LIFT_SLOPE", 0, 0, 400);
         f = (float)pct / 100.0f;
         TD5_LOG_I(LOG_TAG, "shadow slope-lift gain = %.2f (0 = off, no float)", f);
     }
@@ -7630,7 +7615,7 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
 static int td6_prop_mesh_enabled(void)
 {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("TD5RE_TD6_PROP_MESH"); s = (e && e[0] == '0') ? 0 : 1; }
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TD6_PROP_MESH"); }
     return s;
 }
 
@@ -8206,8 +8191,7 @@ static void render_vehicle_headlights(const TD5_Actor *actor, int slot)
      * effect now. TD5RE_HEADLAMP_SPRITE=1 restores the lamp glow. */
     static int s_headlamp_sprite = -1;
     if (s_headlamp_sprite < 0) {
-        const char *e = getenv("TD5RE_HEADLAMP_SPRITE");
-        s_headlamp_sprite = (e && e[0] == '1') ? 1 : 0;
+        s_headlamp_sprite = td5_env_flag_off("TD5RE_HEADLAMP_SPRITE");
     }
     if (!s_headlamp_sprite) return;
 
@@ -9118,12 +9102,12 @@ static void wheel_load_rim_pool(void) {
 
 static int wheel_overhaul_enabled(void) {
     static int cached = -1;
-    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_OVERHAUL"); cached = (e && e[0] == '0') ? 0 : 1; }
+    if (cached < 0) { cached = td5_env_flag_on("TD5RE_WHEEL_OVERHAUL"); }
     return cached;
 }
 static int wheel_traffic_enabled(void) {
     static int cached = -1;
-    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_TRAFFIC"); cached = (e && e[0] == '0') ? 0 : 1; }
+    if (cached < 0) { cached = td5_env_flag_on("TD5RE_WHEEL_TRAFFIC"); }
     return cached;
 }
 /* [BUG 3a — traffic wheels outside the chassis on the WIDTH axis]
@@ -9158,7 +9142,7 @@ static int wheel_track_fix_enabled(void) {
  * independent, no rand()). TD5RE_TRAFFIC_WHEEL_SPIN=0 reverts (frozen wheels). */
 static int traffic_wheel_spin_enabled(void) {
     static int cached = -1;
-    if (cached < 0) { const char *e = getenv("TD5RE_TRAFFIC_WHEEL_SPIN"); cached = (e && e[0] == '0') ? 0 : 1; }
+    if (cached < 0) { cached = td5_env_flag_on("TD5RE_TRAFFIC_WHEEL_SPIN"); }
     return cached;
 }
 /* [WHEELS-TOO-LOW on NON-FOCUSED cars — 2026-06-17]
@@ -9184,7 +9168,7 @@ static int traffic_wheel_spin_enabled(void) {
  * A/B: TD5RE_WHEEL_LIFT_FIX=0 restores the old (un-aligned) synth wheel Y. */
 static int wheel_lift_fix_enabled(void) {
     static int cached = -1;
-    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_LIFT_FIX"); cached = (e && e[0] == '0') ? 0 : 1; }
+    if (cached < 0) { cached = td5_env_flag_on("TD5RE_WHEEL_LIFT_FIX"); }
     return cached;
 }
 /* The racer body render-lift magnitude (body-units), mirroring the
@@ -9206,7 +9190,7 @@ static float wheel_body_lift_magnitude(void) {
  * TD5RE_WHEEL_INNER_TEX=0 reverts (open inner face). */
 static int wheel_inner_tex_enabled(void) {
     static int cached = -1;
-    if (cached < 0) { const char *e = getenv("TD5RE_WHEEL_INNER_TEX"); cached = (e && e[0] == '0') ? 0 : 1; }
+    if (cached < 0) { cached = td5_env_flag_on("TD5RE_WHEEL_INNER_TEX"); }
     return cached;
 }
 

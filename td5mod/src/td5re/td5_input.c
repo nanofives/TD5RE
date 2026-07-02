@@ -30,6 +30,7 @@
 #include "td5_sound.h"   /* td5_sound_toggle_siren — cop-chase siren toggle */
 #include "td5_physics.h" /* FF SIGNALS #1: drift/gear/redline/crash getters for rumble */
 #include "td5_laneassist.h" /* keyboard 'L' toggles the optional lane-assist aid */
+#include "td5_config.h"  /* shared TD5RE_* env-knob accessors */
 
 /* Defined in td5_game.c */
 extern int    g_actorSlotForView[TD5_MAX_VIEWPORTS];
@@ -308,8 +309,7 @@ static int td5_ff_vibration_enabled(void)
     static int s_init = 0;
     static int s_on = 1;
     if (!s_init) {
-        const char *e = getenv("TD5RE_FORCE_FEEDBACK");
-        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_on = td5_env_flag_on("TD5RE_FORCE_FEEDBACK");   /* default ON */
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "Force feedback vibration: %s",
                   s_on ? "enabled (drift/crash/gear/redline/landing)" : "disabled");
@@ -364,8 +364,7 @@ static int td5_ff_collision_dir_enabled(void)
     static int s_init = 0;
     static int s_on = 1;
     if (!s_init) {
-        const char *e = getenv("TD5RE_FF_COLLISION_DIR");
-        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_on = td5_env_flag_on("TD5RE_FF_COLLISION_DIR");   /* default ON */
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "FF directional collisions: %s",
                   s_on ? "enabled (left=low motor, right=high motor)" : "disabled (symmetric)");
@@ -774,8 +773,7 @@ void td5_input_poll_race_session(void)
             static int s_replay_exit_init = 0;
             static int s_replay_exit_enabled = 1;
             if (!s_replay_exit_init) {
-                const char *e = getenv("TD5RE_REPLAY_EXIT");
-                s_replay_exit_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+                s_replay_exit_enabled = td5_env_flag_on("TD5RE_REPLAY_EXIT");  /* default ON */
                 s_replay_exit_init = 1;
                 TD5_LOG_I(LOG_TAG, "Replay controller-exit: %s",
                           s_replay_exit_enabled ? "enabled" : "disabled (ESC only)");
@@ -975,8 +973,7 @@ void td5_input_poll_race_session(void)
             static int s_recovery_init = 0;
             static int s_recovery_enabled = 1;
             if (!s_recovery_init) {
-                const char *e = getenv("TD5RE_STUCK_RECOVERY");
-                s_recovery_enabled = (e && e[0] == '0') ? 0 : 1;  /* default ON */
+                s_recovery_enabled = td5_env_flag_on("TD5RE_STUCK_RECOVERY");  /* default ON */
                 s_recovery_init = 1;
                 TD5_LOG_I(LOG_TAG, "Stuck recovery (manual R / SELECT): %s",
                           s_recovery_enabled ? "enabled" : "disabled");
@@ -1361,13 +1358,7 @@ void td5_input_update_player_control(int slot)
         static int   s_steer_expo_init = 0;
         static float s_steer_expo = 0.6f;          /* default expo strength */
         if (!s_steer_expo_init) {
-            const char *e = getenv("TD5RE_STEER_EXPO");
-            if (e && e[0]) {
-                float v = (float)atof(e);
-                if (v < 0.0f) v = 0.0f;
-                if (v > 1.0f) v = 1.0f;             /* e>1 would invert mid-slope */
-                s_steer_expo = v;
-            }
+            s_steer_expo = td5_env_float("TD5RE_STEER_EXPO", 0.6f, 0.0f, 1.0f);
             s_steer_expo_init = 1;
             TD5_LOG_I(LOG_TAG, "Analog steer expo: strength=%.3f (%s)",
                       s_steer_expo,
@@ -1571,8 +1562,7 @@ void td5_input_update_player_control(int slot)
         static int s_hb_brake_init = 0;
         static int s_hb_brake = 1;                 /* default ON = always brakes */
         if (!s_hb_brake_init) {
-            const char *e = getenv("TD5RE_HANDBRAKE_BRAKE");
-            s_hb_brake = (e && e[0] == '0') ? 0 : 1;
+            s_hb_brake = td5_env_flag_on("TD5RE_HANDBRAKE_BRAKE");
             s_hb_brake_init = 1;
             TD5_LOG_I(LOG_TAG, "Handbrake-while-accel: %s",
                       s_hb_brake ? "always brakes" : "donut (throttle held, no brake)");
@@ -1848,8 +1838,7 @@ void td5_input_update_player_control(int slot)
              * each edge moves the target one lane and the aid re-aims smoothly.
              * Knob: TD5RE_DRAG_AUTOSTEER=0 -> free-steer on the wide track instead. */
             if (g_td5.drag_race_enabled && slot < g_td5.num_human_players) {
-                const char *as = getenv("TD5RE_DRAG_AUTOSTEER");
-                if (!as || as[0] != '0') {
+                if (td5_env_flag_on("TD5RE_DRAG_AUTOSTEER")) {
                     int field    = td5_game_drag_field_size();
                     int cur_lane = (int)*(int8_t *)(a + 0x8C);    /* derived sub_lane */
                     int l_now    = (bits & TD5_INPUT_STEER_LEFT)  ? 1 : 0;
@@ -2144,8 +2133,7 @@ static int td5_fe_cam_buttons_enabled(void)
     static int s_init = 0;
     static int s_on = 1;
     if (!s_init) {
-        const char *e = getenv("TD5RE_FRONTEND_CAM_BUTTONS");
-        s_on = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        s_on = td5_env_flag_on("TD5RE_FRONTEND_CAM_BUTTONS");   /* default ON */
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "Frontend camera buttons: %s",
                   s_on ? "enabled" : "disabled");

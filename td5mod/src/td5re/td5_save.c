@@ -15,6 +15,7 @@
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_game.h"
+#include "td5_config.h"  /* shared TD5RE_* env-knob helpers */
 #include <string.h>
 #include <stdio.h>  /* remove() in td5_save_test_cup_roundtrip */
 #include <stdarg.h> /* vsnprintf in the INI text builder */
@@ -2484,8 +2485,7 @@ static const TD5_NpcGroup *td6_placeholder_group(int td6_level)
 {
     static int enabled = -1;
     if (enabled < 0) {
-        const char *e = getenv("TD5RE_TD6_HIGHSCORE_PLACEHOLDERS");
-        enabled = (e && e[0] == '0') ? 0 : 1;
+        enabled = td5_env_flag_on("TD5RE_TD6_HIGHSCORE_PLACEHOLDERS");
     }
     if (!enabled) return NULL;
     if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return NULL;

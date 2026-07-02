@@ -47,6 +47,7 @@
 #include "td5re.h"          /* g_td5 (ini.lane_assist, drag_race_enabled) */
 #include "td5_platform.h"   /* TD5_LOG_* */
 #include "td5_input.h"      /* td5_input_drag_target_lane (drag chosen lane) */
+#include "td5_config.h"     /* shared TD5RE_* env-knob helpers */
 #include "../../../re/include/td5_actor_struct.h"
 
 #include <stdlib.h>         /* getenv, atoi */
@@ -167,17 +168,6 @@ static int32_t la_angle_from_vector(int32_t dx, int32_t dz)
     return ((int32_t)(a * (4096.0 / (2.0 * 3.14159265358979323846)))) & 0xFFF;
 }
 
-static int env_int(const char *name, int def, int lo, int hi)
-{
-    const char *e = getenv(name);
-    int v;
-    if (!e || !e[0]) return def;
-    v = atoi(e);
-    if (v < lo) v = lo;
-    if (v > hi) v = hi;
-    return v;
-}
-
 static void laneassist_init_once(void)
 {
     int i;
@@ -185,17 +175,17 @@ static void laneassist_init_once(void)
     s_inited = 1;
 
     s_master_enable = (g_td5.ini.lane_assist != 0);
-    s_strength_pct  = env_int("TD5RE_LANEASSIST_STRENGTH",       900, 0, 1000);
-    s_lookahead     = env_int("TD5RE_LANEASSIST_LOOKAHEAD_SPANS",  6, 1, 8);
-    s_max_yaw       = env_int("TD5RE_LANEASSIST_MAX_YAW",        400, 0, 800);
-    s_fork_commit   = env_int("TD5RE_LANEASSIST_FORK_COMMIT",      1, 0, 1);
-    s_fork_diverge  = env_int("TD5RE_LANEASSIST_FORK_DIVERGE",     1, 0, 1);
-    s_lane_band     = env_int("TD5RE_LANEASSIST_LANE_BAND",        0, 0, 4);
-    s_drag_strength  = env_int("TD5RE_DRAG_LA_STRENGTH",  1200, 0, 8000);
-    s_drag_maxyaw    = env_int("TD5RE_DRAG_LA_MAXYAW",    1500, 0, 4000);
-    s_drag_lookahead = env_int("TD5RE_DRAG_LA_LOOKAHEAD",    6, 1, 8);
-    s_drag_rate_damp = env_int("TD5RE_DRAG_RATE_DAMP",      70, 0, 256);
-    s_drag_vlat_damp = env_int("TD5RE_DRAG_VLAT_DAMP",      80, -2000, 2000);
+    s_strength_pct  = td5_env_int("TD5RE_LANEASSIST_STRENGTH",       900, 0, 1000);
+    s_lookahead     = td5_env_int("TD5RE_LANEASSIST_LOOKAHEAD_SPANS",  6, 1, 8);
+    s_max_yaw       = td5_env_int("TD5RE_LANEASSIST_MAX_YAW",        400, 0, 800);
+    s_fork_commit   = td5_env_int("TD5RE_LANEASSIST_FORK_COMMIT",      1, 0, 1);
+    s_fork_diverge  = td5_env_int("TD5RE_LANEASSIST_FORK_DIVERGE",     1, 0, 1);
+    s_lane_band     = td5_env_int("TD5RE_LANEASSIST_LANE_BAND",        0, 0, 4);
+    s_drag_strength  = td5_env_int("TD5RE_DRAG_LA_STRENGTH",  1200, 0, 8000);
+    s_drag_maxyaw    = td5_env_int("TD5RE_DRAG_LA_MAXYAW",    1500, 0, 4000);
+    s_drag_lookahead = td5_env_int("TD5RE_DRAG_LA_LOOKAHEAD",    6, 1, 8);
+    s_drag_rate_damp = td5_env_int("TD5RE_DRAG_RATE_DAMP",      70, 0, 256);
+    s_drag_vlat_damp = td5_env_int("TD5RE_DRAG_VLAT_DAMP",      80, -2000, 2000);
 
     for (i = 0; i < TD5_MAX_HUMAN_PLAYERS; i++) {
         s_enable[i]    = (uint8_t)s_master_enable;   /* per-session default */

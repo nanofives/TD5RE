@@ -20,6 +20,7 @@
 #include "td5_game.h"
 #include "td5_platform.h"
 #include "td5re.h"
+#include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -837,8 +838,7 @@ void td5_vfx_project_particles(int view_index) {
 int td5_vfx_proc_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char *e = getenv("TD5RE_FX_PROC");
-        cached = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        cached = td5_env_flag_on("TD5RE_FX_PROC");   /* default ON */
         TD5_LOG_I(LOG_TAG, "procedural FX %s (TD5RE_FX_PROC)", cached ? "ENABLED" : "disabled");
     }
     return cached;
@@ -1569,8 +1569,7 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
      * TD5RE_RAIN_DIR=0 restores the old (upward) behavior for A/B. */
     static int s_rain_dir = -1;
     if (s_rain_dir < 0) {
-        const char *e = getenv("TD5RE_RAIN_DIR");
-        s_rain_dir = (e && e[0] == '0') ? 0 : 1;   /* default ON = falls down */
+        s_rain_dir = td5_env_flag_on("TD5RE_RAIN_DIR");   /* default ON = falls down */
         TD5_LOG_I(LOG_TAG, "rain direction %s (TD5RE_RAIN_DIR)",
                   s_rain_dir ? "CORRECTED (down)" : "legacy (up)");
     }
@@ -3165,11 +3164,7 @@ void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor) {
 
     static float roof_lift = -1.0f;
     if (roof_lift < 0.0f) {
-        const char *e = getenv("TD5RE_WRECK_SMOKE_LIFT");
-        float v = (e && e[0]) ? (float)atof(e) : 24.0f;
-        if (v < 0.0f)   v = 0.0f;
-        if (v > 200.0f) v = 200.0f;
-        roof_lift = v;
+        roof_lift = td5_env_float("TD5RE_WRECK_SMOKE_LIFT", 24.0f, 0.0f, 200.0f);
     }
 
     uint8_t *ap = (uint8_t *)actor;

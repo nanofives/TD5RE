@@ -21,6 +21,7 @@
 #include "td5_platform.h"
 #include "td5_render.h"
 #include "td5_save.h"
+#include "td5_config.h"      /* shared TD5RE_* env-knob accessors */
 #include "td5_sound.h"
 #include "td5_hud.h"           /* per-viewport player-identity overlay (race) */
 #include "td5re.h"
@@ -2438,8 +2439,7 @@ static void frontend_nav_selftest_maybe(void) {
     int queue[FE_MAX_BUTTONS], qh = 0, qt = 0;
 
     if (s_enabled < 0) {
-        const char *e = getenv("TD5RE_NAV_SELFTEST");
-        s_enabled = (e && e[0] == '1') ? 1 : 0;
+        s_enabled = td5_env_flag_off("TD5RE_NAV_SELFTEST");
     }
     if (!s_enabled || s_current_screen == s_last_tested) return;
     /* Fire once the screen has settled: s_anim_complete, OR ~2s of being current
@@ -4493,8 +4493,7 @@ static void frontend_apply_nav_event(unsigned code) {
              * TD5RE_NAMEENTRY_FIX (default on; "0" restores the old locked sound). */
             static int s_nameentry_fix = -1;
             if (s_nameentry_fix < 0) {
-                const char *e = getenv("TD5RE_NAMEENTRY_FIX");
-                s_nameentry_fix = (e && e[0] == '0') ? 0 : 1;
+                s_nameentry_fix = td5_env_flag_on("TD5RE_NAMEENTRY_FIX");
                 TD5_LOG_I(LOG_TAG, "name-entry confirm SFX fix (task#25): %s",
                           s_nameentry_fix ? "on (pad confirms field, no locked sfx)"
                                           : "off (legacy locked sfx)");
@@ -13261,8 +13260,7 @@ static void frontend_mp_setup_render(float sx, float sy) {
     {
         static int s_draw_dim = -1;
         if (s_draw_dim < 0)
-            s_draw_dim = (getenv("TD5RE_MP_SETUP_DIM") != NULL &&
-                          getenv("TD5RE_MP_SETUP_DIM")[0] == '1');
+            s_draw_dim = td5_env_flag_off("TD5RE_MP_SETUP_DIM");
         if (s_draw_dim)
             fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy,
                          ((uint32_t)(0xB0 * anim_t) << 24) | 0x101018u, -1, 0, 0, 1, 1);
