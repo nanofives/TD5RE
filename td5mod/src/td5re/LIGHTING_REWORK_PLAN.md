@@ -5,8 +5,18 @@ per-pixel lighting, a material-driven reflection system, and ray-cast shadows �
 implemented as a **screen-space deferred pipeline** on top of the existing
 software T&L, with CPU ray casting reserved for load-time bakes where it wins.
 
-Session: `fix-1783039430-975268-7046`.
-Status: **P0 IMPLEMENTED in this worktree** (2026-07-02) — see §11. Delivered:
+Sessions: P0 `fix-1783039430-975268-7046` (merged @6582a2e), P2 `fix-1783052330-1155609-2495`.
+Status update (2026-07-03): **P2 IMPLEMENTED** — screen-space ray-marched sun
+shadows (ps_shadow.hlsl, MULT blend pass before the light pass; sun = the zone
+table's dominant directional slot, strength scaled by directional dominance so
+tunnels cast nothing) + per-light occlusion marching in ps_light (headlights
+blocked by geometry). Knobs: `[Lighting] SunShadows / ShadowStrength /
+LightOcclusion` (+ CLI, + `TD5RE_SHADOW_*` env). P2 was pulled AHEAD of P1:
+depth-only marching needs no per-pixel normals, so P1's face-normal derivation
+is not a prerequisite (normals, where present, only gate backface skip).
+P1 (full relight + face normals) and P3 (SSR reflections) remain.
+
+P0 status (2026-07-02, SHIPPED): **P0 IMPLEMENTED** — see §11. Delivered:
 td5_light2 + td5_material modules, zone-RGB colored vertex lighting (cars, per
 original scope), COLOR1 vertex packing (world normal + matid), wrapper G-buffer
 MRT (ps_modulate_g / ps_modulate_alpha_g), N.L in the deferred light pass,

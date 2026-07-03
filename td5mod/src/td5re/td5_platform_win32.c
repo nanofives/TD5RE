@@ -6468,7 +6468,8 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
                                   float focal, float center_x, float center_y,
                                   float vp_x, float vp_y,
                                   float depth_scale, float depth_bias,
-                                  const TD5_LightGPU *lights, int light_count)
+                                  const TD5_LightGPU *lights, int light_count,
+                                  int occl_steps, float pane_w, float pane_h)
 {
     /* Serial/immediate path only — the deferred light pass composites the whole
      * pane at once, so it must run on the main context (not a pane-recording
@@ -6491,6 +6492,10 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
     cb.misc[1] = (float)n;
     cb.misc[2] = vp_x;
     cb.misc[3] = vp_y;
+    /* [P2] per-light occlusion march config (0 steps = off) */
+    cb.ext[0] = (float)occl_steps;
+    cb.ext[1] = pane_w;
+    cb.ext[2] = pane_h;
 
     for (int i = 0; i < n; i++) {
         const TD5_LightGPU *L = &lights[i];
@@ -6507,6 +6512,41 @@ void td5_plat_render_set_gbuffer(int on)
     /* Serial/immediate path only (same constraint as the light pass). */
     if (td5_rcmd_recording()) return;
     Backend_SetGBufferEnabled(on);
+}
+
+void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
+                                  float focal, float center_x, float center_y,
+                                  float vp_x, float vp_y,
+                                  float depth_scale, float depth_bias,
+                                  const float sun_dir[3], float strength,
+                                  int steps, float max_dist, float thickness,
+                                  float start_off, float pane_w, float pane_h)
+{
+    /* Serial/immediate path only (same constraint as the light pass). */
+    if (td5_rcmd_recording()) return;
+    if (!sun_dir || strength <= 0.0f || steps <= 0) return;
+
+    ShadowCB cb;
+    memset(&cb, 0, sizeof(cb));
+    cb.camPosFocal[0] = cam_pos[0]; cb.camPosFocal[1] = cam_pos[1]; cb.camPosFocal[2] = cam_pos[2];
+    cb.camPosFocal[3] = focal;
+    cb.rightCx[0] = basis9[0]; cb.rightCx[1] = basis9[1]; cb.rightCx[2] = basis9[2]; cb.rightCx[3] = center_x;
+    cb.upCy[0]    = basis9[3]; cb.upCy[1]    = basis9[4]; cb.upCy[2]    = basis9[5]; cb.upCy[3]    = center_y;
+    cb.fwdDepthScale[0] = basis9[6]; cb.fwdDepthScale[1] = basis9[7]; cb.fwdDepthScale[2] = basis9[8];
+    cb.fwdDepthScale[3] = depth_scale;
+    cb.misc[0] = depth_bias;
+    cb.misc[1] = vp_x;
+    cb.misc[2] = vp_y;
+    cb.misc[3] = strength;
+    cb.sun[0] = sun_dir[0]; cb.sun[1] = sun_dir[1]; cb.sun[2] = sun_dir[2];
+    cb.sun[3] = max_dist;
+    cb.params[0] = (float)steps;
+    cb.params[1] = thickness;
+    cb.params[2] = start_off;
+    cb.params[3] = pane_w;
+    cb.params2[0] = pane_h;
+
+    Backend_ApplyShadowPass(&cb);
 }
 
 int td5_plat_render_upload_texture(int page_index, const void *pixels,

@@ -135,11 +135,76 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
     float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
+    /* [P2] per-light occlusion march config (Mode>=1 + knob; 0 = off). */
+    int occl = (td5_light2_active() && td5_light2_light_occlusion()) ? 8 : 0;
+
     td5_plat_render_apply_lights(cam, basis9,
                                  s_focal_length, s_center_x, s_center_y,
                                  (float)vp_x, (float)vp_y,
                                  depth_scale, NEAR_DEPTH_OFFSET,
-                                 gpu, n);
+                                 gpu, n,
+                                 occl, (float)s_viewport_width, (float)s_viewport_height);
+}
+
+/* [LIGHT2 P2] Screen-space ray-marched sun shadows for the CURRENT viewport.
+ * The "sun" is the zone table's dominant directional light for this pane
+ * (strongest enabled tl_contrib slot, world frame — the same authored data
+ * that lights the cars). Shadow strength scales with directional dominance so
+ * ambient-only zones (tunnels) cast nothing. Call AFTER the opaque world,
+ * BEFORE td5_render_apply_light_pass (headlight pools must not be darkened).
+ * March tuning env knobs (dev): TD5RE_SHADOW_STEPS / _DIST / _THICK. */
+void td5_render_apply_shadow_pass(int vp_x, int vp_y)
+{
+    if (!td5_light2_active() || !td5_light2_sun_shadows()) return;
+
+    /* Strongest enabled directional slot = the scene's sun. */
+    float best_mag2 = 0.0f;
+    float sun[3] = { 0.0f, 0.0f, 0.0f };
+    for (int s = 0; s < 3; s++) {
+        if (!s_tl_contrib[s].enabled) continue;
+        const float *v = s_tl_contrib[s].vec_world;
+        float m2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+        if (m2 > best_mag2) { best_mag2 = m2; sun[0] = v[0]; sun[1] = v[1]; sun[2] = v[2]; }
+    }
+    if (best_mag2 <= 1.0f) return;               /* no directional light (tunnel) */
+    float mag = sqrtf(best_mag2);
+    sun[0] /= mag; sun[1] /= mag; sun[2] /= mag;
+    if (sun[1] <= 0.05f) return;                 /* sun at/below horizon — skip */
+
+    /* Directional dominance: how much of the zone's lighting is the sun vs
+     * flat ambient. |vec_world| ~ 4*intensity (dir_shorts ~4096 / 1024). */
+    float dir_lum = mag * 0.25f;
+    float amb     = s_ambient_intensity > 0.0f ? s_ambient_intensity : 1.0f;
+    float dom     = dir_lum / (dir_lum + amb);
+    float strength = ((float)td5_light2_shadow_strength() / 100.0f) * dom;
+    if (strength <= 0.01f) return;
+
+    /* March tuning (env-overridable for look iteration). */
+    static float s_dist = -1.0f, s_thick = -1.0f;
+    static int   s_steps = -1;
+    if (s_steps < 0) {
+        const char *e;
+        s_steps = ((e = getenv("TD5RE_SHADOW_STEPS")) && e[0]) ? atoi(e)         : 16;
+        s_dist  = ((e = getenv("TD5RE_SHADOW_DIST"))  && e[0]) ? (float)atof(e)  : 2500.0f;
+        s_thick = ((e = getenv("TD5RE_SHADOW_THICK")) && e[0]) ? (float)atof(e)  : 600.0f;
+        if (s_steps < 4)  s_steps = 4;
+        if (s_steps > 64) s_steps = 64;
+        TD5_LOG_I(LOG_TAG, "light2: shadow pass steps=%d dist=%.0f thick=%.0f",
+                  s_steps, (double)s_dist, (double)s_thick);
+    }
+
+    float basis9[9];
+    for (int i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
+    float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
+    float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
+
+    td5_plat_render_apply_shadow(cam, basis9,
+                                 s_focal_length, s_center_x, s_center_y,
+                                 (float)vp_x, (float)vp_y,
+                                 depth_scale, NEAR_DEPTH_OFFSET,
+                                 sun, strength,
+                                 s_steps, s_dist, s_thick, 8.0f,
+                                 (float)s_viewport_width, (float)s_viewport_height);
 }
 
 /* [LIGHT2 P0] Per-frame gate for the G-buffer feed. Call once per rendered

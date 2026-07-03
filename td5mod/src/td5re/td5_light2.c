@@ -48,3 +48,64 @@ int td5_light2_active(void)
 {
     return td5_light2_mode() >= TD5_LIGHT2_ENHANCE;
 }
+
+/* ---- P2: screen-space ray-marched shadows ------------------------------ */
+
+static int s_sun_shadows     = 1;
+static int s_shadow_strength = 45;   /* percent, 0..100 */
+static int s_light_occlusion = 1;
+
+void td5_light2_set_sun_shadows(int on)
+{
+    s_sun_shadows = on ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "light2: sun_shadows=%d", s_sun_shadows);
+}
+
+int td5_light2_sun_shadows(void)
+{
+    /* TD5RE_SHADOW_SUN=0|1 A/B override */
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("TD5RE_SHADOW_SUN");
+        env = (e && e[0]) ? atoi(e) : -1;
+    }
+    if (env >= 0) return env;
+    return s_sun_shadows;
+}
+
+void td5_light2_set_shadow_strength(int percent)
+{
+    if (percent < 0)   percent = 0;
+    if (percent > 100) percent = 100;
+    s_shadow_strength = percent;
+}
+
+int td5_light2_shadow_strength(void)
+{
+    /* TD5RE_SHADOW_STRENGTH=0..100 A/B override */
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("TD5RE_SHADOW_STRENGTH");
+        env = (e && e[0]) ? atoi(e) : -1;
+    }
+    if (env >= 0 && env <= 100) return env;
+    return s_shadow_strength;
+}
+
+void td5_light2_set_light_occlusion(int on)
+{
+    s_light_occlusion = on ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "light2: light_occlusion=%d", s_light_occlusion);
+}
+
+int td5_light2_light_occlusion(void)
+{
+    /* TD5RE_SHADOW_LIGHTOCCL=0|1 A/B override */
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("TD5RE_SHADOW_LIGHTOCCL");
+        env = (e && e[0]) ? atoi(e) : -1;
+    }
+    if (env >= 0) return env;
+    return s_light_occlusion;
+}

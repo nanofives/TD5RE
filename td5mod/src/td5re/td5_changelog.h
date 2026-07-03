@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 3" },
+    { CL_ITEM,    "NEW lighting engine (phase 2): real-time SHADOWS." },
+    { CL_ITEM,    "  Cars, walls and buildings now cast shadows onto" },
+    { CL_ITEM,    "  the road and each other, ray-traced against the" },
+    { CL_ITEM,    "  scene each frame ([Lighting] SunShadows=0 = off," },
+    { CL_ITEM,    "  ShadowStrength=45 tunes how dark they are)" },
+    { CL_ITEM,    "Headlight beams are now blocked by geometry - a car" },
+    { CL_ITEM,    "  in front of you casts a shadow in your headlights" },
+    { CL_ITEM,    "  instead of the beam passing through it" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 2" },
     { CL_ITEM,    "NEW lighting engine (phase 1): tracks now show the" },
     { CL_ITEM,    "  colour lighting their artists authored in 1998" },

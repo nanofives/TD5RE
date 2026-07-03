@@ -6773,6 +6773,12 @@ int td5_game_run_race_frame(void) {
         if (!td5_render_photobooth_active())
             render_td6_props(td5_game_get_actor(g_actorSlotForView[vp]));
 
+        /* [LIGHT2 P2] Sun-shadow pass FIRST (multiplicative darkening of the
+         * opaque world), then the additive light pass — this order keeps
+         * headlight pools from being darkened by the shadow term. */
+        if (!td5_render_photobooth_active())
+            td5_render_apply_shadow_pass(s_viewports[vp].x, s_viewports[vp].y);
+
         /* [DEFERRED LIGHTS] Screen-space dynamic-light pass: now that the opaque
          * world (track + actors + props) has filled the depth buffer for this
          * pane, add the headlight/light contribution per pixel before the

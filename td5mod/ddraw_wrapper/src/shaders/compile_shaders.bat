@@ -47,6 +47,11 @@ echo   ps_composite OK
 if errorlevel 1 (echo FAILED: ps_light && exit /b 1)
 echo   ps_light OK
 
+REM --- Screen-space ray-marched sun shadows (lighting rework P2) ---
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_shadow_bytes.h /Vn g_ps_shadow ps_shadow.hlsl
+if errorlevel 1 (echo FAILED: ps_shadow && exit /b 1)
+echo   ps_shadow OK
+
 %FXC% %OPTS% /T ps_4_0 /E main /Fh ps_msdf_bytes.h /Vn g_ps_msdf ps_msdf.hlsl
 if errorlevel 1 (echo FAILED: ps_msdf && exit /b 1)
 echo   ps_msdf OK
