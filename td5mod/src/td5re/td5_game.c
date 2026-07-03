@@ -1105,9 +1105,12 @@ static const SSW_NavStep k_ssw_lan_menu[]   = { { TD5_SCREEN_MAIN_MENU, 3 },
                                                 { TD5_SCREEN_CONNECTION_BROWSER, 0 } };
 static const SSW_NavStep k_ssw_direct_ip[]  = { { TD5_SCREEN_MAIN_MENU, 3 },
                                                 { TD5_SCREEN_CONNECTION_BROWSER, 1 } };
-/* Changelog screen: 0=PENDING TO TEST (td5_fe_devscreens.c:172). */
+/* Changelog screen: 0=PENDING TO TEST, 2=UI GUIDE (dev builds;
+ * td5_fe_devscreens.c Screen_Changelog state 0 creation order). */
 static const SSW_NavStep k_ssw_pending[]    = { { TD5_SCREEN_MAIN_MENU, 7 },
                                                 { TD5_SCREEN_CHANGELOG, 0 } };
+static const SSW_NavStep k_ssw_ui_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
+                                                { TD5_SCREEN_CHANGELOG, 2 } };
 
 #define SSW_ROUTE(arr) do { *out_len = (int)(sizeof(arr)/sizeof(arr[0])); return arr; } while (0)
 static const SSW_NavStep *startscreen_route(int target, int *out_len)
@@ -1129,6 +1132,9 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_DIRECT_CONNECT:     SSW_ROUTE(k_ssw_direct_ip);
     case TD5_SCREEN_CHANGELOG:          SSW_ROUTE(k_ssw_changelog);
     case TD5_SCREEN_PENDING_TEST:       SSW_ROUTE(k_ssw_pending);
+#ifndef TD5RE_RELEASE
+    case TD5_SCREEN_UI_GUIDE:           SSW_ROUTE(k_ssw_ui_guide);
+#endif
     default: *out_len = 0; return NULL;   /* no route — direct jump */
     }
 }

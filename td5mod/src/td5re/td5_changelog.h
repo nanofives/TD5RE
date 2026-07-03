@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 3" },
+    { CL_ITEM,    "NEW dev screen: UI GUIDE (button on this screen) -" },
+    { CL_ITEM,    "  one-page gallery of every menu widget: buttons," },
+    { CL_ITEM,    "  selector arrows, MP host badge, confirm prompt" },
     { CL_ITEM,    "Removed two dead menu screens (language select and" },
     { CL_ITEM,    "  its legal splash) that nothing could ever reach -" },
     { CL_ITEM,    "  boot legal text and languages are unaffected" },

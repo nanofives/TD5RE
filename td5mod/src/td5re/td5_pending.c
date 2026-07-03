@@ -62,6 +62,7 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "UI GUIDE (changelog screen): widgets render + modal works",
     "Retired screens: StartScreen=3/4 lands on main menu",
     "InputScript: scripted drive (gas/brake/horn/keys) works",
     "StartScreen: jumped-to menus look same as navigated",

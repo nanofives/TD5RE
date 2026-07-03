@@ -342,7 +342,10 @@ typedef enum TD5_MeshDispatch {
 /** Frontend screen indices */
 typedef enum TD5_ScreenIndex {
     TD5_SCREEN_LOCALIZATION_INIT   = 0,
-    TD5_SCREEN_POSITIONER_DEBUG    = 1,
+    /* Slot 1 REPURPOSED 2026-07-03: dev UI GUIDE style-guide/widget gallery
+     * (Screen_UiGuide). Was the original's glyph-positioner dev tool
+     * (@0x415030), obsolete since the port renders text via TTF/vector. */
+    TD5_SCREEN_UI_GUIDE            = 1,
     TD5_SCREEN_ATTRACT_MODE        = 2,
     /* Slots 3/4 RETIRED 2026-07-03 (screens removed — zero nav edges in the
      * shipped game; boot legals show via td5_fmv_show_legal_screens). Values

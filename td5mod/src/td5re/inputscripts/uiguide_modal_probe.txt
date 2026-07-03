@@ -1,0 +1,12 @@
+# Probe: after the StartScreen=1 nav-walk lands on UI GUIDE, navigate to the
+# CONFIRM PROMPT button (3 DOWNs: disabled row is skipped by nav) and press
+# ENTER so the shared MP confirm modal shows for a screenshot.
+# Run with: td5re.exe --SkipIntro=1 --StartScreen=1 --InputScript=td5mod/src/td5re/inputscripts/uiguide_modal_probe.txt
+
+sync menu
+500  log uiguide probe: DOWN x3 to CONFIRM PROMPT
+500  key down press
++30  key down press
++30  key down press
++30  key enter press
+620  log uiguide probe: modal should be armed now

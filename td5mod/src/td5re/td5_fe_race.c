@@ -3690,7 +3690,7 @@ void Screen_MpModeVote(void) {
  * outside the given button rect, `th` px thick, following the button's
  * rectangular shape (four thin quads: top / bottom / left / right). All inputs
  * are 640x480 canvas px; sx/sy scale to the backbuffer. */
-static void mp_mode_draw_border_ring(float bx, float by, float bw, float bh,
+void mp_mode_draw_border_ring(float bx, float by, float bw, float bh,
                                      float out, float th, uint32_t color,
                                      float sx, float sy) {
     float x0 = bx - out, y0 = by - out;

@@ -2,8 +2,8 @@
  * td5_fe_menu.c -- frontend screens: boot flow + main menu + options.
  *
  * Split out of td5_frontend.c (2026-06). Handlers: LocalizationInit[0],
- * PositionerDebugTool[1], AttractModeDemo[2], LanguageSelect[3],
- * LegalCopyright[4], MainMenu[5], RaceTypeCategory[6], OptionsHub[12],
+ * AttractModeDemo[2] (UiGuide[1] is in td5_fe_devscreens.c; 3/4 retired),
+ * MainMenu[5], RaceTypeCategory[6], OptionsHub[12],
  * GameOptions[13], ControlOptions[14], SoundOptions[15], DisplayOptions[16],
  * TwoPlayerOptions[17], ControllerBinding[18], MusicTestExtras[19],
  * ExtrasGallery[22], StartupInit[28]. Shared frontend state comes from
@@ -736,42 +736,6 @@ void Screen_LocalizationInit(void) {
         td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         break;
 
-    default:
-        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
-        break;
-    }
-}
-
-void Screen_PositionerDebugTool(void) {
-    switch (s_inner_state) {
-    case 0: /* Load the menu font + clear (orig loads Positioner.tga as the cursor-bar
-             * colour source, clears the backbuffer black and draws two guide scanlines).
-             * The original creates NO on-screen buttons — the whole tool is keyboard-
-             * driven (arrows move/edit, ESC saves), so the port draws none either. */
-        frontend_init_return_screen(TD5_SCREEN_POSITIONER_DEBUG);
-        frontend_load_tga("Front_End/Positioner.tga", "Front_End/FrontEnd.zip");
-        s_anim_tick = 0;
-        s_inner_state = 1;
-        break;
-    case 1: /* present (orig case 1) */
-        frontend_present_buffer();
-        s_inner_state = 2;
-        break;
-    case 2: /* init glyph selection (orig g_positionerSelectedGlyphIndex = 0) */
-        s_anim_tick = 0;
-        s_anim_complete = 1;   /* enable the shared ESC handler (-> return screen = main menu) */
-        s_inner_state = 3;
-        break;
-    case 3: /* navigate the glyph strip (orig case 3: arrow bits LEFT=1/RIGHT=2/UP=4/DOWN=8;
-             * ←/→ = ±1, ↓/↑ = ±8). ESC is handled by the shared escape path -> main menu. */
-        if (s_input_ready && s_arrow_input) {
-            if (s_arrow_input & 1) s_anim_tick -= 1;   /* LEFT  */
-            if (s_arrow_input & 2) s_anim_tick += 1;   /* RIGHT */
-            if (s_arrow_input & 8) s_anim_tick += 8;   /* DOWN  */
-            if (s_arrow_input & 4) s_anim_tick -= 8;   /* UP    */
-            frontend_play_sfx(1);
-        }
-        break;
     default:
         td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         break;

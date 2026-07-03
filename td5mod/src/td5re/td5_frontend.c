@@ -86,7 +86,10 @@ typedef void (*ScreenFn)(void);
  */
 static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [ 0] */ Screen_LocalizationInit,
-    /* [ 1] */ Screen_PositionerDebugTool,
+    /* [ 1] */ Screen_UiGuide,        /* REPURPOSED 2026-07-03 — dev UI style
+                                       * guide / widget gallery (was the orig
+                                       * glyph positioner @0x415030, obsolete:
+                                       * port text is TTF/vector). */
     /* [ 2] */ Screen_AttractModeDemo,
     /* [ 3] */ NULL,   /* RETIRED 2026-07-03 — Screen_LanguageSelect had zero nav
                         * edges (orig picks language from the static Language.dll
@@ -3190,11 +3193,13 @@ int frontend_input_confirm_was_mouse(void) {
 
 static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     switch (screen) {
-    case TD5_SCREEN_POSITIONER_DEBUG:
     case TD5_SCREEN_ATTRACT_MODE:
     case TD5_SCREEN_EXTRAS_GALLERY:
     case TD5_SCREEN_RACE_RESULTS:
         return TD5_SCREEN_MAIN_MENU;
+
+    case TD5_SCREEN_UI_GUIDE:            /* dev gallery lives under CHANGELOG */
+        return TD5_SCREEN_CHANGELOG;
 
     case TD5_SCREEN_MAIN_MENU:
     case TD5_SCREEN_LOCALIZATION_INIT:
@@ -4064,7 +4069,7 @@ int fe_draw_arrow_proc(float x, float y, float w, float h,
                               int dir_right, uint32_t color);
 void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 float fe_measure_small_text(const char *text);
-static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
+void fe_draw_option_arrows(int btn_idx, float sx, float sy);
  void frontend_load_bg_gallery(void);
 /* Forward declarations for dialog text overlay renderers */
 static void frontend_render_cup_failed_overlay(float sx, float sy);
@@ -4750,7 +4755,6 @@ static int BarFade_Tick(void) {
 static int frontend_screen_wants_fade(TD5_ScreenIndex s) {
     switch (s) {
     case TD5_SCREEN_LOCALIZATION_INIT:   /* [0]  boot/localization init */
-    case TD5_SCREEN_POSITIONER_DEBUG:    /* [1]  dev glyph-positioner tool */
     case TD5_SCREEN_ATTRACT_MODE:        /* [2]  attract demo (routes into a race) */
     case TD5_SCREEN_STARTUP_INIT:        /* [28] boot init redirect */
     case TD5_SCREEN_CUP_FAILED:          /* [26] silent end dialog */
@@ -5406,7 +5410,7 @@ static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
 #define FE_VALUE_PANEL_W    224
 #define FE_VALUE_CENTER_X   506  /* FE_VALUE_PANEL_X + FE_VALUE_PANEL_W/2 */
 
-static void frontend_draw_value_centered(float sx, float sy, int y,
+void frontend_draw_value_centered(float sx, float sy, int y,
                                          const char *text, uint32_t color) {
     /* [2026-06-16] TTF-first: don't suppress on a deleted BodyText.png atlas. */
     if (!text || !text[0] || (!td5_font_ready() && s_font_page < 0)) return;
@@ -6162,7 +6166,7 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
 #endif /* !TD5RE_RELEASE */
 }
 
-static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
+void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
     /* Selector ◄► arrows drawn procedurally via the triangle-SDF shader
      * (ps_arrow). [2026-06-16] The legacy ArrowButtonz.tga 12x36 sprite-sheet
      * bitmap fallback was retired — procedural arrows are permanent now. */
@@ -8133,43 +8137,6 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
 #define FE_CREDITS_REEL_W   320.0f  /* 0x140 */
 
 
-/* [1] Positioner dev tool overlay — faithful to ScreenPositionerDebugTool @0x00415030 +
- * RenderPositionerGlyphStrip @0x00414F40. The original clears to BLACK, draws two white
- * guide scanlines (FillPrimaryFrontendScanline at y=0x10c=268 and y=0x114=276), then a
- * horizontal strip of the menu-font glyphs centred on the selected glyph (it walks
- * selected-8..selected+8 over the glyph set @0x465960 = ASCII 0x20..0x67) with the
- * selected glyph also shown enlarged below. It is a developer font-metrics editor: the
- * arrow keys move the selection / nudge metrics and ESC writes positioner.txt. There are
- * NO on-screen buttons in the original. [reimplemented faithful 2026-06-02] */
-static const char k_positioner_glyphs[] =
-    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_";
-
-static void frontend_render_positioner_overlay(float sx, float sy) {
-    const float W = 640.0f, H = 480.0f;
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    /* black background (orig ClearBackbufferWithColor(0)) */
-    fe_draw_quad(0.0f, 0.0f, W * sx, H * sy, 0xFF000000, -1, 0, 0, 0, 0);
-    /* two white guide scanlines */
-    fe_draw_quad(0.0f, 268.0f * sy, W * sx, 2.0f * sy, 0xFFFFFFFF, -1, 0, 0, 0, 0);
-    fe_draw_quad(0.0f, 276.0f * sy, W * sx, 2.0f * sy, 0xFFFFFFFF, -1, 0, 0, 0, 0);
-
-    int n = (int)sizeof(k_positioner_glyphs) - 1;
-    int sel = s_anim_tick % n;
-    if (sel < 0) sel += n;
-    /* glyph strip: selected-8 .. selected+8, centred on screen, selected highlighted */
-    const float step = 30.0f;          /* horizontal pitch between strip glyphs */
-    for (int k = -8; k <= 8; k++) {
-        int gi = sel + k;
-        if (gi < 0 || gi >= n) continue;
-        char ch[2] = { k_positioner_glyphs[gi], 0 };
-        float gx = (320.0f + (float)k * step) * sx;
-        uint32_t col = (k == 0) ? 0xFFFFFF00u : 0xFFFFFFFFu;
-        fe_draw_text_centered(gx, 232.0f * sy, ch, col, 1.0f * sx, 1.0f * sy);
-    }
-    /* selected glyph shown enlarged below (orig zoomed reference glyph) */
-    char selch[2] = { k_positioner_glyphs[sel], 0 };
-    fe_draw_text_centered(320.0f * sx, 300.0f * sy, selch, 0xFFFFFF00u, 2.2f * sx, 2.2f * sy);
-}
 
 static void frontend_render_extras_gallery_overlay(float sx, float sy) {
     /* Black background fills entire viewport */
@@ -9428,9 +9395,9 @@ void td5_frontend_render_ui_rects(void) {
         /* "Sorry / Session Locked" dialog [CONFIRMED @ 0x0041D630] */
         frontend_render_session_locked_overlay(sx, sy);
         break;
-    case TD5_SCREEN_POSITIONER_DEBUG:
-        /* Dev font-metrics editor [CONFIRMED @ 0x00415030] */
-        frontend_render_positioner_overlay(sx, sy);
+    case TD5_SCREEN_UI_GUIDE:
+        /* Dev UI style guide / widget gallery (td5_fe_devscreens.c) */
+        frontend_uiguide_render(sx, sy);
         break;
     default:
         break;
@@ -10115,8 +10082,10 @@ void td5_frontend_tick(void) {
 
 
 /* ========================================================================
- * [1] ScreenPositionerDebugTool (0x415030) -- Dev debug, unreachable
- * States: 6
+ * [1] ScreenPositionerDebugTool (0x415030) -- Dev debug, unreachable.
+ *     RETIRED 2026-07-03: the original's glyph-positioner is obsolete (port
+ *     text is TTF/vector); slot [1] now hosts the dev UI GUIDE gallery
+ *     (Screen_UiGuide, td5_fe_devscreens.c).
  * ======================================================================== */
 
 
