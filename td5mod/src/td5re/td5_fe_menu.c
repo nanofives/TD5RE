@@ -1663,7 +1663,9 @@ void Screen_GameOptions(void) {
              * (on/off, 0..2 levels, 5-state traffic) lives in td5_gameopts_cycle. */
             if (delta != 0 && active_button >= 0 && active_button < row_count) {
                 int opt = td5_gameopts_row_option(active_button);
-                if (opt >= 0) {
+                /* [PLAYER NAME 2026-07-02] The name row is Enter-to-edit — no
+                 * L/R cycle and no stray beep (its arrows are skipped too). */
+                if (opt >= 0 && opt != td5_gameopts_name_option()) {
                     /* Nav beep on any selector-row change, matching the original's
                      * central arrow handler (DXSound::Play(2) @ 0x0042687c). */
                     frontend_play_sfx(2);
@@ -1675,7 +1677,15 @@ void Screen_GameOptions(void) {
              * (prev/next btn ids are -1 on a single page, so they never match a
              * real s_button_index >= 0.) */
             if (s_button_index >= 0) {
-                if (s_button_index == td5_gameopts_ok_btn()) {
+                if (s_button_index < row_count &&
+                    td5_gameopts_row_option(s_button_index) ==
+                        td5_gameopts_name_option()) {
+                    /* [PLAYER NAME 2026-07-02] Enter on the PLAYER NAME row
+                     * opens the text-input editor (widget drawn in the render
+                     * path; state 10 ticks it until confirm/cancel). */
+                    td5_gameopts_name_edit_begin();
+                    s_inner_state = 10;
+                } else if (s_button_index == td5_gameopts_ok_btn()) {
                     /* Sync the committed game options into g_td5.ini (the global the
                      * boot-override at frontend init reads) and write them back to
                      * td5re.ini so the selection survives a relaunch. The original
@@ -1734,6 +1744,13 @@ void Screen_GameOptions(void) {
 
     case 9:
         td5_frontend_set_screen(TD5_SCREEN_OPTIONS_HUB);
+        break;
+
+    case 10: /* [PLAYER NAME 2026-07-02] Name editor active. The tick handles
+              * keystrokes, ESC-cancel and Enter-commit (commit also persists
+              * the INI key); returns 1 once the editor closed. */
+        if (td5_gameopts_name_edit_tick())
+            s_inner_state = 4;   /* redraw values (name may have changed) */
         break;
     }
 }

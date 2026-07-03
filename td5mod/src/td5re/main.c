@@ -287,6 +287,9 @@ void td5_ini_persist_options(void)
     /* [TUTORIAL 2026-06-29] Controller-overlay on/off (0=off, 1=on every race,
      * 2=dev force) — set by the Game Options TUTORIAL row. */
     td5_ini_write_int("GameOptions", "TutorialOverlay",  g_td5.ini.tutorial_overlay);
+    /* [PLAYER NAME 2026-07-02] Display name set on the Game Options PLAYER
+     * NAME row (also written immediately on edit-confirm in td5_frontend.c). */
+    td5_ini_write_str("GameOptions", "PlayerName",       g_td5.ini.player_name);
     td5_ini_write_int("Input",       "LaneAssist",       g_td5.ini.lane_assist);
 
     /* [CAR DAMAGE 2026-06-29] Global damage levels (Game Options rows). */
@@ -784,6 +787,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
     g_td5.ini.powerups           = td5_ini_int("GameOptions", "Powerups", 1);
     g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
+    /* [PLAYER NAME 2026-07-02] Game Options PLAYER NAME (string): shown as the
+     * human row in race results and prefilled in the post-race high-score name
+     * entry. Empty = unset ("P1" / "PLAYER" fallbacks apply). Case preserved. */
+    td5_ini_str("GameOptions", "PlayerName", "", g_td5.ini.player_name,
+                sizeof(g_td5.ini.player_name));
     /* LaneAssist (port-only accessibility aid, 2026-06-28): per-session default
      * enable for the optional lane-assist steering aid. Off by default (not
      * faithful). Runtime per-player toggle via keyboard 'L'; strength/look-ahead/

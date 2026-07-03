@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 2" },
+    { CL_ITEM,    "NEW Game Options: PLAYER NAME - your name shows in" },
+    { CL_ITEM,    "  race results and standings, and is prefilled in" },
+    { CL_ITEM,    "  the high-score name entry (still editable there)" },
     { CL_ITEM,    "Damage bar now sits at the top centre of the screen," },
     { CL_ITEM,    "  styled like the pause-menu bars (blue to red fill);" },
     { CL_ITEM,    "  the checkpoint timer and other top-centre HUD items" },
