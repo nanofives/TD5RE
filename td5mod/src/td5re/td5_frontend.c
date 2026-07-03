@@ -549,6 +549,21 @@ static int mp_session_player_accent(int p) {
     return s_mp_session.accent[k];
 }
 
+/* [PLAYER NAME 2026-07-02] Display name for a HUMAN racer slot on results /
+ * standings screens: the MP profile name when one is loaded (s_mp_player_name),
+ * else — slot 0 only — the Game Options PLAYER NAME, else NULL (callers fall
+ * back to the generic "P<n>" / "PLAYER <n>"). Port enhancement: the original
+ * results screen draws NO driver names at all (RunRaceResultsScreen
+ * @ 0x00422480 shows only the car name + stat rows), so this column and its
+ * name source are port-only. */
+const char *frontend_human_display_name(int slot) {
+    if (slot >= 0 && slot < TD5_MAX_HUMAN_PLAYERS && s_mp_player_name[slot][0])
+        return s_mp_player_name[slot];
+    if (slot == 0 && g_td5.ini.player_name[0])
+        return g_td5.ini.player_name;
+    return NULL;
+}
+
 /* ---- MP split-screen POSITION SELECT (#6/#8) ----
  * TD5RE_MP_POSITIONS: default ON; exactly "0" skips the picker screen AND forces
  * the identity viewport mapping (= legacy behaviour). Cached. */
@@ -4031,9 +4046,16 @@ static void frontend_render_cup_won_overlay(float sx, float sy);
  * NAME"). Set AFTER frontend_begin_text_input (which resets it to default). */
 char s_text_input_prompt[40] = "";
 
+/* [PLAYER NAME 2026-07-02] When 1, the active text field keeps lowercase even
+ * with the TD5RE_NAME_UPPERCASE fold on (the Game Options PLAYER NAME row must
+ * store the name exactly as typed — "nanofives" stays "nanofives"). Reset to 0
+ * by every frontend_begin_text_input so other fields keep faithful folding. */
+static int s_text_input_mixed_case = 0;
+
 void frontend_begin_text_input(char *buffer, int capacity) {
     memset(&s_text_input_ctx, 0, sizeof(s_text_input_ctx));
     s_text_input_prompt[0] = '\0';   /* default prompt unless the screen sets one */
+    s_text_input_mixed_case = 0;
     if (!buffer || capacity <= 1) { s_text_input_state = 0; return; }
     buffer[capacity - 1] = '\0';
     s_text_input_ctx.buffer = buffer;
@@ -4122,8 +4144,11 @@ void frontend_handle_text_input_key(void) {
         if (len >= s_text_input_ctx.capacity - 1) continue;
 
         /* [BUG #5] Fold lowercase letters to uppercase so keyboard-typed names
-         * match the original's uppercase-only name entry (knob-gated). */
-        if (ch >= 'a' && ch <= 'z' && frontend_name_uppercase_on())
+         * match the original's uppercase-only name entry (knob-gated).
+         * [PLAYER NAME 2026-07-02] Mixed-case fields (Game Options PLAYER NAME)
+         * skip the fold — the name is stored exactly as typed. */
+        if (ch >= 'a' && ch <= 'z' && frontend_name_uppercase_on() &&
+            !s_text_input_mixed_case)
             ch -= ('a' - 'A');
 
         memmove(&s_text_input_ctx.buffer[s_text_input_ctx.caret + 1],
@@ -6135,7 +6160,11 @@ static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
  * Screen_GameOptions is a thin FSM that drives this model via the API declared
  * in td5_frontend_internal.h. ===============================================*/
 enum {
-    GO_CHECKPOINTS = 0, GO_TRAFFIC, GO_COPS, GO_DIFFICULTY, GO_COLLISIONS,
+    /* [PLAYER NAME 2026-07-02] First row: the player's display name (Enter to
+     * edit — NOT a ◄► value selector). Shown in race results, prefilled in the
+     * high-score name entry. */
+    GO_PLAYER_NAME = 0,
+    GO_CHECKPOINTS, GO_TRAFFIC, GO_COPS, GO_DIFFICULTY, GO_COLLISIONS,
     GO_POWERUPS, GO_TOUGHNESS, GO_DEFORM, GO_DAMAGE_BAR, GO_LANEASSIST,
     GO_TUTORIAL, GO_OPTION_COUNT
 };
@@ -6174,6 +6203,7 @@ int td5_gameopts_row_option(int row) {
 
 static const char *go_label(int opt) {
     switch (opt) {
+        case GO_PLAYER_NAME: return "PLAYER NAME";
         case GO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
         case GO_TRAFFIC:     return SNK_TrafficButTxt;
         case GO_COPS:        return SNK_CopsButTxt;       /* orig label: POLICE */
@@ -6199,6 +6229,11 @@ void td5_gameopts_value(int opt, char *out, size_t n) {
     const char *v = "";
     int t;
     switch (opt) {
+        /* [PLAYER NAME 2026-07-02] Show the configured name as typed (case
+         * preserved); "-" when unset. */
+        case GO_PLAYER_NAME:
+            v = g_td5.ini.player_name[0] ? g_td5.ini.player_name : "-";
+            break;
         case GO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
         case GO_TRAFFIC:
             t = s_game_option_traffic;
@@ -6235,6 +6270,7 @@ void td5_gameopts_value(int opt, char *out, size_t n) {
 void td5_gameopts_cycle(int opt, int delta) {
     if (delta == 0) return;
     switch (opt) {
+        case GO_PLAYER_NAME: break;   /* Enter-to-edit row: L/R cycles nothing */
         case GO_CHECKPOINTS: s_game_option_checkpoint_timers ^= 1; break;
         case GO_TRAFFIC:
             s_game_option_traffic =
@@ -6263,6 +6299,46 @@ void td5_gameopts_cycle(int opt, int delta) {
         case GO_LANEASSIST: s_game_option_laneassist ^= 1; break;
         case GO_TUTORIAL:   s_game_option_tutorial ^= 1; break;
     }
+}
+
+/* [PLAYER NAME 2026-07-02] Game Options PLAYER NAME editor. The row is
+ * Enter-to-edit: it opens the standard gold text-input widget over the screen
+ * (same widget the post-race name entry / net nickname editors use; drawn from
+ * the render path). Edits go to a scratch buffer so ESC-cancel discards them;
+ * Enter commits to g_td5.ini.player_name and persists the INI key immediately
+ * (mirrors the nickname editor, so the name sticks even if the screen is later
+ * left via ESC instead of OK). Mixed case is allowed on purpose: results and
+ * the high-score prefill must show the name exactly as typed. */
+static char s_go_name_edit[16];
+
+int td5_gameopts_name_option(void) { return GO_PLAYER_NAME; }
+
+void td5_gameopts_name_edit_begin(void) {
+    snprintf(s_go_name_edit, sizeof s_go_name_edit, "%s", g_td5.ini.player_name);
+    frontend_begin_text_input(s_go_name_edit, (int)sizeof s_go_name_edit);
+    s_text_input_mixed_case = 1;
+    TD5_LOG_I(LOG_TAG, "GameOptions: PLAYER NAME edit begin (current=\"%s\")",
+              g_td5.ini.player_name);
+}
+
+int td5_gameopts_name_edit_tick(void) {
+    frontend_handle_text_input_key();
+    if (frontend_check_escape()) {               /* ESC = cancel, discard edits */
+        frontend_reset_text_input();
+        TD5_LOG_I(LOG_TAG, "GameOptions: PLAYER NAME edit cancelled");
+        return 1;
+    }
+    if (frontend_text_input_confirmed()) {
+        snprintf(g_td5.ini.player_name, sizeof g_td5.ini.player_name, "%s",
+                 s_go_name_edit);
+        td5_ini_write_str("GameOptions", "PlayerName", g_td5.ini.player_name);
+        frontend_play_sfx(5);
+        frontend_reset_text_input();
+        TD5_LOG_I(LOG_TAG, "GameOptions: PLAYER NAME set to \"%s\"",
+                  g_td5.ini.player_name);
+        return 1;
+    }
+    return 0;
 }
 
 /* (Re)create the button set for the current page: the page's option rows
@@ -6325,6 +6401,17 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
         int  opt = start + r;
         if (opt >= GO_OPTION_COUNT) break;
         td5_gameopts_value(opt, val, sizeof val);
+        /* [PLAYER NAME 2026-07-02] The name value renders in the SMALL font so
+         * its case shows exactly as typed ("nanofives" stays lowercase) — the
+         * big value font displays caps only. Same font the results table and
+         * the name-entry widget use. Centred on the shared value column. */
+        if (opt == GO_PLAYER_NAME && val[0] && strcmp(val, "-") != 0) {
+            fe_draw_small_text((float)FE_VALUE_CENTER_X * sx
+                                   - fe_measure_small_text(val) * 0.5f * fe_glyph_sx(sx, sy),
+                               (float)(s_buttons[r].y + 10) * sy, val,
+                               0xFFFFFFFF, sx, sy);
+            continue;
+        }
         frontend_draw_value_centered(sx, sy, s_buttons[r].y + 6, val, 0xFFFFFFFF);
     }
     /* "PAGE x / y" footer (only when there is more than one page). */
@@ -9260,6 +9347,9 @@ void td5_frontend_render_ui_rects(void) {
         break;
     case TD5_SCREEN_GAME_OPTIONS:
         frontend_render_game_options_overlay(sx, sy);
+        /* [PLAYER NAME 2026-07-02] Name-editor widget on top (drawn from the
+         * render path like every text input so it composites into the frame). */
+        if (s_text_input_state != 0) frontend_render_text_input();
         break;
     case TD5_SCREEN_SOUND_OPTIONS:
         frontend_render_sound_options_overlay(sx, sy);
@@ -9524,8 +9614,14 @@ void td5_frontend_render_ui_rects(void) {
         case TD5_SCREEN_GAME_OPTIONS:
             /* [TUTORIAL 2026-06-29] Paginated: the option rows on the current
              * page are button indices 0..row_count-1 (all selectors with ◄►);
-             * OK / PREV / NEXT follow and get no arrows. */
-            for (int i = 0; i < td5_gameopts_row_count(); i++) fe_draw_option_arrows(i, sx, sy);
+             * OK / PREV / NEXT follow and get no arrows.
+             * [PLAYER NAME 2026-07-02] The PLAYER NAME row is Enter-to-edit,
+             * not a L/R value cycle — skip its ◄► (also leaves nav_selector
+             * unset so LEFT/RIGHT move focus off the row normally). */
+            for (int i = 0; i < td5_gameopts_row_count(); i++) {
+                if (td5_gameopts_row_option(i) == GO_PLAYER_NAME) continue;
+                fe_draw_option_arrows(i, sx, sy);
+            }
             break;
         case TD5_SCREEN_CONTROLLER_BINDING:
             /* Draw the action labels+values on top of the (opaque-when-selected)

@@ -256,6 +256,10 @@ const char *td6_pattern_name(int pat);
 
 extern char s_lobby_password[32];
 extern char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][16];
+/* [PLAYER NAME 2026-07-02] Human display name for results/standings rows: MP
+ * profile name if loaded, else (slot 0) the Game Options PLAYER NAME, else
+ * NULL (caller falls back to "P<n>" / "PLAYER <n>"). Impl in td5_frontend.c. */
+const char *frontend_human_display_name(int slot);
 extern const uint32_t k_mp_player_colors[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_fe_logic_ticks;
 extern int      s_mp_car_player;
@@ -735,6 +739,10 @@ void td5_gameopts_build_page(void);            /* (re)create buttons for current
 void td5_gameopts_reset_page(void);            /* jump back to page 0 (on screen entry) */
 int  td5_gameopts_page_prev(void);             /* page--; rebuild; 1 if it moved */
 int  td5_gameopts_page_next(void);             /* page++; rebuild; 1 if it moved */
+/* [PLAYER NAME 2026-07-02] The PLAYER NAME row (Enter-to-edit, no ◄►). */
+int  td5_gameopts_name_option(void);           /* option index of the name row */
+void td5_gameopts_name_edit_begin(void);       /* open the text-input editor */
+int  td5_gameopts_name_edit_tick(void);        /* 1 when editor closed (ok/esc) */
 extern int             s_sound_option_music_volume;
 extern int             s_sound_option_sfx_mode;
 extern int             s_sound_option_sfx_volume;

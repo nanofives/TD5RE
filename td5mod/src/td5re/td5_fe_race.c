@@ -4351,13 +4351,15 @@ void frontend_cup_winners_render(float sx, float sy) {
         int slot = order[i];
         char nm[24];
         /* [CUP STANDINGS NAMES 2026-06-25] Show each racer's PROFILE NAME instead of
-         * the bare "PLAYER N" — same source the per-race results table uses
-         * (s_mp_player_name[slot]). Human slots with no stored name fall back to
+         * the bare "PLAYER N" — same source the per-race results table uses.
+         * [PLAYER NAME 2026-07-02] Routed through frontend_human_display_name so
+         * a single-player cup (no MP profile loaded) shows the Game Options
+         * PLAYER NAME. Human slots with no name anywhere fall back to
          * "PLAYER N"; AI cup opponents (slots past the human count) show "CPU". */
         if (slot < s_num_human_players) {
-            const char *pn = (slot < TD5_MAX_HUMAN_PLAYERS) ? s_mp_player_name[slot] : "";
-            if (pn && pn[0]) snprintf(nm, sizeof nm, "%s", pn);
-            else             snprintf(nm, sizeof nm, "PLAYER %d", slot + 1);
+            const char *pn = frontend_human_display_name(slot);
+            if (pn) snprintf(nm, sizeof nm, "%s", pn);
+            else    snprintf(nm, sizeof nm, "PLAYER %d", slot + 1);
         } else {
             snprintf(nm, sizeof nm, "CPU");
         }
@@ -4426,10 +4428,13 @@ static void mp_roleselect_row(float sx, float sy, int p, float y, const char *va
      * single change fixes the blank/generic names the user reported on BOTH
      * screens. Empty name falls back to "PLAYER N" (mirrors the original's
      * empty-name -> default fallback at ScreenPostRaceNameEntry 0x00413BC0). */
-    if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS && s_mp_player_name[p][0])
-        snprintf(nb, sizeof nb, "%s", s_mp_player_name[p]);
-    else
-        snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
+    /* [PLAYER NAME 2026-07-02] frontend_human_display_name also covers the
+     * Game Options PLAYER NAME for slot 0 when no MP profile is loaded. */
+    {
+        const char *pn = frontend_human_display_name(p);
+        if (pn) snprintf(nb, sizeof nb, "%s", pn);
+        else    snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
+    }
     /* [MP HOST INDICATOR 2026-06-28] Slot 0 is the host (it confirms with OK).
      * Tag its row with the same gold HOST pill badge the splitscreen selectors
      * use, in the left margin ahead of the name column, so the host is obvious on
@@ -7602,13 +7607,14 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
                 uint32_t rc = (slot == my_slot) ? CC_SELF
                             : is_human ? k_mp_player_colors[slot < TD5_MAX_HUMAN_PLAYERS ? slot : 0]
                             : CC_AI;
-                /* NAME — humans show their profile name (fallback P%d); the AI
-                 * cop shows "CPU". Left-aligned at the title edge. */
+                /* NAME — humans show their profile name (or, slot 0, the Game
+                 * Options PLAYER NAME — [PLAYER NAME 2026-07-02]; fallback P%d);
+                 * the AI cop shows "CPU". Left-aligned at the title edge. */
                 char nb[40];
                 if (is_human) {
-                    const char *pn = (slot < TD5_MAX_HUMAN_PLAYERS) ? s_mp_player_name[slot] : "";
-                    if (pn && pn[0]) snprintf(nb, sizeof(nb), "%s", pn);
-                    else             snprintf(nb, sizeof(nb), "P%d", slot + 1);
+                    const char *pn = frontend_human_display_name(slot);
+                    if (pn) snprintf(nb, sizeof(nb), "%s", pn);
+                    else    snprintf(nb, sizeof(nb), "P%d", slot + 1);
                 } else {
                     snprintf(nb, sizeof(nb), "CPU");
                 }
@@ -7725,13 +7731,14 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
                                : is_human ? k_mp_player_colors[slot < TD5_MAX_HUMAN_PLAYERS ? slot : 0]
                                : MAICOL;
 
-            /* NAME — humans show their PROFILE NAME (fallback "P%d" if unset);
+            /* NAME — humans show their PROFILE NAME (or, slot 0, the Game
+             * Options PLAYER NAME — [PLAYER NAME 2026-07-02]; fallback "P%d");
              * AI rows show "CPU" (the car moves to its own column below).
              * LEFT-aligned at the title edge (drawn directly, not via MP_CTR). */
             if (is_human) {
-                const char *pn = (slot < TD5_MAX_HUMAN_PLAYERS) ? s_mp_player_name[slot] : "";
-                if (pn && pn[0]) snprintf(buf, sizeof(buf), "%s", pn);
-                else             snprintf(buf, sizeof(buf), "P%d", slot + 1);
+                const char *pn = frontend_human_display_name(slot);
+                if (pn) snprintf(buf, sizeof(buf), "%s", pn);
+                else    snprintf(buf, sizeof(buf), "P%d", slot + 1);
             } else {
                 snprintf(buf, sizeof(buf), "CPU");
             }
@@ -7858,8 +7865,16 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
                            : is_human ? k_mp_player_colors[slot < TD5_MAX_HUMAN_PLAYERS ? slot : 0]
                            : AICOL;
 
-        /* NAME — humans "P1".."P6"; AI the car's short name. */
-        if (is_human) snprintf(buf, sizeof(buf), "P%d", slot + 1);
+        /* NAME — humans show the Game Options PLAYER NAME (or MP profile name)
+         * when set, else "P1".."P6"; AI the car's short name. [PLAYER NAME
+         * 2026-07-02] Port-only column: the original results screen draws no
+         * driver names at all (RunRaceResultsScreen @ 0x00422480 shows only
+         * the car name + stat rows). */
+        if (is_human) {
+            const char *pn = frontend_human_display_name(slot);
+            if (pn) snprintf(buf, sizeof(buf), "%s", pn);
+            else    snprintf(buf, sizeof(buf), "P%d", slot + 1);
+        }
         else          snprintf(buf, sizeof(buf), "%s", frontend_summary_car_name(slot));
         fe_draw_small_text(SUM_CTR(c_name, buf), y, buf, row_color, sx, sy);
 
@@ -8858,9 +8873,21 @@ void Screen_PostRaceNameEntry(void) {
             }
         }
 
-        /* Player qualifies: prompt for name */
+        /* Player qualifies: prompt for name.
+         * [PLAYER NAME 2026-07-02] Prefill with the Game Options PLAYER NAME
+         * when set (still editable), else the legacy "PLAYER" default. The
+         * original prefills NOTHING here (buffer 0x496ff8 keeps its previous
+         * in-session content; only an EMPTY confirm falls back to
+         * g_localComputerName, strcpy @ 0x00413F28-0x00413F46, and that global
+         * is populated solely by the MP connection browser @ 0x00418DB8) — the
+         * port's explicit prefill is deliberate UX, the options name playing
+         * the computer-name role. */
         memset(s_post_race_name, 0, sizeof(s_post_race_name));
-        strcpy(s_post_race_name, "PLAYER");
+        if (g_td5.ini.player_name[0])
+            snprintf(s_post_race_name, sizeof(s_post_race_name), "%s",
+                     g_td5.ini.player_name);
+        else
+            strcpy(s_post_race_name, "PLAYER");
         frontend_begin_text_input(s_post_race_name, (int)sizeof(s_post_race_name));
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -8878,7 +8905,19 @@ void Screen_PostRaceNameEntry(void) {
              * (td5_frontend_render_ui_rects NAME_ENTRY dispatch). */
         frontend_handle_text_input_key();
         if (frontend_text_input_confirmed()) {
-            /* Copy entered name, or fallback to default */
+            /* [PLAYER NAME 2026-07-02] Empty-confirm fallback, mirroring the
+             * original's strcpy(g_localComputerName) @ 0x00413F28: an all-
+             * deleted name refills from the Game Options PLAYER NAME (or the
+             * legacy "PLAYER") so an empty string never reaches the table. */
+            if (!s_post_race_name[0]) {
+                if (g_td5.ini.player_name[0])
+                    snprintf(s_post_race_name, sizeof(s_post_race_name), "%s",
+                             g_td5.ini.player_name);
+                else
+                    strcpy(s_post_race_name, "PLAYER");
+                TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: empty confirm -> \"%s\"",
+                          s_post_race_name);
+            }
             frontend_play_sfx(5);
             s_inner_state = 3;
         }
