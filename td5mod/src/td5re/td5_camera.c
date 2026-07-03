@@ -3612,7 +3612,23 @@ void td5_camera_set_preset(int pi)
         s_flyin_preset_reloaded[rv] = 0;
         g_raceCameraPresetId[rv]    = 0;
         g_raceCameraPresetMode[rv]  = 0;
+        /* [FIX 2026-07-02 end-race-now stale camera yaw] Original's
+         * UpdateRaceCameraTransitionState [CONFIRMED @ 0x0042B580 RunRaceFrame,
+         * unconditional per-frame call; 0x00401FB6/0x00401FD9 write DAT_00482f70]
+         * continuously re-clamps this yaw offset to 0 (or 0x800 during an
+         * actively-held rear-view) every frame for any non-finished actor. The
+         * port only reproduces that clamp while the race-start countdown is
+         * active (see td5_camera_update_transition_state), so once a race ends
+         * with the CarDamage finish-orbit engaged (cam_finish_orbit_step drifts
+         * this same value — port-only feature, no original equivalent), the
+         * drifted value survives into the next race untouched. Zero it here at
+         * the single per-race camera-setup call site (td5_game.c InitRace ->
+         * td5_camera_set_preset(0)) so every new race starts at the same yaw a
+         * freshly-spawned (non-finished) actor would read in the original. */
+        g_camYawOffset[rv] = 0;
     }
+    TD5_LOG_I(LOG_TAG, "camera preset reset: cleared g_camYawOffset for %d viewports (race init)",
+              TD5_MAX_VIEWPORTS);
 
     /* Seed per-view chase-camera state from the spawned actors so the first
        UpdateChaseCamera frame starts with correct radius/height/orbit values
