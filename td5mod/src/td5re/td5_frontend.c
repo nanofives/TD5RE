@@ -2272,14 +2272,42 @@ static int frontend_spatial_pick(int dx, int dy) {
             offaxis = pdy < 0 ? -pdy : pdy; /* vertical drift (row)        */
         }
         if (primary <= 0) continue;         /* not in the requested direction */
-        /* Penalize perpendicular drift heavily so movement stays in the same
-         * column (up/down) or row (left/right); nearest along the travel axis
-         * breaks ties. Columns here are ~230px apart vs ~32px rows, so an 8x
-         * weight makes a column jump strictly costlier than any in-column step. */
-        cost = offaxis * 8 + primary;
-        if (best < 0 || cost < best_cost) { best_cost = cost; best = i; }
+        /* [UI RULES 2026-07-03] NEAREST ROW/COLUMN FIRST. The old single-stage
+         * cost (offaxis*8 + primary) let a farther full-width row beat a nearer
+         * half-width pair: DOWN from a 224-wide row skipped the 109+6+109
+         * two-column row right below it (drift ~57 -> cost 532) and landed on
+         * the full-width row after it (drift 0 -> cost 114). Stage 1 records
+         * the nearest travel distance; stage 2 below only considers candidates
+         * within one row-band of it and picks the least drift, so movement
+         * always stops at the visually-next row (the spanned-row post-step in
+         * frontend_nav_vertical then lands on the pair's leftmost item). */
+        cost = offaxis;                     /* stage-2 tiebreak metric */
+        if (best < 0 || primary < best_cost) { best_cost = primary; best = i; }
+        (void)cost;
     }
-    return best;
+    if (best < 0) return -1;
+    {
+        /* Stage 2: among candidates within the nearest row/column band
+         * (tolerance covers mixed heights on one visual row), least off-axis
+         * drift wins; nearer primary breaks ties. */
+        int min_primary = best_cost, i2, best2 = -1, best2_cost = 0;
+        for (i2 = 0; i2 < FE_MAX_BUTTONS; i2++) {
+            int bx, by, pdx, pdy, primary, offaxis, cost2;
+            if (i2 == current) continue;
+            if (!s_buttons[i2].active || s_buttons[i2].disabled) continue;
+            bx = s_buttons[i2].x + s_buttons[i2].w / 2;
+            by = s_buttons[i2].y + s_buttons[i2].h / 2;
+            pdx = bx - cx;
+            pdy = by - cy;
+            if (dy != 0) { primary = pdy * dy; offaxis = pdx < 0 ? -pdx : pdx; }
+            else         { primary = pdx * dx; offaxis = pdy < 0 ? -pdy : pdy; }
+            if (primary <= 0) continue;
+            if (primary > min_primary + 16) continue;   /* not the nearest band */
+            cost2 = offaxis * 64 + primary;
+            if (best2 < 0 || cost2 < best2_cost) { best2_cost = cost2; best2 = i2; }
+        }
+        return best2;
+    }
 }
 
 /* Move the selection in a 2D direction using frontend_spatial_pick; returns 1
@@ -9401,7 +9429,11 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_session_locked_overlay(sx, sy);
         break;
     /* (UI GUIDE / MP TOOLS render in the POST-button overlay pass below —
-     * their captions/modal must composite over the button fills.) */
+     * their captions/modal must composite over the button fills. Only MP
+     * TOOLS' widget BOX draws here, UNDER its demo buttons.) */
+    case TD5_SCREEN_MP_GUIDE:
+        frontend_mpguide_render_box(sx, sy);
+        break;
     default:
         break;
     }

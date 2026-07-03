@@ -65,10 +65,14 @@ ends up not lining up under the title. The values are **fixed**, so just use the
 - **Two-column items:** horizontal gap between side-by-side items is the same
   **6px** (the 224 column splits as `109 + 6 + 109`).
 - **Arrowed (selector) rows:** keep **6px clear to the right** of the button
-  before the next element.
+  before the next element. The row's **value text starts at X=348,
+  LEFT-justified** (never centred in a floating value column).
 - **BACK button:** placed **after the last box** on the screen with the same
-  <=6px gap. It may move down as content grows but **never past Y=410** —
-  nothing is drawn below the Y410 content floor.
+  <=6px gap. It may move down as content grows but **never past Y=460** —
+  nothing is drawn below the Y460 content floor.
+- **Vertical keyboard nav stops at the nearest row** (frontend_spatial_pick is
+  nearest-row-first) — a half-width pair right below a full row is landed on,
+  not skipped; the spanned-row rule then picks the pair's leftmost item.
 - The dev **UI GUIDE** screen (`--StartScreen=1`, or CHANGELOG → UI GUIDE →
   MP TOOLS for the MP widgets) renders these rules with visible margin lines,
   6px gap markers and per-button WxH labels — screenshot it after frontend

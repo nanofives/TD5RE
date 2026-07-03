@@ -826,6 +826,7 @@ void Screen_UiGuide(void);              /* dev UI style guide (slot 1, td5_fe_de
 void frontend_uiguide_render(float sx, float sy);
 void Screen_MpGuide(void);              /* dev MP-widgets gallery (slot 44, td5_fe_devscreens.c) */
 void frontend_mpguide_render(float sx, float sy);
+void frontend_mpguide_render_box(float sx, float sy);  /* pre-button pass: box under the demo buttons */
 void Screen_RaceTypeCategory(void);
 void Screen_SoundOptions(void);
 void Screen_StartupInit(void);

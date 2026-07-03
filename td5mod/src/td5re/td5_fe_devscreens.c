@@ -544,17 +544,17 @@ static void devscreens_draw_margin_guides(float sx, float sy) {
     /* verticals: column left X=120, panel left X=348 */
     fe_draw_quad(120.0f * sx,     60.0f * sy,     2.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
     fe_draw_quad(348.0f * sx,     60.0f * sy,     2.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
-    /* horizontals: title Y=17, content top Y=97, content floor Y=410
-     * ([UI RULES 2026-07-03] BACK follows the last box; nothing below 410). */
+    /* horizontals: title Y=17, content top Y=97, content floor Y=460
+     * ([UI RULES 2026-07-03] BACK follows the last box; nothing below 460). */
     fe_draw_quad(8.0f * sx,       17.0f * sy,     624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
     fe_draw_quad(8.0f * sx,       97.0f * sy,     624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
-    fe_draw_quad(8.0f * sx,       410.0f * sy,    624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(8.0f * sx,       460.0f * sy,    624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
     /* labels */
     fe_draw_small_text(123.0f * sx,  62.0f * sy, "X120", k_label, sx, sy);
     fe_draw_small_text(351.0f * sx,  62.0f * sy, "X348", k_label, sx, sy);
     fe_draw_small_text(  9.0f * sx,  20.0f * sy, "Y17",  k_label, sx, sy);
     fe_draw_small_text(  9.0f * sx, 100.0f * sy, "Y97",  k_label, sx, sy);
-    fe_draw_small_text(  9.0f * sx, 396.0f * sy, "Y410 FLOOR", k_label, sx, sy);
+    fe_draw_small_text(  9.0f * sx, 446.0f * sy, "Y460 FLOOR", k_label, sx, sy);
     fe_draw_small_text(565.0f * sx, 465.0f * sy, "640x480", k_label, sx, sy);
 }
 
@@ -616,9 +616,9 @@ void Screen_UiGuide(void) {
         /* NOTE: the StartScreen nav walker routes MP GUIDE (screen 44) through
          * THIS button (index 5 — created sixth); keep the creation order. */
         s_ug_btn_mptools  = frontend_create_button("MP TOOLS",        FE_MENU_BTN_X, 249, FE_MENU_BTN_W, FE_MENU_BTN_H);
-        /* BACK after the last box (spec panel ends at 373) with the <=6px gap;
-         * bottom edge 378+32 = 410 sits exactly on the content floor. */
-        s_ug_btn_back     = frontend_create_button("BACK",            176, 378, 112, FE_MENU_BTN_H);
+        /* BACK after the last box (spec panel ends at 397) with the <=6px gap;
+         * bottom edge 435, well above the Y460 content floor. */
+        s_ug_btn_back     = frontend_create_button("BACK",            176, 403, 112, FE_MENU_BTN_H);
         s_selected_button = s_ug_btn_standard;
         s_ug_sel_value    = 1;
         s_ug_flash_until  = 0;
@@ -667,13 +667,14 @@ void frontend_uiguide_render(float sx, float sy) {
                                0xFFE3D708u, sx, sy);
 
     /* Selector row: caption drawn here with the loop's exact label formula
-     * (the shared loop never auto-draws selector captions), plus the standard
-     * centred value column + the canonical option arrows. */
+     * (the shared loop never auto-draws selector captions), the canonical
+     * option arrows, and the value at X=348 LEFT-JUSTIFIED ([UI RULES]:
+     * selector values start at the panel edge, always left-aligned). */
     if (s_ug_btn_selector >= 0 && s_buttons[s_ug_btn_selector].active) {
         FE_Button *b = &s_buttons[s_ug_btn_selector];
         uiguide_button_caption(b, "DEMO SELECTOR", 0xFFFFFFFFu, sx, sy);
-        frontend_draw_value_centered(sx, sy, b->y + 6,
-                                     k_ug_sel_values[s_ug_sel_value], 0xFFFFFFFF);
+        fe_draw_text(348.0f * sx, (float)b->y * sy,
+                     k_ug_sel_values[s_ug_sel_value], 0xFFFFFFFFu, sx, sy);
         fe_draw_option_arrows(s_ug_btn_selector, sx, sy);
     }
 
@@ -684,31 +685,40 @@ void frontend_uiguide_render(float sx, float sy) {
     uiguide_gap_marker(344.0f, 135.0f,   6.0f, 32.0f, sx, sy);  /* right of ◄► button  */
     uiguide_gap_marker(120.0f, 281.0f, 224.0f, 6.0f, sx, sy);   /* button -> box       */
 
-    /* Spec panel BELOW the button column (last box before BACK): canonical
-     * metrics + the new layout rules on the left half, type specimens right. */
-    fe_draw_button_frame_fill_scaled(120.0f * sx, 287.0f * sy, 480.0f * sx, 86.0f * sy,
+    /* Spec panels BELOW the button column (last boxes before BACK): metrics
+     * left, type specimens right — TWO 237-wide frames with the canonical 6px
+     * column gap (the 9-slice frame clamps visibly past ~250px wide, and the
+     * split doubles as a box-level demo of the column rule). Text blocks are
+     * vertically CENTRED in the boxes (equal ~11px pads). */
+    fe_draw_button_frame_fill_scaled(120.0f * sx, 287.0f * sy, 237.0f * sx, 110.0f * sy,
                                      1, 0xFF392152u, 1.0f, sx, sy);
-    fe_draw_small_text(132.0f * sx, 296.0f * sy, "CANONICAL METRICS + RULES",     0xFFE3D708u, sx, sy);
-    fe_draw_small_text(132.0f * sx, 310.0f * sy, "TITLE X=126 Y=17 #E3D708",      0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 323.0f * sy, "BUTTON X=120 W=224 H=32",       0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 336.0f * sy, "GAPS ROWS/COLS/ARROWS <= 6PX",  0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 349.0f * sy, "BACK AFTER LAST BOX, FLOOR Y=410", 0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 362.0f * sy, "SELECTOR NEEDS OPTION ARROWS",  0xFFFFFFFFu, sx, sy);
+    fe_draw_button_frame_fill_scaled(363.0f * sx, 287.0f * sy, 237.0f * sx, 110.0f * sy,
+                                     1, 0xFF392152u, 1.0f, sx, sy);
+    uiguide_gap_marker(357.0f, 287.0f, 6.0f, 110.0f, sx, sy);
+    fe_draw_small_text(132.0f * sx, 298.0f * sy, "CANONICAL METRICS + RULES",       0xFFE3D708u, sx, sy);
+    fe_draw_small_text(132.0f * sx, 316.0f * sy, "TITLE X=126 Y=17 #E3D708",        0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 331.0f * sy, "BUTTON X=120 W=224 H=32",         0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 346.0f * sy, "GAPS ROWS/COLS/ARROWS <= 6PX",    0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 361.0f * sy, "SELECTOR VALUE AT X348 LEFT-JUST", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 376.0f * sy, "BACK AFTER LAST BOX, FLOOR Y=460", 0xFFFFFFFFu, sx, sy);
 
-    /* Type specimens (right half of the panel). */
-    fe_draw_text(380.0f * sx, 296.0f * sy, "MAIN FONT ABC 0123", 0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(380.0f * sx, 318.0f * sy, "SMALL FONT ABC 0123", 0xFF8890A0u, sx, sy);
+    /* Type specimens (right panel, clear separation between the faces). */
+    fe_draw_text(375.0f * sx, 300.0f * sy, "MAIN FONT ABC 0123", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(375.0f * sx, 330.0f * sy, "SMALL FONT ABC 0123", 0xFF8890A0u, sx, sy);
     {
         int keep = s_fe_preserve_case;
         s_fe_preserve_case = 1;   /* mixed-case flag (player-name feature) */
-        fe_draw_text(380.0f * sx, 332.0f * sy, "Mixed Case Text", 0xFFE3D708u, sx, sy);
+        fe_draw_text(375.0f * sx, 348.0f * sy, "Mixed Case Text", 0xFFE3D708u, sx, sy);
         s_fe_preserve_case = keep;
     }
-    fe_draw_small_text(380.0f * sx, 356.0f * sy, "MP WIDGETS: SEE MP TOOLS", 0xFF8890A0u, sx, sy);
+    fe_draw_small_text(375.0f * sx, 376.0f * sy, "MP WIDGETS: SEE MP TOOLS", 0xFF8890A0u, sx, sy);
+
+    /* [UI RULES] 6px gap marker between the panel and BACK. */
+    uiguide_gap_marker(120.0f, 397.0f, 224.0f, 6.0f, sx, sy);
 
     /* Press feedback flash (right of BACK on the bottom row). */
     if (s_ug_flash_until && now < s_ug_flash_until)
-        fe_draw_text_centered(450.0f * sx, 386.0f * sy, s_ug_flash_text,
+        fe_draw_text_centered(450.0f * sx, 410.0f * sy, s_ug_flash_text,
                               0xFFE3D708u, sx, sy);
     else
         s_ug_flash_until = 0;
@@ -730,10 +740,14 @@ void Screen_MpGuide(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_reset_buttons();
         frontend_init_return_screen(TD5_SCREEN_MP_GUIDE);   /* parent = UI_GUIDE */
-        /* [UI RULES] <=6px row gaps; BACK follows the last box (+6). */
-        s_mg_btn_twoline = frontend_create_button("", FE_MENU_BTN_X,  97, FE_MENU_BTN_W, 54);
-        s_mg_btn_modal   = frontend_create_button("CONFIRM PROMPT", FE_MENU_BTN_X, 157, FE_MENU_BTN_W, FE_MENU_BTN_H);
-        s_mg_btn_back    = frontend_create_button("BACK", 176, 195, 112, FE_MENU_BTN_H);
+        /* [UI RULES] The MP widget demos live INSIDE one box (frame drawn in
+         * the PRE-button pass by frontend_mpguide_render_box so the buttons
+         * composite on top): buttons on the left half, badge/swatches right.
+         * <=6px row gaps; BACK follows the box (+6). Two-line height is 48
+         * (54 read as too tall) with a 26px name->description spacing. */
+        s_mg_btn_twoline = frontend_create_button("", 132, 118, FE_MENU_BTN_W, 48);
+        s_mg_btn_modal   = frontend_create_button("CONFIRM PROMPT", 132, 172, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        s_mg_btn_back    = frontend_create_button("BACK", 176, 227, 112, FE_MENU_BTN_H);
         s_selected_button = s_mg_btn_twoline;
         s_mg_modal_armed  = 0;
         s_ug_flash_until  = 0;
@@ -778,6 +792,16 @@ void Screen_MpGuide(void) {
     }
 }
 
+/* PRE-button pass: the MP box frames — drawn UNDER the demo buttons so they
+ * composite on top of the fill (called from the pre-button overlay switch).
+ * Two 237-wide frames + 6px gap (the 9-slice clamps past ~250px wide). */
+void frontend_mpguide_render_box(float sx, float sy) {
+    fe_draw_button_frame_fill_scaled(120.0f * sx, 97.0f * sy, 237.0f * sx, 124.0f * sy,
+                                     1, 0xFF392152u, 1.0f, sx, sy);
+    fe_draw_button_frame_fill_scaled(363.0f * sx, 97.0f * sy, 237.0f * sx, 124.0f * sy,
+                                     1, 0xFF392152u, 1.0f, sx, sy);
+}
+
 void frontend_mpguide_render(float sx, float sy) {
     extern const uint32_t k_mp_player_colors[];   /* shared MP accent palette (td5_fe_race.c seam) */
     uint32_t now = td5_plat_time_ms();
@@ -786,50 +810,50 @@ void frontend_mpguide_render(float sx, float sy) {
     devscreens_draw_margin_guides(sx, sy);
     devscreens_draw_button_dims(sx, sy);
 
-    /* [UI RULES] 6px gap markers between the stacked rows and before BACK. */
-    uiguide_gap_marker(120.0f, 151.0f, 224.0f, 6.0f, sx, sy);
-    uiguide_gap_marker(120.0f, 189.0f, 224.0f, 6.0f, sx, sy);
+    /* [UI RULES] 6px gap markers: between the box rows and box -> BACK. */
+    uiguide_gap_marker(132.0f, 166.0f, 224.0f, 6.0f, sx, sy);
+    uiguide_gap_marker(120.0f, 221.0f, 224.0f, 6.0f, sx, sy);
 
     frontend_draw_screen_title("MP TOOLS", FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                0xFFE3D708u, sx, sy);
 
-    /* Two-line MP-style labels: name + small description, block-centred with
-     * the mode-vote screen's offsets (name y+5, desc y+29 on a 50-tall button;
-     * this one is 54 so +7/+31 keeps the block centred). */
+    /* Box header (the box frame itself is pre-button, see _render_box). */
+    fe_draw_small_text(132.0f * sx, 103.0f * sy, "MP WIDGETS", 0xFFE3D708u, sx, sy);
+
+    /* Two-line MP-style labels on the 48-tall button: name at +6, small
+     * description at +32 — 26px apart (mode-vote's 24 + 2 per review). */
     if (s_mg_btn_twoline >= 0 && s_buttons[s_mg_btn_twoline].active) {
         FE_Button *b = &s_buttons[s_mg_btn_twoline];
         float cx = ((float)b->x + (float)b->w * 0.5f) * sx;
         float tw = fe_measure_text("TWO-LINE BUTTON", sx, sy);
         fe_draw_text((float)b->x * sx + ((float)b->w * sx - tw) * 0.5f,
-                     ((float)b->y + 7.0f) * sy, "TWO-LINE BUTTON", 0xFFFFFFFFu, sx, sy);
-        uiguide_small_centered(cx, ((float)b->y + 31.0f) * sy,
+                     ((float)b->y + 6.0f) * sy, "TWO-LINE BUTTON", 0xFFFFFFFFu, sx, sy);
+        uiguide_small_centered(cx, ((float)b->y + 32.0f) * sy,
                                "SMALL DESCRIPTION LINE", 0xFFB8C0CCu, sx, sy);
     }
 
-    /* HOST pill (the shared td5_vui_host_badge used by the MP selectors). */
-    fe_draw_small_text(348.0f * sx, 100.0f * sy, "HOST BADGE:", 0xFF8890A0u, sx, sy);
-    td5_vui_host_badge(440.0f, 98.0f, 13.0f, sx, sy);
+    /* Right box: HOST pill, accents + nested vote rings. */
+    fe_draw_small_text(375.0f * sx, 118.0f * sy, "HOST BADGE:", 0xFF8890A0u, sx, sy);
+    td5_vui_host_badge(463.0f, 116.0f, 13.0f, sx, sy);
 
-    /* Player accent palette + the mode-vote border rings, nested per voter
-     * exactly like Screen_MpModeVote (margin 3, thickness 2, gap 1). */
-    fe_draw_small_text(348.0f * sx, 130.0f * sy, "ACCENTS + VOTE RINGS:", 0xFF8890A0u, sx, sy);
+    fe_draw_small_text(375.0f * sx, 146.0f * sy, "ACCENTS + VOTE RINGS:", 0xFF8890A0u, sx, sy);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     for (p = 0; p < TD5_MAX_HUMAN_PLAYERS && p < 8; p++) {
         uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
         if (!rgb) rgb = k_mp_player_colors[p] & 0x00FFFFFFu;
-        fe_draw_quad((352.0f + (float)p * 34.0f) * sx, 152.0f * sy,
-                     22.0f * sx, 15.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
+        fe_draw_quad((379.0f + (float)p * 28.0f) * sx, 168.0f * sy,
+                     20.0f * sx, 14.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
     }
     /* two nested rings on swatch 0 = two players voted for it */
-    mp_mode_draw_border_ring(352.0f, 152.0f, 22.0f, 15.0f, 3.0f, 2.0f,
+    mp_mode_draw_border_ring(379.0f, 168.0f, 20.0f, 14.0f, 3.0f, 2.0f,
                              (k_mp_player_colors[0] & 0x00FFFFFFu) | 0xFF000000u, sx, sy);
-    mp_mode_draw_border_ring(352.0f, 152.0f, 22.0f, 15.0f, 6.0f, 2.0f,
+    mp_mode_draw_border_ring(379.0f, 168.0f, 20.0f, 14.0f, 6.0f, 2.0f,
                              (k_mp_player_colors[1] & 0x00FFFFFFu) | 0xFF000000u, sx, sy);
-    fe_draw_small_text(352.0f * sx, 180.0f * sy, "RINGS NEST OUTWARD PER VOTER", 0xFF8890A0u, sx, sy);
+    fe_draw_small_text(375.0f * sx, 196.0f * sy, "RINGS NEST OUTWARD PER VOTER", 0xFF8890A0u, sx, sy);
 
-    /* Press feedback flash. */
+    /* Press feedback flash (right of BACK). */
     if (s_ug_flash_until && now < s_ug_flash_until)
-        fe_draw_text_centered(232.0f * sx, 345.0f * sy, s_ug_flash_text,
+        fe_draw_text_centered(450.0f * sx, 234.0f * sy, s_ug_flash_text,
                               0xFFE3D708u, sx, sy);
     else
         s_ug_flash_until = 0;
