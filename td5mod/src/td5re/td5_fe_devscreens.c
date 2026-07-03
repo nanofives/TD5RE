@@ -526,26 +526,27 @@ static void uiguide_small_centered(float cx_px, float y_px, const char *t,
     fe_draw_small_text(cx_px - fe_measure_small_text(t) * 0.5f * gsx, y_px, t, col, sx, sy);
 }
 
-/* Margin guides: the canonical drawing bounds, as requested — canvas border
- * (640x480), the button-column left edge (X=120), the description-panel left
- * edge (X=348), the title line (Y=17), content top (Y=97) and the canonical
- * bottom row (Y=377). Subtle cyan so they read as guides, not content. */
+/* Margin guides: the canonical drawing bounds — canvas border (640x480), the
+ * button-column left edge (X=120), the description-panel left edge (X=348),
+ * the title line (Y=17), content top (Y=97) and the canonical bottom row
+ * (Y=377). Bright cyan, 2px, so the lines are unambiguous on any display
+ * (the first pass at 30% alpha read as invisible in review). */
 static void devscreens_draw_margin_guides(float sx, float sy) {
-    const uint32_t k_line  = 0x5000E0E0u;
-    const uint32_t k_label = 0xA0AFEFEFu;
+    const uint32_t k_line  = 0xD000F0F0u;
+    const uint32_t k_label = 0xFF9FF7F7u;
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     /* canvas bounds */
-    fe_draw_quad(0.0f,            0.0f,           640.0f * sx, 1.0f * sy,   k_line, -1, 0, 0, 1, 1);
-    fe_draw_quad(0.0f,            479.0f * sy,    640.0f * sx, 1.0f * sy,   k_line, -1, 0, 0, 1, 1);
-    fe_draw_quad(0.0f,            0.0f,           1.0f * sx,   480.0f * sy, k_line, -1, 0, 0, 1, 1);
-    fe_draw_quad(639.0f * sx,     0.0f,           1.0f * sx,   480.0f * sy, k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(0.0f,            0.0f,           640.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(0.0f,            478.0f * sy,    640.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(0.0f,            0.0f,           2.0f * sx,   480.0f * sy, k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(638.0f * sx,     0.0f,           2.0f * sx,   480.0f * sy, k_line, -1, 0, 0, 1, 1);
     /* verticals: column left X=120, panel left X=348 */
-    fe_draw_quad(120.0f * sx,     60.0f * sy,     1.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
-    fe_draw_quad(348.0f * sx,     60.0f * sy,     1.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(120.0f * sx,     60.0f * sy,     2.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(348.0f * sx,     60.0f * sy,     2.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
     /* horizontals: title Y=17, content top Y=97, bottom row Y=377 */
-    fe_draw_quad(8.0f * sx,       17.0f * sy,     624.0f * sx, 1.0f * sy,   k_line, -1, 0, 0, 1, 1);
-    fe_draw_quad(8.0f * sx,       97.0f * sy,     624.0f * sx, 1.0f * sy,   k_line, -1, 0, 0, 1, 1);
-    fe_draw_quad(8.0f * sx,       377.0f * sy,    624.0f * sx, 1.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(8.0f * sx,       17.0f * sy,     624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(8.0f * sx,       97.0f * sy,     624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(8.0f * sx,       377.0f * sy,    624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
     /* labels */
     fe_draw_small_text(123.0f * sx,  62.0f * sy, "X120", k_label, sx, sy);
     fe_draw_small_text(351.0f * sx,  62.0f * sy, "X348", k_label, sx, sy);
@@ -627,32 +628,33 @@ void frontend_uiguide_render(float sx, float sy) {
         fe_draw_option_arrows(s_ug_btn_selector, sx, sy);
     }
 
-    /* Right-side spec panel: standard 9-slice frame + the canonical metrics,
-     * printed live so a screenshot documents them. */
-    fe_draw_button_frame_fill_scaled(348.0f * sx, 97.0f * sy, 252.0f * sx, 152.0f * sy,
+    /* Spec panel BELOW the button column, above the BACK row (per review):
+     * one wide standard 9-slice frame spanning the content width, canonical
+     * metrics on the left half, type specimens on the right half. */
+    fe_draw_button_frame_fill_scaled(120.0f * sx, 256.0f * sy, 480.0f * sx, 112.0f * sy,
                                      1, 0xFF392152u, 1.0f, sx, sy);
-    fe_draw_small_text(360.0f * sx, 110.0f * sy, "CANONICAL METRICS",            0xFFE3D708u, sx, sy);
-    fe_draw_small_text(360.0f * sx, 130.0f * sy, "TITLE X=126 Y=17 #E3D708",     0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(360.0f * sx, 146.0f * sy, "BUTTON X=120 W=224 H=32",      0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(360.0f * sx, 162.0f * sy, "PANEL X=348  BACK X=176 Y=377", 0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(360.0f * sx, 178.0f * sy, "SELECTOR NEEDS OPTION ARROWS", 0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(360.0f * sx, 194.0f * sy, "SFX 2=NAV 3=OK 5=BACK 10=NO",  0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(360.0f * sx, 218.0f * sy, "CYAN LINES = LAYOUT MARGINS",  0xFF8890A0u, sx, sy);
-    fe_draw_small_text(360.0f * sx, 232.0f * sy, "MP WIDGETS: SEE MP TOOLS",     0xFF8890A0u, sx, sy);
+    fe_draw_small_text(132.0f * sx, 268.0f * sy, "CANONICAL METRICS",            0xFFE3D708u, sx, sy);
+    fe_draw_small_text(132.0f * sx, 286.0f * sy, "TITLE X=126 Y=17 #E3D708",     0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 300.0f * sy, "BUTTON X=120 W=224 H=32",      0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 314.0f * sy, "BACK X=176 Y=377  PANEL X=348", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 328.0f * sy, "SELECTOR NEEDS OPTION ARROWS", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 342.0f * sy, "SFX 2=NAV 3=OK 5=BACK 10=NO",  0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 356.0f * sy, "CYAN LINES = LAYOUT MARGINS",  0xFF8890A0u, sx, sy);
 
-    /* Type specimens. */
-    fe_draw_text(348.0f * sx, 300.0f * sy, "MAIN FONT ABC 0123", 0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(348.0f * sx, 324.0f * sy, "SMALL FONT ABC 0123", 0xFF8890A0u, sx, sy);
+    /* Type specimens (right half of the panel). */
+    fe_draw_text(380.0f * sx, 268.0f * sy, "MAIN FONT ABC 0123", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(380.0f * sx, 296.0f * sy, "SMALL FONT ABC 0123", 0xFF8890A0u, sx, sy);
     {
         int keep = s_fe_preserve_case;
         s_fe_preserve_case = 1;   /* mixed-case flag (player-name feature) */
-        fe_draw_text(348.0f * sx, 340.0f * sy, "Mixed Case Text", 0xFFE3D708u, sx, sy);
+        fe_draw_text(380.0f * sx, 312.0f * sy, "Mixed Case Text", 0xFFE3D708u, sx, sy);
         s_fe_preserve_case = keep;
     }
+    fe_draw_small_text(380.0f * sx, 342.0f * sy, "MP WIDGETS: SEE MP TOOLS", 0xFF8890A0u, sx, sy);
 
-    /* Press feedback flash. */
+    /* Press feedback flash (right of BACK on the bottom row). */
     if (s_ug_flash_until && now < s_ug_flash_until)
-        fe_draw_text_centered(232.0f * sx, 345.0f * sy, s_ug_flash_text,
+        fe_draw_text_centered(450.0f * sx, 384.0f * sy, s_ug_flash_text,
                               0xFFE3D708u, sx, sy);
     else
         s_ug_flash_until = 0;
