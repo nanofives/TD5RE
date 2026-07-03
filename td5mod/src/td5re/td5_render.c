@@ -1336,26 +1336,39 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     if (s_level_pass_active && out_count == 4 &&
         td5_light2_active() && td5_light_street_lights() &&
         td5_material_id_for_page(tex_page) == TD5_MAT_CUTOUT) {
-        float wmin = out_vx[0], wmax = out_vx[0];
+        float xmin = out_vx[0], xmax = out_vx[0];
         float hmin = out_vy[0], hmax = out_vy[0];
+        float zmin = out_vz[0], zmax = out_vz[0];
         for (int i2 = 1; i2 < 4; i2++) {
-            if (out_vx[i2] < wmin) wmin = out_vx[i2];
-            if (out_vx[i2] > wmax) wmax = out_vx[i2];
+            if (out_vx[i2] < xmin) xmin = out_vx[i2];
+            if (out_vx[i2] > xmax) xmax = out_vx[i2];
             if (out_vy[i2] < hmin) hmin = out_vy[i2];
             if (out_vy[i2] > hmax) hmax = out_vy[i2];
+            if (out_vz[i2] < zmin) zmin = out_vz[i2];
+            if (out_vz[i2] > zmax) zmax = out_vz[i2];
         }
-        float w = wmax - wmin, h = hmax - hmin;
-        if (w >= 250.0f && w <= 900.0f && h >= 80.0f && h <= 500.0f &&
+        /* Width = the larger HORIZONTAL spread (view X or Z): world-oriented
+         * halo quads angled to the camera split their width across both axes
+         * — measuring view-X alone missed them. Height stays view-Y. */
+        float wx_ext = xmax - xmin, wz_ext = zmax - zmin;
+        float w = (wx_ext > wz_ext) ? wx_ext : wz_ext;
+        float h = hmax - hmin;
+        if (w >= 250.0f && w <= 900.0f && h >= 80.0f && h <= 600.0f &&
             h < 0.7f * w) {
             float vx0 = 0, vy0 = 0, vz0 = 0;
             for (int i2 = 0; i2 < 4; i2++) { vx0 += out_vx[i2]; vy0 += out_vy[i2]; vz0 += out_vz[i2]; }
             vx0 *= 0.25f; vy0 *= 0.25f; vz0 *= 0.25f;
-            float wx = s_camera_pos[0] + vx0 * s_camera_basis[0] + vy0 * s_camera_basis[3] + vz0 * s_camera_basis[6];
-            float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
-            float wz = s_camera_pos[2] + vx0 * s_camera_basis[2] + vy0 * s_camera_basis[5] + vz0 * s_camera_basis[8];
-            float above_cam = s_camera_pos[1] - wy;    /* up = -Y */
-            if (above_cam > -150.0f && above_cam < 2500.0f)
-                td5_light_lamps_capture(wx, wy, wz);
+            /* Distance cap: only capture NEAR halos — far sprites carry
+             * projection slop and produced phantom lights (a capture landed
+             * 200k units away). Every lamp is captured on approach anyway. */
+            if (vz0 > s_near_clip && vz0 < 15000.0f) {
+                float wx = s_camera_pos[0] + vx0 * s_camera_basis[0] + vy0 * s_camera_basis[3] + vz0 * s_camera_basis[6];
+                float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
+                float wz = s_camera_pos[2] + vx0 * s_camera_basis[2] + vy0 * s_camera_basis[5] + vz0 * s_camera_basis[8];
+                float above_cam = s_camera_pos[1] - wy;    /* up = -Y */
+                if (above_cam > -150.0f && above_cam < 2500.0f)
+                    td5_light_lamps_capture(wx, wy, wz);
+            }
         }
     }
 
