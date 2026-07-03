@@ -556,6 +556,25 @@ static void devscreens_draw_margin_guides(float sx, float sy) {
     fe_draw_small_text(565.0f * sx, 465.0f * sy, "640x480", k_label, sx, sy);
 }
 
+/* Dimension labels: "WxH" for every live button on the screen, right-aligned
+ * into the left gutter (x < 120) so they never collide with captions, values
+ * or the option arrows. Same cyan as the margin guides. */
+static void devscreens_draw_button_dims(float sx, float sy) {
+    const uint32_t k_label = 0xFF9FF7F7u;
+    float gsx = (sx < sy) ? sx : sy;
+    int i;
+    for (i = 0; i < s_button_count; i++) {
+        char dim[16];
+        if (!s_buttons[i].active || s_buttons[i].hidden) continue;
+        snprintf(dim, sizeof dim, "%dx%d", s_buttons[i].w, s_buttons[i].h);
+        fe_draw_small_text((float)s_buttons[i].x * sx
+                               - (fe_measure_small_text(dim) + 8.0f) * gsx,
+                           ((float)s_buttons[i].y
+                               + ((float)s_buttons[i].h - 10.0f) * 0.5f) * sy,
+                           dim, k_label, sx, sy);
+    }
+}
+
 void Screen_UiGuide(void) {
     switch (s_inner_state) {
     case 0:
@@ -612,6 +631,7 @@ void frontend_uiguide_render(float sx, float sy) {
     uint32_t now = td5_plat_time_ms();
 
     devscreens_draw_margin_guides(sx, sy);
+    devscreens_draw_button_dims(sx, sy);
 
     /* Canonical screen title -- position/colour per FRONTEND_SCREEN_GUIDE.md. */
     frontend_draw_screen_title("UI GUIDE", FE_TITLE_LEFT_X * sx, 17.0f * sy,
@@ -729,6 +749,7 @@ void frontend_mpguide_render(float sx, float sy) {
     int p;
 
     devscreens_draw_margin_guides(sx, sy);
+    devscreens_draw_button_dims(sx, sy);
 
     frontend_draw_screen_title("MP TOOLS", FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                0xFFE3D708u, sx, sy);
