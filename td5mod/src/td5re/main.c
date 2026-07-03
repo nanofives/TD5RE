@@ -278,6 +278,8 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Lighting", "SunShadows",     g_td5.ini.sun_shadows);
     td5_ini_write_int("Lighting", "ShadowStrength", g_td5.ini.shadow_strength);
     td5_ini_write_int("Lighting", "LightOcclusion", g_td5.ini.light_occlusion);
+    td5_ini_write_int("Lighting", "Reflections",    g_td5.ini.reflections);
+    td5_ini_write_int("Lighting", "WetRoads",       g_td5.ini.wet_roads);
 
     /* Game options */
     td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
@@ -366,6 +368,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SunShadows",           &g_td5.ini.sun_shadows },
         { "ShadowStrength",       &g_td5.ini.shadow_strength },
         { "LightOcclusion",       &g_td5.ini.light_occlusion },
+        { "Reflections",          &g_td5.ini.reflections },
+        { "WetRoads",             &g_td5.ini.wet_roads },
         /* GameOptions */
         { "Laps",                 &g_td5.ini.laps },
         { "CheckpointTimers",     &g_td5.ini.checkpoint_timers },
@@ -785,6 +789,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.sun_shadows      = td5_ini_int("Lighting", "SunShadows", 1);
     g_td5.ini.shadow_strength  = td5_ini_int("Lighting", "ShadowStrength", 45);
     g_td5.ini.light_occlusion  = td5_ini_int("Lighting", "LightOcclusion", 1);
+    /* [LIGHT2 P3] screen-space reflection knobs */
+    g_td5.ini.reflections      = td5_ini_int("Lighting", "Reflections", 1);
+    g_td5.ini.wet_roads        = td5_ini_int("Lighting", "WetRoads", 1);
 
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
@@ -1122,12 +1129,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     td5_light2_set_sun_shadows(g_td5.ini.sun_shadows);
     td5_light2_set_shadow_strength(g_td5.ini.shadow_strength);
     td5_light2_set_light_occlusion(g_td5.ini.light_occlusion);
+    td5_light2_set_reflections(g_td5.ini.reflections);
+    td5_light2_set_wet_roads(g_td5.ini.wet_roads);
     dbglog("Lighting: enabled=%d headlights=%d dark_mode=%d auto=%d mode=%d "
-           "sun_shadows=%d strength=%d light_occl=%d",
+           "sun_shadows=%d strength=%d light_occl=%d refl=%d wet=%d",
            g_td5.ini.lighting_enabled, g_td5.ini.headlights,
            g_td5.ini.light_dark_mode, g_td5.ini.lighting_auto,
            g_td5.ini.lighting2_mode, g_td5.ini.sun_shadows,
-           g_td5.ini.shadow_strength, g_td5.ini.light_occlusion);
+           g_td5.ini.shadow_strength, g_td5.ini.light_occlusion,
+           g_td5.ini.reflections, g_td5.ini.wet_roads);
 
     /* String CLI knob (the int-only override table above can't carry it):
      * --PlayerCarArchive=<code> overrides [Game] PlayerCarArchive so parallel

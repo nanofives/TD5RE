@@ -62,4 +62,15 @@ int  td5_light2_shadow_strength(void);
 void td5_light2_set_light_occlusion(int on);
 int  td5_light2_light_occlusion(void);
 
+/* ---- P3: screen-space reflections -------------------------------------- */
+/* [Lighting] Reflections / --Reflections=N: 1 = SSR pass (car paint, glass,
+ * wet roads mirror the scene). Only active when Mode>=1. */
+void td5_light2_set_reflections(int on);
+int  td5_light2_reflections(void);
+
+/* [Lighting] WetRoads / --WetRoads=N: 1 = rainy weather makes up-facing
+ * roads reflective (needs Reflections=1). */
+void td5_light2_set_wet_roads(int on);
+int  td5_light2_wet_roads(void);
+
 #endif /* TD5_LIGHT2_H */

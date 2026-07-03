@@ -1214,7 +1214,13 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         vert_data >= g_rs->vtx_work &&
         vert_data + vert_count <= g_rs->vtx_work + g_rs->vtx_pack_cap) {
         have_pack = 1;
-        poly_matid = (uint32_t)td5_material_id_for_page(tex_page) << 24;
+        /* [P3] Vehicle bodies: the light basis carries a body->world rotation
+         * exactly for rotated (vehicle/prop) meshes — classify those CARBODY
+         * so car paint gets its SSR sheen; everything else by texture-page
+         * class. */
+        poly_matid = (uint32_t)(s_light_basis_has_rot
+                                ? TD5_MAT_CARBODY
+                                : td5_material_id_for_page(tex_page)) << 24;
     }
 
     for (int i = 0; i < vert_count; i++) {

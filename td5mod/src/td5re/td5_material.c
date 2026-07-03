@@ -17,13 +17,16 @@
 static uint8_t s_page_mat[MAT_PAGE_MAX];
 static int     s_cache_init = 0;
 
-/* Indexed by TD5_MAT_*; tuned later (P1/P3) — P0 only wires the pipeline. */
+/* Indexed by TD5_MAT_*. [P3] reflectivity feeds the SSR pass: DEFAULT world
+ * geometry is 0 (roads reflect only via the wet-weather boost, buildings never
+ * turn glossy); CARBODY gives car paint its sheen; GLASS is strongest. */
 static const TD5_MaterialParams k_params[TD5_MAT_COUNT] = {
     /* NONE    */ { 0.00f, 1.00f, 0.00f, 1.00f },
-    /* DEFAULT */ { 0.10f, 0.85f, 0.05f, 0.00f },
+    /* DEFAULT */ { 0.10f, 0.85f, 0.00f, 0.00f },
     /* CUTOUT  */ { 0.02f, 0.95f, 0.00f, 0.00f },
     /* GLASS   */ { 0.60f, 0.20f, 0.40f, 0.00f },
     /* GLOW    */ { 0.00f, 1.00f, 0.00f, 1.00f },
+    /* CARBODY */ { 0.50f, 0.30f, 0.30f, 0.00f },
 };
 
 static void mat_cache_ensure(void)

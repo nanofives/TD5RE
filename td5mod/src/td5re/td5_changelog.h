@@ -33,6 +33,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 3" },
+    { CL_ITEM,    "NEW lighting engine (phase 3): REFLECTIONS. Car" },
+    { CL_ITEM,    "  paint and glass mirror the world, and in the rain" },
+    { CL_ITEM,    "  the road turns wet and reflective, all ray-traced" },
+    { CL_ITEM,    "  against the scene ([Lighting] Reflections=0 = off," },
+    { CL_ITEM,    "  WetRoads=0 keeps roads dry)" },
+    { CL_ITEM,    "Roads and buildings now have surface data too, so" },
+    { CL_ITEM,    "  shadows and headlights shade them correctly" },
     { CL_ITEM,    "NEW lighting engine (phase 2): real-time SHADOWS." },
     { CL_ITEM,    "  Cars, walls and buildings now cast shadows onto" },
     { CL_ITEM,    "  the road and each other, ray-traced against the" },

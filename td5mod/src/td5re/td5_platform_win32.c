@@ -6549,6 +6549,41 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
     Backend_ApplyShadowPass(&cb);
 }
 
+void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
+                               float focal, float center_x, float center_y,
+                               float vp_x, float vp_y,
+                               float depth_scale, float depth_bias,
+                               const float refl8[8], float wet_boost,
+                               float intensity, int steps, float max_dist,
+                               float thickness, float pane_w, float pane_h)
+{
+    /* Serial/immediate path only (same constraint as the light pass). */
+    if (td5_rcmd_recording()) return;
+    if (!refl8 || intensity <= 0.0f || steps <= 0) return;
+
+    SSRCB cb;
+    memset(&cb, 0, sizeof(cb));
+    cb.camPosFocal[0] = cam_pos[0]; cb.camPosFocal[1] = cam_pos[1]; cb.camPosFocal[2] = cam_pos[2];
+    cb.camPosFocal[3] = focal;
+    cb.rightCx[0] = basis9[0]; cb.rightCx[1] = basis9[1]; cb.rightCx[2] = basis9[2]; cb.rightCx[3] = center_x;
+    cb.upCy[0]    = basis9[3]; cb.upCy[1]    = basis9[4]; cb.upCy[2]    = basis9[5]; cb.upCy[3]    = center_y;
+    cb.fwdDepthScale[0] = basis9[6]; cb.fwdDepthScale[1] = basis9[7]; cb.fwdDepthScale[2] = basis9[8];
+    cb.fwdDepthScale[3] = depth_scale;
+    cb.misc[0] = depth_bias;
+    cb.misc[1] = vp_x;
+    cb.misc[2] = vp_y;
+    cb.misc[3] = wet_boost;
+    cb.params[0] = (float)steps;
+    cb.params[1] = max_dist;
+    cb.params[2] = thickness;
+    cb.params[3] = pane_w;
+    cb.params2[0] = pane_h;
+    cb.params2[1] = intensity;
+    for (int i = 0; i < 4; i++) { cb.reflA[i] = refl8[i]; cb.reflB[i] = refl8[4 + i]; }
+
+    Backend_ApplySSRPass(&cb);
+}
+
 int td5_plat_render_upload_texture(int page_index, const void *pixels,
                                     int width, int height, int format)
 {

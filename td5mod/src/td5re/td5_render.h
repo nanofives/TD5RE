@@ -109,6 +109,11 @@ void td5_render_apply_light_pass(int vp_x, int vp_y);
  * td5_render_apply_light_pass (additive light pools must not be darkened). */
 void td5_render_apply_shadow_pass(int vp_x, int vp_y);
 
+/* [LIGHT2 P3] Screen-space reflections for the current viewport. Call once
+ * per viewport AFTER td5_render_apply_light_pass (reflections mirror the lit
+ * + shadowed scene), before translucent VFX/HUD. */
+void td5_render_apply_ssr_pass(int vp_x, int vp_y);
+
 /* [LIGHT2 P0] Per-frame G-buffer gate — call once per rendered race frame
  * BEFORE the world pass (next to td5_light_begin_frame). See
  * LIGHTING_REWORK_PLAN.md. */

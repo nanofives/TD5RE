@@ -62,6 +62,10 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Reflections P3: wet road mirrors cars/buildings on rainy Moscow",
+    "Reflections P3: car paint/glass sheen at grazing angles",
+    "Reflections P3: no smearing/ghosting artifacts while driving",
+    "Reflections P3: Reflections=0 removes all of it (A/B)",
     "Shadows P2: cars/walls cast shadows on the road (drive daylight)",
     "Shadows P2: no shadow acne/flicker on the road while driving",
     "Shadows P2: tunnels/ambient zones cast NO sun shadow",

@@ -30,6 +30,7 @@
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode knob */
+#include "td5_material.h" /* [LIGHT2 P3] per-material reflectivity for SSR */
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 #include "td5re.h"
 
@@ -207,6 +208,54 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
                                  (float)s_viewport_width, (float)s_viewport_height);
 }
 
+/* [LIGHT2 P3] Screen-space reflections for the CURRENT viewport. Reflective
+ * materials (car paint, glass — per-id reflectivity from td5_material) mirror
+ * the already lit + shadowed scene; up-facing road pixels gain reflectivity
+ * in non-clear weather ("wet roads"). Call AFTER td5_render_apply_light_pass.
+ * March tuning env knobs (dev): TD5RE_SSR_STEPS / _DIST / _THICK / _INTENSITY. */
+void td5_render_apply_ssr_pass(int vp_x, int vp_y)
+{
+    if (!td5_light2_active() || !td5_light2_reflections()) return;
+
+    /* Per-material base reflectivity LUT (ids 0..7; beyond COUNT = 0). */
+    float refl8[8];
+    for (int i = 0; i < 8; i++)
+        refl8[i] = (i < TD5_MAT_COUNT) ? td5_material_params(i)->reflectivity : 0.0f;
+    refl8[TD5_MAT_NONE] = 0.0f;   /* sentinel never reflects */
+
+    /* Wet roads: any non-clear weather makes up-facing DEFAULT-material
+     * pixels reflective. */
+    float wet = (td5_light2_wet_roads() && g_td5.weather != TD5_WEATHER_CLEAR)
+              ? 0.35f : 0.0f;
+
+    static float s_dist = -1.0f, s_thick = -1.0f, s_intensity = -1.0f;
+    static int   s_steps = -1;
+    if (s_steps < 0) {
+        const char *e;
+        s_steps     = ((e = getenv("TD5RE_SSR_STEPS"))     && e[0]) ? atoi(e)        : 24;
+        s_dist      = ((e = getenv("TD5RE_SSR_DIST"))      && e[0]) ? (float)atof(e) : 4000.0f;
+        s_thick     = ((e = getenv("TD5RE_SSR_THICK"))     && e[0]) ? (float)atof(e) : 500.0f;
+        s_intensity = ((e = getenv("TD5RE_SSR_INTENSITY")) && e[0]) ? (float)atof(e) : 0.8f;
+        if (s_steps < 4)  s_steps = 4;
+        if (s_steps > 64) s_steps = 64;
+        TD5_LOG_I(LOG_TAG, "light2: SSR pass steps=%d dist=%.0f thick=%.0f intensity=%.2f",
+                  s_steps, (double)s_dist, (double)s_thick, (double)s_intensity);
+    }
+
+    float basis9[9];
+    for (int i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
+    float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
+    float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
+
+    td5_plat_render_apply_ssr(cam, basis9,
+                              s_focal_length, s_center_x, s_center_y,
+                              (float)vp_x, (float)vp_y,
+                              depth_scale, NEAR_DEPTH_OFFSET,
+                              refl8, wet, s_intensity,
+                              s_steps, s_dist, s_thick,
+                              (float)s_viewport_width, (float)s_viewport_height);
+}
+
 /* [LIGHT2 P0] Per-frame gate for the G-buffer feed. Call once per rendered
  * race frame BEFORE the world pass (alongside td5_light_begin_frame): enables
  * + clears the wrapper's normal+material target when Mode>=1, so z-writing
@@ -355,9 +404,14 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 
     int count = mesh->total_vertex_count;
     /* [parallel-build] lighting writes target the pane workspace copy (the
-     * blob is read-only in the render path); normals stay blob (read-only). */
+     * blob is read-only in the render path); normals stay blob (read-only).
+     * [LIGHT2 P1] bit 0 of normals_offset tags a DERIVED flat-normal stream
+     * (td5_track_derive_missing_normals): those meshes feed the G-buffer only
+     * — their artist-baked vertex lighting is left exactly as loaded. */
     TD5_MeshVertex *verts   = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
-    TD5_VertexNormal *norms = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
+    uintptr_t nraw          = (uintptr_t)mesh->normals_offset;
+    int norms_derived       = (int)(nraw & 1u);
+    TD5_VertexNormal *norms = (TD5_VertexNormal *)(nraw & ~(uintptr_t)1);
     /* Blob (read-only original) — read the un-modulated baked grey from here so
      * the per-frame zone modulation never compounds on the workspace copy. */
     TD5_MeshVertex *vb = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
@@ -464,11 +518,24 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
                 wny = nR[3] * nx + nR[4] * ny + nR[5] * nz;
                 wnz = nR[6] * nx + nR[7] * ny + nR[8] * nz;
             }
-            int bx = clampi((int)(wnx * 127.0f) + 128, 1, 255);
-            int by = clampi((int)(wny * 127.0f) + 128, 1, 255);
-            int bz = clampi((int)(wnz * 127.0f) + 128, 1, 255);
-            pack[i] = ((uint32_t)bx << 16) | ((uint32_t)by << 8) | (uint32_t)bz;
+            /* [LIGHT2 P1] Zero-length normal = "unknown" (derived streams
+             * leave billboard/degenerate corners at zero): keep pack[i] = 0
+             * so those pixels stay G-buffer-less instead of getting a bogus
+             * mid-grey normal. */
+            if (wnx != 0.0f || wny != 0.0f || wnz != 0.0f) {
+                int bx = clampi((int)(wnx * 127.0f) + 128, 1, 255);
+                int by = clampi((int)(wny * 127.0f) + 128, 1, 255);
+                int bz = clampi((int)(wnz * 127.0f) + 128, 1, 255);
+                pack[i] = ((uint32_t)bx << 16) | ((uint32_t)by << 8) | (uint32_t)bz;
+            }
         }
+
+        /* [LIGHT2 P1] Derived flat normals exist ONLY to feed the G-buffer —
+         * the mesh keeps its artist-baked vertex lighting exactly as loaded
+         * (the original never runtime-lights track geometry, and these meshes
+         * were never lit by the port before either). */
+        if (norms_derived)
+            continue;
 
         if (prelit && (vb[i].lighting & 0xFF000000u) != 0u) {
             uint32_t c = vb[i].lighting;          /* keep the #13 baked TD6 grey... */
@@ -3350,9 +3417,10 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot)
     mode = pe->sub_mode;
 
     /* [parallel-build] proj_u/proj_v writes target the pane workspace copy
-     * (mode 3 also READS view_x/view_y, which only exist there). */
+     * (mode 3 also READS view_x/view_y, which only exist there).
+     * [LIGHT2 P1] mask the derived-normals tag (bit 0). */
     verts      = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
-    normals    = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
+    normals    = (TD5_VertexNormal *)((uintptr_t)mesh->normals_offset & ~(uintptr_t)1);
     vert_count = mesh->total_vertex_count;
     if (!verts || vert_count <= 0) return;
 

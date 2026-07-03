@@ -289,6 +289,8 @@ typedef struct TD5_GlobalState {
         int  sun_shadows;       /* [LIGHT2 P2] 1 = SS ray-marched sun shadows (default) */
         int  shadow_strength;   /* [LIGHT2 P2] max shadow darkening, percent (default 45) */
         int  light_occlusion;   /* [LIGHT2 P2] 1 = headlights blocked by geometry (default) */
+        int  reflections;       /* [LIGHT2 P3] 1 = SSR (car paint/glass/wet roads, default) */
+        int  wet_roads;         /* [LIGHT2 P3] 1 = rain makes roads reflective (default) */
         /* Game options */
         int  laps;
         int  checkpoint_timers;

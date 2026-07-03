@@ -2960,6 +2960,10 @@ int td5_game_init_race_session(void) {
     /* Must run AFTER textures load so the per-page transparency table is
      * populated. Dims billboard meshes that use a type-3 (additive) page. */
     td5_track_dim_additive_billboard_meshes();
+    /* [LIGHT2 P1] Give normal-less track meshes derived face normals so the
+     * G-buffer covers roads/walls (sun-shadow backface skip, SSR). No-op in
+     * Mode 0; baked vertex lighting is never touched. */
+    td5_track_derive_missing_normals();
     TD5_LOG_I(LOG_TAG, "InitRace step 8/19: track textures loaded for track=%d",
               g_td5.track_index);
 
@@ -6785,6 +6789,11 @@ int td5_game_run_race_frame(void) {
          * translucent VFX + HUD. */
         if (!td5_render_photobooth_active())
             td5_render_apply_light_pass(s_viewports[vp].x, s_viewports[vp].y);
+
+        /* [LIGHT2 P3] Screen-space reflections LAST of the deferred passes so
+         * they mirror the lit + shadowed scene (car paint, glass, wet roads). */
+        if (!td5_render_photobooth_active())
+            td5_render_apply_ssr_pass(s_viewports[vp].x, s_viewports[vp].y);
 
         /* VFX: tire tracks, particles */
         if (!td5_render_photobooth_active()) {

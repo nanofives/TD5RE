@@ -251,6 +251,19 @@ typedef struct {
     float params2[4];        /* x = pane H, yzw reserved                     */
 } ShadowCB;
 
+/* [P3] Screen-space reflections constant buffer (mirrors ps_ssr.hlsl SSRCB). */
+typedef struct {
+    float camPosFocal[4];    /* xyz = camera world pos, w = focal            */
+    float rightCx[4];        /* xyz = camera right,   w = viewport center X  */
+    float upCy[4];           /* xyz = camera up,      w = viewport center Y  */
+    float fwdDepthScale[4];  /* xyz = camera forward, w = depth scale        */
+    float misc[4];           /* x = depth bias, y = vpX, z = vpY, w = wet-road boost */
+    float params[4];         /* x = steps, y = max march dist, z = thickness, w = pane W */
+    float params2[4];        /* x = pane H, y = master intensity, zw reserved */
+    float reflA[4];          /* base reflectivity, material ids 0..3         */
+    float reflB[4];          /* base reflectivity, material ids 4..7         */
+} SSRCB;
+
 /* ========================================================================
  * Global D3D11 backend state (single-instance, game is single-threaded)
  * ======================================================================== */
@@ -323,6 +336,14 @@ typedef struct {
     ID3D11PixelShader       *ps_composite;           /* Fullscreen blit shader */
     ID3D11PixelShader       *ps_light;                /* Deferred dynamic-light pass */
     ID3D11PixelShader       *ps_shadow;               /* [P2] SS sun-shadow pass */
+    ID3D11PixelShader       *ps_ssr;                  /* [P3] SS reflections pass */
+
+    /* [P3] Scene-colour copy sampled by the SSR pass (reflections must read
+     * the scene while drawing onto it). (Re)created to match the backbuffer
+     * surface texture; NULL until the first SSR pass. */
+    ID3D11Texture2D          *scene_copy_tex;
+    ID3D11ShaderResourceView *scene_copy_srv;
+    int                       scene_copy_w, scene_copy_h;
     ID3D11InputLayout       *input_layout;           /* TD5_FVF vertex layout */
 
     /* Immutable state objects (pre-created at init) */
@@ -343,6 +364,7 @@ typedef struct {
     ID3D11Buffer            *cb_fog;        /* FogCB */
     ID3D11Buffer            *cb_light;      /* LightCB (deferred light pass) */
     ID3D11Buffer            *cb_shadow;     /* [P2] ShadowCB (SS sun shadows) */
+    ID3D11Buffer            *cb_ssr;        /* [P3] SSRCB (SS reflections) */
 
     /* Render state cache */
     RenderStateCache        state;
@@ -936,6 +958,13 @@ void Backend_ApplyLightPass(const LightCB *cb);
  * world, BEFORE Backend_ApplyLightPass (so additive lights are not darkened).
  * No-op if depth_srv/ps_shadow are NULL. */
 void Backend_ApplyShadowPass(const ShadowCB *cb);
+
+/* [P3] Screen-space reflections: fullscreen ALPHA-BLENDED draw over the
+ * CURRENT viewport that reflects the (already lit + shadowed) scene on
+ * reflective materials via depth-buffer ray marching. Copies the backbuffer
+ * to scene_copy_tex first. Run AFTER Backend_ApplyLightPass, BEFORE the
+ * translucent VFX/HUD. No-op if ps_ssr/depth_srv/gbuffer_srv are NULL. */
+void Backend_ApplySSRPass(const SSRCB *cb);
 
 /* [lighting rework P0] Per-frame G-buffer gate. on=1: (re)create the G-buffer
  * at render-target size if needed, clear it (matid 0 = "no data"), and let the

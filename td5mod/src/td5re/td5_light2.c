@@ -109,3 +109,44 @@ int td5_light2_light_occlusion(void)
     if (env >= 0) return env;
     return s_light_occlusion;
 }
+
+/* ---- P3: screen-space reflections -------------------------------------- */
+
+static int s_reflections = 1;
+static int s_wet_roads   = 1;
+
+void td5_light2_set_reflections(int on)
+{
+    s_reflections = on ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "light2: reflections=%d", s_reflections);
+}
+
+int td5_light2_reflections(void)
+{
+    /* TD5RE_SSR=0|1 A/B override */
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("TD5RE_SSR");
+        env = (e && e[0]) ? atoi(e) : -1;
+    }
+    if (env >= 0) return env;
+    return s_reflections;
+}
+
+void td5_light2_set_wet_roads(int on)
+{
+    s_wet_roads = on ? 1 : 0;
+    TD5_LOG_I(LOG_TAG, "light2: wet_roads=%d", s_wet_roads);
+}
+
+int td5_light2_wet_roads(void)
+{
+    /* TD5RE_SSR_WET=0|1 A/B override */
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("TD5RE_SSR_WET");
+        env = (e && e[0]) ? atoi(e) : -1;
+    }
+    if (env >= 0) return env;
+    return s_wet_roads;
+}

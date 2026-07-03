@@ -204,6 +204,11 @@ void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh);
  * type-3 (additive) texture page. Call AFTER td5_asset_load_track_textures
  * so the transparency table is populated. */
 void td5_track_dim_additive_billboard_meshes(void);
+/* [LIGHT2 P1] One-shot post-load pass: derive flat face normals for every
+ * MODELS.DAT mesh without a normals stream (G-buffer feed only — baked vertex
+ * lighting is untouched). Derived streams are tagged with bit 0 of
+ * normals_offset; call right after td5_track_dim_additive_billboard_meshes. */
+void td5_track_derive_missing_normals(void);
 int  td5_track_get_models_display_list_count(void);
 int  td5_track_get_span_display_list_index(int span_index);
 const void *td5_track_get_models_display_list_raw(int index, size_t *size_out);

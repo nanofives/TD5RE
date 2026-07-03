@@ -27,6 +27,7 @@
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
 #include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
+#include "td5_light2.h"   /* [LIGHT2 P1] derive-normals gate */
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -7503,6 +7504,189 @@ void td5_track_dim_additive_billboard_meshes(void)
     TD5_LOG_I("track",
         "additive billboard dim: %d/%d billboard meshes had type-3 pages "
         "(halved per-vertex diffuse)", dimmed, total_bb);
+}
+
+/* ========================================================================
+ * [LIGHT2 P1] Derived face normals for normal-less track meshes
+ *
+ * Most MODELS.DAT track meshes ship WITHOUT a normals stream (the original
+ * never runtime-lights track geometry — vertex intensity is baked). The
+ * lighting rework's G-buffer, sun-shadow backface skip and SSR reflections
+ * all want per-pixel normals, so this one-shot post-load pass computes FLAT
+ * per-face normals (assigned to each expanded corner vertex; corners are
+ * never shared so no smoothing is possible) for every mesh whose
+ * normals_offset is 0, oriented to the upper hemisphere (+Y up — the same
+ * convention the TD6 converter uses so ground/roofs light correctly).
+ *
+ * The derived stream is tagged by setting BIT 0 of the stored pointer
+ * (mallocs are >= 8-aligned so the bit is free). Consumers mask it off;
+ * td5_render_compute_vertex_lighting treats tagged streams as "G-buffer
+ * feed ONLY" — the artist-baked vertex lighting stays byte-identical, the
+ * mesh is never re-lit (matching the original's behavior).
+ *
+ * Allocations live for one track load and are freed at the start of the
+ * next pass; any still-tagged header offset encountered during the walk is
+ * reset first (covers a cached blob being re-passed).
+ * ======================================================================== */
+static TD5_VertexNormal **s_derived_norms = NULL;
+static int s_derived_norm_count = 0, s_derived_norm_cap = 0;
+
+static void track_derived_norms_free_all(void)
+{
+    for (int i = 0; i < s_derived_norm_count; i++)
+        free(s_derived_norms[i]);
+    s_derived_norm_count = 0;
+}
+
+static int track_derived_norms_register(TD5_VertexNormal *p)
+{
+    if (s_derived_norm_count >= s_derived_norm_cap) {
+        int cap = s_derived_norm_cap > 0 ? s_derived_norm_cap * 2 : 256;
+        TD5_VertexNormal **nn =
+            (TD5_VertexNormal **)realloc(s_derived_norms, (size_t)cap * sizeof(*nn));
+        if (!nn) return 0;
+        s_derived_norms = nn;
+        s_derived_norm_cap = cap;
+    }
+    s_derived_norms[s_derived_norm_count++] = p;
+    return 1;
+}
+
+/* Unit face normal from three corners, flipped into the upper hemisphere
+ * (winding is mixed in MODELS.DAT — CullMode is NONE — so the raw sign is
+ * meaningless; preferring +Y matches how the zone sun lights ground). Zero
+ * output = degenerate face (consumer leaves those vertices "no normal"). */
+static void track_face_normal_up(const TD5_MeshVertex *a,
+                                 const TD5_MeshVertex *b,
+                                 const TD5_MeshVertex *c,
+                                 float out[3])
+{
+    float ux = b->pos_x - a->pos_x, uy = b->pos_y - a->pos_y, uz = b->pos_z - a->pos_z;
+    float vx = c->pos_x - a->pos_x, vy = c->pos_y - a->pos_y, vz = c->pos_z - a->pos_z;
+    float nx = uy * vz - uz * vy;
+    float ny = uz * vx - ux * vz;
+    float nz = ux * vy - uy * vx;
+    float len2 = nx * nx + ny * ny + nz * nz;
+    if (len2 < 1e-12f) { out[0] = out[1] = out[2] = 0.0f; return; }
+    float inv = 1.0f / sqrtf(len2);
+    nx *= inv; ny *= inv; nz *= inv;
+    if (ny < -0.01f) { nx = -nx; ny = -ny; nz = -nz; }
+    out[0] = nx; out[1] = ny; out[2] = nz;
+}
+
+void td5_track_derive_missing_normals(void)
+{
+    track_derived_norms_free_all();
+    if (!td5_light2_active()) return;
+
+    int derived_meshes = 0, skipped_have = 0, total_faces = 0;
+
+    for (int dl = 0; dl < s_models_display_list_count; dl++) {
+        if (s_models_entry_offsets[dl] == 0) continue;
+        uint8_t *block_base = s_models_blob + s_models_entry_offsets[dl];
+        uint32_t sub_count = *(const uint32_t *)block_base;
+        if (sub_count == 0 || sub_count > 256) continue;
+
+        for (uint32_t j = 0; j < sub_count; j++) {
+            uint32_t mesh_ptr_val = *(const uint32_t *)(block_base + 4 + j * 4);
+            if (mesh_ptr_val == 0) continue;
+
+            TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
+            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader)))
+                continue;
+
+            /* Stale tag from a previous pass over a cached blob: the memory
+             * was just freed above — reset and re-derive. */
+            if (mesh->normals_offset & 1u)
+                mesh->normals_offset = 0;
+
+            if (mesh->normals_offset != 0) { skipped_have++; continue; }
+            /* Billboard meshes (tag 1/2) are camera-facing sprites — skip. */
+            if (mesh->texture_page_id == 1 || mesh->texture_page_id == 2)
+                continue;
+            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0)
+                continue;
+            int count = mesh->total_vertex_count;
+            int cmd_count = mesh->command_count;
+            if (count <= 0 || count > 65536 || cmd_count <= 0 || cmd_count > 4096)
+                continue;
+
+            TD5_MeshVertex *base_verts =
+                (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+            TD5_PrimitiveCmd *cmds =
+                (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+            if ((uintptr_t)base_verts < 0x10000u || (uintptr_t)cmds < 0x10000u)
+                continue;
+
+            TD5_VertexNormal *nn =
+                (TD5_VertexNormal *)calloc((size_t)count, sizeof(TD5_VertexNormal));
+            if (!nn) return;                 /* OOM — stop deriving, keep what we have */
+            if (!track_derived_norms_register(nn)) { free(nn); return; }
+
+            /* Walk commands with the SAME sequential-cursor rules as
+             * td5_render_prepared_mesh so corner indices line up 1:1. */
+            int cursor = 0;
+            for (int ci = 0; ci < cmd_count; ci++) {
+                const TD5_PrimitiveCmd *cmd = &cmds[ci];
+                int opcode = cmd->dispatch_type;
+                if (opcode < 0 || opcode > 6) continue;
+                int needed = cmd->triangle_count * 3 + cmd->quad_count * 4;
+
+                int idx0;
+                if (cmd->vertex_data_ptr != 0) {
+                    uintptr_t vp = (uintptr_t)cmd->vertex_data_ptr;
+                    const TD5_MeshVertex *cv;
+                    if (vp < 0x10000u)
+                        cv = (const TD5_MeshVertex *)((uint8_t *)mesh + vp);
+                    else
+                        cv = (const TD5_MeshVertex *)vp;
+                    idx0 = (int)(cv - base_verts);
+                    if (idx0 < 0 || idx0 + needed > count) continue;
+                } else {
+                    idx0 = cursor;
+                    if (cursor + needed > count) break;
+                    cursor += needed;
+                }
+
+                /* Opcode 4 = depth-sorted billboards (camera-facing) — leave
+                 * their corners at zero ("no normal"); all other opcodes are
+                 * plain tri/quad geometry. */
+                if (opcode == 4) continue;
+
+                float fn[3];
+                for (int t = 0; t < cmd->triangle_count; t++) {
+                    const TD5_MeshVertex *v = base_verts + idx0 + t * 3;
+                    track_face_normal_up(&v[0], &v[1], &v[2], fn);
+                    for (int k = 0; k < 3; k++) {
+                        nn[idx0 + t * 3 + k].nx = fn[0];
+                        nn[idx0 + t * 3 + k].ny = fn[1];
+                        nn[idx0 + t * 3 + k].nz = fn[2];
+                    }
+                    total_faces++;
+                }
+                int qbase = idx0 + cmd->triangle_count * 3;
+                for (int q = 0; q < cmd->quad_count; q++) {
+                    const TD5_MeshVertex *v = base_verts + qbase + q * 4;
+                    track_face_normal_up(&v[0], &v[1], &v[2], fn);
+                    for (int k = 0; k < 4; k++) {
+                        nn[qbase + q * 4 + k].nx = fn[0];
+                        nn[qbase + q * 4 + k].ny = fn[1];
+                        nn[qbase + q * 4 + k].nz = fn[2];
+                    }
+                    total_faces++;
+                }
+            }
+
+            /* Publish with the DERIVED tag in bit 0. */
+            mesh->normals_offset = (uint32_t)((uintptr_t)nn | 1u);
+            derived_meshes++;
+        }
+    }
+
+    TD5_LOG_I("track",
+        "derived normals: %d meshes (%d faces) got flat face normals; "
+        "%d meshes already had authored normals",
+        derived_meshes, total_faces, skipped_have);
 }
 
 /* ========================================================================
