@@ -30,6 +30,7 @@ TD5RE/
 │   └── deps/mingw/       # Bundled MinGW-w64 i686 toolchain
 ├── re/                   # RE analysis, extracted assets, tools
 │   ├── assets/           # All game data — pre-extracted PNGs, DATs, WAVs, meshes (runtime asset directory)
+│   ├── ghidra_export/    # FULL decompilation as greppable text (functions/, symbols.csv, structs.h) — check BEFORE live Ghidra
 │   ├── tools/            # RE helper scripts (extractor, alpha tool, etc.)
 │   ├── analysis/         # RE analysis notes
 │   └── sessions/         # RE session logs
@@ -153,6 +154,18 @@ Key headers: `td5_types.h` (structs, verified against 0x388 actor stride),
 **Frida attach:** `attach("TD5.exe")` or `attach("TD5_d3d.exe")` — process must be running.
 **codebase-memory index:** `td5mod/src/td5re` only (deps/mingw crashes the indexer).
 
+### Ghidra: offline export first, live pool second
+
+**Before opening live Ghidra, grep `re/ghidra_export/`** — the full annotated decompilation as text
+(`functions/0x<addr>_<Name>.c`, `symbols.csv`, `globals.csv`, `structs.h`; see its README). It answers
+most "what did the original do?" questions with zero locking, and facts found there count as confirmed
+decompilation data (`[CONFIRMED @ 0xADDR]`). Live Ghidra is only needed for interactive xref exploration
+or writing annotations. Regenerate the export after annotation work:
+`ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat . TD5 -process TD5_d3d.exe -noanalysis -readOnly -scriptPath scripts -postScript ExportAllDecomp.java`
+
+Also: fixes/features that are **TD5RE-only** (no original counterpart — arcade, lane assist, drag mode,
+selftest, MP extensions, etc.) need **no** original-binary research at all — see the triage step in `/fix`.
+
 ### Ghidra pool (parallel session access)
 
 Multiple sessions share Ghidra via a pool of project clones in `ghidra_pool/`. Managed by `scripts/ghidra_pool.sh`.
@@ -178,3 +191,26 @@ See `td5mod/src/td5re/EXPECTED_BEHAVIOR.md` for full behavioral spec.
 # Run directly — MCP tool is deprecated in OSS version
 semgrep --config=auto --lang=c --quiet td5mod/src/td5re/
 ```
+
+## Delegating read-only analysis (repo-fleet worker)
+
+Workspace policy (Proyectos): read-only analysis goes to the worker account (account2/Accenture —
+headless, never prompts, doesn't burn this account's quota). A user-level PreToolUse gate denies plain
+local Agent/Task spawns under Proyectos; prefix an agent prompt with `[local]` only for the keep-local
+cases below.
+
+Delegate one task (result prints to stdout; add `-Model haiku|sonnet` for bulk, default is opus):
+
+```
+pwsh -NoProfile -File "C:\Users\maria\Desktop\Proyectos\.claude\skills\repo-fleet\scripts\delegate.ps1" -Prompt "<task>" -Repo TD5RE
+```
+
+**Good delegation targets here** (read-only over the working tree — the worker has Read/Grep/Glob):
+- stub/TODO/FIXME/divergence audits across the 28 port modules
+- cross-referencing ported code in `td5mod/src/td5re/` against `re/analysis/` exports; RVA /
+  `FUN_XXXXXXXX` lookups in already-exported sources and docs
+- convention sweeps (fixed-point usage, BGRA order, `__stdcall`/`__cdecl`, naming) and consistency hunts
+- summarizing/drafting docs from sources; reviewing committed diffs read-only via `.git`
+
+**Keep local** (`[local]` prefix or in-session): anything needing Ghidra/x64dbg/frida MCP, builds,
+running the game/dev harness, semgrep, edits/writes, git mutations.

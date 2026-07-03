@@ -1,6 +1,6 @@
 # TD5RE Fix Workflow
 
-Fix a bug or implement a feature in the TD5RE source port. Delegates Ghidra RE research to a subagent (keeps large MCP responses out of main context), then implements the fix **inside an isolated git worktree** so parallel `/fix` sessions can't clobber each other's `td5re.exe`, `td5re.ini`, or `log/`. On user approval the worktree is merged back and deleted.
+Fix a bug or implement a feature in the TD5RE source port. A triage step decides whether original-binary research is needed at all (TD5RE-only features skip Ghidra entirely); when it is, RE research is delegated to a subagent (keeps large MCP responses out of main context). The fix is implemented **inside an isolated git worktree** so parallel `/fix` sessions can't clobber each other's `td5re.exe`, `td5re.ini`, or `log/`. On user approval the worktree is merged back and deleted.
 
 **Usage:** `/fix <description of the bug or feature>`
 
@@ -58,7 +58,22 @@ echo "Branch: ${SESSION_TAG} (forked from ${BASE_BRANCH})"
 
 If `git worktree add` fails because the tag is already in use, pick a new tag and retry.
 
-### Step 1: Ghidra Research Agent
+### Step 1 Triage: does this fix need original-binary research?
+
+The port has strayed deliberately far from the original game. Before spawning any research agent, classify `$ARGUMENTS`:
+
+- **ORIGINAL-DERIVED** — correct behavior is defined by what `TD5_d3d.exe` does. Markers: parity/divergence bugs (anything `/diff-race`-shaped), original constants/formulas/struct offsets in play, behavior the original game had that the port gets wrong, asset-format questions (DAT/TGA/STRIP layouts).
+- **TD5RE-ONLY** — correct behavior is defined by TD5RE itself. Markers: features with no original counterpart (arcade mode/power-ups, lane assist, tutorial overlay, drag mode, cop-chase extensions, MP modes/HUD beyond the original, selftest/benchmark/trace/profiler, UPnP, TTF fonts, celebrity names, assetsrc), pure build/tooling work, or bugs introduced by TD5RE-authored code.
+
+**Decision rule: "Would decompiling the original change what I implement?" If no → TD5RE-ONLY.**
+
+For **TD5RE-ONLY** fixes: **skip Step 1, the Step 1 Gate, Step 1.5, and Step 4.6 entirely.** Do not acquire a Ghidra pool slot. Research the port source under `${WORKTREE_DIR}/td5mod/src/td5re/`, `EXPECTED_BEHAVIOR.md`, and git history instead. In the Step 3 commit message use `RE basis: N/A — TD5RE-only (no original counterpart)`. The NO-GUESSING rule and the Verbose Uncertainty Disclosure still apply in full — the evidence base is the port source instead of the decompilation.
+
+**Mixed cases** (a TD5RE feature layered on original-derived systems, e.g. a power-up multiplier applied to the original drivetrain formula): treat as ORIGINAL-DERIVED **only for the specific original-derived values touched** — scope the research narrowly to those; everything else follows the TD5RE-ONLY path.
+
+For **ORIGINAL-DERIVED** fixes, check the offline export first: `re/ghidra_export/` holds the full annotated decompilation as text (`functions/0x<addr>_<name>.c`, `symbols.csv`, `globals.csv`, `structs.h`) — Grep it directly. If it answers the question, cite facts as `[CONFIRMED @ 0xADDR]` with the export file as the source and **skip live Ghidra**. Only proceed to the Step 1 research agent when the export is insufficient (missing xref tracing, need to explore callers/callees interactively, or the export doesn't exist yet).
+
+### Step 1: Ghidra Research Agent (ORIGINAL-DERIVED only, when the offline export is insufficient)
 
 Launch a **general-purpose Agent** (has MCP access) to investigate the original binary. The agent prompt MUST include:
 
@@ -127,7 +142,9 @@ This ensures other sessions pick up any master project changes. Slots locked by 
 
 Do NOT ask the agent to make edits. Research only.
 
-### Step 1 Gate: Ghidra Access Required (HARD STOP)
+### Step 1 Gate: Ghidra Access Required (HARD STOP — ORIGINAL-DERIVED fixes only)
+
+This gate applies only when the triage classified the fix ORIGINAL-DERIVED. TD5RE-ONLY fixes skipped Step 1 and are not subject to it. Facts confirmed from `re/ghidra_export/` count as confirmed decompilation data and satisfy this gate without live Ghidra.
 
 **Before proceeding to Step 1.5 or any code changes, verify the research agent's output:**
 
@@ -295,7 +312,7 @@ fi
 
 git commit -m "fix: <one-line description from $ARGUMENTS>
 
-RE basis: <function name(s) and Ghidra address(es) from Step 1>
+RE basis: <function name(s) and Ghidra address(es) from Step 1, or "N/A — TD5RE-only (no original counterpart)" per the triage>
 CSV bundle: tools/frida_csv/${SESSION_TAG}/  (Moscow + Newcastle + <random track name>)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
@@ -481,6 +498,8 @@ Rules for this step:
 - If the loop breaks early due to a lock/conflict, later worktrees stay unmerged — that's fine. Running this step again after the blocker clears will pick them up (git skips worktrees that are already up to date, and the asset robocopy is idempotent).
 
 ### Step 4.6: Final Ghidra pool sync (republish master's RE annotations)
+
+**Skip this step entirely if no live Ghidra session was opened this run** (TD5RE-ONLY triage, or ORIGINAL-DERIVED answered from `re/ghidra_export/`) — there is nothing to republish and no locks to clean.
 
 Step 1 (research agent) runs `ghidra_pool.sh cleanup` + `sync` at the end of its own work, but only inside the research subagent's scope. Steps 2–4 never touch the pool. If the shipped fix included any Ghidra annotations (function renames, struct edits, comments, retypes) the master `TD5.rep` now contains them — but pool slots still hold the pre-merge snapshot. Republish so the next `/fix` (or `/re`, or any concurrent session) sees up-to-date RE state.
 
