@@ -7530,6 +7530,29 @@ void td5_track_register_lamp_lights(void)
     static int s_reg_dbg = -1;
     if (s_reg_dbg < 0) { const char *e = getenv("TD5RE_LAMP_LOG"); s_reg_dbg = (e && e[0] && e[0] != '0') ? 1 : 0; }
 
+    /* Road-height reference: snapshot every span's center (world float) so
+     * the elevation test below measures "height above the ROAD", not above
+     * the mesh's own lowest geometry (halo-only meshes have no ground of
+     * their own — the round-5 miss). One flat array; nearest-span lookup per
+     * candidate quad is a few hundred x a few thousand ops, load-time only. */
+    typedef struct { float x, y, z; } SpanPt;
+    static SpanPt *s_span_pts = NULL;
+    int span_total = td5_track_get_span_count();
+    int span_n = 0;
+    if (s_span_pts) { free(s_span_pts); s_span_pts = NULL; }
+    if (span_total > 0)
+        s_span_pts = (SpanPt *)malloc((size_t)span_total * sizeof(SpanPt));
+    if (s_span_pts) {
+        for (int s = 0; s < span_total; s++) {
+            int ix, iy, iz;
+            if (!td5_track_get_span_center_world(s, &ix, &iy, &iz)) continue;
+            s_span_pts[span_n].x = (float)ix;
+            s_span_pts[span_n].y = (float)iy;
+            s_span_pts[span_n].z = (float)iz;
+            span_n++;
+        }
+    }
+
     int lamps = 0;
 
     for (int dl = 0; dl < s_models_display_list_count; dl++) {
@@ -7558,13 +7581,6 @@ void td5_track_register_lamp_lights(void)
                 (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
             if ((uintptr_t)base_verts < 0x10000u || (uintptr_t)cmds < 0x10000u)
                 continue;
-
-            /* Ground reference for the elevation test below: the mesh's
-             * LOWEST geometry (world +Y is DOWN, so ground = max local Y). */
-            float mesh_ground = -1e9f;
-            for (int v = 0; v < count; v++)
-                if (base_verts[v].pos_y > mesh_ground)
-                    mesh_ground = base_verts[v].pos_y;
 
             /* Walk EVERY command (same sequential-cursor rules as the render
              * walk). Two fixture signatures:
@@ -7625,11 +7641,13 @@ void td5_track_register_lamp_lights(void)
                      * position (e.g. Moscow's riverside quay lamps). */
                     td5_light_lamps_add(wx, wy, wz);
                 } else if (trans == 1 && cmd->quad_count >= 1) {
-                    /* Alpha-keyed sprite quads hanging HIGH above the mesh's
-                     * ground line = street-lamp halo sprites at post tips.
-                     * Small extent excludes trees/banners; the >900-unit
-                     * elevation excludes pedestrians/signs at ground level.
-                     * Light registered at the exact halo position. */
+                    /* Alpha-keyed sprite quads hanging HIGH above the ROAD =
+                     * street-lamp halo sprites at post tips. Small extent
+                     * excludes trees/banners; the road-relative elevation
+                     * window (600..3500 above the nearest span center)
+                     * excludes pedestrians/signs; the 4000-unit road-distance
+                     * cap keeps it to roadside fixtures. The light registers
+                     * at the exact halo position (the visible glow sphere). */
                     int registered_any = 0;
                     int qb = idx0 + cmd->triangle_count * 3;
                     for (int q = 0; q < cmd->quad_count; q++) {
@@ -7647,24 +7665,38 @@ void td5_track_register_lamp_lights(void)
                             if (qv[v].pos_z > qxz) qxz = qv[v].pos_z;
                         }
                         float ext_x = qxx - qnx, ext_y = qxy - qny, ext_z = qxz - qnz;
-                        float elev  = mesh_ground - (qay * 0.25f);   /* above mesh ground */
                         if (ext_x > 900.0f || ext_y > 900.0f || ext_z > 900.0f) continue;
                         if (ext_x + ext_z < 60.0f) continue;         /* degenerate */
-                        if (elev < 900.0f) continue;                 /* ground-level sprite */
+
+                        float qwx = mesh->origin_x * (1.0f / 256.0f) + qax * 0.25f;
+                        float qwy = mesh->origin_y * (1.0f / 256.0f) + qay * 0.25f;
+                        float qwz = mesh->origin_z * (1.0f / 256.0f) + qaz * 0.25f;
+
+                        /* Nearest span center: road distance + road height. */
+                        float best_d2 = 1e30f, road_y = 0.0f;
+                        for (int s = 0; s < span_n; s++) {
+                            float dx2 = s_span_pts[s].x - qwx;
+                            float dz2 = s_span_pts[s].z - qwz;
+                            float d2 = dx2 * dx2 + dz2 * dz2;
+                            if (d2 < best_d2) { best_d2 = d2; road_y = s_span_pts[s].y; }
+                        }
+                        if (span_n <= 0 || best_d2 > 4000.0f * 4000.0f)
+                            continue;                     /* not a roadside fixture */
+                        float elev = road_y - qwy;        /* height above road (up=-Y) */
+                        if (elev < 600.0f || elev > 3500.0f)
+                            continue;                     /* pedestrians/signs vs flags */
+
                         if (s_reg_dbg) {
                             static int s_cand = 0;
                             if (s_cand < 30) {
                                 s_cand++;
                                 TD5_LOG_I("track",
-                                    "lamp cand: dl=%d sub=%u cmd=%d page=%d q=%d ext=(%.0f,%.0f,%.0f) elev=%.0f",
+                                    "lamp cand: dl=%d sub=%u cmd=%d page=%d q=%d ext=(%.0f,%.0f,%.0f) elev=%.0f droad=%.0f",
                                     dl, j, ci, (int)cmd->texture_page_id, q,
-                                    ext_x, ext_y, ext_z, elev);
+                                    ext_x, ext_y, ext_z, elev, (double)sqrtf(best_d2));
                             }
                         }
-                        td5_light_lamps_add(
-                            mesh->origin_x * (1.0f / 256.0f) + qax * 0.25f,
-                            mesh->origin_y * (1.0f / 256.0f) + qay * 0.25f,
-                            mesh->origin_z * (1.0f / 256.0f) + qaz * 0.25f);
+                        td5_light_lamps_add(qwx, qwy, qwz);
                         registered_any = 1;
                     }
                     if (!registered_any) continue;
