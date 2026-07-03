@@ -1597,10 +1597,26 @@ void td5_input_update_player_control(int slot)
      * throttle_state (+0x36F) is forced to 1 (forward) so the brake->reverse
      * latch never arms — the car brakes, it does NOT reverse. Once stopped it
      * holds with no brake (so auto-reverse can't engage) and no throttle, until
-     * the cop releases (target reaches 0 speed) and encounter_active clears. */
+     * the cop releases (target reaches 0 speed) and encounter_active clears.
+     *
+     * [FIX 2026-07-02 police-brake-deadzone] This branch used to compare
+     * `speed` (raw longitudinal speed >> 8) against a hardcoded 100 — copied
+     * from the unrelated `vehicle_stopped` steering-formula guard above, not
+     * from this feature's own "stopped" definition. The chase scheduler
+     * (td5_ai.c td5_ai_update_special_encounter, COP_PULLOVER phase) only
+     * actually releases the hold once |longitudinal_speed| <= COP_STOP_SPEED
+     * (0x2000 raw == 32 in this shifted scale, ~10.5 km/h) — three times
+     * lower than the old 100 (~33 km/h). Below ~33 km/h but above ~10.5 km/h
+     * this branch cancelled the brake (coast, no throttle) while the AI side
+     * was still holding the pullover active, so the car just coasted on drag
+     * with zero control for that ~20-23 km/h band — "brakes stop working for
+     * the last 20-30 km/h" — until it finally decayed past the real release
+     * point. Comparing against COP_STOP_SPEED directly keeps both sides in
+     * lockstep: the player keeps braking exactly until the scheduler is about
+     * to release, then coast-holds for the remaining sliver down to rest. */
     if (encounter_active) {
         TD5_Actor *a_actor = td5_game_get_actor(slot);
-        if (speed >= 100) {
+        if (speed >= (COP_STOP_SPEED >> 8)) {
             s_throttle[slot] = (int16_t)0xFF00;  /* full brake (forward gear) */
             s_brake[slot]    = 1;
         } else {
@@ -1610,6 +1626,8 @@ void td5_input_update_player_control(int slot)
         s_reverse_req[slot] = 0;
         s_handbrake[slot]   = 0;
         if (a_actor) ((uint8_t *)a_actor)[0x36F] = 1;  /* forward gear — never reverse */
+        TD5_LOG_I(LOG_TAG, "police_pullover: slot=%d speed=%d stop_thresh=%d brake=%d",
+                  slot, speed, (int)(COP_STOP_SPEED >> 8), (int)s_brake[slot]);
     }
 
     /* ---- NOS / Horn ---- */
