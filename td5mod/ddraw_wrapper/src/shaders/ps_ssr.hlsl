@@ -88,8 +88,9 @@ float4 main(PS_INPUT input) : SV_TARGET
     else if (matid == 5) base = reflB.y;
     else if (matid == 6) base = reflB.z;
     else                 base = reflB.w;
-    if (matid == 1 && N.y > 0.6)
-        base += misc.w * saturate((N.y - 0.6) / 0.4);
+    /* Up-facing in POSITION space: world +Y is DOWN, so up = -Y. */
+    if (matid == 1 && -N.y > 0.6)
+        base += misc.w * saturate((-N.y - 0.6) / 0.4);
 
     float fresnel = pow(1.0 - ndv, 3.0);
     float w = base * (0.25 + 0.75 * fresnel) * params2.y;

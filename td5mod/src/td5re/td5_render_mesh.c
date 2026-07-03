@@ -170,7 +170,11 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
     if (best_mag2 <= 1.0f) return;               /* no directional light (tunnel) */
     float mag = sqrtf(best_mag2);
     sun[0] /= mag; sun[1] /= mag; sun[2] /= mag;
-    if (sun[1] <= 0.05f) return;                 /* sun at/below horizon — skip */
+    /* [Y-CONVENTION] Zone dirs live in the original's Y-flipped lighting
+     * convention (+Y = toward the sky); the shadow march happens in POSITION
+     * space (world +Y is DOWN) — flip so rays leave the ground upward. */
+    sun[1] = -sun[1];
+    if (sun[1] >= -0.05f) return;                /* sun at/below horizon — skip */
 
     /* Directional dominance: how much of the zone's lighting is the sun vs
      * flat ambient. |vec_world| ~ 4*intensity (dir_shorts ~4096 / 1024). */
@@ -523,9 +527,18 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
              * so those pixels stay G-buffer-less instead of getting a bogus
              * mid-grey normal. */
             if (wnx != 0.0f || wny != 0.0f || wnz != 0.0f) {
-                int bx = clampi((int)(wnx * 127.0f) + 128, 1, 255);
-                int by = clampi((int)(wny * 127.0f) + 128, 1, 255);
-                int bz = clampi((int)(wnz * 127.0f) + 128, 1, 255);
+                /* [Y-CONVENTION] The G-buffer stores normals in POSITION
+                 * space (world +Y is DOWN, so "up" = -Y). Authored normals +
+                 * the zone light dirs live in the original's Y-FLIPPED
+                 * lighting convention (car roofs = +Y, sun dirs = +Y) — the
+                 * CPU vertex lighting stays wholly in that convention, but
+                 * the GPU passes (N.L vs reconstructed positions, shadow /
+                 * SSR ray marching) do geometry in position space, so the Y
+                 * must flip here or roads reject overhead light and sun rays
+                 * march into the ground. */
+                int bx = clampi((int)( wnx * 127.0f) + 128, 1, 255);
+                int by = clampi((int)(-wny * 127.0f) + 128, 1, 255);
+                int bz = clampi((int)( wnz * 127.0f) + 128, 1, 255);
                 pack[i] = ((uint32_t)bx << 16) | ((uint32_t)by << 8) | (uint32_t)bz;
             }
         }
