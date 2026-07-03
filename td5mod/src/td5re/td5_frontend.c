@@ -138,6 +138,8 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [42] */ Screen_PendingTest,        /* dev/QA pending-test checklist (2026-06-25)  */
     /* [43] */ Screen_TrackSelection,     /* CUP TRACK SELECT: shares the track-select body,
                                            * runs in multi-pick mode (2026-06-25)        */
+    /* [44] */ Screen_MpGuide,            /* dev MP-widgets gallery (2026-07-03; from
+                                           * UI GUIDE's MP TOOLS row)                    */
 };
 
 /* ========================================================================
@@ -3200,6 +3202,9 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
 
     case TD5_SCREEN_UI_GUIDE:            /* dev gallery lives under CHANGELOG */
         return TD5_SCREEN_CHANGELOG;
+
+    case TD5_SCREEN_MP_GUIDE:            /* MP-widgets page lives under UI GUIDE */
+        return TD5_SCREEN_UI_GUIDE;
 
     case TD5_SCREEN_MAIN_MENU:
     case TD5_SCREEN_LOCALIZATION_INIT:
@@ -9395,10 +9400,8 @@ void td5_frontend_render_ui_rects(void) {
         /* "Sorry / Session Locked" dialog [CONFIRMED @ 0x0041D630] */
         frontend_render_session_locked_overlay(sx, sy);
         break;
-    case TD5_SCREEN_UI_GUIDE:
-        /* Dev UI style guide / widget gallery (td5_fe_devscreens.c) */
-        frontend_uiguide_render(sx, sy);
-        break;
+    /* (UI GUIDE / MP TOOLS render in the POST-button overlay pass below —
+     * their captions/modal must composite over the button fills.) */
     default:
         break;
     }
@@ -9535,6 +9538,16 @@ void td5_frontend_render_ui_rects(void) {
      * Original BltFast compositing placed arrows on top of the pre-baked button surface. */
     if (s_anim_complete) {
         switch (s_current_screen) {
+        case TD5_SCREEN_UI_GUIDE:
+            /* Dev UI style guide — POST-button so captions/guides composite
+             * over the button fills (a focused row's opaque fill covered them
+             * when this ran in the pre-button pass). */
+            frontend_uiguide_render(sx, sy);
+            break;
+        case TD5_SCREEN_MP_GUIDE:
+            /* Dev MP-widgets gallery — modal must draw over everything. */
+            frontend_mpguide_render(sx, sy);
+            break;
         case TD5_SCREEN_QUICK_RACE:
             /* Selectors: Car(0), Track(1), Direction(2, hidden on forward-only
              * tracks), Players(3, hidden), Opponents(4), Laps(5).

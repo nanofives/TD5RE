@@ -1111,6 +1111,10 @@ static const SSW_NavStep k_ssw_pending[]    = { { TD5_SCREEN_MAIN_MENU, 7 },
                                                 { TD5_SCREEN_CHANGELOG, 0 } };
 static const SSW_NavStep k_ssw_ui_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
                                                 { TD5_SCREEN_CHANGELOG, 2 } };
+/* UI GUIDE row 3 = MP TOOLS (Screen_UiGuide state 0 creation order). */
+static const SSW_NavStep k_ssw_mp_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
+                                                { TD5_SCREEN_CHANGELOG, 2 },
+                                                { TD5_SCREEN_UI_GUIDE, 3 } };
 
 #define SSW_ROUTE(arr) do { *out_len = (int)(sizeof(arr)/sizeof(arr[0])); return arr; } while (0)
 static const SSW_NavStep *startscreen_route(int target, int *out_len)
@@ -1134,6 +1138,7 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_PENDING_TEST:       SSW_ROUTE(k_ssw_pending);
 #ifndef TD5RE_RELEASE
     case TD5_SCREEN_UI_GUIDE:           SSW_ROUTE(k_ssw_ui_guide);
+    case TD5_SCREEN_MP_GUIDE:           SSW_ROUTE(k_ssw_mp_guide);
 #endif
     default: *out_len = 0; return NULL;   /* no route — direct jump */
     }

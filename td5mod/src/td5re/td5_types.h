@@ -419,7 +419,11 @@ typedef enum TD5_ScreenIndex {
      * enhancement — the original always auto-assigned the fixed cup schedule
      * (RE: g_cupDataXorKey @0x00464084, indexed by g_raceWithinSeriesIndex). */
     TD5_SCREEN_CUP_TRACK_SELECT   = 43,  /* Screen_TrackSelection (cup multi-pick) */
-    TD5_SCREEN_COUNT               = 44
+    /* [UI GUIDE 2026-07-03] Companion dev gallery for the MP-specific widgets
+     * (two-line buttons, shared confirm modal, HOST pill, accents + vote
+     * rings). Reached from UI GUIDE's [1] MP TOOLS row. Port-only dev tool. */
+    TD5_SCREEN_MP_GUIDE           = 44,  /* Screen_MpGuide (td5_fe_devscreens.c) */
+    TD5_SCREEN_COUNT               = 45
 } TD5_ScreenIndex;
 
 /* ========================================================================

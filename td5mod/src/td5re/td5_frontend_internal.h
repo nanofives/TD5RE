@@ -824,6 +824,8 @@ void Screen_MusicTestExtras(void);
 void Screen_OptionsHub(void);
 void Screen_UiGuide(void);              /* dev UI style guide (slot 1, td5_fe_devscreens.c) */
 void frontend_uiguide_render(float sx, float sy);
+void Screen_MpGuide(void);              /* dev MP-widgets gallery (slot 44, td5_fe_devscreens.c) */
+void frontend_mpguide_render(float sx, float sy);
 void Screen_RaceTypeCategory(void);
 void Screen_SoundOptions(void);
 void Screen_StartupInit(void);
