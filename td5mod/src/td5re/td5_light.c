@@ -242,7 +242,7 @@ void td5_light_emit_vehicle_headlights(void)
 
 /* ---- Street lamps (static world lights) -------------------------------- */
 
-#define TD5_LAMP_MAX 1024
+#define TD5_LAMP_MAX 4096
 
 static float s_lamp_pos[TD5_LAMP_MAX][3];
 static int   s_lamp_count     = 0;
@@ -329,5 +329,32 @@ void td5_light_emit_street_lamps(void)
         TD5_LOG_I(LOG_TAG, "street lamps: emitting %d/%d nearest (registry now %d lights)",
                   nbest, s_lamp_count, s_light_count);
         s_lamp_logged = 1;
+    }
+
+    /* TD5RE_LAMP_LOG=1: periodic dump of the player position + the nearest
+     * emitted lamps (world coords + distance) — position/emission debugging. */
+    static int s_lamp_dbg = -1;
+    if (s_lamp_dbg < 0) { const char *e = getenv("TD5RE_LAMP_LOG"); s_lamp_dbg = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    if (s_lamp_dbg) {
+        static int s_tick = 0;
+        if ((s_tick++ % 90) == 0) {
+            float py = (float)p->world_pos.y * (1.0f / 256.0f);
+            /* global nearest lamp, ignoring the cutoff — position debugging */
+            int   gi = -1;
+            float gd2 = 1e30f;
+            for (int i = 0; i < s_lamp_count; i++) {
+                float dx = s_lamp_pos[i][0] - px;
+                float dz = s_lamp_pos[i][2] - pz;
+                float d2 = dx * dx + dz * dz;
+                if (d2 < gd2) { gd2 = d2; gi = i; }
+            }
+            TD5_LOG_I(LOG_TAG, "lamp dbg: player=(%.0f,%.0f,%.0f) emitting=%d "
+                      "global-nearest=%d at (%.0f,%.0f,%.0f) dxz=%.0f",
+                      px, py, pz, nbest, gi,
+                      gi >= 0 ? s_lamp_pos[gi][0] : 0.0f,
+                      gi >= 0 ? s_lamp_pos[gi][1] : 0.0f,
+                      gi >= 0 ? s_lamp_pos[gi][2] : 0.0f,
+                      gi >= 0 ? (double)sqrtf(gd2) : -1.0);
+        }
     }
 }

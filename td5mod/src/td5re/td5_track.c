@@ -31,6 +31,7 @@
 #include "td5_light.h"    /* [LIGHT2] street-lamp light registration */
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>   /* sscanf (TD5RE_LAMP_SCAN dev diagnostic) */
 #include <math.h>
 
 #define LOG_TAG "track"
@@ -7526,6 +7527,9 @@ void td5_track_register_lamp_lights(void)
     td5_light_lamps_reset();
     if (!td5_light2_active()) return;
 
+    static int s_reg_dbg = -1;
+    if (s_reg_dbg < 0) { const char *e = getenv("TD5RE_LAMP_LOG"); s_reg_dbg = (e && e[0] && e[0] != '0') ? 1 : 0; }
+
     int lamps = 0;
 
     for (int dl = 0; dl < s_models_display_list_count; dl++) {
@@ -7541,24 +7545,234 @@ void td5_track_register_lamp_lights(void)
             TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
             if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader)))
                 continue;
-            if (mesh->texture_page_id != 1 && mesh->texture_page_id != 2)
-                continue;                     /* not a billboard mesh */
-            if (mesh->commands_offset == 0 || mesh->command_count <= 0)
+            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0)
+                continue;
+            int count = mesh->total_vertex_count;
+            int cmd_count = mesh->command_count;
+            if (count <= 0 || count > 65536 || cmd_count <= 0 || cmd_count > 4096)
                 continue;
 
-            const TD5_PrimitiveCmd *cmd0 =
+            TD5_MeshVertex *base_verts =
+                (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+            const TD5_PrimitiveCmd *cmds =
                 (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
-            if (td5_asset_get_page_transparency(cmd0->texture_page_id) != 3)
-                continue;                     /* tree/sign, not a light glow */
+            if ((uintptr_t)base_verts < 0x10000u || (uintptr_t)cmds < 0x10000u)
+                continue;
 
-            td5_light_lamps_add(mesh->bounding_center_x,
-                                mesh->bounding_center_y,
-                                mesh->bounding_center_z);
-            lamps++;
+            /* Walk EVERY command (same sequential-cursor rules as the render
+             * walk): each type-3 (additive) command IS a light glow — lamp
+             * heads, whether the mesh is a billboard fixture or a solid post
+             * mesh with the glow as one command. The glow's true rendered
+             * position = mesh origin/256 + the average of ITS OWN vertex
+             * slice (the exact translation the renderer uses; the earlier
+             * bounding_center shortcut pointed ~3k units off the road). */
+            int cursor = 0;
+            int per_mesh = 0;
+            for (int ci = 0; ci < cmd_count && per_mesh < 8; ci++) {
+                const TD5_PrimitiveCmd *cmd = &cmds[ci];
+                int opcode = cmd->dispatch_type;
+                if (opcode < 0 || opcode > 6) continue;
+                int needed = cmd->triangle_count * 3 + cmd->quad_count * 4;
+
+                int idx0;
+                if (cmd->vertex_data_ptr != 0) {
+                    uintptr_t vp = (uintptr_t)cmd->vertex_data_ptr;
+                    const TD5_MeshVertex *cv;
+                    if (vp < 0x10000u)
+                        cv = (const TD5_MeshVertex *)((uint8_t *)mesh + vp);
+                    else
+                        cv = (const TD5_MeshVertex *)vp;
+                    idx0 = (int)(cv - base_verts);
+                    if (idx0 < 0 || idx0 + needed > count) continue;
+                } else {
+                    idx0 = cursor;
+                    if (cursor + needed > count) break;
+                    cursor += needed;
+                }
+                if (needed <= 0) continue;
+
+                int trans = td5_asset_get_page_transparency(cmd->texture_page_id);
+
+                float ax = 0.0f, ay = 0.0f, az = 0.0f;
+                float mnx = 1e9f, mxx = -1e9f, mny = 1e9f, mxy = -1e9f,
+                      mnz = 1e9f, mxz = -1e9f;
+                for (int v = 0; v < needed; v++) {
+                    float x = base_verts[idx0 + v].pos_x;
+                    float y = base_verts[idx0 + v].pos_y;
+                    float z = base_verts[idx0 + v].pos_z;
+                    ax += x; ay += y; az += z;
+                    if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+                    if (y < mny) mny = y; if (y > mxy) mxy = y;
+                    if (z < mnz) mnz = z; if (z > mxz) mxz = z;
+                }
+                float inv = 1.0f / (float)needed;
+                float wx = mesh->origin_x * (1.0f / 256.0f) + ax * inv;
+                float wy = mesh->origin_y * (1.0f / 256.0f) + ay * inv;
+                float wz = mesh->origin_z * (1.0f / 256.0f) + az * inv;
+
+                if (trans == 3) {
+                    /* Additive glow command — a light fixture at its rendered
+                     * position (e.g. Moscow's riverside quay lamps). */
+                    td5_light_lamps_add(wx, wy, wz);
+                } else if (cmd->triangle_count == 0 &&
+                           cmd->quad_count >= 1 && cmd->quad_count <= 2 &&
+                           (mxy - mny) < 60.0f) {
+                    /* FLAT ground quads — the artists' baked lamp REFLECTION
+                     * markers sitting at each street-light post's XZ (Moscow
+                     * pages 338..347: one or two per command, ~1400 apart
+                     * along lit stretches; the matching halo renders ~800
+                     * above). Register EACH small flat quad, lifted to head
+                     * height (up = -Y). TD5RE_LAMP_LIFT tunes the lift. */
+                    static float s_lift = -1.0f;
+                    if (s_lift < 0.0f) {
+                        const char *e = getenv("TD5RE_LAMP_LIFT");
+                        s_lift = (e && e[0]) ? (float)atof(e) : 800.0f;
+                    }
+                    int registered_any = 0;
+                    for (int q = 0; q < cmd->quad_count; q++) {
+                        const TD5_MeshVertex *qv = base_verts + idx0 + q * 4;
+                        float qnx = 1e9f, qxx = -1e9f, qnz = 1e9f, qxz = -1e9f;
+                        float qax = 0, qay = 0, qaz = 0;
+                        for (int v = 0; v < 4; v++) {
+                            qax += qv[v].pos_x; qay += qv[v].pos_y; qaz += qv[v].pos_z;
+                            if (qv[v].pos_x < qnx) qnx = qv[v].pos_x;
+                            if (qv[v].pos_x > qxx) qxx = qv[v].pos_x;
+                            if (qv[v].pos_z < qnz) qnz = qv[v].pos_z;
+                            if (qv[v].pos_z > qxz) qxz = qv[v].pos_z;
+                        }
+                        if (s_reg_dbg) {
+                            static int s_cand = 0;
+                            if (s_cand < 30) {
+                                s_cand++;
+                                TD5_LOG_I("track",
+                                    "lamp cand: dl=%d sub=%u cmd=%d page=%d q=%d ext=(%.0f,%.0f) flatY=%.0f",
+                                    dl, j, ci, (int)cmd->texture_page_id, q,
+                                    qxx - qnx, qxz - qnz, mxy - mny);
+                            }
+                        }
+                        if ((qxx - qnx) < 1500.0f || (qxx - qnx) > 2600.0f) continue;
+                        if ((qxz - qnz) < 1500.0f || (qxz - qnz) > 2600.0f) continue;
+                        td5_light_lamps_add(
+                            mesh->origin_x * (1.0f / 256.0f) + qax * 0.25f,
+                            mesh->origin_y * (1.0f / 256.0f) + qay * 0.25f - s_lift,
+                            mesh->origin_z * (1.0f / 256.0f) + qaz * 0.25f);
+                        registered_any = 1;
+                    }
+                    if (!registered_any) continue;
+                    /* fall through to the shared debug log with wx/wy/wz as
+                     * the command average (position summary only) */
+                    wy -= s_lift;
+                } else {
+                    continue;
+                }
+                if (s_reg_dbg && lamps < 40) {
+                    TD5_LOG_I("track",
+                        "lamp reg[%d]: dl=%d sub=%u cmd=%d tag=%d pos=(%.0f,%.0f,%.0f) verts=%d",
+                        lamps, dl, j, ci, (int)mesh->texture_page_id,
+                        wx, wy, wz, needed);
+                }
+                lamps++;
+                per_mesh++;
+            }
         }
     }
 
-    TD5_LOG_I("track", "street lamps: %d light fixtures registered", lamps);
+    TD5_LOG_I("track", "street lamps: %d light glows registered", lamps);
+
+    /* TD5RE_LAMP_SCAN="x,z": one-shot dump of every mesh whose origin sits
+     * within 5000 world units of the given XZ — per-command page ids,
+     * transparency classes, counts and local geometry extents. Asset
+     * identification aid (what IS a lamp post made of?). Dev-only. */
+    const char *scan = getenv("TD5RE_LAMP_SCAN");
+    if (scan && scan[0]) {
+        float tx = 0.0f, tz = 0.0f;
+        if (sscanf(scan, "%f,%f", &tx, &tz) == 2) {
+            TD5_LOG_I("track", "SCAN: %d display lists total", s_models_display_list_count);
+            for (int dl = 0; dl < s_models_display_list_count; dl++) {
+                if (s_models_entry_offsets[dl] == 0) continue;
+                uint8_t *bb = s_models_blob + s_models_entry_offsets[dl];
+                uint32_t sc = *(const uint32_t *)bb;
+                if (sc > 256) { TD5_LOG_I("track", "SCAN: dl=%d sub_count=%u SKIPPED(>256)", dl, sc); continue; }
+                if (sc == 0) continue;
+                for (uint32_t j = 0; j < sc; j++) {
+                    uint32_t mp = *(const uint32_t *)(bb + 4 + j * 4);
+                    if (mp == 0) continue;
+                    TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)mp;
+                    if (!td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)))
+                        continue;
+                    if (m->commands_offset == 0 || m->vertices_offset == 0) continue;
+                    int cnt = m->total_vertex_count, cc = m->command_count;
+                    if (cnt <= 0 || cnt > 65536 || cc <= 0 || cc > 4096) continue;
+                    TD5_MeshVertex *bv = (TD5_MeshVertex *)(uintptr_t)m->vertices_offset;
+                    const TD5_PrimitiveCmd *cd = (const TD5_PrimitiveCmd *)(uintptr_t)m->commands_offset;
+                    if ((uintptr_t)bv < 0x10000u || (uintptr_t)cd < 0x10000u) continue;
+                    float ox = m->origin_x / 256.0f, oy = m->origin_y / 256.0f,
+                          oz = m->origin_z / 256.0f;
+                    /* PER-COMMAND filter: near-road fixtures often live as a
+                     * few commands inside big merged meshes centered far away. */
+                    static int s_scan_lines = 0;
+                    int cur = 0;
+                    for (int ci = 0; ci < cc; ci++) {
+                        int need = cd[ci].triangle_count * 3 + cd[ci].quad_count * 4;
+                        int i0;
+                        if (cd[ci].vertex_data_ptr != 0) {
+                            uintptr_t vp2 = (uintptr_t)cd[ci].vertex_data_ptr;
+                            const TD5_MeshVertex *cv2 = (vp2 < 0x10000u)
+                                ? (const TD5_MeshVertex *)((uint8_t *)m + vp2)
+                                : (const TD5_MeshVertex *)vp2;
+                            i0 = (int)(cv2 - bv);
+                            if (i0 < 0 || i0 + need > cnt) continue;
+                        } else {
+                            i0 = cur;
+                            if (cur + need > cnt) break;
+                            cur += need;
+                        }
+                        if (need <= 0) continue;
+                        float ax = 0, ay = 0, az = 0, miny = 1e9f, maxy = -1e9f;
+                        for (int v = 0; v < need; v++) {
+                            float y = bv[i0 + v].pos_y;
+                            ax += bv[i0 + v].pos_x; ay += y; az += bv[i0 + v].pos_z;
+                            if (y < miny) miny = y; if (y > maxy) maxy = y;
+                        }
+                        float ninv = 1.0f / (float)need;
+                        float wx = ox + ax * ninv, wy = oy + ay * ninv, wz = oz + az * ninv;
+                        float ddx = wx - tx, ddz = wz - tz;
+                        if (ddx * ddx + ddz * ddz <= 2500.0f * 2500.0f) {
+                            if (s_scan_lines < 70) {
+                                s_scan_lines++;
+                                TD5_LOG_I("track", "SCAN dl=%d sub=%u tag=%d cmd=%d/%d op=%d page=%d trans=%d tri=%d quad=%d wpos=(%.0f,%.0f,%.0f) wY=[%.0f..%.0f]",
+                                          dl, j, (int)m->texture_page_id, ci, cc,
+                                          (int)cd[ci].dispatch_type, (int)cd[ci].texture_page_id,
+                                          td5_asset_get_page_transparency(cd[ci].texture_page_id),
+                                          (int)cd[ci].triangle_count, (int)cd[ci].quad_count,
+                                          wx, wy, wz, oy + miny, oy + maxy);
+                            }
+                        }
+                        /* QUAD-LEVEL: individual quads near the target and
+                         * 400..2000 units ABOVE the road (up = -Y) — lamp
+                         * halos / post tops inside merged commands. */
+                        int qb = i0 + cd[ci].triangle_count * 3;
+                        for (int q = 0; q < cd[ci].quad_count; q++) {
+                            const TD5_MeshVertex *qv = bv + qb + q * 4;
+                            float qx = ox + 0.25f * (qv[0].pos_x + qv[1].pos_x + qv[2].pos_x + qv[3].pos_x);
+                            float qy = oy + 0.25f * (qv[0].pos_y + qv[1].pos_y + qv[2].pos_y + qv[3].pos_y);
+                            float qz = oz + 0.25f * (qv[0].pos_z + qv[1].pos_z + qv[2].pos_z + qv[3].pos_z);
+                            float qdx = qx - tx, qdz = qz - tz;
+                            if (qdx * qdx + qdz * qdz > 2500.0f * 2500.0f) continue;
+                            if (qy > -9000.0f || qy < -13000.0f) continue;  /* not ~0..4200 above road */
+                            if (s_scan_lines >= 70) break;
+                            s_scan_lines++;
+                            TD5_LOG_I("track", "SCANQ dl=%d sub=%u tag=%d cmd=%d page=%d trans=%d q=%d qpos=(%.0f,%.0f,%.0f)",
+                                      dl, j, (int)m->texture_page_id, ci,
+                                      (int)cd[ci].texture_page_id,
+                                      td5_asset_get_page_transparency(cd[ci].texture_page_id),
+                                      q, qx, qy, qz);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /* ========================================================================

@@ -1327,6 +1327,35 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     }
     clipped_count = out_count;
 
+    /* [DEV: TD5RE_GLOW_SCAN=1] Render-side fixture identification: log each
+     * texture page whose polygons draw ELEVATED near the camera (lamp posts /
+     * halos), with a reconstructed world position. Ground truth regardless of
+     * which asset path the geometry came from. One line per page. */
+    {
+        static int s_glow_scan = -1;
+        if (s_glow_scan < 0) { const char *e = getenv("TD5RE_GLOW_SCAN"); s_glow_scan = (e && e[0] && e[0] != '0') ? 1 : 0; }
+        if (s_glow_scan && tex_page >= 0 && tex_page < 1024 && s_level_pass_active) {
+            static uint8_t s_seen[1024];
+            if (!s_seen[tex_page]) {
+                float vx0 = 0, vy0 = 0, vz0 = 0;
+                for (int i2 = 0; i2 < out_count; i2++) { vx0 += out_vx[i2]; vy0 += out_vy[i2]; vz0 += out_vz[i2]; }
+                float inv2 = 1.0f / (float)out_count;
+                vx0 *= inv2; vy0 *= inv2; vz0 *= inv2;
+                float wx = s_camera_pos[0] + vx0 * s_camera_basis[0] + vy0 * s_camera_basis[3] + vz0 * s_camera_basis[6];
+                float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
+                float wz = s_camera_pos[2] + vx0 * s_camera_basis[2] + vy0 * s_camera_basis[5] + vz0 * s_camera_basis[8];
+                float dx = wx - s_camera_pos[0], dz = wz - s_camera_pos[2];
+                float above = s_camera_pos[1] - wy;   /* +Y down: above camera = smaller Y */
+                if (dx * dx + dz * dz < 3500.0f * 3500.0f && above > 300.0f && above < 3500.0f) {
+                    s_seen[tex_page] = 1;
+                    TD5_LOG_I(LOG_TAG, "GLOWSCAN page=%d trans=%d wpos=(%.0f,%.0f,%.0f) above=%.0f",
+                              tex_page, td5_asset_get_page_transparency(tex_page),
+                              wx, wy, wz, above);
+                }
+            }
+        }
+    }
+
     /* --- Backface cull (cross product winding test) --- */
     {
         float ax = clipped[1].screen_x - clipped[0].screen_x;
