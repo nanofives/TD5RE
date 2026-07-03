@@ -92,6 +92,9 @@ void Backend_CaptureIfRequested(void)
 #include "shaders/ps_luminance_alpha_bytes.h"
 #include "shaders/ps_composite_bytes.h"
 #include "shaders/ps_light_bytes.h"
+/* [lighting rework P0] MRT G-buffer variants */
+#include "shaders/ps_modulate_g_bytes.h"
+#include "shaders/ps_modulate_alpha_g_bytes.h"
 
 /* Dynamic buffer sizes.
  *
@@ -471,6 +474,18 @@ static int Backend_CreateShaders(void)
         g_ps_light, sizeof(g_ps_light), NULL,
         &g_backend.ps_light);
     if (FAILED(hr)) { WRAPPER_LOG("CreateShaders: ps_light FAILED (light pass disabled)"); g_backend.ps_light = NULL; }
+
+    /* [lighting rework P0] MRT G-buffer variants (non-fatal: NULL => the
+     * selection logic never promotes to them and the G-buffer stays unwritten). */
+    hr = ID3D11Device_CreatePixelShader(dev,
+        g_ps_modulate_g, sizeof(g_ps_modulate_g), NULL,
+        &g_backend.ps_shaders[PS_MODULATE_G]);
+    if (FAILED(hr)) { WRAPPER_LOG("CreateShaders: ps_modulate_g FAILED (gbuffer write disabled)"); g_backend.ps_shaders[PS_MODULATE_G] = NULL; }
+
+    hr = ID3D11Device_CreatePixelShader(dev,
+        g_ps_modulate_alpha_g, sizeof(g_ps_modulate_alpha_g), NULL,
+        &g_backend.ps_shaders[PS_MODULATE_ALPHA_G]);
+    if (FAILED(hr)) { WRAPPER_LOG("CreateShaders: ps_modulate_alpha_g FAILED (gbuffer write disabled)"); g_backend.ps_shaders[PS_MODULATE_ALPHA_G] = NULL; }
 
     WRAPPER_LOG("CreateShaders: all shaders created OK");
     return 1;
@@ -959,6 +974,7 @@ void Backend_RestoreMainRenderTarget(void)
     if (!g_backend.context) return;
     ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
         &g_backend.swap_rtv, g_backend.depth_dsv);
+    g_backend.gbuffer_bound = 0;   /* single-RT bind above dropped RT1 */
 }
 
 void Backend_RecPoolRelease(void)
@@ -1084,6 +1100,13 @@ static void Backend_ReleaseRenderTargets(void)
     if (g_backend.depth_dsv)  { ID3D11DepthStencilView_Release(g_backend.depth_dsv);  g_backend.depth_dsv = NULL; }
     if (g_backend.depth_tex)  { ID3D11Texture2D_Release(g_backend.depth_tex);           g_backend.depth_tex = NULL; }
     if (g_backend.swap_rtv)   { ID3D11RenderTargetView_Release(g_backend.swap_rtv);     g_backend.swap_rtv = NULL; }
+    /* [lighting rework P0] Drop the G-buffer with the other RT-sized targets;
+     * the next Backend_SetGBufferEnabled(1) recreates it at the new size. */
+    if (g_backend.gbuffer_srv) { ID3D11ShaderResourceView_Release(g_backend.gbuffer_srv); g_backend.gbuffer_srv = NULL; }
+    if (g_backend.gbuffer_rtv) { ID3D11RenderTargetView_Release(g_backend.gbuffer_rtv);   g_backend.gbuffer_rtv = NULL; }
+    if (g_backend.gbuffer_tex) { ID3D11Texture2D_Release(g_backend.gbuffer_tex);          g_backend.gbuffer_tex = NULL; }
+    g_backend.gbuffer_w = g_backend.gbuffer_h = 0;
+    g_backend.gbuffer_bound = 0;
 }
 
 /* ========================================================================
@@ -1572,7 +1595,8 @@ void Backend_UpdateFogCB(void)
  * State cache → D3D11 binding
  * ======================================================================== */
 
-static const char *s_ps_names[] = { "MODULATE", "MODULATE_ALPHA", "DECAL", "LUMINANCE_ALPHA" };
+static const char *s_ps_names[] = { "MODULATE", "MODULATE_ALPHA", "DECAL", "LUMINANCE_ALPHA",
+                                    "MODULATE_G", "MODULATE_ALPHA_G" };
 
 void Backend_SelectPixelShader(void)
 {
@@ -1594,6 +1618,18 @@ void Backend_SelectPixelShader(void)
     case D3DTBLEND_DECAL:         idx = PS_DECAL; break;
     case D3DTBLEND_MODULATEALPHA: idx = PS_MODULATE_ALPHA; break;
     default:                      idx = PS_MODULATE; break;
+    }
+
+    /* [lighting rework P0] Promote to the MRT G-buffer variant for z-writing,
+     * non-blended draws while the G-buffer is active. Immediate path only —
+     * the deferred-context record path keeps the single-RT shaders. The RT1
+     * binding follows in Backend_ApplyStateCache with the same predicate. */
+    if (!rc && g_backend.gbuffer_enabled && g_backend.gbuffer_rtv &&
+        st->z_write && !st->blend_enable) {
+        if (idx == PS_MODULATE && g_backend.ps_shaders[PS_MODULATE_G])
+            idx = PS_MODULATE_G;
+        else if (idx == PS_MODULATE_ALPHA && g_backend.ps_shaders[PS_MODULATE_ALPHA_G])
+            idx = PS_MODULATE_ALPHA_G;
     }
 
     if (idx != st->current_ps_idx) {
@@ -1694,6 +1730,23 @@ void Backend_ApplyStateCache(void)
     /* Pixel shader */
     Backend_SelectPixelShader();
 
+    /* [lighting rework P0] Bind/unbind the G-buffer as RT1 to match the shader
+     * promotion in Backend_SelectPixelShader (same predicate). Immediate
+     * context only; RT0 stays the game's 3D target (backbuffer surface). */
+    if (!rc) {
+        int want = (g_backend.gbuffer_enabled && g_backend.gbuffer_rtv &&
+                    s->z_write && !s->blend_enable &&
+                    g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) ? 1 : 0;
+        if (want != g_backend.gbuffer_bound) {
+            ID3D11RenderTargetView *rtvs[2];
+            rtvs[0] = g_backend.backbuffer->d3d11_rtv;
+            rtvs[1] = want ? g_backend.gbuffer_rtv : NULL;
+            ID3D11DeviceContext_OMSetRenderTargets(ctx, want ? 2 : 1, rtvs,
+                                                   g_backend.depth_dsv);
+            g_backend.gbuffer_bound = want;
+        }
+    }
+
     /* Update fog+alpha CB (contains alpha test state which changes per-draw) */
     Backend_UpdateFogCB();
 
@@ -1765,6 +1818,84 @@ void Backend_DrawFullscreenQuad(ID3D11ShaderResourceView *srv)
     }
 }
 
+/* [lighting rework P0] Lazily (re)create the G-buffer at the current
+ * render-target size. Must match the backbuffer/depth dimensions or the MRT
+ * bind is invalid. Returns 1 when usable. */
+static int Backend_GBufferEnsure(void)
+{
+    HRESULT hr;
+    int w = g_backend.target_width  > 0 ? g_backend.target_width  : g_backend.width;
+    int h = g_backend.target_height > 0 ? g_backend.target_height : g_backend.height;
+
+    if (w <= 0 || h <= 0 || !g_backend.device) return 0;
+    if (g_backend.gbuffer_rtv && g_backend.gbuffer_w == w && g_backend.gbuffer_h == h)
+        return 1;
+
+    if (g_backend.gbuffer_srv) { ID3D11ShaderResourceView_Release(g_backend.gbuffer_srv); g_backend.gbuffer_srv = NULL; }
+    if (g_backend.gbuffer_rtv) { ID3D11RenderTargetView_Release(g_backend.gbuffer_rtv);   g_backend.gbuffer_rtv = NULL; }
+    if (g_backend.gbuffer_tex) { ID3D11Texture2D_Release(g_backend.gbuffer_tex);          g_backend.gbuffer_tex = NULL; }
+    g_backend.gbuffer_w = g_backend.gbuffer_h = 0;
+    g_backend.gbuffer_bound = 0;
+
+    {
+        D3D11_TEXTURE2D_DESC td;
+        ZeroMemory(&td, sizeof(td));
+        td.Width  = (UINT)w;
+        td.Height = (UINT)h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+        hr = ID3D11Device_CreateTexture2D(g_backend.device, &td, NULL, &g_backend.gbuffer_tex);
+        if (FAILED(hr)) { WRAPPER_LOG("GBufferEnsure: CreateTexture2D FAILED hr=0x%08lX", hr); return 0; }
+    }
+    hr = ID3D11Device_CreateRenderTargetView(g_backend.device,
+        (ID3D11Resource*)g_backend.gbuffer_tex, NULL, &g_backend.gbuffer_rtv);
+    if (FAILED(hr)) {
+        WRAPPER_LOG("GBufferEnsure: CreateRTV FAILED hr=0x%08lX", hr);
+        ID3D11Texture2D_Release(g_backend.gbuffer_tex); g_backend.gbuffer_tex = NULL;
+        return 0;
+    }
+    hr = ID3D11Device_CreateShaderResourceView(g_backend.device,
+        (ID3D11Resource*)g_backend.gbuffer_tex, NULL, &g_backend.gbuffer_srv);
+    if (FAILED(hr)) {
+        WRAPPER_LOG("GBufferEnsure: CreateSRV FAILED hr=0x%08lX", hr);
+        ID3D11RenderTargetView_Release(g_backend.gbuffer_rtv); g_backend.gbuffer_rtv = NULL;
+        ID3D11Texture2D_Release(g_backend.gbuffer_tex);        g_backend.gbuffer_tex = NULL;
+        return 0;
+    }
+    g_backend.gbuffer_w = w;
+    g_backend.gbuffer_h = h;
+    WRAPPER_LOG("GBufferEnsure: created %dx%d R8G8B8A8 (normal+matid)", w, h);
+    return 1;
+}
+
+void Backend_SetGBufferEnabled(int on)
+{
+    on = on ? 1 : 0;
+    if (on && (!g_backend.device || !g_backend.context)) on = 0;
+    if (on && !Backend_GBufferEnsure()) on = 0;
+
+    if (g_backend.gbuffer_enabled != on) {
+        g_backend.gbuffer_enabled = on;
+        WRAPPER_LOG("SetGBufferEnabled: %d", on);
+    }
+    /* Force the next draw to re-evaluate the PS promotion + RT1 binding. */
+    g_backend.state.current_ps_idx = -1;
+    g_backend.state.dirty = 1;
+
+    /* Per-frame clear: matid 0 everywhere = "no G-buffer data" so pixels never
+     * touched by a z-writing world draw keep the legacy lighting fallback. */
+    if (on) {
+        const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ID3D11DeviceContext_ClearRenderTargetView(g_backend.context,
+                                                  g_backend.gbuffer_rtv, clear);
+    }
+}
+
 /* Deferred dynamic-light pass — see Backend_ApplyLightPass in wrapper.h.
  * Samples scene depth (depth_srv) to reconstruct world position per pixel and
  * accumulates the dynamic lights additively onto the scene colour target. Runs
@@ -1786,8 +1917,10 @@ void Backend_ApplyLightPass(const LightCB *cb)
     ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource*)g_backend.cb_light,
                                           0, NULL, cb, 0, 0);
 
-    /* Colour-only RT so depth_tex is free to be sampled as an SRV. */
+    /* Colour-only RT so depth_tex is free to be sampled as an SRV. This also
+     * unbinds the G-buffer RT1 (whole-RT-set replace) so it can be sampled. */
     ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, NULL);
+    g_backend.gbuffer_bound = 0;
 
     ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_fullscreen, NULL, 0);
     ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_light, NULL, 0);
@@ -1795,6 +1928,9 @@ void Backend_ApplyLightPass(const LightCB *cb)
     ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.depth_srv);
+    /* [lighting rework P0] G-buffer normals at t1 (NULL when inactive — the
+     * shader's Load then returns 0 = "no data" and keeps legacy behavior). */
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &g_backend.gbuffer_srv);
     ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
     ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_light);
 
@@ -1805,14 +1941,21 @@ void Backend_ApplyLightPass(const LightCB *cb)
     /* Fullscreen triangle, clipped to the current viewport/scissor (the pane). */
     ID3D11DeviceContext_Draw(ctx, 3, 0);
 
-    /* Unbind the depth SRV BEFORE re-binding it as a DSV. */
+    /* Unbind the depth SRV BEFORE re-binding it as a DSV (and the G-buffer SRV
+     * before it can be re-bound as RT1 by the next opaque draw). */
     ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &null_srv);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &null_srv);
 
     /* Restore colour + depth RT and the game's shader/state so the following
      * translucent/HUD draws continue normally. */
     ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, g_backend.depth_dsv);
     ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
     ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    /* [lighting rework P0] The PS binding was replaced by ps_light above but
+     * the cache index still names the game shader — invalidate so
+     * Backend_SelectPixelShader actually re-binds instead of early-outing. */
+    g_backend.state.current_ps_idx = -1;
+    g_backend.state.dirty = 1;
     Backend_SelectPixelShader();
     ID3D11DeviceContext_OMSetDepthStencilState(ctx,
         g_backend.ds_states[g_backend.state.current_ds_idx], 0);
@@ -2075,6 +2218,7 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
         ID3D11DeviceContext_OMSetRenderTargets(ctx, 1,
             &g_backend.backbuffer->d3d11_rtv, g_backend.depth_dsv);
     }
+    g_backend.gbuffer_bound = 0;   /* RT juggling above dropped RT1 */
 }
 
 /* ========================================================================

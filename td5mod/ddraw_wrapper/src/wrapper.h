@@ -122,7 +122,13 @@ typedef struct {
 #define PS_MODULATE_ALPHA        1  /* tex * diffuse, alpha = tex * diffuse */
 #define PS_DECAL                 2  /* tex only */
 #define PS_LUMINANCE_ALPHA       3  /* tex * diffuse, alpha = luminance */
-#define PS_COUNT                 4
+/* [lighting rework P0] MRT variants: same color math + SV_Target1 = COLOR1
+ * (world normal + material id) into the G-buffer. Auto-selected in place of
+ * their base shader for z-writing non-blended draws while the G-buffer is
+ * active (Backend_SetGBufferEnabled). */
+#define PS_MODULATE_G            4
+#define PS_MODULATE_ALPHA_G      5
+#define PS_COUNT                 6
 
 typedef struct {
     /* D3D6 render state values (as received from game) */
@@ -251,6 +257,17 @@ typedef struct {
      * NULL if creation failed (soft particles then silently disabled). */
     ID3D11DepthStencilView   *depth_dsv_readonly; /* D32_FLOAT, READ_ONLY_DEPTH */
     ID3D11ShaderResourceView *depth_srv;          /* R32_FLOAT view of depth_tex */
+
+    /* [lighting rework P0] G-buffer: R8G8B8A8 target carrying world normal
+     * (rgb, biased) + material id (a) written by the ps_*_g MRT variants
+     * during z-writing opaque draws; sampled by the deferred light pass for
+     * N.L. Lazily created at render-target size; NULL until first enable. */
+    ID3D11Texture2D          *gbuffer_tex;
+    ID3D11RenderTargetView   *gbuffer_rtv;
+    ID3D11ShaderResourceView *gbuffer_srv;
+    int                       gbuffer_w, gbuffer_h;
+    int                       gbuffer_enabled;   /* game wants G-buffer this frame */
+    int                       gbuffer_bound;     /* RT1 currently bound (OM state) */
 
     /* Window */
     HWND                hwnd;
@@ -895,6 +912,13 @@ void Backend_UpdateViewportCB(float w, float h); /* Upload viewport constant buf
  * over the CURRENT D3D viewport/scissor (call after the opaque world geometry of
  * a viewport, before translucent VFX/HUD). No-op if depth_srv/ps_light are NULL. */
 void Backend_ApplyLightPass(const LightCB *cb);
+
+/* [lighting rework P0] Per-frame G-buffer gate. on=1: (re)create the G-buffer
+ * at render-target size if needed, clear it (matid 0 = "no data"), and let the
+ * per-draw state machinery bind it as RT1 + swap in the ps_*_g MRT shader
+ * variants for z-writing non-blended draws. on=0: unbind and stop writing.
+ * Call once per rendered frame BEFORE the world pass (race frames only). */
+void Backend_SetGBufferEnabled(int on);
 
 /* [2026-06-08 streaming-ring] Append vertices (+ optional 16-bit indices) to the
  * dynamic VB/IB ring with WRITE_NO_OVERWRITE (DISCARD only on wrap). On success

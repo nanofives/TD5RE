@@ -714,6 +714,13 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
                                   float depth_scale, float depth_bias,
                                   const TD5_LightGPU *lights, int light_count);
 
+/* [LIGHTING REWORK P0] Per-frame G-buffer gate. on=1: the backend clears the
+ * normal+material G-buffer and writes it from z-writing opaque draws (COLOR1
+ * carries world normal + material id); the deferred light pass then applies
+ * proper N.L. on=0: G-buffer off (classic behavior). Call once per rendered
+ * race frame BEFORE the world pass. */
+void td5_plat_render_set_gbuffer(int on);
+
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);
 

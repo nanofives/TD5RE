@@ -41,6 +41,7 @@
 #include "td5_assetsrc.h"
 #include "td5_render.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] master enable / headlights / dark-mode push */
+#include "td5_light2.h"   /* [LIGHT2] lighting rework mode push */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -273,6 +274,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Lighting", "Headlights", g_td5.ini.headlights);
     td5_ini_write_int("Lighting", "DarkMode",   g_td5.ini.light_dark_mode);
     td5_ini_write_int("Lighting", "Auto",       g_td5.ini.lighting_auto);
+    td5_ini_write_int("Lighting", "Mode",       g_td5.ini.lighting2_mode);
 
     /* Game options */
     td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
@@ -357,6 +359,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Headlights",           &g_td5.ini.headlights },
         { "DarkMode",             &g_td5.ini.light_dark_mode },
         { "LightAuto",            &g_td5.ini.lighting_auto },
+        { "LightingMode",         &g_td5.ini.lighting2_mode },
         /* GameOptions */
         { "Laps",                 &g_td5.ini.laps },
         { "CheckpointTimers",     &g_td5.ini.checkpoint_timers },
@@ -770,6 +773,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.headlights       = td5_ini_int("Lighting", "Headlights", 1);
     g_td5.ini.light_dark_mode  = td5_ini_int("Lighting", "DarkMode", 0);
     g_td5.ini.lighting_auto    = td5_ini_int("Lighting", "Auto", 1);
+    /* [LIGHT2] lighting rework mode: 0 classic / 1 enhance (default) */
+    g_td5.ini.lighting2_mode   = td5_ini_int("Lighting", "Mode", 1);
 
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
@@ -1103,9 +1108,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     td5_light_set_headlights(g_td5.ini.headlights);
     td5_light_set_auto(g_td5.ini.lighting_auto);
     td5_render_set_dark_mode(g_td5.ini.light_dark_mode);
-    dbglog("Lighting: enabled=%d headlights=%d dark_mode=%d auto=%d",
+    td5_light2_set_mode(g_td5.ini.lighting2_mode);
+    dbglog("Lighting: enabled=%d headlights=%d dark_mode=%d auto=%d mode=%d",
            g_td5.ini.lighting_enabled, g_td5.ini.headlights,
-           g_td5.ini.light_dark_mode, g_td5.ini.lighting_auto);
+           g_td5.ini.light_dark_mode, g_td5.ini.lighting_auto,
+           g_td5.ini.lighting2_mode);
 
     /* String CLI knob (the int-only override table above can't carry it):
      * --PlayerCarArchive=<code> overrides [Game] PlayerCarArchive so parallel
