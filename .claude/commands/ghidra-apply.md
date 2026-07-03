@@ -1,6 +1,6 @@
 # Ghidra Apply
 
-Apply rename + comment proposals from one or more batch files to the master Ghidra project (`TD5.gpr`). Updates master, appends to header, runs `/ghidra-sync`. Idempotent — running twice on the same batch is a no-op for already-applied renames.
+Apply rename + comment proposals from one or more batch files to the master Ghidra project (`TD5.gpr`). Updates master, appends to header, then regenerates the offline export `re/ghidra_export/`. Idempotent — running twice on the same batch is a no-op for already-applied renames.
 
 **Usage:** `/ghidra-apply <batch-path> [<batch-path> ...]`
 
@@ -27,7 +27,7 @@ Batch file format: see `re/analysis/global_naming/BATCH_TEMPLATE.md`. Supports t
    cp -r TD5.rep "$BACKUP"
    echo "Backup: $BACKUP"
    ```
-3. **Check pool state**: `bash scripts/ghidra_pool.sh status` — confirm master shows `available` (no other writable session active).
+3. **Check master is free**: confirm no `TD5.lock` exists at the repo root (`ls TD5.lock* 2>/dev/null` — empty means available). If a lock exists and the user confirms no Ghidra session is running, it's stale: `rm -f TD5.lock TD5.lock~`.
 
 ### Phase 1 — Load Ghidra MCP schemas
 
@@ -38,7 +38,7 @@ ToolSearch(query="select:mcp__ghidra__project_program_open_existing,mcp__ghidra_
 
 ### Phase 2 — Open master writable
 
-This is the **EXCEPTION to the read-only HARD RULE** — master IS the writable target. Pool slots stay read-only.
+This is the **EXCEPTION to the read-only HARD RULE** — master IS the writable target (single-writer: never run two applies concurrently).
 
 ```
 project_program_open_existing(
@@ -102,23 +102,23 @@ For each high-confidence GLOBAL successfully renamed, append to `td5mod/src/td5r
 
 Sort within the section by address. Skip if no new high-confidence global renames applied. Functions don't go in the header (different consumer).
 
-### Phase 5 — Close + sync
+### Phase 5 — Close + republish
 
 1. `program_close` (releases master lock)
-2. Run pool sync:
+2. Regenerate the offline export so other sessions see the new annotations (the pool of clones was retired 2026-07-03; `re/ghidra_export/` is what sessions read now):
    ```bash
-   bash scripts/ghidra_pool.sh sync
+   cd C:/Users/maria/Desktop/Proyectos/TD5RE
+   ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat . TD5 -process TD5_d3d.exe \
+     -noanalysis -readOnly -scriptPath scripts -postScript ExportAllDecomp.java
    ```
-3. `bash scripts/ghidra_pool.sh status` — confirm result.
-
-If pool sync hits "Device or resource busy" on stale `.gbf` files (per the 2026-05-20 incident), advise the user to reboot and manually re-run sync. The successfully-applied slots are still ahead of the stuck ones.
+3. Confirm `re/ghidra_export/EXPORT_INFO.txt` has fresh counts and 0 decompile failures.
 
 ### Phase 6 — Report
 
 Concise summary:
 - Per batch: G global renames + F function renames + C comments + S skipped
 - Header lines appended: N
-- Pool slots refreshed: M / 16
+- Offline export regenerated: yes/no (+ function count from EXPORT_INFO.txt)
 - Any conflicts (name already taken with different name): list with both names
 
 ## Agent delegation template (for large applies)

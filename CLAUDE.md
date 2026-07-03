@@ -34,8 +34,8 @@ TD5RE/
 │   ├── tools/            # RE helper scripts (extractor, alpha tool, etc.)
 │   ├── analysis/         # RE analysis notes
 │   └── sessions/         # RE session logs
-├── scripts/              # ghidra_pool.sh (parallel-session Ghidra pool)
-├── ghidra_pool/          # Ghidra project clones for parallel sessions
+├── scripts/              # selftest.ps1, ExportAllDecomp.java, deploy/worktree helpers
+├── ghidra_pool/          # TD6_re side project only (TD5 pool slots retired 2026-07-03)
 ├── tools/                # Cloned MCP helper repos, capture_window.ps1, frida CSVs
 └── ghidra_12.0.3_PUBLIC/ # Ghidra installation
 ```
@@ -154,7 +154,7 @@ Key headers: `td5_types.h` (structs, verified against 0x388 actor stride),
 **Frida attach:** `attach("TD5.exe")` or `attach("TD5_d3d.exe")` — process must be running.
 **codebase-memory index:** `td5mod/src/td5re` only (deps/mingw crashes the indexer).
 
-### Ghidra: offline export first, live pool second
+### Ghidra: offline export first, live master second
 
 **Before opening live Ghidra, grep `re/ghidra_export/`** — the full annotated decompilation as text
 (`functions/0x<addr>_<Name>.c`, `symbols.csv`, `globals.csv`, `structs.h`; see its README). It answers
@@ -166,16 +166,17 @@ or writing annotations. Regenerate the export after annotation work:
 Also: fixes/features that are **TD5RE-only** (no original counterpart — arcade, lane assist, drag mode,
 selftest, MP extensions, etc.) need **no** original-binary research at all — see the triage step in `/fix`.
 
-### Ghidra pool (parallel session access)
+### Live Ghidra (rare — open the master project directly)
 
-Multiple sessions share Ghidra via a pool of project clones in `ghidra_pool/`. Managed by `scripts/ghidra_pool.sh`.
+The pool of project clones was retired 2026-07-03 (with `re/ghidra_export/` there is no parallel live
+access to arbitrate; `ghidra_pool/` now holds only the `TD6_re` side project). For the rare live session:
 
-**HARD RULE: Always open Ghidra projects with `read_only=true`.** Never use `read_only=false`. This ensures `/ghidra-sync` can refresh pool slots without conflicts. Any session violating this blocks sync for all others.
+`project_program_open_existing(project_location="C:/Users/maria/Desktop/Proyectos/TD5RE", project_name="TD5", program_name="TD5_d3d.exe", read_only=true)`
 
-To open Ghidra in any context (skills, subagents, ad-hoc):
-1. `bash scripts/ghidra_pool.sh acquire` → get slot name (e.g. `TD5_pool2`)
-2. `project_program_open_existing(project_location=".../ghidra_pool", project_name="TD5_pool2", program_name="TD5_d3d.exe", read_only=true)`
-3. After done: `bash scripts/ghidra_pool.sh cleanup`
+**HARD RULE: `read_only=true` for all research.** `read_only=false` is reserved for `/ghidra-apply`
+(annotation writes; single writer, one at a time), which must regenerate `re/ghidra_export/` afterwards.
+If open fails with LockException and no Ghidra session is actually running, the lock is stale —
+`rm -f TD5.lock TD5.lock~` at the repo root and retry.
 
 ## Debug shortcuts (in-race)
 

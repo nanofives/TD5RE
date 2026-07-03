@@ -67,7 +67,7 @@ The port has strayed deliberately far from the original game. Before spawning an
 
 **Decision rule: "Would decompiling the original change what I implement?" If no → TD5RE-ONLY.**
 
-For **TD5RE-ONLY** fixes: **skip Step 1, the Step 1 Gate, Step 1.5, and Step 4.6 entirely.** Do not acquire a Ghidra pool slot. Research the port source under `${WORKTREE_DIR}/td5mod/src/td5re/`, `EXPECTED_BEHAVIOR.md`, and git history instead. In the Step 3 commit message use `RE basis: N/A — TD5RE-only (no original counterpart)`. The NO-GUESSING rule and the Verbose Uncertainty Disclosure still apply in full — the evidence base is the port source instead of the decompilation.
+For **TD5RE-ONLY** fixes: **skip Step 1, the Step 1 Gate, Step 1.5, and Step 4.6 entirely.** Do not open live Ghidra. Research the port source under `${WORKTREE_DIR}/td5mod/src/td5re/`, `EXPECTED_BEHAVIOR.md`, and git history instead. In the Step 3 commit message use `RE basis: N/A — TD5RE-only (no original counterpart)`. The NO-GUESSING rule and the Verbose Uncertainty Disclosure still apply in full — the evidence base is the port source instead of the decompilation.
 
 **Mixed cases** (a TD5RE feature layered on original-derived systems, e.g. a power-up multiplier applied to the original drivetrain formula): treat as ORIGINAL-DERIVED **only for the specific original-derived values touched** — scope the research narrowly to those; everything else follows the TD5RE-ONLY path.
 
@@ -78,31 +78,19 @@ For **ORIGINAL-DERIVED** fixes, check the offline export first: `re/ghidra_expor
 Launch a **general-purpose Agent** (has MCP access) to investigate the original binary. The agent prompt MUST include:
 
 - The bug/feature description: `$ARGUMENTS`
-- Instructions to connect to the analyzed Ghidra project using the **pool system**:
+- Instructions to open the **master project directly** (the pool of clones was retired 2026-07-03 — parallel read access goes through `re/ghidra_export/`, so live sessions are rare enough to share the single master):
   ```
-  STEP A: Acquire a pool slot by running this Bash command:
-    bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" acquire
+  mcp__ghidra__project_program_open_existing with:
+    project_location="C:/Users/maria/Desktop/Proyectos/TD5RE"
+    project_name="TD5"
+    program_name="TD5_d3d.exe"
+    read_only=true
 
-  This prints a project name like "TD5_pool2". If it prints an ERROR (all locked),
-  run: bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" cleanup
-  then retry acquire. If still failing, fall back to master TD5.
-
-  STEP B: Open the acquired slot:
-    mcp__ghidra__project_program_open_existing with:
-      project_location="C:/Users/maria/Desktop/Proyectos/TD5RE/ghidra_pool"
-      project_name=<the name from Step A, e.g. "TD5_pool2">
-      program_name="TD5_d3d.exe"
-      read_only=true
-
-  If STEP B fails with LockException, go back to STEP A (the acquire script
-  already skips locked slots, so this means a race — just retry).
-
-  FALLBACK: If the pool directory doesn't exist, use the master project directly:
-    mcp__ghidra__project_program_open_existing with:
-      project_location="C:/Users/maria/Desktop/Proyectos/TD5RE"
-      project_name="TD5"
-      program_name="TD5_d3d.exe"
-      read_only=true
+  If this fails with LockException, another live Ghidra session has master open —
+  wait and retry once. If the user confirms NO Ghidra session is running, the lock
+  is stale; remove it and retry:
+    rm -f "C:/Users/maria/Desktop/Proyectos/TD5RE/TD5.lock" \
+          "C:/Users/maria/Desktop/Proyectos/TD5RE/TD5.lock~"
   ```
 - Instructions to find and decompile the relevant function(s) using `mcp__ghidra__function_by_name` or `mcp__ghidra__search_text`, then `mcp__ghidra__decomp_function`
 - Instructions to trace callers/callees with `mcp__ghidra__function_callees` / `mcp__ghidra__function_callers` if needed
@@ -133,12 +121,7 @@ Launch a **general-purpose Agent** (has MCP access) to investigate the original 
   7. **Asset dimensions** (if any TGA/surface is involved): read actual TGA header dimensions — do NOT derive from `create_surface` calls (those are compositing buffers)
   8. **Unknowns list**: Explicitly list anything the research could NOT determine — do not silently omit gaps
 
-After all Ghidra MCP calls are done, clean up locks and refresh the pool:
-```bash
-bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" cleanup
-bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" sync
-```
-This ensures other sessions pick up any master project changes. Slots locked by other active sessions are safely skipped.
+After all Ghidra MCP calls are done, close the program (`mcp__ghidra__program_close`) so the master lock is released for other sessions.
 
 Do NOT ask the agent to make edits. Research only.
 
@@ -497,30 +480,21 @@ Rules for this step:
 - The re-population step (b) ONLY runs after the merge succeeds for that sibling. If the merge failed (lock/conflict), the loop has already `break`'d and we never reach re-population — that's intentional so we don't paper over a broken merge state.
 - If the loop breaks early due to a lock/conflict, later worktrees stay unmerged — that's fine. Running this step again after the blocker clears will pick them up (git skips worktrees that are already up to date, and the asset robocopy is idempotent).
 
-### Step 4.6: Final Ghidra pool sync (republish master's RE annotations)
+### Step 4.6: Refresh the offline decomp export (only if RE annotations were written)
 
-**Skip this step entirely if no live Ghidra session was opened this run** (TD5RE-ONLY triage, or ORIGINAL-DERIVED answered from `re/ghidra_export/`) — there is nothing to republish and no locks to clean.
-
-Step 1 (research agent) runs `ghidra_pool.sh cleanup` + `sync` at the end of its own work, but only inside the research subagent's scope. Steps 2–4 never touch the pool. If the shipped fix included any Ghidra annotations (function renames, struct edits, comments, retypes) the master `TD5.rep` now contains them — but pool slots still hold the pre-merge snapshot. Republish so the next `/fix` (or `/re`, or any concurrent session) sees up-to-date RE state.
+**Skip this step unless a live Ghidra session WROTE annotations to master this run** (function renames, struct edits, comments, retypes — e.g. via `/ghidra-apply`). Read-only research and TD5RE-ONLY fixes have nothing to republish. (The pool of clones was retired 2026-07-03; other sessions read `re/ghidra_export/`, so republishing means regenerating the export.)
 
 ```bash
 cd C:/Users/maria/Desktop/Proyectos/TD5RE
-
-# Clean any stale lock files first so locked slots that died ungracefully
-# don't get skipped forever. The pool script already protects active slots
-# (it skips ones with a live .lock file from another running session).
-bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" cleanup
-bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" sync
+ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat . TD5 -process TD5_d3d.exe \
+  -noanalysis -readOnly -scriptPath scripts -postScript ExportAllDecomp.java
 ```
 
-Rules for this step:
-- This is **always** safe to re-run. Locked slots get logged-as-skipped, not failed. Idempotent.
-- Failure here is not fatal — the fix is already merged and pushed. Log the error and continue to Step 5. (Locked pool slots will catch up on the next `/fix` or manual `ghidra_pool.sh sync`.)
-- Do NOT run `ghidra_pool.sh init` here — that recreates ALL slots from scratch and wipes any in-progress edits in pool slots that another session is using.
+Failure here is not fatal — the fix is already merged and pushed. Log the error and continue to Step 5.
 
 ### Step 5: Post-condition — verify origin is in sync (HARD STOP)
 
-After Step 4.5 (sibling worktree propagation) and Step 4.6 (final pool sync), run a final check that local master is fully published. This catches any case where the push was skipped — e.g. fallback cherry-pick path (Step 4 rules), partial flow due to manual recovery, or auth failure that wasn't surfaced.
+After Step 4.5 (sibling worktree propagation) and Step 4.6 (export refresh, if applicable), run a final check that local master is fully published. This catches any case where the push was skipped — e.g. fallback cherry-pick path (Step 4 rules), partial flow due to manual recovery, or auth failure that wasn't surfaced.
 
 ```bash
 cd C:/Users/maria/Desktop/Proyectos/TD5RE

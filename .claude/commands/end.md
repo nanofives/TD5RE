@@ -467,14 +467,17 @@ echo "origin/master in sync — session fully published."
 
 ---
 
-## Step 7d: Final Ghidra pool sync (if RE annotations shipped)
+## Step 7d: Refresh the offline decomp export (if RE annotations shipped)
+
+Only if this session WROTE annotations to the master Ghidra project (renames, struct edits, comments). The pool of clones was retired 2026-07-03 — republishing means regenerating `re/ghidra_export/`:
 
 ```bash
-bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" cleanup
-bash "C:/Users/maria/Desktop/Proyectos/TD5RE/scripts/ghidra_pool.sh" sync
+cd C:/Users/maria/Desktop/Proyectos/TD5RE
+ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat . TD5 -process TD5_d3d.exe \
+  -noanalysis -readOnly -scriptPath scripts -postScript ExportAllDecomp.java
 ```
 
-Always safe to re-run (locked slots are logged-skipped). Failure here is non-fatal — the fix is already shipped. Never run `ghidra_pool.sh init` (wipes in-progress pool edits).
+Failure here is non-fatal — the fix is already shipped.
 
 ---
 
