@@ -83,11 +83,19 @@ float4 main(PS_INPUT input) : SV_TARGET
     float thick   = params.y;
     float t0      = params.z;
 
+    /* Per-pixel stratified jitter (hash of the pixel coord — constant across
+     * frames, so no temporal shimmer). Without it the fixed step grid makes
+     * one occluder's shadow repeat as several offset "echo" copies: adjacent
+     * road pixels alternately hit/miss a thin occluder in a spatially
+     * coherent pattern. Jitter decorrelates neighbours, turning the echoes
+     * into a single dithered-edge shadow. */
+    float jit = frac(sin(dot(float2(px), float2(12.9898, 78.233))) * 43758.5453);
+
     float occ = 0.0;
     [loop]
     for (int k = 1; k <= steps; k++)
     {
-        float t = t0 + (maxDist - t0) * ((float)k / (float)steps);
+        float t = t0 + (maxDist - t0) * (((float)k - jit) / (float)steps);
         float3 P = world + sun.xyz * t;
 
         /* World -> view (basis rows are orthonormal). */
@@ -104,7 +112,8 @@ float4 main(PS_INPUT input) : SV_TARGET
         if (psx < 0.5 || psx >= paneW - 0.5 || psy < 0.5 || psy >= paneH - 0.5)
             break;                         /* ray left this pane — stop      */
 
-        float sceneD  = depthTex.Load(int3(int(psx + vpX), int(psy + vpY), 0)).r;
+        int2  sp = int2(int(psx + vpX), int(psy + vpY));
+        float sceneD  = depthTex.Load(int3(sp, 0)).r;
         if (sceneD >= 0.99999)
             continue;                      /* sky along the ray — unoccluded */
         float sceneVz = sceneD * depthScale + depthBias;
@@ -115,8 +124,15 @@ float4 main(PS_INPUT input) : SV_TARGET
         float dz = pvz - sceneVz;
         if (dz > 4.0 && dz < thick)
         {
-            occ = 1.0;
-            break;
+            /* Billboard occluders (camera-facing tree/sprite quads) carry no
+             * G-buffer data (matid 0): their quads reorient with the camera,
+             * so their "shadows" would swing and morph while driving. Only
+             * REAL geometry (matid > 0: roads, walls, cars) casts. */
+            if (gbufTex.Load(int3(sp, 0)).a > 0.001)
+            {
+                occ = 1.0;
+                break;
+            }
         }
     }
 

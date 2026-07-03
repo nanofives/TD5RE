@@ -104,4 +104,19 @@ const TD5_DynLight *td5_light_list(int *count);   /* NULL,0 when none/disabled *
  * frame after td5_light_begin_frame(). No-op when headlights are disabled. */
 void td5_light_emit_vehicle_headlights(void);
 
+/* ---- Street lamps (static world lights) --------------------------------
+ * The track's light fixtures (street-lamp glow billboards — additive type-3
+ * pages) are registered at track load with their world positions; each frame
+ * the emitter promotes the nearest few to REAL point lights so lamps
+ * illuminate the road, cars and walls under them. Emission follows the same
+ * environment-darkness verdict as auto headlights (rain/dusk/tunnels), so
+ * bright daylight stays untouched. [Lighting] StreetLights / --StreetLights. */
+void td5_light_lamps_reset(void);                     /* track load: clear     */
+void td5_light_lamps_add(float x, float y, float z);  /* track load: register  */
+int  td5_light_lamps_count(void);
+void td5_light_set_street_lights(int on);
+int  td5_light_street_lights(void);
+/* Per frame, after td5_light_emit_vehicle_headlights(). */
+void td5_light_emit_street_lamps(void);
+
 #endif /* TD5_LIGHT_H */

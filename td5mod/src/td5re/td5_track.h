@@ -209,6 +209,10 @@ void td5_track_dim_additive_billboard_meshes(void);
  * lighting is untouched). Derived streams are tagged with bit 0 of
  * normals_offset; call right after td5_track_dim_additive_billboard_meshes. */
 void td5_track_derive_missing_normals(void);
+/* [LIGHT2] One-shot post-load pass: register every street-lamp glow fixture
+ * (type-3 billboard mesh) with the dynamic-light system so the nearest few
+ * become real point lights per frame. Call AFTER track textures load. */
+void td5_track_register_lamp_lights(void);
 int  td5_track_get_models_display_list_count(void);
 int  td5_track_get_span_display_list_index(int span_index);
 const void *td5_track_get_models_display_list_raw(int index, size_t *size_out);

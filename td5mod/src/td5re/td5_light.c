@@ -239,3 +239,95 @@ void td5_light_emit_vehicle_headlights(void)
         s_logged = 1;
     }
 }
+
+/* ---- Street lamps (static world lights) -------------------------------- */
+
+#define TD5_LAMP_MAX 1024
+
+static float s_lamp_pos[TD5_LAMP_MAX][3];
+static int   s_lamp_count     = 0;
+static int   s_street_lights  = 1;
+
+void td5_light_lamps_reset(void)          { s_lamp_count = 0; }
+int  td5_light_lamps_count(void)          { return s_lamp_count; }
+void td5_light_set_street_lights(int on)  { s_street_lights = on ? 1 : 0; }
+int  td5_light_street_lights(void)        { return s_street_lights; }
+
+void td5_light_lamps_add(float x, float y, float z)
+{
+    if (s_lamp_count >= TD5_LAMP_MAX) return;
+    s_lamp_pos[s_lamp_count][0] = x;
+    s_lamp_pos[s_lamp_count][1] = y;
+    s_lamp_pos[s_lamp_count][2] = z;
+    s_lamp_count++;
+}
+
+/* Lamp look knobs (env, read once): warm sodium-ish pools. */
+static int   s_lamp_knobs_read = 0;
+static float s_lamp_range      = 2200.0f;  /* TD5RE_LAMP_RANGE      pool radius (world units) */
+static float s_lamp_intensity  = 0.60f;    /* TD5RE_LAMP_INTENSITY  peak added light 0..1     */
+static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
+
+void td5_light_emit_street_lamps(void)
+{
+    if (!s_enabled || !s_street_lights || s_lamp_count <= 0) return;
+    /* Same verdict as auto headlights: lamps light up in rain/dusk/dark zones
+     * and stay off in bright daylight. */
+    if (!s_env_dark) return;
+
+    if (!s_lamp_knobs_read) {
+        s_lamp_knobs_read = 1;
+        s_lamp_range     = env_f("TD5RE_LAMP_RANGE",     s_lamp_range);
+        s_lamp_intensity = env_f("TD5RE_LAMP_INTENSITY", s_lamp_intensity);
+        {
+            const char *e = getenv("TD5RE_LAMP_COUNT");
+            if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= TD5_LIGHT_MAX) s_lamp_budget = v; }
+        }
+        TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d",
+                  s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget);
+    }
+    if (s_lamp_budget <= 0 || s_lamp_intensity <= 0.0f) return;
+
+    /* Reference point: player slot 0 (lights are shared across panes). */
+    TD5_Actor *p = td5_game_get_actor(0);
+    if (!p) return;
+    float px = (float)p->world_pos.x * (1.0f / 256.0f);
+    float pz = (float)p->world_pos.z * (1.0f / 256.0f);
+
+    /* Nearest-N selection (insertion into a small sorted list — lamp counts
+     * are a few hundred, budget ~10; runs once per frame). XZ distance only:
+     * lamp heads sit high, vertical offset is irrelevant for "near me". */
+    int   best_idx[TD5_LIGHT_MAX];
+    float best_d2[TD5_LIGHT_MAX];
+    int   nbest = 0;
+    float cutoff2 = (s_lamp_range * 6.0f) * (s_lamp_range * 6.0f);
+    for (int i = 0; i < s_lamp_count; i++) {
+        float dx = s_lamp_pos[i][0] - px;
+        float dz = s_lamp_pos[i][2] - pz;
+        float d2 = dx * dx + dz * dz;
+        if (d2 > cutoff2) continue;
+        int j = nbest;
+        if (nbest < s_lamp_budget) nbest++;
+        else if (d2 >= best_d2[nbest - 1]) continue;
+        else j = nbest - 1;
+        while (j > 0 && best_d2[j - 1] > d2) {
+            best_d2[j] = best_d2[j - 1]; best_idx[j] = best_idx[j - 1]; j--;
+        }
+        best_d2[j] = d2; best_idx[j] = i;
+    }
+
+    for (int k = 0; k < nbest; k++) {
+        const float *L = s_lamp_pos[best_idx[k]];
+        /* Warm sodium-vapor tint. */
+        td5_light_add_point(L[0], L[1], L[2],
+                            s_lamp_range, s_lamp_intensity,
+                            1.0f, 0.82f, 0.55f);
+    }
+
+    static int s_lamp_logged = 0;
+    if (!s_lamp_logged && nbest > 0) {
+        TD5_LOG_I(LOG_TAG, "street lamps: emitting %d/%d nearest (registry now %d lights)",
+                  nbest, s_lamp_count, s_light_count);
+        s_lamp_logged = 1;
+    }
+}

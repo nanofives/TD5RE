@@ -280,6 +280,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Lighting", "LightOcclusion", g_td5.ini.light_occlusion);
     td5_ini_write_int("Lighting", "Reflections",    g_td5.ini.reflections);
     td5_ini_write_int("Lighting", "WetRoads",       g_td5.ini.wet_roads);
+    td5_ini_write_int("Lighting", "StreetLights",   g_td5.ini.street_lights);
 
     /* Game options */
     td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
@@ -370,6 +371,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "LightOcclusion",       &g_td5.ini.light_occlusion },
         { "Reflections",          &g_td5.ini.reflections },
         { "WetRoads",             &g_td5.ini.wet_roads },
+        { "StreetLights",         &g_td5.ini.street_lights },
         /* GameOptions */
         { "Laps",                 &g_td5.ini.laps },
         { "CheckpointTimers",     &g_td5.ini.checkpoint_timers },
@@ -792,6 +794,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* [LIGHT2 P3] screen-space reflection knobs */
     g_td5.ini.reflections      = td5_ini_int("Lighting", "Reflections", 1);
     g_td5.ini.wet_roads        = td5_ini_int("Lighting", "WetRoads", 1);
+    /* [LIGHT2] street-lamp light emission */
+    g_td5.ini.street_lights    = td5_ini_int("Lighting", "StreetLights", 1);
 
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
@@ -1131,6 +1135,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     td5_light2_set_light_occlusion(g_td5.ini.light_occlusion);
     td5_light2_set_reflections(g_td5.ini.reflections);
     td5_light2_set_wet_roads(g_td5.ini.wet_roads);
+    td5_light_set_street_lights(g_td5.ini.street_lights);
     dbglog("Lighting: enabled=%d headlights=%d dark_mode=%d auto=%d mode=%d "
            "sun_shadows=%d strength=%d light_occl=%d refl=%d wet=%d",
            g_td5.ini.lighting_enabled, g_td5.ini.headlights,

@@ -28,6 +28,7 @@
 #include "td5re.h"
 #include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
 #include "td5_light2.h"   /* [LIGHT2 P1] derive-normals gate */
+#include "td5_light.h"    /* [LIGHT2] street-lamp light registration */
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -7504,6 +7505,60 @@ void td5_track_dim_additive_billboard_meshes(void)
     TD5_LOG_I("track",
         "additive billboard dim: %d/%d billboard meshes had type-3 pages "
         "(halved per-vertex diffuse)", dimmed, total_bb);
+}
+
+/* ========================================================================
+ * [LIGHT2] Street-lamp light registration
+ *
+ * The track's light fixtures are additive glow billboards (mesh header tag
+ * 1/2, first command on a type-3 page) — the SAME detection the billboard
+ * dim pass above uses. Their bounding_center is authored in ABSOLUTE world
+ * float space [CONFIRMED @ 0x42dcad — the frustum cull reads +0x10/14/18
+ * directly with no origin add], i.e. exactly the space the dynamic-light
+ * registry wants. Register each fixture so td5_light_emit_street_lamps can
+ * promote the nearest few to real point lights per frame.
+ *
+ * One-shot per track load; call AFTER td5_asset_load_track_textures (needs
+ * the page transparency table, like the dim pass).
+ * ======================================================================== */
+void td5_track_register_lamp_lights(void)
+{
+    td5_light_lamps_reset();
+    if (!td5_light2_active()) return;
+
+    int lamps = 0;
+
+    for (int dl = 0; dl < s_models_display_list_count; dl++) {
+        if (s_models_entry_offsets[dl] == 0) continue;
+        uint8_t *block_base = s_models_blob + s_models_entry_offsets[dl];
+        uint32_t sub_count = *(const uint32_t *)block_base;
+        if (sub_count == 0 || sub_count > 256) continue;
+
+        for (uint32_t j = 0; j < sub_count; j++) {
+            uint32_t mesh_ptr_val = *(const uint32_t *)(block_base + 4 + j * 4);
+            if (mesh_ptr_val == 0) continue;
+
+            TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
+            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader)))
+                continue;
+            if (mesh->texture_page_id != 1 && mesh->texture_page_id != 2)
+                continue;                     /* not a billboard mesh */
+            if (mesh->commands_offset == 0 || mesh->command_count <= 0)
+                continue;
+
+            const TD5_PrimitiveCmd *cmd0 =
+                (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+            if (td5_asset_get_page_transparency(cmd0->texture_page_id) != 3)
+                continue;                     /* tree/sign, not a light glow */
+
+            td5_light_lamps_add(mesh->bounding_center_x,
+                                mesh->bounding_center_y,
+                                mesh->bounding_center_z);
+            lamps++;
+        }
+    }
+
+    TD5_LOG_I("track", "street lamps: %d light fixtures registered", lamps);
 }
 
 /* ========================================================================

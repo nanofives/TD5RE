@@ -2964,6 +2964,9 @@ int td5_game_init_race_session(void) {
      * G-buffer covers roads/walls (sun-shadow backface skip, SSR). No-op in
      * Mode 0; baked vertex lighting is never touched. */
     td5_track_derive_missing_normals();
+    /* [LIGHT2] Register the track's street-lamp glow fixtures as light
+     * sources (nearest few become real point lights per frame when dark). */
+    td5_track_register_lamp_lights();
     TD5_LOG_I(LOG_TAG, "InitRace step 8/19: track textures loaded for track=%d",
               g_td5.track_index);
 
@@ -6543,6 +6546,10 @@ int td5_game_run_race_frame(void) {
     }
     if (!td5_render_photobooth_active())
         td5_light_emit_vehicle_headlights();
+    /* [LIGHT2] Street lamps: promote the nearest registered lamp fixtures to
+     * real point lights (env-dark gated, same verdict as auto headlights). */
+    if (!td5_render_photobooth_active())
+        td5_light_emit_street_lamps();
 
     /* [S01 2026-06-04] Live window resize: if the render dimensions changed
      * (drag-resize / maximize, applied in the platform layer's WM_SIZE handler),

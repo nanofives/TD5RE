@@ -105,10 +105,13 @@ float4 main(PS_INPUT input) : SV_TARGET
     float3 hitColor = float3(0.0, 0.0, 0.0);
     float  hitFade  = 0.0;
 
+    /* per-pixel stratified jitter — see ps_shadow.hlsl rationale */
+    float jit = frac(sin(dot(float2(px), float2(12.9898, 78.233))) * 43758.5453);
+
     [loop]
     for (int k = 1; k <= steps; k++)
     {
-        float t = 4.0 + (maxDist - 4.0) * ((float)k / (float)steps);
+        float t = 4.0 + (maxDist - 4.0) * (((float)k - jit) / (float)steps);
         float3 P = world + R * t;
 
         float3 d = P - camPosFocal.xyz;

@@ -185,7 +185,7 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
     static int   s_steps = -1;
     if (s_steps < 0) {
         const char *e;
-        s_steps = ((e = getenv("TD5RE_SHADOW_STEPS")) && e[0]) ? atoi(e)         : 16;
+        s_steps = ((e = getenv("TD5RE_SHADOW_STEPS")) && e[0]) ? atoi(e)         : 24;
         s_dist  = ((e = getenv("TD5RE_SHADOW_DIST"))  && e[0]) ? (float)atof(e)  : 2500.0f;
         s_thick = ((e = getenv("TD5RE_SHADOW_THICK")) && e[0]) ? (float)atof(e)  : 600.0f;
         if (s_steps < 4)  s_steps = 4;

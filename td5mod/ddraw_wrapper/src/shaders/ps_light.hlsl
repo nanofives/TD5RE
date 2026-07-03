@@ -134,10 +134,12 @@ float4 main(PS_INPUT input) : SV_TARGET
         if (osteps > 0)
         {
             float3 Ld = toL / max(dist, 0.001);
+            /* per-pixel stratified jitter — see ps_shadow.hlsl rationale */
+            float jit = frac(sin(dot(float2(px), float2(12.9898, 78.233))) * 43758.5453);
             [loop]
             for (int s = 1; s <= osteps; s++)
             {
-                float t = dist * ((float)s / (float)(osteps + 1));
+                float t = dist * (((float)s - jit) / (float)(osteps + 1));
                 float3 P = world + Ld * t;
                 float3 dd = P - camPosFocal.xyz;
                 float pvz = dot(dd, fwdDepthScale.xyz);
