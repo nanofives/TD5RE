@@ -72,6 +72,7 @@ static const char *const k_seed[] = {
     "Pause menu: END RACE NOW only in local split-screen MP (not SP/net)",
     "Pause menu: RESTART/QUIT/EXIT/LOBBY ask YES/NO confirm in split-screen MP",
     "Pause menu (single-player): RESTART/QUIT/EXIT act immediately, no confirm",
+    "END RACE NOW: next race camera starts normal (was stuck shifted)",
     "Track walker: no span warp on degenerate quads (race normally)",
     "Headlights: per-pixel beams flood the road (deferred light pass)",
     "Headlights auto-on in rain/overcast/dusk, off in bright daylight",
