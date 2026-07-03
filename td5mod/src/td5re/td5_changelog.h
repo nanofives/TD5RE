@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 2" },
+    { CL_ITEM,    "Damage bar now sits at the top centre of the screen," },
+    { CL_ITEM,    "  styled like the pause-menu bars (blue to red fill);" },
+    { CL_ITEM,    "  the checkpoint timer and other top-centre HUD items" },
+    { CL_ITEM,    "  slide down below it so nothing overlaps" },
     { CL_ITEM,    "FIX: game sounds no longer vanish after playing" },
     { CL_ITEM,    "  several races in one session (audio buffer pool" },
     { CL_ITEM,    "  now recycles freed slots instead of filling up)" },

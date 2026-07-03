@@ -62,6 +62,8 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Damage bar: top-centre + pause-style blue-red fill",
+    "Damage bar on: checkpoint timer sits below it",
     "Track walker: no span warp on degenerate quads (race normally)",
     "Headlights: per-pixel beams flood the road (deferred light pass)",
     "Headlights auto-on in rain/overcast/dusk, off in bright daylight",

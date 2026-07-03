@@ -1833,6 +1833,12 @@ void td5_hud_draw_player_id_overlays(void)
  * max from td5_arcade_active_max_frames() is unavailable. Kept in step with the
  * actual durations in td5_arcade.c apply_pickup so the bar never depicts just
  * the last few seconds (the old bug: these were stale at 30/120/150). */
+/* [DMG BAR TOP-CENTRE 2026-07-02] Extra Y offset every top-centre HUD element
+ * (checkpoint countdown, WRECKS/ARRESTS/POINTS, power-up chip) applies while
+ * the player damage bar occupies the pane's top-centre slot. 0 when the bar is
+ * disabled. Defined next to hud_draw_player_damage_bar. */
+static float hud_top_center_shift_y(int view_index);
+
 static int arcade_effect_nominal_frames(int effect)
 {
     switch (effect) {
@@ -1896,9 +1902,10 @@ void td5_hud_draw_arcade_chips(void)
         float chip_h  = 15.0f * ts + 2.0f * (5.0f * ts) + bar_h;
         /* [2026-06-26] Centre the effect chip horizontally and sit it just below
          * the top-centre checkpoint countdown (per user) instead of the pane's
-         * top-left corner. */
+         * top-left corner. [DMG BAR TOP-CENTRE 2026-07-02] shifted with the rest
+         * of the top-centre stack when the damage bar claims the top slot. */
         float cx      = vl->center_x - chip_w * 0.5f;
-        float cy      = T + h * 0.14f;
+        float cy      = T + h * 0.14f + hud_top_center_shift_y(v);
 
         /* chip background (dark, semi-transparent) */
         td5_vui_quad(cx, cy, chip_w, chip_h, 0xC0101010u, -1, 0, 0, 0, 0);
@@ -1947,6 +1954,8 @@ void td5_hud_draw_battle_wrecks(void)
         if (w < 2.0f) continue;
 
         int wrecks = td5_game_get_wanted_kills(slot);
+        /* [DMG BAR TOP-CENTRE 2026-07-02] drop below the top-centre damage bar */
+        float tshift = hud_top_center_shift_y(v);
 
         if (td5_hudfont_ready()) {
             float ts = (w / 640.0f) * 0.95f;
@@ -1955,7 +1964,7 @@ void td5_hud_draw_battle_wrecks(void)
             if (ts > 1.50f) ts = 1.50f;
             char buf[24];
             snprintf(buf, sizeof buf, "WRECKS %d", wrecks);
-            td5_vui_text_centered(vl->center_x, vl->vp_int_top + 8.0f, buf,
+            td5_vui_text_centered(vl->center_x, vl->vp_int_top + 8.0f + tshift, buf,
                                   0xFFFFC040u, ts, ts);   /* amber-gold */
             /* [CHECKPOINTS] Deadline gap — how many spans ahead of the chaser
              * (turns red as it closes in; "CAUGHT" once passed). */
@@ -1965,11 +1974,11 @@ void td5_hud_draw_battle_wrecks(void)
                 if (gap <= 0)        { snprintf(gb, sizeof gb, "CAUGHT");        gc = 0xFFFF3030u; }
                 else if (gap < 40)   { snprintf(gb, sizeof gb, "DEADLINE %d", gap); gc = 0xFFFF6030u; }
                 else                 { snprintf(gb, sizeof gb, "DEADLINE %d", gap); gc = 0xFF60FF80u; }
-                td5_vui_text_centered(vl->center_x, vl->vp_int_top + 8.0f + 18.0f * ts,
+                td5_vui_text_centered(vl->center_x, vl->vp_int_top + 8.0f + tshift + 18.0f * ts,
                                       gb, gc, ts * 0.85f, ts * 0.85f);
             }
         } else {
-            td5_hud_queue_text(0, (int)vl->center_x, (int)(vl->vp_int_top + 8.0f), 1,
+            td5_hud_queue_text(0, (int)vl->center_x, (int)(vl->vp_int_top + 8.0f + tshift), 1,
                                "WRECKS %d", wrecks);
         }
     }
@@ -3136,7 +3145,9 @@ int td5_hud_build_metric_digits(void)
      * result is identical (digits at the right place). */
     TD5_HudViewLayout *vl0 = &s_view_layout[0];
     float center_x = vl0->vp_left + vl0->half_width;
-    float dy0 = vl0->vp_top + 8.0f;
+    /* [DMG BAR TOP-CENTRE 2026-07-02] digits position from view 0 (known port
+     * shape, see above) -> shift below the damage bar with view 0's metrics. */
+    float dy0 = vl0->vp_top + 8.0f + hud_top_center_shift_y(0);
     float dy1 = dy0 + 23.0f;
     float dx_h0 = center_x - 24.0f;  /* hundreds */
     float dx_t0 = center_x - 8.0f;   /* tens */
@@ -3382,6 +3393,8 @@ static void hud_draw_copchase_arrest_strip(int view_index)
 
     const TD5_HudViewLayout *vl = &s_view_layout[view_index];
     int own = g_actor_slot_map[view_index];
+    /* [DMG BAR TOP-CENTRE 2026-07-02] drop below the top-centre damage bar */
+    float tshift = hud_top_center_shift_y(view_index);
 
     if (!td5_hudfont_ready()) {
         /* Bitmap fallback: one plain queued line per cop, stacked top-centre. */
@@ -3391,7 +3404,7 @@ static void hud_draw_copchase_arrest_strip(int view_index)
             else                           snprintf(nm, sizeof nm, "COP%d", cops[i] + 1);
             s_hud_next_text_scale = copchase_hud_text_scale();
             td5_hud_queue_text(0, (int)vl->center_x,
-                               (int)(vl->vp_int_top + 6.0f + (float)i * 16.0f), 1,
+                               (int)(vl->vp_int_top + 6.0f + tshift + (float)i * 16.0f), 1,
                                "%s %d", nm, td5_game_get_wanted_kills(cops[i]));
         }
         return;
@@ -3418,7 +3431,7 @@ static void hud_draw_copchase_arrest_strip(int view_index)
     }
 
     float x  = vl->center_x - total * 0.5f;
-    float ny = vl->vp_int_top + 6.0f;          /* glyph cell top */
+    float ny = vl->vp_int_top + 6.0f + tshift; /* glyph cell top */
     for (int i = 0; i < ncop; i++) {
         uint32_t accent = s_hud_id_accent[cops[i]] ? s_hud_id_accent[cops[i]] : 0xFFD0D0D0u;
         float tcx = x + tw[i] * 0.5f;
@@ -4018,7 +4031,9 @@ static int hud_draw_checkpoint_timer_ttf(int view_idx, uint32_t value)
     for (int k = 0; buf[k]; k++) total_w += td5_hudfont_advance((unsigned char)buf[k], cap);
 
     float cx       = vl->center_x;
-    float caps_cy  = vl->vp_top + cap * 0.5f + 6.0f * sy;  /* sit just below the pane top */
+    /* [DMG BAR TOP-CENTRE 2026-07-02] countdown yields the very top to the
+     * damage bar and sits just below it (shift = 0 when the bar is off). */
+    float caps_cy  = vl->vp_top + cap * 0.5f + 6.0f * sy + hud_top_center_shift_y(view_idx);
     float baseline = caps_cy + cap * 0.5f;                 /* caps centre at caps_cy */
     float pen      = cx - total_w * 0.5f;
     float off      = cap * (1.0f / 16.0f);
@@ -5005,7 +5020,7 @@ void td5_hud_render_overlays(float dt)
                     s_hud_next_text_scale = copchase_hud_text_scale();
                     td5_hud_queue_text(0,
                         (int)vl->center_x,
-                        (int)(vl->vp_int_top + 30.0f),
+                        (int)(vl->vp_int_top + 30.0f + hud_top_center_shift_y(v)),
                         1,
                         "POINTS %d", (int)td5_game_get_result_secondary(actor_slot));
                 }
@@ -7766,13 +7781,54 @@ static void hud_solid_tri(float x0,float y0,float x1,float y1,float x2,float y2,
     td5_plat_render_draw_tris(q,3,idx,3);
 }
 
-/* [CAR DAMAGE 2026-06-28] Player HUD car-health bar. A fixed screen-space bar
- * anchored top-left of the pane: dark background + border, with a fill whose
- * WIDTH is the remaining health and whose COLOUR runs green (full) -> yellow
- * (half) -> red (wrecked). Modelled on td5_hud_update_wanted_damage_indicator
- * but screen-space (no world projection). Inert when CarDamage is off / the slot
- * is uninitialized. Drawn with the same hud_solid_quad helper (sz=0, rhw=1 =
- * flat 2D HUD quad on the white page). */
+/* [DMG BAR TOP-CENTRE 2026-07-02] Textured screen-space sibling of
+ * hud_solid_quad: samples an atlas page with NORMALIZED UVs, diffuse white
+ * (texture passthrough). Used by the pause-style damage bar below. */
+static void hud_tex_quad(float l, float t, float r, float b,
+                         float sz, float rhw, int page,
+                         float u0, float v0, float u1, float v1) {
+    TD5_D3DVertex q[4];
+    q[0].screen_x=l; q[0].screen_y=t; q[0].tex_u=u0; q[0].tex_v=v0;
+    q[1].screen_x=l; q[1].screen_y=b; q[1].tex_u=u0; q[1].tex_v=v1;
+    q[2].screen_x=r; q[2].screen_y=t; q[2].tex_u=u1; q[2].tex_v=v0;
+    q[3].screen_x=r; q[3].screen_y=b; q[3].tex_u=u1; q[3].tex_v=v1;
+    for (int i=0;i<4;i++){ q[i].depth_z=sz; q[i].rhw=rhw; q[i].diffuse=0xFFFFFFFFu; q[i].specular=0; }
+    uint16_t idx[6]={0,1,2,1,3,2};
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT);
+    td5_plat_render_bind_texture(page);
+    td5_plat_render_draw_tris(q,4,idx,6);
+}
+
+/* [DMG BAR TOP-CENTRE 2026-07-02] Shared pane scale for the damage bar and the
+ * top-centre shift (same 640-base clamp the bar has always used). */
+static float hud_damage_bar_scale(const TD5_HudViewLayout *vl)
+{
+    float pane_w = vl->vp_int_right - vl->vp_int_left;
+    if (pane_w < 2.0f) pane_w = g_render_width_f;
+    float sc = pane_w / 640.0f;
+    if (sc < 0.5f) sc = 0.5f; else if (sc > 2.0f) sc = 2.0f;
+    return sc;
+}
+
+/* Y offset every top-centre HUD element adds while the damage bar owns the
+ * pane's top-centre slot: bar top (12sc) + trough height (8sc) + clearance
+ * (4sc). Keyed on the DAMAGE BAR toggle alone (not per-frame health validity)
+ * so the elements never jump mid-race. Declared near the top of the file. */
+static float hud_top_center_shift_y(int view_index)
+{
+    if (!td5_damage_bar_enabled()) return 0.0f;
+    if (view_index < 0 || view_index >= MAX_HUD_VIEWS) return 0.0f;
+    return 24.0f * hud_damage_bar_scale(&s_view_layout[view_index]);
+}
+
+/* [CAR DAMAGE 2026-06-28 / DMG BAR TOP-CENTRE 2026-07-02] Player HUD car-health
+ * bar, anchored TOP-CENTRE of the pane (user 2026-07-02; was top-left) and drawn
+ * in the pause-menu slider style: single-texel BLACKBAR trough + SLIDER 256x8
+ * gradient fill (blue -> red) whose width AND revealed UV extent scale with
+ * health -- the exact mapping td5_hud_update_pause_overlay uses
+ * (fill_x1 = x0 + frac*128, u1 = u0 + frac*255). Legacy solid-colour bar kept
+ * as fallback when the atlas entries are missing. Inert when the DAMAGE BAR
+ * toggle is off / the slot is uninitialized. */
 static void hud_draw_player_damage_bar(int player_slot, int view_index)
 {
     /* [CAR DAMAGE 2026-06-29] Gate on the DAMAGE BAR sub-toggle (Game Options),
@@ -7788,35 +7844,63 @@ static void hud_draw_player_damage_bar(int player_slot, int view_index)
     const TD5_HudViewLayout *vl = &s_view_layout[view_index];
     float pane_w = vl->vp_int_right - vl->vp_int_left;
     if (pane_w < 2.0f) pane_w = g_render_width_f;
-    float sc = pane_w / 640.0f;
-    if (sc < 0.5f) sc = 0.5f; else if (sc > 2.0f) sc = 2.0f;
+    float sc = hud_damage_bar_scale(vl);
 
-    float bw = pane_w * 0.20f;
-    float bh = 9.0f * sc;
-    float bl = vl->vp_int_left + 12.0f * sc;
-    float bt = vl->vp_int_top  + 12.0f * sc;
+    float bw = pane_w * 0.20f;                 /* fill max width (128px @640 = pause slider) */
+    float bh = 8.0f * sc;                      /* trough height (pause rows: 8px) */
+    float bl = vl->center_x - bw * 0.5f;       /* [2026-07-02] top-CENTRE anchor  */
+    float bt = vl->vp_int_top + 12.0f * sc;
     const float sz = 0.0f, rhw = 1.0f;
-    float ob = 2.0f * sc; if (ob < 1.5f) ob = 1.5f;
 
-    /* [CAR DAMAGE 2026-06-29] One-shot per-pane diagnostic: log the first
-     * MAX_HUD_VIEWS draws (one frame of panes) so the bar rect can be confirmed
-     * to lie INSIDE each pane's rect. The split-screen bug was this bar being
-     * clipped to one offset per-pane viewport; logging the computed rect vs the
-     * pane bounds documents the per-pane placement. One-shot -> no per-frame spam. */
+    /* Pause-slider atlas pieces (same keys td5_hud_init_pause_menu looks up). */
+    TD5_AtlasEntry *trough_e = td5_asset_find_atlas_entry(NULL, "BLACKBAR");
+    TD5_AtlasEntry *slider_e = td5_asset_find_atlas_entry(NULL, "SLIDER");
+
+    /* [CAR DAMAGE 2026-06-29] One-shot per-pane diagnostic: rect vs pane bounds
+     * plus the style path taken and the shift the other elements inherit. */
     {
         static int s_dbg_n = 0;
         if (s_dbg_n < MAX_HUD_VIEWS) {
             s_dbg_n++;
             TD5_LOG_I(LOG_TAG, "damage_bar v=%d slot=%d hp=%.2f rect=[%.0f,%.0f %.0fx%.0f] "
-                      "pane=[%.0f,%.0f -> %.0f,%.0f]",
+                      "style=%s shift=%.1f pane=[%.0f,%.0f -> %.0f,%.0f]",
                       view_index, player_slot, (double)h,
                       (double)bl, (double)bt, (double)bw, (double)bh,
+                      (trough_e && slider_e) ? "pause-slider" : "solid-fallback",
+                      (double)hud_top_center_shift_y(view_index),
                       (double)vl->vp_int_left, (double)vl->vp_int_top,
                       (double)vl->vp_int_right, (double)vl->vp_int_bottom);
         }
     }
 
-    /* health -> colour (green @1.0, yellow @0.5, red @0.0); ARGB (0xAARRGGBB). */
+    if (trough_e && slider_e) {
+        /* Trough: single-texel BLACKBAR stretch, 1sc wider than the fill max
+         * (the pause trough is 129px against its 128px fill). */
+        int ttw = 256, tth = 256;
+        td5_plat_render_get_texture_dims(trough_e->texture_page, &ttw, &tth);
+        float bbu = ((float)trough_e->atlas_x + 0.5f) / (float)ttw;
+        float bbv = ((float)trough_e->atlas_y + 0.5f) / (float)tth;
+        hud_tex_quad(bl, bt, bl + bw + 1.0f * sc, bt + bh, sz, rhw,
+                     trough_e->texture_page, bbu, bbv, bbu, bbv);
+
+        /* Fill: SLIDER gradient revealed proportionally -- width = h*bw,
+         * u1 = u0 + h*255 texels, inset 1px top/bottom like the pause rows. */
+        float fw = bw * h;
+        if (fw > 0.5f) {
+            int stw = 256, sth = 256;
+            td5_plat_render_get_texture_dims(slider_e->texture_page, &stw, &sth);
+            float su0 = ((float)slider_e->atlas_x + 0.5f) / (float)stw;
+            float su1 = ((float)slider_e->atlas_x + 0.5f + h * 255.0f) / (float)stw;
+            float sv  = ((float)slider_e->atlas_y + 0.5f) / (float)sth;
+            hud_tex_quad(bl, bt + 1.0f * sc, bl + fw, bt + bh - 1.0f * sc, sz, rhw,
+                         slider_e->texture_page, su0, sv, su1, sv);
+        }
+        return;
+    }
+
+    /* Solid-colour fallback (BLACKBAR/SLIDER atlas missing): the legacy
+     * green (full) -> yellow (half) -> red (wrecked) bar at the new anchor. */
+    float ob = 2.0f * sc; if (ob < 1.5f) ob = 1.5f;
     int r, g; const int b = 0x22;
     if (h > 0.5f) { float t = (1.0f - h) * 2.0f; r = (int)(0x20 + t * (0xE0 - 0x20)); g = 0xD0; }
     else          { float t = (0.5f - h) * 2.0f; r = 0xE0; g = (int)(0xD0 - t * (0xD0 - 0x20)); }
