@@ -264,12 +264,15 @@ void td5_light_lamps_add(float x, float y, float z)
 
 void td5_light_lamps_capture(float x, float y, float z)
 {
-    /* Dedupe: the same halo is captured every frame it is on screen. */
+    /* Dedupe: the same halo is captured every frame it is on screen, and the
+     * big soft glows are assembled from 2-4 quadrant quads whose centers sit
+     * a few hundred units apart — 650 merges a fixture's pieces while staying
+     * under the closest real post spacing (~1400). */
     for (int i = 0; i < s_lamp_count; i++) {
         float dx = s_lamp_pos[i][0] - x;
         float dy = s_lamp_pos[i][1] - y;
         float dz = s_lamp_pos[i][2] - z;
-        if (dx * dx + dy * dy + dz * dz < 400.0f * 400.0f)
+        if (dx * dx + dy * dy + dz * dz < 650.0f * 650.0f)
             return;
     }
     td5_light_lamps_add(x, y, z);
@@ -279,6 +282,39 @@ void td5_light_lamps_capture(float x, float y, float z)
         TD5_LOG_I(LOG_TAG, "lamp capture[%d]: (%.0f,%.0f,%.0f)",
                   s_lamp_count - 1, x, y, z);
     }
+}
+
+/* ---- Content-classified glow pages (per level) --------------------------
+ * Generated offline from the extracted texture pages: a page whose image is a
+ * bright radial blob with smooth falloff IS a lamp glow (Moscow: 474 post-tip
+ * halo + 253..256 big-glow quadrants, eyeball-verified). The capture gate in
+ * clip_and_submit_polygon consults this — texture CONTENT is the only signal
+ * that survived six rounds of geometry/class heuristics. */
+#include "td5_lamp_pages.inc"
+
+static const int *s_halo_pages      = NULL;
+static int        s_halo_page_count = 0;
+
+void td5_light_lamps_set_level(int level)
+{
+    s_halo_pages = NULL;
+    s_halo_page_count = 0;
+    for (size_t i = 0; i < sizeof(k_lamp_page_table) / sizeof(k_lamp_page_table[0]); i++) {
+        if (k_lamp_page_table[i].level == level) {
+            s_halo_pages = k_lamp_page_table[i].pages;
+            s_halo_page_count = k_lamp_page_table[i].count;
+            break;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "street lamps: level %d has %d classified glow pages",
+              level, s_halo_page_count);
+}
+
+int td5_light_lamp_page_is_halo(int page)
+{
+    for (int i = 0; i < s_halo_page_count; i++)
+        if (s_halo_pages[i] == page) return 1;
+    return 0;
 }
 
 /* Lamp look knobs (env, read once): warm sodium-ish pools. */

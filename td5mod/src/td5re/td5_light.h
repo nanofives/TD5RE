@@ -118,6 +118,10 @@ void td5_light_lamps_add(float x, float y, float z);  /* track load: register  *
  * actually draws — its view-space verts give the exact world position, which
  * sidesteps the display-list placement folds that defeat static extraction. */
 void td5_light_lamps_capture(float x, float y, float z);
+/* Select the current level's content-classified glow-page list (generated
+ * offline into td5_lamp_pages.inc); the capture gate tests pages against it. */
+void td5_light_lamps_set_level(int level);
+int  td5_light_lamp_page_is_halo(int page);
 int  td5_light_lamps_count(void);
 void td5_light_set_street_lights(int on);
 int  td5_light_street_lights(void);

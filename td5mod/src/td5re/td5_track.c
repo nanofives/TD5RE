@@ -29,6 +29,7 @@
 #include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
 #include "td5_light2.h"   /* [LIGHT2 P1] derive-normals gate */
 #include "td5_light.h"    /* [LIGHT2] street-lamp light registration */
+#include "td5_material.h" /* [LIGHT2] page-class cache reset at track load */
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>   /* sscanf (TD5RE_LAMP_SCAN dev diagnostic) */
@@ -7530,114 +7531,22 @@ void td5_track_register_lamp_lights(void)
     static int s_reg_dbg = -1;
     if (s_reg_dbg < 0) { const char *e = getenv("TD5RE_LAMP_LOG"); s_reg_dbg = (e && e[0] && e[0] != '0') ? 1 : 0; }
 
-    int lamps = 0;
-
-    for (int dl = 0; dl < s_models_display_list_count; dl++) {
-        if (s_models_entry_offsets[dl] == 0) continue;
-        uint8_t *block_base = s_models_blob + s_models_entry_offsets[dl];
-        uint32_t sub_count = *(const uint32_t *)block_base;
-        if (sub_count == 0 || sub_count > 256) continue;
-
-        for (uint32_t j = 0; j < sub_count; j++) {
-            uint32_t mesh_ptr_val = *(const uint32_t *)(block_base + 4 + j * 4);
-            if (mesh_ptr_val == 0) continue;
-
-            TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
-            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader)))
-                continue;
-            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0)
-                continue;
-            int count = mesh->total_vertex_count;
-            int cmd_count = mesh->command_count;
-            if (count <= 0 || count > 65536 || cmd_count <= 0 || cmd_count > 4096)
-                continue;
-
-            TD5_MeshVertex *base_verts =
-                (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-            const TD5_PrimitiveCmd *cmds =
-                (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
-            if ((uintptr_t)base_verts < 0x10000u || (uintptr_t)cmds < 0x10000u)
-                continue;
-
-            /* Walk EVERY command (same sequential-cursor rules as the render
-             * walk). Two fixture signatures:
-             *  - type-3 (additive) commands: the glow IS the light (e.g.
-             *    Moscow's riverside quay lamps);
-             *  - type-1 (alpha-keyed) SMALL quads hanging HIGH above the
-             *    mesh's ground line: the halo sprite at each street-lamp
-             *    post's tip (e.g. Moscow page 451). Registered at the exact
-             *    quad position — the light sits where the glow visibly hangs.
-             * The glow's rendered position = mesh origin/256 + its own vertex
-             * average (the exact translation the renderer uses). */
-            int cursor = 0;
-            int per_mesh = 0;
-            for (int ci = 0; ci < cmd_count && per_mesh < 64; ci++) {
-                const TD5_PrimitiveCmd *cmd = &cmds[ci];
-                int opcode = cmd->dispatch_type;
-                if (opcode < 0 || opcode > 6) continue;
-                int needed = cmd->triangle_count * 3 + cmd->quad_count * 4;
-
-                int idx0;
-                if (cmd->vertex_data_ptr != 0) {
-                    uintptr_t vp = (uintptr_t)cmd->vertex_data_ptr;
-                    const TD5_MeshVertex *cv;
-                    if (vp < 0x10000u)
-                        cv = (const TD5_MeshVertex *)((uint8_t *)mesh + vp);
-                    else
-                        cv = (const TD5_MeshVertex *)vp;
-                    idx0 = (int)(cv - base_verts);
-                    if (idx0 < 0 || idx0 + needed > count) continue;
-                } else {
-                    idx0 = cursor;
-                    if (cursor + needed > count) break;
-                    cursor += needed;
-                }
-                if (needed <= 0) continue;
-
-                int trans = td5_asset_get_page_transparency(cmd->texture_page_id);
-
-                float ax = 0.0f, ay = 0.0f, az = 0.0f;
-                float mnx = 1e9f, mxx = -1e9f, mny = 1e9f, mxy = -1e9f,
-                      mnz = 1e9f, mxz = -1e9f;
-                for (int v = 0; v < needed; v++) {
-                    float x = base_verts[idx0 + v].pos_x;
-                    float y = base_verts[idx0 + v].pos_y;
-                    float z = base_verts[idx0 + v].pos_z;
-                    ax += x; ay += y; az += z;
-                    if (x < mnx) mnx = x; if (x > mxx) mxx = x;
-                    if (y < mny) mny = y; if (y > mxy) mxy = y;
-                    if (z < mnz) mnz = z; if (z > mxz) mxz = z;
-                }
-                float inv = 1.0f / (float)needed;
-                float wx = mesh->origin_x * (1.0f / 256.0f) + ax * inv;
-                float wy = mesh->origin_y * (1.0f / 256.0f) + ay * inv;
-                float wz = mesh->origin_z * (1.0f / 256.0f) + az * inv;
-
-                if (trans == 3) {
-                    /* Additive glow command — a light fixture at its rendered
-                     * position (e.g. Moscow's riverside quay lamps). */
-                    td5_light_lamps_add(wx, wy, wz);
-                } else {
-                    /* Post-tip halo sprites are captured at RENDER time
-                     * (td5_light_lamps_capture from clip_and_submit_polygon)
-                     * — the display-list placement folds defeat static
-                     * extraction (four attempts documented in the memory
-                     * topic file). */
-                    continue;
-                }
-                if (s_reg_dbg && lamps < 40) {
-                    TD5_LOG_I("track",
-                        "lamp reg[%d]: dl=%d sub=%u cmd=%d tag=%d pos=(%.0f,%.0f,%.0f) verts=%d",
-                        lamps, dl, j, ci, (int)mesh->texture_page_id,
-                        wx, wy, wz, needed);
-                }
-                lamps++;
-                per_mesh++;
-            }
-        }
-    }
-
-    TD5_LOG_I("track", "street lamps: %d light glows registered", lamps);
+    /* ALL lamp lights now come from RENDER-TIME capture of additive glow
+     * quads (td5_light_lamps_capture from clip_and_submit_polygon) — the
+     * content-verified glow pages (Moscow: 474 post halos, 253..256 quadrant
+     * halos) are additive, and static extraction of their positions from the
+     * display lists lands wrong (placement folds; several documented dead
+     * ends in the memory topic file). This pass now only resets the registry
+     * on track load; the s_reg_dbg knob is consumed by the capture logs. */
+    (void)s_reg_dbg;
+    /* The material page->class cache fills lazily and pages queried BEFORE
+     * this track's textures loaded are cached with stale classes (page 474's
+     * GLOW class was cached as DEFAULT from a frontend-era query — no glow
+     * captures at all). Reset it now that the transparency table is fresh. */
+    td5_material_reset_cache();
+    /* Select the level's content-classified glow pages for the capture gate. */
+    td5_light_lamps_set_level(td5_asset_level_number(g_td5.track_index));
+    TD5_LOG_I("track", "street lamps: registry reset (render-time capture active)");
 
     /* TD5RE_LAMP_SCAN="x,z": one-shot dump of every mesh whose origin sits
      * within 5000 world units of the given XZ — per-command page ids,

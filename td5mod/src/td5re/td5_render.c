@@ -1327,19 +1327,24 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     }
     clipped_count = out_count;
 
-    /* [LIGHT2] Render-time street-lamp capture: when a lamp-halo sprite
-     * actually DRAWS (squat, wide, alpha-keyed quad above the camera during
-     * the level pass), its view-space verts give the exact world position —
-     * ground truth that sidesteps the display-list placement folds which
-     * defeated four static-extraction attempts. Captured lamps accumulate in
-     * the (deduped) registry as they come on screen and stay cached. */
-    if (s_level_pass_active && out_count == 4 &&
+    /* [LIGHT2] Render-time street-lamp capture — anchored on the POLE.
+     * When a lamp-post pole sprite draws (tall thin alpha-keyed quad — e.g.
+     * Moscow page 371 at ~60..150 wide x 660..1430 tall, aspect ~10:1),
+     * its view-space verts give the exact world position; the light
+     * registers at the TOP of the pole (the head). Nothing else in the
+     * track shares this silhouette: pedestrians are ~2.3:1, trees are
+     * square-ish billboards, banners are wide, fence posts are short.
+     * This replaces six failed attempts to identify the GLOW sprite —
+     * the pole is the one element every lamp model must have, and its
+     * rendered position needs no knowledge of the display-list placement
+     * folds that defeated static extraction. */
+    if (out_count >= 3 && out_count <= 5 &&
         td5_light2_active() && td5_light_street_lights() &&
         td5_material_id_for_page(tex_page) == TD5_MAT_CUTOUT) {
         float xmin = out_vx[0], xmax = out_vx[0];
         float hmin = out_vy[0], hmax = out_vy[0];
         float zmin = out_vz[0], zmax = out_vz[0];
-        for (int i2 = 1; i2 < 4; i2++) {
+        for (int i2 = 1; i2 < out_count; i2++) {
             if (out_vx[i2] < xmin) xmin = out_vx[i2];
             if (out_vx[i2] > xmax) xmax = out_vx[i2];
             if (out_vy[i2] < hmin) hmin = out_vy[i2];
@@ -1347,27 +1352,27 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
             if (out_vz[i2] < zmin) zmin = out_vz[i2];
             if (out_vz[i2] > zmax) zmax = out_vz[i2];
         }
-        /* Width = the larger HORIZONTAL spread (view X or Z): world-oriented
-         * halo quads angled to the camera split their width across both axes
-         * — measuring view-X alone missed them. Height stays view-Y. */
         float wx_ext = xmax - xmin, wz_ext = zmax - zmin;
         float w = (wx_ext > wz_ext) ? wx_ext : wz_ext;
         float h = hmax - hmin;
-        if (w >= 250.0f && w <= 900.0f && h >= 80.0f && h <= 600.0f &&
-            h < 0.7f * w) {
+        if (h >= 500.0f && h <= 1800.0f && w >= 30.0f && w <= 350.0f &&
+            h >= 4.0f * w) {
             float vx0 = 0, vy0 = 0, vz0 = 0;
-            for (int i2 = 0; i2 < 4; i2++) { vx0 += out_vx[i2]; vy0 += out_vy[i2]; vz0 += out_vz[i2]; }
-            vx0 *= 0.25f; vy0 *= 0.25f; vz0 *= 0.25f;
-            /* Distance cap: only capture NEAR halos — far sprites carry
-             * projection slop and produced phantom lights (a capture landed
-             * 200k units away). Every lamp is captured on approach anyway. */
-            if (vz0 > s_near_clip && vz0 < 15000.0f) {
+            for (int i2 = 0; i2 < out_count; i2++) { vx0 += out_vx[i2]; vy0 += out_vy[i2]; vz0 += out_vz[i2]; }
+            float invn = 1.0f / (float)out_count;
+            vx0 *= invn; vy0 *= invn; vz0 *= invn;
+            /* Distance cap: far sprites carry projection slop; every lamp is
+             * captured on approach anyway. */
+            if (vz0 > s_near_clip && vz0 < 8000.0f) {
                 float wx = s_camera_pos[0] + vx0 * s_camera_basis[0] + vy0 * s_camera_basis[3] + vz0 * s_camera_basis[6];
                 float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
                 float wz = s_camera_pos[2] + vx0 * s_camera_basis[2] + vy0 * s_camera_basis[5] + vz0 * s_camera_basis[8];
-                float above_cam = s_camera_pos[1] - wy;    /* up = -Y */
-                if (above_cam > -150.0f && above_cam < 2500.0f)
-                    td5_light_lamps_capture(wx, wy, wz);
+                /* Light at the pole TOP (world up = -Y; near-level camera, so
+                 * the view-Y half-extent approximates the world half-height). */
+                float top_wy = wy - h * 0.5f;
+                float above_cam = s_camera_pos[1] - top_wy;
+                if (above_cam > 300.0f && above_cam < 2500.0f)
+                    td5_light_lamps_capture(wx, top_wy, wz);
             }
         }
     }
