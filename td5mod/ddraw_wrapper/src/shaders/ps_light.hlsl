@@ -119,19 +119,28 @@ float4 main(PS_INPUT input) : SV_TARGET
          * little pool light. Pixels without G-buffer data keep the legacy
          * orientation-blind behavior. */
         float ndotl = 1.0;
+        float ndotl_raw = 1.0;
         if (hasN)
         {
             float3 Lv = toL / max(dist, 0.001);
-            ndotl = saturate(dot(N, Lv)) * 0.85 + 0.15;
+            ndotl_raw = dot(N, Lv);
+            ndotl = saturate(ndotl_raw) * 0.85 + 0.15;
         }
 
         /* [P2] Light-occlusion march: step from the surface toward the light
          * through the depth buffer; a blocking surface drops the contribution
          * to a small leak factor (so headlights no longer light THROUGH cars
-         * and walls). Screen-space: off-screen blockers can't occlude. */
+         * and walls). Screen-space: off-screen blockers can't occlude.
+         *
+         * Self-shadow (acne) controls [user feedback round 2 — lit car bodies
+         * were covered in per-pixel speckle]: grazing surfaces (raw N.L < 0.3)
+         * skip the march entirely (they receive little light and are the
+         * noisiest self-occluders); the march starts at 25% of the way to the
+         * light (skips the receiver's OWN body); the depth bias grows with
+         * march distance. */
         float vis = 1.0;
         int osteps = (int)ext.x;
-        if (osteps > 0)
+        if (osteps > 0 && (!hasN || ndotl_raw > 0.3))
         {
             float3 Ld = toL / max(dist, 0.001);
             /* per-pixel stratified jitter — see ps_shadow.hlsl rationale */
@@ -139,7 +148,7 @@ float4 main(PS_INPUT input) : SV_TARGET
             [loop]
             for (int s = 1; s <= osteps; s++)
             {
-                float t = dist * (((float)s - jit) / (float)(osteps + 1));
+                float t = dist * (0.25 + 0.70 * (((float)s - jit) / (float)osteps));
                 float3 P = world + Ld * t;
                 float3 dd = P - camPosFocal.xyz;
                 float pvz = dot(dd, fwdDepthScale.xyz);
@@ -154,7 +163,7 @@ float4 main(PS_INPUT input) : SV_TARGET
                 if (sd >= 0.99999) continue;
                 float svz = sd * depthScale + depthBias;
                 float dz = pvz - svz;
-                if (dz > 6.0 && dz < 500.0)
+                if (dz > 8.0 + 0.04 * t && dz < 500.0)
                 {
                     vis = 0.15;            /* leak a little (soft look) */
                     break;

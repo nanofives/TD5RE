@@ -68,13 +68,14 @@ float4 main(PS_INPUT input) : SV_TARGET
     float vy = -(sy - upCy.w)    * vz / focal;
     float3 world = camPosFocal.xyz + vx * rightCx.xyz + vy * upCy.xyz + vz * fwdDepthScale.xyz;
 
-    /* G-buffer normal (a==0 => unknown). Sun-backfacing surfaces skip:
-     * their baked/vertex shading is already dark. */
+    /* G-buffer normal (a==0 => unknown). Sun-backfacing AND grazing surfaces
+     * skip: their shading is already dark, and grazing pixels are the worst
+     * self-shadow (acne/speckle) offenders under the jittered march. */
     float4 gb = gbufTex.Load(int3(px, 0));
     if (gb.a > 0.001)
     {
         float3 N = gb.rgb * 2.0 - 1.0;
-        if (dot(N, sun.xyz) <= 0.02)
+        if (dot(N, sun.xyz) <= 0.25)
             discard;
     }
 
@@ -121,8 +122,10 @@ float4 main(PS_INPUT input) : SV_TARGET
         /* Occluded when the scene surface at this screen point is NEARER than
          * the ray sample (with a bias), but within the thickness window (so a
          * distant foreground object doesn't cast an infinite streak). */
+        /* Depth bias grows with march distance — grazing self-hits far along
+         * the ray were the speckle source on curved car bodies. */
         float dz = pvz - sceneVz;
-        if (dz > 4.0 && dz < thick)
+        if (dz > 6.0 + 0.02 * t && dz < thick)
         {
             /* Billboard occluders (camera-facing tree/sprite quads) carry no
              * G-buffer data (matid 0): their quads reorient with the camera,
@@ -130,7 +133,8 @@ float4 main(PS_INPUT input) : SV_TARGET
              * REAL geometry (matid > 0: roads, walls, cars) casts. */
             if (gbufTex.Load(int3(sp, 0)).a > 0.001)
             {
-                occ = 1.0;
+                /* Distance-softened: far occluders cast lighter shadows. */
+                occ = 1.0 - 0.45 * (t / maxDist);
                 break;
             }
         }

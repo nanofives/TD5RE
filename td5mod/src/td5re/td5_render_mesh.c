@@ -137,7 +137,7 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
     /* [P2] per-light occlusion march config (Mode>=1 + knob; 0 = off). */
-    int occl = (td5_light2_active() && td5_light2_light_occlusion()) ? 8 : 0;
+    int occl = (td5_light2_active() && td5_light2_light_occlusion()) ? 12 : 0;
 
     td5_plat_render_apply_lights(cam, basis9,
                                  s_focal_length, s_center_x, s_center_y,

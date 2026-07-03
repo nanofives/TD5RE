@@ -111,7 +111,10 @@ float4 main(PS_INPUT input) : SV_TARGET
     [loop]
     for (int k = 1; k <= steps; k++)
     {
-        float t = 4.0 + (maxDist - 4.0) * (((float)k - jit) / (float)steps);
+        /* Start 60 units out — a reflected ray leaving a curved body re-hits
+         * its OWN geometry almost immediately, which showed up as dark noise
+         * dots on light car paint (user feedback round 2). */
+        float t = 60.0 + (maxDist - 60.0) * (((float)k - jit) / (float)steps);
         float3 P = world + R * t;
 
         float3 d = P - camPosFocal.xyz;
@@ -132,8 +135,9 @@ float4 main(PS_INPUT input) : SV_TARGET
             continue;                               /* sky along the ray */
         float sceneVz = sceneD * depthScale + depthBias;
 
+        /* Distance-scaled bias (same acne control as the shadow passes). */
         float dz = pvz - sceneVz;
-        if (dz > 4.0 && dz < thick)
+        if (dz > 6.0 + 0.02 * t && dz < thick)
         {
             hitColor = sceneTex.Load(int3(sp, 0)).rgb;
 
