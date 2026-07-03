@@ -765,8 +765,6 @@ extern int  s_band_cover_surface[5];
 extern int  s_control_options_surface;
 extern int  s_credit_mugshot_surf[K_CREDIT_MUGSHOT_COUNT];
 extern int  s_cup_unlock_tier;
-extern int  s_language_bg_surface;
-extern int  s_language_flag_surface;
 extern int  s_mp_btn_catchup;
 extern int  s_mp_btn_layout;
 extern int  s_mp_btn_missing[2];
@@ -810,8 +808,8 @@ void Screen_ControllerBinding(void);
 void Screen_DisplayOptions(void);
 void Screen_ExtrasGallery(void);
 void Screen_GameOptions(void);
-void Screen_LanguageSelect(void);
-void Screen_LegalCopyright(void);
+/* Screen_LanguageSelect / Screen_LegalCopyright RETIRED 2026-07-03 —
+ * table slots [3]/[4] are NULL; set_screen redirects them to MAIN_MENU. */
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);

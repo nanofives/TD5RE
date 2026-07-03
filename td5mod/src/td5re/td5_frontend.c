@@ -88,8 +88,13 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [ 0] */ Screen_LocalizationInit,
     /* [ 1] */ Screen_PositionerDebugTool,
     /* [ 2] */ Screen_AttractModeDemo,
-    /* [ 3] */ Screen_LanguageSelect,
-    /* [ 4] */ Screen_LegalCopyright,
+    /* [ 3] */ NULL,   /* RETIRED 2026-07-03 — Screen_LanguageSelect had zero nav
+                        * edges (orig picks language from the static Language.dll
+                        * import; ScreenLocalizationInit @0x427182 boots straight
+                        * to MAIN_MENU). set_screen redirects retired slots. */
+    /* [ 4] */ NULL,   /* RETIRED 2026-07-03 — Screen_LegalCopyright was only
+                        * reachable FROM the retired language screen; boot legals
+                        * show via td5_fmv_show_legal_screens (INTRO state). */
     /* [ 5] */ Screen_MainMenu,
     /* [ 6] */ Screen_RaceTypeCategory,
     /* [ 7] */ Screen_QuickRaceMenu,
@@ -897,9 +902,6 @@ static int  s_gallery_pic_surface;
 static int  s_gallery_visited_mask;
 int  s_credit_mugshot_surf[K_CREDIT_MUGSHOT_COUNT]; /* dev photos, lazy-loaded (0=none) */
 uint32_t s_credits_start_ms;  /* scroll-reel start timestamp */
-int  s_language_bg_surface = 0;   /* LanguageScreen.tga 640x480 bg (ScreenLanguageSelect) */
-int  s_language_flag_surface = 0; /* Language.tga 176x512 = 4 stacked 176x128 flag tiles */
-
 /* Background gallery slideshow (LoadExtrasGalleryImageSurfaces / UpdateExtrasGalleryDisplay)
  * pic1-5.tga from Extras.zip cycle as a semi-transparent overlay during frontend navigation. */
 BgGalImg s_bg_gallery[5];
@@ -3190,8 +3192,6 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     switch (screen) {
     case TD5_SCREEN_POSITIONER_DEBUG:
     case TD5_SCREEN_ATTRACT_MODE:
-    case TD5_SCREEN_LANGUAGE_SELECT:
-    case TD5_SCREEN_LEGAL_COPYRIGHT:
     case TD5_SCREEN_EXTRAS_GALLERY:
     case TD5_SCREEN_RACE_RESULTS:
         return TD5_SCREEN_MAIN_MENU;
@@ -4067,7 +4067,6 @@ float fe_measure_small_text(const char *text);
 static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
  void frontend_load_bg_gallery(void);
 /* Forward declarations for dialog text overlay renderers */
-static void frontend_render_legal_copyright_overlay(float sx, float sy);
 static void frontend_render_cup_failed_overlay(float sx, float sy);
 static void frontend_render_cup_won_overlay(float sx, float sy);
  void frontend_render_session_locked_overlay(float sx, float sy);
@@ -4753,8 +4752,6 @@ static int frontend_screen_wants_fade(TD5_ScreenIndex s) {
     case TD5_SCREEN_LOCALIZATION_INIT:   /* [0]  boot/localization init */
     case TD5_SCREEN_POSITIONER_DEBUG:    /* [1]  dev glyph-positioner tool */
     case TD5_SCREEN_ATTRACT_MODE:        /* [2]  attract demo (routes into a race) */
-    case TD5_SCREEN_LANGUAGE_SELECT:     /* [3]  first-run boot screen */
-    case TD5_SCREEN_LEGAL_COPYRIGHT:     /* [4]  copyright splash */
     case TD5_SCREEN_STARTUP_INIT:        /* [28] boot init redirect */
     case TD5_SCREEN_CUP_FAILED:          /* [26] silent end dialog */
     case TD5_SCREEN_CUP_WON:             /* [27] silent end dialog */
@@ -4793,6 +4790,18 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     int preserved_background = s_background_surface;
 
     if (index < 0 || index >= TD5_SCREEN_COUNT) return;
+
+    /* [RETIRED SCREENS 2026-07-03] Language Select (3) and Legal Copyright (4)
+     * were removed (zero nav edges in normal play; boot legals show via the
+     * FMV path). Their table slots are NULL — landing on one would blank-lock
+     * the frontend, so redirect any stale jump (StartScreen, old configs) to
+     * the main menu instead. */
+    if (index == TD5_SCREEN_LANGUAGE_SELECT ||
+        index == TD5_SCREEN_LEGAL_COPYRIGHT) {
+        TD5_LOG_W(LOG_TAG, "set_screen(%d): retired screen — redirecting to "
+                  "MAIN_MENU", (int)index);
+        index = TD5_SCREEN_MAIN_MENU;
+    }
 
     s_previous_screen = previous;
     s_current_screen = index;
@@ -6640,42 +6649,6 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     }
 }
 
-/* ScreenLanguageSelect overlay: full-screen LanguageScreen.tga bg + 4 flag IMAGE tiles
- * from Language.tga (176x512 = four 176x128 tiles, src V 0/128/256/384) at the 4 corners
- * + "LANGUAGE SELECT" header. [CONFIRMED @0x00427290; header literal @0x004667c0;
- * flag dest rects TL(40,128) TR(424,128) BL(40,320) BR(424,320), 176x128.] */
-static void frontend_render_language_select_overlay(float sx, float sy) {
-    /* Background (drawn opaque, full screen) */
-    if (s_language_bg_surface > 0) {
-        int slot = s_language_bg_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xFFFFFFFF,
-                         s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
-        }
-    }
-    /* 4 flag tiles (each 176x128 from the 176x512 sheet; src V = row/4) */
-    if (s_language_flag_surface > 0) {
-        int slot = s_language_flag_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-            /* [FIXED 2026-06-01, audit+verify] orig left col x = uVar2 = 72, right col =
-             * (canvasW-uVar2)-0xb0 = 640-72-176 = 392 (not 40/424). Y 128/320 already faithful. */
-            static const int dx[4] = { 72, 392, 72, 392 };
-            static const int dy[4] = { 128, 128, 320, 320 };
-            int fi;
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            for (fi = 0; fi < 4; fi++) {
-                float v0 = (float)fi / 4.0f, v1 = (float)(fi + 1) / 4.0f;
-                fe_draw_quad((float)dx[fi] * sx, (float)dy[fi] * sy,
-                             176.0f * sx, 128.0f * sy, 0xFFFFFFFF,
-                             s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
-            }
-        }
-    }
-    /* Header "LANGUAGE SELECT" (in-EXE literal @0x4667c0), 24px font, at (uVar2=72, 34).
-     * [FIXED 2026-06-01: header X was 40, orig draws at uVar2=72 — same left margin as the flags.] */
-    fe_draw_text(72.0f * sx, 34.0f * sy, "LANGUAGE SELECT", 0xFFFFFFFF, sx, sy);
-}
 
 static void frontend_render_race_type_description(float sx, float sy) {
     /* [FIXED 2026-06-01, corrected] Orig (0x4168B0 case 4/9) draws a MULTI-LINE localized
@@ -8947,34 +8920,6 @@ void td5_vui_gauge(const TD5_VuiGauge *g) {
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
-/* ========================================================================
- * frontend_render_legal_copyright_overlay
- *
- * Draws "TEST DRIVE 5 COPYRIGHT 1998" tiled down the screen.
- * Original: DrawFrontendLocalizedStringSecondary @ 0x00424390 (__cdecl),
- *   params (byte *str, uint x, int y). Called in a loop:
- *     x = g_frontendCanvasW / 10  (≈64 at 640px)
- *     y starts at 0x20 (32px), increments by 0x20 (32px) per row
- *     loop condition: row < (g_frontendCanvasH - 0x20) / 0x20
- * [CONFIRMED @ ScreenLegalCopyright 0x004274A0 case 0]
- * [CONFIRMED: string "TEST DRIVE 5 COPYRIGHT 1998" @ 0x00466808 Language.dll]
- * ======================================================================== */
-static void frontend_render_legal_copyright_overlay(float sx, float sy) {
-    /* Copyright string [CONFIRMED @ 0x00466808] */
-    static const char k_copyright[] = "TEST DRIVE 5 COPYRIGHT 1998";
-    /* x = canvasW/10 scaled; original uses integer pixel coords on 640px canvas */
-    float draw_x = (640.0f / 10.0f) * sx;  /* = 64 * sx [CONFIRMED] */
-    float row_h  = 32.0f * sy;              /* 0x20 pixel row height [CONFIRMED] */
-    float start_y = 32.0f * sy;             /* y starts at 0x20 = 32 [CONFIRMED] */
-    /* Row count [FIXED 2026-06-01 — re-RE'd @0x004274A0]: the orig do-while inits counter=1 and
-     * loops while counter < ((canvasH-0x20)>>5)=14, i.e. counter=1..13 => 13 rows at y=32..416.
-     * The port previously drew 14 (an extra row at y=448). Faithful count = ((480-32)/32) - 1 = 13. */
-    int rows = (int)((480.0f - 32.0f) / 32.0f) - 1;
-    for (int r = 0; r < rows; r++) {
-        float y = start_y + (float)r * row_h;
-        fe_draw_text(draw_x, y, k_copyright, 0xFFFFFFFF, sx, sy);
-    }
-}
 
 /* ========================================================================
  * frontend_render_cup_failed_overlay
@@ -9356,9 +9301,6 @@ void td5_frontend_render_ui_rects(void) {
          * always composites on top. [CHANGELOG 2026-06-25] */
         frontend_changelog_render(sx, sy);
         break;
-    case TD5_SCREEN_LANGUAGE_SELECT:
-        frontend_render_language_select_overlay(sx, sy);
-        break;
     case TD5_SCREEN_RACE_TYPE_MENU:
         frontend_render_race_type_description(sx, sy);
         break;
@@ -9474,10 +9416,6 @@ void td5_frontend_render_ui_rects(void) {
         break;
     }
     /* Dialog overlays: text drawn live since port has no offscreen surfaces */
-    case TD5_SCREEN_LEGAL_COPYRIGHT:
-        /* "TEST DRIVE 5 COPYRIGHT 1998" tiled [CONFIRMED @ 0x004274A0] */
-        frontend_render_legal_copyright_overlay(sx, sy);
-        break;
     case TD5_SCREEN_CUP_FAILED:
         /* "Sorry / You Failed / To Win / [cup]" dialog [CONFIRMED @ 0x004237F0] */
         frontend_render_cup_failed_overlay(sx, sy);
@@ -10201,8 +10139,10 @@ void td5_frontend_tick(void) {
 
 
 /* ========================================================================
- * [3] ScreenLanguageSelect (0x427290)
- * States: 7
+ * [3] ScreenLanguageSelect (0x427290) — RETIRED 2026-07-03 (screen removed;
+ *     zero nav edges in the shipped game: language comes from the static
+ *     Language.dll import and ScreenLocalizationInit boots straight to the
+ *     main menu). RE notes preserved in the audit block near EOF.
  * ======================================================================== */
 
 
@@ -10957,7 +10897,11 @@ static const char * const s_gallery_names[GALLERY_PIC_COUNT] = {
  *       orig g_mainMenuButtonHint_PROVISIONAL==2/4 logic.
  *
  *   0x00427290  ScreenLanguageSelect  [ARCH-DIVERGENCE: ScreenFSM]
- *       Screen_LanguageSelect (td5_frontend.c:5980) — 7 states (0..6) map to
+ *       [RETIRED 2026-07-03 — screen + overlay removed from the port: no nav
+ *       edge ever entered it (orig boots straight to MAIN_MENU @0x427182 and
+ *       takes language from the static Language.dll import). Audit notes kept
+ *       for the original's reference:]
+ *       Screen_LanguageSelect (was td5_frontend.c:5980) — 7 states (0..6) map to
  *       orig 7 states (0..6). Structural deviation: orig uses 4
  *       CreateFrontendMenuRectEntry calls against a single
  *       g_frontendLanguageFlagsSurface_PROVISIONAL flag sheet at (x,0/0x80/

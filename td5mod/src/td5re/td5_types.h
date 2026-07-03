@@ -344,8 +344,12 @@ typedef enum TD5_ScreenIndex {
     TD5_SCREEN_LOCALIZATION_INIT   = 0,
     TD5_SCREEN_POSITIONER_DEBUG    = 1,
     TD5_SCREEN_ATTRACT_MODE        = 2,
-    TD5_SCREEN_LANGUAGE_SELECT     = 3,
-    TD5_SCREEN_LEGAL_COPYRIGHT     = 4,
+    /* Slots 3/4 RETIRED 2026-07-03 (screens removed — zero nav edges in the
+     * shipped game; boot legals show via td5_fmv_show_legal_screens). Values
+     * kept so screen numbering (StartScreen, logs, docs) stays stable;
+     * td5_frontend_set_screen redirects them to MAIN_MENU. */
+    TD5_SCREEN_LANGUAGE_SELECT     = 3,   /* RETIRED — do not use */
+    TD5_SCREEN_LEGAL_COPYRIGHT     = 4,   /* RETIRED — do not use */
     TD5_SCREEN_MAIN_MENU           = 5,
     TD5_SCREEN_RACE_TYPE_MENU      = 6,
     TD5_SCREEN_QUICK_RACE          = 7,

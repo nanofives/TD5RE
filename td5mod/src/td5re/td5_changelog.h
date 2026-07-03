@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 3" },
+    { CL_ITEM,    "Removed two dead menu screens (language select and" },
+    { CL_ITEM,    "  its legal splash) that nothing could ever reach -" },
+    { CL_ITEM,    "  boot legal text and languages are unaffected" },
     { CL_ITEM,    "Test harness: drive the game from a text file of" },
     { CL_ITEM,    "  timed inputs - gas, brake, handbrake, horn, gears," },
     { CL_ITEM,    "  camera, menus, any key ([Trace] InputScript=file)" },

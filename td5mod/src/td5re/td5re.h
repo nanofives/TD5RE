@@ -575,8 +575,10 @@ typedef struct TD5_GlobalState {
          * 0-29 = jump to that screen index after frontend resources are ready.
          * Ignored when AutoRace=1. Use with SkipIntro=1 to bypass legal screens.
          * Screen index map — mirrors td5_types.h TD5_ScreenIndex:
-         *   0=LocalizationInit  1=PositionerDebug  2=AttractMode    3=LanguageSelect
-         *   4=LegalCopyright    5=MainMenu         6=RaceTypeMenu   7=QuickRace
+         *   0=LocalizationInit  1=PositionerDebug  2=AttractMode
+         *   3/4=RETIRED (LanguageSelect/LegalCopyright removed 2026-07-03;
+         *                jumps redirect to MainMenu)
+         *   5=MainMenu          6=RaceTypeMenu     7=QuickRace
          *   8=ConnectionBrowser 9=SessionPicker   10=CreateSession  11=NetworkLobby
          *  12=OptionsHub       13=GameOptions     14=ControlOptions 15=SoundOptions
          *  16=DisplayOptions   17=TwoPlayerOpts   18=ControllerBinding 19=MusicTest
