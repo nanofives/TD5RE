@@ -187,6 +187,10 @@ void td5_hud_draw_net_pause_overlay(void);
 /* [END RACE NOW 2026-06-30] Pause-menu force-finish confirmation modal. No-op
  * unless td5_game has armed the prompt (any player selecting END RACE NOW). */
 void td5_hud_draw_endrace_confirm(void);
+/* [PAUSE CONFIRM 2026-07-02] Pause-menu RESTART RACE / QUIT TO MENU / EXIT
+ * GAME confirmation modal (local split-screen MP only). No-op unless td5_game
+ * has armed one of the three prompts. */
+void td5_hud_draw_pause_action_confirm(void);
 /* [PORT 2026-06-08] Per-viewport player identity: coloured frame + name plate
  * under the car. Set by the multiplayer frontend at race start. */
 void td5_hud_draw_player_id_overlays(void);

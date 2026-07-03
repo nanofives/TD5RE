@@ -656,10 +656,15 @@ static int      s_replay_abort_pending; /* 1 = ESC pressed during replay → exi
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
 static int      s_pause_menu_active;
-static int      s_pause_menu_cursor;   /* [S31][END RACE NOW 2026-06-30]
-                                        * 0=VIEW 1=SOUND 2=CONTINUE 3=RESTART
-                                        * 4=END RACE NOW 5=BACK TO LOBBY(MP only)
-                                        * 6/5=QUIT TO MENU 7/6=EXIT GAME (MP/SP) */
+static int      s_pause_menu_cursor;   /* [S31][END RACE NOW 2026-06-30][GATED 2026-07-02]
+                                        * 0=VIEW 1=SOUND 2=RADIO 3=CONTINUE 4=RESTART.
+                                        * Rows past 4 are conditional and computed
+                                        * dynamically (row_endrace/row_lobby/row_quit/
+                                        * row_exit locals in the input-handling block):
+                                        * END RACE NOW only if num_human_players>1
+                                        * (local split-screen MP); BACK TO LOBBY only if
+                                        * network_active or num_human_players>1 (any MP);
+                                        * QUIT TO MENU / EXIT GAME always last. */
 static int      s_pause_lobby_pending; /* [S31] BACK TO LOBBY fade in progress;
                                         * run-race-frame returns 4 when done */
 
@@ -734,6 +739,13 @@ static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 
 static int      s_pause_restart_pending; /* [REWORK 2026-06-05/S15] 1 = pause-menu RESTART RACE fade in progress, return 3 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
 static int      s_pause_endrace_confirm; /* [END RACE NOW 2026-06-30] 1 = force-finish confirm prompt up in the pause menu */
+static int      s_pause_action_confirm; /* [PAUSE CONFIRM 2026-07-02] 0=none, else which pause-menu action
+                                          * is awaiting Y/N confirm: 1=RESTART RACE 2=QUIT TO MENU 3=EXIT GAME
+                                          * 4=BACK TO LOBBY. Armed only in local split-screen MP
+                                          * (num_human_players>1) -- a shared pause menu means one pad's stray
+                                          * press shouldn't silently end the race for everyone else on the
+                                          * screen. Single-player and network-only (1 local human) keep the
+                                          * original immediate behavior (BACK TO LOBBY is MP-only regardless). */
 
 /* ========================================================================
  * Forward declarations (internal helpers)
@@ -749,6 +761,7 @@ static void sort_results_by_time_asc(void);
 static void sort_results_by_score_desc(void);
 static void update_race_order(void);
 static void td5_game_force_finish_race(void); /* [END RACE NOW 2026-06-30] pause-menu force-finish */
+static void td5_game_pause_execute_action(int which); /* [PAUSE CONFIRM 2026-07-02] RESTART/QUIT/EXIT body */
 static int  active_racer_count(void);   /* # of participating racers (state != 3) */
 static void advance_pending_finish_state(int slot, uint32_t sim_delta);
 static void tick_pending_finish_timer(int slot);
@@ -4364,6 +4377,7 @@ int td5_game_init_race_session(void) {
     s_pause_exit_pending = 0;
     s_pause_restart_pending = 0;   /* [REWORK 2026-06-05/S15] clear stale RESTART latch */
     s_pause_endrace_confirm = 0;   /* [END RACE NOW 2026-06-30] clear stale force-finish confirm */
+    s_pause_action_confirm = 0;    /* [PAUSE CONFIRM 2026-07-02] clear stale RESTART/QUIT/EXIT confirm */
     g_td5.paused = 1;              /* start paused for countdown */
     /* DAT_00483030 (xz_freeze) has 1 read / 0 writes in the original binary.
      * The port previously set a software flag here to gate XZ integration,
@@ -5615,18 +5629,32 @@ int td5_game_run_race_frame(void) {
                 /* Navigation: [REWORK 2026-06-05/S15] 6 selectable rows
                  * (VIEW / SOUND / CONTINUE / RESTART RACE / QUIT TO MENU / EXIT GAME).
                  * Original had 5 rows (RunAudioOptionsOverlay @ 0x0043BF70). */
-                /* [MP 2026-06-13] BACK TO LOBBY (row 4) only exists in a
+                /* [MP 2026-06-13] BACK TO LOBBY only exists in a
                  * multiplayer/network session — it's removed from the single-
-                 * player pause menu (see td5_hud_init_pause_menu), which then has
-                 * 6 rows instead of 7. Wrap navigation over the live row count so
-                 * QUIT TO MENU / EXIT GAME stay reachable and there's no gap. */
-                /* [RADIO + END RACE NOW 2026-06-30] +2 rows over the original
-                 * (RADIO slider at row 2, END RACE NOW action): MP = 9 selectable
-                 * rows, single-player = 8 (BACK TO LOBBY still MP-only). */
-                int pause_rows = (g_td5.network_active || g_td5.num_human_players > 1) ? 9 : 8;
-                /* Freeze cursor movement while the END RACE NOW confirmation is up
-                 * so the highlight can't drift off the row mid-confirm. */
-                if (!s_pause_endrace_confirm) {
+                 * player pause menu (see td5_hud_init_pause_menu). Wrap navigation
+                 * over the live row count so QUIT TO MENU / EXIT GAME stay
+                 * reachable and there's no gap. */
+                /* [RADIO 2026-06-30] +1 row over the original (RADIO slider @
+                 * row 2). */
+                /* [END RACE NOW GATING 2026-07-02] END RACE NOW is now local-MP
+                 * only (num_human_players>1) instead of always-present — see
+                 * td5_hud_init_pause_menu for the matching row-skip. Row indices
+                 * below are computed dynamically so cursor comparisons stay
+                 * correct across all 3 combinations (SP / network-only MP /
+                 * local split-screen MP). */
+                int local_mp = (g_td5.num_human_players > 1);        /* local split-screen MP */
+                int mp_any   = (g_td5.network_active || local_mp);   /* any MP (net or local) */
+                int row_continue = 3;
+                int row_restart  = 4;
+                int row_endrace  = local_mp ? 5 : -1;                 /* -1 = row not present */
+                int row_lobby    = mp_any ? (5 + (local_mp ? 1 : 0)) : -1;
+                int row_quit     = 5 + (local_mp ? 1 : 0) + (mp_any ? 1 : 0);
+                int row_exit     = row_quit + 1;
+                int pause_rows   = row_exit + 1;
+                /* Freeze cursor movement while a confirmation prompt (END RACE NOW
+                 * or the local-MP RESTART/QUIT/EXIT confirm) is up so the highlight
+                 * can't drift off the row mid-confirm. */
+                if (!s_pause_endrace_confirm && !s_pause_action_confirm) {
                     if (key_down  && !s_prev_down)  s_pause_menu_cursor = (s_pause_menu_cursor + 1) % pause_rows;
                     if (key_up    && !s_prev_up)    s_pause_menu_cursor = (s_pause_menu_cursor + pause_rows - 1) % pause_rows;
                 }
@@ -5674,9 +5702,11 @@ int td5_game_run_race_frame(void) {
                     }
                 }
 
-                /* Confirm (Enter). [RADIO + END RACE NOW 2026-06-30] Rows:
-                 *   3=CONTINUE 4=RESTART RACE 5=END RACE NOW
-                 *   [6=BACK TO LOBBY MP] QUIT TO MENU / EXIT GAME. */
+                /* Confirm (Enter). Rows: 3=CONTINUE 4=RESTART RACE
+                 *   [5=END RACE NOW, local-MP only] [BACK TO LOBBY, MP only]
+                 *   QUIT TO MENU / EXIT GAME. Row indices are the row_* locals
+                 *   computed above (dynamic — see [END RACE NOW GATING
+                 *   2026-07-02]). */
                 if (key_enter && !s_prev_enter) {
                     if (s_pause_endrace_confirm) {
                         /* [END RACE NOW 2026-06-30] Second ENTER on the
@@ -5695,151 +5725,86 @@ int td5_game_run_race_frame(void) {
                         }
                         td5_game_force_finish_race();
                         TD5_LOG_I(LOG_TAG, "Pause menu: END RACE NOW confirmed -> force-finishing race");
-                    } else if (s_pause_menu_cursor == 3) {
+                    } else if (s_pause_action_confirm) {
+                        /* [PAUSE CONFIRM 2026-07-02] Second ENTER on the
+                         * RESTART/QUIT/EXIT confirmation = YES. Run the actual
+                         * action body (shared with the no-confirm-needed path). */
+                        int confirmed = s_pause_action_confirm;
+                        s_pause_action_confirm = 0;
+                        TD5_LOG_I(LOG_TAG, "Pause menu: action %d confirmed (split-screen MP)", confirmed);
+                        td5_game_pause_execute_action(confirmed);
+                    } else if (s_pause_menu_cursor == row_continue) {
                         /* CONTINUE — close the menu, resume the race. */
                         s_pause_menu_active = 0;
-                    } else if (s_pause_menu_cursor == 5) {
-                        /* [END RACE NOW 2026-06-30] Arm the confirmation prompt
-                         * (don't end yet). A second ENTER confirms; B/ESC cancels.
-                         * Shown in single-player and MP alike. Row 5 in both modes
-                         * (after the RADIO slider pushed actions down one). */
+                    } else if (row_endrace >= 0 && s_pause_menu_cursor == row_endrace) {
+                        /* [END RACE NOW 2026-06-30][GATED 2026-07-02] Arm the
+                         * confirmation prompt (don't end yet). A second ENTER
+                         * confirms; B/ESC cancels. Only reachable when
+                         * row_endrace>=0, i.e. local split-screen MP
+                         * (num_human_players>1) -- see the row-index locals above. */
                         s_pause_endrace_confirm = 1;
                         TD5_LOG_I(LOG_TAG, "Pause menu: END RACE NOW selected -> confirm prompt");
-                    } else if (s_pause_menu_cursor == 4) {
-                        /* RESTART RACE — re-run the SAME race (track/car/opponents/
-                         * laps/direction unchanged). Fade out, then the fade-complete
-                         * handler returns 3 and the FSM re-inits the race session.
-                         * The dirty-volume flush below (close-path) persists any
-                         * SOUND slider change; the race re-init re-plays the music.
-                         * [S31] Ignored in a net race: a one-sided re-init can't be
-                         * reconciled with the other machines' lockstep state. */
-                        if (g_td5.network_active && td5_net_is_active()) {
-                            /* [S31] Net race: host-only and SYNCED. Broadcast
-                             * RACE_RESTART (0x19) so every machine runs the same
-                             * fade + re-init; the lockstep latch survives the
-                             * restart (release_race_resources keeps it while
-                             * restart_pending) and InitRace re-seeds from the
-                             * archived DXPSTART config, so all machines rebuild
-                             * the identical race and resume the same exchange. */
-                            if (td5_net_is_host()) {
-                                uint8_t rs_msg[8] = {0x19, 0, 0, 0, 0, 0, 0, 0};
-                                td5_net_send(TD5_DXPDATA, rs_msg, 8);
-                                s_pause_menu_active = 0;
-                                s_pause_restart_pending = 1;
-                                TD5_LOG_I(LOG_TAG, "Pause menu: net RESTART (host), fading out");
-                                td5_game_begin_fade_out(0);
-                            } else {
-                                TD5_LOG_I(LOG_TAG, "Pause menu: RESTART is host-only in net races");
-                            }
+                    } else if (s_pause_menu_cursor == row_restart) {
+                        /* RESTART RACE. [PAUSE CONFIRM 2026-07-02] In local
+                         * split-screen MP, arm a Y/N confirm first (restarting is
+                         * shared — a stray press shouldn't silently reset everyone
+                         * else's race). Single-player and network-only (1 local
+                         * human) keep the original immediate behavior. */
+                        if (local_mp) {
+                            s_pause_action_confirm = 1;
+                            TD5_LOG_I(LOG_TAG, "Pause menu: RESTART RACE selected -> confirm prompt (split-screen MP)");
                         } else {
-                        s_pause_menu_active = 0;
-                        s_pause_restart_pending = 1;
-                        TD5_LOG_I(LOG_TAG, "Pause menu: RESTART RACE selected, starting fade-out");
-                        td5_game_begin_fade_out(0);
+                            td5_game_pause_execute_action(1);
                         }
-                    } else if (s_pause_menu_cursor == 6 &&
-                               (g_td5.network_active || g_td5.num_human_players > 1)) {
-                        /* BACK TO LOBBY [S31] -- end the race and return to the
-                         * lobby it came from: network lobby (LAN/direct-IP),
-                         * local-MP lobby, or the main menu in single player.
-                         * [MP 2026-06-13] Single-player has no lobby — the row is
-                         * greyed + cursor-skipped, and this guard makes it inert
-                         * even if somehow reached.
-                         * Net: tell the peers; lockstep cannot continue without
-                         * us, so their race ends through the same fade and they
-                         * land back in the lobby too (session stays alive). */
-                        s_pause_menu_active = 0;
-                        s_pause_lobby_pending = 1;
-                        {
-                            TD5_Actor *pl = td5_game_local_player_actor();
-                            s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+                    } else if (row_lobby >= 0 && s_pause_menu_cursor == row_lobby) {
+                        /* BACK TO LOBBY [S31] -- only reachable when row_lobby>=0
+                         * (any MP session). [PAUSE CONFIRM 2026-07-02] Same
+                         * local-split-screen-MP confirm gating as RESTART RACE /
+                         * QUIT TO MENU / EXIT GAME above -- it ends the shared
+                         * race for every pad on the screen just like those do.
+                         * Network-only (1 local human) keeps the original
+                         * immediate behavior. */
+                        if (local_mp) {
+                            s_pause_action_confirm = 4;
+                            TD5_LOG_I(LOG_TAG, "Pause menu: BACK TO LOBBY selected -> confirm prompt (split-screen MP)");
+                        } else {
+                            td5_game_pause_execute_action(4);
                         }
-                        if (s_pause_options_dirty) {
-                            g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
-                            g_td5.ini.music_volume = td5_save_get_music_volume();
-                            td5_ini_persist_options();
-                            s_pause_options_dirty = 0;
+                    } else if (s_pause_menu_cursor == row_quit) {
+                        /* QUIT TO MENU. [PAUSE CONFIRM 2026-07-02] Same
+                         * local-split-screen-MP confirm gating as RESTART RACE
+                         * above. */
+                        if (local_mp) {
+                            s_pause_action_confirm = 2;
+                            TD5_LOG_I(LOG_TAG, "Pause menu: QUIT TO MENU selected -> confirm prompt (split-screen MP)");
+                        } else {
+                            td5_game_pause_execute_action(2);
                         }
-                        if (g_td5.network_active && td5_net_is_active()) {
-                            uint8_t left_msg[8] = {0x17, 0, 0, 0, 0, 0, 0, 0};
-                            td5_net_send(TD5_DXPDATA, left_msg, 8);
+                    } else if (s_pause_menu_cursor == row_exit) {
+                        /* EXIT GAME. [PAUSE CONFIRM 2026-07-02] Same
+                         * local-split-screen-MP confirm gating as RESTART RACE
+                         * above. */
+                        if (local_mp) {
+                            s_pause_action_confirm = 3;
+                            TD5_LOG_I(LOG_TAG, "Pause menu: EXIT GAME selected -> confirm prompt (split-screen MP)");
+                        } else {
+                            td5_game_pause_execute_action(3);
                         }
-                        TD5_LOG_I(LOG_TAG, "Pause menu: BACK TO LOBBY, starting fade-out");
-                        td5_game_begin_fade_out(0);
-                    } else if (s_pause_menu_cursor ==
-                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 7 : 6)) {
-                        /* QUIT TO MENU — leave the race, return to the frontend
-                         * (was "EXIT"; behaviour unchanged, only relabelled).
-                         * [RADIO + END RACE NOW 2026-06-30] Row 7 in MP, row 6 in
-                         * single-player (RADIO slider + END RACE NOW each pushed
-                         * the action rows down; BACK TO LOBBY remains MP-only). */
-                        s_pause_menu_active = 0;
-                        s_pause_exit_pending = 1;
-                        /* PART A (user 2026-06-02): capture the player's CURRENT
-                         * race position so the centered finishing-position digit
-                         * (td5_hud_draw_finish_position, drawn during the fade
-                         * whenever td5_game_get_victory_position() > 0) shows
-                         * "where I was before exiting". The finish path captures
-                         * this at completion (see check_race_completion above), but
-                         * the pause-Exit path began the fade without it, so the
-                         * digit was 0 and nothing drew — "there's no number, just
-                         * the transition". Mirror the finish capture here. */
-                        {
-                            TD5_Actor *pl = td5_game_local_player_actor();
-                            s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
-                        }
-                        /* Flush any pending pause-slider volume change before the
-                         * fade tears down the race (close-path persist below only
-                         * runs on the continue path). [PART B 2026-06-02] */
-                        if (s_pause_options_dirty) {
-                            g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
-                            g_td5.ini.music_volume = td5_save_get_music_volume();
-                            td5_ini_persist_options();
-                            s_pause_options_dirty = 0;
-                        }
-                        /* [S31] Tell the peers we are leaving the race so they
-                         * end theirs too (lockstep cannot continue without us)
-                         * instead of stalling out their input barrier. */
-                        if (g_td5.network_active && td5_net_is_active()) {
-                            uint8_t left_msg[8] = {0x17, 0, 0, 0, 0, 0, 0, 0};
-                            td5_net_send(TD5_DXPDATA, left_msg, 8);
-                        }
-                        TD5_LOG_I(LOG_TAG, "Pause menu: Quit-to-menu selected, starting fade-out (pos=%d)",
-                                  s_finish_position_display);
-                        /* Trigger fade-out; resources released when fade completes.
-                         * Original (0x43C317): calls BeginRaceFadeOutTransition(0). */
-                        td5_game_begin_fade_out(0);
-                    } else if (s_pause_menu_cursor ==
-                               ((g_td5.network_active || g_td5.num_human_players > 1) ? 8 : 7)) {
-                        /* EXIT GAME — clean application shutdown (distinct from
-                         * QUIT TO MENU). [RADIO + END RACE NOW 2026-06-30] Row 8 in
-                         * MP, row 7 in single-player (RADIO slider + END RACE NOW).
-                         * Sets the same quit latch the frontend
-                         * Quit button uses (g_td5.quit_requested); the main loop
-                         * tears the app down on its next iteration. Persist any
-                         * pending volume change first so it survives the exit. */
-                        s_pause_menu_active = 0;
-                        if (s_pause_options_dirty) {
-                            g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
-                            g_td5.ini.music_volume = td5_save_get_music_volume();
-                            td5_ini_persist_options();
-                            s_pause_options_dirty = 0;
-                        }
-                        TD5_LOG_I(LOG_TAG, "Pause menu: EXIT GAME selected -> requesting clean shutdown");
-                        g_td5.quit_requested = 1;
                     }
                 }
 
                 /* Joystick B = back = continue (close the menu), mirroring the
                  * frontend B=back convention. [PORT ENHANCEMENT 2026-06]
-                 * [END RACE NOW 2026-06-30] When the force-finish confirmation is
-                 * up, B cancels the prompt (returns to the menu) instead of
-                 * closing the menu — matching the "B = NO" footer. */
+                 * [END RACE NOW 2026-06-30][PAUSE CONFIRM 2026-07-02] When
+                 * either confirmation prompt is up, B cancels it (returns to the
+                 * menu) instead of closing the menu — matching the "B = NO"
+                 * footer. */
                 {
                     int jb = (jnav & 0x20) ? 1 : 0;
                     if (jb && !s_prev_jb) {
-                        if (s_pause_endrace_confirm) s_pause_endrace_confirm = 0;
-                        else                         s_pause_menu_active = 0;
+                        if (s_pause_endrace_confirm)     s_pause_endrace_confirm = 0;
+                        else if (s_pause_action_confirm) s_pause_action_confirm = 0;
+                        else                              s_pause_menu_active = 0;
                     }
                     s_prev_jb = jb;
                 }
@@ -5850,12 +5815,13 @@ int td5_game_run_race_frame(void) {
             }
 
             /* ESC again = continue; the PAUSE action also toggles the menu shut.
-             * [END RACE NOW 2026-06-30] When the force-finish confirmation is up,
-             * ESC cancels the prompt (keeps the menu open) instead of closing the
-             * menu — matching the "ESC = NO" footer. */
+             * [END RACE NOW 2026-06-30][PAUSE CONFIRM 2026-07-02] When either
+             * confirmation prompt is up, ESC cancels it (keeps the menu open)
+             * instead of closing the menu — matching the "ESC = NO" footer. */
             if ((esc_edge || pause_act_edge) && pause_menu_was_active) {
-                if (s_pause_endrace_confirm) s_pause_endrace_confirm = 0;
-                else                         s_pause_menu_active = 0;
+                if (s_pause_endrace_confirm)     s_pause_endrace_confirm = 0;
+                else if (s_pause_action_confirm) s_pause_action_confirm = 0;
+                else                              s_pause_menu_active = 0;
             }
 
             /* Update graphical overlay (SELBOX + sliders). Rows: 0=VIEW,
@@ -6922,6 +6888,9 @@ int td5_game_run_race_frame(void) {
         /* [END RACE NOW 2026-06-30] Force-finish YES/NO confirmation, drawn on
          * top of the pause panel. Self-gated: no-op unless the prompt is armed. */
         td5_hud_draw_endrace_confirm();
+        /* [PAUSE CONFIRM 2026-07-02] RESTART/QUIT/EXIT YES/NO confirmation
+         * (local split-screen MP only). Self-gated: no-op unless armed. */
+        td5_hud_draw_pause_action_confirm();
     }
 
     /* Race end fade: directional wipe overlay (black bars closing in).
@@ -8841,6 +8810,135 @@ static void td5_game_force_finish_race(void)
 int td5_game_pause_endrace_confirm_active(void)
 {
     return s_pause_endrace_confirm;
+}
+
+/* [PAUSE CONFIRM 2026-07-02] Which pause-menu RESTART/QUIT/EXIT/LOBBY
+ * confirmation (if any) is up: 0=none 1=RESTART RACE 2=QUIT TO MENU
+ * 3=EXIT GAME 4=BACK TO LOBBY. Read by the HUD overlay to draw the matching
+ * "ACTION?" YES/NO modal. */
+int td5_game_pause_action_confirm(void)
+{
+    return s_pause_action_confirm;
+}
+
+/* [PAUSE CONFIRM 2026-07-02] Executes the pause-menu RESTART RACE / QUIT TO
+ * MENU / EXIT GAME / BACK TO LOBBY action body. Called either immediately
+ * (single-player, or MP without local split-screen — the original
+ * unconfirmed behavior) or after the player answers YES to the "ACTION?"
+ * prompt armed for local split-screen MP (num_human_players>1), where these
+ * actions end the shared race for every pad on the screen.
+ * which: 1=RESTART RACE 2=QUIT TO MENU 3=EXIT GAME 4=BACK TO LOBBY. */
+static void td5_game_pause_execute_action(int which)
+{
+    if (which == 1) {
+        /* RESTART RACE — re-run the SAME race (track/car/opponents/laps/
+         * direction unchanged). Fade out, then the fade-complete handler
+         * returns 3 and the FSM re-inits the race session. The dirty-volume
+         * flush on menu-close (close-path) persists any SOUND slider change;
+         * the race re-init re-plays the music.
+         * [S31] Ignored in a net race unless we're the host: a one-sided
+         * re-init can't be reconciled with the other machines' lockstep
+         * state. */
+        if (g_td5.network_active && td5_net_is_active()) {
+            /* [S31] Net race: host-only and SYNCED. Broadcast RACE_RESTART
+             * (0x19) so every machine runs the same fade + re-init; the
+             * lockstep latch survives the restart (release_race_resources
+             * keeps it while restart_pending) and InitRace re-seeds from the
+             * archived DXPSTART config, so all machines rebuild the identical
+             * race and resume the same exchange. */
+            if (td5_net_is_host()) {
+                uint8_t rs_msg[8] = {0x19, 0, 0, 0, 0, 0, 0, 0};
+                td5_net_send(TD5_DXPDATA, rs_msg, 8);
+                s_pause_menu_active = 0;
+                s_pause_restart_pending = 1;
+                TD5_LOG_I(LOG_TAG, "Pause menu: net RESTART (host), fading out");
+                td5_game_begin_fade_out(0);
+            } else {
+                TD5_LOG_I(LOG_TAG, "Pause menu: RESTART is host-only in net races");
+            }
+        } else {
+            s_pause_menu_active = 0;
+            s_pause_restart_pending = 1;
+            TD5_LOG_I(LOG_TAG, "Pause menu: RESTART RACE selected, starting fade-out");
+            td5_game_begin_fade_out(0);
+        }
+    } else if (which == 2) {
+        /* QUIT TO MENU — leave the race, return to the frontend. */
+        s_pause_menu_active = 0;
+        s_pause_exit_pending = 1;
+        /* PART A (user 2026-06-02): capture the player's CURRENT race position
+         * so the centered finishing-position digit (td5_hud_draw_finish_position,
+         * drawn during the fade whenever td5_game_get_victory_position() > 0)
+         * shows "where I was before exiting". The finish path captures this at
+         * completion (see check_race_completion), but the pause-Exit path began
+         * the fade without it, so the digit was 0 and nothing drew. Mirror the
+         * finish capture here. */
+        {
+            TD5_Actor *pl = td5_game_local_player_actor();
+            s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+        }
+        /* Flush any pending pause-slider volume change before the fade tears
+         * down the race (close-path persist only runs on the continue path).
+         * [PART B 2026-06-02] */
+        if (s_pause_options_dirty) {
+            g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
+            g_td5.ini.music_volume = td5_save_get_music_volume();
+            td5_ini_persist_options();
+            s_pause_options_dirty = 0;
+        }
+        /* [S31] Tell the peers we are leaving the race so they end theirs too
+         * (lockstep cannot continue without us) instead of stalling out their
+         * input barrier. */
+        if (g_td5.network_active && td5_net_is_active()) {
+            uint8_t left_msg[8] = {0x17, 0, 0, 0, 0, 0, 0, 0};
+            td5_net_send(TD5_DXPDATA, left_msg, 8);
+        }
+        TD5_LOG_I(LOG_TAG, "Pause menu: Quit-to-menu selected, starting fade-out (pos=%d)",
+                  s_finish_position_display);
+        /* Trigger fade-out; resources released when fade completes.
+         * Original (0x43C317): calls BeginRaceFadeOutTransition(0). */
+        td5_game_begin_fade_out(0);
+    } else if (which == 3) {
+        /* EXIT GAME — clean application shutdown (distinct from QUIT TO
+         * MENU). Sets the same quit latch the frontend Quit button uses
+         * (g_td5.quit_requested); the main loop tears the app down on its
+         * next iteration. Persist any pending volume change first so it
+         * survives the exit. */
+        s_pause_menu_active = 0;
+        if (s_pause_options_dirty) {
+            g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
+            g_td5.ini.music_volume = td5_save_get_music_volume();
+            td5_ini_persist_options();
+            s_pause_options_dirty = 0;
+        }
+        TD5_LOG_I(LOG_TAG, "Pause menu: EXIT GAME selected -> requesting clean shutdown");
+        g_td5.quit_requested = 1;
+    } else if (which == 4) {
+        /* BACK TO LOBBY [S31] -- end the race and return to the lobby it
+         * came from: network lobby (LAN/direct-IP) or local-MP lobby. Only
+         * reachable in an MP session (row_lobby>=0 guard at the call site).
+         * Net: tell the peers; lockstep cannot continue without us, so their
+         * race ends through the same fade and they land back in the lobby
+         * too (session stays alive). */
+        s_pause_menu_active = 0;
+        s_pause_lobby_pending = 1;
+        {
+            TD5_Actor *pl = td5_game_local_player_actor();
+            s_finish_position_display = pl ? (int)pl->race_position + 1 : 1;
+        }
+        if (s_pause_options_dirty) {
+            g_td5.ini.sfx_volume   = td5_save_get_sfx_volume();
+            g_td5.ini.music_volume = td5_save_get_music_volume();
+            td5_ini_persist_options();
+            s_pause_options_dirty = 0;
+        }
+        if (g_td5.network_active && td5_net_is_active()) {
+            uint8_t left_msg[8] = {0x17, 0, 0, 0, 0, 0, 0, 0};
+            td5_net_send(TD5_DXPDATA, left_msg, 8);
+        }
+        TD5_LOG_I(LOG_TAG, "Pause menu: BACK TO LOBBY, starting fade-out");
+        td5_game_begin_fade_out(0);
+    }
 }
 
 /* ========================================================================

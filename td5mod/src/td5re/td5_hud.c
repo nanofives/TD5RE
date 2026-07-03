@@ -397,10 +397,18 @@ const int8_t g_pause_glyph_widths[256] = {
  * END RACE NOW action row was added; the action rows shifted down accordingly.
  * Layout — title + selectable rows (cursor indices in parentheses):
  *   PAUSED(title) / VIEW(0) SOUND(1) RADIO(2) [sliders] /
- *   CONTINUE(3) RESTART RACE(4) END RACE NOW(5)
- *   [BACK TO LOBBY(6) — MP only] QUIT TO MENU EXIT GAME.
- * Force-finish (END RACE NOW) shown in BOTH single-player and MP; BACK TO LOBBY
- * remains MP-only (skipped without advancing y in single-player).
+ *   CONTINUE(3) RESTART RACE(4) [END RACE NOW(5) — local split-screen MP only]
+ *   [BACK TO LOBBY — any MP only] QUIT TO MENU EXIT GAME.
+ * [END RACE NOW GATING 2026-07-02] Force-finish (END RACE NOW) now shown ONLY
+ * in local split-screen MP (num_human_players>1) — single-player and
+ * network-only (1 local human) races drop the row (skipped without advancing
+ * y, same pattern as BACK TO LOBBY). BACK TO LOBBY remains gated on ANY
+ * multiplayer session (network or local). RESTART RACE / QUIT TO MENU / EXIT
+ * GAME / BACK TO LOBBY now also arm a YES/NO confirmation prompt (mirroring
+ * END RACE NOW's) when in local split-screen MP, since those actions end the
+ * shared race for every pad on the screen — see td5_game.c's row_* locals and
+ * td5_game_pause_execute_action(). Single-player / network-only keep the
+ * original immediate (no confirm) behavior (BACK TO LOBBY is MP-only either way).
  * This is source-port-only UI (no original pause-restart/exit-game equiv). */
 static const char *s_eng_pause_strings[] = {
     "PAUSED",         (const char *)(intptr_t)2,
@@ -2167,6 +2175,49 @@ void td5_hud_draw_endrace_confirm(void)
     float line_h = 30.0f * ts;
     /* Gold matches the frontend confirm-title accent (MP_TITLE_GOLD 0xFFE3D708). */
     td5_vui_text_centered(cx, cy - line_h * 0.6f, "END RACE NOW?",
+                          0xFFE3D708u, ts, ts);
+    td5_vui_text_centered(cx, cy + line_h * 0.6f,
+                          "A / ENTER = YES        B / ESC = NO",
+                          0xFFFFFFFFu, ts * 0.65f, ts * 0.65f);
+}
+
+/* [PAUSE CONFIRM 2026-07-02] Confirmation modal for the pause-menu RESTART
+ * RACE / QUIT TO MENU / EXIT GAME actions. Self-gated: draws nothing unless
+ * td5_game has armed one of the three prompts (only possible in local
+ * split-screen MP — num_human_players>1 — since these actions end the shared
+ * race for every pad on the screen). Same look as td5_hud_draw_endrace_confirm,
+ * with the question text swapped per action. Port-only feature. */
+void td5_hud_draw_pause_action_confirm(void)
+{
+    extern int td5_game_pause_action_confirm(void);
+    int action = td5_game_pause_action_confirm();
+    if (!action) return;
+
+    float sw = g_render_width_f;
+    float sh = g_render_height_f;
+    if (sw < 2.0f || sh < 2.0f) return;
+
+    /* Dim the whole screen so the question stands out over the (already-drawn)
+     * pause panel and the frozen race behind it. */
+    td5_vui_quad(0.0f, 0.0f, sw, sh, 0xC0000000u, -1, 0.0f, 0.0f, 0.0f, 0.0f);
+
+    float cx = sw * 0.5f;
+    float cy = sh * 0.5f;
+    float ts = sw / 640.0f;
+    if (ts > 1.6f)  ts = 1.6f;
+    if (ts < 0.40f) ts = 0.40f;
+    float line_h = 30.0f * ts;
+
+    const char *question = "";
+    switch (action) {
+        case 1: question = "RESTART RACE?";  break;
+        case 2: question = "QUIT TO MENU?";  break;
+        case 3: question = "EXIT GAME?";     break;
+        case 4: question = "BACK TO LOBBY?"; break;
+        default: break;
+    }
+    /* Gold matches the frontend confirm-title accent (MP_TITLE_GOLD 0xFFE3D708). */
+    td5_vui_text_centered(cx, cy - line_h * 0.6f, question,
                           0xFFE3D708u, ts, ts);
     td5_vui_text_centered(cx, cy + line_h * 0.6f,
                           "A / ENTER = YES        B / ESC = NO",
@@ -7367,18 +7418,26 @@ void td5_hud_init_pause_menu(int page_index)
      * sample. Texture alpha (A=128 after ARGB channel remap) provides
      * semi-transparency naturally. */
     /* [MP 2026-06-13] BACK TO LOBBY only exists in a multiplayer/network session.
-     * Single-player drops that row entirely (see the build loop below), so the
-     * panel is one row shorter. */
-    int pause_mp = (g_td5.network_active || g_td5.num_human_players > 1);
+     * [END RACE NOW GATING 2026-07-02] END RACE NOW only exists in a LOCAL
+     * split-screen multiplayer session (num_human_players>1) — a plain
+     * network-only race (1 local human) or single-player drop that row too
+     * (see the build loop below), so the panel shrinks accordingly. */
+    int local_mp = (g_td5.num_human_players > 1);
+    int pause_mp = (g_td5.network_active || local_mp);
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
-        /* [RADIO + END RACE NOW 2026-06-30] +2 selectable rows over the original
-         * (RADIO slider at row 2, END RACE NOW action), each +16px taller:
-         * MP = 9 rows -> panel +116; single-player = 8 rows (BACK TO LOBBY
-         * removed) -> panel +100. */
+        /* [RADIO 2026-06-30] +1 selectable row over the original (RADIO slider
+         * at row 2). [END RACE NOW GATING 2026-07-02] END RACE NOW is now a
+         * conditional 2nd extra row (local-MP only) instead of always present:
+         * base (no END RACE NOW, no BACK TO LOBBY) = 84; +16 per extra row
+         * present (END RACE NOW and/or BACK TO LOBBY). Reproduces the previous
+         * fixed 100/116 for the two cases that existed before this gating
+         * (single-player=84 now vs 100 before, since END RACE NOW no longer
+         * shows there; MP unchanged at 116). */
+        float panel_bottom = 84.0f + 16.0f * ((local_mp ? 1 : 0) + (pause_mp ? 1 : 0));
         PAUSE_ADD(-s_pause_half_width, -56.0f,
-                   s_pause_half_width,  pause_mp ? 116.0f : 100.0f,
+                   s_pause_half_width,  panel_bottom,
                    bu, bv, bu, bv,
                    blackbox_e->texture_page, 0xFFFFFFFF);
     }
@@ -7458,10 +7517,20 @@ void td5_hud_init_pause_menu(int page_index)
         const char *str = s_pause_menu_strings[string_offset / 4];
         if (str == NULL) break;
 
-        /* [MP 2026-06-13] Omit BACK TO LOBBY in single-player (no lobby). Skip
-         * WITHOUT advancing text_y so the rows below (QUIT TO MENU / EXIT GAME)
-         * close the gap and shift up — the menu becomes a clean 6-row layout. */
+        /* [MP 2026-06-13] Omit BACK TO LOBBY outside any multiplayer session (no
+         * lobby). Skip WITHOUT advancing text_y so the rows below close the gap
+         * and shift up. */
         if (!pause_mp && strcmp(str, "BACK TO LOBBY") == 0) {
+            string_offset += 8;
+            continue;
+        }
+
+        /* [END RACE NOW GATING 2026-07-02] Omit END RACE NOW outside LOCAL
+         * split-screen multiplayer (num_human_players>1) — force-finishing only
+         * makes sense when there's more than one local racer sharing this pause
+         * menu; single-player and plain network-only (1 local human) races drop
+         * the row, same skip-without-advancing-y pattern as BACK TO LOBBY. */
+        if (!local_mp && strcmp(str, "END RACE NOW") == 0) {
             string_offset += 8;
             continue;
         }
