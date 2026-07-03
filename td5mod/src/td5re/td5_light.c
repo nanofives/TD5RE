@@ -292,19 +292,27 @@ void td5_light_emit_street_lamps(void)
     TD5_Actor *p = td5_game_get_actor(0);
     if (!p) return;
     float px = (float)p->world_pos.x * (1.0f / 256.0f);
+    float py = (float)p->world_pos.y * (1.0f / 256.0f);
     float pz = (float)p->world_pos.z * (1.0f / 256.0f);
 
     /* Nearest-N selection (insertion into a small sorted list — lamp counts
-     * are a few hundred, budget ~10; runs once per frame). XZ distance only:
-     * lamp heads sit high, vertical offset is irrelevant for "near me". */
+     * are a few hundred, budget ~10; runs once per frame). FULL 3D distance:
+     * Moscow's riverside quay glows sit ~3000 units BELOW the road — with
+     * XZ-only ranking they hogged every budget slot while lighting nothing
+     * the player can see (the 'only one lit post on the map' bug). In 3D
+     * they rank beyond the road-level post halos and lose. */
     int   best_idx[TD5_LIGHT_MAX];
     float best_d2[TD5_LIGHT_MAX];
     int   nbest = 0;
     float cutoff2 = (s_lamp_range * 6.0f) * (s_lamp_range * 6.0f);
     for (int i = 0; i < s_lamp_count; i++) {
         float dx = s_lamp_pos[i][0] - px;
+        float dy = s_lamp_pos[i][1] - py;
         float dz = s_lamp_pos[i][2] - pz;
-        float d2 = dx * dx + dz * dz;
+        /* Vertical gap alone beyond the light's range => it can never touch
+         * the player's plane (quay glows 3000 below the embankment road). */
+        if (dy > s_lamp_range * 1.25f || dy < -s_lamp_range * 1.25f) continue;
+        float d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > cutoff2) continue;
         int j = nbest;
         if (nbest < s_lamp_budget) nbest++;
