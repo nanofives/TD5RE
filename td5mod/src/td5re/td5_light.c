@@ -264,8 +264,8 @@ void td5_light_lamps_add(float x, float y, float z)
 
 /* Lamp look knobs (env, read once): warm sodium-ish pools. */
 static int   s_lamp_knobs_read = 0;
-static float s_lamp_range      = 2200.0f;  /* TD5RE_LAMP_RANGE      pool radius (world units) */
-static float s_lamp_intensity  = 0.60f;    /* TD5RE_LAMP_INTENSITY  peak added light 0..1     */
+static float s_lamp_range      = 1600.0f;  /* TD5RE_LAMP_RANGE      pool radius (world units) */
+static float s_lamp_intensity  = 0.50f;    /* TD5RE_LAMP_INTENSITY  peak added light 0..1     */
 static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
 
 void td5_light_emit_street_lamps(void)

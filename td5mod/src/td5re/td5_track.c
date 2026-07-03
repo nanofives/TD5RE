@@ -7559,16 +7559,26 @@ void td5_track_register_lamp_lights(void)
             if ((uintptr_t)base_verts < 0x10000u || (uintptr_t)cmds < 0x10000u)
                 continue;
 
+            /* Ground reference for the elevation test below: the mesh's
+             * LOWEST geometry (world +Y is DOWN, so ground = max local Y). */
+            float mesh_ground = -1e9f;
+            for (int v = 0; v < count; v++)
+                if (base_verts[v].pos_y > mesh_ground)
+                    mesh_ground = base_verts[v].pos_y;
+
             /* Walk EVERY command (same sequential-cursor rules as the render
-             * walk): each type-3 (additive) command IS a light glow — lamp
-             * heads, whether the mesh is a billboard fixture or a solid post
-             * mesh with the glow as one command. The glow's true rendered
-             * position = mesh origin/256 + the average of ITS OWN vertex
-             * slice (the exact translation the renderer uses; the earlier
-             * bounding_center shortcut pointed ~3k units off the road). */
+             * walk). Two fixture signatures:
+             *  - type-3 (additive) commands: the glow IS the light (e.g.
+             *    Moscow's riverside quay lamps);
+             *  - type-1 (alpha-keyed) SMALL quads hanging HIGH above the
+             *    mesh's ground line: the halo sprite at each street-lamp
+             *    post's tip (e.g. Moscow page 451). Registered at the exact
+             *    quad position — the light sits where the glow visibly hangs.
+             * The glow's rendered position = mesh origin/256 + its own vertex
+             * average (the exact translation the renderer uses). */
             int cursor = 0;
             int per_mesh = 0;
-            for (int ci = 0; ci < cmd_count && per_mesh < 8; ci++) {
+            for (int ci = 0; ci < cmd_count && per_mesh < 64; ci++) {
                 const TD5_PrimitiveCmd *cmd = &cmds[ci];
                 int opcode = cmd->dispatch_type;
                 if (opcode < 0 || opcode > 6) continue;
@@ -7614,54 +7624,50 @@ void td5_track_register_lamp_lights(void)
                     /* Additive glow command — a light fixture at its rendered
                      * position (e.g. Moscow's riverside quay lamps). */
                     td5_light_lamps_add(wx, wy, wz);
-                } else if (cmd->triangle_count == 0 &&
-                           cmd->quad_count >= 1 && cmd->quad_count <= 2 &&
-                           (mxy - mny) < 60.0f) {
-                    /* FLAT ground quads — the artists' baked lamp REFLECTION
-                     * markers sitting at each street-light post's XZ (Moscow
-                     * pages 338..347: one or two per command, ~1400 apart
-                     * along lit stretches; the matching halo renders ~800
-                     * above). Register EACH small flat quad, lifted to head
-                     * height (up = -Y). TD5RE_LAMP_LIFT tunes the lift. */
-                    static float s_lift = -1.0f;
-                    if (s_lift < 0.0f) {
-                        const char *e = getenv("TD5RE_LAMP_LIFT");
-                        s_lift = (e && e[0]) ? (float)atof(e) : 800.0f;
-                    }
+                } else if (trans == 1 && cmd->quad_count >= 1) {
+                    /* Alpha-keyed sprite quads hanging HIGH above the mesh's
+                     * ground line = street-lamp halo sprites at post tips.
+                     * Small extent excludes trees/banners; the >900-unit
+                     * elevation excludes pedestrians/signs at ground level.
+                     * Light registered at the exact halo position. */
                     int registered_any = 0;
+                    int qb = idx0 + cmd->triangle_count * 3;
                     for (int q = 0; q < cmd->quad_count; q++) {
-                        const TD5_MeshVertex *qv = base_verts + idx0 + q * 4;
-                        float qnx = 1e9f, qxx = -1e9f, qnz = 1e9f, qxz = -1e9f;
+                        const TD5_MeshVertex *qv = base_verts + qb + q * 4;
+                        float qnx = 1e9f, qxx = -1e9f, qny = 1e9f, qxy = -1e9f,
+                              qnz = 1e9f, qxz = -1e9f;
                         float qax = 0, qay = 0, qaz = 0;
                         for (int v = 0; v < 4; v++) {
                             qax += qv[v].pos_x; qay += qv[v].pos_y; qaz += qv[v].pos_z;
                             if (qv[v].pos_x < qnx) qnx = qv[v].pos_x;
                             if (qv[v].pos_x > qxx) qxx = qv[v].pos_x;
+                            if (qv[v].pos_y < qny) qny = qv[v].pos_y;
+                            if (qv[v].pos_y > qxy) qxy = qv[v].pos_y;
                             if (qv[v].pos_z < qnz) qnz = qv[v].pos_z;
                             if (qv[v].pos_z > qxz) qxz = qv[v].pos_z;
                         }
+                        float ext_x = qxx - qnx, ext_y = qxy - qny, ext_z = qxz - qnz;
+                        float elev  = mesh_ground - (qay * 0.25f);   /* above mesh ground */
+                        if (ext_x > 900.0f || ext_y > 900.0f || ext_z > 900.0f) continue;
+                        if (ext_x + ext_z < 60.0f) continue;         /* degenerate */
+                        if (elev < 900.0f) continue;                 /* ground-level sprite */
                         if (s_reg_dbg) {
                             static int s_cand = 0;
                             if (s_cand < 30) {
                                 s_cand++;
                                 TD5_LOG_I("track",
-                                    "lamp cand: dl=%d sub=%u cmd=%d page=%d q=%d ext=(%.0f,%.0f) flatY=%.0f",
+                                    "lamp cand: dl=%d sub=%u cmd=%d page=%d q=%d ext=(%.0f,%.0f,%.0f) elev=%.0f",
                                     dl, j, ci, (int)cmd->texture_page_id, q,
-                                    qxx - qnx, qxz - qnz, mxy - mny);
+                                    ext_x, ext_y, ext_z, elev);
                             }
                         }
-                        if ((qxx - qnx) < 1500.0f || (qxx - qnx) > 2600.0f) continue;
-                        if ((qxz - qnz) < 1500.0f || (qxz - qnz) > 2600.0f) continue;
                         td5_light_lamps_add(
                             mesh->origin_x * (1.0f / 256.0f) + qax * 0.25f,
-                            mesh->origin_y * (1.0f / 256.0f) + qay * 0.25f - s_lift,
+                            mesh->origin_y * (1.0f / 256.0f) + qay * 0.25f,
                             mesh->origin_z * (1.0f / 256.0f) + qaz * 0.25f);
                         registered_any = 1;
                     }
                     if (!registered_any) continue;
-                    /* fall through to the shared debug log with wx/wy/wz as
-                     * the command average (position summary only) */
-                    wy -= s_lift;
                 } else {
                     continue;
                 }
