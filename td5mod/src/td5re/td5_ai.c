@@ -357,7 +357,7 @@ static int16_t s_cop_rebust_ticks [TD5_MAX_TOTAL_ACTORS];
 #define COP_TRIGGER_LO       0   /* alongside counts as a pass */
 #define COP_TRIGGER_HI      15   /* up to 15 spans ahead still counts as "just passed" */
 #define COP_OVERTAKE_MARGIN  1   /* cop ahead of target by >=this many spans = overtaken */
-#define COP_STOP_SPEED  0x2000   /* |longitudinal speed| at/under which a target counts as stopped */
+/* COP_STOP_SPEED now defined in td5_ai.h (exported for td5_input.c parity). */
 #define COP_FULL_THROTTLE 0x0200 /* forward drive command while catching up (gentler accel) */
 /* [MP COP CHASE RAM 2026-06-23] Aggressive ram-the-suspect steering for the AI
  * cop. Within COP_RAM_SPAN_RANGE spans of the target the cop steers straight at

@@ -64,6 +64,7 @@ static void retired_add(const char *text) {
 static const char *const k_seed[] = {
     "Damage bar: top-centre + pause-style blue-red fill",
     "Damage bar on: checkpoint timer sits below it",
+    "Police pullover: brakes hold all the way through (no coast gap)",
     "Track walker: no span warp on degenerate quads (race normally)",
     "Headlights: per-pixel beams flood the road (deferred light pass)",
     "Headlights auto-on in rain/overcast/dusk, off in bright daylight",

@@ -149,6 +149,13 @@ void td5_ai_update_encounter_control(int slot);
  * here so the player's throttle write is not blocked for the entire Cop Chase
  * session (only while a tracked encounter is actually engaged). */
 int  td5_ai_is_encounter_active(int slot);
+/* |ACTOR_LONGITUDINAL_SPEED| (raw 24.8 fixed, td5_ai.c) at/under which a
+ * pulled-over target counts as stopped and the chase scheduler releases
+ * the hold (td5_ai.c: td5_ai_update_special_encounter, COP_PULLOVER phase).
+ * Exported so td5_input.c's player-side coast-hold branch uses the SAME
+ * "stopped" threshold instead of an independently-hardcoded value — see
+ * the 2026-07-02 police-brake-deadzone fix. */
+#define COP_STOP_SPEED  0x2000
 
 /* --- Police chase rewrite (2026-06-19) — cosmetic-layer queries ---------
  * The chase logic is deterministic sim state (td5_ai.c); these are read by
