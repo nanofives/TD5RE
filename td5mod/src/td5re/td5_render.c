@@ -1327,6 +1327,38 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     }
     clipped_count = out_count;
 
+    /* [LIGHT2] Render-time street-lamp capture: when a lamp-halo sprite
+     * actually DRAWS (squat, wide, alpha-keyed quad above the camera during
+     * the level pass), its view-space verts give the exact world position —
+     * ground truth that sidesteps the display-list placement folds which
+     * defeated four static-extraction attempts. Captured lamps accumulate in
+     * the (deduped) registry as they come on screen and stay cached. */
+    if (s_level_pass_active && out_count == 4 &&
+        td5_light2_active() && td5_light_street_lights() &&
+        td5_material_id_for_page(tex_page) == TD5_MAT_CUTOUT) {
+        float wmin = out_vx[0], wmax = out_vx[0];
+        float hmin = out_vy[0], hmax = out_vy[0];
+        for (int i2 = 1; i2 < 4; i2++) {
+            if (out_vx[i2] < wmin) wmin = out_vx[i2];
+            if (out_vx[i2] > wmax) wmax = out_vx[i2];
+            if (out_vy[i2] < hmin) hmin = out_vy[i2];
+            if (out_vy[i2] > hmax) hmax = out_vy[i2];
+        }
+        float w = wmax - wmin, h = hmax - hmin;
+        if (w >= 250.0f && w <= 900.0f && h >= 80.0f && h <= 500.0f &&
+            h < 0.7f * w) {
+            float vx0 = 0, vy0 = 0, vz0 = 0;
+            for (int i2 = 0; i2 < 4; i2++) { vx0 += out_vx[i2]; vy0 += out_vy[i2]; vz0 += out_vz[i2]; }
+            vx0 *= 0.25f; vy0 *= 0.25f; vz0 *= 0.25f;
+            float wx = s_camera_pos[0] + vx0 * s_camera_basis[0] + vy0 * s_camera_basis[3] + vz0 * s_camera_basis[6];
+            float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
+            float wz = s_camera_pos[2] + vx0 * s_camera_basis[2] + vy0 * s_camera_basis[5] + vz0 * s_camera_basis[8];
+            float above_cam = s_camera_pos[1] - wy;    /* up = -Y */
+            if (above_cam > -150.0f && above_cam < 2500.0f)
+                td5_light_lamps_capture(wx, wy, wz);
+        }
+    }
+
     /* [DEV: TD5RE_GLOW_SCAN=1] Render-side fixture identification: log each
      * texture page whose polygons draw ELEVATED near the camera (lamp posts /
      * halos), with a reconstructed world position. Ground truth regardless of

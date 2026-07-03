@@ -113,6 +113,11 @@ void td5_light_emit_vehicle_headlights(void);
  * bright daylight stays untouched. [Lighting] StreetLights / --StreetLights. */
 void td5_light_lamps_reset(void);                     /* track load: clear     */
 void td5_light_lamps_add(float x, float y, float z);  /* track load: register  */
+/* Render-time capture: like lamps_add but DEDUPED (skips if an existing lamp
+ * sits within ~400 units). Called by the renderer when a lamp-halo sprite
+ * actually draws — its view-space verts give the exact world position, which
+ * sidesteps the display-list placement folds that defeat static extraction. */
+void td5_light_lamps_capture(float x, float y, float z);
 int  td5_light_lamps_count(void);
 void td5_light_set_street_lights(int on);
 int  td5_light_street_lights(void);

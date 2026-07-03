@@ -262,6 +262,25 @@ void td5_light_lamps_add(float x, float y, float z)
     s_lamp_count++;
 }
 
+void td5_light_lamps_capture(float x, float y, float z)
+{
+    /* Dedupe: the same halo is captured every frame it is on screen. */
+    for (int i = 0; i < s_lamp_count; i++) {
+        float dx = s_lamp_pos[i][0] - x;
+        float dy = s_lamp_pos[i][1] - y;
+        float dz = s_lamp_pos[i][2] - z;
+        if (dx * dx + dy * dy + dz * dz < 400.0f * 400.0f)
+            return;
+    }
+    td5_light_lamps_add(x, y, z);
+    static int s_cap_log = 0;
+    if (s_cap_log < 8) {
+        s_cap_log++;
+        TD5_LOG_I(LOG_TAG, "lamp capture[%d]: (%.0f,%.0f,%.0f)",
+                  s_lamp_count - 1, x, y, z);
+    }
+}
+
 /* Lamp look knobs (env, read once): warm sodium-ish pools. */
 static int   s_lamp_knobs_read = 0;
 static float s_lamp_range      = 1600.0f;  /* TD5RE_LAMP_RANGE      pool radius (world units) */
