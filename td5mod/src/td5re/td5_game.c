@@ -1111,10 +1111,11 @@ static const SSW_NavStep k_ssw_pending[]    = { { TD5_SCREEN_MAIN_MENU, 7 },
                                                 { TD5_SCREEN_CHANGELOG, 0 } };
 static const SSW_NavStep k_ssw_ui_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
                                                 { TD5_SCREEN_CHANGELOG, 2 } };
-/* UI GUIDE row 3 = MP TOOLS (Screen_UiGuide state 0 creation order). */
+/* UI GUIDE row 5 = MP TOOLS (Screen_UiGuide state 0 creation order:
+ * standard, selector, disabled, column A, column B, MP TOOLS, BACK). */
 static const SSW_NavStep k_ssw_mp_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
                                                 { TD5_SCREEN_CHANGELOG, 2 },
-                                                { TD5_SCREEN_UI_GUIDE, 3 } };
+                                                { TD5_SCREEN_UI_GUIDE, 5 } };
 
 #define SSW_ROUTE(arr) do { *out_len = (int)(sizeof(arr)/sizeof(arr[0])); return arr; } while (0)
 static const SSW_NavStep *startscreen_route(int target, int *out_len)

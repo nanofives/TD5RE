@@ -496,6 +496,7 @@ void Screen_PendingTest(void) {
  * --StartScreen=1 (nav-walked). ESC/BACK returns to the changelog.
  * ======================================================================== */
 static int s_ug_btn_standard = -1, s_ug_btn_selector = -1, s_ug_btn_disabled = -1;
+static int s_ug_btn_col_a    = -1, s_ug_btn_col_b    = -1;
 static int s_ug_btn_mptools  = -1, s_ug_btn_back     = -1;
 static int s_ug_sel_value    = 1;
 static uint32_t s_ug_flash_until = 0;
@@ -543,17 +544,27 @@ static void devscreens_draw_margin_guides(float sx, float sy) {
     /* verticals: column left X=120, panel left X=348 */
     fe_draw_quad(120.0f * sx,     60.0f * sy,     2.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
     fe_draw_quad(348.0f * sx,     60.0f * sy,     2.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
-    /* horizontals: title Y=17, content top Y=97, bottom row Y=377 */
+    /* horizontals: title Y=17, content top Y=97, content floor Y=410
+     * ([UI RULES 2026-07-03] BACK follows the last box; nothing below 410). */
     fe_draw_quad(8.0f * sx,       17.0f * sy,     624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
     fe_draw_quad(8.0f * sx,       97.0f * sy,     624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
-    fe_draw_quad(8.0f * sx,       377.0f * sy,    624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(8.0f * sx,       410.0f * sy,    624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
     /* labels */
     fe_draw_small_text(123.0f * sx,  62.0f * sy, "X120", k_label, sx, sy);
     fe_draw_small_text(351.0f * sx,  62.0f * sy, "X348", k_label, sx, sy);
     fe_draw_small_text(  9.0f * sx,  20.0f * sy, "Y17",  k_label, sx, sy);
     fe_draw_small_text(  9.0f * sx, 100.0f * sy, "Y97",  k_label, sx, sy);
-    fe_draw_small_text(  9.0f * sx, 380.0f * sy, "Y377", k_label, sx, sy);
+    fe_draw_small_text(  9.0f * sx, 396.0f * sy, "Y410 FLOOR", k_label, sx, sy);
     fe_draw_small_text(565.0f * sx, 465.0f * sy, "640x480", k_label, sx, sy);
+}
+
+/* [UI RULES 2026-07-03] 6px gap markers: translucent cyan strips filling the
+ * reserved 6px module so the rule is visible, not just documented — between
+ * stacked rows, between two-column items, and right of an arrowed button. */
+static void uiguide_gap_marker(float x, float y, float w, float h,
+                               float sx, float sy) {
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(x * sx, y * sy, w * sx, h * sy, 0x7000F0F0u, -1, 0, 0, 1, 1);
 }
 
 /* Dimension labels: "WxH" for every live button on the screen, right-aligned
@@ -562,10 +573,20 @@ static void devscreens_draw_margin_guides(float sx, float sy) {
 static void devscreens_draw_button_dims(float sx, float sy) {
     const uint32_t k_label = 0xFF9FF7F7u;
     float gsx = (sx < sy) ? sx : sy;
-    int i;
+    int i, j;
     for (i = 0; i < s_button_count; i++) {
         char dim[16];
+        int has_left_neighbor = 0;
         if (!s_buttons[i].active || s_buttons[i].hidden) continue;
+        /* Right-column items (a sibling button directly to their LEFT on the
+         * same row) get no gutter label — it would land on the sibling. The
+         * left item of the pair already documents the shared WxH. */
+        for (j = 0; j < s_button_count; j++) {
+            if (j == i || !s_buttons[j].active || s_buttons[j].hidden) continue;
+            if (s_buttons[j].y == s_buttons[i].y &&
+                s_buttons[j].x < s_buttons[i].x) { has_left_neighbor = 1; break; }
+        }
+        if (has_left_neighbor) continue;
         snprintf(dim, sizeof dim, "%dx%d", s_buttons[i].w, s_buttons[i].h);
         fe_draw_small_text((float)s_buttons[i].x * sx
                                - (fe_measure_small_text(dim) + 8.0f) * gsx,
@@ -581,17 +602,23 @@ void Screen_UiGuide(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_reset_buttons();
         frontend_init_return_screen(TD5_SCREEN_UI_GUIDE);   /* parent = CHANGELOG */
+        /* [UI RULES 2026-07-03] Row pitch = H + 6 (gap between stacked buttons
+         * is at most 6px). Two-column items split the 224 column into
+         * 109 + 6 + 109. BACK follows the LAST BOX with the same <=6px gap and
+         * never crosses the Y410 content floor (bottom edge here = 410). */
         s_ug_btn_standard = frontend_create_button("STANDARD BUTTON", FE_MENU_BTN_X,  97, FE_MENU_BTN_W, FE_MENU_BTN_H);
-        s_ug_btn_selector = frontend_create_button("DEMO SELECTOR",   FE_MENU_BTN_X, 137, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        s_ug_btn_selector = frontend_create_button("DEMO SELECTOR",   FE_MENU_BTN_X, 135, FE_MENU_BTN_W, FE_MENU_BTN_H);
         if (s_ug_btn_selector >= 0) s_buttons[s_ug_btn_selector].is_selector = 1;
-        s_ug_btn_disabled = frontend_create_button("DISABLED BUTTON", FE_MENU_BTN_X, 177, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        s_ug_btn_disabled = frontend_create_button("DISABLED BUTTON", FE_MENU_BTN_X, 173, FE_MENU_BTN_W, FE_MENU_BTN_H);
         if (s_ug_btn_disabled >= 0) s_buttons[s_ug_btn_disabled].disabled = 1;
+        s_ug_btn_col_a    = frontend_create_button("COLUMN A",        FE_MENU_BTN_X, 211, 109, FE_MENU_BTN_H);
+        s_ug_btn_col_b    = frontend_create_button("COLUMN B",        235,           211, 109, FE_MENU_BTN_H);
         /* NOTE: the StartScreen nav walker routes MP GUIDE (screen 44) through
-         * THIS button (index 3 — created fourth); keep the creation order. */
-        s_ug_btn_mptools  = frontend_create_button("MP TOOLS",        FE_MENU_BTN_X, 217, FE_MENU_BTN_W, FE_MENU_BTN_H);
-        /* Canonical column BACK: centred under the column (X=176 → centre 232,
-         * the race-type menu's geometry) on the Y=377 bottom row. */
-        s_ug_btn_back     = frontend_create_button("BACK",            176, 377, 112, FE_MENU_BTN_H);
+         * THIS button (index 5 — created sixth); keep the creation order. */
+        s_ug_btn_mptools  = frontend_create_button("MP TOOLS",        FE_MENU_BTN_X, 249, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        /* BACK after the last box (spec panel ends at 373) with the <=6px gap;
+         * bottom edge 378+32 = 410 sits exactly on the content floor. */
+        s_ug_btn_back     = frontend_create_button("BACK",            176, 378, 112, FE_MENU_BTN_H);
         s_selected_button = s_ug_btn_standard;
         s_ug_sel_value    = 1;
         s_ug_flash_until  = 0;
@@ -611,7 +638,9 @@ void Screen_UiGuide(void) {
         }
 
         if (s_input_ready && s_button_index >= 0) {
-            if (s_button_index == s_ug_btn_standard) {
+            if (s_button_index == s_ug_btn_standard ||
+                s_button_index == s_ug_btn_col_a ||
+                s_button_index == s_ug_btn_col_b) {
                 frontend_play_sfx(3);
                 uiguide_flash("PRESSED");
             } else if (s_button_index == s_ug_btn_mptools) {
@@ -648,33 +677,38 @@ void frontend_uiguide_render(float sx, float sy) {
         fe_draw_option_arrows(s_ug_btn_selector, sx, sy);
     }
 
-    /* Spec panel BELOW the button column, above the BACK row (per review):
-     * one wide standard 9-slice frame spanning the content width, canonical
-     * metrics on the left half, type specimens on the right half. */
-    fe_draw_button_frame_fill_scaled(120.0f * sx, 256.0f * sy, 480.0f * sx, 112.0f * sy,
+    /* [UI RULES] 6px gap markers — the reserved module made visible:
+     * row gap, column gap, arrowed-button right gap, box gap. */
+    uiguide_gap_marker(120.0f, 205.0f, 224.0f, 6.0f, sx, sy);   /* between rows        */
+    uiguide_gap_marker(229.0f, 211.0f,   6.0f, 32.0f, sx, sy);  /* between columns     */
+    uiguide_gap_marker(344.0f, 135.0f,   6.0f, 32.0f, sx, sy);  /* right of ◄► button  */
+    uiguide_gap_marker(120.0f, 281.0f, 224.0f, 6.0f, sx, sy);   /* button -> box       */
+
+    /* Spec panel BELOW the button column (last box before BACK): canonical
+     * metrics + the new layout rules on the left half, type specimens right. */
+    fe_draw_button_frame_fill_scaled(120.0f * sx, 287.0f * sy, 480.0f * sx, 86.0f * sy,
                                      1, 0xFF392152u, 1.0f, sx, sy);
-    fe_draw_small_text(132.0f * sx, 268.0f * sy, "CANONICAL METRICS",            0xFFE3D708u, sx, sy);
-    fe_draw_small_text(132.0f * sx, 286.0f * sy, "TITLE X=126 Y=17 #E3D708",     0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 300.0f * sy, "BUTTON X=120 W=224 H=32",      0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 314.0f * sy, "BACK X=176 Y=377  PANEL X=348", 0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 328.0f * sy, "SELECTOR NEEDS OPTION ARROWS", 0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 342.0f * sy, "SFX 2=NAV 3=OK 5=BACK 10=NO",  0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(132.0f * sx, 356.0f * sy, "CYAN LINES = LAYOUT MARGINS",  0xFF8890A0u, sx, sy);
+    fe_draw_small_text(132.0f * sx, 296.0f * sy, "CANONICAL METRICS + RULES",     0xFFE3D708u, sx, sy);
+    fe_draw_small_text(132.0f * sx, 310.0f * sy, "TITLE X=126 Y=17 #E3D708",      0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 323.0f * sy, "BUTTON X=120 W=224 H=32",       0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 336.0f * sy, "GAPS ROWS/COLS/ARROWS <= 6PX",  0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 349.0f * sy, "BACK AFTER LAST BOX, FLOOR Y=410", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 362.0f * sy, "SELECTOR NEEDS OPTION ARROWS",  0xFFFFFFFFu, sx, sy);
 
     /* Type specimens (right half of the panel). */
-    fe_draw_text(380.0f * sx, 268.0f * sy, "MAIN FONT ABC 0123", 0xFFFFFFFFu, sx, sy);
-    fe_draw_small_text(380.0f * sx, 296.0f * sy, "SMALL FONT ABC 0123", 0xFF8890A0u, sx, sy);
+    fe_draw_text(380.0f * sx, 296.0f * sy, "MAIN FONT ABC 0123", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(380.0f * sx, 318.0f * sy, "SMALL FONT ABC 0123", 0xFF8890A0u, sx, sy);
     {
         int keep = s_fe_preserve_case;
         s_fe_preserve_case = 1;   /* mixed-case flag (player-name feature) */
-        fe_draw_text(380.0f * sx, 312.0f * sy, "Mixed Case Text", 0xFFE3D708u, sx, sy);
+        fe_draw_text(380.0f * sx, 332.0f * sy, "Mixed Case Text", 0xFFE3D708u, sx, sy);
         s_fe_preserve_case = keep;
     }
-    fe_draw_small_text(380.0f * sx, 342.0f * sy, "MP WIDGETS: SEE MP TOOLS", 0xFF8890A0u, sx, sy);
+    fe_draw_small_text(380.0f * sx, 356.0f * sy, "MP WIDGETS: SEE MP TOOLS", 0xFF8890A0u, sx, sy);
 
     /* Press feedback flash (right of BACK on the bottom row). */
     if (s_ug_flash_until && now < s_ug_flash_until)
-        fe_draw_text_centered(450.0f * sx, 384.0f * sy, s_ug_flash_text,
+        fe_draw_text_centered(450.0f * sx, 386.0f * sy, s_ug_flash_text,
                               0xFFE3D708u, sx, sy);
     else
         s_ug_flash_until = 0;
@@ -696,9 +730,10 @@ void Screen_MpGuide(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_reset_buttons();
         frontend_init_return_screen(TD5_SCREEN_MP_GUIDE);   /* parent = UI_GUIDE */
+        /* [UI RULES] <=6px row gaps; BACK follows the last box (+6). */
         s_mg_btn_twoline = frontend_create_button("", FE_MENU_BTN_X,  97, FE_MENU_BTN_W, 54);
-        s_mg_btn_modal   = frontend_create_button("CONFIRM PROMPT", FE_MENU_BTN_X, 161, FE_MENU_BTN_W, FE_MENU_BTN_H);
-        s_mg_btn_back    = frontend_create_button("BACK", 176, 377, 112, FE_MENU_BTN_H);
+        s_mg_btn_modal   = frontend_create_button("CONFIRM PROMPT", FE_MENU_BTN_X, 157, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        s_mg_btn_back    = frontend_create_button("BACK", 176, 195, 112, FE_MENU_BTN_H);
         s_selected_button = s_mg_btn_twoline;
         s_mg_modal_armed  = 0;
         s_ug_flash_until  = 0;
@@ -750,6 +785,10 @@ void frontend_mpguide_render(float sx, float sy) {
 
     devscreens_draw_margin_guides(sx, sy);
     devscreens_draw_button_dims(sx, sy);
+
+    /* [UI RULES] 6px gap markers between the stacked rows and before BACK. */
+    uiguide_gap_marker(120.0f, 151.0f, 224.0f, 6.0f, sx, sy);
+    uiguide_gap_marker(120.0f, 189.0f, 224.0f, 6.0f, sx, sy);
 
     frontend_draw_screen_title("MP TOOLS", FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                0xFFE3D708u, sx, sy);

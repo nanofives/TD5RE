@@ -58,6 +58,22 @@ ends up not lining up under the title. The values are **fixed**, so just use the
    button). The label text must be drawn in the **post-button render pass** (see
    §Render order) so it composites on top of the frame.
 
+## Spacing rules (defined 2026-07-03 — demonstrated live on the UI GUIDE screen)
+
+- **Stacked buttons:** vertical gap between consecutive buttons is **at most
+  6px** (row pitch = `h + 6`; e.g. 32-tall rows at 97, 135, 173, ...).
+- **Two-column items:** horizontal gap between side-by-side items is the same
+  **6px** (the 224 column splits as `109 + 6 + 109`).
+- **Arrowed (selector) rows:** keep **6px clear to the right** of the button
+  before the next element.
+- **BACK button:** placed **after the last box** on the screen with the same
+  <=6px gap. It may move down as content grows but **never past Y=410** —
+  nothing is drawn below the Y410 content floor.
+- The dev **UI GUIDE** screen (`--StartScreen=1`, or CHANGELOG → UI GUIDE →
+  MP TOOLS for the MP widgets) renders these rules with visible margin lines,
+  6px gap markers and per-button WxH labels — screenshot it after frontend
+  changes to verify the canon.
+
 ## Render order (critical)
 
 The per-frame frontend draw (`td5_frontend.c`) is:
