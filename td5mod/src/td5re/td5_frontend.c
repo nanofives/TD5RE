@@ -9429,11 +9429,7 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_session_locked_overlay(sx, sy);
         break;
     /* (UI GUIDE / MP TOOLS render in the POST-button overlay pass below —
-     * their captions/modal must composite over the button fills. Only MP
-     * TOOLS' widget BOX draws here, UNDER its demo buttons.) */
-    case TD5_SCREEN_MP_GUIDE:
-        frontend_mpguide_render_box(sx, sy);
-        break;
+     * their captions/modal/pane must composite over the button fills.) */
     default:
         break;
     }

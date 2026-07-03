@@ -726,12 +726,16 @@ void frontend_uiguide_render(float sx, float sy) {
 
 /* ========================================================================
  * MP TOOLS screen (2026-07-03) -- companion gallery for the MP-specific
- * widgets (split from UI GUIDE on review feedback): the MP two-line button
- * style, the shared confirm modal, the gold HOST pill, the player accent
- * palette and the mode-vote border rings (nested per voter). Slot [44];
- * reached from UI GUIDE's MP TOOLS row; BACK/ESC returns to UI GUIDE.
+ * widgets. Rebuilt 2026-07-03 (review) to render the REAL profile-selection
+ * pane rather than ad-hoc stand-ins: the style is extracted verbatim from
+ * frontend_mp_setup_render (td5_fe_mp_setup.c) — a translucent pane box with
+ * a 4-edge accent border, the accent name banner + HOST pill, and a band of
+ * genuine mp_simul_draw_btn widgets (NAME+value, COLOUR+swatch, arrowed CAR,
+ * AUTOMATIC, focused OK). Right column shows the mode-vote nested border
+ * rings and the shared confirm modal. Slot [44]; reached from UI GUIDE's
+ * MP TOOLS row; BACK/ESC returns to UI GUIDE.
  * ======================================================================== */
-static int s_mg_btn_twoline = -1, s_mg_btn_modal = -1, s_mg_btn_back = -1;
+static int s_mg_btn_modal = -1, s_mg_btn_back = -1;
 static int s_mg_modal_armed = 0;
 
 void Screen_MpGuide(void) {
@@ -740,15 +744,11 @@ void Screen_MpGuide(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_reset_buttons();
         frontend_init_return_screen(TD5_SCREEN_MP_GUIDE);   /* parent = UI_GUIDE */
-        /* [UI RULES] The MP widget demos live INSIDE one box (frame drawn in
-         * the PRE-button pass by frontend_mpguide_render_box so the buttons
-         * composite on top): buttons on the left half, badge/swatches right.
-         * <=6px row gaps; BACK follows the box (+6). Two-line height is 48
-         * (54 read as too tall) with a 26px name->description spacing. */
-        s_mg_btn_twoline = frontend_create_button("", 132, 118, FE_MENU_BTN_W, 48);
-        s_mg_btn_modal   = frontend_create_button("CONFIRM PROMPT", 132, 172, FE_MENU_BTN_W, FE_MENU_BTN_H);
-        s_mg_btn_back    = frontend_create_button("BACK", 176, 227, 112, FE_MENU_BTN_H);
-        s_selected_button = s_mg_btn_twoline;
+        /* Only the two NAVIGABLE buttons are shared-loop buttons; the profile
+         * pane's widgets are demo mp_simul_draw_btn drawn in the render. */
+        s_mg_btn_modal = frontend_create_button("CONFIRM PROMPT", 364, 300, 224, FE_MENU_BTN_H);
+        s_mg_btn_back  = frontend_create_button("BACK", 176, 368, 112, FE_MENU_BTN_H);
+        s_selected_button = s_mg_btn_modal;
         s_mg_modal_armed  = 0;
         s_ug_flash_until  = 0;
         s_anim_complete   = 1;
@@ -775,10 +775,7 @@ void Screen_MpGuide(void) {
         }
 
         if (s_input_ready && s_button_index >= 0) {
-            if (s_button_index == s_mg_btn_twoline) {
-                frontend_play_sfx(3);
-                uiguide_flash("PRESSED");
-            } else if (s_button_index == s_mg_btn_modal) {
+            if (s_button_index == s_mg_btn_modal) {
                 frontend_play_sfx(3);
                 s_mg_modal_armed = 1;
                 td5_plat_input_flush_nav();  /* the arming press must not also confirm */
@@ -792,68 +789,96 @@ void Screen_MpGuide(void) {
     }
 }
 
-/* PRE-button pass: the MP box frames — drawn UNDER the demo buttons so they
- * composite on top of the fill (called from the pre-button overlay switch).
- * Two 237-wide frames + 6px gap (the 9-slice clamps past ~250px wide). */
-void frontend_mpguide_render_box(float sx, float sy) {
-    fe_draw_button_frame_fill_scaled(120.0f * sx, 97.0f * sy, 237.0f * sx, 124.0f * sy,
-                                     1, 0xFF392152u, 1.0f, sx, sy);
-    fe_draw_button_frame_fill_scaled(363.0f * sx, 97.0f * sy, 237.0f * sx, 124.0f * sy,
-                                     1, 0xFF392152u, 1.0f, sx, sy);
+/* An authentic single profile-selection pane, style-extracted from
+ * frontend_mp_setup_render (host slot, idle button band). Non-interactive
+ * demo — draws the pane box, accent border, name banner + HOST pill and the
+ * real mp_simul_draw_btn widget band. */
+static void mpguide_draw_profile_pane(float px, float py, float pw, float ph,
+                                      uint32_t rgb, float sx, float sy) {
+    uint32_t pcol = rgb | 0xFF000000u;
+    float bt = 2.0f;
+    uint32_t bc = rgb | 0xD0000000u;
+
+    /* Backdrop + 4-edge accent border (frontend_mp_setup_render lines 1855-64). */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad((px + 3) * sx, (py + 3) * sy, (pw - 6) * sx, (ph - 6) * sy,
+                 0xB0141420u, -1, 0, 0, 1, 1);
+    fe_draw_quad((px + 3) * sx, (py + 3) * sy, (pw - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+    fe_draw_quad((px + 3) * sx, (py + ph - 3 - bt) * sy, (pw - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+    fe_draw_quad((px + 3) * sx, (py + 3) * sy, bt * sx, (ph - 6) * sy, bc, -1, 0, 0, 1, 1);
+    fe_draw_quad((px + pw - 3 - bt) * sx, (py + 3) * sy, bt * sx, (ph - 6) * sy, bc, -1, 0, 0, 1, 1);
+
+    /* Name banner + HOST pill (mp_draw_pane_name_banner, host slot 0). */
+    fe_draw_quad((px + 3) * sx, (py + 3) * sy, (pw - 6) * sx, 16.0f * sy,
+                 rgb | 0xD0000000u, -1, 0, 0, 1, 1);
+    {
+        float badge_w = td5_vui_host_badge(px + 6.0f, py + 4.5f, 13.0f, sx, sy);
+        float name_l  = px + 6.0f + badge_w + 5.0f, name_r = px + pw - 3.0f;
+        uiguide_small_centered((name_l + name_r) * 0.5f, (py + 6.0f) * sy,
+                               "PLAYER 1", 0xFF000000u, sx, sy);
+    }
+
+    /* Idle button band: the genuine shared MP button widget in each variant. */
+    {
+        float bx = px + 8.0f, bw = pw - 16.0f, bh = 26.0f, yy = py + 26.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "NAME",      0, pcol, 0, "Player1",    -1, sx, sy);
+        yy += bh + 3.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "COLOUR",    0, pcol, 0, NULL, (int)rgb,    sx, sy);
+        yy += bh + 3.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "CAR",       0, pcol, 1, NULL,        -1, sx, sy);
+        yy += bh + 3.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "AUTOMATIC", 0, pcol, 0, NULL,        -1, sx, sy);
+        yy += bh + 3.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "OK",        1, pcol, 0, NULL,        -1, sx, sy);
+    }
 }
 
 void frontend_mpguide_render(float sx, float sy) {
     extern const uint32_t k_mp_player_colors[];   /* shared MP accent palette (td5_fe_race.c seam) */
     uint32_t now = td5_plat_time_ms();
+    uint32_t demo_rgb = k_mp_player_colors[0] & 0x00FFFFFFu;
     int p;
 
     devscreens_draw_margin_guides(sx, sy);
     devscreens_draw_button_dims(sx, sy);
 
-    /* [UI RULES] 6px gap markers: between the box rows and box -> BACK. */
-    uiguide_gap_marker(132.0f, 166.0f, 224.0f, 6.0f, sx, sy);
-    uiguide_gap_marker(120.0f, 221.0f, 224.0f, 6.0f, sx, sy);
-
     frontend_draw_screen_title("MP TOOLS", FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                0xFFE3D708u, sx, sy);
 
-    /* Box header (the box frame itself is pre-button, see _render_box). */
-    fe_draw_small_text(132.0f * sx, 103.0f * sy, "MP WIDGETS", 0xFFE3D708u, sx, sy);
+    /* LEFT: an authentic profile-selection pane (host slot). */
+    fe_draw_small_text(120.0f * sx, 100.0f * sy, "PROFILE PANE (PROFILE SELECTION):",
+                       0xFFE3D708u, sx, sy);
+    mpguide_draw_profile_pane(120.0f, 112.0f, 216.0f, 250.0f, demo_rgb, sx, sy);
 
-    /* Two-line MP-style labels on the 48-tall button: name at +6, small
-     * description at +32 — 26px apart (mode-vote's 24 + 2 per review). */
-    if (s_mg_btn_twoline >= 0 && s_buttons[s_mg_btn_twoline].active) {
-        FE_Button *b = &s_buttons[s_mg_btn_twoline];
-        float cx = ((float)b->x + (float)b->w * 0.5f) * sx;
-        float tw = fe_measure_text("TWO-LINE BUTTON", sx, sy);
-        fe_draw_text((float)b->x * sx + ((float)b->w * sx - tw) * 0.5f,
-                     ((float)b->y + 6.0f) * sy, "TWO-LINE BUTTON", 0xFFFFFFFFu, sx, sy);
-        uiguide_small_centered(cx, ((float)b->y + 32.0f) * sy,
-                               "SMALL DESCRIPTION LINE", 0xFFB8C0CCu, sx, sy);
-    }
+    /* RIGHT: what the pane is made of + the mode-vote rings + the modal. */
+    fe_draw_small_text(356.0f * sx, 118.0f * sy, "PANE + ACCENT BORDER",       0xFF8890A0u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 132.0f * sy, "HOST BADGE + NAME BANNER",   0xFF8890A0u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 146.0f * sy, "NAME / COLOUR / CAR / OK",   0xFF8890A0u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 160.0f * sy, "(mp_simul_draw_btn widget)", 0xFF667080u, sx, sy);
 
-    /* Right box: HOST pill, accents + nested vote rings. */
-    fe_draw_small_text(375.0f * sx, 118.0f * sy, "HOST BADGE:", 0xFF8890A0u, sx, sy);
-    td5_vui_host_badge(463.0f, 116.0f, 13.0f, sx, sy);
-
-    fe_draw_small_text(375.0f * sx, 146.0f * sy, "ACCENTS + VOTE RINGS:", 0xFF8890A0u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 190.0f * sy, "MODE-VOTE RINGS:", 0xFF8890A0u, sx, sy);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS && p < 8; p++) {
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS && p < 6; p++) {
         uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
         if (!rgb) rgb = k_mp_player_colors[p] & 0x00FFFFFFu;
-        fe_draw_quad((379.0f + (float)p * 28.0f) * sx, 168.0f * sy,
-                     20.0f * sx, 14.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
+        fe_draw_quad((360.0f + (float)p * 34.0f) * sx, 208.0f * sy,
+                     22.0f * sx, 15.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
     }
     /* two nested rings on swatch 0 = two players voted for it */
-    mp_mode_draw_border_ring(379.0f, 168.0f, 20.0f, 14.0f, 3.0f, 2.0f,
+    mp_mode_draw_border_ring(360.0f, 208.0f, 22.0f, 15.0f, 3.0f, 2.0f,
                              (k_mp_player_colors[0] & 0x00FFFFFFu) | 0xFF000000u, sx, sy);
-    mp_mode_draw_border_ring(379.0f, 168.0f, 20.0f, 14.0f, 6.0f, 2.0f,
+    mp_mode_draw_border_ring(360.0f, 208.0f, 22.0f, 15.0f, 6.0f, 2.0f,
                              (k_mp_player_colors[1] & 0x00FFFFFFu) | 0xFF000000u, sx, sy);
-    fe_draw_small_text(375.0f * sx, 196.0f * sy, "RINGS NEST OUTWARD PER VOTER", 0xFF8890A0u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 236.0f * sy, "RINGS NEST OUTWARD PER VOTER", 0xFF667080u, sx, sy);
 
-    /* Press feedback flash (right of BACK). */
+    fe_draw_small_text(356.0f * sx, 284.0f * sy, "SHARED CONFIRM MODAL:", 0xFF8890A0u, sx, sy);
+
+    /* [UI RULES] 6px gap marker before BACK (pane bottom 362 -> BACK 368). */
+    uiguide_gap_marker(120.0f, 362.0f, 216.0f, 6.0f, sx, sy);
+
+    /* Press feedback flash (above BACK). */
     if (s_ug_flash_until && now < s_ug_flash_until)
-        fe_draw_text_centered(450.0f * sx, 234.0f * sy, s_ug_flash_text,
+        fe_draw_text_centered(450.0f * sx, 344.0f * sy, s_ug_flash_text,
                               0xFFE3D708u, sx, sy);
     else
         s_ug_flash_until = 0;
