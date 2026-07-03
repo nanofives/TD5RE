@@ -57,6 +57,16 @@ void td5_frontend_leave_net_session(void);
 void td5_frontend_show_net_disconnect(const char *reason);
 TD5_ScreenIndex td5_frontend_get_screen(void);
 
+/* --- Test-harness hooks (StartScreen nav walker / scripted-input engine) ---
+ * force_input: acquire(1)/release(0) — treat the window as focused so injected
+ * input isn't flushed while a test window runs in the background.
+ * ready: current screen has settled and has at least one clickable button.
+ * select: move keyboard focus to button `index` (an injected ENTER then
+ * confirms it through the real input path). Returns 1 on success. */
+void td5_frontend_harness_force_input(int on);
+int  td5_frontend_harness_ready(void);
+int  td5_frontend_harness_select(int index);
+
 /* --- Display loop (called from game tick in MENU state) --- */
 int  td5_frontend_display_loop(void);
 

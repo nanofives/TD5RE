@@ -196,6 +196,15 @@ const uint8_t *td5_plat_input_get_keyboard(void);
 /** Check if a specific key is pressed (scancode). */
 int td5_plat_input_key_pressed(int scancode);
 
+/** Scripted-key injection (td5_inputscript.c dev harness + StartScreen nav
+ *  walker). Injected scancodes merge into the keyboard snapshot after every
+ *  hardware fill (works with the window unfocused); arrow/Enter presses also
+ *  enqueue a WM_KEYDOWN nav event and ESC sets the one-shot ESC latch, so
+ *  frontend navigation reacts exactly as to a physical press. Inert while
+ *  nothing is injected. */
+void td5_plat_input_inject_key(int scancode, int down);
+void td5_plat_input_inject_clear(void);
+
 /** Accumulated mouse-wheel delta since the last call (cleared on read). One notch
  *  is ±120 (WHEEL_DELTA); positive = wheel-up/away from the user. */
 int td5_plat_input_get_mouse_wheel(void);

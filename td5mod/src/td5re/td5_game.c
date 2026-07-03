@@ -49,6 +49,7 @@
 #include "td5_profile.h"
 #include "td5_benchmark.h"
 #include "td5_selftest.h"  /* in-session automated test suite (dev builds) */
+#include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
 
 int td5_trace_current_sim_tick(void) {
     return g_td5.simulation_tick_counter;
@@ -1049,7 +1050,206 @@ void td5_game_shutdown(void) {
  *   the DDraw Lock/blit/Flip benchmark presentation path.
  * ======================================================================== */
 
+/* ========================================================================
+ * [STARTSCREEN WALK 2026-07-03] StartScreen nav walker.
+ *
+ * A direct td5_frontend_set_screen jump runs the target screen's own init but
+ * SKIPS everything its parent menus do on the way there — the nav handlers'
+ * side effects (e.g. Quick Race stamps game_type=0 + ConfigureGameTypeFlags,
+ * td5_fe_menu.c:1066), inherited cursor visibility, flow context, return
+ * screens. So a screen opened via --StartScreen=N historically displayed/
+ * behaved differently from one navigated to by hand, and each difference got
+ * a bespoke per-screen patch.
+ *
+ * The walker fixes the class: it NAVIGATES for real. Boot lands on MAIN_MENU
+ * (the selftest-blessed root), then for each route step it waits for the
+ * screen to become interactive, moves the keyboard focus onto the step's
+ * button (td5_frontend_harness_select) and injects one ENTER through the
+ * platform layer — the confirm fires through the genuine frontend_poll_input
+ * path, handler side effects, sounds and all. Fallbacks: any step that times
+ * out or can't find its button degrades to the legacy direct jump (WARN in
+ * frontend.log). Screens with no click route (boot/net-session/post-race)
+ * and the TD5RE_INJECT_POSTRACE / TD5RE_MP_SIMUL_PREVIEW preview harnesses
+ * always jump direct; --StartScreenDirect=1 restores the old behaviour
+ * wholesale. Button indices come from the screens' dispatch switches
+ * (td5_fe_menu.c Screen_MainMenu / Screen_RaceTypeCategory / Screen_OptionsHub,
+ * td5_fe_net.c connection browser, td5_fe_devscreens.c changelog).
+ * ======================================================================== */
+typedef struct { uint8_t at_screen; int8_t btn; } SSW_NavStep; /* btn -1 = plain ENTER */
+
+/* Main menu buttons: 0=Race Menu 1=Quick Race 2=Two Player 3=Net Play
+ * 4=Options 5=Hi-Score 6=Exit 7=Changelog (td5_fe_menu.c:1051). */
+static const SSW_NavStep k_ssw_race_type[]  = { { TD5_SCREEN_MAIN_MENU, 0 } };
+static const SSW_NavStep k_ssw_quick_race[] = { { TD5_SCREEN_MAIN_MENU, 1 } };
+static const SSW_NavStep k_ssw_browser[]    = { { TD5_SCREEN_MAIN_MENU, 3 } };
+static const SSW_NavStep k_ssw_optshub[]    = { { TD5_SCREEN_MAIN_MENU, 4 } };
+static const SSW_NavStep k_ssw_hiscore[]    = { { TD5_SCREEN_MAIN_MENU, 5 } };
+static const SSW_NavStep k_ssw_mp_lobby[]   = { { TD5_SCREEN_MAIN_MENU, 2 } };
+static const SSW_NavStep k_ssw_changelog[]  = { { TD5_SCREEN_MAIN_MENU, 7 } };
+/* Options hub: 0=Game 1=Control 2=Sound 3=Display 4=TwoPlayer (fe_menu:1573). */
+static const SSW_NavStep k_ssw_game_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                { TD5_SCREEN_OPTIONS_HUB, 0 } };
+static const SSW_NavStep k_ssw_ctrl_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                { TD5_SCREEN_OPTIONS_HUB, 1 } };
+static const SSW_NavStep k_ssw_sound_opts[] = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                { TD5_SCREEN_OPTIONS_HUB, 2 } };
+static const SSW_NavStep k_ssw_disp_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                { TD5_SCREEN_OPTIONS_HUB, 3 } };
+static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                { TD5_SCREEN_OPTIONS_HUB, 4 } };
+/* Race type menu: 0=Single Race (→ car selection with game_type=0). */
+static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
+                                                { TD5_SCREEN_RACE_TYPE_MENU, 0 } };
+/* Connection browser: 0=LAN GAME 1=DIRECT IP (td5_fe_net.c:624). */
+static const SSW_NavStep k_ssw_lan_menu[]   = { { TD5_SCREEN_MAIN_MENU, 3 },
+                                                { TD5_SCREEN_CONNECTION_BROWSER, 0 } };
+static const SSW_NavStep k_ssw_direct_ip[]  = { { TD5_SCREEN_MAIN_MENU, 3 },
+                                                { TD5_SCREEN_CONNECTION_BROWSER, 1 } };
+/* Changelog screen: 0=PENDING TO TEST (td5_fe_devscreens.c:172). */
+static const SSW_NavStep k_ssw_pending[]    = { { TD5_SCREEN_MAIN_MENU, 7 },
+                                                { TD5_SCREEN_CHANGELOG, 0 } };
+
+#define SSW_ROUTE(arr) do { *out_len = (int)(sizeof(arr)/sizeof(arr[0])); return arr; } while (0)
+static const SSW_NavStep *startscreen_route(int target, int *out_len)
+{
+    switch (target) {
+    case TD5_SCREEN_RACE_TYPE_MENU:     SSW_ROUTE(k_ssw_race_type);
+    case TD5_SCREEN_QUICK_RACE:         SSW_ROUTE(k_ssw_quick_race);
+    case TD5_SCREEN_CONNECTION_BROWSER: SSW_ROUTE(k_ssw_browser);
+    case TD5_SCREEN_OPTIONS_HUB:        SSW_ROUTE(k_ssw_optshub);
+    case TD5_SCREEN_GAME_OPTIONS:       SSW_ROUTE(k_ssw_game_opts);
+    case TD5_SCREEN_CONTROL_OPTIONS:    SSW_ROUTE(k_ssw_ctrl_opts);
+    case TD5_SCREEN_SOUND_OPTIONS:      SSW_ROUTE(k_ssw_sound_opts);
+    case TD5_SCREEN_DISPLAY_OPTIONS:    SSW_ROUTE(k_ssw_disp_opts);
+    case TD5_SCREEN_TWO_PLAYER_OPTIONS: SSW_ROUTE(k_ssw_2p_opts);
+    case TD5_SCREEN_CAR_SELECTION:      SSW_ROUTE(k_ssw_car_sel);
+    case TD5_SCREEN_HIGH_SCORE:         SSW_ROUTE(k_ssw_hiscore);
+    case TD5_SCREEN_MP_LOBBY:           SSW_ROUTE(k_ssw_mp_lobby);
+    case TD5_SCREEN_LAN_MENU:           SSW_ROUTE(k_ssw_lan_menu);
+    case TD5_SCREEN_DIRECT_CONNECT:     SSW_ROUTE(k_ssw_direct_ip);
+    case TD5_SCREEN_CHANGELOG:          SSW_ROUTE(k_ssw_changelog);
+    case TD5_SCREEN_PENDING_TEST:       SSW_ROUTE(k_ssw_pending);
+    default: *out_len = 0; return NULL;   /* no route — direct jump */
+    }
+}
+#undef SSW_ROUTE
+
+static struct {
+    int active;
+    const SSW_NavStep *route;
+    int len, pos;
+    int target;
+    int frames;          /* frames since walk start */
+    int step_deadline;   /* frames value at which the current wait times out */
+    int key_release_at;  /* frames value to release the injected ENTER (0 = none) */
+    int clicked_wait;    /* clicked the current step; waiting to leave its screen */
+    int click_frame;
+    int settle;          /* frames the screen has been interactive before we click */
+    int retries;
+} s_ssw;
+
+static void startscreen_walk_finish(void)
+{
+    if (s_ssw.key_release_at) td5_plat_input_inject_key(0x1C, 0);
+    td5_frontend_harness_force_input(0);
+    s_ssw.active = 0;
+}
+
+static void startscreen_walk_begin(int target, const SSW_NavStep *route, int len)
+{
+    memset(&s_ssw, 0, sizeof(s_ssw));
+    s_ssw.active = 1;
+    s_ssw.route  = route;
+    s_ssw.len    = len;
+    s_ssw.target = target;
+    s_ssw.step_deadline = 300;
+    td5_frontend_harness_force_input(1);
+    td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+    TD5_LOG_I(LOG_TAG, "StartScreen=%d: nav-walking %d step(s) from MAIN_MENU "
+              "(StartScreenDirect=1 for the legacy direct jump)", target, len);
+}
+
+static void startscreen_walk_tick(void)
+{
+    TD5_ScreenIndex cur = td5_frontend_get_screen();
+    s_ssw.frames++;
+
+    if (s_ssw.key_release_at && s_ssw.frames >= s_ssw.key_release_at) {
+        td5_plat_input_inject_key(0x1C, 0);
+        s_ssw.key_release_at = 0;
+    }
+
+    if ((int)cur == s_ssw.target) {
+        TD5_LOG_I(LOG_TAG, "StartScreen walk: reached screen %d via real "
+                  "navigation in %d frames", s_ssw.target, s_ssw.frames);
+        startscreen_walk_finish();
+        return;
+    }
+
+    if (s_ssw.frames > s_ssw.step_deadline) {
+        TD5_LOG_W(LOG_TAG, "StartScreen walk: stalled at screen %d (step %d/%d) "
+                  "— falling back to direct jump to %d",
+                  (int)cur, s_ssw.pos, s_ssw.len, s_ssw.target);
+        startscreen_walk_finish();
+        td5_frontend_set_screen((TD5_ScreenIndex)s_ssw.target);
+        return;
+    }
+
+    if (s_ssw.pos >= s_ssw.len) return;   /* all clicked; waiting for target */
+
+    {
+        const SSW_NavStep *st = &s_ssw.route[s_ssw.pos];
+        if ((int)cur == (int)st->at_screen) {
+            if (s_ssw.clicked_wait) {
+                /* Still on the step's screen after the click — either the
+                 * slide-out is playing (fine) or the confirm edge was lost
+                 * (e.g. it landed on a stabilize state). Retry twice. */
+                if (s_ssw.frames - s_ssw.click_frame > 120 && s_ssw.retries < 2) {
+                    s_ssw.retries++;
+                    s_ssw.clicked_wait = 0;
+                    s_ssw.settle = 0;
+                    TD5_LOG_W(LOG_TAG, "StartScreen walk: confirm lost on step "
+                              "%d, retry %d", s_ssw.pos, s_ssw.retries);
+                }
+            }
+            if (!s_ssw.clicked_wait && td5_frontend_harness_ready()) {
+                /* Give the screen a few frames past anim-complete: several
+                 * screens run 1-2 stabilize states before reading input, and
+                 * an ENTER edge that lands there is consumed unseen. */
+                if (s_ssw.settle < 6) { s_ssw.settle++; return; }
+                if (st->btn >= 0 && !td5_frontend_harness_select(st->btn)) {
+                    TD5_LOG_W(LOG_TAG, "StartScreen walk: button %d missing on "
+                              "screen %d — direct jump to %d",
+                              st->btn, (int)cur, s_ssw.target);
+                    startscreen_walk_finish();
+                    td5_frontend_set_screen((TD5_ScreenIndex)s_ssw.target);
+                    return;
+                }
+                td5_plat_input_inject_key(0x1C, 1);
+                s_ssw.key_release_at = s_ssw.frames + 3;
+                s_ssw.clicked_wait   = 1;
+                s_ssw.click_frame    = s_ssw.frames;
+                TD5_LOG_I(LOG_TAG, "StartScreen walk: step %d/%d — clicking "
+                          "button %d on screen %d", s_ssw.pos + 1, s_ssw.len,
+                          st->btn, (int)cur);
+            }
+        } else if (s_ssw.clicked_wait) {
+            /* Left the step's screen — the click landed. Next step. */
+            s_ssw.pos++;
+            s_ssw.clicked_wait  = 0;
+            s_ssw.settle        = 0;
+            s_ssw.retries       = 0;
+            s_ssw.step_deadline = s_ssw.frames + 300;
+        }
+        /* else: transition frames between screens — the deadline guards. */
+    }
+}
+
 int td5_game_tick(void) {
+    /* Scripted-input harness clock ([Trace] InputScript) — one tick per
+     * rendered frame across every game state; inert when no script loaded. */
+    td5_inputscript_frame_tick();
+
     /* Self-test director (dev builds; inert unless [SelfTest] Enabled=1).
      * Runs before the state switch so it can observe MENU/RACE transitions
      * and re-arm auto_race between scripted scenarios. */
@@ -1103,12 +1303,20 @@ int td5_game_tick(void) {
             g_td5.ini.auto_race = 0;  /* one-shot: don't re-trigger after race ends */
         }
 
-        /* StartScreen: jump to a specific screen on first frontend entry.
+        /* StartScreen: go to a specific screen on first frontend entry.
          * Fires once after resources are ready; ignored when AutoRace consumed
-         * the boot slot above.  -1 = normal flow. */
+         * the boot slot above.  -1 = normal flow.
+         * [STARTSCREEN WALK 2026-07-03] Default path now NAVIGATES to the
+         * target through its real parent-menu chain (see the walker above) so
+         * the screen displays/behaves exactly as if reached by hand. Direct
+         * jump remains for: StartScreenDirect=1, screens with no click route,
+         * and the preview harnesses whose fabricated context a walk would
+         * clobber. */
         if (g_td5.ini.start_screen >= 0 && g_td5.ini.start_screen < TD5_SCREEN_COUNT) {
-            TD5_LOG_I(LOG_TAG, "StartScreen=%d: jumping to screen %d",
-                      g_td5.ini.start_screen, g_td5.ini.start_screen);
+            int ss_target = g_td5.ini.start_screen;
+            int ss_direct = g_td5.ini.start_screen_direct ? 1 : 0;
+            TD5_LOG_I(LOG_TAG, "StartScreen=%d: going to screen %d",
+                      ss_target, ss_target);
             /* Natural flow runs init_resources via Screen_LocalizationInit.
              * StartScreen bypasses that; load resources directly so fonts,
              * the white fallback page, and the bg gallery are present on
@@ -1121,30 +1329,49 @@ int td5_game_tick(void) {
              * race so the screen renders real data instead of all-zero columns.
              * Must run BEFORE the screen's case-0 (next display-loop tick) reads
              * the result statics. See td5_game_inject_demo_results. */
-            if (g_td5.ini.start_screen >= TD5_SCREEN_HIGH_SCORE &&
-                g_td5.ini.start_screen <= TD5_SCREEN_CUP_WON) {
+            if (ss_target >= TD5_SCREEN_HIGH_SCORE &&
+                ss_target <= TD5_SCREEN_CUP_WON) {
                 const char *inj = getenv("TD5RE_INJECT_POSTRACE");
                 if (inj && inj[0] && inj[0] != '0') {
                     td5_game_inject_demo_results();
+                    ss_direct = 1;   /* fabricated context — don't re-walk it */
                     TD5_LOG_I(LOG_TAG, "StartScreen=%d: injected demo post-race "
-                              "results (TD5RE_INJECT_POSTRACE)", g_td5.ini.start_screen);
+                              "results (TD5RE_INJECT_POSTRACE)", ss_target);
                 }
             }
             /* [layout preview harness 2026-06-29] TD5RE_MP_SIMUL_PREVIEW=N with
              * StartScreen=20 (CAR_SELECTION) jumps straight to the N-player
              * simultaneous car-select grid so the split-screen pane layout can be
              * screenshotted without N controllers. See frontend_mp_simul_preview_setup. */
-            if (g_td5.ini.start_screen == TD5_SCREEN_CAR_SELECTION) {
+            if (ss_target == TD5_SCREEN_CAR_SELECTION) {
                 const char *mpv = getenv("TD5RE_MP_SIMUL_PREVIEW");
                 if (mpv && mpv[0]) {
                     extern void frontend_mp_simul_preview_setup(int);
                     frontend_mp_simul_preview_setup(atoi(mpv));
+                    ss_direct = 1;   /* fabricated MP grid — don't re-walk it */
                 }
             }
 #endif
-            td5_frontend_set_screen((TD5_ScreenIndex)g_td5.ini.start_screen);
+            {
+                int ss_route_len = 0;
+                const SSW_NavStep *ss_route =
+                    startscreen_route(ss_target, &ss_route_len);
+                if (ss_direct || !ss_route) {
+                    td5_frontend_set_screen((TD5_ScreenIndex)ss_target);
+                    TD5_LOG_I(LOG_TAG, "StartScreen=%d: direct jump (%s)",
+                              ss_target,
+                              g_td5.ini.start_screen_direct ? "StartScreenDirect=1"
+                              : (ss_direct ? "preview harness" : "no nav route"));
+                } else {
+                    startscreen_walk_begin(ss_target, ss_route, ss_route_len);
+                }
+            }
             g_td5.ini.start_screen = -1;  /* one-shot */
         }
+
+        /* StartScreen nav walker: one step per frontend frame while active. */
+        if (s_ssw.active)
+            startscreen_walk_tick();
 
         /* Run one frame of the frontend display loop */
         td5_frontend_display_loop();

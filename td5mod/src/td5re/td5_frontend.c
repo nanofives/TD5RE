@@ -3341,12 +3341,42 @@ void frontend_init_display_mode_state(void) {
 
 /* --- Input Polling --- */
 
+/* [INPUTSCRIPT 2026-07-03] While the scripted-input harness or the StartScreen
+ * nav walker is driving, treat the window as active so the poll doesn't flush
+ * injected nav events / ignore injected keys when a test window runs in the
+ * background. Acquire/release counted so the two users can't stomp each other.
+ * Zero in normal play — the focus gate is unchanged for humans. */
+static int s_harness_input_force = 0;
+void td5_frontend_harness_force_input(int on) {
+    s_harness_input_force += on ? 1 : -1;
+    if (s_harness_input_force < 0) s_harness_input_force = 0;
+}
+
 static int frontend_is_window_active(void) {
     HWND hwnd = (HWND)(DWORD_PTR)Backend_GetDisplayWindow();
     HWND foreground = GetForegroundWindow();
 
+    if (s_harness_input_force > 0) return 1;
     if (!hwnd) return 1;
     return (foreground == hwnd) ? 1 : 0;
+}
+
+/* [STARTSCREEN WALK 2026-07-03] Harness hooks for the StartScreen nav walker
+ * (td5_game.c): report when the current screen is interactive, and move the
+ * keyboard focus to a specific button so an injected ENTER confirms it through
+ * the REAL frontend_poll_input path (side effects, sounds and all). */
+int td5_frontend_harness_ready(void) {
+    if (!s_anim_complete) return 0;
+    for (int i = 0; i < FE_MAX_BUTTONS; i++)
+        if (s_buttons[i].active && !s_buttons[i].disabled) return 1;
+    return 0;
+}
+
+int td5_frontend_harness_select(int index) {
+    if (index < 0 || index >= FE_MAX_BUTTONS) return 0;
+    if (!s_buttons[index].active || s_buttons[index].disabled) return 0;
+    s_selected_button = index;
+    return 1;
 }
 
  void frontend_post_quit(void);   /* defined later; used by the credits-skip path */

@@ -38,7 +38,9 @@ or CLI: `--DefaultOpponents=N` (CLI > INI > default).
 - **Isolate one AI:** `--DefaultOpponents=1` → player + a single AI. Cleanest way
   to watch/trace one opponent's routing, rubber-band, or collision in isolation.
 - **Minimal repro:** fewer actors = simpler state when bisecting a crash, a
-  physics blow-up, or a standings bug. Pairs with `--AutoThrottle=1`.
+  physics blow-up, or a standings bug. Pairs with `--InputScript=<file>`
+  (scripted controls — see below) or, for tick-exact /diff-race parity
+  captures only, the retired `--AutoThrottle=1`.
 - **Spawn-path coverage:** exercises the reduced-field disable/spawn paths that
   the full grid never hits (a Ghidra-correct change can look "no-op" at 6 cars).
 - **Player-alone-ish:** `--DefaultOpponents=0` → player races alone. (Distinct
@@ -47,9 +49,17 @@ or CLI: `--DefaultOpponents=N` (CLI > INI > default).
 ### Example
 
 ```
-td5re.exe --AutoRace=1 --DefaultTrack=0 --DefaultOpponents=2 --AutoThrottle=1
+td5re.exe --AutoRace=1 --DefaultTrack=0 --DefaultOpponents=2 --InputScript=td5mod/src/td5re/inputscripts/full_controls_demo.txt
 ```
-→ 3-car Moscow race (player + 2 AI), throttle held.
+→ 3-car Moscow race (player + 2 AI) driven by the scripted-input harness
+(throttle, brake, handbrake, horn, gears, camera, pause — see
+`td5_inputscript.h` for the file format; examples in `inputscripts/`).
+
+**AutoThrottle is retired for functional testing** (2026-07-03): it can only
+hold full gas on slot 0. Use `--InputScript=<file>` to exercise real control
+sequences. `--AutoThrottle=1` remains ONLY for /diff-race parity captures —
+its instant-0x100 throttle write is mirrored bit-for-bit by the original-side
+Frida harness, so its semantics must never change.
 
 ### Verification log lines
 

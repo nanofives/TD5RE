@@ -62,6 +62,8 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "InputScript: scripted drive (gas/brake/horn/keys) works",
+    "StartScreen: jumped-to menus look same as navigated",
     "Lighting v2: authored zone colours show (dusk/tunnel tint)",
     "Lighting v2: headlights don't shine through walls (N.L)",
     "Lighting v2: Mode=0 looks identical to the old build (A/B)",

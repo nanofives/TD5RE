@@ -533,9 +533,19 @@ typedef struct TD5_GlobalState {
          * tools/frida_csv/terrain_probe_port.csv. Inert when 0.
          * [TRACE 2026-05-25 terrain-pitch-roll-zeroed OVERSIGHT row] */
         int  trace_terrain_cam_probe;
-        int  auto_throttle;         /* 1 = force full throttle for slot 0 */
+        int  auto_throttle;         /* 1 = force full throttle for slot 0.
+                                     * RETIRED for functional testing (2026-07-03)
+                                     * in favour of [Trace] InputScript; kept for
+                                     * /diff-race parity captures only (the
+                                     * original-side Frida harness mirrors this
+                                     * exact instant-0x100 throttle write). */
         int  auto_throttle_value;   /* throttle magnitude under AutoThrottle (0=full 0x100) */
         int  auto_throttle_stop_span; /* AutoThrottle brakes to a stop at this span (0=off) */
+        /* [Trace] InputScript=path — scripted-input harness (td5_inputscript.c).
+         * Drives races AND menus from a plain-text command file (throttle,
+         * brake, handbrake, horn, gears, camera, steering taps, raw keys).
+         * Empty = off. Clamped empty in release builds. */
+        char input_script[260];
         float trace_fast_forward;   /* Speed multiplier during trace capture.
                                      * 1.0 = real-time (default), 2.0 = 2x,
                                      * 0.5 = half-speed, N = Nx. Implemented by
@@ -574,6 +584,14 @@ typedef struct TD5_GlobalState {
          *  24=RaceResults      25=NameEntry       26=CupFailed      27=CupWon
          *  28=StartupInit      29=SessionLocked */
         int  start_screen;         /* -1 = normal, 0-29 = jump to screen */
+        /* [STARTSCREEN WALK 2026-07-03] StartScreen now NAVIGATES to the target
+         * through its real parent-menu chain by clicking the actual buttons
+         * (so handler side effects — game-type flags, cursor, flow context —
+         * match a human run). StartScreenDirect=1 restores the legacy direct
+         * jump; screens with no click route (boot/net/post-race) always jump
+         * direct, as do the TD5RE_INJECT_POSTRACE / TD5RE_MP_SIMUL_PREVIEW
+         * preview harnesses (their fabricated context must not be re-walked). */
+        int  start_screen_direct;  /* 1 = legacy direct set_screen jump */
         /* Shift every actor's spawn span by this many units along the track
          * ring (mirrors the Frida InitializeActorTrackPose hook in
          * re/tools/quickrace/td5_quickrace_hook.js). Read from td5re.ini
