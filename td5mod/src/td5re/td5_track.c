@@ -7665,8 +7665,15 @@ void td5_track_register_lamp_lights(void)
                             if (qv[v].pos_z > qxz) qxz = qv[v].pos_z;
                         }
                         float ext_x = qxx - qnx, ext_y = qxy - qny, ext_z = qxz - qnz;
-                        if (ext_x > 900.0f || ext_y > 900.0f || ext_z > 900.0f) continue;
-                        if (ext_x + ext_z < 60.0f) continue;         /* degenerate */
+                        /* SHAPE filter: lamp halos are SQUAT and WIDE (e.g.
+                         * Moscow page 451: 250 tall x 555..766 wide);
+                         * pedestrian/sign sprites are TALL and NARROW (680 x
+                         * 297) and sit in the SAME height band, so elevation
+                         * alone cannot separate them. */
+                        float ext_w = (ext_x > ext_z) ? ext_x : ext_z;
+                        if (ext_w < 250.0f || ext_w > 900.0f) continue;
+                        if (ext_y < 80.0f || ext_y > 500.0f) continue;
+                        if (ext_y > 0.7f * ext_w) continue;   /* standing sprite */
 
                         float qwx = mesh->origin_x * (1.0f / 256.0f) + qax * 0.25f;
                         float qwy = mesh->origin_y * (1.0f / 256.0f) + qay * 0.25f;
@@ -7680,22 +7687,26 @@ void td5_track_register_lamp_lights(void)
                             float d2 = dx2 * dx2 + dz2 * dz2;
                             if (d2 < best_d2) { best_d2 = d2; road_y = s_span_pts[s].y; }
                         }
-                        if (span_n <= 0 || best_d2 > 4000.0f * 4000.0f)
-                            continue;                     /* not a roadside fixture */
                         float elev = road_y - qwy;        /* height above road (up=-Y) */
-                        if (elev < 600.0f || elev > 3500.0f)
-                            continue;                     /* pedestrians/signs vs flags */
-
                         if (s_reg_dbg) {
                             static int s_cand = 0;
                             if (s_cand < 30) {
                                 s_cand++;
                                 TD5_LOG_I("track",
-                                    "lamp cand: dl=%d sub=%u cmd=%d page=%d q=%d ext=(%.0f,%.0f,%.0f) elev=%.0f droad=%.0f",
+                                    "lamp cand: dl=%d sub=%u cmd=%d page=%d q=%d ext=(%.0f,%.0f,%.0f) elev=%.0f droad=%.0f road_y=%.0f qwy=%.0f",
                                     dl, j, ci, (int)cmd->texture_page_id, q,
-                                    ext_x, ext_y, ext_z, elev, (double)sqrtf(best_d2));
+                                    ext_x, ext_y, ext_z, elev, (double)sqrtf(best_d2),
+                                    road_y, qwy);
                             }
                         }
+                        if (span_n <= 0 || best_d2 > 4000.0f * 4000.0f)
+                            continue;                     /* not a roadside fixture */
+                        /* Height band around the road: span centers float a
+                         * few hundred units above the surface, and Moscow's
+                         * lamp arms hang ~330 above it — accept a generous
+                         * window, the shape filter above does the real work. */
+                        if (elev < -800.0f || elev > 2500.0f)
+                            continue;
                         td5_light_lamps_add(qwx, qwy, qwz);
                         registered_any = 1;
                     }
