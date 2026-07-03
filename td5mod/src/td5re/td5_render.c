@@ -49,6 +49,8 @@
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
+#include "td5_light2.h"   /* [LIGHT2] lighting rework mode knob */
+#include "td5_material.h" /* [LIGHT2] texture-page -> material id */
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 #include "td5re.h"
 
@@ -148,9 +150,16 @@ static int rs_vtx_workspace_ensure(int count)
     while (cap < count) cap *= 2;
     TD5_MeshVertex *nw = (TD5_MeshVertex *)malloc((size_t)cap * sizeof(TD5_MeshVertex));
     if (!nw) return 0;
+    /* [LIGHT2] Parallel packed-normal array (same indexing as vtx_work). Kept
+     * in lockstep with the workspace so a grow can never desync the two. An
+     * alloc failure here just disables the G-buffer feed for this pane. */
+    uint32_t *np = (uint32_t *)malloc((size_t)cap * sizeof(uint32_t));
     free(g_rs->vtx_work);
+    free(g_rs->vtx_pack);
     g_rs->vtx_work     = nw;
     g_rs->vtx_work_cap = cap;
+    g_rs->vtx_pack     = np;                 /* NULL on failure = feed off */
+    g_rs->vtx_pack_cap = np ? cap : 0;
     return 1;
 }
 
@@ -1190,7 +1199,23 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     /* Input polygon from view-space vertices */
     float in_vx[8], in_vy[8], in_vz[8], in_u[8], in_v[8];
     uint32_t in_color[8];
+    uint32_t in_pack[8];
     int in_count = vert_count;
+
+    /* [LIGHT2] Packed world normals for this polygon's vertices. The mesh
+     * walker hands us pointers INTO the pane workspace (rebased upstream), so
+     * the workspace index recovers each vertex's slot in the parallel
+     * vtx_pack array filled by compute_vertex_lighting. Pointers outside the
+     * workspace (ad-hoc emitters, depth-bucket prim copies, alloc-failure
+     * fallback) get 0 = "no normal" and stay emissive. matid joins below. */
+    uint32_t poly_matid = 0;
+    int have_pack = 0;
+    if (td5_light2_active() && g_rs->vtx_pack &&
+        vert_data >= g_rs->vtx_work &&
+        vert_data + vert_count <= g_rs->vtx_work + g_rs->vtx_pack_cap) {
+        have_pack = 1;
+        poly_matid = (uint32_t)td5_material_id_for_page(tex_page) << 24;
+    }
 
     for (int i = 0; i < vert_count; i++) {
         in_vx[i]    = vert_data[i].view_x;
@@ -1199,11 +1224,13 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         in_u[i]     = vert_data[i].tex_u;
         in_v[i]     = vert_data[i].tex_v;
         in_color[i] = vert_data[i].lighting;
+        in_pack[i]  = have_pack ? g_rs->vtx_pack[(vert_data - g_rs->vtx_work) + i] : 0;
     }
 
     /* Near-plane clip */
     float out_vx[8], out_vy[8], out_vz[8], out_u[8], out_v[8];
     uint32_t out_color[8];
+    uint32_t out_pack[8];
     int out_count = 0;
 
     for (int i = 0; i < in_count; i++) {
@@ -1218,6 +1245,7 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
             out_u[out_count]     = in_u[i];
             out_v[out_count]     = in_v[i];
             out_color[out_count] = in_color[i];
+            out_pack[out_count]  = in_pack[i];
             out_count++;
         }
 
@@ -1244,6 +1272,9 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
                 if (a < 0) a = 0; else if (a > 255) a = 255;
                 out_color[out_count] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
             }
+            /* [LIGHT2] Clip-edge vertex: nearest-vertex normal (normals vary
+             * little across one edge; a per-channel lerp isn't worth it). */
+            out_pack[out_count] = in_pack[i];
             out_count++;
         }
 
@@ -1281,7 +1312,10 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         clipped[i].depth_z  = (dvz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
         clipped[i].rhw      = inv_z;
         clipped[i].diffuse  = out_color[i];
-        clipped[i].specular = 0;
+        /* [LIGHT2] COLOR1 = material id (bits 31..24) + packed world normal
+         * (bits 23..0). 0 = no G-buffer data (classic / never-lit vertices) —
+         * byte-identical to the old constant 0 when Mode=0. */
+        clipped[i].specular = out_pack[i] ? (poly_matid | out_pack[i]) : 0;
         clipped[i].tex_u    = out_u[i];
         clipped[i].tex_v    = out_v[i];
     }
@@ -1983,6 +2017,12 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
         memcpy(verts, src, (size_t)count * sizeof(TD5_MeshVertex));
         g_rs->vtx_src_base = (const uint8_t *)src;
         g_rs->vtx_src_end  = (const uint8_t *)(src + count);
+        /* [LIGHT2] Invalidate the packed-normal slots for this mesh — a mesh
+         * that never reaches the lighting pass (sky, billboards, baked-only
+         * paths) must read as "no normal" (0 = emissive sentinel), never as a
+         * stale normal from the previous mesh in the workspace. */
+        if (g_rs->vtx_pack && td5_light2_active())
+            memset(g_rs->vtx_pack, 0, (size_t)count * sizeof(uint32_t));
     } else {
         verts = src;   /* legacy in-place fallback (serial-only correct) */
         g_rs->vtx_src_base = g_rs->vtx_src_end = NULL;
@@ -2196,12 +2236,29 @@ static void tl_set_contrib(int slot, const int16_t dir[3], int r, int g, int b)
     s_tl_contrib[slot].vec_world[0] = (float)dir[0] * intensity * (1.0f / 1024.0f);
     s_tl_contrib[slot].vec_world[1] = (float)dir[1] * intensity * (1.0f / 1024.0f);
     s_tl_contrib[slot].vec_world[2] = (float)dir[2] * intensity * (1.0f / 1024.0f);
+    /* [LIGHT2] Keep the per-channel ratios the classic path averages away.
+     * chroma = channel / gray-average, so gray zones give exactly (1,1,1) and
+     * the Mode>=1 colored path reproduces the classic result bit-for-bit on
+     * uncolored data. The blend paths pass already-attenuated per-channel
+     * weights here, so zone-transition blending colors correctly for free. */
+    if (intensity > 0.0f) {
+        s_tl_chroma[slot][0] = (float)r / intensity;
+        s_tl_chroma[slot][1] = (float)g / intensity;
+        s_tl_chroma[slot][2] = (float)b / intensity;
+    } else {
+        s_tl_chroma[slot][0] = s_tl_chroma[slot][1] = s_tl_chroma[slot][2] = 1.0f;
+    }
 }
 
 /* ComputeAverageDepth @ 0x0043E7B0: scalar ambient = (R+G+B)/3 byte. */
 static void tl_set_depth(int r, int g, int b)
 {
     s_tl_ambient = (r + g + b) / 3;
+    /* [LIGHT2] Raw authored ambient RGB (classic path only ever sees the
+     * average above). */
+    s_tl_amb_rgb[0] = (float)r;
+    s_tl_amb_rgb[1] = (float)g;
+    s_tl_amb_rgb[2] = (float)b;
 }
 
 /* UpdateActiveTrackLightDirections @ 0x0042CE90:
@@ -2278,8 +2335,11 @@ static void tl_apply_fallback(void)
         s_tl_contrib[s].vec_world[0] = 0.0f;
         s_tl_contrib[s].vec_world[1] = 0.0f;
         s_tl_contrib[s].vec_world[2] = 0.0f;
+        /* [LIGHT2] neutral chroma with the slot disabled */
+        s_tl_chroma[s][0] = s_tl_chroma[s][1] = s_tl_chroma[s][2] = 1.0f;
     }
     s_tl_ambient = TD5_LIGHTING_MIN;
+    s_tl_amb_rgb[0] = s_tl_amb_rgb[1] = s_tl_amb_rgb[2] = (float)TD5_LIGHTING_MIN;
 }
 
 /* Bounds-checked accessor for the per-track-zone array. */

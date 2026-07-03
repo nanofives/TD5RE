@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 2" },
+    { CL_ITEM,    "NEW lighting engine (phase 1): tracks now show the" },
+    { CL_ITEM,    "  colour lighting their artists authored in 1998" },
+    { CL_ITEM,    "  (sunsets, tunnels, dusk zones were always grey)" },
+    { CL_ITEM,    "Headlights now respect surface angle and no longer" },
+    { CL_ITEM,    "  shine through walls ([Lighting] Mode=0 = old look)" },
     { CL_ITEM,    "NEW Game Options: PLAYER NAME - your name shows in" },
     { CL_ITEM,    "  race results and standings, and is prefilled in" },
     { CL_ITEM,    "  the high-score name entry (still editable there)" },

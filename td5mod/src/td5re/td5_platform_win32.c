@@ -6502,6 +6502,13 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
     Backend_ApplyLightPass(&cb);
 }
 
+void td5_plat_render_set_gbuffer(int on)
+{
+    /* Serial/immediate path only (same constraint as the light pass). */
+    if (td5_rcmd_recording()) return;
+    Backend_SetGBufferEnabled(on);
+}
+
 int td5_plat_render_upload_texture(int page_index, const void *pixels,
                                     int width, int height, int format)
 {

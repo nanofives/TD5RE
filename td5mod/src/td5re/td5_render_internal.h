@@ -303,6 +303,13 @@ typedef struct RenderScratch {
     float ambient_intensity;
     TL_Contribution tl_contrib[3];
     int   tl_ambient;
+    /* [LIGHT2] Authored per-channel zone color the classic path averages to
+     * gray: tl_chroma[slot] = weight_rgb / gray-average (all-zero = "not yet
+     * captured", treated as neutral); tl_amb_rgb = raw ambient RGB (all-zero =
+     * fall back to the gray ambient_intensity). Written by tl_set_contrib /
+     * tl_set_depth, consumed by the Mode>=1 colored vertex lighting. */
+    float tl_chroma[3][3];
+    float tl_amb_rgb[3];
     /* [DYNAMIC LIGHTS] model->world basis for the mesh whose vertex lighting is
      * about to be computed: origin (world units) + body->world rotation (9
      * floats, row-major). has_rot=0 means identity rotation (track geometry,
@@ -362,6 +369,13 @@ typedef struct RenderScratch {
      * reused — are copied into prim_copy at queue time (entry idx*4 slots). */
     TD5_MeshVertex *vtx_work;        /* malloc'd, grown on demand            */
     int             vtx_work_cap;
+    /* [LIGHT2] Parallel per-workspace-vertex packed WORLD normal (biased
+     * 8:8:8 in bits 23..0; 0 = "no normal"). Cleared per mesh in
+     * transform_mesh_vertices, filled by compute_vertex_lighting, consumed by
+     * clip_and_submit_polygon which adds the material id in bits 31..24 and
+     * emits the result as the D3D vertex's COLOR1 (G-buffer feed). */
+    uint32_t       *vtx_pack;
+    int             vtx_pack_cap;
     const uint8_t  *vtx_src_base;    /* blob range of the current mesh       */
     const uint8_t  *vtx_src_end;
     int             tex_page_override; /* -1 = none; reflection overlay page */
@@ -396,6 +410,8 @@ extern __thread RenderScratch *g_rs;   /* defined in td5_render.c (default -> g_
 #define s_ambient_intensity         (g_rs->ambient_intensity)
 #define s_tl_contrib                (g_rs->tl_contrib)
 #define s_tl_ambient                (g_rs->tl_ambient)
+#define s_tl_chroma                 (g_rs->tl_chroma)
+#define s_tl_amb_rgb                (g_rs->tl_amb_rgb)
 #define s_light_basis_origin        (g_rs->light_basis_origin)
 #define s_light_basis_rot           (g_rs->light_basis_rot)
 #define s_light_basis_has_rot       (g_rs->light_basis_has_rot)

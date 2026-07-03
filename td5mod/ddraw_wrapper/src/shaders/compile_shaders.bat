@@ -22,6 +22,15 @@ echo   ps_modulate OK
 if errorlevel 1 (echo FAILED: ps_modulate_alpha && exit /b 1)
 echo   ps_modulate_alpha OK
 
+REM --- G-buffer MRT variants (lighting rework P0) ---
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_modulate_g_bytes.h /Vn g_ps_modulate_g ps_modulate_g.hlsl
+if errorlevel 1 (echo FAILED: ps_modulate_g && exit /b 1)
+echo   ps_modulate_g OK
+
+%FXC% %OPTS% /T ps_4_0 /E main /Fh ps_modulate_alpha_g_bytes.h /Vn g_ps_modulate_alpha_g ps_modulate_alpha_g.hlsl
+if errorlevel 1 (echo FAILED: ps_modulate_alpha_g && exit /b 1)
+echo   ps_modulate_alpha_g OK
+
 %FXC% %OPTS% /T ps_4_0 /E main /Fh ps_decal_bytes.h /Vn g_ps_decal ps_decal.hlsl
 if errorlevel 1 (echo FAILED: ps_decal && exit /b 1)
 echo   ps_decal OK

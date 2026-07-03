@@ -39,6 +39,8 @@ td5_upnp.c
 td5_camera.c
 td5_vfx.c
 td5_light.c
+td5_light2.c
+td5_material.c
 td5_arcade.c
 td5_damage.c
 td5_tutorial.c

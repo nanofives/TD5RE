@@ -29,6 +29,7 @@
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
+#include "td5_light2.h"   /* [LIGHT2] lighting rework mode knob */
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 #include "td5re.h"
 
@@ -139,6 +140,24 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
                                  (float)vp_x, (float)vp_y,
                                  depth_scale, NEAR_DEPTH_OFFSET,
                                  gpu, n);
+}
+
+/* [LIGHT2 P0] Per-frame gate for the G-buffer feed. Call once per rendered
+ * race frame BEFORE the world pass (alongside td5_light_begin_frame): enables
+ * + clears the wrapper's normal+material target when Mode>=1, so z-writing
+ * opaque draws (which carry packed world normals + material ids in COLOR1)
+ * populate it and the deferred light pass gets proper N.L. Mode 0 keeps it
+ * off — classic behavior. */
+void td5_render_lighting2_frame_begin(void)
+{
+    static int s_logged = 0;
+    int on = td5_light2_active() ? 1 : 0;
+    td5_plat_render_set_gbuffer(on);
+    if (!s_logged) {
+        s_logged = 1;
+        TD5_LOG_I(LOG_TAG, "light2: frame gate first run, mode=%d gbuffer=%d",
+                  td5_light2_mode(), on);
+    }
 }
 
 /* [AUTO LIGHTS] Verdict: is the current environment poorly lit (so headlights
@@ -330,6 +349,33 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     int dark = s_light_dark_mode;
     int floor_lum = dark ? s_dark_floor : TD5_LIGHTING_MIN;
 
+    /* [LIGHT2 P0] Mode>=1 extras: (a) pack each vertex's WORLD normal into the
+     * parallel workspace array so clip_and_submit_polygon can feed the
+     * G-buffer; (b) resurrect the authored per-channel zone color that the
+     * classic path averaged away (tl_set_contrib/tl_set_depth captured it).
+     * Mode 0 leaves pack=NULL and colored=0 — every branch below is then
+     * byte-identical to the classic path. */
+    int l2mode = td5_light2_active();
+    uint32_t *pack = (l2mode && g_rs->vtx_pack && verts == g_rs->vtx_work)
+                   ? g_rs->vtx_pack : NULL;
+    const float *nR = s_light_basis_has_rot ? &s_light_basis_rot[0] : NULL;
+    float ch[3][3], amb_rgb[3];
+    int colored = 0;
+    if (l2mode) {
+        for (int s = 0; s < 3; s++) {
+            float cr = s_tl_chroma[s][0], cg = s_tl_chroma[s][1], cb = s_tl_chroma[s][2];
+            /* all-zero = never captured (pre-first-zone frame) -> neutral */
+            if (cr == 0.0f && cg == 0.0f && cb == 0.0f) { cr = cg = cb = 1.0f; }
+            ch[s][0] = cr; ch[s][1] = cg; ch[s][2] = cb;
+            if (cr != cg || cg != cb) colored = 1;
+        }
+        float ar = s_tl_amb_rgb[0], ag = s_tl_amb_rgb[1], ab = s_tl_amb_rgb[2];
+        if (ar == 0.0f && ag == 0.0f && ab == 0.0f)
+            ar = ag = ab = s_ambient_intensity;
+        amb_rgb[0] = ar; amb_rgb[1] = ag; amb_rgb[2] = ab;
+        if (ar != ag || ag != ab) colored = 1;
+    }
+
     for (int i = 0; i < count; i++) {
         /* damage darkening factor for this vertex (1.0 = undamaged) */
         float df = 1.0f;
@@ -340,6 +386,24 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
         float nx = norms[i].nx;
         float ny = norms[i].ny;
         float nz = norms[i].nz;
+
+        /* [LIGHT2 P0] World-space normal -> packed 8:8:8 (biased) for the
+         * G-buffer feed. Rotate model->world with the mesh's body basis (rows
+         * of the row-major body->world matrix); identity for track geometry.
+         * Low bound 1 keeps the pack nonzero (0 = "no normal" sentinel). Runs
+         * for prelit (TD6 baked) vertices too — they still want N.L lights. */
+        if (pack) {
+            float wnx = nx, wny = ny, wnz = nz;
+            if (nR) {
+                wnx = nR[0] * nx + nR[1] * ny + nR[2] * nz;
+                wny = nR[3] * nx + nR[4] * ny + nR[5] * nz;
+                wnz = nR[6] * nx + nR[7] * ny + nR[8] * nz;
+            }
+            int bx = clampi((int)(wnx * 127.0f) + 128, 1, 255);
+            int by = clampi((int)(wny * 127.0f) + 128, 1, 255);
+            int bz = clampi((int)(wnz * 127.0f) + 128, 1, 255);
+            pack[i] = ((uint32_t)bx << 16) | ((uint32_t)by << 8) | (uint32_t)bz;
+        }
 
         if (prelit && (vb[i].lighting & 0xFF000000u) != 0u) {
             uint32_t c = vb[i].lighting;          /* keep the #13 baked TD6 grey... */
@@ -374,10 +438,10 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
         }
 
         /* 3-light diffuse accumulation */
-        float intensity = 0.0f;
-        intensity += nx * l0[0] + ny * l0[1] + nz * l0[2];
-        intensity += nx * l1[0] + ny * l1[1] + nz * l1[2];
-        intensity += nx * l2[0] + ny * l2[1] + nz * l2[2];
+        float dot0 = nx * l0[0] + ny * l0[1] + nz * l0[2];
+        float dot1 = nx * l1[0] + ny * l1[1] + nz * l1[2];
+        float dot2 = nx * l2[0] + ny * l2[1] + nz * l2[2];
+        float intensity = dot0 + dot1 + dot2;
 
         /* Add ambient, clamp to [0x40, 0xFF] */
         intensity += s_ambient_intensity;
@@ -385,11 +449,43 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
          * additive headlight bump is applied ON TOP (undimmed) so the lit pool
          * stands out in dark areas. Both no-ops when off => byte-identical. */
         if (dark) intensity *= s_dark_scale;
+        float bump = 0.0f;
         if (nlights)
-            intensity += light_vertex_bump(lm, nlights,
-                             verts[i].pos_x, verts[i].pos_y, verts[i].pos_z, nx, ny, nz);
+            bump = light_vertex_bump(lm, nlights,
+                       verts[i].pos_x, verts[i].pos_y, verts[i].pos_z, nx, ny, nz);
+        intensity += bump;
         int lum = (int)intensity;
         lum = clampi(lum, floor_lum, TD5_LIGHTING_MAX);
+
+        /* [LIGHT2 P0] Colored zone lighting: the same 3-dot + ambient model,
+         * evaluated per channel with the authored zone RGB (chroma ratios +
+         * raw ambient RGB). Gray zones give chroma (1,1,1) / equal ambient
+         * channels, in which case colored==0 and this path never runs — the
+         * classic result is preserved bit-for-bit on uncolored data. */
+        if (colored) {
+            float fr = dot0 * ch[0][0] + dot1 * ch[1][0] + dot2 * ch[2][0] + amb_rgb[0];
+            float fg = dot0 * ch[0][1] + dot1 * ch[1][1] + dot2 * ch[2][1] + amb_rgb[1];
+            float fb = dot0 * ch[0][2] + dot1 * ch[1][2] + dot2 * ch[2][2] + amb_rgb[2];
+            if (dark) { fr *= s_dark_scale; fg *= s_dark_scale; fb *= s_dark_scale; }
+            fr += bump; fg += bump; fb += bump;
+            int ir = clampi((int)fr, floor_lum, TD5_LIGHTING_MAX);
+            int ig = clampi((int)fg, floor_lum, TD5_LIGHTING_MAX);
+            int ib = clampi((int)fb, floor_lum, TD5_LIGHTING_MAX);
+            if (use_tint) {
+                ir = ir * tr / 255;
+                ig = ig * tg / 255;
+                ib = ib * tb / 255;
+            }
+            if (df < 0.999f) {
+                ir = (int)(ir * df);
+                ig = (int)(ig * df);
+                ib = (int)(ib * df);
+            }
+            /* alpha 0xFF bypasses the gray color LUT at flush */
+            verts[i].lighting = 0xFF000000u | ((uint32_t)ir << 16) |
+                                ((uint32_t)ig << 8) | (uint32_t)ib;
+            continue;
+        }
 
         if (use_tint) {
             /* Full ARGB = lit-luminance * tint; alpha 0xFF bypasses the color LUT. */

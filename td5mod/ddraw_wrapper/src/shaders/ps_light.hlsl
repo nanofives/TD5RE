@@ -33,6 +33,11 @@ cbuffer LightCB : register(b0)
 };
 
 Texture2D    depthTex : register(t0);
+/* [lighting rework P0] G-buffer written by the ps_*_g variants during the
+ * opaque world pass: .rgb = world normal biased 0..1, .a = material id / 255.
+ * a == 0 => no G-buffer data at this pixel (legacy no-normal fallback). Left
+ * unbound when the G-buffer is inactive — Load then returns 0 = fallback. */
+Texture2D    gbufTex  : register(t1);
 SamplerState samp     : register(s0);   /* unused (Load), kept for signature parity */
 
 struct PS_INPUT
@@ -66,6 +71,17 @@ float4 main(PS_INPUT input) : SV_TARGET
                  + vy * upCy.xyz
                  + vz * fwdDepthScale.xyz;
 
+    /* [lighting rework P0] Surface normal from the G-buffer (matid 0 = none). */
+    float4 gb = gbufTex.Load(int3(px, 0));
+    bool   hasN = (gb.a > 0.001);
+    float3 N = float3(0.0, 1.0, 0.0);
+    if (hasN)
+    {
+        N = gb.rgb * 2.0 - 1.0;
+        float nl = length(N);
+        if (nl > 0.001) N /= nl; else hasN = false;
+    }
+
     float3 accum = float3(0.0, 0.0, 0.0);
 
     [loop]
@@ -96,7 +112,18 @@ float4 main(PS_INPUT input) : SV_TARGET
             cone = cone * cone;
         }
 
-        accum += ci.rgb * (ci.w * atten * cone);
+        /* [lighting rework P0] Lambert term with a soft wrap (mirrors the CPU
+         * per-vertex bump's 0.85/0.15 split) so grazing surfaces still catch a
+         * little pool light. Pixels without G-buffer data keep the legacy
+         * orientation-blind behavior. */
+        float ndotl = 1.0;
+        if (hasN)
+        {
+            float3 Lv = toL / max(dist, 0.001);
+            ndotl = saturate(dot(N, Lv)) * 0.85 + 0.15;
+        }
+
+        accum += ci.rgb * (ci.w * atten * cone * ndotl);
     }
 
     return float4(accum, 1.0);

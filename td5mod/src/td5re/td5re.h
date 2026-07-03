@@ -283,6 +283,9 @@ typedef struct TD5_GlobalState {
         int  headlights;        /* 1 = vehicle headlights (manual toggle, used when Auto=0) */
         int  light_dark_mode;   /* 1 = dim scene so headlights illuminate dark areas (default 0) */
         int  lighting_auto;     /* 1 = auto-enable headlights in poorly-lit environments (default) */
+        int  lighting2_mode;    /* [LIGHT2] 0 = classic (byte-identical), 1 = enhance:
+                                 * authored zone RGB colors + G-buffer N.L lights
+                                 * (default 1). See LIGHTING_REWORK_PLAN.md. */
         /* Game options */
         int  laps;
         int  checkpoint_timers;

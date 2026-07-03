@@ -104,6 +104,11 @@ void td5_render_set_dark_mode(int on);
  * vp_x/vp_y = the pane's origin in render-target pixels (0,0 single-view). */
 void td5_render_apply_light_pass(int vp_x, int vp_y);
 
+/* [LIGHT2 P0] Per-frame G-buffer gate — call once per rendered race frame
+ * BEFORE the world pass (next to td5_light_begin_frame). See
+ * LIGHTING_REWORK_PLAN.md. */
+void td5_render_lighting2_frame_begin(void);
+
 /* [AUTO LIGHTS] 1 when the current environment is poorly lit (dark track zone or
  * non-clear weather) and headlights should auto-enable; 0 in bright daylight. */
 int  td5_render_env_is_dark(void);

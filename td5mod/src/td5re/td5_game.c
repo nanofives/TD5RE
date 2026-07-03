@@ -6517,6 +6517,10 @@ int td5_game_run_race_frame(void) {
      * split-screen panes). Headlights move with each car. No-op when the
      * lighting system or the headlight emitter is disabled. */
     td5_light_begin_frame();
+    /* [LIGHT2 P0] Enable + clear the normal/material G-buffer for this frame
+     * (Mode>=1); z-writing world draws populate it and the per-pane light pass
+     * applies proper N.L. No-op (off) in Mode 0. */
+    td5_render_lighting2_frame_begin();
     /* [AUTO LIGHTS] Decide whether the environment is poorly lit. In AUTO mode
      * (default), non-clear weather / dark tracks get the full headlight treatment:
      * the beams turn on AND the scene is dimmed so they read strongly — the look
