@@ -2166,9 +2166,21 @@ static int laneassist_band_center(int span, int sub, int band,
         if (hi < lo)       hi = lo;
         forked = 1;
     } else if (band <= 0) {
-        /* Centre of ALL drivable lanes (whole paved road). */
-        lo = 0;
-        hi = lc - 1;
+        /* Centre of ALL drivable lanes (whole paved road). On a TD6-converted
+         * track this range can include a sidewalk/verge lane that
+         * td5_track_surface_is_slow() does not flag (full grip, zero drag —
+         * see td5_track_td6_road_band's header comment), so it would
+         * otherwise be averaged into the "road centre" and skew the aim off
+         * the true centreline (the reported "too aggressive / wrong centre"
+         * on TD6 tracks). Reuse the same widest-contiguous-run-of-one-
+         * surface-class detector already proven for traffic lane selection
+         * to exclude it here too. */
+        if (avoid && g_active_td6_level > 0 && s_td6_surface_grid) {
+            td5_track_td6_road_band(span, lc, &lo, &hi);
+        } else {
+            lo = 0;
+            hi = lc - 1;
+        }
     } else {
         if (band > lc) band = lc;
         if (avoid) sub = td5_track_nearest_road_lane(span, sub);  /* never centre on grass */

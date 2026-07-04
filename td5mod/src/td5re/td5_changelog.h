@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "Lane Assist no longer aims at the sidewalk on some TD6" },
+    { CL_ITEM,    "  tracks (was pulling the car off the true road centre)" },
     { CL_ITEM,    "Headlights now sense the surroundings: they switch on" },
     { CL_ITEM,    "  in tunnels and dim stretches (e.g. Bern's tunnels)" },
     { CL_ITEM,    "  and across dark tracks with a night sky (e.g. Moscow)," },

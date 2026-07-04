@@ -69,6 +69,7 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Lane Assist: no longer aims at sidewalk on TD6 tracks (London etc.)",
     "Auto headlights: ON in Bern tunnels, OFF in Bern sunlit stretches",
     "Auto headlights: ON across dark-sky tracks (Moscow), OFF on bright tracks",
     "Car bodies stay neutral (no red/colour tint from track lighting, e.g. Bern)",
