@@ -276,6 +276,13 @@ extern int  s_anim_tick;
 extern int  s_arrow_input;
 extern int  s_button_index;
 extern int  s_flow_context;
+/* [NET GAME MODES 2026-07-04] 1 = the host is configuring the MP game mode from
+ * the NETWORK lobby (not the local split-screen flow). Set when the net lobby's
+ * GAME MODE button is pressed; routes the shared Mode-Vote / Mode-Config (and,
+ * later, roles/team) screens' exits back to the net lobby instead of the local
+ * car-select grid, and makes Mode-Vote a host-only picker (no per-pad voting).
+ * Cleared on net-lobby (re)entry and the frontend reset. */
+extern int  s_mp_net_config;
 extern int  s_inner_state;
 extern int  s_input_ready;
 extern int  s_kicked_flag;

@@ -194,7 +194,17 @@ void frontend_init_race_schedule(void) {
      * list from the picked track) and force the current cup race's track. */
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_CUP) {
         if (!td5_game_mp_cup_active()) td5_game_mp_cup_begin();
-        {
+        if (s_launching_net_race) {
+            /* [NET GAME MODES 2026-07-04] The host drives cup progression: adopt
+             * the broadcast cup race index (keeps standings + "race X of Y" in
+             * lockstep across peers) and use the broadcast track for this race. */
+            TD5_NetRaceConfig nc;
+            if (td5_net_get_race_config(&nc)) {
+                if (nc.cup_race_index >= 0)
+                    td5_game_mp_cup_set_current(nc.cup_race_index);
+                if (nc.track_index >= 0) { s_selected_track = nc.track_index; g_td5.track_index = nc.track_index; }
+            }
+        } else {
             int ct = td5_game_mp_cup_track();
             if (ct >= 0) { s_selected_track = ct; g_td5.track_index = ct; }
         }
@@ -426,6 +436,20 @@ void frontend_init_race_schedule(void) {
             for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
                 td5_asset_set_human_td6_color(
                     i, (i < np && i < 6) ? net_cfg.td6_color[i] : -1);
+            /* [NET GAME MODES 2026-07-04] Colour each net player's results /
+             * standings / podium row by their chosen body colour (falls back to
+             * a distinct per-slot colour). mp_slot_color() reads
+             * s_mp_player_accent[]; that array is indexed by LOCAL setup slot, so
+             * over the net the local machine's own accent would otherwise mis-
+             * colour net slot 0. Set it per net slot on every peer so the field
+             * shows the same, distinct colour for each player everywhere. */
+            for (i = 0; i < TD5_MAX_HUMAN_PLAYERS; i++) {
+                uint32_t col = (i < np && i < 6 && net_cfg.td6_color[i] > 0 &&
+                                (uint32_t)net_cfg.td6_color[i] != 0x00FFFFFFu)
+                                   ? (uint32_t)net_cfg.td6_color[i] & 0x00FFFFFFu
+                                   : k_mp_player_colors[i % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu;
+                s_mp_player_accent[i] = (int)col;
+            }
             for (i = 0; i < np && i < 6; i++)
                 TD5_LOG_I(LOG_TAG,
                           "InitRaceSchedule: net slot%d car=%d paint=%d color=%06X",

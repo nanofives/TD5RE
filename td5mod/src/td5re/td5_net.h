@@ -117,9 +117,21 @@ typedef struct TD5_NetRaceConfig {
      * per-machine difference here would desync the spawner. */
     int32_t  traffic_volume;      /* 0=Off..4=VeryHigh (host's [GameOptions] Traffic) */
     int32_t  cops;                /* POLICE option: 1 = cops on, 0 = off */
+    /* [NET GAME MODES 2026-07-04] Replicate the host's DYNAMICS choice
+     * (0=ARCADE, 1=SIMULATION). Arcade adds 3x-collision launch + collectible
+     * power-up boxes (td5_arcade); the box layout + pickups are deterministic by
+     * design, but a per-machine ARCADE/SIM mismatch would place boxes on some
+     * peers only and desync the pickup effects. Also gates Traffic Battle's
+     * power-up boxes (they appear only in arcade dynamics). */
+    int32_t  dynamics;            /* 0=ARCADE, 1=SIMULATION */
     int32_t  td6_color[6];        /* per-slot TD6 body RGB (0xFFFFFF = unpainted) */
     int32_t  car_index[6];        /* per net slot (TD5_NET_MAX_PLAYERS) */
     int32_t  paint_index[6];
+    /* [NET GAME MODES 2026-07-04] Cup progression: which cup race this is
+     * (0-based). The host advances it between races and broadcasts it so every
+     * peer runs the same cup race (track + "race X of Y" + standings stay in
+     * lockstep). -1 = not a cup race. */
+    int32_t  cup_race_index;
     /* [MP GAME MODES 2026-06-22] Replicated game mode + per-mode options chosen
      * on the host's mode-vote/mode-config screens. All-int32 layout; copied
      * wholesale with the rest of the config (the DXPSTART payload + race_config

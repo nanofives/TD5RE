@@ -214,6 +214,9 @@ static TD5_ScreenIndex s_previous_screen = (TD5_ScreenIndex)-1;
 
 /* Context / flow tracking (DAT_004962d4) */
 int  s_flow_context;
+/* [NET GAME MODES 2026-07-04] host is picking the MP game mode from the net
+ * lobby — see td5_frontend_internal.h. */
+int  s_mp_net_config;
 
 /* Game type / race configuration */
 int  s_selected_game_type;       /* g_selectedGameType     */
@@ -558,6 +561,14 @@ static int mp_session_player_accent(int p) {
  * @ 0x00422480 shows only the car name + stat rows), so this column and its
  * name source are port-only. */
 const char *frontend_human_display_name(int slot) {
+    /* [NET GAME MODES 2026-07-04] In a network race each active slot is a remote
+     * machine, so the local s_mp_player_name[] array only ever holds THIS
+     * machine's name. Prefer the replicated lobby-roster nickname (racer slot ==
+     * net slot). Falls through to the local sources / generic "P<n>" when empty. */
+    if (g_td5.network_active) {
+        const char *nn = td5_net_get_slot_name(slot);
+        if (nn && nn[0]) return nn;
+    }
     if (slot >= 0 && slot < TD5_MAX_HUMAN_PLAYERS && s_mp_player_name[slot][0])
         return s_mp_player_name[slot];
     if (slot == 0 && g_td5.ini.player_name[0])
@@ -10215,6 +10226,7 @@ int td5_frontend_init(void) {
     s_attract_idle_timestamp = td5_plat_time_ms();
     s_attract_demo_active = 0;
     s_flow_context = 0;
+    s_mp_net_config = 0;
     s_selected_game_type = -1;
     s_race_within_series = 0;
     s_cup_unlock_tier = 0;
