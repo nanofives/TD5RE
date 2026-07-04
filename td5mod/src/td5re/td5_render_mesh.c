@@ -2297,11 +2297,20 @@ void td5_render_actors_for_view(int view_index)
 
             /* [ARCADE] An active power-up makes the CAR itself read the effect:
              * GHOST renders the car translucent (the same look as a time-trial
-             * ghost opponent — you pass through it); NITRO/WRECK/HAZARD make the
-             * car SILHOUETTE glow in the effect colour (applied via the effect
-             * tint around the body draw below). Racer slots only. */
+             * ghost opponent — you pass through it); NITRO/INDESTRUCTIBLE/HAZARD
+             * make the car SILHOUETTE glow in the effect colour (applied via the
+             * effect tint around the body draw below). Holder-effect glow is
+             * racer slots only (only racers can hold power-ups). [FREEZE REWORK
+             * 2026-07-04] The freeze-VICTIM glow below is independent of that and
+             * applies to ANY slot (racer or traffic — "whatever you crash"), and
+             * takes priority since a debuff is more urgent to notice than a buff. */
             uint32_t arc_tint = 0;
-            if (td5_arcade_mode_active() && slot >= 0 && slot < g_traffic_slot_base) {
+            if (td5_arcade_mode_active() && td5_arcade_slot_is_freeze_victim(slot)) {
+                float pu = 0.5f + 0.5f * sinf((float)td5_plat_time_ms() * 0.02f + (float)slot);
+                uint32_t inten = (uint32_t)(165.0f + 90.0f * pu);   /* 165..255 — strong */
+                if (inten > 255u) inten = 255u;
+                arc_tint = (inten << 24) | 0x40C0FFu;   /* icy blue — slowed by FREEZE */
+            } else if (td5_arcade_mode_active() && slot >= 0 && slot < g_traffic_slot_base) {
                 int eff = td5_arcade_active_effect(slot);
                 if (eff == TD5_PU_GHOST) {
                     actor_fade = (actor_fade * TT_GHOST_ALPHA) / 255;
@@ -2309,15 +2318,21 @@ void td5_render_actors_for_view(int view_index)
                 } else if (eff != TD5_PU_NONE) {
                     uint32_t kc;
                     switch (eff) {
-                    case TD5_PU_NITRO:  kc = 0x20E0FFu; break;   /* cyan  */
-                    case TD5_PU_WRECK:  kc = 0xFF3020u; break;   /* red   */
-                    case TD5_PU_HAZARD: kc = 0xFFB000u; break;   /* amber */
-                    default:            kc = 0xFFFFFFu; break;
+                    case TD5_PU_NITRO:          kc = 0x20E0FFu; break;   /* cyan  */
+                    case TD5_PU_INDESTRUCTIBLE: kc = 0xFF3020u; break;   /* red   */
+                    case TD5_PU_HAZARD:         kc = 0xFFB000u; break;   /* amber */
+                    default:                    kc = 0xFFFFFFu; break;
                     }
                     float pu = 0.5f + 0.5f * sinf((float)td5_plat_time_ms() * 0.008f + (float)slot);
                     uint32_t inten = (uint32_t)(165.0f + 90.0f * pu);   /* 165..255 — strong */
                     if (inten > 255u) inten = 255u;
                     arc_tint = (inten << 24) | kc;
+
+                    /* [ARCADE NITRO 2026-07-04] Bright speed-trail particles
+                     * behind the car while NITRO is active — the "anime speed
+                     * lines" cue for the sustained accel boost. */
+                    if (eff == TD5_PU_NITRO)
+                        td5_vfx_spawn_nitro_streak(actor, view_index);
                 }
             }
 

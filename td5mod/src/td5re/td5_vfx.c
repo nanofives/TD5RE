@@ -3100,6 +3100,37 @@ void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index) {
  * Uses the actor's rotation matrix at +0x120 to transform a local
  * exhaust offset to world space.
  */
+/* [ARCADE NITRO 2026-07-04] See td5_vfx.h for the design note: this reuses the
+ * round smoke-puff sprite (the particle system's only sprite type) tinted
+ * bright white-cyan and spawned frequently/short-lived so it reads as a speed
+ * trail rather than a smoke cloud. A true elongated streak shape would need new
+ * render/atlas work; this is a deliberate scope trade-off within the existing
+ * particle pipeline. */
+void td5_vfx_spawn_nitro_streak(TD5_Actor *actor, int view_index) {
+    if (!actor) return;
+    /* Skip ~1/3 of frames so a full field of NITRO cars in MP doesn't flood the
+     * 100-slot/view particle pool; still reads as a continuous trail at 30Hz+. */
+    if ((rand() % 3) == 0) return;
+
+    uint8_t *ap = (uint8_t *)actor;
+    int32_t pos_x, pos_y, pos_z;
+    memcpy(&pos_x, ap + 0x1FC, 4);
+    memcpy(&pos_y, ap + 0x200, 4);
+    memcpy(&pos_z, ap + 0x204, 4);
+    float mid_x = (float)pos_x * FP_TO_FLOAT;
+    float mid_y = (float)pos_y * FP_TO_FLOAT + 6.0f;   /* bumper height */
+    float mid_z = (float)pos_z * FP_TO_FLOAT;
+
+    /* Scatter left/right of the rear bumper each spawn for a twin-trail look
+     * (cosmetic/render-only — rand() here doesn't touch sim determinism). */
+    mid_x += (rand() % 2) ? 14.0f : -14.0f;
+    mid_z += (float)((rand() % 9) - 4);
+
+    s_smoke_tint  = 0xFFE0FFFFu;   /* bright white-cyan — "speed" colour */
+    s_smoke_vel_y = 0;
+    vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, view_index);
+}
+
 void td5_vfx_spawn_smoke(TD5_Actor *actor) {
     if (!actor) return;
 

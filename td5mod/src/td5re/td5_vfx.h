@@ -112,6 +112,14 @@ void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor);
 void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier);
 void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index);
 
+/* [ARCADE NITRO 2026-07-04] Bright speed-trail particles behind a car with
+ * NITRO active — the "anime speed lines" cue for the sustained accel boost.
+ * Reuses the existing smoke-puff pipeline (the particle system only implements
+ * one sprite type) tinted bright white-cyan with a short lifetime, alternating
+ * left/right of the rear bumper, so it reads as a snappy trail rather than a
+ * smoke cloud. Called once per frame per NITRO-boosted visible racer. */
+void td5_vfx_spawn_nitro_streak(TD5_Actor *actor, int view_index);
+
 /* Engine-rev gated random smoke puff (orig 0x00401370 SpawnRandomVehicleSmokePuff).
  * Called per-frame per visible racer from the actor render path. Gates on
  * engine_speed_accum<4000 && encounter_steering_cmd>200 && rand()%engine<500;

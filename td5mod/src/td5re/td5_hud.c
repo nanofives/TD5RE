@@ -1852,13 +1852,11 @@ static int arcade_effect_nominal_frames(int effect)
     switch (effect) {
     case TD5_PU_NITRO:  return 180;   /* master's +20% duration values */
     case TD5_PU_GHOST:  return 288;
-    case TD5_PU_WRECK:  return 360;
+    case TD5_PU_INDESTRUCTIBLE: return 360;   /* [RENAMED 2026-07-04, was TD5_PU_WRECK] */
     case TD5_PU_HAZARD: return 20;
     /* [ARCADE EXPANSION 2026-06-28] new kinds (nominal = their apply_pickup default) */
-    case TD5_PU_SHIELD: return 300;
-    case TD5_PU_FREEZE: return 30;
+    case TD5_PU_FREEZE: return 300;   /* [REWORKED 2026-07-04] holder-buff window */
     case TD5_PU_MAGNET: return 240;
-    case TD5_PU_ROCKET: return 75;
     case TD5_PU_REPAIR: return 30;
     default:            return 60;
     }
@@ -1887,13 +1885,11 @@ void td5_hud_draw_arcade_chips(void)
         switch (effect) {
         case TD5_PU_NITRO:  label = "NITRO";  col = 0xFF20E0FFu; break;
         case TD5_PU_GHOST:  label = "GHOST";  col = 0xFFFFFFFFu; break;
-        case TD5_PU_WRECK:  label = "WRECK";  col = 0xFFFF3020u; break;
+        case TD5_PU_INDESTRUCTIBLE: label = "INDESTRUCTIBLE"; col = 0xFFFF3020u; break;
         case TD5_PU_HAZARD: label = "HAZARD"; col = 0xFFFFB000u; break;
         /* [ARCADE EXPANSION 2026-06-28] new kinds */
-        case TD5_PU_SHIELD: label = "SHIELD"; col = 0xFF40C0FFu; break;
-        case TD5_PU_FREEZE: label = "EMP";    col = 0xFF80FFF0u; break;
+        case TD5_PU_FREEZE: label = "FREEZE"; col = 0xFF80FFF0u; break;
         case TD5_PU_MAGNET: label = "MAGNET"; col = 0xFFFF40C0u; break;
-        case TD5_PU_ROCKET: label = "ROCKET"; col = 0xFFFF8020u; break;
         case TD5_PU_REPAIR: label = "REPAIR"; col = 0xFF40FF60u; break;
         default: continue;
         }
