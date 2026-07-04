@@ -1868,12 +1868,23 @@ void frontend_mp_simul_preview_setup(int n) {
     s_two_player_mode        = 1;
     s_mp_flow                = 1;
     s_mp_simul               = 1;
-    s_mp_phase               = 1;   /* car-select grid (skip name/colour + position picker) */
+    /* [layout preview 2026-07-04] TD5RE_MP_SIMUL_PREVIEW_PHASE=0 lands on the
+     * phase-0 PROFILE SELECTION setup screen (name/colour/PROFILE/trans/assist/OK
+     * per-pane buttons) instead of the default phase-1 car-select grid, so that
+     * screen's button layout can be screenshotted without N controllers. Screen_
+     * CarSelection auto-runs frontend_mp_setup_init on the first tick (inner_state
+     * 0 -> 0x20 slide-in -> 0x21 interactive). Slot 0 stays an idle human (shows
+     * the full button stack); AI slots 1..n-1 auto-ready (show READY). */
+    {
+        const char *ph = getenv("TD5RE_MP_SIMUL_PREVIEW_PHASE");
+        s_mp_phase = (ph && ph[0] == '0' && ph[1] == '\0') ? 0 : 1;
+    }
     s_mp_car_player          = 0;
-    s_inner_state            = 0;   /* force carsel_init on the first screen tick */
+    s_inner_state            = 0;   /* force setup/carsel init on the first screen tick */
     for (p = 0; p < s_mp_joined_count; p++) s_mp_player_cell[p] = p;
-    TD5_LOG_I(LOG_TAG, "MP simul PREVIEW: %d players -> car-select grid (dev harness)",
-              s_mp_joined_count);
+    TD5_LOG_I(LOG_TAG, "MP simul PREVIEW: %d players -> %s (dev harness)",
+              s_mp_joined_count, s_mp_phase == 0 ? "PROFILE SELECTION (phase 0)"
+                                                 : "car-select grid (phase 1)");
 }
 #endif
 
