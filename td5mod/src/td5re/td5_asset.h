@@ -355,6 +355,10 @@ int  td5_asset_track_has_reverse(int track_index);
 /** Converted TD5 level number for a migrated TD6 menu slot (schedule index),
  *  or 0 if track_index is not a TD6 track. Source of truth = k_td6_menu_slots. */
 int  td5_asset_td6_level_for_slot(int track_index);
+/* [LAPS 2026-07-04] 1 = circuit (lap race, show LAPS selector), 0 = point-to-point.
+ * Reads LEVELINF.DAT DWORD[0] (the byte the race uses for g_td5.track_type),
+ * cached per track index. Used by the track-select LAPS-row visibility. */
+int  td5_asset_track_is_circuit(int track_index);
 /** Per-track grid / start-finish span for a migrated TD6 track, keyed by its
  *  converted level number, or 0 if not a TD6 track. */
 int  td5_asset_td6_start_span_for_level(int level_num);

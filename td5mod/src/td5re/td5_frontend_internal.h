@@ -591,6 +591,23 @@ void Screen_QuickRaceMenu(void);
 void Screen_RaceResults(void);
 void Screen_MpPostRace(void);    /* [2026-06-25] MP split-screen post-race menu   */
 void Screen_TrackSelection(void);
+/* [RACE OPTIONS MODAL 2026-07-04] Consolidated race-options modal shown over the
+ * track-select screen. Defined in td5_fe_race.c; the render dispatch + central
+ * ESC handler in td5_frontend.c query/draw it. */
+/* [RACE OPTIONS 2026-07-04] Dedicated screen (TD5_SCREEN_RACE_OPTIONS) opened by
+ * the track-select RACE OPTIONS button; consolidates every per-race option and
+ * reuses the track-select backdrop. Screen body in td5_fe_race.c; the label/value/
+ * cycle model + value render live in td5_frontend.c. */
+void Screen_RaceOptions(void);
+/* Option ids: screen button i (0..RO_OPT_COUNT-1) maps 1:1 to these; OK + BACK
+ * follow. */
+enum {
+    RO_OPPONENTS = 0, RO_TRAFFIC, RO_POLICE, RO_DIFFICULTY, RO_DYNAMICS,
+    RO_CHECKPOINTS, RO_POWERUPS, RO_TOUGHNESS, RO_DEFORM, RO_OPT_COUNT
+};
+const char *td5_raceopts_label(int idx);
+void        td5_raceopts_value(int idx, char *out, size_t out_sz);
+void        td5_raceopts_cycle(int idx, int delta);
 void frontend_load_car_spec_fields(int car_index);
 void frontend_release_surface(int handle);
 void frontend_set_cursor_visible(int visible);

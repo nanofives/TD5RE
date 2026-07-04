@@ -135,6 +135,10 @@
 /* Race-option row labels (track selectors + quick race) + multiplayer lobby. */
 #define SNK_OpponentsButTxt        "OPPONENTS"
 #define SNK_LapsButTxt             "LAPS"
+/* [RACE OPTIONS MODAL 2026-07-04] Track-select button that opens the
+ * consolidated race-options modal (opponents/traffic/police/difficulty/dynamics
+ * + checkpoint timers/power-ups/car toughness/deformation). */
+#define SNK_RaceOptionsButTxt      "RACE OPTIONS"
 #define SNK_MultiplayerTitleTxt    "MULTIPLAYER"
 #define SNK_PressJoinTxt           "PRESS A / ENTER TO JOIN"
 #define SNK_StartRaceTxt           "START"

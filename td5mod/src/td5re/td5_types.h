@@ -412,7 +412,12 @@ typedef enum TD5_ScreenIndex {
      * enhancement — the original always auto-assigned the fixed cup schedule
      * (RE: g_cupDataXorKey @0x00464084, indexed by g_raceWithinSeriesIndex). */
     TD5_SCREEN_CUP_TRACK_SELECT   = 43,  /* Screen_TrackSelection (cup multi-pick) */
-    TD5_SCREEN_COUNT               = 44
+    /* [RACE OPTIONS 2026-07-04] Dedicated screen consolidating every per-race
+     * option (opponents/traffic/police/difficulty/dynamics + checkpoint timers/
+     * power-ups/car toughness/deformation). Opened by the RACE OPTIONS button on
+     * track-select; reuses the track-select backdrop. Port-only. */
+    TD5_SCREEN_RACE_OPTIONS       = 44,  /* Screen_RaceOptions */
+    TD5_SCREEN_COUNT               = 45
 } TD5_ScreenIndex;
 
 /* ========================================================================
