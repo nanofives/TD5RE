@@ -7796,7 +7796,16 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
     int kph = (td5_save_get_speed_units() != 0);
     const char *unit = kph ? "KPH" : "MPH";
     int humans = s_num_human_players; if (humans < 1) humans = 1;
-    const int my_slot = 0;          /* the local player (P1); in SP the sole human */
+    int my_slot = 0;                /* the local player (P1); in SP the sole human */
+    /* [NET GAME MODES 2026-07-04] Over the net num_human_players is forced to 1,
+     * so every remote player would fall to the "CPU" branch and the wrong row
+     * (net slot 0, usually a remote player) would be highlighted as "you". Use
+     * the net player count + the local net slot so all players show their names
+     * and the local machine's own row is the highlighted one. */
+    if (g_td5.network_active) {
+        humans  = td5_net_get_player_count(); if (humans < 1) humans = 1;
+        my_slot = td5_net_local_slot();       if (my_slot < 0) my_slot = 0;
+    }
     /* [TRAFFIC BATTLE 2026-06-28] In battle mode the HITS column becomes WRECKS
      * (the destroyed-traffic score the sort + win are based on). */
     const int battle = td5_game_battle_mode_active();

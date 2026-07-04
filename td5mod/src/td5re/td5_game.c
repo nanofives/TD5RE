@@ -9972,13 +9972,14 @@ int td5_game_cop_chase_is_suspect(int slot) {
     return !td5_game_cop_chase_is_cop(slot);          /* every non-cop racer */
 }
 
-/* [MP COP CHASE results 2026-06-25] True when a LOCAL split-screen cop chase is
- * running — the gate for the dedicated COPS/SUSPECTS results layout and the
- * "CHASE RESULTS" title. Net play and SP wanted mode keep the normal table. */
+/* [MP COP CHASE results 2026-06-25] True when a cop chase is running — the gate
+ * for the dedicated COPS/SUSPECTS results layout and the "CHASE RESULTS" title.
+ * [NET GAME MODES 2026-07-04] Now also true over the net (roles, names, colours
+ * and arrest stats are all replicated / net-aware), so a network cop chase gets
+ * the same cop/suspect results table. SP wanted mode keeps the normal table. */
 int td5_game_mp_cop_chase_active(void) {
     return g_td5.wanted_mode_enabled
-        && g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE
-        && !g_td5.network_active;
+        && g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE;
 }
 
 int td5_game_get_cop_actor_index(void) {
