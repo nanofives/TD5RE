@@ -63,6 +63,7 @@ static void retired_add(const char *text) {
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
     "MP mode select: TIME TRIAL entry is gone, other modes unaffected",
+    "MP profile screen: NAME + COLOUR button labels now centred",
     "Street lamps (EXPERIMENTAL, StreetLights=1 to enable): pools under posts",
     "Shadows: no duplicated/offset echo copies (fence area, Moscow)",
     "Reflections P3: wet road mirrors cars/buildings on rainy Moscow",

@@ -958,11 +958,21 @@ void mp_simul_draw_btn(float x, float y, float w, float h, const char *label,
      * value/swatch on the right, shrinking it for narrow panes so long labels
      * (AUTO / MANUAL) never overflow the button. */
     float val_w  = (val && swatch_rgb < 0) ? fe_measure_small_text(val) * fe_glyph_sx(sx, sy) : 0.0f;
-    float l_left = (arrows ? (x + 17.0f) : (x + 4.0f)) * sx;
     float l_right;
     if (swatch_rgb >= 0)   l_right = (redge - 17.0f) * sx;
     else if (val)          l_right = redge * sx - val_w - 4.0f * sx;
     else                   l_right = (arrows ? (x + w - 18.0f) : (x + w - 4.0f)) * sx;
+    /* [MP PROFILE SELECTION centring 2026-07-04] Mirror the right-side reserve
+     * (value readout, colour swatch, or arrow gutter) onto the LEFT so the label
+     * is centred on the BUTTON centre — matching the plain PROFILE/AUTOMATIC/
+     * ASSIST/OK buttons. Previously the value/swatch buttons (NAME, COLOUR) kept a
+     * flush-left l_left (x+4) and only pulled l_right in, so their labels centred
+     * in a left-biased span and sat visibly LEFT of the others in the vertical
+     * stack. This is a no-op for already-symmetric plain/arrowed buttons (their
+     * left inset already equals the right reserve). */
+    float l_left = (x * sx) + ((x + w) * sx - l_right);
+    if (l_left >= l_right)   /* degenerate: value wider than half the button — keep it visible */
+        l_left = (arrows ? (x + 17.0f) : (x + 4.0f)) * sx;
     {
         /* [2026-06-29] CENTRE the (fit-scaled) label within the available span
          * [l_left, l_right] for EVERY button — arrowed CAR/PAINT now read centred
