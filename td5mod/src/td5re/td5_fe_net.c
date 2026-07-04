@@ -2067,6 +2067,13 @@ void Screen_NetworkLobby(void) {
                  * broadcast) and were stale ("AI players are not loading"). */
                 cfg.lap_count         = s_game_option_laps + 1;
                 cfg.num_opponents     = s_num_ai_opponents;
+                /* [NET GAME MODES 2026-07-04] Drag + Traffic Battle are
+                 * humans-only fields (no rival AI); broadcast 0 so no phantom AI
+                 * car spawns in the other net players' slots. mp_mode_config is
+                 * already set by the host's GAME MODE picker at this point. */
+                if (g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE ||
+                    g_td5.mp_mode_config.mode == TD5_MP_MODE_TRAFFIC_BATTLE)
+                    cfg.num_opponents = 0;
                 if (cfg.num_opponents < 0)  cfg.num_opponents = 0;
                 if (cfg.num_opponents > TD5_MAX_RACER_SLOTS - 2)
                     cfg.num_opponents = TD5_MAX_RACER_SLOTS - 2;

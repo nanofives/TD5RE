@@ -2043,12 +2043,18 @@ int td5_game_init_race_session(void) {
      * distance preset (drag_length) + lane count (num_human_players +
      * drag_extra_lanes) are read straight from mp_mode_config by drag_length_level()
      * and td5_game_drag_field_size(); nothing extra to wire here. */
-    if (td5_game_drag_mp_active() && !g_td5.network_active) {
+    if (td5_game_drag_mp_active()) {
         g_td5.drag_race_enabled         = 1;
         g_td5.wanted_mode_enabled       = 0;     /* not cop chase            */
         g_td5.special_encounter_enabled = 0;     /* cops OFF                 */
         g_td5.time_trial_enabled        = 0;
-        g_td5.num_ai_opponents          = 0;     /* NO rival AI (user rule)  */
+        /* [NET GAME MODES 2026-07-04] NO rival AI (user rule). Over the net the
+         * OTHER players live in num_ai_opponents (np-1; num_human_players is
+         * forced to 1 at td5_fe_mp_setup.c:447) and the host broadcasts
+         * num_opponents=0 for drag, so only zero it for local/solo drag —
+         * zeroing it over the net would delete every other player's car. */
+        if (!g_td5.network_active)
+            g_td5.num_ai_opponents      = 0;     /* NO rival AI (user rule)  */
         if (g_td5.mp_mode_config.drag_traffic) {
             /* Oncoming-only traffic stream (no lane changes; spawns ~50 spans
              * ahead — see trf_force_oncoming + the drag spawn-ahead in td5_ai.c). */
@@ -8398,8 +8404,14 @@ int td5_game_drag_field_size(void)
     if (force && force[0])
         n = atoi(force);                   /* dev override first */
     else if (td5_game_drag_mp_active())
-        /* MP DRAG: one lane per human player PLUS the EXTRA LANES option. */
-        n = g_td5.num_human_players + g_td5.mp_mode_config.drag_extra_lanes;
+        /* MP DRAG: one lane per human player PLUS the EXTRA LANES option. Over
+         * the net every player is a separate machine folded into
+         * num_ai_opponents (num_human_players is forced to 1), so the human
+         * count is num_human_players + num_ai_opponents on every peer. */
+        n = (g_td5.network_active
+                 ? g_td5.num_human_players + g_td5.num_ai_opponents
+                 : g_td5.num_human_players)
+            + g_td5.mp_mode_config.drag_extra_lanes;
     else
         n = g_td5.num_human_players + g_td5.num_ai_opponents;
 
@@ -8418,7 +8430,12 @@ int td5_game_drag_active_racers(void)
 {
     int n;
     if (td5_game_drag_mp_active())
-        n = g_td5.num_human_players;       /* humans only; extra lanes stay empty */
+        /* humans only; extra lanes stay empty. Over the net the other players
+         * are folded into num_ai_opponents (num_human_players==1), so count
+         * both there to get the true racer count on every peer. */
+        n = g_td5.network_active
+                ? g_td5.num_human_players + g_td5.num_ai_opponents
+                : g_td5.num_human_players;
     else
         n = td5_game_drag_field_size();    /* SP: a car (player/AI) per lane */
     if (n < 1) n = 1;

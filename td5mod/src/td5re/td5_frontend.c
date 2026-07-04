@@ -561,6 +561,14 @@ static int mp_session_player_accent(int p) {
  * @ 0x00422480 shows only the car name + stat rows), so this column and its
  * name source are port-only. */
 const char *frontend_human_display_name(int slot) {
+    /* [NET GAME MODES 2026-07-04] In a network race each active slot is a remote
+     * machine, so the local s_mp_player_name[] array only ever holds THIS
+     * machine's name. Prefer the replicated lobby-roster nickname (racer slot ==
+     * net slot). Falls through to the local sources / generic "P<n>" when empty. */
+    if (g_td5.network_active) {
+        const char *nn = td5_net_get_slot_name(slot);
+        if (nn && nn[0]) return nn;
+    }
     if (slot >= 0 && slot < TD5_MAX_HUMAN_PLAYERS && s_mp_player_name[slot][0])
         return s_mp_player_name[slot];
     if (slot == 0 && g_td5.ini.player_name[0])
