@@ -33,6 +33,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "Headlights now sense the surroundings: they switch on" },
+    { CL_ITEM,    "  in tunnels and dim stretches (e.g. Bern's tunnels)" },
+    { CL_ITEM,    "  and across dark tracks with a night sky (e.g. Moscow)," },
+    { CL_ITEM,    "  and switch off again in bright daylight" },
+    { CL_ITEM,    "Cars no longer pick up a coloured tint from the track" },
+    { CL_ITEM,    "  lighting (e.g. the reddish cast on Bern) - car bodies" },
+    { CL_ITEM,    "  stay neutral while the scenery keeps its colour" },
     { CL_ITEM,    "Track select: new RACE OPTIONS button opens a screen" },
     { CL_ITEM,    "  gathering every race option in one place -- opponents," },
     { CL_ITEM,    "  traffic, police, difficulty and dynamics, plus new" },
