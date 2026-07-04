@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "First-race tutorial now explains special modes (Cop" },
+    { CL_ITEM,    "  Chase, Drag Race, Traffic Battle, Infect, Cup) in" },
+    { CL_ITEM,    "  one short line" },
     { CL_ITEM,    "Pause menu confirm popup (END RACE NOW, RESTART, etc.)" },
     { CL_ITEM,    "  now scales correctly on high-resolution displays" },
     { CL_ITEM,    "Race-end transition: HUD text no longer flashes through" },
