@@ -2960,6 +2960,13 @@ int td5_game_init_race_session(void) {
     /* Must run AFTER textures load so the per-page transparency table is
      * populated. Dims billboard meshes that use a type-3 (additive) page. */
     td5_track_dim_additive_billboard_meshes();
+    /* [LIGHT2 P1] Give normal-less track meshes derived face normals so the
+     * G-buffer covers roads/walls (sun-shadow backface skip, SSR). No-op in
+     * Mode 0; baked vertex lighting is never touched. */
+    td5_track_derive_missing_normals();
+    /* [LIGHT2] Register the track's street-lamp glow fixtures as light
+     * sources (nearest few become real point lights per frame when dark). */
+    td5_track_register_lamp_lights();
     TD5_LOG_I(LOG_TAG, "InitRace step 8/19: track textures loaded for track=%d",
               g_td5.track_index);
 
@@ -6539,6 +6546,10 @@ int td5_game_run_race_frame(void) {
     }
     if (!td5_render_photobooth_active())
         td5_light_emit_vehicle_headlights();
+    /* [LIGHT2] Street lamps: promote the nearest registered lamp fixtures to
+     * real point lights (env-dark gated, same verdict as auto headlights). */
+    if (!td5_render_photobooth_active())
+        td5_light_emit_street_lamps();
 
     /* [S01 2026-06-04] Live window resize: if the render dimensions changed
      * (drag-resize / maximize, applied in the platform layer's WM_SIZE handler),
@@ -6773,12 +6784,23 @@ int td5_game_run_race_frame(void) {
         if (!td5_render_photobooth_active())
             render_td6_props(td5_game_get_actor(g_actorSlotForView[vp]));
 
+        /* [LIGHT2 P2] Sun-shadow pass FIRST (multiplicative darkening of the
+         * opaque world), then the additive light pass — this order keeps
+         * headlight pools from being darkened by the shadow term. */
+        if (!td5_render_photobooth_active())
+            td5_render_apply_shadow_pass(s_viewports[vp].x, s_viewports[vp].y);
+
         /* [DEFERRED LIGHTS] Screen-space dynamic-light pass: now that the opaque
          * world (track + actors + props) has filled the depth buffer for this
          * pane, add the headlight/light contribution per pixel before the
          * translucent VFX + HUD. */
         if (!td5_render_photobooth_active())
             td5_render_apply_light_pass(s_viewports[vp].x, s_viewports[vp].y);
+
+        /* [LIGHT2 P3] Screen-space reflections LAST of the deferred passes so
+         * they mirror the lit + shadowed scene (car paint, glass, wet roads). */
+        if (!td5_render_photobooth_active())
+            td5_render_apply_ssr_pass(s_viewports[vp].x, s_viewports[vp].y);
 
         /* VFX: tire tracks, particles */
         if (!td5_render_photobooth_active()) {

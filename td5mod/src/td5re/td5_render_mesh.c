@@ -30,6 +30,7 @@
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode knob */
+#include "td5_material.h" /* [LIGHT2 P3] per-material reflectivity for SSR */
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 #include "td5re.h"
 
@@ -135,11 +136,128 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
     float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
+    /* [P2] per-light occlusion march config (Mode>=1 + knob; 0 = off). */
+    int occl = (td5_light2_active() && td5_light2_light_occlusion()) ? 12 : 0;
+
     td5_plat_render_apply_lights(cam, basis9,
                                  s_focal_length, s_center_x, s_center_y,
                                  (float)vp_x, (float)vp_y,
                                  depth_scale, NEAR_DEPTH_OFFSET,
-                                 gpu, n);
+                                 gpu, n,
+                                 occl, (float)s_viewport_width, (float)s_viewport_height);
+}
+
+/* [LIGHT2 P2] Screen-space ray-marched sun shadows for the CURRENT viewport.
+ * The "sun" is the zone table's dominant directional light for this pane
+ * (strongest enabled tl_contrib slot, world frame — the same authored data
+ * that lights the cars). Shadow strength scales with directional dominance so
+ * ambient-only zones (tunnels) cast nothing. Call AFTER the opaque world,
+ * BEFORE td5_render_apply_light_pass (headlight pools must not be darkened).
+ * March tuning env knobs (dev): TD5RE_SHADOW_STEPS / _DIST / _THICK. */
+void td5_render_apply_shadow_pass(int vp_x, int vp_y)
+{
+    if (!td5_light2_active() || !td5_light2_sun_shadows()) return;
+
+    /* Strongest enabled directional slot = the scene's sun. */
+    float best_mag2 = 0.0f;
+    float sun[3] = { 0.0f, 0.0f, 0.0f };
+    for (int s = 0; s < 3; s++) {
+        if (!s_tl_contrib[s].enabled) continue;
+        const float *v = s_tl_contrib[s].vec_world;
+        float m2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+        if (m2 > best_mag2) { best_mag2 = m2; sun[0] = v[0]; sun[1] = v[1]; sun[2] = v[2]; }
+    }
+    if (best_mag2 <= 1.0f) return;               /* no directional light (tunnel) */
+    float mag = sqrtf(best_mag2);
+    sun[0] /= mag; sun[1] /= mag; sun[2] /= mag;
+    /* [Y-CONVENTION] Zone dirs live in the original's Y-flipped lighting
+     * convention (+Y = toward the sky); the shadow march happens in POSITION
+     * space (world +Y is DOWN) — flip so rays leave the ground upward. */
+    sun[1] = -sun[1];
+    if (sun[1] >= -0.05f) return;                /* sun at/below horizon — skip */
+
+    /* Directional dominance: how much of the zone's lighting is the sun vs
+     * flat ambient. |vec_world| ~ 4*intensity (dir_shorts ~4096 / 1024). */
+    float dir_lum = mag * 0.25f;
+    float amb     = s_ambient_intensity > 0.0f ? s_ambient_intensity : 1.0f;
+    float dom     = dir_lum / (dir_lum + amb);
+    float strength = ((float)td5_light2_shadow_strength() / 100.0f) * dom;
+    if (strength <= 0.01f) return;
+
+    /* March tuning (env-overridable for look iteration). */
+    static float s_dist = -1.0f, s_thick = -1.0f;
+    static int   s_steps = -1;
+    if (s_steps < 0) {
+        const char *e;
+        s_steps = ((e = getenv("TD5RE_SHADOW_STEPS")) && e[0]) ? atoi(e)         : 24;
+        s_dist  = ((e = getenv("TD5RE_SHADOW_DIST"))  && e[0]) ? (float)atof(e)  : 2500.0f;
+        s_thick = ((e = getenv("TD5RE_SHADOW_THICK")) && e[0]) ? (float)atof(e)  : 600.0f;
+        if (s_steps < 4)  s_steps = 4;
+        if (s_steps > 64) s_steps = 64;
+        TD5_LOG_I(LOG_TAG, "light2: shadow pass steps=%d dist=%.0f thick=%.0f",
+                  s_steps, (double)s_dist, (double)s_thick);
+    }
+
+    float basis9[9];
+    for (int i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
+    float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
+    float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
+
+    td5_plat_render_apply_shadow(cam, basis9,
+                                 s_focal_length, s_center_x, s_center_y,
+                                 (float)vp_x, (float)vp_y,
+                                 depth_scale, NEAR_DEPTH_OFFSET,
+                                 sun, strength,
+                                 s_steps, s_dist, s_thick, 8.0f,
+                                 (float)s_viewport_width, (float)s_viewport_height);
+}
+
+/* [LIGHT2 P3] Screen-space reflections for the CURRENT viewport. Reflective
+ * materials (car paint, glass — per-id reflectivity from td5_material) mirror
+ * the already lit + shadowed scene; up-facing road pixels gain reflectivity
+ * in non-clear weather ("wet roads"). Call AFTER td5_render_apply_light_pass.
+ * March tuning env knobs (dev): TD5RE_SSR_STEPS / _DIST / _THICK / _INTENSITY. */
+void td5_render_apply_ssr_pass(int vp_x, int vp_y)
+{
+    if (!td5_light2_active() || !td5_light2_reflections()) return;
+
+    /* Per-material base reflectivity LUT (ids 0..7; beyond COUNT = 0). */
+    float refl8[8];
+    for (int i = 0; i < 8; i++)
+        refl8[i] = (i < TD5_MAT_COUNT) ? td5_material_params(i)->reflectivity : 0.0f;
+    refl8[TD5_MAT_NONE] = 0.0f;   /* sentinel never reflects */
+
+    /* Wet roads: any non-clear weather makes up-facing DEFAULT-material
+     * pixels reflective. */
+    float wet = (td5_light2_wet_roads() && g_td5.weather != TD5_WEATHER_CLEAR)
+              ? 0.35f : 0.0f;
+
+    static float s_dist = -1.0f, s_thick = -1.0f, s_intensity = -1.0f;
+    static int   s_steps = -1;
+    if (s_steps < 0) {
+        const char *e;
+        s_steps     = ((e = getenv("TD5RE_SSR_STEPS"))     && e[0]) ? atoi(e)        : 24;
+        s_dist      = ((e = getenv("TD5RE_SSR_DIST"))      && e[0]) ? (float)atof(e) : 4000.0f;
+        s_thick     = ((e = getenv("TD5RE_SSR_THICK"))     && e[0]) ? (float)atof(e) : 500.0f;
+        s_intensity = ((e = getenv("TD5RE_SSR_INTENSITY")) && e[0]) ? (float)atof(e) : 0.8f;
+        if (s_steps < 4)  s_steps = 4;
+        if (s_steps > 64) s_steps = 64;
+        TD5_LOG_I(LOG_TAG, "light2: SSR pass steps=%d dist=%.0f thick=%.0f intensity=%.2f",
+                  s_steps, (double)s_dist, (double)s_thick, (double)s_intensity);
+    }
+
+    float basis9[9];
+    for (int i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
+    float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
+    float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
+
+    td5_plat_render_apply_ssr(cam, basis9,
+                              s_focal_length, s_center_x, s_center_y,
+                              (float)vp_x, (float)vp_y,
+                              depth_scale, NEAR_DEPTH_OFFSET,
+                              refl8, wet, s_intensity,
+                              s_steps, s_dist, s_thick,
+                              (float)s_viewport_width, (float)s_viewport_height);
 }
 
 /* [LIGHT2 P0] Per-frame gate for the G-buffer feed. Call once per rendered
@@ -290,9 +408,14 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
 
     int count = mesh->total_vertex_count;
     /* [parallel-build] lighting writes target the pane workspace copy (the
-     * blob is read-only in the render path); normals stay blob (read-only). */
+     * blob is read-only in the render path); normals stay blob (read-only).
+     * [LIGHT2 P1] bit 0 of normals_offset tags a DERIVED flat-normal stream
+     * (td5_track_derive_missing_normals): those meshes feed the G-buffer only
+     * — their artist-baked vertex lighting is left exactly as loaded. */
     TD5_MeshVertex *verts   = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
-    TD5_VertexNormal *norms = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
+    uintptr_t nraw          = (uintptr_t)mesh->normals_offset;
+    int norms_derived       = (int)(nraw & 1u);
+    TD5_VertexNormal *norms = (TD5_VertexNormal *)(nraw & ~(uintptr_t)1);
     /* Blob (read-only original) — read the un-modulated baked grey from here so
      * the per-frame zone modulation never compounds on the workspace copy. */
     TD5_MeshVertex *vb = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
@@ -399,11 +522,33 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
                 wny = nR[3] * nx + nR[4] * ny + nR[5] * nz;
                 wnz = nR[6] * nx + nR[7] * ny + nR[8] * nz;
             }
-            int bx = clampi((int)(wnx * 127.0f) + 128, 1, 255);
-            int by = clampi((int)(wny * 127.0f) + 128, 1, 255);
-            int bz = clampi((int)(wnz * 127.0f) + 128, 1, 255);
-            pack[i] = ((uint32_t)bx << 16) | ((uint32_t)by << 8) | (uint32_t)bz;
+            /* [LIGHT2 P1] Zero-length normal = "unknown" (derived streams
+             * leave billboard/degenerate corners at zero): keep pack[i] = 0
+             * so those pixels stay G-buffer-less instead of getting a bogus
+             * mid-grey normal. */
+            if (wnx != 0.0f || wny != 0.0f || wnz != 0.0f) {
+                /* [Y-CONVENTION] The G-buffer stores normals in POSITION
+                 * space (world +Y is DOWN, so "up" = -Y). Authored normals +
+                 * the zone light dirs live in the original's Y-FLIPPED
+                 * lighting convention (car roofs = +Y, sun dirs = +Y) — the
+                 * CPU vertex lighting stays wholly in that convention, but
+                 * the GPU passes (N.L vs reconstructed positions, shadow /
+                 * SSR ray marching) do geometry in position space, so the Y
+                 * must flip here or roads reject overhead light and sun rays
+                 * march into the ground. */
+                int bx = clampi((int)( wnx * 127.0f) + 128, 1, 255);
+                int by = clampi((int)(-wny * 127.0f) + 128, 1, 255);
+                int bz = clampi((int)( wnz * 127.0f) + 128, 1, 255);
+                pack[i] = ((uint32_t)bx << 16) | ((uint32_t)by << 8) | (uint32_t)bz;
+            }
         }
+
+        /* [LIGHT2 P1] Derived flat normals exist ONLY to feed the G-buffer —
+         * the mesh keeps its artist-baked vertex lighting exactly as loaded
+         * (the original never runtime-lights track geometry, and these meshes
+         * were never lit by the port before either). */
+        if (norms_derived)
+            continue;
 
         if (prelit && (vb[i].lighting & 0xFF000000u) != 0u) {
             uint32_t c = vb[i].lighting;          /* keep the #13 baked TD6 grey... */
@@ -3285,9 +3430,10 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot)
     mode = pe->sub_mode;
 
     /* [parallel-build] proj_u/proj_v writes target the pane workspace copy
-     * (mode 3 also READS view_x/view_y, which only exist there). */
+     * (mode 3 also READS view_x/view_y, which only exist there).
+     * [LIGHT2 P1] mask the derived-normals tag (bit 0). */
     verts      = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
-    normals    = (TD5_VertexNormal *)(uintptr_t)mesh->normals_offset;
+    normals    = (TD5_VertexNormal *)((uintptr_t)mesh->normals_offset & ~(uintptr_t)1);
     vert_count = mesh->total_vertex_count;
     if (!verts || vert_count <= 0) return;
 

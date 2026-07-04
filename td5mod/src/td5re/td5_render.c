@@ -1214,7 +1214,13 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         vert_data >= g_rs->vtx_work &&
         vert_data + vert_count <= g_rs->vtx_work + g_rs->vtx_pack_cap) {
         have_pack = 1;
-        poly_matid = (uint32_t)td5_material_id_for_page(tex_page) << 24;
+        /* [P3] Vehicle bodies: the light basis carries a body->world rotation
+         * exactly for rotated (vehicle/prop) meshes — classify those CARBODY
+         * so car paint gets its SSR sheen; everything else by texture-page
+         * class. */
+        poly_matid = (uint32_t)(s_light_basis_has_rot
+                                ? TD5_MAT_CARBODY
+                                : td5_material_id_for_page(tex_page)) << 24;
     }
 
     for (int i = 0; i < vert_count; i++) {
@@ -1321,6 +1327,95 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     }
     clipped_count = out_count;
 
+    /* [LIGHT2] Render-time street-lamp capture — anchored on the POLE
+     * sprite; the light registers at the head, shifted toward the road.
+     *
+     * WHY NOT THE GLOW SPHERE: the visible lamp glows are painted on the
+     * DISTANT SKYLINE BACKDROP (page 474 string at constant world height,
+     * 28k..160k units out, angularly aligned to sit on the post tips from
+     * the driver's eye — a 1999 backdrop illusion, confirmed by raw view
+     * dumps). There is no lamp-local glow geometry to anchor to.
+     *
+     * Pole silhouette is unique in the track set: tall thin alpha-keyed
+     * sprite (Moscow page 371: 58..150 wide x 660..1430 tall, >=5:1;
+     * pedestrians 2.3:1 and 297 wide, trees square, banners wide, fence
+     * posts short). The light lands at the pole TOP shifted 340 units
+     * toward the camera's XZ (the camera is on the road, so the shift
+     * points down the lamp arm, over the roadway) — and captures reach
+     * 20000 units so lamps are lit well before the player arrives. */
+    if (out_count >= 3 && out_count <= 5 &&
+        td5_light2_active() && td5_light_street_lights() &&
+        td5_material_id_for_page(tex_page) == TD5_MAT_CUTOUT) {
+        float xmin = out_vx[0], xmax = out_vx[0];
+        float hmin = out_vy[0], hmax = out_vy[0];
+        float zmin = out_vz[0], zmax = out_vz[0];
+        for (int i2 = 1; i2 < out_count; i2++) {
+            if (out_vx[i2] < xmin) xmin = out_vx[i2];
+            if (out_vx[i2] > xmax) xmax = out_vx[i2];
+            if (out_vy[i2] < hmin) hmin = out_vy[i2];
+            if (out_vy[i2] > hmax) hmax = out_vy[i2];
+            if (out_vz[i2] < zmin) zmin = out_vz[i2];
+            if (out_vz[i2] > zmax) zmax = out_vz[i2];
+        }
+        float wx_ext = xmax - xmin, wz_ext = zmax - zmin;
+        float w = (wx_ext > wz_ext) ? wx_ext : wz_ext;
+        float h = hmax - hmin;
+        if (h >= 500.0f && h <= 1700.0f && w >= 30.0f && w <= 220.0f &&
+            h >= 5.0f * w) {
+            float vx0 = 0, vy0 = 0, vz0 = 0;
+            for (int i2 = 0; i2 < out_count; i2++) { vx0 += out_vx[i2]; vy0 += out_vy[i2]; vz0 += out_vz[i2]; }
+            float invn = 1.0f / (float)out_count;
+            vx0 *= invn; vy0 *= invn; vz0 *= invn;
+            if (vz0 > s_near_clip && vz0 < 20000.0f) {
+                float wx = s_camera_pos[0] + vx0 * s_camera_basis[0] + vy0 * s_camera_basis[3] + vz0 * s_camera_basis[6];
+                float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
+                float wz = s_camera_pos[2] + vx0 * s_camera_basis[2] + vy0 * s_camera_basis[5] + vz0 * s_camera_basis[8];
+                float top_wy = wy - h * 0.5f;      /* pole top (up = -Y) */
+                float above_cam = s_camera_pos[1] - top_wy;
+                if (above_cam > 300.0f && above_cam < 2500.0f) {
+                    /* Shift toward the road: from the pole toward the
+                     * camera's ground position (the car IS on the road). */
+                    float ddx = s_camera_pos[0] - wx, ddz = s_camera_pos[2] - wz;
+                    float dlen = (float)sqrt((double)(ddx * ddx + ddz * ddz));
+                    if (dlen > 1.0f) {
+                        float s = 340.0f / dlen;
+                        wx += ddx * s; wz += ddz * s;
+                    }
+                    td5_light_lamps_capture(wx, top_wy, wz);
+                }
+            }
+        }
+    }
+
+    /* [DEV: TD5RE_GLOW_SCAN=1] Render-side fixture identification: log each
+     * texture page whose polygons draw ELEVATED near the camera (lamp posts /
+     * halos), with a reconstructed world position. Ground truth regardless of
+     * which asset path the geometry came from. One line per page. */
+    {
+        static int s_glow_scan = -1;
+        if (s_glow_scan < 0) { const char *e = getenv("TD5RE_GLOW_SCAN"); s_glow_scan = (e && e[0] && e[0] != '0') ? 1 : 0; }
+        if (s_glow_scan && tex_page >= 0 && tex_page < 1024 && s_level_pass_active) {
+            static uint8_t s_seen[1024];
+            if (!s_seen[tex_page]) {
+                float vx0 = 0, vy0 = 0, vz0 = 0;
+                for (int i2 = 0; i2 < out_count; i2++) { vx0 += out_vx[i2]; vy0 += out_vy[i2]; vz0 += out_vz[i2]; }
+                float inv2 = 1.0f / (float)out_count;
+                vx0 *= inv2; vy0 *= inv2; vz0 *= inv2;
+                float wx = s_camera_pos[0] + vx0 * s_camera_basis[0] + vy0 * s_camera_basis[3] + vz0 * s_camera_basis[6];
+                float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
+                float wz = s_camera_pos[2] + vx0 * s_camera_basis[2] + vy0 * s_camera_basis[5] + vz0 * s_camera_basis[8];
+                float dx = wx - s_camera_pos[0], dz = wz - s_camera_pos[2];
+                float above = s_camera_pos[1] - wy;   /* +Y down: above camera = smaller Y */
+                if (dx * dx + dz * dz < 3500.0f * 3500.0f && above > 300.0f && above < 3500.0f) {
+                    s_seen[tex_page] = 1;
+                    TD5_LOG_I(LOG_TAG, "GLOWSCAN page=%d trans=%d wpos=(%.0f,%.0f,%.0f) above=%.0f",
+                              tex_page, td5_asset_get_page_transparency(tex_page),
+                              wx, wy, wz, above);
+                }
+            }
+        }
+    }
+
     /* --- Backface cull (cross product winding test) --- */
     {
         float ax = clipped[1].screen_x - clipped[0].screen_x;
@@ -1393,6 +1488,38 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         flush_immediate_internal();
         s_previous_texture_page = s_current_texture_page;
         s_current_texture_page  = tex_page;
+    }
+
+    /* [DEV: TD5RE_LAMP_TINT=<page>] paint every polygon of one texture page
+     * opaque magenta — identifies which page a visible element draws from. */
+    {
+        static int s_tint_page = -2;
+        if (s_tint_page == -2) { const char *e = getenv("TD5RE_LAMP_TINT"); s_tint_page = (e && e[0]) ? atoi(e) : -1; }
+        if (s_tint_page >= 0 && tex_page == s_tint_page) {
+            for (int i = 0; i < clipped_count; i++) clipped[i].diffuse = 0xFFFF00FFu;
+            static int s_tint_n = 0;
+            {
+                float xmin = out_vx[0], xmax = out_vx[0], hmn = out_vy[0], hmx = out_vy[0];
+                float vx0 = 0, vy0 = 0, vz0 = 0;
+                for (int i = 0; i < out_count; i++) {
+                    if (out_vx[i] < xmin) xmin = out_vx[i];
+                    if (out_vx[i] > xmax) xmax = out_vx[i];
+                    if (out_vy[i] < hmn) hmn = out_vy[i];
+                    if (out_vy[i] > hmx) hmx = out_vy[i];
+                    vx0 += out_vx[i]; vy0 += out_vy[i]; vz0 += out_vz[i];
+                }
+                float invn = 1.0f / (float)out_count;
+                vx0 *= invn; vy0 *= invn; vz0 *= invn;
+                float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
+                float above_l = s_camera_pos[1] - wy;
+                if (s_tint_n < 25) {
+                    s_tint_n++;
+                    TD5_LOG_I(LOG_TAG, "tint raw: vy0=%.0f vz0=%.0f above=%.0f b4=%.3f sy=%.0f cy=%.0f campos_y=%.0f",
+                              vy0, vz0, above_l, s_camera_basis[4],
+                              clipped[0].screen_y, s_center_y, s_camera_pos[1]);
+                }
+            }
+        }
     }
 
     /* --- Triangle fan decomposition --- */

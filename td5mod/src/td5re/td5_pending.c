@@ -62,6 +62,17 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Street lamps (EXPERIMENTAL, StreetLights=1 to enable): pools under posts",
+    "Shadows: no duplicated/offset echo copies (fence area, Moscow)",
+    "Reflections P3: wet road mirrors cars/buildings on rainy Moscow",
+    "Reflections P3: car paint/glass sheen at grazing angles",
+    "Reflections P3: no smearing/ghosting artifacts while driving",
+    "Reflections P3: Reflections=0 removes all of it (A/B)",
+    "Shadows P2: cars/walls cast shadows on the road (drive daylight)",
+    "Shadows P2: no shadow acne/flicker on the road while driving",
+    "Shadows P2: tunnels/ambient zones cast NO sun shadow",
+    "Shadows P2: headlight beam blocked by the car in front",
+    "Shadows P2: SunShadows=0 removes all of it (A/B)",
     "Lighting v2: authored zone colours show (dusk/tunnel tint)",
     "Lighting v2: headlights don't shine through walls (N.L)",
     "Lighting v2: Mode=0 looks identical to the old build (A/B)",

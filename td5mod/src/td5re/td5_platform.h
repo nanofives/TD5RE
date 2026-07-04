@@ -712,7 +712,40 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
                                   float focal, float center_x, float center_y,
                                   float vp_x, float vp_y,
                                   float depth_scale, float depth_bias,
-                                  const TD5_LightGPU *lights, int light_count);
+                                  const TD5_LightGPU *lights, int light_count,
+                                  int occl_steps, float pane_w, float pane_h);
+
+/* [LIGHTING REWORK P2] Screen-space ray-marched sun-shadow pass over the
+ * CURRENT viewport: darkens pixels whose path toward `sun_dir` is blocked by
+ * on-screen geometry (depth-buffer march). Call AFTER the opaque world,
+ * BEFORE td5_plat_render_apply_lights (additive lights must not be darkened).
+ *   sun_dir  : surface->light direction, world space, unit length
+ *   strength : 0..1 max darkening in full shadow
+ *   steps/max_dist/thickness/start_off : march tuning (world / view-z units)
+ *   pane_w/pane_h : viewport size in pixels (march clamps to the pane) */
+void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
+                                  float focal, float center_x, float center_y,
+                                  float vp_x, float vp_y,
+                                  float depth_scale, float depth_bias,
+                                  const float sun_dir[3], float strength,
+                                  int steps, float max_dist, float thickness,
+                                  float start_off, float pane_w, float pane_h);
+
+/* [LIGHTING REWORK P3] Screen-space reflections over the CURRENT viewport:
+ * reflective materials (per-id reflectivity in refl8[0..7], + wet_boost on
+ * up-facing DEFAULT-material pixels) mirror the already lit + shadowed scene
+ * via depth-buffer ray marching. Call AFTER td5_plat_render_apply_lights,
+ * BEFORE the translucent VFX/HUD.
+ *   refl8     : base reflectivity per material id 0..7 (0..1)
+ *   wet_boost : extra reflectivity for up-facing roads (rain), 0 = dry
+ *   intensity : master reflection intensity 0..1 */
+void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
+                               float focal, float center_x, float center_y,
+                               float vp_x, float vp_y,
+                               float depth_scale, float depth_bias,
+                               const float refl8[8], float wet_boost,
+                               float intensity, int steps, float max_dist,
+                               float thickness, float pane_w, float pane_h);
 
 /* [LIGHTING REWORK P0] Per-frame G-buffer gate. on=1: the backend clears the
  * normal+material G-buffer and writes it from z-writing opaque draws (COLOR1

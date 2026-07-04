@@ -21,11 +21,12 @@
 
 enum {
     TD5_MAT_NONE     = 0,   /* emissive / unlit sentinel — never packed      */
-    TD5_MAT_DEFAULT  = 1,   /* opaque world geometry                         */
+    TD5_MAT_DEFAULT  = 1,   /* opaque world geometry (roads reflect when wet) */
     TD5_MAT_CUTOUT   = 2,   /* alpha-tested (fences, foliage)                */
     TD5_MAT_GLASS    = 3,   /* translucent-blend pages                       */
     TD5_MAT_GLOW     = 4,   /* additive pages (street-light halos etc.)      */
-    TD5_MAT_COUNT    = 5
+    TD5_MAT_CARBODY  = 5,   /* [P3] vehicle bodies (rotated-basis meshes)    */
+    TD5_MAT_COUNT    = 6
 };
 
 /* Per-material lighting response. Consumed by the GPU passes from P1 on;

@@ -27,8 +27,12 @@
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
 #include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
+#include "td5_light2.h"   /* [LIGHT2 P1] derive-normals gate */
+#include "td5_light.h"    /* [LIGHT2] street-lamp light registration */
+#include "td5_material.h" /* [LIGHT2] page-class cache reset at track load */
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>   /* sscanf (TD5RE_LAMP_SCAN dev diagnostic) */
 #include <math.h>
 
 #define LOG_TAG "track"
@@ -7503,6 +7507,324 @@ void td5_track_dim_additive_billboard_meshes(void)
     TD5_LOG_I("track",
         "additive billboard dim: %d/%d billboard meshes had type-3 pages "
         "(halved per-vertex diffuse)", dimmed, total_bb);
+}
+
+/* ========================================================================
+ * [LIGHT2] Street-lamp light registration
+ *
+ * The track's light fixtures are additive glow billboards (mesh header tag
+ * 1/2, first command on a type-3 page) — the SAME detection the billboard
+ * dim pass above uses. Their bounding_center is authored in ABSOLUTE world
+ * float space [CONFIRMED @ 0x42dcad — the frustum cull reads +0x10/14/18
+ * directly with no origin add], i.e. exactly the space the dynamic-light
+ * registry wants. Register each fixture so td5_light_emit_street_lamps can
+ * promote the nearest few to real point lights per frame.
+ *
+ * One-shot per track load; call AFTER td5_asset_load_track_textures (needs
+ * the page transparency table, like the dim pass).
+ * ======================================================================== */
+void td5_track_register_lamp_lights(void)
+{
+    td5_light_lamps_reset();
+    if (!td5_light2_active()) return;
+
+    static int s_reg_dbg = -1;
+    if (s_reg_dbg < 0) { const char *e = getenv("TD5RE_LAMP_LOG"); s_reg_dbg = (e && e[0] && e[0] != '0') ? 1 : 0; }
+
+    /* ALL lamp lights now come from RENDER-TIME capture of additive glow
+     * quads (td5_light_lamps_capture from clip_and_submit_polygon) — the
+     * content-verified glow pages (Moscow: 474 post halos, 253..256 quadrant
+     * halos) are additive, and static extraction of their positions from the
+     * display lists lands wrong (placement folds; several documented dead
+     * ends in the memory topic file). This pass now only resets the registry
+     * on track load; the s_reg_dbg knob is consumed by the capture logs. */
+    (void)s_reg_dbg;
+    /* The material page->class cache fills lazily and pages queried BEFORE
+     * this track's textures loaded are cached with stale classes (page 474's
+     * GLOW class was cached as DEFAULT from a frontend-era query — no glow
+     * captures at all). Reset it now that the transparency table is fresh. */
+    td5_material_reset_cache();
+    /* Select the level's content-classified glow pages for the capture gate. */
+    td5_light_lamps_set_level(td5_asset_level_number(g_td5.track_index));
+    TD5_LOG_I("track", "street lamps: registry reset (render-time capture active)");
+
+    /* TD5RE_LAMP_SCAN="x,z": one-shot dump of every mesh whose origin sits
+     * within 5000 world units of the given XZ — per-command page ids,
+     * transparency classes, counts and local geometry extents. Asset
+     * identification aid (what IS a lamp post made of?). Dev-only. */
+    const char *scan = getenv("TD5RE_LAMP_SCAN");
+    if (scan && scan[0]) {
+        float tx = 0.0f, tz = 0.0f;
+        if (sscanf(scan, "%f,%f", &tx, &tz) == 2) {
+            TD5_LOG_I("track", "SCAN: %d display lists total", s_models_display_list_count);
+            for (int dl = 0; dl < s_models_display_list_count; dl++) {
+                if (s_models_entry_offsets[dl] == 0) continue;
+                uint8_t *bb = s_models_blob + s_models_entry_offsets[dl];
+                uint32_t sc = *(const uint32_t *)bb;
+                if (sc > 256) { TD5_LOG_I("track", "SCAN: dl=%d sub_count=%u SKIPPED(>256)", dl, sc); continue; }
+                if (sc == 0) continue;
+                for (uint32_t j = 0; j < sc; j++) {
+                    uint32_t mp = *(const uint32_t *)(bb + 4 + j * 4);
+                    if (mp == 0) continue;
+                    TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)mp;
+                    if (!td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)))
+                        continue;
+                    if (m->commands_offset == 0 || m->vertices_offset == 0) continue;
+                    int cnt = m->total_vertex_count, cc = m->command_count;
+                    if (cnt <= 0 || cnt > 65536 || cc <= 0 || cc > 4096) continue;
+                    TD5_MeshVertex *bv = (TD5_MeshVertex *)(uintptr_t)m->vertices_offset;
+                    const TD5_PrimitiveCmd *cd = (const TD5_PrimitiveCmd *)(uintptr_t)m->commands_offset;
+                    if ((uintptr_t)bv < 0x10000u || (uintptr_t)cd < 0x10000u) continue;
+                    float ox = m->origin_x / 256.0f, oy = m->origin_y / 256.0f,
+                          oz = m->origin_z / 256.0f;
+                    /* PER-COMMAND filter: near-road fixtures often live as a
+                     * few commands inside big merged meshes centered far away. */
+                    static int s_scan_lines = 0;
+                    int cur = 0;
+                    for (int ci = 0; ci < cc; ci++) {
+                        int need = cd[ci].triangle_count * 3 + cd[ci].quad_count * 4;
+                        int i0;
+                        if (cd[ci].vertex_data_ptr != 0) {
+                            uintptr_t vp2 = (uintptr_t)cd[ci].vertex_data_ptr;
+                            const TD5_MeshVertex *cv2 = (vp2 < 0x10000u)
+                                ? (const TD5_MeshVertex *)((uint8_t *)m + vp2)
+                                : (const TD5_MeshVertex *)vp2;
+                            i0 = (int)(cv2 - bv);
+                            if (i0 < 0 || i0 + need > cnt) continue;
+                        } else {
+                            i0 = cur;
+                            if (cur + need > cnt) break;
+                            cur += need;
+                        }
+                        if (need <= 0) continue;
+                        float ax = 0, ay = 0, az = 0, miny = 1e9f, maxy = -1e9f;
+                        for (int v = 0; v < need; v++) {
+                            float y = bv[i0 + v].pos_y;
+                            ax += bv[i0 + v].pos_x; ay += y; az += bv[i0 + v].pos_z;
+                            if (y < miny) miny = y; if (y > maxy) maxy = y;
+                        }
+                        float ninv = 1.0f / (float)need;
+                        float wx = ox + ax * ninv, wy = oy + ay * ninv, wz = oz + az * ninv;
+                        float ddx = wx - tx, ddz = wz - tz;
+                        if (ddx * ddx + ddz * ddz <= 2500.0f * 2500.0f) {
+                            if (s_scan_lines < 70) {
+                                s_scan_lines++;
+                                TD5_LOG_I("track", "SCAN dl=%d sub=%u tag=%d cmd=%d/%d op=%d page=%d trans=%d tri=%d quad=%d wpos=(%.0f,%.0f,%.0f) wY=[%.0f..%.0f]",
+                                          dl, j, (int)m->texture_page_id, ci, cc,
+                                          (int)cd[ci].dispatch_type, (int)cd[ci].texture_page_id,
+                                          td5_asset_get_page_transparency(cd[ci].texture_page_id),
+                                          (int)cd[ci].triangle_count, (int)cd[ci].quad_count,
+                                          wx, wy, wz, oy + miny, oy + maxy);
+                            }
+                        }
+                        /* QUAD-LEVEL: individual quads near the target and
+                         * 400..2000 units ABOVE the road (up = -Y) — lamp
+                         * halos / post tops inside merged commands. */
+                        int qb = i0 + cd[ci].triangle_count * 3;
+                        for (int q = 0; q < cd[ci].quad_count; q++) {
+                            const TD5_MeshVertex *qv = bv + qb + q * 4;
+                            float qx = ox + 0.25f * (qv[0].pos_x + qv[1].pos_x + qv[2].pos_x + qv[3].pos_x);
+                            float qy = oy + 0.25f * (qv[0].pos_y + qv[1].pos_y + qv[2].pos_y + qv[3].pos_y);
+                            float qz = oz + 0.25f * (qv[0].pos_z + qv[1].pos_z + qv[2].pos_z + qv[3].pos_z);
+                            float qdx = qx - tx, qdz = qz - tz;
+                            if (qdx * qdx + qdz * qdz > 2500.0f * 2500.0f) continue;
+                            if (qy > -9000.0f || qy < -13000.0f) continue;  /* not ~0..4200 above road */
+                            if (s_scan_lines >= 70) break;
+                            s_scan_lines++;
+                            TD5_LOG_I("track", "SCANQ dl=%d sub=%u tag=%d cmd=%d page=%d trans=%d q=%d qpos=(%.0f,%.0f,%.0f)",
+                                      dl, j, (int)m->texture_page_id, ci,
+                                      (int)cd[ci].texture_page_id,
+                                      td5_asset_get_page_transparency(cd[ci].texture_page_id),
+                                      q, qx, qy, qz);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ========================================================================
+ * [LIGHT2 P1] Derived face normals for normal-less track meshes
+ *
+ * Most MODELS.DAT track meshes ship WITHOUT a normals stream (the original
+ * never runtime-lights track geometry — vertex intensity is baked). The
+ * lighting rework's G-buffer, sun-shadow backface skip and SSR reflections
+ * all want per-pixel normals, so this one-shot post-load pass computes FLAT
+ * per-face normals (assigned to each expanded corner vertex; corners are
+ * never shared so no smoothing is possible) for every mesh whose
+ * normals_offset is 0, oriented to the upper hemisphere (+Y up — the same
+ * convention the TD6 converter uses so ground/roofs light correctly).
+ *
+ * The derived stream is tagged by setting BIT 0 of the stored pointer
+ * (mallocs are >= 8-aligned so the bit is free). Consumers mask it off;
+ * td5_render_compute_vertex_lighting treats tagged streams as "G-buffer
+ * feed ONLY" — the artist-baked vertex lighting stays byte-identical, the
+ * mesh is never re-lit (matching the original's behavior).
+ *
+ * Allocations live for one track load and are freed at the start of the
+ * next pass; any still-tagged header offset encountered during the walk is
+ * reset first (covers a cached blob being re-passed).
+ * ======================================================================== */
+static TD5_VertexNormal **s_derived_norms = NULL;
+static int s_derived_norm_count = 0, s_derived_norm_cap = 0;
+
+static void track_derived_norms_free_all(void)
+{
+    for (int i = 0; i < s_derived_norm_count; i++)
+        free(s_derived_norms[i]);
+    s_derived_norm_count = 0;
+}
+
+static int track_derived_norms_register(TD5_VertexNormal *p)
+{
+    if (s_derived_norm_count >= s_derived_norm_cap) {
+        int cap = s_derived_norm_cap > 0 ? s_derived_norm_cap * 2 : 256;
+        TD5_VertexNormal **nn =
+            (TD5_VertexNormal **)realloc(s_derived_norms, (size_t)cap * sizeof(*nn));
+        if (!nn) return 0;
+        s_derived_norms = nn;
+        s_derived_norm_cap = cap;
+    }
+    s_derived_norms[s_derived_norm_count++] = p;
+    return 1;
+}
+
+/* Unit face normal from three corners, flipped into the upper hemisphere
+ * (winding is mixed in MODELS.DAT — CullMode is NONE — so the raw sign is
+ * meaningless; preferring +Y matches how the zone sun lights ground). Zero
+ * output = degenerate face (consumer leaves those vertices "no normal"). */
+static void track_face_normal_up(const TD5_MeshVertex *a,
+                                 const TD5_MeshVertex *b,
+                                 const TD5_MeshVertex *c,
+                                 float out[3])
+{
+    float ux = b->pos_x - a->pos_x, uy = b->pos_y - a->pos_y, uz = b->pos_z - a->pos_z;
+    float vx = c->pos_x - a->pos_x, vy = c->pos_y - a->pos_y, vz = c->pos_z - a->pos_z;
+    float nx = uy * vz - uz * vy;
+    float ny = uz * vx - ux * vz;
+    float nz = ux * vy - uy * vx;
+    float len2 = nx * nx + ny * ny + nz * nz;
+    if (len2 < 1e-12f) { out[0] = out[1] = out[2] = 0.0f; return; }
+    float inv = 1.0f / sqrtf(len2);
+    nx *= inv; ny *= inv; nz *= inv;
+    if (ny < -0.01f) { nx = -nx; ny = -ny; nz = -nz; }
+    out[0] = nx; out[1] = ny; out[2] = nz;
+}
+
+void td5_track_derive_missing_normals(void)
+{
+    track_derived_norms_free_all();
+    if (!td5_light2_active()) return;
+
+    int derived_meshes = 0, skipped_have = 0, total_faces = 0;
+
+    for (int dl = 0; dl < s_models_display_list_count; dl++) {
+        if (s_models_entry_offsets[dl] == 0) continue;
+        uint8_t *block_base = s_models_blob + s_models_entry_offsets[dl];
+        uint32_t sub_count = *(const uint32_t *)block_base;
+        if (sub_count == 0 || sub_count > 256) continue;
+
+        for (uint32_t j = 0; j < sub_count; j++) {
+            uint32_t mesh_ptr_val = *(const uint32_t *)(block_base + 4 + j * 4);
+            if (mesh_ptr_val == 0) continue;
+
+            TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
+            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader)))
+                continue;
+
+            /* Stale tag from a previous pass over a cached blob: the memory
+             * was just freed above — reset and re-derive. */
+            if (mesh->normals_offset & 1u)
+                mesh->normals_offset = 0;
+
+            if (mesh->normals_offset != 0) { skipped_have++; continue; }
+            /* Billboard meshes (tag 1/2) are camera-facing sprites — skip. */
+            if (mesh->texture_page_id == 1 || mesh->texture_page_id == 2)
+                continue;
+            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0)
+                continue;
+            int count = mesh->total_vertex_count;
+            int cmd_count = mesh->command_count;
+            if (count <= 0 || count > 65536 || cmd_count <= 0 || cmd_count > 4096)
+                continue;
+
+            TD5_MeshVertex *base_verts =
+                (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+            TD5_PrimitiveCmd *cmds =
+                (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+            if ((uintptr_t)base_verts < 0x10000u || (uintptr_t)cmds < 0x10000u)
+                continue;
+
+            TD5_VertexNormal *nn =
+                (TD5_VertexNormal *)calloc((size_t)count, sizeof(TD5_VertexNormal));
+            if (!nn) return;                 /* OOM — stop deriving, keep what we have */
+            if (!track_derived_norms_register(nn)) { free(nn); return; }
+
+            /* Walk commands with the SAME sequential-cursor rules as
+             * td5_render_prepared_mesh so corner indices line up 1:1. */
+            int cursor = 0;
+            for (int ci = 0; ci < cmd_count; ci++) {
+                const TD5_PrimitiveCmd *cmd = &cmds[ci];
+                int opcode = cmd->dispatch_type;
+                if (opcode < 0 || opcode > 6) continue;
+                int needed = cmd->triangle_count * 3 + cmd->quad_count * 4;
+
+                int idx0;
+                if (cmd->vertex_data_ptr != 0) {
+                    uintptr_t vp = (uintptr_t)cmd->vertex_data_ptr;
+                    const TD5_MeshVertex *cv;
+                    if (vp < 0x10000u)
+                        cv = (const TD5_MeshVertex *)((uint8_t *)mesh + vp);
+                    else
+                        cv = (const TD5_MeshVertex *)vp;
+                    idx0 = (int)(cv - base_verts);
+                    if (idx0 < 0 || idx0 + needed > count) continue;
+                } else {
+                    idx0 = cursor;
+                    if (cursor + needed > count) break;
+                    cursor += needed;
+                }
+
+                /* Opcode 4 = depth-sorted billboards (camera-facing) — leave
+                 * their corners at zero ("no normal"); all other opcodes are
+                 * plain tri/quad geometry. */
+                if (opcode == 4) continue;
+
+                float fn[3];
+                for (int t = 0; t < cmd->triangle_count; t++) {
+                    const TD5_MeshVertex *v = base_verts + idx0 + t * 3;
+                    track_face_normal_up(&v[0], &v[1], &v[2], fn);
+                    for (int k = 0; k < 3; k++) {
+                        nn[idx0 + t * 3 + k].nx = fn[0];
+                        nn[idx0 + t * 3 + k].ny = fn[1];
+                        nn[idx0 + t * 3 + k].nz = fn[2];
+                    }
+                    total_faces++;
+                }
+                int qbase = idx0 + cmd->triangle_count * 3;
+                for (int q = 0; q < cmd->quad_count; q++) {
+                    const TD5_MeshVertex *v = base_verts + qbase + q * 4;
+                    track_face_normal_up(&v[0], &v[1], &v[2], fn);
+                    for (int k = 0; k < 4; k++) {
+                        nn[qbase + q * 4 + k].nx = fn[0];
+                        nn[qbase + q * 4 + k].ny = fn[1];
+                        nn[qbase + q * 4 + k].nz = fn[2];
+                    }
+                    total_faces++;
+                }
+            }
+
+            /* Publish with the DERIVED tag in bit 0. */
+            mesh->normals_offset = (uint32_t)((uintptr_t)nn | 1u);
+            derived_meshes++;
+        }
+    }
+
+    TD5_LOG_I("track",
+        "derived normals: %d meshes (%d faces) got flat face normals; "
+        "%d meshes already had authored normals",
+        derived_meshes, total_faces, skipped_have);
 }
 
 /* ========================================================================

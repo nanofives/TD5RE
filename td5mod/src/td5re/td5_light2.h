@@ -43,4 +43,34 @@ int  td5_light2_mode(void);
  * vertex packing) should run. Hot paths read this once per mesh/frame. */
 int  td5_light2_active(void);
 
+/* ---- P2: screen-space ray-marched shadows ------------------------------ */
+/* [Lighting] SunShadows / --SunShadows=N: 1 = fullscreen sun-shadow pass
+ * (cars/walls shadow the road via depth-buffer ray marching). Only active
+ * when Mode>=1. */
+void td5_light2_set_sun_shadows(int on);
+int  td5_light2_sun_shadows(void);
+
+/* [Lighting] ShadowStrength / --ShadowStrength=N: max darkening in full
+ * shadow, percent 0..100 (default 45). Scaled at runtime by the zone's
+ * directional dominance so ambient-only zones (tunnels) cast nothing. */
+void td5_light2_set_shadow_strength(int percent);
+int  td5_light2_shadow_strength(void);
+
+/* [Lighting] LightOcclusion / --LightOcclusion=N: 1 = dynamic lights
+ * (headlights) march the depth buffer toward each light so they no longer
+ * shine through cars/walls. Only active when Mode>=1. */
+void td5_light2_set_light_occlusion(int on);
+int  td5_light2_light_occlusion(void);
+
+/* ---- P3: screen-space reflections -------------------------------------- */
+/* [Lighting] Reflections / --Reflections=N: 1 = SSR pass (car paint, glass,
+ * wet roads mirror the scene). Only active when Mode>=1. */
+void td5_light2_set_reflections(int on);
+int  td5_light2_reflections(void);
+
+/* [Lighting] WetRoads / --WetRoads=N: 1 = rainy weather makes up-facing
+ * roads reflective (needs Reflections=1). */
+void td5_light2_set_wet_roads(int on);
+int  td5_light2_wet_roads(void);
+
 #endif /* TD5_LIGHT2_H */

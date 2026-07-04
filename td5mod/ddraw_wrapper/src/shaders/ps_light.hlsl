@@ -28,6 +28,8 @@ cbuffer LightCB : register(b0)
     float4 upCy;           /* xyz = camera up,      w = viewport center Y       */
     float4 fwdDepthScale;  /* xyz = camera forward, w = depth scale (195000)    */
     float4 misc;           /* x = depth bias(64), y = light count, z = vpX, w = vpY */
+    /* [P2] x = occlusion march steps (0 = off), y = pane width, z = pane height */
+    float4 ext;
     /* per light, 3 float4: [0]=pos.xyz,range  [1]=color.rgb,intensity  [2]=dir.xyz,coneCos */
     float4 lights[LIGHT_MAX * 3];
 };
@@ -117,13 +119,59 @@ float4 main(PS_INPUT input) : SV_TARGET
          * little pool light. Pixels without G-buffer data keep the legacy
          * orientation-blind behavior. */
         float ndotl = 1.0;
+        float ndotl_raw = 1.0;
         if (hasN)
         {
             float3 Lv = toL / max(dist, 0.001);
-            ndotl = saturate(dot(N, Lv)) * 0.85 + 0.15;
+            ndotl_raw = dot(N, Lv);
+            ndotl = saturate(ndotl_raw) * 0.85 + 0.15;
         }
 
-        accum += ci.rgb * (ci.w * atten * cone * ndotl);
+        /* [P2] Light-occlusion march: step from the surface toward the light
+         * through the depth buffer; a blocking surface drops the contribution
+         * to a small leak factor (so headlights no longer light THROUGH cars
+         * and walls). Screen-space: off-screen blockers can't occlude.
+         *
+         * Self-shadow (acne) controls [user feedback round 2 — lit car bodies
+         * were covered in per-pixel speckle]: grazing surfaces (raw N.L < 0.3)
+         * skip the march entirely (they receive little light and are the
+         * noisiest self-occluders); the march starts at 25% of the way to the
+         * light (skips the receiver's OWN body); the depth bias grows with
+         * march distance. */
+        float vis = 1.0;
+        int osteps = (int)ext.x;
+        if (osteps > 0 && (!hasN || ndotl_raw > 0.3))
+        {
+            float3 Ld = toL / max(dist, 0.001);
+            /* per-pixel stratified jitter — see ps_shadow.hlsl rationale */
+            float jit = frac(sin(dot(float2(px), float2(12.9898, 78.233))) * 43758.5453);
+            [loop]
+            for (int s = 1; s <= osteps; s++)
+            {
+                float t = dist * (0.25 + 0.70 * (((float)s - jit) / (float)osteps));
+                float3 P = world + Ld * t;
+                float3 dd = P - camPosFocal.xyz;
+                float pvz = dot(dd, fwdDepthScale.xyz);
+                if (pvz <= 1.0) continue;
+                float pvx = dot(dd, rightCx.xyz);
+                float pvy = dot(dd, upCy.xyz);
+                float psx = -pvx * focal / pvz + rightCx.w;
+                float psy = -pvy * focal / pvz + upCy.w;
+                if (psx < 0.5 || psx >= ext.y - 0.5 || psy < 0.5 || psy >= ext.z - 0.5)
+                    break;
+                float sd = depthTex.Load(int3(int(psx + misc.z), int(psy + misc.w), 0)).r;
+                if (sd >= 0.99999) continue;
+                float svz = sd * depthScale + depthBias;
+                float dz = pvz - svz;
+                if (dz > 8.0 + 0.04 * t && dz < 500.0)
+                {
+                    vis = 0.15;            /* leak a little (soft look) */
+                    break;
+                }
+            }
+        }
+
+        accum += ci.rgb * (ci.w * atten * cone * ndotl * vis);
     }
 
     return float4(accum, 1.0);

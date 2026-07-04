@@ -239,3 +239,185 @@ void td5_light_emit_vehicle_headlights(void)
         s_logged = 1;
     }
 }
+
+/* ---- Street lamps (static world lights) -------------------------------- */
+
+#define TD5_LAMP_MAX 4096
+
+static float s_lamp_pos[TD5_LAMP_MAX][3];
+static int   s_lamp_count     = 0;
+static int   s_street_lights  = 0;   /* OFF by default: parked pending a lamp look-dev session */
+
+void td5_light_lamps_reset(void)          { s_lamp_count = 0; }
+int  td5_light_lamps_count(void)          { return s_lamp_count; }
+void td5_light_set_street_lights(int on)  { s_street_lights = on ? 1 : 0; }
+int  td5_light_street_lights(void)        { return s_street_lights; }
+
+void td5_light_lamps_add(float x, float y, float z)
+{
+    if (s_lamp_count >= TD5_LAMP_MAX) return;
+    s_lamp_pos[s_lamp_count][0] = x;
+    s_lamp_pos[s_lamp_count][1] = y;
+    s_lamp_pos[s_lamp_count][2] = z;
+    s_lamp_count++;
+}
+
+void td5_light_lamps_capture(float x, float y, float z)
+{
+    /* Dedupe: the same halo is captured every frame it is on screen, and the
+     * big soft glows are assembled from 2-4 quadrant quads whose centers sit
+     * a few hundred units apart — 650 merges a fixture's pieces while staying
+     * under the closest real post spacing (~1400). */
+    for (int i = 0; i < s_lamp_count; i++) {
+        float dx = s_lamp_pos[i][0] - x;
+        float dy = s_lamp_pos[i][1] - y;
+        float dz = s_lamp_pos[i][2] - z;
+        if (dx * dx + dy * dy + dz * dz < 650.0f * 650.0f)
+            return;
+    }
+    td5_light_lamps_add(x, y, z);
+    static int s_cap_log = 0;
+    if (s_cap_log < 8) {
+        s_cap_log++;
+        TD5_LOG_I(LOG_TAG, "lamp capture[%d]: (%.0f,%.0f,%.0f)",
+                  s_lamp_count - 1, x, y, z);
+    }
+}
+
+/* ---- Content-classified glow pages (per level) --------------------------
+ * Generated offline from the extracted texture pages: a page whose image is a
+ * bright radial blob with smooth falloff IS a lamp glow (Moscow: 474 post-tip
+ * halo + 253..256 big-glow quadrants, eyeball-verified). The capture gate in
+ * clip_and_submit_polygon consults this — texture CONTENT is the only signal
+ * that survived six rounds of geometry/class heuristics. */
+#include "td5_lamp_pages.inc"
+
+static const int *s_halo_pages      = NULL;
+static int        s_halo_page_count = 0;
+
+void td5_light_lamps_set_level(int level)
+{
+    s_halo_pages = NULL;
+    s_halo_page_count = 0;
+    for (size_t i = 0; i < sizeof(k_lamp_page_table) / sizeof(k_lamp_page_table[0]); i++) {
+        if (k_lamp_page_table[i].level == level) {
+            s_halo_pages = k_lamp_page_table[i].pages;
+            s_halo_page_count = k_lamp_page_table[i].count;
+            break;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "street lamps: level %d has %d classified glow pages",
+              level, s_halo_page_count);
+}
+
+int td5_light_lamp_page_is_halo(int page)
+{
+    for (int i = 0; i < s_halo_page_count; i++)
+        if (s_halo_pages[i] == page) return 1;
+    return 0;
+}
+
+/* Lamp look knobs (env, read once): warm sodium-ish pools. */
+static int   s_lamp_knobs_read = 0;
+static float s_lamp_range      = 2400.0f;  /* TD5RE_LAMP_RANGE      pool radius (world units) */
+static float s_lamp_intensity  = 1.00f;    /* TD5RE_LAMP_INTENSITY  peak added light 0..1     */
+static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
+
+void td5_light_emit_street_lamps(void)
+{
+    if (!s_enabled || !s_street_lights || s_lamp_count <= 0) return;
+    /* Same verdict as auto headlights: lamps light up in rain/dusk/dark zones
+     * and stay off in bright daylight. */
+    if (!s_env_dark) return;
+
+    if (!s_lamp_knobs_read) {
+        s_lamp_knobs_read = 1;
+        s_lamp_range     = env_f("TD5RE_LAMP_RANGE",     s_lamp_range);
+        s_lamp_intensity = env_f("TD5RE_LAMP_INTENSITY", s_lamp_intensity);
+        {
+            const char *e = getenv("TD5RE_LAMP_COUNT");
+            if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= TD5_LIGHT_MAX) s_lamp_budget = v; }
+        }
+        TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d",
+                  s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget);
+    }
+    if (s_lamp_budget <= 0 || s_lamp_intensity <= 0.0f) return;
+
+    /* Reference point: player slot 0 (lights are shared across panes). */
+    TD5_Actor *p = td5_game_get_actor(0);
+    if (!p) return;
+    float px = (float)p->world_pos.x * (1.0f / 256.0f);
+    float py = (float)p->world_pos.y * (1.0f / 256.0f);
+    float pz = (float)p->world_pos.z * (1.0f / 256.0f);
+
+    /* Nearest-N selection (insertion into a small sorted list — lamp counts
+     * are a few hundred, budget ~10; runs once per frame). FULL 3D distance:
+     * Moscow's riverside quay glows sit ~3000 units BELOW the road — with
+     * XZ-only ranking they hogged every budget slot while lighting nothing
+     * the player can see (the 'only one lit post on the map' bug). In 3D
+     * they rank beyond the road-level post halos and lose. */
+    int   best_idx[TD5_LIGHT_MAX];
+    float best_d2[TD5_LIGHT_MAX];
+    int   nbest = 0;
+    float cutoff2 = (s_lamp_range * 6.0f) * (s_lamp_range * 6.0f);
+    for (int i = 0; i < s_lamp_count; i++) {
+        float dx = s_lamp_pos[i][0] - px;
+        float dy = s_lamp_pos[i][1] - py;
+        float dz = s_lamp_pos[i][2] - pz;
+        /* Vertical gap alone beyond the light's range => it can never touch
+         * the player's plane (quay glows 3000 below the embankment road). */
+        if (dy > s_lamp_range * 1.25f || dy < -s_lamp_range * 1.25f) continue;
+        float d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > cutoff2) continue;
+        int j = nbest;
+        if (nbest < s_lamp_budget) nbest++;
+        else if (d2 >= best_d2[nbest - 1]) continue;
+        else j = nbest - 1;
+        while (j > 0 && best_d2[j - 1] > d2) {
+            best_d2[j] = best_d2[j - 1]; best_idx[j] = best_idx[j - 1]; j--;
+        }
+        best_d2[j] = d2; best_idx[j] = i;
+    }
+
+    for (int k = 0; k < nbest; k++) {
+        const float *L = s_lamp_pos[best_idx[k]];
+        /* Warm sodium-vapor tint. */
+        td5_light_add_point(L[0], L[1], L[2],
+                            s_lamp_range, s_lamp_intensity,
+                            1.0f, 0.82f, 0.55f);
+    }
+
+    static int s_lamp_logged = 0;
+    if (!s_lamp_logged && nbest > 0) {
+        TD5_LOG_I(LOG_TAG, "street lamps: emitting %d/%d nearest (registry now %d lights)",
+                  nbest, s_lamp_count, s_light_count);
+        s_lamp_logged = 1;
+    }
+
+    /* TD5RE_LAMP_LOG=1: periodic dump of the player position + the nearest
+     * emitted lamps (world coords + distance) — position/emission debugging. */
+    static int s_lamp_dbg = -1;
+    if (s_lamp_dbg < 0) { const char *e = getenv("TD5RE_LAMP_LOG"); s_lamp_dbg = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    if (s_lamp_dbg) {
+        static int s_tick = 0;
+        if ((s_tick++ % 90) == 0) {
+            float py = (float)p->world_pos.y * (1.0f / 256.0f);
+            /* global nearest lamp, ignoring the cutoff — position debugging */
+            int   gi = -1;
+            float gd2 = 1e30f;
+            for (int i = 0; i < s_lamp_count; i++) {
+                float dx = s_lamp_pos[i][0] - px;
+                float dz = s_lamp_pos[i][2] - pz;
+                float d2 = dx * dx + dz * dz;
+                if (d2 < gd2) { gd2 = d2; gi = i; }
+            }
+            TD5_LOG_I(LOG_TAG, "lamp dbg: player=(%.0f,%.0f,%.0f) emitting=%d "
+                      "global-nearest=%d at (%.0f,%.0f,%.0f) dxz=%.0f",
+                      px, py, pz, nbest, gi,
+                      gi >= 0 ? s_lamp_pos[gi][0] : 0.0f,
+                      gi >= 0 ? s_lamp_pos[gi][1] : 0.0f,
+                      gi >= 0 ? s_lamp_pos[gi][2] : 0.0f,
+                      gi >= 0 ? (double)sqrtf(gd2) : -1.0);
+        }
+    }
+}

@@ -95,6 +95,10 @@ void Backend_CaptureIfRequested(void)
 /* [lighting rework P0] MRT G-buffer variants */
 #include "shaders/ps_modulate_g_bytes.h"
 #include "shaders/ps_modulate_alpha_g_bytes.h"
+/* [lighting rework P2] SS sun-shadow pass */
+#include "shaders/ps_shadow_bytes.h"
+/* [lighting rework P3] SS reflections pass */
+#include "shaders/ps_ssr_bytes.h"
 
 /* Dynamic buffer sizes.
  *
@@ -475,6 +479,18 @@ static int Backend_CreateShaders(void)
         &g_backend.ps_light);
     if (FAILED(hr)) { WRAPPER_LOG("CreateShaders: ps_light FAILED (light pass disabled)"); g_backend.ps_light = NULL; }
 
+    /* [P2] SS sun-shadow pass (non-fatal: NULL => shadow pass is skipped). */
+    hr = ID3D11Device_CreatePixelShader(dev,
+        g_ps_shadow, sizeof(g_ps_shadow), NULL,
+        &g_backend.ps_shadow);
+    if (FAILED(hr)) { WRAPPER_LOG("CreateShaders: ps_shadow FAILED (shadow pass disabled)"); g_backend.ps_shadow = NULL; }
+
+    /* [P3] SS reflections pass (non-fatal: NULL => SSR pass is skipped). */
+    hr = ID3D11Device_CreatePixelShader(dev,
+        g_ps_ssr, sizeof(g_ps_ssr), NULL,
+        &g_backend.ps_ssr);
+    if (FAILED(hr)) { WRAPPER_LOG("CreateShaders: ps_ssr FAILED (SSR pass disabled)"); g_backend.ps_ssr = NULL; }
+
     /* [lighting rework P0] MRT G-buffer variants (non-fatal: NULL => the
      * selection logic never promotes to them and the G-buffer stays unwritten). */
     hr = ID3D11Device_CreatePixelShader(dev,
@@ -555,6 +571,17 @@ static int Backend_CreateStateObjects(void)
         bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
         bd.RenderTarget[0].BlendOpAlpha   = D3D11_BLEND_OP_ADD;
         hr = ID3D11Device_CreateBlendState(dev, &bd, &g_backend.blend_states[BLEND_INVSRC_INVSRC]);
+        if (FAILED(hr)) return 0;
+
+        /* [P2] BLEND_MULT: out = dst * src (modulate). Used by the fullscreen
+         * sun-shadow pass to darken shadowed pixels; keeps dst alpha. */
+        bd.RenderTarget[0].SrcBlend  = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_SRC_COLOR;
+        bd.RenderTarget[0].BlendOp   = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha  = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+        hr = ID3D11Device_CreateBlendState(dev, &bd, &g_backend.blend_states[BLEND_MULT]);
         if (FAILED(hr)) return 0;
     }
 
@@ -714,6 +741,16 @@ static int Backend_CreateDynamicBuffers(void)
     bd.ByteWidth = sizeof(LightCB);
     hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &g_backend.cb_light);
     if (FAILED(hr)) { WRAPPER_LOG("CreateDynamicBuffers: cb_light FAILED (light pass disabled)"); g_backend.cb_light = NULL; }
+
+    /* [P2] Sun-shadow pass constant buffer (non-fatal). */
+    bd.ByteWidth = sizeof(ShadowCB);
+    hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &g_backend.cb_shadow);
+    if (FAILED(hr)) { WRAPPER_LOG("CreateDynamicBuffers: cb_shadow FAILED (shadow pass disabled)"); g_backend.cb_shadow = NULL; }
+
+    /* [P3] SSR pass constant buffer (non-fatal). */
+    bd.ByteWidth = sizeof(SSRCB);
+    hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &g_backend.cb_ssr);
+    if (FAILED(hr)) { WRAPPER_LOG("CreateDynamicBuffers: cb_ssr FAILED (SSR pass disabled)"); g_backend.cb_ssr = NULL; }
 
     WRAPPER_LOG("CreateDynamicBuffers: VB=%uKB IB=%uKB, CBs created",
         DYNAMIC_VB_SIZE/1024, DYNAMIC_IB_SIZE/1024);
@@ -1107,6 +1144,11 @@ static void Backend_ReleaseRenderTargets(void)
     if (g_backend.gbuffer_tex) { ID3D11Texture2D_Release(g_backend.gbuffer_tex);          g_backend.gbuffer_tex = NULL; }
     g_backend.gbuffer_w = g_backend.gbuffer_h = 0;
     g_backend.gbuffer_bound = 0;
+    /* [P3] Scene-colour copy tracks the backbuffer surface size — drop it too
+     * (the next SSR pass recreates it to match). */
+    if (g_backend.scene_copy_srv) { ID3D11ShaderResourceView_Release(g_backend.scene_copy_srv); g_backend.scene_copy_srv = NULL; }
+    if (g_backend.scene_copy_tex) { ID3D11Texture2D_Release(g_backend.scene_copy_tex);          g_backend.scene_copy_tex = NULL; }
+    g_backend.scene_copy_w = g_backend.scene_copy_h = 0;
 }
 
 /* ========================================================================
@@ -1894,6 +1936,163 @@ void Backend_SetGBufferEnabled(int on)
         ID3D11DeviceContext_ClearRenderTargetView(g_backend.context,
                                                   g_backend.gbuffer_rtv, clear);
     }
+}
+
+/* [P2] Screen-space ray-marched sun-shadow pass — see wrapper.h. Same RT/SRV
+ * juggling discipline as Backend_ApplyLightPass below, but the fullscreen draw
+ * uses the MULTIPLICATIVE blend so shadowed pixels darken the scene colour. */
+void Backend_ApplyShadowPass(const ShadowCB *cb)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    ID3D11RenderTargetView *rtv;
+    ID3D11ShaderResourceView *null_srv = NULL;
+
+    if (!ctx || !cb) return;
+    if (!g_backend.ps_shadow || !g_backend.cb_shadow || !g_backend.depth_srv) return;
+    if (!g_backend.backbuffer || !g_backend.backbuffer->d3d11_rtv) return;
+    rtv = g_backend.backbuffer->d3d11_rtv;
+
+    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource*)g_backend.cb_shadow,
+                                          0, NULL, cb, 0, 0);
+
+    /* Colour-only RT: depth free for SRV sampling; drops G-buffer RT1 too. */
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, NULL);
+    g_backend.gbuffer_bound = 0;
+
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_fullscreen, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shadow, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.depth_srv);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &g_backend.gbuffer_srv);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_shadow);
+
+    /* Multiplicative darkening, depth test OFF. */
+    ID3D11DeviceContext_OMSetBlendState(ctx, g_backend.blend_states[BLEND_MULT], NULL, 0xFFFFFFFF);
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_backend.ds_states[DS_Z_OFF_WRITE_OFF], 0);
+
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+
+    /* Unbind SRVs, restore RT + game state (see ApplyLightPass rationale). */
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &null_srv);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &null_srv);
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, g_backend.depth_dsv);
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    g_backend.state.current_ps_idx = -1;
+    g_backend.state.dirty = 1;
+    Backend_SelectPixelShader();
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx,
+        g_backend.ds_states[g_backend.state.current_ds_idx], 0);
+    ID3D11DeviceContext_OMSetBlendState(ctx,
+        g_backend.blend_states[g_backend.state.current_blend_idx], NULL, 0xFFFFFFFF);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1,
+        &g_backend.sampler_states[g_backend.state.current_samp_idx]);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_fog);
+}
+
+/* [P3] (Re)create the scene-colour copy to match the backbuffer surface
+ * texture (CopyResource requires identical size/format). */
+static int Backend_SceneCopyEnsure(void)
+{
+    HRESULT hr;
+    D3D11_TEXTURE2D_DESC td;
+
+    if (!g_backend.backbuffer || !g_backend.backbuffer->d3d11_texture) return 0;
+    ID3D11Texture2D_GetDesc(g_backend.backbuffer->d3d11_texture, &td);
+    if (g_backend.scene_copy_tex &&
+        g_backend.scene_copy_w == (int)td.Width &&
+        g_backend.scene_copy_h == (int)td.Height)
+        return 1;
+
+    if (g_backend.scene_copy_srv) { ID3D11ShaderResourceView_Release(g_backend.scene_copy_srv); g_backend.scene_copy_srv = NULL; }
+    if (g_backend.scene_copy_tex) { ID3D11Texture2D_Release(g_backend.scene_copy_tex);          g_backend.scene_copy_tex = NULL; }
+    g_backend.scene_copy_w = g_backend.scene_copy_h = 0;
+
+    td.Usage          = D3D11_USAGE_DEFAULT;
+    td.BindFlags      = D3D11_BIND_SHADER_RESOURCE;
+    td.CPUAccessFlags = 0;
+    td.MiscFlags      = 0;
+    td.MipLevels      = 1;
+    hr = ID3D11Device_CreateTexture2D(g_backend.device, &td, NULL, &g_backend.scene_copy_tex);
+    if (FAILED(hr)) { WRAPPER_LOG("SceneCopyEnsure: CreateTexture2D FAILED hr=0x%08lX", hr); return 0; }
+    hr = ID3D11Device_CreateShaderResourceView(g_backend.device,
+        (ID3D11Resource*)g_backend.scene_copy_tex, NULL, &g_backend.scene_copy_srv);
+    if (FAILED(hr)) {
+        WRAPPER_LOG("SceneCopyEnsure: CreateSRV FAILED hr=0x%08lX", hr);
+        ID3D11Texture2D_Release(g_backend.scene_copy_tex); g_backend.scene_copy_tex = NULL;
+        return 0;
+    }
+    g_backend.scene_copy_w = (int)td.Width;
+    g_backend.scene_copy_h = (int)td.Height;
+    WRAPPER_LOG("SceneCopyEnsure: created %ux%u scene-colour copy", td.Width, td.Height);
+    return 1;
+}
+
+/* [P3] Screen-space reflections — see wrapper.h. Copies the backbuffer to
+ * scene_copy_tex, then draws a fullscreen ALPHA-BLENDED pass that reflects
+ * the copied scene on reflective materials. Same RT/SRV/restore discipline
+ * as the shadow + light passes. */
+void Backend_ApplySSRPass(const SSRCB *cb)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    ID3D11RenderTargetView *rtv;
+    ID3D11ShaderResourceView *null_srv = NULL;
+
+    if (!ctx || !cb) return;
+    if (!g_backend.ps_ssr || !g_backend.cb_ssr || !g_backend.depth_srv) return;
+    if (!g_backend.gbuffer_srv) return;   /* SSR needs per-pixel normals */
+    if (!g_backend.backbuffer || !g_backend.backbuffer->d3d11_rtv) return;
+    if (!Backend_SceneCopyEnsure()) return;
+    rtv = g_backend.backbuffer->d3d11_rtv;
+
+    ID3D11DeviceContext_CopyResource(ctx,
+        (ID3D11Resource*)g_backend.scene_copy_tex,
+        (ID3D11Resource*)g_backend.backbuffer->d3d11_texture);
+
+    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource*)g_backend.cb_ssr,
+                                          0, NULL, cb, 0, 0);
+
+    /* Colour-only RT: depth free for SRV sampling; drops G-buffer RT1 too. */
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, NULL);
+    g_backend.gbuffer_bound = 0;
+
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_fullscreen, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_ssr, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.depth_srv);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &g_backend.gbuffer_srv);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 2, 1, &g_backend.scene_copy_srv);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_ssr);
+
+    /* Standard alpha blend: out = refl*w + scene*(1-w); depth test OFF. */
+    ID3D11DeviceContext_OMSetBlendState(ctx, g_backend.blend_states[BLEND_SRCALPHA_INVSRC], NULL, 0xFFFFFFFF);
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_backend.ds_states[DS_Z_OFF_WRITE_OFF], 0);
+
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+
+    /* Unbind SRVs, restore RT + game state (see ApplyLightPass rationale). */
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &null_srv);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &null_srv);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 2, 1, &null_srv);
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, g_backend.depth_dsv);
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    g_backend.state.current_ps_idx = -1;
+    g_backend.state.dirty = 1;
+    Backend_SelectPixelShader();
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx,
+        g_backend.ds_states[g_backend.state.current_ds_idx], 0);
+    ID3D11DeviceContext_OMSetBlendState(ctx,
+        g_backend.blend_states[g_backend.state.current_blend_idx], NULL, 0xFFFFFFFF);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1,
+        &g_backend.sampler_states[g_backend.state.current_samp_idx]);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_fog);
 }
 
 /* Deferred dynamic-light pass — see Backend_ApplyLightPass in wrapper.h.
