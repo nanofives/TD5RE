@@ -4890,7 +4890,7 @@ static float hud_pending_line_width(const char *s, float cap) {
 }
 
 void td5_hud_draw_pending_overlay(void) {
-    int   n, i, shown = 0, remaining;
+    int   n, i, shown = 0;
     float scale, cap, dy, y_des, w, xd;
     const float MARGIN_PX = 10.0f;
     const char *hdr = "PENDING TO TEST";
@@ -4906,7 +4906,6 @@ void td5_hud_draw_pending_overlay(void) {
     cap   = HUD_TTF_CAP * scale;
     dy    = 14.0f;                            /* design units (scaled at draw), like debug */
     y_des = 10.0f;
-    remaining = td5_pending_remaining();
 
     w  = hud_pending_line_width(hdr, cap);
     xd = (g_render_width_f - MARGIN_PX - w) / scale;
@@ -4914,18 +4913,16 @@ void td5_hud_draw_pending_overlay(void) {
     y_des += dy * 1.3f;
 
     for (i = 0; i < n; i++) {
-        const char *t;
-        if (td5_pending_is_done(i)) continue;
-        t  = td5_pending_text(i);
+        const char *t = td5_pending_text(i);
         w  = hud_pending_line_width(t, cap);
         xd = (g_render_width_f - MARGIN_PX - w) / scale;
         td5_hud_queue_text(0, (int)xd, (int)y_des, 0, "%s", t);
         y_des += dy;
         if (++shown >= 20 || (y_des * scale) > (g_render_height_f - dy * scale)) break;
     }
-    if (shown < remaining) {
+    if (shown < n) {
         char more[40];
-        snprintf(more, sizeof more, "+%d MORE...", remaining - shown);
+        snprintf(more, sizeof more, "+%d MORE...", n - shown);
         w  = hud_pending_line_width(more, cap);
         xd = (g_render_width_f - MARGIN_PX - w) / scale;
         td5_hud_queue_text(0, (int)xd, (int)y_des, 0, "%s", more);

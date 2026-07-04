@@ -223,18 +223,21 @@ void Screen_Changelog(void) {
 }
 
 /* ========================================================================
- * PENDING TO TEST screen (2026-06-25) -- dev/QA checklist.
+ * PENDING TO TEST screen (2026-06-25, modal reworked 2026-07-04) -- dev/QA
+ * checklist.
  *
  * Reached from a button at the top of the main menu. Lists the features in
- * td5_pending.c; each row toggles "done" (checkbox + strikethrough) on confirm.
- * An IN-GAME OVERLAY button (mirrored by F11) toggles the right-edge overlay
- * that lists everything still untested. Items are paged so a long list stays
- * within FE_MAX_BUTTONS; the /end routine prunes done items from the backing
- * file. Present in dev AND release.
+ * td5_pending.c; ENTER on a row opens a details modal (frontend_pending_render_modal)
+ * showing the item's full text plus a longer testing-focused note
+ * (td5_pending_detail_text). There is no more crossing-out/"mark tested" --
+ * SUPR/DELETE is the only way to clear a row, once it's actually been
+ * verified. An IN-GAME OVERLAY button (mirrored by F11) toggles the
+ * right-edge overlay that lists every item. Items are paged so a long list
+ * stays within FE_MAX_BUTTONS. Present in dev AND release.
  *
  * Each list row is a standard EMPTY-LABEL button, so it gets keyboard / pad /
- * mouse selection + the gold highlight for free; the checkbox + item text +
- * strikethrough are drawn over the row in the POST-button render pass.
+ * mouse selection + the gold highlight for free; the item text is drawn over
+ * the row in the POST-button render pass.
  * ======================================================================== */
 
 #define PL_ROWS_PER_PAGE 10
@@ -246,6 +249,15 @@ void Screen_Changelog(void) {
 #define PL_CTL_Y     (PL_ROW_Y0 + PL_ROWS_PER_PAGE * PL_ROW_STEP + 8)   /* 366 */
 #define PENDING_TEXT_MAX_LOCAL 128       /* >= td5_pending.c PENDING_TEXT_MAX (120) + "..." */
 
+/* ENTER-key details modal geometry (design units, 640x480 canvas). */
+#define PL_MODAL_W               440.0f
+#define PL_MODAL_H               260.0f
+#define PL_MODAL_X               ((640.0f - PL_MODAL_W) * 0.5f)
+#define PL_MODAL_Y               ((480.0f - PL_MODAL_H) * 0.5f)
+#define PL_MODAL_PAD             20.0f
+#define PL_MODAL_TITLE_MAX_LINES 3
+#define PL_MODAL_BODY_MAX_LINES  9
+
 static int s_pl_page        = 0;
 static int s_pl_pages       = 1;
 static int s_pl_row_count   = 0;
@@ -253,6 +265,8 @@ static int s_pl_overlay_btn = -1;
 static int s_pl_back_btn    = -1;
 static int s_pl_prev_btn    = -1;
 static int s_pl_next_btn    = -1;
+static int s_pl_modal_open  = 0;   /* details modal (ENTER on a row) owns input while set */
+static int s_pl_modal_item  = -1;  /* global (unpaged) index of the item the modal describes */
 
 /* (Re)create the button set for the current page. Called on entry and on every
  * page change. Row buttons are indices 0..row_count-1; the control buttons land
@@ -326,10 +340,65 @@ static float frontend_pending_fit_ellipsis(const char *src, float max_w,
     }
 }
 
+/* ENTER-key details modal: dims the screen and draws a bordered box with the
+ * highlighted item's full text as a title and its longer test-focus note
+ * (td5_pending_detail_text) wrapped underneath. Drawn last so it sits on top
+ * of the list/control-row text. Replaces the old crossing-out behaviour --
+ * ENTER opens this instead of toggling a checkbox. */
+static void frontend_pending_render_modal(float sx, float sy) {
+    float mx   = PL_MODAL_X * sx, my = PL_MODAL_Y * sy;
+    float mw   = PL_MODAL_W * sx, mh = PL_MODAL_H * sy;
+    float pad  = PL_MODAL_PAD * sx;
+    float pfx  = sx * 0.82f, pfy = sy * 0.82f;
+    float text_w = mw - 2.0f * pad;
+    int   prev_case = s_fe_preserve_case;
+    char  title_lines[PL_MODAL_TITLE_MAX_LINES][64];
+    char  body_lines[PL_MODAL_BODY_MAX_LINES][64];
+    int   n_title, n_body, li;
+    float y, border_t = 2.0f * sy;
+    const uint32_t border_c = 0xFFE3D708u;   /* gold, matches the screen title */
+
+    if (s_pl_modal_item < 0 || s_pl_modal_item >= td5_pending_count()) return;
+
+    /* fe_draw_quad doesn't set a blend state (it inherits whatever opaque
+     * preset was last active and silently ignores alpha) -- td5_vui_quad
+     * wraps the draw in the translucent preset so this actually blends. */
+    td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0x80000008u, -1, 0, 0, 0, 0);  /* dim behind, 50% */
+
+    fe_draw_quad(mx, my, mw, mh, 0xFF141018u, -1, 0, 0, 0, 0);                       /* box fill, opaque */
+    fe_draw_quad(mx, my, mw, border_t, border_c, -1, 0, 0, 0, 0);                    /* top */
+    fe_draw_quad(mx, my + mh - border_t, mw, border_t, border_c, -1, 0, 0, 0, 0);    /* bottom */
+    fe_draw_quad(mx, my, border_t, mh, border_c, -1, 0, 0, 0, 0);                    /* left */
+    fe_draw_quad(mx + mw - border_t, my, border_t, mh, border_c, -1, 0, 0, 0, 0);    /* right */
+
+    s_fe_preserve_case = 1;
+    n_title = fe_wrap_text_lines(td5_pending_text(s_pl_modal_item), text_w, pfx, pfy,
+                                 title_lines, PL_MODAL_TITLE_MAX_LINES);
+    n_body  = fe_wrap_text_lines(td5_pending_detail_text(s_pl_modal_item), text_w, pfx, pfy,
+                                 body_lines, PL_MODAL_BODY_MAX_LINES);
+
+    y = my + pad;
+    for (li = 0; li < n_title; li++) {
+        float tw = fe_measure_text(title_lines[li], pfx, pfy);
+        fe_draw_text(mx + (mw - tw) * 0.5f, y, title_lines[li], 0xFFE3D708u, pfx, pfy);
+        y += 16.0f * sy;
+    }
+    y += 10.0f * sy;
+    fe_draw_quad(mx + pad, y, mw - 2.0f * pad, 1.0f * sy, 0xFF3A3E48u, -1, 0, 0, 0, 0);  /* divider */
+    y += 12.0f * sy;
+    for (li = 0; li < n_body; li++) {
+        fe_draw_text(mx + pad, y, body_lines[li], 0xFFE6EAF0u, pfx, pfy);
+        y += 15.0f * sy;
+    }
+    s_fe_preserve_case = prev_case;
+
+    td5_vui_text_centered(mx + mw * 0.5f, my + mh - 34.0f * sy,
+                          "ENTER / B / BACK = CLOSE", 0xFF8890A0u, sx, sy);
+}
+
 void frontend_pending_render(float sx, float sy) {
     char buf[96];
     int  total     = td5_pending_count();
-    int  remaining = td5_pending_remaining();
     int  start     = s_pl_page * PL_ROWS_PER_PAGE;
     int  prev_case = s_fe_preserve_case;
     float pfx = sx * 0.82f;       /* smaller body-text scale (matches CHANGELOG) */
@@ -338,27 +407,22 @@ void frontend_pending_render(float sx, float sy) {
 
     frontend_draw_screen_title("PENDING TO TEST", FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                0xFFE3D708u, sx, sy);
-    snprintf(buf, sizeof buf, "%d ITEMS   -   %d STILL TO TEST", total, remaining);
+    snprintf(buf, sizeof buf, "%d ITEMS TO TEST", total);
     td5_vui_text_centered(320.0f * sx, 48.0f * sy, buf, 0xFFB0B8C0u, sx, sy);
 
-    /* Per-row checkbox + item text (left-aligned) + strikethrough when done. */
+    /* Per-row item text (left-aligned). */
     for (r = 0; r < s_pl_row_count; r++) {
         int   item = start + r;
-        int   done = td5_pending_is_done(item);
-        float bx, by, bw, bh, tx, tw, avail;
+        float bx, by, bw, bh, tx, avail;
         char  rowbuf[PENDING_TEXT_MAX_LOCAL];
-        const char *box = done ? "[x]" : "[ ]";
         frontend_get_button_render_rect(r, sx, sy, &bx, &by, &bw, &bh);
-        fe_draw_text(bx + 10.0f * sx, by, box, done ? 0xFF66E066u : 0xFFB0B8C0u, pfx, pfy);
-        tx    = bx + 30.0f * sx;             /* tighter gap between the checkbox and the item text */
+        tx    = bx + 10.0f * sx;
         avail = (bx + bw) - tx - 8.0f * sx;  /* text room left in the row (small right-rim padding) */
         s_fe_preserve_case = 1;
-        tw = frontend_pending_fit_ellipsis(td5_pending_text(item), avail, pfx, pfy,
-                                           rowbuf, sizeof rowbuf);
-        fe_draw_text(tx, by, rowbuf, done ? 0xFF707880u : 0xFFE6EAF0u, pfx, pfy);
+        frontend_pending_fit_ellipsis(td5_pending_text(item), avail, pfx, pfy,
+                                      rowbuf, sizeof rowbuf);
+        fe_draw_text(tx, by, rowbuf, 0xFFE6EAF0u, pfx, pfy);
         s_fe_preserve_case = prev_case;
-        if (done)
-            fe_draw_quad(tx, by + 13.0f * sy, tw, 1.5f * sy, 0xFFA0A4A8u, -1, 0, 0, 0, 0);
     }
 
     /* IN-GAME OVERLAY toggle label (centred on its button). */
@@ -395,8 +459,10 @@ void frontend_pending_render(float sx, float sy) {
         td5_vui_text_centered(320.0f * sx, (float)(PL_CTL_Y + 30) * sy, buf, 0xFF8890A0u, sx, sy);
     }
     td5_vui_text_centered(320.0f * sx, (float)(PL_CTL_Y + 56) * sy,
-                          "ENTER = MARK TESTED   -   SUPR = DELETE   -   B / BACK = RETURN",
+                          "ENTER = DETAILS   -   SUPR = DELETE   -   B / BACK = RETURN",
                           0xFF8890A0u, sx, sy);
+
+    if (s_pl_modal_open) frontend_pending_render_modal(sx, sy);
 }
 
 void Screen_PendingTest(void) {
@@ -405,20 +471,52 @@ void Screen_PendingTest(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_init_return_screen(TD5_SCREEN_PENDING_TEST);
         s_return_screen = TD5_SCREEN_CHANGELOG;   /* reached FROM the changelog screen */
-        s_pl_page = 0;
+        s_pl_page       = 0;
+        s_pl_modal_open = 0;
+        s_pl_modal_item = -1;
         frontend_pending_build_buttons();
         s_anim_complete = 1;   /* instant screen: enables B/ESC + fade-in chime */
         s_inner_state   = 1;
-        TD5_LOG_I(LOG_TAG, "Screen_PendingTest: enter (%d items, %d remaining)",
-                  td5_pending_count(), td5_pending_remaining());
+        TD5_LOG_I(LOG_TAG, "Screen_PendingTest: enter (%d items)", td5_pending_count());
+        /* Dev harness: TD5RE_PENDING_MODAL_TEST=1 auto-opens an item's details
+         * modal on entry (item 0 by default; TD5RE_PENDING_MODAL_TEST_ITEM=N
+         * picks another index), so a headless launch (StartScreen=42) can
+         * verify the modal draws without live ENTER input -- same pattern as
+         * TD5RE_MP_SIMUL_PREVIEW_PHASE for the MP profile screen. */
+        if (td5_pending_count() > 0 && td5_env_flag_on("TD5RE_PENDING_MODAL_TEST")) {
+            s_pl_modal_item = td5_env_int("TD5RE_PENDING_MODAL_TEST_ITEM", 0, 0,
+                                          td5_pending_count() - 1);
+            s_pl_modal_open = 1;
+            TD5_LOG_I(LOG_TAG, "Screen_PendingTest: TD5RE_PENDING_MODAL_TEST auto-open item=%d",
+                      s_pl_modal_item);
+        }
         break;
 
     case 1: {
         /* SUPR / DELETE drops the currently-highlighted checklist row outright
-         * (vs ENTER, which only marks it tested). td5_plat_input_key_pressed is
-         * level-triggered, so debounce on the rising edge: one delete per press. */
+         * (vs ENTER, which opens the details modal). td5_plat_input_key_pressed
+         * is level-triggered, so debounce on the rising edge: one delete per
+         * press. */
         static int s_pl_supr_down = 0;
-        int supr = td5_plat_input_key_pressed(0xD3);   /* DIK_DELETE ("SUPR") */
+        int supr;
+
+        /* The details modal owns the frame while open: a fresh confirm press
+         * (ENTER / pad A / click) OR ESC/gamepad-B closes it and returns focus
+         * to the list underneath. frontend_check_escape() consumes the escape
+         * edge here so the central back-handler (td5_frontend.c step 7) can't
+         * ALSO fire on the same press and leave the screen entirely -- same
+         * "steal the edge" idiom td5_gameopts_name_edit_tick uses for its own
+         * sub-mode. Everything else (SUPR, paging, BACK) is swallowed. */
+        if (s_pl_modal_open) {
+            if ((s_input_ready && s_button_index >= 0) || frontend_check_escape()) {
+                s_pl_modal_open = 0;
+                s_pl_modal_item = -1;
+                frontend_play_sfx(5);
+            }
+            break;
+        }
+
+        supr = td5_plat_input_key_pressed(0xD3);   /* DIK_DELETE ("SUPR") */
         if (supr && !s_pl_supr_down &&
             s_selected_button >= 0 && s_selected_button < s_pl_row_count) {
             int sel  = s_selected_button;
@@ -435,10 +533,12 @@ void Screen_PendingTest(void) {
 
         if (s_input_ready && s_button_index >= 0) {
             int b = s_button_index;
-            if (b < s_pl_row_count) {                 /* toggle a checklist row */
+            if (b < s_pl_row_count) {                 /* open the details modal for this row */
                 int item = s_pl_page * PL_ROWS_PER_PAGE + b;
-                td5_pending_toggle(item);
+                s_pl_modal_item = item;
+                s_pl_modal_open = 1;
                 frontend_play_sfx(3);
+                TD5_LOG_I(LOG_TAG, "Screen_PendingTest: modal open item=%d", item);
             } else if (b == s_pl_overlay_btn) {
                 td5_pending_toggle_overlay();
                 frontend_play_sfx(2);

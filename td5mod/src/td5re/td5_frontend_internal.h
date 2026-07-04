@@ -456,6 +456,8 @@ void  frontend_get_button_render_rect(int button_index, float sx, float sy,
                                       float *out_x, float *out_y, float *out_w, float *out_h);
 void  frontend_changelog_render(float sx, float sy);
 void  frontend_pending_render(float sx, float sy);
+int   fe_wrap_text_lines(const char *s, float maxw, float sx, float sy,
+                         char lines[][64], int max_lines);
 
 /* --- mp_setup seam: shared frontend state + helpers (defined in td5_frontend.c) --- */
 #define FE_TITLE_LEFT_X  126.0f  /* design x where the first letter starts (every screen);
