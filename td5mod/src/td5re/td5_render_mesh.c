@@ -1011,9 +1011,16 @@ void td5_render_span_display_list(void *display_list_block)
          * banners vanish (Paris-backwards report). Auto-flip the kept side in
          * reverse; "0" disables (then use _FLIP manually). */
         s_banner_cull_revflip = td5_env_flag_on("TD5RE_TD6_BANNER_REVFLIP");
-        TD5_LOG_I(LOG_TAG, "banner cull: %s (keep_sign=%s revflip=%d; TD5RE_BANNER_CULL/_FLIP/_TD6_BANNER_REVFLIP)",
+        /* [NATIVE BANNERS] Kept winding sign for geometry-detected native-track
+         * banner pages (td5_track_scan_banner_pages). Defaults to the TD6 sign
+         * (native TD5 and converted-TD6 meshes share the projection/winding
+         * convention); TD5RE_NATIVE_BANNER_FLIP=1 flips it if native banners
+         * come out showing their mirrored back / vanish. */
+        s_native_banner_keep_pos = td5_env_flag_off("TD5RE_NATIVE_BANNER_FLIP")
+                                   ? !s_banner_cull_keep_pos : s_banner_cull_keep_pos;
+        TD5_LOG_I(LOG_TAG, "banner cull: %s (keep_sign=%s revflip=%d native_keep=%s; TD5RE_BANNER_CULL/_FLIP/_TD6_BANNER_REVFLIP/_NATIVE_BANNER_FLIP)",
                   s_banner_cull ? "ON" : "OFF", s_banner_cull_keep_pos ? "pos" : "neg",
-                  s_banner_cull_revflip);
+                  s_banner_cull_revflip, s_native_banner_keep_pos ? "pos" : "neg");
         /* [START-banner align] road-centre re-alignment of TD6 banner gantries.
          * Default ON; TD5RE_BANNER_ALIGN=0 restores the raw authored position. */
         s_banner_align = td5_env_flag_on("TD5RE_BANNER_ALIGN");

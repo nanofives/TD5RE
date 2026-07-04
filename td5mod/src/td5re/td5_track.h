@@ -213,6 +213,14 @@ void td5_track_derive_missing_normals(void);
  * (type-3 billboard mesh) with the dynamic-light system so the nearest few
  * become real point lights per frame. Call AFTER track textures load. */
 void td5_track_register_lamp_lights(void);
+/* [NATIVE BANNERS] One-shot post-load pass: flag the texture pages of native
+ * (g_active_td6_level==0) double-sided sign panels, detected by finding
+ * coincident reverse-wound primitive pairs in the MODELS.DAT geometry. The
+ * banner one-sided cull in clip_and_submit_polygon consults this so native
+ * track banners stop z-fighting/reading mirrored. TD5RE_BANNER_PAIR_CULL=0
+ * disables. Call after td5_track_dim_additive_billboard_meshes. */
+void td5_track_scan_banner_pages(void);
+int  td5_track_is_native_banner_page(int page);
 int  td5_track_get_models_display_list_count(void);
 int  td5_track_get_span_display_list_index(int span_index);
 const void *td5_track_get_models_display_list_raw(int index, size_t *size_out);

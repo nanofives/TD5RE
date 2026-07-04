@@ -7510,6 +7510,248 @@ void td5_track_dim_additive_billboard_meshes(void)
 }
 
 /* ========================================================================
+ * [NATIVE BANNERS 2026-07-04] Geometry-detected double-sided sign panels
+ *
+ * Track sign/banner panels (e.g. Tokyo's "STAGE 3" overhead banners) are
+ * authored as flat DOUBLE-SIDED meshes: a front quad plus a coincident,
+ * reverse-wound back quad occupying the SAME model-space positions. The
+ * original relied on hardware backface culling (D3D default CULL_CCW) to show
+ * only the camera-facing side. The D3D11 wrapper forces CullMode=NONE globally
+ * (track and car meshes have opposite winding conventions, so a single
+ * hardware cull can't pick one sign), so BOTH faces rasterize at the same
+ * depth and z-fight — the back face reads MIRRORED, garbling the banner text
+ * ("rendering of banners is wrong in most tracks", 2026-07-04).
+ *
+ * The port already one-sided-culls TD6 banners via a hardcoded texture-page
+ * list (k_td6_banner_pages in td5_render.c), but that returns nothing for
+ * native TD5 tracks (g_active_td6_level==0). This one-shot load pass DETECTS
+ * the banner pages of a native track from geometry instead of a hand list:
+ * within each small MODELS.DAT mesh, any two primitives sharing the same set
+ * of quantized vertex positions with OPPOSITE winding (antiparallel normals)
+ * form a double-sided panel, and their texture pages are flagged.
+ * clip_and_submit_polygon then applies the SAME screen-winding one-sided cull
+ * (see s_banner_cull) to the flagged pages.
+ *
+ * Matching is PER MESH so front+back (which share the mesh origin) coincide in
+ * model space exactly; no world-space / origin math is needed, and a mesh that
+ * is reused across several display-list blocks can never collide with itself.
+ * Only small blob meshes are scanned (banner gantries are small; the vertex
+ * cap skips the big road/building meshes cheaply). TD5RE_BANNER_PAIR_CULL=0
+ * disables detection entirely; the flagged page list is logged for verification.
+ * ======================================================================== */
+#define TD5_BANNER_PAGE_MAX 1024   /* texture-page id range for the bitset */
+static uint8_t s_native_banner_page[TD5_BANNER_PAGE_MAX / 8];
+static int     s_native_banner_page_count = 0;
+
+int td5_track_is_native_banner_page(int page)
+{
+    if (page < 0 || page >= TD5_BANNER_PAGE_MAX) return 0;
+    return (s_native_banner_page[page >> 3] >> (page & 7)) & 1;
+}
+
+static void native_banner_flag_page(int page)
+{
+    uint8_t bit;
+    if (page < 0 || page >= TD5_BANNER_PAGE_MAX) return;
+    bit = (uint8_t)(1u << (page & 7));
+    if (!(s_native_banner_page[page >> 3] & bit)) {
+        s_native_banner_page[page >> 3] |= bit;
+        s_native_banner_page_count++;
+    }
+}
+
+/* Lexicographic compare of two quantized vertex positions (for canonical sort
+ * so a primitive and its reverse-wound twin hash identically). */
+static int banner_vlt(int64_t ax, int64_t ay, int64_t az,
+                      int64_t bx, int64_t by, int64_t bz)
+{
+    if (ax != bx) return ax < bx;
+    if (ay != by) return ay < by;
+    return az < bz;
+}
+
+void td5_track_scan_banner_pages(void)
+{
+    /* per-mesh coincident-primitive hash, reused across meshes via a
+     * generation stamp (so it never has to be memset per mesh) */
+    #define BANNER_HASH_SLOTS 32768u  /* pow2; >= max prim count of a 65536-vert mesh so probing never saturates */
+    static uint64_t s_key[BANNER_HASH_SLOTS];
+    static int16_t  s_pg [BANNER_HASH_SLOTS];
+    static float    s_nx [BANNER_HASH_SLOTS];
+    static float    s_ny [BANNER_HASH_SLOTS];
+    static float    s_nz [BANNER_HASH_SLOTS];
+    static uint32_t s_gen[BANNER_HASH_SLOTS];   /* 0 = never used; first gen is 1 */
+    static uint32_t s_cur_gen = 0;
+
+    int scanned_meshes = 0, pairs = 0;
+    int dl;
+
+    memset(s_native_banner_page, 0, sizeof(s_native_banner_page));
+    s_native_banner_page_count = 0;
+
+    /* TD6 tracks keep the hand-authored k_td6_banner_pages list. */
+    if (g_active_td6_level != 0) {
+        TD5_LOG_I("track", "native banner scan: skipped (TD6 level %d uses page list)",
+                  g_active_td6_level);
+        return;
+    }
+    if (!td5_env_flag_on("TD5RE_BANNER_PAIR_CULL")) {
+        TD5_LOG_I("track", "native banner scan: OFF (TD5RE_BANNER_PAIR_CULL=0)");
+        return;
+    }
+    if (!s_models_blob || s_models_display_list_count <= 0)
+        return;
+
+    for (dl = 0; dl < s_models_display_list_count; dl++) {
+        uint8_t *block_base;
+        uint32_t sub_count, j;
+        if (s_models_entry_offsets[dl] == 0) continue;
+        block_base = s_models_blob + s_models_entry_offsets[dl];
+        sub_count = *(const uint32_t *)block_base;
+        if (sub_count == 0 || sub_count > 256) continue;
+
+        for (j = 0; j < sub_count; j++) {
+            uint32_t mesh_ptr_val = *(const uint32_t *)(block_base + 4 + j * 4);
+            TD5_MeshHeader *mesh;
+            const TD5_PrimitiveCmd *cmds;
+            TD5_MeshVertex *base_verts;
+            int count, cmd_count, cursor, c;
+
+            if (mesh_ptr_val == 0) continue;
+            mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
+            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader))) continue;
+            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0) continue;
+            /* Billboard meshes (tag 1/2) are camera-facing sprites, never signs. */
+            if (mesh->texture_page_id == 1 || mesh->texture_page_id == 2) continue;
+            count = mesh->total_vertex_count;
+            cmd_count = mesh->command_count;
+            if (count <= 0 || count > 65536 || cmd_count <= 0 || cmd_count > 4096) continue;
+
+            cmds = (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+            base_verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+            if ((uintptr_t)cmds < 0x10000u || (uintptr_t)base_verts < 0x10000u) continue;
+            if (!td5_track_is_ptr_in_blob(cmds, (size_t)cmd_count * sizeof(TD5_PrimitiveCmd))) continue;
+            if (!td5_track_is_ptr_in_blob(base_verts, (size_t)count * sizeof(TD5_MeshVertex))) continue;
+
+            scanned_meshes++;
+            s_cur_gen++;
+            if (s_cur_gen == 0) { memset(s_gen, 0, sizeof(s_gen)); s_cur_gen = 1; }
+
+            /* Walk commands with the SAME sequential-cursor rules as
+             * td5_render_prepared_mesh / td5_track_derive_missing_normals so a
+             * primitive's vertices line up 1:1 with what actually renders
+             * (vertex_data_ptr: 0 => sequential cursor, small => mesh+offset,
+             * large => absolute pointer). */
+            cursor = 0;
+            for (c = 0; c < cmd_count; c++) {
+                int opcode = cmds[c].dispatch_type;
+                int page   = cmds[c].texture_page_id;
+                int n_tri  = cmds[c].triangle_count;
+                int n_quad = cmds[c].quad_count;
+                int needed = n_tri * 3 + n_quad * 4;
+                int idx0, p;
+
+                if (opcode < 0 || opcode > 6) continue;
+                if (cmds[c].vertex_data_ptr != 0) {
+                    uintptr_t vp = (uintptr_t)cmds[c].vertex_data_ptr;
+                    const TD5_MeshVertex *cv = (vp < 0x10000u)
+                        ? (const TD5_MeshVertex *)((uint8_t *)mesh + vp)
+                        : (const TD5_MeshVertex *)vp;
+                    idx0 = (int)(cv - base_verts);
+                    if (idx0 < 0 || idx0 + needed > count) continue;
+                } else {
+                    idx0 = cursor;
+                    if (cursor + needed > count) break;
+                    cursor += needed;
+                }
+                if (opcode == 4) continue;   /* billboard: different stride, not a sign */
+                if (page < 0 || page >= TD5_BANNER_PAGE_MAX) continue;
+                if (needed <= 0) continue;
+
+                /* triangles first, then quads (base_verts + idx0 layout) */
+                for (p = 0; p < n_tri + n_quad; p++) {
+                    const TD5_MeshVertex *pv;
+                    int nv, a, b, k;
+                    int64_t qx[4], qy[4], qz[4];
+                    uint64_t h;
+                    float ux, uy, uz, vx, vy, vz, nx, ny, nz;
+                    uint32_t slot, probe;
+
+                    if (p < n_tri) { pv = base_verts + idx0 + p * 3; nv = 3; }
+                    else           { pv = base_verts + idx0 + n_tri * 3 + (p - n_tri) * 4; nv = 4; }
+
+                    for (k = 0; k < nv; k++) {
+                        qx[k] = (int64_t)floorf(pv[k].pos_x + 0.5f);
+                        qy[k] = (int64_t)floorf(pv[k].pos_y + 0.5f);
+                        qz[k] = (int64_t)floorf(pv[k].pos_z + 0.5f);
+                    }
+                    /* geometric normal from the ORIGINAL (unsorted) winding —
+                     * the reverse-wound twin yields an antiparallel normal. */
+                    ux = pv[1].pos_x - pv[0].pos_x; uy = pv[1].pos_y - pv[0].pos_y; uz = pv[1].pos_z - pv[0].pos_z;
+                    vx = pv[2].pos_x - pv[0].pos_x; vy = pv[2].pos_y - pv[0].pos_y; vz = pv[2].pos_z - pv[0].pos_z;
+                    nx = uy * vz - uz * vy;
+                    ny = uz * vx - ux * vz;
+                    nz = ux * vy - uy * vx;
+                    if (nx * nx + ny * ny + nz * nz < 1e-3f) continue;  /* degenerate */
+
+                    /* canonical key: sort quantized verts, then FNV-1a hash */
+                    for (a = 1; a < nv; a++)
+                        for (b = a; b > 0 && banner_vlt(qx[b], qy[b], qz[b],
+                                                        qx[b-1], qy[b-1], qz[b-1]); b--) {
+                            int64_t t;
+                            t = qx[b]; qx[b] = qx[b-1]; qx[b-1] = t;
+                            t = qy[b]; qy[b] = qy[b-1]; qy[b-1] = t;
+                            t = qz[b]; qz[b] = qz[b-1]; qz[b-1] = t;
+                        }
+                    h = 1469598103934665603ULL;
+                    for (k = 0; k < nv; k++) {
+                        uint64_t comp[3]; int w;
+                        comp[0] = (uint64_t)qx[k]; comp[1] = (uint64_t)qy[k]; comp[2] = (uint64_t)qz[k];
+                        for (w = 0; w < 3; w++) { h ^= comp[w]; h *= 1099511628211ULL; }
+                    }
+                    h ^= (uint64_t)nv;   /* keep tri and quad key spaces distinct */
+
+                    slot = (uint32_t)(h & (BANNER_HASH_SLOTS - 1));
+                    for (probe = 0; probe < 64; probe++) {
+                        uint32_t s = (slot + probe) & (BANNER_HASH_SLOTS - 1);
+                        if (s_gen[s] != s_cur_gen) {
+                            s_key[s] = h; s_pg[s] = (int16_t)page;
+                            s_nx[s] = nx; s_ny[s] = ny; s_nz[s] = nz;
+                            s_gen[s] = s_cur_gen;
+                            break;
+                        }
+                        if (s_key[s] == h) {
+                            /* coincident primitive in this mesh: opposite winding
+                             * => a double-sided panel (banner); same winding => a
+                             * harmless exact duplicate, left alone. */
+                            float dot = s_nx[s] * nx + s_ny[s] * ny + s_nz[s] * nz;
+                            if (dot < 0.0f) {
+                                native_banner_flag_page(page);
+                                native_banner_flag_page(s_pg[s]);
+                                pairs++;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    TD5_LOG_I("track",
+        "native banner scan: %d meshes, %d double-sided pairs, %d banner pages flagged",
+        scanned_meshes, pairs, s_native_banner_page_count);
+    if (s_native_banner_page_count > 0) {
+        char buf[256]; int n = 0, pg; buf[0] = 0;
+        for (pg = 0; pg < TD5_BANNER_PAGE_MAX && n < (int)sizeof(buf) - 8; pg++)
+            if (td5_track_is_native_banner_page(pg))
+                n += snprintf(buf + n, sizeof(buf) - n, "%d ", pg);
+        TD5_LOG_I("track", "native banner pages: %s", buf);
+    }
+    #undef BANNER_HASH_SLOTS
+}
+
+/* ========================================================================
  * [LIGHT2] Street-lamp light registration
  *
  * The track's light fixtures are additive glow billboards (mesh header tag
