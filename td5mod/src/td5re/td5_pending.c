@@ -71,6 +71,7 @@ static void retired_add(const char *text) {
 static const char *const k_seed[] = {
     "Auto headlights: ON in Bern tunnels, OFF in Bern sunlit stretches",
     "Auto headlights: ON across dark-sky tracks (Moscow), OFF on bright tracks",
+    "Car bodies stay neutral (no red/colour tint from track lighting, e.g. Bern)",
     "Track select: RACE OPTIONS screen gathers all race options in one place",
     "RACE OPTIONS screen: adds checkpoint timers/power-ups/toughness/deform",
     "Track select: LAPS shows on TD5 circuit tracks (Newcastle etc.), not P2P",

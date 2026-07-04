@@ -74,6 +74,14 @@ static int   s_light_dark_mode  = 0;
 static int   s_dark_knobs_read  = 0;
 static float s_dark_scale       = 0.50f;   /* ambient/directional dim under dark mode */
 static int   s_dark_floor       = 0x2A;     /* clamp floor: distant geometry stays dim, not black */
+/* [car look] Saturation of the authored zone COLOUR applied to VEHICLE bodies in
+ * the Mode>=1 colored path: 1.0 = full authored colour, 0.0 = neutral grey (the
+ * original averaged zone light to grey, so 0 == the faithful car look). Warm-lit
+ * tracks (e.g. Bern, amber ambient) otherwise cast a red tint on cars; this pulls
+ * the car lighting back toward its own luminance while the TRACK keeps full
+ * colour. Default 0 = neutral cars (matches the original + the approved look);
+ * raise toward 1 to let the authored zone colour tint cars. Env: TD5RE_CAR_ZONE_SAT. */
+static float s_car_zone_sat     = 0.0f;
 
 /* [AUTO LIGHTS] Environment-brightness probe, sampled each frame in the actor
  * lighting pass for the player (slot 0). Two components:
@@ -118,6 +126,8 @@ static void light_read_dark_knobs(void)
     if (ef && ef[0]) { int v = atoi(ef); if (v >= 0 && v <= 0xFF) s_dark_floor = v; }
     const char *em = getenv("TD5RE_LIGHT_DARK_MODE");   /* env override of the INI toggle */
     if (em && em[0]) s_light_dark_mode = (em[0] != '0');
+    const char *ecs = getenv("TD5RE_CAR_ZONE_SAT");     /* vehicle zone-colour saturation */
+    if (ecs && ecs[0]) { float v = (float)atof(ecs); if (v >= 0.0f && v <= 1.0f) s_car_zone_sat = v; }
     TD5_LOG_I(LOG_TAG, "lighting dark-mode: %s (scale=%.2f floor=0x%02X)",
               s_light_dark_mode ? "ON" : "off", (double)s_dark_scale, s_dark_floor);
 }
@@ -673,6 +683,17 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
             float fr = dot0 * ch[0][0] + dot1 * ch[1][0] + dot2 * ch[2][0] + amb_rgb[0];
             float fg = dot0 * ch[0][1] + dot1 * ch[1][1] + dot2 * ch[2][1] + amb_rgb[1];
             float fb = dot0 * ch[0][2] + dot1 * ch[1][2] + dot2 * ch[2][2] + amb_rgb[2];
+            /* [car look] Vehicles only (slot>=0): desaturate the authored zone
+             * colour toward its own average so warm/cool zones don't cast a tint
+             * on car bodies. avg == the original's (r+g+b)/3 grey, so sat=0 gives
+             * the faithful neutral car; sat=1 keeps full colour. Track (slot<0)
+             * is never touched, so environment colour is preserved. */
+            if (slot >= 0 && s_car_zone_sat < 0.999f) {
+                float y = (fr + fg + fb) * (1.0f / 3.0f);
+                fr = y + (fr - y) * s_car_zone_sat;
+                fg = y + (fg - y) * s_car_zone_sat;
+                fb = y + (fb - y) * s_car_zone_sat;
+            }
             if (dark) { fr *= s_dark_scale; fg *= s_dark_scale; fb *= s_dark_scale; }
             fr += bump; fg += bump; fb += bump;
             int ir = clampi((int)fr, floor_lum, TD5_LIGHTING_MAX);
