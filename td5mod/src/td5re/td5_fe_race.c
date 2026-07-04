@@ -3397,11 +3397,10 @@ static int mp_game_modes_enabled(void) {
 }
 
 static const char *const k_mp_mode_names[TD5_MP_MODE_COUNT] = {
-    "REGULAR RACE", "TIME TRIAL", "CUP", "TRAFFIC BATTLE", "COP CHASE", "DRAG RACE"
+    "REGULAR RACE", "CUP", "TRAFFIC BATTLE", "COP CHASE", "DRAG RACE"
 };
 static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
     "Classic race to the finish",
-    "Race the clock - players pass through each other",
     "Best-of-X series, points by position",
     "Wreck the most ONCOMING traffic - placement ignored",
     "One cop hunts the rest before time runs out",
@@ -3519,10 +3518,6 @@ static void mp_mode_config_apply_defaults(int mode) {
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
     c->mode = mode;
     switch (mode) {
-    case TD5_MP_MODE_TIME_TRIAL:
-        c->tt_checkpoint_start  = 0;
-        c->tt_checkpoint_finish = 5;            /* 5 = full run to the finish line */
-        break;
     case TD5_MP_MODE_CUP:
         c->cup_race_count    = 3;
         c->cup_team_mode     = 0;
@@ -3793,10 +3788,6 @@ static int mp_cfg_build(MpCfgOpt *o) {
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
     int n = 0;
     switch (c->mode) {
-    case TD5_MP_MODE_TIME_TRIAL:
-        o[n].label="CHECKPOINT START";  o[n].val=&c->tt_checkpoint_start;  o[n].min=0; o[n].max=4; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
-        o[n].label="CHECKPOINT FINISH"; o[n].val=&c->tt_checkpoint_finish; o[n].min=1; o[n].max=5; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
-        break;
     case TD5_MP_MODE_CUP:
         o[n].label="RACES";            o[n].val=&c->cup_race_count;       o[n].min=1;  o[n].max=TD5_CUP_MAX_RACES; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
         o[n].label="OPPONENTS";        o[n].val=&c->cup_ai_opponents;     o[n].min=0;  o[n].max=TD5_MAX_RACER_SLOTS-1; o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
@@ -3965,17 +3956,6 @@ void Screen_MpModeConfig(void) {
         if (v < o->min) v = o->min;
         if (v > o->max) v = o->max;
         if (v != *o->val) { *o->val = v; frontend_play_sfx(2); }
-        /* Time trial: keep finish strictly above start (start<=4, finish<=5). */
-        if (c->mode == TD5_MP_MODE_TIME_TRIAL) {
-            if (c->tt_checkpoint_start  < 0) c->tt_checkpoint_start  = 0;
-            if (c->tt_checkpoint_start  > 4) c->tt_checkpoint_start  = 4;
-            if (c->tt_checkpoint_finish > 5) c->tt_checkpoint_finish = 5;
-            if (c->tt_checkpoint_finish <= c->tt_checkpoint_start) {
-                if (c->tt_checkpoint_start < 4)
-                    c->tt_checkpoint_finish = c->tt_checkpoint_start + 1;
-                else { c->tt_checkpoint_start = 4; c->tt_checkpoint_finish = 5; }
-            }
-        }
     }
 
     /* OK -> next step. Cop chase with a HUMAN cop goes to the role-pick screen;
@@ -6388,13 +6368,12 @@ static void frontend_update_laps_button_visibility(int laps_btn_idx) {
 static void frontend_update_difficulty_button_visibility(int diff_btn_idx) {
     if (diff_btn_idx < 0 || diff_btn_idx >= s_button_count) return;
     /* Difficulty is opponent-dependent, so hide it when there are 0 opponents,
-     * in Quick Race (flow 2), or in Time Trial (which has no AI opponents).
+     * in Quick Race (flow 2).
      * [MP COP CHASE 2026-06-24] Also hide it in Cop Chase: the mode is a
      * human-vs-human pursuit with no AI-difficulty selection on this screen
      * (mirrors the POLICE row hide). Checks mode directly — wanted_mode_enabled
      * is only set at race init, so the MP track selector wouldn't see it yet. */
     int hide = (s_num_ai_opponents <= 0) || (s_flow_context == 2) ||
-               (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL) ||
                (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE);
     s_buttons[diff_btn_idx].hidden   = hide;
     s_buttons[diff_btn_idx].disabled = hide;
@@ -6608,12 +6587,6 @@ void Screen_TrackSelection(void) {
         frontend_update_difficulty_button_visibility(6);
         /* [COP-CHASE 2026-06-21] Hide the POLICE row in Cop Chase / wanted mode. */
         frontend_update_police_button_visibility(5);
-        /* [MP TIME TRIAL 2026-06-22] AI opponents are auto-filled in time trial,
-         * so hide the manual OPPONENTS row (button 2) on the track selector. */
-        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL) {
-            s_buttons[2].hidden = 1;
-            s_buttons[2].disabled = 1;
-        }
         s_race_difficulty = g_td5.difficulty_tier;
         if (s_race_difficulty < 0) s_race_difficulty = 0;
         if (s_race_difficulty > 2) s_race_difficulty = 2;

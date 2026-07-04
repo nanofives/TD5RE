@@ -261,19 +261,6 @@ void td5_render_set_actor_effect_tint(uint32_t argb)
     s_actor_effect_tint = argb;
 }
 
-/* [MP GAME MODES: TIME TRIAL 2026-06-22] Non-owner players render translucent
- * ("ghost") so the player pass-through reads visually. Knob TD5RE_TT_GHOST=0
- * keeps opponents fully opaque. */
-/* #define TT_GHOST_ALPHA moved to td5_render_internal.h */
-int tt_ghost_enabled(void)
-{
-    static int knob = -1;
-    if (knob < 0) {
-        knob = td5_env_flag_on("TD5RE_TT_GHOST");   /* default ON */
-    }
-    return knob;
-}
-
 /* Per-slot "this is a ported TD6 car" flag. TD6 cars have a grayscale body and
  * no meaningful env-map reflection mesh (envmodel.dat is unused), so the
  * TD5-faithful chrome/projection reflection overlay must NOT run on them: in a

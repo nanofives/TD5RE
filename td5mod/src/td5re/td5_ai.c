@@ -8161,13 +8161,13 @@ static int      s_trf_dyn_oncoming_pct;                   /* 0..100 from TRAFFIC
 static int      s_trf_dyn_seeded;                         /* race_init ran for this race */
 
 /* ---- [PER-VIEWPORT TRAFFIC 2026-06-22] ----------------------------------------
- * Split-screen TIME TRIAL: each viewport gets its OWN traffic partition (a disjoint
- * sub-range of the traffic slots), spawned with an IDENTICAL RNG seed but scoped to
- * its own player (s_trf_scope_slot), so the sets land in matching places yet are
- * simulated / collided / rendered independently — one player perturbing a traffic
- * car never shows in another player's pane. INERT unless s_trf_per_vp is set in
- * race_init (knob on + mp mode == TIME_TRIAL + viewport_count > 1). When inert,
- * every path below is bypassed and the original shared spawner runs unchanged. */
+ * Split-screen TIME TRIAL (removed 2026-07-04): each viewport got its OWN traffic
+ * partition (a disjoint sub-range of the traffic slots), spawned with an IDENTICAL
+ * RNG seed but scoped to its own player, so the sets landed in matching places yet
+ * were simulated / collided / rendered independently — one player perturbing a
+ * traffic car never showed in another player's pane. That was the only mode that
+ * ever set s_trf_per_vp, so trf_per_viewport_setup() now always leaves it at 0 and
+ * every path below permanently takes the original shared-spawner branch. */
 int             g_traffic_slot_owner_vp[TD5_MAX_TOTAL_ACTORS]; /* viewport owner; -1 = shared */
 static int      s_trf_per_vp     = 0;     /* per-viewport traffic active this race      */
 static int      s_trf_vp_count   = 1;     /* number of viewports partitioned across     */
@@ -8179,15 +8179,6 @@ static int      s_trf_dyn_cooldown_vp[TD5_MAX_VIEWPORTS]; /* per-viewport spawn 
  * (a partition must not "see" another partition's twins when deciding clumping).
  * -1 = count all traffic (default / non-per-vp). */
 static int      s_trf_spawn_partition = -1;
-
-static int trf_per_viewport_knob(void)
-{
-    static int s = -1;
-    if (s < 0) {
-        s = td5_env_flag_on("TD5RE_TT_PER_VIEWPORT_TRAFFIC");   /* default ON */
-    }
-    return s;
-}
 
 /* Viewport index whose player occupies racer `slot` (-1 if none). Split-screen is
  * an identity map (vp == slot) but resolve it via the game table to be safe. */
@@ -8228,41 +8219,20 @@ int td5_ai_traffic_pair_blocked(int slot_a, int slot_b)
     return 0;
 }
 
-/* Decide per-viewport activation + fill the slot->owner partition map. Called from
- * race_init after g_traffic_slot_base / viewport_count are known. */
+/* Reset per-viewport traffic partitioning state. [MP TIME TRIAL removed
+ * 2026-07-04] This subsystem existed solely to give split-screen TIME TRIAL
+ * ghost semantics an isolated traffic partition per player; with that mode
+ * gone there is no remaining caller that can ever enable it, so this now only
+ * resets to the inactive defaults and every gated call site below permanently
+ * takes the original shared-traffic path (s_trf_per_vp stays 0). */
 static void trf_per_viewport_setup(void)
 {
-    int base = g_traffic_slot_base, v, slot, vc;
+    int slot;
     for (slot = 0; slot < TD5_MAX_TOTAL_ACTORS; slot++)
         g_traffic_slot_owner_vp[slot] = -1;
     s_trf_per_vp   = 0;
     s_trf_vp_count = 1;
     s_trf_vp_k     = TD5_MAX_TRAFFIC_SLOTS;
-    /* Partition by num_human_players, NOT viewport_count: traffic init runs at
-     * InitRace step ~4 but the viewport layout (viewport_count) isn't set until
-     * step ~17, so viewport_count is still 1 here. In split-screen each human is
-     * one viewport with an identity slot map, so num_human_players is the right
-     * (and already-set) partition count. */
-    vc = g_td5.num_human_players;
-    if (!trf_per_viewport_knob()) return;
-    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_TIME_TRIAL) return;
-    if (vc <= 1) return;
-    if (vc > TD5_MAX_VIEWPORTS) vc = TD5_MAX_VIEWPORTS;
-    s_trf_per_vp   = 1;
-    s_trf_vp_count = vc;
-    s_trf_vp_k     = TD5_MAX_TRAFFIC_SLOTS / vc;
-    if (s_trf_vp_k < 1) s_trf_vp_k = 1;
-    for (v = 0; v < vc; v++) {
-        int pv_lo = base + v * s_trf_vp_k;
-        int pv_hi = pv_lo + s_trf_vp_k;
-        if (v == vc - 1) pv_hi = base + vc * s_trf_vp_k;   /* last gets the slack slots */
-        for (slot = pv_lo; slot < pv_hi && slot < TD5_MAX_TOTAL_ACTORS; slot++)
-            g_traffic_slot_owner_vp[slot] = v;
-        s_trf_dyn_rng_vp[v]      = 0x54443552u ^ ((uint32_t)g_td5.track_index * 2654435761u);
-        s_trf_dyn_cooldown_vp[v] = 0;
-    }
-    TD5_LOG_I(LOG_TAG, "traffic_per_viewport: ON (time trial split-screen) viewports=%d "
-              "slots/vp=%d base=%d", s_trf_vp_count, s_trf_vp_k, base);
 }
 
 /* Per-track lane→direction map learned from the authored TRAFFIC.BUS records:

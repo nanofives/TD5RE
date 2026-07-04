@@ -550,7 +550,6 @@ extern const float *s_deform_dy;
 extern const float *s_deform_dz;
 extern int          s_deform_count;
 
-int tt_ghost_enabled(void);
 int td6_car_zfix_enabled(void);
 int traffic_recover_smoke_enabled(void);
 void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot);

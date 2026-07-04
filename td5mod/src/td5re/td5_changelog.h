@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 4" },
+    { CL_ITEM,    "Removed multiplayer TIME TRIAL from the mode select" },
+    { CL_ITEM,    "  screen (ghost pass-through, checkpoint start/finish)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 3" },
     { CL_ITEM,    "Street-lamp light pools: EXPERIMENTAL, off by default" },
     { CL_ITEM,    "  pending a look-dev pass ([Lighting] StreetLights=1" },
