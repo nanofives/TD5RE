@@ -2314,6 +2314,24 @@ void Screen_TwoPlayerOptions(void) {
     }
 }
 
+/* [FIX 2026-07-04] Track whether THIS visit's joystick per-action row was
+ * auto-seeded from the live built-in default (because the saved row was
+ * unconfigured) and whether the player actually captured any binding since.
+ * Only an edited row gets persisted as an explicit override on OK; an
+ * unedited seed is display-only, so a player who merely opens Controller
+ * Setup and presses OK keeps tracking future changes to the built-in default
+ * table instead of freezing today's snapshot forever. Without this, the
+ * first player to ever visit this screen for a given joystick permanently
+ * pins that joystick to whichever default happened to be live that day —
+ * e.g. the 2026-06-27 CHANGE VIEW -> Y swap silently never applied to them,
+ * while every joystick nobody had visited kept tracking the live default.
+ * That is exactly the "joystick 1 has a different camera button than the
+ * others" bug: whichever joystick was configured-and-OK'd earliest is the
+ * odd one out. See the OK-save block in Screen_ControllerBinding (state 10)
+ * and the seed block in state 0 below. */
+static int s_ctrl_action_seeded_from_default = 0;
+static int s_ctrl_action_edited              = 0;
+
 /* [PORT ENHANCEMENT 2026-06] Per-button remap row helpers. Both keyboard and
  * joystick players configure all 10 actions (LEFT/RIGHT/ACCELERATE/BRAKE +
  * HANDBRAKE..REAR VIEW). For joysticks each action maps to a button or an
@@ -2349,6 +2367,7 @@ static void ctrl_begin_capture(void)
 static void ctrl_capture_advance(void)
 {
     s_ctrl_capturing = 0;
+    s_ctrl_action_edited = 1;   /* [FIX 2026-07-04] a real capture happened this visit */
     if (s_ctrl_remap_all) {
         s_ctrl_sel_action++;
         if (s_ctrl_sel_action < TD5_JSBIND_ACTIONS) {
@@ -2390,6 +2409,10 @@ void Screen_ControllerBinding(void) {
             int j;
             if (dev_type < 0 || dev_type > 2) dev_type = 0;   /* no controller → keyboard list */
             s_ctrl_input_source = dev_type;
+            /* [FIX 2026-07-04] Reset the seed/edit tracking for this visit; the
+             * joystick branch below sets s_ctrl_action_seeded_from_default. */
+            s_ctrl_action_seeded_from_default = 0;
+            s_ctrl_action_edited              = 0;
 
             if (dev_type == 0) {
                 /* Seed the scancode buffer from this player's saved keyboard set
@@ -2423,6 +2446,10 @@ void Screen_ControllerBinding(void) {
                         if (def)
                             memcpy(s_ctrl_action_bind[s_ctrl_player], def,
                                    TD5_JSBIND_ACTIONS * sizeof(uint32_t));
+                        /* [FIX 2026-07-04] Remember this row is a display-only
+                         * seed of the LIVE default, not a saved config — see
+                         * the OK-save guard in state 10. */
+                        s_ctrl_action_seeded_from_default = 1;
                     }
                 }
             }
@@ -2507,13 +2534,31 @@ void Screen_ControllerBinding(void) {
                     /* Save this player's bindings (joystick per-action codes +
                      * keyboard set) and return to Control Options. */
                     {
+                        /* [FIX 2026-07-04] A joystick row that was unconfigured on
+                         * entry and merely SHOWED the live default (never actually
+                         * captured a binding this visit) must NOT be written back
+                         * as an explicit per-player override — that would freeze
+                         * this player onto today's default forever, deaf to any
+                         * later change to k_default_js_action_bind. Keyboard rows
+                         * are unaffected (they don't have this live-default
+                         * fallback concept). */
+                        int persist_joystick = (s_ctrl_input_source == 0) ||
+                                                !s_ctrl_action_seeded_from_default ||
+                                                s_ctrl_action_edited;
                         uint32_t *ab = td5_save_get_action_bindings_mutable();
-                        if (ab)
-                            memcpy(ab + (size_t)s_ctrl_player * TD5_JSBIND_ACTIONS,
-                                   s_ctrl_action_bind[s_ctrl_player],
-                                   TD5_JSBIND_ACTIONS * sizeof(uint32_t));
-                        td5_input_set_action_bindings(s_ctrl_player,
-                            s_ctrl_action_bind[s_ctrl_player], TD5_JSBIND_ACTIONS);
+                        if (persist_joystick) {
+                            if (ab)
+                                memcpy(ab + (size_t)s_ctrl_player * TD5_JSBIND_ACTIONS,
+                                       s_ctrl_action_bind[s_ctrl_player],
+                                       TD5_JSBIND_ACTIONS * sizeof(uint32_t));
+                            td5_input_set_action_bindings(s_ctrl_player,
+                                s_ctrl_action_bind[s_ctrl_player], TD5_JSBIND_ACTIONS);
+                        } else {
+                            TD5_LOG_I(LOG_TAG,
+                                "CtrlBind: player %d joystick row left unconfigured "
+                                "(only viewed the live default, no edits) — keeps "
+                                "tracking the built-in default table", s_ctrl_player);
+                        }
                     }
                     {
                         /* Keyboard set: players 0/1 own a set; 2+ share player-1's. */
