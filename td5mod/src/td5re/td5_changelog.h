@@ -33,9 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 3" },
-    { CL_ITEM,    "Street lamps now emit REAL light: in rain, dusk or" },
-    { CL_ITEM,    "  tunnels the nearest lamps cast warm pools onto the" },
-    { CL_ITEM,    "  road, cars and walls ([Lighting] StreetLights=0 off)" },
+    { CL_ITEM,    "Street-lamp light pools: EXPERIMENTAL, off by default" },
+    { CL_ITEM,    "  pending a look-dev pass ([Lighting] StreetLights=1" },
+    { CL_ITEM,    "  to try: nearest lamps cast warm pools when dark)" },
     { CL_ITEM,    "FIX: shadows no longer appear as several offset" },
     { CL_ITEM,    "  duplicate copies (ray-march dithering)" },
     { CL_ITEM,    "NEW lighting engine (phase 3): REFLECTIONS. Car" },
