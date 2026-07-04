@@ -1460,6 +1460,10 @@ void Screen_NetworkLobby(void) {
         }
 #endif
 
+        /* [NET GAME MODES 2026-07-04] Arriving at the net lobby (incl. the
+         * return from the GAME MODE picker) clears the net-config routing flag. */
+        s_mp_net_config = 0;
+
         /* S31: (re)announce this machine's car pick to the host -- runs on
          * every lobby entry, including the return from CHANGE CAR. */
         td5_net_set_local_car(s_selected_car, s_selected_paint,
@@ -1494,9 +1498,11 @@ void Screen_NetworkLobby(void) {
          * input strip + a "MESSAGE WINDOW" panel that overlapped the roster and
          * the action buttons. Replaced with a left roster (drawn by the overlay,
          * no navigable panel buttons) + a right column of action buttons. Fixed
-         * indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=EXIT 4=OPTIONS(host).
+         * indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=GAME MODE 4=EXIT;
+         * per-row KICK buttons follow at 5..9 (host).
          * [2026-06-07] Added SELECT TRACK -> the track picker (returns to the
-         * lobby via flow_context==4); rows below it shift down one slot (0x28). */
+         * lobby via flow_context==4); rows below it shift down one slot (0x28).
+         * [2026-07-04] Added GAME MODE -> the shared MP mode picker (host). */
         /* [S31] Button 0: the host STARTS the race; clients toggle READY.
          * Width 180 so SELECT TRACK fits inside the frame. */
         frontend_create_button(frontend_net_is_host() ? SNK_StartButTxt
@@ -1504,14 +1510,20 @@ void Screen_NetworkLobby(void) {
                                                     430, 110, 180, 0x20); /* 0 */
         frontend_create_button(SNK_ChangeCarButTxt, 430, 150, 180, 0x20); /* 1 CHANGE CAR */
         frontend_create_button("SELECT TRACK",      430, 190, 180, 0x20); /* 2 SELECT TRACK */
-        frontend_create_button(SNK_ExitButTxt,      430, 230, 180, 0x20); /* 3 EXIT */
-        /* [S31] Track choice is the host's call (the DXPSTART config overrides
-         * any client-side pick anyway) -- hide SELECT TRACK for joiners. */
+        /* [NET GAME MODES 2026-07-04] GAME MODE -> the shared MP mode picker
+         * (host only). s_mp_net_config routes the mode screens back here. */
+        frontend_create_button("GAME MODE",         430, 230, 180, 0x20); /* 3 GAME MODE */
+        frontend_create_button(SNK_ExitButTxt,      430, 270, 180, 0x20); /* 4 EXIT */
+        /* [S31] Track + game-mode choices are the host's call (the DXPSTART
+         * config overrides any client-side pick anyway) -- hide SELECT TRACK and
+         * GAME MODE for joiners. */
         if (!frontend_net_is_host()) {
             s_buttons[2].hidden   = 1;
             s_buttons[2].disabled = 1;
+            s_buttons[3].hidden   = 1;
+            s_buttons[3].disabled = 1;
         }
-        /* [S31 redesign] indices 4..8: per-row KICK buttons (host only) —
+        /* [S31 redesign] indices 5..9: per-row KICK buttons (host only) —
          * positioned/unhidden each frame next to the joined remote players;
          * the exit-door icon is drawn over them in the post-button pass. */
         if (frontend_net_is_host()) {
@@ -1600,7 +1612,7 @@ void Screen_NetworkLobby(void) {
             for (pslot = 0; pslot < TD5_NET_MAX_PLAYERS; pslot++) {
                 if (!td5_net_is_slot_active(pslot)) continue;
                 if (pslot != td5_net_local_slot() && k < 5) {
-                    int bi = 4 + k;
+                    int bi = 5 + k;
                     if (bi < FE_MAX_BUTTONS && s_buttons[bi].active) {
                         s_buttons[bi].x = FE_LOBBY_X + FE_LOBBY_PANEL_W - 38;
                         s_buttons[bi].y = FE_LOBBY_ROW0_Y + prow * FE_LOBBY_ROW_H - 3;
@@ -1613,7 +1625,7 @@ void Screen_NetworkLobby(void) {
                 prow++;
             }
             for (; k < 5; k++) {
-                int bi = 4 + k;
+                int bi = 5 + k;
                 if (bi < FE_MAX_BUTTONS) {
                     s_buttons[bi].hidden   = 1;
                     s_buttons[bi].disabled = 1;
@@ -1738,7 +1750,8 @@ void Screen_NetworkLobby(void) {
         }
 
         /* Process button input
-         * (indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=EXIT 4=OPTIONS). */
+         * (indices: 0=START 1=CHANGE CAR 2=SELECT TRACK 3=GAME MODE 4=EXIT;
+         *  5..9=KICK). */
         if (s_input_ready && s_button_index >= 0) {
             switch (s_button_index) {
             case 0: /* START */
@@ -1788,7 +1801,19 @@ void Screen_NetworkLobby(void) {
                 }
                 break;
 
-            case 3: /* EXIT -> tear down the session and leave the lobby */
+            case 3: /* GAME MODE -> the shared MP mode picker (host only). Sets
+                     * s_mp_net_config so the mode screens route back to the net
+                     * lobby; the chosen mode rides DXPSTART to clients. */
+                if (frontend_net_is_host()) {
+                    s_mp_net_config = 1;
+                    frontend_play_sfx(3);
+                    TD5_LOG_I(LOG_TAG, "NetworkLobby: GAME MODE -> mode picker");
+                    td5_frontend_set_screen(TD5_SCREEN_MP_MODE_VOTE);
+                    return;
+                }
+                break;
+
+            case 4: /* EXIT -> tear down the session and leave the lobby */
                 TD5_LOG_I(LOG_TAG, "NetworkLobby: exit -> destroy session");
                 frontend_net_destroy();
                 s_network_active = 0;
@@ -1796,10 +1821,10 @@ void Screen_NetworkLobby(void) {
                 return;
 
             default:
-                /* [S31 redesign] indices 4..8 = per-row KICK buttons (host). */
+                /* [S31 redesign] indices 5..9 = per-row KICK buttons (host). */
                 if (frontend_net_is_host() &&
-                    s_button_index >= 4 && s_button_index <= 8) {
-                    int ks = s_kick_button_slot[s_button_index - 4];
+                    s_button_index >= 5 && s_button_index <= 9) {
+                    int ks = s_kick_button_slot[s_button_index - 5];
                     if (ks >= 0 && td5_net_is_slot_active(ks) &&
                         ks != td5_net_local_slot()) {
                         uint8_t kick_msg[8] = {0x12, 0, 0, 0, 0, 0, 0, 0};

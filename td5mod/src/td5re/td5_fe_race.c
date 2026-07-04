@@ -3612,7 +3612,42 @@ void Screen_MpModeVote(void) {
         s_mode_host_prev    = mp_simul_player_nav(0);
         s_anim_complete     = 1;
         s_inner_state       = 1;
-        TD5_LOG_I(LOG_TAG, "MP mode vote: enter (%d players)", n);
+        if (s_mp_net_config &&                 /* net: focus the current pick */
+            g_td5.mp_mode_config.mode >= 0 &&
+            g_td5.mp_mode_config.mode < TD5_MP_MODE_COUNT) {
+            s_selected_button = g_td5.mp_mode_config.mode;
+            s_mode_vote[0]    = g_td5.mp_mode_config.mode;
+        }
+        TD5_LOG_I(LOG_TAG, "MP mode vote: enter (%d players, net=%d)", n, s_mp_net_config);
+        return;
+    }
+
+    /* [NET GAME MODES 2026-07-04] Host-only mode picker over the network. Each
+     * machine is one player, so there is no per-pad voting: the host navigates
+     * the mode list with the standard nav, A locks the pick + opens the option
+     * screen, B returns to the net lobby. The chosen mode rides DXPSTART to
+     * every client at race start (td5_fe_net.c builds cfg.mode_config from
+     * g_td5.mp_mode_config). The delicate local voting path below is skipped. */
+    if (s_mp_net_config) {
+        if (s_selected_button < 0) s_selected_button = 0;
+        if (s_selected_button >= TD5_MP_MODE_COUNT) s_selected_button = TD5_MP_MODE_COUNT - 1;
+        s_mode_vote[0] = s_selected_button;             /* highlight = host pick */
+        if (frontend_check_escape()) {                  /* B -> back to net lobby */
+            frontend_play_sfx(5);
+            td5_plat_input_flush_nav();
+            td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
+            return;
+        }
+        if (s_input_ready && s_button_index >= 0 && s_button_index < TD5_MP_MODE_COUNT) {
+            s_mode_vote[0]    = s_button_index;
+            s_selected_button = s_button_index;
+            mp_mode_config_apply_defaults(s_button_index);
+            frontend_play_sfx(3);
+            td5_plat_input_flush_nav();
+            TD5_LOG_I(LOG_TAG, "NET mode pick: mode=%d -> config", s_button_index);
+            td5_frontend_set_screen(TD5_SCREEN_MP_MODE_CONFIG);
+            return;
+        }
         return;
     }
 
@@ -3719,6 +3754,7 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
     int p, m, n = s_num_human_players;
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    if (s_mp_net_config) n = 1;   /* host-only net picker: no phantom voters */
 
     /* Standard top-left title (background + button frames are drawn by the
      * shared render; we only overlay content). */
@@ -3918,6 +3954,11 @@ void Screen_MpModeConfig(void) {
         count = mp_cfg_build(opts);
         /* Regular race has no options -> skip the config screen entirely. */
         if (count == 0) {
+            if (s_mp_net_config) {   /* net RACE: mode set -> back to net lobby */
+                TD5_LOG_I(LOG_TAG, "NET mode config: no options (mode=%d) -> net lobby", c->mode);
+                td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
+                return;
+            }
             TD5_LOG_I(LOG_TAG, "MP mode config: no options (mode=%d) -> car select", c->mode);
             td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
             return;
@@ -3932,7 +3973,7 @@ void Screen_MpModeConfig(void) {
         return;
     }
 
-    if (frontend_mp_setup_disconnect_check(n)) return;
+    if (!s_mp_net_config && frontend_mp_setup_disconnect_check(n)) return;
 
     count = mp_cfg_build(opts);
 
@@ -3981,6 +4022,15 @@ void Screen_MpModeConfig(void) {
      * everything else (incl. AI cop) goes straight to car selection. */
     if (s_input_ready && s_button_index == count) {
         td5_plat_input_flush_nav();
+        if (s_mp_net_config) {
+            /* [NET GAME MODES 2026-07-04] Mode + its global options are set and
+             * ride DXPSTART to every client. Per-slot role/team assignment
+             * (cop chase / cup teams) is wired when those modes are enabled over
+             * the net; for now confirm returns to the net lobby. */
+            TD5_LOG_I(LOG_TAG, "NET mode config: confirmed mode=%d -> net lobby", c->mode);
+            td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
+            return;
+        }
         if (c->mode == TD5_MP_MODE_COP_CHASE && frontend_mp_ai_player_count() > 0) {
             /* [MP AI TEST PLAYERS 2026-06-25] Auto-assign cop roles instead of the
              * human role-pick screen: the first s_mp_ai_cop_count AI players become
