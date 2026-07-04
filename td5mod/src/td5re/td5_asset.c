@@ -36,6 +36,7 @@
 #include "td5_hud.h"    /* for TD5_AtlasEntry */
 #include "td5_physics.h" /* for td5_physics_load_carparam */
 #include "td5_ai.h"      /* for td5_ai_set_traffic_queue */
+#include "td5_game.h"    /* for td5_game_drag_mp_active */
 
 #include <stdlib.h>
 #include <string.h>
@@ -1681,9 +1682,26 @@ int td5_asset_level_number(int track_index)
      * MOV [0x004aaf3c], 0x1e (=30) directly, bypassing the schedule remap.
      * Check game_type (not drag_race_enabled) — game_type is explicitly
      * assigned in ConfigureGameTypeFlags for every race mode, so it won't
-     * leak between sessions even if a flag reset is missed. */
-    if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE)
+     * leak between sessions even if a flag reset is missed.
+     *
+     * [MP DRAG TRACK FIX 2026-07-04] The MP lobby (Screen_MpModeVote ->
+     * mp_mode_config_apply_defaults) never calls ConfigureGameTypeFlags, so
+     * game_type keeps whatever value the LAST race left it at (e.g. 0 after a
+     * normal quick race). track_index for MP drag is schedule slot 19
+     * (FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX, td5_fe_race.c CarSelect MP),
+     * which is out of range for the 19-entry schedule table below and fell
+     * through to its "return 1" fallback — level001.zip, which happens to be
+     * schedule slot 10 (Keswick)'s zip. Hence "MP drag race launches Keswick
+     * instead of the drag strip" after playing other tracks first (whatever
+     * game_type those left behind). td5_game_drag_mp_active() is the
+     * established mp_mode_config-based check used everywhere else in the
+     * codebase for this exact SP-flag-vs-MP-mode gap (see td5_game.c
+     * td5_game_drag_mp_active callers). */
+    if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active()) {
+        TD5_LOG_I(LOG_TAG, "level_number: drag race (game_type=%d mp_drag=%d) -> level030.zip",
+                  (int)g_td5.game_type, td5_game_drag_mp_active());
         return 30;
+    }
 
     /* Two-step lookup from the original binary:
      * Step 1: schedule slot index -> pool index via gScheduleToPoolIndex (VA 0x466894).

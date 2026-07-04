@@ -4112,7 +4112,7 @@ int td5_game_init_race_session(void) {
         int tidx = g_td5.track_index;
         int record_idx = -1;
         memset(&s_active_checkpoint, 0, sizeof(s_active_checkpoint));
-        if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE) {
+        if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active()) {
             /* Drag race: original LoadTrackRuntimeData(pool=30) reads the
              * checkpoint record pointer at 0x0046cfe4, which points to
              * 0x0046ce68 = {count=1, initial_time=30779, threshold=204,
@@ -4121,9 +4121,17 @@ int td5_game_init_race_session(void) {
              * needs an explicit branch. k_checkpoint_table[30] (and [29])
              * already mirror that exact row.
              * [CONFIRMED @ LoadTrackRuntimeData 0x0042FB90 +
-             *  memory_read(0x0046ce68) {01 00 3B 78 CC 00 00 00 ...}] */
+             *  memory_read(0x0046ce68) {01 00 3B 78 CC 00 00 00 ...}]
+             *
+             * [MP DRAG TRACK FIX 2026-07-04] Same game_type-goes-stale gap as
+             * td5_asset_level_number (the MP lobby never runs
+             * ConfigureGameTypeFlags) — without the td5_game_drag_mp_active()
+             * fallback, MP drag races fell to the tidx<19 bound check below
+             * with tidx=19, always missing it, leaving record_idx=-1 and no
+             * checkpoint/finish data for the whole race. */
             record_idx = 30;
-            TD5_LOG_I(LOG_TAG, "Drag race: forcing checkpoint record_idx=30 (track_index=%d)", tidx);
+            TD5_LOG_I(LOG_TAG, "Drag race: forcing checkpoint record_idx=30 (track_index=%d game_type=%d mp_drag=%d)",
+                      tidx, (int)g_td5.game_type, td5_game_drag_mp_active());
         } else if (tidx >= 0 && tidx < (int)(sizeof(k_schedule_to_checkpoint_index) /
                                       sizeof(k_schedule_to_checkpoint_index[0]))) {
             record_idx = k_schedule_to_checkpoint_index[tidx];
