@@ -303,6 +303,9 @@ void td5_ini_persist_options(void)
     /* [CAR DAMAGE 2026-06-29] Global damage levels (Game Options rows). */
     td5_ini_write_int("Game", "CarToughness", g_td5.ini.car_damage_toughness);
     td5_ini_write_int("Game", "CarDeform",    g_td5.ini.car_damage_deform);
+    /* [DAMAGE 2026-07-04] Master car-damage switch — now driven by the single
+     * "DAMAGE" Game Options toggle (ON=both, OFF=both), so it must persist too. */
+    td5_ini_write_int("Game", "CarDamage",    g_td5.ini.car_damage);
     td5_ini_write_int("Game", "CarDamageBar", g_td5.ini.car_damage_bar);
 
     /* TD6 paint color (last selected in the car-select color panel). */

@@ -741,7 +741,7 @@ int             s_game_option_collisions = 1;
 int             s_game_option_powerups = 1;   /* ARCADE item-box power-ups on/off */
 int             s_game_option_car_toughness = 1; /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 int             s_game_option_car_deform = 1;    /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
-int             s_game_option_car_damage_bar = 1; /* [CAR DAMAGE] HUD bar + wreck on/off */
+int             s_game_option_car_damage = 1; /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
 int             s_game_option_laneassist = 0; /* lane-assist steering aid on/off */
 int             s_game_option_tutorial = 1;   /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
 int             s_sound_option_sfx_mode;
@@ -3081,7 +3081,7 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_powerups          = g_td5.ini.powerups;
     s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
     s_game_option_car_deform        = g_td5.ini.car_damage_deform;
-    s_game_option_car_damage_bar    = g_td5.ini.car_damage_bar;
+    s_game_option_car_damage        = (g_td5.ini.car_damage != 0);
     s_game_option_laneassist        = g_td5.ini.lane_assist;
     s_game_option_tutorial          = (g_td5.ini.tutorial_overlay > 0) ? 1 : 0;
 
@@ -6165,7 +6165,7 @@ enum {
      * high-score name entry. */
     GO_PLAYER_NAME = 0,
     GO_CHECKPOINTS, GO_TRAFFIC, GO_COPS, GO_DIFFICULTY, GO_COLLISIONS,
-    GO_POWERUPS, GO_TOUGHNESS, GO_DEFORM, GO_DAMAGE_BAR, GO_LANEASSIST,
+    GO_POWERUPS, GO_TOUGHNESS, GO_DEFORM, GO_DAMAGE, GO_LANEASSIST,
     GO_TUTORIAL, GO_OPTION_COUNT
 };
 
@@ -6176,6 +6176,13 @@ enum {
 #define GO_ROW_Y0   96
 #define GO_ROW_STEP 40
 #define GO_CTL_Y    (GO_ROW_Y0 + GO_ROWS_PER_PAGE * GO_ROW_STEP + 12)   /* 388 */
+#define GO_CTL_W    0x60                                        /* PREV/OK/NEXT width (96) */
+/* [ALIGN 2026-07-04] The < PREV / OK / NEXT > controls sit UNDER the option-row
+ * column (x 120..416): PREV flush-left, NEXT flush-right, OK centred between —
+ * instead of poking out wider than the rows above. Equal 4px gaps. */
+#define GO_CTL_PREV_X (GO_ROW_X)                                /* 120 = column left  */
+#define GO_CTL_NEXT_X (GO_ROW_X + GO_ROW_W - GO_CTL_W)          /* 320 = column right */
+#define GO_CTL_OK_X   (GO_ROW_X + (GO_ROW_W - GO_CTL_W) / 2)    /* 220 = column centre */
 
 static int s_go_page      = 0;
 static int s_go_pages     = 1;
@@ -6212,7 +6219,7 @@ static const char *go_label(int opt) {
         case GO_POWERUPS:    return "POWER-UPS";
         case GO_TOUGHNESS:   return "CAR TOUGHNESS";
         case GO_DEFORM:      return "DEFORMATION";
-        case GO_DAMAGE_BAR:  return "DAMAGE BAR";
+        case GO_DAMAGE:      return "DAMAGE";
         case GO_LANEASSIST:  return "LANE ASSIST";
         case GO_TUTORIAL:    return "TUTORIAL";
     }
@@ -6257,7 +6264,7 @@ void td5_gameopts_value(int opt, char *out, size_t n) {
             if (t > 2) t = 2;
             v = level3[t];
             break;
-        case GO_DAMAGE_BAR:  v = on_off[s_game_option_car_damage_bar & 1]; break;
+        case GO_DAMAGE:      v = on_off[s_game_option_car_damage & 1]; break;
         case GO_LANEASSIST:  v = on_off[s_game_option_laneassist & 1]; break;
         case GO_TUTORIAL:    v = on_off[s_game_option_tutorial & 1]; break;
     }
@@ -6295,7 +6302,7 @@ void td5_gameopts_cycle(int opt, int delta) {
             if (s_game_option_car_deform < 0) s_game_option_car_deform = 2;
             if (s_game_option_car_deform > 2) s_game_option_car_deform = 0;
             break;
-        case GO_DAMAGE_BAR: s_game_option_car_damage_bar ^= 1; break;
+        case GO_DAMAGE: s_game_option_car_damage ^= 1; break;
         case GO_LANEASSIST: s_game_option_laneassist ^= 1; break;
         case GO_TUTORIAL:   s_game_option_tutorial ^= 1; break;
     }
@@ -6365,19 +6372,22 @@ void td5_gameopts_build_page(void) {
         frontend_create_button(go_label(start + r), GO_ROW_X,
                                GO_ROW_Y0 + r * GO_ROW_STEP, GO_ROW_W, GO_ROW_H);
 
-    /* OK centred; PREV/NEXT only appear when paging is possible. */
-    s_go_ok_btn = frontend_create_button(SNK_OkButTxt, 272, GO_CTL_Y, 0x60, GO_ROW_H);
+    /* OK / PREV / NEXT aligned under the option-row column (PREV/NEXT only
+     * appear when paging is possible). */
+    s_go_ok_btn = frontend_create_button(SNK_OkButTxt, GO_CTL_OK_X, GO_CTL_Y, GO_CTL_W, GO_ROW_H);
     if (s_go_pages > 1) {
-        s_go_prev_btn = frontend_create_button("< PREV", 88,  GO_CTL_Y, 0x60, GO_ROW_H);
-        s_go_next_btn = frontend_create_button("NEXT >", 456, GO_CTL_Y, 0x60, GO_ROW_H);
+        s_go_prev_btn = frontend_create_button("< PREV", GO_CTL_PREV_X, GO_CTL_Y, GO_CTL_W, GO_ROW_H);
+        s_go_next_btn = frontend_create_button("NEXT >", GO_CTL_NEXT_X, GO_CTL_Y, GO_CTL_W, GO_ROW_H);
     } else {
         s_go_prev_btn = -1;
         s_go_next_btn = -1;
     }
     s_selected_button = 0;
-    TD5_LOG_I(LOG_TAG, "GameOptions: page %d/%d (%d rows; ok=%d prev=%d next=%d)",
+    TD5_LOG_I(LOG_TAG, "GameOptions: page %d/%d (%d rows; ok=%d@x%d prev=%d@x%d next=%d@x%d)",
               s_go_page + 1, s_go_pages, s_go_row_count,
-              s_go_ok_btn, s_go_prev_btn, s_go_next_btn);
+              s_go_ok_btn, GO_CTL_OK_X,
+              s_go_prev_btn, (s_go_pages > 1) ? GO_CTL_PREV_X : -1,
+              s_go_next_btn, (s_go_pages > 1) ? GO_CTL_NEXT_X : -1);
 }
 
 int td5_gameopts_page_prev(void) {
@@ -6387,6 +6397,30 @@ int td5_gameopts_page_prev(void) {
 int td5_gameopts_page_next(void) {
     if (s_go_page < s_go_pages - 1) { s_go_page++; td5_gameopts_build_page(); return 1; }
     return 0;
+}
+
+/* Body-font width WITHOUT the toupper fold that fe_measure_text / _width apply.
+ * Needed to place the inline PLAYER NAME caret snug against mixed-case glyphs:
+ * the caps fold overestimates lowercase widths (caps are wider), which left a
+ * visible gap after the last typed letter. Mirrors fe_measure_text otherwise. */
+static float fe_measure_text_cased(const char *text, float sx, float sy) {
+    float w = 0.0f;
+    float gsx = fe_glyph_sx(sx, sy);
+    if (!text) return 0.0f;
+    if (td5_font_ready()) {
+        const float cap_px = 15.0f * sy;
+        const float hscale = (sx < sy) ? (sx / sy) : 1.0f;
+        const float trkn   = (float)FONT_GLYPH_TRACKING * sy * hscale;
+        for (int i = 0; text[i]; i++)
+            w += td5_font_advance((unsigned char)text[i], cap_px) * hscale + trkn;
+        return w;
+    }
+    for (int i = 0; text[i]; i++) {
+        int c = (unsigned char)text[i];
+        if (c < 32 || c > 127) { w += (14.0f + FONT_GLYPH_TRACKING) * gsx; continue; }
+        w += ((float)s_font_glyph_advance[c - 0x20] + FONT_GLYPH_TRACKING) * gsx;
+    }
+    return w;
 }
 
 static void frontend_render_game_options_overlay(float sx, float sy) {
@@ -6401,24 +6435,44 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
         int  opt = start + r;
         if (opt >= GO_OPTION_COUNT) break;
         td5_gameopts_value(opt, val, sizeof val);
-        /* [PLAYER NAME 2026-07-02] The name value renders in the SMALL font so
-         * its case shows exactly as typed ("nanofives" stays lowercase) — the
-         * big value font displays caps only. Same font the results table and
-         * the name-entry widget use. Centred on the shared value column. */
-        if (opt == GO_PLAYER_NAME && val[0] && strcmp(val, "-") != 0) {
-            fe_draw_small_text((float)FE_VALUE_CENTER_X * sx
-                                   - fe_measure_small_text(val) * 0.5f * fe_glyph_sx(sx, sy),
-                               (float)(s_buttons[r].y + 10) * sy, val,
-                               0xFFFFFFFF, sx, sy);
+        /* [PLAYER NAME 2026-07-04] The name renders in the SAME value font as
+         * every other option row (no more small-font mismatch), with case
+         * preserved so "nanofives" stays lowercase. When the row is being edited
+         * (Enter-to-edit) the field is edited INLINE right here — the live scratch
+         * buffer plus a blinking green caret — instead of a separate pop-up modal
+         * (the modal draw for this screen was removed from the render dispatch). */
+        if (opt == GO_PLAYER_NAME) {
+            int   editing = (s_text_input_state != 0 &&
+                             s_text_input_ctx.buffer == s_go_name_edit);
+            const char *shown = editing ? s_go_name_edit : (val[0] ? val : "-");
+            float cx = (float)FE_VALUE_CENTER_X * sx;
+            float ty = (float)(s_buttons[r].y + 6) * sy;
+            /* Centre by the TRUE mixed-case width (not the caps-fold measure), so
+             * the caret can sit right after the last glyph. */
+            float half = fe_measure_text_cased(shown, sx, sy) * 0.5f;
+            int   saved_case = s_fe_preserve_case;
+            s_fe_preserve_case = 1;                       /* keep true lowercase */
+            fe_draw_text(cx - half, ty, shown, 0xFFFFFFFF, sx, sy);
+            if (editing &&
+                (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
+                /* Blinking green caret snug against the end of the typed text
+                 * (same 350ms clock the old modal used). */
+                float caret_x = cx + half + 1.0f * sx;
+                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+                fe_draw_quad(caret_x, ty + 6.0f * sy, 2.0f * sx, 16.0f * sy,
+                             0xFF00FF00, -1, 0, 0, 0, 0);
+            }
+            s_fe_preserve_case = saved_case;
             continue;
         }
         frontend_draw_value_centered(sx, sy, s_buttons[r].y + 6, val, 0xFFFFFFFF);
     }
-    /* "PAGE x / y" footer (only when there is more than one page). */
+    /* "PAGE x / y" footer, centred UNDER the OK button (only when >1 page). */
     if (s_go_pages > 1) {
         char buf[24];
         snprintf(buf, sizeof buf, "PAGE %d / %d", s_go_page + 1, s_go_pages);
-        td5_vui_text_centered(320.0f * sx, (float)(GO_CTL_Y + 28) * sy, buf,
+        td5_vui_text_centered((float)(GO_CTL_OK_X + GO_CTL_W / 2) * sx,
+                              (float)(GO_CTL_Y + 28) * sy, buf,
                               0xFF8890A0u, sx, sy);
     }
 }
@@ -9346,10 +9400,10 @@ void td5_frontend_render_ui_rects(void) {
         frontend_render_quick_race_overlay(sx, sy);
         break;
     case TD5_SCREEN_GAME_OPTIONS:
+        /* [PLAYER NAME 2026-07-04] The PLAYER NAME row is now edited INLINE inside
+         * the options list (scratch buffer + caret drawn by the overlay itself) —
+         * no pop-up "ENTER PLAYER NAME" text-input modal on this screen any more. */
         frontend_render_game_options_overlay(sx, sy);
-        /* [PLAYER NAME 2026-07-02] Name-editor widget on top (drawn from the
-         * render path like every text input so it composites into the frame). */
-        if (s_text_input_state != 0) frontend_render_text_input();
         break;
     case TD5_SCREEN_SOUND_OPTIONS:
         frontend_render_sound_options_overlay(sx, sy);
@@ -10103,7 +10157,7 @@ int td5_frontend_init(void) {
         s_game_option_powerups          = g_td5.ini.powerups;
         s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
         s_game_option_car_deform        = g_td5.ini.car_damage_deform;
-        s_game_option_car_damage_bar    = g_td5.ini.car_damage_bar;
+        s_game_option_car_damage        = (g_td5.ini.car_damage != 0);
         s_game_option_laneassist        = g_td5.ini.lane_assist;
         s_game_option_tutorial          = (g_td5.ini.tutorial_overlay > 0) ? 1 : 0;
         s_selected_game_type = g_td5.ini.default_game_type;

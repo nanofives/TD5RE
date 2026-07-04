@@ -372,26 +372,20 @@ void td5_tutorial_begin_race(void)
     /* [2026-06-29] Show at the start of EVERY race (the first thing you see on
      * each race), not just once-ever. The old td5re_progress.ini [Tutorial] Seen
      * gate is gone: the player turns the overlay off via the Game Options
-     * TUTORIAL row (mode 0). mode 2 ("force") still additionally bypasses the
-     * gamepad-only gate below, for dev/testing on keyboard. */
+     * TUTORIAL row (mode 0). mode 2 ("force") is retained only as a dev marker
+     * (logged below); it no longer changes gating.
+     * [TUTORIAL 2026-07-04] The overlay used to be suppressed on keyboard-only
+     * play (shown only when a player was on a joystick), so turning TUTORIAL = ON
+     * appeared to "do nothing" for keyboard players. The Game Options TUTORIAL row
+     * is now the SINGLE authority: ON always arms the overlay at race start
+     * regardless of input device — keyboard players dismiss it with the same
+     * "press any button" keys handled in player_dismiss_input(). The old
+     * gamepad-only gate is gone. */
     s_force_mode = (mode >= 2);
 
     s_humans = g_td5.num_human_players;
     if (s_humans < 1) s_humans = 1;
     if (s_humans > TD5_MAX_HUMAN_PLAYERS) s_humans = TD5_MAX_HUMAN_PLAYERS;
-
-    /* This is a CONTROLLER diagram — only show it when at least one player is
-     * actually on a joystick (skip keyboard-only play). Force mode (=2) bypasses
-     * this so the overlay can still be exercised for dev/testing. */
-    if (!s_force_mode) {
-        int any_pad = 0;
-        for (int p = 0; p < s_humans; p++)
-            if (td5_input_get_input_source(p) > 0) { any_pad = 1; break; }
-        if (!any_pad) {
-            TD5_LOG_I(LOG_TAG, "Tutorial overlay suppressed: no player on a joystick");
-            return;
-        }
-    }
 
     s_active = 1;
     for (int i = 0; i < TD5_MAX_HUMAN_PLAYERS; i++)

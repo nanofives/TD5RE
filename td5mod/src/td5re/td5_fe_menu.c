@@ -1621,9 +1621,10 @@ void Screen_GameOptions(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* [TUTORIAL 2026-06-29] The Game Options list now PAGINATES (same scheme
          * as the PENDING TO TEST checklist) because it outgrew a single column:
-         * Checkpoint Timers, Traffic, Cops, Difficulty, 3D Collisions, Power-ups,
-         * Car Toughness, Deformation, Damage Bar, Lane Assist, and the new
-         * TUTORIAL on/off (11 selector rows + OK). The option list, per-page
+         * a PLAYER NAME (Enter-to-edit inline), Checkpoint Timers, Traffic, Cops,
+         * Difficulty, 3D Collisions, Power-ups, Car Toughness, Deformation, DAMAGE
+         * (single toggle: car damage + HUD bar), Lane Assist, and TUTORIAL on/off.
+         * The option list, per-page
          * layout, value/arrow rendering and cycle logic live in the model in
          * td5_frontend.c (td5_gameopts_*); this screen is just the FSM glue.
          * Start on page 1 on each entry. */
@@ -1705,12 +1706,17 @@ void Screen_GameOptions(void) {
                     g_td5.ini.dynamics          = s_game_option_dynamics;
                     g_td5.ini.collisions        = s_game_option_collisions;
                     g_td5.ini.powerups          = s_game_option_powerups;
-                    /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels +
-                     * the HUD damage-bar / wreck toggle. */
+                    /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels. */
                     g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
                     g_td5.ini.car_damage_deform    = s_game_option_car_deform;
-                    g_td5.ini.car_damage_bar       = s_game_option_car_damage_bar ? 1 : 0;
+                    /* [DAMAGE 2026-07-04] One "DAMAGE" toggle drives BOTH the master
+                     * car-damage switch AND the HUD damage-bar/wreck sub-toggle:
+                     * ON enables car damage + the bar, OFF disables both. */
+                    g_td5.ini.car_damage           = s_game_option_car_damage ? 1 : 0;
+                    g_td5.ini.car_damage_bar       = s_game_option_car_damage ? 1 : 0;
                     g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
+                    TD5_LOG_I(LOG_TAG, "GameOptions OK: DAMAGE=%d (car_damage=%d bar=%d)",
+                              s_game_option_car_damage, g_td5.ini.car_damage, g_td5.ini.car_damage_bar);
                     /* [TUTORIAL 2026-06-29] Commit the controller-overlay on/off.
                      * Preserve a dev "force every race" (2) if it was set;
                      * otherwise plain on=1 / off=0. */
