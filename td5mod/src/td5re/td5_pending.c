@@ -76,6 +76,7 @@ static const char *const k_seed[] = {
     "RACE OPTIONS screen: adds checkpoint timers/power-ups/toughness/deform",
     "Track select: LAPS shows on TD5 circuit tracks (Newcastle etc.), not P2P",
     "2D trees/foliage: smooth anti-aliased edges (Switzerland, Blue Ridge, etc.)",
+    "Banners: overhead track signs (Tokyo STAGE, etc.) not garbled/mirrored",
     "High Scores: COLLISIONS + AIR TIME columns match race results",
     "High Scores: celebrity names show in full (Michael Schumacher)",
     "High Scores: default best times all read 5-10 min (unraced tracks)",

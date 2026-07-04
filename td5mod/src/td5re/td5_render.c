@@ -1035,6 +1035,7 @@ int s_level_pass_active   = 0;  /* set only while drawing level geometry */
 int s_banner_cull         = -1; /* -1 uninit; 0 off; 1 on (env TD5RE_BANNER_CULL) */
 int s_banner_cull_keep_pos = 0; /* which screen-winding sign faces the camera */
 int s_banner_cull_revflip  = -1; /* [#9] auto-flip kept side in reverse (env TD5RE_TD6_BANNER_REVFLIP) */
+int s_native_banner_keep_pos = 1; /* [NATIVE BANNERS] kept winding sign for detected native pages (env TD5RE_NATIVE_BANNER_FLIP) */
 int s_banner_align         = -1; /* [START-banner align] -1 uninit; 0 off; 1 on (env TD5RE_BANNER_ALIGN) */
 int s_banner_align_log     = 0;  /* throttle the per-mesh align log */
 /* [START-banner align] Pending world-space X shift applied by
@@ -1418,15 +1419,23 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
             s_debug_clip_backface_rejects++;
             return;
         }
-        /* [banners] one-sided cull for track sign panels only (see
-         * k_td6_banner_pages). Everything else keeps CullMode=NONE. */
-        if (s_level_pass_active && s_banner_cull && td6_is_banner_page(tex_page)) {
+        /* [banners] one-sided cull for track sign panels — TD6 hand-listed
+         * pages (k_td6_banner_pages) OR native-track double-sided panels
+         * detected by geometry (td5_track_scan_banner_pages). Everything else
+         * keeps CullMode=NONE. The two sets are mutually exclusive by level:
+         * the native scan only runs when g_active_td6_level==0, and
+         * td6_is_banner_page returns 0 there. */
+        int is_td6_banner    = td6_is_banner_page(tex_page);
+        int is_native_banner = !is_td6_banner && td5_track_is_native_banner_page(tex_page);
+        if (s_level_pass_active && s_banner_cull && (is_td6_banner || is_native_banner)) {
             /* [#9 2026-06-19] Auto-flip the kept (camera-facing) winding sign in
-             * reverse — each P2P banner panel's screen winding flips when driven
-             * backward, so the forward keep-side would cull the now-camera-facing
-             * face and the banners disappear. Scoped to banner pages in the level
-             * pass only (never other geometry). TD5RE_TD6_BANNER_REVFLIP=0 reverts. */
-            int keep_pos = s_banner_cull_keep_pos;
+             * reverse — each panel's screen winding flips when driven backward,
+             * so the forward keep-side would cull the now-camera-facing face and
+             * the banners disappear. Scoped to banner pages in the level pass
+             * only (never other geometry). TD5RE_TD6_BANNER_REVFLIP=0 reverts.
+             * Native pages use their own kept sign (TD5RE_NATIVE_BANNER_FLIP). */
+            int keep_pos = is_native_banner ? s_native_banner_keep_pos
+                                            : s_banner_cull_keep_pos;
             if (s_banner_cull_revflip == 1 && g_td5.reverse_direction) keep_pos = !keep_pos;
             int facing_away = keep_pos ? (cross < 0.0f) : (cross > 0.0f);
             if (facing_away) {

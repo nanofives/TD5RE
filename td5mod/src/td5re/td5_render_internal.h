@@ -539,6 +539,7 @@ extern int s_level_pass_active;
 extern int s_banner_cull;
 extern int s_banner_cull_keep_pos;
 extern int s_banner_cull_revflip;
+extern int s_native_banner_keep_pos;  /* [NATIVE BANNERS] kept winding sign for detected native banner pages */
 extern int s_banner_align;
 extern int s_banner_align_log;
 extern float s_banner_vshift_x;

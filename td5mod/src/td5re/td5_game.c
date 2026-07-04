@@ -2944,6 +2944,10 @@ int td5_game_init_race_session(void) {
      * G-buffer covers roads/walls (sun-shadow backface skip, SSR). No-op in
      * Mode 0; baked vertex lighting is never touched. */
     td5_track_derive_missing_normals();
+    /* [NATIVE BANNERS] Detect native-track double-sided sign panels (coincident
+     * reverse-wound primitive pairs) so the banner one-sided cull applies to
+     * their pages — stops Tokyo/Kyoto/etc. banners z-fighting/reading mirrored. */
+    td5_track_scan_banner_pages();
     /* [LIGHT2] Register the track's street-lamp glow fixtures as light
      * sources (nearest few become real point lights per frame when dark). */
     td5_track_register_lamp_lights();
