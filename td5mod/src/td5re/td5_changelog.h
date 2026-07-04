@@ -36,6 +36,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "CHOOSE YOUR TEAM: new TEAM ROSTER box (top right) lists" },
     { CL_ITEM,    "  every team's members by name, updating live as picks" },
     { CL_ITEM,    "  and host AI-team assignments change" },
+    { CL_ITEM,    "FIX: mode select buttons no longer overlap the HOST" },
+    { CL_ITEM,    "  banner text at the top of the screen" },
     { CL_ITEM,    "Removed multiplayer TIME TRIAL from the mode select" },
     { CL_ITEM,    "  screen (ghost pass-through, checkpoint start/finish)" },
     { CL_ITEM,    "FIX: on the multiplayer split-screen profile" },

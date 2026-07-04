@@ -63,6 +63,7 @@ static void retired_add(const char *text) {
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
     "Cup CHOOSE YOUR TEAM: roster box (top right) lists members by name",
+    "MP mode select: buttons no longer overlap HOST banner text",
     "MP mode select: TIME TRIAL entry is gone, other modes unaffected",
     "MP profile screen: NAME + COLOUR button labels now centred",
     "Street lamps (EXPERIMENTAL, StreetLights=1 to enable): pools under posts",
