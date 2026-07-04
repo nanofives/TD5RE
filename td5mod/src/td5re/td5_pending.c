@@ -69,6 +69,7 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "2D trees/foliage: smooth anti-aliased edges (Switzerland, Blue Ridge, etc.)",
     "High Scores: COLLISIONS + AIR TIME columns match race results",
     "High Scores: celebrity names show in full (Michael Schumacher)",
     "High Scores: default best times all read 5-10 min (unraced tracks)",
