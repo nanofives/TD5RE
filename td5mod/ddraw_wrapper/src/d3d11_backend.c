@@ -1229,6 +1229,15 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
         g_backend.bpp = bpp;
         g_backend.windowed = windowed;
 
+        /* [foliage AA 2026-07-04] Smooth 2D cutout foliage edges by default.
+         * TD5RE_FOLIAGE_AA=0 restores the faithful hard 1-bit cutout. */
+        {
+            char fa[8];
+            DWORD n = GetEnvironmentVariableA("TD5RE_FOLIAGE_AA", fa, sizeof(fa));
+            g_backend.foliage_aa_enabled = (n > 0 && n < sizeof(fa)) ? (fa[0] != '0') : 1;
+            WRAPPER_LOG("Backend_CreateDevice: foliage_aa_enabled=%d", g_backend.foliage_aa_enabled);
+        }
+
         /* In windowed mode, create our own display window */
         device_hwnd = hwnd;
         if (windowed) {
@@ -1640,6 +1649,21 @@ void Backend_UpdateFogCB(void)
 static const char *s_ps_names[] = { "MODULATE", "MODULATE_ALPHA", "DECAL", "LUMINANCE_ALPHA",
                                     "MODULATE_G", "MODULATE_ALPHA_G" };
 
+/* [foliage AA 2026-07-04] A draw is "cutout foliage" when the game has the
+ * color-key alpha test enabled (st->alpha_test_enable, set only by
+ * D3DRS_COLORKEYENABLE) AND the bound texture came from a transparent source
+ * (has_alpha: A1R5G5B5, or R5G6B5 with a color key). That combination is
+ * exactly trees / fences / signs / chain-link — the opaque sky/road/car-body
+ * are plain R5G6B5 (has_alpha=0) drawn with the color key off, so they never
+ * match. We render matches with bilinear + standard alpha blend so the 1-bit
+ * edge/dither alpha interpolates into a smooth anti-aliased silhouette instead
+ * of a jagged point-sampled cutout. The tight scope avoids the old global
+ * luminance-alpha regression (sky/road/cars turned translucent). */
+static int Backend_IsFoliageAA(const RenderStateCache *st, int has_alpha)
+{
+    return g_backend.foliage_aa_enabled && st->alpha_test_enable && has_alpha;
+}
+
 void Backend_SelectPixelShader(void)
 {
     WrapperRecCtx *rc = g_wrapper_rec;
@@ -1667,7 +1691,8 @@ void Backend_SelectPixelShader(void)
      * the deferred-context record path keeps the single-RT shaders. The RT1
      * binding follows in Backend_ApplyStateCache with the same predicate. */
     if (!rc && g_backend.gbuffer_enabled && g_backend.gbuffer_rtv &&
-        st->z_write && !st->blend_enable) {
+        st->z_write && !st->blend_enable &&
+        !Backend_IsFoliageAA(st, g_backend.current_tex_has_alpha)) {
         if (idx == PS_MODULATE && g_backend.ps_shaders[PS_MODULATE_G])
             idx = PS_MODULATE_G;
         else if (idx == PS_MODULATE_ALPHA && g_backend.ps_shaders[PS_MODULATE_ALPHA_G])
@@ -1697,10 +1722,19 @@ void Backend_ApplyStateCache(void)
 
     if (!s->dirty) return;
 
+    /* [foliage AA] Cutout foliage (color-key alpha test on a transparent-source
+     * texture) is forced to bilinear + standard alpha blend below so its 1-bit
+     * edge/dither alpha anti-aliases. Computed once, reused for the blend,
+     * sampler, and G-buffer-binding decisions. */
+    int foliage_aa = Backend_IsFoliageAA(s,
+        rc ? rc->current_tex_has_alpha : g_backend.current_tex_has_alpha);
+
     /* Blend state */
     {
         int bi;
-        if (!s->blend_enable) {
+        if (foliage_aa) {
+            bi = BLEND_SRCALPHA_INVSRC;
+        } else if (!s->blend_enable) {
             bi = BLEND_OPAQUE;
         } else if (s->src_blend == D3D6BLEND_SRCALPHA && s->dest_blend == D3D6BLEND_INVSRCALPHA) {
             bi = BLEND_SRCALPHA_INVSRC;
@@ -1763,6 +1797,11 @@ void Backend_ApplyStateCache(void)
         else if (!linear && clamp) si = SAMP_POINT_CLAMP;
         else                       si = SAMP_POINT_WRAP;
 
+        /* [foliage AA] Force bilinear so the 1-bit alpha edge/dither becomes a
+         * continuous 0..1 ramp the alpha blend can smooth (keeps the game's
+         * wrap/clamp addressing). */
+        if (foliage_aa) si = clamp ? SAMP_LINEAR_CLAMP : SAMP_LINEAR_WRAP;
+
         if (si != s->current_samp_idx) {
             s->current_samp_idx = si;
             ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
@@ -1777,7 +1816,7 @@ void Backend_ApplyStateCache(void)
      * context only; RT0 stays the game's 3D target (backbuffer surface). */
     if (!rc) {
         int want = (g_backend.gbuffer_enabled && g_backend.gbuffer_rtv &&
-                    s->z_write && !s->blend_enable &&
+                    s->z_write && !s->blend_enable && !foliage_aa &&
                     g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) ? 1 : 0;
         if (want != g_backend.gbuffer_bound) {
             ID3D11RenderTargetView *rtvs[2];

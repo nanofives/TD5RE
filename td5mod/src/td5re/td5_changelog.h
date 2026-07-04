@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "2D trees / foliage now have smooth anti-aliased edges" },
+    { CL_ITEM,    "  instead of jagged, blocky cutouts (Switzerland etc.)" },
     { CL_ITEM,    "HIGH SCORES now show the same values as the race" },
     { CL_ITEM,    "  results (added COLLISIONS and AIR TIME columns)" },
     { CL_ITEM,    "Leaderboard celebrity names now show in FULL" },

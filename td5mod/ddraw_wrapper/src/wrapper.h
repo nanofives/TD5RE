@@ -297,6 +297,15 @@ typedef struct {
     int                       gbuffer_enabled;   /* game wants G-buffer this frame */
     int                       gbuffer_bound;     /* RT1 currently bound (OM state) */
 
+    /* [foliage AA 2026-07-04] Anti-alias 2D cutout foliage (trees/fences/signs).
+     * When set, draws the game submits with color-key alpha test on a
+     * transparent-source texture (A1R5G5B5 / color-keyed R5G6B5) are forced to
+     * bilinear + standard alpha blend, so the 1-bit edge/dither alpha smooths
+     * into an anti-aliased silhouette instead of a jagged point-sampled cutout.
+     * Read once from TD5RE_FOLIAGE_AA at device init (default 1). See
+     * Backend_IsFoliageAA. */
+    int                       foliage_aa_enabled;
+
     /* Window */
     HWND                hwnd;
     int                 windowed;
