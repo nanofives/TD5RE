@@ -62,7 +62,7 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
-    "Street lamps: warm light pools on the road at rainy/dusk tracks",
+    "Street lamps (EXPERIMENTAL, StreetLights=1 to enable): pools under posts",
     "Shadows: no duplicated/offset echo copies (fence area, Moscow)",
     "Reflections P3: wet road mirrors cars/buildings on rainy Moscow",
     "Reflections P3: car paint/glass sheen at grazing angles",
