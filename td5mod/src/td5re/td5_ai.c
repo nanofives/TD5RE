@@ -10672,6 +10672,21 @@ void td5_ai_update_special_encounter(void) {
             continue;
         }
 
+        /* [ARCADE GHOST 2026-07-04] "Police should not be able to see you
+         * anymore" — a chase already in progress ENDS outright the moment the
+         * target ghosts (not just paused/held). Every cop currently pursuing
+         * this target re-evaluates its own chase here, so a target followed by
+         * several cops loses ALL of them, not just one. If GHOST wears off
+         * later, a cop has to re-acquire the target from scratch via the
+         * normal COP_IDLE acquisition gate above (which already refuses to
+         * acquire a ghosting car). */
+        if (td5_arcade_slot_is_ghost(tgt)) {
+            if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
+            TD5_LOG_I(LOG_TAG, "cop_chase END (target ghosted): cop=%d target=%d", k, tgt);
+            cop_end_chase(k);
+            continue;
+        }
+
         {
             char *tactor   = actor_ptr(tgt);
             int   tgt_main = td5_track_branch_to_main_span((int)ACTOR_I16(tactor, ACTOR_SPAN_RAW));

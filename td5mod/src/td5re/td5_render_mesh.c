@@ -2328,11 +2328,10 @@ void td5_render_actors_for_view(int view_index)
                     if (inten > 255u) inten = 255u;
                     arc_tint = (inten << 24) | kc;
 
-                    /* [ARCADE NITRO 2026-07-04] Bright speed-trail particles
-                     * behind the car while NITRO is active — the "anime speed
-                     * lines" cue for the sustained accel boost. */
+                    /* [ARCADE NITRO 2026-07-04] Trailing glow-orb speed
+                     * effect behind the car while NITRO is active. */
                     if (eff == TD5_PU_NITRO)
-                        td5_vfx_spawn_nitro_streak(actor, view_index);
+                        td5_render_arcade_nitro_trail(actor);
                 }
             }
 

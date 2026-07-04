@@ -103,8 +103,11 @@ int td5_arcade_scatter_pct(void);
 
 /* 1 = this racer slot is currently GHOSTing — the collision solver should skip
  * ALL contact for it (V2V both directions). 0 otherwise / outside arcade.
- * [2026-07-04] Also consulted by the cop-chase acquisition loop (td5_ai.c) —
- * a ghosting car cannot be newly acquired as a pursuit target. */
+ * [2026-07-04] Also consulted by td5_ai.c's cop-chase logic in two places:
+ * a ghosting car cannot be newly ACQUIRED as a pursuit target, and any chase
+ * already in progress ENDS outright the moment its target ghosts ("police
+ * should not be able to see you anymore") — every cop pursuing that target
+ * drops it, not just one. */
 int td5_arcade_slot_is_ghost(int slot);
 
 /* 1 = this racer slot is currently INDESTRUCTIBLE (was WRECK) — the collision

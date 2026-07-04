@@ -238,6 +238,15 @@ void td5_render_flush_immediate_batch(void);
  * outside ARCADE mode. */
 void td5_render_arcade_pads(void);
 
+/* [ARCADE NITRO 2026-07-04] Trailing glow-orb speed effect behind a
+ * NITRO-boosted car. Reuses the same additive-glow quad primitive that draws
+ * the item-box halos (confirmed visible in-game) rather than the smoke-puff
+ * pool or the debug-line batch — no persistent state, synchronous immediate
+ * draw. Call once per frame per NITRO-active visible racer, from inside the
+ * per-actor render loop (td5_render_mesh.c). No-op outside arcade mode is the
+ * caller's responsibility (gated on the active-effect check already there). */
+void td5_render_arcade_nitro_trail(TD5_Actor *actor);
+
 /* --- Depth-sorted pipeline (4096 buckets) --- */
 void td5_render_queue_projected_entry(void *entry, int bucket, uint32_t flags, int texture_page);
 void td5_render_flush_projected_buckets(void);

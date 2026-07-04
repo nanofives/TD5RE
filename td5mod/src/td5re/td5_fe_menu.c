@@ -1705,6 +1705,7 @@ void Screen_GameOptions(void) {
                     g_td5.ini.difficulty        = s_game_option_difficulty;
                     g_td5.ini.dynamics          = s_game_option_dynamics;
                     g_td5.ini.collisions        = s_game_option_collisions;
+                    /* [ITEM CHAOS 2026-07-04] 3-state: 0=OFF 1=CASUAL 2=CHAOS. */
                     g_td5.ini.powerups          = s_game_option_powerups;
                     /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels. */
                     g_td5.ini.car_damage_toughness = s_game_option_car_toughness;

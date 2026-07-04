@@ -1956,6 +1956,51 @@ static void arcade_emit_glow_at(float wx, float wy, float wz,
     tracked_marker_emit_quad_world(corners, vz, 0.0f, 0.0f, 1.0f, 1.0f, color, -1);
 }
 
+/* [ARCADE NITRO 2026-07-04] Trailing glow-orb speed effect. Two earlier
+ * attempts didn't read as intended: the smoke-puff pool (td5_vfx.c) looked too
+ * much like ordinary exhaust, and a debug-line-segment version (queued into
+ * td5_render.c's batched debug-line buffer, flushed conditionally elsewhere in
+ * the frame) confirmed-fired every frame with correct world positions per
+ * diagnostic logging but never reliably showed on screen. This reuses
+ * arcade_emit_glow_at — the SAME additive-glow quad primitive that draws the
+ * item-box halos players already see clearly — via a synchronous immediate
+ * draw (flush_immediate_internal + td5_plat_render_draw_tris happen inside
+ * tracked_marker_emit_quad_world right here, not queued for later). No
+ * persistent state: a fresh scatter of glow orbs is drawn behind the car each
+ * frame, trailing opposite its travel direction. */
+void td5_render_arcade_nitro_trail(TD5_Actor *actor)
+{
+    if (!actor) return;
+
+    float cx = (float)actor->world_pos.x * (1.0f / 256.0f);
+    float cy = (float)actor->world_pos.y * (1.0f / 256.0f) + 8.0f;   /* bumper height */
+    float cz = (float)actor->world_pos.z * (1.0f / 256.0f);
+    float vx = (float)actor->linear_velocity_x * (1.0f / 256.0f);
+    float vz = (float)actor->linear_velocity_z * (1.0f / 256.0f);
+
+    float speed = sqrtf(vx * vx + vz * vz);
+    if (speed < 1.0f) return;   /* stationary — no trail to draw */
+
+    /* Unit vector pointing BACKWARD (opposite of travel) + its perpendicular
+     * (same horizontal plane) for lateral scatter of the orb origins. */
+    float bx = -vx / speed, bz = -vz / speed;
+    float px = -bz,         pz = bx;
+
+    const int NUM_ORBS = 3;
+    for (int i = 0; i < NUM_ORBS; i++) {
+        float back = 20.0f + (float)(rand() % 70);                     /* 20..90 behind the bumper */
+        float lane = ((float)(rand() % 100) / 100.0f - 0.5f) * 30.0f;  /* -15..+15 lateral */
+        float lift = (float)(rand() % 16);                             /* 0..16 vertical scatter */
+        float wx = cx + bx * back + px * lane;
+        float wy = cy + lift;
+        float wz = cz + bz * back + pz * lane;
+        float half   = 6.0f + (float)(rand() % 8);           /* 6..14 world-unit glow radius */
+        uint32_t alpha = (uint32_t)(140 + rand() % 116);      /* 140..255 — per-frame flicker */
+        uint32_t col   = (alpha << 24) | 0xE0FFFFu;           /* bright white-cyan */
+        arcade_emit_glow_at(wx, wy, wz, half, col);
+    }
+}
+
 /* One camera-facing icon stroke: a line from icon-local (ax,ay) to (bx,by)
  * (units of `scale`, +y up) laid in the billboard plane at world centre
  * (cx,cy,cz). Uses the camera right/up world axes (camera_basis rows 0 and 1)

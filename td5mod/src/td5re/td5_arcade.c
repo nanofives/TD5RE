@@ -530,7 +530,15 @@ void td5_arcade_init_race(void) {
         if (right_lane < 0)         right_lane = 0;
         if (left_lane  > right_lane) left_lane = right_lane = lanes / 2;
 
-        if (make_dbl && s_pad_count + 2 <= ARC_MAX_PADS) {
+        /* [ITEM CHAOS 2026-07-04] Mashed-style: ONE box in EVERY lane at this
+         * spawn point (up to 4 wide on a 4-lane span), instead of the regular
+         * mode's 1-2 boxes. Spawn-point spacing/frequency along the ring is
+         * unchanged — this only changes how many boxes land at each point. */
+        if (g_td5.ini.powerups == 2) {   /* [ITEM CHAOS] 0=OFF 1=CASUAL 2=CHAOS */
+            int nlanes = lanes; if (nlanes > 4) nlanes = 4;
+            for (int ln = 0; ln < nlanes && s_pad_count < ARC_MAX_PADS; ln++)
+                arc_emit_box(span, ln, lanes, lift, &rng);
+        } else if (make_dbl && s_pad_count + 2 <= ARC_MAX_PADS) {
             arc_emit_box(span, left_lane,  lanes, lift, &rng);     /* left  shoulder */
             arc_emit_box(span, right_lane, lanes, lift, &rng);     /* right shoulder */
         } else if (side && lanes > 1) {
@@ -545,8 +553,8 @@ void td5_arcade_init_race(void) {
     {
         TD5_Actor *p0 = td5_game_get_actor(0);
         TD5_LOG_I(LOG_TAG,
-                  "init: ARCADE on — ring=%d pads=%d humans=%d spacing=%d dbl%%=%d pad0=(%d,%d,%d) player/256=(%d,%d,%d)",
-                  s_ring, s_pad_count, num_h, spacing, dbl_pct,
+                  "init: ARCADE on — ring=%d pads=%d humans=%d spacing=%d dbl%%=%d powerups_mode=%d pad0=(%d,%d,%d) player/256=(%d,%d,%d)",
+                  s_ring, s_pad_count, num_h, spacing, dbl_pct, g_td5.ini.powerups,
                   s_pad_count ? s_pads[0].x : 0,
                   s_pad_count ? s_pads[0].y : 0,
                   s_pad_count ? s_pads[0].z : 0,

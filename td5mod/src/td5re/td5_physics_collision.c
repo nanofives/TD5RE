@@ -176,6 +176,17 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
                                int32_t probe_x_fp8, int32_t probe_z_fp8)
 {
+    /* [ARCADE INDESTRUCTIBLE 2026-07-04] Reverted (user correction): wall
+     * collisions are NOT special-cased for INDESTRUCTIBLE — a wall hit
+     * displaces and damages the car exactly like it would for anyone else.
+     * The immunity (no self-displacement, no self-damage) is scoped to V2V
+     * collisions ONLY (traffic + other racers): the wrecking-ball A_wreck/
+     * B_wreck restore below already keeps the indestructible car on its
+     * pre-impact trajectory while the OTHER car still gets the full boosted
+     * launch, and td5_damage_on_impact is skipped for the wrecking side only
+     * in that same V2V path. See td5_arcade_slot_is_wrecking call sites in
+     * this file for the actual (V2V-only) immunity. */
+
     /* [#10] A deep wall clip arms the chase-cam zoom for this racer. penetration
      * is negative when the probe is outside the rail; the more negative, the
      * deeper the clip. Racer slots only (traffic has no camera). Knob
@@ -302,7 +313,10 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          * face that struck the wall. iVar11 is the approach speed into the wall;
          * the hit region comes from the inward wall normal (-sin_w, cos_w) rotated
          * into the car's model frame by its heading (signs only, so the 12-bit
-         * fixed scale cancels). No-op when [Game] CarDamage=0. */
+         * fixed scale cancels). No-op when [Game] CarDamage=0. [ARCADE
+         * INDESTRUCTIBLE 2026-07-04] The INDESTRUCTIBLE exemption now lives at
+         * this function's entry (early-return, forbids ALL wall response —
+         * displacement AND damage), so no separate check is needed here. */
         if (td5_damage_enabled() && actor->slot_index >= 0) {
             int32_t h     = actor->display_angles.yaw & 0xFFF;
             int32_t cos_h = cos_fixed12(h);
@@ -1847,8 +1861,15 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         hitB.lat = (cx_B > 0) - (cx_B < 0);
         hitB.fwd = (cz_B > 0) - (cz_B < 0);
         hitB.is_side = (cx_B < 0 ? -cx_B : cx_B) > (cz_B < 0 ? -cz_B : cz_B);
-        td5_damage_on_impact(A, impact_mag, &hitA);
-        td5_damage_on_impact(B, impact_mag, &hitB);
+        /* [ARCADE INDESTRUCTIBLE 2026-07-04] An indestructible holder takes no
+         * damage from its own rams (the OTHER car still does) — this ran
+         * unconditionally before, so a WRECK/INDESTRUCTIBLE car still accrued
+         * health loss + dents on every hit even though its motion was restored
+         * untouched further down in this function. */
+        if (!td5_arcade_slot_is_wrecking((int)A->slot_index))
+            td5_damage_on_impact(A, impact_mag, &hitA);
+        if (!td5_arcade_slot_is_wrecking((int)B->slot_index))
+            td5_damage_on_impact(B, impact_mag, &hitB);
     }
 
     /* [TRAFFIC BATTLE 2026-06-28] SPEED-based wreck trigger. impact_mag above is
@@ -2262,12 +2283,26 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
         delta_y = 0;
     }
 
-    a->linear_velocity_x += delta_x;
-    a->linear_velocity_y += delta_y;
-    a->linear_velocity_z += delta_z;
-    b->linear_velocity_x -= delta_x;
-    b->linear_velocity_y -= delta_y;
-    b->linear_velocity_z -= delta_z;
+    /* [ARCADE INDESTRUCTIBLE 2026-07-04] The wrecking side keeps its OWN speed
+     * untouched by this routine contact (no self speed-displacement) while the
+     * OTHER side still gets pushed — the same "stay on your line, everything
+     * you hit gets displaced" contract the heavy V2V wrecking-ball restore
+     * already gives, extended to this lighter sphere-overlap resolver (the
+     * far more common path for everyday player-vs-traffic brushing, which the
+     * heavy path's A_wreck/B_wreck restore never covered). */
+    int a_wreck = td5_arcade_slot_is_wrecking((int)a->slot_index);
+    int b_wreck = td5_arcade_slot_is_wrecking((int)b->slot_index);
+
+    if (!a_wreck) {
+        a->linear_velocity_x += delta_x;
+        a->linear_velocity_y += delta_y;
+        a->linear_velocity_z += delta_z;
+    }
+    if (!b_wreck) {
+        b->linear_velocity_x -= delta_x;
+        b->linear_velocity_y -= delta_y;
+        b->linear_velocity_z -= delta_z;
+    }
 
     /* [#10 telemetry] A closing sphere overlap that produced a separation
      * impulse is a real car-to-car contact — flag both actors for this tick. */
