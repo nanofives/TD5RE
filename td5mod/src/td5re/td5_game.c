@@ -1859,6 +1859,11 @@ int td5_game_init_race_session(void) {
                 g_td5.traffic_volume = TD5_TRAFFIC_VOLUME_COUNT - 1;
             g_td5.traffic_enabled = (g_td5.traffic_volume > 0) ? 1 : 0;
             g_td5.special_encounter_enabled = ncfg_l.cops ? 1 : 0;
+            /* [NET GAME MODES 2026-07-04] Adopt the host's DYNAMICS (ARCADE/SIM)
+             * so arcade 3x-collisions + power-up boxes (and Traffic Battle boxes)
+             * are identical on every peer. Committed to physics below at
+             * td5_physics_set_dynamics() before td5_arcade_init_race() reads it. */
+            g_td5.ini.dynamics = ncfg_l.dynamics ? 1 : 0;
             /* [MP GAME MODES 2026-06-22] Adopt the host's replicated game mode +
              * per-mode options so every peer runs the identical mode. Behaviour
              * gating off this lands per work-package (TT/cup/cop-chase); here we

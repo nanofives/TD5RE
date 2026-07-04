@@ -2083,6 +2083,10 @@ void Screen_NetworkLobby(void) {
                  * every peer. */
                 cfg.traffic_volume    = g_td5.ini.traffic;
                 cfg.cops              = g_td5.ini.cops;
+                /* [NET GAME MODES 2026-07-04] Replicate ARCADE/SIM so arcade
+                 * power-up boxes + 3x collisions (and Traffic Battle boxes) are
+                 * identical on every peer. */
+                cfg.dynamics          = g_td5.ini.dynamics ? 1 : 0;
                 for (slot = 0; slot < 6; slot++) {
                     int col = td5_net_get_slot_td6_color(slot);
                     cfg.car_index[slot]   = 0;
