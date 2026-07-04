@@ -3433,10 +3433,12 @@ static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
 #define MV_BX   170      /* mode-button x      */
 #define MV_BW   300      /* mode-button width  */
 #define MV_BH   50       /* mode-button height (two lines) */
-#define MV_Y0   70       /* [DRAG RACE 2026-06-30] first mode button raised from 96
-                          * so the list now has SIX modes (DRAG RACE is the 6th):
-                          * bottom button reaches 70 + 5*64 + 50 = 440 (was 466 at
-                          * Y0=96), leaving room below for the outward voter rings. */
+#define MV_Y0   96       /* [MP TIME TRIAL removal 2026-07-04] Restored to 96 (was
+                          * lowered to 70 for DRAG RACE 2026-06-30 to fit SIX modes).
+                          * TIME TRIAL's removal brings the list back to FIVE modes,
+                          * so the extra headroom is no longer needed — and at 70 the
+                          * first button overlapped the "OTHERS PRESS A / HOST" banner
+                          * drawn at y=72-85. Bottom button reaches 96 + 4*64 + 50 = 402. */
 #define MV_GAP  64       /* [2026-06-29] row pitch (was 78). Keeps the per-voter
                           * border rings clear (14px gap between 50px buttons). */
 /* [MP MODE VOTE BORDERS 2026-06-27] Concentric per-voter border-ring geometry,
