@@ -360,9 +360,12 @@ static void frontend_pending_render_modal(float sx, float sy) {
 
     if (s_pl_modal_item < 0 || s_pl_modal_item >= td5_pending_count()) return;
 
-    fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xC8000008u, -1, 0, 0, 0, 0);  /* dim behind */
+    /* fe_draw_quad doesn't set a blend state (it inherits whatever opaque
+     * preset was last active and silently ignores alpha) -- td5_vui_quad
+     * wraps the draw in the translucent preset so this actually blends. */
+    td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0x80000008u, -1, 0, 0, 0, 0);  /* dim behind, 50% */
 
-    fe_draw_quad(mx, my, mw, mh, 0xF2141018u, -1, 0, 0, 0, 0);                       /* box fill */
+    fe_draw_quad(mx, my, mw, mh, 0xFF141018u, -1, 0, 0, 0, 0);                       /* box fill, opaque */
     fe_draw_quad(mx, my, mw, border_t, border_c, -1, 0, 0, 0, 0);                    /* top */
     fe_draw_quad(mx, my + mh - border_t, mw, border_t, border_c, -1, 0, 0, 0, 0);    /* bottom */
     fe_draw_quad(mx, my, border_t, mh, border_c, -1, 0, 0, 0, 0);                    /* left */
@@ -389,7 +392,7 @@ static void frontend_pending_render_modal(float sx, float sy) {
     }
     s_fe_preserve_case = prev_case;
 
-    td5_vui_text_centered(mx + mw * 0.5f, my + mh - 22.0f * sy,
+    td5_vui_text_centered(mx + mw * 0.5f, my + mh - 34.0f * sy,
                           "ENTER / B / BACK = CLOSE", 0xFF8890A0u, sx, sy);
 }
 
