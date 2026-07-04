@@ -33,6 +33,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "Net play: the host can now pick the GAME MODE from" },
+    { CL_ITEM,    "  the network lobby - Race, Drag Race, Traffic" },
+    { CL_ITEM,    "  Battle and Cop Chase all play over the network" },
+    { CL_ITEM,    "Net play: ARCADE dynamics work online too (power-up" },
+    { CL_ITEM,    "  boxes + big-hit collisions, in sync on every PC)" },
+    { CL_ITEM,    "Net play: other players now show their names on the" },
+    { CL_ITEM,    "  results and standings screens (not P2 / P3...)" },
     { CL_ITEM,    "Headlights now sense the surroundings: they switch on" },
     { CL_ITEM,    "  in tunnels and dim stretches (e.g. Bern's tunnels)" },
     { CL_ITEM,    "  and across dark tracks with a night sky (e.g. Moscow)," },

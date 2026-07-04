@@ -69,6 +69,12 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Net play: host picks GAME MODE in the network lobby (Race/Drag/Battle/Cop)",
+    "Net play: Drag Race over the network (lanes=players, no AI, deterministic)",
+    "Net play: Traffic Battle over the network (power-up boxes in sync on all PCs)",
+    "Net play: Cop Chase over the network (random human cop; bust/arrest in sync)",
+    "Net play: ARCADE dynamics online (power-up boxes + 3x collisions in sync)",
+    "Net play: remote players show their names in results/standings (not P2/P3)",
     "Auto headlights: ON in Bern tunnels, OFF in Bern sunlit stretches",
     "Auto headlights: ON across dark-sky tracks (Moscow), OFF on bright tracks",
     "Car bodies stay neutral (no red/colour tint from track lighting, e.g. Bern)",
