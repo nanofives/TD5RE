@@ -1218,6 +1218,114 @@ static int td5_camera_replay_eye_floor_clamp(uintptr_t actor, int view, int *eye
     return 1;
 }
 
+/* ========================================================================
+ * TD5RE_FLYIN_TERRAIN_CLAMP (default 1) — the race-start fly-in orbits the
+ * eye away from the car (preset 13's orbit_radius, ~1600 wu, plus a height
+ * offset that itself reaches ~2000+ wu at some countdown levels — see
+ * UpdateRaceCameraTransitionState/td5_camera_finalize_chase_pos). On a grid
+ * spawn that hugs open water with no cliff/hillside behind it (Montego Bay
+ * and other coastal circuit starts — Maui, Honolulu, Sydney), that sweep can
+ * carry the eye out over the sea with no track geometry anywhere beneath
+ * it — the reported "car spawned out of bounds during countdown" (the car
+ * itself never moves; only the cinematic camera swings out over the water).
+ * Confirmed present in BOTH single-player and split-screen (2026-07-04
+ * screenshot verification, DefaultTrack=17 / SpectateScreens=1).
+ *
+ * This is faithful to the original on tracks where the same orbit radius
+ * lands over solid ground (RunRaceFrame @ 0x0042b580 runs this fly-in
+ * unconditionally for every view) — nothing in the original clamps the
+ * eye/look-at height to the track surface here. Montego's coastal grid is
+ * simply a case the original's fixed orbit radius was never validated
+ * against.
+ *
+ * Reuses the SAME ground-floor probe as the replay trackside fix above
+ * (td5_camera_probe_ground_floor -> td5_track_compute_contact_height_bestlane,
+ * which self-validates the walk and reports untrustworthy rather than
+ * guessing). Two-tier, two-sided against that floor:
+ *   1. Probe under the (unclamped) eye XZ. If trustworthy — the eye is near
+ *      real track geometry — cap its height above that local floor. This is
+ *      the common case (on-track / near-shoulder swings) and matches the
+ *      faithful sweep's normal excursion (~2000-2200 wu measured on Moscow/
+ *      Newcastle) comfortably under the cap, so it doesn't visibly change
+ *      the cinematic anywhere the original geometry supports it.
+ *   2. If untrustworthy (the eye XZ is too far from any track span to
+ *      validate — open water/off the map), fall back to probing under the
+ *      CAR's own XZ instead (always valid — the car is on the grid) and cap
+ *      the eye's height above THAT baseline. This is the Montego case.
+ * Also raises the eye/target back UP to the floor if either dipped below
+ * it — investigation (2026-07-04) found the fly-in's prev/cur pose lerp in
+ * td5_camera_apply_view can transiently swing the interpolated eye/target
+ * height far below the car (a separate, pre-existing instability, not yet
+ * root-caused) during the fast preset-transition portions of the countdown;
+ * the same floor probe catches and corrects it as a side effect.
+ * The look-at target gets the same two-sided clamp (its XZ is pinned to the
+ * car, so its own floor probe is always trustworthy) so eye and target move
+ * together — clamping the eye alone while the target stayed far from it
+ * would aim the shot away from where the eye ends up.
+ * "0" (TD5RE_FLYIN_TERRAIN_CLAMP=0) reverts to the unclamped, faithful
+ * fly-in for A/B comparison.
+ * ======================================================================== */
+static int td5_camera_flyin_terrain_clamp_enabled(void)
+{
+    static int s_mode = -1;
+    if (s_mode < 0) {
+        s_mode = td5_env_flag_on("TD5RE_FLYIN_TERRAIN_CLAMP");   /* default ON */
+    }
+    return s_mode;
+}
+
+/* ~2500 world units (24.8 FP) above the local track floor — comfortably
+ * above the fly-in's normal ~2000-2200 wu excursion (measured Moscow/
+ * Newcastle) so faithful sweeps over solid ground are never touched; only
+ * an unbounded swing over open water/void gets reined in. */
+#define TD5_CAM_FLYIN_MAX_ABOVE_TRACK  0x9C400
+
+static int td5_camera_flyin_terrain_clamp(uintptr_t actor, int view,
+                                          int *eye, int *target)
+{
+    if (!td5_camera_flyin_terrain_clamp_enabled()) return 0;
+    if (!actor || !eye || !target) return 0;
+
+    int changed = 0;
+    int floor_y;
+
+    /* Eye: prefer a floor probed directly under the eye; fall back to the
+     * car's own (always-valid) floor when the eye has swung somewhere
+     * untrustworthy. Two-sided: raise it if it dipped below the floor
+     * (mirrors td5_camera_replay_eye_floor_clamp — also catches a transient
+     * prev/cur pose-interpolation excursion observed during investigation,
+     * independent of the open-water case), cap it if it swung too far above
+     * (the open-water/off-map case this fix targets). */
+    int eye_floor;
+    int have_eye_floor = td5_camera_probe_ground_floor(actor, eye[0], eye[2], &eye_floor);
+    if (!have_eye_floor)
+        have_eye_floor = td5_camera_probe_ground_floor(actor, target[0], target[2], &eye_floor);
+    if (have_eye_floor) {
+        int cap = eye_floor + TD5_CAM_FLYIN_MAX_ABOVE_TRACK;
+        if (eye[1] > cap) { eye[1] = cap; changed = 1; }
+        else if (eye[1] < eye_floor) { eye[1] = eye_floor; changed = 1; }
+    }
+
+    /* Target XZ == car XZ (see td5_camera_finalize_chase_pos), so this probe
+     * is always trustworthy. Clamp it the same two-sided way so the shot
+     * stays aimed near the (possibly clamped) eye instead of far away from
+     * it in either direction. */
+    if (td5_camera_probe_ground_floor(actor, target[0], target[2], &floor_y)) {
+        int cap = floor_y + TD5_CAM_FLYIN_MAX_ABOVE_TRACK;
+        if (target[1] > cap) { target[1] = cap; changed = 1; }
+        else if (target[1] < floor_y) { target[1] = floor_y; changed = 1; }
+    }
+
+    if (changed) {
+        static uint32_t s_flyin_clamp_log_ctr;
+        if ((s_flyin_clamp_log_ctr++ % 120u) == 0u)
+            TD5_LOG_D(LOG_TAG,
+                      "flyin terrain clamp v%d: eye=(%d,%d,%d) tgt=(%d,%d,%d)",
+                      view, eye[0], eye[1], eye[2], target[0], target[1], target[2]);
+    }
+    return changed;
+}
+
 void UpdateChaseCamera(int actor, int do_track_heading, int view)
 {
     int fly_in_threshold = g_flyInThreshold;
@@ -2236,6 +2344,20 @@ void td5_camera_apply_view(int view)
                 }
             }
         }
+        /* [Montego fly-in fix 2026-07-04] While the race-start fly-in is
+         * active (same condition cam_solve_view uses to pick the fly-in
+         * branch), rein in an excessive orbit sweep out over open water /
+         * off the map — see td5_camera_flyin_terrain_clamp above. Runs
+         * AFTER the wall-avoid clip (so it clamps the already wall-safe
+         * eye) and BEFORE the shake jitter (so a crash rattle still layers
+         * on top of the clamped position, matching the wall-avoid ordering
+         * above). */
+        if (g_cameraTransitionActive > 0 && !s_flyin_preset_reloaded[v]) {
+            TD5_Actor *fa = camera_actor_for_view(v);
+            if (fa)
+                td5_camera_flyin_terrain_clamp((uintptr_t)fa, v, eye, target);
+        }
+
         /* [ITEM #12] Jitter the eye AFTER the wall-avoid clip so the rattle
          * rides on the clipped position. The shake is small (~tens of world
          * units) so it won't re-clip into geometry; the look-at target is left
