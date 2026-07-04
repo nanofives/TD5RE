@@ -107,8 +107,10 @@ int  td5_ai_traffic_dynamic_parked(int slot);
 /* Render/audio fade for `slot`: 0 = hidden/parked, 255 = fully visible.
  * Always 255 for racer slots or when dynamic traffic is off. */
 int  td5_ai_traffic_get_draw_alpha(int slot);
-/* [PER-VIEWPORT TRAFFIC] 1 when split-screen time-trial per-viewport traffic is
- * active this race (each viewport has its own independent traffic partition). */
+/* [PER-VIEWPORT TRAFFIC] 1 when per-viewport traffic partitioning is active this
+ * race (each viewport has its own independent traffic partition). [MP TIME TRIAL
+ * removed 2026-07-04] The only mode that ever enabled this was split-screen TIME
+ * TRIAL, so this now always returns 0 — kept only because callers still probe it. */
 int  td5_ai_traffic_per_viewport_active(void);
 /* Viewport that OWNS traffic `slot` (0..viewport_count-1); -1 = shared/no-gating
  * (per-viewport off, or a racer slot). Render uses this to draw each viewport

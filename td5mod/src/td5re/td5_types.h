@@ -427,8 +427,7 @@ typedef enum TD5_ScreenIndex {
  *  overloading the 0..9 game-type enum. */
 typedef enum TD5_MpGameMode {
     TD5_MP_MODE_RACE           = 0,  /* regular race (existing behaviour)            */
-    TD5_MP_MODE_TIME_TRIAL     = 1,  /* live simultaneous, no player-vs-player crash */
-    TD5_MP_MODE_CUP            = 2,  /* best-of-X series, points, optional teams     */
+    TD5_MP_MODE_CUP            = 1,  /* best-of-X series, points, optional teams     */
     /* [TRAFFIC BATTLE 2026-06-28] Demolition-derby mode: a fixed-pace dynamic
      * ONCOMING traffic stream pours onto the track and every racer scores by
      * DESTROYING traffic cars (no rival racers, no cops). Placement is ignored —
@@ -437,14 +436,14 @@ typedef enum TD5_MpGameMode {
      * CHECKPOINTS (a deadline that catches up, so you must keep crashing AND keep
      * moving). Listed below CUP. Works in MP split-screen and solo-vs-traffic.
      * PORT-ONLY. */
-    TD5_MP_MODE_TRAFFIC_BATTLE = 3,
-    TD5_MP_MODE_COP_CHASE      = 4,  /* one designated cop chases the suspects       */
+    TD5_MP_MODE_TRAFFIC_BATTLE = 2,
+    TD5_MP_MODE_COP_CHASE      = 3,  /* one designated cop chases the suspects       */
     /* [DRAG RACE 2026-06-30] Lane-change drag strip (level030 stadium), no AI
      * opponents, no track selector (always the drag strip). Options: oncoming
      * TRAFFIC on/off, DISTANCE preset (SHORT/MEDIUM/LONG/EPIC), EXTRA LANES on top
      * of the per-player lanes. Win = race to the finish (standard placement). */
-    TD5_MP_MODE_DRAG_RACE      = 5,
-    TD5_MP_MODE_COUNT          = 6
+    TD5_MP_MODE_DRAG_RACE      = 4,
+    TD5_MP_MODE_COUNT          = 5
 } TD5_MpGameMode;
 
 /** Traffic-battle win condition (battle_win_condition). */
@@ -474,10 +473,6 @@ typedef enum TD5_CopPickMode {
  *  layout. */
 typedef struct TD5_MpModeConfig {
     int32_t mode;                 /* TD5_MpGameMode */
-
-    /* --- Time trial --- */
-    int32_t tt_checkpoint_start;  /* count from this checkpoint (0..4)               */
-    int32_t tt_checkpoint_finish; /* win at this checkpoint (> start; 5 = finish line)*/
 
     /* --- Cup --- */
     int32_t cup_race_count;                       /* races in the series (best of X) */

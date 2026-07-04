@@ -249,13 +249,6 @@ void frontend_init_race_schedule(void) {
         if (humans < 1) humans = 1;
         if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
 
-        /* [MP TIME TRIAL 2026-06-22] Time trial has NO AI opponents — only the
-         * human players race the clock, seeing each other as non-colliding
-         * ghosts. Force 0 AI here (before the count is committed) so no AI slots
-         * are activated; the Opponents selector is hidden on the track selector. */
-        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL)
-            s_num_ai_opponents = 0;
-
         /* [PORT ENHANCEMENT 2026-06] Single-player: the active menu controller
          * (whoever navigated here) becomes the driver = player 0's device. */
         if (!s_mp_flow) {

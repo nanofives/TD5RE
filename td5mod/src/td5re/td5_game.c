@@ -405,26 +405,6 @@ static int32_t s_levelinf_checkpoint_config;   /* +0x08 from LEVELINF.DAT */
  * so reaching this span is the only finish trigger). */
 static int s_td6_finish_span = 0;
 
-/* [MP TIME TRIAL — segment checkpoints] The TT mode-config screen offers a START
- * (0..4) and FINISH (1..5) checkpoint on EVERY track. The range is fixed 0..5
- * (not per-track), so a "checkpoint" here is simply a fifth of the track ring:
- * cp 0 = start line, cp 5 = finish line. This is independent of any per-track
- * native checkpoint data (s_active_checkpoint). mp_tt_checkpoint_span() maps a
- * checkpoint index to its absolute ring span. */
-static int mp_tt_checkpoint_span(int cp_idx) {
-    int ring = g_td5.track_span_ring_length;
-    if (ring <= 0) ring = td5_track_get_span_count();
-    if (ring <= 0) return 0;
-    if (cp_idx <= 0) return 0;
-    if (cp_idx >= 5) return ring;
-    return (int)(((long)cp_idx * (long)ring) / 5);
-}
-
-/* TT segment finish span (>0): end the TT race when forward progress reaches it.
- * 0 = run to the track's normal finish (finish cp == 5, or any non-TT mode).
- * Resolved once at race init; consumed by advance_pending_finish_state. */
-static int s_tt_finish_span = 0;
-
 /* [TD6 SYNTHESIZED CHECKPOINTS] Drive-through markers derived from the in-track
  * ring/banner mesh positions (TD6.exe ships NO checkpoint-trigger data — RE'd
  * 2026-06-04: CHECKPT.NUM is loaded but never read, the banner-texture tables
@@ -1910,10 +1890,10 @@ int td5_game_init_race_session(void) {
 #ifndef TD5RE_RELEASE
     /* [MP GAME MODES test hook 2026-06-22] Force the MP game mode for solo
      * drive-testing without the local split-screen vote screen:
-     *   TD5RE_MP_MODE_FORCE=1 time trial, 2 cup, 3 cop chase (0 = race).
-     * Dev build only. Note: human-vs-human effects (e.g. TT pass-through) need
-     * >=2 human slots; in a solo race only slot 0 is human, so the force lets
-     * you exercise the code path + logs even when the visible effect needs MP. */
+     *   TD5RE_MP_MODE_FORCE=1 cup, 2 traffic battle, 3 cop chase, 4 drag race
+     *   (0 = race). Dev build only. Note: human-vs-human effects need >=2
+     * human slots; in a solo race only slot 0 is human, so the force lets you
+     * exercise the code path + logs even when the visible effect needs MP. */
     {
         const char *mf = getenv("TD5RE_MP_MODE_FORCE");
         if (mf && mf[0]) {
@@ -1966,13 +1946,6 @@ int td5_game_init_race_session(void) {
                   g_td5.mp_mode_config.cop_win_condition,
                   g_td5.mp_mode_config.suspect_head_start);
     }
-
-    /* [MP TIME TRIAL 2026-06-22] TT has NO AI opponents — only the human players
-     * (frontend_init_race_schedule forces num_ai_opponents=0, so the AI-fill below
-     * disables every non-human slot). time_trial_enabled stays 0 so the solo
-     * 2-slot limit doesn't apply (we keep all the human slots, not just 2). */
-    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL && !g_td5.network_active)
-        g_td5.time_trial_enabled = 0;
 
     /* [TRAFFIC BATTLE 2026-06-28] Single-player entry: a release-safe knob lets a
      * solo race (humans + AI, no split-screen / net) launch the Traffic
@@ -3362,23 +3335,7 @@ int td5_game_init_race_session(void) {
                       effective_start_span_offset);
         }
 
-        /* [MP TIME TRIAL] TT spawns differently from a normal grid: every car
-         * starts on the SAME span (no down-track stagger) but on a DIFFERENT lane
-         * (handled in the spawn loop below). The grid sits AT the chosen START
-         * checkpoint's absolute ring span (cp 0 = the track's normal start line;
-         * cp 1..4 = the absolute ring fraction, the SAME mapping the FINISH
-         * checkpoint uses, so a checkpoint index is one consistent span). */
-        int tt_mode = (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL &&
-                       !g_td5.network_active);
-        int tt_spawn_span = start_span;
-        if (tt_mode && g_td5.mp_mode_config.tt_checkpoint_start > 0) {
-            tt_spawn_span = mp_tt_checkpoint_span(g_td5.mp_mode_config.tt_checkpoint_start);
-            TD5_LOG_I(LOG_TAG, "MP TT start checkpoint: cp=%d -> spawn_span=%d (ring=%d)",
-                      g_td5.mp_mode_config.tt_checkpoint_start, tt_spawn_span,
-                      g_td5.track_span_ring_length);
-        }
-
-        /* [MP COP CHASE 2026-06-23] Like TT, cop chase spawns everyone TOGETHER on
+        /* [MP COP CHASE 2026-06-23] Cop chase spawns everyone TOGETHER on
          * the same span (the start line) on different lanes — the AI cop right
          * beside the suspects, no down-track stagger and no positional head start —
          * so the chase begins fair + simultaneous (per user request). */
@@ -3395,20 +3352,6 @@ int td5_game_init_race_session(void) {
          * P2P branch — the only finish trigger for checkpoint-less TD6 P2P
          * tracks. */
         s_td6_finish_span = td5_asset_td6_finish_span_for_level(level_num);
-
-        /* [MP TIME TRIAL] Resolve the segment FINISH span: end the TT race at the
-         * chosen finish checkpoint. cp 5 ("finish line") -> 0 = use the track's
-         * normal finish (native checkpoints / laps); cp 1..4 -> the ring fraction. */
-        s_tt_finish_span = 0;
-        if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL && !g_td5.network_active &&
-            g_td5.mp_mode_config.tt_checkpoint_finish > 0 &&
-            g_td5.mp_mode_config.tt_checkpoint_finish < 5) {
-            s_tt_finish_span =
-                mp_tt_checkpoint_span(g_td5.mp_mode_config.tt_checkpoint_finish);
-            TD5_LOG_I(LOG_TAG, "MP TT segment finish: cp=%d -> span=%d (ring=%d)",
-                      g_td5.mp_mode_config.tt_checkpoint_finish, s_tt_finish_span,
-                      g_td5.track_span_ring_length);
-        }
 
         /* [TD6 SYNTHESIZED CHECKPOINTS] Resolve this track's checkpoint spans
          * once. Gated on g_active_td6_level (NOT level_num) so faithful TD5
@@ -3510,15 +3453,13 @@ int td5_game_init_race_session(void) {
                  * [BUG 5b] effective_start_span_offset = the live offset normally,
                  * or the value captured when this replay was recorded (so playback
                  * spawns on the recorded grid). */
-                /* TT and MP cop chase spawn every car on the SAME span (lanes are
-                 * spread instead, below); for cop chase the AI cop starts right
-                 * beside the suspects — no positional head start — so the chase is
-                 * fair + simultaneous. Other modes keep the per-slot down-track
+                /* MP cop chase spawns every car on the SAME span (lanes are
+                 * spread instead, below); the AI cop starts right beside the
+                 * suspects — no positional head start — so the chase is fair +
+                 * simultaneous. Other modes keep the per-slot down-track
                  * stagger off start_span. */
                 int raw;
-                if (tt_mode) {
-                    raw = tt_spawn_span + effective_start_span_offset;
-                } else if (mp_cop_mode) {
+                if (mp_cop_mode) {
                     raw = start_span + effective_start_span_offset;
                     /* The cop(s) start a few spans BEHIND the suspects (a gap to
                      * close); suspects line up together at start_span. [multi-cop
@@ -3627,24 +3568,23 @@ int td5_game_init_race_session(void) {
                 }
             }
 
-            /* [MP TIME TRIAL — grid lanes] TT cars all share the start span, so
-             * spread the players ACROSS the lanes instead of down-track. Each
-             * player gets a DISTINCT lane (the block is centred on the drivable
-             * road); when there are more players than lanes, reuse a lane modulo
-             * the lane count — TT cars pass through each other (tt_pair_passthrough)
-             * so an overlap is harmless. Overrides the default grid lane above
-             * (incl. the TD6 road-band case, which only sets the band here). */
-            if (tt_mode || mp_cop_mode) {
+            /* [MP COP CHASE — grid lanes] Cop chase cars all share the start
+             * span, so spread the players ACROSS the lanes instead of
+             * down-track. Each player gets a DISTINCT lane (the block is
+             * centred on the drivable road); when there are more players than
+             * lanes, reuse a lane modulo the lane count. Overrides the default
+             * grid lane above (incl. the TD6 road-band case, which only sets
+             * the band here). */
+            if (mp_cop_mode) {
                 int lc = td5_track_span_lane_count_at(span_index);
                 int lane_lo = 0, lane_hi = (lc > 0 ? lc - 1 : 0);
                 if (g_active_td6_level > 0 && lc > 4)
                     td5_track_td6_road_band(span_index, lc, &lane_lo, &lane_hi);
                 int lanes = lane_hi - lane_lo + 1;
                 if (lanes < 1) lanes = 1;
-                /* Grid size: TT = the human players; cop chase = the suspects +
-                 * the AI-cop slot (so the cop gets its own lane next to them). */
-                int grid_n = tt_mode ? g_td5.num_human_players
-                                     : td5_game_mp_cop_chase_field();
+                /* Grid size: the suspects + the AI-cop slot (so the cop gets
+                 * its own lane next to them). */
+                int grid_n = td5_game_mp_cop_chase_field();
                 if (grid_n < 1) grid_n = 1;
                 if (grid_n <= lanes)
                     sub_lane = lane_lo + (lanes - grid_n) / 2 + effective_slot;  /* centred, distinct */
@@ -4317,34 +4257,6 @@ int td5_game_init_race_session(void) {
         TD5_LOG_I(LOG_TAG,
             "TD6 checkpoint timer synthesized: level=%d count=%d initial=%ds bonus=%ds/cp",
             g_active_td6_level, n, cp_secs, bonus_secs);
-    }
-
-    /* [MP TIME TRIAL — no beat-the-clock fail-timer] A time trial is a timed
-     * segment run, NOT a survival challenge: the P2P/TD6 checkpoint FAIL-timer
-     * (g_special_encounter -> tick_pending_finish_timer) must never end a TT
-     * race. It is correctly disabled for split-screen at the InitRace gate
-     * above (g_td5.split_screen_mode > 0 -> g_special_encounter = 0), but the
-     * TD6 checkpoint-timer synthesis just above unconditionally re-enables it
-     * for every migrated TD6 point-to-point city (Hong Kong / London / Paris /
-     * New York / Rome). On a TT SEGMENT the grid spawns at the chosen start
-     * checkpoint (mp_tt_checkpoint_span), which for start cp >= 2 lands the car
-     * PAST one or more of that track's synthesized checkpoint banners. Their
-     * +Ns time bonuses are then all granted on the first ticks at once, and the
-     * int16 packed timer_ticks (hi-byte = whole seconds) overflows NEGATIVE
-     * (e.g. Hong Kong: 90s base + 30 + 30 = 150s -> 0x963B < 0 as int16), which
-     * tick_pending_finish_timer reads as "time expired" -> instant p2p-timeout
-     * = the reported "TT cp2->cp3 on Hong Kong ends after a few spans". Force
-     * the gate off for any time trial so the race is governed solely by the TT
-     * finish checkpoint (s_tt_finish_span) / the track's normal finish. */
-    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_TIME_TRIAL &&
-        !g_td5.network_active) {
-        if (g_special_encounter != 0 || td6_cp_active) {
-            g_special_encounter = 0;
-            td6_cp_active = 0;   /* Step 21 below then seeds timer_ticks = 0x7FFF */
-            TD5_LOG_I(LOG_TAG,
-                "MP TT: P2P/TD6 checkpoint fail-timer disabled "
-                "(time trial has no beat-the-clock timeout)");
-        }
     }
 
     /* ---- Step 21: Adjust checkpoint timers by difficulty ---- */
@@ -7641,28 +7553,6 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
 
     /* Already finished */
     if (s_slot_state[slot].companion_1 != 0) return;
-
-    /* [MP TIME TRIAL — segment finish] When a finish checkpoint < 5 is chosen the
-     * TT race ends at that ring span, regardless of track type (circuit or P2P)
-     * and before the circuit/P2P branches below. Gate on forward progress via the
-     * RAW accumulator (+0x84) — like the TD6 P2P finish — so a reverse near the
-     * start can't wrap the normalized span up to ring-1 and false-trigger. The UI
-     * forces finish > start, so the spawn span is always below s_tt_finish_span
-     * (no instant finish). s_tt_finish_span is 0 outside TT / for finish cp == 5,
-     * making this a no-op on every other mode/track. */
-    if (s_tt_finish_span > 0 && actor) {
-        int32_t raw_acc = (int32_t)*(int16_t *)((uint8_t *)actor + 0x84);
-        if (raw_acc >= s_tt_finish_span) {
-            m->post_finish_metric_base = m->cumulative_timer;
-            s_slot_state[slot].companion_1 = 1;
-            s_slot_state[slot].companion_2 = 1;
-            s_slot_state[slot].state = 2;
-            TD5_LOG_I(LOG_TAG,
-                      "Actor finish: slot=%d mode=tt-segment raw=%d finish=%d timer=%d",
-                      slot, (int)raw_acc, s_tt_finish_span, m->cumulative_timer);
-            return;
-        }
-    }
 
     /* [TD6 SYNTHESIZED CHECKPOINTS] Register a drive-through when this actor
      * reaches the next synthesized checkpoint span (derived from the in-track
