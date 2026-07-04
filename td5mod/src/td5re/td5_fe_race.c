@@ -340,6 +340,12 @@ static int  s_results_panel_slide_dir;   /* +1 = right (next), -1 = left (prev) 
  * passes, forcing the table to display even on a partial race. */
 static int  s_results_view_data_request;
 
+/* [TD5RE HS-MP] Once-per-race latch for local split-screen multiplayer high-score
+ * registration. Set at RaceResults state 0 when it's a genuine finish (not a VIEW
+ * RESULTS re-view), consumed at state 0x0D — so re-viewing the results table never
+ * re-inserts (double) records. */
+static int  s_mp_hs_pending;
+
 /* [FIX 2026-06-05 race-again-opponent-count] Snapshot the opponent count too,
  * so "Race Again" (and S15's pause-menu RESTART RACE, which reads this same
  * snapshot) reruns with the SAME field size instead of falling back to the
@@ -7280,13 +7286,21 @@ void Screen_PostRaceHighScore(void) {
             int delta = frontend_option_delta();
             if (delta != 0) {
                 s_score_category_index += delta;
-                /* High score screen: all 26 TD5 tracks+cups (0..0x19) PLUS the 11
+                /* High score screen: the 20 TD5 race tracks (0..19) PLUS the 11
                  * migrated TD6 tracks (display indices 26..36) are accessible
-                 * regardless of lock state. Simple wrap [0..36]; the overlay shows
-                 * TD6 placeholder records for the 26..36 slots (see
-                 * frontend_render_high_score_overlay). */
+                 * regardless of lock state. Wrap [0..36], the overlay shows TD6
+                 * placeholder records for the 26..36 slots (see
+                 * frontend_render_high_score_overlay).
+                 * [TD5RE] The 6 single-player CUP categories (groups 20..25) are
+                 * excluded from the Records browse — skip over them in the same
+                 * direction the player is cycling. */
                 if (s_score_category_index > 36) s_score_category_index = 0;
                 if (s_score_category_index < 0)  s_score_category_index = 36;
+                while (s_score_category_index >= 20 && s_score_category_index <= 25) {
+                    s_score_category_index += (delta >= 0) ? 1 : -1;
+                    if (s_score_category_index > 36) s_score_category_index = 0;
+                    if (s_score_category_index < 0)  s_score_category_index = 36;
+                }
                 /* Menu-move nav sound on track change. The original plays sound id 2
                  * (DXSound::Play(2)) centrally for arrow-capable L/R changes in the
                  * shared frontend input handler [CONFIRMED @ 0x0042687c, handler
@@ -8051,6 +8065,89 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
     #undef SUM_CTR
 }
 
+/* [TD5RE HS-MP] Register EVERY finishing human player's result into the high-score
+ * records after a local split-screen multiplayer race. The SP name-entry flow
+ * (Screen_PostRaceNameEntry) is bypassed for split-screen MP, so records would
+ * otherwise never capture MP runs. No name prompt — each player's PROFILE name is
+ * used, along with their per-slot car (s_mp_player_car[]) and per-slot metrics
+ * (avg/top speed, collisions, air time). Standard TIME/LAP races only: cop-chase /
+ * battle / drag / time-trial and the (now-hidden) single-player CUP groups skip.
+ * Highlights the local player's inserted rank for the summary. Called once per
+ * race (guarded by s_mp_hs_pending). */
+static void frontend_mp_register_high_scores(void)
+{
+    /* Mode gate: only a standard race has a meaningful time/lap high-score table. */
+    if (td5_game_battle_mode_active() ||
+        td5_game_is_wanted_mode() || td5_game_mp_cop_chase_active() ||
+        g_td5.drag_race_enabled || g_td5.time_trial_enabled)
+        return;
+    /* Cups (game types 1-6) are excluded from High Scores entirely — their groups
+     * (20-25) are hidden from the Records browse, so registering would be dead data. */
+    if (s_selected_game_type >= 1 && s_selected_game_type <= 6)
+        return;
+
+    int humans = s_num_human_players;
+    if (humans < 2) return;                 /* not split-screen */
+    if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
+
+    /* TD6 tracks keep a separate genuine-records store (no fake names); TD5 tracks
+     * use the authored NPC group for the track index. Mirrors the SP routing. */
+    int td6_level  = frontend_postrace_td6_level();
+    int is_circuit = frontend_track_is_circuit(s_selected_track);
+    int group_idx  = s_selected_track;
+    if (group_idx < 0) group_idx = 0; else if (group_idx >= 26) group_idx = 25;
+
+    int group_type;
+    if (td6_level > 0) {
+        const TD5_NpcGroup *td6grp = td5_save_get_td6_record_group(td6_level);
+        group_type = td6grp ? (td6grp->header & 3) : (is_circuit ? 1 : 0);
+    } else {
+        const TD5_NpcGroup *grp = td5_save_get_npc_group(group_idx);
+        if (!grp) return;
+        group_type = grp->header & 3;
+    }
+
+    int registered = 0;
+    for (int sl = 0; sl < humans; sl++) {
+        if (!td5_game_slot_is_finished(sl)) continue;
+
+        int32_t score;
+        if (group_type == 1)      score = td5_game_get_best_lap_time(sl);
+        else if (group_type == 2) score = td5_game_get_result_secondary(sl);
+        else                      score = td5_game_get_result_primary(sl);
+        if (score == 0) continue;           /* DNF / no time */
+
+        const char *nm = frontend_human_display_name(sl);
+        if (!nm || !nm[0]) nm = "PLAYER";
+        const TD5_RaceMetrics *m = td5_game_get_metrics(sl);
+        int coll = m ? m->collisions : 0;
+        int air  = m ? m->air_ticks  : 0;
+        int car  = (int)(uint8_t)s_mp_player_car[sl];
+        int avg  = td5_game_get_result_avg_speed(sl);
+        int top  = td5_game_get_result_top_speed(sl);
+
+        int rank;
+        if (td6_level > 0) {
+            rank = td5_save_td6_record_insert(td6_level, group_type,
+                       nm, score, car, avg, top, coll, air);
+        } else {
+            rank = td5_save_npc_record_insert(group_idx, nm, score,
+                       car, avg, top, coll, air);
+        }
+        if (rank >= 0) {
+            registered++;
+            if (sl == 0) {                  /* highlight the local player in the summary */
+                s_score_insert_pos = rank;
+                s_score_category_index = (td6_level > 0) ? s_selected_track : group_idx;
+            }
+        }
+        TD5_LOG_I(LOG_TAG, "MP high-score: slot=%d name='%s' score=%d -> rank=%d",
+                  sl, nm, (int)score, rank);
+    }
+    TD5_LOG_I(LOG_TAG, "MP high-score registration: %d/%d human(s) placed (group=%d td6=%d type=%d)",
+              registered, humans, group_idx, td6_level, group_type);
+}
+
 void Screen_RaceResults(void) {
     switch (s_inner_state) {
     case 0: /* Init & routing: sort results, create panel */
@@ -8058,6 +8155,12 @@ void Screen_RaceResults(void) {
         frontend_reset_buttons();
         TD5_LOG_I(LOG_TAG, "RaceResults: state 0 - init, game_type=%d",
                   s_selected_game_type);
+
+        /* [TD5RE HS-MP] Latch a once-per-race high-score registration for local
+         * split-screen MP. A genuine finish enters with s_results_view_data_request
+         * == 0; a VIEW RESULTS re-view enters with it == 1, so re-viewing never
+         * re-registers (double-inserts). Consumed at state 0x0D. */
+        s_mp_hs_pending = !s_results_view_data_request;
 
         /* [#2a] If we land on the results screen with VALID live results (a genuine
          * finished race — incl. a replay that completed normally and re-finished),
@@ -8498,6 +8601,14 @@ void Screen_RaceResults(void) {
          *   - Any standard MP race           -> the standard 6-button menu.
          * Port-only feature. */
         if (s_mp_flow && s_num_human_players >= 2) {
+            /* [TD5RE HS-MP] Register every finishing human's result into the track
+             * high scores before leaving for the MP post-race menu (the SP name-
+             * entry flow that normally does this is bypassed for split-screen MP).
+             * Once per race — the latch is cleared so re-viewing results is a no-op. */
+            if (s_mp_hs_pending) {
+                s_mp_hs_pending = 0;
+                frontend_mp_register_high_scores();
+            }
             if (td5_game_mp_cup_active() && !td5_game_mp_cup_has_next()) {
                 TD5_LOG_I(LOG_TAG, "RaceResults: local MP cup final race -> CUP_WINNERS -> MP post-race menu");
                 td5_frontend_set_screen(TD5_SCREEN_CUP_WINNERS);
@@ -9071,6 +9182,13 @@ void Screen_PostRaceNameEntry(void) {
          * 3. Write entry at position uVar8: name, score, car_id, avg_speed, top_speed.
          * 4. s_score_insert_pos = uVar8.
          */
+        /* [TD5RE] Race-results-parity metrics for the just-raced player (slot 0):
+         * COLLISIONS + AIR TIME are now stored alongside the record so the High
+         * Scores table shows the same values as the race-results screen. */
+        {
+        const TD5_RaceMetrics *m0 = td5_game_get_metrics(0);
+        int coll0 = m0 ? m0->collisions : 0;
+        int air0  = m0 ? m0->air_ticks  : 0;
         if (s_postrace_td6_level > 0 && s_post_race_score != 0) {
             /* [#2b] TD6 track: insert into the GENUINE TD6 record store (td5_save),
              * NOT a clamped TD5 NPC group — so no fake names are ever written and
@@ -9082,7 +9200,7 @@ void Screen_PostRaceNameEntry(void) {
             int ins_pos = td5_save_td6_record_insert(
                 s_postrace_td6_level, s_postrace_td6_score_type,
                 s_post_race_name, s_post_race_score,
-                (int)(uint8_t)s_selected_car, avg, top);
+                (int)(uint8_t)s_selected_car, avg, top, coll0, air0);
             s_score_insert_pos = ins_pos;            /* -1 if it didn't fit */
             s_score_category_index = s_selected_track;  /* nav-bar title only */
             s_anim_complete = 1;                     /* unblock the table render */
@@ -9101,74 +9219,42 @@ void Screen_PostRaceNameEntry(void) {
             }
             ins_group = (ins_group < 0) ? 0 : (ins_group >= 26 ? 25 : ins_group);
 
-            TD5_NpcGroup *grp = td5_save_get_npc_group_mutable(ins_group);
-            if (grp != NULL) {
-                int group_type = grp->header & 3;
+            /* Average and top speed.
+             * Non-cup: direct from slot 0 metrics.
+             * Cup: avg_speed = total / race count [CONFIRMED @ 0x00413D55-0x00413D70] */
+            int avg, top;
+            if (s_selected_game_type < 1 || s_selected_game_type == 7) {
+                avg = s_post_race_avg_speed;
+                top = s_post_race_top_speed;
+            } else {
+                int race_count = (s_race_within_series > 0) ? s_race_within_series : 1;
+                avg = s_post_race_avg_speed / race_count;
+                top = s_post_race_top_speed;
+            }
 
-                /* Find insert position [CONFIRMED @ 0x00413CB5-0x00413CDA] */
-                int ins_pos = 5; /* default: past end (discard) */
-                for (int k = 0; k < 5; k++) {
-                    if (group_type < 2) {
-                        /* Time: lower is better; insert where player < entry */
-                        if (s_post_race_score <= grp->entries[k].score) {
-                            ins_pos = k; break;
-                        }
-                    } else {
-                        /* Points: higher is better; insert where player >= entry */
-                        if (s_post_race_score >= grp->entries[k].score) {
-                            ins_pos = k; break;
-                        }
-                    }
-                }
-
-                if (ins_pos < 5) {
-                    /* Shift entries[ins_pos..3] down one slot [CONFIRMED @ 0x00413CDB-0x00413D1B] */
-                    for (int k = 3; k >= ins_pos; k--) {
-                        grp->entries[k + 1] = grp->entries[k];
-                    }
-
-                    /* Write new entry [CONFIRMED @ 0x00413D1C-0x00413D71]:
-                     * name (13 bytes), score, car_id, avg_speed, top_speed */
-                    TD5_NpcEntry *e = &grp->entries[ins_pos];
-                    memset(e, 0, sizeof(*e));
-                    strncpy(e->name, s_post_race_name, sizeof(e->name) - 1);
-                    e->score = s_post_race_score;
-                    e->car_id = (int32_t)(uint8_t)s_selected_car;
-
-                    /* Average and top speed.
-                     * Non-cup: direct from slot 0 metrics.
-                     * Cup: avg_speed = total / race count [CONFIRMED @ 0x00413D55-0x00413D70] */
-                    if (s_selected_game_type < 1 || s_selected_game_type == 7) {
-                        e->avg_speed = s_post_race_avg_speed;
-                        e->top_speed = s_post_race_top_speed;
-                    } else {
-                        int race_count = (s_race_within_series > 0) ? s_race_within_series : 1;
-                        e->avg_speed = s_post_race_avg_speed / race_count;
-                        e->top_speed = s_post_race_top_speed;
-                    }
-                    s_score_insert_pos = ins_pos;
-                    /* Point the shared score-overlay at the just-inserted
-                     * group so the post-submit display (cases 5-12) renders
-                     * the user's new entry. Without this the overlay would
-                     * show whatever group was last viewed in the Records
-                     * screen (initialized to 0 at HIGH_SCORE entry). */
-                    s_score_category_index = ins_group;
-                    /* Unblock the overlay's `!s_anim_complete` early-return so
-                     * NAME_ENTRY cases 6+ can render the high-score table.
-                     * Without this the screen stays blank between insert and
-                     * slide-out (user-reported 2026-05-26). */
-                    s_anim_complete = 1;
-
-                    TD5_LOG_I(LOG_TAG,
-                              "PostRaceNameEntry: inserted '%s' score=%d at pos=%d in group=%d",
-                              e->name, (int)e->score, ins_pos, ins_group);
-                } else {
-                    TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: score=%d doesn't fit (insert_pos=%d)",
-                              (int)s_post_race_score, ins_pos);
-                }
+            /* Sorted insert (entry + full-name/collisions/air extension) via the
+             * shared helper [CONFIRMED @ 0x00413CB0 case 4]. Returns rank or -1. */
+            int ins_pos = td5_save_npc_record_insert(
+                ins_group, s_post_race_name, s_post_race_score,
+                (int)(uint8_t)s_selected_car, avg, top, coll0, air0);
+            if (ins_pos >= 0) {
+                s_score_insert_pos = ins_pos;
+                /* Point the shared score-overlay at the just-inserted group so the
+                 * post-submit display (cases 5-12) renders the user's new entry. */
+                s_score_category_index = ins_group;
+                /* Unblock the overlay's `!s_anim_complete` early-return so
+                 * NAME_ENTRY cases 6+ can render the high-score table. */
+                s_anim_complete = 1;
+                TD5_LOG_I(LOG_TAG,
+                          "PostRaceNameEntry: inserted '%s' score=%d at pos=%d in group=%d",
+                          s_post_race_name, (int)s_post_race_score, ins_pos, ins_group);
+            } else {
+                TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: score=%d doesn't fit",
+                          (int)s_post_race_score);
             }
         } else {
             TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: case 4 skip (score=0, no qualification)");
+        }
         }
 
         /* [#2b] TD6 tracks always render the records table (genuine records or the

@@ -119,6 +119,42 @@ const TD5_NpcGroup *td5_save_get_npc_group(int group_index);
 TD5_NpcGroup *td5_save_get_npc_group_mutable(int group_index);
 
 /* ========================================================================
+ * High-score TD5RE extensions (parallel to the RE-faithful TD5_NpcEntry)
+ *
+ * TD5_NpcEntry / TD5_NpcGroup mirror the original 32/164-byte binary layout
+ * exactly (they round-trip through the legacy Config.td5 buffer), so they cannot
+ * grow. These parallel per-entry extensions hold TD5RE-only data that doesn't
+ * fit: the FULL display name (>15 chars, e.g. "Michael Schumacher") and the
+ * race-results-parity metrics (collisions, air time) now shown in the High
+ * Scores table. Indexed [group][entry], kept in lockstep with the sorted NPC
+ * entries by the insert helpers below. Persisted in td5re_progress.ini. */
+typedef struct TD5_NpcEntryExt {
+    char    full_name[32];   /* full display name; "" => fall back to entry.name[16] */
+    int32_t collisions;      /* race collisions   (== race-results COLLISIONS column) */
+    int32_t air_ticks;       /* airborne ticks @30fps (== race-results AIR TIME column) */
+} TD5_NpcEntryExt;
+
+/** Read-only extension for a TD5 NPC group entry (group 0-25, entry 0-4). NULL if
+ *  out of range. full_name[0]=='\0' means "no full name — display entry.name". */
+const TD5_NpcEntryExt *td5_save_get_npc_ext(int group_index, int entry);
+
+/** Read-only extension for a TD6 record entry (level, entry 0-4). NULL if out of
+ *  range or the level has no records. */
+const TD5_NpcEntryExt *td5_save_get_td6_ext(int td6_level, int entry);
+
+/** Insert one result into TD5 NPC group `group_index`, keeping the 5 entries
+ *  sorted by the group's header score type (0/1/4 = time, lower better; 2 =
+ *  points, higher better). Shifts both the entry and its extension in lockstep,
+ *  writes name/score/car/avg/top plus the extension (full_name/collisions/
+ *  air_ticks), and persists to td5re_progress.ini. Returns inserted rank [0..4]
+ *  or -1 if it didn't place / args invalid. Used by both the single-player name-
+ *  entry flow and multiplayer split-screen auto-registration. */
+int td5_save_npc_record_insert(int group_index, const char *full_name,
+                               int32_t score, int car_id,
+                               int32_t avg_speed, int32_t top_speed,
+                               int32_t collisions, int32_t air_ticks);
+
+/* ========================================================================
  * TD6 high-score records (port enhancement #2b 2026-06-16)
  *
  * The original 26-group NPC high-score table only covers the 26 authored TD5
@@ -143,7 +179,8 @@ const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level);
  *  if it didn't qualify / the feature is off / args are invalid. */
 int td5_save_td6_record_insert(int td6_level, int score_type,
                                const char *name, int32_t score,
-                               int car_id, int32_t avg_speed, int32_t top_speed);
+                               int car_id, int32_t avg_speed, int32_t top_speed,
+                               int32_t collisions, int32_t air_ticks);
 
 /** Returns the speed-units setting (0=MPH, 1=KPH). */
 int td5_save_get_speed_units(void);

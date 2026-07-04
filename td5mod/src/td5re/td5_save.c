@@ -597,33 +597,37 @@ static const uint8_t k_npc_default_table[TD5_CONFIG_NPC_TABLE_SIZE] = {
  * 130 entries = TD5_CONFIG_NPC_GROUPS(26) × 5 entries per group.
  * Groups 0-19 = race tracks; 20-25 = cup tracks.
  * ======================================================================== */
+/* Full celebrity names (<=31 chars to fit TD5_NpcEntryExt.full_name[32]). The
+ * short first name is still stored in the 15-char entry.name[16] (for legacy
+ * Config.td5 round-trip); the full name lives in the parallel extension and is
+ * what the High Scores table displays. */
 static const char * const k_celebrity_names[TD5_CONFIG_NPC_GROUPS * 5] = {
-    /* 0 Moscow */      "Michael",  "Lewis",     "Ayrton",    "Damon",     "Mika",
-    /* 1 Edinburgh */   "Fernando", "Sebastian", "David",     "Rubens",    "Nigel",
-    /* 2 Sydney */      "Alain",    "Jackie",    "James",     "Niki",      "Emerson",
-    /* 3 Blue Ridge */  "Tom",      "Brad",      "Leonardo",  "Julia",     "Denzel",
-    /* 4 Jarash */      "Arnold",   "Sylvester", "Bruce",     "Harrison",  "Will",
-    /* 5 Newcastle */   "Robert",   "Jack",      "Meryl",     "Halle",     "Keanu",
-    /* 6 Maui */        "Madonna",  "Beyonce",   "Eminem",    "Britney",   "Whitney",
-    /* 7 Courmayeur */  "Celine",   "Elton",     "Bono",      "Sting",     "Tina",
-    /* 8 Honolulu */    "Diana",    "Aretha",    "Elvis",     "Prince",    "Mick",
-    /* 9 Tokyo */       "Tiger",    "Muhammad",  "Carl",      "Jesse",     "Andre",
-    /* 10 Keswick */    "Steffi",   "Martina",   "Kobe",      "Shaq",      "Magic",
-    /* 11 San Fran */   "Wayne",    "Mario",     "Pele",      "Diego",     "Zinedine",
-    /* 12 Bern */       "Oprah",    "Angelina",  "Jennifer",  "Gwyneth",   "Reese",
-    /* 13 Kyoto */      "Charlize", "Hilary",    "Cameron",   "Drew",      "Winona",
-    /* 14 Washington */ "Salma",    "Penelope",  "Monica",    "Jodie",     "Jessica",
-    /* 15 Munich */     "Natalie",  "Scarlett",  "Keira",     "Cate",      "Nicole",
-    /* 16 Cheddar */    "Colin",    "Sebastien", "Tommi",     "Carlos",    "Petter",
-    /* 17 Montego */    "Usain",    "Florence",  "Venus",     "Serena",    "Roger",
-    /* 18 Bez */        "Pete",     "Lleyton",   "Marat",     "Andy",      "Rafael",
-    /* 19 Drag Strip */ "Freddie",  "Keith",     "Paul",      "George",    "Ringo",
-    /* 20 Cup 1 */      "Ronaldo",  "Thierry",   "Patrick",   "Oliver",    "Raul",
-    /* 21 Cup 2 */      "Naomi",    "Claudia",   "Cindy",     "Elle",      "Karlie",
-    /* 22 Cup 3 */      "Russell",  "Hugh",      "Geoffrey",  "Rachel",    "Sarah",
-    /* 23 Cup 4 */      "Orlando",  "Viggo",     "Elijah",    "Ian",       "Sean",
-    /* 24 Cup 5 */      "Uma",      "Julianne",  "Helen",     "Judi",      "Lily",
-    /* 25 Cup 6 */      "Morgan",   "Samuel",    "Laurence",  "Chiwetel",  "Idris",
+    /* 0 Moscow */      "Michael Schumacher", "Lewis Hamilton",     "Ayrton Senna",         "Damon Hill",          "Mika Hakkinen",
+    /* 1 Edinburgh */   "Fernando Alonso",    "Sebastian Vettel",   "David Coulthard",      "Rubens Barrichello",  "Nigel Mansell",
+    /* 2 Sydney */      "Alain Prost",        "Jackie Stewart",     "James Hunt",           "Niki Lauda",          "Emerson Fittipaldi",
+    /* 3 Blue Ridge */  "Tom Cruise",         "Brad Pitt",          "Leonardo DiCaprio",    "Julia Roberts",       "Denzel Washington",
+    /* 4 Jarash */      "Arnold Schwarzenegger", "Sylvester Stallone", "Bruce Willis",      "Harrison Ford",       "Will Smith",
+    /* 5 Newcastle */   "Robert De Niro",     "Jack Nicholson",     "Meryl Streep",         "Halle Berry",         "Keanu Reeves",
+    /* 6 Maui */        "Madonna Ciccone",    "Beyonce Knowles",    "Eminem Mathers",       "Britney Spears",      "Whitney Houston",
+    /* 7 Courmayeur */  "Celine Dion",        "Elton John",         "Bono Hewson",          "Sting Sumner",        "Tina Turner",
+    /* 8 Honolulu */    "Diana Ross",         "Aretha Franklin",    "Elvis Presley",        "Prince Nelson",       "Mick Jagger",
+    /* 9 Tokyo */       "Tiger Woods",        "Muhammad Ali",       "Carl Lewis",           "Jesse Owens",         "Andre Agassi",
+    /* 10 Keswick */    "Steffi Graf",        "Martina Navratilova","Kobe Bryant",          "Shaquille O'Neal",    "Magic Johnson",
+    /* 11 San Fran */   "Wayne Gretzky",      "Mario Lemieux",      "Pele Nascimento",      "Diego Maradona",      "Zinedine Zidane",
+    /* 12 Bern */       "Oprah Winfrey",      "Angelina Jolie",     "Jennifer Aniston",     "Gwyneth Paltrow",     "Reese Witherspoon",
+    /* 13 Kyoto */      "Charlize Theron",    "Hilary Swank",       "Cameron Diaz",         "Drew Barrymore",      "Winona Ryder",
+    /* 14 Washington */ "Salma Hayek",        "Penelope Cruz",      "Monica Bellucci",      "Jodie Foster",        "Jessica Alba",
+    /* 15 Munich */     "Natalie Portman",    "Scarlett Johansson", "Keira Knightley",      "Cate Blanchett",      "Nicole Kidman",
+    /* 16 Cheddar */    "Colin McRae",        "Sebastien Loeb",     "Tommi Makinen",        "Carlos Sainz",        "Petter Solberg",
+    /* 17 Montego */    "Usain Bolt",         "Florence Joyner",    "Venus Williams",       "Serena Williams",     "Roger Federer",
+    /* 18 Bez */        "Pete Sampras",       "Lleyton Hewitt",     "Marat Safin",          "Andy Roddick",        "Rafael Nadal",
+    /* 19 Drag Strip */ "Freddie Mercury",    "Keith Richards",     "Paul McCartney",       "George Harrison",     "Ringo Starr",
+    /* 20 Cup 1 */      "Ronaldo Nazario",    "Thierry Henry",      "Patrick Vieira",       "Oliver Kahn",         "Raul Gonzalez",
+    /* 21 Cup 2 */      "Naomi Campbell",     "Claudia Schiffer",   "Cindy Crawford",       "Elle Macpherson",     "Karlie Kloss",
+    /* 22 Cup 3 */      "Russell Crowe",      "Hugh Jackman",       "Geoffrey Rush",        "Rachel Weisz",        "Sarah Connor",
+    /* 23 Cup 4 */      "Orlando Bloom",      "Viggo Mortensen",    "Elijah Wood",          "Ian McKellen",        "Sean Bean",
+    /* 24 Cup 5 */      "Uma Thurman",        "Julianne Moore",     "Helen Mirren",         "Judi Dench",          "Lily Collins",
+    /* 25 Cup 6 */      "Morgan Freeman",     "Samuel Jackson",     "Laurence Fishburne",   "Chiwetel Ejiofor",    "Idris Elba",
 };
 
 /* Extract the original default name for slot (group g, entry e).
@@ -737,6 +741,10 @@ done:
 }
 
 static uint8_t  s_npc_group_table[TD5_CONFIG_NPC_TABLE_SIZE]; /* 0x4643B8 */
+/* TD5RE parallel extensions to s_npc_group_table entries (full names >15 chars,
+ * collisions + air time for the race-results-parity High Scores columns). Same
+ * [group][entry] indexing; kept in lockstep by td5_save_npc_record_insert. */
+static TD5_NpcEntryExt s_npc_ext[TD5_CONFIG_NPC_GROUPS][5];
 static uint32_t s_cup_tier;                                   /* 0x4962A8 */
 static uint32_t s_max_unlocked_car;                           /* 0x463E0C */
 static uint8_t  s_all_cars_unlocked;                          /* 0x4962B0 */
@@ -795,6 +803,8 @@ static int         s_profiles_loaded;
  * highest level<NN>.zip); 48 gives headroom. */
 #define TD5_MAX_TD6_RECORD_LEVELS 48
 static TD5_NpcGroup s_td6_records[TD5_MAX_TD6_RECORD_LEVELS];
+/* TD5RE parallel extension to s_td6_records entries (see s_npc_ext). */
+static TD5_NpcEntryExt s_td6_ext[TD5_MAX_TD6_RECORD_LEVELS][5];
 static int          s_td6_records_loaded;
 
 /* Apply celebrity (or API-fetched) names to NPC slots that still hold the
@@ -802,35 +812,88 @@ static int          s_td6_records_loaded;
  * all save data has been loaded so player-set names are already in place. */
 static void npc_apply_celebrity_names(char api_names[][16], int api_count)
 {
-    int g, e, idx;
+    int g, e, k;
     TD5_NpcGroup *groups = (TD5_NpcGroup *)s_npc_group_table;
-    int applied = 0;
+    int applied = 0, retimed = 0;
 
     for (g = 0; g < TD5_CONFIG_NPC_GROUPS; g++) {
         TD5_NpcGroup *grp = &groups[g];
+
+        /* Precompute this group's five original binary-default names (Frank/Ben/…),
+         * their celebrity FULL names, and the celebrity first tokens. Each entry is
+         * matched against ALL five so a SHIFTED seed (pushed down when a genuine
+         * record was inserted at a better rank) is still recognised, and the seed
+         * keeps its celebrity IDENTITY regardless of its current row. */
+        char        def[5][16];
+        char        cshort[5][16];
+        const char *cel[5];
+        for (k = 0; k < 5; k++) {
+            int idxk = g * 5 + k;
+            cel[k] = (api_names && idxk < api_count && api_names[idxk][0])
+                     ? api_names[idxk] : k_celebrity_names[idxk];
+            int si = 0;
+            for (const char *p = cel[k]; *p && *p != ' ' && si < 15; ++p) cshort[k][si++] = *p;
+            cshort[k][si] = '\0';
+            npc_default_name(g, k, def[k]);
+        }
+
+        /* Track whether the WHOLE group is still unraced SEED data (never a genuine
+         * player run). Only then do we normalize its seed times — a group holding a
+         * real record must keep its sorted times, or clamping seed rows could
+         * disorder the table. */
+        int all_seed = 1;
+
         for (e = 0; e < 5; e++) {
-            char orig[16];
-            npc_default_name(g, e, orig);
-            if (orig[0] == '\0') continue;
+            const char *nm = grp->entries[e].name;
 
-            if (strncmp(grp->entries[e].name, orig, 15) != 0) continue;
+            /* Which seed identity (if any) does this entry hold? Prefer a binary-
+             * default match (Frank/Ben/… -> replace with the celebrity), else a
+             * celebrity first-name match (pre-full-name save -> just fill the ext). */
+            int def_k = -1, cel_k = -1;
+            for (k = 0; k < 5; k++)
+                if (def[k][0] && strncmp(nm, def[k], 15) == 0) { def_k = k; break; }
+            if (def_k < 0)
+                for (k = 0; k < 5; k++)
+                    if (cshort[k][0] && strncmp(nm, cshort[k], 15) == 0) { cel_k = k; break; }
 
-            idx = g * 5 + e;
-            const char *celebrity;
-            if (api_names && idx < api_count && api_names[idx][0]) {
-                celebrity = api_names[idx];
+            if (def_k >= 0) {
+                /* Seed at its factory (possibly shifted) name: set the celebrity
+                 * short name in the 15-char field + the full name in the extension. */
+                memset(grp->entries[e].name, 0, 16);
+                strncpy(grp->entries[e].name, cshort[def_k], 15);
+                memset(s_npc_ext[g][e].full_name, 0, sizeof(s_npc_ext[g][e].full_name));
+                strncpy(s_npc_ext[g][e].full_name, cel[def_k], sizeof(s_npc_ext[g][e].full_name) - 1);
+                applied++;
+            } else if (cel_k >= 0 && s_npc_ext[g][e].full_name[0] == '\0') {
+                /* Pre-full-name save (celebrity FIRST name only, no extension yet):
+                 * fill in the full name without touching the stored score/name. */
+                memset(s_npc_ext[g][e].full_name, 0, sizeof(s_npc_ext[g][e].full_name));
+                strncpy(s_npc_ext[g][e].full_name, cel[cel_k], sizeof(s_npc_ext[g][e].full_name) - 1);
+                applied++;
             } else {
-                celebrity = k_celebrity_names[idx];
+                all_seed = 0;   /* genuine player entry */
             }
+        }
 
-            memset(grp->entries[e].name, 0, 16);
-            strncpy(grp->entries[e].name, celebrity, 15);
-            applied++;
+        /* Normalize default best times to 5-10 min for fully-unraced TIME groups.
+         * Header 0/4 = race TIME (ticks @30fps): 5:00=9000 .. 9:00=16200, plus a
+         * small group-uniform offset so tracks don't all read identically while
+         * staying inside [9000,18000] = [5,10] min. Order is preserved (offset is
+         * the same for all 5 rows). LAP(1)/POINTS(2) groups are left untouched. */
+        if (all_seed) {
+            int htype = grp->header & 0xFF;
+            if (htype == 0 || htype == 4) {
+                int jitter = (g * 37) % 600;   /* 0..599 ticks, group-uniform */
+                for (e = 0; e < 5; e++)
+                    grp->entries[e].score = 9000 + e * 1800 + jitter;
+                retimed++;
+            }
         }
     }
 
-    TD5_LOG_I(LOG_TAG, "celebrity names: applied to %d/%d NPC slots",
-              applied, TD5_CONFIG_NPC_GROUPS * 5);
+    TD5_LOG_I(LOG_TAG,
+              "celebrity names: applied full names to %d/%d NPC slots; normalized default times for %d group(s)",
+              applied, TD5_CONFIG_NPC_GROUPS * 5, retimed);
 }
 
 /* ========================================================================
@@ -845,10 +908,12 @@ int td5_save_init(void)
     memset(s_cup_buf, 0, sizeof(s_cup_buf));
     s_cup_buf_size = 0;
     memcpy(s_npc_group_table, k_npc_default_table, sizeof(s_npc_group_table));
+    memset(s_npc_ext, 0, sizeof(s_npc_ext));   /* TD5RE full-name/collisions/air extensions */
 
     /* TD6 records start EMPTY (header -1) — never seeded with fake names. The
      * lazy loader (td6_records_ensure_loaded) fills genuine runs from disk. */
     memset(s_td6_records, 0, sizeof(s_td6_records));
+    memset(s_td6_ext, 0, sizeof(s_td6_ext));
     for (i = 0; i < TD5_MAX_TD6_RECORD_LEVELS; i++)
         s_td6_records[i].header = -1;
     s_td6_records_loaded = 0;
@@ -2143,6 +2208,18 @@ static int cfgini_write_progress(void)
             cfgini_add(&w, "Entry%d.Car = %d\r\n", e, en->car_id);
             cfgini_add(&w, "Entry%d.AvgSpeed = %d\r\n", e, en->avg_speed);
             cfgini_add(&w, "Entry%d.TopSpeed = %d\r\n", e, en->top_speed);
+            /* TD5RE extension: full display name + race-results-parity metrics. */
+            {
+                const TD5_NpcEntryExt *ex = &s_npc_ext[g][e];
+                if (ex->full_name[0]) {
+                    char fn[32]; snprintf(fn, sizeof fn, "%s", ex->full_name);
+                    for (int c = 0; c < (int)sizeof(fn); c++)
+                        if ((unsigned char)fn[c] < 0x20) { fn[c] = '\0'; break; }
+                    cfgini_add(&w, "Entry%d.FullName = %s\r\n", e, fn);
+                }
+                cfgini_add(&w, "Entry%d.Collisions = %d\r\n", e, ex->collisions);
+                cfgini_add(&w, "Entry%d.Air = %d\r\n", e, ex->air_ticks);
+            }
         }
         cfgini_add(&w, "\r\n");
     }
@@ -2199,6 +2276,18 @@ static int cfgini_write_progress(void)
             cfgini_add(&w, "Entry%d.Car = %d\r\n", e, en->car_id);
             cfgini_add(&w, "Entry%d.AvgSpeed = %d\r\n", e, en->avg_speed);
             cfgini_add(&w, "Entry%d.TopSpeed = %d\r\n", e, en->top_speed);
+            /* TD5RE extension: full display name + race-results-parity metrics. */
+            {
+                const TD5_NpcEntryExt *ex = &s_td6_ext[lv][e];
+                if (ex->full_name[0]) {
+                    char fn[32]; snprintf(fn, sizeof fn, "%s", ex->full_name);
+                    for (int c = 0; c < (int)sizeof(fn); c++)
+                        if ((unsigned char)fn[c] < 0x20) { fn[c] = '\0'; break; }
+                    cfgini_add(&w, "Entry%d.FullName = %s\r\n", e, fn);
+                }
+                cfgini_add(&w, "Entry%d.Collisions = %d\r\n", e, ex->collisions);
+                cfgini_add(&w, "Entry%d.Air = %d\r\n", e, ex->air_ticks);
+            }
         }
         cfgini_add(&w, "\r\n");
     }
@@ -2246,6 +2335,17 @@ static int cfgini_read_progress(void)
             snprintf(key, sizeof key, "Entry%d.Car", e);      en->car_id    = cfgini_get_i32(f, sec, key, en->car_id);
             snprintf(key, sizeof key, "Entry%d.AvgSpeed", e); en->avg_speed = cfgini_get_i32(f, sec, key, en->avg_speed);
             snprintf(key, sizeof key, "Entry%d.TopSpeed", e); en->top_speed = cfgini_get_i32(f, sec, key, en->top_speed);
+            /* TD5RE extension: full display name + collisions + air time. */
+            {
+                TD5_NpcEntryExt *ex = &s_npc_ext[g][e];
+                snprintf(key, sizeof key, "Entry%d.FullName", e);
+                if (td5_plat_ini_get_str(f, sec, key, "", val, sizeof val) > 0) {
+                    memset(ex->full_name, 0, sizeof(ex->full_name));
+                    strncpy(ex->full_name, val, sizeof(ex->full_name) - 1);
+                }
+                snprintf(key, sizeof key, "Entry%d.Collisions", e); ex->collisions = cfgini_get_i32(f, sec, key, ex->collisions);
+                snprintf(key, sizeof key, "Entry%d.Air", e);        ex->air_ticks  = cfgini_get_i32(f, sec, key, ex->air_ticks);
+            }
         }
     }
 
@@ -2430,6 +2530,7 @@ static void td6_records_read(void)
     for (int lv = 0; lv < TD5_MAX_TD6_RECORD_LEVELS; lv++) {
         memset(&s_td6_records[lv], 0, sizeof(s_td6_records[lv]));
         s_td6_records[lv].header = -1;
+        memset(&s_td6_ext[lv], 0, sizeof(s_td6_ext[lv]));
     }
     if (!td6_records_enabled()) return;
 
@@ -2458,6 +2559,17 @@ static void td6_records_read(void)
             snprintf(key, sizeof key, "Entry%d.Car", e);      en->car_id    = cfgini_get_i32(f, sec, key, 0);
             snprintf(key, sizeof key, "Entry%d.AvgSpeed", e); en->avg_speed = cfgini_get_i32(f, sec, key, 0);
             snprintf(key, sizeof key, "Entry%d.TopSpeed", e); en->top_speed = cfgini_get_i32(f, sec, key, 0);
+            /* TD5RE extension: full display name + collisions + air time. */
+            {
+                TD5_NpcEntryExt *ex = &s_td6_ext[lv][e];
+                snprintf(key, sizeof key, "Entry%d.FullName", e);
+                if (td5_plat_ini_get_str(f, sec, key, "", val, sizeof val) > 0) {
+                    memset(ex->full_name, 0, sizeof(ex->full_name));
+                    strncpy(ex->full_name, val, sizeof(ex->full_name) - 1);
+                }
+                snprintf(key, sizeof key, "Entry%d.Collisions", e); ex->collisions = cfgini_get_i32(f, sec, key, 0);
+                snprintf(key, sizeof key, "Entry%d.Air", e);        ex->air_ticks  = cfgini_get_i32(f, sec, key, 0);
+            }
         }
     }
 }
@@ -2520,18 +2632,21 @@ const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level)
 
 int td5_save_td6_record_insert(int td6_level, int score_type,
                                const char *name, int32_t score,
-                               int car_id, int32_t avg_speed, int32_t top_speed)
+                               int car_id, int32_t avg_speed, int32_t top_speed,
+                               int32_t collisions, int32_t air_ticks)
 {
     if (!td6_records_enabled()) return -1;
     td6_records_ensure_loaded();
     if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return -1;
     if (score == 0) return -1;                 /* DNF / no real time = no record */
 
-    TD5_NpcGroup *grp = &s_td6_records[td6_level];
+    TD5_NpcGroup    *grp = &s_td6_records[td6_level];
+    TD5_NpcEntryExt *ext = s_td6_ext[td6_level];
     int type = score_type & 3;                 /* 0/1=time, 2=points (4 -> 0) */
     if (grp->header < 0) {                      /* first record for this level */
         grp->header = score_type;
         memset(grp->entries, 0, sizeof(grp->entries));
+        memset(ext, 0, sizeof(s_td6_ext[td6_level]));
     }
 
     /* Find the insert rank, keeping the 5 entries sorted (time: lower is better;
@@ -2544,9 +2659,11 @@ int td5_save_td6_record_insert(int td6_level, int score_type,
     }
     if (ins_pos >= 5) return -1;               /* didn't beat any of the 5 */
 
-    /* Shift lower entries down one slot, then write the new record. */
-    for (int k = 3; k >= ins_pos; k--)
+    /* Shift lower entries (and their extensions) down one slot, then write. */
+    for (int k = 3; k >= ins_pos; k--) {
         grp->entries[k + 1] = grp->entries[k];
+        ext[k + 1]          = ext[k];
+    }
     TD5_NpcEntry *en = &grp->entries[ins_pos];
     memset(en, 0, sizeof(*en));
     if (name) {
@@ -2559,9 +2676,14 @@ int td5_save_td6_record_insert(int td6_level, int score_type,
     en->avg_speed = avg_speed;
     en->top_speed = top_speed;
 
+    memset(&ext[ins_pos], 0, sizeof(ext[ins_pos]));
+    if (name) strncpy(ext[ins_pos].full_name, name, sizeof(ext[ins_pos].full_name) - 1);
+    ext[ins_pos].collisions = collisions;
+    ext[ins_pos].air_ticks  = air_ticks;
+
     cfgini_write_progress();                   /* persist whole progress file */
-    TD5_LOG_I(LOG_TAG, "TD6 record inserted: level=%d rank=%d name='%s' score=%d",
-              td6_level, ins_pos, en->name, (int)score);
+    TD5_LOG_I(LOG_TAG, "TD6 record inserted: level=%d rank=%d name='%s' score=%d coll=%d air=%d",
+              td6_level, ins_pos, en->name, (int)score, (int)collisions, (int)air_ticks);
     return ins_pos;
 }
 
@@ -2714,6 +2836,69 @@ TD5_NpcGroup *td5_save_get_npc_group_mutable(int group_index)
 {
     if (group_index < 0 || group_index >= TD5_CONFIG_NPC_GROUPS) return NULL;
     return (TD5_NpcGroup *)(s_npc_group_table + group_index * TD5_CONFIG_NPC_GROUP_SIZE);
+}
+
+/* -- TD5RE high-score extensions (full names + collisions + air time) -------- */
+
+const TD5_NpcEntryExt *td5_save_get_npc_ext(int group_index, int entry)
+{
+    if (group_index < 0 || group_index >= TD5_CONFIG_NPC_GROUPS) return NULL;
+    if (entry < 0 || entry >= 5) return NULL;
+    return &s_npc_ext[group_index][entry];
+}
+
+const TD5_NpcEntryExt *td5_save_get_td6_ext(int td6_level, int entry)
+{
+    if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return NULL;
+    if (entry < 0 || entry >= 5) return NULL;
+    return &s_td6_ext[td6_level][entry];
+}
+
+/* Sorted insert into a TD5 NPC group, keeping the parallel extension (full name +
+ * collisions + air time) in lockstep. Mirrors the original name-entry insert
+ * [CONFIRMED @ 0x00413CB0 case 4] and is shared by the single-player name-entry
+ * flow and multiplayer split-screen auto-registration. Persists progress.ini. */
+int td5_save_npc_record_insert(int group_index, const char *full_name,
+                               int32_t score, int car_id,
+                               int32_t avg_speed, int32_t top_speed,
+                               int32_t collisions, int32_t air_ticks)
+{
+    if (group_index < 0 || group_index >= TD5_CONFIG_NPC_GROUPS) return -1;
+    if (score == 0) return -1;                 /* DNF / no time = no record */
+
+    TD5_NpcGroup    *grp = (TD5_NpcGroup *)(s_npc_group_table + group_index * TD5_CONFIG_NPC_GROUP_SIZE);
+    TD5_NpcEntryExt *ext = s_npc_ext[group_index];
+    int type = grp->header & 3;                /* 0/1 = time (lower better), 2 = points (higher better) */
+
+    int ins_pos = 5;
+    for (int k = 0; k < 5; k++) {
+        if (type < 2) { if (score <= grp->entries[k].score) { ins_pos = k; break; } }
+        else          { if (score >= grp->entries[k].score) { ins_pos = k; break; } }
+    }
+    if (ins_pos >= 5) return -1;               /* didn't beat any of the 5 */
+
+    /* Shift lower entries (and their extensions) down one slot, then write. */
+    for (int k = 3; k >= ins_pos; k--) {
+        grp->entries[k + 1] = grp->entries[k];
+        ext[k + 1]          = ext[k];
+    }
+    TD5_NpcEntry *en = &grp->entries[ins_pos];
+    memset(en, 0, sizeof(*en));
+    if (full_name) strncpy(en->name, full_name, sizeof(en->name) - 1);   /* 15-char legacy field */
+    en->score     = score;
+    en->car_id    = car_id;
+    en->avg_speed = avg_speed;
+    en->top_speed = top_speed;
+
+    memset(&ext[ins_pos], 0, sizeof(ext[ins_pos]));
+    if (full_name) strncpy(ext[ins_pos].full_name, full_name, sizeof(ext[ins_pos].full_name) - 1);
+    ext[ins_pos].collisions = collisions;
+    ext[ins_pos].air_ticks  = air_ticks;
+
+    cfgini_write_progress();                   /* persist ext + entries to progress.ini */
+    TD5_LOG_I(LOG_TAG, "NPC record inserted: group=%d rank=%d name='%s' score=%d coll=%d air=%d",
+              group_index, ins_pos, en->name, (int)score, (int)collisions, (int)air_ticks);
+    return ins_pos;
 }
 
 int td5_save_get_speed_units(void)

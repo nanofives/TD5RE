@@ -62,6 +62,11 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "High Scores: COLLISIONS + AIR TIME columns match race results",
+    "High Scores: celebrity names show in full (Michael Schumacher)",
+    "High Scores: default best times all read 5-10 min (unraced tracks)",
+    "High Scores: single-player CUPS no longer in the browse list",
+    "High Scores: split-screen MP records every player by profile name",
     "Game Options: PLAYER NAME edits INLINE in place (no pop-up), full-size font",
     "Game Options: DAMAGE toggle ON=car damage+bar, OFF=both off (label 'DAMAGE')",
     "Game Options: PREV/OK/NEXT aligned under the option-row column (120/220/320)",

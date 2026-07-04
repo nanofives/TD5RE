@@ -7787,28 +7787,31 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
 
     int score_type = grp->header & 0xFF;
     uint32_t hdr_color = 0xFFFFFFFF;
-    /* Two-row header [CONFIRMED @0x413010]: NAME/CAR + the TIME|LAP|POINTS label at y=7;
-     * BEST / AVERAGE / TOP at y=0; the second "SPEED" line + TIME/LAP at y=14. */
-    float y0  = HS_SF_Y(0);
-    float y7  = HS_SF_Y(7);
-    float y14 = HS_SF_Y(14);
-    fe_draw_small_text(HS_SF_CTR(0x10,0x70,"NAME"), y7, "NAME", hdr_color, sx, sy);
-    if (score_type == 2) {
-        fe_draw_small_text(HS_SF_CTR(0x80,0xd4,"POINTS"), y7, "POINTS", hdr_color, sx, sy);
-    } else {
-        const char *tlabel = (score_type == 1) ? "LAP" : "TIME";
-        fe_draw_small_text(HS_SF_CTR(0x80,0xd4,"BEST"), y0,  "BEST", hdr_color, sx, sy);
-        fe_draw_small_text(HS_SF_CTR(0x80,0xd4,tlabel), y14, tlabel, hdr_color, sx, sy);
-    }
-    fe_draw_small_text(HS_SF_CTR(0xe4,0x150,"CAR"),      y7,  "CAR",     hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0x160,0x1ac,"AVERAGE"), y0,  "AVERAGE", hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0x160,0x1ac,"SPEED"),   y14, "SPEED",   hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0x1bc,0x208,"TOP"),     y0,  "TOP",     hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0x1bc,0x208,"SPEED"),   y14, "SPEED",   hdr_color, sx, sy);
+    /* [TD5RE] The table now shows the SAME value set as the race-results screen:
+     * NAME | TIME | CAR | AVG | TOP | COLL | AIR (7 columns across the 520px panel).
+     * COLLISIONS + AIR TIME come from the parallel high-score extension. Single-row
+     * headers at y=7; short labels keep the narrower 7-column layout legible.
+     * Panel-local column bands [L,R] (0..0x208 = 0..520):
+     *   NAME 0x10..0x68  TIME 0x68..0xA8  CAR 0xA8..0xF0  AVG 0xF0..0x138
+     *   TOP 0x138..0x180  COLL 0x180..0x1B8  AIR 0x1B8..0x208 */
+    float y7 = HS_SF_Y(7);
+    const char *tlabel = (score_type == 2) ? "POINTS" : (score_type == 1) ? "LAP" : "TIME";
+    fe_draw_small_text(HS_SF_CTR(0x10,0x68,"NAME"),  y7, "NAME",  hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0x68,0xa8,tlabel),  y7, tlabel,  hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0xa8,0xf0,"CAR"),   y7, "CAR",   hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0xf0,0x138,"AVG"),  y7, "AVG",   hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0x138,0x180,"TOP"), y7, "TOP",   hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0x180,0x1b8,"COLL"),y7, "COLL",  hdr_color, sx, sy);
+    fe_draw_small_text(HS_SF_CTR(0x1b8,0x208,"AIR"), y7, "AIR",   hdr_color, sx, sy);
 
     /* 5 entry rows at panel-local y = 48,64,80,96,112 (step 16). */
     for (int i = 0; i < 5; i++) {
         const TD5_NpcEntry *e = &grp->entries[i];
+        /* Parallel extension for this row (full name + collisions + air time). */
+        const TD5_NpcEntryExt *ex =
+            (s_postrace_td6_level > 0) ? td5_save_get_td6_ext(s_postrace_td6_level, i) :
+            (browse_td6_level    > 0) ? td5_save_get_td6_ext(browse_td6_level, i) :
+                                        td5_save_get_npc_ext(s_score_category_index, i);
         float y = HS_SF_Y(48 + i * 16);
         /* Highlight row = g_postRaceQualifyingScore (orig bolds it via SmallTextb). Browse
          * mode defaults to 0 → #1 row; post-insert it's the inserted rank. Port has no bold
@@ -7825,22 +7828,32 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
             continue;
         }
 
-        /* Rank flush at panel x=0; name at x=0x10 — names render MIXED-CASE (seed names
-         * are stored "Frank"/"Jeffrey"; the small font has true lowercase). */
+        /* Rank flush at panel x=0; name at x=0x10 — names render MIXED-CASE. The FULL
+         * name (e.g. "Michael Schumacher") comes from the extension; fall back to the
+         * 15-char legacy name field. Clipped to the NAME column (~84px). */
         snprintf(buf, sizeof(buf), "%d", i + 1);
         fe_draw_small_text(HS_SF_X(0), y, buf, row_color, sx, sy);
         {
-            char name_buf[14];
-            memcpy(name_buf, e->name, 13);
-            name_buf[13] = '\0';
+            char name_buf[32];
+            if (ex && ex->full_name[0]) {
+                snprintf(name_buf, sizeof(name_buf), "%s", ex->full_name);
+            } else {
+                memcpy(name_buf, e->name, 15);
+                name_buf[15] = '\0';
+            }
+            {
+                int nlen = (int)strlen(name_buf);
+                while (nlen > 0 && fe_measure_small_text(name_buf) > 84.0f)
+                    name_buf[--nlen] = '\0';
+            }
             fe_draw_small_text(HS_SF_X(16), y, name_buf, row_color, sx, sy);
         }
 
-        /* Score / Time centered in [0x80,0xd4]. */
+        /* Score / Time centered in [0x68,0xa8]. */
         frontend_format_score_time(buf, sizeof(buf), e->score, score_type);
-        fe_draw_small_text(HS_SF_CTR(0x80,0xd4,buf), y, buf, row_color, sx, sy);
+        fe_draw_small_text(HS_SF_CTR(0x68,0xa8,buf), y, buf, row_color, sx, sy);
 
-        /* Car SHORT name (e.g. "'97 CAMARO") centered in [0xe4,0x150], clipped to 108px. */
+        /* Car SHORT name centered in [0xa8,0xf0], clipped to the narrower column (~66px). */
         {
             int cid = e->car_id & 0xFF;
             const char *cname = frontend_get_car_short_name(cid);
@@ -7849,19 +7862,31 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
             cname_buf[sizeof(cname_buf) - 1] = '\0';
             {
                 int clen = (int)strlen(cname_buf);
-                while (clen > 0 && fe_measure_small_text(cname_buf) > 108.0f)
+                while (clen > 0 && fe_measure_small_text(cname_buf) > 66.0f)
                     cname_buf[--clen] = '\0';
             }
-            fe_draw_small_text(HS_SF_CTR(0xe4,0x150,cname_buf), y, cname_buf, row_color, sx, sy);
+            fe_draw_small_text(HS_SF_CTR(0xa8,0xf0,cname_buf), y, cname_buf, row_color, sx, sy);
         }
 
         /* Average / Top speed WITH unit (orig "%dMPH"/"%dKPH"), centered. */
         {
             const char *unit = speed_kph ? "KPH" : "MPH";
             snprintf(buf, sizeof(buf), "%d%s", frontend_convert_speed(e->avg_speed, speed_kph), unit);
-            fe_draw_small_text(HS_SF_CTR(0x160,0x1ac,buf), y, buf, row_color, sx, sy);
+            fe_draw_small_text(HS_SF_CTR(0xf0,0x138,buf), y, buf, row_color, sx, sy);
             snprintf(buf, sizeof(buf), "%d%s", frontend_convert_speed(e->top_speed, speed_kph), unit);
-            fe_draw_small_text(HS_SF_CTR(0x1bc,0x208,buf), y, buf, row_color, sx, sy);
+            fe_draw_small_text(HS_SF_CTR(0x138,0x180,buf), y, buf, row_color, sx, sy);
+        }
+
+        /* [TD5RE] COLLISIONS (count) + AIR TIME (tenths of a second, same as the
+         * race-results summary: air_tenths = (air_ticks*10+15)/30 at 30 Hz). */
+        {
+            int coll = ex ? ex->collisions : 0;
+            int air_ticks = ex ? ex->air_ticks : 0;
+            int air_tenths = (air_ticks * 10 + 15) / 30;
+            snprintf(buf, sizeof(buf), "%d", coll);
+            fe_draw_small_text(HS_SF_CTR(0x180,0x1b8,buf), y, buf, row_color, sx, sy);
+            snprintf(buf, sizeof(buf), "%d.%ds", air_tenths / 10, air_tenths % 10);
+            fe_draw_small_text(HS_SF_CTR(0x1b8,0x208,buf), y, buf, row_color, sx, sy);
         }
     }
     #undef HS_SF_X
