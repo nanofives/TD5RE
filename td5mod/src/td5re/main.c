@@ -795,7 +795,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.reflections      = td5_ini_int("Lighting", "Reflections", 1);
     g_td5.ini.wet_roads        = td5_ini_int("Lighting", "WetRoads", 1);
     /* [LIGHT2] street-lamp light emission */
-    g_td5.ini.street_lights    = td5_ini_int("Lighting", "StreetLights", 1);
+    g_td5.ini.street_lights    = td5_ini_int("Lighting", "StreetLights", 0);
 
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);

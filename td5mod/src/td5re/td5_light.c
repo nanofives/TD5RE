@@ -246,7 +246,7 @@ void td5_light_emit_vehicle_headlights(void)
 
 static float s_lamp_pos[TD5_LAMP_MAX][3];
 static int   s_lamp_count     = 0;
-static int   s_street_lights  = 1;
+static int   s_street_lights  = 0;   /* OFF by default: parked pending a lamp look-dev session */
 
 void td5_light_lamps_reset(void)          { s_lamp_count = 0; }
 int  td5_light_lamps_count(void)          { return s_lamp_count; }
