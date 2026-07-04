@@ -69,6 +69,7 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Race Options: CAR TOUGHNESS is Low/Medium/High/Off (Off disables damage)",
     "Net play: host picks GAME MODE in the network lobby (Race/Drag/Battle/Cop)",
     "Net play: CUP over the network (series advance, points, standings, auto-teams)",
     "Net play: Cop Chase INFECT online + COPS/SUSPECTS results table over net",

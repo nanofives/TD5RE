@@ -740,7 +740,7 @@ extern int             s_game_option_powerups;   /* [ITEM CHAOS 2026-07-04] 0=OF
 extern int             s_game_option_laneassist;
 extern int             s_game_option_difficulty;
 extern int             s_game_option_dynamics;
-extern int             s_game_option_car_toughness;   /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
+extern int             s_game_option_car_toughness;   /* [TOUGHNESS OFF 2026-07-04] 0=Low 1=Medium 2=High 3=Off */
 extern int             s_game_option_car_deform;      /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 extern int             s_game_option_car_damage;      /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
 extern int             s_game_option_tutorial;        /* [TUTORIAL 2026-06-29] controller overlay every race on/off */

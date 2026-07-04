@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "FIX: CAR TOUGHNESS can now turn damage fully OFF -" },
+    { CL_ITEM,    "  it's now Low / Medium / High / Off (was Low/Norm/High," },
+    { CL_ITEM,    "  with no way to disable damage from Race Options)" },
     { CL_ITEM,    "Net play: the host can now pick the GAME MODE from" },
     { CL_ITEM,    "  the network lobby - Race, Drag Race, Traffic" },
     { CL_ITEM,    "  Battle and Cop Chase all play over the network" },
