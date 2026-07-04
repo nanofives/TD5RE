@@ -1,11 +1,11 @@
 /**
  * td5_pending.h -- Dev/QA "pending to test" checklist + in-game overlay.
  *
- * A flat list of features awaiting manual testing. Each item toggles "done"
- * (shown checked + struck through on the PENDING TO TEST menu). An optional
- * in-game overlay lists everything still untested, right-justified on the right
- * edge of the screen (like the dev debug data). The /end routine prunes done
- * ([x]) lines from the backing file.
+ * A flat list of features awaiting manual testing. On the PENDING TO TEST
+ * menu, ENTER on a row opens a details modal (td5_pending_detail_text) with a
+ * longer, testing-focused note; SUPR/DELETE drops the row outright once it's
+ * been verified. An optional in-game overlay lists every item, right-justified
+ * on the right edge of the screen (like the dev debug data).
  *
  * Persistence: an UNTRACKED plain-text file next to the exe (td5re_pending.txt),
  * seeded from a compiled-in default list on first run. The file is the source of
@@ -21,9 +21,8 @@ void td5_pending_shutdown(void);   /* no-op: writes happen on each toggle       
 /* List access. */
 int         td5_pending_count(void);
 const char *td5_pending_text(int i);
-int         td5_pending_is_done(int i);
-int         td5_pending_remaining(void);   /* number of NOT-done items */
-void        td5_pending_toggle(int i);     /* flip done + persist immediately */
+const char *td5_pending_detail_text(int i);   /* longer test-focus note for the ENTER modal;
+                                                  falls back to a generic note if none recorded */
 void        td5_pending_delete(int i);     /* drop item i + persist (SUPR on the menu) */
 void        td5_pending_save(void);        /* rewrite the backing file now */
 

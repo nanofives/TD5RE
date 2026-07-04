@@ -509,35 +509,16 @@ A non-zero result here **never** undoes the ship — `/end` already merged and p
 
 ---
 
-## Step 7f: Retire tested items in the pending-test checklist (non-blocking)
+## Step 7f: Retire tested items in the pending-test checklist (RETIRED 2026-07-04)
 
-The **PENDING TO TEST** menu (dev/QA feature) writes `td5re_pending.txt` at the
-project root — untracked runtime state, one item per line: `[x] ...` = tested/done,
-`[ ] ...` = still to test, `#- ...` = retired tombstone, `# ...` = comment. `/end`
-**retires** the done items (rewrites `[x] foo` → `#- foo`) so they leave the visible
-list but are **not** re-seeded from `k_seed[]` on the next launch — the game now
-merges any new `k_seed[]` item into an existing file on boot (`td5_pending_init`),
-so a plain delete would just bring tested items back as untested. Non-blocking: a
-missing file or any error never undoes the ship.
-
-```bash
-cd C:/Users/maria/Desktop/Proyectos/TD5RE
-PF="td5re_pending.txt"
-if [ -f "${PF}" ]; then
-    DONE="$(grep -c '^\[[xX]\]' "${PF}" 2>/dev/null)"; [ -z "${DONE}" ] && DONE=0
-    if [ "${DONE}" -gt 0 ]; then
-        # Retire (tombstone) tested items rather than delete them, so the boot-time
-        # k_seed[] merge doesn't resurrect them. "[x] foo" -> "#- foo".
-        awk '{ if ($0 ~ /^\[[xX]\]/) { sub(/^\[[xX]\][ \t]*/, ""); print "#- " $0 } else print }' \
-            "${PF}" > "${PF}.tmp" && mv "${PF}.tmp" "${PF}"
-        echo "pending-test: retired ${DONE} tested item(s) in ${PF}"
-    else
-        echo "pending-test: nothing marked tested — list unchanged"
-    fi
-else
-    echo "pending-test: no ${PF} yet (game hasn't written one) — skipped"
-fi
-```
+**This step is now a permanent no-op — skip it.** The **PENDING TO TEST** menu's
+crossing-out ("mark tested", `[x] .../[ ] ...` lines) was removed 2026-07-04: ENTER on
+a row now opens a details modal instead of toggling a checkbox, so the game never
+writes a `[x] ...` line to `td5re_pending.txt` again. Clearing an item is done in-game
+via SUPR/DELETE, which already tombstones it (`#- ...`) immediately — there is nothing
+left for `/end` to retire after the fact. If you find this step still running an
+`awk '^\[[xX]\]'` sweep, that's leftover from before the removal and can be deleted;
+it will only ever report "nothing marked tested".
 
 ---
 
@@ -697,4 +678,4 @@ Next: <run /fix for deferred stubs | resume a leftover | nothing pending>
 - **Every `/end` auto-publishes the release to the LAN server (Step 7e).** After the push, `deploy_release.sh` mirrors `td5re_release.exe` + `re/assets/` to the Pi (`mariano-server.local:8088`, incremental upload). Non-blocking: a Pi-offline/SSH failure (clean exit 2) or any other error is reported, never undoes the ship. Skip with `TD5RE_SKIP_PUBLISH=1`. This is what keeps the downstairs game machines from going stale — they pull the new build via `update.bat`.
 - **Every `/end` auto-syncs memory + conversation history with account3, bidirectionally (Step 7g).** Detects the current account from `$CLAUDE_CONFIG_DIR` (never hardcoded) and merges `~/.claude-account<current>/projects/$PROJECT_DIR/` with `~/.claude-account3/projects/$PROJECT_DIR/` both ways — `MEMORY.md` via lossless line-union merge (a blind overwrite would drop whichever side's unique entries lost the copy, unacceptable when unattended), per-topic memory files via newest-mtime-wins, session `.jsonl` history append-only with preserved mtimes. Non-blocking; override the partner with `TD5RE_SYNC_PARTNER_ACCOUNT=<1|2|3>`, skip with `TD5RE_SKIP_ACCOUNT_SYNC=1`. Project skills/code are NOT part of this step — they already reach every account through the Step 7c git push (same shared working-tree checkout).
 - **Never commit `td5re.ini`, `log/`, build artifacts, or `*.td5` saves.** Stage by explicit allowlist only — never `git add -A`/`.`. `td5re_release.ini` IS tracked; `td5re.ini` is NOT.
-- **Every session updates the in-game CHANGELOG + PENDING TO TEST seed (Step 2c), before the build.** Each user-visible change gets a present-tense bullet in `td5_changelog.h` (top of today's `LAST 7 DAYS` block) and a concise test item in `k_seed[]` in `td5_pending.c`. `/fix` adds these per change; `/end` is the idempotent backstop (and the only path on a main-tree-only `/end`). The runtime `td5re_pending.txt` is untracked — `k_seed[]` is the durable home. The game now **merges** any new `k_seed[]` item into an existing `td5re_pending.txt` on launch (`td5_pending_init`), so a shipped item surfaces in the in-game list without deleting the file; tested/deleted items are tombstoned (`#- `) so the merge never resurrects them (Step 7f retires, not deletes).
+- **Every session updates the in-game CHANGELOG + PENDING TO TEST seed (Step 2c), before the build.** Each user-visible change gets a present-tense bullet in `td5_changelog.h` (top of today's `LAST 7 DAYS` block) and a concise test item in `k_seed[]` in `td5_pending.c`. `/fix` adds these per change; `/end` is the idempotent backstop (and the only path on a main-tree-only `/end`). The runtime `td5re_pending.txt` is untracked — `k_seed[]` is the durable home. The game now **merges** any new `k_seed[]` item into an existing `td5re_pending.txt` on launch (`td5_pending_init`), so a shipped item surfaces in the in-game list without deleting the file; deleted items are tombstoned (`#- `) so the merge never resurrects them (SUPR/DELETE does this immediately in-game; there is no more "mark tested" state for Step 7f to retire -- see Step 7f).

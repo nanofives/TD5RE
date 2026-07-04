@@ -4,17 +4,24 @@
  * See td5_pending.h. Backing file: td5re_pending.txt next to the exe (untracked,
  * gitignored). Line format:
  *     # comment
- *     [ ] item still to test
- *     [x] item already tested   <- /end retires these (see below)
- *     #- retired item           <- tested-and-cleared or user-deleted; never
- *                                  shown again and never re-seeded from k_seed[]
+ *     item still to test
+ *     #- retired item        <- deleted (SUPR); never shown again and never
+ *                                re-seeded from k_seed[]
+ *
+ * [2026-07-04] Items no longer track a "tested"/"done" state -- there is no
+ * more crossing-out. ENTER on a row instead opens a details modal
+ * (td5_pending_detail_text, backed by td5_pending_detail.h's k_pending_detail[]
+ * table) with a longer, testing-focused note. SUPR/DELETE is the only way to
+ * clear an item, once it's actually been verified. Old files from before this
+ * change may still have "[ ] "/"[x] " prefixes; pending_load_file strips
+ * either and treats the item as a normal (untracked-state) row.
  *
  * On launch td5_pending_init() MERGES any k_seed[] entry not already present
  * (and not retired) into the loaded file, newest-first — so a freshly-shipped
  * feature surfaces in the checklist even on a machine whose td5re_pending.txt
  * already exists. Before this the file was frozen after its first run, so every
- * item shipped later stayed invisible in the in-game list. Tested/deleted items
- * are tombstoned (#- ) so the merge doesn't bring them back.
+ * item shipped later stayed invisible in the in-game list. Deleted items are
+ * tombstoned (#- ) so the merge doesn't bring them back.
  */
 #include "td5_pending.h"
 #include "td5_platform.h"
@@ -28,7 +35,7 @@
 #define PENDING_MAX       256   /* > K_SEED_COUNT so no shipped item is dropped */
 #define PENDING_TEXT_MAX  120
 
-typedef struct { char text[PENDING_TEXT_MAX]; int done; } PendingItem;
+typedef struct { char text[PENDING_TEXT_MAX]; } PendingItem;
 
 static PendingItem s_items[PENDING_MAX];
 static int s_count      = 0;
@@ -71,6 +78,8 @@ static const char *const k_seed[] = {
     "Game Options: DAMAGE toggle ON=car damage+bar, OFF=both off (label 'DAMAGE')",
     "Game Options: PREV/OK/NEXT aligned under the option-row column (120/220/320)",
     "Tutorial: TUTORIAL=ON now shows the overlay on keyboard too (was pad-only)",
+    "PENDING TO TEST: ENTER opens a details modal (no more mark-tested)",
+    "PENDING TO TEST: crossing-out is gone; SUPR/DELETE still clears an item",
     "Cup CHOOSE YOUR TEAM: roster box (top right) lists members by name",
     "MP mode select: buttons no longer overlap HOST banner text",
     "MP mode select: TIME TRIAL entry is gone, other modes unaffected",
@@ -293,6 +302,8 @@ static const char *const k_seed[] = {
 };
 #define K_SEED_COUNT ((int)(sizeof(k_seed) / sizeof(k_seed[0])))
 
+#include "td5_pending_detail.h"   /* k_pending_detail[]: per-item ENTER-modal test notes */
+
 static const char *pending_path(void) {
     static char p[600];
     static int  done = 0;
@@ -300,7 +311,7 @@ static const char *pending_path(void) {
     return p;
 }
 
-static void pending_add(const char *text, int done) {
+static void pending_add(const char *text) {
     int i;
     if (s_count >= PENDING_MAX || !text) return;
     while (*text == ' ' || *text == '\t') text++;
@@ -309,7 +320,6 @@ static void pending_add(const char *text, int done) {
         if (strcmp(s_items[i].text, text) == 0) return;
     strncpy(s_items[s_count].text, text, PENDING_TEXT_MAX - 1);
     s_items[s_count].text[PENDING_TEXT_MAX - 1] = '\0';
-    s_items[s_count].done = done ? 1 : 0;
     s_count++;
 }
 
@@ -339,13 +349,12 @@ static void pending_load_file(void) {
             }
             /* any other "# ..." line is an ordinary comment — ignore */
         } else if (*s) {
-            int         done = 0;
-            const char *txt  = s;
-            if (s[0] == '[' && s[2] == ']') {       /* "[ ] text" / "[x] text" */
-                done = (s[1] == 'x' || s[1] == 'X');
-                txt  = s + 3;
-            }
-            pending_add(txt, done);
+            const char *txt = s;
+            if (s[0] == '[' && s[2] == ']')     /* legacy "[ ] text" / "[x] text" prefix from
+                                                  * before crossing-out was removed -- strip it,
+                                                  * the tested/untested state is no longer tracked */
+                txt = s + 3;
+            pending_add(txt);
         }
         if (!nl) break;
         line = nl + 1;
@@ -360,11 +369,10 @@ void td5_pending_save(void) {
     int         len  = 0, i;
     if (!f) { TD5_LOG_W(LOG_TAG, "save: cannot open %s", path); return; }
     len += snprintf(buf + len, sizeof buf - (size_t)len,
-        "# TD5RE pending-test checklist.  [ ] = still to test,  [x] = tested,  #- = retired.\r\n"
-        "# The game merges newly-shipped items on launch; edit freely.  /end retires [x] items.\r\n");
+        "# TD5RE pending-test checklist.  one item per line,  #- = retired (deleted).\r\n"
+        "# The game merges newly-shipped items on launch; edit freely.  SUPR in-game deletes.\r\n");
     for (i = 0; i < s_count && len < (int)sizeof buf - (PENDING_TEXT_MAX + 16); i++)
-        len += snprintf(buf + len, sizeof buf - (size_t)len, "[%c] %s\r\n",
-                        s_items[i].done ? 'x' : ' ', s_items[i].text);
+        len += snprintf(buf + len, sizeof buf - (size_t)len, "%s\r\n", s_items[i].text);
     for (i = 0; i < s_retired_count && len < (int)sizeof buf - (PENDING_TEXT_MAX + 16); i++)
         len += snprintf(buf + len, sizeof buf - (size_t)len, "#- %s\r\n", s_retired[i]);
     if (len < 0) len = 0;
@@ -383,55 +391,49 @@ int td5_pending_init(void) {
 
     /* Rebuild the list so freshly-shipped k_seed[] entries surface. New work is
      * added at the TOP of k_seed[], so iterating it in order lands newest-first.
-     * We carry over each item's prior tested-state and never resurrect a retired
-     * one. THIS is what makes new work show up in the in-game checklist on a
-     * machine that already has a td5re_pending.txt — the file used to be frozen
-     * after the first run, so nothing shipped later ever appeared. */
+     * THIS is what makes new work show up in the in-game checklist on a machine
+     * that already has a td5re_pending.txt — the file used to be frozen after
+     * the first run, so nothing shipped later ever appeared. */
     prior_count = s_count;
     for (i = 0; i < prior_count; i++) prior[i] = s_items[i];
     s_count = 0;
 
     for (i = 0; i < K_SEED_COUNT; i++) {           /* 1) seeds, newest-first */
-        const char *t    = k_seed[i];
-        int         done = 0;
+        const char *t = k_seed[i];
         while (*t == ' ' || *t == '\t') t++;
         if (!*t || retired_contains(t)) continue;
-        for (j = 0; j < prior_count; j++)          /* preserve prior tested-state */
-            if (strcmp(prior[j].text, t) == 0) { done = prior[j].done; break; }
-        pending_add(t, done);
+        pending_add(t);
     }
     for (j = 0; j < prior_count; j++)              /* 2) keep hand-added, non-seed */
         if (!retired_contains(prior[j].text))
-            pending_add(prior[j].text, prior[j].done);   /* de-dups against seeds */
+            pending_add(prior[j].text);            /* de-dups against seeds */
 
     td5_pending_save();                            /* persist merged list + tombstones */
-    TD5_LOG_I(LOG_TAG, "pending-test: %d item(s), %d remaining, %d retired (%s)",
-              s_count, td5_pending_remaining(), s_retired_count, pending_path());
+    TD5_LOG_I(LOG_TAG, "pending-test: %d item(s), %d retired (%s)",
+              s_count, s_retired_count, pending_path());
     return 1;
 }
 
-void td5_pending_shutdown(void) { /* writes happen on toggle; nothing to flush */ }
+void td5_pending_shutdown(void) { /* writes happen on delete; nothing to flush */ }
 
 int td5_pending_count(void)        { return s_count; }
 const char *td5_pending_text(int i){ return (i >= 0 && i < s_count) ? s_items[i].text : ""; }
-int td5_pending_is_done(int i)     { return (i >= 0 && i < s_count) ? s_items[i].done : 0; }
 
-int td5_pending_remaining(void) {
-    int i, r = 0;
-    for (i = 0; i < s_count; i++) if (!s_items[i].done) r++;
-    return r;
-}
-
-void td5_pending_toggle(int i) {
-    if (i < 0 || i >= s_count) return;
-    s_items[i].done = !s_items[i].done;
-    td5_pending_save();
+/* Longer test-focus note for the ENTER-key modal. Matched by exact text
+ * against k_pending_detail[] (td5_pending_detail.h) rather than by index, so
+ * coverage can be partial/out-of-order and survives list reshuffling. */
+const char *td5_pending_detail_text(int i) {
+    const char *text = td5_pending_text(i);
+    int j;
+    for (j = 0; j < K_PENDING_DETAIL_COUNT; j++)
+        if (strcmp(k_pending_detail[j].text, text) == 0) return k_pending_detail[j].detail;
+    return "No additional test notes recorded for this item yet -- use the summary above as the test focus.";
 }
 
 /* Remove item i from the list (shift the tail down), tombstone it, and persist.
  * Used by the SUPR/Delete key on the PENDING TO TEST menu to drop a row outright
- * instead of just marking it tested. The tombstone (#- ) is what keeps the
- * launch-time seed merge from re-adding the deleted item. */
+ * once it's been verified. The tombstone (#- ) is what keeps the launch-time
+ * seed merge from re-adding the deleted item. */
 void td5_pending_delete(int i) {
     int k;
     if (i < 0 || i >= s_count) return;
@@ -439,7 +441,6 @@ void td5_pending_delete(int i) {
     for (k = i; k < s_count - 1; k++) s_items[k] = s_items[k + 1];
     s_count--;
     s_items[s_count].text[0] = '\0';
-    s_items[s_count].done    = 0;
     td5_pending_save();
 }
 

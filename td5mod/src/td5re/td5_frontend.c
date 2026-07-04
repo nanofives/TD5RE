@@ -2843,8 +2843,8 @@ float fe_measure_text(const char *text, float sx, float sy) {
  * cleanly). Used so a long controller name (e.g. "Controller (8BitDo Ultimate 2C
  * Wireless Controller) #1") is shown in full instead of being clipped to two
  * fixed lines. Each line buffer is 64 bytes; pass lines as char[N][64]. */
-static int fe_wrap_text_lines(const char *s, float maxw, float sx, float sy,
-                              char lines[][64], int max_lines) {
+int fe_wrap_text_lines(const char *s, float maxw, float sx, float sy,
+                       char lines[][64], int max_lines) {
     char cur[64];
     int nlines = 0;
     int i = 0, len;
