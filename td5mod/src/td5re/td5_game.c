@@ -1113,8 +1113,15 @@ int td5_game_tick(void) {
             /* [layout preview harness 2026-06-29] TD5RE_MP_SIMUL_PREVIEW=N with
              * StartScreen=20 (CAR_SELECTION) jumps straight to the N-player
              * simultaneous car-select grid so the split-screen pane layout can be
-             * screenshotted without N controllers. See frontend_mp_simul_preview_setup. */
-            if (g_td5.ini.start_screen == TD5_SCREEN_CAR_SELECTION) {
+             * screenshotted without N controllers. See frontend_mp_simul_preview_setup.
+             * [CUP TEAM ROSTER 2026-07-04] Also honoured for StartScreen=39
+             * (MP_TEAM_SELECT): slot 0 becomes the host, slots 1..N-1 become dev
+             * "ADD AI PLAYER" bots (team_select_slot_is_ai's existing dev-bot
+             * branch already treats them as AI opponents), so the roster box +
+             * AI skill-slider layout can be screenshotted without N controllers
+             * or a real cup AI-opponent count. */
+            if (g_td5.ini.start_screen == TD5_SCREEN_CAR_SELECTION ||
+                g_td5.ini.start_screen == TD5_SCREEN_MP_TEAM_SELECT) {
                 const char *mpv = getenv("TD5RE_MP_SIMUL_PREVIEW");
                 if (mpv && mpv[0]) {
                     extern void frontend_mp_simul_preview_setup(int);

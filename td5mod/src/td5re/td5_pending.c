@@ -62,6 +62,7 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Cup CHOOSE YOUR TEAM: roster box (top right) lists members by name",
     "MP mode select: TIME TRIAL entry is gone, other modes unaffected",
     "Street lamps (EXPERIMENTAL, StreetLights=1 to enable): pools under posts",
     "Shadows: no duplicated/offset echo copies (fence area, Moscow)",
