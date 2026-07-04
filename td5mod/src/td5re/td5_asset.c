@@ -2308,6 +2308,45 @@ static void *load_first_available_level_entry(int track_index,
     return NULL;
 }
 
+/* [LAPS 2026-07-04] Lightweight circuit-vs-point-to-point query for the frontend
+ * LAPS selector. Reads DWORD[0] of the track's LEVELINF.DAT — the SAME byte the
+ * race uses to set g_td5.track_type (@0x42AE6B: 1 = circuit / laps, else P2P).
+ * The frontend can't use td5_asset_track_has_reverse as a proxy: reverse-capable
+ * lap circuits (e.g. Newcastle/029) have reverse data yet ARE circuits. Result is
+ * cached per track index so track-select cycling doesn't re-open the level zip.
+ * Returns 1 = circuit, 0 = point-to-point; a missing/short LEVELINF defaults to
+ * circuit, matching the race-load default. Read-only (does not touch
+ * g_td5.track_type / g_track_environment_config). */
+int td5_asset_track_is_circuit(int track_index)
+{
+    static int8_t s_circuit_cache[64];
+    static int    s_circuit_cache_init = 0;
+    static const char *const names[1] = { "LEVELINF.DAT" };
+    void *data;
+    int   sz = 0, result;
+
+    if (!s_circuit_cache_init) {
+        int i;
+        for (i = 0; i < 64; i++) s_circuit_cache[i] = -1;   /* -1 = not yet probed */
+        s_circuit_cache_init = 1;
+    }
+    if (track_index < 0) return 1;                          /* random/unset: show laps */
+    if (track_index < 64 && s_circuit_cache[track_index] >= 0)
+        return s_circuit_cache[track_index];
+
+    data = load_first_available_level_entry(track_index, names, 1, &sz, NULL, 0);
+    if (data && sz >= 4) {
+        int32_t circuit_flag;
+        memcpy(&circuit_flag, data, sizeof(int32_t));
+        result = (circuit_flag == 1) ? 1 : 0;
+    } else {
+        result = 1;   /* missing/short LEVELINF -> circuit (race-load default) */
+    }
+    free(data);
+    if (track_index < 64) s_circuit_cache[track_index] = (int8_t)result;
+    return result;
+}
+
 int td5_asset_load_level(int track_index)
 {
     char zip_path[256];

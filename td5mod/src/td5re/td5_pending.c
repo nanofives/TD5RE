@@ -69,6 +69,9 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Track select: RACE OPTIONS screen gathers all race options in one place",
+    "RACE OPTIONS screen: adds checkpoint timers/power-ups/toughness/deform",
+    "Track select: LAPS shows on TD5 circuit tracks (Newcastle etc.), not P2P",
     "2D trees/foliage: smooth anti-aliased edges (Switzerland, Blue Ridge, etc.)",
     "High Scores: COLLISIONS + AIR TIME columns match race results",
     "High Scores: celebrity names show in full (Michael Schumacher)",

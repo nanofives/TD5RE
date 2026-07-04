@@ -6494,22 +6494,32 @@ static int frontend_track_is_circuit(int track_slot) {
     return td5_asset_track_has_reverse(track_slot) ? 0 : 1;
 }
 
-/* Hide/show the "Laps" selector for the currently selected track. Point-to-point
- * tracks have no laps, so the row is hidden+disabled — the vertical nav, the
- * selector arrows (fe_draw_option_arrows) and the value draw all skip a hidden
- * button, exactly like the Direction toggle. Circuit tracks keep the row. Called
- * on screen entry and whenever the selected track changes. The persisted lap
- * value (s_game_option_laps) is untouched and is simply ignored by P2P races
- * (which finish at the finish line, not after N laps). */
+/* Hide/show the "Laps" selector for the currently selected track — shown on
+ * circuit (lap) tracks, hidden on point-to-point ones (which finish at the line,
+ * ignoring the lap count).
+ * [LAPS 2026-07-04] The old has_reverse proxy (frontend_track_is_circuit) was
+ * wrong for reverse-capable lap circuits like Newcastle (a circuit that also has
+ * reverse data → it was mis-classified P2P and LAPS hidden). Native TD5 tracks now
+ * use the authoritative LEVELINF circuit flag (td5_asset_track_is_circuit — the
+ * same DWORD the race reads for g_td5.track_type), so LAPS shows on true circuits
+ * and stays hidden on genuine point-to-point tracks. Migrated TD6 tracks keep the
+ * reliable finish-span gating (frontend_track_is_circuit's TD6 branch). Called on
+ * entry + track change; the vertical nav, ◄► arrows and value draw all skip a
+ * hidden button, exactly like the Direction toggle. */
 static void frontend_update_laps_button_visibility(int laps_btn_idx) {
     if (laps_btn_idx < 0 || laps_btn_idx >= s_button_count) return;
-    int is_circuit = frontend_track_is_circuit(s_selected_track);
-    s_buttons[laps_btn_idx].hidden   = !is_circuit;
-    s_buttons[laps_btn_idx].disabled = !is_circuit;
-    TD5_LOG_I(LOG_TAG, "Laps row: track=%d circuit=%d -> %s",
-              s_selected_track, is_circuit, is_circuit ? "SHOWN" : "hidden");
+    int show;
+    if (s_selected_track < 0)
+        show = 1;                                             /* random/unset: keep the row */
+    else if (td5_asset_td6_level_for_slot(s_selected_track) > 0)
+        show = frontend_track_is_circuit(s_selected_track);   /* TD6: reliable finish-span */
+    else
+        show = td5_asset_track_is_circuit(s_selected_track);  /* TD5: LEVELINF circuit flag */
+    s_buttons[laps_btn_idx].hidden   = !show;
+    s_buttons[laps_btn_idx].disabled = !show;
+    TD5_LOG_I(LOG_TAG, "Laps row: track=%d show=%d", s_selected_track, show);
     /* Don't leave the highlight parked on a now-hidden row. */
-    if (!is_circuit && s_selected_button == laps_btn_idx) s_selected_button = 0;
+    if (!show && s_selected_button == laps_btn_idx) s_selected_button = 0;
 }
 
 /* [R5 2026-06-19] Per-race AI difficulty is meaningless with no AI cars, so HIDE
@@ -6597,22 +6607,174 @@ static int frontend_cup_track_select_on(void) {
     return v;
 }
 
-/* [CUP TRACK SELECT] The per-race cup picker chooses TRACK (0), DIRECTION (1),
- * LAPS (3), TRAFFIC (4) and POLICE (5) for each race. Only OPPONENTS (2) and
- * DIFFICULTY (6) are hidden — those come from the cup options, not per race.
- * Direction/laps keep their own track-dependent visibility (the helpers hide
- * them on forward-only / point-to-point tracks). No-op unless on the cup screen. */
-static void frontend_cup_picker_hide_rows(void) {
-    static const int k_cup_hide[] = { 2, 6 };
-    int i;
-    if (td5_frontend_get_screen() != TD5_SCREEN_CUP_TRACK_SELECT) return;
-    for (i = 0; i < (int)(sizeof(k_cup_hide)/sizeof(k_cup_hide[0])); i++) {
-        int b = k_cup_hide[i];
-        if (b < s_button_count) {
-            s_buttons[b].hidden   = 1;
-            s_buttons[b].disabled = 1;
-            if (s_selected_button == b) s_selected_button = 0;
+/* ===== RACE OPTIONS screen (PORT ENHANCEMENT 2026-07-04) ====================
+ * The track-select column used to carry every per-race option row inline
+ * (OPPONENTS / LAPS / TRAFFIC / POLICE / DIFFICULTY / DYNAMICS). They are now
+ * consolidated onto a dedicated RACE OPTIONS screen opened by a "RACE OPTIONS"
+ * button, which ALSO exposes four options that previously lived only on the Game
+ * Options screen: CHECKPOINT TIMERS, POWER-UPS, CAR TOUGHNESS and DEFORMATION.
+ * LAPS stays on the main column (track-dependent — circuit only).
+ *
+ * The screen is registered at TD5_SCREEN_RACE_OPTIONS (Screen_RaceOptions) and
+ * REUSES the track-select backdrop: it is entered via td5_frontend_set_screen
+ * (which preserves the inherited full-canvas background) and is excluded from the
+ * gallery slideshow like track-select, so it reads as part of that flow. Its
+ * label/value/cycle model lives in td5_frontend.c (td5_raceopts_*). No RE basis —
+ * a port-only UX consolidation. ============================================ */
+
+/* Which track-select screen opened RACE OPTIONS (21 regular / 43 cup), so OK /
+ * BACK / ESC all return to the right one. */
+static int s_raceopts_parent = TD5_SCREEN_TRACK_SELECTION;
+
+/* Build the main track-select column: TRACK / DIRECTION / LAPS / RACE OPTIONS /
+ * OK / BACK (+ randomize chip). Used on screen init (case 0) and on return from
+ * RACE OPTIONS. Resets the shared button set first, exactly like
+ * td5_gameopts_build_page() does for its page flip. */
+static void trksel_build_main_buttons(void) {
+    frontend_reset_buttons();
+    frontend_create_button(SNK_TrackButTxt,       120,  97, 224, 32); /* 0: Track (◄►)          */
+    frontend_create_button(SNK_ForwardsButTxt,    120, 132, 224, 32); /* 1: Direction toggle     */
+    frontend_create_button(SNK_LapsButTxt,        120, 167, 224, 32); /* 2: Laps (◄►, circuit)   */
+    frontend_create_button(SNK_RaceOptionsButTxt, 120, 344, 224, 32); /* 3: RACE OPTIONS -> screen (just above OK/BACK) */
+    frontend_create_button(SNK_OkButTxt,          120, 386,  96, 32); /* 4: OK                    */
+    if (s_flow_context != 2)                                          /* Quick Race: no Back      */
+        frontend_create_button(SNK_BackButTxt,    232, 386, 112, 32); /* 5: Back                  */
+    /* [#14] Randomize control (icon to the right of Track by default), created
+     * after the fixed rows so indices 0..5 stay stable. */
+    s_trksel_rand_btn = -1;
+    if (frontend_random_button_on()) {
+        if (frontend_random_icon_on()) {
+            s_trksel_rand_btn = frontend_create_button(NULL, 348, 99,
+                                                       FE_RAND_ICON_W, FE_RAND_ICON_H);
+            if (s_trksel_rand_btn >= 0) s_buttons[s_trksel_rand_btn].hidden = 1;
+        } else {
+            s_trksel_rand_btn = frontend_create_button("Randomize", 120, 57, 224, 32);
         }
+    }
+    s_trksel_dyn_btn = -1;   /* DYNAMICS moved onto the RACE OPTIONS screen */
+    /* Track-dependent row visibility (Direction hidden on forward-only tracks,
+     * Laps hidden on point-to-point tracks) — same helpers, new indices. */
+    frontend_update_direction_button_visibility(1, 1);
+    if (!s_buttons[1].hidden) {   /* reflect the live direction (rebuild after a toggle) */
+        strncpy(s_buttons[1].label, s_track_direction ? "Backwards" : "Forwards",
+                sizeof(s_buttons[1].label) - 1);
+        s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
+    }
+    frontend_update_laps_button_visibility(2);
+}
+
+/* Commit the RACE OPTIONS the launched race reads from g_td5.ini (POWER-UPS +
+ * CAR TOUGHNESS/DEFORMATION are read from g_td5.ini.* directly by td5_arcade.c /
+ * td5_damage.c), keep TRAFFIC/POLICE/DYNAMICS/CHECKPOINTS in sync, and persist —
+ * mirrors the Game Options OK. Per-race DIFFICULTY (s_race_difficulty) + OPPONENTS
+ * stay live-only, committed at the track-select OK. */
+static void raceopts_commit_persist(void) {
+    g_td5.ini.checkpoint_timers    = s_game_option_checkpoint_timers;
+    g_td5.ini.traffic              = s_game_option_traffic;
+    if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
+    if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
+        g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
+    g_td5.ini.cops                 = s_game_option_cops;
+    g_td5.ini.dynamics             = s_game_option_dynamics;
+    g_td5.ini.powerups             = s_game_option_powerups;
+    g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
+    g_td5.ini.car_damage_deform    = s_game_option_car_deform;
+    td5_physics_set_dynamics(s_game_option_dynamics);
+    td5_ini_persist_options();
+    TD5_LOG_I(LOG_TAG,
+              "RaceOpts commit: opp=%d traffic=%d cops=%d diff=%d dyn=%d "
+              "cp=%d pu=%d tough=%d deform=%d",
+              s_num_ai_opponents, s_game_option_traffic, s_game_option_cops,
+              s_race_difficulty, s_game_option_dynamics,
+              s_game_option_checkpoint_timers, s_game_option_powerups,
+              s_game_option_car_toughness, s_game_option_car_deform);
+}
+
+/* Leave RACE OPTIONS: persist, then return to whichever track-select screen
+ * opened it (OK / BACK / ESC all land here — the options are edited live, so
+ * there is no cancel/discard). */
+static void raceopts_leave(void) {
+    raceopts_commit_persist();
+    frontend_play_sfx(5);
+    td5_frontend_set_screen((TD5_ScreenIndex)s_raceopts_parent);
+}
+
+/* Button indices on the RACE OPTIONS screen: rows 0..RO_OPT_COUNT-1 are the
+ * option selectors (index == RO_* id), then OK, then BACK. */
+#define RO_SCR_OK_BTN    RO_OPT_COUNT
+#define RO_SCR_BACK_BTN  (RO_OPT_COUNT + 1)
+
+/* Dedicated RACE OPTIONS screen (registered at TD5_SCREEN_RACE_OPTIONS). Reuses
+ * the track-select backdrop (inherited via set_screen; excluded from the gallery
+ * in td5_frontend.c). The shared title path draws "RACE OPTIONS"; the option
+ * values + ◄► arrows are drawn by the td5_frontend.c render dispatch. */
+void Screen_RaceOptions(void) {
+    switch (s_inner_state) {
+    case 0: { /* init: build option rows + OK/BACK, apply the same gating the
+               * inline rows used */
+        int i, cup = (s_raceopts_parent == TD5_SCREEN_CUP_TRACK_SELECT);
+        frontend_reset_buttons();
+        for (i = 0; i < RO_OPT_COUNT; i++)
+            frontend_create_button(td5_raceopts_label(i), 120, 96 + i * 34, 224, 32);
+        frontend_create_button(SNK_OkButTxt,   120, 414,  96, 32); /* RO_SCR_OK_BTN   */
+        frontend_create_button(SNK_BackButTxt, 232, 414, 112, 32); /* RO_SCR_BACK_BTN */
+        /* POLICE hides in Cop Chase; DIFFICULTY hides at 0 opponents / Quick Race /
+         * Cop Chase (index == RO_* id). */
+        frontend_update_police_button_visibility(RO_POLICE);
+        frontend_update_difficulty_button_visibility(RO_DIFFICULTY);
+        if (cup) {   /* cup sources OPPONENTS + DIFFICULTY from the cup options */
+            s_buttons[RO_OPPONENTS].hidden  = s_buttons[RO_OPPONENTS].disabled  = 1;
+            s_buttons[RO_DIFFICULTY].hidden = s_buttons[RO_DIFFICULTY].disabled = 1;
+        }
+        frontend_set_cursor_visible(1);
+        s_return_screen   = s_raceopts_parent;   /* ESC / central back returns here */
+        s_selected_button = 0;
+        s_anim_complete   = 0;
+        frontend_begin_timed_animation();
+        s_inner_state = 1;
+        TD5_LOG_I(LOG_TAG, "RaceOptions: init (parent=%d cup=%d)", s_raceopts_parent, cup);
+        for (i = 0; i < s_button_count; i++)
+            TD5_LOG_I(LOG_TAG, "  ro[%d] '%s' y=%d hidden=%d", i, s_buttons[i].label,
+                      s_buttons[i].y, s_buttons[i].hidden);
+        break;
+    }
+    case 1: case 2:
+        frontend_present_buffer();
+        s_inner_state++;
+        break;
+    case 3: /* slide-in */
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 4;
+        }
+        break;
+    case 4: case 5:
+        s_inner_state = 6;
+        break;
+    case 6: /* interactive: cycle options / OK / BACK */
+        /* ESC / gamepad-B: persist + return. Consumed HERE (screen dispatch runs
+         * before the central back handler), which would otherwise navigate without
+         * persisting; frontend_check_escape() is single-consume per frame so the
+         * central handler no-ops afterwards. */
+        if (frontend_check_escape()) {
+            raceopts_leave();
+            break;
+        }
+        if (s_input_ready) {
+            int delta = frontend_option_delta();
+            int sel = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            if (s_button_index == RO_SCR_OK_BTN || s_button_index == RO_SCR_BACK_BTN) {
+                raceopts_leave();
+            } else if (delta != 0 && sel >= 0 && sel < RO_OPT_COUNT &&
+                       s_buttons[sel].active && !s_buttons[sel].hidden) {
+                td5_raceopts_cycle(sel, delta);
+                frontend_play_sfx(2);
+                /* OPPONENTS gates the per-race DIFFICULTY row live. */
+                if (sel == RO_OPPONENTS)
+                    frontend_update_difficulty_button_visibility(RO_DIFFICULTY);
+            }
+        }
+        break;
     }
 }
 
@@ -6714,80 +6876,21 @@ void Screen_TrackSelection(void) {
          * championship cup (20-25), see frontend_track_excluded_from_selector. */
         if (frontend_track_excluded_from_selector(s_selected_track)) s_selected_track = 0;
 
-        /* Create buttons. Ghidra settles these at x=120 for Track/Forwards/OK
-         * and x=232 for Back, with OK/Back sharing the bottom row. */
-        frontend_create_button(SNK_TrackButTxt,     120,  97, 224, 32); /* 0: with L/R arrows */
-        frontend_create_button(SNK_ForwardsButTxt,  120, 132, 224, 32); /* 1: direction toggle */
-        /* [PORT ENHANCEMENT 2026-06] race-option rows: AI opponents, laps, traffic,
-         * police. They drive s_num_ai_opponents + s_game_option_* which apply to
-         * single/multiplayer races via ConfigureGameTypeFlags (cup game-types
-         * override them, so they're inert there). Present on every track-select
-         * entry (regular single race, quick race, multiplayer). */
-        frontend_create_button(SNK_OpponentsButTxt, 120, 167, 224, 32); /* 2: AI count */
-        frontend_create_button(SNK_LapsButTxt,      120, 202, 224, 32); /* 3: laps */
-        frontend_create_button(SNK_TrafficButTxt,   120, 237, 224, 32); /* 4: traffic */
-        frontend_create_button(SNK_CopsButTxt,      120, 272, 224, 32); /* 5: police */
-        /* [PORT ENHANCEMENT 2026-06-12] Per-race AI difficulty. Seeded from the
-         * tier ConfigureGameTypeFlags derived at mode selection (= the Game
-         * Options global for game-type 0), applied to g_td5.difficulty_tier on
-         * OK. Quick Race (flow context 2) keeps the Game Options global — the
-         * row is still CREATED there (index stability: OK=6→7, Back=7→8) but
-         * hidden+disabled, exactly like the Quick Race Players row. */
-        frontend_create_button(SNK_DifficultyButTxt, 120, 307, 224, 32); /* 6: AI difficulty */
-        /* [R5] Hide the difficulty row when there are 0 opponents (and still in
-         * Quick Race flow). frontend_update_difficulty_button_visibility folds in
-         * the old flow_context==2 hide; refreshed in case 4 when opponents change. */
-        frontend_update_difficulty_button_visibility(6);
-        /* [COP-CHASE 2026-06-21] Hide the POLICE row in Cop Chase / wanted mode. */
-        frontend_update_police_button_visibility(5);
+        /* [RACE OPTIONS 2026-07-04] The per-race option rows (OPPONENTS, TRAFFIC,
+         * POLICE, DIFFICULTY, DYNAMICS) plus CHECKPOINT TIMERS, POWER-UPS, CAR
+         * TOUGHNESS and DEFORMATION moved onto the dedicated RACE OPTIONS screen
+         * (button 3 navigates there); the main column keeps only TRACK / DIRECTION
+         * / LAPS / RACE OPTIONS / OK / BACK. See trksel_build_main_buttons +
+         * Screen_RaceOptions above. */
         s_race_difficulty = g_td5.difficulty_tier;
         if (s_race_difficulty < 0) s_race_difficulty = 0;
         if (s_race_difficulty > 2) s_race_difficulty = 2;
-        frontend_create_button(SNK_OkButTxt,        120, 386,  96, 32); /* 7: OK  (moved a little lower) */
-        /* Quick Race mode: no Back button */
-        if (s_flow_context != 2) {
-            frontend_create_button(SNK_BackButTxt, 232, 386, 112, 32);  /* 8: Back (moved a little lower) */
-        }
+        s_track_direction = 0;   /* Forwards to start (matches the original label) */
+        trksel_build_main_buttons();
         /* The MP simultaneous car grid (pad-driven) hides the mouse cursor and
          * its all-ready path lands directly here — restore it so this screen's
          * mouse interaction is usable on every entry path. [cursor-fix 2026-06-12] */
         frontend_set_cursor_visible(1);
-        /* [#14] RANDOMIZE: dedicated control for the Track selector. Created LAST
-         * so the Track/Forwards/Opponents/.../OK/Back indices (0..7) used by the
-         * action handlers are unchanged. Activating it picks a random track.
-         * [item #7 2026-06-15] NEW default form = a small ICON to the RIGHT of the
-         * Track selector (x=348, on its OWN sub-row y=99 — 2px below the Track row
-         * y=97). Hit-rect created HIDDEN so the generic button loop skips its
-         * frame+label; the icon is painted in frontend_render_trksel_randomize_icon
-         * (chip only when focused, #12).
-         * [#12 2026-06-15 nav-selectable] As on car-select, the icon's .y (99) is
-         * kept DISTINCT from the Track selector's .y (97): the screen navigates by
-         * INDEX+ROW, so a distinct row keeps the Track row's LEFT/RIGHT cycling the
-         * track VALUE while this (highest-index, different-row) icon is reached by
-         * pressing UP from the Track row (the vertical cycler wraps to the highest
-         * different-row button). It is `active`, only `hidden`, never `disabled`, so
-         * neither frontend_cycle_selected_button_by_row nor frontend_spatial_pick
-         * (both ignore `hidden`) exclude it. Do NOT "align" it to the Track row —
-         * that would hijack the value-cycle key. TD5RE_RANDOM_ICON=0 = full button. */
-        if (frontend_random_button_on()) {
-            if (frontend_random_icon_on()) {
-                s_trksel_rand_btn = frontend_create_button(NULL, 348, 99,
-                                                           FE_RAND_ICON_W, FE_RAND_ICON_H);
-                if (s_trksel_rand_btn >= 0) s_buttons[s_trksel_rand_btn].hidden = 1;
-            } else {
-                s_trksel_rand_btn = frontend_create_button("Randomize", 120, 57, 224, 32);
-            }
-        }
-
-        /* [ARCADE 2026-06-26] DYNAMICS (ARCADE / SIMULATION) selector. Appended
-         * AFTER every load-bearing row (0..8) + the randomize button so none of
-         * their indices move. A normal selectable value-row (L/R flips
-         * s_game_option_dynamics); its ◄► arrows + value text follow this .y.
-         * [LAYOUT 2026-06-26] Sits just above the OK/BACK action row (y=342, with
-         * OK/BACK at y=386): the option rows above were compressed to a 35px step
-         * (TRACK 97 -> DIFFICULTY 307) to make room. The non-default RANDOMIZE
-         * full-button (TD5RE_RANDOM_ICON=0) keeps the freed top row y=57. */
-        s_trksel_dyn_btn = frontend_create_button(SNK_DynamicsButTxt, 120, 342, 224, 32);
 
         /* Network track-pick (entered from the lobby's SELECT TRACK, flow
          * context 4): the global ESC/back handler navigates to s_return_screen,
@@ -6802,14 +6905,9 @@ void Screen_TrackSelection(void) {
         s_track_direction = 0;
         s_track_switch_tick = 16; /* holds preview settled during button slide-in (state 3); reset to 0 in state 5 */
         frontend_load_selected_track_preview();
-        /* Hide the Direction toggle for forward-only/circuit tracks from the
-         * very first frame (cases 1-3 render before case 5 reloads). */
-        frontend_update_direction_button_visibility(1, 1);
-        /* Hide the Laps row (button 3) on point-to-point tracks (no laps). */
-        frontend_update_laps_button_visibility(3);
-        /* [CUP TRACK SELECT] Keep only TRACK/TRAFFIC/POLICE on the cup picker —
-         * done LAST so it overrides the direction/laps visibility helpers above. */
-        frontend_cup_picker_hide_rows();
+        /* Row visibility (Direction hidden on forward-only tracks, Laps hidden on
+         * point-to-point tracks) was already applied by trksel_build_main_buttons
+         * for the current track; nothing track-dependent needs re-applying here. */
         /* [LAYOUT 2026-06-26 /fix] One-shot button-rect dump — verifies the
          * compressed option-row spacing + DYNAMICS-just-above-OK/BACK placement
          * and that the DYNAMICS row is active (so its new ◄► arrows render).
@@ -6848,6 +6946,21 @@ void Screen_TrackSelection(void) {
         break;
 
     case 4: /* Main interaction: track preview + navigation */
+#ifndef TD5RE_RELEASE
+        /* [RACE OPTIONS 2026-07-04] Dev headless-verify hook: auto-navigate to the
+         * RACE OPTIONS screen once so its button layout + gating land in the log
+         * (frontend screenshots come back black). TD5RE_RACEOPTS_AUTOOPEN=1. */
+        {
+            static int s_ro_autoopened = 0;
+            const char *e = getenv("TD5RE_RACEOPTS_AUTOOPEN");
+            if (!s_ro_autoopened && e && e[0] == '1') {
+                s_ro_autoopened = 1;
+                s_raceopts_parent = (int)td5_frontend_get_screen();
+                td5_frontend_set_screen(TD5_SCREEN_RACE_OPTIONS);
+                break;
+            }
+        }
+#endif
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
@@ -6920,8 +7033,7 @@ void Screen_TrackSelection(void) {
                 /* Re-evaluate the Direction toggle + Laps row for the new track
                  * (hide on forward-only/circuit tracks, restore on reverse-capable). */
                 frontend_update_direction_button_visibility(1, 1);
-                frontend_update_laps_button_visibility(3);
-                frontend_cup_picker_hide_rows();   /* [CUP] keep rows 1/3 hidden after recycle */
+                frontend_update_laps_button_visibility(2);
                 s_inner_state = 5;
             }
 
@@ -6940,50 +7052,27 @@ void Screen_TrackSelection(void) {
                 s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
             }
 
-            /* [PORT ENHANCEMENT 2026-06] race-option rows (AI/laps/traffic/police/difficulty). */
-            if (delta != 0 && selected_button >= 2 && selected_button <= 6) {
-                if (selected_button == 2) {            /* AI opponents */
-                    s_num_ai_opponents += delta;
-                    if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
-                    if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
-                        s_num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
-                    /* [R5] Show/hide the difficulty row live as opponents cross 0. */
-                    frontend_update_difficulty_button_visibility(6);
-                } else if (selected_button == 3 && !s_buttons[3].hidden) {  /* laps (value+1) */
-                    s_game_option_laps += delta;
-                    if (s_game_option_laps < 0) s_game_option_laps = 0;
-                    if (s_game_option_laps > 9) s_game_option_laps = 9;
-                } else if (selected_button == 4) {     /* traffic volume Off/Light/Normal/Heavy/Very-High */
-                    /* [dynamic-traffic] 5-state wrap (delta may be negative). */
-                    s_game_option_traffic =
-                        ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
-                         + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
-                } else if (selected_button == 5 && !s_buttons[5].hidden) {  /* police on/off */
-                    s_game_option_cops = (s_game_option_cops + delta) & 1;
-                } else if (selected_button == 6 && !s_buttons[6].hidden) {
-                    /* Per-race AI difficulty 0..2, wraps both ways (matches the
-                     * Game Options row + orig 0x00420060 wrap behaviour). */
-                    s_race_difficulty += delta;
-                    if (s_race_difficulty < 0) s_race_difficulty = 2;
-                    if (s_race_difficulty > 2) s_race_difficulty = 0;
-                }
+            /* [RACE OPTIONS MODAL 2026-07-04] LAPS (button 2) is the only value
+             * row left on the main column; OPPONENTS / TRAFFIC / POLICE /
+             * DIFFICULTY / DYNAMICS all moved into the RACE OPTIONS modal. */
+            if (delta != 0 && selected_button == 2 && !s_buttons[2].hidden) {  /* laps (value+1) */
+                s_game_option_laps += delta;
+                if (s_game_option_laps < 0) s_game_option_laps = 0;
+                if (s_game_option_laps > 9) s_game_option_laps = 9;
                 frontend_play_sfx(2);
             }
 
-            /* [ARCADE 2026-06-26] DYNAMICS row (ARCADE/SIMULATION). Appended at
-             * the highest button index (s_trksel_dyn_btn), so it is handled here
-             * by an explicit index check rather than the 2..6 value-row range.
-             * L/R flips s_game_option_dynamics; ConfigureGameTypeFlags commits it
-             * to physics (td5_physics_set_dynamics) at race launch. */
-            if (s_trksel_dyn_btn >= 0 && selected_button == s_trksel_dyn_btn && delta != 0) {
-                s_game_option_dynamics ^= 1;
-                frontend_play_sfx(2);
-                TD5_LOG_I(LOG_TAG, "TrackSel DYNAMICS -> %s (%d)",
-                          s_game_option_dynamics ? "SIMULATION" : "ARCADE",
-                          s_game_option_dynamics);
+            /* [RACE OPTIONS 2026-07-04] RACE OPTIONS (button 3) navigates to the
+             * dedicated screen, remembering which track-select opened it so OK /
+             * BACK / ESC return here. set_screen resets s_button_index to -1, so
+             * the OK/Back/randomize checks below are inert on this frame. */
+            if (s_button_index == 3) {
+                s_raceopts_parent = (int)td5_frontend_get_screen();
+                frontend_play_sfx(3);
+                td5_frontend_set_screen(TD5_SCREEN_RACE_OPTIONS);
             }
 
-            if (s_button_index == 7) { /* OK */
+            if (s_button_index == 4) { /* OK */
                 /* Lock enforcement */
                 int locked = (s_selected_track >= 0 && s_selected_track < 37 &&
                              s_track_lock_table[s_selected_track] != 0 &&
@@ -7024,7 +7113,12 @@ void Screen_TrackSelection(void) {
                      * Options global is untouched, and ConfigureGameTypeFlags
                      * re-derives the tier from it on the next main-menu mode
                      * selection, so Quick Race never inherits this pick. */
-                    if (!s_buttons[6].hidden && g_td5.difficulty_tier != s_race_difficulty) {
+                    /* [RACE OPTIONS MODAL 2026-07-04] Difficulty is edited in the
+                     * modal (per-race s_race_difficulty). When the modal hid that
+                     * row (0 opponents / Quick Race / Cop Chase) it stays equal to
+                     * the g_td5.difficulty_tier seeded at init, so this is a no-op
+                     * there; otherwise commit the pick to the live tier. */
+                    if (g_td5.difficulty_tier != s_race_difficulty) {
                         TD5_LOG_I(LOG_TAG, "TrackSel OK: per-race difficulty tier %d -> %d",
                                   g_td5.difficulty_tier, s_race_difficulty);
                         g_td5.difficulty_tier = s_race_difficulty;
@@ -7034,11 +7128,11 @@ void Screen_TrackSelection(void) {
                 }
             }
 
-            /* Back (button 8 — master's per-race difficulty row shifted it from 7).
-             * Guard against the RANDOMIZE button landing on index 8 in Quick Race
-             * flow (flow_context==2 skips Back, so RANDOMIZE becomes index 8) —
-             * without this, pressing RANDOMIZE there would also trip Back. */
-            if (s_button_index == 8 && s_button_index != s_trksel_rand_btn) { /* Back */
+            /* Back (button 5 after the RACE OPTIONS consolidation: TRACK 0 /
+             * DIRECTION 1 / LAPS 2 / RACE OPTIONS 3 / OK 4 / BACK 5). Guard against
+             * the RANDOMIZE button aliasing this index in a flow with fewer buttons
+             * so pressing RANDOMIZE can't also trip Back. */
+            if (s_button_index == 5 && s_button_index != s_trksel_rand_btn) { /* Back */
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 6;
             }
@@ -7076,8 +7170,7 @@ void Screen_TrackSelection(void) {
                                   frontend_get_track_name(s_selected_track));
                         s_track_switch_tick = 0;
                         frontend_update_direction_button_visibility(1, 1);
-                        frontend_update_laps_button_visibility(3);
-                        frontend_cup_picker_hide_rows();   /* [CUP] keep rows 1/3 hidden after randomize */
+                        frontend_update_laps_button_visibility(2);
                         s_inner_state = 5;
                     } else {
                         frontend_play_sfx(10); /* nothing else to pick */

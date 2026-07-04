@@ -130,6 +130,7 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [42] */ Screen_PendingTest,        /* dev/QA pending-test checklist (2026-06-25)  */
     /* [43] */ Screen_TrackSelection,     /* CUP TRACK SELECT: shares the track-select body,
                                            * runs in multi-pick mode (2026-06-25)        */
+    /* [44] */ Screen_RaceOptions,        /* RACE OPTIONS: consolidated per-race options (2026-07-04) */
 };
 
 /* ========================================================================
@@ -1419,6 +1420,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
     case TD5_SCREEN_CUP_TRACK_SELECT:   return "CUP TRACKS";   /* forked cup multi-pick */
+    case TD5_SCREEN_RACE_OPTIONS:       return "RACE OPTIONS"; /* [2026-07-04] dedicated options screen */
     case TD5_SCREEN_HIGH_SCORE:
     case TD5_SCREEN_NAME_ENTRY:         return "HIGH SCORES";
     /* [MP CUP RESULTS 2026-06-25] In split-screen multiplayer CUP mode the results
@@ -6308,6 +6310,98 @@ void td5_gameopts_cycle(int opt, int delta) {
     }
 }
 
+/* ===== RACE OPTIONS modal model (PORT ENHANCEMENT 2026-07-04) ================
+ * The track-select "RACE OPTIONS" button opens a modal consolidating every
+ * per-race option: OPPONENTS + DYNAMICS (previously track-select-only), TRAFFIC /
+ * POLICE / per-race DIFFICULTY, and the four options that used to live only on the
+ * Game Options screen — CHECKPOINT TIMERS, POWER-UPS, CAR TOUGHNESS, DEFORMATION.
+ * The FSM (open/close/input/visibility) lives in Screen_TrackSelection
+ * (td5_fe_race.c); the label/value/cycle model + render live here beside the
+ * s_game_option_* statics. NOTE: DIFFICULTY here edits the PER-RACE tier
+ * (s_race_difficulty), NOT the global s_game_option_difficulty — it replaces the
+ * old inline per-race difficulty row and keeps that semantics. ================*/
+const char *td5_raceopts_label(int idx) {
+    switch (idx) {
+        case RO_OPPONENTS:   return SNK_OpponentsButTxt;
+        case RO_TRAFFIC:     return SNK_TrafficButTxt;
+        case RO_POLICE:      return SNK_CopsButTxt;        /* label: POLICE */
+        case RO_DIFFICULTY:  return SNK_DifficultyButTxt;
+        case RO_DYNAMICS:    return SNK_DynamicsButTxt;
+        case RO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
+        case RO_POWERUPS:    return "POWER-UPS";
+        case RO_TOUGHNESS:   return "CAR TOUGHNESS";
+        case RO_DEFORM:      return "DEFORMATION";
+    }
+    return "";
+}
+
+void td5_raceopts_value(int idx, char *out, size_t out_sz) {
+    static const char *const on_off[]      = { "OFF", "ON" };
+    static const char *const traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] =
+        { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
+    static const char *const difficulty[]  = { "EASY", "NORMAL", "HARD" };
+    static const char *const level3[]      = { "LOW", "NORMAL", "HIGH" };
+    static const char *const dynamics[]    = { "ARCADE", "SIMULATION" };
+    const char *v = "";
+    int t;
+    switch (idx) {
+        case RO_OPPONENTS:   snprintf(out, out_sz, "%d", s_num_ai_opponents); return;
+        case RO_TRAFFIC:
+            t = s_game_option_traffic;
+            if (t < 0) t = 0;
+            if (t > TD5_TRAFFIC_VOLUME_COUNT - 1) t = TD5_TRAFFIC_VOLUME_COUNT - 1;
+            v = traffic_vol[t]; break;
+        case RO_POLICE:      v = on_off[s_game_option_cops & 1]; break;
+        case RO_DIFFICULTY:  v = difficulty[((s_race_difficulty % 3) + 3) % 3]; break;
+        case RO_DYNAMICS:    v = dynamics[s_game_option_dynamics & 1]; break;
+        case RO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
+        case RO_POWERUPS:    v = on_off[s_game_option_powerups & 1]; break;
+        case RO_TOUGHNESS:
+            t = s_game_option_car_toughness; if (t < 0) t = 0; if (t > 2) t = 2;
+            v = level3[t]; break;
+        case RO_DEFORM:
+            t = s_game_option_car_deform; if (t < 0) t = 0; if (t > 2) t = 2;
+            v = level3[t]; break;
+    }
+    snprintf(out, out_sz, "%s", v);
+}
+
+void td5_raceopts_cycle(int idx, int delta) {
+    if (delta == 0) return;
+    switch (idx) {
+        case RO_OPPONENTS:
+            s_num_ai_opponents += delta;
+            if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
+            if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
+                s_num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
+            break;
+        case RO_TRAFFIC:
+            s_game_option_traffic =
+                ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
+                 + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
+            break;
+        case RO_POLICE:      s_game_option_cops ^= 1; break;
+        case RO_DIFFICULTY:  /* per-race tier, wraps 0..2 (matches old inline row) */
+            s_race_difficulty += delta;
+            if (s_race_difficulty < 0) s_race_difficulty = 2;
+            if (s_race_difficulty > 2) s_race_difficulty = 0;
+            break;
+        case RO_DYNAMICS:    s_game_option_dynamics ^= 1; break;
+        case RO_CHECKPOINTS: s_game_option_checkpoint_timers ^= 1; break;
+        case RO_POWERUPS:    s_game_option_powerups ^= 1; break;
+        case RO_TOUGHNESS:
+            s_game_option_car_toughness += delta;
+            if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 2;
+            if (s_game_option_car_toughness > 2) s_game_option_car_toughness = 0;
+            break;
+        case RO_DEFORM:
+            s_game_option_car_deform += delta;
+            if (s_game_option_car_deform < 0) s_game_option_car_deform = 2;
+            if (s_game_option_car_deform > 2) s_game_option_car_deform = 0;
+            break;
+    }
+}
+
 /* [PLAYER NAME 2026-07-02] Game Options PLAYER NAME editor. The row is
  * Enter-to-edit: it opens the standard gold text-input widget over the screen
  * (same widget the post-race name entry / net nickname editors use; drawn from
@@ -7229,6 +7323,24 @@ static void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int
     }
 }
 
+/* [RACE OPTIONS 2026-07-04] The dedicated RACE OPTIONS screen reuses the
+ * track-select backdrop (inherited via set_screen). This overlay draws each
+ * visible option row's value in the right column (x=350, clear of the centred
+ * button labels); the shared title path draws the "RACE OPTIONS" header and the
+ * ◄► arrows are drawn in the post-button pass. Row i (0..RO_OPT_COUNT-1) is the
+ * RO_* option with id i. */
+static void frontend_render_race_options_overlay(float sx, float sy) {
+    int i;
+    if (!s_anim_complete) return;
+    for (i = 0; i < RO_OPT_COUNT && i < s_button_count; i++) {
+        char vb[16];
+        if (!s_buttons[i].active || s_buttons[i].hidden) continue;
+        td5_raceopts_value(i, vb, sizeof vb);
+        fe_draw_text(350.0f * sx, (float)(s_buttons[i].y + 6) * sy, vb,
+                     0xFFFFFFFFu, sx * 0.8f, sy * 0.8f);
+    }
+}
+
 static void frontend_render_track_selection_preview(float sx, float sy) {
     char track_name[80], city[80], country[80];
     const char *comma;
@@ -7253,39 +7365,16 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         fe_draw_text_centered(492.0f * sx, 50.0f * sy, hdr, 0xFFE0C000, sx, sy);
     }
 
-    /* [PORT ENHANCEMENT 2026-06] race-option row values (AI/laps/traffic/police),
-     * drawn in the gap between the 224-wide option buttons (end x=344) and the
-     * track preview (x=412). */
-    {
-        const char *on_off[2] = { "OFF", "ON" };
-        /* [dynamic-traffic] 5-state traffic volume row (merge: ours) + per-race
-         * difficulty row (merge: master). */
-        const char *traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] = { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
-        const char *difficulty[3] = { "EASY", "NORMAL", "HARD" };
+    /* [RACE OPTIONS 2026-07-04] Only the LAPS value (button 2) is drawn on the
+     * main column now — every other per-race option's value renders on the RACE
+     * OPTIONS screen (frontend_render_race_options_overlay). LAPS shows the 1-based
+     * lap count in the gap between the 224-wide button (end x=344) and the preview
+     * (x=412); self-skips when hidden (point-to-point tracks). */
+    if (s_buttons[2].active && !s_buttons[2].hidden) {
         char vb[8];
-        float vx = 350.0f * sx;
-        if (s_buttons[2].active && !s_buttons[2].hidden) { snprintf(vb, sizeof vb, "%d", s_num_ai_opponents);
-            fe_draw_text(vx, (float)(s_buttons[2].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
-        if (s_buttons[3].active && !s_buttons[3].hidden) { snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
-            fe_draw_text(vx, (float)(s_buttons[3].y + 6) * sy, vb, 0xFFFFFFFF, sx*0.8f, sy*0.8f); }
-        if (s_buttons[4].active && !s_buttons[4].hidden) {
-            int tvi = s_game_option_traffic;
-            if (tvi < 0) tvi = 0;
-            if (tvi > TD5_TRAFFIC_VOLUME_COUNT - 1) tvi = TD5_TRAFFIC_VOLUME_COUNT - 1;
-            fe_draw_text(vx, (float)(s_buttons[4].y + 6) * sy, traffic_vol[tvi], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
-        }
-        if (s_buttons[5].active && !s_buttons[5].hidden)  /* police on/off (hidden in cop chase) */
-            fe_draw_text(vx, (float)(s_buttons[5].y + 6) * sy, on_off[s_game_option_cops & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
-        if (s_buttons[6].active && !s_buttons[6].hidden)  /* per-race AI difficulty (hidden in Quick Race) */
-            fe_draw_text(vx, (float)(s_buttons[6].y + 6) * sy, difficulty[s_race_difficulty % 3], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
-        /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) value — appended row,
-         * indexed via s_trksel_dyn_btn (sits just above OK/BACK; value follows .y). */
-        if (s_trksel_dyn_btn >= 0 && s_buttons[s_trksel_dyn_btn].active &&
-            !s_buttons[s_trksel_dyn_btn].hidden) {
-            const char *dyn[2] = { "ARCADE", "SIMULATION" };
-            fe_draw_text(vx, (float)(s_buttons[s_trksel_dyn_btn].y + 6) * sy,
-                         dyn[s_game_option_dynamics & 1], 0xFFFFFFFF, sx*0.8f, sy*0.8f);
-        }
+        snprintf(vb, sizeof vb, "%d", s_game_option_laps + 1);
+        fe_draw_text(350.0f * sx, (float)(s_buttons[2].y + 6) * sy, vb,
+                     0xFFFFFFFF, sx * 0.8f, sy * 0.8f);
     }
 
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
@@ -9396,7 +9485,8 @@ void td5_frontend_render_ui_rects(void) {
         s_current_screen != TD5_SCREEN_CAR_SELECTION &&
         s_current_screen != TD5_SCREEN_MP_POSITION &&
         s_current_screen != TD5_SCREEN_TRACK_SELECTION &&
-        s_current_screen != TD5_SCREEN_CUP_TRACK_SELECT)
+        s_current_screen != TD5_SCREEN_CUP_TRACK_SELECT &&
+        s_current_screen != TD5_SCREEN_RACE_OPTIONS)   /* [2026-07-04] shares the track-select backdrop */
         frontend_render_bg_gallery(sx, sy);
 
     switch (s_current_screen) {
@@ -9461,6 +9551,9 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_TRACK_SELECTION:
     case TD5_SCREEN_CUP_TRACK_SELECT:   /* cup picker reuses the track preview */
         frontend_render_track_selection_preview(sx, sy);
+        break;
+    case TD5_SCREEN_RACE_OPTIONS:       /* [2026-07-04] option values on the shared backdrop */
+        frontend_render_race_options_overlay(sx, sy);
         break;
     case TD5_SCREEN_CONTROL_OPTIONS:
         frontend_render_control_options_overlay(sx, sy);
@@ -9776,24 +9869,18 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_TRACK_SELECTION:
         case TD5_SCREEN_CUP_TRACK_SELECT:
-            /* Track(0) selector + the race-option rows (AI/laps/traffic/police/
-             * difficulty = buttons 2..6; difficulty self-skips when hidden in
-             * Quick Race context). [PORT ENHANCEMENT 2026-06]
-             * Cup picker hides rows 2..6 (cup-overridden), so fe_draw_option_arrows
-             * self-skips them — only the Track(0) arrows + randomize chip draw. */
-            fe_draw_option_arrows(0, sx, sy);
-            fe_draw_option_arrows(2, sx, sy);
-            fe_draw_option_arrows(3, sx, sy);
-            fe_draw_option_arrows(4, sx, sy);
-            fe_draw_option_arrows(5, sx, sy);
-            fe_draw_option_arrows(6, sx, sy);   /* per-race difficulty (master) */
-            /* [ARCADE 2026-06-26] DYNAMICS (ARCADE/SIMULATION) row — same ◄►
-             * selector glyphs as the quick-race option rows above. The button
-             * is appended last, so dispatch it by its stored index (self-skips
-             * when hidden/inactive). [LAYOUT 2026-06-26] now sits just above OK/BACK. */
-            if (s_trksel_dyn_btn >= 0) fe_draw_option_arrows(s_trksel_dyn_btn, sx, sy);
+            /* [RACE OPTIONS 2026-07-04] The main column carries only Track(0) +
+             * Laps(2) selectors (self-skip hidden) plus the randomize chip; every
+             * other option-row arrow moved onto the RACE OPTIONS screen. */
+            fe_draw_option_arrows(0, sx, sy);   /* Track */
+            fe_draw_option_arrows(2, sx, sy);   /* Laps (self-skips on P2P) */
             /* [item #7] Randomize chip to the right of the Track selector. */
             frontend_render_trksel_randomize_icon(sx, sy);
+            break;
+        case TD5_SCREEN_RACE_OPTIONS:
+            /* [2026-07-04] ◄► arrows for each option row (self-skip hidden; the
+             * OK/BACK buttons are excluded by the RO_OPT_COUNT bound). */
+            { int ri; for (ri = 0; ri < RO_OPT_COUNT; ri++) fe_draw_option_arrows(ri, sx, sy); }
             break;
         case TD5_SCREEN_CONTROL_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] arrows on PLAYER(0) + CONTROLLER SELECTION(1). */
@@ -9910,6 +9997,7 @@ void td5_frontend_render_ui_rects(void) {
         s_current_screen != TD5_SCREEN_NETWORK_LOBBY &&
         s_current_screen != TD5_SCREEN_MP_LOBBY &&
         s_current_screen != TD5_SCREEN_TRACK_SELECTION &&
+        s_current_screen != TD5_SCREEN_RACE_OPTIONS &&   /* [2026-07-04] MP keeps its header */
         /* [MP HIGH SCORES 2026-06-25] The split-screen post-race RESULTS screen
          * keeps s_mp_simul set, which blanked its "RESULTS" header so the MP
          * results table had no top title like the rest of the frontend. Exempt
