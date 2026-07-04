@@ -716,7 +716,7 @@ extern int             s_game_option_difficulty;
 extern int             s_game_option_dynamics;
 extern int             s_game_option_car_toughness;   /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 extern int             s_game_option_car_deform;      /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
-extern int             s_game_option_car_damage_bar;  /* [CAR DAMAGE] HUD bar + wreck on/off */
+extern int             s_game_option_car_damage;      /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
 extern int             s_game_option_tutorial;        /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
 extern int             s_race_difficulty;   /* per-race AI difficulty row on Track Selection (0..2) */
 extern int             s_trksel_dyn_btn;    /* [ARCADE] ARCADE/SIM row index on Track Selection (-1=none) */

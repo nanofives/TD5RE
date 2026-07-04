@@ -62,6 +62,10 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Game Options: PLAYER NAME edits INLINE in place (no pop-up), full-size font",
+    "Game Options: DAMAGE toggle ON=car damage+bar, OFF=both off (label 'DAMAGE')",
+    "Game Options: PREV/OK/NEXT aligned under the option-row column (120/220/320)",
+    "Tutorial: TUTORIAL=ON now shows the overlay on keyboard too (was pad-only)",
     "Cup CHOOSE YOUR TEAM: roster box (top right) lists members by name",
     "MP mode select: buttons no longer overlap HOST banner text",
     "MP mode select: TIME TRIAL entry is gone, other modes unaffected",
