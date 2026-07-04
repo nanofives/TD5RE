@@ -2675,42 +2675,57 @@ int td5_game_init_race_session(void) {
     /* ---- Step 4b: Initialize race sound resources ---- */
     td5_sound_init_race_resources();
 
-    /* ---- Cop Chase: force the player into a POLICE car ----
-     * [FIX 2026-05-30 cop-chase] Faithful to the original car-select clamp for
-     * game_type 8: CarSelectionScreenStateMachine @ 0x0040E0B3 restricts the
-     * player's EXT car id to 0x21..0x24 = the 4 police cars (cop/sp5/sp6/sp7.zip
-     * = port s_car_zip_paths indices 33..36 = Police Cerbera/Mustang/Charger/
-     * Camaro). The port's frontend never clamped, so the player kept their menu
-     * car (a non-police model — the user saw a regular Cerbera). Clamp here, the
-     * single point before the model/cardef/sound load below picks up
-     * g_td5.car_index. Respect an already-police choice (33..36); otherwise
-     * default to the Police Cerbera (33 = cars/cop.zip). Suspects (slots 1..5)
-     * stay varied via the normal opponent roster — only the player is police
-     * (CONFIRMED: orig opponent loop @ 0x0040DD5B uses the difficulty roster,
-     * not the police set). */
-    if (g_td5.wanted_mode_enabled && td5_game_cop_chase_is_cop(0)) {
-        /* Force the police car ONLY when SLOT 0 is A cop — SP wanted mode, or MP
-         * cop chase where the host (slot 0) chose the cop role. When the cop is an AI
-         * or slot 0 is a suspect, slot 0 KEEPS its chosen car (other human cops get
-         * their police car from the per-pane cop roster via the schedule + the cop
-         * render path). [multi-cop 2026-06-24] is_cop is mask-aware so slot 0 being a
-         * cop is detected even when it isn't the primary. This fixes
-         * "player 1 is a cop despite choosing another car" in AI-cop chase.
-         * Valid cop cars = TD5 police 33..36 OR ported TD6 cops cp1..cp4 (46..49). */
-        int is_cop = (g_td5.car_index >= 33 && g_td5.car_index <= 36) ||
-                     (g_td5.car_index >= 46 && g_td5.car_index <= 49);
-        if (!is_cop) {
-            TD5_LOG_I(LOG_TAG,
-                      "Cop Chase: forcing player car %d -> 33 (Police Cerbera, cop.zip)",
-                      g_td5.car_index);
-            g_td5.car_index = 33;
-        } else {
-            TD5_LOG_I(LOG_TAG, "Cop Chase: player car %d already a police car",
-                      g_td5.car_index);
+    /* ---- Cop Chase: force every HUMAN cop into a POLICE car ----
+     * [FIX 2026-05-30 cop-chase, generalized 2026-07-04 for RANDOM COP / multi-cop]
+     * Faithful to the original car-select clamp for game_type 8:
+     * CarSelectionScreenStateMachine @ 0x0040E0B3 restricts the player's EXT car
+     * id to 0x21..0x24 = the 4 police cars (cop/sp5/sp6/sp7.zip = port
+     * s_car_zip_paths indices 33..36 = Police Cerbera/Mustang/Charger/Camaro).
+     *
+     * A MANUALLY role-picked human cop already only had police cars available
+     * at car-select time (mp_simul_set_pane_roster restricts the COP pane's
+     * roster to 33-36/46-49 in td5_fe_race.c) — for that path this loop is a
+     * no-op safety net. But RANDOM COP (td5_game_assign_random_cop, above)
+     * skips the role screen entirely: every player picks from the FULL roster
+     * and the cop is drawn AFTER car-select, at race init — so whichever human
+     * ends up drawn may be sitting in any civilian car. This forces that slot's
+     * car to a police car the same way the AI-cop (InitRaceSchedule) and
+     * INFECT-conversion (td5_game_process_pending_infections) paths already
+     * do. [multi-cop 2026-06-24] is_cop is mask-aware, so every human cop is
+     * covered, not just the primary. Only slot 0 (via g_td5.car_index, and
+     * only when !network_active) used to be patched here; other split-screen
+     * slots and the net-play slot-0 path (which loads from ai_car_indices[0],
+     * not car_index — see Step 5 below) kept their originally-selected car,
+     * which is the reported bug this loop fixes. AI-driven cop slots are
+     * skipped — InitRaceSchedule already gave them a police car at schedule
+     * build time. Valid cop cars = TD5 police 33..36 OR ported TD6 cops
+     * cp1..cp4 (46..49). */
+    if (g_td5.wanted_mode_enabled) {
+        int humans = g_td5.network_active ? td5_net_get_player_count()
+                                           : g_td5.num_human_players;
+        if (humans < 1) humans = 1;
+        if (humans > TD5_MAX_RACER_SLOTS) humans = TD5_MAX_RACER_SLOTS;
+        for (int s = 0; s < humans; s++) {
+            if (!td5_game_cop_chase_is_cop(s)) {
+                TD5_LOG_I(LOG_TAG,
+                          "Cop Chase: slot %d is a suspect (cop slot=%d) — keeping chosen car",
+                          s, td5_game_cop_chase_cop_slot());
+                continue;
+            }
+            int *car_slot = (s == 0 && !g_td5.network_active) ? &g_td5.car_index
+                                                                : &g_td5.ai_car_indices[s];
+            int is_cop_car = (*car_slot >= 33 && *car_slot <= 36) ||
+                             (*car_slot >= 46 && *car_slot <= 49);
+            if (!is_cop_car) {
+                TD5_LOG_I(LOG_TAG,
+                          "Cop Chase: forcing slot %d car %d -> 33 (Police Cerbera, cop.zip)",
+                          s, *car_slot);
+                *car_slot = 33;
+            } else {
+                TD5_LOG_I(LOG_TAG, "Cop Chase: slot %d already a police car (%d)",
+                          s, *car_slot);
+            }
         }
-    } else if (g_td5.wanted_mode_enabled) {
-        TD5_LOG_I(LOG_TAG, "Cop Chase: slot 0 is a suspect (cop slot=%d) — keeping chosen car %d",
-                  td5_game_cop_chase_cop_slot(), g_td5.car_index);
     }
 
     /* ---- Step 5: Load vehicle assets and sound banks for all active slots ---- */
