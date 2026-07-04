@@ -541,6 +541,124 @@ fi
 
 ---
 
+## Step 7g: Auto-sync memory + conversation history with account3 (bidirectional, non-blocking)
+
+Every `/end` also keeps this project's memory + conversation history in step across
+Claude accounts, so a session started under one account's license can see what a
+session under another account already learned. This moves the same project-scoped
+state `/sync` moves manually (`.claude/commands/sync.md`) — this step just runs it
+automatically, in **both directions**, at session close, so no one has to remember
+to run `/sync` by hand. **Project skills/code (`.claude/commands/*.md`,
+`td5mod/**`, etc.) do NOT need this step** — they already propagate to every
+account via the Step 7c git push, since all accounts share the same working-tree
+checkout on this machine; only the per-account `~/.claude-accountN/` state is
+siloed.
+
+**Partner account:** defaults to account **3** (the personal/unrestricted account —
+see `CLAUDE.local.md`). Override with `TD5RE_SYNC_PARTNER_ACCOUNT=<1|2|3>`. Skip
+entirely with `TD5RE_SKIP_ACCOUNT_SYNC=1` (e.g. to deliberately keep an account's
+session state isolated for this run).
+
+**Detect the current account from the live environment — never hardcode it:**
+
+```bash
+CURRENT_ACCOUNT="$(echo "$CLAUDE_CONFIG_DIR" | grep -oE '[0-9]+$')"
+PARTNER_ACCOUNT="${TD5RE_SYNC_PARTNER_ACCOUNT:-3}"
+
+if [ "${TD5RE_SKIP_ACCOUNT_SYNC:-0}" = "1" ]; then
+    SYNC_RESULT="skipped (TD5RE_SKIP_ACCOUNT_SYNC=1)"
+elif [ -z "${CURRENT_ACCOUNT}" ] || [ "${CURRENT_ACCOUNT}" = "${PARTNER_ACCOUNT}" ]; then
+    SYNC_RESULT="skipped (already account ${PARTNER_ACCOUNT}, or CLAUDE_CONFIG_DIR unrecognized)"
+else
+    # ... run the sync below, then set SYNC_RESULT ...
+fi
+```
+
+### Resolve both accounts' project dirs (same encoding as `/sync`)
+
+```bash
+PROJECT_DIR=$(cygpath -w "$PWD" | sed 's|[:\\/]|-|g')
+A="$HOME/.claude-account${CURRENT_ACCOUNT}/projects/${PROJECT_DIR}"
+B="$HOME/.claude-account${PARTNER_ACCOUNT}/projects/${PROJECT_DIR}"
+mkdir -p "${A}/memory" "${B}/memory"
+```
+
+### MEMORY.md — line-level union merge, NEVER a blind overwrite
+
+`MEMORY.md` is a shared, hand-appended index — both accounts may have added
+*different* lines to it independently since the last sync. A plain "copy one side
+over the other" (what `/sync` does for every other `.md`, fine for a supervised
+manual run) would silently drop whichever side's unique entries lost the copy.
+Because this step runs unattended, merge by line-level union instead — this can
+never lose an entry, it can only occasionally leave a line filed under the wrong
+section until the next memory-organizing pass tidies it:
+
+```bash
+if [ -f "${A}/memory/MEMORY.md" ] || [ -f "${B}/memory/MEMORY.md" ]; then
+    touch "${A}/memory/MEMORY.md" "${B}/memory/MEMORY.md"
+    MERGED="$(mktemp)"
+    # Keep A's structure verbatim, then append any line from B not already
+    # present verbatim in A (exact-string dedup) — order-preserving, lossless.
+    awk 'NR==FNR{print; seen[$0]=1; next} !($0 in seen)' \
+        "${A}/memory/MEMORY.md" "${B}/memory/MEMORY.md" > "${MERGED}"
+    cp -f "${MERGED}" "${A}/memory/MEMORY.md"
+    cp -f "${MERGED}" "${B}/memory/MEMORY.md"
+    rm -f "${MERGED}"
+fi
+```
+
+### Per-topic memory files — newest mtime wins, both directions
+
+Unlike `MEMORY.md`, per-topic files are uniquely named per topic/date, so a
+newest-wins copy (never a delete) is safe:
+
+```bash
+sync_newer() {  # sync_newer <src_memory_dir> <dst_memory_dir>
+    for f in "$1"/*.md; do
+        [ -e "$f" ] || continue
+        name="$(basename "$f")"
+        [ "${name}" = "MEMORY.md" ] && continue   # handled above
+        dst="$2/${name}"
+        if [ ! -f "${dst}" ] || [ "$f" -nt "${dst}" ]; then
+            cp -fp "$f" "${dst}"
+        fi
+    done
+}
+sync_newer "${A}/memory" "${B}/memory"
+sync_newer "${B}/memory" "${A}/memory"
+```
+
+### Session history (conversation logs) — append-only, both directions
+
+Same rule as `/sync`: never overwrite, never delete, always preserve mtime (the
+conversation picker sorts by it):
+
+```bash
+sync_sessions() {  # sync_sessions <src_dir> <dst_dir>
+    for f in "$1"/*.jsonl; do
+        [ -e "$f" ] || continue
+        dst="$2/$(basename "$f")"
+        [ -f "${dst}" ] || cp -p "$f" "${dst}"
+    done
+    for d in "$1"/*/; do
+        [ -d "$d" ] || continue
+        base="$(basename "$d")"
+        mkdir -p "$2/${base}"
+        cp -rnp "${d}"* "$2/${base}/" 2>/dev/null || true
+    done
+}
+sync_sessions "${A}" "${B}"
+sync_sessions "${B}" "${A}"
+SYNC_RESULT="memory + sessions merged bidirectionally with account ${PARTNER_ACCOUNT}"
+```
+
+**Non-blocking:** any failure here (missing dir, permission error, `CLAUDE_CONFIG_DIR`
+not set) is reported and does NOT undo the ship — the push in Step 7c already
+completed before this step runs. Report `${SYNC_RESULT}` in Step 8. This step runs
+regardless of which path Step 0 took (worktree merge or main-tree-only).
+
+---
+
 ## Step 8: Session close report
 
 ```
@@ -552,6 +670,7 @@ Push:     origin/master in sync
 Worktree: torn down / still registered (locked — will sweep next /end)
 Binaries: td5re.exe + td5re_release.exe copied to project root from the worktree build
 Published: ${PUBLISH}   (LAN server — game machines update via update.bat)
+Account sync: ${SYNC_RESULT}   (memory + conversations, bidirectional w/ account3)
 
 Deferred to memory:    <new TODO entries, or 'none'>
 Resolved this session:  <resolved TODOs, or 'none'>
@@ -576,5 +695,6 @@ Next: <run /fix for deferred stubs | resume a leftover | nothing pending>
 - **Housekeeping never blocks the ship and never destroys unmerged work.** Step 7 runs after the worktree is gone; it deletes only branches/worktrees fully contained in master and reports everything else. Skip the worktree-closing parts while sibling `fix-*` worktrees are active.
 - **`/end` ends with `origin/master..master` empty.** The final push (Step 7c) is the last git action. Never report shipped while commits are unpushed.
 - **Every `/end` auto-publishes the release to the LAN server (Step 7e).** After the push, `deploy_release.sh` mirrors `td5re_release.exe` + `re/assets/` to the Pi (`mariano-server.local:8088`, incremental upload). Non-blocking: a Pi-offline/SSH failure (clean exit 2) or any other error is reported, never undoes the ship. Skip with `TD5RE_SKIP_PUBLISH=1`. This is what keeps the downstairs game machines from going stale — they pull the new build via `update.bat`.
+- **Every `/end` auto-syncs memory + conversation history with account3, bidirectionally (Step 7g).** Detects the current account from `$CLAUDE_CONFIG_DIR` (never hardcoded) and merges `~/.claude-account<current>/projects/$PROJECT_DIR/` with `~/.claude-account3/projects/$PROJECT_DIR/` both ways — `MEMORY.md` via lossless line-union merge (a blind overwrite would drop whichever side's unique entries lost the copy, unacceptable when unattended), per-topic memory files via newest-mtime-wins, session `.jsonl` history append-only with preserved mtimes. Non-blocking; override the partner with `TD5RE_SYNC_PARTNER_ACCOUNT=<1|2|3>`, skip with `TD5RE_SKIP_ACCOUNT_SYNC=1`. Project skills/code are NOT part of this step — they already reach every account through the Step 7c git push (same shared working-tree checkout).
 - **Never commit `td5re.ini`, `log/`, build artifacts, or `*.td5` saves.** Stage by explicit allowlist only — never `git add -A`/`.`. `td5re_release.ini` IS tracked; `td5re.ini` is NOT.
 - **Every session updates the in-game CHANGELOG + PENDING TO TEST seed (Step 2c), before the build.** Each user-visible change gets a present-tense bullet in `td5_changelog.h` (top of today's `LAST 7 DAYS` block) and a concise test item in `k_seed[]` in `td5_pending.c`. `/fix` adds these per change; `/end` is the idempotent backstop (and the only path on a main-tree-only `/end`). The runtime `td5re_pending.txt` is untracked — `k_seed[]` is the durable home. The game now **merges** any new `k_seed[]` item into an existing `td5re_pending.txt` on launch (`td5_pending_init`), so a shipped item surfaces in the in-game list without deleting the file; tested/deleted items are tombstoned (`#- `) so the merge never resurrects them (Step 7f retires, not deletes).
