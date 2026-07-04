@@ -70,6 +70,8 @@ static void retired_add(const char *text) {
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
     "Net play: host picks GAME MODE in the network lobby (Race/Drag/Battle/Cop)",
+    "Net play: CUP over the network (series advance, points, standings, auto-teams)",
+    "Net play: Cop Chase INFECT online + COPS/SUSPECTS results table over net",
     "Net play: Drag Race over the network (lanes=players, no AI, deterministic)",
     "Net play: Traffic Battle over the network (power-up boxes in sync on all PCs)",
     "Net play: Cop Chase over the network (random human cop; bust/arrest in sync)",

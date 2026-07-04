@@ -127,6 +127,11 @@ typedef struct TD5_NetRaceConfig {
     int32_t  td6_color[6];        /* per-slot TD6 body RGB (0xFFFFFF = unpainted) */
     int32_t  car_index[6];        /* per net slot (TD5_NET_MAX_PLAYERS) */
     int32_t  paint_index[6];
+    /* [NET GAME MODES 2026-07-04] Cup progression: which cup race this is
+     * (0-based). The host advances it between races and broadcasts it so every
+     * peer runs the same cup race (track + "race X of Y" + standings stay in
+     * lockstep). -1 = not a cup race. */
+    int32_t  cup_race_index;
     /* [MP GAME MODES 2026-06-22] Replicated game mode + per-mode options chosen
      * on the host's mode-vote/mode-config screens. All-int32 layout; copied
      * wholesale with the rest of the config (the DXPSTART payload + race_config

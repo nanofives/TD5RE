@@ -279,6 +279,13 @@ int  td5_game_mp_cup_team(int slot);
 int  td5_game_mp_cup_ai_difficulty(int slot);  /* [CUP TEAM SELECT] per-opponent difficulty 0..2, -1=inherit global */
 int  td5_game_mp_cup_team_mode(void);
 int  td5_game_mp_cup_track(void);
+/* [NET GAME MODES 2026-07-04] Net cup sync: the host advances the series and
+ * broadcasts the current race index; every client adopts it so the track,
+ * "race X of Y" and standings stay in lockstep. race_finished() = the current
+ * race's points have been tallied (the host uses it to decide when to advance
+ * before broadcasting the next race). */
+void td5_game_mp_cup_set_current(int idx);
+int  td5_game_mp_cup_race_finished(void);
 
 /* [MP GAME MODES: TRAFFIC FAIRNESS 2026-06-22] 1 when local split-screen MP
  * should keep shared traffic deterministic (no permanent player-caused wrecks). */

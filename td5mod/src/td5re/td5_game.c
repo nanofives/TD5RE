@@ -9775,6 +9775,23 @@ void td5_game_mp_cup_advance(void) {
     }
 }
 
+/* [NET GAME MODES 2026-07-04] Force the current cup race index (client adopts the
+ * host's broadcast value). Clearing s_mpcup_awarded marks the adopted race as not
+ * yet tallied so td5_game_mp_cup_award() runs once for it at race end. */
+void td5_game_mp_cup_set_current(int idx) {
+    if (!s_mpcup_active) return;
+    if (idx < 0) idx = 0;
+    if (idx >= s_mpcup_race_count) idx = s_mpcup_race_count - 1;
+    if (idx != s_mpcup_current) {
+        s_mpcup_current = idx;
+        s_mpcup_awarded = 0;
+        TD5_LOG_I(LOG_TAG, "MP CUP set current -> race %d/%d (net adopt) track=%d",
+                  s_mpcup_current + 1, s_mpcup_race_count, td5_game_mp_cup_track());
+    }
+}
+
+int td5_game_mp_cup_race_finished(void) { return s_mpcup_active && s_mpcup_awarded; }
+
 void td5_game_mp_cup_end(void) { s_mpcup_active = 0; }
 
 /* [MP GAME MODES: TRAFFIC FAIRNESS 2026-06-22] In local split-screen MP the

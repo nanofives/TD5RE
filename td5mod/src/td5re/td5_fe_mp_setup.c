@@ -194,7 +194,17 @@ void frontend_init_race_schedule(void) {
      * list from the picked track) and force the current cup race's track. */
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_CUP) {
         if (!td5_game_mp_cup_active()) td5_game_mp_cup_begin();
-        {
+        if (s_launching_net_race) {
+            /* [NET GAME MODES 2026-07-04] The host drives cup progression: adopt
+             * the broadcast cup race index (keeps standings + "race X of Y" in
+             * lockstep across peers) and use the broadcast track for this race. */
+            TD5_NetRaceConfig nc;
+            if (td5_net_get_race_config(&nc)) {
+                if (nc.cup_race_index >= 0)
+                    td5_game_mp_cup_set_current(nc.cup_race_index);
+                if (nc.track_index >= 0) { s_selected_track = nc.track_index; g_td5.track_index = nc.track_index; }
+            }
+        } else {
             int ct = td5_game_mp_cup_track();
             if (ct >= 0) { s_selected_track = ct; g_td5.track_index = ct; }
         }

@@ -2103,6 +2103,35 @@ void Screen_NetworkLobby(void) {
                 /* [MP GAME MODES 2026-06-22] Replicate the host's chosen game
                  * mode + per-mode options so every peer boots the same mode. */
                 cfg.mode_config = g_td5.mp_mode_config;
+                /* [NET GAME MODES 2026-07-04] Net cup TEAMS: there is no per-slot
+                 * team-pick screen over the net, so auto-assign the net players
+                 * round-robin to the chosen number of teams. Rides mode_config to
+                 * every peer, so cup_begin() reads the same teams everywhere. */
+                if (cfg.mode_config.mode == TD5_MP_MODE_CUP &&
+                    cfg.mode_config.cup_team_mode) {
+                    int tc = cfg.mode_config.cup_team_count; if (tc < 2) tc = 2;
+                    int npl = td5_net_get_player_count(), ti;
+                    for (ti = 0; ti < npl && ti < 6; ti++)
+                        cfg.mode_config.cup_team_of_slot[ti] = ti % tc;
+                }
+                /* [NET GAME MODES 2026-07-04] Cup progression is host-authoritative.
+                 * If a cup race just finished, advance to the next one (or end the
+                 * series so a fresh START begins a new cup) BEFORE broadcasting, then
+                 * send the current race index + its track so every peer runs the same
+                 * race and tallies standings in lockstep. */
+                cfg.cup_race_index = -1;
+                if (g_td5.mp_mode_config.mode == TD5_MP_MODE_CUP &&
+                    td5_game_mp_cup_active()) {
+                    if (td5_game_mp_cup_race_finished()) {
+                        if (td5_game_mp_cup_has_next()) td5_game_mp_cup_advance();
+                        else                            td5_game_mp_cup_end();
+                    }
+                    if (td5_game_mp_cup_active()) {
+                        int ct = td5_game_mp_cup_track();
+                        if (ct >= 0) cfg.track_index = ct;
+                        cfg.cup_race_index = td5_game_mp_cup_current();
+                    }
+                }
                 frontend_net_send(4, &cfg, (int)sizeof(cfg));
                 TD5_LOG_I(LOG_TAG,
                           "NetworkLobby: DXPSTART config seed=0x%08X track=%d dir=%d",
