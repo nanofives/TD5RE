@@ -33,8 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
-    { CL_ITEM,    "FIX: race-start camera no longer swings out over open" },
-    { CL_ITEM,    "  water on coastal tracks like Montego Bay" },
+    { CL_ITEM,    "FIX: race-start camera stays close to your car instead of" },
+    { CL_ITEM,    "  swinging out over open water/off-track on coastal grids" },
+    { CL_ITEM,    "  like Montego Bay" },
     { CL_ITEM,    "Game Options: PLAYER NAME is now edited in place, at" },
     { CL_ITEM,    "  full size, instead of a separate pop-up box" },
     { CL_ITEM,    "Game Options: the DAMAGE BAR row is now just DAMAGE -" },
