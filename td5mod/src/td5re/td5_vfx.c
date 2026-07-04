@@ -3100,6 +3100,14 @@ void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index) {
  * Uses the actor's rotation matrix at +0x120 to transform a local
  * exhaust offset to world space.
  */
+/* TD5_PU_NITRO speed trail -- [MOVED 2026-07-04] now td5_render_arcade_nitro_trail
+ * in td5_render_effects.c, reusing the additive-glow quad primitive that
+ * already draws the (confirmed-visible) item-box halos. This debug-line
+ * version confirmed-fired every frame with correct world positions (verified
+ * via temporary diagnostic logging) but never reliably showed on screen —
+ * likely the batched debug-line buffer's conditional flush ordering elsewhere
+ * in the frame. See td5_render_effects.c for the replacement + full history. */
+
 void td5_vfx_spawn_smoke(TD5_Actor *actor) {
     if (!actor) return;
 

@@ -435,6 +435,15 @@ int32_t phys_top_speed_rating(TD5_Actor *actor) {
         if (ts_q8 != MP_CATCHUP_Q8_ONE)
             rating = (int32_t)(((int64_t)rating * (int64_t)ts_q8) >> 8);
     }
+    /* [ARCADE NITRO 2026-07-04] Raise the cap (default +50%) while NITRO is
+     * active so the boosted drive torque can actually be exploited instead of
+     * hitting the same faithful cap sooner. Inert (100%) outside arcade mode or
+     * when NITRO isn't active on this slot. */
+    {
+        int pct = td5_arcade_slot_topspeed_pct(slot);
+        if (pct != 100)
+            rating = (int32_t)(((int64_t)rating * pct) / 100);
+    }
     return rating;
 }
 

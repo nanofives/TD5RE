@@ -300,7 +300,15 @@ typedef struct TD5_GlobalState {
         int  difficulty;
         int  dynamics;
         int  collisions;
-        int  powerups;   /* 1 = ARCADE power-up item boxes enabled (default), 0 = off */
+        /* [ITEM CHAOS 2026-07-04] Power-up mode, 3-state: 0 = OFF (no item
+         * boxes at all), 1 = CASUAL (default — current spacing-based scatter,
+         * a handful of boxes around the ring), 2 = CHAOS (Mashed-style — one
+         * box in EVERY lane at each spawn point, up to 4 wide on a 4-lane
+         * span). CHAOS only changes box PLACEMENT density/pattern, not which
+         * kinds can spawn (damage/battle gating on individual kinds is
+         * unchanged). Was a plain on/off bool before 2026-07-04; 0/1 values
+         * from an old INI still mean OFF/CASUAL, so this is backward-compatible. */
+        int  powerups;
         /* AutoGearbox: 1 = automatic transmission (default; gear up/down keys
          * ignored), 0 = manual. Drives input bit 28 → actor+0x378 which orig
          * UpdatePlayerVehicleControlState @ 0x00402E60 gates the gear-shift

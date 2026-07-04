@@ -814,7 +814,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.difficulty         = td5_ini_int("GameOptions", "Difficulty", 1);
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
+    /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS; clamp in case of a stray
+     * out-of-range manual INI edit (old on/off files only ever had 0/1). */
     g_td5.ini.powerups           = td5_ini_int("GameOptions", "Powerups", 1);
+    if (g_td5.ini.powerups < 0) g_td5.ini.powerups = 0;
+    if (g_td5.ini.powerups > 2) g_td5.ini.powerups = 2;
     g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
     /* [PLAYER NAME 2026-07-02] Game Options PLAYER NAME (string): shown as the
      * human row in race results and prefilled in the post-race high-score name

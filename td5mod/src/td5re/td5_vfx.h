@@ -112,6 +112,9 @@ void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor);
 void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier);
 void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index);
 
+/* TD5_PU_NITRO speed trail -- [MOVED 2026-07-04] now td5_render_arcade_nitro_trail
+ * (td5_render.h / td5_render_effects.c). */
+
 /* Engine-rev gated random smoke puff (orig 0x00401370 SpawnRandomVehicleSmokePuff).
  * Called per-frame per visible racer from the actor render path. Gates on
  * engine_speed_accum<4000 && encounter_steering_cmd>200 && rand()%engine<500;

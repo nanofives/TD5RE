@@ -729,7 +729,7 @@ extern int             s_display_vsync;
 extern int             s_display_window_mode;
 extern int             s_game_option_checkpoint_timers;
 extern int             s_game_option_collisions;
-extern int             s_game_option_powerups;
+extern int             s_game_option_powerups;   /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS */
 extern int             s_game_option_laneassist;
 extern int             s_game_option_difficulty;
 extern int             s_game_option_dynamics;

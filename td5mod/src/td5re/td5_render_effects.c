@@ -1914,13 +1914,11 @@ static uint32_t arcade_pad_color(int kind)
     switch (kind) {
     case TD5_PU_NITRO:  return 0xFF20E0FFu;  /* cyan    — speed   */
     case TD5_PU_GHOST:  return 0xFFE6E6FFu;  /* white   — ghost   */
-    case TD5_PU_WRECK:  return 0xFFFF3020u;  /* red     — wreck   */
+    case TD5_PU_INDESTRUCTIBLE: return 0xFFFF3020u;  /* red — indestructible (was WRECK) */
     case TD5_PU_HAZARD: return 0xFFFFB000u;  /* amber   — hazard  */
     /* [ARCADE EXPANSION 2026-06-28] new kinds */
-    case TD5_PU_SHIELD: return 0xFF40C0FFu;  /* sky blue — shield */
-    case TD5_PU_FREEZE: return 0xFF80FFF0u;  /* ice cyan — EMP    */
+    case TD5_PU_FREEZE: return 0xFF80FFF0u;  /* ice cyan — freeze */
     case TD5_PU_MAGNET: return 0xFFFF40C0u;  /* magenta  — magnet */
-    case TD5_PU_ROCKET: return 0xFFFF8020u;  /* orange   — rocket */
     case TD5_PU_REPAIR: return 0xFF40FF60u;  /* green    — repair */
     default:            return 0xFFFFFFFFu;
     }
@@ -1956,6 +1954,51 @@ static void arcade_emit_glow_at(float wx, float wy, float wz,
         { vx + half, vy + half }, { vx + half, vy - half }
     };
     tracked_marker_emit_quad_world(corners, vz, 0.0f, 0.0f, 1.0f, 1.0f, color, -1);
+}
+
+/* [ARCADE NITRO 2026-07-04] Trailing glow-orb speed effect. Two earlier
+ * attempts didn't read as intended: the smoke-puff pool (td5_vfx.c) looked too
+ * much like ordinary exhaust, and a debug-line-segment version (queued into
+ * td5_render.c's batched debug-line buffer, flushed conditionally elsewhere in
+ * the frame) confirmed-fired every frame with correct world positions per
+ * diagnostic logging but never reliably showed on screen. This reuses
+ * arcade_emit_glow_at — the SAME additive-glow quad primitive that draws the
+ * item-box halos players already see clearly — via a synchronous immediate
+ * draw (flush_immediate_internal + td5_plat_render_draw_tris happen inside
+ * tracked_marker_emit_quad_world right here, not queued for later). No
+ * persistent state: a fresh scatter of glow orbs is drawn behind the car each
+ * frame, trailing opposite its travel direction. */
+void td5_render_arcade_nitro_trail(TD5_Actor *actor)
+{
+    if (!actor) return;
+
+    float cx = (float)actor->world_pos.x * (1.0f / 256.0f);
+    float cy = (float)actor->world_pos.y * (1.0f / 256.0f) + 8.0f;   /* bumper height */
+    float cz = (float)actor->world_pos.z * (1.0f / 256.0f);
+    float vx = (float)actor->linear_velocity_x * (1.0f / 256.0f);
+    float vz = (float)actor->linear_velocity_z * (1.0f / 256.0f);
+
+    float speed = sqrtf(vx * vx + vz * vz);
+    if (speed < 1.0f) return;   /* stationary — no trail to draw */
+
+    /* Unit vector pointing BACKWARD (opposite of travel) + its perpendicular
+     * (same horizontal plane) for lateral scatter of the orb origins. */
+    float bx = -vx / speed, bz = -vz / speed;
+    float px = -bz,         pz = bx;
+
+    const int NUM_ORBS = 3;
+    for (int i = 0; i < NUM_ORBS; i++) {
+        float back = 20.0f + (float)(rand() % 70);                     /* 20..90 behind the bumper */
+        float lane = ((float)(rand() % 100) / 100.0f - 0.5f) * 30.0f;  /* -15..+15 lateral */
+        float lift = (float)(rand() % 16);                             /* 0..16 vertical scatter */
+        float wx = cx + bx * back + px * lane;
+        float wy = cy + lift;
+        float wz = cz + bz * back + pz * lane;
+        float half   = 6.0f + (float)(rand() % 8);           /* 6..14 world-unit glow radius */
+        uint32_t alpha = (uint32_t)(140 + rand() % 116);      /* 140..255 — per-frame flicker */
+        uint32_t col   = (alpha << 24) | 0xE0FFFFu;           /* bright white-cyan */
+        arcade_emit_glow_at(wx, wy, wz, half, col);
+    }
 }
 
 /* One camera-facing icon stroke: a line from icon-local (ax,ay) to (bx,by)
@@ -2001,7 +2044,7 @@ static void arcade_draw_icon(int kind, float cx, float cy, float cz,
         }
         break;
     }
-    case TD5_PU_WRECK:                              /* X = smash / wrecking ball */
+    case TD5_PU_INDESTRUCTIBLE:                     /* X = smash / indestructible (was WRECK) */
         arcade_icon_stroke(cx, cy, cz, scale, -0.8f, -0.8f,  0.8f,  0.8f, col);
         arcade_icon_stroke(cx, cy, cz, scale, -0.8f,  0.8f,  0.8f, -0.8f, col);
         break;
@@ -2013,14 +2056,8 @@ static void arcade_draw_icon(int kind, float cx, float cy, float cz,
         arcade_icon_stroke(cx, cy, cz, scale,  0.0f, -0.68f,-0.14f,-0.55f, col);
         break;
     /* [ARCADE EXPANSION 2026-06-28] new-kind emblems (simple line-art) */
-    case TD5_PU_SHIELD:                            /* shield = chevron crest */
-        arcade_icon_stroke(cx, cy, cz, scale, -0.7f, 0.7f,  0.7f, 0.7f, col);
-        arcade_icon_stroke(cx, cy, cz, scale, -0.7f, 0.7f, -0.7f,-0.1f, col);
-        arcade_icon_stroke(cx, cy, cz, scale,  0.7f, 0.7f,  0.7f,-0.1f, col);
-        arcade_icon_stroke(cx, cy, cz, scale, -0.7f,-0.1f,  0.0f,-0.85f, col);
-        arcade_icon_stroke(cx, cy, cz, scale,  0.7f,-0.1f,  0.0f,-0.85f, col);
-        break;
-    case TD5_PU_FREEZE:                            /* snowflake / asterisk = EMP */
+    /* TD5_PU_SHIELD / TD5_PU_ROCKET emblems -- [REMOVED 2026-07-04], no case. */
+    case TD5_PU_FREEZE:                            /* snowflake / asterisk = freeze */
         arcade_icon_stroke(cx, cy, cz, scale,  0.0f, 0.9f,  0.0f,-0.9f, col);
         arcade_icon_stroke(cx, cy, cz, scale, -0.78f,0.45f, 0.78f,-0.45f, col);
         arcade_icon_stroke(cx, cy, cz, scale, -0.78f,-0.45f,0.78f, 0.45f, col);
@@ -2031,13 +2068,6 @@ static void arcade_draw_icon(int kind, float cx, float cy, float cz,
         arcade_icon_stroke(cx, cy, cz, scale, -0.5f,-0.2f, -0.2f,-0.6f, col);
         arcade_icon_stroke(cx, cy, cz, scale,  0.5f,-0.2f,  0.2f,-0.6f, col);
         arcade_icon_stroke(cx, cy, cz, scale, -0.2f,-0.6f,  0.2f,-0.6f, col);
-        break;
-    case TD5_PU_ROCKET:                            /* up-arrow w/ tail = rocket */
-        arcade_icon_stroke(cx, cy, cz, scale,  0.0f,-0.9f,  0.0f, 0.95f, col);
-        arcade_icon_stroke(cx, cy, cz, scale, -0.5f, 0.4f,  0.0f, 0.95f, col);
-        arcade_icon_stroke(cx, cy, cz, scale,  0.5f, 0.4f,  0.0f, 0.95f, col);
-        arcade_icon_stroke(cx, cy, cz, scale, -0.3f,-0.9f, -0.3f,-0.5f, col);
-        arcade_icon_stroke(cx, cy, cz, scale,  0.3f,-0.9f,  0.3f,-0.5f, col);
         break;
     case TD5_PU_REPAIR:                            /* plus / cross = repair */
         arcade_icon_stroke(cx, cy, cz, scale,  0.0f, 0.8f,  0.0f,-0.8f, col);

@@ -26,6 +26,8 @@
 #include "td5_sound.h"
 #include "td5_trace.h"
 #include "td5_game.h"   /* td5_game_get_wanted_target_slot, td5_game_is_wanted_mode */
+#include "td5_arcade.h" /* [2026-07-04] td5_arcade_slot_is_ghost — GHOST can't be
+                         * newly acquired as a cop-chase target */
 #include "td5_save.h"   /* td5_save_get_catchup_assist — CATCHUP level (S06) */
 #include "td5_input.h"  /* g_td5_steering_bias_max_swing — CATCHUP steering swing (S06) */
 #include "td5re.h"
@@ -10601,6 +10603,12 @@ void td5_ai_update_special_encounter(void) {
                  * (state 0) so the chase is observable headlessly. */
                 if (st != 1 && !(cop_chase_ai_debug() && st == 0)) continue;
                 if (g_actor_broken_down[c]) continue;
+                /* [ARCADE GHOST 2026-07-04] A ghosting car can't be newly
+                 * acquired as a pursuit target — it phases through everything
+                 * else, so a passing cop shouldn't lock on either. An
+                 * already-running chase is untouched (this only gates
+                 * ACQUISITION, in the COP_IDLE branch above). */
+                if (td5_arcade_slot_is_ghost(c)) continue;
                 cand = actor_ptr(c);
                 /* Line of sight: a cop can't START a chase across a fork. If the
                  * player is on a branch corridor and the cop is on the main road
@@ -10660,6 +10668,21 @@ void td5_ai_update_special_encounter(void) {
         if (g_actor_broken_down[tgt]) {
             if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
             TD5_LOG_I(LOG_TAG, "cop_chase END (target broke down): cop=%d target=%d", k, tgt);
+            cop_end_chase(k);
+            continue;
+        }
+
+        /* [ARCADE GHOST 2026-07-04] "Police should not be able to see you
+         * anymore" — a chase already in progress ENDS outright the moment the
+         * target ghosts (not just paused/held). Every cop currently pursuing
+         * this target re-evaluates its own chase here, so a target followed by
+         * several cops loses ALL of them, not just one. If GHOST wears off
+         * later, a cop has to re-acquire the target from scratch via the
+         * normal COP_IDLE acquisition gate above (which already refuses to
+         * acquire a ghosting car). */
+        if (td5_arcade_slot_is_ghost(tgt)) {
+            if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
+            TD5_LOG_I(LOG_TAG, "cop_chase END (target ghosted): cop=%d target=%d", k, tgt);
             cop_end_chase(k);
             continue;
         }

@@ -739,7 +739,7 @@ int             s_game_option_difficulty = 1;
 int             s_race_difficulty = 1;
 int             s_game_option_dynamics = 0;
 int             s_game_option_collisions = 1;
-int             s_game_option_powerups = 1;   /* ARCADE item-box power-ups on/off */
+int             s_game_option_powerups = 1;   /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS */
 int             s_game_option_car_toughness = 1; /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 int             s_game_option_car_deform = 1;    /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
 int             s_game_option_car_damage = 1; /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
@@ -6231,6 +6231,10 @@ static const char *go_label(int opt) {
 /* Current value string for an option row, written into out[n]. */
 void td5_gameopts_value(int opt, char *out, size_t n) {
     static const char *const on_off[]      = { "OFF", "ON" };
+    /* [ITEM CHAOS 2026-07-04] POWER-UPS is a 3-state cycle, not on/off:
+     * OFF (no item boxes) -> CASUAL (current default scatter) -> CHAOS
+     * (Mashed-style: one box per lane, up to 4 wide, at every spawn point). */
+    static const char *const powerups_lv[] = { "OFF", "CASUAL", "CHAOS" };
     static const char *const traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] =
         { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
     static const char *const difficulty[]  = { "EASY", "NORMAL", "HARD" };
@@ -6253,7 +6257,12 @@ void td5_gameopts_value(int opt, char *out, size_t n) {
         case GO_COPS:        v = on_off[s_game_option_cops & 1]; break;
         case GO_DIFFICULTY:  v = difficulty[((s_game_option_difficulty % 3) + 3) % 3]; break;
         case GO_COLLISIONS:  v = on_off[s_game_option_collisions & 1]; break;
-        case GO_POWERUPS:    v = on_off[s_game_option_powerups & 1]; break;
+        case GO_POWERUPS:
+            t = s_game_option_powerups;
+            if (t < 0) t = 0;
+            if (t > 2) t = 2;
+            v = powerups_lv[t];
+            break;
         case GO_TOUGHNESS:
             t = s_game_option_car_toughness;
             if (t < 0) t = 0;
@@ -6293,7 +6302,12 @@ void td5_gameopts_cycle(int opt, int delta) {
             if (s_game_option_difficulty > 2) s_game_option_difficulty = 0;
             break;
         case GO_COLLISIONS: s_game_option_collisions ^= 1; break;
-        case GO_POWERUPS:   s_game_option_powerups ^= 1; break;
+        case GO_POWERUPS:
+            /* [ITEM CHAOS 2026-07-04] 3-state: OFF(0) -> CASUAL(1) -> CHAOS(2). */
+            s_game_option_powerups += delta;
+            if (s_game_option_powerups < 0) s_game_option_powerups = 2;
+            if (s_game_option_powerups > 2) s_game_option_powerups = 0;
+            break;
         case GO_TOUGHNESS:
             s_game_option_car_toughness += delta;
             if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 2;
