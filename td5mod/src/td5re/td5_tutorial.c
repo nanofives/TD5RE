@@ -25,6 +25,7 @@
 #include "td5_game.h"
 #include "td5_input.h"     /* td5_input_get_input_source (joystick vs keyboard) */
 #include "td5_inflate.h"
+#include "td5_sound.h"      /* td5_sound_set_paused -- mute race audio while overlay is up */
 #include "td5_tutorial_pad_art.h"
 
 #define LOG_TAG "hud"
@@ -189,7 +190,13 @@ enum { REG_T, REG_B, REG_L, REG_R };
 typedef struct { int action; int elem; const char *label; int region; float p0, p1, p2, p3; } CalloutDef;
 
 #define LBL_VC 6.0f         /* nudge side/bottom labels up to centre on the row */
-#define LBL_TOP_Y 100.0f    /* top-label text Y */
+/* [2026-07-04] LBL_TOP_Y was 100 — with the LT/RT trigger anchors sitting at
+ * ~y=197 on the pad art, that put ~68 virtual units of bare leader line
+ * between the button and the label (vs. ~60-90 units total for the L/R side
+ * callouts' short, mostly-horizontal leaders). Moved down to 132 (button is
+ * now only ~36 units above the arrow base) so BRAKE/ACCELERATE read like the
+ * rest of the diagram instead of the longest lines on screen. */
+#define LBL_TOP_Y 132.0f    /* top-label text Y */
 #define LBL_SCALE 0.66f
 #define TXT_H 18.0f         /* approx label height (virtual) for top-arrow spacing */
 
@@ -202,9 +209,16 @@ static const CalloutDef k_callouts[] = {
     { 8,  E_NONE, "CHANGE VIEW",  REG_R, 448, 238, 0, 0  },  /* straight (at Y)      */
     { 6,  E_NONE, "GEAR UP",      REG_R, 448, 212, 0, 0  },  /* straight (at bumper) */
     { 4,  E_NONE, "HANDBRAKE",    REG_R, 448, 272, 0, 20 }, /* down then out (no up) */
-    { -1, E_BACK, "RESET CAR",    REG_B, 206, 372, 0, 0  },  /* Select/Back, not rebindable */
-    { 10, E_NONE, "PAUSE",        REG_B, 316, 394, 0, 0  },
-    { 9,  E_NONE, "REAR VIEW",    REG_B, 424, 372, 0, 0  },
+    /* [2026-07-04] RESET CAR/PAUSE/REAR VIEW anchor to BACK/START/Y, which sit
+     * near the pad's vertical CENTER (~y=238-252) while these labels sit below
+     * the pad — the old lanes (372/394) made these by far the longest leaders
+     * in the diagram (~150-200 virtual units of combined line vs. ~60-90 for
+     * the L/R callouts). Pulled the lanes up closer to the pad's bottom edge
+     * (~327) and RESET CAR/REAR VIEW's label x closer to their buttons to cut
+     * roughly a quarter to a third off the total leader length. */
+    { -1, E_BACK, "RESET CAR",    REG_B, 225, 338, 0, 0  },  /* Select/Back, not rebindable */
+    { 10, E_NONE, "PAUSE",        REG_B, 316, 352, 0, 0  },
+    { 9,  E_NONE, "REAR VIEW",    REG_B, 405, 338, 0, 0  },
 };
 
 static void draw_callout(const CalloutDef *c, const uint32_t *bind)
@@ -352,7 +366,12 @@ void td5_tutorial_update(void)
          * armed afresh at the start of every race (gated only by the Game
          * Options TUTORIAL on/off below), so dismissing it just releases THIS
          * race's countdown. */
-        TD5_LOG_I(LOG_TAG, "Tutorial overlay dismissed by all %d player(s) — countdown released", s_humans);
+        /* [AUDIO 2026-07-04] Release the mute td5_tutorial_begin_race applied.
+         * Shared with the pause menu's own suspend/resume (td5_sound.c) — safe
+         * because td5_sound_init_race_resources() unconditionally resets the
+         * mute at the start of every race before this overlay can re-arm. */
+        td5_sound_set_paused(0);
+        TD5_LOG_I(LOG_TAG, "Tutorial overlay dismissed by all %d player(s) — countdown released, audio unmuted", s_humans);
     }
 }
 
@@ -391,7 +410,13 @@ void td5_tutorial_begin_race(void)
     for (int i = 0; i < TD5_MAX_HUMAN_PLAYERS; i++)
         s_prev_in[i] = (i < s_humans) ? player_dismiss_input(i) : 0;
 
-    TD5_LOG_I(LOG_TAG, "Tutorial overlay armed (mode=%d force=%d humans=%d)", mode, s_force_mode, s_humans);
+    /* [AUDIO 2026-07-04] Mute race SFX + duck music while the overlay holds the
+     * grid, same lever the in-race pause menu uses (td5_sound_set_paused --
+     * td5_sound.c). Runs AFTER td5_sound_init_race_resources() in this same
+     * init function, so it isn't clobbered by that call's per-race unmute. */
+    td5_sound_set_paused(1);
+
+    TD5_LOG_I(LOG_TAG, "Tutorial overlay armed (mode=%d force=%d humans=%d), audio muted", mode, s_force_mode, s_humans);
     {
         const uint32_t *b = td5_plat_input_player_action_bindings(0);
         for (int a = 0; a < TD5_JSBIND_ACTIONS; a++) {
