@@ -6399,6 +6399,30 @@ int td5_gameopts_page_next(void) {
     return 0;
 }
 
+/* Body-font width WITHOUT the toupper fold that fe_measure_text / _width apply.
+ * Needed to place the inline PLAYER NAME caret snug against mixed-case glyphs:
+ * the caps fold overestimates lowercase widths (caps are wider), which left a
+ * visible gap after the last typed letter. Mirrors fe_measure_text otherwise. */
+static float fe_measure_text_cased(const char *text, float sx, float sy) {
+    float w = 0.0f;
+    float gsx = fe_glyph_sx(sx, sy);
+    if (!text) return 0.0f;
+    if (td5_font_ready()) {
+        const float cap_px = 15.0f * sy;
+        const float hscale = (sx < sy) ? (sx / sy) : 1.0f;
+        const float trkn   = (float)FONT_GLYPH_TRACKING * sy * hscale;
+        for (int i = 0; text[i]; i++)
+            w += td5_font_advance((unsigned char)text[i], cap_px) * hscale + trkn;
+        return w;
+    }
+    for (int i = 0; text[i]; i++) {
+        int c = (unsigned char)text[i];
+        if (c < 32 || c > 127) { w += (14.0f + FONT_GLYPH_TRACKING) * gsx; continue; }
+        w += ((float)s_font_glyph_advance[c - 0x20] + FONT_GLYPH_TRACKING) * gsx;
+    }
+    return w;
+}
+
 static void frontend_render_game_options_overlay(float sx, float sy) {
     int start = s_go_page * GO_ROWS_PER_PAGE;
     int r;
@@ -6423,15 +6447,17 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
             const char *shown = editing ? s_go_name_edit : (val[0] ? val : "-");
             float cx = (float)FE_VALUE_CENTER_X * sx;
             float ty = (float)(s_buttons[r].y + 6) * sy;
+            /* Centre by the TRUE mixed-case width (not the caps-fold measure), so
+             * the caret can sit right after the last glyph. */
+            float half = fe_measure_text_cased(shown, sx, sy) * 0.5f;
             int   saved_case = s_fe_preserve_case;
             s_fe_preserve_case = 1;                       /* keep true lowercase */
-            fe_draw_text_centered(cx, ty, shown, 0xFFFFFFFF, sx, sy);
+            fe_draw_text(cx - half, ty, shown, 0xFFFFFFFF, sx, sy);
             if (editing &&
                 (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
-                /* Blinking green caret just past the (centred) text — same 350ms
-                 * clock the old modal used. Width measured with the same helper
-                 * fe_draw_text_centered centres by, so the caret tracks the text. */
-                float caret_x = cx + fe_measure_text(shown, sx, sy) * 0.5f + 2.0f * sx;
+                /* Blinking green caret snug against the end of the typed text
+                 * (same 350ms clock the old modal used). */
+                float caret_x = cx + half + 1.0f * sx;
                 td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
                 fe_draw_quad(caret_x, ty + 6.0f * sy, 2.0f * sx, 16.0f * sy,
                              0xFF00FF00, -1, 0, 0, 0, 0);
@@ -6441,11 +6467,12 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
         }
         frontend_draw_value_centered(sx, sy, s_buttons[r].y + 6, val, 0xFFFFFFFF);
     }
-    /* "PAGE x / y" footer (only when there is more than one page). */
+    /* "PAGE x / y" footer, centred UNDER the OK button (only when >1 page). */
     if (s_go_pages > 1) {
         char buf[24];
         snprintf(buf, sizeof buf, "PAGE %d / %d", s_go_page + 1, s_go_pages);
-        td5_vui_text_centered(320.0f * sx, (float)(GO_CTL_Y + 28) * sy, buf,
+        td5_vui_text_centered((float)(GO_CTL_OK_X + GO_CTL_W / 2) * sx,
+                              (float)(GO_CTL_Y + 28) * sy, buf,
                               0xFF8890A0u, sx, sy);
     }
 }
