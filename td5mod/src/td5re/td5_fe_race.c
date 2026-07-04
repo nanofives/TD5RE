@@ -4629,12 +4629,18 @@ static const char *team_select_diff_label(int d) {
 }
 
 /* One AI-opponent row: name + TEAM + per-opponent SKILL slider (3 segments).
- * Highlights the field under the host cursor. */
+ * Highlights the field under the host cursor.
+ * [CUP TEAM ROSTER 2026-07-04] Slider compacted (bx 452->436, narrower segments)
+ * and the spelled-out EASY/NORMAL/HARD label shortened to its first letter so the
+ * row's right edge clears x=520 -- freeing the TEAM ROSTER box (mp_team_roster_render)
+ * anchored at TEAM_ROSTER_BOX_X on the screen's right edge. The slider's filled-
+ * segment count still conveys the full tier; the letter is a legend, not the only cue. */
 static void mp_team_ai_row(float sx, float sy, int slot, float y, const char *name,
                            int team, int diff, int hl_team, int hl_diff) {
-    char tb[16];
+    char tb[16], lb[2];
     int i;
-    const float bx = 452.0f, bw = 15.0f, bgap = 4.0f, bh = 11.0f;
+    const float bx = 436.0f, bw = 11.0f, bgap = 2.0f, bh = 11.0f;
+    float label_x;
     td5_vui_text(150.0f * sx, y * sy, name, mp_slot_color(slot), sx, sy);
     snprintf(tb, sizeof tb, "TEAM %d", team + 1);
     td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, tb,
@@ -4650,11 +4656,12 @@ static void mp_team_ai_row(float sx, float sy, int slot, float y, const char *na
         td5_vui_quad((bx + i * (bw + bgap)) * sx, (y - bh) * sy, bw * sx, bh * sy,
                      c, -1, 0, 0, 1, 1);
     }
-    td5_vui_text((bx + 3.0f * (bw + bgap) + 8.0f) * sx, y * sy, team_select_diff_label(diff),
-                 hl_diff ? 0xFFFFE060u : 0xFFC0C8D0u, sx, sy);
+    label_x = bx + 3.0f * (bw + bgap) + 6.0f;
+    lb[0] = team_select_diff_label(diff)[0]; lb[1] = '\0';
+    td5_vui_text(label_x * sx, y * sy, lb, hl_diff ? 0xFFFFE060u : 0xFFC0C8D0u, sx, sy);
     if (hl_diff) {
-        td5_vui_arrow((bx - 15.0f) * sx, (y - 1.0f) * sy, 10.0f * sx, 12.0f * sy, 0, 0xFFFFE060u);
-        td5_vui_arrow((bx + 3.0f * (bw + bgap) + 60.0f) * sx, (y - 1.0f) * sy, 10.0f * sx, 12.0f * sy, 1, 0xFFFFE060u);
+        td5_vui_arrow((bx - 14.0f) * sx, (y - 1.0f) * sy, 10.0f * sx, 12.0f * sy, 0, 0xFFFFE060u);
+        td5_vui_arrow((label_x + 22.0f) * sx, (y - 1.0f) * sy, 10.0f * sx, 12.0f * sy, 1, 0xFFFFE060u);
     }
 }
 
@@ -4728,6 +4735,131 @@ void Screen_MpTeamSelect(void) {
     }
 }
 
+/* ------------------------------------------------------------------------
+ * [CUP TEAM ROSTER 2026-07-04] Right-side "who's on which team" panel.
+ * The per-racer rows (mp_roleselect_row / mp_team_ai_row) each show only their
+ * OWN team number -- with several players + AI opponents on screen at once,
+ * seeing the full roster of a given team means reading every row. This panel
+ * groups every racer slot by team and lists members by profile name (same name
+ * resolution the rows already use), so team composition is visible at a glance.
+ * TD5RE-only: the CHOOSE YOUR TEAM screen itself has no original-binary
+ * counterpart (confirmed 2026-06-25 via string-table search -- see
+ * project_mp_cup_team_names_ai_team_difficulty_2026-06-25 memory).
+ * ------------------------------------------------------------------------ */
+#define TEAM_ROSTER_BOX_X       520.0f   /* left edge; right edge = FE_MP_RIGHT_EDGE (628) */
+#define TEAM_ROSTER_BOX_TOP     104.0f
+#define TEAM_ROSTER_BOX_BOTTOM  372.0f   /* stays clear of the OK button at y=388 */
+#define TEAM_ROSTER_LINE_H_MAX   12.0f
+#define TEAM_ROSTER_LINE_H_MIN    9.0f
+
+/* Copy `name` into `out` (>=20 bytes), trimming with a trailing ".." until it
+ * fits within max_w design px at the small font. Narrow box + up to 15-char
+ * profile names means overflow is the common case, not the edge case. */
+static void team_roster_fit_name(const char *name, float max_w, char *out, size_t outsz) {
+    size_t n = strlen(name);
+    if (n >= outsz) n = outsz - 1;
+    memcpy(out, name, n);
+    out[n] = '\0';
+    if (fe_measure_small_text(out) <= max_w) return;
+    while (n > 0) {
+        char tmp[24];
+        n--;
+        out[n] = '\0';
+        snprintf(tmp, sizeof tmp, "%s..", out);
+        if (fe_measure_small_text(tmp) <= max_w || n == 0) {
+            snprintf(out, outsz, "%s", tmp);
+            return;
+        }
+    }
+}
+
+static void mp_team_roster_render(float sx, float sy, int humans, int ai_count,
+                                  int total, int teams) {
+    const float box_x = TEAM_ROSTER_BOX_X, box_r = FE_MP_RIGHT_EDGE;
+    const float box_w = box_r - box_x;
+    int members[4];
+    int slots_by_team[4][TD5_MAX_RACER_SLOTS];
+    int k, slot, nlines = 0;
+
+    if (teams < 2) teams = 2;
+    if (teams > 4) teams = 4;
+    for (k = 0; k < 4; k++) members[k] = 0;
+
+    for (slot = 0; slot < total && slot < TD5_MAX_RACER_SLOTS; slot++) {
+        int t = team_select_get_team(slot);
+        if (t < 0 || t >= teams) continue;
+        if (members[t] < TD5_MAX_RACER_SLOTS) slots_by_team[t][members[t]++] = slot;
+    }
+    for (k = 0; k < teams; k++)
+        if (members[k] > 0) nlines += 1 + members[k];   /* header + one line per member */
+    if (nlines < 1) return;   /* nobody assigned yet (screen just entered) -- nothing to show */
+
+    {
+        float avail   = (TEAM_ROSTER_BOX_BOTTOM - TEAM_ROSTER_BOX_TOP) - 20.0f;  /* minus "TEAMS" title */
+        float line_h  = TEAM_ROSTER_LINE_H_MAX;
+        float box_h;
+        if (line_h * (float)nlines > avail) line_h = avail / (float)nlines;
+        if (line_h < TEAM_ROSTER_LINE_H_MIN) line_h = TEAM_ROSTER_LINE_H_MIN;
+
+        box_h = 20.0f + line_h * (float)nlines + 8.0f;
+        if (box_h > TEAM_ROSTER_BOX_BOTTOM - TEAM_ROSTER_BOX_TOP)
+            box_h = TEAM_ROSTER_BOX_BOTTOM - TEAM_ROSTER_BOX_TOP;
+
+        {
+            static int s_logged_once = 0;
+            if (!s_logged_once) {
+                s_logged_once = 1;
+                TD5_LOG_I(LOG_TAG, "team roster: nlines=%d line_h=%.1f shapes_avail=%d "
+                          "box_px=(%.1f,%.1f,%.1f,%.1f) sx=%.3f sy=%.3f",
+                          nlines, (double)line_h, td5_vui_shapes_available(),
+                          (double)(box_x * sx), (double)(TEAM_ROSTER_BOX_TOP * sy),
+                          (double)(box_w * sx), (double)(box_h * sy), (double)sx, (double)sy);
+            }
+        }
+
+        if (td5_vui_shapes_available()) {
+            td5_vui_roundrect(box_x * sx, TEAM_ROSTER_BOX_TOP * sy, box_w * sx, box_h * sy,
+                              6.0f * sy, 6.0f * sy, 1.5f * sx, 1.5f * sy,
+                              0xFF4A5568u, 0xFF4A5568u, 0xFF4A5568u,
+                              0xFF141820u, 0.72f);
+        } else {
+            td5_vui_quad(box_x * sx, TEAM_ROSTER_BOX_TOP * sy, box_w * sx, box_h * sy,
+                         0xB8141820u, -1, 0, 0, 0, 0);
+        }
+
+        {
+            float y = TEAM_ROSTER_BOX_TOP + 6.0f;
+            float text_max_w = box_w - 20.0f;
+            fe_draw_small_text((box_x + 8.0f) * sx, y * sy, "TEAMS", 0xFFFFE060u, sx, sy);
+            y += 16.0f;
+
+            for (k = 0; k < teams; k++) {
+                int i;
+                char hdr[16];
+                if (members[k] <= 0) continue;
+                snprintf(hdr, sizeof hdr, "TEAM %d", k + 1);
+                fe_draw_small_text((box_x + 8.0f) * sx, y * sy, hdr, 0xFFC0C8D0u, sx, sy);
+                y += line_h;
+                for (i = 0; i < members[k]; i++) {
+                    int s = slots_by_team[k][i];
+                    const char *nm;
+                    char pb[16], fit[24];
+                    if (team_select_slot_is_ai(s, humans, ai_count)) {
+                        nm = (s < TD5_MAX_HUMAN_PLAYERS && s_mp_player_name[s][0])
+                             ? s_mp_player_name[s] : frontend_mp_ai_pool_name(s);
+                    } else {
+                        nm = frontend_human_display_name(s);
+                    }
+                    if (!nm || !nm[0]) { snprintf(pb, sizeof pb, "PLAYER %d", s + 1); nm = pb; }
+                    team_roster_fit_name(nm, text_max_w - 6.0f, fit, sizeof fit);
+                    fe_draw_small_text((box_x + 14.0f) * sx, y * sy, fit, mp_slot_color(s), sx, sy);
+                    y += line_h;
+                }
+            }
+        }
+    }
+}
+
 void frontend_mp_team_select_render(float sx, float sy) {
     int slot, n = s_num_human_players;
     int humans, ai_count, total, teams = g_td5.mp_mode_config.cup_team_count;
@@ -4779,6 +4911,8 @@ void frontend_mp_team_select_render(float sx, float sy) {
         }
         y += pitch;
     }
+
+    mp_team_roster_render(sx, sy, humans, ai_count, total, teams);
 }
 
 /* [#6] Smooth, SUBTLE pulse in [lo,hi] driven off wall-clock `now`.
