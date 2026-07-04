@@ -316,6 +316,9 @@ int  td5_render_get_fog_transition(void);
 void td5_render_advance_sky_rotation(void);
 void td5_render_load_sky(const char *path);
 void td5_render_draw_sky(void);
+/* [AUTO LIGHTS] Average luminance (0..255) of the loaded sky texture, or -1 if
+ * none. Per-track brightness baseline for the auto-headlight verdict. */
+float td5_render_sky_luma(void);
 
 /* --- Billboard animation --- */
 void td5_render_advance_billboard_anims(void);

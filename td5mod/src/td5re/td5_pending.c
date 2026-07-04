@@ -69,6 +69,8 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Auto headlights: ON in Bern tunnels, OFF in Bern sunlit stretches",
+    "Auto headlights: ON across dark-sky tracks (Moscow), OFF on bright tracks",
     "Track select: RACE OPTIONS screen gathers all race options in one place",
     "RACE OPTIONS screen: adds checkpoint timers/power-ups/toughness/deform",
     "Track select: LAPS shows on TD5 circuit tracks (Newcastle etc.), not P2P",

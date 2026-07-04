@@ -3162,6 +3162,16 @@ void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
 static int             s_sky_loaded;
 static int             s_sky_page;
 static TD5_MeshHeader *s_sky_mesh = NULL;   /* sky.prr dome mesh */
+/* [AUTO LIGHTS] Average luminance (0..255) of the current track's sky texture,
+ * computed once at load. The single most literal "how bright are the
+ * surroundings" cue: a night/dusk track (Moscow) has a dark sky, a daytime
+ * track a bright one — which the per-zone light table does NOT encode. Consumed
+ * by td5_render_env_is_dark() as the whole-track brightness baseline. -1 = no
+ * sky loaded / unknown (term disabled). */
+static float           s_sky_luma = -1.0f;
+
+/* [AUTO LIGHTS] Track sky-brightness baseline; -1 when no sky is loaded. */
+float td5_render_sky_luma(void) { return s_sky_luma; }
 
 void td5_render_load_sky(const char *path)
 {
@@ -3170,6 +3180,7 @@ void td5_render_load_sky(const char *path)
 
     /* Reset so a new sky is loaded each race */
     s_sky_loaded = 0;
+    s_sky_luma   = -1.0f;   /* [AUTO LIGHTS] recomputed below; stays -1 if no sky */
 
     /* td5_asset_decode_png_rgba32 handles R↔B swap to BGRA internally */
     if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
@@ -3177,6 +3188,27 @@ void td5_render_load_sky(const char *path)
             s_sky_loaded = 1;
             s_sky_page = SKY_TEXTURE_PAGE;
             TD5_LOG_I(RENDER_LOG_TAG, "sky loaded: %s (%dx%d)", path, w, h);
+        }
+        /* [AUTO LIGHTS] Average sky luminance = per-track brightness baseline.
+         * Subsampled (cap ~64k taps) so a large panorama stays cheap; ignores
+         * alpha. Pixels are BGRA32 but a flat (R+G+B)/3 average is order-blind. */
+        {
+            const uint8_t *px = (const uint8_t *)pixels;
+            long total = (long)w * (long)h;
+            if (px && total > 0) {
+                long step = (total > 65536) ? (total / 65536) : 1;
+                double acc = 0.0; long n = 0;
+                for (long i = 0; i < total; i += step) {
+                    const uint8_t *p = px + i * 4;
+                    acc += (double)p[0] + (double)p[1] + (double)p[2];
+                    n++;
+                }
+                if (n > 0) {
+                    s_sky_luma = (float)(acc / (3.0 * (double)n));
+                    TD5_LOG_I(RENDER_LOG_TAG, "sky luma: %.1f (%ld taps of %ld px)",
+                              (double)s_sky_luma, n, total);
+                }
+            }
         }
         free(pixels);
     } else {

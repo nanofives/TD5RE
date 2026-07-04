@@ -75,18 +75,38 @@ static int   s_dark_knobs_read  = 0;
 static float s_dark_scale       = 0.50f;   /* ambient/directional dim under dark mode */
 static int   s_dark_floor       = 0x2A;     /* clamp floor: distant geometry stays dim, not black */
 
-/* [AUTO LIGHTS] Environment-brightness probe: the player's current track-zone
- * ambient (set each frame in the actor lighting pass). Auto mode enables the
- * headlights when this is below s_auto_ambient_thresh (or when the weather is
- * non-clear). Both env-tunable. */
+/* [AUTO LIGHTS] Environment-brightness probe, sampled each frame in the actor
+ * lighting pass for the player (slot 0). Two components:
+ *   s_env_ambient — the zone ambient scalar (sits at the 0x40 floor even on
+ *                   sunny tracks; a poor discriminator ON ITS OWN, which is why
+ *                   the old ambient-only term was dead code / threshold 0).
+ *   s_env_direct  — the zone directional ("sun") budget = sum of |vec_world|
+ *                   over the enabled light slots. THIS is what separates a
+ *                   tunnel (no sun) from an open sunlit road (strong sun) at
+ *                   the same ambient floor.
+ * scene_luma = s_env_ambient + AUTO_DIRECT_SCALE*s_env_direct is the per-zone
+ * brightness the auto verdict thresholds against (see td5_render_env_is_dark). */
 static float s_env_ambient       = 255.0f;
+static float s_env_direct        = 0.0f;
 static int   s_auto_knobs_read   = 0;
-/* The per-zone ambient scalar turned out NOT to discriminate bright vs dark
- * tracks (it sits at the 0x40 floor even on sunny tracks), so the ambient term
- * is OFF by default (threshold 0 = never). Weather is the reliable "poorly lit"
- * signal (non-clear = rain/storm/overcast/dusk). Raise via TD5RE_LIGHT_AUTO_AMBIENT
- * only if a specific track needs the extra trigger. */
-static int   s_auto_ambient_thr  = 0;
+/* Per-zone scene-luma threshold: below this -> "dark zone" (tunnels, very dim
+ * stretches). Non-zero by default now that the directional term makes scene_luma
+ * a real discriminator. Calibrated on Bern: tunnel scene~48, open road scene~106
+ * -> 80 cleanly splits them (tunnels ON, sunlit road OFF). Tunables (env):
+ * TD5RE_LIGHT_AUTO_ZONE (alias legacy TD5RE_LIGHT_AUTO_AMBIENT), _AUTO_SKY, _AUTO_HYST. */
+static int   s_auto_zone_thr     = 80;
+/* Per-track sky-luminance threshold: a track whose average sky brightness is
+ * below this reads "dark everywhere" (night/dusk/overcast tracks), so headlights
+ * stay on across the whole track regardless of the local zone. Calibrated on the
+ * sky-texture averages: Moscow(dark) ~64, Bern(day) ~124 -> 110 flags Moscow and
+ * dimmer/dusk tracks while leaving bright daylight (>=~124) off. */
+static int   s_auto_sky_thr      = 110;
+/* Hysteresis (scene-luma units) on the dynamic zone term so headlights don't
+ * strobe at zone boundaries: once ON they need scene_luma >= thr+hyst to flip OFF.
+ * Kept below (open-road - tunnel) so open road always clears (80+15=95 < 106). */
+static int   s_auto_hyst         = 15;
+static int   s_env_zone_dark     = 0;   /* latched zone verdict (hysteresis) */
+#define AUTO_DIRECT_SCALE 0.25f         /* |vec_world| ~= 4*weight_avg, so /4 to ambient units */
 
 static void light_read_dark_knobs(void)
 {
@@ -279,25 +299,67 @@ void td5_render_lighting2_frame_begin(void)
 }
 
 /* [AUTO LIGHTS] Verdict: is the current environment poorly lit (so headlights
- * should auto-enable)? True when the weather is non-clear (rain/storm/night) OR
- * the player's track-zone ambient is below the threshold (tunnels, dark tracks).
- * The manual [Lighting] DarkMode also forces it (the game folds that in). Env
- * knobs: TD5RE_LIGHT_AUTO_AMBIENT (0..255 threshold), TD5RE_LIGHT_AUTO_LOG. */
+ * should auto-enable)? Three independent triggers, OR'd together:
+ *   1. weather_dark — RAIN only. Not "any non-clear": TD5's SNOW render path is
+ *      gated off (a cut feature), so snow tracks (e.g. Bern) LOOK like bright
+ *      sunny days -- forcing their headlights on all race, over the sunlit
+ *      stretches too, is wrong. Snow therefore falls through to the sky/zone
+ *      terms; only visible rain forces dark on its own.
+ *   2. zone_dark    — the player's per-zone scene luminance (ambient + scaled
+ *                     directional/"sun" budget) is below s_auto_zone_thr. This
+ *                     is the DYNAMIC, within-track trigger: a tunnel drops the
+ *                     sun budget to ~0 so scene_luma falls below thr, an open
+ *                     sunlit stretch climbs back above it (Bern tunnels vs sun).
+ *                     Hysteresis (s_auto_hyst) stops it strobing at zone edges.
+ *   3. sky_dark     — the track's average sky luminance is below s_auto_sky_thr.
+ *                     This is the STATIC, whole-track trigger for night/dusk
+ *                     tracks (e.g. Moscow) whose zone lighting reads medium but
+ *                     whose sky is dark; headlights then stay on all race.
+ * The manual [Lighting] DarkMode also forces it (folded in by the caller). Env
+ * knobs: TD5RE_LIGHT_AUTO_ZONE (alias TD5RE_LIGHT_AUTO_AMBIENT), _AUTO_SKY,
+ * _AUTO_HYST, TD5RE_LIGHT_AUTO_LOG. */
 int td5_render_env_is_dark(void)
 {
     if (!s_auto_knobs_read) {
         s_auto_knobs_read = 1;
-        const char *e = getenv("TD5RE_LIGHT_AUTO_AMBIENT");
-        if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= 255) s_auto_ambient_thr = v; }
+        const char *e = getenv("TD5RE_LIGHT_AUTO_AMBIENT");   /* legacy alias */
+        if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= 512) s_auto_zone_thr = v; }
+        const char *ez = getenv("TD5RE_LIGHT_AUTO_ZONE");
+        if (ez && ez[0]) { int v = atoi(ez); if (v >= 0 && v <= 512) s_auto_zone_thr = v; }
+        const char *es = getenv("TD5RE_LIGHT_AUTO_SKY");
+        if (es && es[0]) { int v = atoi(es); if (v >= 0 && v <= 255) s_auto_sky_thr = v; }
+        const char *eh = getenv("TD5RE_LIGHT_AUTO_HYST");
+        if (eh && eh[0]) { int v = atoi(eh); if (v >= 0 && v <= 128) s_auto_hyst = v; }
     }
-    int weather_dark = (g_td5.weather != TD5_WEATHER_CLEAR);
-    int ambient_dark = (s_env_ambient < (float)s_auto_ambient_thr);
-    int dark = weather_dark || ambient_dark;
+
+    /* RAIN only (see header): snow is invisible in TD5 so snow tracks read as
+     * bright daylight and must not force headlights on by weather alone. */
+    int weather_dark = (g_td5.weather == TD5_WEATHER_RAIN);
+
+    /* Per-zone scene luminance = ambient + scaled directional (sun) budget. */
+    float scene_luma = s_env_ambient + AUTO_DIRECT_SCALE * s_env_direct;
+
+    /* Hysteresis on the dynamic zone term: once ON, require scene_luma to climb
+     * thr+hyst before flipping OFF; once OFF, require it to drop below thr. */
+    if (s_env_zone_dark) {
+        if (scene_luma >= (float)(s_auto_zone_thr + s_auto_hyst)) s_env_zone_dark = 0;
+    } else {
+        if (scene_luma <  (float)s_auto_zone_thr)                 s_env_zone_dark = 1;
+    }
+
+    /* Per-track sky baseline (-1 = no sky loaded / unknown -> term disabled). */
+    float sky_luma = td5_render_sky_luma();
+    int sky_dark = (sky_luma >= 0.0f) && (sky_luma < (float)s_auto_sky_thr);
+
+    int dark = weather_dark || s_env_zone_dark || sky_dark;
 
     static int s_log = 0;
     if (getenv("TD5RE_LIGHT_AUTO_LOG") && (s_log++ % 120) == 0) {
-        TD5_LOG_I(LOG_TAG, "auto-lights: env_ambient=%.0f thr=%d weather_dark=%d -> dark=%d",
-                  (double)s_env_ambient, s_auto_ambient_thr, weather_dark, dark);
+        TD5_LOG_I(LOG_TAG, "auto-lights: amb=%.0f direct=%.0f scene=%.0f (zone_thr=%d hyst=%d) "
+                  "sky=%.0f (sky_thr=%d) weather=%d zone_dark=%d sky_dark=%d -> dark=%d",
+                  (double)s_env_ambient, (double)s_env_direct, (double)scene_luma,
+                  s_auto_zone_thr, s_auto_hyst, (double)sky_luma, s_auto_sky_thr,
+                  weather_dark, s_env_zone_dark, sky_dark, dark);
     }
     return dark;
 }
@@ -2512,11 +2574,24 @@ void td5_render_actors_for_view(int view_index)
              * BEFORE compute_vertex_lighting since that's the consumer of
              * s_light_dirs[]/s_ambient_intensity. */
             td5_render_apply_track_lighting(slot, actor);
-            /* [AUTO LIGHTS] Capture the player's current track-zone ambient as the
-             * environment-brightness probe (low in tunnels / dark tracks). Read
-             * one frame later by td5_render_env_is_dark() to auto-toggle headlights. */
-            if (slot == 0)
+            /* [AUTO LIGHTS] Capture the player's current track-zone brightness as
+             * the environment probe, read one frame later by td5_render_env_is_dark()
+             * to auto-toggle headlights. Ambient ALONE can't tell a tunnel from an
+             * open sunlit road (both sit near the 0x40 ambient floor), so also sum
+             * the directional ("sun") budget from the just-applied zone contribs —
+             * that collapses to ~0 in a tunnel and is large in daylight. */
+            if (slot == 0) {
                 s_env_ambient = s_ambient_intensity;
+                float direct = 0.0f;
+                for (int li = 0; li < 3; li++) {
+                    if (!s_tl_contrib[li].enabled) continue;
+                    float vx = s_tl_contrib[li].vec_world[0];
+                    float vy = s_tl_contrib[li].vec_world[1];
+                    float vz = s_tl_contrib[li].vec_world[2];
+                    direct += sqrtf(vx * vx + vy * vy + vz * vz);
+                }
+                s_env_direct = direct;
+            }
             /* [DYNAMIC LIGHTS] actor verts are in body space; the model->world
              * basis is the interpolated world pos + the actor's body->world
              * rotation, so dynamic lights are transformed into body space. */
