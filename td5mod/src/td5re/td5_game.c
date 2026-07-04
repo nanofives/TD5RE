@@ -1722,11 +1722,16 @@ static void td5_game_assign_wheel_styles(uint32_t race_seed) {
  * the human-cop random path is active. */
 static void td5_game_assign_random_cop(uint32_t race_seed) {
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
-    if (c->mode != TD5_MP_MODE_COP_CHASE || g_td5.network_active ||
+    if (c->mode != TD5_MP_MODE_COP_CHASE ||
         c->cop_is_ai || !c->cop_random)
         return;
 
-    int nh = g_td5.num_human_players;
+    /* [NET GAME MODES 2026-07-04] Over the net cops are drawn from the human
+     * players (net slots 0..np-1); num_human_players is forced to 1 locally, so
+     * use the net player count. Every peer seeds from the same replicated
+     * race_seed + the same np, so the drawn cop mask is identical everywhere. */
+    int nh = g_td5.network_active ? td5_net_get_player_count()
+                                  : g_td5.num_human_players;
     if (nh < 2) nh = 2;
     if (nh > TD5_MAX_HUMAN_PLAYERS) nh = TD5_MAX_HUMAN_PLAYERS;
 
@@ -1869,6 +1874,21 @@ int td5_game_init_race_session(void) {
              * gating off this lands per work-package (TT/cup/cop-chase); here we
              * only propagate the replicated choice. */
             g_td5.mp_mode_config = ncfg_l.mode_config;
+            /* [NET GAME MODES 2026-07-04] Net COP CHASE: cops are drawn from the
+             * human players (an AI cop would need a slot beyond the net field, and
+             * multiplayer cop chase is human-vs-human anyway). Force a random
+             * HUMAN cop — assigned deterministically from the shared seed by
+             * td5_game_assign_random_cop below — and arm wanted mode. Win
+             * condition / head start / suspect speed ride mode_config. INFECT
+             * stays local-only for now (its cop-car swap isn't verified
+             * lockstep-safe). */
+            if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) {
+                g_td5.mp_mode_config.cop_is_ai  = 0;
+                g_td5.mp_mode_config.cop_random = 1;
+                g_td5.wanted_mode_enabled       = 1;
+                g_td5.special_encounter_enabled = 0;   /* players are the cops */
+                td5_game_reset_infect_state();
+            }
             TD5_LOG_I(LOG_TAG,
                       "InitRace: network session — real race, traffic_vol=%d cops=%d "
                       "mp_mode=%d (replicated from host)",
@@ -9928,7 +9948,7 @@ int td5_game_cop_chase_is_cop(int slot) {
      * EVERY cop-chase variant, regardless of the AI-cop / human-cop branch below. */
     if ((s_infected_mask >> slot) & 1u) return 1;
     if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
-        !g_td5.network_active && !g_td5.mp_mode_config.cop_is_ai) {
+        !g_td5.mp_mode_config.cop_is_ai) {   /* net + local: mask-driven human cop(s) */
         /* Human cop chase: any slot whose mask bit is set is a cop. A 0 mask
          * (e.g. role screen skipped) falls back to the single primary slot. */
         int mask = g_td5.mp_mode_config.cop_slot_mask;
