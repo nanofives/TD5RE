@@ -1879,9 +1879,9 @@ int td5_game_init_race_session(void) {
              * multiplayer cop chase is human-vs-human anyway). Force a random
              * HUMAN cop — assigned deterministically from the shared seed by
              * td5_game_assign_random_cop below — and arm wanted mode. Win
-             * condition / head start / suspect speed ride mode_config. INFECT
-             * stays local-only for now (its cop-car swap isn't verified
-             * lockstep-safe). */
+             * condition / head start / suspect speed / INFECT ride mode_config
+             * (INFECT's cop-car swap is a deterministic per-slot pick from the
+             * replicated seed — see td5_game_process_pending_infections). */
             if (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) {
                 g_td5.mp_mode_config.cop_is_ai  = 0;
                 g_td5.mp_mode_config.cop_random = 1;
@@ -7221,11 +7221,10 @@ static const int k_infect_cop_cars[4] = { 33, 34, 35, 36 };
 
 void td5_game_reset_infect_state(void) { s_infected_mask = 0; s_infect_pending = 0; }
 
-/* 1 when INFECT mode is active for this (local) cop chase. */
+/* 1 when INFECT mode is active for this cop chase (local or net). */
 int td5_game_cop_chase_infect_enabled(void) {
     return g_td5.wanted_mode_enabled
         && g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE
-        && !g_td5.network_active
         && g_td5.mp_mode_config.cop_infect_enabled != 0;
 }
 
@@ -7258,8 +7257,13 @@ void td5_game_process_pending_infections(void) {
         s_infect_pending &= ~(1u << s);
         if ((s_infected_mask >> s) & 1u) continue;        /* already converted */
 
-        /* Swap this slot's vehicle to a random police car (mesh + physics). */
-        int pick = k_infect_cop_cars[(unsigned)rand() % 4u];
+        /* Swap this slot's vehicle to a police car (mesh + physics). Pick it
+         * DETERMINISTICALLY from the replicated race seed + slot so every netplay
+         * peer converts the slot to the SAME cop car — CRT rand() is consumed at
+         * render rate and diverges between peers (a permanent carparam desync). */
+        uint32_t ih = td5_game_get_race_seed() ^ (0x9E3779B9u * (uint32_t)(s + 1));
+        ih ^= ih >> 15; ih *= 0x2C1B3C6Du; ih ^= ih >> 13;
+        int pick = k_infect_cop_cars[ih % 4u];
         td5_asset_load_vehicle(pick, s, 0);
 
         /* Flag as a cop and give it a fresh, healthy car. */
@@ -7267,8 +7271,12 @@ void td5_game_process_pending_infections(void) {
         g_wanted_damage_state[s] = 0x1000;
 
         /* AI-driven slot -> arm the cop driver; a human slot keeps manual control
-         * (its cop identity comes from s_infected_mask, not the AI cop driver). */
-        int is_human = (s < humans) && !(g_td5.mp_ai_player_mask & (1u << s));
+         * (its cop identity comes from s_infected_mask, not the AI cop driver).
+         * Over the net every net slot (0..np-1) is a remote human, so use the net
+         * player count — num_human_players is forced to 1 locally. */
+        int is_human = g_td5.network_active
+                           ? (s < td5_net_get_player_count())
+                           : ((s < humans) && !(g_td5.mp_ai_player_mask & (1u << s)));
         if (!is_human)
             td5_ai_cop_chase_setup(s, 1);
 
