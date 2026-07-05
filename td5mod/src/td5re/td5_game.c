@@ -6888,6 +6888,26 @@ int td5_game_run_race_frame(void) {
         td5_hud_draw_pause_action_confirm();
     }
 
+    /* [TRANSITION-TRANSPARENCY FIX 2026-07-04] Flush all queued HUD glyph text
+     * (speedo/lap/position digits, minimap labels, per-viewport player-ID name
+     * plates, damage-bar numbers, lane-assist text, etc. queued by the calls
+     * above) BEFORE the race-end fade draws, not after. td5_hud_flush_text()
+     * routes queued glyphs through TD5_PRESET_TRANSLUCENT_LINEAR_HUD
+     * (z_enable=0, alpha-blended) -- with no depth test, whatever it draws
+     * LAST wins the pixel regardless of what's already on screen. The fade's
+     * black bars are fully-opaque (TD5_PRESET_OPAQUE_LINEAR, alpha=255) and
+     * really do reach 100% coverage, but flushing the queued text AFTER them
+     * (the previous order) re-stamped every one of those HUD widgets back on
+     * top of the black -- reading as "the transition doesn't fully cover the
+     * screen" even though the fade geometry itself was correct. Split-screen
+     * showed this far more visibly because it queues a full HUD widget set
+     * per pane, all bleeding through at once, vs. a single easy-to-miss
+     * instance in single-player. [user 2026-07-04: "end race now transition
+     * animation end is semi-transparent (at least on multiplayer split
+     * screen)"] Moving the flush here (unchanged relative to the pause
+     * overlay above it) makes the fade the true last thing painted. */
+    td5_hud_flush_text();
+
     /* Race end fade: directional wipe overlay (black bars closing in).
      * [CONFIRMED @ 0x0042b791/0x0042b797 RunRaceFrame] The directional fade and
      * the 1st-place victory star pulse are MUTUALLY EXCLUSIVE: orig CMPs
@@ -6904,8 +6924,6 @@ int td5_game_run_race_frame(void) {
      * centered render state, alongside the star pulse). Drawing it here picked up
      * a leftover viewport/clip offset and landed it off-centre. The captured place
      * is exposed via td5_game_get_finish_position() below. */
-
-    td5_hud_flush_text();
 
     /* ---- Audio tick ---- */
 

@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "Pause menu confirm popup (END RACE NOW, RESTART, etc.)" },
+    { CL_ITEM,    "  now scales correctly on high-resolution displays" },
+    { CL_ITEM,    "Race-end transition: HUD text no longer flashes through" },
+    { CL_ITEM,    "  the black screen wipe (most visible in split-screen)" },
     { CL_ITEM,    "Cop Chase RANDOM COP: whoever gets drawn as the cop" },
     { CL_ITEM,    "  now drives a police car, not their originally-" },
     { CL_ITEM,    "  picked car" },
