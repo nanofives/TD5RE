@@ -2163,11 +2163,13 @@ void td5_hud_draw_endrace_confirm(void)
 
     float cx = sw * 0.5f;
     float cy = sh * 0.5f;
-    /* Scale the prompt with screen width (mirrors the net-pause overlay), clamped
-     * so it stays readable on small windows and not gigantic on 4K. */
-    float ts = sw / 640.0f;
-    if (ts > 1.6f)  ts = 1.6f;
-    if (ts < 0.40f) ts = 0.40f;
+    /* [DPI FIX 2026-07-04] Use the SAME uniform scale as the pause panel behind
+     * this modal (hud_pause_scale: min(W/640, H/480), DPI-guarded, no upper
+     * cap). The previous width-only `sw/640` ratio with a 1.6x hard cap fell
+     * far short of the panel's scale on high-res displays (e.g. 3.0x at
+     * 2560x1440) -- the modal rendered at ~53% of the panel's size, reading as
+     * "too small" on higher-DPI machines. [user: "too small on downstairs PC"] */
+    float ts = hud_pause_scale();
     float line_h = 30.0f * ts;
     /* Gold matches the frontend confirm-title accent (MP_TITLE_GOLD 0xFFE3D708). */
     td5_vui_text_centered(cx, cy - line_h * 0.6f, "END RACE NOW?",
@@ -2199,9 +2201,11 @@ void td5_hud_draw_pause_action_confirm(void)
 
     float cx = sw * 0.5f;
     float cy = sh * 0.5f;
-    float ts = sw / 640.0f;
-    if (ts > 1.6f)  ts = 1.6f;
-    if (ts < 0.40f) ts = 0.40f;
+    /* [DPI FIX 2026-07-04] Same fix as td5_hud_draw_endrace_confirm above --
+     * use hud_pause_scale() (the pause panel's own uniform scale) instead of a
+     * width-only ratio capped at 1.6x, which undersized this modal relative to
+     * the panel behind it on higher-resolution displays. */
+    float ts = hud_pause_scale();
     float line_h = 30.0f * ts;
 
     const char *question = "";
