@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "Cop Chase RANDOM COP: whoever gets drawn as the cop" },
+    { CL_ITEM,    "  now drives a police car, not their originally-" },
+    { CL_ITEM,    "  picked car" },
     { CL_ITEM,    "Net play: the host can now pick the GAME MODE from" },
     { CL_ITEM,    "  the network lobby - Race, Drag Race, Traffic" },
     { CL_ITEM,    "  Battle and Cop Chase all play over the network" },
