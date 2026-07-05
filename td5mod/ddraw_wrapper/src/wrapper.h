@@ -221,7 +221,10 @@ typedef struct {
     int     alphaTestEnabled;
     float   alphaRef;       /* 0..1 range */
     float   _pad1;
-    float   _pad2;
+    float   foliageAA;      /* [foliage AA] 1.0 = this draw uses the clamped,
+                              * alpha-weighted manual reconstruction in
+                              * SampleFoliageAA (ps_common.hlsli) instead of
+                              * texMap.Sample(); 0.0 = normal sampling. */
 } FogCB;
 
 /* Deferred dynamic-light pass constant buffer (mirrors ps_light.hlsl LightCB).
@@ -297,11 +300,20 @@ typedef struct {
     int                       gbuffer_enabled;   /* game wants G-buffer this frame */
     int                       gbuffer_bound;     /* RT1 currently bound (OM state) */
 
-    /* [foliage AA 2026-07-04] Anti-alias 2D cutout foliage (trees/fences/signs).
-     * When set, draws the game submits with color-key alpha test on a
-     * transparent-source texture (A1R5G5B5 / color-keyed R5G6B5) are forced to
-     * bilinear + standard alpha blend, so the 1-bit edge/dither alpha smooths
-     * into an anti-aliased silhouette instead of a jagged point-sampled cutout.
+    /* [foliage AA 2026-07-04, reworked 2026-07-04] Anti-alias 2D cutout
+     * foliage (trees/fences/signs). When set, draws the game submits with
+     * color-key alpha test on a transparent-source texture (A1R5G5B5 /
+     * color-keyed R5G6B5) are rendered via a manual clamped, alpha-weighted
+     * 4-tap reconstruction (SampleFoliageAA in ps_common.hlsli) instead of
+     * texMap.Sample(), so the 1-bit edge/dither alpha smooths into an
+     * anti-aliased silhouette instead of a jagged point-sampled cutout.
+     * Sampling manually (not via the bound sampler) avoids two bugs hardware
+     * bilinear had: (1) "transparent" texels keep whatever incidental RGB
+     * was baked into the source art (e.g. sky-blue painted behind the tree)
+     * since texture2.c never zeroes it, so bilinear would leak that color
+     * into the edge regardless of what's actually behind the sprite; (2) the
+     * clamped-index fetch never wraps to the texture's opposite edge, unlike
+     * the sampler's WRAP addressing, which caused a seam/bar at the border.
      * Read once from TD5RE_FOLIAGE_AA at device init (default 1). See
      * Backend_IsFoliageAA. */
     int                       foliage_aa_enabled;

@@ -1618,6 +1618,26 @@ void Backend_UpdateViewportCB(float w, float h)
         (ID3D11Resource*)cb, 0, NULL, &vp, 0, 0);
 }
 
+/* [foliage AA 2026-07-04, reworked 2026-07-04] A draw is "cutout foliage"
+ * when the game has the color-key alpha test enabled (st->alpha_test_enable,
+ * set only by D3DRS_COLORKEYENABLE) AND the bound texture came from a
+ * transparent source (has_alpha: A1R5G5B5, or R5G6B5 with a color key). That
+ * combination is exactly trees / fences / signs / chain-link — the opaque
+ * sky/road/car-body are plain R5G6B5 (has_alpha=0) drawn with the color key
+ * off, so they never match. Matches are rendered via a manual clamped,
+ * alpha-weighted texel reconstruction (SampleFoliageAA in ps_common.hlsli,
+ * selected per-draw by the foliageAA flag in FogCB) instead of the bound
+ * sampler's hardware bilinear, so the 1-bit edge/dither alpha interpolates
+ * into a smooth anti-aliased silhouette without leaking incidental
+ * "transparent" texel color or wrap-seam artifacts at the sprite border (see
+ * the FogCB.foliageAA comment in wrapper.h for why hardware bilinear alone
+ * got both of those wrong). The tight scope avoids the old global
+ * luminance-alpha regression (sky/road/cars turned translucent). */
+static int Backend_IsFoliageAA(const RenderStateCache *st, int has_alpha)
+{
+    return g_backend.foliage_aa_enabled && st->alpha_test_enable && has_alpha;
+}
+
 void Backend_UpdateFogCB(void)
 {
     WrapperRecCtx *rc = g_wrapper_rec;
@@ -1626,6 +1646,8 @@ void Backend_UpdateFogCB(void)
     RenderStateCache *st = rc ? &rc->state : &g_backend.state;
     FogCB fog;
     DWORD fc = st->fog_color;
+    int foliage_aa = Backend_IsFoliageAA(st,
+        rc ? rc->current_tex_has_alpha : g_backend.current_tex_has_alpha);
     fog.fogColor[0] = ((fc >> 16) & 0xFF) / 255.0f;  /* R */
     fog.fogColor[1] = ((fc >>  8) & 0xFF) / 255.0f;  /* G */
     fog.fogColor[2] = ((fc >>  0) & 0xFF) / 255.0f;  /* B */
@@ -1637,7 +1659,7 @@ void Backend_UpdateFogCB(void)
     fog.alphaTestEnabled = st->alpha_test_enable;
     fog.alphaRef    = st->alpha_ref / 255.0f;
     fog._pad1       = 0.0f;
-    fog._pad2       = 0.0f;
+    fog.foliageAA   = foliage_aa ? 1.0f : 0.0f;
     ID3D11DeviceContext_UpdateSubresource(ctx,
         (ID3D11Resource*)cb, 0, NULL, &fog, 0, 0);
 }
@@ -1648,21 +1670,6 @@ void Backend_UpdateFogCB(void)
 
 static const char *s_ps_names[] = { "MODULATE", "MODULATE_ALPHA", "DECAL", "LUMINANCE_ALPHA",
                                     "MODULATE_G", "MODULATE_ALPHA_G" };
-
-/* [foliage AA 2026-07-04] A draw is "cutout foliage" when the game has the
- * color-key alpha test enabled (st->alpha_test_enable, set only by
- * D3DRS_COLORKEYENABLE) AND the bound texture came from a transparent source
- * (has_alpha: A1R5G5B5, or R5G6B5 with a color key). That combination is
- * exactly trees / fences / signs / chain-link — the opaque sky/road/car-body
- * are plain R5G6B5 (has_alpha=0) drawn with the color key off, so they never
- * match. We render matches with bilinear + standard alpha blend so the 1-bit
- * edge/dither alpha interpolates into a smooth anti-aliased silhouette instead
- * of a jagged point-sampled cutout. The tight scope avoids the old global
- * luminance-alpha regression (sky/road/cars turned translucent). */
-static int Backend_IsFoliageAA(const RenderStateCache *st, int has_alpha)
-{
-    return g_backend.foliage_aa_enabled && st->alpha_test_enable && has_alpha;
-}
 
 void Backend_SelectPixelShader(void)
 {
@@ -1723,9 +1730,12 @@ void Backend_ApplyStateCache(void)
     if (!s->dirty) return;
 
     /* [foliage AA] Cutout foliage (color-key alpha test on a transparent-source
-     * texture) is forced to bilinear + standard alpha blend below so its 1-bit
-     * edge/dither alpha anti-aliases. Computed once, reused for the blend,
-     * sampler, and G-buffer-binding decisions. */
+     * texture) is rendered via the shader's manual reconstruction (FogCB's
+     * foliageAA flag, set in Backend_UpdateFogCB below) + standard alpha
+     * blend, so its 1-bit edge/dither alpha anti-aliases. The bound sampler
+     * is NOT involved for these draws (see ps_common.hlsli SampleFoliageAA).
+     * Computed once here, reused for the blend and G-buffer-binding
+     * decisions. */
     int foliage_aa = Backend_IsFoliageAA(s,
         rc ? rc->current_tex_has_alpha : g_backend.current_tex_has_alpha);
 
@@ -1797,10 +1807,14 @@ void Backend_ApplyStateCache(void)
         else if (!linear && clamp) si = SAMP_POINT_CLAMP;
         else                       si = SAMP_POINT_WRAP;
 
-        /* [foliage AA] Force bilinear so the 1-bit alpha edge/dither becomes a
-         * continuous 0..1 ramp the alpha blend can smooth (keeps the game's
-         * wrap/clamp addressing). */
-        if (foliage_aa) si = clamp ? SAMP_LINEAR_CLAMP : SAMP_LINEAR_WRAP;
+        /* [foliage AA] No override here anymore: foliage_aa draws reconstruct
+         * their own edge in the pixel shader via Load() (SampleFoliageAA),
+         * which never touches the bound sampler, so forcing a filter/address
+         * mode on it would be a no-op. Previously this forced bilinear while
+         * keeping the game's WRAP addressing, which bled the texture's
+         * opposite edge into the sprite border — that's what moved the fix
+         * into the shader instead of the fixed-function sampler. foliage_aa
+         * itself is still used below for the G-buffer-binding decision. */
 
         if (si != s->current_samp_idx) {
             s->current_samp_idx = si;

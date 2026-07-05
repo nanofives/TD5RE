@@ -13,7 +13,7 @@
 
 float4 main(PS_INPUT input) : SV_TARGET
 {
-    float4 tex = texMap.Sample(samplerState, input.uv);
+    float4 tex = SampleTex(texMap, samplerState, input.uv);
     float4 color;
     color.rgb = tex.rgb * input.diffuse.rgb;
     color.a   = tex.a;
