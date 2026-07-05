@@ -3665,6 +3665,21 @@ void td5_camera_set_rear_view(int view, int active)
     }
 }
 
+/* [RESET-CAR REPAIR CAMERA 2026-07-04] Snap this viewport's chase-cam yaw
+ * offset back to normal (directly behind the car). cam_finish_orbit_step spins
+ * g_camYawOffset[v] while the view's car is knocked out (CarDamage finish-
+ * orbit, port-only); nothing else clears it once the car recovers mid-race —
+ * only the once-per-race td5_camera_set_preset zeroes it — so a manually
+ * repaired car left the camera parked at whatever angle it had drifted to.
+ * Call this right after a successful manual stuck-recovery repair. No-op on
+ * an out-of-range view. */
+void td5_camera_reset_yaw_offset(int view)
+{
+    if (view < 0 || view >= TD5_MAX_VIEWPORTS) return;
+    g_camYawOffset[view] = 0;
+    TD5_LOG_I(LOG_TAG, "camera: yaw offset reset view=%d (manual recovery repair)", view);
+}
+
 void td5_camera_update_trackside(TD5_Actor *a, int vi)
 {
     UpdateTracksideCamera((int)a, vi);
