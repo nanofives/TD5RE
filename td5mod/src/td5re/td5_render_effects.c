@@ -3196,7 +3196,7 @@ static TD5_MeshHeader *s_sky_mesh = NULL;   /* sky.prr dome mesh */
  * computed once at load. The single most literal "how bright are the
  * surroundings" cue: a night/dusk track (Moscow) has a dark sky, a daytime
  * track a bright one — which the per-zone light table does NOT encode. Consumed
- * by td5_render_env_is_dark() as the whole-track brightness baseline. -1 = no
+ * by td5_render_env_is_dark_for_slot() as the whole-track brightness baseline. -1 = no
  * sky loaded / unknown (term disabled). */
 static float           s_sky_luma = -1.0f;
 

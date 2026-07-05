@@ -26,7 +26,11 @@ static int          s_light_count   = 0;
 static int          s_enabled       = 1;   /* master enable (set from INI at boot) */
 static int          s_headlights    = 1;   /* manual headlight emitter enable */
 static int          s_auto          = 1;   /* auto-enable in poorly-lit environments */
-static int          s_env_dark      = 0;   /* set per-frame by the render env-brightness probe */
+static int          s_env_dark      = 0;   /* set per-frame by the render env-brightness probe (street lamps + single-value fallback) */
+/* Per-actor-slot env-dark verdict — split-screen players can be in different
+ * lighting simultaneously, so vehicle headlight emission follows THIS array,
+ * not the single s_env_dark above (see td5_light_set_env_dark_for_slot). */
+static int          s_env_dark_slot[TD5_ACTOR_MAX_TOTAL_SLOTS];
 
 void td5_light_set_enabled(int on)      { s_enabled = on ? 1 : 0; }
 int  td5_light_enabled(void)            { return s_enabled; }
@@ -35,13 +39,21 @@ int  td5_light_headlights_enabled(void) { return s_headlights; }
 void td5_light_set_auto(int on)         { s_auto = on ? 1 : 0; }
 int  td5_light_auto(void)               { return s_auto; }
 void td5_light_set_env_dark(int dark)   { s_env_dark = dark ? 1 : 0; }
+void td5_light_set_env_dark_for_slot(int slot, int dark)
+{
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return;
+    s_env_dark_slot[slot] = dark ? 1 : 0;
+}
 
-/* Effective headlight emission: in AUTO mode follow the environment-dark probe;
- * otherwise follow the manual headlight toggle. */
-static int td5_light_headlights_active(void)
+/* Effective headlight emission for one actor slot: in AUTO mode follow that
+ * slot's OWN environment-dark verdict; otherwise (manual mode) follow the
+ * global manual headlight toggle, same for every car. */
+static int td5_light_headlights_active_for_slot(int slot)
 {
     if (!s_enabled) return 0;
-    return s_auto ? s_env_dark : s_headlights;
+    if (!s_auto) return s_headlights;
+    if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return s_env_dark;
+    return s_env_dark_slot[slot];
 }
 
 void td5_light_begin_frame(void)
@@ -161,7 +173,7 @@ static void body_to_world(const float *m, float ox, float oy, float oz,
 
 void td5_light_emit_vehicle_headlights(void)
 {
-    if (!td5_light_headlights_active()) return;
+    if (!s_enabled) return;
     read_knobs_once();
 
     int total = td5_game_get_total_actor_count();
@@ -171,6 +183,10 @@ void td5_light_emit_vehicle_headlights(void)
     for (int slot = 0; slot < total; slot++) {
         /* Racers always; traffic only when the knob is set. */
         if (slot >= g_traffic_slot_base && !s_hl_traffic) continue;
+        /* [AUTO LIGHTS] Per-slot verdict — split-screen players can be in
+         * different lighting at once, so each car's headlights follow only
+         * its OWN zone/manual state, never a sibling viewport's. */
+        if (!td5_light_headlights_active_for_slot(slot)) continue;
 
         TD5_Actor *a = td5_game_get_actor(slot);
         if (!a) continue;

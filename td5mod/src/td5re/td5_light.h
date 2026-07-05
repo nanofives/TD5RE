@@ -69,8 +69,16 @@ void td5_light_set_auto(int on);
 int  td5_light_auto(void);
 
 /* Per-frame environment-darkness verdict, set by the renderer's brightness probe
- * (td5_render_env_is_dark). Consumed by the emitter when Auto is on. */
+ * (td5_render_env_is_dark_for_slot). Applies to street lamps + any single-value
+ * fallback context (frontend car preview, photo booth) — those aren't split
+ * across viewports so one shared value is correct there. */
 void td5_light_set_env_dark(int dark);
+
+/* Same, but PER ACTOR SLOT: split-screen players can be in different lighting
+ * simultaneously (one in a tunnel, one on open road), so vehicle headlights
+ * must follow each car's OWN verdict rather than one shared/latched flag.
+ * Consumed by td5_light_emit_vehicle_headlights() when Auto is on. */
+void td5_light_set_env_dark_for_slot(int slot, int dark);
 
 /* ---- Per-frame lifecycle ----------------------------------------------- */
 /* Clear the registry at the top of each rendered frame. Re-populate via the

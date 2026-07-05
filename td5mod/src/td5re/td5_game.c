@@ -6482,21 +6482,39 @@ int td5_game_run_race_frame(void) {
      * (Mode>=1); z-writing world draws populate it and the per-pane light pass
      * applies proper N.L. No-op (off) in Mode 0. */
     td5_render_lighting2_frame_begin();
-    /* [AUTO LIGHTS] Decide whether the environment is poorly lit. In AUTO mode
-     * (default), non-clear weather / dark tracks get the full headlight treatment:
-     * the beams turn on AND the scene is dimmed so they read strongly — the look
-     * approved manually, applied automatically. Bright daylight stays untouched.
-     * The manual [Lighting] DarkMode always forces it on. */
+    /* [AUTO LIGHTS] Decide whether the environment is poorly lit, PER ACTOR SLOT
+     * (each car's own track-zone brightness). In AUTO mode (default), non-clear
+     * weather / dark tracks get the full headlight treatment: the beams turn on
+     * AND the scene is dimmed so they read strongly — the look approved
+     * manually, applied automatically. Bright daylight stays untouched. The
+     * manual [Lighting] DarkMode always forces it on for every slot.
+     * [2026-07-04 SPLIT-SCREEN FIX] Previously this was a single decision fed
+     * from slot 0's zone only, so every OTHER player's headlights (and one
+     * player's own state, once slot 0 exited a tunnel) followed player 1's
+     * position — a player driving in a tunnel could have their headlights
+     * killed by a sibling viewport clearing its own dark zone, and the shared
+     * hysteresis latch then never re-armed for that player's later tunnels.
+     * Now every active actor slot gets its own verdict from
+     * td5_render_env_is_dark_for_slot(slot) (per-slot ambient/direct capture +
+     * per-slot hysteresis latch in td5_render_mesh.c). */
     {
         int manual_dark = g_td5.ini.light_dark_mode;
-        int env_dark;
-        if (td5_light_auto()) {
-            env_dark = td5_render_env_is_dark() || manual_dark;
-            td5_render_set_dark_mode(env_dark);
-        } else {
-            env_dark = manual_dark;   /* dimming stays as configured at startup */
+        int auto_on = td5_light_auto();
+        int total_actors = td5_game_get_total_actor_count();
+        if (total_actors > TD5_ACTOR_MAX_TOTAL_SLOTS) total_actors = TD5_ACTOR_MAX_TOTAL_SLOTS;
+        for (int s = 0; s < total_actors; s++) {
+            int dark_s = auto_on ? (td5_render_env_is_dark_for_slot(s) || manual_dark) : manual_dark;
+            td5_light_set_env_dark_for_slot(s, dark_s);
         }
-        td5_light_set_env_dark(env_dark);
+        /* Slot-0 verdict also drives the non-per-viewport fallback (frontend
+         * car previews / photo booth, which never enter the viewport loop
+         * below) and street lamps (already slot-0-referenced by design — see
+         * td5_light_emit_street_lamps). Per-viewport race rendering overrides
+         * td5_render_set_dark_mode with each pane's OWN local player just
+         * before that pane renders (see the viewport loop below). */
+        int env_dark0 = auto_on ? (td5_render_env_is_dark_for_slot(0) || manual_dark) : manual_dark;
+        td5_render_set_dark_mode(env_dark0);
+        td5_light_set_env_dark(env_dark0);
     }
     if (!td5_render_photobooth_active())
         td5_light_emit_vehicle_headlights();
@@ -6684,6 +6702,19 @@ int td5_game_run_race_frame(void) {
             }
         }
         td5_camera_apply_view(vp);
+
+        /* [AUTO LIGHTS / 2026-07-04 SPLIT-SCREEN FIX] This pane's OWN local
+         * player's dark verdict — split-screen panes can be in different
+         * lighting at once (one player in a tunnel, one on open road), so the
+         * scene-dim floor must be re-applied per viewport right before its
+         * world/actor draws (td5_render_compute_vertex_lighting reads
+         * td5_render_set_dark_mode's flag per mesh as it renders this pane).
+         * Manual DarkMode is uniform for every pane; only the auto per-slot
+         * verdict varies. */
+        if (td5_light_auto()) {
+            td5_render_set_dark_mode(
+                td5_render_env_is_dark_for_slot(g_actorSlotForView[vp]) || g_td5.ini.light_dark_mode);
+        }
 
         /* Configure projection for this viewport */
         td5_render_configure_projection(s_viewports[vp].w, s_viewports[vp].h);

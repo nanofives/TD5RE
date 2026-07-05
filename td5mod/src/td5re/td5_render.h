@@ -119,9 +119,12 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y);
  * LIGHTING_REWORK_PLAN.md. */
 void td5_render_lighting2_frame_begin(void);
 
-/* [AUTO LIGHTS] 1 when the current environment is poorly lit (dark track zone or
- * non-clear weather) and headlights should auto-enable; 0 in bright daylight. */
-int  td5_render_env_is_dark(void);
+/* [AUTO LIGHTS] 1 when actor SLOT's own environment is poorly lit (its zone is
+ * dark, the track's sky is dark, or it's raining) and that car's headlights
+ * should auto-enable; 0 in bright daylight. PER-SLOT so split-screen players in
+ * different lighting (one in a tunnel, one on open road) each get their own
+ * verdict instead of one shared/latched flag. */
+int  td5_render_env_is_dark_for_slot(int slot);
 
 /* [task#21 TD6 per-area lighting zones — REMOVED/DEFERRED 2026-06-19 at user
  * request; see the note in td5_render.c. The RE + LIGHTZONES.BIN extractor
