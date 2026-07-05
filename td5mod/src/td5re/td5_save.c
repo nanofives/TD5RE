@@ -2139,6 +2139,52 @@ static int cfgini_read_input(void)
                                s_js_action_bind[pl * TD5_JSBIND_ACTIONS + a]);
         }
 
+    /* [FIX 2026-07-04] Retroactively un-stick joystick rows that were frozen
+     * verbatim onto a now-superseded built-in default. Before this fix,
+     * merely opening Controller Setup for an unconfigured joystick and
+     * pressing OK (even without touching a single binding) permanently saved
+     * a snapshot of whatever k_default_js_action_bind was that day — so a
+     * player who visited early keeps an old CHANGE VIEW button forever while
+     * every joystick nobody ever visited tracks the live (current) default.
+     * That produced exactly "joystick 1 has a different camera button than
+     * the others." The behavioural fix (Screen_ControllerBinding, td5_fe_menu.c)
+     * stops NEW freezes; this repairs installs that already have one, by
+     * recognizing an EXACT byte-for-byte match against a historical default
+     * snapshot (not a real user edit — no genuine remap would coincidentally
+     * reproduce 11 stock values) and resetting the row to unconfigured so it
+     * resumes tracking the live default. RE basis: N/A — TD5RE-only, no
+     * original counterpart (k_default_js_action_bind is a port invention). */
+    {
+        /* Gen A (before commit 75c1d767, 2026-06-24): CHANGE VIEW = button 6. */
+        static const uint32_t k_stale_gen_a[TD5_JSBIND_ACTIONS] = {
+            TD5_JSBIND_AXIS | (0u << 1) | 1u, TD5_JSBIND_AXIS | (0u << 1) | 0u,
+            TD5_JSBIND_AXIS | (2u << 1) | 1u, TD5_JSBIND_AXIS | (2u << 1) | 0u,
+            TD5_JSBIND_BUTTON | 2u, TD5_JSBIND_BUTTON | 3u,
+            TD5_JSBIND_BUTTON | 5u, TD5_JSBIND_BUTTON | 4u,
+            TD5_JSBIND_BUTTON | 6u, TD5_JSBIND_BUTTON | 9u, TD5_JSBIND_BUTTON | 7u,
+        };
+        /* Gen B (2026-06-24 .. before 03686cf3, 2026-06-27): CHANGE VIEW = button 8 (L3). */
+        static const uint32_t k_stale_gen_b[TD5_JSBIND_ACTIONS] = {
+            TD5_JSBIND_AXIS | (0u << 1) | 1u, TD5_JSBIND_AXIS | (0u << 1) | 0u,
+            TD5_JSBIND_AXIS | (2u << 1) | 1u, TD5_JSBIND_AXIS | (2u << 1) | 0u,
+            TD5_JSBIND_BUTTON | 2u, TD5_JSBIND_BUTTON | 3u,
+            TD5_JSBIND_BUTTON | 5u, TD5_JSBIND_BUTTON | 4u,
+            TD5_JSBIND_BUTTON | 8u, TD5_JSBIND_BUTTON | 9u, TD5_JSBIND_BUTTON | 7u,
+        };
+        for (int pl = 0; pl < TD5_MAX_HUMAN_PLAYERS; pl++) {
+            uint32_t *row = &s_js_action_bind[pl * TD5_JSBIND_ACTIONS];
+            int is_stale = (memcmp(row, k_stale_gen_a, sizeof(k_stale_gen_a)) == 0) ||
+                           (memcmp(row, k_stale_gen_b, sizeof(k_stale_gen_b)) == 0);
+            if (is_stale) {
+                TD5_LOG_I(LOG_TAG,
+                    "Input migration: player %d joystick action row matched a "
+                    "superseded built-in default (frozen CHANGE VIEW button) — "
+                    "clearing so it resumes tracking the live default", pl + 1);
+                memset(row, 0, TD5_JSBIND_ACTIONS * sizeof(uint32_t));
+            }
+        }
+    }
+
     for (int i = 0; i < 10; i++) {
         p1kb[i] = (uint8_t)td5_plat_ini_get_int(f, "KeyboardPlayer1", k_cfgini_kb_names[i], p1kb[i]);
         p2kb[i] = (uint8_t)td5_plat_ini_get_int(f, "KeyboardPlayer2", k_cfgini_kb_names[i], p2kb[i]);
