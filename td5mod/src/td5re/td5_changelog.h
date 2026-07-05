@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "FIX: Bern's START banner no longer reads backwards -" },
+    { CL_ITEM,    "  a leftover from the overhead-banner mirror fix that" },
+    { CL_ITEM,    "  needed a per-track correction on this one gantry" },
     { CL_ITEM,    "Net play: the host can now pick the GAME MODE from" },
     { CL_ITEM,    "  the network lobby - Race, Drag Race, Traffic" },
     { CL_ITEM,    "  Battle and Cop Chase all play over the network" },
