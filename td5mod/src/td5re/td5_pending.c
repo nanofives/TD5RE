@@ -69,6 +69,8 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Cop Chase (MP): cops' sirens default ON at race start (horn toggles off)",
+    "Cop Chase (Net play): RESTART RACE re-rolls who is picked as the cop",
     "Net play: host picks GAME MODE in the network lobby (Race/Drag/Battle/Cop)",
     "Net play: CUP over the network (series advance, points, standings, auto-teams)",
     "Net play: Cop Chase INFECT online + COPS/SUSPECTS results table over net",

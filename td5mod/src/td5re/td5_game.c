@@ -4859,6 +4859,15 @@ static int td5_game_net_sync_frame(int apply_dt_correction) {
         while (td5_net_receive(&mtype, &mdata, &msize)) {
             if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
                 ((const uint8_t *)mdata)[0] == 0x19 && !s_pause_restart_pending) {
+                /* [MP RESTART RE-ROLL 2026-07-04] Adopt the host's fresh
+                 * restart seed (rides in bytes 4-7 of this same message)
+                 * before re-init so our cop-chase/wheel-style draw matches
+                 * every other peer's instead of replaying the old race. */
+                if (msize >= 8) {
+                    uint32_t new_seed;
+                    memcpy(&new_seed, (const uint8_t *)mdata + 4, 4);
+                    td5_net_update_race_seed(new_seed);
+                }
                 /* [S31] Host restarted the race: same fade + re-init here. */
                 TD5_LOG_I(LOG_TAG, "net: host restarted the race -> re-init");
                 s_pause_menu_active = 0;
@@ -4994,6 +5003,14 @@ static int td5_game_net_try_sync(void) {
         while (td5_net_receive(&mtype, &mdata, &msize)) {
             if (mtype == TD5_DXPDATA && mdata && msize >= 1 &&
                 ((const uint8_t *)mdata)[0] == 0x19 && !s_pause_restart_pending) {
+                /* [MP RESTART RE-ROLL 2026-07-04] See td5_game_net_sync_frame's
+                 * matching branch for why -- adopt the host's fresh seed
+                 * before re-init. */
+                if (msize >= 8) {
+                    uint32_t new_seed;
+                    memcpy(&new_seed, (const uint8_t *)mdata + 4, 4);
+                    td5_net_update_race_seed(new_seed);
+                }
                 s_pause_menu_active = 0;
                 s_pause_restart_pending = 1;
                 td5_game_begin_fade_out(0);
@@ -8822,13 +8839,26 @@ static void td5_game_pause_execute_action(int which)
              * lockstep latch survives the restart (release_race_resources
              * keeps it while restart_pending) and InitRace re-seeds from the
              * archived DXPSTART config, so all machines rebuild the identical
-             * race and resume the same exchange. */
+             * race and resume the same exchange.
+             * [MP RESTART RE-ROLL 2026-07-04] The archived rng_seed used to
+             * ride along UNCHANGED, so every RNG-seeded pick (cop-chase cop,
+             * wheel styles, traffic pattern) came out IDENTICAL on every
+             * restart -- e.g. the same player was always drawn as the cop.
+             * Local MP never had this problem because ITS restart path
+             * reseeds from GetTickCount(); mirror that here by drawing a
+             * fresh seed, adopting it locally (td5_net_update_race_seed), and
+             * riding it in bytes 4-7 of this same broadcast so every client
+             * adopts the identical new seed before its own re-init. */
             if (td5_net_is_host()) {
+                uint32_t new_seed = (uint32_t)td5_plat_time_ms() ^ ((uint32_t)rand() << 16);
                 uint8_t rs_msg[8] = {0x19, 0, 0, 0, 0, 0, 0, 0};
+                memcpy(rs_msg + 4, &new_seed, 4);
+                td5_net_update_race_seed(new_seed);
                 td5_net_send(TD5_DXPDATA, rs_msg, 8);
                 s_pause_menu_active = 0;
                 s_pause_restart_pending = 1;
-                TD5_LOG_I(LOG_TAG, "Pause menu: net RESTART (host), fading out");
+                TD5_LOG_I(LOG_TAG, "Pause menu: net RESTART (host), new seed=0x%08X, fading out",
+                          new_seed);
                 td5_game_begin_fade_out(0);
             } else {
                 TD5_LOG_I(LOG_TAG, "Pause menu: RESTART is host-only in net races");

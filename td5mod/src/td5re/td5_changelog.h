@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 4" },
+    { CL_ITEM,    "Cop Chase (MP): cops' sirens now start ON by default" },
+    { CL_ITEM,    "  each race - press horn to turn one off if you want" },
+    { CL_ITEM,    "Cop Chase (Net play): RESTART RACE now re-rolls who" },
+    { CL_ITEM,    "  gets picked as the cop, instead of the same player" },
+    { CL_ITEM,    "  every time" },
     { CL_ITEM,    "Net play: the host can now pick the GAME MODE from" },
     { CL_ITEM,    "  the network lobby - Race, Drag Race, Traffic" },
     { CL_ITEM,    "  Battle and Cop Chase all play over the network" },

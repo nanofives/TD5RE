@@ -472,6 +472,38 @@ void td5_sound_tick(void)
  * playing). Reset it per race + force audio audible on race start. */
 static int s_sound_paused = 0;
 
+/* [MP COP CHASE SIREN DEFAULT-ON 2026-07-04, PORT ENHANCEMENT] In human MP cop
+ * chase (local split-screen or net) the siren used to start OFF every race,
+ * requiring every cop to press horn once before it counted for the arrest
+ * gate / looked right on the HUD. Default each actual human cop's siren ON
+ * instead so it's already active at the green light; the horn still toggles
+ * it off (td5_sound_toggle_cop_siren, td5_input.c) for players who want it
+ * silent. Called from BOTH per-race resets below (td5_sound_init_race_resources
+ * AND the per-slot td5_sound_load_vehicle_bank, which unconditionally zeroes
+ * the same per-cop array on every vehicle it loads) so whichever runs last
+ * still lands on the correct default -- td5_game_cop_chase_is_cop() is safe to
+ * call from either site because InitRace finalizes wanted_mode_enabled + the
+ * cop role mask (td5_game_assign_random_cop, td5_game.c:2211) before EITHER
+ * sound reset runs (td5_game.c:2676 and :2755 respectively).
+ * Scoped to !cop_is_ai (human cop chase) -- an AI-driven cop has no horn to
+ * toggle, so its cosmetic siren default is left alone. */
+static void td5_sound_apply_cop_siren_defaults(void)
+{
+    if (!g_td5.wanted_mode_enabled || g_td5.mp_mode_config.cop_is_ai)
+        return;
+
+    int any_cop = 0;
+    for (int slot = 0; slot < TD5_MAX_RACER_SLOTS; slot++) {
+        if (td5_game_cop_chase_is_cop(slot)) {
+            s_cop_siren_on[slot] = 1;
+            any_cop = 1;
+        }
+    }
+    s_siren_user_enabled = any_cop;
+    TD5_LOG_I(LOG_TAG, "MP cop chase: siren defaulted ON for cop slot(s) mask=0x%X",
+              g_td5.mp_mode_config.cop_slot_mask);
+}
+
 int td5_sound_init_race_resources(void)
 {
     /* [#8] Fresh audio state for this race: drop any leftover pause suspend from
@@ -501,8 +533,9 @@ int td5_sound_init_race_resources(void)
     s_tracked_veh_actor     = 0;
     s_siren_active_flag     = 0;
     s_siren_refreshed       = 0;
-    s_siren_user_enabled    = 0;   /* siren starts off; press horn to enable */
-    memset(s_cop_siren_on, 0, sizeof(s_cop_siren_on));   /* per-cop sirens off */
+    s_siren_user_enabled    = 0;   /* siren starts off; press horn to re-toggle */
+    memset(s_cop_siren_on, 0, sizeof(s_cop_siren_on));   /* per-cop sirens off (default) */
+    td5_sound_apply_cop_siren_defaults();   /* MP cop chase: default cop(s) siren ON */
     s_skid_playing[0]       = 0;
     s_skid_playing[1]       = 0;
     s_rain_playing[0]       = 0;
@@ -651,8 +684,9 @@ int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
     s_rain_playing[1]   = 0;
     s_siren_refreshed   = 0;
     s_siren_active_flag = 0;
-    s_siren_user_enabled = 0;   /* siren off until the player presses the horn */
-    memset(s_cop_siren_on, 0, sizeof(s_cop_siren_on));   /* per-cop sirens off */
+    s_siren_user_enabled = 0;   /* siren off until the player presses the horn (default) */
+    memset(s_cop_siren_on, 0, sizeof(s_cop_siren_on));   /* per-cop sirens off (default) */
+    td5_sound_apply_cop_siren_defaults();   /* MP cop chase: default cop(s) siren ON */
 
     return 1;
 }
