@@ -144,5 +144,13 @@ void td5_net_set_local_car(int car_index, int paint_index, int td6_color);
 int  td5_net_get_slot_td6_color(int slot);
 int  td5_net_get_slot_car(int slot, int *car_index, int *paint_index);
 int  td5_net_get_race_config(TD5_NetRaceConfig *out);
+/* [MP RESTART RE-ROLL 2026-07-04] Overwrite just the archived rng_seed field
+ * (track/cars/mode_config untouched) so a pause-menu net RESTART draws a fresh
+ * cop-chase/wheel-style/traffic roll instead of replaying the exact same seed
+ * every time -- mirrors local MP, which already reseeds from GetTickCount() on
+ * every restart. Host calls this when composing the RACE_RESTART broadcast;
+ * every client calls it after parsing the same seed back out of that
+ * broadcast, so all machines land on the identical new value. */
+void td5_net_update_race_seed(uint32_t new_seed);
 
 #endif /* TD5_NET_H */

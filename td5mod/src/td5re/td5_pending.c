@@ -83,6 +83,8 @@ static const char *const k_seed[] = {
     "Split-screen: each player's headlights follow their OWN tunnel/zone now",
     "Bern: START banner reads correctly now (was backwards/mirrored)",
     "Split-screen Drag Race: fixed launching wrong track instead of drag strip",
+    "Cop Chase (MP): cops' sirens default ON at race start (horn toggles off)",
+    "Cop Chase (Net play): RESTART RACE re-rolls who is picked as the cop",
     "Net play: host picks GAME MODE in the network lobby (Race/Drag/Battle/Cop)",
     "Net play: CUP over the network (series advance, points, standings, auto-teams)",
     "Net play: Cop Chase INFECT online + COPS/SUSPECTS results table over net",

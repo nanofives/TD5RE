@@ -735,6 +735,19 @@ static void race_config_publish(const void *src)
     InterlockedIncrement(&s_race_config_seq);            /* leave write (even) */
 }
 
+/* [MP RESTART RE-ROLL 2026-07-04] See td5_net.h. Same seqlock-protected write
+ * pattern as race_config_publish, but touches ONLY rng_seed -- track/cars/
+ * mode_config stay exactly as archived from the original DXPSTART, so a
+ * RESTART still re-runs the same track/cars/opponents while its RNG-seeded
+ * picks (cop-chase cop, wheel styles, traffic pattern) draw fresh, matching
+ * local MP's existing GetTickCount()-per-restart behaviour. */
+void td5_net_update_race_seed(uint32_t new_seed)
+{
+    InterlockedIncrement(&s_race_config_seq);            /* enter write (odd)  */
+    s_race_config.rng_seed = new_seed;
+    InterlockedIncrement(&s_race_config_seq);            /* leave write (even) */
+}
+
 /**
  * Type 4 -- DXPSTART (4 bytes)
  * Host signals race start to each client.
