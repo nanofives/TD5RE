@@ -439,7 +439,14 @@ static void st_golden_begin(void)
 
     g_td5.ini.race_trace_enabled       = 1;
     g_td5.ini.trace_module_mask        = ST_GOLDEN_MODULES;
-    g_td5.ini.trace_stage_mask         = TD5_TRACE_STG_ALL;
+    /* Tick-paced stages ONLY: FRAME_BEGIN/FRAME_END fire once per RENDER
+     * frame (several per sim tick, count varying with fps run-to-run), which
+     * made the progress module's row count nondeterministic across identical
+     * sim runs. PAUSE_MENU never fires under AutoRace but is real-time-paced
+     * too, so it's excluded on principle. */
+    g_td5.ini.trace_stage_mask         = TD5_TRACE_STG_ALL &
+        ~(TD5_TRACE_STG_FRAME_BEGIN | TD5_TRACE_STG_FRAME_END |
+          TD5_TRACE_STG_PAUSE_MENU);
     g_td5.ini.race_trace_slot          = -1;
     g_td5.ini.race_trace_max_frames    = 1 << 30;
     g_td5.ini.race_trace_max_sim_ticks = 0;   /* never the quit-request path */
