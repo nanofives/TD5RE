@@ -69,6 +69,8 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "Walls/buildings occlude correctly again (no see-through, no backfaces)",
+    "Street lamp glow heads render as glows, not black balls (Moscow)",
     "Tutorial overlay: adds a mode-specific hint line",
     "Pause confirm popup (END RACE NOW etc.) scales with resolution/DPI",
     "Race-end black transition: HUD text no longer bleeds through (split-screen)",

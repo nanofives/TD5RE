@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 6" },
+    { CL_ITEM,    "FIX: buildings/walls no longer show through each other" },
+    { CL_ITEM,    "  (regression from the July 5 foliage-AA update: any" },
+    { CL_ITEM,    "  cutout texture stopped writing depth)" },
+    { CL_ITEM,    "FIX: street lamps no longer render as solid black" },
+    { CL_ITEM,    "  balls (Moscow etc.) - glow sprites keep the game's" },
+    { CL_ITEM,    "  own blending instead of the foliage-AA override" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 5" },
     { CL_ITEM,    "FIX: DEFORMATION can now turn body dents fully OFF -" },
     { CL_ITEM,    "  it's now Low / Normal / High / Off. Independent of" },

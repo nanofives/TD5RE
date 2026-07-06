@@ -44,6 +44,17 @@ float4 SampleFoliageAA(Texture2D tex, float2 uv)
     int2 lo = int2(0, 0);
     int2 hi = int2(texW, texH) - int2(1, 1);
 
+    /* [2026-07-06] Tile OUT-OF-RANGE UVs the way hardware WRAP would: some
+     * sprites (e.g. Moscow's streetlamp glow heads) sample uv well past 1.0
+     * and relied on the sampler tiling them — clamping those smeared one
+     * opaque corner texel across the whole quad (the "solid black ball"
+     * regression). IN-RANGE UVs stay un-fracced so a 0..1 billboard's border
+     * still can't wrap to the opposite edge (the seam bug this function
+     * exists to fix; frac() at exactly 1.0 would wrap the border row to 0,
+     * hence the conditional rather than an unconditional frac). */
+    uv.x = (uv.x < 0.0 || uv.x > 1.0) ? frac(uv.x) : uv.x;
+    uv.y = (uv.y < 0.0 || uv.y > 1.0) ? frac(uv.y) : uv.y;
+
     float2 texel = uv * float2(texW, texH) - 0.5;
     float2 f     = frac(texel);
     int2   base  = int2(floor(texel));
