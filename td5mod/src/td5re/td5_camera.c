@@ -2312,6 +2312,53 @@ void td5_camera_apply_view(int view)
                 }
             }
         }
+        /* [Montego fly-in fix 2026-07-04 — round 3] Split-screen A/B (Montego,
+         * SpectateScreens=1) showed the countdown tight-chase preset (see the
+         * one-shot in cam_solve_view) can put the AI/spectate pane's camera
+         * AT OR BELOW the car looking up through its underside — "spawning
+         * below ground". Root cause: UpdateChaseCamera's orbit offset is
+         * tilted by a 3-point terrain-normal sample near THAT car's own
+         * position (see the "terrain following" block above); the human's
+         * grid slot and the AI's grid slot sample different local geometry,
+         * and at the AI's slot this tilt goes degenerate.
+         *
+         * [ROUND 3a — REVERTED] An earlier version of this guard ALSO
+         * rejected small total eye-car distance, on the theory that a
+         * degenerate tilt would also collapse the distance. That fired
+         * during ordinary countdown startup too — g_camCurrentRadius[v] is a
+         * spring that starts at 0 and takes several ticks to reach its
+         * target (by design, not a bug), so early in the countdown EVERY
+         * view's distance is transiently small. The fallback eye (a fixed
+         * ~1600 wu behind the car) then clipped into Montego's roadside
+         * terrain for the human's specific grid slot — a NEW regression.
+         * Narrowed to the one condition that's never legitimate: the eye
+         * literally at or below the car's own height. */
+        if (g_td5.paused && !td5_camera_flyin_enabled()) {
+            TD5_Actor *ca = camera_actor_for_view(v);
+            if (ca) {
+                int car_y = ca->world_pos.y;
+                /* Small tolerance (~8 wu) for legitimate near-level dips;
+                 * only the genuinely-at-or-below-car case trips this. */
+                if (eye[1] < car_y - 0x800) {
+                    int heading = -(int)*(short *)((uintptr_t)ca + 0x20A);
+                    float back_dist = 0x28000;   /* ~400 wu — short enough to stay clear of roadside terrain */
+                    int fx = ca->world_pos.x + (int)(SinFloat12bit(heading) * back_dist + 0.5f);
+                    int fz = ca->world_pos.z - (int)(CosFloat12bit((unsigned int)heading) * back_dist + 0.5f);
+                    int fy = car_y + 0x19000;   /* ~100 wu above the car — a plain, low "just behind" fallback */
+                    /* Validate against real terrain at the fallback XZ; raise
+                     * above it if the short back-hop itself lands low (e.g.
+                     * a dip in the road) rather than trusting the fixed
+                     * height blindly. */
+                    int floor_y;
+                    if (td5_camera_probe_ground_floor((uintptr_t)ca, fx, fz, &floor_y) &&
+                        fy < floor_y) {
+                        fy = floor_y;
+                    }
+                    eye[0] = fx; eye[1] = fy; eye[2] = fz;
+                }
+            }
+        }
+
         /* [ITEM #12] Jitter the eye AFTER the wall-avoid clip so the rattle
          * rides on the clipped position. The shake is small (~tens of world
          * units) so it won't re-clip into geometry; the look-at target is left
