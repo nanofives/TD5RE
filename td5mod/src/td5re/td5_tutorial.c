@@ -35,6 +35,7 @@
 static int      s_active     = 0;
 static int      s_force_mode = 0;
 static int      s_humans     = 1;
+static const char *s_mode_hint = NULL;   /* short "what's different" line, or NULL */
 static uint32_t s_ready_mask = 0;
 static uint32_t s_prev_in[TD5_MAX_HUMAN_PLAYERS];
 static unsigned s_anim       = 0;
@@ -105,6 +106,16 @@ static void text_left(float x, float y, const char *s, uint32_t c, float sc)
 { td5_vui_text(PXc(x), PYc(y), s, c, U*sc, U*sc); }
 static void text_right(float xr, float y, const char *s, uint32_t c, float sc)
 { float w = td5_vui_text_width(s, U*sc); td5_vui_text(PXc(xr) - w, PYc(y), s, c, U*sc, U*sc); }
+/* Centred text that shrinks to fit max_w (virtual units) — used for the
+ * mode-hint line since its length varies per game mode and the slot between
+ * the title and the top callouts is narrow. */
+static void text_center_fit(float cx, float y, const char *s, uint32_t c, float max_sc, float max_w)
+{
+    float sc = max_sc;
+    float w = td5_vui_text_width(s, U*sc);
+    if (w > max_w * U) sc *= (max_w * U) / w;
+    text_center(cx, y, s, c, sc);
+}
 
 /* --- Leader lines: thin white core + subtle black halo, continuous joins. --- */
 #define LEAD_CORE  1.4f
@@ -279,6 +290,29 @@ static void draw_callouts(void)
         draw_callout(&k_callouts[i], bind);
 }
 
+/* -------------------------------------------------------------- mode hint --- */
+/* [MODE HINT 2026-07-04] One short line spelling out this race's special rule
+ * when it plays differently enough from a normal race that the control
+ * diagram alone doesn't explain the goal (cop chase incl. INFECT, drag race,
+ * traffic battle, cup). Checked against the SAME flags td5_game already uses
+ * to configure the race, so it matches what's actually running whether SP or
+ * MP, split-screen or (non-network) local — NULL for a normal race/time-trial,
+ * drawing nothing. */
+static const char *mode_hint_text(void)
+{
+    if (td5_game_cop_chase_infect_enabled())
+        return "INFECT: suspects arrested by a cop become cops themselves.";
+    if (td5_game_is_wanted_mode())
+        return "COP CHASE: cops must catch every suspect before time runs out.";
+    if (g_td5.drag_race_enabled)
+        return "DRAG RACE: launch on green, stay in your lane to the finish.";
+    if (td5_game_battle_mode_active())
+        return "TRAFFIC BATTLE: wreck the most oncoming traffic to win.";
+    if (td5_game_mp_cup_active())
+        return "CUP: points are awarded by finishing position each race.";
+    return NULL;
+}
+
 /* ----------------------------------------------------------- dismiss row ---- */
 static void draw_dismiss_row(void)
 {
@@ -323,6 +357,8 @@ void td5_tutorial_draw(void)
     /* 50%-opacity sharp rectangle covering most of the screen (no border). */
     td5_vui_quad(rw * 0.035f, rh * 0.03f, rw * 0.93f, rh * 0.94f, 0x80000000u, -1, 0, 0, 0, 0);
     text_center(320, 48, "Controls", 0xFFFFFFFFu, 1.7f);
+    if (s_mode_hint)
+        text_center_fit(320, 82, s_mode_hint, 0xFFFFD24Au, 0.62f, 560.0f);
 
     ensure_pad_texture();
     if (s_pad_ready)
@@ -379,7 +415,7 @@ int td5_tutorial_is_active(void) { return s_active; }
 
 void td5_tutorial_begin_race(void)
 {
-    s_active = 0; s_force_mode = 0; s_anim = 0; s_ready_mask = 0;
+    s_active = 0; s_force_mode = 0; s_anim = 0; s_ready_mask = 0; s_mode_hint = NULL;
     int mode = g_td5.ini.tutorial_overlay;
     if (mode <= 0) return;
     if (g_td5.network_active) return;
@@ -387,6 +423,10 @@ void td5_tutorial_begin_race(void)
     if (g_td5.ini.player_is_ai) return;
     if (g_td5.num_human_players < 1) return;
     if (g_td5.ini.race_trace_enabled || g_td5.ini.auto_throttle) return;
+
+    s_mode_hint = mode_hint_text();
+    if (s_mode_hint)
+        TD5_LOG_I(LOG_TAG, "Tutorial mode hint: \"%s\"", s_mode_hint);
 
     /* [2026-06-29] Show at the start of EVERY race (the first thing you see on
      * each race), not just once-ever. The old td5re_progress.ini [Tutorial] Seen
