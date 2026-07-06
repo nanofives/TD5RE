@@ -19,7 +19,7 @@
 #include "td5_asset.h"
 #include "td5_physics.h"
 #include "td5_ai.h"
-#include "td5_game.h"   /* td5_game_drag_field_size() for drag dynamic widening */
+#include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 #include "td5_platform.h"
 #include "td5_render.h"
 #include "td5_camera.h"

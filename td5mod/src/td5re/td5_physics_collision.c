@@ -20,7 +20,7 @@
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
 #include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
-#include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
+#include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 #include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
 #include "td5_damage.h"   /* [CAR DAMAGE] health from impacts, knockout freeze, handling penalty */
 #include "td5_laneassist.h" /* optional lane-assist steering aid (port-only, default OFF) */

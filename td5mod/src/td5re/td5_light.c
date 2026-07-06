@@ -14,7 +14,7 @@
 
 #include "td5_types.h"                          /* g_traffic_slot_base, TD5_Mat3x3 */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, rotation_matrix) */
-#include "td5_game.h"                           /* td5_game_get_actor / total count */
+#include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 #include "td5_light.h"
 #include "td5_platform.h"
 
