@@ -609,15 +609,18 @@ typedef struct TD5_GlobalState {
          * TD5RE_DAMAGE_* env knobs. */
         int  car_damage;
         /* [CAR DAMAGE 2026-06-29] Global, persistent damage LEVELS, edited on the
-         * Game Options screen (and, for toughness, the RACE OPTIONS screen too)
-         * and applied to EVERY race. Deform: 0=Low, 1=Normal, 2=High. Toughness:
-         * 0=Low, 1=Medium, 2=High, 3=Off (folds the master damage disable into the
-         * level cycle itself — see td5_damage_enabled() — so Race Options, which
-         * has no separate DAMAGE toggle, can still fully disable damage). Deform
-         * scales the per-vertex dent + scuff magnitude. Persisted to td5re.ini
-         * [Game] via td5_ini_persist_options(); --CarToughness/--CarDeform override. */
+         * Game Options screen (and on the RACE OPTIONS screen too) and applied to
+         * EVERY race. Both fold an OFF state into the level cycle itself (same
+         * pattern as POWER-UPS' OFF/CASUAL/CHAOS), so Race Options — which has no
+         * separate DAMAGE toggle — can still fully disable either axis: Toughness:
+         * 0=Low, 1=Medium, 2=High, 3=Off disables the WHOLE damage module (health/
+         * wreck/HUD bar/deform) — see td5_damage_enabled(). Deform: 0=Low, 1=Normal,
+         * 2=High, 3=Off disables ONLY the per-vertex dent + scuff magnitude,
+         * independently of health/wreck — see td5_damage_deform_enabled().
+         * Persisted to td5re.ini [Game] via td5_ini_persist_options();
+         * --CarToughness/--CarDeform override. */
         int  car_damage_toughness;   /* 0=Low 1=Medium 2=High 3=Off */
-        int  car_damage_deform;      /* 0=Low 1=Normal 2=High */
+        int  car_damage_deform;      /* 0=Low 1=Normal 2=High 3=Off */
         /* [CAR DAMAGE 2026-06-29] HUD damage bar + wreck/knockout master. ON by
          * default. When 0, the top-of-pane health bar is hidden AND a car can no
          * longer be wrecked / eliminated by accumulated damage (no race-ending

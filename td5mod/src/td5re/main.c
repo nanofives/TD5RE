@@ -1009,7 +1009,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * td5_save and then this CLI/INI layer can still override them. */
     g_td5.ini.car_damage            = td5_ini_int("Game", "CarDamage", 1);
     g_td5.ini.car_damage_toughness  = td5_ini_int("Game", "CarToughness", 1);  /* 0=Low 1=Medium 2=High 3=Off */
-    g_td5.ini.car_damage_deform     = td5_ini_int("Game", "CarDeform",    1);  /* 0=Low 1=Normal 2=High */
+    g_td5.ini.car_damage_deform     = td5_ini_int("Game", "CarDeform",    1);  /* 0=Low 1=Normal 2=High 3=Off */
     g_td5.ini.car_damage_bar        = td5_ini_int("Game", "CarDamageBar", 1);  /* HUD bar + wreck on/off */
     g_td5.ini.celebrity_names_api   = td5_ini_int("Game", "CelebrityNamesAPI", 0); /* 1=fetch names from randomuser.me at startup */
 
