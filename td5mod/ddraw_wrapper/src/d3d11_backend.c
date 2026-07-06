@@ -1771,13 +1771,27 @@ void Backend_ApplyStateCache(void)
     /* Depth-stencil state */
     {
         int di;
-        if (!s->z_enable && !s->z_write)      di = DS_Z_OFF_WRITE_OFF;
-        else if (!s->z_enable && s->z_write)   di = DS_Z_OFF_WRITE_ON;
+        /* [foliage AA] The game submits foliage as z-written opaque-style
+         * geometry (correct for the original hard alpha-test cutout, where
+         * a pixel is either fully drawn or fully discarded and z-buffering
+         * alone gives order-independent occlusion). Once we blend a partial
+         * edge alpha there, keeping z_write on breaks overlapping billboards:
+         * static level meshes aren't depth-sorted, so whichever tree happens
+         * to submit first "claims" the z-buffer at that pixel — including at
+         * its semi-transparent edge — and a farther tree drawn afterward
+         * fails the z-test there and never draws, leaving whatever was in
+         * the framebuffer before either tree drew (the sky) showing through.
+         * Force z_write off for these draws (z-test stays as the game set
+         * it, so opaque scenery like buildings/ground still occludes
+         * foliage correctly) — the standard fix for blended geometry. */
+        int eff_z_write = foliage_aa ? 0 : s->z_write;
+        if (!s->z_enable && !eff_z_write)      di = DS_Z_OFF_WRITE_OFF;
+        else if (!s->z_enable && eff_z_write)   di = DS_Z_OFF_WRITE_ON;
         else if (s->z_func == 1) {
-            di = s->z_write ? DS_Z_ON_WRITE_ON_ALWAYS : DS_Z_ON_WRITE_OFF_ALWAYS;
+            di = eff_z_write ? DS_Z_ON_WRITE_ON_ALWAYS : DS_Z_ON_WRITE_OFF_ALWAYS;
         }
-        else if (s->z_enable && s->z_write)    di = DS_Z_ON_WRITE_ON;
-        else                                   di = DS_Z_ON_WRITE_OFF;
+        else if (s->z_enable && eff_z_write)    di = DS_Z_ON_WRITE_ON;
+        else                                    di = DS_Z_ON_WRITE_OFF;
 
         if (di != s->current_ds_idx) {
             s->current_ds_idx = di;
