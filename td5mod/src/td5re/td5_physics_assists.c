@@ -26,7 +26,7 @@
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* manual-recovery edge, FF signal consumers */
-#include "td5_game.h"     /* slot counts, cop-chase role queries */
+#include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 #include "td5_arcade.h"
 #include "td5_damage.h"
 #include "td5_camera.h"   /* td5_camera_reset_yaw_offset (post-repair cam un-spin) */

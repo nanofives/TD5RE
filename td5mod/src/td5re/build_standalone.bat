@@ -50,8 +50,25 @@ if not defined TD5RE_SRCS_COMMON (
     exit /b 1
 )
 
-REM Shared compiler flags for every variant.
-set CFLAGS_BASE=-c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC% -DTD5_INFLATE_USE_ZLIB
+REM Shared compiler flags -- SINGLE SOURCE OF TRUTH: cflags.txt (same pattern
+REM as srcs.txt; build.yml, release.yml and td5mod\Makefile read the SAME file).
+REM Only the path-dependent -I include dirs are appended here.
+set "CFLAGS_COMMON="
+for /f "usebackq eol=# delims=" %%L in ("%~dp0cflags.txt") do set "CFLAGS_COMMON=!CFLAGS_COMMON! %%L"
+if not defined CFLAGS_COMMON (
+    echo ERROR: cflags.txt missing or empty at %~dp0cflags.txt
+    exit /b 1
+)
+set CFLAGS_BASE=!CFLAGS_COMMON! -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC%
+
+REM System link libraries -- SINGLE SOURCE OF TRUTH: link_libs.txt (shared with
+REM build.yml, release.yml and td5mod\Makefile so the lib list cannot drift).
+set "LINK_LIBS="
+for /f "usebackq eol=# delims=" %%L in ("%~dp0link_libs.txt") do set "LINK_LIBS=!LINK_LIBS! %%L"
+if not defined LINK_LIBS (
+    echo ERROR: link_libs.txt missing or empty at %~dp0link_libs.txt
+    exit /b 1
+)
 
 REM Per-variant configuration (goto-based, NOT parenthesized blocks, so comments
 REM containing parentheses cannot corrupt the batch parser).
@@ -173,8 +190,7 @@ echo Linking !EXE!...
     !BUILDDIR!\main.o !RESOBJ! ^
     -L!BUILDDIR! -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive ^
     -L%WRAPPER_BUILDDIR% -lddraw_wrapper ^
-    -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 -lshell32 ^
-    -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 -lmfplat -lmfreadwrite -lmfuuid -lole32 -lwinhttp -lpsapi ^
+    !LINK_LIBS! ^
     -Wl,-Map=!BUILDDIR!\!MAPFILE! ^
     -Wl,--enable-stdcall-fixup ^
     -Wl,--allow-multiple-definition ^

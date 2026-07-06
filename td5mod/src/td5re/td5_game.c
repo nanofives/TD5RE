@@ -2016,8 +2016,18 @@ static void td5_game_assign_random_cop(uint32_t race_seed) {
  * running at different frame rates. */
 uint32_t td5_game_get_race_seed(void) { return s_saved_race_seed; }
 
-int td5_game_init_race_session(void) {
-    #define CK(n) TD5_LOG_I(LOG_TAG, "CK: %s", n)
+/* ---- [GOD-SPLIT 2026-07-06] td5_game_init_race_session phases ----------
+ * The ~2,650-line monolith below was split into the init_race_* phase
+ * functions by PURE CODE MOTION (see STRUCTURE_ROADMAP.md 3): the body
+ * text is verbatim, phases run in the exact original order, and every
+ * seam was verified to carry ZERO function-scope locals (all inter-phase
+ * state is global/static) - hence the uniform (void) signatures. The CK
+ * checkpoint macro is hoisted from the old function body so every phase
+ * still sees it. Verified bit-identical via the golden-trace suite. */
+#define CK(n) TD5_LOG_I(LOG_TAG, "CK: %s", n)
+
+static void init_race_modes_and_seed(void)
+{
     CK("ck0_start");
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: begin");
 
@@ -2469,7 +2479,10 @@ int td5_game_init_race_session(void) {
      * every race so the post-race summary reflects only this race. Accumulated
      * each live sim tick by td5_physics_accumulate_metrics(). */
     td5_physics_reset_metrics();
+}
 
+static void init_race_slot_states(void)
+{
     /* ---- Step 3: Configure race slot states (player/AI/disabled) ---- */
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_slot_state[i].state       = (i == 0) ? 1 : 0;  /* slot 0 = player */
@@ -2820,7 +2833,10 @@ int td5_game_init_race_session(void) {
                   "(slot-9 layout); regular traffic kept faithful", g_racer_count);
         g_td5.special_encounter_enabled = 0;
     }
+}
 
+static void init_race_level_and_assets(void)
+{
     /* ---- Step 4: Load track runtime data ---- */
     /* NOTE: td5_asset_load_level sets g_td5.track_type from LEVELINF.DAT,
      * so g_track_is_circuit / g_track_type_mode must be derived after this call. */
@@ -3184,7 +3200,10 @@ int td5_game_init_race_session(void) {
                   g_td5.drag_race_enabled, g_td5.network_active,
                   g_td5.split_screen_mode, g_traffic_slot_base);
     }
+}
 
+static void init_race_track_resources(void)
+{
     /* ---- Step 6: Bind track strip runtime pointers ---- */
     /* (Internal to td5_asset_load_level -- strip data is patched in place) */
     TD5_LOG_I(LOG_TAG, "InitRace step 6/19: track strip runtime pointers bound");
@@ -3256,7 +3275,10 @@ int td5_game_init_race_session(void) {
         s_race_order[i] = (uint8_t)i;
     }
     TD5_LOG_I(LOG_TAG, "InitRace step 10/19: race metrics/runtime arrays reset");
+}
 
+static void init_race_spawn_actors(void)
+{
     /* ---- Step 11: Allocate actors and init vehicle/AI runtime ---- */
     {
         static uint8_t s_actor_memory[TD5_ACTOR_STRIDE * TD5_MAX_TOTAL_ACTORS];
@@ -4071,7 +4093,10 @@ int td5_game_init_race_session(void) {
         TD5_LOG_I(LOG_TAG, "Actors spawned: base=%p count=%d racers=%d",
                   (void *)s_actor_memory, g_td5.total_actor_count, racer_count);
     }
+}
 
+static void init_race_race_systems(void)
+{
     /* ---- Step 12: Open input recording/playback ---- */
     if (s_replay_mode) {
         td5_input_read_open("replay.td5");
@@ -4242,7 +4267,10 @@ int td5_game_init_race_session(void) {
     td5_sound_cd_play(g_td5.track_index % 10 + 1);
     TD5_LOG_I(LOG_TAG, "InitRace step 16/19: CD audio started track=%d",
               g_td5.track_index % 10 + 1);
+}
 
+static void init_race_viewports_and_hud(void)
+{
     CK("ck17_before_viewport");
     /* ---- Step 17: Initialize 3D render state + viewport layout ---- */
     td5_render_reset_texture_cache();
@@ -4345,7 +4373,10 @@ int td5_game_init_race_session(void) {
                  "re/assets/levels/level%03d/%s.png", level_num, sky_name);
         td5_render_load_sky(sky_path);
     }
+}
 
+static void init_race_checkpoints(void)
+{
     /* ---- Step 20: Load checkpoint timing from hardcoded table (0x46CBB0) ---- */
     {
         int tidx = g_td5.track_index;
@@ -4593,6 +4624,17 @@ int td5_game_init_race_session(void) {
             }
         }
     }
+}
+
+int td5_game_init_race_session(void) {
+    init_race_modes_and_seed();
+    init_race_slot_states();
+    init_race_level_and_assets();
+    init_race_track_resources();
+    init_race_spawn_actors();
+    init_race_race_systems();
+    init_race_viewports_and_hud();
+    init_race_checkpoints();
 
     /* ---- Reset race state ---- */
     g_td5.race_end_fade_state = 0;
@@ -5477,34 +5519,18 @@ static void mt_build_pane_rcmd(int vp, void *unused)
     td5_render_scratch_unbind();
 }
 
-int td5_game_run_race_frame(void) {
-    int i;
-    td5_photobooth_tick();   /* sets the booth camera before this frame renders */
-    /* ---- Update frame timing ---- */
-    td5_game_update_frame_timing();
-
-    /* ---- Network lockstep input sync (S10) ----
-     * With a network session active, sample + exchange input ONCE per frame
-     * here and hold the host-merged authoritative bits constant across every
-     * substep below (mirrors the original's once-per-frame network poll).
-     * Non-network play keeps polling once per substep, inside the loop. */
-    int net_lockstep = (g_td5.network_active && td5_net_is_active());
-    /* [#5 2026-06-19] Decoupled (default): exchange per SIM TICK inside the
-     * fixed-step loop below so render free-runs at monitor rate. Legacy (knob
-     * off): exchange ONCE here and hold the merged bits constant across this
-     * frame's substeps (mirrors the original's once-per-frame network poll). */
-    int net_decoupled = net_lockstep && net_render_decouple_enabled();
-    if (net_lockstep && !net_decoupled)
-        td5_game_net_sync_frame(1);
-
-    td5_profile_begin_frame();   /* race-frame profiler timeline (zones via trace_stage + render/present below) */
-    td5_game_trace_stage("frame_begin", 0);
-
-    /* [S27] Controller-disconnect check (once per frame, before the sim loop).
-     * Pauses instantly the frame a required player's pad drops; resumes when it
-     * returns. Sets g_td5.paused so the fixed-step loop freezes below. */
-    td5_game_update_device_disconnect();
-
+/* ---- [GOD-SPLIT 2026-07-06] td5_game_run_race_frame phases -----------
+ * Split from the ~1,800-line monolith by PURE CODE MOTION (see
+ * STRUCTURE_ROADMAP.md 3). The only function-scope dataflow across
+ * seams: net_lockstep/net_decoupled (parent -> sim loop/interpolate)
+ * and ticks_this_frame (sim loop -> parent, for the diag log + the
+ * frame_end trace row). frame_fade_step converts the fade block's four
+ * early returns into a status code (0 = keep running the frame). The
+ * fixed-timestep sim loop stays internally monolithic BY DESIGN - its
+ * per-sub-tick locals and continue/break flow make interior splits a
+ * behavior risk. Verified bit-identical via the golden-trace suite. */
+static void frame_check_completion(void)
+{
     /* ---- Race completion check (before sim loop) ----
      *
      * Original CheckRaceCompletionState @ 0x00409E80 is invoked once per frame
@@ -5565,7 +5591,10 @@ int td5_game_run_race_frame(void) {
             td5_game_begin_fade_out(g_td5.split_screen_mode);
         }
     }
+}
 
+static int frame_fade_step(void)
+{
     /* ---- Fade-out accumulation ---- */
     if (g_td5.race_end_fade_state > 0) {
         /* Replay timeout: force fade after 45 seconds */
@@ -5632,7 +5661,12 @@ int td5_game_run_race_frame(void) {
             }
         }
     }
+    return 0;   /* not fading out — keep running the frame */
+}
 
+static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
+{
+    int i;
     /* ---- Fixed-timestep simulation loop ---- */
     /* Drain sim_time_accumulator in 0x10000 steps.
      * Normal play caps at 4 ticks/frame (spiral-of-death protection).
@@ -6671,7 +6705,11 @@ int td5_game_run_race_frame(void) {
         td5_game_trace_stage("post_progress", ticks_this_frame);
         g_td5.simulation_tick_counter++;
     }
+    return ticks_this_frame;
+}
 
+static void frame_interpolate(int net_lockstep, int ticks_this_frame)
+{
     /* Compute sub-tick interpolation fraction for camera/VFX rendering.
      * Original (0x0042b709): fraction is NOT recomputed when paused.
      * [S31] A net-synced REMOTE pause freezes it too -- otherwise the
@@ -6705,37 +6743,10 @@ int td5_game_run_race_frame(void) {
          * td5_render.c:1530-1537. */
         td5_camera_finalize_all();
     }
+}
 
-    if ((g_td5.simulation_tick_counter % 60u) == 0u) {
-        TD5_LOG_D(LOG_TAG,
-                  "Race frame timing: norm_dt=%.3f fps=%.2f ticks_this_frame=%d paused=%d pause_menu=%d countdown_indicator=%d countdown_timer=0x%X fade=%d",
-                  g_td5.normalized_frame_dt,
-                  g_td5.instant_fps,
-                  ticks_this_frame,
-                  g_td5.paused,
-                  s_pause_menu_active,
-                  s_race_countdown_state,
-                  g_cameraTransitionActive,
-                  g_td5.race_end_fade_state);
-        {
-            TD5_Actor *actor0 = td5_game_get_actor(0);
-            if (actor0) {
-                uint8_t *a0 = (uint8_t *)actor0;
-                TD5_LOG_D(LOG_TAG,
-                          "Race actor0: pos=(%d,%d,%d) speed=%d gear=%d",
-                          *(int32_t *)(a0 + 0x1CC),
-                          *(int32_t *)(a0 + 0x1D0),
-                          *(int32_t *)(a0 + 0x1D4),
-                          *(int32_t *)(a0 + 0x208),
-                          *(int32_t *)(a0 + 0x224));
-            }
-        }
-    }
-
-    /* ---- Per-tick fog fade now runs inside the fixed-step sim loop (see the
-     *      "Per-non-paused-tick world animation advances" block) so it advances
-     *      at 30 Hz instead of per rendered frame. ---- */
-
+static void frame_render(void)
+{
     /* ---- Split-screen steering balance ---- */
     td5_game_update_split_screen_balance();
 
@@ -7219,7 +7230,11 @@ int td5_game_run_race_frame(void) {
      * centered render state, alongside the star pulse). Drawing it here picked up
      * a leftover viewport/clip offset and landed it off-centre. The captured place
      * is exposed via td5_game_get_finish_position() below. */
+}
 
+static void frame_audio_tick(void)
+{
+    int i;
     /* ---- Audio tick ---- */
 
     /* Feed camera position into the sound system as listener position.
@@ -7268,6 +7283,80 @@ int td5_game_run_race_frame(void) {
      * frame after the vehicle audio mix, gated by weather particle density. */
     td5_sound_update_ambient();
     td5_sound_tick();
+}
+
+int td5_game_run_race_frame(void) {
+    td5_photobooth_tick();   /* sets the booth camera before this frame renders */
+    /* ---- Update frame timing ---- */
+    td5_game_update_frame_timing();
+
+    /* ---- Network lockstep input sync (S10) ----
+     * With a network session active, sample + exchange input ONCE per frame
+     * here and hold the host-merged authoritative bits constant across every
+     * substep below (mirrors the original's once-per-frame network poll).
+     * Non-network play keeps polling once per substep, inside the loop. */
+    int net_lockstep = (g_td5.network_active && td5_net_is_active());
+    /* [#5 2026-06-19] Decoupled (default): exchange per SIM TICK inside the
+     * fixed-step loop below so render free-runs at monitor rate. Legacy (knob
+     * off): exchange ONCE here and hold the merged bits constant across this
+     * frame's substeps (mirrors the original's once-per-frame network poll). */
+    int net_decoupled = net_lockstep && net_render_decouple_enabled();
+    if (net_lockstep && !net_decoupled)
+        td5_game_net_sync_frame(1);
+
+    td5_profile_begin_frame();   /* race-frame profiler timeline (zones via trace_stage + render/present below) */
+    td5_game_trace_stage("frame_begin", 0);
+
+    /* [S27] Controller-disconnect check (once per frame, before the sim loop).
+     * Pauses instantly the frame a required player's pad drops; resumes when it
+     * returns. Sets g_td5.paused so the fixed-step loop freezes below. */
+    td5_game_update_device_disconnect();
+
+
+    frame_check_completion();
+
+    {
+        int fade_r = frame_fade_step();
+        if (fade_r) return fade_r;
+    }
+
+    int ticks_this_frame = frame_run_sim_loop(net_lockstep, net_decoupled);
+
+    frame_interpolate(net_lockstep, ticks_this_frame);
+
+    if ((g_td5.simulation_tick_counter % 60u) == 0u) {
+        TD5_LOG_D(LOG_TAG,
+                  "Race frame timing: norm_dt=%.3f fps=%.2f ticks_this_frame=%d paused=%d pause_menu=%d countdown_indicator=%d countdown_timer=0x%X fade=%d",
+                  g_td5.normalized_frame_dt,
+                  g_td5.instant_fps,
+                  ticks_this_frame,
+                  g_td5.paused,
+                  s_pause_menu_active,
+                  s_race_countdown_state,
+                  g_cameraTransitionActive,
+                  g_td5.race_end_fade_state);
+        {
+            TD5_Actor *actor0 = td5_game_get_actor(0);
+            if (actor0) {
+                uint8_t *a0 = (uint8_t *)actor0;
+                TD5_LOG_D(LOG_TAG,
+                          "Race actor0: pos=(%d,%d,%d) speed=%d gear=%d",
+                          *(int32_t *)(a0 + 0x1CC),
+                          *(int32_t *)(a0 + 0x1D0),
+                          *(int32_t *)(a0 + 0x1D4),
+                          *(int32_t *)(a0 + 0x208),
+                          *(int32_t *)(a0 + 0x224));
+            }
+        }
+    }
+
+    /* ---- Per-tick fog fade now runs inside the fixed-step sim loop (see the
+     *      "Per-non-paused-tick world animation advances" block) so it advances
+     *      at 30 Hz instead of per rendered frame. ---- */
+
+    frame_render();
+
+    frame_audio_tick();
 
     /* End scene and present */
     td5_render_end_scene();

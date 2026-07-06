@@ -54,8 +54,10 @@ jobs:
           WRAPPER_SRCDIR=../../ddraw_wrapper/src
           WRAPPER_BUILDDIR=../../ddraw_wrapper/build
           # RELEASE configuration — mirrors build_standalone.bat's release path:
-          # -DTD5RE_RELEASE -DNDEBUG compile out dev affordances, -s (link) strips.
-          CFLAGS="-c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 -I. -I$WRAPPER_SRCDIR -DTD5_INFLATE_USE_ZLIB -DTD5RE_RELEASE -DNDEBUG"
+          # flags come from cflags.txt (single source, shared with the .bat +
+          # Makefile); -DTD5RE_RELEASE -DNDEBUG compile out dev affordances,
+          # -s (link) strips.
+          CFLAGS="$(tr -d '\r' < cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR -DTD5RE_RELEASE -DNDEBUG"
 
           # Module list: single source of truth (shared with the .bat + Makefile).
           SRCS=$(tr -d '\r' < srcs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
@@ -74,13 +76,13 @@ jobs:
           ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
           ar rcs build/libtd5re.a $ARCHIVE_OBJS
 
+          # Libs: single source of truth link_libs.txt (shared with the .bat + Makefile).
+          LIBS=$(tr -d '\r' < link_libs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
           gcc -m32 -mwindows -static -s -o build/td5re.exe \
             build/main.o $RES_OBJ \
             -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
             -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
-            -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
-            -lshell32 -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
-            -lmfplat -lmfreadwrite -lmfuuid -lwinhttp -lpsapi \
+            $LIBS \
             -Wl,--enable-stdcall-fixup \
             -Wl,--allow-multiple-definition
 

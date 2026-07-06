@@ -36,7 +36,7 @@
 #include "td5_hud.h"    /* for TD5_AtlasEntry */
 #include "td5_physics.h" /* for td5_physics_load_carparam */
 #include "td5_ai.h"      /* for td5_ai_set_traffic_queue */
-#include "td5_game.h"    /* for td5_game_drag_mp_active */
+#include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 
 #include <stdlib.h>
 #include <string.h>

@@ -1,4 +1,5 @@
-/* Auto-generated from log/orig/pool3_trig_lut_dump.bin */
+/* td5_trig_lut_data.c -- baked 12-bit trig LUT data (dumped from the original exe)
+ * Auto-generated from log/orig/pool3_trig_lut_dump.bin */
 /* g_sinCosFloatTable @ 0x00488984 dumped from TD5_d3d.exe runtime */
 #include <stdint.h>
 const uint32_t td5_trig_lut_bits[5120] = {

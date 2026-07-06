@@ -7059,8 +7059,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         else                 frontend_mp_simul_carsel_render(sx, sy);
         /* [disconnect-modal 2026-06-21] reconnect overlay on top of BOTH the
          * name/colour (phase 0) and car-select (phase 1) steps. */
-        { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
-          frontend_mp_setup_disconnect_render(sx, sy); }
+        {          frontend_mp_setup_disconnect_render(sx, sy); }
         return;
     }
     int actual_car = frontend_current_car_index();
@@ -9557,8 +9556,7 @@ void td5_frontend_render_ui_rects(void) {
         { extern void frontend_mp_position_render2(float sx, float sy);  /* [#6] reworked: de-pulsed + footer hints + empty-cell labels */
           frontend_mp_position_render2(sx, sy); }
         /* [disconnect-modal 2026-06-21] reconnect overlay on the CHOOSE YOUR SCREEN picker. */
-        { extern void frontend_mp_setup_disconnect_render(float sx, float sy);
-          frontend_mp_setup_disconnect_render(sx, sy); }
+        {          frontend_mp_setup_disconnect_render(sx, sy); }
         break;
     /* [MP GAME MODES 2026-06-22] vote / config / cup-winners overlays are drawn
      * in the POST-button pass below so their two-line labels + value text
@@ -9830,13 +9828,11 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_MP_MODE_VOTE:   /* [MP GAME MODES 2026-06-22] on top of frames */
             { extern void frontend_mp_mode_vote_render(float sx, float sy);
-              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
               frontend_mp_mode_vote_render(sx, sy);
               frontend_mp_setup_disconnect_render(sx, sy); }
             break;
         case TD5_SCREEN_MP_MODE_CONFIG:
             { extern void frontend_mp_mode_config_render(float sx, float sy);
-              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
               frontend_mp_mode_config_render(sx, sy);
               frontend_mp_setup_disconnect_render(sx, sy); }
             break;
@@ -9849,13 +9845,11 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_MP_COP_ROLES:
             { extern void frontend_mp_cop_roles_render(float sx, float sy);
-              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
               frontend_mp_cop_roles_render(sx, sy);
               frontend_mp_setup_disconnect_render(sx, sy); }
             break;
         case TD5_SCREEN_MP_TEAM_SELECT:
             { extern void frontend_mp_team_select_render(float sx, float sy);
-              extern void frontend_mp_setup_disconnect_render(float sx, float sy);
               frontend_mp_team_select_render(sx, sy);
               frontend_mp_setup_disconnect_render(sx, sy); }
             break;

@@ -897,6 +897,11 @@ void mp_resolve_layout(int n, int sel, int *cols, int *rows, int *missing);
 #define FE_MENU_BTN_H   0x20    /* 32:  standard button height                                          */
 
 extern char s_create_session_name[64];
+
+/* [2026-07-06] MP disconnect/kick modal renderer (td5_fe_race.c). Was
+ * re-declared inline-extern at 6 call sites across td5_frontend.c —
+ * cross-module symbols belong in a header (extern-in-.c lint). */
+void frontend_mp_setup_disconnect_render(float sx, float sy);
 extern char s_cs_port_buf[8];     /* GAME PORT inline field buffer (direct host) */
 extern int  s_cs_edit;
 extern uint8_t s_slot_ready[6];   /* [S31] per-slot lobby READY latch */

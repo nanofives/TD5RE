@@ -1,0 +1,20 @@
+# Common compile flags — SINGLE SOURCE OF TRUTH, shared by
+# build_standalone.bat, td5mod/Makefile, .github/workflows/build.yml and
+# release.yml (same pattern as srcs.txt). One flag per line, # comments.
+# Path-dependent -I include dirs and variant defines (-DTD5RE_RELEASE
+# -DNDEBUG) stay in each build path — everything else lives here.
+-c
+-O2
+-fwrapv
+-Wall
+-Wextra
+-Wpedantic
+-DWIN32
+-m32
+-DTD5_INFLATE_USE_ZLIB
+# Hard-error classes (2026-07-06): these indicate real bugs in i686 C, never
+# style. The tree is clean of all four; -Werror keeps it that way.
+-Werror=implicit-function-declaration
+-Werror=return-type
+-Werror=int-conversion
+-Werror=incompatible-pointer-types

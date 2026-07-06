@@ -57,6 +57,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM --- Structure lint (report-only locally; CI fails on regressions) --------
+REM Ratchets: extern-in-.c, td5_game.h includer set, warning classes. See
+REM scripts/lint_structure.ps1 + scripts/lint_structure_baseline.json.
+where pwsh >nul 2>&1
+if not errorlevel 1 (
+    echo.
+    pwsh -NoProfile -File "%~dp0..\..\..\scripts\lint_structure.ps1" -ReportOnly
+)
+
 echo.
 echo ############################################################
 echo #  build_all OK

@@ -63,20 +63,25 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Build td5re.exe (source port)
         run: |
+          set -o pipefail
           cd td5mod/src/td5re
           mkdir -p build
 
           WRAPPER_SRCDIR=../../ddraw_wrapper/src
           WRAPPER_BUILDDIR=../../ddraw_wrapper/build
-          CFLAGS="-c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 -I. -I$WRAPPER_SRCDIR -DTD5_INFLATE_USE_ZLIB"
+          # Flags: single source of truth cflags.txt (shared with the .bat + Makefile).
+          CFLAGS="$(tr -d '\r' < cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR"
 
           # Module list: single source of truth (shared with the .bat + Makefile).
           SRCS=$(tr -d '\r' < srcs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
 
+          # Compile output is teed to a log so the structure-lint step can
+          # ratchet the warning count (scripts/lint_structure.ps1).
+          : > ../../../build_warnings.log
           for src in $SRCS; do
             name=$(basename "${src%.c}")
             echo "Compiling $src..."
-            gcc $CFLAGS "$src" -o "build/$name.o"
+            gcc $CFLAGS "$src" -o "build/$name.o" 2>&1 | tee -a ../../../build_warnings.log
           done
 
           # Resource (icon) — non-fatal if windres fails
@@ -91,18 +96,30 @@ jobs:
           ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
           ar rcs build/libtd5re.a $ARCHIVE_OBJS
 
-          # Link
+          # Link — libs: single source of truth link_libs.txt (shared with the
+          # .bat + Makefile).
+          LIBS=$(tr -d '\r' < link_libs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
           gcc -m32 -mwindows -static -o build/td5re.exe \
             build/main.o $RES_OBJ \
             -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
             -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
-            -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
-            -lshell32 -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
-            -lmfplat -lmfreadwrite -lmfuuid -lwinhttp -lpsapi \
+            $LIBS \
             -Wl,--enable-stdcall-fixup \
             -Wl,--allow-multiple-definition
 
           ls -lh build/td5re.exe
+
+      # -----------------------------------------------------------------------
+      # Structure lint — architectural ratchets (extern-in-.c, td5_game.h
+      # includer set, per-flag warning counts vs the tee'd build log). Fails the
+      # build on any regression; baseline: scripts/lint_structure_baseline.json.
+      # NOTE: a full in-game selftest cannot run here — re/assets/ (game data)
+      # is not in the repo, so the exe has nothing to boot. The behavioral gate
+      # (selftest + golden-trace) runs locally via scripts/selftest.ps1.
+      # -----------------------------------------------------------------------
+      - name: Structure lint (ratchets)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/lint_structure.ps1 -BuildLog build_warnings.log
 
       - name: Upload td5re.exe
         uses: actions/upload-artifact@v4
