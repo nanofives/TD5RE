@@ -68,19 +68,20 @@ WRAPPER_OBJS := $(addprefix $(WRAPPER_BUILD)/,$(WRAPPER_SRCS:.c=.o))
 # Flags (mirrors the .bat scripts exactly)
 # ---------------------------------------------------------------------------
 
-TD5RE_CFLAGS   := -c -O2 -fwrapv -Wall -Wextra -Wpedantic -DWIN32 -m32 \
-                  -I$(TD5RE_SRC) -I$(WRAPPER_SRC) -I$(ZLIB_INC) \
-                  -DTD5_INFLATE_USE_ZLIB
+# Common flags -- SINGLE SOURCE OF TRUTH: src/td5re/cflags.txt (shared with
+# build_standalone.bat + the CI workflows). $(filter -%,...) keeps only flag
+# tokens, dropping comment words and blanks. Path-dependent -I dirs appended.
+TD5RE_CFLAGS   := $(filter -%,$(file < $(TD5RE_SRC)/cflags.txt)) \
+                  -I$(TD5RE_SRC) -I$(WRAPPER_SRC) -I$(ZLIB_INC)
 
 WRAPPER_CFLAGS := -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG -m32
 
 # png_loader.c additionally needs -Wno-unused-function per build.bat.
 $(WRAPPER_BUILD)/png_loader.o: WRAPPER_CFLAGS += -Wno-unused-function
 
-# Link command (mirrors build_standalone.bat link line)
-LINK_LIBS := -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -lole32 \
-             -lshell32 -lwinmm -ldinput8 -ldsound -ldxguid -lz -lws2_32 \
-             -lmfplat -lmfreadwrite -lmfuuid -lole32 -lwinhttp -lpsapi
+# System link libs -- SINGLE SOURCE OF TRUTH: src/td5re/link_libs.txt
+# (shared with build_standalone.bat + the CI workflows).
+LINK_LIBS := $(filter -l%,$(file < $(TD5RE_SRC)/link_libs.txt))
 
 LINK_FLAGS := -m32 -mwindows -static \
               -Wl,--enable-stdcall-fixup \
