@@ -279,6 +279,7 @@ static int s_pl_prev_btn    = -1;
 static int s_pl_next_btn    = -1;
 static int s_pl_modal_open  = 0;   /* details modal (ENTER on a row) owns input while set */
 static int s_pl_modal_item  = -1;  /* global (unpaged) index of the item the modal describes */
+static int s_pl_entry_guard = 0;   /* swallow the confirm edge that navigated INTO this screen */
 
 /* (Re)create the button set for the current page. Called on entry and on every
  * page change. Row buttons are indices 0..row_count-1; the control buttons land
@@ -486,6 +487,16 @@ void Screen_PendingTest(void) {
         s_pl_page       = 0;
         s_pl_modal_open = 0;
         s_pl_modal_item = -1;
+        /* [fix 2026-07-06] Swallow the confirm edge that navigated us in. This
+         * is an instant screen (s_anim_complete=1, no intro to eat the first
+         * frame), and td5_frontend_set_screen only masks the LEVEL-triggered
+         * ENTER (s_prev_enter_state=1) -- it does NOT flush the WM_KEYDOWN nav
+         * FIFO. So the ENTER that pressed the changelog's "PENDING TO TEST"
+         * button (or its key-repeat) drains on our first live frame, fires
+         * frontend_apply_nav_event(ENTER) on the default-selected row 0, and
+         * pops that row's details modal the instant the screen appears. Arm a
+         * guard that ignores confirms until the ENTER key is released (see case 1). */
+        s_pl_entry_guard = 1;
         frontend_pending_build_buttons();
         s_anim_complete = 1;   /* instant screen: enables B/ESC + fade-in chime */
         s_inner_state   = 1;
@@ -494,8 +505,12 @@ void Screen_PendingTest(void) {
          * modal on entry (item 0 by default; TD5RE_PENDING_MODAL_TEST_ITEM=N
          * picks another index), so a headless launch (StartScreen=42) can
          * verify the modal draws without live ENTER input -- same pattern as
-         * TD5RE_MP_SIMUL_PREVIEW_PHASE for the MP profile screen. */
-        if (td5_pending_count() > 0 && td5_env_flag_on("TD5RE_PENDING_MODAL_TEST")) {
+         * TD5RE_MP_SIMUL_PREVIEW_PHASE for the MP profile screen.
+         * [fix 2026-07-06] This MUST be opt-in: td5_env_flag_off() is false unless
+         * the var is explicitly "1". The old td5_env_flag_on() is default-ON (true
+         * for an UNSET var), so the harness auto-opened item 0's modal for every
+         * user on every entry -- the reported "first modal loads right away" bug. */
+        if (td5_pending_count() > 0 && td5_env_flag_off("TD5RE_PENDING_MODAL_TEST")) {
             s_pl_modal_item = td5_env_int("TD5RE_PENDING_MODAL_TEST_ITEM", 0, 0,
                                           td5_pending_count() - 1);
             s_pl_modal_open = 1;
@@ -511,6 +526,21 @@ void Screen_PendingTest(void) {
          * press. */
         static int s_pl_supr_down = 0;
         int supr;
+
+        /* [fix 2026-07-06] Ignore the confirm carried in from the changelog screen
+         * until the ENTER key is physically RELEASED (guard armed in case 0).
+         * Otherwise the stray ENTER that navigated us in opens the default-selected
+         * row's details modal the instant the screen appears. Gate on the key LEVEL
+         * (not the confirm edge): a held ENTER re-edges via key-repeat with idle
+         * gaps in between, so an edge/idle test would clear the guard in a gap and
+         * the next repeat would still pop the modal. Waiting for the key to go up is
+         * immune to that. DIK_RETURN=0x1C, DIK_NUMPADENTER=0x9C. */
+        if (s_pl_entry_guard) {
+            const uint8_t *kb = td5_plat_input_get_keyboard();
+            int enter_down = kb && ((kb[0x1C] & 0x80) || (kb[0x9C] & 0x80));
+            if (!enter_down && !s_input_ready) s_pl_entry_guard = 0;  /* released -> accept next frame */
+            break;                                                    /* swallow this frame's input */
+        }
 
         /* The details modal owns the frame while open: a fresh confirm press
          * (ENTER / pad A / click) OR ESC/gamepad-B closes it and returns focus

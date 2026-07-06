@@ -69,6 +69,7 @@ static void retired_add(const char *text) {
  * lines. New work shipped later should be added here (and folded into the
  * changelog) so a fresh checkout seeds the current testing backlog. */
 static const char *const k_seed[] = {
+    "PENDING TO TEST screen opens with no modal; ENTER on a row opens details",
     "Countdown camera sweep fires on all tracks except Montego (stays tight)",
     "Walls/buildings occlude correctly again (no see-through, no backfaces)",
     "Street lamp glow heads render as glows, not black balls (Moscow)",
