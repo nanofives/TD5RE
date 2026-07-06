@@ -1082,6 +1082,37 @@ static int td6_is_banner_page(int page)
     return 0;
 }
 
+/* [NATIVE BANNER FLIP 2026-07-04] td5_track_scan_banner_pages() detects double-
+ * sided sign panels from geometry alone (coincident reverse-wound primitive
+ * pairs) and the render-time one-sided cull keeps whichever side matches
+ * s_native_banner_keep_pos — a single sign tuned against Tokyo (17 pairs) and
+ * Moscow (7 pairs), where it shows the correct (non-mirrored) face. Bern's
+ * START gantry (native level 3, td5_asset_level_number() numbering — NOT the
+ * frontend track index) was authored with its front/back quads' winding
+ * reversed relative to those tracks: the SAME default sign keeps page 499
+ * (renders "TRATS", mirrored) and culls page 500 (the correct "START" face).
+ * Confirmed via a one-shot NATIVE_BANNER_SCAN world-position dump — both
+ * pages sit at the identical gantry position (~-4906,781,-77270), opposite
+ * cross-product sign, i.e. a genuine front/back pair with an inverted
+ * convention, not a detection false-positive. A single global sign can't
+ * satisfy both Bern and Tokyo/Moscow at once, so list the exception here
+ * (mirrors k_td6_banner_pages' per-level-page-list precedent) rather than
+ * flipping the shared default. Both pages of the pair must be listed — only
+ * flipping one would cull BOTH (the cull test is independent per page). */
+static const struct { short level, page; } k_native_banner_flip_pages[] = {
+    /* Bern (native level 3) START gantry */ {3, 499}, {3, 500},
+};
+
+static int native_banner_page_needs_flip(int page)
+{
+    int lvl = td5_asset_level_number(g_td5.track_index);
+    size_t i;
+    for (i = 0; i < sizeof(k_native_banner_flip_pages) / sizeof(k_native_banner_flip_pages[0]); i++)
+        if (k_native_banner_flip_pages[i].level == lvl && k_native_banner_flip_pages[i].page == page)
+            return 1;
+    return 0;
+}
+
 /* [LONDON START BANNER 2026-06-23 — road-centre align]
  * TD6 START/FINISH/checkpoint banner gantries are baked into the level geometry
  * as flat meshes with absolute verts (origin=0). London's START gantry (pages
@@ -1433,9 +1464,12 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
              * so the forward keep-side would cull the now-camera-facing face and
              * the banners disappear. Scoped to banner pages in the level pass
              * only (never other geometry). TD5RE_TD6_BANNER_REVFLIP=0 reverts.
-             * Native pages use their own kept sign (TD5RE_NATIVE_BANNER_FLIP). */
+             * Native pages use their own kept sign (TD5RE_NATIVE_BANNER_FLIP),
+             * further flipped per-page for known reversed-winding assets (see
+             * k_native_banner_flip_pages — Bern's START gantry). */
             int keep_pos = is_native_banner ? s_native_banner_keep_pos
                                             : s_banner_cull_keep_pos;
+            if (is_native_banner && native_banner_page_needs_flip(tex_page)) keep_pos = !keep_pos;
             if (s_banner_cull_revflip == 1 && g_td5.reverse_direction) keep_pos = !keep_pos;
             int facing_away = keep_pos ? (cross < 0.0f) : (cross > 0.0f);
             if (facing_away) {
