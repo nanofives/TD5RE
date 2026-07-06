@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 6" },
+    { CL_ITEM,    "FIX: the race-countdown camera sweep is back (it was" },
+    { CL_ITEM,    "  accidentally disabled on EVERY track while fixing" },
+    { CL_ITEM,    "  Montego Bay's out-of-frame countdown; Montego alone" },
+    { CL_ITEM,    "  keeps the steady close-up camera)" },
     { CL_ITEM,    "FIX: buildings/walls no longer show through each other" },
     { CL_ITEM,    "  (regression from the July 5 foliage-AA update: any" },
     { CL_ITEM,    "  cutout texture stopped writing depth)" },

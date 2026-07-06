@@ -13,6 +13,7 @@
 #include "td5_damage.h"   /* [CAR DAMAGE] end-of-race orbit around a finished/wrecked car */
 #include "td5_platform.h"
 #include "td5_hud.h"
+#include "td5_asset.h"  /* td5_asset_level_number — fly-in per-level blocklist */
 #include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-shake driver (Item #12) */
 #include "td5re.h"
@@ -1264,14 +1265,38 @@ static int td5_camera_replay_eye_floor_clamp(uintptr_t actor, int view, int *eye
  * A/B comparison against the original binary's cinematic (RunRaceFrame @
  * 0x0042b580 runs it unconditionally for every view) — useful for anyone
  * revisiting the underlying pose-interpolation bug later.
- * ======================================================================== */
+ *
+ * [FLY-IN RESTORED 2026-07-06] The global default-OFF above shipped in the
+ * 2026-07-05 bulk merge and was immediately reported as its own regression
+ * ("camera stays still during the countdown") — the cinematic is part of
+ * the game's feel and the original runs it unconditionally. The instability
+ * is only KNOWN to manifest on Montego Bay's grid geometry (the A/B in the
+ * comment above: Moscow fine, Montego not), so the default is now ON with a
+ * per-level blocklist: blocked levels fall through to the countdown
+ * tight-chase + below-car-guard paths that shipped with the Montego fix.
+ * TD5RE_FLYIN_ENABLED=1 forces the cinematic ON everywhere (A/B vs the
+ * original), =0 forces it OFF everywhere (the 2026-07-04..05 behavior);
+ * unset = auto (on except blocklist). Root-causing the pose-interpolation
+ * lerp remains the real fix — until then this keeps the cinematic where it
+ * has always worked and the safety net where it hasn't. */
+static const int k_flyin_blocked_levels[] = { 39 /* Montego Bay */ };
+
 static int td5_camera_flyin_enabled(void)
 {
-    static int s_mode = -1;
-    if (s_mode < 0) {
-        s_mode = td5_env_flag_off("TD5RE_FLYIN_ENABLED");   /* default OFF */
+    static int s_env = -2;              /* -2 unread; -1 auto; 0/1 forced */
+    if (s_env == -2) {
+        const char *e = getenv("TD5RE_FLYIN_ENABLED");
+        s_env = (e && *e) ? ((*e != '0') ? 1 : 0) : -1;
     }
-    return s_mode;
+    if (s_env >= 0) return s_env;
+    {
+        int lvl = td5_asset_level_number(g_td5.track_index);
+        size_t i;
+        for (i = 0; i < sizeof(k_flyin_blocked_levels) /
+                        sizeof(k_flyin_blocked_levels[0]); i++)
+            if (k_flyin_blocked_levels[i] == lvl) return 0;
+    }
+    return 1;
 }
 
 void UpdateChaseCamera(int actor, int do_track_heading, int view)
