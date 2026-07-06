@@ -79,6 +79,7 @@ static const char *const k_seed[] = {
     "Race Options: CAR TOUGHNESS is Low/Medium/High/Off (Off disables damage)",
     "Reset-car recovery: repairs 20% (not full) + camera un-spins after",
     "2D trees/foliage: edges no longer tint sky-blue vs. wrong backdrop, no border bar",
+    "Split-screen: each player's headlights follow their OWN tunnel/zone now",
     "Net play: host picks GAME MODE in the network lobby (Race/Drag/Battle/Cop)",
     "Net play: CUP over the network (series advance, points, standings, auto-teams)",
     "Net play: Cop Chase INFECT online + COPS/SUSPECTS results table over net",
