@@ -31,6 +31,7 @@
 #include "td5_physics.h" /* FF SIGNALS #1: drift/gear/redline/crash getters for rumble */
 #include "td5_laneassist.h" /* keyboard 'L' toggles the optional lane-assist aid */
 #include "td5_config.h"  /* shared TD5RE_* env-knob accessors */
+#include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
 
 /* Defined in td5_game.c */
 extern int    g_actorSlotForView[TD5_MAX_VIEWPORTS];
@@ -493,6 +494,18 @@ int td5_input_init(void)
     device_count = td5_plat_input_enumerate_devices();
     TD5_LOG_I(LOG_TAG, "Input init: result=%d devices=%d active_players=%d",
               ok, device_count, s_active_players);
+
+    /* [INPUTSCRIPT 2026-07-03] Scripted-input harness ([Trace] InputScript).
+     * Inert when the knob is empty. AutoThrottle stays available for
+     * /diff-race parity captures (its instant-0x100 throttle write is what
+     * the original-side Frida harness mirrors) but is RETIRED as the
+     * functional-testing tool — warn so stale configs migrate. */
+    td5_inputscript_init();
+    if (g_td5.ini.auto_throttle)
+        TD5_LOG_W(LOG_TAG, "AutoThrottle is retired for functional testing — "
+                  "use [Trace] InputScript (AutoThrottle remains for "
+                  "/diff-race parity traces only)");
+
     return ok;
 }
 
@@ -506,6 +519,7 @@ void td5_input_shutdown(void)
         td5_input_write_close();
     }
 
+    td5_inputscript_shutdown();
     td5_input_ff_shutdown();
     td5_plat_input_shutdown();
 }
@@ -826,6 +840,15 @@ void td5_input_poll_race_session(void)
         s_control_bits[i] = state.buttons;
         s_analog_x[i] = state.analog_x;
         s_analog_y[i] = state.analog_y;
+
+        /* [INPUTSCRIPT 2026-07-03] Scripted race actions overlay the polled
+         * hardware word AFTER the poll, so they flow through the identical
+         * downstream paths as real input (steering ramp, horn edge latch,
+         * gear debounce, camera cooldown) — and keep working when the window
+         * is unfocused (the platform poll early-outs with zero buttons there).
+         * Inert (one branch) when no script is loaded. */
+        if (td5_inputscript_active())
+            s_control_bits[i] |= td5_inputscript_race_bits(i);
 
         /* Bit 28 = auto/manual gearbox toggle.
          * Orig 0x00402E60 derives actor+0x378 = ~(bits >> 28) & 1, then gates

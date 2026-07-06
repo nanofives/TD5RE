@@ -500,6 +500,14 @@ void frontend_speed_band_for_tier(int tier, int *lo, int *hi);
 uint32_t td6_hsv_to_rgb(float h, float s, float v);
 void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 float fe_measure_small_text(const char *text);
+/* [UI GUIDE 2026-07-03] Canonical shared widget renderers, exported so every
+ * fe_*.c screen (and the dev UI GUIDE gallery) uses THE routine instead of
+ * hand-rolling: the selector ◄► arrows every selector row needs, the standard
+ * centred option value, and the MP mode-vote border ring. All were file-static
+ * before (td5_frontend.c / td5_fe_race.c). */
+void fe_draw_option_arrows(int btn_idx, float sx, float sy);
+void frontend_draw_value_centered(float sx, float sy, int y, const char *text, uint32_t color);
+void mp_mode_draw_border_ring(float bx, float by, float bw, float bh, float out, float th, uint32_t color, float sx, float sy);
 extern const char *s_car_zip_paths[TD5_CAR_SLOT_MAX];
 extern const int s_cup_schedules[][13];
 /* [CUP TRACK SELECT 2026-06-25] player-chosen per-race cup tracks (port enhancement) */
@@ -791,8 +799,6 @@ extern int  s_band_cover_surface[5];
 extern int  s_control_options_surface;
 extern int  s_credit_mugshot_surf[K_CREDIT_MUGSHOT_COUNT];
 extern int  s_cup_unlock_tier;
-extern int  s_language_bg_surface;
-extern int  s_language_flag_surface;
 extern int  s_mp_btn_catchup;
 extern int  s_mp_btn_layout;
 extern int  s_mp_btn_missing[2];
@@ -836,13 +842,16 @@ void Screen_ControllerBinding(void);
 void Screen_DisplayOptions(void);
 void Screen_ExtrasGallery(void);
 void Screen_GameOptions(void);
-void Screen_LanguageSelect(void);
-void Screen_LegalCopyright(void);
+/* Screen_LanguageSelect / Screen_LegalCopyright RETIRED 2026-07-03 —
+ * table slots [3]/[4] are NULL; set_screen redirects them to MAIN_MENU. */
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);
 void Screen_OptionsHub(void);
-void Screen_PositionerDebugTool(void);
+void Screen_UiGuide(void);              /* dev UI style guide (slot 1, td5_fe_devscreens.c) */
+void frontend_uiguide_render(float sx, float sy);
+void Screen_MpGuide(void);              /* dev MP-widgets gallery (slot 44, td5_fe_devscreens.c) */
+void frontend_mpguide_render(float sx, float sy);
 void Screen_RaceTypeCategory(void);
 void Screen_SoundOptions(void);
 void Screen_StartupInit(void);

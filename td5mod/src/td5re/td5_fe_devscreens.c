@@ -64,6 +64,7 @@ static float    s_changelog_max_scroll = 0.0f;  /* set by the render pass each f
 static uint32_t s_changelog_last_ms    = 0;     /* for frame-rate-independent scrolling */
 static int      s_cl_pending_btn       = -1;
 static int      s_cl_back_btn          = -1;
+static int      s_cl_uiguide_btn       = -1;   /* dev builds: UI GUIDE gallery */
 
 static int frontend_changelog_visible_lines(void) {
     return (int)((CL_VIEW_BOTTOM - CL_VIEW_TOP) / CL_LINE_H);
@@ -171,6 +172,14 @@ void Screen_Changelog(void) {
          * bottom, now centred. */
         s_cl_pending_btn = frontend_create_button("PENDING TO TEST", 420,  15, 200, 26);
         s_cl_back_btn    = frontend_create_button("BACK",            260, 440, 120, 26);
+        s_cl_uiguide_btn = -1;
+#ifndef TD5RE_RELEASE
+        /* Dev-only gateway to the UI GUIDE widget gallery (screen slot 1).
+         * Sits under PENDING TO TEST against the right margin. NOTE: the
+         * StartScreen nav walker routes screen 1 through THIS button (index 2
+         * — created third); keep the creation order if the route changes. */
+        s_cl_uiguide_btn = frontend_create_button("UI GUIDE",        420,  46, 200, 26);
+#endif
         s_selected_button   = s_cl_back_btn;
         s_changelog_scroll  = 0.0f;
         s_changelog_last_ms = 0;
@@ -212,6 +221,9 @@ void Screen_Changelog(void) {
             if (s_button_index == s_cl_pending_btn) {
                 frontend_play_sfx(3);
                 td5_frontend_set_screen(TD5_SCREEN_PENDING_TEST);
+            } else if (s_cl_uiguide_btn >= 0 && s_button_index == s_cl_uiguide_btn) {
+                frontend_play_sfx(3);
+                td5_frontend_set_screen(TD5_SCREEN_UI_GUIDE);
             } else if (s_button_index == s_cl_back_btn) {
                 frontend_play_sfx(5);
                 td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
@@ -558,4 +570,420 @@ void Screen_PendingTest(void) {
         break;
     }
     }
+}
+
+
+/* ========================================================================
+ * UI GUIDE screen (2026-07-03) -- dev visual style-guide / widget gallery.
+ *
+ * Repurposes screen slot [1] (the original's glyph-positioner dev tool
+ * @0x00415030, obsolete since the port renders text via TTF/vector). Shows
+ * the STANDARD widget kit through its real renderers so one screenshot
+ * verifies the canon after any frontend change; the MP-specific widgets live
+ * on the companion MP TOOLS screen (slot [44], Screen_MpGuide below) reached
+ * from this screen's MP TOOLS row. Both screens draw margin guides marking
+ * the canonical layout bounds (canvas 640x480, column X=120, panel X=348,
+ * title Y=17, content top Y=97, bottom row Y=377).
+ *
+ * Render runs in the POST-button overlay pass (drawn ON TOP of the button
+ * frames — captions over focused fills, modal over everything). Selector-row
+ * captions MUST be drawn here: the shared button loop only auto-draws
+ * captions for non-selector buttons (VectorUI single-path rule), and it
+ * places labels at x = bx+(bw-tw)/2, y = button top — match that formula
+ * exactly so gallery text sits pixel-identical to loop-drawn labels.
+ *
+ * Reached from the CHANGELOG screen's UI GUIDE button (dev builds) or
+ * --StartScreen=1 (nav-walked). ESC/BACK returns to the changelog.
+ * ======================================================================== */
+static int s_ug_btn_standard = -1, s_ug_btn_selector = -1, s_ug_btn_disabled = -1;
+static int s_ug_btn_col_a    = -1, s_ug_btn_col_b    = -1;
+static int s_ug_btn_mptools  = -1, s_ug_btn_back     = -1;
+static int s_ug_sel_value    = 1;
+static uint32_t s_ug_flash_until = 0;
+static char s_ug_flash_text[24];
+
+static const char *const k_ug_sel_values[4] = { "OFF", "LOW", "MEDIUM", "HIGH" };
+
+static void uiguide_flash(const char *msg) {
+    snprintf(s_ug_flash_text, sizeof s_ug_flash_text, "%s", msg);
+    s_ug_flash_until = td5_plat_time_ms() + 900u;
+}
+
+/* Draw a label centred on a button with the SAME formula the shared button
+ * loop uses (x = bx+(bw-tw)/2, y = button top) so gallery-drawn captions are
+ * pixel-identical to loop-drawn ones. */
+static void uiguide_button_caption(const FE_Button *b, const char *text,
+                                   uint32_t color, float sx, float sy) {
+    float tw = fe_measure_text(text, sx, sy);
+    fe_draw_text((float)b->x * sx + ((float)b->w * sx - tw) * 0.5f,
+                 (float)b->y * sy, text, color, sx, sy);
+}
+
+/* Small text centred on cx — same formula as the MP screens' small-centred
+ * helper (mp_pos_small_centered, td5_fe_race.c:123). */
+static void uiguide_small_centered(float cx_px, float y_px, const char *t,
+                                   uint32_t col, float sx, float sy) {
+    float gsx = (sx < sy) ? sx : sy;
+    fe_draw_small_text(cx_px - fe_measure_small_text(t) * 0.5f * gsx, y_px, t, col, sx, sy);
+}
+
+/* Margin guides: the canonical drawing bounds — canvas border (640x480), the
+ * button-column left edge (X=120), the description-panel left edge (X=348),
+ * the title line (Y=17), content top (Y=97) and the canonical bottom row
+ * (Y=377). Bright cyan, 2px, so the lines are unambiguous on any display
+ * (the first pass at 30% alpha read as invisible in review). */
+static void devscreens_draw_margin_guides(float sx, float sy) {
+    const uint32_t k_line  = 0xD000F0F0u;
+    const uint32_t k_label = 0xFF9FF7F7u;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    /* canvas bounds */
+    fe_draw_quad(0.0f,            0.0f,           640.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(0.0f,            478.0f * sy,    640.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(0.0f,            0.0f,           2.0f * sx,   480.0f * sy, k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(638.0f * sx,     0.0f,           2.0f * sx,   480.0f * sy, k_line, -1, 0, 0, 1, 1);
+    /* verticals: column left X=120, panel left X=348 */
+    fe_draw_quad(120.0f * sx,     60.0f * sy,     2.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(348.0f * sx,     60.0f * sy,     2.0f * sx,   360.0f * sy, k_line, -1, 0, 0, 1, 1);
+    /* horizontals: title Y=17, content top Y=97, content floor Y=460
+     * ([UI RULES 2026-07-03] BACK follows the last box; nothing below 460). */
+    fe_draw_quad(8.0f * sx,       17.0f * sy,     624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(8.0f * sx,       97.0f * sy,     624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    fe_draw_quad(8.0f * sx,       460.0f * sy,    624.0f * sx, 2.0f * sy,   k_line, -1, 0, 0, 1, 1);
+    /* labels */
+    fe_draw_small_text(123.0f * sx,  62.0f * sy, "X120", k_label, sx, sy);
+    fe_draw_small_text(351.0f * sx,  62.0f * sy, "X348", k_label, sx, sy);
+    fe_draw_small_text(  9.0f * sx,  20.0f * sy, "Y17",  k_label, sx, sy);
+    fe_draw_small_text(  9.0f * sx, 100.0f * sy, "Y97",  k_label, sx, sy);
+    fe_draw_small_text(  9.0f * sx, 446.0f * sy, "Y460 FLOOR", k_label, sx, sy);
+    fe_draw_small_text(565.0f * sx, 465.0f * sy, "640x480", k_label, sx, sy);
+}
+
+/* [UI RULES 2026-07-03] 6px gap markers: translucent cyan strips filling the
+ * reserved 6px module so the rule is visible, not just documented — between
+ * stacked rows, between two-column items, and right of an arrowed button. */
+static void uiguide_gap_marker(float x, float y, float w, float h,
+                               float sx, float sy) {
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad(x * sx, y * sy, w * sx, h * sy, 0x7000F0F0u, -1, 0, 0, 1, 1);
+}
+
+/* Dimension labels: "WxH" for every live button on the screen, right-aligned
+ * into the left gutter (x < 120) so they never collide with captions, values
+ * or the option arrows. Same cyan as the margin guides. */
+static void devscreens_draw_button_dims(float sx, float sy) {
+    const uint32_t k_label = 0xFF9FF7F7u;
+    float gsx = (sx < sy) ? sx : sy;
+    int i, j;
+    for (i = 0; i < s_button_count; i++) {
+        char dim[16];
+        int has_left_neighbor = 0;
+        if (!s_buttons[i].active || s_buttons[i].hidden) continue;
+        /* Right-column items (a sibling button directly to their LEFT on the
+         * same row) get no gutter label — it would land on the sibling. The
+         * left item of the pair already documents the shared WxH. */
+        for (j = 0; j < s_button_count; j++) {
+            if (j == i || !s_buttons[j].active || s_buttons[j].hidden) continue;
+            if (s_buttons[j].y == s_buttons[i].y &&
+                s_buttons[j].x < s_buttons[i].x) { has_left_neighbor = 1; break; }
+        }
+        if (has_left_neighbor) continue;
+        snprintf(dim, sizeof dim, "%dx%d", s_buttons[i].w, s_buttons[i].h);
+        fe_draw_small_text((float)s_buttons[i].x * sx
+                               - (fe_measure_small_text(dim) + 8.0f) * gsx,
+                           ((float)s_buttons[i].y
+                               + ((float)s_buttons[i].h - 10.0f) * 0.5f) * sy,
+                           dim, k_label, sx, sy);
+    }
+}
+
+void Screen_UiGuide(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_reset_buttons();
+        frontend_init_return_screen(TD5_SCREEN_UI_GUIDE);   /* parent = CHANGELOG */
+        /* [UI RULES 2026-07-03] Row pitch = H + 6 (gap between stacked buttons
+         * is at most 6px). Two-column items split the 224 column into
+         * 109 + 6 + 109. BACK follows the LAST BOX with the same <=6px gap and
+         * never crosses the Y410 content floor (bottom edge here = 410). */
+        s_ug_btn_standard = frontend_create_button("STANDARD BUTTON", FE_MENU_BTN_X,  97, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        s_ug_btn_selector = frontend_create_button("DEMO SELECTOR",   FE_MENU_BTN_X, 135, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        if (s_ug_btn_selector >= 0) s_buttons[s_ug_btn_selector].is_selector = 1;
+        s_ug_btn_disabled = frontend_create_button("DISABLED BUTTON", FE_MENU_BTN_X, 173, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        if (s_ug_btn_disabled >= 0) s_buttons[s_ug_btn_disabled].disabled = 1;
+        s_ug_btn_col_a    = frontend_create_button("COLUMN A",        FE_MENU_BTN_X, 211, 109, FE_MENU_BTN_H);
+        s_ug_btn_col_b    = frontend_create_button("COLUMN B",        235,           211, 109, FE_MENU_BTN_H);
+        /* NOTE: the StartScreen nav walker routes MP GUIDE (screen 44) through
+         * THIS button (index 5 — created sixth); keep the creation order. */
+        s_ug_btn_mptools  = frontend_create_button("MP TOOLS",        FE_MENU_BTN_X, 249, FE_MENU_BTN_W, FE_MENU_BTN_H);
+        /* BACK after the last box (spec panel ends at 397) with the <=6px gap;
+         * bottom edge 435, well above the Y460 content floor. */
+        s_ug_btn_back     = frontend_create_button("BACK",            176, 403, 112, FE_MENU_BTN_H);
+        s_selected_button = s_ug_btn_standard;
+        s_ug_sel_value    = 1;
+        s_ug_flash_until  = 0;
+        s_anim_complete   = 1;   /* instant screen: enables B/ESC + fade-in chime */
+        s_inner_state     = 1;
+        TD5_LOG_I(LOG_TAG, "Screen_UiGuide: enter");
+        break;
+
+    case 1: {
+        /* Selector row: LEFT/RIGHT cycles the demo value (canonical path). */
+        if (s_selected_button == s_ug_btn_selector) {
+            int d = frontend_option_delta();
+            if (d) {
+                s_ug_sel_value = (s_ug_sel_value + d + 4) % 4;
+                frontend_play_sfx(2);
+            }
+        }
+
+        if (s_input_ready && s_button_index >= 0) {
+            if (s_button_index == s_ug_btn_standard ||
+                s_button_index == s_ug_btn_col_a ||
+                s_button_index == s_ug_btn_col_b) {
+                frontend_play_sfx(3);
+                uiguide_flash("PRESSED");
+            } else if (s_button_index == s_ug_btn_mptools) {
+                frontend_play_sfx(3);
+                td5_frontend_set_screen(TD5_SCREEN_MP_GUIDE);
+            } else if (s_button_index == s_ug_btn_back) {
+                frontend_play_sfx(5);
+                td5_frontend_set_screen(TD5_SCREEN_CHANGELOG);
+            }
+        }
+        break;
+    }
+    }
+}
+
+void frontend_uiguide_render(float sx, float sy) {
+    uint32_t now = td5_plat_time_ms();
+
+    devscreens_draw_margin_guides(sx, sy);
+    devscreens_draw_button_dims(sx, sy);
+
+    /* Canonical screen title -- position/colour per FRONTEND_SCREEN_GUIDE.md. */
+    frontend_draw_screen_title("UI GUIDE", FE_TITLE_LEFT_X * sx, 17.0f * sy,
+                               0xFFE3D708u, sx, sy);
+
+    /* Selector row: caption drawn here with the loop's exact label formula
+     * (the shared loop never auto-draws selector captions), the canonical
+     * option arrows, and the value at X=348 LEFT-JUSTIFIED ([UI RULES]:
+     * selector values start at the panel edge, always left-aligned). */
+    if (s_ug_btn_selector >= 0 && s_buttons[s_ug_btn_selector].active) {
+        FE_Button *b = &s_buttons[s_ug_btn_selector];
+        uiguide_button_caption(b, "DEMO SELECTOR", 0xFFFFFFFFu, sx, sy);
+        fe_draw_text(348.0f * sx, (float)b->y * sy,
+                     k_ug_sel_values[s_ug_sel_value], 0xFFFFFFFFu, sx, sy);
+        fe_draw_option_arrows(s_ug_btn_selector, sx, sy);
+    }
+
+    /* [UI RULES] 6px gap markers — the reserved module made visible:
+     * row gap, column gap, arrowed-button right gap, box gap. */
+    uiguide_gap_marker(120.0f, 205.0f, 224.0f, 6.0f, sx, sy);   /* between rows        */
+    uiguide_gap_marker(229.0f, 211.0f,   6.0f, 32.0f, sx, sy);  /* between columns     */
+    uiguide_gap_marker(344.0f, 135.0f,   6.0f, 32.0f, sx, sy);  /* right of ◄► button  */
+    uiguide_gap_marker(120.0f, 281.0f, 224.0f, 6.0f, sx, sy);   /* button -> box       */
+
+    /* Spec panels BELOW the button column (last boxes before BACK): metrics
+     * left, type specimens right — TWO 237-wide frames with the canonical 6px
+     * column gap (the 9-slice frame clamps visibly past ~250px wide, and the
+     * split doubles as a box-level demo of the column rule). Text blocks are
+     * vertically CENTRED in the boxes (equal ~11px pads). */
+    fe_draw_button_frame_fill_scaled(120.0f * sx, 287.0f * sy, 237.0f * sx, 110.0f * sy,
+                                     1, 0xFF392152u, 1.0f, sx, sy);
+    fe_draw_button_frame_fill_scaled(363.0f * sx, 287.0f * sy, 237.0f * sx, 110.0f * sy,
+                                     1, 0xFF392152u, 1.0f, sx, sy);
+    uiguide_gap_marker(357.0f, 287.0f, 6.0f, 110.0f, sx, sy);
+    fe_draw_small_text(132.0f * sx, 298.0f * sy, "CANONICAL METRICS + RULES",       0xFFE3D708u, sx, sy);
+    fe_draw_small_text(132.0f * sx, 316.0f * sy, "TITLE X=126 Y=17 #E3D708",        0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 331.0f * sy, "BUTTON X=120 W=224 H=32",         0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 346.0f * sy, "GAPS ROWS/COLS/ARROWS <= 6PX",    0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 361.0f * sy, "SELECTOR VALUE AT X348 LEFT-JUST", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(132.0f * sx, 376.0f * sy, "BACK AFTER LAST BOX, FLOOR Y=460", 0xFFFFFFFFu, sx, sy);
+
+    /* Type specimens (right panel, clear separation between the faces). */
+    fe_draw_text(375.0f * sx, 300.0f * sy, "MAIN FONT ABC 0123", 0xFFFFFFFFu, sx, sy);
+    fe_draw_small_text(375.0f * sx, 330.0f * sy, "SMALL FONT ABC 0123", 0xFF8890A0u, sx, sy);
+    {
+        int keep = s_fe_preserve_case;
+        s_fe_preserve_case = 1;   /* mixed-case flag (player-name feature) */
+        fe_draw_text(375.0f * sx, 348.0f * sy, "Mixed Case Text", 0xFFE3D708u, sx, sy);
+        s_fe_preserve_case = keep;
+    }
+    fe_draw_small_text(375.0f * sx, 376.0f * sy, "MP WIDGETS: SEE MP TOOLS", 0xFF8890A0u, sx, sy);
+
+    /* [UI RULES] 6px gap marker between the panel and BACK. */
+    uiguide_gap_marker(120.0f, 397.0f, 224.0f, 6.0f, sx, sy);
+
+    /* Press feedback flash (right of BACK on the bottom row). */
+    if (s_ug_flash_until && now < s_ug_flash_until)
+        fe_draw_text_centered(450.0f * sx, 410.0f * sy, s_ug_flash_text,
+                              0xFFE3D708u, sx, sy);
+    else
+        s_ug_flash_until = 0;
+}
+
+/* ========================================================================
+ * MP TOOLS screen (2026-07-03) -- companion gallery for the MP-specific
+ * widgets. Rebuilt 2026-07-03 (review) to render the REAL profile-selection
+ * pane rather than ad-hoc stand-ins: the style is extracted verbatim from
+ * frontend_mp_setup_render (td5_fe_mp_setup.c) — a translucent pane box with
+ * a 4-edge accent border, the accent name banner + HOST pill, and a band of
+ * genuine mp_simul_draw_btn widgets (NAME+value, COLOUR+swatch, arrowed CAR,
+ * AUTOMATIC, focused OK). Right column shows the mode-vote nested border
+ * rings and the shared confirm modal. Slot [44]; reached from UI GUIDE's
+ * MP TOOLS row; BACK/ESC returns to UI GUIDE.
+ * ======================================================================== */
+static int s_mg_btn_modal = -1, s_mg_btn_back = -1;
+static int s_mg_modal_armed = 0;
+
+void Screen_MpGuide(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        frontend_reset_buttons();
+        frontend_init_return_screen(TD5_SCREEN_MP_GUIDE);   /* parent = UI_GUIDE */
+        /* Only the two NAVIGABLE buttons are shared-loop buttons; the profile
+         * pane's widgets are demo mp_simul_draw_btn drawn in the render. */
+        s_mg_btn_modal = frontend_create_button("CONFIRM PROMPT", 364, 300, 224, FE_MENU_BTN_H);
+        s_mg_btn_back  = frontend_create_button("BACK", 176, 368, 112, FE_MENU_BTN_H);
+        s_selected_button = s_mg_btn_modal;
+        s_mg_modal_armed  = 0;
+        s_ug_flash_until  = 0;
+        s_anim_complete   = 1;
+        s_inner_state     = 1;
+        TD5_LOG_I(LOG_TAG, "Screen_MpGuide: enter");
+        break;
+
+    case 1: {
+        /* Armed shared confirm modal: ENTER/A = confirm, ESC/B = cancel.
+         * (Same read pattern as the MP mode-config back prompt.) */
+        if (s_mg_modal_armed) {
+            if (s_input_ready) {
+                s_mg_modal_armed = 0;
+                frontend_play_sfx(3);
+                uiguide_flash("CONFIRMED");
+                td5_plat_input_flush_nav();
+            } else if (frontend_check_escape()) {
+                s_mg_modal_armed = 0;
+                frontend_play_sfx(5);
+                uiguide_flash("CANCELLED");
+                td5_plat_input_flush_nav();
+            }
+            break;
+        }
+
+        if (s_input_ready && s_button_index >= 0) {
+            if (s_button_index == s_mg_btn_modal) {
+                frontend_play_sfx(3);
+                s_mg_modal_armed = 1;
+                td5_plat_input_flush_nav();  /* the arming press must not also confirm */
+            } else if (s_button_index == s_mg_btn_back) {
+                frontend_play_sfx(5);
+                td5_frontend_set_screen(TD5_SCREEN_UI_GUIDE);
+            }
+        }
+        break;
+    }
+    }
+}
+
+/* An authentic single profile-selection pane, style-extracted from
+ * frontend_mp_setup_render (host slot, idle button band). Non-interactive
+ * demo — draws the pane box, accent border, name banner + HOST pill and the
+ * real mp_simul_draw_btn widget band. */
+static void mpguide_draw_profile_pane(float px, float py, float pw, float ph,
+                                      uint32_t rgb, float sx, float sy) {
+    uint32_t pcol = rgb | 0xFF000000u;
+    float bt = 2.0f;
+    uint32_t bc = rgb | 0xD0000000u;
+
+    /* Backdrop + 4-edge accent border (frontend_mp_setup_render lines 1855-64). */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    fe_draw_quad((px + 3) * sx, (py + 3) * sy, (pw - 6) * sx, (ph - 6) * sy,
+                 0xB0141420u, -1, 0, 0, 1, 1);
+    fe_draw_quad((px + 3) * sx, (py + 3) * sy, (pw - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+    fe_draw_quad((px + 3) * sx, (py + ph - 3 - bt) * sy, (pw - 6) * sx, bt * sy, bc, -1, 0, 0, 1, 1);
+    fe_draw_quad((px + 3) * sx, (py + 3) * sy, bt * sx, (ph - 6) * sy, bc, -1, 0, 0, 1, 1);
+    fe_draw_quad((px + pw - 3 - bt) * sx, (py + 3) * sy, bt * sx, (ph - 6) * sy, bc, -1, 0, 0, 1, 1);
+
+    /* Name banner + HOST pill (mp_draw_pane_name_banner, host slot 0). */
+    fe_draw_quad((px + 3) * sx, (py + 3) * sy, (pw - 6) * sx, 16.0f * sy,
+                 rgb | 0xD0000000u, -1, 0, 0, 1, 1);
+    {
+        float badge_w = td5_vui_host_badge(px + 6.0f, py + 4.5f, 13.0f, sx, sy);
+        float name_l  = px + 6.0f + badge_w + 5.0f, name_r = px + pw - 3.0f;
+        uiguide_small_centered((name_l + name_r) * 0.5f, (py + 6.0f) * sy,
+                               "PLAYER 1", 0xFF000000u, sx, sy);
+    }
+
+    /* Idle button band: the genuine shared MP button widget in each variant. */
+    {
+        float bx = px + 8.0f, bw = pw - 16.0f, bh = 26.0f, yy = py + 26.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "NAME",      0, pcol, 0, "Player1",    -1, sx, sy);
+        yy += bh + 3.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "COLOUR",    0, pcol, 0, NULL, (int)rgb,    sx, sy);
+        yy += bh + 3.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "CAR",       0, pcol, 1, NULL,        -1, sx, sy);
+        yy += bh + 3.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "AUTOMATIC", 0, pcol, 0, NULL,        -1, sx, sy);
+        yy += bh + 3.0f;
+        mp_simul_draw_btn(bx, yy, bw, bh, "OK",        1, pcol, 0, NULL,        -1, sx, sy);
+    }
+}
+
+void frontend_mpguide_render(float sx, float sy) {
+    extern const uint32_t k_mp_player_colors[];   /* shared MP accent palette (td5_fe_race.c seam) */
+    uint32_t now = td5_plat_time_ms();
+    uint32_t demo_rgb = k_mp_player_colors[0] & 0x00FFFFFFu;
+    int p;
+
+    devscreens_draw_margin_guides(sx, sy);
+    devscreens_draw_button_dims(sx, sy);
+
+    frontend_draw_screen_title("MP TOOLS", FE_TITLE_LEFT_X * sx, 17.0f * sy,
+                               0xFFE3D708u, sx, sy);
+
+    /* LEFT: an authentic profile-selection pane (host slot). */
+    fe_draw_small_text(120.0f * sx, 100.0f * sy, "PROFILE PANE (PROFILE SELECTION):",
+                       0xFFE3D708u, sx, sy);
+    mpguide_draw_profile_pane(120.0f, 112.0f, 216.0f, 250.0f, demo_rgb, sx, sy);
+
+    /* RIGHT: what the pane is made of + the mode-vote rings + the modal. */
+    fe_draw_small_text(356.0f * sx, 118.0f * sy, "PANE + ACCENT BORDER",       0xFF8890A0u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 132.0f * sy, "HOST BADGE + NAME BANNER",   0xFF8890A0u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 146.0f * sy, "NAME / COLOUR / CAR / OK",   0xFF8890A0u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 160.0f * sy, "(mp_simul_draw_btn widget)", 0xFF667080u, sx, sy);
+
+    fe_draw_small_text(356.0f * sx, 190.0f * sy, "MODE-VOTE RINGS:", 0xFF8890A0u, sx, sy);
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    for (p = 0; p < TD5_MAX_HUMAN_PLAYERS && p < 6; p++) {
+        uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
+        if (!rgb) rgb = k_mp_player_colors[p] & 0x00FFFFFFu;
+        fe_draw_quad((360.0f + (float)p * 34.0f) * sx, 208.0f * sy,
+                     22.0f * sx, 15.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
+    }
+    /* two nested rings on swatch 0 = two players voted for it */
+    mp_mode_draw_border_ring(360.0f, 208.0f, 22.0f, 15.0f, 3.0f, 2.0f,
+                             (k_mp_player_colors[0] & 0x00FFFFFFu) | 0xFF000000u, sx, sy);
+    mp_mode_draw_border_ring(360.0f, 208.0f, 22.0f, 15.0f, 6.0f, 2.0f,
+                             (k_mp_player_colors[1] & 0x00FFFFFFu) | 0xFF000000u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 236.0f * sy, "RINGS NEST OUTWARD PER VOTER", 0xFF667080u, sx, sy);
+
+    fe_draw_small_text(356.0f * sx, 284.0f * sy, "SHARED CONFIRM MODAL:", 0xFF8890A0u, sx, sy);
+
+    /* [UI RULES] 6px gap marker before BACK (pane bottom 362 -> BACK 368). */
+    uiguide_gap_marker(120.0f, 362.0f, 216.0f, 6.0f, sx, sy);
+
+    /* Press feedback flash (above BACK). */
+    if (s_ug_flash_until && now < s_ug_flash_until)
+        fe_draw_text_centered(450.0f * sx, 344.0f * sy, s_ug_flash_text,
+                              0xFFE3D708u, sx, sy);
+    else
+        s_ug_flash_until = 0;
+
+    /* Shared MP confirm modal -- drawn last so it composites over everything. */
+    if (s_mg_modal_armed)
+        mp_confirm_modal_render(sx, sy, "SAMPLE CONFIRM PROMPT");
 }

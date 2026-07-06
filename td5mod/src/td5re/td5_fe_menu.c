@@ -2,8 +2,8 @@
  * td5_fe_menu.c -- frontend screens: boot flow + main menu + options.
  *
  * Split out of td5_frontend.c (2026-06). Handlers: LocalizationInit[0],
- * PositionerDebugTool[1], AttractModeDemo[2], LanguageSelect[3],
- * LegalCopyright[4], MainMenu[5], RaceTypeCategory[6], OptionsHub[12],
+ * AttractModeDemo[2] (UiGuide[1] is in td5_fe_devscreens.c; 3/4 retired),
+ * MainMenu[5], RaceTypeCategory[6], OptionsHub[12],
  * GameOptions[13], ControlOptions[14], SoundOptions[15], DisplayOptions[16],
  * TwoPlayerOptions[17], ControllerBinding[18], MusicTestExtras[19],
  * ExtrasGallery[22], StartupInit[28]. Shared frontend state comes from
@@ -742,42 +742,6 @@ void Screen_LocalizationInit(void) {
     }
 }
 
-void Screen_PositionerDebugTool(void) {
-    switch (s_inner_state) {
-    case 0: /* Load the menu font + clear (orig loads Positioner.tga as the cursor-bar
-             * colour source, clears the backbuffer black and draws two guide scanlines).
-             * The original creates NO on-screen buttons — the whole tool is keyboard-
-             * driven (arrows move/edit, ESC saves), so the port draws none either. */
-        frontend_init_return_screen(TD5_SCREEN_POSITIONER_DEBUG);
-        frontend_load_tga("Front_End/Positioner.tga", "Front_End/FrontEnd.zip");
-        s_anim_tick = 0;
-        s_inner_state = 1;
-        break;
-    case 1: /* present (orig case 1) */
-        frontend_present_buffer();
-        s_inner_state = 2;
-        break;
-    case 2: /* init glyph selection (orig g_positionerSelectedGlyphIndex = 0) */
-        s_anim_tick = 0;
-        s_anim_complete = 1;   /* enable the shared ESC handler (-> return screen = main menu) */
-        s_inner_state = 3;
-        break;
-    case 3: /* navigate the glyph strip (orig case 3: arrow bits LEFT=1/RIGHT=2/UP=4/DOWN=8;
-             * ←/→ = ±1, ↓/↑ = ±8). ESC is handled by the shared escape path -> main menu. */
-        if (s_input_ready && s_arrow_input) {
-            if (s_arrow_input & 1) s_anim_tick -= 1;   /* LEFT  */
-            if (s_arrow_input & 2) s_anim_tick += 1;   /* RIGHT */
-            if (s_arrow_input & 8) s_anim_tick += 8;   /* DOWN  */
-            if (s_arrow_input & 4) s_anim_tick -= 8;   /* UP    */
-            frontend_play_sfx(1);
-        }
-        break;
-    default:
-        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
-        break;
-    }
-}
-
 void Screen_AttractModeDemo(void) {
     switch (s_inner_state) {
     case 0: /* Set attract mode flag */
@@ -820,110 +784,6 @@ void Screen_AttractModeDemo(void) {
             frontend_init_race_schedule();
             td5_game_set_demo_mode(1);
             frontend_init_display_mode_state();
-        }
-        break;
-    }
-}
-
-void Screen_LanguageSelect(void) {
-    switch (s_inner_state) {
-    case 0: /* Load Language.tga and LanguageScreen.tga */
-        frontend_init_return_screen(TD5_SCREEN_LANGUAGE_SELECT);
-        /* [FIXED 2026-06-01] Faithful to ScreenLanguageSelect @0x00427290: the original
-         * draws LanguageScreen.tga (bg) + 4 FLAG IMAGE tiles from Language.tga (176x512,
-         * four stacked 176x128 tiles, src V 0/128/256/384) as clickable hit-rects at the
-         * four corners + a "LANGUAGE SELECT" header (in-EXE literal @0x4667c0). It has NO
-         * text buttons. Port previously showed 4 text buttons — replaced: the 4 buttons
-         * are now HIDDEN hit-rects at the confirmed flag dest rects (input still works via
-         * s_button_index<4), and frontend_render_language_select_overlay draws the flags +
-         * header + bg. Clicking any flag advances to LEGAL (no language global written —
-         * CONFIRMED). Dest rects @640x480: TL(40,128) TR(424,128) BL(40,320) BR(424,320),
-         * each 176x128. */
-        s_language_bg_surface   = frontend_load_tga("Front_End/LanguageScreen.tga", "Front_End/FrontEnd.zip");
-        s_language_flag_surface = frontend_load_tga("Front_End/Language.tga", "Front_End/FrontEnd.zip");
-        {
-            int fi;
-            for (fi = 0; fi < 4; fi++) {
-                int fx = (fi & 1) ? 424 : 40;     /* TL/BL left=40, TR/BR right=424 */
-                int fy = (fi < 2) ? 128 : 320;    /* top row 128, bottom row 320 */
-                int b = frontend_create_button("", fx, fy, 176, 128);
-                if (b >= 0) s_buttons[b].hidden = 1;  /* invisible hit-rect; flag drawn in overlay */
-            }
-        }
-        s_anim_tick = 0;
-        s_inner_state = 1;
-        break;
-
-    case 1: /* Tick */
-        frontend_present_buffer();
-        s_inner_state = 2;
-        break;
-
-    case 2:
-        s_anim_tick += 2 * s_fe_logic_ticks;
-        frontend_present_buffer();
-        if (s_anim_tick >= 16) {
-            s_inner_state = 3;
-        }
-        break;
-
-    case 3: /* Interaction -- wait for language selection */
-        if (s_input_ready && s_button_index >= 0 && s_button_index < 4) {
-            s_flow_context = s_button_index;
-            s_anim_tick = 0;
-            s_inner_state = 4;
-        }
-        break;
-
-    case 4:
-    case 5:
-        s_anim_tick += 2 * s_fe_logic_ticks;
-        if (s_anim_tick >= 8) {
-            s_inner_state = 6;
-        }
-        break;
-
-    case 6: /* Release surfaces, exit to Legal screen */
-        td5_frontend_set_screen(TD5_SCREEN_LEGAL_COPYRIGHT);
-        break;
-    }
-}
-
-void Screen_LegalCopyright(void) {
-    switch (s_inner_state) {
-    case 0: /* Load + draw */
-        frontend_init_return_screen(TD5_SCREEN_LEGAL_COPYRIGHT);
-        frontend_load_tga("Front_End/LegalScreen.tga", "Front_End/FrontEnd.zip");
-        /* Copyright text drawn live in render overlay via
-         * DrawFrontendLocalizedStringSecondary @ 0x00424390.
-         * Original renders "TEST DRIVE 5 COPYRIGHT 1998" [CONFIRMED @ 0x00466808]
-         * at x=canvasW/10, y=0x20 (32px) and repeats each row down the screen.
-         * Port renders it in frontend_render_legal_copyright_overlay below. */
-        s_anim_tick = 0;
-        s_inner_state = 1;
-        break;
-
-    case 1: /* Fade in [FIXED 2026-06-01: actually run the fade — was a no-op counter,
-             * so the legal splash popped in. Orig case1 = RenderFrontendFadeEffect.] */
-        if (s_anim_tick == 0) { frontend_init_fade(0x000000); s_anim_tick = 1; }
-        if (frontend_render_fade()) {
-            /* Store wall-clock start for 3-second guard [CONFIRMED @ 0x4274A0 case 1→2] */
-            s_anim_tick = (int)timeGetTime();
-            s_inner_state = 2;
-        }
-        break;
-
-    case 2: /* 3-second timer [CONFIRMED @ 0x4274A0 case 2: timeGetTime() - stored > 2999] */
-        if ((uint32_t)(timeGetTime() - (uint32_t)s_anim_tick) > 2999u) {
-            s_anim_tick = 0;
-            s_inner_state = 3;
-        }
-        break;
-
-    case 3: /* Fade out + exit [FIXED 2026-06-01: run the fade, was a no-op counter.] */
-        if (s_anim_tick == 0) { frontend_init_fade(0x000000); s_anim_tick = 1; }
-        if (frontend_render_fade()) {
-            td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
         }
         break;
     }

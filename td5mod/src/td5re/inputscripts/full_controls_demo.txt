@@ -1,0 +1,41 @@
+# TD5RE input-script: full control-surface exercise for a solo race.
+# Run with:  td5re.exe --AutoRace=1 --SkipIntro=1 --InputScript=td5mod/src/td5re/inputscripts/full_controls_demo.txt
+# Ticks are rendered frames (~60/s). Each phase logs a MARKER to frontend.log
+# so the run can be verified from the logs alone. Gear commands need manual
+# gearbox (--AutoGearbox=0) to have an effect — same as the real keys.
+
+sync race
+0    log phase 1: full throttle launch
+0    throttle 1
+360  log phase 2: brake to a stop
+360  throttle 0
+361  brake 1
+540  brake 0
+541  log phase 3: throttle + steering taps L/R
+541  throttle 1
+600  left 1
+660  left 0
+661  right 1
+720  right 0
+780  log phase 4: handbrake pull
+780  handbrake 1
+840  handbrake 0
+841  log phase 5: horn honk x2
+841  horn press
+900  horn press
+960  log phase 6: camera cycle x2 + rear view
+960  camera press
+1020 camera press
+1080 rearview 1
+1140 rearview 0
+1141 log phase 7: gear up / gear down
+1141 gearup press
+1200 geardown press
+1260 log phase 8: pause menu open + close (ESC key)
+1260 key esc press
+1380 key esc press
+1500 log phase 9: recovery key R (hold)
+1500 key r 1
+1540 key r 0
+1620 log demo complete
+1620 quit

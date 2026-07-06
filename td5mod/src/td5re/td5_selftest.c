@@ -150,8 +150,8 @@ typedef struct {
 
 static const ScreenStep k_screens_full[] = {
     { "scr-main-menu",       TD5_SCREEN_MAIN_MENU,          0 },
-    { "scr-language",        TD5_SCREEN_LANGUAGE_SELECT,    0 },
-    { "scr-legal",           TD5_SCREEN_LEGAL_COPYRIGHT,    0 },
+    /* scr-language / scr-legal removed 2026-07-03 — screens retired (table
+     * slots NULL, set_screen redirects to MAIN_MENU). */
     { "scr-race-type",       TD5_SCREEN_RACE_TYPE_MENU,     0 },
     { "scr-quick-race",      TD5_SCREEN_QUICK_RACE,         0 },
     { "scr-options-hub",     TD5_SCREEN_OPTIONS_HUB,        0 },
@@ -173,6 +173,8 @@ static const ScreenStep k_screens_full[] = {
     { "scr-mp-lobby",        TD5_SCREEN_MP_LOBBY,           0 },
     { "scr-changelog",       TD5_SCREEN_CHANGELOG,          0 },
     { "scr-pending-test",    TD5_SCREEN_PENDING_TEST,       0 },
+    { "scr-ui-guide",        TD5_SCREEN_UI_GUIDE,           0 },
+    { "scr-mp-guide",        TD5_SCREEN_MP_GUIDE,           0 },
 };
 #define ST_SCREEN_COUNT_FULL ((int)(sizeof(k_screens_full) / sizeof(k_screens_full[0])))
 #define ST_SMOKE_SCREENS 3   /* main menu, language, legal — plus races cover results */

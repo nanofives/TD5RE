@@ -82,6 +82,16 @@ static LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 /* Input */
 static uint8_t  s_keyboard[256];
 
+/* [INPUTSCRIPT 2026-07-03] Scripted-key overlay (td5_inputscript.c dev harness
+ * + StartScreen nav walker). Merged into s_keyboard right after every hardware
+ * fill — including the unfocused path — so injected keys read as physical
+ * presses everywhere (frontend nav held-state, pause menu, dev keys, the
+ * rebindable race key map) even when the window is in the background.
+ * s_inject_active is a cheap gate so the merge loop costs nothing when the
+ * harness is idle. */
+static uint8_t  s_inject_keys[256];
+static int      s_inject_active = 0;
+
 /* Rebindable keyboard scancode table, per player, in the canonical action
  * order used by the control-config screen / original g_keyboardScanCodeTable:
  *   0=LEFT 1=RIGHT 2=ACCELERATE 3=BRAKE 4=HANDBRAKE 5=HORN/SIREN
@@ -1856,6 +1866,12 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
     active_hwnd = GetForegroundWindow();
     if (target_hwnd && active_hwnd != target_hwnd) {
         memset(s_keyboard, 0, sizeof(s_keyboard));
+        /* [INPUTSCRIPT] keep scripted keys alive while unfocused so automated
+         * test windows can run in the background (key_pressed readers only —
+         * the button mapping below is still skipped, race actions inject at
+         * the control-bits level in td5_input.c instead). */
+        if (s_inject_active)
+            for (int k = 0; k < 256; k++) s_keyboard[k] |= s_inject_keys[k];
         s_mouse_dx = 0;
         s_mouse_dy = 0;
         s_mouse_buttons = 0;
@@ -1908,6 +1924,12 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             }
         }
     }
+
+    /* [INPUTSCRIPT] Merge the scripted-key overlay over the fresh hardware
+     * snapshot — one insertion point covers every downstream reader
+     * (key_pressed, the K_DOWN binding map, get_keyboard, jbits ESC/pause). */
+    if (s_inject_active)
+        for (int k = 0; k < 256; k++) s_keyboard[k] |= s_inject_keys[k];
 
     /* Mouse */
     if (s_di_mouse) {
@@ -2150,6 +2172,58 @@ int td5_plat_input_key_pressed(int scancode)
 {
     if (scancode < 0 || scancode > 255) return 0;
     return (s_keyboard[scancode] & 0x80) ? 1 : 0;
+}
+
+/* [INPUTSCRIPT 2026-07-03] Scripted-key injection (dev harness + StartScreen
+ * nav walker). Press/release a DIK scancode as if it were a physical key:
+ *  - the overlay is merged into s_keyboard after each hardware fill (and
+ *    immediately here so readers between polls see it);
+ *  - arrow/Enter DOWN transitions also enqueue a WM_KEYDOWN nav event —
+ *    frontend menu MOVES are drained exclusively from that FIFO, so a bare
+ *    scancode overlay would never move the cursor;
+ *  - ESC DOWN also sets the one-shot ESC latch (frontend back-out reads the
+ *    latch, the pause menu reads the scancode — both paths covered). */
+void td5_plat_input_inject_key(int scancode, int down)
+{
+    if (scancode < 0 || scancode > 255) return;
+    if (down) {
+        s_inject_keys[scancode] = 0x80;
+        s_keyboard[scancode]   |= 0x80;
+        s_inject_active = 1;
+
+        {
+            unsigned code = 0;
+            switch (scancode) {
+            case 0xCB: code = TD5_NAVKEY_LEFT;  break;
+            case 0xCD: code = TD5_NAVKEY_RIGHT; break;
+            case 0xC8: code = TD5_NAVKEY_UP;    break;
+            case 0xD0: code = TD5_NAVKEY_DOWN;  break;
+            case 0x1C: code = TD5_NAVKEY_ENTER; break;
+            case 0x01: s_esc_latch = 1;         break;
+            default: break;
+            }
+            if (code) {
+                int next = (s_nav_q_head + 1) % TD5_NAV_QUEUE_SIZE;
+                if (next != s_nav_q_tail) {
+                    s_nav_queue[s_nav_q_head] = (unsigned char)code;
+                    s_nav_q_head = next;
+                }
+            }
+        }
+    } else {
+        s_inject_keys[scancode] = 0;
+        s_keyboard[scancode]   &= (uint8_t)~0x80;
+    }
+}
+
+void td5_plat_input_inject_clear(void)
+{
+    if (!s_inject_active) return;
+    for (int k = 0; k < 256; k++) {
+        if (s_inject_keys[k]) s_keyboard[k] &= (uint8_t)~0x80;
+        s_inject_keys[k] = 0;
+    }
+    s_inject_active = 0;
 }
 
 /* Pop the next queued typed character (WM_CHAR). Returns 0 when the queue is

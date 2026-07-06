@@ -86,10 +86,18 @@ typedef void (*ScreenFn)(void);
  */
 static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [ 0] */ Screen_LocalizationInit,
-    /* [ 1] */ Screen_PositionerDebugTool,
+    /* [ 1] */ Screen_UiGuide,        /* REPURPOSED 2026-07-03 — dev UI style
+                                       * guide / widget gallery (was the orig
+                                       * glyph positioner @0x415030, obsolete:
+                                       * port text is TTF/vector). */
     /* [ 2] */ Screen_AttractModeDemo,
-    /* [ 3] */ Screen_LanguageSelect,
-    /* [ 4] */ Screen_LegalCopyright,
+    /* [ 3] */ NULL,   /* RETIRED 2026-07-03 — Screen_LanguageSelect had zero nav
+                        * edges (orig picks language from the static Language.dll
+                        * import; ScreenLocalizationInit @0x427182 boots straight
+                        * to MAIN_MENU). set_screen redirects retired slots. */
+    /* [ 4] */ NULL,   /* RETIRED 2026-07-03 — Screen_LegalCopyright was only
+                        * reachable FROM the retired language screen; boot legals
+                        * show via td5_fmv_show_legal_screens (INTRO state). */
     /* [ 5] */ Screen_MainMenu,
     /* [ 6] */ Screen_RaceTypeCategory,
     /* [ 7] */ Screen_QuickRaceMenu,
@@ -131,6 +139,8 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [43] */ Screen_TrackSelection,     /* CUP TRACK SELECT: shares the track-select body,
                                            * runs in multi-pick mode (2026-06-25)        */
     /* [44] */ Screen_RaceOptions,        /* RACE OPTIONS: consolidated per-race options (2026-07-04) */
+    /* [45] */ Screen_MpGuide,            /* dev MP-widgets gallery (2026-07-03; from
+                                           * UI GUIDE's MP TOOLS row)                    */
 };
 
 /* ========================================================================
@@ -909,9 +919,6 @@ static int  s_gallery_pic_surface;
 static int  s_gallery_visited_mask;
 int  s_credit_mugshot_surf[K_CREDIT_MUGSHOT_COUNT]; /* dev photos, lazy-loaded (0=none) */
 uint32_t s_credits_start_ms;  /* scroll-reel start timestamp */
-int  s_language_bg_surface = 0;   /* LanguageScreen.tga 640x480 bg (ScreenLanguageSelect) */
-int  s_language_flag_surface = 0; /* Language.tga 176x512 = 4 stacked 176x128 flag tiles */
-
 /* Background gallery slideshow (LoadExtrasGalleryImageSurfaces / UpdateExtrasGalleryDisplay)
  * pic1-5.tga from Extras.zip cycle as a semi-transparent overlay during frontend navigation. */
 BgGalImg s_bg_gallery[5];
@@ -2278,14 +2285,42 @@ static int frontend_spatial_pick(int dx, int dy) {
             offaxis = pdy < 0 ? -pdy : pdy; /* vertical drift (row)        */
         }
         if (primary <= 0) continue;         /* not in the requested direction */
-        /* Penalize perpendicular drift heavily so movement stays in the same
-         * column (up/down) or row (left/right); nearest along the travel axis
-         * breaks ties. Columns here are ~230px apart vs ~32px rows, so an 8x
-         * weight makes a column jump strictly costlier than any in-column step. */
-        cost = offaxis * 8 + primary;
-        if (best < 0 || cost < best_cost) { best_cost = cost; best = i; }
+        /* [UI RULES 2026-07-03] NEAREST ROW/COLUMN FIRST. The old single-stage
+         * cost (offaxis*8 + primary) let a farther full-width row beat a nearer
+         * half-width pair: DOWN from a 224-wide row skipped the 109+6+109
+         * two-column row right below it (drift ~57 -> cost 532) and landed on
+         * the full-width row after it (drift 0 -> cost 114). Stage 1 records
+         * the nearest travel distance; stage 2 below only considers candidates
+         * within one row-band of it and picks the least drift, so movement
+         * always stops at the visually-next row (the spanned-row post-step in
+         * frontend_nav_vertical then lands on the pair's leftmost item). */
+        cost = offaxis;                     /* stage-2 tiebreak metric */
+        if (best < 0 || primary < best_cost) { best_cost = primary; best = i; }
+        (void)cost;
     }
-    return best;
+    if (best < 0) return -1;
+    {
+        /* Stage 2: among candidates within the nearest row/column band
+         * (tolerance covers mixed heights on one visual row), least off-axis
+         * drift wins; nearer primary breaks ties. */
+        int min_primary = best_cost, i2, best2 = -1, best2_cost = 0;
+        for (i2 = 0; i2 < FE_MAX_BUTTONS; i2++) {
+            int bx, by, pdx, pdy, primary, offaxis, cost2;
+            if (i2 == current) continue;
+            if (!s_buttons[i2].active || s_buttons[i2].disabled) continue;
+            bx = s_buttons[i2].x + s_buttons[i2].w / 2;
+            by = s_buttons[i2].y + s_buttons[i2].h / 2;
+            pdx = bx - cx;
+            pdy = by - cy;
+            if (dy != 0) { primary = pdy * dy; offaxis = pdx < 0 ? -pdx : pdx; }
+            else         { primary = pdx * dx; offaxis = pdy < 0 ? -pdy : pdy; }
+            if (primary <= 0) continue;
+            if (primary > min_primary + 16) continue;   /* not the nearest band */
+            cost2 = offaxis * 64 + primary;
+            if (best2 < 0 || cost2 < best2_cost) { best2_cost = cost2; best2 = i2; }
+        }
+        return best2;
+    }
 }
 
 /* Move the selection in a 2D direction using frontend_spatial_pick; returns 1
@@ -3201,13 +3236,16 @@ int frontend_input_confirm_was_mouse(void) {
 
 static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     switch (screen) {
-    case TD5_SCREEN_POSITIONER_DEBUG:
     case TD5_SCREEN_ATTRACT_MODE:
-    case TD5_SCREEN_LANGUAGE_SELECT:
-    case TD5_SCREEN_LEGAL_COPYRIGHT:
     case TD5_SCREEN_EXTRAS_GALLERY:
     case TD5_SCREEN_RACE_RESULTS:
         return TD5_SCREEN_MAIN_MENU;
+
+    case TD5_SCREEN_UI_GUIDE:            /* dev gallery lives under CHANGELOG */
+        return TD5_SCREEN_CHANGELOG;
+
+    case TD5_SCREEN_MP_GUIDE:            /* MP-widgets page lives under UI GUIDE */
+        return TD5_SCREEN_UI_GUIDE;
 
     case TD5_SCREEN_MAIN_MENU:
     case TD5_SCREEN_LOCALIZATION_INIT:
@@ -3354,12 +3392,42 @@ void frontend_init_display_mode_state(void) {
 
 /* --- Input Polling --- */
 
+/* [INPUTSCRIPT 2026-07-03] While the scripted-input harness or the StartScreen
+ * nav walker is driving, treat the window as active so the poll doesn't flush
+ * injected nav events / ignore injected keys when a test window runs in the
+ * background. Acquire/release counted so the two users can't stomp each other.
+ * Zero in normal play — the focus gate is unchanged for humans. */
+static int s_harness_input_force = 0;
+void td5_frontend_harness_force_input(int on) {
+    s_harness_input_force += on ? 1 : -1;
+    if (s_harness_input_force < 0) s_harness_input_force = 0;
+}
+
 static int frontend_is_window_active(void) {
     HWND hwnd = (HWND)(DWORD_PTR)Backend_GetDisplayWindow();
     HWND foreground = GetForegroundWindow();
 
+    if (s_harness_input_force > 0) return 1;
     if (!hwnd) return 1;
     return (foreground == hwnd) ? 1 : 0;
+}
+
+/* [STARTSCREEN WALK 2026-07-03] Harness hooks for the StartScreen nav walker
+ * (td5_game.c): report when the current screen is interactive, and move the
+ * keyboard focus to a specific button so an injected ENTER confirms it through
+ * the REAL frontend_poll_input path (side effects, sounds and all). */
+int td5_frontend_harness_ready(void) {
+    if (!s_anim_complete) return 0;
+    for (int i = 0; i < FE_MAX_BUTTONS; i++)
+        if (s_buttons[i].active && !s_buttons[i].disabled) return 1;
+    return 0;
+}
+
+int td5_frontend_harness_select(int index) {
+    if (index < 0 || index >= FE_MAX_BUTTONS) return 0;
+    if (!s_buttons[index].active || s_buttons[index].disabled) return 0;
+    s_selected_button = index;
+    return 1;
 }
 
  void frontend_post_quit(void);   /* defined later; used by the credits-skip path */
@@ -4047,10 +4115,9 @@ int fe_draw_arrow_proc(float x, float y, float w, float h,
                               int dir_right, uint32_t color);
 void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 float fe_measure_small_text(const char *text);
-static void fe_draw_option_arrows(int btn_idx, float sx, float sy);
+void fe_draw_option_arrows(int btn_idx, float sx, float sy);
  void frontend_load_bg_gallery(void);
 /* Forward declarations for dialog text overlay renderers */
-static void frontend_render_legal_copyright_overlay(float sx, float sy);
 static void frontend_render_cup_failed_overlay(float sx, float sy);
 static void frontend_render_cup_won_overlay(float sx, float sy);
  void frontend_render_session_locked_overlay(float sx, float sy);
@@ -4734,10 +4801,7 @@ static int BarFade_Tick(void) {
 static int frontend_screen_wants_fade(TD5_ScreenIndex s) {
     switch (s) {
     case TD5_SCREEN_LOCALIZATION_INIT:   /* [0]  boot/localization init */
-    case TD5_SCREEN_POSITIONER_DEBUG:    /* [1]  dev glyph-positioner tool */
     case TD5_SCREEN_ATTRACT_MODE:        /* [2]  attract demo (routes into a race) */
-    case TD5_SCREEN_LANGUAGE_SELECT:     /* [3]  first-run boot screen */
-    case TD5_SCREEN_LEGAL_COPYRIGHT:     /* [4]  copyright splash */
     case TD5_SCREEN_STARTUP_INIT:        /* [28] boot init redirect */
     case TD5_SCREEN_CUP_FAILED:          /* [26] silent end dialog */
     case TD5_SCREEN_CUP_WON:             /* [27] silent end dialog */
@@ -4776,6 +4840,18 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     int preserved_background = s_background_surface;
 
     if (index < 0 || index >= TD5_SCREEN_COUNT) return;
+
+    /* [RETIRED SCREENS 2026-07-03] Language Select (3) and Legal Copyright (4)
+     * were removed (zero nav edges in normal play; boot legals show via the
+     * FMV path). Their table slots are NULL — landing on one would blank-lock
+     * the frontend, so redirect any stale jump (StartScreen, old configs) to
+     * the main menu instead. */
+    if (index == TD5_SCREEN_LANGUAGE_SELECT ||
+        index == TD5_SCREEN_LEGAL_COPYRIGHT) {
+        TD5_LOG_W(LOG_TAG, "set_screen(%d): retired screen — redirecting to "
+                  "MAIN_MENU", (int)index);
+        index = TD5_SCREEN_MAIN_MENU;
+    }
 
     s_previous_screen = previous;
     s_current_screen = index;
@@ -5380,7 +5456,7 @@ static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
 #define FE_VALUE_PANEL_W    224
 #define FE_VALUE_CENTER_X   506  /* FE_VALUE_PANEL_X + FE_VALUE_PANEL_W/2 */
 
-static void frontend_draw_value_centered(float sx, float sy, int y,
+void frontend_draw_value_centered(float sx, float sy, int y,
                                          const char *text, uint32_t color) {
     /* [2026-06-16] TTF-first: don't suppress on a deleted BodyText.png atlas. */
     if (!text || !text[0] || (!td5_font_ready() && s_font_page < 0)) return;
@@ -6136,7 +6212,7 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
 #endif /* !TD5RE_RELEASE */
 }
 
-static void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
+void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
     /* Selector ◄► arrows drawn procedurally via the triangle-SDF shader
      * (ps_arrow). [2026-06-16] The legacy ArrowButtonz.tga 12x36 sprite-sheet
      * bitmap fallback was retired — procedural arrows are permanent now. */
@@ -6783,42 +6859,6 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     }
 }
 
-/* ScreenLanguageSelect overlay: full-screen LanguageScreen.tga bg + 4 flag IMAGE tiles
- * from Language.tga (176x512 = four 176x128 tiles, src V 0/128/256/384) at the 4 corners
- * + "LANGUAGE SELECT" header. [CONFIRMED @0x00427290; header literal @0x004667c0;
- * flag dest rects TL(40,128) TR(424,128) BL(40,320) BR(424,320), 176x128.] */
-static void frontend_render_language_select_overlay(float sx, float sy) {
-    /* Background (drawn opaque, full screen) */
-    if (s_language_bg_surface > 0) {
-        int slot = s_language_bg_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            fe_draw_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xFFFFFFFF,
-                         s_surfaces[slot].tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
-        }
-    }
-    /* 4 flag tiles (each 176x128 from the 176x512 sheet; src V = row/4) */
-    if (s_language_flag_surface > 0) {
-        int slot = s_language_flag_surface - 1;
-        if (slot >= 0 && slot < FE_MAX_SURFACES && s_surfaces[slot].in_use) {
-            /* [FIXED 2026-06-01, audit+verify] orig left col x = uVar2 = 72, right col =
-             * (canvasW-uVar2)-0xb0 = 640-72-176 = 392 (not 40/424). Y 128/320 already faithful. */
-            static const int dx[4] = { 72, 392, 72, 392 };
-            static const int dy[4] = { 128, 128, 320, 320 };
-            int fi;
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            for (fi = 0; fi < 4; fi++) {
-                float v0 = (float)fi / 4.0f, v1 = (float)(fi + 1) / 4.0f;
-                fe_draw_quad((float)dx[fi] * sx, (float)dy[fi] * sy,
-                             176.0f * sx, 128.0f * sy, 0xFFFFFFFF,
-                             s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
-            }
-        }
-    }
-    /* Header "LANGUAGE SELECT" (in-EXE literal @0x4667c0), 24px font, at (uVar2=72, 34).
-     * [FIXED 2026-06-01: header X was 40, orig draws at uVar2=72 — same left margin as the flags.] */
-    fe_draw_text(72.0f * sx, 34.0f * sy, "LANGUAGE SELECT", 0xFFFFFFFF, sx, sy);
-}
 
 static void frontend_render_race_type_description(float sx, float sy) {
     /* [FIXED 2026-06-01, corrected] Orig (0x4168B0 case 4/9) draws a MULTI-LINE localized
@@ -8323,43 +8363,6 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
 #define FE_CREDITS_REEL_W   320.0f  /* 0x140 */
 
 
-/* [1] Positioner dev tool overlay — faithful to ScreenPositionerDebugTool @0x00415030 +
- * RenderPositionerGlyphStrip @0x00414F40. The original clears to BLACK, draws two white
- * guide scanlines (FillPrimaryFrontendScanline at y=0x10c=268 and y=0x114=276), then a
- * horizontal strip of the menu-font glyphs centred on the selected glyph (it walks
- * selected-8..selected+8 over the glyph set @0x465960 = ASCII 0x20..0x67) with the
- * selected glyph also shown enlarged below. It is a developer font-metrics editor: the
- * arrow keys move the selection / nudge metrics and ESC writes positioner.txt. There are
- * NO on-screen buttons in the original. [reimplemented faithful 2026-06-02] */
-static const char k_positioner_glyphs[] =
-    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_";
-
-static void frontend_render_positioner_overlay(float sx, float sy) {
-    const float W = 640.0f, H = 480.0f;
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    /* black background (orig ClearBackbufferWithColor(0)) */
-    fe_draw_quad(0.0f, 0.0f, W * sx, H * sy, 0xFF000000, -1, 0, 0, 0, 0);
-    /* two white guide scanlines */
-    fe_draw_quad(0.0f, 268.0f * sy, W * sx, 2.0f * sy, 0xFFFFFFFF, -1, 0, 0, 0, 0);
-    fe_draw_quad(0.0f, 276.0f * sy, W * sx, 2.0f * sy, 0xFFFFFFFF, -1, 0, 0, 0, 0);
-
-    int n = (int)sizeof(k_positioner_glyphs) - 1;
-    int sel = s_anim_tick % n;
-    if (sel < 0) sel += n;
-    /* glyph strip: selected-8 .. selected+8, centred on screen, selected highlighted */
-    const float step = 30.0f;          /* horizontal pitch between strip glyphs */
-    for (int k = -8; k <= 8; k++) {
-        int gi = sel + k;
-        if (gi < 0 || gi >= n) continue;
-        char ch[2] = { k_positioner_glyphs[gi], 0 };
-        float gx = (320.0f + (float)k * step) * sx;
-        uint32_t col = (k == 0) ? 0xFFFFFF00u : 0xFFFFFFFFu;
-        fe_draw_text_centered(gx, 232.0f * sy, ch, col, 1.0f * sx, 1.0f * sy);
-    }
-    /* selected glyph shown enlarged below (orig zoomed reference glyph) */
-    char selch[2] = { k_positioner_glyphs[sel], 0 };
-    fe_draw_text_centered(320.0f * sx, 300.0f * sy, selch, 0xFFFFFF00u, 2.2f * sx, 2.2f * sy);
-}
 
 static void frontend_render_extras_gallery_overlay(float sx, float sy) {
     /* Black background fills entire viewport */
@@ -9110,34 +9113,6 @@ void td5_vui_gauge(const TD5_VuiGauge *g) {
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
-/* ========================================================================
- * frontend_render_legal_copyright_overlay
- *
- * Draws "TEST DRIVE 5 COPYRIGHT 1998" tiled down the screen.
- * Original: DrawFrontendLocalizedStringSecondary @ 0x00424390 (__cdecl),
- *   params (byte *str, uint x, int y). Called in a loop:
- *     x = g_frontendCanvasW / 10  (≈64 at 640px)
- *     y starts at 0x20 (32px), increments by 0x20 (32px) per row
- *     loop condition: row < (g_frontendCanvasH - 0x20) / 0x20
- * [CONFIRMED @ ScreenLegalCopyright 0x004274A0 case 0]
- * [CONFIRMED: string "TEST DRIVE 5 COPYRIGHT 1998" @ 0x00466808 Language.dll]
- * ======================================================================== */
-static void frontend_render_legal_copyright_overlay(float sx, float sy) {
-    /* Copyright string [CONFIRMED @ 0x00466808] */
-    static const char k_copyright[] = "TEST DRIVE 5 COPYRIGHT 1998";
-    /* x = canvasW/10 scaled; original uses integer pixel coords on 640px canvas */
-    float draw_x = (640.0f / 10.0f) * sx;  /* = 64 * sx [CONFIRMED] */
-    float row_h  = 32.0f * sy;              /* 0x20 pixel row height [CONFIRMED] */
-    float start_y = 32.0f * sy;             /* y starts at 0x20 = 32 [CONFIRMED] */
-    /* Row count [FIXED 2026-06-01 — re-RE'd @0x004274A0]: the orig do-while inits counter=1 and
-     * loops while counter < ((canvasH-0x20)>>5)=14, i.e. counter=1..13 => 13 rows at y=32..416.
-     * The port previously drew 14 (an extra row at y=448). Faithful count = ((480-32)/32) - 1 = 13. */
-    int rows = (int)((480.0f - 32.0f) / 32.0f) - 1;
-    for (int r = 0; r < rows; r++) {
-        float y = start_y + (float)r * row_h;
-        fe_draw_text(draw_x, y, k_copyright, 0xFFFFFFFF, sx, sy);
-    }
-}
 
 /* ========================================================================
  * frontend_render_cup_failed_overlay
@@ -9520,9 +9495,6 @@ void td5_frontend_render_ui_rects(void) {
          * always composites on top. [CHANGELOG 2026-06-25] */
         frontend_changelog_render(sx, sy);
         break;
-    case TD5_SCREEN_LANGUAGE_SELECT:
-        frontend_render_language_select_overlay(sx, sy);
-        break;
     case TD5_SCREEN_RACE_TYPE_MENU:
         frontend_render_race_type_description(sx, sy);
         break;
@@ -9641,10 +9613,6 @@ void td5_frontend_render_ui_rects(void) {
         break;
     }
     /* Dialog overlays: text drawn live since port has no offscreen surfaces */
-    case TD5_SCREEN_LEGAL_COPYRIGHT:
-        /* "TEST DRIVE 5 COPYRIGHT 1998" tiled [CONFIRMED @ 0x004274A0] */
-        frontend_render_legal_copyright_overlay(sx, sy);
-        break;
     case TD5_SCREEN_CUP_FAILED:
         /* "Sorry / You Failed / To Win / [cup]" dialog [CONFIRMED @ 0x004237F0] */
         frontend_render_cup_failed_overlay(sx, sy);
@@ -9657,10 +9625,8 @@ void td5_frontend_render_ui_rects(void) {
         /* "Sorry / Session Locked" dialog [CONFIRMED @ 0x0041D630] */
         frontend_render_session_locked_overlay(sx, sy);
         break;
-    case TD5_SCREEN_POSITIONER_DEBUG:
-        /* Dev font-metrics editor [CONFIRMED @ 0x00415030] */
-        frontend_render_positioner_overlay(sx, sy);
-        break;
+    /* (UI GUIDE / MP TOOLS render in the POST-button overlay pass below —
+     * their captions/modal/pane must composite over the button fills.) */
     default:
         break;
     }
@@ -9797,6 +9763,16 @@ void td5_frontend_render_ui_rects(void) {
      * Original BltFast compositing placed arrows on top of the pre-baked button surface. */
     if (s_anim_complete) {
         switch (s_current_screen) {
+        case TD5_SCREEN_UI_GUIDE:
+            /* Dev UI style guide — POST-button so captions/guides composite
+             * over the button fills (a focused row's opaque fill covered them
+             * when this ran in the pre-button pass). */
+            frontend_uiguide_render(sx, sy);
+            break;
+        case TD5_SCREEN_MP_GUIDE:
+            /* Dev MP-widgets gallery — modal must draw over everything. */
+            frontend_mpguide_render(sx, sy);
+            break;
         case TD5_SCREEN_QUICK_RACE:
             /* Selectors: Car(0), Track(1), Direction(2, hidden on forward-only
              * tracks), Players(3, hidden), Opponents(4), Laps(5).
@@ -10340,8 +10316,10 @@ void td5_frontend_tick(void) {
 
 
 /* ========================================================================
- * [1] ScreenPositionerDebugTool (0x415030) -- Dev debug, unreachable
- * States: 6
+ * [1] ScreenPositionerDebugTool (0x415030) -- Dev debug, unreachable.
+ *     RETIRED 2026-07-03: the original's glyph-positioner is obsolete (port
+ *     text is TTF/vector); slot [1] now hosts the dev UI GUIDE gallery
+ *     (Screen_UiGuide, td5_fe_devscreens.c).
  * ======================================================================== */
 
 
@@ -10364,8 +10342,10 @@ void td5_frontend_tick(void) {
 
 
 /* ========================================================================
- * [3] ScreenLanguageSelect (0x427290)
- * States: 7
+ * [3] ScreenLanguageSelect (0x427290) — RETIRED 2026-07-03 (screen removed;
+ *     zero nav edges in the shipped game: language comes from the static
+ *     Language.dll import and ScreenLocalizationInit boots straight to the
+ *     main menu). RE notes preserved in the audit block near EOF.
  * ======================================================================== */
 
 
@@ -11120,7 +11100,11 @@ static const char * const s_gallery_names[GALLERY_PIC_COUNT] = {
  *       orig g_mainMenuButtonHint_PROVISIONAL==2/4 logic.
  *
  *   0x00427290  ScreenLanguageSelect  [ARCH-DIVERGENCE: ScreenFSM]
- *       Screen_LanguageSelect (td5_frontend.c:5980) — 7 states (0..6) map to
+ *       [RETIRED 2026-07-03 — screen + overlay removed from the port: no nav
+ *       edge ever entered it (orig boots straight to MAIN_MENU @0x427182 and
+ *       takes language from the static Language.dll import). Audit notes kept
+ *       for the original's reference:]
+ *       Screen_LanguageSelect (was td5_frontend.c:5980) — 7 states (0..6) map to
  *       orig 7 states (0..6). Structural deviation: orig uses 4
  *       CreateFrontendMenuRectEntry calls against a single
  *       g_frontendLanguageFlagsSurface_PROVISIONAL flag sheet at (x,0/0x80/

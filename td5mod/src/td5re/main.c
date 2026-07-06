@@ -448,6 +448,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SimulateJoyLossHoldMs",  &g_td5.ini.sim_joy_loss_hold_ms },
         { "AutoRace",             &g_td5.ini.auto_race },
         { "StartScreen",          &g_td5.ini.start_screen },
+        { "StartScreenDirect",    &g_td5.ini.start_screen_direct },
         { "StartSpanOffset",      &g_td5.ini.start_span_offset },
         { "DefaultReverse",       &g_td5.ini.default_reverse },
         { "CarDamage",            &g_td5.ini.car_damage },
@@ -564,6 +565,20 @@ static int td5_apply_cli_overrides(const char *cmdline,
             g_td5.ini.trace_stage_mask = td5_trace_parse_stages(eq + 1);
             dbglog("  CLI override: TraceStages=%s -> mask=0x%x",
                    eq + 1, g_td5.ini.trace_stage_mask);
+            n_applied++;
+            continue;
+        }
+        if (klen == 11 && _strnicmp(key, "InputScript", 11) == 0) {
+            /* Copy only the token's value — `eq` points into the shared
+             * cmdline string, so an unbounded copy would swallow every
+             * following argument (the TraceModules override has the same
+             * quirk but its comma-parser just WARNs on the stragglers). */
+            size_t vlen = (size_t)((start + tok_len) - (eq + 1));
+            if (vlen >= sizeof(g_td5.ini.input_script))
+                vlen = sizeof(g_td5.ini.input_script) - 1;
+            memcpy(g_td5.ini.input_script, eq + 1, vlen);
+            g_td5.ini.input_script[vlen] = '\0';
+            dbglog("  CLI override: InputScript=%s", g_td5.ini.input_script);
             n_applied++;
             continue;
         }
@@ -998,6 +1013,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Auto-race: skip frontend entirely, launch race with INI settings */
     g_td5.ini.auto_race             = td5_ini_int("Game", "AutoRace", 0);
     g_td5.ini.start_screen          = td5_ini_int("Game", "StartScreen", -1);
+    /* 0 (default) = StartScreen navigates via the real parent-menu chain;
+     * 1 = legacy direct set_screen jump. See td5re.h + td5_game.c walker. */
+    g_td5.ini.start_screen_direct   = td5_ini_int("Game", "StartScreenDirect", 0);
 
     /* Additive span shift for every actor spawn — mirrors the Frida hook on
      * InitializeActorTrackPose (0x00434350). 0 = vanilla grid. */
@@ -1064,6 +1082,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.auto_throttle         = td5_ini_int("Trace", "AutoThrottle", 0);
     g_td5.ini.auto_throttle_value   = td5_ini_int("Trace", "AutoThrottleValue", 0);
     g_td5.ini.auto_throttle_stop_span = td5_ini_int("Trace", "AutoThrottleStopSpan", 0);
+    /* Scripted-input harness (td5_inputscript.c) — supersedes AutoThrottle for
+     * functional testing; AutoThrottle stays for /diff-race parity captures. */
+    td5_ini_str("Trace", "InputScript", "", g_td5.ini.input_script,
+                sizeof(g_td5.ini.input_script));
     g_td5.ini.trace_fast_forward    = td5_ini_float("Trace", "TraceFastForward", 1.0f);
     g_td5.ini.race_trace_max_sim_ticks =
         td5_ini_int("Trace", "RaceTraceMaxSimTicks", 0);
@@ -1213,6 +1235,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.sim_joy_loss_player    = -1;  /* no simulated controller-loss hook */
     g_td5.ini.race_trace_enabled     = 0;   /* no per-tick CSV race trace       */
     g_td5.ini.auto_throttle          = 0;   /* no scripted throttle             */
+    g_td5.ini.input_script[0]        = '\0';/* no scripted-input harness        */
     g_td5.ini.trace_traffic_edge_pen = 0;   /* no traffic edge-pen probe CSV    */
     g_td5.ini.trace_terrain_cam_probe = 0;  /* no terrain camera probe CSV      */
     g_td5.ini.test_cup_roundtrip     = 0;   /* no CupData self-test path         */
@@ -1267,11 +1290,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
            g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race,
            g_td5.ini.start_screen, g_td5.ini.start_span_offset);
-    dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d AutoThrottle=%d FastFwd=%g SimTickCap=%d Modules=0x%x Stages=0x%x",
+    dbglog("  [Trace]   RaceTrace=%d Slot=%d MaxFrames=%d AutoThrottle=%d FastFwd=%g SimTickCap=%d Modules=0x%x Stages=0x%x InputScript=%s",
            g_td5.ini.race_trace_enabled, g_td5.ini.race_trace_slot,
            g_td5.ini.race_trace_max_frames, g_td5.ini.auto_throttle,
            g_td5.ini.trace_fast_forward, g_td5.ini.race_trace_max_sim_ticks,
-           g_td5.ini.trace_module_mask, g_td5.ini.trace_stage_mask);
+           g_td5.ini.trace_module_mask, g_td5.ini.trace_stage_mask,
+           g_td5.ini.input_script[0] ? g_td5.ini.input_script : "(off)");
     dbglog("  [Logging] Enabled=%d MinLevel=%d Frontend=%d Race=%d Engine=%d Wrapper=%d",
            g_td5.ini.log_enabled, g_td5.ini.log_min_level,
            g_td5.ini.log_frontend, g_td5.ini.log_race,

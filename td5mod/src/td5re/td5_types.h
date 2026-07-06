@@ -342,10 +342,17 @@ typedef enum TD5_MeshDispatch {
 /** Frontend screen indices */
 typedef enum TD5_ScreenIndex {
     TD5_SCREEN_LOCALIZATION_INIT   = 0,
-    TD5_SCREEN_POSITIONER_DEBUG    = 1,
+    /* Slot 1 REPURPOSED 2026-07-03: dev UI GUIDE style-guide/widget gallery
+     * (Screen_UiGuide). Was the original's glyph-positioner dev tool
+     * (@0x415030), obsolete since the port renders text via TTF/vector. */
+    TD5_SCREEN_UI_GUIDE            = 1,
     TD5_SCREEN_ATTRACT_MODE        = 2,
-    TD5_SCREEN_LANGUAGE_SELECT     = 3,
-    TD5_SCREEN_LEGAL_COPYRIGHT     = 4,
+    /* Slots 3/4 RETIRED 2026-07-03 (screens removed — zero nav edges in the
+     * shipped game; boot legals show via td5_fmv_show_legal_screens). Values
+     * kept so screen numbering (StartScreen, logs, docs) stays stable;
+     * td5_frontend_set_screen redirects them to MAIN_MENU. */
+    TD5_SCREEN_LANGUAGE_SELECT     = 3,   /* RETIRED — do not use */
+    TD5_SCREEN_LEGAL_COPYRIGHT     = 4,   /* RETIRED — do not use */
     TD5_SCREEN_MAIN_MENU           = 5,
     TD5_SCREEN_RACE_TYPE_MENU      = 6,
     TD5_SCREEN_QUICK_RACE          = 7,
@@ -417,7 +424,12 @@ typedef enum TD5_ScreenIndex {
      * power-ups/car toughness/deformation). Opened by the RACE OPTIONS button on
      * track-select; reuses the track-select backdrop. Port-only. */
     TD5_SCREEN_RACE_OPTIONS       = 44,  /* Screen_RaceOptions */
-    TD5_SCREEN_COUNT               = 45
+    /* [UI GUIDE 2026-07-03] Companion dev gallery for the MP-specific widgets
+     * (two-line buttons, shared confirm modal, HOST pill, accents + vote
+     * rings). Reached from UI GUIDE's [1] MP TOOLS row. Port-only dev tool.
+     * (Moved 44→45 in the 2026-07-05 bulk merge — 44 went to RACE OPTIONS.) */
+    TD5_SCREEN_MP_GUIDE           = 45,  /* Screen_MpGuide (td5_fe_devscreens.c) */
+    TD5_SCREEN_COUNT               = 46
 } TD5_ScreenIndex;
 
 /* ========================================================================
