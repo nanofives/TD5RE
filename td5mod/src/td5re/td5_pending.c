@@ -77,6 +77,7 @@ static const char *const k_seed[] = {
     "Tutorial overlay: race audio (SFX+music) mutes while it's on screen",
     "DEFORMATION is Low/Normal/High/Off (Off = no dents, toughness unaffected)",
     "Race Options: CAR TOUGHNESS is Low/Medium/High/Off (Off disables damage)",
+    "Reset-car recovery: repairs 20% (not full) + camera un-spins after",
     "Net play: host picks GAME MODE in the network lobby (Race/Drag/Battle/Cop)",
     "Net play: CUP over the network (series advance, points, standings, auto-teams)",
     "Net play: Cop Chase INFECT online + COPS/SUSPECTS results table over net",

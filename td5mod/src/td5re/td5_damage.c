@@ -228,17 +228,17 @@ void td5_damage_reset_race(void) {
 
 /* [RESET-CAR REPAIR 2026-06-29] Fully repair ONE slot mid-race: restore health to
  * full, clear the accumulated/knockout state, reset the per-event contact tracker,
- * and erase the body deformation + scuff (a reset car is a FRESH car). Called by
- * the manual stuck-recovery path (td5_physics_recover_player) so a damaged or
- * knocked-out car is actually recovered.
+ * and erase the body deformation + scuff (a reset car is a FRESH car).
+ *
+ * [2026-07-04] The manual stuck-recovery path (td5_physics_recover_player) now
+ * calls td5_damage_repair_actor_pct (partial repair) instead of this function —
+ * a full free heal on every R/SELECT press was too generous. This full-repair
+ * entrypoint remains the arcade REPAIR power-up's action (td5_arcade.c), where
+ * a complete repair is the intended reward.
  *
  * WHY this is required: the original ResetVehicleActorState (0x00405D70) had no
  * health field to restore (the original has NO damage model — RE-confirmed), so a
- * faithful in-place reset leaves the port-only health untouched. Without this:
- *   - a heavily-damaged car that resets keeps its low health and is wrecked by the
- *     next bump (the user's "reset car -> complete break of car"), and
- *   - a knocked-out car (health<=0) stays physics-FROZEN forever, because health
- *     never regenerates, so the manual reset can never un-stick it.
+ * faithful in-place reset leaves the port-only health untouched.
  * Inert when the master CarDamage toggle is off (faithful sim unchanged). */
 void td5_damage_repair_actor(int slot) {
     if (!td5_damage_enabled()) return;
@@ -272,6 +272,42 @@ void td5_damage_repair_actor(int slot) {
 
     TD5_LOG_I(LOG_TAG, "car_damage: repair slot=%d (health restored to %d, dents cleared)",
               slot, s_max_hp);
+}
+
+/* [RESET-CAR REPAIR PARTIAL 2026-07-04] Partially repair ONE slot mid-race: add
+ * `pct` percent of max health to the slot's CURRENT health (capped at max), and
+ * clear the knockout/event state so a knocked-out car is no longer treated as
+ * wrecked (it would otherwise stay physics-frozen, since health never
+ * regenerates on its own). Unlike td5_damage_repair_actor, dents/scuff are left
+ * untouched — a partial repair gets the car moving again, it doesn't undo the
+ * visible damage. Called by the manual stuck-recovery (R/SELECT) path so
+ * un-sticking a broken-down car isn't a free full heal (that stays exclusive to
+ * the arcade REPAIR power-up). Inert when CarDamage is off. */
+void td5_damage_repair_actor_pct(int slot, int pct) {
+    if (!td5_damage_enabled()) return;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (!s_inited) td5_damage_init();
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+
+    TD5_Actor *a = dmg_actor(slot);
+    int32_t new_hp = -1;
+    if (a) {
+        int32_t add = (int32_t)(((int64_t)s_max_hp * pct) / 100);
+        new_hp = a->damage_health + add;
+        if (new_hp > s_max_hp) new_hp = s_max_hp;
+        a->damage_health = new_hp;
+        a->damage_magic  = TD5_DAMAGE_ACTOR_MAGIC;
+    }
+
+    /* Reset the knockout + per-event contact bookkeeping so the first post-repair
+     * contact reads as a fresh event (and the KO hook can fire again later). */
+    s_ko_notified[slot]      = 0;
+    s_last_contact_tick[slot] = -1000000;
+    s_event_peak_mag[slot]    = 0;
+
+    TD5_LOG_I(LOG_TAG, "car_damage: partial repair slot=%d (+%d%% of max hp -> health=%d/%d, dents kept)",
+              slot, pct, new_hp, s_max_hp);
 }
 
 /* health fraction 0..1 for an actor (1 = pristine, -1 = uninitialized). */

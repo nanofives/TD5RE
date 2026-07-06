@@ -29,6 +29,7 @@
 #include "td5_game.h"     /* slot counts, cop-chase role queries */
 #include "td5_arcade.h"
 #include "td5_damage.h"
+#include "td5_camera.h"   /* td5_camera_reset_yaw_offset (post-repair cam un-spin) */
 #include "td5_platform.h"
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 #include "td5_carparam.h" /* shared carparam field map (weight mechanics) */
@@ -80,6 +81,11 @@
  *                                               on branch tracks — see fix note on
  *                                               td5_physics_recover_player).
  *   TD5RE_RECOVERY_COOLDOWN_TICKS default 150 — manual cooldown window (ticks).
+ *   TD5RE_RECOVERY_REPAIR_PCT     default 20  — % of max HP a manual recovery
+ *                                               restores (added to current health,
+ *                                               capped at max). NOT a full heal —
+ *                                               that stays exclusive to the arcade
+ *                                               REPAIR power-up.
  * ======================================================================== */
 
 /* [RESET-CAR IN-PLACE FIX 2026-06-29] Default 0 = reset the car where it stands
@@ -95,6 +101,10 @@
  * which further manual requests for the same player are ignored. 150 = 5 s at
  * the fixed 30 Hz tick. Runtime-overridable via TD5RE_RECOVERY_COOLDOWN_TICKS. */
 #define TD5_MANUAL_RECOVERY_COOLDOWN_TICKS  150  /* 5 s at fixed 30 Hz */
+/* Manual recovery is a PARTIAL repair, not a free full heal — 20% of max HP
+ * added to current health (capped at max). Runtime-overridable via
+ * TD5RE_RECOVERY_REPAIR_PCT. */
+#define TD5_MANUAL_RECOVERY_REPAIR_PCT  20
 
 /* Per-slot manual-recovery cooldown counter (racer slots only; humans are
  * racers). Counts DOWN each live sim tick from the cooldown window to 0; while
@@ -106,6 +116,7 @@ static int     s_recovery_init = 0;
 static int     s_recovery_enabled = 1;     /* TD5RE_STUCK_RECOVERY */
 static int     s_recovery_spans_back = TD5_RECOVERY_DEFAULT_BACK;
 static int     s_recovery_cooldown_ticks = TD5_MANUAL_RECOVERY_COOLDOWN_TICKS;  /* TD5RE_RECOVERY_COOLDOWN_TICKS */
+static int     s_recovery_repair_pct = TD5_MANUAL_RECOVERY_REPAIR_PCT;          /* TD5RE_RECOVERY_REPAIR_PCT */
 
 /* [GENTLE FLIP-RECOVERY 2026-06-21] Forward decls (definitions live just after
  * the stuck-recovery block). For a LOCAL HUMAN, the byte-faithful scripted-
@@ -1635,15 +1646,21 @@ static void recovery_init_knobs(void)
      * <= 60 s (1800 ticks) sanity clamp. */
     s_recovery_cooldown_ticks = td5_env_int("TD5RE_RECOVERY_COOLDOWN_TICKS",
                                             TD5_MANUAL_RECOVERY_COOLDOWN_TICKS, 0, 1800);
+    /* [RESET-CAR REPAIR PARTIAL 2026-07-04] % of max HP a manual recovery restores;
+     * sanity clamp [0,100]. */
+    s_recovery_repair_pct = td5_env_int("TD5RE_RECOVERY_REPAIR_PCT",
+                                        TD5_MANUAL_RECOVERY_REPAIR_PCT, 0, 100);
     s_recovery_init = 1;
-    TD5_LOG_I(LOG_TAG, "Manual recovery: %s spans_back=%d cooldown=%d ticks (%.1fs)",
+    TD5_LOG_I(LOG_TAG, "Manual recovery: %s spans_back=%d cooldown=%d ticks (%.1fs) repair_pct=%d",
               s_recovery_enabled ? "enabled" : "disabled",
               s_recovery_spans_back, s_recovery_cooldown_ticks,
-              s_recovery_cooldown_ticks / 30.0);
+              s_recovery_cooldown_ticks / 30.0, s_recovery_repair_pct);
 }
 
 /* Recover `slot`'s actor: upright it, kill its motion, re-face it track-forward,
- * ground-snap it, and (port damage feature) fully repair it.
+ * ground-snap it, and (port damage feature) PARTIALLY repair it
+ * (s_recovery_repair_pct, default 20% of max HP) — enough to un-stick a
+ * knocked-out car without granting a free full heal.
  *
  * [RESET-CAR IN-PLACE FIX 2026-06-29] DEFAULT (s_recovery_spans_back == 0) is an
  * IN-PLACE reset, faithful to the original ResetVehicleActorState @0x00405D70:
@@ -1661,10 +1678,12 @@ static void recovery_init_knobs(void)
  * and a branch/junction span's center lane can sit in wall geometry that the new
  * damage-bar then wrecks). Kept only behind the explicit knob.
  *
- * Either way, on success the car is fully repaired (health restored, dents +
+ * Either way, on success the car is PARTIALLY repaired (health +s_recovery_repair_pct%,
  * knockout cleared) so a damaged or knocked-out car is actually recovered — the
  * byte-faithful reset can't touch the port-only damage fields, and a knocked-out
- * car (health 0) would otherwise stay physics-frozen forever. */
+ * car (health 0) would otherwise stay physics-frozen forever. A full repair is
+ * intentionally NOT granted here (see td5_damage_repair_actor_pct) — that stays
+ * exclusive to the arcade REPAIR power-up. */
 int td5_physics_recover_player(int slot)
 {
     recovery_init_knobs();
@@ -1730,19 +1749,21 @@ int td5_physics_recover_player(int slot)
     actor->throttle_state = 1;      /* +0x36F: forward */
     actor->track_contact_flag = 0;  /* +0x37B: V2W contact */
 
-    /* [RESET-CAR REPAIR 2026-06-29] Fully recover the car: restore health, clear
-     * dents + the knockout state (port-only damage feature — inert when CarDamage
-     * is off), and clear the broken-down flag so a knocked-out racer is no longer
-     * treated as wrecked (it would otherwise stay physics-frozen, since health
-     * never regenerates). */
-    td5_damage_repair_actor(slot);
+    /* [RESET-CAR REPAIR PARTIAL 2026-07-04] Partially recover the car: restore
+     * s_recovery_repair_pct% of max health and clear the knockout state (port-only
+     * damage feature — inert when CarDamage is off; dents are left in place — see
+     * td5_damage_repair_actor_pct), and clear the broken-down flag so a knocked-out
+     * racer is no longer treated as wrecked (it would otherwise stay physics-frozen,
+     * since health never regenerates on its own). */
+    td5_damage_repair_actor_pct(slot, s_recovery_repair_pct);
     td5_ai_clear_actor_broken_down(slot);
 
     TD5_LOG_I(LOG_TAG,
-              "recover_player: slot=%d cur_span=%d -> span=%d%s pos=(%d,%d,%d) [repaired]",
+              "recover_player: slot=%d cur_span=%d -> span=%d%s pos=(%d,%d,%d) [repaired %d%%]",
               slot, cur_span, tgt_span,
               (s_recovery_spans_back > 0) ? " (step-back)" : " (in-place)",
-              actor->world_pos.x, actor->world_pos.y, actor->world_pos.z);
+              actor->world_pos.x, actor->world_pos.y, actor->world_pos.z,
+              s_recovery_repair_pct);
     return 1;
 }
 
@@ -1829,8 +1850,18 @@ void td5_physics_update_stuck_recovery(void)
                           s_manual_recovery_cooldown[slot] / 30.0);
             } else {
                 TD5_LOG_I(LOG_TAG, "manual recovery: player=%d slot=%d", vp, slot);
-                if (td5_physics_recover_player(slot))
+                if (td5_physics_recover_player(slot)) {
                     s_manual_recovery_cooldown[slot] = s_recovery_cooldown_ticks;
+                    /* [ROTATING-CAM FIX 2026-07-04] A knocked-out car engages the
+                     * CarDamage finish-orbit (cam_finish_orbit_step), which spins
+                     * this viewport's g_camYawOffset every tick. Nothing else clears
+                     * it mid-race, so without this the camera stayed parked at
+                     * whatever angle it had drifted to even after the repair above
+                     * cleared the knockout. `vp` is this player's own camera pane
+                     * (identity-mapped in the common case; see the split-screen
+                     * button-routing note above `slot`'s derivation). */
+                    td5_camera_reset_yaw_offset(vp);
+                }
             }
         }
 

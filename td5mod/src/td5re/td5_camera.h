@@ -192,6 +192,11 @@ void OrientCameraTowardTarget(int *target_pos, unsigned int yaw_offset);
 void td5_camera_update_chase(TD5_Actor *actor, int player, int view_index);
 void td5_camera_set_preset(int preset_index);
 void td5_camera_set_rear_view(int view, int active);
+
+/* Snap this viewport's chase-cam yaw offset back to normal (behind the car).
+ * Clears any residual spin left by the CarDamage finish-orbit (knockout) once
+ * the car has recovered. No-op on an out-of-range view. */
+void td5_camera_reset_yaw_offset(int view);
 void td5_camera_update_trackside(TD5_Actor *actor, int view_index);
 void td5_camera_update_transition_state(int player, int view_index);
 void td5_camera_update_transition_timer(void);

@@ -71,11 +71,19 @@ int   td5_damage_deform_enabled(void);
 void  td5_damage_reset_race(void);
 
 /* [RESET-CAR REPAIR] Fully repair ONE slot mid-race: restore health, clear the
- * knockout/event state, and erase dents + scuff. Called by the manual stuck-
- * recovery (reset-car) path so a damaged / knocked-out car is actually recovered
- * (the byte-faithful in-place reset can't touch the port-only health field).
- * Inert when CarDamage is off. */
+ * knockout/event state, and erase dents + scuff. Called by the arcade REPAIR
+ * power-up (the one place a full, free repair is intended). Inert when
+ * CarDamage is off. */
 void  td5_damage_repair_actor(int slot);
+
+/* [RESET-CAR REPAIR PARTIAL 2026-07-04] Partially repair ONE slot mid-race: add
+ * `pct` percent of max health to the slot's CURRENT health (capped at max) and
+ * clear the knockout/event state so a knocked-out car can drive again — but do
+ * NOT erase dents/scuff (a partial repair gets the car moving, it doesn't undo
+ * the visible damage). Called by the manual stuck-recovery (R/SELECT) path so
+ * un-sticking a broken-down car isn't a free full heal. Inert when CarDamage
+ * is off. */
+void  td5_damage_repair_actor_pct(int slot, int pct);
 
 /* Apply a collision of magnitude impact_mag (same units as the physics solver's
  * impact_mag) to actor. Drives health down and, when enabled, deforms the slot's
