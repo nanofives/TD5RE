@@ -130,6 +130,14 @@ int    g_vertexTable    = 0;
 int    g_cameraTransitionActive = 0xA000;
 int    g_camTransitionGate      = 0;
 static int s_flyin_preset_reloaded[TD5_MAX_VIEWPORTS] = {0};
+/* [Montego fly-in fix 2026-07-04] One-shot: force a TIGHT chase preset for
+ * the countdown window when the fly-in is disabled (see
+ * td5_camera_flyin_enabled below) — preset 0 ("far chase") has a 2100 wu
+ * radius, nearly as wide as the fly-in presets it replaces, so simply
+ * falling through to preset 0 during the countdown can ALSO end up over
+ * water / losing the car around a bend on Montego's geometry. A close
+ * preset keeps the eye near enough to the car that this can't happen. */
+static int s_countdown_tight_applied[TD5_MAX_VIEWPORTS] = {0};
 extern int    g_actorSlotForView[TD5_MAX_VIEWPORTS];     /* td5_game.c */
 extern int    g_actorBaseAddr;           /* td5_game.c */
 extern uint8_t *g_actor_table_base;      /* td5_game.c */
@@ -1218,6 +1226,54 @@ static int td5_camera_replay_eye_floor_clamp(uintptr_t actor, int view, int *eye
     return 1;
 }
 
+/* ========================================================================
+ * TD5RE_FLYIN_ENABLED (default 0 — OFF) — the race-start fly-in cinematic
+ * (UpdateRaceCameraTransitionState, presets 10-13) orbits the eye away from
+ * the car in ALL THREE axes. Investigation 2026-07-04 (Montego Bay,
+ * DefaultTrack=17, both single-player and split-screen) found this can put
+ * the player's own car SOMEWHERE OUT OF FRAME ENTIRELY for the whole
+ * countdown, on a track whose grid heading/geometry doesn't suit the fixed
+ * orbit path — reported as "car spawned out of bounds during countdown"
+ * (the car's telemetry — SPAN/POS — never changes; only the cinematic
+ * camera moves). Confirmed via Moscow vs Montego A/B at the identical
+ * countdown tick: Moscow's geometry keeps the car in frame at the same
+ * orbit math, Montego's does not.
+ *
+ * Two narrower clamps were tried first (height-only, then a full 3-axis
+ * distance cap with a from-scratch eye/target recompute) and BOTH still
+ * left the car out of frame in some countdown windows — investigation
+ * traced this to td5_camera_apply_view's per-render-frame eye/target being
+ * reconstructed via a prev/cur pose lerp (cam_lerp_i) that can transiently
+ * diverge by a large margin from what td5_camera_finalize_chase_pos
+ * actually solved that tick (confirmed by side-by-side logging), and a
+ * magnitude-only clamp on an already-wrong DIRECTION just produces a
+ * closer wrong-direction shot. That instability was not fully root-caused
+ * in the time available.
+ *
+ * Rather than keep patching increasingly specific edge cases in a cinematic
+ * with a genuine unresolved instability, this SKIPS the fly-in state
+ * machine entirely: cam_solve_view now falls through to the SAME normal
+ * chase-camera path used once the race is actually running (proven
+ * reliable — confirmed via screenshot to always keep the car in frame at
+ * GO and throughout every race). The 3-2-1 countdown indicator itself is
+ * unaffected (driven independently by tick_race_countdown() in
+ * td5_game.c) — only the pre-race camera SWEEP is gone; the grid, HUD, and
+ * gameplay pause/hold during the countdown are untouched.
+ *
+ * "1" (TD5RE_FLYIN_ENABLED=1) restores the original orbiting fly-in for
+ * A/B comparison against the original binary's cinematic (RunRaceFrame @
+ * 0x0042b580 runs it unconditionally for every view) — useful for anyone
+ * revisiting the underlying pose-interpolation bug later.
+ * ======================================================================== */
+static int td5_camera_flyin_enabled(void)
+{
+    static int s_mode = -1;
+    if (s_mode < 0) {
+        s_mode = td5_env_flag_off("TD5RE_FLYIN_ENABLED");   /* default OFF */
+    }
+    return s_mode;
+}
+
 void UpdateChaseCamera(int actor, int do_track_heading, int view)
 {
     int fly_in_threshold = g_flyInThreshold;
@@ -2011,12 +2067,32 @@ static void cam_solve_view(int v)
         g_camElevationAngleFP[v] = (int)p->elevation_angle << 8;
     }
 
+    /* [Montego fly-in fix 2026-07-04] Countdown tight-chase one-shot: when the
+     * fly-in cinematic is disabled (default), load a CLOSE preset (4: "tight
+     * chase", radius 1200 wu vs preset 0's 2100 wu) for the countdown window
+     * instead of falling through to whatever preset 0 last left behind. Fires
+     * once per race, only while still paused; the existing fly-in one-shot
+     * above unconditionally restores preset 0 the instant the race actually
+     * starts, so gameplay is untouched — this only shapes the pre-race hold. */
+    if (!s_countdown_tight_applied[v] && g_td5.paused && !td5_camera_flyin_enabled()) {
+        s_countdown_tight_applied[v] = 1;
+        g_raceCameraPresetId[v]   = 4;
+        g_raceCameraPresetMode[v] = 0;
+        TD5_CameraPreset *p = &g_cameraPresets[4];
+        g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw  * g_const256;
+        g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
+        g_camElevationAngleFP[v] = (int)p->elevation_angle << 8;
+    }
+
     float save = g_subTickFraction;
     g_subTickFraction = 0.0f;     /* kill vel-extrapolation; integrators use cam_integ_step() */
     s_cam_capture_view = v;
 
-    if (g_cameraTransitionActive > 0 && !s_flyin_preset_reloaded[v]) {
-        /* Race-start fly-in — now advances once per TICK (was per frame/viewport). */
+    if (g_cameraTransitionActive > 0 && !s_flyin_preset_reloaded[v] &&
+        td5_camera_flyin_enabled()) {
+        /* Race-start fly-in — now advances once per TICK (was per frame/viewport).
+         * [Montego fly-in fix 2026-07-04] Disabled by default — see
+         * td5_camera_flyin_enabled() above. TD5RE_FLYIN_ENABLED=1 restores it. */
         UpdateChaseCamera((int)actor, 1, v);
         UpdateRaceCameraTransitionState((int)actor, v);
         td5_camera_finalize_chase_pos(actor, v);
@@ -2236,6 +2312,53 @@ void td5_camera_apply_view(int view)
                 }
             }
         }
+        /* [Montego fly-in fix 2026-07-04 — round 3] Split-screen A/B (Montego,
+         * SpectateScreens=1) showed the countdown tight-chase preset (see the
+         * one-shot in cam_solve_view) can put the AI/spectate pane's camera
+         * AT OR BELOW the car looking up through its underside — "spawning
+         * below ground". Root cause: UpdateChaseCamera's orbit offset is
+         * tilted by a 3-point terrain-normal sample near THAT car's own
+         * position (see the "terrain following" block above); the human's
+         * grid slot and the AI's grid slot sample different local geometry,
+         * and at the AI's slot this tilt goes degenerate.
+         *
+         * [ROUND 3a — REVERTED] An earlier version of this guard ALSO
+         * rejected small total eye-car distance, on the theory that a
+         * degenerate tilt would also collapse the distance. That fired
+         * during ordinary countdown startup too — g_camCurrentRadius[v] is a
+         * spring that starts at 0 and takes several ticks to reach its
+         * target (by design, not a bug), so early in the countdown EVERY
+         * view's distance is transiently small. The fallback eye (a fixed
+         * ~1600 wu behind the car) then clipped into Montego's roadside
+         * terrain for the human's specific grid slot — a NEW regression.
+         * Narrowed to the one condition that's never legitimate: the eye
+         * literally at or below the car's own height. */
+        if (g_td5.paused && !td5_camera_flyin_enabled()) {
+            TD5_Actor *ca = camera_actor_for_view(v);
+            if (ca) {
+                int car_y = ca->world_pos.y;
+                /* Small tolerance (~8 wu) for legitimate near-level dips;
+                 * only the genuinely-at-or-below-car case trips this. */
+                if (eye[1] < car_y - 0x800) {
+                    int heading = -(int)*(short *)((uintptr_t)ca + 0x20A);
+                    float back_dist = 0x28000;   /* ~400 wu — short enough to stay clear of roadside terrain */
+                    int fx = ca->world_pos.x + (int)(SinFloat12bit(heading) * back_dist + 0.5f);
+                    int fz = ca->world_pos.z - (int)(CosFloat12bit((unsigned int)heading) * back_dist + 0.5f);
+                    int fy = car_y + 0x19000;   /* ~100 wu above the car — a plain, low "just behind" fallback */
+                    /* Validate against real terrain at the fallback XZ; raise
+                     * above it if the short back-hop itself lands low (e.g.
+                     * a dip in the road) rather than trusting the fixed
+                     * height blindly. */
+                    int floor_y;
+                    if (td5_camera_probe_ground_floor((uintptr_t)ca, fx, fz, &floor_y) &&
+                        fy < floor_y) {
+                        fy = floor_y;
+                    }
+                    eye[0] = fx; eye[1] = fy; eye[2] = fz;
+                }
+            }
+        }
+
         /* [ITEM #12] Jitter the eye AFTER the wall-avoid clip so the rattle
          * rides on the clipped position. The shake is small (~tens of world
          * units) so it won't re-clip into geometry; the look-at target is left
@@ -3610,6 +3733,7 @@ void td5_camera_set_preset(int pi)
     /* [PORT: N-way] reset preset / fly-in state for EVERY viewport (was 0/1). */
     for (int rv = 0; rv < TD5_MAX_VIEWPORTS; rv++) {
         s_flyin_preset_reloaded[rv] = 0;
+        s_countdown_tight_applied[rv] = 0;
         g_raceCameraPresetId[rv]    = 0;
         g_raceCameraPresetMode[rv]  = 0;
         /* [FIX 2026-07-02 end-race-now stale camera yaw] Original's

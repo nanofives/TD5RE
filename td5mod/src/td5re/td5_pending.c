@@ -96,6 +96,7 @@ static const char *const k_seed[] = {
     "High Scores: default best times all read 5-10 min (unraced tracks)",
     "High Scores: single-player CUPS no longer in the browse list",
     "High Scores: split-screen MP records every player by profile name",
+    "Race-start camera: no more over-water swing at Montego Bay (both SP+MP)",
     "Game Options: PLAYER NAME edits INLINE in place (no pop-up), full-size font",
     "Game Options: DAMAGE toggle ON=car damage+bar, OFF=both off (label 'DAMAGE')",
     "Game Options: PREV/OK/NEXT aligned under the option-row column (120/220/320)",
