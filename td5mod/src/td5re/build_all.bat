@@ -66,6 +66,13 @@ if not errorlevel 1 (
     pwsh -NoProfile -File "%~dp0..\..\..\scripts\lint_structure.ps1" -ReportOnly
 )
 
+REM --- Code map refresh (navigation indexes; see CLAUDE.md "Fast navigation")
+REM codemap\*.tsv is gitignored and regenerated here so it never goes stale.
+where python >nul 2>&1
+if not errorlevel 1 (
+    python "%~dp0..\..\..\scripts\gen_codemap.py"
+)
+
 echo.
 echo ############################################################
 echo #  build_all OK

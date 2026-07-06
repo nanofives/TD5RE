@@ -1238,6 +1238,9 @@ float fe_glyph_sx(float sx, float sy) { return sx < sy ? sx : sy; }
  *           title strips retired 2026-06-16, headers render via title.ttf)
  */
 
+
+/* ===== SECTION: frontend helpers: surfaces, timed animations, titles ===== */
+
 static void frontend_note_activity(void) {
     s_attract_idle_counter = 0;
     s_attract_idle_timestamp = td5_plat_time_ms();
@@ -6757,6 +6760,9 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
 
 
 
+
+/* ===== SECTION: per-screen render overlays (music test, 2P options, descriptions, car preview) ===== */
+
 /* ========================================================================
  * Music Test overlay: track-name label + Now Playing panel.
  *
@@ -9269,6 +9275,9 @@ static void frontend_render_cup_won_overlay(float sx, float sy) {
 
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
+
+
+/* ===== SECTION: net-session overlays (lobby, create session, kick) + UI rect renderer ===== */
 
 /* ========================================================================
  * frontend_render_session_locked_overlay

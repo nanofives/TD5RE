@@ -4644,6 +4644,9 @@ typedef struct {
 
 static inline int smart_ang_signed(int a) { a &= 0xFFF; if (a > 0x800) a -= 0x1000; return a; }
 
+
+/* ===== SECTION: Smart Opponent AI (smart_*) sensing, branch/lane/speed ===== */
+
 /* Mid-point (track units) of a span's left/right rail. */
 static int smart_span_mid(int span, int span_count, double *mx, double *mz) {
     int lx, lz, rx, rz;
@@ -6170,6 +6173,9 @@ void td5_ai_update_track_behavior(int slot) {
  * ahead/behind peer-scan direction; UpdateTrafficRoutePlan uses the same dword
  * for the route-heading mirror branch. Both names alias the same field. */
 #define RS_PEER_SCAN_REVERSE      RS_ROUTE_DIRECTION_POLARITY
+
+
+/* ===== SECTION: traffic actor lifecycle: recycle, queue, init ===== */
 
 int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
     int self_slot = route_state_ptr[RS_SLOT_INDEX];
@@ -8181,6 +8187,9 @@ static int      s_trf_dyn_cooldown_vp[TD5_MAX_VIEWPORTS]; /* per-viewport spawn 
  * (a partition must not "see" another partition's twins when deciding clumping).
  * -1 = count all traffic (default / non-per-vp). */
 static int      s_trf_spawn_partition = -1;
+
+
+/* ===== SECTION: dynamic ambient traffic (trf_dyn_*) spawner + lane logic ===== */
 
 /* Viewport index whose player occupies racer `slot` (-1 if none). Split-screen is
  * an identity map (vp == slot) but resolve it via the game table to be safe. */

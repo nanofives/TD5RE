@@ -167,3 +167,7 @@ re/tools/car_studio/vendor/
 
 # Claude Code local memory (per-machine, not shared)
 CLAUDE.local.md
+
+# Generated code-navigation indexes (scripts/gen_codemap.py) — line numbers
+# churn every commit, so these stay untracked; build_all.bat refreshes them.
+codemap/

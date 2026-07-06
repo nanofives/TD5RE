@@ -4135,6 +4135,9 @@ static int hud_draw_checkpoint_timer_ttf(int view_idx, uint32_t value)
 extern int td5_track_count_branch_corridors(int main_span);
 extern int td5_track_branch_corridor_span(int main_span, int which);
 
+
+/* ===== SECTION: split-screen filler pane (map/standings) + pending overlay ===== */
+
 /* Stable, bright, well-separated fallback accent for a racer slot that has no MP
  * identity colour (AI opponents, or single-player). Spreads hue by slot via a
  * fixed 6-colour wheel so dots/labels stay distinguishable. */
@@ -5830,6 +5833,9 @@ void td5_hud_render_overlays(float dt)
  * segments, checkpoint markers, and racer dots relative to the player's
  * heading.
  * ======================================================================== */
+
+
+/* ===== SECTION: vector minimap (span quads, connectors, checkpoints) ===== */
 
 /* Branch-collapse a raw strip-span index into the main-road linear range,
  * replicating the value the original stores at actor+0x82

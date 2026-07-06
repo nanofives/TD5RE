@@ -1434,6 +1434,9 @@ static const int32_t s_level_boundary_sentinels[40][2] = {
 static int32_t s_boundary_fwd_sentinel = -1;
 static int32_t s_boundary_rev_sentinel = 9999;
 
+
+/* ===== SECTION: span contacts: forward/reverse resolvers ===== */
+
 void td5_track_bind_boundary_sentinels(int level_number)
 {
     /* [TD6 SEAM-TELEPORT ROOT FIX — track-scoped, OverrideTrackZip-gated]
@@ -3602,6 +3605,9 @@ int td5_track_get_surface_type(TD5_Actor *actor, int probe_index)
  *
  * On crossing, transitions to the neighbor span and recursively re-tests.
  * ======================================================================== */
+
+
+/* ===== SECTION: position walker: boundary bits + recursive update ===== */
 
 /**
  * Cross-product edge test: returns > 0 if the point (px,pz) is on the

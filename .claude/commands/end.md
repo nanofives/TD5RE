@@ -479,6 +479,14 @@ ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat . TD5 -process TD5_d3d.exe \
 
 Failure here is non-fatal — the fix is already shipped.
 
+**Navigation-index freshness (same trigger class, near-zero cost):** the
+code map (`codemap/*.tsv`) is regenerated automatically by every
+`build_all.bat`, so it is already fresh — no action. If this session
+ADDED/SPLIT/RENAMED modules or made large structural moves, also queue a
+repo-fleet digest rebuild so the worker's orientation map doesn't mislead
+the next session (non-blocking, runs on account2):
+`pwsh -NoProfile -File C:/Users/maria/Desktop/Proyectos/.claude/skills/repo-fleet/scripts/build-digests.ps1 -Repos TD5RE`
+
 ---
 
 ## Step 7e: Publish the release to the LAN server (non-blocking)
