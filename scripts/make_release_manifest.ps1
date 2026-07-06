@@ -29,8 +29,23 @@ $rootFull = (Resolve-Path $Root).Path.TrimEnd('\')
 $topLevel = @('td5re_release.exe','td5re_release.ini','td5re_update.ps1','update.bat')
 $entries  = New-Object System.Collections.Generic.List[object]
 
+# SHA256 via .NET rather than Get-FileHash: this box's Windows PowerShell 5.1
+# ships a partially-broken Microsoft.PowerShell.Utility that is missing
+# Get-FileHash (and Import-PowerShellDataFile) — other Utility cmdlets work, but
+# those two are absent, so `Get-FileHash` fails with CommandNotFoundException and
+# the whole publish aborts. [System.Security.Cryptography.SHA256] is present on
+# every PowerShell (5.1 and 7), so this is portable and dependency-free.
+function Get-Sha256Hex([string]$full) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $fs = [System.IO.File]::OpenRead($full)
+        try { $bytes = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
+    } finally { $sha.Dispose() }
+    -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
 function Add-Entry([string]$full, [string]$rel) {
-    $h   = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLower()
+    $h   = Get-Sha256Hex $full
     $len = (Get-Item -LiteralPath $full).Length
     $entries.Add([ordered]@{ path = ($rel -replace '\\','/'); size = $len; sha256 = $h })
 }
