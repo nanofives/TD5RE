@@ -79,15 +79,20 @@ static int     s_contact_gap = 8;   /* ticks of no-contact that end a collision 
 
 /* Env-knob parse/clamp helpers now live in td5_config.c (shared across modules). */
 
-/* Map the global Game Options toughness/deform LEVELS (0=Low,1=Normal,2=High)
- * to the active health + deformation magnitudes. Env knobs, when set, win over
- * the level. Called at init and at every race start so a menu change takes
- * effect on the next race. Normal == the user's tuned 3x durability / 0.75x
- * deform baseline. */
+/* Map the global Game Options toughness/deform LEVELS (toughness: 0=Low,
+ * 1=Medium, 2=High, 3=Off; deform: 0=Low,1=Normal,2=High, 3=Off) to the active
+ * health + deformation magnitudes. Env knobs, when set, win over the level.
+ * Called at init and at every race start so a menu change takes effect on the
+ * next race. Medium/Normal == the user's tuned 3x durability / 0.75x deform
+ * baseline. Toughness==3 short-circuits td5_damage_enabled() below and
+ * deform==3 short-circuits td5_damage_deform_enabled(), so the HP/dent/disp
+ * values computed here for those cases are never actually used — both are
+ * clamped to their High tier defensively since HP[]/DENT[]/DISP[] only have
+ * 3 entries. */
 static void apply_levels(void) {
     int t = g_td5.ini.car_damage_toughness; if (t < 0) t = 0; if (t > 2) t = 2;
     int d = g_td5.ini.car_damage_deform;    if (d < 0) d = 0; if (d > 2) d = 2;
-    static const int32_t HP[3]   = { 1200000, 2400000, 4800000 };  /* Low/Normal/High */
+    static const int32_t HP[3]   = { 1200000, 2400000, 4800000 };  /* Low/Medium/High */
     static const int     DENT[3] = { 23, 45, 68 };
     static const int     DISP[3] = { 45, 90, 135 };
     s_max_hp    = (s_hp_env   >= 0) ? (int32_t)s_hp_env : HP[t];
@@ -136,8 +141,14 @@ void td5_damage_shutdown(void) {
     s_inited = 0;
 }
 
+/* [TOUGHNESS OFF 2026-07-04] car_damage_toughness==3 ("OFF" on the CAR
+ * TOUGHNESS row) is a second, independent way to disable the whole damage
+ * module — folded into the level cycle itself (same pattern as POWER-UPS'
+ * OFF/CASUAL/CHAOS) because the RACE OPTIONS screen only exposes the
+ * toughness row, not the separate Game Options "DAMAGE" master toggle. Either
+ * knob being "off" disables everything gated by this function. */
 int td5_damage_enabled(void) {
-    return g_td5.ini.car_damage != 0;
+    return g_td5.ini.car_damage != 0 && g_td5.ini.car_damage_toughness != 3;
 }
 
 /* The HUD health bar + the wreck/knockout mechanic (and its health-driven
@@ -145,9 +156,17 @@ int td5_damage_enabled(void) {
  * [Game] CarDamageBar sub-toggle. When this is off, accumulated damage never
  * wrecks a car or ends the race; only the impact-driven mesh deformation (dents)
  * and the collision physics remain — those are gated by td5_damage_enabled()
- * alone, not by this. Default on. */
+ * and td5_damage_deform_enabled(), not by this. Default on. */
 int td5_damage_bar_enabled(void) {
     return td5_damage_enabled() && g_td5.ini.car_damage_bar != 0;
+}
+
+/* [DEFORM OFF 2026-07-05] car_damage_deform==3 ("OFF" on the DEFORMATION row)
+ * disables impact-driven mesh deformation (dents) + the companion scuff
+ * darkening, independently of CAR TOUGHNESS/health — folded into the level
+ * cycle itself, same pattern as td5_damage_enabled()'s toughness==3 check. */
+int td5_damage_deform_enabled(void) {
+    return td5_damage_enabled() && g_td5.ini.car_damage_deform != 3;
 }
 
 /* Resolve a slot to its actor (NULL if out of range / unspawned). */
@@ -170,6 +189,11 @@ void td5_damage_reset_race(void) {
     if (!s_inited) td5_damage_init();
     apply_levels();   /* pick up any Game Options toughness/deform change for this race */
     int enabled = td5_damage_enabled();
+    int deform_enabled = td5_damage_deform_enabled();
+    TD5_LOG_I(LOG_TAG, "car_damage: reset_race car_damage=%d toughness=%d -> enabled=%d "
+              "deform=%d -> deform_enabled=%d max_hp=%d dent_frac=%d disp_frac=%d",
+              g_td5.ini.car_damage, g_td5.ini.car_damage_toughness, enabled,
+              g_td5.ini.car_damage_deform, deform_enabled, s_max_hp, s_dent_frac, s_disp_frac);
     for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
         /* Zero the deltas (keep the allocation for reuse) and detach the mesh so
          * a new car/mesh forces a fresh ensure on the next hit. Done even when
@@ -507,8 +531,9 @@ void td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
     else actor->damage_accum = 0x7FFFFFFF;
 
     /* Deform the body mesh at the hit region (event-effective magnitude, so a
-     * sustained grind doesn't keep crumpling the panel). */
-    if (hit) apply_deform(slot, eff, hit);
+     * sustained grind doesn't keep crumpling the panel). Gated separately from
+     * health/wreck by td5_damage_deform_enabled() (DEFORMATION=OFF). */
+    if (hit && td5_damage_deform_enabled()) apply_deform(slot, eff, hit);
 
     /* Knockout transition: fire the broken-down hook once. The health-based
      * knocked-out test (used by the freeze + completion gate) is inherently

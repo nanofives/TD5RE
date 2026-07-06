@@ -761,8 +761,8 @@ int             s_race_difficulty = 1;
 int             s_game_option_dynamics = 0;
 int             s_game_option_collisions = 1;
 int             s_game_option_powerups = 1;   /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS */
-int             s_game_option_car_toughness = 1; /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
-int             s_game_option_car_deform = 1;    /* [CAR DAMAGE] 0=Low 1=Normal 2=High */
+int             s_game_option_car_toughness = 1; /* [TOUGHNESS OFF 2026-07-04] 0=Low 1=Medium 2=High 3=Off */
+int             s_game_option_car_deform = 1;    /* [DEFORM OFF 2026-07-05] 0=Low 1=Normal 2=High 3=Off */
 int             s_game_option_car_damage = 1; /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
 int             s_game_option_laneassist = 0; /* lane-assist steering aid on/off */
 int             s_game_option_tutorial = 1;   /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
@@ -6325,7 +6325,15 @@ void td5_gameopts_value(int opt, char *out, size_t n) {
     static const char *const traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] =
         { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
     static const char *const difficulty[]  = { "EASY", "NORMAL", "HARD" };
-    static const char *const level3[]      = { "LOW", "NORMAL", "HIGH" };
+    /* [TOUGHNESS OFF 2026-07-04] 4-state cycle, not a plain 0..2 level: folds
+     * the master damage disable into the level itself (mirrors POWER-UPS'
+     * OFF/CASUAL/CHAOS above) so this row alone can fully disable damage —
+     * see td5_damage_enabled(). */
+    static const char *const toughness_lv[] = { "LOW", "MEDIUM", "HIGH", "OFF" };
+    /* [DEFORM OFF 2026-07-05] Same 4-state pattern as toughness_lv[] above —
+     * OFF disables impact-driven mesh deformation + scuff independently of
+     * CAR TOUGHNESS/health, see td5_damage_deform_enabled(). */
+    static const char *const deform_lv[] = { "LOW", "NORMAL", "HIGH", "OFF" };
     const char *v = "";
     int t;
     switch (opt) {
@@ -6353,14 +6361,14 @@ void td5_gameopts_value(int opt, char *out, size_t n) {
         case GO_TOUGHNESS:
             t = s_game_option_car_toughness;
             if (t < 0) t = 0;
-            if (t > 2) t = 2;
-            v = level3[t];
+            if (t > 3) t = 3;
+            v = toughness_lv[t];
             break;
         case GO_DEFORM:
             t = s_game_option_car_deform;
             if (t < 0) t = 0;
-            if (t > 2) t = 2;
-            v = level3[t];
+            if (t > 3) t = 3;
+            v = deform_lv[t];
             break;
         case GO_DAMAGE:      v = on_off[s_game_option_car_damage & 1]; break;
         case GO_LANEASSIST:  v = on_off[s_game_option_laneassist & 1]; break;
@@ -6396,14 +6404,18 @@ void td5_gameopts_cycle(int opt, int delta) {
             if (s_game_option_powerups > 2) s_game_option_powerups = 0;
             break;
         case GO_TOUGHNESS:
+            /* [TOUGHNESS OFF 2026-07-04] 4-state: LOW(0) -> MEDIUM(1) -> HIGH(2)
+             * -> OFF(3), matching the toughness_lv[] display array above. */
             s_game_option_car_toughness += delta;
-            if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 2;
-            if (s_game_option_car_toughness > 2) s_game_option_car_toughness = 0;
+            if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 3;
+            if (s_game_option_car_toughness > 3) s_game_option_car_toughness = 0;
             break;
         case GO_DEFORM:
+            /* [DEFORM OFF 2026-07-05] 4-state: LOW(0) -> NORMAL(1) -> HIGH(2)
+             * -> OFF(3), matching the deform_lv[] display array above. */
             s_game_option_car_deform += delta;
-            if (s_game_option_car_deform < 0) s_game_option_car_deform = 2;
-            if (s_game_option_car_deform > 2) s_game_option_car_deform = 0;
+            if (s_game_option_car_deform < 0) s_game_option_car_deform = 3;
+            if (s_game_option_car_deform > 3) s_game_option_car_deform = 0;
             break;
         case GO_DAMAGE: s_game_option_car_damage ^= 1; break;
         case GO_LANEASSIST: s_game_option_laneassist ^= 1; break;
@@ -6441,7 +6453,14 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
     static const char *const traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] =
         { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
     static const char *const difficulty[]  = { "EASY", "NORMAL", "HARD" };
-    static const char *const level3[]      = { "LOW", "NORMAL", "HIGH" };
+    /* [TOUGHNESS OFF 2026-07-04] Same 4-state array as td5_gameopts_value's
+     * toughness_lv[] — this is the ONLY damage on/off control exposed on the
+     * RACE OPTIONS screen (no separate DAMAGE row here), so OFF must fully
+     * disable damage; see td5_damage_enabled(). */
+    static const char *const toughness_lv[] = { "LOW", "MEDIUM", "HIGH", "OFF" };
+    /* [DEFORM OFF 2026-07-05] Same 4-state pattern as deform_lv[] in
+     * td5_gameopts_value — see td5_damage_deform_enabled(). */
+    static const char *const deform_lv[] = { "LOW", "NORMAL", "HIGH", "OFF" };
     static const char *const dynamics[]    = { "ARCADE", "SIMULATION" };
     const char *v = "";
     int t;
@@ -6458,11 +6477,11 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
         case RO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
         case RO_POWERUPS:    v = on_off[s_game_option_powerups & 1]; break;
         case RO_TOUGHNESS:
-            t = s_game_option_car_toughness; if (t < 0) t = 0; if (t > 2) t = 2;
-            v = level3[t]; break;
+            t = s_game_option_car_toughness; if (t < 0) t = 0; if (t > 3) t = 3;
+            v = toughness_lv[t]; break;
         case RO_DEFORM:
-            t = s_game_option_car_deform; if (t < 0) t = 0; if (t > 2) t = 2;
-            v = level3[t]; break;
+            t = s_game_option_car_deform; if (t < 0) t = 0; if (t > 3) t = 3;
+            v = deform_lv[t]; break;
     }
     snprintf(out, out_sz, "%s", v);
 }
@@ -6491,14 +6510,16 @@ void td5_raceopts_cycle(int idx, int delta) {
         case RO_CHECKPOINTS: s_game_option_checkpoint_timers ^= 1; break;
         case RO_POWERUPS:    s_game_option_powerups ^= 1; break;
         case RO_TOUGHNESS:
+            /* [TOUGHNESS OFF 2026-07-04] LOW(0) -> MEDIUM(1) -> HIGH(2) -> OFF(3). */
             s_game_option_car_toughness += delta;
-            if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 2;
-            if (s_game_option_car_toughness > 2) s_game_option_car_toughness = 0;
+            if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 3;
+            if (s_game_option_car_toughness > 3) s_game_option_car_toughness = 0;
             break;
         case RO_DEFORM:
+            /* [DEFORM OFF 2026-07-05] LOW(0) -> NORMAL(1) -> HIGH(2) -> OFF(3). */
             s_game_option_car_deform += delta;
-            if (s_game_option_car_deform < 0) s_game_option_car_deform = 2;
-            if (s_game_option_car_deform > 2) s_game_option_car_deform = 0;
+            if (s_game_option_car_deform < 0) s_game_option_car_deform = 3;
+            if (s_game_option_car_deform > 3) s_game_option_car_deform = 0;
             break;
     }
 }

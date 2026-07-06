@@ -57,6 +57,14 @@ int   td5_damage_enabled(void);
  * physics are unaffected by this toggle — they live below the health meter. */
 int   td5_damage_bar_enabled(void);
 
+/* [DEFORM OFF 2026-07-05] DEFORMATION level sub-toggle — mirrors [Game]
+ * CarDeform==3 ("OFF" folded into the DEFORMATION level cycle itself, same
+ * pattern as CAR TOUGHNESS's OFF state) AND requires the master to be on.
+ * When this returns 0, impact-driven mesh deformation (dents) and the
+ * companion scuff darkening are suppressed; health/wreck (CAR TOUGHNESS) is
+ * unaffected — the two axes are independent. */
+int   td5_damage_deform_enabled(void);
+
 /* Initialize per-slot health + clear all deformation at race start. MUST be
  * called once the race actors exist (ResetVehicleActorState does NOT touch the
  * damage padding, so this is the only initializer). */
