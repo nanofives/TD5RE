@@ -86,6 +86,13 @@ includers, no new compiler warnings per -W class.
   frame times) across repeated races. Report: `log/selftest_report.{csv,md}`;
   process exit code 0/1. Runner: `pwsh scripts/selftest.ps1 [-Suite full]`.
   See `td5mod/src/td5re/td5_selftest.c`; thresholds via `TD5RE_SELFTEST_*`.
+- **Golden traces** (full suite): two pinned-config races (Moscow + TD6 Pelton)
+  run with the fixed RaceTrace seed and hash their per-tick trace CSVs against
+  `td5mod/src/td5re/trace_goldens.txt`. A mismatch = the SIM changed — a
+  regression, or an intentional physics/AI change that must re-record via
+  `TD5RE_TRACE_GOLDEN_UPDATE=1 pwsh scripts/selftest.ps1 -Suite full` (commit
+  the file with the change). This is the behavioral regression net; CI can't
+  run it (no game assets on runners) — CI gates on the structure lint instead.
 
 ## Source port modules
 

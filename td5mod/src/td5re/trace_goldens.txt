@@ -6,9 +6,9 @@ race-golden-moscow pose 7cdf42f645bace29
 race-golden-moscow motion 8f4858c269f24bf2
 race-golden-moscow track 14ce6ebae6ee9b0b
 race-golden-moscow controls 224c23490898c884
-race-golden-moscow progress 7963d29d185990e4
+race-golden-moscow progress 600bc82383b08b84
 race-golden-pelton pose f6bc6caf61c307bb
 race-golden-pelton motion 4e77770d84edf7ab
 race-golden-pelton track 3b9273ab8e26df1d
 race-golden-pelton controls 1ae23b0d92b30237
-race-golden-pelton progress f114f64c2f3e4fef
+race-golden-pelton progress 1184a63dfa9077fc
