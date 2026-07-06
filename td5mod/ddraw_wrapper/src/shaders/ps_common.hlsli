@@ -17,10 +17,75 @@ cbuffer FogParams : register(b0)
     int    alphaTestEnabled; /* 1 = discard pixels with alpha < alphaRef */
     float  alphaRef;    /* alpha test reference value (0..1) */
     float  _pad1;
+    float  foliageAA;   /* 1.0 = use SampleFoliageAA() for texMap, else Sample() */
 };
 
 SamplerState samplerState : register(s0);
 Texture2D    texMap       : register(t0);
+
+/**
+ * SampleFoliageAA - clamped, alpha-weighted 4-tap reconstruction for
+ * color-keyed cutout textures (trees/fences/signs). Fetches texels directly
+ * with Load() instead of going through the bound sampler:
+ *   - Indices are clamped to the texture bounds, never wrapped, so the
+ *     opposite edge of the bitmap can't bleed into the border of the
+ *     billboard (the old WRAP+bilinear seam/"bars" bug).
+ *   - Each tap's RGB is weighted by its OWN alpha before being averaged, so
+ *     fully/partly-transparent texels — whose RGB is leftover source-art
+ *     color (e.g. sky-blue painted behind the tree) never meant to be seen —
+ *     can't bleed their color into the edge. Alpha itself is still a plain
+ *     bilinear average, so the cutout still gets a smooth 0..1 edge ramp for
+ *     the alpha test/blend to soften.
+ */
+float4 SampleFoliageAA(Texture2D tex, float2 uv)
+{
+    uint texW, texH;
+    tex.GetDimensions(texW, texH);
+    int2 lo = int2(0, 0);
+    int2 hi = int2(texW, texH) - int2(1, 1);
+
+    float2 texel = uv * float2(texW, texH) - 0.5;
+    float2 f     = frac(texel);
+    int2   base  = int2(floor(texel));
+
+    int2 i00 = clamp(base,                lo, hi);
+    int2 i10 = clamp(base + int2(1, 0),   lo, hi);
+    int2 i01 = clamp(base + int2(0, 1),   lo, hi);
+    int2 i11 = clamp(base + int2(1, 1),   lo, hi);
+
+    float4 c00 = tex.Load(int3(i00, 0));
+    float4 c10 = tex.Load(int3(i10, 0));
+    float4 c01 = tex.Load(int3(i01, 0));
+    float4 c11 = tex.Load(int3(i11, 0));
+
+    float w00 = (1.0 - f.x) * (1.0 - f.y);
+    float w10 = f.x         * (1.0 - f.y);
+    float w01 = (1.0 - f.x) * f.y;
+    float w11 = f.x         * f.y;
+
+    float alpha = c00.a * w00 + c10.a * w10 + c01.a * w01 + c11.a * w11;
+
+    float aw00 = w00 * c00.a, aw10 = w10 * c10.a, aw01 = w01 * c01.a, aw11 = w11 * c11.a;
+    float aWeightSum = aw00 + aw10 + aw01 + aw11;
+    float3 rgb = (aWeightSum > 1e-5)
+        ? (c00.rgb * aw00 + c10.rgb * aw10 + c01.rgb * aw01 + c11.rgb * aw11) / aWeightSum
+        : float3(0.0, 0.0, 0.0);
+
+    return float4(rgb, alpha);
+}
+
+/* Dispatch helper used by every PS variant that samples texMap: routes
+ * foliage-AA draws through the manual reconstruction above, everything else
+ * through the normal sampler path (unchanged behavior). */
+float4 SampleTex(Texture2D tex, SamplerState samp, float2 uv)
+{
+    float4 result;
+    if (foliageAA != 0.0)
+        result = SampleFoliageAA(tex, uv);
+    else
+        result = tex.Sample(samp, uv);
+    return result;
+}
 
 struct PS_INPUT
 {
