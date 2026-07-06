@@ -111,6 +111,17 @@ extern const int        g_td5re_module_count;
  * Global Game State
  *
  * Central state structure that modules read/write through td5_game.
+ *
+ * [OWNERSHIP CONTRACT 2026-07-06 — see STRUCTURE_ROADMAP.md §2]
+ * This struct is the port's god-struct (~57 fields + the ~142-knob `ini`
+ * block; ~2,165 access sites). It only shrinks from here:
+ *   - Each `ini` block is OWNED by one module (the feature comments name
+ *     it); cross-module knob reads are a smell — target is per-module
+ *     const config views, not new direct g_td5.ini.* reads.
+ *   - NEW per-module runtime state goes in the OWNING MODULE (g_rs pattern
+ *     from the render split), never as a new g_td5 field.
+ *   - Leaf modules query race state via td5_race_state.h, not td5_game.h
+ *     (enforced by scripts/lint_structure.ps1's includer ratchet).
  * ======================================================================== */
 
 /* [dynamic-traffic 2026-06] Number of traffic-volume tiers in the selector and
