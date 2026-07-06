@@ -83,6 +83,7 @@ static const char *const k_seed[] = {
     "Net play: Cop Chase over the network (random human cop; bust/arrest in sync)",
     "Net play: ARCADE dynamics online (power-up boxes + 3x collisions in sync)",
     "Net play: remote players show their names in results/standings (not P2/P3)",
+    "Lane Assist: no longer aims at sidewalk on TD6 tracks (London etc.)",
     "Auto headlights: ON in Bern tunnels, OFF in Bern sunlit stretches",
     "Auto headlights: ON across dark-sky tracks (Moscow), OFF on bright tracks",
     "Car bodies stay neutral (no red/colour tint from track lighting, e.g. Bern)",
