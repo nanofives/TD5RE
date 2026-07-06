@@ -50,6 +50,7 @@
 #include "td5_config.h"
 #include "td5_game.h"
 #include "td5_frontend.h"
+#include "td5_trace.h"
 
 #define LOG_TAG "selftest"
 
@@ -105,6 +106,9 @@ typedef struct {
     int auto_throttle;    /* -1 = base (base forces 1) */
     int natural_finish;   /* 1 = run to the real finish (results screen) */
     int repeat_group;     /* >0 = degradation series id */
+    int trace_golden;     /* 1 = golden-trace scenario: fixed-seed RaceTrace on,
+                           * per-tick CSVs hashed vs trace_goldens.txt (table
+                           * rows omitting the field default to 0) */
 } RaceScenario;
 
 /* Order matters: smoke = first ST_SMOKE_RACES entries; the late Moscow
@@ -134,6 +138,14 @@ static const RaceScenario k_races[] = {
     { "race-ai-slot0",        0, -1,  0, -1, -1, -1, -1, -2, -1,  1,  0, 0, 0 },
     { "race-moscow-late1",    0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
     { "race-moscow-late2",    0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
+    /* [TRACE GOLDEN 2026-07-06] Deterministic sim-regression net: fixed
+     * RaceTrace seed (0x1A2B3C4D) + every sim-relevant knob pinned (the
+     * columns here + st_golden_begin for ini knobs the columns don't cover),
+     * AI-driven player, per-tick trace CSVs hashed vs trace_goldens.txt.
+     * One TD5 track + one TD6 conversion. Kept BEFORE spectate3 (its pane
+     * layout must stay last / leak-free). */
+    { "race-golden-moscow",   0,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1 },
+    { "race-golden-pelton",  26,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1 },
     { "race-spectate3",       0, -1,  0, -1, -1, -1, -1, -2,  3, -1, -1, 0, 0 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
@@ -375,6 +387,214 @@ static void st_reset_scenario_fields(void)
     g_td5.ini.trace_fast_forward = s_base.fast_forward;
 }
 
+/* ------------------------------------------------------------------------
+ * [TRACE GOLDEN 2026-07-06] Golden-trace regression net
+ *
+ * A trace_golden scenario runs with the RaceTrace harness on (fixed CRT seed
+ * 0x1A2B3C4D — see InitRace step 0) and every sim-relevant knob pinned, so
+ * the per-tick CSVs are byte-deterministic. At race end each canonical CSV
+ * is hashed (FNV-1a 64, skipping the render-dependent leading `frame`
+ * column, capped at ST_GOLDEN_TICKS sim ticks) and compared against the
+ * tracked goldens file. A mismatch means the SIM CHANGED — either a real
+ * regression, or an intentional physics/AI change that must re-record via
+ * TD5RE_TRACE_GOLDEN_UPDATE=1 (rewrites the file; commit it with the change).
+ * ---------------------------------------------------------------------- */
+
+#define ST_GOLDEN_MODULES (TD5_TRACE_MOD_POSE | TD5_TRACE_MOD_MOTION | \
+                           TD5_TRACE_MOD_TRACK | TD5_TRACE_MOD_CONTROLS | \
+                           TD5_TRACE_MOD_PROGRESS)
+#define ST_GOLDEN_TICKS   300
+#define ST_GOLDEN_FILE    "td5mod/src/td5re/trace_goldens.txt"
+
+static const struct { unsigned mask; const char *suffix; } k_golden_mods[] = {
+    { TD5_TRACE_MOD_POSE,     "pose"     },
+    { TD5_TRACE_MOD_MOTION,   "motion"   },
+    { TD5_TRACE_MOD_TRACK,    "track"    },
+    { TD5_TRACE_MOD_CONTROLS, "controls" },
+    { TD5_TRACE_MOD_PROGRESS, "progress" },
+};
+#define ST_GOLDEN_MOD_COUNT ((int)(sizeof(k_golden_mods) / sizeof(k_golden_mods[0])))
+
+static struct {
+    int car_damage, toughness, deform, difficulty, lane_assist;
+} s_golden_saved;
+static char s_golden_lines[32][96];   /* recorded "<scenario> <mod> <hash>" */
+static int  s_golden_line_count;
+static int  s_golden_ran, s_golden_active;
+
+/* Pin the sim-relevant ini knobs the scenario columns don't cover, then
+ * restart the trace harness so its CSVs reopen fresh for THIS race only. */
+static void st_golden_begin(void)
+{
+    s_golden_saved.car_damage  = g_td5.ini.car_damage;
+    s_golden_saved.toughness   = g_td5.ini.car_damage_toughness;
+    s_golden_saved.deform      = g_td5.ini.car_damage_deform;
+    s_golden_saved.difficulty  = g_td5.ini.difficulty;
+    s_golden_saved.lane_assist = g_td5.ini.lane_assist;
+    g_td5.ini.car_damage           = 1;
+    g_td5.ini.car_damage_toughness = 1;
+    g_td5.ini.car_damage_deform    = 1;
+    g_td5.ini.difficulty           = 1;
+    g_td5.ini.lane_assist          = 0;
+
+    g_td5.ini.race_trace_enabled       = 1;
+    g_td5.ini.trace_module_mask        = ST_GOLDEN_MODULES;
+    g_td5.ini.trace_stage_mask         = TD5_TRACE_STG_ALL;
+    g_td5.ini.race_trace_slot          = -1;
+    g_td5.ini.race_trace_max_frames    = 1 << 30;
+    g_td5.ini.race_trace_max_sim_ticks = 0;   /* never the quit-request path */
+    td5_trace_shutdown();
+    td5_trace_init();                         /* reopen ("w") = clean CSVs */
+    s_golden_active = 1;
+}
+
+/* Undo st_golden_begin (also the abort path when the race never started). */
+static void st_golden_end(void)
+{
+    if (!s_golden_active) return;
+    td5_trace_shutdown();                     /* flush + close the CSVs */
+    g_td5.ini.race_trace_enabled = 0;
+    td5_trace_init();                         /* trace off again (no-op) */
+    g_td5.ini.car_damage           = s_golden_saved.car_damage;
+    g_td5.ini.car_damage_toughness = s_golden_saved.toughness;
+    g_td5.ini.car_damage_deform    = s_golden_saved.deform;
+    g_td5.ini.difficulty           = s_golden_saved.difficulty;
+    g_td5.ini.lane_assist          = s_golden_saved.lane_assist;
+    s_golden_active = 0;
+}
+
+/* FNV-1a 64 over the data rows of one trace CSV, minus each row's leading
+ * `frame` column (render-cadence-dependent), capped at ST_GOLDEN_TICKS sim
+ * ticks past the first row's tick (tick numbering is absolute-per-race but
+ * starts wherever countdown left it). Returns 0 if the file is missing. */
+static int st_golden_hash_csv(const char *path, unsigned long long *out)
+{
+    FILE *f = fopen(path, "r");
+    char line[1024];
+    unsigned long long h = 1469598103934665603ULL;
+    int first_tick = -1, rows = 0;
+    if (!f) return 0;
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }   /* header */
+    while (fgets(line, sizeof(line), f)) {
+        char *p = strchr(line, ',');
+        int tick;
+        if (!p) continue;
+        tick = atoi(p + 1);
+        if (first_tick < 0) first_tick = tick;
+        if (tick - first_tick >= ST_GOLDEN_TICKS) break;
+        for (p = p + 1; *p && *p != '\n' && *p != '\r'; p++) {
+            h ^= (unsigned char)*p;
+            h *= 1099511628211ULL;
+        }
+        h ^= (unsigned char)'\n';
+        h *= 1099511628211ULL;
+        rows++;
+    }
+    fclose(f);
+    if (!rows) return 0;
+    *out = h;
+    return 1;
+}
+
+/* Look up "<scenario> <suffix> <hex>" in the tracked goldens file. */
+static int st_golden_lookup(const char *scenario, const char *suffix,
+                            unsigned long long *out)
+{
+    FILE *f = fopen(ST_GOLDEN_FILE, "r");
+    char line[160], sc[64], mod[32];
+    unsigned long long h;
+    int found = 0;
+    if (!f) return -1;   /* no goldens file at all */
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#') continue;
+        if (sscanf(line, "%63s %31s %llx", sc, mod, &h) == 3 &&
+            strcmp(sc, scenario) == 0 && strcmp(mod, suffix) == 0) {
+            *out = h;
+            found = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+/* Hash the CSVs of a finished golden race, judge vs the goldens file, and
+ * append the 'G' verdict row. In update mode collect lines and rewrite the
+ * file once the LAST golden scenario has run. */
+static void st_golden_finish(const RaceScenario *sc)
+{
+    const char *env = getenv("TD5RE_TRACE_GOLDEN_UPDATE");
+    int update = (env && *env && *env != '0');
+    int golden_total = 0, i;
+    int status = ST_PASS;
+    char note[120] = "";
+    size_t noff = 0;
+    StepRow *r;
+
+    st_golden_end();   /* flush CSVs + restore knobs BEFORE hashing */
+    s_golden_ran++;
+    for (i = 0; i < ST_RACE_COUNT; i++) golden_total += k_races[i].trace_golden;
+
+    r = st_new_row(sc->name, 'G');
+    for (i = 0; i < ST_GOLDEN_MOD_COUNT; i++) {
+        char path[640];
+        unsigned long long have = 0, want = 0;
+        int lk;
+        snprintf(path, sizeof(path), "%srace_trace_%s.csv",
+                 td5_plat_log_dir(), k_golden_mods[i].suffix);
+        if (!st_golden_hash_csv(path, &have)) {
+            status = ST_FAIL;
+            noff += snprintf(note + noff, sizeof(note) - noff, "%s: no rows; ",
+                             k_golden_mods[i].suffix);
+            continue;
+        }
+        if (update) {
+            if (s_golden_line_count < 32) {
+                snprintf(s_golden_lines[s_golden_line_count++],
+                         sizeof(s_golden_lines[0]), "%s %s %016llx",
+                         sc->name, k_golden_mods[i].suffix, have);
+            }
+            continue;
+        }
+        lk = st_golden_lookup(sc->name, k_golden_mods[i].suffix, &want);
+        if (lk <= 0) {
+            if (status < ST_WARN) status = ST_WARN;
+            noff += snprintf(note + noff, sizeof(note) - noff,
+                             "%s: no golden; ", k_golden_mods[i].suffix);
+        } else if (have != want) {
+            status = ST_FAIL;
+            noff += snprintf(note + noff, sizeof(note) - noff,
+                             "%s: %016llx != golden %016llx; ",
+                             k_golden_mods[i].suffix, have, want);
+        }
+        if (noff >= sizeof(note)) noff = sizeof(note) - 1;
+    }
+
+    if (update) {
+        snprintf(note, sizeof(note), "goldens recorded (%d/%d scenarios)",
+                 s_golden_ran, golden_total);
+        if (s_golden_ran >= golden_total) {
+            FILE *f = fopen(ST_GOLDEN_FILE, "w");
+            if (f) {
+                fputs("# Golden trace hashes -- regenerate with:\n"
+                      "#   TD5RE_TRACE_GOLDEN_UPDATE=1 pwsh scripts/selftest.ps1 -Suite full\n"
+                      "# Commit this file together with any INTENTIONAL sim change.\n"
+                      "# <scenario> <module> <fnv1a64 of trace rows, frame column stripped>\n", f);
+                for (i = 0; i < s_golden_line_count; i++)
+                    fprintf(f, "%s\n", s_golden_lines[i]);
+                fclose(f);
+            } else {
+                snprintf(note, sizeof(note), "cannot write %s", ST_GOLDEN_FILE);
+                status = ST_FAIL;
+            }
+        }
+    } else if (status == ST_PASS) {
+        snprintf(note, sizeof(note), "%d module hashes match goldens",
+                 ST_GOLDEN_MOD_COUNT);
+    }
+    st_finish_row(r, status, note);
+}
+
 static void st_apply_scenario(const RaceScenario *sc)
 {
     st_reset_scenario_fields();
@@ -390,6 +610,7 @@ static void st_apply_scenario(const RaceScenario *sc)
     if (sc->player_is_ai >= 0) g_td5.ini.player_is_ai    = sc->player_is_ai;
     if (sc->auto_throttle >= 0) g_td5.ini.auto_throttle  = sc->auto_throttle;
     g_td5.ini.trace_fast_forward = s_ff;
+    if (sc->trace_golden) st_golden_begin();
 }
 
 /* ------------------------------------------------------------------------
@@ -786,6 +1007,7 @@ static void st_tick_races(uint32_t now)
         } else if ((int32_t)(now - s_step_deadline_ms) >= 0) {
             st_finish_row(row, ST_FAIL, "race never started (timeout)");
             g_td5.ini.auto_race = 0;
+            st_golden_end();   /* no-op unless this was a golden scenario */
             st_reset_scenario_fields();
             st_next_step();
         }
@@ -825,6 +1047,9 @@ static void st_tick_races(uint32_t now)
                 }
                 st_finish_row(row, status, note);
             }
+            /* Golden scenario: hash the trace CSVs + append the 'G' verdict
+             * row (also restores the pinned knobs + closes the trace). */
+            if (sc->trace_golden) st_golden_finish(sc);
             st_reset_scenario_fields();
             st_next_step();
         }
