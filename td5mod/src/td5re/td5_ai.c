@@ -536,6 +536,32 @@ static int cop_rebust_cooldown(void) {
     return v;
 }
 
+/* [FIX 2026-07-07] Cop ACQUIRE window. Diag proved the faithful window [0,15]
+ * spans + full cop_min_speed made chases fire only on a spawn coincidence
+ * (329/330 idle rejects failed the gap gate at 250-290 spans; the one in-window
+ * case failed the speed gate by ~5%). These widen the acquire window and relax
+ * the acquire-speed so a cop that the player passes actually locks on. Chase
+ * MAINTENANCE (leash cop_chase_max_gap, stall watchdog) is unchanged, so a
+ * hopeless chase still ends. cgap>0 = player ahead of cop (just passed); <0 =
+ * player still approaching from behind. */
+static int cop_trigger_lo(void) {
+    static int v = 0x7fffffff;
+    if (v == 0x7fffffff) v = td5_env_int("TD5RE_COP_TRIGGER_LO", -8, -60, 15);
+    return v;
+}
+static int cop_trigger_hi(void) {
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_COP_TRIGGER_HI", 60, 15, 300);
+    return v;
+}
+/* Acquire-speed gate as a percent of cop_min_speed (100 = faithful). Default 85
+ * so a car a touch under the speeding threshold still draws a cop. */
+static int cop_trigger_speed_pct(void) {
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_COP_TRIGGER_SPEED_PCT", 85, 10, 100);
+    return v;
+}
+
 /* Fully strip a slot's cop identity (called when the traffic slot is recycled
  * / despawned so a future ordinary spawn doesn't inherit cop-ness). */
 static void cop_release(int slot) {
@@ -914,6 +940,26 @@ static int wreck_permanent_enabled(void) {
     return s;
 }
 
+/* [FIX 2026-07-07] A COP that crashes must NOT become a permanent wreck. Under
+ * the permanent-wreck rule a cop that rams the player and crashes (the common
+ * case) parks forever and the chase dies with no re-engage ("police get broken
+ * down"). Default ON: cop slots get a self-clearing recovery timer (like racers)
+ * instead of ticks=-1, so a crashed cop recovers and can chase again. Regular
+ * (non-cop) traffic keeps the faithful permanent wreck. TD5RE_COP_WRECK_RECOVER=0
+ * restores the old permanent-cop behaviour. */
+static int cop_wreck_recover_enabled(void) {
+    static int s = -1;
+    if (s < 0) { s = td5_env_flag_on("TD5RE_COP_WRECK_RECOVER"); }
+    return s;
+}
+/* Ticks (@30Hz) a wrecked cop stays down before self-recovering. Default 150
+ * (~5s), overridable via TD5RE_COP_WRECK_TICKS. */
+static int cop_wreck_recover_ticks(void) {
+    static int v = -1;
+    if (v < 0) { v = td5_env_int("TD5RE_COP_WRECK_TICKS", 150, 30, 900); }
+    return v;
+}
+
 /* Flag an actor as broken down (a wreck). Called from the physics collision
  * response on a hard V2V / wall impact for traffic and cop slots. Idempotent
  * while already broken. Player/AI racer slots are left to the existing crash-fx
@@ -945,9 +991,26 @@ void td5_ai_mark_actor_broken_down(int slot) {
                   slot, g_td5.ini.cop_smoke_ticks);
         return;
     }
-    g_actor_broken_ticks[slot] = wreck_permanent_enabled()
-        ? (int16_t)-1
-        : (int16_t)g_td5.ini.cop_smoke_ticks;
+    if (g_cop_is_cop[slot] && cop_wreck_recover_enabled()) {
+        /* [FIX 2026-07-07] Cop -> self-clearing recovery timer (never permanent),
+         * so a crashed cop rejoins the chase instead of parking for the race. */
+        g_actor_broken_ticks[slot] = (int16_t)cop_wreck_recover_ticks();
+    } else {
+        g_actor_broken_ticks[slot] = wreck_permanent_enabled()
+            ? (int16_t)-1
+            : (int16_t)g_td5.ini.cop_smoke_ticks;
+    }
+    /* [DIAG 2026-07-07] A traffic/cop slot just wrecked. For a COP this is the
+     * "police get broken down and the chase dies" symptom — log the slot, its
+     * chase phase at the moment it wrecked, and whether the wreck is permanent
+     * (never self-recovers; only distance-recycling frees the slot) or timed. */
+    TD5_LOG_I(LOG_TAG,
+              "mark_broken_down: %s slot=%d -> %s wreck (ticks=%d)%s",
+              (g_cop_is_cop[slot] ? "COP" : "TRAFFIC"), slot,
+              (g_actor_broken_ticks[slot] < 0 ? "PERMANENT" : "timed-recover"),
+              (int)g_actor_broken_ticks[slot],
+              (g_cop_is_cop[slot] && g_cop_phase[slot] != COP_IDLE)
+                  ? " [WHILE CHASING -> chase ends; recovers + can re-engage]" : "");
 }
 
 /* [RESET-CAR REPAIR 2026-06-29] Clear the broken-down/parked state for `slot`.
@@ -5529,6 +5592,36 @@ static int td5_ai_smart_leash_modifier(int slot, int32_t delta, int32_t *out_mod
     return 1;
 }
 
+/* [DIAG 2026-07-07] Verbose traffic tracing (lane oscillation + freeze onset).
+ * Default OFF; set TD5RE_TRAFFIC_DIAG=1 to enable. Zero cost when off. */
+static int traffic_diag_enabled(void) {
+    static int s = -1;
+    if (s < 0) { s = td5_env_flag_off("TD5RE_TRAFFIC_DIAG"); }
+    return s;
+}
+
+/* [FIX 2026-07-07] Lane-change hysteresis. Diag proved the chooser re-scores
+ * every tick with no commitment (398 flips; cars alternating lanes every ~2
+ * ticks) — the "abrupt lane change" symptom. Default ON: once a car commits to a
+ * target lane it HOLDS it until a different lane beats the committed lane's score
+ * by MARGIN and a per-slot COOLDOWN has lapsed. Port-only (smart-traffic path);
+ * TD5RE_TRAFFIC_LANE_HYST=0 restores the old per-tick behaviour. */
+static int traffic_lane_hyst_enabled(void) {
+    static int s = -1;
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TRAFFIC_LANE_HYST"); }
+    return s;
+}
+static int traffic_lane_hyst_margin(void) {   /* score units a rival lane must win by */
+    static int v = -1;
+    if (v < 0) { v = td5_env_int("TD5RE_TRAFFIC_LANE_MARGIN", 3, 0, 50); }
+    return v;
+}
+static int traffic_lane_hyst_cooldown(void) { /* ticks between committed changes */
+    static int v = -1;
+    if (v < 0) { v = td5_env_int("TD5RE_TRAFFIC_LANE_COOLDOWN", 24, 0, 300); }
+    return v;
+}
+
 /* Traffic lane brain: score lanes by surface, occupancy ahead, wall, and
  * change-cost; return the best, clamped to a ±1 lane step so the change is
  * gradual (a multi-lane jump would slam the steering cascade). */
@@ -5597,9 +5690,69 @@ static int td5_ai_smart_traffic_lane(int slot, int target_span, int lane_count,
     if (best > base + 1) best = base + 1;
     else if (best < base - 1) best = base - 1;
 
+    /* [FIX 2026-07-07] Hysteresis: hold the previously-committed target lane
+     * unless a rival lane beats it by MARGIN and the change cooldown has lapsed.
+     * base_sub_lane is stale (never written back), so committing to the last
+     * RETURNED lane is the stable reference — this stops the tick-to-tick flip. */
+    if (traffic_lane_hyst_enabled() && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        static int      s_commit_lane[TD5_MAX_TOTAL_ACTORS];
+        static uint16_t s_commit_cd[TD5_MAX_TOTAL_ACTORS];
+        static int      s_commit_init = 0;
+        if (!s_commit_init) {
+            for (int z = 0; z < TD5_MAX_TOTAL_ACTORS; z++) s_commit_lane[z] = -1;
+            s_commit_init = 1;
+        }
+        int cl = s_commit_lane[slot];
+        if (cl < 0 || cl >= lane_count) cl = best;   /* first time / stale -> adopt */
+        if (s_commit_cd[slot] > 0) s_commit_cd[slot]--;
+        if (best != cl) {
+            /* Recompute the committed lane's score from the same terms. */
+            double cl_score = 0.0;
+            if (td5_track_surface_is_slow(td5_track_get_span_lane_surface(target_span, cl)))
+                cl_score += 6.0;
+            cl_score += (double)occ[cl] * 1.5;
+            if (cl == 0 || cl == lane_count - 1) cl_score += 0.6;
+            cl_score += (double)smart_iabs(cl - base) * (1.4 - skill * 0.7);
+            if (s_commit_cd[slot] > 0 ||
+                (cl_score - best_score) < (double)traffic_lane_hyst_margin()) {
+                best = cl;                                   /* hold the commit */
+            } else {
+                s_commit_cd[slot] = (uint16_t)traffic_lane_hyst_cooldown();
+            }
+        }
+        s_commit_lane[slot] = best;
+    }
+
     if (best != base && (g_ai_frame_counter % 90u) == 0u)
         TD5_LOG_I(LOG_TAG, "smart_traffic_lane: slot=%d base=%d -> %d "
                   "(lanes=%d tspan=%d)", slot, base, best, lane_count, target_span);
+
+    /* [DIAG] Lane-oscillation tracker: the chooser re-scores every tick with no
+     * hysteresis, and base_sub_lane is stale (never written back), so the chosen
+     * lane can flip tick-to-tick. Log every flip with a running per-slot count —
+     * a rapidly climbing 'flips' number over a short window IS the "abrupt lane
+     * change" symptom. Includes the occupancy vector so the driving score is
+     * visible. */
+    if (traffic_diag_enabled() && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        static int      s_last_lane[TD5_MAX_TOTAL_ACTORS];
+        static uint32_t s_lane_flips[TD5_MAX_TOTAL_ACTORS];
+        static int      s_ll_init = 0;
+        if (!s_ll_init) {
+            for (int z = 0; z < TD5_MAX_TOTAL_ACTORS; z++) s_last_lane[z] = -1;
+            s_ll_init = 1;
+        }
+        if (s_last_lane[slot] >= 0 && s_last_lane[slot] != best) {
+            s_lane_flips[slot]++;
+            TD5_LOG_I(LOG_TAG,
+                "traffic_diag LANE-FLIP: slot=%d %d->%d flips=%u base=%d(stale) "
+                "lanes=%d occ=[%d,%d,%d,%d] tspan=%d",
+                slot, s_last_lane[slot], best, s_lane_flips[slot], base, lane_count,
+                (lane_count > 0 ? occ[0] : 0), (lane_count > 1 ? occ[1] : 0),
+                (lane_count > 2 ? occ[2] : 0), (lane_count > 3 ? occ[3] : 0),
+                target_span);
+        }
+        s_last_lane[slot] = best;
+    }
     return best;
 }
 
@@ -7558,6 +7711,29 @@ static void traffic_smart_antifreeze(int slot, char *actor, int32_t *rs) {
         TD5_LOG_I(LOG_TAG,
                   "traffic_antifreeze: slot=%d unstuck at span=%d (cleared recovery + realigned)",
                   slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW));
+}
+
+/* [FIX 2026-07-07] Universal stuck backstop. AntiFreeze only clears the
+ * recovery-latch (recovery_stage!=0) and collision-escape only the jam-speed
+ * case; the diag showed the DOMINANT real stall is the low-speed wedge
+ * (recovery_stage==0, ~zero speed) at specific track spots — neither net fired
+ * once in an 80s run. This resets ANY traffic car that has made no span progress
+ * for the caller's window (clear recovery, realign heading, reset velocity,
+ * reseed progress) so it rejoins the flow. The caller gates on stuck-duration and
+ * excludes an actively-chasing cop. TD5RE_TRAFFIC_UNSTICK=0 disables. */
+static int traffic_unstick_enabled(void) {
+    static int s = -1;
+    if (s < 0) { s = td5_env_flag_on("TD5RE_TRAFFIC_UNSTICK"); }
+    return s;
+}
+static void traffic_force_unstick(int slot, char *actor, int32_t *rs) {
+    g_traffic_recovery_stage[slot] = 0;
+    td5_track_compute_heading((TD5_Actor *)actor);
+    if ((rs[RS_ROUTE_DIRECTION_POLARITY] & 1) != 0)
+        ACTOR_I32(actor, ACTOR_YAW_ACCUM) += 0x80000;
+    td5_physics_reset_actor_state((TD5_Actor *)actor);
+    td5_ai_seed_actor_track_progress_offset(slot);
+    td5_track_normalize_actor_wrap((TD5_Actor *)actor);
 }
 
 /* [#3 COLLISION-DEADLOCK ESCAPE 2026-06-19] Safety net for traffic cars that pile
@@ -9827,6 +10003,80 @@ void td5_ai_update_traffic_route_plan(int slot) {
      * has frozen and the player-relative recycle can't reach (parked player). */
     traffic_smart_antifreeze(slot, actor, rs);
 
+    /* [DIAG+FIX 2026-07-07] Stuck detector + universal unstick backstop. Tracks
+     * per-slot span progress; under TD5RE_TRAFFIC_DIAG it edge-logs STUCK/UNSTUCK
+     * with the freeze cause, and under TD5RE_TRAFFIC_UNSTICK (default ON) it
+     * force-resets a car that has made no progress for ~3s so it rejoins the flow
+     * — covering the low-speed wedges (recovery_stage==0) that AntiFreeze and
+     * collision-escape both miss. An actively-chasing cop is never reset. */
+    if ((traffic_diag_enabled() || traffic_unstick_enabled()) &&
+        slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        static int16_t  s_stuck_last_span[TD5_MAX_TOTAL_ACTORS];
+        static uint16_t s_stuck_ticks[TD5_MAX_TOTAL_ACTORS];
+        static uint8_t  s_stuck_logged[TD5_MAX_TOTAL_ACTORS];
+        static uint32_t s_last_reset_frame[TD5_MAX_TOTAL_ACTORS];
+        static int      s_sd_init = 0;
+        if (!s_sd_init) {
+            for (int z = 0; z < TD5_MAX_TOTAL_ACTORS; z++) {
+                s_stuck_last_span[z] = ACTOR_I16(actor_ptr(z), ACTOR_SPAN_RAW);
+                s_stuck_ticks[z] = 0; s_stuck_logged[z] = 0;
+                s_last_reset_frame[z] = 0;
+            }
+            s_sd_init = 1;
+        }
+        int16_t cur_span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int32_t lspd     = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+        if (cur_span == s_stuck_last_span[slot] && lspd < 0x1000 && lspd > -0x1000) {
+            s_stuck_ticks[slot]++;
+            if (traffic_diag_enabled() && s_stuck_ticks[slot] == 60 &&
+                !s_stuck_logged[slot]) {
+                s_stuck_logged[slot] = 1;
+                TD5_LOG_W(LOG_TAG,
+                    "traffic_diag STUCK: slot=%d span=%d ~60t no-progress lspd=%d "
+                    "recovery_stage=%d brake=%d cop=%d phase=%d",
+                    slot, (int)cur_span, lspd, g_traffic_recovery_stage[slot],
+                    (int)ACTOR_U8(actor, ACTOR_BRAKE_FLAG),
+                    (int)g_cop_is_cop[slot], (int)g_cop_phase[slot]);
+            }
+            /* [FIX] force-unstick after ~90 ticks (3s), unless it's an
+             * actively-chasing cop (leave the chase alone) or already broken. */
+            if (traffic_unstick_enabled() && s_stuck_ticks[slot] >= 90 &&
+                !g_actor_broken_down[slot] &&
+                !(g_cop_is_cop[slot] && g_cop_phase[slot] != COP_IDLE)) {
+                /* If this slot re-wedged shortly after a previous reset, an
+                 * in-place reset clearly isn't clearing the obstacle (a hotspot
+                 * pinch). Escalate to a full despawn so the distance spawner
+                 * relocates the car elsewhere instead of thrashing at one spot. */
+                unsigned since = (s_last_reset_frame[slot] != 0)
+                    ? (g_ai_frame_counter - s_last_reset_frame[slot]) : 0xFFFFFFFFu;
+                s_last_reset_frame[slot] = g_ai_frame_counter ? g_ai_frame_counter : 1u;
+                if (since < 150u && td5_ai_traffic_dynamic_active() &&
+                    !g_cop_is_cop[slot]) {
+                    s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;   /* relocate */
+                    TD5_LOG_I(LOG_TAG,
+                        "traffic_unstick: slot=%d RE-WEDGED at span=%d -> despawn/relocate",
+                        slot, (int)cur_span);
+                } else {
+                    traffic_force_unstick(slot, actor, rs);
+                    TD5_LOG_I(LOG_TAG,
+                        "traffic_unstick: slot=%d FORCE-reset at span=%d after %u stuck ticks",
+                        slot, (int)cur_span, (unsigned)s_stuck_ticks[slot]);
+                }
+                s_stuck_ticks[slot]  = 0;
+                s_stuck_logged[slot] = 0;
+                cur_span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
+            }
+        } else {
+            if (traffic_diag_enabled() && s_stuck_logged[slot])
+                TD5_LOG_I(LOG_TAG,
+                    "traffic_diag UNSTUCK: slot=%d span=%d after %u ticks",
+                    slot, (int)cur_span, (unsigned)s_stuck_ticks[slot]);
+            s_stuck_ticks[slot] = 0;
+            s_stuck_logged[slot] = 0;
+        }
+        s_stuck_last_span[slot] = cur_span;
+    }
+
     /* [S20 smart-traffic] periodic diagnostic dump (one slot, every ~300 frames)
      * so the before/after trace can confirm which behaviours actually fired. */
     if (g_td5.ini.traffic_smart && slot == g_traffic_slot_base &&
@@ -10535,12 +10785,29 @@ static int cop_chase_ai_debug(void) {
     if (s < 0) { s = td5_env_flag_off("TD5RE_COP_CHASE_AI"); }
     return s;
 }
+/* [DIAG 2026-07-07] Verbose cop-acquire tracing. Default OFF (set TD5RE_COP_DIAG=1
+ * to enable). When on, an idle cop that fails to acquire a target logs the raw
+ * gate inputs (slot state, gap window, speed, section, forward motion) for each
+ * candidate racer every ~30 ticks, so "why won't a chase fire" is answerable
+ * from race.log alone. Zero cost when off. */
+static int cop_diag_enabled(void) {
+    static int s = -1;
+    if (s < 0) { s = td5_env_flag_off("TD5RE_COP_DIAG"); }
+    return s;
+}
 void td5_ai_update_special_encounter(void) {
     int span_count, ring_len, t_base, t_end, racer_n;
+    static uint32_t s_diag_tick = 0;   /* [DIAG] throttle counter, one/call */
+    s_diag_tick++;
 
     /* POLICE option off -> no chases (and the cosmetic siren/glow gate on the
      * same g_td5.special_encounter_enabled, so cops are silent + invisible). */
-    if (!g_encounter_enabled) return;
+    if (!g_encounter_enabled) {
+        if (cop_diag_enabled() && (s_diag_tick % 120) == 0)
+            TD5_LOG_I(LOG_TAG, "cop_diag: scheduler OFF "
+                      "(g_encounter_enabled=0 -> POLICE option not armed; no cop will ever chase)");
+        return;
+    }
     if (!g_actor_base) return;
 
     span_count = td5_track_get_span_count();
@@ -10632,8 +10899,12 @@ void td5_ai_update_special_encounter(void) {
                           ring_len);
                 /* "passed by" = now just ahead of the cop (1..COP_TRIGGER_HI
                  * spans), moving forward, above the speeding threshold. */
-                if (cgap < COP_TRIGGER_LO || cgap > COP_TRIGGER_HI) continue;
-                if (ACTOR_I32(cand, ACTOR_LONGITUDINAL_SPEED) <= g_td5.ini.cop_min_speed) continue;
+                if (cgap < cop_trigger_lo() || cgap > cop_trigger_hi()) continue;
+                {
+                    int spd_gate = (int)(((int64_t)g_td5.ini.cop_min_speed *
+                                          cop_trigger_speed_pct()) / 100);
+                    if (ACTOR_I32(cand, ACTOR_LONGITUDINAL_SPEED) <= spd_gate) continue;
+                }
                 if (g_actor_forward_track_component[c] <= 0) continue;
                 chosen = c;
                 break;
@@ -10665,6 +10936,34 @@ void td5_ai_update_special_encounter(void) {
                     ACTOR_I32(cop, ACTOR_LIN_VEL_Z) = 0;
                 }
                 TD5_LOG_I(LOG_TAG, "cop_chase START: cop=%d target=%d", k, chosen);
+            } else if (cop_diag_enabled() && (s_diag_tick % 30) == 0) {
+                /* [DIAG] No acquire this tick — dump the raw gate inputs for
+                 * every candidate racer so the blocking gate is readable. Order
+                 * matches the acquire loop above; the FIRST failing condition is
+                 * the one that killed the acquire. */
+                for (int c = 0; c < racer_n; c++) {
+                    char *cd;
+                    int   st, c_raw, p_raw, samesect, cgap, spd;
+                    st = g_slot_state[c];
+                    cd = actor_ptr(c);
+                    c_raw = (int)ACTOR_I16(cop, ACTOR_SPAN_RAW);
+                    p_raw = (int)ACTOR_I16(cd,  ACTOR_SPAN_RAW);
+                    samesect = ((c_raw >= ring_len) == (p_raw >= ring_len));
+                    cgap = smart_span_gap(cop_main,
+                              td5_track_branch_to_main_span(p_raw), ring_len);
+                    spd  = ACTOR_I32(cd, ACTOR_LONGITUDINAL_SPEED);
+                    TD5_LOG_I(LOG_TAG,
+                        "cop_diag: cop=%d IDLE no-acquire racer=%d st=%d(need 1) "
+                        "broken=%d ghost=%d cop_span=%d p_span=%d gap=%d(win %d..%d) "
+                        "spd=%d(gate=%d) fwd=%d samesect=%d cooldown=%d rebust=%d",
+                        k, c, st, g_actor_broken_down[c],
+                        td5_arcade_slot_is_ghost(c), c_raw, p_raw,
+                        cgap, cop_trigger_lo(), cop_trigger_hi(),
+                        spd, (int)(((int64_t)g_td5.ini.cop_min_speed *
+                                    cop_trigger_speed_pct()) / 100),
+                        g_actor_forward_track_component[c], samesect,
+                        (int)g_cop_cooldown[k], (int)s_cop_rebust_ticks[k]);
+                }
             }
             continue;
         }
