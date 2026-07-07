@@ -3395,9 +3395,14 @@ void td5_render_advance_texture_ages(void)
  *   type 2 → same D3D state as type 1, no ZWRITE write    [CONFIRMED @ 0x0040B6CC, same case]
  *   type 3 → ALPHABLENDENABLE=1, ONE/ONE (additive)       [CONFIRMED @ 0x0040B6E8]
  *
- * Types 1 and 2 share the same D3D blend state but differ in pixel alpha:
- *   type 1 = binary 0/255 → OPAQUE_LINEAR (alpha_ref=1 discards 0-alpha pixels)
- *   type 2 = uniform 0x80 → TRANSLUCENT_ANISO (blend enabled for 50% opacity)
+ * Types 1 and 2 are BOTH binary color-key (0/255 pixel alpha, baked in
+ * td5_asset.c). They differ only in z-write:
+ *   type 1 = OPAQUE_LINEAR      (blend off, z_write on)
+ *   type 2 = TRANSLUCENT_ANISO  (SRCALPHA/INVSRCALPHA blend, z_write OFF) —
+ *            matches BindRaceTexturePage's "same state as type 1, no ZWRITE".
+ *            With binary color-key alpha the SRCALPHA blend is visually opaque;
+ *            it is NOT a 50% translucency (that was an earlier misreading — the
+ *            0x80 pixel-alpha bake that produced it has been removed).
  *
  * Reflection overlay carve-out: when s_in_reflection_overlay is set, the
  * caller has explicitly chosen ADDITIVE for chrome highlights — keep it. */

@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 6" },
+    { CL_ITEM,    "FIX: START/FINISH banners and other track signs no" },
+    { CL_ITEM,    "  longer look see-through - they now render fully" },
+    { CL_ITEM,    "  solid instead of 50% transparent" },
     { CL_ITEM,    "FIX: the PENDING TO TEST screen no longer pops the first" },
     { CL_ITEM,    "  item's details box the moment you open it - the box" },
     { CL_ITEM,    "  now opens only when you press ENTER on a row" },

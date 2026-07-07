@@ -2945,8 +2945,22 @@ static void tpage_decode_one(int i, void *vctx)
                 alpha = 0xFF;
             }
             break;
-        case 2: /* Semi-transparent */
-            alpha = 0x80;
+        case 2: /* Color-key opaque, z-write off (identical PIXEL treatment to
+                 * type 1; the z-write-off half is applied at draw time by
+                 * TD5_PRESET_TRANSLUCENT_ANISO). BindRaceTexturePage @0x0040B6CC
+                 * [CONFIRMED]: the original renders type 2 with the SAME D3D
+                 * state as type 1 (SRCALPHA/INVSRCALPHA color-key), only ZWRITE
+                 * disabled — it was NEVER a 50% blend. Baking a uniform 0x80
+                 * here made every native type-2 page (e.g. the Montego START
+                 * banner) render 50% translucent. Bake binary color-key alpha
+                 * so opaque texels stay fully opaque under the blend. */
+            if (idx == 0) {
+                alpha = 0x00;
+                b_val = g_val = r_val = 0;
+                keyed_pixel_count++;
+            } else {
+                alpha = 0xFF;
+            }
             break;
         case 3: /* Additive: index 0 -> alpha 0 (sprite background) */
             if (idx == 0) {
