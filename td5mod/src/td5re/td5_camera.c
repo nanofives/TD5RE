@@ -2240,7 +2240,35 @@ void td5_camera_apply_view(int view)
             ax = a->world_pos.x + (int)((float)a->linear_velocity_x * f);
             az = a->world_pos.z + (int)((float)a->linear_velocity_z * f);
             if (td5_camera_pin_anchor_y()) {
-                ay = a->world_pos.y + (int)((float)a->linear_velocity_y * f);
+                /* [SPLIT-SCREEN COUNTDOWN UNDER-GROUND FIX 2026-07-06] A cold-spawn
+                 * suspension glitch on the session's FIRST race can leave slot 0's
+                 * linear_velocity_y with a garbage magnitude (observed ~= -3.98M
+                 * 24.8-FP units == ~-15500 wu/tick on the Montego countdown, while
+                 * world_pos.y stayed sane at 928 wu). The body-matching Y pin then
+                 * extrapolates that into the anchor — hence the chase eye — diving
+                 * it far under the terrain: split-screen showed "player-1's pane is
+                 * below the ground for a few countdown frames" (view 0 follows slot
+                 * 0; warm and fine on every later race once the track walker is
+                 * primed). Gate on the VELOCITY magnitude (not the frame-scaled
+                 * delta, which slips under any bound at small g_subTickFraction):
+                 * a vertical speed above 0x40000 (== 1024 wu/tick, the same "sane
+                 * jump" envelope the interpolation branch below uses) is never
+                 * physical, so drop the extrapolation and pin to the raw car Y.
+                 * Legitimate suspension settle / fall speeds are far below this, so
+                 * this is a no-op in the normal case. X/Z are left unguarded: a
+                 * fast car's horizontal speed can legitimately approach this
+                 * bound, and only Y produced the glitch. */
+                int vy = a->linear_velocity_y;
+                if (vy > 0x40000 || vy < -0x40000) {
+                    ay = a->world_pos.y;
+#ifndef TD5RE_RELEASE
+                    { static int s_vy_rej = 0; if (s_vy_rej < 8) { s_vy_rej++;
+                        TD5_LOG_I(LOG_TAG, "apply_view: rejected garbage anchor vel_y=%d on view=%d (pinned to car_y=%d)",
+                                  vy, v, a->world_pos.y); } }
+#endif
+                } else {
+                    ay = a->world_pos.y + (int)((float)vy * f);
+                }
             } else {
                 int dy = C->anchor[1] - P->anchor[1];
                 if (dy > 0x40000 || dy < -0x40000) ay = C->anchor[1];

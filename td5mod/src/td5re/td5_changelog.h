@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 6" },
+    { CL_ITEM,    "FIX: in split-screen on Montego Bay, player 1's view no" },
+    { CL_ITEM,    "  longer dips below the ground for a few frames during" },
+    { CL_ITEM,    "  the countdown of the first race of a session" },
     { CL_ITEM,    "FIX: the PENDING TO TEST screen no longer pops the first" },
     { CL_ITEM,    "  item's details box the moment you open it - the box" },
     { CL_ITEM,    "  now opens only when you press ENTER on a row" },

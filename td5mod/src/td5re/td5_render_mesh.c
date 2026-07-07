@@ -2553,8 +2553,25 @@ void td5_render_actors_for_view(int view_index)
                 extern float g_subTickFraction;
                 extern int td5_input_is_playback_active(void);
                 float frac = g_subTickFraction;
+                /* [SPLIT-SCREEN COUNTDOWN UNDER-GROUND FIX 2026-07-06] Guard the
+                 * per-render sub-tick Y extrapolation against a garbage
+                 * linear_velocity_y. On the session's FIRST race a cold-spawn
+                 * suspension ground-snap can leave slot 0's linear_velocity_y with
+                 * a non-physical magnitude (~-3.98M 24.8-FP == ~-15500 wu/tick,
+                 * while world_pos.y stays sane); the sub-tick smoothing here (a
+                 * PORT-ONLY high-refresh construct — the original ran a fixed 30Hz
+                 * with no interpolation) then punches the car mesh far below the
+                 * road for a few countdown frames. This is the same glitch that
+                 * dived the chase camera (td5_camera_apply_view). Reject a vertical
+                 * speed above 0x40000 (== 1024 wu/tick) and render at the raw
+                 * world Y; legitimate motion is far below the bound so this is a
+                 * no-op in the normal case. X/Z keep the faithful extrapolation
+                 * (fast horizontal speed can legitimately approach the bound). */
+                int vy_raw = actor->linear_velocity_y;
+                float vy_extrap = (vy_raw > 0x40000 || vy_raw < -0x40000)
+                                      ? 0.0f : (float)vy_raw * frac;
                 float interp_x = (float)actor->world_pos.x + (float)actor->linear_velocity_x * frac;
-                float interp_y = (float)actor->world_pos.y + (float)actor->linear_velocity_y * frac;
+                float interp_y = (float)actor->world_pos.y + vy_extrap;
                 float interp_z = (float)actor->world_pos.z + (float)actor->linear_velocity_z * frac;
                 /* [FIX 2026-06-12 traffic-wheel gate drift] racer gate must be
                  * g_traffic_slot_base (see wheel/brake gate below) — with the
