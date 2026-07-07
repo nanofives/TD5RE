@@ -7,9 +7,10 @@
  * been verified. An optional in-game overlay lists every item, right-justified
  * on the right edge of the screen (like the dev debug data).
  *
- * Persistence: an UNTRACKED plain-text file next to the exe (td5re_pending.txt),
- * seeded from a compiled-in default list on first run. The file is the source of
- * truth thereafter (no re-merge of defaults, so /end-deleted items stay gone).
+ * Persistence: a TRACKED, hand-editable CSV, td5mod/src/td5re/pending_to_test.csv
+ * (columns summary,detail,status), is the single source of truth -- edit it
+ * directly to add/reword/annotate/retire items. SUPR/DELETE flips a row's status
+ * to "tested" (it leaves the list but stays in the CSV). See td5_pending.c.
  */
 #ifndef TD5_PENDING_H
 #define TD5_PENDING_H
