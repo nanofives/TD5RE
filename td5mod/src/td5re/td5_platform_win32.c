@@ -6225,10 +6225,13 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
          * (discard only alpha<1/255), which let every fringe tap survive.
          * Raise to 0x80, exactly as TD5_PRESET_TRANSLUCENT_LINEAR already does
          * ("Discarding < 128 prunes the dark/black fringes around transparent
-         * pixels"): the sub-50%-alpha fringe taps are alpha-tested away while
-         * genuine type-2 semi-transparent surfaces sit at exactly 0x80 and the
-         * strict `< alphaRef` test (ps_common.hlsli) keeps them. Solid opaque
-         * geometry is alpha=255 throughout and is unaffected. */
+         * pixels"): the sub-50%-alpha fringe taps are alpha-tested away. Type-2
+         * pages are binary color-key (0/255 alpha — see td5_asset.c case 2), so
+         * opaque texels (alpha=255) survive the strict `< alphaRef` test and,
+         * under SRCALPHA/INVSRCALPHA, blend fully opaque. (Historically the bake
+         * forced a uniform 0x80 here, making native type-2 geometry render 50%
+         * translucent — that misreading of BindRaceTexturePage has been fixed;
+         * type 2 differs from type 1 only by z_write=0, not by translucency.) */
         s->alpha_ref         = 0x80;
         break;
 
