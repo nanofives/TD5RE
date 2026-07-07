@@ -914,6 +914,22 @@ int      s_fade_active;
 int      s_fade_progress;     /* 0..255 */
 int      s_fade_direction;    /* 1 = in, -1 = out */
 static int      s_fade_table_index;
+
+/* [RACE->FRONTEND TRANSITION OPACITY 2026-07-07] Frames still owed a forced
+ * backbuffer clear after a screen entry. The frontend's steady-state render
+ * skips per-frame clears (RE parity: the original issues none — see
+ * td5_frontend_render_ui_rects), relying on the opaque BG quad to repaint every
+ * pixel. That holds in DDraw's blit-to-primary model, but the port's D3D11
+ * FLIP-model swapchain keeps 2-3 buffers, each still holding a stale RACE frame
+ * when the frontend takes over at race end. With no clear, those stale race
+ * frames bleed THROUGH the incoming RESULTS/menu screen for the first couple of
+ * present cycles — the "end-of-race transition is semi-transparent" bug (the
+ * player's car visibly dissolving over the results table). Forcing a clear for
+ * the first few frames after every screen entry guarantees each swapchain buffer
+ * is painted opaque before persistence is relied upon. Cost: a handful of clears
+ * per navigation (the BG quad repaints over the clear in the SAME frame, so
+ * there is no black flash when a full-canvas BG is present). */
+static int      s_fe_entry_clear_frames;
 static int  s_gallery_pic_index;
 static int  s_gallery_pic_surface;
 static int  s_gallery_visited_mask;
@@ -4865,6 +4881,10 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_anim_start_ms = 0;
     s_anim_elapsed_ms = 0;
     s_anim_complete = 0;
+    /* Force a few opaque backbuffer clears so no stale RACE frame lingering in
+     * the flip-model swapchain bleeds through the incoming screen (see
+     * s_fe_entry_clear_frames). 4 covers a 2-3 buffer swapchain with margin. */
+    s_fe_entry_clear_frames = 4;
     s_screen_entry_timestamp = td5_plat_time_ms();
     s_prev_enter_state = 1;
     s_prev_left_state = 1;
@@ -9487,9 +9507,17 @@ void td5_frontend_render_ui_rects(void) {
             bg_slot = slot;
         }
     }
-    if (!has_full_bg) {
-        td5_plat_render_clear(0xFF101020);
+    /* Clear when there's no full-canvas BG (stale pixels would show through),
+     * OR for the first few frames after a screen entry — to flush any stale
+     * RACE frame out of every flip-model swapchain buffer before relying on the
+     * BG quad's persistence. Without the latter, the race bleeds through the
+     * results/menu screen at race end (semi-transparent transition). The BG quad
+     * below repaints over this clear in the same frame, so a full-canvas BG shows
+     * no black flash. */
+    if (!has_full_bg || s_fe_entry_clear_frames > 0) {
+        td5_plat_render_clear(has_full_bg ? 0xFF000000u : 0xFF101020u);
     }
+    if (s_fe_entry_clear_frames > 0) s_fe_entry_clear_frames--;
     td5_plat_render_begin_scene();
     td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);

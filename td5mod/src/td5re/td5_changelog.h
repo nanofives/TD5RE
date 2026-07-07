@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 7" },
+    { CL_ITEM,    "FIX: the end-of-race transition is now fully opaque -" },
+    { CL_ITEM,    "  the race no longer shows through the RESULTS screen" },
+    { CL_ITEM,    "  as it fades out" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 6" },
     { CL_ITEM,    "FIX: START/FINISH banners and other track signs no" },
     { CL_ITEM,    "  longer look see-through - they now render fully" },
