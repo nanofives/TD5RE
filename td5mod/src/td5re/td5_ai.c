@@ -545,8 +545,12 @@ static int cop_rebust_cooldown(void) {
  * hopeless chase still ends. cgap>0 = player ahead of cop (just passed); <0 =
  * player still approaching from behind. */
 static int cop_trigger_lo(void) {
+    /* Default 0: the cop only acquires once the player is alongside/ahead of it
+     * (a genuine "pass"), NEVER while still approaching from behind — otherwise
+     * the cop starts already-ahead and instantly triggers its overtake/pull-over
+     * brake, an unavoidable bust the player can't evade. Only widen the HI side. */
     static int v = 0x7fffffff;
-    if (v == 0x7fffffff) v = td5_env_int("TD5RE_COP_TRIGGER_LO", -8, -60, 15);
+    if (v == 0x7fffffff) v = td5_env_int("TD5RE_COP_TRIGGER_LO", 0, -60, 15);
     return v;
 }
 static int cop_trigger_hi(void) {
