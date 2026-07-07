@@ -5,6 +5,8 @@
 .DESCRIPTION
     Walks the playable release set and writes a manifest of {path, size, sha256}:
         td5re_release.exe, td5re_release.ini, td5re_update.ps1, update.bat
+        pending_to_test.csv   (copied here from td5mod/src/td5re/, the tracked
+                               source of truth, so release machines get the list)
         re/assets/**  (everything, recursive)
 
     Deliberately EXCLUDES per-machine state so the updater never clobbers it:
@@ -26,8 +28,20 @@ if (-not $Root) {
 if (-not $OutFile) { $OutFile = Join-Path $Root "manifest.json" }
 $rootFull = (Resolve-Path $Root).Path.TrimEnd('\')
 
-$topLevel = @('td5re_release.exe','td5re_release.ini','td5re_update.ps1','update.bat')
+$topLevel = @('td5re_release.exe','td5re_release.ini','td5re_update.ps1','update.bat','pending_to_test.csv')
 $entries  = New-Object System.Collections.Generic.List[object]
+
+# Stage the pending-to-test checklist next to the exe from its tracked source of
+# truth (td5mod/src/td5re/pending_to_test.csv) so it ships in the manifest. The
+# root copy is a publish artifact (gitignored); the DEV runtime prefers the
+# source-tree copy, so this never hijacks dev reads/writes.
+$pendingSrc = Join-Path $Root 'td5mod\src\td5re\pending_to_test.csv'
+$pendingDst = Join-Path $Root 'pending_to_test.csv'
+if (Test-Path -LiteralPath $pendingSrc) {
+    Copy-Item -LiteralPath $pendingSrc -Destination $pendingDst -Force
+} else {
+    Write-Warning "missing tracked pending_to_test.csv at $pendingSrc"
+}
 
 # SHA256 via .NET rather than Get-FileHash: this box's Windows PowerShell 5.1
 # ships a partially-broken Microsoft.PowerShell.Utility that is missing

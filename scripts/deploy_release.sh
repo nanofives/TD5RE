@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERAPPS="${DOCKERAPPS:-$HOME/Desktop/Proyectos/DockerApps}"
 SSH_OPTS="-o ConnectTimeout=15 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 SSH_CMD="ssh -i $SSH_KEY $SSH_OPTS"
-META_FILES=(td5re_release.exe td5re_release.ini td5re_update.ps1 update.bat manifest.json)
+META_FILES=(td5re_release.exe td5re_release.ini td5re_update.ps1 update.bat pending_to_test.csv manifest.json)
 
 # Pre-flight: confirm the Pi answers over SSH BEFORE the expensive manifest hash
 # (SHA-256 over ~600 MB of re/assets). Exit 2 (distinct from a real failure) so

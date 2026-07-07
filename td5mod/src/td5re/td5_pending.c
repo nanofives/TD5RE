@@ -15,11 +15,13 @@
  * or retire items; the game reads it on launch. RFC4180 quoting: every field
  * is wrapped in double-quotes and an embedded " is doubled ("").
  *
- * Runtime path resolution (pending_path): first "pending_to_test.csv" next to
- * the exe (release layout), else "td5mod/src/td5re/pending_to_test.csv" under
- * the exe dir (dev layout -- both exes deploy to the project root, so the
- * tracked source-tree copy is found automatically). The file that was loaded
- * is the one written back to.
+ * Runtime path resolution (pending_path): the DEV source-tree copy
+ * "td5mod/src/td5re/pending_to_test.csv" under the exe dir wins first (both
+ * exes deploy to the project root, so a dev run always reads/writes the TRACKED
+ * file), else "pending_to_test.csv" next to the exe (release layout -- a release
+ * machine has no source tree, and the LAN updater ships the CSV to the exe dir).
+ * The file that was loaded is the one written back to. Order matters: it keeps a
+ * root copy (dropped next to the exe at publish time) from hijacking dev writes.
  *
  * [2026-07-06] Migrated from the compiled arrays + td5re_pending.txt to this
  * CSV. In-game SUPR/DELETE no longer removes a row and tombstones it; it sets
@@ -87,18 +89,18 @@ static int file_exists(const char *path) {
 static const char *pending_path(void) {
     static int done = 0;
     if (!done) {
-        char cand[600];
-        td5_plat_ini_resolve_path("pending_to_test.csv", cand, sizeof cand);
-        if (file_exists(cand)) {
-            snprintf(s_csv_path, sizeof s_csv_path, "%s", cand);
+        char dev[600];
+        td5_plat_ini_resolve_path("td5mod/src/td5re/pending_to_test.csv",
+                                  dev, sizeof dev);
+        if (file_exists(dev)) {
+            /* dev layout: read/write the TRACKED source-tree copy. */
+            snprintf(s_csv_path, sizeof s_csv_path, "%s", dev);
         } else {
-            char dev[600];
-            td5_plat_ini_resolve_path("td5mod/src/td5re/pending_to_test.csv",
-                                      dev, sizeof dev);
-            /* dev tree if present, otherwise fall back to the exe-dir name
-             * (which is where a first-ever save will create the file). */
-            snprintf(s_csv_path, sizeof s_csv_path, "%s",
-                     file_exists(dev) ? dev : cand);
+            /* release layout: the CSV shipped next to the exe (or, on a
+             * first-ever run with neither present, where a save will create it). */
+            char cand[600];
+            td5_plat_ini_resolve_path("pending_to_test.csv", cand, sizeof cand);
+            snprintf(s_csv_path, sizeof s_csv_path, "%s", cand);
         }
         done = 1;
     }

@@ -32,9 +32,12 @@ tmp_ar_check*/
 /td5re_progress.ini
 /td5re_cup.ini
 
-# Dev/QA pending-test checklist (written by td5_pending.c, pruned by /end). Local
-# runtime state, seeded from the compiled-in default list — never source.
+# Legacy Dev/QA pending-test checklist (pre-CSV; untracked runtime file).
 /td5re_pending.txt
+# Publish artifact: make_release_manifest.ps1 copies the TRACKED source-of-truth
+# (td5mod/src/td5re/pending_to_test.csv) here next to the exe so it ships in the
+# manifest. The root copy is generated, never source — do not commit it.
+/pending_to_test.csv
 
 # Original game files (copyrighted — do not distribute)
 original/
