@@ -158,7 +158,7 @@ sim package is `wip`.
 | H2 | Orphan worktree sweep (keep street-lights branch!) | todo | NEEDS USER SIGN-OFF |
 | H3 | Retired-tooling prune | todo | NEEDS USER SIGN-OFF |
 | H4 | Dead MCP clones (verify .mcp.json first) | todo | NEEDS USER SIGN-OFF |
-| H5 | Docs collapse | wip fix-refactor-h5-docs-collapse | |
+| H5 | Docs collapse | done @87db7dd5 | docs-only; goldens N/A; smoke 12/12 PASS; ratchets unchanged (extern=118, game_h=25); INDEX.md links repointed |
 | H6 | Strays (0-byte gpr, -p dir, .o files) | todo | |
 | H7 | CLAUDE.md refresh | todo | after H1-H6 |
 | A1 | Dead-code removal | todo | |
