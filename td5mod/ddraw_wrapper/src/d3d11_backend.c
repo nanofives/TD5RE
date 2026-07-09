@@ -1668,6 +1668,22 @@ void Backend_UpdateFogCB(void)
     fog.fogEnabled  = st->fog_enable;
     fog.alphaTestEnabled = st->alpha_test_enable;
     fog.alphaRef    = st->alpha_ref / 255.0f;
+    /* [foliage-AA depth halo fix 2026-07-07] Foliage-AA draws (type-1 color-key
+     * cutouts, blend off, z_write ON) reconstruct alpha with a bilinear kernel
+     * (SampleFoliageAA) that smears non-zero alpha OUT of opaque texels into the
+     * neighbouring transparent holes/gaps. At the preset's near-zero alpha_ref
+     * (1/255) those smeared fringe/hole texels survive the alpha test, so they
+     * WRITE DEPTH while contributing ~no colour under SRCALPHA blend — occluding
+     * the world drawn afterwards and revealing the pre-painted skybox through a
+     * cutout's transparent parts (Newcastle guardrails "see the skybox behind").
+     * Raise the effective alpha test to 0.5 for foliage-AA draws (matching the
+     * type-2 TRANSLUCENT_ANISO preset): the sub-50%-coverage reconstruction is
+     * discarded so it never stamps depth into holes, while opaque cores (alpha
+     * ~1 — e.g. cutout building WALLS) still pass and keep occluding, so this
+     * does NOT re-open the 51dd13b2 "see-through geometry" regression that the
+     * global z-write-off hunk caused. */
+    if (foliage_aa && fog.alphaRef < 0.5f)
+        fog.alphaRef = 0.5f;
     fog._pad1       = 0.0f;
     fog.foliageAA   = foliage_aa ? 1.0f : 0.0f;
     ID3D11DeviceContext_UpdateSubresource(ctx,

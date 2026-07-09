@@ -7558,8 +7558,13 @@ void td5_track_dim_additive_billboard_meshes(void)
  * disables detection entirely; the flagged page list is logged for verification.
  * ======================================================================== */
 #define TD5_BANNER_PAGE_MAX 1024   /* texture-page id range for the bitset */
-static uint8_t s_native_banner_page[TD5_BANNER_PAGE_MAX / 8];
-static int     s_native_banner_page_count = 0;
+static uint8_t  s_native_banner_page[TD5_BANNER_PAGE_MAX / 8];
+static int      s_native_banner_page_count = 0;
+/* Per-page count of coincident double-sided pairs found this scan. A localized
+ * overhead SIGN yields only a few (<=4 across Moscow/Tokyo); a repeated roadside
+ * GUARDRAIL/BARRIER run yields many (Edinburgh page 294: 151). Used post-scan to
+ * un-flag structural runs so guardrails stay two-sided. */
+static uint16_t s_native_banner_pair_count[TD5_BANNER_PAGE_MAX];
 
 int td5_track_is_native_banner_page(int page)
 {
@@ -7575,6 +7580,17 @@ static void native_banner_flag_page(int page)
     if (!(s_native_banner_page[page >> 3] & bit)) {
         s_native_banner_page[page >> 3] |= bit;
         s_native_banner_page_count++;
+    }
+}
+
+static void native_banner_unflag_page(int page)
+{
+    uint8_t bit;
+    if (page < 0 || page >= TD5_BANNER_PAGE_MAX) return;
+    bit = (uint8_t)(1u << (page & 7));
+    if (s_native_banner_page[page >> 3] & bit) {
+        s_native_banner_page[page >> 3] &= (uint8_t)~bit;
+        if (s_native_banner_page_count > 0) s_native_banner_page_count--;
     }
 }
 
@@ -7605,6 +7621,7 @@ void td5_track_scan_banner_pages(void)
     int dl;
 
     memset(s_native_banner_page, 0, sizeof(s_native_banner_page));
+    memset(s_native_banner_pair_count, 0, sizeof(s_native_banner_pair_count));
     s_native_banner_page_count = 0;
 
     /* TD6 tracks keep the hand-authored k_td6_banner_pages list. */
@@ -7747,10 +7764,49 @@ void td5_track_scan_banner_pages(void)
                                 native_banner_flag_page(page);
                                 native_banner_flag_page(s_pg[s]);
                                 pairs++;
+                                /* Tally coincident double-sided pairs per page so
+                                 * the post-scan pass can tell a localized sign from
+                                 * a repeated guardrail/barrier run. */
+                                if (s_native_banner_pair_count[page] < 0xFFFF)
+                                    s_native_banner_pair_count[page]++;
+                                if (s_pg[s] >= 0 && s_pg[s] < TD5_BANNER_PAGE_MAX &&
+                                    s_pg[s] != (int16_t)page &&
+                                    s_native_banner_pair_count[s_pg[s]] < 0xFFFF)
+                                    s_native_banner_pair_count[s_pg[s]]++;
                             }
                             break;
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /* [guardrail mis-flag fix 2026-07-07] The double-sided-panel geometry test
+     * cannot by itself tell an overhead SIGN from a roadside GUARDRAIL/BARRIER —
+     * both are flat panels with a front + reverse-wound back face. But a sign is
+     * a LOCALIZED object (a handful of coincident pairs — Moscow's/Tokyo's real
+     * signs measured 2-4), whereas a guardrail is a REPEATED structural run of
+     * the same panel down the track (Edinburgh's page 294: 151 pairs; other
+     * barrier runs 8-15). One-sided-culling a guardrail leaves it visible only
+     * from the backface, and where its page is shared with scenery it culls that
+     * scenery's camera-facing side too ("missing textures in a lot of places").
+     * So un-flag any page whose pair count reaches the structural threshold: it
+     * renders two-sided (CULL_NONE) like the rest of the track, while genuine
+     * localized signs (below the threshold) keep their one-sided banner cull.
+     * TD5RE_BANNER_MAX_PAIRS tunes the cutoff (0 disables the exclusion). */
+    {
+        int max_pairs = td5_env_int("TD5RE_BANNER_MAX_PAIRS", 6, 0, 4096);
+        if (max_pairs > 0) {
+            int pg2;
+            for (pg2 = 0; pg2 < TD5_BANNER_PAGE_MAX; pg2++) {
+                if (s_native_banner_pair_count[pg2] >= (uint16_t)max_pairs &&
+                    td5_track_is_native_banner_page(pg2)) {
+                    TD5_LOG_I("track",
+                        "native banner: page=%d has %d pairs (>= %d) => structural "
+                        "guardrail/barrier run, un-flagged (kept two-sided)",
+                        pg2, s_native_banner_pair_count[pg2], max_pairs);
+                    native_banner_unflag_page(pg2);
                 }
             }
         }
