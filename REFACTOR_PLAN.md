@@ -159,7 +159,7 @@ sim package is `wip`.
 | H3 | Retired-tooling prune | todo | NEEDS USER SIGN-OFF |
 | H4 | Dead MCP clones (verify .mcp.json first) | todo | NEEDS USER SIGN-OFF |
 | H5 | Docs collapse | done @87db7dd5 | docs-only; goldens N/A; smoke 12/12 PASS; ratchets unchanged (extern=118, game_h=25); INDEX.md links repointed |
-| H6 | Strays (0-byte gpr, -p dir, .o files) | wip fix-refactor-h6-strays | |
+| H6 | Strays (0-byte gpr, -p dir, .o files) | done @53dc2bd8 | other strays already gone from tree; only td5_config.h placeholder fixed; smoke 12/12 PASS |
 | H7 | CLAUDE.md refresh | todo | after H1-H6 |
 | A1 | Dead-code removal | todo | |
 | A2 | Build single-sourcing | todo | |
