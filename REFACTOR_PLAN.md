@@ -171,7 +171,7 @@ sim package is `wip`.
 | A6 | DAT_ token retirement | done @65b439b1 | 245 raw DAT_ tokens substituted (24 files); td5_orig_globals.h's 610 defines -> comment-only docs (none left referenced anywhere, verified); found+fixed a real dup-key data bug (DAT_0048f30c 2 conflicting names); full suite 46/46 PASS in worktree, goldens matched. Main-repo post-merge rebuild skipped this time (td5re.exe held open by a running process at repo root, left alone rather than killed — merge itself landed clean, fast-forward, verified via worktree) |
 | A10 | Shared helpers (td5_bytes.h, argb8, math) | done @5ced1735 | td5_bytes.h (LE read/write, 6 sites consolidated) + td5_math_util.h (clampi/iabs unify + td5_argb8, 7 dup sites); full suite 46/46 PASS, goldens matched; merged alongside a concurrent /fix session's commit (no file overlap) |
 | A7 | Comment debt (per-module, divisible) | todo | filler; sim modules before their Wave-2 package |
-| S1a | FP_* migration td5_physics.c (+S2 renames) | todo | sim-exclusive |
+| S1a | FP_* migration td5_physics.c (+S2 renames) | wip fix-refactor-s1a-fp-physics | sim-exclusive |
 | S1b | FP_* migration td5_physics_suspension.c | todo | sim-exclusive |
 | S1c | FP_* migration td5_physics_collision.c (+renames) | todo | sim-exclusive |
 | S1d | FP_* migration td5_track.c | todo | sim-exclusive |
