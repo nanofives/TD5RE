@@ -6933,7 +6933,6 @@ static void frame_render(void)
 
             if (!td5_render_photobooth_active()) {
                 td5_vfx_render_tire_tracks();
-                td5_vfx_render_tire_marks();
                 {
                     TD5_Actor *wa = td5_game_get_actor(g_actorSlotForView[vp]);
                     if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
@@ -7080,7 +7079,6 @@ static void frame_render(void)
         /* VFX: tire tracks, particles */
         if (!td5_render_photobooth_active()) {
             td5_vfx_render_tire_tracks();
-            td5_vfx_render_tire_marks();
             /* Weather rain streaks — orig RenderAmbientParticleStreaks @ 0x00446560,
              * called per view in RunRaceFrame's draw phase AFTER the actors + tire
              * tracks and BEFORE the general particle draw (order @ 0x0042be9a:

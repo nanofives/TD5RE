@@ -16,7 +16,6 @@
 #include "td5_frontend.h"
 #include "td5_asset.h"
 #include "td5_track_registry.h"  /* custom-track registry: name/slot lookups + slot headroom */
-#include "td5_frontend_button_cache.h"
 #include "td5_game.h"
 #include "td5_profile.h"
 #include "td5_input.h"

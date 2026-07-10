@@ -3450,8 +3450,6 @@ float   g_renderBasisMatrix[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
  * Coordinate space: x/y/z arrive in raw 24.8 world fixed-point (origin+vertex
  * sums from emit_strip_line) — the SAME space as s_camera_pos, so a plain
  * camera-relative subtract + basis rotate matches the world geometry.
- * [Implements the former no-op stub; renderer pipeline confirmed against
- * project_vertex / the shadow path 2026-05-30.]
  * ======================================================================== */
 #define TD5_DEBUG_LINE_MAX_VERTS 2048   /* 1024 segments/flush; VB holds ~4096 */
 #define TD5_DEBUG_LINE_HALF_PX   1      /* line half-thickness in px → (2*HP+1) px wide.

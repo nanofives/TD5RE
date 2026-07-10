@@ -25,7 +25,7 @@ TD5RE/
 │   ├── sound/            # Audio archives
 │   └── movie/            # FMV files
 ├── td5mod/
-│   ├── src/td5re/        # Source port modules (~59 .c files, see generated table below)
+│   ├── src/td5re/        # Source port modules (~58 .c files, see generated table below)
 │   ├── ddraw_wrapper/    # DirectDraw → D3D11 translation layer (static lib)
 │   └── deps/mingw/       # Bundled MinGW-w64 i686 toolchain
 ├── re/                   # RE analysis, extracted assets, tools
@@ -159,7 +159,6 @@ comment — regenerate after adding/splitting modules with
 | `td5_fe_mp_setup.c` | Multiplayer setup: split layouts, car-select grid, |
 | `td5_fe_carstats.c` | Car stat bars + physics-derived MORE STATS panel |
 | `td5_fe_devscreens.c` | CHANGELOG + PENDING TO TEST dev screens |
-| `td5_frontend_button_cache.c` | Baked main-menu button surface cache (CPU). |
 | `td5_font.c` | runtime TTF glyph cache (stb_truetype). See td5_font.h. |
 | `td5_hud.c` | Race HUD, minimap, text rendering, pause menu overlay |
 | `td5_sound.c` | Sound playback, vehicle audio, ambient, CD |

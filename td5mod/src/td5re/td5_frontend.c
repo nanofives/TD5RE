@@ -11,7 +11,6 @@
 #include "td5_frontend.h"
 #include "td5_asset.h"
 #include "td5_track_registry.h"  /* custom-track registry: name/slot lookups + slot headroom */
-#include "td5_frontend_button_cache.h"
 #include "td5_game.h"
 #include "td5_profile.h"
 #include "td5_input.h"
@@ -2709,33 +2708,6 @@ void frontend_play_sfx(int id) {
 }
 
 
-/* --- Text Rendering (simple bitmap font) --- */
-
-/*
- * frontend_draw_string / frontend_draw_small_string
- *
- * [CONFIRMED @ 0x00424110] DrawFrontendFontStringPrimary: 12×12 glyph atlas,
- * 21 columns. col = (c-0x20) % 21 * 12, row = (c-0x20) / 21 * 12. Advance
- * from g_smallFontAdvance[c]. Renders to g_primaryWorkSurface via vtable +0x1C.
- * [CONFIRMED @ 0x004241E0] Secondary variant: same atlas, renders to
- * g_secondaryWorkSurface at y+8. Callers include ScreenGameOptions (0x41F990),
- * ScreenDisplayOptions (0x420400), ScreenOptionsHub (0x41D890).
- *
- * Port verdict: ZERO call sites exist for these stubs. All screen state machines
- * in the port use frontend_create_button() for option labels, which routes through
- * the draw queue / td5_frontend_render_ui_rects. The original's offscreen-surface
- * rendering path has been superseded. No-op stubs are CORRECT for the port.
- */
-static void frontend_draw_string(int surface, const char *str_id, int x, int y) {
-    (void)surface; (void)str_id; (void)x; (void)y;
-    /* No-op: dialog text rendered live in td5_frontend_render_ui_rects */
-}
-
-static void frontend_draw_small_string(int surface, const char *str_id, int x, int y) {
-    (void)surface; (void)str_id; (void)x; (void)y;
-    /* No-op: small-text paths rendered live in td5_frontend_render_ui_rects */
-}
-
 /* --- Draw Queue --- */
 
 FE_DrawCmd s_draw_queue[FE_MAX_DRAW_CMDS];
@@ -4463,9 +4435,6 @@ static void frontend_recover_surfaces(void) {
         TD5_LOG_W(LOG_TAG, "surface recovery: no PNG for %s", s_surfaces[i].source_name);
     }
 
-    /* Phase 6: re-upload baked main-menu button cache textures so the
-     * cached pages survive native-resolution / device reset events. */
-    td5_fe_btncache_recover();
 }
 void frontend_post_quit(void) {
     g_td5.quit_requested = 1;
@@ -5389,8 +5358,6 @@ void td5_frontend_release_resources(void) {
     TD5_LOG_I(LOG_TAG, "ReleaseFrontendResources");
     /* Release all loaded surfaces, fonts, work buffers */
     for (int i = 0; i < FE_MAX_SURFACES; i++) s_surfaces[i].in_use = 0;
-    td5_fe_btncache_reset();
-    td5_fe_btncache_release_sources();
     s_font_page = -1;
     s_cursor_tex_page = -1;
     s_cursor_w = 0; s_cursor_h = 0;
@@ -8458,11 +8425,8 @@ static void frontend_render_extras_gallery_overlay(float sx, float sy) {
  * One font drives all of it: BodyText (re/assets/frontend/BodyText.*). With
  * VectorUI on (the default, [Frontend] VectorUI=1) the glyphs come from the
  * resolution-independent MSDF atlas (BodyText_msdf.png) via s_ps_msdf; with it
- * off they come from the BodyText.tga bitmap atlas. The baked button cache
- * (td5_frontend_button_cache.c) composites from the SAME BodyText atlas and the
- * SAME s_font_glyph_advance metrics, so cached button captions and live text
- * share one set of letterforms. fe_measure_text* mirrors that advance table so
- * centering matches the rendered width.
+ * off they come from the BodyText.tga bitmap atlas. fe_measure_text* mirrors
+ * s_font_glyph_advance so centering matches the rendered width.
  *
  * fe_draw_small_text (smalltext atlas) is the ONLY deliberate second font — the
  * dense High-Scores / Race-Results tables need true lowercase + descenders. It

@@ -77,15 +77,6 @@
 #define RS_SCRIPT_OFFSET_PARAM    0x1B
 #define RS_ENCOUNTER_HANDLE       0x1F
 #define RS_RECOVERY_STAGE         0x22
-/* RS_DIRECTION_POLARITY_LEGACY = 0x25 (byte 0x94): this offset is NOT a real
- * field — the original game listing has zero references to base+0x94. The
- * macro was port-only and reads/writes here had no effect. Kept as a
- * compile-time alias so any leftover code paths can be audited if found; do
- * not introduce new uses. The canonical field is RS_ROUTE_DIRECTION_POLARITY
- * at dword index 0x3F (byte 0xFC), which corresponds to the original symbol
- * `gActorRouteDirectionPolarity` at 0x004afc5c.
- */
-#define RS_DIRECTION_POLARITY_LEGACY 0x25  /* DEPRECATED — do not use in new code */
 #define RS_ROUTE_DIRECTION_POLARITY  0x3F  /* gActorRouteDirectionPolarity @ 0x4afc5c */
 #define RS_SLOT_INDEX             0x35
 #define RS_SCRIPT_BASE_PTR        0x3A
@@ -6777,10 +6768,7 @@ void td5_ai_recycle_traffic_actor(void) {
     q_byte_3 = qp[3];
 
     /* dword at rs+0xFC = polarity (q_flags & 1) [0x0043548a]. The original
-     * writes ONLY this dword (= gActorRouteDirectionPolarity, dword index 0x3F).
-     * Prior port also wrote dword 0x25 (RS_DIRECTION_POLARITY_LEGACY) but that
-     * field has no references in the original listing — the defensive
-     * dual-write was unnecessary. */
+     * writes ONLY this dword (= gActorRouteDirectionPolarity, dword index 0x3F). */
     /* [traffic one-way] Force polarity 0 so this car follows the route in the
      * down-track direction; otherwise honour the authored TRAFFIC.BUS bit. */
     rs[RS_ROUTE_DIRECTION_POLARITY] =

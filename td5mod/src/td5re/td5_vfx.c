@@ -2396,14 +2396,6 @@ void td5_vfx_render_tire_tracks(void) {
     }
 }
 
-/* Float tire-mark ring REMOVED 2026-05-28. See header comment near
- * line ~277 for the rationale. Stub kept so callers in td5_game.c
- * compile; the function is a no-op. */
-void td5_vfx_render_tire_marks(void)
-{
-    return;
-}
-
 /**
  * UpdateTireTrackEmitterDispatch (0x43FAE0)
  *

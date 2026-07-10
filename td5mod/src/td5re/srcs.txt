@@ -19,7 +19,6 @@ td5_fe_menu.c
 td5_fe_mp_setup.c
 td5_fe_carstats.c
 td5_fe_devscreens.c
-td5_frontend_button_cache.c
 td5_font.c
 td5_hud.c
 td5_sound.c
