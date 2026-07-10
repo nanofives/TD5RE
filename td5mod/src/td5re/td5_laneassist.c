@@ -273,7 +273,7 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
 {
     int     player;
     int     fresh = 0;                            /* target just (re)seeded?      */
-    int32_t vx, vz, v_long, v_lat;
+    int32_t vx, vz, v_long;
     int32_t raw_x, raw_z, tx, tz;
     int32_t cx, cz, dx, dz, lat_err;
     int32_t perp_vel = 0;                        /* lane-perpendicular approach speed */
@@ -332,9 +332,6 @@ void td5_laneassist_apply(TD5_Actor *actor, int32_t sin_h, int32_t cos_h)
     vx = actor->linear_velocity_x;
     vz = actor->linear_velocity_z;
     v_long = (vx * sin_h + vz * cos_h) >> 12;     /* forward speed (24.8/tick) */
-    v_lat  = (vx * cos_h - vz * sin_h) >> 12;     /* lateral speed (body frame, same
-                                                   * frame as lat_err) — drag uses it
-                                                   * to decelerate onto the lane     */
 
     /* CURRENT airborne state: wheel_contact_bitmask == 0x0F means all four wheels
      * are OFF the ground (the engine's "fully airborne" flag — see the FF landing

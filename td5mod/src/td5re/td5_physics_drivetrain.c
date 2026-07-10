@@ -637,7 +637,6 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
     }
 
     uint8_t  gear_u8 = actor->current_gear;
-    int32_t  gear    = (int32_t)gear_u8;
 
     /* Neutral (gear == 1) — original CMP BL,0x1 / JZ RET_ZERO at 0x0042F03B-45. */
     if (gear_u8 == 0x01) {

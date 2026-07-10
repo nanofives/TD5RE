@@ -110,26 +110,6 @@ static const uint8_t s_edge_mask_last[12] = {
     0x0B, 0x0B, 0x0B, 0x0B
 };
 
-/**
- * Per-span-type wall vertex offset tables (DAT_004631A0/A4).
- * Used for collision boundary vertex selection.
- */
-static const int32_t s_wall_vtx_left[12] = {
-    0, 0, -1, -1, -2, 0, 0, 0, 0, 0, 0, 0
-};
-static const int32_t s_wall_vtx_right[12] = {
-    0, 0, 0, 0, 0, -1, -1, -2, 0, 0, 0, 0
-};
-
-/**
- * Per-span-type forward/lateral edge index offsets (DAT_00473C6C/68).
- */
-static const int32_t s_edge_fwd_offset[12] = {
-    0, 0, 0, -1, -1, -2, 0, -1, -1, -2, 0, 0
-};
-static const int32_t s_edge_lat_offset[12] = {
-    0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0
-};
 
 /* ========================================================================
  * Module State
@@ -887,8 +867,10 @@ static void geo_build(void)
                         i, lane, sp->span_type);
                 }
             }
-            if (q->minx < wx0) wx0 = q->minx; if (q->maxx > wx1) wx1 = q->maxx;
-            if (q->minz < wz0) wz0 = q->minz; if (q->maxz > wz1) wz1 = q->maxz;
+            if (q->minx < wx0) wx0 = q->minx;
+            if (q->maxx > wx1) wx1 = q->maxx;
+            if (q->minz < wz0) wz0 = q->minz;
+            if (q->maxz > wz1) wz1 = q->maxz;
             edge_sum += (q->maxx - q->minx) + (q->maxz - q->minz); edge_n++;
             qi++;
         }
@@ -903,7 +885,8 @@ static void geo_build(void)
     rangez = wz1 - wz0; if (rangez < 1) rangez = 1;
     gnx = (int)(rangex / cell) + 1; gnz = (int)(rangez / cell) + 1;
     while ((int64_t)gnx * gnz > 500000) { cell *= 2; gnx = (int)(rangex / cell) + 1; gnz = (int)(rangez / cell) + 1; }
-    if (gnx < 1) gnx = 1; if (gnz < 1) gnz = 1;
+    if (gnx < 1) gnx = 1;
+    if (gnz < 1) gnz = 1;
     s_geo_gnx = gnx; s_geo_gnz = gnz; s_geo_gx0 = wx0; s_geo_gz0 = wz0; s_geo_gcell = cell;
     ncell = gnx * gnz;
     s_geo_cell_start = (int *)calloc((size_t)ncell + 1, sizeof(int));
@@ -915,8 +898,10 @@ static void geo_build(void)
         if (Q->minx == Q->maxx && Q->minz == Q->maxz) continue;  /* degenerate */
         gx0 = (int)((Q->minx - wx0) / cell); gx1 = (int)((Q->maxx - wx0) / cell);
         gz0 = (int)((Q->minz - wz0) / cell); gz1 = (int)((Q->maxz - wz0) / cell);
-        if (gx0 < 0) gx0 = 0; if (gx1 >= gnx) gx1 = gnx - 1;
-        if (gz0 < 0) gz0 = 0; if (gz1 >= gnz) gz1 = gnz - 1;
+        if (gx0 < 0) gx0 = 0;
+        if (gx1 >= gnx) gx1 = gnx - 1;
+        if (gz0 < 0) gz0 = 0;
+        if (gz1 >= gnz) gz1 = gnz - 1;
         for (gz = gz0; gz <= gz1; gz++)
             for (gx = gx0; gx <= gx1; gx++)
                 s_geo_cell_start[gz * gnx + gx + 1]++;
@@ -933,8 +918,10 @@ static void geo_build(void)
         if (Q->minx == Q->maxx && Q->minz == Q->maxz) continue;
         gx0 = (int)((Q->minx - wx0) / cell); gx1 = (int)((Q->maxx - wx0) / cell);
         gz0 = (int)((Q->minz - wz0) / cell); gz1 = (int)((Q->maxz - wz0) / cell);
-        if (gx0 < 0) gx0 = 0; if (gx1 >= gnx) gx1 = gnx - 1;
-        if (gz0 < 0) gz0 = 0; if (gz1 >= gnz) gz1 = gnz - 1;
+        if (gx0 < 0) gx0 = 0;
+        if (gx1 >= gnx) gx1 = gnx - 1;
+        if (gz0 < 0) gz0 = 0;
+        if (gz1 >= gnz) gz1 = gnz - 1;
         for (gz = gz0; gz <= gz1; gz++)
             for (gx = gx0; gx <= gx1; gx++) {
                 int c = gz * gnx + gx; s_geo_cell_items[cursor[c]++] = i;
@@ -5712,54 +5699,6 @@ int32_t td5_track_shadow_probe_height(int slot, int node,
  * vertices, dispatched by span type.
  * ======================================================================== */
 
-/**
- * AngleFromVector12Full (0x433FC0). L5 promotion sweep audit (2026-05-18).
- * Full 4-quadrant 12-bit angle from a 2D vector (dx, dz).
- * Returns 0x000-0xFFF = 0-360 degrees.
- *
- * [ARCH-DIVERGENCE @ 0x00433FC0] Orig dispatches into AngleFromVector12
- *   (0x0040A720) which indexes a precomputed 12-bit atan2 LUT at
- *   DAT_00463214. Port replaces the LUT with a runtime integer atan2
- *   approximation (linear interpolation per quadrant) - cosmetically
- *   equivalent: same 4-quadrant dispatch, same 0x400 quadrant scaling,
- *   same 12-bit modular output, matches orig within +/-1 LSB.
- */
-static int angle_from_vector_full(int32_t dx, int32_t dz)
-{
-    int32_t ax, az;
-    int quadrant = 0;
-    int angle;
-
-    /* Determine quadrant and normalize to Q1 */
-    if (dx >= 0 && dz >= 0) {
-        ax = dx; az = dz; quadrant = 0;
-    } else if (dx < 0 && dz >= 0) {
-        ax = dz; az = -dx; quadrant = 0x400;
-    } else if (dx < 0 && dz < 0) {
-        ax = -dx; az = -dz; quadrant = 0x800;
-    } else {
-        ax = -dz; az = dx; quadrant = 0xC00;
-    }
-
-    /* Q1 angle: atan2 approximation using integer lookup
-     * For the source port we use a direct atan2 approximation */
-    if (ax == 0 && az == 0) return 0;
-
-    /* Simple atan2 approximation scaled to 0x400 range (one quadrant) */
-    if (ax >= az) {
-        if (ax == 0) return quadrant;
-        angle = (int)((int64_t)az * 0x400 / (int64_t)ax);
-        /* Clamp to quadrant */
-        if (angle > 0x3FF) angle = 0x3FF;
-    } else {
-        if (az == 0) return quadrant;
-        angle = 0x400 - (int)((int64_t)ax * 0x400 / (int64_t)az);
-        if (angle < 1) angle = 1;
-    }
-
-    return (quadrant + angle) & 0xFFF;
-}
-
 void td5_track_compute_heading(TD5_Actor *actor)
 {
     /*
@@ -5774,7 +5713,7 @@ void td5_track_compute_heading(TD5_Actor *actor)
      *  5. 180° (0x800) offset added to heading [CONFIRMED @ 0x434501]
      */
     int16_t *track_state;
-    int span_idx, sub_lane;
+    int span_idx;
     TD5_StripSpan *sp;
     TD5_StripVertex *vl0, *vl1, *vr0, *vr1;
     int32_t dx, dz;
@@ -5786,7 +5725,6 @@ void td5_track_compute_heading(TD5_Actor *actor)
 
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
     span_idx = (int)track_state[0];
-    sub_lane = (int)((uint8_t *)actor)[0x8C];
 
     if (span_idx < 0 || span_idx >= s_span_count)
         return;
@@ -6552,7 +6490,7 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
     int start_vi, end_vi, type_offset, lane_count;
     const TD5_StripVertex *v_start, *v_end;
     int start_x, start_z, end_x, end_z;
-    int delta, dX, dZ, dX_sc, dZ_sc, len, v;
+    int delta, dX_sc, dZ_sc, len, v;
 
     if (!s_span_array || !s_vertex_table ||
         span_index < 0 || span_index >= s_span_count)
@@ -6738,8 +6676,10 @@ int td5_track_get_span_route_frame(int span_index, int *lx, int *lz,
     TD5_StripVertex *v_left, *v_right;
     int lane_count, type_offset;
 
-    if (lx) *lx = 0; if (lz) *lz = 0;
-    if (rx) *rx = 0; if (rz) *rz = 0;
+    if (lx) *lx = 0;
+    if (lz) *lz = 0;
+    if (rx) *rx = 0;
+    if (rz) *rz = 0;
     if (!s_span_array || !s_vertex_table ||
         span_index < 0 || span_index >= s_span_count)
         return 0;
@@ -7034,7 +6974,6 @@ int td5_track_parse_models_dat(const void *data, size_t size)
     const uint8_t *src;
     uint32_t raw_entry_count;
     int parsed_count = 0;
-    int display_list_count = 0;
     uint32_t table_start_byte;   /* byte offset of entry table in file */
 
     if (!data || size < 8)
@@ -7224,8 +7163,6 @@ int td5_track_parse_models_dat(const void *data, size_t size)
                 dst->bounding_radius = first_mesh->bounding_radius;
             }
         }
-
-        display_list_count++;
     }
 
     s_models_display_list_count = raw_entry_count;
@@ -7917,7 +7854,8 @@ void td5_track_register_lamp_lights(void)
                         for (int v = 0; v < need; v++) {
                             float y = bv[i0 + v].pos_y;
                             ax += bv[i0 + v].pos_x; ay += y; az += bv[i0 + v].pos_z;
-                            if (y < miny) miny = y; if (y > maxy) maxy = y;
+                            if (y < miny) miny = y;
+                            if (y > maxy) maxy = y;
                         }
                         float ninv = 1.0f / (float)need;
                         float wx = ox + ax * ninv, wy = oy + ay * ninv, wz = oz + az * ninv;
@@ -9043,8 +8981,6 @@ void *td5_track_get_display_list_entry(int entry_index)
  */
 void *td5_track_get_display_list(int span_index)
 {
-    static int s_models_log = 0;
-
     /* Prefer real MODELS.DAT display lists when available.
      * Original render loop (0x42baf4) converts span_index to display list
      * index with >> 2 (divide by 4), mapping ~2789 spans to ~698 entries.

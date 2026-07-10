@@ -380,9 +380,6 @@ static uint32_t s_last_crash_seq[TD5_MAX_RACER_SLOTS];
  * Forward declarations (internal helpers)
  * ======================================================================== */
 
-static float sound_compute_distance(const int32_t *listener_pos,
-                                    const int32_t *vehicle_pos);
-
 static float sound_compute_doppler_ratio(const int32_t *listener_vel,
                                          const int32_t *vehicle_vel,
                                          float dx, float dz, float dist);
@@ -2099,18 +2096,6 @@ void td5_sound_set_radio_volume(int v) { td5_radio_set_volume_pct(v); }
 /* ========================================================================
  * Internal Helpers
  * ======================================================================== */
-
-/**
- * Compute 2D (XZ plane) distance from listener to a vehicle position,
- * scaled by the audio distance factor.
- */
-static float sound_compute_distance(const int32_t *listener_pos,
-                                    const int32_t *vehicle_pos)
-{
-    float dx = ((float)listener_pos[0] - (float)vehicle_pos[0]) * TD5_SOUND_DISTANCE_SCALE;
-    float dz = ((float)listener_pos[2] - (float)vehicle_pos[2]) * TD5_SOUND_DISTANCE_SCALE;
-    return sqrtf(dx * dx + dz * dz);
-}
 
 /**
  * Compute Doppler ratio from listener and vehicle velocities projected

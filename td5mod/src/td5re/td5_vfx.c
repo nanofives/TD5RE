@@ -389,7 +389,7 @@ static float    s_taillight_page;
  * screen-space half-size centred on the cardef taillight hardpoint (or, for
  * ported TD6 cars as of S23, the authored TD6 :CAR_LIGHTS: position installed by
  * the asset loader). Kept for reference; do not chase it for taillight placement. */
-static const int16_t s_taillight_offsets[4][3] = {
+static const int16_t s_taillight_offsets[4][3] __attribute__((unused)) = {
     {  80, -80, 0 },   /* 0x463030: top-left     */
     { -80, -80, 0 },   /* 0x463038: bottom-left  */
     {  80,  80, 0 },   /* 0x463040: top-right    */
@@ -415,8 +415,6 @@ static const float WEATHER_BOUNDS_Y = 3000.0f;    /* DAT_00474e6c */
 static const float WEATHER_BOUNDS_Z = 1947.5f;    /* DAT_00474e70 */
 static const float WEATHER_DEPTH_OFFSET = 2147.0f; /* DAT_0045d7a8 */
 static const float WEATHER_Y_OFFSET = 1000.0f;     /* DAT_0045d7a4 */
-static const float TRACK_Y_OFFSET   = -20.0f;      /* DAT_0045d6ac */
-static const float TAILLIGHT_Z_BIAS = -24.0f;      /* DAT_0045d5d4 */
 
 /* ========================================================================
  * Helper: extract UV coords from a TD5_AtlasEntry (static.hed sprite)

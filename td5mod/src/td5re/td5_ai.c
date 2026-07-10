@@ -232,14 +232,6 @@ static const int32_t g_script_program_d[] = {
     8, 2, 0x40, 5, 0
 };
 
-/* Array of 4 program bank pointers for round-robin cycling */
-static const int32_t *g_script_banks[4] = {
-    g_script_program_a,
-    g_script_program_b,
-    g_script_program_c,
-    g_script_program_d
-};
-
 /* Initial recovery script (0x473CC8): stop, auto-select, terminate */
 static const int32_t g_script_init_recovery[] = { 8, 9, 0 };
 
@@ -254,12 +246,7 @@ static int32_t g_encounter_cooldown;                /* counts down from 300 */
 static int32_t g_encounter_active[TD5_MAX_TOTAL_ACTORS];
 static int32_t g_encounter_control_active_latch;
 static int32_t g_encounter_steer_bias_latch;
-static int32_t g_encounter_route_table_selector;
 static int32_t g_encounter_phase_flag;              /* 0=acquisition, !0=tracking */
-static int32_t g_encounter_ref_slot;                /* 0x4B0630 */
-/* gSpecialEncounterMinForwardTrackComponentThreshold @ 0x4B05BC — gates the
- * brake band in UpdateSpecialEncounterControl. Defaults to 0 in static memory. */
-static int32_t g_special_encounter_min_fwd_track_threshold;
 
 /* ========================================================================
  * Police chase rewrite (2026-06-19) — multi-cop, deterministic, MP-safe.
@@ -585,9 +572,6 @@ static void cop_tick_broken_down(void) {
             g_actor_broken_down[s] = 0;
     }
 }
-
-/* Per-car torque triplets table (9 cars x 3 dwords at 0x466F90) */
-static int32_t g_car_torque_triplets[9 * 3];
 
 /* AI physics template (128 bytes at 0x473DB0 in TD5_d3d.exe) — verbatim
  * copy of the original binary's global AI tuning data. Used by the
@@ -1625,7 +1609,6 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
 static void td5_ai_refresh_route_state_slot(int slot) {
     int32_t *rs;
     char *actor;
-    int selector;
     const uint8_t *route_table;
     size_t route_count;
     int16_t span;
@@ -1692,13 +1675,10 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         }
     }
 
-    selector = rs[RS_ROUTE_TABLE_SELECTOR] & 1;
     /* route_table now derived from rs[RS_ROUTE_TABLE_PTR] which may have been
-     * left UNCHANGED in PATH 2b, OR forcibly set in PATH 1/2a. The selector
-     * variable continues to drive downstream branches; the lookup against
-     * g_route_tables[selector] is only used to derive route_count for the
-     * empty-table fallback and route_byte indexing. To keep downstream code
-     * byte-equivalent we still cache route_table = the resolved ptr, but
+     * left UNCHANGED in PATH 2b, OR forcibly set in PATH 1/2a. Downstream
+     * branches read rs[RS_ROUTE_TABLE_SELECTOR] directly. To keep downstream
+     * code byte-equivalent we still cache route_table = the resolved ptr, but
      * we read from rs (not g_route_tables) so PATH 2b's preserved ptr wins. */
     route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
     /* For route_count, prefer the size that matches the actual ptr. If the
@@ -10673,13 +10653,13 @@ ttc_done:;
  *
  * Original-symbol mapping (TD5_d3d.exe @ 0x004XXXXX):
  *   DAT_004b05d8  gSpecialEncounterTrackedActorHandle  → g_encounter_tracked_handle
- *   DAT_004b055c  gSpecialEncounterRouteTable          → s_enc_route_table_ptr
- *   DAT_004b05c0  gSpecialEncounterTrackProgress       → s_enc_track_progress
- *   DAT_004b0580  gSpecialEncounterSignedTrackOffset   → s_enc_signed_track_offset
+ *   DAT_004b055c  gSpecialEncounterRouteTable          (never wired to a port var; unused)
+ *   DAT_004b05c0  gSpecialEncounterTrackProgress       (never wired to a port var; unused)
+ *   DAT_004b0580  gSpecialEncounterSignedTrackOffset   (never wired to a port var; unused)
  *   DAT_004b05e4  encounter phase flag (0=ACQUIRE)     → g_encounter_phase_flag
  *   DAT_004b064c  g_specialEncounterCooldown           → g_encounter_cooldown
- *   DAT_004b0658  teardown secondary flag              → s_enc_teardown_flag
- *   DAT_004b0568  encounter route-table-selector ref   → g_encounter_route_table_selector
+ *   DAT_004b0658  teardown secondary flag              (never wired to a port var; unused)
+ *   DAT_004b0568  encounter route-table-selector ref   (never wired to a port var; unused)
  *   DAT_004afbe0  gActorSpecialEncounterActive (RS+0x80, stride 0x11c)
  *                                                       → g_encounter_active[slot]
  *   DAT_004ab18a  actor[0].span_normalized  (+0x82)
@@ -10708,25 +10688,6 @@ ttc_done:;
  * port mirrors the original's idle state but lets us hard-disable
  * encounters from frontend config.
  * ------------------------------------------------------------------ */
-
-/* gSpecialEncounterRouteTable: pointer to the route-table byte stream
- * (LEFT.TRK / RIGHT.TRK) of the tracked actor. Refreshed every tick
- * when the tracked actor's RS_ROUTE_TABLE_PTR differs from the cached
- * value. Used as the source of the per-span lateral lane byte read
- * at offset (span_norm * 3). */
-static const uint8_t *s_enc_route_table_ptr;
-
-/* gSpecialEncounterTrackProgress: low dword of the ComputeTrackSpanProgress
- * return (longlong). The high dword is discarded by the original. */
-static int32_t s_enc_track_progress;
-
-/* gSpecialEncounterSignedTrackOffset: low dword of ComputeSignedTrackOffset
- * (ulonglong) return. */
-static int32_t s_enc_signed_track_offset;
-
-/* _DAT_004b0658: secondary teardown flag. Zeroed on the >0x40 despawn
- * path; not read elsewhere in this function. */
-static int32_t s_enc_teardown_flag;
 
 /* External symbols mapped from absolute addresses in the disassembly. */
 /* DAT_004aaf68 ENC_WANTED_MODE mirror in the port lives at

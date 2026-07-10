@@ -179,6 +179,7 @@ static void tls_probe_job(int i, void *ctx)
     (void)ctx;
     s_tls_probe = i;
     for (long k = 0; k < 3000000; k++) sink += k;   /* ~ms spin: ensure overlap */
+    (void)sink;   /* busy-spin accumulator; only the CPU work matters */
     if (s_tls_probe != i) InterlockedIncrement(&s_tls_fail);
 }
 int td5_jobs_selftest_tls(void)

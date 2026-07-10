@@ -263,29 +263,6 @@ static void frontend_net_seal(int sealed) {
 }
 
 /**
- * Enumerate network providers and sessions.
- * Initializes the network subsystem if needed, enumerates connections,
- * picks the first (UDP LAN), and triggers session discovery.
- * Returns the number of sessions found.
- */
-static int frontend_net_enumerate(void) {
-    int conn_count;
-
-    /* Initialize network if not already done (td5_net_init is idempotent) */
-    if (!td5_net_init()) {
-        TD5_LOG_W(LOG_TAG, "frontend_net_enumerate: td5_net_init failed");
-        return 0;
-    }
-
-    conn_count = td5_net_enumerate_connections();
-    if (conn_count > 0) {
-        td5_net_pick_connection(0);
-    }
-
-    return td5_net_enumerate_sessions();
-}
-
-/**
  * Check if the local player is the session host.
  */
 static int frontend_net_is_host(void) {

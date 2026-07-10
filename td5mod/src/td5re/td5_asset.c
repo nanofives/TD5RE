@@ -1719,32 +1719,6 @@ int td5_asset_level_number(int track_index)
     return k_pool_to_zip[k_schedule_to_pool[track_index]];
 }
 
-static int td5_asset_build_track_texture_png_path(int track_index,
-                                                  int page_index,
-                                                  char *out_path,
-                                                  size_t out_size)
-{
-    int level_number = td5_asset_level_number(track_index);
-    int n;
-
-    if (!out_path || out_size == 0 || page_index < 0)
-        return 0;
-
-    n = snprintf(out_path, out_size,
-                 "re/assets/levels/level%03d/textures/tex_%03d.png",
-                 level_number, page_index);
-    if (n > 0 && (size_t)n < out_size && td5_plat_file_exists(out_path))
-        return 1;
-
-    n = snprintf(out_path, out_size,
-                 "re/assets/levels/level%03d/textures/tex_%03d.png",
-                 level_number, page_index);
-    if (n > 0 && (size_t)n < out_size && td5_plat_file_exists(out_path))
-        return 1;
-
-    return 0;
-}
-
 /* Fast narrow PNG decoder for the car-preview-style assets: 8-bit, color type 6
  * (RGBA), non-interlaced — the format our tools (PIL) emit for carpic/carpicpaint.
  * Inflates IDAT through the engine's zlib-backed td5_inflate, which is ~2x faster
@@ -2175,44 +2149,6 @@ int td5_asset_resolve_png_path(const char *entry_name, const char *archive,
     { char *p = out_path; while (*p) { if (*p == '\\') *p = '/'; p++; } }
 
     return td5_plat_file_exists(out_path);
-}
-
-static int td5_asset_upload_png_texture_page(int page_index,
-                                             const char *path,
-                                             uint32_t *loaded_count)
-{
-    void *pixels = NULL;
-    int width = 0, height = 0;
-    int ok = 0;
-
-    if (td5_asset_decode_png_rgba32(path, &pixels, &width, &height)) {
-        /* Type-3 (additive) pages: the PNG extractor doesn't preserve the
-         * palette-index-0 → alpha 0 rule from BuildTrackTextureCacheImpl
-         * @ 0x0040B1D0 case 3. Approximate it by treating pure black
-         * (RGB=0) as the background colour and setting its alpha to 0;
-         * everything else stays alpha=0xFF. The ADDITIVE preset's
-         * inherited alpha_test ref=1 then discards only the background,
-         * matching the original's type-3 path exactly. */
-        if (td5_asset_get_page_transparency(page_index) == 3) {
-            uint8_t *px = (uint8_t *)pixels;
-            int total = width * height;
-            for (int i = 0; i < total; i++, px += 4) {
-                uint8_t b = px[0], g = px[1], r = px[2];
-                px[3] = (r | g | b) ? 0xFF : 0x00;
-            }
-        }
-        /* Dilate RGB into transparent texels so the D3D11 LINEAR sampler
-         * doesn't bleed {0,0,0,0} into opaque edges. No-op if the PNG has
-         * no alpha=0 pixels. */
-        alpha_bleed_rgb((uint8_t *)pixels, width, height);
-        ok = td5_plat_render_upload_texture(page_index, pixels, width, height, 2);
-        stbi_image_free(pixels);
-        if (ok && loaded_count)
-            (*loaded_count)++;
-        return ok;
-    }
-
-    return 0;
 }
 
 static void td5_asset_build_level_zip_path(int track_index,
@@ -3607,8 +3543,10 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
         for (int y = 0; y < sh; y++)
             for (int x = 0; x < sw; x++)
                 if (m[(y * sw + x) * 4] > 127) {
-                    if (x < x0) x0 = x;  if (x > x1) x1 = x;
-                    if (y < y0) y0 = y;  if (y > y1) y1 = y;
+                    if (x < x0) x0 = x;
+                    if (x > x1) x1 = x;
+                    if (y < y0) y0 = y;
+                    if (y > y1) y1 = y;
                 }
         if (x1 < x0 || y1 < y0) pattern = 0;   /* no body texels -> solid */
     }

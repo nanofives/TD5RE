@@ -395,7 +395,6 @@ static WrapperTexture  *s_tex_wrappers[MAX_TEXTURE_PAGES];
 static DWORD            s_tex_handles[MAX_TEXTURE_PAGES];
 static uint16_t         s_tex_widths[MAX_TEXTURE_PAGES];
 static uint16_t         s_tex_heights[MAX_TEXTURE_PAGES];
-static int              s_tex_page_count = 0;
 static int              s_frame_draw_calls = 0;
 static int              s_frame_vertices = 0;
 static int              s_frame_indices = 0;
@@ -2108,8 +2107,10 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
                 int thr   = accel - brake;    /* accelerate pushes Y below centre */
                 ax_x = TD5_PLAT_JS_AXIS_CENTER + (steer * TD5_PLAT_JS_AXIS_CENTER) / 256;
                 ax_y = TD5_PLAT_JS_AXIS_CENTER - (thr   * TD5_PLAT_JS_AXIS_CENTER) / 256;
-                if (ax_x < 0) ax_x = 0; if (ax_x > 0x1FF) ax_x = 0x1FF;
-                if (ax_y < 0) ax_y = 0; if (ax_y > 0x1FF) ax_y = 0x1FF;
+                if (ax_x < 0) ax_x = 0;
+                if (ax_x > 0x1FF) ax_x = 0x1FF;
+                if (ax_y < 0) ax_y = 0;
+                if (ax_y > 0x1FF) ax_y = 0x1FF;
                 jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
                 jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
                 for (int k = 0; k < 6; k++)
@@ -2126,8 +2127,10 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
                 int configured = s_joystick_bound[slot];
                 ax_x = js.lX; ax_y = js.lY;
                 if (configured && bind[1] == 5 && bind[2] == 4) { long t = ax_x; ax_x = ax_y; ax_y = t; }
-                if (ax_x < 0) ax_x = 0; if (ax_x > 0x1FF) ax_x = 0x1FF;
-                if (ax_y < 0) ax_y = 0; if (ax_y > 0x1FF) ax_y = 0x1FF;
+                if (ax_x < 0) ax_x = 0;
+                if (ax_x > 0x1FF) ax_x = 0x1FF;
+                if (ax_y < 0) ax_y = 0;
+                if (ax_y > 0x1FF) ax_y = 0x1FF;
                 jbits |= ((uint32_t)ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG;
                 jbits |= (((uint32_t)ax_y & 0x1FF) << 9) | TD5_INPUT_ANALOG_Y_FLAG;
                 {
@@ -3405,8 +3408,10 @@ uint32_t td5_plat_input_joystick_nav(int device_slot)
     if (!td5_plat_js_read(device_slot, &js)) return 0;
     cx = js.lX - TD5_PLAT_JS_AXIS_CENTER;
     cy = js.lY - TD5_PLAT_JS_AXIS_CENTER;
-    if (cx < -T) db |= 1; if (cx > T) db |= 2;
-    if (cy < -T) db |= 4; if (cy > T) db |= 8;       /* stick up = lY low = UP */
+    if (cx < -T) db |= 1;
+    if (cx > T) db |= 2;
+    if (cy < -T) db |= 4;
+    if (cy > T) db |= 8;       /* stick up = lY low = UP */
     if (!pov_centered(js.rgdwPOV[0])) {
         DWORD deg = js.rgdwPOV[0] / 100;
         if (deg > 270 || deg <  90) db |= 4;

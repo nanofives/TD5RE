@@ -3643,29 +3643,6 @@ static void update_debug_track_camera(void)
 }
 static unsigned int s_debug_camera_frame[TD5_MAX_VIEWPORTS];
 
-static int resolve_view_actor_ptr(int view, int *out_actor)
-{
-    uintptr_t actor_base;
-    int slot;
-
-    if (!out_actor || view < 0 || view >= 2)
-        return 0;
-
-    slot = g_actorSlotForView[view];
-    if (slot < 0 || slot >= g_td5.total_actor_count)
-        return 0;
-
-    if (g_actorBaseAddr == 0)
-        return 0;
-
-    actor_base = (uintptr_t)(uint32_t)g_actorBaseAddr;
-    if (actor_base < 0x10000u)
-        return 0;
-
-    *out_actor = (int)(actor_base + (uintptr_t)slot * 0x388u);
-    return 1;
-}
-
 static void update_debug_race_camera(int view)
 {
     int v = view;  /* [PORT: N-way] per-view camera state (was view & 1) */

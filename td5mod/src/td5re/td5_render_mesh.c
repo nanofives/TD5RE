@@ -1710,7 +1710,6 @@ void td5_render_actors_for_view(int view_index)
      * renders vehicles with full transform/light/render pipeline.
      */
     int rendered_spans = 0;
-    int span_count = td5_track_get_span_count();
 
     /* View distance span-window cull.
      * Original RunRaceFrame (0x42BB2E): effective_spans = (int)((v * 0.85 + 0.15) * max_spans)
@@ -1869,7 +1868,6 @@ void td5_render_actors_for_view(int view_index)
     }
 
     int actor_render_count = 0;
-    int actor_meshes_submitted = 0;
 
     /* Refresh render-side camera snapshot from game-side globals every frame.
      * td5_render_configure_projection only runs when viewport dimensions change,
@@ -2231,7 +2229,6 @@ void td5_render_actors_for_view(int view_index)
 
     {
         int total_actors = td5_game_get_total_actor_count();
-        int drag_mode = g_td5.drag_race_enabled;
 
         /* Bumper/interior-camera own-car suppression. The original
          * RenderRaceActorForView @ 0x0040c120 (gate @ 0x0040c2a0-0x0040c2af)
@@ -2918,7 +2915,6 @@ void td5_render_actors_for_view(int view_index)
             }
 
             actor_render_count++;
-            actor_meshes_submitted++;
 
             TD5_LOG_D(LOG_TAG,
                       "vehicle render: view=%d slot=%d pos=(%.2f, %.2f, %.2f) mesh=%p",

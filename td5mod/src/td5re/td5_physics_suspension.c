@@ -534,8 +534,7 @@ void td5_physics_integrate_suspension(TD5_Actor *actor, int32_t accel_x, int32_t
  *
  * Used by the chassis-snap loop in IntegrateVehiclePoseAndContacts to
  * populate wheel_contact_normals at +0x230+i*8 (per-wheel rotated body
- * offset for the suspension-response consumer). The Y component matches
- * `rotate_body_to_world_y` above. */
+ * offset for the suspension-response consumer). */
 static void rotate_body_to_world_vec3(const TD5_Actor *actor,
                                       const int16_t v[3],
                                       int16_t out[3])
@@ -553,31 +552,6 @@ static void rotate_body_to_world_vec3(const TD5_Actor *actor,
     out[0] = (int16_t)(int32_t)rx;
     out[1] = (int16_t)(int32_t)ry;
     out[2] = (int16_t)(int32_t)rz;
-}
-
-static int16_t rotate_body_to_world_y(const TD5_Actor *actor, const int16_t v[3])
-{
-    float m3 = actor->rotation_matrix.m[3];
-    float m4 = actor->rotation_matrix.m[4];
-    float m5 = actor->rotation_matrix.m[5];
-    float result = (float)v[0] * m3 + (float)v[1] * m4 + (float)v[2] * m5;
-    if (result >  32767.0f) return  32767;
-    if (result < -32768.0f) return -32768;
-    /* Original ConvertFloatVec3ToShortAngles @ 0x0042E2E0 calls __ftol @
-     * 0x0044817C which EXPLICITLY sets the FPU rounding mode to TRUNCATE
-     * (`OR AH, 0xC` = RC=11 = chop) before FISTP. So the orig truncates
-     * toward zero, not round-to-nearest-even. Earlier port comment claimed
-     * "FISTP rounds-to-nearest-even by default" — that's only true when
-     * RC=00 in the control word, but __ftol forces RC=11. C cast
-     * `(int32_t)float` already truncates toward zero, matching orig.
-     *
-     * Sum/4 of per-wheel rotated body-Y, scaled by -0x100, accumulates
-     * the ~±1 LSB rounding drift into the chassis world_y. The previous
-     * lrintf path produced a +128 FP world_y offset at spawn (port=58112
-     * vs orig=57984), which propagated to wheel_y at sim_tick=2 refresh
-     * → rear wheel airborne detection → chassis launch upward → Honolulu
-     * rollover root cause. [round 28: 2026-05-03] */
-    return (int16_t)(int32_t)result;
 }
 
 /* Y-component projection of a world-space vector into body space.
@@ -3518,7 +3492,6 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
         /* Compute wheel vertical force from the probed span surface. */
         int32_t wheel_y = actor->wheel_contact_pos[i].y;
         int32_t ground_y = 0;
-        int surface_type = actor->surface_type_chassis;
         int probe_span = actor->wheel_probes[i].span_index;
 
         /* Per-wheel probe span bounds check.

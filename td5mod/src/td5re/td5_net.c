@@ -385,7 +385,6 @@ static void handle_resync_ack(uint32_t sender, const void *data, int size);
 
 /* Internal helpers */
 static void             send_frame_to_all(const TD5_NetFrame *frame);
-static void             send_to_player(uint32_t player_id, uint32_t type, const void *data, int size);
 static void             send_to_all(uint32_t type, const void *data, int size);
 static void             refresh_roster(void);
 static int              count_active_remote_players(void);
@@ -1060,14 +1059,6 @@ static int count_active_remote_players(void)
         if (s_roster[i].active) count++;
     }
     return count;
-}
-
-/** Send typed message to a specific player via transport. */
-static void send_to_player(uint32_t player_id, uint32_t type, const void *data, int size)
-{
-    (void)type;
-    if (s_transport_send)
-        s_transport_send(player_id, data, size);
 }
 
 /** Broadcast typed message to all players via transport (id=0 = broadcast). */

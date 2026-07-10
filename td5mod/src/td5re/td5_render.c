@@ -445,20 +445,6 @@ const PrimDispatchFn s_dispatch_table[7] = {
  * ======================================================================== */
 
 /**
- * Apply 3x3 rotation + translation (3x4 matrix multiply) to a point.
- *
- *   out = M_rot * in + M_trans
- *
- * M layout: m[0..8] = 3x3 rotation (row-major), m[9..11] = translation
- */
-static void mat3x4_transform_point(const float *m, const float *in, float *out)
-{
-    out[0] = in[0] * m[0] + in[1] * m[1] + in[2] * m[2] + m[9];
-    out[1] = in[0] * m[3] + in[1] * m[4] + in[2] * m[5] + m[10];
-    out[2] = in[0] * m[6] + in[1] * m[7] + in[2] * m[8] + m[11];
-}
-
-/**
  * Apply 3x3 rotation only (no translation) -- for direction vectors/normals.
  */
 /* [CONFIRMED @ 0x0043DC50 TransformVec3ByRenderMatrixFull
@@ -528,16 +514,6 @@ float td5_render_get_center_y(void)     { return s_center_y; }
  * Clamp an integer to [lo, hi].
  */
 /* clampi moved to td5_render_internal.h (static inline) */
-
-/**
- * Clamp a float to [lo, hi].
- */
-static float clampf(float x, float lo, float hi)
-{
-    if (x < lo) return lo;
-    if (x > hi) return hi;
-    return x;
-}
 
 /* Forward decl: defined alongside td5_render_bind_texture_page below.
  * Switches the current render preset based on the bound page's
@@ -3630,7 +3606,8 @@ TD5_MeshHeader *td5_render_drag_gantry(void)
                 if (!vp || !td5_track_is_valid_mesh_ptr(vp) || nv < 1 || nv > 8192) continue;
                 for (v = 0; v < nv; v++) {
                     float z = vp[v].pos_z;
-                    if (z < minz) minz = z; if (z > maxz) maxz = z;
+                    if (z < minz) minz = z;
+                    if (z > maxz) maxz = z;
                 }
             }
         }
@@ -3688,6 +3665,10 @@ void td5_render_drag_finish_line(void)   /* extern: mesh TU calls it (seam heade
  * road slab vs the tall vertical walls) and take its texture page. Cached; -1 = none
  * found (fall back to flat grey). */
 static int s_drag_road_tex_page = -2;   /* -2 unresolved, -1 none, >=0 page */
+/* Currently unreferenced -- kept for the future real road-mesh tiling pass
+ * noted below; __attribute__((unused)) silences the warning without
+ * deleting the code. */
+static int td5_render_drag_road_texture_page(void) __attribute__((unused));
 static int td5_render_drag_road_texture_page(void)
 {
     int dl;
@@ -3716,8 +3697,10 @@ static int td5_render_drag_road_texture_page(void)
             if (!vp || !td5_track_is_valid_mesh_ptr(vp) || nv < 3 || nv > 8192) continue;
             for (v = 0; v < nv; v++) {
                 float x = (float)vp[v].pos_x, y = (float)vp[v].pos_y;
-                if (x < minx) minx = x; if (x > maxx) maxx = x;
-                if (y < miny) miny = y; if (y > maxy) maxy = y;
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (y < miny) miny = y;
+                if (y > maxy) maxy = y;
             }
             xr = maxx - minx; yr = maxy - miny;
             /* road = FLAT (small y span) at the DRIVABLE-ROAD WIDTH (~6438). Ruled out

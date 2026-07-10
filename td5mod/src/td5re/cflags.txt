@@ -3,12 +3,16 @@
 # release.yml (same pattern as srcs.txt). One flag per line, # comments.
 # Path-dependent -I include dirs and variant defines (-DTD5RE_RELEASE
 # -DNDEBUG) stay in each build path — everything else lives here.
+# -Wpedantic dropped (2026-07-09, A8 warning paydown): its 33 warnings here
+# were all pure ISO-C-strictness noise — 16 "braced-groups within
+# expressions" from a GNU statement-expression macro, 17 function-pointer
+# <-> object-pointer casts for GetProcAddress-style dynamic loading — not
+# real bugs, unlike the four -Werror classes below.
 -c
 -O2
 -fwrapv
 -Wall
 -Wextra
--Wpedantic
 -DWIN32
 -m32
 -DTD5_INFLATE_USE_ZLIB

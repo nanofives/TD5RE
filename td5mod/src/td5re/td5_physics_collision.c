@@ -63,7 +63,6 @@ typedef struct OBB_CornerData {
     int16_t own_z;      /* rotated corner offset from penetrator's center, in TARGET's frame (Z) */
 } OBB_CornerData;
 
-static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b);
 static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b);
 static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b);
 static int  obb_corner_test(TD5_Actor *a, TD5_Actor *b,
@@ -2967,7 +2966,7 @@ void td5_physics_resolve_vehicle_contacts(void)
 
                 /* [TIME TRIAL] human-vs-human pairs pass THROUGH each other
                  * (ghosts) — skip the V2V impulse entirely. This is the real V2V
-                 * dispatch (the broadphase), not resolve_collision_pair.
+                 * dispatch (the broadphase).
                  * [PER-VIEWPORT TRAFFIC] also skip pairs that belong to different
                  * viewports' traffic partitions (a player only touches its own
                  * traffic; cross-partition traffic twins never collide). */
@@ -3085,8 +3084,8 @@ void td5_physics_resolve_vehicle_contacts(void)
      * is never tested and the player drives THROUGH it (user-reported "traffic
      * doesn't collide"). Supplement here: test slot 0 against every traffic
      * actor whose bucket the broadphase did NOT cover, gated on a real world
-     * overlap. resolve_collision_pair runs the same OBB test + impulse as the
-     * faithful path, so the response is identical — just no longer skipped. */
+     * overlap. collision_detect_simple runs the same sphere impulse as the
+     * broadphase path, so the response is identical — just no longer skipped. */
     if (g_td5.ini.traffic_player_collide && total > g_traffic_slot_base) {
         int tmax = (total < TD5_MAX_TOTAL_ACTORS) ? total : TD5_MAX_TOTAL_ACTORS;
         /* [PER-VIEWPORT TRAFFIC] When active, run this supplement for EVERY human
@@ -3146,27 +3145,6 @@ void td5_physics_resolve_vehicle_contacts(void)
 
     /* --- Phase 3: Grid reset is handled at start of next call --- */
 }
-
-/* Internal: dispatch collision between two actors (grid broadphase wrapper).
- * Same rule as the inline dispatch in td5_physics_resolve_vehicle_contacts
- * (see comment there). */
-static void resolve_collision_pair(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx_b)
-{
-    if (!a || !b) return;
-    if (!a->car_definition_ptr || !b->car_definition_ptr) return;
-
-    int a_scripted = (a->vehicle_mode != 0) ||
-                     (a->wheel_contact_bitmask >= 0x0F);
-    int b_scripted = (b->vehicle_mode != 0) ||
-                     (b->wheel_contact_bitmask >= 0x0F);
-
-    if (a_scripted || b_scripted) {
-        collision_detect_simple(a, b);
-    } else {
-        collision_detect_full(a, b, idx_a, idx_b);
-    }
-}
-
 
 /* ------------------------------------------------------------------ hooks */
 /* Race-init invalidation of the per-slot model box + hull (called from the

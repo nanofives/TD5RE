@@ -229,7 +229,6 @@ int  s_mp_net_config;
 
 /* Game type / race configuration */
 int  s_selected_game_type;       /* g_selectedGameType     */
-static int  s_race_rule_variant;        /* gRaceRuleVariant       */
 int  s_race_within_series;       /* g_raceWithinSeriesIndex */
 int  s_cup_unlock_tier;          /* DAT_004962a8           */
 
@@ -797,7 +796,6 @@ int  s_launching_net_race;       /* set by the lobby before init_race_schedule *
 int  s_net_cfg_game_port   = 37050;   /* [Network] GamePort */
 int  s_kicked_flag;              /* DAT_00497328 */
 int  s_lobby_action;             /* DAT_0049722c */
-static int  s_chat_msg_count;           /* DAT_00496408 */
 int  s_text_input_state;         /* DAT_004969d0 */
 
 int  s_results_rerace_flag;      /* DAT_00497a78 */
@@ -816,7 +814,6 @@ int  s_results_skip_display;     /* DAT_00497a74 */
 int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 
 int     s_score_insert_pos;      /* 0-4: position in 5-entry table where insert goes */
-static int  s_snap_opp_car, s_snap_opp_paint, s_snap_opp_trans, s_snap_opp_config;
 
 /* Masters roster (type 5): 15 random car slots, 6 marked AI */
 int  s_masters_roster[15];
@@ -872,19 +869,6 @@ int frontend_cup_race_count(int game_type) {
     }
 }
 
-/* Bar-fade transition lookup table (slot -> {r,g,b} bar color + type) */
-typedef struct {
-    uint8_t r, g, b;
-    int     fade_type;  /* 0 = fade-to-black, 1 = fade-to-color, 2 = fade-to-image */
-} BarFadeEntry;
-
-static const BarFadeEntry s_bar_fade_table[] = {
-    { 0x00, 0x00, 0x00, 0 },  /* default: fade to black */
-    { 0x20, 0x20, 0x40, 1 },  /* blue tint bar sweep    */
-    { 0x40, 0x10, 0x10, 1 },  /* red tint bar sweep     */
-    { 0x00, 0x00, 0x00, 2 },  /* fade to image          */
-};
-
 /* Mouse state */
 int  s_mouse_x, s_mouse_y;
 static int  s_prev_mouse_x = -1;
@@ -901,7 +885,6 @@ static int  s_mouse_click_latched;
 static int  s_mouse_confirm_button = -1;
 static int  s_mouse_hover_button  = -1;
 static int  s_prev_mouse_hover_button = -1;
-static uint32_t s_mouse_confirm_until;
 static int  s_mouse_flash_button = -1;
 static uint32_t s_mouse_flash_until;
 static uint32_t s_mouse_act_until;   /* debounce horizon: absorb the 2nd click of a rapid double-click after a mouse activation (single-click mode) */
@@ -912,7 +895,6 @@ static uint32_t s_dbl_last_time   = 0;   /* timestamp (ms) of that click */
 int      s_fade_active;
 int      s_fade_progress;     /* 0..255 */
 int      s_fade_direction;    /* 1 = in, -1 = out */
-static int      s_fade_table_index;
 
 /* [RACE->FRONTEND TRANSITION OPACITY 2026-07-07] Frames still owed a forced
  * backbuffer clear after a screen entry. The frontend's steady-state render
@@ -1996,7 +1978,8 @@ uint32_t frontend_rgb_to_bgra(uint32_t c) {
 }
 /* HSV (0..1 each) -> 0xRRGGBB. */
 uint32_t td6_hsv_to_rgb(float h, float s, float v) {
-    while (h >= 1.0f) h -= 1.0f;  while (h < 0.0f) h += 1.0f;
+    while (h >= 1.0f) h -= 1.0f;
+    while (h < 0.0f) h += 1.0f;
     float hh = h * 6.0f; int i = (int)hh; float f = hh - (float)i;
     float p = v*(1.0f-s), q = v*(1.0f-s*f), t = v*(1.0f-s*(1.0f-f));
     float r, g, b;
@@ -2713,32 +2696,6 @@ void frontend_play_sfx(int id) {
 FE_DrawCmd s_draw_queue[FE_MAX_DRAW_CMDS];
 int s_draw_queue_count;
 
-static void frontend_fill_rect(int surface, int x, int y, int w, int h, uint32_t color) {
-    (void)surface;
-    if (s_draw_queue_count >= FE_MAX_DRAW_CMDS) return;
-    FE_DrawCmd *cmd = &s_draw_queue[s_draw_queue_count++];
-    cmd->type = FE_CMD_RECT;
-    cmd->x = x; cmd->y = y; cmd->w = w; cmd->h = h;
-    cmd->color = color;
-    cmd->tex_page = -1;
-}
-
-static void frontend_blit(int dst, int src, int dx, int dy) {
-    (void)dst;
-    int slot = src - 1;
-    if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
-    if (s_draw_queue_count >= FE_MAX_DRAW_CMDS) return;
-    FE_DrawCmd *cmd = &s_draw_queue[s_draw_queue_count++];
-    cmd->type = FE_CMD_BLIT;
-    cmd->x = dx; cmd->y = dy;
-    cmd->w = s_surfaces[slot].width;
-    cmd->h = s_surfaces[slot].height;
-    cmd->tex_page = s_surfaces[slot].tex_page;
-    cmd->u0 = 0.0f; cmd->v0 = 0.0f;
-    cmd->u1 = 1.0f; cmd->v1 = 1.0f;
-    cmd->color = 0xFFFFFFFF;
-}
-
 /* VectorUI cursor: SDF pointer (white outline + purple fill) drawn immediately,
  * called AFTER the sprite flush so it stays on top. */
 static void fe_draw_cursor_proc(float sx, float sy) {
@@ -2942,21 +2899,6 @@ int frontend_advance_tick(void) {
  * Mirrors DAT_00463E24[37] from the original binary (confirmed by RE).
  * Quick-race default: all cup_schedule_track[i] = 0 → type index 7 (XKR).
  */
-/* [TD5_CAR_COUNT..TD5_CAR_SLOT_MAX-1] (custom cars) zero-fill -> type index 0;
- * custom cars are quick-race only and never flow through the cup/difficulty
- * mapping that reads this table, so the value is unused for them. */
-static const int s_ext_car_to_type_index[TD5_CAR_SLOT_MAX] = {
-     7,  2, 17, 33, 22, 31, 32, 34, 18, 14,
-     1, 15, 13,  9, 11,  5,  0, 35,  8,  3,
-     4, 12, 26, 10, 36, 16, 19, 25, 20, 23,
-     6, 24, 21, 30, 28, 27, 29,
-    /* 37-75: TD6 cars map to themselves (this conversion is not applied at
-     * race init anyway — see the note in frontend_init_race_schedule). */
-    37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
-    54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-    71, 72, 73, 74, 75
-};
-
 /*
  * Difficulty tier table — 3 tiers × 6 ext car IDs.
  * From original binary @ 0x463e10 [CONFIRMED].
@@ -4087,7 +4029,6 @@ static void frontend_central_return_back(void) {
 void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 void fe_draw_text_centered(float center_x, float y, const char *text,
                                   uint32_t color, float sx, float sy);
-static void frontend_fill_rect(int layer, int x, int y, int w, int h, uint32_t color);
 static void fe_draw_button_9slice(float bx, float by, float bw, float bh,
                                   int state, uint32_t interior, float sx, float sy);
 static void fe_draw_button_frame(float bx, float by, float bw, float bh,
@@ -4752,31 +4693,6 @@ int ConfigureGameTypeFlags(void) {
     }
 
     return 1;
-}
-
-/* ========================================================================
- * Bar-fade transitions
- * ======================================================================== */
-
-static void BarFade_Start(int table_index, int direction) {
-    s_fade_table_index = table_index;
-    if (table_index < 0 || table_index >= (int)(sizeof(s_bar_fade_table)/sizeof(s_bar_fade_table[0])))
-        s_fade_table_index = 0;
-    s_fade_active = 1;
-    s_fade_progress = (direction > 0) ? 0 : 255;
-    s_fade_direction = direction;
-}
-
-static int BarFade_Tick(void) {
-    if (!s_fade_active) return 1;
-    s_fade_progress += s_fade_direction * 8 * s_fe_logic_ticks;
-    if (s_fade_progress >= 256 || s_fade_progress < 0) {
-        s_fade_active = 0;
-        return 1; /* done */
-    }
-    /* Real implementation would render horizontal bar sweep using
-     * s_bar_fade_table[s_fade_table_index].{r,g,b} and fade_type */
-    return 0;
 }
 
 /* Returns 1 if the screen should get the universal transition fades (slide-out
@@ -7064,8 +6980,6 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * working ◄► arrows (TD5) / modal colour picker (TD6). */
     if (s_button_count > 1 && s_buttons[1].active)
         s_buttons[1].disabled = !frontend_car_has_paint(actual_car);
-    float sw = sx * 640.0f;
-    float sh = sy * 480.0f;
 
     /* [PORT ENHANCEMENT 2026-06] Multiplayer flow: show whose turn it is to pick. */
     if (s_mp_flow && s_anim_complete) {
@@ -10617,18 +10531,6 @@ void td5_frontend_tick(void) {
 #define GALLERY_PIC_COUNT   27
 #define GALLERY_ALL_VISITED ((1 << GALLERY_PIC_COUNT) - 1)
 
-/* Original push order (from 0x465AAC string table):
- * Legals5-1 first, then developer mugshots. */
-static const char * const s_gallery_names[GALLERY_PIC_COUNT] = {
-    "Legals5.tga", "Legals4.tga", "Legals3.tga", "Legals2.tga", "Legals1.tga",
-    "Daz.tga",    "JFK.tga",     "Marie.tga",   "Matt.tga",    "Slade.tga",
-    "ChrisD.tga", "DaveyB.tga",  "TonyC.tga",   "DavidT.tga",  "JohnS.tga",
-    "TonyP.tga",  "Les.tga",     "Bez.tga",     "Mike.tga",    "Rich.tga",
-    "Steve.tga",  "Headley.tga", "Chris.tga",   "MikeT.tga",   "Snake.tga",
-    "Gareth.tga", "Bob.tga"
-};
-
-
 /* ========================================================================
  * [23] ScreenPostRaceHighScoreTable (0x413580)
  * States: 9
@@ -10993,7 +10895,7 @@ static const char * const s_gallery_names[GALLERY_PIC_COUNT] = {
  * LoadFrontendExtrasGalleryResources (0x00417DD2) batch-loads 21 developer
  * mugshots + 5 Legals*.tga from Mugshots.zip into DAT_004962e0..DAT_00496348.
  *
- * Port replaces all of this with a sequential auto-advance (s_gallery_names[]
+ * Port replaces all of this with a sequential auto-advance (27 filenames
  * iterated 0..26 at fixed 4000ms intervals) using frontend_load_tga on-demand
  * and a full-viewport fe_draw_quad. Cross-fade math is dropped (no 16bpp
  * surface lock + per-scanline pixel arithmetic under D3D11). Initial position

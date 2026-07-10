@@ -1862,7 +1862,7 @@ void frontend_mp_setup_render(float sx, float sy) {
     for (p = 0; p < n; p++) {
         int col = p % cols, row = p / cols;
         float px = row_x0 + (float)col * pane_w, py = mp_title_band + (float)row * pane_h;
-        float cx, pyr, pt, pe, rise, ax, ay, aw, ah;
+        float cx, pyr, pt, pe, rise, ax, ay, aw;
         uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
         uint32_t pcol = rgb | 0xFF000000u;
         int ready = s_mp_player_ready[p];
@@ -1892,7 +1892,7 @@ void frontend_mp_setup_render(float sx, float sy) {
         /* Header banner: chosen name or PLAYER N (host slot 0 gets the crown). */
         mp_draw_pane_name_banner(p, px, pyr, pane_w, cx, sx, sy);
 
-        ax = px + 6.0f; ay = pyr + 22.0f; aw = pane_w - 12.0f; ah = pane_h - 28.0f;
+        ax = px + 6.0f; ay = pyr + 22.0f; aw = pane_w - 12.0f;
 
         if (ready) {
             mp_simul_small_centered_fit(cx * sx, (pyr + pane_h * 0.42f) * sy, "READY", 0xFF40FF40u, sx, sy, (pane_w - 12.0f) * sx);

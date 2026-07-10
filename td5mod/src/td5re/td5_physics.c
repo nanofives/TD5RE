@@ -226,7 +226,6 @@ static int td5_copchase_arrest_freeze_enabled(void) {
 static int32_t s_dynamics_mode = 0;          /* 0=arcade, 1=simulation (0x42F7B0) */
 static int32_t g_difficulty_easy = 0;
 int32_t g_difficulty_hard = 0;
-static int32_t g_total_actor_count = 6;
 int32_t g_race_slot_state[TD5_MAX_RACER_SLOTS]; /* 1=human, 0=AI per slot */
 
 /* Viewport -> actor-slot map (defined in td5_game.c). Used by the stuck-recovery
@@ -556,7 +555,6 @@ void td5_physics_apply_render_interpolation(float subtick_fraction)
         const TD5_Vec3_Fixed *prev = &s_prev_world_pos[slot];
         const TD5_Vec3_Fixed *cur  = &actor->world_pos;
         float dx = (float)(cur->x - prev->x);
-        float dy = (float)(cur->y - prev->y);
         float dz = (float)(cur->z - prev->z);
         actor->render_pos.x = ((float)prev->x + dx * subtick_fraction) * kInv256;
         /* Y deliberately NOT interpolated. The original's integrate_pose
@@ -3272,7 +3270,6 @@ void td5_physics_update_ai(TD5_Actor *actor)
     int32_t brake_front = (int32_t)PHYS_S(actor, PHYS_BRAKE_FRONT);
     int32_t brake_rear  = (int32_t)PHYS_S(actor, PHYS_BRAKE_REAR);
     int32_t speed_limit = phys_top_speed_rating(actor) << 8;
-    int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
     /* Drivetrain dispatch — verbatim port of UpdateAIVehicleDynamics @ 0x004051A0.
      * Original has NO surface_contact_flags gate; the flag is ONLY written in
@@ -4313,8 +4310,10 @@ void td5_physics_init_vehicle_runtime(void)
                         const char *ge = getenv("TD5RE_ARCADE_GRIP_PCT");
                         int tpct = te ? atoi(te) : 125;
                         int gpct = ge ? atoi(ge) : 112;
-                        if (tpct < 100) tpct = 100; if (tpct > 250) tpct = 250;
-                        if (gpct < 100) gpct = 100; if (gpct > 200) gpct = 200;
+                        if (tpct < 100) tpct = 100;
+                        if (tpct > 250) tpct = 250;
+                        if (gpct < 100) gpct = 100;
+                        if (gpct > 200) gpct = 200;
                         int32_t tm2 = (int32_t)PHYS_S(actor, PHYS_DRIVE_TORQUE_MULT);
                         write_i16((uint8_t *)phys, PHYS_DRIVE_TORQUE_MULT, (int16_t)((tm2 * tpct) / 100));
                         int32_t dc2 = (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF);

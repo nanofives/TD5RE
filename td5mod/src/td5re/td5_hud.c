@@ -543,7 +543,6 @@ static int   s_is_first_player;          /* 0x4B0BF4 */
 static uint32_t s_metric_value;          /* 0x4B11C8 */
 
 /* Minimap state */
-static TD5_MinimapState s_minimap;
 static uint8_t *s_minimap_quad_buf;      /* 0x4B0A6C */
 static float s_minimap_x;               /* 0x4B0A40 */
 static float s_minimap_y;               /* 0x4B0A44 */
@@ -4326,10 +4325,14 @@ static void hud_filler_draw_map(float cl, float ct, float cr, float cb, int stat
                 int16_t *vr = (int16_t *)(vert_base + (uint32_t)vi_r * 6);        \
                 float lx = (float)((int)vl[0] + ox), lz = (float)((int)vl[2] + oz); \
                 float rx = (float)((int)vr[0] + ox), rz = (float)((int)vr[2] + oz); \
-                if (lx < minx) minx = lx;  if (lx > maxx) maxx = lx;             \
-                if (rx < minx) minx = rx;  if (rx > maxx) maxx = rx;             \
-                if (lz < minz) minz = lz;  if (lz > maxz) maxz = lz;             \
-                if (rz < minz) minz = rz;  if (rz > maxz) maxz = rz;             \
+                if (lx < minx) minx = lx;                                        \
+                if (lx > maxx) maxx = lx;                                        \
+                if (rx < minx) minx = rx;                                        \
+                if (rx > maxx) maxx = rx;                                        \
+                if (lz < minz) minz = lz;                                        \
+                if (lz > maxz) maxz = lz;                                        \
+                if (rz < minz) minz = rz;                                        \
+                if (rz > maxz) maxz = rz;                                        \
             }                                                                    \
         }                                                                        \
     } while (0)
@@ -5951,12 +5954,18 @@ static int minimap_emit_connector(uint8_t *span_base, uint8_t *vert_base, int sp
     float mm_l = s_minimap_x, mm_t = s_minimap_y;
     float mm_r = s_minimap_x + s_minimap_width, mm_b = s_minimap_y + s_minimap_height;
     float min_x = tl_x, max_x = tl_x, min_y = tl_y, max_y = tl_y;
-    if (tr_x < min_x) min_x = tr_x; if (tr_x > max_x) max_x = tr_x;
-    if (bl_x < min_x) min_x = bl_x; if (bl_x > max_x) max_x = bl_x;
-    if (br_x < min_x) min_x = br_x; if (br_x > max_x) max_x = br_x;
-    if (tr_y < min_y) min_y = tr_y; if (tr_y > max_y) max_y = tr_y;
-    if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
-    if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
+    if (tr_x < min_x) min_x = tr_x;
+    if (tr_x > max_x) max_x = tr_x;
+    if (bl_x < min_x) min_x = bl_x;
+    if (bl_x > max_x) max_x = bl_x;
+    if (br_x < min_x) min_x = br_x;
+    if (br_x > max_x) max_x = br_x;
+    if (tr_y < min_y) min_y = tr_y;
+    if (tr_y > max_y) max_y = tr_y;
+    if (bl_y < min_y) min_y = bl_y;
+    if (bl_y > max_y) max_y = bl_y;
+    if (br_y < min_y) min_y = br_y;
+    if (br_y > max_y) max_y = br_y;
     if (max_x < mm_l || min_x > mm_r || max_y < mm_t || min_y > mm_b) return 0;
     if (minimap_quad_is_stray(min_x, max_x, min_y, max_y)) return 0; /* [S25] discontinuous spans */
 
@@ -6035,12 +6044,18 @@ static int minimap_emit_road_quad(uint8_t *span_base, uint8_t *vert_base,
     float mm_l = s_minimap_x, mm_t = s_minimap_y;
     float mm_r = s_minimap_x + s_minimap_width, mm_b = s_minimap_y + s_minimap_height;
     float min_x = fl_x, max_x = fl_x, min_y = fl_y, max_y = fl_y;
-    if (fr_x < min_x) min_x = fr_x; if (fr_x > max_x) max_x = fr_x;
-    if (bl_x < min_x) min_x = bl_x; if (bl_x > max_x) max_x = bl_x;
-    if (br_x < min_x) min_x = br_x; if (br_x > max_x) max_x = br_x;
-    if (fr_y < min_y) min_y = fr_y; if (fr_y > max_y) max_y = fr_y;
-    if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
-    if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
+    if (fr_x < min_x) min_x = fr_x;
+    if (fr_x > max_x) max_x = fr_x;
+    if (bl_x < min_x) min_x = bl_x;
+    if (bl_x > max_x) max_x = bl_x;
+    if (br_x < min_x) min_x = br_x;
+    if (br_x > max_x) max_x = br_x;
+    if (fr_y < min_y) min_y = fr_y;
+    if (fr_y > max_y) max_y = fr_y;
+    if (bl_y < min_y) min_y = bl_y;
+    if (bl_y > max_y) max_y = bl_y;
+    if (br_y < min_y) min_y = br_y;
+    if (br_y > max_y) max_y = br_y;
     if (max_x < mm_l || min_x > mm_r || max_y < mm_t || min_y > mm_b) return 0;
     if (minimap_quad_is_stray(min_x, max_x, min_y, max_y)) return 0; /* [S25] discontinuous spans */
 
@@ -6315,7 +6330,6 @@ void td5_hud_render_minimap(int actor_slot)
 
     uint8_t *span_base = (uint8_t *)g_strip_span_base;
     uint8_t *vert_base = (uint8_t *)g_strip_vertex_base;
-    int dot_count = 0;
     TD5_SpriteQuad map_quad;
 
     /* Minimap boundary for software clip (original: software-only globals @ 0x43E640,
@@ -6454,12 +6468,18 @@ void td5_hud_render_minimap(int actor_slot)
          * rasterizer stage, so the road extends naturally to the edge
          * instead of popping in/out as quads enter the rect. */
         float min_x = fl_x, max_x = fl_x, min_y = fl_y, max_y = fl_y;
-        if (fr_x < min_x) min_x = fr_x; if (fr_x > max_x) max_x = fr_x;
-        if (bl_x < min_x) min_x = bl_x; if (bl_x > max_x) max_x = bl_x;
-        if (br_x < min_x) min_x = br_x; if (br_x > max_x) max_x = br_x;
-        if (fr_y < min_y) min_y = fr_y; if (fr_y > max_y) max_y = fr_y;
-        if (bl_y < min_y) min_y = bl_y; if (bl_y > max_y) max_y = bl_y;
-        if (br_y < min_y) min_y = br_y; if (br_y > max_y) max_y = br_y;
+        if (fr_x < min_x) min_x = fr_x;
+        if (fr_x > max_x) max_x = fr_x;
+        if (bl_x < min_x) min_x = bl_x;
+        if (bl_x > max_x) max_x = bl_x;
+        if (br_x < min_x) min_x = br_x;
+        if (br_x > max_x) max_x = br_x;
+        if (fr_y < min_y) min_y = fr_y;
+        if (fr_y > max_y) max_y = fr_y;
+        if (bl_y < min_y) min_y = bl_y;
+        if (bl_y > max_y) max_y = bl_y;
+        if (br_y < min_y) min_y = br_y;
+        if (br_y > max_y) max_y = br_y;
         int primary_culled = (max_x < s_minimap_x || min_x > mm_r ||
                               max_y < s_minimap_y || min_y > mm_b);
         /* [FIX 2026-06-05 Rome end-of-race stray minimap line] Also drop a quad
@@ -6590,12 +6610,18 @@ void td5_hud_render_minimap(int actor_slot)
 
                     float b_min_x = bfl_x, b_max_x = bfl_x;
                     float b_min_y = bfl_y, b_max_y = bfl_y;
-                    if (bfr_x < b_min_x) b_min_x = bfr_x; if (bfr_x > b_max_x) b_max_x = bfr_x;
-                    if (bbl_x < b_min_x) b_min_x = bbl_x; if (bbl_x > b_max_x) b_max_x = bbl_x;
-                    if (bbr_x < b_min_x) b_min_x = bbr_x; if (bbr_x > b_max_x) b_max_x = bbr_x;
-                    if (bfr_y < b_min_y) b_min_y = bfr_y; if (bfr_y > b_max_y) b_max_y = bfr_y;
-                    if (bbl_y < b_min_y) b_min_y = bbl_y; if (bbl_y > b_max_y) b_max_y = bbl_y;
-                    if (bbr_y < b_min_y) b_min_y = bbr_y; if (bbr_y > b_max_y) b_max_y = bbr_y;
+                    if (bfr_x < b_min_x) b_min_x = bfr_x;
+                    if (bfr_x > b_max_x) b_max_x = bfr_x;
+                    if (bbl_x < b_min_x) b_min_x = bbl_x;
+                    if (bbl_x > b_max_x) b_max_x = bbl_x;
+                    if (bbr_x < b_min_x) b_min_x = bbr_x;
+                    if (bbr_x > b_max_x) b_max_x = bbr_x;
+                    if (bfr_y < b_min_y) b_min_y = bfr_y;
+                    if (bfr_y > b_max_y) b_max_y = bfr_y;
+                    if (bbl_y < b_min_y) b_min_y = bbl_y;
+                    if (bbl_y > b_max_y) b_max_y = bbl_y;
+                    if (bbr_y < b_min_y) b_min_y = bbr_y;
+                    if (bbr_y > b_max_y) b_max_y = bbr_y;
 
                     if (!(b_max_x < s_minimap_x || b_min_x > mm_r ||
                           b_max_y < s_minimap_y || b_min_y > mm_b) &&
@@ -6954,7 +6980,6 @@ void td5_hud_render_minimap(int actor_slot)
                 HUD_DEPTH
             );
             hud_submit_quad(&map_quad);
-            dot_count++;
         }
     }
 
@@ -7026,7 +7051,6 @@ void td5_hud_render_minimap(int actor_slot)
                 HUD_DEPTH
             );
             hud_submit_quad(&map_quad);
-            dot_count++;
         }
     }
 
@@ -7102,7 +7126,6 @@ void td5_hud_init_minimap_layout(void)
     float sc_v = (float)(semicol->atlas_y + 1);
 
     /* Build track connector dot quads (0x30 segment dots) */
-    uint8_t *seg_dot_buf = s_minimap_quad_buf + 0x5080;
     for (int i = 0; i < 3; i++) { /* 3 segment dot types */
         int off = 0x5080 + i * TD5_HUD_GLYPH_QUAD_SIZE;
         if (off + TD5_HUD_GLYPH_QUAD_SIZE <= TD5_HUD_MINIMAP_BUF_SIZE) {
@@ -7167,7 +7190,6 @@ void td5_hud_init_minimap_layout(void)
     /* Build route segment table from track strip data */
     int seg_count = 0;
     int seg_start_val = 0;
-    int span_idx = 0;
 
     if (g_strip_total_segments > 0) {
         uint8_t *span_base = (uint8_t *)g_strip_span_base;
@@ -7208,8 +7230,6 @@ void td5_hud_init_minimap_layout(void)
                 seg_start_val = s;
                 seg_count++;
             }
-
-            span_idx = s;
         }
     }
 
@@ -7976,8 +7996,10 @@ static void hud_draw_player_damage_bar(int player_slot, int view_index)
     int r, g; const int b = 0x22;
     if (h > 0.5f) { float t = (1.0f - h) * 2.0f; r = (int)(0x20 + t * (0xE0 - 0x20)); g = 0xD0; }
     else          { float t = (0.5f - h) * 2.0f; r = 0xE0; g = (int)(0xD0 - t * (0xD0 - 0x20)); }
-    if (r < 0) r = 0; if (r > 255) r = 255;
-    if (g < 0) g = 0; if (g > 255) g = 255;
+    if (r < 0) r = 0;
+    if (r > 255) r = 255;
+    if (g < 0) g = 0;
+    if (g > 255) g = 255;
     uint32_t fill = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 
     hud_solid_quad(bl - ob, bt - ob, bl + bw + ob, bt + bh + ob, sz, rhw, 0xFF000000u); /* border */
