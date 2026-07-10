@@ -168,7 +168,7 @@ sim package is `wip`.
 | A3 | ddraw_wrapper restructure | done @7abd8190 | wrapper.h -> 3 per-interface headers + d3d11_backend.c -> device/pipeline/draw .c files, both split along pre-existing banner boundaries; diffed byte-identical vs original; build_all + wrapper rebuilt from scratch + smoke 12/12 PASS; no live visual screenshot check (smoke races completing at normal frame times used as proxy) |
 | A5 | Dev modules out of release | todo | after A2; user decision on benchmark |
 | A4 | Env-knob prune | todo | SOLO; user batch-approval of fold list |
-| A6 | DAT_ token retirement | wip fix-refactor-a6-dat-tokens | SOLO |
+| A6 | DAT_ token retirement | done @65b439b1 | 245 raw DAT_ tokens substituted (24 files); td5_orig_globals.h's 610 defines -> comment-only docs (none left referenced anywhere, verified); found+fixed a real dup-key data bug (DAT_0048f30c 2 conflicting names); full suite 46/46 PASS in worktree, goldens matched. Main-repo post-merge rebuild skipped this time (td5re.exe held open by a running process at repo root, left alone rather than killed — merge itself landed clean, fast-forward, verified via worktree) |
 | A10 | Shared helpers (td5_bytes.h, argb8, math) | todo | SOLO |
 | A7 | Comment debt (per-module, divisible) | todo | filler; sim modules before their Wave-2 package |
 | S1a | FP_* migration td5_physics.c (+S2 renames) | todo | sim-exclusive |
