@@ -28,7 +28,6 @@ if /I "%~1"=="release" set VARIANT=release
 set GCC=..\..\deps\mingw\mingw32\bin\gcc.exe
 set AR=..\..\deps\mingw\mingw32\bin\ar.exe
 set WINDRES=..\..\deps\mingw\mingw32\bin\windres.exe
-set STRINGS=..\..\deps\mingw\mingw32\bin\strings.exe
 set SRCDIR=.
 set WRAPPER_SRCDIR=..\..\ddraw_wrapper\src
 set WRAPPER_BUILDDIR=..\..\ddraw_wrapper\build

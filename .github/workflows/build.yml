@@ -6,124 +6,18 @@ on:
     paths:
       - 'td5mod/**'
       - '.github/workflows/build.yml'
+      - '.github/workflows/_build-td5re.yml'
   pull_request:
     branches: [main, master]
     paths:
       - 'td5mod/**'
       - '.github/workflows/build.yml'
+      - '.github/workflows/_build-td5re.yml'
 
 jobs:
   build:
-    name: Build (MinGW i686)
-    runs-on: windows-latest
-
-    defaults:
-      run:
-        shell: msys2 {0}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up MSYS2 (MinGW i686)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW32
-          update: false
-          install: >-
-            mingw-w64-i686-gcc
-            mingw-w64-i686-zlib
-
-      # -----------------------------------------------------------------------
-      # ddraw_wrapper — D3D11 translation layer, built as a static archive
-      # that gets linked into td5re.exe. Shaders are pre-compiled to _bytes.h
-      # so no HLSL toolchain is needed.
-      # -----------------------------------------------------------------------
-      - name: Build ddraw_wrapper (static library)
-        run: |
-          cd td5mod/ddraw_wrapper
-          mkdir -p build
-          CFLAGS="-c -O2 -Wall -DWIN32 -m32"
-
-          for name in ddraw_main ddraw4 surface4 d3d3 device3 viewport3 texture2 d3d11_backend; do
-            echo "Compiling $name.c..."
-            gcc $CFLAGS "src/$name.c" -o "build/$name.o"
-          done
-          gcc $CFLAGS -Wno-unused-function "src/png_loader.c" -o "build/png_loader.o"
-
-          ar rcs build/libddraw_wrapper.a \
-            build/ddraw_main.o build/ddraw4.o build/surface4.o \
-            build/d3d3.o build/device3.o build/viewport3.o \
-            build/texture2.o build/d3d11_backend.o build/png_loader.o
-
-          echo "ddraw_wrapper archive: $(ls -lh build/libddraw_wrapper.a | awk '{print $5}')"
-
-      # -----------------------------------------------------------------------
-      # td5re.exe — standalone source port. Module list comes from
-      # td5mod/src/td5re/srcs.txt (shared with build_standalone.bat + Makefile).
-      # -----------------------------------------------------------------------
-      - name: Build td5re.exe (source port)
-        run: |
-          set -o pipefail
-          cd td5mod/src/td5re
-          mkdir -p build
-
-          WRAPPER_SRCDIR=../../ddraw_wrapper/src
-          WRAPPER_BUILDDIR=../../ddraw_wrapper/build
-          # Flags: single source of truth cflags.txt (shared with the .bat + Makefile).
-          CFLAGS="$(tr -d '\r' < cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR"
-
-          # Module list: single source of truth (shared with the .bat + Makefile).
-          SRCS=$(tr -d '\r' < srcs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
-
-          # Compile output is teed to a log so the structure-lint step can
-          # ratchet the warning count (scripts/lint_structure.ps1).
-          : > ../../../build_warnings.log
-          for src in $SRCS; do
-            name=$(basename "${src%.c}")
-            echo "Compiling $src..."
-            gcc $CFLAGS "$src" -o "build/$name.o" 2>&1 | tee -a ../../../build_warnings.log
-          done
-
-          # Resource (icon) — non-fatal if windres fails
-          if windres -F pe-i386 -i td5re.rc -o build/td5re_res.o 2>/dev/null; then
-            RES_OBJ="build/td5re_res.o"
-          else
-            echo "WARNING: windres failed, icon will not be embedded"
-            RES_OBJ=""
-          fi
-
-          # Static archive (all modules except main)
-          ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
-          ar rcs build/libtd5re.a $ARCHIVE_OBJS
-
-          # Link — libs: single source of truth link_libs.txt (shared with the
-          # .bat + Makefile).
-          LIBS=$(tr -d '\r' < link_libs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
-          gcc -m32 -mwindows -static -o build/td5re.exe \
-            build/main.o $RES_OBJ \
-            -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
-            -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
-            $LIBS \
-            -Wl,--enable-stdcall-fixup \
-            -Wl,--allow-multiple-definition
-
-          ls -lh build/td5re.exe
-
-      # -----------------------------------------------------------------------
-      # Structure lint — architectural ratchets (extern-in-.c, td5_game.h
-      # includer set, per-flag warning counts vs the tee'd build log). Fails the
-      # build on any regression; baseline: scripts/lint_structure_baseline.json.
-      # NOTE: a full in-game selftest cannot run here — re/assets/ (game data)
-      # is not in the repo, so the exe has nothing to boot. The behavioral gate
-      # (selftest + golden-trace) runs locally via scripts/selftest.ps1.
-      # -----------------------------------------------------------------------
-      - name: Structure lint (ratchets)
-        shell: pwsh
-        run: pwsh -NoProfile -File scripts/lint_structure.ps1 -BuildLog build_warnings.log
-
-      - name: Upload td5re.exe
-        uses: actions/upload-artifact@v4
-        with:
-          name: td5re-${{ github.sha }}
-          path: td5mod/src/td5re/build/td5re.exe
-          if-no-files-found: error
+    uses: ./.github/workflows/_build-td5re.yml
+    with:
+      release: false
+      run-lint: true
+      artifact-name: td5re-${{ github.sha }}

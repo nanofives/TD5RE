@@ -9,96 +9,30 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build & Release (MinGW i686)
+  build:
+    uses: ./.github/workflows/_build-td5re.yml
+    with:
+      release: true
+      run-lint: false
+      artifact-name: td5re-release-${{ github.ref_name }}
+
+  package-and-release:
+    name: Package & Release
+    needs: build
     runs-on: windows-latest
-
-    defaults:
-      run:
-        shell: msys2 {0}
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up MSYS2 (MinGW i686)
-        uses: msys2/setup-msys2@v2
+      - name: Download td5re.exe
+        uses: actions/download-artifact@v4
         with:
-          msystem: MINGW32
-          update: false
-          install: >-
-            mingw-w64-i686-gcc
-            mingw-w64-i686-zlib
+          name: td5re-release-${{ github.ref_name }}
+          path: dist/td5re
 
-      - name: Build ddraw_wrapper (static library)
-        run: |
-          cd td5mod/ddraw_wrapper
-          mkdir -p build
-          CFLAGS="-c -O2 -Wall -DWIN32 -m32"
-
-          for name in ddraw_main ddraw4 surface4 d3d3 device3 viewport3 texture2 d3d11_backend; do
-            gcc $CFLAGS "src/$name.c" -o "build/$name.o"
-          done
-          gcc $CFLAGS -Wno-unused-function "src/png_loader.c" -o "build/png_loader.o"
-
-          ar rcs build/libddraw_wrapper.a \
-            build/ddraw_main.o build/ddraw4.o build/surface4.o \
-            build/d3d3.o build/device3.o build/viewport3.o \
-            build/texture2.o build/d3d11_backend.o build/png_loader.o
-
-      # Module list comes from td5mod/src/td5re/srcs.txt (shared with build_standalone.bat + Makefile).
-      - name: Build td5re.exe (source port)
-        run: |
-          cd td5mod/src/td5re
-          mkdir -p build
-
-          WRAPPER_SRCDIR=../../ddraw_wrapper/src
-          WRAPPER_BUILDDIR=../../ddraw_wrapper/build
-          # RELEASE configuration — mirrors build_standalone.bat's release path:
-          # flags come from cflags.txt (single source, shared with the .bat +
-          # Makefile); -DTD5RE_RELEASE -DNDEBUG compile out dev affordances,
-          # -s (link) strips.
-          CFLAGS="$(tr -d '\r' < cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR -DTD5RE_RELEASE -DNDEBUG"
-
-          # Module list: single source of truth (shared with the .bat + Makefile).
-          SRCS=$(tr -d '\r' < srcs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
-
-          for src in $SRCS; do
-            name=$(basename "${src%.c}")
-            gcc $CFLAGS "$src" -o "build/$name.o"
-          done
-
-          if windres -F pe-i386 -i td5re.rc -o build/td5re_res.o 2>/dev/null; then
-            RES_OBJ="build/td5re_res.o"
-          else
-            RES_OBJ=""
-          fi
-
-          ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
-          ar rcs build/libtd5re.a $ARCHIVE_OBJS
-
-          # Libs: single source of truth link_libs.txt (shared with the .bat + Makefile).
-          LIBS=$(tr -d '\r' < link_libs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
-          gcc -m32 -mwindows -static -s -o build/td5re.exe \
-            build/main.o $RES_OBJ \
-            -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
-            -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
-            $LIBS \
-            -Wl,--enable-stdcall-fixup \
-            -Wl,--allow-multiple-definition
-
-      # -----------------------------------------------------------------------
-      # Package artifact and create GitHub Release
-      # -----------------------------------------------------------------------
-      - name: Package artifacts
+      - name: Package artifact
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-
-          mkdir -p dist/td5re
-          cp td5mod/src/td5re/build/td5re.exe dist/td5re/
           cd dist
           7z a "td5re-${TAG}-win32.zip" td5re/
-          cd ..
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

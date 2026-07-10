@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 REM Change to script directory so relative paths work
 cd /d "%~dp0"
@@ -11,8 +11,6 @@ set GCC=..\deps\mingw\mingw32\bin\gcc.exe
 set AR=..\deps\mingw\mingw32\bin\ar.exe
 set SRCDIR=src
 set OUTDIR=build
-set DEF=ddraw.def
-set OUT=ddraw.dll
 
 echo === D3D11 Wrapper Build ===
 
@@ -25,41 +23,39 @@ call "%~dp0src\shaders\compile_shaders.bat"
 popd
 if errorlevel 1 goto :fail
 
-echo Compiling ddraw_main.c...
-"%GCC%" -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\ddraw_main.c   -o %OUTDIR%\ddraw_main.o
-if errorlevel 1 goto :fail
+REM ---------------------------------------------------------------------------
+REM Module list + flags -- SINGLE SOURCE OF TRUTH: wrapper_srcs.txt /
+REM wrapper_cflags.txt (one entry per line, # comments; same pattern as
+REM src/td5re/srcs.txt + cflags.txt). td5mod\Makefile, build.yml and
+REM release.yml read the SAME files, so this list/flag set cannot drift.
+REM png_loader.c additionally needs -Wno-unused-function (kept here, not in
+REM the shared flags file, since it's a single-file exception).
+REM ---------------------------------------------------------------------------
+set "WRAPPER_SRCS="
+for /f "usebackq eol=# delims=" %%L in ("%~dp0wrapper_srcs.txt") do set "WRAPPER_SRCS=!WRAPPER_SRCS! %%L"
+if not defined WRAPPER_SRCS (
+    echo ERROR: wrapper_srcs.txt missing or empty at %~dp0wrapper_srcs.txt
+    goto :fail
+)
 
-echo Compiling ddraw4.c...
-"%GCC%" -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\ddraw4.c       -o %OUTDIR%\ddraw4.o
-if errorlevel 1 goto :fail
+set "WRAPPER_CFLAGS="
+for /f "usebackq eol=# delims=" %%L in ("%~dp0wrapper_cflags.txt") do set "WRAPPER_CFLAGS=!WRAPPER_CFLAGS! %%L"
+if not defined WRAPPER_CFLAGS (
+    echo ERROR: wrapper_cflags.txt missing or empty at %~dp0wrapper_cflags.txt
+    goto :fail
+)
 
-echo Compiling surface4.c...
-"%GCC%" -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\surface4.c     -o %OUTDIR%\surface4.o
-if errorlevel 1 goto :fail
-
-echo Compiling d3d3.c...
-"%GCC%" -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\d3d3.c         -o %OUTDIR%\d3d3.o
-if errorlevel 1 goto :fail
-
-echo Compiling device3.c...
-"%GCC%" -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\device3.c      -o %OUTDIR%\device3.o
-if errorlevel 1 goto :fail
-
-echo Compiling viewport3.c...
-"%GCC%" -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\viewport3.c    -o %OUTDIR%\viewport3.o
-if errorlevel 1 goto :fail
-
-echo Compiling texture2.c...
-"%GCC%" -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\texture2.c     -o %OUTDIR%\texture2.o
-if errorlevel 1 goto :fail
-
-echo Compiling d3d11_backend.c...
-"%GCC%" -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\d3d11_backend.c -o %OUTDIR%\d3d11_backend.o
-if errorlevel 1 goto :fail
-
-echo Compiling png_loader.c...
-"%GCC%" -c -O2 -Wall -Wno-unused-function -DWIN32 -DWRAPPER_DEBUG %SRCDIR%\png_loader.c -o %OUTDIR%\png_loader.o
-if errorlevel 1 goto :fail
+set ARCHIVE_OBJS=
+for %%F in (!WRAPPER_SRCS!) do (
+    echo Compiling %%F...
+    if /I "%%~nF"=="png_loader" (
+        "%GCC%" !WRAPPER_CFLAGS! -Wno-unused-function %SRCDIR%\%%F -o %OUTDIR%\%%~nF.o
+    ) else (
+        "%GCC%" !WRAPPER_CFLAGS! %SRCDIR%\%%F -o %OUTDIR%\%%~nF.o
+    )
+    if errorlevel 1 goto :fail
+    set "ARCHIVE_OBJS=!ARCHIVE_OBJS! %OUTDIR%\%%~nF.o"
+)
 
 REM --- Static archive for the source-port link ---
 REM [2026-06-04] build_standalone.bat links the wrapper as a PREBUILT static lib
@@ -68,44 +64,17 @@ REM .a MUST be (re)produced here whenever the wrapper objects change, or td5re's
 REM link fails with "undefined reference" (e.g. S01's Backend_SetExclusiveFullscreen).
 echo Creating libddraw_wrapper.a...
 if exist %OUTDIR%\libddraw_wrapper.a del %OUTDIR%\libddraw_wrapper.a
-"%AR%" rcs %OUTDIR%\libddraw_wrapper.a ^
-    %OUTDIR%\ddraw_main.o ^
-    %OUTDIR%\ddraw4.o ^
-    %OUTDIR%\surface4.o ^
-    %OUTDIR%\d3d3.o ^
-    %OUTDIR%\device3.o ^
-    %OUTDIR%\viewport3.o ^
-    %OUTDIR%\texture2.o ^
-    %OUTDIR%\d3d11_backend.o ^
-    %OUTDIR%\png_loader.o
+"%AR%" rcs %OUTDIR%\libddraw_wrapper.a !ARCHIVE_OBJS!
 if errorlevel 1 goto :fail
-
-echo Linking %OUT%...
-"%GCC%" -shared -static -o %OUTDIR%\%OUT% ^
-    %OUTDIR%\ddraw_main.o ^
-    %OUTDIR%\ddraw4.o ^
-    %OUTDIR%\surface4.o ^
-    %OUTDIR%\d3d3.o ^
-    %OUTDIR%\device3.o ^
-    %OUTDIR%\viewport3.o ^
-    %OUTDIR%\texture2.o ^
-    %OUTDIR%\d3d11_backend.o ^
-    %OUTDIR%\png_loader.o ^
-    %DEF% ^
-    -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -ldxguid ^
-    -Wl,--enable-stdcall-fixup
-if errorlevel 1 goto :fail
-
-echo Deploying to game directory...
-copy /Y %OUTDIR%\%OUT% ..\..\%OUT% >nul
 
 echo.
-echo === BUILD OK: %OUTDIR%\%OUT% (deployed) ===
+echo === BUILD OK: %OUTDIR%\libddraw_wrapper.a ===
 goto :done
 
 :fail
 echo.
 echo === BUILD FAILED ===
+endlocal
 exit /b 1
 
 :done

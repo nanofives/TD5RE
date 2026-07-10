@@ -5,7 +5,7 @@
 #
 # Targets:
 #   make td5re      — build td5re.exe (requires wrapper to exist)
-#   make wrapper    — build libddraw_wrapper.a + ddraw.dll
+#   make wrapper    — build libddraw_wrapper.a
 #   make all        — wrapper, then td5re
 #   make clean      — remove build artifacts (both subprojects)
 #   make rebuild    — clean + all
@@ -25,7 +25,6 @@ MINGW_BIN := deps/mingw/mingw32/bin
 GCC       := $(MINGW_BIN)/gcc.exe
 AR        := $(MINGW_BIN)/ar.exe
 WINDRES   := $(MINGW_BIN)/windres.exe
-STRINGS   := $(MINGW_BIN)/strings.exe
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -33,8 +32,9 @@ STRINGS   := $(MINGW_BIN)/strings.exe
 
 TD5RE_SRC     := src/td5re
 TD5RE_BUILD   := $(TD5RE_SRC)/build
-WRAPPER_SRC   := ddraw_wrapper/src
-WRAPPER_BUILD := ddraw_wrapper/build
+WRAPPER_DIR   := ddraw_wrapper
+WRAPPER_SRC   := $(WRAPPER_DIR)/src
+WRAPPER_BUILD := $(WRAPPER_DIR)/build
 ZLIB_INC      := deps/mingw/mingw32/i686-w64-mingw32/include
 
 PROJECT_ROOT  := ..
@@ -55,13 +55,11 @@ TD5RE_OBJS := $(addprefix $(TD5RE_BUILD)/,$(notdir $(TD5RE_SRCS:.c=.o)))
 TD5RE_LIB_OBJS := $(filter-out $(TD5RE_BUILD)/main.o,$(TD5RE_OBJS))
 
 # ---------------------------------------------------------------------------
-# Wrapper sources (mirrors ddraw_wrapper/build.bat)
+# Wrapper sources -- SINGLE SOURCE OF TRUTH: ddraw_wrapper/wrapper_srcs.txt,
+# shared with build.bat + the CI workflows (same pattern as td5re's srcs.txt).
 # ---------------------------------------------------------------------------
 
-WRAPPER_SRCS := \
-    ddraw_main.c ddraw4.c surface4.c d3d3.c device3.c viewport3.c \
-    texture2.c d3d11_backend.c png_loader.c
-
+WRAPPER_SRCS := $(filter %.c,$(file < $(WRAPPER_DIR)/wrapper_srcs.txt))
 WRAPPER_OBJS := $(addprefix $(WRAPPER_BUILD)/,$(WRAPPER_SRCS:.c=.o))
 
 # ---------------------------------------------------------------------------
@@ -74,7 +72,9 @@ WRAPPER_OBJS := $(addprefix $(WRAPPER_BUILD)/,$(WRAPPER_SRCS:.c=.o))
 TD5RE_CFLAGS   := $(filter -%,$(file < $(TD5RE_SRC)/cflags.txt)) \
                   -I$(TD5RE_SRC) -I$(WRAPPER_SRC) -I$(ZLIB_INC)
 
-WRAPPER_CFLAGS := -c -O2 -Wall -DWIN32 -DWRAPPER_DEBUG -m32
+# SINGLE SOURCE OF TRUTH: ddraw_wrapper/wrapper_cflags.txt, shared with
+# build.bat + the CI workflows.
+WRAPPER_CFLAGS := $(filter -%,$(file < $(WRAPPER_DIR)/wrapper_cflags.txt)) -m32
 
 # png_loader.c additionally needs -Wno-unused-function per build.bat.
 $(WRAPPER_BUILD)/png_loader.o: WRAPPER_CFLAGS += -Wno-unused-function
@@ -121,13 +121,7 @@ $(WRAPPER_BUILD)/%.o: $(WRAPPER_SRC)/%.c | dirs
 $(WRAPPER_BUILD)/libddraw_wrapper.a: $(WRAPPER_OBJS)
 	"$(AR)" rcs $@ $^
 
-# --- wrapper DLL (legacy artifact from the retired DLL-proxy setup) ---
-$(WRAPPER_BUILD)/ddraw.dll: $(WRAPPER_OBJS)
-	"$(GCC)" -shared -static -o $@ $^ ddraw_wrapper/ddraw.def \
-	    -ld3d11 -ldxgi -lkernel32 -luser32 -lgdi32 -luuid -ldxguid \
-	    -Wl,--enable-stdcall-fixup
-
-wrapper: $(WRAPPER_BUILD)/libddraw_wrapper.a $(WRAPPER_BUILD)/ddraw.dll
+wrapper: $(WRAPPER_BUILD)/libddraw_wrapper.a
 
 # --- td5re static archive ---
 $(TD5RE_BUILD)/libtd5re.a: $(TD5RE_LIB_OBJS)

@@ -60,10 +60,15 @@ DEV vs RELEASE: same module list; `TD5RE_RELEASE` compiles out dev affordances
 
 Single-source build config (never hand-edit a per-build copy): module list in
 `srcs.txt`, compile flags in `cflags.txt`, system libs in `link_libs.txt` —
-all three are read by build_standalone.bat, td5mod/Makefile, build.yml and
-release.yml. Structural ratchets (`scripts/lint_structure.ps1` + its baseline
-JSON) run report-only at the end of `build_all.bat` and FAIL the CI build on
-any regression: no new `extern` decls in .c files, no new `td5_game.h`
+all three read by build_standalone.bat, td5mod/Makefile and the CI workflows.
+The D3D11 wrapper has its own pair, `ddraw_wrapper/wrapper_srcs.txt` +
+`wrapper_cflags.txt`, read by `ddraw_wrapper/build.bat`, td5mod/Makefile and
+the CI workflows the same way. `build.yml` and `release.yml` both call the
+same reusable workflow (`.github/workflows/_build-td5re.yml`, `dev`/`release`
+selected via an input) so the build steps can't drift between them.
+Structural ratchets (`scripts/lint_structure.ps1` + its baseline JSON) run
+report-only at the end of `build_all.bat` and FAIL the CI build on any
+regression: no new `extern` decls in .c files, no new `td5_game.h`
 includers, no new compiler warnings per -W class.
 
 ## Runtime logs & dev harness

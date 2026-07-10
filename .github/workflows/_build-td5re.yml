@@ -1,0 +1,151 @@
+name: Build td5re.exe (reusable)
+
+# Shared by build.yml (DEV, on push/PR) and release.yml (RELEASE, on tag).
+# Both wrapper + td5re build steps read their module list/flags from the
+# single-source-of-truth files (wrapper_srcs.txt/wrapper_cflags.txt,
+# src/td5re/srcs.txt/cflags.txt/link_libs.txt) so this workflow, the local
+# .bat scripts and td5mod/Makefile can never drift apart.
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: Build the RELEASE variant (-DTD5RE_RELEASE -DNDEBUG, stripped)
+        type: boolean
+        default: false
+      run-lint:
+        description: Run the structure-lint ratchet step
+        type: boolean
+        default: true
+      artifact-name:
+        description: Name for the uploaded td5re.exe artifact
+        type: string
+        required: true
+
+jobs:
+  build:
+    name: Build (MinGW i686)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW i686)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: false
+          install: >-
+            mingw-w64-i686-gcc
+            mingw-w64-i686-zlib
+
+      # -----------------------------------------------------------------------
+      # ddraw_wrapper — D3D11 translation layer, built as a static archive
+      # that gets linked into td5re.exe. Shaders are pre-compiled to _bytes.h
+      # so no HLSL toolchain is needed. Module list + flags: single source of
+      # truth wrapper_srcs.txt/wrapper_cflags.txt (shared with build.bat +
+      # Makefile).
+      # -----------------------------------------------------------------------
+      - name: Build ddraw_wrapper (static library)
+        run: |
+          cd td5mod/ddraw_wrapper
+          mkdir -p build
+          CFLAGS="$(tr -d '\r' < wrapper_cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -m32"
+          SRCS=$(tr -d '\r' < wrapper_srcs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
+
+          ARCHIVE_OBJS=""
+          for src in $SRCS; do
+            name=$(basename "${src%.c}")
+            echo "Compiling $src..."
+            if [ "$name" = "png_loader" ]; then
+              gcc $CFLAGS -Wno-unused-function "src/$src" -o "build/$name.o"
+            else
+              gcc $CFLAGS "src/$src" -o "build/$name.o"
+            fi
+            ARCHIVE_OBJS="$ARCHIVE_OBJS build/$name.o"
+          done
+
+          ar rcs build/libddraw_wrapper.a $ARCHIVE_OBJS
+
+          echo "ddraw_wrapper archive: $(ls -lh build/libddraw_wrapper.a | awk '{print $5}')"
+
+      # -----------------------------------------------------------------------
+      # td5re.exe — standalone source port. Module list/flags/libs: single
+      # source of truth td5mod/src/td5re/{srcs,cflags,link_libs}.txt (shared
+      # with build_standalone.bat + Makefile). RELEASE additionally passes
+      # -DTD5RE_RELEASE -DNDEBUG (compiles out dev affordances) and -s (strips).
+      # -----------------------------------------------------------------------
+      - name: Build td5re.exe (source port)
+        run: |
+          set -o pipefail
+          cd td5mod/src/td5re
+          mkdir -p build
+
+          WRAPPER_SRCDIR=../../ddraw_wrapper/src
+          WRAPPER_BUILDDIR=../../ddraw_wrapper/build
+          CFLAGS="$(tr -d '\r' < cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR"
+          if [ "${{ inputs.release }}" = "true" ]; then
+            CFLAGS="$CFLAGS -DTD5RE_RELEASE -DNDEBUG"
+          fi
+
+          SRCS=$(tr -d '\r' < srcs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
+
+          # Compile output is teed to a log so the structure-lint step can
+          # ratchet the warning count (scripts/lint_structure.ps1).
+          : > ../../../build_warnings.log
+          for src in $SRCS; do
+            name=$(basename "${src%.c}")
+            echo "Compiling $src..."
+            gcc $CFLAGS "$src" -o "build/$name.o" 2>&1 | tee -a ../../../build_warnings.log
+          done
+
+          # Resource (icon) — non-fatal if windres fails
+          if windres -F pe-i386 -i td5re.rc -o build/td5re_res.o 2>/dev/null; then
+            RES_OBJ="build/td5re_res.o"
+          else
+            echo "WARNING: windres failed, icon will not be embedded"
+            RES_OBJ=""
+          fi
+
+          # Static archive (all modules except main)
+          ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
+          ar rcs build/libtd5re.a $ARCHIVE_OBJS
+
+          LIBS=$(tr -d '\r' < link_libs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
+          EXTRA_LDFLAGS=""
+          if [ "${{ inputs.release }}" = "true" ]; then
+            EXTRA_LDFLAGS="-s"
+          fi
+          gcc -m32 -mwindows -static $EXTRA_LDFLAGS -o build/td5re.exe \
+            build/main.o $RES_OBJ \
+            -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
+            -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \
+            $LIBS \
+            -Wl,--enable-stdcall-fixup \
+            -Wl,--allow-multiple-definition
+
+          ls -lh build/td5re.exe
+
+      # -----------------------------------------------------------------------
+      # Structure lint — architectural ratchets (extern-in-.c, td5_game.h
+      # includer set, per-flag warning counts vs the tee'd build log). Fails the
+      # build on any regression; baseline: scripts/lint_structure_baseline.json.
+      # NOTE: a full in-game selftest cannot run here — re/assets/ (game data)
+      # is not in the repo, so the exe has nothing to boot. The behavioral gate
+      # (selftest + golden-trace) runs locally via scripts/selftest.ps1.
+      # -----------------------------------------------------------------------
+      - name: Structure lint (ratchets)
+        if: ${{ inputs.run-lint }}
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/lint_structure.ps1 -BuildLog build_warnings.log
+
+      - name: Upload td5re.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: td5mod/src/td5re/build/td5re.exe
+          if-no-files-found: error

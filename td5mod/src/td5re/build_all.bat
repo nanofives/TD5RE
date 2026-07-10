@@ -26,7 +26,7 @@ REM than the lib (or the lib is missing) so it can't go stale. [2026-06-04]
 REM ABSOLUTE path (via %~dp0) so build.bat's own %~dp0 resolves correctly when we
 REM call it — a RELATIVE call leaves build.bat's later %~dp0 wrong after its cd.
 set WRAPDIR=%~dp0..\..\ddraw_wrapper
-powershell -NoProfile -Command "$lib='%WRAPDIR%\build\libddraw_wrapper.a'; if(-not (Test-Path $lib)){exit 1}; $n=(Get-ChildItem '%WRAPDIR%\src' -Recurse -Include *.c,*.h,*.hlsl -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime; if($n -gt (Get-Item $lib).LastWriteTime){exit 1}; exit 0"
+powershell -NoProfile -File "%~dp0..\..\..\scripts\wrapper_stale_check.ps1" -WrapperDir "%WRAPDIR%"
 if errorlevel 1 goto :rebuild_wrapper
 goto :wrapper_ok
 :rebuild_wrapper
