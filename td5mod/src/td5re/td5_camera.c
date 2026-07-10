@@ -1278,8 +1278,19 @@ static int td5_camera_replay_eye_floor_clamp(uintptr_t actor, int view, int *eye
  * original), =0 forces it OFF everywhere (the 2026-07-04..05 behavior);
  * unset = auto (on except blocklist). Root-causing the pose-interpolation
  * lerp remains the real fix — until then this keeps the cinematic where it
- * has always worked and the safety net where it hasn't. */
-static const int k_flyin_blocked_levels[] = { 39 /* Montego Bay */ };
+ * has always worked and the safety net where it hasn't.
+ *
+ * [MONTEGO UN-BLOCKED 2026-07-10] Montego Bay (39) was the sole blocked
+ * level; it was blocked because the countdown fly-in put the eye (and the
+ * car mesh) underground / through the water. That root cause — cold-spawn
+ * garbage linear_velocity_y amplified by the port sub-tick extrapolation —
+ * was fixed 2026-07-07 (|vy| clamp in td5_camera_apply_view + the render
+ * mesh; see the 0x40000 clamps above). With the underground sink gone the
+ * safety net is no longer needed, so Montego now runs the normal orbiting
+ * fly-in like every other level. The blocklist mechanism is kept (empty via
+ * the -1 never-match sentinel) so any future regression can re-add a level
+ * with a one-line change. */
+static const int k_flyin_blocked_levels[] = { -1 /* none — see note above */ };
 
 static int td5_camera_flyin_enabled(void)
 {

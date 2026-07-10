@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 10" },
+    { CL_ITEM,    "FIX: Montego Bay's countdown camera fly-in is back -" },
+    { CL_ITEM,    "  now that the camera no longer dips underground, the" },
+    { CL_ITEM,    "  cinematic sweep plays during the 3-2-1 like on every" },
+    { CL_ITEM,    "  other track" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 7" },
     { CL_ITEM,    "FIX: police now actually give chase - the pursuit" },
     { CL_ITEM,    "  trigger window is much wider so cops lock on when" },
