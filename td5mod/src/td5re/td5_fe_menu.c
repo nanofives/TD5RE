@@ -11,6 +11,7 @@
  */
 
 #include "td5_frontend.h"
+#include "td5_math_util.h"
 #include "td5_asset.h"
 #include "td5_game.h"
 #include "td5_input.h"
@@ -443,8 +444,7 @@ int td5_frontend_init_resources(void) {
                         uint8_t g = (uint8_t)((p >> 8) & 0xFF);
                         uint8_t r = (uint8_t)((p >> 16) & 0xFF);
                         uint8_t a = (uint8_t)((r + g + b) / 3);
-                        pixels[i] = ((uint32_t)a << 24) | ((uint32_t)r << 16) |
-                                    ((uint32_t)g << 8) | b;
+                        pixels[i] = td5_argb8(a, r, g, b);
                     }
                     SelectObject(hdc, old_font);
                     DeleteObject(hfont);

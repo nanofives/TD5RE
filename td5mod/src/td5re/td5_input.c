@@ -19,6 +19,7 @@
  */
 
 #include "td5_input.h"
+#include "td5_math_util.h"
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_game.h"
@@ -432,18 +433,6 @@ static int s_escape_fade_active = 0;
 /* F3 key edge-detection latch [CONFIRMED @ 0x42C6FC: g_f3PauseInputHeldFlag] */
 static uint8_t s_f3_held = 0;
 
-/* ========================================================================
- * Helper: clamp int to range
- * ======================================================================== */
-
-static inline int clamp_i(int v, int lo, int hi)
-{
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
-/* static inline int abs_i(int v) { return v < 0 ? -v : v; } -- reserved */
 
 /* ========================================================================
  * Lifecycle
@@ -533,7 +522,7 @@ void td5_input_tick(void)
  * Setters for state driven by other modules
  * ======================================================================== */
 
-void td5_input_set_active_players(int n)       { s_active_players = clamp_i(n, 1, TD5_MAX_HUMAN_PLAYERS); }
+void td5_input_set_active_players(int n)       { s_active_players = clampi(n, 1, TD5_MAX_HUMAN_PLAYERS); }
 void td5_input_set_input_source(int p, int s)
 {
     if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return;

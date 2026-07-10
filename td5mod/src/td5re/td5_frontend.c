@@ -9,6 +9,7 @@
  */
 
 #include "td5_frontend.h"
+#include "td5_math_util.h"
 #include "td5_asset.h"
 #include "td5_track_registry.h"  /* custom-track registry: name/slot lookups + slot headroom */
 #include "td5_game.h"
@@ -9581,7 +9582,7 @@ void td5_frontend_render_ui_rects(void) {
             uint32_t r = (uint32_t)(0x28 + (0x50 - 0x28) * ramp_t);
             uint32_t g = (uint32_t)(0x38 + (0x80 - 0x38) * ramp_t);
             uint32_t b = (uint32_t)(0x58 + (0xC0 - 0x58) * ramp_t);
-            bg_color = (a << 24) | (r << 16) | (g << 8) | b;
+            bg_color = td5_argb8(a, r, g, b);
         }
 
         /* Button background: 9-slice frame from ButtonBits.tga (56x100).

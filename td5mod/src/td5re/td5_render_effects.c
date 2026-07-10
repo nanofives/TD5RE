@@ -1933,7 +1933,7 @@ static uint32_t arcade_scale_rgb(uint32_t c, float f)
     uint32_t r = (uint32_t)(((c >> 16) & 0xFFu) * f);
     uint32_t g = (uint32_t)(((c >>  8) & 0xFFu) * f);
     uint32_t b = (uint32_t)(( c        & 0xFFu) * f);
-    return (a << 24) | (r << 16) | (g << 8) | b;
+    return td5_argb8(a, r, g, b);
 }
 
 static void arcade_emit_glow_at(float wx, float wy, float wz,

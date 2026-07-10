@@ -18,6 +18,7 @@
  */
 
 #include "td5_inflate.h"
+#include "td5_bytes.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -401,7 +402,7 @@ size_t td5_inflate_mem_to_mem(void *out_buf, size_t out_buf_len,
             state.num_bits = 0;
 
             if (state.in_ptr + 4 > state.in_end) return 0;
-            uint16_t len  = (uint16_t)(state.in_ptr[0] | (state.in_ptr[1] << 8));
+            uint16_t len  = td5_read_le16(state.in_ptr);
             /* uint16_t nlen -- complement, skip validation */
             state.in_ptr += 4;
 

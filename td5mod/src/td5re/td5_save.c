@@ -12,6 +12,7 @@
  */
 
 #include "td5_save.h"
+#include "td5_bytes.h"
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_game.h"
@@ -1060,32 +1061,10 @@ uint32_t td5_save_crc32(const uint8_t *data, size_t size)
  * Helper: read/write a little-endian uint32 from a byte buffer
  * ======================================================================== */
 
-static inline uint32_t read_le32(const uint8_t *p)
-{
-    return (uint32_t)p[0]
-         | ((uint32_t)p[1] << 8)
-         | ((uint32_t)p[2] << 16)
-         | ((uint32_t)p[3] << 24);
-}
-
-static inline void write_le32(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)(v);
-    p[1] = (uint8_t)(v >> 8);
-    p[2] = (uint8_t)(v >> 16);
-    p[3] = (uint8_t)(v >> 24);
-}
-
-static inline uint16_t read_le16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static inline void write_le16(uint8_t *p, uint16_t v)
-{
-    p[0] = (uint8_t)(v);
-    p[1] = (uint8_t)(v >> 8);
-}
+static inline uint32_t read_le32(const uint8_t *p)  { return td5_read_le32(p); }
+static inline void write_le32(uint8_t *p, uint32_t v) { td5_write_le32(p, v); }
+static inline uint16_t read_le16(const uint8_t *p)  { return td5_read_le16(p); }
+static inline void write_le16(uint8_t *p, uint16_t v) { td5_write_le16(p, v); }
 
 /* ========================================================================
  * WritePackedConfigTd5  (original VA 0x40F8D0)
