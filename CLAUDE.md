@@ -126,7 +126,7 @@ small file instead of a fan-out over ~145k LOC:
 | Track geometry, span contacts, position walker | `td5_track.c` (SECTION anchors: contact resolvers, walker) |
 | Game modes (cop chase, arcade, drag, battle, cup) | `td5_game.c` mode config + `td5_arcade.c`/`td5_damage.c`; read-only queries: `td5_race_state.h` |
 | Netplay, lockstep, desync | `td5_net.c` + `td5_msvc_rand.c` (determinism); restart/seed: `td5_game.c` pause path |
-| Texture/blend/z render states, foliage AA | `ddraw_wrapper/src/d3d11_backend.c` (state cache; `Backend_IsFoliageAA`) |
+| Texture/blend/z render states, foliage AA | `ddraw_wrapper/src/d3d11_backend_pipeline.c` (state cache; `Backend_IsFoliageAA`) |
 | Mesh draw, culling, banners, billboards | `td5_render*.c` |
 | Asset loading (zips, TGA, levels, cars) | `td5_asset.c` (+ `td5_assetsrc.c` pack-on-load) |
 | Sound / music / internet radio | `td5_sound.c` / `td5_music.c` / `td5_radio.c` |

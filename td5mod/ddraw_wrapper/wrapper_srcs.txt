@@ -11,5 +11,7 @@ d3d3.c
 device3.c
 viewport3.c
 texture2.c
-d3d11_backend.c
+d3d11_backend_device.c
+d3d11_backend_pipeline.c
+d3d11_backend_draw.c
 png_loader.c
