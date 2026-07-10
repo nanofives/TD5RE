@@ -513,7 +513,7 @@ float td5_render_get_center_y(void)     { return s_center_y; }
 /**
  * Clamp an integer to [lo, hi].
  */
-/* clampi moved to td5_render_internal.h (static inline) */
+/* clampi moved to td5_math_util.h (shared, A10 refactor) */
 
 /* Forward decl: defined alongside td5_render_bind_texture_page below.
  * Switches the current render preset based on the bound page's
@@ -644,7 +644,7 @@ void flush_immediate_internal(void)
             if (cr > 255u) cr = 255u;
             if (cg > 255u) cg = 255u;
             if (cb > 255u) cb = 255u;
-            s_imm_verts[i].diffuse = (a << 24) | (cr << 16) | (cg << 8) | cb;
+            s_imm_verts[i].diffuse = td5_argb8(a, cr, cg, cb);
         }
     }
 
@@ -1271,7 +1271,7 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
                 if (g < 0) g = 0; else if (g > 255) g = 255;
                 if (r < 0) r = 0; else if (r > 255) r = 255;
                 if (a < 0) a = 0; else if (a > 255) a = 255;
-                out_color[out_count] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+                out_color[out_count] = td5_argb8((uint32_t)a, (uint32_t)r, (uint32_t)g, (uint32_t)b);
             }
             /* [LIGHT2] Clip-edge vertex: nearest-vertex normal (normals vary
              * little across one edge; a per-channel lerp isn't worth it). */
@@ -3259,7 +3259,7 @@ void td5_render_crossfade_surfaces(uint32_t *dst, const uint32_t *src_a,
         uint32_t r = ((((a >> 16) & 0xFF) * inv_alpha + ((b >> 16) & 0xFF) * alpha) >> 8) & 0xFF;
         uint32_t g = ((((a >> 8) & 0xFF) * inv_alpha + ((b >> 8) & 0xFF) * alpha) >> 8) & 0xFF;
         uint32_t bl = (((a & 0xFF) * inv_alpha + (b & 0xFF) * alpha) >> 8) & 0xFF;
-        dst[i] = 0xFF000000u | (r << 16) | (g << 8) | bl;
+        dst[i] = td5_argb8(0xFFu, r, g, bl);
     }
 }
 

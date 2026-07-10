@@ -20,6 +20,8 @@
  */
 
 #include "td5_ai.h"
+#include "td5_bytes.h"
+#include "td5_math_util.h"
 #include "td5_track.h"
 #include "td5_physics.h"
 #include "td5_platform.h"
@@ -4461,7 +4463,7 @@ static inline uint32_t smart_branch_rand(int slot) {
     return g_smart_branch_rng[slot] >> 16;
 }
 
-static inline int smart_iabs(int x) { return x < 0 ? -x : x; }
+static inline int smart_iabs(int x) { return td5_iabs(x); }
 
 /* Deterministic integer hash (no runtime RNG — reproducible across replays). */
 static inline uint32_t smart_hash_u32(uint32_t x) {
@@ -6665,7 +6667,7 @@ void td5_ai_recycle_traffic_actor(void) {
     player_span_norm = (int16_t)ai_player_span_lead();
 
     qp = g_traffic_queue_ptr;
-    q_span = (int16_t)(qp[0] | (qp[1] << 8));
+    q_span = td5_read_le16s(qp);
     if (q_span != -1) {
         for (;;) {
             int sx = (int)q_span;
@@ -6674,7 +6676,7 @@ void td5_ai_recycle_traffic_actor(void) {
             if ((sx - px) >= 0x28) break; /* ≥40 ahead → stop */
             /* fall through: too close — advance */
             qp += 4;
-            q_span = (int16_t)(qp[0] | (qp[1] << 8));
+            q_span = td5_read_le16s(qp);
             if (q_span == -1) break;
         }
     }
@@ -6722,7 +6724,7 @@ void td5_ai_recycle_traffic_actor(void) {
     /* [0x00435451-55] If queue cursor entry is -1 sentinel: commit cursor
      * and return. The pre-scan may have left q_span==-1 OR may have left a
      * valid entry; this check fires only when entry IS sentinel. */
-    if ((int16_t)(qp[0] | (qp[1] << 8)) == -1) {
+    if (td5_read_le16s(qp) == -1) {
         g_traffic_queue_ptr = qp;
         return;
     }
@@ -6743,7 +6745,7 @@ void td5_ai_recycle_traffic_actor(void) {
     rs_bytes = (uint8_t *)rs;
     /* Refresh q_span and qp[2..3] from cursor (may have been advanced by
      * pre-scan, then validated above). */
-    q_span   = (int16_t)(qp[0] | (qp[1] << 8));
+    q_span   = td5_read_le16s(qp);
     q_flags  = qp[2];
     q_byte_3 = qp[3];
 
@@ -7102,7 +7104,7 @@ void td5_ai_init_traffic_actors(void) {
         int lane_count;
         int orig_queue_span;          /* preserved for REMAP path post-call */
 
-        queue_span  = (int16_t)(qp[0] | ((uint16_t)qp[1] << 8));
+        queue_span  = td5_read_le16s(qp);
         queue_byte2 = qp[2];
         queue_byte3 = qp[3];
         orig_queue_span = (int)queue_span;
@@ -9551,7 +9553,7 @@ void td5_ai_traffic_dynamic_race_init(void)
         int32_t side_n[2]   = { 0, 0 };
         memset(votes, 0, sizeof(votes));
         for (int i = 0; i < 4096; i++, qp += 4) {
-            int16_t q_span = (int16_t)(qp[0] | (qp[1] << 8));
+            int16_t q_span = td5_read_le16s(qp);
             int pol, lane, lc;
             if (q_span == -1) break;
             pol  = (int)(qp[2] & 1u);

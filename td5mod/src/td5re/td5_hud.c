@@ -22,6 +22,7 @@
  */
 
 #include "td5_hud.h"
+#include "td5_math_util.h"
 #include "td5_platform.h"
 #include "td5_asset.h"
 #include "td5_render.h"
@@ -8000,7 +8001,7 @@ static void hud_draw_player_damage_bar(int player_slot, int view_index)
     if (r > 255) r = 255;
     if (g < 0) g = 0;
     if (g > 255) g = 255;
-    uint32_t fill = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+    uint32_t fill = td5_argb8(0xFFu, (uint32_t)r, (uint32_t)g, (uint32_t)b);
 
     hud_solid_quad(bl - ob, bt - ob, bl + bw + ob, bt + bh + ob, sz, rhw, 0xFF000000u); /* border */
     hud_solid_quad(bl, bt, bl + bw, bt + bh, sz, rhw, 0xC0202020u);                      /* track  */

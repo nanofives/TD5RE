@@ -13,6 +13,8 @@
 #ifndef TD5_RENDER_INTERNAL_H
 #define TD5_RENDER_INTERNAL_H
 
+#include "td5_math_util.h"
+
 /* ------------------------------------------------------------------------
  * Render state vocabulary hoisted VERBATIM from td5_render.c (P1-C):
  * constants, pool typedefs, the RenderScratch re-entrancy struct and the
@@ -569,12 +571,7 @@ static inline TD5_MeshVertex *rs_vtx_rebase(void *p)
     return (TD5_MeshVertex *)p;
 }
 
-static inline int clampi(int x, int lo, int hi)
-{
-    if (x < lo) return lo;
-    if (x > hi) return hi;
-    return x;
-}
+/* clampi -> td5_math_util.h (shared, A10 refactor) */
 
 
 /* ------------------------------------------------------------------------

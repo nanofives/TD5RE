@@ -26,6 +26,7 @@
  */
 
 #include "td5_asset.h"
+#include "td5_bytes.h"
 #include "td5_assetsrc.h" /* pack-on-load editable sources (step 0) */
 #include "td5_customcar.h" /* drop-in custom car registry (slots 76+) */
 #include "td5_track.h"
@@ -770,16 +771,10 @@ int td5_asset_get_page_transparency(int page_id)
  *   ZIP-format byte-faithful. */
 
 /** Read a little-endian uint16 from a byte pointer. */
-static inline uint16_t read_u16(const uint8_t *p)
-{
-    return (uint16_t)(p[0] | (p[1] << 8));
-}
+static inline uint16_t read_u16(const uint8_t *p) { return td5_read_le16(p); }
 
 /** Read a little-endian uint32 from a byte pointer. */
-static inline uint32_t read_u32(const uint8_t *p)
-{
-    return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
-}
+static inline uint32_t read_u32(const uint8_t *p) { return td5_read_le32(p); }
 
 /**
  * Locate the End of Central Directory Record in a ZIP file.

@@ -9,6 +9,7 @@
  * ======================================================================== */
 
 #include "td5_frontend.h"
+#include "td5_bytes.h"
 #include "td5_asset.h"
 #include "td5_track_registry.h"  /* custom-track registry: name/slot lookups + slot headroom */
 #include "td5_game.h"
@@ -341,12 +342,11 @@ static int          s_cps_built = 0;
 
 static int32_t cps_rd_i16(const uint8_t *d, int sz, int off) {
     if (off < 0 || off + 2 > sz) return 0;
-    return (int32_t)(int16_t)((uint16_t)d[off] | ((uint16_t)d[off + 1] << 8));
+    return td5_read_le16s(d + off);
 }
 static int32_t cps_rd_i32(const uint8_t *d, int sz, int off) {
     if (off < 0 || off + 4 > sz) return 0;
-    return (int32_t)((uint32_t)d[off] | ((uint32_t)d[off + 1] << 8) |
-                     ((uint32_t)d[off + 2] << 16) | ((uint32_t)d[off + 3] << 24));
+    return td5_read_le32s(d + off);
 }
 
 /* Per-bar raw value, with the inversion-direction baked in so that a HIGHER
