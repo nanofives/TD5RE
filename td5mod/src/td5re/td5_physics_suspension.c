@@ -1599,10 +1599,10 @@ outer_test:
  * [CONFIRMED @ 0x00407840: called from UpdateTrafficActorMotion 0x443ED0]
  *
  * Only fires when track_span_raw == g_trackTotalSpanCount - 1 (last span).
- * [CONFIRMED @ 0x407879: `if (actor->track_span == DAT_00483550 + -1)`]
+ * [CONFIRMED @ 0x407879: `if (actor->track_span == g_trackRuntimeDataPtr + -1)`]
  *
  * [CONFIRMED @ 0x00407840] Byte-faithful with orig ProcessActorRouteAdvance.
- *   - Wrap-span strip indexed at DAT_00483550 (total_spans), matching the
+ *   - Wrap-span strip indexed at g_trackRuntimeDataPtr (total_spans), matching the
  *     port's `td5_track_get_span(0)` ring-wrap.
  *   - lane_count byte source = byte +0x03 (fixed 2026-05-18, was +0x01).
  *   - Vertex pair = single rail from base to base+lane_nibble (fixed
@@ -1624,7 +1624,7 @@ void process_traffic_route_advance(TD5_Actor *actor, int slot)
     if (span_idx != total_spans - 1) return;
 
     /* Last span in the ring — test forward edge using vertices of span 0 wrap.
-     * [CONFIRMED @ 0x40787E: uses span_at(DAT_00483550) i.e. last+1 = wrap to 0] */
+     * [CONFIRMED @ 0x40787E: uses span_at(g_trackRuntimeDataPtr) i.e. last+1 = wrap to 0] */
     TD5_StripSpan *sp_last = td5_track_get_span(span_idx);
     if (!sp_last) return;
     TD5_StripSpan *sp_wrap = td5_track_get_span(0);  /* wraps to span 0 */
@@ -1697,7 +1697,7 @@ void process_traffic_route_advance(TD5_Actor *actor, int slot)
  *   - Strip:    strip[fwd_sentinel]        (vs strip[rev_sentinel])
  *   - Vertices: psVar2=left_base, psVar3=left_base+lane_count (NOT reversed)
  *
- * [CONFIRMED @ 0x4076C0] if (*(short*)(actor+0x80) == DAT_00483954 + 1)
+ * [CONFIRMED @ 0x4076C0] if (*(short*)(actor+0x80) == g_currentCheckpointStripIndex + 1)
  * [CONFIRMED @ 0x443ED0] called after ProcessActorRouteAdvance, before
  *                         ProcessActorSegmentTransition.
  */
@@ -1711,7 +1711,7 @@ void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
     if (span_idx != fwd_sentinel + 1) return;
 
     /* Use the strip at fwd_sentinel for the boundary edge
-     * [CONFIRMED @ 0x4076E8: iVar1 = g_trackStripRecords + DAT_00483954 * 0x18] */
+     * [CONFIRMED @ 0x4076E8: iVar1 = g_trackStripRecords + g_currentCheckpointStripIndex * 0x18] */
     TD5_StripSpan *sp = td5_track_get_span(fwd_sentinel);
     if (!sp) return;
 
@@ -2107,7 +2107,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     actor->euler_accum.pitch += actor->angular_velocity_pitch;
 
     /* 3. Integrate linear velocity into position.
-     * The original gates this on DAT_00483030 (ref_count=1, read-only), which
+     * The original gates this on g_freezeHorizontalIntegration (ref_count=1, read-only), which
      * is never written, so effectively always runs. With dynamics skipped
      * during pause, vel_x/vel_z stay 0 and the integration is a no-op. */
     actor->world_pos.x += actor->linear_velocity_x;

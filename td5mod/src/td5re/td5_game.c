@@ -157,7 +157,7 @@ extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffe
  *         (focal = w*0.5625, h_cos = focal/h_len, etc.). Caller also
  *         resets g_projectionDepthBias = 0x1000 — port mirrors this at
  *         td5_render.c:2537 [CONFIRMED @ 0x0043E7E0].
- *     8) Center pos: gRenderCenter{X,Y} = render{W,H}F * DAT_0045d5d0 (= 0.5).
+ *     8) Center pos: gRenderCenter{X,Y} = render{W,H}F * g_halfFloatConstant (= 0.5).
  *     9) Call InitializeRaceViewportLayout @ 0x0042C2B0.
  *     10) Call LoadStaticTrackTextureHeader.
  *         [ARCH-DIVERGENCE @ 0x00442560 LoadStaticTrackTextureHeader]
@@ -1612,7 +1612,7 @@ int32_t td5_game_get_race_timer(int slot, int lap_index)
  * actual run instead of all "-" / 0. */
 
 /* Returns the primary_metric (finish time ticks) for a given slot.
- * 0 = not finished or out-of-range. [CONFIRMED: DAT_0048d990 = primary base] */
+ * 0 = not finished or out-of-range. [CONFIRMED: g_raceFinalResultsSlot0_primaryMetric = primary base] */
 int32_t td5_game_get_result_primary(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
@@ -1806,7 +1806,7 @@ int td5_game_slot_finish_place(int slot)
 }
 
 /* 0-based finish position for a slot (0=1st, 1=2nd, ...).
- * [CONFIRMED @ 0x004233E0 dispatch] mirrors DAT_0048d988._2_2_ — the int16 at
+ * [CONFIRMED @ 0x004233E0 dispatch] mirrors g_raceResults._2_2_ — the int16 at
  * offset +2 of s_results entry (stride 0x14 = 20 bytes), written by the sort
  * functions at 0x40AAD0/0x40AB80. Returns -1 if unsorted (still 0 from BSS). */
 int td5_game_get_finish_position(int slot)
@@ -3037,8 +3037,8 @@ static void init_race_level_and_assets(void)
      * actor even though td5_ai + td5_physics are ticking them.
      *
      * Model selection now uses the original's two-level lookup chain via
-     * td5_asset_resolve_traffic_model_index: per-track row in DAT_00474ce8
-     * selected via DAT_00474d74[g_trackPoolIndex]. Resolver returns -1
+     * td5_asset_resolve_traffic_model_index: per-track row in g_trafficVehicleVariantTable
+     * selected via g_trafficVehicleSkinTable[g_trackPoolIndex]. Resolver returns -1
      * when the track's pool index >= 25, matching the original guard
      * @ 0x004435ad (`iVar15 < 0x19`) which gates a zero-sized traffic
      * allocation.
@@ -4644,7 +4644,7 @@ int td5_game_init_race_session(void) {
     s_pause_endrace_confirm = 0;   /* [END RACE NOW 2026-06-30] clear stale force-finish confirm */
     s_pause_action_confirm = 0;    /* [PAUSE CONFIRM 2026-07-02] clear stale RESTART/QUIT/EXIT confirm */
     g_td5.paused = 1;              /* start paused for countdown */
-    /* DAT_00483030 (xz_freeze) has 1 read / 0 writes in the original binary.
+    /* g_freezeHorizontalIntegration (xz_freeze) has 1 read / 0 writes in the original binary.
      * The port previously set a software flag here to gate XZ integration,
      * but the original leaves position integration active during pause and
      * relies on vel_x/vel_z staying 0 because dynamics is skipped. Dead

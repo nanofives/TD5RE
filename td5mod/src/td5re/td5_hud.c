@@ -7678,7 +7678,7 @@ void td5_hud_render(void)
  *  clip-rect setter, NOT a fade renderer; L5 promotion sweep 2026-05-21]
  *  — Ghidra-verified: orig 0x0043E750 takes 4 floats (param_1..param_4),
  *  pairwise-mins them (`if (param_2 < param_1) param_1 = param_2;` etc.),
- *  and stores to globals at DAT_004afb38/0x3c/0x40/0x44 (the projection
+ *  and stores to globals at g_clipBoundsMinX/0x3c/0x40/0x44 (the projection
  *  clip rect used by later vertex transforms). This is the equivalent of
  *  td5_render_set_clip_rect (td5_render.c:5570) which casts to int and
  *  pushes to td5_plat_render_set_clip_rect (D3D11 scissor). The port's

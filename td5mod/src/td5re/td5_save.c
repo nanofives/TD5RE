@@ -1408,8 +1408,8 @@ static void cup_serialize_to_buffer(void)
      *
      * Re-examining the Ghidra output for RestoreRaceStatusSnapshot:
      *   uVar2 = 0xFFFFFFFF;
-     *   do { uVar2 = ... CRC over full buffer ... } while (uVar3 < DAT_00494bbc);
-     *   if (DAT_00490bb8 == ~uVar2) { ... }
+     *   do { uVar2 = ... CRC over full buffer ... } while (uVar3 < g_snapshotPayloadSize);
+     *   if (g_snapshotCrc32 == ~uVar2) { ... }
      * This checks: stored_crc_at_0x0C == CRC32(full_buffer).
      * But the full_buffer includes the CRC bytes at 0x0C!
      *

@@ -259,7 +259,7 @@ int16_t td5_input_get_player_steering_bias(int player);
 /** Set the 16-bit per-player input source word that feeds the weight calc. */
 void    td5_input_set_player_steering_bias_input(int player, int16_t value);
 
-/** Steering bias maximum swing (orig DAT_0048301c g_steeringBiasMaxSwing). */
+/** Steering bias maximum swing (orig g_steeringBiasMaxSwing g_steeringBiasMaxSwing). */
 extern int32_t g_td5_steering_bias_max_swing;
 
 /* ========================================================================

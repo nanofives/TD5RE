@@ -210,7 +210,7 @@ int32_t g_collisions_enabled = 0;     /* DAT_00463188 (== orig's `g_cameraMode`)
                                                 * 0x004155BD / 0x0041DC8E). Setter `td5_physics_set_collisions`
                                                 * preserves that inversion. */
 int32_t g_game_paused = 0;                   /* DAT_004AAD60 (shared w/ assists TU via td5_physics_internal.h) */
-static int32_t g_xz_freeze = 0;             /* DAT_00483030: 1=freeze XZ during countdown */
+static int32_t g_xz_freeze = 0;             /* g_freezeHorizontalIntegration: 1=freeze XZ during countdown */
 
 /* [COP CHASE ARREST FREEZE 2026-06-25] An arrested suspect is fully immobilized
  * (its drive integrator is skipped and its velocity is zeroed every tick). Knob
@@ -3975,7 +3975,7 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
      * the static call graph (verified: only this function writes them). */
     int16_t *wcn_p = (int16_t *)(ap + 0x230);   /* DAT_00483024: wheel_contact_normals base */
     uint32_t i_idx = 0;                          /* DAT_00483028: wheel index counter */
-    int32_t  sum   = 0;                          /* DAT_00483020: accumulator (EAX) */
+    int32_t  sum   = 0;                          /* g_missingWheelVelocityScratch: accumulator (EAX) */
     int32_t  cnt   = 0;                          /* DAT_00483038: missing-wheel count (EDI) */
     int16_t *hn_p  = (int16_t *)(ap + 0x290);   /* DAT_00483044: heading_normal base */
 
@@ -3997,7 +3997,7 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
      * filter above for masks 0..0xF). */
     sum = (sum / cnt) * (int32_t)hn_p[1];           /* IMUL EAX, [ESI+0x292] */
     int32_t avg_norm = mwvc_sar_rz(sum, 12);        /* CDQ/AND 0xFFF/ADD/SAR 12 */
-    /* avg_norm == DAT_00483020 at this point */
+    /* avg_norm == g_missingWheelVelocityScratch at this point */
 
     /* [0x403F51..F8D] Cos/Sin of display_angles.yaw (int16 @ +0x20A).
      * Both calls take the same MOVSX-promoted argument. Original then
@@ -5079,7 +5079,7 @@ void td5_physics_set_paused(int paused)
 void td5_physics_set_xz_freeze(int freeze)
 {
     if (g_xz_freeze != freeze) {
-        TD5_LOG_I(LOG_TAG, "XZ freeze=%d (DAT_00483030)", freeze);
+        TD5_LOG_I(LOG_TAG, "XZ freeze=%d (g_freezeHorizontalIntegration)", freeze);
         g_xz_freeze = freeze;
     }
 }

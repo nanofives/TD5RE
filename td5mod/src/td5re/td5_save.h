@@ -239,7 +239,7 @@ void td5_save_get_track_lock_table(uint8_t *out_track_locks, int count);
  *  Returns the number of newly unlocked items. */
 int  td5_save_apply_cup_unlocks(int game_type);
 /** Like td5_save_apply_cup_unlocks but also fills separate car/track counts.
- *  [CONFIRMED @ 0x423A80]: original tracks DAT_00494bb0 (cars) / DAT_00494bb4 (tracks) separately. */
+ *  [CONFIRMED @ 0x423A80]: original tracks g_cupSchedule_currentCup (cars) / g_cupSchedule_currentRound (tracks) separately. */
 int  td5_save_apply_cup_unlocks_ex(int game_type, int *cars_out, int *tracks_out);
 
 /* ========================================================================

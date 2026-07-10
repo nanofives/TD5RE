@@ -197,7 +197,7 @@ int32_t s_billboard_anim_phase;        /* extern: effects TU advances billboard 
  * ======================================================================== */
 
 static int s_globals_initialized;   /* DAT_0048dba8 */
-static int s_state_active;          /* DAT_0048dba0 */
+static int s_state_active;          /* g_raceRenderInitialized */
 /* s_scene_has_renderer_geometry moved to RenderScratch (Phase B Stage 1). */
 int s_debug_fallback_log_count;
 static int s_debug_clip_log_count;
@@ -1551,8 +1551,8 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
  * [ARCH-DIVERGENCE: globals + ClipAndSubmit -> direct param list;
  *  Phase 5(d) L5 audit 2026-05-21]
  *   Orig EmitTranslucentTriangleStrip @ 0x00431750: per-tri loop writes
- *   DAT_004af268 (vertex ptr = cmd+0xC), DAT_004af278 (vert count), the
- *   material handle (cmd+0x02), DAT_004af27c (count=3 or 4), then calls
+ *   g_currentPrimitiveTopology (vertex ptr = cmd+0xC), g_currentPrimitiveVertexStride (vert count), the
+ *   material handle (cmd+0x02), g_currentPrimitiveIndexStride (count=3 or 4), then calls
  *   ClipAndSubmitProjectedPolygon which reads those globals. The orig also
  *   has a second loop for quads (count=4) appended at vertex_ptr + tri_count
  *   *0x84. Port passes (verts, 3/4, tex_page) directly to
@@ -1588,8 +1588,8 @@ static void dispatch_tristrip(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
  *
  * [ARCH-DIVERGENCE: globals -> parameter list; L5 sweep 2026-05-21]
  *   Mirror of the quad path with vert count 3 instead of 4. Orig writes the
- *   same four globals (DAT_004af268=cmd+8, DAT_004af278=1, material handle
- *   from cmd+2, DAT_004af27c=3) then calls ClipAndSubmitProjectedPolygon;
+ *   same four globals (g_currentPrimitiveTopology=cmd+8, g_currentPrimitiveVertexStride=1, material handle
+ *   from cmd+2, g_currentPrimitiveIndexStride=3) then calls ClipAndSubmitProjectedPolygon;
  *   port passes (verts, 3, tex_page) explicitly into clip_and_submit_polygon.
  *   Same vertex source and texture-page semantics.
  */
@@ -1608,8 +1608,8 @@ static void dispatch_projected_tri(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_v
  * Single quad (4 vertices), submitted through clip + project pipeline.
  *
  * [ARCH-DIVERGENCE: globals -> parameter list; L5 sweep 2026-05-21]
- *   Orig writes DAT_004af268 (vertex ptr = cmd+8), DAT_004af278=1, sets
- *   g_renderCurrentMaterialHandle from cmd+2, DAT_004af27c=4 (vert count),
+ *   Orig writes g_currentPrimitiveTopology (vertex ptr = cmd+8), g_currentPrimitiveVertexStride=1, sets
+ *   g_renderCurrentMaterialHandle from cmd+2, g_currentPrimitiveIndexStride=4 (vert count),
  *   then calls ClipAndSubmitProjectedPolygon (which reads the four globals).
  *   Port passes (verts, 4, tex_page) explicitly into clip_and_submit_polygon,
  *   eliminating the global-write step. Same vertex source, same vert count,
@@ -1672,7 +1672,7 @@ static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts
  * Opcode 5: EmitTranslucentTriangleStripDirect (0x431730)
  *
  * [CONFIRMED @ 0x00431730 EmitTranslucentTriangleStripDirect; L5 sweep 2026-05-21]
- *   Orig: DAT_004af268 = param_1+8; InsertTriangleIntoDepthSortBuckets(param_1);
+ *   Orig: g_currentPrimitiveTopology = param_1+8; InsertTriangleIntoDepthSortBuckets(param_1);
  *   Routes through depth-sort bucket queue (translucent primitives need
  *   back-to-front ordering for correct alpha blending). Prior port routed
  *   through clip_and_submit_polygon (immediate raster), bypassing depth-sort
@@ -1716,7 +1716,7 @@ static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base
  * Opcode 6: EmitTranslucentQuadDirect (0x4316D0)
  *
  * [CONFIRMED @ 0x004316D0 EmitTranslucentQuadDirect; L5 sweep 2026-05-21]
- *   Orig: DAT_004af268 = param_1+8; QueueProjectedPrimitiveBucketEntry(param_1);
+ *   Orig: g_currentPrimitiveTopology = param_1+8; QueueProjectedPrimitiveBucketEntry(param_1);
  *   Routes through depth-sort bucket queue (translucent primitives need
  *   back-to-front ordering for correct alpha blending). Prior port routed
  *   through clip_and_submit_polygon (immediate raster).
@@ -1743,7 +1743,7 @@ static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_ver
 /* --- Module Lifecycle --- */
 
 /* [CONFIRMED @ 0x0040AE80 InitializeRaceRenderState; Phase 5(d) L5 audit 2026-05-21]
- *   Orig is a one-shot gate (`if (DAT_0048dba0 == 1) return 0;`) that calls
+ *   Orig is a one-shot gate (`if (g_raceRenderInitialized == 1) return 0;`) that calls
  *   InitializeTranslucentPrimitivePipeline + InitializeProjectedPrimitiveBuckets
  *   + ResetProjectedPrimitiveWorkBuffer, sets the sentinel, and arms the
  *   clear-screen flag. Port collapses the three sub-routines (folded under
@@ -1839,10 +1839,10 @@ int td5_render_init(void)
 
 /* [ARCH-DIVERGENCE: D3D3 ReleaseRaceRenderResources -> D3D11 abstracted shutdown; L5 sweep 2026-05-21]
  *   Mirrors ReleaseRaceRenderResources @ 0x0040AEC0 (orig: DXD3DTexture::ClearAll
- *   + write 0 to d3d_exref+0xa34 if DAT_0048dba0 != 0). Port routes texture
+ *   + write 0 to d3d_exref+0xa34 if g_raceRenderInitialized != 0). Port routes texture
  *   teardown through td5_render_reset_texture_cache and clears fog + active
  *   sentinel (s_state_active / s_globals_initialized), absorbing the orig's
- *   DAT_0048dba0 gate. */
+ *   g_raceRenderInitialized gate. */
 void td5_render_shutdown(void)
 {
     TD5_LOG_I(RENDER_LOG_TAG, "Releasing render resources");
@@ -2028,7 +2028,7 @@ void td5_render_configure_fog(uint32_t color, int enable)
  *  LoadGlobalOrientationToRenderState; Phase 5(d) L5 audit 2026-05-21]
  *   Orig LoadRenderRotationMatrix copies 9 floats from param_1[0..8] into
  *   g_currentRenderTransform[0..8]. Orig LoadGlobalOrientationToRenderState
- *   is a 1-call wrapper: LoadRenderRotationMatrix(&DAT_004ab040). Port
+ *   is a 1-call wrapper: LoadRenderRotationMatrix(&g_cameraBasisMatrix_m00). Port
  *   td5_render_load_rotation is the identical 9-float copy; the global-
  *   orientation wrapper is folded into callers that pass
  *   &g_raceRotationMatrix directly. Both byte-faithful. */
@@ -2349,7 +2349,7 @@ static int tl_normalize_4096(const int16_t in[3], int16_t out[3])
  *   All-zero RGB disables the slot.
  * [CONFIRMED @ 0x0042E130] L5 promotion sweep audit (2026-05-18). Byte-faithful
  *   port: same all-zero-disable gate, same (R+G+B)/3 intensity, same
- *   1/1024 attenuation (DAT_0045d6a0 = 0x3a800000 = 1/1024 IEEE754).
+ *   1/1024 attenuation (k_lightContribDirScale = 0x3a800000 = 1/1024 IEEE754).
  *   Minor 1-LSB rounding divergence: orig (int)((R+G+B)/3) truncates
  *   before float convert; port (float)(R+G+B)/3.0f preserves fraction.
  *   Result diverges <= 1.0 on intensity for non-multiples-of-3,
@@ -2398,13 +2398,13 @@ static void tl_set_depth(int r, int g, int b)
  *   For each slot, transform its world-frame contribution into body frame
  *   via M^T (port matrix layout: m[0..2]=row0, m[3..5]=row1, m[6..8]=row2,
  *   so column j = {m[j], m[j+3], m[j+6]}). Disabled slots fall back to the
- *   default zero vector (DAT_004ab0f8/0fc/100 verified zero in memory).
+ *   default zero vector (g_trackLightFallbackDirX/0fc/100 verified zero in memory).
  *
  * L5 promotion sweep audit (2026-05-18) — byte-equivalent, render-side
  * with two intentional ARCH-DIVERGENCEs.
  *
  *   - 3-slot M^T transform: orig computes per-slot
- *     [DAT_004ab0d0/d4/d8] = contrib.x * m[0] + contrib.y * m[3] + contrib.z * m[6]
+ *     [g_activeLightBasisDirX/d4/d8] = contrib.x * m[0] + contrib.y * m[3] + contrib.z * m[6]
  *     (and the y/z output rows likewise reading m[1,4,7] and m[2,5,8]).
  *     Port's tl_commit_to_render_globals does the identical column-sum.
  *     [CONFIRMED @ 0x0042CEA9-0x0042CEFA decomp lines (slot 0),
@@ -3949,7 +3949,7 @@ void td5_render_fallback_strip_ribbon(int center_span, int window,
  * [ARCH-DIVERGENCE: depth-sort bucket management] Phase 5(a) class manifest (2026-05-21)
  *
  * Orig's depth-sort bucket system uses raw-heap scratch buffers and
- * global state (DAT_004af268 / DAT_004af278) for the projected-primitive
+ * global state (g_currentPrimitiveTopology / g_currentPrimitiveVertexStride) for the projected-primitive
  * linked lists. Port consolidates this into typed struct arrays (one
  * TD5_RenderBucketEntry per slot) plus inline reset semantics inside
  * td5_render_flush_projected_buckets and td5_render_init. Four orig
@@ -4060,14 +4060,14 @@ void td5_render_fallback_strip_ribbon(int center_span, int window,
  * port call site or definition.
  *
  *   0x0040AE80  InitializeRaceRenderState        [CONFIRMED — byte-faithful init guard]
- *     Orig: 3-call sequence + sentinel set (DAT_0048dba0, bClearScreen) under
+ *     Orig: 3-call sequence + sentinel set (g_raceRenderInitialized, bClearScreen) under
  *     a one-shot gate. Port td5_render_init (td5_render.c:~987) merges the
  *     three init sub-routines (InitializeTranslucentPrimitivePipeline,
  *     InitializeProjectedPrimitiveBuckets, ResetProjectedPrimitiveWorkBuffer)
  *     into a single inline reset pass; the sentinel collapses to s_initialized.
  *
  *   0x0042E9C0  LoadGlobalOrientationToRenderState [CONFIRMED — byte-faithful wrapper]
- *     Orig: single LoadRenderRotationMatrix(&DAT_004ab040) call. Port routes
+ *     Orig: single LoadRenderRotationMatrix(&g_cameraBasisMatrix_m00) call. Port routes
  *     through td5_render_load_rotation((Mat3x3*)&g_raceRotationMatrix), same
  *     9-float copy. Used by RenderRaceActorForView path.
  *

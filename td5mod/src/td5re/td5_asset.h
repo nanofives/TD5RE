@@ -299,8 +299,8 @@ TD5_MeshHeader *td5_asset_load_cop_mesh(int model_index);
  * LoadRaceVehicleAssets @ 0x00443280:
  *   gScheduleToPoolIndex[track_index] -> pool_row
  *   gTrackPoolSpanCountTable[pool_row] (or Reverse variant) -> pool_idx
- *   DAT_00474d74[pool_idx] -> row
- *   DAT_00474ce8[row][slot_in_pool] -> model_index
+ *   g_trafficVehicleSkinTable[pool_idx] -> row
+ *   g_trafficVehicleVariantTable[row][slot_in_pool] -> model_index
  *
  * Returns the model index (0..30) in traffic.zip, or -1 when the track has
  * no traffic pool (original behavior: pool_idx >= 25 gates the size query

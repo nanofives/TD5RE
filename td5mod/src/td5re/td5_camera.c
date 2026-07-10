@@ -747,7 +747,7 @@ void FinalizeCameraProjectionMatrices(void)
  *   - inv_dist = _DAT_0046737c / sqrt(dist_sq) (g_invDistScale)
  *   - degenerate-case branch on horiz_len <= g_audioDopplerZeroSentinel
  *     (sentinel reuses near-zero compare const)
- *   - non-degenerate branch writes secondary matrix DAT_004ab070..090
+ *   - non-degenerate branch writes secondary matrix g_cameraBasisMatrix_m11 (0x004ab070..090)
  *     identically (right.x, right.z = -fwd.x/h, up.x = -fy*fx/h, up.y = h,
  *     up.z = fz*fy/h, secondary row1/2 mirrors)
  *   - yaw_rot uses (sin,cos) swap matching orig's `local_60=cos local_5c=-sin`
@@ -921,9 +921,9 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
  *     - Fly-in counter behaviour (ramp/decrement around g_flyInThreshold,
  *       inverted clamp to 6 when actor+0x379 != 0) reproduces orig.
  *     - Orbit visual angle = g_camYawOffset[v] - (g_camOrbitAngleFP[v]>>8)
- *       matches DAT_00482f70 - (DAT_00482f18>>8).
+ *       matches g_cameraYawOffsetView - (g_cameraSpringYawAccum>>8).
  *     - Orbit-offset sin/cos*radius (writes [0]/[2]; [1] = stored pitch)
- *       matches orig sin/cos writes to DAT_00482ed8/edc/ee0.
+ *       matches orig sin/cos writes to g_cameraOrbitOffsetIntermediate/edc/ee0.
  *     - Heading integrator: 20-bit shortest-wrap, abs/5 + 5 base speed,
  *       clamp >= 15 unless fly-in completed, integrate
  *       (effective_speed * heading_delta) >> 8 — line-by-line match.
@@ -940,7 +940,7 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
  *   fb60d3d-class fix verified by this sweep.
  *
  * [ARCH-DIVERGENCE — DAT_*-bank globals → named C-arrays]
- *   Orig writes to fixed DAT addresses (DAT_00482ed8/edc/ee0/f18/f50/f54/
+ *   Orig writes to fixed DAT addresses (g_cameraOrbitOffsetIntermediate/edc/ee0/f18/f50/f54/
  *   f60/f70/fa0/ef8/f00/f10). Port collects all per-view state into named
  *   arrays (g_camOrbitOffset, g_camOrbitAngleFP, g_camOrientShort,
  *   g_camHeadingDelta20, g_camYawOffset, g_camStoredPitch, g_camRotationSlot,
@@ -2576,7 +2576,7 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
  *   Per-axis shortest-path wrap delta (`((target-cached-0x800)&0xFFF) -
  *   0x800) * g_subTickFraction`) reproduced exactly. cam_angles[1] (yaw)
  *   gets the g_camYawOffset[v] addition, matching uStack_a addition with
- *   DAT_00482f70[viewIndex*4] in the original.
+ *   g_cameraYawOffsetView[viewIndex*4] in the original.
  *   Offset transform through actor rotation matrix + 0x100-scaling +
  *   world_pos + (linear_velocity * g_subTickFraction) is identical.
  *   BuildCameraBasisFromAngles called twice (pre- and post-position set)
@@ -2825,7 +2825,7 @@ void UpdateRaceCameraTransitionState(int actor, int view)
  * [CONFIRMED @ 0x00402000 ResetRaceCameraSelectionState; L5 promotion sweep
  *  audit 2026-05-18] -- Byte-faithful port (NOT ARCH-DIVERGENCE).
  *  Two-branch dispatch matches orig exactly:
- *    param == 0: restore from packed save (DAT_00482f48 / +0x82fd4):
+ *    param == 0: restore from packed save (g_savedPlayer1CameraView / +0x82fd4):
  *                  preset[0] = packed[0] & 0x7F
  *                  mode[0]   = (packed[0] & 0xFF) >> 7
  *                  preset[1] = packed[1] & 0x7F
@@ -3136,7 +3136,7 @@ void SelectTracksideCameraProfile(int actor, int view)
  * [CONFIRMED @ 0x00402950 UpdateStaticTracksideCamera; REG-3 verdict 2026-05-22]
  *   Byte-faithful Y baseline. Orig reads
  *     vtx[(strip[+4] + g_cameraProfileVertOffset[v]) * 6 + 2]
- *   from the per-profile g_cameraProfileVertOffset @ DAT_00482eb8. Cross-ref
+ *   from the per-profile g_cameraProfileVertOffset @ g_cameraProfileVertOffset. Cross-ref
  *   audit (mcp__ghidra__reference_to 0x00482eb8) shows ONLY two refs to that
  *   global — both READS at 0x004024dc (UpdateTracksideCamera case 0) and
  *   0x0040299a (this function). NO ORIG WRITER exists; the variable remains
@@ -3768,7 +3768,7 @@ void td5_camera_set_preset(int pi)
         g_raceCameraPresetMode[rv]  = 0;
         /* [FIX 2026-07-02 end-race-now stale camera yaw] Original's
          * UpdateRaceCameraTransitionState [CONFIRMED @ 0x0042B580 RunRaceFrame,
-         * unconditional per-frame call; 0x00401FB6/0x00401FD9 write DAT_00482f70]
+         * unconditional per-frame call; 0x00401FB6/0x00401FD9 write g_cameraYawOffsetView]
          * continuously re-clamps this yaw offset to 0 (or 0x800 during an
          * actively-held rear-view) every frame for any non-finished actor. The
          * port only reproduces that clamp while the race-start countdown is

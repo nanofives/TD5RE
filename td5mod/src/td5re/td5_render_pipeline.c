@@ -94,7 +94,7 @@ static void td5_trig_build_lut(void) {
         pun.u = td5_trig_lut_bits[i];
         s_cosFloatTable[i] = pun.f;
     }
-    /* The int (FP12 fixed-point) LUT — DAT_00483984 in the original — is
+    /* The int (FP12 fixed-point) LUT — g_sinCosLut_fixed12 in the original — is
      * derived from the float LUT by `lrintf(float * 4096.0f)` using FISTP
      * semantics (round-to-nearest-even). Build it here so CosFixed12bit /
      * SinFixed12bit stay byte-faithful to the original's int LUT as well.

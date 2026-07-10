@@ -316,7 +316,7 @@ static float    s_smoke_u0, s_smoke_v0, s_smoke_u1, s_smoke_v1;
 static float    s_smoke_page;
 
 /* Smoke sprite variant UV table -- orig DrawCallback @ 0x004297D0 reads
- * DAT_004aabb8 with stride 0x14 (5 floats) indexed by (phase >> 2) where
+ * g_spriteUvTemplateTable with stride 0x14 (5 floats) indexed by (phase >> 2) where
  * phase cycles 0..0x1F mod 32. The orig init loop at 0x00429630 writes 8
  * entries with col = i & 1, row = (i - sign)/2 (=> i/2 for unsigned), step
  * 32 texels (DAT_0045d5dc), cell w/h = 30.0 (0x41f00000). The smoke puff
@@ -407,7 +407,7 @@ static const char *vfx_weather_type_name(TD5_WeatherType type)
 
 /* --- Constants matching original binary --- */
 static const float FP_TO_FLOAT = 1.0f / 256.0f; /* DAT_004749d0 */
-static const float HALF_PIXEL  = 0.5f;           /* DAT_0045d5d0 */
+static const float HALF_PIXEL  = 0.5f;           /* g_halfFloatConstant */
 static const float PERSPECTIVE_SCALE = 180.0f;    /* DAT_00474e64 */
 static const float WEATHER_WIND_Y   = -250.0f;    /* DAT_00474e5c */
 static const float WEATHER_BOUNDS_X = 4000.0f;    /* DAT_00474e68 */
@@ -1025,7 +1025,7 @@ void td5_vfx_draw_particles(int view_index) {
         /* For smoke (type 0): refresh UVs every frame from variant table indexed
          * by (phase >> 2). Mirrors orig SmokeDrawCallback @ 0x004297D0 which sets
          * flag=2 in BuildSpriteQuadTemplate and writes the 4 corner UVs from
-         * DAT_004aabb8[phase >> 2]. Phase cycles 0..0x1F via SmokeUpdateCallback
+         * g_spriteUvTemplateTable[phase >> 2]. Phase cycles 0..0x1F via SmokeUpdateCallback
          * @ 0x00429950 (slot[0] = (slot[0] + 1) & 0x1F) so the puff animates
          * through 8 sub-cells, one cell every 4 ticks. */
         if (slot[PSLOT_TYPE] == 0) {
@@ -1537,7 +1537,7 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
     td5_render_pop_transform();
 
     /* Per-frame advance. Original [CONFIRMED @ 0x004466fe-0x0044674f]:
-     *   advect = view_motion * 4096.0 (DAT_0045d604) / (float)g_projectionDepthBias
+     *   advect = view_motion * 4096.0 (g_audioDopplerSpeedOfSound) / (float)g_projectionDepthBias
      * where g_projectionDepthBias @ 0x00467368 is INTEGER 1 (FILD), NOT a scale.
      * The prior port mis-identified 0x00467368 as g_worldToRenderScale (1/256)
      * and DIVIDED by it, so advect = view_motion * 4096 * 256 (~1e6) -> every

@@ -429,7 +429,7 @@ static int td5_ff_collision_dir_enabled(void)
 static int s_escape_muted = 0;
 static int s_escape_fade_active = 0;
 
-/* F3 key edge-detection latch [CONFIRMED @ 0x42C6FC: DAT_004aaf93] */
+/* F3 key edge-detection latch [CONFIRMED @ 0x42C6FC: g_f3PauseInputHeldFlag] */
 static uint8_t s_f3_held = 0;
 
 /* ========================================================================
@@ -1063,7 +1063,7 @@ post_poll:
     }
 
     /* F3 key edge detection [CONFIRMED @ 0x42C6FC-0x42C71F in FUN_0042C470].
-     * Original: rising edge sets DAT_004aaf93 (latch), falling edge clears
+     * Original: rising edge sets g_f3PauseInputHeldFlag (latch), falling edge clears
      * latch and pulses DAT_004aadf0=1. Reader (FUN_0042b580 main loop) clears
      * DAT_004aadf0 immediately with no other action — effectively dead code. */
     if (td5_plat_input_key_pressed(0x3D)) {
@@ -1942,8 +1942,8 @@ void td5_input_update_player_control(int slot)
 
 /* [ARCH-DIVERGENCE: 2-dword globals collapsed into per-slot array; L5 sweep 2026-05-21]
  *   Orig 0x00402E30 zeroes two specific dwords:
- *     _g_remoteBrakeCheatPerSlotLatch = 0;     (DAT_00483014)
- *     _g_playerControlAccum1 = 0;              (DAT_00483018)
+ *     _g_remoteBrakeCheatPerSlotLatch = 0;     (g_remoteBrakeCheatPerSlotLatch)
+ *     _g_playerControlAccum1 = 0;              (g_playerControlAccum1)
  *   Port stores NOS-latch state per-slot in s_nos_latch[TD5_MAX_RACER_SLOTS]
  *   rather than the orig's 2-dword pair. The port zeroes the whole array here
  *   to match the conceptual "reset all NOS accumulators" semantics. Orig's
@@ -2026,7 +2026,7 @@ int32_t        g_td5_steering_bias_max_swing  = 0;                    /* orig 0x
                                                                           (orig 0x00465ff8, range 0..9, ROM default = 4) at the
                                                                           MainMenu→1PRace transition (orig writer near 0x004155EA
                                                                           inside ScreenMainMenuAnd1PRaceFlow:
-                                                                          `DAT_0048301c = DAT_00465ff8;`). Port has no 2P-split,
+                                                                          `g_steeringBiasMaxSwing = g_twoPlayerCatchupAssist;`). Port has no 2P-split,
                                                                           so the value is effectively unused; keep BSS default. */
 
 void td5_input_update_player_steering_weight_balance(void)
@@ -2997,7 +2997,7 @@ void td5_input_ff_update_player(int player)
 
     /*
      * [CONFIRMED @ 0x4288E0]: (uint)(byte)(actor + slot*0x388 + 0x370)
-     * Surface type byte — indexes into DAT_00466afc = g_terrain_ff_coefficients[13].
+     * Surface type byte — indexes into g_ffCollisionCoefficientTable = g_terrain_ff_coefficients[13].
      * Formula: iVar2 = (0x1e - iVar2/10000) * coeff[surface_type]
      * where iVar2 is the already-clamped lateral_force.
      */

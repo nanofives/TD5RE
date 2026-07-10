@@ -52,11 +52,11 @@
 #define RS_ROUTE_TABLE_PTR        0x00
 #define RS_ROUTE_TABLE_SELECTOR   0x03
 #define RS_DEFAULT_THROTTLE       0x04
-/* RS dword 0x09 (byte 0x24) per Ghidra: DAT_004afb84 (0x004afb84) is the
+/* RS dword 0x09 (byte 0x24) per Ghidra: g_rs_track_offset_bias_slot0 (0x004afb84) is the
  * per-slot lateral_bias array. With gActorRouteStateTable base = 0x004afb60,
  * `0x4afb84 - 0x4afb60 = 0x24` bytes = dword index 9.
  * [CONFIRMED via Ghidra symbol audit pass 2026-05-11 cross-checking stride
- * against DAT_004afbb0 (+0x50 = index 20 = RS_ACTIVE_LOWER_BOUND) and
+ * against g_rs_active_upper_bound_slot0 (+0x50 = index 20 = RS_ACTIVE_LOWER_BOUND) and
  * gActorTrackSpanProgress (+0x64 = index 25 = RS_TRACK_PROGRESS).]
  *
  * A prior port revision used 0x0B with a comment that computed the offset
@@ -1401,7 +1401,7 @@ static void td5_ai_update_actor_track_bounds(int slot) {
             int32_t *probe = (int32_t *)(actor + probe_offsets[i]);
             int64_t prog64 = td5_track_compute_span_progress(span_raw, probe);
             progress[i] = (int32_t)(uint32_t)(prog64 & 0xFFFFFFFFu);
-            rs[10 + i] = progress[i];  /* RS scratch 10..13 = DAT_004afb88..94 */
+            rs[10 + i] = progress[i];  /* RS scratch 10..13 = g_rs_probe_progress_slot0_p0 (0x004afb88..94) */
         }
     }
 
@@ -1477,7 +1477,7 @@ static int td5_ai_remap_for_classify(int span_normalized) {
      *   iVar5 = span_normalized + 4
      *   if (g_trackTotalSpanCount <= iVar5):
      *     iVar5 = (span_normalized - g_trackTotalSpanCount) + 4
-     *   walk DAT_004c3da0 jump table for a matching entry; remap inline.
+     *   walk g_trackStripBlobAliasJunction jump table for a matching entry; remap inline.
      * The port's td5_track_branch_to_junction implements the same lookup
      * (post-wrap) for span indices >= ring_length. */
     int ring = td5_track_get_ring_length();
@@ -1948,14 +1948,14 @@ static void td5_ai_refresh_route_state_slot(int slot) {
             int racer_or_encounter = slot_is_racer || slot_is_encounter_9;
 
             if (self_table == g_route_tables[0]) {
-                /* Selector == LEFT (DAT_004afb58):
+                /* Selector == LEFT (g_activeRouteTablePtrA_left):
                  *   racer    : RS_LEFT_BOUNDARY_A   = RS_TRACK_OFFSET_BIAS
                  *   traffic  : RS_TRACK_OFFSET_BIAS = signed_offset(LEFT)
                  *              RS_LEFT_BOUNDARY_A   = same
                  *   both     : RS_LEFT_BOUNDARY_B   = signed_offset(RIGHT)
                  *              RS_ACTIVE_UPPER      = RS_RIGHT_BOUNDARY_A
                  *              RS_ACTIVE_LOWER      = RS_RIGHT_BOUNDARY_B
-                 * NB: original's `&DAT_004afbb4` / `&DAT_004afbb0` writes are
+                 * NB: original's `&g_rs_active_lower_bound_slot0` / `&g_rs_active_upper_bound_slot0` writes are
                  *     RS[0x15] / RS[0x14] in port-index land:
                  *     0x4afbb4 - 0x4afb60 = 0x54 → dword 0x15 = ACTIVE_UPPER_BOUND
                  *     0x4afbb0 - 0x4afb60 = 0x50 → dword 0x14 = ACTIVE_LOWER_BOUND */
@@ -1978,9 +1978,9 @@ static void td5_ai_refresh_route_state_slot(int slot) {
                 rs[RS_ACTIVE_UPPER_BOUND] = rs[RS_RIGHT_BOUNDARY_A];
                 rs[RS_ACTIVE_LOWER_BOUND] = rs[RS_RIGHT_BOUNDARY_B];
             } else {
-                /* Selector == RIGHT (DAT_004b08b4):
+                /* Selector == RIGHT (g_activeRouteTablePtrB_right):
                  *   racer    : RS_LEFT_BOUNDARY_B   = RS_TRACK_OFFSET_BIAS
-                 *              [CONFIRMED @ 0x00436DC4: DAT_004afb9c write]
+                 *              [CONFIRMED @ 0x00436DC4: g_rs_track_offset_for_right_route_slot0 write]
                  *   traffic  : RS_TRACK_OFFSET_BIAS = signed_offset(RIGHT)
                  *              RS_LEFT_BOUNDARY_B   = same
                  *   both     : RS_LEFT_BOUNDARY_A   = signed_offset(LEFT)
@@ -2105,7 +2105,7 @@ void td5_ai_compute_rubber_band(void) {
         for (i = 0; i < racer_count; i++) {
             /* [0x00432D9F-A8] state byte at gRaceSlotStateTable.slot[i].state */
             if (g_slot_state[i] == 0) { /* AI slot */
-                /* [0x00432DAA] DAT_00473d2c[i] = 0x100 (live throttle override) */
+                /* [0x00432DAA] g_perSlotRubberBandThrottleLive[i] = 0x100 (live throttle override) */
                 g_live_throttle[i] = 0x100;
                 /* [0x00432DB5] gActorDefaultRouteSteerBias[i*0x47] = 0x100 */
                 g_actor_route_steer_bias[i] = 0x100;
@@ -2709,7 +2709,7 @@ void td5_ai_init_race_actor_runtime(void) {
     }
 
     /* Restore the original CATCHUP -> 2-player steering-bias-swing propagation
-     * (orig `DAT_0048301c = DAT_00465ff8` at the MainMenu->1PRace transition,
+     * (orig `g_steeringBiasMaxSwing = g_twoPlayerCatchupAssist` at the MainMenu->1PRace transition,
      * 0x004155EA). The revamp dropped the frontend CATCHUP row that fed this;
      * re-derive it from the resolved catchup level so the assist is restored and
      * the S05 toggle drives it. 0 = off (swing 0, the BSS default). The swing
@@ -2958,7 +2958,7 @@ void td5_ai_update_steering_bias(int *route_state, int32_t steer_weight) {
                  * [CONFIRMED @ 0x4340C0 via 0x0040a700, and LUT init
                  * BuildSinCosLookupTables @ 0x0040a650]
                  * Original calls FUN_0040a700(raw_deviation) = SinFixed12bit.
-                 * DAT_00483984 is a COSINE table (init stores cos(i*step)*4096),
+                 * g_sinCosLut_fixed12 is a COSINE table (init stores cos(i*step)*4096),
                  * so LUT[(arg - 0x400) & 0xFFF] = cos(arg - π/2) = +sin(arg).
                  * For small deviation the return is ≈ arg, producing a
                  * proportional correction. sin(0) = 0 → aligned car (left=0xFFF
@@ -3202,7 +3202,7 @@ int td5_ai_update_route_threshold(int slot) {
  *   - Compares self vs each traffic slot. Uses peer.field_0x82 (span_normalized)
  *     for the proximity test (self.field_0x82 <= peer.field_0x82).
  *   - Cross-route is NOT a separate branch in this pass — same body executes
- *     for both. The route-table swap happens inline (rs[0]==DAT_004afb58 chain).
+ *     for both. The route-table swap happens inline (rs[0]==g_activeRouteTablePtrA_left chain).
  *   - Range gate: target_offset_at_clamp must lie within peer's RS[0x14],RS[0x15].
  *   - dist gate (final): `0 < local_c && local_c < 0x28` and best != self.
  *
@@ -3218,7 +3218,7 @@ int td5_ai_update_route_threshold(int slot) {
  * lateral target offset used in the range-gate against peer's RS[0x14]/RS[0x15].
  *
  * Direction formula [CONFIRMED @ 0x00433A11-0x00433A4D and 0x00433C84-0x00433CBE]:
- *   mid = (DAT_004afbb4[best*0x47] + DAT_004afbb0[best*0x47]) / 2
+ *   mid = (g_rs_active_lower_bound_slot0[best*0x47] + g_rs_active_upper_bound_slot0[best*0x47]) / 2
  *     -- these are RS[0x14]/RS[0x15] of the BEST peer (signed CDQ-divide /2,
  *        which equals C99 signed div for nonneg arg). Pass uses SAR 1 after
  *        CDQ — the original adds the sign bit before SAR, so >>1 with signed
@@ -3226,14 +3226,14 @@ int td5_ai_update_route_threshold(int slot) {
  *        (different from C /2 which truncates toward zero). We match SAR 1.
  *   abs_r = abs((peer_cardef_hi - mid) + 0x20 + offset_at_clamp)
  *   abs_l = abs((peer_cardef_lo - mid) - 0x20 + offset_at_clamp)
- *   DAT_004b08b0 = (abs_r >= abs_l)  -- note: SETGE means right >= left,
+ *   g_lateralAvoidanceDirection = (abs_r >= abs_l)  -- note: SETGE means right >= left,
  *     which differs from prior port's "abs_r <= abs_l" by sign convention.
  *   ** Bounds source [CONFIRMED @ 0x00433C92]: cardef pointer comes from
  *     g_actorRuntimeState.slot[self_slot].field_0x1b8 (SELF's cardef), NOT
  *     the peer's. The EAX*0x8 arithmetic resolves to self_slot*0x388+0x1b8.
  *
  * Returns: best peer slot (int), or self_slot when nothing in range. Also
- * writes DAT_004b08b0 (g_lateral_avoidance_direction) when a peer is found
+ * writes g_lateralAvoidanceDirection (g_lateral_avoidance_direction) when a peer is found
  * AND the direction formula executed.
  *
  * [CONFIRMED @ disassembly 0x004337E0-0x00433CDE — full pool14 audit].
@@ -3249,12 +3249,12 @@ int td5_ai_update_route_threshold(int slot) {
  *   2 = clamp against the "lo-bound" path (second sample's progress <= 0).
  *
  * Original control flow [CONFIRMED @ 0x004368A0-0x00436A65]:
- *   if (rs[0] == DAT_004afb58)             -- primary route
+ *   if (rs[0] == g_activeRouteTablePtrA_left)             -- primary route
  *       iVar3 = span_norm                  -- NO walker; fall through
  *   else                                   -- secondary route
  *       iVar3 = span_norm
  *       iVar5 = (iVar3 + 4) wrapped
- *       walk DAT_004c3da0 jump table:
+ *       walk g_trackStripBlobAliasJunction jump table:
  *           if a row matches iVar5: iVar5 = remap; goto LAB_0043699b
  *   fall-through (primary OR secondary that did NOT match walker):
  *   iVar5 = (iVar3 + 4) wrapped            -- unconditional default
@@ -3395,12 +3395,12 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
             /* Cross-route swap [CONFIRMED @ 0x0043385C-0x0043388A] */
             if (route_state_ptr[RS_ROUTE_TABLE_PTR] != peer_rs[RS_ROUTE_TABLE_PTR]) {
                 if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[0]) {
-                    /* On primary: rs[0x0F]→rs[9], ptr ← DAT_004b08b4
-                     *   [DAT_004b08b4 = g_route_tables[1] / RIGHT route] */
+                    /* On primary: rs[0x0F]→rs[9], ptr ← g_activeRouteTablePtrB_right
+                     *   [g_activeRouteTablePtrB_right = g_route_tables[1] / RIGHT route] */
                     route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_B];
                     route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[1];
                 } else {
-                    /* On secondary (or other): rs[0x0E]→rs[9], ptr ← DAT_004afb58 */
+                    /* On secondary (or other): rs[0x0E]→rs[9], ptr ← g_activeRouteTablePtrA_left */
                     route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_A];
                     route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[0];
                 }
@@ -3466,8 +3466,8 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
         if (best_dist > 0 && best_dist < 0x28 && best_slot != self_slot) {
             int32_t *bp_rs = route_state(best_slot);
             int32_t mid;
-            int32_t mid_lo = bp_rs[RS_ACTIVE_LOWER_BOUND]; /* DAT_004afbb0[best*0x47] = RS[0x14] */
-            int32_t mid_hi = bp_rs[RS_ACTIVE_UPPER_BOUND]; /* DAT_004afbb4[best*0x47] = RS[0x15] */
+            int32_t mid_lo = bp_rs[RS_ACTIVE_LOWER_BOUND]; /* g_rs_active_upper_bound_slot0[best*0x47] = RS[0x14] */
+            int32_t mid_hi = bp_rs[RS_ACTIVE_UPPER_BOUND]; /* g_rs_active_lower_bound_slot0[best*0x47] = RS[0x15] */
             int32_t mid_sum = mid_hi + mid_lo;
             int16_t *cd_for_dir;
             int32_t val_r, val_l, abs_r, abs_l;
@@ -3663,7 +3663,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
  *     bias = 0; store; return                         // RET via 0x00434969
  *
  *   Peer path (0x0043496d-0x00434a97):
- *     load direction = DAT_004b08b0
+ *     load direction = g_lateralAvoidanceDirection
  *     if (direction == 1):                            // 0x00434982/0x0043498d
  *       BL = peer_actor.field_0x8C  (ACTOR_SUB_LANE_INDEX)   [@ 0x004349A0]
  *       if (BL == 0):
@@ -3721,7 +3721,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
  *      and should now be revisited downstream.
  *   4. Negative-push branch is now reached for direction values outside
  *      {0,1} (no flip), matching the JNZ at 0x004349E6 falling through to
- *      common_neg without touching DAT_004b08b0.
+ *      common_neg without touching g_lateralAvoidanceDirection.
  */
 /* Phantom-peer setup (port-only, 2026-05-22 v2).
  *
@@ -3948,7 +3948,7 @@ void td5_ai_update_track_offset_bias(int slot) {
             }
         } else {
             /* [0x004349E4-0x004349E6]: direction not in {0,1} falls through
-             * to common_neg without touching DAT_004b08b0. */
+             * to common_neg without touching g_lateralAvoidanceDirection. */
             do_positive = 0;
         }
 
@@ -4046,7 +4046,7 @@ void td5_ai_seed_actor_track_progress_offset(int slot)
     }
     (void)span_norm;
 
-    /* Store signed lateral offset [CONFIRMED @ 0x00434332: DAT_004afb84[slot*0x47]] */
+    /* Store signed lateral offset [CONFIRMED @ 0x00434332: g_rs_track_offset_bias_slot0[slot*0x47]] */
     {
         int32_t bias = td5_track_compute_signed_offset(span_raw, progress, route_byte);
         /* Route byte coordinate space is 0=right, 255=left (right_vertex_index base).
@@ -5970,7 +5970,7 @@ void td5_ai_update_track_behavior(int slot) {
             /* (a) Target span: 4 spans ahead, then remap through junction
              * table when the actor is NOT on the LEFT.TRK (canonical) route.
              * [CONFIRMED @ 0x00435180-0x00435260] Original walks
-             * DAT_004c3da0 (= STRIP.DAT +0x14/+0x18) to jump across track
+             * g_trackStripBlobAliasJunction (= STRIP.DAT +0x14/+0x18) to jump across track
              * junctions to a physically-farther span; without this, the AI
              * target_angle is computed against a too-close point, producing
              * tiny first-tick deviations that land outside the cascade's
@@ -5979,7 +5979,7 @@ void td5_ai_update_track_behavior(int slot) {
              *
              * `is_canonical_route` = rs[RS_ROUTE_TABLE_SELECTOR] == 0
              * which the init path at td5_ai.c:573 maps to g_route_tables[0]
-             * (LEFT.TRK). Original gates on pointer equality to DAT_004afb58
+             * (LEFT.TRK). Original gates on pointer equality to g_activeRouteTablePtrA_left
              * (LEFT.TRK blob ptr) — same intent. */
             int is_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
             int lin_span = ((int)span + 4) % span_count;
@@ -6461,7 +6461,7 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
  *         ProgressOffset + NormalizeActorTrackWrapState.
  *       - RIGHT: inline jump-table scan + remap + Init + geometry +
  *         RefreshActorTrackProgressOffset + ResolveActorSegmentBoundary.
- *   9.  Advance DAT_004b08b8 +4.
+ *   9.  Advance g_activeTrafficBusCursor +4.
  *  10.  LAB_0043588d post-call zero block.
  *
  * ARCHITECTURAL DIVERGENCES (documented in code below):
@@ -6486,7 +6486,7 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
  *   1. Bail if g_racerCount <= 6 (no traffic).
  *   2. Pre-scan g_traffic_queue cursor forward over entries that are
  *      either == -1 sentinel, behind player.span_norm (+0x82), or within
- *      0x28 spans ahead. Advance DAT_004b08b8 over rejected entries.
+ *      0x28 spans ahead. Advance g_activeTrafficBusCursor over rejected entries.
  *   3. Linear scan slots 6..min(g_racerCount,12)-1: find the slot with
  *      max (player.span_norm - traffic[i].span_norm) — store as
  *      (best_slot, best_dist). NOTE: gate (>=0x29) is applied AFTER the
@@ -6516,7 +6516,7 @@ int td5_ai_find_nearest_route_peer(int *route_state_ptr) {
  *            * Call InitActorTrackSegmentPlacement; geometry; angle; polarity; reset.
  *            * Call RefreshActorTrackProgressOffset(best_slot)
  *            * Call ResolveActorSegmentBoundary(actor) (0x00443FF0)
- *   9. Advance DAT_004b08b8 by 4 bytes (past consumed entry).
+ *   9. Advance g_activeTrafficBusCursor by 4 bytes (past consumed entry).
  *  10. Zero post-call state fields (LAB_0043588d) including velocities,
  *      steering, encounter_handle = -1, etc.
  *
@@ -6713,7 +6713,7 @@ void td5_ai_recycle_traffic_actor(void) {
     }
 
     /* [0x00435448-4b] If best_dist <= 0x28: commit cursor and return.
-     * Original writes DAT_004b08b8 unconditionally just before bail. */
+     * Original writes g_activeTrafficBusCursor unconditionally just before bail. */
     if (best_dist <= 0x28) {
         g_traffic_queue_ptr = qp;
         return;
@@ -6823,7 +6823,7 @@ void td5_ai_recycle_traffic_actor(void) {
             /* [0x004356cd-ce] NormalizeActorTrackWrapState(actor) at 0x00443fb0 */
             td5_track_normalize_actor_wrap((TD5_Actor *)a);
 
-            /* [0x004356d3-de] Commit DAT_004b08b8 += 4 (consume entry) */
+            /* [0x004356d3-de] Commit g_activeTrafficBusCursor += 4 (consume entry) */
             g_traffic_queue_ptr = qp + 4;
 
         } else {
@@ -6898,7 +6898,7 @@ void td5_ai_recycle_traffic_actor(void) {
                 td5_track_normalize_actor_wrap((TD5_Actor *)a);
             }
 
-            /* [0x00435882-88] Commit DAT_004b08b8 += 4. */
+            /* [0x00435882-88] Commit g_activeTrafficBusCursor += 4. */
             g_traffic_queue_ptr = qp + 4;
         }
     }
@@ -7043,7 +7043,7 @@ void td5_ai_set_traffic_queue(const uint8_t *data, int size) {
 void td5_ai_init_traffic_actors(void) {
     int local_18;       /* slot counter (original local_18, starts at 6) */
     int local_c;        /* per-slot small constant (slot*4 + 0x10), starts at 0x28 */
-    const uint8_t *qp;  /* DAT_004b08b8 queue cursor */
+    const uint8_t *qp;  /* g_activeTrafficBusCursor queue cursor */
     int racer_count;
     int racer_cap;
 
@@ -7112,7 +7112,7 @@ void td5_ai_init_traffic_actors(void) {
         polarity_bit = trf_oneway_traffic() ? 0 : ((int)queue_byte2 & 1);
 
         /* 0x435989-9d: common writes — polarity, local_c, RECOVERY_STAGE=0,
-         * DAT_004afc50=0. Polarity goes to dword 0x3F (= gActorRouteDirectionPolarity
+         * g_actor_traffic_recovery_stage=0. Polarity goes to dword 0x3F (= gActorRouteDirectionPolarity
          * @ 0x004afc5c). Prior port also wrote dword 0x25 (legacy macro) but
          * that field has no references in the original — the dual-write was
          * unnecessary and is now removed.
@@ -7121,7 +7121,7 @@ void td5_ai_init_traffic_actors(void) {
         rs[RS_ROUTE_DIRECTION_POLARITY] = polarity_bit;
         rs[0x1A] = local_c;                         /* DAT_004afbc8[slot] */
         rs[RS_RECOVERY_STAGE] = 0;                  /* dword 0x22 */
-        rs[RS_SCRIPT_SPEED_PARAM] = 0;              /* dword 0x3C = DAT_004afc50[slot] */
+        rs[RS_SCRIPT_SPEED_PARAM] = 0;              /* dword 0x3C = g_actor_traffic_recovery_stage[slot] */
         g_traffic_recovery_stage[local_18] = 0;     /* port-side mirror */
 
         /* 0x004359a0-bf: compute lane_count for branching */
@@ -7256,7 +7256,7 @@ void td5_ai_init_traffic_actors(void) {
         else {
             /* ---------- REMAP path (selector = 1, 0x004359c7) ----------
              *
-             * Original walks the junction-remap table at DAT_004c3da0+0x18,
+             * Original walks the junction-remap table at g_trackStripBlobAliasJunction+0x18,
              * matching queue.span into [range_lo, range_lo + (B - A) - 1].
              * On match: remapped = (A - C) + queue.span. On miss: -1.
              *
@@ -7510,7 +7510,7 @@ void td5_ai_init_traffic_actors(void) {
  *   - Stage 2 special-encounter cleanup: slot==9 + !wanted_mode in
  *     polarity==0 path stops audio AND clears handle. polarity!=0 path
  *     stops audio only — DOES NOT clear the handle. Original asymmetric.
- *   - Stage 3 bail-out checks rs[RS_SCRIPT_SPEED_PARAM] (DAT_004afc50) and
+ *   - Stage 3 bail-out checks rs[RS_SCRIPT_SPEED_PARAM] (g_actor_traffic_recovery_stage) and
  *     g_traffic_recovery_stage[slot] (DAT_004afbe8). Prior port duplicated
  *     the recovery check and never read the script-speed-param sentinel.
  *   - Stage 2 hdelta band check uses strict bounds (0x400, 0xC00) per the
@@ -10171,7 +10171,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
      *   sVar5 = field_0x80 (ACTOR_SPAN_RAW)   (param_1 actor)
      *   bail if: ((sVar5 < 3 || g_trackTotalSpanCount - 8 <= sVar5) &&
      *             rs[RS_ROUTE_TABLE_SELECTOR] == 0)
-     *         || rs[RS_SCRIPT_SPEED_PARAM] != 0   (DAT_004afc50)
+     *         || rs[RS_SCRIPT_SPEED_PARAM] != 0   (g_actor_traffic_recovery_stage)
      *         || g_traffic_recovery_stage[slot] != 0   (DAT_004afbe8) */
     {
         int16_t span_raw = ACTOR_I16(actor, ACTOR_SPAN_RAW);
@@ -10664,8 +10664,8 @@ ttc_done:;
  *                                                       → g_encounter_active[slot]
  *   DAT_004ab18a  actor[0].span_normalized  (+0x82)
  *   DAT_004ab41c  actor[0].longitudinal_speed (+0x314)
- *   DAT_004ad150  actor[9].span_raw         (+0x80)
- *   DAT_004ad152  actor[9].span_normalized  (+0x82)
+ *   g_specialTrafficEncounter_lastSlot  actor[9].span_raw         (+0x80)
+ *   g_specialTrafficEncounter_pendingFlag  actor[9].span_normalized  (+0x82)
  *   DAT_004ad2cc  actor[9].world_pos_x      (+0x1fc)  — ComputeTrackSpanProgress reads [x,_,z]
  *   DAT_004ad449  actor[9].vehicle_mode     (+0x379)
  *   DAT_004ad0d0  actor[9] base
@@ -11056,7 +11056,7 @@ void td5_ai_update_special_encounter(void) {
  * heading: any angle inside the band counts as "facing the wrong way" and
  * forces teardown.
  *
- * Fast-path writes target actor_ptr(slot), NOT actor_ptr(9). DAT_004ad152
+ * Fast-path writes target actor_ptr(slot), NOT actor_ptr(9). g_specialTrafficEncounter_pendingFlag
  * is the player's SPAN_NORMALIZED snapshot — it gates the brake band.
  */
 /* Pull-over control (rewrite 2026-06-19): when the multi-cop scheduler has

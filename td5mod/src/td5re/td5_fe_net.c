@@ -92,16 +92,16 @@ static int  s_net_cfg_enable_upnp = 1;       /* [Network] EnableUPnP (Direct hos
 
 static int  s_dialog_mode;              /* DAT_00496350 */
 
-static int  s_per_slot_status[6];       /* DAT_00496980[6] */
+static int  s_per_slot_status[6];       /* g_lobbySlotStatusTable[6] */
 
-static int  s_config_received[6];       /* DAT_00497262[6] */
+static int  s_config_received[6];       /* g_lobbyConfigReceiptTable[6] */
 
-static int  s_participant_flags[6];     /* DAT_0049725c[6] */
+static int  s_participant_flags[6];     /* g_lobbyRoleAcceptedTable[6] */
 
 static int  s_race_active_flag;         /* DAT_00497324 */
 
 
-static uint32_t s_last_poll_timestamp;  /* DAT_004968a8 */
+static uint32_t s_last_poll_timestamp;  /* g_lobbyHeartbeatTimestamp */
 
 /* [S31] Per-slot READY latch (clients toggle via the lobby READY button,
  * broadcast as DXPDATA opcode 0x18 {op, slot, state}); reset on every lobby

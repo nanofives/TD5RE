@@ -77,7 +77,7 @@ static int          s_checkpoint_data_size = 0;
  *   RemapCheckpointOrderForTrackDirection @ 0x0042FD70
  *   SwapIndexedRuntimeEntries             @ 0x0040B530
  * which exchanges entries in the texture-cache header arrays
- * (DAT_0048dc40+4 page-pointer table and +0xc per-page descriptor
+ * (g_textureCacheRuntimeCount+4 page-pointer table and +0xc per-page descriptor
  * table). The port has no separate cache header — pages upload
  * straight to GPU slots keyed by raw page index. Equivalent effect:
  * when the upload loop emits slot S, source the bytes from page
@@ -354,7 +354,7 @@ static TD5_PageMetadata s_page_metadata[STATIC_PAGE_META_MAX];
 static int              s_page_metadata_count = 0;
 
 /* Chassis sprite UV bounds (from "CHASSIS" static.hed entry).
- * Original stores these at DAT_004c3d7c-88 [CONFIRMED @ 0x00443336-0x0044336c].
+ * Original stores these at g_chassisBoundsXMin-88 [CONFIRMED @ 0x00443336-0x0044336c].
  * UV = atlas_coord * (1.0 / 256.0) per axis. */
 static float s_chassis_uv_x = 0.0f;   /* pos_x / 256 */
 static float s_chassis_uv_y = 0.0f;   /* pos_y / 256 */
@@ -730,7 +730,7 @@ int td5_asset_static_tpage_is_real(int slot)
 }
 
 /* Per-tpage transparency type, indexed by page_id. -1 = unknown.
- * Mirrors the per-page metadata stored at DAT_0048dc40[3]+7+i*8 in the
+ * Mirrors the per-page metadata stored at g_textureCacheRuntimeCount[3]+7+i*8 in the
  * original BindRaceTexturePage @ 0x0040B660. */
 #define TD5_PAGE_TRANSPARENCY_MAX 1024
 static int8_t s_page_transparency[TD5_PAGE_TRANSPARENCY_MAX] = {
@@ -4041,8 +4041,8 @@ TD5_MeshHeader *td5_asset_load_cop_mesh(int model_index)
  *   pool_row       = gScheduleToPoolIndex[schedule_index]        (0x00466894)
  *   pool_idx       = gTrackPoolSpanCountTable[pool_row]          (0x00466D50, forward)
  *                    or gTrackPoolReverseSpanCountTable[pool_row] (0x00466E3C, reverse)
- *   row            = DAT_00474d74[pool_idx]                      (0x00474D74)
- *   model_index    = DAT_00474ce8[row][slot_in_pool]             (0x00474CE8)
+ *   row            = g_trafficVehicleSkinTable[pool_idx]                      (0x00474D74)
+ *   model_index    = g_trafficVehicleVariantTable[row][slot_in_pool]             (0x00474CE8)
  *
  * Original gates the load with `pool_idx < 0x19` (@ 0x004435ad region): when
  * the pool index is >= 25, the per-slot size query returns 0 and the traffic
@@ -4079,7 +4079,7 @@ static const int32_t s_track_pool_reverse_span_count_table[15] = {
     -1, -1, -1,
 };
 
-/* DAT_00474d74 @ 0x00474D74 — 25 int32 entries mapping pool_idx to
+/* g_trafficVehicleSkinTable @ 0x00474D74 — 25 int32 entries mapping pool_idx to
  * a row in s_traffic_model_table[][]. Entry [0] = 30 is the benchmark
  * sentinel (out-of-range against the 6-row model table). */
 static const int32_t s_traffic_pool_to_row[25] = {
@@ -4087,7 +4087,7 @@ static const int32_t s_traffic_pool_to_row[25] = {
      1,  5,  3,  0,  4,  1,  5,  3,  0,  4,  2,  2,
 };
 
-/* DAT_00474ce8 @ 0x00474CE8 — 6 rows of 6 traffic model indices
+/* g_trafficVehicleVariantTable @ 0x00474CE8 — 6 rows of 6 traffic model indices
  * (values resolve to "model%d.prr" inside traffic.zip).
  * Row 5's last dword (0x1e) aliases s_traffic_pool_to_row[0]=30 at 0x00474D74. */
 static const int32_t s_traffic_model_table[6][6] = {

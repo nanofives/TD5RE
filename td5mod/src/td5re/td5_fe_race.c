@@ -266,7 +266,7 @@ static int      s_mp_player_color_idx[TD5_MAX_HUMAN_PLAYERS]; /* palette cursor 
 
 static uint32_t s_mp_rep_ms[TD5_MAX_HUMAN_PLAYERS];          /* colour-grid auto-repeat next-fire time */
 
-static int  s_car_preview_overlay;      /* DAT_0048f360            */
+static int  s_car_preview_overlay;      /* g_carSelectionPreviewFrameIndex            */
 
 static int  s_car_roster_max;           /* max car index for current mode */
 
@@ -322,7 +322,7 @@ int  s_trksel_dyn_btn  = -1;
 static int  s_trksel_prev_focus = -2;
 
 /* Race results state */
-static int  s_results_button;           /* DAT_00497a64 */
+static int  s_results_button;           /* g_postRaceMenuButtonChoice */
 
 static int  s_results_panel_slide_dir;   /* +1 = right (next), -1 = left (prev) */
 
@@ -349,7 +349,7 @@ static int  s_mp_hs_pending;
 static int  s_snap_num_ai_opponents = -1;
 
 /* Post-race name entry state (Screen [25]) */
-static int32_t s_post_race_score;       /* DAT_004951d0: player's score for qualification */
+static int32_t s_post_race_score;       /* g_postRaceQualifyingScore: player's score for qualification */
 
 /* [#2b 2026-06-16] When the post-race track is TD6 (s_postrace_td6_level > 0),
  * the score does NOT go into a TD5 NPC group — it goes into the genuine TD6
@@ -8462,7 +8462,7 @@ void Screen_RaceResults(void) {
              * [CONFIRMED @ 0x004228EC case 3 head] First three statements
              * gate the slide-in itself. The original short-circuits to
              * state 0xC (cleanup -> 0xD menu) when ANY of:
-             *   - DAT_00497a74 != 0    (s_results_skip_display)
+             *   - g_postRaceRestartSelectedRace != 0    (s_results_skip_display)
              *   - slot[0].companion_state_2 == 2  (player disqualified)
              *   - actor.slot._808_4_ == 0         (no race finished)
              * The `slot._808_4_ == 0` clause is what makes a fresh
@@ -8536,7 +8536,7 @@ void Screen_RaceResults(void) {
 
     case 6: /* Interactive: L/R browse racer slots (0-5), confirm exits.
              * Original @ 0x004229DA: button_index >= 0 && < 2 -> state 0x0B.
-             * [CONFIRMED @ 0x004229DA] DAT_00497a68 cycles by DAT_0049b690 (arrow delta),
+             * [CONFIRMED @ 0x004229DA] g_postRaceRacerCardIndex cycles by g_postRaceRacerCardNavDirection (arrow delta),
              * skips slots with state == 3 (disabled). Drag: masked & 1 for 2-slot only.
              * P7 PANEL fix: arrow input now triggers state 7 (right) or 9 (left)
              * for the slide-out animation; the actual slot cycle happens
@@ -8581,7 +8581,7 @@ void Screen_RaceResults(void) {
                 break;
             }
             /* [CONFIRMED @ 0x004229DA] Original wraps the button-press exit
-             * in `if (DAT_0049b690 == 0)` — i.e. only honor the confirm when
+             * in `if (g_postRaceRacerCardNavDirection == 0)` — i.e. only honor the confirm when
              * no arrow input is also queued. Without the gate a paired
              * arrow-and-click exits the browser before s_score_category_index
              * has updated, which the original avoids. */
@@ -8598,7 +8598,7 @@ void Screen_RaceResults(void) {
              * [CONFIRMED @ 0x00422480 case 7] Original formula:
              *   panel_x = g_frontendAnimFrameCounter * 0x20 + 0x2a + iVar4
              * Step +0x20 (32 px/frame), end counter == 0x11 (17). At end:
-             *   DrawRaceDataSummaryPanel(DAT_00497a68);  // re-fill with new slot
+             *   DrawRaceDataSummaryPanel(g_postRaceRacerCardIndex);  // re-fill with new slot
              *   counter = 0; state++;                    // -> state 8
              * Port uses s_anim_tick stepping +2 from 0..0x11. */
         s_anim_tick += 2 * s_fe_logic_ticks;
@@ -8703,12 +8703,12 @@ void Screen_RaceResults(void) {
 
     case 0x0C: /* Cleanup: release tracked surfaces + clear button table.
                 * P9 — [CONFIRMED @ 0x00422CEE] original body:
-                *   DAT_0049628c = ReleaseTrackedFrontendSurface(DAT_0049628c);
+                *   g_lobbyErrorDialogSurface = ReleaseTrackedFrontendSurface(g_lobbyErrorDialogSurface);
                 *   DAT_00496358 = ReleaseTrackedFrontendSurface(DAT_00496358);
                 *   ReleaseFrontendDisplayModeButtons();
                 *   g_frontendInnerState++;
                 * Port has no analog of those tracked surfaces — the panel
-                * (DAT_0049628c, 408×392) is rendered fresh each frame from
+                * (g_lobbyErrorDialogSurface, 408×392) is rendered fresh each frame from
                 * frontend_render_race_results_overlay via fe_draw_text + the
                 * MainMenu.tga backdrop (P2), not allocated through
                 * CreateTrackedFrontendSurface, so there is nothing to release.
@@ -8923,7 +8923,7 @@ void Screen_RaceResults(void) {
 
             case 2: /* View Race Data — re-enter screen 24 from state 0.
                      * [CONFIRMED @ 0x00423110 case 0x10 dispatch on
-                     * DAT_00497a64 == 2] Original simply calls
+                     * g_postRaceMenuButtonChoice == 2] Original simply calls
                      * SetFrontendScreen(0x18) — which IS this screen,
                      * 0x18 == 24 == TD5_SCREEN_RACE_RESULTS. Re-entry runs
                      * state 0 again: snapshot restore, sort, button rebuild,
@@ -8974,22 +8974,22 @@ void Screen_RaceResults(void) {
 
             case 4: /* Quit
                      * P6 — Quit branch fidelity. [CONFIRMED @ 0x004233E0
-                     * dispatch on DAT_00497a64 == 4] Original dispatches FOUR
+                     * dispatch on g_postRaceMenuButtonChoice == 4] Original dispatches FOUR
                      * branches; the prior port collapsed them to TWO and got
                      * the cup-won/failed inversion wrong:
                      *
                      *   game_type < 1 (single):
                      *     AwardCupCompletionUnlocks(); SetFrontendScreen(0x19)
-                     *   game_type >= 1, DAT_00497a70 == 0  (cup mid-progress):
+                     *   game_type >= 1, g_postRaceNextCupRaceAvailable == 0  (cup mid-progress):
                      *     SetFrontendScreen(5)            // back to MainMenu
-                     *   cup, DAT_00497a70 != 0, DAT_0048d988._2_2_ == 0  (won):
+                     *   cup, g_postRaceNextCupRaceAvailable != 0, g_raceResults._2_2_ == 0  (won):
                      *     g_returnToScreenIndex = 0x19;   SetFrontendScreen(0x1B)
-                     *   cup, DAT_00497a70 != 0, DAT_0048d988._2_2_ != 0  (failed):
+                     *   cup, g_postRaceNextCupRaceAvailable != 0, g_raceResults._2_2_ != 0  (failed):
                      *     g_returnToScreenIndex = 0x19;   SetFrontendScreen(0x1A)
                      *
-                     * DAT_0048d988._2_2_ is the int16 at +2 of s_results[0]
+                     * g_raceResults._2_2_ is the int16 at +2 of s_results[0]
                      * — i.e. final_position. 0 = 1st place (won), nonzero =
-                     * not 1st (failed). DAT_00497a70 is s_results_cup_complete,
+                     * not 1st (failed). g_postRaceNextCupRaceAvailable is s_results_cup_complete,
                      * set in state 0xD when ConfigureGameTypeFlags()==0.
                      * AwardCupCompletionUnlocks @ 0x00421DA0 grants unlock flags;
                      * Screen_CupWon already invokes the port equivalent
@@ -9165,7 +9165,7 @@ void Screen_PostRaceNameEntry(void) {
                 /* Time (primary finish metric) */
                 if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
                     /* Cup: use s_results secondary lap time field
-                     * [CONFIRMED @ 0x00413C0B]: DAT_0048d990 for cup types */
+                     * [CONFIRMED @ 0x00413C0B]: g_raceFinalResultsSlot0_primaryMetric for cup types */
                     s_post_race_score = eff_secondary;
                 } else {
                     s_post_race_score = eff_primary;
@@ -9499,7 +9499,7 @@ void Screen_CupFailed(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* Dialog 0x198x0x70 (408x112) rendered live in
          * frontend_render_cup_failed_overlay (called from render_ui_rects).
-         * Original: CreateTrackedFrontendSurface(0x198,0x70) @ DAT_0049628c,
+         * Original: CreateTrackedFrontendSurface(0x198,0x70) @ g_lobbyErrorDialogSurface,
          * then DrawFrontendLocalizedStringToSurface x4 for:
          *   SNK_SorryTxt     y=0x00 ("SORRY")           [CONFIRMED Language.dll]
          *   SNK_YouFailedTxt y=0x1c ("YOU FAILED")       [CONFIRMED Language.dll]
@@ -9557,7 +9557,7 @@ void Screen_CupWon(void) {
          * They persist via static-zero-init until the next Screen_CupWon
          * entry; td5_frontend_set_screen(MAIN_MENU) in state 5 leaves them
          * stale, but no other screen reads them so the staleness is inert.
-         * [CONFIRMED @ 0x00423A80]: DAT_00494bb0 = car count, DAT_00494bb4 = track count. */
+         * [CONFIRMED @ 0x00423A80]: g_cupSchedule_currentCup = car count, g_cupSchedule_currentRound = track count. */
         s_cup_won_car_count   = 0;
         s_cup_won_track_count = 0;
         {

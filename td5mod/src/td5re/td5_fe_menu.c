@@ -99,7 +99,7 @@ static int  s_exit_confirm_no_idx  = -1;
 /*
  * Fade overlay color (RGB only, alpha is driven by s_fade_progress).
  * [CONFIRMED @ 0x411750 InitFrontendFadeColor]: original stores
- *   DAT_00494fc4 = param_1 >> 3 & 0x1f1f1f  (packed B/G/R channel levels)
+ *   g_frontendFadeChannelR = param_1 >> 3 & 0x1f1f1f  (packed B/G/R channel levels)
  * We store the raw ARGB word and extract RGB in the renderer.
  */
 static uint32_t s_fade_color;        /* packed 0x00RRGGBB from caller */
@@ -574,8 +574,8 @@ int td5_frontend_init_resources(void) {
     td5_sound_set_music_volume(80);
     td5_sound_load_frontend_sfx();
 
-    /* Car lock table: DAT_00463e4c (original binary).
-     * Selector shows 23 cars (positions 0-22) in regular mode; DAT_00463e0c = 23.
+    /* Car lock table: g_savedCarLockTable (original binary).
+     * Selector shows 23 cars (positions 0-22) in regular mode; g_savedMaxUnlockedCar = 23.
      * Positions 0-20: unlocked (21 cars visible + selectable).
      *   Note: atp(16), ss1(17), 128(18), gtr(19), jag(20) are UNLOCKED in original.
      * Positions 21-22: visible but locked (cat=SUPER7, sp4=R390).
@@ -587,7 +587,7 @@ int td5_frontend_init_resources(void) {
 
     /* Compute total unlocked car count (visible + selectable in roster).
      * s_total_unlocked_cars = max visible car index (exclusive).
-     * The original uses DAT_00463e0c which counts contiguous visible slots. */
+     * The original uses g_savedMaxUnlockedCar which counts contiguous visible slots. */
     if (td5_save_get_all_cars_unlocked()) {
         s_total_unlocked_cars = 37;
     } else {
@@ -684,7 +684,7 @@ void Screen_LocalizationInit(void) {
      *   1 = normal re-entry: skip init, route to MAIN_MENU (screen 5)
      *   2 = resume-cup re-entry: set results_skip_display=1, route to RACE_RESULTS (screen 0x18=24) */
     if (s_attract_mode_ctrl == 2) {
-        /* [CONFIRMED @ 0x42718A-0x4271A2]: DAT_00497a6c=1 then SetFrontendScreen(0x18) */
+        /* [CONFIRMED @ 0x42718A-0x4271A2]: g_replayFileAvailable=1 then SetFrontendScreen(0x18) */
         TD5_LOG_I(LOG_TAG, "ScreenLocalizationInit: resume-cup path -> RACE_RESULTS (skip_display=1)");
         s_results_skip_display = 1;
         s_attract_mode_ctrl = 1;
@@ -805,8 +805,8 @@ void Screen_MainMenu(void) {
         s_attract_idle_timestamp = td5_plat_time_ms();
 
         /* [CONFIRMED @ 0x004155DE ScreenMainMenuAnd1PRaceFlow case 0] Original
-         * copies the GameOptions shadow (DAT_00466000, range 0..3) into the
-         * live runtime lap count: gCircuitLapCount = DAT_00466000 + 1.
+         * copies the GameOptions shadow (gCircuitLapsConfigShadow, range 0..3) into the
+         * live runtime lap count: gCircuitLapCount = gCircuitLapsConfigShadow + 1.
          * Without this seed, a fresh boot leaves circuit_lap_count=0 and the
          * HUD's "%d/%d" lap label renders as "1/0". The original re-applies
          * this on every main-menu entry; ConfigureGameTypeFlags later may
@@ -2545,8 +2545,8 @@ void Screen_MusicTestExtras(void) {
         /* [CONFIRMED @ 0x418460 case 0]:
          *   ReleaseExtrasGalleryImageSurfaces() + LoadExtrasBandGalleryImages()
          *   CreateMenuStringLabelSurface(6) → DAT_00496358 (title surface)
-         *   CreateTrackedFrontendSurface(0x170,0x28) → DAT_0049628c (track-name)
-         *   CreateTrackedFrontendSurface(0x170,0x78) → DAT_00496400 (now-playing)
+         *   CreateTrackedFrontendSurface(0x170,0x28) → g_lobbyErrorDialogSurface (track-name)
+         *   CreateTrackedFrontendSurface(0x170,0x78) → g_musicTestSelectedTrackId (now-playing)
          *   Initial draw: sprintf "%d. %s" + NowPlayingTxt + band + title into surfaces
          * Port: no offscreen surfaces — strings are rendered live every frame via
          * frontend_render_music_test_overlay. Initialise them here.
@@ -2615,9 +2615,9 @@ void Screen_MusicTestExtras(void) {
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             if (active_button == 0 && delta != 0) {
                 /* Cycle track index 0..11.
-                 * [CONFIRMED @ 0x4186A8]: g_selectedCdTrackIndex += DAT_0049b690 (arrow dir),
+                 * [CONFIRMED @ 0x4186A8]: g_selectedCdTrackIndex += g_postRaceRacerCardNavDirection (arrow dir),
                  *   clamped 0..11; then BltColorFillToSurface + sprintf "%d. %s" redrawn
-                 *   into DAT_0049628c (track-name surface). Port: update label string. */
+                 *   into g_lobbyErrorDialogSurface (track-name surface). Port: update label string. */
                 s_music_test_track_idx += delta;
                 /* [CONFIRMED @ 0x00418460 case6/idx0, re-decompiled 2026-05-30 by two
                  * independent agents] original WRAPS 0<->0xB: LEFT underflow -> 0xB,
@@ -2632,7 +2632,7 @@ void Screen_MusicTestExtras(void) {
             if (s_button_index == 0 && s_arrow_input == 0) {
                 /* Confirm "Select Track" -> play CD audio.
                  * [CONFIRMED @ 0x41864E]: DXSound::CDPlay(g_selectedCdTrackIndex+2, 1)
-                 *   then redraw DAT_00496400 (now-playing surface):
+                 *   then redraw g_musicTestSelectedTrackId (now-playing surface):
                  *   row y=0:    "NOW PLAYING" text (SNK_NowPlayingTxt_exref)
                  *   row y=0x28: band name  (PTR_s_GRAVITY_KILLS_00465e1c[idx])
                  *   row y=0x50: song title (PTR_s_FALLING_00465e58[idx])

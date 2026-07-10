@@ -91,13 +91,13 @@ int     g_track_type_mode       = 0;
 /**
  * Per-span-type vertex offset LUT — REMOVED 2026-04-20.
  * The single source of truth is `k_quad_vertex_offsets[12][2]` below
- * (DAT_00474e40/41 verified). The prior s_vtx_offset_left/right pair
+ * (g_trackContactNormalYLut/41 verified). The prior s_vtx_offset_left/right pair
  * held wrong values ({0,0,0,3,3,0,3,3,0,0,0,0} on the right) that
  * didn't match the binary and were never read anyway.
  */
 
 /**
- * Per-span-type edge mask LUT (DAT_00474e28/29).
+ * Per-span-type edge mask LUT (g_trackContactNormalXLut/29).
  * Controls which of the 4 boundary edges exist at the first/last sub-span.
  * Bitmask: bit0=forward, bit1=right, bit2=backward, bit3=left.
  */
@@ -507,8 +507,8 @@ void td5_track_get_span_edges(int span_index,
  * fails, in which case the car enters state 0x0F damping. The only calls
  * to ApplyTrackSurfaceForceToActor (0x406980) are:
  *   - `0x406CC0` branches 1/2  → sub_lane start/end longitudinal rumble
- *   - `0x406F50`               → left rail of fence strip DAT_00483954
- *   - `0x4070E0`               → left rail of fence strip DAT_00483550
+ *   - `0x406F50`               → left rail of fence strip g_currentCheckpointStripIndex
+ *   - `0x4070E0`               → left rail of fence strip g_trackRuntimeDataPtr
  * None handle mid-track lateral walls.
  *
  * THIS FUNCTION is a **port-specific** lateral wall check added to give the
@@ -1327,16 +1327,16 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
  * Lateral inside UpdateVehicleActor (0x00406650) after integrate_pose.
  *
  * Both functions gate on a per-level boundary span index:
- *   DAT_00483954 = forward-side sentinel  (used by Forward handler)
- *   DAT_00483550 = reverse-side sentinel  (used by Reverse handler)
+ *   g_currentCheckpointStripIndex = forward-side sentinel  (used by Forward handler)
+ *   g_trackRuntimeDataPtr = reverse-side sentinel  (used by Reverse handler)
  *
  * Both values are written EXACTLY ONCE by LoadTrackRuntimeData @ 0x0042fb90
  * from a 40-entry table at 0x00473820, keyed on (level_number - 1). Raw
  * disasm @ 0x0042fd00-0x0042fd57:
  *   MOV EAX, [ESP+0x128]     ; level number (1..N)
  *   DEC EAX
- *   MOV EDX, [EAX*8 + 0x473820]  ; DAT_00483954 = fwd sentinel
- *   MOV EAX, [EAX*8 + 0x473824]  ; DAT_00483550 = rev sentinel
+ *   MOV EDX, [EAX*8 + 0x473820]  ; g_currentCheckpointStripIndex = fwd sentinel
+ *   MOV EAX, [EAX*8 + 0x473824]  ; g_trackRuntimeDataPtr = rev sentinel
  *   MOV [0x00483954], EDX
  *   MOV [0x00483550], EAX
  *
@@ -1892,7 +1892,7 @@ int td5_track_get_recovery_pose(int from_span, int spans_back,
  *   pbVar1 = g_trackStripRecords + sVar4 * 0x18;                   [LEA EDX+ECX*8]
  *   iVar7 = (int)(char)param_1[6];                                 [MOVSX EAX, BYTE [ESI+0xC]]
  *   uVar5 = *(ushort *)(pbVar1 + 4);
- *   cVar2 = DAT_00474e40[(uint)*pbVar1 * 2];     // = k_quad_vertex_offsets[type][0]
+ *   cVar2 = g_trackContactNormalYLut[(uint)*pbVar1 * 2];     // = k_quad_vertex_offsets[type][0]
  *   cVar3 = DAT_00474e41[(uint)*pbVar1 * 2];     // = k_quad_vertex_offsets[type][1]
  *   uVar6 = *(ushort *)(pbVar1 + 6);
  *   if ((int)(pbVar1[3] & 0xf) <= iVar7) {       // sub_lane >= lane_count
@@ -3419,7 +3419,7 @@ int td5_track_load_strip(const void *data, size_t size)
  *
  * Original listing (29 instructions, 0x00444070-0x004440E0):
  *   MOV EAX,[0x004aed90]                ; blob base ptr
- *   MOV [0x004c3da0],EAX                ; DAT_004c3da0 = blob_ptr
+ *   MOV [0x004c3da0],EAX                ; g_trackStripBlobAliasJunction = blob_ptr
  *   MOV ECX,[EAX]; ADD ECX,EAX          ; ECX = blob + blob[0] = strip records
  *   MOV [0x004c3d9c],ECX                ; g_trackStripRecords
  *   MOV EDX,[EAX+8]; ADD EDX,EAX        ; EDX = blob + blob[2] = vertex pool
@@ -3638,7 +3638,7 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
     lane_count = span_lane_count(sp);
     if (lane_count < 1) lane_count = 1;
 
-    /* Apply per-span-type lane offset (DAT_00474e40 left / DAT_00474e41 right).
+    /* Apply per-span-type lane offset (g_trackContactNormalYLut left / DAT_00474e41 right).
      * [CONFIRMED @ 0x00444208-0x00444336, LUT verified at 0x00474e40] */
     int left_off  = 0;
     int right_off = 0;
@@ -4755,7 +4755,7 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
  *   uVar6  = *(byte *)(iVar9 + g_trackStripRecords)         ; span_type
  *   iVar5  = strip[span].left_vertex_index
  *          + (char)param_1[6]                                ; sub_lane_index
- *          + (char)DAT_00474e40[type * 2]                    ; left_off LUT
+ *          + (char)g_trackContactNormalYLut[type * 2]                    ; left_off LUT
  *   param_1[4] = (short)iVar5
  *   iVar7  = strip[span].right_vertex_index
  *          + (char)param_1[6]
@@ -4765,7 +4765,7 @@ void td5_track_update_probe_position(TD5_TrackProbeState *probe,
  * The walker (UpdateActorTrackPosition) updates span_index + sub_lane;
  * this helper writes contact_vertex_A/B that the downstream pose code
  * (and whole-state diff) reads at probe + 0x08 / + 0x0A. The port's
- * k_quad_vertex_offsets[][0] = DAT_00474e40, [][1] = DAT_00474e41.
+ * k_quad_vertex_offsets[][0] = g_trackContactNormalYLut, [][1] = DAT_00474e41.
  *
  * Whole-state diff 2026-05-15: port had contact_vertex_A/B = 0 (memset)
  * while original had 770/779 on tick 1. */
@@ -6280,7 +6280,7 @@ int td5_track_normalize_actor_wrap(TD5_Actor *actor)
  * Caller in original: RecycleTrafficActorFromQueue @ 0x004353B0 (only xref).
  *
  * Listing layout (from 0x00443FF0 disassembly, pool9 2026-05-14):
- *   - DAT_004c3da0   = pointer to STRIP.DAT blob (== s_strip_blob).
+ *   - g_trackStripBlobAliasJunction   = pointer to STRIP.DAT blob (== s_strip_blob).
  *   - [strip + 0x04] = main-road span count (hdr[1], == ring_length).
  *   - [strip + 0x14] = jump_entry_count.
  *   - [strip + 0x18] = jump_entry[0] -- 3 shorts per entry, stride 6:
@@ -6327,7 +6327,7 @@ void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
     /* Line: MOVSX EDX, word ptr [EBX + 0x80] -> sign-extended raw span. */
     raw_span = (int)track_state[0];
 
-    /* Original reads [DAT_004c3da0 + 0x04] = hdr[1] = main-road ring length.
+    /* Original reads [g_trackStripBlobAliasJunction + 0x04] = hdr[1] = main-road ring length.
      * In the port, hdr[1] is mirrored at g_td5.track_span_ring_length and
      * also lives at s_strip_header[1] if the header pointer is bound. We
      * prefer the runtime ring_length since the original's [+0x04] is
@@ -8098,7 +8098,7 @@ void td5_track_derive_missing_normals(void)
  * [CONFIRMED @ 0x0042FAD0] Byte-faithful with orig InitializeTrackStripMetadata.
  *
  * Orig reads the per-track LEVELINF.DAT blob at
- *   DAT_004aee10 = (&DAT_0046bb1c)[track_index]
+ *   g_trackEnvironmentMetadataBlob = (&g_perTrackEnvironmentMetadataPtrs)[track_index]
  * then iterates 4 light entries at offsets 0x40 / 0x60 / 0x80 / 0xA0,
  * testing each entry's name prefix via _strnicmp(entry_name, "sun", 3):
  *   match    -> writes light_type = 3 at offset 0x14/0x18/0x1C/0x20
@@ -9184,7 +9184,7 @@ void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
      *
      * Triangle-pick + barycentric math verified end-to-end against the
      * orig 2026-05-18 (L5 promotion audit):
-     *   - DAT_00474e40/41 LUT mirrors `k_quad_vertex_offsets[12][2]` byte-for-byte
+     *   - g_trackContactNormalYLut/41 LUT mirrors `k_quad_vertex_offsets[12][2]` byte-for-byte
      *     [CONFIRMED @ 0x00474e40, dumped 2026-05-18: types 3/4 = (-1,0),
      *      6/7 = (0,-1), all others (0,0)].
      *   - Sub_lane==0 / sub_lane==max-1 / interior branches reproduce orig's
@@ -9201,7 +9201,7 @@ void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
      * [ARCH-DIVERGENCE — port splits orig 0x00445450 into wrapper + 2 helpers]
      *
      * Original 0x00445450 does THREE jobs in one function:
-     *   (1) write probe[4]/[5] = (li/ri + sub_lane + DAT_00474e40/41[type*2]),
+     *   (1) write probe[4]/[5] = (li/ri + sub_lane + g_trackContactNormalYLut/41[type*2]),
      *   (2) per-type triangle pick (sub_lane edge vs interior),
      *   (3) call ComputeTrackTriangleBarycentrics + write origin_y*256.
      *

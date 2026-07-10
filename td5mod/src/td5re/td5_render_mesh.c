@@ -1257,7 +1257,7 @@ void td5_render_span_display_list(void *display_list_block)
          * horizontally while still tilting with pitch/roll.
          * [CONFIRMED @ 0x00431296 raw 66 8b 46 02]: original reads
          * `MOV AX, [ESI+0x02]` and tests `==1 || ==2` to take the billboard
-         * branch which calls LoadRenderRotationMatrix(&DAT_004ab070).
+         * branch which calls LoadRenderRotationMatrix(&g_cameraBasisMatrix_m11).
          * In TD5_MeshHeader the int16 at byte offset 2 is currently named
          * `texture_page_id`, but per-mesh texture binding is done from the
          * per-primitive cmd->texture_page_id, not this field — the mesh
@@ -3343,8 +3343,8 @@ void td5_render_flush_projected_buckets(void)
 
 /* [ARCH-DIVERGENCE: struct vs raw-byte texture-page pool; L5 sweep 2026-05-21]
  *   Mirrors ResetTexturePageCacheState @ 0x0040BA60. Orig walks raw byte arrays
- *   (DAT_0048dc40[3]+5 stride-8 status+age, DAT_0048dc40[8] page-id u32 array)
- *   gated by DAT_0048dc40[0x18]/[0x1c] counts; port walks the equivalent
+ *   (g_textureCacheRuntimeCount[3]+5 stride-8 status+age, g_textureCacheRuntimeCount[8] page-id u32 array)
+ *   gated by g_textureCacheRuntimeCount[0x18]/[0x1c] counts; port walks the equivalent
  *   struct-array s_texture_cache[] with identical per-slot reset semantics
  *   (page_id=-1, status=0, age=0, used_this_frame=0). Port adds explicit
  *   current/previous-page invalidation (-1) that orig does in BeginRaceScene. */
@@ -3369,7 +3369,7 @@ void td5_render_reset_texture_cache(void)
 /* [CONFIRMED @ 0x0040BA10 AdvanceTexturePageUsageAges; L5 sweep 2026-05-21]
  *   Byte-faithful: same LRU sweep -- per-slot if-used reset-age + clear-flag
  *   else increment-with-0xFF-saturate. Orig walks raw byte arrays at
- *   DAT_0048dc40[0]/[3]+5; port walks struct-array field equivalents with
+ *   g_textureCacheRuntimeCount[0]/[3]+5; port walks struct-array field equivalents with
  *   identical loop ordering. */
 void td5_render_advance_texture_ages(void)
 {

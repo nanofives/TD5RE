@@ -1588,7 +1588,7 @@ static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
 /* Per-marker scalar bases (orig 0x0043cdf6-0x0043ce26). All three are scaled
  * by intensity * DAT_0045d698 (1/4096) every frame:
  *   fVar8  = intensity * 512.0f / 4096   — long-radius rotated cone (DAT_0045d768)
- *   fVar10 = intensity *  64.0f / 4096   — cross-radius            (DAT_0045d6c0)
+ *   fVar10 = intensity *  64.0f / 4096   — cross-radius            (g_hudSpeedoDialNearOff)
  *   fVar9  = intensity *   6.0f / 4096   — narrow bottom-tip       (DAT_0045d764)
  * [FIX 2026-05-24 strobe-17call; orig 0x0043cde0]
  *   Previous constants (255/64/255/64) were placeholders during the Tier-1
@@ -1596,7 +1596,7 @@ static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
  *   0x0045d768 (=512.0), 0x0045d6c0 (=64.0), 0x0045d764 (=6.0). */
 #define TRACKED_MARKER_INTENSITY_SCALE   (1.0f / 4096.0f)  /* DAT_0045d698 */
 #define TRACKED_MARKER_BASE_FVAR8        512.0f            /* DAT_0045d768 */
-#define TRACKED_MARKER_BASE_FVAR10       64.0f             /* DAT_0045d6c0 */
+#define TRACKED_MARKER_BASE_FVAR10       64.0f             /* g_hudSpeedoDialNearOff */
 #define TRACKED_MARKER_BASE_FVAR9        6.0f              /* DAT_0045d764 */
 #define TRACKED_MARKER_BASE_HALF_XY      96.0f             /* [USER DIVERGENCE 2026-06-01: 3x the orig DAT_0045d5dc=32.0 — bigger over-car glow per user] */
 #define TRACKED_MARKER_BASE_Z_OFFSET     4.0f              /* _g_simTickBudgetCap — layer-2 Z lift */

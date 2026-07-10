@@ -120,8 +120,8 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
 /* ========================================================================
  * Camera Basis (set externally by td5_camera module)
  *
- * Original: DAT_004aafa0..b4 = right/up/forward (3x3)
- *           DAT_004aafc4..cc = camera world position
+ * Original: g_currentViewRotationMatrix (0x004aafa0..b4) = right/up/forward (3x3)
+ *           g_currentViewWorldOrigin (0x004aafc4..cc) = camera world position
  * ======================================================================== */
 
 /* s_camera_basis / s_camera_pos moved to RenderScratch (Phase B Stage 1). */
@@ -130,7 +130,7 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * Lighting State
  *
  * 3 directional lights (9 floats total) + ambient intensity.
- * Original: DAT_004ab0d0..f0 = light directions, DAT_004bf6a8 = ambient
+ * Original: g_activeLightBasisDirX (0x004ab0d0..f0) = light directions, g_trackLightAmbientBaseline = ambient
  * ======================================================================== */
 
 /* s_light_dirs / s_ambient_intensity moved to RenderScratch (Phase B Stage 1). */
@@ -148,7 +148,7 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
  * Texture Cache
  *
  * LRU texture page cache with per-page age tracking.
- * Original: DAT_0048dc40 = control block, 8 bytes per slot descriptor
+ * Original: g_textureCacheRuntimeCount = control block, 8 bytes per slot descriptor
  * ======================================================================== */
 
 #define TEXTURE_CACHE_SLOTS TD5_MAX_TEXTURE_CACHE_SLOTS
@@ -178,7 +178,7 @@ typedef struct TextureCacheSlot {
  * Sorted by texture page (sort key at record+0x02).
  *
  * Original: HeapAllocTracked(0x1000) = 4096 bytes = 512 x 8 bytes
- *           DAT_004af270 = active batch count
+ *           g_translucentPrimitiveBucketCount = active batch count
  * ======================================================================== */
 
 typedef struct TranslucentBatchEntry {
@@ -220,7 +220,7 @@ typedef struct DepthBucketEntry {
  * Immediate Draw Buffers
  *
  * Accumulated pre-transformed vertices/indices for batched DrawPrimitive.
- * Original: DAT_004afb14 (vertex buf), DAT_004af314 (index buf)
+ * Original: g_currentDrawCallVertexBuffer (vertex buf), DAT_004af314 (index buf)
  * ======================================================================== */
 
 /* immediate vert/index buffers + counts moved to RenderScratch (Phase B Stage 1). */

@@ -170,7 +170,7 @@ int  s_attract_demo_active;      /* g_attractModeDemoActive @ 0x495254 */
 /* -----------------------------------------------------------------------
  * Screen [27] CupWon — persistent unlock counts for overlay renderer
  * Set in state 0 via td5_save_apply_cup_unlocks_ex; read in states 4-5.
- * [CONFIRMED @ 0x423A80]: original DAT_00494bb0 = car count, DAT_00494bb4 = track count.
+ * [CONFIRMED @ 0x423A80]: original g_cupSchedule_currentCup = car count, g_cupSchedule_currentRound = track count.
  * ----------------------------------------------------------------------- */
 int s_cup_won_car_count;
 int s_cup_won_track_count;
@@ -206,7 +206,7 @@ static const int k_music_track_to_band[12] = { 1,3,4,4,2,0,0,1,3,4,4,4 };
 int  s_music_attract_track = 0;
 int  s_input_ready;              /* DAT_004951e8            */
 int  s_button_index;             /* currently pressed button */
-int  s_arrow_input;              /* DAT_0049b690 arrow direction */
+int  s_arrow_input;              /* g_postRaceRacerCardNavDirection arrow direction */
 /* [PORT ENHANCEMENT 2026-06] gamepad frontend-nav bits this frame (bit4 A,
  * bit5 B); cached so frontend_check_escape() can read B without re-polling. */
 uint32_t s_fe_gamepad_nav;
@@ -230,7 +230,7 @@ int  s_mp_net_config;
 /* Game type / race configuration */
 int  s_selected_game_type;       /* g_selectedGameType     */
 int  s_race_within_series;       /* g_raceWithinSeriesIndex */
-int  s_cup_unlock_tier;          /* DAT_004962a8           */
+int  s_cup_unlock_tier;          /* g_cheatFlagBitfieldGameModes           */
 
 /* Two-player mode flag (DAT_004962a0) */
 int  s_two_player_mode;
@@ -688,10 +688,10 @@ int td5_frontend_get_player_laneassist(int player) {
 int  s_attract_mode_ctrl;
 
 /* Car selection state */
-int  s_selected_car;             /* DAT_0048f31c / DAT_0048f364 */
-int  s_selected_paint;           /* DAT_0048f308 / DAT_0048f368 */
-int  s_selected_config;          /* DAT_0048f370            */
-int  s_selected_transmission;    /* DAT_0048f338 / DAT_0048f378 */
+int  s_selected_car;             /* g_quickRaceSelectedTrackId / DAT_0048f364 */
+int  s_selected_paint;           /* g_carSelectPaintSchemeTransient / g_player1SelectedPaintScheme */
+int  s_selected_config;          /* g_player1SelectedWheelScheme            */
+int  s_selected_transmission;    /* g_carSelectManualTransmissionToggle / g_player1ManualTransmission */
 int  s_p2_car;                   /* DAT_00463e08            */
 
 
@@ -724,7 +724,7 @@ int  s_num_ai_opponents  = 5;    /* 0..(TD5_MAX_RACER_SLOTS-1)        */
  * of the player's pane — viewport_count = 1 + this. 0 = legacy single view.
  * Inert outside Quick Race; clamped to the AI field + the viewport cap. */
 int  s_num_spectate_screens = 0; /* 0..min(opponents, TD5_MAX_VIEWPORTS-1) */
-int  s_score_category_index;    /* DAT_00497a68: current track in score table */
+int  s_score_category_index;    /* g_postRaceRacerCardIndex: current track in score table */
 /* [#2b 2026-06-16] Post-race high-score TD6 context: 0 = a normal (TD5) track,
  * uses the authored NPC group; >0 = the active TD6 level number whose genuine
  * record table (td5_save_get_td6_record_group) the high-score overlay should
@@ -775,17 +775,17 @@ int             s_sound_option_music_volume = 80;
  * sizes the port-side roster tables. */
 
 /* Lock tables (simplified inline representation) */
-uint8_t s_car_lock_table[TD5_CAR_SLOT_MAX]; /* DAT_00463e4c (0-36); 37-75 = TD6, 76+ = custom; all always unlocked */
+uint8_t s_car_lock_table[TD5_CAR_SLOT_MAX]; /* g_savedCarLockTable (0-36); 37-75 = TD6, 76+ = custom; all always unlocked */
 /* Sized base(37)+custom headroom so custom-track slots (>=37) read in-bounds
  * (always 0 = unlocked; the static global is zero-initialized and never written
  * non-zero past slot 36). See td5_track_registry.h. */
 uint8_t s_track_lock_table[TD5_CUSTOM_TRACK_SLOT_BASE + TD5_CUSTOM_TRACK_MAX];  /* DAT_004668B0 (orig 26); 26-36 = TD6; 37+ = custom */
-int  s_total_unlocked_cars;      /* DAT_00463e0c */
-int  s_total_unlocked_tracks;    /* DAT_00466840 */
-int  s_cheat_unlock_all;         /* DAT_00496298 */
+int  s_total_unlocked_cars;      /* g_savedMaxUnlockedCar */
+int  s_total_unlocked_tracks;    /* g_savedMusicTrackIndex */
+int  s_cheat_unlock_all;         /* g_cheatPostRaceHighScoreUnlock */
 
 /* Network state */
-int  s_network_active;           /* g_networkSessionActive / DAT_004962bc */
+int  s_network_active;           /* g_networkSessionActive / g_mainMenuFlowPhase */
 int  s_nickname_from_mpopts;     /* nickname screen entered from Multiplayer Options */
 /* --- S10b: lobby options modal (host) + join-password prompt --- */
 int  s_lobby_max_players = 6;    /* modal: max players (2..6) */
@@ -794,20 +794,20 @@ int  s_net_session_sel;          /* SESSION_PICKER cursor: 0=host, 1..N=join */
 int  s_launching_net_race;       /* set by the lobby before init_race_schedule */
 /* [Network] config (seeded from td5re.ini in frontend_init; see td5_save). */
 int  s_net_cfg_game_port   = 37050;   /* [Network] GamePort */
-int  s_kicked_flag;              /* DAT_00497328 */
-int  s_lobby_action;             /* DAT_0049722c */
-int  s_text_input_state;         /* DAT_004969d0 */
+int  s_kicked_flag;              /* g_lobbyAbortRequestLatch */
+int  s_lobby_action;             /* g_lobbyPlayerStatus */
+int  s_text_input_state;         /* g_postRaceNameEditState */
 
-int  s_results_rerace_flag;      /* DAT_00497a78 */
-int  s_results_cup_complete;     /* DAT_00497a70 */
+int  s_results_rerace_flag;      /* g_postRaceCarSelectionBackupValid */
+int  s_results_cup_complete;     /* g_postRaceNextCupRaceAvailable */
 /* P7 PANEL fix — sprite-rect slide offset for screen 24 results panel.
  * [CONFIRMED @ 0x00422480 cases 7..10 + 0xB] Original animates the panel
- * surface (DAT_0049628c) via QueueFrontendOverlayRect with a per-state
+ * surface (g_lobbyErrorDialogSurface) via QueueFrontendOverlayRect with a per-state
  * x-coordinate formula. Port has no MoveFrontendSpriteRect / sprite-rect
  * array; instead we accumulate a render-side x offset that overlays panel_x
  * in frontend_render_race_results_overlay. Reset to 0 on state 6 entry. */
 int  s_results_panel_slide_x;
-int  s_results_skip_display;     /* DAT_00497a74 */
+int  s_results_skip_display;     /* g_postRaceRestartSelectedRace */
 
 
 /* Race snapshot for re-race */
@@ -942,9 +942,9 @@ int  s_car_preview_next_surface;
 int      s_ctrl_opts_player      = 0;
 
 /* ---- Screen [18] ControllerBinding persistent state ---- */
-/* [CONFIRMED @ 0x40FE00 / DAT_004974b8]: which player is being configured */
+/* [CONFIRMED @ 0x40FE00 / g_controllerBindingActivePlayerSlot]: which player is being configured */
 int      s_ctrl_player        = 0;
-/* [CONFIRMED @ 0x40FE00 / DAT_00490b94]: device source index (0=kbd/1=pad/2=stick) */
+/* [CONFIRMED @ 0x40FE00 / g_controllerBindingActiveDeviceIndex]: device source index (0=kbd/1=pad/2=stick) */
 int      s_ctrl_input_source  = 0;
 /* [PORT ENHANCEMENT 2026-06] per-button remap: which action row the Configure
  * screen has selected, and whether it is currently capturing that action. */
@@ -954,7 +954,7 @@ int      s_ctrl_capturing     = 0;
  * held input from the previous bind / the confirm press isn't re-captured), then
  * 1 = armed and listening for one fresh input. */
 int      s_ctrl_capture_armed = 0;
-/* [CONFIRMED @ 0x40FE00 / DAT_00464054]: 16-byte scancode capture buffer */
+/* [CONFIRMED @ 0x40FE00 / g_keyboardScanCodeTable]: 16-byte scancode capture buffer */
 uint8_t  s_ctrl_kb_scancodes[16];
 /* [PORT ENHANCEMENT 2026-06] per-action joystick binding being edited on the
  * Configure screen: 10 codes (button/axis/trigger) for the selected player. */
@@ -6666,8 +6666,8 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
  * Music Test overlay: track-name label + Now Playing panel.
  *
  * Original (0x418460) drew into two offscreen DDraw surfaces:
- *   DAT_0049628c  (0x170 x 0x28)  — track-name label, format "%d. %s"
- *   DAT_00496400  (0x170 x 0x78)  — now-playing panel:
+ *   g_lobbyErrorDialogSurface  (0x170 x 0x28)  — track-name label, format "%d. %s"
+ *   g_musicTestSelectedTrackId  (0x170 x 0x78)  — now-playing panel:
  *       y=0:    "NOW PLAYING" header
  *       y=0x28: band name
  *       y=0x50: song title
@@ -8043,7 +8043,7 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
      *     filled from SNK_ResultsTxt / SNK_DRResultsTxt / SNK_CCResultsTxt
      *     per-game-type ladder).
      *   - Right column @ panel x=0x118 (280 px): per-slot VALUES, drawn by
-     *     DrawRaceDataSummaryPanel(DAT_00497a68 == s_score_category_index).
+     *     DrawRaceDataSummaryPanel(g_postRaceRacerCardIndex == s_score_category_index).
      *     The right column is cleared and re-filled when the user uses L/R
      *     to browse to a new slot (states 7..10 panel-slide L/R).
      *
@@ -8182,7 +8182,7 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
         char val_buf[32];
         switch (label_id) {
         case LBL_CUP_POSITION: {
-            /* Original reads (&DAT_004660b4)[slot+0x14*0x14+0x2] — a cup-position
+            /* Original reads (&g_raceDataSummaryFieldTable)[slot+0x14*0x14+0x2] — a cup-position
              * lookup table that the port has not surfaced. Use final_position+1
              * as a coarse fallback (cup position == finish position for the
              * final cup race). */
@@ -10448,13 +10448,13 @@ void td5_frontend_tick(void) {
  *
  * Data (carried over from the original RE):
  *   s_ctrl_player        — player being configured (set by Control Options)
- *   s_ctrl_input_source  — device type 0=kbd / 1=joypad / 2=joystick [DAT_00490b94]
+ *   s_ctrl_input_source  — device type 0=kbd / 1=joypad / 2=joystick [g_controllerBindingActiveDeviceIndex]
  *   s_ctrl_sel_action    — the action row being (re)bound while capturing
  *   s_ctrl_capturing     — 0 = browsing the list, 1 = capturing a key/button
  *   s_ctrl_binding_table — per-player joystick binding rows [player*9]
  *                          ([0]=active, [1]/[2]=axes, [3..8]=6 button actions,
  *                          value = physical_button + 2) [DAT_00463FC8]
- *   s_ctrl_kb_scancodes  — captured keyboard scancodes (DIK_*) [DAT_00464054]
+ *   s_ctrl_kb_scancodes  — captured keyboard scancodes (DIK_*) [g_keyboardScanCodeTable]
  *
  * Action labels (k_ctrl_action_labels, from SNK_ControlText @ 0x100075E0):
  *   0=LEFT 1=RIGHT 2=ACCELERATE 3=BRAKE 4=HANDBRAKE 5=HORN/SIREN

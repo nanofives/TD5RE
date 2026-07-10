@@ -187,7 +187,7 @@ static int slot_has_voice(int slot) {
 /**
  * Per-vehicle engine state for each viewport pass.
  * Index: [viewport * 6 + vehicle]. Values: ENGINE_STATE_STOPPED/DRIVE/REV.
- * Original: DAT_004c3770 (P1), DAT_004c3774 (P2 interleaved).
+ * Original: g_engineLoopStateByActorView (P1), DAT_004c3774 (P2 interleaved).
  */
 static int s_engine_state[12];
 
@@ -215,7 +215,7 @@ static int s_engine_state[12];
 /**
  * Per-traffic-vehicle engine state for each viewport pass.
  * Index: pass + (t-6)*2, bounded by TD5_SOUND_TRAFFIC_AUDIO_MAX * 2.
- * Original: DAT_004c37a0.
+ * Original: g_trafficEngineLoopActiveByActorView.
  */
 static int s_traffic_engine_state[TD5_SOUND_TRAFFIC_AUDIO_MAX * 2];
 
@@ -225,24 +225,24 @@ static int s_traffic_audio_cap_logged;
 
 /**
  * Per-vehicle horn/siren tracked audio state.
- * Original: DAT_004c37dc.
+ * Original: g_sirenChannelPlayStateByActorView.
  */
 static int s_tracked_audio_state[12];
 
 /**
  * Per-vehicle horn playing state.
  * 0=idle, 1=start pending, 2=playing.
- * Original: DAT_004c3848.
+ * Original: g_skidLoopStateByActorView.
  */
 static int s_horn_state[12];
 
 /**
  * Per-vehicle reverb flag (non-zero = use Reverb.wav instead of Rev.wav).
- * Original: DAT_004c382c.
+ * Original: g_vehicleSoundBankReverbModeByActor.
  */
 static int s_reverb_flag[6];
 
-/** Index of actor using Reverb.wav. Original: DAT_004c3878. */
+/** Index of actor using Reverb.wav. Original: g_reverbVehicleActorIndex. */
 static int s_reverb_actor_index;
 
 /** Per-viewport listener world position (2 viewports x 3 components).
@@ -250,29 +250,29 @@ static int s_reverb_actor_index;
 static int32_t s_listener_pos[TD5_MAX_VIEWPORTS][3];
 
 /** Previous frame listener position for velocity delta.
- *  Original: DAT_004c38c0. */
+ *  Original: g_listenerPrevFramePositionByView. */
 static int32_t s_listener_prev_pos[TD5_MAX_VIEWPORTS][3];
 
-/** Listener velocity delta. Original: DAT_004c3888, DAT_004c388c, DAT_004c3890. */
+/** Listener velocity delta. Original: g_listenerVelocityByView, g_listenerVelocityByView_Y, DAT_004c3890. */
 static int32_t s_listener_vel[TD5_MAX_VIEWPORTS][3];
 
 /** Active listener position pointer (for current viewport pass). */
 static int32_t *s_active_listener_pos;
 
-/** Active listener velocity pointer. Original: DAT_004c387c. */
+/** Active listener velocity pointer. Original: g_activeListenerVelocityPtr. */
 static int32_t *s_active_listener_vel;
 
-/** Per-vehicle gear state (for horn volume table). Original: DAT_004c38a0. */
+/** Per-vehicle gear state (for horn volume table). Original: g_perSlotActiveLightZoneTexturePage. */
 static int s_gear_state[6];
 
 /** Tracked vehicle (siren) state. */
 static int s_tracked_veh_active;       /* Original: DAT_004c37d0 (viewport 0) */
 static int s_tracked_veh_active_p2;    /* Original: _DAT_004c37d4 */
 static int s_tracked_veh_fade_target;  /* Original: DAT_004c37d8 */
-static int s_tracked_veh_fade_level;   /* Original: DAT_004c38b8 */
+static int s_tracked_veh_fade_level;   /* Original: g_trackedVehicleAudioFadeLevel */
 static int s_tracked_veh_actor;        /* Original: DAT_004c380c */
-static int s_siren_active_flag;        /* Original: DAT_004c3880 */
-static int s_siren_refreshed;          /* Original: DAT_004c3844 */
+static int s_siren_active_flag;        /* Original: g_sirenRefreshedThisFrame */
+static int s_siren_refreshed;          /* Original: g_sirenActiveFlag */
 
 /* Police/siren positional-audio fix (#15, PORT ENHANCEMENT 2026-06-15).
  *
@@ -329,18 +329,18 @@ static int s_siren_user_enabled;
  * keep working unchanged; td5_sound_toggle_cop_siren maintains both. */
 static uint8_t s_cop_siren_on[TD5_MAX_RACER_SLOTS];
 
-/** Per-viewport skid playing state. Original: DAT_004c3768. */
+/** Per-viewport skid playing state. Original: g_rainLoopActiveByViewport. */
 static int s_skid_playing[2];
 
 /** Per-viewport rain sound playing state.
- *  [CONFIRMED @ 0x00440B00]: DAT_004c3768 tracks whether rain has been started
- *  per viewport ("if DAT_004c3768 != 0 → already playing"). */
+ *  [CONFIRMED @ 0x00440B00]: g_rainLoopActiveByViewport tracks whether rain has been started
+ *  per viewport ("if g_rainLoopActiveByViewport != 0 → already playing"). */
 static int s_rain_playing[2];
 
 /** Per-viewport skid intensity. Original: DAT_004c3de0. */
 static int s_skid_intensity[2];
 
-/** Viewport audio state change tracker. Original: DAT_004c38d8. */
+/** Viewport audio state change tracker. Original: g_audioViewportLayoutChangePending. */
 static int s_viewport_audio_state;
 
 /** Race end flag (suppresses new sounds during fade-out). Original: DAT_004c3de8. */
@@ -758,7 +758,7 @@ void td5_sound_update_ambient(void)
      * [CONFIRMED @ 0x00440B00]:
      *   g_weatherActiveCountView0/1 → td5_vfx_get_weather_active_count(vp)
      *   g_weatherType               → td5_vfx_get_weather_type()
-     *   DAT_004c3768 (per-viewport) → s_rain_playing[vp]
+     *   g_rainLoopActiveByViewport (per-viewport) → s_rain_playing[vp]
      * ---------------------------------------------------------------- */
 
     /* [PORT] audio mixes at most 2 listener passes (P1 base + P2 @slot+44);
